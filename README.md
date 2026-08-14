@@ -263,7 +263,28 @@ cubestack-installer/
 └── .env.example
 ```
 
-## 十、工程规范
+## 十、CI/CD 流水线
+
+项目根目录提供 .gitlab-ci.yml,代码提交至 GitLab 后自动执行:
+
+| 阶段 | 任务 | 说明 |
+| --- | --- | --- |
+| test | backend-test | 基于 uv 执行后端测试(pytest) |
+| test | frontend-build | 执行前端生产构建校验(npm run build) |
+| build | build-image | 构建单镜像并推送至 Harbor(仅 main 分支与标签触发) |
+
+构建镜像目标为 harbor.isuanova.com/cubestack/cubestack-installer,标签提交时使用标签名作为镜像标签,main 分支默认使用 latest。
+
+使用前须在 GitLab 项目设置中配置以下 CI/CD 变量(建议勾选 Masked):
+
+| 变量名 | 说明 |
+| --- | --- |
+| HARBOR_USERNAME | Harbor 登录用户名 |
+| HARBOR_PASSWORD | Harbor 登录密码或访问令牌 |
+
+说明:构建阶段使用 Docker-in-Docker 方式,要求 Runner 可访问 docker.io 与 ghcr.io 基础镜像(或由 Runner 管理员配置镜像加速)。
+
+## 十一、工程规范
 
 - 包管理:后端依赖采用 uv 管理(uv sync / uv run / uv build),版本由 uv.lock 锁定
 - 测试:后端提供 pytest 冒烟测试(make test),覆盖健康检查、注册登录、鉴权及任务流
