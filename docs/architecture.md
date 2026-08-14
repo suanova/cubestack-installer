@@ -1,6 +1,6 @@
-# 架构说明
+# 架构设计文档
 
-## 总体架构
+## 一、总体架构
 
 ```
 ┌──────────────────────────┐
@@ -26,40 +26,46 @@
  宿主机(libvirt)   目标 K8s 集群(KubeVirt)
 ```
 
-> 单端口部署:make package 将 UI 构建产物打进 installer(app/static),FastAPI 直接托管前端,起一个端口即可兼顾页面(/)与接口(/api)。
+通信方式说明:
 
-## 核心设计
+- 开发环境下,前端通过 Vite 代理将 /api 请求转发至后端服务
+- 生产环境下,可由后端统一托管前端静态资源(单端口部署),亦可由 Nginx 反向代理
 
-### 1. 双虚拟化后端(Provider 插件化)
+单端口部署模式:执行 make package 可将前端构建产物纳入后端静态目录(app/static),由 FastAPI 统一托管,仅需一个服务端口即可同时提供页面与接口。
 
-统一 `VMProvider` 接口(`create / action / delete / info`),按 `provider` 字段路由:
+## 二、核心设计
 
-- **Libvirt**: 宿主机本机 `virt-install / virsh`
-- **KubeVirt**: `kubectl` 操作 `VirtualMachine` CRD(DataVolume + ContainerDisk)
+### 2.1 双虚拟化后端(Provider 插件化)
 
-新增后端只需在 `engine/providers/` 添加一个类并注册到工厂。
+系统定义统一的 VMProvider 接口(create / action / delete / info),按 provider 字段路由至相应实现:
 
-### 2. 仿真/真实双模式
+- Libvirt:基于宿主机本机 virt-install / virsh 实现
+- KubeVirt:基于 kubectl 操作 VirtualMachine CRD(含 DataVolume 与 ContainerDisk)
 
-`DEPLOY_MODE=auto|real|sim`:
-- 检测到工具链 → 真实执行
-- 缺失或执行失败 → 自动回退仿真(日志标注 `[模式]` 与 `[警告]`)
+新增虚拟化后端时,仅在 engine/providers/ 目录新增实现类并注册至工厂即可,无需修改其他模块。
 
-### 3. 异步任务引擎
+### 2.2 仿真/真实双模式
 
-线程执行 VM 创建 / 集群安装,逐步写 `log_text` 与 `progress`,前端轮询实时展示。
+DEPLOY_MODE 环境变量支持 auto、real、sim 三值:
 
-### 4. 宿主机环境检测
+- 检测到工具链时,系统执行真实操作
+- 工具缺失或执行失败时,系统自动回退至仿真模式,并在日志中标注 [模式] 与 [警告]
 
-SSH 检查:Ubuntu 22.04 + libvirt 依赖 + libvirtd + /dev/kvm,结果入库(JSON 报告)。
+### 2.3 异步任务引擎
 
-## 目录结构
+虚拟机创建与集群安装任务由后台线程执行,逐步写入 log_text 与 progress 字段;前端通过轮询机制实时展示任务进度与日志。
+
+### 2.4 宿主机环境检测
+
+系统通过 SSH 对宿主机执行环境检查,包括操作系统版本(Ubuntu 22.04)、libvirt 依赖、libvirtd 服务状态及 /dev/kvm 设备,检测结果以 JSON 报告形式入库。
+
+## 三、目录结构
 
 ```
 cubestack-installer/
-├── installer/                # Python 后端
+├── installer/                # 后端服务(FastAPI)
 │   ├── app/
-│   │   ├── main.py         # FastAPI 入口 + 种子数据
+│   │   ├── main.py         # 入口及种子数据
 │   │   ├── core/           # config / security
 │   │   ├── db/             # session / base
 │   │   ├── models/         # 数据模型
@@ -67,35 +73,35 @@ cubestack-installer/
 │   │   ├── api/            # deps + routes(6 组)
 │   │   └── engine/         # executor / services / providers
 │   ├── tests/              # pytest 冒烟测试
-│   ├── app/run.py           # uv 入口
+│   ├── app/run.py          # uv 入口(console script)
 │   ├── Dockerfile
 │   ├── pyproject.toml
-│   └── uv.lock              # uv 依赖锁
-├── ui/               # React 前端
+│   └── uv.lock             # 依赖锁文件
+├── ui/                     # 前端控制台(Vite)
 │   ├── src/
 │   │   ├── api/            # API 客户端
-│   │   ├── components/     # 侧边栏/弹窗/命令块/Toast...
+│   │   ├── components/     # 侧边栏/弹窗/命令块/Toast 等组件
 │   │   ├── pages/          # 概览/宿主机/虚拟机/集群/任务/接口参考/用户
 │   │   ├── context/        # AuthContext
 │   │   ├── i18n.jsx        # 中英文案
 │   │   └── theme.jsx       # 深浅主题
 │   ├── Dockerfile + nginx.conf
 │   └── vite.config.js      # /api 代理
-├── scripts/                # dev / start-installer / start-ui
+├── scripts/                # 启动脚本(dev / start-backend / start-frontend)
 ├── docs/                   # api.md / architecture.md
 ├── Makefile
 ├── docker-compose.yml
 └── .env.example
 ```
 
-## 配置参考
+## 四、配置参考
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| SECRET_KEY | dev 默认值 | JWT 签名密钥(生产必改) |
+| SECRET_KEY | dev 默认值 | JWT 签名密钥(生产环境须修改) |
 | TOKEN_EXPIRE_MINUTES | 1440 | 令牌有效期(分钟) |
-| DATABASE_URL | sqlite:///./userhub.db | 数据库连接 |
-| DEPLOY_MODE | auto | auto / real / sim |
-| KUBECONFIG_PATH | ~/.kube/config | KubeVirt 目标集群 |
+| DATABASE_URL | sqlite:///./userhub.db | 数据库连接地址 |
+| DEPLOY_MODE | auto | 部署模式:auto / real / sim |
+| KUBECONFIG_PATH | ~/.kube/config | KubeVirt 目标集群 kubeconfig |
 | KUBEVIRT_NAMESPACE | default | KubeVirt 默认命名空间 |
 
