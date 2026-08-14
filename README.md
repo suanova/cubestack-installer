@@ -1,168 +1,179 @@
-# CubeStackInstaller · 虚拟机 + Kubespray 安装 K8s 集群平台
+# CubeStackInstaller 使用文档
 
-在宿主机上创建 KVM 虚拟机,再通过 **Kubespray** 一键部署生产级 Kubernetes 集群。
-左侧**两个树形导航**分别对应两大流程:**虚拟机安装** 与 **K8s集群安装**。
+## 一、系统概述
 
-- 🐍 **后端**: Python + FastAPI + SQLAlchemy + JWT + 异步部署任务引擎
-- ⚛️ **前端**: JavaScript + React 18 + Vite + React Router
-- 🎨 **界面**: 专业蓝灰配色 · 深色/浅色双主题 · 中英文双语切换(顶栏按钮,偏好持久化)
+CubeStackInstaller 是一套面向基础设施自动化的管理平台,用于在宿主机上创建 KVM 虚拟机,并基于 Kubespray 完成 Kubernetes 集群的部署与管理。平台由后端服务与前端控制台两部分组成,界面采用双树形导航结构,分别对应“虚拟机安装”与“K8s 集群安装”两大业务流程。
 
-## 功能一览
+系统具备以下能力:
 
-| 流程 | 功能 | 说明 |
+- 宿主机纳管:支持对物理服务器的添加、删除及 SSH 连通性检测
+- 虚拟机管理:支持 KVM 虚拟机的创建、启动、停止、重启及删除
+- 集群管理:支持基于 Kubespray 的 Kubernetes 集群部署
+- 任务管理:提供异步部署任务流,支持实时日志与进度展示
+- 账号管理:支持用户注册、登录及管理员权限控制
+
+系统默认管理员账号为 admin / admin123(首次启动时自动创建)。
+
+## 二、系统组成
+
+| 组件 | 技术栈 | 说明 |
 | --- | --- | --- |
-| 虚拟机安装 | 宿主机管理 | 纳管物理服务器,SSH 连通性检测,添加/删除 |
-| 虚拟机安装 | 虚拟机管理 | 创建 KVM 虚拟机(规格/镜像/IP),启动/停止/重启/删除 |
-| K8s集群安装 | 集群管理 | 选择节点创建集群,一键 Kubespray 安装 |
-| K8s集群安装 | 部署任务 | 异步任务流,实时日志与进度,自动刷新 |
-| 平台 | 概览 / 接口参考 / 用户管理 | 资源统计、API 输入输出文档、账号管理 |
+| 后端服务 | Python 3、FastAPI、SQLAlchemy、JWT | 提供 REST API 及异步部署任务引擎 |
+| 前端控制台 | JavaScript、React 18、Vite、React Router | 提供图形化管理界面 |
+| 界面特性 | — | 专业配色、深色/浅色双主题、中英文双语切换(偏好持久化于本地存储) |
 
-> 默认管理员账号:**admin** / **admin123**(首次启动自动创建)
+## 三、快速部署
 
-## 语言与主题
+### 3.1 一键启动
 
-- 顶栏右侧 **EN/中** 按钮切换中英文(记住偏好,刷新不丢)
-- 顶栏右侧 **☀/☾** 按钮切换深色/浅色主题(跟随系统偏好,可手动覆盖)
-- 主题/语言偏好保存在 localStorage
-
-## 快速开始
-
-### 方式一:一键启动(推荐)
+执行以下命令可同时启动后端服务与前端控制台:
 
 ```bash
 bash scripts/dev.sh        # 或 make dev
 ```
 
-### 方式二:分别启动
+### 3.2 分别启动
 
 ```bash
-# 后端(FastAPI,端口 8000,uv 管理)
-make installer              # 或 cd installer && uv run cubestack-installer-installer
+# 后端服务(FastAPI,监听 8000 端口,依赖管理采用 uv)
+make installer            # 或 cd installer && uv run cubestack-installer-installer
 
-# 前端(React + Vite,端口 5173)
-make ui             # 或 cd ui && npm run dev
+# 前端控制台(Vite,监听 5173 端口)
+make ui                   # 或 cd ui && npm run dev
 ```
 
-- 前端: **http://localhost:5173**(admin / admin123 登录)
-- 后端 Swagger: http://127.0.0.1:8000/docs
+启动完成后,可通过以下地址访问:
 
-### 常用命令
+- 前端控制台: http://localhost:5173(使用 admin / admin123 登录)
+- 接口文档(Swagger): http://127.0.0.1:8000/docs
 
-```bash
-make build    # 前端生产构建 + 后端 uv build 发行包
-make test     # 后端 pytest 测试(uv run)
-make stop     # 停止全部服务
-```
+### 3.3 常用命令
 
-### 后端 uv 工作流
+| 命令 | 说明 |
+| --- | --- |
+| make build | 构建前端生产包及后端发行包 |
+| make test | 运行后端测试(pytest) |
+| make stop | 停止全部服务 |
+
+### 3.4 后端依赖管理(uv)
+
+后端依赖采用 uv 管理,常用操作如下:
 
 ```bash
 cd installer
-uv sync                 # 安装依赖(生成 .venv 与 uv.lock,走清华镜像)
-uv add <包名>           # 新增依赖
-uv run pytest           # 运行测试
-uv run cubestack-installer-installer   # 启动后端
-uv build                # 构建 wheel + sdist(输出 dist/)
+uv sync                    # 安装依赖并生成 uv.lock
+uv add <包名>               # 新增依赖
+uv run pytest              # 运行测试
+uv run cubestack-installer-installer   # 启动后端服务
+uv build                   # 构建 wheel 与 sdist 发行包
 ```
 
-> Python 依赖由 **uv** 管理(uv.lock 锁定版本,清华镜像);npm 走 npmmirror 镜像。
+说明:Python 依赖版本由 uv.lock 锁定,默认使用清华镜像源;前端依赖使用 npmmirror 镜像源。
 
-### 单端口部署(前后端合一)
+## 四、部署模式
+
+### 4.1 单端口部署(前后端一体化)
+
+执行 make package 可将前端构建产物打包至后端静态目录,由后端统一托管,仅需启动一个服务即可同时提供页面与接口:
 
 ```bash
-make package     # 构建 UI 并打包进后端
+make package
 cd installer && uv run cubestack-installer-installer
 ```
 
-### 单镜像容器部署(podman)
+打包流程为:构建前端生产包 → 将产物复制至 installer/app/static → 生成包含前端产物的发行包。
 
-根目录 `Dockerfile` 多阶段构建:**Stage 1** 用 Node 构建 UI,**Stage 2** 用 uv 安装后端全部依赖并放入前端产物,生成一个自包含镜像(与 docker 完全兼容):
+部署后的路由规则如下:
 
-镜像名:**`harbor.isuanova.com/cubestack/cubestack-installer:latest`**(Harbor 私有仓库):
+- `/`:返回前端页面
+- `/assets/*`:提供静态资源
+- `/api/*`:提供接口服务
+- 前端路由(如 /hosts)自动回退至 index.html;Swagger 接口文档不受影响
+
+### 4.2 容器化部署(podman)
+
+根目录 Dockerfile 采用多阶段构建:第一阶段使用 Node 构建前端产物,第二阶段使用 uv 安装后端全部依赖并将前端产物纳入镜像,最终生成自包含镜像。该镜像与 docker 完全兼容。
+
+镜像名:harbor.isuanova.com/cubestack/cubestack-installer:latest
 
 ```bash
-make image          # 构建 + 启动(镜像名见 Makefile IMAGE 变量)
-make image-push     # 推送到 Harbor(需先 podman login harbor.isuanova.com)
+make image                 # 构建并启动容器
+make image-push            # 推送镜像至 Harbor(需预先执行 podman login)
 
 podman build --format docker -t harbor.isuanova.com/cubestack/cubestack-installer:latest .
 podman run -d -p 8000:8000 -v csi-data:/app/data --name cubestack-installer harbor.isuanova.com/cubestack/cubestack-installer:latest
-podman logs -f cubestack-installer     # 查看日志
-# 访问 http://localhost:8000(页面 + /api 单端口)
+podman logs -f cubestack-installer
 ```
 
-- 镜像内置全部 Python 依赖(uv.lock 锁定)+ 前端构建产物 + 健康检查(HEALTHCHECK)
-- ENTRYPOINT 一键启动:FastAPI 同时托管前端页面与 /api 接口
-- 数据持久化:挂载卷到 `/app`(SQLite userhub.db);rootless podman 无需 sudo
-- 多服务编排:也可用 `podman compose up -d` 使用根目录 docker-compose.yml(podman 4.2+ 内置 compose 支持)
+镜像特性:
 
-- `make package` 会:`npm run build` 构建 UI → 复制 `ui/dist` 到 `installer/app/static` → `uv build` 生成含前端产物的 wheel
-- 后端启动后由 FastAPI 直接托管前端静态资源,**只需 8000 一个端口**:
-  - `/` 返回前端页面,`/assets/*` 提供静态资源,`/api/*` 提供接口
-  - 前端路由(如 `/hosts`)自动回退 index.html,Swagger `/docs` 不受影响
+- 内置全部 Python 依赖(版本由 uv.lock 锁定)及前端构建产物
+- 提供健康检查(HEALTHCHECK)
+- 容器启动后由 FastAPI 统一托管前端页面与接口
+- 数据持久化:建议将数据卷挂载至 /app/data(SQLite 数据文件为 userhub.db);rootless 模式下无需 sudo
 
-## 宿主机环境检测
+说明:使用 docker 时,将上述命令中的 podman 替换为 docker 即可;多服务编排亦可执行 podman compose up -d 或 docker compose up -d 使用根目录 docker-compose.yml。
 
-添加宿主机或点击「环境检测」时,平台会 SSH 到宿主机执行环境体检:
+## 五、宿主机环境检测
+
+添加宿主机或执行环境检测时,平台将通过 SSH 对宿主机执行环境体检,检测项如下:
 
 | 检查项 | 要求 | 校验方式 |
 | --- | --- | --- |
 | SSH 连通性 | 可登录 | ssh BatchMode + ConnectTimeout=5 |
-| 操作系统 | **Ubuntu 22.04**(ID=ubuntu 且 VERSION_ID 以 22.04 开头) | 解析 /etc/os-release |
-| libvirt 依赖 | virt-install / virsh / qemu-img / qemu-kvm / cloud-localds 全部存在 | command -v + dpkg 兜底 |
+| 操作系统 | Ubuntu 22.04(ID=ubuntu 且 VERSION_ID 以 22.04 开头) | 解析 /etc/os-release |
+| libvirt 依赖 | virt-install / virsh / qemu-img / qemu-kvm / cloud-localds 均需存在 | command -v + dpkg 兜底 |
 | libvirtd 服务 | 运行中 | systemctl is-active libvirtd |
 | /dev/kvm | 存在(硬件加速) | test -e /dev/kvm |
 
-- 检测报告(逐项通过/缺失)保存到宿主机记录,前端表格「环境」列展示 OS 与 libvirt 徽章,点击「环境检测」查看完整报告
-- 新增宿主机接口(POST /api/hosts)会同步执行环境检测并返回结果
-- 仿真模式(DEPLOY_MODE=sim / 无 ssh 工具)返回模拟通过报告并标记「仿真检测」;真实模式检测失败如实标记
+检测结果以报告形式保存至宿主机记录,包含逐项通过或缺失状态。新增宿主机接口(POST /api/hosts)会自动执行环境检测并返回结果。仿真模式下(DEPLOY_MODE=sim 或无 ssh 工具)返回模拟通过报告,并标注“仿真检测”。
 
-### 宿主机初始化命令(一键复制)
+### 5.1 宿主机初始化命令
 
-添加宿主机弹窗(或列表行「配置命令」)内置一段**可复制的 Shell 脚本**,在管理机执行即可完成:
+添加宿主机时,平台提供可复制的初始化脚本,用于在管理机上完成免密配置与依赖安装,执行顺序如下:
 
-1. `ssh-copy-id` 将管理机公钥复制到宿主机(免密 SSH)
-2. `apt-get install` 安装 libvirt 依赖(virtinst / libvirt-clients / qemu-utils / qemu-kvm / cloud-image-utils)
-3. `systemctl enable --now libvirtd` 启动服务并设置开机自启
-4. 校验 `/dev/kvm` 硬件加速
+1. 通过 ssh-copy-id 将管理机公钥复制至宿主机,实现免密登录
+2. 通过 apt-get 安装 libvirt 相关依赖(virtinst / libvirt-clients / qemu-utils / qemu-kvm / cloud-image-utils)
+3. 通过 systemctl 启动 libvirtd 服务并设置开机自启
+4. 校验 /dev/kvm 是否可用(硬件加速)
 
-脚本根据表单输入的 IP / SSH 用户 / 端口实时生成,一键复制后执行,再点击「环境检测」即可看到检测通过。
-## 双虚拟化后端(Provider 插件化)
+脚本根据表单输入的 IP、SSH 用户及端口实时生成;脚本以 ssh-copy-id 为首步,并校验免密配置生效后方执行后续步骤。
 
-虚拟机支持两种启动方式,通过创建表单「启动方式」选择,后端按 Provider 分发:
+## 六、虚拟化后端(Provider 插件化)
 
-| Provider | 连接方式 | 操作实现 | 状态检测 |
-| --- | --- | --- | --- |
-| **Libvirt (virsh)** | 宿主机本机 libvirt | virt-install / virsh start/stop/reboot | 默认 |
-| **KubeVirt** | kubectl + kubeconfig(管理集群) | VirtualMachine CRD:apply / patch /spec/running / delete | 需 kubectl |
+平台支持两种虚拟机启动方式,创建虚拟机时可选择后端,由 Provider 工厂按类型分发:
 
-- 架构:engine/providers/ 下统一 VMProvider 接口(create/action/delete/info),
-  通过 get_provider(provider_type) 工厂按需路由,任务引擎、日志、仿真回退全部复用
-- KubeVirt 配置(环境变量):
-  - KUBECONFIG_PATH:kubectl 使用的 kubeconfig(默认 ~/.kube/config)
-  - KUBEVIRT_NAMESPACE:默认命名空间(默认 default),也可在创建虚拟机时按 VM 指定
-- KubeVirt 会为每个 VM 生成 **VirtualMachine CRD 清单**(DataVolume + ContainerDisk + PVC),
-  镜像名自动映射到容器磁盘地址,支持 docker:// 直连地址
-- 无 kubectl/kubeconfig 或执行失败时自动回退仿真模式;真实模式同样受 DEPLOY_MODE 控制
-- 前端虚拟机页顶部显示两个后端的连接状态(已连接·真实模式 / 未连接·仿真模式)
-## 部署引擎:仿真与真实模式
+| Provider | 连接方式 | 操作实现 |
+| --- | --- | --- |
+| Libvirt (virsh) | 宿主机本机 libvirt | virt-install / virsh start/stop/reboot |
+| KubeVirt | kubectl + kubeconfig | VirtualMachine CRD:apply / patch /spec/running / delete |
 
-后端引擎自动检测宿主机工具,支持两种模式(可在任务日志首行确认):
+架构说明:
+
+- engine/providers/ 目录定义统一的 VMProvider 接口(create / action / delete / info),通过 get_provider() 工厂按需路由;任务引擎、日志记录及仿真回退机制在各 Provider 间复用
+- KubeVirt 配置通过环境变量指定:KUBECONFIG_PATH(默认 ~/.kube/config)、KUBEVIRT_NAMESPACE(默认 default,亦可在创建虚拟机时按虚拟机指定)
+- KubeVirt 为每个虚拟机生成 VirtualMachine CRD 清单(含 DataVolume、ContainerDisk 与 PVC),镜像名自动映射至容器磁盘地址,亦支持 docker:// 直连地址
+- 未检测到 kubectl/kubeconfig 或执行失败时,自动回退至仿真模式;真实模式受 DEPLOY_MODE 控制
+
+## 七、部署引擎运行模式
+
+后端引擎自动检测宿主机工具链,支持以下两种模式:
 
 | 模式 | 触发条件 | 行为 |
 | --- | --- | --- |
-| **真实模式** | 检测到 `virt-install` / `ansible-playbook` + `KUBESPRAY_DIR` | 调用真实命令创建 VM / 运行 Kubespray playbook |
-| **仿真模式** | 工具缺失(或 `DEPLOY_MODE=sim`) | 完整模拟流程步骤与日志,便于开发演示 |
+| 真实模式 | 检测到 virt-install / ansible-playbook 及 KUBESPRAY_DIR | 调用真实命令创建虚拟机、执行 Kubespray playbook |
+| 仿真模式 | 工具缺失或 DEPLOY_MODE=sim | 完整模拟流程步骤与日志,便于开发与演示 |
 
-- 环境变量 `DEPLOY_MODE=sim|real|auto`(默认 auto)
-- 真实执行任一步失败时**自动回退仿真**并记录警告,任务不会中断
-- 集群安装会生成并展示 `inventory.ini`、组变量与 kubeconfig 输出
-- 工作目录: `installer/workspace/`(真实模式生成的清单)
+- DEPLOY_MODE 支持 sim、real、auto 三值,默认 auto
+- 真实执行任一步骤失败时,自动回退至仿真模式并记录警告,任务不会中断
+- 集群安装过程生成并展示 inventory.ini、组变量及 kubeconfig 输出
+- 工作目录为 installer/workspace/(真实模式生成的清单)
 
-## 输入输出(API 约定)
+## 八、接口规范
 
-所有接口除登录/注册外,请求头需携带 `Authorization: Bearer <token>`;写操作(创建/删除/部署)需**管理员**权限。
+除登录与注册外,所有接口请求头需携带 Authorization: Bearer <token>;写操作(创建、删除、部署)需管理员权限。
 
-### 认证
+### 8.1 认证
 
 | 方法 | 路径 | 输入 | 输出 |
 | --- | --- | --- | --- |
@@ -170,16 +181,16 @@ podman logs -f cubestack-installer     # 查看日志
 | POST | /api/auth/login | `{"account","password"}`(用户名或邮箱) | 200 `{"access_token","token_type","user"}` |
 | GET | /api/auth/me | - | 200 当前用户 |
 
-### 宿主机
+### 8.2 宿主机
 
 | 方法 | 路径 | 输入 | 输出 |
 | --- | --- | --- | --- |
 | GET | /api/hosts | - | 200 主机数组 |
-| POST | /api/hosts | `{"name","ip","ssh_user?","ssh_port?","cpu_cores?","memory_gb?","disk_gb?"}` | 201 主机对象 |
+| POST | /api/hosts | `{"name","ip","ssh_user?","ssh_port?","cpu_cores?","memory_gb?","disk_gb?"}` | 201 主机对象(含环境检测结果) |
 | POST | /api/hosts/{id}/check | - | 200 主机(状态更新为 online/offline) |
 | DELETE | /api/hosts/{id} | - | 200 `{"message"}` |
 
-### 虚拟机
+### 8.3 虚拟机
 
 | 方法 | 路径 | 输入 | 输出 |
 | --- | --- | --- | --- |
@@ -188,7 +199,7 @@ podman logs -f cubestack-installer     # 查看日志
 | POST | /api/vms/{id}/action | `{"action":"start|stop|reboot"}` | 200 虚拟机 |
 | DELETE | /api/vms/{id} | - | 200 `{"message"}` |
 
-### K8s 集群
+### 8.4 K8s 集群
 
 | 方法 | 路径 | 输入 | 输出 |
 | --- | --- | --- | --- |
@@ -198,14 +209,14 @@ podman logs -f cubestack-installer     # 查看日志
 | POST | /api/clusters/{id}/deploy | - | 202 `{"task_id"}`(启动安装任务) |
 | DELETE | /api/clusters/{id} | - | 200 `{"message"}` |
 
-### 部署任务
+### 8.5 部署任务
 
 | 方法 | 路径 | 输入 | 输出 |
 | --- | --- | --- | --- |
 | GET | /api/tasks | - | 200 任务数组(含进度与日志摘要) |
 | GET | /api/tasks/{id} | - | 200 任务详情(完整日志流) |
 
-### 用户管理
+### 8.6 用户管理
 
 | 方法 | 路径 | 输入 | 输出 |
 | --- | --- | --- | --- |
@@ -213,61 +224,63 @@ podman logs -f cubestack-installer     # 查看日志
 | PATCH | /api/users/{id} | `{"role"?,"is_active"?,"full_name"?}` | 200 用户 |
 | DELETE | /api/users/{id} | - | 200 `{"message"}` |
 
-应用内「接口参考」页面展示全部接口的输入/输出 JSON 示例。
+完整接口输入/输出示例详见 docs/api.md 及应用内“接口参考”页面。
 
-## 项目结构
+## 九、项目结构
 
 ```
 cubestack-installer/
-├── installer/                     # Python 后端(FastAPI)
+├── installer/                     # 后端服务(FastAPI)
 │   ├── app/
-│   │   ├── main.py              # 入口 + 种子数据
-│   │   ├── core/                # config(环境变量) / security(PBKDF2+JWT)
-│   │   ├── db/                  # session / base(数据库与会话)
-│   │   ├── models/              # 数据模型(用户/宿主机/虚拟机/集群/节点/任务)
-│   │   ├── schemas/             # Pydantic 输入输出契约
-│   │   ├── api/                 # deps(鉴权) + routes(6 组业务路由)
-│   │   └── engine/              # 部署引擎
-│   │       ├── executor.py      # 异步任务执行器(线程 + 日志流)
-│   │       ├── services/        # hostops(环境检测) / kubespray(集群安装)
-│   │       └── providers/       # 虚拟化后端:libvirt / kubevirt
-│   ├── tests/                   # pytest 冒烟测试
-│   ├── app/run.py               # uv 入口(console script)
+│   │   ├── main.py                 # 入口及种子数据
+│   │   ├── core/                   # config(环境变量) / security(PBKDF2+JWT)
+│   │   ├── db/                     # session / base(数据库与会话)
+│   │   ├── models/                 # 数据模型(用户/宿主机/虚拟机/集群/节点/任务)
+│   │   ├── schemas/                # Pydantic 输入输出契约
+│   │   ├── api/                    # deps(鉴权) + routes(业务路由)
+│   │   └── engine/                 # 部署引擎
+│   │       ├── executor.py         # 异步任务执行器(线程 + 日志流)
+│   │       ├── services/           # hostops(环境检测) / kubespray(集群安装)
+│   │       └── providers/          # 虚拟化后端:libvirt / kubevirt
+│   ├── tests/                      # pytest 冒烟测试
+│   ├── app/run.py                  # uv 入口(console script)
 │   ├── Dockerfile / pyproject.toml / uv.lock
-│   └── requirements.txt         # pip 兼容参考
-├── ui/                    # React 前端(Vite)
+│   └── requirements.txt            # pip 兼容参考
+├── ui/                             # 前端控制台(Vite)
 │   ├── src/
-│   │   ├── api/                 # API 客户端
-│   │   ├── components/          # Sidebar(双树导航)/Modal/CommandBlock/Toast...
-│   │   ├── pages/               # 概览/宿主机/虚拟机/集群/任务/接口参考/用户
-│   │   ├── context/             # AuthContext
-│   │   ├── i18n.jsx / theme.jsx # 中英文案 / 深浅主题
-│   │   └── index.css            # 设计系统
+│   │   ├── api/                    # API 客户端
+│   │   ├── components/             # 侧边栏/弹窗/命令块/Toast 等组件
+│   │   ├── pages/                  # 概览/宿主机/虚拟机/集群/任务/接口参考/用户
+│   │   ├── context/                # AuthContext
+│   │   ├── i18n.jsx / theme.jsx    # 中英文案 / 深浅主题
+│   │   └── index.css               # 设计系统
 │   ├── Dockerfile + nginx.conf
 │   └── vite.config.js
-├── scripts/                     # dev / start-installer / start-ui
-├── docs/                        # api.md / architecture.md
+├── scripts/                        # 启动脚本(dev / start-backend / start-frontend)
+├── docs/                           # api.md / architecture.md
 ├── Makefile
 ├── docker-compose.yml
 └── .env.example
 ```
 
-## 工程化
+## 十、工程规范
 
-- **包管理**: 后端由 **uv** 管理(uv sync / uv run / uv build),uv.lock 锁定版本
-- **测试**: 后端 pytest 冒烟测试(`make test`),覆盖健康检查/注册登录/鉴权/任务流
-- **容器化**: `docker-compose up --build` 一键编排(后端 + Nginx 前端),前端 /api 自动反代
-- **配置**: 全部环境变量集中声明于 `.env.example` 与 `installer/app/core/config.py`
-- **文档**: `docs/api.md`(接口契约)与 `docs/architecture.md`(架构设计)
+- 包管理:后端依赖采用 uv 管理(uv sync / uv run / uv build),版本由 uv.lock 锁定
+- 测试:后端提供 pytest 冒烟测试(make test),覆盖健康检查、注册登录、鉴权及任务流
+- 容器化:支持 podman / docker 构建单镜像,亦支持 docker-compose 多服务编排
+- 配置:全部环境变量集中声明于 .env.example 与 installer/app/core/config.py
+- 文档:docs/api.md(接口契约)与 docs/architecture.md(架构设计)
 
-## 安全设计
+## 十一、安全设计
 
-- 密码 PBKDF2-HMAC-SHA256(60 万次迭代 + 随机盐)哈希存储
-- JWT(HS256,24h)鉴权,未登录 401、越权 403
-- 管理员不能删除/禁用自己;普通用户不可执行写操作
+- 密码以 PBKDF2-HMAC-SHA256(60 万次迭代 + 随机盐)哈希存储
+- 鉴权采用 JWT(HS256,有效期 24 小时);未登录返回 401,越权访问返回 403
+- 管理员账号不可被删除、禁用或降级;普通用户不具写操作权限
 
-## 生产部署提示
+## 十二、生产部署注意事项
 
-- 设置 `SECRET_KEY` 环境变量;管理机安装 `libvirt` / `ansible` / `kubespray` 后自动进入真实模式
-- SQLite 可替换为 PostgreSQL(修改 `database.py`)
-- `npm run build` 产物由 Nginx 托管,`/api` 反向代理到后端
+- 须设置 SECRET_KEY 环境变量;管理机安装 libvirt、ansible 及 kubespray 后,系统自动进入真实模式
+- 生产环境建议将 SQLite 替换为 PostgreSQL(通过 DATABASE_URL 环境变量指定)
+- 前端生产包可由后端直接托管,亦可由 Nginx 代理,并将 /api 反向代理至后端服务
+- 容器部署时,建议将数据卷挂载至 /app/data,以保证数据持久化
+
