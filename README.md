@@ -286,7 +286,7 @@ cubestack-installer/
 | test | backend-test | 基于 uv 执行后端测试(pytest) |
 | test | frontend-build | 执行前端生产构建校验(npm run build) |
 
-说明:流水线当前仅包含测试与构建校验阶段,镜像构建未启用。基础镜像默认使用 DaoCloud 国内加速源(docker.m.daocloud.io/library),如需切换镜像源,可在 CI/CD 变量中设置 DOCKER_MIRROR,例如 docker.1ms.run/library。
+说明:流水线当前仅包含测试与构建校验阶段,镜像构建未启用。基础镜像直接使用 DaoCloud 国内加速源(docker.m.daocloud.io/library/python:3.12-slim 等),如需切换镜像源,直接修改 .gitlab-ci.yml 中的 image 字段即可。
 
 ## 十一、工程规范
 

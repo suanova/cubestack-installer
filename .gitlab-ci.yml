@@ -6,25 +6,21 @@
 #   backend-test    后端单元测试(pytest,依赖管理采用 uv)
 #   frontend-build  前端生产构建校验(npm run build)
 #
-# 基础镜像使用国内加速源(默认 DaoCloud),可通过 CI/CD 变量 DOCKER_MIRROR 切换:
-#   示例:
-#     docker.m.daocloud.io/library
-#     docker.1ms.run/library
-#     docker.1panel.live/library
-#     registry.cn-hangzhou.aliyuncs.com/<命名空间>(阿里云个人镜像加速)
+# 基础镜像使用国内加速源(DaoCloud)。
+# 如需切换镜像源,直接修改下方 image 字段即可,可用源示例:
+#   docker.m.daocloud.io/library(当前,已验证可用)
+#   docker.1ms.run/library
+#   docker.1panel.live/library
+#   registry.cn-hangzhou.aliyuncs.com/<命名空间>
 # =====================================================================
 
 stages:
   - test
 
-variables:
-  # 基础镜像仓库前缀(默认 DaoCloud 国内加速源)
-  IMAGE_PREFIX: ${DOCKER_MIRROR:-docker.m.daocloud.io/library}
-
 # 后端单元测试
 backend-test:
   stage: test
-  image: ${IMAGE_PREFIX}/python:3.12-slim
+  image: docker.m.daocloud.io/library/python:3.12-slim
   before_script:
     # 安装 uv(清华 PyPI 镜像)
     - pip install -q uv -i https://pypi.tuna.tsinghua.edu.cn/simple
@@ -41,7 +37,7 @@ backend-test:
 # 前端生产构建校验(编译通过即视为校验成功)
 frontend-build:
   stage: test
-  image: ${IMAGE_PREFIX}/node:20-alpine
+  image: docker.m.daocloud.io/library/node:20-alpine
   script:
     - cd ui
     - npm ci --no-fund --no-audit
