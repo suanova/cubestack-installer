@@ -1,0 +1,24 @@
+services:
+  installer:
+    image: cubestack-installer-installer
+    build: ./installer
+    environment:
+      DATABASE_URL: sqlite:////data/userhub.db
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-prod}
+      DEPLOY_MODE: ${DEPLOY_MODE:-auto}
+      KUBECONFIG_PATH: /root/.kube/config
+    volumes:
+      - installer-data:/data
+    ports:
+      - "8000:8000"
+
+  ui:
+    image: cubestack-installer-ui
+    build: ./ui
+    depends_on:
+      - installer
+    ports:
+      - "8080:80"
+
+volumes:
+  installer-data:

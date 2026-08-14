@@ -1,0 +1,6 @@
+.venv
+__pycache__
+*.pyc
+userhub.db
+workspace
+tests

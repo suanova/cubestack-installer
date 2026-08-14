@@ -1,0 +1,26 @@
+# 依赖与缓存(避免构建上下文过大)
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.vite
+*.log
+
+# 构建产物(镜像内会重新构建)
+**/dist
+installer/app/static
+installer/*.egg-info
+
+# 运行时数据
+installer/userhub.db
+installer/workspace
+
+# 杂项
+.git
+.github
+docs
+scripts
+Makefile
+docker-compose.yml
+*.md

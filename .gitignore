@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+userhub.db
+
+# 部署引擎工作目录
+installer/workspace/
+
+# uv 相关(uv.lock 应提交,勿忽略)
+# uv.lock
+
+# 构建产物
+dist/
+*.egg-info/
+installer/app/static/
+
+# Node
+node_modules/
+dist/
+
+# 部署引擎工作目录
+backend/workspace/
+
+# 系统文件
+.DS_Store
+nohup.out

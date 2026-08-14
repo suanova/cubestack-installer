@@ -1,0 +1,298 @@
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+
+// ---------- 中英文字典 ----------
+const dict = {
+  zh: {
+    // 通用
+    'common.cancel': '取消', 'common.confirm': '确认', 'common.delete': '删除',
+    'common.add': '添加', 'common.create': '创建', 'common.close': '关闭',
+    'common.actions': '操作', 'common.status': '状态', 'common.name': '名称',
+    'common.loading': '加载中...', 'common.demo': '演示', 'common.save': '保存',
+    'common.detail': '详情', 'common.log': '日志', 'common.install': '安装',
+    'common.role': '角色', 'common.roleAdmin': '管理员', 'common.roleUser': '普通用户',
+    'common.enabled': '已启用', 'common.disabled': '已禁用',
+    'common.id': 'ID', 'common.user': '用户', 'common.time': '时间',
+    // 状态
+    'status.pending': '等待', 'status.creating': '创建中', 'status.running': '运行中',
+    'status.stopped': '已停止', 'status.error': '失败', 'status.installing': '安装中',
+    'status.ready': '已就绪', 'status.failed': '失败', 'status.success': '成功',
+    'status.waiting': '等待中', 'status.unknown': '未知', 'status.online': '在线', 'status.offline': '离线',
+    // 导航
+    'nav.tagline': '基础设施部署平台', 'nav.vmTree': '虚拟机安装', 'nav.k8sTree': 'K8s集群安装',
+    'nav.hosts': '宿主机管理', 'nav.vms': '虚拟机管理', 'nav.clusters': '集群管理',
+    'nav.tasks': '部署任务', 'nav.apiDocs': '接口参考', 'nav.users': '用户管理', 'nav.logout': '退出',
+    'nav.subBrand': 'VM & K8s 部署平台',
+    // 认证
+    'auth.loginTitle': '欢迎回来', 'auth.loginSubtitle': '登录您的账号,继续管理您的集群',
+    'auth.account': '用户名或邮箱', 'auth.password': '密码', 'auth.login': '登 录',
+    'auth.loggingIn': '登录中...', 'auth.noAccount': '还没有账号?', 'auth.registerNow': '立即注册',
+    'auth.demoHint': '演示账号',
+    'auth.registerTitle': '创建账号', 'auth.registerSubtitle': '注册一个新账号,开启部署之旅',
+    'auth.username': '用户名', 'auth.email': '邮箱', 'auth.fullName': '姓名(可选)',
+    'auth.confirmPassword': '确认密码', 'auth.register': '注 册', 'auth.registering': '注册中...',
+    'auth.haveAccount': '已有账号?', 'auth.loginDirect': '直接登录',
+    'auth.usernameHint': '3-50 个字符', 'auth.pwdHint': '至少 6 位',
+    'auth.errUsername': '用户名至少 3 个字符', 'auth.errEmail': '请输入有效的邮箱地址',
+    'auth.errPwd': '密码至少 6 位', 'auth.errConfirm': '两次输入的密码不一致',
+    'auth.loginOk': '登录成功,欢迎回来!', 'auth.registerOk': '注册成功,欢迎加入!',
+    // 概览
+    'dash.badge': '基础设施部署平台', 'dash.welcome': '欢迎回来,{name} 👋',
+    'dash.heroDesc': '在宿主机上创建虚拟机,再通过 Kubespray 一键部署生产级 Kubernetes 集群。左侧导航分「虚拟机安装」与「K8s集群安装」两大流程。',
+    'dash.createVm': '＋ 创建虚拟机', 'dash.createCluster': '☸ 创建集群',
+    'dash.statHosts': '宿主机', 'dash.statVms': '虚拟机', 'dash.statClusters': 'K8s 集群', 'dash.statTasks': '运行中任务',
+    'dash.hostsOnline': '{n} 台在线', 'dash.vmsRunning': '{n} 台运行中', 'dash.clustersReady': '{n} 个就绪', 'dash.tasksRunning': '部署任务流',
+    'dash.recentTasks': '最近任务', 'dash.allTasks': '全部任务 →', 'dash.noTasks': '暂无部署任务',
+    'dash.flowTitle': '部署流程',
+    'dash.flow1t': '纳管宿主机', 'dash.flow1d': '添加物理服务器,检测 SSH 连通性',
+    'dash.flow2t': '创建虚拟机', 'dash.flow2d': '指定规格与镜像,自动分配 IP',
+    'dash.flow3t': '创建集群', 'dash.flow3d': '选择控制平面 / 工作节点',
+    'dash.flow4t': 'Kubespray 安装', 'dash.flow4d': '异步任务流,实时查看部署日志',
+    // 宿主机
+    'hosts.title': '宿主机管理', 'hosts.desc': '纳管用于创建虚拟机的物理服务器,支持 SSH 连通性检测',
+    'hosts.add': '添加宿主机', 'hosts.addTitle': '添加宿主机', 'hosts.name': '名称',
+    'hosts.ip': 'IP 地址', 'hosts.sshUser': 'SSH 用户', 'hosts.sshPort': 'SSH 端口',
+    'hosts.cpu': 'CPU 核数', 'hosts.mem': '内存 (GB)', 'hosts.disk': '磁盘 (GB)',
+    'hosts.spec': '规格', 'hosts.check': '检测连通', 'hosts.checking': '检测中...',
+    'hosts.deleteTitle': '删除宿主机', 'hosts.deleteMsg': '确定要删除宿主机 {name} ({ip}) 吗?',
+    'hosts.added': '宿主机 {name} 已添加', 'hosts.deleted': '宿主机 {name} 已删除',
+    'hosts.checkDone': '主机 {name} 连通性检测完成:{status}',
+    'hosts.empty': '暂无宿主机,点击右上角「添加宿主机」',
+    'hosts.envCheck': '环境检测', 'hosts.envChecking': '检测中...', 'hosts.envTitle': '宿主机环境检测报告',
+    'hosts.envCol': '环境', 'hosts.addHint': '添加后将自动检测操作系统(需 Ubuntu 22.04)与 libvirt 依赖环境',
+    'hosts.os': '操作系统', 'hosts.osOk': 'Ubuntu 22.04', 'hosts.osFail': '非 Ubuntu 22.04', 'hosts.osUnknown': '未检测',
+    'hosts.libvirtOk': 'libvirt 就绪', 'hosts.libvirtFail': '依赖缺失', 'hosts.unk': '未检测',
+    'hosts.deps': 'libvirt 依赖包', 'hosts.installed': '已安装', 'hosts.missing': '缺失',
+    'hosts.service': 'libvirtd 服务', 'hosts.serviceActive': '运行中', 'hosts.serviceDown': '未运行',
+    'hosts.kvm': '/dev/kvm', 'hosts.kvmYes': '存在(硬件加速)', 'hosts.kvmNo': '不存在(无加速)',
+    'hosts.simNote': '仿真检测(未连接真实主机)', 'hosts.addResult': '宿主机 {name} 已添加 · 环境:OS {os} · libvirt {lv}',
+    'hosts.pass': '通过', 'hosts.fail': '不通过', 'hosts.unreachable': 'SSH 不可达',
+    'hosts.cmdTitle': '免密配置与依赖安装命令', 'hosts.cmdHint': '在管理机上执行以下命令,完成 SSH 免密与 libvirt 依赖安装,然后点击「环境检测」',
+    'hosts.cmdSudoNote': '非 root 用户执行时会提示输入 sudo 密码', 'hosts.copy': '复制', 'hosts.copied': '已复制到剪贴板',
+    'hosts.cmdBtn': '配置命令', 'hosts.cmdModalTitle': '宿主机初始化命令 · {name}',
+    'hosts.scriptHint': '初始化命令根据下方连接信息实时生成,请先填写 IP 与 SSH 信息;复制后在管理机执行',
+    'hosts.userNote': '⚠️ 重要:后续环境检测、虚拟机创建、集群安装等所有操作都将使用上方用户(默认 ubuntu)登录宿主机,请务必先完成 ssh-copy-id 免密配置',
+    'hosts.sc.userCreate': '# (可选)宿主机没有 ubuntu 用户时先创建:sudo useradd -m ubuntu -s /bin/bash && sudo passwd ubuntu && sudo usermod -aG sudo ubuntu',
+    'hosts.sc.head': '# ===== CubeStackInstaller 宿主机初始化(在管理机执行,可整段复制) =====',
+    'hosts.sc.step1': '# 第 1 步:SSH 免密 —— 将管理机公钥复制到宿主机(需要输入宿主机密码)',
+    'hosts.sc.step2': '# 第 2 步:校验免密已生效;生效后才继续后续操作',
+    'hosts.sc.ok': '✓ 免密配置成功,继续后续步骤...',
+    'hosts.sc.fail': '✗ 免密未生效,请检查密码/网络后重试第 1 步',
+    'hosts.sc.step3': '# 第 3 步:确认系统为 Ubuntu 22.04',
+    'hosts.sc.step4': '# 第 4 步:安装 libvirt 依赖(Ubuntu 22.04)',
+    'hosts.sc.step5': '# 第 5 步:启动 libvirtd 并设置开机自启',
+    'hosts.sc.step6': '# 第 6 步:确认 KVM 硬件加速可用',
+    // 虚拟机
+    'vms.title': '虚拟机管理', 'vms.desc': '在宿主机上创建 KVM 虚拟机,用于承载 Kubernetes 集群节点',
+    'vms.create': '创建虚拟机', 'vms.createTitle': '创建虚拟机', 'vms.host': '宿主机',
+    'vms.selectHost': '请选择宿主机', 'vms.vcpu': 'vCPU 核数', 'vms.mem': '内存', 'vms.disk': '系统盘',
+    'vms.image': '云镜像', 'vms.autoIp': '自动分配 IP 地址', 'vms.customIp': '指定 IP 地址',
+    'vms.start': '启动', 'vms.stop': '停止', 'vms.reboot': '重启', 'vms.creatingHint': '创建中...',
+    'vms.provider': '启动方式', 'vms.providerLibvirt': 'Libvirt (virsh)', 'vms.providerKubevirt': 'KubeVirt',
+    'vms.namespace': '命名空间', 'vms.namespaceHint': '仅 KubeVirt 使用',
+    'vms.providersTitle': '虚拟化后端', 'vms.modeReal': '真实模式', 'vms.modeSim': '仿真模式',
+    'vms.connected': '已连接', 'vms.notConnected': '未连接', 'vms.providerCol': '提供方',
+    'vms.created': '虚拟机 {name} 创建任务已启动,查看「部署任务」跟踪进度',
+    'vms.deleteTitle': '删除虚拟机', 'vms.deleteMsg': '确定要删除虚拟机 {name} 吗?该操作将销毁其磁盘数据。',
+    'vms.deleted': '虚拟机 {name} 已删除',
+    'vms.doneStart': '已启动', 'vms.doneStop': '已停止', 'vms.doneReboot': '已重启',
+    'vms.actionDone': '虚拟机 {name} {action}',
+    'vms.empty': '暂无虚拟机,点击右上角「创建虚拟机」',
+    // 集群
+    'clusters.title': '集群管理', 'clusters.desc': '基于 Kubespray 一键部署生产级 Kubernetes 集群',
+    'clusters.create': '创建集群', 'clusters.createTitle': '创建集群 (Kubespray)',
+    'clusters.name': '集群名称', 'clusters.k8sVersion': 'Kubernetes 版本', 'clusters.plugin': '网络插件',
+    'clusters.kubespray': 'Kubespray 版本', 'clusters.cpNodes': '控制平面节点 (至少 1 个)',
+    'clusters.workerNodes': '工作节点 (可选)', 'clusters.sshKey': 'SSH 私钥(可选)',
+    'clusters.sshKeyHint': '留空则使用平台默认密钥', 'clusters.noVm': '暂无虚拟机,请先在「虚拟机管理」中创建',
+    'clusters.needCp': '请至少选择 1 个控制平面节点',
+    'clusters.version': '版本 / 插件', 'clusters.nodes': '节点',
+    'clusters.cpCount': '控制平面 {n}', 'clusters.workerCount': '工作节点 {n}',
+    'clusters.install': '安装', 'clusters.installingHint': '安装中...', 'clusters.detail': '详情',
+    'clusters.detailTitle': '集群详情 · {name}', 'clusters.node': '节点', 'clusters.roleCp': '控制平面', 'clusters.roleWorker': '工作节点',
+    'clusters.lastTask': '最近安装任务', 'clusters.created': '集群 {name} 已创建,点击「安装」开始 Kubespray 部署',
+    'clusters.deployStarted': '集群安装任务 #{id} 已启动,可到「部署任务」查看日志',
+    'clusters.deleteTitle': '删除集群', 'clusters.deleteMsg': '确定要删除集群 {name} 吗?',
+    'clusters.deleted': '集群 {name} 已删除', 'clusters.empty': '暂无集群,点击右上角「创建集群」',
+    // 任务
+    'tasks.title': '部署任务', 'tasks.desc': '虚拟机创建与集群安装的异步任务流,点击任务查看实时日志',
+    'tasks.autoRefresh': '正在自动刷新...', 'tasks.running': '运行中', 'tasks.history': '{n} 条历史',
+    'tasks.type': '类型', 'tasks.typeVm': '虚拟机创建', 'tasks.typeCluster': '集群安装',
+    'tasks.target': '目标', 'tasks.progress': '进度', 'tasks.createdAt': '创建 / 完成',
+    'tasks.viewLog': '查看日志', 'tasks.viewing': '查看中', 'tasks.collapse': '收起',
+    'tasks.taskLabel': '任务 #{id} · {name} ·', 'tasks.empty': '暂无任务,创建虚拟机或安装集群后自动生成',
+    'tasks.noLog': '(暂无日志)',
+    // 接口参考
+    'apidocs.title': '接口参考', 'apidocs.desc': '全部 REST API 的输入输出约定。交互式调试请访问',
+    'apidocs.method': '方法', 'apidocs.path': '路径', 'apidocs.descCol': '说明',
+    'apidocs.input': '输入', 'apidocs.output': '输出',
+    'apidocs.adminWrite': '写操作仅管理员可用', 'apidocs.selfWrite': '· 写操作仅管理员可用',
+    // 用户
+    'users.title': '用户管理', 'users.desc': '管理平台中的所有注册用户,可调整角色、启用状态或删除账号',
+    'users.count': '{n} 位用户', 'users.regTime': '注册时间', 'users.current': '当前账号',
+    'users.me': '我', 'users.deleteTitle': '删除用户',
+    'users.deleteMsg': '确定要删除用户 {name}(@{username})吗?此操作不可恢复。',
+    'users.deleted': '用户 {username} 已删除', 'users.updated': '用户信息已更新',
+  },
+  en: {
+    // Common
+    'common.cancel': 'Cancel', 'common.confirm': 'Confirm', 'common.delete': 'Delete',
+    'common.add': 'Add', 'common.create': 'Create', 'common.close': 'Close',
+    'common.actions': 'Actions', 'common.status': 'Status', 'common.name': 'Name',
+    'common.loading': 'Loading...', 'common.demo': 'Demo', 'common.save': 'Save',
+    'common.detail': 'Details', 'common.log': 'Log', 'common.install': 'Install',
+    'common.role': 'Role', 'common.roleAdmin': 'Admin', 'common.roleUser': 'User',
+    'common.enabled': 'Enabled', 'common.disabled': 'Disabled',
+    'common.id': 'ID', 'common.user': 'User', 'common.time': 'Time',
+    // Status
+    'status.pending': 'Pending', 'status.creating': 'Creating', 'status.running': 'Running',
+    'status.stopped': 'Stopped', 'status.error': 'Failed', 'status.installing': 'Installing',
+    'status.ready': 'Ready', 'status.failed': 'Failed', 'status.success': 'Success',
+    'status.waiting': 'Waiting', 'status.unknown': 'Unknown', 'status.online': 'Online', 'status.offline': 'Offline',
+    // Nav
+    'nav.tagline': 'Infrastructure Deployment Platform', 'nav.vmTree': 'VM Provisioning', 'nav.k8sTree': 'K8s Cluster Install',
+    'nav.hosts': 'Host Management', 'nav.vms': 'Virtual Machines', 'nav.clusters': 'Cluster Management',
+    'nav.tasks': 'Deploy Tasks', 'nav.apiDocs': 'API Reference', 'nav.users': 'User Management', 'nav.logout': 'Logout',
+    'nav.subBrand': 'VM & K8s Platform',
+    // Auth
+    'auth.loginTitle': 'Welcome Back', 'auth.loginSubtitle': 'Sign in to manage your infrastructure',
+    'auth.account': 'Username or Email', 'auth.password': 'Password', 'auth.login': 'Sign In',
+    'auth.loggingIn': 'Signing in...', 'auth.noAccount': 'No account yet?', 'auth.registerNow': 'Register Now',
+    'auth.demoHint': 'Demo account',
+    'auth.registerTitle': 'Create Account', 'auth.registerSubtitle': 'Register to start deploying',
+    'auth.username': 'Username', 'auth.email': 'Email', 'auth.fullName': 'Full Name (optional)',
+    'auth.confirmPassword': 'Confirm Password', 'auth.register': 'Register', 'auth.registering': 'Registering...',
+    'auth.haveAccount': 'Already have an account?', 'auth.loginDirect': 'Sign In',
+    'auth.usernameHint': '3-50 characters', 'auth.pwdHint': 'At least 6 chars',
+    'auth.errUsername': 'Username must be at least 3 chars', 'auth.errEmail': 'Enter a valid email address',
+    'auth.errPwd': 'Password must be at least 6 chars', 'auth.errConfirm': 'Passwords do not match',
+    'auth.loginOk': 'Signed in. Welcome back!', 'auth.registerOk': 'Registered. Welcome aboard!',
+    // Dashboard
+    'dash.badge': 'Infrastructure Deployment Platform', 'dash.welcome': 'Welcome back, {name} 👋',
+    'dash.heroDesc': 'Provision VMs on hosts, then deploy production-grade Kubernetes clusters with Kubespray. Use the two trees on the left: VM Provisioning and K8s Cluster Install.',
+    'dash.createVm': '＋ New VM', 'dash.createCluster': '☸ New Cluster',
+    'dash.statHosts': 'Hosts', 'dash.statVms': 'VMs', 'dash.statClusters': 'K8s Clusters', 'dash.statTasks': 'Running Tasks',
+    'dash.hostsOnline': '{n} online', 'dash.vmsRunning': '{n} running', 'dash.clustersReady': '{n} ready', 'dash.tasksRunning': 'Deploy task flows',
+    'dash.recentTasks': 'Recent Tasks', 'dash.allTasks': 'All Tasks →', 'dash.noTasks': 'No deploy tasks yet',
+    'dash.flowTitle': 'Deployment Flow',
+    'dash.flow1t': 'Onboard Hosts', 'dash.flow1d': 'Add physical servers and check SSH connectivity',
+    'dash.flow2t': 'Create VMs', 'dash.flow2d': 'Pick specs and images, auto-assign IPs',
+    'dash.flow3t': 'Create Cluster', 'dash.flow3d': 'Select control-plane / worker nodes',
+    'dash.flow4t': 'Kubespray Install', 'dash.flow4d': 'Async task flow with live logs',
+    // Hosts
+    'hosts.title': 'Host Management', 'hosts.desc': 'Manage physical servers for VM provisioning with SSH connectivity checks',
+    'hosts.add': 'Add Host', 'hosts.addTitle': 'Add Host', 'hosts.name': 'Name',
+    'hosts.ip': 'IP Address', 'hosts.sshUser': 'SSH User', 'hosts.sshPort': 'SSH Port',
+    'hosts.cpu': 'CPU Cores', 'hosts.mem': 'Memory (GB)', 'hosts.disk': 'Disk (GB)',
+    'hosts.spec': 'Specs', 'hosts.check': 'Check', 'hosts.checking': 'Checking...',
+    'hosts.deleteTitle': 'Delete Host', 'hosts.deleteMsg': 'Delete host {name} ({ip})?',
+    'hosts.added': 'Host {name} added', 'hosts.deleted': 'Host {name} deleted',
+    'hosts.checkDone': 'Connectivity check for {name}: {status}',
+    'hosts.empty': 'No hosts yet. Click "Add Host" to get started.',
+    'hosts.envCheck': 'Env Check', 'hosts.envChecking': 'Checking...', 'hosts.envTitle': 'Host Environment Check Report',
+    'hosts.envCol': 'Environment', 'hosts.addHint': 'On add, the host OS (Ubuntu 22.04 required) and libvirt dependencies are auto-checked',
+    'hosts.os': 'OS', 'hosts.osOk': 'Ubuntu 22.04', 'hosts.osFail': 'Not Ubuntu 22.04', 'hosts.osUnknown': 'Not checked',
+    'hosts.libvirtOk': 'libvirt Ready', 'hosts.libvirtFail': 'Deps missing', 'hosts.unk': 'Not checked',
+    'hosts.deps': 'libvirt Packages', 'hosts.installed': 'Installed', 'hosts.missing': 'Missing',
+    'hosts.service': 'libvirtd Service', 'hosts.serviceActive': 'Running', 'hosts.serviceDown': 'Not running',
+    'hosts.kvm': '/dev/kvm', 'hosts.kvmYes': 'Present (HW accel)', 'hosts.kvmNo': 'Missing (no accel)',
+    'hosts.simNote': 'Simulated check (no live host)', 'hosts.addResult': 'Host {name} added · Env: OS {os} · libvirt {lv}',
+    'hosts.pass': 'Pass', 'hosts.fail': 'Fail', 'hosts.unreachable': 'SSH unreachable',
+    'hosts.cmdTitle': 'SSH Setup & Dependency Commands', 'hosts.cmdHint': 'Run these on the management server to set up passwordless SSH and libvirt deps, then click Env Check',
+    'hosts.cmdSudoNote': 'Non-root users will be prompted for the sudo password', 'hosts.copy': 'Copy', 'hosts.copied': 'Copied to clipboard',
+    'hosts.cmdBtn': 'Setup Cmd', 'hosts.cmdModalTitle': 'Host Bootstrap Commands · {name}',
+    'hosts.scriptHint': 'Generated live from the connection info below — fill in IP and SSH first, copy and run on the management server',
+    'hosts.userNote': '⚠️ Important: all subsequent operations (env check, VM creation, cluster install) will use the user above (ubuntu by default) to log into the host. Complete ssh-copy-id first!',
+    'hosts.sc.userCreate': '# (optional) if the host has no ubuntu user, create one: sudo useradd -m ubuntu -s /bin/bash && sudo passwd ubuntu && sudo usermod -aG sudo ubuntu',
+    'hosts.sc.head': '# ===== CubeStackInstaller host bootstrap (run on the management server) =====',
+    'hosts.sc.step1': '# Step 1: passwordless SSH — copy the management public key to the host (host password required)',
+    'hosts.sc.step2': '# Step 2: verify passwordless auth works; continue only after it succeeds',
+    'hosts.sc.ok': '✓ Passwordless SSH enabled, continuing...',
+    'hosts.sc.fail': '✗ Passwordless SSH failed; check the password/network and retry step 1',
+    'hosts.sc.step3': '# Step 3: confirm the OS is Ubuntu 22.04',
+    'hosts.sc.step4': '# Step 4: install libvirt dependencies (Ubuntu 22.04)',
+    'hosts.sc.step5': '# Step 5: start libvirtd and enable on boot',
+    'hosts.sc.step6': '# Step 6: confirm KVM hardware acceleration',
+    // VMs
+    'vms.title': 'Virtual Machines', 'vms.desc': 'Provision KVM VMs on hosts to serve as Kubernetes cluster nodes',
+    'vms.create': 'Create VM', 'vms.createTitle': 'Create VM', 'vms.host': 'Host',
+    'vms.selectHost': 'Select a host', 'vms.vcpu': 'vCPUs', 'vms.mem': 'Memory', 'vms.disk': 'Disk',
+    'vms.image': 'Cloud Image', 'vms.autoIp': 'Auto-assign IP address', 'vms.customIp': 'Custom IP address',
+    'vms.start': 'Start', 'vms.stop': 'Stop', 'vms.reboot': 'Reboot', 'vms.creatingHint': 'Creating...',
+    'vms.provider': 'Provider', 'vms.providerLibvirt': 'Libvirt (virsh)', 'vms.providerKubevirt': 'KubeVirt',
+    'vms.namespace': 'Namespace', 'vms.namespaceHint': 'KubeVirt only',
+    'vms.providersTitle': 'Virtualization Backends', 'vms.modeReal': 'Real mode', 'vms.modeSim': 'Simulation',
+    'vms.connected': 'Connected', 'vms.notConnected': 'Not connected', 'vms.providerCol': 'Provider',
+    'vms.created': 'VM {name} creation started. Track it under Deploy Tasks.',
+    'vms.deleteTitle': 'Delete VM', 'vms.deleteMsg': 'Delete VM {name}? Its disk data will be destroyed.',
+    'vms.deleted': 'VM {name} deleted',
+    'vms.doneStart': 'started', 'vms.doneStop': 'stopped', 'vms.doneReboot': 'restarted',
+    'vms.actionDone': 'VM {name} {action}',
+    'vms.empty': 'No VMs yet. Click "Create VM" to get started.',
+    // Clusters
+    'clusters.title': 'Cluster Management', 'clusters.desc': 'Deploy production-grade Kubernetes clusters with Kubespray',
+    'clusters.create': 'Create Cluster', 'clusters.createTitle': 'Create Cluster (Kubespray)',
+    'clusters.name': 'Cluster Name', 'clusters.k8sVersion': 'Kubernetes Version', 'clusters.plugin': 'Network Plugin',
+    'clusters.kubespray': 'Kubespray Version', 'clusters.cpNodes': 'Control Plane Nodes (min 1)',
+    'clusters.workerNodes': 'Worker Nodes (optional)', 'clusters.sshKey': 'SSH Private Key (optional)',
+    'clusters.sshKeyHint': 'Leave blank to use the platform key', 'clusters.noVm': 'No VMs available. Create VMs first.',
+    'clusters.needCp': 'Select at least 1 control plane node',
+    'clusters.version': 'Version / Plugin', 'clusters.nodes': 'Nodes',
+    'clusters.cpCount': 'CP {n}', 'clusters.workerCount': 'Workers {n}',
+    'clusters.install': 'Install', 'clusters.installingHint': 'Installing...', 'clusters.detail': 'Details',
+    'clusters.detailTitle': 'Cluster Details · {name}', 'clusters.node': 'Node', 'clusters.roleCp': 'Control Plane', 'clusters.roleWorker': 'Worker',
+    'clusters.lastTask': 'Last install task', 'clusters.created': 'Cluster {name} created. Click Install to deploy with Kubespray.',
+    'clusters.deployStarted': 'Install task #{id} started. View logs under Deploy Tasks.',
+    'clusters.deleteTitle': 'Delete Cluster', 'clusters.deleteMsg': 'Delete cluster {name}?',
+    'clusters.deleted': 'Cluster {name} deleted', 'clusters.empty': 'No clusters yet. Click "Create Cluster".',
+    // Tasks
+    'tasks.title': 'Deploy Tasks', 'tasks.desc': 'Async tasks for VM creation and cluster install. Click a task to view live logs',
+    'tasks.autoRefresh': 'Auto-refreshing...', 'tasks.running': 'Running', 'tasks.history': '{n} in history',
+    'tasks.type': 'Type', 'tasks.typeVm': 'VM Create', 'tasks.typeCluster': 'Cluster Install',
+    'tasks.target': 'Target', 'tasks.progress': 'Progress', 'tasks.createdAt': 'Created / Finished',
+    'tasks.viewLog': 'View Log', 'tasks.viewing': 'Viewing', 'tasks.collapse': 'Collapse',
+    'tasks.taskLabel': 'Task #{id} · {name} ·', 'tasks.empty': 'No tasks yet. Create a VM or install a cluster to generate one.',
+    'tasks.noLog': '(No log yet)',
+    // API docs
+    'apidocs.title': 'API Reference', 'apidocs.desc': 'Input/output contract for all REST APIs. Interactive debugging:',
+    'apidocs.method': 'Method', 'apidocs.path': 'Path', 'apidocs.descCol': 'Description',
+    'apidocs.input': 'Input', 'apidocs.output': 'Output',
+    'apidocs.adminWrite': 'Write operations require admin', 'apidocs.selfWrite': '· write ops are admin-only',
+    // Users
+    'users.title': 'User Management', 'users.desc': 'Manage all registered users: roles, enable status and deletion',
+    'users.count': '{n} users', 'users.regTime': 'Registered', 'users.current': 'Current account',
+    'users.me': 'Me', 'users.deleteTitle': 'Delete User',
+    'users.deleteMsg': 'Delete user {name}(@{username})? This cannot be undone.',
+    'users.deleted': 'User {username} deleted', 'users.updated': 'User updated',
+  },
+}
+
+const I18nContext = createContext(null)
+
+export function I18nProvider({ children }) {
+  const [lang, setLang] = useState(() => localStorage.getItem('kd_lang') || 'zh')
+
+  useEffect(() => {
+    localStorage.setItem('kd_lang', lang)
+    document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en'
+  }, [lang])
+
+  const t = useCallback(
+    (key, vars) => {
+      let s = (dict[lang] && dict[lang][key]) || dict.zh[key] || key
+      if (vars) {
+        for (const [k, v] of Object.entries(vars)) {
+          s = s.split('{' + k + '}').join(String(v))
+        }
+      }
+      return s
+    },
+    [lang],
+  )
+
+  const value = useMemo(() => ({ lang, setLang, t, isZh: lang === 'zh' }), [lang, t])
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>
+}
+
+export function useI18n() {
+  return useContext(I18nContext)
+}
