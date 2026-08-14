@@ -292,13 +292,13 @@ cubestack-installer/
 - 配置:全部环境变量集中声明于 .env.example 与 installer/app/core/config.py
 - 文档:docs/api.md(接口契约)与 docs/architecture.md(架构设计)
 
-## 十一、安全设计
+## 十二、安全设计
 
 - 密码以 PBKDF2-HMAC-SHA256(60 万次迭代 + 随机盐)哈希存储
 - 鉴权采用 JWT(HS256,有效期 24 小时);未登录返回 401,越权访问返回 403
 - 管理员账号不可被删除、禁用或降级;普通用户不具写操作权限
 
-## 十二、生产部署注意事项
+## 十三、生产部署注意事项
 
 - 须设置 SECRET_KEY 环境变量;管理机安装 libvirt、ansible 及 kubespray 后,系统自动进入真实模式
 - 生产环境建议将 SQLite 替换为 PostgreSQL(通过 DATABASE_URL 环境变量指定)
