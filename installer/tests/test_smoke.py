@@ -8,7 +8,7 @@ def test_health(client):
 
 
 def test_admin_login(client):
-    r = client.post("/api/auth/login", json={"account": "admin", "password": "admin123"})
+    r = client.post("/api/auth/login", json={"account": "admin", "password": "admin@123"})
     assert r.status_code == 200
     data = r.json()
     assert data["user"]["role"] == "admin"
@@ -62,7 +62,7 @@ def test_vm_create_task_flow(client):
 
 
 def _admin_token(client):
-    r = client.post("/api/auth/login", json={"account": "admin", "password": "admin123"})
+    r = client.post("/api/auth/login", json={"account": "admin", "password": "admin@123"})
     return r.json()["access_token"]
 
 

@@ -61,7 +61,7 @@ export default function LoginPage() {
       </p>
 
       <div className="demo-hint">
-        {t('auth.demoHint')}:<kbd>admin</kbd> / <kbd>admin123</kbd>
+        {t('auth.demoHint')}:<kbd>admin</kbd> / <kbd>admin@123</kbd>
       </div>
     </AuthLayout>
   )

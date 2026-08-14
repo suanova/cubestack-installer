@@ -7,9 +7,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import api_router
+from .core.config import ADMIN_INITIAL_PASSWORD
+from .core.security import hash_password
 from .db.session import SessionLocal, init_db
 from .models import Host, User, VirtualMachine
-from .core.security import hash_password
 
 
 def seed_data() -> None:
@@ -22,7 +23,7 @@ def seed_data() -> None:
                     username="admin",
                     email="admin@example.com",
                     full_name="系统管理员",
-                    hashed_password=hash_password("admin123"),
+                    hashed_password=hash_password(ADMIN_INITIAL_PASSWORD),
                     role="admin",
                 )
             )

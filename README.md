@@ -12,7 +12,7 @@ CubeStackInstaller 是一套面向基础设施自动化的管理平台,用于在
 - 任务管理:提供异步部署任务流,支持实时日志与进度展示
 - 账号管理:支持用户注册、登录及管理员权限控制
 
-系统默认管理员账号为 admin / admin123(首次启动时自动创建)。
+系统默认管理员账号为 admin / admin@123(首次启动时自动创建)。管理员初始密码可通过启动参数 --admin-password 或环境变量 ADMIN_INITIAL_PASSWORD 指定,详见 3.5 节。
 
 ## 二、系统组成
 
@@ -44,7 +44,7 @@ make ui                   # 或 cd ui && npm run dev
 
 启动完成后,可通过以下地址访问:
 
-- 前端控制台: http://localhost:5173(使用 admin / admin123 登录)
+- 前端控制台: http://localhost:5173(使用 admin / admin@123 登录)
 - 接口文档(Swagger): http://127.0.0.1:8000/docs
 
 ### 3.3 常用命令
@@ -69,6 +69,20 @@ uv build                   # 构建 wheel 与 sdist 发行包
 ```
 
 说明:Python 依赖版本由 uv.lock 锁定,默认使用清华镜像源;前端依赖使用 npmmirror 镜像源。
+
+### 3.5 管理员初始密码
+
+系统首次启动时自动创建管理员账号 admin,初始密码默认为 admin@123。可通过以下方式指定初始密码:
+
+```bash
+# 方式一:启动参数(推荐)
+uv run cubestack-installer-installer --admin-password '自定义密码'
+
+# 方式二:环境变量
+ADMIN_INITIAL_PASSWORD='自定义密码' uv run cubestack-installer-installer
+```
+
+说明:初始密码仅在首次创建 admin 账号时生效;账号已存在时,修改密码不影响既有账号。
 
 ## 四、部署模式
 

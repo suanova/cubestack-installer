@@ -13,6 +13,9 @@ TOKEN_EXPIRE_MINUTES = int(_env("TOKEN_EXPIRE_MINUTES", "1440"))
 # 数据库
 DATABASE_URL = _env("DATABASE_URL", "sqlite:///./userhub.db")
 
+# 管理员初始密码(首次启动创建 admin 时生效;默认 admin@123)
+ADMIN_INITIAL_PASSWORD = _env("ADMIN_INITIAL_PASSWORD", "admin@123")
+
 # 部署引擎
 DEPLOY_MODE = _env("DEPLOY_MODE", "auto")  # auto | real | sim
 
