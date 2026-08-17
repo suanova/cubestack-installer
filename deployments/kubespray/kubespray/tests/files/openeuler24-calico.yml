@@ -1,0 +1,4 @@
+---
+# Instance settings
+cloud_image: openeuler-2403
+vm_memory: 3072

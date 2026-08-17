@@ -1,0 +1,15 @@
+# Download-only inventory — localhost with root, used by generate_list.sh
+# This file is only for generating download lists; no SSH to nodes is required.
+
+[kube_control_plane]
+node1 ansible_host=localhost ansible_user=root
+
+[etcd:children]
+kube_control_plane
+
+[kube_node]
+node1 ansible_host=localhost ansible_user=root
+
+[k8s_cluster:children]
+kube_control_plane
+kube_node

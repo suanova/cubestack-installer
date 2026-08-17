@@ -1,0 +1,54 @@
+{{netcheck_server_image_repo}}:{{netcheck_server_image_tag}}
+{{netcheck_agent_image_repo}}:{{netcheck_agent_image_tag}}
+{{etcd_image_repo}}:{{etcd_image_tag}}
+{{cilium_image_repo}}:{{cilium_image_tag}}
+{{cilium_operator_image_repo}}:{{cilium_operator_image_tag}}
+{{cilium_hubble_relay_image_repo}}:{{cilium_hubble_relay_image_tag}}
+{{cilium_hubble_certgen_image_repo}}:{{cilium_hubble_certgen_image_tag}}
+{{cilium_hubble_ui_image_repo}}:{{cilium_hubble_ui_image_tag}}
+{{cilium_hubble_ui_backend_image_repo}}:{{cilium_hubble_ui_backend_image_tag}}
+{{cilium_hubble_envoy_image_repo}}:{{cilium_hubble_envoy_image_tag}}
+{{multus_image_repo}}:{{multus_image_tag}}
+{{flannel_image_repo}}:{{flannel_image_tag}}
+{{flannel_init_image_repo}}:{{flannel_init_image_tag}}
+{{calico_node_image_repo}}:{{calico_node_image_tag}}
+{{calico_cni_image_repo}}:{{calico_cni_image_tag}}
+{{calico_policy_image_repo}}:{{calico_policy_image_tag}}
+{{calico_typha_image_repo}}:{{calico_typha_image_tag}}
+{{calico_apiserver_image_repo}}:{{calico_apiserver_image_tag}}
+{{weave_kube_image_repo}}:{{weave_kube_image_tag}}
+{{weave_npc_image_repo}}:{{weave_npc_image_tag}}
+{{kube_ovn_container_image_repo}}:{{kube_ovn_container_image_tag}}
+{{kube_router_image_repo}}:{{kube_router_image_tag}}
+{{pod_infra_image_repo}}:{{pod_infra_image_tag}}
+{{kube_vip_image_repo}}:{{kube_vip_image_tag}}
+{{nginx_image_repo}}:{{nginx_image_tag}}
+{{haproxy_image_repo}}:{{haproxy_image_tag}}
+{{coredns_image_repo}}:{{coredns_image_tag}}
+{{nodelocaldns_image_repo}}:{{nodelocaldns_image_tag}}
+{{dnsautoscaler_image_repo}}:{{dnsautoscaler_image_tag}}
+{{registry_image_repo}}:{{registry_image_tag}}
+{{metrics_server_image_repo}}:{{metrics_server_image_tag}}
+{{local_volume_provisioner_image_repo}}:{{local_volume_provisioner_image_tag}}
+{{local_path_provisioner_image_repo}}:{{local_path_provisioner_image_tag}}
+{{ingress_nginx_controller_image_repo}}:{{ingress_nginx_controller_image_tag}}
+{{alb_ingress_image_repo}}:{{alb_ingress_image_tag}}
+{{cert_manager_controller_image_repo}}:{{cert_manager_controller_image_tag}}
+{{cert_manager_cainjector_image_repo}}:{{cert_manager_cainjector_image_tag}}
+{{cert_manager_webhook_image_repo}}:{{cert_manager_webhook_image_tag}}
+{{csi_attacher_image_repo}}:{{csi_attacher_image_tag}}
+{{csi_provisioner_image_repo}}:{{csi_provisioner_image_tag}}
+{{csi_snapshotter_image_repo}}:{{csi_snapshotter_image_tag}}
+{{snapshot_controller_image_repo}}:{{snapshot_controller_image_tag}}
+{{csi_resizer_image_repo}}:{{csi_resizer_image_tag}}
+{{csi_node_driver_registrar_image_repo}}:{{csi_node_driver_registrar_image_tag}}
+{{cinder_csi_plugin_image_repo}}:{{cinder_csi_plugin_image_tag}}
+{{aws_ebs_csi_plugin_image_repo}}:{{aws_ebs_csi_plugin_image_tag}}
+{{dashboard_image_repo}}:{{dashboard_image_tag}}
+{{dashboard_metrics_scraper_repo}}:{{dashboard_metrics_scraper_tag}}
+{{metallb_speaker_image_repo}}:{{metallb_image_tag}}
+{{metallb_controller_image_repo}}:{{metallb_image_tag}}
+{{ kube_image_repo }}/kube-apiserver:v{{ kube_version }}
+{{ kube_image_repo }}/kube-controller-manager:v{{ kube_version }}
+{{ kube_image_repo }}/kube-scheduler:v{{ kube_version }}
+{{ kube_image_repo }}/kube-proxy:v{{ kube_version }}

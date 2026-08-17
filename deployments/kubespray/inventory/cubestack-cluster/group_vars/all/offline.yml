@@ -1,0 +1,21 @@
+---
+# 离线安装变量（由 cubestack-offline.sh 自动生成）
+
+## 下载控制
+download_run_once: true
+download_localhost: true
+download_force_cache: true
+download_always_pull: false
+
+## 缓存目录
+download_cache_dir: "/opt/cubestack-installer/repository/cubestack-cluster"
+local_release_dir: "/opt/cubestack-installer/repository/cubestack-cluster"
+
+## 容器运行时
+container_manager: "containerd"
+container_manager_on_localhost: "containerd"
+
+## 连接
+ansible_user: "ubuntu"
+ansible_become: true
+ansible_become_method: sudo

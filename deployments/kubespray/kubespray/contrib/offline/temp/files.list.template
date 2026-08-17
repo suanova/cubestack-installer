@@ -1,0 +1,23 @@
+{{ dl_k8s_io_url }}/release/v{{ kube_version }}/bin/linux/{{ image_arch }}/kubelet
+{{ dl_k8s_io_url }}/release/v{{ kube_version }}/bin/linux/{{ image_arch }}/kubectl
+{{ dl_k8s_io_url }}/release/v{{ kube_version }}/bin/linux/{{ image_arch }}/kubeadm
+{{ github_url }}/etcd-io/etcd/releases/download/v{{ etcd_version }}/etcd-v{{ etcd_version }}-linux-{{ image_arch }}.tar.gz
+{{ github_url }}/containernetworking/plugins/releases/download/v{{ cni_version }}/cni-plugins-linux-{{ image_arch }}-v{{ cni_version }}.tgz
+{{ github_url }}/projectcalico/calico/releases/download/v{{ calico_ctl_version }}/calicoctl-linux-{{ image_arch }}
+{{ github_url }}/projectcalico/calico/archive/v{{ calico_version }}.tar.gz
+{{ github_url }}/cilium/cilium-cli/releases/download/v{{ cilium_cli_version }}/cilium-linux-{{ image_arch }}.tar.gz
+{{ github_url }}/kubernetes-sigs/cri-tools/releases/download/v{{ crictl_version }}/crictl-v{{ crictl_version }}-{{ ansible_system | lower }}-{{ image_arch }}.tar.gz
+{{ storage_googleapis_url }}/cri-o/artifacts/cri-o.{{ image_arch }}.v{{ crio_version }}.tar.gz
+{{ get_helm_url }}/helm-v{{ helm_version }}-linux-{{ image_arch }}.tar.gz
+{{ github_url }}/opencontainers/runc/releases/download/v{{ runc_version }}/runc.{{ image_arch }}
+{{ github_url }}/containers/crun/releases/download/{{ crun_version }}/crun-{{ crun_version }}-linux-{{ image_arch }}
+{{ github_url }}/youki-dev/youki/releases/download/v{{ youki_version }}/youki-{{ youki_version }}-{{ ansible_architecture }}-gnu.tar.gz
+{{ github_url }}/kata-containers/kata-containers/releases/download/{{ kata_containers_version }}/kata-static-{{ kata_containers_version }}-{{ image_arch }}.tar.xz
+{{ storage_googleapis_url }}/gvisor/releases/release/{{ gvisor_version }}/{{ ansible_architecture }}/runsc
+{{ storage_googleapis_url }}/gvisor/releases/release/{{ gvisor_version }}/{{ ansible_architecture }}/containerd-shim-runsc-v1
+{{ github_url }}/containerd/nerdctl/releases/download/v{{ nerdctl_version }}/nerdctl-{{ nerdctl_version }}-{{ ansible_system | lower }}-{{ image_arch }}.tar.gz
+{{ github_url }}/containerd/containerd/releases/download/v{{ containerd_version }}/containerd-{{ containerd_version }}-linux-{{ image_arch }}.tar.gz
+{{ github_url }}/Mirantis/cri-dockerd/releases/download/v{{ cri_dockerd_version }}/cri-dockerd-{{ cri_dockerd_version }}.{{ image_arch }}.tgz
+{{ github_url }}/lework/skopeo-binary/releases/download/v{{ skopeo_version }}/skopeo-linux-{{ image_arch }}
+{{ github_url }}/mikefarah/yq/releases/download/v{{ yq_version }}/yq_linux_{{ image_arch }}
+{{ github_url }}/kubernetes-sigs/gateway-api/releases/download/v{{ gateway_api_version }}/{{ gateway_api_channel }}-install.yaml

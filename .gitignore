@@ -26,3 +26,13 @@ backend/workspace/
 # 系统文件
 .DS_Store
 nohup.out
+
+#kubepray install image and binary folder
+deployments/kubespray/repository/cubestack-cluster/*
+deployments/kubespray/kubespray/.git
+deployments/kubespray/kubespray/.gitattributes
+deployments/kubespray/kubespray/.github
+deployments/kubespray/kubespray/.gitignore
+deployments/kubespray/kubespray/.gitlab-ci
+deployments/kubespray/kubespray/.gitlab-ci.yml
+deployments/kubespray/kubespray/.gitmodules

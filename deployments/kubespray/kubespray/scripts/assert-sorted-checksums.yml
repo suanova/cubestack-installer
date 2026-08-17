@@ -1,0 +1,54 @@
+#!/usr/bin/env ansible-playbook
+---
+- name: Verify correct structure of Kubespray variables
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    fallback_ip: 'bypass tasks in kubespray_defaults'
+    _keys: "{{ query('ansible.builtin.varnames', '^.+_checksums$') }}"
+    _values: "{{ query('ansible.builtin.vars', *_keys) | map('dict2items') }}"
+    _components_archs_values: "{{ _keys | zip(_values) | community.general.dict | dict2items | subelements('value') }}"
+    _minimal_data_needed: "{{ _components_archs_values | map(attribute='0.key') | zip(_components_archs_values | map(attribute='1')) }}"
+  roles:
+  - kubespray_defaults
+  tasks:
+  - name: Check all versions are strings
+    assert:
+      that: "{{ item.1.value | reject('string') == [] }}"
+      quiet: true
+    loop: "{{ _minimal_data_needed }}"
+    loop_control:
+      label: "{{ item.0 }}:{{ item.1.key }}"
+  - name: Check all checksums are sorted by version
+    vars:
+      actual: "{{ item.1.value.keys() | map('string') | reverse}}"
+      sorted: "{{ item.1.value.keys() | map('string') | community.general.version_sort }}"
+    assert:
+      that: actual == sorted
+      quiet: true
+      msg: "{{ actual | ansible.utils.fact_diff(sorted) }}"
+    loop: "{{ _minimal_data_needed }}"
+    loop_control:
+      label: "{{ item.0 }}:{{ item.1.key }}"
+    when:
+    - item.1.value is not string
+    - (item.1.value | dict2items)[0].value is string or
+      (item.1.value | dict2items)[0].value is number
+    # only do list, the others are checksums with a different structure
+  - name: Include the packages list variable
+    include_vars: ../roles/system_packages/vars/main.yml
+
+  - name: Verify that the packages list is sorted
+    loop:
+    - pkgs_to_remove
+    - pkgs
+    vars:
+      pkgs_lists: "{{ lookup('vars', item).keys() | list }}"
+      ansible_distribution: irrelevant
+      ansible_distribution_major_version: irrelevant
+      ansible_distribution_minor_version: irrelevant
+      ansible_os_family: irrelevant
+    assert:
+      that: "pkgs_lists | sort == pkgs_lists"
+      fail_msg: "{{ item }} is not sorted: {{ pkgs_lists | ansible.utils.fact_diff(pkgs_lists | sort) }}"

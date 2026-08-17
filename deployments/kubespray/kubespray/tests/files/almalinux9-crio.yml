@@ -1,0 +1,7 @@
+---
+# Instance settings
+cloud_image: almalinux-9
+
+# Kubespray settings
+container_manager: crio
+auto_renew_certificates: true
