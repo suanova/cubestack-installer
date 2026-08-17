@@ -425,6 +425,8 @@ tr.row-selected td { background: var(--primary-soft); }
 .modal-x { background: var(--hover); border: 1px solid var(--line); width: 28px; height: 28px; border-radius: 8px; color: var(--ink-soft); font-size: 13px; }
 .modal-x:hover { background: var(--line); color: var(--ink); }
 .modal-text { font-size: 14px; color: var(--ink-soft); }
+.modal-note { font-size: 12.5px; color: var(--muted); background: var(--input-bg); border: 1px dashed var(--line); border-radius: 8px; padding: 8px 12px; margin-top: 4px; }
+textarea.input { resize: vertical; min-height: 78px; line-height: 1.5; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 
