@@ -20,7 +20,7 @@ function formatDate(iso) {
   return new Date(iso).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
-export default function TasksPage() {
+export default function TasksPage({ typeFilter, titleKey, descKey }) {
   const { token } = useAuth()
   const { t } = useI18n()
   const [tasks, setTasks] = useState([])
@@ -65,20 +65,21 @@ export default function TasksPage() {
       .catch(() => {})
   }
 
-  const hasRunning = tasks.some((tk) => tk.status === 'running' || tk.status === 'pending')
+  const visibleTasks = typeFilter ? tasks.filter((tk) => tk.type === typeFilter) : tasks
+  const hasRunning = visibleTasks.some((tk) => tk.status === 'running' || tk.status === 'pending')
 
   return (
     <div>
       <div className="page-head">
         <div>
-          <h1 className="page-title">{t('tasks.title')}</h1>
+          <h1 className="page-title">{t(titleKey || 'tasks.title')}</h1>
           <p className="page-desc">
-            {t('tasks.desc')}
+            {t(descKey || 'tasks.desc')}
             {hasRunning && ' · ' + t('tasks.autoRefresh')}
           </p>
         </div>
         <span className={'count-chip' + (hasRunning ? ' pulse' : '')}>
-          {hasRunning ? t('tasks.running') : t('tasks.history', { n: tasks.length })}
+          {hasRunning ? t('tasks.running') : t('tasks.history', { n: visibleTasks.length })}
         </span>
       </div>
 
@@ -100,7 +101,7 @@ export default function TasksPage() {
                 </tr>
               </thead>
               <tbody>
-                {tasks.map((tk) => {
+                {visibleTasks.map((tk) => {
                   const ty = TYPE_MAP[tk.type] || { key: tk.type, cls: 'badge-muted' }
                   const st = STATUS_MAP[tk.status] || { key: tk.status, cls: 'badge-muted' }
                   return (
@@ -129,7 +130,7 @@ export default function TasksPage() {
                     </tr>
                   )
                 })}
-                {tasks.length === 0 && (
+                {visibleTasks.length === 0 && (
                   <tr><td colSpan="7" className="td-empty">{t('tasks.empty')}</td></tr>
                 )}
               </tbody>

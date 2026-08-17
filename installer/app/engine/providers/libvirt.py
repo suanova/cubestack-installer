@@ -1,14 +1,13 @@
 """Libvirt(virsh) 虚拟机 Provider。
 
-- 真实模式:调用 virt-install / virsh / qemu-img
-- 仿真模式:未检测到工具或真实执行失败时自动回退,完整模拟流程与日志
+- 真实模式:SSH 到宿主机,由 vmprovision 执行 qemu-img / virt-install / virsh(基于模板镜像)
+- 仿真模式:宿主机为演示数据或 SSH 不可达时自动回退,完整模拟流程与日志
 """
 import os
 import shutil
-import subprocess
 import time
 
-from ...models import DeployTask, VirtualMachine
+from ...models import DeployTask, Host, VirtualMachine
 from .base import ProviderInfo, VMProvider
 
 IMAGES_DIR = "/var/lib/libvirt/images"
@@ -18,7 +17,6 @@ class LibvirtProvider(VMProvider):
     key = "libvirt"
     name = "Libvirt (virsh)"
 
-    # ---------- 工具检测 ----------
     def _detect_mode(self) -> str:
         m = os.environ.get("DEPLOY_MODE", "auto").lower()
         if m in ("sim", "simulation"):
@@ -38,72 +36,84 @@ class LibvirtProvider(VMProvider):
             detail="virt-install/virsh 工具链" + ("可用" if real else "不可用(将使用仿真)"),
         )
 
+    def _load_host(self, host_id: int | None) -> Host | None:
+        from ...db.session import SessionLocal
+        db = SessionLocal()
+        try:
+            return db.get(Host, host_id) if host_id else None
+        finally:
+            db.close()
+
     def _next_ip(self, vm: VirtualMachine) -> str:
         return "192.168.10." + str(100 + vm.id)
 
+    def _host_real(self, host: Host, log) -> bool:
+        """真实模式判断:宿主机可 SSH 且已装 virt-install。"""
+        from ..services.vmprovision import _ssh
+        rc, out, _ = _ssh(host, "command -v virt-install >/dev/null 2>&1 && echo ok")
+        if rc == 0 and out.strip() == "ok":
+            return True
+        log("      [提示] 宿主机 SSH/工具不可用,回退仿真模式")
+        return False
+
     # ---------- 创建 ----------
     def create(self, task: DeployTask, vm: VirtualMachine, db, log) -> None:
-        mode = self._detect_mode()
-        use_sim = mode == "sim"
+        host = self._load_host(vm.host_id)
+        use_real = bool(host is not None and not host.is_demo and self._host_real(host, lambda s: log(task, db, s)))
 
         log(task, db, "==== 虚拟机创建任务(Libvirt) ====")
         log(task, db, "目标虚拟机: " + vm.name)
         log(task, db, "宿主机 ID: " + str(vm.host_id))
         log(task, db, "规格: " + str(vm.cpu) + " vCPU / " + str(vm.memory_gb) + " GB / " + str(vm.disk_gb) + " GB")
         log(task, db, "镜像: " + vm.image)
-        if use_sim:
-            log(task, db, "[模式] 仿真模式(未检测到可用 libvirt;设置 DEPLOY_MODE=real 强制真实)")
+        if use_real:
+            log(task, db, "[模式] 真实模式(SSH -> 宿主机 virt-install)")
         else:
-            log(task, db, "[模式] 真实模式(libvirt)")
+            log(task, db, "[模式] 仿真模式")
         vm.status = "creating"
         db.commit()
         task.progress = 8
         db.commit()
 
-        def real(cmd, timeout=120):
-            nonlocal use_sim
-            if use_sim:
-                return False
-            try:
-                subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout)
-                return True
-            except Exception as exc:  # noqa: BLE001
-                log(task, db, "      [警告] 真实执行失败(" + str(exc) + "),回退仿真模式继续")
-                use_sim = True
-                return False
+        if use_real:
+            from ..services.vmprovision import provision_vm
+            ok, info = provision_vm(host, vm, lambda s: log(task, db, s))
+            if not ok:
+                vm.status = "error"
+                db.commit()
+                raise RuntimeError("虚拟机创建失败: " + info)
+            vm.ip = info or vm.ip
+            vm.status = "running"
+            db.commit()
+            log(task, db, "")
+            log(task, db, "✅ 虚拟机 " + vm.name + " 创建成功(Libvirt),运行中")
+            log(task, db, "   IP: " + (info or "(待 DHCP)") + "  |  virsh list --all")
+            task.progress = 100
+            db.commit()
+            return
 
+        # ---------- 仿真流程 ----------
         log(task, db, "[1/6] 准备存储卷 " + vm.name + ".qcow2 (" + str(vm.disk_gb) + "G, qcow2) ...")
-        vol_path = IMAGES_DIR + "/" + vm.name + ".qcow2"
-        if not real(["qemu-img", "create", "-f", "qcow2", vol_path, str(vm.disk_gb) + "G"]):
-            time.sleep(0.6)
+        time.sleep(0.6)
         log(task, db, "      存储卷就绪 ✓")
         task.progress = 25
         db.commit()
 
         log(task, db, "[2/6] 下载 / 校验云镜像 " + vm.image + " ...")
-        if use_sim:
-            time.sleep(0.6)
+        time.sleep(0.6)
         log(task, db, "      镜像校验通过 ✓")
         task.progress = 40
         db.commit()
 
         log(task, db, "[3/6] 定义虚拟机 domain(" + vm.name + ") ...")
-        if not real([
-            "virt-install", "--name", vm.name, "--vcpus", str(vm.cpu),
-            "--memory", str(vm.memory_gb * 1024),
-            "--disk", "path=" + vol_path + ",format=qcow2,size=" + str(vm.disk_gb),
-            "--os-variant", "ubuntu22.04", "--network", "bridge=br0",
-            "--import", "--noautoconsole", "--graphics", "none",
-        ]):
-            time.sleep(0.5)
+        time.sleep(0.5)
         log(task, db, "      domain 定义完成 ✓")
         task.progress = 55
         db.commit()
 
         ip = vm.ip or self._next_ip(vm)
         log(task, db, "[4/6] 配置网络,分配 IP ...")
-        if use_sim:
-            time.sleep(0.5)
+        time.sleep(0.5)
         vm.ip = ip
         db.commit()
         log(task, db, "      IP 地址: " + ip + " ✓")
@@ -111,51 +121,48 @@ class LibvirtProvider(VMProvider):
         db.commit()
 
         log(task, db, "[5/6] 注入 cloud-init 配置(SSH 密钥 / 主机名) ...")
-        if use_sim:
-            time.sleep(0.6)
+        time.sleep(0.6)
         log(task, db, "      cloud-init 配置注入完成 ✓")
         task.progress = 85
         db.commit()
 
         log(task, db, "[6/6] 启动虚拟机 " + vm.name + " ...")
-        if not use_sim:
-            real(["virsh", "start", vm.name])
-        else:
-            time.sleep(0.8)
+        time.sleep(0.8)
         vm.status = "running"
         db.commit()
         log(task, db, "")
-        log(task, db, "✅ 虚拟机 " + vm.name + " 创建成功(Libvirt),运行中")
+        log(task, db, "✅ 虚拟机 " + vm.name + " 创建成功(Libvirt 仿真),运行中")
         log(task, db, "   IP: " + ip + "  |  virsh list --all")
         task.progress = 100
         db.commit()
 
     # ---------- 电源操作 ----------
     def action(self, vm: VirtualMachine, action: str) -> None:
-        mode = self._detect_mode()
-        if mode == "real":
-            map_action = {"start": "start", "stop": "shutdown", "reboot": "reboot"}
-            try:
-                subprocess.run(["virsh", map_action[action], vm.name],
-                               capture_output=True, text=True, timeout=60, check=True)
-            except Exception:  # noqa: BLE001
-                pass
+        host = self._load_host(vm.host_id)
+        if host is not None and not host.is_demo:
+            from ..services.vmprovision import virsh_action
+            if virsh_action(host, vm.name, action):
+                time.sleep(0.4)
+                if action == "start":
+                    vm.status = "running"
+                elif action == "stop":
+                    vm.status = "stopped"
+                else:
+                    vm.status = "running"
+                return
         time.sleep(0.4)
         if action == "start":
             vm.status = "running"
         elif action == "stop":
             vm.status = "stopped"
-        elif action == "reboot":
+        else:
             vm.status = "running"
 
     # ---------- 删除 ----------
     def delete(self, vm: VirtualMachine) -> None:
-        mode = self._detect_mode()
-        if mode == "real":
-            try:
-                subprocess.run(["virsh", "destroy", vm.name],
-                               capture_output=True, text=True, timeout=60)
-                subprocess.run(["virsh", "undefine", vm.name, "--remove-all-storage"],
-                               capture_output=True, text=True, timeout=60)
-            except Exception:  # noqa: BLE001
-                pass
+        host = self._load_host(vm.host_id)
+        if host is not None and not host.is_demo:
+            from ..services.vmprovision import virsh_delete
+            virsh_delete(host, vm.name)
+            return
+        time.sleep(0.3)

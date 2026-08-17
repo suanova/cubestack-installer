@@ -19,15 +19,22 @@ import time
 
 from ...models import Host
 
-# 创建/管理 libvirt 虚拟机所需的可执行文件(对应 Ubuntu 依赖包)
-REQUIRED_BINS = ["virt-install", "virsh", "qemu-img", "qemu-kvm", "cloud-localds"]
-REQUIRED_PACKAGES = {
-    "virt-install": "virtinst",
-    "virsh": "libvirt-clients",
-    "qemu-img": "qemu-utils",
-    "qemu-kvm": "qemu-kvm",
-    "cloud-localds": "cloud-image-utils",
-}
+# 创建/管理 libvirt 虚拟机所需的依赖:(显示名, 候选可执行文件, 对应 Ubuntu 包名)
+# 说明:Ubuntu 22.04 的 KVM 二进制为 qemu-system-x86_64 / kvm(软链),包名为 qemu-system-x86
+REQUIRED_PKGS: list[tuple[str, list[str], str]] = [
+    ("virt-install", ["virt-install"], "virtinst"),
+    ("virsh", ["virsh"], "libvirt-clients"),
+    ("qemu-img", ["qemu-img"], "qemu-utils"),
+    ("qemu-kvm", ["qemu-system-x86_64", "kvm"], "qemu-system-x86"),
+    ("cloud-localds", ["cloud-localds"], "cloud-image-utils"),
+    ("libvirtd", ["libvirtd"], "libvirt-daemon-system"),
+    # MinIO 客户端(mc):非 apt 包,由宿主机初始化脚本单独下载安装;用于连接 MinIO 拉取模板镜像
+    ("mc", ["mc"], "minio-client"),
+]
+
+# 兼容旧引用(仅用于展示/兼容)
+REQUIRED_BINS: list[str] = [label for label, _, _ in REQUIRED_PKGS]
+REQUIRED_PACKAGES: dict[str, str] = {label: pkg for label, _, pkg in REQUIRED_PKGS}
 
 
 def _sim_report() -> dict:
@@ -103,15 +110,21 @@ def check_host_env(host: Host) -> tuple[str, dict]:
         os_ok = kv.get("ID") == "ubuntu" and str(kv.get("VERSION_ID", "")).startswith("22.04")
     report["os"] = {"detected": detected, "ok": os_ok}
 
-    # 3. libvirt 依赖包
+    # 3. libvirt 依赖包(任意候选可执行文件存在,或对应包已安装,即视为就绪)
     installed: list[str] = []
-    for bin_name in REQUIRED_BINS:
-        out = _ssh(host, "command -v " + bin_name + " || dpkg -l " + REQUIRED_PACKAGES[bin_name] + " 2>/dev/null | grep -q ^ii && echo ok")
-        if out is not None and ("ok" in out or "/" in out):
-            installed.append(bin_name)
-    missing = [b for b in REQUIRED_BINS if b not in installed]
+    for label, candidates, pkg in REQUIRED_PKGS:
+        found = False
+        for c in candidates:
+            if _ssh(host, "command -v " + c + " 2>/dev/null"):
+                found = True
+                break
+        if not found and _ssh(host, "dpkg -l " + pkg + " 2>/dev/null | grep -q '^ii' && echo ok") == "ok":
+            found = True
+        if found:
+            installed.append(label)
+    missing = [label for label, _, _ in REQUIRED_PKGS if label not in installed]
     report["packages"] = {
-        "required": REQUIRED_BINS,
+        "required": [label for label, _, _ in REQUIRED_PKGS],
         "installed": installed,
         "missing": missing,
         "ok": not missing,
