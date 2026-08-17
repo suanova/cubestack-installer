@@ -31,16 +31,21 @@ sudo ./scripts/deploy-cluster.sh --skip-net --with-k8s
 
 ```
 scripts/
-├── lib-common.sh          # 公共库:统一配置加载 + IP/MAC 工具(被所有脚本 source)
-├── deploy-cluster.sh      # ★ 一键编排(主入口)
-├── gen-ssh-key.sh         # 生成集群 SSH 密钥对(幂等)
-├── setup-passwordless.sh  # 注入公钥实现目标主机免密登录
-├── gen-inventory.sh       # 从配置生成 kubespray 兼容 inventory(hosts.yml + inventory.ini)
-├── create-libvirt-vm.sh   # 创建单台 Ubuntu22.04 虚拟机(静态IP,配置驱动)
-├── setup-vm-network.sh    # 方案A:创建 privbr0 网桥网络(建桥/回程路由/SNAT/自启)
-├── setup-libvirt-nat.sh   # 方案B:创建 libvirt NAT 网络(含 --delete 回滚)
-├── verify-vm-network.sh   # 验证宿主网络配置与连通性
-├── teardown-vm-network.sh # 回滚方案A桥接网络(SNAT/路由/自启,可删网桥)
+├── lib-common.sh              # 公共库:统一配置加载 + IP/MAC 工具(被所有脚本 source)
+│                              #   register_node_to_conf(): awk 幂等注册节点到 cluster.conf
+├── deploy-cluster.sh          # ★ 一键编排(主入口)
+├── gen-ssh-key.sh             # 生成集群 SSH 密钥对(幂等)
+├── setup-passwordless.sh      # 注入公钥实现目标主机免密登录
+├── gen-inventory.sh           # 从配置生成 kubespray inventory + 同步 kubespray 配置
+├── sync-kubespray-config.sh   # ★ 从 cluster.conf 动态生成 kubespray group_vars 中的 IP
+├── register-vm.sh             # 将已存在 VM 注册到 cluster.conf NODES
+├── create-libvirt-vm.sh       # 创建单台 Ubuntu22.04 虚拟机(静态IP,配置驱动,自动注册+装包)
+├── create-vm-template.sh      # 制作黄金基础镜像(预埋用户/SSH/时区/kubespray所需包)
+├── install-worker-packages.sh # 离线 .deb 包安装到 bare-metal worker 节点
+├── setup-vm-network.sh        # 方案A:创建 privbr0 网桥网络(建桥/回程路由/SNAT/自启)
+├── setup-libvirt-nat.sh       # 方案B:创建 libvirt NAT 网络(含 --delete 回滚)
+├── verify-vm-network.sh       # 验证宿主网络配置与连通性
+├── teardown-vm-network.sh     # 回滚方案A桥接网络(SNAT/路由/自启,可删网桥)
 ├── dev.sh / start-backend.sh / start-frontend.sh   # 项目原有开发/启动脚本
 ```
 
@@ -125,14 +130,58 @@ sudo ./scripts/deploy-cluster.sh --list         # 仅打印集群规划(只读)
 ### 5.4 gen-inventory.sh —— kubespray inventory
 
 ```bash
-./scripts/gen-inventory.sh
+./scripts/gen-inventory.sh                    # 生成全部节点
+INV_ROLES=master ./scripts/gen-inventory.sh   # 仅 master(先部署控制平面)
+INV_EXCLUDE=mxgpu-1-232 ./scripts/gen-inventory.sh  # 排除指定节点(逗号分隔)
 ```
 
 生成:
 - `deployments/kubespray/inventory/cubestack-cluster/hosts.yml` —— **kubespray 实际使用**(注意 kubespray 的 ansible.cfg 忽略 `.ini`)
 - 同目录 `inventory.ini` —— 兼容 installer 后端风格(参考/后续 UI 用)
+- 生成后**自动调用 `sync-kubespray-config.sh`**,从 cluster.conf 动态填充 group_vars 中的 IP(见 5.8)
 
-master 写入 `ansible_ssh_private_key_file`(密钥免密);worker 写入 `ansible_password`(密码认证,未配置则留注释)。
+master 写入 `ansible_ssh_private_key_file`(密钥免密);worker 若密钥存在同样优先用密钥,否则用 `ansible_password`(未配置则留注释)。
+
+### 5.8 sync-kubespray-config.sh —— 动态同步 kubespray IP 配置
+
+**避免在 kubespray group_vars 中硬编码环境 IP**,从 `config/cluster.conf` 动态生成:
+
+```bash
+./scripts/sync-kubespray-config.sh
+```
+
+自动同步项:
+
+| 配置文件 | 字段 | 数据源 |
+|---|---|---|
+| `group_vars/all/all.yml` | `loadbalancer_apiserver.address` | `HOST_PHYS_IP`(宿主机物理 IP) |
+| `group_vars/all/all.yml` | `supplementary_addresses_in_ssl_keys` | `HOST_PHYS_IP` + 所有 master IP + `lb.k8s.local` |
+| `group_vars/k8s_cluster/k8s-net-calico.yml` | `calico_ip_auto_method` | 第一个 worker IP(`can-reach=`) |
+| `group_vars/k8s_cluster/k8s-cluster.yml` | `kube_apiserver_extra_args.advertise-address` | `HOST_PHYS_IP` |
+
+> 说明:`kube_service_addresses` / `kube_pods_subnet` 为集群内部 CIDR(10.233.x),属 kubespray 默认值,无需从环境同步。
+
+### 5.9 register-vm.sh —— 注册已存在 VM
+
+VM 已通过其他方式创建时,用此脚本将其注册到 `cluster.conf` 的 NODES:
+
+```bash
+./scripts/register-vm.sh <role> <hostname> <ip> <mac> <mem> <cpu> <disk> [user] [password]
+./scripts/register-vm.sh worker cubestack-k8s-worker01 10.244.1.21 52:54:00:aa:bb:21 16 8 50
+```
+
+幂等(已存在则跳过),内部复用 `lib-common.sh` 的 `register_node_to_conf()`(awk 实现)。
+
+### 5.10 install-worker-packages.sh —— 离线包安装到裸机 worker
+
+bare-metal worker(Ubuntu)无法联网时,用 repository 中的离线 `.deb` 包安装 kubespray 所需系统包:
+
+```bash
+./scripts/install-worker-packages.sh <IP> [user]
+./scripts/install-worker-packages.sh 10.66.1.232 ubuntu
+```
+
+包来源: `deployments/kubespray/repository/cubestack-cluster/packages/`(含 iputils-ping / rsync / iptables / curl / ca-certificates 及依赖)。
 
 ### 5.5 create-libvirt-vm.sh —— 单台虚拟机
 
@@ -179,3 +228,108 @@ CLUSTER_CONF=/path/to/cluster.conf sudo ./scripts/deploy-cluster.sh --list
 - **worker 连通性检查失败** — 需在 `config/cluster.conf` 填写 `WORKER_SSH_PASSWORD`(或节点行第9字段),脚本才用密码测试裸金属。
 - **创建 VM 报"网桥不存在"** — 先 `sudo ./scripts/setup-vm-network.sh`,或 `AUTO_SETUP_NET=1` 自动建。
 - **kubespray 部署** — `--with-k8s` 需宿主机已装 `ansible-playbook` 且 `KUBESPRAY_DIR` 指向完整 kubespray 仓库(含 `cluster.yml` 与 `group_vars`)。
+- **离线部署 kube-proxy 报 ImagePullBackOff** — 需先预加载离线镜像到节点 containerd(见第 8 节,`cubestack-offline.sh scale` 已内置此逻辑)。
+
+---
+
+## 8. 从 0 到 1:离线部署 kubespray 集群
+
+完整流程(全部通过脚本自动完成,无人工干预):
+
+### 8.1 前置条件
+
+| 依赖 | 说明 |
+|---|---|
+| 宿主机 | Ubuntu 22.04,已装 `libvirt / virt-install / qemu / virt-customize` |
+| 基础镜像 | `deployments/virtual-machine/cloud-images/ubuntu2204-k8s-base.qcow2`(由 `create-vm-template.sh` 制作,预埋 ubuntu/root 密码 `k8s@2026`、SSH、时区及 kubespray 所需包) |
+| 离线资源 | `deployments/kubespray/repository/cubestack-cluster/`(镜像 `images/` + 二进制 + `packages/` 系统包) |
+| kubespray | `deployments/kubespray/kubespray/`(含 `cluster.yml`,Python 依赖可离线/在线安装) |
+
+### 8.2 配置(cluster.conf 为唯一数据源)
+
+```bash
+cp config/cluster.conf.example config/cluster.conf
+# 修改: HOST_PHYS_IP / BASE_IMG / VM_DISK_DIR / 网段 / NODES(每行一个节点)
+vim config/cluster.conf
+```
+
+节点格式:`role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password`
+
+> **所有 IP 不硬编码**:kubespray group_vars 中的宿主机 IP、master IP、Calico can-reach 等均由 `sync-kubespray-config.sh` 从 cluster.conf 动态生成。
+
+### 8.3 一键部署(推荐)
+
+```bash
+# 全流程: 宿主网络 → SSH密钥 → master/worker VM 创建+注册+装包 → 免密 → inventory → kubespray 离线部署
+sudo ./scripts/deploy-cluster.sh --with-k8s
+```
+
+该命令自动完成:
+1. `setup-vm-network.sh` 初始化 privbr0 网桥 + SNAT
+2. `gen-ssh-key.sh` 生成 SSH 密钥
+3. 按 NODES 创建 master/worker 虚拟机(已存在则跳过创建、直接 `virsh start`;`AUTO_REGISTER_CLUSTER=1` 自动注册到 cluster.conf)
+4. `setup-passwordless.sh` 注入公钥
+5. 对 worker 执行 `install-worker-packages.sh` 安装离线包
+6. `gen-inventory.sh` + `sync-kubespray-config.sh` 生成 inventory 与配置
+7. `cubestack-offline.sh install` 执行 kubespray 离线部署
+
+### 8.4 分步部署(可精细控制)
+
+```bash
+# ① 初始化宿主网络(bridge 方案)
+sudo ./scripts/setup-vm-network.sh
+
+# ② 生成 SSH 密钥
+./scripts/gen-ssh-key.sh
+
+# ③ 创建 master VM(3 台)+ 注册到 cluster.conf + 免密
+sudo AUTO_REGISTER_CLUSTER=1 ./scripts/create-libvirt-vm.sh cubestack-k8s-master01 16 8 50 52:54:00:3b:e9:d2 10.244.1.11
+SSH_DEFAULT_PASSWORD='k8s@2026' ./scripts/setup-passwordless.sh 10.244.1.11 ubuntu
+# ... 重复 master02 / master03 ...
+
+# ④ 生成 inventory + 同步 kubespray 配置
+INV_ROLES=master ./scripts/gen-inventory.sh        # 先只生成 master
+
+# ⑤ 离线部署 kubespray(先下载离线资源,再安装)
+cd deployments/kubespray
+CUBESTACK_INVENTORY_DIR=$PWD/inventory/cubestack-cluster \
+CUBESTACK_LOCAL_REPO_DIR=$PWD/repository/cubestack-cluster \
+CUBESTACK_KUBESPRAY_DIR=$PWD/kubespray \
+  bash cubestack-offline.sh install
+```
+
+### 8.5 扩容(新增 worker 节点)
+
+```bash
+# ① 创建 worker VM + 注册(或编辑 cluster.conf NODES 追加 worker 行)
+sudo AUTO_REGISTER_CLUSTER=1 ./scripts/create-libvirt-vm.sh cubestack-k8s-worker01 16 8 50 52:54:00:aa:bb:21 10.244.1.21
+SSH_DEFAULT_PASSWORD='k8s@2026' ./scripts/setup-passwordless.sh 10.244.1.21 ubuntu
+
+# ② 生成含新 worker 的 inventory(排除跨网段节点可加 INV_EXCLUDE)
+./scripts/gen-inventory.sh
+
+# ③ 扩容: 预加载镜像到 worker → 执行 scale.yml
+cd deployments/kubespray
+CUBESTACK_INVENTORY_DIR=$PWD/inventory/cubestack-cluster \
+CUBESTACK_LOCAL_REPO_DIR=$PWD/repository/cubestack-cluster \
+CUBESTACK_KUBESPRAY_DIR=$PWD/kubespray \
+  bash cubestack-offline.sh scale --limit kube_node
+```
+
+> `cubestack-offline.sh scale` 已内置:先复制 `repository/*/images/` 到 worker 并 `ctr image import` 预加载,再执行 `scale.yml`,避免 kube-proxy 等镜像 ImagePullBackOff。
+
+### 8.6 bare-metal worker(跨网段)
+
+```bash
+# ① 先通过密码注入 SSH 公钥(免密)
+export SSHPASS='<worker密码>'
+sshpass -e ssh ubuntu@<workerIP> "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" < ~/.ssh/cubestack_k8s.pub
+
+# ② 安装离线系统包
+./scripts/install-worker-packages.sh <workerIP> ubuntu
+
+# ③ 加入 inventory 后扩容
+#    注意: worker 通过宿主机 IP:6443(DNAT)访问 API Server,需确保 /etc/hosts 与证书 SAN 配置正确(见 5.8)
+./scripts/gen-inventory.sh
+bash deployments/kubespray/cubestack-offline.sh scale --limit kube_node
+```

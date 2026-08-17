@@ -7,7 +7,7 @@
 
 # ---------------- 宿主机(Hypervisor) ----------------
 HOST_PHYS_IP="${HOST_PHYS_IP:-10.66.3.37}"
-BASE_IMG="${BASE_IMG:-/k8s/cloud-images/ubuntu2204-k8s-base.qcow2}"
+BASE_IMG="${BASE_IMG:-${REPO_ROOT}/deployments/virtual-machine/cloud-images/ubuntu2204-k8s-base.qcow2}"
 VM_DISK_DIR="${VM_DISK_DIR:-/k8s/vm-disks}"
 
 # ---------------- 网络规划 ----------------
@@ -44,4 +44,6 @@ NODES=(
 # ---------------- kubespray / 部署 ----------------
 KUBESPRAY_INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}"
 KUBESPRAY_DIR="${KUBESPRAY_DIR:-${REPO_ROOT}/deployments/kubespray/kubespray}"
+# 离线资源缓存目录(二进制/镜像)
+LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${REPO_ROOT}/deployments/kubespray/repository/cubestack-cluster}"
 UPDATE_ETC_HOSTS="${UPDATE_ETC_HOSTS:-0}"

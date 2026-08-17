@@ -173,3 +173,6 @@ done
 echo "---------------------------------------------"
 echo "部署命令参考:"
 echo "  ansible-playbook -i ${HOSTS_YML} ${KUBESPRAY_DIR:-<kubespray>}/cluster.yml"
+
+# ---------------- 同步 kubespray 配置(从 cluster.conf 动态生成 IP) ----------------
+bash "${SCRIPT_DIR}/sync-kubespray-config.sh"
