@@ -19,7 +19,7 @@ const dict = {
     'status.waiting': '等待中', 'status.unknown': '未知', 'status.online': '在线', 'status.offline': '离线',
     // 导航
     'nav.tagline': '基础设施部署平台', 'nav.vmTree': '虚拟机安装', 'nav.k8sTree': 'K8s集群安装',
-    'nav.hosts': '宿主机管理', 'nav.vms': '虚拟机管理', 'nav.vmTasks': '虚拟机安装任务日志', 'nav.clusters': '集群管理',
+    'nav.hosts': '宿主机管理', 'nav.vms': '虚拟机管理', 'nav.vmTasks': '安装日志', 'nav.clusters': '集群管理',
     'nav.tasks': '部署任务', 'nav.apiDocs': '接口参考', 'nav.users': '用户管理', 'nav.logout': '退出',
     'nav.subBrand': 'VM & K8s 部署平台',
     // 认证
@@ -157,8 +157,8 @@ const dict = {
     'tasks.type': '类型', 'tasks.typeVm': '虚拟机创建', 'tasks.typeCluster': '集群安装',
     'tasks.target': '目标', 'tasks.progress': '进度', 'tasks.createdAt': '创建 / 完成',
     'tasks.viewLog': '查看日志', 'tasks.viewing': '查看中', 'tasks.collapse': '收起',
-    // 虚拟机安装任务日志
-    'vmtasks.title': '虚拟机安装任务日志', 'vmtasks.desc': '虚拟机创建/安装任务的执行日志,点击任务查看实时日志',
+    // 虚拟机安装日志
+    'vmtasks.title': '安装日志', 'vmtasks.desc': '虚拟机安装任务的执行日志,点击任务查看实时日志',
     'tasks.taskLabel': '任务 #{id} · {name} ·', 'tasks.empty': '暂无任务,创建虚拟机或安装集群后自动生成',
     'tasks.noLog': '(暂无日志)',
     // 接口参考
