@@ -147,7 +147,7 @@ podman logs -f cubestack-installer
 添加宿主机时,平台提供可复制的初始化脚本,用于在管理机上完成免密配置与依赖安装,执行顺序如下:
 
 1. 通过 ssh-copy-id 将管理机公钥复制至宿主机,实现免密登录
-2. 通过 apt-get 安装 libvirt 相关依赖(virtinst / libvirt-clients / qemu-utils / qemu-kvm / cloud-image-utils)
+2. 通过 apt-get 安装 libvirt 相关依赖(virtinst / libvirt-clients / qemu-utils / qemu-kvm / cloud-image-utils / libvirt-daemon-system)
 3. 通过 systemctl 启动 libvirtd 服务并设置开机自启
 4. 校验 /dev/kvm 是否可用(硬件加速)
 

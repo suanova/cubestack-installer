@@ -1,3 +1,6 @@
+import json
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -7,6 +10,50 @@ from ...models import Host, User
 from ...schemas import HostIn, HostOut, MessageOut
 
 router = APIRouter(prefix="/api/hosts", tags=["hosts"])
+
+
+class _ProbeHost:
+    """瞬态探测对象:仅承载连接信息,不落库。"""
+
+    __slots__ = ("ip", "ssh_user", "ssh_port")
+
+    def __init__(self, ip: str, ssh_user: str, ssh_port: int) -> None:
+        self.ip = ip
+        self.ssh_user = ssh_user
+        self.ssh_port = ssh_port
+
+
+@router.post("/precheck", response_model=HostOut)
+def precheck_host(
+    payload: HostIn,
+    _: User = Depends(get_current_user),
+) -> HostOut:
+    """添加向导预检:按输入的连接信息执行环境检测(免密连通性 + Ubuntu/libvirt),不落库。
+
+    用于「添加宿主机」向导的『验证免密』与『环境预检』步骤,
+    避免在未完成初始化前就创建宿主机记录。
+    """
+    probe = _ProbeHost(payload.ip, payload.ssh_user, payload.ssh_port)
+    status, report = check_host_env(probe)
+    now = datetime.now(timezone.utc)
+    return HostOut(
+        id=0,
+        name=payload.name,
+        ip=payload.ip,
+        ssh_user=payload.ssh_user,
+        ssh_port=payload.ssh_port,
+        status=status,
+        cpu_cores=payload.cpu_cores,
+        memory_gb=payload.memory_gb,
+        disk_gb=payload.disk_gb,
+        os_name=report.get("os", {}).get("detected"),
+        os_ok=bool(report.get("os", {}).get("ok")),
+        libvirt_ready=bool(report.get("packages", {}).get("ok")),
+        check_report=json.dumps(report, ensure_ascii=False),
+        last_checked_at=now,
+        is_demo=False,
+        created_at=now,
+    )
 
 
 @router.get("", response_model=list[HostOut])
