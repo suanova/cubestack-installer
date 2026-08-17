@@ -7,7 +7,7 @@ download_localhost: true
 download_force_cache: true
 download_always_pull: false
 
-## 缓存目录(指向本仓库离线包)
+## 缓存目录
 download_cache_dir: "/home/supperadm/cubestack-installer/deployments/kubespray/repository/cubestack-cluster"
 local_release_dir: "/home/supperadm/cubestack-installer/deployments/kubespray/repository/cubestack-cluster"
 
@@ -19,3 +19,6 @@ container_manager_on_localhost: "containerd"
 ansible_user: "ubuntu"
 ansible_become: true
 ansible_become_method: sudo
+
+## 离线环境 — 跳过不必要的检查
+ping_access_ip: false

@@ -5,7 +5,7 @@ BASE_DIR="/opt/cubestack-installer"
 KUBESPRAY_DIR="${BASE_DIR}/kubespray"
 LOCAL_REPO_BASE="${BASE_DIR}/repository"
 INVENTORY_BASE="${BASE_DIR}/inventory"
-REMOTE_USER="ubuntu"
+REMOTE_USER="${CUBESTACK_REMOTE_USER:-ubuntu}"
 CONTAINER_RUNTIME="containerd"
 KUBESPRAY_VERSION="v2.28.0"
 KUBESPRAY_REPO="https://github.com/kubernetes-sigs/kubespray.git"
@@ -441,16 +441,34 @@ cmd_install() {
         echo "ansible_user: \"${REMOTE_USER}\""
         echo "ansible_become: true"
         echo "ansible_become_method: sudo"
+        echo ""
+        echo "## 离线环境 — 跳过不必要的检查"
+        echo "ping_access_ip: false"
     } > "${OFFLINE_VARS}"
     log "执行 Kubespray 离线安装..."
     if [ -n "$LIMIT_GROUP" ]; then
         log "  ▶ 限定目标组: ${LIMIT_GROUP}"
     fi
     cd "${KUBESPRAY_DIR}"
+
+    # 当使用 --limit 时,预先收集全节点 facts (排除的节点也需要 facts 缓存)
+    if [ -n "$LIMIT_GROUP" ]; then
+        log "预收集全节点 facts (为 --limit 做准备)..."
+        ansible-playbook playbooks/facts.yml \
+            -i "${INVENTORY_DIR}/hosts.yml" \
+            --become --become-user=root \
+            -e @${OFFLINE_VARS} \
+            --skip-tags system-packages,kube-proxy \
+            -v 2>&1 | tee "/tmp/${CLUSTER_NAME}-facts.log" || true
+        log "✅ Facts 收集完成"
+    fi
+
     ansible-playbook cluster.yml \
         -i "${INVENTORY_DIR}/hosts.yml" \
         --become --become-user=root \
         ${LIMIT_FLAG} \
+        -e @${OFFLINE_VARS} \
+        --skip-tags system-packages,kube-proxy \
         -vv 2>&1 | tee "/tmp/${CLUSTER_NAME}-install.log"
     log "🎉 集群 [${CLUSTER_NAME}] 安装完成! 日志: /tmp/${CLUSTER_NAME}-install.log"
 }
@@ -500,29 +518,21 @@ cmd_scale() {
         ansible-playbook playbooks/facts.yml \
             -i "${INVENTORY_DIR}/hosts.yml" \
             --become --become-user=root \
+            -e @${OFFLINE_VARS} \
+            --skip-tags system-packages,kube-proxy \
             -v 2>&1 | tee "/tmp/${CLUSTER_NAME}-facts.log"
         log "✅ Facts 收集完成"
     fi
 
-    log "执行 Kubespray 扩容 (scale.yml)..."
-    cd "${KUBESPRAY_DIR}"
-    ansible-playbook scale.yml \
-        -i "${INVENTORY_DIR}/hosts.yml" \
-        --become --become-user=root \
-        ${LIMIT_FLAG} \
-        -vv 2>&1 | tee "/tmp/${CLUSTER_NAME}-scale.log"
-
-    # ── 扩容后置处理 ──
-    log "扩容后置处理..."
-
-    # 1. 修复镜像同步：Kubespray download 角色使用 ansible.posix.synchronize (rsync)
-    #    在离线环境下可能不可靠，这里用 copy + nerdctl load 兜底
-    log "  [1/2] 同步离线镜像到新节点..."
+    # ── 预加载离线镜像到目标节点 ──
+    # 必须先于 scale.yml 加载镜像: kubelet 启动 kube-proxy 时会尝试拉镜像,
+    # 离线环境下必须先 load 到 containerd, 否则 ImagePullBackOff
+    log "预加载离线镜像到 kube_node 节点..."
     ansible kube_node -i "${INVENTORY_DIR}/hosts.yml" \
         --become --become-user=root \
         -m copy \
         -a "src=${LOCAL_REPO_DIR}/images/ dest=/tmp/cubestack-images/" \
-        >/dev/null 2>&1 || true
+        >/dev/null 2>&1 || warn "镜像复制失败,继续..."
 
     # 使用 shell 模块遍历加载镜像（幂等：已加载的镜像会快速跳过）
     ansible kube_node -i "${INVENTORY_DIR}/hosts.yml" \
@@ -538,11 +548,27 @@ cmd_scale() {
           done
           rm -rf /tmp/cubestack-images
         " \
-        >/dev/null 2>&1 || true
-    log "  ✅ 离线镜像同步完成"
+        >/dev/null 2>&1 || warn "镜像加载部分失败,继续..."
+    log "✅ 离线镜像预加载完成"
 
-    # 2. 修复 Calico ClusterRole RBAC：Calico v3.29+ 需要 ipamconfigs 等 CRD 权限
-    log "  [2/2] 修复 Calico ClusterRole RBAC..."
+    log "执行 Kubespray 扩容 (scale.yml)..."
+    cd "${KUBESPRAY_DIR}"
+    ansible-playbook scale.yml \
+        -i "${INVENTORY_DIR}/hosts.yml" \
+        --become --become-user=root \
+        ${LIMIT_FLAG} \
+        -e @${OFFLINE_VARS} \
+        --skip-tags system-packages,kube-proxy \
+        -vv 2>&1 | tee "/tmp/${CLUSTER_NAME}-scale.log" || {
+            err "Kubespray 扩容失败,日志: /tmp/${CLUSTER_NAME}-scale.log"
+            return 1
+        }
+
+    # ── 扩容后置处理 ──
+    log "扩容后置处理..."
+
+    # 1. 修复 Calico ClusterRole RBAC：Calico v3.29+ 需要 ipamconfigs 等 CRD 权限
+    log "  [1/2] 修复 Calico ClusterRole RBAC..."
     MISSING_CALICO_RESOURCES="ipamconfigs kubecontrollersconfigurations"
     for res in $MISSING_CALICO_RESOURCES; do
         ansible kube_control_plane[0] -i "${INVENTORY_DIR}/hosts.yml" \
@@ -563,7 +589,8 @@ cmd_scale() {
     done
     log "  ✅ Calico RBAC 修复完成"
 
-    # 若 Calico pods CrashLoopBackOff，删除让其用新权限重建
+    # 2. 若 Calico pods CrashLoopBackOff，删除让其用新权限重建
+    log "  [2/2] 重建异常的 Calico pods..."
     ansible kube_control_plane[0] -i "${INVENTORY_DIR}/hosts.yml" \
         --become --become-user=root \
         -m shell \
@@ -651,6 +678,12 @@ CLUSTER_NAME=$(resolve_cluster_name "${COMMAND}" "${CLUSTER_ARG}")
 OFFLINE_CONTRIB="${KUBESPRAY_DIR}/contrib/offline"
 INVENTORY_DIR="${INVENTORY_BASE}/${CLUSTER_NAME}"
 LOCAL_REPO_DIR="${LOCAL_REPO_BASE}/${CLUSTER_NAME}"
+
+# ── 环境变量覆盖(让调用方如 deploy-cluster.sh 可传入项目路径) ──
+KUBESPRAY_DIR="${CUBESTACK_KUBESPRAY_DIR:-${KUBESPRAY_DIR}}"
+INVENTORY_DIR="${CUBESTACK_INVENTORY_DIR:-${INVENTORY_DIR}}"
+LOCAL_REPO_DIR="${CUBESTACK_LOCAL_REPO_DIR:-${LOCAL_REPO_DIR}}"
+OFFLINE_CONTRIB="${KUBESPRAY_DIR}/contrib/offline"
 
 # 构建 ansible-playbook 通用 limit 参数
 LIMIT_FLAG=""

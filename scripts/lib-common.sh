@@ -61,3 +61,35 @@ node_password() { # <role> <password>
 
 # 获取根目录(供其它脚本引用路径)
 repo_root() { echo "${REPO_ROOT}"; }
+
+# ---------------- 节点注册到 cluster.conf ----------------
+# 将节点信息写入 config/cluster.conf 的 NODES 数组(幂等)
+# 用法: register_node_to_conf <role> <hostname> <ip> <mac> <mem> <cpu> <disk> <user> <password>
+register_node_to_conf() {
+    local role="$1" hostname="$2" ip="$3" mac="$4" mem="$5" cpu="$6" disk="$7" user="$8" pw="$9"
+    local conf_file="${CLUSTER_CONF:-${REPO_ROOT}/config/cluster.conf}"
+
+    [ -f "${conf_file}" ] || { warn "cluster.conf 不存在: ${conf_file}, 跳过注册 ${hostname}"; return 0; }
+    [ -w "${conf_file}" ] || { warn "cluster.conf 不可写: ${conf_file}, 跳过注册 ${hostname}"; return 0; }
+
+    # 已存在则跳过(幂等)
+    if grep -qF "${hostname}," "${conf_file}" 2>/dev/null; then
+        echo -e "\033[33m⚠ ${hostname} 已在 ${conf_file} 中注册,跳过\033[0m"
+        return 0
+    fi
+
+    local new_entry="\"${role},${hostname},${ip},${mac},${mem},${cpu},${disk},${user},${pw}\""
+    echo -e "\033[36m→ 注册节点到 ${conf_file}: ${new_entry}\033[0m"
+
+    # 在 NODES=( 区块的结尾 ) 前插入新条目(awk 实现, 可靠)
+    awk -v entry="  ${new_entry}" '
+        /^NODES=\(/ { in_nodes=1 }
+        in_nodes && /^\)/ {
+            print entry
+            in_nodes=0
+        }
+        { print }
+    ' "${conf_file}" > "${conf_file}.tmp" && mv "${conf_file}.tmp" "${conf_file}"
+
+    echo -e "\033[32m✅ ${hostname} 已注册到 cluster.conf\033[0m"
+}

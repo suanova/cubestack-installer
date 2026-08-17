@@ -20,11 +20,14 @@ bin_dir: /usr/local/bin
 loadbalancer_apiserver_localhost: false
 apiserver_loadbalancer_domain_name: "lb.k8s.local"
 loadbalancer_apiserver:
-  address: 10.66.3.37    # ← 你的 Keepalived VIP
+  address: 10.66.3.37    # ← 宿主机物理 IP(worker 通过此地址访问)
   port: 6443
 
 supplementary_addresses_in_ssl_keys:
-  - 10.66.3.37
+  - 10.66.3.37           # 宿主机物理 IP(worker 通过此地址访问 API Server)
+  - 10.244.1.11
+  - 10.244.1.12
+  - 10.244.1.13
   - lb.k8s.local
 
 # 如果 Kubespray 版本 ≥ 2.24 且 K8s ≥ 1.29，还需要启用 EndpointSlice 镜像
