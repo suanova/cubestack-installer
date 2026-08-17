@@ -33,6 +33,9 @@ config/cluster.conf
 deployments/kubespray/inventory/cubestack-cluster/hosts.yml
 deployments/kubespray/inventory/cubestack-cluster/inventory.ini
 
+# 虚拟机基础镜像(大文件,勿提交)
+deployments/virtual-machine/cloud-images/
+
 #kubepray install image and binary folder
 deployments/kubespray/repository/cubestack-cluster/*
 deployments/kubespray/kubespray/.git
