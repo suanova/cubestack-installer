@@ -81,6 +81,7 @@ const dict = {
     'hosts.sc.step4': '# 第 4 步:安装 libvirt 依赖(Ubuntu 22.04)',
     'hosts.sc.step5': '# 第 5 步:启动 libvirtd 并设置开机自启',
     'hosts.sc.step6': '# 第 6 步:确认 KVM 硬件加速可用',
+    'hosts.sc.step7': '# 第 7 步:安装 MinIO 客户端 mc(用于连接 MinIO 拉取模板镜像)',
     // 添加宿主机向导
     'hosts.wizard.title': '添加宿主机向导',
     'hosts.wizard.intro': '按步骤完成宿主机初始化与添加:① 连接信息 → ② 免密配置 → ③ 依赖安装 → ④ 确认添加',
@@ -252,6 +253,7 @@ const dict = {
     'hosts.sc.step4': '# Step 4: install libvirt dependencies (Ubuntu 22.04)',
     'hosts.sc.step5': '# Step 5: start libvirtd and enable on boot',
     'hosts.sc.step6': '# Step 6: confirm KVM hardware acceleration',
+    'hosts.sc.step7': '# Step 7: install MinIO client mc (for pulling template images from MinIO)',
     // Add Host wizard
     'hosts.wizard.title': 'Add Host Wizard',
     'hosts.wizard.intro': 'Follow the steps to initialize and add a host: ① Connection info → ② Passwordless SSH → ③ Dependency install → ④ Confirm & add',
