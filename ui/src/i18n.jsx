@@ -326,6 +326,8 @@ const dict = {
     'tasks.type': 'Type', 'tasks.typeVm': 'VM Create', 'tasks.typeCluster': 'Cluster Install',
     'tasks.target': 'Target', 'tasks.progress': 'Progress', 'tasks.createdAt': 'Created / Finished',
     'tasks.viewLog': 'View Log', 'tasks.viewing': 'Viewing', 'tasks.collapse': 'Collapse',
+    // VM install task log
+    'vmtasks.title': 'VM Install Task Log', 'vmtasks.desc': 'Execution logs of VM creation/install tasks. Click a task to view live logs',
     'tasks.taskLabel': 'Task #{id} · {name} ·', 'tasks.empty': 'No tasks yet. Create a VM or install a cluster to generate one.',
     'tasks.noLog': '(No log yet)',
     // API docs

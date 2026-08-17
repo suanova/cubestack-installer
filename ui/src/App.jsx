@@ -37,6 +37,7 @@ export default function App() {
                   <Route path="/vms" element={<VmsPage />} />
                   <Route path="/clusters" element={<ClustersPage />} />
                   <Route path="/tasks" element={<TasksPage />} />
+                  <Route path="/vm-tasks" element={<TasksPage typeFilter="vm_create" titleKey="vmtasks.title" descKey="vmtasks.desc" />} />
                   <Route
                     path="/users"
                     element={
