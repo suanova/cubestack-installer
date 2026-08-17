@@ -35,8 +35,8 @@ def seed_data() -> None:
                 "ssh": "ok",
                 "os": {"detected": "Ubuntu 22.04.4 LTS (仿真)", "ok": True},
                 "packages": {
-                    "required": ["virt-install", "virsh", "qemu-img", "qemu-kvm", "cloud-localds"],
-                    "installed": ["virt-install", "virsh", "qemu-img", "qemu-kvm", "cloud-localds"],
+                    "required": ["virt-install", "virsh", "qemu-img", "qemu-kvm", "cloud-localds", "libvirtd"],
+                    "installed": ["virt-install", "virsh", "qemu-img", "qemu-kvm", "cloud-localds", "libvirtd"],
                     "missing": [],
                     "ok": True,
                 },
