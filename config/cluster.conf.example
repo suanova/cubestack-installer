@@ -1,0 +1,47 @@
+# ============================================================
+# CubeStack 集群统一配置文件 —— 示例模板(提交到仓库)
+# 复制为 config/cluster.conf 后按实际环境修改(真实配置已 gitignore)
+#   cp config/cluster.conf.example config/cluster.conf
+# 字段含义见同目录 config/cluster.conf 注释
+# ============================================================
+
+# ---------------- 宿主机(Hypervisor) ----------------
+HOST_PHYS_IP="${HOST_PHYS_IP:-10.66.3.37}"
+BASE_IMG="${BASE_IMG:-/k8s/cloud-images/ubuntu2204-k8s-base.qcow2}"
+VM_DISK_DIR="${VM_DISK_DIR:-/k8s/vm-disks}"
+
+# ---------------- 网络规划 ----------------
+NET_MODE="${NET_MODE:-bridge}"          # bridge=方案A(privbr0+精准SNAT) | nat=方案B(libvirt NAT)
+
+# [方案A bridge]
+BRIDGE="${BRIDGE:-privbr0}"
+BRIDGE_IP="${BRIDGE_IP:-10.244.0.1}"
+VM_SUBNET="${VM_SUBNET:-10.244.0.0/16}"
+PHYS_WORKER_NET="${PHYS_WORKER_NET:-10.66.1.0/24}"
+
+# [方案B nat]
+NAT_NET_NAME="${NAT_NET_NAME:-cubestack-nat}"
+NAT_SUBNET="${NAT_SUBNET:-10.245.0.0/16}"
+NAT_GATEWAY="${NAT_GATEWAY:-10.245.0.1}"
+
+# ---------------- SSH 配置 ----------------
+SSH_KEY_DIR="${SSH_KEY_DIR:-${HOME}/.ssh}"
+SSH_KEY_NAME="${SSH_KEY_NAME:-cubestack_k8s}"
+SSH_DEFAULT_PASSWORD="${SSH_DEFAULT_PASSWORD:-CHANGE_ME}"
+VM_SSH_USERS="${VM_SSH_USERS:-root ubuntu}"
+WORKER_SSH_PASSWORD="${WORKER_SSH_PASSWORD:-}"
+
+# ---------------- 节点规划 ----------------
+# 格式: role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password
+#   role: master(虚拟机) | worker(裸金属); mac: 显式或"-"(自动); 密码"-"=用默认
+NODES=(
+  "master,cubestack-k8s-master01,10.244.1.11,52:54:00:3b:e9:d2,16,8,50,ubuntu,-"
+  "master,cubestack-k8s-master02,10.244.1.12,52:54:00:b6:f1:39,16,8,50,ubuntu,-"
+  "master,cubestack-k8s-master03,10.244.1.13,52:54:00:49:e2:3d,16,8,50,ubuntu,-"
+  "worker,mxgpu-1-232,10.66.1.232,-,0,0,0,ubuntu,-"
+)
+
+# ---------------- kubespray / 部署 ----------------
+KUBESPRAY_INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}"
+KUBESPRAY_DIR="${KUBESPRAY_DIR:-${REPO_ROOT}/deployments/kubespray/kubespray}"
+UPDATE_ETC_HOSTS="${UPDATE_ETC_HOSTS:-0}"
