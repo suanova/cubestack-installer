@@ -309,3 +309,48 @@ cubestack-installer/
 - 前端生产包可由后端直接托管,亦可由 Nginx 代理,并将 /api 反向代理至后端服务
 - 容器部署时,建议将数据卷挂载至 /app/data,以保证数据持久化
 
+## 十四、离线部署 Kubernetes 集群(CLI)
+
+除 Web 控制台外,仓库提供一套完整的 **CLI 脚本**实现从 0 到 1 的 kubespray 离线部署,全部通过脚本自动完成,无人工干预:
+
+```
+宿主网络 → SSH密钥 → 创建 master/worker 虚拟机(自动注册+装包) → 免密 → 生成 inventory → 同步配置 → kubespray 离线部署
+```
+
+**一键命令:**
+
+```bash
+# 从 config/cluster.conf 读取配置(唯一数据源,所有 IP 不硬编码)
+cp config/cluster.conf.example config/cluster.conf && vim config/cluster.conf
+
+# 全流程部署(含 kubespray 离线安装)
+sudo ./scripts/deploy-cluster.sh --with-k8s
+```
+
+**核心脚本:**
+
+| 脚本 | 作用 |
+|---|---|
+| `scripts/deploy-cluster.sh` | 一键编排(主入口) |
+| `scripts/create-libvirt-vm.sh` | 创建单台虚拟机(自动注册 cluster.conf + 安装 kubespray 所需包) |
+| `scripts/create-vm-template.sh` | 制作黄金基础镜像 |
+| `scripts/gen-inventory.sh` | 生成 kubespray inventory(`INV_ROLES`/`INV_EXCLUDE` 过滤) |
+| `scripts/sync-kubespray-config.sh` | 从 cluster.conf 动态生成 group_vars 中的 IP(避免硬编码) |
+| `scripts/register-vm.sh` | 注册已存在 VM 到 cluster.conf |
+| `scripts/install-worker-packages.sh` | 离线 .deb 包安装到 bare-metal worker |
+| `deployments/kubespray/cubestack-offline.sh` | kubespray 离线安装/扩容(init/download/install/scale/check) |
+
+**离线资源目录:**
+
+```
+deployments/kubespray/
+├── kubespray/                    # kubespray 源码(含 cluster.yml)
+├── inventory/cubestack-cluster/  # 生成的 inventory(hosts.yml + group_vars)
+└── repository/cubestack-cluster/ # 离线资源
+    ├── images/                   # 容器镜像(.tar, 供 ctr image import)
+    ├── <二进制文件>                # kubeadm/kubelet/etcd/calicoctl 等
+    └── packages/                 # 系统 .deb 包(iputils-ping/rsync/iptables/curl/ca-certificates)
+```
+
+完整分步指南(含扩容、跨网段 bare-metal worker)见 **`scripts/README.md` 第 8 节「从 0 到 1:离线部署 kubespray 集群」**。
+
