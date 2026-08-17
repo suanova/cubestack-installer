@@ -52,6 +52,8 @@ export const vmApi = {
   list: (token) => request('/vms', { token }),
   providers: (token) => request('/vms/providers', { token }),
   create: (payload, token) => request('/vms', { method: 'POST', body: payload, token }),
+  createBatch: (payload, token) => request('/vms/batch', { method: 'POST', body: payload, token }),
+  images: (token, hostId) => request('/vms/images' + (hostId ? '?host_id=' + hostId : ''), { token }),
   action: (id, action, token) =>
     request('/vms/' + id + '/action', { method: 'POST', body: { action }, token }),
   remove: (id, token) => request('/vms/' + id, { method: 'DELETE', token }),

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { CONSTANTS, vmApi } from '../api/client'
 import Field, { Select } from '../components/Field'
 import Modal from '../components/Modal'
@@ -16,25 +17,28 @@ const STATUS_MAP = {
 
 const ACTION_DONE = { start: 'vms.doneStart', stop: 'vms.doneStop', reboot: 'vms.doneReboot' }
 const PROVIDER_CLS = { libvirt: 'badge-cyan', kubevirt: 'badge-violet' }
+const NAME_RE = /^[A-Za-z0-9_.-]{2,80}$/
 
-const emptyForm = {
-  name: '', host_id: '', cpu: '4', memory_gb: '8', disk_gb: '40',
-  image: CONSTANTS.images[0], provider: 'libvirt', namespace: '',
-  auto_ip: true, ip: '',
+const emptyBatch = {
+  names: '', host_id: '', cpu: '2', memory_gb: '16', disk_gb: '40',
+  image: '', manual: '', images: [], imagesLoading: false, imagesError: false,
 }
 
 export default function VmsPage() {
   const { token } = useAuth()
   const { t } = useI18n()
   const toast = useToast()
+  const navigate = useNavigate()
 
   const [vms, setVms] = useState([])
   const [hosts, setHosts] = useState([])
   const [providers, setProviders] = useState([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
-  const [form, setForm] = useState(emptyForm)
+  const [batch, setBatch] = useState(emptyBatch)
+  const [errors, setErrors] = useState({})
   const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState(null) // { names: [...] }
   const [deleting, setDeleting] = useState(null)
   const timer = useRef(null)
 
@@ -71,47 +75,93 @@ export default function VmsPage() {
     setLoading(false)
   }, [vms])
 
+  // ---------- 镜像列表 ----------
+  function loadImages(hostId) {
+    setBatch((b) => ({ ...b, imagesLoading: true, imagesError: false }))
+    vmApi
+      .images(token, hostId)
+      .then((imgs) => {
+        const list = imgs || []
+        setBatch((b) => ({ ...b, images: list, imagesLoading: false, imagesError: list.length === 0 }))
+      })
+      .catch(() => setBatch((b) => ({ ...b, imagesLoading: false, imagesError: true })))
+  }
+
   function openCreate() {
-    setForm(emptyForm)
+    setBatch({ ...emptyBatch })
+    setErrors({})
     setShowCreate(true)
     fetch('/api/hosts', { headers: { Authorization: 'Bearer ' + token } })
       .then((r) => r.json())
-      .then(setHosts)
+      .then((list) => {
+        setHosts(list)
+        const real = list.find((h) => !h.is_demo)
+        if (real) {
+          setBatch((b) => ({ ...b, host_id: String(real.id) }))
+          loadImages(real.id)
+        } else {
+          loadImages()
+        }
+      })
       .catch(() => {})
   }
 
-  function submitCreate(e) {
+  // ---------- 批量创建 ----------
+  function parseNames() {
+    const raw = batch.names
+      .split(/[\n,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const seen = new Set()
+    const names = []
+    for (const n of raw) {
+      if (!seen.has(n)) {
+        seen.add(n)
+        names.push(n)
+      }
+    }
+    return names
+  }
+
+  function submitBatch(e) {
     e.preventDefault()
-    if (!form.host_id) {
-      toast(t('vms.selectHost'), 'error')
+    const errs = {}
+    const names = parseNames()
+    if (!batch.host_id) errs.host_id = t('vms.selectHost')
+    if (names.length === 0) errs.names = t('vms.needNames')
+    else if (names.some((n) => !NAME_RE.test(n))) errs.names = t('vms.badName')
+    const image = (batch.image || '').trim() || (batch.manual || '').trim()
+    if (!image) errs.image = t('vms.needImage')
+    if (Object.keys(errs).length) {
+      setErrors(errs)
       return
     }
+    setErrors({})
     setBusy(true)
     vmApi
-      .create(
+      .createBatch(
         {
-          name: form.name.trim(),
-          host_id: parseInt(form.host_id, 10),
-          cpu: parseInt(form.cpu, 10),
-          memory_gb: parseInt(form.memory_gb, 10),
-          disk_gb: parseInt(form.disk_gb, 10),
-          image: form.image,
-          provider: form.provider,
-          namespace: form.provider === 'kubevirt' ? form.namespace.trim() || null : null,
-          auto_ip: form.auto_ip,
-          ip: form.auto_ip ? null : form.ip.trim() || null,
+          names,
+          host_id: parseInt(batch.host_id, 10),
+          cpu: parseInt(batch.cpu, 10),
+          memory_gb: parseInt(batch.memory_gb, 10),
+          disk_gb: parseInt(batch.disk_gb, 10),
+          image,
+          provider: 'libvirt',
         },
         token,
       )
-      .then((res) => {
+      .then(() => {
         setShowCreate(false)
-        toast(t('vms.created', { name: res.vm.name }))
+        setResult({ names })
+        toast(t('vms.batchCreated', { n: names.length }))
         setTimeout(load, 800)
       })
       .catch((err) => toast(err.message, 'error'))
       .finally(() => setBusy(false))
   }
 
+  // ---------- 电源操作 / 删除 ----------
   function doAction(id, action, name) {
     vmApi
       .action(id, action, token)
@@ -144,6 +194,11 @@ export default function VmsPage() {
       </div>
     )
   }
+
+  const resultAllDone = result && result.names.every((name) => {
+    const v = vms.find((x) => x.name === name)
+    return v && (v.status === 'running' || v.status === 'error' || v.status === 'stopped')
+  })
 
   return (
     <div>
@@ -254,56 +309,98 @@ export default function VmsPage() {
         </div>
       </div>
 
+      {/* 批量创建弹窗 */}
       {showCreate && (
-        <Modal title={t('vms.createTitle')} onClose={() => setShowCreate(false)} width="560px">
-          <form onSubmit={submitCreate}>
-            <Field label={t('common.name')} placeholder="k8s-node-4" value={form.name} required
-              onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            <Select label={t('vms.provider')} value={form.provider}
-              onChange={(e) => setForm({ ...form, provider: e.target.value })}>
-              {CONSTANTS.vmProviders.map((p) => (
-                <option key={p.key} value={p.key}>{t(p.labelKey)}</option>
-              ))}
-            </Select>
-            {form.provider === 'kubevirt' && (
-              <Field label={t('vms.namespace')} placeholder={t('vms.namespaceHint')} value={form.namespace}
-                onChange={(e) => setForm({ ...form, namespace: e.target.value })} />
-            )}
-            <Select label={t('vms.host')} value={form.host_id} required
-              onChange={(e) => setForm({ ...form, host_id: e.target.value })}>
+        <Modal title={t('vms.batchTitle')} onClose={() => setShowCreate(false)} width="600px">
+          <form onSubmit={submitBatch}>
+            <Select label={t('vms.host')} value={batch.host_id} required error={errors.host_id}
+              onChange={(e) => {
+                const hid = e.target.value
+                setBatch({ ...batch, host_id: hid, image: '', manual: '' })
+                if (hid) loadImages(parseInt(hid, 10))
+              }}>
               <option value="">{t('vms.selectHost')}</option>
               {hosts.map((h) => (
                 <option key={h.id} value={h.id}>{h.name} ({h.ip})</option>
               ))}
             </Select>
+
+            <label className="field">
+              <span className="field-label">{t('vms.names')}</span>
+              <textarea className={'input' + (errors.names ? ' input-error' : '')} rows="4"
+                placeholder={t('vms.namesHint')} value={batch.names}
+                onChange={(e) => setBatch({ ...batch, names: e.target.value })} />
+              {errors.names && <span className="field-error">{errors.names}</span>}
+            </label>
+
             <div className="grid-3">
-              <Select label={t('vms.vcpu')} value={form.cpu} onChange={(e) => setForm({ ...form, cpu: e.target.value })}>
+              <Select label={t('vms.vcpu')} value={batch.cpu} onChange={(e) => setBatch({ ...batch, cpu: e.target.value })}>
                 {CONSTANTS.cpus.map((c) => <option key={c} value={c}>{c}</option>)}
               </Select>
-              <Select label={t('vms.mem')} value={form.memory_gb} onChange={(e) => setForm({ ...form, memory_gb: e.target.value })}>
+              <Select label={t('vms.mem')} value={batch.memory_gb} onChange={(e) => setBatch({ ...batch, memory_gb: e.target.value })}>
                 {CONSTANTS.memories.map((m) => <option key={m} value={m}>{m} GB</option>)}
               </Select>
-              <Select label={t('vms.disk')} value={form.disk_gb} onChange={(e) => setForm({ ...form, disk_gb: e.target.value })}>
+              <Select label={t('vms.disk')} value={batch.disk_gb} onChange={(e) => setBatch({ ...batch, disk_gb: e.target.value })}>
                 {CONSTANTS.disks.map((d) => <option key={d} value={d}>{d} GB</option>)}
               </Select>
             </div>
-            <Select label={t('vms.image')} value={form.image} onChange={(e) => setForm({ ...form, image: e.target.value })}>
-              {CONSTANTS.images.map((img) => <option key={img} value={img}>{img}</option>)}
-            </Select>
-            <label className="switch-row">
-              <input type="checkbox" checked={form.auto_ip}
-                onChange={(e) => setForm({ ...form, auto_ip: e.target.checked })} />
-              <span>{t('vms.autoIp')}</span>
+
+            <label className="field">
+              <span className="field-label">
+                {t('vms.imagesFromMinio')}
+                <button type="button" className="btn btn-ghost btn-sm" style={{ marginLeft: 8 }}
+                  onClick={() => (batch.host_id ? loadImages(parseInt(batch.host_id, 10)) : loadImages())}>
+                  {t('vms.refreshImages')}
+                </button>
+              </span>
+              <select className={'input' + (errors.image ? ' input-error' : '')} value={batch.image}
+                onChange={(e) => setBatch({ ...batch, image: e.target.value })} disabled={batch.imagesLoading}>
+                <option value="">{batch.imagesLoading ? t('vms.imagesLoading') : t('vms.selectImage')}</option>
+                {batch.images.map((img) => (
+                  <option key={img.name} value={img.name}>
+                    {img.name} ({(img.size / 1073741824).toFixed(1)} GB)
+                  </option>
+                ))}
+              </select>
+              {errors.image && <span className="field-error">{errors.image}</span>}
             </label>
-            {!form.auto_ip && (
-              <Field label={t('vms.customIp')} placeholder="192.168.10.x" value={form.ip}
-                onChange={(e) => setForm({ ...form, ip: e.target.value })} />
+
+            {(batch.imagesError || !batch.images.length) && (
+              <Field label={t('vms.manualImage')} placeholder="ubuntu-22.04-cloud.qcow2" value={batch.manual}
+                onChange={(e) => setBatch({ ...batch, manual: e.target.value })} />
             )}
+
+            <div className="modal-note">{t('vms.defaultSpec')} · {t('vms.loginHint')}</div>
+
             <div className="modal-actions">
               <button type="button" className="btn btn-ghost" onClick={() => setShowCreate(false)}>{t('common.cancel')}</button>
               <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? t('common.loading') : t('vms.create')}</button>
             </div>
           </form>
+        </Modal>
+      )}
+
+      {/* 批量创建结果(含 IP) */}
+      {result && (
+        <Modal title={t('vms.batchResultTitle')} onClose={() => setResult(null)} width="540px">
+          <div className="wizard-summary">
+            {result.names.map((name) => {
+              const v = vms.find((x) => x.name === name)
+              const st = v ? STATUS_MAP[v.status] || { key: v.status, cls: 'badge-muted' } : { key: 'status.pending', cls: 'badge-muted' }
+              return (
+                <div key={name} className="wizard-summary-row">
+                  <span className="wizard-summary-label">{name}</span>
+                  <span className={'badge ' + st.cls}>{t(st.key)}</span>
+                  <span className="td-mono">{v ? (v.ip || '-') : '-'}</span>
+                </div>
+              )
+            })}
+          </div>
+          <p className="modal-text">{resultAllDone ? t('vms.batchDone') : t('vms.batchPolling')}</p>
+          <div className="modal-actions">
+            <button className="btn btn-ghost" onClick={() => setResult(null)}>{t('common.close')}</button>
+            <button className="btn btn-primary" onClick={() => navigate('/tasks')}>{t('vms.batchWatch')}</button>
+          </div>
         </Modal>
       )}
 

@@ -138,6 +138,29 @@ class VmActionIn(BaseModel):
     action: Literal["start", "stop", "reboot"]
 
 
+class VmImageOut(BaseModel):
+    """MinIO 上的虚拟机模板镜像。"""
+
+    name: str
+    size: int
+    last_modified: str
+
+
+class VmBatchCreateIn(BaseModel):
+    names: list[str] = Field(min_length=1, max_length=20, description="虚拟机名称列表(一次最多 20 台)")
+    host_id: int = Field(description="宿主机 ID")
+    cpu: int = Field(default=2, ge=1, le=64, description="vCPU 核数(默认 2)")
+    memory_gb: int = Field(default=16, ge=1, le=512, description="内存(GB,默认 16)")
+    disk_gb: int = Field(default=40, ge=5, le=2048, description="系统盘(GB)")
+    image: str = Field(min_length=1, max_length=120, description="模板镜像名称(来自 MinIO cubestack/installer/vm)")
+    provider: Literal["libvirt", "kubevirt"] = Field(default="libvirt", description="虚拟化后端")
+
+
+class VmBatchCreateResult(BaseModel):
+    task_ids: list[int]
+    vms: list[VmOut]
+
+
 # ---------- K8s 集群 ----------
 
 class ClusterCreateIn(BaseModel):
