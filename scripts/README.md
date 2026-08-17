@@ -181,7 +181,7 @@ bare-metal worker(Ubuntu)无法联网时,用 repository 中的离线 `.deb` 包�
 ./scripts/install-worker-packages.sh 10.66.1.232 ubuntu
 ```
 
-包来源: `deployments/kubespray/repository/cubestack-cluster/packages/`(含 iputils-ping / rsync / iptables / curl / ca-certificates 及依赖)。
+包来源: `deployments/kubespray/repository/cubestack-cluster/` 下的 `.deb` 文件(仓库根目录,与 kubeadm/etcd 等二进制同层)或 `packages/` 子目录,脚本自动收集两者并去重。包含 iputils-ping / rsync / iptables / curl / ca-certificates 及依赖。
 
 ### 5.5 create-libvirt-vm.sh —— 单台虚拟机
 

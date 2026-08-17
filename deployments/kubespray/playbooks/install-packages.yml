@@ -2,6 +2,7 @@
 # ============================================================
 # 离线安装 bare-metal worker 节点系统包
 # 将 repository 中的 .deb 包复制到目标节点并安装
+# 包来源: repository/cubestack-cluster/*.deb(仓库根目录) + packages/ 子目录
 # 用法:
 #   ansible-playbook -i <inventory> install-packages.yml
 # ============================================================
@@ -9,7 +10,10 @@
   hosts: kube_node
   gather_facts: false
   vars:
-    packages_dir: "{{ playbook_dir | dirname }}/repository/cubestack-cluster/packages"
+    repo_base: "{{ playbook_dir | dirname }}/repository/cubestack-cluster"
+    packages_dirs:
+      - "{{ repo_base }}"
+      - "{{ repo_base }}/packages"
 
   tasks:
     - name: Ensure /tmp/packages directory exists on target
@@ -17,12 +21,21 @@
         path: /tmp/packages
         state: directory
 
-    - name: Copy offline .deb packages to target
-      synchronize:
-        src: "{{ packages_dir }}/"
-        dest: /tmp/packages/
-        mode: push
+    - name: Find offline .deb packages (仓库根目录 + packages/)
+      find:
+        paths: "{{ packages_dirs }}"
+        patterns: "*.deb"
+        file_type: file
       delegate_to: localhost
+      register: deb_files
+
+    - name: Copy offline .deb packages to target
+      copy:
+        src: "{{ item.path }}"
+        dest: /tmp/packages/
+      delegate_to: localhost
+      loop: "{{ deb_files.files }}"
+      when: deb_files.files | length > 0
 
     - name: Install packages from local files
       shell: dpkg -i /tmp/packages/*.deb && rm -rf /tmp/packages

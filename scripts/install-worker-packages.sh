@@ -19,7 +19,9 @@ USER="${2:-ubuntu}"
 # 定位离线包目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-PKG_DIR="${REPO_ROOT}/deployments/kubespray/repository/cubestack-cluster/packages"
+REPO_DIR="${REPO_ROOT}/deployments/kubespray/repository/cubestack-cluster"
+# 离线 .deb 包来源: 优先仓库根目录(与 kubeadm/etcd 等二进制同层),兼容 packages/ 子目录
+PKG_DIRS=("${REPO_DIR}" "${REPO_DIR}/packages")
 
 # SSH 密钥配置
 SSH_KEY_DIR="${SSH_KEY_DIR:-${HOME}/.ssh}"
@@ -27,21 +29,34 @@ SSH_KEY_NAME="${SSH_KEY_NAME:-cubestack_k8s}"
 SSH_KEY="${SSH_KEY_DIR}/${SSH_KEY_NAME}"
 SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
-[ -d "${PKG_DIR}" ] || { err "包目录不存在: ${PKG_DIR}"; exit 1; }
+# 收集所有存在的 .deb 包完整路径(按 basename 去重,优先仓库根目录)
+DEBS=()
+declare -A DEB_SEEN
+for d in "${PKG_DIRS[@]}"; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*.deb; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        if [ -z "${DEB_SEEN[$base]:-}" ]; then
+            DEB_SEEN["$base"]=1
+            DEBS+=("$f")
+        fi
+    done
+done
+[ "${#DEBS[@]}" -gt 0 ] || { err "未找到离线 .deb 包: ${REPO_DIR} 或 ${REPO_DIR}/packages"; exit 1; }
+
 [ -f "${SSH_KEY}" ] || { err "SSH 密钥不存在: ${SSH_KEY}"; exit 1; }
 
-say "安装 worker 节点 ${USER}@${IP} 所需离线包..."
+say "安装 worker 节点 ${USER}@${IP} 所需离线包(${#DEBS[@]} 个)..."
 
-# 1. 复制离线包到目标节点
+# 1. 复制离线包到目标节点(先建目录,再从所有来源逐个复制)
+ssh ${SSH_OPTS} "${USER}@${IP}" "mkdir -p /tmp/packages" 2>/dev/null || true
 say "复制离线包到 ${IP}:/tmp/packages/ ..."
-rsync -e "ssh ${SSH_OPTS}" \
-  "${PKG_DIR}/"*.deb "${USER}@${IP}:/tmp/packages/" 2>/dev/null || {
-  warn "rsync 失败,尝试 scp 逐个复制..."
-  ssh ${SSH_OPTS} "${USER}@${IP}" "mkdir -p /tmp/packages"
-  for f in "${PKG_DIR}"/*.deb; do
-    scp ${SSH_OPTS} "$f" "${USER}@${IP}:/tmp/packages/" 2>/dev/null || true
-  done
-}
+for f in "${DEBS[@]}"; do
+    [ -f "$f" ] || continue
+    rsync -e "ssh ${SSH_OPTS}" "$f" "${USER}@${IP}:/tmp/packages/" 2>/dev/null || \
+      scp ${SSH_OPTS} "$f" "${USER}@${IP}:/tmp/packages/" 2>/dev/null || true
+done
 
 # 2. 安装包
 say "安装中 (dpkg -i) ..."
