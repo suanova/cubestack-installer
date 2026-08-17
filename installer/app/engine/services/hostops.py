@@ -28,6 +28,8 @@ REQUIRED_PKGS: list[tuple[str, list[str], str]] = [
     ("qemu-kvm", ["qemu-system-x86_64", "kvm"], "qemu-system-x86"),
     ("cloud-localds", ["cloud-localds"], "cloud-image-utils"),
     ("libvirtd", ["libvirtd"], "libvirt-daemon-system"),
+    # MinIO 客户端(mc):非 apt 包,由宿主机初始化脚本单独下载安装;用于连接 MinIO 拉取模板镜像
+    ("mc", ["mc"], "minio-client"),
 ]
 
 # 兼容旧引用(仅用于展示/兼容)
