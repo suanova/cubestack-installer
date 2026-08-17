@@ -24,10 +24,17 @@ SSH_KEY="${SSH_KEY_DIR}/${SSH_KEY_NAME}"
 
 # ---------------- 解析节点 ----------------
 # 角色过滤: INV_ROLES="master" 仅生成控制平面; 空=全部
+# 排除过滤: INV_EXCLUDE="mxgpu-1-232" 排除指定节点(逗号分隔)
 INV_ROLES="${INV_ROLES:-}"
 role_included() { # <role> → 0=包含
     [ -z "${INV_ROLES}" ] && return 0
     local r; for r in ${INV_ROLES//,/ }; do [ "$r" = "$1" ] && return 0; done
+    return 1
+}
+
+node_excluded() { # <hostname> → 0=排除
+    [ -z "${INV_EXCLUDE:-}" ] && return 1
+    local h; for h in ${INV_EXCLUDE//,/ }; do [ "$h" = "$1" ] && return 0; done
     return 1
 }
 
@@ -37,6 +44,7 @@ for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
     IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
     role_included "${role}" || continue
+    node_excluded "${hostname}" && { warn "排除节点: ${hostname}"; continue; }
     case "${role}" in
         master) MASTERS+=("${line}") ;;
         worker) WORKERS+=("${line}") ;;
@@ -81,6 +89,10 @@ HOSTS_YML="${INV_DIR}/hosts.yml"
             echo "      ip: ${ip}"
             echo "      access_ip: ${ip}"
             echo "      ansible_user: ${user}"
+            # 优先使用密钥认证(免密); 密钥不存在时回退到密码认证
+            if [ -f "${SSH_KEY}" ]; then
+                echo "      ansible_ssh_private_key_file: ${SSH_KEY}"
+            fi
             # 裸金属(物理Worker)用密码认证; 未配置密码则省略(由 kubespray 交互/ssh-agent)
             if [ -n "${node_pw}" ]; then
                 echo "      ansible_password: ${node_pw}"

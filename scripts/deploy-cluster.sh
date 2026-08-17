@@ -99,7 +99,7 @@ for line in "${NODES[@]:-}"; do
         virsh start "${hostname}" >/dev/null 2>&1 || true
     else
         say "创建 VM ${hostname} (${mem}G/${cpu}C/${disk}G, ${ip}, ${mac}) ..."
-        bash "${SCRIPT_DIR}/create-libvirt-vm.sh" "${hostname}" "${mem}" "${cpu}" "${disk}" "${mac}" "${ip}"
+        AUTO_REGISTER_CLUSTER=1 bash "${SCRIPT_DIR}/create-libvirt-vm.sh" "${hostname}" "${mem}" "${cpu}" "${disk}" "${mac}" "${ip}"
     fi
 
     # 等待 SSH 就绪(最长120s)
@@ -117,8 +117,8 @@ for line in "${NODES[@]:-}"; do
     fi
 done
 
-# ============ Phase 4: worker(裸金属) 连通性 ============
-say "[4/6] worker(裸金属) 连通性检查(仅读,不修改) ..."
+# ============ Phase 4: worker(裸金属) 连通性 + 离线包安装 ============
+say "[4/6] worker(裸金属) 连通性检查 + 离线包安装 ..."
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
     IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
@@ -130,6 +130,21 @@ for line in "${NODES[@]:-}"; do
             -o ConnectTimeout=8 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
             "${user}@${ip}" 'hostname' >/dev/null 2>&1; then
             ok "worker ${hostname}(${ip}) 连通(user=${user}, 密码认证OK)"
+            # 注入 SSH 公钥(免密)
+            say "注入 SSH 公钥到 worker ${hostname}(${ip}) ..."
+            SSH_KEY_DIR="${SSH_KEY_DIR:-${HOME}/.ssh}"
+            SSH_KEY_NAME="${SSH_KEY_NAME:-cubestack_k8s}"
+            KEY_PUB="${SSH_KEY_DIR}/${SSH_KEY_NAME}.pub"
+            if [ -f "${KEY_PUB}" ]; then
+                PUBKEY="$(cat "${KEY_PUB}")"
+                SSHPASS="${pw}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                    -o ConnectTimeout=10 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                    "${user}@${ip}" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '${PUBKEY}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" 2>/dev/null || true
+                ok "SSH 公钥已注入 ${hostname}"
+            fi
+            # 安装离线包(iputils-ping rsync iptables curl ca-certificates)
+            say "安装离线包到 worker ${hostname}(${ip}) ..."
+            bash "${SCRIPT_DIR}/install-worker-packages.sh" "${ip}" "${user}" || warn "离线包安装失败,可稍后手动执行"
         else
             warn "worker ${hostname}(${ip}) 密码连接失败(检查 WORKER_SSH_PASSWORD 或节点第9字段)"
         fi
@@ -140,7 +155,7 @@ done
 
 # ============ Phase 5: 更新 /etc/hosts ============
 if [ "${UPDATE_ETC_HOSTS:-0}" = "1" ]; then
-    say "[5/6] 更新 /etc/hosts(节点主机名解析) ..."
+    say "[5/7] 更新 /etc/hosts(节点主机名解析) ..."
     for line in "${NODES[@]:-}"; do
         [ -z "${line}" ] && continue
         IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
@@ -150,21 +165,24 @@ if [ "${UPDATE_ETC_HOSTS:-0}" = "1" ]; then
         fi
     done
 else
-    say "[5/6] 跳过 /etc/hosts 更新(配置 UPDATE_ETC_HOSTS=1 可启用)"
+    say "[5/7] 跳过 /etc/hosts 更新(配置 UPDATE_ETC_HOSTS=1 可启用)"
 fi
 
 # ============ Phase 6: 生成 inventory ============
-say "[6/6] 生成 kubespray 兼容 inventory ..."
+say "[6/7] 生成 kubespray 兼容 inventory ..."
 bash "${SCRIPT_DIR}/gen-inventory.sh"
 
-# ============ Phase 7: (可选) kubespray 部署 ============
+# ============ Phase 7: (可选) kubespray 离线部署 ============
 if [ "${WITH_K8S}" = "1" ]; then
-    say "执行 kubespray 部署 ..."
-    if command -v ansible-playbook >/dev/null 2>&1 && [ -d "${KUBESPRAY_DIR:-}" ]; then
-        INV="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}"
-        ( cd "${KUBESPRAY_DIR}" && ansible-playbook -i "${INV}/hosts.yml" cluster.yml )
+    OFFLINE_SCRIPT="${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
+    if [ -f "${OFFLINE_SCRIPT}" ]; then
+        say "执行 kubespray 离线部署 (via cubestack-offline.sh) ..."
+        CUBESTACK_KUBESPRAY_DIR="${KUBESPRAY_DIR}" \
+        CUBESTACK_INVENTORY_DIR="${KUBESPRAY_INV_DIR}" \
+        CUBESTACK_LOCAL_REPO_DIR="${LOCAL_REPO_DIR}" \
+            bash "${OFFLINE_SCRIPT}" install
     else
-        warn "缺少 ansible-playbook 或 KUBESPRAY_DIR=${KUBESPRAY_DIR:-<未配置>},跳过 kubespray 部署"
+        warn "未找到 ${OFFLINE_SCRIPT}, 跳过 kubespray 部署"
     fi
 fi
 

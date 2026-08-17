@@ -1,0 +1,46 @@
+---
+# ============================================================
+# 离线安装 bare-metal worker 节点系统包
+# 将 repository 中的 .deb 包复制到目标节点并安装
+# 用法:
+#   ansible-playbook -i <inventory> install-packages.yml
+# ============================================================
+- name: Install required packages on worker nodes
+  hosts: kube_node
+  gather_facts: false
+  vars:
+    packages_dir: "{{ playbook_dir | dirname }}/repository/cubestack-cluster/packages"
+
+  tasks:
+    - name: Ensure /tmp/packages directory exists on target
+      file:
+        path: /tmp/packages
+        state: directory
+
+    - name: Copy offline .deb packages to target
+      synchronize:
+        src: "{{ packages_dir }}/"
+        dest: /tmp/packages/
+        mode: push
+      delegate_to: localhost
+
+    - name: Install packages from local files
+      shell: dpkg -i /tmp/packages/*.deb && rm -rf /tmp/packages
+      args:
+        warn: false
+      become: true
+
+    - name: Verify required packages
+      package_facts:
+        manager: apt
+
+    - name: Check installation status
+      assert:
+        that:
+          - "'iputils-ping' in ansible_facts.packages"
+          - "'rsync' in ansible_facts.packages"
+          - "'iptables' in ansible_facts.packages"
+          - "'curl' in ansible_facts.packages"
+          - "'ca-certificates' in ansible_facts.packages"
+        fail_msg: "Required packages missing on {{ inventory_hostname }}"
+        success_msg: "All required packages installed on {{ inventory_hostname }}"

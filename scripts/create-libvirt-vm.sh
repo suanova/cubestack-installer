@@ -146,7 +146,11 @@ qemu-img resize "${VM_DISK}" "${DISK_G}G"
 # ==================== virt-customize 系统调优（不含用户/SSH）====================
 VC="virt-customize -a ${VM_DISK} --quiet --no-network"
 
-# 1. 禁用 IPv6
+# 1. 安装常用包（kubespray 离线部署需要）
+echo -e "\033[36m→ 安装常用包 (iputils-ping rsync iptables curl ca-certificates) ...\033[0m"
+virt-customize -a "${VM_DISK}" --quiet --install iputils-ping,rsync,iptables,curl,ca-certificates 2>&1 || echo -e "\033[33m⚠ 部分包安装失败，可忽略\033[0m"
+
+# 2. 禁用 IPv6
 ${VC} --run-command 'sed -i -E "s#^(GRUB_CMDLINE_LINUX_DEFAULT=.*)\"#\1 ipv6.disable=1\"#" /etc/default/grub'
 ${VC} --run-command 'update-grub'
 
@@ -210,6 +214,14 @@ else
     NET_ARG="network=${LIBVIRT_NET_NAME}"
 fi
 
+# ==================== Auto-register VM in cluster.conf ====================
+# 当 AUTO_REGISTER_CLUSTER=1 时,将 VM 信息写入 config/cluster.conf 的 NODES 数组
+# 复用 lib-common.sh 的 register_node_to_conf(awk 实现, 幂等)
+auto_register_vm() {
+    [ "${AUTO_REGISTER_CLUSTER:-0}" != "1" ] && return 0
+    register_node_to_conf master "${VM_NAME}" "${VM_IP}" "${VM_MAC_LC}" "${MEM_G}" "${VCPU}" "${DISK_G}" ubuntu -
+}
+
 virt-install \
   --name "${VM_NAME}" \
   --memory "${MEM_MB}" \
@@ -224,6 +236,10 @@ virt-install \
 
 echo "============================================="
 echo -e "\033[32m✅ VM ${VM_NAME} 创建成功\033[0m"
+
+# 自动注册到 cluster.conf (AUTO_REGISTER_CLUSTER=1 时生效)
+auto_register_vm
+
 echo "✅ 登录: root/${SSH_DEFAULT_PASSWORD:-k8s@2026} 或 ubuntu/${SSH_DEFAULT_PASSWORD:-k8s@2026} (镜像预埋)"
 echo "  静态IP: ${VM_IP}/${PREFIX}  网关: ${GATEWAY}"
 echo "  规格: ${MEM_G}G/${VCPU}C/${DISK_G}G"
