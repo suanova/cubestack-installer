@@ -27,6 +27,12 @@ backend/workspace/
 .DS_Store
 nohup.out
 
+# 集群统一配置(含密码,勿提交;模板 cluster.conf.example 需提交)
+config/cluster.conf
+# 部署生成的 inventory(含密码)
+deployments/kubespray/inventory/cubestack-cluster/hosts.yml
+deployments/kubespray/inventory/cubestack-cluster/inventory.ini
+
 #kubepray install image and binary folder
 deployments/kubespray/repository/cubestack-cluster/*
 deployments/kubespray/kubespray/.git
