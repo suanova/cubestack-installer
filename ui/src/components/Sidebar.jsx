@@ -45,6 +45,9 @@ export default function Sidebar({ open, onClose }) {
                 <NavLink to="/vms" className={({ isActive }) => 'tree-link' + (isActive ? ' active' : '')} onClick={onClose}>
                   {t('nav.vms')}
                 </NavLink>
+                <NavLink to="/vm-tasks" className={({ isActive }) => 'tree-link' + (isActive ? ' active' : '')} onClick={onClose}>
+                  {t('nav.vmTasks')}
+                </NavLink>
               </div>
             )}
           </div>
