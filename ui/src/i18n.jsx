@@ -152,7 +152,7 @@ const dict = {
     'clusters.deleteTitle': '删除集群', 'clusters.deleteMsg': '确定要删除集群 {name} 吗?',
     'clusters.deleted': '集群 {name} 已删除', 'clusters.empty': '暂无集群,点击右上角「创建集群」',
     // 任务
-    'tasks.title': '部署任务', 'tasks.desc': '虚拟机创建与集群安装的异步任务流,点击任务查看实时日志',
+    'tasks.title': '部署任务', 'tasks.desc': 'K8s 集群安装的异步任务流,点击任务查看实时日志',
     'tasks.autoRefresh': '正在自动刷新...', 'tasks.running': '运行中', 'tasks.history': '{n} 条历史',
     'tasks.type': '类型', 'tasks.typeVm': '虚拟机创建', 'tasks.typeCluster': '集群安装',
     'tasks.target': '目标', 'tasks.progress': '进度', 'tasks.createdAt': '创建 / 完成',
@@ -323,7 +323,7 @@ const dict = {
     'clusters.deleteTitle': 'Delete Cluster', 'clusters.deleteMsg': 'Delete cluster {name}?',
     'clusters.deleted': 'Cluster {name} deleted', 'clusters.empty': 'No clusters yet. Click "Create Cluster".',
     // Tasks
-    'tasks.title': 'Deploy Tasks', 'tasks.desc': 'Async tasks for VM creation and cluster install. Click a task to view live logs',
+    'tasks.title': 'Deploy Tasks', 'tasks.desc': 'Async tasks for K8s cluster install. Click a task to view live logs',
     'tasks.autoRefresh': 'Auto-refreshing...', 'tasks.running': 'Running', 'tasks.history': '{n} in history',
     'tasks.type': 'Type', 'tasks.typeVm': 'VM Create', 'tasks.typeCluster': 'Cluster Install',
     'tasks.target': 'Target', 'tasks.progress': 'Progress', 'tasks.createdAt': 'Created / Finished',
