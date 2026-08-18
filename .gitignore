@@ -32,6 +32,8 @@ deployments/config/cluster.conf
 # 多集群配置 + 断点状态文件
 deployments/config/cluster-*.conf
 deployments/config/.cluster-*.state
+# kubespray 生成的 artifacts(kubeconfig/kubectl,含凭据, root 属主)
+deployments/kubespray/inventory/*/artifacts/
 # 部署生成的 inventory(含密码)
 deployments/kubespray/inventory/cubestack-cluster/hosts.yml
 deployments/kubespray/inventory/cubestack-cluster/inventory.ini

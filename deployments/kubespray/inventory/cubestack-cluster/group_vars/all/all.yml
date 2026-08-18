@@ -25,6 +25,7 @@ loadbalancer_apiserver:
 
 supplementary_addresses_in_ssl_keys:
   - lb.k8s.local
+  - 192.168.122.31           # 宿主机物理 IP(worker 通过此地址访问 API Server)
   - 192.168.122.31
   - 192.168.122.32
   - 192.168.122.33

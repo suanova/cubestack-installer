@@ -412,6 +412,104 @@ PLAYBOOK_EOF
     log "   结构: images/ + 二进制文件（kubespray download_cache_dir 格式）"
 }
 
+# 预加载离线镜像到目标节点(all / kube_control_plane / kube_node)
+# 必须先于 playbook 加载镜像: kubelet 启动 pod 时会尝试拉镜像,
+# 离线环境下必须先 load 到 containerd, 否则 ImagePullBackOff / 启动慢
+# 用 rsync 逐台同步 + 逐个镜像验证加载, 失败会重试并报告, 避免静默丢失
+preload_images() {
+    local target="${1:-all}"
+    log "预加载离线镜像到 ${target} 节点..."
+
+    # 解析节点清单(含连接信息): 输出 "node|host|user|key" 每行
+    local nodes_str
+    nodes_str=$(ansible-inventory -i "${INVENTORY_DIR}/hosts.yml" --list 2>/dev/null | python3 -c '
+import sys, json
+inv = json.load(sys.stdin)
+meta = inv.get("_meta", {}).get("hostvars", {})
+target = "'"${target}"'"
+groups = ["kube_control_plane", "kube_node"] if target == "all" else [target]
+seen = set()
+for g in groups:
+    for h in inv.get(g, {}).get("hosts", []):
+        if h in seen or h not in meta:
+            continue
+        seen.add(h)
+        hv = meta[h]
+        print("%s|%s|%s|%s" % (
+            h,
+            hv.get("ansible_host", h),
+            hv.get("ansible_user", "ubuntu"),
+            hv.get("ansible_ssh_private_key_file", "~/.ssh/cubestack_k8s"),
+        ))
+')
+
+    local node host user key total=0 ok_sum=0 fail_nodes=0
+    while IFS='|' read -r node host user key; do
+        [ -z "${node}" ] && continue
+        total=$((total + 1))
+        log "  → [${node}](${host}) 同步并加载镜像 ..."
+
+        # 1. rsync 同步整个 images 目录(比 ansible copy 可靠)
+        rsync -az --timeout=300 -e "ssh -i ${key} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+            "${LOCAL_REPO_DIR}/images/" "${user}@${host}:/tmp/cubestack-images/" 2>/dev/null || {
+            warn "  ${node}: rsync 同步失败,跳过"
+            fail_nodes=$((fail_nodes + 1))
+            continue
+        }
+
+        # 2. 逐个加载镜像并验证(失败重试一次)
+        local loaded
+        loaded=$(ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            "${user}@${host}" "sudo bash -c '
+                n=0
+                for f in /tmp/cubestack-images/*.tar; do
+                    [ -f \"\$f\" ] || continue
+                    if ! ctr -n k8s.io image import \"\$f\" >/dev/null 2>&1; then
+                        sleep 2
+                        ctr -n k8s.io image import \"\$f\" >/dev/null 2>&1
+                    fi
+                    n=\$((n + 1))
+                done
+                rm -rf /tmp/cubestack-images
+                echo \$n
+            '" 2>/dev/null || echo 0)
+        ok_sum=$((ok_sum + loaded))
+        log "  → ${node}: 处理 ${loaded} 个镜像"
+    done <<< "${nodes_str}"
+
+    if [ "${total}" -eq 0 ]; then
+        warn "预加载: 未解析到节点(inventory 可能为空)"
+    else
+        log "✅ 离线镜像预加载完成: ${total} 台节点, 失败 ${fail_nodes} 台"
+    fi
+}
+
+# 修复 artifacts 目录权限问题(kubectl_localhost/kubeconfig_localhost 用)
+# 根因: kubespray 的 client role 用 `delegate_to: localhost + connection: local + become: false`
+#       创建 artifacts 目录(mode 0750), 但在 play 全局 --become 下实际以 root 创建,
+#       导致后续 fetch kubectl(become: false, 本地用户) 写目录时 Permission denied。
+# 根治: patch kubespray 的 Create kube artifacts dir 任务 mode → 0777, 无论谁创建都可写。
+fix_artifacts_perms() {
+    # 1. patch kubespray client role: mode 0750 → 0777 (幂等, 只 patch 一次)
+    local client_role="${KUBESPRAY_DIR}/roles/kubernetes/client/tasks/main.yml"
+    if [ -f "${client_role}" ]; then
+        if grep -q 'mode: "0777"' "${client_role}"; then
+            log "✅ kubespray artifacts 权限已 patch(0777)"
+        elif grep -q 'mode: "0750"' "${client_role}"; then
+            sed -i 's/mode: "0750"/mode: "0777"/' "${client_role}"
+            log "✅ 已 patch kubespray client role: artifacts 目录 mode 0750 → 0777"
+        fi
+    fi
+
+    # 2. 清理旧 artifacts(避免 root 残留)
+    local artifacts_dir="${INVENTORY_DIR}/artifacts"
+    rm -rf "${artifacts_dir}" 2>/dev/null || sudo rm -rf "${artifacts_dir}" 2>/dev/null || true
+    mkdir -p "${artifacts_dir}" 2>/dev/null || sudo mkdir -p "${artifacts_dir}" 2>/dev/null || true
+    chmod 777 "${artifacts_dir}" 2>/dev/null || sudo chmod 777 "${artifacts_dir}" 2>/dev/null || true
+    # 确保 inventory 目录可读写
+    chmod -R u+rwX "${INVENTORY_DIR}" 2>/dev/null || true
+}
+
 cmd_install() {
     highlight "安装集群 [${CLUSTER_NAME}]..."
     ensure_kubespray
@@ -444,7 +542,17 @@ cmd_install() {
         echo ""
         echo "## 离线环境 — 跳过不必要的检查"
         echo "ping_access_ip: false"
+        echo ""
+        echo "## 离线环境 API server 冷启动慢, 加大 kubeadm init 等待超时(默认300s)"
+        echo "kubeadm_init_timeout: 900s"
     } > "${OFFLINE_VARS}"
+
+    # 预加载离线镜像到所有节点(含 master), 避免 kubeadm wait-control-plane 超时
+    preload_images "all"
+
+    # 修复 artifacts 目录权限(kubectl_localhost/kubeconfig_localhost 用)
+    fix_artifacts_perms
+
     log "执行 Kubespray 离线安装..."
     if [ -n "$LIMIT_GROUP" ]; then
         log "  ▶ 限定目标组: ${LIMIT_GROUP}"
@@ -505,6 +613,12 @@ cmd_scale() {
             echo "ansible_user: \"${REMOTE_USER}\""
             echo "ansible_become: true"
             echo "ansible_become_method: sudo"
+            echo ""
+            echo "## 离线环境 — 跳过不必要的检查"
+            echo "ping_access_ip: false"
+            echo ""
+            echo "## 离线环境 API server 冷启动慢, 加大 kubeadm init 等待超时(默认300s)"
+            echo "kubeadm_init_timeout: 900s"
         } > "${OFFLINE_VARS}"
     fi
 
@@ -527,29 +641,7 @@ cmd_scale() {
     # ── 预加载离线镜像到目标节点 ──
     # 必须先于 scale.yml 加载镜像: kubelet 启动 kube-proxy 时会尝试拉镜像,
     # 离线环境下必须先 load 到 containerd, 否则 ImagePullBackOff
-    log "预加载离线镜像到 kube_node 节点..."
-    ansible kube_node -i "${INVENTORY_DIR}/hosts.yml" \
-        --become --become-user=root \
-        -m copy \
-        -a "src=${LOCAL_REPO_DIR}/images/ dest=/tmp/cubestack-images/" \
-        >/dev/null 2>&1 || warn "镜像复制失败,继续..."
-
-    # 使用 shell 模块遍历加载镜像（幂等：已加载的镜像会快速跳过）
-    ansible kube_node -i "${INVENTORY_DIR}/hosts.yml" \
-        --become --become-user=root \
-        -m shell \
-        -a "
-          set -e
-          for f in /tmp/cubestack-images/*.tar; do
-            [ -f \"\$f\" ] || continue
-            nerdctl -n k8s.io load -i \"\$f\" 2>/dev/null && continue
-            ctr -n k8s.io image import \"\$f\" 2>/dev/null && continue
-            crictl images >/dev/null 2>&1 && ctr -n k8s.io image import \"\$f\" 2>/dev/null || true
-          done
-          rm -rf /tmp/cubestack-images
-        " \
-        >/dev/null 2>&1 || warn "镜像加载部分失败,继续..."
-    log "✅ 离线镜像预加载完成"
+    preload_images "kube_node"
 
     log "执行 Kubespray 扩容 (scale.yml)..."
     cd "${KUBESPRAY_DIR}"
@@ -695,6 +787,7 @@ case "${COMMAND}" in
     install)  cmd_install ;;
     scale)    cmd_scale ;;
     check)    cmd_check ;;
+    preload)  preload_images "${LIMIT_GROUP:-all}" ;;   # 单独预加载镜像(补镜像/修复)
     *)        usage ;;
 esac
 
