@@ -412,12 +412,12 @@ export default function ClustersPage() {
                 st === 'success' ? t('status.success') : st === 'failed' ? t('status.failed') : st === 'running' ? t('clusters.stepRunning') : t('clusters.stepReady')
               return (
                 <div key={n} className={'wizard-step' + (st === 'running' ? ' running' : '')}>
-                  <div className="wizard-step-head">
+                  <div className="wizard-step-top">
                     <span className="wizard-step-num">{n}</span>
-                    <div className="wizard-step-meta">
-                      <div className="wizard-step-title">{WIZARD_STEPS[n - 1].title}</div>
-                      <div className="wizard-step-desc">{WIZARD_STEPS[n - 1].desc}</div>
-                    </div>
+                    <div className="wizard-step-title">{WIZARD_STEPS[n - 1].title}</div>
+                  </div>
+                  <div className="wizard-step-desc">{WIZARD_STEPS[n - 1].desc}</div>
+                  <div className="wizard-step-actions">
                     <span className={'badge ' + badge}>{label}</span>
                     <button
                       className="btn btn-primary btn-sm"
