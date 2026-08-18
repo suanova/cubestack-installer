@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from ..deps import get_current_user, get_db, require_admin
 from ...engine.executor import start_task
-from ...models import ClusterNode, DeployTask, K8sCluster, User, VirtualMachine
+from ...models import ClusterNode, DeployTask, Host, K8sCluster, User, VirtualMachine
 from ...schemas import (
     ClusterCreateIn,
     ClusterDetailOut,
@@ -22,6 +22,10 @@ def _to_out(cluster: K8sCluster, db: Session) -> ClusterOut:
     nodes = db.query(ClusterNode).filter(ClusterNode.cluster_id == cluster.id).all()
     out.control_plane_count = len([n for n in nodes if n.role == "control_plane"])
     out.worker_count = len([n for n in nodes if n.role == "worker"])
+    if cluster.run_node_host_id:
+        run_host = db.get(Host, cluster.run_node_host_id)
+        if run_host is not None:
+            out.run_node_name = run_host.name + " (" + run_host.ip + ")"
     return out
 
 
@@ -52,12 +56,17 @@ def create_cluster(
     vms = db.query(VirtualMachine).filter(VirtualMachine.id.in_(all_ids)).all()
     if len(vms) != len(all_ids):
         raise HTTPException(status_code=400, detail="存在无效的虚拟机选择")
+    if payload.run_node_host_id is not None:
+        run_host = db.get(Host, payload.run_node_host_id)
+        if run_host is None:
+            raise HTTPException(status_code=400, detail="Kubespray 运行节点不存在(宿主机 ID 无效)")
 
     cluster = K8sCluster(
         name=payload.name,
         k8s_version=payload.k8s_version,
         network_plugin=payload.network_plugin,
         kubespray_version=payload.kubespray_version,
+        run_node_host_id=payload.run_node_host_id,
         ssh_key=payload.ssh_key,
         status="pending",
     )
@@ -98,6 +107,63 @@ def cluster_detail(
     )
 
 
+def _start_cluster_task(cluster_id: int, task_type: str, action_name: str, db: Session) -> DeployTask:
+    cluster = db.get(K8sCluster, cluster_id)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="集群不存在")
+    running = (
+        db.query(DeployTask)
+        .filter(
+            DeployTask.target_id == cluster_id,
+            DeployTask.type == task_type,
+            DeployTask.status.in_(["pending", "running"]),
+        )
+        .first()
+    )
+    if running:
+        raise HTTPException(status_code=400, detail=action_name + "任务正在进行中")
+    task = DeployTask(
+        type=task_type, target_id=cluster.id, target_name=cluster.name, status="pending"
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    start_task(task.id)
+    return task
+
+
+@router.post("/{cluster_id}/prepare", response_model=DeployResult, status_code=202)
+def prepare_cluster(
+    cluster_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> DeployResult:
+    """向导第一步:检查/配置安装机环境(uv + Python3.12 + Ansible)。"""
+    cluster = db.get(K8sCluster, cluster_id)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="集群不存在")
+    if not cluster.run_node_host_id:
+        raise HTTPException(status_code=400, detail="请先为集群选择 Kubespray 运行节点(宿主机)")
+    task = _start_cluster_task(cluster_id, "cluster_prepare", "环境准备", db)
+    return DeployResult(task_id=task.id)
+
+
+@router.post("/{cluster_id}/sshkey", response_model=DeployResult, status_code=202)
+def sshkey_cluster(
+    cluster_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> DeployResult:
+    """向导第二步:在安装机生成公钥并免密到所有集群节点。"""
+    cluster = db.get(K8sCluster, cluster_id)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="集群不存在")
+    if not cluster.run_node_host_id:
+        raise HTTPException(status_code=400, detail="请先为集群选择 Kubespray 运行节点(宿主机)")
+    task = _start_cluster_task(cluster_id, "cluster_sshkey", "SSH 免密配置", db)
+    return DeployResult(task_id=task.id)
+
+
 @router.post("/{cluster_id}/deploy", response_model=DeployResult, status_code=202)
 def deploy_cluster(
     cluster_id: int,
@@ -107,24 +173,7 @@ def deploy_cluster(
     cluster = db.get(K8sCluster, cluster_id)
     if cluster is None:
         raise HTTPException(status_code=404, detail="集群不存在")
-    running = (
-        db.query(DeployTask)
-        .filter(
-            DeployTask.target_id == cluster_id,
-            DeployTask.type == "cluster_install",
-            DeployTask.status.in_(["pending", "running"]),
-        )
-        .first()
-    )
-    if running:
-        raise HTTPException(status_code=400, detail="集群安装任务正在进行中")
-    task = DeployTask(
-        type="cluster_install", target_id=cluster.id, target_name=cluster.name, status="pending"
-    )
-    db.add(task)
-    db.commit()
-    db.refresh(task)
-    start_task(task.id)
+    task = _start_cluster_task(cluster_id, "cluster_install", "集群安装", db)
     return DeployResult(task_id=task.id)
 
 

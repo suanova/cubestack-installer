@@ -50,3 +50,6 @@ deployments/kubespray/kubespray/.gitignore
 deployments/kubespray/kubespray/.gitlab-ci
 deployments/kubespray/kubespray/.gitlab-ci.yml
 deployments/kubespray/kubespray/.gitmodules
+
+# 部署引擎在宿主机生成的临时拷贝(按 ssh 目标命名)
+/deployments/*@*/
