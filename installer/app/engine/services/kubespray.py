@@ -1,15 +1,21 @@
-"""Kubespray 安装 K8s 集群。"""
+"""Kubespray 安装 K8s 集群(第三步:改 hosts.yml + 运行 cubestack-offline.sh)。"""
 import os
 import shutil
+import subprocess
 import time
 
 from ...db.session import SessionLocal
 from ...models import ClusterNode, DeployTask, Host, K8sCluster
 from ..executor import log_line
-from .clusterprep import ANSIBLE_VENV, KUBESPRAY_DIR, _mc_env, _ensure_mc
+from .clusterprep import ANSIBLE_VENV, KUBESPRAY_DIR, PIP_INDEX, _mc_env, _ensure_mc
 from .vmprovision import _ssh
 
 RUN_KEY_FILE = os.environ.get("KUBESPRAY_SSH_KEY", "/root/.ssh/id_rsa")
+# cubestack-offline.sh 期望的目录布局(脚本内 BASE_DIR 固定为 /opt/cubestack-installer)
+CUBESTACK_BASE = "/opt/cubestack-installer"
+CUBESTACK_SCRIPT = CUBESTACK_BASE + "/cubestack-offline.sh"
+# 离线脚本使用的集群名,对应 MinIO 上 kubespray/inventory/cubestack-cluster 目录
+CUBESTACK_CLUSTER = "cubestack-cluster"
 WORKSPACE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "workspace"
 )
@@ -24,22 +30,22 @@ def _sim_mode(run_node: Host | None) -> bool:
     return shutil.which("ansible-playbook") is None or not os.path.isdir(KUBESPRAY_DIR)
 
 
-def _ensure_kubespray_on_host(run_node: Host, task, db) -> str:
-    """在运行节点上从 MinIO 下载 Kubespray playbook 到 /opt/kubespray,返回下载后的绝对路径。"""
-    rc, out, err = _ssh(run_node, "ls " + KUBESPRAY_DIR + "/kubespray/cluster.yml >/dev/null 2>&1 && echo ALREADY", timeout=20)
+def _ensure_cubestack_on_host(run_node: Host, task, db) -> str:
+    """在运行节点上把 cubestack 离线安装工具链下载到 /opt/cubestack-installer。"""
+    rc, out, err = _ssh(run_node, "ls " + CUBESTACK_SCRIPT + " >/dev/null 2>&1 && ls " + CUBESTACK_BASE + "/kubespray/cluster.yml >/dev/null 2>&1 && echo ALREADY", timeout=20)
     if "ALREADY" in out:
-        return KUBESPRAY_DIR + "/kubespray"
+        return CUBESTACK_BASE
     _ensure_mc(run_node, task, db)
-    log_line(task, db, "      [下载] 从 MinIO " + _mc_env().split("@")[-1] + "/" + "cubestack" + "/installer/ansible/kubespray 下载 playbook 到 " + KUBESPRAY_DIR + " ...")
-    rc, out, err = _ssh(run_node, "sudo mkdir -p " + KUBESPRAY_DIR + " && sudo chown $(whoami) " + KUBESPRAY_DIR + " && " + _mc_env() + " mc mirror minio/cubestack/installer/ansible/kubespray " + KUBESPRAY_DIR + " && ls " + KUBESPRAY_DIR + "/kubespray/cluster.yml", timeout=900)
+    log_line(task, db, "      [下载] 从 MinIO " + _mc_env().split("@")[-1] + "/cubestack/installer/ansible/kubespray 下载离线安装工具到 " + CUBESTACK_BASE + " ...")
+    rc, out, err = _ssh(run_node, "sudo mkdir -p " + CUBESTACK_BASE + " && sudo chown $(whoami) " + CUBESTACK_BASE + " && " + _mc_env() + " mc mirror minio/cubestack/installer/ansible/kubespray " + CUBESTACK_BASE + " && chmod +x " + CUBESTACK_SCRIPT + " && ls " + CUBESTACK_BASE + "/kubespray/cluster.yml", timeout=1800)
     if rc != 0 or "cluster.yml" not in out:
-        raise RuntimeError("从 MinIO 下载 kubespray 失败: " + (err or out))
-    log_line(task, db, "      kubespray playbook 下载完成 ✓")
-    return KUBESPRAY_DIR + "/kubespray"
+        raise RuntimeError("从 MinIO 下载 kubespray 离线工具失败: " + (err or out))
+    log_line(task, db, "      cubestack 离线安装工具下载完成 ✓")
+    return CUBESTACK_BASE
 
 
 def _build_inventory(cluster: K8sCluster, nodes: list[ClusterNode], key_file: str) -> str:
-    """生成 kubespray inventory.ini。"""
+    """生成 kubespray inventory.ini(管理机本机执行路径)。"""
     masters = [n for n in nodes if n.role == "control_plane"]
     workers = [n for n in nodes if n.role == "worker"]
     lines = []
@@ -67,6 +73,45 @@ def _build_inventory(cluster: K8sCluster, nodes: list[ClusterNode], key_file: st
     return "\n".join(lines)
 
 
+def _build_inventory_yaml(cluster: K8sCluster, nodes: list[ClusterNode], key_file: str) -> str:
+    """生成新版 kubespray hosts.yml(运行节点 + cubestack-offline.sh 使用)。"""
+    masters = [n for n in nodes if n.role == "control_plane"]
+    workers = [n for n in nodes if n.role == "worker"]
+    lines = []
+    lines.append("all:")
+    lines.append("  vars:")
+    lines.append("    ansible_become: true")
+    lines.append("    ansible_become_method: sudo")
+    lines.append("kube_control_plane:")
+    lines.append("  hosts:")
+    for n in masters:
+        ip = n.ip or ""
+        lines.append("    " + n.name + ":")
+        lines.append("      ansible_host: " + ip)
+        lines.append("      ip: " + ip + "            # K8s 内部通信使用的 IP")
+        lines.append("      access_ip: " + ip + "     # API Server 对外暴露的 IP")
+        lines.append("      ansible_user: ubuntu")
+        lines.append("      ansible_ssh_private_key_file: " + key_file)
+    lines.append("etcd:")
+    lines.append("  children:")
+    lines.append("    kube_control_plane:")
+    lines.append("kube_node:")
+    lines.append("  hosts:")
+    for n in workers:
+        ip = n.ip or ""
+        lines.append("    " + n.name + ":")
+        lines.append("      ansible_host: " + ip)
+        lines.append("      ip: " + ip)
+        lines.append("      access_ip: " + ip)
+        lines.append("      ansible_user: ubuntu")
+        lines.append("      ansible_ssh_private_key_file: " + key_file)
+    lines.append("k8s_cluster:")
+    lines.append("  children:")
+    lines.append("    kube_control_plane:")
+    lines.append("    kube_node:")
+    return "\n".join(lines) + "\n"
+
+
 def run_cluster_install(task: DeployTask, db) -> None:
     """执行集群安装任务。"""
     cluster = db.get(K8sCluster, task.target_id)
@@ -91,38 +136,41 @@ def run_cluster_install(task: DeployTask, db) -> None:
     log_line(task, db, "节点: 控制平面 " + str(len([n for n in nodes if n.role == "control_plane"]))
              + " 个 / 工作节点 " + str(len([n for n in nodes if n.role == "worker"])) + " 个")
     if sim:
-        log_line(task, db, "[模式] 运行节点上未检测到 ansible-playbook / /opt/kubespray,以仿真模式执行(仅演示流程)")
+        log_line(task, db, "[模式] 以仿真模式执行(仅演示流程)")
     else:
-        log_line(task, db, "[模式] 检测到 Kubespray,以真实模式执行")
+        log_line(task, db, "[模式] 以真实模式执行")
     cluster.status = "installing"
     db.commit()
     task.progress = 5
     db.commit()
 
-    # 步骤 1: 校验 Kubespray 仓库(运行节点模式:从 MinIO 下载 playbook)
-    kubespray_path = None
+    # 步骤 1: 下载 cubestack 离线安装工具链到运行节点
     if run_node is not None:
-        log_line(task, db, "[1/8] 检查/下载运行节点 " + run_node.name + " 的 Kubespray playbook ...")
-        kubespray_path = _ensure_kubespray_on_host(run_node, task, db)
+        log_line(task, db, "[1/8] 检查/下载运行节点 " + run_node.name + " 的 cubestack 离线安装工具 ...")
+        _ensure_cubestack_on_host(run_node, task, db)
         rc, out, err = _ssh(run_node, "test -x " + ANSIBLE_VENV + "/bin/ansible-playbook && echo ANSIBLE_OK || echo NO_ANSIBLE", timeout=20)
         if "ANSIBLE_OK" not in out:
             raise RuntimeError("运行节点缺少 Ansible 环境,请先在创建集群向导「第一步」中准备安装机环境")
         log_line(task, db, "      ansible 环境(venv)检测: 通过 ✓")
     else:
         log_line(task, db, "[1/8] 校验管理机 Kubespray 仓库 " + KUBESPRAY_DIR + " ...")
-        ok = not sim
         if sim:
             time.sleep(0.6)
         log_line(task, db, "      仓库校验通过 ✓")
     task.progress = 12
     db.commit()
 
-    # 步骤 2: 生成 Ansible 清单
-    inventory = _build_inventory(cluster, nodes, key_file)
-    log_line(task, db, "[2/8] 生成 Ansible 清单(inventory.ini) ...")
+    # 步骤 2: 生成 Ansible 清单(运行节点模式:hosts.yml;本机模式:inventory.ini)
+    if run_node is not None:
+        inventory = _build_inventory_yaml(cluster, nodes, key_file)
+        inv_name = "hosts.yml"
+    else:
+        inventory = _build_inventory(cluster, nodes, key_file)
+        inv_name = "inventory.ini"
+    log_line(task, db, "[2/8] 生成 Ansible 清单(" + inv_name + ") ...")
     if sim:
         time.sleep(0.5)
-    log_line(task, db, "----- inventory.ini -----")
+    log_line(task, db, "----- " + inv_name + " -----")
     for line in inventory.splitlines():
         log_line(task, db, line)
     log_line(task, db, "-------------------------")
@@ -148,29 +196,31 @@ def run_cluster_install(task: DeployTask, db) -> None:
     task.progress = 50
     db.commit()
 
-    # 步骤 5: 运行 ansible-playbook cluster.yml
-    log_line(task, db, "[5/8] 运行 ansible-playbook -i inventory.ini cluster.yml ...")
+    # 步骤 5: 改写 hosts.yml + 运行 cubestack-offline.sh install
     if not sim:
         try:
             if run_node is not None:
-                inv_path = KUBESPRAY_DIR + "/inventory/cubestack-cluster/inventory.ini"
-                rc, out, err = _ssh(run_node, "mkdir -p " + KUBESPRAY_DIR + "/inventory/cubestack-cluster && cat > " + inv_path + " <<'CSIEOF'\n" + inventory + "\nCSIEOF\necho WROTE_OK", timeout=30)
+                inv_path = CUBESTACK_BASE + "/inventory/cubestack-cluster/hosts.yml"
+                rc, out, err = _ssh(run_node, "mkdir -p " + CUBESTACK_BASE + "/inventory/cubestack-cluster/group_vars/all && cat > " + inv_path + " <<'CSIEOF'\n" + inventory + "CSIEOF\necho WROTE_OK", timeout=30)
                 if rc != 0 or "WROTE_OK" not in out:
-                    raise RuntimeError("写入 inventory.ini 到运行节点失败: " + (err or out))
-                log_line(task, db, "      [运行节点 " + run_node.name + "] 已写入 inventory/cubestack-cluster/inventory.ini")
-                # 安装 kubespray 依赖(对齐 requirements.txt)
-                from .clusterprep import PIP_INDEX
-                idx = (" --index-url " + PIP_INDEX) if PIP_INDEX else ""
-                rc, out, err = _ssh(run_node, ANSIBLE_VENV + "/bin/python -m pip install -q " + idx + " -r " + KUBESPRAY_DIR + "/kubespray/requirements.txt && echo REQ_OK", timeout=900)
-                log_line(task, db, "      kubespray 依赖安装: " + ("✓" if "REQ_OK" in out else "跳过/失败(" + (err or out)[-120:] + ")"))
-                log_line(task, db, "      执行 ansible-playbook cluster.yml(运行节点 " + run_node.name + ") ...")
-                rc, out, err = _ssh(run_node, "cd " + KUBESPRAY_DIR + " && " + ANSIBLE_VENV + "/bin/ansible-playbook -i inventory/cubestack-cluster/inventory.ini kubespray/cluster.yml", timeout=3600)
+                    raise RuntimeError("写入 hosts.yml 到运行节点失败: " + (err or out))
+                log_line(task, db, "      [运行节点 " + run_node.name + "] 已改写 inventory/cubestack-cluster/hosts.yml")
+                # 预置 kubespray venv(uv + requirements.txt,幂等)
+                from .clusterprep import PIP_INDEX as _PI
+                idx = (" --index-url " + _PI) if _PI else ""
+                venv = CUBESTACK_BASE + "/kubespray/.venv"
+                rc, out, err = _ssh(run_node, "if [ ! -x " + venv + "/bin/ansible-playbook ]; then rm -rf " + venv + " && uv venv --python 3.12 " + venv + " && uv pip install --python " + venv + idx + " -r " + CUBESTACK_BASE + "/kubespray/requirements.txt; fi && echo VENV_OK", timeout=1200)
+                log_line(task, db, "      kubespray 依赖环境: " + ("✓" if "VENV_OK" in out else "失败(" + (err or out)[-200:] + ")"))
+                if "VENV_OK" not in out:
+                    raise RuntimeError("kubespray 依赖环境准备失败: " + (err or out))
+                log_line(task, db, "      执行 " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER + "(运行节点 " + run_node.name + ") ...")
+                rc, out, err = _ssh(run_node, "cd " + CUBESTACK_BASE + " && CUBESTACK_LOCAL_REPO_DIR=" + CUBESTACK_BASE + "/inventory/cubestack-cluster bash " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER, timeout=3600)
                 tail = (out or "").splitlines()[-40:]
                 for ln in tail:
                     if ln.strip():
                         log_line(task, db, "      " + ln.strip())
                 if rc != 0:
-                    raise RuntimeError("ansible-playbook 执行失败(rc=" + str(rc) + "): " + ((err or "")[-500:]))
+                    raise RuntimeError("cubestack-offline.sh 安装失败(rc=" + str(rc) + "): " + ((err or "")[-500:]))
             else:
                 ws = os.path.join(WORKSPACE, "cluster-" + cluster.name)
                 os.makedirs(ws, exist_ok=True)
@@ -181,8 +231,8 @@ def run_cluster_install(task: DeployTask, db) -> None:
                        os.path.join(KUBESPRAY_DIR, "cluster.yml")]
                 subprocess.run(cmd, check=True, timeout=3600)
         except Exception as exc:  # noqa: BLE001
-            log_line(task, db, "      真实执行失败,回退仿真: " + str(exc))
-            sim = True
+            log_line(task, db, "      真实执行失败: " + str(exc))
+            raise
     if sim:
         play_steps = [
             "       TASK [Gathering Facts] *****************************************",
