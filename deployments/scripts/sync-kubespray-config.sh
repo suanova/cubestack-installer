@@ -17,6 +17,8 @@ INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubes
 # ---------------- 从 cluster.conf 解析 IP ----------------
 # API Server 地址: 优先 APISERVER_ADDRESS(NAT 模式=第一个 master IP), 回退 HOST_PHYS_IP(桥接模式)
 HOST_IP="${APISERVER_ADDRESS:-${HOST_PHYS_IP:-10.66.3.37}}"
+# API Server 域名(跨网段统一入口), 默认 k8s-api.nova.local
+APISERVER_DOMAIN="${APISERVER_DOMAIN:-k8s-api.nova.local}"
 MASTER_IPS=()    # master 节点 IP
 WORKER_IPS=()    # worker 节点 IP
 for line in "${NODES[@]:-}"; do
@@ -34,6 +36,7 @@ done
 FIRST_WORKER="${WORKER_IPS[0]:-${HOST_IP}}"
 
 say "宿主机 IP: ${HOST_IP}"
+say "API 域名: ${APISERVER_DOMAIN}"
 say "Master IPs: ${MASTER_IPS[*]}"
 say "Worker IPs: ${WORKER_IPS[*]:-<无>}"
 
@@ -44,16 +47,20 @@ if [ -f "${ALL_YML}" ]; then
     # loadbalancer_apiserver.address → 宿主机物理 IP
     sed -i -E "s/^(\s+address:)\s+[0-9.]+(\s*#.*)?\$/\1 ${HOST_IP}\2/" "${ALL_YML}"
 
-    # supplementary_addresses_in_ssl_keys → 宿主机 IP + 所有 master IP + lb.k8s.local
-    awk -v host="${HOST_IP}" -v masters="${MASTER_IPS[*]}" '
+    # apiserver_loadbalancer_domain_name → 集群 API 域名
+    sed -i -E "s/^apiserver_loadbalancer_domain_name:.*/apiserver_loadbalancer_domain_name: \"${APISERVER_DOMAIN}\"/" "${ALL_YML}"
+
+    # supplementary_addresses_in_ssl_keys → API 域名 + 宿主机 IP + 所有 master IP
+    awk -v host="${HOST_IP}" -v domain="${APISERVER_DOMAIN}" -v masters="${MASTER_IPS[*]}" '
         /^supplementary_addresses_in_ssl_keys:/ { in_sec=1; print; next }
         in_sec && /^[[:space:]]*-/ {
-            # 跳过旧的 IP 条目和 lb.k8s.local(保留 lb.k8s.local)
-            if ($0 ~ /lb\.k8s\.local/) { print; next }
+            # 跳过旧的域名/IP 条目(保留 k8s-api.nova.local)
+            if ($0 ~ /nova\.local|lb\.k8s\.local/) { next }
             next
         }
         in_sec && !/^[[:space:]]*-/ {
-            # 区块结束,输出宿主机 + masters 条目
+            # 区块结束,输出 API 域名 + 宿主机 + masters 条目
+            print "  - " domain
             print "  - " host "           # 宿主机物理 IP(worker 通过此地址访问 API Server)"
             split(masters, arr, " ")
             for (i in arr) print "  - " arr[i]
@@ -63,7 +70,7 @@ if [ -f "${ALL_YML}" ]; then
         }
         { print }
     ' "${ALL_YML}" > "${ALL_YML}.tmp" && mv "${ALL_YML}.tmp" "${ALL_YML}"
-    ok "已同步 loadbalancer_apiserver / supplementary_addresses_in_ssl_keys"
+    ok "已同步 loadbalancer_apiserver / apiserver_loadbalancer_domain_name / supplementary_addresses_in_ssl_keys"
 else
     warn "未找到 ${ALL_YML},跳过"
 fi

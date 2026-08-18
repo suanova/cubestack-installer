@@ -10,6 +10,14 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"          # deployments/scripts/ → 根目录
 
+# 真实用户 home(sudo bash 下 HOME=/root 会出错, 用 SUDO_USER 定位真实用户)
+REAL_USER="${SUDO_USER:-${USER:-$(id -un)}}"
+REAL_HOME="$(getent passwd "${REAL_USER}" 2>/dev/null | cut -d: -f6)"
+[ -n "${REAL_HOME}" ] || REAL_HOME="${HOME}"
+export REAL_HOME REAL_USER
+# 统一 HOME 为真实用户(sudo bash 下 HOME=/root, 会导致配置里 ${HOME}/.ssh 等解析错误)
+[ -n "${REAL_HOME}" ] && export HOME="${REAL_HOME}"
+
 # ---------------- 多集群: 集群名解析 ----------------
 # 优先级: 环境变量 CLUSTER_NAME > 环境变量 CUBESTACK_CLUSTER > 默认值
 CLUSTER_NAME="${CLUSTER_NAME:-${CUBESTACK_CLUSTER:-}}"
@@ -53,10 +61,13 @@ is_state_completed() {
 }
 
 # ---------------- 输出函数 ----------------
+# 日志开关: LOG_VERBOSE=1 显示详细日志(默认) / 0 仅显示关键信息
+LOG_VERBOSE="${LOG_VERBOSE:-1}"
 say()  { echo -e "\033[36m→  $*\033[0m"; }
 ok()   { echo -e "\033[32m✅ $*\033[0m"; }
 warn() { echo -e "\033[33m⚠  $*\033[0m"; }
 err()  { echo -e "\033[31m【错误】$*\033[0m" >&2; }
+vlog() { [ "${LOG_VERBOSE}" = "1" ] && echo -e "\033[90m[DEBUG] $*\033[0m" || true; }
 
 # ---------------- 统一配置加载 ----------------
 # 环境变量优先: 配置文件内使用 ${VAR:-default},已导出的环境变量不会被覆盖
