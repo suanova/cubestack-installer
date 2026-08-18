@@ -270,7 +270,11 @@ cubestack-installer/
 │   │   └── index.css               # 设计系统
 │   ├── Dockerfile + nginx.conf
 │   └── vite.config.js
-├── scripts/                        # 启动脚本(dev / start-backend / start-frontend)
+├── scripts/                        # 开发启动脚本(dev / start-backend / start-frontend)
+├── deployments/
+│   ├── scripts/                    # 部署脚本(14 脚本, 从0到1离线部署 kubespray)
+│   ├── kubespray/                  # kubespray 源码 + inventory + 离线资源
+│   └── virtual-machine/            # 虚拟机基础镜像
 ├── docs/                           # api.md / architecture.md
 ├── Makefile
 ├── docker-compose.yml
@@ -324,20 +328,20 @@ cubestack-installer/
 cp config/cluster.conf.example config/cluster.conf && vim config/cluster.conf
 
 # 全流程部署(含 kubespray 离线安装)
-sudo ./scripts/deploy-cluster.sh --with-k8s
+sudo ./deployments/scripts/deploy-cluster.sh --with-k8s
 ```
 
 **核心脚本:**
 
 | 脚本 | 作用 |
 |---|---|
-| `scripts/deploy-cluster.sh` | 一键编排(主入口) |
-| `scripts/create-libvirt-vm.sh` | 创建单台虚拟机(自动注册 cluster.conf + 安装 kubespray 所需包) |
-| `scripts/create-vm-template.sh` | 制作黄金基础镜像 |
-| `scripts/gen-inventory.sh` | 生成 kubespray inventory(`INV_ROLES`/`INV_EXCLUDE` 过滤) |
-| `scripts/sync-kubespray-config.sh` | 从 cluster.conf 动态生成 group_vars 中的 IP(避免硬编码) |
-| `scripts/register-vm.sh` | 注册已存在 VM 到 cluster.conf |
-| `scripts/install-worker-packages.sh` | 离线 .deb 包安装到 bare-metal worker |
+| `deployments/scripts/deploy-cluster.sh` | 一键编排(主入口) |
+| `deployments/scripts/create-libvirt-vm.sh` | 创建单台虚拟机(自动注册 cluster.conf + 安装 kubespray 所需包) |
+| `deployments/scripts/create-vm-template.sh` | 制作黄金基础镜像 |
+| `deployments/scripts/gen-inventory.sh` | 生成 kubespray inventory(`INV_ROLES`/`INV_EXCLUDE` 过滤) |
+| `deployments/scripts/sync-kubespray-config.sh` | 从 cluster.conf 动态生成 group_vars 中的 IP(避免硬编码) |
+| `deployments/scripts/register-vm.sh` | 注册已存在 VM 到 cluster.conf |
+| `deployments/scripts/install-worker-packages.sh` | 离线 .deb 包安装到 bare-metal worker |
 | `deployments/kubespray/cubestack-offline.sh` | kubespray 离线安装/扩容(init/download/install/scale/check) |
 
 **离线资源目录:**
@@ -352,5 +356,5 @@ deployments/kubespray/
     └── packages/                 # 系统 .deb 包(iputils-ping/rsync/iptables/curl/ca-certificates)
 ```
 
-完整分步指南(含扩容、跨网段 bare-metal worker)见 **`scripts/README.md` 第 8 节「从 0 到 1:离线部署 kubespray 集群」**。
+完整分步指南(含扩容、跨网段 bare-metal worker)见 **`deployments/scripts/README.md` 第 8 节「从 0 到 1:离线部署 kubespray 集群」**。
 

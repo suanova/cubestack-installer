@@ -29,6 +29,9 @@ nohup.out
 
 # 集群统一配置(含密码,勿提交;模板 cluster.conf.example 需提交)
 config/cluster.conf
+# 多集群配置 + 断点状态文件
+config/cluster-*.conf
+config/.cluster-*.state
 # 部署生成的 inventory(含密码)
 deployments/kubespray/inventory/cubestack-cluster/hosts.yml
 deployments/kubespray/inventory/cubestack-cluster/inventory.ini

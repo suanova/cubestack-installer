@@ -1,15 +1,56 @@
 #!/bin/bash
 # ============================================================
 # CubeStack 公共库: 统一配置加载 + 通用工具函数
-# 所有 scripts/*.sh 在 set -euo pipefail 之后 source 本文件
-# 配置统一来源: config/cluster.conf (同时驱动虚拟机创建与 kubespray inventory 生成)
+# 所有 deployments/scripts/*.sh 在 set -euo pipefail 之后 source 本文件
+# 配置统一来源: config/cluster.conf (单集群) 或 config/cluster-${CLUSTER_NAME}.conf (多集群)
 # 优先级: 环境变量 > 配置文件 > 内置默认值(内置默认值在配置文件中声明)
 # 说明: 本库不执行任何宿主修改,仅供各脚本复用
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/config/cluster.conf}"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"          # deployments/scripts/ → 根目录
+
+# ---------------- 多集群: 集群名解析 ----------------
+# 优先级: 环境变量 CLUSTER_NAME > 环境变量 CUBESTACK_CLUSTER > 默认值
+CLUSTER_NAME="${CLUSTER_NAME:-${CUBESTACK_CLUSTER:-}}"
+[ -n "${CLUSTER_NAME}" ] || CLUSTER_NAME="cubestack-cluster"
+export CLUSTER_NAME
+
+# ---------------- 多集群: 配置文件解析 ----------------
+# 优先 cluster-${CLUSTER_NAME}.conf, 回退 cluster.conf
+CONF_BY_CLUSTER="${REPO_ROOT}/config/cluster-${CLUSTER_NAME}.conf"
+if [ -f "${CONF_BY_CLUSTER}" ]; then
+    CLUSTER_CONF="${CLUSTER_CONF:-${CONF_BY_CLUSTER}}"
+else
+    CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/config/cluster.conf}"
+fi
+export CLUSTER_CONF
+
+# ---------------- 断点续跑: 状态文件 ----------------
+# 每个集群独立的状态文件,记录已完成的任务阶段
+# 用法: save_state <phase> <value>; get_state <phase>; clear_state
+STATE_FILE="${REPO_ROOT}/config/.cluster-${CLUSTER_NAME}.state"
+save_state() {
+    local key="$1" val="$2"
+    # 移除旧记录再写入(避免重复)
+    grep -vF "${key}=" "${STATE_FILE}" 2>/dev/null > "${STATE_FILE}.tmp" || true
+    echo "${key}=${val}" >> "${STATE_FILE}.tmp"
+    mv "${STATE_FILE}.tmp" "${STATE_FILE}"
+}
+get_state() {
+    grep -F "$1=" "${STATE_FILE}" 2>/dev/null | tail -1 | cut -d= -f2-
+}
+clear_state() {
+    rm -f "${STATE_FILE}"
+}
+# 检查是否所有 phases 都已完成 → 上次部署成功
+is_state_completed() {
+    local phases=("$@")
+    for p in "${phases[@]}"; do
+        [ "$(get_state "$p")" = "done" ] || return 1
+    done
+    return 0
+}
 
 # ---------------- 输出函数 ----------------
 say()  { echo -e "\033[36m→  $*\033[0m"; }
@@ -63,7 +104,7 @@ node_password() { # <role> <password>
 repo_root() { echo "${REPO_ROOT}"; }
 
 # ---------------- 节点注册到 cluster.conf ----------------
-# 将节点信息写入 config/cluster.conf 的 NODES 数组(幂等)
+# 将节点信息写入 config/cluster.conf(或 cluster-${CLUSTER_NAME}.conf) 的 NODES 数组(幂等)
 # 用法: register_node_to_conf <role> <hostname> <ip> <mac> <mem> <cpu> <disk> <user> <password>
 register_node_to_conf() {
     local role="$1" hostname="$2" ip="$3" mac="$4" mem="$5" cpu="$6" disk="$7" user="$8" pw="$9"
