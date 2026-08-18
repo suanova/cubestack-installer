@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { CONSTANTS, clusterApi, vmApi } from '../api/client'
+import { CONSTANTS, clusterApi, hostApi, vmApi } from '../api/client'
 import Field, { CheckboxCard, Select } from '../components/Field'
 import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
@@ -14,8 +14,8 @@ const STATUS_MAP = {
 }
 
 const emptyForm = {
-  name: '', k8s_version: CONSTANTS.k8sVersions[2], network_plugin: 'calico',
-  kubespray_version: CONSTANTS.kubesprayVersions[1], cp_ids: [], worker_ids: [], ssh_key: '',
+  name: '', network_plugin: 'calico', run_node_host_id: '',
+  cp_ids: [], worker_ids: [], ssh_key: '',
 }
 
 export default function ClustersPage() {
@@ -28,6 +28,7 @@ export default function ClustersPage() {
   const [showCreate, setShowCreate] = useState(false)
   const [form, setForm] = useState(emptyForm)
   const [vms, setVms] = useState([])
+  const [hosts, setHosts] = useState([])
   const [busy, setBusy] = useState(false)
   const [detail, setDetail] = useState(null)
   const [deleting, setDeleting] = useState(null)
@@ -53,6 +54,13 @@ export default function ClustersPage() {
     vmApi
       .list(token)
       .then(setVms)
+      .catch(() => {})
+    hostApi
+      .list(token)
+      .then((hs) => {
+        setHosts(hs)
+        setForm((f) => (f.run_node_host_id === '' && hs.length ? { ...f, run_node_host_id: String(hs[0].id) } : f))
+      })
       .catch(() => {})
   }
 
@@ -81,9 +89,8 @@ export default function ClustersPage() {
       .create(
         {
           name: form.name.trim(),
-          k8s_version: form.k8s_version,
           network_plugin: form.network_plugin,
-          kubespray_version: form.kubespray_version,
+          run_node_host_id: form.run_node_host_id ? Number(form.run_node_host_id) : null,
           control_plane_vm_ids: form.cp_ids,
           worker_vm_ids: form.worker_ids,
           ssh_key: form.ssh_key.trim() || null,
@@ -159,7 +166,7 @@ export default function ClustersPage() {
                 <th>{t('common.name')}</th>
                 <th>{t('clusters.version')}</th>
                 <th>{t('clusters.nodes')}</th>
-                <th>Kubespray</th>
+                <th>{t('clusters.runNode')}</th>
                 <th>{t('common.status')}</th>
                 <th className="th-actions">{t('common.actions')}</th>
               </tr>
@@ -188,7 +195,7 @@ export default function ClustersPage() {
                         <span>{t('clusters.workerCount', { n: c.worker_count })}</span>
                       </div>
                     </td>
-                    <td className="td-mono td-muted">{c.kubespray_version}</td>
+                    <td className="td-mono td-muted">{c.run_node_name || t('clusters.runNodeAuto')}</td>
                     <td>
                       <span className={'badge ' + st.cls}>{t(st.key)}</span>
                     </td>
@@ -223,20 +230,22 @@ export default function ClustersPage() {
             <div className="grid-2">
               <Field label={t('clusters.name')} placeholder="prod-cluster" value={form.name} required
                 onChange={(e) => setForm({ ...form, name: e.target.value })} />
-              <Select label={t('clusters.k8sVersion')} value={form.k8s_version}
-                onChange={(e) => setForm({ ...form, k8s_version: e.target.value })}>
-                {CONSTANTS.k8sVersions.map((v) => <option key={v} value={v}>{v}</option>)}
-              </Select>
-            </div>
-            <div className="grid-2">
               <Select label={t('clusters.plugin')} value={form.network_plugin}
                 onChange={(e) => setForm({ ...form, network_plugin: e.target.value })}>
                 {CONSTANTS.networkPlugins.map((p) => <option key={p} value={p}>{p}</option>)}
               </Select>
-              <Select label={t('clusters.kubespray')} value={form.kubespray_version}
-                onChange={(e) => setForm({ ...form, kubespray_version: e.target.value })}>
-                {CONSTANTS.kubesprayVersions.map((v) => <option key={v} value={v}>{v}</option>)}
-              </Select>
+            </div>
+            <div className="field">
+              <span className="field-label">{t('clusters.runNode')}</span>
+              <select className="input" value={form.run_node_host_id}
+                onChange={(e) => setForm({ ...form, run_node_host_id: e.target.value })}>
+                <option value="">{t('clusters.runNodeAuto')}</option>
+                {hosts.map((h) => (
+                  <option key={h.id} value={h.id}>{h.name} ({h.ip})</option>
+                ))}
+              </select>
+              {hosts.length === 0 && <span className="td-hint">{t('clusters.noHost')}</span>}
+              <span className="td-hint">{t('clusters.runNodeHint')}</span>
             </div>
 
             <div className="field">
@@ -286,7 +295,7 @@ export default function ClustersPage() {
           <div className="detail-kv">
             <div><span>{t('clusters.k8sVersion')}</span><strong>{detail.cluster.k8s_version}</strong></div>
             <div><span>{t('clusters.plugin')}</span><strong>{detail.cluster.network_plugin}</strong></div>
-            <div><span>Kubespray</span><strong>{detail.cluster.kubespray_version}</strong></div>
+            <div><span>{t('clusters.runNode')}</span><strong>{detail.cluster.run_node_name || t('clusters.runNodeAuto')}</strong></div>
             <div><span>{t('common.status')}</span>
               <strong>
                 <span className={'badge ' + (STATUS_MAP[detail.cluster.status] || {}).cls}>

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from ..deps import get_current_user, get_db, require_admin
 from ...engine.executor import start_task
-from ...models import ClusterNode, DeployTask, K8sCluster, User, VirtualMachine
+from ...models import ClusterNode, DeployTask, Host, K8sCluster, User, VirtualMachine
 from ...schemas import (
     ClusterCreateIn,
     ClusterDetailOut,
@@ -22,6 +22,10 @@ def _to_out(cluster: K8sCluster, db: Session) -> ClusterOut:
     nodes = db.query(ClusterNode).filter(ClusterNode.cluster_id == cluster.id).all()
     out.control_plane_count = len([n for n in nodes if n.role == "control_plane"])
     out.worker_count = len([n for n in nodes if n.role == "worker"])
+    if cluster.run_node_host_id:
+        run_host = db.get(Host, cluster.run_node_host_id)
+        if run_host is not None:
+            out.run_node_name = run_host.name + " (" + run_host.ip + ")"
     return out
 
 
@@ -52,12 +56,17 @@ def create_cluster(
     vms = db.query(VirtualMachine).filter(VirtualMachine.id.in_(all_ids)).all()
     if len(vms) != len(all_ids):
         raise HTTPException(status_code=400, detail="存在无效的虚拟机选择")
+    if payload.run_node_host_id is not None:
+        run_host = db.get(Host, payload.run_node_host_id)
+        if run_host is None:
+            raise HTTPException(status_code=400, detail="Kubespray 运行节点不存在(宿主机 ID 无效)")
 
     cluster = K8sCluster(
         name=payload.name,
         k8s_version=payload.k8s_version,
         network_plugin=payload.network_plugin,
         kubespray_version=payload.kubespray_version,
+        run_node_host_id=payload.run_node_host_id,
         ssh_key=payload.ssh_key,
         status="pending",
     )
