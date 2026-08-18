@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { CONSTANTS, clusterApi, vmApi } from '../api/client'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { CONSTANTS, clusterApi, hostApi, taskApi, vmApi } from '../api/client'
 import Field, { CheckboxCard, Select } from '../components/Field'
 import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
@@ -14,8 +14,8 @@ const STATUS_MAP = {
 }
 
 const emptyForm = {
-  name: '', k8s_version: CONSTANTS.k8sVersions[2], network_plugin: 'calico',
-  kubespray_version: CONSTANTS.kubesprayVersions[1], cp_ids: [], worker_ids: [], ssh_key: '',
+  name: '', network_plugin: 'calico', run_node_host_id: '',
+  cp_ids: [], worker_ids: [], ssh_key: '',
 }
 
 export default function ClustersPage() {
@@ -28,10 +28,16 @@ export default function ClustersPage() {
   const [showCreate, setShowCreate] = useState(false)
   const [form, setForm] = useState(emptyForm)
   const [vms, setVms] = useState([])
+  const [hosts, setHosts] = useState([])
   const [busy, setBusy] = useState(false)
   const [detail, setDetail] = useState(null)
   const [deleting, setDeleting] = useState(null)
   const [deployingId, setDeployingId] = useState(null)
+  const [wizard, setWizard] = useState(null)
+  const [wizStep, setWizStep] = useState(0)
+  const [stepState, setStepState] = useState({ 1: 'idle', 2: 'idle', 3: 'idle' })
+  const [stepLogs, setStepLogs] = useState({ 1: '', 2: '', 3: '' })
+  const logRefs = { 1: useRef(null), 2: useRef(null), 3: useRef(null) }
 
   const load = useCallback(() => {
     clusterApi
@@ -47,12 +53,25 @@ export default function ClustersPage() {
     return () => clearInterval(iv)
   }, [load])
 
+  useEffect(() => {
+    ;[1, 2, 3].forEach((n) => {
+      if (logRefs[n].current) logRefs[n].current.scrollTop = logRefs[n].current.scrollHeight
+    })
+  }, [stepLogs])
+
   function openCreate() {
     setForm(emptyForm)
     setShowCreate(true)
     vmApi
       .list(token)
       .then(setVms)
+      .catch(() => {})
+    hostApi
+      .list(token)
+      .then((hs) => {
+        setHosts(hs)
+        setForm((f) => (f.run_node_host_id === '' && hs.length ? { ...f, run_node_host_id: String(hs[0].id) } : f))
+      })
       .catch(() => {})
   }
 
@@ -81,9 +100,8 @@ export default function ClustersPage() {
       .create(
         {
           name: form.name.trim(),
-          k8s_version: form.k8s_version,
           network_plugin: form.network_plugin,
-          kubespray_version: form.kubespray_version,
+          run_node_host_id: form.run_node_host_id ? Number(form.run_node_host_id) : null,
           control_plane_vm_ids: form.cp_ids,
           worker_vm_ids: form.worker_ids,
           ssh_key: form.ssh_key.trim() || null,
@@ -93,6 +111,10 @@ export default function ClustersPage() {
       .then((c) => {
         setClusters((list) => [...list, c])
         setShowCreate(false)
+        setWizard(c)
+        setWizStep(0)
+        setStepState({ 1: 'idle', 2: 'idle', 3: 'idle' })
+        setStepLogs({ 1: '', 2: '', 3: '' })
         toast(t('clusters.created', { name: c.name }))
       })
       .catch((err) => toast(err.message, 'error'))
@@ -133,6 +155,57 @@ export default function ClustersPage() {
       })
   }
 
+  function runWizardStep(n) {
+    if (!wizard) return
+    const apiCall = n === 1 ? clusterApi.prepare : n === 2 ? clusterApi.sshkey : clusterApi.deploy
+    setStepState((s) => ({ ...s, [n]: 'running' }))
+    setStepLogs((l) => ({ ...l, [n]: '' }))
+    apiCall(wizard.id, token)
+      .then((res) => pollStep(n, res.task_id))
+      .catch((err) => {
+        setStepState((s) => ({ ...s, [n]: 'failed' }))
+        setStepLogs((l) => ({ ...l, [n]: '请求失败: ' + err.message }))
+      })
+  }
+
+  function pollStep(n, taskId) {
+    let iv
+    const tick = () => {
+      taskApi
+        .get(taskId, token)
+        .then((tk) => {
+          setStepLogs((l) => ({ ...l, [n]: (tk.log_text || '').split('\n').slice(-80).join('\n') }))
+          if (tk.status === 'success' || tk.status === 'failed') {
+            clearInterval(iv)
+            setStepState((s) => ({ ...s, [n]: tk.status === 'success' ? 'success' : 'failed' }))
+            if (tk.status === 'success') {
+              toast(t('clusters.stepOk', { n }))
+              load()
+            } else {
+              toast(t('clusters.stepFail', { n }), 'error')
+            }
+          }
+        })
+        .catch(() => {
+          clearInterval(iv)
+          setStepState((s) => ({ ...s, [n]: 'failed' }))
+        })
+    }
+    tick()
+    iv = setInterval(tick, 2000)
+  }
+
+  function closeWizard() {
+    setWizard(null)
+    load()
+  }
+
+  const WIZARD_STEPS = [
+    { title: t('clusters.step1Title'), desc: t('clusters.step1Desc') },
+    { title: t('clusters.step2Title'), desc: t('clusters.step2Desc') },
+    { title: t('clusters.step3Title'), desc: t('clusters.step3Desc') },
+  ]
+
   if (loading) {
     return (
       <div className="page-loader">
@@ -159,7 +232,7 @@ export default function ClustersPage() {
                 <th>{t('common.name')}</th>
                 <th>{t('clusters.version')}</th>
                 <th>{t('clusters.nodes')}</th>
-                <th>Kubespray</th>
+                <th>{t('clusters.runNode')}</th>
                 <th>{t('common.status')}</th>
                 <th className="th-actions">{t('common.actions')}</th>
               </tr>
@@ -188,7 +261,7 @@ export default function ClustersPage() {
                         <span>{t('clusters.workerCount', { n: c.worker_count })}</span>
                       </div>
                     </td>
-                    <td className="td-mono td-muted">{c.kubespray_version}</td>
+                    <td className="td-mono td-muted">{c.run_node_name || t('clusters.runNodeAuto')}</td>
                     <td>
                       <span className={'badge ' + st.cls}>{t(st.key)}</span>
                     </td>
@@ -223,20 +296,22 @@ export default function ClustersPage() {
             <div className="grid-2">
               <Field label={t('clusters.name')} placeholder="prod-cluster" value={form.name} required
                 onChange={(e) => setForm({ ...form, name: e.target.value })} />
-              <Select label={t('clusters.k8sVersion')} value={form.k8s_version}
-                onChange={(e) => setForm({ ...form, k8s_version: e.target.value })}>
-                {CONSTANTS.k8sVersions.map((v) => <option key={v} value={v}>{v}</option>)}
-              </Select>
-            </div>
-            <div className="grid-2">
               <Select label={t('clusters.plugin')} value={form.network_plugin}
                 onChange={(e) => setForm({ ...form, network_plugin: e.target.value })}>
                 {CONSTANTS.networkPlugins.map((p) => <option key={p} value={p}>{p}</option>)}
               </Select>
-              <Select label={t('clusters.kubespray')} value={form.kubespray_version}
-                onChange={(e) => setForm({ ...form, kubespray_version: e.target.value })}>
-                {CONSTANTS.kubesprayVersions.map((v) => <option key={v} value={v}>{v}</option>)}
-              </Select>
+            </div>
+            <div className="field">
+              <span className="field-label">{t('clusters.runNode')}</span>
+              <select className="input" value={form.run_node_host_id}
+                onChange={(e) => setForm({ ...form, run_node_host_id: e.target.value })}>
+                <option value="">{t('clusters.runNodeAuto')}</option>
+                {hosts.map((h) => (
+                  <option key={h.id} value={h.id}>{h.name} ({h.ip})</option>
+                ))}
+              </select>
+              {hosts.length === 0 && <span className="td-hint">{t('clusters.noHost')}</span>}
+              <span className="td-hint">{t('clusters.runNodeHint')}</span>
             </div>
 
             <div className="field">
@@ -286,7 +361,7 @@ export default function ClustersPage() {
           <div className="detail-kv">
             <div><span>{t('clusters.k8sVersion')}</span><strong>{detail.cluster.k8s_version}</strong></div>
             <div><span>{t('clusters.plugin')}</span><strong>{detail.cluster.network_plugin}</strong></div>
-            <div><span>Kubespray</span><strong>{detail.cluster.kubespray_version}</strong></div>
+            <div><span>{t('clusters.runNode')}</span><strong>{detail.cluster.run_node_name || t('clusters.runNodeAuto')}</strong></div>
             <div><span>{t('common.status')}</span>
               <strong>
                 <span className={'badge ' + (STATUS_MAP[detail.cluster.status] || {}).cls}>
@@ -323,6 +398,70 @@ export default function ClustersPage() {
           )}
           <div className="modal-actions">
             <button className="btn btn-ghost" onClick={() => setDetail(null)}>{t('common.close')}</button>
+          </div>
+        </Modal>
+      )}
+
+      {wizard && (
+        <Modal title={t('clusters.wizardTitle', { name: wizard.name })} onClose={closeWizard} width="780px">
+          <p className="cmd-note cmd-note-top">{t('clusters.wizardSub', { node: wizard.run_node_name || t('clusters.runNodeAuto') })}</p>
+
+          {/* 步骤指示器(与添加宿主机向导一致) */}
+          <div className="wizard-steps">
+            {WIZARD_STEPS.map((s, i) => {
+              const done = stepState[i + 1] === 'success'
+              return (
+                <div key={i} className={'wizard-step' + (i === wizStep ? ' active' : done ? ' done' : '')}>
+                  <span className="wizard-step-dot">{done ? '✓' : String(i + 1)}</span>
+                  <span className="wizard-step-label">{s.title}</span>
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="wizard-body">
+            {[1, 2, 3].map((n) => {
+              const st = stepState[n]
+              const badge =
+                st === 'success' ? 'badge-success' : st === 'failed' ? 'badge-failed' : st === 'running' ? 'badge-info' : 'badge-muted'
+              const label =
+                st === 'success' ? t('status.success') : st === 'failed' ? t('status.failed') : st === 'running' ? t('clusters.stepRunning') : t('clusters.stepReady')
+              return (
+                wizStep === n - 1 && (
+                  <div key={n}>
+                    <div className="wizard-step-run">
+                      <span className="wizard-desc">{WIZARD_STEPS[n - 1].desc}</span>
+                      <button className="btn btn-primary" disabled={st === 'running'} onClick={() => runWizardStep(n)}>
+                        {st === 'running' ? t('common.loading') : st === 'success' ? t('clusters.stepRerun') : t('clusters.stepRun')}
+                      </button>
+                      <span className={'badge ' + badge}>{label}</span>
+                    </div>
+                    {stepLogs[n] && (
+                      <pre ref={logRefs[n]} className="log-viewer wizard-step-log">
+                        {stepLogs[n]}
+                      </pre>
+                    )}
+                  </div>
+                )
+              )
+            })}
+          </div>
+
+          {/* 底部导航(与添加宿主机向导一致) */}
+          <div className="wizard-foot">
+            <span className="wizard-foot-left" />
+            <div className="wizard-foot-actions">
+              {wizStep > 0 && (
+                <button className="btn btn-ghost" onClick={() => setWizStep(wizStep - 1)}>{t('clusters.wizardPrev')}</button>
+              )}
+              {wizStep < 2 ? (
+                <button className="btn btn-primary" disabled={stepState[wizStep + 1] !== 'success'} onClick={() => setWizStep(wizStep + 1)}>
+                  {t('clusters.wizardNext')} →
+                </button>
+              ) : (
+                <button className="btn btn-primary" onClick={closeWizard}>{t('common.close')}</button>
+              )}
+            </div>
           </div>
         </Modal>
       )}

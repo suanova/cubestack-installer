@@ -14,6 +14,7 @@ const DOCS = [
     items: [
       { m: 'GET', p: '/api/hosts', d: ['宿主机列表', 'List hosts'], input: '-', output: '200 [{"id":1,"name":"node1","ip":"192.168.10.11","status":"online",...}]' },
       { m: 'POST', p: '/api/hosts', d: ['添加宿主机(管理员)', 'Add host (admin)'], input: '{"name":"node3","ip":"192.168.10.13","ssh_user":"root","ssh_port":22,"cpu_cores":8,"memory_gb":32,"disk_gb":500}', output: '201 {"id":3,"name":"node3","status":"unknown",...}' },
+      { m: 'POST', p: '/api/hosts/precheck', d: ['宿主机向导预检:免密连通 + Ubuntu/libvirt 环境检测(不落库)', 'Host wizard precheck: SSH + Ubuntu/libvirt env check'], input: '{"name":"node3","ip":"192.168.10.13","ssh_user":"ubuntu","ssh_port":22,"cpu_cores":8,"memory_gb":32,"disk_gb":500}', output: '200 {"id":0,"name":"node3","status":"online","libvirt_ready":true,"check_report":"{\"packages\":{...}}"}' },
       { m: 'POST', p: '/api/hosts/{id}/check', d: ['SSH 连通性检测', 'SSH connectivity check'], input: '-', output: '200 {"id":3,"status":"online",...}' },
       { m: 'DELETE', p: '/api/hosts/{id}', d: ['删除宿主机(管理员)', 'Delete host (admin)'], input: '-', output: '200 {"message":"ok"}' },
     ],
@@ -21,8 +22,11 @@ const DOCS = [
   {
     section: ['虚拟机', 'Virtual Machines'],
     items: [
+      { m: 'GET', p: '/api/vms/providers', d: ['虚拟化后端状态(libvirt / kubevirt)', 'Virtualization backend status'], input: '-', output: '200 [{"key":"libvirt","name":"Libvirt","available":true,"mode":"real","detail":"..."}]' },
+      { m: 'GET', p: '/api/vms/images?host_id=', d: ['MinIO 模板镜像列表(cubestack/installer/vm),host_id 可选', 'List MinIO template images (optional host_id)'], input: 'query: host_id', output: '200 [{"name":"ubuntu-template-v2.qcow2","size":6109069312,"last_modified":"..."}]' },
+      { m: 'POST', p: '/api/vms/batch', d: ['从一个宿主机批量创建多台 VM,默认 2vCPU/16GB(管理员)', 'Batch create VMs from one host (admin)'], input: '{"names":["master1","master2","master3"],"host_id":3,"cpu":2,"memory_gb":16,"disk_gb":40,"image":"ubuntu-template-v2.qcow2"}', output: '202 {"task_ids":[6,7,8],"vms":[{"id":4,"name":"master1","status":"pending",...}]}' },
       { m: 'GET', p: '/api/vms', d: ['虚拟机列表(含宿主机信息)', 'List VMs with host info'], input: '-', output: '200 [{"id":1,"name":"k8s-master-1","host_name":"node1","ip":"192.168.10.101","status":"running",...}]' },
-      { m: 'POST', p: '/api/vms', d: ['创建虚拟机,返回并启动部署任务(管理员)', 'Create VM, returns task (admin)'], input: '{"name":"k8s-node-4","host_id":2,"cpu":8,"memory_gb":16,"disk_gb":80,"image":"ubuntu-22.04-cloud.qcow2","auto_ip":true}', output: '202 {"task_id":7,"vm":{"id":5,"name":"k8s-node-4","status":"pending",...}}' },
+      { m: 'POST', p: '/api/vms', d: ['创建虚拟机,返回并启动部署任务(管理员)', 'Create VM, returns task (admin)'], input: '{"name":"k8s-node-4","host_id":2,"cpu":2,"memory_gb":16,"disk_gb":80,"image":"ubuntu-22.04-cloud.qcow2"}', output: '202 {"task_id":7,"vm":{"id":5,"name":"k8s-node-4","status":"pending",...}}' },
       { m: 'POST', p: '/api/vms/{id}/action', d: ['电源操作 start|stop|reboot(管理员)', 'Power actions (admin)'], input: '{"action":"start"}', output: '200 {"id":5,"status":"running",...}' },
       { m: 'DELETE', p: '/api/vms/{id}', d: ['删除虚拟机(管理员)', 'Delete VM (admin)'], input: '-', output: '200 {"message":"ok"}' },
     ],

@@ -77,9 +77,11 @@ class K8sCluster(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(80), unique=True, index=True)
-    k8s_version: Mapped[str] = mapped_column(String(20))
+    k8s_version: Mapped[str] = mapped_column(String(20), default="v1.28.13")
     network_plugin: Mapped[str] = mapped_column(String(20), default="calico")
     kubespray_version: Mapped[str] = mapped_column(String(30), default="v2.25.0")
+    run_node_host_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Kubespray 运行节点(宿主机 ID,None=平台管理机本机执行)
     ssh_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     # pending|installing|ready|failed
