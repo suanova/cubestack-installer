@@ -32,6 +32,13 @@ PORT=6443
 say "API 入口: ${API_IP}:${PORT}"
 say "后端 master: ${#MASTER_IPS[@]} 台"
 
+# 清理旧的 DNAT 转发规则(历史 bridge 模式残留: 10.66.3.37:6443 → 10.244.x.x)
+# 会劫持流量绕过 HAProxy, 导致 worker 无法访问 API; HAProxy 接管后无需任何 6443 DNAT
+sudo nft -a list chain ip nat PREROUTING 2>/dev/null | grep "dport ${PORT}.*dnat to" | grep -oE "handle [0-9]+" | awk '{print $2}' | while read -r h; do
+    say "删除旧 DNAT 规则 handle=${h}"
+    sudo nft delete rule ip nat PREROUTING handle "${h}" 2>/dev/null && warn "已清理旧 6443 DNAT"
+done
+
 # 备份并生成配置
 [ -f /etc/haproxy/haproxy.cfg ] && cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak-$(date +%Y%m%d%H%M%S) 2>/dev/null || true
 

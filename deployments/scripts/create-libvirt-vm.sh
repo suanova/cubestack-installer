@@ -146,9 +146,23 @@ qemu-img resize "${VM_DISK}" "${DISK_G}G"
 # ==================== virt-customize 系统调优（不含用户/SSH）====================
 VC="virt-customize -a ${VM_DISK} --quiet --no-network"
 
-# 1. 安装常用包（kubespray 离线部署需要）
-echo -e "\033[36m→ 安装常用包 (iputils-ping rsync iptables curl ca-certificates) ...\033[0m"
-virt-customize -a "${VM_DISK}" --quiet --install iputils-ping,rsync,iptables,curl,ca-certificates 2>&1 || echo -e "\033[33m⚠ 部分包安装失败，可忽略\033[0m"
+# 1. 校验基础镜像已内置 kubespray 所需常用包（只读校验, 不安装任何组件）
+#    这些包由 create-vm-template.sh 制作黄金镜像时固化, 创建 VM 无需再装;
+#    离线环境 apt 无法联网, 故此处只校验缺包并告警(不中断), 避免静默缺 rsync/curl 导致后续同步失败
+echo -e "\033[36m→ 校验基础镜像已含常用包 (iputils-ping rsync iptables curl ca-certificates) ...\033[0m"
+if virt-customize -a "${VM_DISK}" --quiet \
+    --run-command 'for c in ping rsync iptables curl update-ca-certificates; do command -v "$c" >/dev/null 2>&1 || exit 1; done' \
+    >/dev/null 2>&1; then
+    echo -e "\033[32m✓ 所需包已内置\033[0m"
+else
+    echo -e "\033[33m⚠ 基础镜像缺少 kubespray 所需包(rsync/iptables/curl/iputils-ping/ca-certificates)\033[0m"
+    echo -e "\033[33m  请确认基础镜像由 create-vm-template.sh 制作; 离线环境无法自动安装, 可继续但后续 rsync/curl 相关步骤可能失败\033[0m"
+fi
+
+# 1b. 磁盘扩容到 ${DISK_G}G(不依赖 cloud-init runcmd, 在 virt-customize 阶段直接扩展分区+文件系统)
+echo -e "\033[36m→ 磁盘扩容分区+文件系统到 ${DISK_G}G ...\033[0m"
+virt-customize -a "${VM_DISK}" --quiet --run-command 'growpart /dev/sda 1 2>/dev/null || growpart /dev/vda 1 2>/dev/null || true' 2>&1
+virt-customize -a "${VM_DISK}" --quiet --run-command 'resize2fs /dev/sda1 2>/dev/null || resize2fs /dev/vda1 2>/dev/null || true' 2>&1
 
 # 2. 禁用 IPv6
 ${VC} --run-command 'sed -i -E "s#^(GRUB_CMDLINE_LINUX_DEFAULT=.*)\"#\1 ipv6.disable=1\"#" /etc/default/grub'
@@ -234,8 +248,60 @@ virt-install \
   --import \
   --noautoconsole
 
+# ==================== 创建后立即启动虚拟机(running) ====================
+# 显式通过 virsh start 启动, 不依赖 virt-install 是否自动启动; 启动失败重试(创建刚结束时域可能处于瞬时状态)
+virsh list --all | grep -qw "${VM_NAME}" || {
+    echo -e "\033[31m【错误】VM ${VM_NAME} 创建后未找到,请检查 virt-install 输出\033[0m"; exit 1; }
+echo -e "\033[36m→ 启动 VM ${VM_NAME} ...\033[0m"
+STARTED=0
+for attempt in 1 2 3 4 5; do
+    if virsh domstate "${VM_NAME}" 2>/dev/null | grep -qi "running"; then
+        STARTED=1; break
+    fi
+    virsh start "${VM_NAME}" >/dev/null 2>&1 && { STARTED=1; break; }
+    echo -e "\033[33m⚠ 启动尝试 ${attempt}/5 失败,2s 后重试...\033[0m"
+    sleep 2
+done
+[ "${STARTED}" = "1" ] || {
+    echo -e "\033[31m【错误】VM ${VM_NAME} 启动失败,请检查磁盘/日志(virsh list --all / virsh start ${VM_NAME})\033[0m"; exit 1; }
+# 最终确认状态必须为 running(立即启动的保证)
+sleep 2
+if virsh domstate "${VM_NAME}" 2>/dev/null | grep -qi "running"; then
+    echo -e "\033[32m✓ VM ${VM_NAME} 已启动(running)\033[0m"
+else
+    echo -e "\033[31m【错误】VM ${VM_NAME} 未处于 running 状态(当前: $(virsh domstate "${VM_NAME}" 2>/dev/null))\033[0m"; exit 1
+fi
+
+# ==================== 设置宿主机重启自动启动(autostart) ====================
+# 宿主机重启后 VM 自动启动, 避免每次重启后手动 virsh start
+if virsh autostart "${VM_NAME}" >/dev/null 2>&1; then
+    echo -e "\033[32m✓ VM ${VM_NAME} 已设置开机自启(宿主机重启后自动启动)\033[0m"
+else
+    echo -e "\033[33m⚠ 设置 VM ${VM_NAME} 开机自启失败(可手动: virsh autostart ${VM_NAME})\033[0m"
+fi
+
+# ==================== 最终确保运行(收尾) ====================
+# virt-install 创建后 VM 可能在短暂启动后被关闭(创建流程/libvirt 状态抖动),
+# 脚本退出前再确认一次, 未运行则重新 virsh start, 保证结束时 VM 一定是 running
+echo -e "\033[36m→ 最终确认 VM ${VM_NAME} 运行状态 ...\033[0m"
+sleep 5
+RUNNING=0
+for attempt in 1 2 3 4 5; do
+    if virsh domstate "${VM_NAME}" 2>/dev/null | grep -qi "running"; then
+        RUNNING=1; break
+    fi
+    echo -e "\033[33m⚠ VM ${VM_NAME} 未在运行,重新启动(尝试 ${attempt}/5) ...\033[0m"
+    virsh start "${VM_NAME}" >/dev/null 2>&1 || true
+    sleep 5
+done
+if [ "${RUNNING}" = "1" ]; then
+    echo -e "\033[32m✓ 最终确认: VM ${VM_NAME} running\033[0m"
+else
+    echo -e "\033[31m【错误】VM ${VM_NAME} 最终未能启动,请检查磁盘/日志(virsh list --all)\033[0m"; exit 1
+fi
+
 echo "============================================="
-echo -e "\033[32m✅ VM ${VM_NAME} 创建成功\033[0m"
+echo -e "\033[32m✅ VM ${VM_NAME} 创建成功(running)\033[0m"
 
 # 自动注册到 cluster.conf (AUTO_REGISTER_CLUSTER=1 时生效)
 auto_register_vm

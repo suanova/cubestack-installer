@@ -93,6 +93,15 @@
         - not download_localhost
         - download_delegate == inventory_hostname
 
+    - name: Download_container | Create dest directory for image upload
+      file:
+        path: "{{ image_path_final | dirname }}"
+        state: directory
+        recurse: true
+      when:
+        - pull_required
+        - download_force_cache
+
     - name: Download_container | Upload image to node if it is cached
       ansible.posix.synchronize:
         src: "{{ image_path_cached }}"

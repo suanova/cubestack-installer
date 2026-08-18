@@ -29,7 +29,9 @@ virt-customize -a "$BASE_IMG" --memsize 4096 \
   --run-command 'apt-get install -y -qq --no-install-recommends linux-image-generic' \
   --run-command 'update-grub' \
   \
-  `# ===== 🆕 3. 安装 kubespray 离线部署所需包 =====` \
+  `# ===== 🆕 3. 安装 kubespray 离线部署所需包(唯一固化点) =====` \
+  `# 这些包只在制作黄金镜像时安装一次, 固化进基础镜像; 之后 create-libvirt-vm.sh 创建` \
+  `# 虚拟机不再安装任何组件(离线环境无法 apt), 仅校验已内置。新增依赖请在此处添加。` \
   --run-command 'apt-get install -y -qq --no-install-recommends iputils-ping rsync iptables curl ca-certificates' \
   \
   `# ===== 🆕 4. 时区 + NTP 时间同步 =====` \

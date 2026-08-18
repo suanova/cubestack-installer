@@ -32,13 +32,16 @@ VM_SSH_USERS="${VM_SSH_USERS:-root ubuntu}"
 WORKER_SSH_PASSWORD="${WORKER_SSH_PASSWORD:-}"
 
 # ---------------- 节点规划 ----------------
-# 格式: role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password
-#   role: master(虚拟机) | worker(裸金属); mac: 显式或"-"(自动); 密码"-"=用默认
+# 格式: role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password,node_type
+#   role: master | worker
+#   node_type: vm=虚拟机(自动创建+启动) | bm=裸金属(不创建VM, 走密码连通+装包)
+#   省略 node_type 时回退推断: master 默认 vm; 其余按是否有 VM 参数(mac 非"-"且 内存>0)
+#   mac: 显式或"-"(自动); 密码"-"=用默认
 NODES=(
-  "master,cubestack-k8s-master01,10.244.1.11,52:54:00:3b:e9:d2,16,8,100,ubuntu,-"
-  "master,cubestack-k8s-master02,10.244.1.12,52:54:00:b6:f1:39,16,8,100,ubuntu,-"
-  "master,cubestack-k8s-master03,10.244.1.13,52:54:00:49:e2:3d,16,8,100,ubuntu,-"
-  "worker,mxgpu-1-232,10.66.1.232,-,0,0,0,ubuntu,-"
+  "master,cubestack-k8s-master01,10.244.1.11,52:54:00:3b:e9:d2,16,8,100,ubuntu,-,vm"
+  "master,cubestack-k8s-master02,10.244.1.12,52:54:00:b6:f1:39,16,8,100,ubuntu,-,vm"
+  "master,cubestack-k8s-master03,10.244.1.13,52:54:00:49:e2:3d,16,8,100,ubuntu,-,vm"
+  "worker,mxgpu-1-232,10.66.1.232,-,0,0,0,ubuntu,-,bm"
 )
 
 # ---------------- kubespray / 部署 ----------------
@@ -48,3 +51,10 @@ KUBESPRAY_DIR="${KUBESPRAY_DIR:-${REPO_ROOT}/deployments/kubespray/kubespray}"
 # 离线资源缓存目录(二进制/镜像,按集群名隔离)
 LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${REPO_ROOT}/deployments/kubespray/repository/${CLUSTER_NAME}}"
 UPDATE_ETC_HOSTS="${UPDATE_ETC_HOSTS:-0}"
+
+# ---------------- 离线镜像预加载(最小集合) ----------------
+# 仅同步"部署 kubespray 最小镜像集合"到节点 containerd,避免全量 rsync 无关镜像
+# 格式: 空格分隔的匹配条目; 含 ".tar" 为精确文件名匹配, 否则为文件名包含匹配(匹配 images/ 下 *.tar 文件名)
+# 留空 = 全量同步 images/ 目录
+# 也可在 inventory/${CLUSTER_NAME}/preload-images.conf 中单独覆盖(standalone 运行 cubestack-offline.sh 时)
+PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause}"

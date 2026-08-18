@@ -21,6 +21,43 @@ warn()      { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()       { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 highlight() { echo -e "${CYAN}>>> $*${NC}"; }
 
+# 启动日志 tee(同时输出终端 + 写文件), 对写失败安全
+# 根因: 日志文件可能被上次运行占用不可写(如上次 sudo/root 创建, 本次非 root 运行)
+#       → tee 报 "Permission denied", 日志丢失。这里先清理, 仍失败则回退 HOME 下日志, 绝不中断安装。
+# 用法: start_log_tee <日志文件>  — 依次尝试: 原路径 > ~/.cache/cubestack/ 回退 > 仅终端输出
+start_log_tee() {
+    local log="$1"
+    # 1. 若文件存在但当前用户不可写: 优先删除(自己创建的), 否则放开权限
+    if [ -e "${log}" ] && [ ! -w "${log}" ]; then
+        rm -f "${log}" 2>/dev/null || chmod 666 "${log}" 2>/dev/null || true
+    fi
+    # 2. 用 touch 确认可写后才挂 tee; 失败回退 HOME 下日志(始终可写, 保留记录能力)
+    if touch "${log}" 2>/dev/null; then
+        exec > >(tee "${log}") 2>&1
+        return 0
+    fi
+    local fallback_log="${HOME}/.cache/cubestack/$(basename "${log}")"
+    if mkdir -p "$(dirname "${fallback_log}")" 2>/dev/null && touch "${fallback_log}" 2>/dev/null; then
+        warn "无法写入 ${log}(可能被其他用户占用), 日志改写到: ${fallback_log}"
+        exec > >(tee "${fallback_log}") 2>&1
+    else
+        warn "无法写入日志 ${log} 及回退路径, 本次仅输出到终端, 不记录日志文件"
+    fi
+}
+
+# 运行 ansible-playbook, 日志输出到文件 + 可选终端
+# 环境变量 ANSIBLE_LOG_TERMINAL(默认 1): 1=同时终端+文件, 0=仅文件
+# 用法: run_ansible_playbook <日志文件> <ansible-playbook 参数...>
+run_ansible_playbook() {
+    local log_file="$1"; shift
+    if [ "${ANSIBLE_LOG_TERMINAL:-1}" = "1" ]; then
+        ansible-playbook "$@" 2>&1 | tee -a "${log_file}"
+    else
+        ansible-playbook "$@" 2>&1 >> "${log_file}"
+    fi
+    return "${PIPESTATUS[0]}"
+}
+
 usage() {
     echo "用法: $0 <命令> [集群名称] [选项]"
     echo ""
@@ -415,10 +452,52 @@ PLAYBOOK_EOF
 # 预加载离线镜像到目标节点(all / kube_control_plane / kube_node)
 # 必须先于 playbook 加载镜像: kubelet 启动 pod 时会尝试拉镜像,
 # 离线环境下必须先 load 到 containerd, 否则 ImagePullBackOff / 启动慢
-# 用 rsync 逐台同步 + 逐个镜像验证加载, 失败会重试并报告, 避免静默丢失
+# 仅同步"部署 kubespray 最小镜像集合"(PRELOAD_IMAGE_PATTERNS 配置, 空=全量),
+# 避免全量 rsync 大量无关镜像(cilium/flannel/ingress 等)拖慢部署
+# 匹配规则: 条目含 ".tar" 为精确文件名匹配, 否则为文件名包含匹配
+# 用 rsync 逐台同步(仅匹配镜像, --delete-excluded 清理目标残留) + 逐个镜像验证加载
 preload_images() {
     local target="${1:-all}"
     log "预加载离线镜像到 ${target} 节点..."
+
+    # ── 1. 解析预加载镜像文件列表(过滤 images/ 目录) ──
+    local patterns=(${PRELOAD_IMAGE_PATTERNS:-})
+    local image_files=()
+    local f p base matched
+    if [ "${#patterns[@]}" -eq 0 ]; then
+        # 全量同步(向后兼容): images/ 下所有 *.tar
+        for f in "${LOCAL_REPO_DIR}"/images/*.tar; do
+            [ -f "${f}" ] && image_files+=("$(basename "${f}")")
+        done
+        log "  同步集合: 全量 ${#image_files[@]} 个镜像(未配置 PRELOAD_IMAGE_PATTERNS)"
+    else
+        for f in "${LOCAL_REPO_DIR}"/images/*.tar; do
+            [ -f "${f}" ] || continue
+            base="$(basename "${f}")"
+            matched=0
+            for p in "${patterns[@]}"; do
+                if [[ "${p}" == *".tar"* ]]; then
+                    [ "${p}" = "${base}" ] && { matched=1; break; }
+                else
+                    [[ "${base}" == *"${p}"* ]] && { matched=1; break; }
+                fi
+            done
+            [ "${matched}" = "1" ] && image_files+=("${base}")
+        done
+        log "  同步集合: ${#image_files[@]} 个镜像(最小集合: ${patterns[*]})"
+    fi
+
+    if [ "${#image_files[@]}" -eq 0 ]; then
+        warn "预加载: 未匹配到任何镜像(检查 PRELOAD_IMAGE_PATTERNS 或 ${PRELOAD_CONF})"
+        return 0
+    fi
+
+    # 构建 rsync 过滤参数: 仅同步匹配镜像 + --delete-excluded 清理目标残留(断点续跑场景)
+    local rsync_filter=()
+    for f in "${image_files[@]}"; do
+        rsync_filter+=(--include="${f}")
+    done
+    rsync_filter+=(--exclude='*')
 
     # 解析节点清单(含连接信息): 输出 "node|host|user|key" 每行
     local nodes_str
@@ -443,44 +522,72 @@ for g in groups:
         ))
 ')
 
-    local node host user key total=0 ok_sum=0 fail_nodes=0
-    while IFS='|' read -r node host user key; do
+    local total=0 ok_sum=0 fail_nodes=0
+    # 用 for 循环遍历(while read + 内部 ssh/rsync 会吞 stdin 导致只处理首行)
+    local oldifs="${IFS}"
+    IFS=$'\n'
+    for line in ${nodes_str}; do
+        IFS='|' read -r node host user key <<< "${line}"
         [ -z "${node}" ] && continue
         total=$((total + 1))
-        log "  → [${node}](${host}) 同步并加载镜像 ..."
+        log "  → [${node}](${host}) 同步并加载 ${#image_files[@]} 个镜像 ..."
 
-        # 1. rsync 同步整个 images 目录(比 ansible copy 可靠)
-        rsync -az --timeout=300 -e "ssh -i ${key} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+        # 0. 确保节点侧 repository/images 目录存在(幂等)。
+        #    根因: kubespray download role 的 "Upload image to node" 用
+        #    ansible.posix.synchronize(rsync --rsync-path='sudo -u root rsync')
+        #    把镜像 push 到节点 ${LOCAL_REPO_DIR}/images/, 但该目录不会被 playbook 自动创建;
+        #    全新节点(scale 新 worker / 裸金属 worker)上不存在 → rsync 报
+        #    "change_dir failed: No such file or directory" → 镜像没有全部同步成功。
+        ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            "${user}@${host}" "sudo mkdir -p '${LOCAL_REPO_DIR}/images'" >/dev/null 2>&1 || {
+            warn "  ${node}: 创建节点侧仓库目录失败(${LOCAL_REPO_DIR}/images),跳过"
+            fail_nodes=$((fail_nodes + 1))
+            continue
+        }
+
+        # 1. rsync 仅同步匹配镜像(比 ansible copy 可靠)
+        rsync -az --delete --delete-excluded --timeout=300 "${rsync_filter[@]}" \
+            -e "ssh -i ${key} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
             "${LOCAL_REPO_DIR}/images/" "${user}@${host}:/tmp/cubestack-images/" 2>/dev/null || {
             warn "  ${node}: rsync 同步失败,跳过"
             fail_nodes=$((fail_nodes + 1))
             continue
         }
 
-        # 2. 逐个加载镜像并验证(失败重试一次)
+        # 2. 逐个 import 所有 tar 并校验: 只统计真正导入成功的镜像,
+        #    失败镜像单独告警(避免之前"按文件数计数"虚报成功导致部分镜像缺失)
+        #    全新 VM 上 containerd 尚未安装(kubespray 下载角色才安装)时返回 SKIP, 优雅跳过
         local loaded
         loaded=$(ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             "${user}@${host}" "sudo bash -c '
-                n=0
+                command -v ctr >/dev/null 2>&1 || { rm -rf /tmp/cubestack-images; echo SKIP; exit 0; }
+                ok=0; fail=0
                 for f in /tmp/cubestack-images/*.tar; do
                     [ -f \"\$f\" ] || continue
-                    if ! ctr -n k8s.io image import \"\$f\" >/dev/null 2>&1; then
-                        sleep 2
-                        ctr -n k8s.io image import \"\$f\" >/dev/null 2>&1
+                    if ctr -n k8s.io image import \"\$f\" >/dev/null 2>&1 || \
+                       ctr -n k8s.io image import \"\$f\" >/dev/null 2>&1; then
+                        ok=\$((ok + 1))
+                    else
+                        fail=\$((fail + 1))
+                        echo \"[FAIL] 导入失败: \$(basename \"\$f\")\" >&2
                     fi
-                    n=\$((n + 1))
                 done
                 rm -rf /tmp/cubestack-images
-                echo \$n
-            '" 2>/dev/null || echo 0)
+                echo \$ok
+            '" || echo 0)
+        if [ "${loaded}" = "SKIP" ]; then
+            warn "  ${node}: 节点上 containerd 未安装, 跳过镜像预加载(将由 kubespray 下载角色安装 containerd 并加载镜像)"
+            continue
+        fi
         ok_sum=$((ok_sum + loaded))
-        log "  → ${node}: 处理 ${loaded} 个镜像"
-    done <<< "${nodes_str}"
+        log "  → ${node}: 成功加载 ${loaded} 个镜像"
+    done
+    IFS="${oldifs}"
 
     if [ "${total}" -eq 0 ]; then
         warn "预加载: 未解析到节点(inventory 可能为空)"
     else
-        log "✅ 离线镜像预加载完成: ${total} 台节点, 失败 ${fail_nodes} 台"
+        log "✅ 离线镜像预加载完成: ${total} 台节点, 失败 ${fail_nodes} 台, 共加载 ${ok_sum} 个镜像"
     fi
 }
 
@@ -508,6 +615,95 @@ fix_artifacts_perms() {
     chmod 777 "${artifacts_dir}" 2>/dev/null || sudo chmod 777 "${artifacts_dir}" 2>/dev/null || true
     # 确保 inventory 目录可读写
     chmod -R u+rwX "${INVENTORY_DIR}" 2>/dev/null || true
+}
+
+# 修复 kubespray download role 镜像上传同步缺目录问题(幂等)
+# 根因: download_container.yml 的 "Upload image to node" 用 ansible.posix.synchronize(rsync)
+#       把镜像 push 到节点 ${local_release_dir}/images/, 但该目录不会被自动创建,
+#       全新节点(scale 新 worker / 裸金属 worker)上 rsync 报 "change_dir failed:
+#       No such file or directory" → 镜像没有全部同步成功。
+# 根治: 在 Upload 任务前插入 "Create dest directory" 任务(与 download_file.yml 一致),
+#       使 ansible-playbook 自身就能全量同步, 不依赖 preload 预建目录。
+fix_download_sync_dirs() {
+    local dcf="${KUBESPRAY_DIR}/roles/download/tasks/download_container.yml"
+    [ -f "${dcf}" ] || { warn "未找到 ${dcf},跳过 patch"; return 0; }
+    if grep -q "Download_container | Create dest directory for image upload" "${dcf}"; then
+        log "✅ kubespray download_container 已 patch(上传前创建目标目录)"
+        return 0
+    fi
+    python3 - "${dcf}" << 'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+marker = "    - name: Download_container | Upload image to node if it is cached"
+if "Download_container | Create dest directory for image upload" in src:
+    sys.exit(0)
+assert marker in src, f"marker not found in {path}"
+insert = (
+    "    - name: Download_container | Create dest directory for image upload\n"
+    "      file:\n"
+    "        path: \"{{ image_path_final | dirname }}\"\n"
+    "        state: directory\n"
+    "        recurse: true\n"
+    "      when:\n"
+    "        - pull_required\n"
+    "        - download_force_cache\n"
+    "\n"
+)
+open(path, "w").write(src.replace(marker, insert + marker, 1))
+print("patched")
+PYEOF
+    log "✅ 已 patch kubespray download_container.yml: 镜像上传前创建目标目录"
+}
+
+# 修复 kubespray download 角色中 dnsautoscaler / metrics_server 镜像的 groups 配置(幂等)
+# 根因: 这两个镜像的 group 仅包含 kube_control_plane(master 节点), 不包含 k8s_cluster,
+#       导致 kubespray 的 download role 只把镜像推到 master, 不推 worker 节点。
+#       当 pod 调度到 worker 时, 镜像不存在 → kubelet 尝试外网拉取 → 离线环境超时 → ImagePullBackOff。
+# 根治: 在 groups 中追加 k8s_cluster, 使 playbook 将镜像推送到所有节点。
+fix_download_groups() {
+    local dcf="${KUBESPRAY_DIR}/roles/kubespray_defaults/defaults/main/download.yml"
+    [ -f "${dcf}" ] || { warn "未找到 ${dcf},跳过 patch"; return 0; }
+    local result
+    result=$(python3 - "${dcf}" << 'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+changed = False
+for key in ("dnsautoscaler", "metrics_server"):
+    marker = f"  {key}:"
+    idx = src.find(marker)
+    if idx < 0:
+        continue
+    # 检查 groups 块中是否已有 k8s_cluster(幂等)
+    groups_pos = src.find("    groups:", idx)
+    if groups_pos < 0:
+        continue
+    # 从 groups 行之后到下一个顶层 key 之间查找
+    blk_start = src.find("\n", groups_pos) + 1
+    blk_end = src.find("\n\n  ", blk_start)  # 空行 + 下一个顶层 key
+    if blk_end < 0:
+        blk_end = len(src)
+    groups_block = src[blk_start:blk_end]
+    if "k8s_cluster" in groups_block:
+        continue  # 已包含, 跳过
+    if "kube_control_plane" in groups_block:
+        insert_pos = src.find("      - kube_control_plane", groups_pos)
+        if insert_pos >= 0:
+            nl = src.find("\n", insert_pos)
+            src = src[:nl+1] + "      - k8s_cluster\n" + src[nl+1:]
+            changed = True
+if changed:
+    open(path, "w").write(src)
+    print("patched")
+else:
+    print("no change needed")
+PYEOF
+) 2>/dev/null
+    case "${result}" in
+        *patched*) log "✅ kubespray download groups 已 patch(dnsautoscaler/metrics_server 追加 k8s_cluster)" ;;
+        *) log "✅ kubespray download groups 已包含 k8s_cluster(幂等跳过)" ;;
+    esac
 }
 
 cmd_install() {
@@ -553,7 +749,17 @@ cmd_install() {
     # 修复 artifacts 目录权限(kubectl_localhost/kubeconfig_localhost 用)
     fix_artifacts_perms
 
+    # 修复 download role 镜像上传缺目录问题(使 ansible-playbook 自身可全量同步镜像)
+    fix_download_sync_dirs
+
+    # 修复 download role 镜像 groups 配置(使 dnsautoscaler/metrics-server 镜像推送到全节点)
+    fix_download_groups
+
+    # ansible 日志: tee 同时写入文件 + 输出到终端
+    INSTALL_LOG="/tmp/${CLUSTER_NAME}-install.log"
     log "执行 Kubespray 离线安装..."
+    log "ansible 日志: 同时显示终端 + 写入 ${INSTALL_LOG}"
+    [ "${ANSIBLE_LOG_TERMINAL:-1}" != "1" ] && log "ansible 日志: 仅写入文件(ANSIBLE_LOG_TERMINAL=0, 终端不显示)"
     if [ -n "$LIMIT_GROUP" ]; then
         log "  ▶ 限定目标组: ${LIMIT_GROUP}"
     fi
@@ -571,14 +777,20 @@ cmd_install() {
         log "✅ Facts 收集完成"
     fi
 
-    ansible-playbook cluster.yml \
+    run_ansible_playbook "${INSTALL_LOG}" cluster.yml \
         -i "${INVENTORY_DIR}/hosts.yml" \
         --become --become-user=root \
         ${LIMIT_FLAG} \
         -e @${OFFLINE_VARS} \
         --skip-tags system-packages,kube-proxy \
-        -vv 2>&1 | tee "/tmp/${CLUSTER_NAME}-install.log"
-    log "🎉 集群 [${CLUSTER_NAME}] 安装完成! 日志: /tmp/${CLUSTER_NAME}-install.log"
+        -vv
+
+    # 安装后预加载: playbook 前 containerd 可能未安装(preload 跳过), playbook 后 containerd 已就绪,
+    # 补加载 playbook 未推到所有节点的镜像(如 dns-autoscaler/ metrics-server 等附加组件镜像)
+    preload_images "all"
+
+    log "🎉 集群 [${CLUSTER_NAME}] 安装完成!"
+    log "完整 ansible 日志: ${INSTALL_LOG} (终端已同步显示)"
 }
 
 cmd_scale() {
@@ -643,18 +855,27 @@ cmd_scale() {
     # 离线环境下必须先 load 到 containerd, 否则 ImagePullBackOff
     preload_images "kube_node"
 
+    # 修复 download role 镜像上传缺目录问题(使 scale.yml 对新 worker 也能全量同步镜像)
+    fix_download_sync_dirs
+
     log "执行 Kubespray 扩容 (scale.yml)..."
+    log "ansible 日志: 同时显示终端 + 写入 /tmp/${CLUSTER_NAME}-scale.log"
+    [ "${ANSIBLE_LOG_TERMINAL:-1}" != "1" ] && log "ansible 日志: 仅写入文件(ANSIBLE_LOG_TERMINAL=0, 终端不显示)"
     cd "${KUBESPRAY_DIR}"
-    ansible-playbook scale.yml \
+    run_ansible_playbook "/tmp/${CLUSTER_NAME}-scale.log" scale.yml \
         -i "${INVENTORY_DIR}/hosts.yml" \
         --become --become-user=root \
         ${LIMIT_FLAG} \
         -e @${OFFLINE_VARS} \
         --skip-tags system-packages,kube-proxy \
-        -vv 2>&1 | tee "/tmp/${CLUSTER_NAME}-scale.log" || {
-            err "Kubespray 扩容失败,日志: /tmp/${CLUSTER_NAME}-scale.log"
+        -vv || {
+            err "Kubespray 扩容失败,完整日志: /tmp/${CLUSTER_NAME}-scale.log"
             return 1
         }
+
+    # 扩容后预加载: playbook 前 containerd 可能未安装(preload 跳过), playbook 后补加载
+    # 新加入的节点可能缺少某些附加组件镜像(如 dns-autoscaler/metrics-server)
+    preload_images "${LIMIT_GROUP:-kube_node}"
 
     # ── 扩容后置处理 ──
     log "扩容后置处理..."
@@ -729,8 +950,11 @@ PYEOF
     [ "${HOST_COUNT}" -gt 0 ] || err "Inventory 解析失败: ${INVENTORY_DIR}/hosts.yml"
     log "✅ Inventory 有效，共 ${HOST_COUNT} 台主机"
 
-    ansible all -i "${INVENTORY_DIR}/hosts.yml" -m ping -u "${REMOTE_USER}" --become >/dev/null 2>&1 \
-        || warn "部分主机 SSH/sudo 异常"
+    # 预检连通性: 加超时防卡死。ansible ping 默认无 SSH 连接超时, 节点关机/不可达时会无限挂起
+    # (曾出现: 全部 VM 关机 → 部署卡在预检不动)。timeout 60 兜底 + ConnectTimeout 让单节点快速失败。
+    timeout 60 ansible all -i "${INVENTORY_DIR}/hosts.yml" -m ping -u "${REMOTE_USER}" --become \
+        -e ansible_ssh_common_args='-o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2' \
+        >/dev/null 2>&1 || warn "部分主机 SSH/sudo 异常或不可达(预检连通性超时 60s)"
     log "✅ 预检通过"
 }
 
@@ -777,6 +1001,27 @@ INVENTORY_DIR="${CUBESTACK_INVENTORY_DIR:-${INVENTORY_DIR}}"
 LOCAL_REPO_DIR="${CUBESTACK_LOCAL_REPO_DIR:-${LOCAL_REPO_DIR}}"
 OFFLINE_CONTRIB="${KUBESPRAY_DIR}/contrib/offline"
 
+# ── 预加载镜像集合配置(仅同步部署 kubespray 所需的最小镜像集合) ──
+# 优先级: CUBESTACK_PRELOAD_IMAGE_PATTERNS 环境变量(含空串) > inventory 下 preload-images.conf > PRELOAD_IMAGE_PATTERNS 环境变量 > 内置默认最小集合
+# 匹配规则: 条目含 ".tar" 为精确文件名匹配(如 quay.io_calico_node_v3.29.3.tar), 否则为文件名包含匹配(如 calico)
+# 任一来源显式置空(如 preload-images.conf 中 PRELOAD_IMAGE_PATTERNS="") = 全量同步 images/ 目录
+PRELOAD_CONF="${INVENTORY_DIR}/preload-images.conf"
+if [ -n "${CUBESTACK_PRELOAD_IMAGE_PATTERNS+x}" ]; then
+    # 环境变量显式传递(deploy-cluster.sh 透传 cluster.conf 配置, 空串=全量同步)
+    PRELOAD_IMAGE_PATTERNS="${CUBESTACK_PRELOAD_IMAGE_PATTERNS}"
+    log "预加载镜像集合(环境变量): ${PRELOAD_IMAGE_PATTERNS:-<空=全量>}"
+elif [ -f "${PRELOAD_CONF}" ]; then
+    # shellcheck disable=SC1090
+    source "${PRELOAD_CONF}"
+    log "预加载镜像集合(preload-images.conf): ${PRELOAD_IMAGE_PATTERNS:-<空=全量>}"
+elif [ -z "${PRELOAD_IMAGE_PATTERNS:-}" ]; then
+    # 内置默认最小集合: kubespray 默认部署 + calico 网络插件所需镜像
+    # (排除 cilium/flannel/ingress-nginx/dashboard/metallb 等未启用组件的镜像)
+    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause"
+    log "预加载镜像集合(内置默认最小集合): ${PRELOAD_IMAGE_PATTERNS}"
+fi
+export PRELOAD_IMAGE_PATTERNS
+
 # 构建 ansible-playbook 通用 limit 参数
 LIMIT_FLAG=""
 [ -n "$LIMIT_GROUP" ] && LIMIT_FLAG="--limit ${LIMIT_GROUP}"
@@ -784,10 +1029,31 @@ LIMIT_FLAG=""
 case "${COMMAND}" in
     init)     cmd_init ;;
     download) cmd_download ;;
-    install)  cmd_install ;;
-    scale)    cmd_scale ;;
+    install)
+        # 整个安装过程所有日志(含 ansible): 同时显示终端 + 写入日志文件
+        # 每次执行前清理旧日志: 旧文件可能被上次 root/sudo 运行占用导致 tee 写失败(Permission denied),
+        # 非 root 时用 sudo 删除; start_log_tee 仍作为最终兜底(回退 HOME 日志/仅终端), 不中断安装
+        LOG_FILE="/tmp/${CLUSTER_NAME}-install.log"
+        [ -e "${LOG_FILE}" ] && { rm -f "${LOG_FILE}" 2>/dev/null || sudo rm -f "${LOG_FILE}" 2>/dev/null || true; }
+        echo ">>> 安装日志: 同时显示终端 + 写入 ${LOG_FILE}"
+        echo ">>> 可实时查看: tail -f ${LOG_FILE}"
+        start_log_tee "${LOG_FILE}"
+        cmd_install
+        ;;
+    scale)
+        LOG_FILE="/tmp/${CLUSTER_NAME}-scale.log"
+        [ -e "${LOG_FILE}" ] && { rm -f "${LOG_FILE}" 2>/dev/null || sudo rm -f "${LOG_FILE}" 2>/dev/null || true; }
+        echo ">>> 扩容日志: 同时显示终端 + 写入 ${LOG_FILE}"
+        echo ">>> 可实时查看: tail -f ${LOG_FILE}"
+        start_log_tee "${LOG_FILE}"
+        cmd_scale
+        ;;
     check)    cmd_check ;;
     preload)  preload_images "${LIMIT_GROUP:-all}" ;;   # 单独预加载镜像(补镜像/修复)
     *)        usage ;;
 esac
+
+# 等待 tee 子进程 flush(exec > >(tee) 的 process substitution)
+wait 2>/dev/null || true
+
 
