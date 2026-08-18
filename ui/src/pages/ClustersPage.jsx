@@ -429,8 +429,8 @@ export default function ClustersPage() {
               return (
                 wizStep === n - 1 && (
                   <div key={n}>
-                    <p className="wizard-desc">{WIZARD_STEPS[n - 1].desc}</p>
                     <div className="wizard-step-run">
+                      <span className="wizard-desc">{WIZARD_STEPS[n - 1].desc}</span>
                       <button className="btn btn-primary" disabled={st === 'running'} onClick={() => runWizardStep(n)}>
                         {st === 'running' ? t('common.loading') : st === 'success' ? t('clusters.stepRerun') : t('clusters.stepRun')}
                       </button>
