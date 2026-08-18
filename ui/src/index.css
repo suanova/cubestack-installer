@@ -555,5 +555,6 @@ textarea.input { resize: vertical; min-height: 78px; line-height: 1.5; }
 .cmd-note-top { margin-bottom: 10px; }
 .wizard-done-ico { font-size: 40px; text-align: center; margin: 6px 0 10px; }
 /* ---------- 创建集群向导(与添加宿主机向导共用 wizard-* 样式) ---------- */
-.wizard-step-run { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.wizard-step-run { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.wizard-step-run .wizard-desc { margin-bottom: 0; }
 .wizard-step-log { max-height: 340px; font-size: 12px; }
