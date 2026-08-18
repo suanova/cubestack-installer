@@ -34,8 +34,8 @@ while [ $# -gt 0 ]; do
 done
 
 # 重新加载配置(CLUSTER_NAME 已更新,lib-common 的 CLUSTER_CONF 基于新 CLUSTER_NAME 重算)
-CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/config/cluster.conf}"
-CONF_BY_CLUSTER="${REPO_ROOT}/config/cluster-${CLUSTER_NAME}.conf"
+CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/deployments/config/cluster.conf}"
+CONF_BY_CLUSTER="${REPO_ROOT}/deployments/config/cluster-${CLUSTER_NAME}.conf"
 [ -f "${CONF_BY_CLUSTER}" ] && CLUSTER_CONF="${CONF_BY_CLUSTER}"
 load_config
 
