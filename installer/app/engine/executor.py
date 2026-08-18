@@ -44,13 +44,13 @@ def _run(task_id: int) -> None:
             provider = get_provider(vm.provider if vm else "libvirt")
             provider.create(task, vm, db, log_line)
         elif task.type == "cluster_install":
-            from .kubespray import run_cluster_install
+            from .services.kubespray import run_cluster_install
             run_cluster_install(task, db)
         elif task.type == "cluster_prepare":
-            from .clusterprep import run_cluster_prepare
+            from .services.clusterprep import run_cluster_prepare
             run_cluster_prepare(task, db)
         elif task.type == "cluster_sshkey":
-            from .clusterprep import run_cluster_sshkey
+            from .services.clusterprep import run_cluster_sshkey
             run_cluster_sshkey(task, db)
         else:
             raise ValueError("未知任务类型: " + str(task.type))
