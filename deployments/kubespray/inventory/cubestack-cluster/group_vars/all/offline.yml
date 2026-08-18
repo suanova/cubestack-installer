@@ -22,3 +22,6 @@ ansible_become_method: sudo
 
 ## 离线环境 — 跳过不必要的检查
 ping_access_ip: false
+
+## 离线环境 API server 冷启动慢, 加大 kubeadm init 等待超时(默认300s)
+kubeadm_init_timeout: 900s

@@ -15,7 +15,8 @@ INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubes
 [ -d "${INV_DIR}" ] || { err "Inventory 目录不存在: ${INV_DIR}, 请先运行 gen-inventory.sh"; exit 1; }
 
 # ---------------- 从 cluster.conf 解析 IP ----------------
-HOST_IP="${HOST_PHYS_IP:-10.66.3.37}"
+# API Server 地址: 优先 APISERVER_ADDRESS(NAT 模式=第一个 master IP), 回退 HOST_PHYS_IP(桥接模式)
+HOST_IP="${APISERVER_ADDRESS:-${HOST_PHYS_IP:-10.66.3.37}}"
 MASTER_IPS=()    # master 节点 IP
 WORKER_IPS=()    # worker 节点 IP
 for line in "${NODES[@]:-}"; do
