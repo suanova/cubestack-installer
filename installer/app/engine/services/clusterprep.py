@@ -93,7 +93,7 @@ def run_cluster_prepare(task: DeployTask, db) -> None:
         index_arg = " --index-url " + PIP_INDEX
     else:
         index_arg = ""
-    rc, out, err = _ssh(host, "rm -rf " + ANSIBLE_VENV + " && uv venv " + ANSIBLE_VENV + " --python 3.12 && uv pip install --python " + ANSIBLE_VENV + index_arg + " 'ansible-core>=2.15'", timeout=900)
+    rc, out, err = _ssh(host, "sudo rm -rf " + ANSIBLE_VENV + " && sudo mkdir -p " + ANSIBLE_VENV + " && sudo chown $(whoami) " + ANSIBLE_VENV + " && uv venv " + ANSIBLE_VENV + " --python 3.12 && uv pip install --python " + ANSIBLE_VENV + index_arg + " 'ansible-core>=2.15'", timeout=900)
     if rc != 0:
         raise RuntimeError("安装 Ansible 失败: " + (err or out))
     log_line(task, db, "      Ansible 依赖安装完成 ✓")
