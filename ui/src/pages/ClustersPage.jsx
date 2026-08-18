@@ -34,6 +34,7 @@ export default function ClustersPage() {
   const [deleting, setDeleting] = useState(null)
   const [deployingId, setDeployingId] = useState(null)
   const [wizard, setWizard] = useState(null)
+  const [wizStep, setWizStep] = useState(0)
   const [stepState, setStepState] = useState({ 1: 'idle', 2: 'idle', 3: 'idle' })
   const [stepLogs, setStepLogs] = useState({ 1: '', 2: '', 3: '' })
   const logRefs = { 1: useRef(null), 2: useRef(null), 3: useRef(null) }
@@ -111,6 +112,7 @@ export default function ClustersPage() {
         setClusters((list) => [...list, c])
         setShowCreate(false)
         setWizard(c)
+        setWizStep(0)
         setStepState({ 1: 'idle', 2: 'idle', 3: 'idle' })
         setStepLogs({ 1: '', 2: '', 3: '' })
         toast(t('clusters.created', { name: c.name }))
@@ -402,8 +404,22 @@ export default function ClustersPage() {
 
       {wizard && (
         <Modal title={t('clusters.wizardTitle', { name: wizard.name })} onClose={closeWizard} width="780px">
-          <div className="cwizard-sub">{t('clusters.wizardSub', { node: wizard.run_node_name || t('clusters.runNodeAuto') })}</div>
-          <div className="cwizard-steps">
+          <p className="cmd-note cmd-note-top">{t('clusters.wizardSub', { node: wizard.run_node_name || t('clusters.runNodeAuto') })}</p>
+
+          {/* 步骤指示器(与添加宿主机向导一致) */}
+          <div className="wizard-steps">
+            {WIZARD_STEPS.map((s, i) => {
+              const done = stepState[i + 1] === 'success'
+              return (
+                <div key={i} className={'wizard-step' + (i === wizStep ? ' active' : done ? ' done' : '')}>
+                  <span className="wizard-step-dot">{done ? '✓' : String(i + 1)}</span>
+                  <span className="wizard-step-label">{s.title}</span>
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="wizard-body">
             {[1, 2, 3].map((n) => {
               const st = stepState[n]
               const badge =
@@ -411,33 +427,41 @@ export default function ClustersPage() {
               const label =
                 st === 'success' ? t('status.success') : st === 'failed' ? t('status.failed') : st === 'running' ? t('clusters.stepRunning') : t('clusters.stepReady')
               return (
-                <div key={n} className={'cwizard-step' + (st === 'running' ? ' running' : '')}>
-                  <div className="cwizard-top">
-                    <span className="cwizard-num">{n}</span>
-                    <div className="cwizard-title">{WIZARD_STEPS[n - 1].title}</div>
+                wizStep === n - 1 && (
+                  <div key={n}>
+                    <p className="wizard-desc">{WIZARD_STEPS[n - 1].desc}</p>
+                    <div className="wizard-step-run">
+                      <button className="btn btn-primary" disabled={st === 'running'} onClick={() => runWizardStep(n)}>
+                        {st === 'running' ? t('common.loading') : st === 'success' ? t('clusters.stepRerun') : t('clusters.stepRun')}
+                      </button>
+                      <span className={'badge ' + badge}>{label}</span>
+                    </div>
+                    {stepLogs[n] && (
+                      <pre ref={logRefs[n]} className="log-viewer wizard-step-log">
+                        {stepLogs[n]}
+                      </pre>
+                    )}
                   </div>
-                  <div className="cwizard-desc">{WIZARD_STEPS[n - 1].desc}</div>
-                  <div className="cwizard-actions">
-                    <span className={'badge ' + badge}>{label}</span>
-                    <button
-                      className="btn btn-primary btn-sm"
-                      disabled={st === 'running' || (n > 1 && stepState[n - 1] !== 'success')}
-                      onClick={() => runWizardStep(n)}
-                    >
-                      {st === 'running' ? t('common.loading') : st === 'success' ? t('clusters.stepRerun') : t('clusters.stepRun')}
-                    </button>
-                  </div>
-                  {stepLogs[n] && (
-                    <pre ref={logRefs[n]} className="log-viewer cwizard-log">
-                      {stepLogs[n]}
-                    </pre>
-                  )}
-                </div>
+                )
               )
             })}
           </div>
-          <div className="modal-actions">
-            <button className="btn btn-ghost" onClick={closeWizard}>{t('common.close')}</button>
+
+          {/* 底部导航(与添加宿主机向导一致) */}
+          <div className="wizard-foot">
+            <span className="wizard-foot-left" />
+            <div className="wizard-foot-actions">
+              {wizStep > 0 && (
+                <button className="btn btn-ghost" onClick={() => setWizStep(wizStep - 1)}>{t('clusters.wizardPrev')}</button>
+              )}
+              {wizStep < 2 ? (
+                <button className="btn btn-primary" disabled={stepState[wizStep + 1] !== 'success'} onClick={() => setWizStep(wizStep + 1)}>
+                  {t('clusters.wizardNext')} →
+                </button>
+              ) : (
+                <button className="btn btn-primary" onClick={closeWizard}>{t('common.close')}</button>
+              )}
+            </div>
           </div>
         </Modal>
       )}
