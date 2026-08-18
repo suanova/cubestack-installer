@@ -32,6 +32,9 @@ def _migrate() -> None:
         ]:
             if col not in host_cols:
                 conn.execute(sa.text(ddl))
+        cluster_cols = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(clusters)"))]
+        if "run_node_host_id" not in cluster_cols:
+            conn.execute(sa.text("ALTER TABLE clusters ADD COLUMN run_node_host_id INTEGER"))
         conn.commit()
 
 

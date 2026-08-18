@@ -165,9 +165,12 @@ class VmBatchCreateResult(BaseModel):
 
 class ClusterCreateIn(BaseModel):
     name: str = Field(min_length=2, max_length=80, description="集群名称")
-    k8s_version: str = Field(max_length=20, description="Kubernetes 版本")
     network_plugin: str = Field(default="calico", max_length=20, description="网络插件")
-    kubespray_version: str = Field(default="v2.25.0", max_length=30, description="Kubespray 版本")
+    k8s_version: str = Field(default="v1.28.13", max_length=20, description="Kubernetes 版本(默认)")
+    kubespray_version: str = Field(default="v2.25.0", max_length=30, description="Kubespray 版本(默认)")
+    run_node_host_id: int | None = Field(
+        default=None, description="Kubespray 运行节点(宿主机 ID,None=平台管理机本机执行)"
+    )
     control_plane_vm_ids: list[int] = Field(min_length=1, description="控制平面节点(虚拟机 ID 列表)")
     worker_vm_ids: list[int] = Field(default=[], description="工作节点(虚拟机 ID 列表)")
     ssh_key: str | None = Field(default=None, description="SSH 私钥(可选,留空使用平台密钥)")
@@ -181,6 +184,8 @@ class ClusterOut(BaseModel):
     k8s_version: str
     network_plugin: str
     kubespray_version: str
+    run_node_host_id: int | None = None
+    run_node_name: str | None = None
     status: str
     is_demo: bool
     created_at: datetime
