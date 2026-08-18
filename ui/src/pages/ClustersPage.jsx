@@ -402,8 +402,8 @@ export default function ClustersPage() {
 
       {wizard && (
         <Modal title={t('clusters.wizardTitle', { name: wizard.name })} onClose={closeWizard} width="780px">
-          <div className="wizard-sub">{t('clusters.wizardSub', { node: wizard.run_node_name || t('clusters.runNodeAuto') })}</div>
-          <div className="wizard-steps">
+          <div className="cwizard-sub">{t('clusters.wizardSub', { node: wizard.run_node_name || t('clusters.runNodeAuto') })}</div>
+          <div className="cwizard-steps">
             {[1, 2, 3].map((n) => {
               const st = stepState[n]
               const badge =
@@ -411,13 +411,13 @@ export default function ClustersPage() {
               const label =
                 st === 'success' ? t('status.success') : st === 'failed' ? t('status.failed') : st === 'running' ? t('clusters.stepRunning') : t('clusters.stepReady')
               return (
-                <div key={n} className={'wizard-step' + (st === 'running' ? ' running' : '')}>
-                  <div className="wizard-step-top">
-                    <span className="wizard-step-num">{n}</span>
-                    <div className="wizard-step-title">{WIZARD_STEPS[n - 1].title}</div>
+                <div key={n} className={'cwizard-step' + (st === 'running' ? ' running' : '')}>
+                  <div className="cwizard-top">
+                    <span className="cwizard-num">{n}</span>
+                    <div className="cwizard-title">{WIZARD_STEPS[n - 1].title}</div>
                   </div>
-                  <div className="wizard-step-desc">{WIZARD_STEPS[n - 1].desc}</div>
-                  <div className="wizard-step-actions">
+                  <div className="cwizard-desc">{WIZARD_STEPS[n - 1].desc}</div>
+                  <div className="cwizard-actions">
                     <span className={'badge ' + badge}>{label}</span>
                     <button
                       className="btn btn-primary btn-sm"
@@ -428,7 +428,7 @@ export default function ClustersPage() {
                     </button>
                   </div>
                   {stepLogs[n] && (
-                    <pre ref={logRefs[n]} className="log-viewer wizard-log">
+                    <pre ref={logRefs[n]} className="log-viewer cwizard-log">
                       {stepLogs[n]}
                     </pre>
                   )}
