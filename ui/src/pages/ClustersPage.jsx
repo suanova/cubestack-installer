@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { CONSTANTS, clusterApi, hostApi, vmApi } from '../api/client'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { CONSTANTS, clusterApi, hostApi, taskApi, vmApi } from '../api/client'
 import Field, { CheckboxCard, Select } from '../components/Field'
 import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
@@ -33,6 +33,10 @@ export default function ClustersPage() {
   const [detail, setDetail] = useState(null)
   const [deleting, setDeleting] = useState(null)
   const [deployingId, setDeployingId] = useState(null)
+  const [wizard, setWizard] = useState(null)
+  const [stepState, setStepState] = useState({ 1: 'idle', 2: 'idle', 3: 'idle' })
+  const [stepLogs, setStepLogs] = useState({ 1: '', 2: '', 3: '' })
+  const logRefs = { 1: useRef(null), 2: useRef(null), 3: useRef(null) }
 
   const load = useCallback(() => {
     clusterApi
@@ -47,6 +51,12 @@ export default function ClustersPage() {
     const iv = setInterval(load, 4000)
     return () => clearInterval(iv)
   }, [load])
+
+  useEffect(() => {
+    ;[1, 2, 3].forEach((n) => {
+      if (logRefs[n].current) logRefs[n].current.scrollTop = logRefs[n].current.scrollHeight
+    })
+  }, [stepLogs])
 
   function openCreate() {
     setForm(emptyForm)
@@ -100,6 +110,9 @@ export default function ClustersPage() {
       .then((c) => {
         setClusters((list) => [...list, c])
         setShowCreate(false)
+        setWizard(c)
+        setStepState({ 1: 'idle', 2: 'idle', 3: 'idle' })
+        setStepLogs({ 1: '', 2: '', 3: '' })
         toast(t('clusters.created', { name: c.name }))
       })
       .catch((err) => toast(err.message, 'error'))
@@ -139,6 +152,57 @@ export default function ClustersPage() {
         setDeleting(null)
       })
   }
+
+  function runWizardStep(n) {
+    if (!wizard) return
+    const apiCall = n === 1 ? clusterApi.prepare : n === 2 ? clusterApi.sshkey : clusterApi.deploy
+    setStepState((s) => ({ ...s, [n]: 'running' }))
+    setStepLogs((l) => ({ ...l, [n]: '' }))
+    apiCall(wizard.id, token)
+      .then((res) => pollStep(n, res.task_id))
+      .catch((err) => {
+        setStepState((s) => ({ ...s, [n]: 'failed' }))
+        setStepLogs((l) => ({ ...l, [n]: '请求失败: ' + err.message }))
+      })
+  }
+
+  function pollStep(n, taskId) {
+    let iv
+    const tick = () => {
+      taskApi
+        .get(taskId, token)
+        .then((tk) => {
+          setStepLogs((l) => ({ ...l, [n]: (tk.log_text || '').split('\n').slice(-80).join('\n') }))
+          if (tk.status === 'success' || tk.status === 'failed') {
+            clearInterval(iv)
+            setStepState((s) => ({ ...s, [n]: tk.status === 'success' ? 'success' : 'failed' }))
+            if (tk.status === 'success') {
+              toast(t('clusters.stepOk', { n }))
+              load()
+            } else {
+              toast(t('clusters.stepFail', { n }), 'error')
+            }
+          }
+        })
+        .catch(() => {
+          clearInterval(iv)
+          setStepState((s) => ({ ...s, [n]: 'failed' }))
+        })
+    }
+    tick()
+    iv = setInterval(tick, 2000)
+  }
+
+  function closeWizard() {
+    setWizard(null)
+    load()
+  }
+
+  const WIZARD_STEPS = [
+    { title: t('clusters.step1Title'), desc: t('clusters.step1Desc') },
+    { title: t('clusters.step2Title'), desc: t('clusters.step2Desc') },
+    { title: t('clusters.step3Title'), desc: t('clusters.step3Desc') },
+  ]
 
   if (loading) {
     return (
@@ -332,6 +396,48 @@ export default function ClustersPage() {
           )}
           <div className="modal-actions">
             <button className="btn btn-ghost" onClick={() => setDetail(null)}>{t('common.close')}</button>
+          </div>
+        </Modal>
+      )}
+
+      {wizard && (
+        <Modal title={t('clusters.wizardTitle', { name: wizard.name })} onClose={closeWizard} width="780px">
+          <div className="wizard-sub">{t('clusters.wizardSub', { node: wizard.run_node_name || t('clusters.runNodeAuto') })}</div>
+          <div className="wizard-steps">
+            {[1, 2, 3].map((n) => {
+              const st = stepState[n]
+              const badge =
+                st === 'success' ? 'badge-success' : st === 'failed' ? 'badge-failed' : st === 'running' ? 'badge-info' : 'badge-muted'
+              const label =
+                st === 'success' ? t('status.success') : st === 'failed' ? t('status.failed') : st === 'running' ? t('clusters.stepRunning') : t('clusters.stepReady')
+              return (
+                <div key={n} className={'wizard-step' + (st === 'running' ? ' running' : '')}>
+                  <div className="wizard-step-head">
+                    <span className="wizard-step-num">{n}</span>
+                    <div className="wizard-step-meta">
+                      <div className="wizard-step-title">{WIZARD_STEPS[n - 1].title}</div>
+                      <div className="wizard-step-desc">{WIZARD_STEPS[n - 1].desc}</div>
+                    </div>
+                    <span className={'badge ' + badge}>{label}</span>
+                    <button
+                      className="btn btn-primary btn-sm"
+                      disabled={st === 'running' || (n > 1 && stepState[n - 1] !== 'success')}
+                      onClick={() => runWizardStep(n)}
+                    >
+                      {st === 'running' ? t('common.loading') : st === 'success' ? t('clusters.stepRerun') : t('clusters.stepRun')}
+                    </button>
+                  </div>
+                  {stepLogs[n] && (
+                    <pre ref={logRefs[n]} className="log-viewer wizard-log">
+                      {stepLogs[n]}
+                    </pre>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+          <div className="modal-actions">
+            <button className="btn btn-ghost" onClick={closeWizard}>{t('common.close')}</button>
           </div>
         </Modal>
       )}
