@@ -87,7 +87,8 @@ cubestack-installer/
 │   │   └── theme.jsx       # 深浅主题
 │   ├── Dockerfile + nginx.conf
 │   └── vite.config.js      # /api 代理
-├── scripts/                # 启动脚本(dev / start-backend / start-frontend)
+├── scripts/                # 开发启动脚本(dev / start-backend / start-frontend)
+├── deployments/scripts/    # 部署脚本(14 脚本, 从0到1离线部署 kubespray)
 ├── docs/                   # api.md / architecture.md
 ├── Makefile
 ├── docker-compose.yml

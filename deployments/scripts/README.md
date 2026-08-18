@@ -1,8 +1,12 @@
 # CubeStack 脚本使用手册(CLI)
 
-本目录脚本提供完整的**命令行自动化**能力:从宿主网络初始化、SSH 密钥、master 虚拟机创建与免密登录,到 kubespray 兼容 inventory 生成与(可选)K8s 部署。
+本目录脚本提供完整的**命令行自动化**能力:从宿主网络初始化、SSH 密钥、master 虚拟机创建与免密登录,到 kubespray 兼容 inventory 生成与(可选)K8s 离线部署。
 
-所有脚本**统一读取** `config/cluster.conf`(唯一数据源),不硬编码 IP / 用户名 / 密码 / 路径。配置优先级:**环境变量 > 配置文件 > 内置兜底默认**。
+所有脚本**统一读取** `config/cluster.conf`(单集群)或 `config/cluster-${CLUSTER_NAME}.conf`(多集群)作为唯一数据源,不硬编码 IP / 用户名 / 密码 / 路径。配置优先级:**环境变量 > 配置文件 > 内置兜底默认**。
+
+> 多集群:通过 `--cluster <name>` 或环境变量 `CLUSTER_NAME` 或 `CUBESTACK_CLUSTER` 指定集群名,默认 `cubestack-cluster`。例如 `./deploy-cluster.sh --cluster prod` 读取 `config/cluster-prod.conf`。
+>
+> 断点续跑:每阶段完成自动保存状态到 `config/.cluster-${CLUSTER_NAME}.state`;下次启动自动跳过已完成阶段;`--fresh` 清状态重新执行。
 
 > UI 兼容性:统一配置结构清晰,`gen-inventory.sh` 同时产出后端风格的 `inventory.ini`,后期 installer 后端可复用同一份 `cluster.conf`。
 
@@ -16,13 +20,19 @@ cp config/cluster.conf.example config/cluster.conf
 vim config/cluster.conf          # 修改 宿主机/网络/SSH/节点清单
 
 # 1) 查看集群规划(只读)
-sudo ./scripts/deploy-cluster.sh --list
+sudo ./deployments/scripts/deploy-cluster.sh --list
 
 # 2) 一键部署(宿主网络 → SSH密钥 → master虚拟机+免密 → worker连通性 → inventory)
-sudo ./scripts/deploy-cluster.sh
+sudo ./deployments/scripts/deploy-cluster.sh
 
-# 3) 可选:继续执行 kubespray 集群部署(需 ansible-playbook)
-sudo ./scripts/deploy-cluster.sh --skip-net --with-k8s
+# 3) 多集群:指定集群名(读取 config/cluster-<name>.conf)
+sudo ./deployments/scripts/deploy-cluster.sh --cluster mycluster --list
+
+# 4) 断点续跑:完成后继续(自动跳过已完成阶段)
+sudo ./deployments/scripts/deploy-cluster.sh --skip-net --with-k8s
+
+# 5) 清状态重新执行
+sudo ./deployments/scripts/deploy-cluster.sh --fresh --with-k8s
 ```
 
 ---
@@ -30,10 +40,12 @@ sudo ./scripts/deploy-cluster.sh --skip-net --with-k8s
 ## 2. 目录与文件
 
 ```
-scripts/
+deployments/scripts/
 ├── lib-common.sh              # 公共库:统一配置加载 + IP/MAC 工具(被所有脚本 source)
 │                              #   register_node_to_conf(): awk 幂等注册节点到 cluster.conf
-├── deploy-cluster.sh          # ★ 一键编排(主入口)
+│                              #   save_state/get_state/clear_state: 断点续跑状态管理
+│                              #   CLUSTER_NAME 解析: 支持多集群 cluster-${name}.conf
+├── deploy-cluster.sh          # ★ 一键编排(主入口,支持 --cluster/--fresh 断点续跑)
 ├── gen-ssh-key.sh             # 生成集群 SSH 密钥对(幂等)
 ├── setup-passwordless.sh      # 注入公钥实现目标主机免密登录
 ├── gen-inventory.sh           # 从配置生成 kubespray inventory + 同步 kubespray 配置
@@ -46,8 +58,10 @@ scripts/
 ├── setup-libvirt-nat.sh       # 方案B:创建 libvirt NAT 网络(含 --delete 回滚)
 ├── verify-vm-network.sh       # 验证宿主网络配置与连通性
 ├── teardown-vm-network.sh     # 回滚方案A桥接网络(SNAT/路由/自启,可删网桥)
-├── dev.sh / start-backend.sh / start-frontend.sh   # 项目原有开发/启动脚本
+└── README.md                  # 本文件
 ```
+
+项目根目录 `scripts/` 下仅有 dev 启动脚本(`dev.sh`/`start-backend.sh`/`start-frontend.sh`),部署脚本统一在 `deployments/scripts/`。
 
 统一配置:见 `config/cluster.conf`(真实,已 gitignore)与 `config/cluster.conf.example`(模板,提交)。
 
