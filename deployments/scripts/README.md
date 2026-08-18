@@ -44,15 +44,28 @@ deployments/scripts/
 ├── lib-common.sh              # 公共库:统一配置加载 + IP/MAC 工具(被所有脚本 source)
 │                              #   register_node_to_conf(): awk 幂等注册节点到 cluster.conf
 │                              #   save_state/get_state/clear_state: 断点续跑状态管理
+│                              #   node_is_vm(): 按 node_type 判断 vm/裸金属
 │                              #   CLUSTER_NAME 解析: 支持多集群 cluster-${name}.conf
-├── deploy-cluster.sh          # ★ 一键编排(主入口,支持 --cluster/--fresh 断点续跑)
+├── lib-deploy.sh              # ★ 模块注册表(DEPLOY_STEPS) + 调度(steps/*.sh 在此登记)
+├── deploy-cluster.sh          # ★ 统一入口(模块化编排,薄壳: 参数解析 + 按注册表调度)
+├── steps/                     # ★ 部署模块(每个 = 复用现有脚本的薄封装, 可插拔)
+│   ├── 01-network.sh          #   初始化宿主网络 → setup-vm-network.sh / setup-libvirt-nat.sh
+│   ├── 02-ssh-key.sh          #   生成 SSH 密钥     → gen-ssh-key.sh
+│   ├── 03-vm.sh               #   创建虚拟机并启动   → create-libvirt-vm.sh
+│   ├── 04-ssh-passwordless.sh #   SSH 免密         → setup-passwordless.sh
+│   ├── 05-worker-bm.sh        #   裸金属 worker 装包 → install-worker-packages.sh
+│   ├── 06-hosts.sh            #   更新 /etc/hosts
+│   ├── 07-inventory.sh        #   生成 inventory   → gen-inventory.sh
+│   ├── 08-k8s.sh              #   部署 kubespray   → cubestack-offline.sh(默认关闭)
+│   ├── 09-gpu-operator.sh     #   沐曦 GPU Operator(占位, 默认关闭)
+│   └── 10-lws.sh              #   LeaderWorkerSet(占位, 默认关闭)
 ├── gen-ssh-key.sh             # 生成集群 SSH 密钥对(幂等)
 ├── setup-passwordless.sh      # 注入公钥实现目标主机免密登录
 ├── gen-inventory.sh           # 从配置生成 kubespray inventory + 同步 kubespray 配置
 ├── sync-kubespray-config.sh   # ★ 从 cluster.conf 动态生成 kubespray group_vars 中的 IP
 ├── register-vm.sh             # 将已存在 VM 注册到 cluster.conf NODES
-├── create-libvirt-vm.sh       # 创建单台 Ubuntu22.04 虚拟机(静态IP,配置驱动,自动注册+装包)
-├── create-vm-template.sh      # 制作黄金基础镜像(预埋用户/SSH/时区/kubespray所需包)
+├── create-libvirt-vm.sh       # 创建单台 Ubuntu22.04 虚拟机(静态IP,配置驱动,自动注册; 不再安装任何组件)
+├── create-vm-template.sh      # 制作黄金基础镜像(预埋用户/SSH/时区/kubespray所需包; 包固化唯一入口)
 ├── install-worker-packages.sh # 离线 .deb 包安装到 bare-metal worker 节点
 ├── setup-vm-network.sh        # 方案A:创建 privbr0 网桥网络(建桥/回程路由/SNAT/自启)
 ├── setup-libvirt-nat.sh       # 方案B:创建 libvirt NAT 网络(含 --delete 回滚)
@@ -60,6 +73,16 @@ deployments/scripts/
 ├── teardown-vm-network.sh     # 回滚方案A桥接网络(SNAT/路由/自启,可删网桥)
 └── README.md                  # 本文件
 ```
+
+### 模块化设计说明
+
+`deploy-cluster.sh` 只做两件事:**参数解析 + 按注册表调度**,不内联任何业务逻辑。
+每个部署功能 = `steps/` 下一个独立脚本(薄封装, 复用现有脚本, 不重复实现)。
+
+**新增模块(如未来接入 GPU Operator / LWS 等)**:
+1. 在 `steps/` 新建 `<NN>-<name>.sh`(实现逻辑, 可调用现有脚本/kubectl)
+2. 在 `lib-deploy.sh` 的 `DEPLOY_STEPS` 追加一行: `"key|描述|脚本文件名|默认启用(1/0)"`
+3. 无需修改 `deploy-cluster.sh`
 
 项目根目录 `scripts/` 下仅有 dev 启动脚本(`dev.sh`/`start-backend.sh`/`start-frontend.sh`),部署脚本统一在 `deployments/scripts/`。
 
@@ -76,14 +99,16 @@ deployments/scripts/
 | 宿主机 | `HOST_PHYS_IP` `BASE_IMG` `VM_DISK_DIR` | 物理IP(SNAT源)、基础镜像、VM磁盘目录 |
 | 网络规划 | `NET_MODE`(bridge/nat)、`BRIDGE` `BRIDGE_IP` `VM_SUBNET` `PHYS_WORKER_NET` / `NAT_NET_NAME` `NAT_SUBNET` `NAT_GATEWAY` | 双方案网段/网关/SNAT目标 |
 | SSH | `SSH_KEY_NAME` `SSH_DEFAULT_PASSWORD` `VM_SSH_USERS` `WORKER_SSH_PASSWORD` | 密钥、虚拟机预埋密码、免密用户、裸金属密码 |
-| 节点规划 | `NODES=( ... )` | 每行一节点,master(虚拟机)/worker(裸金属) |
+| 节点规划 | `NODES=( ... )` | 每行一节点,类型由第10字段 `node_type` 决定: vm=虚拟机 / bm=裸金属 |
 | kubespray | `KUBESPRAY_INV_DIR` `KUBESPRAY_DIR` `UPDATE_ETC_HOSTS` | inventory 输出位置、playbook 位置、是否写 /etc/hosts |
 
 ### 节点行格式
 
 ```
-role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password
+role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password,node_type
 ```
+
+`node_type`:`vm`=创建为虚拟机(自动启动) / `bm`=裸金属(不创建 VM,走密码连通+离线装包)。省略时回退推断:master 默认 `vm`,其余按是否有 VM 参数(MAC 非 `-` 且 内存>0)判断。
 
 - `role`: `master`(虚拟机,自动创建) | `worker`(裸金属,仅记录/连通性检查)
 - `mac`: 显式 MAC,或 `-` 按主机名确定性生成(幂等)
@@ -113,17 +138,21 @@ NODES=(
 
 ## 5. 脚本用法详解
 
-### 5.1 deploy-cluster.sh —— 一键编排(主入口)
+### 5.1 deploy-cluster.sh —— 一键部署统一入口(模块化)
 
 ```bash
-sudo ./scripts/deploy-cluster.sh                # 全流程
-sudo ./scripts/deploy-cluster.sh --skip-net     # 跳过宿主网络初始化
-sudo ./scripts/deploy-cluster.sh --only <host>  # 仅处理指定节点(可多次)
-sudo ./scripts/deploy-cluster.sh --with-k8s     # 完成后执行 kubespray cluster.yml
-sudo ./scripts/deploy-cluster.sh --list         # 仅打印集群规划(只读)
+sudo ./scripts/deploy-cluster.sh                       # 默认基础设施模块(net/ssh_key/vm/ssh_passwordless/worker_bm/hosts/inventory)
+sudo ./scripts/deploy-cluster.sh --with-k8s            # 追加 k8s 部署模块(= --enable k8s)
+sudo ./scripts/deploy-cluster.sh --steps vm,k8s        # 只运行指定模块(逗号分隔)
+sudo ./scripts/deploy-cluster.sh --skip hosts          # 跳过某模块
+sudo ./scripts/deploy-cluster.sh --enable gpu_operator,lws  # 启用默认关闭模块(需先实现 steps/ 脚本)
+sudo ./scripts/deploy-cluster.sh --only <host>         # 仅处理指定节点(可多次)
+sudo ./scripts/deploy-cluster.sh --list-steps          # 查看全部模块
+sudo ./scripts/deploy-cluster.sh --list                # 仅打印集群规划(只读)
+sudo ./scripts/deploy-cluster.sh --fresh               # 清断点续跑状态重跑
 ```
 
-流程:`宿主网络 → SSH密钥 → master虚拟机创建+免密 → worker连通性检查 → /etc/hosts(可选) → 生成inventory → (可选)k8s`。master 已存在则跳过创建、自动 `virsh start`;worker 仅做只读连通性检查,**不会修改裸金属**。
+流程按 `lib-deploy.sh` 注册表顺序执行 `steps/*.sh`;每模块完成自动保存状态(断点续跑)。默认模块:网络 → SSH密钥 → 虚拟机创建+启动 → SSH免密 → 裸金属worker装包 → /etc/hosts(可选) → inventory。k8s/gpu_operator/lws 默认关闭,按需 `--enable`/`--steps` 启用。
 
 ### 5.2 gen-ssh-key.sh —— SSH 密钥对
 
@@ -267,21 +296,33 @@ cp config/cluster.conf.example config/cluster.conf
 vim config/cluster.conf
 ```
 
-节点格式:`role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password`
+节点格式:`role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password,node_type`(第10字段 `node_type`=vm 虚拟机 / bm 裸金属, 省略时自动推断)
+
+**离线镜像预加载(最小集合)**:部署前只把"kubespray 必需镜像"同步到节点 containerd,避免全量 rsync 无关镜像(cilium/flannel/ingress-nginx/dashboard 等)拖慢部署。通过 `cluster.conf` 的 `PRELOAD_IMAGE_PATTERNS` 配置:
+
+```bash
+# 空格分隔的匹配条目; 含 ".tar" 为精确文件名匹配(如 quay.io_calico_node_v3.29.3.tar), 否则为文件名包含匹配(如 calico)
+# 留空 = 全量同步 images/ 目录; 默认值为内置最小集合(见 cluster.conf.example)
+PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver \
+kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler \
+k8s-dns-node-cache metrics-server pause"
+```
+
+> 也可在 `inventory/<cluster>/preload-images.conf` 中单独覆盖(standalone 运行 `cubestack-offline.sh` 时生效;`PRELOAD_IMAGE_PATTERNS=""` 即全量同步)。
 
 > **所有 IP 不硬编码**:kubespray group_vars 中的宿主机 IP、master IP、Calico can-reach 等均由 `sync-kubespray-config.sh` 从 cluster.conf 动态生成。
 
 ### 8.3 一键部署(推荐)
 
 ```bash
-# 全流程: 宿主网络 → SSH密钥 → master/worker VM 创建+注册+装包 → 免密 → inventory → kubespray 离线部署
+# 全流程: 宿主网络 → SSH密钥 → master/worker VM 创建+注册 → 免密 → inventory → kubespray 离线部署
 sudo ./scripts/deploy-cluster.sh --with-k8s
 ```
 
 该命令自动完成:
 1. `setup-vm-network.sh` 初始化 privbr0 网桥 + SNAT
 2. `gen-ssh-key.sh` 生成 SSH 密钥
-3. 按 NODES 创建 master/worker 虚拟机(已存在则跳过创建、直接 `virsh start`;`AUTO_REGISTER_CLUSTER=1` 自动注册到 cluster.conf)
+3. 按 NODES 创建 master/worker 虚拟机(基础镜像已由 `create-vm-template.sh` 预制 kubespray 所需包, 创建 VM 不安装任何组件, 离线环境安全)
 4. `setup-passwordless.sh` 注入公钥
 5. 对 worker 执行 `install-worker-packages.sh` 安装离线包
 6. `gen-inventory.sh` + `sync-kubespray-config.sh` 生成 inventory 与配置
@@ -330,7 +371,7 @@ CUBESTACK_KUBESPRAY_DIR=$PWD/kubespray \
   bash cubestack-offline.sh scale --limit kube_node
 ```
 
-> `cubestack-offline.sh scale` 已内置:先复制 `repository/*/images/` 到 worker 并 `ctr image import` 预加载,再执行 `scale.yml`,避免 kube-proxy 等镜像 ImagePullBackOff。
+> `cubestack-offline.sh scale` 已内置:先按 `PRELOAD_IMAGE_PATTERNS` 将最小镜像集合(默认 13 个,如 kube-*、etcd、coredns、calico、metrics-server、pause)rsync 到 worker 并 `ctr image import` 预加载,再执行 `scale.yml`,避免 kube-proxy 等镜像 ImagePullBackOff。
 
 ### 8.6 bare-metal worker(跨网段)
 

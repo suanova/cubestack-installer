@@ -34,6 +34,21 @@ else
 fi
 export CLUSTER_CONF
 
+# ---------------- 宿主机物理 IP 自动检测 ----------------
+# 不 hardcode: 自动检测宿主机物理网卡 IP(排除虚拟网桥 docker0/privbr0/virbr0 等)
+detect_host_ip() {
+    local ip=""
+    # 方法1: 默认路由出口源 IP(最可靠)
+    ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+    [ -n "${ip}" ] && echo "${ip}" && return 0
+    # 方法2: hostname -I 过滤虚拟网桥/保留地址
+    ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.244\.|10\.245\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[0-1]\.|192\.168\.122\.|127\.|169\.254\.)' | head -1)"
+    [ -n "${ip}" ] && echo "${ip}" && return 0
+    # 方法3: 枚举物理网卡 IP
+    ip="$(ip -4 addr show 2>/dev/null | grep -oP 'inet \K[0-9.]+' | grep -vE '^(10\.244\.|10\.245\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[0-1]\.|192\.168\.122\.|127\.|169\.254\.)' | head -1)"
+    [ -n "${ip}" ] && echo "${ip}" || echo "127.0.0.1"
+}
+
 # ---------------- 断点续跑: 状态文件 ----------------
 # 每个集群独立的状态文件,记录已完成的任务阶段
 # 用法: save_state <phase> <value>; get_state <phase>; clear_state
@@ -79,7 +94,33 @@ load_config() {
         warn "未找到配置文件 ${CLUSTER_CONF},使用内置默认值"
         warn "建议: cp ${REPO_ROOT}/deployments/config/cluster.conf.example ${CLUSTER_CONF}"
     fi
+    # 宿主机物理 IP 自动检测(不 hardcode): 仅当未显式设置或仍是旧默认值时覆盖
+    if [ -z "${HOST_PHYS_IP:-}" ] || [ "${HOST_PHYS_IP}" = "10.66.3.37" ] || [ "${HOST_PHYS_IP}" = "CHANGE_ME" ]; then
+        HOST_PHYS_IP="$(detect_host_ip)"
+        export HOST_PHYS_IP
+        vlog "自动检测宿主机物理 IP: ${HOST_PHYS_IP}"
+    fi
+    # NAT 模式同网段: APISERVER_ADDRESS 默认取第一个 master IP
+    if [ -z "${APISERVER_ADDRESS:-}" ] && [ "${NET_MODE:-nat}" = "nat" ]; then
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
+            [ "${role}" = "master" ] && { APISERVER_ADDRESS="${ip}"; export APISERVER_ADDRESS; vlog "NAT 模式自动设 APISERVER_ADDRESS=第一个master: ${ip}"; break; }
+        done
+    fi
 }
+
+# ---------------- 指定节点过滤(--only) ----------------
+# 仅在 ONLY_HOSTS(逗号分隔, 由 deploy-cluster.sh --only 收集)非空时过滤
+node_matches() {
+    [ -z "${ONLY_HOSTS:-}" ] && return 0
+    local h
+    for h in ${ONLY_HOSTS//,/ }; do [ "$h" = "$1" ] && return 0; done
+    return 1
+}
+
+# SSH 端口探测(免认证,仅确认就绪)
+ssh_port_open() { timeout 3 bash -c "echo > /dev/tcp/$1/22" 2>/dev/null; }
 
 # ---------------- IP / CIDR 工具 ----------------
 ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24) + (b<<16) + (c<<8) + d )); }
@@ -109,6 +150,21 @@ mac_from_name() {
 node_password() { # <role> <password>
     [ "$1" = "worker" ] && { [ -n "$2" ] && [ "$2" != "-" ] && echo "$2" || echo "${WORKER_SSH_PASSWORD:-}"; } \
                       || { [ -n "$2" ] && [ "$2" != "-" ] && echo "$2" || echo "${SSH_DEFAULT_PASSWORD:-}"; }
+}
+
+# ---------------- 节点类型判断(vm=虚拟机 / bm=裸金属) ----------------
+# NODES 第10字段 node_type 显式指定节点类型; 省略时回退推断:
+#   master 默认视为虚拟机; 其余按是否有 VM 参数(mac 非 "-" 且 内存>0)推断
+# 用法: node_is_vm <role> <mac> <mem_g> <node_type> → 退出码 0=是虚拟机
+node_is_vm() {
+    local role="$1" mac="$2" mem="$3" ntype="$4"
+    case "${ntype}" in
+        vm) return 0 ;;
+        bm) return 1 ;;
+    esac
+    # 未显式指定类型: 回退推断
+    [ "${role}" = "master" ] && return 0
+    [ -n "${mac}" ] && [ "${mac}" != "-" ] && [ "${mem:-0}" -gt 0 ]
 }
 
 # 获取根目录(供其它脚本引用路径)
