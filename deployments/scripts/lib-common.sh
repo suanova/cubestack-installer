@@ -2,7 +2,7 @@
 # ============================================================
 # CubeStack 公共库: 统一配置加载 + 通用工具函数
 # 所有 deployments/scripts/*.sh 在 set -euo pipefail 之后 source 本文件
-# 配置统一来源: config/cluster.conf (单集群) 或 config/cluster-${CLUSTER_NAME}.conf (多集群)
+# 配置统一来源: deployments/config/cluster.conf (单集群) 或 deployments/config/cluster-${CLUSTER_NAME}.conf (多集群)
 # 优先级: 环境变量 > 配置文件 > 内置默认值(内置默认值在配置文件中声明)
 # 说明: 本库不执行任何宿主修改,仅供各脚本复用
 # ============================================================
@@ -18,18 +18,18 @@ export CLUSTER_NAME
 
 # ---------------- 多集群: 配置文件解析 ----------------
 # 优先 cluster-${CLUSTER_NAME}.conf, 回退 cluster.conf
-CONF_BY_CLUSTER="${REPO_ROOT}/config/cluster-${CLUSTER_NAME}.conf"
+CONF_BY_CLUSTER="${REPO_ROOT}/deployments/config/cluster-${CLUSTER_NAME}.conf"
 if [ -f "${CONF_BY_CLUSTER}" ]; then
     CLUSTER_CONF="${CLUSTER_CONF:-${CONF_BY_CLUSTER}}"
 else
-    CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/config/cluster.conf}"
+    CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/deployments/config/cluster.conf}"
 fi
 export CLUSTER_CONF
 
 # ---------------- 断点续跑: 状态文件 ----------------
 # 每个集群独立的状态文件,记录已完成的任务阶段
 # 用法: save_state <phase> <value>; get_state <phase>; clear_state
-STATE_FILE="${REPO_ROOT}/config/.cluster-${CLUSTER_NAME}.state"
+STATE_FILE="${REPO_ROOT}/deployments/config/.cluster-${CLUSTER_NAME}.state"
 save_state() {
     local key="$1" val="$2"
     # 移除旧记录再写入(避免重复)
@@ -66,7 +66,7 @@ load_config() {
         source "${CLUSTER_CONF}"
     else
         warn "未找到配置文件 ${CLUSTER_CONF},使用内置默认值"
-        warn "建议: cp ${REPO_ROOT}/config/cluster.conf.example ${CLUSTER_CONF}"
+        warn "建议: cp ${REPO_ROOT}/deployments/config/cluster.conf.example ${CLUSTER_CONF}"
     fi
 }
 

@@ -20,15 +20,14 @@ bin_dir: /usr/local/bin
 loadbalancer_apiserver_localhost: false
 apiserver_loadbalancer_domain_name: "lb.k8s.local"
 loadbalancer_apiserver:
-  address: 10.66.3.37    # ← 宿主机物理 IP(worker 通过此地址访问)
+  address: 192.168.122.31   # ← 第一个 master 节点 IP(同网段 VM 直接访问)
   port: 6443
 
 supplementary_addresses_in_ssl_keys:
   - lb.k8s.local
-  - 10.66.3.37           # 宿主机物理 IP(worker 通过此地址访问 API Server)
-  - 10.244.1.11
-  - 10.244.1.12
-  - 10.244.1.13
+  - 192.168.122.31
+  - 192.168.122.32
+  - 192.168.122.33
 
 # 如果 Kubespray 版本 ≥ 2.24 且 K8s ≥ 1.29，还需要启用 EndpointSlice 镜像
 # 让 kubernetes service 的 EndpointSlice 指向 LB VIP
