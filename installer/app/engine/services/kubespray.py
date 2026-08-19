@@ -244,7 +244,7 @@ def run_cluster_install(task: DeployTask, db) -> None:
                 # sshd 收不到通道 EOF,启动命令会一直挂起直到 _ssh 超时,被误判为启动失败。
                 inst_log = "/tmp/csi-install-" + CUBESTACK_CLUSTER + ".log"
                 inst_done = "/tmp/csi-install-" + CUBESTACK_CLUSTER + ".done"
-                rc, out, err = _ssh(run_node, "rm -f " + inst_log + " " + inst_done + "; ( cd " + CUBESTACK_BASE + " && setsid bash -c '" + "CUBESTACK_LOCAL_REPO_DIR=" + CUBESTACK_BASE + "/inventory/cubestack-cluster bash " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER + " > " + inst_log + " 2>&1; echo $? > " + inst_done + "' ) >/dev/null 2>&1 </dev/null & echo STARTED", timeout=30)
+                rc, out, err = _ssh(run_node, "rm -f " + inst_log + " " + inst_done + "; ( cd " + CUBESTACK_BASE + " && setsid bash -c '" + "bash " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER + " > " + inst_log + " 2>&1; echo $? > " + inst_done + "' ) >/dev/null 2>&1 </dev/null & echo STARTED", timeout=30)
                 if "STARTED" not in out:
                     # 兜底:即使启动命令的 SSH 连接异常(超时/被掐断),只要安装进程确实已在运行节点启动,仍继续轮询
                     r2, o2, e2 = _ssh(run_node, "pgrep -f 'cubestack-offline[.]sh install ' >/dev/null 2>&1 && echo PROC_RUNNING || echo NO_PROC", timeout=20)
@@ -254,6 +254,8 @@ def run_cluster_install(task: DeployTask, db) -> None:
                 # 轮询日志文件,增量回传控制台(每次短连接,不会因长会话被掐断)
                 line_no = 1
                 final_rc = None
+                completed_at = None          # 日志中出现“安装完成”标记的时间
+                grace_deadline = None        # 出现完成标记后,等待 done 文件的宽限截止
                 deadline = time.time() + 7200
                 while time.time() < deadline:
                     r, o, e = _ssh(run_node, "tail -n +" + str(line_no) + " " + inst_log + " 2>/dev/null", timeout=30)
@@ -262,9 +264,18 @@ def run_cluster_install(task: DeployTask, db) -> None:
                         line_no += len(ls)
                         for ln in ls:
                             _on_line(ln)
+                            # 脚本打印“安装完成”即安装成功; 脚本可能因日志管道挂起而不写 done, 这里额外宽限
+                            if completed_at is None and "安装完成" in ln:
+                                completed_at = time.time()
+                                grace_deadline = completed_at + 180
                     r2, d, e2 = _ssh(run_node, "test -f " + inst_done + " && cat " + inst_done + " || echo NOTDONE", timeout=30)
                     if "NOTDONE" not in d and d.strip():
                         final_rc = int(d.strip())
+                        break
+                    if completed_at is not None and time.time() >= grace_deadline:
+                        # 已确认完成但脚本进程仍挂起(done 文件缺失), 按成功处理, 不再等满 2 小时误报超时
+                        log_line(task, db, "      [提示] 安装日志已显示完成,但脚本进程未退出(done 文件缺失),按成功处理")
+                        final_rc = 0
                         break
                     time.sleep(8)
                 _flush_lines()
