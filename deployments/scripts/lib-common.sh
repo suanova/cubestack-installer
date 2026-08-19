@@ -71,6 +71,8 @@ is_state_completed() {
 # ---------------- 输出函数(同时写入日志文件) ----------------
 # 日志文件路径: 设置 LOG_FILE 后, 所有输出同时写入该文件
 # 用法: export LOG_FILE=/tmp/deploy.log; sudo ./deploy-cluster.sh ...
+# 日志开关: LOG_VERBOSE=1 显示详细日志(默认) / 0 仅显示关键信息
+LOG_VERBOSE="${LOG_VERBOSE:-1}"
 _log_file() { [ -n "${LOG_FILE:-}" ] && echo -e "$*" >> "${LOG_FILE}" 2>/dev/null || true; }
 say()  { local m="→  $*"; echo -e "\033[36m${m}\033[0m"; _log_file "${m}"; }
 ok()   { local m="✅ $*"; echo -e "\033[32m${m}\033[0m"; _log_file "${m}"; }
