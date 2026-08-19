@@ -239,11 +239,18 @@ def run_cluster_install(task: DeployTask, db) -> None:
                                 db.commit()
 
                 # 后台执行安装(与 SSH 会话解耦:连接被掐断也不影响安装),退出码写入 done 文件
+                # 注意:后台命令必须整体包在 "( ... )" 里并把重定向放在子 shell 上——
+                # 否则 bash 为 "A && B &" 派生的子 shell 会持有 SSH 通道的 stdout/stderr,
+                # sshd 收不到通道 EOF,启动命令会一直挂起直到 _ssh 超时,被误判为启动失败。
                 inst_log = "/tmp/csi-install-" + CUBESTACK_CLUSTER + ".log"
                 inst_done = "/tmp/csi-install-" + CUBESTACK_CLUSTER + ".done"
-                rc, out, err = _ssh(run_node, "rm -f " + inst_log + " " + inst_done + "; cd " + CUBESTACK_BASE + " && setsid bash -c '" + "CUBESTACK_LOCAL_REPO_DIR=" + CUBESTACK_BASE + "/inventory/cubestack-cluster bash " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER + " > " + inst_log + " 2>&1; echo $? > " + inst_done + "' >/dev/null 2>&1 </dev/null & echo STARTED", timeout=30)
+                rc, out, err = _ssh(run_node, "rm -f " + inst_log + " " + inst_done + "; ( cd " + CUBESTACK_BASE + " && setsid bash -c '" + "CUBESTACK_LOCAL_REPO_DIR=" + CUBESTACK_BASE + "/inventory/cubestack-cluster bash " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER + " > " + inst_log + " 2>&1; echo $? > " + inst_done + "' ) >/dev/null 2>&1 </dev/null & echo STARTED", timeout=30)
                 if "STARTED" not in out:
-                    raise RuntimeError("后台启动 cubestack-offline.sh 失败: " + (err or out))
+                    # 兜底:即使启动命令的 SSH 连接异常(超时/被掐断),只要安装进程确实已在运行节点启动,仍继续轮询
+                    r2, o2, e2 = _ssh(run_node, "pgrep -f 'cubestack-offline[.]sh install ' >/dev/null 2>&1 && echo PROC_RUNNING || echo NO_PROC", timeout=20)
+                    if "PROC_RUNNING" not in o2:
+                        raise RuntimeError("后台启动 cubestack-offline.sh 失败: " + (err or out or "SSH 无响应(可能超时),且未检测到安装进程"))
+                    log_line(task, db, "      [提示] 启动命令的 SSH 连接异常,但安装进程已在运行节点启动,继续轮询日志 ...")
                 # 轮询日志文件,增量回传控制台(每次短连接,不会因长会话被掐断)
                 line_no = 1
                 final_rc = None
