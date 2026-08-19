@@ -6,7 +6,7 @@
 #   2. 安装离线 .deb 包(iputils-ping/rsync/iptables/curl/ca-certificates)
 #   3. 推送 /etc/hosts 节点解析(k8s-api.nova.local + 全节点)
 # 用法: sudo ./prepare-workers.sh [--only <hostname>]
-# 数据源: deployments/config/cluster-${CLUSTER_NAME}.conf
+# 数据源: deployments/config/cluster.conf
 # ============================================================
 set -euo pipefail
 
@@ -34,13 +34,12 @@ SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/n
 [ -f "${SSH_KEY}" ] || { err "SSH 密钥不存在: ${SSH_KEY}, 先运行 gen-ssh-key.sh"; exit 1; }
 
 # 宿主机解析块(与 sync-hosts.sh 一致)
-API_IP="${APISERVER_ADDRESS:-${HOST_PHYS_IP:-10.66.3.37}}"
-API_DOMAIN="${APISERVER_DOMAIN:-k8s-api.nova.local}"
+# API_IP / API_DOMAIN 由 lib-common load_config 统一提供(从 cluster.conf 派生), 不再本地设置
 HOSTS_BLOCK="# >>> cubestack-cluster
 ${API_IP}          ${API_DOMAIN}"
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
+    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
     HOSTS_BLOCK="${HOSTS_BLOCK}
 ${ip}     ${hostname}"
 done
@@ -51,7 +50,7 @@ say "准备物理 GPU worker 节点(登录密钥: ${SSH_KEY}) ..."
 COUNT=0
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
+    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
     [ "${role}" = "worker" ] || continue
     [ -z "${ONLY}" ] || [ "${hostname}" = "${ONLY}" ] || continue
 

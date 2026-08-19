@@ -21,7 +21,7 @@
 #   sudo ./deploy-cluster.sh --enable gpu_operator,lws      # 启用默认关闭模块
 #   sudo ./deploy-cluster.sh --only <host> --with-k8s       # 仅处理指定节点
 #   sudo ./deploy-cluster.sh --list / --list-steps / --fresh
-# 数据源: config/cluster.conf(单集群) / config/cluster-${CLUSTER_NAME}.conf(多集群)
+# 数据源: config/cluster.conf
 # ============================================================
 set -euo pipefail
 
@@ -44,7 +44,6 @@ usage() {
   lws           LeaderWorkerSet(占位, 默认关闭)
 
 选项:
-  --cluster NAME        指定集群(默认 cubestack-cluster, 读 cluster-NAME.conf)
   --with-k8s            启用 k8s 部署模块(= --enable k8s)
   --steps k1,k2         只运行指定模块
   --skip k1,k2          跳过模块
@@ -71,7 +70,6 @@ STEPS_ARG=""; SKIP_ARG=""; ENABLE_ARG=""
 ONLY_HOSTS=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --cluster)  CLUSTER_NAME="${2:?--cluster 需要集群名}"; export CLUSTER_NAME; shift 2 ;;
         --fresh|--refresh) FRESH=1; shift ;;
         --list)     LIST=1; shift ;;
         --list-steps) LIST_STEPS=1; shift ;;
@@ -89,10 +87,7 @@ ONLY_HOSTS="${ONLY_HOSTS#,}"
 export ONLY_HOSTS
 
 # ---------------- 配置加载 + 模块解析 ----------------
-# 重新加载配置(CLUSTER_NAME 已更新, lib-common 的 CLUSTER_CONF 基于新 CLUSTER_NAME 重算)
-CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/deployments/config/cluster.conf}"
-CONF_BY_CLUSTER="${REPO_ROOT}/deployments/config/cluster-${CLUSTER_NAME}.conf"
-[ -f "${CONF_BY_CLUSTER}" ] && CLUSTER_CONF="${CONF_BY_CLUSTER}"
+# 统一读取 lib-common 解析出的 config/cluster.conf
 load_config
 
 init_deploy_steps
@@ -121,7 +116,7 @@ if [ "${FAILED}" = "1" ]; then
     err "部署中断: 模块 ${key} 失败(可用 --skip ${key} 跳过或修复后重跑, --fresh 清状态重跑)"
     exit 1
 fi
-echo -e "\033[32m✅ 一键部署流程完成(集群: ${CLUSTER_NAME})\033[0m"
+echo -e "\033[32m✅ 一键部署流程完成(配置: ${CLUSTER_CONF})\033[0m"
 echo "  配置: ${CLUSTER_CONF}"
 echo "  本次执行: ${RUN_STEPS[*]}"
 echo "  下一步: 用 --enable gpu_operator,lws 安装 GPU Operator / LWS(需先实现 steps/ 对应脚本)"

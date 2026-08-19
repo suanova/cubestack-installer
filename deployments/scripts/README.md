@@ -2,11 +2,9 @@
 
 本目录脚本提供完整的**命令行自动化**能力:从宿主网络初始化、SSH 密钥、master 虚拟机创建与免密登录,到 kubespray 兼容 inventory 生成与(可选)K8s 离线部署。
 
-所有脚本**统一读取** `config/cluster.conf`(单集群)或 `config/cluster-${CLUSTER_NAME}.conf`(多集群)作为唯一数据源,不硬编码 IP / 用户名 / 密码 / 路径。配置优先级:**环境变量 > 配置文件 > 内置兜底默认**。
+所有脚本**统一读取** `config/cluster.conf` 作为唯一数据源,不硬编码 IP / 用户名 / 密码 / 路径。配置优先级:**环境变量 > 配置文件 > 内置兜底默认**。
 
-> 多集群:通过 `--cluster <name>` 或环境变量 `CLUSTER_NAME` 或 `CUBESTACK_CLUSTER` 指定集群名,默认 `cubestack-cluster`。例如 `./deploy-cluster.sh --cluster prod` 读取 `config/cluster-prod.conf`。
->
-> 断点续跑:每阶段完成自动保存状态到 `config/.cluster-${CLUSTER_NAME}.state`;下次启动自动跳过已完成阶段;`--fresh` 清状态重新执行。
+> 断点续跑:每阶段完成自动保存状态到 `config/.deploy.state`;下次启动自动跳过已完成阶段;`--fresh` 清状态重新执行。
 
 > UI 兼容性:统一配置结构清晰,`gen-inventory.sh` 同时产出后端风格的 `inventory.ini`,后期 installer 后端可复用同一份 `cluster.conf`。
 
@@ -25,13 +23,10 @@ sudo ./deployments/scripts/deploy-cluster.sh --list
 # 2) 一键部署(宿主网络 → SSH密钥 → master虚拟机+免密 → worker连通性 → inventory)
 sudo ./deployments/scripts/deploy-cluster.sh
 
-# 3) 多集群:指定集群名(读取 config/cluster-<name>.conf)
-sudo ./deployments/scripts/deploy-cluster.sh --cluster mycluster --list
-
-# 4) 断点续跑:完成后继续(自动跳过已完成阶段)
+# 3) 断点续跑:完成后继续(自动跳过已完成阶段)
 sudo ./deployments/scripts/deploy-cluster.sh --skip-net --with-k8s
 
-# 5) 清状态重新执行
+# 4) 清状态重新执行
 sudo ./deployments/scripts/deploy-cluster.sh --fresh --with-k8s
 ```
 
@@ -45,7 +40,7 @@ deployments/scripts/
 │                              #   register_node_to_conf(): awk 幂等注册节点到 cluster.conf
 │                              #   save_state/get_state/clear_state: 断点续跑状态管理
 │                              #   node_is_vm(): 按 node_type 判断 vm/裸金属
-│                              #   CLUSTER_NAME 解析: 支持多集群 cluster-${name}.conf
+│                              #   统一读取 config/cluster.conf
 ├── lib-deploy.sh              # ★ 模块注册表(DEPLOY_STEPS) + 调度(steps/*.sh 在此登记)
 ├── deploy-cluster.sh          # ★ 统一入口(模块化编排,薄壳: 参数解析 + 按注册表调度)
 ├── steps/                     # ★ 部署模块(每个 = 复用现有脚本的薄封装, 可插拔)

@@ -706,11 +706,108 @@ PYEOF
     esac
 }
 
+# ============================================================
+# 依据 hosts.yml 自动同步 kubespray group_vars 中的环境 IP(与 inventory 同源)
+#   group_vars/all/all.yml
+#     loadbalancer_apiserver.address            = 第一个 master 节点 IP
+#     apiserver_loadbalancer_domain_name        = 保持 all.yml 现有值(默认 lb.k8s.local)
+#     supplementary_addresses_in_ssl_keys       = API 域名 + 全部 master 节点 IP
+#   group_vars/k8s_cluster/k8s-cluster.yml
+#     kube_apiserver_extra_args.advertise-address = 第一个 master 节点 IP
+#   group_vars/k8s_cluster/k8s-net-calico.yml
+#     calico_ip_auto_method: can-reach=<第一个 worker IP>(无 worker 时回退第一个 master)
+# 数据源: 全部节点 IP 来自 hosts.yml(kube_control_plane / kube_node 组), 随 inventory 自动更新
+# ============================================================
+update_loadbalancer_all_yml() {
+    local inv="${INVENTORY_DIR}/hosts.yml"
+    local all_yml="${INVENTORY_DIR}/group_vars/all/all.yml"
+    [ -f "${inv}" ] || { warn "未找到 ${inv}, 跳过 hosts.yml 同步"; return 0; }
+
+    # 收集 kube_control_plane(master) 与 kube_node(worker) 节点 IP(优先 access_ip, 兜底 ip), 去重
+    local master_ips=() worker_ips=()
+    mapfile -t master_ips < <(awk '
+        /^[A-Za-z0-9_]+:/ { in_cp = ($0 ~ /^kube_control_plane:/) ? 1 : 0; next }
+        in_cp && /^[[:space:]]*access_ip:[[:space:]]*[0-9.]+/ { if (!seen[$2]++) print $2; next }
+        in_cp && /^[[:space:]]*ip:[[:space:]]*[0-9.]+/         { if (!seen[$2]++) print $2 }
+    ' "${inv}")
+    mapfile -t worker_ips < <(awk '
+        /^[A-Za-z0-9_]+:/ { in_w = ($0 ~ /^kube_node:/) ? 1 : 0; next }
+        in_w && /^[[:space:]]*access_ip:[[:space:]]*[0-9.]+/ { if (!seen[$2]++) print $2; next }
+        in_w && /^[[:space:]]*ip:[[:space:]]*[0-9.]+/         { if (!seen[$2]++) print $2 }
+    ' "${inv}")
+    [ "${#master_ips[@]}" -gt 0 ] || { warn "hosts.yml 中无 master 节点(kube_control_plane), 跳过同步"; return 0; }
+
+    local api_ip="${master_ips[0]}"
+    local calico_ip="${worker_ips[0]:-${api_ip}}"   # 无 worker 时回退第一个 master
+
+    # ---------- 1. all.yml: API 负载均衡 + SAN ----------
+    if [ -f "${all_yml}" ] && grep -qE '^loadbalancer_apiserver:' "${all_yml}" && grep -qE '^supplementary_addresses_in_ssl_keys:' "${all_yml}"; then
+        local domain port
+        domain="$(sed -nE 's/^apiserver_loadbalancer_domain_name:[[:space:]]*"?([^" ]+)"?.*/\1/p' "${all_yml}" | tail -1)"
+        [ -n "${domain}" ] || domain="lb.k8s.local"
+        port="$(awk '/^loadbalancer_apiserver:/{f=1} f&&/port:/{print $2; exit}' "${all_yml}")"
+        [ -n "${port}" ] || port="6443"
+
+        awk -v api="${api_ip}" -v domain="${domain}" -v port="${port}" -v masters="${master_ips[*]}" '
+            BEGIN { n = split(masters, m, " ") }
+            /^apiserver_loadbalancer_domain_name:/ {
+                printf "apiserver_loadbalancer_domain_name: \"%s\"\n", domain
+                next
+            }
+            /^loadbalancer_apiserver:/ { print; in_lb = 1; next }
+            in_lb {
+                if ($0 ~ /^[[:space:]]+address:/) { printf "  address: %s   # 第一个 master 节点 IP(由 hosts.yml 自动同步)\n", api; next }
+                if ($0 ~ /^[[:space:]]+port:/)     { printf "  port: %s\n", port; next }
+                in_lb = 0
+            }
+            /^supplementary_addresses_in_ssl_keys:/ { print; in_san = 1; next }
+            in_san {
+                if ($0 ~ /^[[:space:]]*-/) { next }
+                printf "  - %s\n", domain
+                for (i = 1; i <= n; i++) printf "  - %s\n", m[i]
+                in_san = 0
+            }
+            { print }
+        ' "${all_yml}" > "${all_yml}.tmp" && mv "${all_yml}.tmp" "${all_yml}"
+        log "✅ 已依据 hosts.yml 同步 ${all_yml}: API=${api_ip}:${port}, SAN=[${master_ips[*]}]"
+    else
+        warn "all.yml 中未找到 loadbalancer_apiserver / supplementary_addresses_in_ssl_keys 区块(可能仍为注释), 跳过 all.yml 同步"
+    fi
+
+    # ---------- 2. k8s-cluster.yml: kube_apiserver_extra_args.advertise-address ----------
+    local cluster_yml="${INVENTORY_DIR}/group_vars/k8s_cluster/k8s-cluster.yml"
+    if [ -f "${cluster_yml}" ]; then
+        if grep -qE '^[[:space:]]+advertise-address:[[:space:]]*"' "${cluster_yml}"; then
+            sed -i -E "s/^(\s+advertise-address:)\s+\"[0-9.]+\"/\1 \"${api_ip}\"/" "${cluster_yml}"
+        else
+            sed -i -E "/^kube_apiserver_extra_args:/a\  advertise-address: \"${api_ip}\"" "${cluster_yml}"
+        fi
+        log "✅ 已依据 hosts.yml 同步 ${cluster_yml}: advertise-address=${api_ip}"
+    else
+        warn "未找到 ${cluster_yml}, 跳过 advertise-address 同步"
+    fi
+
+    # ---------- 3. k8s-net-calico.yml: calico_ip_auto_method can-reach ----------
+    local calico_yml="${INVENTORY_DIR}/group_vars/k8s_cluster/k8s-net-calico.yml"
+    if [ -f "${calico_yml}" ]; then
+        if grep -qE '^calico_ip_auto_method:' "${calico_yml}"; then
+            sed -i -E "s/^calico_ip_auto_method:.*/calico_ip_auto_method: \"can-reach=${calico_ip}\"/" "${calico_yml}"
+        else
+            echo "calico_ip_auto_method: \"can-reach=${calico_ip}\"" >> "${calico_yml}"
+        fi
+        log "✅ 已依据 hosts.yml 同步 ${calico_yml}: calico can-reach=${calico_ip}"
+    else
+        warn "未找到 ${calico_yml}, 跳过 calico can-reach 同步"
+    fi
+}
+
 cmd_install() {
     highlight "安装集群 [${CLUSTER_NAME}]..."
     ensure_kubespray
     ensure_venv
     cmd_check
+    # 依据 hosts.yml 自动同步 all.yml 的 API 负载均衡/SAN 配置
+    update_loadbalancer_all_yml
     log "注入离线安装变量..."
     OFFLINE_VARS="${INVENTORY_DIR}/group_vars/all/offline.yml"
     {
@@ -798,6 +895,8 @@ cmd_scale() {
     ensure_kubespray
     ensure_venv
     cmd_check
+    # 依据 hosts.yml 自动同步 all.yml 的 API 负载均衡/SAN 配置
+    update_loadbalancer_all_yml
 
     # 确保离线变量文件存在
     OFFLINE_VARS="${INVENTORY_DIR}/group_vars/all/offline.yml"

@@ -17,7 +17,6 @@ say "执行 kubespray 离线部署 (via cubestack-offline.sh) ..."
 # 透传 cluster.conf 的预加载镜像集合; 仅当显式定义了该变量(含空串=全量同步)才传递,
 # 否则由 cubestack-offline.sh 回退内置默认最小集合
 OFFLINE_ENV=(
-    "CUBESTACK_CLUSTER=${CLUSTER_NAME}"
     "CUBESTACK_KUBESPRAY_DIR=${KUBESPRAY_DIR}"
     "CUBESTACK_INVENTORY_DIR=${KUBESPRAY_INV_DIR}"
     "CUBESTACK_LOCAL_REPO_DIR=${LOCAL_REPO_DIR}"

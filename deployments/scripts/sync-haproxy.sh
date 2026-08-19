@@ -1,9 +1,9 @@
 #!/bin/bash
 # ============================================================
 # 从 cluster.conf 自动生成宿主机 HAProxy 配置(K8s API 四层负载均衡)
-# 宿主机 10.66.3.37:6443 → 负载均衡所有 master apiserver
+# 宿主机 ${HOST_PHYS_IP}:6443 → 负载均衡所有 master apiserver
 # 用法: sudo ./sync-haproxy.sh
-# 数据源: deployments/config/cluster-${CLUSTER_NAME}.conf (APISERVER_ADDRESS / NODES)
+# 数据源: deployments/config/cluster.conf (APISERVER_ADDRESS / NODES)
 # 生成: /etc/haproxy/haproxy.cfg (备份到 .bak)
 # ============================================================
 set -euo pipefail
@@ -19,20 +19,20 @@ MASTER_IPS=()
 MASTER_NAMES=()
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
+    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
     [ "${role}" = "master" ] || continue
     MASTER_NAMES+=("${hostname}")
     MASTER_IPS+=("${ip}")
 done
 [ "${#MASTER_IPS[@]}" -gt 0 ] || { err "cluster.conf 中无 master 节点"; exit 1; }
 
-API_IP="${APISERVER_ADDRESS:-${HOST_PHYS_IP:-10.66.3.37}}"
+# API_IP 由 lib-common load_config 统一提供(从 cluster.conf 派生), 不再本地设置
 PORT=6443
 
 say "API 入口: ${API_IP}:${PORT}"
 say "后端 master: ${#MASTER_IPS[@]} 台"
 
-# 清理旧的 DNAT 转发规则(历史 bridge 模式残留: 10.66.3.37:6443 → 10.244.x.x)
+# 清理旧的 DNAT 转发规则(历史 bridge 模式残留: 宿主机 IP:6443 → 10.244.x.x)
 # 会劫持流量绕过 HAProxy, 导致 worker 无法访问 API; HAProxy 接管后无需任何 6443 DNAT
 sudo nft -a list chain ip nat PREROUTING 2>/dev/null | grep "dport ${PORT}.*dnat to" | grep -oE "handle [0-9]+" | awk '{print $2}' | while read -r h; do
     say "删除旧 DNAT 规则 handle=${h}"
