@@ -76,6 +76,30 @@ export const taskApi = {
   get: (id, token) => request('/tasks/' + id, { token }),
 }
 
+// 浏览器端把文本保存为本地文件
+export function downloadText(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+// 下载部署任务完整日志(自动带鉴权头,获取完整 log_text 后保存为 .log 文件)
+export function downloadTaskLog(task, token) {
+  const id = typeof task === 'object' ? task.id : task
+  return request('/tasks/' + id, { token }).then((tk) => {
+    const safeName = (tk.target_name || 'task').replace(/[^\w.-]/g, '_')
+    const type =
+      tk.type === 'vm_create' ? 'vm-create' : tk.type === 'cluster_install' ? 'cluster-install' : tk.type || 'task'
+    downloadText('task-' + tk.id + '-' + type + '-' + safeName + '.log', tk.log_text || '(暂无日志)')
+  })
+}
+
 export const CONSTANTS = {
   images: ['ubuntu-22.04-cloud.qcow2', 'ubuntu-24.04-cloud.qcow2', 'rocky-9.4-cloud.qcow2', 'debian-12-cloud.qcow2', 'centos-stream-9.qcow2'],
   k8sVersions: ['v1.27.16', 'v1.28.13', 'v1.29.8', 'v1.30.4', 'v1.31.1'],
