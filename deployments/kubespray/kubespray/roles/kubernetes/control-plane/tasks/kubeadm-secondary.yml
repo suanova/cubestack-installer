@@ -30,6 +30,14 @@
     - hostvars[first_kube_control_plane]['kubeadm_upload_cert'] is defined
     - hostvars[first_kube_control_plane]['kubeadm_upload_cert'] is not skipped
 
+- name: Check if admin.conf exists (indicating successful join)
+  stat:
+    path: "{{ kube_config_dir }}/admin.conf"
+    get_attributes: false
+    get_checksum: false
+    get_mime: false
+  register: admin_conf_stat
+
 - name: Create kubeadm ControlPlane config
   template:
     src: "kubeadm-controlplane.yaml.j2"
@@ -51,14 +59,6 @@
 - name: Check already run
   debug:
     msg: "{{ kubeadm_already_run.stat.exists }}"
-
-- name: Check if admin.conf exists (indicating successful join)
-  stat:
-    path: "{{ kube_config_dir }}/admin.conf"
-    get_attributes: false
-    get_checksum: false
-    get_mime: false
-  register: admin_conf_stat
 
 - name: Reset cert directory
   shell: >-
