@@ -31,25 +31,14 @@ highlight() { echo -e "${CYAN}>>> $*${NC}"; }
 # 启动日志 tee(同时输出终端 + 写文件), 对写失败安全
 # 根因: 日志文件可能被上次运行占用不可写(如上次 sudo/root 创建, 本次非 root 运行)
 #       → tee 报 "Permission denied", 日志丢失。这里先清理, 仍失败则回退 HOME 下日志, 绝不中断安装。
-# 用法: start_log_tee <日志文件>  — 依次尝试: 原路径 > ~/.cache/cubestack/ 回退 > 仅终端输出
+# 用法: start_log_tee <日志文件>  — 提示用户可用 pipe 保存日志, 不再使用 exec tee
+#       (exec > >(tee) 会导致 Python subprocess 调用时死锁)
 start_log_tee() {
     local log="$1"
-    # 1. 若文件存在但当前用户不可写: 优先删除(自己创建的), 否则放开权限
-    if [ -e "${log}" ] && [ ! -w "${log}" ]; then
-        rm -f "${log}" 2>/dev/null || chmod 666 "${log}" 2>/dev/null || true
-    fi
-    # 2. 用 touch 确认可写后才挂 tee; 失败回退 HOME 下日志(始终可写, 保留记录能力)
-    if touch "${log}" 2>/dev/null; then
-        exec > >(tee "${log}") 2>&1
-        return 0
-    fi
-    local fallback_log="${HOME}/.cache/cubestack/$(basename "${log}")"
-    if mkdir -p "$(dirname "${fallback_log}")" 2>/dev/null && touch "${fallback_log}" 2>/dev/null; then
-        warn "无法写入 ${log}(可能被其他用户占用), 日志改写到: ${fallback_log}"
-        exec > >(tee "${fallback_log}") 2>&1
-    else
-        warn "无法写入日志 ${log} 及回退路径, 本次仅输出到终端, 不记录日志文件"
-    fi
+    echo ">>> 安装日志: 同时显示终端 + 写入 ${log}"
+    echo ">>> 可实时查看: tail -f ${log}"
+    # 使用 run_ansible_playbook 的 tee -a 保存 ansible 日志; 脚本自身日志可通过 pipe 保存:
+    #   bash cubestack-offline.sh install 2>&1 | tee /tmp/install.log
 }
 
 # 运行 ansible-playbook, 日志输出到文件 + 可选终端
@@ -1144,16 +1133,12 @@ case "${COMMAND}" in
         # 非 root 时用 sudo 删除; start_log_tee 仍作为最终兜底(回退 HOME 日志/仅终端), 不中断安装
         LOG_FILE="/tmp/${CLUSTER_NAME}-install.log"
         [ -e "${LOG_FILE}" ] && { rm -f "${LOG_FILE}" 2>/dev/null || sudo rm -f "${LOG_FILE}" 2>/dev/null || true; }
-        echo ">>> 安装日志: 同时显示终端 + 写入 ${LOG_FILE}"
-        echo ">>> 可实时查看: tail -f ${LOG_FILE}"
         start_log_tee "${LOG_FILE}"
         cmd_install
         ;;
     scale)
         LOG_FILE="/tmp/${CLUSTER_NAME}-scale.log"
         [ -e "${LOG_FILE}" ] && { rm -f "${LOG_FILE}" 2>/dev/null || sudo rm -f "${LOG_FILE}" 2>/dev/null || true; }
-        echo ">>> 扩容日志: 同时显示终端 + 写入 ${LOG_FILE}"
-        echo ">>> 可实时查看: tail -f ${LOG_FILE}"
         start_log_tee "${LOG_FILE}"
         cmd_scale
         ;;
@@ -1161,8 +1146,5 @@ case "${COMMAND}" in
     preload)  preload_images "${LIMIT_GROUP:-all}" ;;   # 单独预加载镜像(补镜像/修复)
     *)        usage ;;
 esac
-
-# 等待 tee 子进程 flush(exec > >(tee) 的 process substitution)
-wait 2>/dev/null || true
 
 
