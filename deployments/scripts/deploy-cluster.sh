@@ -101,6 +101,14 @@ if [ "${LIST}" = "1" ]; then print_plan; exit 0; fi
 
 need_root() { [ "$(id -u)" -eq 0 ] || { err "需要 root 权限,请执行: sudo $0"; exit 1; }; }
 need_root
+
+# ---------------- 启动全量日志: 同时输出终端 + 写入 /tmp/cubestack-cluster-install.log ----------------
+LOG_FILE="/tmp/cubestack-cluster-install.log"
+rm -f "${LOG_FILE}" 2>/dev/null || true
+# exec 重定向: 所有 stdout/stderr 通过 tee 分流到终端 + 日志文件
+exec > >(tee -a "${LOG_FILE}") 2>&1
+say "完整部署日志: ${LOG_FILE}"
+
 print_plan
 
 # ---------------- 调度: 按注册表顺序执行选中的模块 ----------------
@@ -119,5 +127,6 @@ fi
 echo -e "\033[32m✅ 一键部署流程完成(配置: ${CLUSTER_CONF})\033[0m"
 echo "  配置: ${CLUSTER_CONF}"
 echo "  本次执行: ${RUN_STEPS[*]}"
+echo "  完整日志: ${LOG_FILE}"
 echo "  下一步: 用 --enable gpu_operator,lws 安装 GPU Operator / LWS(需先实现 steps/ 对应脚本)"
 echo "============================================="
