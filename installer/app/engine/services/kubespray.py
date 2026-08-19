@@ -8,7 +8,7 @@ from ...db.session import SessionLocal
 from ...models import ClusterNode, DeployTask, Host, K8sCluster
 from ..executor import log_line
 from .clusterprep import ANSIBLE_VENV, KUBESPRAY_DIR, PIP_INDEX, _mc_env, _ensure_mc
-from .vmprovision import _ssh
+from .vmprovision import _ssh, _ssh_stream
 
 RUN_KEY_FILE = os.environ.get("KUBESPRAY_SSH_KEY", "/root/.ssh/id_rsa")
 # cubestack-offline.sh 期望的目录布局(脚本内 BASE_DIR 固定为 /opt/cubestack-installer)
@@ -213,14 +213,36 @@ def run_cluster_install(task: DeployTask, db) -> None:
                 log_line(task, db, "      kubespray 依赖环境: " + ("✓" if "VENV_OK" in out else "失败(" + (err or out)[-200:] + ")"))
                 if "VENV_OK" not in out:
                     raise RuntimeError("kubespray 依赖环境准备失败: " + (err or out))
-                log_line(task, db, "      执行 " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER + "(运行节点 " + run_node.name + ") ...")
-                rc, out, err = _ssh(run_node, "cd " + CUBESTACK_BASE + " && CUBESTACK_LOCAL_REPO_DIR=" + CUBESTACK_BASE + "/inventory/cubestack-cluster bash " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER, timeout=3600)
-                tail = (out or "").splitlines()[-40:]
-                for ln in tail:
-                    if ln.strip():
-                        log_line(task, db, "      " + ln.strip())
+                log_line(task, db, "      执行 " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER + "(运行节点 " + run_node.name + "),输出实时回传 ...")
+                # 流式读取安装输出,分批写入任务日志(向导控制台实时显示)
+                _buf = []
+                _flushed = 0
+
+                def _flush_lines():
+                    nonlocal _buf
+                    if _buf:
+                        log_line(task, db, "\n".join(_buf))
+                        _buf = []
+
+                def _on_line(line):
+                    nonlocal _buf, _flushed
+                    s = line.rstrip()
+                    if not s.strip():
+                        return
+                    _buf.append("      " + s.strip())
+                    if len(_buf) >= 20:
+                        _flush_lines()
+                        _flushed += 1
+                        if _flushed % 50 == 0:  # 每约 1000 行截断一次,防止日志无限膨胀
+                            if (task.log_text or "").count("\n") > 3000:
+                                task.log_text = "\n".join((task.log_text or "").splitlines()[-3000:]) + "\n"
+                                db.commit()
+
+                cmd_install = "cd " + CUBESTACK_BASE + " && CUBESTACK_LOCAL_REPO_DIR=" + CUBESTACK_BASE + "/inventory/cubestack-cluster bash " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER
+                rc = _ssh_stream(run_node, cmd_install, _on_line, timeout=3600)
+                _flush_lines()
                 if rc != 0:
-                    raise RuntimeError("cubestack-offline.sh 安装失败(rc=" + str(rc) + "): " + ((err or "")[-500:]))
+                    raise RuntimeError("cubestack-offline.sh 安装失败(rc=" + str(rc) + ")")
             else:
                 ws = os.path.join(WORKSPACE, "cluster-" + cluster.name)
                 os.makedirs(ws, exist_ok=True)

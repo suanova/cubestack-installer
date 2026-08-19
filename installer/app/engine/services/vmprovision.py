@@ -37,6 +37,28 @@ def _ssh(host: Host, cmd: str, timeout: int = 60) -> tuple[int, str, str]:
         return -1, "", ""
 
 
+def _ssh_stream(host: Host, cmd: str, on_line, timeout: int = 3600) -> int:
+    """在宿主机上流式执行命令,每产生一行输出回调 on_line(line);返回 returncode。
+    ServerAliveInterval 保活,避免长时间安装时 SSH 连接被中断。"""
+    import subprocess as _sp
+
+    proc = _sp.Popen(
+        [
+            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=120",
+            "-p", str(host.ssh_port),
+            host.ssh_user + "@" + host.ip, cmd,
+        ],
+        stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True, bufsize=1,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        on_line(line)
+    proc.wait(timeout=timeout)
+    return proc.returncode
+
+
 def _os_variant(image: str) -> str:
     n = image.lower()
     if "24.04" in n or "noble" in n:
