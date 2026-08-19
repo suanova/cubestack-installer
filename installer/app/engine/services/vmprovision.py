@@ -37,6 +37,23 @@ def _ssh(host: Host, cmd: str, timeout: int = 60) -> tuple[int, str, str]:
         return -1, "", ""
 
 
+def _ssh_detach(host: Host, cmd: str) -> tuple[int, str, str]:
+    """通过 ssh -f -n 在宿主机上脱离会话启动命令:认证后 ssh 立即返回,远端命令继续后台运行。
+    避免 ssh 等待远端会话结束而挂起(rc=124)的问题。"""
+    try:
+        res = subprocess.run(
+            [
+                "ssh", "-f", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                "-o", "StrictHostKeyChecking=no", "-p", str(host.ssh_port),
+                host.ssh_user + "@" + host.ip, cmd,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        return res.returncode, res.stdout, res.stderr
+    except Exception:  # noqa: BLE001
+        return -1, "", ""
+
+
 def _ssh_stream(host: Host, cmd: str, on_line, timeout: int = 3600) -> int:
     """在宿主机上流式执行命令,每产生一行输出回调 on_line(line);返回 returncode。
     ServerAliveInterval 保活,避免长时间安装时 SSH 连接被中断。"""
