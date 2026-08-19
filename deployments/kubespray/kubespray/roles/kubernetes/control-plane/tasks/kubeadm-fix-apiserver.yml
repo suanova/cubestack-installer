@@ -1,4 +1,16 @@
 ---
+- name: Check if kubeconfig file exists
+  stat:
+    path: "{{ kube_config_dir }}/{{ item }}"
+    get_attributes: false
+    get_checksum: false
+    get_mime: false
+  register: kubeconfig_file_stat
+  with_items:
+    - admin.conf
+    - controller-manager.conf
+    - kubelet.conf
+    - scheduler.conf
 
 - name: Update server field in component kubeconfigs
   lineinfile:
@@ -11,6 +23,12 @@
     - controller-manager.conf
     - kubelet.conf
     - scheduler.conf
+  when: >-
+    kubeconfig_file_stat.results |
+    selectattr('item', 'equalto', item) |
+    map(attribute='stat.exists') |
+    first |
+    default(false)
   notify:
     - "Control plane | Restart kube-controller-manager"
     - "Control plane | Restart kube-scheduler"

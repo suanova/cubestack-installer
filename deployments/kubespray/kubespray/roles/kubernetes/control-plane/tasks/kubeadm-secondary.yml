@@ -39,7 +39,7 @@
     validate: "{{ kubeadm_config_validate_enabled | ternary(bin_dir + '/kubeadm config validate --config %s', omit) }}"
   when:
     - inventory_hostname != first_kube_control_plane
-    - not kubeadm_already_run.stat.exists
+    - not kubeadm_already_run.stat.exists or not admin_conf_stat.stat.exists
 
 - name: Wait for k8s apiserver
   wait_for:
@@ -52,6 +52,14 @@
   debug:
     msg: "{{ kubeadm_already_run.stat.exists }}"
 
+- name: Check if admin.conf exists (indicating successful join)
+  stat:
+    path: "{{ kube_config_dir }}/admin.conf"
+    get_attributes: false
+    get_checksum: false
+    get_mime: false
+  register: admin_conf_stat
+
 - name: Reset cert directory
   shell: >-
     if [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ]; then
@@ -61,7 +69,7 @@
     PATH: "{{ bin_dir }}:{{ ansible_env.PATH }}"
   when:
     - inventory_hostname != first_kube_control_plane
-    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists
+    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists or not admin_conf_stat.stat.exists
     - not kube_external_ca_mode
 
 - name: Get kubeconfig for join discovery process
@@ -71,7 +79,7 @@
   delegate_to: "{{ groups['kube_control_plane'] | first }}"
   when:
     - kubeadm_use_file_discovery
-    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists
+    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists or not admin_conf_stat.stat.exists
 
 - name: Copy discovery kubeconfig
   copy:
@@ -82,7 +90,7 @@
   when:
     - inventory_hostname != first_kube_control_plane
     - kubeadm_use_file_discovery
-    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists
+    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists or not admin_conf_stat.stat.exists
 
 - name: Joining control plane node to the cluster.
   command: >-
