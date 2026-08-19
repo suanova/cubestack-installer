@@ -105,6 +105,12 @@ if [ "${LIST}" = "1" ]; then print_plan; exit 0; fi
 need_root() { [ "$(id -u)" -eq 0 ] || { err "需要 root 权限,请执行: sudo $0"; exit 1; }; }
 need_root
 
+# 启动全量日志: lib-common 的 say/ok/warn/err 会同时写入 ${LOG_FILE}
+LOG_FILE="/tmp/cubestack-cluster-install.log"
+rm -f "${LOG_FILE}" 2>/dev/null || true
+export LOG_FILE
+say "完整部署日志: ${LOG_FILE}"
+
 print_plan
 
 # ---------------- 调度: 按注册表顺序执行选中的模块 ----------------

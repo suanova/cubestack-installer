@@ -68,14 +68,15 @@ is_state_completed() {
     return 0
 }
 
-# ---------------- 输出函数 ----------------
-# 日志开关: LOG_VERBOSE=1 显示详细日志(默认) / 0 仅显示关键信息
-LOG_VERBOSE="${LOG_VERBOSE:-1}"
-say()  { echo -e "\033[36m→  $*\033[0m"; }
-ok()   { echo -e "\033[32m✅ $*\033[0m"; }
-warn() { echo -e "\033[33m⚠  $*\033[0m"; }
-err()  { echo -e "\033[31m【错误】$*\033[0m" >&2; }
-vlog() { [ "${LOG_VERBOSE}" = "1" ] && echo -e "\033[90m[DEBUG] $*\033[0m" || true; }
+# ---------------- 输出函数(同时写入日志文件) ----------------
+# 日志文件路径: 设置 LOG_FILE 后, 所有输出同时写入该文件
+# 用法: export LOG_FILE=/tmp/deploy.log; sudo ./deploy-cluster.sh ...
+_log_file() { [ -n "${LOG_FILE:-}" ] && echo -e "$*" >> "${LOG_FILE}" 2>/dev/null || true; }
+say()  { local m="→  $*"; echo -e "\033[36m${m}\033[0m"; _log_file "${m}"; }
+ok()   { local m="✅ $*"; echo -e "\033[32m${m}\033[0m"; _log_file "${m}"; }
+warn() { local m="⚠  $*"; echo -e "\033[33m${m}\033[0m"; _log_file "${m}"; }
+err()  { local m="【错误】$*"; echo -e "\033[31m${m}\033[0m" >&2; _log_file "${m}"; }
+vlog() { [ "${LOG_VERBOSE}" = "1" ] && { local m="[DEBUG] $*"; echo -e "\033[90m${m}\033[0m"; _log_file "${m}"; } || true; }
 
 # ---------------- 统一配置加载 ----------------
 # 环境变量优先: 配置文件内使用 ${VAR:-default},已导出的环境变量不会被覆盖
