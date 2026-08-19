@@ -125,6 +125,17 @@
   loop: "{{ kube_apiserver_enable_admission_plugins }}"
   notify: Control plane | Restart apiserver
 
+- name: Kubeadm | Check if apiserver.crt exists
+  stat:
+    path: "{{ kube_cert_dir }}/apiserver.crt"
+    get_attributes: false
+    get_checksum: false
+    get_mime: false
+  register: apiserver_crt_stat
+  when:
+    - kubeadm_already_run.stat.exists
+    - not kube_external_ca_mode
+
 - name: Kubeadm | Check apiserver.crt SANs
   vars:
     apiserver_ips: "{{ apiserver_sans | map('ansible.utils.ipaddr') | reject('equalto', False) | list }}"
@@ -132,6 +143,7 @@
   when:
     - kubeadm_already_run.stat.exists
     - not kube_external_ca_mode
+    - apiserver_crt_stat.stat.exists
   block:
     - name: Kubeadm | Check apiserver.crt SAN IPs
       command:
