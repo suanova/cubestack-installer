@@ -9,6 +9,7 @@ const dict = {
     'common.actions': '操作', 'common.status': '状态', 'common.name': '名称',
     'common.loading': '加载中...', 'common.demo': '演示', 'common.save': '保存',
     'common.detail': '详情', 'common.log': '日志', 'common.install': '安装',
+    'common.download': '下载',
     'common.role': '角色', 'common.roleAdmin': '管理员', 'common.roleUser': '普通用户',
     'common.enabled': '已启用', 'common.disabled': '已禁用',
     'common.id': 'ID', 'common.user': '用户', 'common.time': '时间',
@@ -172,6 +173,7 @@ const dict = {
     'tasks.type': '类型', 'tasks.typeVm': '虚拟机创建', 'tasks.typeCluster': '集群安装',
     'tasks.target': '目标', 'tasks.progress': '进度', 'tasks.createdAt': '创建 / 完成',
     'tasks.viewLog': '查看日志', 'tasks.viewing': '查看中', 'tasks.collapse': '收起',
+    'tasks.downloadLog': '下载日志',
     // 虚拟机安装日志
     'vmtasks.title': '安装日志', 'vmtasks.desc': '虚拟机安装任务的执行日志,点击任务查看实时日志',
     'tasks.taskLabel': '任务 #{id} · {name} ·', 'tasks.empty': '暂无任务,创建虚拟机或安装集群后自动生成',
@@ -195,6 +197,7 @@ const dict = {
     'common.actions': 'Actions', 'common.status': 'Status', 'common.name': 'Name',
     'common.loading': 'Loading...', 'common.demo': 'Demo', 'common.save': 'Save',
     'common.detail': 'Details', 'common.log': 'Log', 'common.install': 'Install',
+    'common.download': 'Download',
     'common.role': 'Role', 'common.roleAdmin': 'Admin', 'common.roleUser': 'User',
     'common.enabled': 'Enabled', 'common.disabled': 'Disabled',
     'common.id': 'ID', 'common.user': 'User', 'common.time': 'Time',
@@ -358,6 +361,7 @@ const dict = {
     'tasks.type': 'Type', 'tasks.typeVm': 'VM Create', 'tasks.typeCluster': 'Cluster Install',
     'tasks.target': 'Target', 'tasks.progress': 'Progress', 'tasks.createdAt': 'Created / Finished',
     'tasks.viewLog': 'View Log', 'tasks.viewing': 'Viewing', 'tasks.collapse': 'Collapse',
+    'tasks.downloadLog': 'Download Log',
     // VM install task log
     'vmtasks.title': 'VM Install Task Log', 'vmtasks.desc': 'Execution logs of VM creation/install tasks. Click a task to view live logs',
     'tasks.taskLabel': 'Task #{id} · {name} ·', 'tasks.empty': 'No tasks yet. Create a VM or install a cluster to generate one.',

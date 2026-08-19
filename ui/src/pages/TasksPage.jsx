@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { taskApi } from '../api/client'
+import { downloadTaskLog, taskApi } from '../api/client'
 import { useAuth } from '../context/AuthContext'
 import { useI18n } from '../i18n'
 
@@ -125,6 +125,10 @@ export default function TasksPage({ typeFilter, titleKey, descKey }) {
                           <button className="btn btn-ghost btn-sm" onClick={() => openLog(tk)}>
                             {selected?.id === tk.id ? t('tasks.viewing') : t('tasks.viewLog')}
                           </button>
+                          <button className="btn btn-ghost btn-sm" title={t('tasks.downloadLog')}
+                            onClick={() => downloadTaskLog(tk, token).catch(() => {})}>
+                            {t('common.download')}
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -148,7 +152,12 @@ export default function TasksPage({ typeFilter, titleKey, descKey }) {
                 {t((STATUS_MAP[selected.status] || { key: selected.status }).key)}
               </span>
             </span>
-            <button className="btn btn-ghost btn-sm" onClick={() => setSelected(null)}>{t('tasks.collapse')}</button>
+            <div className="td-actions">
+              <button className="btn btn-ghost btn-sm" onClick={() => downloadTaskLog(selected, token).catch(() => {})}>
+                {t('tasks.downloadLog')}
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={() => setSelected(null)}>{t('tasks.collapse')}</button>
+            </div>
           </div>
           <pre className="log-viewer" ref={logRef}>{logText}</pre>
         </div>
