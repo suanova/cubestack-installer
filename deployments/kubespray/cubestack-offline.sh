@@ -555,8 +555,8 @@ for g in groups:
         # 1. rsync 仅同步匹配镜像(比 ansible copy 可靠)
         rsync -az --delete --delete-excluded --timeout=300 "${rsync_filter[@]}" \
             -e "ssh -i ${key} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
-            "${LOCAL_REPO_DIR}/images/" "${user}@${host}:/tmp/cubestack-images/" 2>/dev/null || {
-            warn "  ${node}: rsync 同步失败,跳过"
+            "${LOCAL_REPO_DIR}/images/" "${user}@${host}:/tmp/cubestack-images/" 2>&1 || {
+            warn "  ${node}: rsync 同步失败,跳过(见上方错误)"
             fail_nodes=$((fail_nodes + 1))
             continue
         }
@@ -571,12 +571,15 @@ for g in groups:
                 ok=0; fail=0
                 for f in /tmp/cubestack-images/*.tar; do
                     [ -f \"\$f\" ] || continue
-                    if ctr -n k8s.io image import \"\$f\" >/dev/null 2>&1 || \
-                       ctr -n k8s.io image import \"\$f\" >/dev/null 2>&1; then
+                    if ctr -n k8s.io image import \"\$f\" >/dev/null 2>&1; then
+                        ok=\$((ok + 1))
+                    elif sleep 1 && ctr -n k8s.io image import \"\$f\" >/dev/null 2>&1; then
                         ok=\$((ok + 1))
                     else
                         fail=\$((fail + 1))
                         echo \"[FAIL] 导入失败: \$(basename \"\$f\")\" >&2
+                        # 尝试获取失败原因(如磁盘空间不足/镜像名冲突)
+                        ctr -n k8s.io image import \"\$f\" 2>&1 | head -3 >&2
                     fi
                 done
                 rm -rf /tmp/cubestack-images
