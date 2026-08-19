@@ -241,7 +241,7 @@ def run_cluster_install(task: DeployTask, db) -> None:
                 # 后台执行安装(与 SSH 会话解耦:连接被掐断也不影响安装),退出码写入 done 文件
                 inst_log = "/tmp/csi-install-" + CUBESTACK_CLUSTER + ".log"
                 inst_done = "/tmp/csi-install-" + CUBESTACK_CLUSTER + ".done"
-                rc, out, err = _ssh(run_node, "rm -f " + inst_log + " " + inst_done + "; cd " + CUBESTACK_BASE + " && ( CUBESTACK_LOCAL_REPO_DIR=" + CUBESTACK_BASE + "/inventory/cubestack-cluster bash " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER + " > " + inst_log + " 2>&1; echo $? > " + inst_done + " ) </dev/null >/dev/null 2>&1 & echo STARTED", timeout=30)
+                rc, out, err = _ssh(run_node, "rm -f " + inst_log + " " + inst_done + "; cd " + CUBESTACK_BASE + " && setsid bash -c '" + "CUBESTACK_LOCAL_REPO_DIR=" + CUBESTACK_BASE + "/inventory/cubestack-cluster bash " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER + " > " + inst_log + " 2>&1; echo $? > " + inst_done + "' >/dev/null 2>&1 </dev/null & echo STARTED", timeout=30)
                 if "STARTED" not in out:
                     raise RuntimeError("后台启动 cubestack-offline.sh 失败: " + (err or out))
                 # 轮询日志文件,增量回传控制台(每次短连接,不会因长会话被掐断)
