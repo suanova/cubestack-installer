@@ -20,10 +20,15 @@ bin_dir: /usr/local/bin
 loadbalancer_apiserver_localhost: false
 apiserver_loadbalancer_domain_name: "lb.k8s.local"
 loadbalancer_apiserver:
-  address: 192.0.2.1   # 占位(RFC 5737 文档地址), 由脚本按 hosts.yml 生成
+  address: 10.66.1.232   # 占位(RFC 5737 文档地址), 由脚本按 hosts.yml 生成
   port: 6443
 
 supplementary_addresses_in_ssl_keys:
+  - lb.k8s.local
+  - 10.66.1.232           # 宿主机物理 IP(worker 通过此地址访问 API Server)
+  - 10.66.1.232
+  - 10.66.1.147
+  - 10.66.1.152
 # 由脚本按 hosts.yml 自动生成(API 域名 + 全部 master IP)
 
 # 如果 Kubespray 版本 ≥ 2.24 且 K8s ≥ 1.29，还需要启用 EndpointSlice 镜像

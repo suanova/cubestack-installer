@@ -23,6 +23,10 @@ sudo ./deployments/scripts/deploy-cluster.sh --list
 # 2) 一键部署(宿主网络 → SSH密钥 → master虚拟机+免密 → worker连通性 → inventory)
 sudo ./deployments/scripts/deploy-cluster.sh
 
+# 2b) 全裸金属集群: 跳过虚拟机网络模块, 直接部署
+#     (所有节点 node_type=bm, 同网段互通, 无需 VM 网桥/SNAT)
+sudo ./deployments/scripts/deploy-cluster.sh --skip net
+
 # 3) 断点续跑:完成后继续(自动跳过已完成阶段)
 sudo ./deployments/scripts/deploy-cluster.sh --skip-net --with-k8s
 
@@ -105,15 +109,22 @@ role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password,node_type
 
 `node_type`:`vm`=创建为虚拟机(自动启动) / `bm`=裸金属(不创建 VM,走密码连通+离线装包)。省略时回退推断:master 默认 `vm`,其余按是否有 VM 参数(MAC 非 `-` 且 内存>0)判断。
 
-- `role`: `master`(虚拟机,自动创建) | `worker`(裸金属,仅记录/连通性检查)
-- `mac`: 显式 MAC,或 `-` 按主机名确定性生成(幂等)
-- `mem_g/cpu/disk_g`: 仅 master 使用;worker 填 `0`
+**全裸金属集群**:所有节点填 `node_type=bm`。部署时需 `--skip net` 跳过 VM 网桥网络初始化(裸金属同网段互通,无需 SNAT/网桥), `--skip vm` 跳过虚拟机创建(自动跳过,但显式跳过更清晰)。示例: `sudo ./deploy-cluster.sh --skip net --with-k8s`。
+
+- `role`: `master`(控制平面) | `worker`(工作节点)
+- `mac`: 显式 MAC,或 `-` 按主机名确定性生成(幂等); 裸金属填 `-`
+- `mem_g/cpu/disk_g`: 仅 master 虚拟机使用; 裸金属填 `0`
 - `ssh_password`: 显式密码,或 `-` 用默认(master→`SSH_DEFAULT_PASSWORD`, worker→`WORKER_SSH_PASSWORD`)
 
 ```bash
+# 虚拟机节点(自动创建 VM)
 NODES=(
-  "master,cubestack-k8s-master01,10.244.1.11,52:54:00:3b:e9:d2,16,8,50,ubuntu,-"
-  "worker,mxgpu-1-232,10.66.1.232,-,0,0,0,ubuntu,-"
+  "master,cubestack-k8s-master01,10.244.1.11,52:54:00:3b:e9:d2,16,8,50,ubuntu,-,vm"
+)
+# 裸金属节点(不创建 VM, 直接连通)
+NODES=(
+  "master,mxgpu-1-232,10.66.1.232,-,0,0,0,ubuntu,-,bm"
+  "worker,mxgpu-1-154,10.66.1.154,-,0,0,0,ubuntu,-,bm"
 )
 ```
 
@@ -140,6 +151,7 @@ sudo ./scripts/deploy-cluster.sh                       # 默认基础设施模�
 sudo ./scripts/deploy-cluster.sh --with-k8s            # 追加 k8s 部署模块(= --enable k8s)
 sudo ./scripts/deploy-cluster.sh --steps vm,k8s        # 只运行指定模块(逗号分隔)
 sudo ./scripts/deploy-cluster.sh --skip hosts          # 跳过某模块
+sudo ./scripts/deploy-cluster.sh --skip net --with-k8s  # 全裸金属:跳过网络模块, 部署 k8s
 sudo ./scripts/deploy-cluster.sh --enable gpu_operator,lws  # 启用默认关闭模块(需先实现 steps/ 脚本)
 sudo ./scripts/deploy-cluster.sh --only <host>         # 仅处理指定节点(可多次)
 sudo ./scripts/deploy-cluster.sh --list-steps          # 查看全部模块
@@ -383,3 +395,24 @@ sshpass -e ssh ubuntu@<workerIP> "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_ke
 ./scripts/gen-inventory.sh
 bash deployments/kubespray/cubestack-offline.sh scale --limit kube_node
 ```
+
+### 8.7 全裸金属集群(无虚拟机)
+
+master 和 worker 全部为裸金属服务器(同网段互通),无需创建 VM 和 VM 网桥网络。
+
+**配置要点**:
+- `cluster.conf` 中所有节点 `node_type=bm`
+- 网络模式 `NET_MODE=bridge`(同网段互通,无需 SNAT)
+- 删去 `BASE_IMG` / `VM_DISK_DIR` 等 VM 相关配置(或留空)
+- SSH 密码需配置正确(`SSH_DEFAULT_PASSWORD`)
+
+**部署命令**:
+```bash
+# 查看集群规划
+sudo ./deployments/scripts/deploy-cluster.sh --list
+
+# 一键部署(跳过网络模块, 所有节点直接连通)
+sudo ./deployments/scripts/deploy-cluster.sh --skip net --with-k8s
+```
+
+`--skip net` 跳过 VM 网桥/SNAT 初始化(裸金属节点同网段直连,无需转发)。`--skip vm` 也可但非必须(`03-vm.sh` 遇到 `node_type=bm` 会自动跳过)。
