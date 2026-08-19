@@ -23,22 +23,30 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-log()       { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn()      { echo -e "${YELLOW}[WARN]${NC} $*"; }
-err()       { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
-highlight() { echo -e "${CYAN}>>> $*${NC}"; }
+# 日志文件(全局, 由 start_log_tee 设置): 所有输出函数同时写入该文件
+LOG_FILE="${LOG_FILE:-}"
+_log_file() { [ -n "${LOG_FILE}" ] && echo -e "$*" >> "${LOG_FILE}" 2>/dev/null || true; }
+log()       { local m="[INFO] $*";  echo -e "${GREEN}${m}${NC}"; _log_file "${m}"; }
+warn()      { local m="[WARN] $*";  echo -e "${YELLOW}${m}${NC}"; _log_file "${m}"; }
+err()       { local m="[ERROR] $*"; echo -e "${RED}${m}${NC}" >&2; _log_file "${m}"; exit 1; }
+highlight() { local m=">>> $*";     echo -e "${CYAN}${m}${NC}"; _log_file "${m}"; }
 
-# 启动日志 tee(同时输出终端 + 写文件), 对写失败安全
-# 根因: 日志文件可能被上次运行占用不可写(如上次 sudo/root 创建, 本次非 root 运行)
-#       → tee 报 "Permission denied", 日志丢失。这里先清理, 仍失败则回退 HOME 下日志, 绝不中断安装。
-# 用法: start_log_tee <日志文件>  — 提示用户可用 pipe 保存日志, 不再使用 exec tee
-#       (exec > >(tee) 会导致 Python subprocess 调用时死锁)
+# 启动日志: 设置 LOG_FILE, 后续 log/warn/err/highlight 及 ansible 日志都写入该文件
+# 同时输出到终端 + 写文件, 不使用 exec > >(tee)(会导致 Python subprocess 调用死锁)
 start_log_tee() {
     local log="$1"
-    echo ">>> 安装日志: 同时显示终端 + 写入 ${log}"
-    echo ">>> 可实时查看: tail -f ${log}"
-    # 使用 run_ansible_playbook 的 tee -a 保存 ansible 日志; 脚本自身日志可通过 pipe 保存:
-    #   bash cubestack-offline.sh install 2>&1 | tee /tmp/install.log
+    # 若文件存在但当前用户不可写: 优先删除(自己创建的), 否则放开权限
+    if [ -e "${log}" ] && [ ! -w "${log}" ]; then
+        rm -f "${log}" 2>/dev/null || chmod 666 "${log}" 2>/dev/null || true
+    fi
+    if touch "${log}" 2>/dev/null; then
+        LOG_FILE="${log}"
+    else
+        warn "无法写入日志 ${log}, 本次仅输出到终端, 不记录日志文件"
+        LOG_FILE=""
+    fi
+    echo ">>> 日志: 同时显示终端 + 写入 ${LOG_FILE}"
+    echo ">>> 可实时查看: tail -f ${LOG_FILE}"
 }
 
 # 运行 ansible-playbook, 日志输出到文件 + 可选终端
