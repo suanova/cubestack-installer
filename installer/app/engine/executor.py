@@ -77,5 +77,12 @@ def _run(task_id: int) -> None:
             if vm is not None and vm.status == "creating":
                 vm.status = "error"
                 db.commit()
+        # 集群安装失败时,把集群状态置为 failed(避免卡在 installing)
+        if task is not None and task.type == "cluster_install":
+            from ..models import K8sCluster
+            cl = db.get(K8sCluster, task.target_id)
+            if cl is not None and cl.status == "installing":
+                cl.status = "failed"
+                db.commit()
     finally:
         db.close()

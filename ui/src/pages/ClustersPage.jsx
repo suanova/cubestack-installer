@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CONSTANTS, clusterApi, hostApi, taskApi, vmApi } from '../api/client'
+import { CONSTANTS, clusterApi, downloadTaskLog, hostApi, taskApi, vmApi } from '../api/client'
 import Field, { CheckboxCard, Select } from '../components/Field'
 import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
@@ -37,6 +37,7 @@ export default function ClustersPage() {
   const [wizStep, setWizStep] = useState(0)
   const [stepState, setStepState] = useState({ 1: 'idle', 2: 'idle', 3: 'idle' })
   const [stepLogs, setStepLogs] = useState({ 1: '', 2: '', 3: '' })
+  const [stepTaskIds, setStepTaskIds] = useState({ 1: null, 2: null, 3: null })
   const logRefs = { 1: useRef(null), 2: useRef(null), 3: useRef(null) }
 
   const load = useCallback(() => {
@@ -115,6 +116,7 @@ export default function ClustersPage() {
         setWizStep(0)
         setStepState({ 1: 'idle', 2: 'idle', 3: 'idle' })
         setStepLogs({ 1: '', 2: '', 3: '' })
+        setStepTaskIds({ 1: null, 2: null, 3: null })
         toast(t('clusters.created', { name: c.name }))
       })
       .catch((err) => toast(err.message, 'error'))
@@ -161,7 +163,10 @@ export default function ClustersPage() {
     setStepState((s) => ({ ...s, [n]: 'running' }))
     setStepLogs((l) => ({ ...l, [n]: '' }))
     apiCall(wizard.id, token)
-      .then((res) => pollStep(n, res.task_id))
+      .then((res) => {
+        setStepTaskIds((s) => ({ ...s, [n]: res.task_id }))
+        pollStep(n, res.task_id)
+      })
       .catch((err) => {
         setStepState((s) => ({ ...s, [n]: 'failed' }))
         setStepLogs((l) => ({ ...l, [n]: '请求失败: ' + err.message }))
@@ -197,6 +202,7 @@ export default function ClustersPage() {
 
   function closeWizard() {
     setWizard(null)
+    setStepTaskIds({ 1: null, 2: null, 3: null })
     load()
   }
 
@@ -397,6 +403,12 @@ export default function ClustersPage() {
             </p>
           )}
           <div className="modal-actions">
+            {detail.last_task && (
+              <button className="btn btn-ghost"
+                onClick={() => downloadTaskLog({ id: detail.last_task.id }, token).catch(() => {})}>
+                {t('tasks.downloadLog')}
+              </button>
+            )}
             <button className="btn btn-ghost" onClick={() => setDetail(null)}>{t('common.close')}</button>
           </div>
         </Modal>
@@ -435,6 +447,12 @@ export default function ClustersPage() {
                         {st === 'running' ? t('common.loading') : st === 'success' ? t('clusters.stepRerun') : t('clusters.stepRun')}
                       </button>
                       <span className={'badge ' + badge}>{label}</span>
+                      {stepTaskIds[n] && (
+                        <button className="btn btn-ghost btn-sm" title={t('tasks.downloadLog')}
+                          onClick={() => downloadTaskLog({ id: stepTaskIds[n] }, token).catch(() => {})}>
+                          {t('common.download')}
+                        </button>
+                      )}
                     </div>
                     {stepLogs[n] && (
                       <pre ref={logRefs[n]} className="log-viewer wizard-step-log">
