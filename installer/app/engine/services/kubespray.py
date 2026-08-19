@@ -8,7 +8,7 @@ from ...db.session import SessionLocal
 from ...models import ClusterNode, DeployTask, Host, K8sCluster
 from ..executor import log_line
 from .clusterprep import ANSIBLE_VENV, KUBESPRAY_DIR, PIP_INDEX, _mc_env, _ensure_mc
-from .vmprovision import _ssh, _ssh_stream
+from .vmprovision import _ssh
 
 RUN_KEY_FILE = os.environ.get("KUBESPRAY_SSH_KEY", "/root/.ssh/id_rsa")
 # cubestack-offline.sh 期望的目录布局(脚本内 BASE_DIR 固定为 /opt/cubestack-installer)
@@ -238,11 +238,33 @@ def run_cluster_install(task: DeployTask, db) -> None:
                                 task.log_text = "\n".join((task.log_text or "").splitlines()[-3000:]) + "\n"
                                 db.commit()
 
-                cmd_install = "cd " + CUBESTACK_BASE + " && CUBESTACK_LOCAL_REPO_DIR=" + CUBESTACK_BASE + "/inventory/cubestack-cluster bash " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER
-                rc = _ssh_stream(run_node, cmd_install, _on_line, timeout=3600)
+                # 后台执行安装(与 SSH 会话解耦:连接被掐断也不影响安装),退出码写入 done 文件
+                inst_log = "/tmp/csi-install-" + CUBESTACK_CLUSTER + ".log"
+                inst_done = "/tmp/csi-install-" + CUBESTACK_CLUSTER + ".done"
+                rc, out, err = _ssh(run_node, "rm -f " + inst_log + " " + inst_done + "; cd " + CUBESTACK_BASE + " && ( CUBESTACK_LOCAL_REPO_DIR=" + CUBESTACK_BASE + "/inventory/cubestack-cluster bash " + CUBESTACK_SCRIPT + " install " + CUBESTACK_CLUSTER + " > " + inst_log + " 2>&1 < /dev/null; echo $? > " + inst_done + " ) >/dev/null 2>&1 & echo STARTED", timeout=30)
+                if "STARTED" not in out:
+                    raise RuntimeError("后台启动 cubestack-offline.sh 失败: " + (err or out))
+                # 轮询日志文件,增量回传控制台(每次短连接,不会因长会话被掐断)
+                line_no = 1
+                final_rc = None
+                deadline = time.time() + 7200
+                while time.time() < deadline:
+                    r, o, e = _ssh(run_node, "tail -n +" + str(line_no) + " " + inst_log + " 2>/dev/null", timeout=30)
+                    if o and o.strip():
+                        ls = o.splitlines()
+                        line_no += len(ls)
+                        for ln in ls:
+                            _on_line(ln)
+                    r2, d, e2 = _ssh(run_node, "test -f " + inst_done + " && cat " + inst_done + " || echo NOTDONE", timeout=30)
+                    if "NOTDONE" not in d and d.strip():
+                        final_rc = int(d.strip())
+                        break
+                    time.sleep(8)
                 _flush_lines()
-                if rc != 0:
-                    raise RuntimeError("cubestack-offline.sh 安装失败(rc=" + str(rc) + ")")
+                if final_rc is None:
+                    raise RuntimeError("cubestack-offline.sh 安装超时(超过 2 小时)")
+                if final_rc != 0:
+                    raise RuntimeError("cubestack-offline.sh 安装失败(rc=" + str(final_rc) + ")")
             else:
                 ws = os.path.join(WORKSPACE, "cluster-" + cluster.name)
                 os.makedirs(ws, exist_ok=True)
