@@ -369,6 +369,6 @@ kubeadm_patches: []
 # Patches are applied in the order they are specified.
 # group_vars/k8s_cluster/k8s-cluster.yml
 kube_apiserver_extra_args:
-  advertise-address: "192.168.122.31"
+  advertise-address: "192.0.2.1"   # 占位 IP, 由脚本按 hosts.yml 生成
 # Set to true to remove the role binding to anonymous users created by kubeadm
 remove_anonymous_access: false

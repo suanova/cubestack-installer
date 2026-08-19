@@ -25,7 +25,7 @@ FIRST_MASTER=""
 FIRST_MASTER_IP=""
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
+    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
     if [ "${role}" = "master" ] && [ -z "${FIRST_MASTER}" ]; then
         FIRST_MASTER="${hostname}"
         FIRST_MASTER_IP="${ip}"
@@ -35,7 +35,7 @@ done
 [ -n "${FIRST_MASTER}" ] || { err "cluster.conf 中无 master 节点"; exit 1; }
 
 say "从 ${FIRST_MASTER}(${FIRST_MASTER_IP}) 获取集群 CA ..."
-CA_FILE="/tmp/cubestack-ca-${CLUSTER_NAME}.crt"
+CA_FILE="/tmp/cubestack-ca.crt"
 ssh ${SSH_OPTS} "${user:-ubuntu}@${FIRST_MASTER_IP}" "sudo cat /etc/kubernetes/ssl/ca.crt" > "${CA_FILE}" 2>/dev/null
 [ -s "${CA_FILE}" ] || { err "获取 CA 失败"; exit 1; }
 ok "CA 已获取 ($(wc -c < "${CA_FILE}") 字节)"
@@ -48,7 +48,7 @@ REMOTE_SCRIPT="$(dirname "${BASH_SOURCE[0]}")/sync-ca-remote.sh"
 COUNT=0
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
+    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
     [ -z "${ONLY}" ] || [ "${hostname}" = "${ONLY}" ] || continue
 
     COUNT=$((COUNT + 1))

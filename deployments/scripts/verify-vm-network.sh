@@ -15,7 +15,7 @@ load_config
 BRIDGE="${BRIDGE:-privbr0}"
 BRIDGE_IP="${BRIDGE_IP:-10.244.0.1}"
 VM_SUBNET="${VM_SUBNET:-10.244.0.0/16}"
-HOST_PHYS_IP="${HOST_PHYS_IP:-10.66.3.37}"
+# HOST_PHYS_IP 由 lib-common load_config 统一提供(留空自动检测), 不再本地设置
 PHYS_WORKER_NET="${PHYS_WORKER_NET:-10.66.1.0/24}"
 
 PASS=0; FAIL=0

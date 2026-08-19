@@ -6,7 +6,7 @@
 #   所有 master/worker 节点 hostname → IP
 # 幂等: 自动移除旧的 nova-k8s-* / mxgpu-* 条目再追加新条目
 # 用法: sudo ./sync-hosts.sh
-# 数据源: deployments/config/cluster-${CLUSTER_NAME}.conf
+# 数据源: deployments/config/cluster.conf
 # ============================================================
 set -euo pipefail
 
@@ -16,16 +16,14 @@ load_config
 
 [ "$(id -u)" -eq 0 ] || { err "需要 root: sudo $0"; exit 1; }
 
-API_IP="${APISERVER_ADDRESS:-${HOST_PHYS_IP:-10.66.3.37}}"
-API_DOMAIN="${APISERVER_DOMAIN:-k8s-api.nova.local}"
-
+# API_IP / API_DOMAIN 由 lib-common load_config 统一提供(从 cluster.conf 派生), 不再本地设置
 say "API 解析: ${API_DOMAIN} → ${API_IP}"
 
 # 收集所有节点 hostname→ip
 NODE_ENTRIES=""
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
+    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
     NODE_ENTRIES="${NODE_ENTRIES}
 ${ip}     ${hostname}"
 done

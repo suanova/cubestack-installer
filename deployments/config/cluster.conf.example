@@ -6,7 +6,8 @@
 # ============================================================
 
 # ---------------- 宿主机(Hypervisor) ----------------
-HOST_PHYS_IP="${HOST_PHYS_IP:-10.66.3.37}"
+# 宿主机物理 IP(留空=自动检测; 各脚本直接引用该全局变量, 不硬编码)
+HOST_PHYS_IP="${HOST_PHYS_IP:-}"
 BASE_IMG="${BASE_IMG:-${REPO_ROOT}/deployments/virtual-machine/cloud-images/ubuntu2204-k8s-base.qcow2}"
 VM_DISK_DIR="${VM_DISK_DIR:-/k8s/vm-disks}"
 
@@ -51,6 +52,11 @@ KUBESPRAY_DIR="${KUBESPRAY_DIR:-${REPO_ROOT}/deployments/kubespray/kubespray}"
 # 离线资源缓存目录(二进制/镜像,按集群名隔离)
 LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${REPO_ROOT}/deployments/kubespray/repository/${CLUSTER_NAME}}"
 UPDATE_ETC_HOSTS="${UPDATE_ETC_HOSTS:-0}"
+
+# ---------------- 集群内部网络 CIDR(由脚本同步到 kubespray group_vars, 不硬编码) ----------------
+KUBE_SERVICE_ADDRESSES="${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18}"
+KUBE_PODS_SUBNET="${KUBE_PODS_SUBNET:-10.233.64.0/18}"
+NODELOCAL_DNS_IP="${NODELOCAL_DNS_IP:-169.254.25.10}"
 
 # ---------------- 离线镜像预加载(最小集合) ----------------
 # 仅同步"部署 kubespray 最小镜像集合"到节点 containerd,避免全量 rsync 无关镜像

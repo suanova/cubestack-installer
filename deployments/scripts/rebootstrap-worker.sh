@@ -24,7 +24,7 @@ SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/n
 FIRST_MASTER=""; FIRST_MASTER_IP=""
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
+    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
     if [ "${role}" = "master" ] && [ -z "${FIRST_MASTER}" ]; then
         FIRST_MASTER="${hostname}"; FIRST_MASTER_IP="${ip}"; break
     fi
@@ -50,7 +50,7 @@ REMOTE_SCRIPT="$(dirname "${BASH_SOURCE[0]}")/rebootstrap-remote.sh"
 COUNT=0
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
+    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
     [ "${role}" = "worker" ] || continue
     [ -z "${ONLY}" ] || [ "${hostname}" = "${ONLY}" ] || continue
 

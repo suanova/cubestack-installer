@@ -29,17 +29,16 @@ nohup.out
 
 # 集群统一配置(含密码,勿提交;模板 cluster.conf.example 需提交)
 deployments/config/cluster.conf
-# 多集群配置 + 断点状态文件
-deployments/config/cluster-*.conf
-deployments/config/.cluster-*.state
+# 断点状态文件(含进度,勿提交)
+deployments/config/.deploy.state
 # kubespray 生成的 artifacts(kubeconfig/kubectl,含凭据, root 属主)
 deployments/kubespray/inventory/*/artifacts/
 # 部署生成的 inventory(含密码)
 deployments/kubespray/inventory/cubestack-cluster/hosts.yml
 deployments/kubespray/inventory/cubestack-cluster/inventory.ini
 
-# 虚拟机基础镜像(大文件,勿提交)
-deployments/virtual-machine/cloud-images/
+# 虚拟机基础镜像/磁盘(大文件,勿提交)
+deployments/virtual-machine/
 
 #kubepray install image and binary folder
 deployments/kubespray/repository/cubestack-cluster/*

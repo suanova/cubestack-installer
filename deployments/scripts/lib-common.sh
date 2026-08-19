@@ -2,7 +2,7 @@
 # ============================================================
 # CubeStack 公共库: 统一配置加载 + 通用工具函数
 # 所有 deployments/scripts/*.sh 在 set -euo pipefail 之后 source 本文件
-# 配置统一来源: deployments/config/cluster.conf (单集群) 或 deployments/config/cluster-${CLUSTER_NAME}.conf (多集群)
+# 配置统一来源: deployments/config/cluster.conf
 # 优先级: 环境变量 > 配置文件 > 内置默认值(内置默认值在配置文件中声明)
 # 说明: 本库不执行任何宿主修改,仅供各脚本复用
 # ============================================================
@@ -18,21 +18,14 @@ export REAL_HOME REAL_USER
 # 统一 HOME 为真实用户(sudo bash 下 HOME=/root, 会导致配置里 ${HOME}/.ssh 等解析错误)
 [ -n "${REAL_HOME}" ] && export HOME="${REAL_HOME}"
 
-# ---------------- 多集群: 集群名解析 ----------------
-# 优先级: 环境变量 CLUSTER_NAME > 环境变量 CUBESTACK_CLUSTER > 默认值
-CLUSTER_NAME="${CLUSTER_NAME:-${CUBESTACK_CLUSTER:-}}"
-[ -n "${CLUSTER_NAME}" ] || CLUSTER_NAME="cubestack-cluster"
-export CLUSTER_NAME
-
-# ---------------- 多集群: 配置文件解析 ----------------
-# 优先 cluster-${CLUSTER_NAME}.conf, 回退 cluster.conf
-CONF_BY_CLUSTER="${REPO_ROOT}/deployments/config/cluster-${CLUSTER_NAME}.conf"
-if [ -f "${CONF_BY_CLUSTER}" ]; then
-    CLUSTER_CONF="${CLUSTER_CONF:-${CONF_BY_CLUSTER}}"
-else
-    CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/deployments/config/cluster.conf}"
-fi
+# ---------------- 配置文件: 统一读取 cluster.conf ----------------
+CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/deployments/config/cluster.conf}"
 export CLUSTER_CONF
+
+# ---------------- 集群名(固定默认, 单集群) ----------------
+# 默认集群名 cubestack-cluster, 用于 inventory/repository 目录与日志命名; 环境变量可覆盖
+CLUSTER_NAME="${CLUSTER_NAME:-cubestack-cluster}"
+export CLUSTER_NAME
 
 # ---------------- 宿主机物理 IP 自动检测 ----------------
 # 不 hardcode: 自动检测宿主机物理网卡 IP(排除虚拟网桥 docker0/privbr0/virbr0 等)
@@ -50,9 +43,9 @@ detect_host_ip() {
 }
 
 # ---------------- 断点续跑: 状态文件 ----------------
-# 每个集群独立的状态文件,记录已完成的任务阶段
+# 统一的状态文件,记录已完成的任务阶段
 # 用法: save_state <phase> <value>; get_state <phase>; clear_state
-STATE_FILE="${REPO_ROOT}/deployments/config/.cluster-${CLUSTER_NAME}.state"
+STATE_FILE="${REPO_ROOT}/deployments/config/.deploy.state"
 save_state() {
     local key="$1" val="$2"
     # 移除旧记录再写入(避免重复)
@@ -94,8 +87,8 @@ load_config() {
         warn "未找到配置文件 ${CLUSTER_CONF},使用内置默认值"
         warn "建议: cp ${REPO_ROOT}/deployments/config/cluster.conf.example ${CLUSTER_CONF}"
     fi
-    # 宿主机物理 IP 自动检测(不 hardcode): 仅当未显式设置或仍是旧默认值时覆盖
-    if [ -z "${HOST_PHYS_IP:-}" ] || [ "${HOST_PHYS_IP}" = "10.66.3.37" ] || [ "${HOST_PHYS_IP}" = "CHANGE_ME" ]; then
+    # 宿主机物理 IP 自动检测(不 hardcode): 仅当未显式设置或仍是占位符时覆盖
+    if [ -z "${HOST_PHYS_IP:-}" ] || [ "${HOST_PHYS_IP}" = "CHANGE_ME" ]; then
         HOST_PHYS_IP="$(detect_host_ip)"
         export HOST_PHYS_IP
         vlog "自动检测宿主机物理 IP: ${HOST_PHYS_IP}"
@@ -104,10 +97,16 @@ load_config() {
     if [ -z "${APISERVER_ADDRESS:-}" ] && [ "${NET_MODE:-nat}" = "nat" ]; then
         for line in "${NODES[@]:-}"; do
             [ -z "${line}" ] && continue
-            IFS=, read -r role hostname ip mac mem cpu disk user pw <<<"${line}"
+            IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
             [ "${role}" = "master" ] && { APISERVER_ADDRESS="${ip}"; export APISERVER_ADDRESS; vlog "NAT 模式自动设 APISERVER_ADDRESS=第一个master: ${ip}"; break; }
         done
     fi
+    # 全局派生变量(由 cluster.conf 变量派生, 各脚本直接引用, 不各自设置本地变量):
+    #   API_IP       API 入口地址 = APISERVER_ADDRESS(HAProxy IP / NAT 第一个 master), 回退 HOST_PHYS_IP(桥接=宿主机物理 IP)
+    #   API_DOMAIN   API Server 域名(跨网段统一入口), 默认 k8s-api.nova.local
+    API_IP="${API_IP:-${APISERVER_ADDRESS:-${HOST_PHYS_IP}}}"
+    API_DOMAIN="${API_DOMAIN:-${APISERVER_DOMAIN:-k8s-api.nova.local}}"
+    export API_IP API_DOMAIN
 }
 
 # ---------------- 指定节点过滤(--only) ----------------
@@ -171,7 +170,7 @@ node_is_vm() {
 repo_root() { echo "${REPO_ROOT}"; }
 
 # ---------------- 节点注册到 cluster.conf ----------------
-# 将节点信息写入 config/cluster.conf(或 cluster-${CLUSTER_NAME}.conf) 的 NODES 数组(幂等)
+# 将节点信息写入 config/cluster.conf 的 NODES 数组(幂等)
 # 用法: register_node_to_conf <role> <hostname> <ip> <mac> <mem> <cpu> <disk> <user> <password>
 register_node_to_conf() {
     local role="$1" hostname="$2" ip="$3" mac="$4" mem="$5" cpu="$6" disk="$7" user="$8" pw="$9"

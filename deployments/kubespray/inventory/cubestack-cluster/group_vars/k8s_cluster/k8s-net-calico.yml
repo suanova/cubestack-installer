@@ -107,8 +107,8 @@ calico_vxlan_mode: 'Always'
 # * can-reach=DESTINATION
 # * interface=INTERFACE-REGEX
 # see https://docs.projectcalico.org/reference/node/configuration
-calico_ip_auto_method: "can-reach=192.168.122.41"
-# calico_ip6_auto_method: "interface=eth.*"
+# calico_ip_auto_method: "can-reach=<由脚本按 hosts.yml 生成>"
+# 见上方注释，calico 节点 IP 自动检测方式
 
 # Set FELIX_MTUIFACEPATTERN, Pattern used to discover the host’s interface for MTU auto-detection.
 # see https://projectcalico.docs.tigera.io/reference/felix/configuration
@@ -130,3 +130,5 @@ calico_ip_auto_method: "can-reach=192.168.122.41"
 
 # Calico apiserver (only with kdd)
 # calico_apiserver_enabled: false
+
+
