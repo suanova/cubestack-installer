@@ -1,7 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-BASE_DIR="/opt/cubestack-installer"
+# 自动检测: 脚本所在目录 = deployments/kubespray/
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 离线资源根目录: 优先级:
+#   1. CUBESTACK_BASE_DIR 环境变量(由 deploy-cluster.sh 08 步骤通过 env 传入)
+#   2. 脚本所在目录(本项目结构: SCRIPT_DIR = deployments/kubespray/)
+#   3. 回退 /opt/cubestack-installer(standalone 模式)
+BASE_DIR="${CUBESTACK_BASE_DIR:-${SCRIPT_DIR}}"
 KUBESPRAY_DIR="${BASE_DIR}/kubespray"
 LOCAL_REPO_BASE="${BASE_DIR}/repository"
 INVENTORY_BASE="${BASE_DIR}/inventory"
