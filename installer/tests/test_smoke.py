@@ -21,9 +21,20 @@ def test_register_then_login(client):
         json={"username": "tester", "email": "tester@example.com", "password": "secret123"},
     )
     assert r.status_code == 201
+    uid = r.json()["id"]
+    # 新注册用户默认 pending, 登录被拒绝(需管理员审核激活)
     r2 = client.post("/api/auth/login", json={"account": "tester", "password": "secret123"})
-    assert r2.status_code == 200
-    assert r2.json()["user"]["username"] == "tester"
+    assert r2.status_code == 403
+    # 管理员审核通过后即可登录
+    r3 = client.patch(
+        "/api/users/" + str(uid),
+        headers=_auth(_admin_token(client)),
+        json={"status": "active"},
+    )
+    assert r3.status_code == 200
+    r4 = client.post("/api/auth/login", json={"account": "tester", "password": "secret123"})
+    assert r4.status_code == 200
+    assert r4.json()["user"]["username"] == "tester"
 
 
 def test_unauthorized_rejected(client):
