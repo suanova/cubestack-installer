@@ -194,7 +194,8 @@ const dict = {
     'tasks.type': '类型', 'tasks.typeVm': '虚拟机创建', 'tasks.typeCluster': '集群安装', 'tasks.typeScale': '集群扩容',
     'tasks.target': '目标', 'tasks.progress': '进度', 'tasks.createdAt': '创建 / 完成',
     'tasks.viewLog': '查看日志', 'tasks.viewing': '查看中', 'tasks.collapse': '收起',
-    'tasks.downloadLog': '下载日志',
+    'tasks.downloadLog': '下载日志', 'tasks.deleteLog': '删除日志',
+    'tasks.deleteLogConfirm': '确定删除任务 #{id} 的日志吗?(任务记录保留)', 'tasks.logDeleted': '日志已清除',
     // 虚拟机安装日志
     'vmtasks.title': '安装日志', 'vmtasks.desc': '虚拟机安装任务的执行日志,点击任务查看实时日志',
     'tasks.taskLabel': '任务 #{id} · {name} ·', 'tasks.empty': '暂无任务,创建虚拟机或安装集群后自动生成',
@@ -405,7 +406,8 @@ const dict = {
     'tasks.type': 'Type', 'tasks.typeVm': 'VM Create', 'tasks.typeCluster': 'Cluster Install', 'tasks.typeScale': 'Cluster Scale',
     'tasks.target': 'Target', 'tasks.progress': 'Progress', 'tasks.createdAt': 'Created / Finished',
     'tasks.viewLog': 'View Log', 'tasks.viewing': 'Viewing', 'tasks.collapse': 'Collapse',
-    'tasks.downloadLog': 'Download Log',
+    'tasks.downloadLog': 'Download Log', 'tasks.deleteLog': 'Delete Log',
+    'tasks.deleteLogConfirm': 'Delete log of task #{id}? (task record is kept)', 'tasks.logDeleted': 'Log cleared',
     // VM install task log
     'vmtasks.title': 'VM Install Task Log', 'vmtasks.desc': 'Execution logs of VM creation/install tasks. Click a task to view live logs',
     'tasks.taskLabel': 'Task #{id} · {name} ·', 'tasks.empty': 'No tasks yet. Create a VM or install a cluster to generate one.',

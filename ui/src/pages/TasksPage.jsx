@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { downloadTaskLog, taskApi } from '../api/client'
+import { useToast } from '../components/Toast'
 import { useAuth } from '../context/AuthContext'
 import { useI18n } from '../i18n'
 
@@ -22,6 +23,7 @@ function formatDate(iso) {
 }
 
 export default function TasksPage({ typeFilter, titleKey, descKey }) {
+  const toast = useToast()
   const { token } = useAuth()
   const { t } = useI18n()
   const [tasks, setTasks] = useState([])
@@ -64,6 +66,21 @@ export default function TasksPage({ typeFilter, titleKey, descKey }) {
         setLogText(tk.log_text || t('tasks.noLog'))
       })
       .catch(() => {})
+  }
+
+  function deleteLog(tk) {
+    if (!window.confirm(t('tasks.deleteLogConfirm', { id: tk.id }))) return
+    taskApi
+      .clearLog(tk.id, token)
+      .then(() => {
+        toast(t('tasks.logDeleted'))
+        if (selected?.id === tk.id) {
+          setSelected((s) => (s ? { ...s, log_text: '' } : s))
+          setLogText(t('tasks.noLog'))
+        }
+        load()
+      })
+      .catch((err) => toast(err.message, 'error'))
   }
 
   const visibleTasks = typeFilter
@@ -131,6 +148,10 @@ export default function TasksPage({ typeFilter, titleKey, descKey }) {
                           <button className="btn btn-ghost btn-sm" title={t('tasks.downloadLog')}
                             onClick={() => downloadTaskLog(tk, token).catch(() => {})}>
                             {t('common.download')}
+                          </button>
+                          <button className="btn btn-danger btn-sm" title={t('tasks.deleteLog')}
+                            onClick={() => deleteLog(tk)}>
+                            {t('tasks.deleteLog')}
                           </button>
                         </div>
                       </td>
