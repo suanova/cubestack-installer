@@ -24,6 +24,8 @@ def register(payload: RegisterIn, db: Session = Depends(get_db)) -> User:
         email=payload.email,
         full_name=payload.full_name,
         hashed_password=hash_password(payload.password),
+        is_active=False,
+        status="pending",  # 注册账号需管理员审核激活
     )
     db.add(user)
     db.commit()
@@ -40,7 +42,9 @@ def login(payload: LoginIn, db: Session = Depends(get_db)) -> TokenOut:
     )
     if user is None or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    if not user.is_active:
+    if user.status == "pending":
+        raise HTTPException(status_code=403, detail="账号待管理员审核,请通过后再登录")
+    if user.status == "disabled" or not user.is_active:
         raise HTTPException(status_code=403, detail="账号已被禁用,请联系管理员")
     return TokenOut(
         access_token=create_access_token(str(user.id)),

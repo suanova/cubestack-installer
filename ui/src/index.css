@@ -282,6 +282,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
 /* ---------- 页面头部 ---------- */
 .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.page-actions { display: flex; align-items: center; gap: 10px; }
 .page-title { font-size: 23px; font-weight: 800; }
 .page-desc { font-size: 13.5px; color: var(--muted); margin-top: 4px; }
 .count-chip { background: var(--primary-soft); color: var(--c-blue); font-weight: 700; font-size: 13px; padding: 7px 14px; border-radius: 999px; white-space: nowrap; }
