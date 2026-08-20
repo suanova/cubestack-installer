@@ -1,8 +1,11 @@
-export default function Field({ label, error, ...props }) {
+export default function Field({ label, error, action, ...props }) {
   return (
     <label className="field">
       <span className="field-label">{label}</span>
-      <input className={'input' + (error ? ' input-error' : '')} {...props} />
+      <span className={'field-input-wrap' + (action ? ' has-action' : '')}>
+        <input className={'input' + (error ? ' input-error' : '')} {...props} />
+        {action}
+      </span>
       {error && <span className="field-error">{error}</span>}
     </label>
   )

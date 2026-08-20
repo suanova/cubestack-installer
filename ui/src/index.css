@@ -154,6 +154,14 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3.5px var(--primary-soft); }
 .input-error { border-color: var(--danger) !important; }
 .field-error { color: var(--c-red); font-size: 12px; }
+.field-input-wrap { position: relative; display: block; }
+.field-input-wrap.has-action .input { padding-right: 42px; }
+.field-toggle {
+  position: absolute; top: 50%; right: 8px; transform: translateY(-50%);
+  border: none; background: transparent; cursor: pointer; line-height: 1;
+  font-size: 16px; color: var(--muted); padding: 4px 6px; border-radius: 6px;
+}
+.field-toggle:hover { color: var(--primary); background: var(--primary-soft); }
 .alert {
   display: flex; align-items: center; gap: 8px; background: rgba(220, 38, 38, 0.08);
   border: 1px solid rgba(220, 38, 38, 0.28); color: var(--c-red); border-radius: 10px;
