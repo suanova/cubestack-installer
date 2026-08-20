@@ -240,6 +240,7 @@ export default function ClustersPage() {
                 <th>{t('clusters.nodes')}</th>
                 <th>{t('clusters.runNode')}</th>
                 <th>{t('common.status')}</th>
+                <th>{t('clusters.apiServer')}</th>
                 <th className="th-actions">{t('common.actions')}</th>
               </tr>
             </thead>
@@ -271,6 +272,7 @@ export default function ClustersPage() {
                     <td>
                       <span className={'badge ' + st.cls}>{t(st.key)}</span>
                     </td>
+                    <td className="td-mono">{c.api_server || <span className="td-muted">-</span>}</td>
                     <td>
                       <div className="td-actions">
                         {(c.status === 'pending' || c.status === 'failed') && (
@@ -280,6 +282,12 @@ export default function ClustersPage() {
                         )}
                         {c.status === 'installing' && <span className="td-hint">{t('clusters.installingHint')}</span>}
                         <button className="btn btn-ghost btn-sm" onClick={() => openDetail(c.id)}>{t('clusters.detail')}</button>
+                        {c.has_kubeconfig && (
+                          <button className="btn btn-ghost btn-sm"
+                            onClick={() => downloadClusterKubeconfig(c, token).catch(() => {})}>
+                            {t('clusters.downloadKubeconfig')}
+                          </button>
+                        )}
                         <button className="btn btn-danger btn-sm" onClick={() => setDeleting(c)}>{t('common.delete')}</button>
                       </div>
                     </td>
@@ -288,7 +296,7 @@ export default function ClustersPage() {
               })}
               {clusters.length === 0 && (
                 <tr>
-                  <td colSpan="6" className="td-empty">{t('clusters.empty')}</td>
+                  <td colSpan="7" className="td-empty">{t('clusters.empty')}</td>
                 </tr>
               )}
             </tbody>
