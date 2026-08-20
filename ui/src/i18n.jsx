@@ -37,7 +37,7 @@ const dict = {
     'auth.errUsername': '用户名至少 3 个字符', 'auth.errEmail': '请输入有效的邮箱地址',
     'auth.errPwd': '密码至少 6 位', 'auth.errConfirm': '两次输入的密码不一致',
     'auth.loginOk': '登录成功,欢迎回来!', 'auth.registerOk': '注册成功,欢迎加入!',
-    'auth.registerPending': '注册成功!账号待管理员审核,通过后即可登录',
+    'auth.registerPending': '注册信息已经提交,等待管理员审核后即可登录',
     // 概览
     'dash.badge': '基础设施部署平台', 'dash.welcome': '欢迎回来,{name} 👋',
     'dash.heroDesc': '在宿主机上创建虚拟机,再通过 Kubespray 一键部署生产级 Kubernetes 集群。左侧导航分「虚拟机安装」与「K8s集群安装」两大流程。',
@@ -230,7 +230,7 @@ const dict = {
     'auth.errUsername': 'Username must be at least 3 chars', 'auth.errEmail': 'Enter a valid email address',
     'auth.errPwd': 'Password must be at least 6 chars', 'auth.errConfirm': 'Passwords do not match',
     'auth.loginOk': 'Signed in. Welcome back!', 'auth.registerOk': 'Registered. Welcome aboard!',
-    'auth.registerPending': 'Registered! Your account is pending admin approval before you can sign in.',
+    'auth.registerPending': 'Registration submitted. Awaiting admin approval before you can sign in.',
     // Dashboard
     'dash.badge': 'Infrastructure Deployment Platform', 'dash.welcome': 'Welcome back, {name} 👋',
     'dash.heroDesc': 'Provision VMs on hosts, then deploy production-grade Kubernetes clusters with Kubespray. Use the two trees on the left: VM Provisioning and K8s Cluster Install.',
