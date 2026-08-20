@@ -33,8 +33,8 @@ IMAGE := harbor.isuanova.com/cubestack/cubestack-installer:latest
 
 image: ## 构建并运行单镜像(podman,含全部依赖)
 	podman build --format docker -t $(IMAGE) .
-	podman rm -f cubestack-installer 2>/dev/null; podman run -d --replace -p 8000:8000 -v csi-data:/app/data --name cubestack-installer $(IMAGE)
-	@echo "访问 http://localhost:8000"
+	podman rm -f cubestack-installer 2>/dev/null; podman run -d --replace -p 8008:8000 -v csi-data:/app/data --name cubestack-installer $(IMAGE)
+	@echo "访问 http://localhost:8008"
 
 image-push: ## 推送到 Harbor 私有仓库
 	podman push $(IMAGE)
