@@ -31,17 +31,18 @@ def _sim_mode(run_node: Host | None) -> bool:
     return shutil.which("ansible-playbook") is None or not os.path.isdir(KUBESPRAY_DIR)
 
 
-def _ensure_cubestack_on_host(run_node: Host, task, db) -> str:
-    """在运行节点上把 cubestack 离线安装工具链下载到 /opt/cubestack-installer。"""
+def _ensure_cubestack_on_host(run_node: Host, task, db, force: bool = False) -> str:
+    """同步 cubestack 离线安装工具链到运行节点。force=True 时强制从 MinIO 覆盖更新(不删除目标端多余文件)。"""
     rc, out, err = _ssh(run_node, "ls " + CUBESTACK_SCRIPT + " >/dev/null 2>&1 && ls " + CUBESTACK_BASE + "/kubespray/cluster.yml >/dev/null 2>&1 && echo ALREADY", timeout=20)
-    if "ALREADY" in out:
+    if not force and "ALREADY" in out:
         return CUBESTACK_BASE
     _ensure_mc(run_node, task, db)
-    log_line(task, db, "      [下载] 从 MinIO " + _mc_env().split("@")[-1] + "/cubestack/installer/ansible/kubespray 下载离线安装工具到 " + CUBESTACK_BASE + " ...")
-    rc, out, err = _ssh(run_node, "sudo mkdir -p " + CUBESTACK_BASE + " && sudo chown $(whoami) " + CUBESTACK_BASE + " && " + _mc_env() + " mc mirror minio/cubestack/installer/ansible/kubespray " + CUBESTACK_BASE + " && chmod +x " + CUBESTACK_SCRIPT + " && ls " + CUBESTACK_BASE + "/kubespray/cluster.yml", timeout=1800)
+    log_line(task, db, "      [同步] 从 MinIO " + _mc_env().split("@")[-1] + "/cubestack/installer/ansible/kubespray " + ("强制覆盖更新" if force else "下载") + "到 " + CUBESTACK_BASE + " ...")
+    mirror_flag = " --overwrite" if force else ""
+    rc, out, err = _ssh(run_node, "sudo mkdir -p " + CUBESTACK_BASE + " && sudo chown $(whoami) " + CUBESTACK_BASE + " && " + _mc_env() + " mc mirror" + mirror_flag + " minio/cubestack/installer/ansible/kubespray " + CUBESTACK_BASE + " && chmod +x " + CUBESTACK_SCRIPT + " && ls " + CUBESTACK_BASE + "/kubespray/cluster.yml", timeout=1800)
     if rc != 0 or "cluster.yml" not in out:
         raise RuntimeError("从 MinIO 下载 kubespray 离线工具失败: " + (err or out))
-    log_line(task, db, "      cubestack 离线安装工具下载完成 ✓")
+    log_line(task, db, "      cubestack 离线安装工具" + ("同步更新完成 ✓" if force else "下载完成 ✓"))
     return CUBESTACK_BASE
 
 
@@ -145,10 +146,10 @@ def run_cluster_install(task: DeployTask, db) -> None:
     task.progress = 5
     db.commit()
 
-    # 步骤 1: 下载 cubestack 离线安装工具链到运行节点
+    # 步骤 1: 从 MinIO 强制同步最新 cubestack 离线安装工具链到运行节点
     if run_node is not None:
-        log_line(task, db, "[1/8] 检查/下载运行节点 " + run_node.name + " 的 cubestack 离线安装工具 ...")
-        _ensure_cubestack_on_host(run_node, task, db)
+        log_line(task, db, "[1/8] 从 MinIO 同步最新工具链到运行节点 " + run_node.name + " ...")
+        _ensure_cubestack_on_host(run_node, task, db, force=True)
         rc, out, err = _ssh(run_node, "test -x " + ANSIBLE_VENV + "/bin/ansible-playbook && echo ANSIBLE_OK || echo NO_ANSIBLE", timeout=20)
         if "ANSIBLE_OK" not in out:
             raise RuntimeError("运行节点缺少 Ansible 环境,请先在创建集群向导「第一步」中准备安装机环境")
@@ -404,15 +405,9 @@ def run_cluster_scale(task: DeployTask, db) -> None:
     task.progress = 5
     db.commit()
 
-    # 1. 确保工具链: /opt/cubestack-installer 不存在时从 MinIO 拉取
-    log_line(task, db, "[1/6] 检查 kubespray 工作区 " + CUBESTACK_BASE + " ...")
-    rc, out, err = _ssh(run_node, "ls " + CUBESTACK_SCRIPT + " >/dev/null 2>&1 && ls " + CUBESTACK_BASE + "/kubespray/cluster.yml >/dev/null 2>&1 && echo ALREADY || echo MISSING", timeout=20)
-    if "MISSING" in out:
-        log_line(task, db, "      工作区不存在,从 MinIO 拉取 kubespray ...")
-        _ensure_cubestack_on_host(run_node, task, db)
-        log_line(task, db, "      工具链就绪 ✓")
-    else:
-        log_line(task, db, "      工作区已存在,跳过下载 ✓")
+    # 1. 从 MinIO 强制同步最新工具链(每次扩容都更新, 不删除目标端多余文件)
+    log_line(task, db, "[1/6] 从 MinIO 强制同步最新工具链到 " + CUBESTACK_BASE + " ...")
+    _ensure_cubestack_on_host(run_node, task, db, force=True)
     task.progress = 12
     db.commit()
 
