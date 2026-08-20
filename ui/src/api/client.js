@@ -66,6 +66,7 @@ export const clusterApi = {
   create: (payload, token) => request('/clusters', { method: 'POST', body: payload, token }),
   detail: (id, token) => request('/clusters/' + id, { token }),
   deploy: (id, token) => request('/clusters/' + id + '/deploy', { method: 'POST', token }),
+  scale: (id, payload, token) => request('/clusters/' + id + '/scale', { method: 'POST', body: payload, token }),
   prepare: (id, token) => request('/clusters/' + id + '/prepare', { method: 'POST', token }),
   sshkey: (id, token) => request('/clusters/' + id + '/sshkey', { method: 'POST', token }),
   remove: (id, token) => request('/clusters/' + id, { method: 'DELETE', token }),
