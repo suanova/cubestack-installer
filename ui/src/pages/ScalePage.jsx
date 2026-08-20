@@ -138,31 +138,31 @@ export default function ScalePage() {
             <div className="node-group">
               <div className="group-label">{t('clusters.groupHosts')}</div>
               <div className="checkbox-grid">
-                {hosts.map((h) => (
+                {freeHosts.map((h) => (
                   <CheckboxCard
                     key={'scwh-' + h.id}
-                    label={h.name + (h.in_cluster ? ' · ' + t('scale.inCluster') : '')}
+                    label={h.name}
                     sub={h.ip + ' · 🖥 宿主机'}
                     checked={wk.hostIds.includes(h.id)}
                     onChange={() => toggleWorkerHost(h.id)}
                   />
                 ))}
-                {hosts.length === 0 && <span className="td-hint">{t('clusters.noHost')}</span>}
+                {freeHosts.length === 0 && <span className="td-hint">{t('clusters.noHost')}</span>}
               </div>
             </div>
             <div className="node-group">
               <div className="group-label">{t('clusters.groupVms')}</div>
               <div className="checkbox-grid">
-                {vms.map((v) => (
+                {freeVms.map((v) => (
                   <CheckboxCard
                     key={'scwv-' + v.id}
-                    label={v.name + (v.in_cluster ? ' · ' + t('scale.inCluster') : '')}
+                    label={v.name}
                     sub={v.ip + ' · ☁ ' + v.cpu + 'c/' + v.memory_gb + 'G'}
                     checked={wk.vmIds.includes(v.id)}
                     onChange={() => toggleWorkerVm(v.id)}
                   />
                 ))}
-                {vms.length === 0 && <span className="td-hint">{t('clusters.noVm')}</span>}
+                {freeVms.length === 0 && <span className="td-hint">{t('clusters.noVm')}</span>}
               </div>
             </div>
           </div>
