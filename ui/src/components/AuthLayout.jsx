@@ -16,7 +16,7 @@ export default function AuthLayout({ title, subtitle, children }) {
         <p className="auth-subtitle">{subtitle}</p>
         {children}
       </div>
-      <p className="auth-foot">CubeStackInstaller · FastAPI + React</p>
+      <p className="auth-foot">CubeStackInstaller © 2026 iSuanova</p>
     </div>
   )
 }
