@@ -1,7 +1,7 @@
 """后端启动入口(支持命令行参数)。
 
 用法:
-    uv run cubestack-installer-installer [--admin-password <密码>] [--host <IP>] [--port <端口>] [--reload]
+    uv run cubestack-installer-installer [--bootstrap-password <初始密码>] [--host <IP>] [--port <端口>] [--reload]
 """
 import argparse
 import os
@@ -15,8 +15,8 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--admin-password",
-        dest="admin_password",
+        "--bootstrap-password",
+        dest="bootstrap_password",
         metavar="PASSWORD",
         help="管理员初始密码(仅首次创建 admin 账号时生效);不指定时默认 " + DEFAULT_ADMIN_PASSWORD,
     )
@@ -25,8 +25,8 @@ def main() -> None:
     parser.add_argument("--reload", action="store_true", help="开发模式热重载")
     args = parser.parse_args()
 
-    if args.admin_password:
-        os.environ["ADMIN_INITIAL_PASSWORD"] = args.admin_password
+    if args.bootstrap_password:
+        os.environ["ADMIN_INITIAL_PASSWORD"] = args.bootstrap_password
 
     import uvicorn
 

@@ -60,9 +60,7 @@ export default function LoginPage() {
         {t('auth.noAccount')}<Link to="/register">{t('auth.registerNow')}</Link>
       </p>
 
-      <div className="demo-hint">
-        {t('auth.demoHint')}:<kbd>admin</kbd> / <kbd>admin@123</kbd>
-      </div>
+
     </AuthLayout>
   )
 }
