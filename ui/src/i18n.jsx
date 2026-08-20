@@ -27,7 +27,7 @@ const dict = {
     'auth.loginTitle': '欢迎回来', 'auth.loginSubtitle': '登录您的账号,继续管理您的集群',
     'auth.account': '用户名或邮箱', 'auth.password': '密码', 'auth.login': '登 录',
     'auth.loggingIn': '登录中...', 'auth.noAccount': '还没有账号?', 'auth.registerNow': '立即注册',
-    'auth.demoHint': '演示账号',
+
     'auth.registerTitle': '创建账号', 'auth.registerSubtitle': '注册一个新账号,开启部署之旅',
     'auth.username': '用户名', 'auth.email': '邮箱', 'auth.fullName': '姓名(可选)',
     'auth.confirmPassword': '确认密码', 'auth.register': '注 册', 'auth.registering': '注册中...',
@@ -216,7 +216,7 @@ const dict = {
     'auth.loginTitle': 'Welcome Back', 'auth.loginSubtitle': 'Sign in to manage your infrastructure',
     'auth.account': 'Username or Email', 'auth.password': 'Password', 'auth.login': 'Sign In',
     'auth.loggingIn': 'Signing in...', 'auth.noAccount': 'No account yet?', 'auth.registerNow': 'Register Now',
-    'auth.demoHint': 'Demo account',
+
     'auth.registerTitle': 'Create Account', 'auth.registerSubtitle': 'Register to start deploying',
     'auth.username': 'Username', 'auth.email': 'Email', 'auth.fullName': 'Full Name (optional)',
     'auth.confirmPassword': 'Confirm Password', 'auth.register': 'Register', 'auth.registering': 'Registering...',
