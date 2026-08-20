@@ -118,6 +118,7 @@ class DeployTask(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     type: Mapped[str] = mapped_column(String(20))  # vm_create | cluster_install
     target_id: Mapped[int] = mapped_column(Integer)
+    params: Mapped[str | None] = mapped_column(Text, nullable=True)  # 附加参数(JSON), 如扩容节点列表
     target_name: Mapped[str] = mapped_column(String(80))
     status: Mapped[str] = mapped_column(String(20), default="pending")
     # pending|running|success|failed

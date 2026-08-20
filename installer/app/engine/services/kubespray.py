@@ -6,7 +6,7 @@ import subprocess
 import time
 
 from ...db.session import SessionLocal
-from ...models import ClusterNode, DeployTask, Host, K8sCluster
+from ...models import ClusterNode, DeployTask, Host, K8sCluster, VirtualMachine
 from ..executor import log_line
 from .clusterprep import ANSIBLE_VENV, KUBESPRAY_DIR, PIP_INDEX, _mc_env, _ensure_mc
 from .vmprovision import _ssh
@@ -430,27 +430,35 @@ def run_cluster_scale(task: DeployTask, db) -> None:
     task.progress = 20
     db.commit()
 
-    # 3. 读取当前 hosts.yml,找出新增节点(不在旧清单中的集群节点)
-    log_line(task, db, "[3/6] 读取当前 hosts.yml,识别待加入节点 ...")
-    rc, out, err = _ssh(run_node, "cat " + hosts_yml + " 2>/dev/null", timeout=30)
-    old_names = set()
-    if rc == 0 and out:
-        for ln in out.splitlines():
-            m = re.match(r"^    ([A-Za-z0-9_-]+):\s*$", ln)
-            if m:
-                old_names.add(m.group(1))
-    new_nodes = [n for n in nodes if n.name not in old_names]
-    if not new_nodes:
-        raise RuntimeError("没有检测到需要加入集群的节点(所选节点可能已在 hosts.yml 中)")
-    worker_new = [n for n in new_nodes if n.role == "worker"]
-    master_new = [n for n in new_nodes if n.role == "control_plane"]
+    # 3. 从任务参数解析待加入节点(扩容成功后才写入集群节点表)
+    log_line(task, db, "[3/6] 解析待加入节点 ...")
+    import json as _json
+
+    _p = _json.loads(task.params or "{}")
+    _wvm = set(_p.get("worker_vm_ids", []) or [])
+    _wh = set(_p.get("worker_host_ids", []) or [])
+    if not _wvm and not _wh:
+        raise RuntimeError("任务缺少扩容节点参数")
+    _nvms = db.query(VirtualMachine).filter(VirtualMachine.id.in_(_wvm)).all() if _wvm else []
+    _nhs = db.query(Host).filter(Host.id.in_(_wh)).all() if _wh else []
+    new_nodes = [
+        ClusterNode(cluster_id=cluster.id, vm_id=v.id, node_type="vm", name=v.name, ip=v.ip, role="worker")
+        for v in _nvms
+    ]
+    new_nodes += [
+        ClusterNode(cluster_id=cluster.id, host_id=h.id, node_type="host", name=h.name, ip=h.ip, role="worker")
+        for h in _nhs
+    ]
+    worker_new = new_nodes
+    master_new = []
     log_line(task, db, "      新增节点: " + ", ".join(n.name + "(" + (n.ip or "-") + ")" for n in new_nodes))
     task.progress = 30
     db.commit()
 
     # 4. 生成 hosts.yml: 已有 CP/worker 节点 + 新节点进标准组, 新建 add-worker/add-master 组(仅新节点)
-    log_line(task, db, "[4/6] 生成 hosts.yml(全量节点 " + str(len(nodes)) + " 个 + 新组)...")
-    inventory = _build_scale_inventory_yaml(cluster, nodes, key_file, worker_new, master_new)
+    all_nodes = nodes + new_nodes
+    log_line(task, db, "[4/6] 生成 hosts.yml(全量节点 " + str(len(all_nodes)) + " 个 + 新组)...")
+    inventory = _build_scale_inventory_yaml(cluster, all_nodes, key_file, worker_new, master_new)
     rc, out, err = _ssh(run_node, "cat > " + hosts_yml + " <<'CSIEOF'\n" + inventory + "CSIEOF\necho WROTE_OK", timeout=30)
     if rc != 0 or "WROTE_OK" not in out:
         raise RuntimeError("写入 hosts.yml 失败: " + (err or out))
@@ -526,9 +534,19 @@ def run_cluster_scale(task: DeployTask, db) -> None:
     if final_rc != 0:
         raise RuntimeError("扩容失败(rc=" + str(final_rc) + "),完整日志: " + scale_log)
 
-    # 完成
+    # 完成: 扩容成功, 才把节点正式写入集群节点表
+    for n in new_nodes:
+        dup = None
+        if n.vm_id:
+            dup = db.query(ClusterNode).filter(ClusterNode.cluster_id == cluster.id, ClusterNode.vm_id == n.vm_id).first()
+        elif n.host_id:
+            dup = db.query(ClusterNode).filter(ClusterNode.cluster_id == cluster.id, ClusterNode.host_id == n.host_id).first()
+        if dup is None:
+            db.add(n)
+    db.commit()
     log_line(task, db, "")
     log_line(task, db, "✅ 扩容完成: 已加入 " + str(len(new_nodes)) + " 个节点(" + ", ".join(n.name for n in new_nodes) + ")")
+    log_line(task, db, "   节点已正式加入集群(mytest 集群记录已更新)")
     log_line(task, db, "   验证: kubectl --kubeconfig " + CUBESTACK_BASE + "/inventory/" + CUBESTACK_CLUSTER + "/artifacts/admin.conf get nodes")
     task.progress = 100
     db.commit()

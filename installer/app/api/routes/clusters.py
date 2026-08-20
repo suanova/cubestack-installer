@@ -155,7 +155,9 @@ def download_cluster_kubeconfig(
     )
 
 
-def _start_cluster_task(cluster_id: int, task_type: str, action_name: str, db: Session) -> DeployTask:
+def _start_cluster_task(
+    cluster_id: int, task_type: str, action_name: str, db: Session, params: str | None = None
+) -> DeployTask:
     cluster = db.get(K8sCluster, cluster_id)
     if cluster is None:
         raise HTTPException(status_code=404, detail="集群不存在")
@@ -171,7 +173,7 @@ def _start_cluster_task(cluster_id: int, task_type: str, action_name: str, db: S
     if running:
         raise HTTPException(status_code=400, detail=action_name + "任务正在进行中")
     task = DeployTask(
-        type=task_type, target_id=cluster.id, target_name=cluster.name, status="pending"
+        type=task_type, target_id=cluster.id, target_name=cluster.name, status="pending", params=params
     )
     db.add(task)
     db.commit()
@@ -249,14 +251,13 @@ def scale_cluster(
     taken_host = db.query(ClusterNode.host_id).filter(ClusterNode.host_id.in_(all_host_ids)).all() if all_host_ids else []
     if taken_vm or taken_host:
         raise HTTPException(status_code=400, detail="部分节点已被其他集群纳入管理")
-    for vm in vms:
-        role = "control_plane" if vm.id in cp_vm_ids else "worker"
-        db.add(ClusterNode(cluster_id=cluster.id, vm_id=vm.id, node_type="vm", name=vm.name, ip=vm.ip, role=role))
-    for h in hosts:
-        role = "control_plane" if h.id in cp_host_ids else "worker"
-        db.add(ClusterNode(cluster_id=cluster.id, host_id=h.id, node_type="host", name=h.name, ip=h.ip, role=role))
-    db.commit()
-    task = _start_cluster_task(cluster_id, "cluster_scale", "扩容", db)
+    # 节点列表存入任务参数, 扩容成功后才写入集群节点表(避免失败残留脏数据)
+    import json as _json
+
+    params = _json.dumps(
+        {"worker_vm_ids": sorted(wk_vm_ids), "worker_host_ids": sorted(wk_host_ids)}, ensure_ascii=False
+    )
+    task = _start_cluster_task(cluster_id, "cluster_scale", "扩容", db, params=params)
     return DeployResult(task_id=task.id)
 
 
