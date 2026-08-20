@@ -502,6 +502,13 @@ export default function ClustersPage() {
             {detail.cluster.api_server && (
               <div><span>{t('clusters.apiServer')}</span><strong className="td-mono">{detail.cluster.api_server}</strong></div>
             )}
+            <div>
+              <span>{t('clusters.nodeCounts')}</span>
+              <strong className="node-counts">
+                <span className="badge badge-admin">{t('clusters.cpCount', { n: detail.cluster.control_plane_count })}</span>
+                <span className="badge badge-user">{t('clusters.workerCount', { n: detail.cluster.worker_count })}</span>
+              </strong>
+            </div>
           </div>
           <table className="mini-table">
             <thead>
