@@ -15,7 +15,6 @@ export default function ScalePage() {
   const [vms, setVms] = useState([])
   const [hosts, setHosts] = useState([])
   const [clusterId, setClusterId] = useState('')
-  const [cp, setCp] = useState({ vmIds: [], hostIds: [] })
   const [wk, setWk] = useState({ vmIds: [], hostIds: [] })
   const [busy, setBusy] = useState(false)
   const [lastTask, setLastTask] = useState(null)
@@ -37,17 +36,6 @@ export default function ScalePage() {
   const freeHosts = hosts.filter((h) => !h.in_cluster)
   const readyClusters = clusters.filter((c) => c.status === 'ready')
 
-  // 互斥: 控制平面与工作节点不能选同一节点
-  function toggleCpVm(id) {
-    const adding = !cp.vmIds.includes(id)
-    setCp({ ...cp, vmIds: adding ? [...cp.vmIds, id] : cp.vmIds.filter((x) => x !== id) })
-    if (adding) setWk({ ...wk, vmIds: wk.vmIds.filter((x) => x !== id) })
-  }
-  function toggleCpHost(id) {
-    const adding = !cp.hostIds.includes(id)
-    setCp({ ...cp, hostIds: adding ? [...cp.hostIds, id] : cp.hostIds.filter((x) => x !== id) })
-    if (adding) setWk({ ...wk, hostIds: wk.hostIds.filter((x) => x !== id) })
-  }
   function toggleWorkerVm(id) {
     const adding = !wk.vmIds.includes(id)
     setWk({ ...wk, vmIds: adding ? [...wk.vmIds, id] : wk.vmIds.filter((x) => x !== id) })
@@ -65,7 +53,7 @@ export default function ScalePage() {
       toast(t('scale.needCluster'), 'error')
       return
     }
-    if (!cp.vmIds.length && !cp.hostIds.length && !wk.vmIds.length && !wk.hostIds.length) {
+    if (!wk.vmIds.length && !wk.hostIds.length) {
       toast(t('scale.needNode'), 'error')
       return
     }
@@ -74,8 +62,8 @@ export default function ScalePage() {
       .scale(
         Number(clusterId),
         {
-          control_plane_vm_ids: cp.vmIds,
-          control_plane_host_ids: cp.hostIds,
+          control_plane_vm_ids: [],
+          control_plane_host_ids: [],
           worker_vm_ids: wk.vmIds,
           worker_host_ids: wk.hostIds,
         },
@@ -111,42 +99,8 @@ export default function ScalePage() {
           </div>
 
           <div className="field">
-            <span className="field-label">{t('scale.cpNodes')}</span>
-            <span className="td-hint">{t('scale.mutexHint')}</span>
-            <div className="node-group">
-              <div className="group-label">{t('clusters.groupHosts')}</div>
-              <div className="checkbox-grid">
-                {freeHosts.map((h) => (
-                  <CheckboxCard
-                    key={'scph-' + h.id}
-                    label={h.name}
-                    sub={h.ip + ' · 🖥 宿主机'}
-                    checked={cp.hostIds.includes(h.id)}
-                    onChange={() => toggleCpHost(h.id)}
-                  />
-                ))}
-                {freeHosts.length === 0 && <span className="td-hint">{t('clusters.noHost')}</span>}
-              </div>
-            </div>
-            <div className="node-group">
-              <div className="group-label">{t('clusters.groupVms')}</div>
-              <div className="checkbox-grid">
-                {freeVms.map((v) => (
-                  <CheckboxCard
-                    key={'scpv-' + v.id}
-                    label={v.name}
-                    sub={v.ip + ' · ☁ ' + v.cpu + 'c/' + v.memory_gb + 'G'}
-                    checked={cp.vmIds.includes(v.id)}
-                    onChange={() => toggleCpVm(v.id)}
-                  />
-                ))}
-                {freeVms.length === 0 && <span className="td-hint">{t('clusters.noVm')}</span>}
-              </div>
-            </div>
-          </div>
-
-          <div className="field">
             <span className="field-label">{t('scale.workerNodes')}</span>
+            <span className="td-hint">{t('scale.workerOnlyHint')}</span>
             <div className="node-group">
               <div className="group-label">{t('clusters.groupHosts')}</div>
               <div className="checkbox-grid">

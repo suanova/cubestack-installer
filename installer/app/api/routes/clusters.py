@@ -227,6 +227,8 @@ def scale_cluster(
         raise HTTPException(status_code=400, detail="集群未就绪,无法扩容")
     if not cluster.run_node_host_id:
         raise HTTPException(status_code=400, detail="该集群未配置 Kubespray 运行节点,无法扩容")
+    if payload.control_plane_vm_ids or payload.control_plane_host_ids:
+        raise HTTPException(status_code=400, detail="扩容暂不支持增加控制平面节点,仅支持工作节点")
     cp_vm_ids = set(payload.control_plane_vm_ids)
     cp_host_ids = set(payload.control_plane_host_ids)
     wk_vm_ids = set(payload.worker_vm_ids)
