@@ -367,65 +367,73 @@ export default function ClustersPage() {
             <div className="field">
               <span className="field-label">{t('clusters.cpNodes')}</span>
               <span className="td-hint">{t('clusters.cpHint')}</span>
-              <div className="group-label">{t('clusters.groupHosts')}</div>
-              <div className="checkbox-grid">
-                {availableHosts.map((h) => (
-                  <CheckboxCard
-                    key={'cph-' + h.id}
-                    label={h.name}
-                    sub={h.ip + ' · 🖥 宿主机'}
-                    checked={form.cpHostIds.includes(h.id)}
-                    onChange={() => toggleCpHost(h.id)}
-                  />
-                ))}
-                {availableHosts.length === 0 && <span className="td-hint">{t('clusters.noHost')}</span>}
+              <div className="node-group">
+                <div className="group-label">{t('clusters.groupHosts')}</div>
+                <div className="checkbox-grid">
+                  {availableHosts.map((h) => (
+                    <CheckboxCard
+                      key={'cph-' + h.id}
+                      label={h.name}
+                      sub={h.ip + ' · 🖥 宿主机'}
+                      checked={form.cpHostIds.includes(h.id)}
+                      onChange={() => toggleCpHost(h.id)}
+                    />
+                  ))}
+                  {availableHosts.length === 0 && <span className="td-hint">{t('clusters.noHost')}</span>}
+                </div>
               </div>
-              <div className="group-label">{t('clusters.groupVms')}</div>
-              <div className="checkbox-grid">
-                {availableVms.map((v) => (
-                  <CheckboxCard
-                    key={'cpv-' + v.id}
-                    label={v.name}
-                    sub={v.ip + ' · ☁ ' + v.cpu + 'c/' + v.memory_gb + 'G'}
-                    checked={form.cpVmIds.includes(v.id)}
-                    onChange={() => toggleCpVm(v.id)}
-                  />
-                ))}
-                {availableVms.length === 0 && (
-                  <span className="td-hint">{vms.length ? t('clusters.allManaged') : t('clusters.noVm')}</span>
-                )}
+              <div className="node-group">
+                <div className="group-label">{t('clusters.groupVms')}</div>
+                <div className="checkbox-grid">
+                  {availableVms.map((v) => (
+                    <CheckboxCard
+                      key={'cpv-' + v.id}
+                      label={v.name}
+                      sub={v.ip + ' · ☁ ' + v.cpu + 'c/' + v.memory_gb + 'G'}
+                      checked={form.cpVmIds.includes(v.id)}
+                      onChange={() => toggleCpVm(v.id)}
+                    />
+                  ))}
+                  {availableVms.length === 0 && (
+                    <span className="td-hint">{vms.length ? t('clusters.allManaged') : t('clusters.noVm')}</span>
+                  )}
+                </div>
               </div>
             </div>
 
             <div className="field">
               <span className="field-label">{t('clusters.workerNodes')}</span>
-              <div className="group-label">{t('clusters.groupHosts')}</div>
-              <div className="checkbox-grid">
-                {availableHosts.map((h) => (
-                  <CheckboxCard
-                    key={'wkh-' + h.id}
-                    label={h.name}
-                    sub={h.ip + ' · 🖥 宿主机'}
-                    checked={form.workerHostIds.includes(h.id)}
-                    onChange={() => toggleWorkerHost(h.id)}
-                  />
-                ))}
-                {availableHosts.length === 0 && <span className="td-hint">{t('clusters.noHost')}</span>}
+              <div className="node-group">
+                <div className="group-label">{t('clusters.groupHosts')}</div>
+                <div className="checkbox-grid">
+                  {availableHosts.map((h) => (
+                    <CheckboxCard
+                      key={'wkh-' + h.id}
+                      label={h.name}
+                      sub={h.ip + ' · 🖥 宿主机'}
+                      checked={form.workerHostIds.includes(h.id)}
+                      onChange={() => toggleWorkerHost(h.id)}
+                    />
+                  ))}
+                  {availableHosts.length === 0 && <span className="td-hint">{t('clusters.noHost')}</span>}
+                </div>
               </div>
-              <div className="group-label">{t('clusters.groupVms')}</div>
-              <div className="checkbox-grid">
-                {availableVms.map((v) => (
-                  <CheckboxCard
-                    key={'wkv-' + v.id}
-                    label={v.name}
-                    sub={v.ip + ' · ☁ ' + v.cpu + 'c/' + v.memory_gb + 'G'}
-                    checked={form.workerVmIds.includes(v.id)}
-                    onChange={() => toggleWorkerVm(v.id)}
-                  />
-                ))}
-                {availableVms.length === 0 && (
-                  <span className="td-hint">{vms.length ? t('clusters.allManaged') : t('clusters.noVm')}</span>
-                )}
+              <div className="node-group">
+                <div className="group-label">{t('clusters.groupVms')}</div>
+                <div className="checkbox-grid">
+                  {availableVms.map((v) => (
+                    <CheckboxCard
+                      key={'wkv-' + v.id}
+                      label={v.name}
+                      sub={v.ip + ' · ☁ ' + v.cpu + 'c/' + v.memory_gb + 'G'}
+                      checked={form.workerVmIds.includes(v.id)}
+                      onChange={() => toggleWorkerVm(v.id)}
+                    />
+                  ))}
+                  {availableVms.length === 0 && (
+                    <span className="td-hint">{vms.length ? t('clusters.allManaged') : t('clusters.noVm')}</span>
+                  )}
+                </div>
               </div>
             </div>
 
