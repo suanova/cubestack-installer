@@ -100,6 +100,23 @@ export function downloadTaskLog(task, token) {
   })
 }
 
+// 下载集群 kubeconfig(后端以文本返回, 需带鉴权头原始 fetch)
+export function downloadClusterKubeconfig(cluster, token) {
+  const id = typeof cluster === 'object' ? cluster.id : cluster
+  const name = (typeof cluster === 'object' && cluster.name) || 'cluster-' + id
+  const headers = {}
+  if (token) headers.Authorization = 'Bearer ' + token
+  return fetch('/api/clusters/' + id + '/kubeconfig', { headers })
+    .then((res) => {
+      if (!res.ok) {
+        return res.json().catch(() => ({}))
+          .then((err) => { throw new Error((err && err.detail) || ('HTTP ' + res.status)) })
+      }
+      return res.text()
+    })
+    .then((text) => downloadText('kubeconfig-' + name + '.conf', text))
+}
+
 export const CONSTANTS = {
   images: ['ubuntu-22.04-cloud.qcow2', 'ubuntu-24.04-cloud.qcow2', 'rocky-9.4-cloud.qcow2', 'debian-12-cloud.qcow2', 'centos-stream-9.qcow2'],
   k8sVersions: ['v1.27.16', 'v1.28.13', 'v1.29.8', 'v1.30.4', 'v1.31.1'],

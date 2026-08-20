@@ -342,6 +342,24 @@ def run_cluster_install(task: DeployTask, db) -> None:
     log_line(task, db, "✅ 集群 " + cluster.name + " 安装完成!")
     log_line(task, db, "   版本: " + cluster.k8s_version + "  网络: " + cluster.network_plugin)
     log_line(task, db, "   访问: kubectl --kubeconfig <生成的 kubeconfig> get nodes")
+    # 取回 kubeconfig 入库(供集群信息展示与用户下载);取回失败不影响安装结果
+    if not sim and run_node is not None:
+        try:
+            _kc_path = CUBESTACK_BASE + "/inventory/" + CUBESTACK_CLUSTER + "/artifacts/admin.conf"
+            _r, _o, _e = _ssh(run_node, "sudo cat " + _kc_path + " 2>/dev/null", timeout=30)
+            if _r == 0 and _o and "server:" in _o:
+                cluster.kubeconfig = _o
+                for _ln in _o.splitlines():
+                    _ln = _ln.strip()
+                    if _ln.startswith("server:"):
+                        cluster.api_server = _ln.split(":", 1)[1].strip()
+                        break
+                log_line(task, db, "      kubeconfig 已取回入库,API Server: " + (cluster.api_server or "?"))
+            else:
+                log_line(task, db, "      [提示] 读取 kubeconfig 失败,可稍后从运行节点手动取回: " + (_e or _o or "")[-120:])
+        except Exception as _kc_exc:  # noqa: BLE001
+            log_line(task, db, "      [提示] 取回 kubeconfig 异常(不影响安装结果): " + str(_kc_exc)[:120])
+        db.commit()
     cluster.status = "ready"
     db.commit()
     task.progress = 100

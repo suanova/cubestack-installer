@@ -83,6 +83,10 @@ class K8sCluster(Base):
     run_node_host_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Kubespray 运行节点(宿主机 ID,None=平台管理机本机执行)
     ssh_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # API Server 地址(如 https://192.168.122.24:6443),安装成功后从 kubeconfig 提取
+    api_server: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # 集群 kubeconfig(admin.conf)全文,安装成功后从运行节点取回入库,供展示与下载
+    kubeconfig: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     # pending|installing|ready|failed
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False)

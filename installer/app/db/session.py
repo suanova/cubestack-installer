@@ -35,6 +35,10 @@ def _migrate() -> None:
         cluster_cols = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(clusters)"))]
         if "run_node_host_id" not in cluster_cols:
             conn.execute(sa.text("ALTER TABLE clusters ADD COLUMN run_node_host_id INTEGER"))
+        if "api_server" not in cluster_cols:
+            conn.execute(sa.text("ALTER TABLE clusters ADD COLUMN api_server VARCHAR(255)"))
+        if "kubeconfig" not in cluster_cols:
+            conn.execute(sa.text("ALTER TABLE clusters ADD COLUMN kubeconfig TEXT"))
         conn.commit()
 
 

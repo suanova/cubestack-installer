@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CONSTANTS, clusterApi, downloadTaskLog, hostApi, taskApi, vmApi } from '../api/client'
+import { CONSTANTS, clusterApi, downloadClusterKubeconfig, downloadTaskLog, hostApi, taskApi, vmApi } from '../api/client'
 import Field, { CheckboxCard, Select } from '../components/Field'
 import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
@@ -375,6 +375,9 @@ export default function ClustersPage() {
                 </span>
               </strong>
             </div>
+            {detail.cluster.api_server && (
+              <div><span>{t('clusters.apiServer')}</span><strong className="td-mono">{detail.cluster.api_server}</strong></div>
+            )}
           </div>
           <table className="mini-table">
             <thead>
@@ -407,6 +410,12 @@ export default function ClustersPage() {
               <button className="btn btn-ghost"
                 onClick={() => downloadTaskLog({ id: detail.last_task.id }, token).catch(() => {})}>
                 {t('tasks.downloadLog')}
+              </button>
+            )}
+            {detail.cluster.has_kubeconfig && (
+              <button className="btn btn-ghost"
+                onClick={() => downloadClusterKubeconfig(detail.cluster, token).catch(() => {})}>
+                {t('clusters.downloadKubeconfig')}
               </button>
             )}
             <button className="btn btn-ghost" onClick={() => setDetail(null)}>{t('common.close')}</button>
