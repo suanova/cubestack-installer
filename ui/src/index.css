@@ -340,6 +340,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
 /* ---------- 卡片 / 表格 ---------- */
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow-sm); overflow: hidden; }
+.scale-page .card { padding: 30px 34px; }
 .card-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px; border-bottom: 1px solid var(--line); }
 .card-title { font-size: 16px; font-weight: 800; }
 .table-wrap { overflow-x: auto; }
