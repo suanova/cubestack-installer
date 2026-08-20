@@ -3,11 +3,9 @@ import { Link, useNavigate } from 'react-router-dom'
 import AuthLayout from '../components/AuthLayout'
 import Field from '../components/Field'
 import { useToast } from '../components/Toast'
-import { useAuth } from '../context/AuthContext'
 import { useI18n } from '../i18n'
 
 export default function RegisterPage() {
-  const { login } = useAuth()
   const toast = useToast()
   const { t } = useI18n()
   const navigate = useNavigate()
@@ -54,11 +52,11 @@ export default function RegisterPage() {
       .then(async (res) => {
         const data = await res.json().catch(() => ({}))
         if (!res.ok) throw new Error(data.detail || 'Register failed')
-        return login({ account: form.username, password: form.password })
+        return data
       })
       .then(() => {
-        toast(t('auth.registerOk'))
-        navigate('/', { replace: true })
+        toast(t('auth.registerPending'))
+        navigate('/login', { replace: true })
       })
       .catch((err) => setServerError(err.message))
       .finally(() => setBusy(false))

@@ -26,6 +26,7 @@ class UserOut(BaseModel):
     full_name: str | None
     role: str
     is_active: bool
+    status: str
     created_at: datetime
 
 
@@ -38,7 +39,16 @@ class TokenOut(BaseModel):
 class UserUpdateIn(BaseModel):
     role: str | None = Field(default=None, pattern="^(admin|user)$")
     is_active: bool | None = None
+    status: str | None = Field(default=None, pattern="^(pending|active|disabled)$")
     full_name: str | None = Field(default=None, max_length=100)
+
+
+class UserCreateIn(BaseModel):
+    username: str = Field(min_length=3, max_length=50)
+    email: str = Field(max_length=120)
+    password: str = Field(min_length=6, max_length=128)
+    full_name: str | None = Field(default=None, max_length=100)
+    role: str = Field(default="user", pattern="^(admin|user)$")
 
 
 class MessageOut(BaseModel):

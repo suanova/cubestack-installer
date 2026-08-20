@@ -16,6 +16,8 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     role: Mapped[str] = mapped_column(String(20), default="user")  # admin | user
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # pending=注册待审核 | active=正常 | disabled=禁用
+    status: Mapped[str] = mapped_column(String(20), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { userApi } from '../api/client'
+import Field, { Select } from '../components/Field'
 import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
 import { useAuth } from '../context/AuthContext'
@@ -26,6 +27,9 @@ export default function UsersPage() {
   const [error, setError] = useState('')
   const [busyId, setBusyId] = useState(null)
   const [deleting, setDeleting] = useState(null)
+  const [showAdd, setShowAdd] = useState(false)
+  const [addBusy, setAddBusy] = useState(false)
+  const [addForm, setAddForm] = useState({ username: '', email: '', password: '', full_name: '', role: 'user' })
 
   const load = useCallback(() => {
     setLoading(true)
@@ -51,6 +55,30 @@ export default function UsersPage() {
       })
       .catch((err) => toast(err.message, 'error'))
       .finally(() => setBusyId(null))
+  }
+
+  function submitAdd(e) {
+    e.preventDefault()
+    setAddBusy(true)
+    userApi
+      .create(
+        {
+          username: addForm.username.trim(),
+          email: addForm.email.trim(),
+          password: addForm.password,
+          full_name: addForm.full_name.trim() || null,
+          role: addForm.role,
+        },
+        token
+      )
+      .then((created) => {
+        toast(t('users.added', { username: created.username }))
+        setShowAdd(false)
+        setAddForm({ username: '', email: '', password: '', full_name: '', role: 'user' })
+        load()
+      })
+      .catch((err) => toast(err.message, 'error'))
+      .finally(() => setAddBusy(false))
   }
 
   function confirmDelete() {
@@ -83,7 +111,10 @@ export default function UsersPage() {
           <h1 className="page-title">{t('users.title')}</h1>
           <p className="page-desc">{t('users.desc')}</p>
         </div>
-        <span className="count-chip">{t('users.count', { n: users.length })}</span>
+        <div className="page-actions">
+          <button className="btn btn-primary" onClick={() => setShowAdd(true)}>{t('users.add')}</button>
+          <span className="count-chip">{t('users.count', { n: users.length })}</span>
+        </div>
       </div>
 
       {error && <div className="alert">{error}</div>}
@@ -141,16 +172,21 @@ export default function UsersPage() {
                     </td>
                     <td>
                       {isSelf ? (
-                        <span className={'pill ' + (u.is_active ? 'pill-active' : 'pill-disabled')}>
-                          {u.is_active ? t('common.enabled') : t('common.disabled')}
+                        <span className={'pill ' + (u.status === 'active' ? 'pill-active' : 'pill-disabled')}>
+                          {u.status === 'pending' ? t('users.statusPending') : u.status === 'active' ? t('common.enabled') : t('common.disabled')}
                         </span>
+                      ) : u.status === 'pending' ? (
+                        <button className="pill-btn pill-btn-active" disabled={busy}
+                          onClick={() => patchUser(u.id, { status: 'active' })}>
+                          {t('users.approve')}
+                        </button>
                       ) : (
                         <button
-                          className={'pill-btn ' + (u.is_active ? 'pill-btn-active' : 'pill-btn-disabled')}
+                          className={'pill-btn ' + (u.status === 'active' ? 'pill-btn-active' : 'pill-btn-disabled')}
                           disabled={busy}
-                          onClick={() => patchUser(u.id, { is_active: !u.is_active })}
+                          onClick={() => patchUser(u.id, { status: u.status === 'active' ? 'disabled' : 'active' })}
                         >
-                          {u.is_active ? t('common.enabled') : t('common.disabled')}
+                          {u.status === 'active' ? t('common.enabled') : t('common.disabled')}
                         </button>
                       )}
                     </td>
@@ -188,6 +224,32 @@ export default function UsersPage() {
             <button className="btn btn-ghost" onClick={() => setDeleting(null)}>{t('common.cancel')}</button>
             <button className="btn btn-danger" onClick={confirmDelete}>{t('common.confirm')}</button>
           </div>
+        </Modal>
+      )}
+
+      {showAdd && (
+        <Modal title={t('users.addTitle')} onClose={() => setShowAdd(false)} width="460px">
+          <form onSubmit={submitAdd}>
+            <Field label={t('auth.username')} type="text" required value={addForm.username}
+              onChange={(e) => setAddForm({ ...addForm, username: e.target.value })} />
+            <Field label={t('auth.email')} type="email" required value={addForm.email}
+              onChange={(e) => setAddForm({ ...addForm, email: e.target.value })} />
+            <Field label={t('auth.fullName')} type="text" value={addForm.full_name}
+              onChange={(e) => setAddForm({ ...addForm, full_name: e.target.value })} />
+            <Field label={t('auth.password')} type="password" required value={addForm.password}
+              onChange={(e) => setAddForm({ ...addForm, password: e.target.value })} />
+            <Select label={t('common.role')} value={addForm.role}
+              onChange={(e) => setAddForm({ ...addForm, role: e.target.value })}>
+              <option value="user">{t('common.roleUser')}</option>
+              <option value="admin">{t('common.roleAdmin')}</option>
+            </Select>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-ghost" onClick={() => setShowAdd(false)}>{t('common.cancel')}</button>
+              <button className="btn btn-primary" type="submit" disabled={addBusy}>
+                {addBusy ? t('common.loading') : t('users.add')}
+              </button>
+            </div>
+          </form>
         </Modal>
       )}
     </div>
