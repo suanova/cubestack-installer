@@ -245,17 +245,16 @@ def scale_cluster(
     hosts = db.query(Host).filter(Host.id.in_(all_host_ids)).all() if all_host_ids else []
     if len(hosts) != len(all_host_ids):
         raise HTTPException(status_code=400, detail="存在无效的宿主机选择")
-    # 允许选择已被其他集群/本集群纳管的节点(如状态过期需重新加入); 同集群已有记录自动去重
+    taken_vm = db.query(ClusterNode.vm_id).filter(ClusterNode.vm_id.in_(all_vm_ids)).all() if all_vm_ids else []
+    taken_host = db.query(ClusterNode.host_id).filter(ClusterNode.host_id.in_(all_host_ids)).all() if all_host_ids else []
+    if taken_vm or taken_host:
+        raise HTTPException(status_code=400, detail="部分节点已被其他集群纳入管理")
     for vm in vms:
         role = "control_plane" if vm.id in cp_vm_ids else "worker"
-        dup = db.query(ClusterNode).filter(ClusterNode.cluster_id == cluster.id, ClusterNode.vm_id == vm.id).first()
-        if dup is None:
-            db.add(ClusterNode(cluster_id=cluster.id, vm_id=vm.id, node_type="vm", name=vm.name, ip=vm.ip, role=role))
+        db.add(ClusterNode(cluster_id=cluster.id, vm_id=vm.id, node_type="vm", name=vm.name, ip=vm.ip, role=role))
     for h in hosts:
         role = "control_plane" if h.id in cp_host_ids else "worker"
-        dup = db.query(ClusterNode).filter(ClusterNode.cluster_id == cluster.id, ClusterNode.host_id == h.id).first()
-        if dup is None:
-            db.add(ClusterNode(cluster_id=cluster.id, host_id=h.id, node_type="host", name=h.name, ip=h.ip, role=role))
+        db.add(ClusterNode(cluster_id=cluster.id, host_id=h.id, node_type="host", name=h.name, ip=h.ip, role=role))
     db.commit()
     task = _start_cluster_task(cluster_id, "cluster_scale", "扩容", db)
     return DeployResult(task_id=task.id)
