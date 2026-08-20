@@ -1,0 +1,95 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# cubestack-installer: 离线镜像预加载 play(cluster.yml / scale.yml 共用)
+#
+# 在 containerd 安装完成后, 将离线镜像从部署机缓存同步到目标节点并 load 进 containerd,
+# 解决新节点 kube-proxy/calico 等镜像缺失问题。不硬编码任何路径或集群名:
+#   · 镜像缓存目录: download_cache_dir / local_release_dir(入口脚本写入 offline.yml)
+#   · 同步文件清单: {{ inventory_dir }}/preload-images.lst(入口脚本生成, 每行一个 tar 名)
+#     清单不存在 → 回退为同步缓存目录下全部 *.tar; 空文件 → 无镜像可同步(跳过)
+#
+# 同步机制与 kubespray download role 的镜像上传一致: synchronize(use_ssh_args, push)
+# 保证完全同步并 load 成功: 每个清单文件必须存在于节点且 ctr import 成功(最多重试 3 次),
+# 任一镜像缺失或导入失败 → play 失败, 不会被静默跳过
+# ═══════════════════════════════════════════════════════════════════════════
+- name: Preload offline images to target nodes
+  hosts: "{{ preload_target | default('k8s_cluster') }}"
+  gather_facts: false
+  environment: "{{ proxy_disable_env }}"
+  roles:
+    - { role: kubespray_defaults }
+  tasks:
+    - name: Preload | Resolve image file list (lst file or all tars in cache)
+      set_fact:
+        preload_image_files: >-
+          {%- set raw = lookup('file', inventory_dir + '/preload-images.lst', errors='ignore') -%}
+          {%- set lst = (raw if raw is string else '').splitlines() | select() | list -%}
+          {%- if raw is string -%}
+          {{ lst }}
+          {%- else -%}
+          {{ query('fileglob', download_cache_dir + '/images/*.tar') | map('basename') | sort | list }}
+          {%- endif -%}
+
+    - name: Preload | Build rsync include filter
+      set_fact:
+        preload_rsync_opts: "{{ preload_image_files | map('regex_replace', '^(.*)$', '--include=\\1') | list + ['--exclude=*'] }}"
+      when: preload_image_files | length > 0
+
+    - name: Preload | Ensure node-side images directory
+      file:
+        path: "{{ local_release_dir }}/images"
+        state: directory
+        recurse: true
+      when: preload_image_files | length > 0
+
+    - name: Preload | Sync image tars from cache to node
+      ansible.posix.synchronize:
+        src: "{{ download_cache_dir }}/images/"
+        dest: "{{ local_release_dir }}/images/"
+        mode: push
+        use_ssh_args: true
+        rsync_opts: "{{ preload_rsync_opts }}"
+      register: preload_sync
+      until: preload_sync is succeeded
+      retries: 2
+      delay: 5
+      when: preload_image_files | length > 0
+
+    - name: Preload | Load images into containerd (逐镜像校验, 失败重试 3 次)
+      shell: |
+        set -euo pipefail
+        files="{{ preload_image_files | join(' ') }}"
+        total=$(wc -w <<< "${files}")
+        ok=0
+        rc=0
+        i=0
+        for f in ${files}; do
+          i=$((i + 1))
+          img="{{ local_release_dir }}/images/$f"
+          if [ ! -f "$img" ]; then
+            echo "  ✗ [$i/$total] $f: 节点缺少镜像文件(同步未完成或清单过期, 请重新运行入口脚本)"
+            rc=1
+            continue
+          fi
+          imported=0
+          for attempt in 1 2 3; do
+            if ctr -n k8s.io images import "$img" >/dev/null 2>&1; then
+              imported=1
+              break
+            fi
+            sleep $((attempt * attempt))
+          done
+          if [ "$imported" = "1" ]; then
+            ok=$((ok + 1))
+            echo "  ✓ [$i/$total] $f"
+          else
+            echo "  ✗ [$i/$total] $f: 3 次导入均失败"
+            rc=1
+          fi
+        done
+        echo "  预加载结果: ${ok}/${total} 个镜像导入成功"
+        exit $rc
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: preload_image_files | length > 0

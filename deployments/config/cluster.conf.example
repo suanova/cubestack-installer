@@ -42,7 +42,7 @@ NODES=(
   "master,cubestack-k8s-master01,10.244.1.11,52:54:00:3b:e9:d2,16,8,100,ubuntu,-,vm"
   "master,cubestack-k8s-master02,10.244.1.12,52:54:00:b6:f1:39,16,8,100,ubuntu,-,vm"
   "master,cubestack-k8s-master03,10.244.1.13,52:54:00:49:e2:3d,16,8,100,ubuntu,-,vm"
-  "worker,mxgpu-1-232,10.66.1.232,-,0,0,0,ubuntu,-,bm"
+  "worker,cubestack-k8s-worker01,10.244.1.21,52:54:00:49:e2:3c,16,8,100,ubuntu,-,vm"
 )
 
 # ---------------- kubespray / 部署 ----------------

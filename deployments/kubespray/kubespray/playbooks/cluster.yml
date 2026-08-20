@@ -16,6 +16,15 @@
     - { role: "container-engine", tags: "container-engine", when: deploy_container_engine }
     - { role: download, tags: download, when: "not skip_downloads" }
 
+# ───────────────────────────────────────────────────────────────────────────
+# 在 containerd 安装完成后, 预加载离线镜像到全部集群节点(解决新节点 kube-proxy/calico
+# 等镜像缺失问题)。同步/加载逻辑见 patch-playbooks/cubestack-preload.yml(kubespray
+# 升级后由 ensure_preload_play 自动恢复文件并重新挂载); 镜像目录由入口脚本写入
+# offline.yml, 文件清单由入口脚本生成(preload-images.lst)
+# ───────────────────────────────────────────────────────────────────────────
+- name: Preload offline images to cluster nodes
+  import_playbook: ../patch-playbooks/cubestack-preload.yml
+
 - name: Install etcd
   vars:
     etcd_cluster_setup: true

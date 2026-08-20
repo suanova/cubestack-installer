@@ -4,10 +4,11 @@
 # 设计目标: deploy-cluster.sh 只做参数解析 + 按注册表调度, 不内联任何业务逻辑
 # 每个部署模块 = steps/ 目录下一个独立脚本, 在 DEPLOY_STEPS 注册一行即可被调度
 #
-# 注册表格式(每行): "key|描述|脚本文件名|默认启用(1/0)"
+# 注册表格式(每行): "key|描述|脚本文件名|默认启用(1/0)|可重复执行(1/0)"
 #   key        状态文件/steps 参数中使用的模块标识
 #   脚本文件名 相对 STEPS_DIR 的脚本(独立可执行, source lib-common.sh)
 #   默认启用   1=默认执行; 0=需 --with-xxx / --enable / --steps 显式启用
+#   可重复执行 1=每次执行且不写状态(如 scale 扩容, 可反复加节点); 0=断点续跑
 #
 # 新增模块步骤(未来如 gpu-operator / lws 等):
 #   1. 在 steps/ 新建 <NN>-<name>.sh(实现具体逻辑)
@@ -20,26 +21,27 @@ STEPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/steps"
 
 # ---------------- 模块注册表(按执行顺序排列) ----------------
 DEPLOY_STEPS=(
-  "net|初始化宿主网络(bridge/nat)|01-network.sh|1"
-  "ssh_key|生成 SSH 密钥对|02-ssh-key.sh|1"
-  "vm|创建虚拟机并确保 running|03-vm.sh|1"
-  "ssh_passwordless|配置 SSH 免密登录|04-ssh-passwordless.sh|1"
-  "worker_bm|裸金属 worker 连通性+离线装包|05-worker-bm.sh|1"
-  "hosts|更新 /etc/hosts 节点解析|06-hosts.sh|1"
-  "inventory|生成 inventory + 同步 kubespray 配置|07-inventory.sh|1"
-  "k8s|部署 kubespray 集群(离线)|08-k8s.sh|0"
-  "gpu_operator|安装沐曦 Muxi GPU Operator|09-gpu-operator.sh|0"
-  "lws|安装 LeaderWorkerSet(LWS)|10-lws.sh|0"
+  "net|初始化宿主网络(bridge/nat)|01-network.sh|1|0"
+  "ssh_key|生成 SSH 密钥对|02-ssh-key.sh|1|0"
+  "vm|创建虚拟机并确保 running|03-vm.sh|1|0"
+  "ssh_passwordless|配置 SSH 免密登录|04-ssh-passwordless.sh|1|0"
+  "worker_bm|裸金属 worker 连通性+离线装包|05-worker-bm.sh|1|0"
+  "hosts|更新 /etc/hosts 节点解析|06-hosts.sh|1|0"
+  "inventory|生成 inventory + 同步 kubespray 配置|07-inventory.sh|1|0"
+  "k8s|部署 kubespray 集群(离线)|08-k8s.sh|0|0"
+  "gpu_operator|安装沐曦 Muxi GPU Operator|09-gpu-operator.sh|0|0"
+  "lws|安装 LeaderWorkerSet(LWS)|10-lws.sh|0|0"
+  "scale|扩容集群(缺 VM 自动创建, 可重复)|11-scale.sh|0|1"
 )
 
 # ---------------- 注册表解析为并行数组 ----------------
-DEPLOY_KEY=() DEPLOY_DESC=() DEPLOY_SCRIPT=() DEPLOY_DEFAULT=()
+DEPLOY_KEY=() DEPLOY_DESC=() DEPLOY_SCRIPT=() DEPLOY_DEFAULT=() DEPLOY_REPEAT=()
 init_deploy_steps() {
     local line
-    DEPLOY_KEY=(); DEPLOY_DESC=(); DEPLOY_SCRIPT=(); DEPLOY_DEFAULT=()
+    DEPLOY_KEY=(); DEPLOY_DESC=(); DEPLOY_SCRIPT=(); DEPLOY_DEFAULT=(); DEPLOY_REPEAT=()
     for line in "${DEPLOY_STEPS[@]}"; do
-        IFS='|' read -r k d s e <<<"${line}"
-        DEPLOY_KEY+=("${k}"); DEPLOY_DESC+=("${d}"); DEPLOY_SCRIPT+=("${s}"); DEPLOY_DEFAULT+=("${e}")
+        IFS='|' read -r k d s e r <<<"${line}"
+        DEPLOY_KEY+=("${k}"); DEPLOY_DESC+=("${d}"); DEPLOY_SCRIPT+=("${s}"); DEPLOY_DEFAULT+=("${e}"); DEPLOY_REPEAT+=("${r:-0}")
     done
 }
 
@@ -106,12 +108,13 @@ resolve_run_steps() {
 # ---------------- 调度: 执行单个步骤(断点续跑感知) ----------------
 # run_deploy_step <key>  成功/跳过返回 0; 失败返回 1(调用方决定是否中断)
 run_deploy_step() {
-    local key="$1" script idx
+    local key="$1" script idx repeat
     idx="$(deploy_step_index "${key}")"
     [ "${idx}" -ge 0 ] || { err "未知步骤: ${key}"; return 1; }
+    repeat="${DEPLOY_REPEAT[$idx]:-0}"
 
-    # 断点续跑: 已完成则跳过
-    if [ "$(get_state "${key}")" = "done" ]; then
+    # 断点续跑: 已完成则跳过(可重复执行的模块除外, 如 scale)
+    if [ "${repeat}" != "1" ] && [ "$(get_state "${key}")" = "done" ]; then
         say "[${key}] 已完成,跳过(--fresh 清状态可重跑)"
         return 0
     fi
@@ -121,7 +124,7 @@ run_deploy_step() {
     say "[${key}] ${DEPLOY_DESC[$idx]} ..."
     say "  执行: ${script}"
     if bash "${script}"; then
-        save_state "${key}" "done"
+        [ "${repeat}" = "1" ] || save_state "${key}" "done"
         ok "模块 [${key}] 完成"
     else
         err "模块 [${key}] 执行失败(${script}),退出码 $?"
@@ -134,7 +137,9 @@ print_steps() {
     say "==== 部署模块列表(steps/) ===="
     for i in "${!DEPLOY_KEY[@]}"; do
         local flag="[${DEPLOY_DEFAULT[$i]}]"
-        printf "  %-4s %-18s 默认启用:%-3s  %s\n" "${DEPLOY_KEY[$i]}" "(${DEPLOY_SCRIPT[$i]})" "${flag}" "${DEPLOY_DESC[$i]}"
+        local desc="${DEPLOY_DESC[$i]}"
+        [ "${DEPLOY_REPEAT[$i]}" = "1" ] && desc="${desc} [可重复执行]"
+        printf "  %-4s %-18s 默认启用:%-3s  %s\n" "${DEPLOY_KEY[$i]}" "(${DEPLOY_SCRIPT[$i]})" "${flag}" "${desc}"
     done
     echo "---------------------------------------------"
     echo "  --steps k1,k2  只运行指定模块    --skip k1,k2  跳过模块"

@@ -40,6 +40,17 @@
         - kube_network_plugin in ["calico", "flannel", "canal", "cilium"] or cilium_deploy_additionally | default(false) | bool
         - kube_network_plugin != "calico" or calico_datastore == "etcd"
 
+# ───────────────────────────────────────────────────────────────────────────
+# 在 containerd 安装完成后, 预加载离线镜像到扩容节点(解决新节点 kube-proxy/calico
+# 等镜像缺失问题)。同步/加载逻辑见 patch-playbooks/cubestack-preload.yml(kubespray
+# 升级后由 ensure_preload_play 自动恢复文件并重新挂载); 镜像目录由入口脚本写入
+# offline.yml, 文件清单由入口脚本生成(preload-images.lst)
+# ───────────────────────────────────────────────────────────────────────────
+- name: Preload offline images to scale nodes
+  vars:
+    preload_target: kube_node
+  import_playbook: ../patch-playbooks/cubestack-preload.yml
+
 - name: Target only workers to get kubelet installed and checking in on any new nodes(node)
   hosts: kube_node
   gather_facts: false
