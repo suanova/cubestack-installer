@@ -145,7 +145,7 @@ def run_cluster_sshkey(task: DeployTask, db) -> None:
 
     # 2. 检查/生成公钥
     log_line(task, db, "[2/4] 检查安装机 SSH 公钥 ...")
-    rc, out, err = _ssh(host, "if [ -f ~/.ssh/id_rsa.pub ]; then echo HAVE_KEY; else ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa -q; echo KEY_GENERATED; fi", timeout=60)
+    rc, out, err = _ssh(host, "if [ -f ~/.ssh/id_ed25519.pub ] || [ -f ~/.ssh/id_rsa.pub ]; then echo HAVE_KEY; else ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519 -q; echo KEY_GENERATED; fi", timeout=60)
     if "KEY_GENERATED" in out:
         log_line(task, db, "      未发现公钥,已用 ssh-keygen 生成 ✓")
     else:
