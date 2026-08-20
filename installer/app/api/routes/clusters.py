@@ -53,6 +53,10 @@ def create_cluster(
 ) -> ClusterOut:
     if db.query(K8sCluster).filter(K8sCluster.name == payload.name).first():
         raise HTTPException(status_code=409, detail="集群名称已存在")
+    if len(payload.control_plane_vm_ids) < 3:
+        raise HTTPException(status_code=400, detail="控制平面至少需要 3 个节点")
+    if set(payload.control_plane_vm_ids) & set(payload.worker_vm_ids):
+        raise HTTPException(status_code=400, detail="控制平面与工作节点不能重复选择")
     all_ids = set(payload.control_plane_vm_ids) | set(payload.worker_vm_ids)
     vms = db.query(VirtualMachine).filter(VirtualMachine.id.in_(all_ids)).all()
     if len(vms) != len(all_ids):
