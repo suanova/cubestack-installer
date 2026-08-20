@@ -53,14 +53,24 @@ def create_cluster(
 ) -> ClusterOut:
     if db.query(K8sCluster).filter(K8sCluster.name == payload.name).first():
         raise HTTPException(status_code=409, detail="集群名称已存在")
-    if len(payload.control_plane_vm_ids) < 3:
+    cp_ids = set(payload.control_plane_vm_ids) | set(payload.control_plane_host_ids)
+    wk_ids = set(payload.worker_vm_ids) | set(payload.worker_host_ids)
+    if len(cp_ids) < 3:
         raise HTTPException(status_code=400, detail="控制平面至少需要 3 个节点")
-    if set(payload.control_plane_vm_ids) & set(payload.worker_vm_ids):
+    if cp_ids & wk_ids:
         raise HTTPException(status_code=400, detail="控制平面与工作节点不能重复选择")
-    all_ids = set(payload.control_plane_vm_ids) | set(payload.worker_vm_ids)
-    vms = db.query(VirtualMachine).filter(VirtualMachine.id.in_(all_ids)).all()
-    if len(vms) != len(all_ids):
+    all_vm_ids = set(payload.control_plane_vm_ids) | set(payload.worker_vm_ids)
+    all_host_ids = set(payload.control_plane_host_ids) | set(payload.worker_host_ids)
+    vms = db.query(VirtualMachine).filter(VirtualMachine.id.in_(all_vm_ids)).all() if all_vm_ids else []
+    if len(vms) != len(all_vm_ids):
         raise HTTPException(status_code=400, detail="存在无效的虚拟机选择")
+    hosts = db.query(Host).filter(Host.id.in_(all_host_ids)).all() if all_host_ids else []
+    if len(hosts) != len(all_host_ids):
+        raise HTTPException(status_code=400, detail="存在无效的宿主机选择")
+    taken_vm = db.query(ClusterNode.vm_id).filter(ClusterNode.vm_id.in_(all_vm_ids)).all() if all_vm_ids else []
+    taken_host = db.query(ClusterNode.host_id).filter(ClusterNode.host_id.in_(all_host_ids)).all() if all_host_ids else []
+    if taken_vm or taken_host:
+        raise HTTPException(status_code=400, detail="部分节点已被其他集群纳入管理")
     if payload.run_node_host_id is not None:
         run_host = db.get(Host, payload.run_node_host_id)
         if run_host is None:
@@ -85,8 +95,21 @@ def create_cluster(
             ClusterNode(
                 cluster_id=cluster.id,
                 vm_id=vm.id,
+                node_type="vm",
                 name=vm.name,
                 ip=vm.ip,
+                role=role,
+            )
+        )
+    for h in hosts:
+        role = "control_plane" if h.id in payload.control_plane_host_ids else "worker"
+        db.add(
+            ClusterNode(
+                cluster_id=cluster.id,
+                host_id=h.id,
+                node_type="host",
+                name=h.name,
+                ip=h.ip,
                 role=role,
             )
         )

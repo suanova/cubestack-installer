@@ -103,6 +103,8 @@ class ClusterNode(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     cluster_id: Mapped[int] = mapped_column(Integer, index=True)
     vm_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    host_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    node_type: Mapped[str] = mapped_column(String(10), default="vm")  # vm | host
     name: Mapped[str] = mapped_column(String(80))
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     role: Mapped[str] = mapped_column(String(20))  # control_plane | worker
