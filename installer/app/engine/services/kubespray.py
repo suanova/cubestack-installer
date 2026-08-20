@@ -482,7 +482,7 @@ def run_cluster_scale(task: DeployTask, db) -> None:
     # 6. 运行 cubestack-offline.sh scale --limit <新组>(后台执行 + done 文件 + 轮询回传日志)
     scale_log = "/tmp/csi-scale-" + CUBESTACK_CLUSTER + ".log"
     scale_done = "/tmp/csi-scale-" + CUBESTACK_CLUSTER + ".done"
-    play = "cd " + CUBESTACK_BASE + " && bash " + CUBESTACK_SCRIPT + " scale " + CUBESTACK_CLUSTER + " --limit " + limit
+    play = "cd " + CUBESTACK_BASE + " && sudo bash " + CUBESTACK_SCRIPT + " scale " + CUBESTACK_CLUSTER + " --limit " + limit
     log_line(task, db, "[6/6] 执行 cubestack-offline.sh scale --limit " + limit + " ...")
     log_line(task, db, "      " + play)
     rc, out, err = _ssh(run_node, "rm -f " + scale_log + " " + scale_done + "; ( setsid bash -c '" + play + " > " + scale_log + " 2>&1; echo $? > " + scale_done + "' ) >/dev/null 2>&1 </dev/null & echo STARTED", timeout=30)
