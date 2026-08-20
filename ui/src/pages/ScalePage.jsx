@@ -18,6 +18,7 @@ export default function ScalePage() {
   const [wk, setWk] = useState({ vmIds: [], hostIds: [] })
   const [busy, setBusy] = useState(false)
   const [lastTask, setLastTask] = useState(null)
+  const [clusterNodes, setClusterNodes] = useState({ cp: [], wk: [] })
 
   useEffect(() => {
     Promise.all([clusterApi.list(token), vmApi.list(token), hostApi.list(token)])
@@ -32,6 +33,25 @@ export default function ScalePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token])
 
+  // 选中的集群变化时, 拉取详情展示现有控制面/工作节点
+  useEffect(() => {
+    if (!clusterId) {
+      setClusterNodes({ cp: [], wk: [] })
+      return
+    }
+    clusterApi
+      .detail(Number(clusterId), token)
+      .then((d) => {
+        const ns = d.nodes || []
+        setClusterNodes({
+          cp: ns.filter((n) => n.role === 'control_plane'),
+          wk: ns.filter((n) => n.role === 'worker'),
+        })
+      })
+      .catch(() => setClusterNodes({ cp: [], wk: [] }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clusterId])
+
   const freeVms = vms.filter((v) => !v.in_cluster)
   const freeHosts = hosts.filter((h) => !h.in_cluster)
   const readyClusters = clusters.filter((c) => c.status === 'ready')
@@ -39,12 +59,10 @@ export default function ScalePage() {
   function toggleWorkerVm(id) {
     const adding = !wk.vmIds.includes(id)
     setWk({ ...wk, vmIds: adding ? [...wk.vmIds, id] : wk.vmIds.filter((x) => x !== id) })
-    if (adding) setCp({ ...cp, vmIds: cp.vmIds.filter((x) => x !== id) })
   }
   function toggleWorkerHost(id) {
     const adding = !wk.hostIds.includes(id)
     setWk({ ...wk, hostIds: adding ? [...wk.hostIds, id] : wk.hostIds.filter((x) => x !== id) })
-    if (adding) setCp({ ...cp, hostIds: cp.hostIds.filter((x) => x !== id) })
   }
 
   function submit(e) {
@@ -96,6 +114,22 @@ export default function ScalePage() {
               ))}
             </select>
             {readyClusters.length === 0 && <span className="td-hint">{t('scale.noReadyCluster')}</span>}
+            {clusterNodes.cp.length > 0 && (
+              <div className="scale-cluster-nodes">
+                <span className="scale-node-line">
+                  <span className="badge badge-admin">{t('scale.existCp')}</span>{' '}
+                  {clusterNodes.cp.map((n) => n.name).join(' / ')}
+                </span>
+              </div>
+            )}
+            {clusterNodes.wk.length > 0 && (
+              <div className="scale-cluster-nodes">
+                <span className="scale-node-line">
+                  <span className="badge badge-user">{t('scale.existWorker')}</span>{' '}
+                  {clusterNodes.wk.map((n) => n.name).join(' / ')}
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="field">
