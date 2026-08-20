@@ -15,6 +15,7 @@ export default function LoginPage() {
   const [form, setForm] = useState({ account: '', password: '' })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [showPwd, setShowPwd] = useState(false)
 
   function submit(e) {
     e.preventDefault()
@@ -44,12 +45,20 @@ export default function LoginPage() {
         />
         <Field
           label={t('auth.password')}
-          type="password"
+          type={showPwd ? 'text' : 'password'}
           placeholder={t('auth.password')}
           value={form.password}
           onChange={(e) => setForm({ ...form, password: e.target.value })}
           autoComplete="current-password"
           required
+          action={
+            <button type="button" className="field-toggle"
+              onClick={() => setShowPwd(!showPwd)}
+              title={showPwd ? t('auth.hidePwd') : t('auth.showPwd')}
+              aria-label={showPwd ? t('auth.hidePwd') : t('auth.showPwd')}>
+              {showPwd ? '🙈' : '👁️'}
+            </button>
+          }
         />
         <button className="btn btn-primary btn-block" type="submit" disabled={busy}>
           {busy ? t('auth.loggingIn') : t('auth.login')}
