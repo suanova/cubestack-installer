@@ -30,7 +30,7 @@ export default function Layout() {
         <main className="page">
           <Outlet />
         </main>
-        <footer className="footer">CubeStackInstaller · FastAPI + React</footer>
+        <footer className="footer">CubeStackInstaller © 2026 iSuanova</footer>
       </div>
     </div>
   )
