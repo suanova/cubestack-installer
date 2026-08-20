@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..deps import get_current_user, get_db, require_admin
 from ...engine.services.hostops import apply_report, check_host, check_host_env
-from ...models import Host, User
+from ...models import ClusterNode, Host, User
 from ...schemas import HostIn, HostOut, MessageOut
 
 router = APIRouter(prefix="/api/hosts", tags=["hosts"])
@@ -56,9 +56,15 @@ def precheck_host(
     )
 
 
+def _to_out(h: Host, db: Session) -> HostOut:
+    out = HostOut.model_validate(h)
+    out.in_cluster = db.query(ClusterNode.id).filter(ClusterNode.host_id == h.id).first() is not None
+    return out
+
+
 @router.get("", response_model=list[HostOut])
-def list_hosts(db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> list[Host]:
-    return db.query(Host).order_by(Host.id).all()
+def list_hosts(db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> list[HostOut]:
+    return [_to_out(h, db) for h in db.query(Host).order_by(Host.id).all()]
 
 
 @router.post("", response_model=HostOut, status_code=201)

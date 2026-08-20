@@ -15,7 +15,7 @@ const STATUS_MAP = {
 
 const emptyForm = {
   name: '', network_plugin: 'calico', run_node_host_id: '',
-  cp_ids: [], worker_ids: [], ssh_key: '',
+  cpVmIds: [], cpHostIds: [], workerVmIds: [], workerHostIds: [], ssh_key: '',
 }
 
 export default function ClustersPage() {
@@ -76,31 +76,53 @@ export default function ClustersPage() {
       .catch(() => {})
   }
 
-  function toggleCp(id) {
+  function toggleCpVm(id) {
     setForm((f) => {
-      const adding = !f.cp_ids.includes(id)
+      const adding = !f.cpVmIds.includes(id)
       return {
         ...f,
-        cp_ids: adding ? [...f.cp_ids, id] : f.cp_ids.filter((x) => x !== id),
-        worker_ids: adding ? f.worker_ids.filter((x) => x !== id) : f.worker_ids,
+        cpVmIds: adding ? [...f.cpVmIds, id] : f.cpVmIds.filter((x) => x !== id),
+        workerVmIds: adding ? f.workerVmIds.filter((x) => x !== id) : f.workerVmIds,
       }
     })
   }
 
-  function toggleWorker(id) {
+  function toggleCpHost(id) {
     setForm((f) => {
-      const adding = !f.worker_ids.includes(id)
+      const adding = !f.cpHostIds.includes(id)
       return {
         ...f,
-        worker_ids: adding ? [...f.worker_ids, id] : f.worker_ids.filter((x) => x !== id),
-        cp_ids: adding ? f.cp_ids.filter((x) => x !== id) : f.cp_ids,
+        cpHostIds: adding ? [...f.cpHostIds, id] : f.cpHostIds.filter((x) => x !== id),
+        workerHostIds: adding ? f.workerHostIds.filter((x) => x !== id) : f.workerHostIds,
+      }
+    })
+  }
+
+  function toggleWorkerVm(id) {
+    setForm((f) => {
+      const adding = !f.workerVmIds.includes(id)
+      return {
+        ...f,
+        workerVmIds: adding ? [...f.workerVmIds, id] : f.workerVmIds.filter((x) => x !== id),
+        cpVmIds: adding ? f.cpVmIds.filter((x) => x !== id) : f.cpVmIds,
+      }
+    })
+  }
+
+  function toggleWorkerHost(id) {
+    setForm((f) => {
+      const adding = !f.workerHostIds.includes(id)
+      return {
+        ...f,
+        workerHostIds: adding ? [...f.workerHostIds, id] : f.workerHostIds.filter((x) => x !== id),
+        cpHostIds: adding ? f.cpHostIds.filter((x) => x !== id) : f.cpHostIds,
       }
     })
   }
 
   function submitCreate(e) {
     e.preventDefault()
-    if (form.cp_ids.length < 3) {
+    if (form.cpVmIds.length + form.cpHostIds.length < 3) {
       toast(t('clusters.needCp'), 'error')
       return
     }
@@ -111,8 +133,10 @@ export default function ClustersPage() {
           name: form.name.trim(),
           network_plugin: form.network_plugin,
           run_node_host_id: form.run_node_host_id ? Number(form.run_node_host_id) : null,
-          control_plane_vm_ids: form.cp_ids,
-          worker_vm_ids: form.worker_ids,
+          control_plane_vm_ids: form.cpVmIds,
+          control_plane_host_ids: form.cpHostIds,
+          worker_vm_ids: form.workerVmIds,
+          worker_host_ids: form.workerHostIds,
           ssh_key: form.ssh_key.trim() || null,
         },
         token,
@@ -228,8 +252,9 @@ export default function ClustersPage() {
     )
   }
 
-  // 创建集群时只能选择未被任何 K8s 集群纳入管理的节点
+  // 创建集群时只能选择未被任何 K8s 集群纳入管理的节点(虚拟机与宿主机)
   const availableVms = vms.filter((v) => !v.in_cluster)
+  const availableHosts = hosts.filter((h) => !h.in_cluster)
 
   return (
     <div>
@@ -342,14 +367,28 @@ export default function ClustersPage() {
             <div className="field">
               <span className="field-label">{t('clusters.cpNodes')}</span>
               <span className="td-hint">{t('clusters.cpHint')}</span>
+              <div className="group-label">{t('clusters.groupHosts')}</div>
+              <div className="checkbox-grid">
+                {availableHosts.map((h) => (
+                  <CheckboxCard
+                    key={'cph-' + h.id}
+                    label={h.name}
+                    sub={h.ip + ' · 🖥 宿主机'}
+                    checked={form.cpHostIds.includes(h.id)}
+                    onChange={() => toggleCpHost(h.id)}
+                  />
+                ))}
+                {availableHosts.length === 0 && <span className="td-hint">{t('clusters.noHost')}</span>}
+              </div>
+              <div className="group-label">{t('clusters.groupVms')}</div>
               <div className="checkbox-grid">
                 {availableVms.map((v) => (
                   <CheckboxCard
-                    key={'cp-' + v.id}
+                    key={'cpv-' + v.id}
                     label={v.name}
-                    sub={v.ip + ' · ' + v.cpu + 'c/' + v.memory_gb + 'G'}
-                    checked={form.cp_ids.includes(v.id)}
-                    onChange={() => toggleCp(v.id)}
+                    sub={v.ip + ' · ☁ ' + v.cpu + 'c/' + v.memory_gb + 'G'}
+                    checked={form.cpVmIds.includes(v.id)}
+                    onChange={() => toggleCpVm(v.id)}
                   />
                 ))}
                 {availableVms.length === 0 && (
@@ -360,14 +399,28 @@ export default function ClustersPage() {
 
             <div className="field">
               <span className="field-label">{t('clusters.workerNodes')}</span>
+              <div className="group-label">{t('clusters.groupHosts')}</div>
+              <div className="checkbox-grid">
+                {availableHosts.map((h) => (
+                  <CheckboxCard
+                    key={'wkh-' + h.id}
+                    label={h.name}
+                    sub={h.ip + ' · 🖥 宿主机'}
+                    checked={form.workerHostIds.includes(h.id)}
+                    onChange={() => toggleWorkerHost(h.id)}
+                  />
+                ))}
+                {availableHosts.length === 0 && <span className="td-hint">{t('clusters.noHost')}</span>}
+              </div>
+              <div className="group-label">{t('clusters.groupVms')}</div>
               <div className="checkbox-grid">
                 {availableVms.map((v) => (
                   <CheckboxCard
-                    key={'wk-' + v.id}
+                    key={'wkv-' + v.id}
                     label={v.name}
-                    sub={v.ip + ' · ' + v.cpu + 'c/' + v.memory_gb + 'G'}
-                    checked={form.worker_ids.includes(v.id)}
-                    onChange={() => toggleWorker(v.id)}
+                    sub={v.ip + ' · ☁ ' + v.cpu + 'c/' + v.memory_gb + 'G'}
+                    checked={form.workerVmIds.includes(v.id)}
+                    onChange={() => toggleWorkerVm(v.id)}
                   />
                 ))}
                 {availableVms.length === 0 && (
@@ -417,6 +470,8 @@ export default function ClustersPage() {
                     <span className={'badge ' + (n.role === 'control_plane' ? 'badge-admin' : 'badge-user')}>
                       {n.role === 'control_plane' ? t('clusters.roleCp') : t('clusters.roleWorker')}
                     </span>
+                    {n.node_type === 'host' && <span className="badge badge-cyan">{t('clusters.nodeHost')}</span>}
+                    {n.node_type !== 'host' && <span className="badge badge-info">{t('clusters.nodeVm')}</span>}
                   </td>
                 </tr>
               ))}
