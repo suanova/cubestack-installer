@@ -68,15 +68,15 @@ export default function TasksPage({ typeFilter, titleKey, descKey }) {
       .catch(() => {})
   }
 
-  function deleteLog(tk) {
-    if (!window.confirm(t('tasks.deleteLogConfirm', { id: tk.id }))) return
+  function deleteTask(tk) {
+    if (!window.confirm(t('tasks.deleteConfirm', { id: tk.id }))) return
     taskApi
-      .clearLog(tk.id, token)
+      .remove(tk.id, token)
       .then(() => {
-        toast(t('tasks.logDeleted'))
+        toast(t('tasks.deleted'))
         if (selected?.id === tk.id) {
-          setSelected((s) => (s ? { ...s, log_text: '' } : s))
-          setLogText(t('tasks.noLog'))
+          setSelected(null)
+          setLogText('')
         }
         load()
       })
@@ -149,9 +149,9 @@ export default function TasksPage({ typeFilter, titleKey, descKey }) {
                             onClick={() => downloadTaskLog(tk, token).catch(() => {})}>
                             {t('common.download')}
                           </button>
-                          <button className="btn btn-danger btn-sm" title={t('tasks.deleteLog')}
-                            onClick={() => deleteLog(tk)}>
-                            {t('tasks.deleteLog')}
+                          <button className="btn btn-danger btn-sm" title={t('tasks.delete')}
+                            onClick={() => deleteTask(tk)}>
+                            {t('common.delete')}
                           </button>
                         </div>
                       </td>

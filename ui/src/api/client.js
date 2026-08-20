@@ -76,7 +76,7 @@ export const clusterApi = {
 export const taskApi = {
   list: (token) => request('/tasks', { token }),
   get: (id, token) => request('/tasks/' + id, { token }),
-  clearLog: (id, token) => request('/tasks/' + id + '/log', { method: 'DELETE', token }),
+  remove: (id, token) => request('/tasks/' + id, { method: 'DELETE', token }),
 }
 
 // 浏览器端把文本保存为本地文件

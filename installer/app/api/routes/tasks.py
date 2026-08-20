@@ -33,16 +33,18 @@ def task_detail(
     return TaskDetailOut.model_validate(task)
 
 
-@router.delete("/{task_id}/log", response_model=MessageOut)
-def clear_task_log(
+@router.delete("/{task_id}", response_model=MessageOut)
+def delete_task(
     task_id: int,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> MessageOut:
-    """清除任务日志(保留任务记录与状态)。"""
+    """删除任务(连同日志, 不保留记录)。运行中的任务不允许删除。"""
     task = db.get(DeployTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
-    task.log_text = ""
+    if task.status in ("pending", "running"):
+        raise HTTPException(status_code=400, detail="任务正在运行中,无法删除")
+    db.delete(task)
     db.commit()
-    return MessageOut(message="日志已清除")
+    return MessageOut(message="任务已删除")
