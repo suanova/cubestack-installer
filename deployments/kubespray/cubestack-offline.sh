@@ -460,20 +460,19 @@ PLAYBOOK_EOF
 # 避免全量 rsync 大量无关镜像(cilium/flannel/ingress 等)拖慢部署
 # 匹配规则: 条目含 ".tar" 为精确文件名匹配, 否则为文件名包含匹配
 # 用 rsync 逐台同步(仅匹配镜像, --delete-excluded 清理目标残留) + 逐个镜像验证加载
-preload_images() {
-    local target="${1:-all}"
-    log "预加载离线镜像到 ${target} 节点..."
-
-    # ── 1. 解析预加载镜像文件列表(过滤 images/ 目录) ──
+# 解析预加载镜像文件清单(按 PRELOAD_IMAGE_PATTERNS 规则过滤 LOCAL_REPO_DIR/images/*.tar)
+# 结果: 全局数组 PRELOAD_IMAGE_FILES; 同时写入 inventory/preload-images.lst,
+# 供 cluster.yml/scale.yml 内置的镜像预加载 play 读取(空文件=无镜像可同步)
+resolve_preload_image_files() {
     local patterns=(${PRELOAD_IMAGE_PATTERNS:-})
-    local image_files=()
+    PRELOAD_IMAGE_FILES=()
     local f p base matched
     if [ "${#patterns[@]}" -eq 0 ]; then
         # 全量同步(向后兼容): images/ 下所有 *.tar
         for f in "${LOCAL_REPO_DIR}"/images/*.tar; do
-            [ -f "${f}" ] && image_files+=("$(basename "${f}")")
+            [ -f "${f}" ] && PRELOAD_IMAGE_FILES+=("$(basename "${f}")")
         done
-        log "  同步集合: 全量 ${#image_files[@]} 个镜像(未配置 PRELOAD_IMAGE_PATTERNS)"
+        log "  同步集合: 全量 ${#PRELOAD_IMAGE_FILES[@]} 个镜像(未配置 PRELOAD_IMAGE_PATTERNS)"
     else
         for f in "${LOCAL_REPO_DIR}"/images/*.tar; do
             [ -f "${f}" ] || continue
@@ -486,10 +485,28 @@ preload_images() {
                     [[ "${base}" == *"${p}"* ]] && { matched=1; break; }
                 fi
             done
-            [ "${matched}" = "1" ] && image_files+=("${base}")
+            [ "${matched}" = "1" ] && PRELOAD_IMAGE_FILES+=("${base}")
         done
-        log "  同步集合: ${#image_files[@]} 个镜像(最小集合: ${patterns[*]})"
+        log "  同步集合: ${#PRELOAD_IMAGE_FILES[@]} 个镜像(最小集合: ${patterns[*]})"
     fi
+
+    # 写入 inventory 目录: 每行一个 tar 文件名; 空文件表示无镜像可同步
+    # (playbook 仅在清单文件不存在时才回退为全量同步)
+    {
+        if [ "${#PRELOAD_IMAGE_FILES[@]}" -gt 0 ]; then
+            printf '%s\n' "${PRELOAD_IMAGE_FILES[@]}"
+        fi
+    } > "${INVENTORY_DIR}/preload-images.lst" 2>/dev/null || \
+        warn "无法写入镜像清单 ${INVENTORY_DIR}/preload-images.lst(playbook 预加载将回退为全量同步)"
+}
+
+preload_images() {
+    local target="${1:-all}"
+    log "预加载离线镜像到 ${target} 节点..."
+
+    # ── 1. 解析预加载镜像文件列表(过滤 images/ 目录) ──
+    resolve_preload_image_files
+    local image_files=("${PRELOAD_IMAGE_FILES[@]}")
 
     if [ "${#image_files[@]}" -eq 0 ]; then
         warn "预加载: 未匹配到任何镜像(检查 PRELOAD_IMAGE_PATTERNS 或 ${PRELOAD_CONF})"
@@ -622,6 +639,165 @@ fix_artifacts_perms() {
     chmod 777 "${artifacts_dir}" 2>/dev/null || sudo chmod 777 "${artifacts_dir}" 2>/dev/null || true
     # 确保 inventory 目录可读写
     chmod -R u+rwX "${INVENTORY_DIR}" 2>/dev/null || true
+}
+
+# 确保 cluster.yml/scale.yml 已挂载镜像预加载 play(幂等)
+# 背景: 预加载 play 位于 kubespray/patch-playbooks/(kubespray 升级/重新 clone 会丢失),
+#       本函数在文件缺失时从内置内容重新生成, 并把 import 重新插回 playbook,
+#       保证镜像同步逻辑在升级后依然生效(插入标记取自各版本稳定的 play 名称)
+ensure_preload_play() {
+    local preload_file="${KUBESPRAY_DIR}/patch-playbooks/cubestack-preload.yml"
+    if [ ! -f "${preload_file}" ]; then
+        log "重新生成 ${preload_file}(kubespray 升级后恢复)..."
+        mkdir -p "$(dirname "${preload_file}")" 2>/dev/null || true
+        cat > "${preload_file}" << 'PRELOAD_EOF' 2>/dev/null || true
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# cubestack-installer: 离线镜像预加载 play(cluster.yml / scale.yml 共用)
+#
+# 在 containerd 安装完成后, 将离线镜像从部署机缓存同步到目标节点并 load 进 containerd,
+# 解决新节点 kube-proxy/calico 等镜像缺失问题。不硬编码任何路径或集群名:
+#   · 镜像缓存目录: download_cache_dir / local_release_dir(入口脚本写入 offline.yml)
+#   · 同步文件清单: {{ inventory_dir }}/preload-images.lst(入口脚本生成, 每行一个 tar 名)
+#     清单不存在 → 回退为同步缓存目录下全部 *.tar; 空文件 → 无镜像可同步(跳过)
+#
+# 同步机制与 kubespray download role 的镜像上传一致: synchronize(use_ssh_args, push)
+# 保证完全同步并 load 成功: 每个清单文件必须存在于节点且 ctr import 成功(最多重试 3 次),
+# 任一镜像缺失或导入失败 → play 失败, 不会被静默跳过
+# ═══════════════════════════════════════════════════════════════════════════
+- name: Preload offline images to target nodes
+  hosts: "{{ preload_target | default('k8s_cluster') }}"
+  gather_facts: false
+  environment: "{{ proxy_disable_env }}"
+  roles:
+    - { role: kubespray_defaults }
+  tasks:
+    - name: Preload | Resolve image file list (lst file or all tars in cache)
+      set_fact:
+        preload_image_files: >-
+          {%- set raw = lookup('file', inventory_dir + '/preload-images.lst', errors='ignore') -%}
+          {%- set lst = (raw if raw is string else '').splitlines() | select() | list -%}
+          {%- if raw is string -%}
+          {{ lst }}
+          {%- else -%}
+          {{ query('fileglob', download_cache_dir + '/images/*.tar') | map('basename') | sort | list }}
+          {%- endif -%}
+
+    - name: Preload | Build rsync include filter
+      set_fact:
+        preload_rsync_opts: "{{ preload_image_files | map('regex_replace', '^(.*)$', '--include=\\1') | list + ['--exclude=*'] }}"
+      when: preload_image_files | length > 0
+
+    - name: Preload | Ensure node-side images directory
+      file:
+        path: "{{ local_release_dir }}/images"
+        state: directory
+        recurse: true
+      when: preload_image_files | length > 0
+
+    - name: Preload | Sync image tars from cache to node
+      ansible.posix.synchronize:
+        src: "{{ download_cache_dir }}/images/"
+        dest: "{{ local_release_dir }}/images/"
+        mode: push
+        use_ssh_args: true
+        rsync_opts: "{{ preload_rsync_opts }}"
+      register: preload_sync
+      until: preload_sync is succeeded
+      retries: 2
+      delay: 5
+      when: preload_image_files | length > 0
+
+    - name: Preload | Load images into containerd (逐镜像校验, 失败重试 3 次)
+      shell: |
+        set -euo pipefail
+        files="{{ preload_image_files | join(' ') }}"
+        total=$(wc -w <<< "${files}")
+        ok=0
+        rc=0
+        i=0
+        for f in ${files}; do
+          i=$((i + 1))
+          img="{{ local_release_dir }}/images/$f"
+          if [ ! -f "$img" ]; then
+            echo "  ✗ [$i/$total] $f: 节点缺少镜像文件(同步未完成或清单过期, 请重新运行入口脚本)"
+            rc=1
+            continue
+          fi
+          imported=0
+          for attempt in 1 2 3; do
+            if ctr -n k8s.io images import "$img" >/dev/null 2>&1; then
+              imported=1
+              break
+            fi
+            sleep $((attempt * attempt))
+          done
+          if [ "$imported" = "1" ]; then
+            ok=$((ok + 1))
+            echo "  ✓ [$i/$total] $f"
+          else
+            echo "  ✗ [$i/$total] $f: 3 次导入均失败"
+            rc=1
+          fi
+        done
+        echo "  预加载结果: ${ok}/${total} 个镜像导入成功"
+        exit $rc
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: preload_image_files | length > 0
+PRELOAD_EOF
+        [ -f "${preload_file}" ] || { warn "无法生成 ${preload_file}, 跳过预加载 play 挂载"; return 0; }
+    fi
+
+    local py name
+    for py in "${KUBESPRAY_DIR}/playbooks/cluster.yml" "${KUBESPRAY_DIR}/playbooks/scale.yml"; do
+        [ -f "${py}" ] || continue
+        name="$(basename "${py}")"
+        if grep -q "cubestack-preload.yml" "${py}"; then
+            log "✅ ${name} 已挂载镜像预加载 play"
+            continue
+        fi
+        python3 - "${py}" "${name}" << 'PYEOF'
+import sys
+path, name = sys.argv[1], sys.argv[2]
+src = open(path).read()
+marker = {
+    "cluster.yml": "- name: Install etcd",
+    "scale.yml": '- name: Target only workers to get kubelet installed and checking in on any new nodes(node)',
+}.get(name)
+if not marker or marker not in src:
+    print("marker not found, skip")
+    sys.exit(0)
+block = (
+    "# ──────────────────────────────────────────────────────────────────────\n"
+    "# 在 containerd 安装完成后, 预加载离线镜像到目标节点(解决新节点 kube-proxy/\n"
+    "# calico 等镜像缺失问题)。同步/加载逻辑见 patch-playbooks/cubestack-preload.yml;\n"
+    "# 镜像目录由入口脚本写入 offline.yml, 文件清单由入口脚本生成(preload-images.lst)。\n"
+    "# 本 import 由入口脚本 ensure_preload_play 自动维护(kubespray 升级后重新挂载)\n"
+    "# ──────────────────────────────────────────────────────────────────────\n"
+)
+if name == "scale.yml":
+    block += (
+        "- name: Preload offline images to scale nodes\n"
+        "  vars:\n"
+        "    preload_target: kube_node\n"
+        "  import_playbook: ../patch-playbooks/cubestack-preload.yml\n"
+    )
+else:
+    block += (
+        "- name: Preload offline images to cluster nodes\n"
+        "  import_playbook: ../patch-playbooks/cubestack-preload.yml\n"
+    )
+open(path, "w").write(src.replace(marker, block + "\n" + marker, 1))
+print("patched")
+PYEOF
+        if grep -q "cubestack-preload.yml" "${py}"; then
+            log "✅ 已挂载镜像预加载 play 到 ${name}"
+        else
+            warn "无法挂载镜像预加载 play 到 ${name}(未找到插入标记, kubespray 版本结构可能已变化)"
+        fi
+    done
 }
 
 # 修复 kubespray download role 镜像上传同步缺目录问题(幂等)
@@ -808,6 +984,178 @@ update_loadbalancer_all_yml() {
     fi
 }
 
+# 在真正部署前, 通过 SSH 检查并重置目标节点上的旧 Kubernetes 状态
+# 检测到残留 → 醒目警告 + sleep 60 → kubeadm reset -f + IPVS 清理
+# 未检测到 → 直接部署, 不执行 reset
+# 用法: reset_kubernetes_if_needed
+# 返回: 始终 0(不因 reset 失败中断部署)
+# 检查并重置节点上的旧 Kubernetes 状态(部署/扩容前清理残留)
+# 参数 scope:
+#   all — 检查并重置全部有残留的节点(全新部署场景, 旧集群将被整体替换)
+#   new — 仅检查并重置"未加入运行中集群"的新节点(扩容场景, 绝不重置旧集群节点):
+#         通过首个 master 的 kubectl 获取集群现有节点(名称+InternalIP), 按清单名/
+#         ansible_host/远端 hostname 三重匹配排除旧节点; 无法获取集群状态时,
+#         为安全起见跳过全部 reset(宁可不清理, 也不误重置运行中的集群)
+reset_kubernetes_if_needed() {
+    local scope="${1:-all}"
+
+    # 解析节点清单(host+user+key) 从 hosts.yml 获取
+    local nodes_str
+    nodes_str=$(ansible-inventory -i "${INVENTORY_DIR}/hosts.yml" --list 2>/dev/null | python3 -c '
+import sys, json
+inv = json.load(sys.stdin)
+meta = inv.get("_meta", {}).get("hostvars", {})
+seen = set()
+for g in ["kube_control_plane", "kube_node"]:
+    for h in inv.get(g, {}).get("hosts", []):
+        if h in seen or h not in meta:
+            continue
+        seen.add(h)
+        hv = meta[h]
+        print("%s|%s|%s|%s" % (
+            h,
+            hv.get("ansible_host", h),
+            hv.get("ansible_user", "ubuntu"),
+            hv.get("ansible_ssh_private_key_file", "~/.ssh/cubestack_k8s"),
+        ))
+')
+    [ -n "${nodes_str}" ] || { warn "无法解析节点清单(${INVENTORY_DIR}/hosts.yml), 跳过 reset 检查"; return 0; }
+
+    # 扩容场景: 从运行中的集群获取现有节点列表(名称 + InternalIP), 用于排除旧节点
+    local existing_nodes=""
+    if [ "${scope}" = "new" ]; then
+        local mstr
+        mstr=$(ansible-inventory -i "${INVENTORY_DIR}/hosts.yml" --list 2>/dev/null | python3 -c '
+import sys, json
+inv = json.load(sys.stdin)
+meta = inv.get("_meta", {}).get("hostvars", {})
+cp = inv.get("kube_control_plane", {}).get("hosts", [])
+if not cp:
+    sys.exit(0)
+hv = meta.get(cp[0], {})
+print("%s|%s|%s" % (
+    hv.get("ansible_host", cp[0]),
+    hv.get("ansible_user", "ubuntu"),
+    hv.get("ansible_ssh_private_key_file", "~/.ssh/cubestack_k8s"),
+))
+')
+        if [ -n "${mstr}" ]; then
+            local mhost muser mkey
+            IFS='|' read -r mhost muser mkey <<< "${mstr}"
+            # 获取集群现有节点: 名称 + InternalIP + ExternalIP, 并归一化为单行空格分隔
+            # (多行输出时 token 前后是换行而非空格, 会导致除首行名称/末行 IP 外的条目匹配失败)
+            existing_nodes=$(ssh -i "${mkey}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+                "${muser}@${mhost}" \
+                "sudo kubectl get nodes --no-headers -o wide 2>/dev/null | awk '{print \$1, \$6, \$7}'" 2>/dev/null | tr '\n' ' ' || true)
+        fi
+        if [ -z "${existing_nodes}" ]; then
+            warn "无法获取运行中集群的节点列表, 为安全起见跳过全部 reset(避免误重置旧集群节点)"
+            return 0
+        fi
+        log "扩容场景: 已获取集群现有节点列表($(wc -w <<< "${existing_nodes}" | tr -d ' ') 个标识), reset 仅作用于未加入集群的新节点"
+    fi
+
+    # 逐个节点检查是否已有 Kubernetes 残留(kubelet 运行 / etcd 数据 / /etc/kubernetes 等)
+    # 并记录需要重置的节点(仅重置有残留的节点, 不影响干净节点)
+    local found=0
+    local reset_targets=()
+    local oldifs="${IFS}"
+    IFS=$'\n'
+    for line in ${nodes_str}; do
+        IFS='|' read -r node host user key <<< "${line}"
+        [ -z "${node}" ] && continue
+
+        # 探针: 首行为远端 hostname, 其后为 YES(有残留)/NO(干净)
+        local probe
+        probe=$(ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+            "${user}@${host}" \
+            "sudo bash -c '
+                hostname
+                systemctl is-active kubelet 2>/dev/null | grep -q active && { echo YES; exit 0; }
+                [ -d /etc/kubernetes ] && [ -n \"\$(ls -A /etc/kubernetes 2>/dev/null)\" ] && { echo YES; exit 0; }
+                [ -d /var/lib/etcd/member ] && { echo YES; exit 0; }
+                [ -d /var/lib/kubelet ] && [ -n \"\$(ls -A /var/lib/kubelet 2>/dev/null)\" ] && { echo YES; exit 0; }
+                echo NO
+            '" 2>/dev/null || true)
+
+        # 扩容: 已属于运行中集群的节点绝不重置(清单名/ansible_host/远端 hostname 匹配)
+        if [ "${scope}" = "new" ]; then
+            local remote_name in_cluster=0
+            remote_name=$(head -1 <<< "${probe}")
+            case " ${existing_nodes} " in
+                *" ${node} "*|*" ${host} "*) in_cluster=1 ;;
+            esac
+            if [ -n "${remote_name}" ]; then
+                case " ${existing_nodes} " in
+                    *" ${remote_name} "*) in_cluster=1 ;;
+                esac
+            fi
+            if [ "${in_cluster}" = "1" ]; then
+                log "  → [${node}](${host}) 已属于运行中的集群, 跳过 reset"
+                continue
+            fi
+        fi
+
+        if grep -qx "YES" <<< "${probe}"; then
+            log "  → [${node}](${host}) 检测到旧 Kubernetes 残留"
+            found=1
+            reset_targets+=("${line}")
+        fi
+    done
+    IFS="${oldifs}"
+
+    if [ "${found}" = "0" ]; then
+        log "未检测到需要清理的旧 Kubernetes 状态, 直接部署"
+        return 0
+    fi
+
+    # 检测到残留 → 醒目警告 + sleep 60
+    echo ""
+    highlight "╔══════════════════════════════════════════════════════════╗"
+    highlight "║   ⚠️  检测到节点上已有 Kubernetes 部署! ⚠️              ║"
+    highlight "║                                                      ║"
+    highlight "║  将在 60 秒后自动清理这些节点上的旧 Kubernetes 状态      ║"
+    highlight "║  如需中断, 请按 Ctrl+C 退出                          ║"
+    highlight "╚══════════════════════════════════════════════════════════╝"
+    echo ""
+    local countdown=60
+    while [ "${countdown}" -gt 0 ]; do
+        printf "\r  ⏳ 倒计时 %3d 秒后自动清理并继续部署..." "${countdown}"
+        sleep 1
+        countdown=$((countdown - 1))
+    done
+    printf "\r  ✅ 继续部署...                          \n"
+    echo ""
+
+    # 执行 reset: kubeadm reset -f + IPVS 清理 + 删除残留(仅重置检测到残留的节点)
+    log "清理节点上的旧 Kubernetes 状态(kubeadm reset -f + IPVS 清理)..."
+    local reset_ok=0 reset_fail=0
+    for line in "${reset_targets[@]}"; do
+        IFS='|' read -r node host user key <<< "${line}"
+        [ -z "${node}" ] && continue
+        log "  → [${node}](${host}) 清理中..."
+        if ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+            "${user}@${host}" \
+            "sudo bash -c '
+                kubeadm reset -f 2>/dev/null;
+                # 清理 IPVS 规则与 kube-ipvs0 虚拟接口
+                ipvsadm -C 2>/dev/null;
+                ip link del kube-ipvs0 2>/dev/null;
+                rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd 2>/dev/null;
+                systemctl stop kubelet 2>/dev/null || true;
+                systemctl stop etcd 2>/dev/null || true;
+                rm -f /etc/etcd.env /etc/systemd/system/etcd.service 2>/dev/null;
+                true
+            '" >/dev/null 2>&1; then
+            reset_ok=$((reset_ok + 1))
+        else
+            warn "  ${node}: 清理失败, 跳过"
+            reset_fail=$((reset_fail + 1))
+        fi
+    done
+    log "✅ 清理完成: ${reset_ok} 台成功, ${reset_fail} 台失败"
+}
+
 cmd_install() {
     highlight "安装集群 [${CLUSTER_NAME}]..."
     ensure_kubespray
@@ -815,6 +1163,8 @@ cmd_install() {
     cmd_check
     # 依据 hosts.yml 自动同步 all.yml 的 API 负载均衡/SAN 配置
     update_loadbalancer_all_yml
+    # 部署前: 检查并重置旧 Kubernetes 状态(检测到残留才 reset; 全新部署覆盖全部节点)
+    reset_kubernetes_if_needed all
     log "注入离线安装变量..."
     OFFLINE_VARS="${INVENTORY_DIR}/group_vars/all/offline.yml"
     {
@@ -847,8 +1197,10 @@ cmd_install() {
         echo "kubeadm_init_timeout: 900s"
     } > "${OFFLINE_VARS}"
 
-    # 预加载离线镜像到所有节点(含 master), 避免 kubeadm wait-control-plane 超时
-    preload_images "all"
+    # 生成镜像文件清单(inventory/preload-images.lst), 供 cluster.yml 内置预加载 play 使用
+    # (实际同步+加载由 cluster.yml 在 containerd 安装完成后完成;
+    #  全新节点此时尚无 containerd, 入口脚本直接预加载会跳过)
+    resolve_preload_image_files
 
     # 修复 artifacts 目录权限(kubectl_localhost/kubeconfig_localhost 用)
     fix_artifacts_perms
@@ -858,6 +1210,9 @@ cmd_install() {
 
     # 修复 download role 镜像 groups 配置(使 dnsautoscaler/metrics-server 镜像推送到全节点)
     fix_download_groups
+
+    # 确保 cluster.yml 已挂载镜像预加载 play(kubespray 升级后自动重新挂载)
+    ensure_preload_play
 
     # ansible 日志: tee 同时写入文件 + 输出到终端
     INSTALL_LOG="/tmp/${CLUSTER_NAME}-install.log"
@@ -889,6 +1244,42 @@ cmd_install() {
         --skip-tags system-packages,kube-proxy \
         -vv
 
+    # 安装后兜底预加载: 补加载附加组件镜像, 同时重新生成镜像清单(供后续扩容使用)
+    preload_images "all"
+
+    # 安装后: 重启 containerd + kubelet, 确保 CNI 插件初始化
+    # 根因: containerd 启动时读取 /etc/cni/net.d 初始化 CNI 插件;
+    #       若 reset 删除过该目录(或首次部署时 CNI 未就绪), containerd 标记 CNI 未初始化,
+    #       calico 之后创建配置也不会重新加载 → 节点 NotReady
+    log "重启 containerd + kubelet(确保 CNI 插件初始化)..."
+    cd "${KUBESPRAY_DIR}"
+    source .venv/bin/activate 2>/dev/null || true
+    local restart_rc=0
+
+    # 先重启 master 节点
+    log "  → 重启 master 节点..."
+    ansible kube_control_plane -i "${INVENTORY_DIR}/hosts.yml" -m shell \
+        -a "systemctl restart kubelet; sleep 5; systemctl restart containerd; true" \
+        -u "${REMOTE_USER}" --become \
+        --ssh-common-args="-o ConnectTimeout=30 -o ServerAliveInterval=5 -o StrictHostKeyChecking=no" \
+        || restart_rc=$?
+    sleep 5
+
+    # 再重启 worker 节点
+    log "  → 重启 worker 节点..."
+    ansible kube_node -i "${INVENTORY_DIR}/hosts.yml" -m shell \
+        -a "systemctl restart kubelet; sleep 5; systemctl restart containerd; true" \
+        -u "${REMOTE_USER}" --become \
+        --ssh-common-args="-o ConnectTimeout=30 -o ServerAliveInterval=5 -o StrictHostKeyChecking=no" \
+        || restart_rc=$?
+
+    if [ "${restart_rc}" -ne 0 ]; then
+        warn "部分节点重启 kubelet/containerd 失败(rc=${restart_rc}), 请检查节点状态"
+        log "可手动重启: systemctl restart containerd && systemctl restart kubelet"
+    else
+        log "✅ containerd + kubelet 已重启"
+    fi
+
     # 安装后预加载: playbook 前 containerd 可能未安装(preload 跳过), playbook 后 containerd 已就绪,
     # 补加载 playbook 未推到所有节点的镜像(如 dns-autoscaler/ metrics-server 等附加组件镜像)
     preload_images "all"
@@ -904,6 +1295,9 @@ cmd_scale() {
     cmd_check
     # 依据 hosts.yml 自动同步 all.yml 的 API 负载均衡/SAN 配置
     update_loadbalancer_all_yml
+    # 扩容前: 仅检查并重置"新加入"节点上的旧 Kubernetes 状态
+    # (已在运行集群中的节点绝不重置; 无法获取集群状态时跳过全部 reset)
+    reset_kubernetes_if_needed new
 
     # 确保离线变量文件存在
     OFFLINE_VARS="${INVENTORY_DIR}/group_vars/all/offline.yml"
@@ -956,13 +1350,34 @@ cmd_scale() {
         log "✅ Facts 收集完成"
     fi
 
-    # ── 预加载离线镜像到目标节点 ──
+    # ── 镜像预加载方案 ──
     # 必须先于 scale.yml 加载镜像: kubelet 启动 kube-proxy 时会尝试拉镜像,
     # 离线环境下必须先 load 到 containerd, 否则 ImagePullBackOff
-    preload_images "kube_node"
+    # 新 worker 节点可能尚未安装 containerd(入口脚本直接预加载会跳过)
+    # 解决方案: 先跑一次 scale.yml 的前半段(仅安装 containerd + 下载镜像),
+    # 然后生成镜像清单 inventory/preload-images.lst, 由 scale.yml 内置的
+    # 预加载 play 在 containerd 装完后完成同步+加载
+    log "预安装 containerd 到新节点(为镜像预加载做准备)..."
+    cd "${KUBESPRAY_DIR}"
+    run_ansible_playbook "/tmp/${CLUSTER_NAME}-prescale.log" scale.yml \
+        -i "${INVENTORY_DIR}/hosts.yml" \
+        --become --become-user=root \
+        ${LIMIT_FLAG} \
+        -e @${OFFLINE_VARS} \
+        --skip-tags system-packages,kube-proxy \
+        --tags container-engine,download \
+        -v 2>&1 || warn "containerd 预安装部分节点可能失败(首次 scale 可忽略)"
+    log "✅ containerd 预安装完成"
+
+    # 生成镜像文件清单(inventory/preload-images.lst), 供 scale.yml 内置预加载 play 使用
+    # (实际同步+加载由 scale.yml 完成, 入口脚本不再重复预加载)
+    resolve_preload_image_files
 
     # 修复 download role 镜像上传缺目录问题(使 scale.yml 对新 worker 也能全量同步镜像)
     fix_download_sync_dirs
+
+    # 确保 scale.yml 已挂载镜像预加载 play(kubespray 升级后自动重新挂载)
+    ensure_preload_play
 
     log "执行 Kubespray 扩容 (scale.yml)..."
     log "ansible 日志: 同时显示终端 + 写入 /tmp/${CLUSTER_NAME}-scale.log"
@@ -979,8 +1394,8 @@ cmd_scale() {
             return 1
         }
 
-    # 扩容后预加载: playbook 前 containerd 可能未安装(preload 跳过), playbook 后补加载
-    # 新加入的节点可能缺少某些附加组件镜像(如 dns-autoscaler/metrics-server)
+    # 扩容后兜底预加载: 补加载附加组件镜像(如 dns-autoscaler/metrics-server),
+    # 同时重新生成镜像清单(供下次扩容或独立运行 scale.yml 使用)
     preload_images "${LIMIT_GROUP:-kube_node}"
 
     # ── 扩容后置处理 ──
@@ -1019,6 +1434,36 @@ cmd_scale() {
           xargs -r kubectl -n kube-system delete pod 2>/dev/null || true
         " \
         >/dev/null 2>&1 || true
+
+    # 重启 containerd + kubelet, 确保新节点 CNI 插件初始化
+    log "重启 containerd + kubelet(确保 CNI 插件初始化)..."
+    cd "${KUBESPRAY_DIR}"
+    source .venv/bin/activate 2>/dev/null || true
+    local restart_rc=0
+
+    # 先重启 master 节点
+    log "  → 重启 master 节点..."
+    ansible kube_control_plane -i "${INVENTORY_DIR}/hosts.yml" -m shell \
+        -a "systemctl restart kubelet; sleep 5; systemctl restart containerd; true" \
+        -u "${REMOTE_USER}" --become \
+        --ssh-common-args="-o ConnectTimeout=30 -o ServerAliveInterval=5 -o StrictHostKeyChecking=no" \
+        || restart_rc=$?
+    sleep 5
+
+    # 再重启 worker 节点
+    log "  → 重启 worker 节点..."
+    ansible kube_node -i "${INVENTORY_DIR}/hosts.yml" -m shell \
+        -a "systemctl restart kubelet; sleep 5; systemctl restart containerd; true" \
+        -u "${REMOTE_USER}" --become \
+        --ssh-common-args="-o ConnectTimeout=30 -o ServerAliveInterval=5 -o StrictHostKeyChecking=no" \
+        || restart_rc=$?
+
+    if [ "${restart_rc}" -ne 0 ]; then
+        warn "部分节点重启 kubelet/containerd 失败(rc=${restart_rc}), 请检查节点状态"
+        log "可手动重启: systemctl restart containerd && systemctl restart kubelet"
+    else
+        log "✅ containerd + kubelet 已重启"
+    fi
 
     log "🎉 集群 [${CLUSTER_NAME}] 扩容完成! 日志: /tmp/${CLUSTER_NAME}-scale.log"
 }

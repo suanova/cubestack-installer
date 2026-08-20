@@ -114,10 +114,17 @@ load_config() {
 
 # ---------------- 指定节点过滤(--only) ----------------
 # 仅在 ONLY_HOSTS(逗号分隔, 由 deploy-cluster.sh --only 收集)非空时过滤
+# --only 过滤: 支持全名精确匹配或短名后缀匹配
+# (如 --only worker02 可匹配 cubestack-k8s-worker02)
 node_matches() {
     [ -z "${ONLY_HOSTS:-}" ] && return 0
     local h
-    for h in ${ONLY_HOSTS//,/ }; do [ "$h" = "$1" ] && return 0; done
+    for h in ${ONLY_HOSTS//,/ }; do
+        [ "$h" = "$1" ] && return 0
+        case "$1" in
+            *"-${h}") return 0 ;;   # 短名后缀: cubestack-k8s-worker02 匹配 worker02
+        esac
+    done
     return 1
 }
 

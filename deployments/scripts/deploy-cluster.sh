@@ -9,9 +9,11 @@
 #   vm             创建虚拟机并确保 running ssh_passwordless 配置 SSH 免密
 #   worker_bm      裸金属 worker 装包      hosts         更新 /etc/hosts
 #   inventory      生成 inventory          k8s           部署 kubespray(默认关闭)
+#   scale          扩容集群(缺 VM 自动创建, 可重复, 默认关闭)
 #   gpu_operator   沐曦 GPU Operator(占位, 默认关闭)   lws  LWS(占位, 默认关闭)
 #
 # 断点续跑: 每模块完成后写入状态文件; 下次从断点继续; --fresh 清状态重跑
+# (scale 为可重复模块: 每次执行且不写状态, 便于反复加节点)
 #
 # 用法:
 #   sudo ./deploy-cluster.sh                                # 默认基础设施模块
@@ -20,6 +22,7 @@
 #   sudo ./deploy-cluster.sh --skip hosts --with-k8s        # 跳过某模块
 #   sudo ./deploy-cluster.sh --enable gpu_operator,lws      # 启用默认关闭模块
 #   sudo ./deploy-cluster.sh --only <host> --with-k8s       # 仅处理指定节点
+#   sudo ./deploy-cluster.sh --with-scale                   # 扩容(新节点已在 cluster.conf, 缺 VM 自动创建)
 #   sudo ./deploy-cluster.sh --list / --list-steps / --fresh
 # 数据源: config/cluster.conf
 #
@@ -43,14 +46,17 @@ usage() {
 模块(steps/):
   net ssh_key vm ssh_passwordless worker_bm hosts inventory   (默认执行)
   k8s           部署 kubespray(默认关闭, --with-k8s / --enable k8s 启用)
+  scale         扩容集群: 添加新节点(缺 VM 自动创建, 可重复执行,
+                --with-scale / --enable scale 启用)
   gpu_operator  沐曦 GPU Operator(占位, 默认关闭)
   lws           LeaderWorkerSet(占位, 默认关闭)
 
 选项:
   --with-k8s            启用 k8s 部署模块(= --enable k8s)
+  --with-scale          启用扩容模块(= --enable scale)
   --steps k1,k2         只运行指定模块
   --skip k1,k2          跳过模块
-  --enable k1,k2        启用默认关闭模块(gpu_operator,lws...)
+  --enable k1,k2        启用默认关闭模块(scale,gpu_operator,lws...)
   --only HOST           仅处理指定节点(可多次)
   --fresh, --refresh    清断点续跑状态重新执行
   --skip-net            跳过网络模块
@@ -63,6 +69,8 @@ usage() {
   sudo ./deploy-cluster.sh --steps vm,k8s
   sudo ./deploy-cluster.sh --skip hosts --with-k8s
   sudo ./deploy-cluster.sh --enable gpu_operator,lws
+  sudo ./deploy-cluster.sh --with-scale   # 扩容: 新节点先写入 cluster.conf(缺 VM 自动创建)
+  sudo ./deploy-cluster.sh --only worker02 --with-scale   # 仅扩容指定新节点
 EOF
     exit 0
 }
@@ -77,6 +85,7 @@ while [ $# -gt 0 ]; do
         --list)     LIST=1; shift ;;
         --list-steps) LIST_STEPS=1; shift ;;
         --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; shift ;;
+        --with-scale) ENABLE_ARG="${ENABLE_ARG},scale"; shift ;;
         --steps)    STEPS_ARG="${2:?--steps 需要模块列表, 逗号分隔}"; shift 2 ;;
         --skip)     SKIP_ARG="${2:?--skip 需要模块列表, 逗号分隔}"; shift 2 ;;
         --enable)   ENABLE_ARG="${ENABLE_ARG},${2:?--enable 需要模块列表, 逗号分隔}"; shift 2 ;;
@@ -130,5 +139,6 @@ echo -e "\033[32m✅ 一键部署流程完成(配置: ${CLUSTER_CONF})\033[0m"
 echo "  配置: ${CLUSTER_CONF}"
 echo "  本次执行: ${RUN_STEPS[*]}"
 echo "  完整日志: ${LOG_FILE:-<未保存, 可用 pipe 保存>}"
-echo "  下一步: 用 --enable gpu_operator,lws 安装 GPU Operator / LWS(需先实现 steps/ 对应脚本)"
+echo "  下一步: 扩容用 --with-scale(新节点先写入 cluster.conf 的 NODES, 缺 VM 自动创建);"
+echo "          用 --enable gpu_operator,lws 安装 GPU Operator / LWS(需先实现 steps/ 对应脚本)"
 echo "============================================="
