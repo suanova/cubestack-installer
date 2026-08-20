@@ -284,6 +284,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
 .page-actions { display: flex; align-items: center; gap: 10px; }
 .group-label { font-size: 12.5px; font-weight: 600; color: var(--ink-soft); margin: 12px 0 6px; }
+.node-group { border: 1.5px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: var(--input-bg); }
+.node-group .group-label { margin-top: 0; }
+.node-group .checkbox-grid { margin-bottom: 0; }
 .register-done { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 18px 0 8px; }
 .register-done-icon { font-size: 42px; }
 .register-done-text { font-size: 14px; color: var(--ink-soft); text-align: center; line-height: 1.6; }
