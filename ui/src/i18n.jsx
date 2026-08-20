@@ -165,6 +165,7 @@ const dict = {
     'clusters.detailTitle': '集群详情 · {name}', 'clusters.node': '节点', 'clusters.roleCp': '控制平面', 'clusters.roleWorker': '工作节点',
     'clusters.lastTask': '最近安装任务', 'clusters.created': '集群 {name} 已创建,点击「安装」开始 Kubespray 部署',
     'clusters.deployStarted': '集群安装任务 #{id} 已启动,可到「部署任务」查看日志',
+    'clusters.apiServer': 'API Server 地址', 'clusters.downloadKubeconfig': '下载 kubeconfig',
     'clusters.deleteTitle': '删除集群', 'clusters.deleteMsg': '确定要删除集群 {name} 吗?',
     'clusters.deleted': '集群 {name} 已删除', 'clusters.empty': '暂无集群,点击右上角「创建集群」',
     // 任务
@@ -352,6 +353,7 @@ const dict = {
     'clusters.install': 'Install', 'clusters.installingHint': 'Installing...', 'clusters.detail': 'Details',
     'clusters.detailTitle': 'Cluster Details · {name}', 'clusters.node': 'Node', 'clusters.roleCp': 'Control Plane', 'clusters.roleWorker': 'Worker',
     'clusters.lastTask': 'Last install task', 'clusters.created': 'Cluster {name} created. Click Install to deploy with Kubespray.',
+    'clusters.apiServer': 'API Server Address', 'clusters.downloadKubeconfig': 'Download kubeconfig',
     'clusters.deployStarted': 'Install task #{id} started. View logs under Deploy Tasks.',
     'clusters.deleteTitle': 'Delete Cluster', 'clusters.deleteMsg': 'Delete cluster {name}?',
     'clusters.deleted': 'Cluster {name} deleted', 'clusters.empty': 'No clusters yet. Click "Create Cluster".',

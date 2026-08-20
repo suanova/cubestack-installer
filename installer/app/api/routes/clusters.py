@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from ..deps import get_current_user, get_db, require_admin
@@ -22,6 +22,7 @@ def _to_out(cluster: K8sCluster, db: Session) -> ClusterOut:
     nodes = db.query(ClusterNode).filter(ClusterNode.cluster_id == cluster.id).all()
     out.control_plane_count = len([n for n in nodes if n.role == "control_plane"])
     out.worker_count = len([n for n in nodes if n.role == "worker"])
+    out.has_kubeconfig = bool(cluster.kubeconfig)
     if cluster.run_node_host_id:
         run_host = db.get(Host, cluster.run_node_host_id)
         if run_host is not None:
@@ -104,6 +105,25 @@ def cluster_detail(
         cluster=_to_out(cluster, db),
         nodes=[NodeOut.model_validate(n) for n in nodes],
         last_task=TaskBriefOut.model_validate(last) if last else None,
+    )
+
+
+@router.get("/{cluster_id}/kubeconfig")
+def download_cluster_kubeconfig(
+    cluster_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> Response:
+    """下载集群 kubeconfig(admin.conf 内容,已入库)。"""
+    cluster = db.get(K8sCluster, cluster_id)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="集群不存在")
+    if not cluster.kubeconfig:
+        raise HTTPException(status_code=404, detail="该集群暂无 kubeconfig(可能未安装成功)")
+    return Response(
+        content=cluster.kubeconfig,
+        media_type="application/yaml",
+        headers={"Content-Disposition": 'attachment; filename="kubeconfig-' + cluster.name + '.conf"'},
     )
 
 

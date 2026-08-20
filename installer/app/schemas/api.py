@@ -187,6 +187,8 @@ class ClusterOut(BaseModel):
     run_node_host_id: int | None = None
     run_node_name: str | None = None
     status: str
+    api_server: str | None = None
+    has_kubeconfig: bool = False
     is_demo: bool
     created_at: datetime
     control_plane_count: int = 0
