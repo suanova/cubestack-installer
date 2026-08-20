@@ -57,7 +57,7 @@ usage() {
   --steps k1,k2         只运行指定模块
   --skip k1,k2          跳过模块
   --enable k1,k2        启用默认关闭模块(scale,gpu_operator,lws...)
-  --only HOST           仅处理指定节点(可多次)
+  --only HOST           仅处理指定节点(可多次; 支持 hostname 或 group 名, group 由 NODE_GROUP_<name> 定义)
   --fresh, --refresh    清断点续跑状态重新执行
   --skip-net            跳过网络模块
   --list                仅打印集群规划(只读)
@@ -96,6 +96,22 @@ while [ $# -gt 0 ]; do
     esac
 done
 ONLY_HOSTS="${ONLY_HOSTS#,}"
+# 展开 --only 中的 group 名: NODE_GROUP_<name> 定义在 cluster.conf 中, 值为逗号分隔的 hostname 列表
+# 例如 cluster.conf: NODE_GROUP_new_node="worker2,worker3" → --only new_node → --only worker2,worker3
+if [ -n "${ONLY_HOSTS}" ]; then
+    _resolved=""
+    for _token in ${ONLY_HOSTS//,/ }; do
+        _group_var="NODE_GROUP_${_token}"
+        if [ -n "${!_group_var:-}" ]; then
+            _resolved="${_resolved},${!_group_var}"
+            vlog "  --only ${_token} → 展开为: ${!_group_var}"
+        else
+            _resolved="${_resolved},${_token}"
+        fi
+    done
+    ONLY_HOSTS="${_resolved#,}"
+    unset _resolved _token _group_var
+fi
 export ONLY_HOSTS
 
 # ---------------- 配置加载 + 模块解析 ----------------

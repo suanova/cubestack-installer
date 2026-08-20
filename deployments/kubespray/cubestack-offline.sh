@@ -1334,6 +1334,15 @@ cmd_scale() {
         } > "${OFFLINE_VARS}"
     fi
 
+    # 自动检测 hosts.yml 中是否有扩容专用组(名由 SCALE_GROUP_NAME 控制, 默认 new_node)
+    # 存在时自动 --limit 该组, 仅对新增节点执行扩容, 避免对已有节点重复操作
+    local scale_group="${SCALE_GROUP_NAME:-new_node}"
+    if [ -z "$LIMIT_GROUP" ] && grep -q "^${scale_group}:" "${INVENTORY_DIR}/hosts.yml" 2>/dev/null; then
+        LIMIT_GROUP="${scale_group}"
+        LIMIT_FLAG="--limit ${LIMIT_GROUP}"
+        log "检测到 hosts.yml 中 ${scale_group} 组, 自动 --limit ${scale_group}(仅扩容新增节点)"
+    fi
+
     if [ -n "$LIMIT_GROUP" ]; then
         log "  ▶ 限定目标组: ${LIMIT_GROUP}"
 
