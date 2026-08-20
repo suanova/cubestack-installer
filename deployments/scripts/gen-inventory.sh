@@ -109,6 +109,25 @@ HOSTS_YML="${INV_DIR}/hosts.yml"
     echo "    kube_control_plane:"
     echo "    kube_node:"
 } > "${HOSTS_YML}"
+
+# ---------------- 生成扩容专用 group(由 SCALE_NODES / SCALE_GROUP_NAME 变量控制) ----------------
+# SCALE_NODES: 逗号分隔的 hostname 列表, 仅将这些节点放入扩容组
+# SCALE_GROUP_NAME: 扩容组名称, 默认 new_node(可通过 cluster.conf 或环境变量覆盖)
+# scale 时 kubespray 自动 --limit 该组, 避免对已有节点重复执行
+SCALE_NODES="${SCALE_NODES:-}"
+SCALE_GROUP_NAME="${SCALE_GROUP_NAME:-new_node}"
+if [ -n "${SCALE_NODES}" ]; then
+    {
+        echo "${SCALE_GROUP_NAME}:"
+        echo "  hosts:"
+        for hostname in ${SCALE_NODES//,/ }; do
+            hostname="$(echo "${hostname}" | xargs)"  # trim whitespace
+            [ -z "${hostname}" ] && continue
+            echo "    ${hostname}: {}"
+        done
+    } >> "${HOSTS_YML}"
+    ok "已生成扩容组 ${SCALE_GROUP_NAME}(目标节点: ${SCALE_NODES})"
+fi
 ok "已生成 hosts.yml: ${HOSTS_YML}"
 
 # ---------------- 生成 inventory.ini(兼容 installer 后端/UI) ----------------

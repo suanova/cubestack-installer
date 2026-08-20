@@ -45,6 +45,14 @@ NODES=(
   "worker,cubestack-k8s-worker01,10.244.1.21,52:54:00:49:e2:3c,16,8,100,ubuntu,-,vm"
 )
 
+# ---------------- 节点组(可选, 配合 --only 使用) ----------------
+# --only 支持直接指定 group 名(而非逐个 hostname):
+#   sudo ./deploy-cluster.sh --with-scale --only new_node
+# 展开规则: --only <name> 先检查 NODE_GROUP_<name> 变量, 有则展开为其中的 hostname 列表
+NODE_GROUP_new_node="cubestack-k8s-worker02"
+# 可定义多组, 逗号分隔:
+# NODE_GROUP_gpu_nodes="cubestack-k8s-worker03,cubestack-k8s-worker04"
+
 # ---------------- kubespray / 部署 ----------------
 # 注意: ${CLUSTER_NAME} 由 lib-common.sh 自动解析(环境变量或默认 cubestack-cluster)
 KUBESPRAY_INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}"

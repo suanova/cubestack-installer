@@ -264,12 +264,14 @@ for attempt in 1 2 3 4 5; do
 done
 [ "${STARTED}" = "1" ] || {
     echo -e "\033[31m【错误】VM ${VM_NAME} 启动失败,请检查磁盘/日志(virsh list --all / virsh start ${VM_NAME})\033[0m"; exit 1; }
-# 最终确认状态必须为 running(立即启动的保证)
+# 确认状态: Ubuntu cloud image 首次启动时 cloud-init 会在完成后自动关机,
+# 属于正常行为, 此时只需再次启动即可; 后续"最终确保运行"会兜底重试
 sleep 2
 if virsh domstate "${VM_NAME}" 2>/dev/null | grep -qi "running"; then
     echo -e "\033[32m✓ VM ${VM_NAME} 已启动(running)\033[0m"
 else
-    echo -e "\033[31m【错误】VM ${VM_NAME} 未处于 running 状态(当前: $(virsh domstate "${VM_NAME}" 2>/dev/null))\033[0m"; exit 1
+    echo -e "\033[33m⚠ VM ${VM_NAME} 未运行(cloud-init 首次关机是正常行为), 重新启动...\033[0m"
+    virsh start "${VM_NAME}" >/dev/null 2>&1 || true
 fi
 
 # ==================== 设置宿主机重启自动启动(autostart) ====================
