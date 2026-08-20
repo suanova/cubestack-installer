@@ -32,6 +32,9 @@ def _migrate() -> None:
         ]:
             if col not in host_cols:
                 conn.execute(sa.text(ddl))
+        task_cols = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(deploy_tasks)"))]
+        if "params" not in task_cols:
+            conn.execute(sa.text("ALTER TABLE deploy_tasks ADD COLUMN params TEXT"))
         cnode_cols = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(cluster_nodes)"))]
         if "node_type" not in cnode_cols:
             conn.execute(sa.text("ALTER TABLE cluster_nodes ADD COLUMN node_type VARCHAR(10) DEFAULT 'vm'"))
