@@ -175,6 +175,13 @@ class VmBatchCreateResult(BaseModel):
 
 # ---------- K8s 集群 ----------
 
+class ClusterScaleIn(BaseModel):
+    control_plane_vm_ids: list[int] = Field(default=[], description="新增控制平面节点(虚拟机 ID 列表)")
+    control_plane_host_ids: list[int] = Field(default=[], description="新增控制平面节点(宿主机 ID 列表)")
+    worker_vm_ids: list[int] = Field(default=[], description="新增工作节点(虚拟机 ID 列表)")
+    worker_host_ids: list[int] = Field(default=[], description="新增工作节点(宿主机 ID 列表)")
+
+
 class ClusterCreateIn(BaseModel):
     name: str = Field(min_length=2, max_length=80, description="集群名称")
     network_plugin: str = Field(default="calico", max_length=20, description="网络插件")

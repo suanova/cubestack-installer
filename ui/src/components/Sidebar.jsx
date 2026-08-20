@@ -66,6 +66,9 @@ export default function Sidebar({ open, onClose }) {
                 <NavLink to="/clusters" className={({ isActive }) => 'tree-link' + (isActive ? ' active' : '')} onClick={onClose}>
                   {t('nav.clusters')}
                 </NavLink>
+                <NavLink to="/scale" className={({ isActive }) => 'tree-link' + (isActive ? ' active' : '')} onClick={onClose}>
+                  {t('nav.scale')}
+                </NavLink>
                 <NavLink to="/tasks" className={({ isActive }) => 'tree-link' + (isActive ? ' active' : '')} onClick={onClose}>
                   {t('nav.tasks')}
                 </NavLink>

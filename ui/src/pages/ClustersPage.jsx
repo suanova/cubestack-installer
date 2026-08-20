@@ -31,6 +31,9 @@ export default function ClustersPage() {
   const [hosts, setHosts] = useState([])
   const [busy, setBusy] = useState(false)
   const [detail, setDetail] = useState(null)
+  const [scaleTarget, setScaleTarget] = useState(null)
+  const [scaleForm, setScaleForm] = useState({ role: 'worker', vmIds: [], hostIds: [] })
+  const [scaleBusy, setScaleBusy] = useState(false)
   const [deleting, setDeleting] = useState(null)
   const [deployingId, setDeployingId] = useState(null)
   const [wizard, setWizard] = useState(null)
@@ -107,6 +110,41 @@ export default function ClustersPage() {
         cpVmIds: adding ? f.cpVmIds.filter((x) => x !== id) : f.cpVmIds,
       }
     })
+  }
+
+  function toggleScaleVm(id) {
+    setScaleForm((f) => ({ ...f, vmIds: f.vmIds.includes(id) ? f.vmIds.filter((x) => x !== id) : [...f.vmIds, id] }))
+  }
+
+  function toggleScaleHost(id) {
+    setScaleForm((f) => ({ ...f, hostIds: f.hostIds.includes(id) ? f.hostIds.filter((x) => x !== id) : [...f.hostIds, id] }))
+  }
+
+  function openScale(c) {
+    setScaleForm({ role: 'worker', vmIds: [], hostIds: [] })
+    setScaleTarget(c)
+  }
+
+  function submitScale(e) {
+    e.preventDefault()
+    if (!scaleForm.vmIds.length && !scaleForm.hostIds.length) {
+      toast(t('clusters.scaleNeedNode'), 'error')
+      return
+    }
+    setScaleBusy(true)
+    clusterApi
+      .scale(
+        scaleTarget.id,
+        { role: scaleForm.role, vm_ids: scaleForm.vmIds, host_ids: scaleForm.hostIds },
+        token
+      )
+      .then((res) => {
+        toast(t('clusters.scaleStarted', { id: res.task_id }))
+        setScaleTarget(null)
+        if (detail) clusterApi.detail(detail.cluster.id, token).then(setDetail).catch(() => {})
+      })
+      .catch((err) => toast(err.message, 'error'))
+      .finally(() => setScaleBusy(false))
   }
 
   function toggleWorkerHost(id) {
@@ -494,6 +532,9 @@ export default function ClustersPage() {
             </p>
           )}
           <div className="modal-actions">
+            {detail.cluster.status === 'ready' && (
+              <button className="btn btn-primary" onClick={() => navigate('/scale')}>{t('clusters.scale')}</button>
+            )}
             {detail.last_task && (
               <button className="btn btn-ghost"
                 onClick={() => downloadTaskLog({ id: detail.last_task.id }, token).catch(() => {})}>
@@ -508,6 +549,60 @@ export default function ClustersPage() {
             )}
             <button className="btn btn-ghost" onClick={() => setDetail(null)}>{t('common.close')}</button>
           </div>
+        </Modal>
+      )}
+
+      {scaleTarget && (
+        <Modal title={t('clusters.scaleTitle', { name: scaleTarget.name })} onClose={() => setScaleTarget(null)} width="600px">
+          <form onSubmit={submitScale}>
+            <div className="field">
+              <span className="field-label">{t('clusters.scaleRole')}</span>
+              <select className="input" value={scaleForm.role}
+                onChange={(e) => setScaleForm({ ...scaleForm, role: e.target.value })}>
+                <option value="worker">{t('clusters.scaleRoleWorker')}</option>
+                <option value="master">{t('clusters.scaleRoleMaster')}</option>
+              </select>
+            </div>
+            <span className="td-hint">{t('clusters.scaleHint')}</span>
+            <div className="node-group">
+              <div className="group-label">{t('clusters.groupHosts')}</div>
+              <div className="checkbox-grid">
+                {availableHosts.map((h) => (
+                  <CheckboxCard
+                    key={'sch-' + h.id}
+                    label={h.name}
+                    sub={h.ip + ' · 🖥 宿主机'}
+                    checked={scaleForm.hostIds.includes(h.id)}
+                    onChange={() => toggleScaleHost(h.id)}
+                  />
+                ))}
+                {availableHosts.length === 0 && <span className="td-hint">{t('clusters.noHost')}</span>}
+              </div>
+            </div>
+            <div className="node-group">
+              <div className="group-label">{t('clusters.groupVms')}</div>
+              <div className="checkbox-grid">
+                {availableVms.map((v) => (
+                  <CheckboxCard
+                    key={'scv-' + v.id}
+                    label={v.name}
+                    sub={v.ip + ' · ☁ ' + v.cpu + 'c/' + v.memory_gb + 'G'}
+                    checked={scaleForm.vmIds.includes(v.id)}
+                    onChange={() => toggleScaleVm(v.id)}
+                  />
+                ))}
+                {availableVms.length === 0 && (
+                  <span className="td-hint">{vms.length ? t('clusters.allManaged') : t('clusters.noVm')}</span>
+                )}
+              </div>
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-ghost" onClick={() => setScaleTarget(null)}>{t('common.cancel')}</button>
+              <button type="submit" className="btn btn-primary" disabled={scaleBusy}>
+                {scaleBusy ? t('common.loading') : t('clusters.scale')}
+              </button>
+            </div>
+          </form>
         </Modal>
       )}
 

@@ -6,6 +6,7 @@ import { AuthProvider } from './context/AuthContext'
 import { I18nProvider } from './i18n'
 import ApiDocsPage from './pages/ApiDocsPage'
 import ClustersPage from './pages/ClustersPage'
+import ScalePage from './pages/ScalePage'
 import DashboardPage from './pages/DashboardPage'
 import HostsPage from './pages/HostsPage'
 import LoginPage from './pages/LoginPage'
@@ -36,7 +37,8 @@ export default function App() {
                   <Route path="/hosts" element={<HostsPage />} />
                   <Route path="/vms" element={<VmsPage />} />
                   <Route path="/clusters" element={<ClustersPage />} />
-                  <Route path="/tasks" element={<TasksPage typeFilter="cluster_install" titleKey="tasks.title" descKey="tasks.desc" />} />
+                  <Route path="/scale" element={<ScalePage />} />
+                  <Route path="/tasks" element={<TasksPage typeFilter={['cluster_install', 'cluster_scale', 'cluster_prepare', 'cluster_sshkey']} titleKey="tasks.title" descKey="tasks.desc" />} />
                   <Route path="/vm-tasks" element={<TasksPage typeFilter="vm_create" titleKey="vmtasks.title" descKey="vmtasks.desc" />} />
                   <Route
                     path="/users"
