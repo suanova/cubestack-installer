@@ -20,6 +20,7 @@ export default function RegisterPage() {
   const [errors, setErrors] = useState({})
   const [serverError, setServerError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [registered, setRegistered] = useState(false)
 
   function validate() {
     const e = {}
@@ -55,11 +56,28 @@ export default function RegisterPage() {
         return data
       })
       .then(() => {
+        setRegistered(true)
         toast(t('auth.registerPending'))
-        navigate('/login', { replace: true })
       })
       .catch((err) => setServerError(err.message))
       .finally(() => setBusy(false))
+  }
+
+  if (registered) {
+    return (
+      <AuthLayout title={t('auth.registerTitle')} subtitle={t('auth.registerSubtitle')}>
+        <div className="register-done">
+          <div className="register-done-icon">✅</div>
+          <p className="register-done-text">{t('auth.registerPending')}</p>
+          <button className="btn btn-primary btn-block" onClick={() => navigate('/login')}>
+            {t('auth.loginDirect')}
+          </button>
+        </div>
+        <p className="auth-switch">
+          {t('auth.haveAccount')}<Link to="/login">{t('auth.loginDirect')}</Link>
+        </p>
+      </AuthLayout>
+    )
   }
 
   return (
