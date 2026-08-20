@@ -220,6 +220,9 @@ export default function ClustersPage() {
     )
   }
 
+  // 创建集群时只能选择未被任何 K8s 集群纳入管理的节点
+  const availableVms = vms.filter((v) => !v.in_cluster)
+
   return (
     <div>
       <div className="page-head">
@@ -331,7 +334,7 @@ export default function ClustersPage() {
             <div className="field">
               <span className="field-label">{t('clusters.cpNodes')}</span>
               <div className="checkbox-grid">
-                {vms.map((v) => (
+                {availableVms.map((v) => (
                   <CheckboxCard
                     key={'cp-' + v.id}
                     label={v.name}
@@ -340,14 +343,16 @@ export default function ClustersPage() {
                     onChange={() => toggleCp(v.id)}
                   />
                 ))}
-                {vms.length === 0 && <span className="td-hint">{t('clusters.noVm')}</span>}
+                {availableVms.length === 0 && (
+                  <span className="td-hint">{vms.length ? t('clusters.allManaged') : t('clusters.noVm')}</span>
+                )}
               </div>
             </div>
 
             <div className="field">
               <span className="field-label">{t('clusters.workerNodes')}</span>
               <div className="checkbox-grid">
-                {vms.map((v) => (
+                {availableVms.map((v) => (
                   <CheckboxCard
                     key={'wk-' + v.id}
                     label={v.name}
@@ -356,6 +361,9 @@ export default function ClustersPage() {
                     onChange={() => toggleWorker(v.id)}
                   />
                 ))}
+                {availableVms.length === 0 && (
+                  <span className="td-hint">{vms.length ? t('clusters.allManaged') : t('clusters.noVm')}</span>
+                )}
               </div>
             </div>
 

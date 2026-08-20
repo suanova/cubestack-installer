@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from ..deps import get_current_user, get_db, require_admin
 from ...engine.executor import start_task
 from ...engine.providers import get_provider, list_providers
-from ...models import DeployTask, Host, User, VirtualMachine
+from ...models import ClusterNode, DeployTask, Host, User, VirtualMachine
 from ...schemas import (
     MessageOut,
     ProviderInfoOut,
@@ -26,6 +26,9 @@ def _to_out(vm: VirtualMachine, db: Session) -> VmOut:
     if host:
         out.host_name = host.name
         out.host_ip = host.ip
+    out.in_cluster = (
+        db.query(ClusterNode.id).filter(ClusterNode.vm_id == vm.id).first() is not None
+    )
     return out
 
 

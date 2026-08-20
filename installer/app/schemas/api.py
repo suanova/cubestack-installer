@@ -123,6 +123,7 @@ class VmOut(BaseModel):
     provider: str
     namespace: str | None
     status: str
+    in_cluster: bool = False  # 是否已被某个 K8s 集群纳入管理
     is_demo: bool
     created_at: datetime
 
