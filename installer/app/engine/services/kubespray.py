@@ -1,5 +1,6 @@
 """Kubespray 安装 K8s 集群(第三步:改 hosts.yml + 运行 cubestack-offline.sh)。"""
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -362,5 +363,127 @@ def run_cluster_install(task: DeployTask, db) -> None:
         db.commit()
     cluster.status = "ready"
     db.commit()
+    task.progress = 100
+    db.commit()
+
+
+def run_cluster_scale(task: DeployTask, db) -> None:
+    """扩容:向已有集群添加节点(重写 hosts.yml -> 免密 -> 运行 scale.yml)。"""
+    cluster = db.get(K8sCluster, task.target_id)
+    if cluster is None:
+        raise RuntimeError("集群不存在(可能已被删除)")
+    if not cluster.run_node_host_id:
+        raise RuntimeError("该集群未配置 Kubespray 运行节点,无法扩容")
+    run_node = db.get(Host, cluster.run_node_host_id)
+    if run_node is None:
+        raise RuntimeError("Kubespray 运行节点(宿主机)不存在")
+    nodes = db.query(ClusterNode).filter(ClusterNode.cluster_id == cluster.id).all()
+    key_file = "/home/" + run_node.ssh_user + "/.ssh/id_rsa"
+    hosts_yml = CUBESTACK_BASE + "/inventory/" + CUBESTACK_CLUSTER + "/hosts.yml"
+
+    log_line(task, db, "==== Kubespray 集群扩容任务 ====")
+    log_line(task, db, "集群: " + cluster.name + "  运行节点: " + run_node.name + " (" + run_node.ip + ")")
+    task.progress = 5
+    db.commit()
+
+    # 1. 读取当前 hosts.yml,找出新增节点(不在旧清单中的集群节点)
+    log_line(task, db, "[1/5] 读取当前 hosts.yml,识别待加入节点 ...")
+    rc, out, err = _ssh(run_node, "cat " + hosts_yml + " 2>/dev/null", timeout=30)
+    old_names = set()
+    if rc == 0 and out:
+        for ln in out.splitlines():
+            m = re.match(r"^    ([A-Za-z0-9_-]+):s*$", ln)
+            if m:
+                old_names.add(m.group(1))
+    new_nodes = [n for n in nodes if n.name not in old_names]
+    if not new_nodes:
+        raise RuntimeError("没有检测到需要加入集群的节点(所选节点可能已在 hosts.yml 中)")
+    role = new_nodes[0].role
+    log_line(task, db, "      新增节点(" + role + "): " + ", ".join(n.name + "(" + (n.ip or "-") + ")" for n in new_nodes))
+    task.progress = 15
+    db.commit()
+
+    # 2. 依据集群全部节点重新生成 hosts.yml(保留已有节点 + 追加新节点)
+    log_line(task, db, "[2/5] 重新生成 hosts.yml(全量节点 " + str(len(nodes)) + " 个)...")
+    inventory = _build_inventory_yaml(cluster, nodes, key_file)
+    rc, out, err = _ssh(run_node, "cat > " + hosts_yml + " <<'CSIEOF'\n" + inventory + "CSIEOF\necho WROTE_OK", timeout=30)
+    if rc != 0 or "WROTE_OK" not in out:
+        raise RuntimeError("写入 hosts.yml 失败: " + (err or out))
+    log_line(task, db, "      hosts.yml 已重写 ✓")
+    task.progress = 30
+    db.commit()
+
+    # 3. 免密到新节点
+    log_line(task, db, "[3/5] 配置运行节点到新节点的 SSH 免密 ...")
+    from .clusterprep import NODE_PASSWORD
+    for n in new_nodes:
+        if not n.ip:
+            log_line(task, db, "      " + n.name + " 无 IP,跳过免密")
+            continue
+        r3, o3, e3 = _ssh(run_node, "sshpass -p " + NODE_PASSWORD + " ssh-copy-id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@" + n.ip + " >/dev/null 2>&1 && echo COPIED", timeout=90)
+        log_line(task, db, "      " + n.name + " (" + n.ip + ") -> " + ("免密已配置 ✓" if "COPIED" in o3 else "免密推送失败 ✗"))
+    task.progress = 40
+    db.commit()
+
+    # 4. 运行 kubespray scale.yml(--limit 仅限新节点, 不重跑已有节点; 后台执行 + done 文件 + 轮询回传日志)
+    limit_hosts = ",".join(n.name for n in new_nodes)
+    scale_log = "/tmp/csi-scale-" + CUBESTACK_CLUSTER + ".log"
+    scale_done = "/tmp/csi-scale-" + CUBESTACK_CLUSTER + ".done"
+    play = (
+        "cd " + CUBESTACK_BASE + "/kubespray && .venv/bin/ansible-playbook scale.yml "
+        "-i " + hosts_yml + " --become --become-user=root --limit " + limit_hosts
+        + " -e @" + CUBESTACK_BASE + "/inventory/" + CUBESTACK_CLUSTER + "/group_vars/all/offline.yml "
+        + "--skip-tags system-packages,kube-proxy"
+    )
+    log_line(task, db, "[4/5] 执行 scale.yml(--limit " + limit_hosts + ") ...")
+    log_line(task, db, "      " + play)
+    rc, out, err = _ssh(run_node, "rm -f " + scale_log + " " + scale_done + "; ( setsid bash -c '" + play + " > " + scale_log + " 2>&1; echo $? > " + scale_done + "' ) >/dev/null 2>&1 </dev/null & echo STARTED", timeout=30)
+    if "STARTED" not in out:
+        r2, o2, e2 = _ssh(run_node, "pgrep -f 'ansible-playbook scale[.]yml' >/dev/null 2>&1 && echo RUNNING || echo NO", timeout=20)
+        if "RUNNING" not in o2:
+            raise RuntimeError("启动 scale.yml 失败: " + (err or out or "SSH 无响应"))
+        log_line(task, db, "      [提示] 启动 SSH 连接异常,但 scale 进程已启动,继续轮询 ...")
+    task.progress = 50
+    db.commit()
+
+    # 轮询日志(增量回传 + 截断防膨胀)
+    line_no = 1
+    final_rc = None
+    deadline = time.time() + 3600
+    _buf = []
+
+    def _flush():
+        nonlocal _buf
+        if _buf:
+            log_line(task, db, "\n".join(_buf))
+            _buf = []
+
+    while time.time() < deadline:
+        r, o, e = _ssh(run_node, "tail -n +" + str(line_no) + " " + scale_log + " 2>/dev/null", timeout=30)
+        if o and o.strip():
+            ls = o.splitlines()
+            line_no += len(ls)
+            for ln in ls:
+                _buf.append("      " + ln.rstrip())
+                if len(_buf) >= 20:
+                    _flush()
+                    if (task.log_text or "").count("\n") > 3000:
+                        task.log_text = "\n".join((task.log_text or "").splitlines()[-3000:]) + "\n"
+                        db.commit()
+        r2, d, e2 = _ssh(run_node, "test -f " + scale_done + " && cat " + scale_done + " || echo NOTDONE", timeout=30)
+        if "NOTDONE" not in d and d.strip():
+            final_rc = int(d.strip())
+            break
+        time.sleep(8)
+    _flush()
+    if final_rc is None:
+        raise RuntimeError("扩容超时(超过 1 小时),完整日志: " + scale_log)
+    if final_rc != 0:
+        raise RuntimeError("扩容失败(rc=" + str(final_rc) + "),完整日志: " + scale_log)
+
+    # 5. 完成
+    log_line(task, db, "")
+    log_line(task, db, "✅ 扩容完成: 已加入 " + str(len(new_nodes)) + " 个节点(" + ", ".join(n.name for n in new_nodes) + ")")
+    log_line(task, db, "   验证: kubectl --kubeconfig " + CUBESTACK_BASE + "/inventory/" + CUBESTACK_CLUSTER + "/artifacts/admin.conf get nodes")
     task.progress = 100
     db.commit()

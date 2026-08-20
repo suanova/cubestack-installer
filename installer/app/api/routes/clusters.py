@@ -8,6 +8,7 @@ from ...schemas import (
     ClusterCreateIn,
     ClusterDetailOut,
     ClusterOut,
+    ClusterScaleIn,
     DeployResult,
     MessageOut,
     NodeOut,
@@ -33,7 +34,7 @@ def _to_out(cluster: K8sCluster, db: Session) -> ClusterOut:
 def _last_task(cluster_id: int, db: Session) -> DeployTask | None:
     return (
         db.query(DeployTask)
-        .filter(DeployTask.target_id == cluster_id, DeployTask.type == "cluster_install")
+        .filter(DeployTask.target_id == cluster_id, DeployTask.type.in_(["cluster_install", "cluster_scale"]))
         .order_by(DeployTask.id.desc())
         .first()
     )
@@ -208,6 +209,52 @@ def sshkey_cluster(
     if not cluster.run_node_host_id:
         raise HTTPException(status_code=400, detail="请先为集群选择 Kubespray 运行节点(宿主机)")
     task = _start_cluster_task(cluster_id, "cluster_sshkey", "SSH 免密配置", db)
+    return DeployResult(task_id=task.id)
+
+
+@router.post("/{cluster_id}/scale", response_model=DeployResult, status_code=202)
+def scale_cluster(
+    cluster_id: int,
+    payload: ClusterScaleIn,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> DeployResult:
+    """向已有集群添加节点(扩容): 记录新节点 -> 生成任务调 scale playbook。"""
+    cluster = db.get(K8sCluster, cluster_id)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="集群不存在")
+    if cluster.status != "ready":
+        raise HTTPException(status_code=400, detail="集群未就绪,无法扩容")
+    if not cluster.run_node_host_id:
+        raise HTTPException(status_code=400, detail="该集群未配置 Kubespray 运行节点,无法扩容")
+    cp_vm_ids = set(payload.control_plane_vm_ids)
+    cp_host_ids = set(payload.control_plane_host_ids)
+    wk_vm_ids = set(payload.worker_vm_ids)
+    wk_host_ids = set(payload.worker_host_ids)
+    all_vm_ids = cp_vm_ids | wk_vm_ids
+    all_host_ids = cp_host_ids | wk_host_ids
+    if not all_vm_ids and not all_host_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一个要加入集群的节点")
+    if all_vm_ids & wk_vm_ids or all_host_ids & wk_host_ids:
+        raise HTTPException(status_code=400, detail="同一节点不能同时作为控制平面和工作节点")
+    vms = db.query(VirtualMachine).filter(VirtualMachine.id.in_(all_vm_ids)).all() if all_vm_ids else []
+    if len(vms) != len(all_vm_ids):
+        raise HTTPException(status_code=400, detail="存在无效的虚拟机选择")
+    hosts = db.query(Host).filter(Host.id.in_(all_host_ids)).all() if all_host_ids else []
+    if len(hosts) != len(all_host_ids):
+        raise HTTPException(status_code=400, detail="存在无效的宿主机选择")
+    taken_vm = db.query(ClusterNode.vm_id).filter(ClusterNode.vm_id.in_(all_vm_ids)).all() if all_vm_ids else []
+    taken_host = db.query(ClusterNode.host_id).filter(ClusterNode.host_id.in_(all_host_ids)).all() if all_host_ids else []
+    if taken_vm or taken_host:
+        raise HTTPException(status_code=400, detail="部分节点已被其他集群纳入管理")
+    for vm in vms:
+        role = "control_plane" if vm.id in cp_vm_ids else "worker"
+        db.add(ClusterNode(cluster_id=cluster.id, vm_id=vm.id, node_type="vm", name=vm.name, ip=vm.ip, role=role))
+    for h in hosts:
+        role = "control_plane" if h.id in cp_host_ids else "worker"
+        db.add(ClusterNode(cluster_id=cluster.id, host_id=h.id, node_type="host", name=h.name, ip=h.ip, role=role))
+    db.commit()
+    task = _start_cluster_task(cluster_id, "cluster_scale", "扩容", db)
     return DeployResult(task_id=task.id)
 
 

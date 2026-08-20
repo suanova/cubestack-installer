@@ -6,6 +6,7 @@ import { useI18n } from '../i18n'
 const TYPE_MAP = {
   vm_create: { key: 'tasks.typeVm', cls: 'badge-cyan' },
   cluster_install: { key: 'tasks.typeCluster', cls: 'badge-violet' },
+  cluster_scale: { key: 'tasks.typeScale', cls: 'badge-warning' },
 }
 
 const STATUS_MAP = {
@@ -65,7 +66,9 @@ export default function TasksPage({ typeFilter, titleKey, descKey }) {
       .catch(() => {})
   }
 
-  const visibleTasks = typeFilter ? tasks.filter((tk) => tk.type === typeFilter) : tasks
+  const visibleTasks = typeFilter
+    ? tasks.filter((tk) => (Array.isArray(typeFilter) ? typeFilter.includes(tk.type) : tk.type === typeFilter))
+    : tasks
   const hasRunning = visibleTasks.some((tk) => tk.status === 'running' || tk.status === 'pending')
 
   return (

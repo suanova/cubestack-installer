@@ -52,6 +52,9 @@ def _run(task_id: int) -> None:
         elif task.type == "cluster_sshkey":
             from .services.clusterprep import run_cluster_sshkey
             run_cluster_sshkey(task, db)
+        elif task.type == "cluster_scale":
+            from .services.kubespray import run_cluster_scale
+            run_cluster_scale(task, db)
         else:
             raise ValueError("未知任务类型: " + str(task.type))
 
