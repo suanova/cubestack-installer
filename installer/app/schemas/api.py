@@ -182,7 +182,7 @@ class ClusterCreateIn(BaseModel):
     run_node_host_id: int | None = Field(
         default=None, description="Kubespray 运行节点(宿主机 ID,None=平台管理机本机执行)"
     )
-    control_plane_vm_ids: list[int] = Field(min_length=1, description="控制平面节点(虚拟机 ID 列表)")
+    control_plane_vm_ids: list[int] = Field(min_length=3, description="控制平面节点(虚拟机 ID 列表,至少 3 个)")
     worker_vm_ids: list[int] = Field(default=[], description="工作节点(虚拟机 ID 列表)")
     ssh_key: str | None = Field(default=None, description="SSH 私钥(可选,留空使用平台密钥)")
 

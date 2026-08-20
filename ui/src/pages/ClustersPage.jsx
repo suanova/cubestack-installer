@@ -77,22 +77,30 @@ export default function ClustersPage() {
   }
 
   function toggleCp(id) {
-    setForm((f) => ({
-      ...f,
-      cp_ids: f.cp_ids.includes(id) ? f.cp_ids.filter((x) => x !== id) : [...f.cp_ids, id],
-    }))
+    setForm((f) => {
+      const adding = !f.cp_ids.includes(id)
+      return {
+        ...f,
+        cp_ids: adding ? [...f.cp_ids, id] : f.cp_ids.filter((x) => x !== id),
+        worker_ids: adding ? f.worker_ids.filter((x) => x !== id) : f.worker_ids,
+      }
+    })
   }
 
   function toggleWorker(id) {
-    setForm((f) => ({
-      ...f,
-      worker_ids: f.worker_ids.includes(id) ? f.worker_ids.filter((x) => x !== id) : [...f.worker_ids, id],
-    }))
+    setForm((f) => {
+      const adding = !f.worker_ids.includes(id)
+      return {
+        ...f,
+        worker_ids: adding ? [...f.worker_ids, id] : f.worker_ids.filter((x) => x !== id),
+        cp_ids: adding ? f.cp_ids.filter((x) => x !== id) : f.cp_ids,
+      }
+    })
   }
 
   function submitCreate(e) {
     e.preventDefault()
-    if (!form.cp_ids.length) {
+    if (form.cp_ids.length < 3) {
       toast(t('clusters.needCp'), 'error')
       return
     }
@@ -333,6 +341,7 @@ export default function ClustersPage() {
 
             <div className="field">
               <span className="field-label">{t('clusters.cpNodes')}</span>
+              <span className="td-hint">{t('clusters.cpHint')}</span>
               <div className="checkbox-grid">
                 {availableVms.map((v) => (
                   <CheckboxCard
