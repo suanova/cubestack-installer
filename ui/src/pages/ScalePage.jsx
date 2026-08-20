@@ -90,7 +90,7 @@ export default function ScalePage() {
   }
 
   return (
-    <div>
+    <div className="scale-page">
       <div className="page-head">
         <div>
           <h1 className="page-title">{t('scale.title')}</h1>
@@ -100,8 +100,8 @@ export default function ScalePage() {
 
       <div className="card">
         <form onSubmit={submit}>
-          <div className="field">
-            <span className="field-label">{t('scale.cluster')}</span>
+          <div className="node-group">
+            <div className="group-label">{t('scale.cluster')}</div>
             <select className="input" value={clusterId} onChange={(e) => setClusterId(e.target.value)}>
               {readyClusters.map((c) => (
                 <option key={c.id} value={c.id}>{c.name} · {c.api_server || c.k8s_version}</option>
