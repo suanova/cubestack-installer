@@ -399,7 +399,7 @@ export default function VmsPage() {
           <p className="modal-text">{resultAllDone ? t('vms.batchDone') : t('vms.batchPolling')}</p>
           <div className="modal-actions">
             <button className="btn btn-ghost" onClick={() => setResult(null)}>{t('common.close')}</button>
-            <button className="btn btn-primary" onClick={() => navigate('/tasks')}>{t('vms.batchWatch')}</button>
+            <button className="btn btn-primary" onClick={() => navigate('/vm-tasks')}>{t('vms.batchWatch')}</button>
           </div>
         </Modal>
       )}

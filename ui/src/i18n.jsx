@@ -136,7 +136,7 @@ const dict = {
     'vms.needNames': '请填写至少一个虚拟机名称', 'vms.badName': '名称只能包含字母数字与 -_.',
     'vms.batchCreated': '已提交 {n} 台虚拟机创建任务',
     'vms.batchResultTitle': '批量创建结果', 'vms.batchPolling': '正在等待虚拟机启动并分配 IP...',
-    'vms.batchDone': '全部完成', 'vms.batchIp': 'IP 地址', 'vms.batchWatch': '查看部署任务日志',
+    'vms.batchDone': '全部完成', 'vms.batchIp': 'IP 地址', 'vms.batchWatch': '查看虚拟机安装日志',
     // 集群
     'clusters.title': '集群管理', 'clusters.desc': '基于 Kubespray 一键部署生产级 Kubernetes 集群',
     'clusters.create': '创建集群', 'clusters.createTitle': '创建集群 (Kubespray)',
@@ -325,7 +325,7 @@ const dict = {
     'vms.needNames': 'Enter at least one VM name', 'vms.badName': 'Names may only contain letters, digits, - _ .',
     'vms.batchCreated': '{n} VM creation tasks submitted',
     'vms.batchResultTitle': 'Batch Result', 'vms.batchPolling': 'Waiting for VMs to boot and get an IP...',
-    'vms.batchDone': 'All done', 'vms.batchIp': 'IP address', 'vms.batchWatch': 'View task logs',
+    'vms.batchDone': 'All done', 'vms.batchIp': 'IP address', 'vms.batchWatch': 'View VM install logs',
     // Clusters
     'clusters.title': 'Cluster Management', 'clusters.desc': 'Deploy production-grade Kubernetes clusters with Kubespray',
     'clusters.create': 'Create Cluster', 'clusters.createTitle': 'Create Cluster (Kubespray)',
