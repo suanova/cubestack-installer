@@ -422,7 +422,7 @@ def run_cluster_scale(task: DeployTask, db) -> None:
         log_line(task, db, "      [提示] 集群未保存 kubeconfig,跳过恢复")
     else:
         artifacts_dir = CUBESTACK_BASE + "/inventory/" + CUBESTACK_CLUSTER + "/artifacts"
-        rc, out, err = _ssh(run_node, "mkdir -p " + artifacts_dir + " && cat > " + artifacts_dir + "/admin.conf <<'CSIEOF'\n" + cluster.kubeconfig + "CSIEOF\nchmod 600 " + artifacts_dir + "/admin.conf && echo WROTE_OK", timeout=30)
+        rc, out, err = _ssh(run_node, "mkdir -p " + artifacts_dir + " && cat > /tmp/csi-admin.conf <<'CSIEOF'\n" + cluster.kubeconfig + "CSIEOF\nsudo mv /tmp/csi-admin.conf " + artifacts_dir + "/admin.conf && sudo chmod 600 " + artifacts_dir + "/admin.conf && echo WROTE_OK", timeout=30)
         if rc != 0 or "WROTE_OK" not in out:
             log_line(task, db, "      [提示] 写入 admin.conf 失败: " + (err or out)[:120])
         else:

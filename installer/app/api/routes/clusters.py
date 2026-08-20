@@ -237,7 +237,7 @@ def scale_cluster(
     all_host_ids = cp_host_ids | wk_host_ids
     if not all_vm_ids and not all_host_ids:
         raise HTTPException(status_code=400, detail="请至少选择一个要加入集群的节点")
-    if all_vm_ids & wk_vm_ids or all_host_ids & wk_host_ids:
+    if cp_vm_ids & wk_vm_ids or cp_host_ids & wk_host_ids:
         raise HTTPException(status_code=400, detail="同一节点不能同时作为控制平面和工作节点")
     vms = db.query(VirtualMachine).filter(VirtualMachine.id.in_(all_vm_ids)).all() if all_vm_ids else []
     if len(vms) != len(all_vm_ids):
@@ -245,16 +245,17 @@ def scale_cluster(
     hosts = db.query(Host).filter(Host.id.in_(all_host_ids)).all() if all_host_ids else []
     if len(hosts) != len(all_host_ids):
         raise HTTPException(status_code=400, detail="存在无效的宿主机选择")
-    taken_vm = db.query(ClusterNode.vm_id).filter(ClusterNode.vm_id.in_(all_vm_ids)).all() if all_vm_ids else []
-    taken_host = db.query(ClusterNode.host_id).filter(ClusterNode.host_id.in_(all_host_ids)).all() if all_host_ids else []
-    if taken_vm or taken_host:
-        raise HTTPException(status_code=400, detail="部分节点已被其他集群纳入管理")
+    # 允许选择已被其他集群/本集群纳管的节点(如状态过期需重新加入); 同集群已有记录自动去重
     for vm in vms:
         role = "control_plane" if vm.id in cp_vm_ids else "worker"
-        db.add(ClusterNode(cluster_id=cluster.id, vm_id=vm.id, node_type="vm", name=vm.name, ip=vm.ip, role=role))
+        dup = db.query(ClusterNode).filter(ClusterNode.cluster_id == cluster.id, ClusterNode.vm_id == vm.id).first()
+        if dup is None:
+            db.add(ClusterNode(cluster_id=cluster.id, vm_id=vm.id, node_type="vm", name=vm.name, ip=vm.ip, role=role))
     for h in hosts:
         role = "control_plane" if h.id in cp_host_ids else "worker"
-        db.add(ClusterNode(cluster_id=cluster.id, host_id=h.id, node_type="host", name=h.name, ip=h.ip, role=role))
+        dup = db.query(ClusterNode).filter(ClusterNode.cluster_id == cluster.id, ClusterNode.host_id == h.id).first()
+        if dup is None:
+            db.add(ClusterNode(cluster_id=cluster.id, host_id=h.id, node_type="host", name=h.name, ip=h.ip, role=role))
     db.commit()
     task = _start_cluster_task(cluster_id, "cluster_scale", "扩容", db)
     return DeployResult(task_id=task.id)
