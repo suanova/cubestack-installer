@@ -1071,7 +1071,7 @@ print("%s|%s|%s" % (
             "${user}@${host}" \
             "sudo bash -c '
                 hostname
-                systemctl is-active kubelet 2>/dev/null | grep -q active && { echo YES; exit 0; }
+                systemctl is-active kubelet 2>/dev/null | grep -qx active && { echo YES; exit 0; }
                 [ -d /etc/kubernetes ] && [ -n \"\$(ls -A /etc/kubernetes 2>/dev/null)\" ] && { echo YES; exit 0; }
                 [ -d /var/lib/etcd/member ] && { echo YES; exit 0; }
                 [ -d /var/lib/kubelet ] && [ -n \"\$(ls -A /var/lib/kubelet 2>/dev/null)\" ] && { echo YES; exit 0; }
