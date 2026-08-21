@@ -44,7 +44,6 @@
 # containerd_metrics_grpc_histogram: false
 
 # Registries defined within containerd.
-# containerd_registries_mirrors:
 #  - prefix: docker.io
 #    mirrors:
 #     - host: https://registry-1.docker.io
@@ -57,29 +56,5 @@
 #   - registry: 10.0.0.2:5000
 #     username: user
 #     password: pass
-
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
-
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
-
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
-
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
-
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
-
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
-
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
-
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
-
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
-
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
-
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
-
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
 
 # containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)

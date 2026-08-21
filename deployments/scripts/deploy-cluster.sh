@@ -67,13 +67,13 @@ usage() {
   --phase env|k8s|addon 仅运行指定阶段(可逗号分隔)
   --only HOST           仅处理指定节点(可多次; 支持 hostname 或 group 名)
   --fresh, --refresh    清断点续跑状态重新执行
-  --skip-net            跳过 vm_network 模块
+  --skip-net            跳过 vm_network 模块(裸金属集群需要 --skip-net, 虚拟机无需改参)
   --list                仅打印集群规划(只读)
   --list-steps          列出全部模块
   --help, -h            显示本帮助
 
 示例:
-  sudo ./deploy-cluster.sh --with-k8s
+  sudo ./deploy-cluster.sh --with-k8s --skip-net   # 裸金属集群加 --skip-net，虚拟机无需该参，去掉skip-net
   sudo ./deploy-cluster.sh --steps vm_create,k8s_deploy
   sudo ./deploy-cluster.sh --skip k8s_hosts --with-k8s
   sudo ./deploy-cluster.sh --enable gpu_operator,lws
