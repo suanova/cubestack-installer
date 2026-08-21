@@ -1,0 +1,235 @@
+#!/bin/bash
+# ============================================================
+# lib-module.sh — 部署模块框架(自动发现 + 元数据 + 调度)
+# 取代旧 lib-deploy.sh 手工注册表: 模块 = modules/<NN_phase>/<NN>_<category>_<action>.sh
+# 新增/删除/修改模块只需操作 modules/ 下的单个文件, 无需改任何注册表/入口。
+#
+# 目录组织(按部署环境准备的阶段划分子目录):
+#   modules/01_env/    阶段一: 环境准备(VM/SSH/HAProxy/Keepalived — 发生在部署 kubespray 之前)
+#   modules/02_k8s/    阶段二: 离线部署 kubespray(不依赖 VM 还是裸金属)
+#   modules/03_addon/  阶段三: 附加组件(集群部署后的扩展组件)
+#
+# 模块命名规范: <NN>_<category>_<action>.sh
+#   NN       两位序号, 决定执行顺序(01 最早, 与子目录 NN_ 前缀共同决定全局顺序)
+#   category 模块分类: vm / env / k8s / gpu / lb / registry ...
+#   action   模块动作: 如 network / create / deploy / scale
+#
+# 模块头部元数据注释(标准格式, 框架自动解析):
+#   # MODULE: <key>            模块唯一标识(缺省 = 文件名去掉 NN_ 前缀)
+#   # DESC: <一句话描述>
+#   # PHASE: <env|k8s|addon>   阶段: env=环境准备 k8s=离线部署 addon=附加组件
+#   # DEFAULT: <0|1>           是否默认启用(0=需 --enable / TOGGLE / --steps)
+#   # REPEAT: <0|1>            1=可重复执行(每次执行且不写断点状态)
+#   # TOGGLE: <VAR>            (可选) cluster.conf 变量名, 值为 true 时自动启用
+# 示例:
+#   # MODULE: k8s_deploy
+#   # DESC: 部署 kubespray 集群(离线)
+#   # PHASE: k8s
+#   # DEFAULT: 0
+#   # REPEAT: 0
+#   # TOGGLE: K8S_ENABLED
+#
+# 旧 key 别名(向后兼容, 旧用法 --steps vm,k8s 等仍然有效):
+#   net→vm_network ssh_key→vm_sshkey vm→vm_create ssh_passwordless→k8s_passwordless
+#   worker_bm→k8s_workerbm hosts→k8s_hosts inventory→k8s_inventory ntp→k8s_ntp
+#   k8s→k8s_deploy scale→k8s_scale lws→gpu_lws
+# ============================================================
+
+MODULES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/modules"
+
+# ---------------- 旧 key → 新 key 别名(向后兼容) ----------------
+declare -A MODULE_ALIAS=(
+    [net]=vm_network
+    [ssh_key]=vm_sshkey
+    [vm]=vm_create
+    [ssh_passwordless]=k8s_passwordless
+    [worker_bm]=k8s_workerbm
+    [hosts]=k8s_hosts
+    [inventory]=k8s_inventory
+    [ntp]=k8s_ntp
+    [k8s]=k8s_deploy
+    [scale]=k8s_scale
+    [gpu_operator]=gpu_operator
+    [lws]=gpu_lws
+)
+
+# 归一化模块 key(旧别名 → 新 key; 未知 key 原样返回)
+normalize_key() {
+    local k="$1"
+    [ -n "${MODULE_ALIAS[$k]:-}" ] && echo "${MODULE_ALIAS[$k]}" || echo "$k"
+}
+
+# 读取模块头部元数据字段
+# 用法: module_meta <file> <FIELD>
+module_meta() {
+    sed -nE "s/^#[[:space:]]*${2}:[[:space:]]*(.*)$/\1/p" "$1" | head -1
+}
+
+# ---------------- 模块自动发现(子目录递归, 按 目录序号+文件序号 排序) ----------------
+# 结果写入并行数组: MODULE_KEY / MODULE_DESC / MODULE_SCRIPT(相对 modules/ 的路径) /
+#   MODULE_DEFAULT / MODULE_REPEAT / MODULE_PHASE / MODULE_TOGGLE
+discover_modules() {
+    MODULE_KEY=(); MODULE_DESC=(); MODULE_SCRIPT=(); MODULE_DEFAULT=(); MODULE_REPEAT=(); MODULE_PHASE=(); MODULE_TOGGLE=()
+    local f dir base key rel
+    # 遍历 modules/NN_*/NN_*.sh(两级), 按路径字典序 = 目录序号+文件序号 排序
+    for f in "${MODULES_DIR}"/[0-9][0-9]_*/[0-9][0-9]_*.sh; do
+        [ -f "${f}" ] || continue
+        dir="$(basename "$(dirname "${f}")")"
+        base="$(basename "${f}" .sh)"
+        rel="${dir}/${base}.sh"
+        key="$(module_meta "${f}" MODULE)"
+        [ -z "${key}" ] && key="${base#*_}"          # 缺省: 去掉 NN_ 前缀
+        MODULE_KEY+=("${key}")
+        MODULE_DESC+=("$(module_meta "${f}" DESC)")
+        MODULE_SCRIPT+=("${rel}")
+        MODULE_DEFAULT+=("$(module_meta "${f}" DEFAULT)")
+        MODULE_REPEAT+=("$(module_meta "${f}" REPEAT)")
+        MODULE_PHASE+=("$(module_meta "${f}" PHASE)")
+        MODULE_TOGGLE+=("$(module_meta "${f}" TOGGLE)")
+    done
+}
+
+# 模块索引(-1=不存在)
+module_index() {
+    local key="$1" i
+    for i in "${!MODULE_KEY[@]}"; do
+        [ "${MODULE_KEY[$i]}" = "${key}" ] && { echo "$i"; return 0; }
+    done
+    echo -1
+    return 1
+}
+
+# 模块是否应默认启用: DEFAULT=1 或 TOGGLE 变量为 true/1/yes/on
+module_default_on() {
+    local i="$1" tgl val
+    [ "${MODULE_DEFAULT[$i]:-0}" = "1" ] && return 0
+    tgl="${MODULE_TOGGLE[$i]:-}"
+    [ -n "${tgl}" ] || return 1
+    val="${!tgl:-false}"
+    case "${val,,}" in
+        true|1|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ---------------- 运行步骤解析 ----------------
+# 优先级: --steps(精确) > 默认启用 + --enable/--with-xxx - --skip
+# 结果写入全局 RUN_STEPS(按模块文件顺序)
+# 用法: resolve_run_steps <steps> <skip> <enable> [phase_filter]
+resolve_run_steps() {
+    local steps_arg="$1" skip_arg="$2" enable_arg="$3" phase_filter="$4"
+    local s k nk i found=0
+    RUN_STEPS=()
+
+    # 阶段过滤: 只保留该阶段模块
+    _phase_ok() {
+        [ -z "${phase_filter}" ] && return 0
+        local p
+        for p in ${phase_filter//,/ }; do
+            [ "${MODULE_PHASE[$1]:-}" = "${p}" ] && return 0
+        done
+        return 1
+    }
+
+    if [ -n "${steps_arg}" ]; then
+        # 精确模式: 只运行指定的(按模块文件顺序)
+        for s in ${steps_arg//,/ }; do
+            nk="$(normalize_key "${s}")"
+            module_index "${nk}" >/dev/null 2>&1 || { err "未知模块: ${s}(可用 --list-steps 查看)"; return 1; }
+        done
+        for i in "${!MODULE_KEY[@]}"; do
+            _phase_ok "$i" || continue
+            for s in ${steps_arg//,/ }; do
+                [ "$(normalize_key "${s}")" = "${MODULE_KEY[$i]}" ] && RUN_STEPS+=("${MODULE_KEY[$i]}")
+            done
+        done
+        return 0
+    fi
+
+    # 默认模式: 默认启用 + 显式启用 - 显式跳过
+    for i in "${!MODULE_KEY[@]}"; do
+        _phase_ok "$i" || continue
+        module_default_on "$i" && RUN_STEPS+=("${MODULE_KEY[$i]}")
+    done
+    for s in ${enable_arg//,/ }; do
+        [ -z "${s}" ] && continue
+        nk="$(normalize_key "${s}")"
+        module_index "${nk}" >/dev/null 2>&1 || { err "未知模块: ${s}"; return 1; }
+        found=0
+        for k in "${RUN_STEPS[@]:-}"; do [ "${k}" = "${nk}" ] && found=1; done
+        [ "${found}" = "0" ] && RUN_STEPS+=("${nk}")
+    done
+    for s in ${skip_arg//,/ }; do
+        [ -z "${s}" ] && continue
+        nk="$(normalize_key "${s}")"
+        local comp=() k2
+        for k2 in "${RUN_STEPS[@]}"; do [ "${k2}" != "${nk}" ] && comp+=("${k2}"); done
+        RUN_STEPS=("${comp[@]}")
+    done
+}
+
+# ---------------- 调度: 执行单个模块(断点续跑感知) ----------------
+# run_module <key>  成功/跳过返回 0; 失败返回 1
+run_module() {
+    local key="$1" idx script repeat
+    idx="$(module_index "${key}")"
+    [ "${idx}" -ge 0 ] || { err "未知模块: ${key}"; return 1; }
+    repeat="${MODULE_REPEAT[$idx]:-0}"
+
+    # 断点续跑: 已完成则跳过(可重复执行模块除外)
+    if [ "${repeat}" != "1" ] && [ "$(get_state "${key}")" = "done" ]; then
+        say "[${key}] 已完成,跳过(--fresh 清状态可重跑)"
+        return 0
+    fi
+
+    script="${MODULES_DIR}/${MODULE_SCRIPT[$idx]}"
+    [ -f "${script}" ] || { err "模块脚本缺失: ${script}"; return 1; }
+    say "[${key}] ${MODULE_DESC[$idx]:-${MODULE_SCRIPT[$idx]}} ..."
+    say "  执行: ${script}"
+    if bash "${script}"; then
+        [ "${repeat}" = "1" ] || save_state "${key}" "done"
+        ok "模块 [${key}] 完成"
+        return 0
+    else
+        err "模块 [${key}] 执行失败(${script}),退出码 $?"
+        return 1
+    fi
+}
+
+# ---------------- 打印 ----------------
+print_steps() {
+    say "==== 部署模块列表(modules/, 自动发现) ===="
+    for i in "${!MODULE_KEY[@]}"; do
+        local flag="[${MODULE_DEFAULT[$i]:-0}]"
+        local desc="${MODULE_DESC[$i]:-}"
+        local phase="${MODULE_PHASE[$i]:-?}"
+        local tgl="${MODULE_TOGGLE[$i]:-}"
+        [ "${MODULE_REPEAT[$i]:-0}" = "1" ] && desc="${desc} [可重复执行]"
+        [ -n "${tgl}" ] && flag="[${tgl}]"
+        printf "  %-18s %-6s 启用:%-8s %s\n" "${MODULE_KEY[$i]}" "(${MODULE_SCRIPT[$i]})" "${phase}/${flag}" "${desc}"
+    done
+    echo "---------------------------------------------"
+    echo "  --steps k1,k2  只运行指定模块    --skip k1,k2  跳过模块"
+    echo "  --phase env|k8s|addon  仅运行指定阶段"
+    echo "  --enable k     启用默认关闭模块(如 gpu_operator/lws)   --with-k8s = --enable k8s"
+    echo "  --list-steps   查看本列表"
+}
+
+print_plan() {
+    say "==== 集群规划(配置: ${CLUSTER_CONF}) ===="
+    echo "  网络模式: ${NET_MODE:-bridge}   虚拟机网段: ${VM_SUBNET:-10.244.0.0/16}   物理Worker: ${PHYS_WORKER_NET:-10.66.1.0/24}"
+    echo "  SSH密钥: ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}   默认密码: ${SSH_DEFAULT_PASSWORD:-<未配置>}"
+    echo "  本次执行模块: ${RUN_STEPS[*]:-<空>}"
+    echo "  节点规划(类型由 NODES 第10字段 node_type 决定: vm=虚拟机 / bm=裸金属):"
+    local line
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
+        if node_is_vm "${role}" "${mac}" "${mem}" "${node_type:-}"; then
+            echo "    [${role}] ${hostname}  ${ip}  (vm, ${mem}G/${cpu}C/${disk}G, user=${user})"
+        else
+            echo "    [${role}] ${hostname}  ${ip}  (bm 裸金属, user=${user})"
+        fi
+    done
+    echo "---------------------------------------------"
+}

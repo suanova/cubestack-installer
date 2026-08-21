@@ -51,9 +51,68 @@ KUBE_SERVICE_ADDRESSES="${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18}"
 KUBE_PODS_SUBNET="${KUBE_PODS_SUBNET:-10.233.64.0/18}"
 NODELOCAL_DNS_IP="${NODELOCAL_DNS_IP:-169.254.25.10}"
 
+# ---------------- 集群内 Registry(kubespray addon, 默认不部署) ----------------
+# 集群外镜像仓库统一使用 Harbor; 集群内 registry 默认不部署(REGISTRY_ENABLED=0)
+REGISTRY_ENABLED="${REGISTRY_ENABLED:-0}"
+REGISTRY_DOMAIN="${REGISTRY_DOMAIN:-registry.local}"
+REGISTRY_IP="${REGISTRY_IP:-10.66.1.245}"
+REGISTRY_PORT="${REGISTRY_PORT:-5000}"
+REGISTRY_SERVICE_TYPE="${REGISTRY_SERVICE_TYPE:-loadbalancer}"
+REGISTRY_NODEPORT="${REGISTRY_NODEPORT:-31148}"
+
+# ---------------- Harbor 镜像仓库(集群外私有仓库, P1-4, 环境准备阶段) ----------------
+# 集群外容器镜像仓库唯一方案(替代原本地 docker registry), 部署前于宿主机就绪;
+# 由 modules/01_env/04_harbor.sh 部署
+HARBOR_ENABLED="${HARBOR_ENABLED:-false}"
+HARBOR_DOMAIN="${HARBOR_DOMAIN:-harbor.local}"
+HARBOR_IP="${HARBOR_IP:-10.66.1.246}"                    # Harbor 监听地址(宿主机 IP)
+HARBOR_NAMESPACE="${HARBOR_NAMESPACE:-harbor}"
+HARBOR_STORAGE_CLASS="${HARBOR_STORAGE_CLASS:-local-path}"
+
+# ---------------- MetalLB 负载均衡地址池(由脚本同步到 addons.yml, 不硬编码) ----------------
+# 需与节点网段不冲突(节点在 10.66.1.147~232, 池用 .240~.250)
+METALLB_POOL="${METALLB_POOL:-10.66.1.240-10.66.1.250}"
+
+# ---------------- 组件开关(统一数据源, 由 sync-addons-config.sh 同步到 kubespray addons.yml) ----------------
+METALLB_ENABLED="${METALLB_ENABLED:-true}"                # MetalLB
+LOCAL_PATH_ENABLED="${LOCAL_PATH_ENABLED:-false}"       # local-path-provisioner(默认 StorageClass, 默认不启动)
+METRICS_SERVER_ENABLED="${METRICS_SERVER_ENABLED:-true}"  # metrics-server
+HELM_ENABLED="${HELM_ENABLED:-true}"                      # Helm
+INGRESS_NGINX_ENABLED="${INGRESS_NGINX_ENABLED:-false}"   # ingress-nginx
+DASHBOARD_ENABLED="${DASHBOARD_ENABLED:-false}"           # dashboard
+CERT_MANAGER_ENABLED="${CERT_MANAGER_ENABLED:-false}"     # cert-manager
+GATEWAY_API_ENABLED="${GATEWAY_API_ENABLED:-false}"       # Gateway API CRDs
+
+# ---------------- 附加组件开关(控制 deploy-cluster.sh 默认执行哪些 addon 模块) ----------------
+K8S_ENABLED="${K8S_ENABLED:-false}"                     # modules/02_k8s/06_k8s_deploy.sh(= --with-k8s)
+K8S_SCALE_ENABLED="${K8S_SCALE_ENABLED:-false}"         # modules/02_k8s/07_k8s_scale.sh(= --with-scale)
+GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-false}"   # modules/03_addon/01_gpu_operator.sh
+LWS_ENABLED="${LWS_ENABLED:-false}"                     # modules/03_addon/02_gpu_lws.sh
+HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # modules/01_env/05_lb_haproxy.sh(部署前准备)
+KEEPALIVED_ENABLED="${KEEPALIVED_ENABLED:-false}"       # modules/01_env/06_lb_keepalived.sh(部署前准备)
+KEEPALIVED_VIP="${KEEPALIVED_VIP:-}"                    # Keepalived VIP(留空=取 APISERVER_ADDRESS)
+
+# ---------------- P1 阶段附加组件开关(集群部署后安装) ----------------
+PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-false}"       # 监控(P1-2/3)
+CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # Ceph 存储(P1-6)
+CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI(P1-7)
+ENVOY_GATEWAY_ENABLED="${ENVOY_GATEWAY_ENABLED:-false}" # Envoy AI 网关(P1-9)
+
+# ---------------- P2 阶段附加组件开关 ----------------
+KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # Keycloak 统一认证(P2-1)
+KUEUE_ENABLED="${KUEUE_ENABLED:-false}"                 # Kueue 队列治理(P2-2 DEV-29)
+KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # KubeVirt(P2-3 DEV-35)
+
+# ---------------- P3 阶段附加组件开关 ----------------
+LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(P3-1 DEV-26)
+
+# ---------------- 自研模块开关(CubeStack 平台组件) ----------------
+# 03_addon/ 下 01~19 为第三方中间件预留, 20 起为 CubeStack 自研模块
+CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # modules/03_addon/20_cubestack_apps.sh
+
 # ---------------- 离线镜像预加载(最小集合) ----------------
 # 仅同步"部署 kubespray 最小镜像集合"到节点 containerd,避免全量 rsync 无关镜像
 # 格式: 空格分隔的匹配条目; 含 ".tar" 为精确文件名匹配, 否则为文件名包含匹配(匹配 images/ 下 *.tar 文件名)
 # 留空 = 全量同步 images/ 目录
 # 也可在 inventory/${CLUSTER_NAME}/preload-images.conf 中单独覆盖
-PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause}"
+PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb library_registry local-path-provisioner busybox}"

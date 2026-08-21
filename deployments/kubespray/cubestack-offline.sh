@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 离线资源根目录: 优先级:
-#   1. CUBESTACK_BASE_DIR 环境变量(由 deploy-cluster.sh 08 步骤通过 env 传入)
+#   1. CUBESTACK_BASE_DIR 环境变量(由 deploy-cluster.sh 10_k8s_deploy 模块通过 env 传入)
 #   2. 脚本所在目录(本项目结构: SCRIPT_DIR = deployments/kubespray/)
 #   3. 回退 /opt/cubestack-installer(standalone 模式)
 BASE_DIR="${CUBESTACK_BASE_DIR:-${SCRIPT_DIR}}"
@@ -800,6 +800,49 @@ PYEOF
     done
 }
 
+# 将内置 registry 域名解析 play 注入 cluster.yml/scale.yml(幂等, 与 ensure_preload_play 同机制)
+# 作用: 在节点 /etc/hosts 写入 "REGISTRY_IP REGISTRY_DOMAIN", 配合 containerd certs.d 信任,
+#       实现集群内节点拉取 registry.local:5000 镜像。变量由 group_vars/all/registry.yml 提供。
+ensure_registry_play() {
+    local py name
+    for py in "${KUBESPRAY_DIR}/playbooks/cluster.yml" "${KUBESPRAY_DIR}/playbooks/scale.yml"; do
+        [ -f "${py}" ] || continue
+        name="$(basename "${py}")"
+        if grep -q "cubestack-registry.yml" "${py}"; then
+            log "✅ ${name} 已挂载 registry 节点 hosts play"
+            continue
+        fi
+        python3 - "${py}" "${name}" << 'PYEOF'
+import sys
+path, name = sys.argv[1], sys.argv[2]
+src = open(path).read()
+marker = {
+    "cluster.yml": "- name: Install etcd",
+    "scale.yml": '- name: Target only workers to get kubelet installed and checking in on any new nodes(node)',
+}.get(name)
+if not marker or marker not in src:
+    print("marker not found, skip")
+    sys.exit(0)
+block = (
+    "# ──────────────────────────────────────────────────────────────────────\n"
+    "# 在内置 registry(LoadBalancer)就绪前, 在节点 /etc/hosts 写入 registry 域名解析,\n"
+    "# 配合 containerd certs.d HTTP 信任, 实现集群内节点拉取 registry.local 镜像。\n"
+    "# 本 import 由入口脚本 ensure_registry_play 自动维护(kubespray 升级后重新挂载)\n"
+    "# ──────────────────────────────────────────────────────────────────────\n"
+    "- name: Configure nodes /etc/hosts for internal registry\n"
+    "  import_playbook: ../patch-playbooks/cubestack-registry.yml\n"
+)
+open(path, "w").write(src.replace(marker, block + "\n" + marker, 1))
+print("patched")
+PYEOF
+        if grep -q "cubestack-registry.yml" "${py}"; then
+            log "✅ 已挂载 registry 节点 hosts play 到 ${name}"
+        else
+            warn "无法挂载 registry 节点 hosts play 到 ${name}(未找到插入标记, kubespray 版本结构可能已变化)"
+        fi
+    done
+}
+
 # 修复 kubespray download role 镜像上传同步缺目录问题(幂等)
 # 根因: download_container.yml 的 "Upload image to node" 用 ansible.posix.synchronize(rsync)
 #       把镜像 push 到节点 ${local_release_dir}/images/, 但该目录不会被自动创建,
@@ -1112,10 +1155,10 @@ print("%s|%s|%s" % (
     # 检测到残留 → 醒目警告 + sleep 60
     echo ""
     highlight "╔══════════════════════════════════════════════════════════╗"
-    highlight "║   ⚠️  检测到节点上已有 Kubernetes 部署! ⚠️              ║"
-    highlight "║                                                      ║"
+    highlight "║   ⚠️  检测到节点上已有 Kubernetes 部署! ⚠️                 ║"
+    highlight "║                                                          ║"
     highlight "║  将在 60 秒后自动清理这些节点上的旧 Kubernetes 状态      ║"
-    highlight "║  如需中断, 请按 Ctrl+C 退出                          ║"
+    highlight "║  如需中断, 请按 Ctrl+C 退出                              ║"
     highlight "╚══════════════════════════════════════════════════════════╝"
     echo ""
     local countdown=60
@@ -1213,6 +1256,9 @@ cmd_install() {
 
     # 确保 cluster.yml 已挂载镜像预加载 play(kubespray 升级后自动重新挂载)
     ensure_preload_play
+
+    # 确保 cluster.yml 已挂载 registry 节点 hosts play(域名解析, 配合 containerd certs.d)
+    ensure_registry_play
 
     # ansible 日志: tee 同时写入文件 + 输出到终端
     INSTALL_LOG="/tmp/${CLUSTER_NAME}-install.log"
@@ -1512,8 +1558,10 @@ PYEOF
 
     # 预检连通性: 加超时防卡死。ansible ping 默认无 SSH 连接超时, 节点关机/不可达时会无限挂起
     # (曾出现: 全部 VM 关机 → 部署卡在预检不动)。timeout 60 兜底 + ConnectTimeout 让单节点快速失败。
+    # 注意: ansible -e key=value 的值含空格时会被解析器按空格拆成多个 var, 必须在值外层再包一层引号,
+    #       否则 ansible_ssh_common_args 只拿到 "-o", ssh 报 "no argument after keyword -o", 预检恒失败。
     timeout 60 ansible all -i "${INVENTORY_DIR}/hosts.yml" -m ping -u "${REMOTE_USER}" --become \
-        -e ansible_ssh_common_args='-o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2' \
+        -e "ansible_ssh_common_args='-o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2'" \
         >/dev/null 2>&1 || warn "部分主机 SSH/sudo 异常或不可达(预检连通性超时 60s)"
     log "✅ 预检通过"
 }
@@ -1575,9 +1623,9 @@ elif [ -f "${PRELOAD_CONF}" ]; then
     source "${PRELOAD_CONF}"
     log "预加载镜像集合(preload-images.conf): ${PRELOAD_IMAGE_PATTERNS:-<空=全量>}"
 elif [ -z "${PRELOAD_IMAGE_PATTERNS:-}" ]; then
-    # 内置默认最小集合: kubespray 默认部署 + calico 网络插件所需镜像
-    # (排除 cilium/flannel/ingress-nginx/dashboard/metallb 等未启用组件的镜像)
-    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause"
+    # 内置默认最小集合: kubespray 默认部署 + calico 网络插件 + metallb/registry/local-path 附加组件所需镜像
+    # (排除 cilium/flannel/ingress-nginx/dashboard 等未启用组件的镜像)
+    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb library_registry local-path-provisioner busybox"
     log "预加载镜像集合(内置默认最小集合): ${PRELOAD_IMAGE_PATTERNS}"
 fi
 export PRELOAD_IMAGE_PATTERNS
@@ -1608,5 +1656,3 @@ case "${COMMAND}" in
     preload)  preload_images "${LIMIT_GROUP:-all}" ;;   # 单独预加载镜像(补镜像/修复)
     *)        usage ;;
 esac
-
-

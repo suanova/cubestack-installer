@@ -210,3 +210,50 @@ register_node_to_conf() {
 
     echo -e "\033[32m✅ ${hostname} 已注册到 cluster.conf\033[0m"
 }
+
+# ---------------- 附加组件通用工具 ----------------
+
+# 返回第一个 master 节点 IP(附加组件执行 kubectl 的入口)
+# 用法: FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
+first_master_ip() {
+    local line role hostname ip _rest
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        IFS=, read -r role hostname ip _rest <<<"${line}"
+        if [ "${role}" = "master" ] && [ -n "${ip}" ]; then
+            echo "${ip}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 伪代码占位执行框架: 用于尚未实现真实逻辑的附加组件模块。
+# 用法: addon_stub <模块key> <步骤数组名>
+#   步骤数组格式: "步骤描述|要执行的命令(伪代码)" 每行一项
+# 行为:
+#   · ADDON_STUB_EXEC=1 时: 真实执行伪代码命令(用于实现验证/模拟)
+#   · 否则: 仅打印伪代码步骤(占位, 不执行), 返回 0 表示"流程可继续"
+#   · DEPLOY_MODE=sim 时额外 sleep 模拟耗时
+addon_stub() {
+    local key="$1" arr_name="$2"
+    local -n _steps="${arr_name}"  # bash 4.3+ nameref
+    local _desc _cmd _i=0
+    say "▶ [${key}] 伪代码占位实现(尚未接入真实逻辑, ADDON_STUB_EXEC=1 可试执行)..."
+    for _line in "${_steps[@]:-}"; do
+        [ -z "${_line}" ] && continue
+        _i=$((_i + 1))
+        _desc="${_line%%|*}"
+        _cmd="${_line#*|}"
+        say "  ${_i}. ${_desc}"
+        say "     \$ ${_cmd}"
+        if [ "${ADDON_STUB_EXEC:-0}" = "1" ]; then
+            # 试执行模式: 忽略失败继续
+            bash -c "${_cmd}" 2>/dev/null || warn "     [占位试执行失败,忽略]"
+        elif [ "${DEPLOY_MODE:-auto}" = "sim" ]; then
+            sleep 0.5
+        fi
+    done
+    say "◼ [${key}] 占位流程执行完毕(如需真实安装, 请按 TODO 实现模块逻辑)"
+    return 0
+}

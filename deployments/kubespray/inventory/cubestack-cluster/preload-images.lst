@@ -1,7 +1,11 @@
+busybox.tar
+docker.io_library_registry_2.8.1.tar
 quay.io_calico_cni_v3.29.3.tar
 quay.io_calico_kube-controllers_v3.29.3.tar
 quay.io_calico_node_v3.29.3.tar
 quay.io_coreos_etcd_v3.5.16.tar
+quay.io_metallb_controller_v0.13.9.tar
+quay.io_metallb_speaker_v0.13.9.tar
 registry.k8s.io_coredns_coredns_v1.11.3.tar
 registry.k8s.io_cpa_cluster-proportional-autoscaler_v1.8.8.tar
 registry.k8s.io_dns_k8s-dns-node-cache_1.25.0.tar

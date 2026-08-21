@@ -271,11 +271,15 @@ cubestack-installer/
 │   ├── Dockerfile + nginx.conf
 │   └── vite.config.js
 ├── scripts/                        # 开发启动脚本(dev / start-backend / start-frontend)
-├── deployments/
-│   ├── scripts/                    # 部署脚本(14 脚本, 从0到1离线部署 kubespray)
-│   ├── kubespray/                  # kubespray 源码 + inventory + 离线资源
-│   └── virtual-machine/            # 虚拟机基础镜像
-├── docs/                           # api.md / architecture.md
+├── deployments/                    # ★ 离线部署套件(总览见 deployments/README.md)
+│   ├── README.md                   #   套件总览: 支持的软件/架构/目录组织/镜像路径
+│   ├── config/                     #   cluster.conf(唯一配置源, example 模板 + 真实配置)
+│   ├── scripts/                    #   部署脚本(modules 三阶段模块化, 见 scripts/README.md)
+│   ├── kubespray/                  #   kubespray 源码 + inventory + 离线资源(repository/)
+│   └── virtual-machine/            #   【运行时生成】虚拟机基础镜像(create-vm-template.sh 制作)
+├── docs/                           # api.md / architecture.md / scripts-development-spec.md / cluster-components-plan.md
+├── skills/                         # ★ AI 工具技能(SKILL.md 标准, 可被 Claude/Cursor 等直接加载)
+│   └── cubestack-deploy-scripts/   #   部署脚本开发规范(含 reference/ 附属文档)
 ├── Makefile
 ├── docker-compose.yml
 └── .env.example
@@ -335,14 +339,19 @@ sudo ./deployments/scripts/deploy-cluster.sh --with-k8s
 
 | 脚本 | 作用 |
 |---|---|
-| `deployments/scripts/deploy-cluster.sh` | 一键编排(主入口) |
-| `deployments/scripts/create-libvirt-vm.sh` | 创建单台虚拟机(自动注册 cluster.conf + 安装 kubespray 所需包) |
-| `deployments/scripts/create-vm-template.sh` | 制作黄金基础镜像 |
-| `deployments/scripts/gen-inventory.sh` | 生成 kubespray inventory(`INV_ROLES`/`INV_EXCLUDE` 过滤) |
-| `deployments/scripts/sync-kubespray-config.sh` | 从 cluster.conf 动态生成 group_vars 中的 IP(避免硬编码) |
-| `deployments/scripts/register-vm.sh` | 注册已存在 VM 到 cluster.conf |
-| `deployments/scripts/install-worker-packages.sh` | 离线 .deb 包安装到 bare-metal worker |
+| `deployments/scripts/deploy-cluster.sh` | 一键编排(主入口, 模块自动发现+调度) |
+| `deployments/scripts/lib-module.sh` | 模块框架(自动发现 modules/*.sh, 新增模块无需改注册表) |
+| `deployments/scripts/modules/` | 部署模块(按 `NN_category_action.sh` 命名, 阶段划分 env/k8s/addon) |
+| `deployments/scripts/tools/k8s/sync-addons-config.sh` | 从 cluster.conf 组件开关(REGISTRY_ENABLED/METALLB_ENABLED...)生成 addons.yml |
+| `deployments/scripts/tools/vm/create-libvirt-vm.sh` | 创建单台虚拟机(自动注册 cluster.conf + 安装 kubespray 所需包) |
+| `deployments/scripts/tools/vm/create-vm-template.sh` | 制作黄金基础镜像 |
+| `deployments/scripts/tools/k8s/gen-inventory.sh` | 生成 kubespray inventory(`INV_ROLES`/`INV_EXCLUDE` 过滤) |
+| `deployments/scripts/tools/k8s/sync-kubespray-config.sh` | 从 cluster.conf 动态生成 group_vars 中的 IP/组件配置(避免硬编码) |
+| `deployments/scripts/tools/vm/register-vm.sh` | 注册已存在 VM 到 cluster.conf |
+| `deployments/scripts/tools/node/install-worker-packages.sh` | 离线 .deb 包安装到 bare-metal worker |
 | `deployments/kubespray/cubestack-offline.sh` | kubespray 离线安装/扩容(init/download/install/scale/check) |
+
+> 脚本开发规范(模块命名/元数据/新增模块流程/最佳实践)见 **`docs/scripts-development-spec.md`**;部署套件总览(支持的软件/架构/镜像路径)见 **`deployments/README.md`**。
 
 **离线资源目录:**
 
@@ -350,7 +359,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --with-k8s
 deployments/kubespray/
 ├── kubespray/                    # kubespray 源码(含 cluster.yml)
 ├── inventory/cubestack-cluster/  # 生成的 inventory(hosts.yml + group_vars)
-└── repository/cubestack-cluster/ # 离线资源
+└── repository/cubestack-cluster/ # 离线资源(cubestack-offline.sh download 生成)
     ├── images/                   # 容器镜像(.tar, 供 ctr image import)
     ├── <二进制文件>                # kubeadm/kubelet/etcd/calicoctl 等
     └── packages/                 # 系统 .deb 包(iputils-ping/rsync/iptables/curl/ca-certificates)

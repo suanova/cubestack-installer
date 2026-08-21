@@ -25,6 +25,19 @@ NAT_NET_NAME="${NAT_NET_NAME:-cubestack-nat}"
 NAT_SUBNET="${NAT_SUBNET:-10.245.0.0/16}"
 NAT_GATEWAY="${NAT_GATEWAY:-10.245.0.1}"
 
+# ---------------- NTP 时间同步(集群节点时钟一致化, k8s 部署前) ----------------
+# 由 modules/02_k8s/05_k8s_ntp.sh 执行(k8s 阶段默认启用步, 可重复):
+#   · 权威时间源 = 宿主机(默认): host 装 chrony 并 allow 集群全部网段; 无公网上游时
+#     local stratum 10 以本机时钟兜底(离线优先)。
+#   · 各节点指向权威: VM(黄金镜像已装 chrony)改写 chrony.conf; 裸金属用 systemd-timesyncd;
+#     应用时偏差>1s 的节点一次性 date -s @宿主epoch 硬对齐。
+#   · 校验门禁: 校验后全节点与宿主机偏差 ≤ NTP_MAX_OFFSET_MS, 超限本步失败 → 中止部署(在 kubespray 前)。
+NTP_ENABLED="${NTP_ENABLED:-1}"                       # 0=跳过时间同步(不推荐)
+NTP_SERVER="${NTP_SERVER:-}"                          # 权威时间源 IP; 留空=宿主机(HOST_PHYS_IP)为权威
+NTP_UPSTREAM="${NTP_UPSTREAM:-}"                      # 权威的公网上游(如 "pool ntp.aliyun.com iburst"); 留空=离线用本机时钟
+NTP_ALLOW="${NTP_ALLOW:-${VM_SUBNET} ${PHYS_WORKER_NET} ${NAT_SUBNET}}"  # chrony server allow 子网(bridge/nat 全覆盖)
+NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"        # 节点-权威最大时钟偏差(毫秒); 超限本步失败 → 中止部署
+
 # ---------------- SSH 配置 ----------------
 SSH_KEY_DIR="${SSH_KEY_DIR:-${HOME}/.ssh}"
 SSH_KEY_NAME="${SSH_KEY_NAME:-cubestack_k8s}"
@@ -66,9 +79,76 @@ KUBE_SERVICE_ADDRESSES="${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18}"
 KUBE_PODS_SUBNET="${KUBE_PODS_SUBNET:-10.233.64.0/18}"
 NODELOCAL_DNS_IP="${NODELOCAL_DNS_IP:-169.254.25.10}"
 
+# ---------------- 集群内 Registry(kubespray addon, 默认不部署) ----------------
+# 集群内镜像仓库统一使用 kubespray 内置 registry addon,**默认不部署**(REGISTRY_ENABLED=0)。
+# 集群外镜像仓库统一使用 Harbor(见下方 HARBOR_ENABLED 配置段)。
+# 如需启用集群内 registry: REGISTRY_ENABLED=1(部署 addon 并配置节点信任/对外 DNAT)。
+REGISTRY_ENABLED="${REGISTRY_ENABLED:-0}"
+REGISTRY_DOMAIN="${REGISTRY_DOMAIN:-registry.local}"   # 内部域名(需本地 /etc/hosts 解析)
+REGISTRY_IP="${REGISTRY_IP:-10.244.2.100}"             # LoadBalancer 模式: MetalLB 固定 VIP(须在 METALLB_POOL 内, 避开 .0/.255)
+REGISTRY_PORT="${REGISTRY_PORT:-5000}"
+# registry Service 暴露方式(业界常见):
+#   loadbalancer = MetalLB 固定 VIP(默认, 端口保持标准 5000, 依赖 metallb addon)
+#   nodeport     = NodePort 经 kube-proxy 路由(不依赖 MetalLB; 外部用 REGISTRY_NODEPORT 端口, 或宿主 DNAT 5000→nodeport)
+REGISTRY_SERVICE_TYPE="${REGISTRY_SERVICE_TYPE:-loadbalancer}"
+REGISTRY_NODEPORT="${REGISTRY_NODEPORT:-31148}"        # nodeport 模式: 固定 NodePort(30000-32767)
+
+# ---------------- Harbor 镜像仓库(集群外私有仓库, P1-4, 环境准备阶段) ----------------
+# 集群外容器镜像仓库唯一方案(替代原本地 docker registry), 属于环境准备阶段:
+# 在部署 kubespray 之前于宿主机就绪; 由 modules/01_env/04_harbor.sh 部署
+HARBOR_ENABLED="${HARBOR_ENABLED:-false}"
+HARBOR_DOMAIN="${HARBOR_DOMAIN:-harbor.local}"         # Harbor 访问域名(需 DNS//etc/hosts 解析)
+HARBOR_IP="${HARBOR_IP:-10.244.2.200}"                 # Harbor 监听地址(宿主机 IP 或网卡地址)
+HARBOR_NAMESPACE="${HARBOR_NAMESPACE:-harbor}"         # 部署命名空间/数据目录
+HARBOR_STORAGE_CLASS="${HARBOR_STORAGE_CLASS:-local-path}"  # 数据持久化 StorageClass(如走集群外则用数据目录)
+
+# ---------------- MetalLB 负载均衡地址池(由脚本同步到 addons.yml, 不硬编码) ----------------
+# 需与节点/虚拟机网段不冲突(Layer2 模式下同网段广播);
+# 默认取 VM_SUBNET 的第二个 /24(示例 10.244.0.0/16 → 10.244.2.0/24), 可改为 CIDR 或起止区间
+METALLB_POOL="${METALLB_POOL:-10.244.2.0/24}"
+
+# ---------------- 组件开关(统一数据源, 由 sync-addons-config.sh 同步到 kubespray addons.yml) ----------------
+# 这些开关决定 kubespray 附加组件是否安装; 组件详细配置(地址池/存储类等)仍保留在 addons.yml
+METALLB_ENABLED="${METALLB_ENABLED:-true}"              # MetalLB(负载均衡, 需 kube_proxy_strict_arp=true, 已默认开启)
+LOCAL_PATH_ENABLED="${LOCAL_PATH_ENABLED:-false}"       # local-path-provisioner(默认 StorageClass,**默认不启动**; 需本地 PVC 持久化时启用)
+METRICS_SERVER_ENABLED="${METRICS_SERVER_ENABLED:-true}"  # metrics-server(HPA 依赖)
+HELM_ENABLED="${HELM_ENABLED:-true}"                    # Helm(registry 等组件依赖)
+INGRESS_NGINX_ENABLED="${INGRESS_NGINX_ENABLED:-false}" # ingress-nginx(HTTP 入口, 需 MetalLB 或 hostNetwork)
+DASHBOARD_ENABLED="${DASHBOARD_ENABLED:-false}"         # Kubernetes dashboard
+CERT_MANAGER_ENABLED="${CERT_MANAGER_ENABLED:-false}"   # cert-manager(证书签发)
+GATEWAY_API_ENABLED="${GATEWAY_API_ENABLED:-false}"     # Gateway API CRDs
+
+# ---------------- 附加组件开关(控制 deploy-cluster.sh 默认执行哪些 addon 模块) ----------------
+# true = deploy-cluster.sh 默认执行对应 modules/ 模块; false = 需 --enable 显式启用
+K8S_ENABLED="${K8S_ENABLED:-false}"                      # modules/02_k8s/06_k8s_deploy.sh(= --with-k8s)
+K8S_SCALE_ENABLED="${K8S_SCALE_ENABLED:-false}"          # modules/02_k8s/07_k8s_scale.sh(= --with-scale)
+GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-false}"   # modules/03_addon/01_gpu_operator.sh(沐曦 GPU Operator, P1-5)
+LWS_ENABLED="${LWS_ENABLED:-false}"                     # modules/03_addon/02_gpu_lws.sh(LeaderWorkerSet, P1-8)
+HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # modules/01_env/05_lb_haproxy.sh(API 四层负载均衡, 部署前准备)
+KEEPALIVED_ENABLED="${KEEPALIVED_ENABLED:-false}"       # modules/01_env/06_lb_keepalived.sh(API VIP 高可用, 部署前准备)
+KEEPALIVED_VIP="${KEEPALIVED_VIP:-}"                    # Keepalived VIP(留空=取 APISERVER_ADDRESS)
+
+# ---------------- P1 阶段附加组件开关(kubespray 集群部署后安装) ----------------
+PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-false}"       # modules/03_addon/04_prometheus.sh(P1-2/3 监控: Prometheus+Operator+node-exporter/DCGM/MetaX/RDMA/Ceph)
+CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # modules/03_addon/05_ceph.sh(P1-6 Ceph 存储底座)
+CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # modules/03_addon/06_ceph_csi.sh(P1-7 Ceph CSI RBD/RGW/CephFS)
+ENVOY_GATEWAY_ENABLED="${ENVOY_GATEWAY_ENABLED:-false}" # modules/03_addon/07_envoy_gateway.sh(P1-9 Envoy AI 网关)
+
+# ---------------- P2 阶段附加组件开关 ----------------
+KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # modules/03_addon/08_keycloak.sh(P2-1 统一认证)
+KUEUE_ENABLED="${KUEUE_ENABLED:-false}"                 # modules/03_addon/09_kueue.sh(P2-2 队列治理 DEV-29)
+KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # modules/03_addon/10_kubevirt.sh(P2-3 虚拟机能力 DEV-35)
+
+# ---------------- P3 阶段附加组件开关 ----------------
+LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # modules/03_addon/11_lustre_csi.sh(P3-1 Lustre CSI DEV-26)
+
+# ---------------- 自研模块开关(CubeStack 平台组件) ----------------
+# 03_addon/ 下 01~19 为第三方中间件预留, 20 起为 CubeStack 自研模块
+CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # modules/03_addon/20_cubestack_apps.sh(自研组件占位)
+
 # ---------------- 离线镜像预加载(最小集合) ----------------
 # 仅同步"部署 kubespray 最小镜像集合"到节点 containerd,避免全量 rsync 无关镜像
 # 格式: 空格分隔的匹配条目; 含 ".tar" 为精确文件名匹配, 否则为文件名包含匹配(匹配 images/ 下 *.tar 文件名)
 # 留空 = 全量同步 images/ 目录
 # 也可在 inventory/${CLUSTER_NAME}/preload-images.conf 中单独覆盖(standalone 运行 cubestack-offline.sh 时)
-PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause}"
+PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb library_registry local-path-provisioner busybox}"
