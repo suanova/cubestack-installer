@@ -843,6 +843,147 @@ PYEOF
     done
 }
 
+# 将"重启 containerd + kubelet 确保 CNI 初始化"play 注入 cluster.yml/scale.yml(幂等)
+# 作用: 在 Kubernetes+CNI 部署完成后、metallb 等 operator 安装前重启节点容器运行时,
+#       解决 containerd 因残留/缺失 /etc/cni/net.d 而标记 CNI 未初始化导致的节点
+#       NotReady(表现为 apiserver 访问其他节点 pod 超时 → admission webhook 失败)。
+ensure_cni_restart_play() {
+    local restart_file="${KUBESPRAY_DIR}/patch-playbooks/cubestack-cni-restart.yml"
+    if [ ! -f "${restart_file}" ]; then
+        log "重新生成 ${restart_file}(kubespray 升级后恢复)..."
+        mkdir -p "$(dirname "${restart_file}")" 2>/dev/null || true
+        cat > "${restart_file}" << 'CNI_EOF' 2>/dev/null || true
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# cubestack-installer: 重启 containerd + kubelet, 确保 CNI 插件初始化
+#
+# 在 Kubernetes 部署完成(CNI 已安装)、metallb 等 operator 安装之前执行, 保证
+# 集群跨节点网络正常。根因: 节点 NotReady / apiserver 无法访问其他节点 pod 时,
+# 各类 admission webhook 调用会超时(如 MetalLB "context deadline exceeded")。
+#
+# 根因: containerd 启动时读取 /etc/cni/net.d 初始化 CNI 插件; 若 reset 删除过
+#       该目录(或首次部署时 CNI 未就绪), containerd 标记 CNI 未初始化,
+#       calico 之后创建配置也不会重新加载 → 节点 NotReady。
+#
+# 挂载位置: cluster.yml / scale.yml 中"安装 Kubernetes + CNI"之后、
+#           "Install Kubernetes apps"(metallb 等 operator)之前。
+# 由入口脚本 ensure_cni_restart_play 自动维护(kubespray 升级后重新挂载)。
+#
+# 顺序: 先重启 worker 再串行重启 control-plane(尽量缩短 apiserver 中断窗口),
+#       结束时等待 apiserver 就绪, 保证后续 kubernetes-apps 正常执行。
+# ═══════════════════════════════════════════════════════════════════════════
+- name: Restart containerd + kubelet on worker nodes (re-init CNI)
+  hosts: kube_node
+  gather_facts: false
+  any_errors_fatal: false
+  environment: "{{ proxy_disable_env }}"
+  roles:
+    - { role: kubespray_defaults }
+  tasks:
+    - name: Restart kubelet then containerd (re-init CNI plugins)
+      ansible.builtin.shell: |
+        systemctl restart kubelet
+        sleep 5
+        systemctl restart containerd
+      args:
+        executable: /bin/bash
+      register: cni_restart_worker
+      ignore_errors: true
+      changed_when: false
+    - name: Warn if worker restart failed
+      ansible.builtin.debug:
+        msg: "节点 {{ inventory_hostname }} kubelet/containerd 重启失败(rc={{ cni_restart_worker.rc | default('N/A') }}), 可手动执行: systemctl restart containerd && systemctl restart kubelet"
+      when: cni_restart_worker is failed
+
+- name: Restart containerd + kubelet on control-plane nodes (re-init CNI)
+  hosts: kube_control_plane
+  serial: 1
+  gather_facts: false
+  any_errors_fatal: false
+  environment: "{{ proxy_disable_env }}"
+  roles:
+    - { role: kubespray_defaults }
+  tasks:
+    - name: Restart kubelet then containerd (re-init CNI plugins)
+      ansible.builtin.shell: |
+        systemctl restart kubelet
+        sleep 5
+        systemctl restart containerd
+      args:
+        executable: /bin/bash
+      register: cni_restart_master
+      ignore_errors: true
+      changed_when: false
+    - name: Warn if control-plane restart failed
+      ansible.builtin.debug:
+        msg: "节点 {{ inventory_hostname }} kubelet/containerd 重启失败(rc={{ cni_restart_master.rc | default('N/A') }}), 可手动执行: systemctl restart containerd && systemctl restart kubelet"
+      when: cni_restart_master is failed
+
+- name: Wait for kube-apiserver to be healthy after node restarts
+  hosts: kube_control_plane[0]
+  gather_facts: false
+  any_errors_fatal: false
+  environment:
+    KUBECONFIG: "{{ kube_config_dir }}/admin.conf"
+  roles:
+    - { role: kubespray_defaults }
+  tasks:
+    - name: Wait for apiserver readyz (up to 5 minutes)
+      ansible.builtin.shell: |
+        for i in $(seq 1 60); do
+          {{ bin_dir }}/kubectl get --raw /readyz >/dev/null 2>&1 && exit 0
+          sleep 5
+        done
+        echo "apiserver 在 5 分钟内未恢复就绪" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: cni_apiserver_wait
+      changed_when: false
+CNI_EOF
+        [ -f "${restart_file}" ] || { warn "无法生成 ${restart_file}, 跳过 CNI 重启 play 挂载"; return 0; }
+    fi
+
+    local py name
+    for py in "${KUBESPRAY_DIR}/playbooks/cluster.yml" "${KUBESPRAY_DIR}/playbooks/scale.yml"; do
+        [ -f "${py}" ] || continue
+        name="$(basename "${py}")"
+        if grep -q "cubestack-cni-restart.yml" "${py}"; then
+            log "✅ ${name} 已挂载 CNI 重启 play"
+            continue
+        fi
+        python3 - "${py}" "${name}" << 'PYEOF'
+import sys
+path, name = sys.argv[1], sys.argv[2]
+src = open(path).read()
+marker = {
+    "cluster.yml": "- name: Install Kubernetes apps",
+    "scale.yml": "- name: Apply resolv.conf changes now that cluster DNS is up",
+}.get(name)
+if not marker or marker not in src:
+    print("marker not found, skip")
+    sys.exit(0)
+block = (
+    "# ──────────────────────────────────────────────────────────────────────\n"
+    "# 在 Kubernetes + CNI 部署完成后、metallb 等 operator 安装之前, 重启\n"
+    "# containerd + kubelet, 确保 CNI 插件初始化(解决节点 NotReady / webhook 超时)。\n"
+    "# 逻辑见 patch-playbooks/cubestack-cni-restart.yml; 由入口脚本\n"
+    "# ensure_cni_restart_play 自动维护(kubespray 升级后重新挂载)。\n"
+    "# ──────────────────────────────────────────────────────────────────────\n"
+    "- name: Restart containerd + kubelet to (re)init CNI plugins\n"
+    "  import_playbook: ../patch-playbooks/cubestack-cni-restart.yml\n"
+)
+open(path, "w").write(src.replace(marker, block + "\n" + marker, 1))
+print("patched")
+PYEOF
+        if grep -q "cubestack-cni-restart.yml" "${py}"; then
+            log "✅ 已挂载 CNI 重启 play 到 ${name}"
+        else
+            warn "无法挂载 CNI 重启 play 到 ${name}(未找到插入标记, kubespray 版本结构可能已变化)"
+        fi
+    done
+}
+
 # 修复 kubespray download role 镜像上传同步缺目录问题(幂等)
 # 根因: download_container.yml 的 "Upload image to node" 用 ansible.posix.synchronize(rsync)
 #       把镜像 push 到节点 ${local_release_dir}/images/, 但该目录不会被自动创建,
@@ -1260,6 +1401,9 @@ cmd_install() {
     # 确保 cluster.yml 已挂载 registry 节点 hosts play(域名解析, 配合 containerd certs.d)
     ensure_registry_play
 
+    # 确保 cluster.yml 已挂载 CNI 重启 play(K8s+CNI 之后、operator 之前重启 containerd+kubelet)
+    ensure_cni_restart_play
+
     # ansible 日志: tee 同时写入文件 + 输出到终端
     INSTALL_LOG="/tmp/${CLUSTER_NAME}-install.log"
     log "执行 Kubespray 离线安装..."
@@ -1293,38 +1437,9 @@ cmd_install() {
     # 安装后兜底预加载: 补加载附加组件镜像, 同时重新生成镜像清单(供后续扩容使用)
     preload_images "all"
 
-    # 安装后: 重启 containerd + kubelet, 确保 CNI 插件初始化
-    # 根因: containerd 启动时读取 /etc/cni/net.d 初始化 CNI 插件;
-    #       若 reset 删除过该目录(或首次部署时 CNI 未就绪), containerd 标记 CNI 未初始化,
-    #       calico 之后创建配置也不会重新加载 → 节点 NotReady
-    log "重启 containerd + kubelet(确保 CNI 插件初始化)..."
-    cd "${KUBESPRAY_DIR}"
-    source .venv/bin/activate 2>/dev/null || true
-    local restart_rc=0
-
-    # 先重启 master 节点
-    log "  → 重启 master 节点..."
-    ansible kube_control_plane -i "${INVENTORY_DIR}/hosts.yml" -m shell \
-        -a "systemctl restart kubelet; sleep 5; systemctl restart containerd; true" \
-        -u "${REMOTE_USER}" --become \
-        --ssh-common-args="-o ConnectTimeout=30 -o ServerAliveInterval=5 -o StrictHostKeyChecking=no" \
-        || restart_rc=$?
-    sleep 5
-
-    # 再重启 worker 节点
-    log "  → 重启 worker 节点..."
-    ansible kube_node -i "${INVENTORY_DIR}/hosts.yml" -m shell \
-        -a "systemctl restart kubelet; sleep 5; systemctl restart containerd; true" \
-        -u "${REMOTE_USER}" --become \
-        --ssh-common-args="-o ConnectTimeout=30 -o ServerAliveInterval=5 -o StrictHostKeyChecking=no" \
-        || restart_rc=$?
-
-    if [ "${restart_rc}" -ne 0 ]; then
-        warn "部分节点重启 kubelet/containerd 失败(rc=${restart_rc}), 请检查节点状态"
-        log "可手动重启: systemctl restart containerd && systemctl restart kubelet"
-    else
-        log "✅ containerd + kubelet 已重启"
-    fi
+    # CNI 插件初始化重启(containerd + kubelet)已移入 kubespray
+    # patch-playbooks/cubestack-cni-restart.yml: 在 K8s+CNI 部署完成后、operator 安装前
+    # 由 ensure_cni_restart_play 自动挂载到 cluster.yml, 此处不再单独重启
 
     # 安装后预加载: playbook 前 containerd 可能未安装(preload 跳过), playbook 后 containerd 已就绪,
     # 补加载 playbook 未推到所有节点的镜像(如 dns-autoscaler/ metrics-server 等附加组件镜像)
@@ -1434,6 +1549,9 @@ cmd_scale() {
     # 确保 scale.yml 已挂载镜像预加载 play(kubespray 升级后自动重新挂载)
     ensure_preload_play
 
+    # 确保 scale.yml 已挂载 CNI 重启 play(新节点 K8s+CNI 之后重启 containerd+kubelet)
+    ensure_cni_restart_play
+
     log "执行 Kubespray 扩容 (scale.yml)..."
     log "ansible 日志: 同时显示终端 + 写入 /tmp/${CLUSTER_NAME}-scale.log"
     [ "${ANSIBLE_LOG_TERMINAL:-1}" != "1" ] && log "ansible 日志: 仅写入文件(ANSIBLE_LOG_TERMINAL=0, 终端不显示)"
@@ -1490,35 +1608,9 @@ cmd_scale() {
         " \
         >/dev/null 2>&1 || true
 
-    # 重启 containerd + kubelet, 确保新节点 CNI 插件初始化
-    log "重启 containerd + kubelet(确保 CNI 插件初始化)..."
-    cd "${KUBESPRAY_DIR}"
-    source .venv/bin/activate 2>/dev/null || true
-    local restart_rc=0
-
-    # 先重启 master 节点
-    log "  → 重启 master 节点..."
-    ansible kube_control_plane -i "${INVENTORY_DIR}/hosts.yml" -m shell \
-        -a "systemctl restart kubelet; sleep 5; systemctl restart containerd; true" \
-        -u "${REMOTE_USER}" --become \
-        --ssh-common-args="-o ConnectTimeout=30 -o ServerAliveInterval=5 -o StrictHostKeyChecking=no" \
-        || restart_rc=$?
-    sleep 5
-
-    # 再重启 worker 节点
-    log "  → 重启 worker 节点..."
-    ansible kube_node -i "${INVENTORY_DIR}/hosts.yml" -m shell \
-        -a "systemctl restart kubelet; sleep 5; systemctl restart containerd; true" \
-        -u "${REMOTE_USER}" --become \
-        --ssh-common-args="-o ConnectTimeout=30 -o ServerAliveInterval=5 -o StrictHostKeyChecking=no" \
-        || restart_rc=$?
-
-    if [ "${restart_rc}" -ne 0 ]; then
-        warn "部分节点重启 kubelet/containerd 失败(rc=${restart_rc}), 请检查节点状态"
-        log "可手动重启: systemctl restart containerd && systemctl restart kubelet"
-    else
-        log "✅ containerd + kubelet 已重启"
-    fi
+    # CNI 插件初始化重启(containerd + kubelet)已移入 kubespray
+    # patch-playbooks/cubestack-cni-restart.yml: 在新节点 K8s+CNI 部署完成后自动执行,
+    # 由 ensure_cni_restart_play 自动挂载到 scale.yml, 此处不再单独重启
 
     log "🎉 集群 [${CLUSTER_NAME}] 扩容完成! 日志: /tmp/${CLUSTER_NAME}-scale.log"
 }

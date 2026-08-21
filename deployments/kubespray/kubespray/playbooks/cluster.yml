@@ -94,6 +94,15 @@
     - { role: kubespray_defaults }
     - { role: win_nodes/kubernetes_patch, tags: ["master", "win_nodes"] }
 
+# ──────────────────────────────────────────────────────────────────────
+# 在 Kubernetes + CNI 部署完成后、metallb 等 operator 安装之前, 重启
+# containerd + kubelet, 确保 CNI 插件初始化(解决节点 NotReady / webhook 超时)。
+# 逻辑见 patch-playbooks/cubestack-cni-restart.yml; 由入口脚本
+# ensure_cni_restart_play 自动维护(kubespray 升级后重新挂载)。
+# ──────────────────────────────────────────────────────────────────────
+- name: Restart containerd + kubelet to (re)init CNI plugins
+  import_playbook: ../patch-playbooks/cubestack-cni-restart.yml
+
 - name: Install Kubernetes apps
   hosts: kube_control_plane
   gather_facts: false
