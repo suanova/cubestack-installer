@@ -56,6 +56,14 @@
         kubectl: "{{ bin_dir }}/kubectl"
         filename: "{{ kube_config_dir }}/pools.yaml"
         state: "{{ pools_rendering.changed | ternary('latest', 'present') }}"
+      register: metallb_pools_result
+      # 新集群刚拉起时 apiserver→webhook-service 的 ClusterIP 路由(calico/kube-proxy)
+      # 可能尚未收敛, 且 controller 的 webhook(9443)启动晚于 metrics 就绪探针,
+      # 首次 apply 会因 webhook 调用超时而失败(池未持久化); 重试吸收该瞬时窗口。
+      # 见 cubestack-installer 对裸金属环境 metallb 超时问题的修复。
+      until: metallb_pools_result is succeeded
+      retries: "{{ metallb_apply_retries | default(10) }}"
+      delay: "{{ metallb_apply_retry_delay | default(5) }}"
       become: true
 
 - name: MetalLB | Layer2
@@ -76,6 +84,10 @@
         kubectl: "{{ bin_dir }}/kubectl"
         filename: "{{ kube_config_dir }}/layer2.yaml"
         state: "{{ layer2_rendering.changed | ternary('latest', 'present') }}"
+      register: metallb_layer2_result
+      until: metallb_layer2_result is succeeded
+      retries: "{{ metallb_apply_retries | default(10) }}"
+      delay: "{{ metallb_apply_retry_delay | default(5) }}"
       become: true
 
 - name: MetalLB | Layer3
@@ -96,6 +108,10 @@
         kubectl: "{{ bin_dir }}/kubectl"
         filename: "{{ kube_config_dir }}/layer3.yaml"
         state: "{{ layer3_rendering.changed | ternary('latest', 'present') }}"
+      register: metallb_layer3_result
+      until: metallb_layer3_result is succeeded
+      retries: "{{ metallb_apply_retries | default(10) }}"
+      delay: "{{ metallb_apply_retry_delay | default(5) }}"
       become: true
 
 

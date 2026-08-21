@@ -102,6 +102,15 @@
     - { role: kubernetes/node-taint, tags: node-taint }
     - { role: network_plugin, tags: network }
 
+# ──────────────────────────────────────────────────────────────────────
+# 在 Kubernetes + CNI 部署完成后、operator 安装之前, 重启 containerd + kubelet,
+# 确保 CNI 插件初始化(解决新节点 NotReady / webhook 超时)。
+# 逻辑见 patch-playbooks/cubestack-cni-restart.yml; 由入口脚本
+# ensure_cni_restart_play 自动维护(kubespray 升级后重新挂载)。
+# ──────────────────────────────────────────────────────────────────────
+- name: Restart containerd + kubelet to (re)init CNI plugins
+  import_playbook: ../patch-playbooks/cubestack-cni-restart.yml
+
 - name: Apply resolv.conf changes now that cluster DNS is up
   hosts: k8s_cluster
   gather_facts: false

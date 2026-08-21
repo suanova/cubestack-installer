@@ -1,0 +1,87 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# cubestack-installer: 重启 containerd + kubelet, 确保 CNI 插件初始化
+#
+# 在 Kubernetes 部署完成(CNI 已安装)、metallb 等 operator 安装之前执行, 保证
+# 集群跨节点网络正常。根因: 节点 NotReady / apiserver 无法访问其他节点 pod 时,
+# 各类 admission webhook 调用会超时(如 MetalLB "context deadline exceeded")。
+#
+# 根因: containerd 启动时读取 /etc/cni/net.d 初始化 CNI 插件; 若 reset 删除过
+#       该目录(或首次部署时 CNI 未就绪), containerd 标记 CNI 未初始化,
+#       calico 之后创建配置也不会重新加载 → 节点 NotReady。
+#
+# 挂载位置: cluster.yml / scale.yml 中"安装 Kubernetes + CNI"之后、
+#           "Install Kubernetes apps"(metallb 等 operator)之前。
+# 由入口脚本 ensure_cni_restart_play 自动维护(kubespray 升级后重新挂载)。
+#
+# 顺序: 先重启 worker 再串行重启 control-plane(尽量缩短 apiserver 中断窗口),
+#       结束时等待 apiserver 就绪, 保证后续 kubernetes-apps 正常执行。
+# ═══════════════════════════════════════════════════════════════════════════
+- name: Restart containerd + kubelet on worker nodes (re-init CNI)
+  hosts: kube_node
+  gather_facts: false
+  any_errors_fatal: false
+  environment: "{{ proxy_disable_env }}"
+  roles:
+    - { role: kubespray_defaults }
+  tasks:
+    - name: Restart kubelet then containerd (re-init CNI plugins)
+      ansible.builtin.shell: |
+        systemctl restart kubelet
+        sleep 5
+        systemctl restart containerd
+      args:
+        executable: /bin/bash
+      register: cni_restart_worker
+      ignore_errors: true
+      changed_when: false
+    - name: Warn if worker restart failed
+      ansible.builtin.debug:
+        msg: "节点 {{ inventory_hostname }} kubelet/containerd 重启失败(rc={{ cni_restart_worker.rc | default('N/A') }}), 可手动执行: systemctl restart containerd && systemctl restart kubelet"
+      when: cni_restart_worker is failed
+
+- name: Restart containerd + kubelet on control-plane nodes (re-init CNI)
+  hosts: kube_control_plane
+  serial: 1
+  gather_facts: false
+  any_errors_fatal: false
+  environment: "{{ proxy_disable_env }}"
+  roles:
+    - { role: kubespray_defaults }
+  tasks:
+    - name: Restart kubelet then containerd (re-init CNI plugins)
+      ansible.builtin.shell: |
+        systemctl restart kubelet
+        sleep 5
+        systemctl restart containerd
+      args:
+        executable: /bin/bash
+      register: cni_restart_master
+      ignore_errors: true
+      changed_when: false
+    - name: Warn if control-plane restart failed
+      ansible.builtin.debug:
+        msg: "节点 {{ inventory_hostname }} kubelet/containerd 重启失败(rc={{ cni_restart_master.rc | default('N/A') }}), 可手动执行: systemctl restart containerd && systemctl restart kubelet"
+      when: cni_restart_master is failed
+
+- name: Wait for kube-apiserver to be healthy after node restarts
+  hosts: kube_control_plane[0]
+  gather_facts: false
+  any_errors_fatal: false
+  environment:
+    KUBECONFIG: "{{ kube_config_dir }}/admin.conf"
+  roles:
+    - { role: kubespray_defaults }
+  tasks:
+    - name: Wait for apiserver readyz (up to 5 minutes)
+      ansible.builtin.shell: |
+        for i in $(seq 1 60); do
+          {{ bin_dir }}/kubectl get --raw /readyz >/dev/null 2>&1 && exit 0
+          sleep 5
+        done
+        echo "apiserver 在 5 分钟内未恢复就绪" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: cni_apiserver_wait
+      changed_when: false

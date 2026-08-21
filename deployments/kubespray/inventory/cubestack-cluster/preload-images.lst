@@ -1,5 +1,6 @@
 busybox.tar
 docker.io_library_registry_2.8.1.tar
+docker.io_rancher_local-path-provisioner_v0.0.24.tar
 quay.io_calico_cni_v3.29.3.tar
 quay.io_calico_kube-controllers_v3.29.3.tar
 quay.io_calico_node_v3.29.3.tar
