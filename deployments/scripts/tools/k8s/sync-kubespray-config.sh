@@ -18,6 +18,8 @@ INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubes
 # API_IP / API_DOMAIN 由 lib-common load_config 统一提供:
 #   API_IP     = APISERVER_ADDRESS(NAT 模式=第一个 master IP / HAProxy IP), 回退 HOST_PHYS_IP(桥接=宿主机物理 IP)
 #   API_DOMAIN = 跨网段统一入口域名(默认 k8s-api.nova.local)
+# 注意: 实际写入配置的 API 入口地址为 API_ADDR(本脚本计算)——全裸金属集群取第一个 master IP
+#       (宿主机不在集群网络, 无法作为 API 入口); 含 VM 集群沿用 API_IP(跨网段 worker 经宿主机 DNAT 访问)
 MASTER_IPS=()    # master 节点 IP
 WORKER_IPS=()    # worker 节点 IP
 for line in "${NODES[@]:-}"; do
@@ -34,6 +36,27 @@ done
 # 第一个 worker IP(用于 Calico can-reach 探测),无 worker 时回退到宿主机 IP
 FIRST_WORKER="${WORKER_IPS[0]:-${API_IP}}"
 
+# 全裸金属检测: NODES 全部为裸金属(node_type=bm)→ 宿主机(部署机)不在集群网络,
+# API 入口不能用宿主机物理 IP, 应取第一个 master IP(与 all.yml 注释"第一个 master 节点 IP"一致)
+ALL_BM=1
+for line in "${NODES[@]:-}"; do
+    [ -z "${line}" ] && continue
+    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
+    node_is_vm "${role}" "${mac}" "${mem}" "${node_type:-}" && { ALL_BM=0; break; }
+done
+
+# API 入口地址: 全裸金属 → 第一个 master IP; 含 VM(跨网段 worker 经宿主机 DNAT 访问)→ 宿主机物理 IP
+if [ "${ALL_BM}" = "1" ]; then
+    API_ADDR="${MASTER_IPS[0]}"
+else
+    API_ADDR="${API_IP}"
+fi
+
+if [ "${ALL_BM}" = "1" ]; then
+    say "节点类型: 全裸金属 → API 入口=第一个 master(${API_ADDR})"
+else
+    say "节点类型: 含 VM → API 入口=宿主机物理 IP(${API_ADDR})"
+fi
 say "宿主机 IP: ${API_IP}"
 say "API 域名: ${API_DOMAIN}"
 say "Master IPs: ${MASTER_IPS[*]}"
@@ -43,14 +66,15 @@ say "Worker IPs: ${WORKER_IPS[*]:-<无>}"
 ALL_YML="${INV_DIR}/group_vars/all/all.yml"
 if [ -f "${ALL_YML}" ]; then
     say "更新 ${ALL_YML} ..."
-    # loadbalancer_apiserver.address → 宿主机物理 IP
-    sed -i -E "s/^(\s+address:)\s+[0-9.]+(\s*#.*)?\$/\1 ${API_IP}\2/" "${ALL_YML}"
+    # loadbalancer_apiserver.address → API 入口地址(全裸金属=第一个 master / 含 VM=宿主机物理 IP)
+    sed -i -E "s/^(\s+address:)\s+[0-9.]+(\s*#.*)?\$/\1 ${API_ADDR}\2/" "${ALL_YML}"
 
     # apiserver_loadbalancer_domain_name → 集群 API 域名
     sed -i -E "s/^apiserver_loadbalancer_domain_name:.*/apiserver_loadbalancer_domain_name: \"${API_DOMAIN}\"/" "${ALL_YML}"
 
-    # supplementary_addresses_in_ssl_keys → API 域名 + 宿主机 IP + 所有 master IP
-    awk -v host="${API_IP}" -v domain="${API_DOMAIN}" -v masters="${MASTER_IPS[*]}" '
+    # supplementary_addresses_in_ssl_keys → API 域名 + [宿主机 IP(仅含 VM 时)] + 所有 master IP
+    # 全裸金属时 API 入口即第一个 master, 已在 masters 中, 不再单独加宿主机 IP
+    awk -v host="${API_ADDR}" -v domain="${API_DOMAIN}" -v masters="${MASTER_IPS[*]}" -v is_bm="${ALL_BM}" '
         /^supplementary_addresses_in_ssl_keys:/ { in_sec=1; print; next }
         in_sec && /^[[:space:]]*-/ {
             # 跳过旧的域名/IP 条目(保留 k8s-api.nova.local)
@@ -58,9 +82,9 @@ if [ -f "${ALL_YML}" ]; then
             next
         }
         in_sec && !/^[[:space:]]*-/ {
-            # 区块结束,输出 API 域名 + 宿主机 + masters 条目
+            # 区块结束,输出 API 域名 + [宿主机(仅含 VM)] + masters 条目
             print "  - " domain
-            print "  - " host "           # 宿主机物理 IP(worker 通过此地址访问 API Server)"
+            if (is_bm != "1") print "  - " host "           # 宿主机物理 IP(worker 通过此地址访问 API Server)"
             split(masters, arr, " ")
             for (i in arr) print "  - " arr[i]
             in_sec=0
@@ -93,12 +117,12 @@ CLUSTER_YML="${INV_DIR}/group_vars/k8s_cluster/k8s-cluster.yml"
 if [ -f "${CLUSTER_YML}" ]; then
     say "更新 ${CLUSTER_YML} ..."
     if grep -q "advertise-address" "${CLUSTER_YML}"; then
-        sed -i -E "s/^(\s+advertise-address:)\s+\"[0-9.]+\"/\1 \"${API_IP}\"/" "${CLUSTER_YML}"
+        sed -i -E "s/^(\s+advertise-address:)\s+\"[0-9.]+\"/\1 \"${API_ADDR}\"/" "${CLUSTER_YML}"
     else
         # 在 kube_apiserver_extra_args 下追加 advertise-address
-        sed -i -E "/^kube_apiserver_extra_args:/a\  advertise-address: \"${API_IP}\"" "${CLUSTER_YML}"
+        sed -i -E "/^kube_apiserver_extra_args:/a\  advertise-address: \"${API_ADDR}\"" "${CLUSTER_YML}"
     fi
-    ok "已同步 kube_apiserver_extra_args.advertise-address → ${API_IP}"
+    ok "已同步 kube_apiserver_extra_args.advertise-address → ${API_ADDR}"
     # 集群内部网络 CIDR(从 cluster.conf 读取, 不硬编码在 group_vars 中)
     sed -i -E "s|^kube_service_addresses:[[:space:]]*[0-9.]+/[0-9]+|kube_service_addresses: ${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18}|" "${CLUSTER_YML}"
     sed -i -E "s|^kube_pods_subnet:[[:space:]]*[0-9.]+/[0-9]+|kube_pods_subnet: ${KUBE_PODS_SUBNET:-10.233.64.0/18}|" "${CLUSTER_YML}"
@@ -202,6 +226,9 @@ if enabled == "1":
     out.append('        capabilities: ["pull", "resolve"]')
     out.append('        skip_verify: true')
 else:
+    # 幂等: 先清掉历史重复累积的注释行, 再追加一条(否则每次运行都会多一条)
+    marker = '# containerd_registries_mirrors:'
+    out = [l for l in out if not l.startswith(marker)]
     out.append('# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)')
 open(path, 'w').write('\n'.join(out) + '\n')
 PYEOF
@@ -227,7 +254,7 @@ bash "${SCRIPT_DIR}/tools/k8s/sync-addons-config.sh"
 
 echo "---------------------------------------------"
 ok "kubespray 配置已从 cluster.conf 同步完成"
-echo "  宿主机 API 地址: ${API_IP}:6443"
+echo "  API 入口地址: ${API_ADDR}:6443"
 echo "  Master IPs: ${MASTER_IPS[*]}"
 echo "  Calico can-reach: ${FIRST_WORKER}"
 echo "  MetalLB 地址池: ${METALLB_POOL}"

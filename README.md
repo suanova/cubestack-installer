@@ -332,7 +332,7 @@ cubestack-installer/
 cp config/cluster.conf.example config/cluster.conf && vim config/cluster.conf
 
 # 全流程部署(含 kubespray 离线安装)
-sudo ./deployments/scripts/deploy-cluster.sh --with-k8s
+sudo ./deployments/scripts/deploy-cluster.sh --with-k8s --skip-net   # 裸金属集群加 --skip-net，虚拟机无需该参，去掉skip-net
 ```
 
 **核心脚本:**
