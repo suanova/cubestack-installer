@@ -52,3 +52,4 @@ deployments/kubespray/kubespray/.gitmodules
 
 # 部署引擎在宿主机生成的临时拷贝(按 ssh 目标命名)
 /deployments/*@*/
+cluster.conf.backup

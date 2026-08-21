@@ -1,5 +1,9 @@
 # CubeStack 脚本使用手册(CLI)
 
+> **本文档定位**:介绍 `deployments/scripts/` 下脚本的**调用方式与使用案例**。
+> **部署套件总览**(支持的软件/架构/目录组织/离线镜像与虚拟机镜像路径):见 [`deployments/README.md`](../README.md)。
+> **脚本开发规范**(模块命名/元数据/新增模块流程):见 [`docs/scripts-development-spec.md`](../../docs/scripts-development-spec.md)。
+
 本目录脚本提供完整的**命令行自动化**能力:从宿主网络初始化、SSH 密钥、master 虚拟机创建与免密登录,到 kubespray 兼容 inventory 生成与(可选)K8s 离线部署。
 
 所有脚本**统一读取** `config/cluster.conf` 作为唯一数据源,不硬编码 IP / 用户名 / 密码 / 路径。配置优先级:**环境变量 > 配置文件 > 内置兜底默认**。
@@ -45,53 +49,92 @@ deployments/scripts/
 │                              #   save_state/get_state/clear_state: 断点续跑状态管理
 │                              #   node_is_vm(): 按 node_type 判断 vm/裸金属
 │                              #   统一读取 config/cluster.conf
-├── lib-deploy.sh              # ★ 模块注册表(DEPLOY_STEPS) + 调度(steps/*.sh 在此登记)
-├── deploy-cluster.sh          # ★ 统一入口(模块化编排,薄壳: 参数解析 + 按注册表调度)
-├── steps/                     # ★ 部署模块(每个 = 复用现有脚本的薄封装, 可插拔)
-│   ├── 01-network.sh          #   初始化宿主网络 → setup-vm-network.sh / setup-libvirt-nat.sh
-│   ├── 02-ssh-key.sh          #   生成 SSH 密钥     → gen-ssh-key.sh
-│   ├── 03-vm.sh               #   创建虚拟机并启动   → create-libvirt-vm.sh
-│   ├── 04-ssh-passwordless.sh #   SSH 免密         → setup-passwordless.sh
-│   ├── 05-worker-bm.sh        #   裸金属 worker 装包 → install-worker-packages.sh
-│   ├── 06-hosts.sh            #   更新 /etc/hosts
-│   ├── 07-inventory.sh        #   生成 inventory   → gen-inventory.sh
-│   ├── 08-k8s.sh              #   部署 kubespray   → cubestack-offline.sh(默认关闭)
-│   ├── 09-gpu-operator.sh     #   沐曦 GPU Operator(占位, 默认关闭)
-│   └── 10-lws.sh              #   LeaderWorkerSet(占位, 默认关闭)
-├── gen-ssh-key.sh             # 生成集群 SSH 密钥对(幂等)
-├── setup-passwordless.sh      # 注入公钥实现目标主机免密登录
-├── gen-inventory.sh           # 从配置生成 kubespray inventory + 同步 kubespray 配置
-├── sync-kubespray-config.sh   # ★ 从 cluster.conf 动态生成 kubespray group_vars 中的 IP
-├── register-vm.sh             # 将已存在 VM 注册到 cluster.conf NODES
-├── create-libvirt-vm.sh       # 创建单台 Ubuntu22.04 虚拟机(静态IP,配置驱动,自动注册; 不再安装任何组件)
-├── create-vm-template.sh      # 制作黄金基础镜像(预埋用户/SSH/时区/kubespray所需包; 包固化唯一入口)
-├── install-worker-packages.sh # 离线 .deb 包安装到 bare-metal worker 节点
-├── setup-vm-network.sh        # 方案A:创建 privbr0 网桥网络(建桥/回程路由/SNAT/自启)
-├── setup-libvirt-nat.sh       # 方案B:创建 libvirt NAT 网络(含 --delete 回滚)
-├── verify-vm-network.sh       # 验证宿主网络配置与连通性
-├── teardown-vm-network.sh     # 回滚方案A桥接网络(SNAT/路由/自启,可删网桥)
+├── lib-module.sh              # ★ 模块框架:递归自动发现 modules/<阶段>/*.sh + 元数据解析 + 调度
+├── deploy-cluster.sh          # ★ 统一入口(薄壳: 参数解析 + 按模块框架调度, 不内联业务逻辑)
+├── modules/                   # ★ 部署模块(按部署环境准备的阶段组织子目录, 自动发现)
+│   ├── 01_env/                #   阶段一: 环境准备(发生在部署 kubespray 之前)
+│   │   ├── 01_vm_network.sh   #     VM 宿主网络(bridge/nat)
+│   │   ├── 02_vm_sshkey.sh    #     生成 SSH 密钥
+│   │   ├── 03_vm_create.sh    #     创建虚拟机并启动
+│   │   ├── 04_harbor.sh       #     Harbor 镜像仓库(集群外私有仓库, 部署前就绪)
+│   │   ├── 05_lb_haproxy.sh   #     HAProxy API 四层负载均衡(集群部署前准备)
+│   │   └── 06_lb_keepalived.sh#     Keepalived API VIP 高可用(集群部署前准备)
+│   ├── 02_k8s/                #   阶段二: 离线部署 kubespray(不依赖 VM/裸金属)
+│   │   ├── 01_k8s_passwordless.sh  # SSH 免密
+│   │   ├── 02_k8s_workerbm.sh      # 裸金属 worker 装包
+│   │   ├── 03_k8s_hosts.sh         # 更新 /etc/hosts
+│   │   ├── 04_k8s_inventory.sh     # 生成 inventory + 同步配置
+│   │   ├── 05_k8s_ntp.sh           # NTP 时间同步
+│   │   ├── 06_k8s_deploy.sh        # 部署 kubespray(默认关, K8S_ENABLED)
+│   │   └── 07_k8s_scale.sh         # 扩容集群(默认关, K8S_SCALE_ENABLED)
+│   └── 03_addon/              #   阶段三: 附加组件(集群部署后; 01~19 中间件, 20 起自研)
+│       ├── 01_gpu_operator.sh #    沐曦 GPU Operator(P1-5, GPU_OPERATOR_ENABLED)
+│       ├── 02_gpu_lws.sh      #    LeaderWorkerSet(P1-8, LWS_ENABLED)
+│       ├── 03_k8s_registry.sh #    集群内内置 registry addon(默认不部署, REGISTRY_ENABLED)
+│       ├── 04_prometheus.sh   #    Prometheus+Operator+监控附属(P1-2/3, PROMETHEUS_ENABLED)
+│       ├── 05_ceph.sh         #    Ceph 存储集群(P1-6, CEPH_ENABLED)
+│       ├── 06_ceph_csi.sh     #    Ceph CSI RBD/RGW/CephFS(P1-7, CEPH_CSI_ENABLED)
+│       ├── 07_envoy_gateway.sh#    Envoy AI 网关(P1-9, ENVOY_GATEWAY_ENABLED)
+│       ├── 08_keycloak.sh     #    Keycloak 统一认证(P2-1, KEYCLOAK_ENABLED)
+│       ├── 09_kueue.sh        #    Kueue 队列治理(P2-2 DEV-29, KUEUE_ENABLED)
+│       ├── 10_kubevirt.sh     #    KubeVirt 虚拟机能力(P2-3 DEV-35, KUBEVIRT_ENABLED)
+│       ├── 11_lustre_csi.sh   #    Lustre CSI(P3-1 DEV-26, LUSTRE_CSI_ENABLED)
+│       └── 20_cubestack_apps.sh#   CubeStack 自研模块占位(20 起, CUBESTACK_APPS_ENABLED)
+├── tools/                     # ★ 工具脚本(模块的底层实现, 按领域分目录)
+│   ├── vm/                    #   虚拟机: create-libvirt-vm.sh / create-vm-template.sh / register-vm.sh
+│   ├── net/                   #   网络: setup-vm-network.sh / verify-vm-network.sh / teardown-vm-network.sh / setup-libvirt-nat.sh
+│   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / install-worker-packages.sh / prepare-workers.sh
+│   │                         #        setup-ntp.sh / sync-hosts.sh / sync-ca*.sh / rebootstrap*.sh
+│   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
+│   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 └── README.md                  # 本文件
 ```
 
-### 模块化设计说明
+### 模块化设计说明(规范见 docs/scripts-development-spec.md)
 
-`deploy-cluster.sh` 只做两件事:**参数解析 + 按注册表调度**,不内联任何业务逻辑。
-每个部署功能 = `steps/` 下一个独立脚本(薄封装, 复用现有脚本, 不重复实现)。
+`deploy-cluster.sh` 只做两件事:**参数解析 + 按模块框架调度**,不内联任何业务逻辑。
+每个部署功能 = `modules/<阶段目录>/NN_category_action.sh` 一个独立脚本(薄封装, 复用现有工具脚本)。
 
-**新增模块(如未来接入 GPU Operator / LWS 等)**:
-1. 在 `steps/` 新建 `<NN>-<name>.sh`(实现逻辑, 可调用现有脚本/kubectl)
-2. 在 `lib-deploy.sh` 的 `DEPLOY_STEPS` 追加一行: `"key|描述|脚本文件名|默认启用(1/0)"`
-3. 无需修改 `deploy-cluster.sh`
+**目录 = 部署环境准备的阶段**:
+- `01_env/` — 阶段一: 环境准备(VM/SSH/Harbor/HAProxy/Keepalived),**发生在部署 kubespray 之前**
+- `02_k8s/` — 阶段二: 离线部署 kubespray(不依赖 VM 还是裸金属)
+- `03_addon/` — 阶段三: 附加组件(集群部署后; 01~19 中间件, 20 起 CubeStack 自研模块)
+
+**镜像仓库定位**(与部署阶段对应):
+- 集群外私有仓库 → **Harbor**(`01_env/04_harbor.sh`, `HARBOR_ENABLED`),环境准备阶段于宿主机就绪
+- 集群内 registry → kubespray addon(`03_addon/03_k8s_registry.sh`),**默认不部署**(`REGISTRY_ENABLED=0`)
+- 原本地 docker registry(env_registry)已移除,由 Harbor 承担镜像仓库职责
+
+模块头部用注释声明元数据,框架**自动发现**(递归扫描子目录, 按 目录序号+文件序号 排序):
+
+```bash
+# MODULE: k8s_deploy          # 模块 key(缺省=文件名去掉 NN_ 前缀)
+# DESC: 部署 kubespray 集群   # 一句话描述
+# PHASE: k8s                  # 阶段: env / k8s / addon
+# DEFAULT: 0                  # 是否默认启用
+# REPEAT: 0                   # 1=可重复执行(不写断点状态)
+# TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量, true 时自动启用
+```
+
+**新增模块**:
+1. 在 `modules/<阶段目录>/` 新建 `NN_category_action.sh`(实现逻辑, 可调用 `tools/` 下工具脚本/kubectl)
+2. 按上面格式写元数据头
+3. 完成 —— 无需修改 `lib-module.sh` / `deploy-cluster.sh` / 任何注册表
+
+**tools/ 工具脚本**:模块是"薄封装",具体动作(网络/SSH/装包/生成 inventory/配置同步等)在 `tools/<领域>/` 下的工具脚本中实现,被模块通过 `bash "${SCRIPT_DIR}/tools/<领域>/xxx.sh"` 复用。新增工具脚本放入对应领域目录即可(网络→`tools/net/`, 节点→`tools/node/`, inventory/配置→`tools/k8s/`, 负载均衡/registry→`tools/lb/`, 虚拟机→`tools/vm/`)。
+
+**向后兼容**:旧模块名(`net`/`ssh_key`/`vm`/`ssh_passwordless`/`worker_bm`/`hosts`/`inventory`/`ntp`/`k8s`/`scale`/`lws`)由 `lib-module.sh` 的 `MODULE_ALIAS` 自动映射,旧用法 `--steps vm,k8s` 仍然有效。
 
 项目根目录 `scripts/` 下仅有 dev 启动脚本(`dev.sh`/`start-backend.sh`/`start-frontend.sh`),部署脚本统一在 `deployments/scripts/`。
 
 统一配置:见 `config/cluster.conf`(真实,已 gitignore)与 `config/cluster.conf.example`(模板,提交)。
+全阶段组件规划与进度追踪:见 `docs/cluster-components-plan.md`(P1/P2/P3)。
 
 ---
 
 ## 3. 统一配置文件(config/cluster.conf)
 
-配置分四大块,字段含义见文件内注释:
+配置分五大块,字段含义见文件内注释:
 
 | 区块 | 关键项 | 说明 |
 |---|---|---|
@@ -100,6 +143,7 @@ deployments/scripts/
 | SSH | `SSH_KEY_NAME` `SSH_DEFAULT_PASSWORD` `VM_SSH_USERS` `WORKER_SSH_PASSWORD` | 密钥、虚拟机预埋密码、免密用户、裸金属密码 |
 | 节点规划 | `NODES=( ... )` | 每行一节点,类型由第10字段 `node_type` 决定: vm=虚拟机 / bm=裸金属 |
 | kubespray | `KUBESPRAY_INV_DIR` `KUBESPRAY_DIR` `UPDATE_ETC_HOSTS` | inventory 输出位置、playbook 位置、是否写 /etc/hosts |
+| NTP 时间同步 | `NTP_ENABLED` `NTP_SERVER` `NTP_UPSTREAM` `NTP_ALLOW` `NTP_MAX_OFFSET_MS` | k8s 部署前的节点时钟一致化(见 §5.8.2) |
 
 ### 节点行格式
 
@@ -147,32 +191,39 @@ NODES=(
 ### 5.1 deploy-cluster.sh —— 一键部署统一入口(模块化)
 
 ```bash
-sudo ./scripts/deploy-cluster.sh                       # 默认基础设施模块(net/ssh_key/vm/ssh_passwordless/worker_bm/hosts/inventory)
-sudo ./scripts/deploy-cluster.sh --with-k8s            # 追加 k8s 部署模块(= --enable k8s)
-sudo ./scripts/deploy-cluster.sh --steps vm,k8s        # 只运行指定模块(逗号分隔)
+sudo ./scripts/deploy-cluster.sh                       # 默认基础设施模块(vm_network/vm_sshkey/vm_create/k8s_passwordless/k8s_workerbm/k8s_hosts/k8s_inventory/k8s_ntp)
+sudo ./scripts/deploy-cluster.sh --with-k8s            # 追加 k8s 部署模块(= --enable k8s, 兼容旧名)
+sudo ./scripts/deploy-cluster.sh --steps vm,k8s        # 只运行指定模块(逗号分隔, 旧名自动映射)
 sudo ./scripts/deploy-cluster.sh --skip hosts          # 跳过某模块
 sudo ./scripts/deploy-cluster.sh --skip net --with-k8s  # 全裸金属:跳过网络模块, 部署 k8s
-sudo ./scripts/deploy-cluster.sh --enable gpu_operator,lws  # 启用默认关闭模块(需先实现 steps/ 脚本)
+sudo ./scripts/deploy-cluster.sh --phase k8s           # 仅运行 k8s 阶段
+sudo ./scripts/deploy-cluster.sh --enable gpu_operator,lws  # 启用默认关闭模块
 sudo ./scripts/deploy-cluster.sh --only <host>         # 仅处理指定节点(可多次)
-sudo ./scripts/deploy-cluster.sh --list-steps          # 查看全部模块
+sudo ./scripts/deploy-cluster.sh --list-steps          # 查看全部模块(自动发现)
 sudo ./scripts/deploy-cluster.sh --list                # 仅打印集群规划(只读)
 sudo ./scripts/deploy-cluster.sh --fresh               # 清断点续跑状态重跑
 ```
 
-流程按 `lib-deploy.sh` 注册表顺序执行 `steps/*.sh`;每模块完成自动保存状态(断点续跑)。默认模块:网络 → SSH密钥 → 虚拟机创建+启动 → SSH免密 → 裸金属worker装包 → /etc/hosts(可选) → inventory。k8s/gpu_operator/lws 默认关闭,按需 `--enable`/`--steps` 启用。
+流程按 `modules/*.sh` 文件序号自动发现并执行;每模块完成自动保存状态(断点续跑)。默认模块:网络 → SSH密钥 → 虚拟机创建+启动 → SSH免密 → 裸金属worker装包 → /etc/hosts(可选) → inventory → **NTP 时间同步(在 k8s 前)**。k8s/gpu_operator/lws/haproxy/keepalived 默认关闭,按需 `--enable`/`--steps`/`--phase` 或 cluster.conf 开关启用。
+
+随时可只检查节点时钟偏差(只读, 不写任何东西):
+
+```bash
+sudo ./scripts/tools/node/setup-ntp.sh --check
+```
 
 ### 5.2 gen-ssh-key.sh —— SSH 密钥对
 
 ```bash
-./scripts/gen-ssh-key.sh        # 生成 ~/.ssh/cubestack_k8s(ed25519, 幂等)
+./scripts/tools/node/gen-ssh-key.sh        # 生成 ~/.ssh/cubestack_k8s(ed25519, 幂等)
 ```
 
 ### 5.3 setup-passwordless.sh —— 免密登录
 
 ```bash
-./scripts/setup-passwordless.sh <IP> [user ...]        # user 缺省用配置 VM_SSH_USERS
-./scripts/setup-passwordless.sh 10.244.1.11            # root + ubuntu
-./scripts/setup-passwordless.sh 10.244.1.11 ubuntu     # 仅 ubuntu
+./scripts/tools/node/setup-passwordless.sh <IP> [user ...]        # user 缺省用配置 VM_SSH_USERS
+./scripts/tools/node/setup-passwordless.sh 10.244.1.11            # root + ubuntu
+./scripts/tools/node/setup-passwordless.sh 10.244.1.11 ubuntu     # 仅 ubuntu
 ```
 
 用配置的默认密码(`SSH_DEFAULT_PASSWORD`)注入公钥到目标主机 `~/.ssh/authorized_keys`,随后验证纯密钥登录。要求:已执行 `gen-ssh-key.sh`;目标允许 SSH 密码登录。
@@ -180,9 +231,9 @@ sudo ./scripts/deploy-cluster.sh --fresh               # 清断点续跑状态�
 ### 5.4 gen-inventory.sh —— kubespray inventory
 
 ```bash
-./scripts/gen-inventory.sh                    # 生成全部节点
-INV_ROLES=master ./scripts/gen-inventory.sh   # 仅 master(先部署控制平面)
-INV_EXCLUDE=mxgpu-1-232 ./scripts/gen-inventory.sh  # 排除指定节点(逗号分隔)
+./scripts/tools/k8s/gen-inventory.sh                    # 生成全部节点
+INV_ROLES=master ./scripts/tools/k8s/gen-inventory.sh   # 仅 master(先部署控制平面)
+INV_EXCLUDE=mxgpu-1-232 ./scripts/tools/k8s/gen-inventory.sh  # 排除指定节点(逗号分隔)
 ```
 
 生成:
@@ -197,7 +248,7 @@ master 写入 `ansible_ssh_private_key_file`(密钥免密);worker 若密钥存�
 **避免在 kubespray group_vars 中硬编码环境 IP**,从 `config/cluster.conf` 动态生成:
 
 ```bash
-./scripts/sync-kubespray-config.sh
+./scripts/tools/k8s/sync-kubespray-config.sh
 ```
 
 自动同步项:
@@ -208,16 +259,166 @@ master 写入 `ansible_ssh_private_key_file`(密钥免密);worker 若密钥存�
 | `group_vars/all/all.yml` | `supplementary_addresses_in_ssl_keys` | `HOST_PHYS_IP` + 所有 master IP + `lb.k8s.local` |
 | `group_vars/k8s_cluster/k8s-net-calico.yml` | `calico_ip_auto_method` | 第一个 worker IP(`can-reach=`) |
 | `group_vars/k8s_cluster/k8s-cluster.yml` | `kube_apiserver_extra_args.advertise-address` | `HOST_PHYS_IP` |
+| `group_vars/k8s_cluster/addons.yml` | `metallb_config.address_pools.primary.ip_range` | `METALLB_POOL`(MetalLB 负载均衡地址池) |
+| `group_vars/k8s_cluster/addons.yml` | `registry_service_loadbalancer_ip` | `REGISTRY_IP`(registry LoadBalancer 固定 VIP) |
+| `group_vars/all/containerd.yml` | `containerd_registries_mirrors` | `REGISTRY_DOMAIN`/`REGISTRY_IP`/`REGISTRY_PORT`(节点 containerd HTTP 信任) |
+| `group_vars/all/registry.yml` | `registry_domain`/`registry_ip`/`registry_port` | `REGISTRY_*`(供 patch-playbook 读取) |
 
 > 说明:`kube_service_addresses` / `kube_pods_subnet` 为集群内部 CIDR(10.233.x),属 kubespray 默认值,无需从环境同步。
+> 说明:集群已默认启用 **MetalLB**(Layer2,地址池来自 `METALLB_POOL`);**Registry(集群内)默认不部署**(`REGISTRY_ENABLED=0`),集群外镜像仓库用 **Harbor**(`HARBOR_ENABLED`);**local-path-provisioner 默认不启动**(`LOCAL_PATH_ENABLED=false`,需本地 PVC 持久化时启用)。组件开关配置见 `group_vars/k8s_cluster/addons.yml`(由 `sync-addons-config.sh` 从 cluster.conf 生成)。
+
+### 5.8.1 内置 Registry(镜像仓库)使用指南
+
+kubespray 的 registry addon 以 MetalLB **LoadBalancer** 暴露(默认),对外统一域名 `REGISTRY_DOMAIN`(默认 `registry.local`)、固定 VIP `REGISTRY_IP`(默认 `10.244.2.100`)、端口 `REGISTRY_PORT`(默认 `5000`,HTTP 无 TLS)。集群内拉镜像、集群外 push/pull 全走同一条链路:
+
+```
+ 集群外 push 机                        宿主机(HOST_PHYS_IP)                       集群内
+ ──────────────                        ─────────────────                        ──────
+ /etc/hosts: HOST_PHYS_IP registry.local
+ docker push registry.local:5000/… ──► DNAT: HOST_PHYS_IP:5000 ──► 10.244.2.100:5000 (MetalLB VIP)
+                                          (setup-registry-expose.sh)   │  registry.local:5000
+ docker pull registry.local:5000/… ◄──── 同上反向                        │  (registry pod, kube-system)
+                                                                        │
+  各节点 /etc/hosts: 10.244.2.100 registry.local                        │
+  各节点 containerd certs.d/registry.local:5000 (HTTP + skip_verify) ◄──┘
+  集群内 pod 引用 image: registry.local:5000/<ns>/<img>:<tag> 直接拉取
+```
+
+`registry.local` 是「**双解析**」域名:集群内解析为 MetalLB VIP(`10.244.2.100`),集群外解析为宿主机物理 IP(`HOST_PHYS_IP`)——两个网络各用各的解析,不要混用。
+
+#### ① 集群内拉取镜像(部署 pod,主要场景)
+
+1. 先把镜像 push 进仓库(见 ②/③);
+2. Deployment / pod 中直接引用:
+
+```yaml
+image: registry.local:5000/dev/myapp:v1.0.0
+```
+
+集群节点已在部署时自动写好 `/etc/hosts` 与 containerd `certs.d` 信任,任何能调度到该镜像的节点都可直接拉取。节点上也可手动验证:
+
+```bash
+curl -s http://registry.local:5000/v2/            # 期望 {"repositories":[...]}
+crictl pull registry.local:5000/dev/myapp:v1.0.0  # 预拉到节点本地(可选, 拉取时不再联网)
+```
+
+#### ② 集群外 push / pull(docker / containerd)
+
+每个 push / pull 机一次性配置:
+
+```bash
+# ① 域名解析 → 宿主机物理 IP(注意是 HOST_PHYS_IP, 不是 VIP!)
+echo "<HOST_PHYS_IP> registry.local" | sudo tee -a /etc/hosts
+
+# ② 让 docker 信任该 HTTP 仓库(无 TLS)
+sudo mkdir -p /etc/docker
+cat > /etc/docker/daemon.json <<'EOF'
+{ "insecure-registries": ["registry.local:5000"] }
+EOF
+sudo systemctl restart docker
+```
+
+push(与 docker.io 一致, `<namespace>` 即仓库一级目录):
+
+```bash
+docker tag myapp:v1.0.0 registry.local:5000/dev/myapp:v1.0.0
+docker push registry.local:5000/dev/myapp:v1.0.0
+```
+
+pull / 验证:
+
+```bash
+docker pull registry.local:5000/dev/myapp:v1.0.0
+curl -s http://registry.local:5000/v2/    # 5000 端口由宿主机 DNAT 转发进集群
+```
+
+> 需宿主机转发规则已启用:`sudo ./scripts/tools/lb/setup-registry-expose.sh --add`(部署流程已自动执行);撤销:`--delete`。
+
+#### ③ 集群内节点 / pod 内 push(pod 内用 VIP, 不用域名)
+
+节点上直接 push(containerd 客户端复用同一份 hosts.toml):
+
+```bash
+ctr -n k8s.io images pull docker.io/library/busybox:latest
+ctr -n k8s.io images tag docker.io/library/busybox:latest registry.local:5000/dev/busybox:latest
+ctr -n k8s.io images push --plain-http registry.local:5000/dev/busybox:latest
+```
+
+> 集群内 **pod 的 DNS 不解析** `registry.local`(集群外域名)。pod 内若要 push,请改用固定 VIP `10.244.2.100:5000`(能路由到即可);跨网段不确定路由时,可把 registry 切成 NodePort 模式后经 `节点IP:REGISTRY_NODEPORT` 访问。
+
+#### 部署 / 启用脚本
+
+| 场景 | 操作 |
+|---|---|
+| 新集群安装 | 自动完成(kubespray addon + `cubestack-registry.yml` patch 写节点 hosts / containerd 信任) |
+| 已部署集群补配(幂等) | `sudo ./scripts/deploy-registry.sh` —— 设 Service 暴露方式 + 各节点 hosts/certs.d + 宿主机 DNAT + 自检 |
+| 仅对外转发 | `sudo ./scripts/tools/lb/setup-registry-expose.sh --add` / `--delete` |
+
+关键配置(`cluster.conf`):
+
+```bash
+REGISTRY_ENABLED=1                 # 0 关闭 registry 信任/转发配置
+REGISTRY_DOMAIN="registry.local"   # 统一内部域名
+REGISTRY_IP="10.244.2.100"         # MetalLB 固定 VIP(须在 METALLB_POOL 内, 避开 .0/.255)
+REGISTRY_PORT="5000"
+REGISTRY_SERVICE_TYPE="loadbalancer" # loadbalancer | nodeport(不依赖 MetalLB, 外部用 REGISTRY_NODEPORT)
+REGISTRY_NODEPORT="31148"            # nodeport 模式的固定 NodePort
+```
+
+#### 运维注意
+
+- **无认证、无 TLS**:`registry_htpasswd` 默认空(匿名读写)。如需鉴权,在 `group_vars/k8s_cluster/addons.yml` 配 `registry_htpasswd`(htpasswd 格式)。
+- **单副本 + RWO PVC**:镜像数据在 registry pod 所在节点的 local-path(`/opt/local-path-provisioner/`),默认 10Gi。**重建 VM / 迁移节点会丢镜像,需重新 push**。
+- **存储类**:`registry_storage_class: "local-path"`(需 `LOCAL_PATH_ENABLED=true` 启动 local-path-provisioner 才能创建 PVC),可改为其他 SC(如 Ceph CSI)。
+- **镜像命名**:`<namespace>/<image>:<tag>` 组织成仓库一级目录(如 `dev/`、`prod/`),与 docker.io 习惯一致。
+- **跨网段 worker 拉镜像**:走集群内解析(→VIP),勿指向宿主机 DNAT 入口。
+
+### 5.8.2 NTP 时间同步(09_k8s_ntp / setup-ntp.sh)—— 部署 k8s 前保证节点时钟一致
+
+kubeadm / etcd 对节点间时钟偏差敏感,若节点时间不一致会导致证书校验、心跳、日志时间线等故障。`modules/02_k8s/05_k8s_ntp.sh` 位于 k8s 阶段**部署模块之前**,为默认启用的可重复模块,一键部署与扩容时自动执行。
+
+原理与机制:
+
+- **权威时间源 = 宿主机(默认)**:`setup-ntp.sh` 在宿主机配置 chrony 服务端(`local stratum 10`,无公网上游时以本机时钟兜底,离线友好);`NTP_SERVER` 显式指定时为内部/外部 NTP 服务器,宿主机不再充当权威。
+- **节点客户端**:
+  - VM 节点(黄金镜像已预装 chrony)→ 改写 `/etc/chrony/chrony.conf` 为 `server <权威> iburst`,禁用冲突的 systemd-timesyncd,强制步进;
+  - 裸金属 worker(离线仓无 chrony 包)→ 用系统自带 `systemd-timesyncd` 指向权威。
+- **一次性硬对齐**:应用时对偏差 >1s 的节点用 `date -s @宿主机epoch` 直接校时(经 SSH 通道传递,即使 NTP 传输失败也保证部署时刻一致)。
+- **校验门禁**:全节点与权威(宿主机)偏差 ≤ `NTP_MAX_OFFSET_MS`(`2000`ms 默认);超限本步 `exit 1`,部署在 kubespray **之前中止**,避免带病上集群。
+
+用法:
+
+```bash
+sudo ./scripts/tools/node/setup-ntp.sh            # apply: 宿主机chrony + 节点客户端配置 + 硬对齐 + 校验(幂等)
+sudo ./scripts/tools/node/setup-ntp.sh --check    # 仅校验各节点时钟偏差(零写入)
+sudo ./scripts/tools/node/setup-ntp.sh --delete   # 关闭节点时间同步服务(幂等)
+sudo ./scripts/deploy-cluster.sh --only worker02   # 仅处理指定节点(框架 --only 透传)
+```
+
+关键配置(`cluster.conf`):
+
+```bash
+NTP_ENABLED="${NTP_ENABLED:-1}"                       # 0=跳过时间同步(不推荐)
+NTP_SERVER="${NTP_SERVER:-}"                          # 权威时间源 IP; 留空=宿主机(HOST_PHYS_IP)
+NTP_UPSTREAM="${NTP_UPSTREAM:-}"                      # 权威的公网上游(如 "pool ntp.aliyun.com iburst"); 留空=离线
+NTP_ALLOW="${NTP_ALLOW:-${VM_SUBNET} ${PHYS_WORKER_NET} ${NAT_SUBNET}}"  # 宿主机 chrony allow 子网
+NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"        # 节点-权威偏差阈值(ms); 超限→中止 k8s 部署
+```
+
+>> 离线排障要点:
+> - 宿主机没有 chrony 且无法 apt 安装(离线)→ 脚本降级以本机时钟为权威,仍做一次性 `date` 硬对齐 + 校验,仅 warn。
+> - 裸金属 worker 无 chrony → 自动用 `systemd-timesyncd`;若无法到达权威 UDP/123,会靠一次性硬对齐保证部署时刻一致,并显示偏差告警。
+> - 若宿主机启用 ufw/iptables,需放行 `udp/123`(chrony server 端口)。
+> - 新 VM 从黄金镜像快照出来时,时钟停在镜像制作时间 → apply 步骤的硬对齐 + `makestep` 会自动修正,校验不通过会中止部署提示修复。
+> - 时间同步只校时钟,不修改时区(VM 已默认 Asia/Shanghai)。
 
 ### 5.9 register-vm.sh —— 注册已存在 VM
 
 VM 已通过其他方式创建时,用此脚本将其注册到 `cluster.conf` 的 NODES:
 
 ```bash
-./scripts/register-vm.sh <role> <hostname> <ip> <mac> <mem> <cpu> <disk> [user] [password]
-./scripts/register-vm.sh worker cubestack-k8s-worker01 10.244.1.21 52:54:00:aa:bb:21 16 8 50
+./scripts/tools/vm/register-vm.sh <role> <hostname> <ip> <mac> <mem> <cpu> <disk> [user] [password]
+./scripts/tools/vm/register-vm.sh worker cubestack-k8s-worker01 10.244.1.21 52:54:00:aa:bb:21 16 8 50
 ```
 
 幂等(已存在则跳过),内部复用 `lib-common.sh` 的 `register_node_to_conf()`(awk 实现)。
@@ -227,8 +428,8 @@ VM 已通过其他方式创建时,用此脚本将其注册到 `cluster.conf` 的
 bare-metal worker(Ubuntu)无法联网时,用 repository 中的离线 `.deb` 包安装 kubespray 所需系统包:
 
 ```bash
-./scripts/install-worker-packages.sh <IP> [user]
-./scripts/install-worker-packages.sh 10.66.1.232 ubuntu
+./scripts/tools/node/install-worker-packages.sh <IP> [user]
+./scripts/tools/node/install-worker-packages.sh 10.66.1.232 ubuntu
 ```
 
 包来源: `deployments/kubespray/repository/cubestack-cluster/` 下的 `.deb` 文件(仓库根目录,与 kubeadm/etcd 等二进制同层)或 `packages/` 子目录,脚本自动收集两者并去重。包含 iputils-ping / rsync / iptables / curl / ca-certificates 及依赖。
@@ -236,8 +437,8 @@ bare-metal worker(Ubuntu)无法联网时,用 repository 中的离线 `.deb` 包�
 ### 5.5 create-libvirt-vm.sh —— 单台虚拟机
 
 ```bash
-./scripts/create-libvirt-vm.sh <主机名> <内存G> <CPU> <磁盘G> <MAC> <静态IP>
-./scripts/create-libvirt-vm.sh cubestack-k8s-master01 16 8 50 52:54:00:3b:e9:d2 10.244.1.11
+./scripts/tools/vm/create-libvirt-vm.sh <主机名> <内存G> <CPU> <磁盘G> <MAC> <静态IP>
+./scripts/tools/vm/create-libvirt-vm.sh cubestack-k8s-master01 16 8 50 52:54:00:3b:e9:d2 10.244.1.11
 ```
 
 网络模式取配置 `NET_MODE`(bridge/nat);`AUTO_SETUP_NET=1` 时网络不存在会自动创建。IP 会校验必须落在虚拟机网段内。通常由 `deploy-cluster.sh` 调用,也可单独使用。
@@ -245,16 +446,16 @@ bare-metal worker(Ubuntu)无法联网时,用 repository 中的离线 `.deb` 包�
 ### 5.6 网络三件套(方案A桥接)
 
 ```bash
-sudo ./scripts/setup-vm-network.sh      # 建 privbr0 + 回程路由 + 精准SNAT + 开机自启
-sudo ./scripts/verify-vm-network.sh     # 9项检查 + 连通性指引
-sudo ./scripts/teardown-vm-network.sh   # 回滚(SNAT/路由/自启); REMOVE_BRIDGE=1 删网桥
+sudo ./scripts/tools/net/setup-vm-network.sh      # 建 privbr0 + 回程路由 + 精准SNAT + 开机自启
+sudo ./scripts/tools/net/verify-vm-network.sh     # 9项检查 + 连通性指引
+sudo ./scripts/tools/net/teardown-vm-network.sh   # 回滚(SNAT/路由/自启); REMOVE_BRIDGE=1 删网桥
 ```
 
 ### 5.7 网络(NAT方案)
 
 ```bash
-sudo ./scripts/setup-libvirt-nat.sh [网络名]         # 创建(幂等),默认 cubestack-nat/10.245.0.0/16
-sudo ./scripts/setup-libvirt-nat.sh --delete [网络名] # 删除回滚
+sudo ./scripts/tools/net/setup-libvirt-nat.sh [网络名]         # 创建(幂等),默认 cubestack-nat/10.245.0.0/16
+sudo ./scripts/tools/net/setup-libvirt-nat.sh --delete [网络名] # 删除回滚
 ```
 
 ---
@@ -263,9 +464,9 @@ sudo ./scripts/setup-libvirt-nat.sh --delete [网络名] # 删除回滚
 
 ```bash
 # 网络方案切换
-VM_NET_MODE=bridge ./scripts/create-libvirt-vm.sh ...     # 覆盖 NET_MODE
+VM_NET_MODE=bridge ./scripts/tools/vm/create-libvirt-vm.sh ...     # 覆盖 NET_MODE
 # 单次指定密码 / 密钥
-SSH_DEFAULT_PASSWORD='xxx' ./scripts/setup-passwordless.sh 10.244.1.11
+SSH_DEFAULT_PASSWORD='xxx' ./scripts/tools/node/setup-passwordless.sh 10.244.1.11
 # 指定配置文件
 CLUSTER_CONF=/path/to/cluster.conf sudo ./scripts/deploy-cluster.sh --list
 ```
@@ -276,9 +477,12 @@ CLUSTER_CONF=/path/to/cluster.conf sudo ./scripts/deploy-cluster.sh --list
 
 - **`net.ipv4.route_localnet` 设置失败(No such file)** — 老内核无此参数,本方案不依赖,脚本已自动跳过并仅告警,可忽略。
 - **worker 连通性检查失败** — 需在 `config/cluster.conf` 填写 `WORKER_SSH_PASSWORD`(或节点行第9字段),脚本才用密码测试裸金属。
-- **创建 VM 报"网桥不存在"** — 先 `sudo ./scripts/setup-vm-network.sh`,或 `AUTO_SETUP_NET=1` 自动建。
+- **创建 VM 报"网桥不存在"** — 先 `sudo ./scripts/tools/net/setup-vm-network.sh`,或 `AUTO_SETUP_NET=1` 自动建。
 - **kubespray 部署** — `--with-k8s` 需宿主机已装 `ansible-playbook` 且 `KUBESPRAY_DIR` 指向完整 kubespray 仓库(含 `cluster.yml` 与 `group_vars`)。
 - **离线部署 kube-proxy 报 ImagePullBackOff** — 需先预加载离线镜像到节点 containerd(见第 8 节,`cubestack-offline.sh scale` 已内置此逻辑)。
+- **部署中止在 ntp 模块(时钟偏差超限)** — `NTP_MAX_OFFSET_MS` 超限说明某节点与权威时钟偏差过大(如新 VM 从快照出来、NTP 端口被防火墙挡),应先修复时间源/网络后重跑 `setup-ntp.sh` 或整个部署;该门禁是为避免 etcd/kubeadm 时间敏感故障。
+- **节点时间不收敛 / chrony 无输出** — 检查宿主机(权威)是否在 **udp/123** 监听且 `NTP_ALLOW` 覆盖了节点子网;裸金属 worker 走 `systemd-timesyncd` 时确认能到达权威服务器(如跨网段路由)。
+- **只查不改** — `sudo ./scripts/tools/node/setup-ntp.sh --check` 只校验零写入;`--delete` 可整体关闭节点时间同步(不建议)。
 
 ---
 
@@ -322,7 +526,7 @@ k8s-dns-node-cache metrics-server pause"
 ### 8.3 一键部署(推荐)
 
 ```bash
-# 全流程: 宿主网络 → SSH密钥 → master/worker VM 创建+注册 → 免密 → inventory → kubespray 离线部署
+# 全流程: 宿主网络 → SSH密钥 → master/worker VM 创建+注册 → 免密 → inventory → 时间同步 → kubespray 离线部署
 sudo ./scripts/deploy-cluster.sh --with-k8s
 ```
 
@@ -333,24 +537,25 @@ sudo ./scripts/deploy-cluster.sh --with-k8s
 4. `setup-passwordless.sh` 注入公钥
 5. 对 worker 执行 `install-worker-packages.sh` 安装离线包
 6. `gen-inventory.sh` + `sync-kubespray-config.sh` 生成 inventory 与配置
-7. `cubestack-offline.sh install` 执行 kubespray 离线部署
+7. `setup-ntp.sh`(modules/02_k8s/05_k8s_ntp)同步各节点时间到宿主机权威, 校验偏差 ≤ `NTP_MAX_OFFSET_MS`(在 kubespray 之前)
+8. `cubestack-offline.sh install` 执行 kubespray 离线部署
 
 ### 8.4 分步部署(可精细控制)
 
 ```bash
 # ① 初始化宿主网络(bridge 方案)
-sudo ./scripts/setup-vm-network.sh
+sudo ./scripts/tools/net/setup-vm-network.sh
 
 # ② 生成 SSH 密钥
-./scripts/gen-ssh-key.sh
+./scripts/tools/node/gen-ssh-key.sh
 
 # ③ 创建 master VM(3 台)+ 注册到 cluster.conf + 免密
-sudo AUTO_REGISTER_CLUSTER=1 ./scripts/create-libvirt-vm.sh cubestack-k8s-master01 16 8 50 52:54:00:3b:e9:d2 10.244.1.11
-SSH_DEFAULT_PASSWORD='k8s@2026' ./scripts/setup-passwordless.sh 10.244.1.11 ubuntu
+sudo AUTO_REGISTER_CLUSTER=1 ./scripts/tools/vm/create-libvirt-vm.sh cubestack-k8s-master01 16 8 50 52:54:00:3b:e9:d2 10.244.1.11
+SSH_DEFAULT_PASSWORD='k8s@2026' ./scripts/tools/node/setup-passwordless.sh 10.244.1.11 ubuntu
 # ... 重复 master02 / master03 ...
 
 # ④ 生成 inventory + 同步 kubespray 配置
-INV_ROLES=master ./scripts/gen-inventory.sh        # 先只生成 master
+INV_ROLES=master ./scripts/tools/k8s/gen-inventory.sh        # 先只生成 master
 
 # ⑤ 离线部署 kubespray(先下载离线资源,再安装)
 cd deployments/kubespray
@@ -364,11 +569,11 @@ CUBESTACK_KUBESPRAY_DIR=$PWD/kubespray \
 
 ```bash
 # ① 创建 worker VM + 注册(或编辑 cluster.conf NODES 追加 worker 行)
-sudo AUTO_REGISTER_CLUSTER=1 ./scripts/create-libvirt-vm.sh cubestack-k8s-worker01 16 8 50 52:54:00:aa:bb:21 10.244.1.21
-SSH_DEFAULT_PASSWORD='k8s@2026' ./scripts/setup-passwordless.sh 10.244.1.21 ubuntu
+sudo AUTO_REGISTER_CLUSTER=1 ./scripts/tools/vm/create-libvirt-vm.sh cubestack-k8s-worker01 16 8 50 52:54:00:aa:bb:21 10.244.1.21
+SSH_DEFAULT_PASSWORD='k8s@2026' ./scripts/tools/node/setup-passwordless.sh 10.244.1.21 ubuntu
 
 # ② 生成含新 worker 的 inventory(排除跨网段节点可加 INV_EXCLUDE)
-./scripts/gen-inventory.sh
+./scripts/tools/k8s/gen-inventory.sh
 
 # ③ 扩容: 预加载镜像到 worker → 执行 scale.yml
 cd deployments/kubespray
@@ -388,11 +593,11 @@ export SSHPASS='<worker密码>'
 sshpass -e ssh ubuntu@<workerIP> "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" < ~/.ssh/cubestack_k8s.pub
 
 # ② 安装离线系统包
-./scripts/install-worker-packages.sh <workerIP> ubuntu
+./scripts/tools/node/install-worker-packages.sh <workerIP> ubuntu
 
 # ③ 加入 inventory 后扩容
 #    注意: worker 通过宿主机 IP:6443(DNAT)访问 API Server,需确保 /etc/hosts 与证书 SAN 配置正确(见 5.8)
-./scripts/gen-inventory.sh
+./scripts/tools/k8s/gen-inventory.sh
 bash deployments/kubespray/cubestack-offline.sh scale --limit kube_node
 ```
 
@@ -415,4 +620,4 @@ sudo ./deployments/scripts/deploy-cluster.sh --list
 sudo ./deployments/scripts/deploy-cluster.sh --skip net --with-k8s
 ```
 
-`--skip net` 跳过 VM 网桥/SNAT 初始化(裸金属节点同网段直连,无需转发)。`--skip vm` 也可但非必须(`03-vm.sh` 遇到 `node_type=bm` 会自动跳过)。
+`--skip net` 跳过 VM 网桥/SNAT 初始化(裸金属节点同网段直连,无需转发)。`--skip vm` 也可但非必须(`modules/01_env/03_vm_create.sh` 遇到 `node_type=bm` 会自动跳过)。
