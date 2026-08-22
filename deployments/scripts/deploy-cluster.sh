@@ -57,6 +57,7 @@ usage() {
   03_addon 01~19 中间件: gpu_operator gpu_lws k8s_registry prometheus ceph
           ceph_csi envoy_gateway keycloak kueue kubevirt lustre_csi        (默认关, --enable)
           20 起自研: cubestack_apps(CUBESTACK_APPS_ENABLED, 默认关)
+          21+ 验证: verify_metallb 等(默认关, --steps verify_<组件> 手动执行)
 
 选项:
   --with-k8s            启用 k8s_deploy 部署模块(= --enable k8s)
@@ -80,6 +81,7 @@ usage() {
   sudo ./deploy-cluster.sh --phase k8s
   sudo ./deploy-cluster.sh --with-scale   # 扩容: 新节点先写入 cluster.conf
   sudo ./deploy-cluster.sh --only worker02 --with-scale
+  sudo ./deploy-cluster.sh --steps verify_metallb   # 端到端验证组件真正工作(非仅 pod running, 验后自动清理)
 EOF
     exit 0
 }
@@ -164,5 +166,9 @@ echo -e "\033[32m✅ 一键部署流程完成(配置: ${CLUSTER_CONF})\033[0m"
 echo "  配置: ${CLUSTER_CONF}"
 echo "  本次执行: ${RUN_STEPS[*]}"
 echo "  完整日志: ${LOG_FILE:-<未保存, 可用 pipe 保存>}"
+echo "  SSH 私钥:   ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+echo "  Kubeconfig: ${KUBESPRAY_INV_DIR}/artifacts/admin.conf"
+echo "              用法: kubectl --kubeconfig=${KUBESPRAY_INV_DIR}/artifacts/admin.conf get nodes"
+echo "  管理凭证:   无 kubeadmin 密码, 管理员权限=admin.conf(客户端证书); 节点 SSH 默认密码: ${SSH_DEFAULT_PASSWORD:-<未设置>}"
 echo "  下一步: 扩容用 --with-scale; 组件用 --enable gpu_operator,lws,lb_haproxy,lb_keepalived"
 echo "============================================="

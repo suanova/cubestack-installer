@@ -14,6 +14,21 @@ description: CubeStack 部署脚本开发规范技能。当需要编写、修改
 - 修改既有模块或工具脚本,且需要保证不影响其他模块
 - 审查脚本是否符合项目规范
 - 需要了解 cluster.conf 组件开关、模块命名、目录组织规则
+- **排查部署/运行问题**(见下方"问题解决 → 沉淀到 troubleshooting")
+
+## 问题解决 → 沉淀到 troubleshooting(强制)
+
+每次解决完一个部署/运行问题,**找到真正的 root cause 后必须**:
+
+1. 按 `docs/troubleshooting.md` 的模板新增一条:`### 症状 → 根因 → 解法(根治) → 验证 → 相关命令`;
+2. 根因要以**证据**为准(日志、抓包、计数器),不要停留在表象(如"webhook 超时"其实是 CNI 数据面断裂);
+3. 若产生了新知识点/新命令,同步更新本 SKILL 的对应章节(或新增小节);
+4. 相关修复脚本/配置一并落地(如 `calico_mtu`、controller pin),而不是只留口头结论。
+
+> ⚠ **最重要的一条:只有「真正验证过能解决问题」的方案,才允许写入文档作为「解法」。**
+> 未验证 / 只验证了一部分(如只解决了部署、没解决数据面)的方案,必须在文档里**如实标注已验证的边界**,绝不能写成"能解决问题"。
+> 否则文档会留下一个看似解决、实则解决不了的方案,误导后续排查。
+> 验证闭环:问题复现 → 修复 → **端到端验证通过(能跑通完整功能)** → 才更新文档。
 
 ## 关键文件位置(先读再改)
 
@@ -83,6 +98,9 @@ load_config
 
 验证: `sudo ./deploy-cluster.sh --list-steps` 应出现新模块; `sudo ./deploy-cluster.sh --steps <key>` 可单独执行。
 
+> ⚠ **新增模块/功能后必须同步更新 `deploy-cluster.sh` 的 help(usage)**: 在"阶段目录与模块"列表与"示例"中补充新模块/命令(如 verify 模块加 `--steps verify_<组件>` 示例)。
+> 原则:**每次增加新功能,及时更新 help**(以及必要的 README/文档),保证 `--help` 始终与代码一致,避免文档与实现脱节。
+
 ## 未实现组件的伪代码占位(addon_stub)
 
 尚未实现真实逻辑的组件,统一用 `lib-common.sh` 的 **`addon_stub`** 框架写伪代码占位(一键流程可跑通,不真正执行; `ADDON_STUB_EXEC=1` 时试执行):
@@ -102,6 +120,43 @@ addon_stub "my_component" MY_COMPONENT_STEPS
 ```
 
 实现真实逻辑时:把 `addon_stub "key" XXX_STEPS` 替换为真实命令即可,其余结构不变。
+
+## 组件功能验证模块模板(verify_<组件>.sh)
+
+部署完某个 operator/组件后,用它**真正验证工作正常**(而非仅 pod Running)。参考实现:`modules/03_addon/21_verify_metallb.sh`。
+
+```bash
+# ============================================================
+# MODULE: verify_<组件>        # 文件 modules/03_addon/2N_verify_<组件>.sh
+# DESC: 端到端验证 <组件> 真正工作(非仅 pod running): <一句话: 如 "LB Service 分配到池内 VIP 且节点可访问">
+# PHASE: addon
+# DEFAULT: 0                    # ⚠ 不要设 TOGGLE!否则组件开关为 true 时会在安装流程中被自动启用
+# REPEAT: 1                     # 验证可重复执行
+# 用法:   sudo ./deploy-cluster.sh --steps verify_<组件>
+```
+⚠ **不要设 `TOGGLE`**:`module_default_on` 会对 TOGGLE=true 的模块自动启用,导致 verify 模块在安装时被带上。verify 模块应保持 `DEFAULT:0`、无 TOGGLE,安装后单独 `--steps` 执行。
+# ============================================================
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
+load_config
+
+[ "${<TOGGLE>:-true}" = "true" ] || { say "跳过(未启用)"; exit 0; }
+FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
+SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
+K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+trap '清理测试资源' EXIT
+# ① 组件 pod Ready → ② 核心 CR/资源存在 → ③ 建测试资源(用已预加载的离线镜像如 busybox/nginx)
+# ④ 等待关键状态(分配 VIP / Ready) → ⑤ 真实功能访问(curl VIP / 调 API / 查数据) → ⑥ trap 清理
+```
+
+要点:
+- **核心是第 ⑤ 步的真实功能验证**(访问/调用/查询能通才算过),不是 `get pods` 就完事;
+- 测试后端用已预加载的离线镜像(`busybox:latest` httpd / `nginx`),避免离线拉镜像失败;
+- 测试命名空间固定前缀 `verify-` 便于清理;`trap cleanup EXIT` 保证失败也清理;
+- VIP 在池内校验、HTTP 状态码判定等边界,可加独立小函数(`_ip_in_pool` 等)便于复用;
+- 每个 operator 一个 `verify_<组件>.sh`,本文件就是模板,复制改 MODULE/DESC/TOGGLE 与 ③⑤ 步。
 
 ## 修改模块的约束(不影响其他模块)
 
@@ -138,6 +193,22 @@ sudo ./deployments/scripts/deploy-cluster.sh --phase addon       # 仅 addon 阶
 sudo ./deployments/scripts/deploy-cluster.sh --enable harbor,prometheus  # 启用组件
 sudo ./deployments/scripts/deploy-cluster.sh --list-steps        # 查看全部模块
 ```
+
+## MetalLB 常见故障速查(环境切换残留 / memberlist)
+
+> 详见 `docs/troubleshooting.md` 三.1(症状→根因→解法→验证全记录)。此处只沉淀关键知识点:
+
+- **controller 永久 Pending + speaker 全报 `secret "memberlist" not found`** → 先看 `describe pod` 的
+  `Node-Selectors`: 残留了**旧环境(裸金属)主机名**(如 `kubernetes.io/hostname: mxgpu-1-232`), 本环境无此节点
+  → controller 调度不上 → 从不启动 → **不会自动创建 memberlist secret** → speaker 连锁失败。
+  `memberlist` secret 缺失是**结果不是根因**, 模板无需加该 Secret(v0.13.x 由 controller 启动时自建)。
+- **快速恢复/验证**(无需重跑部署):
+  ```bash
+  kubectl -n metallb-system patch deployment controller --type=json \
+    -p='[{"op":"remove","path":"/spec/template/spec/nodeSelector/kubernetes.io~1hostname"}]'
+  ```
+- **根治**: 删 addons.yml 里 controller.nodeselector 残留 hostname;`sync-kubespray-config.sh` 4.0 段是
+  **幂等双向同步**(pin=1 确保=当前首个 master, pin=0 移除残留), 换环境重装不再踩坑。
 
 ## 审查清单(写完脚本后自检)
 

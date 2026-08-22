@@ -26,7 +26,7 @@ for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
     IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
     case "${role}" in
-        master) MASTER_IPS+=("${ip}") ;;
+        master) MASTER_IPS+=("${ip}"); [ -z "${FIRST_MASTER_HOST:-}" ] && FIRST_MASTER_HOST="${hostname}" ;;
         worker) WORKER_IPS+=("${ip}") ;;
     esac
 done
@@ -127,14 +127,16 @@ if [ -f "${CLUSTER_YML}" ]; then
     sed -i -E "s|^kube_service_addresses:[[:space:]]*[0-9.]+/[0-9]+|kube_service_addresses: ${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18}|" "${CLUSTER_YML}"
     sed -i -E "s|^kube_pods_subnet:[[:space:]]*[0-9.]+/[0-9]+|kube_pods_subnet: ${KUBE_PODS_SUBNET:-10.233.64.0/18}|" "${CLUSTER_YML}"
     sed -i -E "s|^nodelocaldns_ip:[[:space:]]*[0-9.]+|nodelocaldns_ip: ${NODELOCAL_DNS_IP:-169.254.25.10}|" "${CLUSTER_YML}"
-    ok "已同步集群内部 CIDR: kube_service_addresses=${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18} / kube_pods_subnet=${KUBE_PODS_SUBNET:-10.233.64.0/18} / nodelocaldns_ip=${NODELOCAL_DNS_IP:-169.254.25.10}"
+    # CNI 网络插件(默认 calico, 可选 cilium): 同步到 kube_network_plugin
+    sed -i -E "s|^kube_network_plugin:[[:space:]]*[a-z]+|kube_network_plugin: ${KUBE_NETWORK_PLUGIN:-calico}|" "${CLUSTER_YML}"
+    ok "已同步集群内部 CIDR: kube_service_addresses=${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18} / kube_pods_subnet=${KUBE_PODS_SUBNET:-10.233.64.0/18} / nodelocaldns_ip=${NODELOCAL_DNS_IP:-169.254.25.10} / CNI=${KUBE_NETWORK_PLUGIN:-calico}"
 else
     warn "集群内部 CIDR 未同步(未找到 ${CLUSTER_YML})"
 fi
 
 # ---------------- 4. 更新 addons.yml (MetalLB 地址池) ----------------
 ADDONS_YML="${INV_DIR}/group_vars/k8s_cluster/addons.yml"
-METALLB_POOL="${METALLB_POOL:-10.244.2.0/24}"
+METALLB_POOL="${METALLB_POOL:-10.244.2.1-10.244.2.254}"   # ⚠ 用区间排除 .0/.255(网络/广播地址), 勿用 10.244.2.0/24 这类 CIDR
 if [ -f "${ADDONS_YML}" ]; then
     say "更新 ${ADDONS_YML} (MetalLB 地址池) ..."
     # 替换 address_pools.primary.ip_range 下的条目(首个 "- <CIDR>" 行), 幂等
@@ -158,6 +160,88 @@ if [ -f "${ADDONS_YML}" ]; then
     ok "已同步 MetalLB 地址池 → ${METALLB_POOL}"
 else
     warn "未找到 ${ADDONS_YML},跳过 MetalLB 地址池同步"
+fi
+
+# ---------------- 4.0 更新 addons.yml (metallb controller 钉到首个 master) ----------------
+# workaround: 将 metallb controller 调度到首个 master(与 apiserver 同节点), 避免跨节点 host→pod
+# 网络异常(如裸金属 VXLAN/交换机拦截 4789)导致 admission webhook 不可达 → 部署/verify 失败。
+# 默认: 裸金属(ALL_BM=1)应用 workaround; 其它环境默认不应用。
+# 覆盖: cluster.conf 设 METALLB_PIN_CONTROLLER_FIRST_MASTER=1/0 显式控制。
+# 幂等双向同步(根治"裸金属跑过 → VM 重装残留陈旧 hostname → controller 永久 Pending"):
+#   · pin=1 → 确保 controller.nodeselector 的 hostname 存在且值=当前首个 master;
+#   · pin=0 → 移除 controller.nodeselector 里任何残留的 kubernetes.io/hostname 行。
+_PIN_DEFAULT=0
+[ "${ALL_BM}" = "1" ] && _PIN_DEFAULT=1
+_PIN="${METALLB_PIN_CONTROLLER_FIRST_MASTER:-${_PIN_DEFAULT}}"
+if [ -f "${ADDONS_YML}" ] && [ "${METALLB_ENABLED:-true}" = "true" ]; then
+    if [ "${_PIN}" = "1" ] && [ -n "${FIRST_MASTER_HOST:-}" ]; then
+        say "更新 ${ADDONS_YML} (metallb controller → 首个 master ${FIRST_MASTER_HOST}) ..."
+    else
+        say "更新 ${ADDONS_YML} (metallb controller 解除钉节点, 清除残留 hostname) ..."
+    fi
+    python3 - "${ADDONS_YML}" "${_PIN}" "${FIRST_MASTER_HOST:-}" << 'PYEOF'
+import re, sys
+path, pin, host = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = open(path).read().split('\n')
+
+# 定位 metallb_config 下 controller 的 nodeselector(只改 controller 块, 不碰 speaker)
+ns_idx = None
+for i, line in enumerate(lines):
+    if re.match(r'^\s*controller:\s*$', line):
+        j = i + 1
+        while j < len(lines) and (not lines[j].strip() or lines[j].startswith(' ')):
+            if re.match(r'^\s*nodeselector:\s*$', lines[j]):
+                ns_idx = j
+                break
+            j += 1
+    if ns_idx is not None:
+        break
+
+if ns_idx is not None:
+    base = len(lines[ns_idx]) - len(lines[ns_idx].lstrip())
+    k = ns_idx + 1
+    block_end = ns_idx + 1   # 子属性块(缩进>base)的结束下标(不含)
+    while k < len(lines):
+        line = lines[k]
+        if not line.strip():
+            k += 1
+            continue
+        if len(line) - len(line.lstrip()) <= base:
+            break
+        block_end = k + 1
+        k += 1
+    block = list(range(ns_idx + 1, block_end))
+    host_idx = [idx for idx in block if re.match(r'^\s*kubernetes\.io/hostname:', lines[idx])]
+
+    if pin == '1' and host:
+        target = 'kubernetes.io/hostname: "%s"' % host
+        if host_idx:
+            idx = host_idx[0]
+            indent = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
+            if lines[idx].strip() != target:
+                lines[idx] = indent + target
+        else:
+            # 插到 os 行之后; 无 os 行则插到块末
+            os_idx = next((idx for idx in block if re.match(r'^\s*kubernetes\.io/os:', lines[idx])), None)
+            anchor = os_idx if os_idx is not None else (block_end - 1 if block else ns_idx)
+            indent = (lines[anchor][:len(lines[anchor]) - len(lines[anchor].lstrip())]
+                      if anchor in block else '      ')
+            lines.insert(anchor + 1, indent + target)
+    else:
+        # pin 未启用(或未给出首个 master): 移除任何残留 hostname, 避免陈旧主机名
+        # 使 controller 无法调度 → deployment 永久 Pending
+        for idx in sorted(host_idx, reverse=True):
+            del lines[idx]
+
+open(path, 'w').write('\n'.join(lines).rstrip('\n') + '\n')
+PYEOF
+    if [ "${_PIN}" = "1" ] && [ -n "${FIRST_MASTER_HOST:-}" ]; then
+        ok "已同步 metallb controller 调度 → 首个 master(${FIRST_MASTER_HOST})"
+    else
+        ok "已清除 metallb controller 残留 hostname 钉节点(pin 未启用)"
+    fi
+else
+    say "跳过 metallb controller 调度(无 addons.yml 或 METALLB_ENABLED=false)"
 fi
 
 # ---------------- 4.1 更新 addons.yml (Registry Service 暴露方式) ----------------

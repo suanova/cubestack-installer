@@ -38,6 +38,36 @@
   when:
     - inventory_hostname == groups['kube_control_plane'][0]
 
+# ── 根因修复(裸金属 metallb 部署竞态): ──────────────────────────────────
+# metallb.yaml 一次性 apply CRD + controller, controller 可能早于 CRD 在
+# apiserver 注册前启动, informer 报 "no matches for kind IPAddressPool" 且不自动恢复
+# → 池子 CR 即使创建也无法被 controller 处理 → LB 永远分不到 VIP。
+# 修复: 等 CRD Established 后重启 controller, 保证 informer 在 CRD 之后连接。
+# ──────────────────────────────────────────────────────────────────────
+- name: MetalLB | Wait for IPAddressPool CRD to be established
+  command: "{{ bin_dir }}/kubectl wait --for=condition=Established crd/ipaddresspools.metallb.io --timeout=60s"
+  register: metallb_crd_wait
+  until: metallb_crd_wait is succeeded
+  retries: 6
+  delay: 5
+  changed_when: false
+  become: true
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+
+- name: MetalLB | Restart controller so informers start after CRDs established
+  command: "{{ bin_dir }}/kubectl -n {{ metallb_namespace }} rollout restart deployment -l app=metallb,component=controller"
+  changed_when: false
+  become: true
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+
+- name: MetalLB | Wait for controller rollout after restart
+  command: "{{ bin_dir }}/kubectl rollout status -n {{ metallb_namespace }} deployment -l app=metallb,component=controller --timeout=2m"
+  become: true
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+
 - name: MetalLB | Address pools
   when:
     - inventory_hostname == groups['kube_control_plane'][0]

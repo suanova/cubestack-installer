@@ -20,6 +20,14 @@
 | 网络插件 | Calico(默认; 可选 flannel/cilium/kube-ovn 等) |
 | 服务发现 | CoreDNS + nodelocaldns |
 | 负载均衡 | MetalLB(Layer2, 地址池 `METALLB_POOL` 可配) |
+
+> ⚠ **MetalLB 网络需求(Layer2 模式)**:
+> - 地址池 IP 必须与集群节点**同一二层网络(同一子网)且空闲**;
+> - **裸金属集群**: 无需 bridge/NAT 网络(纯物理 L2 直连),用 `--skip-net` 跳过 VM 网络,池取节点物理网段空闲段(如 `10.66.1.130-10.66.1.139`);
+> - **虚拟机集群**: 需 bridge(`privbr0`) 网络,池取 VM 网段空闲段(如 `10.244.2.0/24`);
+> - 依赖 `kube_proxy_strict_arp=true`(默认已开启);池与节点网段冲突会导致 LB 无法通告;
+> - **DHCP 管理网段时**: 池内 IP 必须先在 DHCP 服务器加入**排除/保留段**(如 `ip dhcp excluded-address`),否则 DHCP 会重复分配给其他设备 → 与 LB IP 冲突;
+> - 若网络开启 **DHCP Snooping / IP Source Guard**,需在 speaker 节点接入端口放开,否则 ARP 通告的静态 LB IP 流量会被交换机丢弃。
 | 存储 | local-path-provisioner(可选, 默认**不启动**) |
 
 ### 1.2 附加组件(P1/P2/P3, 集群部署后安装)
