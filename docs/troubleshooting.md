@@ -41,7 +41,8 @@ failed calling webhook "xxxvalidationwebhook.xxx.io": Post "https://<svc>.<ns>.s
 - 把该服务的 webhook pod **钉到首控制面**(如 metallb controller 加 `nodeSelector: kubernetes.io/hostname: <首master>`),webhook 走同节点,不依赖 4789 回包。
 - ✅ **能解决**: 该服务的 webhook 调用、以及部署流程(如 metallb 池子 apply)恢复正常。
 - ⚠️ **不能解决**: 跨节点负载均衡数据面 —— 若后端 pod 在其它节点,LB VIP 回包仍需 4789 进首控制面,网络不放行则 LB 不可达。要彻底可用必须网络侧放行 UDP 4789。
-- ⚠️ **换环境必须清理该 pin**: 该 nodeSelector 按主机名钉死,换到另一批节点(如裸金属 → VM)会残留旧主机名 → controller 永远调度不上(见 §三.1)。`sync-kubespray-config.sh` §4.0 已做**幂等双向同步**自动增删。
+- ⚠️ **换环境必须清理该 pin**: 该 nodeSelector 按主机名钉死,换到另一批节点(如裸金属 → VM)会残留旧主机名 → controller 永远调度不上(见 §三.1)。
+- ℹ️ **该 workaround 已移除(2026-08-22)**: 改用 **Calico IPIP** 数据面后,跨节点 webhook 本身可达,无需再钉 controller(见 `docs/cluster-architecture.md` §5.1)。此处仅留历史记录。
 
 **相关命令**
 ```bash
@@ -96,6 +97,38 @@ ping -c3 <远端 pod IP>
 kubectl -n metallb-system logs deploy/controller | grep -E "no matches for kind"
 ```
 
+### 3. 跨节点 pod 全断 / webhook 超时: proxy-ARP 虚拟化 fabric(非真 L2)不路由 pod CIDR —— 用 IPIP 封装
+
+**症状**
+- direct 路由(无封装)下跨节点 pod 100% 丢包, 部署卡在 metallb 池 apply webhook `context deadline exceeded`;
+- 节点虽同网段(如 10.66.1.0/24), 但跨节点 pod 流量发出去即丢, 同节点 pod 可达。
+
+**根因(以证据判定)**
+1. `ip neigh` 发现**所有节点 IP(含网关)的 ARP 都解析到同一个 MAC**(如 `00:01:00:01:00:01`), 而各节点真实 manage0 MAC 各不相同 → 网络是 **proxy-ARP / 按 IP 转发**的虚拟化 fabric,**不是真实 L2**;
+2. 该 fabric **只转发节点 IP**(SSH / UDP 40002 / 8472 / IPIP-proto4 都通), **不路由 pod CIDR(如 10.233.x)** → direct 路由直接发 pod 包被丢;
+3. 该 fabric **丢弃 UDP 4789**(VXLAN 端口有专门 ACL, 但 40002 / 8472 通)。
+→ 结论: 无封装 direct/native 路由在此类网络**不可行**; VXLAN 用 4789 也不可行。
+
+**解法(根治)**
+- **用 IPIP 封装(默认)**: `CALICO_DATA_PATH=ipip` → `calico_ipip_mode=Always` + `calico_network_backend=bird` + `mtu=物理-20=1480`。
+  外层=节点 IP(IPIP/proto4, fabric 实测放行) → 每节点本地解封装 → 跨节点 pod/webhook/LB 全通。
+  实测: 地址池 apply webhook 从超时 → 成功; `verify_metallb` 端到端通过(**pin workaround 可关闭**)。
+- VXLAN 可选: `CALICO_DATA_PATH=vxlan` + `CALICO_VXLAN_PORT=8472`(非 4789, fabric 放行)。
+- `direct` 仅适用于真实 L2 且网络能路由 pod CIDR 的环境。
+
+**验证**
+- `kubectl -n metallb-system apply --force -f /etc/kubernetes/pools.yaml` → 成功(不再 webhook 超时);
+- `sudo ./deployments/scripts/deploy-cluster.sh --steps verify_metallb` → VIP 在池内 + curl HTTP 200。
+
+**相关命令**
+```bash
+ip neigh show | grep 10.66.1     # 多个 IP 同一 MAC = proxy-ARP fabric
+ip route get <远端pod IP>         # via 节点(非网关)但丢包 = fabric 不路由 pod CIDR
+# 测 fabric 放行哪些 UDP 端口(4789 丢 / 8472 40002 通):
+ssh <节点> 'timeout 6 tcpdump -ni manage0 "udp port 8472" &'
+echo x | nc -u <节点IP> 8472
+```
+
 ---
 
 ## 二、时间同步
@@ -134,7 +167,7 @@ fatal: [cubestack-k8s-master01]: FAILED!  error: timed out waiting for the condi
 
 **解法(根治)**
 - 删掉 addons.yml 中 controller.nodeselector 里残留的 `kubernetes.io/hostname` 行(环境已非裸金属时);
-- `sync-kubespray-config.sh` §4.0 是**幂等双向同步**: `METALLB_PIN_CONTROLLER_FIRST_MASTER=1` 时确保 hostname=当前首个 master(值不对会替换); 未启用时**移除**任何残留 hostname —— 否则换环境重装会再次踩坑(旧代码只加不删)。
+- `sync-kubespray-config.sh` **已移除该 workaround 段(2026-08-22)**: 改用 Calico IPIP 后跨节点 webhook 可达, 不再需要钉 controller; addons.yml 的 `controller.nodeselector` 仅保留 `kubernetes.io/os: linux`。此条仅留历史记录(见 `docs/cluster-architecture.md` §5.1)。
 - 已坏集群快速验证/恢复(无需重跑部署):
   ```bash
   kubectl -n metallb-system patch deployment controller --type=json \

@@ -44,13 +44,13 @@ calico_pool_blocksize: 26
 # You can set MTU value here. If left undefined or empty, it will
 # not be specified in calico CNI config, so Calico will use built-in
 # defaults. The value should be a number, not a string.
-# 裸金属环境必须显式指定(VXLAN 模式 = 物理网卡 MTU 1500 - 50 = 1450):
-# 根因: calico 自动检测 underlay MTU 时会扫到本机 InfiniBand 网卡(ibs2/ibs3, MTU=2044),
-#       导致 Felix 试图把 vxlan 隧道 MTU 设成 2044-50=1994, 而内核以
-#       "mtu: invalid argument" 拒绝(隧道实际绑在 manage0, 上限 1500-50=1450),
-#       felix 每 10s 重试 → 隧道抖动 → 跨节点 pod 网络断裂 → apiserver 无法访问其他节点
-#       的 pod(如 metallb 在远端 worker 的 webhook)→ 部署报 "context deadline exceeded"。
-calico_mtu: 1450
+# 数据面 MTU(固定 IPIP 封装, 由 sync-kubespray-config.sh 管理, 勿手工改):
+#   ipip 模式 = 物理网卡 MTU - 20 = 1480(外层=节点 IP 的 IPIP/proto4 封装, 不依赖任何 UDP 端口)
+#   (曾尝试 direct=1500 无封装、vxlan=1450, 均因本 fabric 限制不可行, 见 docs/cluster-architecture.md)
+# 根因(勿回退自动检测): calico 自动检测 underlay MTU 时会扫到本机 InfiniBand 网卡(ibs2/ibs3, MTU=2044),
+#       导致 Felix 试图把隧道 MTU 设成 2044-50=1994, 而内核以 "mtu: invalid argument" 拒绝,
+#       felix 每 10s 重试 → 隧道抖动 → 跨节点 pod 网络断裂 → webhook 超时。
+calico_mtu: 1480
 
 # Configure the MTU to use for workload interfaces and tunnels.
 # - If Wireguard is enabled, subtract 60 from your network MTU (i.e 1500-60=1440)
@@ -93,16 +93,17 @@ calico_mtu: 1450
 
 # Set calico network backend: "bird", "vxlan" or "none"
 # bird enable BGP routing, required for ipip and no encapsulation modes
-# calico_network_backend: vxlan
+calico_network_backend: bird
 
 # IP in IP and VXLAN is mutually exclusive modes.
 # set IP in IP encapsulation mode: "Always", "CrossSubnet", "Never"
-calico_ipip_mode: 'Never'
+# 默认 IPIP(由 sync-kubespray-config.sh 按 CALICO_DATA_PATH 管理): Always=IPIP 封装
+calico_ipip_mode: 'Always'
 
 # set VXLAN encapsulation mode: "Always", "CrossSubnet", "Never"
-calico_vxlan_mode: 'Always'
+calico_vxlan_mode: 'Never'
 
-# set VXLAN port and VNI
+# set VXLAN port and VNI(calico 已固定 IPIP, 不再使用 VXLAN)
 # calico_vxlan_vni: 4096
 # calico_vxlan_port: 4789
 

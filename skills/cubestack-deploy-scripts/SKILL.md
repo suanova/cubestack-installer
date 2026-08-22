@@ -207,8 +207,22 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps        # 查看全部�
   kubectl -n metallb-system patch deployment controller --type=json \
     -p='[{"op":"remove","path":"/spec/template/spec/nodeSelector/kubernetes.io~1hostname"}]'
   ```
-- **根治**: 删 addons.yml 里 controller.nodeselector 残留 hostname;`sync-kubespray-config.sh` 4.0 段是
-  **幂等双向同步**(pin=1 确保=当前首个 master, pin=0 移除残留), 换环境重装不再踩坑。
+- **根治**: 删 addons.yml 里 controller.nodeselector 残留 hostname。**该 pin workaround 已移除(2026-08-22)**:
+  改用 Calico IPIP 后跨节点 webhook 可达, 无需再钉 controller(见 `docs/cluster-architecture.md` §5.1)。
+
+## MetalLB / 跨节点故障速查(proxy-ARP fabric + 封装选择)
+
+> 详见 `docs/troubleshooting.md` 一.3(症状→根因→解法→验证全记录)。关键知识点:
+
+- **节点同网段但跨节点 pod 全断 / webhook 超时**: 先 `ip neigh` 看是否**所有 IP 解析到同一 MAC**
+  (如 `00:01:00:01:00:01`) → 这是 **proxy-ARP / 按 IP 转发的虚拟化 fabric**, 不是真实 L2。
+- 该类 fabric 通常: 只转发**节点 IP**(SSH / 非 4789 的 UDP / IPIP-proto4), **不路由 pod CIDR**,
+  **丢 UDP 4789**(VXLAN 端口)。→ **direct/native 无封装路由不可行**; VXLAN 用 4789 也不可行。
+- **最优解 = IPIP 封装**(默认): `CALICO_DATA_PATH=ipip` → `calico_ipip_mode=Always` +
+  `calico_network_backend=bird` + `mtu=1480`(物理-20)。外层=节点 IP, 不依赖任何 UDP 端口,
+  实测跨节点 webhook/metallb 全通且 **pin workaround 可关**。
+- VXLAN 在该 fabric 需换端口: `CALICO_DATA_PATH=vxlan` + `CALICO_VXLAN_PORT=8472`。
+- **calico_network_backend 必须与数据面一致**(direct/ipip→bird, vxlan→vxlan), 漏配会无数据面。
 
 ## 审查清单(写完脚本后自检)
 
