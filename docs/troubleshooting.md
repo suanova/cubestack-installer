@@ -38,9 +38,10 @@ failed calling webhook "xxxvalidationwebhook.xxx.io": Post "https://<svc>.<ns>.s
 - 放行后跨节点 VXLAN 全通,所有 webhook / LB VIP / pod 互访一次性恢复。
 
 **workaround(已验证: 只解决「部署/安装卡死」, 不解决跨节点 LB 数据面)**
-- 把该服务的 webhook pod 钉到首控制面(如 metallb controller 加 `nodeSelector: kubernetes.io/hostname: <首master>`),webhook 走同节点,不依赖 4789 回包。
-- ✅ **能解决**: 该服务的 webhook 调用、以及**部署流程**(如 metallb 池子 apply)恢复正常。
-- ⚠️ **不能解决**: 跨节点负载均衡数据面 —— 若后端 pod 在其它节点,LB VIP 回包仍需 4789 进首控制面,网络不放行则 LB 不可达。**要彻底可用必须网络侧放行 UDP 4789。**
+- 把该服务的 webhook pod **钉到首控制面**(如 metallb controller 加 `nodeSelector: kubernetes.io/hostname: <首master>`),webhook 走同节点,不依赖 4789 回包。
+- ✅ **能解决**: 该服务的 webhook 调用、以及部署流程(如 metallb 池子 apply)恢复正常。
+- ⚠️ **不能解决**: 跨节点负载均衡数据面 —— 若后端 pod 在其它节点,LB VIP 回包仍需 4789 进首控制面,网络不放行则 LB 不可达。要彻底可用必须网络侧放行 UDP 4789。
+- ⚠️ **换环境必须清理该 pin**: 该 nodeSelector 按主机名钉死,换到另一批节点(如裸金属 → VM)会残留旧主机名 → controller 永远调度不上(见 §三.1)。`sync-kubespray-config.sh` §4.0 已做**幂等双向同步**自动增删。
 
 **相关命令**
 ```bash
@@ -52,7 +53,7 @@ sudo nc -l -u 40002 &  ;  echo test | nc -u <本机IP> 40002
 
 ---
 
-### 2. kubespray 部署在 MetalLB "Create address pools configuration" 失败: webhook "context deadline exceeded"(即使加重试也失败)
+### 2. 【裸金属】Calico VXLAN MTU 误判(IB 网卡 2044)→ 跨节点链路断裂 → 部署卡在 MetalLB 池 apply webhook 超时
 
 **症状**
 ```
@@ -60,50 +61,40 @@ TASK [kubernetes-apps/metallb : MetalLB | Create address pools configuration]
 fatal: failed calling webhook "ipaddresspoolvalidationwebhook.metallb.io":
   Post "https://webhook-service.metallb-system.svc:443/...": context deadline exceeded
 ```
-重试(10×5s)耗尽仍失败。metallb pods 显示 Running,但池子永远建不出来。
+重试(10×5s)耗尽仍失败。metallb pods 显示 Running,但池子永远建不出来;从首 master `ping <远端 pod IP>` 100% loss。
 
-**根因(串成一条链)**
-> ⚠ **首要持久根因见第 1 条:网络丢弃「进入首控制面的 UDP 4789」** —— 它跨重装依然存在(RX=0)。本条的 MTU 抖动与 CRD 竞态是**加剧因素**,但即使修好,4789 被网络丢弃时跨节点 webhook 仍会失败。
-1. **Calico VXLAN MTU 自动检测误判**(首要根因):
-   裸金属机有 InfiniBand 网卡(`ibs2/ibs3`, MTU=**2044**)。Felix 自动检测 underlay MTU 读到 2044,想把 `vxlan.calico` 隧道 MTU 设成 **2044−50=1994**,但隧道实际绑在 `manage0`(MTU 1500),内核拒绝 `mtu: invalid argument`(合法上限 1500−50=**1450**)。
-   → Felix 每 10s 重试一次,隧道持续抖动。
-   → 日志特征:`felix/vxlan_mgr.go 727: VXLAN device MTU needs to be updated new=1994 old=1450 ... Failed to set vxlan tunnel device MTU error=invalid argument`。
-2. **跨节点 host→pod 路由断裂**:隧道抖动 → apiserver(首 master)访问其他节点上的 pod 100% 丢包。判定:从首 master `ping <远端 pod IP>` 100% loss;`ip -s link show vxlan.calico` 的 **RX=0**(一个包都收不到)而 TX 正常。
+**根因(独立于 §一.1 的 4789, 需分别排查)**
+> ⚠ 若 `ip -s link show vxlan.calico` **RX=0**,首要根因是 §一.1 的「4789 被网络丢弃」,先处理网络放行;本条 MTU 误判是**另一独立根因**,两者都修才彻底。
+1. **Calico VXLAN MTU 自动检测误判**: 裸金属机有 InfiniBand 网卡(`ibs2/ibs3`, MTU=**2044**)。Felix 自动检测 underlay MTU 读到 2044,想把 `vxlan.calico` 隧道 MTU 设成 **2044−50=1994**,但隧道实际绑在 `manage0`(MTU 1500),内核拒绝 `mtu: invalid argument`(合法上限 1500−50=**1450**)。
+   → Felix 每 10s 重试一次,隧道持续抖动。日志特征:`felix/vxlan_mgr.go 727: VXLAN device MTU needs to be updated new=1994 old=1450 ... Failed to set vxlan tunnel device MTU error=invalid argument`。
+2. **跨节点 host→pod 路由断裂**: 隧道抖动 → apiserver(首 master)访问其他节点上的 pod 100% 丢包。判定:从首 master `ping <远端 pod IP>` 100% loss;`ip -s link show vxlan.calico` 的 **RX=0**(一个包都收不到)而 TX 正常。
 3. metallb controller 被调度到**远端 worker**,apiserver→webhook ClusterIP 必须跨节点 → 走断裂的 VXLAN → `context deadline exceeded`。
 
 **解法(根治,按优先级)**
 - `k8s-net-calico.yml` 显式固定 `calico_mtu: 1450`(VXLAN 模式 = 物理网卡 1500 − 50)。避免 Felix 自动检测踩 IB 2044。**下次全新安装不再复现。**
-- 已坏集群无法回溯修复:把 **metallb controller 钉到首个 master**(与 apiserver 同节点),webhook 走同节点本地 pod 网络,不依赖 VXLAN:
+- 已坏集群无法回溯修复: 把 **metallb controller 钉到首个 master**(与 apiserver 同节点),webhook 走同节点本地 pod 网络,不依赖 VXLAN(即 §一.1 的 workaround,注意换环境须清理):
   ```bash
   kubectl -n metallb-system patch deployment controller --type=merge \
     -p '{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"<首个master主机名>"}}}}}'
   ```
-  此默认已写入 `sync-kubespray-config.sh`(`METALLB_PIN_CONTROLLER_FIRST_MASTER=1`,默认开)。
-- metallb 角色已加:等 `crd/ipaddresspools.metallb.io` `Established` 后 `rollout restart` controller,再 apply 池子(消除 CRD 建立与 informer 启动的竞态)。
+- metallb 角色已加: 等 `crd/ipaddresspools.metallb.io` `Established` 后 `rollout restart` controller,再 apply 池子(消除 CRD 建立与 informer 启动的竞态)。
 
 **验证**
-- `kubectl -n metallb-system get ipaddresspools` 出现池子;`get l2advertisements` 出现 primary。
-- 建个 LoadBalancer Service → 事件 `IPAllocated`,EXTERNAL-IP 落在池内;
-- `ping <LB VIP>` 出现 `Redirect Host(New nexthop: <VIP>)` = L2 ARP 通告已生效;
+- `kubectl -n metallb-system get ipaddresspools` 出现池子;`get l2advertisements` 出现 primary;
+- 建个 LoadBalancer Service → 事件 `IPAllocated`,EXTERNAL-IP 落在池内;`ping <LB VIP>` 出现 `Redirect Host(New nexthop: <VIP>)` = L2 ARP 通告已生效;
 - `sudo ./deploy-cluster.sh --steps verify_metallb` 端到端通过(分配 VIP + 池内校验 + curl 可达)。
 
 **相关命令(排查三板斧)**
 ```bash
-# 1) felix MTU 抖动
+# 1) felix MTU 抖动(本条根因)
 kubectl -n kube-system logs ds/calico-node | grep -E "vxlan.*mtu|Failed to set"
-# 2) 本机 VXLAN 收包是否正常(0 = 接收路径坏)
+# 2) 本机 VXLAN 收包是否正常(RX=0 → 另见 §一.1 的 4789)
 ip -s link show vxlan.calico | grep -A1 RX:
 # 3) 跨节点 host→pod 连通性
 ping -c3 <远端 pod IP>
 # 4) metallb 是否认识池子(CRD 竞态时 controller 会报)
 kubectl -n metallb-system logs deploy/controller | grep -E "no matches for kind"
 ```
-
----
-
-### 2. 已写满一条即可,后续按此模板追加
-
-> 占位提示:新问题解决后,把这条替换/追加为真实条目。
 
 ---
 
@@ -114,6 +105,16 @@ kubectl -n metallb-system logs deploy/controller | grep -E "no matches for kind"
 ---
 
 ## 三、集群组件
+
+### MetalLB 部署故障速查(先对号入座)
+
+MetalLB 部署失败有**三类互不相干**的根因,先按症状定位,避免把网络问题当组件问题排查:
+
+| 症状 | 判定 | 根因 | 见条目 |
+|---|---|---|---|
+| 部署卡在 pool apply:`webhook context deadline exceeded` | 跨节点 ping 丢包 / `vxlan.calico` RX=0 | **网络**: VXLAN 4789 被丢弃 或 Calico MTU 误判 | §一.1 / §一.2 |
+| controller 永久 `Pending`:`0/N nodes didn't match node selector` | `describe` 见 `Node-Selectors` 残留旧主机名 | **配置**: addons.yml 残留 `kubernetes.io/hostname`(旧环境) | 三.1 |
+| `verify_metallb`:`VIP 是 .0/.255` | 池是整段 CIDR | **配置**: `METALLB_POOL` 含网络/广播地址 | 三.2 |
 
 ### 1. MetalLB controller 永久 Pending(残留旧环境主机名 nodeSelector)+ speaker 全报 secret "memberlist" not found
 
@@ -127,13 +128,13 @@ fatal: [cubestack-k8s-master01]: FAILED!  error: timed out waiting for the condi
 - `describe` controller 可见 `Node-Selectors: kubernetes.io/hostname=<旧环境主机名>`(如 `mxgpu-1-232`)。
 
 **根因**
-`inventory/<集群>/group_vars/k8s_cluster/addons.yml` 中 `metallb_config.controller.nodeselector` 残留了**上一环境(裸金属)的主机名**。当前 VM 集群没有该主机名节点 → controller **永远调度不上**(一直 Pending)。
+`inventory/<集群>/group_vars/k8s_cluster/addons.yml` 中 `metallb_config.controller.nodeselector` 残留了**上一环境(裸金属)的主机名**(该 pin 本是 §一.1 的 webhook workaround,按主机名钉 controller)。当前环境没有该主机名节点 → controller **永远调度不上**(一直 Pending)。
 **连锁效应**: controller 从不启动 → 不会在启动时自动创建 `memberlist` secret(MetalLB v0.13.x 由 controller 自动创建, 无需写进模板)→ speaker 因 `secret "memberlist" not found` 全部 CreateContainerConfigError。
 > ⚠ `memberlist` secret 缺失是**结果不是根因**; 不要往模板里加该 Secret —— 上游 kubespray 模板即依赖 controller 自建(controller Role 已有 secrets CRUD 权限)。
 
 **解法(根治)**
 - 删掉 addons.yml 中 controller.nodeselector 里残留的 `kubernetes.io/hostname` 行(环境已非裸金属时);
-- `sync-kubespray-config.sh` 4.0 段是**幂等双向同步**: `METALLB_PIN_CONTROLLER_FIRST_MASTER=1` 时确保 hostname=当前首个 master(值不对会替换); 未启用时**移除**任何残留 hostname —— 否则换环境重装会再次踩坑(旧代码只加不删)。
+- `sync-kubespray-config.sh` §4.0 是**幂等双向同步**: `METALLB_PIN_CONTROLLER_FIRST_MASTER=1` 时确保 hostname=当前首个 master(值不对会替换); 未启用时**移除**任何残留 hostname —— 否则换环境重装会再次踩坑(旧代码只加不删)。
 - 已坏集群快速验证/恢复(无需重跑部署):
   ```bash
   kubectl -n metallb-system patch deployment controller --type=json \
@@ -153,7 +154,9 @@ kubectl -n metallb-system describe pod -l app=metallb,component=controller | gre
 kubectl -n metallb-system describe pod -l app=metallb,component=speaker | grep -B1 "memberlist"
 ```
 
-### 2. verify_metallb 失败: LoadBalancer 分到 `.0/.255` 网络/广播地址(METALLB_POOL 用了整段 CIDR)
+---
+
+### 2. verify_metallb 失败: LoadBalancer 分到 .0/.255 网络/广播地址(METALLB_POOL 用了整段 CIDR)
 
 **症状**
 ```
