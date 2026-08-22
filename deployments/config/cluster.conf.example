@@ -79,6 +79,13 @@ KUBE_SERVICE_ADDRESSES="${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18}"
 KUBE_PODS_SUBNET="${KUBE_PODS_SUBNET:-10.233.64.0/18}"
 NODELOCAL_DNS_IP="${NODELOCAL_DNS_IP:-169.254.25.10}"
 
+# ---------------- CNI 网络插件(默认 calico; 可选 cilium) ----------------
+# ⚠ 切换 CNI 需同时准备对应离线镜像并同步 group_vars:
+#   · calico: 默认, k8s-net-calico.yml(MTU 已固定 1450, 见该文件注释)
+#   · cilium: 设 KUBE_NETWORK_PLUGIN=cilium, 需 k8s-net-cilium.yml 就绪 + 离线仓库含 cilium 镜像
+#   由脚本同步到 k8s-cluster.yml 的 kube_network_plugin, 不硬编码。
+KUBE_NETWORK_PLUGIN="${KUBE_NETWORK_PLUGIN:-calico}"
+
 # ---------------- 集群内 Registry(kubespray addon, 默认不部署) ----------------
 # 集群内镜像仓库统一使用 kubespray 内置 registry addon,**默认不部署**(REGISTRY_ENABLED=0)。
 # 集群外镜像仓库统一使用 Harbor(见下方 HARBOR_ENABLED 配置段)。
@@ -103,13 +110,29 @@ HARBOR_NAMESPACE="${HARBOR_NAMESPACE:-harbor}"         # 部署命名空间/数�
 HARBOR_STORAGE_CLASS="${HARBOR_STORAGE_CLASS:-local-path}"  # 数据持久化 StorageClass(如走集群外则用数据目录)
 
 # ---------------- MetalLB 负载均衡地址池(由脚本同步到 addons.yml, 不硬编码) ----------------
-# 需与节点/虚拟机网段不冲突(Layer2 模式下同网段广播);
-# 默认取 VM_SUBNET 的第二个 /24(示例 10.244.0.0/16 → 10.244.2.0/24), 可改为 CIDR 或起止区间
-METALLB_POOL="${METALLB_POOL:-10.244.2.0/24}"
+# ⚠ MetalLB 网络需求(Layer2 模式, 重要):
+#   · 池内 IP 必须与集群节点处于同一二层网络(同一子网), 且必须是空闲地址;
+#   · 裸金属集群: **无需 bridge/NAT 网络**(纯物理 L2 直连), 用 --skip-net 跳过 vm_network,
+#     LB IP 直接在节点物理网卡 ARP 通告 → 池取节点网段空闲段(如 10.66.1.130-10.66.1.139);
+#   · 虚拟机集群: 需 bridge(privbr0) 网络, 池取 VM 网段空闲段(如 10.244.2.0/24, 默认值);
+#   · 依赖 kube_proxy_strict_arp=true(已默认开启)。
+#   · **DHCP 管理网段时**: 池内 IP 必须先加入 DHCP 服务器排除/保留段(如 ip dhcp excluded-address),
+#     否则 DHCP 会把这些 IP 重复分配给其他设备 → 与 LB IP 冲突;
+#   · **网络必须放行 UDP 4789(VXLAN)进入所有节点, 尤其首控制面**: 否则跨节点 webhook 回包
+#     进不来 → 任何服务的 admission webhook 都会 "context deadline exceeded";
+#     ⚠ **仅裸金属环境需要处理**(已验证: 虚拟机标准网络 webhook/LB 均正常, 无此问题); 物理交换机/管理网段可能拦截 VXLAN 端口 4789。
+#   · 若网络开启 DHCP Snooping / IP Source Guard, 需在 speaker 节点接入端口放开
+#     (否则 ARP 通告的静态 LB IP 流量会被交换机丢弃)。
+#   可写 CIDR 或 起止区间; 与节点/VM 网段冲突会导致 LB 无法通告。
+#   ⚠ 用 CIDR(如 10.244.2.0/24)会包含 .0/.255(网络/广播地址), MetalLB 默认不跳过; 建议用区间排除 .0/.255。
+METALLB_POOL="${METALLB_POOL:-10.244.2.1-10.244.2.254}"
 
 # ---------------- 组件开关(统一数据源, 由 sync-addons-config.sh 同步到 kubespray addons.yml) ----------------
 # 这些开关决定 kubespray 附加组件是否安装; 组件详细配置(地址池/存储类等)仍保留在 addons.yml
 METALLB_ENABLED="${METALLB_ENABLED:-true}"              # MetalLB(负载均衡, 需 kube_proxy_strict_arp=true, 已默认开启)
+# workaround: 将 metallb controller 钉到首个 master(与 apiserver 同节点), 规避跨节点 webhook 不可达。
+# 默认: 裸金属自动应用(1), 其它环境默认不应用(0); 显式设 1/0 可覆盖。
+METALLB_PIN_CONTROLLER_FIRST_MASTER="${METALLB_PIN_CONTROLLER_FIRST_MASTER:-}"
 LOCAL_PATH_ENABLED="${LOCAL_PATH_ENABLED:-false}"       # local-path-provisioner(默认 StorageClass,**默认不启动**; 需本地 PVC 持久化时启用)
 METRICS_SERVER_ENABLED="${METRICS_SERVER_ENABLED:-true}"  # metrics-server(HPA 依赖)
 HELM_ENABLED="${HELM_ENABLED:-true}"                    # Helm(registry 等组件依赖)

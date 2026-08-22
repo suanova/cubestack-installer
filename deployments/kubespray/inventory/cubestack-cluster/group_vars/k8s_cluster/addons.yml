@@ -173,6 +173,7 @@ metallb_config:
   controller:
     nodeselector:
       kubernetes.io/os: "linux"
+      kubernetes.io/hostname: "mxgpu-1-232"
     tolerations:
       - key: "node-role.kubernetes.io/control-plane"
         operator: "Equal"
@@ -181,7 +182,7 @@ metallb_config:
   address_pools:
     primary:
       ip_range:
-        - 10.244.2.0/24
+        - 10.66.1.130-10.66.1.139
       auto_assign: true
   layer2:
     - primary

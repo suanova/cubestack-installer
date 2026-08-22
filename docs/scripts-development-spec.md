@@ -202,6 +202,41 @@ addon_stub "my_component" MY_COMPONENT_STEPS
 > - `03_addon/20`: `cubestack_apps`(CubeStack 自研模块占位, 20 起为自研序号)
 > 每个模块头部 `TODO` 注释即实现指引。
 
+### 4.2 组件功能验证模块模板(verify_<组件>.sh)
+
+部署完某个 operator/组件后,做**真实功能验证**(而非仅 pod Running)。参考实现:`03_addon/21_verify_metallb.sh`。
+
+**命名与元数据**:文件 `modules/03_addon/2N_verify_<组件>.sh`,MODULE= `verify_<组件>`,PHASE= `addon`,DEFAULT= `0`,REPEAT= `1`。
+⚠ **不要设 `TOGGLE`**:`module_default_on` 对 TOGGLE=true 的模块自动启用,会让 verify 模块被安装流程带上;verify 应保持 `DEFAULT:0`、无 TOGGLE,仅安装后 `--steps verify_<组件>` 单独执行。
+
+**验证骨架**(核心是第 ⑤ 步真实功能验证,不是 `get pods` 完事):
+
+```bash
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
+load_config
+[ "${<TOGGLE>:-true}" = "true" ] || { say "跳过(未启用)"; exit 0; }
+FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
+SSH() { ssh -i "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}" \
+           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
+K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+trap cleanup EXIT   # 失败也清理测试资源
+
+# ① 组件 pod Ready → ② 核心 CR/资源存在
+# ③ 建测试资源(用已预加载离线镜像如 busybox:latest httpd / nginx, 避免离线拉取失败)
+# ④ 等待关键状态(如 LoadBalancer 分配到池内 VIP, 轮询最长 N s)
+# ⑤ 真实功能访问(如 curl http://VIP → HTTP 可达 / 调组件 API / 查业务数据), 才算通过
+# ⑥ trap cleanup EXIT 清理测试命名空间(前缀 verify-)
+```
+
+**规范要点**:
+- 第 ⑤ 步必须做**真实业务可达性**验证(访问/调用/查询能通),仅 pod Running 不算;
+- 测试后端镜像用已预加载的离线镜像(`busybox:latest` 起 httpd / `nginx`),避免离线环境拉取失败;
+- 测试命名空间固定 `verify-<组件>`;`trap cleanup EXIT` 保证失败也清理;
+- VIP 在池内、HTTP 状态码判定等可抽成小函数(`_ip_in_pool` 等)便于复用与测试;
+- 每个 operator 一个 `verify_<组件>.sh`,以 `verify_metallb` 为模板复制改造即可。
+
 ---
 
 ## 5. 统一入口用法
@@ -243,7 +278,11 @@ sudo ./deploy-cluster.sh --list-steps | --list | --fresh
 - 模块失败应 `err "原因"` + 返回非 0,调度器会中断并提示 `--skip`/`--fresh`。
 - 日志:所有 say/ok/warn/err 自动写入 `LOG_FILE`(`deploy-cluster.sh` 启动时设置)。
 
-### 6.4 安全
+### 6.4 问题解决 → 沉淀到 troubleshooting(强制)
+
+每次解决完一个部署/运行问题,找到**真正的 root cause** 后,必须按 `docs/troubleshooting.md` 模板新增条目(症状 → 根因 → 解法(根治) → 验证 → 相关命令),并把新知识点同步到 `SKILL.md` 相应章节。根因要以证据为准(日志/抓包/计数器),不只写表象。同类问题下次直接命中根因,不用重新排查。
+
+### 6.5 安全
 
 - 不把密码写入日志;`sshpass` 场景用 `SSHPASS` 环境变量(`sshpass -e`)。
 - 需要 root 的模块:开头 `[ "$(id -u)" -eq 0 ] || { err "需要 root: sudo $0"; exit 1; }`。
