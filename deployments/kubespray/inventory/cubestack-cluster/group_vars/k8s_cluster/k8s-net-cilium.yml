@@ -2,7 +2,7 @@
 # Log-level
 # cilium_debug: false
 
-# cilium_mtu: ""
+cilium_mtu: 1500
 # cilium_enable_ipv4: true
 # cilium_enable_ipv6: false
 
@@ -39,8 +39,8 @@ cilium_l2announcements: false
 # cilium_memory_requests: 64M
 # cilium_cpu_requests: 100m
 
-# Overlay Network Mode
-# cilium_tunnel_mode: vxlan
+# Overlay Network Mode (活跃; disabled=native routing 无隧道, 由 sync-kubespray-config.sh 按 CILIUM_TUNNEL_MODE 管理)
+cilium_tunnel_mode: disabled
 
 # LoadBalancer Mode (snat/dsr/hybrid) Ref: https://docs.cilium.io/en/stable/network/kubernetes/kubeproxy-free/#dsr-mode
 # cilium_loadbalancer_mode: snat
@@ -85,7 +85,8 @@ cilium_l2announcements: false
 # You wil also have to specify the variable `cilium_native_routing_cidr` to
 # make this work. Please refer to the cilium documentation for more
 # information about this kind of setups.
-# cilium_auto_direct_node_routes: false
+# (活跃: native routing 需节点同 L2, 自动直连路由 pod 网段; 由 sync-kubespray-config.sh 管理)
+cilium_auto_direct_node_routes: true
 
 # Allows to explicitly specify the IPv4 CIDR for native routing.
 # When specified, Cilium assumes networking for this CIDR is preconfigured and
@@ -97,7 +98,8 @@ cilium_l2announcements: false
 # direct routing and the Kubernetes CIDR is included in the native routing CIDR,
 # the user must configure the routes to reach pods, either manually or by
 # setting the auto-direct-node-routes flag.
-# cilium_native_routing_cidr: ""
+# (活跃: native routing CIDR=pod 网段(KUBE_PODS_SUBNET); 由 sync-kubespray-config.sh 写入解析值)
+cilium_native_routing_cidr: 10.233.64.0/18
 
 # Allows to explicitly specify the IPv6 CIDR for native routing.
 # cilium_native_routing_cidr_ipv6: ""

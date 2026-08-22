@@ -134,6 +134,58 @@ else
     warn "集群内部 CIDR 未同步(未找到 ${CLUSTER_YML})"
 fi
 
+# ---------------- 3.1 更新 k8s-net-*.yml (CNI 数据面模式) ----------------
+# 依据 cluster.conf 同步两个 CNI 的 group_vars, 支持同一套脚本选 calico 或 cilium:
+#   · calico: CALICO_DATA_PATH=vxlan  → VXLAN overlay(VM/bridge 默认, mtu 1450=物理-50)
+#             CALICO_DATA_PATH=direct → 无封装直连路由(裸金属物理网段, 避开 VXLAN 4789 被拦; mtu=物理 1500)
+#   · cilium: CILIUM_TUNNEL_MODE=disabled → native routing(无隧道, 节点需同 L2, 自动直连路由 pod 网段)
+#             CILIUM_TUNNEL_MODE=vxlan    → Cilium VXLAN overlay
+# 默认值与既有部署一致(calico vxlan / cilium 未启用), 不影响已有功能。
+CALICO_YML="${INV_DIR}/group_vars/k8s_cluster/k8s-net-calico.yml"
+if [ -f "${CALICO_YML}" ]; then
+    # calico 数据面固定为 IPIP 封装(默认方案, 已验证):
+    #   本集群网络是 proxy-ARP/按 IP 转发的虚拟化 fabric: 丢 UDP 4789(VXLAN 端口)、不路由 pod CIDR,
+    #   但放行 IPIP(proto4) → direct(无封装)与 VXLAN-4789 均不可行; IPIP 外层=节点 IP, 是唯一可靠路线。
+    #   (限制与原理见 docs/cluster-architecture.md)
+    # 注意: calico_network_backend 必须与数据面一致(漏配时 kubespray 默认 vxlan, 但 vxlan 又禁用
+    #       → 无任何数据面 → 跨节点 pod 全断 → webhook 超时)
+    sed -i -E "s/^calico_network_backend:.*/calico_network_backend: bird/" "${CALICO_YML}"
+    sed -i -E "s/^calico_ipip_mode:.*/calico_ipip_mode: 'Always'/" "${CALICO_YML}"
+    sed -i -E "s/^calico_vxlan_mode:.*/calico_vxlan_mode: 'Never'/" "${CALICO_YML}"
+    sed -i -E "s/^calico_mtu:.*/calico_mtu: 1480/" "${CALICO_YML}"
+    ok "已同步 ${CALICO_YML} → calico+IPIP(backend=bird, ipip_mode=Always, vxlan_mode=Never, mtu=1480)"
+else
+    warn "未找到 ${CALICO_YML}, 跳过 calico 数据面同步"
+fi
+
+CILIUM_YML="${INV_DIR}/group_vars/k8s_cluster/k8s-net-cilium.yml"
+if [ -f "${CILIUM_YML}" ]; then
+    _cilium_tunnel="${CILIUM_TUNNEL_MODE:-disabled}"
+    # MTU: 显式 CILIUM_MTU 优先; 否则按模式默认(vxlan overlay=物理-50=1450, disabled=物理 1500)
+    if [ -n "${CILIUM_MTU:-}" ]; then
+        _cilium_mtu="${CILIUM_MTU}"
+    elif [ "${_cilium_tunnel}" = "vxlan" ]; then
+        _cilium_mtu=1450
+    else
+        _cilium_mtu=1500
+    fi
+    sed -i -E "s/^cilium_tunnel_mode:.*/cilium_tunnel_mode: ${_cilium_tunnel}/" "${CILIUM_YML}"
+    sed -i -E "s/^cilium_mtu:.*/cilium_mtu: ${_cilium_mtu}/" "${CILIUM_YML}"
+    if [ "${_cilium_tunnel}" = "disabled" ]; then
+        # native routing(无隧道, 节点需同 L2): 自动直连路由 pod 网段
+        sed -i -E "s/^cilium_auto_direct_node_routes:.*/cilium_auto_direct_node_routes: true/" "${CILIUM_YML}"
+        sed -i -E "s|^cilium_native_routing_cidr:.*|cilium_native_routing_cidr: ${KUBE_PODS_SUBNET:-10.233.64.0/18}|" "${CILIUM_YML}"
+        ok "已同步 ${CILIUM_YML} 数据面 → tunnel_mode=${_cilium_tunnel}(native routing), mtu=${_cilium_mtu}, native_cidr=${KUBE_PODS_SUBNET:-10.233.64.0/18}"
+    else
+        # overlay(vxlan): 不设 native routing CIDR(否则 Cilium 误以为 pod 网段可原生路由, 破坏隧道)
+        sed -i -E "s/^cilium_auto_direct_node_routes:.*/cilium_auto_direct_node_routes: false/" "${CILIUM_YML}"
+        sed -i -E 's|^cilium_native_routing_cidr:.*|cilium_native_routing_cidr: ""|' "${CILIUM_YML}"
+        ok "已同步 ${CILIUM_YML} 数据面 → tunnel_mode=${_cilium_tunnel}(overlay), mtu=${_cilium_mtu}, native_cidr=\"\""
+    fi
+else
+    warn "未找到 ${CILIUM_YML}, 跳过 cilium 数据面同步"
+fi
+
 # ---------------- 4. 更新 addons.yml (MetalLB 地址池) ----------------
 ADDONS_YML="${INV_DIR}/group_vars/k8s_cluster/addons.yml"
 METALLB_POOL="${METALLB_POOL:-10.244.2.1-10.244.2.254}"   # ⚠ 用区间排除 .0/.255(网络/广播地址), 勿用 10.244.2.0/24 这类 CIDR
@@ -160,88 +212,6 @@ if [ -f "${ADDONS_YML}" ]; then
     ok "已同步 MetalLB 地址池 → ${METALLB_POOL}"
 else
     warn "未找到 ${ADDONS_YML},跳过 MetalLB 地址池同步"
-fi
-
-# ---------------- 4.0 更新 addons.yml (metallb controller 钉到首个 master) ----------------
-# workaround: 将 metallb controller 调度到首个 master(与 apiserver 同节点), 避免跨节点 host→pod
-# 网络异常(如裸金属 VXLAN/交换机拦截 4789)导致 admission webhook 不可达 → 部署/verify 失败。
-# 默认: 裸金属(ALL_BM=1)应用 workaround; 其它环境默认不应用。
-# 覆盖: cluster.conf 设 METALLB_PIN_CONTROLLER_FIRST_MASTER=1/0 显式控制。
-# 幂等双向同步(根治"裸金属跑过 → VM 重装残留陈旧 hostname → controller 永久 Pending"):
-#   · pin=1 → 确保 controller.nodeselector 的 hostname 存在且值=当前首个 master;
-#   · pin=0 → 移除 controller.nodeselector 里任何残留的 kubernetes.io/hostname 行。
-_PIN_DEFAULT=0
-[ "${ALL_BM}" = "1" ] && _PIN_DEFAULT=1
-_PIN="${METALLB_PIN_CONTROLLER_FIRST_MASTER:-${_PIN_DEFAULT}}"
-if [ -f "${ADDONS_YML}" ] && [ "${METALLB_ENABLED:-true}" = "true" ]; then
-    if [ "${_PIN}" = "1" ] && [ -n "${FIRST_MASTER_HOST:-}" ]; then
-        say "更新 ${ADDONS_YML} (metallb controller → 首个 master ${FIRST_MASTER_HOST}) ..."
-    else
-        say "更新 ${ADDONS_YML} (metallb controller 解除钉节点, 清除残留 hostname) ..."
-    fi
-    python3 - "${ADDONS_YML}" "${_PIN}" "${FIRST_MASTER_HOST:-}" << 'PYEOF'
-import re, sys
-path, pin, host = sys.argv[1], sys.argv[2], sys.argv[3]
-lines = open(path).read().split('\n')
-
-# 定位 metallb_config 下 controller 的 nodeselector(只改 controller 块, 不碰 speaker)
-ns_idx = None
-for i, line in enumerate(lines):
-    if re.match(r'^\s*controller:\s*$', line):
-        j = i + 1
-        while j < len(lines) and (not lines[j].strip() or lines[j].startswith(' ')):
-            if re.match(r'^\s*nodeselector:\s*$', lines[j]):
-                ns_idx = j
-                break
-            j += 1
-    if ns_idx is not None:
-        break
-
-if ns_idx is not None:
-    base = len(lines[ns_idx]) - len(lines[ns_idx].lstrip())
-    k = ns_idx + 1
-    block_end = ns_idx + 1   # 子属性块(缩进>base)的结束下标(不含)
-    while k < len(lines):
-        line = lines[k]
-        if not line.strip():
-            k += 1
-            continue
-        if len(line) - len(line.lstrip()) <= base:
-            break
-        block_end = k + 1
-        k += 1
-    block = list(range(ns_idx + 1, block_end))
-    host_idx = [idx for idx in block if re.match(r'^\s*kubernetes\.io/hostname:', lines[idx])]
-
-    if pin == '1' and host:
-        target = 'kubernetes.io/hostname: "%s"' % host
-        if host_idx:
-            idx = host_idx[0]
-            indent = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
-            if lines[idx].strip() != target:
-                lines[idx] = indent + target
-        else:
-            # 插到 os 行之后; 无 os 行则插到块末
-            os_idx = next((idx for idx in block if re.match(r'^\s*kubernetes\.io/os:', lines[idx])), None)
-            anchor = os_idx if os_idx is not None else (block_end - 1 if block else ns_idx)
-            indent = (lines[anchor][:len(lines[anchor]) - len(lines[anchor].lstrip())]
-                      if anchor in block else '      ')
-            lines.insert(anchor + 1, indent + target)
-    else:
-        # pin 未启用(或未给出首个 master): 移除任何残留 hostname, 避免陈旧主机名
-        # 使 controller 无法调度 → deployment 永久 Pending
-        for idx in sorted(host_idx, reverse=True):
-            del lines[idx]
-
-open(path, 'w').write('\n'.join(lines).rstrip('\n') + '\n')
-PYEOF
-    if [ "${_PIN}" = "1" ] && [ -n "${FIRST_MASTER_HOST:-}" ]; then
-        ok "已同步 metallb controller 调度 → 首个 master(${FIRST_MASTER_HOST})"
-    else
-        ok "已清除 metallb controller 残留 hostname 钉节点(pin 未启用)"
-    fi
-else
-    say "跳过 metallb controller 调度(无 addons.yml 或 METALLB_ENABLED=false)"
 fi
 
 # ---------------- 4.1 更新 addons.yml (Registry Service 暴露方式) ----------------

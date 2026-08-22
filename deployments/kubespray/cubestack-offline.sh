@@ -1434,18 +1434,13 @@ cmd_install() {
         --skip-tags system-packages,kube-proxy \
         -vv
 
-    # 安装后兜底预加载: 补加载附加组件镜像, 同时重新生成镜像清单(供后续扩容使用)
-    preload_images "all"
+    # CNI 插件重启(containerd + kubelet)已移入 kubespray
+    # patch-playbooks/cubestack-cni-restart.yml: 在 K8s+CNI 部署完成后、operator 安装前由
+    # ensure_cni_restart_play 自动挂载到 cluster.yml。
+    # 镜像预加载已由 cluster.yml 内置的 cubestack-preload play 在 containerd 就绪后完成,
+    # 不再需要安装后单独 preload_images(preload_images 仅保留给 preload/scale 命令)。
 
-    # CNI 插件初始化重启(containerd + kubelet)已移入 kubespray
-    # patch-playbooks/cubestack-cni-restart.yml: 在 K8s+CNI 部署完成后、operator 安装前
-    # 由 ensure_cni_restart_play 自动挂载到 cluster.yml, 此处不再单独重启
-
-    # 安装后预加载: playbook 前 containerd 可能未安装(preload 跳过), playbook 后 containerd 已就绪,
-    # 补加载 playbook 未推到所有节点的镜像(如 dns-autoscaler/ metrics-server 等附加组件镜像)
-    preload_images "all"
-
-    log "🎉 集群 [${CLUSTER_NAME}] 安装完成!"
+    log "🎉 [集群 ${CLUSTER_NAME}] 安装完成!"
     log "完整 ansible 日志: ${INSTALL_LOG} (终端已同步显示)"
 }
 
