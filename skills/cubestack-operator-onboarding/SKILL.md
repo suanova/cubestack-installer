@@ -13,10 +13,14 @@
 ## 总原则
 
 1. **不硬编码**: 任何 IP / 端口 / 路径 / 节点, 一律从 `cluster.conf` 读取或派生(sync 脚本负责落到 kubespray `group_vars`)。
-2. **不破坏已有**: 只新增模块/配置, 不修改他人模块的元数据头、不改变默认开关行为。
-3. **必须能离线**: 新增镜像进离线仓库 + `PRELOAD_IMAGE_PATTERNS`, 节点预加载。
-4. **必须可验证**: 每个 operator 配套 `verify_<name>.sh` 端到端验证(不只 pod Running)。
-5. **必须沉淀文档**: 架构文档 + troubleshooting + 本技能, 三处同步。
+2. **不破坏已有**: 只新增模块/配置, 不修改他人模块的元数据头。
+3. **`cluster.conf` 为主, `XXX_ENABLED=true` 才启用**: 新增 operator 默认 `false`, 只有设为 `true` 才会被
+   `--with-cubestack` 部署(基座 + cluster.conf 中已启用的 operator); `--with-k8s` 仅部署 kubespray 基座
+   (k8s + metallb/local-path/registry, 跳过全部 operator)。
+   **支持单个安装**: `--enable <operator>` 显式启用(覆盖 cluster.conf 的 false)/ `--skip <operator>` 排除 / `--steps <operator>` 只跑单个。
+4. **必须能离线**: 新增镜像进离线仓库 + `PRELOAD_IMAGE_PATTERNS`, 节点预加载。
+5. **必须可验证**: 每个 operator 配套 `verify_<name>.sh` 端到端验证(不只 pod Running)。
+6. **必须沉淀文档**: 架构文档 + troubleshooting + 本技能, 三处同步。
 
 ---
 
@@ -38,15 +42,21 @@
 ### 2.1 配置开关进 `cluster.conf`(+ `cluster.conf.example`)
 ```bash
 # ---------------- XXX 组件(说明) ----------------
-XXX_ENABLED="${XXX_ENABLED:-false}"    # 默认关, --enable 或 TOGGLE 启用
+XXX_ENABLED="${XXX_ENABLED:-false}"    # 默认 false; cluster.conf 设 true → --with-cubestack 部署; 单独用 --enable/--skip/--steps
 XXX_IP="${XXX_IP:-10.66.1.140}"         # 需要的外部 IP/端口从配置读, 勿硬编码在脚本
 ```
+> 规范: **`cluster.conf` 为主, `XXX_ENABLED=true` 才启用**(默认 false, 基座 addon metallb/local-path/registry 除外, 默认 true)。
+> `--with-k8s` = 仅 kubespray 基座(跳过全部 operator); `--with-cubestack` = 基座 + cluster.conf 中为 true 的 operator。
+> 单独安装/排除/只跑: `--enable <operator>`(显式, 覆盖 false)/ `--skip <operator>` / `--steps <operator>`。
+> 未实现的占位模块(addon_stub)保持 `false`。
 
 ### 2.2 写部署模块 `deployments/scripts/modules/<PHASE>/NN_<name>.sh`
 - `PHASE`: env / k8s / addon;
 - 元数据头(MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE)—— 参考 `modules/03_addon/21_verify_metallb.sh` 头部;
 - `set -euo pipefail` + `source lib-common.sh` + `load_config`;
 - 若组件由 kubespray 管理, 用 `TOGGLE: XXX_ENABLED` 并保持 DEFAULT:0;
+- **REPEAT 语义**: 重型安装模块用 `REPEAT: 0`(断点续跑 —— 完成后写状态跳过, `--fresh` 清状态重装);
+  幂等快速检查类(metallb/local_path/k8s_registry/verify_*)用 `REPEAT: 1`(每次执行)。
 - 若需额外前置(如 Harbor/Registry), 单独模块, 不塞进现有模块。
 
 ### 2.3 需要同步 kubespray group_vars 时

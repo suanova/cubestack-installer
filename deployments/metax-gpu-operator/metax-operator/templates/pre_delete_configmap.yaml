@@ -1,0 +1,106 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: metax-pre-delete-configmap
+  namespace: {{ .Release.Namespace }}
+data:
+  delete_metax_label.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    VENDOR_DOMAIN="${VENDOR_DOMAIN:-metax-tech.com}"
+    echo "Deleting labels with prefix: ${VENDOR_DOMAIN}"
+    for node in $(kubectl get nodes -o name); do
+        echo "Processing ${node}"
+        labels=$(kubectl get "${node}" \
+          -o go-template='{{`{{range $k, $v := .metadata.labels}}{{printf "%s\n" $k}}{{end}}`}}')
+        OLDIFS=$IFS
+        IFS=$'\n'
+        for key in $labels; do
+            case "${key}" in
+                ${VENDOR_DOMAIN}*)
+                    echo "Deleting label ${key} from ${node}"
+                    kubectl label "${node}" "${key}-"
+                    ;;
+            esac
+        done
+        IFS=$OLDIFS
+    done
+    echo "All matching labels deleted."
+
+  delete_metax_annotations.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    VENDOR_DOMAIN="${VENDOR_DOMAIN:-metax-tech.com}"
+    echo "Deleting annotations with prefix: ${VENDOR_DOMAIN}"
+    for node in $(kubectl get nodes -o name); do
+        echo "Processing ${node}"
+        annotations=$(kubectl get "${node}" \
+          -o go-template='{{`{{range $k, $v := .metadata.annotations}}{{printf "%s\n" $k}}{{end}}`}}')
+        OLDIFS=$IFS
+        IFS=$'\n'
+        for key in $annotations; do
+            case "${key}" in
+                ${VENDOR_DOMAIN}*)
+                    echo "Deleting annotation ${key} from ${node}"
+                    kubectl annotate "${node}" "${key}-"
+                    ;;
+            esac
+        done
+        IFS=$OLDIFS
+    done
+    echo "All matching annotations deleted."
+
+  check_metax_pods.sh: |
+    #!/bin/bash
+
+    NAMESPACE="{{ .Release.Namespace }}"
+
+    PODS=""
+    while IFS=' ' read -r name rest; do
+        if [[ "$name" == metax-operator-* ]] && [[ "$name" != "$POD_NMAE" ]]; then
+            PODS="$PODS $name"
+        fi
+    done < <(kubectl get pods -n $NAMESPACE --no-headers=true 2>/dev/null)
+    PODS=$(echo $PODS)
+
+    if [ -z "$PODS" ]; then
+      echo "cannot get metax-operator controller's pod"
+    else
+      for POD in $PODS; do
+        POD_PHASE=$(kubectl get pod -n $NAMESPACE $POD -o jsonpath='{.status.phase}' 2>/dev/null)
+
+        RUNNING_STATE=$(kubectl get pod -n $NAMESPACE $POD -o jsonpath='{.status.containerStatuses[0].state.running}' 2>/dev/null)
+
+        if [ -z "$RUNNING_STATE" ]; then
+          WAITING_REASON=$(kubectl get pod -n $NAMESPACE $POD -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null)
+          TERMINATED_REASON=$(kubectl get pod -n $NAMESPACE $POD -o jsonpath='{.status.containerStatuses[0].state.terminated.reason}' 2>/dev/null)
+          EXIT_CODE=$(kubectl get pod -n $NAMESPACE $POD -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null)
+
+          if [ -n "$WAITING_REASON" ]; then
+            CONTAINER_STATE_TYPE="waiting"
+            CONTAINER_REASON="$WAITING_REASON"
+          elif [ -n "$TERMINATED_REASON" ]; then
+            CONTAINER_STATE_TYPE="terminated"
+            CONTAINER_REASON="$TERMINATED_REASON"
+            if [ "$EXIT_CODE" != "0" ] && [ -n "$EXIT_CODE" ]; then
+              CONTAINER_REASON="$CONTAINER_REASON (ExitCode: $EXIT_CODE)"
+            fi
+          else
+            CONTAINER_STATE_TYPE="unknown"
+          fi
+        else
+          CONTAINER_STATE_TYPE="running"
+        fi
+        if [ "$POD_PHASE" != "Running" ] || [ "$CONTAINER_STATE_TYPE" != "running" ]; then
+          if POD_UID=$(kubectl get pod -n $NAMESPACE $POD -o jsonpath='{.metadata.uid}' 2>/dev/null); then
+            MESSAGE=$(echo "metax-operator is in an abnormal state, please manually clear cr(cluster-operator) resource's finalizer")
+            echo $MESSAGE
+            EVENT_FILE=$(mktemp)
+            CURRENT_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            printf "apiVersion: v1\nkind: Event\nmetadata:\n  namespace: %s\n  generateName: pre-delete-hook-\ntype: Warning\nreason: PodStatusAbnormal\nmessage: %s\nsource:\n  component: pre-delete-hook\nfirstTimestamp: %s\nlastTimestamp: %s\ninvolvedObject:\n  apiVersion: v1\n  kind: Pod\n  name: %s\n  uid: %s\n  namespace: %s\n" "$NAMESPACE" "$MESSAGE" "$CURRENT_TIME" "$CURRENT_TIME" "$POD" "$POD_UID" "$NAMESPACE" > "$EVENT_FILE"
+            kubectl create -f "$EVENT_FILE" 2>&1
+            rm -f "$EVENT_FILE"
+          fi
+        fi
+      done
+    fi

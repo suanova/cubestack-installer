@@ -63,6 +63,32 @@ print(p)
 PY
 }
 
+# 读 docker-save tar 的源镜像名(manifest.json RepoTags[0]); 无则输出空
+# 用法: tar_first_image_tag <tar文件> → 源镜像 ref(如 cr.metax-tech.com/cloud/gpu-label:0.15.3)
+# 供 tar 离线加载模式推导目标 repo/tag(与 docker save 生成的 tar 兼容)
+tar_first_image_tag() {
+    python3 - "${1:-}" << 'PY'
+import json, sys, tarfile
+p = sys.argv[1]
+try:
+    tags = []
+    with tarfile.open(p, "r") as t:
+        try:
+            m = t.extractfile("manifest.json")
+            tags = (json.load(m) or [{}])[0].get("RepoTags") or []
+        except (KeyError, TypeError, IndexError, json.JSONDecodeError):
+            pass
+    # 优先取带冒号 tag、非 digest 引用的条目
+    for tag in tags:
+        if tag and ":" in tag and "@sha256" not in tag:
+            print(tag); sys.exit(0)
+    if tags:
+        print(tags[0]); sys.exit(0)
+except Exception:
+    sys.exit(0)
+PY
+}
+
 # ---------------- 断点续跑: 状态文件 ----------------
 # 统一的状态文件,记录已完成的任务阶段
 # 用法: save_state <phase> <value>; get_state <phase>; clear_state
@@ -124,6 +150,24 @@ load_config() {
             IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
             [ "${role}" = "master" ] && { APISERVER_ADDRESS="${ip}"; export APISERVER_ADDRESS; vlog "NAT 模式自动设 APISERVER_ADDRESS=第一个master: ${ip}"; break; }
         done
+    fi
+    # 全裸金属: 宿主机(部署机)不在集群网络, API 入口=第一个 master IP(与 sync-kubespray-config.sh 的 API_ADDR 一致)
+    # 否则(含 VM)API 入口=宿主机物理 IP(worker 经宿主机 DNAT 访问 API)
+    if [ -z "${APISERVER_ADDRESS:-}" ]; then
+        _ALL_BM=1
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
+            node_is_vm "${role}" "${mac}" "${mem}" "${node_type:-}" && { _ALL_BM=0; break; }
+        done
+        if [ "${_ALL_BM}" = "1" ]; then
+            for line in "${NODES[@]:-}"; do
+                [ -z "${line}" ] && continue
+                IFS=, read -r role hostname ip _rest <<<"${line}"
+                [ "${role}" = "master" ] && [ -n "${ip}" ] && { APISERVER_ADDRESS="${ip}"; export APISERVER_ADDRESS; vlog "全裸金属: API 入口=第一个 master ${ip}"; break; }
+            done
+        fi
+        unset _ALL_BM
     fi
     # 全局派生变量(由 cluster.conf 变量派生, 各脚本直接引用, 不各自设置本地变量):
     #   API_IP       API 入口地址 = APISERVER_ADDRESS(HAProxy IP / NAT 第一个 master), 回退 HOST_PHYS_IP(桥接=宿主机物理 IP)

@@ -25,10 +25,11 @@
 #
 # 用法:
 #   sudo ./deploy-cluster.sh                                # 默认基础设施模块
-#   sudo ./deploy-cluster.sh --with-k8s                     # +部署 kubespray
+#   sudo ./deploy-cluster.sh --with-k8s                     # 仅部署 kubespray 基座(k8s + metallb/local-path/registry)
+#   sudo ./deploy-cluster.sh --with-cubestack               # 全量: 基座 + 全部已实现 operator(gpu_operator/lws/haproxy/...)
 #   sudo ./deploy-cluster.sh --steps vm_create,k8s_deploy   # 只跑指定模块
-#   sudo ./deploy-cluster.sh --skip k8s_hosts --with-k8s    # 跳过某模块
-#   sudo ./deploy-cluster.sh --enable gpu_operator,lws      # 启用默认关闭模块
+#   sudo ./deploy-cluster.sh --skip k8s_hosts --with-cubestack   # 跳过某模块的全量部署
+#   sudo ./deploy-cluster.sh --enable gpu_operator,lws      # 单独启用默认关闭的 operator
 #   sudo ./deploy-cluster.sh --phase k8s                    # 仅运行 k8s 阶段
 #   sudo ./deploy-cluster.sh --only <host> --with-k8s       # 仅处理指定节点
 #   sudo ./deploy-cluster.sh --with-scale                   # 扩容(新节点已在 cluster.conf)
@@ -65,12 +66,19 @@ usage() {
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
 
+注:
+  · k8s_hosts = 更新部署机 /etc/hosts 的节点 hostname 解析, 默认 no-op(由 UPDATE_ETC_HOSTS 控制, 默认关), 可跳过/去掉。
+  · --skip-net = 跳过 vm_network(VM 桥/NAT 网络初始化), 裸金属集群需要加; 与 k8s_hosts 无关。
+
 选项:
-  --with-k8s            启用 k8s_deploy 部署模块(= --enable k8s)
+  --with-k8s            仅部署 kubespray 基座: k8s_deploy + kubespray 内置 addon(metallb/local-path/registry)
+                        不含任何 operator(= --enable k8s, 并跳过全部 operator)
+  --with-cubestack      全量部署: = 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主)
+                        (如设 GPU_OPERATOR_ENABLED=true 即部署 gpu_operator; lb_haproxy/lb_keepalived 默认 false)
   --with-scale          启用 k8s_scale 扩容模块(= --enable scale)
   --steps k1,k2         只运行指定模块(兼容旧名 net/vm/k8s/...; verify=全部验证模块)
   --skip k1,k2          跳过模块(verify=跳过全部验证模块)
-  --enable k1,k2        启用默认关闭模块
+  --enable k1,k2        启用默认关闭模块(单独部署某个 operator, 如 --enable gpu_operator)
   --phase env|k8s|addon 仅运行指定阶段(可逗号分隔)
   --only HOST           仅处理指定节点(可多次; 支持 hostname 或 group 名)
   --fresh, --refresh    清断点续跑状态重新执行
@@ -80,11 +88,11 @@ usage() {
   --help, -h            显示本帮助
 
 示例:
-  sudo ./deploy-cluster.sh --with-k8s --skip-net   # 裸金属集群加 --skip-net，虚拟机无需该参，去掉skip-net
-  sudo ./deploy-cluster.sh --steps vm_create,k8s_deploy
-  sudo ./deploy-cluster.sh --skip k8s_hosts --with-k8s
-  sudo ./deploy-cluster.sh --enable gpu_operator,lws
-  sudo ./deploy-cluster.sh --phase k8s
+  sudo ./deploy-cluster.sh --with-k8s --skip-net      # 仅部署 kubespray 基座(k8s+metallb+local-path+registry)
+  sudo ./deploy-cluster.sh --with-cubestack --skip-net   # 全量部署(基座 + 全部 operator)
+  sudo ./deploy-cluster.sh --skip k8s_hosts --with-cubestack --fresh   # 全量重装(断点续跑, --fresh 清状态)
+  sudo ./deploy-cluster.sh --enable gpu_operator      # 单独部署某个 operator
+  sudo ./deploy-cluster.sh --steps gpu_operator       # 只跑单个 operator(可重复)
   sudo ./deploy-cluster.sh --with-scale   # 扩容: 新节点先写入 cluster.conf
   sudo ./deploy-cluster.sh --only worker02 --with-scale
   sudo ./deploy-cluster.sh --steps verify              # 端到端验证全部组件(不指定 operator 默认全跑)
@@ -102,8 +110,12 @@ while [ $# -gt 0 ]; do
         --fresh|--refresh) FRESH=1; shift ;;
         --list)     LIST=1; shift ;;
         --list-steps) LIST_STEPS=1; shift ;;
-        --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; shift ;;
+        # --with-k8s: 仅 kubespray 基座(k8s + metallb/local-path/registry), 不含任何 operator
+        --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; SKIP_ARG="${SKIP_ARG},gpu_operator,gpu_lws,lb_haproxy,lb_keepalived,prometheus,ceph,ceph_csi,envoy_gateway,keycloak,kueue,kubevirt,lustre_csi,cubestack_apps"; shift ;;
         --with-scale) ENABLE_ARG="${ENABLE_ARG},scale"; shift ;;
+        # --with-cubestack = 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主, 不强制启用)
+        #   lb_haproxy/lb_keepalived 默认 false, 需要时在 cluster.conf 设 true 或 --enable
+        --with-cubestack) ENABLE_ARG="${ENABLE_ARG},k8s"; shift ;;
         --steps)    STEPS_ARG="${2:?--steps 需要模块列表, 逗号分隔}"; shift 2 ;;
         --skip)     SKIP_ARG="${2:?--skip 需要模块列表, 逗号分隔}"; shift 2 ;;
         --enable)   ENABLE_ARG="${ENABLE_ARG},${2:?--enable 需要模块列表, 逗号分隔}"; shift 2 ;;
@@ -137,6 +149,17 @@ load_config
 if ! resolve_run_steps "${STEPS_ARG}" "${SKIP_ARG}" "${ENABLE_ARG}" "${PHASE_ARG}"; then
     exit 1
 fi
+
+# 让显式启用的模块真正生效: 为 RUN_STEPS 中带 TOGGLE 的模块导出 TOGGLE=true。
+# 否则 --enable gpu_operator / --with-cubestack 只把模块加入执行列表, 模块内部 `[ "${TOGGLE}" = true ]`
+# 自检读的是 cluster.conf 默认 false → 会跳过。导出后子进程模块脚本自检通过。
+for i in "${!MODULE_KEY[@]}"; do
+    tgl="${MODULE_TOGGLE[$i]:-}"
+    [ -n "${tgl}" ] || continue
+    for k in "${RUN_STEPS[@]:-}"; do
+        [ "${k}" = "${MODULE_KEY[$i]}" ] && { export "${tgl}=true"; break; }
+    done
+done
 
 [ "${FRESH}" = "1" ] && { clear_state; say "已清除断点续跑状态(--fresh)" ; }
 
@@ -176,5 +199,5 @@ echo "  SSH 私钥:   ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s
 echo "  Kubeconfig: ${KUBESPRAY_INV_DIR}/artifacts/admin.conf"
 echo "              用法: kubectl --kubeconfig=${KUBESPRAY_INV_DIR}/artifacts/admin.conf get nodes"
 echo "  管理凭证:   无 kubeadmin 密码, 管理员权限=admin.conf(客户端证书); 节点 SSH 默认密码: ${SSH_DEFAULT_PASSWORD:-<未设置>}"
-echo "  下一步: 扩容用 --with-scale; 组件用 --enable gpu_operator,lws,lb_haproxy,lb_keepalived"
+echo "  下一步: 扩容用 --with-scale; 单独组件用 --enable gpu_operator,lws,lb_haproxy,lb_keepalived(gpu_operator 已默认随 --with-k8s 启用, 排除用 --skip gpu_operator)"
 echo "============================================="

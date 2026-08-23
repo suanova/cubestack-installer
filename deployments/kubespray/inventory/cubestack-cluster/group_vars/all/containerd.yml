@@ -87,12 +87,11 @@
 
 
 
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
 
-containerd_registries_mirrors:
-  - prefix: "registry.local:5000"
-    server: "http://registry.local:5000"
-    mirrors:
-      - host: "http://registry.local:5000"
-        capabilities: ["pull", "resolve"]
-        skip_verify: true
+
+
+
+
+
+
+# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
