@@ -8,16 +8,16 @@ helm_enabled: true
 
 # Registry deployment (集群内 registry 默认不部署; 集群外镜像仓库用 Harbor)
 # 如需启用集群内 registry: REGISTRY_ENABLED=1(见 cluster.conf), 本行由 sync-addons-config.sh 自动覆盖
-registry_enabled: false
+registry_enabled: true
 # registry_namespace: kube-system
 registry_storage_class: "local-path"
 # registry_disk_size: "10Gi"
 # registry_htpasswd: ""
 # 通过 MetalLB 对外暴露 registry(LoadBalancer 类型), 分配 METALLB_POOL 中的 VIP
 # 也可改为 NodePort(registry_service_nodeport)或 ClusterIP 仅供集群内部使用
-registry_service_type: loadbalancer
+registry_service_type: LoadBalancer
 # registry_service_nodeport: 残留值已由 sync 脚本禁用
-registry_service_loadbalancer_ip: 10.244.2.100
+registry_service_loadbalancer_ip: 10.66.1.130
 
 # Metrics Server deployment
 metrics_server_enabled: true
@@ -29,7 +29,7 @@ metrics_server_enabled: true
 # metrics_server_replicas: 1
 
 # Rancher Local Path Provisioner (默认不启动; 需本地 PVC 持久化时 LOCAL_PATH_ENABLED=true)
-local_path_provisioner_enabled: false
+local_path_provisioner_enabled: true
 # local_path_provisioner_namespace: "local-path-storage"
 # local_path_provisioner_storage_class: "local-path"
 # local_path_provisioner_reclaim_policy: Delete
