@@ -170,7 +170,10 @@ trap '清理测试资源' EXIT
 
 - `config/cluster.conf` 是**唯一**配置入口,所有脚本只从它读取(环境变量可覆盖)
 - 变量写法一律 `VAR="${VAR:-default}"`
-- 常用开关(见 `config/cluster.conf.example` 完整列表): `REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`、`LWS_ENABLED`、`HAPROXY_ENABLED`、`KEEPALIVED_ENABLED`、`PROMETHEUS_ENABLED`、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`ENVOY_GATEWAY_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
+- **`cluster.conf` 为主, `XXX_ENABLED=true` 才启用**: operator 默认 `false`, 只有设为 `true` 才被 `--with-cubestack`
+  部署; `--with-k8s` 仅基座(跳过全部 operator); `--enable <operator>` 单独显式启用(覆盖 cluster.conf 的 false),
+  `--skip <operator>` 排除, `--steps <operator>` 只跑单个。lb_haproxy/lb_keepalived(API-HA)默认 false, 需要时启用。
+- 常用开关(见 `config/cluster.conf.example` 完整列表): `REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认false,未实现)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`PROMETHEUS_ENABLED`、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`ENVOY_GATEWAY_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
 - 新增配置项流程: ① cluster.conf.example 加带注释默认声明 → ② 脚本引用 → ③ 如需同步 kubespray group_vars, 在 `tools/k8s/sync-kubespray-config.sh` / `tools/k8s/sync-addons-config.sh` 加同步逻辑
 
 ## 模块体内规范
@@ -187,12 +190,23 @@ trap '清理测试资源' EXIT
 ## 常用调度命令
 
 ```bash
-sudo ./deployments/scripts/deploy-cluster.sh --with-k8s          # 一键部署
-sudo ./deployments/scripts/deploy-cluster.sh --steps k8s_deploy  # 只跑指定模块
-sudo ./deployments/scripts/deploy-cluster.sh --phase addon       # 仅 addon 阶段
-sudo ./deployments/scripts/deploy-cluster.sh --enable harbor,prometheus  # 启用组件
-sudo ./deployments/scripts/deploy-cluster.sh --list-steps        # 查看全部模块
+sudo ./deployments/scripts/deploy-cluster.sh --with-k8s --fresh      # 仅 kubespray 基座(k8s+metallb+local-path+registry), 不含 operator
+sudo ./deployments/scripts/deploy-cluster.sh --with-cubestack --fresh  # 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主)
+sudo ./deployments/scripts/deploy-cluster.sh --skip gpu_operator --with-cubestack   # 全量但排除某个 operator
+sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator  # 单独安装某个 operator(显式, 覆盖 cluster.conf 的 false)
+sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_operator   # 只跑单个 operator(可重复)
+sudo ./deployments/scripts/deploy-cluster.sh --phase addon          # 仅 addon 阶段
+sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全部模块
 ```
+
+## 断点续跑(REPEAT 语义, 重要)
+
+- **`REPEAT: 0`(可断点续跑)**: 安装成功后写状态文件, 重跑部署自动**跳过已完成模块**(断点继续, 不从头开始);
+  用 **`--fresh` 清空所有状态**后从零重装。适用:**重型安装模块**(k8s_deploy / gpu_operator 等)。
+- **`REPEAT: 1`(每次执行)**: 不写状态, 每次部署都执行。适用:**幂等快速检查**(metallb / local_path /
+  k8s_registry / verify_* 等)。
+- 状态文件: `deployments/config/.deploy.state`; 命令 `--fresh` / `--refresh` = `clear_state`。
+- 新增重型 operator 一律 `REPEAT: 0`(支持断点), 幂等就绪检查类才用 `REPEAT: 1`。
 
 ## MetalLB 常见故障速查(环境切换残留 / memberlist)
 
@@ -223,6 +237,27 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps        # 查看全部�
   实测跨节点 webhook/metallb 全通且 **pin workaround 可关**。
 - VXLAN 在该 fabric 需换端口: `CALICO_DATA_PATH=vxlan` + `CALICO_VXLAN_PORT=8472`。
 - **calico_network_backend 必须与数据面一致**(direct/ipip→bird, vxlan→vxlan), 漏配会无数据面。
+
+## MetaX GPU Operator 部署速查(沐曦)
+
+> 完整部署/镜像准备/故障见 `docs/metax-gpu-operator.md` 与 `docs/troubleshooting.md` §三.3。
+
+- **镜像来源**: 驱动与 maca **不在** `.run` 包内, 需单独推送; 离线 tar 用 `tools/images/metax-save-images.sh`
+  在已有镜像的机器上生成到 `METAX_OFFLINE_DIR`(默认 `deployments/offline-files/metax-gpu`, gitignore)。
+- **默认 tar 加载**: `METAX_IMAGE_MODE=tar` → 模块从 offline 目录逐 tar `skopeo docker-archive` 推送
+  到集群内置 registry; 核心组件去架构后缀(`0.15.3-amd64 → 0.15.3`), maca/driver 原样。
+- **helm 原生安装**(不是 kubectl apply): 官方 chart 有 3 处 bug 需修(deployment 缺 namespace /
+  openshift.deploy 无默认 / vendor 字段未加引号), 修复版 chart 放在 `deployments/metax-gpu-operator/metax-operator`。
+- **`.run` push 有 flag 顺序 bug**(`--plain-http` 置于 ref 后): 用 `.run ctr load` + 自行 `ctr tag`+`ctr push --plain-http`。
+- **master 有 GPU 时**: 用 `sudo mx-smi | grep "Attached GPUs"` 检测, 检测到的 master 自动移除 control-plane 污点并 uncordon。
+- **常用命令**:
+  ```bash
+  sudo ./deploy-cluster.sh --enable gpu_operator            # 部署
+  sudo ./deploy-cluster.sh --steps verify_metax_gpu          # 验证 GPU 识别(或 --steps verify)
+  sudo ./deployments/scripts/tools/images/metax-save-images.sh   # 保存镜像 → 离线 tar
+  sudo ./deployments/scripts/tools/images/metax-load-images.sh   # 加载 tar → 集群 registry(手动)
+  METAX_LIST_IMAGES=true bash modules/03_addon/04_gpu_operator.sh   # 打印所需镜像 pull/save 命令
+  ```
 
 ## 审查清单(写完脚本后自检)
 

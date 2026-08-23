@@ -147,10 +147,46 @@ GATEWAY_API_ENABLED="${GATEWAY_API_ENABLED:-false}"     # Gateway API CRDs
 # true = deploy-cluster.sh 默认执行对应 modules/ 模块; false = 需 --enable 显式启用
 K8S_ENABLED="${K8S_ENABLED:-false}"                      # modules/02_k8s/06_k8s_deploy.sh(= --with-k8s)
 K8S_SCALE_ENABLED="${K8S_SCALE_ENABLED:-false}"          # modules/02_k8s/07_k8s_scale.sh(= --with-scale)
-GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-false}"   # modules/03_addon/04_gpu_operator.sh(沐曦 GPU Operator, P1-5)
-LWS_ENABLED="${LWS_ENABLED:-false}"                     # modules/03_addon/05_gpu_lws.sh(LeaderWorkerSet, P1-8)
-HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # modules/01_env/05_lb_haproxy.sh(API 四层负载均衡, 部署前准备)
-KEEPALIVED_ENABLED="${KEEPALIVED_ENABLED:-false}"       # modules/01_env/06_lb_keepalived.sh(API VIP 高可用, 部署前准备)
+GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-false}"   # modules/03_addon/04_gpu_operator.sh(沐曦 GPU Operator; --with-cubestack 或 --enable gpu_operator 启用)
+
+# ---------------- 沐曦 GPU Operator(MetaX)配置 ----------------
+# 版本不硬编码: 升级只需改 METAX_VERSION, 其余路径/镜像由本配置派生。
+# 资源包来源: 沐曦软件中心 下载 → 云平台工具 → metax-gpu-k8s(<版本>.tar.gz, 内含 metax-k8s-images.<ver>.run + helm charts)
+METAX_VERSION="${METAX_VERSION:-0.15.3}"                        # GPU Operator 版本(决定包名/镜像 tag/Chart)
+# 沐曦 GPU Operator 离线文件目录: 镜像 tar + 资源包/驱动包/.run 等大文件(默认 offline-files/metax-gpu)
+METAX_OFFLINE_DIR="${METAX_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/metax-gpu}"
+# 大文件(资源包 tgz / metax-k8s-images.*.run / 驱动 *.run)所在目录(默认 = METAX_OFFLINE_DIR)
+METAX_PKG_DIR="${METAX_PKG_DIR:-${METAX_OFFLINE_DIR}}"
+METAX_PKG_TGZ="${METAX_PKG_TGZ:-metax-gpu-k8s-package.${METAX_VERSION}.tar.gz}"  # 资源包文件名
+# 修复后的 helm chart 目录(deployments/metax-gpu-operator 下仅保留该修复版 chart, 直接 helm 安装)
+METAX_CHART_DIR="${METAX_CHART_DIR:-${REPO_ROOT}/deployments/metax-gpu-operator/metax-operator}"
+# 镜像加载方式(默认 tar, 从离线 tar 逐镜像加载推送到集群内置 registry):
+#   tar = 从 METAX_OFFLINE_DIR/METAX_IMAGE_DIR 加载离线 tar(需先用 metax-save-images.sh 生成)
+#   run = 用 metax-k8s-images.<ver>.run 内嵌镜像直接推送(无需预存 tar, 离线可用)
+METAX_IMAGE_MODE="${METAX_IMAGE_MODE:-tar}"
+METAX_IMAGE_DIR="${METAX_IMAGE_DIR:-${LOCAL_REPO_DIR}/images}"  # tar 模式: 额外镜像 tar 目录(可配置, 优先用 METAX_OFFLINE_DIR)
+METAX_TAR_PATTERN="${METAX_TAR_PATTERN:-metax}"                 # tar 模式: 匹配文件名以区分沐曦镜像
+# metax-save-images.sh: 从本地 docker 枚举保存的镜像仓库前缀(正则)。
+#   默认 ^harbor.isuanova.com/metax/(内网 Harbor 仓库); 也可选 ^cr\.metax-tech\.com/cloud/(沐曦官方仓库,
+#   仅取 cloud 前缀避免 public-* 下的大推理镜像重复)。两者都含同内容镜像, 选其一即可。
+METAX_SAVE_PATTERN="${METAX_SAVE_PATTERN:-^harbor\.isuanova\.com/metax/}"
+# metax-save-images.sh: 枚举中命中即跳过的镜像(正则; 默认排除 sglang 等大推理镜像)
+METAX_SAVE_EXCLUDE="${METAX_SAVE_EXCLUDE:-sglang}"
+# 核心组件列表(对应 metax-k8s-images.<ver>.run 内嵌镜像, 与版本配套; METAX_LIST_IMAGES=true 可打印保存命令)
+METAX_IMAGE_COMPONENTS="${METAX_IMAGE_COMPONENTS:-gpu-label gpu-device gpu-aware topo-master topo-worker operator-controller container-runtime driver-manager gpu-scheduler mx-exporter}"
+# 集群内置 registry 仓库路径(默认 registry.local:5000/metax, 即 REGISTRY_DOMAIN:REGISTRY_PORT/metax)
+METAX_REGISTRY="${METAX_REGISTRY:-${REGISTRY_DOMAIN}:${REGISTRY_PORT}/metax}"
+METAX_NAMESPACE="${METAX_NAMESPACE:-metax-operator}"            # 部署命名空间
+METAX_RELEASE_NAME="${METAX_RELEASE_NAME:-metax-gpu-operator}"  # Helm release 名
+METAX_CLUSTER_TYPE="${METAX_CLUSTER_TYPE:-k8s}"                 # 集群类型: k8s|k3s(标准 K8s 用 k8s)
+# 驱动部署策略: PreferHost=用节点已装内核驱动(默认, 本集群节点已有 3.9.x; 免 driver-image, 避免卸载宿主驱动失败)
+#   PreferCloud=Operator 经 DaemonSet 容器化安装驱动(需 driver-image, 会尝试卸载宿主驱动, 卸载失败会 CrashLoop)
+METAX_DRIVER_DEPLOY_POLICY="${METAX_DRIVER_DEPLOY_POLICY:-PreferHost}"
+METAX_DRIVER_VERSION="${METAX_DRIVER_VERSION:-3.8.1.6-amd64}"  # 内核驱动版本(driver-image:<ver>; 需与本地镜像/离线 tar 匹配)
+METAX_MACA_IMAGE="${METAX_MACA_IMAGE:-maca:3.8.1.2-ubuntu20.04-amd64}"  # MXMACA SDK 镜像(最新 3.8, 需与离线 tar/在线拉取匹配)
+LWS_ENABLED="${LWS_ENABLED:-false}"                     # modules/03_addon/05_gpu_lws.sh(LeaderWorkerSet, P1-8, 未实现, 默认关)
+HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # modules/01_env/05_lb_haproxy.sh(API 四层负载均衡, 默认关, 需要时 --enable)
+KEEPALIVED_ENABLED="${KEEPALIVED_ENABLED:-false}"       # modules/01_env/06_lb_keepalived.sh(API VIP 高可用, 默认关, 需要时 --enable)
 KEEPALIVED_VIP="${KEEPALIVED_VIP:-}"                    # Keepalived VIP(留空=取 APISERVER_ADDRESS)
 
 # ---------------- P1 阶段附加组件开关(kubespray 集群部署后安装) ----------------

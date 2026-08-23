@@ -243,12 +243,13 @@ trap cleanup EXIT   # 失败也清理测试资源
 
 ```bash
 sudo ./deploy-cluster.sh                                # 默认 env+k8s 基础模块
-sudo ./deploy-cluster.sh --with-k8s                     # = --enable k8s(旧名兼容)
+sudo ./deploy-cluster.sh --with-k8s                     # 仅 kubespray 基座(k8s + metallb/local-path/registry)= --enable k8s
+sudo ./deploy-cluster.sh --with-cubestack               # 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主)
 sudo ./deploy-cluster.sh --with-scale                   # 扩容
 sudo ./deploy-cluster.sh --steps k8s_deploy,lb_haproxy  # 只跑指定模块(旧名自动映射)
-sudo ./deploy-cluster.sh --skip k8s_hosts --with-k8s    # 跳过某模块
+sudo ./deploy-cluster.sh --skip k8s_hosts --with-cubestack  # 跳某模块的全量部署(k8s_hosts 为 no-op, 可省略)
 sudo ./deploy-cluster.sh --phase k8s                    # 仅 k8s 阶段
-sudo ./deploy-cluster.sh --enable gpu_operator,lws      # 显式启用
+sudo ./deploy-cluster.sh --enable gpu_operator          # 单独启用某个 operator(默认关)
 sudo ./deploy-cluster.sh --only <host> --with-scale     # 仅处理指定节点
 sudo ./deploy-cluster.sh --list-steps | --list | --fresh
 ```

@@ -118,9 +118,22 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 | **Calico** | CNI(容器网络) | IPIP 封装跨节点; BIRD 分发节点间 pod 路由; Felix 数据面 | fabric 兼容性最好(见 §3); 离线镜像齐 | kubespray 内置(`kube_network_plugin=calico`) |
 | **MetalLB** | 裸金属 LoadBalancer | Layer2: speaker 用 ARP 通告 VIP; controller 分配地址池 | 无云 LB 的裸金属/VM 环境标准方案; L2 通告与 IPIP 共存 | kubespray 内置 + `verify_metallb` 端到端验证 |
 | **metrics-server** | HPA 依赖的指标 | kubelet Summary API 聚合 | kubespray 标准组件, HPA 必需 | `METRICS_SERVER_ENABLED=true` |
+| **MetaX GPU Operator** | 沐曦 GPU 驱动/识别/调度 | helm chart + CRD(ClusterOperator)驱动组件 DaemonSet; 内置 registry 存放镜像 | 裸金属沐曦 GPU 必备; 离线 tar 加载 + helm 原生安装; master 有 GPU 时自动解除不可调度 | `GPU_OPERATOR_ENABLED=true` + 见 `docs/metax-gpu-operator.md` |
 
 > 详细部署/开关见 `cluster.conf` 组件开关段与 `deployments/scripts/modules/`。
 > 后续新增 operator 按 `skills/cubestack-operator-onboarding/SKILL.md` 流程添加并更新本表。
+
+### 5.2 MetaX GPU Operator 架构与原理(沐曦 GPU 识别 / 调度)
+
+- 架构: helm chart 安装 `metax-operator`(operator controller + ClusterOperator CRD); operator 依据
+  ClusterOperator CR 创建组件 DaemonSet(`gpu-label` 打标 → `driver` / `container-runtime` / `maca` /
+  `gpu-device` 设备插件), 设备插件把 `metax-tech.com/gpu` 注册进 kubelet allocatable。
+- 镜像: 全部放集群内置 registry `registry.local:5000/metax/...`(默认 **tar 离线加载**, 也可 `.run` 内嵌推送)。
+- 为何采用 helm 原生安装: 官方 chart 有 3 处 bug(deployment 缺 namespace / openshift.deploy 无默认 /
+  vendor 字段空值未加引号)会在 kubectl apply 时失败; 修复 chart 后 helm install 自动装 CRD+命名空间, 最稳。
+- master 节点: 用 `mx-smi` 在宿主机检测 GPU, 检测到 GPU 的 master 自动移除 control-plane 污点并 uncordon
+  (供 PD 分离等 pod 调度); 无 GPU 的 master 保持默认不可调度。
+- 部署/验证入口: `docs/metax-gpu-operator.md`。
 
 ### 5.1 MetalLB 架构与原理(裸金属 LoadBalancer)
 
@@ -161,8 +174,9 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 ```bash
 # 1) 编辑 deployments/config/cluster.conf: NODES(节点)/ 网络 / 组件开关
 #    (BM 集群: 全部 node_type=bm, METALLB_POOL=10.66.1.130-139)
-# 2) 一键部署(含: 节点准备 → NTP → kubespray 离线安装 → metallb 等)
-sudo ./deployments/scripts/deploy-cluster.sh --with-k8s
+# 2) 一键部署(含: 节点准备 → NTP → kubespray 离线安装 → metallb 等基座)
+sudo ./deployments/scripts/deploy-cluster.sh --with-k8s          # 仅 kubespray 基座(k8s + metallb/local-path/registry)
+sudo ./deployments/scripts/deploy-cluster.sh --with-cubestack    # 基座 + cluster.conf 中已启用的 operator(如 GPU_OPERATOR_ENABLED=true → gpu_operator)
 #    中途失败: 修复后重跑同一命令(install 会重置残留 k8s 重建); --skip k8s_deploy 可跳过
 # 3) 端到端验证
 sudo ./deployments/scripts/deploy-cluster.sh --steps verify_metallb

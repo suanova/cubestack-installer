@@ -53,3 +53,6 @@ deployments/kubespray/kubespray/.gitmodules
 # 部署引擎在宿主机生成的临时拷贝(按 ssh 目标命名)
 /deployments/*@*/
 cluster.conf.backup
+
+# 沐曦 GPU 离线文件(大 tar / 资源包 / .run, 不入库; 用 tools/images/metax-save-images.sh 生成)
+deployments/offline-files/

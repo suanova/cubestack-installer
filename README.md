@@ -331,8 +331,10 @@ cubestack-installer/
 # 从 config/cluster.conf 读取配置(唯一数据源,所有 IP 不硬编码)
 cp config/cluster.conf.example config/cluster.conf && vim config/cluster.conf
 
-# 全流程部署(含 kubespray 离线安装)
-sudo ./deployments/scripts/deploy-cluster.sh --with-k8s --skip-net   # 裸金属集群加 --skip-net，虚拟机无需该参，去掉skip-net
+# 全流程部署(含 kubespray 离线安装 + cluster.conf 中启用的 operator, 如 GPU_OPERATOR_ENABLED=true → gpu_operator)
+sudo ./deployments/scripts/deploy-cluster.sh --with-cubestack --skip-net   # 裸金属集群加 --skip-net，虚拟机无需该参
+sudo ./deployments/scripts/deploy-cluster.sh --with-k8s --skip-net          # 仅 kubespray 基座(k8s+metallb+local-path+registry)
+sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator         # 单独部署某个 operator(显式, 覆盖 cluster.conf)
 ```
 
 **核心脚本:**

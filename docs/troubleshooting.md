@@ -221,6 +221,140 @@ grep -n METALLB_POOL config/cluster.conf
 
 ---
 
+### 3. 沐曦 MetaX GPU Operator 部署故障速查
+
+> 部署/验证入口与镜像准备见 `docs/metax-gpu-operator.md`。以下问题均已在 9 节点(3 master+6 worker, 69 GPU)端到端验证根治。
+
+#### 3.1 operator 反复 CrashLoop, 日志报 `clusterversions.config.openshift.io "version" is forbidden`
+
+**症状**
+```
+unable to create controller {"controller": "ClusterOperator", "error":
+"failed to get cluster version: clusterversions.config.openshift.io \"version\" is forbidden:
+User \"system:serviceaccount:...:metax-operator\" cannot get resource \"clusterversions\" ..."}
+```
+
+**根因**
+- 未设 `--set cluster.type=k8s`(标准 K8s 上 operator 默认探测 OpenShift API 直接崩溃);
+- **或** ClusterOperator CR 未创建(CRD 未 Established 时 apply 会报 `no matches for kind ClusterOperator`,
+  operator 无 CR 就没有 cluster.type 配置 → 探测 OpenShift)。
+
+**解法(根治)**
+- chart 修复 + helm install 时 `--set cluster.type=k8s --set cluster.version=<K8S版本>`(模块已做);
+- CRD 必须先 Established(`kubectl wait --for=condition=Established crd/clusteroperators.gpu.metax-tech.com`)再 apply/helm;
+- chart 模板 `openshift.deploy` 默认 false(否则 CRD 要求 `spec.openshift` 有值而渲染为空 → 校验失败)。
+
+**验证**
+- `kubectl -n metax-operator get pods | grep metax-gpu-operator` → `1/1 Running`; 日志不再有 OpenShift 探测错误。
+
+**相关命令**
+```bash
+kubectl -n metax-operator logs -l app.kubernetes.io/component=metax-operator --tail=30
+kubectl get crd clusteroperators.gpu.metax-tech.com -o jsonpath='{.status.conditions[?(@.type=="Established")].status}'
+```
+
+#### 3.2 helm 安装失败: `ClusterRole "metax-pre-delete" ... exists and cannot be imported ... missing key "app.kubernetes.io/managed-by"`
+
+**症状**
+```
+Error: unable to continue with install: ClusterRole "metax-pre-delete" ... exists and cannot be imported
+into the current release: invalid ownership metadata; missing key "app.kubernetes.io/managed-by": must be set to "Helm" ...
+```
+
+**根因**
+之前用 `kubectl apply` 装的资源(尤其**集群级** ClusterRole/RoleBinding)没有 Helm 所有权标签, helm 拒绝接管。
+
+**解法(根治)**
+- 统一改 **helm 原生安装**(修复 chart 后 `helm upgrade --install`);
+- 每次重部署先清理残留: CR/CRD/命名空间/default 旧资源 + **集群级 metax ClusterRole/RoleBinding**(模块已做)。
+
+**验证**
+- `helm ls -n metax-operator` 显示 `metax-gpu-operator` deployed。
+
+**相关命令**
+```bash
+kubectl get clusterrole,clusterrolebinding -o name | grep metax   # 看残留
+```
+
+#### 3.3 `skopeo copy docker-daemon:...` 报 `client version 1.22 is too old`
+
+**症状**
+```
+initializing source docker-daemon:harbor.isuanova.com/metax/maca:...: loading image from docker engine:
+Error response from daemon: client version 1.22 is too old. Minimum supported API version is 1.44
+```
+
+**根因** 本机 docker 较新, skopeo 的 `docker-daemon:` 传输协商的 API 版本过旧。
+
+**解法(根治)** 改用 `docker save` 成 tar + `skopeo docker-archive` 推送(模块 `push_extra` 已实现):
+```bash
+docker save <img> -o /tmp/x.tar && skopeo copy docker-archive:/tmp/x.tar docker://registry.local:5000/metax/<name>:<tag> --dest-tls-verify=false --dest-no-creds
+```
+
+#### 3.4 `metax-k8s-images.<ver>.run push` 报 `ctr: image "--plain-http": not found`
+
+**根因** 工具的 ctr 分支把 `--plain-http` 放在镜像 ref **之后**(`push <ref> --plain-http`), 新版 ctr 把 flag 当镜像名。
+
+**解法(根治)** 不用工具自带 push: `.run ctr load` 把内嵌镜像加载进宿主 ctr, 再逐组件
+`ctr -n k8s.io images tag <src> registry.local:5000/metax/<comp>:<ver>` + `ctr -n k8s.io images push --plain-http <dst>`(flag 在前)。
+
+#### 3.5 宿主机 curl `registry.local:5000` / helm 连 `k8s-api.nova.local` 失败(EOF / no route to host)
+
+**根因** 宿主机 /etc/hosts 残留旧 IP(如 `10.66.3.37` = 宿主机自身)或 DNAT 被历史规则遮蔽(两条规则指向 10.244.2.100 与 10.66.1.130, 旧规则先命中)。
+
+**解法(根治)** 每次部署由模块修正 /etc/hosts:
+```
+registry.local → REGISTRY_IP(集群 registry VIP, 如 10.66.1.130)
+k8s-api.nova.local → API_IP(全裸金属=第一个 master, 如 10.66.1.232)
+```
+不留 10.66.3.37 这类过期条目。
+
+#### 3.6 driver / maca 镜像拉不到(`ErrImagePull: ... not found`)
+
+**根因** `driver-image` 与 `maca` **不在** `metax-k8s-images.<ver>.run` 包内, 需单独推送; 即使 PreferHost 驱动 DS 的 init 容器也要拉 `driver-image`(解包内核模块)。
+
+**解法(根治)** 模块 `push_extra` 按 本地 docker(`docker save`+skopeo) → 离线 tar(METAX_OFFLINE_DIR) → 在线 逐级推送; `METAX_DRIVER_VERSION` 须与本地可用镜像匹配(如 `3.8.1.6-amd64`)。
+
+#### 3.7 master 节点没有 `metax-tech.com/gpu.installed` 标签 / GPU 用不上
+
+**根因** metax 组件 DS 默认**无 control-plane 容忍**, 调度不到(带 NoSchedule 污点的)master → gpu-label 不给 master 打标。
+
+**解法(根治)** 部署时在宿主机用 `mx-smi` 检测 GPU(`sudo mx-smi | grep "Attached GPUs"`), 检测到 GPU 的 master 自动移除 control-plane/master 污点并 uncordon(模块已实现); 无 GPU 的 master 保持不可调度。
+
+**相关命令**
+```bash
+sudo mx-smi 2>/dev/null | grep "Attached GPUs"   # count>0 即有沐曦 GPU
+sudo ./deploy-cluster.sh --steps verify_metax_gpu   # 看各节点 GPU 识别/可调度清单
+```
+
+#### 3.8 driver 容器 CrashLoop: `could not unload metax: resource temporarily unavailable`(policy: prefercloud)
+
+**症状**
+```
+{"[M]":"State{config..}","level":"info","msg":"metax version: running (3.9.6) target (3.3.12), tag (cloud) policy: prefercloud"}
+{"[M]":"State{reload..}","level":"error","msg":"could not unload metax: resource temporarily unavailable"}
+resource temporarily unavailable
+```
+
+**根因** `METAX_DRIVER_DEPLOY_POLICY` 用了 `PreferCloud`: 驱动管理器尝试**卸载宿主已装的内核驱动**(3.9.x)并安装
+容器化 cloud 驱动, 但 GPU 驱动在运行中无法卸载 → reload 失败 → CrashLoop。
+
+**解法(根治)** 本集群节点已有宿主驱动, 用 `PreferHost`:
+```
+cluster.conf: METAX_DRIVER_DEPLOY_POLICY="${METAX_DRIVER_DEPLOY_POLICY:-PreferHost}"   # 已改默认
+```
+改后需重跑部署让 CR 更新(`--fresh` 或手动 patch 后重跑)。
+
+**验证** `kubectl -n metax-operator get pods | grep metax-driver` → `1/1 Running`, 日志不再有 `could not unload`。
+
+**相关命令**
+```bash
+kubectl -n metax-operator logs -l app=metax-driver --tail=20
+grep METAX_DRIVER_DEPLOY_POLICY config/cluster.conf
+```
+
+---
+
 ## 四、离线部署
 
 > (示例占位) 按模板追加。

@@ -166,7 +166,13 @@ else
     say "registry Service EXTERNAL-IP: ${VIP_OK:-<获取失败>}"
     curl -s -m 5 "http://${REGISTRY_IP}:${REGISTRY_PORT}/v2/" >/dev/null 2>&1 && ok "  ${REGISTRY_IP}:${REGISTRY_PORT}/v2/ 可达" || warn "  ${REGISTRY_IP}:${REGISTRY_PORT}/v2/ 不可达(稍后重试)"
 fi
-curl -s -m 5 "http://${HOST_PHYS_IP}:${REGISTRY_PORT}/v2/" >/dev/null 2>&1 && ok "  ${HOST_PHYS_IP}:${REGISTRY_PORT}/v2/(DNAT) 可达" || warn "  ${HOST_PHYS_IP}:${REGISTRY_PORT}/v2/(DNAT) 不可达"
+# 集群外 push 用的宿主机 DNAT(可选): 有 MetalLB 提供 registry VIP 后, 集群内访问不需经宿主机 DNAT;
+# 仅当需要"集群外 push → push 机把 registry.local 解析到 HOST_PHYS_IP"时才用, 不可达不告警。
+if curl -s -m 5 "http://${HOST_PHYS_IP}:${REGISTRY_PORT}/v2/" >/dev/null 2>&1; then
+    ok "  ${HOST_PHYS_IP}:${REGISTRY_PORT}/v2/(DNAT) 可达(集群外 push 入口)"
+else
+    say "  ${HOST_PHYS_IP}:${REGISTRY_PORT}/v2/(DNAT) 未启用/不可达(可选, 集群内走 MetalLB VIP 即可, 仅集群外 push 需要)"
+fi
 
 echo "---------------------------------------------"
 ok "内置 registry 部署完成"
