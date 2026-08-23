@@ -4,13 +4,6 @@ docker.io_rancher_local-path-provisioner_v0.0.24.tar
 quay.io_calico_cni_v3.29.3.tar
 quay.io_calico_kube-controllers_v3.29.3.tar
 quay.io_calico_node_v3.29.3.tar
-quay.io_cilium_certgen_v0.2.1.tar
-quay.io_cilium_cilium-envoy_v1.32.5-1744305768-f9ddca7dcd91f7ca25a505560e655c47d3dec2cf.tar
-quay.io_cilium_cilium_v1.17.3.tar
-quay.io_cilium_hubble-relay_v1.17.3.tar
-quay.io_cilium_hubble-ui-backend_v0.13.2.tar
-quay.io_cilium_hubble-ui_v0.13.2.tar
-quay.io_cilium_operator_v1.17.3.tar
 quay.io_coreos_etcd_v3.5.16.tar
 quay.io_metallb_controller_v0.13.9.tar
 quay.io_metallb_speaker_v0.13.9.tar

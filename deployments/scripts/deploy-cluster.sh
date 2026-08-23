@@ -18,6 +18,7 @@
 #   addon 阶段: gpu_operator gpu_lws k8s_registry prometheus ceph ceph_csi
 #              envoy_gateway keycloak kueue kubevirt lustre_csi   (01~19 中间件, 默认关)
 #              cubestack_apps(20 起自研模块占位, 默认关)
+#   验证:      verify_<组件>(自动发现; --steps verify 不指定 operator 默认执行全部 verify_*)
 #
 # vm / k8s_passwordless / k8s_workerbm / k8s_hosts / k8s_inventory 为可重复(幂等)模块。
 # 断点续跑: 每模块完成后写入状态文件; --fresh 清状态重跑。
@@ -43,9 +44,12 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-common.sh"
 # shellcheck source=lib-module.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-module.sh"
 
+# 先发现模块(help 需动态展示 verify_* 列表, 新增 verify step 后 --help 自动更新)
+discover_modules
+
 # ---------------- 帮助 ----------------
 usage() {
-    cat <<'EOF'
+    cat <<EOF
 用法: sudo ./deploy-cluster.sh [选项]
 
 统一入口,按模块框架(lib-module.sh)自动发现并调度 modules/<阶段>/NN_*.sh 部署模块。
@@ -54,16 +58,18 @@ usage() {
   01_env  vm_network vm_sshkey vm_create harbor lb_haproxy lb_keepalived   (默认执行前3项)
   02_k8s  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp           (默认执行)
           k8s_deploy(默认关, --with-k8s)  k8s_scale(默认关, --with-scale)
-  03_addon 01~19 中间件: gpu_operator gpu_lws k8s_registry prometheus ceph
+  03_addon 依赖顺序: metallb local_path k8s_registry(基础) 中间件: gpu_operator gpu_lws prometheus ceph
           ceph_csi envoy_gateway keycloak kueue kubevirt lustre_csi        (默认关, --enable)
           20 起自研: cubestack_apps(CUBESTACK_APPS_ENABLED, 默认关)
-          21+ 验证: verify_metallb 等(默认关, --steps verify_<组件> 手动执行)
+  验证(自动发现, 新增 verify step 后本段自动更新):
+          --steps verify = 执行全部验证模块: $(_verify_meta_list)
+          --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
 
 选项:
   --with-k8s            启用 k8s_deploy 部署模块(= --enable k8s)
   --with-scale          启用 k8s_scale 扩容模块(= --enable scale)
-  --steps k1,k2         只运行指定模块(兼容旧名 net/vm/k8s/...)
-  --skip k1,k2          跳过模块
+  --steps k1,k2         只运行指定模块(兼容旧名 net/vm/k8s/...; verify=全部验证模块)
+  --skip k1,k2          跳过模块(verify=跳过全部验证模块)
   --enable k1,k2        启用默认关闭模块
   --phase env|k8s|addon 仅运行指定阶段(可逗号分隔)
   --only HOST           仅处理指定节点(可多次; 支持 hostname 或 group 名)
@@ -81,7 +87,8 @@ usage() {
   sudo ./deploy-cluster.sh --phase k8s
   sudo ./deploy-cluster.sh --with-scale   # 扩容: 新节点先写入 cluster.conf
   sudo ./deploy-cluster.sh --only worker02 --with-scale
-  sudo ./deploy-cluster.sh --steps verify_metallb   # 端到端验证组件真正工作(非仅 pod running, 验后自动清理)
+  sudo ./deploy-cluster.sh --steps verify              # 端到端验证全部组件(不指定 operator 默认全跑)
+  sudo ./deploy-cluster.sh --steps verify_metallb      # 只验证某个组件(验后自动清理)
 EOF
     exit 0
 }
@@ -127,7 +134,6 @@ export ONLY_HOSTS
 
 # ---------------- 配置加载 + 模块解析 ----------------
 load_config
-discover_modules
 if ! resolve_run_steps "${STEPS_ARG}" "${SKIP_ARG}" "${ENABLE_ARG}" "${PHASE_ARG}"; then
     exit 1
 fi

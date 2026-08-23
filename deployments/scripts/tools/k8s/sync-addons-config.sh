@@ -50,7 +50,15 @@ set_key gateway_api_enabled         "$(bool "${GATEWAY_API_ENABLED:-false}")"
 
 # ---- 字符串型组件配置(有则覆盖) ----
 if [ -n "${REGISTRY_SERVICE_TYPE:-}" ]; then
-    set_key registry_service_type "${REGISTRY_SERVICE_TYPE}"
+    # kubespray registry 角色校验 registry_service_type ∈ {ClusterIP, LoadBalancer, NodePort},
+    # 必须大写; 但 cluster.conf 用小写(loadbalancer/nodeport)—— 这里归一化, 否则 registry addon 部署失败
+    _rtype="${REGISTRY_SERVICE_TYPE}"
+    case "${_rtype,,}" in
+        loadbalancer) _rtype="LoadBalancer" ;;
+        nodeport)     _rtype="NodePort" ;;
+        clusterip)    _rtype="ClusterIP" ;;
+    esac
+    set_key registry_service_type "${_rtype}"
 fi
 if [ -n "${REGISTRY_STORAGE_CLASS:-}" ]; then
     set_key registry_storage_class "\"${REGISTRY_STORAGE_CLASS}\""

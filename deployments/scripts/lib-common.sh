@@ -42,6 +42,27 @@ detect_host_ip() {
     [ -n "${ip}" ] && echo "${ip}" || echo "127.0.0.1"
 }
 
+# 从地址池取首个可用地址(供 REGISTRY_IP 自动派生): 支持 起止区间 / CIDR / 单地址
+# 区间/单地址 → 首地址本身; CIDR → 网络首地址 +1(首个可用)
+# 用法: first_pool_addr "<METALLB_POOL>" → 首个可用地址
+first_pool_addr() {
+    python3 - "${1:-}" << 'PY'
+import ipaddress, sys
+p = (sys.argv[1] or "").strip()
+if not p:
+    sys.exit(0)
+if "/" in p:
+    try:
+        net = ipaddress.ip_network(p, strict=False)
+        print(str(net.network_address + 1)); sys.exit(0)
+    except Exception:
+        pass
+if "-" in p:
+    print(p.split("-", 1)[0].strip()); sys.exit(0)
+print(p)
+PY
+}
+
 # ---------------- 断点续跑: 状态文件 ----------------
 # 统一的状态文件,记录已完成的任务阶段
 # 用法: save_state <phase> <value>; get_state <phase>; clear_state
@@ -110,6 +131,14 @@ load_config() {
     API_IP="${API_IP:-${APISERVER_ADDRESS:-${HOST_PHYS_IP}}}"
     API_DOMAIN="${API_DOMAIN:-${APISERVER_DOMAIN:-k8s-api.nova.local}}"
     export API_IP API_DOMAIN
+    # 全局派生变量(续): REGISTRY_IP 留空时从 METALLB_POOL 自动取池内首地址作为 LoadBalancer VIP
+    # (cluster.conf 约定 "留空 = 自动派生", 与 sync-kubespray-config.sh 写入 addons.yml 的规则一致;
+    #  centralized 于此, 让 deploy-registry.sh / setup-registry-expose.sh 等所有消费者拿到同一值)
+    if [ -z "${REGISTRY_IP:-}" ]; then
+        REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
+        export REGISTRY_IP
+        vlog "REGISTRY_IP 留空, 自动取 METALLB_POOL=${METALLB_POOL:-} 首地址 → ${REGISTRY_IP}"
+    fi
 }
 
 # ---------------- 指定节点过滤(--only) ----------------

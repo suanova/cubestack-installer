@@ -59,6 +59,36 @@ normalize_key() {
     [ -n "${MODULE_ALIAS[$k]:-}" ] && echo "${MODULE_ALIAS[$k]}" || echo "$k"
 }
 
+# ---------------- 元模块展开(verify → 全部 verify_* 模块) ----------------
+# 每次新增一个 verify_<组件>.sh 模块, 这里自动把它纳入 "verify" 集合;
+# 帮助(--help / --list-steps)随之自动更新, 无需手工维护列表。
+expand_meta() {
+    local tok="$1" i out=""
+    if [ "${tok}" = "verify" ]; then
+        for i in "${!MODULE_KEY[@]}"; do
+            [[ "${MODULE_KEY[$i]}" == verify_* ]] && out="${out},${MODULE_KEY[$i]}"
+        done
+        echo "${out#,}"
+    else
+        echo "${tok}"
+    fi
+}
+
+# 展开逗号分隔的模块参数: 每个 token 过 expand_meta; verify 无匹配时报错(防止误入默认模式)
+expand_args() {
+    local t out="" e
+    for t in ${1//,/ }; do
+        [ -z "${t}" ] && continue
+        e="$(expand_meta "${t}")"
+        if [ "${t}" = "verify" ] && [ -z "${e}" ]; then
+            err "未发现任何 verify_* 验证模块(modules/03_addon/2[0-9]_verify_*.sh), 无法展开 --steps verify"
+            return 1
+        fi
+        out="${out},${e}"
+    done
+    echo "${out#,}"
+}
+
 # 读取模块头部元数据字段
 # 用法: module_meta <file> <FIELD>
 module_meta() {
@@ -121,6 +151,12 @@ resolve_run_steps() {
     local s k nk i found=0
     RUN_STEPS=()
 
+    # 元模块展开: --steps/--skip/--enable 中的 "verify" → 全部 verify_* 模块
+    # (新增 verify_<组件>.sh 自动纳入, 无需指定 operator 名即可验证全部组件)
+    steps_arg="$(expand_args "${steps_arg}")" || return 1
+    skip_arg="$(expand_args "${skip_arg}")" || return 1
+    enable_arg="$(expand_args "${enable_arg}")" || return 1
+
     # 阶段过滤: 只保留该阶段模块
     _phase_ok() {
         [ -z "${phase_filter}" ] && return 0
@@ -166,6 +202,17 @@ resolve_run_steps() {
         for k2 in "${RUN_STEPS[@]}"; do [ "${k2}" != "${nk}" ] && comp+=("${k2}"); done
         RUN_STEPS=("${comp[@]}")
     done
+
+    # ★ 关键: 最终按"模块文件顺序(阶段目录 + NN 序号)"重排 RUN_STEPS。
+    # 否则 --enable/--with-xxx 加入的模块(如 k8s_deploy)会被 append 到末尾,
+    # 排到 addon 阶段模块之后 → addon(k8s_registry 等)会在 k8s_deploy 前执行 → 集群未部署就配置 addon → 失败。
+    local _ordered=() _k2
+    for _i in "${!MODULE_KEY[@]}"; do
+        for _k2 in "${RUN_STEPS[@]}"; do
+            [ "${_k2}" = "${MODULE_KEY[$_i]}" ] && _ordered+=("${_k2}")
+        done
+    done
+    RUN_STEPS=("${_ordered[@]}")
 }
 
 # ---------------- 调度: 执行单个模块(断点续跑感知) ----------------
@@ -212,7 +259,18 @@ print_steps() {
     echo "  --steps k1,k2  只运行指定模块    --skip k1,k2  跳过模块"
     echo "  --phase env|k8s|addon  仅运行指定阶段"
     echo "  --enable k     启用默认关闭模块(如 gpu_operator/lws)   --with-k8s = --enable k8s"
+    echo "  --steps verify 默认执行全部 verify_* 验证模块(新增 verify step 后自动纳入):"
+    echo "                 $(_verify_meta_list)"
     echo "  --list-steps   查看本列表"
+}
+
+# 输出全部 verify_* 模块名(逗号分隔; 供 help/list 动态展示)
+_verify_meta_list() {
+    local out="" i
+    for i in "${!MODULE_KEY[@]}"; do
+        [[ "${MODULE_KEY[$i]}" == verify_* ]] && out="${out} ${MODULE_KEY[$i]}"
+    done
+    echo "${out# }"
 }
 
 print_plan() {

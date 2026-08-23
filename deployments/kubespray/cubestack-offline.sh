@@ -1326,6 +1326,11 @@ print("%s|%s|%s" % (
                 ipvsadm -C 2>/dev/null;
                 ip link del kube-ipvs0 2>/dev/null;
                 rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd 2>/dev/null;
+                # 清理 CNI 配置与旧插件残留(切 CNI 时旧插件配置会残留并优先于新 CNI 被
+                # kubelet 选用 → pod sandbox 报 "plugin type=cilium-cni failed: connection refused")
+                rm -rf /etc/cni/net.d 2>/dev/null;
+                rm -f /opt/cni/bin/cilium* 2>/dev/null;
+                rm -rf /var/run/cilium 2>/dev/null;
                 systemctl stop kubelet 2>/dev/null || true;
                 systemctl stop etcd 2>/dev/null || true;
                 rm -f /etc/etcd.env /etc/systemd/system/etcd.service 2>/dev/null;

@@ -10,13 +10,6 @@ dependencies:
     tags:
       - helm
 
-  - role: kubernetes-apps/registry
-    when:
-      - registry_enabled
-      - inventory_hostname == groups['kube_control_plane'][0]
-    tags:
-      - registry
-
   - role: kubernetes-apps/metrics_server
     when:
       - metrics_server_enabled
@@ -110,6 +103,13 @@ dependencies:
       - inventory_hostname == groups['kube_control_plane'][0]
     tags:
       - metallb
+
+  - role: kubernetes-apps/registry
+    when:
+      - registry_enabled
+      - inventory_hostname == groups['kube_control_plane'][0]
+    tags:
+      - registry
 
   - role: kubernetes-apps/argocd
     when:

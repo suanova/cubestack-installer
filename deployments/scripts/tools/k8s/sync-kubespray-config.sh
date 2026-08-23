@@ -214,12 +214,22 @@ else
     warn "未找到 ${ADDONS_YML},跳过 MetalLB 地址池同步"
 fi
 
+# REGISTRY_IP 自动派生统一在 lib-common.sh load_config 中完成(first_pool_addr):
+#   留空 → 从 METALLB_POOL 取池内首地址(换环境只改池, 不用手改 VIP)
+
 # ---------------- 4.1 更新 addons.yml (Registry Service 暴露方式) ----------------
 # 依据 REGISTRY_SERVICE_TYPE 同步 registry Service 的 type 与对外端口:
 #   loadbalancer → LoadBalancer + 固定 VIP(REGISTRY_IP), 避免 MetalLB auto-assign 分到网段边界地址
 #   nodeport     → NodePort + 固定 REGISTRY_NODEPORT(不依赖 MetalLB)
 # 集群内节点 /etc/hosts + containerd 引用的是 REGISTRY_DOMAIN, 与 Service type 无关
 if [ -f "${ADDONS_YML}" ] && [ "${REGISTRY_ENABLED:-0}" = "1" ]; then
+    # REGISTRY_IP 自动派生: 留空则从 METALLB_POOL 取首地址(换环境只改池, 不用手改 VIP)
+    # load_config 已派生, 此处仅兜底(防单独直接运行本脚本时未走 load_config 派生分支)
+    if [ -z "${REGISTRY_IP:-}" ]; then
+        REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
+        [ -n "${REGISTRY_IP}" ] || REGISTRY_IP="10.244.2.100"
+        say "  REGISTRY_IP 留空, 自动取 METALLB_POOL=${METALLB_POOL} 首地址 → ${REGISTRY_IP}(需固定可显式设 REGISTRY_IP)"
+    fi
     case "${REGISTRY_SERVICE_TYPE:-loadbalancer}" in
         nodeport)
             say "更新 ${ADDONS_YML} (registry Service → NodePort ${REGISTRY_NODEPORT:-31148}) ..."

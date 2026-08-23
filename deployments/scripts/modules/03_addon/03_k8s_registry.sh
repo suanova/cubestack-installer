@@ -7,10 +7,10 @@
 # REPEAT: 1
 # TOGGLE: REGISTRY_ENABLED
 # 说明:
-#   · 集群内 registry(kubespray addon), **默认不部署**(REGISTRY_ENABLED 默认 0/false)
+#   · 集群内 registry(kubespray addon), **默认部署**(REGISTRY_ENABLED 默认 1/true)
 #   · 对**已部署**集群幂等配置内置 registry, 需集群就绪后显式执行
 #   · 启用方式: deploy-cluster.sh --enable k8s_registry 或 REGISTRY_ENABLED=true
-#   · 集群外镜像仓库统一使用 Harbor(modules/01_env/04_harbor.sh, HARBOR_ENABLED)
+#   · 集群外镜像仓库 Harbor 为预留配置(modules/01_env/04_harbor.sh, 未来实现, 默认关闭)
 #   · 复用 deploy-registry.sh: 各节点 /etc/hosts 解析 REGISTRY_DOMAIN → REGISTRY_IP(MetalLB VIP),
 #     containerd certs.d 信任该 HTTP registry, 宿主机 DNAT 对外 push 入口
 #   · REGISTRY_ENABLED 控制 addons.yml 中 registry addon 是否安装(见 sync-addons-config.sh)

@@ -7,12 +7,11 @@
 # REPEAT: 0
 # TOGGLE: HARBOR_ENABLED
 # 说明:
-#   【P1-4 规划模块·伪代码占位】Harbor 企业级镜像仓库:
-#   · 定位: 集群外容器镜像仓库的唯一方案(外部开发机/CI push, 集群节点 pull)
-#   · 属于环境准备阶段: 在部署 kubespray 之前于宿主机(或独立仓库机)就绪,
-#     为后续集群部署提供镜像源(替代原本地 docker registry)
-#   · 支持镜像推送、拉取、目录同步(GC/复制); 集群内 registry 为 kubespray
-#     addon(modules/03_addon/03_k8s_registry.sh), 默认不部署
+#   【P1-4 规划模块·伪代码占位】Harbor 企业级镜像仓库(预留配置, 未来实现):
+#   · 定位: 集群外容器镜像仓库(外部开发机/CI push, 集群节点 pull)
+#   · 当前集群镜像仓库统一使用【集群内 docker registry】(kubespray addon,
+#     modules/03_addon/03_k8s_registry.sh, REGISTRY_ENABLED 默认 1)
+#   · Harbor 默认关闭(HARBOR_ENABLED=false), 未来需要外部 push 场景时在此实现
 #   · 接入方法: 将下方 STEPS 伪代码替换为真实命令, 或 ADDON_STUB_EXEC=1 试执行
 # 数据源: cluster.conf (HARBOR_ENABLED / HARBOR_DOMAIN / HARBOR_IP / HARBOR_STORAGE_CLASS)
 # ============================================================
