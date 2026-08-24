@@ -16,7 +16,7 @@ tools: Read, Grep, Glob, Bash
    - cilium 保留但仅作待验证备选, 不得设为默认。
 3. **模块元数据**: `deployments/scripts/modules/` 下模块头部必须有 `MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE`; 且 `set -euo pipefail` + `source lib-common.sh` + `load_config`; 开关类要有 TOGGLE 检查。
 4. **同步脚本幂等**: `tools/k8s/sync-kubespray-config.sh` 的任何改动必须幂等, 且**默认路径不得改变现有行为**; 输出 YAML 必须合法。
-5. **离线约束**: 新组件镜像必须进离线仓库 `deployments/kubespray/repository/<集群>/images/` 并加入 `PRELOAD_IMAGE_PATTERNS`。
+5. **离线约束**: 新组件镜像必须进离线文件目录 `${OFFLINE_FILES_DIR}/<集群>/images/`(默认 `deployments/offline-files/kubespray/<集群>/images/`)并加入 `PRELOAD_IMAGE_PATTERNS`。
 6. **文档同步**: 改动功能必须同步更新 `docs/cluster-architecture.md`(架构/operator 表)、`docs/troubleshooting.md`(按 症状→根因→解法→验证 模板)、相关 skill。只留口头结论 = 不合格。
 7. **语法/合法性**: 改动 bash 需 `bash -n` 通过; 改 group_vars / cluster.conf 需 YAML 可解析。
 

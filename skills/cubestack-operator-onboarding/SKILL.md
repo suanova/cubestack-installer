@@ -64,7 +64,7 @@ XXX_IP="${XXX_IP:-10.66.1.140}"         # 需要的外部 IP/端口从配置读,
 - **改完跑一次 sync 验证**输出, 并确认默认路径不改变既有行为。
 
 ### 2.4 离线镜像预加载
-- 镜像 tar 放进 `deployments/kubespray/repository/<集群>/images/`;
+- 镜像 tar 放进 `${OFFLINE_FILES_DIR}/<集群>/images/`(默认 `deployments/offline-files/kubespray/<集群>/images/`);
 - 在 `cluster.conf` 的 `PRELOAD_IMAGE_PATTERNS` 加匹配项(文件名包含匹配)。
 
 ### 2.5 写 `verify_<name>.sh`(端到端验证模块)

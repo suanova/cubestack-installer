@@ -23,7 +23,7 @@ CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/deployments/config/cluster.conf}"
 export CLUSTER_CONF
 
 # ---------------- 集群名(固定默认, 单集群) ----------------
-# 默认集群名 cubestack-cluster, 用于 inventory/repository 目录与日志命名; 环境变量可覆盖
+# 默认集群名 cubestack-cluster, 用于 inventory/offline-files 目录与日志命名; 环境变量可覆盖
 CLUSTER_NAME="${CLUSTER_NAME:-cubestack-cluster}"
 export CLUSTER_NAME
 
@@ -175,6 +175,16 @@ load_config() {
     API_IP="${API_IP:-${APISERVER_ADDRESS:-${HOST_PHYS_IP}}}"
     API_DOMAIN="${API_DOMAIN:-${APISERVER_DOMAIN:-k8s-api.nova.local}}"
     export API_IP API_DOMAIN
+    # 全局派生变量(续): 离线文件路径
+    #   OFFLINE_FILES_DIR  离线文件根目录(二进制/镜像/离线包), 全局唯一可切换点
+    #                      默认 ${REPO_ROOT}/deployments/offline-files/kubespray
+    #   LOCAL_REPO_DIR     当前集群离线资源目录 = ${OFFLINE_FILES_DIR}/${CLUSTER_NAME}
+    #                      (若显式设置了 LOCAL_REPO_DIR, 保留不覆盖; 否则统一收敛到 OFFLINE_FILES_DIR)
+    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}"
+    if [ -z "${LOCAL_REPO_DIR:-}" ]; then
+        LOCAL_REPO_DIR="${OFFLINE_FILES_DIR}/${CLUSTER_NAME:-cubestack-cluster}"
+    fi
+    export OFFLINE_FILES_DIR LOCAL_REPO_DIR
     # 全局派生变量(续): REGISTRY_IP 留空时从 METALLB_POOL 自动取池内首地址作为 LoadBalancer VIP
     # (cluster.conf 约定 "留空 = 自动派生", 与 sync-kubespray-config.sh 写入 addons.yml 的规则一致;
     #  centralized 于此, 让 deploy-registry.sh / setup-registry-expose.sh 等所有消费者拿到同一值)

@@ -40,8 +40,8 @@ deployments/kubespray/inventory/cubestack-cluster/inventory.ini
 # 虚拟机基础镜像/磁盘(大文件,勿提交)
 deployments/virtual-machine/
 
-#kubepray install image and binary folder
-deployments/kubespray/repository/cubestack-cluster/*
+# 离线文件(镜像 tar / 二进制 / .deb / 资源包, 大文件不入库; 路径由 OFFLINE_FILES_DIR 等变量切换)
+deployments/offline-files/
 deployments/kubespray/kubespray/.git
 deployments/kubespray/kubespray/.gitattributes
 deployments/kubespray/kubespray/.github
@@ -53,6 +53,3 @@ deployments/kubespray/kubespray/.gitmodules
 # 部署引擎在宿主机生成的临时拷贝(按 ssh 目标命名)
 /deployments/*@*/
 cluster.conf.backup
-
-# 沐曦 GPU 离线文件(大 tar / 资源包 / .run, 不入库; 用 tools/images/metax-save-images.sh 生成)
-deployments/offline-files/
