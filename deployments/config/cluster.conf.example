@@ -162,8 +162,8 @@ METAX_OFFLINE_DIR="${METAX_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/m
 # 大文件(资源包 tgz / metax-k8s-images.*.run / 驱动 *.run)所在目录(默认 = METAX_OFFLINE_DIR)
 METAX_PKG_DIR="${METAX_PKG_DIR:-${METAX_OFFLINE_DIR}}"
 METAX_PKG_TGZ="${METAX_PKG_TGZ:-metax-gpu-k8s-package.${METAX_VERSION}.tar.gz}"  # 资源包文件名
-# 修复后的 helm chart 目录(deployments/metax-gpu-operator 下仅保留该修复版 chart, 直接 helm 安装)
-METAX_CHART_DIR="${METAX_CHART_DIR:-${REPO_ROOT}/deployments/metax-gpu-operator/metax-operator}"
+# 修复后的 helm chart 目录(deployments/cubestack-addon/metax-gpu-operator 下仅保留该修复版 chart, 直接 helm 安装)
+METAX_CHART_DIR="${METAX_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/metax-gpu-operator/metax-operator}"
 # 镜像加载方式(默认 tar, 从离线 tar 逐镜像加载推送到集群内置 registry):
 #   tar = 从 METAX_OFFLINE_DIR/METAX_IMAGE_DIR 加载离线 tar(需先用 metax-save-images.sh 生成)
 #   run = 用 metax-k8s-images.<ver>.run 内嵌镜像直接推送(无需预存 tar, 离线可用)
@@ -188,7 +188,35 @@ METAX_CLUSTER_TYPE="${METAX_CLUSTER_TYPE:-k8s}"                 # 集群类型: 
 METAX_DRIVER_DEPLOY_POLICY="${METAX_DRIVER_DEPLOY_POLICY:-PreferHost}"
 METAX_DRIVER_VERSION="${METAX_DRIVER_VERSION:-3.8.1.6-amd64}"  # 内核驱动版本(driver-image:<ver>; 需与本地镜像/离线 tar 匹配)
 METAX_MACA_IMAGE="${METAX_MACA_IMAGE:-maca:3.8.1.2-ubuntu20.04-amd64}"  # MXMACA SDK 镜像(最新 3.8, 需与离线 tar/在线拉取匹配)
-LWS_ENABLED="${LWS_ENABLED:-false}"                     # modules/03_addon/05_gpu_lws.sh(LeaderWorkerSet, P1-8, 未实现, 默认关)
+LWS_ENABLED="${LWS_ENABLED:-false}"                     # modules/03_addon/05_gpu_lws.sh(LeaderWorkerSet, P1-8, 默认关)
+
+# ---------------- LeaderWorkerSet (LWS) 配置 ----------------
+# Chart 来源(三选一, 对应官方 helm 用法):
+#   dir = 本地解包目录(默认 LWS_CHART_DIR, 仓库内置官方 v0.10.0)
+#   tgz = 本地 chart 压缩包(LWS_CHART_TGZ)
+#   oci = 官方 OCI registry(需联网): helm install lws oci://registry.k8s.io/lws/charts/lws --version=<LWS_CHART_VERSION>
+LWS_CHART_SOURCE="${LWS_CHART_SOURCE:-dir}"
+LWS_CHART_VERSION="${LWS_CHART_VERSION:-v0.10.0}"        # 对应官方 CHART_VERSION
+# 离线 helm chart 目录/tgz(默认 deployments/cubestack-addon/lws, 已内置官方 v0.10.0 chart)
+LWS_CHART_DIR="${LWS_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/lws}"
+LWS_CHART_TGZ="${LWS_CHART_TGZ:-${LWS_CHART_DIR}/lws-chart-v0.10.0.tgz}"
+LWS_CHART_OCI="${LWS_CHART_OCI:-oci://registry.k8s.io/lws/charts/lws}"
+# 证书管理模式(二选一, 对应官方 values 键 enableCertManager):
+#   internal     = controller 内置自签证书(enableCertManager=false, 默认, 离线友好)
+#   cert-manager = 使用外部 cert-manager 签发 webhook 证书(enableCertManager=true, 需集群已装 cert-manager)
+LWS_CERT_MODE="${LWS_CERT_MODE:-internal}"
+# controller 镜像(离线优先: 本地源 dir/tgz 时强制走本地 docker/离线 tar, 不联网;
+#   仅 LWS_CHART_SOURCE=oci 或 LWS_IMAGE_ONLINE=true 才允许在线拉取官方镜像)
+LWS_IMAGE_ONLINE="${LWS_IMAGE_ONLINE:-false}"
+LWS_IMAGE_REPO="${LWS_IMAGE_REPO:-${REGISTRY_DOMAIN}:${REGISTRY_PORT}/lws/manager}"
+LWS_IMAGE_TAG="${LWS_IMAGE_TAG:-v0.10.0}"
+# 离线镜像下载(tools/images/lws-save-images.sh): 源镜像(默认官方 registry.k8s.io, 可改内网镜像站)与 tar 保存目录
+LWS_IMAGE_SRC="${LWS_IMAGE_SRC:-registry.k8s.io/lws/lws:${LWS_IMAGE_TAG}}"
+LWS_SAVE_DIR="${LWS_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/lws}"
+LWS_NAMESPACE="${LWS_NAMESPACE:-lws-system}"            # 部署命名空间
+LWS_RELEASE_NAME="${LWS_RELEASE_NAME:-lws}"             # Helm release 名
+# DisaggregatedSet(解耦推理): 对应官方 values 键 enableDisaggregatedSet, 安装后可直接创建该 CR
+LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"
 HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # modules/01_env/05_lb_haproxy.sh(API 四层负载均衡, 默认关, 需要时 --enable)
 KEEPALIVED_ENABLED="${KEEPALIVED_ENABLED:-false}"       # modules/01_env/06_lb_keepalived.sh(API VIP 高可用, 默认关, 需要时 --enable)
 KEEPALIVED_VIP="${KEEPALIVED_VIP:-}"                    # Keepalived VIP(留空=取 APISERVER_ADDRESS)
@@ -216,4 +244,4 @@ CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # modules/03_addon/20
 # 格式: 空格分隔的匹配条目; 含 ".tar" 为精确文件名匹配, 否则为文件名包含匹配(匹配 images/ 下 *.tar 文件名)
 # 留空 = 全量同步 images/ 目录
 # 也可在 inventory/${CLUSTER_NAME}/preload-images.conf 中单独覆盖(standalone 运行 cubestack-offline.sh 时)
-PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb library_registry local-path-provisioner busybox}"
+PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb library_registry local-path-provisioner busybox lws_manager}"

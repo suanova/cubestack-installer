@@ -119,6 +119,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 | **MetalLB** | 裸金属 LoadBalancer | Layer2: speaker 用 ARP 通告 VIP; controller 分配地址池 | 无云 LB 的裸金属/VM 环境标准方案; L2 通告与 IPIP 共存 | kubespray 内置 + `verify_metallb` 端到端验证 |
 | **metrics-server** | HPA 依赖的指标 | kubelet Summary API 聚合 | kubespray 标准组件, HPA 必需 | `METRICS_SERVER_ENABLED=true` |
 | **MetaX GPU Operator** | 沐曦 GPU 驱动/识别/调度 | helm chart + CRD(ClusterOperator)驱动组件 DaemonSet; 内置 registry 存放镜像 | 裸金属沐曦 GPU 必备; 离线 tar 加载 + helm 原生安装; master 有 GPU 时自动解除不可调度 | `GPU_OPERATOR_ENABLED=true` + 见 `docs/metax-gpu-operator.md` |
+| **LeaderWorkerSet (LWS)** | LLM/AI 工作负载调度(Leader/Worker 组 + DisaggregatedSet) | helm chart + CRD; controller 管理 LeaderWorkerSet/DisaggregatedSet; webhook 注入 `lws.io/role` 标签 | 面向 LLM 推理/训练的组调度; 内建 DisaggregatedSet 解耦推理; 支持 cert-manager/internal 双证书 | `LWS_ENABLED=true` + `--enable gpu_lws` + 见 `docs/lws.md` |
 
 > 详细部署/开关见 `cluster.conf` 组件开关段与 `deployments/scripts/modules/`。
 > 后续新增 operator 按 `skills/cubestack-operator-onboarding/SKILL.md` 流程添加并更新本表。
@@ -134,6 +135,22 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 - master 节点: 用 `mx-smi` 在宿主机检测 GPU, 检测到 GPU 的 master 自动移除 control-plane 污点并 uncordon
   (供 PD 分离等 pod 调度); 无 GPU 的 master 保持默认不可调度。
 - 部署/验证入口: `docs/metax-gpu-operator.md`。
+
+### 5.3 LeaderWorkerSet (LWS) 架构与原理(LLM/AI 组调度)
+
+- 架构: helm chart 安装 `lws-controller-manager`(Deployment, 1 副本)+ CRD
+  (`leaderworkersets.leaderworkerset.x-k8s.io/v1` / `disaggregatedsets.disaggregatedset.x-k8s.io/v1`)+
+  Mutating/Validating Webhook(注入 `lws.io/role=leader|worker` 标签, 校验 LWS/DS 规范)。
+- 证书(二选一, `LWS_CERT_MODE`):
+  - `cert-manager`: 由外部 cert-manager 的 Certificate/Issuer 签发 webhook 证书(需集群已装 cert-manager);
+  - `internal`: controller 内置自签证书(`--webhook-cert-dir`), 离线友好(无需外部组件)。
+- DisaggregatedSet: 将 Prefill/Decode 阶段拆分为独立 worker 组(每组独立 LWS), 提升 LLM 推理
+  吞吐与 SLO 稳定性; 安装后直接创建 `DisaggregatedSet` CR。
+- 为何采用 helm 离线安装: chart 与镜像全部离线可备(`deployments/cubestack-addon/lws` +
+  内置 registry), 与 gpu_operator 同一模式; 双证书模式适配有无 cert-manager 两种环境。
+- webhook 跨节点: 与 MetalLB controller 同理, 依赖 **Calico IPIP** 数据面可达(见 §3);
+  controller 不 pinned 时默认可达。
+- 部署/验证入口: `docs/lws.md`。
 
 ### 5.1 MetalLB 架构与原理(裸金属 LoadBalancer)
 
