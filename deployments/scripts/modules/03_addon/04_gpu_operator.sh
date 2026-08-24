@@ -100,6 +100,18 @@ _push_skopeo() {
     return 1
 }
 
+# registry 是否已有该 tag? 优先 skopeo inspect 目标 tag(与 push 同通道 PUSH_REGISTRY、同 repo,
+# 大镜像只拉 manifest/config 不传 blob); skopeo 缺失时退回 curl 查 tags/list。
+# 注意: tags/list 路径必须带命名空间 /metax(与 PUSH_REGISTRY 的仓库路径一致),
+#       旧实现漏掉它打到 /v2/maca 404, 误判不存在 → 已推过的镜像又被重推(如 maca 5.5G)。
+_reg_has_tag() {   # <comp> <ver>
+    local comp="$1" ver="$2" repo="${PUSH_REGISTRY#*/}"
+    if command -v skopeo >/dev/null 2>&1; then
+        skopeo inspect --tls-verify=false --no-creds "docker://${PUSH_REGISTRY}/${comp}:${ver}" >/dev/null 2>&1 && return 0
+    fi
+    curl -s -m 6 "http://${REGISTRY_BASE}/v2/${repo}/${comp}/tags/list" 2>/dev/null | grep -q "\"${ver}\""
+}
+
 # ---------------- 前置检查 ----------------
 say "检查沐曦 GPU Operator 前置条件..."
 [ -d "${CHART_DIR}" ] || { err "修复后的 helm chart 目录不存在: ${CHART_DIR}(应放在 deployments/metax-gpu-operator/metax-operator)"; exit 1; }
@@ -198,6 +210,9 @@ _patch_chart
 ok "资源就绪: chart=${CHART_DIR}(已修复) + 镜像加载方式=${METAX_IMAGE_MODE:-tar}"
 
 # ---------------- 2. 镜像推送 ----------------
+# 大 blob(如 maca 5.5G)推送前先应用宿主 TCP 调优, 缓解 "connection reset by peer"(幂等, 失败不阻塞)
+bash "${SCRIPT_DIR}/tools/node/net-tune.sh" >/dev/null 2>&1 \
+    && say "  已应用宿主 TCP 网络调优(tools/node/net-tune.sh)" || true
 # 模式判定(auto: 有 .run 用 run, 否则 tar)
 _MODE="${METAX_IMAGE_MODE:-auto}"
 [ "${_MODE}" = "auto" ] && { [ -x "${RUN_TOOL}" ] && _MODE="run" || _MODE="tar"; }
@@ -276,8 +291,8 @@ fi
 # MACA + 驱动镜像(不在 .run 包内): registry 已有 → 本地 docker → 离线 tar → 在线, 逐级尝试
 push_extra() {   # <comp> <源镜像>  (如 maca cr.metax-tech.com/public-library/maca:<tag>)
     local comp="$1" src="$2" t found="" docker_src=""
-    # ⓪ registry 已有该 tag → 跳过(避免重复推送大镜像)
-    if curl -s -m 6 "http://${REGISTRY_BASE}/v2/${comp}/tags/list" 2>/dev/null | grep -q "\"${src##*:}\""; then
+    # ⓪ registry 已有该 tag → 跳过(避免重复推送大镜像); 只有确认不存在才走下方 docker/tar/在线重试链
+    if _reg_has_tag "${comp}" "${src##*:}"; then
         ok "  ${comp}:${src##*:} 已在 registry, 跳过"; return 0
     fi
     # ① 本地 docker daemon 已有该镜像(按 名字:tag 匹配任意 registry 前缀)
