@@ -21,6 +21,24 @@ need_root
 REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"   # 集群内置 registry 域名(registry.local:5000)
 PUSH_REGISTRY="${REGISTRY_IP}:${REGISTRY_PORT}/metax" # 推送用 MetalLB VIP 直连(绕开宿主 DNAT, 大 blob 更稳)
 
+# 推送 skopeo(脚本级重试 3 次): 大 blob(如 maca 5.5G)连接中途断开时 skopeo 的 --retry-times 不覆盖, 这里整体重试
+_push_skopeo() {
+    local src="$1" dst="$2" n=1 err
+    for n in 1 2 3; do
+        if skopeo copy --quiet --src-tls-verify=false --dest-tls-verify=false \
+            --dest-no-creds "${src}" "${dst}" 2>/tmp/skopeo-err; then
+            rm -f /tmp/skopeo-err; return 0
+        fi
+        err="$(tail -1 /tmp/skopeo-err 2>/dev/null || true)"
+        if [ "${n}" -lt 3 ]; then
+            say "  推送失败(第 ${n}/3 次: ${err}), 3s 后重试整包..."
+            sleep 3
+        fi
+    done
+    rm -f /tmp/skopeo-err
+    return 1
+}
+
 TAR_DIR="${1:-}"
 # 宿主机把 registry.local 解析到集群 registry VIP(供按域名推送, 不留过期 IP)
 _ensure_hosts() {   # <ip> <domain>
@@ -77,9 +95,8 @@ for d in "${DIRS[@]}"; do
                 ;;
         esac
         say "  推 ${comp}:${ver} ← $(basename "${t}")"
-        skopeo copy --quiet --retry-times=3 --dest-tls-verify=false --dest-no-creds \
-            "docker-archive:${t}" "docker://${PUSH_REGISTRY}/${comp}:${ver}" \
-            || { err "推送失败 ${t}"; exit 1; }
+        _push_skopeo "docker-archive:${t}" "docker://${PUSH_REGISTRY}/${comp}:${ver}" \
+            || { err "推送失败(3 次重试后) ${t}"; exit 1; }
         _PUSHED=$((_PUSHED+1))
     done
 done

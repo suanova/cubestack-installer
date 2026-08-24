@@ -1,9 +1,11 @@
 ---
 # ============================================================
 # 离线安装 bare-metal worker 节点系统包
-# 将 repository 中的 .deb 包复制到目标节点并安装
-# 包来源: repository/<集群>/*.deb(仓库根目录) + packages/ 子目录,
+# 将 offline-files 中的 .deb 包复制到目标节点并安装
+# 包来源: offline-files/kubespray/<集群>/*.deb(仓库根目录) + packages/ 子目录,
 #         集群名取自当前 inventory(inventory_dir | basename), 无硬编码
+# 路径说明: playbook 位于 kubespray/patch-playbooks/,
+#           ../../offline-files/kubespray = deployments/offline-files/kubespray
 # 用法:
 #   ansible-playbook -i <inventory> install-packages.yml
 # ============================================================
@@ -11,7 +13,7 @@
   hosts: kube_node
   gather_facts: false
   vars:
-    repo_base: "{{ playbook_dir }}/../../repository/{{ inventory_dir | basename }}"
+    repo_base: "{{ playbook_dir }}/../../offline-files/kubespray/{{ inventory_dir | basename }}"
     packages_dirs:
       - "{{ repo_base }}"
       - "{{ repo_base }}/packages"

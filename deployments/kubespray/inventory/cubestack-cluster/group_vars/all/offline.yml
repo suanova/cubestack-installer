@@ -8,8 +8,8 @@ download_force_cache: true
 download_always_pull: false
 
 ## 缓存目录
-download_cache_dir: "/home/supperadm/cubestack-installer/deployments/kubespray/repository/cubestack-cluster"
-local_release_dir: "/home/supperadm/cubestack-installer/deployments/kubespray/repository/cubestack-cluster"
+download_cache_dir: "/home/supperadm/cubestack-installer/deployments/offline-files/kubespray"
+local_release_dir: "/home/supperadm/cubestack-installer/deployments/offline-files/kubespray"
 
 ## 容器运行时
 container_manager: "containerd"

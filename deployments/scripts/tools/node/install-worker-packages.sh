@@ -18,7 +18,9 @@ USER="${2:-ubuntu}"
 
 # 定位离线包目录(REPO_ROOT 由 lib-common.sh 计算,为仓库根目录)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="${REPO_ROOT}/deployments/kubespray/repository/${CLUSTER_NAME}"
+# 离线文件根目录(全局变量, load_config 已派生); 包目录 = 当前集群离线资源目录
+OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}"
+REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}/${CLUSTER_NAME:-cubestack-cluster}}"
 # 离线 .deb 包来源: 优先仓库根目录(与 kubeadm/etcd 等二进制同层),兼容 packages/ 子目录
 PKG_DIRS=("${REPO_DIR}" "${REPO_DIR}/packages")
 
