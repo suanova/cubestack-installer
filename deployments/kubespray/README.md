@@ -37,10 +37,11 @@
 │   └── my-prod-cluster/            # 自定义集群配置
 │       ├── hosts.yml
 │       └── group_vars/
-└── repository/
-    ├── cubestack-cluster/          # 默认集群离线资源
-    │   ├── images/
-    │   └── files/
-    └── my-prod-cluster/            # 自定义集群离线资源
-        ├── images/
-        └── files/
+└── offline-files/                  # 离线文件根目录(路径由 OFFLINE_FILES_DIR 切换)
+    └── kubespray/                  # kubespray 离线资源(按集群名隔离)
+        ├── cubestack-cluster/      # 默认集群离线资源
+        │   ├── images/
+        │   └── files/
+        └── my-prod-cluster/        # 自定义集群离线资源
+            ├── images/
+            └── files/

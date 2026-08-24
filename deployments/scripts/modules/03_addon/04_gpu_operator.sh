@@ -80,8 +80,25 @@ RENDER_YAML="${WORK_DIR}/metax-render.yaml"
 REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"    # 集群内置 registry(registry.local:5000, 节点/chart/宿主统一用域名)
 # 推送到集群 registry 用 MetalLB VIP 直连(绕开宿主 DNAT 转发, 大镜像/大 blob 传输更稳, 避免 broken pipe)
 PUSH_REGISTRY="${REGISTRY_IP}:${REGISTRY_PORT}/metax"
-# 大 blob 上传加重试(transient broken pipe 自愈)
-_SKOPEO_RETRY=("--retry-times=3")
+
+# 推送 skopeo(脚本级重试 3 次): 大 blob(如 maca 5.5G)连接中途断开时, skopeo 的 --retry-times
+# 不覆盖 blob 上传阶段的失败, 这里整体重试 skopeo copy。用法: _push_skopeo <src> <dst>
+_push_skopeo() {
+    local src="$1" dst="$2" n=1 err
+    for n in 1 2 3; do
+        if skopeo copy --quiet --src-tls-verify=false --dest-tls-verify=false \
+            --dest-no-creds "${src}" "${dst}" 2>/tmp/skopeo-err; then
+            rm -f /tmp/skopeo-err; return 0
+        fi
+        err="$(tail -1 /tmp/skopeo-err 2>/dev/null || true)"
+        if [ "${n}" -lt 3 ]; then
+            warn "  推送失败(第 ${n}/3 次: ${err}), 3s 后重试整包..."
+            sleep 3
+        fi
+    done
+    rm -f /tmp/skopeo-err
+    return 1
+}
 
 # ---------------- 前置检查 ----------------
 say "检查沐曦 GPU Operator 前置条件..."
@@ -249,9 +266,8 @@ else
                 ;;
         esac
         say "  推 ${comp}:${ver} ← $(basename "${t}")"
-        skopeo copy --quiet --retry-times=3 --dest-tls-verify=false --dest-no-creds \
-            "docker-archive:${t}" "docker://${PUSH_REGISTRY}/${comp}:${ver}" \
-            || { err "推送失败 ${t} → ${PUSH_REGISTRY}/${comp}:${ver}"; exit 1; }
+        _push_skopeo "docker-archive:${t}" "docker://${PUSH_REGISTRY}/${comp}:${ver}" \
+            || { err "推送失败(3 次重试后) ${t} → ${PUSH_REGISTRY}/${comp}:${ver}"; exit 1; }
         _PUSHED=$((_PUSHED+1))
     done
     [ "${_PUSHED}" -gt 0 ] || { err "METAX_OFFLINE_DIR=${METAX_OFFLINE_DIR} / METAX_IMAGE_DIR=${METAX_IMAGE_DIR} 未找到匹配 ${METAX_TAR_PATTERN} 的 tar(可用 metax-save-images.sh 生成, 或改 METAX_TAR_PATTERN)"; exit 1; }
@@ -271,8 +287,7 @@ push_extra() {   # <comp> <源镜像>  (如 maca cr.metax-tech.com/public-librar
         _tmp="/tmp/metax-${comp}-${src##*:}.tar"
         say "  推 ${comp}:${src##*:} ← 本地 docker(${docker_src})"
         if sudo docker save "${docker_src}" -o "${_tmp}" >/dev/null 2>&1 \
-           && sudo skopeo copy --quiet --retry-times=3 --dest-tls-verify=false --dest-no-creds \
-               "docker-archive:${_tmp}" "docker://${PUSH_REGISTRY}/${comp}:${src##*:}" >/dev/null 2>&1; then
+           && _push_skopeo "docker-archive:${_tmp}" "docker://${PUSH_REGISTRY}/${comp}:${src##*:}" >/dev/null 2>&1; then
             rm -f "${_tmp}"
             ok "  ${comp} 已就绪(本地 docker)"; return 0
         fi
@@ -290,16 +305,14 @@ push_extra() {   # <comp> <源镜像>  (如 maca cr.metax-tech.com/public-librar
     done
     if [ -n "${found}" ]; then
         say "  推 ${comp} ← $(basename "${found}")"
-        skopeo copy --quiet --retry-times=3 --dest-tls-verify=false --dest-no-creds \
-            "docker-archive:${found}" "docker://${PUSH_REGISTRY}/${comp}:${src##*:}" \
+        _push_skopeo "docker-archive:${found}" "docker://${PUSH_REGISTRY}/${comp}:${src##*:}" \
             && { ok "  ${comp} 已就绪(离线 tar)"; return 0; }
         warn "  ${comp} tar 推送失败, 尝试在线..."
     fi
     # ③ 在线 skopeo(需 cr.metax-tech.com 可访问/有凭据)
     if [ "${_MODE}" = "run" ]; then
         say "  尝试在线拉取推送 ${src} → ${PUSH_REGISTRY}/${comp}:${src##*:}"
-        if skopeo copy --quiet --retry-times=3 --src-tls-verify=false --dest-tls-verify=false --dest-no-creds \
-            "docker://${src}" "docker://${PUSH_REGISTRY}/${comp}:${src##*:}" 2>/dev/null; then
+        if _push_skopeo "docker://${src}" "docker://${PUSH_REGISTRY}/${comp}:${src##*:}" 2>/dev/null; then
             ok "  ${comp} 已在线就绪"; return 0
         fi
     fi

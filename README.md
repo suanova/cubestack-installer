@@ -275,7 +275,10 @@ cubestack-installer/
 │   ├── README.md                   #   套件总览: 支持的软件/架构/目录组织/镜像路径
 │   ├── config/                     #   cluster.conf(唯一配置源, example 模板 + 真实配置)
 │   ├── scripts/                    #   部署脚本(modules 三阶段模块化, 见 scripts/README.md)
-│   ├── kubespray/                  #   kubespray 源码 + inventory + 离线资源(repository/)
+│   ├── kubespray/                  #   kubespray 源码 + inventory
+│   ├── offline-files/              #   离线文件总根(按领域分: kubespray/ + metax-gpu/, 见 §十四)
+│   │   ├── kubespray/              #     kubespray 离线资源(路径由 OFFLINE_FILES_DIR 切换)
+│   │   └── metax-gpu/              #     沐曦 GPU Operator 离线文件(METAX_OFFLINE_DIR)
 │   └── virtual-machine/            #   【运行时生成】虚拟机基础镜像(create-vm-template.sh 制作)
 ├── docs/                           # api.md / architecture.md / scripts-development-spec.md / cluster-components-plan.md
 ├── skills/                         # ★ AI 工具技能(SKILL.md 标准, 可被 Claude/Cursor 等直接加载)
@@ -355,16 +358,18 @@ sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator         # 单
 
 > 脚本开发规范(模块命名/元数据/新增模块流程/最佳实践)见 **`docs/scripts-development-spec.md`**;部署套件总览(支持的软件/架构/镜像路径)见 **`deployments/README.md`**。
 
-**离线资源目录:**
+**离线资源目录(路径由全局变量 `OFFLINE_FILES_DIR` 切换, 默认):**
 
 ```
-deployments/kubespray/
-├── kubespray/                    # kubespray 源码(含 cluster.yml)
-├── inventory/cubestack-cluster/  # 生成的 inventory(hosts.yml + group_vars)
-└── repository/cubestack-cluster/ # 离线资源(cubestack-offline.sh download 生成)
-    ├── images/                   # 容器镜像(.tar, 供 ctr image import)
-    ├── <二进制文件>                # kubeadm/kubelet/etcd/calicoctl 等
-    └── packages/                 # 系统 .deb 包(iputils-ping/rsync/iptables/curl/ca-certificates)
+deployments/
+├── kubespray/
+│   ├── kubespray/                    # kubespray 源码(含 cluster.yml)
+│   └── inventory/cubestack-cluster/  # 生成的 inventory(hosts.yml + group_vars)
+└── offline-files/
+    └── kubespray/cubestack-cluster/  # 离线资源(cubestack-offline.sh download 生成)
+        ├── images/                   # 容器镜像(.tar, 供 ctr image import)
+        ├── <二进制文件>                # kubeadm/kubelet/etcd/calicoctl 等
+        └── packages/                 # 系统 .deb 包(iputils-ping/rsync/iptables/curl/ca-certificates)
 ```
 
 完整分步指南(含扩容、跨网段 bare-metal worker)见 **`deployments/scripts/README.md` 第 8 节「从 0 到 1:离线部署 kubespray 集群」**。

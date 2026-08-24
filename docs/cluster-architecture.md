@@ -185,7 +185,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --with-scale            # 新节点
 sudo ./deployments/scripts/deploy-cluster.sh --enable <组件>          # 组件开关
 ```
 
-**离线要点**: 镜像预加载 `PRELOAD_IMAGE_PATTERNS`(calico 默认 + cilium 备选); 离线仓库 `deployments/kubespray/repository/<集群>/images/`。
+**离线要点**: 镜像预加载 `PRELOAD_IMAGE_PATTERNS`(calico 默认 + cilium 备选); 离线文件目录 `${OFFLINE_FILES_DIR}/<集群>/images/`(默认 `deployments/offline-files/kubespray/<集群>/images/`)。
 
 ---
 

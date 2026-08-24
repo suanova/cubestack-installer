@@ -104,7 +104,7 @@ if [ "${REGISTRY_ON}" = "1" ]; then
     ok "    ${REGISTRY_ENDPOINT}/v2/ 可达"
 
     say "  ③ 取离线 busybox 镜像 tar(${TAR})..."
-    [ -f "${TAR}" ] || { err "未找到 ${TAR}。离线镜像包缺 busybox.tar, 请先补全 repository/${CLUSTER_NAME}/images/(见 kubespray/cubestack-offline.sh download); 或改 TAR 指向其他验证用镜像"; exit 1; }
+    [ -f "${TAR}" ] || { err "未找到 ${TAR}。离线镜像包缺 busybox.tar, 请先补全 offline-files/kubespray/images/(见 kubespray/cubestack-offline.sh download); 或改 TAR 指向其他验证用镜像"; exit 1; }
     ls -lh "${TAR}" | awk '{print "    " $5" "$9}'
 
     say "  ④ 推送 busybox → ${REGISTRY_ENDPOINT}/${PUSH_NS}/busybox:${TEST_TAG}(--dest-tls-verify=false)..."
