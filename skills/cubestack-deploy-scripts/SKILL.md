@@ -173,7 +173,7 @@ trap '清理测试资源' EXIT
 - **`cluster.conf` 为主, `XXX_ENABLED=true` 才启用**: operator 默认 `false`, 只有设为 `true` 才被 `--with-cubestack`
   部署; `--with-k8s` 仅基座(跳过全部 operator); `--enable <operator>` 单独显式启用(覆盖 cluster.conf 的 false),
   `--skip <operator>` 排除, `--steps <operator>` 只跑单个。lb_haproxy/lb_keepalived(API-HA)默认 false, 需要时启用。
-- 常用开关(见 `config/cluster.conf.example` 完整列表): `REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认false,未实现)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`PROMETHEUS_ENABLED`、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`ENVOY_GATEWAY_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
+- 常用开关(见 `config/cluster.conf.example` 完整列表): `REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认false,已实现:helm 离线 + cert-manager/internal 双证书 + DisaggregatedSet, 见 `docs/lws.md`)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`PROMETHEUS_ENABLED`、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`ENVOY_GATEWAY_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
 - 新增配置项流程: ① cluster.conf.example 加带注释默认声明 → ② 脚本引用 → ③ 如需同步 kubespray group_vars, 在 `tools/k8s/sync-kubespray-config.sh` / `tools/k8s/sync-addons-config.sh` 加同步逻辑
 
 ## 模块体内规范
@@ -247,7 +247,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - **默认 tar 加载**: `METAX_IMAGE_MODE=tar` → 模块从 offline 目录逐 tar `skopeo docker-archive` 推送
   到集群内置 registry; 核心组件去架构后缀(`0.15.3-amd64 → 0.15.3`), maca/driver 原样。
 - **helm 原生安装**(不是 kubectl apply): 官方 chart 有 3 处 bug 需修(deployment 缺 namespace /
-  openshift.deploy 无默认 / vendor 字段未加引号), 修复版 chart 放在 `deployments/metax-gpu-operator/metax-operator`。
+  openshift.deploy 无默认 / vendor 字段未加引号), 修复版 chart 放在 `deployments/cubestack-addon/metax-gpu-operator/metax-operator`。
 - **`.run` push 有 flag 顺序 bug**(`--plain-http` 置于 ref 后): 用 `.run ctr load` + 自行 `ctr tag`+`ctr push --plain-http`。
 - **master 有 GPU 时**: 用 `sudo mx-smi | grep "Attached GPUs"` 检测, 检测到的 master 自动移除 control-plane 污点并 uncordon。
 - **常用命令**:
