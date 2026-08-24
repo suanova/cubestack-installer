@@ -54,7 +54,7 @@ sudo ./deployments/scripts/tools/images/metax-save-images.sh
 
 ```
 deployments/
-├── metax-gpu-operator/metax-operator/     # 修复后的 helm chart(已修 3 处 bug, 直接 helm 安装; 入库)
+├── cubestack-addon/metax-gpu-operator/metax-operator/   # 修复后的 helm chart(已修 3 处 bug, 直接 helm 安装; 入库)
 ├── offline-files/metax-gpu/               # 镜像 tar + 资源包/.run 等大文件(gitignore, 不入库)
 │   ├── <image>_<tag>.tar                  # metax-save-images.sh 生成的 27 个 tar
 │   ├── metax-gpu-k8s-package.<ver>.tar.gz
@@ -80,7 +80,7 @@ GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-false}"   # 总开关, 默认 fals
 METAX_VERSION="${METAX_VERSION:-0.15.3}"                 # 版本(决定包名/镜像 tag/Chart)
 METAX_OFFLINE_DIR="${METAX_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/metax-gpu}"
 METAX_PKG_DIR="${METAX_PKG_DIR:-${METAX_OFFLINE_DIR}}"   # 大文件(.run/资源包)所在目录
-METAX_CHART_DIR="${METAX_CHART_DIR:-${REPO_ROOT}/deployments/metax-gpu-operator/metax-operator}"  # 修复版 chart
+METAX_CHART_DIR="${METAX_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/metax-gpu-operator/metax-operator}"  # 修复版 chart
 METAX_IMAGE_MODE="${METAX_IMAGE_MODE:-tar}"             # tar(默认, 加载离线 tar) | run(.run 内嵌镜像)
 METAX_IMAGE_DIR="${METAX_IMAGE_DIR:-${LOCAL_REPO_DIR}/images}"   # 额外 tar 目录(可配)
 METAX_TAR_PATTERN="${METAX_TAR_PATTERN:-metax}"         # tar 匹配文件名

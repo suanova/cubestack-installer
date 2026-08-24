@@ -114,7 +114,7 @@ _reg_has_tag() {   # <comp> <ver>
 
 # ---------------- 前置检查 ----------------
 say "检查沐曦 GPU Operator 前置条件..."
-[ -d "${CHART_DIR}" ] || { err "修复后的 helm chart 目录不存在: ${CHART_DIR}(应放在 deployments/metax-gpu-operator/metax-operator)"; exit 1; }
+[ -d "${CHART_DIR}" ] || { err "修复后的 helm chart 目录不存在: ${CHART_DIR}(应放在 deployments/cubestack-addon/metax-gpu-operator/metax-operator)"; exit 1; }
 [ -f "${PKG_TGZ}" ] || warn "未找到资源包 ${PKG_TGZ}(tar 模式不需要; run 模式需 metax-k8s-images.*.run 在 METAX_PKG_DIR)"
 command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 请先安装 Helm"; exit 1; }
 command -v skopeo >/dev/null 2>&1 || { warn "未找到 skopeo(tar 模式推送将不可用)"; }
@@ -168,7 +168,7 @@ ok "前置检查通过(registry=${REGISTRY_BASE}, API=${API_DOMAIN}→${API_IP})
 
 # ---------------- 1. 确认资源(修复后的 chart + 镜像加载源) ----------------
 say "[1/5] 确认资源: 修复后的 helm chart + 镜像加载源 ..."
-[ -f "${CHART_DIR}/Chart.yaml" ] || { err "修复后的 helm chart 不存在: ${CHART_DIR}(应放在 deployments/metax-gpu-operator/metax-operator)"; exit 1; }
+[ -f "${CHART_DIR}/Chart.yaml" ] || { err "修复后的 helm chart 不存在: ${CHART_DIR}(应放在 deployments/cubestack-addon/metax-gpu-operator/metax-operator)"; exit 1; }
 mkdir -p "${WORK_DIR}"
 [ -x "${RUN_TOOL}" ] || warn "未找到 ${RUN_TOOL}(tar 模式不需要; run 模式需在 METAX_PKG_DIR 放置 metax-k8s-images.*.run)"
 
@@ -205,7 +205,7 @@ PY
     [ "${ok}" = "1" ] && say "  chart 已修复(namespace / openshift.deploy=false / vendor 引号)" \
                      || warn "  chart 修复可能未完全生效, 请检查 ${d}/templates"
 }
-# chart 为修复版(metax-gpu-operator/metax-operator), 幂等补丁兜底(重新解包/未修复场景自动修复)
+# chart 为修复版(cubestack-addon/metax-gpu-operator/metax-operator), 幂等补丁兜底(重新解包/未修复场景自动修复)
 _patch_chart
 ok "资源就绪: chart=${CHART_DIR}(已修复) + 镜像加载方式=${METAX_IMAGE_MODE:-tar}"
 

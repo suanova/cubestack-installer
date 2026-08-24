@@ -17,7 +17,7 @@
 | 5 | 沐曦MetaX GPU Operator | 完成GPU驱动部署、硬件识别、集群GPU资源调度,配套MetaX指标采集,保障GPU容器正常启动运行 | 100% | ✅ 已完成(2026-08-23) | - |  | 2026-08-23 | `modules/03_addon/04_gpu_operator.sh` / `GPU_OPERATOR_ENABLED`(详见 `docs/metax-gpu-operator.md`) |
 | 6 | Ceph 存储集群 | 完成Ceph底层存储集群部署、集群健康自检、存储池初始化,为上层CSI服务提供稳定存储底座 | 0% | 未开始 | - |  |  | `modules/03_addon/06_ceph.sh` / `CEPH_ENABLED` |
 | 7 | Ceph CSI(RBD/RGW/CephFS) | 部署CSI驱动,对接Ceph存储集群,实现三类存储卷正常创建、挂载、读写,集群StorageReady状态正常置位 | 0% | 未开始 | - |  |  | `modules/03_addon/07_ceph_csi.sh` / `CEPH_CSI_ENABLED` |
-| 8 | LWS | 完成LWS组件部署、集群适配与基础校验,保障集群轻量调度与配套服务正常运行 | 0% | 未开始 | - |  |  | `modules/03_addon/02_gpu_lws.sh` / `LWS_ENABLED` |
+| 8 | LWS | 完成LWS组件部署、集群适配与基础校验,保障集群轻量调度与配套服务正常运行 | 100% | ✅ 已完成(2026-08-23) | - |  | 2026-08-23 | `modules/03_addon/05_gpu_lws.sh` / `LWS_ENABLED`(helm 离线 + cert-manager/internal 双证书 + DisaggregatedSet, 详见 `docs/lws.md`) |
 | 9 | Envoy AI 网关 | 搭建集群统一流量入口,完成路由配置与转发测试,保障外部业务URL可正常稳定访问 | 0% | 未开始 | - |  |  | `modules/03_addon/08_envoy_gateway.sh` / `ENVOY_GATEWAY_ENABLED` |
 
 **P1附属基础依赖(必过验收·极简核对):**
@@ -78,7 +78,7 @@
 | P1-5 | 沐曦 MetaX GPU Operator | `03_addon/04_gpu_operator.sh` | `GPU_OPERATOR_ENABLED` | ✅ 已完成(helm 原生安装 + 离线 tar 加载, 9 节点 69 GPU; 见 `docs/metax-gpu-operator.md`) |
 | P1-6 | Ceph 存储集群 | `03_addon/05_ceph.sh` | `CEPH_ENABLED` | 🧩 伪代码占位 |
 | P1-7 | Ceph CSI | `03_addon/06_ceph_csi.sh` | `CEPH_CSI_ENABLED` | 🧩 伪代码占位 |
-| P1-8 | LWS | `03_addon/02_gpu_lws.sh` | `LWS_ENABLED` | 🧩 伪代码占位 |
+| P1-8 | LWS | `03_addon/05_gpu_lws.sh` | `LWS_ENABLED` | ✅ 已实现(helm 离线 + 双证书 + DisaggregatedSet) |
 | P1-9 | Envoy AI 网关 | `03_addon/07_envoy_gateway.sh` | `ENVOY_GATEWAY_ENABLED` | 🧩 伪代码占位 |
 | P2-1 | Keycloak 统一认证 | `03_addon/08_keycloak.sh` | `KEYCLOAK_ENABLED` | 🧩 伪代码占位 |
 | P2-2 | Kueue 队列治理 | `03_addon/09_kueue.sh` | `KUEUE_ENABLED` | 🧩 伪代码占位 |

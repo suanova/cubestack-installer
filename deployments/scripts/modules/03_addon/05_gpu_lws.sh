@@ -1,17 +1,35 @@
 #!/bin/bash
 # ============================================================
 # MODULE: gpu_lws
-# DESC: 安装 LeaderWorkerSet (LWS)
+# DESC: 部署 LeaderWorkerSet(LWS)(Helm 安装, 支持本地chart/tgz/OCI三种源 + cert-manager/internal双证书 + DisaggregatedSet)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: LWS_ENABLED
 # 说明:
-#   【P1-8 规划模块·伪代码占位】LeaderWorkerSet:
-#   · 完成 LWS 组件部署、集群适配与基础校验, 保障集群轻量调度
-#   · 接入方法: 将下方 STEPS 伪代码替换为真实命令(kubectl apply 官方 manifest / 离线 yaml),
-#     或设置 ADDON_STUB_EXEC=1 试执行
-# 数据源: cluster.conf (LWS_ENABLED / NODES)
+#   · 断点续跑: REPEAT:0 → 安装成功写入状态, 重跑自动跳过; --fresh 清状态重装。
+#   · Chart 来源(三选一, LWS_CHART_SOURCE 控制; **本地源优先, 默认离线安装**):
+#       dir  = 本地解包目录(默认 LWS_CHART_DIR = deployments/cubestack-addon/lws, 官方 v0.10.0)
+#       tgz  = 本地 chart 压缩包(LWS_CHART_TGZ = deployments/cubestack-addon/lws/lws-chart-v0.10.0.tgz)
+#       oci  = 官方 OCI registry(LWS_CHART_OCI = oci://registry.k8s.io/lws/charts/lws, 需联网; 版本 LWS_CHART_VERSION)
+#     oci 用法对应官方: helm install lws oci://registry.k8s.io/lws/charts/lws --version=<CHART_VERSION> ...
+#   · 离线优先: 本地源(dir/tgz)时, 镜像强制走本地 docker/离线 tar(不联网); 仅 oci 源或
+#     LWS_IMAGE_ONLINE=true 才允许在线拉取官方镜像。离线 tar 由
+#     tools/images/lws-save-images.sh 生成, 默认放 ${REPO_ROOT}/deployments/offline-files/lws
+#     (也兼容 ${LOCAL_REPO_DIR}/images 集群镜像目录)。
+#   · 镜像流向(与 gpu_operator 一致): 默认把 lws/manager 镜像文件推送到集群内置 registry
+#     (PUSH_REGISTRY = ${REGISTRY_IP}:${REGISTRY_PORT}/lws/manager, 源: 本地 docker daemon / 离线 tar);
+#     部署时 chart 的 image.manager.repository = LWS_IMAGE_REPO(${REGISTRY_DOMAIN}:${REGISTRY_PORT}/lws/manager),
+#     K8s 节点从集群内置 registry 按域名拉取镜像。
+#   · 证书管理模式(LWS_CERT_MODE, 二选一, 对应官方 values 键 enableCertManager):
+#       cert-manager = 外部 cert-manager 签发 webhook 证书(enableCertManager=true)
+#       internal     = controller 内置自签证书(enableCertManager=false, 默认, 离线友好)
+#   · DisaggregatedSet: 官方 values 键 enableDisaggregatedSet(LWS_DISAGGREGATEDSET_ENABLED 控制, 默认 true)
+#   · 离线镜像: lws/manager:v<LWS_IMAGE_TAG> 推送至集群内置 registry; 或由 PRELOAD_IMAGE_PATTERNS 预加载。
+#   · 参考: https://lws.sigs.k8s.io/docs/installation/ 与 docs/lws.md
+# 数据源: cluster.conf (LWS_ENABLED / LWS_CHART_SOURCE / LWS_CHART_DIR / LWS_CHART_TGZ / LWS_CHART_OCI /
+#                       LWS_CHART_VERSION / LWS_CERT_MODE / LWS_IMAGE_* / REGISTRY_* / NODES)
+# 用法:   sudo ./deploy-cluster.sh --enable gpu_lws  或  LWS_ENABLED=true
 # ============================================================
 set -euo pipefail
 
@@ -19,20 +37,262 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-if [ "${LWS_ENABLED:-false}" != "true" ]; then
-    say "跳过 LeaderWorkerSet(配置 LWS_ENABLED=true 可启用)"
-    exit 0
-fi
+# ---- 开关 ----
+[ "${LWS_ENABLED:-false}" = "true" ] || { say "LWS_ENABLED=false, 跳过 LeaderWorkerSet"; exit 0; }
 
 FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH="ssh -i ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@${FIRST_MASTER}"
+SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
 K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 
-# ── 伪代码步骤(占位): 替换为真实实现 ──
-LWS_STEPS=(
-  "应用 LWS CRD(离线 manifest)|${SSH} \"${K} apply -f /opt/cubestack/addons/lws.yaml 2>/dev/null || true\""
-  "等待 LWS webhook 就绪|${SSH} \"${K} rollout status deploy/lws-controller-manager -n lws-system --timeout=3m 2>/dev/null || true\""
-  "验证 LWS CRD 注册|${SSH} \"${K} get crd leaderworkloadsets.lws.k8s.io 2>/dev/null || true\""
-  "部署测试 LeaderWorkerSet 校验|${SSH} \"${K} apply -f /opt/cubestack/addons/lws-smoke.yaml 2>/dev/null || true\""
-)
-addon_stub "gpu_lws" LWS_STEPS
+# ---------------- 派生变量(全部来自 cluster.conf, 无硬编码) ----------------
+LWS_CHART_DIR="${LWS_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/lws}"
+LWS_CHART_TGZ="${LWS_CHART_TGZ:-${LWS_CHART_DIR}/lws-chart-v0.10.0.tgz}"
+LWS_CHART_OCI="${LWS_CHART_OCI:-oci://registry.k8s.io/lws/charts/lws}"
+LWS_CHART_VERSION="${LWS_CHART_VERSION:-v0.10.0}"       # 对应官方 CHART_VERSION
+LWS_NAMESPACE="${LWS_NAMESPACE:-lws-system}"
+LWS_RELEASE_NAME="${LWS_RELEASE_NAME:-lws}"
+LWS_CERT_MODE="${LWS_CERT_MODE:-internal}"              # 默认 internal(离线友好, 官方 enableCertManager=false)
+LWS_IMAGE_REPO="${LWS_IMAGE_REPO:-${REGISTRY_DOMAIN}:${REGISTRY_PORT}/lws/manager}"
+LWS_IMAGE_TAG="${LWS_IMAGE_TAG:-v0.10.0}"               # 对应官方 image.manager.tag
+LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"
+REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
+PUSH_REGISTRY="${REGISTRY_IP}:${REGISTRY_PORT}/lws"
+
+# ---------------- 前置检查 ----------------
+say "检查 LeaderWorkerSet 前置条件..."
+LWS_CHART_SOURCE="${LWS_CHART_SOURCE:-dir}"
+case "${LWS_CHART_SOURCE}" in
+    dir)  [ -f "${LWS_CHART_DIR}/Chart.yaml" ] || { err "LWS chart 目录不存在/缺 Chart.yaml: ${LWS_CHART_DIR}"; exit 1; } ;;
+    tgz)  [ -f "${LWS_CHART_TGZ}" ] || { err "LWS chart tgz 不存在: ${LWS_CHART_TGZ}"; exit 1; } ;;
+    oci)  : ;;   # OCI 需联网, 由 helm 拉取
+    *)    err "LWS_CHART_SOURCE 仅支持 dir/tgz/oci(当前=${LWS_CHART_SOURCE})"; exit 1 ;;
+esac
+command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 请先安装 Helm"; exit 1; }
+# 证书模式校验(对应官方 enableCertManager)
+case "${LWS_CERT_MODE}" in
+    cert-manager|internal) ;;
+    *) err "LWS_CERT_MODE 仅支持 cert-manager 或 internal(当前=${LWS_CERT_MODE})"; exit 1 ;;
+esac
+if [ "${LWS_CERT_MODE}" = "cert-manager" ]; then
+    if ! SSH "${K} get ns cert-manager >/dev/null 2>&1"; then
+        warn "LWS_CERT_MODE=cert-manager 但集群未检测到 cert-manager; 建议改用 internal 模式(离线友好)。继续尝试安装(webhook 证书可能不生成)..."
+    fi
+fi
+# 宿主机 /etc/hosts 更新(registry 域名 → VIP), 与 gpu_operator 一致
+_ensure_hosts() {   # <ip> <domain>
+    local ip="$1" dom="$2" re
+    [ -n "${ip}" ] && [ -n "${dom}" ] || return 0
+    re="$(echo "${dom}" | sed 's/\./\\./g')"
+    sed -i -E "/[[:space:]]${re}([[:space:]]|$)/d" /etc/hosts 2>/dev/null || true
+    grep -qE "^${ip}[[:space:]]+${dom}([[:space:]]|$)" /etc/hosts 2>/dev/null \
+        || echo "${ip} ${dom}" >> /etc/hosts 2>/dev/null
+}
+_ensure_hosts "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
+_ensure_hosts "${API_IP}" "${API_DOMAIN}"
+grep -qE "^${REGISTRY_IP}[[:space:]]+${REGISTRY_DOMAIN}" /etc/hosts 2>/dev/null \
+    || warn "无法写入宿主机 /etc/hosts(非 root?), ${REGISTRY_DOMAIN} 可能无法从宿主按域名访问"
+curl -s -m 8 "http://${REGISTRY_BASE}/v2/" >/dev/null 2>&1 \
+    || { err "集群内置 registry ${REGISTRY_BASE}/v2/ 不可达(检查: 宿主机 /etc/hosts 的 ${REGISTRY_DOMAIN} 是否解析到 ${REGISTRY_IP}, 及 MetalLB VIP)"; exit 1; }
+SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
+    || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
+# helm 需要从宿主连 API Server: 下载集群 admin.conf 并同步到 ~/.kube/config(与 gpu_operator 一致)
+_sync_kubeconfig() {
+    local tmp newctx
+    tmp="$(mktemp)"
+    # admin.conf 属 root(600), scp 会 Permission denied → 用 ssh + sudo cat 读取
+    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "sudo cat /etc/kubernetes/admin.conf" > "${tmp}" 2>/dev/null \
+        || { rm -f "${tmp}"; return 1; }
+    [ -s "${tmp}" ] || { rm -f "${tmp}"; return 1; }
+    mkdir -p "${HOME}/.kube"
+    newctx="$(grep -E '^[[:space:]]*current-context:' "${tmp}" | head -1 | awk '{print $2}')"
+    if [ -f "${HOME}/.kube/config" ]; then
+        # 合并(新 admin.conf 在前, 同名校则新集群优先); 合并失败则直接覆盖
+        KUBECONFIG="${tmp}:${HOME}/.kube/config" kubectl config view --flatten > "${tmp}.merged" 2>/dev/null \
+            && mv "${tmp}.merged" "${HOME}/.kube/config" || cp "${tmp}" "${HOME}/.kube/config"
+    else
+        cp "${tmp}" "${HOME}/.kube/config"
+    fi
+    [ -n "${newctx}" ] && KUBECONFIG="${HOME}/.kube/config" kubectl config use-context "${newctx}" >/dev/null 2>&1 || true
+    chmod 600 "${HOME}/.kube/config"
+    rm -f "${tmp}"
+    KUBECONFIG="${HOME}/.kube/config" timeout 15 kubectl get nodes --no-headers >/dev/null 2>&1
+}
+_sync_kubeconfig \
+    && ok "宿主机 ~/.kube/config 已同步(admin.conf → API ${API_DOMAIN}→${API_IP})" \
+    || { err "宿主机无法访问集群(admin.conf 下载/同步失败; 检查 ${FIRST_MASTER} 的 /etc/kubernetes/admin.conf, 以及 ${API_DOMAIN}→${API_IP} 解析)"; exit 1; }
+ok "前置检查通过(chart_source=${LWS_CHART_SOURCE}, cert_mode=${LWS_CERT_MODE}, version=${LWS_CHART_VERSION})"
+
+# ---------------- 1. 推送 LWS controller 镜像到集群内置 registry(本地源优先, 离线安装) ----------------
+# 离线优先策略:
+#   · LWS_CHART_SOURCE=dir/tgz(本地源, 默认) → 镜像也强制走本地(docker daemon / 离线 tar),
+#     绝不尝试联网; 离线 tar 由 cubestack-offline.sh download 或手动放入 offline-files。
+#   · LWS_CHART_SOURCE=oci 或 LWS_IMAGE_ONLINE=true → 才允许在线 skopeo 拉取官方镜像。
+say "[1/3] 推送 lws/manager 镜像 → ${PUSH_REGISTRY}:${LWS_IMAGE_TAG}(默认推送到集群内置 registry, 部署时 K8s 按域名拉取) ..."
+# 推送 skopeo(脚本级重试 3 次): 大 blob 连接中途断开时整体重试(与 gpu_operator 一致)
+_push_skopeo() {   # <src> <dst>
+    local src="$1" dst="$2" n=1 err
+    for n in 1 2 3; do
+        if skopeo copy --quiet --src-tls-verify=false --dest-tls-verify=false \
+            --dest-no-creds "${src}" "${dst}" 2>/tmp/skopeo-err-lws; then
+            rm -f /tmp/skopeo-err-lws; return 0
+        fi
+        err="$(tail -1 /tmp/skopeo-err-lws 2>/dev/null || true)"
+        if [ "${n}" -lt 3 ]; then
+            warn "  推送失败(第 ${n}/3 次: ${err}), 3s 后重试整包..."
+            sleep 3
+        fi
+    done
+    rm -f /tmp/skopeo-err-lws
+    return 1
+}
+# registry 是否已有该 tag? 优先 skopeo inspect 目标 tag(与 push 同通道 PUSH_REGISTRY、同 repo,
+# 大镜像只拉 manifest/config 不传 blob); skopeo 缺失时退回 curl 查 tags/list
+# (tags/list 路径必须带仓库路径 /lws/manager, 与 PUSH_REGISTRY 一致)
+_reg_has_tag() {   # <tag>
+    local ver="$1" repo="${PUSH_REGISTRY#*/}"
+    if command -v skopeo >/dev/null 2>&1; then
+        skopeo inspect --tls-verify=false --no-creds "docker://${PUSH_REGISTRY}/manager:${ver}" >/dev/null 2>&1 && return 0
+    fi
+    curl -s -m 6 "http://${REGISTRY_BASE}/v2/${repo}/manager/tags/list" 2>/dev/null | grep -q "\"${ver}\""
+}
+# 是否允许在线拉取: 仅 oci 源或显式 LWS_IMAGE_ONLINE=true
+_ALLOW_ONLINE=0
+[ "${LWS_CHART_SOURCE:-dir}" = "oci" ] && _ALLOW_ONLINE=1
+[ "${LWS_IMAGE_ONLINE:-false}" = "true" ] && _ALLOW_ONLINE=1
+if _reg_has_tag "${LWS_IMAGE_TAG}"; then
+    ok "  ${LWS_IMAGE_TAG} 已在 registry, 跳过"
+else
+    _SRC=""
+    # ① 本地 docker daemon(任意前缀, 匹配 /manager:<tag>)
+    _SRC="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E "/manager:${LWS_IMAGE_TAG}$" | head -1 || true)"
+    if [ -n "${_SRC}" ]; then
+        _tmp="/tmp/lws-manager-${LWS_IMAGE_TAG}.tar"
+        say "  从本地 docker 推送: ${_SRC}"
+        if sudo docker save "${_SRC}" -o "${_tmp}" >/dev/null 2>&1 \
+           && _push_skopeo "docker-archive:${_tmp}" "docker://${PUSH_REGISTRY}/manager:${LWS_IMAGE_TAG}" >/dev/null 2>&1; then
+            rm -f "${_tmp}"
+            ok "  lws/manager 已推送(本地 docker)"; _SRC="done"
+        else
+            rm -f "${_tmp}"
+            warn "  本地 docker 推送失败, 尝试离线 tar..."
+        fi
+    fi
+    # ② 离线 tar(lws-save-images.sh 默认 deployments/offline-files/lws; 兼容集群 images 目录) — 本地源的核心镜像来源
+    if [ -z "${_SRC}" ]; then
+        _TAR=""
+        for _td in "${LWS_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/lws}" \
+                   "${LOCAL_REPO_DIR}/images" \
+                   "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME}/images"; do
+            [ -d "${_td}" ] || continue
+            # ① 按 tar 内容识别 lws controller 镜像(兼容任意文件名, 如 lws-save-images.sh /
+            #    cubestack-offline.sh 生成的标准名 registry.k8s.io_lws_lws_<tag>.tar)
+            for _t in "${_td}"/*.tar; do
+                [ -f "${_t}" ] || continue
+                case "$(tar_first_image_tag "${_t}")" in
+                    *lws:${LWS_IMAGE_TAG}) _TAR="${_t}"; break ;;
+                esac
+            done
+            # ② 旧命名兜底(*lws*manager*.tar / lws_manager*.tar)
+            if [ -z "${_TAR}" ]; then
+                for _t in "${_td}"/*lws*manager*.tar "${_td}"/lws_manager*.tar; do
+                    [ -f "${_t}" ] && { _TAR="${_t}"; break; }
+                done
+            fi
+            [ -n "${_TAR}" ] && break
+        done
+        if [ -n "${_TAR}" ]; then
+            say "  从离线 tar 推送: $(basename "${_TAR}")"
+            if _push_skopeo "docker-archive:${_TAR}" "docker://${PUSH_REGISTRY}/manager:${LWS_IMAGE_TAG}" >/dev/null 2>&1; then
+                ok "  lws/manager 已推送(离线 tar)"; _SRC="done"
+            else
+                warn "  tar 推送失败"
+            fi
+        fi
+    fi
+    # ③ 在线 skopeo(仅允许在线时; 本地源默认跳过)
+    if [ -z "${_SRC}" ] && [ "${_ALLOW_ONLINE}" = "1" ]; then
+        if _push_skopeo "docker://registry.k8s.io/lws/lws:${LWS_IMAGE_TAG}" \
+            "docker://${PUSH_REGISTRY}/manager:${LWS_IMAGE_TAG}" >/dev/null 2>&1; then
+            ok "  lws/manager 已推送(在线)"; _SRC="done"
+        else
+            warn "  在线推送失败(OCI/在线模式)"
+        fi
+    fi
+    # 离线安装: 本地源且镜像未就绪 → 报错给指引(不静默继续)
+    if [ -z "${_SRC}" ]; then
+        if [ "${_ALLOW_ONLINE}" = "1" ]; then
+            warn "  lws/manager:${LWS_IMAGE_TAG} 未就绪(本地 docker/tar 无, 在线失败); 请先联网 docker pull 或放离线 tar"
+        else
+            err "离线安装: 未找到 lws/manager:${LWS_IMAGE_TAG}(本地 docker 无 + 离线 tar 无)。请: ① 在联网机跑 tools/images/lws-save-images.sh 生成 tar 放到 ${REPO_ROOT}/deployments/offline-files/lws/, 或 ② 放离线 tar 到 ${LOCAL_REPO_DIR}/images/, 或 ③ 改 LWS_CHART_SOURCE=oci 允许在线"
+        fi
+    fi
+fi
+
+# ---------------- 2. helm 安装(三种 chart 源 + 双证书模式 + DisaggregatedSet) ----------------
+say "[2/3] helm 安装 ${LWS_RELEASE_NAME} → ${LWS_NAMESPACE}(chart=${LWS_CHART_SOURCE}, cert_mode=${LWS_CERT_MODE}) ..."
+# 清理上次残留(避免 helm 无法接管)
+SSH "${K} delete validatingwebhookconfiguration lws-validating-webhook-configuration --ignore-not-found >/dev/null 2>&1" || true
+SSH "${K} delete mutatingwebhookconfiguration lws-mutating-webhook-configuration --ignore-not-found >/dev/null 2>&1" || true
+SSH "${K} patch ns ${LWS_NAMESPACE} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
+SSH "${K} delete ns ${LWS_NAMESPACE} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+sleep 3
+
+# 证书模式 → 官方 values 键 enableCertManager(互斥)
+_CERT_SET=()
+if [ "${LWS_CERT_MODE}" = "cert-manager" ]; then
+    _CERT_SET=(--set "enableCertManager=true")
+else
+    _CERT_SET=(--set "enableCertManager=false")
+fi
+# DisaggregatedSet → 官方 values 键 enableDisaggregatedSet
+[ "${LWS_DISAGGREGATEDSET_ENABLED:-true}" = "true" ] \
+    && _DSET_SET=(--set "enableDisaggregatedSet=true") \
+    || _DSET_SET=(--set "enableDisaggregatedSet=false")
+
+# 解析 chart 参数(按来源)
+_CHART_ARG=""
+case "${LWS_CHART_SOURCE}" in
+    dir) _CHART_ARG="${LWS_CHART_DIR}" ;;
+    tgz) _CHART_ARG="${LWS_CHART_TGZ}" ;;
+    oci) _CHART_ARG="${LWS_CHART_OCI}"; _CHART_ARG+=" --version ${LWS_CHART_VERSION}" ;;
+esac
+
+helm upgrade --install "${LWS_RELEASE_NAME}" ${_CHART_ARG} \
+    --namespace "${LWS_NAMESPACE}" --create-namespace \
+    --set "image.manager.repository=${LWS_IMAGE_REPO}" \
+    --set "image.manager.tag=${LWS_IMAGE_TAG}" \
+    --set "image.manager.pullPolicy=IfNotPresent" \
+    "${_CERT_SET[@]}" "${_DSET_SET[@]}" \
+    --wait --timeout 180s \
+    || warn "  helm 安装/等待超时(检查 --set 与 chart; 资源可能已创建, 继续等待 Deployment)..."
+
+# ---------------- 3. 等待就绪 + 验证 ----------------
+say "[3/3] 等待 LWS controller 就绪(最长 180s)..."
+SSH "${K} rollout status deployment -n ${LWS_NAMESPACE} ${LWS_RELEASE_NAME}-controller-manager --timeout=120s" >/dev/null 2>&1 \
+    || SSH "${K} rollout status deployment -n ${LWS_NAMESPACE} lws-controller-manager --timeout=120s" >/dev/null 2>&1 \
+    || warn "  controller rollout 未在 120s 内完成(继续检查 pod)..."
+sleep 5
+
+# 检查 CRD 注册(leaderworkerset.x-k8s.io + disaggregatedset.x-k8s.io)
+CRD_OK="$(SSH "${K} get crd leaderworkersets.leaderworkerset.x-k8s.io disaggregatedsets.disaggregatedset.x-k8s.io --no-headers 2>/dev/null" | wc -l)"
+[ "${CRD_OK:-0}" -ge 2 ] \
+    && ok "CRD 已注册(leaderworkersets + disaggregatedsets)" \
+    || warn "CRD 未全部注册(当前 ${CRD_OK}/2): kubectl get crd | grep -E 'leaderworkerset|disaggregatedset'"
+
+# 汇总 pod 状态(不因单个 pod 未 Ready 中断, 交给 verify 模块)
+PODS="$( (SSH "${K} -n ${LWS_NAMESPACE} get pods -o wide 2>/dev/null" || true) )"
+echo "    ${PODS}" | sed 's/^/    /'
+
+echo "---------------------------------------------"
+ok "LeaderWorkerSet 部署完成"
+echo "  namespace:   ${LWS_NAMESPACE}"
+echo "  chart 来源:  ${LWS_CHART_SOURCE}(${LWS_CHART_VERSION})"
+echo "  证书模式:    ${LWS_CERT_MODE}(enableCertManager=$([ "${LWS_CERT_MODE}" = "cert-manager" ] && echo true || echo false))"
+echo "  资源查看:    kubectl get pods -n ${LWS_NAMESPACE}"
+echo "  CRD:         leaderworkersets.leaderworkerset.x-k8s.io / disaggregatedsets.disaggregatedset.x-k8s.io"
+echo "  DisaggregatedSet: enableDisaggregatedSet=${LWS_DISAGGREGATEDSET_ENABLED:-true}(直接创建该 CR 即可, 解耦推理)"
+echo "  端到端验证:  sudo ./deploy-cluster.sh --steps verify_lws"
+echo "  卸载:        helm uninstall ${LWS_RELEASE_NAME} -n ${LWS_NAMESPACE}; 删 CRD"
