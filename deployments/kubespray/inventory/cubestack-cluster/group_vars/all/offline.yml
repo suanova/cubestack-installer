@@ -7,9 +7,9 @@ download_localhost: true
 download_force_cache: true
 download_always_pull: false
 
-## 缓存目录
-download_cache_dir: "/home/supperadm/cubestack-installer/deployments/kubespray/repository/cubestack-cluster"
-local_release_dir: "/home/supperadm/cubestack-installer/deployments/kubespray/repository/cubestack-cluster"
+## 缓存目录(运行时由 cubestack-offline.sh 写入实际路径, 此处为离线文件新布局参考)
+download_cache_dir: "{{ offline_files_dir }}/cubestack-cluster"
+local_release_dir: "{{ offline_files_dir }}/cubestack-cluster"
 
 ## 容器运行时
 container_manager: "containerd"

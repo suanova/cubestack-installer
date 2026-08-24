@@ -70,8 +70,11 @@ NODE_GROUP_new_node="cubestack-k8s-worker02"
 # 注意: ${CLUSTER_NAME} 由 lib-common.sh 自动解析(环境变量或默认 cubestack-cluster)
 KUBESPRAY_INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}"
 KUBESPRAY_DIR="${KUBESPRAY_DIR:-${REPO_ROOT}/deployments/kubespray/kubespray}"
-# 离线资源缓存目录(二进制/镜像,按集群名隔离)
-LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${REPO_ROOT}/deployments/kubespray/repository/${CLUSTER_NAME}}"
+# 离线文件根目录(全局变量, 可切换): 二进制/镜像/离线包统一存放位置
+# 优先级: 环境变量 OFFLINE_FILES_DIR > 此处配置 > 内置默认
+OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}"
+# 离线资源缓存目录(由 OFFLINE_FILES_DIR 派生, 按集群名隔离; 也可整体覆盖 LOCAL_REPO_DIR)
+LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}/${CLUSTER_NAME}}"
 UPDATE_ETC_HOSTS="${UPDATE_ETC_HOSTS:-0}"
 
 # ---------------- 集群内部网络 CIDR(由脚本同步到 kubespray group_vars, 不硬编码) ----------------

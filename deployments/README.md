@@ -103,8 +103,9 @@ deployments/
 │   ├── cubestack-offline.sh      # 离线安装/扩容入口(init/download/install/scale/check)
 │   ├── inventory/                # 集群 inventory(按集群名隔离)
 │   │   └── <cluster>/            #   hosts.yml + group_vars + credentials + preload-images.lst
-│   ├── repository/               # 【运行时生成】离线资源缓存(见 §五)
 │   └── README.md
+├── offline-files/                # 【运行时生成】离线文件(kubespray/metax-gpu, 见 §五)
+│   └── kubespray/                #   离线资源缓存(按集群名隔离), 路径由 OFFLINE_FILES_DIR 切换
 ├── virtual-machine/              # 【运行时生成】虚拟机基础镜像(见 §五)
 ├── scripts/                      # 部署脚本(详见 scripts/README.md)
 │   ├── deploy-cluster.sh         # ★ 统一入口(一键/分步/断点续跑)
@@ -172,19 +173,31 @@ sudo ./deployments/scripts/deploy-cluster.sh --with-scale
 
 ## 五、离线镜像与虚拟机镜像路径
 
-### 5.1 离线资源缓存(repository/)
+### 5.1 离线文件缓存(offline-files/)
 
-离线资源根目录由 `cluster.conf` 的 `LOCAL_REPO_DIR` 指定(按集群名隔离):
+**目录规划**:`deployments/offline-files/` 是所有离线文件的**总根目录**,按领域分子目录(未来可新增):
 
 ```
-${REPO_ROOT}/deployments/kubespray/repository/<CLUSTER_NAME>/
-├── images/                       # 容器镜像(.tar, 由 cubestack-offline.sh download 下载)
-│   ├── quay.io_calico_node_v3.29.3.tar
-│   ├── registry.k8s.io_kube-apiserver_v1.32.5.tar
-│   └── ...                       # 文件名规则: 镜像 repo/tag 的 / 与 : 替换为 _
-├── <二进制文件>                    # kubeadm/kubelet/etcd/calicoctl/cni-plugins 等
-└── packages/                     # 系统 .deb 包(iputils-ping/rsync/iptables/curl/ca-certificates)
+deployments/offline-files/
+├── kubespray/                  # ★ kubespray 离线文件(原 deployments/kubespray/repository 内容)
+│   └── <CLUSTER_NAME>/         #   按集群名隔离(images/ + 二进制 + packages/)
+│       ├── images/             #   容器镜像(.tar, 由 cubestack-offline.sh download 下载)
+│       ├── <二进制文件>          #   kubeadm/kubelet/etcd/calicoctl/cni-plugins 等
+│       └── packages/           #   系统 .deb 包(iputils-ping/rsync/iptables/curl/ca-certificates)
+└── metax-gpu/                  # 沐曦 GPU Operator 离线文件(镜像 tar/资源包/驱动)
+    └── ...                     # (未来其他领域可继续在 offline-files/ 下新增子目录)
 ```
+
+**路径变量**:
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `OFFLINE_FILES_DIR` | `${REPO_ROOT}/deployments/offline-files/kubespray` | kubespray 离线文件根目录(全局可切换) |
+| `LOCAL_REPO_DIR` | `${OFFLINE_FILES_DIR}/${CLUSTER_NAME}` | 当前集群 kubespray 离线资源目录 |
+| `METAX_OFFLINE_DIR` | `${REPO_ROOT}/deployments/offline-files/metax-gpu` | 沐曦 GPU Operator 离线文件目录 |
+
+> 路径切换: 设置环境变量 `OFFLINE_FILES_DIR` 即可整体切换 kubespray 离线文件根目录(如挂载到独立磁盘/共享存储);
+> `LOCAL_REPO_DIR` 也可单独覆盖到任意位置(最高优先)。
 
 - **生成方式**:联网机执行 `./deployments/kubespray/cubestack-offline.sh download`(读取 inventory group_vars 决定下载哪些镜像/文件),产物即离线仓库。
 - **预加载机制**:`inventory/<cluster>/preload-images.lst`(由 `PRELOAD_IMAGE_PATTERNS` 过滤生成)指定部署时同步到节点 containerd 的最小镜像集合;离线部署时节点镜像拉取不依赖公网。

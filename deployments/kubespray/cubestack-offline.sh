@@ -10,7 +10,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   3. 回退 /opt/cubestack-installer(standalone 模式)
 BASE_DIR="${CUBESTACK_BASE_DIR:-${SCRIPT_DIR}}"
 KUBESPRAY_DIR="${BASE_DIR}/kubespray"
-LOCAL_REPO_BASE="${BASE_DIR}/repository"
+# 离线文件根目录(全局切换变量): 二进制/镜像/离线包统一存放位置
+# 优先级: OFFLINE_FILES_DIR 环境变量 > 默认 ${BASE_DIR}/offline-files/kubespray
+#   (BASE_DIR=deployments/kubespray/ 时 → deployments/kubespray/offline-files/kubespray;
+#    standalone /opt/cubestack-installer 时 → /opt/cubestack-installer/offline-files/kubespray)
+# 注: 仓库本地布局为 deployments/offline-files/kubespray(与 kubespray/ 同级),
+#     由 deploy-cluster.sh 通过 OFFLINE_FILES_DIR 显式传入; 此处为 standalone 内部布局兜底。
+OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${BASE_DIR}/offline-files/kubespray}"
+LOCAL_REPO_BASE="${OFFLINE_FILES_DIR}"
 INVENTORY_BASE="${BASE_DIR}/inventory"
 REMOTE_USER="${CUBESTACK_REMOTE_USER:-ubuntu}"
 CONTAINER_RUNTIME="containerd"
@@ -1698,7 +1705,9 @@ LOCAL_REPO_DIR="${LOCAL_REPO_BASE}/${CLUSTER_NAME}"
 # ── 环境变量覆盖(让调用方如 deploy-cluster.sh 可传入项目路径) ──
 KUBESPRAY_DIR="${CUBESTACK_KUBESPRAY_DIR:-${KUBESPRAY_DIR}}"
 INVENTORY_DIR="${CUBESTACK_INVENTORY_DIR:-${INVENTORY_DIR}}"
-LOCAL_REPO_DIR="${CUBESTACK_LOCAL_REPO_DIR:-${LOCAL_REPO_DIR}}"
+# OFFLINE_FILES_DIR 可整体切换离线文件根目录(全局变量); LOCAL_REPO_DIR 仍可单独覆盖(最高优先)
+OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${LOCAL_REPO_BASE}}"
+LOCAL_REPO_DIR="${CUBESTACK_LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}/${CLUSTER_NAME}}"
 OFFLINE_CONTRIB="${KUBESPRAY_DIR}/contrib/offline"
 
 # ── 预加载镜像集合配置(仅同步部署 kubespray 所需的最小镜像集合) ──
