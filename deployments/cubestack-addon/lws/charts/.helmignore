@@ -21,3 +21,7 @@
 .idea/
 *.tmproj
 .vscode/
+# CRD 不入 helm(官方 v0.10.0 的 CRD schema 超大, 写进 release Secret 会超 1MiB 上限报
+# "Secret is invalid: data: Too long"; 由部署脚本 05_gpu_lws.sh 用 kubectl 逐文件 apply 安装)。
+# 注意: 若日后官方 chart 将 CRD 改小可删掉本行恢复 helm 管理。
+crds/

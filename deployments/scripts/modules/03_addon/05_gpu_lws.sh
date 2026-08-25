@@ -1,16 +1,21 @@
 #!/bin/bash
 # ============================================================
 # MODULE: gpu_lws
-# DESC: 部署 LeaderWorkerSet(LWS)(Helm 安装, 支持本地chart/tgz/OCI三种源 + cert-manager/internal双证书 + DisaggregatedSet)
+# DESC: 部署 LeaderWorkerSet(LWS)(默认官方 manifests.yaml bundle; 可选 helm chart 支持 cert-manager + DisaggregatedSet)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: LWS_ENABLED
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态, 重跑自动跳过; --fresh 清状态重装。
-#   · Chart 来源(三选一, LWS_CHART_SOURCE 控制; **本地源优先, 默认离线安装**):
-#       dir  = 本地解包目录(默认 LWS_CHART_DIR = deployments/cubestack-addon/lws, 官方 v0.10.0)
-#       tgz  = 本地 chart 压缩包(LWS_CHART_TGZ = deployments/cubestack-addon/lws/lws-chart-v0.10.0.tgz)
+#   · 双安装方式(LWS_INSTALL_MODE, 默认 bundle; 设 LWS_CERT_MODE=cert-manager 自动切 helm):
+#       bundle(推荐, 默认)= 官方 manifests.yaml 单文件(lws/manifests.yaml), kubectl apply --server-side 整体下发
+#         (含 namespace + CRD + RBAC + controller + webhook; 逐资源应用, 不受 helm release Secret 1MiB 上限; 证书=internal 自签)。
+#       helm = 本地 chart(lws/charts/, 官方 v0.10.0), 支持 cert-manager 模式 / 自定义 values。
+#         官方 v0.10.0 的 CRD schema 超大 → crds/ 已在 charts/.helmignore 排除(helm 只装模板), CRD 由 kubectl 逐文件 apply。
+#   · Chart 来源(仅 helm 方式, LWS_CHART_SOURCE 控制; 本地源优先, 默认离线安装):
+#       dir  = 本地解包目录(默认 LWS_CHART_DIR = deployments/cubestack-addon/lws/charts)
+#       tgz  = 本地 chart 压缩包(LWS_CHART_TGZ = deployments/cubestack-addon/lws/charts/lws-chart-v0.10.0.tgz)
 #       oci  = 官方 OCI registry(LWS_CHART_OCI = oci://registry.k8s.io/lws/charts/lws, 需联网; 版本 LWS_CHART_VERSION)
 #     oci 用法对应官方: helm install lws oci://registry.k8s.io/lws/charts/lws --version=<CHART_VERSION> ...
 #   · 离线优先: 本地源(dir/tgz)时, 镜像强制走本地 docker/离线 tar(不联网); 仅 oci 源或
@@ -19,17 +24,16 @@
 #     (也兼容 ${LOCAL_REPO_DIR}/images 集群镜像目录)。
 #   · 镜像流向(与 gpu_operator 一致): 默认把 lws/manager 镜像文件推送到集群内置 registry
 #     (PUSH_REGISTRY = ${REGISTRY_IP}:${REGISTRY_PORT}/lws/manager, 源: 本地 docker daemon / 离线 tar);
-#     部署时 chart 的 image.manager.repository = LWS_IMAGE_REPO(${REGISTRY_DOMAIN}:${REGISTRY_PORT}/lws/manager),
-#     K8s 节点从集群内置 registry 按域名拉取镜像。
-#   · 证书管理模式(LWS_CERT_MODE, 二选一, 对应官方 values 键 enableCertManager):
-#       cert-manager = 外部 cert-manager 签发 webhook 证书(enableCertManager=true)
-#       internal     = controller 内置自签证书(enableCertManager=false, 默认, 离线友好)
-#   · DisaggregatedSet: 官方 values 键 enableDisaggregatedSet(LWS_DISAGGREGATEDSET_ENABLED 控制, 默认 true)
+#     bundle 方式由脚本 sed 把镜像改为 LWS_IMAGE_REPO, helm 方式 --set image.manager.repository
+#     (均为 ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/lws/manager), K8s 节点从集群内置 registry 按域名拉取。
+#   · 证书管理模式(LWS_CERT_MODE): internal(默认; bundle 固定为控制器自签) / cert-manager(仅 helm 方式,
+#     需集群已装 cert-manager; 设 cert-manager 时自动 LWS_INSTALL_MODE=helm)。
+#   · DisaggregatedSet: bundle 已含; helm 方式由 enableDisaggregatedSet values 控制(LWS_DISAGGREGATEDSET_ENABLED, 默认 true)
 #   · 离线镜像: lws/manager:v<LWS_IMAGE_TAG> 推送至集群内置 registry; 或由 PRELOAD_IMAGE_PATTERNS 预加载。
 #   · 参考: https://lws.sigs.k8s.io/docs/installation/ 与 docs/lws.md
-# 数据源: cluster.conf (LWS_ENABLED / LWS_CHART_SOURCE / LWS_CHART_DIR / LWS_CHART_TGZ / LWS_CHART_OCI /
-#                       LWS_CHART_VERSION / LWS_CERT_MODE / LWS_IMAGE_* / REGISTRY_* / NODES)
-# 用法:   sudo ./deploy-cluster.sh --enable gpu_lws  或  LWS_ENABLED=true
+# 数据源: cluster.conf (LWS_ENABLED / LWS_INSTALL_MODE / LWS_MANIFEST / LWS_CHART_SOURCE / LWS_CHART_DIR / LWS_CHART_TGZ /
+#                       LWS_CHART_OCI / LWS_CHART_VERSION / LWS_CERT_MODE / LWS_IMAGE_* / REGISTRY_* / NODES)
+# 用法:   sudo ./deploy-cluster.sh --steps gpu_lws  或  LWS_ENABLED=true
 # ============================================================
 set -euo pipefail
 
@@ -47,7 +51,13 @@ SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/d
 K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 
 # ---------------- 派生变量(全部来自 cluster.conf, 无硬编码) ----------------
-LWS_CHART_DIR="${LWS_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/lws}"
+# 双安装方式(LWS_INSTALL_MODE):
+#   bundle(默认, 推荐)= 官方 manifests.yaml 单文件, kubectl apply --server-side 整体下发
+#     (逐资源应用, 不受 helm release Secret 1MiB 上限; 含 namespace/CRD/RBAC/controller/webhook)
+#   helm = 本地 chart(LWS_CHART_DIR, 默认 deployments/cubestack-addon/lws/charts; 未来 cert-manager 模式用)
+LWS_INSTALL_MODE="${LWS_INSTALL_MODE:-bundle}"                 # bundle(默认)| helm
+LWS_MANIFEST="${LWS_MANIFEST:-${REPO_ROOT}/deployments/cubestack-addon/lws/manifests.yaml}"   # 官方 bundle(离线 vendoring)
+LWS_CHART_DIR="${LWS_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/lws/charts}"
 LWS_CHART_TGZ="${LWS_CHART_TGZ:-${LWS_CHART_DIR}/lws-chart-v0.10.0.tgz}"
 LWS_CHART_OCI="${LWS_CHART_OCI:-oci://registry.k8s.io/lws/charts/lws}"
 LWS_CHART_VERSION="${LWS_CHART_VERSION:-v0.10.0}"       # 对应官方 CHART_VERSION
@@ -62,20 +72,31 @@ PUSH_REGISTRY="${REGISTRY_IP}:${REGISTRY_PORT}/lws"
 
 # ---------------- 前置检查 ----------------
 say "检查 LeaderWorkerSet 前置条件..."
-LWS_CHART_SOURCE="${LWS_CHART_SOURCE:-dir}"
-case "${LWS_CHART_SOURCE}" in
-    dir)  [ -f "${LWS_CHART_DIR}/Chart.yaml" ] || { err "LWS chart 目录不存在/缺 Chart.yaml: ${LWS_CHART_DIR}"; exit 1; } ;;
-    tgz)  [ -f "${LWS_CHART_TGZ}" ] || { err "LWS chart tgz 不存在: ${LWS_CHART_TGZ}"; exit 1; } ;;
-    oci)  : ;;   # OCI 需联网, 由 helm 拉取
-    *)    err "LWS_CHART_SOURCE 仅支持 dir/tgz/oci(当前=${LWS_CHART_SOURCE})"; exit 1 ;;
+# 安装方式: 默认 bundle(官方 manifests.yaml); LWS_CERT_MODE=cert-manager 或显式 LWS_INSTALL_MODE=helm → 用 helm chart
+[ "${LWS_CERT_MODE:-internal}" = "cert-manager" ] && LWS_INSTALL_MODE="helm"
+case "${LWS_INSTALL_MODE}" in
+    bundle|helm) ;;
+    *) err "LWS_INSTALL_MODE 仅支持 bundle(默认)|helm(当前=${LWS_INSTALL_MODE})"; exit 1 ;;
 esac
-command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 请先安装 Helm"; exit 1; }
-# 证书模式校验(对应官方 enableCertManager)
+if [ "${LWS_INSTALL_MODE}" = "bundle" ]; then
+    # 官方 manifests.yaml(离线 vendoring, 含 namespace+CRD+RBAC+controller+webhook; 控制器自签证书=internal)
+    [ -f "${LWS_MANIFEST}" ] || { err "未找到官方 bundle: ${LWS_MANIFEST}(默认安装方式)。可设 LWS_INSTALL_MODE=helm 用本地 chart 安装"; exit 1; }
+else
+    LWS_CHART_SOURCE="${LWS_CHART_SOURCE:-dir}"
+    case "${LWS_CHART_SOURCE}" in
+        dir)  [ -f "${LWS_CHART_DIR}/Chart.yaml" ] || { err "LWS chart 目录不存在/缺 Chart.yaml: ${LWS_CHART_DIR}"; exit 1; } ;;
+        tgz)  [ -f "${LWS_CHART_TGZ}" ] || { err "LWS chart tgz 不存在: ${LWS_CHART_TGZ}"; exit 1; } ;;
+        oci)  : ;;   # OCI 需联网, 由 helm 拉取
+        *)    err "LWS_CHART_SOURCE 仅支持 dir/tgz/oci(当前=${LWS_CHART_SOURCE})"; exit 1 ;;
+    esac
+    command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 请先安装 Helm"; exit 1; }
+fi
+# 证书模式校验(对应官方 enableCertManager); bundle 方式固定 internal(官方 manifests.yaml 无 cert-manager)
 case "${LWS_CERT_MODE}" in
     cert-manager|internal) ;;
     *) err "LWS_CERT_MODE 仅支持 cert-manager 或 internal(当前=${LWS_CERT_MODE})"; exit 1 ;;
 esac
-if [ "${LWS_CERT_MODE}" = "cert-manager" ]; then
+if [ "${LWS_INSTALL_MODE}" = "helm" ] && [ "${LWS_CERT_MODE}" = "cert-manager" ]; then
     if ! SSH "${K} get ns cert-manager >/dev/null 2>&1"; then
         warn "LWS_CERT_MODE=cert-manager 但集群未检测到 cert-manager; 建议改用 internal 模式(离线友好)。继续尝试安装(webhook 证书可能不生成)..."
     fi
@@ -130,7 +151,7 @@ ok "前置检查通过(chart_source=${LWS_CHART_SOURCE}, cert_mode=${LWS_CERT_MO
 #   · LWS_CHART_SOURCE=dir/tgz(本地源, 默认) → 镜像也强制走本地(docker daemon / 离线 tar),
 #     绝不尝试联网; 离线 tar 由 cubestack-offline.sh download 或手动放入 offline-files。
 #   · LWS_CHART_SOURCE=oci 或 LWS_IMAGE_ONLINE=true → 才允许在线 skopeo 拉取官方镜像。
-say "[1/3] 推送 lws/manager 镜像 → ${PUSH_REGISTRY}:${LWS_IMAGE_TAG}(默认推送到集群内置 registry, 部署时 K8s 按域名拉取) ..."
+say "[1/3] 推送 lws/manager 镜像 → ${PUSH_REGISTRY}/manager:${LWS_IMAGE_TAG}(默认推送到集群内置 registry, 部署时 K8s 按域名拉取) ..."
 # 推送 skopeo(脚本级重试 3 次): 大 blob 连接中途断开时整体重试(与 gpu_operator 一致)
 _push_skopeo() {   # <src> <dst>
     local src="$1" dst="$2" n=1 err
@@ -231,43 +252,82 @@ else
     fi
 fi
 
-# ---------------- 2. helm 安装(三种 chart 源 + 双证书模式 + DisaggregatedSet) ----------------
-say "[2/3] helm 安装 ${LWS_RELEASE_NAME} → ${LWS_NAMESPACE}(chart=${LWS_CHART_SOURCE}, cert_mode=${LWS_CERT_MODE}) ..."
-# 清理上次残留(避免 helm 无法接管)
+# ---------------- 2. 安装(bundle: 官方 manifests.yaml | helm: chart) ----------------
+say "[2/3] 安装 ${LWS_RELEASE_NAME} → ${LWS_NAMESPACE}(mode=${LWS_INSTALL_MODE}, cert=${LWS_CERT_MODE}, version=${LWS_CHART_VERSION}) ..."
+# 清理上次残留(两种方式共用)
 SSH "${K} delete validatingwebhookconfiguration lws-validating-webhook-configuration --ignore-not-found >/dev/null 2>&1" || true
 SSH "${K} delete mutatingwebhookconfiguration lws-mutating-webhook-configuration --ignore-not-found >/dev/null 2>&1" || true
 SSH "${K} patch ns ${LWS_NAMESPACE} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
 SSH "${K} delete ns ${LWS_NAMESPACE} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
 sleep 3
 
-# 证书模式 → 官方 values 键 enableCertManager(互斥)
-_CERT_SET=()
-if [ "${LWS_CERT_MODE}" = "cert-manager" ]; then
-    _CERT_SET=(--set "enableCertManager=true")
+if [ "${LWS_INSTALL_MODE}" = "bundle" ]; then
+    # 官方 manifests.yaml 单文件: kubectl apply --server-side 整体下发(逐资源应用, 不受 helm Secret 1MiB 限制;
+    # 含 namespace + 3 CRD + RBAC + controller + webhook; 控制器自签证书 = internal)。
+    # --force-conflicts: 接管旧 helm 部署遗留的集群级 RBAC(字段由 "helm" manager 持有, 删 namespace 删不掉;
+    #   不带此 flag 会 "Apply failed with N conflicts" → apply 非零退出 → 误判失败, 但资源其实已建)。
+    _tmp="/tmp/lws-manifests-${LWS_IMAGE_TAG}.yaml"
+    # 改镜像到集群内置 registry(bundle 内为官方 registry.k8s.io/lws/lws:<tag>)
+    sed -E "s#registry\.k8s\.io/lws/lws(:${LWS_IMAGE_TAG})?#${LWS_IMAGE_REPO}\1#g" "${LWS_MANIFEST}" > "${_tmp}" \
+        || { rm -f "${_tmp}"; err "生成临时 manifest(改镜像)失败: ${LWS_MANIFEST}"; exit 1; }
+    say "  kubectl apply --server-side --force-conflicts ${LWS_MANIFEST}(镜像已改 → ${LWS_IMAGE_REPO}:${LWS_IMAGE_TAG}) ..."
+    _apply_log="/tmp/lws-apply-$$.log"
+    if cat "${_tmp}" | SSH "${K} apply --server-side --force-conflicts -f -" >"${_apply_log}" 2>&1; then
+        ok "  bundle 已应用(namespace + CRD + RBAC + controller + webhook)"
+        rm -f "${_tmp}" "${_apply_log}"
+    else
+        warn "  bundle apply 非零退出, 末尾输出:"
+        tail -5 "${_apply_log}" | sed 's/^/    /'
+        rm -f "${_tmp}" "${_apply_log}"
+        err "bundle apply 失败(${LWS_MANIFEST}); 请检查上面 kubectl 输出"; exit 1
+    fi
 else
-    _CERT_SET=(--set "enableCertManager=false")
+    # helm 方式(未来 cert-manager 模式 / 自定义 values): chart 在 lws/charts/
+    # 证书模式 → 官方 values 键 enableCertManager(互斥)
+    _CERT_SET=()
+    if [ "${LWS_CERT_MODE}" = "cert-manager" ]; then
+        _CERT_SET=(--set "enableCertManager=true")
+    else
+        _CERT_SET=(--set "enableCertManager=false")
+    fi
+    # DisaggregatedSet → 官方 values 键 enableDisaggregatedSet
+    [ "${LWS_DISAGGREGATEDSET_ENABLED:-true}" = "true" ] \
+        && _DSET_SET=(--set "enableDisaggregatedSet=true") \
+        || _DSET_SET=(--set "enableDisaggregatedSet=false")
+    # 解析 chart 参数(按来源)
+    _CHART_ARG=""
+    case "${LWS_CHART_SOURCE}" in
+        dir) _CHART_ARG="${LWS_CHART_DIR}" ;;
+        tgz) _CHART_ARG="${LWS_CHART_TGZ}" ;;
+        oci) _CHART_ARG="${LWS_CHART_OCI}"; _CHART_ARG+=" --version ${LWS_CHART_VERSION}" ;;
+    esac
+    # 规避 helm Secret 1MiB 上限: 官方 v0.10.0 的 CRD(含 openAPIV3Schema)超大, 写进 release Secret 会超限。
+    # → crds/ 已在 charts/.helmignore 排除(helm 只装模板), CRD 由下方 kubectl 逐文件 apply。
+    INSTALL_CRD="${LWS_INSTALL_CRD:-true}"
+    helm upgrade --install "${LWS_RELEASE_NAME}" ${_CHART_ARG} \
+        --namespace "${LWS_NAMESPACE}" --create-namespace \
+        --set "image.manager.repository=${LWS_IMAGE_REPO}" \
+        --set "image.manager.tag=${LWS_IMAGE_TAG}" \
+        --set "image.manager.pullPolicy=IfNotPresent" \
+        "${_CERT_SET[@]}" "${_DSET_SET[@]}" \
+        --wait --timeout 180s \
+        || warn "  helm 安装/等待超时(检查 --set 与 chart; 资源可能已创建, 继续等待 Deployment)..."
+    # CRD 单独 apply(逐文件: 单个 CRD ≤1.5MB, 低于 apiserver 请求体上限 3MiB; 合并多个会超限报 413)
+    if [ "${INSTALL_CRD}" = "true" ] && [ "${LWS_CHART_SOURCE}" = "dir" ] && [ -d "${LWS_CHART_DIR}/crds" ]; then
+        say "  用 kubectl 逐文件安装 CRD(${LWS_CHART_DIR}/crds) ..."
+        for _crd in "${LWS_CHART_DIR}"/crds/*.yaml; do
+            _name="$(grep -E '^  name: ' "${_crd}" | head -1 | awk '{print $2}')"
+            # 先删旧 CRD 再 apply: 同名 CRD 内容变更时 kubectl apply 无法直接替换(结构冲突), 删后重建保证幂等
+            [ -n "${_name}" ] && SSH "${K} delete crd ${_name} --ignore-not-found >/dev/null 2>&1" || true
+            if cat "${_crd}" | SSH "${K} apply -f -" >/dev/null 2>&1; then
+                ok "  CRD ${_name:-$(basename "${_crd}")} 已应用"
+            else
+                err "CRD apply 失败: ${_crd}(kubectl apply 报错见上方); 请检查 CRD yaml 与集群 API"; exit 1
+            fi
+        done
+        sleep 3   # 等 CRD Established
+    fi
 fi
-# DisaggregatedSet → 官方 values 键 enableDisaggregatedSet
-[ "${LWS_DISAGGREGATEDSET_ENABLED:-true}" = "true" ] \
-    && _DSET_SET=(--set "enableDisaggregatedSet=true") \
-    || _DSET_SET=(--set "enableDisaggregatedSet=false")
-
-# 解析 chart 参数(按来源)
-_CHART_ARG=""
-case "${LWS_CHART_SOURCE}" in
-    dir) _CHART_ARG="${LWS_CHART_DIR}" ;;
-    tgz) _CHART_ARG="${LWS_CHART_TGZ}" ;;
-    oci) _CHART_ARG="${LWS_CHART_OCI}"; _CHART_ARG+=" --version ${LWS_CHART_VERSION}" ;;
-esac
-
-helm upgrade --install "${LWS_RELEASE_NAME}" ${_CHART_ARG} \
-    --namespace "${LWS_NAMESPACE}" --create-namespace \
-    --set "image.manager.repository=${LWS_IMAGE_REPO}" \
-    --set "image.manager.tag=${LWS_IMAGE_TAG}" \
-    --set "image.manager.pullPolicy=IfNotPresent" \
-    "${_CERT_SET[@]}" "${_DSET_SET[@]}" \
-    --wait --timeout 180s \
-    || warn "  helm 安装/等待超时(检查 --set 与 chart; 资源可能已创建, 继续等待 Deployment)..."
 
 # ---------------- 3. 等待就绪 + 验证 ----------------
 say "[3/3] 等待 LWS controller 就绪(最长 180s)..."
