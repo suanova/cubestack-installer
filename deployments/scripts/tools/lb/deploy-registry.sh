@@ -26,7 +26,11 @@ load_config
 need_root() { [ "$(id -u)" -eq 0 ] || { err "需要 root 权限,请执行: sudo $0"; exit 1; }; }
 need_root
 
-[ "${REGISTRY_ENABLED:-0}" = "1" ] || { warn "REGISTRY_ENABLED!=1, 跳过 registry 部署(集群内 registry 默认不部署, 设置 REGISTRY_ENABLED=1 可启用)"; exit 0; }
+# REGISTRY_ENABLED 兼容 1/true/yes/on(TOGGLE 导出可能为 "true" 字符串)
+case "${REGISTRY_ENABLED:-0}" in
+    1|true|yes|on) ;;
+    *) warn "REGISTRY_ENABLED!=1, 跳过 registry 部署(集群内 registry 默认不部署, 设置 REGISTRY_ENABLED=1 可启用)"; exit 0 ;;
+esac
 [ -n "${REGISTRY_IP:-}" ] && [ -n "${REGISTRY_PORT:-}" ] && [ -n "${REGISTRY_DOMAIN:-}" ] || { err "未配置 REGISTRY_DOMAIN/REGISTRY_IP/REGISTRY_PORT(cluster.conf)"; exit 1; }
 
 SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
@@ -146,9 +150,13 @@ for e in "${NODE_ENTRIES[@]}"; do
 done
 rm -f "${NODE_SCRIPT}"
 
-# ---------------- 3. 宿主机对外 DNAT(集群外 push) ----------------
-say "[3/4] 配置宿主机对外 DNAT ..."
-bash "${SCRIPT_DIR}/tools/lb/setup-registry-expose.sh" --add
+# ---------------- 3. 宿主机对外 DNAT(可选, 集群外 push; 默认只用 MetalLB VIP, 不做宿主机 NAT) ----------------
+if [ "${REGISTRY_EXPOSE_HOST:-0}" = "1" ]; then
+    say "[3/4] 配置宿主机对外 DNAT(REGISTRY_EXPOSE_HOST=1) ..."
+    bash "${SCRIPT_DIR}/tools/lb/setup-registry-expose.sh" --add
+else
+    say "[3/4] 跳过宿主机对外 DNAT(REGISTRY_EXPOSE_HOST!=1; 集群内/节点直接用 MetalLB VIP 拉取, 仅集群外 push 需设 1)"
+fi
 
 # ---------------- 4. 验证 + 用法 ----------------
 say "[4/4] 验证 ..."
@@ -166,19 +174,22 @@ else
     say "registry Service EXTERNAL-IP: ${VIP_OK:-<获取失败>}"
     curl -s -m 5 "http://${REGISTRY_IP}:${REGISTRY_PORT}/v2/" >/dev/null 2>&1 && ok "  ${REGISTRY_IP}:${REGISTRY_PORT}/v2/ 可达" || warn "  ${REGISTRY_IP}:${REGISTRY_PORT}/v2/ 不可达(稍后重试)"
 fi
-# 集群外 push 用的宿主机 DNAT(可选): 有 MetalLB 提供 registry VIP 后, 集群内访问不需经宿主机 DNAT;
-# 仅当需要"集群外 push → push 机把 registry.local 解析到 HOST_PHYS_IP"时才用, 不可达不告警。
-if curl -s -m 5 "http://${HOST_PHYS_IP}:${REGISTRY_PORT}/v2/" >/dev/null 2>&1; then
-    ok "  ${HOST_PHYS_IP}:${REGISTRY_PORT}/v2/(DNAT) 可达(集群外 push 入口)"
-else
-    say "  ${HOST_PHYS_IP}:${REGISTRY_PORT}/v2/(DNAT) 未启用/不可达(可选, 集群内走 MetalLB VIP 即可, 仅集群外 push 需要)"
+# 集群外 push 用的宿主机 DNAT(仅 REGISTRY_EXPOSE_HOST=1 时配置/验证; 集群内走 MetalLB VIP 即可)
+if [ "${REGISTRY_EXPOSE_HOST:-0}" = "1" ]; then
+    if curl -s -m 5 "http://${HOST_PHYS_IP}:${REGISTRY_PORT}/v2/" >/dev/null 2>&1; then
+        ok "  ${HOST_PHYS_IP}:${REGISTRY_PORT}/v2/(DNAT) 可达(集群外 push 入口)"
+    else
+        say "  ${HOST_PHYS_IP}:${REGISTRY_PORT}/v2/(DNAT) 未启用/不可达(检查 setup-registry-expose.sh --add)"
+    fi
 fi
 
 echo "---------------------------------------------"
 ok "内置 registry 部署完成"
-echo "  集群内 pod 拉取:  image: ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/<namespace>/<image>:<tag>"
-echo "  集群外 push:     先让 push 机把 ${REGISTRY_DOMAIN} 解析到 ${HOST_PHYS_IP}(/etc/hosts 或内网 DNS),"
-echo "                    docker daemon insecure-registries 加 \"${REGISTRY_DOMAIN}:${REGISTRY_PORT}\", 然后"
-echo "                    docker push ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/<namespace>/<image>:<tag>"
+echo "  集群内 pod 拉取:  image: ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/<namespace>/<image>:<tag>(走 MetalLB VIP ${REGISTRY_IP})"
+if [ "${REGISTRY_EXPOSE_HOST:-0}" = "1" ]; then
+    echo "  集群外 push:     先让 push 机把 ${REGISTRY_DOMAIN} 解析到 ${HOST_PHYS_IP}(/etc/hosts 或内网 DNS),"
+    echo "                    docker daemon insecure-registries 加 \"${REGISTRY_DOMAIN}:${REGISTRY_PORT}\", 然后"
+    echo "                    docker push ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/<namespace>/<image>:<tag>"
+    echo "  撤销对外转发:    sudo ${SCRIPT_DIR}/tools/lb/setup-registry-expose.sh --delete"
+fi
 echo "  验证 registry:    curl http://${REGISTRY_IP}:${REGISTRY_PORT}/v2/  (loadbalancer) 或 节点:${REGISTRY_NODEPORT:-31148} (nodeport)"
-echo "  撤销对外转发:    sudo ${SCRIPT_DIR}/tools/lb/setup-registry-expose.sh --delete"

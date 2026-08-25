@@ -15,7 +15,11 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
 ACTION="${1:---add}"
-[ "${REGISTRY_ENABLED:-0}" = "1" ] || { warn "REGISTRY_ENABLED!=1, 跳过端口转发(集群内 registry 默认不部署)"; exit 0; }
+# REGISTRY_ENABLED 兼容 1/true/yes/on(TOGGLE 导出可能为 "true" 字符串)
+case "${REGISTRY_ENABLED:-0}" in
+    1|true|yes|on) ;;
+    *) warn "REGISTRY_ENABLED!=1, 跳过端口转发(集群内 registry 默认不部署)"; exit 0 ;;
+esac
 
 # 依据暴露方式决定 DNAT 目标(集群外 push 的落点):
 #   loadbalancer → MetalLB 固定 VIP:REGISTRY_PORT
