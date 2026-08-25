@@ -361,11 +361,11 @@ grep METAX_DRIVER_DEPLOY_POLICY config/cluster.conf
 
 | 症状 | 根因 | 解法(根治) |
 |---|---|---|
-| controller CrashLoop, 日志 `cert dir /tmp/k8s-webhook-server/serving-certs` 不存在 | internal 模式未传 `--webhook-cert-dir` 或 chart 未挂 cert 卷 | chart 的 deployment 模板传 `--webhook-cert-dir` 并挂载 Secret 卷(见 `deployments/cubestack-addon/lws/templates/deployment.yaml`) |
+| controller CrashLoop, 日志 `cert dir /tmp/k8s-webhook-server/serving-certs` 不存在 | internal 模式未传 `--webhook-cert-dir` 或 chart 未挂 cert 卷 | chart 的 deployment 模板传 `--webhook-cert-dir` 并挂载 Secret 卷(见 `deployments/cubestack-addon/lws/charts/templates/deployment.yaml`) |
 | webhook 证书 x509 错误(cert-manager 模式) | 集群未装 cert-manager, Certificate 未生成 Secret | 改用 `LWS_CERT_MODE=internal`(离线友好)或先装 cert-manager |
 | webhook `context deadline exceeded` | 跨节点 fabric 数据面(与 §一.1 通用) | 确认 Calico IPIP 数据面可用(默认已根治, 见 `cluster-architecture.md` §3) |
 | 测试 LeaderWorkerSet 一直 Pending | busybox 镜像未预加载 / 节点资源不足 | 确认 `PRELOAD_IMAGE_PATTERNS` 含 busybox 与 `lws_manager`; `kubectl describe pod` 看事件 |
-| 部署后 `--steps verify_lws` 报 leader/worker 标签缺失 | controller 未注入 `lws.io/role`(webhook 未生效) | `kubectl -n lws-system logs deploy/lws-controller-manager`; 检查 webhook 配置与证书 |
+| 部署后 `--steps verify_lws` 报 leader/worker 识别失败 | v0.10 用 `leaderworkerset.sigs.k8s.io/worker-index` 标签(=0 为 leader, >0 为 worker; 旧 `lws.io/role` 已废弃) | `kubectl -n lws-system logs deploy/lws-controller-manager`; 检查 webhook 配置与证书; 用 `tools/k8s/verify-lws.sh` 复跑 |
 
 **验证**
 ```bash

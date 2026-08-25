@@ -14,10 +14,12 @@
 
 1. **不硬编码**: 任何 IP / 端口 / 路径 / 节点, 一律从 `cluster.conf` 读取或派生(sync 脚本负责落到 kubespray `group_vars`)。
 2. **不破坏已有**: 只新增模块/配置, 不修改他人模块的元数据头。
-3. **`cluster.conf` 为主, `XXX_ENABLED=true` 才启用**: 新增 operator 默认 `false`, 只有设为 `true` 才会被
-   `--with-cubestack` 部署(基座 + cluster.conf 中已启用的 operator); `--with-k8s` 仅部署 kubespray 基座
-   (k8s + metallb/local-path/registry, 跳过全部 operator)。
-   **支持单个安装**: `--enable <operator>` 显式启用(覆盖 cluster.conf 的 false)/ `--skip <operator>` 排除 / `--steps <operator>` 只跑单个。
+3. **`cluster.conf` 为主, 职责三分**(新增/部署 operator 只记这套模型):
+   - **全量部署**: `--with-cubestack` / 默认(无 flag) = 部署**基座 + cluster.conf 中已启用的全部 operator**; `--with-k8s` 仅部署 kubespray 基座(k8s + metallb/local-path/registry, 跳过全部 operator)。
+   - **预启用(写配置)**: `--enable X` = **只把 `XXX_ENABLED=true` 写入 cluster.conf(持久化), 不部署**; 下次 `--with-cubestack` / 默认部署生效。
+   - **立即部署单个**: `--steps X` = 部署被指定的 X(**自动带基座, 且只部署被指定的 operator, 不带出其它默认启用的**); `--steps verify` = 只跑全部验证模块。
+   - **排除**: `--skip X` = 全量部署时剔除。
+   **必须**: 新增 operator 把其 key 加进 `deployments/scripts/lib-module.sh` 的 `OPERATOR_MODULES` 列表(否则 `--steps X` / `--enable X` 无法识别调度)。
 4. **必须能离线**: 新增镜像进离线仓库 + `PRELOAD_IMAGE_PATTERNS`, 节点预加载。
 5. **必须可验证**: 每个 operator 配套 `verify_<name>.sh` 端到端验证(不只 pod Running)。
 6. **必须沉淀文档**: 架构文档 + troubleshooting + 本技能, 三处同步。
@@ -42,12 +44,15 @@
 ### 2.1 配置开关进 `cluster.conf`(+ `cluster.conf.example`)
 ```bash
 # ---------------- XXX 组件(说明) ----------------
-XXX_ENABLED="${XXX_ENABLED:-false}"    # 默认 false; cluster.conf 设 true → --with-cubestack 部署; 单独用 --enable/--skip/--steps
+XXX_ENABLED="${XXX_ENABLED:-false}"    # 默认 false; --with-cubestack 按此部署全部启用; --enable 写 true; 立即部署用 --steps
 XXX_IP="${XXX_IP:-10.66.1.140}"         # 需要的外部 IP/端口从配置读, 勿硬编码在脚本
 ```
 > 规范: **`cluster.conf` 为主, `XXX_ENABLED=true` 才启用**(默认 false, 基座 addon metallb/local-path/registry 除外, 默认 true)。
-> `--with-k8s` = 仅 kubespray 基座(跳过全部 operator); `--with-cubestack` = 基座 + cluster.conf 中为 true 的 operator。
-> 单独安装/排除/只跑: `--enable <operator>`(显式, 覆盖 false)/ `--skip <operator>` / `--steps <operator>`。
+> - `--with-cubestack`/默认 = 基座 + cluster.conf 中为 true 的**全部** operator; `--with-k8s` = 仅基座(跳过全部 operator)。
+> - `--enable X` = 只写 `XXX_ENABLED=true` 到 cluster.conf(持久化), **不部署**; 下次 --with-cubestack 生效。
+> - `--steps X` = 立即部署被指定的 X(**自动带基座; 只部署被指定的 operator**); `--steps verify` = 只跑验证模块。
+> - `--skip X` = 全量部署时排除。
+> **必须**: 把 `<operator>` 的 key 加进 `deployments/scripts/lib-module.sh` 的 `OPERATOR_MODULES` 列表(否则无法被 --steps/--enable 识别)。
 > 未实现的占位模块(addon_stub)保持 `false`。
 
 ### 2.2 写部署模块 `deployments/scripts/modules/<PHASE>/NN_<name>.sh`
@@ -74,6 +79,15 @@ XXX_IP="${XXX_IP:-10.66.1.140}"         # 需要的外部 IP/端口从配置读,
 - ⚠ **不设 TOGGLE**(否则组件开关=true 时会被安装流程自动启用), 保持 DEFAULT:0, 仅 `--steps verify_<name>` 执行;
 - 数据源全部从 `cluster.conf` 读(`load_config`)。
 
+### 2.6 安装方式选择(bundle vs helm)
+- **默认用官方 manifests bundle + `kubectl apply --server-side`**(参照 LWS: `deployments/cubestack-addon/lws/manifests.yaml`,
+  单文件含 namespace/CRD/RBAC/controller/webhook; 离线 vendoring 到 `deployments/cubestack-addon/<op>/`; 镜像用 sed 改到内置 registry)。
+- **CRD 超大时不用 helm**: CRD 的 `openAPIV3Schema` 会塞进 helm release Secret, 超 1MiB 报 `Secret is invalid: data: Too long`。
+  (LWS 的 leaderworkersets ~1.3MB / disaggregatedsets ~1.5MB 即此因, 官方因此弃 helm 推 bundle。)
+- **helm 仅保留给需要 values 定制 / cert-manager 等 bundle 覆盖不了的模式**: chart 放 `deployments/cubestack-addon/<op>/charts/`,
+  模块内用 `XXX_INSTALL_MODE`(默认 bundle)切, 并把 CRD 放 `charts/.helmignore` 排除 + kubectl 逐文件 apply。
+- 模块内双模式写法参考 `modules/03_addon/05_gpu_lws.sh`(LWS_INSTALL_MODE / LWS_MANIFEST / LWS_CHART_DIR)。
+
 ---
 
 ## 3. 文档同步(强制, 四选三必做)
@@ -93,6 +107,7 @@ XXX_IP="${XXX_IP:-10.66.1.140}"         # 需要的外部 IP/端口从配置读,
 
 - [ ] 文件名符合 `NN_<name>.sh`, 序号不与现有冲突(`ls deployments/scripts/modules/`)
 - [ ] 元数据头完整(MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE)
+- [ ] **新增 operator 的 key 已加入 `lib-module.sh` 的 `OPERATOR_MODULES`**(否则无法被 --steps/--enable 调度)
 - [ ] `set -euo pipefail` + source lib-common + load_config
 - [ ] 未硬编码 IP/密码/路径(全部来自 cluster.conf)
 - [ ] `deploy-cluster.sh --list-steps` 能看到新模块
@@ -106,8 +121,10 @@ XXX_IP="${XXX_IP:-10.66.1.140}"         # 需要的外部 IP/端口从配置读,
 ## 5. 常用命令
 
 ```bash
-sudo ./deployments/scripts/deploy-cluster.sh --enable <组件>        # 启用
-sudo ./deployments/scripts/deploy-cluster.sh --steps verify_<组件>   # 端到端验证
-sudo ./deployments/scripts/deploy-cluster.sh --list-steps            # 查看全部模块
-bash deployments/scripts/tools/k8s/sync-kubespray-config.sh          # 同步 group_vars(改 sync 后必跑)
+sudo ./deployments/scripts/deploy-cluster.sh --steps <组件>            # 立即部署指定组件(自动带基座, 只部署指定的)
+sudo ./deployments/scripts/deploy-cluster.sh --enable <组件>           # 只写 cluster.conf 预启用(不部署, 下次全量生效)
+sudo ./deployments/scripts/deploy-cluster.sh --with-cubestack           # 部署基座 + 全部启用的 operator
+sudo ./deployments/scripts/deploy-cluster.sh --steps verify_<组件>      # 端到端验证
+sudo ./deployments/scripts/deploy-cluster.sh --list-steps               # 查看全部模块
+bash deployments/scripts/tools/k8s/sync-kubespray-config.sh             # 同步 group_vars(改 sync 后必跑)
 ```
