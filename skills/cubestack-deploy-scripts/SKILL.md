@@ -170,10 +170,14 @@ trap '清理测试资源' EXIT
 
 - `config/cluster.conf` 是**唯一**配置入口,所有脚本只从它读取(环境变量可覆盖)
 - 变量写法一律 `VAR="${VAR:-default}"`
-- **`cluster.conf` 为主, `XXX_ENABLED=true` 才启用**: operator 默认 `false`, 只有设为 `true` 才被 `--with-cubestack`
-  部署; `--with-k8s` 仅基座(跳过全部 operator); `--enable <operator>` 单独显式启用(覆盖 cluster.conf 的 false),
-  `--skip <operator>` 排除, `--steps <operator>` 只跑单个。lb_haproxy/lb_keepalived(API-HA)默认 false, 需要时启用。
-- 常用开关(见 `config/cluster.conf.example` 完整列表): `REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认false,已实现:helm 离线 + cert-manager/internal 双证书 + DisaggregatedSet, 见 `docs/lws.md`)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`PROMETHEUS_ENABLED`、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`ENVOY_GATEWAY_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
+- **`cluster.conf` 为主, 职责三分**(所有 operator 统一遵守):
+  - **全量部署**: `--with-cubestack`/默认 = 基座 + cluster.conf 中已启用的**全部** operator; `--with-k8s` = 仅基座(跳过全部 operator)。
+  - **预启用(写配置)**: `--enable X` = 只把 `XXX_ENABLED=true` 写入 cluster.conf, **不部署**; 下次全量部署生效。
+  - **立即部署单个**: `--steps X` = 部署被指定的 X(自动带基座, 只部署被指定的 operator); `--steps verify` = 只跑验证模块。
+  - **排除**: `--skip X` = 全量部署时剔除。
+  - 新增 operator 必须把 key 加进 `lib-module.sh` 的 `OPERATOR_MODULES` 列表, 否则无法被 --steps/--enable 调度。
+  - lb_haproxy/lb_keepalived(API-HA)默认 false, 需要时用 `--enable` 预启用 或 `--steps` 立即部署。
+- 常用开关(见 `config/cluster.conf.example` 完整列表): `REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认false,已实现:默认官方 manifests.yaml bundle + kubectl apply --server-side; helm chart 保留于 lws/charts 供 cert-manager 用; 见 `docs/lws.md`)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`PROMETHEUS_ENABLED`、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`ENVOY_GATEWAY_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
 - 新增配置项流程: ① cluster.conf.example 加带注释默认声明 → ② 脚本引用 → ③ 如需同步 kubespray group_vars, 在 `tools/k8s/sync-kubespray-config.sh` / `tools/k8s/sync-addons-config.sh` 加同步逻辑
 
 ## 模块体内规范
@@ -191,10 +195,10 @@ trap '清理测试资源' EXIT
 
 ```bash
 sudo ./deployments/scripts/deploy-cluster.sh --with-k8s --fresh      # 仅 kubespray 基座(k8s+metallb+local-path+registry), 不含 operator
-sudo ./deployments/scripts/deploy-cluster.sh --with-cubestack --fresh  # 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主)
+sudo ./deployments/scripts/deploy-cluster.sh --with-cubestack --fresh  # 基座 + cluster.conf 中 XXX_ENABLED=true 的全部 operator
 sudo ./deployments/scripts/deploy-cluster.sh --skip gpu_operator --with-cubestack   # 全量但排除某个 operator
-sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator  # 单独安装某个 operator(显式, 覆盖 cluster.conf 的 false)
-sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_operator   # 只跑单个 operator(可重复)
+sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_operator   # 立即部署单个 operator(自动带基座, 只部署指定的)
+sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator  # 只写 cluster.conf 预启用(不部署, 下次全量生效)
 sudo ./deployments/scripts/deploy-cluster.sh --phase addon          # 仅 addon 阶段
 sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全部模块
 ```
@@ -252,7 +256,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - **master 有 GPU 时**: 用 `sudo mx-smi | grep "Attached GPUs"` 检测, 检测到的 master 自动移除 control-plane 污点并 uncordon。
 - **常用命令**:
   ```bash
-  sudo ./deploy-cluster.sh --enable gpu_operator            # 部署
+  sudo ./deploy-cluster.sh --steps gpu_operator            # 立即部署(自动带基座, 只部署指定的)
   sudo ./deploy-cluster.sh --steps verify_metax_gpu          # 验证 GPU 识别(或 --steps verify)
   sudo ./deployments/scripts/tools/images/metax-save-images.sh   # 保存镜像 → 离线 tar
   sudo ./deployments/scripts/tools/images/metax-load-images.sh   # 加载 tar → 集群 registry(手动)
