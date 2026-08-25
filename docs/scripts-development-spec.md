@@ -170,7 +170,7 @@ load_config
 2. **写元数据头**:按 §2.2 模板填写 MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE。
 3. **实现逻辑**:复用现有工具脚本或写新逻辑(§2.3)。
 4. **加开关**(可选):在 `cluster.conf.example` 加 `XXX_ENABLED` 变量,TOGGLE 指向它。
-5. **完成**:无需修改 `deploy-cluster.sh` / `lib-module.sh` / 任何注册表。
+5. **完成**:**非 operator 组件**无需改任何注册表;**operator 组件**需把 key 加进 `lib-module.sh` 的 `OPERATOR_MODULES` 列表(否则无法被 `--steps` / `--enable` 调度)。
 
 > 验证:`sudo ./deploy-cluster.sh --list-steps` 应出现新模块;`sudo ./deploy-cluster.sh --steps <key>` 可单独执行。
 
@@ -249,7 +249,8 @@ sudo ./deploy-cluster.sh --with-scale                   # 扩容
 sudo ./deploy-cluster.sh --steps k8s_deploy,lb_haproxy  # 只跑指定模块(旧名自动映射)
 sudo ./deploy-cluster.sh --skip k8s_hosts --with-cubestack  # 跳某模块的全量部署(k8s_hosts 为 no-op, 可省略)
 sudo ./deploy-cluster.sh --phase k8s                    # 仅 k8s 阶段
-sudo ./deploy-cluster.sh --enable gpu_operator          # 单独启用某个 operator(默认关)
+sudo ./deploy-cluster.sh --steps gpu_operator          # 立即部署某个 operator(自动带基座, 只部署指定的)
+sudo ./deploy-cluster.sh --enable gpu_operator         # 只写 cluster.conf 预启用(不部署, 下次全量生效)
 sudo ./deploy-cluster.sh --only <host> --with-scale     # 仅处理指定节点
 sudo ./deploy-cluster.sh --list-steps | --list | --fresh
 ```

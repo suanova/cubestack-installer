@@ -119,7 +119,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 | **MetalLB** | 裸金属 LoadBalancer | Layer2: speaker 用 ARP 通告 VIP; controller 分配地址池 | 无云 LB 的裸金属/VM 环境标准方案; L2 通告与 IPIP 共存 | kubespray 内置 + `verify_metallb` 端到端验证 |
 | **metrics-server** | HPA 依赖的指标 | kubelet Summary API 聚合 | kubespray 标准组件, HPA 必需 | `METRICS_SERVER_ENABLED=true` |
 | **MetaX GPU Operator** | 沐曦 GPU 驱动/识别/调度 | helm chart + CRD(ClusterOperator)驱动组件 DaemonSet; 内置 registry 存放镜像 | 裸金属沐曦 GPU 必备; 离线 tar 加载 + helm 原生安装; master 有 GPU 时自动解除不可调度 | `GPU_OPERATOR_ENABLED=true` + 见 `docs/metax-gpu-operator.md` |
-| **LeaderWorkerSet (LWS)** | LLM/AI 工作负载调度(Leader/Worker 组 + DisaggregatedSet) | helm chart + CRD; controller 管理 LeaderWorkerSet/DisaggregatedSet; webhook 注入 `lws.io/role` 标签 | 面向 LLM 推理/训练的组调度; 内建 DisaggregatedSet 解耦推理; 支持 cert-manager/internal 双证书 | `LWS_ENABLED=true` + `--enable gpu_lws` + 见 `docs/lws.md` |
+| **LeaderWorkerSet (LWS)** | LLM/AI 工作负载调度(Leader/Worker 组 + DisaggregatedSet) | 默认官方 manifests.yaml bundle(kubectl apply --server-side); helm chart 保留于 lws/charts; controller 管理 LeaderWorkerSet/DisaggregatedSet; webhook 打 `leaderworkerset.sigs.k8s.io/worker-index` 等标签 | 面向 LLM 推理/训练的组调度; 内建 DisaggregatedSet 解耦推理; 支持 cert-manager/internal 双证书 | `--steps gpu_lws`(立即部署)+ 见 `docs/lws.md` |
 
 > 详细部署/开关见 `cluster.conf` 组件开关段与 `deployments/scripts/modules/`。
 > 后续新增 operator 按 `skills/cubestack-operator-onboarding/SKILL.md` 流程添加并更新本表。
@@ -138,16 +138,18 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 
 ### 5.3 LeaderWorkerSet (LWS) 架构与原理(LLM/AI 组调度)
 
-- 架构: helm chart 安装 `lws-controller-manager`(Deployment, 1 副本)+ CRD
-  (`leaderworkersets.leaderworkerset.x-k8s.io/v1` / `disaggregatedsets.disaggregatedset.x-k8s.io/v1`)+
-  Mutating/Validating Webhook(注入 `lws.io/role=leader|worker` 标签, 校验 LWS/DS 规范)。
+- 架构: 默认官方 manifests.yaml bundle 安装 `lws-controller-manager`(Deployment, 2 副本, 内部选主)+ CRD
+  (`leaderworkersets.leaderworkerset.x-k8s.io/v1` / `disaggregatedsets.disaggregatedset.x-k8s.io/v1` /
+  `disaggregatedsetrolescalers.disaggregatedset.x-k8s.io/v1`)+
+  Mutating/Validating Webhook(打 `leaderworkerset.sigs.k8s.io/name/worker-index` 等标签, 校验 LWS/DS 规范)。
 - 证书(二选一, `LWS_CERT_MODE`):
   - `cert-manager`: 由外部 cert-manager 的 Certificate/Issuer 签发 webhook 证书(需集群已装 cert-manager);
   - `internal`: controller 内置自签证书(`--webhook-cert-dir`), 离线友好(无需外部组件)。
 - DisaggregatedSet: 将 Prefill/Decode 阶段拆分为独立 worker 组(每组独立 LWS), 提升 LLM 推理
   吞吐与 SLO 稳定性; 安装后直接创建 `DisaggregatedSet` CR。
-- 为何采用 helm 离线安装: chart 与镜像全部离线可备(`deployments/cubestack-addon/lws` +
-  内置 registry), 与 gpu_operator 同一模式; 双证书模式适配有无 cert-manager 两种环境。
+- 为何默认官方 bundle 安装: 官方 `manifests.yaml` 单文件(kubectl apply --server-side)离线 vendoring 于
+  `deployments/cubestack-addon/lws/manifests.yaml`, 与内置 registry 镜像全离线; 大 CRD 不受 helm Secret 1MiB 上限。
+  (helm chart 保留在 `lws/charts/`, 供 cert-manager 模式 / 自定义 values 用)。
 - webhook 跨节点: 与 MetalLB controller 同理, 依赖 **Calico IPIP** 数据面可达(见 §3);
   controller 不 pinned 时默认可达。
 - 部署/验证入口: `docs/lws.md`。
@@ -199,7 +201,8 @@ sudo ./deployments/scripts/deploy-cluster.sh --with-cubestack    # 基座 + clus
 sudo ./deployments/scripts/deploy-cluster.sh --steps verify_metallb
 # 4) 扩容 / 组件
 sudo ./deployments/scripts/deploy-cluster.sh --with-scale            # 新节点先写 NODES
-sudo ./deployments/scripts/deploy-cluster.sh --enable <组件>          # 组件开关
+sudo ./deployments/scripts/deploy-cluster.sh --steps <组件>           # 立即部署某个 operator(自动带基座, 只部署指定的)
+sudo ./deployments/scripts/deploy-cluster.sh --enable <组件>          # 只写 cluster.conf 预启用(不部署, 下次全量生效)
 ```
 
 **离线要点**: 镜像预加载 `PRELOAD_IMAGE_PATTERNS`(calico 默认 + cilium 备选); 离线文件目录 `${OFFLINE_FILES_DIR}/<集群>/images/`(默认 `deployments/offline-files/kubespray/<集群>/images/`)。

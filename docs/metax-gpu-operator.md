@@ -76,7 +76,7 @@ deployments/
 > 已加入 `cluster.conf` 与 `cluster.conf.example`。关键项:
 
 ```bash
-GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-false}"   # 总开关, 默认 false; 本集群设为 true → --with-cubestack 即部署; 也可 --enable gpu_operator
+GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-false}"   # 总开关, 默认 false; 本集群设为 true → --with-cubestack 即部署; 也可 --steps gpu_operator 立即部署
 METAX_VERSION="${METAX_VERSION:-0.15.3}"                 # 版本(决定包名/镜像 tag/Chart)
 METAX_OFFLINE_DIR="${METAX_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/metax-gpu}"
 METAX_PKG_DIR="${METAX_PKG_DIR:-${METAX_OFFLINE_DIR}}"   # 大文件(.run/资源包)所在目录
@@ -102,7 +102,8 @@ METAX_IMAGE_COMPONENTS="..."   # 核心组件列表(run 模式 / 列表打印用
 
 ```bash
 sudo ./deploy-cluster.sh --with-cubestack   # 全量: 基座 + cluster.conf 中已启用的 operator(本集群 GPU_OPERATOR_ENABLED=true → 部署 gpu_operator)
-# 或单独: sudo ./deploy-cluster.sh --enable gpu_operator   # 显式启用(不依赖 cluster.conf 开关)
+# 或单独(立即部署): sudo ./deploy-cluster.sh --steps gpu_operator   # 只部署 gpu_operator(自动带基座)
+# 或预启用(只写配置, 不部署): sudo ./deploy-cluster.sh --enable gpu_operator   # 下次 --with-cubestack 生效
 ```
 
 > **断点续跑**: 本模块 `REPEAT:0` —— 安装成功写状态, 重跑部署自动跳过(不重复重装);
@@ -174,7 +175,7 @@ sudo ./deployments/scripts/tools/images/metax-load-images.sh
 # 打印所需镜像的 pull/save 命令
 METAX_LIST_IMAGES=true bash deployments/scripts/modules/03_addon/04_gpu_operator.sh
 # 部署 / 验证
-sudo ./deploy-cluster.sh --enable gpu_operator
+sudo ./deploy-cluster.sh --steps gpu_operator
 sudo ./deploy-cluster.sh --steps verify_metax_gpu
 # 卸载: 删 metax-operator 命名空间 + CRD 后重跑模块
 ```
