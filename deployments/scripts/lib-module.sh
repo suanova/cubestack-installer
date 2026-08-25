@@ -59,6 +59,17 @@ normalize_key() {
     [ -n "${MODULE_ALIAS[$k]:-}" ] && echo "${MODULE_ALIAS[$k]}" || echo "$k"
 }
 
+# ---------------- operator 模块(显式调度用) ----------------
+# --steps 显式命名了任一 operator 时, 只部署被指定的 operator(+基座 env/k8s/metallb/local_path/k8s_registry),
+# 剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps lws 时不部署 gpu_operator);
+# 未命名任何 operator(纯默认 / --with-k8s / --with-cubestack)时, 全部默认启用的 operator 照常部署。
+# (--enable 只写 cluster.conf, 不经过本处; 见 deploy-cluster.sh)
+# 新增 operator 模块时把其 key 加入本列表(基座 metallb/local_path/k8s_registry 与 k8s_deploy/k8s_scale/verify_* 不属于 operator)。
+OPERATOR_MODULES=(
+    gpu_operator gpu_lws prometheus ceph ceph_csi envoy_gateway keycloak kueue kubevirt lustre_csi
+    cubestack_apps harbor lb_haproxy lb_keepalived
+)
+
 # ---------------- 元模块展开(verify → 全部 verify_* 模块) ----------------
 # 每次新增一个 verify_<组件>.sh 模块, 这里自动把它纳入 "verify" 集合;
 # 帮助(--help / --list-steps)随之自动更新, 无需手工维护列表。
@@ -143,7 +154,10 @@ module_default_on() {
 }
 
 # ---------------- 运行步骤解析 ----------------
-# 优先级: --steps(精确) > 默认启用 + --enable/--with-xxx - --skip
+# 优先级: --steps(立即部署, 自动带基座) > 默认启用 + --with-xxx - --skip
+# 注意: --steps 显式命名 operator 时只部署被指定的 operator(+基座), 见 OPERATOR_MODULES 说明。
+#       --steps verify 保持精确: 只跑全部验证模块, 不拉基座。
+#       --enable 不在本函数生效(只写 cluster.conf, 见 deploy-cluster.sh)。
 # 结果写入全局 RUN_STEPS(按模块文件顺序)
 # 用法: resolve_run_steps <steps> <skip> <enable> [phase_filter]
 resolve_run_steps() {
@@ -168,18 +182,27 @@ resolve_run_steps() {
     }
 
     if [ -n "${steps_arg}" ]; then
-        # 精确模式: 只运行指定的(按模块文件顺序)
-        for s in ${steps_arg//,/ }; do
-            nk="$(normalize_key "${s}")"
-            module_index "${nk}" >/dev/null 2>&1 || { err "未知模块: ${s}(可用 --list-steps 查看)"; return 1; }
+        # 全部为 verify_* 模块 → 保持"精确模式": 只跑验证模块, 不拉基座(verify 模块 REPEAT:1, 每次执行)。
+        local _all_verify=1 _tok
+        for _tok in ${steps_arg//,/ }; do
+            [[ "$(normalize_key "${_tok}")" == verify_* ]] || { _all_verify=0; break; }
         done
-        for i in "${!MODULE_KEY[@]}"; do
-            _phase_ok "$i" || continue
+        if [ "${_all_verify}" = "1" ]; then
             for s in ${steps_arg//,/ }; do
-                [ "$(normalize_key "${s}")" = "${MODULE_KEY[$i]}" ] && RUN_STEPS+=("${MODULE_KEY[$i]}")
+                nk="$(normalize_key "${s}")"
+                module_index "${nk}" >/dev/null 2>&1 || { err "未知模块: ${s}(可用 --list-steps 查看)"; return 1; }
             done
-        done
-        return 0
+            for i in "${!MODULE_KEY[@]}"; do
+                _phase_ok "$i" || continue
+                for s in ${steps_arg//,/ }; do
+                    [ "$(normalize_key "${s}")" = "${MODULE_KEY[$i]}" ] && RUN_STEPS+=("${MODULE_KEY[$i]}")
+                done
+            done
+            return 0
+        fi
+        # 非 verify 模块: --steps 与 --enable 等价 = 自动带基座 + 只部署指定的 operator + 执行部署,
+        # 落入默认模式(base + enable - skip + operator 显式调度)。断点续跑感知, 重跑用 --fresh。
+        enable_arg="${enable_arg},${steps_arg}"
     fi
 
     # 默认模式: 默认启用 + 显式启用 - 显式跳过
@@ -202,6 +225,31 @@ resolve_run_steps() {
         for k2 in "${RUN_STEPS[@]}"; do [ "${k2}" != "${nk}" ] && comp+=("${k2}"); done
         RUN_STEPS=("${comp[@]}")
     done
+
+    # ★ operator 显式调度: --steps 显式命名了 operator 时, 只保留被指定的 operator(+基座),
+    #   剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps lws 时不部署 gpu_operator)。
+    #   未命名任何 operator(纯默认 / --with-k8s / --with-cubestack)时保持原行为: 全部默认启用的 operator 照常部署。
+    declare -A _op_keep=()
+    for s in ${enable_arg//,/ }; do
+        [ -z "${s}" ] && continue
+        nk="$(normalize_key "${s}")"
+        for _op in "${OPERATOR_MODULES[@]}"; do [ "${nk}" = "${_op}" ] && _op_keep["${_op}"]=1; done
+    done
+    if [ "${#_op_keep[@]}" -gt 0 ]; then
+        local _kept=() _k2 _is_op=0
+        for _k2 in "${RUN_STEPS[@]}"; do
+            _is_op=0
+            for _op in "${OPERATOR_MODULES[@]}"; do [ "${_k2}" = "${_op}" ] && _is_op=1; done
+            if [ "${_is_op}" = "1" ] && [ -z "${_op_keep[${_k2}]:-}" ]; then
+                :   # operator 且未显式指定 → 剔除
+            else
+                _kept+=("${_k2}")
+            fi
+        done
+        RUN_STEPS=("${_kept[@]}")
+        unset _kept _k2 _is_op
+    fi
+    unset _op_keep
 
     # ★ 关键: 最终按"模块文件顺序(阶段目录 + NN 序号)"重排 RUN_STEPS。
     # 否则 --enable/--with-xxx 加入的模块(如 k8s_deploy)会被 append 到末尾,
