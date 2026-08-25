@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # MODULE: k8s_registry
-# DESC: 配置集群内置 docker registry addon(节点 hosts + containerd certs.d + 对外 DNAT)
+# DESC: 配置集群内置 docker registry addon(节点 hosts + containerd certs.d; REGISTRY_EXPOSE_HOST=1 时可选宿主机对外 DNAT)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
@@ -12,7 +12,7 @@
 #   · 启用方式: deploy-cluster.sh --enable k8s_registry 或 REGISTRY_ENABLED=true
 #   · 集群外镜像仓库 Harbor 为预留配置(modules/01_env/04_harbor.sh, 未来实现, 默认关闭)
 #   · 复用 deploy-registry.sh: 各节点 /etc/hosts 解析 REGISTRY_DOMAIN → REGISTRY_IP(MetalLB VIP),
-#     containerd certs.d 信任该 HTTP registry, 宿主机 DNAT 对外 push 入口
+#     containerd certs.d 信任该 HTTP registry; REGISTRY_EXPOSE_HOST=1 时配宿主机 DNAT 对外 push 入口(默认 0 只用 VIP)
 #   · REGISTRY_ENABLED 控制 addons.yml 中 registry addon 是否安装(见 sync-addons-config.sh)
 # 数据源: cluster.conf (REGISTRY_DOMAIN / REGISTRY_IP / REGISTRY_PORT / NODES)
 # ============================================================
