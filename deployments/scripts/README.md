@@ -467,6 +467,39 @@ sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --min-free 100        #
   ```
   宿主机直跑(非容器)则 `export OFFLINE_FILES_DIR=<下载目录>/offline-files` 后执行 `deploy-cluster.sh`。
 
+### 5.12 容器化部署(Docker 交互式)
+
+不想在宿主机装工具链时,可全程在 CLI 容器内离线部署。镜像内置 kubespray 源码 + 全部部署脚本 + 工具链(ansible/helm/skopeo/mc/kubectl/sshpass/virsh),**不含离线镜像 tar 与二进制**(体积大, 由挂载目录共享)。
+
+**① 先获取离线文件(宿主机还没有时)**
+
+```bash
+sudo ./scripts/tools/offline/fetch-offline-from-minio.sh            # 默认只拉 kubespray(约 3.4GiB)
+sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --all      # 全量(约 34GiB, 含 GPU/LWS/VM 镜像)
+./scripts/tools/offline/fetch-offline-from-minio.sh --list          # 查看 MinIO 可用目录
+```
+
+脚本自动检测 mc、选择空闲 ≥ 50GiB 的最大磁盘下载到 `<下载目录>/offline-files`,并打印容器挂载命令(见 §5.11)。
+
+**② 交互式进入容器(容器内已是 root, 无需 sudo)**
+
+```bash
+sudo docker run --rm -it --network host \
+  -v <下载目录>/offline-files:/opt/cubestack-installer/deployments/offline-files \
+  -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
+  -v $HOME/.ssh:/root/.ssh \
+  harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+```
+
+**③ 容器内部署**
+
+```bash
+cd /opt/cubestack-installer
+./deployments/scripts/deploy-cluster.sh          # 默认 = --with-cubestack(全量)
+```
+
+说明:`--network host` 必须(容器内 ssh 直连节点/集群);创建虚拟机(依赖宿主机 libvirt)加 `--privileged` 或挂载 `/var/run/libvirt`,纯裸金属离线部署无需额外特权;后台运行 + `docker exec` 方式见根 `README.md` §十四。
+
 ### 5.5 create-libvirt-vm.sh —— 单台虚拟机
 
 ```bash
