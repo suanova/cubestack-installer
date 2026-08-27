@@ -4,12 +4,19 @@
 # · 用途: 将运行 kubespray 和离线部署所需的全部工具链与源码打入镜像:
 #   · kubespray 源码(deployments/kubespray/kubespray)+ 部署脚本 + 附加组件
 #   · 工具: ansible / helm / skopeo / mc(MinIO Client)/ kubectl / sshpass / virsh ...
-#   · 系统基础镜像(ubuntu 22.04)与工具: **优先走国内镜像源, 高墙/慢速
-#     binary(helm / kubectl / skopeo / mc)从 deployments/offline-files
-#     拷贝入镜像**(该目录由 fetch-offline-files.sh 从 MinIO 同步, 离线仓库
-#     内自带集群同源二进制)。仅源码与轻量 CLI 入镜像, 不打包离线的镜像
-#     tar(20G+, .dockerignore 排除), cli 镜像体积可控、无密钥泄漏。
-# 构建:  docker build -f Dockerfile-cli -t cubestack-cli .
+#   · 工具链 binary(helm / kubectl / skopeo / mc)优先走国内镜像源/离线文件拷贝,
+#     不打包离线的镜像 tar(20G+), cli 镜像体积可控、无密钥泄漏。
+# ---------------------------------------------------------------------
+# ★ 构建方式(与全量 offline-files 解耦):
+#   1) 生成独立构建上下文(只含镜像所需文件; 未来 offline-files 增加镜像不影响构建):
+#        sudo ./deployments/scripts/tools/docker/build-cli-context.sh
+#   2) 构建(默认基于 Harbor 上的 CLI 镜像做**增量构建**, 工具链已内置, 只刷新源码,
+#      秒级完成; 全新/工具链变更时用 --build-arg BASE_IMAGE=ubuntu:22.04 完整重建):
+#        sudo docker build -f Dockerfile-cli \
+#             -t harbor.isuanova.com/cubestack/cubestack-installer-cli:latest \
+#             deployments/cli-context/
+#   3) 推送: sudo docker push harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+# ---------------------------------------------------------------------
 # 运行(推荐, 挂载离线文件/配置/SSH 密钥):
 #   docker run --rm -it --network host \
 #     -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
@@ -24,7 +31,10 @@
 #       纯裸金属离线部署(kubespray + operator)无需额外特权。
 # =====================================================================
 
-FROM ubuntu:22.04
+# 基础镜像: 默认 Harbor 上的 CLI 镜像(增量构建, 工具链复用); 完整重建时:
+#   docker build --build-arg BASE_IMAGE=ubuntu:22.04 -f Dockerfile-cli -t ... deployments/cli-context/
+ARG BASE_IMAGE=harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     REPO_ROOT=/opt/cubestack-installer \
@@ -77,8 +87,9 @@ RUN python3 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/si
     && rm -f /tmp/kubespray-requirements.txt \
     && ansible --version 2>/dev/null | head -1
 
-# ---------- 拷贝源码(deployments 目录; 离线文件/VM镜像/inventory 由 .dockerignore 排除) ----------
+# ---------- 拷贝源码(增量构建时基础镜像已含旧源码, 先清空再拷入, 避免删除的文件残留) ----------
 WORKDIR ${REPO_ROOT}
+RUN rm -rf ${REPO_ROOT}/deployments ${REPO_ROOT}/skills 2>/dev/null || true
 COPY deployments ${REPO_ROOT}/deployments
 COPY skills ${REPO_ROOT}/skills
 
