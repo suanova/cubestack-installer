@@ -143,33 +143,21 @@ load_config() {
         export HOST_PHYS_IP
         vlog "自动检测宿主机物理 IP: ${HOST_PHYS_IP}"
     fi
-    # NAT 模式同网段: APISERVER_ADDRESS 默认取第一个 master IP
-    if [ -z "${APISERVER_ADDRESS:-}" ] && [ "${NET_MODE:-nat}" = "nat" ]; then
+    # API 入口地址默认取第一个 master IP(VM 与裸金属统一, 不再使用宿主机物理 IP):
+    # 宿主机/节点都直接连第一个 master 的 6443 —— 桥接模式宿主可达 VM 网段, NAT 模式宿主经
+    # libvirt 可达, 裸金属同网段直连, 均无需把 API 入口指向宿主机再做 DNAT。
+    # 显式设置 APISERVER_ADDRESS(如 HAProxy)时保留。
+    if [ -z "${APISERVER_ADDRESS:-}" ]; then
         for line in "${NODES[@]:-}"; do
             [ -z "${line}" ] && continue
             node_parse "${line}"
-            [ "${NODE_ROLE}" = "master" ] && { APISERVER_ADDRESS="${NODE_IP}"; export APISERVER_ADDRESS; vlog "NAT 模式自动设 APISERVER_ADDRESS=第一个master: ${NODE_IP}"; break; }
+            [ "${NODE_ROLE}" = "master" ] && [ -n "${NODE_IP}" ] && { APISERVER_ADDRESS="${NODE_IP}"; export APISERVER_ADDRESS; vlog "API 入口=第一个 master: ${NODE_IP}"; break; }
         done
     fi
-    # 全裸金属(cluster.conf 不再区分 vm/bm: 以 VM 配置文件 tools/vm/vm-nodes.conf 是否有节点判定):
-    #   VM 配置无节点 → 宿主机(部署机)不在集群网络, API 入口=第一个 master IP(与 sync-kubespray-config.sh 一致)
-    #   VM 配置有节点 → 含 VM, API 入口=宿主机物理 IP(worker 经宿主机 DNAT 访问)
-    if [ -z "${APISERVER_ADDRESS:-}" ]; then
-        _ALL_BM=1
-        vm_conf_has_nodes && _ALL_BM=0
-        if [ "${_ALL_BM}" = "1" ]; then
-            for line in "${NODES[@]:-}"; do
-                [ -z "${line}" ] && continue
-                node_parse "${line}"
-                [ "${NODE_ROLE}" = "master" ] && [ -n "${NODE_IP}" ] && { APISERVER_ADDRESS="${NODE_IP}"; export APISERVER_ADDRESS; vlog "全裸金属: API 入口=第一个 master ${NODE_IP}"; break; }
-            done
-        fi
-        unset _ALL_BM
-    fi
     # 全局派生变量(由 cluster.conf 变量派生, 各脚本直接引用, 不各自设置本地变量):
-    #   API_IP       API 入口地址 = APISERVER_ADDRESS(HAProxy IP / NAT 第一个 master), 回退 HOST_PHYS_IP(桥接=宿主机物理 IP)
+    #   API_IP       API 入口地址 = APISERVER_ADDRESS(默认第一个 master IP; 显式设置时保留)
     #   API_DOMAIN   API Server 域名(跨网段统一入口), 默认 k8s-api.nova.local
-    API_IP="${API_IP:-${APISERVER_ADDRESS:-${HOST_PHYS_IP}}}"
+    API_IP="${API_IP:-${APISERVER_ADDRESS:-}}"
     API_DOMAIN="${API_DOMAIN:-${APISERVER_DOMAIN:-k8s-api.nova.local}}"
     export API_IP API_DOMAIN
     # 全局派生变量(续): 离线文件路径
@@ -323,13 +311,15 @@ sync_kubeconfig() {
     [ -n "${newctx}" ] && KUBECONFIG="${HOME}/.kube/config" kubectl config use-context "${newctx}" >/dev/null 2>&1 || true
     # ★ 强制收敛: 合并可能保留旧集群残留(如 lb.k8s.local / 直连 master IP, 不在证书 SAN → TLS 失败)。
     #   只把当前 context 对应 cluster 的 server 改写为 SAN 内 API_DOMAIN(保留证书校验), 不动其它集群。
+    #   注意: K/_ctx/_cl 必须 local —— 各 addon 模块(gpu_operator/lws/envoy_*)顶层也有同名
+    #   全局 K(远端 kubectl), 若此处用全局并 unset 会把调用方的 K 冲掉 → set -u 报 unbound。
+    local K _ctx _cl
     K="KUBECONFIG=${HOME}/.kube/config kubectl"
     _ctx="$(${K} config current-context 2>/dev/null || echo "${newctx}")"
     _cl="$(${K} config view -o jsonpath="{.contexts[?(@.name==\"${_ctx}\")].context.cluster}" 2>/dev/null | head -1)"
     if [ -n "${_cl}" ]; then
         ${K} config set-cluster "${_cl}" --server="https://${API_DOMAIN}:6443" >/dev/null 2>&1 || true
     fi
-    unset _ctx _cl K
     chmod 600 "${HOME}/.kube/config"
     rm -f "${tmp}"
     # 宿主机 DNAT(6443→first master): 让 API_DOMAIN 从宿主机可达(幂等)
