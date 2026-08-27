@@ -16,10 +16,9 @@ INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubes
 
 # ---------------- 从 cluster.conf 派生全局变量 ----------------
 # API_IP / API_DOMAIN 由 lib-common load_config 统一提供:
-#   API_IP     = APISERVER_ADDRESS(NAT 模式=第一个 master IP / HAProxy IP), 回退 HOST_PHYS_IP(桥接=宿主机物理 IP)
+#   API_IP     = APISERVER_ADDRESS(默认第一个 master IP, VM 与裸金属一致; 显式设置时保留)
 #   API_DOMAIN = 跨网段统一入口域名(默认 k8s-api.nova.local)
-# 注意: 实际写入配置的 API 入口地址为 API_ADDR(本脚本计算)——全裸金属集群取第一个 master IP
-#       (宿主机不在集群网络, 无法作为 API 入口); 含 VM 集群沿用 API_IP(跨网段 worker 经宿主机 DNAT 访问)
+# 注意: 实际写入配置的 API 入口地址统一为 API_ADDR = API_IP(第一个 master), 不使用宿主机物理 IP
 MASTER_IPS=()    # master 节点 IP
 WORKER_IPS=()    # worker 节点 IP
 for line in "${NODES[@]:-}"; do
@@ -33,27 +32,12 @@ done
 
 [ "${#MASTER_IPS[@]}" -gt 0 ] || { err "cluster.conf 中无 master 节点"; exit 1; }
 
-# 第一个 worker IP(用于 Calico can-reach 探测),无 worker 时回退到宿主机 IP
+# 第一个 worker IP(用于 Calico can-reach 探测),无 worker 时回退到 API 入口(第一个 master)
 FIRST_WORKER="${WORKER_IPS[0]:-${API_IP}}"
 
-# 全裸金属检测: cluster.conf 不再区分 vm/bm, 以 VM 配置文件(tools/vm/vm-nodes.conf)是否有节点判定
-#   → 无 VM 定义 = 全裸金属: 宿主机(部署机)不在集群网络, API 入口不能用宿主机物理 IP, 取第一个 master IP
-ALL_BM=1
-vm_conf_has_nodes && ALL_BM=0
-
-# API 入口地址: 全裸金属 → 第一个 master IP; 含 VM(跨网段 worker 经宿主机 DNAT 访问)→ 宿主机物理 IP
-if [ "${ALL_BM}" = "1" ]; then
-    API_ADDR="${MASTER_IPS[0]}"
-else
-    API_ADDR="${API_IP}"
-fi
-
-if [ "${ALL_BM}" = "1" ]; then
-    say "节点类型: 全裸金属 → API 入口=第一个 master(${API_ADDR})"
-else
-    say "节点类型: 含 VM → API 入口=宿主机物理 IP(${API_ADDR})"
-fi
-say "宿主机 IP: ${API_IP}"
+# API 入口地址统一 = API_IP(第一个 master IP), VM 与裸金属均不依赖宿主机物理 IP
+API_ADDR="${API_IP}"
+say "节点类型: API 入口=第一个 master(${API_ADDR})"
 say "API 域名: ${API_DOMAIN}"
 say "Master IPs: ${MASTER_IPS[*]}"
 say "Worker IPs: ${WORKER_IPS[*]:-<无>}"
@@ -68,9 +52,8 @@ if [ -f "${ALL_YML}" ]; then
     # apiserver_loadbalancer_domain_name → 集群 API 域名
     sed -i -E "s/^apiserver_loadbalancer_domain_name:.*/apiserver_loadbalancer_domain_name: \"${API_DOMAIN}\"/" "${ALL_YML}"
 
-    # supplementary_addresses_in_ssl_keys → API 域名 + [宿主机 IP(仅含 VM 时)] + 所有 master IP
-    # 全裸金属时 API 入口即第一个 master, 已在 masters 中, 不再单独加宿主机 IP
-    awk -v host="${API_ADDR}" -v domain="${API_DOMAIN}" -v masters="${MASTER_IPS[*]}" -v is_bm="${ALL_BM}" '
+    # supplementary_addresses_in_ssl_keys → API 域名 + 所有 master IP(不使用宿主机物理 IP)
+    awk -v domain="${API_DOMAIN}" -v masters="${MASTER_IPS[*]}" '
         /^supplementary_addresses_in_ssl_keys:/ { in_sec=1; print; next }
         in_sec && /^[[:space:]]*-/ {
             # 跳过旧的域名/IP 条目(保留 k8s-api.nova.local)
@@ -78,9 +61,8 @@ if [ -f "${ALL_YML}" ]; then
             next
         }
         in_sec && !/^[[:space:]]*-/ {
-            # 区块结束,输出 API 域名 + [宿主机(仅含 VM)] + masters 条目
+            # 区块结束,输出 API 域名 + masters 条目
             print "  - " domain
-            if (is_bm != "1") print "  - " host "           # 宿主机物理 IP(worker 通过此地址访问 API Server)"
             split(masters, arr, " ")
             for (i in arr) print "  - " arr[i]
             in_sec=0
