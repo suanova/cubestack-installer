@@ -8,6 +8,15 @@
 - **kubespray 离线工具**(多集群):见 [`deployments/kubespray/README.md`](kubespray/README.md)
 - **CLI 容器(可选)**: [`Dockerfile-cli`](../Dockerfile-cli) 打包 kubespray 源码 + 部署脚本 + 工具链
   (ansible/helm/skopeo/mc/kubectl 等, 不含离线镜像/binary), 可在容器内直接离线安装。
+  运行(仓库根目录执行, 挂载离线文件/配置/SSH 密钥, `--network host` 必须):
+  ```bash
+  sudo docker run --rm -it --network host \
+    -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
+    -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
+    -v $HOME/.ssh:/root/.ssh \
+    harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+  ```
+  进容器后 `cd /opt/cubestack-installer && ./deployments/scripts/deploy-cluster.sh`;完整说明见根 `README.md` §十四「容器化部署(Docker)」。
 
 > ⚠ **节点格式(新)**: cluster.conf 的 NODES 为 **5 字段**(`role,hostname,ip,ssh_user,ssh_password`, 不区分虚拟机/裸金属;
 > 密码 `-` = 默认 `SSH_DEFAULT_PASSWORD`)。需要**创建虚拟机**的节点在
