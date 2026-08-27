@@ -390,3 +390,43 @@ deployments/
 
 完整分步指南(含扩容、跨网段 bare-metal worker)见 **`deployments/scripts/README.md` 第 8 节「从 0 到 1:离线部署 kubespray 集群」**。
 
+### 容器化部署(Docker, 可选)
+
+不想在宿主机装工具链时,可直接用 **CLI 容器**离线部署。镜像内置 kubespray 源码 + 全部部署脚本 + 工具链(ansible/helm/skopeo/mc/kubectl/sshpass/virsh),**不含离线镜像 tar 与二进制**(体积大, 由挂载目录共享)。
+
+镜像名:`harbor.isuanova.com/cubestack/cubestack-installer-cli:latest`(或本地 `docker build -f Dockerfile-cli -t cubestack-cli .` 构建)。
+
+**方式一: 交互式(推荐)**
+
+```bash
+sudo docker run --rm -it --network host \
+  -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
+  -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
+  -v $HOME/.ssh:/root/.ssh \
+  harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+# 进容器后(容器内已是 root, 无需 sudo):
+cd /opt/cubestack-installer
+./deployments/scripts/deploy-cluster.sh                    # 默认 = --with-cubestack(全量)
+```
+
+**方式二: 后台运行 + docker exec**
+
+```bash
+sudo docker run -itd --name cli --network host \
+  -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
+  -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
+  harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+sudo docker exec -it cli bash
+```
+
+**挂载与说明**:
+
+| 挂载 / 参数 | 说明 |
+|---|---|
+| `--network host` | **必须**:容器内 ssh 直连节点/集群/registry(默认桥接网段无法访问) |
+| `deployments/offline-files` | 离线文件(镜像 tar/二进制)不入镜像,挂载复用、免重新下载 |
+| `deployments/config/cluster.conf` | 唯一配置源,宿主机编辑后容器内同步生效 |
+| `~/.ssh` | SSH 密钥(宿主机已有免密时挂载;否则在容器内 `tools/node/gen-ssh-key.sh` 生成) |
+
+> 容器内已是 root,直接运行脚本;若需创建虚拟机(依赖宿主机 libvirt),加 `--privileged` 或挂载 `/var/run/libvirt`,纯裸金属离线部署无需额外特权。
+
