@@ -79,33 +79,13 @@ _ensure_hosts() {   # <ip> <domain>
         || echo "${ip} ${dom}" >> /etc/hosts 2>/dev/null
 }
 _ensure_hosts "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
-curl -s -m 8 "http://${REGISTRY_BASE}/v2/" >/dev/null 2>&1 \
+wait_registry_ready "http://${REGISTRY_BASE}/v2/" \
     || { err "集群内置 registry ${REGISTRY_BASE}/v2/ 不可达(检查: 宿主机 /etc/hosts 的 ${REGISTRY_DOMAIN} 是否解析到 ${REGISTRY_IP}, 及 MetalLB VIP)"; exit 1; }
 SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
     || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
-# helm 需要从宿主连 API Server: 下载集群 admin.conf 并同步到 ~/.kube/config(与 gpu_operator 一致)
-_sync_kubeconfig() {
-    local tmp newctx
-    tmp="$(mktemp)"
-    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "sudo cat /etc/kubernetes/admin.conf" > "${tmp}" 2>/dev/null \
-        || { rm -f "${tmp}"; return 1; }
-    [ -s "${tmp}" ] || { rm -f "${tmp}"; return 1; }
-    mkdir -p "${HOME}/.kube"
-    newctx="$(grep -E '^[[:space:]]*current-context:' "${tmp}" | head -1 | awk '{print $2}')"
-    if [ -f "${HOME}/.kube/config" ]; then
-        KUBECONFIG="${tmp}:${HOME}/.kube/config" kubectl config view --flatten > "${tmp}.merged" 2>/dev/null \
-            && mv "${tmp}.merged" "${HOME}/.kube/config" || cp "${tmp}" "${HOME}/.kube/config"
-    else
-        cp "${tmp}" "${HOME}/.kube/config"
-    fi
-    [ -n "${newctx}" ] && KUBECONFIG="${HOME}/.kube/config" kubectl config use-context "${newctx}" >/dev/null 2>&1 || true
-    chmod 600 "${HOME}/.kube/config"
-    rm -f "${tmp}"
-    KUBECONFIG="${HOME}/.kube/config" timeout 15 kubectl get nodes --no-headers >/dev/null 2>&1
-}
-_sync_kubeconfig \
-    && ok "宿主机 ~/.kube/config 已同步(admin.conf)" \
+# helm 需要从宿主连 API Server: 复用 lib-common 的 sync_kubeconfig(server→API_DOMAIN + 宿主机 DNAT)
+sync_kubeconfig \
+    && ok "宿主机 ~/.kube/config 已同步(admin.conf → API ${API_DOMAIN}→${API_IP})" \
     || { err "宿主机无法访问集群(admin.conf 下载/同步失败; 检查 ${FIRST_MASTER} 的 /etc/kubernetes/admin.conf)"; exit 1; }
 ok "前置检查通过(chart_source=${ENVOY_EG_CHART_SOURCE}, version=${ENVOY_EG_VERSION})"
 

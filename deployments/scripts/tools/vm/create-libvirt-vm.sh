@@ -42,7 +42,7 @@ VM_MAC_LC="$(echo "${VM_MAC}" | tr 'A-F' 'a-f')"
 [[ ${VM_IP} =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo -e "\033[31m【错误】IP格式非法\033[0m"; exit 1; }
 
 # ==================== 防重复 & 文件检查 ====================
-BASE_IMG="${BASE_IMG:-/k8s/cloud-images/ubuntu2204-k8s-base.qcow2}"   # 取自配置(内置兜底)
+BASE_IMG="${BASE_IMG:-${REPO_ROOT}/deployments/offline-files/virtual-machine/cloud-images/ubuntu2204-k8s-base.qcow2}"   # 取自配置(内置兜底, 与 cluster.conf BASE_IMG 一致)
 VM_DISK="${VM_DISK_DIR:-/k8s/vm-disks}/${VM_NAME}.qcow2"
 WORK_DIR="$(mktemp -d)"
 

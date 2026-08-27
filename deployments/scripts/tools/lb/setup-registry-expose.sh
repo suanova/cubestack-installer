@@ -74,6 +74,17 @@ EOF
 case "${ACTION}" in
     --add)
         say "添加宿主机 registry 端口转发: ${HOST_PHYS_IP}:${EXTERNAL_PORT} → ${REGISTRY_FORWARD_TARGET} ..."
+        # ★ 清理旧 IP 残留: 安装环境 IP 会变, 删除所有旧 dport 5000 的 DNAT(不管旧目标),
+        #   再添加当前目标, 避免旧 IP 规则残留劫持流量(PREROUTING + OUTPUT 都清)。
+        for _chain in PREROUTING OUTPUT; do
+            _h=""
+            while read -r _h; do
+                [ -n "${_h}" ] || continue
+                iptables -t nat -D "${_chain}" ${_h} 2>/dev/null && warn "已删除旧 ${_chain} DNAT: ${_h}"
+            done < <(iptables -t nat -L "${_chain}" -n --line-numbers 2>/dev/null \
+                        | grep -E "dpt:${EXTERNAL_PORT}.*to:.*:${EXTERNAL_PORT}" \
+                        | sed -E 's/^[0-9]+[[:space:]]+//')
+        done
         # 1) 立即生效(幂等)
         iptables -t nat -C PREROUTING -d "${HOST_PHYS_IP}" -p tcp --dport "${EXTERNAL_PORT}" -j DNAT --to-destination "${REGISTRY_FORWARD_TARGET}" 2>/dev/null || \
             iptables -t nat -A PREROUTING -d "${HOST_PHYS_IP}" -p tcp --dport "${EXTERNAL_PORT}" -j DNAT --to-destination "${REGISTRY_FORWARD_TARGET}"

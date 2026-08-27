@@ -50,7 +50,7 @@
 | `keepalived` | API VIP 高可用（`--enable lb_keepalived`） | keepalived |
 | `dnsmasq` | VM 网络 DHCP（可选） | dnsmasq |
 
-## 4. 虚拟化（仅 VM 阶段，`--skip-net` 裸金属可省）
+## 4. 虚拟化（仅 VM 阶段；纯裸金属集群不初始化宿主机网络）
 
 | 工具 | 用途 | 包 |
 |---|---|---|
