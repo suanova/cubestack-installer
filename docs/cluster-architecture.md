@@ -226,7 +226,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 ```bash
 # 1) 编辑 deployments/config/cluster.conf: NODES(节点)/ 网络 / 组件开关
 #    (BM 集群: NODES 直接填 5 字段节点, vm-nodes.conf 不定义节点, METALLB_POOL=10.66.1.130-139)
-# 2) 一键部署(默认 = --with-cubestack --skip-net: 节点准备 → NTP → kubespray 离线安装 → 基座 + 启用的 operator)
+# 2) 一键部署(默认 = --with-cubestack: 节点准备 → NTP → kubespray 离线安装 → 基座 + 启用的 operator)
 sudo ./deployments/scripts/deploy-cluster.sh          # 全量(基座 + cluster.conf 中已启用的 operator)
 sudo ./deployments/scripts/deploy-cluster.sh --with-k8s   # 仅 kubespray 基座(k8s + metallb/local-path/registry)
 #    中途失败: 修复后重跑同一命令(install 会重置残留 k8s 重建); --skip k8s_deploy 可跳过

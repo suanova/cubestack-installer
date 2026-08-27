@@ -133,35 +133,27 @@ _ensure_hosts "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
 _ensure_hosts "${API_IP}" "${API_DOMAIN}"
 grep -qE "^${REGISTRY_IP}[[:space:]]+${REGISTRY_DOMAIN}" /etc/hosts 2>/dev/null \
     || warn "无法写入宿主机 /etc/hosts(非 root?), ${REGISTRY_DOMAIN}/${API_DOMAIN} 可能无法从宿主按域名访问"
-curl -s -m 8 "http://${REGISTRY_BASE}/v2/" >/dev/null 2>&1 \
-    || { err "集群内置 registry ${REGISTRY_BASE}/v2/ 不可达(检查: 宿主机 /etc/hosts 的 ${REGISTRY_DOMAIN} 是否解析到 ${REGISTRY_IP}, 及 MetalLB VIP)"; exit 1; }
+# registry(MetalLB VIP)就绪存在时序竞态: Service EXTERNAL-IP 出现后, speaker ARP 通告 /
+# kube-proxy DNAT 规则需要数秒才完全生效 → 首次 curl 可能瞬时失败。重试 30s(每 2s 一次)。
+# 注: 不能依赖 ping VIP(ICMP 无 DNAT 规则, 必回 "port unreachable"), 只能 curl 服务端口。
+_registry_ready=0
+for _t in $(seq 1 15); do
+    if curl -s -m 8 "http://${REGISTRY_BASE}/v2/" >/dev/null 2>&1; then
+        _registry_ready=1
+        break
+    fi
+    say "  registry ${REGISTRY_BASE}/v2/ 未就绪, ${_t}/15 次重试中(MetalLB 数据面初始化) ..."
+    sleep 2
+done
+[ "${_registry_ready}" = "1" ] \
+    || { err "集群内置 registry ${REGISTRY_BASE}/v2/ 30s 内仍不可达(检查: 宿主机 /etc/hosts 的 ${REGISTRY_DOMAIN} 是否解析到 ${REGISTRY_IP}, MetalLB VIP 与 registry Service 状态)"; exit 1; }
+ok "registry ${REGISTRY_BASE}/v2/ 可达"
 SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
     || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
 # helm 需要从宿主连 API Server: 下载集群 admin.conf 并同步到 ~/.kube/config
 # (每次部署后执行, 确保安装机 kubectl/helm 可访问集群; 合并而非覆盖, 避免破坏其他集群配置)
-_sync_kubeconfig() {
-    local tmp newctx
-    tmp="$(mktemp)"
-    # admin.conf 属 root(600), scp 会 Permission denied → 用 ssh + sudo cat 读取
-    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "sudo cat /etc/kubernetes/admin.conf" > "${tmp}" 2>/dev/null \
-        || { rm -f "${tmp}"; return 1; }
-    [ -s "${tmp}" ] || { rm -f "${tmp}"; return 1; }
-    mkdir -p "${HOME}/.kube"
-    newctx="$(grep -E '^[[:space:]]*current-context:' "${tmp}" | head -1 | awk '{print $2}')"
-    if [ -f "${HOME}/.kube/config" ]; then
-        # 合并(新 admin.conf 在前, 同名校则新集群优先); 合并失败则直接覆盖
-        KUBECONFIG="${tmp}:${HOME}/.kube/config" kubectl config view --flatten > "${tmp}.merged" 2>/dev/null \
-            && mv "${tmp}.merged" "${HOME}/.kube/config" || cp "${tmp}" "${HOME}/.kube/config"
-    else
-        cp "${tmp}" "${HOME}/.kube/config"
-    fi
-    [ -n "${newctx}" ] && KUBECONFIG="${HOME}/.kube/config" kubectl config use-context "${newctx}" >/dev/null 2>&1 || true
-    chmod 600 "${HOME}/.kube/config"
-    rm -f "${tmp}"
-    KUBECONFIG="${HOME}/.kube/config" timeout 15 kubectl get nodes --no-headers >/dev/null 2>&1
-}
-_sync_kubeconfig \
+# 宿主机 kubectl/helm 访问集群: 复用 lib-common 的 sync_kubeconfig(server→API_DOMAIN + 宿主机 DNAT)
+sync_kubeconfig \
     && ok "宿主机 ~/.kube/config 已同步(admin.conf → API ${API_DOMAIN}→${API_IP})" \
     || { err "宿主机无法访问集群(admin.conf 下载/同步失败; 检查 ${FIRST_MASTER} 的 /etc/kubernetes/admin.conf, 以及 ${API_DOMAIN}→${API_IP} 解析)"; exit 1; }
 ok "前置检查通过(registry=${REGISTRY_BASE}, API=${API_DOMAIN}→${API_IP})"
