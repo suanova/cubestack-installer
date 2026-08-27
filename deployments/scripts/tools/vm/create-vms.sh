@@ -12,9 +12,44 @@
 # ============================================================
 set -euo pipefail
 
-# shellcheck source=lib-common.sh
+# ============ 先恢复 cluster.conf(在任何 source/load_config 之前) ============
+# create-vms.sh 每次执行都把 cluster.conf 重建为"可 source"的完整配置:
+#   1. 无条件用 cluster.conf.example 覆盖 cluster.conf(备份旧文件到 .bak);
+#   2. 覆盖后 NODES 先清空(保留 NODES=() 空数组);
+#   3. 之后在本脚本每台 VM 创建完毕时, 用 vm-nodes.conf 全部 VM 整体覆盖 NODES。
+#   4. 最后校验 cluster.conf 是否合法(bash -n), 不合法即终止。
+# 这避免了 load_config source 到损坏(截断/括号未闭合)的旧 cluster.conf 而报
+# "unexpected EOF" —— 必须在 source lib-common 抛错前就把配置恢复好。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"   # tools/vm → tools → scripts → deployments → 仓库根(4级)
+CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/deployments/config/cluster.conf}"
+CONF_TEMPLATE="${CLUSTER_CONF}.example"
+[ -f "${CONF_TEMPLATE}" ] || { echo "【错误】模板不存在: ${CONF_TEMPLATE}"; exit 1; }
+[ -f "${CLUSTER_CONF}" ] && cp "${CLUSTER_CONF}" "${CLUSTER_CONF}.bak" 2>/dev/null || true
+cp "${CONF_TEMPLATE}" "${CLUSTER_CONF}" || { echo "【错误】恢复 ${CONF_TEMPLATE} → ${CLUSTER_CONF} 失败"; exit 1; }
+# NODES 清空(保留 NODES=() 空数组): 让 bin-cluster.conf 成为 VM 覆盖的唯一来源
+awk '
+    /^NODES=\(/ { in_nodes=1; print; next }
+    in_nodes && /^\)/ { print; in_nodes=0; next }
+    in_nodes { next }
+    { print }
+' "${CLUSTER_CONF}" > "${CLUSTER_CONF}.tmp" && mv "${CLUSTER_CONF}.tmp" "${CLUSTER_CONF}"
+echo "→ 已用模板重建 cluster.conf: cp ${CONF_TEMPLATE} ${CLUSTER_CONF}"
+echo "→ 更新完 NODES 后会自动校验 cluster.conf 合法性。"
+
+# ============ 再加载公共库 + 配置(此时 cluster.conf 已完整可 source) ============
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# ============ 校验 cluster.conf 合法性(重建/更新 NODES 后调用) ============
+# 任何对 cluster.conf 的写入完成后, 都 bash -n 校验; 不合法立即终止, 避免下游部署
+# source 到损坏配置而报 "unexpected EOF"。
+assert_conf_valid() {
+    if ! bash -n "${CLUSTER_CONF}" 2>/dev/null; then
+        err "cluster.conf 语法不合法(括号未闭合/格式错误): ${CLUSTER_CONF}"; exit 1
+    fi
+    ok "cluster.conf 语法校验通过: ${CLUSTER_CONF}"
+}
 
 ONLY=""
 [ "${1:-}" = "--only" ] && ONLY="${2:-}"
@@ -28,6 +63,8 @@ fi
 
 say "按 ${VM_NODES_CONF} 创建/启动虚拟机 ..."
 BOOTED_VMS=()
+# 收集 vm-nodes.conf 全部 VM 的 5 字段条目(密码归一化后), 结束后整体覆盖 cluster.conf NODES
+VM_ENTRIES_IFS=""
 for line in $(vm_conf_entries); do
     [ -z "${line}" ] && continue
     node_parse "${line}"    # 10字段 → NODE_* (NODE_TYPE=vm)
@@ -57,9 +94,44 @@ for line in $(vm_conf_entries); do
         BOOTED_VMS+=("${NODE_IP}")
     fi
 
-    # 自动注入 5 字段到 cluster.conf(幂等; create-libvirt-vm.sh 已注册新 VM, 这里兜底补已存在 VM)
-    register_node_to_conf "${NODE_ROLE}" "${NODE_HOSTNAME}" "${NODE_IP}" "${NODE_USER}" "${NODE_PW}"
+    # 密码归一化("-"/空→默认密码), 收集该 VM 5 字段条目(供最终整体替换 NODES)
+    if [ -z "${NODE_PW}" ] || [ "${NODE_PW}" = "-" ]; then
+        NODE_PW="$(node_default_pw "${NODE_ROLE}")"
+    fi
+    VM_ENTRIES_IFS="${VM_ENTRIES_IFS}"$'\n'"${NODE_ROLE},${NODE_HOSTNAME},${NODE_IP},${NODE_USER},${NODE_PW}"
+    # 记录一个 VM IP 用于后续自动推导 METALLB_POOL
+    [ -n "${NODE_IP}" ] && VM_IP_FIRST="${VM_IP_FIRST:-${NODE_IP}}"
 done
+
+# ============ 自动推导 METALLB_POOL(与 VM 同网段) ============
+# MetalLB Layer2 要求池内 IP 与节点同二层网络; 虚拟机集群的节点在 VM 网段,
+# 因此创建虚拟机后把 METALLB_POOL 改为与 VM 同网段的一段空闲地址。
+# 生成规则: 取第一个 VM IP 的网段, 池起点 = 该网段后半段(如 .200-.209), 避免与 VM 静态 IP 冲突。
+if [ -n "${VM_IP_FIRST:-}" ]; then
+    NEW_POOL="$(python3 - "${VM_IP_FIRST}" << 'PY'
+import ipaddress, sys
+ip = ipaddress.ip_address(sys.argv[1])
+# 用 /24 网段计算: 起点 = 网段 .200, 终点 = 网段 .209
+net = ipaddress.ip_network(str(ip) + "/24", strict=False)
+base = int(net.network_address)
+start = base + 200
+end   = base + 209
+print(f"{ipaddress.ip_address(start)}-{ipaddress.ip_address(end)}")
+PY
+)"
+    # 用 sed 更新 cluster.conf 的 METALLB_POOL(写**实际值**, 而非 ${VAR} 模板字面量)
+    # 否则 load_config source 时 NEW_POOL 未定义 → 回退旧默认(如 10.66.1.130-139), 部署仍用旧 IP。
+    sed -i -E "s|^(METALLB_POOL=).*|METALLB_POOL=\"${NEW_POOL}\"   # 由 create-vms.sh 自动推导(与 VM 网段同段)|" "${CLUSTER_CONF}"
+    ok "自动更新 METALLB_POOL → ${NEW_POOL}(与 VM 网段同为 ${VM_IP_FIRST}.0/24, 池 .200-.209 避开 VM 静态 IP)"
+fi
+
+# 用 vm-nodes.conf 全部 VM 整体替换 cluster.conf NODES(而非逐条幂等追加)
+if [ -n "${VM_ENTRIES_IFS}" ]; then
+    REPLACE_NODES_IFS="${VM_ENTRIES_IFS#?}" replace_nodes_to_conf "${CLUSTER_CONF}"
+fi
+
+# 最终校验 cluster.conf 合法性(括号闭合/格式正确); 不合法立即终止, 避免下游 source 失败
+assert_conf_valid
 
 # 等待本次启动/创建的 VM SSH 就绪(端口探测, 免认证)
 if [ "${#BOOTED_VMS[@]}" -gt 0 ]; then

@@ -29,7 +29,7 @@
 
 > ⚠ **MetalLB 网络需求(Layer2 模式)**:
 > - 地址池 IP 必须与集群节点**同一二层网络(同一子网)且空闲**;
-> - **裸金属集群**: 无需 bridge/NAT 网络(纯物理 L2 直连),用 `--skip-net` 跳过 VM 网络,池取节点物理网段空闲段(如 `10.66.1.130-10.66.1.139`);
+> - **裸金属集群**: 无需 bridge/NAT 网络(纯物理 L2 直连),不初始化宿主机网络,池取节点物理网段空闲段(如 `10.66.1.130-10.66.1.139`);
 > - **虚拟机集群**: 需 bridge(`privbr0`) 网络,池取 VM 网段空闲段(如 `10.244.2.0/24`);
 > - 依赖 `kube_proxy_strict_arp=true`(默认已开启);池与节点网段冲突会导致 LB 无法通告;
 > - **DHCP 管理网段时**: 池内 IP 必须先在 DHCP 服务器加入**排除/保留段**(如 `ip dhcp excluded-address`),否则 DHCP 会重复分配给其他设备 → 与 LB IP 冲突;
@@ -111,9 +111,9 @@ deployments/
 │   ├── inventory/                # 集群 inventory(按集群名隔离)
 │   │   └── <cluster>/            #   hosts.yml + group_vars + credentials + preload-images.lst
 │   └── README.md
-├── offline-files/                # 【运行时生成】离线文件(kubespray/metax-gpu, 见 §五)
-│   └── kubespray/                #   离线资源缓存(按集群名隔离), 路径由 OFFLINE_FILES_DIR 切换
-├── virtual-machine/              # 【运行时生成】虚拟机基础镜像(见 §五)
+├── offline-files/                # 【运行时生成】离线文件(kubespray/metax-gpu/虚拟机镜像, 见 §五)
+│   ├── kubespray/                #   离线资源缓存(按集群名隔离), 路径由 OFFLINE_FILES_DIR 切换
+│   └── virtual-machine/          #   虚拟机基础镜像(由 BASE_IMG 指定, 见 §五)
 ├── scripts/                      # 部署脚本(详见 scripts/README.md)
 │   ├── deploy-cluster.sh         # ★ 统一入口(一键/分步/断点续跑)
 │   ├── lib-common.sh             # 公共库(配置加载/工具函数)
@@ -209,12 +209,12 @@ deployments/offline-files/
 - **生成方式**:联网机执行 `./deployments/kubespray/cubestack-offline.sh download`(读取 inventory group_vars 决定下载哪些镜像/文件),产物即离线仓库。
 - **预加载机制**:`inventory/<cluster>/preload-images.lst`(由 `PRELOAD_IMAGE_PATTERNS` 过滤生成)指定部署时同步到节点 containerd 的最小镜像集合;离线部署时节点镜像拉取不依赖公网。
 
-### 5.2 虚拟机基础镜像(virtual-machine/)
+### 5.2 虚拟机基础镜像(offline-files/virtual-machine/)
 
 虚拟机黄金镜像路径由 `cluster.conf` 的 `BASE_IMG` 指定:
 
 ```
-${REPO_ROOT}/deployments/virtual-machine/cloud-images/
+${REPO_ROOT}/deployments/offline-files/virtual-machine/cloud-images/
 └── ubuntu2204-k8s-base.qcow2    # 黄金基础镜像(由 create-vm-template.sh 制作)
 ```
 
@@ -250,9 +250,9 @@ vim deployments/config/cluster.conf            # 修改 宿主机IP/网段/节�
 # 2. (可选)制作虚拟机黄金镜像(测试环境)
 sudo ./deployments/scripts/tools/vm/create-vm-template.sh
 
-# 3. 一键部署(默认 = --with-cubestack --skip-net: 基座 + cluster.conf 启用的全部 operator)
+# 3. 一键部署(默认 = --with-cubestack: 基座 + cluster.conf 启用的全部 operator)
 sudo ./deployments/scripts/deploy-cluster.sh
 ```
 
-> 全裸金属集群:vm-nodes.conf 不定义节点即可(默认已自动 `--skip-net`);仅基座用 `--with-k8s`;
+> 全裸金属集群:vm-nodes.conf 不定义节点即可(宿主机网络初始化非必要,需时用 tools/net/setup-vm-network.sh);仅基座用 `--with-k8s`;
 > 分步部署、扩容、跨网段 worker、组件安装等场景见 `deployments/scripts/README.md` 第 8 节。

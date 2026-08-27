@@ -121,7 +121,10 @@ NODE_SCRIPT="$(mktemp)"
 cat > "${NODE_SCRIPT}" <<EOF
 #!/bin/bash
 set -e
-grep -qF "${REGISTRY_IP} ${REGISTRY_DOMAIN}" /etc/hosts || echo "${REGISTRY_IP} ${REGISTRY_DOMAIN}" >> /etc/hosts
+# ★ 删旧域名残留行(安装环境 IP 会变): 先删任何指向 REGISTRY_DOMAIN 的旧行, 再写当前 VIP
+_rd="\$(echo '${REGISTRY_DOMAIN}' | sed 's/\./\\\\./g')"
+sed -i -E "/[[:space:]]\${_rd}([[:space:]]|\$)/d" /etc/hosts 2>/dev/null || true
+echo "${REGISTRY_IP} ${REGISTRY_DOMAIN}" >> /etc/hosts
 mkdir -p "${CERTS_DIR}"
 cat > "${CERTS_DIR}/hosts.toml" <<HT
 server = "http://${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
@@ -160,19 +163,32 @@ fi
 
 # ---------------- 4. 验证 + 用法 ----------------
 say "[4/4] 验证 ..."
-sleep 2
+# registry(MetalLB VIP / NodePort)就绪存在时序竞态: kubespray 刚部署完, MetalLB speaker
+# 冷启动时可能被 liveness probe 误杀重启, ARP 通告与 kube-proxy DNAT 需更久才稳定;
+# registry pod 也可能仍在拉镜像。→ 重试 90s(每 2s 一次, 45 次), 避免误报不可达。
+# 注: 不能用 ping VIP 判活(ICMP 无 DNAT 规则必回 "port unreachable"), 只能 curl 服务端口。
+_wait_ready() {   # <url> <desc> → 0=可达
+    local url="$1" desc="$2" t
+    for t in $(seq 1 45); do
+        curl -s -m 5 "${url}" >/dev/null 2>&1 && { ok "  ${desc} 可达"; return 0; }
+        [ "${t}" -lt 45 ] && { say "  ${desc} 未就绪, 等待第 ${t}/45 次(MetalLB 数据面/registry pod 初始化) ..."; sleep 2; }
+    done
+    warn "  ${desc} 90s 内不可达"
+    return 1
+}
 if [ "${REGISTRY_SERVICE_TYPE:-loadbalancer}" = "nodeport" ]; then
     NP_OK=$(node_cmd "${FIRST_MASTER}" "${FIRST_MASTER_USER}" "${FIRST_MASTER_PW}" \
         "kubectl get svc -n kube-system registry -o jsonpath='{.spec.ports[0].nodePort}'" 2>/dev/null || echo "")
     FIRST_NODE_IP="$(node_cmd "${FIRST_MASTER}" "${FIRST_MASTER_USER}" "${FIRST_MASTER_PW}" \
         "kubectl get nodes --no-headers -o wide | awk '{print \$6}' | head -1" 2>/dev/null || echo "")"
     say "registry Service NodePort: ${NP_OK:-<获取失败>}(节点 ${FIRST_NODE_IP:-?})"
-    curl -s -m 5 "http://${FIRST_NODE_IP:-127.0.0.1}:${NP_OK}/v2/" >/dev/null 2>&1 && ok "  节点 NodePort ${NP_OK}/v2/ 可达" || warn "  节点 NodePort ${NP_OK}/v2/ 不可达(稍后重试)"
+    [ -n "${NP_OK}" ] && [ -n "${FIRST_NODE_IP}" ] \
+        && _wait_ready "http://${FIRST_NODE_IP}:${NP_OK}/v2/" "节点 NodePort ${NP_OK}/v2/"
 else
     VIP_OK=$(node_cmd "${FIRST_MASTER}" "${FIRST_MASTER_USER}" "${FIRST_MASTER_PW}" \
         "kubectl get svc -n kube-system registry -o jsonpath='{.status.loadBalancer.ingress[0].ip}'" 2>/dev/null || echo "")
     say "registry Service EXTERNAL-IP: ${VIP_OK:-<获取失败>}"
-    curl -s -m 5 "http://${REGISTRY_IP}:${REGISTRY_PORT}/v2/" >/dev/null 2>&1 && ok "  ${REGISTRY_IP}:${REGISTRY_PORT}/v2/ 可达" || warn "  ${REGISTRY_IP}:${REGISTRY_PORT}/v2/ 不可达(稍后重试)"
+    _wait_ready "http://${REGISTRY_IP}:${REGISTRY_PORT}/v2/" "${REGISTRY_IP}:${REGISTRY_PORT}/v2/"
 fi
 # 集群外 push 用的宿主机 DNAT(仅 REGISTRY_EXPOSE_HOST=1 时配置/验证; 集群内走 MetalLB VIP 即可)
 if [ "${REGISTRY_EXPOSE_HOST:-0}" = "1" ]; then

@@ -1263,6 +1263,12 @@ print("%s|%s|%s" % (
             "sudo bash -c '
                 hostname
                 systemctl is-active kubelet 2>/dev/null | grep -qx active && { echo YES; exit 0; }
+                # 残留 kubelet.service unit(即使 /etc/kubernetes 等目录已被手动清理, 只要 unit
+                # 还在, kubespray validate-container-engine 就误判节点曾加入集群 → 卸载
+                # docker/containerd 前先 drain → kubectl get nodes 读 admin.conf(全新部署
+                # 尚未生成) 失败, 单机重装必踩, 见 "Drain node" 报 admin.conf 不存在)
+                [ -f /etc/systemd/system/kubelet.service ] && { echo YES; exit 0; }
+                [ -f /lib/systemd/system/kubelet.service ] && { echo YES; exit 0; }
                 [ -d /etc/kubernetes ] && [ -n \"\$(ls -A /etc/kubernetes 2>/dev/null)\" ] && { echo YES; exit 0; }
                 [ -d /var/lib/etcd/member ] && { echo YES; exit 0; }
                 [ -d /var/lib/kubelet ] && [ -n \"\$(ls -A /var/lib/kubelet 2>/dev/null)\" ] && { echo YES; exit 0; }
@@ -1340,6 +1346,16 @@ print("%s|%s|%s" % (
                 rm -rf /var/run/cilium 2>/dev/null;
                 systemctl stop kubelet 2>/dev/null || true;
                 systemctl stop etcd 2>/dev/null || true;
+                # 移除残留 kubelet systemd unit(/etc/kubernetes 等目录可能已被清空, 但 unit
+                # 文件仍在 → validate-container-engine "Ensure kubelet systemd unit exists"
+                # 误判节点已部署 → 卸载 docker/containerd 前先 drain → kubectl get nodes 读
+                # /etc/kubernetes/admin.conf(全新部署尚未生成) 失败, 单机重装必踩)
+                rm -f /etc/systemd/system/kubelet.service \
+                      /etc/systemd/system/kubelet.service.d \
+                      /lib/systemd/system/kubelet.service \
+                      /lib/systemd/system/kubelet.service.d \
+                      /etc/kubernetes/kubelet.env 2>/dev/null;
+                systemctl daemon-reload 2>/dev/null || true;
                 rm -f /etc/etcd.env /etc/systemd/system/etcd.service 2>/dev/null;
                 true
             '" >/dev/null 2>&1; then

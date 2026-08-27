@@ -419,4 +419,44 @@ kubectl -n <gw-ns> get deploy -l gateway.envoyproxy.io/owning-gateway-name=<gw> 
 
 ## 四、离线部署
 
-> (示例占位) 按模板追加。
+### 1. 【单机/重装】`Drain node` → `Remove-node | List nodes` 报 `error: stat /etc/kubernetes/admin.conf: no such file or directory`
+
+**症状:** kubespray `cluster.yml` 跑到 `container-engine/validate-container-engine`
+(`tasks/main.yml:112` "Drain node") 后失败:
+
+```
+fatal: [cmxgpu-1-232]: FAILED! => {"cmd": ["/usr/local/bin/kubectl", "--kubeconfig",
+"/etc/kubernetes/admin.conf", "get", "nodes", ...],
+"stderr": "error: stat /etc/kubernetes/admin.conf: no such file or directory"}
+```
+
+**根因:** 节点之前用 **docker** 部署过 k8s,残留了 `/etc/systemd/system/kubelet.service`
+unit + 正在运行的 docker。本次 `container_manager=containerd`,kubespray 检测到 docker
+在运行 → 进入 "Uninstall docker" 流程;但该流程 drain 前的守卫条件是
+`kubelet_systemd_unit_exists.stat.exists`(残留 unit 还在 → 误判"节点曾加入集群")。
+drain 会 `kubectl get nodes --kubeconfig /etc/kubernetes/admin.conf`,而全新部署/reset 后
+admin.conf 尚未生成(由 kubeadm init 在后置任务创建)→ 必失败。
+
+**修复(已并入 `cubestack-offline.sh` 的 `reset_kubernetes_if_needed`):**
+- 探针新增检测残留 kubelet unit(`/etc/systemd/system/kubelet.service` 等), 即使
+  `/etc/kubernetes`、`/var/lib/kubelet` 等目录已被手动清理也能触发 reset;
+- reset 清理命令新增删除 kubelet unit 文件(`/etc/systemd/system/kubelet.service[.d]`、
+  `/lib/systemd/system/kubelet.service[.d]`、`/etc/kubernetes/kubelet.env`) +
+  `systemctl daemon-reload`。
+
+kubelet unit 移除后,`validate-container-engine` 检测不到 kubelet → 跳过 drain → 直接
+卸载 docker(由 kubespray 处理),部署继续。
+
+**手动急救(不想重跑 deploy 前先清理节点):**
+```bash
+ssh <user>@<node> "sudo bash -c '
+systemctl stop kubelet 2>/dev/null || true
+rm -f /etc/systemd/system/kubelet.service /etc/systemd/system/kubelet.service.d \\
+      /lib/systemd/system/kubelet.service /lib/systemd/system/kubelet.service.d \\
+      /etc/kubernetes/kubelet.env
+systemctl daemon-reload'"
+```
+docker 不用手动卸载, 留给 kubespray "Remove Docker" 流程处理。
+
+> 排查线索: 先确认节点是否残留旧容器运行时/kubelet unit ——
+> `ssh <user>@<node> "systemctl is-active docker kubelet; ls /etc/systemd/system/kubelet.service"`

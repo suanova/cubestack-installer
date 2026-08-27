@@ -14,6 +14,14 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
+# ⚠ 裸金属集群不初始化宿主网络: VM 网桥/NAT 是否需要, 由"是否有虚拟机要创建"
+# (tools/vm/vm-nodes.conf 是否定义节点)决定。cluster.conf 不区分 VM/裸金属,
+# 因此主程序不按节点类型判断 —— 这里统一用 vm_conf_has_nodes 判定。
+if ! vm_conf_has_nodes; then
+    say "未定义任何虚拟机(tools/vm/vm-nodes.conf 无节点), 跳过宿主网络初始化(纯裸金属集群)"
+    exit 0
+fi
+
 say "初始化宿主网络 (NET_MODE=${NET_MODE:-bridge}) ..."
 case "${NET_MODE:-bridge}" in
     bridge)

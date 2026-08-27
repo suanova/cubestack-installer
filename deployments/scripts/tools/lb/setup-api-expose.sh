@@ -1,0 +1,107 @@
+#!/bin/bash
+# ============================================================
+# setup-api-expose.sh — 宿主机 K8s API 入口 DNAT(6443 → 第一个 master)
+# ------------------------------------------------------------
+# 用途: kubespray 生成的 admin.conf 证书 SAN 通常含 API_DOMAIN(如 k8s-api.nova.local)
+#       但不含 master 直连 IP(如 10.244.1.11)。宿主侧要让 kubectl/helm 能经 API_DOMAIN
+#       访问集群, 需要:
+#         1) /etc/hosts: API_DOMAIN → API_IP(含 VM 时=宿主机物理 IP)
+#         2) 宿主机 DNAT:  API_IP:6443 → <first master>:6443 (让发往宿主机 6443 的流量转到 master)
+#   本脚本幂等配置该 DNAT(重复执行安全), 并校验 API 可达。
+# 用法: sudo ./setup-api-expose.sh [--delete]
+# 数据源: config/cluster.conf (API_DOMAIN / API_IP / NODES)
+# ============================================================
+set -euo pipefail
+
+# shellcheck source=lib-common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
+load_config
+
+[ "$(id -u)" -eq 0 ] || { err "需要 root: sudo $0"; exit 1; }
+
+MODE="${1:-add}"
+PORT=6443
+
+# 解析第一个 master
+FIRST_MASTER=""
+for line in "${NODES[@]:-}"; do
+    [ -z "${line}" ] && continue
+    node_parse "${line}"
+    [ "${NODE_ROLE}" = "master" ] || continue
+    FIRST_MASTER="${NODE_IP}"; break
+done
+[ -n "${FIRST_MASTER}" ] || { err "cluster.conf 中无 master 节点"; exit 1; }
+
+[ -n "${API_IP}" ] || { err "API_IP 未派生(需 load_config 提供)"; exit 1; }
+[ -n "${API_DOMAIN}" ] || API_DOMAIN="k8s-api.nova.local"
+
+# /etc/hosts 确保 API_DOMAIN → API_IP
+if grep -qE "^${API_IP}[[:space:]]+${API_DOMAIN}([[:space:]]|$)" /etc/hosts 2>/dev/null; then
+    ok "/etc/hosts 已有 ${API_DOMAIN} → ${API_IP}"
+else
+    # 删除旧域名行再写正确 IP(幂等)
+    re="$(echo "${API_DOMAIN}" | sed 's/\./\\./g')"
+    sed -i -E "/[[:space:]]${re}([[:space:]]|$)/d" /etc/hosts
+    echo "${API_IP} ${API_DOMAIN}" >> /etc/hosts
+    ok "/etc/hosts 写入 ${API_DOMAIN} → ${API_IP}"
+fi
+
+# ---------------- DNAT 管理 ----------------
+# 发往 API_IP:6443 的流量需 DNAT 到 first master。两类来源走不同链:
+#   · 外部/节点 → 宿主机: PREROUTING 链
+#   · 宿主机本机 → 自身物理 IP: OUTPUT 链(本机自访问不经 PREROUTING, 必须也在 OUTPUT 加 DNAT)
+# 两条都要, 否则宿主机 kubectl/curl 经 API_DOMAIN(解析到自身)仍不可达。
+# ★ 先清理旧 IP 残留: 安装环境 IP 会变, 删除所有旧 dport 6443 的 DNAT(不管旧目标),
+#   再添加当前目标, 避免旧 IP 规则残留劫持流量(PREROUTING + OUTPUT 都清)。
+dnat_purge_old() {   # <chain> 删除该链上所有 6443 DNAT
+    local chain="$1" h
+    while read -r h; do
+        [ -n "${h}" ] || continue
+        iptables -t nat -D "${chain}" ${h} 2>/dev/null && warn "已删除旧 ${chain} DNAT: ${h}"
+    done < <(iptables -t nat -L "${chain}" -n --line-numbers 2>/dev/null \
+                | grep -E "dpt:${PORT}.*to:.*:${PORT}" \
+                | sed -E 's/^[0-9]+[[:space:]]+//')
+}
+
+dnat_add() {   # <chain> 幂等添加 DNAT
+    local chain="$1"
+    if iptables -t nat -L "${chain}" -n 2>/dev/null | grep -qE "dpt:${PORT}.*to:${FIRST_MASTER}:${PORT}"; then
+        ok "  ${chain} DNAT 已存在: ${API_IP}:${PORT} → ${FIRST_MASTER}:${PORT}"
+        return
+    fi
+    iptables -t nat -A "${chain}" -d "${API_IP}/32" -p tcp --dport "${PORT}" -j DNAT --to-destination "${FIRST_MASTER}:${PORT}"
+    ok "已添加 ${chain} DNAT: ${API_IP}:${PORT} → ${FIRST_MASTER}:${PORT}"
+}
+
+if [ "${MODE}" = "delete" ]; then
+    for c in PREROUTING OUTPUT; do
+        if iptables -t nat -L "${c}" -n 2>/dev/null | grep -qE "dport ${PORT}.*to:${FIRST_MASTER}:${PORT}"; then
+            iptables -t nat -D "${c}" -d "${API_IP}/32" -p tcp --dport "${PORT}" -j DNAT --to-destination "${FIRST_MASTER}:${PORT}"
+            ok "已删除 ${c} DNAT: ${API_IP}:${PORT} → ${FIRST_MASTER}:${PORT}"
+        else
+            ok "无 ${c} 的该 DNAT, 跳过"
+        fi
+    done
+    exit 0
+fi
+
+# add: 先清旧 IP 残留, 再幂等添加(PREROUTING + OUTPUT, 宿主机自访问也可达)
+dnat_purge_old PREROUTING
+dnat_purge_old OUTPUT
+dnat_add PREROUTING
+dnat_add OUTPUT
+
+# 校验: 经 API_DOMAIN(宿主机 DNAT)访问 API 应 200
+say "校验 https://${API_DOMAIN}:${PORT}/version ..."
+READY=0
+for _t in $(seq 1 10); do
+    if curl -sk -m 8 -o /dev/null -w "%{http_code}" "https://${API_DOMAIN}:${PORT}/version" 2>/dev/null | grep -qE "200"; then
+        READY=1; break
+    fi
+    sleep 2
+done
+if [ "${READY}" = "1" ]; then
+    ok "API 可达: https://${API_DOMAIN}:${PORT}/version (经宿主机 DNAT → ${FIRST_MASTER})"
+else
+    warn "API 经 ${API_DOMAIN}:${PORT} 暂不可达(可稍后重试; 检查 DNAT 与 master apiserver 状态)"
+fi

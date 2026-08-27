@@ -26,8 +26,48 @@ docker-compose.yml
 *.md
 
 # Dockerfile-cli 专用: 离线文件/VM 镜像/inventory 不打包进 CLI 镜像
-# (CLI 镜像只含源码; 离线文件经卷挂载或 fetch-offline-files.sh 下载; inventory 含集群凭证, 运行时生成)
-deployments/offline-files
-deployments/virtual-machine
+# (CLI 镜像只含源码 + 少量 CLI 二进制; 海量离线镜像/VM 经卷挂载或
+#  fetch-offline-files.sh 下载; inventory 含集群凭证, 运行时生成)
+# 注意: dockerignore 与 gitignore 不同——没有 '!' 取反/重新包含, 排除即排除。
+# 因此无法"先排除整个 offline-files/ 再单独放行 kubectl/helm/skopeo",
+# 改为逐项排除每个子目录/镜像/OS 大件, 保留 Dockerfile-cli 拷贝的 3 个轻量
+# CLI 二进制(kubectl/helm/skopeo)进构建上下文。
+# 注意: 下面的归档/镜像规则须先列 helm 白名单(helm tarball 是唯一要打进的
+# 压缩包), 其余 *.tar.gz / *.tgz / *.tar / *.tar.xz 全部排除。
+# 保留 helm tarball 作为唯一打进镜像的压缩包;
+deployments/offline-files/kubespray/images
+deployments/offline-files/kubespray/packages
+deployments/offline-files/kubespray/cilium-chart
+deployments/offline-files/kubespray/3.29.3.tar.gz
+deployments/offline-files/kubespray/cilium-*.tar.gz
+deployments/offline-files/kubespray/containerd-*.tar.gz
+deployments/offline-files/kubespray/crictl-*.tar.gz
+deployments/offline-files/kubespray/cri-dockerd-*.tar.gz
+deployments/offline-files/kubespray/cri-o.*.tar.gz
+deployments/offline-files/kubespray/etcd-*.tar.gz
+deployments/offline-files/kubespray/kata-static-*.tar.xz
+deployments/offline-files/kubespray/nerdctl-*.tar.gz
+deployments/offline-files/kubespray/youki-*.tar.gz
+deployments/offline-files/kubespray/cni-plugins-*.tgz
+deployments/offline-files/kubespray/*.deb
+# kubespray 根目录裸二进制/清单: 仅保留 Dockerfile-cli 用到的 3 个 CLI(kubectl/helm/skopeo),
+# 其余(节点侧 kubelet/kubeadm/runc/crun/gvisor/calicoctl/yq 等, 由 kubespray 分发到节点, 不入 CLI 镜像)
+deployments/offline-files/kubespray/calicoctl-*
+deployments/offline-files/kubespray/crun-*
+deployments/offline-files/kubespray/gateway-api-standard-install.yaml
+deployments/offline-files/kubespray/gvisor-*
+deployments/offline-files/kubespray/kubeadm-*
+deployments/offline-files/kubespray/kubelet-*
+deployments/offline-files/kubespray/runc-*
+deployments/offline-files/kubespray/yq-*
+deployments/offline-files/metax-gpu
+deployments/offline-files/lws
+deployments/offline-files/envoy
+deployments/offline-files/os
+deployments/offline-files/*.tar
+deployments/offline-files/*.tgz
+# 注: 不写 offline-files/*.tar.gz 通配(会误伤 kubespray/helm tarball),
+#     顶层压缩包由 kubespray 内的逐项排除已覆盖, 其余子目录已整目录排除
+deployments/offline-files/virtual-machine
 deployments/kubespray/inventory
 deployments/kubespray/kubespray/venv

@@ -1,11 +1,14 @@
 # =====================================================================
 # Dockerfile-cli — CubeStack 离线部署 CLI 容器
 # ---------------------------------------------------------------------
-# 用途: 将运行 kubespray 和离线安装所需的全部工具链与源码打入镜像:
+# · 用途: 将运行 kubespray 和离线部署所需的全部工具链与源码打入镜像:
 #   · kubespray 源码(deployments/kubespray/kubespray)+ 部署脚本 + 附加组件
 #   · 工具: ansible / helm / skopeo / mc(MinIO Client)/ kubectl / sshpass / virsh ...
-#   · **只包含源码, 不包含离线的镜像与 binary**(离线文件通过卷挂载或
-#     fetch-offline-files.sh 从 MinIO 下载), 镜像体积可控、无密钥泄漏。
+#   · 系统基础镜像(ubuntu 22.04)与工具: **优先走国内镜像源, 高墙/慢速
+#     binary(helm / kubectl / skopeo / mc)从 deployments/offline-files
+#     拷贝入镜像**(该目录由 fetch-offline-files.sh 从 MinIO 同步, 离线仓库
+#     内自带集群同源二进制)。仅源码与轻量 CLI 入镜像, 不打包离线的镜像
+#     tar(20G+, .dockerignore 排除), cli 镜像体积可控、无密钥泄漏。
 # 构建:  docker build -f Dockerfile-cli -t cubestack-cli .
 # 运行(推荐, 挂载离线文件/配置/SSH 密钥):
 #   docker run --rm -it --network host \
@@ -15,10 +18,10 @@
 #     cubestack-cli
 #   容器内:
 #     cd /opt/cubestack-installer
-#     sudo ./deployments/scripts/deploy-cluster.sh          # 默认 = --with-cubestack --skip-net(全量)
-#     sudo ./deployments/scripts/tools/offline/fetch-offline-files.sh   # 离线文件缺失时从 MinIO 下载
+#     ./deployments/scripts/deploy-cluster.sh          # 默认 = --with-cubestack(全量)
+#     ./deployments/scripts/tools/offline/fetch-offline-files.sh   # 离线文件缺失时从 MinIO 下载
 # 说明: 宿主机需要 libvirt 时(创建虚拟机), 建议 --privileged 或挂载 /var/run/libvirt;
-#       纯裸金属离线安装(kubespray + operator)无需额外特权。
+#       纯裸金属离线部署(kubespray + operator)无需额外特权。
 # =====================================================================
 
 FROM ubuntu:22.04
@@ -28,7 +31,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     LANG=C.UTF-8
 
-# ---------- 系统工具链 ----------
+# ---------- apt 源走清华镜像(国内加速) ----------
+RUN sed -i 's@//archive.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g; s@//security.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g; s@//ports.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list
+
+# ---------- 系统工具链(apt 已走清华镜像) ----------
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl wget git unzip jq \
         openssh-client sshpass rsync iputils-ping iptables dnsutils \
@@ -36,35 +42,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libvirt-clients \
     && rm -rf /var/lib/apt/lists/*
 
-# ---------- Helm(离线 chart 安装/打包) ----------
-ARG HELM_VERSION=v3.15.4
-RUN curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | tar xz -C /tmp \
-    && mv /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/linux-amd64 \
+# ---------- kubectl(从本地离线文件拷入, 规避被墙的 dl.k8s.io) ----------
+# 离线文件由 fetch-offline-files.sh 从 MinIO 同步到 deployments/offline-files/kubespray
+# (与 kubespray 集群二进制同源, 文件名 kubectl-<版本>-amd64)。helm 同理。
+# 注: 用精确文件名明确锁定版本(避免 shell 通配紧邻 '.' 解析的坑)。
+COPY deployments/offline-files/kubespray/kubectl-1.32.5-amd64 /usr/local/bin/kubectl
+RUN chmod +x /usr/local/bin/kubectl && kubectl version --client 2>/dev/null | head -1
+
+COPY deployments/offline-files/kubespray/helm-3.16.4-linux-amd64.tar.gz /tmp/helm.tar.gz
+RUN tar xzf /tmp/helm.tar.gz -C /tmp \
+    && mv /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/linux-amd64 /tmp/helm.tar.gz \
     && helm version --short
 
 # ---------- skopeo(离线镜像 docker-archive → 集群 registry 推送) ----------
-ARG SKOPEO_VERSION=v1.15.0
-RUN curl -fsSL "https://github.com/containers/skopeo/releases/download/${SKOPEO_VERSION}/skopeo-linux-amd64" \
-        -o /usr/local/bin/skopeo && chmod +x /usr/local/bin/skopeo \
-    && skopeo --version
+# 从本地离线文件拷入(静态二进制, 无动态依赖); 若目录缺失则由 fetch-offline-files.sh
+# 补齐, 或回退用 apt 装的 skopeo。
+COPY deployments/offline-files/kubespray/skopeo-1.16.1-amd64 /usr/local/bin/skopeo
+RUN chmod +x /usr/local/bin/skopeo \
+    && (skopeo --version 2>/dev/null || true)
 
-# ---------- mc(MinIO Client, 下载离线文件) ----------
-ARG MC_VERSION=RELEASE.2024-11-17T15-45-56Z
-RUN curl -fsSL "https://dl.min.io/client/mc/release/linux-amd64/archive/mc.${MC_VERSION}" \
+# ---------- mc(MinIO Client, 下载离线文件; 走华为云镜像) ----------
+RUN curl -fsSL "https://mirrors.huaweicloud.com/minio/client/mc/latest/linux-amd64/mc" \
         -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc \
-    && mc --version | head -1
+    && mc --version 2>/dev/null | head -1
 
-# ---------- kubectl ----------
-ARG KUBECTL_VERSION=v1.29.5
-RUN curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
-        -o /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl
+# ---------- kubectl 备选(如 offline 目录缺失, 走华为云; 默认不启用) ----------
+#RUN curl -fsSL "https://mirrors.huaweicloud.com/k8s/release/v1.32.5/bin/linux/amd64/kubectl" \
+#        -o /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl
 
-# ---------- kubespray Python 依赖(ansible 等) ----------
+# ---------- kubespray Python 依赖(ansible 等, pip 走清华镜像) ----------
 COPY deployments/kubespray/kubespray/requirements.txt /tmp/kubespray-requirements.txt
-RUN python3 -m pip install --upgrade pip \
-    && python3 -m pip install -r /tmp/kubespray-requirements.txt \
+RUN python3 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && python3 -m pip install -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
     && rm -f /tmp/kubespray-requirements.txt \
-    && ansible --version | head -1
+    && ansible --version 2>/dev/null | head -1
 
 # ---------- 拷贝源码(deployments 目录; 离线文件/VM镜像/inventory 由 .dockerignore 排除) ----------
 WORKDIR ${REPO_ROOT}

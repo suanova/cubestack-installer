@@ -194,7 +194,7 @@ trap '清理测试资源' EXIT
 ## 常用调度命令
 
 ```bash
-sudo ./deployments/scripts/deploy-cluster.sh                    # 默认 = --with-cubestack --skip-net(全量: 基座 + cluster.conf 启用的全部 operator)
+sudo ./deployments/scripts/deploy-cluster.sh                    # 默认 = --with-cubestack(全量: 基座 + cluster.conf 启用的全部 operator)
 sudo ./deployments/scripts/deploy-cluster.sh --with-k8s --fresh # 仅 kubespray 基座(k8s+metallb+local-path+registry), 不含 operator
 sudo ./deployments/scripts/deploy-cluster.sh --skip gpu_operator   # 全量但排除某个 operator
 sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_operator  # 立即部署单个 operator(自动带基座, 只部署指定的)
@@ -222,7 +222,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 ## 离线部署容器(Dockerfile-cli)与离线文件
 
 - **Dockerfile-cli**: 打包 kubespray 源码 + deployments 目录 + 工具链(ansible/helm/skopeo/mc/kubectl/sshpass/virsh),
-  **不含离线镜像与 binary**(`.dockerignore` 排除 offline-files/virtual-machine/inventory)。构建运行:
+  **不含离线镜像与 binary**(`.dockerignore` 排除 offline-files(含 virtual-machine)/inventory)。构建运行:
   ```bash
   docker build -f Dockerfile-cli -t cubestack-cli .
   docker run --rm -it --network host \
