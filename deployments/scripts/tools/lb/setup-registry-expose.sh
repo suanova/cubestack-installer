@@ -30,8 +30,8 @@ case "${REGISTRY_SERVICE_TYPE:-loadbalancer}" in
         [ -n "${REGISTRY_NODEPORT:-}" ] || { err "未配置 REGISTRY_NODEPORT"; exit 1; }
         for line in "${NODES[@]:-}"; do
             [ -z "${line}" ] && continue
-            IFS=, read -r _r _h ip _rest <<<"${line}"
-            [ -n "${ip}" ] && { REGISTRY_FORWARD_TARGET="${ip}:${REGISTRY_NODEPORT}"; break; }
+            node_parse "${line}"
+            [ -n "${NODE_IP}" ] && { REGISTRY_FORWARD_TARGET="${NODE_IP}:${REGISTRY_NODEPORT}"; break; }
         done
         ;;
     *)

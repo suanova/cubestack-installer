@@ -28,7 +28,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list
 sudo ./deployments/scripts/deploy-cluster.sh
 
 # 2b) 全裸金属集群: 跳过虚拟机网络模块, 直接部署
-#     (所有节点 node_type=bm, 同网段互通, 无需 VM 网桥/SNAT)
+#     (所有节点直接填 5 字段 NODES, 不定义虚拟机, 同网段互通, 无需 VM 网桥/SNAT)
 sudo ./deployments/scripts/deploy-cluster.sh --skip net
 
 # 3) 断点续跑:完成后继续(自动跳过已完成阶段)
@@ -47,7 +47,7 @@ deployments/scripts/
 ├── lib-common.sh              # 公共库:统一配置加载 + IP/MAC 工具(被所有脚本 source)
 │                              #   register_node_to_conf(): awk 幂等注册节点到 cluster.conf
 │                              #   save_state/get_state/clear_state: 断点续跑状态管理
-│                              #   node_is_vm(): 按 node_type 判断 vm/裸金属
+│                              #   node_parse(): 统一解析 NODES(5字段, 不区分虚拟机/裸金属)
 │                              #   统一读取 config/cluster.conf
 ├── lib-module.sh              # ★ 模块框架:递归自动发现 modules/<阶段>/*.sh + 元数据解析 + 调度
 ├── deploy-cluster.sh          # ★ 统一入口(薄壳: 参数解析 + 按模块框架调度, 不内联业务逻辑)
@@ -55,13 +55,13 @@ deployments/scripts/
 │   ├── 01_env/                #   阶段一: 环境准备(发生在部署 kubespray 之前)
 │   │   ├── 01_vm_network.sh   #     VM 宿主网络(bridge/nat)
 │   │   ├── 02_vm_sshkey.sh    #     生成 SSH 密钥
-│   │   ├── 03_vm_create.sh    #     创建虚拟机并启动
+│   │   ├── 03_vm_create.sh    #     创建虚拟机(默认关, 由 tools/vm/create-vms.sh 独立执行)
 │   │   ├── 04_harbor.sh       #     Harbor 镜像仓库(集群外私有仓库, 部署前就绪)
 │   │   ├── 05_lb_haproxy.sh   #     HAProxy API 四层负载均衡(集群部署前准备)
 │   │   └── 06_lb_keepalived.sh#     Keepalived API VIP 高可用(集群部署前准备)
 │   ├── 02_k8s/                #   阶段二: 离线部署 kubespray(不依赖 VM/裸金属)
 │   │   ├── 01_k8s_passwordless.sh  # SSH 免密
-│   │   ├── 02_k8s_workerbm.sh      # 裸金属 worker 装包
+│   │   ├── 02_k8s_workerbm.sh      # worker 节点离线装包(全部 worker)
 │   │   ├── 03_k8s_hosts.sh         # 更新 /etc/hosts
 │   │   ├── 04_k8s_inventory.sh     # 生成 inventory + 同步配置
 │   │   ├── 05_k8s_ntp.sh           # NTP 时间同步
@@ -147,37 +147,35 @@ deployments/scripts/
 |---|---|---|
 | 宿主机 | `HOST_PHYS_IP` `BASE_IMG` `VM_DISK_DIR` | 物理IP(SNAT源)、基础镜像、VM磁盘目录 |
 | 网络规划 | `NET_MODE`(bridge/nat)、`BRIDGE` `BRIDGE_IP` `VM_SUBNET` `PHYS_WORKER_NET` / `NAT_NET_NAME` `NAT_SUBNET` `NAT_GATEWAY` | 双方案网段/网关/SNAT目标 |
-| SSH | `SSH_KEY_NAME` `SSH_DEFAULT_PASSWORD` `VM_SSH_USERS` `WORKER_SSH_PASSWORD` | 密钥、虚拟机预埋密码、免密用户、裸金属密码 |
-| 节点规划 | `NODES=( ... )` | 每行一节点,类型由第10字段 `node_type` 决定: vm=虚拟机 / bm=裸金属 |
+| SSH | `SSH_KEY_NAME` `SSH_DEFAULT_PASSWORD` `VM_SSH_USERS` `WORKER_SSH_PASSWORD` | 密钥、默认密码、免密用户 |
+| 节点规划 | `NODES=( ... )` | 每行一节点(5字段, 不区分虚拟机/裸金属); 虚拟机规格见 `tools/vm/vm-nodes.conf` |
+| 离线文件 | `OFFLINE_FILES_DIR` `LOCAL_REPO_DIR` `MINIO_*` | 离线 binary/镜像目录与 MinIO 下载配置(§2.1b) |
 | kubespray | `KUBESPRAY_INV_DIR` `KUBESPRAY_DIR` `UPDATE_ETC_HOSTS` | inventory 输出位置、playbook 位置、是否写 /etc/hosts |
 | NTP 时间同步 | `NTP_ENABLED` `NTP_SERVER` `NTP_UPSTREAM` `NTP_ALLOW` `NTP_MAX_OFFSET_MS` | k8s 部署前的节点时钟一致化(见 §5.8.2) |
 
-### 节点行格式
+### 节点行格式(5字段, 不区分虚拟机/裸金属)
 
 ```
-role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password,node_type
+role,hostname,ip,ssh_user,ssh_password
 ```
-
-`node_type`:`vm`=创建为虚拟机(自动启动) / `bm`=裸金属(不创建 VM,走密码连通+离线装包)。省略时回退推断:master 默认 `vm`,其余按是否有 VM 参数(MAC 非 `-` 且 内存>0)判断。
-
-**全裸金属集群**:所有节点填 `node_type=bm`。部署时需 `--skip net` 跳过 VM 网桥网络初始化(裸金属同网段互通,无需 SNAT/网桥), `--skip vm` 跳过虚拟机创建(自动跳过,但显式跳过更清晰)。示例: `sudo ./deploy-cluster.sh --skip net --with-k8s`。
 
 - `role`: `master`(控制平面) | `worker`(工作节点)
-- `mac`: 显式 MAC,或 `-` 按主机名确定性生成(幂等); 裸金属填 `-`
-- `mem_g/cpu/disk_g`: 仅 master 虚拟机使用; 裸金属填 `0`
-- `ssh_password`: 显式密码,或 `-` 用默认(master→`SSH_DEFAULT_PASSWORD`, worker→`WORKER_SSH_PASSWORD`)
+- `ssh_user`: 节点 SSH 用户名
+- `ssh_password`: `-` = 用默认密码 `SSH_DEFAULT_PASSWORD`(全节点默认一致); 显式密码 = 该节点用此密码(**支持裸金属不同密码场景**)
 
 ```bash
-# 虚拟机节点(自动创建 VM)
 NODES=(
-  "master,cubestack-k8s-master01,10.244.1.11,52:54:00:3b:e9:d2,16,8,50,ubuntu,-,vm"
-)
-# 裸金属节点(不创建 VM, 直接连通)
-NODES=(
-  "master,mxgpu-1-232,10.66.1.232,-,0,0,0,ubuntu,-,bm"
-  "worker,mxgpu-1-154,10.66.1.154,-,0,0,0,ubuntu,-,bm"
+  "master,cubestack-k8s-master01,10.244.1.11,ubuntu,-"
+  "worker,cubestack-k8s-worker01,10.244.2.11,ubuntu,-"
+  "worker,cubestack-k8s-worker02,10.244.2.12,root,独立密码示例"   # 该节点用独立密码
 )
 ```
+
+> ⚠ **虚拟机规格不在此文件**: 需要**创建虚拟机**的节点在 `deployments/scripts/tools/vm/vm-nodes.conf`(10字段:
+> `role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password,node_type`)中定义, 由
+> **`tools/vm/create-vms.sh` 独立执行**(`sudo ./deployments/scripts/tools/vm/create-vms.sh`, 主程序默认不调度),
+> 创建成功后**自动把 5 字段信息注入 cluster.conf 的 NODES**。
+> 主程序(一键部署/各模块)**不判断节点是虚拟机还是裸金属**, 对所有节点一视同仁。旧 10 字段 NODES 格式仍被兼容解析(向后兼容)。
 
 ---
 
@@ -198,7 +196,7 @@ NODES=(
 ### 5.1 deploy-cluster.sh —— 一键部署统一入口(模块化)
 
 ```bash
-sudo ./scripts/deploy-cluster.sh                       # 默认基础设施模块(vm_network/vm_sshkey/vm_create/k8s_passwordless/k8s_workerbm/k8s_hosts/k8s_inventory/k8s_ntp)
+sudo ./scripts/deploy-cluster.sh                       # 默认 = --with-cubestack --skip-net(基座 + 全部启用的 operator)
 sudo ./scripts/deploy-cluster.sh --with-k8s            # 追加 k8s 部署模块(= --enable k8s, 兼容旧名)
 sudo ./scripts/deploy-cluster.sh --steps vm,k8s        # 只运行指定模块(逗号分隔, 旧名自动映射)
 sudo ./scripts/deploy-cluster.sh --skip hosts          # 跳过某模块
@@ -211,7 +209,7 @@ sudo ./scripts/deploy-cluster.sh --list                # 仅打印集群规划(�
 sudo ./scripts/deploy-cluster.sh --fresh               # 清断点续跑状态重跑
 ```
 
-流程按 `modules/*.sh` 文件序号自动发现并执行;每模块完成自动保存状态(断点续跑)。默认模块:网络 → SSH密钥 → 虚拟机创建+启动 → SSH免密 → 裸金属worker装包 → /etc/hosts(可选) → inventory → **NTP 时间同步(在 k8s 前)**。k8s/gpu_operator/lws/haproxy/keepalived 默认关闭,按需 `--enable`/`--steps`/`--phase` 或 cluster.conf 开关启用。
+流程按 `modules/*.sh` 文件序号自动发现并执行;每模块完成自动保存状态(断点续跑)。默认(无参数)= `--with-cubestack --skip-net`:SSH密钥 → SSH免密(全部节点)→ worker离线装包 → /etc/hosts(可选) → inventory → **NTP 时间同步(在 k8s 前)** → kubespray 部署 → 基座 + 启用的 operator。**虚拟机创建由 `tools/vm/create-vms.sh` 独立执行, 主程序不判断节点类型**。gpu_operator 默认启用;其余 operator 默认关,按需 `--enable`/`--steps`/`--phase` 或 cluster.conf 开关启用。
 
 随时可只检查节点时钟偏差(只读, 不写任何东西):
 
@@ -483,7 +481,7 @@ CLUSTER_CONF=/path/to/cluster.conf sudo ./scripts/deploy-cluster.sh --list
 ## 7. 常见问题
 
 - **`net.ipv4.route_localnet` 设置失败(No such file)** — 老内核无此参数,本方案不依赖,脚本已自动跳过并仅告警,可忽略。
-- **worker 连通性检查失败** — 需在 `config/cluster.conf` 填写 `WORKER_SSH_PASSWORD`(或节点行第9字段),脚本才用密码测试裸金属。
+- **worker 连通性检查失败** — 需在 `config/cluster.conf` 配置 `SSH_DEFAULT_PASSWORD`(或 NODES 第5字段节点独立密码),脚本才用密码测试连通。
 - **创建 VM 报"网桥不存在"** — 先 `sudo ./scripts/tools/net/setup-vm-network.sh`,或 `AUTO_SETUP_NET=1` 自动建。
 - **kubespray 部署** — `--with-k8s` 需宿主机已装 `ansible-playbook` 且 `KUBESPRAY_DIR` 指向完整 kubespray 仓库(含 `cluster.yml` 与 `group_vars`)。
 - **离线部署 kube-proxy 报 ImagePullBackOff** — 需先预加载离线镜像到节点 containerd(见第 8 节,`cubestack-offline.sh scale` 已内置此逻辑)。
@@ -514,7 +512,8 @@ cp config/cluster.conf.example config/cluster.conf
 vim config/cluster.conf
 ```
 
-节点格式:`role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password,node_type`(第10字段 `node_type`=vm 虚拟机 / bm 裸金属, 省略时自动推断)
+节点格式(5字段, 不区分虚拟机/裸金属):`role,hostname,ip,ssh_user,ssh_password`(密码 `-` = 默认 `SSH_DEFAULT_PASSWORD`);
+需要创建虚拟机的节点在 `tools/vm/vm-nodes.conf`(10字段, 含 mac/内存/CPU/磁盘)定义, 创建后自动注入 NODES。
 
 **离线镜像预加载(最小集合)**:部署前只把"kubespray 必需镜像"同步到节点 containerd,避免全量 rsync 无关镜像(cilium/flannel/ingress-nginx/dashboard 等)拖慢部署。通过 `cluster.conf` 的 `PRELOAD_IMAGE_PATTERNS` 配置:
 
@@ -613,18 +612,19 @@ bash deployments/kubespray/cubestack-offline.sh scale --limit kube_node
 master 和 worker 全部为裸金属服务器(同网段互通),无需创建 VM 和 VM 网桥网络。
 
 **配置要点**:
-- `cluster.conf` 中所有节点 `node_type=bm`
+- `cluster.conf` 的 NODES 直接填节点(5字段); **不**在 `tools/vm/vm-nodes.conf` 定义任何节点(无 VM)
 - 网络模式 `NET_MODE=bridge`(同网段互通,无需 SNAT)
 - 删去 `BASE_IMG` / `VM_DISK_DIR` 等 VM 相关配置(或留空)
-- SSH 密码需配置正确(`SSH_DEFAULT_PASSWORD`)
+- SSH 密码需配置正确(`SSH_DEFAULT_PASSWORD`; 节点密码不同时用 NODES 第5字段独立密码)
 
 **部署命令**:
 ```bash
 # 查看集群规划
 sudo ./deployments/scripts/deploy-cluster.sh --list
 
-# 一键部署(跳过网络模块, 所有节点直接连通)
-sudo ./deployments/scripts/deploy-cluster.sh --skip net --with-k8s
+# 一键部署(默认 = --with-cubestack --skip-net, 已自动跳过 VM 网络模块)
+sudo ./deployments/scripts/deploy-cluster.sh
 ```
 
-`--skip net` 跳过 VM 网桥/SNAT 初始化(裸金属节点同网段直连,无需转发)。`--skip vm` 也可但非必须(`modules/01_env/03_vm_create.sh` 遇到 `node_type=bm` 会自动跳过)。
+`--skip-net` 跳过 VM 网桥/SNAT 初始化(裸金属节点同网段直连,无需转发);默认模式已自动加 `--skip-net`。
+vm-nodes.conf 无节点时不执行任何虚拟机创建(主程序默认不调度 vm_create)。

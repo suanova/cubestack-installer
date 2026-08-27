@@ -24,3 +24,10 @@ scripts
 Makefile
 docker-compose.yml
 *.md
+
+# Dockerfile-cli 专用: 离线文件/VM 镜像/inventory 不打包进 CLI 镜像
+# (CLI 镜像只含源码; 离线文件经卷挂载或 fetch-offline-files.sh 下载; inventory 含集群凭证, 运行时生成)
+deployments/offline-files
+deployments/virtual-machine
+deployments/kubespray/inventory
+deployments/kubespray/kubespray/venv

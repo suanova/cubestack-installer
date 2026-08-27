@@ -7,7 +7,7 @@
 #   inventory.ini  兼容 installer 后端(UI)风格的 INI(仅参考/后续UI用)
 # 用法: ./gen-inventory.sh                 # 生成全部节点
 #       INV_ROLES=master ./gen-inventory.sh # 仅生成控制平面(先部署master,worker后续加入)
-# 数据源: config/cluster.conf (NODES / SSH_KEY_NAME / KUBESPRAY_INV_DIR / WORKER_SSH_PASSWORD)
+# 数据源: config/cluster.conf (NODES 5字段: role,hostname,ip,ssh_user,ssh_password / SSH_KEY_NAME / KUBESPRAY_INV_DIR)
 # ============================================================
 set -euo pipefail
 
@@ -38,17 +38,17 @@ node_excluded() { # <hostname> → 0=排除
     return 1
 }
 
-MASTERS=()   # role,hostname,ip,mac,mem,cpu,disk,user,pw
+MASTERS=()   # 节点行(5字段)
 WORKERS=()
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    role_included "${role}" || continue
-    node_excluded "${hostname}" && { warn "排除节点: ${hostname}"; continue; }
-    case "${role}" in
+    node_parse "${line}"
+    role_included "${NODE_ROLE}" || continue
+    node_excluded "${NODE_HOSTNAME}" && { warn "排除节点: ${NODE_HOSTNAME}"; continue; }
+    case "${NODE_ROLE}" in
         master) MASTERS+=("${line}") ;;
         worker) WORKERS+=("${line}") ;;
-        *) warn "未知角色 '${role}',跳过节点 ${hostname}" ;;
+        *) warn "未知角色 '${NODE_ROLE}',跳过节点 ${NODE_HOSTNAME}" ;;
     esac
 done
 
@@ -64,12 +64,12 @@ HOSTS_YML="${INV_DIR}/hosts.yml"
     if [ "${#MASTERS[@]}" -gt 0 ]; then
         echo "  hosts:"
         for line in "${MASTERS[@]}"; do
-            IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-            echo "    ${hostname}:"
-            echo "      ansible_host: ${ip}"
-            echo "      ip: ${ip}            # K8s 内部通信使用的 IP"
-            echo "      access_ip: ${ip}     # API Server 对外暴露的 IP"
-            echo "      ansible_user: ${user}"
+            node_parse "${line}"
+            echo "    ${NODE_HOSTNAME}:"
+            echo "      ansible_host: ${NODE_IP}"
+            echo "      ip: ${NODE_IP}            # K8s 内部通信使用的 IP"
+            echo "      access_ip: ${NODE_IP}     # API Server 对外暴露的 IP"
+            echo "      ansible_user: ${NODE_USER}"
             echo "      ansible_ssh_private_key_file: ${SSH_KEY}"
         done
     else
@@ -82,23 +82,22 @@ HOSTS_YML="${INV_DIR}/hosts.yml"
     if [ "${#WORKERS[@]}" -gt 0 ]; then
         echo "  hosts:"
         for line in "${WORKERS[@]}"; do
-            IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-            node_pw="$(node_password worker "${pw}")"
-            echo "    ${hostname}:"
-            echo "      ansible_host: ${ip}"
-            echo "      ip: ${ip}"
-            echo "      access_ip: ${ip}"
-            echo "      ansible_user: ${user}"
+            node_parse "${line}"
+            echo "    ${NODE_HOSTNAME}:"
+            echo "      ansible_host: ${NODE_IP}"
+            echo "      ip: ${NODE_IP}"
+            echo "      access_ip: ${NODE_IP}"
+            echo "      ansible_user: ${NODE_USER}"
             # 优先使用密钥认证(免密); 密钥不存在时回退到密码认证
             if [ -f "${SSH_KEY}" ]; then
                 echo "      ansible_ssh_private_key_file: ${SSH_KEY}"
             fi
-            # 裸金属(物理Worker)用密码认证; 未配置密码则省略(由 kubespray 交互/ssh-agent)
-            if [ -n "${node_pw}" ]; then
-                echo "      ansible_password: ${node_pw}"
-                echo "      ansible_become_password: ${node_pw}"
+            # 密码认证(节点独立密码或默认密码; 未配置则省略, 由 kubespray 交互/ssh-agent)
+            if [ -n "${NODE_PW}" ]; then
+                echo "      ansible_password: ${NODE_PW}"
+                echo "      ansible_become_password: ${NODE_PW}"
             else
-                echo "      # ansible_password: (未配置 WORKER_SSH_PASSWORD)"
+                echo "      # ansible_password: (未配置默认/节点密码)"
             fi
         done
     else
@@ -137,20 +136,20 @@ INI="${INV_DIR}/inventory.ini"
     echo "# 注意: kubespray 的 ansible.cfg 忽略 .ini,实际部署读取 hosts.yml"
     echo "[all]"
     for line in "${MASTERS[@]}" "${WORKERS[@]}"; do
-        IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-        echo "${hostname} ansible_host=${ip} ip=${ip}"
+        node_parse "${line}"
+        echo "${NODE_HOSTNAME} ansible_host=${NODE_IP} ip=${NODE_IP}"
     done
     echo ""
     echo "[kube_control_plane]"
     for line in "${MASTERS[@]}"; do
-        IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-        echo "${hostname}"
+        node_parse "${line}"
+        echo "${NODE_HOSTNAME}"
     done
     echo ""
     echo "[kube_node]"
     for line in "${WORKERS[@]}"; do
-        IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-        echo "${hostname}"
+        node_parse "${line}"
+        echo "${NODE_HOSTNAME}"
     done
     echo ""
     echo "[k8s_cluster:children]"
@@ -161,16 +160,15 @@ INI="${INV_DIR}/inventory.ini"
     echo "ansible_become=true"
     echo "ansible_become_user=root"
     echo "ansible_ssh_private_key_file=${SSH_KEY}"
-    # 各 worker 的密码(如已配置)
+    # 各 worker 的密码(节点独立密码或默认密码)
     for line in "${WORKERS[@]}"; do
-        IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-        node_pw="$(node_password worker "${pw}")"
-        if [ -n "${node_pw}" ]; then
+        node_parse "${line}"
+        if [ -n "${NODE_PW}" ]; then
             echo ""
-            echo "[${hostname}:vars]"
-            echo "ansible_user=${user}"
-            echo "ansible_password=${node_pw}"
-            echo "ansible_become_password=${node_pw}"
+            echo "[${NODE_HOSTNAME}:vars]"
+            echo "ansible_user=${NODE_USER}"
+            echo "ansible_password=${NODE_PW}"
+            echo "ansible_become_password=${NODE_PW}"
         fi
     done
 } > "${INI}"
@@ -179,15 +177,15 @@ ok "已生成 inventory.ini: ${INI}"
 # ---------------- 汇总 ----------------
 echo "---------------------------------------------"
 [ -n "${INV_ROLES}" ] && echo -e "\033[33m(已按 INV_ROLES=${INV_ROLES} 过滤)\033[0m"
-echo -e "\033[36m控制平面(master, 虚拟机):\033[0m ${#MASTERS[@]} 个"
+echo -e "\033[36m控制平面(master):\033[0m ${#MASTERS[@]} 个"
 for line in "${MASTERS[@]}"; do
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    echo "  ${hostname}  ${ip}  (${mem}G/${cpu}C/${disk}G)"
+    node_parse "${line}"
+    echo "  ${NODE_HOSTNAME}  ${NODE_IP}  (user=${NODE_USER})"
 done
-echo -e "\033[36m工作节点(worker, 裸金属):\033[0m ${#WORKERS[@]} 个"
+echo -e "\033[36m工作节点(worker):\033[0m ${#WORKERS[@]} 个"
 for line in "${WORKERS[@]}"; do
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    echo "  ${hostname}  ${ip}"
+    node_parse "${line}"
+    echo "  ${NODE_HOSTNAME}  ${NODE_IP}  (user=${NODE_USER})"
 done
 echo "---------------------------------------------"
 echo "部署命令参考:"

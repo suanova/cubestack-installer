@@ -39,9 +39,9 @@ HOSTS_BLOCK="# >>> cubestack-cluster
 ${API_IP}          ${API_DOMAIN}"
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
+    node_parse "${line}"
     HOSTS_BLOCK="${HOSTS_BLOCK}
-${ip}     ${hostname}"
+${NODE_IP}     ${NODE_HOSTNAME}"
 done
 HOSTS_BLOCK="${HOSTS_BLOCK}
 # <<< cubestack-cluster"
@@ -50,48 +50,48 @@ say "准备物理 GPU worker 节点(登录密钥: ${SSH_KEY}) ..."
 COUNT=0
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    [ "${role}" = "worker" ] || continue
-    [ -z "${ONLY}" ] || [ "${hostname}" = "${ONLY}" ] || continue
+    node_parse "${line}"
+    [ "${NODE_ROLE}" = "worker" ] || continue
+    [ -z "${ONLY}" ] || [ "${NODE_HOSTNAME}" = "${ONLY}" ] || continue
 
     COUNT=$((COUNT + 1))
-    say "── [${hostname}](${ip}) ──"
+    say "── [${NODE_HOSTNAME}](${NODE_IP}) ──"
 
     # 1. 免密检测(root id_rsa) → 并确保 cubestack_k8s 公钥已在 authorized_keys
-    if ${SSH_SUDO} timeout 5 ssh ${SSH_OPTS} -o BatchMode=yes "${user}@${ip}" 'true' >/dev/null 2>&1; then
+    if ${SSH_SUDO} timeout 5 ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" 'true' >/dev/null 2>&1; then
         ok "root id_rsa 免密登录 OK"
     else
         # root id_rsa 免密失败: 尝试密码注入 root id_rsa 公钥
-        PWD="${WORKER_SSH_PASSWORD:-}"
-        [ -n "${PWD}" ] || { warn "免密失败且无密码,跳过 ${hostname}"; continue; }
-        say "注入公钥(密码认证 ${user}@${ip})..."
+        PWD="${NODE_PW:-${WORKER_SSH_PASSWORD:-}}"
+        [ -n "${PWD}" ] || { warn "免密失败且无密码,跳过 ${NODE_HOSTNAME}"; continue; }
+        say "注入公钥(密码认证 ${NODE_USER}@${NODE_IP})..."
         PUBKEY="$(sudo cat /root/.ssh/id_rsa.pub 2>/dev/null)"
         SSHPASS="${PWD}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             -o ConnectTimeout=10 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-            "${user}@${ip}" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '${PUBKEY}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" 2>/dev/null \
-            && ok "root 公钥已注入" || { warn "公钥注入失败,跳过 ${hostname}"; continue; }
+            "${NODE_USER}@${NODE_IP}" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '${PUBKEY}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" 2>/dev/null \
+            && ok "root 公钥已注入" || { warn "公钥注入失败,跳过 ${NODE_HOSTNAME}"; continue; }
     fi
 
     # 1b. 确保 cubestack_k8s 公钥在 authorized_keys(kubespray 统一用此密钥连接)
     #     先删除旧的 cubestack-cluster 行(grep -F 会因注释误判存在), 再追加正确公钥
     say "注入 cubestack_k8s 公钥(幂等)..."
     CSPUBKEY="$(cat "${SSH_KEY_DIR}/${SSH_KEY_NAME}.pub" 2>/dev/null)"
-    ${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes "${user}@${ip}" \
+    ${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" \
         "sed -i '/cubestack-cluster/d' ~/.ssh/authorized_keys 2>/dev/null; echo '${CSPUBKEY}' >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys" 2>/dev/null \
         && ok "cubestack_k8s 公钥已就绪" || warn "cubestack_k8s 公钥注入失败"
 
     # 2. 安装离线包(用 root id_rsa)
     say "安装离线包..."
-    ROOT_SSH=1 bash "${SCRIPT_DIR}/tools/node/install-worker-packages.sh" "${ip}" "${user}" || warn "离线包安装失败"
+    ROOT_SSH=1 bash "${SCRIPT_DIR}/tools/node/install-worker-packages.sh" "${NODE_IP}" "${NODE_USER}" || warn "离线包安装失败"
 
     # 3. 推送 /etc/hosts
     say "更新 /etc/hosts ..."
-    ${SSH_SUDO} timeout 30 ssh ${SSH_OPTS} "${user}@${ip}" "sudo bash -c '
+    ${SSH_SUDO} timeout 30 ssh ${SSH_OPTS} "${NODE_USER}@${NODE_IP}" "sudo bash -c '
         sed -i \"/# >>> cubestack-cluster/,/# <<< cubestack-cluster/d\" /etc/hosts
         sed -i -E \"/nova-k8s-(master|node)/d; /mxgpu-[0-9]/d; /k8s-api\\\\.nova\\\\.local/d\" /etc/hosts
         echo \"${HOSTS_BLOCK}\" >> /etc/hosts
     '" 2>&1 && ok "hosts 已更新" || warn "hosts 更新失败"
-    vlog "  校验: ${user}@${ip} hostname = $(${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes "${user}@${ip}" 'hostname' 2>/dev/null)"
+    vlog "  校验: ${NODE_USER}@${NODE_IP} hostname = $(${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" 'hostname' 2>/dev/null)"
 done
 
 [ "${COUNT}" -eq 0 ] && { warn "未处理任何 worker 节点"; exit 1; }

@@ -46,15 +46,16 @@ VM_SSH_USERS="${VM_SSH_USERS:-root ubuntu}"
 WORKER_SSH_PASSWORD="${WORKER_SSH_PASSWORD:-}"
 
 # ---------------- 1.4 节点规划(依赖: 1.1~1.3 已就绪) ----------------
-# 格式: role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password,node_type
+# 格式(5字段, 不区分虚拟机和裸金属): role,hostname,ip,ssh_user,ssh_password
 #   role: master | worker
-#   node_type: vm=虚拟机(自动创建+启动) | bm=裸金属(不创建VM, 走密码连通+装包)
-#   省略 node_type 时回退推断: master 默认 vm; 其余按是否有 VM 参数(mac 非"-"且 内存>0)
-#   mac: 显式或"-"(自动); 密码"-"=用默认
+#   ssh_password: "-" = 用默认密码 SSH_DEFAULT_PASSWORD(全节点默认一致);
+#                 显式密码 = 该节点用此密码(支持裸金属不同密码场景)
+#   ⚠ 虚拟机规格(mac/内存/CPU/磁盘)不在本文件: 需要创建虚拟机的节点在
+#     deployments/scripts/tools/vm/vm-nodes.conf 中定义(10字段), 创建成功后自动注入本 NODES(5字段)。
 NODES=(
-  "master,cubestack-k8s-master01,10.244.1.11,52:54:00:00:00:01,8,4,50,ubuntu,-,vm"
-  "worker,cubestack-k8s-worker01,10.244.2.11,52:54:00:00:00:11,8,4,50,ubuntu,-,vm"
-  "worker,cubestack-k8s-worker02,10.244.2.12,52:54:00:00:00:12,8,4,50,ubuntu,-,vm"
+  "master,cubestack-k8s-master01,10.244.1.11,ubuntu,-"
+  "worker,cubestack-k8s-worker01,10.244.2.11,ubuntu,-"
+  "worker,cubestack-k8s-worker02,10.244.2.12,ubuntu,-"
 )
 
 # ---------------- 1.5 节点组(依赖: 1.4 节点; 配合 --only 使用) ----------------
@@ -90,11 +91,21 @@ HARBOR_STORAGE_CLASS="${HARBOR_STORAGE_CLASS:-local-path}"  # 预留: 数据持�
 # 注意: ${CLUSTER_NAME} 由 lib-common.sh 自动解析(环境变量或默认 cubestack-cluster)
 KUBESPRAY_INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}"
 KUBESPRAY_DIR="${KUBESPRAY_DIR:-${REPO_ROOT}/deployments/kubespray/kubespray}"
-# 离线资源缓存根目录(二进制/镜像); 各组件离线子目录: kubespray / metax-gpu / lws 等
+# 离线资源缓存根目录(二进制/镜像); 各组件离线子目录: kubespray / metax-gpu / lws / envoy 等
 OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files}"
 # kubespray 离线仓库(镜像 tar + 二进制; 已从 repository/<cluster> 迁到 offline-files/kubespray)
 LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}/kubespray}"
 UPDATE_ETC_HOSTS="${UPDATE_ETC_HOSTS:-0}"
+
+# ---------------- 2.1b 离线文件下载(MinIO, 可选) ----------------
+# 离线文件缺失时, 用 tools/offline/fetch-offline-files.sh 从 MinIO 下载到 OFFLINE_FILES_DIR;
+# 需要 mc(MinIO Client, 见 Dockerfile-cli)。不配置则手工拷贝离线文件。
+MINIO_ALIAS="${MINIO_ALIAS:-minio}"                  # mc alias 名
+MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"                 # MinIO 服务地址(如 https://minio.example.com)
+MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-}"             # AccessKey
+MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-}"             # SecretKey
+MINIO_BUCKET="${MINIO_BUCKET:-cubestack-offline}"    # 离线文件桶
+MINIO_REMOTE_DIR="${MINIO_REMOTE_DIR:-kubespray}"    # 桶内目录(与 OFFLINE_FILES_DIR 结构对应)
 
 # ---------------- 2.2 NTP 时间同步(依赖: 1.1 宿主机为权威源; k8s 部署前) ----------------
 # 由 modules/02_k8s/05_k8s_ntp.sh 执行(k8s 阶段默认启用步, 可重复):

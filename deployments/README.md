@@ -6,6 +6,12 @@
 - **脚本开发规范**(模块命名/元数据/新增模块流程):见 [`docs/scripts-development-spec.md`](../docs/scripts-development-spec.md)
 - **P1/P2/P3 全阶段组件规划与进度追踪**:见 [`docs/cluster-components-plan.md`](../docs/cluster-components-plan.md)
 - **kubespray 离线工具**(多集群):见 [`deployments/kubespray/README.md`](kubespray/README.md)
+- **CLI 容器(可选)**: [`Dockerfile-cli`](../Dockerfile-cli) 打包 kubespray 源码 + 部署脚本 + 工具链
+  (ansible/helm/skopeo/mc/kubectl 等, 不含离线镜像/binary), 可在容器内直接离线安装。
+
+> ⚠ **节点格式(新)**: cluster.conf 的 NODES 为 **5 字段**(`role,hostname,ip,ssh_user,ssh_password`, 不区分虚拟机/裸金属;
+> 密码 `-` = 默认 `SSH_DEFAULT_PASSWORD`)。需要**创建虚拟机**的节点在
+> `deployments/scripts/tools/vm/vm-nodes.conf`(10字段)定义, 创建后自动注入 NODES。详见 `scripts/README.md` §3。
 
 ---
 
@@ -72,8 +78,9 @@
                │ SSH / libvirt / ansible
 ┌──────────────▼──────────────────────────────────────────────────┐
 │ 集群节点(mixed: VM + 裸金属可混部)                               │
-│  node_type=vm: 由 libvirt 创建虚拟机(测试环境)                   │
-│  node_type=bm: 裸金属直连(生产环境, 跳过 VM 创建)                │
+│  · cluster.conf NODES(5字段)不区分虚拟机/裸金属                  │
+│  · 虚拟机: tools/vm/vm-nodes.conf 定义规格, libvirt 创建(测试环境) │
+│  · 裸金属: 不在 vm-nodes.conf 中的节点, 直连(生产环境)            │
 └──────────────┬──────────────────────────────────────────────────┘
                │ kubespray cluster.yml / scale.yml
 ┌──────────────▼──────────────────────────────────────────────────┐
@@ -213,7 +220,7 @@ ${REPO_ROOT}/deployments/virtual-machine/cloud-images/
 
 - **制作**:`sudo ./deployments/scripts/tools/vm/create-vm-template.sh`(基于 Ubuntu 22.04 cloud 镜像,内置 ubuntu/root 密码 `k8s@2026`、SSH、时区 Asia/Shanghai、chrony 及 kubespray 离线所需系统包)。
 - **VM 磁盘目录**:`VM_DISK_DIR`(默认 `/k8s/vm-disks`),每台虚拟机一个磁盘文件,由 `create-libvirt-vm.sh` 创建。
-- **仅测试环境需要**:生产裸金属(`node_type=bm`)不创建虚拟机,不依赖本目录。
+- **仅测试环境需要**:纯裸金属生产集群不创建虚拟机,不依赖本目录(vm-nodes.conf 无节点即可)。
 
 ### 5.3 集群 inventory(inventory/)
 
@@ -243,8 +250,9 @@ vim deployments/config/cluster.conf            # 修改 宿主机IP/网段/节�
 # 2. (可选)制作虚拟机黄金镜像(测试环境)
 sudo ./deployments/scripts/tools/vm/create-vm-template.sh
 
-# 3. 一键部署
-sudo ./deployments/scripts/deploy-cluster.sh --with-k8s
+# 3. 一键部署(默认 = --with-cubestack --skip-net: 基座 + cluster.conf 启用的全部 operator)
+sudo ./deployments/scripts/deploy-cluster.sh
 ```
 
-> 全裸金属集群:`node_type=bm` + `--skip net --with-k8s`;分步部署、扩容、跨网段 worker、组件安装等场景见 `deployments/scripts/README.md` 第 8 节。
+> 全裸金属集群:vm-nodes.conf 不定义节点即可(默认已自动 `--skip-net`);仅基座用 `--with-k8s`;
+> 分步部署、扩容、跨网段 worker、组件安装等场景见 `deployments/scripts/README.md` 第 8 节。

@@ -416,18 +416,18 @@ fi
 say "  检测 master 节点 GPU(mx-smi)并条件解除不可调度 ..."
 for _line in "${NODES[@]:-}"; do
     [ -z "${_line}" ] && continue
-    IFS=, read -r _role _hn _ip _rest <<<"${_line}"
-    [ "${_role}" = "master" ] && [ -n "${_ip}" ] || continue
+    node_parse "${_line}"
+    [ "${NODE_ROLE}" = "master" ] && [ -n "${NODE_IP}" ] || continue
     _GPUCNT="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${SSH_USER:-ubuntu}@${_ip}" "sudo mx-smi 2>/dev/null | grep 'Attached GPUs' | awk '{print \$NF}'" 2>/dev/null || echo 0)"
+        "${SSH_USER:-ubuntu}@${NODE_IP}" "sudo mx-smi 2>/dev/null | grep 'Attached GPUs' | awk '{print \$NF}'" 2>/dev/null || echo 0)"
     _GPUCNT="$(echo "${_GPUCNT:-0}" | tr -d '[:space:]')"
     if [ "${_GPUCNT:-0}" -gt 0 ] 2>/dev/null; then
-        SSH "${K} taint nodes ${_hn} node-role.kubernetes.io/control-plane- >/dev/null 2>&1" || true
-        SSH "${K} taint nodes ${_hn} node-role.kubernetes.io/master- >/dev/null 2>&1" || true
-        SSH "${K} uncordon ${_hn} >/dev/null 2>&1" || true
-        ok "  master ${_hn}(${_ip}) 检测到 ${_GPUCNT} 张 GPU, 已解除不可调度"
+        SSH "${K} taint nodes ${NODE_HOSTNAME} node-role.kubernetes.io/control-plane- >/dev/null 2>&1" || true
+        SSH "${K} taint nodes ${NODE_HOSTNAME} node-role.kubernetes.io/master- >/dev/null 2>&1" || true
+        SSH "${K} uncordon ${NODE_HOSTNAME} >/dev/null 2>&1" || true
+        ok "  master ${NODE_HOSTNAME}(${NODE_IP}) 检测到 ${_GPUCNT} 张 GPU, 已解除不可调度"
     else
-        say "  master ${_hn}(${_ip}) 未检测到 GPU, 保持默认不可调度"
+        say "  master ${NODE_HOSTNAME}(${NODE_IP}) 未检测到 GPU, 保持默认不可调度"
     fi
 done
 # 等 DS 调度到已解除的 master 并给有 GPU 的 master 打标(gpu-label 先跑)
