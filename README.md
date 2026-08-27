@@ -328,17 +328,32 @@ cubestack-installer/
 宿主网络 → SSH密钥 → 创建 master/worker 虚拟机(自动注册+装包) → 免密 → 生成 inventory → 同步配置 → kubespray 离线部署
 ```
 
-**一键命令:**
+> ⚠ **部署前必读:cluster.conf 必改项(红色=必须改,否则部署失败或异常)**
+>
+> `cluster.conf` 是唯一数据源(所有 IP 不硬编码)。首次使用执行:
+> ```bash
+> cp config/cluster.conf.example config/cluster.conf && vim config/cluster.conf
+> ```
+> **① 节点 NODES(1.4 节,裸金属必须改)**:
+> - 虚拟机集群:由 `tools/vm/create-vms.sh` 创建后**自动注入**,通常无需手改;
+> - **裸金属集群:必须手动填所有节点** `"role,hostname,ip,ssh_user,ssh_password"`。
+> **② SSH 密码(k8s@2026)**:NODES 最后一位 `-` = 用默认 `SSH_DEFAULT_PASSWORD`;不同节点不同密码就写该节点密码。
+> **③ METALLB_POOL(3.1 节,裸金属必须改)**:
+> - 虚拟机集群: `create-vms.sh` 自动推导为 VM 网段,通常无需手改;
+> - **裸金属集群:必须手动填节点物理网段空闲段**(如 `10.66.1.130-139`)。
+> 部署 kubespray 前,脚本会红底醒目提示并 `sleep 15s` 供确认 METALLB_POOL。
+
+**一键命令(默认装全部组件 + kubespray):**
 
 ```bash
 # 从 config/cluster.conf 读取配置(唯一数据源,所有 IP 不硬编码)
 cp config/cluster.conf.example config/cluster.conf && vim config/cluster.conf
 
-# 全流程部署(含 kubespray 离线安装 + cluster.conf 中启用的 operator, 如 GPU_OPERATOR_ENABLED=true → gpu_operator)
-sudo ./deployments/scripts/deploy-cluster.sh --with-cubestack --skip-net   # 裸金属集群加 --skip-net，虚拟机无需该参
-sudo ./deployments/scripts/deploy-cluster.sh --with-k8s --skip-net          # 仅 kubespray 基座(k8s+metallb+local-path+registry)
-sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_operator         # 立即部署某个 operator(自动带基座, 只部署指定的)
-sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator        # 只写 cluster.conf 预启用(不部署, 下次全量生效)
+# 全流程部署(默认 = 装全部组件 + kubespray 离线安装 + cluster.conf 中启用的 operator)
+sudo ./deployments/scripts/deploy-cluster.sh                          # 默认 = --with-cubestack(全量)
+sudo ./deployments/scripts/deploy-cluster.sh --with-k8s             # 仅 kubespray 基座(k8s+metallb+local-path+registry)
+sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_operator   # 立即部署某个 operator(自动带基座, 只部署指定的)
+sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator   # 只写 cluster.conf 预启用(不部署, 下次全量生效)
 ```
 
 **核心脚本:**

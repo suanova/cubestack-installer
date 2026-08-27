@@ -3,6 +3,25 @@
 # 复制为 config/cluster.conf 后按实际环境修改(真实配置已 gitignore):
 #   cp config/cluster.conf.example config/cluster.conf
 # ============================================================
+#
+# ╔════════════════════════════════════════════════════════════════════════╗
+# ║ ⚠⚠⚠  使用前必须修改(红色 = 必须改, 否则部署会失败或异常)  ⚠⚠⚠        ║
+# ╠════════════════════════════════════════════════════════════════════════╣
+# ║ ① NODES(必须改, 见下方 1.4 节):                                        ║
+# ║     格式: "role,hostname,ip,ssh_user,ssh_password"                      ║
+# ║     · 虚拟机集群: 由 create-vms.sh 自动注入, 通常无需手改;              ║
+# ║     · 裸金属集群: 必须手动填写所有节点(主机名/真实IP/SSH用户)。          ║
+# ║ ② 节点 SSH 密码(必须改):                                               ║
+# ║     · NODES 最后一位为 "-" → 用默认密码 SSH_DEFAULT_PASSWORD(k8s@2026); ║
+# ║     · 不同节点不同密码 → 在 NODES 显式写该节点密码。                     ║
+# ║ ③ METALLB_POOL(必须改, 见 3.1 节):                                     ║
+# ║     · 池内 IP 必须与节点同一二层网络且空闲;                             ║
+# ║     · 虚拟机集群: create-vms.sh 自动推导为 VM 网段, 通常无需手改;        ║
+# ║     · 裸金属集群: 必须手动填节点物理网段空闲段(如 10.66.1.130-139)。     ║
+# ║ ④ 执行部署:                                                             ║
+# ║     sudo ./deployments/scripts/deploy-cluster.sh   # 默认装全部组件+kubespray ║
+# ╚════════════════════════════════════════════════════════════════════════╝
+#
 # 组织规则: 分段 = 部署阶段, 顺序即依赖方向(后段依赖前段):
 #   阶段一、宿主机环境(modules/01_env)
 #   阶段二、kubespray 基座(modules/02_k8s + kubespray addon)
@@ -21,7 +40,7 @@
 # ---------------- 1.1 宿主机(Hypervisor) ----------------
 # 宿主机物理 IP(留空=自动检测; 各脚本直接引用该全局变量, 不硬编码)
 HOST_PHYS_IP="${HOST_PHYS_IP:-}"
-BASE_IMG="${BASE_IMG:-${REPO_ROOT}/deployments/virtual-machine/cloud-images/ubuntu2204-k8s-base.qcow2}"
+BASE_IMG="${BASE_IMG:-${REPO_ROOT}/deployments/offline-files/virtual-machine/cloud-images/ubuntu2204-k8s-base.qcow2}"
 VM_DISK_DIR="${VM_DISK_DIR:-/k8s/vm-disks}"
 
 # ---------------- 1.2 网络规划(依赖: 1.1 宿主机 IP) ----------------
@@ -41,7 +60,7 @@ NAT_GATEWAY="${NAT_GATEWAY:-10.245.0.1}"
 # ---------------- 1.3 SSH 配置 ----------------
 SSH_KEY_DIR="${SSH_KEY_DIR:-${HOME}/.ssh}"
 SSH_KEY_NAME="${SSH_KEY_NAME:-cubestack_k8s}"
-SSH_DEFAULT_PASSWORD="${SSH_DEFAULT_PASSWORD:-UgBXAE8nLLFTzYXm}"
+SSH_DEFAULT_PASSWORD="${SSH_DEFAULT_PASSWORD:-k8s@2026}"
 VM_SSH_USERS="${VM_SSH_USERS:-root ubuntu}"
 WORKER_SSH_PASSWORD="${WORKER_SSH_PASSWORD:-}"
 
@@ -159,7 +178,7 @@ K8S_SCALE_ENABLED="${K8S_SCALE_ENABLED:-false}"          # modules/02_k8s/07_k8s
 # ---------------- 3.1 MetalLB 负载均衡地址池(依赖: METALLB_ENABLED + 1.2 网络) ----------------
 # ⚠ 网络需求(Layer2 模式, 重要):
 #   · 池内 IP 必须与集群节点处于同一二层网络(同一子网), 且必须是空闲地址;
-#   · 裸金属集群: **无需 bridge/NAT 网络**(纯物理 L2 直连), 用 --skip-net 跳过 vm_network,
+#   · 裸金属集群: **无需 bridge/NAT 网络**(纯物理 L2 直连), 不初始化宿主机网络,
 #     LB IP 直接在节点物理网卡 ARP 通告 → 池取节点网段空闲段(当前空闲: 10.66.1.130-139);
 #   · 虚拟机集群: 需 bridge(privbr0) 网络, 池取 VM 网段空闲段(如 10.244.2.0/24);
 #   · 依赖 kube_proxy_strict_arp=true(已默认开启)。

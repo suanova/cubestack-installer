@@ -275,6 +275,70 @@ node_password() {
     if [ -n "${pw}" ] && [ "${pw}" != "-" ]; then echo "${pw}"; else node_default_pw "$1"; fi
 }
 
+# ---------------- 集群内置 registry 就绪等待(共享, 防 MetalLB 竞态) ----------------
+# MetalLB Layer2 VIP 出现后, speaker ARP 通告与 kube-proxy DNAT 规则需时间才生效;
+# kubespray 刚部署完时 speaker 冷启动可能被 liveness 误杀重启, registry pod 可能仍在拉镜像,
+# → 所有连 registry 的模块统一用本函数重试(默认 90s, 每 2s), 避免误报不可达。
+# 注: 不能用 ping VIP 判活(ICMP 无 DNAT 规则必回 "port unreachable"), 只能 curl 服务端口。
+# 用法: wait_registry_ready <url> [重试次数=45] → 退出码 0=可达
+wait_registry_ready() {
+    local url="$1" tries="${2:-45}" t
+    for t in $(seq 1 "${tries}"); do
+        curl -s -m 8 "${url}" >/dev/null 2>&1 && return 0
+        [ "${t}" -lt "${tries}" ] && { say "  ${url} 未就绪, 等待第 ${t}/${tries} 次(MetalLB 数据面/registry pod 初始化) ..."; sleep 2; }
+    done
+    return 1
+}
+
+# ---------------- 宿主机 kubectl/helm 访问集群(共享, 防 TLS/DNAT 坑) ----------------
+# 从第一个 master 下载 /etc/kubernetes/admin.conf 并同步到 ~/.kube/config, 同时:
+#   ① server 改写为证书 SAN 内的 API_DOMAIN(k8s-api.nova.local) —— admin.conf 默认
+#      直连 master IP, 证书 SAN 常不含该 IP → 宿主机 kubectl 会 TLS x509 校验失败;
+#   ② 调用 tools/lb/setup-api-expose.sh 幂等配置宿主机 6443→first master 的 DNAT
+#      (PREROUTING + OUTPUT), 让 API_DOMAIN 从宿主机可访问。
+# 所有连 API 的模块(gpu_operator/gpu_lws/envoy_*/...)统一复用本函数, 不各自复制。
+# 用法: sync_kubeconfig → 退出码 0=宿主机可访问集群
+sync_kubeconfig() {
+    local tmp newctx
+    tmp="$(mktemp)"
+    local fm="${FIRST_MASTER:-$(first_master_ip)}"
+    [ -n "${fm}" ] || { rm -f "${tmp}"; err "未找到 master 节点(无法下载 admin.conf)"; return 1; }
+    # admin.conf 属 root(600), scp 会 Permission denied → 用 ssh + sudo cat 读取
+    ssh -i "${SSH_KEY:-${HOME}/.ssh/cubestack_k8s}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "${SSH_USER:-ubuntu}@${fm}" "sudo cat /etc/kubernetes/admin.conf" > "${tmp}" 2>/dev/null \
+        || { rm -f "${tmp}"; return 1; }
+    [ -s "${tmp}" ] || { rm -f "${tmp}"; return 1; }
+    # ★ server 改写为证书 SAN 内的 API_DOMAIN(直连 master IP 不在 SAN → TLS 校验失败)
+    API_DOMAIN="${API_DOMAIN:-k8s-api.nova.local}"
+    sed -i -E "s|(server:[[:space:]]*https?://)[^:/]+(:[0-9]+)|\1${API_DOMAIN}\2|" "${tmp}"
+    mkdir -p "${HOME}/.kube"
+    newctx="$(grep -E '^[[:space:]]*current-context:' "${tmp}" | head -1 | awk '{print $2}')"
+    if [ -f "${HOME}/.kube/config" ]; then
+        # 合并(新 admin.conf 在前, 同名校则新集群优先); 合并失败则直接覆盖
+        KUBECONFIG="${tmp}:${HOME}/.kube/config" kubectl config view --flatten > "${tmp}.merged" 2>/dev/null \
+            && mv "${tmp}.merged" "${HOME}/.kube/config" || cp "${tmp}" "${HOME}/.kube/config"
+    else
+        cp "${tmp}" "${HOME}/.kube/config"
+    fi
+    [ -n "${newctx}" ] && KUBECONFIG="${HOME}/.kube/config" kubectl config use-context "${newctx}" >/dev/null 2>&1 || true
+    # ★ 强制收敛: 合并可能保留旧集群残留(如 lb.k8s.local / 直连 master IP, 不在证书 SAN → TLS 失败)。
+    #   只把当前 context 对应 cluster 的 server 改写为 SAN 内 API_DOMAIN(保留证书校验), 不动其它集群。
+    K="KUBECONFIG=${HOME}/.kube/config kubectl"
+    _ctx="$(${K} config current-context 2>/dev/null || echo "${newctx}")"
+    _cl="$(${K} config view -o jsonpath="{.contexts[?(@.name==\"${_ctx}\")].context.cluster}" 2>/dev/null | head -1)"
+    if [ -n "${_cl}" ]; then
+        ${K} config set-cluster "${_cl}" --server="https://${API_DOMAIN}:6443" >/dev/null 2>&1 || true
+    fi
+    unset _ctx _cl K
+    chmod 600 "${HOME}/.kube/config"
+    rm -f "${tmp}"
+    # 宿主机 DNAT(6443→first master): 让 API_DOMAIN 从宿主机可达(幂等)
+    bash "${SCRIPT_DIR}/tools/lb/setup-api-expose.sh" >/dev/null 2>&1 || \
+        sudo bash "${SCRIPT_DIR}/tools/lb/setup-api-expose.sh" >/dev/null 2>&1 || true
+    # 校验: 经 API_DOMAIN 访问集群
+    KUBECONFIG="${HOME}/.kube/config" timeout 15 kubectl get nodes --no-headers >/dev/null 2>&1
+}
+
 # 节点类型判断(vm=虚拟机 / bm=裸金属): 仅对含类型信息的行(旧格式 / VM 配置文件)有效
 # 用法: node_is_vm <role> <mac> <mem_g> <node_type> → 退出码 0=是虚拟机
 node_is_vm() {
@@ -350,6 +414,39 @@ register_node_to_conf() {
     ' "${conf_file}" > "${conf_file}.tmp" && mv "${conf_file}.tmp" "${conf_file}"
 
     echo -e "\033[32m✅ ${hostname} 已注册到 cluster.conf\033[0m"
+}
+
+# ---------------- 用 VM 集合整体替换 cluster.conf NODES ----------------
+# 创建虚拟机会话结束时, 将 vm-nodes.conf 决定的**全部** 5 字段 VM 条目作为
+# cluster.conf NODES 的唯一内容(整体替换 NODES 区块, 非追加)。cluster.conf
+# 不再区分 vm/bm: 纯虚拟机集群由本函数重建 NODES = 全部 VM; 裸金属集群不跑
+# 创建脚本, 由用户在 cluster.conf 手动维护 5 字段节点。
+# 用法: replace_nodes_to_conf <conf_file> <entry> [<entry> ...]
+#   entry = "role,hostname,ip,ssh_user,ssh_password" (5字段, 密码 "-"=默认)
+#   或通过环境变量 REPLACE_NODES_IFS 传入(条目以换行分隔, 便于带空格密码)。
+replace_nodes_to_conf() {
+    local conf_file="$1"; shift
+    [ -f "${conf_file}" ] || { warn "cluster.conf 不存在: ${conf_file}, 跳过覆盖 NODES"; return 0; }
+    [ -w "${conf_file}" ] || { warn "cluster.conf 不可写: ${conf_file}, 跳过覆盖 NODES"; return 0; }
+
+    local entries=()
+    while [ $# -gt 0 ]; do [ -n "${1}" ] && entries+=("${1}"); shift; done
+    if [ -n "${REPLACE_NODES_IFS:-}" ]; then
+        while IFS= read -r e; do [ -n "${e}" ] && entries+=("${e}"); done <<<"${REPLACE_NODES_IFS}"
+    fi
+
+    # 拼出 NODES 区块新内容(两空格缩进 + 双引号包裹, 换行分隔), 用 awk 整体替换旧条目。
+    local _body=""
+    local e
+    for e in "${entries[@]:-}"; do _body="${_body}  \"${e}\"\n"; done
+    awk -v body="$(printf '%b' "${_body}")" '
+        /^NODES=\(/ { print; in_nodes=1; next }
+        in_nodes && /^\)/ { printf "%s", body; print ")"; in_nodes=0; next }
+        in_nodes { next }               # 丢弃旧的 NODES 条目行
+        { print }
+    ' "${conf_file}" > "${conf_file}.tmp" && mv "${conf_file}.tmp" "${conf_file}"
+
+    ok "已用 ${#entries[@]} 个 VM 节点覆盖 cluster.conf NODES"
 }
 
 # ---------------- 离线文件就绪检查(醒目提示, 不阻断) ----------------

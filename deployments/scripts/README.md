@@ -32,7 +32,7 @@ sudo ./deployments/scripts/deploy-cluster.sh
 sudo ./deployments/scripts/deploy-cluster.sh --skip net
 
 # 3) 断点续跑:完成后继续(自动跳过已完成阶段)
-sudo ./deployments/scripts/deploy-cluster.sh --skip-net --with-k8s
+sudo ./deployments/scripts/deploy-cluster.sh --with-k8s
 
 # 4) 清状态重新执行
 sudo ./deployments/scripts/deploy-cluster.sh --fresh --with-k8s
@@ -196,7 +196,7 @@ NODES=(
 ### 5.1 deploy-cluster.sh —— 一键部署统一入口(模块化)
 
 ```bash
-sudo ./scripts/deploy-cluster.sh                       # 默认 = --with-cubestack --skip-net(基座 + 全部启用的 operator)
+sudo ./scripts/deploy-cluster.sh                       # 默认 = --with-cubestack(基座 + 全部启用的 operator)
 sudo ./scripts/deploy-cluster.sh --with-k8s            # 追加 k8s 部署模块(= --enable k8s, 兼容旧名)
 sudo ./scripts/deploy-cluster.sh --steps vm,k8s        # 只运行指定模块(逗号分隔, 旧名自动映射)
 sudo ./scripts/deploy-cluster.sh --skip hosts          # 跳过某模块
@@ -209,7 +209,7 @@ sudo ./scripts/deploy-cluster.sh --list                # 仅打印集群规划(�
 sudo ./scripts/deploy-cluster.sh --fresh               # 清断点续跑状态重跑
 ```
 
-流程按 `modules/*.sh` 文件序号自动发现并执行;每模块完成自动保存状态(断点续跑)。默认(无参数)= `--with-cubestack --skip-net`:SSH密钥 → SSH免密(全部节点)→ worker离线装包 → /etc/hosts(可选) → inventory → **NTP 时间同步(在 k8s 前)** → kubespray 部署 → 基座 + 启用的 operator。**虚拟机创建由 `tools/vm/create-vms.sh` 独立执行, 主程序不判断节点类型**。gpu_operator 默认启用;其余 operator 默认关,按需 `--enable`/`--steps`/`--phase` 或 cluster.conf 开关启用。
+流程按 `modules/*.sh` 文件序号自动发现并执行;每模块完成自动保存状态(断点续跑)。默认(无参数)= `--with-cubestack`:宿主机网络(按需) → SSH密钥 → SSH免密(全部节点)→ worker离线装包 → /etc/hosts(可选) → inventory → **NTP 时间同步(在 k8s 前)** → kubespray 部署 → 基座 + 启用的 operator。**虚拟机创建由 `tools/vm/create-vms.sh` 独立执行, 主程序不判断节点类型**。gpu_operator 默认启用;其余 operator 默认关,按需 `--enable`/`--steps`/`--phase` 或 cluster.conf 开关启用。
 
 随时可只检查节点时钟偏差(只读, 不写任何东西):
 
@@ -500,7 +500,7 @@ CLUSTER_CONF=/path/to/cluster.conf sudo ./scripts/deploy-cluster.sh --list
 | 依赖 | 说明 |
 |---|---|
 | 宿主机 | Ubuntu 22.04,已装 `libvirt / virt-install / qemu / virt-customize` |
-| 基础镜像 | `deployments/virtual-machine/cloud-images/ubuntu2204-k8s-base.qcow2`(由 `create-vm-template.sh` 制作,预埋 ubuntu/root 密码 `k8s@2026`、SSH、时区及 kubespray 所需包) |
+| 基础镜像 | `deployments/offline-files/virtual-machine/cloud-images/ubuntu2204-k8s-base.qcow2`(由 `create-vm-template.sh` 制作,预埋 ubuntu/root 密码 `k8s@2026`、SSH、时区及 kubespray 所需包) |
 | 离线资源 | `deployments/offline-files/kubespray/cubestack-cluster/`(路径由 `OFFLINE_FILES_DIR` 指定; 镜像 `images/` + 二进制 + `packages/` 系统包) |
 | kubespray | `deployments/kubespray/kubespray/`(含 `cluster.yml`,Python 依赖可离线/在线安装) |
 
@@ -622,9 +622,9 @@ master 和 worker 全部为裸金属服务器(同网段互通),无需创建 VM �
 # 查看集群规划
 sudo ./deployments/scripts/deploy-cluster.sh --list
 
-# 一键部署(默认 = --with-cubestack --skip-net, 已自动跳过 VM 网络模块)
+# 一键部署(默认 = --with-cubestack)
 sudo ./deployments/scripts/deploy-cluster.sh
 ```
 
-`--skip-net` 跳过 VM 网桥/SNAT 初始化(裸金属节点同网段直连,无需转发);默认模式已自动加 `--skip-net`。
+宿主机网络初始化(VM 网桥/NAT, 若需)由 `tools/net/setup-vm-network.sh` 按需独立执行;默认部署不再自动跳过。
 vm-nodes.conf 无节点时不执行任何虚拟机创建(主程序默认不调度 vm_create)。
