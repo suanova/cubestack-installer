@@ -16,7 +16,7 @@
 #   k8s 阶段:  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp
 #              k8s_deploy(默认关) k8s_scale(默认关)
 #   addon 阶段: gpu_operator gpu_lws k8s_registry prometheus ceph ceph_csi
-#              envoy_gateway keycloak kueue kubevirt lustre_csi   (01~19 中间件, 默认关)
+#              envoy_gateway envoy_ai_gateway keycloak kueue kubevirt lustre_csi   (01~19 中间件, 默认关)
 #              cubestack_apps(20 起自研模块占位, 默认关)
 #   验证:      verify_<组件>(自动发现; --steps verify 不指定 operator 默认执行全部 verify_*)
 #
@@ -30,6 +30,7 @@
 #   sudo ./deploy-cluster.sh --steps vm_create,k8s_deploy   # 只跑指定模块
 #   sudo ./deploy-cluster.sh --skip k8s_hosts --with-cubestack   # 跳过某模块的全量部署
 #   sudo ./deploy-cluster.sh --enable gpu_operator,lws      # 单独启用默认关闭的 operator
+#   sudo ./deploy-cluster.sh --enable envoy_gateway,envoy_ai_gateway   # Envoy 网关二件套(EG 基座 + AI 扩展, AI 依赖 EG 先装)
 #   sudo ./deploy-cluster.sh --phase k8s                    # 仅运行 k8s 阶段
 #   sudo ./deploy-cluster.sh --only <host> --with-k8s       # 仅处理指定节点
 #   sudo ./deploy-cluster.sh --with-scale                   # 扩容(新节点已在 cluster.conf)
@@ -60,7 +61,7 @@ usage() {
   02_k8s  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp           (默认执行)
           k8s_deploy(默认关, --with-k8s)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb local_path k8s_registry(基础) 中间件: gpu_operator gpu_lws prometheus ceph
-          ceph_csi envoy_gateway keycloak kueue kubevirt lustre_csi        (默认关, --enable)
+          ceph_csi envoy_gateway envoy_ai_gateway keycloak kueue kubevirt lustre_csi (默认关, --enable)
           20 起自研: cubestack_apps(CUBESTACK_APPS_ENABLED, 默认关)
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
@@ -111,7 +112,7 @@ while [ $# -gt 0 ]; do
         --list)     LIST=1; shift ;;
         --list-steps) LIST_STEPS=1; shift ;;
         # --with-k8s: 仅 kubespray 基座(k8s + metallb/local-path/registry), 不含任何 operator
-        --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; SKIP_ARG="${SKIP_ARG},gpu_operator,gpu_lws,lb_haproxy,lb_keepalived,prometheus,ceph,ceph_csi,envoy_gateway,keycloak,kueue,kubevirt,lustre_csi,cubestack_apps"; shift ;;
+        --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; SKIP_ARG="${SKIP_ARG},gpu_operator,gpu_lws,lb_haproxy,lb_keepalived,prometheus,ceph,ceph_csi,envoy_gateway,envoy_ai_gateway,keycloak,kueue,kubevirt,lustre_csi,cubestack_apps"; shift ;;
         --with-scale) ENABLE_ARG="${ENABLE_ARG},scale"; shift ;;
         # --with-cubestack = 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主, 不强制启用)
         #   lb_haproxy/lb_keepalived 默认 false, 需要时在 cluster.conf 设 true 或 --enable

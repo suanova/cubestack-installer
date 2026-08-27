@@ -120,6 +120,8 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 | **metrics-server** | HPA 依赖的指标 | kubelet Summary API 聚合 | kubespray 标准组件, HPA 必需 | `METRICS_SERVER_ENABLED=true` |
 | **MetaX GPU Operator** | 沐曦 GPU 驱动/识别/调度 | helm chart + CRD(ClusterOperator)驱动组件 DaemonSet; 内置 registry 存放镜像 | 裸金属沐曦 GPU 必备; 离线 tar 加载 + helm 原生安装; master 有 GPU 时自动解除不可调度 | `GPU_OPERATOR_ENABLED=true` + 见 `docs/metax-gpu-operator.md` |
 | **LeaderWorkerSet (LWS)** | LLM/AI 工作负载调度(Leader/Worker 组 + DisaggregatedSet) | 默认官方 manifests.yaml bundle(kubectl apply --server-side); helm chart 保留于 lws/charts; controller 管理 LeaderWorkerSet/DisaggregatedSet; webhook 打 `leaderworkerset.sigs.k8s.io/worker-index` 等标签 | 面向 LLM 推理/训练的组调度; 内建 DisaggregatedSet 解耦推理; 支持 cert-manager/internal 双证书 | `--steps gpu_lws`(立即部署)+ 见 `docs/lws.md` |
+| **Envoy Gateway (EG)** | 通用 K8s API 网关(Gateway API 标准实现) | 控制面 `envoy-gateway` 监听 GatewayClass/Gateway/HTTPRoute → xDS 推送按需动态创建的 Envoy Proxy 数据面 Deployment; 入口经 MetalLB 分配 VIP | 统一流量入口(P1-9 刚需): 路由/限流/重试/超时/TLS/JWT 等全走标准 Gateway API; 是 Envoy AI Gateway 的基座 | `ENVOY_GATEWAY_ENABLED=true` + `--enable envoy_gateway` + 见 `docs/envoy-gateway.md` |
+| **Envoy AI Gateway (AIG)** | LLM/AI 专用网关(多模型供应商统一入口/token 限流/语义缓存/failover) | 不是独立二进制: = 特制 EG 控制面 + AI 控制器(Extension Server 机制注册进 EG 的 extensionManager)+ AI CRD(AIGateway/Backend/BackendSecurityPolicy); AI 控制器把 AI CRD 翻译为 Gateway/HTTPRoute 交 EG 控制面 | AI 流量语义(token 级限流/多供应商适配/failover/guardrail)EG 本身不感知, 由 AI 层补齐; 依赖 EG 先装 | `ENVOY_AI_GATEWAY_ENABLED=true`(需 EG)+ `--enable envoy_ai_gateway` + 见 `docs/envoy-gateway.md` |
 
 > 详细部署/开关见 `cluster.conf` 组件开关段与 `deployments/scripts/modules/`。
 > 后续新增 operator 按 `skills/cubestack-operator-onboarding/SKILL.md` 流程添加并更新本表。
@@ -153,6 +155,34 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 - webhook 跨节点: 与 MetalLB controller 同理, 依赖 **Calico IPIP** 数据面可达(见 §3);
   controller 不 pinned 时默认可达。
 - 部署/验证入口: `docs/lws.md`。
+
+### 5.4 Envoy Gateway / Envoy AI Gateway 架构与原理(统一流量入口)
+
+**Envoy Gateway(通用网关基座)**
+- 架构: helm chart 安装控制面 `envoy-gateway`(Deployment, `envoy-gateway-system` 命名空间); 用户创建
+  `GatewayClass eg` / `Gateway` / `HTTPRoute`(标准 `gateway.networking.k8s.io`)→ 控制面翻译为 xDS →
+  gRPC 推送; 每个 Gateway 由控制器**动态创建 Envoy Proxy 数据面 Deployment + Service(LoadBalancer)**,
+  MetalLB 分配 VIP → 外部 URL 可达。
+- 离线要点: 控制面镜像 `envoyproxy/gateway:<v>` + **数据面镜像 `envoyproxy/envoy:<v>`**(chart values
+  `image.*` / `envoyGateway.image.*` 改写为集群内置 registry; 数据面镜像不改写, 离线集群会 ImagePullBackOff)。
+- 为何采用: 统一流量入口(P1-9 刚需); 标准 Gateway API 生态, 也是 Envoy AI Gateway 的基座。
+
+**Envoy AI Gateway(AI 专用扩展层)**
+- 架构: **不是独立二进制**, = 特制 EG 控制面 + AI 控制器(`ai-gateway-controller`, `ai-gateway-system`
+  命名空间)+ AI CRD(`aigateway.envoyproxy.io`: AIGateway / Backend / BackendSecurityPolicy / AIGatewayRoute)。
+  AI 控制器通过 EG 的 **Extension Server 机制**(`extensionManager` 注册进 EG 运行时配置)把 AI CRD
+  翻译为 Gateway/HTTPRoute 交 EG 控制面; AI 语义(token 计数/模型路由/多供应商转换)由控制器经
+  ext_proc/Extension Hook 注入数据面。
+- 部署依赖: **必须先装 Envoy Gateway**(模块 09), AI 模块(10)前置检查强制确认 GatewayClass `eg` Accepted;
+  随后 helm 装 AI CRD chart + 控制器 chart, 并 helm upgrade eg 注入 `extensionManager` 指向
+  `ai-gateway-controller.ai-gateway-system.svc:18090`。
+- 为何采用: LLM 流量统一入口(token 级限流/多模型供应商/failover); 与 EG 共数据面, 二件套即可覆盖
+  业务 URL 与 AI 两类流量。
+- 边界说明(如实标注): AI 项目迭代快(默认 v1.0 GA, API `v1beta1`), AI CRD 字段与 extensionManager
+  结构随版本变化; 模块把关键字段全部走 cluster.conf(`ENVOY_AI_*`), 升级版本按官方文档核对
+  `docs/envoy-gateway.md`。本仓库验证模块仅做控制面调和 + mock 数据面调用, 真实 LLM 需配置真实
+  Backend + API Key(未在离线环境端到端验证过真实模型调用)。
+- 部署/验证入口: `docs/envoy-gateway.md`。
 
 ### 5.1 MetalLB 架构与原理(裸金属 LoadBalancer)
 
