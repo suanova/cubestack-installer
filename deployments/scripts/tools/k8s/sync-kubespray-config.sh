@@ -24,10 +24,10 @@ MASTER_IPS=()    # master 节点 IP
 WORKER_IPS=()    # worker 节点 IP
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    case "${role}" in
-        master) MASTER_IPS+=("${ip}"); [ -z "${FIRST_MASTER_HOST:-}" ] && FIRST_MASTER_HOST="${hostname}" ;;
-        worker) WORKER_IPS+=("${ip}") ;;
+    node_parse "${line}"
+    case "${NODE_ROLE}" in
+        master) MASTER_IPS+=("${NODE_IP}"); [ -z "${FIRST_MASTER_HOST:-}" ] && FIRST_MASTER_HOST="${NODE_HOSTNAME}" ;;
+        worker) WORKER_IPS+=("${NODE_IP}") ;;
     esac
 done
 
@@ -36,14 +36,10 @@ done
 # 第一个 worker IP(用于 Calico can-reach 探测),无 worker 时回退到宿主机 IP
 FIRST_WORKER="${WORKER_IPS[0]:-${API_IP}}"
 
-# 全裸金属检测: NODES 全部为裸金属(node_type=bm)→ 宿主机(部署机)不在集群网络,
-# API 入口不能用宿主机物理 IP, 应取第一个 master IP(与 all.yml 注释"第一个 master 节点 IP"一致)
+# 全裸金属检测: cluster.conf 不再区分 vm/bm, 以 VM 配置文件(tools/vm/vm-nodes.conf)是否有节点判定
+#   → 无 VM 定义 = 全裸金属: 宿主机(部署机)不在集群网络, API 入口不能用宿主机物理 IP, 取第一个 master IP
 ALL_BM=1
-for line in "${NODES[@]:-}"; do
-    [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    node_is_vm "${role}" "${mac}" "${mem}" "${node_type:-}" && { ALL_BM=0; break; }
-done
+vm_conf_has_nodes && ALL_BM=0
 
 # API 入口地址: 全裸金属 → 第一个 master IP; 含 VM(跨网段 worker 经宿主机 DNAT 访问)→ 宿主机物理 IP
 if [ "${ALL_BM}" = "1" ]; then

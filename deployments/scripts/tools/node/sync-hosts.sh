@@ -23,9 +23,9 @@ say "API 解析: ${API_DOMAIN} → ${API_IP}"
 NODE_ENTRIES=""
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
+    node_parse "${line}"
     NODE_ENTRIES="${NODE_ENTRIES}
-${ip}     ${hostname}"
+${NODE_IP}     ${NODE_HOSTNAME}"
 done
 
 # 生成 hosts 条目(带集群标识分隔)

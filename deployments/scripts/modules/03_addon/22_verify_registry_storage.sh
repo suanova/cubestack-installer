@@ -48,11 +48,11 @@ K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 
 # 节点 hostname → IP(cluster.conf NODES, 供 kubectl nodeName→SSH 目标)
 node_ip_by_name() {
-    local hn="$1" line role hostname ip _rest
+    local hn="$1" line
     for line in "${NODES[@]:-}"; do
         [ -z "${line}" ] && continue
-        IFS=, read -r role hostname ip _rest <<<"${line}"
-        [ "${hostname}" = "${hn}" ] && { echo "${ip}"; return 0; }
+        node_parse "${line}"
+        [ "${NODE_HOSTNAME}" = "${hn}" ] && { echo "${NODE_IP}"; return 0; }
     done
     return 1
 }

@@ -177,7 +177,7 @@ trap '清理测试资源' EXIT
   - **排除**: `--skip X` = 全量部署时剔除。
   - 新增 operator 必须把 key 加进 `lib-module.sh` 的 `OPERATOR_MODULES` 列表, 否则无法被 --steps/--enable 调度。
   - lb_haproxy/lb_keepalived(API-HA)默认 false, 需要时用 `--enable` 预启用 或 `--steps` 立即部署。
-- 常用开关(见 `config/cluster.conf.example` 完整列表): `REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认false,已实现:默认官方 manifests.yaml bundle + kubectl apply --server-side; helm chart 保留于 lws/charts 供 cert-manager 用; 见 `docs/lws.md`)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`PROMETHEUS_ENABLED`、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`ENVOY_GATEWAY_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
+- 常用开关(见 `config/cluster.conf.example` 完整列表): `REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认false,已实现:默认官方 manifests.yaml bundle + kubectl apply --server-side; helm chart 保留于 lws/charts 供 cert-manager 用; 见 `docs/lws.md`)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`PROMETHEUS_ENABLED`、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`ENVOY_GATEWAY_ENABLED`(**默认 false, 需显式启用**)、`ENVOY_AI_GATEWAY_ENABLED`(**默认 false, 依赖 EG**)、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
 - 新增配置项流程: ① cluster.conf.example 加带注释默认声明 → ② 脚本引用 → ③ 如需同步 kubespray group_vars, 在 `tools/k8s/sync-kubespray-config.sh` / `tools/k8s/sync-addons-config.sh` 加同步逻辑
 
 ## 模块体内规范
@@ -194,14 +194,48 @@ trap '清理测试资源' EXIT
 ## 常用调度命令
 
 ```bash
-sudo ./deployments/scripts/deploy-cluster.sh --with-k8s --fresh      # 仅 kubespray 基座(k8s+metallb+local-path+registry), 不含 operator
-sudo ./deployments/scripts/deploy-cluster.sh --with-cubestack --fresh  # 基座 + cluster.conf 中 XXX_ENABLED=true 的全部 operator
-sudo ./deployments/scripts/deploy-cluster.sh --skip gpu_operator --with-cubestack   # 全量但排除某个 operator
-sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_operator   # 立即部署单个 operator(自动带基座, 只部署指定的)
-sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator  # 只写 cluster.conf 预启用(不部署, 下次全量生效)
+sudo ./deployments/scripts/deploy-cluster.sh                    # 默认 = --with-cubestack --skip-net(全量: 基座 + cluster.conf 启用的全部 operator)
+sudo ./deployments/scripts/deploy-cluster.sh --with-k8s --fresh # 仅 kubespray 基座(k8s+metallb+local-path+registry), 不含 operator
+sudo ./deployments/scripts/deploy-cluster.sh --skip gpu_operator   # 全量但排除某个 operator
+sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_operator  # 立即部署单个 operator(自动带基座, 只部署指定的)
+sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator # 只写 cluster.conf 预启用(不部署, 下次全量生效)
 sudo ./deployments/scripts/deploy-cluster.sh --phase addon          # 仅 addon 阶段
 sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全部模块
 ```
+
+## NODES 节点格式(5字段, 不区分虚拟机/裸金属)
+
+- **cluster.conf NODES(5字段)**: `role,hostname,ip,ssh_user,ssh_password`
+  - `ssh_password` 为 `-` → 用默认密码 `SSH_DEFAULT_PASSWORD`(全节点默认一致);
+    显式密码 → 该节点独立密码(**支持裸金属不同密码场景**)。
+  - 解析统一走 `lib-common.sh` 的 `node_parse`(输出 NODE_ROLE/NODE_HOSTNAME/NODE_IP/NODE_USER/NODE_PW 等全局变量),
+    旧 10 字段格式(含 mac/mem/cpu/disk/node_type)向后兼容。
+- **虚拟机创建独立执行, 主程序不判断节点类型**:
+  - 需要创建虚拟机的节点在 `tools/vm/vm-nodes.conf`(10字段)定义;
+    **`sudo ./deployments/scripts/tools/vm/create-vms.sh` 单独执行**(创建/启动 + 自动注入 5 字段到 NODES);
+    主程序默认不调度 vm_create 模块(`DEFAULT:0`, 手动 `--steps vm_create` 等价于直接执行该脚本)。
+  - 主程序模块(k8s_passwordless 全部节点 / k8s_workerbm 全部 worker 装包)**不引用 vm/bm 判断**。
+  - "是否含 VM / 全裸金属"判定 `vm_conf_has_nodes`(lib-common)仅用于 **API 入口派生**
+    (含 VM=宿主机物理 IP / 全裸金属=第一个 master IP, load_config + sync-kubespray-config), 不是节点处理判断。
+- 新增脚本解析 NODES 一律用 `node_parse "${line}"`, 不要再用 `IFS=, read -r role hostname ip mac ...`。
+
+## 离线部署容器(Dockerfile-cli)与离线文件
+
+- **Dockerfile-cli**: 打包 kubespray 源码 + deployments 目录 + 工具链(ansible/helm/skopeo/mc/kubectl/sshpass/virsh),
+  **不含离线镜像与 binary**(`.dockerignore` 排除 offline-files/virtual-machine/inventory)。构建运行:
+  ```bash
+  docker build -f Dockerfile-cli -t cubestack-cli .
+  docker run --rm -it --network host \
+    -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
+    -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
+    -v $HOME/.ssh:/root/.ssh cubestack-cli
+  # 容器内: cd /opt/cubestack-installer && sudo ./deployments/scripts/deploy-cluster.sh
+  ```
+- **离线文件下载**: `tools/offline/fetch-offline-files.sh` 用 mc 从 MinIO 同步到 `OFFLINE_FILES_DIR`
+  (默认 `deployments/offline-files`); 配置 `MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY/BUCKET/REMOTE_DIR`。
+- **离线文件缺失检查**: `lib-common.sh` 的 `check_offline_files`(deploy-cluster.sh 启动时调用), 缺失时输出
+  **红底醒目提示**并给出准备指引(不阻断)。部署前务必保证 `${LOCAL_REPO_DIR}` 下有
+  `images/`(镜像 tar)+ 二进制 + `packages/`(系统包)。
 
 ## 断点续跑(REPEAT 语义, 重要)
 

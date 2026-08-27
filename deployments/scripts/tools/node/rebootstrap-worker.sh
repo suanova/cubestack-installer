@@ -21,19 +21,19 @@ SSH_KEY="${SSH_KEY_DIR}/${SSH_KEY_NAME}"
 SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
 # 确定第一个 master
-FIRST_MASTER=""; FIRST_MASTER_IP=""
+FIRST_MASTER=""; FIRST_MASTER_IP=""; FIRST_MASTER_USER=""
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    if [ "${role}" = "master" ] && [ -z "${FIRST_MASTER}" ]; then
-        FIRST_MASTER="${hostname}"; FIRST_MASTER_IP="${ip}"; break
+    node_parse "${line}"
+    if [ "${NODE_ROLE}" = "master" ] && [ -z "${FIRST_MASTER}" ]; then
+        FIRST_MASTER="${NODE_HOSTNAME}"; FIRST_MASTER_IP="${NODE_IP}"; FIRST_MASTER_USER="${NODE_USER}"; break
     fi
 done
 [ -n "${FIRST_MASTER}" ] || { err "cluster.conf 中无 master 节点"; exit 1; }
 
 say "从 ${FIRST_MASTER}(${FIRST_MASTER_IP}) 获取 kubeadm join 命令 ..."
 JOIN_CMD=""
-ssh ${SSH_OPTS} -o BatchMode=yes "ubuntu@${FIRST_MASTER_IP}" \
+ssh ${SSH_OPTS} -o BatchMode=yes "${FIRST_MASTER_USER:-ubuntu}@${FIRST_MASTER_IP}" \
     "sudo kubeadm token create --print-join-command 2>/dev/null" > /tmp/cubestack-join-cmd.txt 2>/dev/null || { err "生成 join token 失败"; exit 1; }
 JOIN_CMD="$(cat /tmp/cubestack-join-cmd.txt)"
 rm -f /tmp/cubestack-join-cmd.txt
@@ -50,22 +50,22 @@ REMOTE_SCRIPT="$(dirname "${BASH_SOURCE[0]}")/rebootstrap-remote.sh"
 COUNT=0
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    [ "${role}" = "worker" ] || continue
-    [ -z "${ONLY}" ] || [ "${hostname}" = "${ONLY}" ] || continue
+    node_parse "${line}"
+    [ "${NODE_ROLE}" = "worker" ] || continue
+    [ -z "${ONLY}" ] || [ "${NODE_HOSTNAME}" = "${ONLY}" ] || continue
 
     COUNT=$((COUNT + 1))
-    say "── [${hostname}](${ip}) 清理旧状态 + kubeadm join ..."
+    say "── [${NODE_HOSTNAME}](${NODE_IP}) 清理旧状态 + kubeadm join ..."
 
     # scp 远端脚本
-    scp ${SSH_OPTS} -o BatchMode=yes "${REMOTE_SCRIPT}" "${user}@${ip}:/tmp/rebootstrap-remote.sh" >/dev/null 2>&1 || { warn "  scp 脚本失败,跳过"; continue; }
+    scp ${SSH_OPTS} -o BatchMode=yes "${REMOTE_SCRIPT}" "${NODE_USER}@${NODE_IP}:/tmp/rebootstrap-remote.sh" >/dev/null 2>&1 || { warn "  scp 脚本失败,跳过"; continue; }
 
     # 用 JOIN_CMD 环境变量传递, root 执行远端脚本(避免 ssh 字符串转义问题)
-    if ssh ${SSH_OPTS} -o BatchMode=yes "${user}@${ip}" \
+    if ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" \
         "JOIN_CMD='${JOIN_CMD}' sudo bash /tmp/rebootstrap-remote.sh; rm -f /tmp/rebootstrap-remote.sh" >/dev/null 2>&1; then
-        ok "  ${hostname} 重新加入集群"
+        ok "  ${NODE_HOSTNAME} 重新加入集群"
     else
-        warn "  ${hostname} join 失败"
+        warn "  ${NODE_HOSTNAME} join 失败"
     fi
 done
 
