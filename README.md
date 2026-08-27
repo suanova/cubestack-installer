@@ -396,6 +396,18 @@ deployments/
 
 镜像名:`harbor.isuanova.com/cubestack/cubestack-installer-cli:latest`(或本地 `docker build -f Dockerfile-cli -t cubestack-cli .` 构建)。
 
+**第 0 步: 获取离线文件(缺失时)**
+
+离线镜像/二进制不入镜像,需先下载到宿主机磁盘;脚本自动检测 mc client、选择空闲 ≥ 50GiB 的最大磁盘下载,并打印容器挂载命令:
+
+```bash
+sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh      # 默认只拉 kubespray(约 3.4GiB)
+sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --all   # 全量(约 34GiB, 含 GPU/LWS/VM 镜像)
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --list    # 查看 MinIO 可用目录
+```
+
+下载到 `<下载目录>/offline-files` 后,下方挂载命令把 `deployments/offline-files` 换成 `<下载目录>/offline-files` 即可(脚本结束时会直接打印完整命令)。
+
 **方式一: 交互式(推荐)**
 
 ```bash
