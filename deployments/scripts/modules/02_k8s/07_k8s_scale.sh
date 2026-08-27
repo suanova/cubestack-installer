@@ -7,23 +7,23 @@
 # REPEAT: 1
 # TOGGLE: K8S_SCALE_ENABLED
 #
-# 场景一: 新节点为虚拟机(node_type=vm)且尚未创建
-#   本模块先准备环境(复用初始部署的同一链路, 全部幂等):
-#     vm_sshkey → vm_create(检查缺失 VM 并创建/启动, 等待 SSH 就绪)
-#     → k8s_passwordless(注入公钥) → k8s_workerbm(bm 节点连通性+装包)
+# 场景一: 新节点为虚拟机且尚未创建
+#   虚拟机创建由 tools/vm/create-vms.sh 独立执行(不经过主程序): 先在 tools/vm/vm-nodes.conf
+#   添加新节点并单独执行 sudo ./deployments/scripts/tools/vm/create-vms.sh, 再执行本模块扩容。
+#   本模块只做集群侧准备(全部幂等):
+#     vm_sshkey → k8s_passwordless(全部节点注入公钥) → k8s_workerbm(worker 离线装包)
 #     → k8s_hosts(/etc/hosts, 可选) → k8s_ntp(新节点时间同步, kubeadm join 前)
 #   再重新生成 inventory(新节点进入 hosts.yml), 最后执行 kubespray 扩容
 #
 # 场景二: 新节点环境已存在(VM 已运行 / 裸金属已就绪)
 #   环境准备步骤幂等快速通过, 直接进入 inventory 重生成 + 扩容
 #
-# 职责边界: 虚拟机/裸金属等基础设施由本模块(deploy-cluster.sh 入口链路)负责;
+# 职责边界: 节点环境(虚拟机创建/裸金属就绪)由 tools/vm/create-vms.sh 独立准备;
 #           cubestack-offline.sh scale 仅负责 K8s 层面扩容, 假设节点环境已存在
 #
 # 自动检测新节点(无 --only 时):
 #   查询运行中集群的节点列表 → 与 cluster.conf 中 worker IP 对比
 #   → 不在集群中的 worker 自动识别为新增节点 → 放入 new_node 组
-#   → VM 不存在则自动创建, BM 节点直接加入
 # ============================================================
 set -euo pipefail
 
@@ -41,9 +41,9 @@ _auto_detect_new_nodes() {
     local m_ip="" m_user="ubuntu"
     for line in "${NODES[@]:-}"; do
         [ -z "${line}" ] && continue
-        IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-        if [ "${role}" = "master" ]; then
-            m_ip="${ip}"; m_user="${user}"
+        node_parse "${line}"
+        if [ "${NODE_ROLE}" = "master" ]; then
+            m_ip="${NODE_IP}"; m_user="${NODE_USER}"
             break
         fi
     done
@@ -62,9 +62,9 @@ _auto_detect_new_nodes() {
         local all=""
         for line in "${NODES[@]:-}"; do
             [ -z "${line}" ] && continue
-            IFS=, read -r role hostname ip _rest <<<"${line}"
-            [ "${role}" = "worker" ] || continue
-            [ -n "${ip}" ] && all="${all},${hostname}"
+            node_parse "${line}"
+            [ "${NODE_ROLE}" = "worker" ] || continue
+            [ -n "${NODE_IP}" ] && all="${all},${NODE_HOSTNAME}"
         done
         echo "${all#,}"
         return 0
@@ -74,16 +74,16 @@ _auto_detect_new_nodes() {
     local new_hosts=""
     for line in "${NODES[@]:-}"; do
         [ -z "${line}" ] && continue
-        IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-        [ "${role}" != "worker" ] && continue
-        [ -z "${ip}" ] && continue
+        node_parse "${line}"
+        [ "${NODE_ROLE}" != "worker" ] && continue
+        [ -z "${NODE_IP}" ] && continue
 
-        if echo "${existing_ips}" | grep -qx "${ip}"; then
-            vlog "  [${hostname}](${ip}) 已在集群中, 跳过" >&2
+        if echo "${existing_ips}" | grep -qx "${NODE_IP}"; then
+            vlog "  [${NODE_HOSTNAME}](${NODE_IP}) 已在集群中, 跳过" >&2
             continue
         fi
-        new_hosts="${new_hosts},${hostname}"
-        say "  检测到新节点: ${hostname} (${ip}, type=${node_type:-vm})" >&2
+        new_hosts="${new_hosts},${NODE_HOSTNAME}"
+        say "  检测到新节点: ${NODE_HOSTNAME} (${NODE_IP})" >&2
     done
     # 仅输出结果到 stdout(被 $() 捕获), 诊断信息已重定向到 stderr
     echo "${new_hosts#,}"
@@ -97,10 +97,10 @@ if [ -n "${ONLY_HOSTS:-}" ]; then
     # 手动模式: 按 --only 过滤(支持 hostname 和 group 名, group 已在 deploy-cluster.sh 展开)
     for line in "${NODES[@]:-}"; do
         [ -z "${line}" ] && continue
-        IFS=, read -r _r hostname _rest <<<"${line}"
-        if node_matches "${hostname}"; then
+        node_parse "${line}"
+        if node_matches "${NODE_HOSTNAME}"; then
             SELECTED_NODES=$((SELECTED_NODES + 1))
-            NEW_NODE_HOSTS="${NEW_NODE_HOSTS},${hostname}"
+            NEW_NODE_HOSTS="${NEW_NODE_HOSTS},${NODE_HOSTNAME}"
         fi
     done
     NEW_NODE_HOSTS="${NEW_NODE_HOSTS#,}"
@@ -120,15 +120,16 @@ else
     say "检测到 ${SELECTED_NODES} 个新节点: ${NEW_NODE_HOSTS}"
 fi
 
-# ── 1. 环境准备: 缺失的 VM 创建/启动 + SSH 免密 + bm 连通装包(复用既有模块, 幂等) ──
-say "[1/3] 环境准备(检查缺失 VM 并创建/启动, 配置 SSH 免密) ..."
+# ── 1. 环境准备: SSH 免密(全部节点)+ worker 离线装包 + hosts + NTP(复用既有模块, 幂等) ──
+# 虚拟机创建由 tools/vm/create-vms.sh 独立执行(不经过主程序): 新 VM 请先在
+# tools/vm/vm-nodes.conf 添加并单独执行 sudo ./deployments/scripts/tools/vm/create-vms.sh
+say "[1/3] 环境准备(SSH 免密 / worker 离线装包 / NTP) ..."
 bash "${SCRIPT_DIR}/modules/01_env/02_vm_sshkey.sh"
-bash "${SCRIPT_DIR}/modules/01_env/03_vm_create.sh"
 bash "${SCRIPT_DIR}/modules/02_k8s/01_k8s_passwordless.sh"
 bash "${SCRIPT_DIR}/modules/02_k8s/02_k8s_workerbm.sh"
 bash "${SCRIPT_DIR}/modules/02_k8s/03_k8s_hosts.sh"
 bash "${SCRIPT_DIR}/modules/02_k8s/05_k8s_ntp.sh"
-ok "环境就绪(缺失 VM 已创建, 节点可 SSH, 时间已同步)"
+ok "环境就绪(节点可 SSH, 时间已同步)"
 
 # ── 2. 重新生成 inventory: 新节点进入 hosts.yml(含扩容专用组) ──
 SCALE_GROUP_NAME="${SCALE_GROUP_NAME:-new_node}"

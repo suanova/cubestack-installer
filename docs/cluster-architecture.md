@@ -12,8 +12,11 @@
 
 | 环境 | 节点 | 网络 | 用途 |
 |---|---|---|---|
-| **VM 集群** | master01-03 + worker01-04, 全部 `node_type=vm` | libvirt 桥 `privbr0`, 网段 `10.244.0.0/16`(节点 `10.244.1.x`) | 开发/验证、离线链路自测 |
-| **BM 集群** | 9 台裸金属 `mxgpu-*`(3 master + 6 worker), `node_type=bm` | 物理网段 `10.66.1.0/24`, 但底层是 **proxy-ARP 虚拟化 fabric**(见 §2) | 生产目标 |
+| **VM 集群** | master01-03 + worker01-04, 在 `tools/vm/vm-nodes.conf` 定义(自动创建并注入 NODES) | libvirt 桥 `privbr0`, 网段 `10.244.0.0/16`(节点 `10.244.1.x`) | 开发/验证、离线链路自测 |
+| **BM 集群** | 9 台裸金属 `mxgpu-*`(3 master + 6 worker), 直接在 NODES 填写(不在 vm-nodes.conf) | 物理网段 `10.66.1.0/24`, 但底层是 **proxy-ARP 虚拟化 fabric**(见 §2) | 生产目标 |
+
+> 注: cluster.conf 的 NODES 统一为 5 字段(`role,hostname,ip,ssh_user,ssh_password`), **不区分虚拟机/裸金属**;
+> 虚拟机规格(mac/内存/CPU/磁盘)在 `tools/vm/vm-nodes.conf`(10字段)定义, 创建后自动注入 NODES。
 
 **共用配置**(`cluster.conf` / `sync-kubespray-config.sh` 派生):
 - 服务网段 `10.233.0.0/18`、Pod 网段 `10.233.64.0/18`、nodelocaldns `169.254.25.10`;
@@ -222,10 +225,10 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 
 ```bash
 # 1) 编辑 deployments/config/cluster.conf: NODES(节点)/ 网络 / 组件开关
-#    (BM 集群: 全部 node_type=bm, METALLB_POOL=10.66.1.130-139)
-# 2) 一键部署(含: 节点准备 → NTP → kubespray 离线安装 → metallb 等基座)
-sudo ./deployments/scripts/deploy-cluster.sh --with-k8s          # 仅 kubespray 基座(k8s + metallb/local-path/registry)
-sudo ./deployments/scripts/deploy-cluster.sh --with-cubestack    # 基座 + cluster.conf 中已启用的 operator(如 GPU_OPERATOR_ENABLED=true → gpu_operator)
+#    (BM 集群: NODES 直接填 5 字段节点, vm-nodes.conf 不定义节点, METALLB_POOL=10.66.1.130-139)
+# 2) 一键部署(默认 = --with-cubestack --skip-net: 节点准备 → NTP → kubespray 离线安装 → 基座 + 启用的 operator)
+sudo ./deployments/scripts/deploy-cluster.sh          # 全量(基座 + cluster.conf 中已启用的 operator)
+sudo ./deployments/scripts/deploy-cluster.sh --with-k8s   # 仅 kubespray 基座(k8s + metallb/local-path/registry)
 #    中途失败: 修复后重跑同一命令(install 会重置残留 k8s 重建); --skip k8s_deploy 可跳过
 # 3) 端到端验证
 sudo ./deployments/scripts/deploy-cluster.sh --steps verify_metallb

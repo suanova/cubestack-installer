@@ -37,7 +37,7 @@ SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 SSH_OPTS=(-i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8)
 
 # ---------- 节点远程执行(密钥优先, 密码回退; 密码场景 sudo -S) ----------
-node_pw() { node_password "$1" "$2"; }   # 复用 lib-common: worker→WORKER_SSH_PASSWORD, 其余→SSH_DEFAULT_PASSWORD
+node_pw() { node_password "$1" "$2"; }   # 复用 lib-common: 显式密码优先, "-"→默认密码
 
 # 在节点以 root 执行单条命令(<ip> <user> <pw> <remote cmd...>)
 node_cmd() {
@@ -63,9 +63,9 @@ node_scp() {
 NODE_ENTRIES=()   # "ip:user:pw:hostname"
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    [ -n "${ip}" ] && [ -n "${user}" ] || continue
-    NODE_ENTRIES+=("${ip}:${user}:$(node_pw "${role}" "${pw}"):${hostname}")
+    node_parse "${line}"
+    [ -n "${NODE_IP}" ] && [ -n "${NODE_USER}" ] || continue
+    NODE_ENTRIES+=("${NODE_IP}:${NODE_USER}:${NODE_PW}:${NODE_HOSTNAME}")
 done
 [ "${#NODE_ENTRIES[@]}" -gt 0 ] || { err "cluster.conf NODES 为空"; exit 1; }
 
@@ -73,8 +73,8 @@ done
 FIRST_MASTER="" ; FIRST_MASTER_USER="" ; FIRST_MASTER_PW=""
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    if [ "${role}" = "master" ]; then FIRST_MASTER="${ip}"; FIRST_MASTER_USER="${user}"; FIRST_MASTER_PW="$(node_pw master "${pw}")"; break; fi
+    node_parse "${line}"
+    if [ "${NODE_ROLE}" = "master" ]; then FIRST_MASTER="${NODE_IP}"; FIRST_MASTER_USER="${NODE_USER}"; FIRST_MASTER_PW="${NODE_PW}"; break; fi
 done
 [ -n "${FIRST_MASTER}" ] || { err "cluster.conf 中无 master 节点"; exit 1; }
 

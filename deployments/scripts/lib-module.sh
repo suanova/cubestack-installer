@@ -66,7 +66,7 @@ normalize_key() {
 # (--enable 只写 cluster.conf, 不经过本处; 见 deploy-cluster.sh)
 # 新增 operator 模块时把其 key 加入本列表(基座 metallb/local_path/k8s_registry 与 k8s_deploy/k8s_scale/verify_* 不属于 operator)。
 OPERATOR_MODULES=(
-    gpu_operator gpu_lws prometheus ceph ceph_csi envoy_gateway keycloak kueue kubevirt lustre_csi
+    gpu_operator gpu_lws prometheus ceph ceph_csi envoy_gateway envoy_ai_gateway keycloak kueue kubevirt lustre_csi
     cubestack_apps harbor lb_haproxy lb_keepalived
 )
 
@@ -326,16 +326,12 @@ print_plan() {
     echo "  网络模式: ${NET_MODE:-bridge}   虚拟机网段: ${VM_SUBNET:-10.244.0.0/16}   物理Worker: ${PHYS_WORKER_NET:-10.66.1.0/24}"
     echo "  SSH密钥: ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}   默认密码: ${SSH_DEFAULT_PASSWORD:-<未配置>}"
     echo "  本次执行模块: ${RUN_STEPS[*]:-<空>}"
-    echo "  节点规划(类型由 NODES 第10字段 node_type 决定: vm=虚拟机 / bm=裸金属):"
+    echo "  节点规划(5字段: role,hostname,ip,ssh_user,ssh_password; 虚拟机创建由 tools/vm/create-vms.sh 独立执行):"
     local line
     for line in "${NODES[@]:-}"; do
         [ -z "${line}" ] && continue
-        IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-        if node_is_vm "${role}" "${mac}" "${mem}" "${node_type:-}"; then
-            echo "    [${role}] ${hostname}  ${ip}  (vm, ${mem}G/${cpu}C/${disk}G, user=${user})"
-        else
-            echo "    [${role}] ${hostname}  ${ip}  (bm 裸金属, user=${user})"
-        fi
+        node_parse "${line}"
+        echo "    [${NODE_ROLE}] ${NODE_HOSTNAME}  ${NODE_IP}  (user=${NODE_USER})"
     done
     echo "---------------------------------------------"
 }
