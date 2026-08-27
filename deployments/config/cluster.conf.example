@@ -264,7 +264,33 @@ LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"
 PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-false}"       # modules/03_addon/06_prometheus.sh(P1-2/3 监控: Prometheus+Operator+node-exporter/DCGM/MetaX/RDMA/Ceph)
 CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # modules/03_addon/07_ceph.sh(P1-6 Ceph 存储底座)
 CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # modules/03_addon/08_ceph_csi.sh(P1-7 Ceph CSI RBD/RGW/CephFS; 依赖 CEPH_ENABLED)
-ENVOY_GATEWAY_ENABLED="${ENVOY_GATEWAY_ENABLED:-false}" # modules/03_addon/09_envoy_gateway.sh(P1-9 Envoy AI 网关)
+# Envoy 网关二件套(P1-9 统一流量入口): Envoy Gateway=通用 K8s API 网关基座;
+# Envoy AI Gateway=LLM/AI 专用扩展层(依赖 Envoy Gateway 先装)。详见 docs/envoy-gateway.md
+ENVOY_GATEWAY_ENABLED="${ENVOY_GATEWAY_ENABLED:-false}"     # modules/03_addon/09_envoy_gateway.sh(通用网关, Gateway API 标准实现)
+ENVOY_AI_GATEWAY_ENABLED="${ENVOY_AI_GATEWAY_ENABLED:-false}"  # modules/03_addon/10_envoy_ai_gateway.sh(AI 专用网关, 依赖 EG)
+
+# ---------------- Envoy Gateway / Envoy AI Gateway 配置 ----------------
+# Chart 来源(二选一/三选一, 与 LWS 一致; **本地源优先, 默认离线安装**):
+#   dir = 本地解包目录(默认 deployments/cubestack-addon/envoy-gateway/{eg,ai}, 需先联网跑 tools/images/envoy-fetch-charts.sh)
+#   tgz = 本地 chart 压缩包 / oci = 官方 registry(需联网)
+ENVOY_EG_CHART_SOURCE="${ENVOY_EG_CHART_SOURCE:-dir}"       # Envoy Gateway chart 来源: dir|tgz|oci
+ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.0}"               # Envoy Gateway 版本(控制面 gateway + 数据面 envoy 同 tag)
+ENVOY_EG_CHART_DIR="${ENVOY_EG_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/eg}"
+ENVOY_EG_CHART_TGZ="${ENVOY_EG_CHART_TGZ:-${ENVOY_EG_CHART_DIR}/gateway-helm-${ENVOY_EG_VERSION}.tgz}"
+ENVOY_EG_CHART_OCI="${ENVOY_EG_CHART_OCI:-oci://docker.io/envoyproxy/gateway-helm}"
+ENVOY_AI_CHART_SOURCE="${ENVOY_AI_CHART_SOURCE:-dir}"       # Envoy AI Gateway chart 来源: dir|tgz|oci
+ENVOY_AI_VERSION="${ENVOY_AI_VERSION:-v1.0.0}"               # Envoy AI Gateway 控制器版本(1.0 = GA)
+ENVOY_AI_API_VERSION="${ENVOY_AI_API_VERSION:-v1beta1}"      # AI CRD apiVersion(aigateway.envoyproxy.io/<v>; v1.0 起 v1beta1)
+ENVOY_AI_CHART_DIR="${ENVOY_AI_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/ai}"
+ENVOY_AI_CHART_OCI="${ENVOY_AI_CHART_OCI:-oci://ghcr.io/envoyproxy/ai-gateway/charts}"
+# 镜像(推送到集群内置 registry, K8s 节点按域名拉取; 离线 tar 由 tools/images/envoy-save-images.sh 生成)
+ENVOY_EG_IMAGE_BASE="${ENVOY_EG_IMAGE_BASE:-${REGISTRY_DOMAIN}:${REGISTRY_PORT}/envoyproxy}"   # EG 控制面/数据面镜像前缀
+ENVOY_AI_IMAGE_REPO="${ENVOY_AI_IMAGE_REPO:-${REGISTRY_DOMAIN}:${REGISTRY_PORT}/ai-gateway/ai-gateway-controller}"
+ENVOY_EG_IMAGE_ONLINE="${ENVOY_EG_IMAGE_ONLINE:-false}"     # 允许在线拉取镜像(仅 oci 源或置 true 才联网)
+ENVOY_AI_IMAGE_ONLINE="${ENVOY_AI_IMAGE_ONLINE:-false}"     # 同上(AI 控制器)
+ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"   # 离线镜像 tar 目录(save 工具输出)
+ENVOY_EG_NAMESPACE="${ENVOY_EG_NAMESPACE:-envoy-gateway-system}"   # EG 部署命名空间
+ENVOY_AI_NAMESPACE="${ENVOY_AI_NAMESPACE:-ai-gateway-system}"      # AI 控制器部署命名空间
 
 # ---------------- 4.4 P2 阶段附加组件 ----------------
 KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # modules/03_addon/10_keycloak.sh(P2-1 统一认证)

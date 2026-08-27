@@ -1,17 +1,33 @@
 #!/bin/bash
 # ============================================================
 # MODULE: envoy_gateway
-# DESC: Envoy AI 网关(集群统一流量入口, P1 刚需)
+# DESC: 部署 Envoy Gateway(通用 K8s API 网关; Gateway API 标准实现; 离线 helm + 集群内置 registry 镜像)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: ENVOY_GATEWAY_ENABLED
 # 说明:
-#   【P1-9 规划模块·伪代码占位】Envoy AI Gateway:
-#   · 搭建集群统一流量入口, 路由配置与转发测试
-#   · 保障外部业务 URL 可正常稳定访问(后续 P2 Keycloak 对接统一认证)
-#   · 接入方法: 将下方 STEPS 伪代码替换为真实命令, 或 ADDON_STUB_EXEC=1 试执行
-# 数据源: cluster.conf (ENVOY_GATEWAY_ENABLED / NODES)
+#   · 断点续跑: REPEAT:0 → 安装成功写入状态, 重跑自动跳过; --fresh 清状态重装。
+#   · 定位: Envoy Gateway = 通用 K8s API 网关基座; Envoy AI Gateway(模块 10_envoy_ai_gateway.sh)
+#     基于它构建。本模块只装 EG 基座(GatewayClass/Gateway/HTTPRoute 通用能力)。
+#   · Chart 来源(三选一, ENVOY_EG_CHART_SOURCE 控制; **本地源优先, 默认离线安装**):
+#       dir  = 本地解包目录(默认 ENVOY_EG_CHART_DIR = deployments/cubestack-addon/envoy-gateway/eg,
+#              由 tools/images/envoy-fetch-charts.sh 在联网机下载解包)
+#       tgz  = 本地 chart 压缩包(ENVOY_EG_CHART_TGZ)
+#       oci  = 官方 OCI registry(ENVOY_EG_CHART_OCI, 需联网)
+#   · 离线优先: 本地源(dir/tgz)时, 镜像强制走本地 docker/离线 tar(不联网); 仅 oci 源或
+#     ENVOY_EG_IMAGE_ONLINE=true 才允许在线拉取。离线 tar 由 tools/images/envoy-save-images.sh
+#     生成, 默认放 ${REPO_ROOT}/deployments/offline-files/envoy。
+#   · 镜像流向(与 gpu_operator/lws 一致): 把 envoyproxy/gateway(控制面)与 envoyproxy/envoy(数据面)
+#     镜像推送到集群内置 registry; helm 安装时 --set image.* / envoyGateway.image.* 改写为内置 registry 路径,
+#     K8s 节点从集群内置 registry 按域名拉取镜像。
+#   · 数据面镜像改写是关键: 用户创建 Gateway 后控制器动态创建的 Envoy Proxy Deployment
+#     必须能用内置 registry 镜像(默认 docker.io 在离线集群不可达)。
+#   · 默认 GatewayClass: eg(gateway.envoyproxy.io/gatewayclass-controller), 安装后自动创建。
+#   · 参考: https://gateway.envoyproxy.io/ 与 docs/envoy-gateway.md
+# 数据源: cluster.conf (ENVOY_GATEWAY_ENABLED / ENVOY_EG_CHART_SOURCE / ENVOY_EG_CHART_DIR / ENVOY_EG_CHART_TGZ /
+#                       ENVOY_EG_CHART_OCI / ENVOY_EG_VERSION / ENVOY_EG_IMAGE_* / ENVOY_SAVE_DIR / REGISTRY_* / NODES)
+# 用法:   sudo ./deploy-cluster.sh --enable envoy_gateway  或  ENVOY_GATEWAY_ENABLED=true
 # ============================================================
 set -euo pipefail
 
@@ -19,22 +35,228 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-if [ "${ENVOY_GATEWAY_ENABLED:-false}" != "true" ]; then
-    say "跳过 Envoy AI 网关(配置 ENVOY_GATEWAY_ENABLED=true 可启用)"
-    exit 0
-fi
+# ---- 开关 ----
+[ "${ENVOY_GATEWAY_ENABLED:-false}" = "true" ] || { say "ENVOY_GATEWAY_ENABLED=false, 跳过 Envoy Gateway"; exit 0; }
 
 FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH="ssh -i ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@${FIRST_MASTER}"
+SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
 K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 
-# ── 伪代码步骤(占位): 替换为真实实现 ──
-ENVOY_GATEWAY_STEPS=(
-  "创建 envoy-gateway 命名空间|${SSH} \"${K} create ns envoy-gateway 2>/dev/null || true\""
-  "部署 Envoy AI Gateway(离线 helm/manifest)|${SSH} \"${K} apply -f /opt/cubestack/addons/envoy-ai-gateway.yaml 2>/dev/null || true\""
-  "等待 GatewayClass/网关控制器就绪|${SSH} \"${K} rollout status deploy/envoy-ai-gateway-controller -n envoy-gateway --timeout=3m 2>/dev/null || true\""
-  "创建 Gateway 资源(绑定 MetalLB 入口)|${SSH} \"${K} apply -f /opt/cubestack/addons/envoy-gateway.yaml 2>/dev/null || true\""
-  "配置 HTTPRoute 路由规则(业务 URL 转发)|${SSH} \"${K} apply -f /opt/cubestack/addons/envoy-httproute.yaml 2>/dev/null || true\""
-  "验证外部业务 URL 转发可达|${SSH} \"curl -s -o /dev/null -w '%{http_code}' http://<gateway-ip>/<path> 2>/dev/null || true\""
-)
-addon_stub "envoy_gateway" ENVOY_GATEWAY_STEPS
+# ---------------- 派生变量(全部来自 cluster.conf, 无硬编码) ----------------
+ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.0}"       # EG 版本(控制面 gateway + 数据面 envoy 同 tag)
+ENVOY_EG_CHART_SOURCE="${ENVOY_EG_CHART_SOURCE:-dir}"
+ENVOY_EG_CHART_DIR="${ENVOY_EG_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/eg}"
+ENVOY_EG_CHART_TGZ="${ENVOY_EG_CHART_TGZ:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/eg/gateway-helm-${ENVOY_EG_VERSION}.tgz}"
+ENVOY_EG_CHART_OCI="${ENVOY_EG_CHART_OCI:-oci://docker.io/envoyproxy/gateway-helm}"
+ENVOY_EG_NAMESPACE="${ENVOY_EG_NAMESPACE:-envoy-gateway-system}"
+ENVOY_EG_RELEASE_NAME="${ENVOY_EG_RELEASE_NAME:-eg}"
+# 镜像: 内置 registry 路径(helm --set 用域名, K8s 节点按域名拉取)
+REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
+ENVOY_EG_IMAGE_BASE="${ENVOY_EG_IMAGE_BASE:-${REGISTRY_BASE}/envoyproxy}"
+# 推送用直连 IP(与 gpu_operator/lws 一致): PUSH_REGISTRY=${REGISTRY_IP}:${REGISTRY_PORT}
+PUSH_REGISTRY="${REGISTRY_IP}:${REGISTRY_PORT}/envoyproxy"
+ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"
+ENVOY_EG_IMAGE_ONLINE="${ENVOY_EG_IMAGE_ONLINE:-false}"   # 允许在线拉取镜像(仅 oci 源或显式 true)
+
+# ---------------- 前置检查 ----------------
+say "检查 Envoy Gateway 前置条件..."
+case "${ENVOY_EG_CHART_SOURCE}" in
+    dir)  [ -f "${ENVOY_EG_CHART_DIR}/Chart.yaml" ] || { err "EG chart 目录不存在/缺 Chart.yaml: ${ENVOY_EG_CHART_DIR}"; exit 1; } ;;
+    tgz)  [ -f "${ENVOY_EG_CHART_TGZ}" ] || { err "EG chart tgz 不存在: ${ENVOY_EG_CHART_TGZ}"; exit 1; } ;;
+    oci)  : ;;   # OCI 需联网, 由 helm 拉取
+    *)    err "ENVOY_EG_CHART_SOURCE 仅支持 dir/tgz/oci(当前=${ENVOY_EG_CHART_SOURCE})"; exit 1 ;;
+esac
+command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 请先安装 Helm"; exit 1; }
+# 宿主机 /etc/hosts 更新(registry 域名 → VIP), 与 gpu_operator 一致
+_ensure_hosts() {   # <ip> <domain>
+    local ip="$1" dom="$2" re
+    [ -n "${ip}" ] && [ -n "${dom}" ] || return 0
+    re="$(echo "${dom}" | sed 's/\./\\./g')"
+    sed -i -E "/[[:space:]]${re}([[:space:]]|$)/d" /etc/hosts 2>/dev/null || true
+    grep -qE "^${ip}[[:space:]]+${dom}([[:space:]]|$)" /etc/hosts 2>/dev/null \
+        || echo "${ip} ${dom}" >> /etc/hosts 2>/dev/null
+}
+_ensure_hosts "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
+curl -s -m 8 "http://${REGISTRY_BASE}/v2/" >/dev/null 2>&1 \
+    || { err "集群内置 registry ${REGISTRY_BASE}/v2/ 不可达(检查: 宿主机 /etc/hosts 的 ${REGISTRY_DOMAIN} 是否解析到 ${REGISTRY_IP}, 及 MetalLB VIP)"; exit 1; }
+SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
+    || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
+# helm 需要从宿主连 API Server: 下载集群 admin.conf 并同步到 ~/.kube/config(与 gpu_operator 一致)
+_sync_kubeconfig() {
+    local tmp newctx
+    tmp="$(mktemp)"
+    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "sudo cat /etc/kubernetes/admin.conf" > "${tmp}" 2>/dev/null \
+        || { rm -f "${tmp}"; return 1; }
+    [ -s "${tmp}" ] || { rm -f "${tmp}"; return 1; }
+    mkdir -p "${HOME}/.kube"
+    newctx="$(grep -E '^[[:space:]]*current-context:' "${tmp}" | head -1 | awk '{print $2}')"
+    if [ -f "${HOME}/.kube/config" ]; then
+        KUBECONFIG="${tmp}:${HOME}/.kube/config" kubectl config view --flatten > "${tmp}.merged" 2>/dev/null \
+            && mv "${tmp}.merged" "${HOME}/.kube/config" || cp "${tmp}" "${HOME}/.kube/config"
+    else
+        cp "${tmp}" "${HOME}/.kube/config"
+    fi
+    [ -n "${newctx}" ] && KUBECONFIG="${HOME}/.kube/config" kubectl config use-context "${newctx}" >/dev/null 2>&1 || true
+    chmod 600 "${HOME}/.kube/config"
+    rm -f "${tmp}"
+    KUBECONFIG="${HOME}/.kube/config" timeout 15 kubectl get nodes --no-headers >/dev/null 2>&1
+}
+_sync_kubeconfig \
+    && ok "宿主机 ~/.kube/config 已同步(admin.conf)" \
+    || { err "宿主机无法访问集群(admin.conf 下载/同步失败; 检查 ${FIRST_MASTER} 的 /etc/kubernetes/admin.conf)"; exit 1; }
+ok "前置检查通过(chart_source=${ENVOY_EG_CHART_SOURCE}, version=${ENVOY_EG_VERSION})"
+
+# ---------------- 1. 推送 EG 镜像到集群内置 registry(本地源优先, 离线安装) ----------------
+# 离线优先策略(与 lws 一致):
+#   · dir/tgz(本地源, 默认) → 镜像强制走本地 docker daemon / 离线 tar, 绝不尝试联网
+#   · oci 源或 ENVOY_EG_IMAGE_ONLINE=true → 才允许在线 skopeo 拉取官方镜像
+say "[1/4] 推送 EG 镜像 → ${PUSH_REGISTRY}(控制面 gateway + 数据面 envoy, tag=${ENVOY_EG_VERSION}) ..."
+_push_skopeo() {   # <src> <dst>
+    local src="$1" dst="$2" n=1 err
+    for n in 1 2 3; do
+        if skopeo copy --quiet --src-tls-verify=false --dest-tls-verify=false \
+            --dest-no-creds "${src}" "${dst}" 2>/tmp/skopeo-err-eg; then
+            rm -f /tmp/skopeo-err-eg; return 0
+        fi
+        err="$(tail -1 /tmp/skopeo-err-eg 2>/dev/null || true)"
+        if [ "${n}" -lt 3 ]; then
+            warn "  推送失败(第 ${n}/3 次: ${err}), 3s 后重试整包..."
+            sleep 3
+        fi
+    done
+    rm -f /tmp/skopeo-err-eg
+    return 1
+}
+_reg_has_tag() {   # <repo> <tag> — 优先 skopeo inspect, 缺失时 curl tags/list
+    local repo="$1" ver="$2" path="${PUSH_REGISTRY#*/}"
+    if command -v skopeo >/dev/null 2>&1; then
+        skopeo inspect --tls-verify=false --no-creds "docker://${PUSH_REGISTRY}/${repo}:${ver}" >/dev/null 2>&1 && return 0
+    fi
+    curl -s -m 6 "http://${REGISTRY_BASE}/v2/${path}/${repo}/tags/list" 2>/dev/null | grep -q "\"${ver}\""
+}
+_ALLOW_ONLINE=0
+[ "${ENVOY_EG_CHART_SOURCE:-dir}" = "oci" ] && _ALLOW_ONLINE=1
+[ "${ENVOY_EG_IMAGE_ONLINE:-false}" = "true" ] && _ALLOW_ONLINE=1
+# push_one <镜像短名 gateway|envoy> <tar匹配模式>
+push_one() {
+    local short="$1" tarpatt="$2" src="" _tar _t
+    if _reg_has_tag "${short}" "${ENVOY_EG_VERSION}"; then
+        ok "  ${short}:${ENVOY_EG_VERSION} 已在 registry, 跳过"
+        return 0
+    fi
+    # ① 本地 docker daemon(任意前缀, 匹配 /gateway:<tag> 或 /envoy:<tag>)
+    src="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E "/${short}:${ENVOY_EG_VERSION}$" | head -1 || true)"
+    if [ -n "${src}" ]; then
+        _tmp="/tmp/eg-${short}-${ENVOY_EG_VERSION}.tar"
+        say "  从本地 docker 推送: ${src}"
+        if sudo docker save "${src}" -o "${_tmp}" >/dev/null 2>&1 \
+           && _push_skopeo "docker-archive:${_tmp}" "docker://${PUSH_REGISTRY}/${short}:${ENVOY_EG_VERSION}" >/dev/null 2>&1; then
+            rm -f "${_tmp}"
+            ok "  ${short} 已推送(本地 docker)"; return 0
+        else
+            rm -f "${_tmp}"
+            warn "  本地 docker 推送失败, 尝试离线 tar..."
+        fi
+    fi
+    # ② 离线 tar(envoy-save-images.sh 默认 deployments/offline-files/envoy; 兼容集群 images 目录)
+    for _td in "${ENVOY_SAVE_DIR}" "${LOCAL_REPO_DIR}/images" \
+               "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME}/images"; do
+        [ -d "${_td}" ] || continue
+        for _t in "${_td}"/"${tarpatt}"; do
+            [ -f "${_t}" ] || continue
+            say "  从离线 tar 推送: $(basename "${_t}")"
+            if _push_skopeo "docker-archive:${_t}" "docker://${PUSH_REGISTRY}/${short}:${ENVOY_EG_VERSION}" >/dev/null 2>&1; then
+                ok "  ${short} 已推送(离线 tar)"; return 0
+            else
+                warn "  tar 推送失败: $(basename "${_t}")"
+            fi
+        done
+    done
+    # ③ 在线 skopeo(仅允许在线时)
+    if [ "${_ALLOW_ONLINE}" = "1" ]; then
+        if _push_skopeo "docker://docker.io/envoyproxy/${short}:${ENVOY_EG_VERSION}" \
+            "docker://${PUSH_REGISTRY}/${short}:${ENVOY_EG_VERSION}" >/dev/null 2>&1; then
+            ok "  ${short} 已推送(在线)"; return 0
+        fi
+        warn "  在线推送失败"
+    fi
+    # 离线安装: 本地源且镜像未就绪 → 报错给指引(不静默继续)
+    if [ "${_ALLOW_ONLINE}" = "1" ]; then
+        warn "  envoyproxy/${short}:${ENVOY_EG_VERSION} 未就绪(本地 docker/tar 无, 在线失败)"
+        return 1
+    else
+        err "离线安装: 未找到 envoyproxy/${short}:${ENVOY_EG_VERSION}(本地 docker 无 + 离线 tar 无)。请: ① 在联网机跑 tools/images/envoy-save-images.sh 生成 tar 放到 ${ENVOY_SAVE_DIR}/, 或 ② 放离线 tar 到 ${LOCAL_REPO_DIR}/images/, 或 ③ 改 ENVOY_EG_CHART_SOURCE=oci 允许在线"
+        return 1
+    fi
+}
+# 控制面 + 数据面都要
+push_one "gateway" "*gateway_${ENVOY_EG_VERSION}.tar"
+push_one "envoy"   "*envoy_${ENVOY_EG_VERSION}.tar"
+
+# ---------------- 2. helm 安装 gateway-helm(三种 chart 源) ----------------
+say "[2/4] helm 安装 ${ENVOY_EG_RELEASE_NAME} → ${ENVOY_EG_NAMESPACE}(chart=${ENVOY_EG_CHART_SOURCE}, version=${ENVOY_EG_VERSION}) ..."
+# 清理上次残留(避免 helm 无法接管)
+SSH "${K} delete ns ${ENVOY_EG_NAMESPACE} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+sleep 3
+
+_CHART_ARG=""
+case "${ENVOY_EG_CHART_SOURCE}" in
+    dir) _CHART_ARG="${ENVOY_EG_CHART_DIR}" ;;
+    tgz) _CHART_ARG="${ENVOY_EG_CHART_TGZ}" ;;
+    oci) _CHART_ARG="${ENVOY_EG_CHART_OCI}"; _CHART_ARG+=" --version ${ENVOY_EG_VERSION#v}" ;;
+esac
+
+helm upgrade --install "${ENVOY_EG_RELEASE_NAME}" ${_CHART_ARG} \
+    --namespace "${ENVOY_EG_NAMESPACE}" --create-namespace \
+    --set "image.repository=${ENVOY_EG_IMAGE_BASE}/gateway" \
+    --set "image.tag=${ENVOY_EG_VERSION}" \
+    --set "image.pullPolicy=IfNotPresent" \
+    --set "envoyGateway.image.repository=${ENVOY_EG_IMAGE_BASE}/envoy" \
+    --set "envoyGateway.image.tag=${ENVOY_EG_VERSION}" \
+    --set "envoyGateway.image.pullPolicy=IfNotPresent" \
+    --wait --timeout 180s \
+    || warn "  helm 安装/等待超时(检查 --set 与 chart; 资源可能已创建, 继续等待 Deployment)..."
+
+# ---------------- 3. 创建默认 GatewayClass(eg) ----------------
+say "[3/4] 创建默认 GatewayClass(eg)..."
+# 控制器名: gateway.envoyproxy.io/gatewayclass-controller(与 chart config 一致)
+SSH "${K} apply -f - <<'YAML'
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+YAML
+" || warn "  GatewayClass eg 创建失败(可稍后手工 kubectl apply)"
+
+# ---------------- 4. 等待就绪 + 验证 ----------------
+say "[4/4] 等待 Envoy Gateway 控制面就绪(最长 180s)..."
+SSH "${K} rollout status deployment -n ${ENVOY_EG_NAMESPACE} ${ENVOY_EG_RELEASE_NAME} --timeout=120s" >/dev/null 2>&1 \
+    || SSH "${K} rollout status deployment -n ${ENVOY_EG_NAMESPACE} envoy-gateway --timeout=120s" >/dev/null 2>&1 \
+    || warn "  控制面 rollout 未在 120s 内完成(继续检查 pod)..."
+sleep 5
+
+# 检查 GatewayClass 是否 Accepted
+GC_OK="$(SSH "${K} get gatewayclass eg -o jsonpath='{.status.conditions[?(@.type==\"Accepted\")].status}' 2>/dev/null" || true)"
+[ "${GC_OK}" = "True" ] \
+    && ok "GatewayClass eg 已 Accepted" \
+    || warn "GatewayClass eg 未 Accepted(当前='${GC_OK}'); 检查控制面日志: kubectl -n ${ENVOY_EG_NAMESPACE} logs deploy/${ENVOY_EG_RELEASE_NAME}"
+
+PODS="$( (SSH "${K} -n ${ENVOY_EG_NAMESPACE} get pods -o wide 2>/dev/null" || true) )"
+echo "    ${PODS}" | sed 's/^/    /'
+
+echo "---------------------------------------------"
+ok "Envoy Gateway 部署完成"
+echo "  namespace:   ${ENVOY_EG_NAMESPACE}"
+echo "  chart 来源:  ${ENVOY_EG_CHART_SOURCE}(${ENVOY_EG_VERSION})"
+echo "  控制面镜像:  ${ENVOY_EG_IMAGE_BASE}/gateway:${ENVOY_EG_VERSION}"
+echo "  数据面镜像:  ${ENVOY_EG_IMAGE_BASE}/envoy:${ENVOY_EG_VERSION}(Gateway 创建后动态拉起)"
+echo "  GatewayClass: eg(已 Accepted)"
+echo "  资源查看:    kubectl get gatewayclass,gateway,httproute -A"
+echo "  端到端验证:  sudo ./deploy-cluster.sh --steps verify_envoy_gateway"
+echo "  AI 扩展:     Envoy AI Gateway 见 --enable envoy_ai_gateway(docs/envoy-gateway.md)"
+echo "  卸载:        helm uninstall ${ENVOY_EG_RELEASE_NAME} -n ${ENVOY_EG_NAMESPACE}; kubectl delete gatewayclass eg"
