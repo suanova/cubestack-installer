@@ -383,6 +383,40 @@ kubectl get validatingwebhookconfiguration lws-validating-webhook-configuration 
 
 ---
 
+### 5. Envoy Gateway / Envoy AI Gateway 部署故障速查
+
+> 分析/部署/使用详见 `docs/envoy-gateway.md`。
+
+**症状/排查对照**
+
+| 症状 | 根因 | 解法(根治) |
+|---|---|---|
+| `09_envoy_gateway.sh` 报 "EG chart 目录不存在/缺 Chart.yaml" | 离线 chart 未备料(联网机未跑 fetch 工具) | 联网机执行 `tools/images/envoy-fetch-charts.sh`(或手动 helm pull gateway-helm 解包)后拷到 `deployments/cubestack-addon/envoy-gateway/eg/` |
+| 部署报 "未找到 envoyproxy/gateway:... 镜像" | 离线镜像未备料 | 联网机执行 `tools/images/envoy-save-images.sh`, tar 放入 `deployments/offline-files/envoy/`(或本地 docker daemon 先 docker pull) |
+| 创建 Gateway 后数据面 pod `ImagePullBackOff`(docker.io 不可达) | **数据面镜像未改写**(chart values `envoyGateway.image.*` 仍指向 docker.io) | 确认 09 模块 helm 安装时注入 `--set envoyGateway.image.repository/tag` = 集群内置 registry; 已装错可 `helm upgrade eg <chart> --reuse-values --set ...` 修复 |
+| `GatewayClass eg` 未 Accepted | 控制面未就绪 / controllerName 不匹配 | `kubectl -n envoy-gateway-system logs deploy/eg --tail=50`; GatewayClass 的 `spec.controllerName` 必须是 `gateway.envoyproxy.io/gatewayclass-controller` |
+| Gateway 一直没 VIP(ADDRESS 空) | MetalLB 池耗尽/网段冲突, 或数据面未起来 | `kubectl describe gateway` 看条件; `kubectl get svc -n <gw-ns>` 看 LoadBalancer pending 原因(参考 §三.1/§三.2) |
+| `10_envoy_ai_gateway.sh` 报 "未检测到 Envoy Gateway(GatewayClass eg 未 Accepted)" | AI 依赖 EG, 但 EG 未装/未就绪 | 先 `ENVOY_GATEWAY_ENABLED=true` 部署模块 `envoy_gateway`, 再装 AI |
+| AI 控制器 pod CrashLoop 或 `AIGateway` 调和不出 Gateway | EG 的 `extensionManager` 未注入 / 版本不匹配(AI 与 EG 版本兼容矩阵) | 确认模块 [4/6] 步 helm upgrade eg 成功(`kubectl -n envoy-gateway-system get cm envoy-gateway -o yaml | grep extensionManager`); 按 `docs/envoy-gateway.md` §三.4 手工注入并重启 eg; 核对 AI↔EG 版本兼容矩阵 |
+| AI CRD apply 报 `no matches for kind "AIGateway"` | CRD 未装 / apiVersion 版本不符 | `kubectl get crd | grep aigateway`; 确认 `ENVOY_AI_API_VERSION`(v1.0 起 `v1beta1`)与所装 chart 一致 |
+
+**验证**
+```bash
+sudo ./deploy-cluster.sh --steps verify_envoy_gateway      # 控制面 + GatewayClass + VIP + 真实 HTTP 转发
+sudo ./deploy-cluster.sh --steps verify_envoy_ai_gateway   # AI 控制器 + CRD + AIGateway→Gateway 调和(+ 边界 mock 调用)
+kubectl get gatewayclass,gateway,httproute -A
+kubectl get aigateway,backend -A
+```
+
+**相关命令**
+```bash
+kubectl -n envoy-gateway-system get pods,cm envoy-gateway    # EG 控制面 + 运行时配置(extensionManager 在此)
+kubectl -n ai-gateway-system logs deploy/ai-gateway-controller --tail=50
+kubectl -n <gw-ns> get deploy -l gateway.envoyproxy.io/owning-gateway-name=<gw> -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'   # 数据面镜像
+```
+
+---
+
 ## 四、离线部署
 
 > (示例占位) 按模板追加。

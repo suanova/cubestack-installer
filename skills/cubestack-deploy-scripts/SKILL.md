@@ -263,6 +263,32 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   METAX_LIST_IMAGES=true bash modules/03_addon/04_gpu_operator.sh   # 打印所需镜像 pull/save 命令
   ```
 
+## Envoy Gateway / Envoy AI Gateway 部署速查(统一流量入口)
+
+> 完整分析/部署/使用/故障见 `docs/envoy-gateway.md` 与 `docs/troubleshooting.md` §三.5。
+
+- **两者关系**: Envoy Gateway(EG)= 通用 K8s API 网关基座(Gateway API 标准实现); Envoy AI Gateway(AIG)
+  = **不是独立二进制**, = 特制 EG 控制面 + AI 控制器(Extension Server)+ AI CRD(`aigateway.envoyproxy.io`),
+  通过 EG 的 `extensionManager` 机制注册。**AIG 依赖 EG 先装**。
+- **离线备料(联网机, 两件套)**: chart 用 `tools/images/envoy-fetch-charts.sh`(helm pull 解包到
+  `deployments/cubestack-addon/envoy-gateway/{eg,ai}`); 镜像用 `tools/images/envoy-save-images.sh`
+  (默认 `deployments/offline-files/envoy`): EG 控制面 `envoyproxy/gateway:<v>` + **数据面
+  `envoyproxy/envoy:<v>`** + AIG 控制器 `ghcr.io/envoyproxy/ai-gateway/ai-gateway-controller:<v>`。
+- **离线关键点(数据面镜像)**: 创建 Gateway 后控制器动态创建的数据面 Deployment 默认用 docker.io 镜像,
+  离线必 ImagePullBackOff → helm 安装必须改写 `envoyGateway.image.repository/tag` 为集群内置 registry
+  (`--set image.*` 只管控制面)。
+- **默认版本**: `ENVOY_EG_VERSION=v1.9.0`(GA)、`ENVOY_AI_VERSION=v1.0.0`(GA, API `v1beta1`, `ENVOY_AI_API_VERSION`)。
+- **常用命令**:
+  ```bash
+  sudo ./deploy-cluster.sh --enable envoy_gateway                 # 只装 EG 基座
+  sudo ./deploy-cluster.sh --enable envoy_gateway,envoy_ai_gateway  # EG + AI 二件套(AI 依赖 EG)
+  sudo ./deploy-cluster.sh --steps verify_envoy_gateway            # 端到端: GatewayClass+VIP+真实 HTTP 转发
+  sudo ./deploy-cluster.sh --steps verify_envoy_ai_gateway         # 端到端: AIGateway→Gateway 调和(+mock 边界)
+  kubectl get gatewayclass,gateway,httproute -A; kubectl get aigateway,backend -A
+  ```
+- **AI 与 EG 版本兼容**: 升级 AIG 版本时核对官方兼容矩阵; `extensionManager` 结构/CRD 字段随版本变化,
+  全部走 cluster.conf `ENVOY_AI_*` 变量, 不硬编码。
+
 ## 审查清单(写完脚本后自检)
 
 - [ ] 文件名符合 `NN_category_action.sh`,序号不冲突

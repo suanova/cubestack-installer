@@ -68,24 +68,31 @@ deployments/scripts/
 │   │   ├── 06_k8s_deploy.sh        # 部署 kubespray(默认关, K8S_ENABLED)
 │   │   └── 07_k8s_scale.sh         # 扩容集群(默认关, K8S_SCALE_ENABLED)
 │   └── 03_addon/              #   阶段三: 附加组件(集群部署后; 01~19 中间件, 20 起自研)
-│       ├── 01_gpu_operator.sh #    沐曦 GPU Operator(P1-5, GPU_OPERATOR_ENABLED)
-│       ├── 02_gpu_lws.sh      #    LeaderWorkerSet(P1-8, LWS_ENABLED)
-│       ├── 03_k8s_registry.sh #    集群内内置 registry addon(默认不部署, REGISTRY_ENABLED)
-│       ├── 04_prometheus.sh   #    Prometheus+Operator+监控附属(P1-2/3, PROMETHEUS_ENABLED)
-│       ├── 05_ceph.sh         #    Ceph 存储集群(P1-6, CEPH_ENABLED)
-│       ├── 06_ceph_csi.sh     #    Ceph CSI RBD/RGW/CephFS(P1-7, CEPH_CSI_ENABLED)
-│       ├── 07_envoy_gateway.sh#    Envoy AI 网关(P1-9, ENVOY_GATEWAY_ENABLED)
-│       ├── 08_keycloak.sh     #    Keycloak 统一认证(P2-1, KEYCLOAK_ENABLED)
-│       ├── 09_kueue.sh        #    Kueue 队列治理(P2-2 DEV-29, KUEUE_ENABLED)
-│       ├── 10_kubevirt.sh     #    KubeVirt 虚拟机能力(P2-3 DEV-35, KUBEVIRT_ENABLED)
-│       ├── 11_lustre_csi.sh   #    Lustre CSI(P3-1 DEV-26, LUSTRE_CSI_ENABLED)
-│       └── 20_cubestack_apps.sh#   CubeStack 自研模块占位(20 起, CUBESTACK_APPS_ENABLED)
+│       ├── 01_metallb.sh      #    MetalLB 负载均衡(基座, METALLB_ENABLED)
+│       ├── 02_local_path.sh   #    local-path-provisioner(基座, LOCAL_PATH_ENABLED)
+│       ├── 03_k8s_registry.sh #    集群内内置 registry addon(REGISTRY_ENABLED)
+│       ├── 04_gpu_operator.sh #    沐曦 GPU Operator(P1-5, GPU_OPERATOR_ENABLED)
+│       ├── 05_gpu_lws.sh      #    LeaderWorkerSet(P1-8, LWS_ENABLED)
+│       ├── 06_prometheus.sh   #    Prometheus+Operator+监控附属(P1-2/3, PROMETHEUS_ENABLED)
+│       ├── 07_ceph.sh         #    Ceph 存储集群(P1-6, CEPH_ENABLED)
+│       ├── 08_ceph_csi.sh     #    Ceph CSI RBD/RGW/CephFS(P1-7, CEPH_CSI_ENABLED)
+│       ├── 09_envoy_gateway.sh#    Envoy Gateway 通用 K8s API 网关(P1-9, ENVOY_GATEWAY_ENABLED)
+│       ├── 10_envoy_ai_gateway.sh # Envoy AI Gateway AI 专用网关(P1-9, ENVOY_AI_GATEWAY_ENABLED, 依赖 EG)
+│       ├── 11_keycloak.sh     #    Keycloak 统一认证(P2-1, KEYCLOAK_ENABLED)
+│       ├── 12_kueue.sh        #    Kueue 队列治理(P2-2 DEV-29, KUEUE_ENABLED)
+│       ├── 13_kubevirt.sh     #    KubeVirt 虚拟机能力(P2-3 DEV-35, KUBEVIRT_ENABLED)
+│       ├── 14_lustre_csi.sh   #    Lustre CSI(P3-1 DEV-26, LUSTRE_CSI_ENABLED)
+│       ├── 20_cubestack_apps.sh#   CubeStack 自研模块占位(20 起, CUBESTACK_APPS_ENABLED)
+│       └── 2x_verify_*.sh     #    端到端验证(verify_metallb / verify_registry_storage / verify_metax_gpu
+│                              #    / verify_lws / verify_envoy_gateway / verify_envoy_ai_gateway; --steps verify 全跑)
 ├── tools/                     # ★ 工具脚本(模块的底层实现, 按领域分目录)
 │   ├── vm/                    #   虚拟机: create-libvirt-vm.sh / create-vm-template.sh / register-vm.sh
 │   ├── net/                   #   网络: setup-vm-network.sh / verify-vm-network.sh / teardown-vm-network.sh / setup-libvirt-nat.sh
 │   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / install-worker-packages.sh / prepare-workers.sh
 │   │                         #        setup-ntp.sh / sync-hosts.sh / sync-ca*.sh / rebootstrap*.sh
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
+│   ├── images/                #   离线镜像工具: metax-save/load-images.sh / lws-save-images.sh
+│   │                         #        envoy-save-images.sh(EG+AI 镜像) / envoy-fetch-charts.sh(EG+AI 离线 chart)
 │   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 └── README.md                  # 本文件
 ```
