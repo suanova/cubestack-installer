@@ -24,16 +24,16 @@
 # 断点续跑: 每模块完成后写入状态文件; --fresh 清状态重跑。
 #
 # 用法:
-#   sudo ./deploy-cluster.sh                                # 默认基础设施模块
+#   sudo ./deploy-cluster.sh                                # 默认 = --with-cubestack --skip-net(全量: 基座 + cluster.conf 启用的全部 operator)
 #   sudo ./deploy-cluster.sh --with-k8s                     # 仅部署 kubespray 基座(k8s + metallb/local-path/registry)
-#   sudo ./deploy-cluster.sh --with-cubestack               # 全量: 基座 + 全部已实现 operator(gpu_operator/lws/haproxy/...)
+#   sudo ./deploy-cluster.sh --with-cubestack               # 全量: 基座 + cluster.conf 中已启用的 operator
 #   sudo ./deploy-cluster.sh --steps vm_create,k8s_deploy   # 只跑指定模块
 #   sudo ./deploy-cluster.sh --skip k8s_hosts --with-cubestack   # 跳过某模块的全量部署
-#   sudo ./deploy-cluster.sh --enable gpu_operator,lws      # 单独启用默认关闭的 operator
-#   sudo ./deploy-cluster.sh --enable envoy_gateway,envoy_ai_gateway   # Envoy 网关二件套(EG 基座 + AI 扩展, AI 依赖 EG 先装)
+#   sudo ./deploy-cluster.sh --enable gpu_operator,lws      # 只把开关写入 cluster.conf 预启用(不部署)
+#   sudo ./deploy-cluster.sh --enable envoy_gateway,envoy_ai_gateway   # Envoy 网关二件套预启用(EG 基座 + AI 扩展, AI 依赖 EG 先装)
 #   sudo ./deploy-cluster.sh --phase k8s                    # 仅运行 k8s 阶段
 #   sudo ./deploy-cluster.sh --only <host> --with-k8s       # 仅处理指定节点
-#   sudo ./deploy-cluster.sh --with-scale                   # 扩容(新节点已在 cluster.conf)
+#   sudo ./deploy-cluster.sh --with-scale                   # 扩容(新节点先写入 cluster.conf / tools/vm/vm-nodes.conf)
 #   sudo ./deploy-cluster.sh --list / --list-steps / --fresh
 # 数据源: config/cluster.conf
 #
@@ -56,8 +56,13 @@ usage() {
 
 统一入口,按模块框架(lib-module.sh)自动发现并调度 modules/<阶段>/NN_*.sh 部署模块。
 
+⚠ 默认(不加任何参数) = sudo ./deploy-cluster.sh --with-cubestack --skip-net
+   = 全量部署: 基座(k8s+metallb+local-path+registry)+ cluster.conf 中 XXX_ENABLED=true 的全部 operator,
+     并跳过 VM 桥/NAT 网络初始化(vm_network)。仅基座用 --with-k8s, 单个立即部署用 --steps。
+
 阶段目录与模块(自动发现):
-  01_env  vm_network vm_sshkey vm_create harbor lb_haproxy lb_keepalived   (默认执行前3项)
+  01_env  vm_network vm_sshkey vm_create harbor lb_haproxy lb_keepalived
+          (默认执行 vm_network+vm_sshkey; vm_create 默认关 — 虚拟机创建由 tools/vm/create-vms.sh 独立执行)
   02_k8s  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp           (默认执行)
           k8s_deploy(默认关, --with-k8s)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb local_path k8s_registry(基础) 中间件: gpu_operator gpu_lws prometheus ceph
@@ -68,8 +73,10 @@ usage() {
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
 
 注:
-  · k8s_hosts = 更新部署机 /etc/hosts 的节点 hostname 解析, 默认 no-op(由 UPDATE_ETC_HOSTS 控制, 默认关), 可跳过/去掉。
-  · --skip-net = 跳过 vm_network(VM 桥/NAT 网络初始化), 裸金属集群需要加; 与 k8s_hosts 无关。
+  · cluster.conf 的 NODES(5字段: role,hostname,ip,ssh_user,ssh_password)不区分虚拟机/裸金属;
+    主程序不判断节点类型 — 需要创建虚拟机的节点在 tools/vm/vm-nodes.conf(10字段)定义,
+    由 sudo ./deployments/scripts/tools/vm/create-vms.sh 独立执行(创建后自动注入 NODES)。
+  · --skip-net = 跳过 vm_network(VM 桥/NAT 网络初始化), 裸金属集群需要加; 默认模式已自动加 --skip-net。
 
 选项:
   --with-k8s            仅部署 kubespray 基座: k8s_deploy + kubespray 内置 addon(metallb/local-path/registry)
@@ -83,21 +90,21 @@ usage() {
   --phase env|k8s|addon 仅运行指定阶段(可逗号分隔)
   --only HOST           仅处理指定节点(可多次; 支持 hostname 或 group 名)
   --fresh, --refresh    清断点续跑状态重新执行
-  --skip-net            跳过 vm_network 模块(裸金属集群需要 --skip-net, 虚拟机无需改参)
+  --skip-net            跳过 vm_network 模块(默认模式已自动加)
   --list                仅打印集群规划(只读)
   --list-steps          列出全部模块
   --help, -h            显示本帮助
 
 示例:
-  sudo ./deploy-cluster.sh --with-k8s --skip-net      # 仅部署 kubespray 基座(k8s+metallb+local-path+registry)
-  sudo ./deploy-cluster.sh --with-cubestack --skip-net   # 全量部署(基座 + 全部 operator)
-  sudo ./deploy-cluster.sh --skip k8s_hosts --with-cubestack --fresh   # 全量重装(断点续跑, --fresh 清状态)
-  sudo ./deploy-cluster.sh --enable lws                # 只把 LWS_ENABLED=true 写入 cluster.conf(不部署)
-  sudo ./deploy-cluster.sh --steps gpu_operator        # 立即部署 gpu_operator(自动带基座, 只部署指定的)
-  sudo ./deploy-cluster.sh --with-scale   # 扩容: 新节点先写入 cluster.conf
+  sudo ./deploy-cluster.sh                          # 默认 = --with-cubestack --skip-net(全量部署)
+  sudo ./deploy-cluster.sh --with-k8s --skip-net    # 仅部署 kubespray 基座(k8s+metallb+local-path+registry)
+  sudo ./deploy-cluster.sh --skip gpu_operator --fresh   # 全量重装但排除 gpu_operator(--fresh 清状态)
+  sudo ./deploy-cluster.sh --enable lws             # 只把 LWS_ENABLED=true 写入 cluster.conf(不部署)
+  sudo ./deploy-cluster.sh --steps gpu_operator     # 立即部署 gpu_operator(自动带基座, 只部署指定的)
+  sudo ./deploy-cluster.sh --with-scale             # 扩容: 新节点先写入 cluster.conf / tools/vm/vm-nodes.conf
   sudo ./deploy-cluster.sh --only worker02 --with-scale
-  sudo ./deploy-cluster.sh --steps verify              # 只跑全部验证模块(端到端验证, 不拉基座)
-  sudo ./deploy-cluster.sh --steps verify_metallb      # 只验证某个组件(验后自动清理)
+  sudo ./deploy-cluster.sh --steps verify           # 只跑全部验证模块(端到端验证, 不拉基座)
+  sudo ./deploy-cluster.sh --steps verify_metallb   # 只验证某个组件(验后自动清理)
 EOF
     exit 0
 }
@@ -149,6 +156,9 @@ export ONLY_HOSTS
 # ---------------- 配置加载 + 模块解析 ----------------
 load_config
 
+# 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 见 tools/offline/fetch-offline-files.sh)
+check_offline_files
+
 # --enable k1,k2 = 只把模块开关写入 cluster.conf(持久化), 不立即部署。
 # 下次 --with-cubestack / 默认部署时按 cluster.conf 生效; 立即部署单个 operator 用 --steps k1,k2。
 _enable_persist() {   # <key,...>
@@ -185,6 +195,16 @@ if [ -n "${ENABLE_PERSIST_ARG}" ]; then
         say "已写入 cluster.conf(本次不部署)。下次执行 --with-cubestack / 默认部署即生效; 立即部署用 --steps ${ENABLE_PERSIST_ARG#,}"
         exit 0
     fi
+fi
+
+# 默认模式(未指定任何部署方式): 等价于 sudo ./deploy-cluster.sh --with-cubestack --skip-net
+#   = 全量部署: 基座(k8s+metallb+local-path+registry)+ cluster.conf 中 XXX_ENABLED=true 的全部 operator,
+#     且跳过 VM 桥/NAT 网络初始化(vm_network)。零参数、或仅带 --skip/--phase/--fresh/--skip-net/--list* 时生效
+#     (--list/--list-steps 展示默认全量计划); --steps/--with-*/--enable/--only/--help 明确指定时不触发。
+if [ -z "${STEPS_ARG}" ] && [ -z "${ENABLE_ARG}" ] && [ -z "${ONLY_HOSTS}" ]; then
+    ENABLE_ARG="k8s"
+    SKIP_ARG="${SKIP_ARG},vm_network"
+    say "默认模式: 等价于 --with-cubestack --skip-net — 基座 + cluster.conf 中启用的全部 operator"
 fi
 
 if ! resolve_run_steps "${STEPS_ARG}" "${SKIP_ARG}" "${ENABLE_ARG}" "${PHASE_ARG}"; then

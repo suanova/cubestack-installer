@@ -230,10 +230,10 @@ fi
 
 # ==================== Auto-register VM in cluster.conf ====================
 # 当 AUTO_REGISTER_CLUSTER=1 时,将 VM 信息写入 config/cluster.conf 的 NODES 数组
-# 复用 lib-common.sh 的 register_node_to_conf(awk 实现, 幂等)
+# (新5字段格式: role,hostname,ip,ssh_user,ssh_password; 密码 "-"=用默认; 复用 register_node_to_conf, 幂等)
 auto_register_vm() {
     [ "${AUTO_REGISTER_CLUSTER:-0}" != "1" ] && return 0
-    register_node_to_conf master "${VM_NAME}" "${VM_IP}" "${VM_MAC_LC}" "${MEM_G}" "${VCPU}" "${DISK_G}" ubuntu -
+    register_node_to_conf master "${VM_NAME}" "${VM_IP}" ubuntu -
 }
 
 virt-install \

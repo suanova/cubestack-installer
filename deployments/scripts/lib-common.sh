@@ -147,24 +147,21 @@ load_config() {
     if [ -z "${APISERVER_ADDRESS:-}" ] && [ "${NET_MODE:-nat}" = "nat" ]; then
         for line in "${NODES[@]:-}"; do
             [ -z "${line}" ] && continue
-            IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-            [ "${role}" = "master" ] && { APISERVER_ADDRESS="${ip}"; export APISERVER_ADDRESS; vlog "NAT 模式自动设 APISERVER_ADDRESS=第一个master: ${ip}"; break; }
+            node_parse "${line}"
+            [ "${NODE_ROLE}" = "master" ] && { APISERVER_ADDRESS="${NODE_IP}"; export APISERVER_ADDRESS; vlog "NAT 模式自动设 APISERVER_ADDRESS=第一个master: ${NODE_IP}"; break; }
         done
     fi
-    # 全裸金属: 宿主机(部署机)不在集群网络, API 入口=第一个 master IP(与 sync-kubespray-config.sh 的 API_ADDR 一致)
-    # 否则(含 VM)API 入口=宿主机物理 IP(worker 经宿主机 DNAT 访问 API)
+    # 全裸金属(cluster.conf 不再区分 vm/bm: 以 VM 配置文件 tools/vm/vm-nodes.conf 是否有节点判定):
+    #   VM 配置无节点 → 宿主机(部署机)不在集群网络, API 入口=第一个 master IP(与 sync-kubespray-config.sh 一致)
+    #   VM 配置有节点 → 含 VM, API 入口=宿主机物理 IP(worker 经宿主机 DNAT 访问)
     if [ -z "${APISERVER_ADDRESS:-}" ]; then
         _ALL_BM=1
-        for line in "${NODES[@]:-}"; do
-            [ -z "${line}" ] && continue
-            IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-            node_is_vm "${role}" "${mac}" "${mem}" "${node_type:-}" && { _ALL_BM=0; break; }
-        done
+        vm_conf_has_nodes && _ALL_BM=0
         if [ "${_ALL_BM}" = "1" ]; then
             for line in "${NODES[@]:-}"; do
                 [ -z "${line}" ] && continue
-                IFS=, read -r role hostname ip _rest <<<"${line}"
-                [ "${role}" = "master" ] && [ -n "${ip}" ] && { APISERVER_ADDRESS="${ip}"; export APISERVER_ADDRESS; vlog "全裸金属: API 入口=第一个 master ${ip}"; break; }
+                node_parse "${line}"
+                [ "${NODE_ROLE}" = "master" ] && [ -n "${NODE_IP}" ] && { APISERVER_ADDRESS="${NODE_IP}"; export APISERVER_ADDRESS; vlog "全裸金属: API 入口=第一个 master ${NODE_IP}"; break; }
             done
         fi
         unset _ALL_BM
@@ -235,18 +232,50 @@ mac_from_name() {
     echo "52:54:00:${hex:0:2}:${hex:2:2}:${hex:4:2}"
 }
 
-# ---------------- 节点解析 ----------------
-# 解析 NODES 配置行为字段,输出以 IFS=, 分隔的字段
-# 格式: role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password
-# mac: 显式或 "-"(自动生成); ssh_password: 显式或 "-"(用角色默认)
-node_password() { # <role> <password>
-    [ "$1" = "worker" ] && { [ -n "$2" ] && [ "$2" != "-" ] && echo "$2" || echo "${WORKER_SSH_PASSWORD:-}"; } \
-                      || { [ -n "$2" ] && [ "$2" != "-" ] && echo "$2" || echo "${SSH_DEFAULT_PASSWORD:-}"; }
+# ---------------- 节点解析(统一, 兼容新5字段/旧10字段) ----------------
+# cluster.conf NODES 新格式(5字段, 不区分 vm/bm): role,hostname,ip,ssh_user,ssh_password
+#   · ssh_password 为 "-" 或空 → 用默认密码 SSH_DEFAULT_PASSWORD(全节点默认一致)
+#   · ssh_password 为显式值   → 该节点用此密码(支持裸金属不同密码场景)
+# 旧格式(10字段, 向后兼容): role,hostname,ip,mac,mem_g,cpu,disk_g,ssh_user,ssh_password,node_type
+# 用法: node_parse <NODES行> → 设置全局变量:
+#   NODE_ROLE / NODE_HOSTNAME / NODE_IP / NODE_USER / NODE_PW(已归一为真实密码)
+#   NODE_MAC / NODE_MEM / NODE_CPU / NODE_DISK / NODE_TYPE(仅旧格式/VM 配置行有值)
+node_parse() {
+    local line="$1" f4 f5
+    NODE_ROLE=""; NODE_HOSTNAME=""; NODE_IP=""; NODE_USER=""; NODE_PW=""
+    NODE_MAC=""; NODE_MEM=""; NODE_CPU=""; NODE_DISK=""; NODE_TYPE=""
+    IFS=, read -r NODE_ROLE NODE_HOSTNAME NODE_IP f4 f5 _f6 _f7 _f8 _f9 _f10 <<<"${line}"
+    # 格式判定: 旧10字段第4位=MAC(或 "-" 且存在第8位用户); 新5字段第4位=SSH 用户名
+    if [[ "${f4}" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]] || { [ "${f4}" = "-" ] && [ -n "${_f8}" ]; }; then
+        NODE_MAC="${f4}"; NODE_MEM="${f5}"; NODE_CPU="${_f6}"; NODE_DISK="${_f7}"
+        NODE_USER="${_f8}"; NODE_PW="${_f9}"; NODE_TYPE="${_f10:-}"
+    else
+        NODE_USER="${f4}"; NODE_PW="${f5}"
+    fi
+    # 密码归一: 显式密码优先; "-"/空 → 默认密码(全节点默认一致)
+    if [ -z "${NODE_PW}" ] || [ "${NODE_PW}" = "-" ]; then
+        NODE_PW="$(node_default_pw "${NODE_ROLE}")"
+    fi
 }
 
-# ---------------- 节点类型判断(vm=虚拟机 / bm=裸金属) ----------------
-# NODES 第10字段 node_type 显式指定节点类型; 省略时回退推断:
-#   master 默认视为虚拟机; 其余按是否有 VM 参数(mac 非 "-" 且 内存>0)推断
+# 默认密码: 全节点默认一致(SSH_DEFAULT_PASSWORD); 兼容旧 WORKER_SSH_PASSWORD(仅默认未设时回退)
+# 用法: node_default_pw <role> → 默认密码(可空)
+node_default_pw() {
+    if [ -n "${SSH_DEFAULT_PASSWORD:-}" ]; then
+        echo "${SSH_DEFAULT_PASSWORD}"
+    elif [ "$1" = "worker" ] && [ -n "${WORKER_SSH_PASSWORD:-}" ]; then
+        echo "${WORKER_SSH_PASSWORD}"
+    fi
+}
+
+# 旧接口(向后兼容): node_password <role> <explicit_pw> → 解析后密码
+#   explicit_pw 非 "-" 且非空 → 原样返回(节点独立密码); 否则 → 默认密码
+node_password() {
+    local pw="$2"
+    if [ -n "${pw}" ] && [ "${pw}" != "-" ]; then echo "${pw}"; else node_default_pw "$1"; fi
+}
+
+# 节点类型判断(vm=虚拟机 / bm=裸金属): 仅对含类型信息的行(旧格式 / VM 配置文件)有效
 # 用法: node_is_vm <role> <mac> <mem_g> <node_type> → 退出码 0=是虚拟机
 node_is_vm() {
     local role="$1" mac="$2" mem="$3" ntype="$4"
@@ -259,14 +288,43 @@ node_is_vm() {
     [ -n "${mac}" ] && [ "${mac}" != "-" ] && [ "${mem:-0}" -gt 0 ]
 }
 
+# ---------------- VM 创建配置(独立于 cluster.conf, 集中管理虚拟机规格) ----------------
+# cluster.conf 的 NODES 不区分 vm/bm(5字段); 需要创建虚拟机的节点统一在
+#   deployments/scripts/tools/vm/vm-nodes.conf 中定义(10字段格式, 见该文件头部注释)。
+# 创建虚拟机的脚本(tools/vm/*)读取本配置; 创建成功后自动把 5 字段信息注入 cluster.conf。
+VM_NODES_CONF="${VM_NODES_CONF:-${SCRIPT_DIR}/tools/vm/vm-nodes.conf}"
+vm_conf_entries() {   # 输出 vm-nodes.conf 中引号包裹的 NODES 行(10字段)
+    [ -f "${VM_NODES_CONF}" ] || return 0
+    sed -n 's/^[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "${VM_NODES_CONF}"
+}
+vm_conf_has_nodes() {   # 是否有 VM 定义(供"含 VM 集群 / 全裸金属"判断)
+    [ -n "$(vm_conf_entries)" ]
+}
+vm_conf_has_node() {    # <hostname> → 退出码 0=该节点在 VM 配置中(是虚拟机)
+    local h="$1" line
+    for line in $(vm_conf_entries); do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        [ "${NODE_HOSTNAME}" = "${h}" ] && return 0
+    done
+    return 1
+}
+
 # 获取根目录(供其它脚本引用路径)
 repo_root() { echo "${REPO_ROOT}"; }
 
 # ---------------- 节点注册到 cluster.conf ----------------
-# 将节点信息写入 config/cluster.conf 的 NODES 数组(幂等)
-# 用法: register_node_to_conf <role> <hostname> <ip> <mac> <mem> <cpu> <disk> <user> <password>
+# 将节点信息写入 config/cluster.conf 的 NODES 数组(新5字段格式, 幂等)
+# 用法: register_node_to_conf <role> <hostname> <ip> <user> <password>
+#   password 为 "-" 表示用默认(SSH_DEFAULT_PASSWORD)
+#   (向后兼容: 传 9 参数旧格式时取 role/hostname/ip/user=8/pw=9, 忽略 mac/mem/cpu/disk)
 register_node_to_conf() {
-    local role="$1" hostname="$2" ip="$3" mac="$4" mem="$5" cpu="$6" disk="$7" user="$8" pw="$9"
+    local role="$1" hostname="$2" ip="$3" user pw
+    if [ $# -ge 9 ]; then
+        user="$8"; pw="$9"     # 旧 9 参数调用(含 mac/mem/cpu/disk)
+    else
+        user="$4"; pw="$5"
+    fi
     local conf_file="${CLUSTER_CONF:-${REPO_ROOT}/config/cluster.conf}"
 
     [ -f "${conf_file}" ] || { warn "cluster.conf 不存在: ${conf_file}, 跳过注册 ${hostname}"; return 0; }
@@ -278,7 +336,7 @@ register_node_to_conf() {
         return 0
     fi
 
-    local new_entry="\"${role},${hostname},${ip},${mac},${mem},${cpu},${disk},${user},${pw}\""
+    local new_entry="\"${role},${hostname},${ip},${user},${pw}\""
     echo -e "\033[36m→ 注册节点到 ${conf_file}: ${new_entry}\033[0m"
 
     # 在 NODES=( 区块的结尾 ) 前插入新条目(awk 实现, 可靠)
@@ -294,17 +352,36 @@ register_node_to_conf() {
     echo -e "\033[32m✅ ${hostname} 已注册到 cluster.conf\033[0m"
 }
 
+# ---------------- 离线文件就绪检查(醒目提示, 不阻断) ----------------
+# 部署依赖离线 binary 与镜像(deployments/offline-files); 缺失时给出醒目提示与准备指引。
+# 用法: check_offline_files   # 在 deploy-cluster.sh / 各模块开头调用
+check_offline_files() {
+    if [ ! -d "${OFFLINE_FILES_DIR:-}" ] || [ -z "$(ls -A "${OFFLINE_FILES_DIR:-/nonexistent}" 2>/dev/null)" ]; then
+        echo ""
+        echo -e "\033[41m\033[97m================================================================\033[0m"
+        echo -e "\033[41m\033[97m ⚠⚠⚠  离线文件缺失: ${OFFLINE_FILES_DIR:-<未配置>} 为空或不存在  ⚠⚠⚠\033[0m"
+        echo -e "\033[41m\033[97m  离线安装需要 binary 与镜像, 请先准备离线文件:                     \033[0m"
+        echo -e "\033[41m\033[97m   ① 内网/联网机从 MinIO 下载:                                    \033[0m"
+        echo -e "\033[41m\033[97m      sudo ./deployments/scripts/tools/offline/fetch-offline-files.sh\033[0m"
+        echo -e "\033[41m\033[97m   ② 或手工拷贝离线文件到 ${OFFLINE_FILES_DIR:-deployments/offline-files}/   \033[0m"
+        echo -e "\033[41m\033[97m   ③ kubespray 离线资源位于 ${LOCAL_REPO_DIR:-offline-files/kubespray}/    \033[0m"
+        echo -e "\033[41m\033[97m      (镜像 images/ + 二进制 + packages/ 系统包)                    \033[0m"
+        echo -e "\033[41m\033[97m================================================================\033[0m"
+        echo ""
+    fi
+}
+
 # ---------------- 附加组件通用工具 ----------------
 
 # 返回第一个 master 节点 IP(附加组件执行 kubectl 的入口)
 # 用法: FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
 first_master_ip() {
-    local line role hostname ip _rest
+    local line
     for line in "${NODES[@]:-}"; do
         [ -z "${line}" ] && continue
-        IFS=, read -r role hostname ip _rest <<<"${line}"
-        if [ "${role}" = "master" ] && [ -n "${ip}" ]; then
-            echo "${ip}"
+        node_parse "${line}"
+        if [ "${NODE_ROLE}" = "master" ] && [ -n "${NODE_IP}" ]; then
+            echo "${NODE_IP}"
             return 0
         fi
     done

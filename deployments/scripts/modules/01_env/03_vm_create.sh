@@ -1,12 +1,17 @@
 #!/bin/bash
 # ============================================================
 # MODULE: vm_create
-# DESC: 创建虚拟机并确保 running(仅 node_type=vm 节点, 裸金属自动跳过)
+# DESC: 创建/启动虚拟机(默认关 — 虚拟机创建由 tools/vm/create-vms.sh 独立执行)
 # PHASE: env
-# DEFAULT: 1
+# DEFAULT: 0
 # REPEAT: 1
-# 说明: 对 NODES 中 node_type=vm 的节点: 已存在则启动, 缺失则 create-libvirt-vm.sh 创建
-# 新启动/创建的 VM 会等待 SSH 就绪(最长 180s/台); 支持 --only 过滤(ONLY_HOSTS)
+# 说明:
+#   · **主程序不创建虚拟机、不判断虚拟机/裸金属**: cluster.conf 的 NODES(5字段)对节点一视同仁;
+#     需要创建虚拟机的节点在 tools/vm/vm-nodes.conf(10字段)定义, 由
+#     `sudo ./deployments/scripts/tools/vm/create-vms.sh` 独立执行(创建/启动 + 自动注入 NODES)。
+#   · 本模块保留为手动入口: `--steps vm_create` 等价于直接执行 create-vms.sh(幂等)。
+#   · vm-nodes.conf 缺失/为空 → 幂等跳过(纯裸金属集群)。
+# 数据源: tools/vm/vm-nodes.conf + cluster.conf(网络/镜像/默认密码)
 # ============================================================
 set -euo pipefail
 
@@ -14,46 +19,6 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-say "创建/启动集群虚拟机(vm 节点) ..."
-BOOTED_VMS=()
-for line in "${NODES[@]:-}"; do
-    [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    node_is_vm "${role}" "${mac}" "${mem}" "${node_type:-}" || continue   # bm/裸金属 → worker_bm 模块
-    node_matches "${hostname}" || continue
-    [ "${mac}" = "-" ] && mac="$(mac_from_name "${hostname}")"
-
-    if virsh list --all | grep -qw "${hostname}"; then
-        if virsh domstate "${hostname}" 2>/dev/null | grep -qi "running"; then
-            ok "VM ${hostname} 已在运行"
-        else
-            say "启动 VM ${hostname} (当前: $(virsh domstate "${hostname}" 2>/dev/null)) ..."
-            virsh start "${hostname}" >/dev/null 2>&1 && { ok "VM ${hostname} 已启动"; BOOTED_VMS+=("${ip}"); } \
-                || warn "VM ${hostname} 启动失败,请检查(virsh list --all / virsh start ${hostname})"
-        fi
-        # 确保设置开机自启(宿主机重启后自动启动)
-        virsh autostart "${hostname}" >/dev/null 2>&1 \
-            && ok "VM ${hostname} 已设置开机自启" \
-            || warn "VM ${hostname} 设置开机自启失败(virsh autostart ${hostname})"
-    else
-        say "创建 VM ${hostname} (${mem}G/${cpu}C/${disk}G, ${ip}, ${mac}) ..."
-        AUTO_REGISTER_CLUSTER=1 bash "${SCRIPT_DIR}/tools/vm/create-libvirt-vm.sh" "${hostname}" "${mem}" "${cpu}" "${disk}" "${mac}" "${ip}"
-        BOOTED_VMS+=("${ip}")
-    fi
-done
-
-# 等待本次启动/创建的 VM SSH 就绪(端口探测, 免认证)
-if [ "${#BOOTED_VMS[@]}" -gt 0 ]; then
-    say "等待 ${#BOOTED_VMS[@]} 台 VM 的 SSH 就绪(最长 180s/台) ..."
-    for boot_ip in "${BOOTED_VMS[@]}"; do
-        READY=0
-        for i in $(seq 1 18); do
-            ssh_port_open "${boot_ip}" && { READY=1; break; }
-            [ "${i}" -eq 18 ] && break
-            sleep 10
-        done
-        [ "${READY}" = "1" ] && ok "  ${boot_ip} SSH 就绪" || warn "  ${boot_ip} 180s 内 SSH 未就绪,可能仍需等待"
-    done
-fi
-
+say "vm_create: 调用 tools/vm/create-vms.sh(虚拟机创建独立执行, 默认不由主程序调度) ..."
+bash "${SCRIPT_DIR}/tools/vm/create-vms.sh"
 ok "虚拟机模块完成"

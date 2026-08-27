@@ -42,9 +42,6 @@ say "NTP 时间同步(权威=${NTP_AUTHORITY}${NTP_SERVER:+[NTP_SERVER]}${HOST_I
 SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 SSH_OPTS=(-i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8)
 
-# node_password <role> <explicit_pw>: worker→WORKER_SSH_PASSWORD, 其余→SSH_DEFAULT_PASSWORD
-node_pw() { node_password "$1" "$2"; }
-
 # 在节点以 root 执行单条命令(<ip> <user> <pw> <remote cmd...>)
 node_cmd() {
     local ip="$1" u="$2" pw="$3"; shift 3
@@ -65,13 +62,13 @@ node_scp() {
         -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=8 "$l" "${u}@${ip}:${r}"
 }
 
-# ---------- 解析节点列表(ip:user:pw:hostname:node_type) ----------
+# ---------- 解析节点列表(ip:user:pw:hostname) ----------
 NODE_ENTRIES=()
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    [ -n "${ip}" ] && [ -n "${user}" ] || continue
-    NODE_ENTRIES+=("${ip}:${user}:$(node_pw "${role}" "${pw}"):${hostname}:${node_type:-}")
+    node_parse "${line}"
+    [ -n "${NODE_IP}" ] && [ -n "${NODE_USER}" ] || continue
+    NODE_ENTRIES+=("${NODE_IP}:${NODE_USER}:${NODE_PW}:${NODE_HOSTNAME}")
 done
 [ "${#NODE_ENTRIES[@]}" -gt 0 ] || { err "cluster.conf NODES 为空"; exit 1; }
 
@@ -208,18 +205,18 @@ verify_clocks() {
     say "校验各节点与权威(${NTP_AUTHORITY})时钟偏差(阈值 ${NTP_MAX_OFFSET_MS}ms) ..."
     local FAIL=0 FAIL_LIST=""
     for e in "${NODE_ENTRIES[@]:-}"; do
-        local ip rest u pw hn typ off
-        ip="${e%%:*}"; rest="${e#*:}"; u="${rest%%:*}"; rest="${rest#*:}"; pw="${rest%%:*}"; rest="${rest#*:}"; hn="${rest%%:*}"; typ="${rest#*:}"
+        local ip rest u pw hn
+        ip="${e%%:*}"; rest="${e#*:}"; u="${rest%%:*}"; rest="${rest#*:}"; pw="${rest%%:*}"; rest="${rest#*:}"; hn="${rest%%:*}"
         node_matches "${hn}" || continue
         off="$(clock_offset "${ip}" "${u}" "${pw}")"
         if [ "${off}" -eq -1 ]; then
-            warn "  ${hn}(${ip}) [${typ:-?}] 无法读取时钟(SSH/sudo 失败?)"
+            warn "  ${hn}(${ip}) 无法读取时钟(SSH/sudo 失败?)"
             FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
             continue
         fi
         if [ "${off}" -gt "${NTP_MAX_OFFSET_MS}" ]; then
             if [ "${AUTO_SYNC_ON_FAIL:-0}" = "1" ]; then
-                warn "  ${hn}(${ip}) [${typ:-?}] 偏差 ${off}ms ✗(>${NTP_MAX_OFFSET_MS}ms), 自动重对齐并复测 ..."
+                warn "  ${hn}(${ip}) 偏差 ${off}ms ✗(>${NTP_MAX_OFFSET_MS}ms), 自动重对齐并复测 ..."
                 local hms
                 hms="$(date +%s%3N)"
                 if node_scp "${NODE_SCRIPT}" "${ip}" "${u}" "${pw}" "${REMOTE_SCRIPT}" \
@@ -228,17 +225,17 @@ verify_clocks() {
                     off="$(clock_offset "${ip}" "${u}" "${pw}")"
                 fi
                 if [ "${off}" -eq -1 ] || [ "${off}" -gt "${NTP_MAX_OFFSET_MS}" ]; then
-                    warn "  ${hn}(${ip}) [${typ:-?}] 复测仍偏差 ${off}ms ✗(>${NTP_MAX_OFFSET_MS}ms)"
+                    warn "  ${hn}(${ip}) 复测仍偏差 ${off}ms ✗(>${NTP_MAX_OFFSET_MS}ms)"
                     FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
                 else
-                    ok "  ${hn}(${ip}) [${typ:-?}] 自动重对齐后偏差 ${off}ms ✓"
+                    ok "  ${hn}(${ip}) 自动重对齐后偏差 ${off}ms ✓"
                 fi
             else
-                warn "  ${hn}(${ip}) [${typ:-?}] 偏差 ${off}ms ✗(>${NTP_MAX_OFFSET_MS}ms)"
+                warn "  ${hn}(${ip}) 偏差 ${off}ms ✗(>${NTP_MAX_OFFSET_MS}ms)"
                 FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
             fi
         else
-            ok "  ${hn}(${ip}) [${typ:-?}] 偏差 ${off}ms ✓"
+            ok "  ${hn}(${ip}) 偏差 ${off}ms ✓"
         fi
     done
     if [ "${FAIL}" = "1" ]; then

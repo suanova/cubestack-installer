@@ -23,12 +23,14 @@ SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/n
 # 确定第一个 master(取配置第一个 master)
 FIRST_MASTER=""
 FIRST_MASTER_IP=""
+FIRST_MASTER_USER=""
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    if [ "${role}" = "master" ] && [ -z "${FIRST_MASTER}" ]; then
-        FIRST_MASTER="${hostname}"
-        FIRST_MASTER_IP="${ip}"
+    node_parse "${line}"
+    if [ "${NODE_ROLE}" = "master" ] && [ -z "${FIRST_MASTER}" ]; then
+        FIRST_MASTER="${NODE_HOSTNAME}"
+        FIRST_MASTER_IP="${NODE_IP}"
+        FIRST_MASTER_USER="${NODE_USER}"
         break
     fi
 done
@@ -36,7 +38,7 @@ done
 
 say "从 ${FIRST_MASTER}(${FIRST_MASTER_IP}) 获取集群 CA ..."
 CA_FILE="/tmp/cubestack-ca.crt"
-ssh ${SSH_OPTS} "${user:-ubuntu}@${FIRST_MASTER_IP}" "sudo cat /etc/kubernetes/ssl/ca.crt" > "${CA_FILE}" 2>/dev/null
+ssh ${SSH_OPTS} "${FIRST_MASTER_USER:-ubuntu}@${FIRST_MASTER_IP}" "sudo cat /etc/kubernetes/ssl/ca.crt" > "${CA_FILE}" 2>/dev/null
 [ -s "${CA_FILE}" ] || { err "获取 CA 失败"; exit 1; }
 ok "CA 已获取 ($(wc -c < "${CA_FILE}") 字节)"
 
@@ -48,19 +50,19 @@ REMOTE_SCRIPT="$(dirname "${BASH_SOURCE[0]}")/sync-ca-remote.sh"
 COUNT=0
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    [ -z "${ONLY}" ] || [ "${hostname}" = "${ONLY}" ] || continue
+    node_parse "${line}"
+    [ -z "${ONLY}" ] || [ "${NODE_HOSTNAME}" = "${ONLY}" ] || continue
 
     COUNT=$((COUNT + 1))
-    say "── [${hostname}](${ip}) 同步 CA + 更新 kubelet.conf + 重启 kubelet ..."
+    say "── [${NODE_HOSTNAME}](${NODE_IP}) 同步 CA + 更新 kubelet.conf + 重启 kubelet ..."
     # 1. scp CA 和远端脚本
-    scp ${SSH_OPTS} -o BatchMode=yes "${CA_FILE}" "${user}@${ip}:/tmp/cubestack-ca.crt" >/dev/null 2>&1 || { warn "  scp CA 失败,跳过"; continue; }
-    scp ${SSH_OPTS} -o BatchMode=yes "${REMOTE_SCRIPT}" "${user}@${ip}:/tmp/sync-ca-remote.sh" >/dev/null 2>&1 || { warn "  scp 脚本失败,跳过"; continue; }
+    scp ${SSH_OPTS} -o BatchMode=yes "${CA_FILE}" "${NODE_USER}@${NODE_IP}:/tmp/cubestack-ca.crt" >/dev/null 2>&1 || { warn "  scp CA 失败,跳过"; continue; }
+    scp ${SSH_OPTS} -o BatchMode=yes "${REMOTE_SCRIPT}" "${NODE_USER}@${NODE_IP}:/tmp/sync-ca-remote.sh" >/dev/null 2>&1 || { warn "  scp 脚本失败,跳过"; continue; }
     # 2. root 执行远端修复脚本
-    if ssh ${SSH_OPTS} -o BatchMode=yes "${user}@${ip}" "sudo bash /tmp/sync-ca-remote.sh; rm -f /tmp/sync-ca-remote.sh" >/dev/null 2>&1; then
-        ok "  ${hostname} CA + kubelet.conf 已同步, kubelet 已重启"
+    if ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" "sudo bash /tmp/sync-ca-remote.sh; rm -f /tmp/sync-ca-remote.sh" >/dev/null 2>&1; then
+        ok "  ${NODE_HOSTNAME} CA + kubelet.conf 已同步, kubelet 已重启"
     else
-        warn "  ${hostname} 同步失败"
+        warn "  ${NODE_HOSTNAME} 同步失败"
     fi
 done
 

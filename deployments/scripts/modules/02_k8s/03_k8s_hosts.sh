@@ -21,10 +21,10 @@ fi
 say "更新 /etc/hosts(节点主机名解析) ..."
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    if ! grep -qE "[[:space:]]${hostname}([[:space:]]|\$)" /etc/hosts; then
-        echo "${ip} ${hostname}" >> /etc/hosts
-        ok "已添加 /etc/hosts: ${ip} ${hostname}"
+    node_parse "${line}"
+    if ! grep -qE "[[:space:]]${NODE_HOSTNAME}([[:space:]]|\$)" /etc/hosts; then
+        echo "${NODE_IP} ${NODE_HOSTNAME}" >> /etc/hosts
+        ok "已添加 /etc/hosts: ${NODE_IP} ${NODE_HOSTNAME}"
     fi
 done
 ok "/etc/hosts 更新完成"

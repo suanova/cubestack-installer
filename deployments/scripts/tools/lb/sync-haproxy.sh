@@ -19,10 +19,10 @@ MASTER_IPS=()
 MASTER_NAMES=()
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
-    IFS=, read -r role hostname ip mac mem cpu disk user pw node_type <<<"${line}"
-    [ "${role}" = "master" ] || continue
-    MASTER_NAMES+=("${hostname}")
-    MASTER_IPS+=("${ip}")
+    node_parse "${line}"
+    [ "${NODE_ROLE}" = "master" ] || continue
+    MASTER_NAMES+=("${NODE_HOSTNAME}")
+    MASTER_IPS+=("${NODE_IP}")
 done
 [ "${#MASTER_IPS[@]}" -gt 0 ] || { err "cluster.conf 中无 master 节点"; exit 1; }
 
