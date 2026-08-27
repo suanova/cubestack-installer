@@ -88,4 +88,6 @@ RUN test -f ${REPO_ROOT}/deployments/scripts/deploy-cluster.sh \
  && test -d ${REPO_ROOT}/deployments/cubestack-addon
 
 WORKDIR ${REPO_ROOT}
-ENTRYPOINT ["/bin/bash"]
+# 默认进入交互式 bash(docker run -it 即可; 不要再设 ENTRYPOINT= bash,
+# 否则与 CMD 拼接成 "/bin/bash /bin/bash" 报 cannot execute binary file)
+CMD ["/bin/bash"]
