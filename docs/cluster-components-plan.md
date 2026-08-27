@@ -18,7 +18,7 @@
 | 6 | Ceph 存储集群 | 完成Ceph底层存储集群部署、集群健康自检、存储池初始化,为上层CSI服务提供稳定存储底座 | 0% | 未开始 | - |  |  | `modules/03_addon/06_ceph.sh` / `CEPH_ENABLED` |
 | 7 | Ceph CSI(RBD/RGW/CephFS) | 部署CSI驱动,对接Ceph存储集群,实现三类存储卷正常创建、挂载、读写,集群StorageReady状态正常置位 | 0% | 未开始 | - |  |  | `modules/03_addon/07_ceph_csi.sh` / `CEPH_CSI_ENABLED` |
 | 8 | LWS | 完成LWS组件部署、集群适配与基础校验,保障集群轻量调度与配套服务正常运行 | 100% | ✅ 已完成(2026-08-23) | - |  | 2026-08-23 | `modules/03_addon/05_gpu_lws.sh` / `LWS_ENABLED`(helm 离线 + cert-manager/internal 双证书 + DisaggregatedSet, 详见 `docs/lws.md`) |
-| 9 | Envoy AI 网关 | 搭建集群统一流量入口,完成路由配置与转发测试,保障外部业务URL可正常稳定访问 | 0% | 未开始 | - |  |  | `modules/03_addon/08_envoy_gateway.sh` / `ENVOY_GATEWAY_ENABLED` |
+| 9 | Envoy AI 网关(Envoy Gateway + Envoy AI Gateway) | 搭建集群统一流量入口,完成路由配置与转发测试,保障外部业务URL可正常稳定访问(通用网关基座 + AI 扩展层) | 50% | 进行中 | 模块/离线 chart/离线镜像工具已实现; 待联网机跑 envoy-fetch-charts.sh / envoy-save-images.sh 备料后实机验证 |  |  | `modules/03_addon/09_envoy_gateway.sh` + `10_envoy_ai_gateway.sh` / `ENVOY_GATEWAY_ENABLED` + `ENVOY_AI_GATEWAY_ENABLED`(详见 `docs/envoy-gateway.md`) |
 
 **P1附属基础依赖(必过验收·极简核对):**
 
@@ -79,7 +79,7 @@
 | P1-6 | Ceph 存储集群 | `03_addon/05_ceph.sh` | `CEPH_ENABLED` | 🧩 伪代码占位 |
 | P1-7 | Ceph CSI | `03_addon/06_ceph_csi.sh` | `CEPH_CSI_ENABLED` | 🧩 伪代码占位 |
 | P1-8 | LWS | `03_addon/05_gpu_lws.sh` | `LWS_ENABLED` | ✅ 已实现(helm 离线 + 双证书 + DisaggregatedSet) |
-| P1-9 | Envoy AI 网关 | `03_addon/07_envoy_gateway.sh` | `ENVOY_GATEWAY_ENABLED` | 🧩 伪代码占位 |
+| P1-9 | Envoy AI 网关(统一流量入口: Envoy Gateway + Envoy AI Gateway) | `03_addon/09_envoy_gateway.sh` + `10_envoy_ai_gateway.sh` | `ENVOY_GATEWAY_ENABLED` + `ENVOY_AI_GATEWAY_ENABLED` | 🚧 已实现(离线 chart+镜像工具齐, 待备料实机验证; 见 `docs/envoy-gateway.md`) |
 | P2-1 | Keycloak 统一认证 | `03_addon/08_keycloak.sh` | `KEYCLOAK_ENABLED` | 🧩 伪代码占位 |
 | P2-2 | Kueue 队列治理 | `03_addon/09_kueue.sh` | `KUEUE_ENABLED` | 🧩 伪代码占位 |
 | P2-3 | KubeVirt 虚拟机能力 | `03_addon/10_kubevirt.sh` | `KUBEVIRT_ENABLED` | 🧩 伪代码占位 |

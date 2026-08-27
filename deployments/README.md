@@ -39,7 +39,7 @@
 | P1-5 | 沐曦 MetaX GPU Operator | `GPU_OPERATOR_ENABLED` | `03_addon/01_gpu_operator.sh` |
 | P1-6/7 | Ceph 存储集群 + Ceph CSI(RBD/RGW/CephFS) | `CEPH_ENABLED` / `CEPH_CSI_ENABLED` | `03_addon/06_ceph.sh` / `07_ceph_csi.sh` |
 | P1-8 | LeaderWorkerSet(LWS) | `LWS_ENABLED` | `03_addon/02_gpu_lws.sh` |
-| P1-9 | Envoy AI 网关(统一流量入口) | `ENVOY_GATEWAY_ENABLED` | `03_addon/08_envoy_gateway.sh` |
+| P1-9 | Envoy 网关二件套: Envoy Gateway(通用 API 网关)+ Envoy AI Gateway(AI 专用扩展层) | `ENVOY_GATEWAY_ENABLED` / `ENVOY_AI_GATEWAY_ENABLED` | `03_addon/09_envoy_gateway.sh` / `10_envoy_ai_gateway.sh`(见 `docs/envoy-gateway.md`) |
 | P2-1 | Keycloak 统一认证 | `KEYCLOAK_ENABLED` | `03_addon/09_keycloak.sh` |
 | P2-2 | Kueue 队列治理(DEV-29) | `KUEUE_ENABLED` | `03_addon/10_kueue.sh` |
 | P2-3 | KubeVirt 虚拟机能力(DEV-35) | `KUBEVIRT_ENABLED` | `03_addon/11_kubevirt.sh` |
