@@ -394,7 +394,14 @@ deployments/
 
 不想在宿主机装工具链时,可直接用 **CLI 容器**离线部署。镜像内置 kubespray 源码 + 全部部署脚本 + 工具链(ansible/helm/skopeo/mc/kubectl/sshpass/virsh),**不含离线镜像 tar 与二进制**(体积大, 由挂载目录共享)。
 
-镜像名:`harbor.isuanova.com/cubestack/cubestack-installer-cli:latest`(或本地 `docker build -f Dockerfile-cli -t cubestack-cli .` 构建)。
+镜像名:`harbor.isuanova.com/cubestack/cubestack-installer-cli:latest`。
+
+构建(独立上下文, 默认基于 Harbor 镜像增量构建, 只刷新源码; 完整重建加 `--build-arg BASE_IMAGE=ubuntu:22.04`):
+
+```bash
+sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build     # 生成上下文 + 构建
+sudo ./deployments/scripts/tools/docker/build-cli-context.sh --push      # 生成 + 构建 + 推送 Harbor
+```
 
 **第 0 步: 获取离线文件(缺失时)**
 
