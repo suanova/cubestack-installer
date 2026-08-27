@@ -93,6 +93,8 @@ deployments/scripts/
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
 │   ├── images/                #   离线镜像工具: metax-save/load-images.sh / lws-save-images.sh
 │   │                         #        envoy-save-images.sh(EG+AI 镜像) / envoy-fetch-charts.sh(EG+AI 离线 chart)
+│   ├── offline/               #   MinIO 离线文件拉取: fetch-offline-from-minio.sh(大磁盘检测+容器挂载提示)
+│   │                         #        fetch-offline-files.sh(MinIO 增量同步到 OFFLINE_FILES_DIR)
 │   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 └── README.md                  # 本文件
 ```
@@ -438,6 +440,32 @@ bare-metal worker(Ubuntu)无法联网时,用 offline-files 中的离线 `.deb` �
 ```
 
 包来源: `deployments/offline-files/kubespray/cubestack-cluster/`(由 `OFFLINE_FILES_DIR` 全局变量指定)下的 `.deb` 文件(仓库根目录,与 kubeadm/etcd 等二进制同层)或 `packages/` 子目录,脚本自动收集两者并去重。包含 iputils-ping / rsync / iptables / curl / ca-certificates 及依赖。
+
+### 5.11 fetch-offline-from-minio.sh —— 从 MinIO 拉取离线文件到宿主机大磁盘
+
+部署机/新机器缺离线文件时,从 MinIO 下载(默认只拉 `kubespray` 部署必需部分;`--all` 全量含 GPU/LWS/虚拟机镜像),自动检测可用空间最大且空闲 ≥ 50GiB 的磁盘,完成后打印 Docker CLI 容器挂载命令:
+
+```bash
+sudo ./scripts/tools/offline/fetch-offline-from-minio.sh            # 默认: kubespray(3.4GiB)
+sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --all      # 全量(约 34GiB, 未来会更多)
+sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --sub metax-gpu    # 只拉某子目录
+sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --dest /data/offline   # 指定目录
+sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --min-free 100        # 磁盘空闲门槛 100GiB
+./scripts/tools/offline/fetch-offline-from-minio.sh --list          # 只列出 MinIO 可用目录
+```
+
+- **mc 检测**:未安装时给出安装指引,可选择自动下载(华为云镜像);alias 优先用 cluster.conf 的 `MINIO_*` 自动配置,否则探测本机已有 alias,再否则交互录入。
+- **桶/目录自适应**:默认桶 `cubestack-installer`、目录 `offline-files`(与 MinIO 实际布局一致),自动回退探测旧布局 `cubestack-offline/kubespray`。
+- **磁盘选择**:空闲 ≥ `MIN_FREE_GB`(默认 50, 离线文件会持续增加)的挂载点中取可用空间最大者;无可选时用 `/opt/offline-files`。
+- **下载后提示**:
+  ```bash
+  sudo docker run --rm -it --network host \
+    -v <下载目录>/offline-files:/opt/cubestack-installer/deployments/offline-files \
+    -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
+    -v $HOME/.ssh:/root/.ssh \
+    harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+  ```
+  宿主机直跑(非容器)则 `export OFFLINE_FILES_DIR=<下载目录>/offline-files` 后执行 `deploy-cluster.sh`。
 
 ### 5.5 create-libvirt-vm.sh —— 单台虚拟机
 
