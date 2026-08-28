@@ -36,15 +36,12 @@ done
 [ -n "${API_DOMAIN}" ] || API_DOMAIN="k8s-api.nova.local"
 
 # /etc/hosts 确保 API_DOMAIN → API_IP
-if grep -qE "^${API_IP}[[:space:]]+${API_DOMAIN}([[:space:]]|$)" /etc/hosts 2>/dev/null; then
-    ok "/etc/hosts 已有 ${API_DOMAIN} → ${API_IP}"
-else
-    # 删除旧域名行再写正确 IP(幂等)
-    re="$(echo "${API_DOMAIN}" | sed 's/\./\\./g')"
-    sed -i -E "/[[:space:]]${re}([[:space:]]|$)/d" /etc/hosts
-    echo "${API_IP} ${API_DOMAIN}" >> /etc/hosts
-    ok "/etc/hosts 写入 ${API_DOMAIN} → ${API_IP}"
-fi
+# ★ 关键: 无论目标 IP 是否已匹配, 都先删除该域名的【所有旧行】(换环境时旧 IP 残留会
+#   让 getent hosts 命中旧 IP → kubectl 打到旧集群 → 误报失败), 再写当前 API_IP 一行。
+re="$(echo "${API_DOMAIN}" | sed 's/\./\\./g')"
+sed -i -E "/[[:space:]]${re}([[:space:]]|$)/d" /etc/hosts 2>/dev/null || true
+echo "${API_IP} ${API_DOMAIN}" >> /etc/hosts
+ok "/etc/hosts 写入 ${API_DOMAIN} → ${API_IP}(先删旧 IP 残留, 确保只有一行)"
 
 # ---------------- DNAT 管理(仅当 API_IP ≠ 第一个 master 时需要) ----------------
 # 默认 API_IP = 第一个 master IP(VM/裸金属统一), 宿主机直连 master:6443, 无需 DNAT。
