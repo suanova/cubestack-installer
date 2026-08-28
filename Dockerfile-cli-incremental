@@ -1,0 +1,64 @@
+# =====================================================================
+# Dockerfile-cli-incremental — CubeStack CLI 镜像【增量构建】
+# ---------------------------------------------------------------------
+# · 用途: 基于 Harbor 上已有的 CLI 镜像(harbor.isuanova.com/cubestack/cubestack-installer-cli:latest)
+#   做增量更新, 只做两件事:
+#     ① 补装缺失的 system package(apt 已走清华镜像, 缺什么补什么);
+#     ② 更新最新的 deployments 脚本/源码(rm 后整体重新 COPY, 保证与仓库一致)。
+#   效果: 基础层(工具链/pip 依赖/二进制)命中 Harbor 旧镜像缓存, 构建秒级。
+#   适用: 改了部署脚本 / cluster.conf.example / 补了系统包依赖时的日常更新。
+#   不适用: 首次构建 / 基础镜像不存在(用 Dockerfile-cli 全量构建)。
+# ---------------------------------------------------------------------
+# 构建(由 build-cli-context.sh --build --incremental 自动执行, 或手动):
+#   sudo docker build -f Dockerfile-cli-incremental \
+#        -t harbor.isuanova.com/cubestack/cubestack-installer-cli:latest \
+#        deployments/cli-context/
+# 说明: 基础镜像不可变标签 latest, 增量=每次基于当前 Harbor latest 重做一遍;
+#       "只更新不存在的 package + 最新 deployments" —— 已存在的包/依赖层不重复构建。
+# =====================================================================
+
+# 基础镜像: 复用 Harbor 旧 CLI 镜像(增量复用工具链/pip 依赖)
+ARG BASE_IMAGE=harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    REPO_ROOT=/opt/cubestack-installer \
+    PIP_NO_CACHE_DIR=1 \
+    LANG=C.UTF-8
+
+# ---------- apt 源走清华镜像(国内加速; 与 Dockerfile-cli 一致, 补装缺失包) ----------
+RUN sed -i 's@//archive.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g; s@//security.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g; s@//ports.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list
+
+# ---------- 系统工具链(增量: 只补装"缺失的"包; 已装的 apt 自动跳过) ----------
+# 与 Dockerfile-cli 保持同一清单, 保证增量构建后功能与全量一致:
+#   · 01_vm_network 依赖: iproute2(ip)/kmod(modprobe)/systemd(systemctl)/procps(sysctl)
+#   · NTP 权威源(chrony): 容器内充当权威时间源时使用
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget git unzip jq \
+        openssh-client sshpass rsync iputils-ping iptables dnsutils \
+        python3 python3-pip python3-venv \
+        libvirt-clients vim gnupg \
+        iproute2 kmod systemd procps bridge-utils chrony \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------- 更新部署脚本/源码(基础镜像已含旧 deployments, 先清空再拷入) ----------
+WORKDIR ${REPO_ROOT}
+RUN rm -rf ${REPO_ROOT}/deployments ${REPO_ROOT}/skills 2>/dev/null || true
+COPY deployments ${REPO_ROOT}/deployments
+COPY skills ${REPO_ROOT}/skills
+
+# 预装 kubespray Python 依赖(随 requirements.txt 精确锁定; 让运行时 ensure_venv
+# 用 --system-site-packages 直接继承, 完全离线, 不再新建空 venv 联网 pip install)。
+# 基础镜像已含早期 ansible, 此处幂等补装 + 对齐当前 requirements.txt 版本。
+COPY deployments/kubespray/kubespray/requirements.txt /tmp/kubespray-requirements.txt
+RUN python3 -m pip install -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && rm -f /tmp/kubespray-requirements.txt \
+    && ansible --version 2>/dev/null | head -1
+
+# 校验关键路径就位
+RUN test -f ${REPO_ROOT}/deployments/scripts/deploy-cluster.sh \
+ && test -d ${REPO_ROOT}/deployments/kubespray/kubespray \
+ && test -d ${REPO_ROOT}/deployments/cubestack-addon
+
+WORKDIR ${REPO_ROOT}
+CMD ["/bin/bash"]

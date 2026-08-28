@@ -7,15 +7,14 @@
 #   · 工具链 binary(helm / kubectl / skopeo / mc)优先走国内镜像源/离线文件拷贝,
 #     不打包离线的镜像 tar(20G+), cli 镜像体积可控、无密钥泄漏。
 # ---------------------------------------------------------------------
-# ★ 构建方式(与全量 offline-files 解耦):
-#   1) 生成独立构建上下文(只含镜像所需文件; 未来 offline-files 增加镜像不影响构建):
-#        sudo ./deployments/scripts/tools/docker/build-cli-context.sh
-#   2) 构建(默认基于 Harbor 上的 CLI 镜像做**增量构建**, 工具链已内置, 只刷新源码,
-#      秒级完成; 全新/工具链变更时用 --build-arg BASE_IMAGE=ubuntu:22.04 完整重建):
-#        sudo docker build -f Dockerfile-cli \
-#             -t harbor.isuanova.com/cubestack/cubestack-installer-cli:latest \
-#             deployments/cli-context/
-#   3) 推送: sudo docker push harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+# ★ 两种构建方式(同一份源码, 两个 Dockerfile):
+#   A) 全量构建(本文件 Dockerfile-cli, 基础 ubuntu:22.04, 从零装全部工具链 + pip 依赖):
+#        sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build
+#     更新部署脚本/源码后, 全量重建会重新跑 apt/pip, 构建较慢(几分钟级)。
+#   B) 增量构建(Dockerfile-cli-incremental, 基础 Harbor 旧 CLI 镜像,
+#      只补装缺失的 package + 更新最新的 deployments 脚本, 秒级):
+#        sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build --incremental
+#     依赖: 本地已有/能拉取 harbor.isuanova.com/cubestack/cubestack-installer-cli:latest。
 # ---------------------------------------------------------------------
 # 运行(推荐, 挂载离线文件/配置/SSH 密钥):
 #   docker run --rm -it --network host \
@@ -31,9 +30,10 @@
 #       纯裸金属离线部署(kubespray + operator)无需额外特权。
 # =====================================================================
 
-# 基础镜像: 默认 Harbor 上的 CLI 镜像(增量构建, 工具链复用); 完整重建时:
-#   docker build --build-arg BASE_IMAGE=ubuntu:22.04 -f Dockerfile-cli -t ... deployments/cli-context/
-ARG BASE_IMAGE=harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+# 基础镜像: ubuntu:22.04(离线构建由 build-cli-context.sh --build 自动 docker load;
+#   工具链复用/秒级增量时可改走 Harbor 上的旧 CLI 镜像:
+#   docker build --build-arg BASE_IMAGE=harbor.isuanova.com/cubestack/cubestack-installer-cli:latest ...)
+ARG BASE_IMAGE=ubuntu:22.04
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -45,46 +45,62 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN sed -i 's@//archive.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g; s@//security.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g; s@//ports.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list
 
 # ---------- 系统工具链(apt 已走清华镜像) ----------
+# 含 01_vm_network 依赖: iproute2(ip)/kmod(modprobe)/systemd(systemctl)/procps(sysctl)
+# 及 NTP 权威源(chrony): 容器内充当权威时间源时使用
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl wget git unzip jq \
         openssh-client sshpass rsync iputils-ping iptables dnsutils \
         python3 python3-pip python3-venv \
-        libvirt-clients vim \
+        libvirt-clients vim gnupg \
+        iproute2 kmod systemd procps bridge-utils chrony \
     && rm -rf /var/lib/apt/lists/*
 
-# ---------- kubectl(从本地离线文件拷入, 规避被墙的 dl.k8s.io) ----------
-# 离线文件由 fetch-offline-files.sh 从 MinIO 同步到 deployments/offline-files/kubespray
+# ---------- kubectl(构建上下文 bin/ 临时拷入, 规避被墙的 dl.k8s.io) ----------
+# bin/ 由 build-cli-context.sh 从 deployments/offline-files/kubespray 临时拷入
 # (与 kubespray 集群二进制同源, 文件名 kubectl-<版本>-amd64)。helm 同理。
 # 注: 用精确文件名明确锁定版本(避免 shell 通配紧邻 '.' 解析的坑)。
-COPY deployments/offline-files/kubespray/kubectl-1.32.5-amd64 /usr/local/bin/kubectl
+COPY bin/kubectl-1.32.5-amd64 /usr/local/bin/kubectl
 RUN chmod +x /usr/local/bin/kubectl && kubectl version --client 2>/dev/null | head -1
 
-COPY deployments/offline-files/kubespray/helm-3.16.4-linux-amd64.tar.gz /tmp/helm.tar.gz
+COPY bin/helm-3.16.4-linux-amd64.tar.gz /tmp/helm.tar.gz
 RUN tar xzf /tmp/helm.tar.gz -C /tmp \
     && mv /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/linux-amd64 /tmp/helm.tar.gz \
     && helm version --short
 
 # ---------- skopeo(离线镜像 docker-archive → 集群 registry 推送) ----------
-# 从本地离线文件拷入(静态二进制, 无动态依赖); 若目录缺失则由 fetch-offline-files.sh
-# 补齐, 或回退用 apt 装的 skopeo。
-COPY deployments/offline-files/kubespray/skopeo-1.16.1-amd64 /usr/local/bin/skopeo
+# 从构建上下文 bin/ 拷入(静态二进制, 无动态依赖); 若缺失则由 fetch-offline-files.sh
+# 补齐后重新生成上下文, 或回退用 apt 装的 skopeo。
+COPY bin/skopeo-1.16.1-amd64 /usr/local/bin/skopeo
 RUN chmod +x /usr/local/bin/skopeo \
     && (skopeo --version 2>/dev/null || true)
 
-# ---------- mc(MinIO Client, 下载离线文件; 走华为云镜像) ----------
-RUN curl -fsSL "https://mirrors.huaweicloud.com/minio/client/mc/latest/linux-amd64/mc" \
-        -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc \
-    && mc --version 2>/dev/null | head -1
+# ---------- mc(MinIO Client, 下载离线文件; 走 MinIO 官方二进制直下) ----------
+# 注: 之前华为云镜像 URL 返回 HTML 页面、官方 apt 仓库 key.gpg 亦不稳定,
+# 改为从 dl.min.io 官方 release 直下二进制(按架构选择)。
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "${ARCH}" in \
+        amd64) MC_ARCH="amd64" ;; \
+        arm64) MC_ARCH="arm64" ;; \
+        *) echo "Unsupported architecture: ${ARCH}" && exit 1 ;; \
+    esac && \
+    wget -q https://dl.min.io/client/mc/release/linux-${MC_ARCH}/mc -O /usr/local/bin/mc && \
+    chmod +x /usr/local/bin/mc && \
+    mc --version
 
 # ---------- kubectl 备选(如 offline 目录缺失, 走华为云; 默认不启用) ----------
 #RUN curl -fsSL "https://mirrors.huaweicloud.com/k8s/release/v1.32.5/bin/linux/amd64/kubectl" \
 #        -o /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl
 
-# ---------- kubespray Python 依赖(ansible 等, pip 走清华镜像) ----------
+# ---------- kubespray Python 依赖(ansible 等, 构建时下载 wheel 缓存, 运行时离线安装) ----------
+# ① 构建机联网时(清华源) pip download 拉 wheel 到 /tmp/pipcache;
+# ② pip install --no-index 全程走本地缓存, 容器内零联网;
+# ③ 复用安装(第二次 --no-index 空跑, 确保幂等/完整), 然后清缓存并校验 ansible。
 COPY deployments/kubespray/kubespray/requirements.txt /tmp/kubespray-requirements.txt
 RUN python3 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    && python3 -m pip install -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    && rm -f /tmp/kubespray-requirements.txt \
+    && python3 -m pip download -d /tmp/pipcache -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && python3 -m pip install --no-index --find-links=/tmp/pipcache -r /tmp/kubespray-requirements.txt \
+    && python3 -m pip install --no-index --find-links=/tmp/pipcache -r /tmp/kubespray-requirements.txt \
+    && rm -rf /tmp/pipcache /tmp/kubespray-requirements.txt \
     && ansible --version 2>/dev/null | head -1
 
 # ---------- 拷贝源码(增量构建时基础镜像已含旧源码, 先清空再拷入, 避免删除的文件残留) ----------
@@ -92,6 +108,14 @@ WORKDIR ${REPO_ROOT}
 RUN rm -rf ${REPO_ROOT}/deployments ${REPO_ROOT}/skills 2>/dev/null || true
 COPY deployments ${REPO_ROOT}/deployments
 COPY skills ${REPO_ROOT}/skills
+
+# 预装 kubespray Python 依赖(随 requirements.txt 精确锁定; 让运行时 ensure_venv
+# 用 --system-site-packages 直接继承, 完全离线, 不再新建空 venv 联网 pip install)。
+# 镜像已含以上全量构建的 ansible, 此处幂等补装 + 确保版本对齐。
+COPY deployments/kubespray/kubespray/requirements.txt /tmp/kubespray-requirements.txt
+RUN python3 -m pip install -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && rm -f /tmp/kubespray-requirements.txt \
+    && ansible --version 2>/dev/null | head -1
 
 # 校验关键路径就位
 RUN test -f ${REPO_ROOT}/deployments/scripts/deploy-cluster.sh \
