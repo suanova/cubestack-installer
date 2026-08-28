@@ -128,16 +128,20 @@ MINIO_REMOTE_DIR="${MINIO_REMOTE_DIR:-kubespray}"    # 桶内目录(与 OFFLINE_
 
 # ---------------- 2.2 NTP 时间同步(依赖: 1.1 宿主机为权威源; k8s 部署前) ----------------
 # 由 modules/02_k8s/05_k8s_ntp.sh 执行(k8s 阶段默认启用步, 可重复):
-#   · 权威时间源 = 宿主机(默认): host 装 chrony 并 allow 集群全部网段; 无公网上游时
-#     local stratum 10 以本机时钟兜底(离线优先)。
-#   · 各节点指向权威: VM(黄金镜像已装 chrony)改写 chrony.conf; 裸金属用 systemd-timesyncd;
-#     应用时偏差>1s 的节点一次性 date -s @宿主epoch 硬对齐。
-#   · 校验门禁: 校验后全节点与宿主机偏差 ≤ NTP_MAX_OFFSET_MS, 超限本步失败 → 中止部署(在 kubespray 前)。
+#   · 单节点集群(仅 1 个 master + 0 worker): 无跨节点时间同步需求, **自动跳过 NTP**。
+#   · 多节点: **权威时间源 = 第一个 master(默认)**: 首 master 装/配 chrony 服务端
+#     (local stratum 10 离线兜底; 可选 NTP_UPSTREAM 公网上游), 其他 master/worker
+#     作为 chrony/timesyncd 客户端指向第一个 master。
+#     **不再用 installer 所在节点(宿主机 HOST_PHYS_IP)作 NTP 服务器** —— 部署机可能在
+#     NAT 后/跨网段, 节点无法可靠访问; 以集群内第一个 master 为权威更稳。
+#   · 显式 NTP_SERVER 可覆盖(用户指定权威时间源, 如公司内 NTP)。
+#   · 应用时对偏差>1s 的节点一次性 date -s @权威epoch 硬对齐。
+#   · 校验门禁: 校验后各节点与权威(首 master)偏差 ≤ NTP_MAX_OFFSET_MS, 超限本步失败 → 中止部署(在 kubespray 前)。
 NTP_ENABLED="${NTP_ENABLED:-1}"                       # 0=跳过时间同步(不推荐)
-NTP_SERVER="${NTP_SERVER:-}"                          # 权威时间源 IP; 留空=宿主机(HOST_PHYS_IP)为权威
-NTP_UPSTREAM="${NTP_UPSTREAM:-}"                      # 权威的公网上游(如 "pool ntp.aliyun.com iburst"); 留空=离线用本机时钟
+NTP_SERVER="${NTP_SERVER:-}"                          # 权威时间源 IP; 留空=第一个 master 为权威
+NTP_UPSTREAM="${NTP_UPSTREAM:-}"                      # 权威(首 master)的公网上游(如 "pool ntp.aliyun.com iburst"); 留空=离线用本机时钟
 NTP_ALLOW="${NTP_ALLOW:-${VM_SUBNET} ${PHYS_WORKER_NET} ${NAT_SUBNET}}"  # chrony server allow 子网(bridge/nat 全覆盖)
-NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"        # 节点-权威最大时钟偏差(毫秒); 超限本步失败 → 中止部署
+NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"        # 节点-权威(首 master)最大时钟偏差(毫秒); 超限本步失败 → 中止部署
 
 # ---------------- 2.3 集群内部网络 CIDR(由脚本同步到 kubespray group_vars, 不硬编码) ----------------
 KUBE_SERVICE_ADDRESSES="${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18}"
