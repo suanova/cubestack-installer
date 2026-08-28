@@ -39,7 +39,14 @@ FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive \
     REPO_ROOT=/opt/cubestack-installer \
     PIP_NO_CACHE_DIR=1 \
-    LANG=C.UTF-8
+    LANG=C.UTF-8 \
+    TZ=Asia/Shanghai
+
+# ---------- 默认时区: GMT+8(Asia/Shanghai) ----------
+# ubuntu 基础镜像带 tzdata(/usr/share/zoneinfo), 设置容器内时区为东八区,
+# 使日志时间戳/date 输出与国内一致(installer 部署/日志/脚本执行均按 GMT+8)。
+RUN ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone
 
 # ---------- apt 源走清华镜像(国内加速) ----------
 RUN sed -i 's@//archive.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g; s@//security.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g; s@//ports.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list
