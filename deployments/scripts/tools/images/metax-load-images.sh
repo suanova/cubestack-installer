@@ -39,66 +39,6 @@ _push_skopeo() {
     return 1
 }
 
-# ---------- 关键修复: 保证 operator 需要的镜像完整进入集群 registry ----------
-# 背景: 仅 skopeo 远程推送到 registry, 若该镜像 tag 在 registry 里"看似存在但 blob 未真正
-#   落盘"(如推送时 registry 后端不稳定 / 磁盘抖动), 节点 crictl pull 仍会 NotFound, 表现为
-#   ImagePullBackOff 而 registry tags/list 却"已有"。彻底解法是"直灌节点" —— 直接把镜像 tar
-#   import 进所有 master/worker 节点的 containerd, 节点再也不用去 registry pull。
-#
-# 同步方式(两者都做, 各自独立幂等):
-#   ① 集群内置 registry(默认): skopeo 远程推送(所有 tar);
-#   ② 每个节点 containerd 直灌: 把本地 tar scp 到节点 → ctr -n k8s.io images import →
-#      打上 chart 引用所需的 registry.local:5000/metax/<comp>:<无后缀 tag>(与 chart 完全一致)。
-#      节点侧 containerd 有镜像后, crictl pull registry.local:5000/metax/<comp>:<tag> 直接用
-#      本地缓存, 不再依赖 registry 可用性 —— 单节点/registry 抖动环境最稳。
-#   (可选离线 tar 目录之外的 METAX_IMAGE_DIR 同理并入扫描)
-#
-# 说明: 直灌节点只作用于"集群内置 registry 引用的无后缀 tag"; maca/driver 带架构后缀 tag 原样,
-#   chart 引用的 ref 与本地 tar 完全一致, 直灌后 crictl 命中本地缓存。
-_import_to_nodes() {   # <tar文件> <comp> <ver>
-    local t="$1" comp="$2" ver="$3" line _ip _user _key
-    _key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-    for line in "${NODES[@]:-}"; do
-        [ -z "${line}" ] && continue
-        node_parse "${line}"
-        [ -n "${NODE_IP}" ] || continue
-        local dst_ref="${REGISTRY_DOMAIN}:${REGISTRY_PORT}/metax/${comp}:${ver}"
-        # 已存在则跳过(幂等; 节点无 ctr 直接跳过)
-        if ssh -i "${_key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-            "${NODE_USER:-ubuntu}@${NODE_IP}" \
-            "sudo bash -c 'command -v ctr >/dev/null 2>&1 && ctr -n k8s.io images list -q | grep -qx \"${dst_ref}\"'" 2>/dev/null; then
-            ok "    [${NODE_HOSTNAME}] 已直灌 ${comp}:${ver}(本地缓存)"
-            continue
-        fi
-        # scp 本地 tar 到节点临时目录(tar 较大, 关压缩防 CPU 卡顿; 失败重试一次)
-        if ! scp -i "${_key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-            -o Compression=no "${t}" "${NODE_USER:-ubuntu}@${NODE_IP}:/tmp/metax-import-${comp}-${ver}.tar" 2>/dev/null \
-           && ! scp -i "${_key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-            -o Compression=no "${t}" "${NODE_USER:-ubuntu}@${NODE_IP}:/tmp/metax-import-${comp}-${ver}.tar" 2>/dev/null; then
-            say "    [${NODE_HOSTNAME}] 直灌 ${comp}:${ver} 跳过(scp 失败)"
-            continue
-        fi
-        if ! ssh -i "${_key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-            "${NODE_USER:-ubuntu}@${NODE_IP}" \
-            "sudo bash -c '
-                command -v ctr >/dev/null 2>&1 || { rm -f /tmp/metax-import-${comp}-${ver}.tar; exit 9; }
-                ctr -n k8s.io images list -q | grep -qx \"${dst_ref}\" && { rm -f /tmp/metax-import-${comp}-${ver}.tar; exit 0; }
-                if ! ctr -n k8s.io images import /tmp/metax-import-${comp}-${ver}.tar >/dev/null 2>&1; then
-                    sleep 2
-                    ctr -n k8s.io images import /tmp/metax-import-${comp}-${ver}.tar >/dev/null 2>&1 || { rm -f /tmp/metax-import-${comp}-${ver}.tar; exit 1; }
-                fi
-                src=\$(ctr -n k8s.io images list -q | grep -E \".*/${comp}[:@].*\" | head -1)
-                [ -n \"\$src\" ] && ctr -n k8s.io images tag \"\$src\" \"${dst_ref}\" >/dev/null 2>&1 || true
-                rm -f /tmp/metax-import-${comp}-${ver}.tar
-                ctr -n k8s.io images list -q | grep -qx \"${dst_ref}\" && exit 0 || exit 1
-            '" 2>/dev/null; then
-            say "    [${NODE_HOSTNAME}] 直灌 ${comp}:${ver} 失败(无 ctr / import 失败)"
-        else
-            ok "    [${NODE_HOSTNAME}] 已直灌 ${comp}:${ver}"
-        fi
-    done
-}
-
 TAR_DIR="${1:-}"
 # 宿主机把 registry.local 解析到集群 registry VIP(供按域名推送, 不留过期 IP)
 _ensure_hosts() {   # <ip> <domain>
@@ -158,8 +98,6 @@ for d in "${DIRS[@]}"; do
         _push_skopeo "docker-archive:${t}" "docker://${PUSH_REGISTRY}/${comp}:${ver}" \
             || { err "推送失败(3 次重试后) ${t}"; exit 1; }
         _PUSHED=$((_PUSHED+1))
-        # 关键: 直灌该镜像到全部节点 containerd(节点本地有镜像, crictl pull 不再依赖 registry)
-        _import_to_nodes "${t}" "${comp}" "${ver}"
     done
 done
 [ "${_PUSHED}" -gt 0 ] || { err "目录 [${DIRS[*]}] 未找到匹配 ${METAX_TAR_PATTERN} 的 tar"; exit 1; }
