@@ -103,56 +103,6 @@ _push_skopeo() {
     return 1
 }
 
-# ---------- 关键: 把 tar 直灌到全部节点 containerd(节点本地缓存镜像, crictl pull 不再依赖 registry) ----------
-# 背景: 仅 skopeo 远程推送到 registry, 若该 tag 在 registry"看似存在但 blob 未落盘"(推送时
-#   registry 后端抖动/磁盘抖动), 节点 crictl pull 仍 NotFound → ImagePullBackOff, 而 registry
-#   tags/list 却"已有"。直灌节点是根治: 每个 master/worker 的 containerd 直接 import tar 并打上
-#   chart 引用所需的 registry.local:5000/metax/<comp>:<无后缀 tag> → 节点拉取命中本地缓存。
-# 用法: _import_to_nodes <tar文件> <comp> <ver>
-_import_to_nodes() {
-    local t="$1" comp="$2" ver="$3" line
-    local key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-    local dst_ref="${REGISTRY_DOMAIN}:${REGISTRY_PORT}/metax/${comp}:${ver}"
-    for line in "${NODES[@]:-}"; do
-        [ -z "${line}" ] && continue
-        node_parse "${line}"
-        [ -n "${NODE_IP}" ] || continue
-        # 已存在则跳过(幂等; 节点无 ctr 直接跳过)
-        if ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-            "${NODE_USER:-ubuntu}@${NODE_IP}" \
-            "sudo bash -c 'command -v ctr >/dev/null 2>&1 && ctr -n k8s.io images list -q | grep -qx \"${dst_ref}\"'" 2>/dev/null; then
-            ok "    [${NODE_HOSTNAME}] 已直灌 ${comp}:${ver}(本地缓存)"
-            continue
-        fi
-        # scp 本地 tar 到节点临时目录(tar 较大, 关压缩防 CPU 卡顿; 失败重试一次)
-        if ! scp -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-            -o Compression=no "${t}" "${NODE_USER:-ubuntu}@${NODE_IP}:/tmp/metax-import-${comp}-${ver}.tar" 2>/dev/null \
-           && ! scp -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-            -o Compression=no "${t}" "${NODE_USER:-ubuntu}@${NODE_IP}:/tmp/metax-import-${comp}-${ver}.tar" 2>/dev/null; then
-            say "    [${NODE_HOSTNAME}] 直灌 ${comp}:${ver} 跳过(scp 失败)"
-            continue
-        fi
-        if ! ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-            "${NODE_USER:-ubuntu}@${NODE_IP}" \
-            "sudo bash -c '
-                command -v ctr >/dev/null 2>&1 || { rm -f /tmp/metax-import-${comp}-${ver}.tar; exit 9; }
-                ctr -n k8s.io images list -q | grep -qx \"${dst_ref}\" && { rm -f /tmp/metax-import-${comp}-${ver}.tar; exit 0; }
-                if ! ctr -n k8s.io images import /tmp/metax-import-${comp}-${ver}.tar >/dev/null 2>&1; then
-                    sleep 2
-                    ctr -n k8s.io images import /tmp/metax-import-${comp}-${ver}.tar >/dev/null 2>&1 || { rm -f /tmp/metax-import-${comp}-${ver}.tar; exit 1; }
-                fi
-                src=\$(ctr -n k8s.io images list -q | grep -E \".*/${comp}[:@].*\" | head -1)
-                [ -n \"\$src\" ] && ctr -n k8s.io images tag \"\$src\" \"${dst_ref}\" >/dev/null 2>&1 || true
-                rm -f /tmp/metax-import-${comp}-${ver}.tar
-                ctr -n k8s.io images list -q | grep -qx \"${dst_ref}\" && exit 0 || exit 1
-            '" 2>/dev/null; then
-            say "    [${NODE_HOSTNAME}] 直灌 ${comp}:${ver} 失败(无 ctr / import 失败)"
-        else
-            ok "    [${NODE_HOSTNAME}] 已直灌 ${comp}:${ver}"
-        fi
-    done
-}
-
 # registry 是否已有该 tag? 优先 skopeo inspect 目标 tag(与 push 同通道 PUSH_REGISTRY、同 repo,
 # 大镜像只拉 manifest/config 不传 blob); skopeo 缺失时退回 curl 查 tags/list。
 # 注意: tags/list 路径必须带命名空间 /metax(与 PUSH_REGISTRY 的仓库路径一致),
@@ -330,9 +280,6 @@ else
         _push_skopeo "docker-archive:${t}" "docker://${PUSH_REGISTRY}/${comp}:${ver}" \
             || { err "推送失败(3 次重试后) ${t} → ${PUSH_REGISTRY}/${comp}:${ver}"; exit 1; }
         _PUSHED=$((_PUSHED+1))
-        # 关键: 直灌该镜像到全部节点 containerd(节点本地有镜像, crictl pull 不再依赖 registry,
-        #       杜绝"registry 看似有 tag 但节点 pull NotFound"的 ImagePullBackOff)
-        _import_to_nodes "${t}" "${comp}" "${ver}"
     done
     [ "${_PUSHED}" -gt 0 ] || { err "METAX_OFFLINE_DIR=${METAX_OFFLINE_DIR} / METAX_IMAGE_DIR=${METAX_IMAGE_DIR} 未找到匹配 ${METAX_TAR_PATTERN} 的 tar(可用 metax-save-images.sh 生成, 或改 METAX_TAR_PATTERN)"; exit 1; }
 fi
