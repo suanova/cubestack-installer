@@ -62,7 +62,7 @@ usage() {
 
 阶段目录与模块(自动发现):
   01_env  vm_network vm_sshkey vm_create harbor lb_haproxy lb_keepalived
-          (默认执行 vm_sshkey; vm_network 无 VM 定义(vm-nodes.conf 无节点)时自动跳过; vm_create 默认关 — 虚拟机创建由 tools/vm/create-vms.sh 独立执行)
+          (默认执行 vm_sshkey; vm_network 默认关 — 宿主网络初始化改由 tools/vm/create-vms.sh 创建 VM 时自动执行; vm_create 默认关 — 虚拟机创建由 tools/vm/create-vms.sh 独立执行)
   02_k8s  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp           (默认执行)
           k8s_deploy(默认关, --with-k8s)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb local_path k8s_registry(基础) 中间件: gpu_operator gpu_lws prometheus ceph
@@ -76,7 +76,8 @@ usage() {
   · cluster.conf 的 NODES(5字段: role,hostname,ip,ssh_user,ssh_password)不区分虚拟机/裸金属;
     主程序不判断节点类型 — 需要创建虚拟机的节点在 tools/vm/vm-nodes.conf(10字段)定义,
     由 sudo ./deployments/scripts/tools/vm/create-vms.sh 独立执行(创建后自动注入 NODES)。
-  · --only/--skip 均支持; 默认不再自动跳过 vm_network(局域网初始化由 tools/net/setup-vm-network.sh 按需独立执行)。
+  · --only/--skip 均支持; 宿主网络初始化(vm_network)默认不再执行, 改由创建虚拟机时
+    (tools/vm/create-vms.sh)自动初始化; 需要手动单独跑用 --steps vm_network。
 
 选项:
   --with-k8s            仅部署 kubespray 基座: k8s_deploy + kubespray 内置 addon(metallb/local-path/registry)
@@ -197,8 +198,8 @@ fi
 
 # 默认模式(未指定任何部署方式): 等价于 sudo ./deploy-cluster.sh --with-cubestack
 #   = 全量部署: 基座(k8s+metallb+local-path+registry)+ cluster.conf 中 XXX_ENABLED=true 的全部 operator。
-#   vm_network(VM 桥/NAT 网络初始化)已移出默认执行序列 —— 局域网初始化改为由
-#   tools/net/setup-vm-network.sh 按需独立执行, 主程序不再自动跳过网络(不区分 VM/裸金属)。
+#   vm_network(VM 桥/NAT 网络初始化)已移出默认执行序列 —— 局域网初始化改为在
+#   tools/vm/create-vms.sh 创建虚拟机时自动执行, 主程序不再初始化宿主网络(不区分 VM/裸金属)。
 #   零参数、或仅带 --skip/--phase/--fresh/--list* 时生效
 #     (--list/--list-steps 展示默认全量计划); --steps/--with-*/--enable/--only/--help 明确指定时不触发。
 if [ -z "${STEPS_ARG}" ] && [ -z "${ENABLE_ARG}" ] && [ -z "${ONLY_HOSTS}" ]; then

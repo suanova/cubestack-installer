@@ -85,6 +85,9 @@ PUSH_REGISTRY="${REGISTRY_IP}:${REGISTRY_PORT}/metax"
 # 不覆盖 blob 上传阶段的失败, 这里整体重试 skopeo copy。用法: _push_skopeo <src> <dst>
 _push_skopeo() {
     local src="$1" dst="$2" n=1 err
+    # 本机(尤其 CLI 容器内)无 /etc/containers 时, skopeo 读 trust policy 会 fatal 报错;
+    # policy 已在 lib-common.sh(ensure_skopeo_policy)source 时生成, 这里再兜底一次(幂等)。
+    ensure_skopeo_policy
     for n in 1 2 3; do
         if skopeo copy --quiet --src-tls-verify=false --dest-tls-verify=false \
             --dest-no-creds "${src}" "${dst}" 2>/tmp/skopeo-err; then
@@ -98,6 +101,56 @@ _push_skopeo() {
     done
     rm -f /tmp/skopeo-err
     return 1
+}
+
+# ---------- 关键: 把 tar 直灌到全部节点 containerd(节点本地缓存镜像, crictl pull 不再依赖 registry) ----------
+# 背景: 仅 skopeo 远程推送到 registry, 若该 tag 在 registry"看似存在但 blob 未落盘"(推送时
+#   registry 后端抖动/磁盘抖动), 节点 crictl pull 仍 NotFound → ImagePullBackOff, 而 registry
+#   tags/list 却"已有"。直灌节点是根治: 每个 master/worker 的 containerd 直接 import tar 并打上
+#   chart 引用所需的 registry.local:5000/metax/<comp>:<无后缀 tag> → 节点拉取命中本地缓存。
+# 用法: _import_to_nodes <tar文件> <comp> <ver>
+_import_to_nodes() {
+    local t="$1" comp="$2" ver="$3" line
+    local key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    local dst_ref="${REGISTRY_DOMAIN}:${REGISTRY_PORT}/metax/${comp}:${ver}"
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        [ -n "${NODE_IP}" ] || continue
+        # 已存在则跳过(幂等; 节点无 ctr 直接跳过)
+        if ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+            "${NODE_USER:-ubuntu}@${NODE_IP}" \
+            "sudo bash -c 'command -v ctr >/dev/null 2>&1 && ctr -n k8s.io images list -q | grep -qx \"${dst_ref}\"'" 2>/dev/null; then
+            ok "    [${NODE_HOSTNAME}] 已直灌 ${comp}:${ver}(本地缓存)"
+            continue
+        fi
+        # scp 本地 tar 到节点临时目录(tar 较大, 关压缩防 CPU 卡顿; 失败重试一次)
+        if ! scp -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+            -o Compression=no "${t}" "${NODE_USER:-ubuntu}@${NODE_IP}:/tmp/metax-import-${comp}-${ver}.tar" 2>/dev/null \
+           && ! scp -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+            -o Compression=no "${t}" "${NODE_USER:-ubuntu}@${NODE_IP}:/tmp/metax-import-${comp}-${ver}.tar" 2>/dev/null; then
+            say "    [${NODE_HOSTNAME}] 直灌 ${comp}:${ver} 跳过(scp 失败)"
+            continue
+        fi
+        if ! ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+            "${NODE_USER:-ubuntu}@${NODE_IP}" \
+            "sudo bash -c '
+                command -v ctr >/dev/null 2>&1 || { rm -f /tmp/metax-import-${comp}-${ver}.tar; exit 9; }
+                ctr -n k8s.io images list -q | grep -qx \"${dst_ref}\" && { rm -f /tmp/metax-import-${comp}-${ver}.tar; exit 0; }
+                if ! ctr -n k8s.io images import /tmp/metax-import-${comp}-${ver}.tar >/dev/null 2>&1; then
+                    sleep 2
+                    ctr -n k8s.io images import /tmp/metax-import-${comp}-${ver}.tar >/dev/null 2>&1 || { rm -f /tmp/metax-import-${comp}-${ver}.tar; exit 1; }
+                fi
+                src=\$(ctr -n k8s.io images list -q | grep -E \".*/${comp}[:@].*\" | head -1)
+                [ -n \"\$src\" ] && ctr -n k8s.io images tag \"\$src\" \"${dst_ref}\" >/dev/null 2>&1 || true
+                rm -f /tmp/metax-import-${comp}-${ver}.tar
+                ctr -n k8s.io images list -q | grep -qx \"${dst_ref}\" && exit 0 || exit 1
+            '" 2>/dev/null; then
+            say "    [${NODE_HOSTNAME}] 直灌 ${comp}:${ver} 失败(无 ctr / import 失败)"
+        else
+            ok "    [${NODE_HOSTNAME}] 已直灌 ${comp}:${ver}"
+        fi
+    done
 }
 
 # registry 是否已有该 tag? 优先 skopeo inspect 目标 tag(与 push 同通道 PUSH_REGISTRY、同 repo,
@@ -118,6 +171,7 @@ say "检查沐曦 GPU Operator 前置条件..."
 [ -f "${PKG_TGZ}" ] || warn "未找到资源包 ${PKG_TGZ}(tar 模式不需要; run 模式需 metax-k8s-images.*.run 在 METAX_PKG_DIR)"
 command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 请先安装 Helm"; exit 1; }
 command -v skopeo >/dev/null 2>&1 || { warn "未找到 skopeo(tar 模式推送将不可用)"; }
+# skopeo 所需最小 trust policy 已在 lib-common.sh source 时自动生成(ensure_skopeo_policy)
 # 宿主机 /etc/hosts 每次部署统一更新为正确 IP(不允许遗留 10.66.3.37 等过期条目):
 #   REGISTRY_DOMAIN → REGISTRY_IP(集群内置 registry VIP, 供宿主按域名 push)
 #   API_DOMAIN      → API_IP(API Server 入口, 供宿主 helm/kubectl 连集群)
@@ -276,6 +330,9 @@ else
         _push_skopeo "docker-archive:${t}" "docker://${PUSH_REGISTRY}/${comp}:${ver}" \
             || { err "推送失败(3 次重试后) ${t} → ${PUSH_REGISTRY}/${comp}:${ver}"; exit 1; }
         _PUSHED=$((_PUSHED+1))
+        # 关键: 直灌该镜像到全部节点 containerd(节点本地有镜像, crictl pull 不再依赖 registry,
+        #       杜绝"registry 看似有 tag 但节点 pull NotFound"的 ImagePullBackOff)
+        _import_to_nodes "${t}" "${comp}" "${ver}"
     done
     [ "${_PUSHED}" -gt 0 ] || { err "METAX_OFFLINE_DIR=${METAX_OFFLINE_DIR} / METAX_IMAGE_DIR=${METAX_IMAGE_DIR} 未找到匹配 ${METAX_TAR_PATTERN} 的 tar(可用 metax-save-images.sh 生成, 或改 METAX_TAR_PATTERN)"; exit 1; }
 fi

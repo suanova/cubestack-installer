@@ -21,6 +21,10 @@
 cp config/cluster.conf.example config/cluster.conf
 vim config/cluster.conf          # 修改 宿主机/网络/SSH/节点清单
 
+# 0b) 离线文件缺失时:从 MinIO 拉取(需先配置 mc alias 指向 MinIO)
+mc alias set minio http://192.168.16.6:9000 admin CHANGE_ME    # CHANGE_ME 替换为真实 MinIO SecretKey
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh    # 默认全量下载 offline-files 下所有文件
+
 # 1) 查看集群规划(只读)
 sudo ./deployments/scripts/deploy-cluster.sh --list
 
@@ -53,7 +57,7 @@ deployments/scripts/
 ├── deploy-cluster.sh          # ★ 统一入口(薄壳: 参数解析 + 按模块框架调度, 不内联业务逻辑)
 ├── modules/                   # ★ 部署模块(按部署环境准备的阶段组织子目录, 自动发现)
 │   ├── 01_env/                #   阶段一: 环境准备(发生在部署 kubespray 之前)
-│   │   ├── 01_vm_network.sh   #     VM 宿主网络(bridge/nat)
+│   │   ├── 01_vm_network.sh   #     VM 宿主网络(bridge/nat; 默认关, 由 tools/vm/create-vms.sh 创建 VM 时自动执行)
 │   │   ├── 02_vm_sshkey.sh    #     生成 SSH 密钥
 │   │   ├── 03_vm_create.sh    #     创建虚拟机(默认关, 由 tools/vm/create-vms.sh 独立执行)
 │   │   ├── 04_harbor.sh       #     Harbor 镜像仓库(集群外私有仓库, 部署前就绪)
@@ -65,8 +69,8 @@ deployments/scripts/
 │   │   ├── 03_k8s_hosts.sh         # 更新 /etc/hosts
 │   │   ├── 04_k8s_inventory.sh     # 生成 inventory + 同步配置
 │   │   ├── 05_k8s_ntp.sh           # NTP 时间同步
-│   │   ├── 06_k8s_deploy.sh        # 部署 kubespray(默认关, K8S_ENABLED)
-│   │   └── 07_k8s_scale.sh         # 扩容集群(默认关, K8S_SCALE_ENABLED)
+│   │   ├── 06_k8s_deploy.sh        # 部署 kubespray(默认关, K8S_ENABLED; 完成后单节点集群自动解除 master 污点使其可调度)
+│   │   └── 07_k8s_scale.sh         # 扩容集群(默认关, K8S_SCALE_ENABLED; 扩容后单 control-plane 重新解除污点)
 │   └── 03_addon/              #   阶段三: 附加组件(集群部署后; 01~19 中间件, 20 起自研)
 │       ├── 01_metallb.sh      #    MetalLB 负载均衡(基座, METALLB_ENABLED)
 │       ├── 02_local_path.sh   #    local-path-provisioner(基座, LOCAL_PATH_ENABLED)
@@ -93,7 +97,7 @@ deployments/scripts/
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
 │   ├── images/                #   离线镜像工具: metax-save/load-images.sh / lws-save-images.sh
 │   │                         #        envoy-save-images.sh(EG+AI 镜像) / envoy-fetch-charts.sh(EG+AI 离线 chart)
-│   ├── offline/               #   MinIO 离线文件拉取: fetch-offline-from-minio.sh(大磁盘检测+容器挂载提示)
+│   ├── offline/               #   MinIO 离线文件拉取: fetch-offline-from-minio.sh(默认下载到 offline-files+磁盘空间检查)
 │   │                         #        fetch-offline-files.sh(MinIO 增量同步到 OFFLINE_FILES_DIR)
 │   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 └── README.md                  # 本文件
@@ -249,6 +253,13 @@ INV_EXCLUDE=mxgpu-1-232 ./scripts/tools/k8s/gen-inventory.sh  # 排除指定节�
 - 生成后**自动调用 `sync-kubespray-config.sh`**,从 cluster.conf 动态填充 group_vars 中的 IP(见 5.8)
 
 master 写入 `ansible_ssh_private_key_file`(密钥免密);worker 若密钥存在同样优先用密钥,否则用 `ansible_password`(未配置则留注释)。
+
+**单节点集群(仅 1 个 master、0 个 worker)**:`gen-inventory.sh` 自动把该 master 同时加入
+`kube_node` 组,使 kubeadm 不给 control-plane 打 `NoSchedule` 污点(本身可调度)。部署完成
+后 `06_k8s_deploy.sh`/`07_k8s_scale.sh` 还会**再次通过 kubectl 移除该节点污点并 uncordon**
+(兜底, 对既存集群重跑也生效) —— 因为 kubespray 扩容会重新给 control-plane 打污点, 而
+metallb/local-path/registry/gpu-operator 等普通 pod 无污点容忍, 单节点若不可调度会全部
+Pending(registry 起不来 → 镜像推不进 → `ImagePullBackOff`)。
 
 ### 5.8 sync-kubespray-config.sh —— 动态同步 kubespray IP 配置
 
@@ -441,31 +452,41 @@ bare-metal worker(Ubuntu)无法联网时,用 offline-files 中的离线 `.deb` �
 
 包来源: `deployments/offline-files/kubespray/cubestack-cluster/`(由 `OFFLINE_FILES_DIR` 全局变量指定)下的 `.deb` 文件(仓库根目录,与 kubeadm/etcd 等二进制同层)或 `packages/` 子目录,脚本自动收集两者并去重。包含 iputils-ping / rsync / iptables / curl / ca-certificates 及依赖。
 
-### 5.11 fetch-offline-from-minio.sh —— 从 MinIO 拉取离线文件到宿主机大磁盘
+### 5.11 fetch-offline-from-minio.sh —— 从 MinIO 拉取离线文件(默认下载到 offline-files)
 
-部署机/新机器缺离线文件时,从 MinIO 下载(默认只拉 `kubespray` 部署必需部分;`--all` 全量含 GPU/LWS/虚拟机镜像),自动检测可用空间最大且空闲 ≥ 50GiB 的磁盘,完成后打印 Docker CLI 容器挂载命令:
+部署机/新机器缺离线文件时,从 MinIO 下载(**默认全量**拉取 `offline-files` 下所有子目录,含 kubespray/metax-gpu/lws/os/虚拟机镜像;需要时可用 `--sub <目录>` 只拉某子目录)。
+
+**默认下载目录: `/opt/cubestack-installer/deployments/offline-files`(即 `OFFLINE_FILES_DIR` 根)**:
+- 在 CLI 容器内执行:下载直接落到容器挂载的 offline-files,**即装即用,无需再挂载**;
+- 宿主机直跑本仓库:默认同一路径;想用大磁盘时 `--auto` 自动挑空闲 ≥ 门槛的最大挂载点。
+
+脚本默认开启**磁盘空间检查**:醒目横幅提示至少需要 `MIN_FREE_GB`(默认 **50 GiB**)空闲空间,并比对本次下载所需(远程大小 + 缓冲)与目标可用空间,不足则中止(`--force` 强制继续)。
 
 ```bash
-sudo ./scripts/tools/offline/fetch-offline-from-minio.sh            # 默认: kubespray(3.4GiB)
-sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --all      # 全量(约 34GiB, 未来会更多)
-sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --sub metax-gpu    # 只拉某子目录
-sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --dest /data/offline   # 指定目录
-sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --min-free 100        # 磁盘空闲门槛 100GiB
-./scripts/tools/offline/fetch-offline-from-minio.sh --list          # 只列出 MinIO 可用目录
+./scripts/tools/offline/fetch-offline-from-minio.sh            # 默认: 全量下载 offline-files 下所有文件
+./scripts/tools/offline/fetch-offline-from-minio.sh --sub kubespray     # 只拉某子目录(如 kubespray)
+./scripts/tools/offline/fetch-offline-from-minio.sh --sub metax-gpu     # 只拉某子目录
+./scripts/tools/offline/fetch-offline-from-minio.sh --dest /data/offline-files   # 指定下载目录(即 offline-files 根)
+sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --auto       # 宿主机: 自动挑空闲 ≥ 门槛的最大磁盘
+./scripts/tools/offline/fetch-offline-from-minio.sh --min-free 100    # 磁盘空闲门槛 100GiB
+./scripts/tools/offline/fetch-offline-from-minio.sh --force           # 跳过磁盘空间不足检查(谨慎)
+./scripts/tools/offline/fetch-offline-from-minio.sh --list      # 只列出 MinIO 可用目录
 ```
 
-- **mc 检测**:未安装时给出安装指引,可选择自动下载(华为云镜像);alias 优先用 cluster.conf 的 `MINIO_*` 自动配置,否则探测本机已有 alias,再否则交互录入。
+- **mc 检测**:未安装时给出安装指引,可选择自动下载(MinIO 官方二进制,与 Dockerfile-cli 同源);alias 优先用 cluster.conf 的 `MINIO_*` 自动配置,否则探测本机已有 alias,再否则交互录入。
 - **桶/目录自适应**:默认桶 `cubestack-installer`、目录 `offline-files`(与 MinIO 实际布局一致),自动回退探测旧布局 `cubestack-offline/kubespray`。
-- **磁盘选择**:空闲 ≥ `MIN_FREE_GB`(默认 50, 离线文件会持续增加)的挂载点中取可用空间最大者;无可选时用 `/opt/offline-files`。
+- **磁盘空间检查(默认开启)**:醒目提示至少 `MIN_FREE_GB`(默认 50 GiB)空闲;比对本次下载所需(远程大小 + 缓冲)与目标可用空间,不足时红色横幅警告并中止(`--force` 强制继续)。
 - **下载后提示**:
-  ```bash
-  sudo docker run --rm -it --network host \
-    -v <下载目录>/offline-files:/opt/cubestack-installer/deployments/offline-files \
-    -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
-    -v $HOME/.ssh:/root/.ssh \
-    harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
-  ```
-  宿主机直跑(非容器)则 `export OFFLINE_FILES_DIR=<下载目录>/offline-files` 后执行 `deploy-cluster.sh`。
+  - 容器内执行:直接 `cd /opt/cubestack-installer && ./deployments/scripts/deploy-cluster.sh`;
+  - 宿主机执行(把 `<下载目录>` 挂进容器 offline-files):
+    ```bash
+    sudo docker run --rm -it --network host \
+      -v <下载目录>:/opt/cubestack-installer/deployments/offline-files \
+      -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
+      -v $HOME/.ssh:/root/.ssh \
+      harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+    ```
+    宿主机直跑(非容器)则 `export OFFLINE_FILES_DIR=<下载目录>` 后执行 `deploy-cluster.sh`。
 
 ### 5.12 容器化部署(Docker 交互式)
 
@@ -474,12 +495,12 @@ sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --min-free 100        #
 **① 先获取离线文件(宿主机还没有时)**
 
 ```bash
-sudo ./scripts/tools/offline/fetch-offline-from-minio.sh            # 默认只拉 kubespray(约 3.4GiB)
-sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --all      # 全量(约 34GiB, 含 GPU/LWS/VM 镜像)
+sudo ./scripts/tools/offline/fetch-offline-from-minio.sh            # 默认全量下载(约 34GiB 级, 含 GPU/LWS/VM 镜像)
+sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --sub kubespray   # 只拉某子目录
 ./scripts/tools/offline/fetch-offline-from-minio.sh --list          # 查看 MinIO 可用目录
 ```
 
-脚本自动检测 mc、选择空闲 ≥ 50GiB 的最大磁盘下载到 `<下载目录>/offline-files`,并打印容器挂载命令(见 §5.11)。
+脚本默认开启磁盘空间检查(建议 ≥ 50GiB 空闲),宿主机下载到 `<下载目录>` 后打印容器挂载命令;也可以在 CLI 容器内直接执行下载(落到容器挂载的 offline-files,即装即用)。用法见 §5.11。
 
 **② 交互式进入容器(容器内已是 root, 无需 sudo)**
 
@@ -561,7 +582,7 @@ CLUSTER_CONF=/path/to/cluster.conf sudo ./scripts/deploy-cluster.sh --list
 | 依赖 | 说明 |
 |---|---|
 | 宿主机 | Ubuntu 22.04,已装 `libvirt / virt-install / qemu / virt-customize` |
-| 基础镜像 | `deployments/offline-files/virtual-machine/cloud-images/ubuntu2204-k8s-base.qcow2`(由 `create-vm-template.sh` 制作,预埋 ubuntu/root 密码 `k8s@2026`、SSH、时区及 kubespray 所需包) |
+| 基础镜像 | `deployments/offline-files/virtual-machine/cloud-images/ubuntu2204-k8s-base.qcow2`(由 `create-vm-template.sh` 制作,预埋 ubuntu/root 默认密码、SSH、时区及 kubespray 所需包) |
 | 离线资源 | `deployments/offline-files/kubespray/cubestack-cluster/`(路径由 `OFFLINE_FILES_DIR` 指定; 镜像 `images/` + 二进制 + `packages/` 系统包) |
 | kubespray | `deployments/kubespray/kubespray/`(含 `cluster.yml`,Python 依赖可离线/在线安装) |
 
@@ -618,7 +639,7 @@ sudo ./scripts/tools/net/setup-vm-network.sh
 
 # ③ 创建 master VM(3 台)+ 注册到 cluster.conf + 免密
 sudo AUTO_REGISTER_CLUSTER=1 ./scripts/tools/vm/create-libvirt-vm.sh cubestack-k8s-master01 16 8 50 52:54:00:3b:e9:d2 10.244.1.11
-SSH_DEFAULT_PASSWORD='k8s@2026' ./scripts/tools/node/setup-passwordless.sh 10.244.1.11 ubuntu
+SSH_DEFAULT_PASSWORD='CHANGE_ME' ./scripts/tools/node/setup-passwordless.sh 10.244.1.11 ubuntu   # CHANGE_ME 替换为真实密码
 # ... 重复 master02 / master03 ...
 
 # ④ 生成 inventory + 同步 kubespray 配置
@@ -637,7 +658,7 @@ CUBESTACK_KUBESPRAY_DIR=$PWD/kubespray \
 ```bash
 # ① 创建 worker VM + 注册(或编辑 cluster.conf NODES 追加 worker 行)
 sudo AUTO_REGISTER_CLUSTER=1 ./scripts/tools/vm/create-libvirt-vm.sh cubestack-k8s-worker01 16 8 50 52:54:00:aa:bb:21 10.244.1.21
-SSH_DEFAULT_PASSWORD='k8s@2026' ./scripts/tools/node/setup-passwordless.sh 10.244.1.21 ubuntu
+SSH_DEFAULT_PASSWORD='CHANGE_ME' ./scripts/tools/node/setup-passwordless.sh 10.244.1.21 ubuntu   # CHANGE_ME 替换为真实密码
 
 # ② 生成含新 worker 的 inventory(排除跨网段节点可加 INV_EXCLUDE)
 ./scripts/tools/k8s/gen-inventory.sh
@@ -687,5 +708,5 @@ sudo ./deployments/scripts/deploy-cluster.sh --list
 sudo ./deployments/scripts/deploy-cluster.sh
 ```
 
-宿主机网络初始化(VM 网桥/NAT, 若需)由 `tools/net/setup-vm-network.sh` 按需独立执行;默认部署不再自动跳过。
-vm-nodes.conf 无节点时不执行任何虚拟机创建(主程序默认不调度 vm_create)。
+宿主网络初始化(VM 网桥/NAT)由 `tools/vm/create-vms.sh` 在创建虚拟机前自动执行(有 VM 定义时才初始化,已存在的网桥/网络幂等跳过);纯裸金属集群无需初始化。
+vm-nodes.conf 无节点时不执行任何虚拟机创建(主程序默认不调度 vm_create / vm_network)。

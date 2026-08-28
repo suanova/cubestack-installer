@@ -127,6 +127,31 @@ warn() { local m="⚠  $*"; echo -e "\033[33m${m}\033[0m"; _log_file "${m}"; }
 err()  { local m="【错误】$*"; echo -e "\033[31m${m}\033[0m" >&2; _log_file "${m}"; }
 vlog() { [ "${LOG_VERBOSE}" = "1" ] && { local m="[DEBUG] $*"; echo -e "\033[90m${m}\033[0m"; _log_file "${m}"; } || true; }
 
+# ---------------- skopeo 运行时最小 trust policy(/etc/containers/policy.json) ----------------
+# 本机(尤其 CLI 容器内)无容器运行时 daemon 配置目录时, skopeo copy/inspect 会因读不到
+# policy.json 而 fatal: "Error loading trust policy: open /etc/containers/policy.json: no such file or directory"。
+# 所有用 skopeo 的模块(tar 镜像推送: gpu_operator/lws/envoy/... )source 本库后即自动就绪。
+# 幂等: 已存在则不覆盖。insecureAcceptAnything 与本仓库离线内网 registry(--tls-verify=false)语义一致。
+ensure_skopeo_policy() {
+    [ -f "/etc/containers/policy.json" ] && return 0
+    if ! mkdir -p /etc/containers 2>/dev/null; then
+        warn "无法创建 /etc/containers(无写权限): skopeo 推送可能因缺 policy.json 失败(容器需 root / 可写 /etc)"
+        return 1
+    fi
+    cat > /etc/containers/policy.json <<'POLICY_EOF'
+{
+    "default": [
+        {
+            "type": "insecureAcceptAnything"
+        }
+    ],
+    "transports": {}
+}
+POLICY_EOF
+    ok "已生成 skopeo 最小 trust policy: /etc/containers/policy.json"
+}
+ensure_skopeo_policy
+
 # ---------------- 统一配置加载 ----------------
 # 环境变量优先: 配置文件内使用 ${VAR:-default},已导出的环境变量不会被覆盖
 load_config() {
@@ -173,10 +198,14 @@ load_config() {
     # 全局派生变量(续): REGISTRY_IP 留空时从 METALLB_POOL 自动取池内首地址作为 LoadBalancer VIP
     # (cluster.conf 约定 "留空 = 自动派生", 与 sync-kubespray-config.sh 写入 addons.yml 的规则一致;
     #  centralized 于此, 让 deploy-registry.sh / setup-registry-expose.sh 等所有消费者拿到同一值)
+    # 标记是否显式指定(供 deploy-registry.sh 冲突检测: 显式设置不再提示)
+    export REGISTRY_IP_EXPLICIT="${REGISTRY_IP_EXPLICIT:-0}"
     if [ -z "${REGISTRY_IP:-}" ]; then
         REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
         export REGISTRY_IP
         vlog "REGISTRY_IP 留空, 自动取 METALLB_POOL=${METALLB_POOL:-} 首地址 → ${REGISTRY_IP}"
+    else
+        export REGISTRY_IP_EXPLICIT=1
     fi
 }
 
