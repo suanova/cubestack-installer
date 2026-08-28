@@ -3,9 +3,11 @@
 # MODULE: vm_network
 # DESC: 初始化宿主网络(bridge/nat)
 # PHASE: env
-# DEFAULT: 1
+# DEFAULT: 0
 # REPEAT: 0
-# 说明: 由 deploy-cluster.sh 按框架调度; 也可独立执行
+# 说明: 宿主网络初始化(网桥/NAT)已移出默认部署序列, 改由创建虚拟机的
+#       tools/vm/create-vms.sh 在创建 VM 前自动执行; 本模块保留用于
+#       --steps vm_network / --enable vm_network 手动独立执行。
 # 数据源: cluster.conf (NET_MODE / BRIDGE / NAT_NET_NAME ...)
 # ============================================================
 set -euo pipefail
@@ -14,9 +16,13 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-# ⚠ 裸金属集群不初始化宿主网络: VM 网桥/NAT 是否需要, 由"是否有虚拟机要创建"
-# (tools/vm/vm-nodes.conf 是否定义节点)决定。cluster.conf 不区分 VM/裸金属,
-# 因此主程序不按节点类型判断 —— 这里统一用 vm_conf_has_nodes 判定。
+# 网络初始化前, 校验关键命令已装(ip/modprobe/systemctl), 缺失时给出安装指引:
+# CLI 镜像已内置 iproute2/kmod/systemd/procps/bridge-utils, 宿主机裸跑需自行安装。
+for _bin in ip modprobe systemctl sysctl; do
+    command -v "${_bin}" >/dev/null 2>&1 || { err "缺少命令 ${_bin}; 请先安装对应包(如 iproute2/kmod/systemd/procps), CLI 容器已内置"; exit 1; }
+done
+
+# 未定义任何虚拟机 → 无需宿主网络, 幂等跳过(与 create-vms.sh 逻辑一致)
 if ! vm_conf_has_nodes; then
     say "未定义任何虚拟机(tools/vm/vm-nodes.conf 无节点), 跳过宿主网络初始化(纯裸金属集群)"
     exit 0

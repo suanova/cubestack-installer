@@ -153,10 +153,21 @@ ensure_kubespray() {
 ensure_venv() {
     cd "${KUBESPRAY_DIR}"
     if [ ! -d ".venv" ]; then
-        highlight "创建 Python 虚拟环境并安装依赖..."
-        python3 -m venv .venv
+        highlight "创建 Python 虚拟环境(继承镜像预装的系统依赖, 完全离线)..."
+        # --system-site-packages: 复用镜像/系统已预装的 ansible 等依赖(见 Dockerfile-cli),
+        # 避免新建空 venv 后联网 pip install 拉取失败(离线环境)。
+        python3 -m venv --system-site-packages .venv
         source .venv/bin/activate
-        pip install -r requirements.txt -q
+        # 校验 ansible 可用; 若镜像未预装(宿主机裸跑), 回退本地 wheel 缓存离线安装
+        if ! python3 -c "import ansible, ansible_runner" >/dev/null 2>&1; then
+            if ls .venv_wheels/*.whl >/dev/null 2>&1; then
+                highlight "系统无预装 ansible, 从 .venv_wheels/ 离线安装 ..."
+                pip install --no-index --find-links=.venv_wheels -r requirements.txt -q \
+                    || { err "离线安装 ansible 失败(缺少 .venv_wheels 缓存)"; return 1; }
+            else
+                warn "系统未预装 ansible 且无 .venv_wheels 缓存: 请用 CLI 镜像(已预装)或联网装"
+            fi
+        fi
         log "✅ 虚拟环境就绪"
     else
         source .venv/bin/activate
@@ -838,6 +849,8 @@ block = (
     "# ──────────────────────────────────────────────────────────────────────\n"
     "- name: Configure nodes /etc/hosts for internal registry\n"
     "  import_playbook: ../patch-playbooks/cubestack-registry.yml\n"
+    "- name: Make single control-plane node schedulable (before addon/operator)\n"
+    "  import_playbook: ../patch-playbooks/cubestack-single-node.yml\n"
 )
 open(path, "w").write(src.replace(marker, block + "\n" + marker, 1))
 print("patched")

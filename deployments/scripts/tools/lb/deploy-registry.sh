@@ -80,8 +80,48 @@ done
 
 say "内置 registry 部署(域名=${REGISTRY_DOMAIN}, VIP=${REGISTRY_IP}, 端口=${REGISTRY_PORT}, 节点=${#NODE_ENTRIES[@]}台) ..."
 
+# ---------- 关键: 分配 registry VIP 前先检测冲突(避免撞上其他集群/设备的 IP) ----------
+# 背景: MetalLB Layer2 VIP 一旦被其他集群(同样默认取 METALLB_POOL 首地址)或设备占用,
+#   ARP 会由"先通告/就近"的一方响应 → 推送/拉取可能打到别的集群的 registry(数据看似在、
+#   实际当前集群 registry pod 是空的 → 节点 pull NotFound / ImagePullBackOff)。
+# 策略:
+#   ① REGISTRY_IP 显式设置 → 原样使用(用户已确认, 跳过探测);
+#   ② REGISTRY_IP 留空(自动取 METALLB_POOL 首地址)→ 对候选 VIP 做**服务端口探测**:
+#      候选的 ${REGISTRY_PORT} 端口有响应(很可能被其他集群 registry 占用)→ 醒目提示冲突;
+#      无响应 → 正常使用。
+#   ③ 醒目提示: 若多集群共用同一网段, 首地址必然被第一个集群占用, 后续集群必须显式指定
+#      REGISTRY_IP(如池内第二个/更靠后的空闲地址), 避免与其他集群 VIP 冲突。
+# 注: ping 对 MetalLB VIP 无效(不响应 ICMP), 改为探测服务端口(/v2/ 有响应即视为被占用)。
+#     每次部署的 VIP 是【固定的】(自动取池首地址 / 显式指定), 不会每次随机变化 ——
+#     因此多集群/多环境必须保证 METALLB_POOL 或 REGISTRY_IP 彼此不重叠, 否则必然冲突。
+_registry_vip_check() {
+    local cand="${REGISTRY_IP:-}"
+    [ -n "${cand}" ] || return 0
+    # 仅自动派生(REGISTRY_IP_EXPLICIT=0)时探测; 显式设置跳过(用户已确认)
+    if [ "${REGISTRY_IP_EXPLICIT:-0}" != "1" ]; then
+        if curl -s -m 3 "http://${cand}:${REGISTRY_PORT:-5000}/v2/" >/dev/null 2>&1; then
+            echo ""
+            echo -e "\033[41m\033[97m==============================================================\033[0m"
+            echo -e "\033[41m\033[97m ⚠⚠⚠  registry VIP 冲突检测: ${cand}:${REGISTRY_PORT:-5000} 已有服务响应  ⚠⚠⚠\033[0m"
+            echo -e "\033[41m\033[97m  自动派生的 METALLB_POOL 首地址可能已被其他集群/设备占用 →        \033[0m"
+            echo -e "\033[41m\033[97m  推送/拉取会打到别人的 registry(数据看似在, 实际本集群 registry 空)  \033[0m"
+            echo -e "\033[41m\033[97m  【VIP 是固定的, 不会每次随机变化】多集群共用网段时, 后续集群必须:    \033[0m"
+            echo -e "\033[41m\033[97m  ① 改 METALLB_POOL 避开已占用段; 或                                   \033[0m"
+            echo -e "\033[41m\033[97m  ② 显式设置 REGISTRY_IP 为一个不冲突的池内空闲地址:                 \033[0m"
+            echo -e "\033[41m\033[97m    vim ${CLUSTER_CONF:-config/cluster.conf} → REGISTRY_IP=\"10.66.1.13x\"  \033[0m"
+            echo -e "\033[41m\033[97m  (用 curl -s http://<候选IP>:5000/v2/ 逐个探测, 无响应者可用)          \033[0m"
+            echo -e "\033[41m\033[97m  继续使用将可能再次把镜像推到别的集群(当前部署会继续, 请注意)       \033[0m"
+            echo -e "\033[41m\033[97m==============================================================\033[0m"
+            echo ""
+            warn "registry VIP ${cand}:${REGISTRY_PORT:-5000} 冲突探测: 已有服务响应(可能被其他集群占用), 继续使用有风险"
+        fi
+    fi
+}
+
 # ---------------- 1. registry Service 暴露方式(LoadBalancer 固定 VIP / NodePort) ----------------
 say "[1/4] 设置 registry Service 暴露方式(${REGISTRY_SERVICE_TYPE:-loadbalancer}) ..."
+# 分配前检测候选 VIP 是否与既有集群/设备冲突(仅自动派生时提示; 显式设置不提示)
+_registry_vip_check
 SVC_EXISTS=$(node_cmd "${FIRST_MASTER}" "${FIRST_MASTER_USER}" "${FIRST_MASTER_PW}" \
     "kubectl get svc -n kube-system registry -o name" 2>/dev/null || echo "")
 if [ -z "${SVC_EXISTS}" ]; then
