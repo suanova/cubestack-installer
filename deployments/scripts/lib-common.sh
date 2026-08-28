@@ -351,6 +351,13 @@ sync_kubeconfig() {
     fi
     chmod 600 "${HOME}/.kube/config"
     rm -f "${tmp}"
+    # ★ 宿主机 /etc/hosts 收敛 API_DOMAIN(换环境旧 IP 残留会让 getent 命中旧集群 → 误报失败):
+    #   先删该域名所有旧行, 再写当前 API_IP 一行(与 setup-api-expose.sh 逻辑一致, 双保险)。
+    _api_re="$(echo "${API_DOMAIN}" | sed 's/\./\\./g')"
+    sed -i -E "/[[:space:]]${_api_re}([[:space:]]|$)/d" /etc/hosts 2>/dev/null || true
+    grep -qE "^${API_IP}[[:space:]]+${API_DOMAIN}([[:space:]]|$)" /etc/hosts 2>/dev/null \
+        || echo "${API_IP} ${API_DOMAIN}" >> /etc/hosts 2>/dev/null || true
+    unset _api_re
     # 宿主机 DNAT(6443→first master): 让 API_DOMAIN 从宿主机可达(幂等)
     bash "${SCRIPT_DIR}/tools/lb/setup-api-expose.sh" >/dev/null 2>&1 || \
         sudo bash "${SCRIPT_DIR}/tools/lb/setup-api-expose.sh" >/dev/null 2>&1 || true
