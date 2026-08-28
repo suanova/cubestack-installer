@@ -61,6 +61,21 @@ if [ ! -f "${VM_NODES_CONF}" ]; then
 fi
 [ -s "${VM_NODES_CONF}" ] || { say "VM 配置为空, 无虚拟机需要创建"; exit 0; }
 
+# ============ 宿主网络初始化(bridge/nat) ============
+# 有 VM 要创建才需要宿主网络(网桥/SNAT/NAT); 已从 deploy-cluster.sh 默认序列移出,
+# 改在这里、创建 VM 之前自动执行。不重复执行: 已存在的网桥/网络由 setup 脚本幂等跳过。
+say "初始化宿主网络 (NET_MODE=${NET_MODE:-bridge}) ..."
+case "${NET_MODE:-bridge}" in
+    bridge)
+        bash "${SCRIPT_DIR}/tools/net/setup-vm-network.sh"
+        ;;
+    nat)
+        bash "${SCRIPT_DIR}/tools/net/setup-libvirt-nat.sh" "${NAT_NET_NAME:-cubestack-nat}"
+        ;;
+    *) err "未知 NET_MODE: ${NET_MODE}"; exit 1 ;;
+esac
+ok "宿主网络就绪"
+
 say "按 ${VM_NODES_CONF} 创建/启动虚拟机 ..."
 BOOTED_VMS=()
 # 收集 vm-nodes.conf 全部 VM 的 5 字段条目(密码归一化后), 结束后整体覆盖 cluster.conf NODES

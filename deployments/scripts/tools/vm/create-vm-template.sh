@@ -2,7 +2,8 @@
 set -euo pipefail
 
 BASE_IMG="/k8s/cloud-images/ubuntu2204-k8s-base.qcow2"
-PASS='k8s@2026'
+# 预埋默认密码: 由环境变量传入(不写死真实密码); 未设置时给占位符 CHANGE_ME, 使用前必须改
+PASS="${GOLDEN_IMAGE_PASSWORD:-CHANGE_ME}"
 
 echo "📦 复制原始镜像作为基底..."
 cp /k8s/cloud-images/ubuntu-22.04-server-cloudimg-amd64.img "$BASE_IMG"

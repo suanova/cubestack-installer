@@ -36,6 +36,12 @@
 | 服务发现 | CoreDNS + nodelocaldns |
 | 负载均衡 | MetalLB(Layer2, 地址池 `METALLB_POOL` 可配) |
 
+> **单节点集群(仅 1 个 control-plane)**:`k8s_deploy` 部署完成后会自动移除该 master 的
+> `NoSchedule` 污点并 uncordon(设为可调度)。因为 metallb controller / local-path /
+> registry / gpu_operator 等普通 pod 无 control-plane 污点容忍, 单节点若 master 不可调度会
+> 全部 Pending(registry 起不来 → 镜像推不进 → `ImagePullBackOff`)。`k8s_scale` 扩容后若仍
+> 是单 control-plane 也会重新收敛一次(kubespray 扩容会重新给 control-plane 打污点)。
+
 > ⚠ **MetalLB 网络需求(Layer2 模式)**:
 > - 地址池 IP 必须与集群节点**同一二层网络(同一子网)且空闲**;
 > - **裸金属集群**: 无需 bridge/NAT 网络(纯物理 L2 直连),不初始化宿主机网络,池取节点物理网段空闲段(如 `10.66.1.130-10.66.1.139`);
@@ -227,7 +233,7 @@ ${REPO_ROOT}/deployments/offline-files/virtual-machine/cloud-images/
 └── ubuntu2204-k8s-base.qcow2    # 黄金基础镜像(由 create-vm-template.sh 制作)
 ```
 
-- **制作**:`sudo ./deployments/scripts/tools/vm/create-vm-template.sh`(基于 Ubuntu 22.04 cloud 镜像,内置 ubuntu/root 密码 `k8s@2026`、SSH、时区 Asia/Shanghai、chrony 及 kubespray 离线所需系统包)。
+- **制作**:`sudo ./deployments/scripts/tools/vm/create-vm-template.sh`(基于 Ubuntu 22.04 cloud 镜像,内置 ubuntu/root 默认密码、SSH、时区 Asia/Shanghai、chrony 及 kubespray 离线所需系统包)。
 - **VM 磁盘目录**:`VM_DISK_DIR`(默认 `/k8s/vm-disks`),每台虚拟机一个磁盘文件,由 `create-libvirt-vm.sh` 创建。
 - **仅测试环境需要**:纯裸金属生产集群不创建虚拟机,不依赖本目录(vm-nodes.conf 无节点即可)。
 

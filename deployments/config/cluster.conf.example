@@ -12,7 +12,7 @@
 # ║     · 虚拟机集群: 由 create-vms.sh 自动注入, 通常无需手改;              ║
 # ║     · 裸金属集群: 必须手动填写所有节点(主机名/真实IP/SSH用户)。          ║
 # ║ ② 节点 SSH 密码(必须改):                                               ║
-# ║     · NODES 最后一位为 "-" → 用默认密码 SSH_DEFAULT_PASSWORD(k8s@2026); ║
+# ║     · NODES 最后一位为 "-" → 用默认密码 SSH_DEFAULT_PASSWORD(默认 CHANGE_ME, 需改成真实密码); ║
 # ║     · 不同节点不同密码 → 在 NODES 显式写该节点密码。                     ║
 # ║ ③ METALLB_POOL(必须改, 见 3.1 节):                                     ║
 # ║     · 池内 IP 必须与节点同一二层网络且空闲;                             ║
@@ -60,7 +60,7 @@ NAT_GATEWAY="${NAT_GATEWAY:-10.245.0.1}"
 # ---------------- 1.3 SSH 配置 ----------------
 SSH_KEY_DIR="${SSH_KEY_DIR:-${HOME}/.ssh}"
 SSH_KEY_NAME="${SSH_KEY_NAME:-cubestack_k8s}"
-SSH_DEFAULT_PASSWORD="${SSH_DEFAULT_PASSWORD:-k8s@2026}"
+SSH_DEFAULT_PASSWORD="${SSH_DEFAULT_PASSWORD:-CHANGE_ME}"
 VM_SSH_USERS="${VM_SSH_USERS:-root ubuntu}"
 WORKER_SSH_PASSWORD="${WORKER_SSH_PASSWORD:-}"
 
@@ -200,6 +200,10 @@ METALLB_POOL="${METALLB_POOL:-10.66.1.130-10.66.1.139}"
 REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"
 REGISTRY_DOMAIN="${REGISTRY_DOMAIN:-registry.local}"   # 内部域名(需本地 /etc/hosts 解析)
 # REGISTRY_IP 留空 = sync 自动从 METALLB_POOL 取池内首地址作为 LoadBalancer VIP(换环境只改 METALLB_POOL, 免手改)。
+# ⚠ 多集群共用同一网段时, 首地址必然被第一个集群占用 → 后续集群必须显式指定 REGISTRY_IP
+#   为一个不冲突的池内空闲地址(如 10.66.1.13x; 用 curl -s http://<候选IP>:5000/v2/ 探测无响应者可用),
+#   否则推送/拉取会打到别的集群的 registry(数据看似在、实际本集群 registry 空 → 节点 pull NotFound)。
+#   部署时 deploy-registry.sh 会对自动派生的候选 VIP 做服务端口探测并醒目提示冲突。
 # 显式设置则用它固定(须在池内、避开 .0/.255) —— 适合要绑定某特定空闲 IP 时。
 REGISTRY_IP="${REGISTRY_IP:-}"
 REGISTRY_PORT="${REGISTRY_PORT:-5000}"

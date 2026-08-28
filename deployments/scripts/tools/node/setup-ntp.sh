@@ -106,9 +106,19 @@ host_chrony_setup() {
         ok "宿主机 chrony 配置已是最新(local stratum 10 + allow), 跳过重启"
     else
         cp "${TMP_CONF}" "${HOST_CHRONY_CONF}"
-        systemctl enable chrony >/dev/null 2>&1 || true
-        systemctl restart chrony >/dev/null 2>&1 || systemctl restart chronyd >/dev/null 2>&1 \
-            || { warn "chrony 重启失败, 本机可能无法提供 NTP 服务(仍有一次性 date 硬对齐)"; }
+        # CLI 容器内(无 systemd): 无法用 systemctl 起 chrony, 但 chronyd 二进制可用;
+        # 后台直接拉起 chronyd(作为权威源)并提供即时 makestep, 避免"重启失败"告警。
+        if ! systemctl restart chrony >/dev/null 2>&1 && ! systemctl restart chronyd >/dev/null 2>&1; then
+            if command -v chronyd >/dev/null 2>&1; then
+                # 无 systemd(CLI 容器): 用配置文件(带 local stratum 10 + allow)后台直接拉起 chronyd
+                chronyd -f "${HOST_CHRONY_CONF}" >/dev/null 2>&1 &
+                sleep 2
+                chronyc -a makestep >/dev/null 2>&1 && ok "chronyd 后台启动成功(无 systemd, 直接拉起)" \
+                    || warn "chrony 重启失败, 本机可能无法提供 NTP 服务(仍有一次性 date 硬对齐)"
+            else
+                warn "chrony 重启失败, 本机可能无法提供 NTP 服务(仍有一次性 date 硬对齐)"
+            fi
+        fi
         ok "宿主机 chrony 已配置为权威(allow: ${NTP_ALLOW:-${VM_SUBNET} ${PHYS_WORKER_NET} ${NAT_SUBNET}})"
     fi
     rm -f "${TMP_CONF}"

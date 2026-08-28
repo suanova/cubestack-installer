@@ -337,7 +337,7 @@ cubestack-installer/
 > **① 节点 NODES(1.4 节,裸金属必须改)**:
 > - 虚拟机集群:由 `tools/vm/create-vms.sh` 创建后**自动注入**,通常无需手改;
 > - **裸金属集群:必须手动填所有节点** `"role,hostname,ip,ssh_user,ssh_password"`。
-> **② SSH 密码(k8s@2026)**:NODES 最后一位 `-` = 用默认 `SSH_DEFAULT_PASSWORD`;不同节点不同密码就写该节点密码。
+> **② SSH 密码**:NODES 最后一位 `-` = 用默认 `SSH_DEFAULT_PASSWORD`(默认无,需在 cluster.conf 中自行设置);不同节点不同密码就写该节点密码。
 > **③ METALLB_POOL(3.1 节,裸金属必须改)**:
 > - 虚拟机集群: `create-vms.sh` 自动推导为 VM 网段,通常无需手改;
 > - **裸金属集群:必须手动填节点物理网段空闲段**(如 `10.66.1.130-139`)。
@@ -347,7 +347,12 @@ cubestack-installer/
 
 ```bash
 # 从 config/cluster.conf 读取配置(唯一数据源,所有 IP 不硬编码)
-cp config/cluster.conf.example config/cluster.conf && vim config/cluster.conf
+cp config/cluster.conf.example config/cluster.conf
+vim config/cluster.conf          # 修改 NODES 里的 IP 等信息
+
+# 离线文件缺失时,先从 MinIO 拉取(需先配置 mc alias 指向 MinIO)
+mc alias set minio http://192.168.16.6:9000 admin CHANGE_ME    # CHANGE_ME 替换为真实 MinIO SecretKey
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh    # 默认全量下载 offline-files 下所有文件
 
 # 全流程部署(默认 = 装全部组件 + kubespray 离线安装 + cluster.conf 中启用的 operator)
 sudo ./deployments/scripts/deploy-cluster.sh                          # 默认 = --with-cubestack(全量)
@@ -396,7 +401,8 @@ deployments/
 
 镜像名:`harbor.isuanova.com/cubestack/cubestack-installer-cli:latest`。
 
-构建(独立上下文, 默认基于 Harbor 镜像增量构建, 只刷新源码; 完整重建加 `--build-arg BASE_IMAGE=ubuntu:22.04`):
+构建(独立上下文, 全量同步 deployments 源码/脚本/模板——除 offline-files 离线大文件外全部进镜像;
+基础镜像 `ubuntu:22.04`, 本地缺失时脚本自动从 `deployments/offline-files/os/ubuntu-22.04.tar` `docker load`, 离线可构建):
 
 ```bash
 sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build     # 生成上下文 + 构建
@@ -405,15 +411,16 @@ sudo ./deployments/scripts/tools/docker/build-cli-context.sh --push      # 生�
 
 **第 0 步: 获取离线文件(缺失时)**
 
-离线镜像/二进制不入镜像,需先下载到宿主机磁盘;脚本自动检测 mc client、选择空闲 ≥ 50GiB 的最大磁盘下载,并打印容器挂载命令:
+离线镜像/二进制不入镜像,需先下载到磁盘。脚本默认下载到 `/opt/cubestack-installer/deployments/offline-files`(容器内执行即落到挂载的 offline-files,即装即用),并默认开启**磁盘空间检查**(醒目提示至少 50GiB 空闲,不足则中止);宿主机想用大磁盘时加 `--auto` 自动挑空闲 ≥ 门槛的最大挂载点:
 
 ```bash
-sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh      # 默认只拉 kubespray(约 3.4GiB)
-sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --all   # 全量(约 34GiB, 含 GPU/LWS/VM 镜像)
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --list    # 查看 MinIO 可用目录
+sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh            # 默认: 全量下载 offline-files 下所有文件(含 kubespray/metax-gpu/lws/os/VM 镜像)
+sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub kubespray   # 只拉某子目录(如 kubespray)
+sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --auto      # 宿主机: 自动挑空闲 ≥ 50GiB 的最大磁盘
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --list           # 查看 MinIO 可用目录
 ```
 
-下载到 `<下载目录>/offline-files` 后,下方挂载命令把 `deployments/offline-files` 换成 `<下载目录>/offline-files` 即可(脚本结束时会直接打印完整命令)。
+下载完成后:容器内执行可直接开始部署;宿主机下载到 `<下载目录>` 后,下方挂载命令把 `deployments/offline-files` 换成 `<下载目录>` 即可(脚本结束时会直接打印完整命令)。
 
 **方式一: 交互式(推荐)**
 

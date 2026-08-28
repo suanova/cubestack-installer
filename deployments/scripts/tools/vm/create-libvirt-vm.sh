@@ -308,7 +308,7 @@ echo -e "\033[32m✅ VM ${VM_NAME} 创建成功(running)\033[0m"
 # 自动注册到 cluster.conf (AUTO_REGISTER_CLUSTER=1 时生效)
 auto_register_vm
 
-echo "✅ 登录: root/${SSH_DEFAULT_PASSWORD:-k8s@2026} 或 ubuntu/${SSH_DEFAULT_PASSWORD:-k8s@2026} (镜像预埋)"
+echo "✅ 登录: root/密码(镜像预埋, 由 create-vm-template.sh 的 GOLDEN_IMAGE_PASSWORD 指定, 默认 CHANGE_ME) 或 ubuntu/同密码 (sudo免密)"
 echo "  静态IP: ${VM_IP}/${PREFIX}  网关: ${GATEWAY}"
 echo "  规格: ${MEM_G}G/${VCPU}C/${DISK_G}G"
 if [ "${VM_NET_MODE}" = "bridge" ]; then
