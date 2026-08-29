@@ -45,6 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv \
         libvirt-clients vim gnupg \
         iproute2 kmod systemd procps bridge-utils chrony \
+        moreutils \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------- 更新部署脚本/源码(基础镜像已含旧 deployments, 先清空再拷入) ----------

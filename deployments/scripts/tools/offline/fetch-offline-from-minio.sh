@@ -14,11 +14,17 @@
 #     自动回退探测旧布局(cubestack-offline/kubespray);
 #   · 磁盘检查(默认开启): 醒目提示磁盘至少需 MIN_FREE_GB(默认 50)GiB 空闲, 并比对
 #     本次下载所需(远程总大小 + 缓冲)与目标可用空间; 不足时红色横幅警告并中止(--force 强制继续);
-#   · 下载范围: 默认全量拉取 offline-files 下所有子目录(含 kubespray/metax-gpu/lws/os/虚拟镜像);
-#     需要时可用 --sub <目录> 只拉某子目录;
+#   · 下载范围: 默认下载【部署必需】子目录(kubespray/metax-gpu/lws/os/envoy 等),
+#     不下载 virtual-machine(虚拟机镜像, 体积大且仅创建 VM 时用);
+#     需要时可 --sub virtual-machine 只拉 VM 镜像, 或 --all 全量(含 VM 镜像)。
+#   · 子目录排除: DEFAULT_EXCLUDE_SUBS(默认 virtual-machine)在默认/全量下载时自动跳过;
+#     显式 --sub <目录> 不受排除限制(按需下载)。
+#   · 需要时可用 --sub <目录> 只拉某子目录;
 #   · 结果提示: 容器内就绪提示; 宿主机打印容器挂载命令 + 直跑 OFFLINE_FILES_DIR 指引。
 # 用法(容器内已 root, 无需 sudo):
-#   ./fetch-offline-from-minio.sh                                 # 默认: 全量下载 offline-files 下所有文件
+#   ./fetch-offline-from-minio.sh                                 # 默认: 下载部署必需子目录(排除 virtual-machine)
+#   ./fetch-offline-from-minio.sh --sub virtual-machine           # 按需拉 VM 镜像(仅创建虚拟机时)
+#   ./fetch-offline-from-minio.sh --all                           # 真正全量(含 virtual-machine 等所有子目录)
 #   ./fetch-offline-from-minio.sh --sub kubespray                 # 只拉某子目录(如 kubespray)
 #   ./fetch-offline-from-minio.sh --dest /data/offline-files      # 指定下载目录(即 offline-files 根)
 #   sudo ./fetch-offline-from-minio.sh --auto                     # 宿主机: 自动挑空闲 ≥ 门槛的最大磁盘
@@ -31,9 +37,29 @@
 # ============================================================
 set -euo pipefail
 
+# 捕获"进程环境显式传入的 OFFLINE_FILES_DIR"(须在 load_config 之前, 否则已被 lib-common 默认覆盖)
+OFFLINE_FILES_DIR_RAW="${OFFLINE_FILES_DIR:-}"
+
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+# 记录"用户显式 OFFLINE_FILES_DIR"(环境变量):
+#   lib-common 会把未设置时的默认导出为 .../offline-files/kubespray(部署脚本专用内层语义),
+#   fetch 的下载目标是 offline-files 总根, 不能误用该默认 → 仅在用户显式设置时采用。
+# 判定"显式": ① 进程环境中确实传入了 OFFLINE_FILES_DIR(env 前导 / export); ② 或 cluster.conf
+# 里将其设成了 offline-files 根(.../offline-files, 而非 .../offline-files/kubespray 内层)。
+# ⚠ 默认(不显式设置): cluster.conf 里 OFFLINE_FILES_DIR 留空 → lib-common 解析为 .../offline-files/kubespray,
+#   属部署脚本内层默认, 此处忽略 → fetch 走 offline-files 总根(场景 1, 默认即下载到 offline-files/{kubespray,lws,metax-gpu,os})。
+OFFLINE_FILES_DIR_EXPLICIT=""
+if [ -n "${OFFLINE_FILES_DIR_RAW:-}" ]; then
+    OFFLINE_FILES_DIR_EXPLICIT="${OFFLINE_FILES_DIR_RAW}"
+elif [ -n "${OFFLINE_FILES_DIR:-}" ]; then
+    case "${OFFLINE_FILES_DIR}" in
+        */offline-files/kubespray) OFFLINE_FILES_DIR_EXPLICIT="" ;;  # lib-common 默认内层, 忽略
+        *) OFFLINE_FILES_DIR_EXPLICIT="${OFFLINE_FILES_DIR}" ;;      # 用户显式根
+    esac
+fi
+export OFFLINE_FILES_DIR_EXPLICIT
 
 # ---------------- 参数解析 ----------------
 DEST_ARG=""
@@ -45,6 +71,8 @@ AUTO=0
 FORCE=0
 MIN_FREE_GB="${MIN_FREE_GB:-50}"     # 磁盘空间门槛(GB): 默认至少 50GiB 空闲, 离线文件会持续增加
 WARN_NEED_GB="${WARN_NEED_GB:-50}"   # 醒目警告建议的总空闲门槛(GB)
+# 默认/全量下载时自动排除的子目录(体积大且非部署必需, 需用时 --sub 单独拉):
+DEFAULT_EXCLUDE_SUBS="${DEFAULT_EXCLUDE_SUBS:-virtual-machine}"
 while [ $# -gt 0 ]; do
     case "$1" in
         --dest) DEST_ARG="$2"; shift 2 ;;
@@ -150,7 +178,7 @@ ok "MinIO 离线目录: ${SRC_ROOT}"
 
 # ---------------- 4. 列出可用子目录 ----------------
 echo ""
-say "MinIO 中离线文件子目录(默认全量下载; 可 --sub <目录> 只拉某子目录):"
+say "MinIO 中离线文件子目录(默认下载部署必需子目录, 排除 ${DEFAULT_EXCLUDE_SUBS}; 可 --sub <目录> 只拉某子目录 / --all 全量):"
 mc ls "${SRC_ROOT}" 2>/dev/null | awk '{print "  - " $NF}'
 echo ""
 
@@ -172,10 +200,18 @@ fi
 # 默认下载到 /opt/cubestack-installer/deployments/offline-files:
 #   · 容器内: REPO_ROOT=/opt/cubestack-installer, 即默认 offline-files 路径;
 #   · 宿主机直跑本仓库: 默认同一路径; 磁盘不足时用 --auto 换更大磁盘。
+# 下载目录 = offline-files 总根(远端 offline-files/<子目录> 直接落到 <TARGET>/<子目录>):
+#   注意 lib-common 的 OFFLINE_FILES_DIR 默认是 .../offline-files/kubespray(kubespray 内层),
+#   与本脚本的 offline-files 总根语义不同 —— 因此这里只认: 环境变量显式 OFFLINE_FILES_DIR(用户自定义根) 或
+#   --dest 显式指定; lib-common 自动导出的默认值(指向 offline-files/kubespray)不采纳, 避免下载进 kubespray/ 内层。
 DEFAULT_DIR="${REPO_ROOT}/deployments/offline-files"
 if [ -n "${DEST_ARG}" ]; then
     TARGET="${DEST_ARG}"
     say "使用指定下载目录: ${TARGET}"
+elif [ -n "${OFFLINE_FILES_DIR_EXPLICIT:-}" ]; then
+    # 仅用户显式设置(环境变量)时才采用; lib-common 自动导出的默认(offline-files/kubespray)不采纳
+    TARGET="${OFFLINE_FILES_DIR_EXPLICIT}"
+    say "使用显式 OFFLINE_FILES_DIR 下载目录: ${TARGET}"
 elif [ "${IS_CONTAINER}" = "1" ]; then
     TARGET="${DEFAULT_DIR}"
     say "容器内执行: 下载到默认目录 ${TARGET}"
@@ -209,20 +245,36 @@ fi
 DST_ROOT="${TARGET}"
 
 # ---------------- 7. 选择下载范围 ----------------
+# 默认下载【部署必需】子目录(排除 DEFAULT_EXCLUDE_SUBS=virtual-machine, 仅创建 VM 时用);
+#   --all = 真正全量(含 virtual-machine); --sub <目录> = 只拉指定目录(不受排除限制)。
+_subs_all() {   # 输出 MinIO 根下全部子目录(排除 DEFAULT_EXCLUDE_SUBS)
+    # 注: mc ls 对目录名带尾斜杠(如 "virtual-machine/"), 先剥掉再与排除列表匹配;
+    #     跳过提示(say)写 stderr, 避免混入 stdout 被 mapfile 当子目录名收集。
+    local s
+    for s in $(mc ls "${SRC_ROOT}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##'); do
+        [ -n "${s}" ] || continue
+        case " ${DEFAULT_EXCLUDE_SUBS} " in
+            *" ${s} "*) say "  跳过 ${s}(默认排除, 需用 --sub ${s} 单独下载)" >&2 ;;
+            *) echo "${s}" ;;
+        esac
+    done
+}
 SUBS=()
 if [ "${ALL}" = "1" ]; then
-    mapfile -t SUBS < <(mc ls "${SRC_ROOT}" 2>/dev/null | awk '{print $NF}')
-    say "全量下载: ${#SUBS[@]} 个子目录"
+    # --all = 真正全量(含 virtual-machine; 同样剥掉目录名尾斜杠)
+    mapfile -t SUBS < <(mc ls "${SRC_ROOT}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##')
+    say "全量下载(--all, 含 ${DEFAULT_EXCLUDE_SUBS}): ${#SUBS[@]} 个子目录"
 elif [ -n "${SUB_ARG}" ]; then
+    # 显式 --sub 不受排除限制; 容错: 若 MinIO 中名字带尾斜杠, 剥离后比对
     mc_has "${SRC_ROOT}/${SUB_ARG}" || { err "MinIO 中无子目录 ${SRC_ROOT}/${SUB_ARG}(用 --list 查看)"; exit 1; }
     SUBS=("${SUB_ARG}")
     say "只拉取子目录: ${SUB_ARG}"
 else
-    # 默认全量: offline-files 下所有子目录都下载
-    mapfile -t SUBS < <(mc ls "${SRC_ROOT}" 2>/dev/null | awk '{print $NF}')
-    say "默认全量下载 offline-files 下所有子目录: ${#SUBS[@]} 个"
+    # 默认: 下载部署必需子目录(排除 virtual-machine)
+    mapfile -t SUBS < <(_subs_all)
+    say "默认下载部署必需子目录(排除 ${DEFAULT_EXCLUDE_SUBS}): ${#SUBS[@]} 个"
     if [ "${#SUBS[@]}" -eq 0 ]; then
-        err "MinIO 离线目录 ${SRC_ROOT} 下无子目录可下载"; exit 1
+        err "MinIO 离线目录 ${SRC_ROOT} 下无子目录可下载(全部被排除? 用 --sub <目录> 或 --all 或改 DEFAULT_EXCLUDE_SUBS)"; exit 1
     fi
 fi
 
@@ -230,7 +282,8 @@ fi
 # 下载需要足够空间: 醒目提示至少 MIN_FREE_GB(默认 50)GiB 空闲;
 # 并按"远程待下载大小 + 缓冲"预检, 不足时红色横幅警告并中止(--force 强制继续)。
 [ -d "${DST_ROOT}" ] || mkdir -p "${DST_ROOT}"
-TARGET_AVAIL_BYTES="$(df -Pk "${DST_ROOT}" 2>/dev/null | awk 'NR==2 {print $4*1024}')"
+# df 输出可能为科学计数法(>1TB 文件系统, 如 7.42899e+12)或带逗号, 统一规整为整数 Byte 数
+TARGET_AVAIL_BYTES="$(df -Pk "${DST_ROOT}" 2>/dev/null | awk 'NR==2 {gsub(/,/,"",$4); printf "%.0f", $4*1024}')"
 if [ -n "${TARGET_AVAIL_BYTES}" ] && [ "${TARGET_AVAIL_BYTES}" -gt 0 ]; then
     TARGET_AVAIL_GB="$(awk -v a="${TARGET_AVAIL_BYTES}" 'BEGIN{printf "%.1f", a/1024/1024/1024}')"
     say "目标磁盘可用: ${TARGET_AVAIL_GB} GiB (${DST_ROOT})"
@@ -244,6 +297,8 @@ fi
 NEED_BYTES=0
 for s in "${SUBS[@]}"; do
     [ -n "${s}" ] || continue
+    # 本次下载所需 = 远程待下载总大小 + 缓冲; mc du 输出 "大小<TAB>N objects<TAB>路径",
+    # 大小在第 1 列(如 1.1GiB), 取 $1 即可
     _rsize="$(mc du "${SRC_ROOT}/${s}" 2>/dev/null | awk -F'\t' '{print $1}')"
     _rbytes="$(echo "${_rsize}" | awk '
         /[0-9.]+[Tt](i?B)?$/ { x=$1; sub(/[Tt](i?B)?$/,"",x); printf "%d", x*1024^4; exit }
@@ -251,9 +306,10 @@ for s in "${SUBS[@]}"; do
         /[0-9.]+[Mm](i?B)?$/ { x=$1; sub(/[Mm](i?B)?$/,"",x); printf "%d", x*1024^2; exit }
         /[0-9.]+[Kk](i?B)?$/ { x=$1; sub(/[Kk](i?B)?$/,"",x); printf "%d", x*1024; exit }
         { gsub(/[^0-9.]/,""); printf "%d", $1 }')"
+    _rbytes="${_rbytes:-0}"
     say "  远程 ${s}: ${_rsize:-?}"
     # 计算未下载部分大小(增量续传场景)
-    if [ -n "${_rbytes}" ] && [ "${_rbytes}" -gt 0 ] && [ -d "${DST_ROOT}/${s}" ]; then
+    if [ "${_rbytes}" -gt 0 ] && [ -d "${DST_ROOT}/${s}" ]; then
         _local="$(du -sb "${DST_ROOT}/${s}" 2>/dev/null | awk '{print $1}')"
         _local="${_local:-0}"
         [ "${_local}" -gt 0 ] && [ "${_local}" -le "${_rbytes}" ] && _rbytes=$(( _rbytes - _local ))
@@ -289,7 +345,7 @@ fi
 
 # ---------------- 8. 空间预检 ----------------
 mkdir -p "${DST_ROOT}"
-TARGET_AVAIL="$(df -Pk "${TARGET}" 2>/dev/null | awk 'NR==2 {print $4*1024}')"
+TARGET_AVAIL="$(df -Pk "${TARGET}" 2>/dev/null | awk 'NR==2 {gsub(/,/,"",$4); printf "%.0f", $4*1024}')"
 for s in "${SUBS[@]}"; do
     [ -n "${s}" ] || continue
     _rsize="$(mc du "${SRC_ROOT}/${s}" 2>/dev/null | awk -F'\t' '{print $1}')"
@@ -299,9 +355,10 @@ for s in "${SUBS[@]}"; do
         /[0-9.]+[Mm](i?B)?$/ { x=$1; sub(/[Mm](i?B)?$/,"",x); printf "%d", x*1024^2; exit }
         /[0-9.]+[Kk](i?B)?$/ { x=$1; sub(/[Kk](i?B)?$/,"",x); printf "%d", x*1024; exit }
         { gsub(/[^0-9.]/,""); printf "%d", $1 }')"
+    _rbytes="${_rbytes:-0}"
     say "  远程 ${s}: ${_rsize:-?} → 目标可用: $(awk -v a="${TARGET_AVAIL}" 'BEGIN{printf "%.1f GiB", a/1024/1024/1024}')"
     # 预检: 远程大小 + MIN_FREE_GB 余量(未来离线文件还会增加) > 目标可用 → 警告
-    if [ -n "${_rbytes}" ] && [ -n "${TARGET_AVAIL}" ] \
+    if [ -n "${TARGET_AVAIL}" ] \
        && [ "$(( _rbytes + MIN_FREE_GB * 1024 * 1024 * 1024 ))" -gt "${TARGET_AVAIL}" ]; then
         warn "⚠ 远程 ${s}(${_rsize}) + ${MIN_FREE_GB} GiB 余量已接近/超过 ${TARGET} 可用空间, 建议 --dest 换更大磁盘"
     fi

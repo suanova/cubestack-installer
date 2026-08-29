@@ -34,12 +34,10 @@ ${API_IP}          ${API_DOMAIN}${NODE_ENTRIES}
 # <<< cubestack-cluster"
 
 # ---- 更新 /etc/hosts ----
-# 1. 删除旧的 cubestack 集群块
-sed -i '/# >>> cubestack-cluster/,/# <<< cubestack-cluster/d' /etc/hosts
-# 2. 删除旧的 nova-k8s-master / nova-k8s-node / mxgpu 裸条目
-sed -i -E '/nova-k8s-(master|node)/d; /mxgpu-[0-9]/d; /k8s-api\.nova\.local/d' /etc/hosts
-# 3. 追加新块
-echo "${HOSTS_BLOCK}" >> /etc/hosts
+# 复用 lib-common 的 ensure_hosts_block(先删旧块/旧裸条目再追加 → 主机名不残留重复行)
+ensure_hosts_block '# >>> cubestack-cluster' '# <<< cubestack-cluster' <<EOF
+${HOSTS_BLOCK}
+EOF
 ok "已更新 /etc/hosts (${#NODES[@]} 节点)"
 
 # ---- 更新 /etc/dnsmasq.hosts ----

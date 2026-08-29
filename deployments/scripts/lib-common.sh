@@ -207,6 +207,8 @@ load_config() {
     else
         export REGISTRY_IP_EXPLICIT=1
     fi
+    # 虚拟机配置(独立于 cluster.conf): source vm-nodes.conf 提供 VM 创建/网络变量
+    vm_conf_load
 }
 
 # ---------------- 指定节点过滤(--only) ----------------
@@ -307,6 +309,64 @@ wait_registry_ready() {
     return 1
 }
 
+# ---------------- 宿主机 /etc/hosts 收敛(共享, 防多集群残留 + 防重复行) ----------------
+# 多套集群/换环境时, 同一域名(registry.local / k8s-api.nova.local / 节点主机名)会在
+# /etc/hosts 残留多个旧 IP 行; getent 命中旧 IP → push/helm/kubectl 打到旧集群 → 误报失败。
+# 固定套路: 【先无条件删除该域名所有旧行, 再追加当前 IP 一行】。
+# ⚠ 不要加 "grep 已匹配则跳过" 的幂等守卫: 守卫会因第一行旧 IP 已匹配而跳过追加,
+#   新 IP 永远写不进去 —— 正是多行残留累积的根因(历史 _ensure_hosts 的 bug)。
+# 用法: ensure_hosts_entry <ip> <domain>; 非 root 时静默失败, 调用方用 grep 校验 + warn。
+#
+# ★ bind-mount 安全: 不能用 sed -i / awk -i inplace(它们=写临时文件再 rename 覆盖)。
+#   容器(cli 镜像/installer)内 /etc/hosts 是 docker bind-mount, rename 会
+#   "Device or resource busy" 失败 → 旧行删不掉、只剩追加 → 同一域名多行残留(历史根因)。
+#   【优先用】sed '/<域名>/d' /etc/hosts | sponge /etc/hosts(moreutils, CLI 镜像已预装)
+#   做"删旧行→原地覆盖写"; 非容器环境(宿主机/节点, 未必有 sponge)回退
+#   "sed 过滤 → 临时文件 + cat 覆盖写"(同样不 rename, bind-mount 与普通 FS 都安全)。
+#   两种分支都是先删该域名【所有】旧行, 再追加当前 IP 一行。
+ensure_hosts_entry() {
+    local ip="$1" dom="$2"
+    [ -n "${ip}" ] && [ -n "${dom}" ] || return 0
+    local t="/etc/hosts.$$"
+    if command -v sponge >/dev/null 2>&1; then
+        sed "/${dom}/d" /etc/hosts | sponge /etc/hosts 2>/dev/null || return 0
+    else
+        sed "/${dom}/d" /etc/hosts > "${t}" 2>/dev/null || return 0
+        cat "${t}" > /etc/hosts 2>/dev/null || { rm -f "${t}"; return 0; }
+        rm -f "${t}"
+    fi
+    printf '%s %s\n' "${ip}" "${dom}" >> /etc/hosts 2>/dev/null || true
+}
+
+# 幂等追加【整块】宿主机 hosts 条目(与 ensure_hosts_entry 同套防重复理念, 适用于多行块):
+#   · 命中任意主机名(含 k8s-api.nova.local / nova-k8s-* / mxgpu-* 旧版裸条目)即视为已有该块,
+#     【先删除旧块标记段 + 匹配主机名的裸行, 再追加新块】, 主机名→IP 永不重复。
+#   · 块标记仅保留一段, 重复追加(历史版本多次写入)也会被收敛成一段。
+#   · bind-mount 安全(同 ensure_hosts_entry): 过滤→sponge 或临时文件+cat 覆盖写。
+# 用法: ensure_hosts_block <块首注释> <块尾注释> <<< 块内容(以 EOF 结尾)
+ensure_hosts_block() {
+    local start="$1" end="$2" content
+    content="$(cat)"
+    [ -n "${content}" ] || return 0
+    local t="/etc/hosts.$$"
+    if command -v sponge >/dev/null 2>&1; then
+        sed -e "/${start}/,/${end}/d" \
+            -e '/nova-k8s-\(master\|node\)/d' \
+            -e '/mxgpu-[0-9]/d' \
+            -e '/k8s-api\.nova\.local/d' \
+            /etc/hosts | sponge /etc/hosts 2>/dev/null || return 0
+    else
+        sed -e "/${start}/,/${end}/d" \
+            -e '/nova-k8s-\(master\|node\)/d' \
+            -e '/mxgpu-[0-9]/d' \
+            -e '/k8s-api\.nova\.local/d' \
+            /etc/hosts > "${t}" 2>/dev/null || return 0
+        cat "${t}" > /etc/hosts 2>/dev/null || { rm -f "${t}"; return 0; }
+        rm -f "${t}"
+    fi
+    printf '%s\n' "${content}" >> /etc/hosts 2>/dev/null || true
+}
+
 # ---------------- 宿主机 kubectl/helm 访问集群(共享, 防 TLS/DNAT 坑) ----------------
 # 从第一个 master 下载 /etc/kubernetes/admin.conf 并同步到 ~/.kube/config, 同时:
 #   ① server 改写为证书 SAN 内的 API_DOMAIN(k8s-api.nova.local) —— admin.conf 默认
@@ -353,11 +413,7 @@ sync_kubeconfig() {
     rm -f "${tmp}"
     # ★ 宿主机 /etc/hosts 收敛 API_DOMAIN(换环境旧 IP 残留会让 getent 命中旧集群 → 误报失败):
     #   先删该域名所有旧行, 再写当前 API_IP 一行(与 setup-api-expose.sh 逻辑一致, 双保险)。
-    _api_re="$(echo "${API_DOMAIN}" | sed 's/\./\\./g')"
-    sed -i -E "/[[:space:]]${_api_re}([[:space:]]|$)/d" /etc/hosts 2>/dev/null || true
-    grep -qE "^${API_IP}[[:space:]]+${API_DOMAIN}([[:space:]]|$)" /etc/hosts 2>/dev/null \
-        || echo "${API_IP} ${API_DOMAIN}" >> /etc/hosts 2>/dev/null || true
-    unset _api_re
+    ensure_hosts_entry "${API_IP}" "${API_DOMAIN}"
     # 宿主机 DNAT(6443→first master): 让 API_DOMAIN 从宿主机可达(幂等)
     bash "${SCRIPT_DIR}/tools/lb/setup-api-expose.sh" >/dev/null 2>&1 || \
         sudo bash "${SCRIPT_DIR}/tools/lb/setup-api-expose.sh" >/dev/null 2>&1 || true
@@ -383,9 +439,23 @@ node_is_vm() {
 #   deployments/scripts/tools/vm/vm-nodes.conf 中定义(10字段格式, 见该文件头部注释)。
 # 创建虚拟机的脚本(tools/vm/*)读取本配置; 创建成功后自动把 5 字段信息注入 cluster.conf。
 VM_NODES_CONF="${VM_NODES_CONF:-${SCRIPT_DIR}/tools/vm/vm-nodes.conf}"
-vm_conf_entries() {   # 输出 vm-nodes.conf 中引号包裹的 NODES 行(10字段)
+# source vm-nodes.conf(虚拟机创建 + 虚拟网络变量 + VM_NODES 10字段数组):
+#   · 集中 VM 专属配置(BASE_IMG/VM_DISK_DIR/VM_SSH_USERS/VM_SUBNET/BRIDGE/NET_MODE/NAT_*/PHYS_WORKER_NET),
+#     与 cluster.conf 解耦; 所有引用这些变量的脚本(tools/vm/*, tools/net/*, 01_vm_network)统一经 lib-common 拿到。
+#   · 无 VM 的纯裸金属集群: 文件不存在则跳过(变量回退到各自默认值)。
+vm_conf_load() {
     [ -f "${VM_NODES_CONF}" ] || return 0
-    sed -n 's/^[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "${VM_NODES_CONF}"
+    # 容错: 文件不合法不阻断(变量回退默认)
+    source "${VM_NODES_CONF}" 2>/dev/null || true
+}
+vm_conf_entries() {   # 输出 VM_NODES 数组中 10 字段节点行(定义于 vm-nodes.conf)
+    local i
+    # 直接遍历 VM_NODES 数组(需已 source vm-nodes.conf); 未 source 时回退 sed 解析
+    if declare -p VM_NODES >/dev/null 2>&1; then
+        for i in "${VM_NODES[@]:-}"; do echo "${i}"; done
+        return 0
+    fi
+    sed -n 's/^[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "${VM_NODES_CONF}" 2>/dev/null
 }
 vm_conf_has_nodes() {   # 是否有 VM 定义(供"含 VM 集群 / 全裸金属"判断)
     [ -n "$(vm_conf_entries)" ]

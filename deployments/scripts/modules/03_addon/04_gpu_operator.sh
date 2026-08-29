@@ -125,16 +125,9 @@ command -v skopeo >/dev/null 2>&1 || { warn "未找到 skopeo(tar 模式推送�
 # 宿主机 /etc/hosts 每次部署统一更新为正确 IP(不允许遗留 10.66.3.37 等过期条目):
 #   REGISTRY_DOMAIN → REGISTRY_IP(集群内置 registry VIP, 供宿主按域名 push)
 #   API_DOMAIN      → API_IP(API Server 入口, 供宿主 helm/kubectl 连集群)
-_ensure_hosts() {   # <ip> <domain>: 删除该域名的旧行再写入正确 IP(幂等)
-    local ip="$1" dom="$2" re
-    [ -n "${ip}" ] && [ -n "${dom}" ] || return 0
-    re="$(echo "${dom}" | sed 's/\./\\./g')"
-    sed -i -E "/[[:space:]]${re}([[:space:]]|$)/d" /etc/hosts 2>/dev/null || true
-    grep -qE "^${ip}[[:space:]]+${dom}([[:space:]]|$)" /etc/hosts 2>/dev/null \
-        || echo "${ip} ${dom}" >> /etc/hosts 2>/dev/null
-}
-_ensure_hosts "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
-_ensure_hosts "${API_IP}" "${API_DOMAIN}"
+# 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)
+ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
+ensure_hosts_entry "${API_IP}" "${API_DOMAIN}"
 grep -qE "^${REGISTRY_IP}[[:space:]]+${REGISTRY_DOMAIN}" /etc/hosts 2>/dev/null \
     || warn "无法写入宿主机 /etc/hosts(非 root?), ${REGISTRY_DOMAIN}/${API_DOMAIN} 可能无法从宿主按域名访问"
 # registry(MetalLB VIP)就绪存在时序竞态: Service EXTERNAL-IP 出现后, speaker ARP 通告 /
