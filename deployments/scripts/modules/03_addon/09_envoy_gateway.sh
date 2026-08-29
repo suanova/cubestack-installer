@@ -70,15 +70,8 @@ case "${ENVOY_EG_CHART_SOURCE}" in
 esac
 command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 请先安装 Helm"; exit 1; }
 # 宿主机 /etc/hosts 更新(registry 域名 → VIP), 与 gpu_operator 一致
-_ensure_hosts() {   # <ip> <domain>
-    local ip="$1" dom="$2" re
-    [ -n "${ip}" ] && [ -n "${dom}" ] || return 0
-    re="$(echo "${dom}" | sed 's/\./\\./g')"
-    sed -i -E "/[[:space:]]${re}([[:space:]]|$)/d" /etc/hosts 2>/dev/null || true
-    grep -qE "^${ip}[[:space:]]+${dom}([[:space:]]|$)" /etc/hosts 2>/dev/null \
-        || echo "${ip} ${dom}" >> /etc/hosts 2>/dev/null
-}
-_ensure_hosts "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
+# 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)
+ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
 wait_registry_ready "http://${REGISTRY_BASE}/v2/" \
     || { err "集群内置 registry ${REGISTRY_BASE}/v2/ 不可达(检查: 宿主机 /etc/hosts 的 ${REGISTRY_DOMAIN} 是否解析到 ${REGISTRY_IP}, 及 MetalLB VIP)"; exit 1; }
 SSH "${K} get nodes --no-headers >/dev/null 2>&1" \

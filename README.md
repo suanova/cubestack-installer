@@ -352,7 +352,9 @@ vim config/cluster.conf          # 修改 NODES 里的 IP 等信息
 
 # 离线文件缺失时,先从 MinIO 拉取(需先配置 mc alias 指向 MinIO)
 mc alias set minio http://192.168.16.6:9000 admin CHANGE_ME    # CHANGE_ME 替换为真实 MinIO SecretKey
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh    # 默认全量下载 offline-files 下所有文件
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh            # 默认下载部署必需子目录(排除 virtual-machine)
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub virtual-machine   # 仅创建虚拟机时按需拉 VM 镜像
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --all      # 真正全量(含 virtual-machine)
 
 # 全流程部署(默认 = 装全部组件 + kubespray 离线安装 + cluster.conf 中启用的 operator)
 sudo ./deployments/scripts/deploy-cluster.sh                          # 默认 = --with-cubestack(全量)
@@ -414,13 +416,34 @@ sudo ./deployments/scripts/tools/docker/build-cli-context.sh --push      # 生�
 离线镜像/二进制不入镜像,需先下载到磁盘。脚本默认下载到 `/opt/cubestack-installer/deployments/offline-files`(容器内执行即落到挂载的 offline-files,即装即用),并默认开启**磁盘空间检查**(醒目提示至少 50GiB 空闲,不足则中止);宿主机想用大磁盘时加 `--auto` 自动挑空闲 ≥ 门槛的最大挂载点:
 
 ```bash
-sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh            # 默认: 全量下载 offline-files 下所有文件(含 kubespray/metax-gpu/lws/os/VM 镜像)
+sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh            # 默认: 下载部署必需子目录(排除 virtual-machine)
+sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub virtual-machine  # 按需拉 VM 镜像(仅创建虚拟机时)
+sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --all      # 真正全量(含 virtual-machine)
 sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub kubespray   # 只拉某子目录(如 kubespray)
 sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --auto      # 宿主机: 自动挑空闲 ≥ 50GiB 的最大磁盘
 ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --list           # 查看 MinIO 可用目录
 ```
 
 下载完成后:容器内执行可直接开始部署;宿主机下载到 `<下载目录>` 后,下方挂载命令把 `deployments/offline-files` 换成 `<下载目录>` 即可(脚本结束时会直接打印完整命令)。
+
+**离线文件管理(源机器同步/清理, 可选)**
+
+离线文件仓库侧(制作/维护 offline-files 的机器)可把本地清理后的精简文件同步到 MinIO, 供各部署机拉取:
+
+```bash
+# ① 先清理本部署不需要的镜像/二进制(只留部署必需, 可 --dry-run 预览)
+sudo ./deployments/scripts/tools/offline/trim-offline-files.sh --dry-run   # 预览将删除项
+sudo ./deployments/scripts/tools/offline/trim-offline-files.sh             # 实际清理
+
+# ② 本地 offline-files → MinIO 增量同步(mc mirror --overwrite, 只传新增/变更)
+./deployments/scripts/tools/offline/sync-to-minio.sh                       # 增量同步
+./deployments/scripts/tools/offline/sync-to-minio.sh --prune               # 同步 + 删除远端多余文件(与本地严格一致, 慎用)
+./deployments/scripts/tools/offline/sync-to-minio.sh --dry-run             # 仅预览
+
+# ③ 部署机拉取: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh
+```
+
+> 定位: `fetch-offline-from-minio.sh`(拉取)+ `sync-to-minio.sh`(推送)+ `trim-offline-files.sh`(清理)构成离线文件闭环 —— MinIO 侧只存部署必需文件, 部署机默认只拉部署必需子目录(虚拟镜像按需)。
 
 **方式一: 交互式(推荐)**
 

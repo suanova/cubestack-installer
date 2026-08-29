@@ -14,33 +14,50 @@
 
 ---
 
-## 1. 快速开始
+## 1. 快速开始(CLI 容器一键部署)
+
+> ⭐ **推荐方式**:宿主机只需 **Docker**,离线文件/配置/密钥都在容器外管理(挂载),换环境/多集群复用同一套 offline-files。
 
 ```bash
-# 0) 首次:从模板生成真实配置并按实际环境修改(真实配置含密码,已被 .gitignore)
-cp config/cluster.conf.example config/cluster.conf
-vim config/cluster.conf          # 修改 宿主机/网络/SSH/节点清单
+# ① 拉取 CLI 镜像(内置 kubespray 源码 + 全部部署脚本 + 工具链: ansible/helm/skopeo/mc/kubectl/sshpass/virsh)
+docker pull harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
 
-# 0b) 离线文件缺失时:从 MinIO 拉取(需先配置 mc alias 指向 MinIO)
-mc alias set minio http://192.168.16.6:9000 admin CHANGE_ME    # CHANGE_ME 替换为真实 MinIO SecretKey
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh    # 默认全量下载 offline-files 下所有文件
+# ② 宿主机准备大磁盘离线目录(离线文件较大, 建议 ≥50GiB 空闲; 多集群可共用同一份)
+mkdir -p /data/offline-files
 
-# 1) 查看集群规划(只读)
-sudo ./deployments/scripts/deploy-cluster.sh --list
+# ③ 启动容器(后台 + network host): 把离线目录/配置/SSH 密钥挂进容器
+sudo docker run -itd --name cubestack-install --network=host \
+  -v /data/offline-files:/opt/cubestack-installer/deployments/offline-files \
+  harbor.isuanova.com/cubestack/cubestack-installer-cli:latest bash
 
-# 2) 一键部署(宿主网络 → SSH密钥 → master虚拟机+免密 → worker连通性 → inventory)
-sudo ./deployments/scripts/deploy-cluster.sh
+# ④ 进入容器(容器内已是 root, 无需 sudo)
+sudo docker exec -it cubestack-install bash
 
-# 2b) 全裸金属集群: 跳过虚拟机网络模块, 直接部署
-#     (所有节点直接填 5 字段 NODES, 不定义虚拟机, 同网段互通, 无需 VM 网桥/SNAT)
-sudo ./deployments/scripts/deploy-cluster.sh --skip net
+# ⑤ 从 MinIO 拉取离线文件(默认下载部署必需子目录, 排除 virtual-machine; 已挂载即落盘宿主机)
+mc alias set minio http://192.168.16.6:9000 admin CHANGE_ME    # 换真实 MinIO 地址/凭证
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh   # 默认: kubespray/metax-gpu/lws/os/envoy(排除 VM 镜像)
 
-# 3) 断点续跑:完成后继续(自动跳过已完成阶段)
-sudo ./deployments/scripts/deploy-cluster.sh --with-k8s
+# ⑥ 首次: 从模板生成真实配置(cluster.conf 是唯一数据源, 所有 IP 不硬编码)
+cd /opt/cubestack-installer
+cp deployments/config/cluster.conf.example deployments/config/cluster.conf
 
-# 4) 清状态重新执行
-sudo ./deployments/scripts/deploy-cluster.sh --fresh --with-k8s
+# ⑦ 修改配置(必须改): SSH_DEFAULT_PASSWORD 密码 / NODES 节点 IP 等信息 / METALLB_POOL 地址池
+vim deployments/config/cluster.conf
+
+# ⑧ 一键部署(默认 = --with-cubestack 全量: 装全部组件 + kubespray 离线安装)
+./deployments/scripts/deploy-cluster.sh
 ```
+
+**为什么离线目录要挂载(不下载进容器)**:
+- 离线文件不入镜像(20G+ 级), **挂载 `offline-files` 后下载即落盘宿主机大磁盘**, 多集群/换环境复用, 免重复下载;
+- 容器内 `deploy-cluster.sh` / `fetch-offline-from-minio.sh` 读写的就是挂载目录(`/opt/cubestack-installer/deployments/offline-files`);
+- `config/` 挂载: 宿主机编辑 `cluster.conf` 容器内即时生效, 真实配置(含密码)不进容器层。
+
+**宿主机直跑替代**(不想用容器, 机器已装 ansible/skopeo/mc 等):直接 clone 本仓库, 在仓库根执行同样命令(第 ⑤ 步起), 离线文件默认落 `deployments/offline-files`, 脚本自动磁盘检查。
+
+> **全裸金属集群(无虚拟机)**:跳过 VM 网络模块直接部署 → `sudo ./deployments/scripts/deploy-cluster.sh --skip net`(NODES 直接填裸机, 见 §8.7)。
+> **需要创建虚拟机**:依赖宿主机 libvirt, 容器加 `--privileged` 或挂载 `/var/run/libvirt`(见 §5.14); 虚拟机镜像 `--sub virtual-machine` 按需拉取。
+> **容器重建后复用**:`offline-files`/`config`/`.ssh` 都在宿主机, `docker rm -f cubestack-install` 后重跑 ③④ 即可, 离线文件免重下。
 
 ---
 
@@ -97,8 +114,7 @@ deployments/scripts/
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
 │   ├── images/                #   离线镜像工具: metax-save/load-images.sh / lws-save-images.sh
 │   │                         #        envoy-save-images.sh(EG+AI 镜像) / envoy-fetch-charts.sh(EG+AI 离线 chart)
-│   ├── offline/               #   MinIO 离线文件拉取: fetch-offline-from-minio.sh(默认下载到 offline-files+磁盘空间检查)
-│   │                         #        fetch-offline-files.sh(MinIO 增量同步到 OFFLINE_FILES_DIR)
+│   ├── offline/               #   MinIO 离线文件: fetch-offline-from-minio.sh(拉取) / sync-to-minio.sh(推送) / trim-offline-files.sh(清理) / fetch-offline-files.sh(旧)
 │   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 └── README.md                  # 本文件
 ```
@@ -151,13 +167,17 @@ deployments/scripts/
 
 | 区块 | 关键项 | 说明 |
 |---|---|---|
-| 宿主机 | `HOST_PHYS_IP` `BASE_IMG` `VM_DISK_DIR` | 物理IP(SNAT源)、基础镜像、VM磁盘目录 |
-| 网络规划 | `NET_MODE`(bridge/nat)、`BRIDGE` `BRIDGE_IP` `VM_SUBNET` `PHYS_WORKER_NET` / `NAT_NET_NAME` `NAT_SUBNET` `NAT_GATEWAY` | 双方案网段/网关/SNAT目标 |
-| SSH | `SSH_KEY_NAME` `SSH_DEFAULT_PASSWORD` `VM_SSH_USERS` `WORKER_SSH_PASSWORD` | 密钥、默认密码、免密用户 |
+| **核心必改项** | `SSH_DEFAULT_PASSWORD` `NODES` `METALLB_POOL` | 节点默认密码、节点清单、MetalLB 地址池(文件顶部醒目位置) |
+| 宿主机 | `HOST_PHYS_IP` | 宿主机物理 IP(SNAT 源) |
+| SSH | `SSH_KEY_NAME` `WORKER_SSH_PASSWORD` | 密钥名、worker 独立密码(默认密码已在核心必改项) |
 | 节点规划 | `NODES=( ... )` | 每行一节点(5字段, 不区分虚拟机/裸金属); 虚拟机规格见 `tools/vm/vm-nodes.conf` |
 | 离线文件 | `OFFLINE_FILES_DIR` `LOCAL_REPO_DIR` `MINIO_*` | 离线 binary/镜像目录与 MinIO 下载配置(§2.1b) |
 | kubespray | `KUBESPRAY_INV_DIR` `KUBESPRAY_DIR` `UPDATE_ETC_HOSTS` | inventory 输出位置、playbook 位置、是否写 /etc/hosts |
 | NTP 时间同步 | `NTP_ENABLED` `NTP_SERVER` `NTP_UPSTREAM` `NTP_ALLOW` `NTP_MAX_OFFSET_MS` | k8s 部署前的节点时钟一致化(见 §5.8.2) |
+
+> **虚拟机配置已独立**: 虚拟机创建/网络变量(`BASE_IMG` `VM_DISK_DIR` `VM_SSH_USERS` `VM_SUBNET`
+> `BRIDGE` `NET_MODE` `NAT_*` 等)已从 cluster.conf **移至 `tools/vm/vm-nodes.conf`**(由 lib-common
+> `load_config` 自动加载), cluster.conf 不再包含任何 VM 相关变量。
 
 ### 节点行格式(5字段, 不区分虚拟机/裸金属)
 
@@ -260,6 +280,30 @@ master 写入 `ansible_ssh_private_key_file`(密钥免密);worker 若密钥存�
 (兜底, 对既存集群重跑也生效) —— 因为 kubespray 扩容会重新给 control-plane 打污点, 而
 metallb/local-path/registry/gpu-operator 等普通 pod 无污点容忍, 单节点若不可调度会全部
 Pending(registry 起不来 → 镜像推不进 → `ImagePullBackOff`)。
+
+### 5.5 create-libvirt-vm.sh —— 单台虚拟机
+
+```bash
+./scripts/tools/vm/create-libvirt-vm.sh <主机名> <内存G> <CPU> <磁盘G> <MAC> <静态IP>
+./scripts/tools/vm/create-libvirt-vm.sh cubestack-k8s-master01 16 8 50 52:54:00:3b:e9:d2 10.244.1.11
+```
+
+网络模式取配置 `NET_MODE`(bridge/nat);`AUTO_SETUP_NET=1` 时网络不存在会自动创建。IP 会校验必须落在虚拟机网段内。通常由 `deploy-cluster.sh` 调用,也可单独使用。
+
+### 5.6 网络三件套(方案A桥接)
+
+```bash
+sudo ./scripts/tools/net/setup-vm-network.sh      # 建 privbr0 + 回程路由 + 精准SNAT + 开机自启
+sudo ./scripts/tools/net/verify-vm-network.sh     # 9项检查 + 连通性指引
+sudo ./scripts/tools/net/teardown-vm-network.sh   # 回滚(SNAT/路由/自启); REMOVE_BRIDGE=1 删网桥
+```
+
+### 5.7 网络(NAT方案)
+
+```bash
+sudo ./scripts/tools/net/setup-libvirt-nat.sh [网络名]         # 创建(幂等),默认 cubestack-nat/10.245.0.0/16
+sudo ./scripts/tools/net/setup-libvirt-nat.sh --delete [网络名] # 删除回滚
+```
 
 ### 5.8 sync-kubespray-config.sh —— 动态同步 kubespray IP 配置
 
@@ -397,17 +441,18 @@ kubeadm / etcd 对节点间时钟偏差敏感,若节点时间不一致会导致�
 
 原理与机制:
 
-- **权威时间源 = 宿主机(默认)**:`setup-ntp.sh` 在宿主机配置 chrony 服务端(`local stratum 10`,无公网上游时以本机时钟兜底,离线友好);`NTP_SERVER` 显式指定时为内部/外部 NTP 服务器,宿主机不再充当权威。
+- **权威时间源 = 第一个 master(默认)**:`setup-ntp.sh` 在首 master 配置 chrony 服务端(`local stratum 10`,无公网上游时以本机时钟兜底,离线友好);**不再用宿主机(installer 节点)作权威** —— 部署机可能在 NAT 后/跨网段,节点无法可靠访问。`NTP_SERVER` 显式指定时为首 master 之外的权威服务器(此时首 master 作为普通客户端)。
+- **单节点集群(仅 1 master + 0 worker)**:无跨节点时间同步需求,**自动跳过 NTP**。
 - **节点客户端**:
   - VM 节点(黄金镜像已预装 chrony)→ 改写 `/etc/chrony/chrony.conf` 为 `server <权威> iburst`,禁用冲突的 systemd-timesyncd,强制步进;
   - 裸金属 worker(离线仓无 chrony 包)→ 用系统自带 `systemd-timesyncd` 指向权威。
-- **一次性硬对齐**:应用时对偏差 >1s 的节点用 `date -s @宿主机epoch` 直接校时(经 SSH 通道传递,即使 NTP 传输失败也保证部署时刻一致)。
-- **校验门禁**:全节点与权威(宿主机)偏差 ≤ `NTP_MAX_OFFSET_MS`(`2000`ms 默认);超限本步 `exit 1`,部署在 kubespray **之前中止**,避免带病上集群。
+- **一次性硬对齐**:应用时对偏差 >1s 的节点用 `date -s @权威epoch` 直接校时(经 SSH 通道传递,即使 NTP 传输失败也保证部署时刻一致)。
+- **校验门禁**:全节点与权威(首 master/NTP_SERVER)偏差 ≤ `NTP_MAX_OFFSET_MS`(`2000`ms 默认);超限本步 `exit 1`,部署在 kubespray **之前中止**,避免带病上集群。
 
 用法:
 
 ```bash
-sudo ./scripts/tools/node/setup-ntp.sh            # apply: 宿主机chrony + 节点客户端配置 + 硬对齐 + 校验(幂等)
+sudo ./scripts/tools/node/setup-ntp.sh            # apply: 首master chrony 服务端 + 节点客户端 + 硬对齐 + 校验(幂等)
 sudo ./scripts/tools/node/setup-ntp.sh --check    # 仅校验各节点时钟偏差(零写入)
 sudo ./scripts/tools/node/setup-ntp.sh --delete   # 关闭节点时间同步服务(幂等)
 sudo ./scripts/deploy-cluster.sh --only worker02   # 仅处理指定节点(框架 --only 透传)
@@ -417,16 +462,16 @@ sudo ./scripts/deploy-cluster.sh --only worker02   # 仅处理指定节点(框�
 
 ```bash
 NTP_ENABLED="${NTP_ENABLED:-1}"                       # 0=跳过时间同步(不推荐)
-NTP_SERVER="${NTP_SERVER:-}"                          # 权威时间源 IP; 留空=宿主机(HOST_PHYS_IP)
-NTP_UPSTREAM="${NTP_UPSTREAM:-}"                      # 权威的公网上游(如 "pool ntp.aliyun.com iburst"); 留空=离线
-NTP_ALLOW="${NTP_ALLOW:-${VM_SUBNET} ${PHYS_WORKER_NET} ${NAT_SUBNET}}"  # 宿主机 chrony allow 子网
+NTP_SERVER="${NTP_SERVER:-}"                          # 权威时间源 IP; 留空=第一个 master 为权威
+NTP_UPSTREAM="${NTP_UPSTREAM:-}"                      # 权威(首 master)的公网上游(如 "pool ntp.aliyun.com iburst"); 留空=离线
+NTP_ALLOW="${NTP_ALLOW:-}"                            # 权威 chrony allow 子网; 默认空=仅本机(多子网节点填 "10.66.1.0/24")
 NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"        # 节点-权威偏差阈值(ms); 超限→中止 k8s 部署
 ```
 
 >> 离线排障要点:
-> - 宿主机没有 chrony 且无法 apt 安装(离线)→ 脚本降级以本机时钟为权威,仍做一次性 `date` 硬对齐 + 校验,仅 warn。
+> - 首 master 没有 chrony 且无法 apt 安装(离线)→ 脚本降级以该节点本机时钟为权威,仍做一次性 `date` 硬对齐 + 校验,仅 warn。
 > - 裸金属 worker 无 chrony → 自动用 `systemd-timesyncd`;若无法到达权威 UDP/123,会靠一次性硬对齐保证部署时刻一致,并显示偏差告警。
-> - 若宿主机启用 ufw/iptables,需放行 `udp/123`(chrony server 端口)。
+> - 若节点启用 ufw/iptables,需放行 `udp/123`(chrony server 端口)。
 > - 新 VM 从黄金镜像快照出来时,时钟停在镜像制作时间 → apply 步骤的硬对齐 + `makestep` 会自动修正,校验不通过会中止部署提示修复。
 > - 时间同步只校时钟,不修改时区(VM 已默认 Asia/Shanghai)。
 
@@ -452,98 +497,73 @@ bare-metal worker(Ubuntu)无法联网时,用 offline-files 中的离线 `.deb` �
 
 包来源: `deployments/offline-files/kubespray/cubestack-cluster/`(由 `OFFLINE_FILES_DIR` 全局变量指定)下的 `.deb` 文件(仓库根目录,与 kubeadm/etcd 等二进制同层)或 `packages/` 子目录,脚本自动收集两者并去重。包含 iputils-ping / rsync / iptables / curl / ca-certificates 及依赖。
 
-### 5.11 fetch-offline-from-minio.sh —— 从 MinIO 拉取离线文件(默认下载到 offline-files)
+### 5.11 fetch-offline-from-minio.sh —— 从 MinIO 拉取离线文件
 
-部署机/新机器缺离线文件时,从 MinIO 下载(**默认全量**拉取 `offline-files` 下所有子目录,含 kubespray/metax-gpu/lws/os/虚拟机镜像;需要时可用 `--sub <目录>` 只拉某子目录)。
+部署机/新机器缺离线文件时,从 MinIO 下载(**默认拉取部署必需子目录**: kubespray/metax-gpu/lws/os/envoy 等,**排除 virtual-machine** 虚拟机镜像;需要时可 `--sub virtual-machine` 按需拉 VM 镜像,或 `--all` 真正全量)。
 
 **默认下载目录: `/opt/cubestack-installer/deployments/offline-files`(即 `OFFLINE_FILES_DIR` 根)**:
-- 在 CLI 容器内执行:下载直接落到容器挂载的 offline-files,**即装即用,无需再挂载**;
+- 在 CLI 容器内执行:下载直接落到容器挂载的 offline-files(宿主机大磁盘),**即装即用**;
 - 宿主机直跑本仓库:默认同一路径;想用大磁盘时 `--auto` 自动挑空闲 ≥ 门槛的最大挂载点。
 
 脚本默认开启**磁盘空间检查**:醒目横幅提示至少需要 `MIN_FREE_GB`(默认 **50 GiB**)空闲空间,并比对本次下载所需(远程大小 + 缓冲)与目标可用空间,不足则中止(`--force` 强制继续)。
 
 ```bash
-./scripts/tools/offline/fetch-offline-from-minio.sh            # 默认: 全量下载 offline-files 下所有文件
+./scripts/tools/offline/fetch-offline-from-minio.sh            # 默认: 下载部署必需子目录(排除 virtual-machine)
+./scripts/tools/offline/fetch-offline-from-minio.sh --sub virtual-machine  # 按需拉 VM 镜像(仅创建虚拟机时)
+./scripts/tools/offline/fetch-offline-from-minio.sh --all      # 真正全量(含 virtual-machine)
 ./scripts/tools/offline/fetch-offline-from-minio.sh --sub kubespray     # 只拉某子目录(如 kubespray)
-./scripts/tools/offline/fetch-offline-from-minio.sh --sub metax-gpu     # 只拉某子目录
 ./scripts/tools/offline/fetch-offline-from-minio.sh --dest /data/offline-files   # 指定下载目录(即 offline-files 根)
 sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --auto       # 宿主机: 自动挑空闲 ≥ 门槛的最大磁盘
-./scripts/tools/offline/fetch-offline-from-minio.sh --min-free 100    # 磁盘空闲门槛 100GiB
-./scripts/tools/offline/fetch-offline-from-minio.sh --force           # 跳过磁盘空间不足检查(谨慎)
 ./scripts/tools/offline/fetch-offline-from-minio.sh --list      # 只列出 MinIO 可用目录
 ```
 
 - **mc 检测**:未安装时给出安装指引,可选择自动下载(MinIO 官方二进制,与 Dockerfile-cli 同源);alias 优先用 cluster.conf 的 `MINIO_*` 自动配置,否则探测本机已有 alias,再否则交互录入。
 - **桶/目录自适应**:默认桶 `cubestack-installer`、目录 `offline-files`(与 MinIO 实际布局一致),自动回退探测旧布局 `cubestack-offline/kubespray`。
+- **子目录排除(默认开启)**:`DEFAULT_EXCLUDE_SUBS`(默认 `virtual-machine`, 体积大且仅创建 VM 时用)在默认/`--all` 下载时自动跳过;`--sub <目录>` 不受排除限制。
 - **磁盘空间检查(默认开启)**:醒目提示至少 `MIN_FREE_GB`(默认 50 GiB)空闲;比对本次下载所需(远程大小 + 缓冲)与目标可用空间,不足时红色横幅警告并中止(`--force` 强制继续)。
-- **下载后提示**:
-  - 容器内执行:直接 `cd /opt/cubestack-installer && ./deployments/scripts/deploy-cluster.sh`;
-  - 宿主机执行(把 `<下载目录>` 挂进容器 offline-files):
-    ```bash
-    sudo docker run --rm -it --network host \
-      -v <下载目录>:/opt/cubestack-installer/deployments/offline-files \
-      -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
-      -v $HOME/.ssh:/root/.ssh \
-      harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
-    ```
-    宿主机直跑(非容器)则 `export OFFLINE_FILES_DIR=<下载目录>` 后执行 `deploy-cluster.sh`。
+- **下载后提示**:容器内直接 `cd /opt/cubestack-installer && ./deployments/scripts/deploy-cluster.sh`;宿主机下载到 `<下载目录>` 后,把该目录挂进容器 offline-files(见 §1 快速开始),或 `export OFFLINE_FILES_DIR=<下载目录>` 直跑。
 
-### 5.12 容器化部署(Docker 交互式)
+### 5.12 sync-to-minio.sh —— 本地 offline-files → MinIO 同步
 
-不想在宿主机装工具链时,可全程在 CLI 容器内离线部署。镜像内置 kubespray 源码 + 全部部署脚本 + 工具链(ansible/helm/skopeo/mc/kubectl/sshpass/virsh),**不含离线镜像 tar 与二进制**(体积大, 由挂载目录共享)。
-
-**① 先获取离线文件(宿主机还没有时)**
+源机器(制作/维护离线文件的机器)把本地 `offline-files`(已 `trim-offline-files.sh` 清理后的精简文件)增量同步到 MinIO,供各部署机 `fetch-offline-from-minio.sh` 拉取 —— 保证 MinIO 侧也只存部署必需文件。等价于 `mc mirror --overwrite ./offline-files/ minio/cubestack-installer/offline-files/`:
 
 ```bash
-sudo ./scripts/tools/offline/fetch-offline-from-minio.sh            # 默认全量下载(约 34GiB 级, 含 GPU/LWS/VM 镜像)
-sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --sub kubespray   # 只拉某子目录
-./scripts/tools/offline/fetch-offline-from-minio.sh --list          # 查看 MinIO 可用目录
+./scripts/tools/offline/sync-to-minio.sh               # 增量同步(默认 mc mirror --overwrite, 只上传新增/变更)
+./scripts/tools/offline/sync-to-minio.sh --prune       # 同步 + 删除远端多余文件(与本地严格一致; 远端其他集群共享时勿用)
+./scripts/tools/offline/sync-to-minio.sh --dry-run     # 仅预览(不实际同步)
 ```
 
-脚本默认开启磁盘空间检查(建议 ≥ 50GiB 空闲),宿主机下载到 `<下载目录>` 后打印容器挂载命令;也可以在 CLI 容器内直接执行下载(落到容器挂载的 offline-files,即装即用)。用法见 §5.11。
+- **MinIO 配置**:复用 cluster.conf 的 `MINIO_*`(alias/endpoint/ak/sk/bucket/remote-dir),否则探测本机已有 mc alias,再否则交互录入。
+- **桶/目录自适应**:默认桶 `cubestack-installer`;远端目录 = **与本地源同名**(默认 `offline-files`, 可 `MINIO_REMOTE_DIR` 覆盖),保证 MinIO 侧布局与本地一致;自动回退探测旧布局 `cubestack-offline/kubespray`;桶不存在自动创建。
+- **--prune(谨慎)**:等价 `mc mirror --remove`,把远端本地没有的文件一并删除 —— 多集群共用同一 MinIO 桶时慎用。
+- **上游配套**:先 `trim-offline-files.sh` 清理冗余再同步,MinIO 侧只存部署必需。
 
-**② 交互式进入容器(容器内已是 root, 无需 sudo)**
+### 5.13 trim-offline-files.sh —— 清理 offline-files 冗余(只留部署必需)
+
+kubespray/metax-gpu 离线目录由下载命令生成全量清单,含大量本部署用不到的镜像与二进制:
+
+- **kubespray/images**:未匹配 `PRELOAD_IMAGE_PATTERNS`(calico/etcd/kube-*/coredns/metallb 等白名单)的镜像 tar(cilium/flannel/weave/arm64 等);
+- **kubespray 根下二进制**:非 containerd 运行时(cilium/cri-o/gvisor/kata/youki/crun/nerdctl/cri-dockerd);
+- **metax-gpu**:非当前 `METAX_VERSION`/非 amd64/非本部署组件(operator-bundle/catalog)的镜像 tar。
 
 ```bash
-sudo docker run --rm -it --network host \
-  -v <下载目录>/offline-files:/opt/cubestack-installer/deployments/offline-files \
-  -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
-  -v $HOME/.ssh:/root/.ssh \
-  harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+sudo ./scripts/tools/offline/trim-offline-files.sh --dry-run    # 仅预览将删除项(推荐先跑)
+sudo ./scripts/tools/offline/trim-offline-files.sh              # 实际清理
 ```
 
-**③ 容器内部署**
+> ⚠ 删除前先备份 offline-files;未来启用新 addon/切换架构/版本时需重新下载或从 MinIO 恢复。
 
-```bash
-cd /opt/cubestack-installer
-./deployments/scripts/deploy-cluster.sh          # 默认 = --with-cubestack(全量)
-```
+清理后配合 `sync-to-minio.sh` 把精简结果同步回 MinIO,MinIO 侧只存部署必需文件。
 
-说明:`--network host` 必须(容器内 ssh 直连节点/集群);创建虚拟机(依赖宿主机 libvirt)加 `--privileged` 或挂载 `/var/run/libvirt`,纯裸金属离线部署无需额外特权;后台运行 + `docker exec` 方式见根 `README.md` §十四。
+### 5.14 容器化部署(补充说明)
 
-### 5.5 create-libvirt-vm.sh —— 单台虚拟机
+宿主机不想装工具链时的完整流程见 **§1 快速开始**(pull → run → exec → fetch → config → deploy)。本节补充:
 
-```bash
-./scripts/tools/vm/create-libvirt-vm.sh <主机名> <内存G> <CPU> <磁盘G> <MAC> <静态IP>
-./scripts/tools/vm/create-libvirt-vm.sh cubestack-k8s-master01 16 8 50 52:54:00:3b:e9:d2 10.244.1.11
-```
-
-网络模式取配置 `NET_MODE`(bridge/nat);`AUTO_SETUP_NET=1` 时网络不存在会自动创建。IP 会校验必须落在虚拟机网段内。通常由 `deploy-cluster.sh` 调用,也可单独使用。
-
-### 5.6 网络三件套(方案A桥接)
-
-```bash
-sudo ./scripts/tools/net/setup-vm-network.sh      # 建 privbr0 + 回程路由 + 精准SNAT + 开机自启
-sudo ./scripts/tools/net/verify-vm-network.sh     # 9项检查 + 连通性指引
-sudo ./scripts/tools/net/teardown-vm-network.sh   # 回滚(SNAT/路由/自启); REMOVE_BRIDGE=1 删网桥
-```
-
-### 5.7 网络(NAT方案)
-
-```bash
-sudo ./scripts/tools/net/setup-libvirt-nat.sh [网络名]         # 创建(幂等),默认 cubestack-nat/10.245.0.0/16
-sudo ./scripts/tools/net/setup-libvirt-nat.sh --delete [网络名] # 删除回滚
-```
+- **`--network host` 必须**:容器内 ssh 直连节点/集群/registry(默认桥接网段无法访问)。
+- **创建虚拟机(依赖宿主机 libvirt)**:加 `--privileged` 或挂载 `/var/run/libvirt`;纯裸金属离线部署无需额外特权。
+- **后台运行 + `docker exec`**(非交互式启动):`sudo docker run -itd --name cubestack-install --network host ...` 后 `sudo docker exec -it cubestack-install bash`(见 §1 步骤③④)。
+- **离线文件不下载进容器**:离线镜像/二进制不入镜像,由挂载目录共享 —— 容器内 `fetch-offline-from-minio.sh` 下载即落宿主机大磁盘,多集群/换环境复用。
+- 根 `README.md` §十四 还有镜像构建(`build-cli-context.sh`)与挂载参数说明。
 
 ---
 
@@ -568,7 +588,7 @@ CLUSTER_CONF=/path/to/cluster.conf sudo ./scripts/deploy-cluster.sh --list
 - **kubespray 部署** — `--with-k8s` 需宿主机已装 `ansible-playbook` 且 `KUBESPRAY_DIR` 指向完整 kubespray 仓库(含 `cluster.yml` 与 `group_vars`)。
 - **离线部署 kube-proxy 报 ImagePullBackOff** — 需先预加载离线镜像到节点 containerd(见第 8 节,`cubestack-offline.sh scale` 已内置此逻辑)。
 - **部署中止在 ntp 模块(时钟偏差超限)** — `NTP_MAX_OFFSET_MS` 超限说明某节点与权威时钟偏差过大(如新 VM 从快照出来、NTP 端口被防火墙挡),应先修复时间源/网络后重跑 `setup-ntp.sh` 或整个部署;该门禁是为避免 etcd/kubeadm 时间敏感故障。
-- **节点时间不收敛 / chrony 无输出** — 检查宿主机(权威)是否在 **udp/123** 监听且 `NTP_ALLOW` 覆盖了节点子网;裸金属 worker 走 `systemd-timesyncd` 时确认能到达权威服务器(如跨网段路由)。
+- **节点时间不收敛 / chrony 无输出** — 检查权威(首 master/`NTP_SERVER`)是否在 **udp/123** 监听且 `NTP_ALLOW` 覆盖了节点子网;裸金属 worker 走 `systemd-timesyncd` 时确认能到达权威服务器(如跨网段路由)。
 - **只查不改** — `sudo ./scripts/tools/node/setup-ntp.sh --check` 只校验零写入;`--delete` 可整体关闭节点时间同步(不建议)。
 
 ---
@@ -579,18 +599,13 @@ CLUSTER_CONF=/path/to/cluster.conf sudo ./scripts/deploy-cluster.sh --list
 
 ### 8.1 前置条件
 
-| 依赖 | 说明 |
-|---|---|
-| 宿主机 | Ubuntu 22.04,已装 `libvirt / virt-install / qemu / virt-customize` |
-| 基础镜像 | `deployments/offline-files/virtual-machine/cloud-images/ubuntu2204-k8s-base.qcow2`(由 `create-vm-template.sh` 制作,预埋 ubuntu/root 默认密码、SSH、时区及 kubespray 所需包) |
-| 离线资源 | `deployments/offline-files/kubespray/cubestack-cluster/`(路径由 `OFFLINE_FILES_DIR` 指定; 镜像 `images/` + 二进制 + `packages/` 系统包) |
-| kubespray | `deployments/kubespray/kubespray/`(含 `cluster.yml`,Python 依赖可离线/在线安装) |
+**前置条件(宿主机 / 部署机)**:Ubuntu 22.04 + Docker(CLI 容器方式, 见 §1)或已装 `ansible-playbook / skopeo / mc / sshpass / virsh`(宿主机直跑);以下以宿主机直跑为例。
 
 ### 8.2 配置(cluster.conf 为唯一数据源)
 
 ```bash
 cp config/cluster.conf.example config/cluster.conf
-# 修改: HOST_PHYS_IP / BASE_IMG / VM_DISK_DIR / 网段 / NODES(每行一个节点)
+# 修改(必改): SSH_DEFAULT_PASSWORD / NODES(每行一个节点)/ METALLB_POOL
 vim config/cluster.conf
 ```
 
@@ -625,7 +640,7 @@ sudo ./scripts/deploy-cluster.sh --with-k8s
 4. `setup-passwordless.sh` 注入公钥
 5. 对 worker 执行 `install-worker-packages.sh` 安装离线包
 6. `gen-inventory.sh` + `sync-kubespray-config.sh` 生成 inventory 与配置
-7. `setup-ntp.sh`(modules/02_k8s/05_k8s_ntp)同步各节点时间到宿主机权威, 校验偏差 ≤ `NTP_MAX_OFFSET_MS`(在 kubespray 之前)
+7. `setup-ntp.sh`(modules/02_k8s/05_k8s_ntp)同步各节点时间到权威(首 master), 校验偏差 ≤ `NTP_MAX_OFFSET_MS`(在 kubespray 之前)
 8. `cubestack-offline.sh install` 执行 kubespray 离线部署
 
 ### 8.4 分步部署(可精细控制)
@@ -695,8 +710,7 @@ master 和 worker 全部为裸金属服务器(同网段互通),无需创建 VM �
 
 **配置要点**:
 - `cluster.conf` 的 NODES 直接填节点(5字段); **不**在 `tools/vm/vm-nodes.conf` 定义任何节点(无 VM)
-- 网络模式 `NET_MODE=bridge`(同网段互通,无需 SNAT)
-- 删去 `BASE_IMG` / `VM_DISK_DIR` 等 VM 相关配置(或留空)
+- 网络模式 `NET_MODE=bridge`(同网段互通,无需 SNAT); VM 相关变量已随 vm-nodes.conf 独立, cluster.conf 无需再删改
 - SSH 密码需配置正确(`SSH_DEFAULT_PASSWORD`; 节点密码不同时用 NODES 第5字段独立密码)
 
 **部署命令**:

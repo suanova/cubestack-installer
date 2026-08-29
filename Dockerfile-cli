@@ -60,6 +60,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv \
         libvirt-clients vim gnupg \
         iproute2 kmod systemd procps bridge-utils chrony \
+        moreutils \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------- kubectl(构建上下文 bin/ 临时拷入, 规避被墙的 dl.k8s.io) ----------

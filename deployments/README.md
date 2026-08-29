@@ -206,8 +206,9 @@ deployments/offline-files/
 │       ├── images/             #   容器镜像(.tar, 由 cubestack-offline.sh download 下载)
 │       ├── <二进制文件>          #   kubeadm/kubelet/etcd/calicoctl/cni-plugins 等
 │       └── packages/           #   系统 .deb 包(iputils-ping/rsync/iptables/curl/ca-certificates)
-└── metax-gpu/                  # 沐曦 GPU Operator 离线文件(镜像 tar/资源包/驱动)
-    └── ...                     # (未来其他领域可继续在 offline-files/ 下新增子目录)
+├── metax-gpu/                  # 沐曦 GPU Operator 离线文件(镜像 tar/资源包/驱动)
+└── virtual-machine/            # 虚拟机黄金镜像(体积大, 仅创建虚拟机时用; 默认拉取脚本排除)
+    └── cloud-images/ubuntu2204-k8s-base.qcow2
 ```
 
 **路径变量**:
@@ -223,6 +224,7 @@ deployments/offline-files/
 
 - **生成方式**:联网机执行 `./deployments/kubespray/cubestack-offline.sh download`(读取 inventory group_vars 决定下载哪些镜像/文件),产物即离线仓库。
 - **预加载机制**:`inventory/<cluster>/preload-images.lst`(由 `PRELOAD_IMAGE_PATTERNS` 过滤生成)指定部署时同步到节点 containerd 的最小镜像集合;离线部署时节点镜像拉取不依赖公网。
+- **MinIO 分发**:源机器 `tools/offline/sync-to-minio.sh` 把本地 offline-files 增量同步到 MinIO(`mc mirror --overwrite`);部署机 `tools/offline/fetch-offline-from-minio.sh` 拉取(默认排除 virtual-machine,按需 `--sub virtual-machine`/`--all`);冗余清理见 `tools/offline/trim-offline-files.sh`。
 
 ### 5.2 虚拟机基础镜像(offline-files/virtual-machine/)
 
