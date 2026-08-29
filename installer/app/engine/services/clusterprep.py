@@ -6,6 +6,7 @@ from ...models import ClusterNode, DeployTask, Host, K8sCluster
 from ..executor import log_line
 from .vmprovision import _ssh
 
+# MinIO 凭据: 优先环境变量, 默认 CHANGE_ME(真实部署必须覆盖, 勿用明文默认)
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "minio-host:9000")
 MINIO_ACCESS = os.environ.get("MINIO_ACCESS_KEY", "admin")
 MINIO_SECRET = os.environ.get("MINIO_SECRET_KEY", "CHANGE_ME")
@@ -14,8 +15,8 @@ UV_TARBALL = "installer/bin/uv.tar.gz"
 KUBESPRAY_PREFIX = "installer/ansible/kubespray"
 # 运行节点上安装 ansible 用的 PyPI 源(国内可配阿里云/清华镜像)
 PIP_INDEX = os.environ.get("CLUSTER_PIP_INDEX", "https://mirrors.aliyun.com/pypi/simple/")
-# 集群节点初始密码(ssh-copy-id 用)
-NODE_PASSWORD = os.environ.get("CLUSTER_NODE_PASSWORD", "ubuntu")
+# 集群节点初始密码(ssh-copy-id 用; 真实部署必须用 CLUSTER_NODE_PASSWORD 覆盖)
+NODE_PASSWORD = os.environ.get("CLUSTER_NODE_PASSWORD", "CHANGE_ME")
 ANSIBLE_VENV = "/opt/ansible-venv"
 KUBESPRAY_DIR = "/opt/kubespray"
 

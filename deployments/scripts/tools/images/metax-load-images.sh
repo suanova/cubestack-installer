@@ -41,15 +41,8 @@ _push_skopeo() {
 
 TAR_DIR="${1:-}"
 # 宿主机把 registry.local 解析到集群 registry VIP(供按域名推送, 不留过期 IP)
-_ensure_hosts() {   # <ip> <domain>
-    local ip="$1" dom="$2" re
-    [ -n "${ip}" ] && [ -n "${dom}" ] || return 0
-    re="$(echo "${dom}" | sed 's/\./\\./g')"
-    sed -i -E "/[[:space:]]${re}([[:space:]]|$)/d" /etc/hosts 2>/dev/null || true
-    grep -qE "^${ip}[[:space:]]+${dom}([[:space:]]|$)" /etc/hosts 2>/dev/null \
-        || echo "${ip} ${dom}" >> /etc/hosts 2>/dev/null
-}
-_ensure_hosts "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
+# 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)
+ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
 curl -s -m 8 "http://${REGISTRY_BASE}/v2/" >/dev/null 2>&1 \
     || { err "集群内置 registry ${REGISTRY_BASE}/v2/ 不可达(检查 hosts 与 MetalLB VIP)"; exit 1; }
 

@@ -5,33 +5,84 @@
 # ============================================================
 #
 # ╔════════════════════════════════════════════════════════════════════════╗
-# ║ ⚠⚠⚠  使用前必须修改(红色 = 必须改, 否则部署会失败或异常)  ⚠⚠⚠        ║
+# ║ ⚠⚠⚠  核心必改项(部署前必须核对, 否则部署失败/异常)  ⚠⚠⚠            ║
 # ╠════════════════════════════════════════════════════════════════════════╣
-# ║ ① NODES(必须改, 见下方 1.4 节):                                        ║
-# ║     格式: "role,hostname,ip,ssh_user,ssh_password"                      ║
-# ║     · 虚拟机集群: 由 create-vms.sh 自动注入, 通常无需手改;              ║
-# ║     · 裸金属集群: 必须手动填写所有节点(主机名/真实IP/SSH用户)。          ║
-# ║ ② 节点 SSH 密码(必须改):                                               ║
-# ║     · NODES 最后一位为 "-" → 用默认密码 SSH_DEFAULT_PASSWORD(默认 CHANGE_ME, 需改成真实密码); ║
-# ║     · 不同节点不同密码 → 在 NODES 显式写该节点密码。                     ║
-# ║ ③ METALLB_POOL(必须改, 见 3.1 节):                                     ║
-# ║     · 池内 IP 必须与节点同一二层网络且空闲;                             ║
-# ║     · 虚拟机集群: create-vms.sh 自动推导为 VM 网段, 通常无需手改;        ║
-# ║     · 裸金属集群: 必须手动填节点物理网段空闲段(如 10.66.1.130-139)。     ║
-# ║ ④ 执行部署:                                                             ║
-# ║     sudo ./deployments/scripts/deploy-cluster.sh   # 默认装全部组件+kubespray ║
+# ║ ① SSH_DEFAULT_PASSWORD  节点 SSH 默认密码(NODES 中密码为 "-" 时使用)   ║
+# ║ ② NODES                集群节点(role,hostname,ip,ssh_user,ssh_password)║
+# ║ ③ METALLB_POOL         MetalLB 负载均衡地址池(与节点同二层且空闲)      ║
+# ║                                                                        ║
+# ║ · 裸金属集群: 必须手动填 NODES 全部节点 + METALLB_POOL 物理网段空闲段   ║
+# ║ · 虚拟机集群: NODES 由 tools/vm/create-vms.sh 自动注入, 通常无需手改;   ║
+# ║   METALLB_POOL 由 create-vms.sh 自动推导为 VM 网段                      ║
+# ║ · 多集群共用网段时: 务必避开其他集群已用的 LB IP(见 3.1 冲突提示)        ║
 # ╚════════════════════════════════════════════════════════════════════════╝
 #
-# 组织规则: 分段 = 部署阶段, 顺序即依赖方向(后段依赖前段):
-#   阶段一、宿主机环境(modules/01_env)
-#   阶段二、kubespray 基座(modules/02_k8s + kubespray addon)
-#   阶段三、集群基础设施(addon 基座: MetalLB / 内置 Registry)
-#   阶段四、附加组件(operator, 依赖阶段三 Registry 推送镜像)
-#   阶段五、离线镜像预加载
-# 每段标题标注"依赖: xxx" —— 该段组件启动所需的前置(便于查看/编辑时把握启用顺序)。
-# 变量一律 ${VAR:-default} 形式; 改值只改等号后, 勿删变量名。
-# ============================================================
+# ---- ① 节点 SSH 默认密码(必改) ----
+SSH_DEFAULT_PASSWORD="${SSH_DEFAULT_PASSWORD:-CHANGE_ME}"
+#   注: NODES 每行最后一位 ssh_password 为 "-" 时, 用本默认密码; 显式写密码则用该密码。
 
+# ---- ② 集群节点(必改; 5字段: role,hostname,ip,ssh_user,ssh_password) ----
+#   role: master | worker;  ssh_password: "-"=用 SSH_DEFAULT_PASSWORD, 显式=该节点密码
+#   ⚠ 虚拟机规格不在本文件: 需创建虚拟机的节点在 tools/vm/vm-nodes.conf(10字段)定义
+NODES=(
+  "master,cubestack-k8s-master01,10.244.1.11,ubuntu,-"
+  "worker,cubestack-k8s-worker01,10.244.2.11,ubuntu,-"
+  "worker,cubestack-k8s-worker02,10.244.2.12,ubuntu,-"
+)
+
+# ---- ③ MetalLB 地址池(必改; 见 3.1 详细说明) ----
+#   池内 IP 与节点同一二层网络且空闲; 多集群务必避免与其他集群 LB IP 冲突
+METALLB_POOL="10.66.1.130-10.66.1.139"
+
+# ════════════════════════════════════════════════════════════
+# ★★ 组件启停开关(全部集中在此, 一键启停; 按阶段分组) ★★
+# 设 1/true 启用, 0/false 关闭。只改这里即可启停组件, 不用翻各阶段配置。
+# 各组件详细参数仍在下方对应阶段(此块只保留开关, 避免两处维护)。
+# ════════════════════════════════════════════════════════════
+
+# ---- 阶段一、宿主机环境 ----
+HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # API 四层负载均衡(modules/01_env/05_lb_haproxy.sh; 默认 master 直连, 需要时开)
+KEEPALIVED_ENABLED="${KEEPALIVED_ENABLED:-false}"       # API VIP 高可用(modules/01_env/06_lb_keepalived.sh)
+HARBOR_ENABLED="${HARBOR_ENABLED:-false}"               # Harbor 外部镜像仓库(预留, 见 1.7)
+
+# ---- 阶段二、kubespray 基座 ----
+UPDATE_ETC_HOSTS="${UPDATE_ETC_HOSTS:-0}"               # 部署时更新宿主机 /etc/hosts 节点解析(默认关; 1 开)
+NTP_ENABLED="${NTP_ENABLED:-1}"                         # 节点时间同步(0=跳过, 不推荐; 见 2.2)
+K8S_ENABLED="${K8S_ENABLED:-false}"                     # 部署 kubespray 基座(modules/02_k8s/06_k8s_deploy.sh, = --with-k8s)
+K8S_SCALE_ENABLED="${K8S_SCALE_ENABLED:-false}"         # 扩容模块(modules/02_k8s/07_k8s_scale.sh, = --with-scale)
+METALLB_ENABLED="${METALLB_ENABLED:-true}"              # MetalLB 负载均衡(依赖 3.1 地址池; 需 strict_arp)
+LOCAL_PATH_ENABLED="${LOCAL_PATH_ENABLED:-true}"        # local-path-provisioner 默认 StorageClass
+METRICS_SERVER_ENABLED="${METRICS_SERVER_ENABLED:-true}"  # metrics-server(HPA 依赖)
+HELM_ENABLED="${HELM_ENABLED:-true}"                    # Helm(registry 等组件依赖)
+INGRESS_NGINX_ENABLED="${INGRESS_NGINX_ENABLED:-false}" # ingress-nginx(HTTP 入口, 需 MetalLB 或 hostNetwork)
+DASHBOARD_ENABLED="${DASHBOARD_ENABLED:-false}"         # Kubernetes dashboard
+CERT_MANAGER_ENABLED="${CERT_MANAGER_ENABLED:-false}"   # cert-manager(证书签发; LWS cert-manager 模式依赖)
+GATEWAY_API_ENABLED="${GATEWAY_API_ENABLED:-false}"     # Gateway API CRDs
+
+# ---- 阶段三、集群基础设施 ----
+REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"               # 集群内置 Registry(默认部署; 0=不部署 addon/节点信任, 见 3.2)
+
+# ---- 阶段四、附加组件(operator) ----
+GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 沐曦 GPU Operator(默认启用; 见 4.1)
+LWS_ENABLED="${LWS_ENABLED:-false}"                     # LeaderWorkerSet(LLM 工作负载调度; 见 4.2)
+LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"  # LWS DisaggregatedSet(解耦推理; 见 4.2)
+PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-false}"       # Prometheus+Operator 监控(P1; 见 4.3)
+CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # Ceph 存储底座(P1; 见 4.3)
+CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI RBD/RGW/CephFS(依赖 CEPH_ENABLED; 见 4.3)
+ENVOY_GATEWAY_ENABLED="${ENVOY_GATEWAY_ENABLED:-false}" # Envoy Gateway 通用 K8s 网关基座(P1; 见 4.3)
+ENVOY_AI_GATEWAY_ENABLED="${ENVOY_AI_GATEWAY_ENABLED:-false}"  # Envoy AI Gateway(LLM/AI 专用, 依赖 EG; 见 4.3)
+KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # 统一认证(P2; 见 4.4)
+KUEUE_ENABLED="${KUEUE_ENABLED:-false}"                 # 队列治理(P2; 见 4.4)
+KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # 虚拟机能力(P2; 见 4.4)
+LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(P3; 见 4.5)
+CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # CubeStack 自研组件(占位; 见 4.6)
+
+# ============================================================
+# 其余配置按阶段组织(顺序即依赖方向):
+#   阶段一、宿主机环境 / 阶段二、kubespray 基座 / 阶段三、集群基础设施
+#   / 阶段四、附加组件(operator) / 阶段五、离线镜像预加载
+# 虚拟机创建/网络变量已移至 tools/vm/vm-nodes.conf(独立管理)。
+# ============================================================
 
 # ════════════════════════════════════════════════════════════
 # 阶段一、宿主机环境(modules/01_env)              依赖: 无
@@ -40,42 +91,16 @@
 # ---------------- 1.1 宿主机(Hypervisor) ----------------
 # 宿主机物理 IP(留空=自动检测; 各脚本直接引用该全局变量, 不硬编码)
 HOST_PHYS_IP="${HOST_PHYS_IP:-}"
-BASE_IMG="${BASE_IMG:-${REPO_ROOT}/deployments/offline-files/virtual-machine/cloud-images/ubuntu2204-k8s-base.qcow2}"
-VM_DISK_DIR="${VM_DISK_DIR:-/k8s/vm-disks}"
-
-# ---------------- 1.2 网络规划(依赖: 1.1 宿主机 IP) ----------------
-NET_MODE="${NET_MODE:-bridge}"          # bridge=方案A(privbr0+精准SNAT) | nat=方案B(libvirt NAT)
-
-# [方案A bridge]
-BRIDGE="${BRIDGE:-privbr0}"
-BRIDGE_IP="${BRIDGE_IP:-10.244.0.1}"
-VM_SUBNET="${VM_SUBNET:-10.244.0.0/16}"
-PHYS_WORKER_NET="${PHYS_WORKER_NET:-10.66.1.0/24}"
-
-# [方案B nat]
-NAT_NET_NAME="${NAT_NET_NAME:-cubestack-nat}"
-NAT_SUBNET="${NAT_SUBNET:-10.245.0.0/16}"
-NAT_GATEWAY="${NAT_GATEWAY:-10.245.0.1}"
+# ⚠ 虚拟机创建/网络变量(BASE_IMG/VM_DISK_DIR/VM_SSH_USERS/VM_SUBNET/BRIDGE/NET_MODE/NAT_*)
+#   已移至 tools/vm/vm-nodes.conf —— 由 lib-common load_config 自动加载, 此处不再定义。
 
 # ---------------- 1.3 SSH 配置 ----------------
 SSH_KEY_DIR="${SSH_KEY_DIR:-${HOME}/.ssh}"
 SSH_KEY_NAME="${SSH_KEY_NAME:-cubestack_k8s}"
-SSH_DEFAULT_PASSWORD="${SSH_DEFAULT_PASSWORD:-CHANGE_ME}"
-VM_SSH_USERS="${VM_SSH_USERS:-root ubuntu}"
 WORKER_SSH_PASSWORD="${WORKER_SSH_PASSWORD:-}"
 
-# ---------------- 1.4 节点规划(依赖: 1.1~1.3 已就绪) ----------------
-# 格式(5字段, 不区分虚拟机和裸金属): role,hostname,ip,ssh_user,ssh_password
-#   role: master | worker
-#   ssh_password: "-" = 用默认密码 SSH_DEFAULT_PASSWORD(全节点默认一致);
-#                 显式密码 = 该节点用此密码(支持裸金属不同密码场景)
-#   ⚠ 虚拟机规格(mac/内存/CPU/磁盘)不在本文件: 需要创建虚拟机的节点在
-#     deployments/scripts/tools/vm/vm-nodes.conf 中定义(10字段), 创建成功后自动注入本 NODES(5字段)。
-NODES=(
-  "master,cubestack-k8s-master01,10.244.1.11,ubuntu,-"
-  "worker,cubestack-k8s-worker01,10.244.2.11,ubuntu,-"
-  "worker,cubestack-k8s-worker02,10.244.2.12,ubuntu,-"
-)
+# ---------------- 1.4 节点规划(依赖: 1.3 已就绪) ----------------
+# (NODES 已在顶部核心必改项定义; 虚拟机规格见 tools/vm/vm-nodes.conf)
 
 # ---------------- 1.5 节点组(依赖: 1.4 节点; 配合 --only 使用) ----------------
 # --only 支持直接指定 group 名(而非逐个 hostname):
@@ -87,18 +112,16 @@ NODE_GROUP_new_node="cubestack-k8s-worker02"
 
 # ---------------- 1.6 API 负载均衡 / 高可用(依赖: 1.4 节点; 默认关) ----------------
 # API 入口高可用: HAPROXY=四层 LB(默认 master 直连, 需要时开启); KEEPALIVED=VIP(留空取 API 地址)
-HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # modules/01_env/05_lb_haproxy.sh(API 四层负载均衡, 默认关, 需要时 --enable)
-KEEPALIVED_ENABLED="${KEEPALIVED_ENABLED:-false}"       # modules/01_env/06_lb_keepalived.sh(API VIP 高可用, 默认关, 需要时 --enable)
+# 开关见顶部【组件启停开关】: HAPROXY_ENABLED / KEEPALIVED_ENABLED
 KEEPALIVED_VIP="${KEEPALIVED_VIP:-}"                    # Keepalived VIP(留空=取 APISERVER_ADDRESS)
 
 # ---------------- 1.7 Harbor 镜像仓库(集群外私有仓库, 预留, 未来实现) ----------------
 # ⚠ 当前集群镜像仓库统一使用【集群内 docker registry】(见阶段三 3.2, REGISTRY_ENABLED=1)。
 #   Harbor(集群外企业级仓库)为**预留配置**: 未来需要外部开发机/CI 直接 push、多集群复用等场景时实现;
 #   由 modules/01_env/04_harbor.sh(当前为伪代码占位)实现, 默认关闭, 不影响现有部署。
-HARBOR_ENABLED="${HARBOR_ENABLED:-false}"              # 预留: Harbor 开关, 默认关闭(未来实现)
+#   开关见顶部【组件启停开关】: HARBOR_ENABLED(默认关)
 HARBOR_DOMAIN="${HARBOR_DOMAIN:-harbor.local}"         # 预留: Harbor 访问域名(需 DNS//etc/hosts 解析)
 HARBOR_IP="${HARBOR_IP:-10.244.2.200}"                 # 预留: Harbor 监听地址(宿主机 IP 或网卡地址)
-HARBOR_NAMESPACE="${HARBOR_NAMESPACE:-harbor}"         # 预留: 部署命名空间/数据目录
 HARBOR_STORAGE_CLASS="${HARBOR_STORAGE_CLASS:-local-path}"  # 预留: 数据持久化 StorageClass(如走集群外则用数据目录)
 
 
@@ -111,20 +134,27 @@ HARBOR_STORAGE_CLASS="${HARBOR_STORAGE_CLASS:-local-path}"  # 预留: 数据持�
 KUBESPRAY_INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}"
 KUBESPRAY_DIR="${KUBESPRAY_DIR:-${REPO_ROOT}/deployments/kubespray/kubespray}"
 # 离线资源缓存根目录(二进制/镜像); 各组件离线子目录: kubespray / metax-gpu / lws / envoy 等
-OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files}"
+# ⚠ 默认留空: 部署脚本经 lib-common 自动解析为 offline-files/kubespray(内层),
+#   fetch-offline-from-minio.sh 默认下载到 offline-files 总根(offline-files/{kubespray,lws,metax-gpu,os});
+#   两处解耦, 不需要在此显式设置 OFFLINE_FILES_DIR(显式设置会同时改变 fetch 目标)。
+OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-}"
 # kubespray 离线仓库(镜像 tar + 二进制; 已从 repository/<cluster> 迁到 offline-files/kubespray)
-LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}/kubespray}"
-UPDATE_ETC_HOSTS="${UPDATE_ETC_HOSTS:-0}"
+LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files}/kubespray}"
+# (UPDATE_ETC_HOSTS 开关已移至顶部【组件启停开关】)
 
 # ---------------- 2.1b 离线文件下载(MinIO, 可选) ----------------
-# 离线文件缺失时, 用 tools/offline/fetch-offline-files.sh 从 MinIO 下载到 OFFLINE_FILES_DIR;
+# 离线文件缺失时, 用 tools/offline/fetch-offline-from-minio.sh 从 MinIO 下载到 OFFLINE_FILES_DIR;
 # 需要 mc(MinIO Client, 见 Dockerfile-cli)。不配置则手工拷贝离线文件。
+#   · 已有 mc alias(如 minio)时, sync-to-minio.sh / fetch-offline-from-minio.sh 会优先复用,
+#     以下 MINIO_* 可留空; 无 alias 时才需填写。
+#   · 桶/目录: 推荐默认桶 cubestack-installer、目录 offline-files(与本地 offline-files 同名布局);
+#     MINIO_REMOTE_DIR 留空时 sync 侧自动取本地源目录名, fetch 侧默认 offline-files。
 MINIO_ALIAS="${MINIO_ALIAS:-minio}"                  # mc alias 名
 MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"                 # MinIO 服务地址(如 https://minio.example.com)
 MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-}"             # AccessKey
 MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-}"             # SecretKey
-MINIO_BUCKET="${MINIO_BUCKET:-cubestack-offline}"    # 离线文件桶
-MINIO_REMOTE_DIR="${MINIO_REMOTE_DIR:-kubespray}"    # 桶内目录(与 OFFLINE_FILES_DIR 结构对应)
+MINIO_BUCKET="${MINIO_BUCKET:-cubestack-installer}"  # 离线文件桶(默认与 fetch/sync 一致)
+MINIO_REMOTE_DIR="${MINIO_REMOTE_DIR:-offline-files}"  # 桶内目录(留空=sync 取本地源同名 / fetch 默认 offline-files)
 
 # ---------------- 2.2 NTP 时间同步(依赖: 1.1 宿主机为权威源; k8s 部署前) ----------------
 # 由 modules/02_k8s/05_k8s_ntp.sh 执行(k8s 阶段默认启用步, 可重复):
@@ -137,10 +167,12 @@ MINIO_REMOTE_DIR="${MINIO_REMOTE_DIR:-kubespray}"    # 桶内目录(与 OFFLINE_
 #   · 显式 NTP_SERVER 可覆盖(用户指定权威时间源, 如公司内 NTP)。
 #   · 应用时对偏差>1s 的节点一次性 date -s @权威epoch 硬对齐。
 #   · 校验门禁: 校验后各节点与权威(首 master)偏差 ≤ NTP_MAX_OFFSET_MS, 超限本步失败 → 中止部署(在 kubespray 前)。
-NTP_ENABLED="${NTP_ENABLED:-1}"                       # 0=跳过时间同步(不推荐)
+#   · NTP_ALLOW 独立于虚拟/裸金属网络: chrony server 放行子网, 默认空=只允许本机(如多子网节点需
+#     填集群节点所在网段, 如 "10.66.1.0/24")。
+# 开关见顶部【组件启停开关】: NTP_ENABLED(默认 1=启用)
 NTP_SERVER="${NTP_SERVER:-}"                          # 权威时间源 IP; 留空=第一个 master 为权威
 NTP_UPSTREAM="${NTP_UPSTREAM:-}"                      # 权威(首 master)的公网上游(如 "pool ntp.aliyun.com iburst"); 留空=离线用本机时钟
-NTP_ALLOW="${NTP_ALLOW:-${VM_SUBNET} ${PHYS_WORKER_NET} ${NAT_SUBNET}}"  # chrony server allow 子网(bridge/nat 全覆盖)
+NTP_ALLOW="${NTP_ALLOW:-}"                            # chrony server allow 子网(默认空=仅本机; 多子网填 "10.66.1.0/24" 等)
 NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"        # 节点-权威(首 master)最大时钟偏差(毫秒); 超限本步失败 → 中止部署
 
 # ---------------- 2.3 集群内部网络 CIDR(由脚本同步到 kubespray group_vars, 不硬编码) ----------------
@@ -160,26 +192,16 @@ KUBE_NETWORK_PLUGIN="${KUBE_NETWORK_PLUGIN:-calico}"
 
 # ---------------- 2.5 kubespray 附加组件开关(由 sync-addons-config.sh 同步到 addons.yml) ----------------
 # 这些开关决定 kubespray 附加组件是否安装; 组件详细配置(地址池/存储类等)仍保留在 addons.yml
-METALLB_ENABLED="${METALLB_ENABLED:-true}"              # MetalLB(负载均衡, 需 kube_proxy_strict_arp=true, 已默认开启; 依赖阶段三 3.1 地址池)
+# 开关见顶部【组件启停开关】: METALLB_ENABLED / LOCAL_PATH_ENABLED / METRICS_SERVER_ENABLED /
+#   HELM_ENABLED / INGRESS_NGINX_ENABLED / DASHBOARD_ENABLED / CERT_MANAGER_ENABLED / GATEWAY_API_ENABLED
 # (已移除 metallb controller 钉首 master 的 workaround —— IPIP 数据面保证跨节点 webhook 可达, 无需再钉)
-LOCAL_PATH_ENABLED="${LOCAL_PATH_ENABLED:-true}"        # local-path-provisioner(默认 StorageClass,**默认启动**; 设为 false 关闭)
-METRICS_SERVER_ENABLED="${METRICS_SERVER_ENABLED:-true}"  # metrics-server(HPA 依赖)
-HELM_ENABLED="${HELM_ENABLED:-true}"                    # Helm(registry 等组件依赖)
-INGRESS_NGINX_ENABLED="${INGRESS_NGINX_ENABLED:-false}" # ingress-nginx(HTTP 入口, 需 MetalLB 或 hostNetwork)
-DASHBOARD_ENABLED="${DASHBOARD_ENABLED:-false}"         # Kubernetes dashboard
-CERT_MANAGER_ENABLED="${CERT_MANAGER_ENABLED:-false}"   # cert-manager(证书签发; LWS cert-manager 模式依赖)
-GATEWAY_API_ENABLED="${GATEWAY_API_ENABLED:-false}"     # Gateway API CRDs
-
-# ---------------- 2.6 k8s 部署/扩容调度开关(依赖: 阶段一) ----------------
-K8S_ENABLED="${K8S_ENABLED:-false}"                      # modules/02_k8s/06_k8s_deploy.sh(= --with-k8s)
-K8S_SCALE_ENABLED="${K8S_SCALE_ENABLED:-false}"          # modules/02_k8s/07_k8s_scale.sh(= --with-scale)
 
 
 # ════════════════════════════════════════════════════════════
 # 阶段三、集群基础设施(addon 基座)              依赖: 阶段二(集群已部署)
 # ════════════════════════════════════════════════════════════
 
-# ---------------- 3.1 MetalLB 负载均衡地址池(依赖: METALLB_ENABLED + 1.2 网络) ----------------
+# ---------------- 3.1 MetalLB 负载均衡地址池(依赖: METALLB_ENABLED; 池已在顶部必改项定义) ----------------
 # ⚠ 网络需求(Layer2 模式, 重要):
 #   · 池内 IP 必须与集群节点处于同一二层网络(同一子网), 且必须是空闲地址;
 #   · 裸金属集群: **无需 bridge/NAT 网络**(纯物理 L2 直连), 不初始化宿主机网络,
@@ -193,15 +215,17 @@ K8S_SCALE_ENABLED="${K8S_SCALE_ENABLED:-false}"          # modules/02_k8s/07_k8s
 #     ⚠ **仅裸金属环境需要处理**(已验证: 虚拟机标准网络 webhook/LB 均正常, 无此问题); 物理交换机/管理网段可能拦截 VXLAN 端口 4789。
 #   · 若网络开启 DHCP Snooping / IP Source Guard, 需在 speaker 节点接入端口放开
 #     (否则 ARP 通告的静态 LB IP 流量会被交换机丢弃)。
+#   · ⚠ 多集群共用网段时: 池首地址会默认被第一个集群占用, 后续集群务必显式改 METALLB_POOL
+#     / REGISTRY_IP 避开已用 IP(部署时会做服务端口冲突探测并醒目提示)。
 #   可写 CIDR 或 起止区间; 与节点/VM 网段冲突会导致 LB 无法通告。
-METALLB_POOL="${METALLB_POOL:-10.66.1.130-10.66.1.139}"
+#   (值定义在顶部核心必改项: METALLB_POOL="${METALLB_POOL}", 此处引用, 保持唯一事实来源)
+METALLB_POOL="${METALLB_POOL}"   # 引用顶部必改项定义(避免两处维护)
 
 # ---------------- 3.2 集群内 Registry(kubespray addon, 默认部署; 依赖 MetalLB + HELM) ----------------
 # 集群内镜像仓库统一使用 kubespray 内置 registry addon,**默认部署**(REGISTRY_ENABLED=1)。
 # **所有 operator(GPU/LWS/...)都往它推镜像、节点按域名拉取** → 阶段四的隐含依赖。
 # 集群外镜像仓库 Harbor 为预留配置(见阶段一 1.7)。
-# 关闭: REGISTRY_ENABLED=0(不部署 addon 及节点信任/DNAT)。
-REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"
+# 关闭: 顶部【组件启停开关】REGISTRY_ENABLED=0(不部署 addon 及节点信任/DNAT)。
 REGISTRY_DOMAIN="${REGISTRY_DOMAIN:-registry.local}"   # 内部域名(需本地 /etc/hosts 解析)
 # REGISTRY_IP 留空 = sync 自动从 METALLB_POOL 取池内首地址作为 LoadBalancer VIP(换环境只改 METALLB_POOL, 免手改)。
 # ⚠ 多集群共用同一网段时, 首地址必然被第一个集群占用 → 后续集群必须显式指定 REGISTRY_IP
@@ -226,7 +250,7 @@ REGISTRY_EXPOSE_HOST="${REGISTRY_EXPOSE_HOST:-0}"
 # ════════════════════════════════════════════════════════════
 
 # ---------------- 4.1 沐曦 GPU Operator(依赖: Registry) ----------------
-GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"   # modules/03_addon/04_gpu_operator.sh(沐曦 GPU Operator; 默认启用, --with-cubestack 部署; 立即部署 --steps gpu_operator)
+# 开关见顶部【组件启停开关】: GPU_OPERATOR_ENABLED(默认 true=启用)
 # 版本不硬编码: 升级只需改 METAX_VERSION, 其余路径/镜像由本配置派生。
 # 资源包来源: 沐曦软件中心 下载 → 云平台工具 → metax-gpu-k8s(<版本>.tar.gz, 内含 metax-k8s-images.<ver>.run + helm charts)
 METAX_VERSION="${METAX_VERSION:-0.15.3}"                        # GPU Operator 版本(决定包名/镜像 tag/Chart)
@@ -263,7 +287,7 @@ METAX_DRIVER_VERSION="${METAX_DRIVER_VERSION:-3.8.1.6-amd64}"  # 内核驱动版
 METAX_MACA_IMAGE="${METAX_MACA_IMAGE:-maca:3.8.1.2-ubuntu20.04-amd64}"  # MXMACA SDK 镜像(最新 3.8, 需与离线 tar/在线拉取匹配)
 
 # ---------------- 4.2 LeaderWorkerSet / LWS(依赖: Registry; LLM 工作负载调度) ----------------
-LWS_ENABLED="${LWS_ENABLED:-false}"                     # modules/03_addon/05_gpu_lws.sh(LeaderWorkerSet, 默认关; 立即部署 --steps gpu_lws)
+# 开关见顶部【组件启停开关】: LWS_ENABLED(默认 false=关)
 # 安装方式(二选一, LWS_INSTALL_MODE):
 #   bundle(默认, 推荐)= 官方 manifests.yaml 单文件, kubectl apply --server-side 整体下发
 #     (含 namespace+CRD+RBAC+controller+webhook; 逐资源应用不受 helm Secret 1MiB 上限; 证书=internal 自签)
@@ -295,17 +319,13 @@ LWS_IMAGE_SRC="${LWS_IMAGE_SRC:-registry.k8s.io/lws/lws:${LWS_IMAGE_TAG}}"
 LWS_SAVE_DIR="${LWS_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/lws}"
 LWS_NAMESPACE="${LWS_NAMESPACE:-lws-system}"            # 部署命名空间
 LWS_RELEASE_NAME="${LWS_RELEASE_NAME:-lws}"             # Helm release 名
-# DisaggregatedSet(解耦推理): 对应官方 values 键 enableDisaggregatedSet, 安装后可直接创建该 CR
-LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"
+# (LWS_DISAGGREGATEDSET_ENABLED 开关已移至顶部【组件启停开关】)
 
 # ---------------- 4.3 P1 阶段附加组件(依赖: Registry + 部分依赖 GPU/Ceph) ----------------
-PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-false}"       # modules/03_addon/06_prometheus.sh(P1-2/3 监控: Prometheus+Operator+node-exporter/DCGM/MetaX/RDMA/Ceph)
-CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # modules/03_addon/07_ceph.sh(P1-6 Ceph 存储底座)
-CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # modules/03_addon/08_ceph_csi.sh(P1-7 Ceph CSI RBD/RGW/CephFS; 依赖 CEPH_ENABLED)
+# 开关见顶部【组件启停开关】: PROMETHEUS_ENABLED / CEPH_ENABLED / CEPH_CSI_ENABLED /
+#   ENVOY_GATEWAY_ENABLED / ENVOY_AI_GATEWAY_ENABLED
 # Envoy 网关二件套(P1-9 统一流量入口): Envoy Gateway=通用 K8s API 网关基座;
 # Envoy AI Gateway=LLM/AI 专用扩展层(依赖 Envoy Gateway 先装)。详见 docs/envoy-gateway.md
-ENVOY_GATEWAY_ENABLED="${ENVOY_GATEWAY_ENABLED:-false}"     # modules/03_addon/09_envoy_gateway.sh(通用网关, Gateway API 标准实现)
-ENVOY_AI_GATEWAY_ENABLED="${ENVOY_AI_GATEWAY_ENABLED:-false}"  # modules/03_addon/10_envoy_ai_gateway.sh(AI 专用网关, 依赖 EG)
 
 # ---------------- Envoy Gateway / Envoy AI Gateway 配置 ----------------
 # Chart 来源(二选一/三选一, 与 LWS 一致; **本地源优先, 默认离线安装**):
@@ -331,16 +351,14 @@ ENVOY_EG_NAMESPACE="${ENVOY_EG_NAMESPACE:-envoy-gateway-system}"   # EG 部署�
 ENVOY_AI_NAMESPACE="${ENVOY_AI_NAMESPACE:-ai-gateway-system}"      # AI 控制器部署命名空间
 
 # ---------------- 4.4 P2 阶段附加组件 ----------------
-KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # modules/03_addon/10_keycloak.sh(P2-1 统一认证)
-KUEUE_ENABLED="${KUEUE_ENABLED:-false}"                 # modules/03_addon/11_kueue.sh(P2-2 队列治理 DEV-29)
-KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # modules/03_addon/12_kubevirt.sh(P2-3 虚拟机能力 DEV-35)
+# 开关见顶部【组件启停开关】: KEYCLOAK_ENABLED / KUEUE_ENABLED / KUBEVIRT_ENABLED
 
 # ---------------- 4.5 P3 阶段附加组件 ----------------
-LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # modules/03_addon/13_lustre_csi.sh(P3-1 Lustre CSI DEV-26)
+# 开关见顶部【组件启停开关】: LUSTRE_CSI_ENABLED
 
 # ---------------- 4.6 自研模块(CubeStack 平台组件) ----------------
 # 03_addon/ 下 01~19 为第三方中间件预留, 20 起为 CubeStack 自研模块
-CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # modules/03_addon/20_cubestack_apps.sh(自研组件占位)
+# 开关见顶部【组件启停开关】: CUBESTACK_APPS_ENABLED
 
 
 # ════════════════════════════════════════════════════════════

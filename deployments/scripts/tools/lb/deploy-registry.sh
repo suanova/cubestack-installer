@@ -162,6 +162,9 @@ cat > "${NODE_SCRIPT}" <<EOF
 #!/bin/bash
 set -e
 # ★ 删旧域名残留行(安装环境 IP 会变): 先删任何指向 REGISTRY_DOMAIN 的旧行, 再写当前 VIP
+#   (节点 /etc/hosts 是普通文件系统, sed -i 无 bind-mount rename 问题, 与 lib-common 行为一致)
+#   ⚠ heredoc 内需节点运行时展开的变量(如下面 _rd 的赋值命令)必须转义(写成 \$()/\\\$()),
+#     让外层 deploy-registry.sh(set -u) 原样输出、由节点 bash 执行; 未转义会在外层展开报 unbound。
 _rd="\$(echo '${REGISTRY_DOMAIN}' | sed 's/\./\\\\./g')"
 sed -i -E "/[[:space:]]\${_rd}([[:space:]]|\$)/d" /etc/hosts 2>/dev/null || true
 echo "${REGISTRY_IP} ${REGISTRY_DOMAIN}" >> /etc/hosts

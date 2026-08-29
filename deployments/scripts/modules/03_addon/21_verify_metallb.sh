@@ -13,7 +13,12 @@
 #       ① controller/speaker pod Ready
 #       ② IPAddressPool / L2Advertisement 存在 + **预检池不含 .0/.255**(网络/广播地址,
 #          命中即提前失败, 省去创建测试资源后才发现 VIP 不可用)
-#       ③ 创建测试命名空间 + busybox httpd 后端 + LoadBalancer Service
+#       ②b **按地址池规模决定验证方式**(本次需求):
+#          · 池内地址 **>1 个** → 【新建测试 LoadBalancer, 验证"分配新 VIP"能力】(③④⑤⑥)
+#          · 池内地址 **仅 1 个** → 该地址通常已被 registry 等既有 LoadBalancer 占用
+#            (新建必然拿不到 VIP → 90s 超时误报), 改为**直接验证已分配 VIP 工作是否正常**;
+#            若单地址池尚空闲则仍走新建分配验证
+#       ③ 需要新建时创建测试命名空间 + busybox httpd 后端 + LoadBalancer Service
 #       ④ 等待分配到池内 VIP, 校验 VIP 在 METALLB_POOL 范围内
 #       ⑤ 从首个 master curl http://VIP 验证 L2 通告真正可达
 #       ⑥ 清理测试资源(命名空间, trap 兜底)
@@ -113,10 +118,55 @@ if [ -n "${BAD_SPEC}" ]; then
     exit 1
 fi
 
-say "  ③ 创建测试后端(busybox httpd) + LoadBalancer Service..."
-cleanup
-LOCAL_YAML="$(mktemp)"
-cat > "${LOCAL_YAML}" <<YAML
+# ②b ★ 按地址池规模决定验证方式(需求):
+#   · 池内地址 **>1 个** → 【新建测试 LoadBalancer, 验证"分配新 VIP"能力】(③④⑤⑥)
+#   · 池内地址 **仅 1 个** → 该地址通常已被 registry 等既有 LoadBalancer 占用
+#     (新建必然拿不到 VIP → 90s 超时误报), 改为**直接验证已分配 VIP 工作是否正常**;
+#     若单地址池尚空闲则仍走新建分配验证。
+_pool_size() {   # 地址池地址数量(支持 起止区间 / CIDR / 单地址)
+    local pool="$1"
+    python3 - "${pool}" <<'PY'
+import ipaddress, sys
+pool = sys.argv[1]
+if "-" in pool and "/" not in pool:
+    a, b = (ipaddress.ip_address(x) for x in pool.split("-"))
+    print(int(b) - int(a) + 1)
+elif "/" in pool:
+    print(ipaddress.ip_network(pool, strict=False).num_addresses)
+else:
+    print(1)
+PY
+}
+say "  ②b 按地址池规模决定验证方式..."
+POOL_SIZE="$(_pool_size "${METALLB_POOL}")"
+say "    地址池 ${METALLB_POOL} 共 ${POOL_SIZE} 个地址"
+VERIFY_MODE="allocate_new"   # allocate_new=新建分配 | verify_existing=直接验证已分配
+if [ "${POOL_SIZE}" -le 1 ]; then
+    say "    单地址池: 检查 ${METALLB_POOL} 是否已被既有 LoadBalancer 占用..."
+    EXISTING_VIP=""; EXISTING_SVC=""; EXISTING_PORT=""
+    while read -r svc_line; do
+        [ -z "${svc_line}" ] && continue
+        _ns="${svc_line%% *}"; _name="$(echo "${svc_line}" | awk '{print $2}')"; _ip="$(echo "${svc_line}" | awk '{print $3}')"; _port="$(echo "${svc_line}" | awk '{print $4}')"
+        # 过滤非池内 IP 与默认 kubernetes svc(ClusterIP, 无 LB IP)
+        if [ "$(_ip_in_pool "${_ip}" "${METALLB_POOL}")" = "1" ] && [ "${_ip}" != "<none>" ]; then
+            EXISTING_VIP="${_ip}"; EXISTING_SVC="${_ns}/${_name}"; EXISTING_PORT="${_port}"; break
+        fi
+    done < <(SSH "${K} get svc -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,LBIP:.status.loadBalancer.ingress[0].ip,PORT:.spec.ports[0].port --no-headers 2>/dev/null")
+    if [ -n "${EXISTING_VIP}" ]; then
+        say "    池内唯一地址已被 ${EXISTING_SVC} 占用 (${EXISTING_VIP}:${EXISTING_PORT:-?}), 直接验证该 VIP 工作是否正常"
+        VERIFY_MODE="verify_existing"
+        VIP="${EXISTING_VIP}"
+    else
+        say "    池内唯一地址空闲, 走新建分配验证"
+    fi
+else
+    say "    多地址池(≥2 个): 走新建分配验证"
+fi
+if [ "${VERIFY_MODE}" = "allocate_new" ]; then
+    say "  ③ 创建测试后端(busybox httpd) + LoadBalancer Service..."
+    cleanup
+    LOCAL_YAML="$(mktemp)"
+    cat > "${LOCAL_YAML}" <<YAML
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -149,22 +199,23 @@ spec:
   - port: 80
     targetPort: 8080
 YAML
-# scp 方式提交(避免 heredoc→SSH stdin 管道挂起): 本地写文件 → scp → apply → 清理
-scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-    "${LOCAL_YAML}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/${TEST_NAME}.yaml" \
-    && SSH "${K} apply -f /tmp/${TEST_NAME}.yaml" \
-    && SSH "rm -f /tmp/${TEST_NAME}.yaml"
-rm -f "${LOCAL_YAML}"
+    # scp 方式提交(避免 heredoc→SSH stdin 管道挂起): 本地写文件 → scp → apply → 清理
+    scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "${LOCAL_YAML}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/${TEST_NAME}.yaml" \
+        && SSH "${K} apply -f /tmp/${TEST_NAME}.yaml" \
+        && SSH "rm -f /tmp/${TEST_NAME}.yaml"
+    rm -f "${LOCAL_YAML}"
 
-say "  ④ 等待 LoadBalancer 分配到池内 VIP(最长 90s)..."
-VIP=""
-for i in $(seq 1 18); do
-    VIP="$(SSH "${K} -n ${TEST_NS} get svc ${TEST_NAME} -o jsonpath={.status.loadBalancer.ingress[0].ip} 2>/dev/null")"
-    [ -n "${VIP}" ] && break
-    sleep 5
-done
-[ -n "${VIP}" ] || { err "LoadBalancer 90s 内未分配到 VIP。先检查: ① IPAddressPool / L2Advertisement 是否已创建(kubectl -n metallb-system get ipaddresspools; 无池则无法分配); ② METALLB_POOL=${METALLB_POOL} 是否为空闲且与节点同网段; ③ 若池刚配好, 重新 apply 池 CR 或重跑 k8s_deploy 后再验证"; exit 1; }
-say "    已分配 VIP: ${VIP}"
+    say "  ④ 等待 LoadBalancer 分配到池内 VIP(最长 90s)..."
+    VIP=""
+    for i in $(seq 1 18); do
+        VIP="$(SSH "${K} -n ${TEST_NS} get svc ${TEST_NAME} -o jsonpath={.status.loadBalancer.ingress[0].ip} 2>/dev/null")"
+        [ -n "${VIP}" ] && break
+        sleep 5
+    done
+    [ -n "${VIP}" ] || { err "LoadBalancer 90s 内未分配到 VIP。先检查: ① IPAddressPool / L2Advertisement 是否已创建(kubectl -n metallb-system get ipaddresspools; 无池则无法分配); ② METALLB_POOL=${METALLB_POOL} 是否为空闲且与节点同网段; ③ 若池刚配好, 重新 apply 池 CR 或重跑 k8s_deploy 后再验证"; exit 1; }
+    say "    已分配 VIP: ${VIP}"
+fi
 
 say "  ⑤ 校验 VIP 在 METALLB_POOL=${METALLB_POOL} 内..."
 # ⚠ .0/.255 是网络/广播地址, 不应作为 LB VIP; 池子若用 CIDR(如 10.244.2.0/24)会分配出 .0
@@ -178,6 +229,22 @@ else
 fi
 
 say "  ⑥ 从首个 master(${FIRST_MASTER}) 访问 http://${VIP}/ ..."
+if [ "${VERIFY_MODE}" = "verify_existing" ]; then
+    # 复用已有 VIP(来自既有 LB 服务, 如 registry): 不校验测试后端, 直接 curl 验证可达性
+    say "    (复用既有服务 ${EXISTING_SVC} 的 VIP:${EXISTING_PORT:-80}, 跳过测试后端等待)"
+    HTTP_CODE=""
+    for i in 1 2 3; do
+        HTTP_CODE="$(SSH "curl -s -m 6 -o /dev/null -w %{http_code} http://${VIP}:${EXISTING_PORT:-80}/ 2>/dev/null")"
+        [ -n "${HTTP_CODE}" ] && [ "${HTTP_CODE}" != "000" ] && break
+        sleep 3
+    done
+    case "${HTTP_CODE}" in
+        200|301|302|404) ok "    http://${VIP}:${EXISTING_PORT:-80}/ → HTTP ${HTTP_CODE}(VIP 已可达, L2 通告正常) ✓" ;;
+        *) err "VIP ${VIP}:${EXISTING_PORT:-80} 访问失败(HTTP=${HTTP_CODE:-超时}); 检查 speaker/节点网络"; exit 1 ;;
+    esac
+    ok "MetalLB 端到端验证通过: 单地址池既有 VIP ${VIP}:${EXISTING_PORT:-80}(${EXISTING_SVC}) 工作正常, 无需新建测试 LoadBalancer"
+    exit 0
+fi
 say "    等待测试后端 Ready..."
 POD_OK=""
 for i in $(seq 1 12); do
