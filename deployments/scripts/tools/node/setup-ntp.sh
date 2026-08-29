@@ -123,7 +123,8 @@ master_chrony_setup() {
     local MASTER_CONF="# === cubestack-managed ===\n"
     [ -n "${NTP_UPSTREAM:-}" ] && MASTER_CONF+="${NTP_UPSTREAM}\n"
     MASTER_CONF+="local stratum 10\n"
-    for net in ${NTP_ALLOW:-${VM_SUBNET} ${PHYS_WORKER_NET} ${NAT_SUBNET}}; do
+    # NTP_ALLOW 独立于虚拟/裸金属网络: 默认空=仅本机; 多子网节点需显式填节点所在网段
+    for net in ${NTP_ALLOW:-}; do
         [ -n "${net}" ] && MASTER_CONF+="allow ${net}\n"
     done
     MASTER_CONF+="driftfile /var/lib/chrony/drift\nmakestep 1.0 3\nrtcsync\nlogdir /var/log/chrony\n"

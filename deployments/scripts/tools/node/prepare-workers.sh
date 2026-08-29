@@ -86,6 +86,7 @@ for line in "${NODES[@]:-}"; do
 
     # 3. 推送 /etc/hosts
     say "更新 /etc/hosts ..."
+    # 先删旧块 + 旧裸条目(nova-k8s-*/mxgpu-*/k8s-api.nova.local), 再追加新块 → 主机名不重复
     ${SSH_SUDO} timeout 30 ssh ${SSH_OPTS} "${NODE_USER}@${NODE_IP}" "sudo bash -c '
         sed -i \"/# >>> cubestack-cluster/,/# <<< cubestack-cluster/d\" /etc/hosts
         sed -i -E \"/nova-k8s-(master|node)/d; /mxgpu-[0-9]/d; /k8s-api\\\\.nova\\\\.local/d\" /etc/hosts

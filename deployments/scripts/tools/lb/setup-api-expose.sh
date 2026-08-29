@@ -38,9 +38,8 @@ done
 # /etc/hosts 确保 API_DOMAIN → API_IP
 # ★ 关键: 无论目标 IP 是否已匹配, 都先删除该域名的【所有旧行】(换环境时旧 IP 残留会
 #   让 getent hosts 命中旧 IP → kubectl 打到旧集群 → 误报失败), 再写当前 API_IP 一行。
-re="$(echo "${API_DOMAIN}" | sed 's/\./\\./g')"
-sed -i -E "/[[:space:]]${re}([[:space:]]|$)/d" /etc/hosts 2>/dev/null || true
-echo "${API_IP} ${API_DOMAIN}" >> /etc/hosts
+#   复用 lib-common 的 ensure_hosts_entry(先删旧行再写, 无 grep 守卫 → 多集群不残留旧 IP)。
+ensure_hosts_entry "${API_IP}" "${API_DOMAIN}"
 ok "/etc/hosts 写入 ${API_DOMAIN} → ${API_IP}(先删旧 IP 残留, 确保只有一行)"
 
 # ---------------- DNAT 管理(仅当 API_IP ≠ 第一个 master 时需要) ----------------
