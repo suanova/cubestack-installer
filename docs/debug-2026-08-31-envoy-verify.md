@@ -48,20 +48,23 @@
 - mock 后端 mkdir 修好后 1/1 Running; mock 调用到达 AI filter(404 为 route-not-found 兜底规则响应),
   唯一剩余阻断 = extProc sidecar 镜像拉不到(现场无 tar、无 docker 缓存、docker.io 不可达)。
 
-## 未完成(环境受限, 需离线备料后补验)
+## 已完成与未完成(环境受限, 需离线备料后补验)
 
-- **现场无法验证的部分**: 本机所有环境均无法访问 docker.io, 且 `/data/offline-files/envoy/` 缺
-  `ai-gateway-extproc` tar → 现场无法推送 extproc 镜像完成 verify_envoy_ai_gateway 的最终 200 验证。
-  待用户在联网机重新跑 `tools/images/envoy-save-images.sh`(现在会多下载 extproc), 把新 tar 放入
-  `/data/offline-files/envoy/`, 然后:
+- ✅ 已提交: `ec02357`(25 模块)、`8bf3038`(AI Gateway 全链: 26/09/10 + 离线镜像脚本 + skill + docs)。
+- ✅ 全量 `--steps verify` 现场验证: **6 模块全绿**(26 核心断言 AIServiceBackend 调和/Accepted 通过,
+  边界 mock 调用因缺 extproc 镜像按设计降级告警跳过)。
+- ⏳ **最后一步(需用户离线备料)**: 所有环境无法访问 docker.io, 且 `/data/offline-files/envoy/` 缺
+  `ai-gateway-extproc` tar。用户在联网机下载该镜像(命令见下), 把 tar 放入 `/data/offline-files/envoy/`, 然后:
   ```bash
-  # 1. 推送缺失镜像(或直接重跑 10 模块/--fresh 重装 AI)
-  sudo ./deployments/scripts/tools/images/envoy-load-images.sh
-  # 2. 重跑全量验证
-  sudo ./deploy-cluster.sh --steps verify
+  # 联网机(手动或更新后的 save 脚本均可):
+  docker pull docker.io/envoyproxy/ai-gateway-extproc:v1.1.0
+  docker save docker.io/envoyproxy/ai-gateway-extproc:v1.1.0 -o docker.io_envoyproxy_ai-gateway-extproc_v1.1.0.tar
+  # 部署机(把 tar 放到 /data/offline-files/envoy/ 后):
+  sudo ./deployments/scripts/tools/images/envoy-load-images.sh        # 幂等推送, 已有 3 个跳过
+  sudo ./deploy-cluster.sh --fresh --steps envoy_ai_gateway           # 重装 AI(helm --set extProc.image.* 生效)
+  sudo ./deploy-cluster.sh --steps verify                             # 26 模块 mock 调用应 200
   ```
-- **待清理**: 测试 ns `verify-aig-new` / `verify-aig-manual`(手工验证遗留), 可在验证通过后删。
-- **待提交**: git commit(25/26/09/10 模块 + envoy-save-images.sh + skill + docs)。
+- ✅ 测试 ns 已清理(verify-aig-new / verify-aig-manual 已删)。
 
 ## 环境事实(已核实, 供后续)
 - EG v1.9.1(helm, GatewayClass `eg`, 数据面 pod 2 容器 2/2, 就绪 ~11s; AI 网关数据面 pod = 3 容器: +extProc sidecar)。
