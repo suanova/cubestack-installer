@@ -207,6 +207,22 @@ load_config() {
     else
         export REGISTRY_IP_EXPLICIT=1
     fi
+    # 服务暴露方式归一化: SERVICE_EXPOSE_MODE ∈ {metallb, nodeport}
+    #   metallb|loadbalancer → metallb(生产, MetalLB LoadBalancer VIP)
+    #   nodeport             → nodeport(测试环境, NodePort 经 kube-proxy 路由, 不依赖 MetalLB)
+    # 下游 sync-addons-config / sync-kubespray-config / verify / 部署汇总统一按此分支。
+    case "${SERVICE_EXPOSE_MODE:-metallb}" in
+        nodeport|NodePort)  SERVICE_EXPOSE_MODE="nodeport" ;;
+        *)                  SERVICE_EXPOSE_MODE="metallb" ;;
+    esac
+    export SERVICE_EXPOSE_MODE
+    # registry 暴露方式: 留空 → 按全局模式派生; 显式设置(loadbalancer|nodeport|clusterip)则覆盖。
+    # cluster.conf 留空 + 各脚本里 ":-loadbalancer" 兜底的默认值统一收敛到本处, 保证所有消费者拿到同一值。
+    if [ -z "${REGISTRY_SERVICE_TYPE:-}" ]; then
+        [ "${SERVICE_EXPOSE_MODE}" = "nodeport" ] && REGISTRY_SERVICE_TYPE="nodeport" || REGISTRY_SERVICE_TYPE="loadbalancer"
+        export REGISTRY_SERVICE_TYPE
+        vlog "REGISTRY_SERVICE_TYPE 留空, 按 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE} 派生 → ${REGISTRY_SERVICE_TYPE}"
+    fi
     # 虚拟机配置(独立于 cluster.conf): source vm-nodes.conf 提供 VM 创建/网络变量
     vm_conf_load
 }
@@ -277,14 +293,10 @@ node_parse() {
     fi
 }
 
-# 默认密码: 全节点默认一致(SSH_DEFAULT_PASSWORD); 兼容旧 WORKER_SSH_PASSWORD(仅默认未设时回退)
-# 用法: node_default_pw <role> → 默认密码(可空)
+# 默认密码: 全节点默认一致(SSH_DEFAULT_PASSWORD); 节点独立密码在 NODES 第5字段显式填写
+# 用法: node_default_pw [role] → 默认密码(可空; role 仅保留签名兼容旧调用)
 node_default_pw() {
-    if [ -n "${SSH_DEFAULT_PASSWORD:-}" ]; then
-        echo "${SSH_DEFAULT_PASSWORD}"
-    elif [ "$1" = "worker" ] && [ -n "${WORKER_SSH_PASSWORD:-}" ]; then
-        echo "${WORKER_SSH_PASSWORD}"
-    fi
+    echo "${SSH_DEFAULT_PASSWORD:-}"
 }
 
 # 旧接口(向后兼容): node_password <role> <explicit_pw> → 解析后密码
@@ -577,6 +589,18 @@ first_master_ip() {
             echo "${NODE_IP}"
             return 0
         fi
+    done
+    return 1
+}
+
+# 返回第一个节点 IP(NODES 顺序首位; NodePort 暴露模式的访问入口)
+# 用法: NODE_IP="$(first_node_ip)" || { err "未找到节点"; exit 1; }
+first_node_ip() {
+    local line
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        [ -n "${NODE_IP}" ] && { echo "${NODE_IP}"; return 0; }
     done
     return 1
 }

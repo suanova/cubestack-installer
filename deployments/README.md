@@ -34,7 +34,7 @@
 | 容器运行时 | containerd(离线预加载镜像) |
 | 网络插件 | Calico(默认; 可选 flannel/cilium/kube-ovn 等) |
 | 服务发现 | CoreDNS + nodelocaldns |
-| 负载均衡 | MetalLB(Layer2, 地址池 `METALLB_POOL` 可配) |
+| 负载均衡 | MetalLB(Layer2, 地址池 `METALLB_POOL` 可配); 测试环境可用 `SERVICE_EXPOSE_MODE=nodeport` 切 NodePort 暴露(不依赖 MetalLB) |
 
 > **单节点集群(仅 1 个 control-plane)**:`k8s_deploy` 部署完成后会自动移除该 master 的
 > `NoSchedule` 污点并 uncordon(设为可调度)。因为 metallb controller / local-path /

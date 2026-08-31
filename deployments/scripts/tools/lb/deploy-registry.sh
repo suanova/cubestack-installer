@@ -13,7 +13,7 @@
 #   2) 集群外(物理网)能 push 镜像到内置 registry
 #      · 宿主机 DNAT: HOST_PHYS_IP:REGISTRY_PORT → REGISTRY_IP:REGISTRY_PORT(setup-registry-expose.sh)
 #
-# 认证: 优先 SSH 密钥(cubestack_k8s), 回退节点密码(NODES 第9字段 / WORKER_SSH_PASSWORD)。
+# 认证: 优先 SSH 密钥(cubestack_k8s), 回退节点密码(NODES 第5字段 / SSH_DEFAULT_PASSWORD)。
 # 全部配置来自 config/cluster.conf(NODES / SSH_KEY / REGISTRY_*), 无硬编码。
 # 用法: sudo ./deploy-registry.sh
 # ============================================================
