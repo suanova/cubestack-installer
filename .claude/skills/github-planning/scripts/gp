@@ -262,12 +262,16 @@ load_state() {
   fi
   local labels milestones issues
   PAGINATE=1
-  labels="$(gh_req GET "repos/$REPO/labels?per_page=100")"
-  milestones="$(gh_req GET "repos/$REPO/milestones?state=all&per_page=100")"
-  issues="$(gh_req GET "repos/$REPO/issues?state=all&per_page=100")"
+  # 用临时文件保存远端响应, 避免超大 issue 集合塞进 jq --argjson 触发 ARG_MAX
+  local _lf _mf _if
+  _lf="$(mktemp)"; _mf="$(mktemp)"; _if="$(mktemp)"
+  TMPFILES="$TMPFILES $_lf $_mf $_if"
+  gh_req GET "repos/$REPO/labels?per_page=100" > "$_lf"
+  gh_req GET "repos/$REPO/milestones?state=all&per_page=100" > "$_mf"
+  gh_req GET "repos/$REPO/issues?state=all&per_page=100" > "$_if"
   PAGINATE=0
-  jq -n --argjson l "$labels" --argjson m "$milestones" --argjson i "$issues" \
-    '{labels:$l, milestones:$m, issues:($i | map(select(.pull_request == null)))}' > "$STATE"
+  jq -n --slurpfile l "$_lf" --slurpfile m "$_mf" --slurpfile i "$_if" \
+    '{labels:($l[0]), milestones:($m[0]), issues:($i[0] | map(select(.pull_request == null)))}' > "$STATE"
 }
 
 # --------------------------------------------------------------------------
