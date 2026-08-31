@@ -13,6 +13,10 @@
 #     保持 DEFAULT:0, 仅由 --steps verify_envoy_ai_gateway 在安装后单独执行。
 #   · ③④ 步验证 AI 控制面真正工作: AIGateway/Backend → AI 控制器翻译为 Gateway(Gateway API)→ EG 控制面
 #     使其 Programmed + MetalLB 分配 VIP(核心断言)。
+#   · ⚠ v1.x API 差异: AI Gateway v1.1 起**没有** AIGateway/Backend CRD(改为标准 Gateway +
+#     AIServiceBackend / AIGatewayRoute / GatewayConfig)。下方测试资源按 v0.x API 构造, 在 v1.x 上
+#     apply 可能失败(仅告警不阻断); 若要完整验证, 按官方 examples/basic/basic.yaml 改用标准 Gateway +
+#     AIServiceBackend + AIGatewayRoute 后手动调整本节。
 #   · ⑤ 步为**边界验证**(AI CRD 字段/路由 API 随版本 Alpha/Beta 变化): 用 busybox httpd 静态 mock
 #     一个 OpenAI chat.completions 响应, 经 AI Gateway VIP 真实调用; 失败仅告警并给出指引,
 #     不阻断(控制面调和已证明 AI 控制面工作正常)。真实 LLM 需配置真实 Backend + API Key Secret。
@@ -38,7 +42,7 @@ K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 
 ENVOY_AI_NAMESPACE="${ENVOY_AI_NAMESPACE:-ai-gateway-system}"
 ENVOY_AI_API_VERSION="${ENVOY_AI_API_VERSION:-v1beta1}"
-ENVOY_AI_GATEWAYCLASS="${ENVOY_AI_GATEWAYCLASS:-envoy-ai-gateway}"
+ENVOY_AI_GATEWAYCLASS="${ENVOY_AI_GATEWAYCLASS:-envoy-gateway}"   # AI Gateway 数据面复用 EG 的 GatewayClass(v1.x)
 TEST_NS="verify-aig-$$"        # 唯一命名空间(带 PID 后缀)
 TEST_AIG="verify-aigw"
 TEST_BACKEND="verify-aig-backend"
@@ -128,40 +132,51 @@ else
 fi
 rm -f "${LOCAL_YAML}"
 
-say "  ④ 等待 AIGateway 调和出 Gateway 且 Programmed + 分配 VIP(最长 180s)..."
+say "  ④ 等待 AIGateway 调和出 Gateway 且 Programmed(nodeport 模式: 数据面转 NodePort; metallb: 等 VIP; 最长 180s)..."
 AIG_GW=""
-AIG_VIP=""
+AIG_ENDPOINT=""
 GW_READY=0
 for i in $(seq 1 36); do
     # AI 控制器在 AIGateway 命名空间创建同名 Gateway(gateway.networking.k8s.io)
     AIG_GW="$( (SSH "${K} -n ${TEST_NS} get gateway ${TEST_AIG} --no-headers 2>/dev/null" || true) )"
     if [ -n "${AIG_GW}" ]; then
-        AIG_VIP="$( (SSH "${K} -n ${TEST_NS} get gateway ${TEST_AIG} -o jsonpath='{.status.addresses[0].value}' 2>/dev/null" || true) )"
+        if [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ]; then
+            # 无 MetalLB: 等数据面 Service 出现 → patch 成 NodePort → 访问入口 = 节点IP:NodePort
+            SVC_LINE="$( (SSH "${K} -n ${TEST_NS} get svc -l gateway.envoyproxy.io/owning-gateway-name=${TEST_AIG} --no-headers 2>/dev/null" || true) | head -1 )"
+            if [ -n "${SVC_LINE}" ]; then
+                DP_NAME="$(echo "${SVC_LINE}" | awk '{print $2}')"
+                SSH "${K} -n ${TEST_NS} patch svc ${DP_NAME} -p '{\"spec\":{\"type\":\"NodePort\"}}' >/dev/null 2>&1" || true
+                NPORT="$( (SSH "${K} -n ${TEST_NS} get svc ${DP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
+                [ -n "${NPORT}" ] && AIG_ENDPOINT="$(first_node_ip):${NPORT}"
+            fi
+        else
+            AIG_ENDPOINT="$( (SSH "${K} -n ${TEST_NS} get gateway ${TEST_AIG} -o jsonpath='{.status.addresses[0].value}' 2>/dev/null" || true) )"
+        fi
         GW_READY="$( (SSH "${K} -n ${TEST_NS} get gateway ${TEST_AIG} -o jsonpath='{.status.conditions[?(@.type==\"Programmed\")].status}' 2>/dev/null" || true) )"
-        [ "${GW_READY}" = "True" ] && [ -n "${AIG_VIP}" ] && break
+        [ "${GW_READY}" = "True" ] && [ -n "${AIG_ENDPOINT}" ] && break
     fi
     sleep 5
 done
 [ -n "${AIG_GW}" ] \
     && ok "    AIGateway 已调和出 Gateway(Gateway API 资源存在, AI 控制面工作正常) ✓" \
-    || { err "    AIGateway 未调和出 Gateway(kubectl -n ${TEST_NS} get aigateway ${TEST_AIG} -o yaml; 检查 AI 控制器日志与 EG extensionManager 配置)"; exit 1; }
-if [ "${GW_READY}" = "True" ] && [ -n "${AIG_VIP}" ]; then
-    ok "    Gateway Programmed ✓, VIP: ${AIG_VIP}"
+    || { err "    AIGateway 未调和出 Gateway(kubectl -n ${TEST_NS} get aigateway ${TEST_AIG} -o yaml; 检查 AI 控制器日志; v1.x 无 AIGateway CRD 时改用官方 examples/basic/basic.yaml 的标准 Gateway 流程)"; exit 1; }
+if [ "${GW_READY}" = "True" ] && [ -n "${AIG_ENDPOINT}" ]; then
+    ok "    Gateway Programmed ✓, 访问入口: ${AIG_ENDPOINT}"
 else
-    warn "    Gateway 未 Programmed 或未分配 VIP(GW_READY='${GW_READY}', VIP='${AIG_VIP}'); 检查 EG 数据面/MetalLB"
-    AIG_VIP=""
+    warn "    Gateway 未 Programmed 或数据面未就绪(GW_READY='${GW_READY}', 入口='${AIG_ENDPOINT}'); 检查 EG 数据面 / MetalLB(metallb 模式)或数据面 Service(nodeport 模式)"
+    AIG_ENDPOINT=""
 fi
 
 say "  ⑤ 边界验证: 经 AI Gateway 调用 mock chat.completions..."
-if [ -n "${AIG_VIP}" ]; then
-    HTTP_CODE="$( (SSH "curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST http://${AIG_VIP}/v1/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"mock\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}' 2>/dev/null" || true) )"
-    BODY="$( (SSH "curl -s -m 10 -X POST http://${AIG_VIP}/v1/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"mock\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}' 2>/dev/null" || true) )"
+if [ -n "${AIG_ENDPOINT}" ]; then
+    HTTP_CODE="$( (SSH "curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST http://${AIG_ENDPOINT}/v1/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"mock\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}' 2>/dev/null" || true) )"
+    BODY="$( (SSH "curl -s -m 10 -X POST http://${AIG_ENDPOINT}/v1/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"mock\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}' 2>/dev/null" || true) )"
     case "${BODY}" in
         *envoy-ai-gateway-verify-ok*) ok "    HTTP ${HTTP_CODE}, mock LLM 响应透传成功 ✓(AI Gateway 数据面转发正常)" ;;
         *) warn "    调用未返回期望响应(HTTP_CODE='${HTTP_CODE}', body='${BODY:0:120}...'); 常见原因: AIGatewayRoute 路由未配置/字段版本差异/Backend url 格式; 控制面调和已通过, 真实 LLM 需按官方文档配 AIGatewayRoute + 真实 Backend" ;;
     esac
 else
-    warn "    无 VIP, 跳过真实调用(控制面调和已证明 AI 控制面工作正常)"
+    warn "    数据面入口未就绪, 跳过真实调用(控制面调和已证明 AI 控制面工作正常)"
 fi
 
 say "  ⑥ 清理测试资源(trap 兜底)..."

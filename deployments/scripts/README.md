@@ -168,8 +168,9 @@ deployments/scripts/
 | 区块 | 关键项 | 说明 |
 |---|---|---|
 | **核心必改项** | `SSH_DEFAULT_PASSWORD` `NODES` `METALLB_POOL` | 节点默认密码、节点清单、MetalLB 地址池(文件顶部醒目位置) |
+| 服务暴露 | `SERVICE_EXPOSE_MODE` | 对外暴露方式全局开关: `metallb`(默认,生产, LoadBalancer VIP)/ `nodeport`(测试环境, NodePort, 自动关 MetalLB); 见 §5.8 |
 | 宿主机 | `HOST_PHYS_IP` | 宿主机物理 IP(SNAT 源) |
-| SSH | `SSH_KEY_NAME` `WORKER_SSH_PASSWORD` | 密钥名、worker 独立密码(默认密码已在核心必改项) |
+| SSH | `SSH_KEY_NAME` | 密钥名(默认密码见核心必改项 `SSH_DEFAULT_PASSWORD`; 节点独立密码写 NODES 第5字段) |
 | 节点规划 | `NODES=( ... )` | 每行一节点(5字段, 不区分虚拟机/裸金属); 虚拟机规格见 `tools/vm/vm-nodes.conf` |
 | 离线文件 | `OFFLINE_FILES_DIR` `LOCAL_REPO_DIR` `MINIO_*` | 离线 binary/镜像目录与 MinIO 下载配置(§2.1b) |
 | kubespray | `KUBESPRAY_INV_DIR` `KUBESPRAY_DIR` `UPDATE_ETC_HOSTS` | inventory 输出位置、playbook 位置、是否写 /etc/hosts |
@@ -328,6 +329,8 @@ sudo ./scripts/tools/net/setup-libvirt-nat.sh --delete [网络名] # 删除回�
 
 > 说明:`kube_service_addresses` / `kube_pods_subnet` 为集群内部 CIDR(10.233.x),属 kubespray 默认值,无需从环境同步。
 > 说明:集群已默认启用 **MetalLB**(Layer2,地址池来自 `METALLB_POOL`);**Registry(集群内)默认不部署**(`REGISTRY_ENABLED=0`),集群外镜像仓库用 **Harbor**(`HARBOR_ENABLED`);**local-path-provisioner 默认不启动**(`LOCAL_PATH_ENABLED=false`,需本地 PVC 持久化时启用)。组件开关配置见 `group_vars/k8s_cluster/addons.yml`(由 `sync-addons-config.sh` 从 cluster.conf 生成)。
+>
+> **对外暴露方式(`SERVICE_EXPOSE_MODE`)**:默认 `metallb`(生产)用 LoadBalancer VIP;设 `nodeport`(测试环境)则 `sync-addons-config.sh` 自动**关闭 MetalLB**(addons.yml `metallb_enabled=false`)、registry→NodePort、ingress-nginx(若启用)→NodePort(30080/30081);Envoy Gateway 数据面需转 NodePort(`tools/lb/gateway-nodeport.sh`, 见 `docs/envoy-gateway.md`)。
 
 ### 5.8.1 内置 Registry(镜像仓库)使用指南
 
@@ -423,7 +426,8 @@ REGISTRY_ENABLED=1                 # 0 关闭 registry 信任/转发配置
 REGISTRY_DOMAIN="registry.local"   # 统一内部域名
 REGISTRY_IP="10.244.2.100"         # MetalLB 固定 VIP(须在 METALLB_POOL 内, 避开 .0/.255)
 REGISTRY_PORT="5000"
-REGISTRY_SERVICE_TYPE="loadbalancer" # loadbalancer | nodeport(不依赖 MetalLB, 外部用 REGISTRY_NODEPORT)
+REGISTRY_SERVICE_TYPE=""           # 留空=按 SERVICE_EXPOSE_MODE 自动(metallb→loadbalancer, nodeport→nodeport);
+                                   # 显式覆盖: loadbalancer | nodeport(不依赖 MetalLB, 外部用 REGISTRY_NODEPORT) | clusterip
 REGISTRY_NODEPORT="31148"            # nodeport 模式的固定 NodePort
 ```
 

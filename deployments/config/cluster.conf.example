@@ -40,6 +40,15 @@ METALLB_POOL="10.66.1.130-10.66.1.139"
 # 各组件详细参数仍在下方对应阶段(此块只保留开关, 避免两处维护)。
 # ════════════════════════════════════════════════════════════
 
+# ---- 服务暴露方式(全局开关; 决定 registry/ingress-nginx/Envoy Gateway 的对外暴露形态) ----
+#   metallb(默认, 生产)  = 用 MetalLB LoadBalancer VIP 暴露(registry 固定 VIP / ingress 80,443 / EG 数据面 VIP)
+#   nodeport(测试环境)   = 用 NodePort 暴露(不依赖 MetalLB 与 L2 同网段空闲 IP; 外部访问 <任一节点IP>:<NodePort>)
+#                         · 自动关闭 MetalLB; registry → NodePort(REGISTRY_NODEPORT 31148)
+#                         · ingress-nginx(若启用) → NodePort(30080/30081)
+#                         · Envoy Gateway 数据面 → NodePort(已创建的 Gateway 用 tools/lb/gateway-nodeport.sh 转换)
+#   各服务仍可单独覆盖: REGISTRY_SERVICE_TYPE(见阶段三 3.2); ingress-nginx 在 kubespray addons.yml。
+SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-metallb}"
+
 # ---- 阶段一、宿主机环境 ----
 HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # API 四层负载均衡(modules/01_env/05_lb_haproxy.sh; 默认 master 直连, 需要时开)
 KEEPALIVED_ENABLED="${KEEPALIVED_ENABLED:-false}"       # API VIP 高可用(modules/01_env/06_lb_keepalived.sh)
@@ -97,7 +106,8 @@ HOST_PHYS_IP="${HOST_PHYS_IP:-}"
 # ---------------- 1.3 SSH 配置 ----------------
 SSH_KEY_DIR="${SSH_KEY_DIR:-${HOME}/.ssh}"
 SSH_KEY_NAME="${SSH_KEY_NAME:-cubestack_k8s}"
-WORKER_SSH_PASSWORD="${WORKER_SSH_PASSWORD:-}"
+#   注: 节点默认密码统一用 SSH_DEFAULT_PASSWORD(见核心必改项①); 节点独立密码在 NODES 第5字段显式填写。
+#       (旧变量 WORKER_SSH_PASSWORD 已废弃移除, 请勿再配置)
 
 # ---------------- 1.4 节点规划(依赖: 1.3 已就绪) ----------------
 # (NODES 已在顶部核心必改项定义; 虚拟机规格见 tools/vm/vm-nodes.conf)
@@ -235,10 +245,12 @@ REGISTRY_DOMAIN="${REGISTRY_DOMAIN:-registry.local}"   # 内部域名(需本地 
 # 显式设置则用它固定(须在池内、避开 .0/.255) —— 适合要绑定某特定空闲 IP 时。
 REGISTRY_IP="${REGISTRY_IP:-}"
 REGISTRY_PORT="${REGISTRY_PORT:-5000}"
-# registry Service 暴露方式(业界常见):
-#   loadbalancer = MetalLB 固定 VIP(默认, 端口保持标准 5000, 依赖 metallb addon)
+# registry Service 暴露方式: 留空 = 按 SERVICE_EXPOSE_MODE 自动派生(metallb→loadbalancer, nodeport→nodeport);
+#   显式设置可单独覆盖(如生产只让 registry 走 NodePort):
+#   loadbalancer = MetalLB 固定 VIP(端口保持标准 5000, 依赖 metallb addon)
 #   nodeport     = NodePort 经 kube-proxy 路由(不依赖 MetalLB; 外部用 REGISTRY_NODEPORT 端口, 或宿主 DNAT 5000→nodeport)
-REGISTRY_SERVICE_TYPE="${REGISTRY_SERVICE_TYPE:-loadbalancer}"
+#   clusterip    = 仅集群内访问
+REGISTRY_SERVICE_TYPE="${REGISTRY_SERVICE_TYPE:-}"
 REGISTRY_NODEPORT="${REGISTRY_NODEPORT:-31148}"        # nodeport 模式: 固定 NodePort(30000-32767)
 # 宿主机对外 DNAT(默认 0 = 只用 MetalLB VIP, 不做宿主机 NAT): 集群内/节点直接从 registry.local(VIP)拉取,
 # 无需宿主机转发; 仅当需要"集群外 push → push 机把 registry.local 解析到宿主机"时才设 1。
@@ -329,18 +341,18 @@ LWS_RELEASE_NAME="${LWS_RELEASE_NAME:-lws}"             # Helm release 名
 
 # ---------------- Envoy Gateway / Envoy AI Gateway 配置 ----------------
 # Chart 来源(二选一/三选一, 与 LWS 一致; **本地源优先, 默认离线安装**):
-#   dir = 本地解包目录(默认 deployments/cubestack-addon/envoy-gateway/{eg,ai}, 需先联网跑 tools/images/envoy-fetch-charts.sh)
-#   tgz = 本地 chart 压缩包 / oci = 官方 registry(需联网)
-ENVOY_EG_CHART_SOURCE="${ENVOY_EG_CHART_SOURCE:-dir}"       # Envoy Gateway chart 来源: dir|tgz|oci
-ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.0}"               # Envoy Gateway 版本(控制面 gateway + 数据面 envoy 同 tag)
+#   dir = 本地解包目录(deployments/cubestack-addon/envoy-gateway/{eg,ai})
+#   tgz = 本地 chart 压缩包(默认; 仓库只存 tgz 不膨胀, 部署时临时解压)/ oci = 官方 registry(需联网)
+ENVOY_EG_CHART_SOURCE="${ENVOY_EG_CHART_SOURCE:-tgz}"       # Envoy Gateway chart 来源: dir|tgz|oci
+ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.1}"               # Envoy Gateway 版本(控制面 gateway + 数据面 envoy 同 tag)
 ENVOY_EG_CHART_DIR="${ENVOY_EG_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/eg}"
 ENVOY_EG_CHART_TGZ="${ENVOY_EG_CHART_TGZ:-${ENVOY_EG_CHART_DIR}/gateway-helm-${ENVOY_EG_VERSION}.tgz}"
 ENVOY_EG_CHART_OCI="${ENVOY_EG_CHART_OCI:-oci://docker.io/envoyproxy/gateway-helm}"
-ENVOY_AI_CHART_SOURCE="${ENVOY_AI_CHART_SOURCE:-dir}"       # Envoy AI Gateway chart 来源: dir|tgz|oci
-ENVOY_AI_VERSION="${ENVOY_AI_VERSION:-v1.0.0}"               # Envoy AI Gateway 控制器版本(1.0 = GA)
+ENVOY_AI_CHART_SOURCE="${ENVOY_AI_CHART_SOURCE:-tgz}"       # Envoy AI Gateway chart 来源: dir|tgz|oci
+ENVOY_AI_VERSION="${ENVOY_AI_VERSION:-v1.1.0}"               # Envoy AI Gateway chart 版本 + 控制器镜像 tag(带 v)
 ENVOY_AI_API_VERSION="${ENVOY_AI_API_VERSION:-v1beta1}"      # AI CRD apiVersion(aigateway.envoyproxy.io/<v>; v1.0 起 v1beta1)
 ENVOY_AI_CHART_DIR="${ENVOY_AI_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/ai}"
-ENVOY_AI_CHART_OCI="${ENVOY_AI_CHART_OCI:-oci://ghcr.io/envoyproxy/ai-gateway/charts}"
+ENVOY_AI_CHART_OCI="${ENVOY_AI_CHART_OCI:-oci://docker.io/envoyproxy}"   # AI chart OCI 前缀(官方 docker.io; 追加 ai-gateway-crds-helm / ai-gateway-helm)
 # 镜像(推送到集群内置 registry, K8s 节点按域名拉取; 离线 tar 由 tools/images/envoy-save-images.sh 生成)
 ENVOY_EG_IMAGE_BASE="${ENVOY_EG_IMAGE_BASE:-${REGISTRY_DOMAIN}:${REGISTRY_PORT}/envoyproxy}"   # EG 控制面/数据面镜像前缀
 ENVOY_AI_IMAGE_REPO="${ENVOY_AI_IMAGE_REPO:-${REGISTRY_DOMAIN}:${REGISTRY_PORT}/ai-gateway/ai-gateway-controller}"

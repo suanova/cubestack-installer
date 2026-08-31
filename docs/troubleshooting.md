@@ -397,20 +397,20 @@ kubectl get validatingwebhookconfiguration lws-validating-webhook-configuration 
 | `GatewayClass eg` 未 Accepted | 控制面未就绪 / controllerName 不匹配 | `kubectl -n envoy-gateway-system logs deploy/eg --tail=50`; GatewayClass 的 `spec.controllerName` 必须是 `gateway.envoyproxy.io/gatewayclass-controller` |
 | Gateway 一直没 VIP(ADDRESS 空) | MetalLB 池耗尽/网段冲突, 或数据面未起来 | `kubectl describe gateway` 看条件; `kubectl get svc -n <gw-ns>` 看 LoadBalancer pending 原因(参考 §三.1/§三.2) |
 | `10_envoy_ai_gateway.sh` 报 "未检测到 Envoy Gateway(GatewayClass eg 未 Accepted)" | AI 依赖 EG, 但 EG 未装/未就绪 | 先 `ENVOY_GATEWAY_ENABLED=true` 部署模块 `envoy_gateway`, 再装 AI |
-| AI 控制器 pod CrashLoop 或 `AIGateway` 调和不出 Gateway | EG 的 `extensionManager` 未注入 / 版本不匹配(AI 与 EG 版本兼容矩阵) | 确认模块 [4/6] 步 helm upgrade eg 成功(`kubectl -n envoy-gateway-system get cm envoy-gateway -o yaml | grep extensionManager`); 按 `docs/envoy-gateway.md` §三.4 手工注入并重启 eg; 核对 AI↔EG 版本兼容矩阵 |
-| AI CRD apply 报 `no matches for kind "AIGateway"` | CRD 未装 / apiVersion 版本不符 | `kubectl get crd | grep aigateway`; 确认 `ENVOY_AI_API_VERSION`(v1.0 起 `v1beta1`)与所装 chart 一致 |
+| AI 控制器 pod CrashLoop / webhook 不生效(v1.x) | `envoyGateway.namespace` 未指向 EG 命名空间 / EG 版本不匹配(AI 与 EG 版本兼容矩阵) | 确认模块 10 helm 安装注入 `--set envoyGateway.namespace` = `envoy-gateway-system`(`kubectl -n ai-gateway-system get deploy ai-gateway-controller -o yaml \| grep envoyGatewayNamespace`); 核对 AI↔EG 版本兼容矩阵 |
+| AI CRD apply 报 `no matches for kind "AIGateway"` | v1.x 无 AIGateway/Backend CRD(改为 AIServiceBackend/AIGatewayRoute); 或 CRD 未装 | `kubectl get crd \| grep aigateway`; 按 `docs/envoy-gateway.md` §4.2 / 官方 `examples/basic/basic.yaml` 使用 v1.x 资源 |
 
 **验证**
 ```bash
 sudo ./deploy-cluster.sh --steps verify_envoy_gateway      # 控制面 + GatewayClass + VIP + 真实 HTTP 转发
-sudo ./deploy-cluster.sh --steps verify_envoy_ai_gateway   # AI 控制器 + CRD + AIGateway→Gateway 调和(+ 边界 mock 调用)
+sudo ./deploy-cluster.sh --steps verify_envoy_ai_gateway   # AI 控制器 + CRD(+ 按官方 basic.yaml 的标准 Gateway 流程)
 kubectl get gatewayclass,gateway,httproute -A
-kubectl get aigateway,backend -A
+kubectl get aiservicebackend,aigatewayroute -A
 ```
 
 **相关命令**
 ```bash
-kubectl -n envoy-gateway-system get pods,cm envoy-gateway    # EG 控制面 + 运行时配置(extensionManager 在此)
+kubectl -n envoy-gateway-system get pods,cm envoy-gateway    # EG 控制面 + 运行时配置
 kubectl -n ai-gateway-system logs deploy/ai-gateway-controller --tail=50
 kubectl -n <gw-ns> get deploy -l gateway.envoyproxy.io/owning-gateway-name=<gw> -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'   # 数据面镜像
 ```

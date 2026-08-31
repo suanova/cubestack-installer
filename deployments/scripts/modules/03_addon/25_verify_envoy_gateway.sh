@@ -125,18 +125,29 @@ scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null 
     && SSH "rm -f /tmp/${TEST_GW}.yaml"
 rm -f "${LOCAL_YAML}"
 
-say "  ④ 等待 Gateway 分配 VIP(MetalLB)且后端 Ready(最长 150s)..."
-GW_VIP=""
+say "  ④ 等待 Gateway 数据面就绪且后端 Ready(nodeport 模式: 数据面转 NodePort; metallb 模式: 等 VIP; 最长 150s)..."
+GW_ENDPOINT=""
 BACKEND_READY=0
 for i in $(seq 1 30); do
-    GW_VIP="$( (SSH "${K} -n ${TEST_NS} get gateway ${TEST_GW} -o jsonpath='{.status.addresses[0].value}' 2>/dev/null" || true) )"
     BACKEND_READY="$( (SSH "${K} -n ${TEST_NS} get pods --no-headers 2>/dev/null" || true) | awk '$2=="1/1" && $3=="Running"{n++} END{print n+0}' )"
-    [ -n "${GW_VIP}" ] && [ "${BACKEND_READY:-0}" -ge 1 ] && break
+    if [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ]; then
+        # 无 MetalLB: 等数据面 Service 出现 → patch 成 NodePort → 访问入口 = 节点IP:NodePort
+        SVC_LINE="$( (SSH "${K} -n ${TEST_NS} get svc -l gateway.envoyproxy.io/owning-gateway-name=${TEST_GW} --no-headers 2>/dev/null" || true) | head -1 )"
+        if [ -n "${SVC_LINE}" ]; then
+            DP_NAME="$(echo "${SVC_LINE}" | awk '{print $2}')"
+            SSH "${K} -n ${TEST_NS} patch svc ${DP_NAME} -p '{\"spec\":{\"type\":\"NodePort\"}}' >/dev/null 2>&1" || true
+            NPORT="$( (SSH "${K} -n ${TEST_NS} get svc ${DP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
+            [ -n "${NPORT}" ] && GW_ENDPOINT="$(first_node_ip):${NPORT}"
+        fi
+    else
+        GW_ENDPOINT="$( (SSH "${K} -n ${TEST_NS} get gateway ${TEST_GW} -o jsonpath='{.status.addresses[0].value}' 2>/dev/null" || true) )"
+    fi
+    [ -n "${GW_ENDPOINT}" ] && [ "${BACKEND_READY:-0}" -ge 1 ] && break
     sleep 5
 done
-[ -n "${GW_VIP}" ] || { err "Gateway 未分配到 VIP(kubectl -n ${TEST_NS} get gateway ${TEST_GW}; 检查 MetalLB 池与 EG 数据面)"; exit 1; }
+[ -n "${GW_ENDPOINT}" ] || { err "Gateway 数据面未就绪(kubectl -n ${TEST_NS} get gateway ${TEST_GW} / get svc -A -l gateway.envoyproxy.io/owning-gateway-name=${TEST_GW}; nodeport 模式检查数据面 Service 是否出现)"; exit 1; }
 [ "${BACKEND_READY:-0}" -ge 1 ] || { err "测试后端未 Ready(kubectl -n ${TEST_NS} get pods; 检查 busybox 镜像是否预加载)"; exit 1; }
-ok "    Gateway 已分配 VIP: ${GW_VIP}; 后端 Ready ✓"
+ok "    Gateway 就绪, 访问入口: ${GW_ENDPOINT}; 后端 Ready ✓"
 
 # 确认数据面镜像来自集群内置 registry(离线关键点)
 DP_IMG="$( (SSH "${K} -n ${TEST_NS} get deploy -l gateway.envoyproxy.io/owning-gateway-name=${TEST_GW} -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' 2>/dev/null" || true) )"
@@ -152,13 +163,13 @@ else
     warn "    未找到数据面 Deployment(检查 Gateway 状态: kubectl -n ${TEST_NS} describe gateway ${TEST_GW})"
 fi
 
-say "  ⑤ 真实功能验证: curl http://${GW_VIP}/ 应返回后端内容..."
-HTTP_CODE="$( (SSH "curl -s -o /dev/null -w '%{http_code}' -m 10 http://${GW_VIP}/ 2>/dev/null" || true) )"
-BODY="$( (SSH "curl -s -m 10 http://${GW_VIP}/ 2>/dev/null" || true) )"
+say "  ⑤ 真实功能验证: curl http://${GW_ENDPOINT}/ 应返回后端内容..."
+HTTP_CODE="$( (SSH "curl -s -o /dev/null -w '%{http_code}' -m 10 http://${GW_ENDPOINT}/ 2>/dev/null" || true) )"
+BODY="$( (SSH "curl -s -m 10 http://${GW_ENDPOINT}/ 2>/dev/null" || true) )"
 [ "${HTTP_CODE}" = "200" ] && [ -n "${BODY}" ] \
     && ok "    HTTP ${HTTP_CODE}, 响应: ${BODY} ✓" \
     || { err "    转发失败(HTTP_CODE='${HTTP_CODE}', body='${BODY}'); 检查数据面/HTTPRoute/后端"; exit 1; }
 
 say "  ⑥ 清理测试资源(trap 兜底)..."
 cleanup
-ok "Envoy Gateway 端到端验证通过: 控制面运行 + GatewayClass Accepted + MetalLB VIP + 真实 HTTP 转发 200"
+ok "Envoy Gateway 端到端验证通过: 控制面运行 + GatewayClass Accepted + ${GW_ENDPOINT} 入口 + 真实 HTTP 转发 200"

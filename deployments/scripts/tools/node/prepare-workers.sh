@@ -2,7 +2,7 @@
 # ============================================================
 # 批量准备物理 GPU worker 节点(master VM 外的裸金属)
 # 对每台 worker:
-#   1. 用 WORKER_SSH_PASSWORD 注入 SSH 公钥(免密)
+#   1. 用节点密码(NODES 第5字段显式密码或默认 SSH_DEFAULT_PASSWORD)注入 SSH 公钥(免密)
 #   2. 安装离线 .deb 包(iputils-ping/rsync/iptables/curl/ca-certificates)
 #   3. 推送 /etc/hosts 节点解析(k8s-api.nova.local + 全节点)
 # 用法: sudo ./prepare-workers.sh [--only <hostname>]
@@ -62,7 +62,7 @@ for line in "${NODES[@]:-}"; do
         ok "root id_rsa 免密登录 OK"
     else
         # root id_rsa 免密失败: 尝试密码注入 root id_rsa 公钥
-        PWD="${NODE_PW:-${WORKER_SSH_PASSWORD:-}}"
+        PWD="${NODE_PW:-}"
         [ -n "${PWD}" ] || { warn "免密失败且无密码,跳过 ${NODE_HOSTNAME}"; continue; }
         say "注入公钥(密码认证 ${NODE_USER}@${NODE_IP})..."
         PUBKEY="$(sudo cat /root/.ssh/id_rsa.pub 2>/dev/null)"

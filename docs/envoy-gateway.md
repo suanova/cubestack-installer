@@ -10,8 +10,8 @@
 >
 > 官方文档: [Envoy Gateway](https://gateway.envoyproxy.io/) / [Envoy AI Gateway](https://aigateway.envoyproxy.io/)
 >
-> **当前默认版本**(cluster.conf 可覆盖): Envoy Gateway **v1.9.0**(GA)、Envoy AI Gateway **v1.0.0**(GA, API `v1beta1`)、
-> AI 控制器镜像 `ghcr.io/envoyproxy/ai-gateway/ai-gateway-controller:v1.0.0`。
+> **当前默认版本**(cluster.conf 可覆盖): Envoy Gateway **v1.9.1**(GA)、Envoy AI Gateway **v1.1.0**(GA)、
+> AI 控制器镜像 `docker.io/envoyproxy/ai-gateway-controller:v1.1.0`(官方源为 DockerHub, 非 ghcr)。
 
 ---
 
@@ -21,15 +21,15 @@
 |---|---|---|
 | 定位 | **通用** Kubernetes 原生 API 网关(Gateway API 的标准实现) | 面向 **LLM/AI 流量**的网关扩展层, 建立在 Envoy Gateway 之上 |
 | 本质 | 独立控制面 + 数据面(完整项目) | **不是独立二进制**: = 特制的 Envoy Gateway 控制面 + 独立的 AI 控制器 + 一组 AI CRD + 转换层 |
-| API | 标准 `gateway.networking.k8s.io`(GatewayClass/Gateway/HTTPRoute/...) | 自定义 `aigateway.envoyproxy.io`(AIGateway/Backend/BackendSecurityPolicy/...) |
+| API | 标准 `gateway.networking.k8s.io`(GatewayClass/Gateway/HTTPRoute/...) | 自定义 `aigateway.envoyproxy.io`(AIServiceBackend/AIGatewayRoute/GatewayConfig/...), 数据面用标准 Gateway |
 | 关系 | **基座** | **上层扩展**(依赖 Envoy Gateway 提供 xDS/数据面能力) |
 
-> **重要澄清**: Envoy AI Gateway **不是一个独立的网关二进制**,也不是"装个 helm chart 就完事"的普通应用。
-> 它由三部分组成:
-> 1. **特制的 Envoy Gateway**(`envoy-gateway-values.yaml` 定制, 由官方 helm chart 安装);
-> 2. **AI Gateway 控制器**(`ai-gateway-controller`, 独立 Deployment + 独立 CRD), 监听 AI CRD 并翻译为
->    Envoy Gateway 的 `Gateway`/`HTTPRoute` + 自研转换(ext_proc / 模型路由 / token 统计);
-> 3. **AI CRD**(`AIGateway` / `Backend` / `BackendSecurityPolicy` 等)。
+> **重要澄清(v1.x 架构)**: Envoy AI Gateway **不是一个独立的网关二进制**,也不是"装个 helm chart 就完事"的普通应用。
+> 它由三部分组成, 且**数据面完全复用标准 Envoy Gateway**(不再像 v0.x 那样用特制 EG / extensionManager 扩展服务器):
+> 1. **标准 Envoy Gateway**(模块 09 安装的 `gateway-helm`, 提供 `envoy-gateway` GatewayClass 与数据面);
+> 2. **AI Gateway 控制器**(`ai-gateway-controller`, 独立 Deployment + MutatingWebhook), 通过 **webhook + extProc 注入**
+>    为标准 Gateway 提供 AI 能力(模型路由 / token 统计 / 多供应商转换);
+> 3. **AI CRD**(`AIServiceBackend` / `AIGatewayRoute` / `GatewayConfig` / `BackendSecurityPolicy` / `QuotaPolicy` 等)。
 >
 > 因此**离线部署必须先装 Envoy Gateway, 再装 AI Gateway 控制器与 CRD**。
 
@@ -57,7 +57,10 @@
 
 - **控制面** `envoy-gateway`: 监听 Gateway API 资源 → 翻译成 xDS(Listener/Route/Cluster/Endpoint)→ gRPC 推送数据面。
 - **数据面** Envoy Proxy: 用户创建 `Gateway` 后, 控制器自动在集群内创建 Envoy Proxy Deployment/Service(非 Sidecar), 承担真实流量。
-- **入口暴露**: Gateway 的 Listener 通过 MetalLB(本集群)分配 VIP → 外部 URL 可达。
+- **入口暴露(metallb 模式, 默认/生产)**: Gateway 的 Listener 通过 MetalLB(本集群)分配 VIP → 外部 URL 可达。
+- **入口暴露(nodeport 模式, 测试环境)**: `SERVICE_EXPOSE_MODE=nodeport` 时不部署 MetalLB, 数据面 Service 默认仍创建为 LoadBalancer, 需转 NodePort 才可访问:
+  - 创建 Gateway 时加注解(推荐, 持久): `gateway.envoyproxy.io/service-type: NodePort`, 之后数据面自动以 NodePort 暴露;
+  - 对已创建、未带注解的 Gateway/AIGateway: 运行 `sudo ./deployments/scripts/tools/lb/gateway-nodeport.sh <gateway名> [namespace]`, 一键 patch 数据面 Service 为 NodePort 并打印 `节点IP:NodePort` 访问地址。
 - **扩展**: `ExtensionRef` 外部处理器(ext_proc)、Wasm、Lua; 限流/熔断/重试/超时/故障注入; TLS/mTLS/JWT/OAuth2; Prometheus metrics / OTel。
 
 ### 2.2 Envoy AI Gateway(AI 专用扩展)
@@ -67,19 +70,21 @@
 │ Kubernetes Cluster                                           │
 │                                                              │
 │  AI CRDs                 AI Gateway 控制器                    │
-│  (AIGateway/Backend/     (ai-gateway-controller Deployment)  │
-│   BackendSecurityPolicy)──▶ 把 AI CRD 翻译为:               │
-│                              · Gateway/HTTPRoute(交 EG 控制面)│
-│                              · 模型路由 / token 统计 /        │
-│                                ext_proc 转换                 │
+│  (AIServiceBackend/      (ai-gateway-controller Deployment)  │
+│   AIGatewayRoute/──▶ 监听 AI CRD + 标准 Gateway:             │
+│   GatewayConfig)         · MutatingWebhook 注入 extProc      │
+│                          · 模型路由 / token 统计 /            │
+│                            多供应商转换                      │
 │                                   │                          │
 │                                   ▼                          │
-│  Envoy Gateway 控制面(特制) ── xDS ──▶ Envoy Proxy 数据面     │
-│   (由 ai-gateway helm 一并部署/接管)   (AI 感知过滤器/转换)    │
+│  Envoy Gateway 控制面 ── xDS ──▶ Envoy Proxy 数据面          │
+│  (标准 gateway-helm,             (AI 感知过滤器/转换,        │
+│   复用, 不再特制)                由 extProc 提供 AI 能力)    │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 - **AI 控制器** 是新增的独立组件: 处理 AI 语义(多模型供应商适配、token 级限流、语义缓存、模型 failover/fallback、prompt guardrail 接入)。
+- **注入方式(v1.x)**: AI 控制器注册 MutatingWebhook, 自动给用户创建的**标准 Gateway**(gatewayClassName=`envoy-gateway`)注入 extProc 配置 → 数据面 Envoy 通过 extProc 外置处理器完成 AI 语义处理。v0.x 的 EG extensionManager / Extension Server(18090 端口)已废弃, v1.x chart 不再使用。
 - **协议理解**: 原生理解 `Chat Completions` 等 LLM API 格式, 可把 OpenAI 格式请求翻译为 Anthropic/Gemini/Bedrock 等格式(多供应商统一入口)。
 - **可选依赖**: 语义缓存需要向量/Redis 类后端(本仓库默认不启用, 见 `ENVOY_AI_SEMANTIC_CACHE_ENABLED`)。
 
@@ -99,7 +104,7 @@
 
 - **只要统一流量入口 / API 网关**(业务 URL 转发、认证前置、限流)→ 装 **Envoy Gateway** 即可(P1-9 刚需, `ENVOY_GATEWAY_ENABLED=true`)。
 - **要暴露 LLM 服务 / 统一多模型供应商 / token 限流 / 语义缓存** → 在 Envoy Gateway 基础上加装 **Envoy AI Gateway**(`ENVOY_AI_GATEWAY_ENABLED=true`, **依赖前者先装**)。
-- 两者可同时存在(各自独立的 GatewayClass / 命名空间), 互不干扰。
+- 两者可同时存在: AI Gateway 数据面**复用** EG 的 `envoy-gateway` GatewayClass(无需第二个数据面); AI 控制器独立命名空间 `ai-gateway-system`。
 
 ---
 
@@ -110,7 +115,7 @@
 | 组件 | 模块 | 开关 | 内容 |
 |---|---|---|---|
 | Envoy Gateway | `09_envoy_gateway.sh` | `ENVOY_GATEWAY_ENABLED` | helm 离线安装 `gateway-helm` + 默认 GatewayClass `eg` + 示例资源 |
-| Envoy AI Gateway | `10_envoy_ai_gateway.sh` | `ENVOY_AI_GATEWAY_ENABLED` | helm 离线安装 AI Gateway CRD chart + 控制器 chart(内含特制 EG values), 依赖 EG 已装 |
+| Envoy AI Gateway | `10_envoy_ai_gateway.sh` | `ENVOY_AI_GATEWAY_ENABLED` | helm 离线安装 AI CRD chart(`ai-gateway-crds-helm`)+ 控制器 chart(`ai-gateway-helm`, 独立控制器, 复用 EG 数据面), 依赖 EG 已装 |
 
 **依赖关系**: `10_envoy_ai_gateway.sh` 前置检查会确认 Envoy Gateway 已就绪(`envoy-gateway-system` 命名空间 / `eg` GatewayClass 存在), 未装则报错并提示先启用 `ENVOY_GATEWAY_ENABLED`。
 
@@ -120,14 +125,17 @@
 
 | 物料 | 位置 | 生成工具 |
 |---|---|---|
-| EG chart(`gateway-helm`) | `deployments/cubestack-addon/envoy-gateway/eg/` | `tools/images/envoy-fetch-charts.sh`(helm pull) |
-| AI chart(`ai-gateway-crds-helm` + `ai-gateway-controller-helm`) | `deployments/cubestack-addon/envoy-gateway/ai/` | 同上 |
+| EG chart tgz(`gateway-helm-<v>.tgz`) | `deployments/cubestack-addon/envoy-gateway/eg/` | `tools/images/envoy-fetch-charts.sh`(helm pull, **只存 tgz**) |
+| AI chart tgz(`ai-gateway-crds-helm-<v>.tgz` + `ai-gateway-helm-<v>.tgz`) | `deployments/cubestack-addon/envoy-gateway/ai/` | 同上 |
 | 全部镜像 tar | `deployments/offline-files/envoy/` | `tools/images/envoy-save-images.sh` |
+
+> 仓库**只存 chart tgz 压缩包**(不膨胀代码库); 部署模块(09/10)在**部署时把 tgz 临时解压到 `mktemp` 目录**
+> 再 `helm install`, 退出自动清理。默认 `ENVOY_*_CHART_SOURCE=tgz`; 手工放好 tgz 即可, 无需解包。
 
 **镜像清单**(随版本变化, 以 `envoy-save-images.sh` 输出为准):
 
 - Envoy Gateway: `envoyproxy/gateway`(控制面)、`envoyproxy/envoy`(数据面); 若启用限流再备 `envoyproxy/ratelimit`、`envoyproxy/envoy-ratelimit`。
-- Envoy AI Gateway: `ghcr.io/envoyproxy/ai-gateway/ai-gateway-controller`(控制器); AI 控制面复用的 EG 镜像同上。
+- Envoy AI Gateway: `docker.io/envoyproxy/ai-gateway-controller`(控制器, 官方源 DockerHub, 非 ghcr); AI 数据面复用 EG 的镜像(`envoyproxy/envoy`)。
 
 ### 3.3 镜像流向(与 LWS/gpu_operator 同一模式)
 
@@ -142,9 +150,9 @@
 |---|---|---|
 | gateway-helm | `image.repository` / `image.tag` | EG 控制面镜像(默认 `docker.io/envoyproxy/gateway`) |
 | gateway-helm | `envoyGateway.image.repository` / `image.tag` | **数据面** Envoy 镜像(默认 `docker.io/envoyproxy/envoy`) |
-| gateway-helm | `envoyGateway.extensionManager` 等 | 扩展组件(默认关, 不启用) |
+| gateway-helm | `envoyGateway.extensionManager` | v0.x 扩展机制(已废弃; v1.x AI 不再使用, 默认不启用) |
 | ai-gateway-crds-helm | — | 纯 CRD chart, 无镜像 |
-| ai-gateway-controller-helm | `image.repository` / `image.tag` | AI 控制器镜像(默认 `ghcr.io/envoyproxy/ai-gateway/ai-gateway-controller`) |
+| ai-gateway-helm | `controller.image.repository` / `controller.image.tag` | AI 控制器镜像(默认 `docker.io/envoyproxy/ai-gateway-controller`; 另 `controller.nameOverride` 定资源名、`envoyGateway.namespace` 指 EG 命名空间) |
 
 > 数据面镜像改写是关键: 用户创建 `Gateway` 后控制器动态创建的 Envoy Proxy Deployment 必须能从集群内置 registry 拉镜像(默认 docker.io 在离线集群不可达)。
 
@@ -194,30 +202,49 @@ spec:
 
 访问: `curl http://<Gateway VIP>/`(VIP 由 MetalLB 分配, `kubectl get gateway` 的 ADDRESS 字段)。
 
-### 4.2 Envoy AI Gateway: 统一接入 OpenAI 兼容服务
+### 4.2 Envoy AI Gateway: 统一接入 OpenAI 兼容服务(v1.x: 标准 Gateway + AI 扩展 CRD)
 
 ```yaml
-apiVersion: aigateway.envoyproxy.io/v1alpha1
-kind: AIGateway
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
 metadata:
   name: llm-gateway
+  namespace: default
 spec:
-  gatewayClassName: envoy-ai-gateway   # AI 控制器创建的 GatewayClass
-  # ...
+  gatewayClassName: envoy-gateway   # 复用 EG 的 GatewayClass(AI 控制器 webhook 自动注入 extProc)
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
 ---
 apiVersion: aigateway.envoyproxy.io/v1alpha1
-kind: Backend
+kind: AIServiceBackend
 metadata:
   name: openai
   namespace: default
 spec:
   type: OpenAI
-  apiKeySecretRef:
-    name: openai-key
+  apiKey:
+    name: openai-key               # 引用保存 API Key 的 Secret
   url: https://api.openai.com/v1
+---
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIGatewayRoute
+metadata:
+  name: llm-route
+  namespace: default
+spec:
+  gatewayRefs:
+    - name: llm-gateway
+  rules:
+    - matches:
+        - path: /v1/chat/completions
+      backendRefs:
+        - name: openai
 ```
 
-> ⚠ AI CRD 的精确字段随版本迭代(Alpha/Beta), 以所装版本的官方文档为准; 本仓库 verify 模块使用最小可运行子集。
+> ⚠ v1.x 起**没有** `AIGateway`/`Backend` CRD(那是 v0.x API); 用上面的标准 Gateway + `AIServiceBackend` + `AIGatewayRoute`。
+> 精确字段随版本迭代(Alpha/Beta), 以所装版本官方 `examples/basic/basic.yaml` 为准; 本仓库 verify 模块使用最小可运行子集。
 
 ---
 
@@ -226,12 +253,12 @@ spec:
 ```bash
 # 端到端验证 Envoy Gateway: 建测试 Gateway+HTTPRoute → busybox httpd 后端 → curl VIP 200
 sudo ./deployments/scripts/deploy-cluster.sh --steps verify_envoy_gateway
-# 端到端验证 Envoy AI Gateway: 控制器 Ready → AI CRD 注册 → AIGateway 正常调和
+# 端到端验证 Envoy AI Gateway: 控制器 Ready → AI CRD 注册 → (v1.x 按官方 examples/basic 的标准 Gateway 流程)
 sudo ./deployments/scripts/deploy-cluster.sh --steps verify_envoy_ai_gateway
 
 # 查看
 kubectl get gatewayclass,gateway,httproute -A
-kubectl get aigateway,backend -A
+kubectl get aiservicebackend,aigatewayroute -A
 kubectl get pods -n envoy-gateway-system      # EG 控制面
 kubectl get pods -n ai-gateway-system         # AI 控制器(AI chart 默认命名空间)
 ```
@@ -240,4 +267,4 @@ kubectl get pods -n ai-gateway-system         # AI 控制器(AI chart 默认命�
 
 - 离线集群 `ImagePullBackOff`(docker.io 不可达)→ 数据面/控制面镜像未改写或未推送, 见 §3.3-3.4 与 `docs/troubleshooting.md` §四。
 - `GatewayClass` 未 `Accepted` → 控制器未就绪 / controllerName 不匹配, 见 troubleshooting §四。
-- AI Gateway 控制器启动失败 → EG 版本不匹配(见 AI 官方兼容矩阵), 或特制 EG values 与所装 EG chart 版本不一致。
+- AI Gateway 控制器启动失败 → EG 版本不匹配(见 AI 官方兼容矩阵), 或 `envoyGateway.namespace` 未指向 EG 所在命名空间。

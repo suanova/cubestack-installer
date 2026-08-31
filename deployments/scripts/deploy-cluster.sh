@@ -260,5 +260,14 @@ echo "  SSH 私钥:   ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s
 echo "  Kubeconfig: ${KUBESPRAY_INV_DIR}/artifacts/admin.conf"
 echo "              用法: kubectl --kubeconfig=${KUBESPRAY_INV_DIR}/artifacts/admin.conf get nodes"
 echo "  管理凭证:   无 kubeadmin 密码, 管理员权限=admin.conf(客户端证书); 节点 SSH 默认密码: ${SSH_DEFAULT_PASSWORD:-<未设置>}"
+if [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ]; then
+    _NIP="$(first_node_ip 2>/dev/null || echo '<节点IP>')"
+    echo "  服务暴露:   测试环境 NodePort 模式(SERVICE_EXPOSE_MODE=nodeport, 未部署 MetalLB)"
+    echo "               · registry:      http://${_NIP}:${REGISTRY_NODEPORT:-31148}/"
+    echo "               · ingress-nginx(若启用): http://${_NIP}:30080/  (https 30081)"
+    echo "               · Envoy Gateway: 数据面转 NodePort 后访问 —— tools/lb/gateway-nodeport.sh <gateway名>"
+else
+    echo "  服务暴露:   MetalLB LoadBalancer(生产默认) —— registry VIP ${REGISTRY_IP:-<自动派生>}:${REGISTRY_PORT:-5000}; ingress/Envoy Gateway 经各自 LoadBalancer VIP"
+fi
 echo "  下一步: 扩容用 --with-scale; 立即部署单个用 --steps gpu_operator,lws(...)(自动带基座); 预启用写入配置用 --enable ...(下次全量生效); 验证用 --steps verify"
 echo "============================================="

@@ -439,15 +439,24 @@ try:
         g=n["status"]["allocatable"].get("metax-tech.com/gpu")
         if g: print(n["metadata"]["name"], g)
 except Exception: pass')"
+# 分两种结果明确提示, 避免"无 GPU 的集群"误以为 GPU 已可用:
+#   · 有 GPU → 正常流程: 列出已发现 GPU 的节点, 确认资源可调度
+#   · 无 GPU → operator 部署仍算成功(组件已就绪), 但明确"暂未发现 GPU 卡", 不误导
 if [ -n "${GPU_NODES}" ]; then
-    ok "GPU 已可调度:"
+    GPU_CNT="$(echo "${GPU_NODES}" | wc -l | tr -d ' ')"
+    ok "节点已发现 GPU 资源, 可调度:"
     echo "    ${GPU_NODES}" | sed 's/^/    /'
 else
-    warn "未检测到 metax-tech.com/gpu allocatable。可能原因: 节点无沐曦 GPU、驱动未就绪、或 operator 尚未完成(重查: kubectl get pods,ds -n ${METAX_NAMESPACE})"
+    warn "暂未发现 GPU 卡(metax-tech.com/gpu allocatable 为空): 当前节点没有沐曦 GPU, GPU Operator 组件已就绪但暂无 GPU 资源可调度"
+    warn "  后续插入 GPU 卡并确保驱动就绪后, 用 --steps verify_metax_gpu 复查节点是否发现 GPU 资源"
 fi
 
 echo "---------------------------------------------"
-ok "沐曦 GPU Operator 部署完成"
+if [ -n "${GPU_NODES}" ]; then
+    ok "沐曦 GPU Operator 部署完成, ${GPU_CNT} 个节点已发现 GPU 资源(可调度)"
+else
+    ok "沐曦 GPU Operator 部署完成(暂未发现 GPU 卡, 仅 operator 组件就绪; 节点暂无 GPU 资源)"
+fi
 echo "  namespace:   ${METAX_NAMESPACE}"
 echo "  镜像仓库:    ${METAX_REGISTRY}"
 echo "  资源查看:    kubectl get pods,ds -n ${METAX_NAMESPACE}"

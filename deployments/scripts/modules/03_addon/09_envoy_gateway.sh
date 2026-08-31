@@ -11,9 +11,9 @@
 #   · 定位: Envoy Gateway = 通用 K8s API 网关基座; Envoy AI Gateway(模块 10_envoy_ai_gateway.sh)
 #     基于它构建。本模块只装 EG 基座(GatewayClass/Gateway/HTTPRoute 通用能力)。
 #   · Chart 来源(三选一, ENVOY_EG_CHART_SOURCE 控制; **本地源优先, 默认离线安装**):
-#       dir  = 本地解包目录(默认 ENVOY_EG_CHART_DIR = deployments/cubestack-addon/envoy-gateway/eg,
-#              由 tools/images/envoy-fetch-charts.sh 在联网机下载解包)
-#       tgz  = 本地 chart 压缩包(ENVOY_EG_CHART_TGZ)
+#       dir  = 本地解包目录(ENVOY_EG_CHART_DIR = deployments/cubestack-addon/envoy-gateway/eg)
+#       tgz  = 本地 chart 压缩包(**默认**, ENVOY_EG_CHART_TGZ; 仓库只存 tgz 不膨胀,
+#              部署时临时解压到 mktemp 目录再 helm 安装)
 #       oci  = 官方 OCI registry(ENVOY_EG_CHART_OCI, 需联网)
 #   · 离线优先: 本地源(dir/tgz)时, 镜像强制走本地 docker/离线 tar(不联网); 仅 oci 源或
 #     ENVOY_EG_IMAGE_ONLINE=true 才允许在线拉取。离线 tar 由 tools/images/envoy-save-images.sh
@@ -24,6 +24,9 @@
 #   · 数据面镜像改写是关键: 用户创建 Gateway 后控制器动态创建的 Envoy Proxy Deployment
 #     必须能用内置 registry 镜像(默认 docker.io 在离线集群不可达)。
 #   · 默认 GatewayClass: eg(gateway.envoyproxy.io/gatewayclass-controller), 安装后自动创建。
+#   · nodeport 暴露模式(SERVICE_EXPOSE_MODE=nodeport, 无 MetalLB): 数据面 Service 默认仍创建为
+#     LoadBalancer, 需转 NodePort 才可访问 —— 创建 Gateway 时加注解 gateway.envoyproxy.io/service-type: NodePort,
+#     或对已创建 Gateway 运行 tools/lb/gateway-nodeport.sh 转换; 详见 docs/envoy-gateway.md。
 #   · 参考: https://gateway.envoyproxy.io/ 与 docs/envoy-gateway.md
 # 数据源: cluster.conf (ENVOY_GATEWAY_ENABLED / ENVOY_EG_CHART_SOURCE / ENVOY_EG_CHART_DIR / ENVOY_EG_CHART_TGZ /
 #                       ENVOY_EG_CHART_OCI / ENVOY_EG_VERSION / ENVOY_EG_IMAGE_* / ENVOY_SAVE_DIR / REGISTRY_* / NODES)
@@ -45,8 +48,8 @@ SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/d
 K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 
 # ---------------- 派生变量(全部来自 cluster.conf, 无硬编码) ----------------
-ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.0}"       # EG 版本(控制面 gateway + 数据面 envoy 同 tag)
-ENVOY_EG_CHART_SOURCE="${ENVOY_EG_CHART_SOURCE:-dir}"
+ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.1}"       # EG 版本(控制面 gateway + 数据面 envoy 同 tag)
+ENVOY_EG_CHART_SOURCE="${ENVOY_EG_CHART_SOURCE:-tgz}"   # 默认 tgz(仓库只存 tgz, 部署时临时解压)
 ENVOY_EG_CHART_DIR="${ENVOY_EG_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/eg}"
 ENVOY_EG_CHART_TGZ="${ENVOY_EG_CHART_TGZ:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/eg/gateway-helm-${ENVOY_EG_VERSION}.tgz}"
 ENVOY_EG_CHART_OCI="${ENVOY_EG_CHART_OCI:-oci://docker.io/envoyproxy/gateway-helm}"
@@ -60,14 +63,40 @@ PUSH_REGISTRY="${REGISTRY_IP}:${REGISTRY_PORT}/envoyproxy"
 ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"
 ENVOY_EG_IMAGE_ONLINE="${ENVOY_EG_IMAGE_ONLINE:-false}"   # 允许在线拉取镜像(仅 oci 源或显式 true)
 
+# tgz 源临时解压目录(部署时 mktemp, 退出自动清理)
+_TMP_CHART=""
+trap 'rm -rf "${_TMP_CHART:-}"' EXIT
+
 # ---------------- 前置检查 ----------------
 say "检查 Envoy Gateway 前置条件..."
+# chart 来源: 默认 tgz(本地离线, 部署时临时解压)。dir 缺 Chart.yaml 时自动回退同版本 tgz(两源均本地, 安全);
+# 两者都缺失则给完整指引(离线 chart tgz 需在联网机用 envoy-fetch-charts.sh 下载后拷到部署机)。
 case "${ENVOY_EG_CHART_SOURCE}" in
-    dir)  [ -f "${ENVOY_EG_CHART_DIR}/Chart.yaml" ] || { err "EG chart 目录不存在/缺 Chart.yaml: ${ENVOY_EG_CHART_DIR}"; exit 1; } ;;
-    tgz)  [ -f "${ENVOY_EG_CHART_TGZ}" ] || { err "EG chart tgz 不存在: ${ENVOY_EG_CHART_TGZ}"; exit 1; } ;;
-    oci)  : ;;   # OCI 需联网, 由 helm 拉取
-    *)    err "ENVOY_EG_CHART_SOURCE 仅支持 dir/tgz/oci(当前=${ENVOY_EG_CHART_SOURCE})"; exit 1 ;;
+    dir)
+        if [ ! -f "${ENVOY_EG_CHART_DIR}/Chart.yaml" ] && [ -f "${ENVOY_EG_CHART_TGZ}" ]; then
+            say "EG chart 目录缺失, 检测到同版本 tgz, 自动改用 tgz 源: ${ENVOY_EG_CHART_TGZ}"
+            ENVOY_EG_CHART_SOURCE="tgz"
+        fi
+        ;;
+    tgz|oci) : ;;   # tgz 缺失在下方按源校验; oci 需联网由 helm 拉取
+    *)  err "ENVOY_EG_CHART_SOURCE 仅支持 dir/tgz/oci(当前=${ENVOY_EG_CHART_SOURCE})"; exit 1 ;;
 esac
+if [ "${ENVOY_EG_CHART_SOURCE}" = "dir" ]; then
+    if [ ! -f "${ENVOY_EG_CHART_DIR}/Chart.yaml" ]; then
+        err "EG chart 目录不存在/缺 Chart.yaml: ${ENVOY_EG_CHART_DIR}"
+        err "请先准备离线 chart(三选一):"
+        err "  ① 在联网机跑 tools/images/envoy-fetch-charts.sh 下载 tgz 到 ${ENVOY_EG_CHART_DIR}/ 后拷到部署机;"
+        err "  ② 放 chart 压缩包到 ${ENVOY_EG_CHART_TGZ}, 设 ENVOY_EG_CHART_SOURCE=tgz;"
+        err "  ③ 部署机有外网则设 ENVOY_EG_CHART_SOURCE=oci 在线安装(ENVOY_EG_CHART_OCI=${ENVOY_EG_CHART_OCI})"
+        exit 1
+    fi
+elif [ "${ENVOY_EG_CHART_SOURCE}" = "tgz" ]; then
+    if [ ! -f "${ENVOY_EG_CHART_TGZ}" ]; then
+        err "EG chart tgz 不存在: ${ENVOY_EG_CHART_TGZ}"
+        err "请: ① 在联网机跑 tools/images/envoy-fetch-charts.sh(生成 tgz) 或放 tgz 到上述路径; ② 或设 ENVOY_EG_CHART_SOURCE=dir(解包目录)/oci(在线)"
+        exit 1
+    fi
+fi
 command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 请先安装 Helm"; exit 1; }
 # 宿主机 /etc/hosts 更新(registry 域名 → VIP), 与 gpu_operator 一致
 # 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)
@@ -178,7 +207,12 @@ sleep 3
 _CHART_ARG=""
 case "${ENVOY_EG_CHART_SOURCE}" in
     dir) _CHART_ARG="${ENVOY_EG_CHART_DIR}" ;;
-    tgz) _CHART_ARG="${ENVOY_EG_CHART_TGZ}" ;;
+    tgz)   # 部署时临时解压 tgz 到 mktemp 目录再安装(仓库只存 tgz, 不膨胀)
+        _TMP_CHART="$(mktemp -d)"
+        tar -xzf "${ENVOY_EG_CHART_TGZ}" -C "${_TMP_CHART}" || { err "解压 chart tgz 失败: ${ENVOY_EG_CHART_TGZ}"; exit 1; }
+        _CHART_ARG="${_TMP_CHART}/gateway-helm"
+        [ -f "${_CHART_ARG}/Chart.yaml" ] || { err "解压结果缺 Chart.yaml(内部目录名异常): ${_TMP_CHART}"; exit 1; }
+        ;;
     oci) _CHART_ARG="${ENVOY_EG_CHART_OCI}"; _CHART_ARG+=" --version ${ENVOY_EG_VERSION#v}" ;;
 esac
 
