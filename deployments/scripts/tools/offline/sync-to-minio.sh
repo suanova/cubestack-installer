@@ -1,33 +1,48 @@
 #!/bin/bash
 # ============================================================
-# sync-to-minio.sh — 本地 offline-files 增量/全量同步到 MinIO
+# sync-to-minio.sh — 本地 offline-files 全量镜像同步到 MinIO(结构一致)
 # ------------------------------------------------------------
-# 用途: 把本机 offline-files(已清理后的精简部署必需文件)同步到 MinIO,
-#       供其他部署机 fetch-offline-from-minio.sh 拉取 —— 保证 MinIO 侧也只存
-#       部署必需文件, 不冗余。
+# 用途: 把本机 offline-files(envoy/kubespray/lws/metax-gpu/os/virtual-machine ...)
+#       **所有子目录**整体镜像到 MinIO 的 <桶>/offline-files/ 下, 远端目录结构与本地
+#       完全一致; 供其他部署机 fetch-offline-from-minio.sh 拉取(下载侧逻辑不变)。
 # 命令(等价):
 #   mc mirror --overwrite ./offline-files/ minio/cubestack-installer/offline-files/
-#
 # 行为:
-#   · 已有 mc alias 时优先复用(不要求 cluster.conf 填 MINIO_*); 无可用 alias 才回退
-#     cluster.conf MINIO_* 或交互录入
-#   · 桶/目录自适应: 默认桶 cubestack-installer; 远端目录 = 与本地源同名(默认 offline-files),
-#     保证 MinIO 侧布局与本地一致(兼容 cubestack-offline 旧布局)
-#   · mc mirror --overwrite 增量同步: 只上传本地新增/变更文件, 已一致跳过
-#   · 可选 --prune: 删除远端有而本地没有的文件(保持 MinIO 与本地一致,
-#     需谨慎 —— 远端其他集群共享时勿用)
+#   · 目标固定 = <alias>/cubestack-installer/offline-files(fetch 默认读取路径;
+#     需改桶/目录时用 cluster.conf 的 MINIO_BUCKET / MINIO_REMOTE_DIR)
+#   · alias: 已配置的 minio 别名优先复用; 否则用 cluster.conf MINIO_* 自动配置;
+#     都没有则报错并给指引(不再做多别名/多桶启发式探测)
+#   · mc mirror --overwrite 增量同步全部子目录, 远端结构 = 本地结构
+#   · 可选 --prune: 删除远端有而本地没有的文件(与本地严格一致, 远端其他集群共享时勿用)
+#   · 可选 --dry-run: 只预览不实际同步
 # 用法:
-#   ./sync-to-minio.sh               # 同步(默认 --overwrite 增量)
-#   ./sync-to-minio.sh --prune       # 同步 + 删除远端多余文件(与本地严格一致)
-#   ./sync-to-minio.sh --dry-run     # 仅预览(不实际同步)
+#   ./sync-to-minio.sh            # 同步(默认 --overwrite 增量)
+#   ./sync-to-minio.sh --prune    # 同步 + 删除远端多余文件(与本地严格一致)
+#   ./sync-to-minio.sh --dry-run  # 仅预览(不实际同步)
 # 数据源: config/cluster.conf (MINIO_ALIAS / MINIO_ENDPOINT / MINIO_ACCESS_KEY /
 #                              MINIO_SECRET_KEY / MINIO_BUCKET / MINIO_REMOTE_DIR / OFFLINE_FILES_DIR)
 # ============================================================
 set -euo pipefail
 
+# 捕获"进程环境显式传入的 OFFLINE_FILES_DIR"(须在 load_config 之前, 否则已被 lib-common 默认覆盖)
+OFFLINE_FILES_DIR_RAW="${OFFLINE_FILES_DIR:-}"
+
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+# 判定"用户显式 OFFLINE_FILES_DIR"(同上 fetch-offline-from-minio.sh):
+#   lib-common 会把未设置时的默认导出为 .../offline-files/kubespray(部署脚本专用内层语义),
+#   sync 的源是 offline-files 总根(envoy/kubespray/lws/metax-gpu/os/virtual-machine 全部子目录),
+#   不能误用该内层默认 → 仅在用户显式设置时采用, 否则回退 offline-files 总根。
+OFFLINE_FILES_DIR_EXPLICIT=""
+if [ -n "${OFFLINE_FILES_DIR_RAW:-}" ]; then
+    OFFLINE_FILES_DIR_EXPLICIT="${OFFLINE_FILES_DIR_RAW}"
+elif [ -n "${OFFLINE_FILES_DIR:-}" ]; then
+    case "${OFFLINE_FILES_DIR}" in
+        */offline-files/kubespray) OFFLINE_FILES_DIR_EXPLICIT="" ;;  # lib-common 默认内层, 忽略
+        *) OFFLINE_FILES_DIR_EXPLICIT="${OFFLINE_FILES_DIR}" ;;      # 用户显式根
+    esac
+fi
 
 PRUNE=0
 DRY_RUN=0
@@ -42,91 +57,43 @@ done
 
 # ---------------- 1. mc client 检测 ----------------
 say "检查 mc(MinIO Client) ..."
-if ! command -v mc >/dev/null 2>&1; then
-    err "未找到 mc(MinIO Client)。安装: curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc; 或用 CLI 容器(已内置)"
-fi
+command -v mc >/dev/null 2>&1 || {
+    err "未找到 mc(MinIO Client)。安装: curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc; 或用 CLI 容器(已内置)"; exit 1; }
+ok "mc 已安装: $(command -v mc)"
 
-# ---------------- 2. MinIO alias 配置(复用 cluster.conf / 探测 / 交互) ----------------
+# ---------------- 2. alias 解析(确定性: 已有别名 / cluster.conf MINIO_* / 报错指引) ----------------
 MINIO_ALIAS="${MINIO_ALIAS:-minio}"
-# 默认桶 = 源布局桶 cubestack-installer(与 fetch-offline-from-minio.sh 一致); 旧 cubestack-offline 为回退探测
+# 目标 = fetch-offline-from-minio.sh 默认读取的路径(桶/目录可经 cluster.conf 覆盖)
 MINIO_BUCKET="${MINIO_BUCKET:-cubestack-installer}"
 MINIO_REMOTE_DIR="${MINIO_REMOTE_DIR:-offline-files}"
 
-mc_has() { mc ls "$1" 2>/dev/null | grep -q .; }
-
-mc_alias_ready=0
-# 已有可用 mc alias 时优先复用(不再要求 cluster.conf 的 MINIO_*):
-#   探测顺序 = 默认 alias(minio)+ 全部已配置 alias, 桶 = 默认桶 + cubestack-installer + cubestack-offline,
-#   首个可访问的 <alias>/<桶> 即为目标; 全都不行才回退到 cluster.conf MINIO_* 或交互录入。
-if [ "${MINIO_ENDPOINT:-}${MINIO_ACCESS_KEY:-}${MINIO_SECRET_KEY:-}" != "" ] && [ -n "${MINIO_ENDPOINT:-}" ]; then
+if [ -n "${MINIO_ENDPOINT:-}${MINIO_ACCESS_KEY:-}${MINIO_SECRET_KEY:-}" ] && [ -n "${MINIO_ENDPOINT:-}" ]; then
     say "cluster.conf 提供 MinIO 配置 → 配置 alias ${MINIO_ALIAS}: ${MINIO_ENDPOINT}"
     mc alias set "${MINIO_ALIAS}" "${MINIO_ENDPOINT}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" >/dev/null 2>&1 \
         || { err "mc alias 配置失败(检查 MINIO_ENDPOINT/凭证/网络)"; exit 1; }
     ok "alias ${MINIO_ALIAS} 配置就绪"
-    mc_alias_ready=1
+elif mc alias list 2>/dev/null | grep -q "^${MINIO_ALIAS}[[:space:]]*$"; then
+    ok "复用已有 alias '${MINIO_ALIAS}'"
 else
-    say "探测本机已有 mc alias(已有 alias 时优先复用; 无则用 cluster.conf MINIO_* 或交互录入) ..."
-    for al in "${MINIO_ALIAS}" $(mc alias list 2>/dev/null | awk '/^[A-Za-z0-9_.-]+[[:space:]]*$/{print $1}'); do
-        [ -n "${al}" ] || continue
-        for _b in "${MINIO_BUCKET}" "cubestack-installer" "cubestack-offline"; do
-            if mc_has "${al}/${_b}"; then
-                ok "已有 alias '${al}' 可访问桶 ${_b}"
-                MINIO_ALIAS="${al}"; MINIO_BUCKET="${_b}"; mc_alias_ready=1; break 2
-            fi
-        done
-    done
-fi
-if [ "${mc_alias_ready}" != "1" ]; then
-    # 已有 alias 但没探测到候选桶 → 列出 alias 下真实存在的桶, 让用户选择或确认新建;
-    # 完全无可用 alias 时才交互录入凭证。
-    # 注意: 此处 LOCAL_SRC 尚未定义, 不引用它(远端目录统一为 offline-files)。
-    _avail="$(mc ls "${MINIO_ALIAS}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##' | grep -vE '^(cuberouter|cubestack-install-full-offline-files)$' | tr '\n' ' ' | sed 's/ *$//')"
-    if [ -n "${_avail:-}" ]; then
-        say "alias '${MINIO_ALIAS}' 下已有桶: $(echo ${_avail} | tr '\n' ' ')"
-        # 候选桶存在 → 直接用(取第一个候选); 否则保留默认桶 cubestack-installer 并自动新建
-        _picked=""
-        for _b in "${MINIO_BUCKET}" "cubestack-installer" "cubestack-offline"; do
-            case " ${_avail} " in *" ${_b} "*) _picked="${_b}"; break ;; esac
-        done
-        if [ -n "${_picked}" ]; then
-            MINIO_BUCKET="${_picked}"
-            say "  复用桶: ${MINIO_BUCKET}"
-        else
-            warn "候选桶(${MINIO_BUCKET:-cubestack-installer}/cubestack-installer/cubestack-offline)均不存在, 将新建桶 ${MINIO_BUCKET:-cubestack-installer} 并同步到 minio/${MINIO_BUCKET:-cubestack-installer}/offline-files"
-        fi
-        mc_alias_ready=1   # 已有可用 alias; 桶不存在时后续自动创建
-    fi
-    if [ "${mc_alias_ready}" != "1" ]; then
-        warn "未检测到可用的 MinIO 配置, 请交互录入(或先在 cluster.conf 配置 MINIO_* 变量):"
-        read -r -p "  MinIO 服务地址 (如 http://192.168.16.6:9000): " _ept
-        read -r -p "  AccessKey: " _ak
-        read -r -s -p "  SecretKey: " _sk; echo ""
-        [ -n "${_ept}" ] || { err "未输入 MinIO 地址"; exit 1; }
-        mc alias set "${MINIO_ALIAS}" "${_ept}" "${_ak}" "${_sk}" >/dev/null 2>&1 \
-            || { err "alias 配置失败(检查地址/凭证/网络)"; exit 1; }
-        ok "alias ${MINIO_ALIAS} 配置就绪: ${_ept}"
-    fi
+    err "未配置 mc alias '${MINIO_ALIAS}'。请任选其一:"
+    err "  ① mc alias set ${MINIO_ALIAS} <endpoint> <accesskey> <secretkey>"
+    err "  ② 在 cluster.conf 填 MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY"
+    exit 1
 fi
 
-# ---------------- 3. 本地源目录 + 远端目标 ----------------
-LOCAL_SRC="${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files}"
+# ---------------- 3. 本地源目录 + 远端目标(结构一致) ----------------
+LOCAL_SRC="${OFFLINE_FILES_DIR_EXPLICIT:-${REPO_ROOT}/deployments/offline-files}"
 [ -d "${LOCAL_SRC}" ] || { err "本地 offline-files 目录不存在: ${LOCAL_SRC}"; exit 1; }
-# 远端目录 = 与本地源同名的目录名(默认 offline-files): 让 MinIO 侧布局与本地一致。
-#   例: 源 ${LOCAL_SRC}=.../offline-files → 目标 minio/<桶>/offline-files
-REMOTE_SUBDIR="$(basename "${LOCAL_SRC}")"
-REMOTE_DIR="${MINIO_REMOTE_DIR:-${REMOTE_SUBDIR:-offline-files}}"
-REMOTE_DST="${MINIO_ALIAS}/${MINIO_BUCKET}/${REMOTE_DIR}"
+REMOTE_DST="${MINIO_ALIAS}/${MINIO_BUCKET}/${MINIO_REMOTE_DIR}"
 
-# 桶存在性: 不存在则创建(探测已通过时一定存在; 显式 MINIO_BUCKET 指向新桶时这里自动创建)
-#   注: 探测仅"桶可访问"即可(空桶 mc_has 为假会误判"不存在", 故这里以 mc ls 桶顶层成功为准,
-#   空桶仍视为存在不重建)。
+# 桶存在性: 不存在则创建(mc ls 桶顶层成功即视为存在, 空桶不误判)
 if ! mc ls "${MINIO_ALIAS}/${MINIO_BUCKET}" >/dev/null 2>&1; then
     say "桶 ${MINIO_BUCKET} 不存在, 创建 ..."
     mc mb "${MINIO_ALIAS}/${MINIO_BUCKET}" >/dev/null 2>&1 \
         || { err "创建桶失败(检查权限)"; exit 1; }
 fi
 
-say "同步本地 offline-files → MinIO"
+say "同步本地 offline-files → MinIO(全部子目录, 远端结构 = 本地结构)"
 say "  源:     ${LOCAL_SRC}"
 say "  目标:   ${REMOTE_DST}"
 say "  模式:   $([ "${DRY_RUN}" = "1" ] && echo 'DRY-RUN 预览(不同步)' || echo 'mc mirror --overwrite')"
