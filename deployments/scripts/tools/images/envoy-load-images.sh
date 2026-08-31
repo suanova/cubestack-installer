@@ -6,7 +6,7 @@
 #       09/10 模块部署时也会自动推送; 本脚本用于**先预加载**(如先推镜像再装 chart)。
 # 目标镜像(与 09/10 模块 helm --set 完全一致):
 #   envoyproxy/gateway:${ENVOY_EG_VERSION}              ← *gateway_${ENVOY_EG_VERSION}.tar(EG 控制面)
-#   envoyproxy/envoy:${ENVOY_EG_VERSION}                ← *envoy_${ENVOY_EG_VERSION}.tar(EG 数据面)
+#   envoyproxy/envoy:${ENVOY_PROXY_VERSION}             ← *envoy_${ENVOY_PROXY_VERSION}.tar(EG 数据面; ⚠ tag=ENVOY_PROXY_VERSION, 默认 distroless-v1.39.1, 勿用 EG 版本号)
 #   ai-gateway/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG} ← *ai-gateway-controller*.tar(AI 控制器)
 # 纯离线: 不联网(在线拉取由 09/10 模块 ENVOY_*_IMAGE_ONLINE 控制)。
 # tar 识别: 文件名 glob 快路径 + tar_first_image_tag 内容校验(兼容改名/异常命名)。
@@ -31,7 +31,9 @@ REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"   # 集群内置 registry �
 PUSH_HOST="${ENVOY_PUSH_ENDPOINT:-${REGISTRY_IP}:${REGISTRY_PORT}}"
 PUSH_REGISTRY_EG="${PUSH_HOST}/envoyproxy"   # 与 09 模块一致
 PUSH_REGISTRY_AI="${PUSH_HOST}/ai-gateway"   # 与 10 模块一致
-ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.1}"
+ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.1}"        # EG 控制面版本
+# ⚠ 数据面 Envoy tag 与 EG 版本不同(EG 1.9.x 配套 Envoy 1.39.x), 勿用 EG 版本号
+ENVOY_PROXY_VERSION="${ENVOY_PROXY_VERSION:-distroless-v1.39.1}"   # 数据面 Envoy 镜像 tag
 ENVOY_AI_VERSION="${ENVOY_AI_VERSION:-v1.1.0}"
 ENVOY_AI_IMAGE_TAG="${ENVOY_AI_IMAGE_TAG:-${ENVOY_AI_VERSION}}"
 ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"
@@ -70,7 +72,7 @@ load_one() {
 }
 _OK=0; _FAIL=0
 load_one "/gateway:${ENVOY_EG_VERSION}"  "*gateway_${ENVOY_EG_VERSION}.tar"  "${PUSH_REGISTRY_EG}" "gateway" "${ENVOY_EG_VERSION}" && _OK=$((_OK+1)) || _FAIL=$((_FAIL+1))
-load_one "/envoy:${ENVOY_EG_VERSION}"    "*envoy_${ENVOY_EG_VERSION}.tar"    "${PUSH_REGISTRY_EG}" "envoy"   "${ENVOY_EG_VERSION}" && _OK=$((_OK+1)) || _FAIL=$((_FAIL+1))
+load_one "/envoy:${ENVOY_PROXY_VERSION}" "*envoy_${ENVOY_PROXY_VERSION}.tar" "${PUSH_REGISTRY_EG}" "envoy"   "${ENVOY_PROXY_VERSION}" && _OK=$((_OK+1)) || _FAIL=$((_FAIL+1))
 load_one "/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" "*ai-gateway-controller*.tar" "${PUSH_REGISTRY_AI}" "ai-gateway-controller" "${ENVOY_AI_IMAGE_TAG}" && _OK=$((_OK+1)) || _FAIL=$((_FAIL+1))
 [ "${_FAIL}" -eq 0 ] || { err "加载未完全成功: 成功/已在 ${_OK}, 失败 ${_FAIL}; 见上方错误指引"; exit 1; }
 ok "加载完成: ${_OK} 个镜像已就绪(推送或已在 registry)"

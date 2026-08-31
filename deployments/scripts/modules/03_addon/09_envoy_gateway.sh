@@ -48,7 +48,10 @@ SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/d
 K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 
 # ---------------- 派生变量(全部来自 cluster.conf, 无硬编码) ----------------
-ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.1}"       # EG 版本(控制面 gateway + 数据面 envoy 同 tag)
+ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.1}"       # EG 版本(控制面 gateway 镜像 tag)
+# ⚠ 数据面 Envoy tag 与 EG 版本不同(EG 1.9.x 配套 Envoy 1.39.x, 见控制面 ENVOY_PROXY_VERSION);
+#   误用 <EG版本> 会拉到远古 Envoy(如 v1.9.1), 数据面启动报 --cpuset-threads 无法识别而 CrashLoop
+ENVOY_PROXY_VERSION="${ENVOY_PROXY_VERSION:-distroless-v1.39.1}"   # 数据面 Envoy 镜像 tag
 ENVOY_EG_CHART_SOURCE="${ENVOY_EG_CHART_SOURCE:-tgz}"   # 默认 tgz(仓库只存 tgz, 部署时临时解压)
 ENVOY_EG_CHART_DIR="${ENVOY_EG_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/eg}"
 ENVOY_EG_CHART_TGZ="${ENVOY_EG_CHART_TGZ:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/eg/gateway-helm-${ENVOY_EG_VERSION}.tgz}"
@@ -122,20 +125,21 @@ say "[1/4] 推送 EG 镜像 → ${PUSH_REGISTRY}(控制面 gateway + 数据面 e
 _ALLOW_ONLINE=0
 [ "${ENVOY_EG_CHART_SOURCE:-dir}" = "oci" ] && _ALLOW_ONLINE=1
 [ "${ENVOY_EG_IMAGE_ONLINE:-false}" = "true" ] && _ALLOW_ONLINE=1
-# push_one <镜像短名 gateway|envoy> <tar匹配模式>
+# push_one <镜像短名 gateway|envoy> <tar匹配模式> <tag>
+#   注意: 控制面 tag=ENVOY_EG_VERSION, 数据面 tag=ENVOY_PROXY_VERSION(两者不同!)
 push_one() {
-    local short="$1" tarpatt="$2" src="" _tar
-    if reg_has_tag "${PUSH_REGISTRY}" "${short}" "${ENVOY_EG_VERSION}"; then
-        ok "  ${short}:${ENVOY_EG_VERSION} 已在 registry, 跳过"
+    local short="$1" tarpatt="$2" tag="${3:-${ENVOY_EG_VERSION}}" src="" _tar
+    if reg_has_tag "${PUSH_REGISTRY}" "${short}" "${tag}"; then
+        ok "  ${short}:${tag} 已在 registry, 跳过"
         return 0
     fi
     # ① 本地 docker daemon(任意前缀, 匹配 /gateway:<tag> 或 /envoy:<tag>)
-    src="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E "/${short}:${ENVOY_EG_VERSION}$" | head -1 || true)"
+    src="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E "/${short}:${tag}$" | head -1 || true)"
     if [ -n "${src}" ]; then
-        _tmp="/tmp/eg-${short}-${ENVOY_EG_VERSION}.tar"
+        _tmp="/tmp/eg-${short}-${tag}.tar"
         say "  从本地 docker 推送: ${src}"
         if sudo docker save "${src}" -o "${_tmp}" >/dev/null 2>&1 \
-           && push_image_skopeo "docker-archive:${_tmp}" "docker://${PUSH_REGISTRY}/${short}:${ENVOY_EG_VERSION}" >/dev/null 2>&1; then
+           && push_image_skopeo "docker-archive:${_tmp}" "docker://${PUSH_REGISTRY}/${short}:${tag}" >/dev/null 2>&1; then
             rm -f "${_tmp}"
             ok "  ${short} 已推送(本地 docker)"; return 0
         else
@@ -145,13 +149,13 @@ push_one() {
     fi
     # ② 离线 tar(envoy-save-images.sh 默认 deployments/offline-files/envoy; 兼容集群 images 目录;
     #     内容识别: 文件名 glob 快路径 + 全部 tar 按内容兜底, 兼容改名/异常命名)
-    _tar="$(find_offline_tar "/${short}:${ENVOY_EG_VERSION}" "${tarpatt}" \
+    _tar="$(find_offline_tar "/${short}:${tag}" "${tarpatt}" \
                 "${ENVOY_SAVE_DIR}" \
                 "${LOCAL_REPO_DIR}/images" \
                 "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME}/images")" || _tar=""
     if [ -n "${_tar}" ]; then
         say "  从离线 tar 推送: $(basename "${_tar}")"
-        if push_image_skopeo "docker-archive:${_tar}" "docker://${PUSH_REGISTRY}/${short}:${ENVOY_EG_VERSION}" >/dev/null 2>&1; then
+        if push_image_skopeo "docker-archive:${_tar}" "docker://${PUSH_REGISTRY}/${short}:${tag}" >/dev/null 2>&1; then
             ok "  ${short} 已推送(离线 tar)"; return 0
         else
             warn "  tar 推送失败: $(basename "${_tar}")"
@@ -159,24 +163,24 @@ push_one() {
     fi
     # ③ 在线 skopeo(仅允许在线时)
     if [ "${_ALLOW_ONLINE}" = "1" ]; then
-        if push_image_skopeo "docker://docker.io/envoyproxy/${short}:${ENVOY_EG_VERSION}" \
-            "docker://${PUSH_REGISTRY}/${short}:${ENVOY_EG_VERSION}" >/dev/null 2>&1; then
+        if push_image_skopeo "docker://docker.io/envoyproxy/${short}:${tag}" \
+            "docker://${PUSH_REGISTRY}/${short}:${tag}" >/dev/null 2>&1; then
             ok "  ${short} 已推送(在线)"; return 0
         fi
         warn "  在线推送失败"
     fi
     # 离线安装: 本地源且镜像未就绪 → 报错给指引(不静默继续)
     if [ "${_ALLOW_ONLINE}" = "1" ]; then
-        warn "  envoyproxy/${short}:${ENVOY_EG_VERSION} 未就绪(本地 docker/tar 无, 在线失败)"
+        warn "  envoyproxy/${short}:${tag} 未就绪(本地 docker/tar 无, 在线失败)"
         return 1
     else
-        err "离线安装: 未找到 envoyproxy/${short}:${ENVOY_EG_VERSION}(本地 docker 无 + 离线 tar 无)。请: ① 在联网机跑 tools/images/envoy-save-images.sh 生成 tar 放到 ${ENVOY_SAVE_DIR}/, 或 ② 放离线 tar 到 ${LOCAL_REPO_DIR}/images/, 或 ③ 单独跑 tools/images/envoy-load-images.sh 预加载, 或 ④ 改 ENVOY_EG_CHART_SOURCE=oci 允许在线"
+        err "离线安装: 未找到 envoyproxy/${short}:${tag}(本地 docker 无 + 离线 tar 无)。请: ① 在联网机跑 tools/images/envoy-save-images.sh 生成 tar 放到 ${ENVOY_SAVE_DIR}/, 或 ② 放离线 tar 到 ${LOCAL_REPO_DIR}/images/, 或 ③ 单独跑 tools/images/envoy-load-images.sh 预加载, 或 ④ 改 ENVOY_EG_CHART_SOURCE=oci 允许在线"
         return 1
     fi
 }
-# 控制面 + 数据面都要
-push_one "gateway" "*gateway_${ENVOY_EG_VERSION}.tar"
-push_one "envoy"   "*envoy_${ENVOY_EG_VERSION}.tar"
+# 控制面(tag=EG 版本)+ 数据面(tag=ENVOY_PROXY_VERSION, 与 EG 版本不同!)
+push_one "gateway" "*gateway_${ENVOY_EG_VERSION}.tar" "${ENVOY_EG_VERSION}"
+push_one "envoy"   "*envoy_${ENVOY_PROXY_VERSION}.tar" "${ENVOY_PROXY_VERSION}"
 
 # ---------------- 2. helm 安装 gateway-helm(三种 chart 源) ----------------
 say "[2/4] helm 安装 ${ENVOY_EG_RELEASE_NAME} → ${ENVOY_EG_NAMESPACE}(chart=${ENVOY_EG_CHART_SOURCE}, version=${ENVOY_EG_VERSION}) ..."
@@ -205,7 +209,7 @@ helm upgrade --install "${ENVOY_EG_RELEASE_NAME}" ${_CHART_ARG} \
     --set "deployment.envoyGateway.image.repository=${ENVOY_EG_IMAGE_BASE}/gateway" \
     --set "deployment.envoyGateway.image.tag=${ENVOY_EG_VERSION}" \
     --set "deployment.envoyGateway.imagePullPolicy=IfNotPresent" \
-    --set "global.images.envoyProxy.image=${ENVOY_EG_IMAGE_BASE}/envoy:${ENVOY_EG_VERSION}" \
+    --set "global.images.envoyProxy.image=${ENVOY_EG_IMAGE_BASE}/envoy:${ENVOY_PROXY_VERSION}" \
     --set "global.images.envoyProxy.pullPolicy=IfNotPresent" \
     --wait --timeout 180s \
     || warn "  helm 安装/等待超时(检查 --set 与 chart; 资源可能已创建, 继续等待 Deployment)..."

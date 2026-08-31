@@ -138,8 +138,8 @@
 
 **镜像清单**(随版本变化, 以 `envoy-save-images.sh` 输出为准):
 
-- Envoy Gateway: `envoyproxy/gateway`(控制面)、`envoyproxy/envoy`(数据面); 若启用限流再备 `envoyproxy/ratelimit`、`envoyproxy/envoy-ratelimit`。
-- Envoy AI Gateway: `docker.io/envoyproxy/ai-gateway-controller`(控制器, 官方源 DockerHub, 非 ghcr); AI 数据面复用 EG 的镜像(`envoyproxy/envoy`)。
+- Envoy Gateway: `envoyproxy/gateway`(控制面, tag=`ENVOY_EG_VERSION`)、`envoyproxy/envoy`(数据面, ⚠ tag=`ENVOY_PROXY_VERSION`, 默认 `distroless-v1.39.1` —— 与 EG 版本号**不同**, 用 `kubectl exec deploy/envoy-gateway -- envoy-gateway version` 的 `ENVOY_PROXY_VERSION` 核对); 若启用限流再备 `envoyproxy/ratelimit`、`envoyproxy/envoy-ratelimit`。
+- Envoy AI Gateway: `docker.io/envoyproxy/ai-gateway-controller`(控制器, 官方源 DockerHub, 非 ghcr); AI 数据面复用 EG 的镜像(`envoyproxy/envoy`, tag 同上)。
 
 ### 3.3 镜像流向(与 LWS/gpu_operator 同一模式)
 
@@ -154,7 +154,7 @@
 | chart | values 键 | 说明 |
 |---|---|---|
 | gateway-helm | `deployment.envoyGateway.image.repository` / `image.tag` | EG 控制面 Deployment + certgen Job 镜像(chart v1.9.1 经 `eg.image` helper 统一取此路径; 默认 `docker.io/envoyproxy/gateway`) |
-| gateway-helm | `global.images.envoyProxy.image` | **数据面** Envoy 镜像(创建 Gateway 时动态拉起, 完整镜像串, 默认 `docker.io/envoyproxy/envoy`) |
+| gateway-helm | `global.images.envoyProxy.image` | **数据面** Envoy 镜像(创建 Gateway 时动态拉起, 完整镜像串, 默认 `docker.io/envoyproxy/envoy`; ⚠ tag=`ENVOY_PROXY_VERSION`=distroless-v1.39.1, 勿用 EG 版本号) |
 | gateway-helm | `envoyGateway.extensionManager` | v0.x 扩展机制(已废弃; v1.x AI 不再使用, 默认不启用) |
 | ai-gateway-crds-helm | — | 纯 CRD chart, 无镜像 |
 | ai-gateway-helm | `controller.image.repository` / `controller.image.tag` | AI 控制器镜像(默认 `docker.io/envoyproxy/ai-gateway-controller`; 另 `controller.nameOverride` 定资源名、`envoyGateway.namespace` 指 EG 命名空间) |
