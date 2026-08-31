@@ -307,11 +307,17 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - **离线备料(联网机, 两件套)**: chart 用 `tools/images/envoy-fetch-charts.sh`(helm pull 解包到
   `deployments/cubestack-addon/envoy-gateway/{eg,ai}`); 镜像用 `tools/images/envoy-save-images.sh`
   (默认 `deployments/offline-files/envoy`): EG 控制面 `envoyproxy/gateway:<v>` + **数据面
-  `envoyproxy/envoy:<v>`** + AIG 控制器 `ghcr.io/envoyproxy/ai-gateway/ai-gateway-controller:<v>`。
-- **离线关键点(数据面镜像)**: 创建 Gateway 后控制器动态创建的数据面 Deployment 默认用 docker.io 镜像,
-  离线必 ImagePullBackOff → helm 安装必须改写 `envoyGateway.image.repository/tag` 为集群内置 registry
-  (`--set image.*` 只管控制面)。
-- **默认版本**: `ENVOY_EG_VERSION=v1.9.0`(GA)、`ENVOY_AI_VERSION=v1.0.0`(GA, API `v1beta1`, `ENVOY_AI_API_VERSION`)。
+  `envoyproxy/envoy:<v>`**(tag 与 EG 版本不同, 见 ENVOY_PROXY_VERSION)+ AIG 控制器
+  `envoyproxy/ai-gateway-controller:<v>`(docker.io 源, 非 ghcr)+ **extProc sidecar
+  `envoyproxy/ai-gateway-extproc:<v>`**(⚠ 必收: 漏收则数据面 pod 2/3 ImagePullBackOff, AI 路由 404)。
+- **离线关键点(镜像改写)**: 创建 Gateway 后控制器动态创建的数据面 Deployment 默认用 docker.io 镜像,
+  离线必 ImagePullBackOff → helm 必须改写: EG `envoyGateway.image.repository/tag` + 数据面
+  `global.images.envoyProxy.image`(09 模块已做); AI 同理 `controller.image.repository/tag` +
+  **`extProc.image.repository/tag`**(控制器 --extProcImage, 决定注入数据面的 extProc sidecar 镜像, 10 模块已做)。
+- **EG Backend API(必须启用)**: AIG v1.1+ 的 AIServiceBackend 必须引用 EG `Backend` 资源, 该 API 默认禁用
+  (安全原因, 参考 CVE-2021-25740) → 09 模块 helm 已默认 `config.envoyGateway.extensionApis.enableBackend=true`;
+  不启用则 HTTPRoute 报 "Backend is disabled in Envoy Gateway configuration" (ResolvedRefs=False)。
+- **默认版本**: `ENVOY_EG_VERSION=v1.9.1`(GA)、`ENVOY_AI_VERSION=v1.1.0`(GA, API `v1beta1`, `ENVOY_AI_API_VERSION`)。
 - **常用命令**:
   ```bash
   sudo ./deploy-cluster.sh --enable envoy_gateway                 # 只装 EG 基座
