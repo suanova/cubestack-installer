@@ -1,0 +1,226 @@
+{
+  "milestone": {
+    "title": "CubeStack Installer 开发 Roadmap",
+    "due_on": "2026-12-31",
+    "description": "CubeStack 离线部署套件持续演进: 基座稳定性 → 组件覆盖 → 工具链/质量 → 发布。"
+  },
+  "issues": [
+    {
+      "title": "Feature: 部署基座稳定性(离线 kubespray + addon 基座)",
+      "type": "feature",
+      "priority": "P0",
+      "story_points": null,
+      "children": [
+        "Epic: 基座稳定性加固",
+        "Epic: 离线资源管理"
+      ]
+    },
+    {
+      "title": "Epic: 基座稳定性加固",
+      "type": "epic",
+      "priority": "P0",
+      "story_points": null,
+      "children": [
+        "registry VIP 冲突检测与自动避让(多集群网段)",
+        "宿主机 /etc/hosts 收敛(换环境不残留旧集群 IP)",
+        "单节点集群 control-plane 可调度收敛"
+      ]
+    },
+    {
+      "title": "registry VIP 冲突检测与自动避让(多集群网段)",
+      "type": "story",
+      "priority": "P0",
+      "story_points": 5,
+      "body": "### Context\n多集群共用网段时, MetalLB 默认取 METALLB_POOL 首地址, 会与其他集群 VIP 撞 IP → 推送/拉取打到别的集群 registry。\n\n### Goal\n部署时自动检测候选 VIP 是否被占用(服务端口探测), 冲突时醒目提示并支持显式指定不冲突 IP。\n\n### Scope\n- **In:** deploy-registry.sh 探测 + 提示; cluster.conf 显式 REGISTRY_IP 支持\n- **Out:** 自动换 VIP(需用户确认)\n\n### Status\n已实现(commit 5f97527 等): deploy-registry.sh 对自动派生的候选 VIP 做服务端口探测(/v2/ 有响应即冲突), 红字提示 + 支持显式 REGISTRY_IP 跳过探测。\n\n### Acceptance criteria\n- [x] 候选 VIP:5000 有响应时红字警告\n- [x] 显式 REGISTRY_IP 时跳过探测\n- [x] 单元测试: 冲突/无冲突分支"
+    },
+    {
+      "title": "宿主机 /etc/hosts 收敛(换环境不残留旧集群 IP)",
+      "type": "story",
+      "priority": "P0",
+      "story_points": 3,
+      "body": "### Context\n换环境部署时 /etc/hosts 残留旧集群的 k8s-api.nova.local/registry.local 行, getent 命中旧 IP → kubectl 打到旧集群失败。\n\n### Goal\nsync_kubeconfig / setup-api-expose 每次先删域名旧行再写当前 IP, 保证唯一。\n\n### Status\n已实现(commit 4a732de / 5f97527): setup-api-expose 与 registry 部署无条件删旧域名行再写一行。\n\n### Acceptance criteria\n- [x] setup-api-expose 无条件删旧行再写一行\n- [x] sync_kubeconfig 双保险收敛 hosts\n- [x] 单元测试: 多条同域名时收敛为一条"
+    },
+    {
+      "title": "单节点集群 control-plane 可调度收敛",
+      "type": "story",
+      "priority": "P1",
+      "story_points": 3,
+      "body": "### Context\n单节点集群 master 带 NoSchedule 污点 → addon/operator pod 全部 Pending。\n\n### Goal\npatch-playbooks 单节点 play: 部署 K8s 后、addon 前, 仅 1 个 control-plane 时解除污点+uncordon。\n\n### Status\n已实现: deployments/kubespray/kubespray/patch-playbooks/cubestack-single-node.yml 在恰有 1 个 control-plane 时移除 NoSchedule 污点并 uncordon(幂等)。\n\n### Acceptance criteria\n- [x] 单节点自动可调度, 多 control-plane 不动\n- [x] 扩容后重新收敛\n- [x] 单元测试: 单/多 master 分支"
+    },
+    {
+      "title": "Epic: 离线资源管理",
+      "type": "epic",
+      "priority": "P1",
+      "story_points": null,
+      "children": []
+    },
+    {
+      "title": "offline-files 冗余清理(仅保留部署必需镜像/二进制)",
+      "type": "story",
+      "priority": "P1",
+      "story_points": 5,
+      "body": "### Context\noffline-files 含大量本部署用不到的镜像(cilium/arm64 等)与二进制(非 containerd 运行时)。\n\n### Goal\ntrim-offline-files.sh 按 PRELOAD_IMAGE_PATTERNS / METAX_* 清理冗余, 只留部署必需。\n\n### Status\n已实现: trim-offline-files.sh 支持 --dry-run, 按 PRELOAD_IMAGE_PATTERNS 与 METAX_VERSION/架构/组件白名单保留。\n\n### Acceptance criteria\n- [x] kubespray images 只留 PRELOAD 匹配\n- [x] metax-gpu 只留当前架构/版本\n- [x] 支持 --dry-run 预览\n- [x] 单元测试: 白名单/排除分支"
+    },
+    {
+      "title": "MinIO 下载排除 virtual-machine(按需下载)",
+      "type": "story",
+      "priority": "P2",
+      "story_points": 2,
+      "body": "### Context\nvirtual-machine 镜像体积大且仅创建 VM 时用, 默认全量下载浪费带宽/磁盘。\n\n### Goal\nfetch-offline-from-minio.sh 默认排除 virtual-machine, --sub/--all 可显式下载。\n\n### Status\n已实现(commit 586c939): DEFAULT_EXCLUDE_SUBS=virtual-machine, 默认跳过; --sub <dir> / --all 可下载。\n\n### Acceptance criteria\n- [x] 默认跳过 virtual-machine\n- [x] --sub virtual-machine / --all 可下载\n- [x] 单元测试: 排除/显式分支"
+    },
+    {
+      "title": "CLI 容器镜像时区/依赖规范化",
+      "type": "story",
+      "priority": "P1",
+      "story_points": 2,
+      "body": "### Context\nCLI 容器默认 UTC, 日志/date 与国内不一致; 依赖需与部署脚本对齐。\n\n### Goal\nCLI 镜像默认 GMT+8, 工具链/依赖规范化。\n\n### Status\n已实现(commit dca6fb9 / 99dd372): CLI 镜像默认 Asia/Shanghai, 独立构建上下文 + Harbor 增量。\n\n### Acceptance criteria\n- [x] 容器内 date 为 Asia/Shanghai\n- [x] 依赖与 Dockerfile-cli 一致\n- [x] 单元测试: 时区校验"
+    },
+    {
+      "title": "NTP 同步逻辑重构",
+      "type": "story",
+      "priority": "P1",
+      "story_points": 3,
+      "body": "### Context\n原 NTP 用宿主机为权威, 部署机可能在 NAT 后; 单节点无同步需求。\n\n### Goal\n单节点跳过 NTP; 多节点以首 master 为权威(不再用宿主机)。\n\n### Status\n已实现(commit 81822a6): 单节点跳过; 首 master chrony 服务端, 其余节点指向。\n\n### Acceptance criteria\n- [x] 单节点跳过\n- [x] 首 master chrony 服务端, 其他节点指向\n- [x] 单元测试: 单/多节点分支"
+    },
+    {
+      "title": "GitLab 侧 gp 适配 + roadmap 落地",
+      "type": "story",
+      "priority": "P1",
+      "story_points": 8,
+      "body": "### Context\n代码库托管在 GitLab(glab.isuanova.com), github-planning skill 的 gp 底层是 gh api。\n\n### Goal\ngp 支持 GITLAB_BASE+TOKEN 走 GitLab REST(labels/milestones/issues/sub-issues/依赖/release), 并把本 roadmap 落到 GitLab。\n\n### Status\n部分完成: gp 已加 GitLab 分支并归一响应(labels/milestones/issues/sub-issues/依赖/release 适配, 见 README.cubestack.md); 尚待用真实 token 实测创建 milestone/issues。\n\n### Acceptance criteria\n- [x] gp 加 GitLab 分支, 响应归一\n- [x] 保留 GitHub 路径, smoke-test 通过\n- [ ] 提供 token 后实测创建 milestone/issues"
+    },
+    {
+      "title": "Feature: 组件覆盖(GPU/LWS/监控/存储/网关)",
+      "type": "feature",
+      "priority": "P1",
+      "story_points": null,
+      "children": [
+        "Epic: 计算组件",
+        "Epic: 存储与网关"
+      ]
+    },
+    {
+      "title": "Epic: 计算组件",
+      "type": "epic",
+      "priority": "P1",
+      "story_points": null,
+      "children": [
+        "GPU Operator 镜像全量同步与 registry 可靠性",
+        "LWS 部署链路验证"
+      ]
+    },
+    {
+      "title": "GPU Operator 镜像全量同步与 registry 可靠性",
+      "type": "story",
+      "priority": "P0",
+      "story_points": 5,
+      "body": "### Context\nGPU Operator 镜像推送依赖集群 registry, VIP 冲突/registry 抖动会导致部分镜像推不进去。\n\n### Goal\n修好 VIP 冲突后, GPU 镜像可靠推送到当前集群 registry, 节点拉取正常。\n\n### Status\n部分完成: VIP 冲突检测已实现(见基座 Feature); metax-save-images/metax-load-images 存在; 仍缺一次完整的 12 镜像推送 + 节点 crictl pull 端到端回归。\n\n### Acceptance criteria\n- [ ] registry VIP 无冲突时 12 个镜像全部推送成功\n- [ ] 节点 crictl pull 命中\n- [x] 单元测试: 推送/校验分支(部分)"
+    },
+    {
+      "title": "LWS 部署链路验证",
+      "type": "story",
+      "priority": "P2",
+      "story_points": 3,
+      "body": "### Context\nLWS(LeaderWorkerSet)是 LLM 工作负载调度组件, 需验证离线部署链路。\n\n### Goal\nLWS bundle/helm 安装可离线完成, 集群可创建 LWS CR。\n\n### Status\n部分完成: 双模式安装(bundle=官方 manifests.yaml 默认 / helm=本地 chart v0.10.0)已实现, verify-lws.sh 存在; 尚待离线全链路回归与 DisaggregatedSet 覆盖。\n\n### Acceptance criteria\n- [ ] LWS 安装成功(bundle + helm 双模式)\n- [ ] 示例 LWS CR 可创建\n- [x] 单元测试: 安装分支(部分)"
+    },
+    {
+      "title": "Epic: 存储与网关",
+      "type": "epic",
+      "priority": "P2",
+      "story_points": null,
+      "children": [
+        "Ceph 存储 + CSI 验证",
+        "Envoy 网关二件套验证"
+      ]
+    },
+    {
+      "title": "Ceph 存储 + CSI 验证",
+      "type": "story",
+      "priority": "P2",
+      "story_points": 8,
+      "body": "### Context\nCeph 提供 RBD/RGW/CephFS 存储底座, 离线部署链路需验证。\n\n### Goal\nCeph 集群 + Ceph CSI 可离线安装, PVC 可用。\n\n### Status\n未实现(伪代码占位): modules/03_addon/07_ceph.sh 与 08_ceph_csi.sh 为 ADDON_STUB 伪代码占位(未接入真实 Rook-Ceph/CSI 逻辑)。\n\n### Acceptance criteria\n- [ ] Ceph 集群就绪(替换 07 占位为真实实现)\n- [ ] Ceph CSI PVC 可创建/挂载(替换 08 占位)\n- [ ] 单元测试: 部署分支"
+    },
+    {
+      "title": "Envoy 网关二件套验证",
+      "type": "story",
+      "priority": "P2",
+      "story_points": 5,
+      "body": "### Context\nEnvoy Gateway + Envoy AI Gateway 提供统一/ AI 流量入口。\n\n### Goal\n离线安装 EG + AI 网关, 示例 HTTPRoute/Gateway 可用。\n\n### Status\n部分完成: 09/10 模块已实现(离线 helm + 内置 registry 镜像), envoy-fetch-charts.sh / envoy-save-images.sh 存在, verify_envoy_* 元模块已加; 尚待一次离线全链路回归与示例路由验证。\n\n### Acceptance criteria\n- [ ] EG 控制面/数据面就绪(离线回归)\n- [ ] AI 网关扩展就绪\n- [x] 单元测试: 安装分支(部分)"
+    },
+    {
+      "title": "Feature: 工具链与质量",
+      "type": "feature",
+      "priority": "P1",
+      "story_points": null,
+      "children": [
+        "验证套件增强"
+      ]
+    },
+    {
+      "title": "验证套件增强",
+      "type": "story",
+      "priority": "P3",
+      "story_points": 5,
+      "body": "### Context\n各组件端到端验证(verify_*)需覆盖更多场景。\n\n### Goal\n补充 verify 模块(registry 推送回读/GPU allocatable 等)。\n\n### Status\n部分完成: 21~26 verify 元模块已存在; verify_registry_storage 已做真 push 回读, verify-metax-gpu 已覆盖 allocatable 异常检测; 仍待补充各 verify 的失败分支与 lint/单测。\n\n### Acceptance criteria\n- [x] verify_registry_storage 覆盖 push 回读\n- [x] verify_metax_gpu 覆盖 allocatable\n- [ ] 单元测试: 各 verify 分支(补全)"
+    },
+    {
+      "title": "Feature: 发布与文档",
+      "type": "feature",
+      "priority": "P2",
+      "story_points": null,
+      "children": [
+        "发布说明与里程碑跟踪",
+        "部署文档完善"
+      ]
+    },
+    {
+      "title": "发布说明与里程碑跟踪",
+      "type": "story",
+      "priority": "P2",
+      "story_points": 2,
+      "body": "### Context\n用 github-planning skill 维护里程碑/发布说明。\n\n### Goal\n里程碑进度同步、发布说明生成。\n\n### Status\n未闭环: gp 的 update-milestone / release-notes 命令存在, 待落地到 GitLab 里程碑后使用。\n\n### Acceptance criteria\n- [ ] update-milestone 进度同步\n- [ ] release-notes 生成\n- [ ] 单元测试: 渲染分支"
+    },
+    {
+      "title": "部署文档完善",
+      "type": "story",
+      "priority": "P3",
+      "story_points": 3,
+      "body": "### Context\n部署文档需覆盖容器化/离线/多集群场景。\n\n### Goal\nREADME/部署文档与当前代码一致。\n\n### Status\n部分完成: README §十四(CLI 容器化)+ deployments/README 已补; 仍待新增特性(verify 元模块、LWS 双模式、Envoy 二件套、阶段五离线)文档补全。\n\n### Acceptance criteria\n- [ ] 文档与 cluster.conf 结构一致\n- [x] 新增特性有文档(部分)\n- [ ] 单元测试: 文档链接有效"
+    },
+    {
+      "title": "Feature: P2 能力增强模块落地(Keycloak/Kueue)",
+      "type": "feature",
+      "priority": "P2",
+      "story_points": null,
+      "children": [
+        "Epic: P2 身份与队列治理"
+      ]
+    },
+    {
+      "title": "Epic: P2 身份与队列治理",
+      "type": "epic",
+      "priority": "P2",
+      "story_points": null,
+      "children": [
+        "Keycloak 统一认证落地",
+        "Kueue 队列治理落地"
+      ]
+    },
+    {
+      "title": "Keycloak 统一认证落地",
+      "type": "story",
+      "priority": "P2",
+      "story_points": 8,
+      "depends_on": ["Ceph 存储 + CSI 验证"],
+      "body": "### Context\nmodules/03_addon/10_keycloak.sh 当前为 ADDON_STUB 伪代码占位(未接入真实逻辑)。\n\n### Goal\nKeycloak 离线部署(helm + 内置 registry 镜像), 接入统一认证。\n\n### Scope\n- **In:** 10_keycloak.sh 真实实现(离线 helm/chart + 集群 registry 镜像改写), verify 元模块\n- **Out:** 与宿主机/平台侧 IdP 对接\n\n### Acceptance criteria\n- [ ] 10_keycloak.sh 替换占位为真实离线部署\n- [ ] Keycloak 可访问、默认 realm/client 可用\n- [ ] 单元测试: 部署分支"
+    },
+    {
+      "title": "Kueue 队列治理落地",
+      "type": "story",
+      "priority": "P2",
+      "story_points": 5,
+      "depends_on": ["GPU Operator 镜像全量同步与 registry 可靠性", "LWS 部署链路验证"],
+      "body": "### Context\nmodules/03_addon/11_kueue.sh 当前为 ADDON_STUB 伪代码占位(未接入真实逻辑)。\n\n### Goal\nKueue 离线部署(helm/chart + 内置 registry), 提供任务队列/配额/调度策略。\n\n### Scope\n- **In:** 11_kueue.sh 真实实现, verify 元模块, 与 GPU/LWS 负载的队列示例\n- **Out:** 全集群默认队列治理策略\n\n### Acceptance criteria\n- [ ] 11_kueue.sh 替换占位为真实离线部署\n- [ ] ClusterQueue/LocalQueue 可创建并调度示例负载\n- [ ] 单元测试: 部署分支"
+    }
+  ]
+}

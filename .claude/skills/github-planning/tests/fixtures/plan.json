@@ -1,0 +1,34 @@
+{
+  "milestone": {
+    "title": "v1.0",
+    "due_on": "2026-09-30",
+    "description": "Quarterly release"
+  },
+  "issues": [
+    {
+      "title": "Epic: onboarding",
+      "body": "Onboarding workstream.\n\n**Acceptance criteria:**\n- [ ] New users can sign up\n- [ ] Existing users can migrate",
+      "type": "epic",
+      "priority": "P1",
+      "assignees": ["alice"],
+      "children": ["Onboard via OAuth", "Onboarding email"]
+    },
+    {
+      "title": "Onboard via OAuth",
+      "body": "Implement OAuth 2.0 login with Google and GitHub providers.\n\n**Acceptance criteria:**\n- [ ] Provider buttons render on the login screen\n- [ ] Token exchange returns a session cookie\n- [ ] Session refresh on expiry",
+      "type": "story",
+      "priority": "P0",
+      "story_points": 5,
+      "assignees": ["bob"],
+      "extra_labels": ["ux"]
+    },
+    {
+      "title": "Onboarding email",
+      "body": "Send a welcome email after signup.",
+      "type": "story",
+      "priority": "P1",
+      "story_points": 3,
+      "depends_on": ["Onboard via OAuth"]
+    }
+  ]
+}

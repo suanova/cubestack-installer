@@ -1,0 +1,17 @@
+{
+  "labels": [
+    { "name": "feature" }, { "name": "bug" }, { "name": "doc" }, { "name": "story" },
+    { "name": "story-points:5" }, { "name": "story-points:3" }, { "name": "story-points:1" },
+    { "name": "story-points:2" }, { "name": "story-points:8" }
+  ],
+  "milestones": [
+    { "number": 1, "title": "v1.0", "state": "open", "description": "Quarterly release", "due_on": null }
+  ],
+  "issues": [
+    { "number": 1, "title": "Add auth", "state": "open",   "milestone": { "number": 1 }, "labels": [{ "name": "feature" }, { "name": "story-points:5" }], "assignees": [], "id": 1, "node_id": "n1" },
+    { "number": 2, "title": "Fix login crash", "state": "closed", "milestone": { "number": 1 }, "labels": [{ "name": "bug" }, { "name": "story-points:3" }], "assignees": [], "id": 2, "node_id": "n2" },
+    { "number": 3, "title": "Write README", "state": "open", "milestone": { "number": 1 }, "labels": [{ "name": "doc" }, { "name": "story-points:1" }], "assignees": [], "id": 3, "node_id": "n3" },
+    { "number": 4, "title": "Add test coverage", "state": "closed", "milestone": { "number": 1 }, "labels": [{ "name": "story" }, { "name": "story-points:2" }], "assignees": [], "id": 4, "node_id": "n4" },
+    { "number": 5, "title": "Set up CI", "state": "open",   "milestone": { "number": 1 }, "labels": [{ "name": "story" }, { "name": "story-points:8" }], "assignees": [], "id": 5, "node_id": "n5" }
+  ]
+}

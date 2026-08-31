@@ -1,0 +1,11 @@
+{
+  "milestone": { "title": "bad" },
+  "issues": [
+    {
+      "title": "Mystery task",
+      "type": "mystery",
+      "story_points": 4,
+      "depends_on": ["Does not exist"]
+    }
+  ]
+}

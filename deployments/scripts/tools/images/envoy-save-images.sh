@@ -1,23 +1,30 @@
 #!/bin/bash
 # ============================================================
-# envoy-save-images.sh — Envoy Gateway + Envoy AI Gateway 镜像: 离线下载 + 保存 tar
+# envoy-save-images.sh — Envoy Gateway + Envoy AI Gateway 镜像: 离线下载 + 保持保存 tar
 # 用途: 在联网/内网机器上把官方镜像下载并保存为 tar, 供离线环境(集群安装机)使用:
 #       部署模块 modules/03_addon/09_envoy_gateway.sh / 10_envoy_ai_gateway.sh 会自动
 #       从 deployments/offline-files/envoy 找到这些 tar 并推送至集群内置 registry(本地源, 不联网)。
 # 数据源: cluster.conf (ENVOY_EG_VERSION / ENVOY_AI_VERSION / ENVOY_SAVE_DIR / REPO_ROOT)
-# 镜像清单(随版本变化):
-#   Envoy Gateway   : envoyproxy/gateway:<EG_VERSION>(控制面) + envoyproxy/envoy:<EG_VERSION>(数据面)
-#                     可选限流组件: envoyproxy/ratelimit:<tag> + envoyproxy/envoy-ratelimit:<tag>(默认不下载)
-#   Envoy AI Gateway: ghcr.io/envoyproxy/ai-gateway/ai-gateway-controller:<AI_VERSION>(控制器)
-#                     数据面复用 Envoy Gateway 的 envoyproxy/envoy 镜像
+#
+# ── 需要下载的镜像清单(随版本变化; cluster.conf 可覆盖, 版本取 ENVOY_EG_VERSION / ENVOY_AI_VERSION)──
+#   [Envoy Gateway]    docker.io/envoyproxy/gateway:<EG_VERSION>     控制面
+#                      docker.io/envoyproxy/envoy:<EG_VERSION>       数据面(用户 Gateway 动态创建 Envoy Proxy)
+#   [Envoy AI Gateway] ghcr.io/envoyproxy/ai-gateway/ai-gateway-controller:<AI_VERSION>   控制器(独立 Deployment)
+#   (可选限流, 默认不下载): envoyproxy/ratelimit:<tag> + envoyproxy/envoy-ratelimit:<tag>
+#
 # 下载方式(按顺序尝试, 与 lws-save-images.sh 一致):
 #   ① 本地 docker daemon 已有 → docker save 直接导出
 #   ② docker pull(5 次重试)→ docker save
 #   ③ skopeo copy docker:// → docker-archive(docker 不可用时兜底)
-# 文件名: <repo>_<tag>.tar(与 cubestack-offline.sh 一致, 如 docker.io_envoyproxy_gateway_v1.2.3.tar)
-# 用法:   sudo ./envoy-save-images.sh [镜像ref ...]
-#         示例: sudo ./envoy-save-images.sh                    # 全部走 cluster.conf 默认(EG + AI 全部)
-#               sudo ./envoy-save-images.sh docker.io/envoyproxy/gateway:v1.2.3   # 只下载指定镜像
+# 文件名: <repo>_<tag>.tar(与 cubestack-offline.sh / 09/10 模块一致, 如 docker.io_envoyproxy_gateway_v1.9.0.tar)
+#
+# 「保持」语义(幂等): 默认**已有 tar 则跳过**(只补缺/补新版本), 保持离线镜像集合完整;
+#   加 --force 可强制重新下载覆盖。
+#
+# 用法:   sudo ./envoy-save-images.sh                      # 下载并保存全部镜像(已有 tar 跳过, 幂等保持)
+#         sudo ./envoy-save-images.sh --list               # 只列出要下载的镜像清单(不下载)
+#         sudo ./envoy-save-images.sh --force              # 强制重新下载(覆盖已有 tar)
+#         sudo ./envoy-save-images.sh <镜像ref ...>        # 只下载指定镜像(如 docker.io/envoyproxy/gateway:v1.9.0)
 # 加载:   tools/images/ 无独立 load 脚本 — 09/10 模块部署时自动识别并推送; 或直接
 #         skopeo copy --src-tls-verify=false docker-archive:<tar> docker://<registry>/envoyproxy/gateway:<tag>
 # ============================================================
@@ -34,6 +41,16 @@ ENVOY_AI_VERSION="${ENVOY_AI_VERSION:-v1.0.0}"        # Envoy AI Gateway 控制�
 ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"
 mkdir -p "${ENVOY_SAVE_DIR}"
 
+# ---- 参数解析: --list / --force / 镜像 ref ----
+MODE="save"; FORCE=0
+for a in "$@"; do
+    case "${a}" in
+        --list|-l)  MODE="list" ;;
+        --force|-f) FORCE=1 ;;
+        *)          EXTRA_IMGS="${EXTRA_IMGS:-} ${a}" ;;
+    esac
+done
+
 # 默认镜像清单(cluster.conf 可覆盖; 每行: 源镜像 ref)
 ENVOY_IMAGE_LIST="${ENVOY_IMAGE_LIST:-}"
 if [ -z "${ENVOY_IMAGE_LIST}" ]; then
@@ -43,14 +60,29 @@ ghcr.io/envoyproxy/ai-gateway/ai-gateway-controller:${ENVOY_AI_VERSION}"
 fi
 
 # 命令行指定镜像则覆盖清单
-[ $# -gt 0 ] && ENVOY_IMAGE_LIST="$*"
+[ -n "${EXTRA_IMGS:-}" ] && ENVOY_IMAGE_LIST="${EXTRA_IMGS# }"
+
+# --list: 只打印清单(不下载), 供确认需离线准备的镜像
+if [ "${MODE}" = "list" ]; then
+    echo "Envoy Gateway / Envoy AI Gateway 需下载的镜像清单(保存目录: ${ENVOY_SAVE_DIR}):"
+    while IFS= read -r img; do
+        [ -z "${img}" ] && continue
+        fname="$(echo "${img}" | sed 's#/#_#g; s#:#_#g').tar"
+        if [ -f "${ENVOY_SAVE_DIR}/${fname}" ]; then
+            echo "  ✓ [已存在] ${img}  →  ${fname}"
+        else
+            echo "  ☐ [待下载] ${img}  →  ${fname}"
+        fi
+    done <<< "${ENVOY_IMAGE_LIST}"
+    exit 0
+fi
 
 save_one() {
     local src="$1" fname dest SRC_TAG _LOCAL retry=0
     fname="$(echo "${src}" | sed 's#/#_#g; s#:#_#g').tar"
     dest="${ENVOY_SAVE_DIR}/${fname}"
-    if [ -f "${dest}" ]; then
-        ok "tar 已存在, 跳过: ${fname}"
+    if [ -f "${dest}" ] && [ "${FORCE}" != "1" ]; then
+        ok "tar 已存在, 跳过(保持幂等): ${fname}"
         du -sh "${dest}" 2>/dev/null | awk '{print "  大小: "$1}'
         return 0
     fi

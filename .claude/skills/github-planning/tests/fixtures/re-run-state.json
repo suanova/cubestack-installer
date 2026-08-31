@@ -1,0 +1,38 @@
+{
+  "labels": [
+    { "name": "feature" }, { "name": "epic" }, { "name": "story" },
+    { "name": "task" }, { "name": "bug" }, { "name": "doc" },
+    { "name": "priority:P0" }, { "name": "priority:P1" }, { "name": "priority:P2" },
+    { "name": "priority:P3" },
+    { "name": "story-points:1" }, { "name": "story-points:2" }, { "name": "story-points:3" },
+    { "name": "story-points:5" }, { "name": "story-points:8" }, { "name": "story-points:13" },
+    { "name": "status:blocked" },
+    { "name": "ux" }
+  ],
+  "milestones": [
+    { "number": 1, "title": "v1.0", "state": "open", "description": "Quarterly release", "due_on": "2026-09-30" }
+  ],
+  "issues": [
+    {
+      "number": 10, "title": "Epic: onboarding", "state": "open",
+      "milestone": { "number": 1 },
+      "labels": [{ "name": "type:epic" }],
+      "assignees": [{ "login": "alice" }],
+      "id": 1000001, "node_id": "node_1000001"
+    },
+    {
+      "number": 11, "title": "Onboard via OAuth", "state": "open",
+      "milestone": { "number": 1 },
+      "labels": [{ "name": "type:feature" }],
+      "assignees": [{ "login": "bob" }],
+      "id": 1000002, "node_id": "node_1000002"
+    },
+    {
+      "number": 12, "title": "Onboarding email", "state": "open",
+      "milestone": { "number": 1 },
+      "labels": [{ "name": "type:feature" }],
+      "assignees": [],
+      "id": 1000003, "node_id": "node_1000003"
+    }
+  ]
+}
