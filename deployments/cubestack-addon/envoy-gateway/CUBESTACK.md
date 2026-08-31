@@ -44,6 +44,8 @@ ENVOY_EG_VERSION=v1.9.1 ENVOY_AI_VERSION=v1.1.0 ./deployments/scripts/tools/imag
 # 离线镜像(同一台联网机, 完全离线还需它; 需要 sudo, 指定版本时 VAR= 写在 sudo 之后)
 sudo ./deployments/scripts/tools/images/envoy-save-images.sh
 sudo ENVOY_EG_VERSION=v1.9.1 ./deployments/scripts/tools/images/envoy-save-images.sh
+# (可选)部署机上把离线镜像 tar 预加载到集群内置 registry(幂等, 09/10 模块部署时也会自动推送)
+sudo ./deployments/scripts/tools/images/envoy-load-images.sh
 ```
 
 **方式二: 手动 helm pull 下载 tgz**(同样需要 helm 3+, 网络只需可达对应源; **不要加 `--untar`**)
@@ -88,7 +90,9 @@ helm pull oci://docker.io/envoyproxy/ai-gateway-helm       --version v1.1.0   # 
 - 部署: `modules/03_addon/09_envoy_gateway.sh`(`ENVOY_GATEWAY_ENABLED=true` 或 `--enable envoy_gateway`)
   + `modules/03_addon/10_envoy_ai_gateway.sh`(`ENVOY_AI_GATEWAY_ENABLED=true`, 依赖 EG 先装)
 - 离线镜像: `tools/images/envoy-save-images.sh`(默认 `deployments/offline-files/envoy`)
+  + 预加载推送: `tools/images/envoy-load-images.sh`(独立入口, 幂等, 推送三镜像到集群内置 registry)
 - 端到端验证: `--steps verify_envoy_gateway` / `--steps verify_envoy_ai_gateway`
+  (verify_envoy_ai_gateway 按运行时 CRD 版本自动分支: v1.x 用标准 Gateway + AIServiceBackend + AIGatewayRoute)
 - 分析/使用文档: `docs/envoy-gateway.md`; 故障排查: `docs/troubleshooting.md` §四
 
 ## 升级到新版本

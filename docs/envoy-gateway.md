@@ -128,9 +128,13 @@
 | EG chart tgz(`gateway-helm-<v>.tgz`) | `deployments/cubestack-addon/envoy-gateway/eg/` | `tools/images/envoy-fetch-charts.sh`(helm pull, **只存 tgz**) |
 | AI chart tgz(`ai-gateway-crds-helm-<v>.tgz` + `ai-gateway-helm-<v>.tgz`) | `deployments/cubestack-addon/envoy-gateway/ai/` | 同上 |
 | 全部镜像 tar | `deployments/offline-files/envoy/` | `tools/images/envoy-save-images.sh` |
+| tar→registry 预加载 | 推送至集群内置 registry | `tools/images/envoy-load-images.sh`(独立入口, 幂等) |
 
 > 仓库**只存 chart tgz 压缩包**(不膨胀代码库); 部署模块(09/10)在**部署时把 tgz 临时解压到 `mktemp` 目录**
 > 再 `helm install`, 退出自动清理。默认 `ENVOY_*_CHART_SOURCE=tgz`; 手工放好 tgz 即可, 无需解包。
+>
+> 镜像推送: 部署时 09/10 模块**自动**把 tar 推送到集群内置 registry; 也可在部署前用
+> `envoy-load-images.sh` **独立预加载**(幂等, 已存在则跳过; 适合先推镜像再装 chart 的场景)。
 
 **镜像清单**(随版本变化, 以 `envoy-save-images.sh` 输出为准):
 
@@ -141,6 +145,7 @@
 
 1. 联网机: `envoy-save-images.sh` 从官方源 docker pull / skopeo 保存 tar → `deployments/offline-files/envoy/`;
 2. 部署机: 模块把 tar 经 skopeo 推送到**集群内置 registry**(`registry.local:5000/envoyproxy/...` 与 `registry.local:5000/ai-gateway/...`);
+   2b. 或先单独预加载(幂等): `sudo ./deployments/scripts/tools/images/envoy-load-images.sh`(适合先推镜像再装 chart);
 3. helm 安装时用 `--set image.repository/tag` 把 chart 默认镜像改写为集群内置 registry 路径, `pullPolicy=IfNotPresent`;
 4. K8s 节点按域名从集群内置 registry 拉取(节点已配 `/etc/hosts` + containerd 信任)。
 
@@ -253,8 +258,13 @@ spec:
 ```bash
 # 端到端验证 Envoy Gateway: 建测试 Gateway+HTTPRoute → busybox httpd 后端 → curl VIP 200
 sudo ./deployments/scripts/deploy-cluster.sh --steps verify_envoy_gateway
-# 端到端验证 Envoy AI Gateway: 控制器 Ready → AI CRD 注册 → (v1.x 按官方 examples/basic 的标准 Gateway 流程)
+# 端到端验证 Envoy AI Gateway: 控制器 Ready → AI CRD 注册 → 按运行时 CRD 版本自动分支
+#   (v1.x: 标准 Gateway + AIServiceBackend + AIGatewayRoute, 断言 AIServiceBackend 被控制器调和;
+#    v0.x legacy: AIGateway/Backend, 仅告警不阻断)
 sudo ./deployments/scripts/deploy-cluster.sh --steps verify_envoy_ai_gateway
+
+# 独立预加载镜像(可选, 幂等): 把 envoy-save-images.sh 生成的 tar 推送到集群内置 registry
+sudo ./deployments/scripts/tools/images/envoy-load-images.sh
 
 # 查看
 kubectl get gatewayclass,gateway,httproute -A

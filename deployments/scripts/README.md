@@ -113,7 +113,7 @@ deployments/scripts/
 │   │                         #        setup-ntp.sh / sync-hosts.sh / sync-ca*.sh / rebootstrap*.sh
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
 │   ├── images/                #   离线镜像工具: metax-save/load-images.sh / lws-save-images.sh
-│   │                         #        envoy-save-images.sh(EG+AI 镜像) / envoy-fetch-charts.sh(EG+AI 离线 chart)
+│   │                         #        envoy-save/load-images.sh(EG+AI 镜像) / envoy-fetch-charts.sh(EG+AI 离线 chart)
 │   ├── offline/               #   MinIO 离线文件: fetch-offline-from-minio.sh(拉取) / sync-to-minio.sh(推送) / trim-offline-files.sh(清理) / fetch-offline-files.sh(旧)
 │   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 └── README.md                  # 本文件
@@ -568,6 +568,29 @@ sudo ./scripts/tools/offline/trim-offline-files.sh              # 实际清理
 - **后台运行 + `docker exec`**(非交互式启动):`sudo docker run -itd --name cubestack-install --network host ...` 后 `sudo docker exec -it cubestack-install bash`(见 §1 步骤③④)。
 - **离线文件不下载进容器**:离线镜像/二进制不入镜像,由挂载目录共享 —— 容器内 `fetch-offline-from-minio.sh` 下载即落宿主机大磁盘,多集群/换环境复用。
 - 根 `README.md` §十四 还有镜像构建(`build-cli-context.sh`)与挂载参数说明。
+
+### 5.15 envoy-load-images.sh —— 预加载 envoy 镜像到集群内置 registry
+
+把 `envoy-save-images.sh` 生成的离线镜像 tar 批量推送到**集群内置 registry**(幂等, 已存在则跳过)。
+09/10 部署模块(envoy_gateway / envoy_ai_gateway)部署时也会自动推送; 本脚本用于**独立预加载**
+(如先推镜像再装 chart、或补齐某次推送失败缺的镜像)。
+
+```bash
+sudo ./scripts/tools/images/envoy-load-images.sh                # tar 目录缺省 = ENVOY_SAVE_DIR
+sudo ENVOY_EG_VERSION=v1.9.1 ./scripts/tools/images/envoy-load-images.sh /path/to/envoy-tars
+```
+
+**推送目标(与 09/10 模块 helm `--set` 一致)**:
+
+| tar | 推送目标 |
+|---|---|
+| `*gateway_${ENVOY_EG_VERSION}.tar` | `registry.local:5000/envoyproxy/gateway:${ENVOY_EG_VERSION}` |
+| `*envoy_${ENVOY_EG_VERSION}.tar` | `registry.local:5000/envoyproxy/envoy:${ENVOY_EG_VERSION}` |
+| `*ai-gateway-controller*.tar` | `registry.local:5000/ai-gateway/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}` |
+
+- 纯离线(不联网): tar 内容经 `skopeo docker-archive → docker://` 推送, 3 次重试; 需本机装 `skopeo`。
+- **nodeport 模式**(无 MetalLB): 用 `ENVOY_PUSH_ENDPOINT=<节点IP>:${REGISTRY_NODEPORT}` 覆盖推送入口。
+- 依赖: 集群内置 registry 已部署(`deploy-registry.sh` / `22_verify_registry_storage` 校验)。
 
 ---
 

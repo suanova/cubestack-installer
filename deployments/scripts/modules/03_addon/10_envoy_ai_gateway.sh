@@ -115,6 +115,7 @@ elif [ "${ENVOY_AI_CHART_SOURCE}" = "tgz" ]; then
     fi
 fi
 command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 请先安装 Helm"; exit 1; }
+skopeo_require "envoy_ai_gateway"   # 推送镜像到集群内置 registry 必需(缺失时给明确指引, 而非误报未找到镜像)
 # 宿主机 /etc/hosts 更新(registry 域名 → VIP), 与 gpu_operator 一致
 # 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)
 ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
@@ -130,33 +131,12 @@ ok "前置检查通过(依赖 EG 就绪; chart_source=${ENVOY_AI_CHART_SOURCE}, 
 
 # ---------------- 1. 推送 AI 控制器镜像到集群内置 registry(本地源优先) ----------------
 say "[1/5] 推送 AI 控制器镜像 → ${PUSH_REGISTRY_AI}/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG} ..."
-_push_skopeo() {   # <src> <dst>
-    local src="$1" dst="$2" n=1 err
-    for n in 1 2 3; do
-        if skopeo copy --quiet --src-tls-verify=false --dest-tls-verify=false \
-            --dest-no-creds "${src}" "${dst}" 2>/tmp/skopeo-err-aig; then
-            rm -f /tmp/skopeo-err-aig; return 0
-        fi
-        err="$(tail -1 /tmp/skopeo-err-aig 2>/dev/null || true)"
-        if [ "${n}" -lt 3 ]; then
-            warn "  推送失败(第 ${n}/3 次: ${err}), 3s 后重试整包..."
-            sleep 3
-        fi
-    done
-    rm -f /tmp/skopeo-err-aig
-    return 1
-}
-_reg_has_tag() {   # <tag>
-    local ver="$1" path="${PUSH_REGISTRY_AI#*/}"
-    if command -v skopeo >/dev/null 2>&1; then
-        skopeo inspect --tls-verify=false --no-creds "docker://${PUSH_REGISTRY_AI}/ai-gateway-controller:${ver}" >/dev/null 2>&1 && return 0
-    fi
-    curl -s -m 6 "http://${REGISTRY_BASE}/v2/${path}/ai-gateway-controller/tags/list" 2>/dev/null | grep -q "\"${ver}\""
-}
+# 推送助手复用 lib-common 的 push_image_skopeo(3 次重试)/ reg_has_tag(幂等)/
+# find_offline_tar(离线 tar 内容识别, 兼容改名/异常命名)
 _ALLOW_ONLINE=0
 [ "${ENVOY_AI_CHART_SOURCE:-dir}" = "oci" ] && _ALLOW_ONLINE=1
 [ "${ENVOY_AI_IMAGE_ONLINE:-false}" = "true" ] && _ALLOW_ONLINE=1
-if _reg_has_tag "${ENVOY_AI_IMAGE_TAG}"; then
+if reg_has_tag "${PUSH_REGISTRY_AI}" "ai-gateway-controller" "${ENVOY_AI_IMAGE_TAG}"; then
     ok "  ai-gateway-controller:${ENVOY_AI_IMAGE_TAG} 已在 registry, 跳过"
 else
     _SRC=""
@@ -166,26 +146,22 @@ else
         _tmp="/tmp/aig-ctrl-${ENVOY_AI_IMAGE_TAG}.tar"
         say "  从本地 docker 推送: ${_SRC}"
         if sudo docker save "${_SRC}" -o "${_tmp}" >/dev/null 2>&1 \
-           && _push_skopeo "docker-archive:${_tmp}" "docker://${PUSH_REGISTRY_AI}/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" >/dev/null 2>&1; then
+           && push_image_skopeo "docker-archive:${_tmp}" "docker://${PUSH_REGISTRY_AI}/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" >/dev/null 2>&1; then
             rm -f "${_tmp}"; ok "  ai-gateway-controller 已推送(本地 docker)"; _SRC="done"
         else
             rm -f "${_tmp}"; warn "  本地 docker 推送失败, 尝试离线 tar..."
         fi
     fi
-    # ② 离线 tar(envoy-save-images.sh 默认 deployments/offline-files/envoy; 兼容集群 images 目录)
+    # ② 离线 tar(envoy-save-images.sh 默认 deployments/offline-files/envoy; 兼容集群 images 目录;
+    #     内容识别: 修复旧 glob *ai-gateway-controller*.tar 版本无关可能推错, 兼容改名/异常命名)
     if [ -z "${_SRC}" ]; then
-        _TAR=""
-        for _td in "${ENVOY_SAVE_DIR}" "${LOCAL_REPO_DIR}/images" \
-                   "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME}/images"; do
-            [ -d "${_td}" ] || continue
-            for _t in "${_td}"/*ai-gateway-controller*.tar; do
-                [ -f "${_t}" ] && { _TAR="${_t}"; break; }
-            done
-            [ -n "${_TAR}" ] && break
-        done
+        _TAR="$(find_offline_tar "/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" "*ai-gateway-controller*.tar" \
+                    "${ENVOY_SAVE_DIR}" \
+                    "${LOCAL_REPO_DIR}/images" \
+                    "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME}/images")" || _TAR=""
         if [ -n "${_TAR}" ]; then
             say "  从离线 tar 推送: $(basename "${_TAR}")"
-            if _push_skopeo "docker-archive:${_TAR}" "docker://${PUSH_REGISTRY_AI}/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" >/dev/null 2>&1; then
+            if push_image_skopeo "docker-archive:${_TAR}" "docker://${PUSH_REGISTRY_AI}/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" >/dev/null 2>&1; then
                 ok "  ai-gateway-controller 已推送(离线 tar)"; _SRC="done"
             else
                 warn "  tar 推送失败"
@@ -194,7 +170,7 @@ else
     fi
     # ③ 在线 skopeo(仅允许在线时; 官方源为 docker.io)
     if [ -z "${_SRC}" ] && [ "${_ALLOW_ONLINE}" = "1" ]; then
-        if _push_skopeo "docker://docker.io/envoyproxy/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" \
+        if push_image_skopeo "docker://docker.io/envoyproxy/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" \
             "docker://${PUSH_REGISTRY_AI}/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" >/dev/null 2>&1; then
             ok "  ai-gateway-controller 已推送(在线)"; _SRC="done"
         else
@@ -205,7 +181,7 @@ else
         if [ "${_ALLOW_ONLINE}" = "1" ]; then
             warn "  ai-gateway-controller:${ENVOY_AI_IMAGE_TAG} 未就绪(本地 docker/tar 无, 在线失败)"
         else
-            err "离线安装: 未找到 ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}。请: ① 在联网机跑 tools/images/envoy-save-images.sh 生成 tar 放到 ${ENVOY_SAVE_DIR}/, 或 ② 改 ENVOY_AI_CHART_SOURCE=oci / ENVOY_AI_IMAGE_ONLINE=true 允许在线"
+            err "离线安装: 未找到 ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}。请: ① 在联网机跑 tools/images/envoy-save-images.sh 生成 tar 放到 ${ENVOY_SAVE_DIR}/, 或 ② 单独跑 tools/images/envoy-load-images.sh 预加载, 或 ③ 改 ENVOY_AI_CHART_SOURCE=oci / ENVOY_AI_IMAGE_ONLINE=true 允许在线"
             exit 1
         fi
     fi
