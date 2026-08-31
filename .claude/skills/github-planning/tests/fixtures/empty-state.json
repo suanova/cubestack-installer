@@ -1,0 +1,15 @@
+{
+  "labels": [],
+  "milestones": [
+    { "number": 99, "title": "v0.9", "state": "open", "description": "Previous release", "due_on": null }
+  ],
+  "issues": [
+    {
+      "number": 900, "title": "Onboard via OAuth", "state": "open",
+      "milestone": { "number": 99 },
+      "labels": [{ "name": "type:feature" }],
+      "assignees": [],
+      "id": 900001, "node_id": "node_900001"
+    }
+  ]
+}

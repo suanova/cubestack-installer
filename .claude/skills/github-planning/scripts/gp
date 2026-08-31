@@ -1,0 +1,970 @@
+#!/usr/bin/env bash
+#
+# gp — GitHub planning helper.
+#
+# Turns a planning manifest (or one-shot commands) into GitHub structure:
+# milestones, epics + sub-issues, issue dependencies (blocks/blocked-by),
+# labels, priorities, assignees, and Fibonacci story-point estimates.
+# Also renders release notes from a milestone and keeps milestone progress current.
+#
+# Design notes:
+#   * All GitHub access goes through `gh api` (never `gh issue create` flags), so
+#     it works on any gh version and --dry-run can intercept every write uniformly.
+#   * Idempotent: "create-if-missing, link-on-create". Existing open issues with the
+#     same exact title in the target milestone are skipped, so re-runs are no-ops.
+#   * --state FILE feeds a repo-state JSON snapshot and implies offline mode
+#     (GP_OFFLINE=1): any attempted gh call dies. This makes the skill fully
+#     testable with no auth and no network.
+#
+# Requires: gh (GitHub CLI), jq. Runs on stock macOS bash 3.2.
+# macOS bash 3.2 constraints honored: no associative arrays, no mapfile, no ${var,,}.
+
+set -euo pipefail
+
+# --------------------------------------------------------------------------
+# Globals
+# --------------------------------------------------------------------------
+DRY_RUN=0
+STATE_FILE=""
+GP_OFFLINE="${GP_OFFLINE:-0}"
+REPO_OVERRIDE="${GP_REPO:-}"
+CONFIG_FILE="${GP_CONFIG:-}"
+THROTTLE_MS=0
+UPDATE=0
+BODY_DIR=""
+TAG=""
+DRAFT=0
+CREATE_RELEASE=0
+OUT_FILE=""
+DUE=""
+DESC=""
+DESC_FILE=""
+AUTO_CLOSE=0
+LABEL_BLOCKED=0
+REPO=""
+SPLIT_RESULT=""
+MANIFEST=""
+STATE=""
+CREATED=""
+COUNTER=""
+DEFAULT_MS=""
+PAGINATE=0
+TMPFILES=""
+POSITIONAL=()
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+trap 'rm -f $TMPFILES' EXIT
+
+# --------------------------------------------------------------------------
+# Small helpers
+# --------------------------------------------------------------------------
+die() { printf 'gp: %s\n' "$*" >&2; exit 1; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "required tool '$1' not found. Install with: brew install $1"; }
+
+throttle() {
+  [[ "$THROTTLE_MS" -gt 0 ]] || return 0
+  sleep "$(awk -v ms="$THROTTLE_MS" 'BEGIN{ printf "%.3f", ms/1000 }')"
+}
+
+bump() {
+  local key="$1" tmp
+  [[ -n "${COUNTER:-}" && -f "$COUNTER" ]] || return 0
+  tmp="$(mktemp)"
+  jq -c --arg k "$key" '.[$k] += 1' "$COUNTER" > "$tmp" && mv "$tmp" "$COUNTER"
+}
+
+init_counter() {
+  printf '%s\n' '{"labels_ensured":0,"milestones_created":0,"issues_created":0,"issues_skipped":0,"issues_updated":0,"subissue_links":0,"dep_links":0}' > "$COUNTER"
+}
+
+append_created() {
+  local obj="$1" tmp
+  tmp="$(mktemp)"
+  jq -c --argjson o "$obj" '. + [$o]' "$CREATED" > "$tmp" && mv "$tmp" "$CREATED"
+}
+
+created_this_run() {
+  local t="$1"
+  [[ -n "$(jq -r --arg t "$t" '[.[] | select(.title == $t)] | if length>0 then "yes" else empty end' "$CREATED" 2>/dev/null || true)" ]]
+}
+
+# --------------------------------------------------------------------------
+# Repo / config resolution
+# --------------------------------------------------------------------------
+resolve_repo() {
+  local given="${1:-}" url stripped
+  if [[ -n "$given" ]]; then printf '%s\n' "$given"; return 0; fi
+  if [[ -n "$REPO_OVERRIDE" ]]; then printf '%s\n' "$REPO_OVERRIDE"; return 0; fi
+  if [[ -n "${GITHUB_REPOSITORY:-}" ]]; then printf '%s\n' "$GITHUB_REPOSITORY"; return 0; fi
+  # GitLab: 从 remote 推断 owner/repo(GitLab 同样适用)
+  if url="$(git remote get-url origin 2>/dev/null)"; then
+    stripped="${url#*github.com[:/]}"
+    if [[ "$stripped" == "$url" ]]; then
+      # 非 github remote → 尝试 gitlab/glab 格式
+      stripped="${url#*glab.isuanova.com[:/]}"
+    fi
+    stripped="${stripped%.git}"
+    if [[ -n "$stripped" ]]; then printf '%s\n' "$stripped"; return 0; fi
+  fi
+  if [[ "${GP_OFFLINE:-0}" == "1" ]]; then
+    printf '%s\n' "${GITHUB_REPOSITORY:-owner/repo}"
+    return 0
+  fi
+  die "cannot determine repo; pass <owner>/<repo> or set GP_REPO"
+}
+
+resolve_config() {
+  local cfg="${CONFIG_FILE:-$SCRIPT_DIR/../config/planning.json}"
+  [[ -f "$cfg" ]] || die "config not found: $cfg"
+  jq empty "$cfg" >/dev/null 2>&1 || die "config is not valid JSON: $cfg"
+  printf '%s\n' "$cfg"
+}
+
+iso_due() {
+  local d="$1"
+  [[ -z "$d" ]] && { printf '\n'; return; }
+  if [[ "$d" == *T* ]]; then printf '%s\n' "$d"; else printf '%sT23:59:59Z\n' "$d"; fi
+}
+
+# --------------------------------------------------------------------------
+# gh wrappers (offline-guarded)
+# --------------------------------------------------------------------------
+# GitLab 后端: 设置 GITLAB_BASE(如 https://glab.isuanova.com) + GITLAB_TOKEN 时,
+#   gh_req/gh_graphql/gh_release 走 GitLab REST API(/api/v4/projects/:id/...),
+#   响应字段归一为 gp 期望的 GitHub 风格(number/iid→number, node_id→id 字符串)。
+#   未设置 GITLAB_BASE 时保持原 GitHub(gh) 行为。
+# GitLab project 定位: REPO 传 <owner>/<repo>, 用 URL 编码的 path(namespace%2Frepo)。
+GITLAB_BASE="${GITLAB_BASE:-}"
+GITLAB_TOKEN="${GITLAB_TOKEN:-}"
+gitlab_on() { [[ -n "$GITLAB_BASE" && -n "$GITLAB_TOKEN" ]]; }
+gitlab_project() { printf '%s' "$1" | sed 's#/#%2F#g'; }
+gitlab_api() {   # gitlab_api METHOD API_PATH [DATA_JSON]  → 输出归一 JSON
+  local method="$1" path="$2" data="${3:-}" out
+  local url="${GITLAB_BASE}/api/v4/${path}"
+  if [[ -n "$data" ]]; then
+    out="$(curl -sS -m 30 -X "$method" -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+        -H 'Content-Type: application/json' -d "$data" "$url")" \
+      || die "gitlab api failed: $method $path"
+  else
+    out="$(curl -sS -m 30 -X "$method" -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "$url")" \
+      || die "gitlab api failed: $method $path"
+  fi
+  # 归一 GitLab 响应 → GitHub 风格字段(iid→number, milestone.iid→number, id→node_id)
+  # jq 版本兼容: 旧 jq 不支持 def 在表达式中间, 用 --arg 传定义? 这里内联 def(需 jq>=1.6 支持)
+  printf '%s' "$out" | jq -c '
+    def gl_norm:
+      if type == "object" then
+        ( if has("iid") then .number = .iid else . end
+        | if has("node_id") then . else ( if has("id") then .node_id = (.id|tostring) else . end ) end
+        | if (.milestone? | type) == "object" and (.milestone | has("iid")) then .milestone.number = .milestone.iid else . end
+        | . )
+      else . end;
+    (if type == "array" then map(gl_norm) else gl_norm end)
+  ' 2>/dev/null || printf '%s\n' "$out"
+}
+
+fail_gh() {
+  local method="$1" path="$2" out="${3:-}"
+  printf 'gp: gh api %s %s failed\n' "$method" "$path" >&2
+  [[ -n "$out" ]] && printf '%s\n' "$out" >&2
+  if printf '%s' "$out" | grep -qiE 'rate limit|secondary rate'; then
+    printf 'gp: rate limit detected. Wait before retrying; use --throttle-ms 200 for large batches.\n' >&2
+  fi
+  exit 1
+}
+
+# GitHub REST 路径 → GitLab REST 路径(GitLab 用 projects/:id 替代 repos/:owner/:repo)
+gh_path_to_gl() {   # <gh_path> → gl_path(projects/<owner>%2F<repo>/...)
+  local p="$1"
+  # repos/OWNER/REPO/... → projects/OWNER%2FREPO/...
+  p="${p#repos/}"
+  local first second rest
+  first="${p%%/*}"; rest="${p#*/}"
+  second="${rest%%/*}"; rest="${rest#*/}"
+  printf 'projects/%s%%2F%s/%s' "$first" "$second" "$rest"
+}
+
+gh_req() {
+  # gh_req METHOD PATH [BODY_JSON]
+  local method="$1" path="$2" body="${3:-}" out pag=""
+  if [[ "${GP_OFFLINE:-0}" == "1" ]]; then
+    die "refusing to call gh api while offline (GP_OFFLINE=1): $method $path"
+  fi
+  if gitlab_on; then
+    local glpath glmethod
+    glpath="$(gh_path_to_gl "$path")"
+    case "$method" in
+      PATCH) glmethod="PUT" ;;   # GitLab 更新用 PUT
+      *)     glmethod="$method" ;;
+    esac
+    # GitLab 字段适配: labels 数组 → 逗号分隔字符串; milestone 数字 → iid
+    if [[ -n "$body" ]]; then
+      body="$(printf '%s' "$body" | jq -c '
+        (if has("labels") and (.labels|type)=="array" then .labels = (.labels|join(",")) else . end)
+        | (if has("assignees") and (.assignees|type)=="array" and (.assignees|length)==0 then del(.assignees) else . end)
+      ' 2>/dev/null || printf '%s' "$body")"
+    fi
+    out="$(gitlab_api "$glmethod" "$glpath" "$body")"
+    printf '%s\n' "$out"
+    return 0
+  fi
+  need gh
+  [[ "$PAGINATE" == "1" ]] && pag="--paginate"
+  if [[ -n "$body" ]]; then
+    out="$(printf '%s' "$body" | gh api --method "$method" -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2026-03-10' $pag --input - "$path")" \
+      || { fail_gh "$method" "$path" "$out"; }
+  else
+    out="$(gh api --method "$method" -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2026-03-10' $pag "$path")" \
+      || { fail_gh "$method" "$path" "$out"; }
+  fi
+  printf '%s\n' "$out"
+}
+
+gh_graphql() {
+  # gh_graphql QUERY [ -f key=value ... ]
+  # GitHub: sub-issues 用 GraphQL addSubIssue; GitLab 用 REST PUT /issues/:iid {parent_id}
+  local query="$1"; shift
+  if [[ "${GP_OFFLINE:-0}" == "1" ]]; then
+    die "refusing to call gh api graphql while offline (GP_OFFLINE=1)"
+  fi
+  if gitlab_on; then
+    # GitLab: parentId/subIssueId 在 gp 里是 node_id(GitLab 为全局 id) → 需映射
+    # 但 sub-issue 用 GitLab parent_id(issue iid), 调用方需传 GitLab iid ——
+    # 由于 node_id 归一为 id 字符串, 这里无法直接翻译 → 由调用方(link_subissues)在
+    # GitLab 模式下用专门路径处理。
+    die "graphql not supported on GitLab; use gp link-subissues (GitLab REST parent_id)"
+  fi
+  need gh
+  out="$(gh api graphql -H 'GraphQL-Features: sub_issues' -f "query=$query" "$@")" \
+    || { printf 'gp: graphql mutation failed\n' >&2; exit 1; }
+  printf '%s\n' "$out"
+}
+
+# --------------------------------------------------------------------------
+# State loading
+# --------------------------------------------------------------------------
+load_state() {
+  if [[ -n "$STATE_FILE" ]]; then
+    [[ -f "$STATE_FILE" ]] || die "state file not found: $STATE_FILE"
+    STATE="$(mktemp)"; TMPFILES="$TMPFILES $STATE"
+    cp "$STATE_FILE" "$STATE"
+    GP_OFFLINE=1
+    return 0
+  fi
+  STATE="$(mktemp)"; TMPFILES="$TMPFILES $STATE"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%s\n' '{"labels":[],"milestones":[],"issues":[]}' > "$STATE"
+    printf '%s\n' "gp: dry-run with no --state: assuming an empty repo. Pass --state FILE for a realistic preview." >&2
+    return 0
+  fi
+  local labels milestones issues
+  PAGINATE=1
+  labels="$(gh_req GET "repos/$REPO/labels?per_page=100")"
+  milestones="$(gh_req GET "repos/$REPO/milestones?state=all&per_page=100")"
+  issues="$(gh_req GET "repos/$REPO/issues?state=all&per_page=100")"
+  PAGINATE=0
+  jq -n --argjson l "$labels" --argjson m "$milestones" --argjson i "$issues" \
+    '{labels:$l, milestones:$m, issues:($i | map(select(.pull_request == null)))}' > "$STATE"
+}
+
+# --------------------------------------------------------------------------
+# Milestones
+# --------------------------------------------------------------------------
+# find_milestone QUERY [open|any]  → prints milestone number or empty
+find_milestone() {
+  local q="$1" mode="${2:-open}"
+  jq -r --arg q "$q" --arg mode "$mode" '
+    ( if ($q | test("^[0-9]+$")) then
+        [.milestones[] | select((.number|tostring) == $q)]
+      elif $mode == "any" then
+        ([.milestones[] | select(.title == $q and .state == "open")]
+          + [.milestones[] | select(.title == $q and .state != "open")])
+      else
+        [.milestones[] | select(.title == $q and .state == "open")]
+      end ) | if length > 0 then .[0].number else "" end' "$STATE"
+}
+
+MS_RESULT=""
+find_or_create_milestone() {
+  # Prints informational lines to stdout; the resolved milestone number is
+  # returned in the global $MS_RESULT (callers must read it, not stdout).
+  local title="$1" due="${2:-}" desc="${3:-}" found payload created num
+  found="$(find_milestone "$title" open)"
+  if [[ -n "$found" ]]; then
+    printf '%s\n' "milestone: using existing '$title' (#$found)"
+    MS_RESULT="$found"
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%s\n' "[dry-run] create milestone: '$title'"
+    MS_RESULT="-1"
+    bump milestones_created
+    return 0
+  fi
+  payload="$(jq -n --arg t "$title" --arg due "$(iso_due "$due")" --arg d "$desc" \
+    'if $due == "" then {title:$t, state:"open", description:$d} else {title:$t, state:"open", due_on:$due, description:$d} end')"
+  created="$(gh_req POST "repos/$REPO/milestones" "$payload")"
+  num="$(printf '%s' "$created" | jq -r '.number')"
+  printf '%s\n' "create milestone: '$title' (#$num)"
+  MS_RESULT="$num"
+  bump milestones_created
+  throttle
+}
+
+# --------------------------------------------------------------------------
+# Labels
+# --------------------------------------------------------------------------
+taxonomy_labels() {
+  jq -c '[.labels.types[], .labels.priorities[], .labels.estimates[], .labels.status[]]' "$CONFIG"
+}
+
+plan_labels() {
+  {
+    jq -c '.labels.types[], .labels.priorities[], .labels.estimates[], .labels.status[]' "$CONFIG"
+    jq -c --arg c "e4e5e7" '.issues[].extra_labels[]? | {name: ., color: $c, description: ""}' "$MANIFEST"
+  } | jq -s 'unique_by(.name)'
+}
+
+ensure_labels() {
+  # $1 = JSON array of {name,color,description}
+  local defs="$1" def name
+  while IFS= read -r def; do
+    name="$(printf '%s' "$def" | jq -r '.name')"
+    if jq -e --arg n "$name" '[.labels[] | select(.name == $n)] | length > 0' "$STATE" >/dev/null 2>&1; then
+      continue
+    fi
+    if [[ "$DRY_RUN" == "1" ]]; then
+      printf '%s\n' "[dry-run] ensure label: $name"
+    else
+      gh_req POST "repos/$REPO/labels" "$def" >/dev/null
+      printf '%s\n' "ensure label: $name"
+    fi
+    bump labels_ensured
+    throttle
+  done < <(printf '%s\n' "$defs" | jq -c '.[]')
+}
+
+# --------------------------------------------------------------------------
+# Manifest validation (offline)
+# --------------------------------------------------------------------------
+validate_manifest() {
+  jq empty "$MANIFEST" >/dev/null 2>&1 || die "manifest is not valid JSON: $MANIFEST"
+  local errs
+  errs="$(jq -rn '
+    $mf[0] as $m |
+    $cfg[0] as $c |
+    ( ($c.labels.types | keys_unsorted | join(", ")) as $valid_types |
+      ($c.labels.priorities | keys_unsorted | join(", ")) as $valid_prios |
+      ($c.estimate_scale | map(tostring) | join(",")) as $valid_scale |
+      ( [ $m.issues[]? | .title ] as $titles |
+        [
+          [ (if ($m | has("issues") | not) then "manifest: missing top-level \"issues\" array" else empty end) ],
+          [ (if ($m.issues | type) != "array" then "manifest: \"issues\" must be an array" else empty end) ],
+          [ (if $m.milestone != null and (($m.milestone.title|type) != "string" or ($m.milestone.title|length)==0)
+                then "manifest.milestone.title must be a non-empty string" else empty end) ],
+          ( $m.issues[]? as $iss |
+            ( $iss.title as $t | $iss.type as $typ | $iss.priority as $pri | $iss.story_points as $sp | $iss.parent as $par |
+              [
+                (if (($t|type) != "string" or ($t|length)==0) then "issue: missing non-empty \"title\"" else empty end),
+                (if (($typ == null) or (($c.labels.types | has($typ)) | not))
+                    then "issue \"\($t)\": unknown type \"\($typ)\" (valid: \($valid_types))" else empty end),
+                (if (($pri != null) and (($c.labels.priorities | has($pri)) | not))
+                    then "issue \"\($t)\": unknown priority \"\($pri)\" (valid: \($valid_prios))" else empty end),
+                (if (($sp != null) and (($c.estimate_scale|map(tostring)|index(($sp|tostring))) | not))
+                    then "issue \"\($t)\": story_points \"\($sp)\" not on scale \($valid_scale)" else empty end),
+                (if (($iss.extra_labels != null) and (($iss.extra_labels|type) != "array"))
+                    then "issue \"\($t)\": extra_labels must be an array" else empty end),
+                (if (($iss.assignees != null) and (($iss.assignees|type) != "array"))
+                    then "issue \"\($t)\": assignees must be an array" else empty end),
+                (if ($iss.children != null and (($iss.children|type) != "array"))
+                    then "issue \"\($t)\": children must be an array" else empty end),
+                (if ($iss.depends_on != null and (($iss.depends_on|type) != "array"))
+                    then "issue \"\($t)\": depends_on must be an array" else empty end),
+                (if (($par != null) and ($iss.children != null) and (($iss.children|length) > 0))
+                    then "issue \"\($t)\": cannot set both \"parent\" and \"children\"" else empty end),
+                (if (($par != null) and (($titles|index($par))|not))
+                    then "issue \"\($t)\": parent \"\($par)\" is not in the manifest" else empty end),
+                ( $iss.children[]? as $c | select(($titles|index($c))|not)
+                  | "issue \"\($t)\": child \"\($c)\" is not in the manifest" ),
+                ( $iss.depends_on[]? as $d | select(($titles|index($d))|not)
+                  | "issue \"\($t)\": depends_on \"\($d)\" is not in the manifest" )
+              ] | map(select(. != null))
+            )
+          )
+        ] | flatten | .[]
+      )
+    )' --slurpfile mf "$MANIFEST" --slurpfile cfg "$CONFIG")"
+  if [[ -n "$errs" ]]; then
+    printf 'gp: manifest validation failed:\n' >&2
+    while IFS= read -r e; do printf '  - %s\n' "$e" >&2; done <<< "$errs"
+    return 1
+  fi
+  return 0
+}
+
+# --------------------------------------------------------------------------
+# Issue-level helpers
+# --------------------------------------------------------------------------
+lookup_field() {
+  # lookup_field TITLE FIELD  → value from state, else from this-run created set
+  local title="$1" field="$2" v=""
+  v="$(jq -r --arg t "$title" --arg f "$field" \
+      '[.issues[] | select(.title == $t) | .[$f]] | if length>0 then .[0] else empty end' "$STATE" 2>/dev/null || true)"
+  if [[ -z "$v" ]]; then
+    v="$(jq -r --arg t "$title" --arg f "$field" \
+        '[.[] | select(.title == $t) | .[$f]] | if length>0 then .[0] else empty end' "$CREATED" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$v"
+}
+
+issue_exists() {
+  local t="$1" msn="$2"
+  if [[ -n "$msn" && "$msn" != "-1" ]]; then
+    jq -e --arg t "$t" --argjson n "$msn" \
+      '[.issues[] | select(.state=="open" and .title==$t and .milestone.number==$n)] | length > 0' "$STATE" >/dev/null 2>&1
+  else
+    jq -e --arg t "$t" \
+      '[.issues[] | select(.state=="open" and .title==$t and (.milestone == null))] | length > 0' "$STATE" >/dev/null 2>&1
+  fi
+}
+
+issue_body() {
+  local iss="$1" b bf dir
+  b="$(printf '%s' "$iss" | jq -r '.body // ""')"
+  if [[ -n "$b" ]]; then printf '%s\n' "$b"; return 0; fi
+  bf="$(printf '%s' "$iss" | jq -r '.body_file // ""')"
+  if [[ -n "$bf" ]]; then
+    dir="${BODY_DIR:-$(dirname "$MANIFEST")}"
+    [[ -f "$dir/$bf" ]] || die "body_file not found: $dir/$bf"
+    cat "$dir/$bf"
+    return 0
+  fi
+  printf '\n'
+}
+
+ms_for() {
+  # prints the milestone number for a manifest issue ("" = no milestone, -1 = pending create in dry-run)
+  local iss="$1" mv
+  if [[ "$(printf '%s' "$iss" | jq 'has("milestone")')" == "true" ]]; then
+    mv="$(printf '%s' "$iss" | jq -r '.milestone // ""')"
+    if [[ -z "$mv" || "$mv" == "null" ]]; then printf '\n'; return 0; fi
+    find_or_create_milestone "$mv" >/dev/null
+    printf '%s\n' "$MS_RESULT"
+    return 0
+  fi
+  printf '%s\n' "$DEFAULT_MS"
+}
+
+labels_for() {
+  printf '%s' "$1" | jq -c \
+    '[ .type,
+       "priority:" + (if .priority then .priority else "P2" end),
+       (if .story_points != null then ("story-points:" + (.story_points|tostring)) else empty end),
+       (.extra_labels[]? // empty) ]'
+}
+
+assignees_for() { printf '%s' "$1" | jq -c '[.assignees[]?]'; }
+
+# --------------------------------------------------------------------------
+# plan: create / link
+# --------------------------------------------------------------------------
+create_issue() {
+  local iss="$1" ms="$2" title body labels assignees payload resp obj
+  title="$(printf '%s' "$iss" | jq -r '.title')"
+  body="$(issue_body "$iss")"
+  labels="$(labels_for "$iss")"
+  assignees="$(assignees_for "$iss")"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%s\n' "[dry-run] create issue: $title"
+    append_created "$(jq -n --arg t "$title" '{title:$t}')"
+    bump issues_created
+    return 0
+  fi
+  payload="$(jq -n --arg title "$title" --arg body "$body" --argjson labels "$labels" \
+      --argjson assignees "$assignees" --arg ms "$ms" \
+      '{title:$title, body:$body, labels:$labels, assignees:$assignees}
+       + (if $ms == "" or $ms == "-1" then {} else {milestone:($ms|tonumber)} end)')"
+  resp="$(gh_req POST "repos/$REPO/issues" "$payload")"
+  obj="$(printf '%s' "$resp" | jq -c --arg t "$title" '{title:$t, number:.number, id:.id, node_id:.node_id}')"
+  append_created "$obj"
+  printf '%s\n' "create issue: $title (#$(printf '%s' "$resp" | jq -r '.number'))"
+  bump issues_created
+  throttle
+}
+
+update_issue() {
+  local iss="$1" ms="$2" title labels assignees payload num
+  title="$(printf '%s' "$iss" | jq -r '.title')"
+  ms="$(ms_for "$iss")"
+  labels="$(labels_for "$iss")"
+  assignees="$(assignees_for "$iss")"
+  num="$(lookup_field "$title" number)"
+  [[ -n "$num" ]] || die "cannot resolve existing issue '$title' for --update"
+  payload="$(jq -n --argjson labels "$labels" --argjson assignees "$assignees" --arg ms "$ms" \
+      '{labels:$labels, assignees:$assignees}
+       + (if $ms == "" or $ms == "-1" then {} else {milestone:($ms|tonumber)} end)')"
+  gh_req PATCH "repos/$REPO/issues/$num" "$payload" >/dev/null
+  printf '%s\n' "update issue: $title (#$num)"
+  throttle
+}
+
+link_subissues() {
+  local edges="$1" edge parent child pnode cnode
+  while IFS= read -r edge; do
+    parent="$(printf '%s' "$edge" | jq -r '.parent')"
+    child="$(printf '%s' "$edge" | jq -r '.child')"
+    created_this_run "$child" || continue
+    if [[ "$DRY_RUN" == "1" ]]; then
+      printf '%s\n' "[dry-run] link sub-issue: $parent <- $child"
+      bump subissue_links
+      continue
+    fi
+    pnode="$(lookup_field "$parent" node_id)"
+    cnode="$(lookup_field "$child" node_id)"
+    [[ -n "$pnode" && -n "$cnode" ]] || die "missing node_id for sub-issue link ($parent <- $child)"
+    if gitlab_on; then
+      # GitLab: sub-issue 用 PUT /issues/:iid {parent_id} (parent_id = 父 issue 的全局 id)
+      # 归一后 node_id = 全局 id(id 字符串) → 直接作为 parent_id
+      local piid ciid
+      piid="$(lookup_field "$parent" number)"    # 父 issue iid
+      ciid="$(lookup_field "$child" number)"     # 子 issue iid
+      gh_req PUT "repos/$REPO/issues/$ciid" "{\"parent_id\": ${pnode}}" >/dev/null 2>&1 \
+        || gh_req PUT "repos/$REPO/issues/$ciid" "{\"parent_id\": ${pnode}}" >/dev/null
+      printf '%s\n' "link sub-issue (gitlab): $parent <- $child"
+    else
+      gh_graphql 'mutation($parentId: ID!, $subIssueId: ID!) { addSubIssue(input: {issueId: $parentId, subIssueId: $subIssueId}) { issue { id } } }' \
+        -f parentId="$pnode" -f subIssueId="$cnode" >/dev/null
+      printf '%s\n' "link sub-issue: $parent <- $child"
+    fi
+    bump subissue_links
+    throttle
+  done < <(printf '%s\n' "$edges" | jq -c '.[]')
+}
+
+link_dependencies() {
+  # For X depends_on D (X blocked by D):
+  #   POST /repos/{o}/{r}/issues/{X.number}/dependencies/blocked_by  body {"issue_id": D.id}
+  # (path = the dependent/blocked issue; body issue_id = the blocker's global numeric id)
+  local edges="$1" pair dep_title blocker xnum did
+  while IFS= read -r pair; do
+    dep_title="$(printf '%s' "$pair" | jq -r '.dep')"
+    blocker="$(printf '%s' "$pair" | jq -r '.block')"
+    created_this_run "$dep_title" || continue
+    if [[ "$DRY_RUN" == "1" ]]; then
+      printf '%s\n' "[dry-run] link blocked_by: $dep_title blocked by $blocker"
+      bump dep_links
+      continue
+    fi
+    xnum="$(lookup_field "$dep_title" number)"
+    did="$(lookup_field "$blocker" id)"
+    [[ -n "$xnum" && -n "$did" ]] || die "missing reference for dependency ($dep_title blocked by $blocker)"
+    if gitlab_on; then
+      # GitLab: 依赖用 POST /issues/:iid/links {target_project_id, target_issue_iid, link_type}
+      local proj target_iid
+      proj="$(printf '%s' "$REPO" | sed 's#/#%2F#g')"
+      target_iid="$(lookup_field "$blocker" number)"
+      gh_req POST "repos/$REPO/issues/$xnum/links" \
+        "{\"target_project_id\": \"$proj\", \"target_issue_iid\": ${target_iid}, \"link_type\": \"is_blocked_by\"}" >/dev/null 2>&1 \
+        || gh_req POST "repos/$REPO/issues/$xnum/links" \
+          "{\"target_project_id\": \"$proj\", \"target_issue_iid\": ${target_iid}, \"link_type\": \"blocks\"}" >/dev/null
+      printf '%s\n' "link blocked_by (gitlab): $dep_title blocked by $blocker"
+    else
+      gh_req POST "repos/$REPO/issues/$xnum/dependencies/blocked_by" "{\"issue_id\": $did}" >/dev/null
+      printf '%s\n' "link blocked_by: $dep_title blocked by $blocker"
+    fi
+    bump dep_links
+    throttle
+  done < <(printf '%s\n' "$edges" | jq -c '.[]')
+}
+
+summary() {
+  jq -r '"plan summary: labels ensured \(.labels_ensured), milestones created \(.milestones_created), issues created \(.issues_created), skipped \(.issues_skipped), updated \(.issues_updated), sub-issues linked \(.subissue_links), dependencies linked \(.dep_links)"' "$COUNTER"
+}
+
+# --------------------------------------------------------------------------
+# release-notes rendering
+# --------------------------------------------------------------------------
+type_key() {
+  jq -r '([.labels[]?.name | select(. == "feature" or . == "epic" or . == "story" or . == "task" or . == "bug" or . == "doc")] | .[0] // "other")'
+}
+
+render_notes() {
+  local msnum="$1" title today totals total closed pts ptsdone open t d count num state ttl
+  title="$(jq -r --argjson n "$msnum" '.milestones[] | select(.number == $n) | .title' "$STATE")"
+  today="$(date +%Y-%m-%d)"
+  printf '# %s\n\n_Generated %s by github-planning._\n\n' "$title" "$today"
+  totals="$(jq -r --argjson n "$msnum" '
+    [.issues[] | select(.milestone.number == $n)] as $all |
+    ($all | length) as $total |
+    ([$all[] | select(.state=="closed")] | length) as $closed |
+    ([$all[].labels[]?.name | select(startswith("story-points:")) | sub("^story-points:";"") | tonumber] | add // 0) as $pts |
+    ([$all[] | select(.state=="closed") | .labels[]?.name | select(startswith("story-points:")) | sub("^story-points:";"") | tonumber] | add // 0) as $ptsdone |
+    "\($total) \($closed) \($pts) \($ptsdone)"' "$STATE")"
+  set -- $totals
+  total="${1:-0}"; closed="${2:-0}"; pts="${3:-0}"; ptsdone="${4:-0}"
+  open=$((total - closed))
+  for t in feature epic story task bug doc other; do
+    case "$t" in
+      feature) d="Features";; epic) d="Epics";; story) d="Stories";; task) d="Tasks";;
+      bug) d="Bug fixes";; doc) d="Docs";; other) d="Other";;
+    esac
+    count="$(jq -r --argjson n "$msnum" --arg t "$t" '
+      [.issues[] | select(.milestone.number == $n)] as $all |
+      [ $all[] | select( (([.labels[]?.name | select(. == "feature" or . == "epic" or . == "story" or . == "task" or . == "bug" or . == "doc")] | .[0] // "other") == $t)) ] | length' "$STATE")"
+    if [[ "$count" -gt 0 ]]; then
+      printf '## %s\n\n' "$d"
+      while IFS=$'\t' read -r num state ttl; do
+        if [[ "$state" == "closed" ]]; then
+          printf -- '- #%s — %s ✔\n' "$num" "$ttl"
+        else
+          printf -- '- #%s — %s\n' "$num" "$ttl"
+        fi
+      done < <(jq -r --argjson n "$msnum" --arg t "$t" '
+        [.issues[] | select(.milestone.number == $n)] as $all |
+        [ $all[] | select( (([.labels[]?.name | select(. == "feature" or . == "epic" or . == "story" or . == "task" or . == "bug" or . == "doc")] | .[0] // "other") == $t)) ] |
+        sort_by(.number)[] | "\(.number)\t\(.state)\t\(.title)"' "$STATE")
+      printf '\n'
+    fi
+  done
+  printf '### Summary\n\n'
+  printf -- '- Issues: %s (%s closed, %s open)\n' "$total" "$closed" "$open"
+  printf -- '- Story points: %s (%s done)\n' "$pts" "$ptsdone"
+}
+
+label_blocked_live() {
+  local msnum="$1" num blockers
+  while IFS= read -r num; do
+    if gitlab_on; then
+      # GitLab: 阻塞依赖经 issue_links(type=is_blocked_by) 查询
+      blockers="$(gh_req GET "repos/$REPO/issues/$num/links")"
+      [[ "$(printf '%s' "$blockers" | jq -r '[.[]? | select(.link_type=="is_blocked_by")] | length // 0')" -gt 0 ]] || blockers="[]"
+    else
+      blockers="$(gh_req GET "repos/$REPO/issues/$num/dependencies/blocked_by")"
+    fi
+    if [[ "$(printf '%s' "$blockers" | jq 'length // 0')" -gt 0 ]]; then
+      if gitlab_on; then
+        gh_req PUT "repos/$REPO/issues/$num" '{"add_labels":"status:blocked"}' >/dev/null
+      else
+        gh_req POST "repos/$REPO/issues/$num/labels" '{"labels":["status:blocked"]}' >/dev/null
+      fi
+      printf '%s\n' "label blocked: #$num"
+    fi
+  done < <(jq -r --argjson n "$msnum" \
+    '[.issues[] | select(.milestone.number == $n and .state=="open") | .number][]' "$STATE")
+}
+
+# --------------------------------------------------------------------------
+# Subcommands
+# --------------------------------------------------------------------------
+parse_common() {
+  POSITIONAL=()
+  local idx=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) DRY_RUN=1; shift;;
+      --state) STATE_FILE="$2"; GP_OFFLINE=1; shift 2;;
+      --config) CONFIG_FILE="$2"; shift 2;;
+      --repo) REPO_OVERRIDE="$2"; shift 2;;
+      --update) UPDATE=1; shift;;
+      --throttle-ms) THROTTLE_MS="$2"; shift 2;;
+      --body-dir) BODY_DIR="$2"; shift 2;;
+      --tag) TAG="$2"; shift 2;;
+      --draft) DRAFT=1; shift;;
+      --create-release) CREATE_RELEASE=1; shift;;
+      --out) OUT_FILE="$2"; shift 2;;
+      --due) DUE="$2"; shift 2;;
+      --desc) DESC="$2"; shift 2;;
+      --desc-file) DESC_FILE="$2"; shift 2;;
+      --auto-close) AUTO_CLOSE=1; shift;;
+      --label-blocked) LABEL_BLOCKED=1; shift;;
+      --) shift; while [[ $# -gt 0 ]]; do POSITIONAL[$idx]="$1"; idx=$((idx+1)); shift; done;;
+      -*) die "unknown option: $1";;
+      *) POSITIONAL[$idx]="$1"; idx=$((idx+1)); shift;;
+    esac
+  done
+}
+
+# Resolve the [<repo>] <primary-arg> pair for commands that take a primary arg
+# (manifest / milestone title). Rules:
+#   * two positionals        -> first is repo, second is the primary arg
+#   * one existing file      -> it is the primary arg; repo resolved from env/git
+#   * one owner/repo string  -> it is the repo; primary arg is missing
+#   * otherwise              -> it is the primary arg (repo from env/git)
+split_repo_arg() {
+  local first="${1:-}" second="${2:-}"
+  if [[ -n "$second" ]]; then
+    REPO="$(resolve_repo "$first")"
+    SPLIT_RESULT="$second"
+  elif [[ -f "$first" ]]; then
+    REPO="$(resolve_repo)"
+    SPLIT_RESULT="$first"
+  elif [[ "$first" =~ ^[^./][^/]*/[^/]+$ ]]; then
+    REPO="$(resolve_repo "$first")"
+    SPLIT_RESULT=""
+  else
+    REPO="$(resolve_repo)"
+    SPLIT_RESULT="$first"
+  fi
+}
+
+cmd_validate() {
+  parse_common "$@"
+  need jq
+  CONFIG="$(resolve_config)"
+  [[ ${#POSITIONAL[@]} -ge 1 ]] || die "usage: gp validate <manifest.json> [--config FILE]"
+  MANIFEST="${POSITIONAL[0]}"
+  [[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
+  if validate_manifest; then
+    printf 'gp: manifest OK (%s issues)\n' "$(jq '.issues | length' "$MANIFEST")"
+  else
+    exit 1
+  fi
+}
+
+cmd_ensure_labels() {
+  parse_common "$@"
+  need jq
+  CONFIG="$(resolve_config)"
+  REPO="$(resolve_repo "${POSITIONAL[0]:-}")"
+  load_state
+  ensure_labels "$(taxonomy_labels)"
+}
+
+cmd_milestone() {
+  parse_common "$@"
+  need jq
+  CONFIG="$(resolve_config)"
+  local title desc=""
+  split_repo_arg "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}"
+  title="$SPLIT_RESULT"
+  [[ -n "$title" ]] || die "usage: gp milestone [<repo>] <title> [--due YYYY-MM-DD] [--desc TEXT|--desc-file FILE]"
+  if [[ -n "$DESC_FILE" ]]; then
+    [[ -f "$DESC_FILE" ]] || die "desc-file not found: $DESC_FILE"
+    desc="$(cat "$DESC_FILE")"
+  else
+    desc="$DESC"
+  fi
+  load_state
+  find_or_create_milestone "$title" "$DUE" "$desc"
+}
+
+cmd_plan() {
+  parse_common "$@"
+  need jq
+  CONFIG="$(resolve_config)"
+  split_repo_arg "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}"
+  MANIFEST="$SPLIT_RESULT"
+  [[ -n "$MANIFEST" ]] || die "usage: gp plan [<repo>] <manifest.json> [--dry-run] [--state FILE]"
+  [[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
+  load_state
+  COUNTER="$(mktemp)"; CREATED="$(mktemp)"; TMPFILES="$TMPFILES $COUNTER $CREATED"
+  init_counter; printf '[]' > "$CREATED"
+  validate_manifest || exit 1
+  ensure_labels "$(plan_labels)"
+  DEFAULT_MS=""
+  if [[ "$(jq -r '.milestone // "none"' "$MANIFEST")" != "none" ]]; then
+    local mtitle mdue mdesc
+    mtitle="$(jq -r '.milestone.title // ""' "$MANIFEST")"
+    mdue="$(jq -r '.milestone.due_on // ""' "$MANIFEST")"
+    mdesc="$(jq -r '.milestone.description // ""' "$MANIFEST")"
+    if [[ -n "$mtitle" ]]; then
+      find_or_create_milestone "$mtitle" "$mdue" "$mdesc"
+      DEFAULT_MS="$MS_RESULT"
+    fi
+  fi
+  local iss title ms
+  while IFS= read -r iss; do
+    title="$(printf '%s' "$iss" | jq -r '.title')"
+    ms="$(ms_for "$iss")"
+    if issue_exists "$title" "$ms"; then
+      if [[ "$UPDATE" == "1" ]]; then
+        if [[ "$DRY_RUN" == "1" ]]; then
+          printf '%s\n' "[dry-run] update issue: $title"
+        else
+          update_issue "$iss" "$ms"
+        fi
+        bump issues_updated
+      else
+        printf '%s\n' "skip (exists): $title"
+        bump issues_skipped
+      fi
+      continue
+    fi
+    create_issue "$iss" "$ms"
+  done < <(jq -c '.issues[]' "$MANIFEST")
+  link_subissues "$(jq -c '[ .issues[] | . as $m | ( [ $m.children[]? | {parent: $m.title, child: .} ] + ( if ($m.parent? != null) then [ {parent: $m.parent, child: $m.title} ] else [] end ) ) ] | add // [] | unique_by([.parent,.child])' "$MANIFEST")"
+  link_dependencies "$(jq -c '[ .issues[] | select(.depends_on? != null) | . as $x | $x.depends_on[] | {dep: $x.title, block: .} ]' "$MANIFEST")"
+  summary
+}
+
+cmd_release_notes() {
+  parse_common "$@"
+  need jq
+  CONFIG="$(resolve_config)"
+  local ms msnum out
+  split_repo_arg "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}"
+  ms="$SPLIT_RESULT"
+  [[ -n "$ms" ]] || die "usage: gp release-notes [<repo>] <milestone> [--tag TAG] [--draft] [--create-release] [--out FILE]"
+  load_state
+  msnum="$(find_milestone "$ms" any)"
+  [[ -n "$msnum" ]] || die "milestone '$ms' not found"
+  out="$(render_notes "$msnum")"
+  if [[ -n "$OUT_FILE" ]]; then
+    printf '%s\n' "$out" > "$OUT_FILE"
+    printf '%s\n' "wrote release notes: $OUT_FILE"
+  else
+    printf '%s\n' "$out"
+  fi
+  if [[ "$CREATE_RELEASE" == "1" ]]; then
+    [[ -n "$TAG" ]] || die "--create-release requires --tag"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      printf '%s\n' "[dry-run] create release: $TAG (draft=$DRAFT)"
+    else
+      local tmp dra="" proj
+      tmp="$(mktemp)"; printf '%s\n' "$out" > "$tmp"
+      [[ "$DRAFT" == "1" ]] && dra="--draft"
+      if gitlab_on; then
+        proj="$(printf '%s' "$REPO" | sed 's#/#%2F#g')"
+        # GitLab: POST /projects/:id/releases {tag_name, description}
+        gitlab_api POST "projects/${proj}/releases" \
+          "$(jq -n --arg t "$TAG" --arg d "$(cat "$tmp")" '{tag_name:$t, description:$d}')" >/dev/null
+        printf '%s\n' "create release (gitlab): $TAG"
+      else
+        need gh
+        if ! gh release create "$TAG" $dra --notes-file "$tmp" --repo "$REPO"; then
+          rm -f "$tmp"
+          die "release create failed for tag '$TAG'"
+        fi
+        printf '%s\n' "create release: $TAG"
+      fi
+      rm -f "$tmp"
+    fi
+  fi
+}
+
+cmd_update_milestone() {
+  parse_common "$@"
+  need jq
+  CONFIG="$(resolve_config)"
+  local ms msnum totals total closed open pct block today orig newdesc payload
+  split_repo_arg "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}"
+  ms="$SPLIT_RESULT"
+  [[ -n "$ms" ]] || die "usage: gp update-milestone [<repo>] <milestone> [--auto-close] [--label-blocked]"
+  load_state
+  msnum="$(find_milestone "$ms" any)"
+  [[ -n "$msnum" ]] || die "milestone '$ms' not found"
+  totals="$(jq -r --argjson n "$msnum" '
+    [.issues[] | select(.milestone.number == $n)] as $all |
+    "\($all|length) \(([$all[]|select(.state=="closed")]|length))"' "$STATE")"
+  set -- $totals
+  total="${1:-0}"; closed="${2:-0}"
+  open=$((total - closed))
+  if [[ "$total" -gt 0 ]]; then
+    pct="$(awk -v c="$closed" -v t="$total" 'BEGIN{ printf "%d", c*100/t }')"
+  else
+    pct="0"
+  fi
+  printf 'progress: %s/%s (%s%%)\n' "$closed" "$total" "$pct"
+  today="$(date +%Y-%m-%d)"
+  block="$(printf '<!-- progress:start -->\n### Progress\nGenerated: %s\n- Issues: %s total, %s closed, %s open\n- Completion: %s%%\n<!-- progress:end -->' \
+    "$today" "$total" "$closed" "$open" "$pct")"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%s\n' "[dry-run] update milestone description: $ms"
+  else
+    orig="$(jq -r --argjson n "$msnum" '.milestones[] | select(.number == $n) | .description // ""' "$STATE")"
+    newdesc="$(printf '%s' "$orig" | sed '/<!-- progress:start -->/,/<!-- progress:end -->/d')"
+    newdesc="$(printf '%s\n\n%s\n' "$newdesc" "$block")"
+    payload="$(jq -n --arg d "$newdesc" '{description:$d}')"
+    gh_req PATCH "repos/$REPO/milestones/$msnum" "$payload" >/dev/null
+    printf '%s\n' "update milestone description: $ms"
+  fi
+  if [[ "$AUTO_CLOSE" == "1" ]]; then
+    if [[ "$total" -gt 0 && "$closed" -eq "$total" ]]; then
+      if [[ "$DRY_RUN" == "1" ]]; then
+        printf '%s\n' "[dry-run] close milestone: $ms"
+      else
+        gh_req PATCH "repos/$REPO/milestones/$msnum" '{"state":"closed"}' >/dev/null
+        printf '%s\n' "close milestone: $ms"
+      fi
+    else
+      printf '%s\n' "close milestone: no ($open still open)"
+    fi
+  else
+    printf '%s\n' "close milestone: no (pass --auto-close)"
+  fi
+  if [[ "$LABEL_BLOCKED" == "1" ]]; then
+    if [[ "$DRY_RUN" == "1" || "${GP_OFFLINE:-0}" == "1" ]]; then
+      printf '%s\n' "label blocked: skipped in offline/dry-run (needs live dependency data)"
+    else
+      label_blocked_live "$msnum"
+    fi
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+gp — GitHub planning helper (milestones, epics, dependencies, estimates, releases)
+
+USAGE
+  gp <command> [options] [args]
+
+COMMANDS
+  ensure-labels [<repo>] [--dry-run] [--state FILE]
+      Ensure the taxonomy labels defined in config/planning.json exist.
+
+  milestone [<repo>] <title> [--due YYYY-MM-DD] [--desc TEXT|--desc-file FILE]
+      [--dry-run] [--state FILE]
+      Find an open milestone by exact title, else create it.
+
+  plan [<repo>] <manifest.json> [--dry-run] [--state FILE] [--body-dir DIR]
+      [--throttle-ms MS] [--update]
+      Idempotent batch: ensure labels -> find-or-create milestone -> create missing
+      issues -> link epics/sub-issues -> link blocked-by dependencies.
+
+  release-notes [<repo>] <milestone> [--tag TAG] [--draft] [--create-release]
+      [--dry-run] [--state FILE] [--out FILE]
+      Render grouped release notes from milestone issues; optionally create a draft release.
+
+  update-milestone [<repo>] <milestone> [--dry-run] [--state FILE]
+      [--auto-close] [--label-blocked]
+      Recompute progress, rewrite the milestone description, optionally auto-close
+      at 100%, optionally maintain the status:blocked label.
+
+  validate <manifest.json> [--config FILE]
+      Offline schema/consistency check (no gh, no auth).
+
+  help
+
+GLOBAL OPTIONS
+  --dry-run       print actions, make no changes
+  --state FILE    use a repo-state JSON snapshot (implies offline; no gh calls)
+  --config FILE   override config/planning.json (env: GP_CONFIG)
+  --repo owner/repo  override repo (env: GP_REPO)
+
+Repo is inferred from the git remote when omitted. The script never deletes anything.
+EOF
+}
+
+# --------------------------------------------------------------------------
+# Entry point
+# --------------------------------------------------------------------------
+main() {
+  local cmd
+  if [[ $# -lt 1 ]]; then usage; exit 1; fi
+  cmd="$1"; shift
+  case "$cmd" in
+    help|-h|--help) usage; exit 0;;
+    validate) cmd_validate "$@";;
+    ensure-labels) cmd_ensure_labels "$@";;
+    milestone) cmd_milestone "$@";;
+    plan) cmd_plan "$@";;
+    release-notes) cmd_release_notes "$@";;
+    update-milestone) cmd_update_milestone "$@";;
+    *) die "unknown command: $cmd (run: gp help)";;
+  esac
+}
+
+main "$@"
