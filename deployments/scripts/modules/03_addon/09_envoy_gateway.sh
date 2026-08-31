@@ -98,6 +98,7 @@ elif [ "${ENVOY_EG_CHART_SOURCE}" = "tgz" ]; then
     fi
 fi
 command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 请先安装 Helm"; exit 1; }
+skopeo_require "envoy_gateway"   # 推送镜像到集群内置 registry 必需(缺失时给明确指引, 而非误报未找到镜像)
 # 宿主机 /etc/hosts 更新(registry 域名 → VIP), 与 gpu_operator 一致
 # 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)
 ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
@@ -116,36 +117,15 @@ ok "前置检查通过(chart_source=${ENVOY_EG_CHART_SOURCE}, version=${ENVOY_EG
 #   · dir/tgz(本地源, 默认) → 镜像强制走本地 docker daemon / 离线 tar, 绝不尝试联网
 #   · oci 源或 ENVOY_EG_IMAGE_ONLINE=true → 才允许在线 skopeo 拉取官方镜像
 say "[1/4] 推送 EG 镜像 → ${PUSH_REGISTRY}(控制面 gateway + 数据面 envoy, tag=${ENVOY_EG_VERSION}) ..."
-_push_skopeo() {   # <src> <dst>
-    local src="$1" dst="$2" n=1 err
-    for n in 1 2 3; do
-        if skopeo copy --quiet --src-tls-verify=false --dest-tls-verify=false \
-            --dest-no-creds "${src}" "${dst}" 2>/tmp/skopeo-err-eg; then
-            rm -f /tmp/skopeo-err-eg; return 0
-        fi
-        err="$(tail -1 /tmp/skopeo-err-eg 2>/dev/null || true)"
-        if [ "${n}" -lt 3 ]; then
-            warn "  推送失败(第 ${n}/3 次: ${err}), 3s 后重试整包..."
-            sleep 3
-        fi
-    done
-    rm -f /tmp/skopeo-err-eg
-    return 1
-}
-_reg_has_tag() {   # <repo> <tag> — 优先 skopeo inspect, 缺失时 curl tags/list
-    local repo="$1" ver="$2" path="${PUSH_REGISTRY#*/}"
-    if command -v skopeo >/dev/null 2>&1; then
-        skopeo inspect --tls-verify=false --no-creds "docker://${PUSH_REGISTRY}/${repo}:${ver}" >/dev/null 2>&1 && return 0
-    fi
-    curl -s -m 6 "http://${REGISTRY_BASE}/v2/${path}/${repo}/tags/list" 2>/dev/null | grep -q "\"${ver}\""
-}
+# 推送助手复用 lib-common 的 push_image_skopeo(3 次重试)/ reg_has_tag(幂等)/
+# find_offline_tar(离线 tar 内容识别, 兼容改名/异常命名)
 _ALLOW_ONLINE=0
 [ "${ENVOY_EG_CHART_SOURCE:-dir}" = "oci" ] && _ALLOW_ONLINE=1
 [ "${ENVOY_EG_IMAGE_ONLINE:-false}" = "true" ] && _ALLOW_ONLINE=1
 # push_one <镜像短名 gateway|envoy> <tar匹配模式>
 push_one() {
-    local short="$1" tarpatt="$2" src="" _tar _t
-    if _reg_has_tag "${short}" "${ENVOY_EG_VERSION}"; then
+    local short="$1" tarpatt="$2" src="" _tar
+    if reg_has_tag "${PUSH_REGISTRY}" "${short}" "${ENVOY_EG_VERSION}"; then
         ok "  ${short}:${ENVOY_EG_VERSION} 已在 registry, 跳过"
         return 0
     fi
@@ -155,7 +135,7 @@ push_one() {
         _tmp="/tmp/eg-${short}-${ENVOY_EG_VERSION}.tar"
         say "  从本地 docker 推送: ${src}"
         if sudo docker save "${src}" -o "${_tmp}" >/dev/null 2>&1 \
-           && _push_skopeo "docker-archive:${_tmp}" "docker://${PUSH_REGISTRY}/${short}:${ENVOY_EG_VERSION}" >/dev/null 2>&1; then
+           && push_image_skopeo "docker-archive:${_tmp}" "docker://${PUSH_REGISTRY}/${short}:${ENVOY_EG_VERSION}" >/dev/null 2>&1; then
             rm -f "${_tmp}"
             ok "  ${short} 已推送(本地 docker)"; return 0
         else
@@ -163,23 +143,23 @@ push_one() {
             warn "  本地 docker 推送失败, 尝试离线 tar..."
         fi
     fi
-    # ② 离线 tar(envoy-save-images.sh 默认 deployments/offline-files/envoy; 兼容集群 images 目录)
-    for _td in "${ENVOY_SAVE_DIR}" "${LOCAL_REPO_DIR}/images" \
-               "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME}/images"; do
-        [ -d "${_td}" ] || continue
-        for _t in "${_td}"/"${tarpatt}"; do
-            [ -f "${_t}" ] || continue
-            say "  从离线 tar 推送: $(basename "${_t}")"
-            if _push_skopeo "docker-archive:${_t}" "docker://${PUSH_REGISTRY}/${short}:${ENVOY_EG_VERSION}" >/dev/null 2>&1; then
-                ok "  ${short} 已推送(离线 tar)"; return 0
-            else
-                warn "  tar 推送失败: $(basename "${_t}")"
-            fi
-        done
-    done
+    # ② 离线 tar(envoy-save-images.sh 默认 deployments/offline-files/envoy; 兼容集群 images 目录;
+    #     内容识别: 文件名 glob 快路径 + 全部 tar 按内容兜底, 兼容改名/异常命名)
+    _tar="$(find_offline_tar "/${short}:${ENVOY_EG_VERSION}" "${tarpatt}" \
+                "${ENVOY_SAVE_DIR}" \
+                "${LOCAL_REPO_DIR}/images" \
+                "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME}/images")" || _tar=""
+    if [ -n "${_tar}" ]; then
+        say "  从离线 tar 推送: $(basename "${_tar}")"
+        if push_image_skopeo "docker-archive:${_tar}" "docker://${PUSH_REGISTRY}/${short}:${ENVOY_EG_VERSION}" >/dev/null 2>&1; then
+            ok "  ${short} 已推送(离线 tar)"; return 0
+        else
+            warn "  tar 推送失败: $(basename "${_tar}")"
+        fi
+    fi
     # ③ 在线 skopeo(仅允许在线时)
     if [ "${_ALLOW_ONLINE}" = "1" ]; then
-        if _push_skopeo "docker://docker.io/envoyproxy/${short}:${ENVOY_EG_VERSION}" \
+        if push_image_skopeo "docker://docker.io/envoyproxy/${short}:${ENVOY_EG_VERSION}" \
             "docker://${PUSH_REGISTRY}/${short}:${ENVOY_EG_VERSION}" >/dev/null 2>&1; then
             ok "  ${short} 已推送(在线)"; return 0
         fi
@@ -190,7 +170,7 @@ push_one() {
         warn "  envoyproxy/${short}:${ENVOY_EG_VERSION} 未就绪(本地 docker/tar 无, 在线失败)"
         return 1
     else
-        err "离线安装: 未找到 envoyproxy/${short}:${ENVOY_EG_VERSION}(本地 docker 无 + 离线 tar 无)。请: ① 在联网机跑 tools/images/envoy-save-images.sh 生成 tar 放到 ${ENVOY_SAVE_DIR}/, 或 ② 放离线 tar 到 ${LOCAL_REPO_DIR}/images/, 或 ③ 改 ENVOY_EG_CHART_SOURCE=oci 允许在线"
+        err "离线安装: 未找到 envoyproxy/${short}:${ENVOY_EG_VERSION}(本地 docker 无 + 离线 tar 无)。请: ① 在联网机跑 tools/images/envoy-save-images.sh 生成 tar 放到 ${ENVOY_SAVE_DIR}/, 或 ② 放离线 tar 到 ${LOCAL_REPO_DIR}/images/, 或 ③ 单独跑 tools/images/envoy-load-images.sh 预加载, 或 ④ 改 ENVOY_EG_CHART_SOURCE=oci 允许在线"
         return 1
     fi
 }

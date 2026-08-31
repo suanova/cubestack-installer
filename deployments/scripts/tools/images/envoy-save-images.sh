@@ -30,7 +30,8 @@
 #         sudo ./envoy-save-images.sh <镜像ref ...>        # 只下载指定镜像(如 docker.io/envoyproxy/gateway:v1.9.1)
 # 注意: sudo 会清空环境变量, 指定版本时**必须把 VAR= 写在 sudo 之后**(否则被丢弃用默认值):
 #         sudo ENVOY_EG_VERSION=v1.9.1 ./envoy-save-images.sh
-# 加载:   tools/images/ 无独立 load 脚本 — 09/10 模块部署时自动识别并推送; 或直接
+# 加载:   tools/images/envoy-load-images.sh 可独立预加载推送(幂等, 已存在则跳过); 09/10 模块部署时
+#         也会自动识别并推送; 或直接
 #         skopeo copy --src-tls-verify=false docker-archive:<tar> docker://<registry>/envoyproxy/gateway:<tag>
 # ============================================================
 set -euo pipefail
@@ -184,4 +185,5 @@ echo "---------------------------------------------"
 ok "保存完成: ${count} 个镜像 → ${ENVOY_SAVE_DIR}"
 du -sh "${ENVOY_SAVE_DIR}" 2>/dev/null | awk '{print "  总大小: "$1}'
 echo "  部署时由 09_envoy_gateway.sh / 10_envoy_ai_gateway.sh 自动推送至集群内置 registry"
-echo "  也可手动: skopeo copy --src-tls-verify=false docker-archive:<tar> docker://<registry>/<repo>:<tag>"
+echo "  也可独立预加载(幂等): sudo ./deployments/scripts/tools/images/envoy-load-images.sh"
+echo "  或手动: skopeo copy --src-tls-verify=false docker-archive:<tar> docker://<registry>/<repo>:<tag>"

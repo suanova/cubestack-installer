@@ -152,6 +152,83 @@ POLICY_EOF
 }
 ensure_skopeo_policy
 
+# ---------------- 共享 skopeo 推送助手(tar → 集群内置 registry) ----------------
+# gpu_operator / lws / envoy(09/10) / metax-load 曾各自复制同一份 _push_skopeo/_reg_has_tag;
+# 集中到本库供新代码复用(envoy 家族 + 独立 load 脚本), 已有 metax/gpu/lws 维持原状避免回归。
+# 全部为**新符号**, 不改任何现有调用方。
+
+# 前置检查: 缺失 skopeo 时给明确指引(而非 3 次重试后误报"未找到镜像")
+# 用法: skopeo_require <组件名>
+skopeo_require() {
+    command -v skopeo >/dev/null 2>&1 && return 0
+    err "未找到 skopeo(推送镜像到集群内置 registry 必需)。请安装 skopeo, 或使用项目 CLI 镜像"
+    err "  (tools/docker/build-cli-context.sh 内置 skopeo-1.16.1-amd64)"
+    exit 1
+}
+
+# 3 次整包重试的 skopeo copy(大 blob 连接中断时 skopeo 的 --retry-times 不覆盖)
+# 错误文件按 PID 隔离(并行安全)。用法: push_image_skopeo <src> <dst>
+push_image_skopeo() {
+    local src="$1" dst="$2" n=1 errf="/tmp/skopeo-err-$$" err
+    for n in 1 2 3; do
+        if skopeo copy --quiet --src-tls-verify=false --dest-tls-verify=false \
+            --dest-no-creds "${src}" "${dst}" 2>"${errf}"; then
+            rm -f "${errf}"; return 0
+        fi
+        err="$(tail -1 "${errf}" 2>/dev/null || true)"
+        if [ "${n}" -lt 3 ]; then
+            warn "  推送失败(第 ${n}/3 次: ${err}), 3s 后重试整包..."
+            sleep 3
+        fi
+    done
+    rm -f "${errf}"; return 1
+}
+
+# 幂等检查: registry 是否已有 <repo>:<tag>(优先 skopeo inspect, 缺失时 curl tags/list)
+# 需调用方先设置 REGISTRY_BASE(各模块/load 脚本在 load_config 后派生)。
+# 用法: reg_has_tag <push_registry> <repo> <tag>
+reg_has_tag() {
+    local pr="$1" repo="$2" ver="$3" path="${pr#*/}"
+    if command -v skopeo >/dev/null 2>&1; then
+        skopeo inspect --tls-verify=false --no-creds "docker://${pr}/${repo}:${ver}" >/dev/null 2>&1 && return 0
+    fi
+    curl -s -m 6 "http://${REGISTRY_BASE}/v2/${path}/${repo}/tags/list" 2>/dev/null | grep -q "\"${ver}\""
+}
+
+# 离线 tar 内容识别: 文件名 glob 快路径 + tar_first_image_tag 内容校验; glob 未命中时
+# 扫描全部 *.tar 按内容兜底(兼容改名/异常命名)。读不出内容时**信任 glob 不否决**,
+# 仅明确不匹配才跳过并告警。用法: find_offline_tar <ref后缀> <文件名glob> <dir...>
+#   ref 后缀带前导 /(如 /gateway:v1.9.1), 防 /foo/gateway:v1.9.1 误匹配
+find_offline_tar() {
+    local suffix="$1" glob="$2"; shift 2
+    local d t src
+    for d in "$@"; do
+        [ -d "${d}" ] || continue
+        # 快路径: 文件名 glob 候选 + 内容校验
+        # 注意: ${glob} 不能加引号(引号会抑制路径展开, 快路径永远匹配不到文件, 只剩内容兜底)
+        for t in "${d}"/${glob}; do
+            [ -f "${t}" ] || continue
+            src="$(tar_first_image_tag "${t}")"
+            if [ -z "${src}" ]; then
+                echo "${t}"; return 0
+            fi
+            case "${src}" in
+                *"${suffix}") echo "${t}"; return 0 ;;
+                # 告警走 stderr: 调用方可能在 $(...) 里调本函数(如 load 脚本), stdout 会被吞
+                *) warn "  $(basename "${t}") 内容为 ${src}, 非 ${suffix}, 跳过" >&2 ;;
+            esac
+        done
+        # 兜底: 无 glob 命中时扫描全部 *.tar 按内容匹配
+        for t in "${d}"/*.tar; do
+            [ -f "${t}" ] || continue
+            case "$(tar_first_image_tag "${t}")" in
+                *"${suffix}") echo "${t}"; return 0 ;;
+            esac
+        done
+    done
+    return 1
+}
+
 # ---------------- 统一配置加载 ----------------
 # 环境变量优先: 配置文件内使用 ${VAR:-default},已导出的环境变量不会被覆盖
 load_config() {

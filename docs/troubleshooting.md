@@ -392,18 +392,20 @@ kubectl get validatingwebhookconfiguration lws-validating-webhook-configuration 
 | 症状 | 根因 | 解法(根治) |
 |---|---|---|
 | `09_envoy_gateway.sh` 报 "EG chart 目录不存在/缺 Chart.yaml" | 离线 chart 未备料(联网机未跑 fetch 工具) | 联网机执行 `tools/images/envoy-fetch-charts.sh`(或手动 helm pull gateway-helm 解包)后拷到 `deployments/cubestack-addon/envoy-gateway/eg/` |
-| 部署报 "未找到 envoyproxy/gateway:... 镜像" | 离线镜像未备料 | 联网机执行 `tools/images/envoy-save-images.sh`, tar 放入 `deployments/offline-files/envoy/`(或本地 docker daemon 先 docker pull) |
+| 部署报 "未找到 envoyproxy/gateway:... 镜像" | 离线镜像未备料 | 联网机执行 `tools/images/envoy-save-images.sh`, tar 放入 `deployments/offline-files/envoy/`(或本地 docker daemon 先 docker pull); 已备 tar 可单独跑 `tools/images/envoy-load-images.sh` 预加载 |
 | 创建 Gateway 后数据面 pod `ImagePullBackOff`(docker.io 不可达) | **数据面镜像未改写**(chart values `envoyGateway.image.*` 仍指向 docker.io) | 确认 09 模块 helm 安装时注入 `--set envoyGateway.image.repository/tag` = 集群内置 registry; 已装错可 `helm upgrade eg <chart> --reuse-values --set ...` 修复 |
 | `GatewayClass eg` 未 Accepted | 控制面未就绪 / controllerName 不匹配 | `kubectl -n envoy-gateway-system logs deploy/eg --tail=50`; GatewayClass 的 `spec.controllerName` 必须是 `gateway.envoyproxy.io/gatewayclass-controller` |
 | Gateway 一直没 VIP(ADDRESS 空) | MetalLB 池耗尽/网段冲突, 或数据面未起来 | `kubectl describe gateway` 看条件; `kubectl get svc -n <gw-ns>` 看 LoadBalancer pending 原因(参考 §三.1/§三.2) |
 | `10_envoy_ai_gateway.sh` 报 "未检测到 Envoy Gateway(GatewayClass eg 未 Accepted)" | AI 依赖 EG, 但 EG 未装/未就绪 | 先 `ENVOY_GATEWAY_ENABLED=true` 部署模块 `envoy_gateway`, 再装 AI |
 | AI 控制器 pod CrashLoop / webhook 不生效(v1.x) | `envoyGateway.namespace` 未指向 EG 命名空间 / EG 版本不匹配(AI 与 EG 版本兼容矩阵) | 确认模块 10 helm 安装注入 `--set envoyGateway.namespace` = `envoy-gateway-system`(`kubectl -n ai-gateway-system get deploy ai-gateway-controller -o yaml \| grep envoyGatewayNamespace`); 核对 AI↔EG 版本兼容矩阵 |
 | AI CRD apply 报 `no matches for kind "AIGateway"` | v1.x 无 AIGateway/Backend CRD(改为 AIServiceBackend/AIGatewayRoute); 或 CRD 未装 | `kubectl get crd \| grep aigateway`; 按 `docs/envoy-gateway.md` §4.2 / 官方 `examples/basic/basic.yaml` 使用 v1.x 资源 |
+| 部署报 "未找到 skopeo" | 推送镜像到集群内置 registry 需要 `skopeo` | 宿主机安装 `skopeo`(如 `apt install skopeo`), 或使用项目 CLI 镜像(`tools/docker/build-cli-context.sh` 内置 skopeo-1.16.1-amd64) |
 
 **验证**
 ```bash
 sudo ./deploy-cluster.sh --steps verify_envoy_gateway      # 控制面 + GatewayClass + VIP + 真实 HTTP 转发
-sudo ./deploy-cluster.sh --steps verify_envoy_ai_gateway   # AI 控制器 + CRD(+ 按官方 basic.yaml 的标准 Gateway 流程)
+sudo ./deploy-cluster.sh --steps verify_envoy_ai_gateway   # AI 控制器 + CRD + 资源调和(运行时 CRD 版本自动分支)
+sudo ./scripts/tools/images/envoy-load-images.sh           # (可选)独立预加载镜像到集群内置 registry
 kubectl get gatewayclass,gateway,httproute -A
 kubectl get aiservicebackend,aigatewayroute -A
 ```
