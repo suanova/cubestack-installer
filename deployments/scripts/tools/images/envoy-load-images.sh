@@ -8,6 +8,8 @@
 #   envoyproxy/gateway:${ENVOY_EG_VERSION}              ← *gateway_${ENVOY_EG_VERSION}.tar(EG 控制面)
 #   envoyproxy/envoy:${ENVOY_PROXY_VERSION}             ← *envoy_${ENVOY_PROXY_VERSION}.tar(EG 数据面; ⚠ tag=ENVOY_PROXY_VERSION, 默认 distroless-v1.39.1, 勿用 EG 版本号)
 #   ai-gateway/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG} ← *ai-gateway-controller*.tar(AI 控制器)
+#   ai-gateway/ai-gateway-extproc:${ENVOY_AI_IMAGE_TAG}    ← *ai-gateway-extproc*.tar(⚠ extProc sidecar: AI 控制器
+#       把它注入数据面 pod, 漏推则数据面 2/3 ImagePullBackOff, AI 路由 404)
 # 纯离线: 不联网(在线拉取由 09/10 模块 ENVOY_*_IMAGE_ONLINE 控制)。
 # tar 识别: 文件名 glob 快路径 + tar_first_image_tag 内容校验(兼容改名/异常命名)。
 # nodeport 模式(无 MetalLB, REGISTRY_IP 为空): 用 ENVOY_PUSH_ENDPOINT 覆盖推送入口,
@@ -74,5 +76,6 @@ _OK=0; _FAIL=0
 load_one "/gateway:${ENVOY_EG_VERSION}"  "*gateway_${ENVOY_EG_VERSION}.tar"  "${PUSH_REGISTRY_EG}" "gateway" "${ENVOY_EG_VERSION}" && _OK=$((_OK+1)) || _FAIL=$((_FAIL+1))
 load_one "/envoy:${ENVOY_PROXY_VERSION}" "*envoy_${ENVOY_PROXY_VERSION}.tar" "${PUSH_REGISTRY_EG}" "envoy"   "${ENVOY_PROXY_VERSION}" && _OK=$((_OK+1)) || _FAIL=$((_FAIL+1))
 load_one "/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" "*ai-gateway-controller*.tar" "${PUSH_REGISTRY_AI}" "ai-gateway-controller" "${ENVOY_AI_IMAGE_TAG}" && _OK=$((_OK+1)) || _FAIL=$((_FAIL+1))
+load_one "/ai-gateway-extproc:${ENVOY_AI_IMAGE_TAG}" "*ai-gateway-extproc*.tar" "${PUSH_REGISTRY_AI}" "ai-gateway-extproc" "${ENVOY_AI_IMAGE_TAG}" && _OK=$((_OK+1)) || _FAIL=$((_FAIL+1))
 [ "${_FAIL}" -eq 0 ] || { err "加载未完全成功: 成功/已在 ${_OK}, 失败 ${_FAIL}; 见上方错误指引"; exit 1; }
 ok "加载完成: ${_OK} 个镜像已就绪(推送或已在 registry)"

@@ -139,7 +139,7 @@
 **镜像清单**(随版本变化, 以 `envoy-save-images.sh` 输出为准):
 
 - Envoy Gateway: `envoyproxy/gateway`(控制面, tag=`ENVOY_EG_VERSION`)、`envoyproxy/envoy`(数据面, ⚠ tag=`ENVOY_PROXY_VERSION`, 默认 `distroless-v1.39.1` —— 与 EG 版本号**不同**, 用 `kubectl exec deploy/envoy-gateway -- envoy-gateway version` 的 `ENVOY_PROXY_VERSION` 核对); 若启用限流再备 `envoyproxy/ratelimit`、`envoyproxy/envoy-ratelimit`。
-- Envoy AI Gateway: `docker.io/envoyproxy/ai-gateway-controller`(控制器, 官方源 DockerHub, 非 ghcr); AI 数据面复用 EG 的镜像(`envoyproxy/envoy`, tag 同上)。
+- Envoy AI Gateway: `docker.io/envoyproxy/ai-gateway-controller`(控制器, 官方源 DockerHub, 非 ghcr)、**`docker.io/envoyproxy/ai-gateway-extproc`(extProc sidecar, ⚠ 必收: AI 控制器把它注入数据面 pod, 漏收则数据面 2/3 ImagePullBackOff、AI 路由 404)**; AI 数据面复用 EG 的镜像(`envoyproxy/envoy`, tag 同上)。
 
 ### 3.3 镜像流向(与 LWS/gpu_operator 同一模式)
 
@@ -156,8 +156,10 @@
 | gateway-helm | `deployment.envoyGateway.image.repository` / `image.tag` | EG 控制面 Deployment + certgen Job 镜像(chart v1.9.1 经 `eg.image` helper 统一取此路径; 默认 `docker.io/envoyproxy/gateway`) |
 | gateway-helm | `global.images.envoyProxy.image` | **数据面** Envoy 镜像(创建 Gateway 时动态拉起, 完整镜像串, 默认 `docker.io/envoyproxy/envoy`; ⚠ tag=`ENVOY_PROXY_VERSION`=distroless-v1.39.1, 勿用 EG 版本号) |
 | gateway-helm | `envoyGateway.extensionManager` | v0.x 扩展机制(已废弃; v1.x AI 不再使用, 默认不启用) |
+| gateway-helm | `config.envoyGateway.extensionApis.enableBackend` | **EG Backend API**(默认禁用, 安全原因; AIG v1.1+ 的 AIServiceBackend 必须引用 EG Backend → 09 模块默认设 `true`, 否则 HTTPRoute 报 "Backend is disabled in Envoy Gateway configuration") |
 | ai-gateway-crds-helm | — | 纯 CRD chart, 无镜像 |
 | ai-gateway-helm | `controller.image.repository` / `controller.image.tag` | AI 控制器镜像(默认 `docker.io/envoyproxy/ai-gateway-controller`; 另 `controller.nameOverride` 定资源名、`envoyGateway.namespace` 指 EG 命名空间) |
+| ai-gateway-helm | `extProc.image.repository` / `extProc.image.tag` | **extProc sidecar 镜像**(控制器 `--extProcImage` 参数; 注入数据面 pod, 必须改写为集群内置 registry, 否则离线拉不到 docker.io) |
 
 > 数据面镜像改写是关键: 用户创建 `Gateway` 后控制器动态创建的 Envoy Proxy Deployment 必须能从集群内置 registry 拉镜像(默认 docker.io 在离线集群不可达)。
 
@@ -222,33 +224,50 @@ spec:
       protocol: HTTP
       port: 80
 ---
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: openai-backend
+  namespace: default
+spec:                              # EG Backend(需 EG extensionApis.enableBackend=true)
+  endpoints:
+    - fqdn:
+        hostname: api.openai.com
+        port: 443
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIServiceBackend
 metadata:
   name: openai
   namespace: default
 spec:
-  type: OpenAI
-  apiKey:
-    name: openai-key               # 引用保存 API Key 的 Secret
-  url: https://api.openai.com/v1
+  backendRef:
+    group: gateway.envoyproxy.io
+    kind: Backend
+    name: openai-backend
+  schema:
+    name: OpenAI                  # OpenAI/Anthropic/AWSBedrock/...(枚举)
+    prefix: /v1                   # chat completions 端点 = <prefix>/chat/completions
 ---
-apiVersion: aigateway.envoyproxy.io/v1alpha1
+apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIGatewayRoute
 metadata:
   name: llm-route
   namespace: default
 spec:
-  gatewayRefs:
+  parentRefs:
     - name: llm-gateway
   rules:
-    - matches:
-        - path: /v1/chat/completions
+    - matches:                    # v1.1 只支持 header 匹配(x-ai-eg-model 由 AI filter 从请求 body 提取 model 注入)
+        - headers:
+            - name: x-ai-eg-model
+              value: gpt-4o
       backendRefs:
         - name: openai
 ```
 
-> ⚠ v1.x 起**没有** `AIGateway`/`Backend` CRD(那是 v0.x API); 用上面的标准 Gateway + `AIServiceBackend` + `AIGatewayRoute`。
+> ⚠ v1.x 起**没有** `AIGateway`/`Backend`(aigateway.envoyproxy.io 组)CRD(那是 v0.x API); 用上面的标准 Gateway + EG `Backend` + `AIServiceBackend` + `AIGatewayRoute`。
+> ⚠ v1.1 起 `AIServiceBackend.spec` 为 `backendRef`(引用 EG Backend)+ `schema`(name/prefix), 旧字段 `type/apiKey/url` 会被 strict decode 拒绝; `AIGatewayRoute.spec` 为 `parentRefs`(非 `gatewayRefs`)。
 > 精确字段随版本迭代(Alpha/Beta), 以所装版本官方 `examples/basic/basic.yaml` 为准; 本仓库 verify 模块使用最小可运行子集。
 
 ---

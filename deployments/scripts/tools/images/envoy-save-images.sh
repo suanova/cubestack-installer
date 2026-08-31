@@ -9,6 +9,9 @@
 #   [Envoy Gateway]    docker.io/envoyproxy/gateway:<EG_VERSION>     控制面
 #                      docker.io/envoyproxy/envoy:<ENVOY_PROXY_VERSION>  数据面(用户 Gateway 动态创建 Envoy Proxy; ⚠ tag 与 EG 版本不同, 默认 distroless-v1.39.1)
 #   [Envoy AI Gateway] docker.io/envoyproxy/ai-gateway-controller:<AI_VERSION>   控制器(独立 Deployment; 官方源 docker.io, 非 ghcr)
+#                      docker.io/envoyproxy/ai-gateway-extproc:<AI_VERSION>    extProc sidecar(⚠ 必收: AI 控制器把数据面 pod
+#                        注入 extProc 容器(镜像由控制器 --extProcImage 参数决定, chart 值 extProc.image.repository/tag),
+#                        漏收则数据面 pod 2/3 ImagePullBackOff(离线集群拉不到 docker.io), AI 路由不生效)
 #   (可选限流, 默认不下载): envoyproxy/ratelimit:<tag> + envoyproxy/envoy-ratelimit:<tag>
 #
 # 下载方式(按顺序尝试, 与 lws-save-images.sh 一致):
@@ -99,7 +102,8 @@ ENVOY_IMAGE_LIST="${ENVOY_IMAGE_LIST:-}"
 if [ -z "${ENVOY_IMAGE_LIST}" ]; then
     ENVOY_IMAGE_LIST="docker.io/envoyproxy/gateway:${ENVOY_EG_VERSION}
 docker.io/envoyproxy/envoy:${ENVOY_PROXY_VERSION}
-docker.io/envoyproxy/ai-gateway-controller:${ENVOY_AI_VERSION}"
+docker.io/envoyproxy/ai-gateway-controller:${ENVOY_AI_VERSION}
+docker.io/envoyproxy/ai-gateway-extproc:${ENVOY_AI_VERSION}"
 fi
 
 # 命令行指定镜像则覆盖清单

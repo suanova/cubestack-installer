@@ -20,6 +20,9 @@
 #   · Chart(两个官方 chart, **均托管在 DockerHub OCI**, 版本带 v 如 v1.1.0; 注意 ghcr 同名路径不存在会 403):
 #       ai-gateway-crds-helm   = CRD chart(所有 aigateway.envoyproxy.io CRD)
 #       ai-gateway-helm        = AI 控制器 chart(controller Deployment/Service/webhook)
+#   · 命名空间: 两个 chart **默认都装进 ENVOY_AI_NAMESPACE**(ai-gateway-system)。CRD 为 cluster-scoped,
+#     namespace 仅 helm release 归属; 早期版本把 CRD chart 单独装 ai-gateway-crds(无 pod 的空 ns,
+#     易被误判为废弃), 已合并并自动清理旧 ns(ENVOY_AI_CRDS_NS=ai-gateway-crds 可恢复拆分)。
 #     来源(ENVOY_AI_CHART_SOURCE, 默认 tgz 本地离线; 由 tools/images/envoy-fetch-charts.sh 在联网机下载):
 #       dir  = 本地解包目录(ENVOY_AI_CHART_DIR = deployments/cubestack-addon/envoy-gateway/ai,
 #              内含 ai-gateway-crds-helm + ai-gateway-helm 两个 chart)
@@ -60,7 +63,9 @@ ENVOY_AI_CHART_TGZ_CRDS="${ENVOY_AI_CHART_TGZ_CRDS:-${ENVOY_AI_CHART_DIR}/ai-gat
 ENVOY_AI_CHART_TGZ_CTRL="${ENVOY_AI_CHART_TGZ_CTRL:-${ENVOY_AI_CHART_DIR}/ai-gateway-helm-${ENVOY_AI_VERSION}.tgz}"
 ENVOY_AI_CHART_OCI="${ENVOY_AI_CHART_OCI:-oci://docker.io/envoyproxy}"
 ENVOY_AI_NAMESPACE="${ENVOY_AI_NAMESPACE:-ai-gateway-system}"       # 控制器命名空间
-ENVOY_AI_CRDS_NS="${ENVOY_AI_CRDS_NS:-ai-gateway-crds}"             # CRD chart 命名空间
+# CRD chart 命名空间: 默认与控制器**合并**(CRD 为 cluster-scoped, namespace 仅 helm release 归属;
+# 早期版本单独 ai-gateway-crds 空 ns 易被误判为废弃, 已统一)。设 ENVOY_AI_CRDS_NS=ai-gateway-crds 可恢复拆分。
+ENVOY_AI_CRDS_NS="${ENVOY_AI_CRDS_NS:-${ENVOY_AI_NAMESPACE}}"
 ENVOY_AI_CRDS_RELEASE="${ENVOY_AI_CRDS_RELEASE:-ai-gateway-crds}"
 ENVOY_AI_CTRL_RELEASE="${ENVOY_AI_CTRL_RELEASE:-ai-gateway-controller}"
 # 控制器 Deployment/Service 名: chart 用 controller.fullname=<release>-<chartName>,
@@ -69,6 +74,7 @@ ENVOY_AI_CTRL_RELEASE="${ENVOY_AI_CTRL_RELEASE:-ai-gateway-controller}"
 ENVOY_AI_CTRL_NAME="${ENVOY_AI_CTRL_NAME:-${ENVOY_AI_CTRL_RELEASE}}"
 REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
 ENVOY_AI_IMAGE_REPO="${ENVOY_AI_IMAGE_REPO:-${REGISTRY_BASE}/ai-gateway/ai-gateway-controller}"  # K8s 可见镜像
+ENVOY_AI_EXTPROC_IMAGE_REPO="${ENVOY_AI_EXTPROC_IMAGE_REPO:-${REGISTRY_BASE}/ai-gateway/ai-gateway-extproc}"  # extProc sidecar 镜像(K8s 可见; ⚠ 必收必推, 见 [1/5])
 ENVOY_AI_IMAGE_TAG="${ENVOY_AI_IMAGE_TAG:-${ENVOY_AI_VERSION}}"
 PUSH_REGISTRY_AI="${REGISTRY_IP}:${REGISTRY_PORT}/ai-gateway"       # 推送直连 IP
 ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"
@@ -129,63 +135,66 @@ sync_kubeconfig \
     || { err "宿主机无法访问集群(admin.conf 下载/同步失败)"; exit 1; }
 ok "前置检查通过(依赖 EG 就绪; chart_source=${ENVOY_AI_CHART_SOURCE}, version=${ENVOY_AI_VERSION})"
 
-# ---------------- 1. 推送 AI 控制器镜像到集群内置 registry(本地源优先) ----------------
-say "[1/5] 推送 AI 控制器镜像 → ${PUSH_REGISTRY_AI}/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG} ..."
+# ---------------- 1. 推送 AI 镜像到集群内置 registry(本地源优先: 控制器 + extProc sidecar) ----------------
+say "[1/5] 推送 AI 镜像 → ${PUSH_REGISTRY_AI}(ai-gateway-controller + ai-gateway-extproc, tag=${ENVOY_AI_IMAGE_TAG}) ..."
+# ⚠ extProc 是必推项: AI 控制器把数据面 pod 注入 extProc sidecar(镜像由控制器 --extProcImage 参数决定,
+#   chart 值 extProc.image.repository/tag)。漏推/漏改 → 数据面 pod 2/3 ImagePullBackOff(离线拉不到
+#   docker.io), AI 路由 404 "No matching route found"(见 envoy-save-images.sh 镜像清单)。
 # 推送助手复用 lib-common 的 push_image_skopeo(3 次重试)/ reg_has_tag(幂等)/
 # find_offline_tar(离线 tar 内容识别, 兼容改名/异常命名)
 _ALLOW_ONLINE=0
 [ "${ENVOY_AI_CHART_SOURCE:-dir}" = "oci" ] && _ALLOW_ONLINE=1
 [ "${ENVOY_AI_IMAGE_ONLINE:-false}" = "true" ] && _ALLOW_ONLINE=1
-if reg_has_tag "${PUSH_REGISTRY_AI}" "ai-gateway-controller" "${ENVOY_AI_IMAGE_TAG}"; then
-    ok "  ai-gateway-controller:${ENVOY_AI_IMAGE_TAG} 已在 registry, 跳过"
-else
-    _SRC=""
+push_ai_image() {
+    local short="$1" tarpatt="$2" _SRC="" _TAR="" _tmp=""
+    if reg_has_tag "${PUSH_REGISTRY_AI}" "${short}" "${ENVOY_AI_IMAGE_TAG}"; then
+        ok "  ${short}:${ENVOY_AI_IMAGE_TAG} 已在 registry, 跳过"
+        return 0
+    fi
     # ① 本地 docker daemon
-    _SRC="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E "/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}$" | head -1 || true)"
+    _SRC="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E "/${short}:${ENVOY_AI_IMAGE_TAG}$" | head -1 || true)"
     if [ -n "${_SRC}" ]; then
-        _tmp="/tmp/aig-ctrl-${ENVOY_AI_IMAGE_TAG}.tar"
+        _tmp="/tmp/aig-${short}-${ENVOY_AI_IMAGE_TAG}.tar"
         say "  从本地 docker 推送: ${_SRC}"
         if sudo docker save "${_SRC}" -o "${_tmp}" >/dev/null 2>&1 \
-           && push_image_skopeo "docker-archive:${_tmp}" "docker://${PUSH_REGISTRY_AI}/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" >/dev/null 2>&1; then
-            rm -f "${_tmp}"; ok "  ai-gateway-controller 已推送(本地 docker)"; _SRC="done"
+           && push_image_skopeo "docker-archive:${_tmp}" "docker://${PUSH_REGISTRY_AI}/${short}:${ENVOY_AI_IMAGE_TAG}" >/dev/null 2>&1; then
+            rm -f "${_tmp}"; ok "  ${short} 已推送(本地 docker)"; return 0
         else
             rm -f "${_tmp}"; warn "  本地 docker 推送失败, 尝试离线 tar..."
         fi
     fi
     # ② 离线 tar(envoy-save-images.sh 默认 deployments/offline-files/envoy; 兼容集群 images 目录;
-    #     内容识别: 修复旧 glob *ai-gateway-controller*.tar 版本无关可能推错, 兼容改名/异常命名)
-    if [ -z "${_SRC}" ]; then
-        _TAR="$(find_offline_tar "/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" "*ai-gateway-controller*.tar" \
-                    "${ENVOY_SAVE_DIR}" \
-                    "${LOCAL_REPO_DIR}/images" \
-                    "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME}/images")" || _TAR=""
-        if [ -n "${_TAR}" ]; then
-            say "  从离线 tar 推送: $(basename "${_TAR}")"
-            if push_image_skopeo "docker-archive:${_TAR}" "docker://${PUSH_REGISTRY_AI}/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" >/dev/null 2>&1; then
-                ok "  ai-gateway-controller 已推送(离线 tar)"; _SRC="done"
-            else
-                warn "  tar 推送失败"
-            fi
+    #     内容识别: glob 版本无关可能推错, find_offline_tar 按 tar 内容兜底, 兼容改名/异常命名)
+    _TAR="$(find_offline_tar "/${short}:${ENVOY_AI_IMAGE_TAG}" "${tarpatt}" \
+                "${ENVOY_SAVE_DIR}" \
+                "${LOCAL_REPO_DIR}/images" \
+                "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME}/images")" || _TAR=""
+    if [ -n "${_TAR}" ]; then
+        say "  从离线 tar 推送: $(basename "${_TAR}")"
+        if push_image_skopeo "docker-archive:${_TAR}" "docker://${PUSH_REGISTRY_AI}/${short}:${ENVOY_AI_IMAGE_TAG}" >/dev/null 2>&1; then
+            ok "  ${short} 已推送(离线 tar)"; return 0
+        else
+            warn "  tar 推送失败"
         fi
     fi
     # ③ 在线 skopeo(仅允许在线时; 官方源为 docker.io)
-    if [ -z "${_SRC}" ] && [ "${_ALLOW_ONLINE}" = "1" ]; then
-        if push_image_skopeo "docker://docker.io/envoyproxy/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" \
-            "docker://${PUSH_REGISTRY_AI}/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}" >/dev/null 2>&1; then
-            ok "  ai-gateway-controller 已推送(在线)"; _SRC="done"
-        else
-            warn "  在线推送失败"
+    if [ "${_ALLOW_ONLINE}" = "1" ]; then
+        if push_image_skopeo "docker://docker.io/envoyproxy/${short}:${ENVOY_AI_IMAGE_TAG}" \
+            "docker://${PUSH_REGISTRY_AI}/${short}:${ENVOY_AI_IMAGE_TAG}" >/dev/null 2>&1; then
+            ok "  ${short} 已推送(在线)"; return 0
         fi
+        warn "  在线推送失败"
     fi
-    if [ -z "${_SRC}" ]; then
-        if [ "${_ALLOW_ONLINE}" = "1" ]; then
-            warn "  ai-gateway-controller:${ENVOY_AI_IMAGE_TAG} 未就绪(本地 docker/tar 无, 在线失败)"
-        else
-            err "离线安装: 未找到 ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}。请: ① 在联网机跑 tools/images/envoy-save-images.sh 生成 tar 放到 ${ENVOY_SAVE_DIR}/, 或 ② 单独跑 tools/images/envoy-load-images.sh 预加载, 或 ③ 改 ENVOY_AI_CHART_SOURCE=oci / ENVOY_AI_IMAGE_ONLINE=true 允许在线"
-            exit 1
-        fi
+    if [ "${_ALLOW_ONLINE}" = "1" ]; then
+        warn "  ${short}:${ENVOY_AI_IMAGE_TAG} 未就绪(本地 docker/tar 无, 在线失败)"
+        return 1
+    else
+        err "离线安装: 未找到 ${short}:${ENVOY_AI_IMAGE_TAG}。请: ① 在联网机跑 tools/images/envoy-save-images.sh 生成 tar 放到 ${ENVOY_SAVE_DIR}/, 或 ② 单独跑 tools/images/envoy-load-images.sh 预加载, 或 ③ 改 ENVOY_AI_CHART_SOURCE=oci / ENVOY_AI_IMAGE_ONLINE=true 允许在线"
+        return 1
     fi
-fi
+}
+push_ai_image "ai-gateway-controller" "*ai-gateway-controller*.tar"
+push_ai_image "ai-gateway-extproc"    "*ai-gateway-extproc*.tar"
 
 # ---------------- 2. helm 安装 AI CRDs chart ----------------
 say "[2/5] helm 安装 AI CRDs(${ENVOY_AI_CRDS_RELEASE} → ${ENVOY_AI_CRDS_NS})..."
@@ -209,6 +218,16 @@ CRD_CNT="$( (SSH "${K} get crd --no-headers 2>/dev/null" || true) | grep -c 'aig
     && ok "  AI CRD 已注册(${CRD_CNT} 个 aigateway.envoyproxy.io CRD)" \
     || warn "  未检测到 aigateway.envoyproxy.io CRD(kubectl get crd | grep aigateway)"
 
+# 旧版遗留清理(命名空间合并): 早期版本 CRD chart 单独装在 ai-gateway-crds ns(只有 CRD, 无 pod,
+# 空 ns 易被误判为废弃)。上面新 ns 的 release 已接管 CRD(helm 所有权 annotation 指向新 release,
+# 卸载旧 release 不会连带删除 CRD/用户实例), 这里卸载旧 release 并删除旧 ns。
+if [ "${ENVOY_AI_CRDS_NS}" != "ai-gateway-crds" ] && SSH "${K} get ns ai-gateway-crds >/dev/null 2>&1"; then
+    say "  检测到旧版独立 ai-gateway-crds 命名空间, 合并清理(卸载旧 CRD release + 删 ns)..."
+    helm uninstall "${ENVOY_AI_CRDS_RELEASE}" -n ai-gateway-crds >/dev/null 2>&1 \
+        || warn "  旧 release ${ENVOY_AI_CRDS_RELEASE}(ns=ai-gateway-crds) 卸载失败, 继续..."
+    SSH "${K} delete ns ai-gateway-crds --ignore-not-found=true --force --grace-period=0 >/dev/null 2>&1" || true
+fi
+
 # ---------------- 3. helm 安装 AI 控制器 chart ----------------
 say "[3/5] helm 安装 AI 控制器(${ENVOY_AI_CTRL_RELEASE} → ${ENVOY_AI_NAMESPACE})..."
 SSH "${K} delete ns ${ENVOY_AI_NAMESPACE} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
@@ -231,6 +250,8 @@ helm upgrade --install "${ENVOY_AI_CTRL_RELEASE}" ${_CHART_ARG} \
     --set "controller.imagePullPolicy=IfNotPresent" \
     --set "controller.nameOverride=${ENVOY_AI_CTRL_NAME}" \
     --set "envoyGateway.namespace=${ENVOY_EG_NAMESPACE}" \
+    --set "extProc.image.repository=${ENVOY_AI_EXTPROC_IMAGE_REPO}" \
+    --set "extProc.image.tag=${ENVOY_AI_IMAGE_TAG}" \
     --wait --timeout 180s \
     || warn "  AI 控制器 helm 安装/等待超时(资源可能已创建, 继续检查 Deployment)..."
 SSH "${K} rollout status deployment -n ${ENVOY_AI_NAMESPACE} ${ENVOY_AI_CTRL_NAME} --timeout=120s" >/dev/null 2>&1 \
@@ -256,10 +277,15 @@ echo "    ${PODS}" | sed 's/^/    /'
 
 echo "---------------------------------------------"
 ok "Envoy AI Gateway 部署完成"
-echo "  namespace:   ${ENVOY_AI_NAMESPACE}(控制器) / ${ENVOY_AI_CRDS_NS}(CRD)"
+if [ "${ENVOY_AI_CRDS_NS}" = "${ENVOY_AI_NAMESPACE}" ]; then
+    echo "  namespace:   ${ENVOY_AI_NAMESPACE}(控制器 + CRD release 合并)"
+else
+    echo "  namespace:   ${ENVOY_AI_NAMESPACE}(控制器) / ${ENVOY_AI_CRDS_NS}(CRD)"
+fi
 echo "  chart 来源:  ${ENVOY_AI_CHART_SOURCE}(${ENVOY_AI_VERSION})"
 echo "  控制器镜像:  ${ENVOY_AI_IMAGE_REPO}:${ENVOY_AI_IMAGE_TAG}"
-echo "  数据面:      复用 Envoy Gateway(${ENVOY_EG_NAMESPACE} 的 envoy-gateway GatewayClass; AI 控制器注入 extProc)"
+echo "  extProc 镜像: ${ENVOY_AI_EXTPROC_IMAGE_REPO}:${ENVOY_AI_IMAGE_TAG}"
+echo "  数据面:      复用 Envoy Gateway(${ENVOY_EG_NAMESPACE} 的 envoy-gateway GatewayClass; AI 控制器注入 extProc sidecar)"
 echo "  AI CRD:      aigateway.envoyproxy.io(AIServiceBackend / AIGatewayRoute / GatewayConfig / ...)"
 echo "  资源查看:    kubectl get aiservicebackend,aigatewayroute -A"
 echo "  端到端验证:  sudo ./deploy-cluster.sh --steps verify_envoy_ai_gateway"

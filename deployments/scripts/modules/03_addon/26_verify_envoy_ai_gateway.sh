@@ -12,14 +12,16 @@
 #   · **验证模块不设 TOGGLE**(否则 ENVOY_AI_GATEWAY_ENABLED=true 时会被安装流程自动启用);
 #     保持 DEFAULT:0, 仅由 --steps verify_envoy_ai_gateway 在安装后单独执行。
 #   · ③④ 步验证 AI 控制面真正工作(按运行时检测的 CRD 版本自动分支):
-#     · v1.x(当前默认安装, 官方 v1.1 起没有 AIGateway/Backend CRD): 标准 Gateway +
-#       AIServiceBackend + AIGatewayRoute + dummy APIKey Secret → AIServiceBackend 被 AI 控制器
-#       调和(**核心断言**, 证明 AI 控制面工作)+ 标准 Gateway Programmed(EG 数据面)+ VIP/NodePort;
+#     · v1.x(当前默认安装 AIG v1.1.0, schema: AIServiceBackend.backendRef→EG Backend + schema:
+#       {name: OpenAI, prefix: /v1}; AIGatewayRoute.parentRefs + rules[].matches 只支持 headers):
+#       标准 Gateway + EG Backend(需 EG extensionApis.enableBackend, 见 09_envoy_gateway.sh)
+#       + AIServiceBackend + AIGatewayRoute → AIServiceBackend 被 AI 控制器调和(**核心断言**,
+#       证明 AI 控制面工作)+ 标准 Gateway Programmed(EG 数据面)+ VIP/NodePort;
 #     · v0.x(legacy 告警分支, 仅旧版本集群): AIGateway/Backend → 调和出 Gateway。
-#   · apiVersion 从在线 CRD served 版本推导(吸收 v1alpha1/v1beta1 漂移), 读不到兜底 v1alpha1。
+#   · apiVersion 从在线 CRD storage 版本推导(吸收 v1alpha1/v1beta1 漂移), 读不到兜底 v1beta1。
 #   · ⚠ v1.x 字段随版本 Alpha/Beta 变化: 测试资源 apply 失败/状态字段取不到时**仅告警不阻断**,
 #     可按官方 examples/basic/basic.yaml 调整字段后重跑。
-#   · ⑤ 步为**边界验证**: 用 busybox httpd 静态 mock 一个 OpenAI chat.completions 响应,
+#   · ⑤ 步为**边界验证**: 用 nginx 静态 mock 一个 OpenAI chat.completions 响应,
 #     经 AI Gateway VIP 真实调用; 失败仅告警并给出指引, 不阻断(资源调和已证明 AI 控制面工作正常)。
 #     真实 LLM 需配置真实 AIServiceBackend + API Key Secret。
 #   · 参考: https://aigateway.envoyproxy.io/ 与 docs/envoy-gateway.md §4.2
@@ -42,6 +44,9 @@ SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/d
            "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
 K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 
+# 测试后端镜像: 离线优先, 幂等确保 nginx 已在集群 registry(不依赖节点 containerd 预加载)
+TEST_IMAGE="$(ensure_registry_nginx)" || exit 1
+
 ENVOY_AI_NAMESPACE="${ENVOY_AI_NAMESPACE:-ai-gateway-system}"
 ENVOY_AI_API_VERSION="${ENVOY_AI_API_VERSION:-v1beta1}"   # 仅 v0.x legacy 分支使用
 ENVOY_AI_GATEWAYCLASS="${ENVOY_AI_GATEWAYCLASS:-envoy-gateway}"   # AI Gateway 数据面复用 EG 的 GatewayClass(v1.x)
@@ -50,7 +55,6 @@ TEST_AIG="verify-aigw"         # v0.x legacy AIGateway 名(scp 临时文件名�
 TEST_GW="verify-aigw-gw"       # v1.x 标准 Gateway 名
 TEST_ASB="verify-aigw-llm"     # v1.x AIServiceBackend 名
 TEST_AIGR="verify-aigw-route"  # v1.x AIGatewayRoute 名
-TEST_SECRET="verify-aigw-apikey"  # v1.x dummy API Key Secret
 TEST_BACKEND="verify-aig-backend"
 TEST_BACKEND_SVC="verify-aig-backend-svc"
 
@@ -77,9 +81,12 @@ echo "${CRD_LIST}" | grep -q 'aigateways\.aigateway\.envoyproxy\.io' \
     || warn "    旧版 AIGateway CRD 未注册(属 v1.x 预期, 仅告警)"
 echo "${CRD_LIST}" | grep -q 'backends\.aigateway\.envoyproxy\.io' \
     || warn "    旧版 Backend CRD 未注册(属 v1.x 预期, 仅告警)"
-# v1.x API 版本: 从在线 CRD served 版本推导(吸收 v1alpha1/v1beta1 漂移), 读不到兜底 v1alpha1
-AI_APIVER="$( (SSH "${K} get crd aiservicebackends.aigateway.envoyproxy.io -o jsonpath='{.spec.versions[?(@.served==true)].name}' 2>/dev/null | tr ' ' '\n' | tail -1)" || true ) )"
-AI_APIVER="${AI_APIVER:-v1alpha1}"
+# v1.x API 版本: 从在线 CRD storage 版本推导(吸收 v1alpha1/v1beta1 漂移), 读不到兜底 served 末位, 最后 v1beta1。
+# ⚠ 双引号串的闭合必须在 `tail -1` 之后、`|| true` 之前(尾括号若落进 SSH 串, 远端命令语法错误
+#   → 恒走兜底版本; 此 bug 曾导致永远用 v1alpha1)
+AI_APIVER="$( (SSH "${K} get crd aiservicebackends.aigateway.envoyproxy.io -o jsonpath='{.spec.versions[?(@.storage==true)].name}' 2>/dev/null | tr ' ' '\n' | tail -1" || true ) )"
+[ -n "${AI_APIVER}" ] || AI_APIVER="$( (SSH "${K} get crd aiservicebackends.aigateway.envoyproxy.io -o jsonpath='{.spec.versions[?(@.served==true)].name}' 2>/dev/null | tr ' ' '\n' | tail -1" || true ) )"
+AI_APIVER="${AI_APIVER:-v1beta1}"
 [ "${HAVE_V1_CRDS}" = "1" ] \
     && say "    v1.x 路径: apiVersion=${AI_APIVER}, 用标准 Gateway + AIServiceBackend + AIGatewayRoute 验证" \
     || warn "    未检测到 v1.x AIServiceBackend CRD, 回退 v0.x AIGateway/Backend legacy 验证"
@@ -88,7 +95,12 @@ say "  ③ 创建测试资源(${AI_APIVER}, mock OpenAI 兼容后端)..."
 cleanup
 LOCAL_YAML="$(mktemp)"
 if [ "${HAVE_V1_CRDS}" = "1" ]; then
-    # v1.x: 标准 Gateway + AIServiceBackend + AIGatewayRoute + dummy APIKey Secret
+    # v1.x(AIG v1.1.0 schema): 标准 Gateway + EG Backend + AIServiceBackend + AIGatewayRoute。
+    # ⚠ AIG v1.1 起 AIServiceBackend.spec 换成 backendRef(必须引用 EG Backend 资源, 需 EG
+    #   extensionApis.enableBackend=true, 见 09_envoy_gateway.sh)+ schema(name=OpenAI + prefix=/v1);
+    #   AIGatewayRoute.spec.gatewayRefs → parentRefs, rules[].matches 只支持 headers(用 x-ai-eg-model
+    #   匹配, AI filter 从请求 body 提取 model 注入该头), 无 path 匹配; 旧字段(type/apiKey/url)会
+    #   strict decode 报错。
     cat > "${LOCAL_YAML}" <<YAML
 apiVersion: v1
 kind: Namespace
@@ -110,10 +122,10 @@ spec:
     spec:
       containers:
         - name: httpd
-          image: docker.io/library/busybox:latest
+          image: ${TEST_IMAGE}
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "-c", "mkdir -p /www/v1 && echo '{\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion\",\"created\":123,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"envoy-ai-gateway-verify-ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}' > /www/v1/chat/completions && busybox httpd -f -p 8080 -h /www"]
-          ports: [{ containerPort: 8080 }]
+          command: ["/bin/sh", "-c", "mkdir -p /usr/share/nginx/html/v1/chat && echo '{\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion\",\"created\":123,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"envoy-ai-gateway-verify-ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}' > /usr/share/nginx/html/v1/chat/completions && nginx -g 'daemon off;'"]
+          ports: [{ containerPort: 80 }]
 ---
 apiVersion: v1
 kind: Service
@@ -122,16 +134,7 @@ metadata:
   namespace: ${TEST_NS}
 spec:
   selector: { app: ${TEST_BACKEND} }
-  ports: [{ port: 8080, targetPort: 8080 }]
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ${TEST_SECRET}
-  namespace: ${TEST_NS}
-type: Opaque
-stringData:
-  apiKey: dummy-verify-key
+  ports: [{ port: 80, targetPort: 80 }]
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
@@ -145,16 +148,30 @@ spec:
       protocol: HTTP
       port: 80
 ---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: ${TEST_ASB}-backend
+  namespace: ${TEST_NS}
+spec:
+  endpoints:
+    - fqdn:
+        hostname: ${TEST_BACKEND_SVC}.${TEST_NS}.svc.cluster.local
+        port: 80
+---
 apiVersion: aigateway.envoyproxy.io/${AI_APIVER}
 kind: AIServiceBackend
 metadata:
   name: ${TEST_ASB}
   namespace: ${TEST_NS}
 spec:
-  type: OpenAI
-  apiKey:
-    name: ${TEST_SECRET}
-  url: http://${TEST_BACKEND_SVC}.${TEST_NS}.svc.cluster.local:8080
+  backendRef:
+    group: gateway.envoyproxy.io
+    kind: Backend
+    name: ${TEST_ASB}-backend
+  schema:
+    name: OpenAI
+    prefix: /v1
 ---
 apiVersion: aigateway.envoyproxy.io/${AI_APIVER}
 kind: AIGatewayRoute
@@ -162,11 +179,13 @@ metadata:
   name: ${TEST_AIGR}
   namespace: ${TEST_NS}
 spec:
-  gatewayRefs:
+  parentRefs:
     - name: ${TEST_GW}
   rules:
     - matches:
-        - path: /v1/chat/completions
+        - headers:
+            - name: x-ai-eg-model
+              value: mock
       backendRefs:
         - name: ${TEST_ASB}
 YAML
@@ -193,10 +212,10 @@ spec:
     spec:
       containers:
         - name: httpd
-          image: docker.io/library/busybox:latest
+          image: ${TEST_IMAGE}
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "-c", "mkdir -p /www/v1 && echo '{\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion\",\"created\":123,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"envoy-ai-gateway-verify-ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}' > /www/v1/chat/completions && busybox httpd -f -p 8080 -h /www"]
-          ports: [{ containerPort: 8080 }]
+          command: ["/bin/sh", "-c", "mkdir -p /usr/share/nginx/html/v1/chat && echo '{\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion\",\"created\":123,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"envoy-ai-gateway-verify-ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}' > /usr/share/nginx/html/v1/chat/completions && nginx -g 'daemon off;'"]
+          ports: [{ containerPort: 80 }]
 ---
 apiVersion: v1
 kind: Service
@@ -205,7 +224,7 @@ metadata:
   namespace: ${TEST_NS}
 spec:
   selector: { app: ${TEST_BACKEND} }
-  ports: [{ port: 8080, targetPort: 8080 }]
+  ports: [{ port: 80, targetPort: 80 }]
 ---
 apiVersion: aigateway.envoyproxy.io/${ENVOY_AI_API_VERSION}
 kind: AIGateway
@@ -222,7 +241,7 @@ metadata:
   namespace: ${TEST_NS}
 spec:
   type: OpenAI
-  url: http://${TEST_BACKEND_SVC}.${TEST_NS}.svc.cluster.local:8080/v1
+  url: http://${TEST_BACKEND_SVC}.${TEST_NS}.svc.cluster.local:80/v1
 YAML
 fi
 scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \

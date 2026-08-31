@@ -23,6 +23,8 @@
 #     global.images.envoyProxy.image(数据面)改写为内置 registry 路径, K8s 节点从集群内置 registry 按域名拉取。
 #   · 数据面镜像改写是关键: 用户创建 Gateway 后控制器动态创建的 Envoy Proxy Deployment
 #     必须能用内置 registry 镜像(默认 docker.io 在离线集群不可达)。
+#   · ⚠ 默认启用 extensionApis.enableBackend(EG Backend API): AI Gateway v1.1+ 的 AIServiceBackend
+#     必须引用 EG Backend 资源; 该 API 默认禁用(安全原因), 离线内网集群启用无额外风险。
 #   · 默认 GatewayClass: eg(gateway.envoyproxy.io/gatewayclass-controller), 安装后自动创建。
 #   · nodeport 暴露模式(SERVICE_EXPOSE_MODE=nodeport, 无 MetalLB): 数据面 Service 默认仍创建为
 #     LoadBalancer, 需转 NodePort 才可访问 —— 创建 Gateway 时加注解 gateway.envoyproxy.io/service-type: NodePort,
@@ -204,6 +206,9 @@ esac
 #   · 控制面 Deployment + certgen Job 都经 eg.image helper → deployment.envoyGateway.image.repository/tag
 #   · 数据面 EnvoyProxy(创建 Gateway 时动态拉起)→ global.images.envoyProxy.image(完整镜像串)
 # 错误示例(曾用, 无效果): image.repository / envoyGateway.image.repository(顶层不存在, 落默认 docker.io)
+# ⚠ extensionApis.enableBackend=true: EG Backend API 默认禁用(安全原因, 参考 CVE-2021-25740),
+#   但 Envoy AI Gateway(v1.1+)的 AIServiceBackend 必须引用 EG Backend 资源; 不启用则 HTTPRoute 报
+#   "Backend is disabled in Envoy Gateway configuration" (ResolvedRefs=False), AI 路由 500。
 helm upgrade --install "${ENVOY_EG_RELEASE_NAME}" ${_CHART_ARG} \
     --namespace "${ENVOY_EG_NAMESPACE}" --create-namespace \
     --set "deployment.envoyGateway.image.repository=${ENVOY_EG_IMAGE_BASE}/gateway" \
@@ -211,6 +216,7 @@ helm upgrade --install "${ENVOY_EG_RELEASE_NAME}" ${_CHART_ARG} \
     --set "deployment.envoyGateway.imagePullPolicy=IfNotPresent" \
     --set "global.images.envoyProxy.image=${ENVOY_EG_IMAGE_BASE}/envoy:${ENVOY_PROXY_VERSION}" \
     --set "global.images.envoyProxy.pullPolicy=IfNotPresent" \
+    --set "config.envoyGateway.extensionApis.enableBackend=true" \
     --wait --timeout 180s \
     || warn "  helm 安装/等待超时(检查 --set 与 chart; 资源可能已创建, 继续等待 Deployment)..."
 
