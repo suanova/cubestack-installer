@@ -44,6 +44,7 @@ for img in ${_IMG_LIST}; do
     if ! docker save "${img}" -o "${dest}"; then
         warn "  save 失败: ${img}"; rm -f "${dest}"; continue
     fi
+    chmod 644 "${dest}"   # docker save 默认 0600, 放开读权限供非 root 同步/使用
     count=$((count+1))
 done
 

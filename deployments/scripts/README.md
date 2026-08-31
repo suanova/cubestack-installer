@@ -527,20 +527,20 @@ sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --auto       # 宿主�
 - **磁盘空间检查(默认开启)**:醒目提示至少 `MIN_FREE_GB`(默认 50 GiB)空闲;比对本次下载所需(远程大小 + 缓冲)与目标可用空间,不足时红色横幅警告并中止(`--force` 强制继续)。
 - **下载后提示**:容器内直接 `cd /opt/cubestack-installer && ./deployments/scripts/deploy-cluster.sh`;宿主机下载到 `<下载目录>` 后,把该目录挂进容器 offline-files(见 §1 快速开始),或 `export OFFLINE_FILES_DIR=<下载目录>` 直跑。
 
-### 5.12 sync-to-minio.sh —— 本地 offline-files → MinIO 同步
+### 5.12 sync-to-minio.sh —— 本地 offline-files 全量镜像同步到 MinIO
 
-源机器(制作/维护离线文件的机器)把本地 `offline-files`(已 `trim-offline-files.sh` 清理后的精简文件)增量同步到 MinIO,供各部署机 `fetch-offline-from-minio.sh` 拉取 —— 保证 MinIO 侧也只存部署必需文件。等价于 `mc mirror --overwrite ./offline-files/ minio/cubestack-installer/offline-files/`:
+源机器把本地 `offline-files` 的**所有子目录**(envoy/kubespray/lws/metax-gpu/os/virtual-machine ...)整体镜像到 MinIO 的 `<桶>/offline-files/`(远端目录结构与本地完全一致),供各部署机 `fetch-offline-from-minio.sh` 拉取(下载侧不变)。等价于 `mc mirror --overwrite ./offline-files/ minio/cubestack-installer/offline-files/`:
 
 ```bash
-./scripts/tools/offline/sync-to-minio.sh               # 增量同步(默认 mc mirror --overwrite, 只上传新增/变更)
+./scripts/tools/offline/sync-to-minio.sh               # 增量同步(默认 mc mirror --overwrite, 自动发现新增/变更文件)
 ./scripts/tools/offline/sync-to-minio.sh --prune       # 同步 + 删除远端多余文件(与本地严格一致; 远端其他集群共享时勿用)
 ./scripts/tools/offline/sync-to-minio.sh --dry-run     # 仅预览(不实际同步)
 ```
 
-- **MinIO 配置**:复用 cluster.conf 的 `MINIO_*`(alias/endpoint/ak/sk/bucket/remote-dir),否则探测本机已有 mc alias,再否则交互录入。
-- **桶/目录自适应**:默认桶 `cubestack-installer`;远端目录 = **与本地源同名**(默认 `offline-files`, 可 `MINIO_REMOTE_DIR` 覆盖),保证 MinIO 侧布局与本地一致;自动回退探测旧布局 `cubestack-offline/kubespray`;桶不存在自动创建。
+- **MinIO 配置**:已有 `minio` mc alias 优先复用;否则用 cluster.conf 的 `MINIO_*`(endpoint/ak/sk)自动配置;都没有则报错给指引(不再探测/交互)。
+- **桶/目录**:默认 `cubestack-installer` / `offline-files`(可 `MINIO_BUCKET` / `MINIO_REMOTE_DIR` 覆盖),桶不存在自动创建。
+- **可读性预检**:mc mirror 对不可读文件(如 root 属主 0600 的 docker-save tar)会**静默跳过**;同步前先全量扫描,发现不可读文件即报错给指引(`sudo chmod -R a+r <源>` 或 `sudo ./sync-to-minio.sh`),避免部分目录未同步却报"同步完成"。
 - **--prune(谨慎)**:等价 `mc mirror --remove`,把远端本地没有的文件一并删除 —— 多集群共用同一 MinIO 桶时慎用。
-- **上游配套**:先 `trim-offline-files.sh` 清理冗余再同步,MinIO 侧只存部署必需。
 
 ### 5.13 trim-offline-files.sh —— 清理 offline-files 冗余(只留部署必需)
 

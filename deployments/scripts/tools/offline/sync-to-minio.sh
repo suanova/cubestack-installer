@@ -12,7 +12,9 @@
 #     需改桶/目录时用 cluster.conf 的 MINIO_BUCKET / MINIO_REMOTE_DIR)
 #   · alias: 已配置的 minio 别名优先复用; 否则用 cluster.conf MINIO_* 自动配置;
 #     都没有则报错并给指引(不再做多别名/多桶启发式探测)
-#   · mc mirror --overwrite 增量同步全部子目录, 远端结构 = 本地结构
+#   · mc mirror --overwrite 增量同步全部子目录(自动发现新增/变更文件), 远端结构 = 本地结构
+#   · 同步前可读性预检: mc mirror 对不可读文件(如 root 0600 的 docker save tar)会**静默跳过**,
+#     预检发现即报错给指引, 避免"envoy 目录没同步过去"这类部分同步假成功
 #   · 可选 --prune: 删除远端有而本地没有的文件(与本地严格一致, 远端其他集群共享时勿用)
 #   · 可选 --dry-run: 只预览不实际同步
 # 用法:
@@ -85,6 +87,20 @@ fi
 LOCAL_SRC="${OFFLINE_FILES_DIR_EXPLICIT:-${REPO_ROOT}/deployments/offline-files}"
 [ -d "${LOCAL_SRC}" ] || { err "本地 offline-files 目录不存在: ${LOCAL_SRC}"; exit 1; }
 REMOTE_DST="${MINIO_ALIAS}/${MINIO_BUCKET}/${MINIO_REMOTE_DIR}"
+
+# 可读性预检: mc mirror 对不可读文件会静默跳过(曾致 envoy 的 root-0600 docker-save tar 未同步,
+# 却仍报"同步完成")。同步前先全量扫描, 发现不可读文件立即报错给指引, 杜绝部分同步假成功。
+_UNREADABLE="$(find "${LOCAL_SRC}" -type f ! -readable 2>/dev/null)"
+if [ -n "${_UNREADABLE}" ]; then
+    _N="$(printf '%s\n' "${_UNREADABLE}" | wc -l)"
+    err "发现 ${_N} 个不可读文件(mc mirror 会静默跳过 → 部分目录不同步):"
+    printf '%s\n' "${_UNREADABLE}" | head -10 | sed 's/^/  /'
+    [ "${_N}" -gt 10 ] && err "  ... 等 ${_N} 个"
+    err "修复(任选其一)后重跑:"
+    err "  ① 放开读权限: sudo chmod -R a+r \"${LOCAL_SRC}\""
+    err "  ② 整脚本以 root 运行: sudo ./sync-to-minio.sh(root 的 mc alias 需已配置)"
+    exit 1
+fi
 
 # 桶存在性: 不存在则创建(mc ls 桶顶层成功即视为存在, 空桶不误判)
 if ! mc ls "${MINIO_ALIAS}/${MINIO_BUCKET}" >/dev/null 2>&1; then
