@@ -136,6 +136,7 @@ save_one() {
     if [ -n "${_LOCAL}" ]; then
         say "  本地 docker 已有: ${_LOCAL}, 直接 save ..."
         if docker save "${_LOCAL}" -o "${dest}"; then
+            chmod 644 "${dest}"   # docker save 默认 0600, 放开读权限供非 root 同步/使用
             ok "保存完成(本地 docker): ${fname}"; return 0
         fi
         rm -f "${dest}"
@@ -153,6 +154,7 @@ save_one() {
             sleep 3
         done
         if docker save "${src}" -o "${dest}"; then
+            chmod 644 "${dest}"
             ok "保存完成(docker pull + save): ${fname}"; return 0
         fi
         rm -f "${dest}"
@@ -162,6 +164,7 @@ save_one() {
     if command -v skopeo >/dev/null 2>&1; then
         say "  skopeo copy ${src} → docker-archive:${dest} ..."
         if skopeo copy --quiet --src-tls-verify=false "docker://${src}" "docker-archive:${dest}"; then
+            chmod 644 "${dest}"
             ok "保存完成(skopeo): ${fname}"; return 0
         fi
         rm -f "${dest}"

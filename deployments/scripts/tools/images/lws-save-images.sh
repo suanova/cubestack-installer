@@ -54,6 +54,7 @@ _LOCAL="$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
 if [ -n "${_LOCAL}" ]; then
     say "  本地 docker 已有: ${_LOCAL}, 直接 save ..."
     if docker save "${_LOCAL}" -o "${dest}"; then
+        chmod 644 "${dest}"   # docker save 默认 0600, 放开读权限供非 root 同步/使用
         ok "保存完成(本地 docker): ${dest}"
         du -sh "${dest}" 2>/dev/null | awk '{print "  大小: "$1}'
         exit 0
@@ -73,6 +74,7 @@ if command -v docker >/dev/null 2>&1; then
         sleep 3
     done
     if docker save "${SRC}" -o "${dest}"; then
+        chmod 644 "${dest}"
         ok "保存完成(docker pull + save): ${dest}"
         du -sh "${dest}" 2>/dev/null | awk '{print "  大小: "$1}'
         exit 0
@@ -84,6 +86,7 @@ fi
 if command -v skopeo >/dev/null 2>&1; then
     say "  skopeo copy ${SRC} → docker-archive:${dest} ..."
     if skopeo copy --quiet --src-tls-verify=false "docker://${SRC}" "docker-archive:${dest}"; then
+        chmod 644 "${dest}"
         ok "保存完成(skopeo): ${dest}"
         du -sh "${dest}" 2>/dev/null | awk '{print "  大小: "$1}'
         exit 0
