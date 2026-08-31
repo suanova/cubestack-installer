@@ -188,7 +188,10 @@ push_image_skopeo() {
 # 需调用方先设置 REGISTRY_BASE(各模块/load 脚本在 load_config 后派生)。
 # 用法: reg_has_tag <push_registry> <repo> <tag>
 reg_has_tag() {
-    local pr="$1" repo="$2" ver="$3" path="${pr#*/}"
+    # 注意: path 依赖 pr, 须与 pr 分行 local —— bash 同一 local 语句的 RHS 按旧作用域
+    # 展开(set -u 下引用同语句未赋值变量会报 unbound variable, 如: local pr="$1" ... path="${pr#*/}")
+    local pr="$1" repo="$2" ver="$3"
+    local path="${pr#*/}"
     if command -v skopeo >/dev/null 2>&1; then
         skopeo inspect --tls-verify=false --no-creds "docker://${pr}/${repo}:${ver}" >/dev/null 2>&1 && return 0
     fi
