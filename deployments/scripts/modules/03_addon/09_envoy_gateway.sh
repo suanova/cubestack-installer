@@ -19,8 +19,8 @@
 #     ENVOY_EG_IMAGE_ONLINE=true 才允许在线拉取。离线 tar 由 tools/images/envoy-save-images.sh
 #     生成, 默认放 ${REPO_ROOT}/deployments/offline-files/envoy。
 #   · 镜像流向(与 gpu_operator/lws 一致): 把 envoyproxy/gateway(控制面)与 envoyproxy/envoy(数据面)
-#     镜像推送到集群内置 registry; helm 安装时 --set image.* / envoyGateway.image.* 改写为内置 registry 路径,
-#     K8s 节点从集群内置 registry 按域名拉取镜像。
+#     镜像推送到集群内置 registry; helm 安装时 --set deployment.envoyGateway.image.*(控制面/certgen)与
+#     global.images.envoyProxy.image(数据面)改写为内置 registry 路径, K8s 节点从集群内置 registry 按域名拉取。
 #   · 数据面镜像改写是关键: 用户创建 Gateway 后控制器动态创建的 Envoy Proxy Deployment
 #     必须能用内置 registry 镜像(默认 docker.io 在离线集群不可达)。
 #   · 默认 GatewayClass: eg(gateway.envoyproxy.io/gatewayclass-controller), 安装后自动创建。
@@ -196,14 +196,17 @@ case "${ENVOY_EG_CHART_SOURCE}" in
     oci) _CHART_ARG="${ENVOY_EG_CHART_OCI}"; _CHART_ARG+=" --version ${ENVOY_EG_VERSION#v}" ;;
 esac
 
+# gateway-helm v1.9.1 的镜像值路径(与 v0.x 不同, 详见 chart _helpers.tpl 的 eg.image):
+#   · 控制面 Deployment + certgen Job 都经 eg.image helper → deployment.envoyGateway.image.repository/tag
+#   · 数据面 EnvoyProxy(创建 Gateway 时动态拉起)→ global.images.envoyProxy.image(完整镜像串)
+# 错误示例(曾用, 无效果): image.repository / envoyGateway.image.repository(顶层不存在, 落默认 docker.io)
 helm upgrade --install "${ENVOY_EG_RELEASE_NAME}" ${_CHART_ARG} \
     --namespace "${ENVOY_EG_NAMESPACE}" --create-namespace \
-    --set "image.repository=${ENVOY_EG_IMAGE_BASE}/gateway" \
-    --set "image.tag=${ENVOY_EG_VERSION}" \
-    --set "image.pullPolicy=IfNotPresent" \
-    --set "envoyGateway.image.repository=${ENVOY_EG_IMAGE_BASE}/envoy" \
-    --set "envoyGateway.image.tag=${ENVOY_EG_VERSION}" \
-    --set "envoyGateway.image.pullPolicy=IfNotPresent" \
+    --set "deployment.envoyGateway.image.repository=${ENVOY_EG_IMAGE_BASE}/gateway" \
+    --set "deployment.envoyGateway.image.tag=${ENVOY_EG_VERSION}" \
+    --set "deployment.envoyGateway.imagePullPolicy=IfNotPresent" \
+    --set "global.images.envoyProxy.image=${ENVOY_EG_IMAGE_BASE}/envoy:${ENVOY_EG_VERSION}" \
+    --set "global.images.envoyProxy.pullPolicy=IfNotPresent" \
     --wait --timeout 180s \
     || warn "  helm 安装/等待超时(检查 --set 与 chart; 资源可能已创建, 继续等待 Deployment)..."
 
