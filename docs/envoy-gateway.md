@@ -146,15 +146,15 @@
 1. 联网机: `envoy-save-images.sh` 从官方源 docker pull / skopeo 保存 tar → `deployments/offline-files/envoy/`;
 2. 部署机: 模块把 tar 经 skopeo 推送到**集群内置 registry**(`registry.local:5000/envoyproxy/...` 与 `registry.local:5000/ai-gateway/...`);
    2b. 或先单独预加载(幂等): `sudo ./deployments/scripts/tools/images/envoy-load-images.sh`(适合先推镜像再装 chart);
-3. helm 安装时用 `--set image.repository/tag` 把 chart 默认镜像改写为集群内置 registry 路径, `pullPolicy=IfNotPresent`;
+3. helm 安装时用 `--set deployment.envoyGateway.image.*`(控制面/certgen)+ `global.images.envoyProxy.image`(数据面)把 chart 默认镜像改写为集群内置 registry 路径, `pullPolicy=IfNotPresent`;
 4. K8s 节点按域名从集群内置 registry 拉取(节点已配 `/etc/hosts` + containerd 信任)。
 
 ### 3.4 关键 chart values(离线改写)
 
 | chart | values 键 | 说明 |
 |---|---|---|
-| gateway-helm | `image.repository` / `image.tag` | EG 控制面镜像(默认 `docker.io/envoyproxy/gateway`) |
-| gateway-helm | `envoyGateway.image.repository` / `image.tag` | **数据面** Envoy 镜像(默认 `docker.io/envoyproxy/envoy`) |
+| gateway-helm | `deployment.envoyGateway.image.repository` / `image.tag` | EG 控制面 Deployment + certgen Job 镜像(chart v1.9.1 经 `eg.image` helper 统一取此路径; 默认 `docker.io/envoyproxy/gateway`) |
+| gateway-helm | `global.images.envoyProxy.image` | **数据面** Envoy 镜像(创建 Gateway 时动态拉起, 完整镜像串, 默认 `docker.io/envoyproxy/envoy`) |
 | gateway-helm | `envoyGateway.extensionManager` | v0.x 扩展机制(已废弃; v1.x AI 不再使用, 默认不启用) |
 | ai-gateway-crds-helm | — | 纯 CRD chart, 无镜像 |
 | ai-gateway-helm | `controller.image.repository` / `controller.image.tag` | AI 控制器镜像(默认 `docker.io/envoyproxy/ai-gateway-controller`; 另 `controller.nameOverride` 定资源名、`envoyGateway.namespace` 指 EG 命名空间) |

@@ -167,7 +167,8 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
   gRPC 推送; 每个 Gateway 由控制器**动态创建 Envoy Proxy 数据面 Deployment + Service(LoadBalancer)**,
   MetalLB 分配 VIP → 外部 URL 可达。
 - 离线要点: 控制面镜像 `envoyproxy/gateway:<v>` + **数据面镜像 `envoyproxy/envoy:<v>`**(chart values
-  `image.*` / `envoyGateway.image.*` 改写为集群内置 registry; 数据面镜像不改写, 离线集群会 ImagePullBackOff)。
+  `deployment.envoyGateway.image.*`(控制面/certgen)与 `global.images.envoyProxy.image`(数据面)改写为集群
+  内置 registry; 不改写则离线集群 ImagePullBackOff)。
 - 为何采用: 统一流量入口(P1-9 刚需); 标准 Gateway API 生态, 也是 Envoy AI Gateway 的基座。
 
 **Envoy AI Gateway(AI 专用扩展层)**
