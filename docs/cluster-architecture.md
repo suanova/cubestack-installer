@@ -166,9 +166,10 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
   `GatewayClass eg` / `Gateway` / `HTTPRoute`(标准 `gateway.networking.k8s.io`)→ 控制面翻译为 xDS →
   gRPC 推送; 每个 Gateway 由控制器**动态创建 Envoy Proxy 数据面 Deployment + Service(LoadBalancer)**,
   MetalLB 分配 VIP → 外部 URL 可达。
-- 离线要点: 控制面镜像 `envoyproxy/gateway:<v>` + **数据面镜像 `envoyproxy/envoy:<v>`**(chart values
+- 离线要点: 控制面镜像 `envoyproxy/gateway:<v>` + **数据面镜像 `envoyproxy/envoy:<proxy-v>`**(chart values
   `deployment.envoyGateway.image.*`(控制面/certgen)与 `global.images.envoyProxy.image`(数据面)改写为集群
-  内置 registry; 不改写则离线集群 ImagePullBackOff)。
+  内置 registry; 不改写则离线集群 ImagePullBackOff)。⚠ 数据面 tag 用 `ENVOY_PROXY_VERSION`(如
+  distroless-v1.39.1), **不要**用 EG 版本号(会拉到远古 Envoy, 数据面 --cpuset-threads 报错 CrashLoop)。
 - 为何采用: 统一流量入口(P1-9 刚需); 标准 Gateway API 生态, 也是 Envoy AI Gateway 的基座。
 
 **Envoy AI Gateway(AI 专用扩展层)**

@@ -5,9 +5,9 @@
 #       部署模块 modules/03_addon/09_envoy_gateway.sh / 10_envoy_ai_gateway.sh 会自动
 #       从 deployments/offline-files/envoy 找到这些 tar 并推送至集群内置 registry(本地源, 不联网)。
 #
-# ── 需要下载的镜像清单(随版本变化; 版本取 ENVOY_EG_VERSION / ENVOY_AI_VERSION, 可用环境变量覆盖)──
+# ── 需要下载的镜像清单(随版本变化; 版本取 ENVOY_EG_VERSION / ENVOY_PROXY_VERSION / ENVOY_AI_VERSION, 可用环境变量覆盖)──
 #   [Envoy Gateway]    docker.io/envoyproxy/gateway:<EG_VERSION>     控制面
-#                      docker.io/envoyproxy/envoy:<EG_VERSION>       数据面(用户 Gateway 动态创建 Envoy Proxy)
+#                      docker.io/envoyproxy/envoy:<ENVOY_PROXY_VERSION>  数据面(用户 Gateway 动态创建 Envoy Proxy; ⚠ tag 与 EG 版本不同, 默认 distroless-v1.39.1)
 #   [Envoy AI Gateway] docker.io/envoyproxy/ai-gateway-controller:<AI_VERSION>   控制器(独立 Deployment; 官方源 docker.io, 非 ghcr)
 #   (可选限流, 默认不下载): envoyproxy/ratelimit:<tag> + envoyproxy/envoy-ratelimit:<tag>
 #
@@ -74,11 +74,15 @@ POLICY_EOF
 [ "$(id -u)" -eq 0 ] || { err "需要 root(docker 访问), 请 sudo 执行"; exit 1; }
 ensure_skopeo_policy
 
-ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.1}"        # Envoy Gateway 版本(控制面 + 数据面 tag)
+ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.1}"        # Envoy Gateway 版本(控制面 gateway 镜像 tag + chart 版本)
+# ⚠ 数据面 Envoy 镜像 tag 与 EG 版本号不同(EG 1.9.x 配套 Envoy 1.39.x):
+#   用 `kubectl exec deploy/envoy-gateway -- envoy-gateway version` 的 ENVOY_PROXY_VERSION 核对;
+#   误用 <EG版本> 会拉到远古 Envoy(如 v1.9.1=2019), 数据面启动报 --cpuset-threads 无法识别
+ENVOY_PROXY_VERSION="${ENVOY_PROXY_VERSION:-distroless-v1.39.1}"   # 数据面 Envoy 镜像 tag
 ENVOY_AI_VERSION="${ENVOY_AI_VERSION:-v1.1.0}"        # Envoy AI Gateway 控制器版本(镜像 tag + chart 版本)
 ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"
 mkdir -p "${ENVOY_SAVE_DIR}"
-say "配置: EG=${ENVOY_EG_VERSION} AI=${ENVOY_AI_VERSION} 保存目录=${ENVOY_SAVE_DIR}"
+say "配置: EG=${ENVOY_EG_VERSION} 数据面Envoy=${ENVOY_PROXY_VERSION} AI=${ENVOY_AI_VERSION} 保存目录=${ENVOY_SAVE_DIR}"
 
 # ---- 参数解析: --list / --force / 镜像 ref ----
 MODE="save"; FORCE=0
@@ -94,7 +98,7 @@ done
 ENVOY_IMAGE_LIST="${ENVOY_IMAGE_LIST:-}"
 if [ -z "${ENVOY_IMAGE_LIST}" ]; then
     ENVOY_IMAGE_LIST="docker.io/envoyproxy/gateway:${ENVOY_EG_VERSION}
-docker.io/envoyproxy/envoy:${ENVOY_EG_VERSION}
+docker.io/envoyproxy/envoy:${ENVOY_PROXY_VERSION}
 docker.io/envoyproxy/ai-gateway-controller:${ENVOY_AI_VERSION}"
 fi
 

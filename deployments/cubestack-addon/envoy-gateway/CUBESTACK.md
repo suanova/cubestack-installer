@@ -75,7 +75,7 @@ helm pull oci://docker.io/envoyproxy/ai-gateway-helm       --version v1.1.0   # 
 | chart | values 键 | 默认 | 离线改写 |
 |---|---|---|---|
 | gateway-helm | `deployment.envoyGateway.image.repository` / `image.tag` | `docker.io/envoyproxy/gateway` | `${REGISTRY_DOMAIN}:${REGISTRY_PORT}/envoyproxy/gateway`(控制面 Deployment + certgen Job; v1.9.1 经 `eg.image` helper 统一取此路径) |
-| gateway-helm | `global.images.envoyProxy.image` | `docker.io/envoyproxy/envoy` | 同上 `/envoyproxy/envoy`(**数据面**, 创建 Gateway 时动态拉起, 离线关键) |
+| gateway-helm | `global.images.envoyProxy.image` | `docker.io/envoyproxy/envoy` | 同上 `/envoyproxy/envoy:${ENVOY_PROXY_VERSION}`(**数据面**, 创建 Gateway 时动态拉起, 离线关键; ⚠ tag=ENVOY_PROXY_VERSION 默认 distroless-v1.39.1, 勿用 EG 版本号) |
 | ai-gateway-helm | `controller.image.repository` / `controller.image.tag` | `docker.io/envoyproxy/ai-gateway-controller` | `${REGISTRY_DOMAIN}:${REGISTRY_PORT}/ai-gateway/ai-gateway-controller` |
 | ai-gateway-helm | `controller.nameOverride` | 空 | `ai-gateway-controller`(让 Deployment/Service 名 = ai-gateway-controller) |
 | ai-gateway-helm | `envoyGateway.namespace` | `envoy-gateway-system` | 同 EG 命名空间(AI 控制器在其内建/看 Gateway 资源) |

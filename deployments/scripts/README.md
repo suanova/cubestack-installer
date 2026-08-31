@@ -585,7 +585,7 @@ sudo ENVOY_EG_VERSION=v1.9.1 ./scripts/tools/images/envoy-load-images.sh /path/t
 | tar | 推送目标 |
 |---|---|
 | `*gateway_${ENVOY_EG_VERSION}.tar` | `registry.local:5000/envoyproxy/gateway:${ENVOY_EG_VERSION}` |
-| `*envoy_${ENVOY_EG_VERSION}.tar` | `registry.local:5000/envoyproxy/envoy:${ENVOY_EG_VERSION}` |
+| `*envoy_${ENVOY_PROXY_VERSION}.tar` | `registry.local:5000/envoyproxy/envoy:${ENVOY_PROXY_VERSION}`(数据面; ⚠ tag=ENVOY_PROXY_VERSION, 默认 `distroless-v1.39.1`, 勿用 EG 版本号) |
 | `*ai-gateway-controller*.tar` | `registry.local:5000/ai-gateway/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}` |
 
 - 纯离线(不联网): tar 内容经 `skopeo docker-archive → docker://` 推送, 3 次重试; 需本机装 `skopeo`。
