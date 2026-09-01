@@ -242,9 +242,20 @@ fi
 CONTAINERD_YML="${INV_DIR}/group_vars/all/containerd.yml"
 if [ -f "${CONTAINERD_YML}" ]; then
     say "更新 ${CONTAINERD_YML} (containerd 信任 registry) ..."
-    python3 - "${CONTAINERD_YML}" "${REGISTRY_ENABLED:-0}" "${REGISTRY_DOMAIN:-registry.local}" "${REGISTRY_IP:-10.244.2.100}" "${REGISTRY_PORT:-5000}" << 'PYEOF'
+    # 镜像 host 按暴露模式二选一:
+    #   nodeport(默认) → http://<首个 master IP>:${REGISTRY_NODEPORT} —— 节点 containerd 客户端侧
+    #     直连 NodePort 拉取, 不依赖 /etc/hosts 解析与节点 iptables(kube-proxy 会重置节点规则);
+    #   metallb         → http://registry.local:PORT(经 /etc/hosts → VIP)。
+    _EXPOSE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
+    if [ "${_EXPOSE}" = "nodeport" ]; then
+        _MIRROR_HOST="http://${REGISTRY_IP}:${REGISTRY_NODEPORT:-31148}"
+    else
+        _MIRROR_HOST="http://${REGISTRY_DOMAIN:-registry.local}:${REGISTRY_PORT:-5000}"
+    fi
+    unset _EXPOSE
+    python3 - "${CONTAINERD_YML}" "${REGISTRY_ENABLED:-0}" "${REGISTRY_DOMAIN:-registry.local}" "${REGISTRY_IP:-10.244.2.100}" "${REGISTRY_PORT:-5000}" "${_MIRROR_HOST}" << 'PYEOF'
 import re, sys
-path, enabled, d, ip, port = sys.argv[1:6]
+path, enabled, d, ip, port, mhost = sys.argv[1:7]
 lines = open(path).read().split('\n')
 out, i = [], 0
 while i < len(lines):
@@ -264,7 +275,7 @@ if enabled == "1":
     out.append(f'  - prefix: "{d}:{port}"')
     out.append(f'    server: "http://{d}:{port}"')
     out.append('    mirrors:')
-    out.append(f'      - host: "http://{d}:{port}"')
+    out.append(f'      - host: "{mhost}"')
     out.append('        capabilities: ["pull", "resolve"]')
     out.append('        skip_verify: true')
 else:
@@ -274,7 +285,7 @@ else:
     out.append('# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)')
 open(path, 'w').write('\n'.join(out) + '\n')
 PYEOF
-    ok "已同步 containerd registry 信任 → ${REGISTRY_DOMAIN:-registry.local}:${REGISTRY_PORT:-5000}"
+    ok "已同步 containerd registry 信任 → ${REGISTRY_DOMAIN:-registry.local}:${REGISTRY_PORT:-5000}(镜像 host: ${_MIRROR_HOST})"
 else
     warn "未找到 ${CONTAINERD_YML},跳过 containerd registry 配置"
 fi

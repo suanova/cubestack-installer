@@ -70,11 +70,12 @@ AI 控制器的扩展服务器 → 数据面根本没有 AI 过滤器**:
 - ❌→✅ **修复 1**: `01_metallb.sh`(部署期就绪检查)与 `21_verify_metallb.sh`(验证)只按
   `METALLB_ENABLED`(默认 true)守卫 → nodeport 模式会假阳性失败。两模块已加
   `SERVICE_EXPOSE_MODE=nodeport → 跳过` 守卫。
-- ⚠→📝 **修复 2(文档)**: nodeport 模式下节点 /etc/hosts 的 registry.local → REGISTRY_IP(自动派生的
-  METALLB_POOL 地址, 无服务监听)→ 节点拉取 registry.local 镜像会失败。已在 cluster.conf.example
-  注明: nodeport 模式须显式设 REGISTRY_IP 为可达入口(① 安装机 IP + REGISTRY_EXPOSE_HOST=1 宿主
-  DNAT 5000→节点:31148; ② 某节点 IP + 该节点 5000→31148 DNAT), 推送端用 ENVOY_PUSH_ENDPOINT 指
-  节点 IP:REGISTRY_NODEPORT。
+- ⚠→✅ **修复 2(自动连通, 用户要求 "nodeport 默认走集群第一个 IP")**: nodeport 模式下节点 /etc/hosts
+  的 registry.local → REGISTRY_IP; 但 REGISTRY_IP 原自动取自 METALLB_POOL(无 MetalLB → 无服务监听)
+  → 节点拉取会失败。现自动: ① REGISTRY_IP 默认 = **首个 master IP**(lib-common 派生); ② 节点
+  containerd hosts.toml 镜像直连 `<master>:REGISTRY_NODEPORT`(客户端侧改写, 绕开 kube-proxy 重置
+  节点 iptables 的问题); ③ 宿主机 registry.local:5000 由 deploy-registry.sh 自动 DNAT 到首个 master
+  的 REGISTRY_NODEPORT(systemd 持久化)。全部默认生效, 无需手动配置; 显式 REGISTRY_IP 仍可覆盖。
 
 ## 待办(已全部完成, 2026-09-01)
 

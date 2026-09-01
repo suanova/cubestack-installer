@@ -357,9 +357,20 @@ load_config() {
     # 标记是否显式指定(供 deploy-registry.sh 冲突检测: 显式设置不再提示)
     export REGISTRY_IP_EXPLICIT="${REGISTRY_IP_EXPLICIT:-0}"
     if [ -z "${REGISTRY_IP:-}" ]; then
-        REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
+        # 按暴露模式决定默认入口(二选一):
+        #   nodeport(默认) → 集群第一个 master IP —— 节点 containerd 经 hosts.toml 直连该 IP 的
+        #     REGISTRY_NODEPORT 拉取, 宿主机经 deploy-registry.sh 的 DNAT 访问, 均无需手动配置;
+        #   metallb         → METALLB_POOL 池内首地址作为 LoadBalancer VIP(registry 固定 VIP)。
+        _EXPOSE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
+        if [ "${_EXPOSE}" = "nodeport" ]; then
+            REGISTRY_IP="$(first_master_ip)" || REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
+            vlog "REGISTRY_IP 留空, nodeport 模式取首个 master IP → ${REGISTRY_IP}"
+        else
+            REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
+            vlog "REGISTRY_IP 留空, 自动取 METALLB_POOL=${METALLB_POOL:-} 首地址 → ${REGISTRY_IP}"
+        fi
+        unset _EXPOSE
         export REGISTRY_IP
-        vlog "REGISTRY_IP 留空, 自动取 METALLB_POOL=${METALLB_POOL:-} 首地址 → ${REGISTRY_IP}"
     else
         export REGISTRY_IP_EXPLICIT=1
     fi
