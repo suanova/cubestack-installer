@@ -152,7 +152,8 @@ for i in $(seq 1 30); do
         SVC_LINE="$( (SSH "${K} -n ${ENVOY_EG_NAMESPACE} get svc -l gateway.envoyproxy.io/owning-gateway-name=${TEST_GW} --no-headers 2>/dev/null" || true) | head -1 )"
         [ -z "${SVC_LINE}" ] && SVC_LINE="$( (SSH "${K} -n ${TEST_NS} get svc -l gateway.envoyproxy.io/owning-gateway-name=${TEST_GW} --no-headers 2>/dev/null" || true) | head -1 )"
         if [ -n "${SVC_LINE}" ]; then
-            DP_NAME="$(echo "${SVC_LINE}" | awk '{print $2}')"
+            # 单命名空间 get svc 列序: NAME TYPE CLUSTER-IP ... → 名称取 $1(勿用 $2, 那是 TYPE)
+            DP_NAME="$(echo "${SVC_LINE}" | awk '{print $1}')"
             SSH "${K} -n ${ENVOY_EG_NAMESPACE} patch svc ${DP_NAME} -p '{\"spec\":{\"type\":\"NodePort\"}}' >/dev/null 2>&1" || true
             NPORT="$( (SSH "${K} -n ${ENVOY_EG_NAMESPACE} get svc ${DP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
             [ -z "${NPORT}" ] && NPORT="$( (SSH "${K} -n ${TEST_NS} get svc ${DP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
