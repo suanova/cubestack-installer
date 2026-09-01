@@ -15,9 +15,12 @@ registry_storage_class: "local-path"
 # registry_htpasswd: ""
 # 通过 MetalLB 对外暴露 registry(LoadBalancer 类型), 分配 METALLB_POOL 中的 VIP
 # 也可改为 NodePort(registry_service_nodeport)或 ClusterIP 仅供集群内部使用
-registry_service_type: LoadBalancer
-# registry_service_nodeport: 残留值已由 sync 脚本禁用
-registry_service_loadbalancer_ip: 10.66.1.130
+# ⚠ 以下三行由 sync-kubespray-config.sh 按 SERVICE_EXPOSE_MODE 自动改写, 请勿手工填环境 IP
+#   (曾因模板残留 10.66.1.130 导致 kubespray 严格校验直接失败: "registry_service_loadbalancer_ip
+#    support only compatible with LoadBalancer")
+registry_service_type: NodePort
+# registry_service_nodeport: "31148"             # nodeport 模式由 sync 启用
+# registry_service_loadbalancer_ip: "<IP>"       # metallb 模式由 sync 按 REGISTRY_IP 写入
 
 # Metrics Server deployment
 metrics_server_enabled: true
