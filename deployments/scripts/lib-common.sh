@@ -232,6 +232,82 @@ find_offline_tar() {
     return 1
 }
 
+# ---------------- 共享 nginx 校验镜像助手(verify 模块测试后端共用) ----------------
+# verify_metallb / verify_envoy_gateway / verify_envoy_ai_gateway / verify-lws 的测试后端
+# 统一用 **nginx**(测试 HTTP 后端, 静态页/JSON mock 皆可), 曾用 busybox httpd(依赖节点
+# containerd 预加载, 漏预加载即 Pending)。统一收敛到本助手:
+# 幂等确保 nginx 已推送进集群内置 registry, echo 出 **K8s 可见镜像 ref**(调用方在 $(...) 捕获,
+# 故本函数进度消息一律走 stderr, 与 find_offline_tar 的 warn >&2 同理), pod 直接走集群 registry
+# 拉取(离线可用, 不依赖节点状态)。
+# 来源: ① 本地 docker daemon → ② 离线 tar(deployments/offline-files/nginx/nginx.tar 优先,
+#       也兼容 LOCAL_REPO_DIR/images) → ③ 在线(仅 VERIFY_IMAGE_ONLINE=true, 离线部署默认禁止)。
+# 用法: TEST_IMAGE="$(ensure_registry_nginx)" || exit 1   # 默认 tag=latest; 可 ensure_registry_nginx <tag>
+# 依赖: load_config 已执行(REGISTRY_* / LOCAL_REPO_DIR / OFFLINE_FILES_DIR / REPO_ROOT); 推送需 skopeo。
+ensure_registry_nginx() {
+    local tag="${1:-latest}"
+    # 推送走 IP 直连(MetalLB VIP, 无 DNS 依赖); 返回的 ref 用 REGISTRY_DOMAIN(K8s 节点可解析)
+    local pr="${REGISTRY_IP}:${REGISTRY_PORT}/verify"
+    local ref="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT}/verify/nginx:${tag}"
+    # reg_has_tag 的 curl 兜底(无 skopeo 时)依赖 REGISTRY_BASE, 先确保已派生(set -u 下未赋值即报错)
+    REGISTRY_BASE="${REGISTRY_BASE:-${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT}}"
+    # 幂等: registry 已有直接返回(无需 skopeo)
+    reg_has_tag "${pr}" "nginx" "${tag}" && { echo "${ref}"; return 0; }
+    skopeo_require "verify"
+    local src="" _tmp="" _t
+    # ① 本地 docker daemon(nginx 常被手工 pull 过, 快路径)
+    src="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '(/|^)nginx:(latest|[0-9.]+)$' | head -1 || true)"
+    if [ -n "${src}" ]; then
+        echo "  [nginx] 从本地 docker 推送: ${src}" >&2
+        _tmp="$(mktemp)"
+        if sudo docker save "${src}" -o "${_tmp}" >/dev/null 2>&1 \
+           && push_image_skopeo "docker-archive:${_tmp}" "docker://${pr}/nginx:${tag}" >/dev/null 2>&1; then
+            rm -f "${_tmp}"; echo "${ref}"; return 0
+        fi
+        rm -f "${_tmp}"; echo "  [nginx] 本地 docker 推送失败, 尝试离线 tar..." >&2
+    fi
+    # ② 离线 tar: suffix 用 "nginx:latest"(无前导 /——find_offline_tar 的前导 / 约定只匹配带
+    # registry 前缀的全格式, 库镜像短格式如 "nginx:latest" 会漏; glob nginx*.tar 已限定候选)。
+    # find_offline_tar 是 endswith 语义, 版本化 tag(nginx:1.31.4)不命中, 下方按内容兜底。
+    _t="$(find_offline_tar "nginx:latest" "nginx*.tar" \
+            "${REPO_ROOT}/deployments/offline-files/nginx" \
+            "${LOCAL_REPO_DIR}/images" \
+            "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME:-cubestack-cluster}/images")" || _t=""
+    if [ -z "${_t}" ]; then
+        # 兜底: 版本化 tag(如 nginx:1.31.4)按内容匹配(含 "nginx:" 即接受)
+        for _d in "${REPO_ROOT}/deployments/offline-files/nginx" \
+                  "${LOCAL_REPO_DIR}/images" \
+                  "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME:-cubestack-cluster}/images"; do
+            [ -d "${_d}" ] || continue
+            for _f in "${_d}"/nginx*.tar; do
+                [ -f "${_f}" ] || continue
+                case "$(tar_first_image_tag "${_f}")" in
+                    *"nginx:"*) _t="${_f}"; break 2 ;;
+                esac
+            done
+        done
+    fi
+    if [ -n "${_t}" ]; then
+        echo "  [nginx] 从离线 tar 推送: $(basename "${_t}")" >&2
+        if push_image_skopeo "docker-archive:${_t}" "docker://${pr}/nginx:${tag}" >/dev/null 2>&1; then
+            echo "${ref}"; return 0
+        fi
+        echo "  [nginx] 离线 tar 推送失败" >&2
+    fi
+    # ③ 在线(仅显式允许; 离线部署默认禁止, 给明确指引)
+    if [ "${VERIFY_IMAGE_ONLINE:-false}" = "true" ]; then
+        echo "  [nginx] 在线拉取并推送(VERIFY_IMAGE_ONLINE=true)..." >&2
+        if push_image_skopeo "docker://docker.io/library/nginx:latest" "docker://${pr}/nginx:${tag}" >/dev/null 2>&1; then
+            echo "${ref}"; return 0
+        fi
+        echo "  [nginx] 在线拉取失败" >&2
+    fi
+    err "集群 registry 无 nginx(${ref}), 测试后端无法拉起。请任选其一:"
+    err "  ① 准备离线 nginx 镜像 tar 放到 ${REPO_ROOT}/deployments/offline-files/nginx/nginx.tar(联网机: sudo docker pull nginx:latest && sudo docker save nginx:latest -o .../nginx.tar, 拷到部署机);"
+    err "  ② 部署机本地 docker 有 nginx:latest(sudo docker pull nginx:latest);"
+    err "  ③ 允许在线拉取: VERIFY_IMAGE_ONLINE=true 重跑"
+    return 1
+}
+
 # ---------------- 统一配置加载 ----------------
 # 环境变量优先: 配置文件内使用 ${VAR:-default},已导出的环境变量不会被覆盖
 load_config() {

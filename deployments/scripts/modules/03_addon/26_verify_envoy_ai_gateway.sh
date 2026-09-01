@@ -21,8 +21,9 @@
 #   · apiVersion 从在线 CRD storage 版本推导(吸收 v1alpha1/v1beta1 漂移), 读不到兜底 v1beta1。
 #   · ⚠ v1.x 字段随版本 Alpha/Beta 变化: 测试资源 apply 失败/状态字段取不到时**仅告警不阻断**,
 #     可按官方 examples/basic/basic.yaml 调整字段后重跑。
-#   · ⑤ 步为**边界验证**: 用 nginx 静态 mock 一个 OpenAI chat.completions 响应,
-#     经 AI Gateway VIP 真实调用; 失败仅告警并给出指引, 不阻断(资源调和已证明 AI 控制面工作正常)。
+#   · ⑤ 步为**边界验证**: 用 nginx `return 200` 内联 mock 一个 OpenAI chat.completions 响应
+#     (⚠ 不能用静态文件, nginx 对静态文件拒绝 POST → 405), 经 AI Gateway VIP 真实调用;
+#     失败仅告警并给出指引, 不阻断(资源调和已证明 AI 控制面工作正常)。
 #     真实 LLM 需配置真实 AIServiceBackend + API Key Secret。
 #   · 参考: https://aigateway.envoyproxy.io/ 与 docs/envoy-gateway.md §4.2
 # 数据源: cluster.conf (ENVOY_AI_GATEWAY_ENABLED / ENVOY_AI_NAMESPACE / ENVOY_AI_API_VERSION /
@@ -48,8 +49,9 @@ K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 TEST_IMAGE="$(ensure_registry_nginx)" || exit 1
 
 ENVOY_AI_NAMESPACE="${ENVOY_AI_NAMESPACE:-ai-gateway-system}"
+ENVOY_EG_NAMESPACE="${ENVOY_EG_NAMESPACE:-envoy-gateway-system}"   # EG 控制面/数据面命名空间(nodeport 分支找数据面 svc 用)
 ENVOY_AI_API_VERSION="${ENVOY_AI_API_VERSION:-v1beta1}"   # 仅 v0.x legacy 分支使用
-ENVOY_AI_GATEWAYCLASS="${ENVOY_AI_GATEWAYCLASS:-envoy-gateway}"   # AI Gateway 数据面复用 EG 的 GatewayClass(v1.x)
+ENVOY_AI_GATEWAYCLASS="${ENVOY_AI_GATEWAYCLASS:-eg}"   # AI Gateway 数据面复用 EG 的 GatewayClass(v1.x; 模块 09 创建名为 eg)
 TEST_NS="verify-aig-$$"        # 唯一命名空间(带 PID 后缀)
 TEST_AIG="verify-aigw"         # v0.x legacy AIGateway 名(scp 临时文件名也用它)
 TEST_GW="verify-aigw-gw"       # v1.x 标准 Gateway 名
@@ -124,7 +126,8 @@ spec:
         - name: httpd
           image: ${TEST_IMAGE}
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "-c", "mkdir -p /usr/share/nginx/html/v1/chat && echo '{\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion\",\"created\":123,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"envoy-ai-gateway-verify-ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}' > /usr/share/nginx/html/v1/chat/completions && nginx -g 'daemon off;'"]
+          # ⚠ 不能用静态文件 mock: nginx 对静态文件拒绝 POST → 405。必须用 return 200 内联 JSON
+          command: ["/bin/sh", "-c", "cat > /etc/nginx/nginx.conf <<'EOF'\nevents {}\nhttp {\n  server {\n    listen 80 default_server;\n    location = /v1/chat/completions {\n      default_type application/json;\n      return 200 '{\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion\",\"created\":123,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"envoy-ai-gateway-verify-ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}';\n    }\n  }\n}\nEOF\nnginx -g 'daemon off;'"]
           ports: [{ containerPort: 80 }]
 ---
 apiVersion: v1
@@ -214,7 +217,8 @@ spec:
         - name: httpd
           image: ${TEST_IMAGE}
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "-c", "mkdir -p /usr/share/nginx/html/v1/chat && echo '{\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion\",\"created\":123,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"envoy-ai-gateway-verify-ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}' > /usr/share/nginx/html/v1/chat/completions && nginx -g 'daemon off;'"]
+          # ⚠ 不能用静态文件 mock: nginx 对静态文件拒绝 POST → 405。必须用 return 200 内联 JSON
+          command: ["/bin/sh", "-c", "cat > /etc/nginx/nginx.conf <<'EOF'\nevents {}\nhttp {\n  server {\n    listen 80 default_server;\n    location = /v1/chat/completions {\n      default_type application/json;\n      return 200 '{\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion\",\"created\":123,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"envoy-ai-gateway-verify-ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}';\n    }\n  }\n}\nEOF\nnginx -g 'daemon off;'"]
           ports: [{ containerPort: 80 }]
 ---
 apiVersion: v1
@@ -263,11 +267,14 @@ for i in $(seq 1 36); do
     if [ -n "${GW_LINE}" ]; then
         if [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ]; then
             # 无 MetalLB: 等数据面 Service 出现 → patch 成 NodePort → 访问入口 = 节点IP:NodePort
-            SVC_LINE="$( (SSH "${K} -n ${TEST_NS} get svc -l gateway.envoyproxy.io/owning-gateway-name=${_TARGET_GW} --no-headers 2>/dev/null" || true) | head -1 )"
+            # (数据面 Service 默认在控制面命名空间, 兜底找 Gateway 同命名空间; 与 25 模块一致)
+            SVC_LINE="$( (SSH "${K} -n ${ENVOY_EG_NAMESPACE} get svc -l gateway.envoyproxy.io/owning-gateway-name=${_TARGET_GW} --no-headers 2>/dev/null" || true) | head -1 )"
+            [ -z "${SVC_LINE}" ] && SVC_LINE="$( (SSH "${K} -n ${TEST_NS} get svc -l gateway.envoyproxy.io/owning-gateway-name=${_TARGET_GW} --no-headers 2>/dev/null" || true) | head -1 )"
             if [ -n "${SVC_LINE}" ]; then
                 DP_NAME="$(echo "${SVC_LINE}" | awk '{print $2}')"
-                SSH "${K} -n ${TEST_NS} patch svc ${DP_NAME} -p '{\"spec\":{\"type\":\"NodePort\"}}' >/dev/null 2>&1" || true
-                NPORT="$( (SSH "${K} -n ${TEST_NS} get svc ${DP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
+                SSH "${K} -n ${ENVOY_EG_NAMESPACE} patch svc ${DP_NAME} -p '{\"spec\":{\"type\":\"NodePort\"}}' >/dev/null 2>&1" || true
+                NPORT="$( (SSH "${K} -n ${ENVOY_EG_NAMESPACE} get svc ${DP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
+                [ -z "${NPORT}" ] && NPORT="$( (SSH "${K} -n ${TEST_NS} get svc ${DP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
                 [ -n "${NPORT}" ] && AIG_ENDPOINT="$(first_node_ip):${NPORT}"
             fi
         else
@@ -313,7 +320,7 @@ if [ -n "${AIG_ENDPOINT}" ]; then
     BODY="$( (SSH "curl -s -m 10 -X POST http://${AIG_ENDPOINT}/v1/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"mock\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}' 2>/dev/null" || true) )"
     case "${BODY}" in
         *envoy-ai-gateway-verify-ok*) ok "    HTTP ${HTTP_CODE}, mock LLM 响应透传成功 ✓(AI Gateway 数据面转发正常)" ;;
-        *) warn "    调用未返回期望响应(HTTP_CODE='${HTTP_CODE}', body='${BODY:0:120}...'); 常见原因: AIGatewayRoute 路由未配置/字段版本差异/Backend url 格式; 资源调和已通过, 真实 LLM 需按官方文档配 AIGatewayRoute + 真实 AIServiceBackend" ;;
+        *) warn "    调用未返回期望响应(HTTP_CODE='${HTTP_CODE}', body='${BODY:0:120}...'); 常见原因: ① EG extensionManager 未接线(模块 10 [5/6], 缺则数据面无 AI ext_proc 过滤器, 404 'No matching route found') ② AIGatewayRoute 路由未配置/字段版本差异 ③ Backend url 格式; 资源调和已通过, 真实 LLM 需按官方文档配 AIGatewayRoute + 真实 AIServiceBackend" ;;
     esac
 else
     warn "    数据面入口未就绪, 跳过真实调用(资源调和已证明 AI 控制面工作正常)"

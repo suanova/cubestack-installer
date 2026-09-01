@@ -46,6 +46,12 @@ METALLB_POOL="10.66.1.130-10.66.1.139"
 #                         · 自动关闭 MetalLB; registry → NodePort(REGISTRY_NODEPORT 31148)
 #                         · ingress-nginx(若启用) → NodePort(30080/30081)
 #                         · Envoy Gateway 数据面 → NodePort(已创建的 Gateway 用 tools/lb/gateway-nodeport.sh 转换)
+#   ⚠ nodeport 模式下的节点拉取: 节点 /etc/hosts 的 registry.local 解析到 REGISTRY_IP; 但 nodeport 模式
+#     无 MetalLB, 自动从 METALLB_POOL 派生的 REGISTRY_IP 无服务监听 → 节点拉取 registry.local 镜像会失败。
+#     需把 REGISTRY_IP 显式设为可达入口(见阶段三 3.2), 二选一:
+#       ① REGISTRY_IP=<安装机 IP> + REGISTRY_EXPOSE_HOST=1(宿主机 DNAT 5000→节点:REGISTRY_NODEPORT, 节点经安装机拉取);
+#       ② REGISTRY_IP=<某节点 IP> 且该节点配 5000→REGISTRY_NODEPORT DNAT。
+#     推送端同理: 用 ENVOY_PUSH_ENDPOINT 指到 <节点IP>:REGISTRY_NODEPORT(见 envoy-load-images.sh / 22_verify_registry_storage.sh)。
 #   各服务仍可单独覆盖: REGISTRY_SERVICE_TYPE(见阶段三 3.2); ingress-nginx 在 kubespray addons.yml。
 SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-metallb}"
 
@@ -361,6 +367,9 @@ ENVOY_AI_IMAGE_ONLINE="${ENVOY_AI_IMAGE_ONLINE:-false}"     # 同上(AI 控制�
 ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"   # 离线镜像 tar 目录(save 工具输出)
 ENVOY_EG_NAMESPACE="${ENVOY_EG_NAMESPACE:-envoy-gateway-system}"   # EG 部署命名空间
 ENVOY_AI_NAMESPACE="${ENVOY_AI_NAMESPACE:-ai-gateway-system}"      # AI 控制器部署命名空间
+# CRD chart 命名空间: 默认与控制器合并(CRD 为 cluster-scoped, namespace 仅 helm release 归属;
+# 早期独立 ai-gateway-crds 空 ns 易误判废弃, 已合并; 设 ai-gateway-crds 可恢复拆分)
+ENVOY_AI_CRDS_NS="${ENVOY_AI_CRDS_NS:-${ENVOY_AI_NAMESPACE}}"
 
 # ---------------- 4.4 P2 阶段附加组件 ----------------
 # 开关见顶部【组件启停开关】: KEYCLOAK_ENABLED / KUEUE_ENABLED / KUBEVIRT_ENABLED

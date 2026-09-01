@@ -302,8 +302,8 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 > 完整分析/部署/使用/故障见 `docs/envoy-gateway.md` 与 `docs/troubleshooting.md` §三.5。
 
 - **两者关系**: Envoy Gateway(EG)= 通用 K8s API 网关基座(Gateway API 标准实现); Envoy AI Gateway(AIG)
-  = **不是独立二进制**, = 特制 EG 控制面 + AI 控制器(Extension Server)+ AI CRD(`aigateway.envoyproxy.io`),
-  通过 EG 的 `extensionManager` 机制注册。**AIG 依赖 EG 先装**。
+  = **不是独立二进制**, = 标准 EG 基座 + AI 控制器(内嵌 EG 扩展服务器, gRPC 1063)+ AI CRD
+  (`aigateway.envoyproxy.io`), 经 EG 的 `extensionManager` 机制接线(见下)。**AIG 依赖 EG 先装**。
 - **离线备料(联网机, 两件套)**: chart 用 `tools/images/envoy-fetch-charts.sh`(helm pull 解包到
   `deployments/cubestack-addon/envoy-gateway/{eg,ai}`); 镜像用 `tools/images/envoy-save-images.sh`
   (默认 `deployments/offline-files/envoy`): EG 控制面 `envoyproxy/gateway:<v>` + **数据面
@@ -317,6 +317,13 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - **EG Backend API(必须启用)**: AIG v1.1+ 的 AIServiceBackend 必须引用 EG `Backend` 资源, 该 API 默认禁用
   (安全原因, 参考 CVE-2021-25740) → 09 模块 helm 已默认 `config.envoyGateway.extensionApis.enableBackend=true`;
   不启用则 HTTPRoute 报 "Backend is disabled in Envoy Gateway configuration" (ResolvedRefs=False)。
+- **EG extensionManager 接线(核心, 10 模块自动完成)**: AI 控制器内嵌 gRPC 扩展服务器(端口 1063);
+  模块 10 [5/6] 把 `extensionManager.hooks.xdsTranslator`(post=[Translation,Cluster,Route],
+  translation includeAll listener/route/cluster/secret)+ `service.fqdn` 指向
+  `ai-gateway-controller.<AI ns>.svc.cluster.local:1063` 写入 EG 的 `envoy-gateway-config` ConfigMap,
+  并重启 EG 控制面(明文 gRPC, 无需证书)。**漏配 → 数据面无 AI 过滤器, AI 请求 404
+  "No matching route found"**(历史调试曾误判为 extProc 镜像问题)。模块 09 **故意不配**
+  (EG 连不上扩展服务器 → 所有 Gateway xDS 翻译失败, 独立 EG 验证会挂)。
 - **默认版本**: `ENVOY_EG_VERSION=v1.9.1`(GA)、`ENVOY_AI_VERSION=v1.1.0`(GA, API `v1beta1`, `ENVOY_AI_API_VERSION`)。
 - **常用命令**:
   ```bash

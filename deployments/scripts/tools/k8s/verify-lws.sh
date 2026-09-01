@@ -2,14 +2,15 @@
 # ============================================================
 # verify-lws.sh — 端到端验证 LeaderWorkerSet(LWS) 真正工作(非仅 pod running)
 # ① controller pod Ready → ② CRD 注册(leaderworkerset/disaggregatedset/disaggregatedsetrolescalers)
-# → ③ 创建测试 LeaderWorkerSet(leader 1 + worker 2, busybox)→ ④ 等待全部 pod Ready
+# → ③ 创建测试 LeaderWorkerSet(leader 1 + worker 2, nginx)→ ④ 等待全部 pod Ready
 # → ⑤ 校验控制器管理(v0.10 标签 leaderworkerset.sigs.k8s.io/name + worker-index=0 为 leader)
 # → ⑥ DisaggregatedSet CR 可创建(dry-run=server, roles≥2)→ ⑦ 清理测试资源(trap 兜底)
 # 注意(v0.10.0 schema): leaderWorkerTemplate 用 leaderTemplate/workerTemplate(workerTemplate 必填),
 #   restartPolicy 枚举 Default/None/RecreateGroup*; DisaggregatedSet 用 roles[](≥2)+slices 整数。
 # 用法: sudo ./verify-lws.sh
 # 依赖: 集群已部署 LWS(默认官方 manifests.yaml bundle, 见 modules/03_addon/05_gpu_lws.sh);
-#       测试镜像 busybox 已预加载(PRELOAD_IMAGE_PATTERNS 含 busybox)。
+#       测试镜像 nginx 由 ensure_registry_nginx 幂等推送进集群 registry(离线可用,
+#       不依赖节点 containerd 预加载)。
 # 退出码: 0=验证通过; 1=任一硬性检查失败(controller/CRD/pod 未就绪)。
 # ============================================================
 set -euo pipefail
@@ -23,6 +24,9 @@ SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
            "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
 K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+
+# 测试镜像: 离线优先, 幂等确保 nginx 已在集群 registry(不依赖节点 containerd 预加载)
+TEST_IMAGE="$(ensure_registry_nginx)" || exit 1
 
 LWS_NAMESPACE="${LWS_NAMESPACE:-lws-system}"
 TEST_NS="verify-lws-$$"       # 唯一命名空间(带 PID 后缀)
@@ -52,8 +56,8 @@ echo "${CRD_LIST}" | grep -q 'leaderworkersets.leaderworkerset.x-k8s.io' \
     || { err "leaderworkersets.leaderworkerset.x-k8s.io CRD 未注册"; exit 1; }
 ok "    leaderworkersets CRD 已注册"
 
-# ③ 创建测试 LeaderWorkerSet(leader 1 + worker 2, busybox)
-say "  ③ 创建测试 LeaderWorkerSet(leader 1 + worker 2, busybox)..."
+# ③ 创建测试 LeaderWorkerSet(leader 1 + worker 2, nginx)
+say "  ③ 创建测试 LeaderWorkerSet(leader 1 + worker 2, nginx)..."
 cleanup
 LOCAL_YAML="$(mktemp)"
 cat > "${LOCAL_YAML}" <<YAML
@@ -77,10 +81,10 @@ spec:
     workerTemplate:
       spec:
         containers:
-          - name: sleep
-            image: docker.io/library/busybox:latest
+          - name: web
+            image: ${TEST_IMAGE}
             imagePullPolicy: IfNotPresent
-            command: ["/bin/sh", "-c", "sleep 3600"]
+            command: ["nginx", "-g", "daemon off;"]
             resources:
               requests:
                 cpu: 10m
@@ -104,7 +108,7 @@ for _ in $(seq 1 24); do
     sleep 5
 done
 [ "${POD_OK:-0}" -ge "${POD_TOTAL}" ] \
-    || { err "LWS 测试工作负载仅 ${POD_OK}/${POD_TOTAL} pod Ready(kubectl -n ${TEST_NS} get pods; 检查 busybox 镜像是否预加载)"; exit 1; }
+    || { err "LWS 测试工作负载仅 ${POD_OK}/${POD_TOTAL} pod Ready(kubectl -n ${TEST_NS} get pods; 检查 nginx 镜像是否已推送进集群 registry(${TEST_IMAGE})与节点能否拉取)"; exit 1; }
 ok "    LeaderWorkerSet ${POD_OK}/${POD_TOTAL} pod 全部 Ready ✓"
 
 # ⑤ 校验 LWS 控制器真正管理(用 v0.10 标签: leaderworkerset.sigs.k8s.io/name=组名 + worker-index=0 为 leader)
@@ -134,20 +138,20 @@ spec:
           workerTemplate:
             spec:
               containers:
-                - name: sleep
-                  image: docker.io/library/busybox:latest
+                - name: web
+                  image: ${TEST_IMAGE}
                   imagePullPolicy: IfNotPresent
-                  command: ["/bin/sh", "-c", "sleep 3600"]
+                  command: ["nginx", "-g", "daemon off;"]
     - name: decode
       spec:
         leaderWorkerTemplate:
           workerTemplate:
             spec:
               containers:
-                - name: sleep
-                  image: docker.io/library/busybox:latest
+                - name: web
+                  image: ${TEST_IMAGE}
                   imagePullPolicy: IfNotPresent
-                  command: ["/bin/sh", "-c", "sleep 3600"]
+                  command: ["nginx", "-g", "daemon off;"]
 YAML
     if cat "${LOCAL_DSET}" | SSH "${K} apply --dry-run=server -f -" >/dev/null 2>&1; then
         ok "    DisaggregatedSet CR 可创建(dry-run=server 通过; 解耦推理支持) ✓"

@@ -179,8 +179,9 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
   翻译为 Gateway/HTTPRoute 交 EG 控制面; AI 语义(token 计数/模型路由/多供应商转换)由控制器经
   ext_proc/Extension Hook 注入数据面。
 - 部署依赖: **必须先装 Envoy Gateway**(模块 09), AI 模块(10)前置检查强制确认 GatewayClass `eg` Accepted;
-  随后 helm 装 AI CRD chart + 控制器 chart, 并 helm upgrade eg 注入 `extensionManager` 指向
-  `ai-gateway-controller.ai-gateway-system.svc:18090`。
+  随后 helm 装 AI CRD chart + 控制器 chart, 并(模块 10 [5/6])把 `extensionManager` 写入 EG 的
+  `envoy-gateway-config` ConfigMap、重启 EG 控制面, 回调指向
+  `ai-gateway-controller.ai-gateway-system.svc:1063`(明文 gRPC 扩展服务器)。
 - 为何采用: LLM 流量统一入口(token 级限流/多模型供应商/failover); 与 EG 共数据面, 二件套即可覆盖
   业务 URL 与 AI 两类流量。
 - 边界说明(如实标注): AI 项目迭代快(默认 v1.0 GA, API `v1beta1`), AI CRD 字段与 extensionManager
