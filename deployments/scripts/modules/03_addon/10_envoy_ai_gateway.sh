@@ -81,7 +81,7 @@ REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
 ENVOY_AI_IMAGE_REPO="${ENVOY_AI_IMAGE_REPO:-${REGISTRY_BASE}/ai-gateway/ai-gateway-controller}"  # K8s 可见镜像
 ENVOY_AI_EXTPROC_IMAGE_REPO="${ENVOY_AI_EXTPROC_IMAGE_REPO:-${REGISTRY_BASE}/ai-gateway/ai-gateway-extproc}"  # extProc sidecar 镜像(K8s 可见; ⚠ 必收必推, 见 [1/5])
 ENVOY_AI_IMAGE_TAG="${ENVOY_AI_IMAGE_TAG:-${ENVOY_AI_VERSION}}"
-PUSH_REGISTRY_AI="${REGISTRY_IP}:${REGISTRY_PORT}/ai-gateway"       # 推送直连 IP
+PUSH_REGISTRY_AI="${REGISTRY_DIRECT}/ai-gateway"       # 推送直连端点: metallb→VIP:PORT / nodeport→master:REGISTRY_NODEPORT
 ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"
 ENVOY_AI_IMAGE_ONLINE="${ENVOY_AI_IMAGE_ONLINE:-false}"
 # EG 命名空间(chart 的 envoyGateway.namespace: AI 控制器在其中创建/查看 Gateway 与数据面资源)
@@ -130,8 +130,8 @@ skopeo_require "envoy_ai_gateway"   # 推送镜像到集群内置 registry 必�
 # 宿主机 /etc/hosts 更新(registry 域名 → VIP), 与 gpu_operator 一致
 # 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)
 ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
-wait_registry_ready "http://${REGISTRY_BASE}/v2/" \
-    || { err "集群内置 registry ${REGISTRY_BASE}/v2/ 不可达"; exit 1; }
+wait_registry_ready "http://${REGISTRY_DIRECT}/v2/" \
+    || { err "集群内置 registry ${REGISTRY_DIRECT}/v2/ 不可达(当前 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE})"; exit 1; }
 SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
     || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
 # 复用 lib-common 的 sync_kubeconfig(server→API_DOMAIN + 宿主机 DNAT)

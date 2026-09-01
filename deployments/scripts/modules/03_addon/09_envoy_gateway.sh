@@ -63,8 +63,8 @@ ENVOY_EG_RELEASE_NAME="${ENVOY_EG_RELEASE_NAME:-eg}"
 # 镜像: 内置 registry 路径(helm --set 用域名, K8s 节点按域名拉取)
 REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
 ENVOY_EG_IMAGE_BASE="${ENVOY_EG_IMAGE_BASE:-${REGISTRY_BASE}/envoyproxy}"
-# 推送用直连 IP(与 gpu_operator/lws 一致): PUSH_REGISTRY=${REGISTRY_IP}:${REGISTRY_PORT}
-PUSH_REGISTRY="${REGISTRY_IP}:${REGISTRY_PORT}/envoyproxy"
+# 推送用直连端点(与 gpu_operator/lws 一致): REGISTRY_DIRECT = metallb→VIP:PORT / nodeport→master:REGISTRY_NODEPORT
+PUSH_REGISTRY="${REGISTRY_DIRECT}/envoyproxy"
 ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"
 ENVOY_EG_IMAGE_ONLINE="${ENVOY_EG_IMAGE_ONLINE:-false}"   # 允许在线拉取镜像(仅 oci 源或显式 true)
 
@@ -107,8 +107,8 @@ skopeo_require "envoy_gateway"   # 推送镜像到集群内置 registry 必需(�
 # 宿主机 /etc/hosts 更新(registry 域名 → VIP), 与 gpu_operator 一致
 # 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)
 ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
-wait_registry_ready "http://${REGISTRY_BASE}/v2/" \
-    || { err "集群内置 registry ${REGISTRY_BASE}/v2/ 不可达(检查: 宿主机 /etc/hosts 的 ${REGISTRY_DOMAIN} 是否解析到 ${REGISTRY_IP}, 及 MetalLB VIP)"; exit 1; }
+wait_registry_ready "http://${REGISTRY_DIRECT}/v2/" \
+    || { err "集群内置 registry ${REGISTRY_DIRECT}/v2/ 不可达(检查: 宿主机 /etc/hosts 的 ${REGISTRY_DOMAIN} 是否解析到 ${REGISTRY_IP}, 及 MetalLB VIP); 当前 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE}"; exit 1; }
 SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
     || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
 # helm 需要从宿主连 API Server: 复用 lib-common 的 sync_kubeconfig(server→API_DOMAIN + 宿主机 DNAT)

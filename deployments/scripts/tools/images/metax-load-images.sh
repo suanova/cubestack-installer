@@ -19,7 +19,7 @@ need_root() { [ "$(id -u)" -eq 0 ] || { err "需要 root, 请 sudo 执行"; exit
 need_root
 
 REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"   # 集群内置 registry 域名(registry.local:5000)
-PUSH_REGISTRY="${REGISTRY_IP}:${REGISTRY_PORT}/metax" # 推送用 MetalLB VIP 直连(绕开宿主 DNAT, 大 blob 更稳)
+PUSH_REGISTRY="${REGISTRY_DIRECT}/metax" # 推送用直连端点(绕开宿主 DNAT, 大 blob 更稳): metallb→VIP:PORT / nodeport→master:REGISTRY_NODEPORT
 
 # 推送 skopeo(脚本级重试 3 次): 大 blob(如 maca 5.5G)连接中途断开时 skopeo 的 --retry-times 不覆盖, 这里整体重试
 _push_skopeo() {

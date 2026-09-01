@@ -68,7 +68,7 @@ LWS_IMAGE_REPO="${LWS_IMAGE_REPO:-${REGISTRY_DOMAIN}:${REGISTRY_PORT}/lws/manage
 LWS_IMAGE_TAG="${LWS_IMAGE_TAG:-v0.10.0}"               # 对应官方 image.manager.tag
 LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"
 REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
-PUSH_REGISTRY="${REGISTRY_IP}:${REGISTRY_PORT}/lws"
+PUSH_REGISTRY="${REGISTRY_DIRECT}/lws"   # REGISTRY_DIRECT: metallb→VIP:PORT / nodeport→master:REGISTRY_NODEPORT
 
 # ---------------- 前置检查 ----------------
 say "检查 LeaderWorkerSet 前置条件..."
@@ -107,8 +107,8 @@ ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
 ensure_hosts_entry "${API_IP}" "${API_DOMAIN}"
 grep -qE "^${REGISTRY_IP}[[:space:]]+${REGISTRY_DOMAIN}" /etc/hosts 2>/dev/null \
     || warn "无法写入宿主机 /etc/hosts(非 root?), ${REGISTRY_DOMAIN} 可能无法从宿主按域名访问"
-wait_registry_ready "http://${REGISTRY_BASE}/v2/" \
-    || { err "集群内置 registry ${REGISTRY_BASE}/v2/ 不可达(检查: 宿主机 /etc/hosts 的 ${REGISTRY_DOMAIN} 是否解析到 ${REGISTRY_IP}, 及 MetalLB VIP)"; exit 1; }
+wait_registry_ready "http://${REGISTRY_DIRECT}/v2/" \
+    || { err "集群内置 registry ${REGISTRY_DIRECT}/v2/ 不可达(检查: 宿主机 /etc/hosts 的 ${REGISTRY_DOMAIN} 是否解析到 ${REGISTRY_IP}, 及 MetalLB VIP); 当前 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE}"; exit 1; }
 SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
     || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
 # helm 需要从宿主连 API Server: 复用 lib-common 的 sync_kubeconfig(server→API_DOMAIN + 宿主机 DNAT)

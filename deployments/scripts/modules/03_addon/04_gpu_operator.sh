@@ -78,8 +78,9 @@ CHART_DIR="${METAX_CHART_DIR:-${METAX_PKG_DIR}/metax-operator}"   # 修复后的
 WORK_DIR="${METAX_PKG_DIR}/_work"
 RENDER_YAML="${WORK_DIR}/metax-render.yaml"
 REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"    # 集群内置 registry(registry.local:5000, 节点/chart/宿主统一用域名)
-# 推送到集群 registry 用 MetalLB VIP 直连(绕开宿主 DNAT 转发, 大镜像/大 blob 传输更稳, 避免 broken pipe)
-PUSH_REGISTRY="${REGISTRY_IP}:${REGISTRY_PORT}/metax"
+# 推送到集群 registry 用直连端点(绕开宿主 DNAT 转发, 大镜像/大 blob 传输更稳, 避免 broken pipe):
+#   REGISTRY_DIRECT = metallb→VIP:PORT / nodeport→首个 master:REGISTRY_NODEPORT(见 lib-common)
+PUSH_REGISTRY="${REGISTRY_DIRECT}/metax"
 
 # 推送 skopeo(脚本级重试 3 次): 大 blob(如 maca 5.5G)连接中途断开时, skopeo 的 --retry-times
 # 不覆盖 blob 上传阶段的失败, 这里整体重试 skopeo copy。用法: _push_skopeo <src> <dst>
@@ -112,7 +113,7 @@ _reg_has_tag() {   # <comp> <ver>
     if command -v skopeo >/dev/null 2>&1; then
         skopeo inspect --tls-verify=false --no-creds "docker://${PUSH_REGISTRY}/${comp}:${ver}" >/dev/null 2>&1 && return 0
     fi
-    curl -s -m 6 "http://${REGISTRY_BASE}/v2/${repo}/${comp}/tags/list" 2>/dev/null | grep -q "\"${ver}\""
+    curl -s -m 6 "http://${REGISTRY_DIRECT}/v2/${repo}/${comp}/tags/list" 2>/dev/null | grep -q "\"${ver}\""
 }
 
 # ---------------- 前置检查 ----------------
@@ -131,20 +132,21 @@ ensure_hosts_entry "${API_IP}" "${API_DOMAIN}"
 grep -qE "^${REGISTRY_IP}[[:space:]]+${REGISTRY_DOMAIN}" /etc/hosts 2>/dev/null \
     || warn "无法写入宿主机 /etc/hosts(非 root?), ${REGISTRY_DOMAIN}/${API_DOMAIN} 可能无法从宿主按域名访问"
 # registry(MetalLB VIP)就绪存在时序竞态: Service EXTERNAL-IP 出现后, speaker ARP 通告 /
-# kube-proxy DNAT 规则需要数秒才完全生效 → 首次 curl 可能瞬时失败。重试 30s(每 2s 一次)。
-# 注: 不能依赖 ping VIP(ICMP 无 DNAT 规则, 必回 "port unreachable"), 只能 curl 服务端口。
+# 数据面就绪需要数秒(metallb: kube-proxy DNAT/speaker 通告; nodeport: kube-proxy 规则) →
+# 首次 curl 可能瞬时失败。重试 30s(每 2s 一次)。注: 不能依赖 ping(ICMP 无 DNAT 规则必回
+# "port unreachable"), 只能 curl 服务端口。预检用 REGISTRY_DIRECT(直连端点, 见 lib-common)。
 _registry_ready=0
 for _t in $(seq 1 15); do
-    if curl -s -m 8 "http://${REGISTRY_BASE}/v2/" >/dev/null 2>&1; then
+    if curl -s -m 8 "http://${REGISTRY_DIRECT}/v2/" >/dev/null 2>&1; then
         _registry_ready=1
         break
     fi
-    say "  registry ${REGISTRY_BASE}/v2/ 未就绪, ${_t}/15 次重试中(MetalLB 数据面初始化) ..."
+    say "  registry ${REGISTRY_DIRECT}/v2/ 未就绪, ${_t}/15 次重试中(${SERVICE_EXPOSE_MODE} 数据面初始化) ..."
     sleep 2
 done
 [ "${_registry_ready}" = "1" ] \
-    || { err "集群内置 registry ${REGISTRY_BASE}/v2/ 30s 内仍不可达(检查: 宿主机 /etc/hosts 的 ${REGISTRY_DOMAIN} 是否解析到 ${REGISTRY_IP}, MetalLB VIP 与 registry Service 状态)"; exit 1; }
-ok "registry ${REGISTRY_BASE}/v2/ 可达"
+    || { err "集群内置 registry ${REGISTRY_DIRECT}/v2/ 30s 内仍不可达(当前 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE}; nodeport 应能直连 <master>:${REGISTRY_NODEPORT:-31148}, metallb 检查 MetalLB VIP 与 registry Service 状态)"; exit 1; }
+ok "registry ${REGISTRY_DIRECT}/v2/ 可达"
 SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
     || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
 # helm 需要从宿主连 API Server: 下载集群 admin.conf 并同步到 ~/.kube/config
