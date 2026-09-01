@@ -196,26 +196,6 @@ spec:
   - name: data
     persistentVolumeClaim:
       claimName: ${PVC_NAME}
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ${POD2}
-  namespace: ${TEST_NS}
-spec:
-  restartPolicy: Never
-  containers:
-  - name: reader
-    image: ${TEST_IMAGE}
-    imagePullPolicy: Always
-    command: ["/bin/sh","-c","cat /mnt/data/marker.txt"]
-    volumeMounts:
-    - name: data
-      mountPath: /mnt/data
-  volumes:
-  - name: data
-    persistentVolumeClaim:
-      claimName: ${PVC_NAME}
 YAML
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
         "${YAML}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/${TEST_NS}-resources.yaml" \
@@ -245,6 +225,36 @@ YAML
     [ "${PVC_PHASE}" = "Bound" ] || { err "PVC 未 Bound(phase=${PVC_PHASE:-?}); 检查 local-path-provisioner 日志"; exit 1; }
 
     say "  ⑨ pod2(${POD2}) 挂同一 PVC 读取 marker..."
+    # ⚠ pod2 必须等 pod1 写盘完成后再创建: 两 pod 同时创建存在竞态 —— 若 reader 先于 writer
+    #   启动, cat 会因 marker 未写入而失败(metallb/nodeport 均可能偶发, 与模式无关)。此刻
+    #   pod1 已 Succeeded(⑧), 建 pod2 读取才有确定性。
+    POD2_YAML="/tmp/${TEST_NS}-pod2.yaml"
+    cat > "${POD2_YAML}" <<POD2YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${POD2}
+  namespace: ${TEST_NS}
+spec:
+  restartPolicy: Never
+  containers:
+  - name: reader
+    image: ${TEST_IMAGE}
+    imagePullPolicy: Always
+    command: ["/bin/sh","-c","cat /mnt/data/marker.txt"]
+    volumeMounts:
+    - name: data
+      mountPath: /mnt/data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: ${PVC_NAME}
+POD2YAML
+    scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "${POD2_YAML}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/${TEST_NS}-pod2.yaml" \
+        && SSH "${K} apply -f /tmp/${TEST_NS}-pod2.yaml" \
+        && SSH "rm -f /tmp/${TEST_NS}-pod2.yaml"
+    rm -f "${POD2_YAML}"
     PHASE2=""
     for i in $(seq 1 24); do
         PHASE2="$(SSH "${K} -n ${TEST_NS} get pod ${POD2} -o jsonpath={.status.phase} 2>/dev/null")" || true
