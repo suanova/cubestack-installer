@@ -146,7 +146,7 @@ for i in $(seq 1 30); do
     # 数据面就绪的权威信号: Gateway Programmed=True(消息含 "1/1 envoy replicas available")
     # ⚠ jsonpath 内的双引号必须写成 \" 才能在多层 shell 传递后保留(裸 " 会被吞, 返回空)
     GW_PROG="$( (SSH "${K} -n ${TEST_NS} get gateway ${TEST_GW} -o jsonpath='{.status.conditions[?(@.type==\"Programmed\")].status}' 2>/dev/null" || true) )"
-    if [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ]; then
+    if [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ]; then
         # 无 MetalLB: 等数据面 Service 出现 → patch 成 NodePort → 访问入口 = 节点IP:NodePort
         # (数据面 Service 默认在控制面命名空间, 兜底找 Gateway 同命名空间)
         SVC_LINE="$( (SSH "${K} -n ${ENVOY_EG_NAMESPACE} get svc -l gateway.envoyproxy.io/owning-gateway-name=${TEST_GW} --no-headers 2>/dev/null" || true) | head -1 )"

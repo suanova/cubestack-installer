@@ -37,7 +37,7 @@ load_config
 
 # 开关检查: 未启用 MetalLB 或 nodeport 暴露模式(未部署 MetalLB)则跳过(不报错)
 [ "${METALLB_ENABLED:-true}" = "true" ] || { say "METALLB_ENABLED=false, 跳过验证"; exit 0; }
-[ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ] \
+[ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ] \
     && { say "SERVICE_EXPOSE_MODE=nodeport(未部署 MetalLB), 跳过验证"; exit 0; }
 
 FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }

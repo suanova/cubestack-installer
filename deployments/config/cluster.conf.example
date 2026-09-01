@@ -41,19 +41,23 @@ METALLB_POOL="10.66.1.130-10.66.1.139"
 # ════════════════════════════════════════════════════════════
 
 # ---- 服务暴露方式(全局开关; 决定 registry/ingress-nginx/Envoy Gateway 的对外暴露形态) ----
-#   metallb(默认, 生产)  = 用 MetalLB LoadBalancer VIP 暴露(registry 固定 VIP / ingress 80,443 / EG 数据面 VIP)
-#   nodeport(测试环境)   = 用 NodePort 暴露(不依赖 MetalLB 与 L2 同网段空闲 IP; 外部访问 <任一节点IP>:<NodePort>)
-#                         · 自动关闭 MetalLB; registry → NodePort(REGISTRY_NODEPORT 31148)
-#                         · ingress-nginx(若启用) → NodePort(30080/30081)
-#                         · Envoy Gateway 数据面 → NodePort(已创建的 Gateway 用 tools/lb/gateway-nodeport.sh 转换)
-#   ⚠ nodeport 模式下的节点拉取: 节点 /etc/hosts 的 registry.local 解析到 REGISTRY_IP; 但 nodeport 模式
-#     无 MetalLB, 自动从 METALLB_POOL 派生的 REGISTRY_IP 无服务监听 → 节点拉取 registry.local 镜像会失败。
-#     需把 REGISTRY_IP 显式设为可达入口(见阶段三 3.2), 二选一:
-#       ① REGISTRY_IP=<安装机 IP> + REGISTRY_EXPOSE_HOST=1(宿主机 DNAT 5000→节点:REGISTRY_NODEPORT, 节点经安装机拉取);
-#       ② REGISTRY_IP=<某节点 IP> 且该节点配 5000→REGISTRY_NODEPORT DNAT。
-#     推送端同理: 用 ENVOY_PUSH_ENDPOINT 指到 <节点IP>:REGISTRY_NODEPORT(见 envoy-load-images.sh / 22_verify_registry_storage.sh)。
-#   各服务仍可单独覆盖: REGISTRY_SERVICE_TYPE(见阶段三 3.2); ingress-nginx 在 kubespray addons.yml。
-SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-metallb}"
+# 支持参数(默认二选一, 互斥 —— 要么 nodeport 要么 metallb, 不能同时):
+#   nodeport(默认) = NodePort 暴露(不依赖 MetalLB 与 L2 同网段空闲 IP; 外部访问 <任一节点IP>:<NodePort>)
+#                   · 自动关闭 MetalLB; registry → NodePort(REGISTRY_NODEPORT 31148)
+#                   · ingress-nginx(若启用) → NodePort(30080/30081)
+#                   · Envoy Gateway 数据面 → NodePort(已创建的 Gateway 用 tools/lb/gateway-nodeport.sh 转换)
+#   metallb         = MetalLB LoadBalancer VIP 暴露(生产; 需 METALLB_POOL 提供同网段空闲 IP)
+#                   · registry 固定 VIP / ingress 80,443 / EG 数据面 VIP
+# 大小写不敏感: 任意大小写组合均接受(判断前先 tr 转小写, 如 nodeport/NodePort/nodePort/NODEPORT
+#   统一归一化为 nodeport); 其它任何值(如 loadbalancer)一律归一化为 metallb。
+# ⚠ nodeport 模式下的节点拉取: 节点 /etc/hosts 的 registry.local 解析到 REGISTRY_IP; 但 nodeport 模式
+#   无 MetalLB, 自动从 METALLB_POOL 派生的 REGISTRY_IP 无服务监听 → 节点拉取 registry.local 镜像会失败。
+#   需把 REGISTRY_IP 显式设为可达入口(见阶段三 3.2), 二选一:
+#     ① REGISTRY_IP=<安装机 IP> + REGISTRY_EXPOSE_HOST=1(宿主机 DNAT 5000→节点:REGISTRY_NODEPORT, 节点经安装机拉取);
+#     ② REGISTRY_IP=<某节点 IP> 且该节点配 5000→REGISTRY_NODEPORT DNAT。
+#   推送端同理: 用 ENVOY_PUSH_ENDPOINT 指到 <节点IP>:REGISTRY_NODEPORT(见 envoy-load-images.sh / 22_verify_registry_storage.sh)。
+# 各服务仍可单独覆盖: REGISTRY_SERVICE_TYPE(见阶段三 3.2); ingress-nginx 在 kubespray addons.yml。
+SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-nodePort}"
 
 # ---- 阶段一、宿主机环境 ----
 HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # API 四层负载均衡(modules/01_env/05_lb_haproxy.sh; 默认 master 直连, 需要时开)

@@ -168,7 +168,7 @@ deployments/scripts/
 | 区块 | 关键项 | 说明 |
 |---|---|---|
 | **核心必改项** | `SSH_DEFAULT_PASSWORD` `NODES` `METALLB_POOL` | 节点默认密码、节点清单、MetalLB 地址池(文件顶部醒目位置) |
-| 服务暴露 | `SERVICE_EXPOSE_MODE` | 对外暴露方式全局开关: `metallb`(默认,生产, LoadBalancer VIP)/ `nodeport`(测试环境, NodePort, 自动关 MetalLB); 见 §5.8 |
+| 服务暴露 | `SERVICE_EXPOSE_MODE` | 对外暴露方式全局开关: `nodeport`(默认, NodePort, 自动关 MetalLB)/ `metallb`(生产, LoadBalancer VIP); 见 §5.8 |
 | 宿主机 | `HOST_PHYS_IP` | 宿主机物理 IP(SNAT 源) |
 | SSH | `SSH_KEY_NAME` | 密钥名(默认密码见核心必改项 `SSH_DEFAULT_PASSWORD`; 节点独立密码写 NODES 第5字段) |
 | 节点规划 | `NODES=( ... )` | 每行一节点(5字段, 不区分虚拟机/裸金属); 虚拟机规格见 `tools/vm/vm-nodes.conf` |
@@ -330,7 +330,7 @@ sudo ./scripts/tools/net/setup-libvirt-nat.sh --delete [网络名] # 删除回�
 > 说明:`kube_service_addresses` / `kube_pods_subnet` 为集群内部 CIDR(10.233.x),属 kubespray 默认值,无需从环境同步。
 > 说明:集群已默认启用 **MetalLB**(Layer2,地址池来自 `METALLB_POOL`);**Registry(集群内)默认不部署**(`REGISTRY_ENABLED=0`),集群外镜像仓库用 **Harbor**(`HARBOR_ENABLED`);**local-path-provisioner 默认不启动**(`LOCAL_PATH_ENABLED=false`,需本地 PVC 持久化时启用)。组件开关配置见 `group_vars/k8s_cluster/addons.yml`(由 `sync-addons-config.sh` 从 cluster.conf 生成)。
 >
-> **对外暴露方式(`SERVICE_EXPOSE_MODE`)**:默认 `metallb`(生产)用 LoadBalancer VIP;设 `nodeport`(测试环境)则 `sync-addons-config.sh` 自动**关闭 MetalLB**(addons.yml `metallb_enabled=false`)、registry→NodePort、ingress-nginx(若启用)→NodePort(30080/30081);Envoy Gateway 数据面需转 NodePort(`tools/lb/gateway-nodeport.sh`, 见 `docs/envoy-gateway.md`)。
+> **对外暴露方式(`SERVICE_EXPOSE_MODE`)**:默认 `nodeport` 用 NodePort 暴露(`sync-addons-config.sh` 自动**关闭 MetalLB**、registry→NodePort、ingress-nginx(若启用)→NodePort(30080/30081)、Envoy Gateway 数据面需转 NodePort(`tools/lb/gateway-nodeport.sh`));设 `metallb`(生产)则部署 MetalLB 用 LoadBalancer VIP。见 `docs/envoy-gateway.md`。
 
 ### 5.8.1 内置 Registry(镜像仓库)使用指南
 
