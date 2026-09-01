@@ -29,12 +29,19 @@ SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/d
 K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 
 # 定位数据面 Service: EG 对 Gateway 所属资源统一打标签 gateway.envoyproxy.io/owning-gateway-name=<名>
-SVCSEL="-l gateway.envoyproxy.io/owning-gateway-name=${GW}"
-[ -n "${NS}" ] && SVCSEL="-n ${NS} ${SVCSEL}"
-SVC="$( (SSH "${K} get svc ${SVCSEL} --no-headers 2>/dev/null" || true) | head -1 )"
-[ -n "${SVC}" ] || { err "未找到数据面 Service(owning-gateway-name=${GW}); 先确认 Gateway/AIGateway 已调和: kubectl get gateway -A / kubectl get aigateway -A"; exit 1; }
-SVC_NS="$(echo "${SVC}" | awk '{print $1}')"
-SVC_NAME="$(echo "${SVC}" | awk '{print $2}')"
+# ⚠ 列序敏感: 指定命名空间时 get svc 输出 NAME TYPE CLUSTER-IP...(名称=$1);
+#   用 -A 全命名空间时输出 NAMESPACE NAME TYPE...(ns=$1, 名称=$2)。两者取列不同, 勿混用。
+if [ -n "${NS}" ]; then
+    SVC="$( (SSH "${K} -n ${NS} get svc -l gateway.envoyproxy.io/owning-gateway-name=${GW} --no-headers 2>/dev/null" || true) | head -1 )"
+    [ -n "${SVC}" ] || { err "未找到数据面 Service(owning-gateway-name=${GW}, ns=${NS}); 先确认 Gateway/AIGateway 已调和: kubectl get gateway -A / kubectl get aigateway -A"; exit 1; }
+    SVC_NS="${NS}"
+    SVC_NAME="$(echo "${SVC}" | awk '{print $1}')"
+else
+    SVC="$( (SSH "${K} -A get svc -l gateway.envoyproxy.io/owning-gateway-name=${GW} --no-headers 2>/dev/null" || true) | head -1 )"
+    [ -n "${SVC}" ] || { err "未找到数据面 Service(owning-gateway-name=${GW}); 先确认 Gateway/AIGateway 已调和: kubectl get gateway -A / kubectl get aigateway -A"; exit 1; }
+    SVC_NS="$(echo "${SVC}" | awk '{print $1}')"
+    SVC_NAME="$(echo "${SVC}" | awk '{print $2}')"
+fi
 
 say "转换数据面 Service ${SVC_NS}/${SVC_NAME} → NodePort(幂等)..."
 if ! SSH "${K} -n ${SVC_NS} patch svc ${SVC_NAME} -p '{\"spec\":{\"type\":\"NodePort\"}}' >/dev/null 2>&1"; then
