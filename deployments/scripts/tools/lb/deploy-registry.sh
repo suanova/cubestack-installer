@@ -103,17 +103,19 @@ _registry_vip_check() {
             echo ""
             echo -e "\033[41m\033[97m==============================================================\033[0m"
             echo -e "\033[41m\033[97m ⚠⚠⚠  registry VIP 冲突检测: ${cand}:${REGISTRY_PORT:-5000} 已有服务响应  ⚠⚠⚠\033[0m"
-            echo -e "\033[41m\033[97m  自动派生的 METALLB_POOL 首地址可能已被其他集群/设备占用 →        \033[0m"
-            echo -e "\033[41m\033[97m  推送/拉取会打到别人的 registry(数据看似在, 实际本集群 registry 空)  \033[0m"
-            echo -e "\033[41m\033[97m  【VIP 是固定的, 不会每次随机变化】多集群共用网段时, 后续集群必须:    \033[0m"
-            echo -e "\033[41m\033[97m  ① 改 METALLB_POOL 避开已占用段; 或                                   \033[0m"
-            echo -e "\033[41m\033[97m  ② 显式设置 REGISTRY_IP 为一个不冲突的池内空闲地址:                 \033[0m"
+            echo -e "\033[41m\033[97m  自动派生的 METALLB_POOL 首地址已被其他集群/设备占用 → 推送/拉取   \033[0m"
+            echo -e "\033[41m\033[97m  会打到别人的 registry(数据看似在, 实际本集群 registry 空, 节点    \033[0m"
+            echo -e "\033[41m\033[97m  pod 镜像拉取 NotFound)。曾因 METALLB_POOL 含 10.66.1.130(其他集群  \033[0m"
+            echo -e "\033[41m\033[97m  已占用)导致 AI Gateway 控制器 ImagePullBackOff。                \033[0m"
+            echo -e "\033[41m\033[97m  【VIP 固定, 不随机变化】多集群共用网段时, 后续集群必须:            \033[0m"
+            echo -e "\033[41m\033[97m  ① 改 METALLB_POOL 避开已占用段; 或                               \033[0m"
+            echo -e "\033[41m\033[97m  ② 显式设置 REGISTRY_IP 为一个不冲突的池内空闲地址:               \033[0m"
             echo -e "\033[41m\033[97m    vim ${CLUSTER_CONF:-config/cluster.conf} → REGISTRY_IP=\"10.66.1.13x\"  \033[0m"
-            echo -e "\033[41m\033[97m  (用 curl -s http://<候选IP>:5000/v2/ 逐个探测, 无响应者可用)          \033[0m"
-            echo -e "\033[41m\033[97m  继续使用将可能再次把镜像推到别的集群(当前部署会继续, 请注意)       \033[0m"
+            echo -e "\033[41m\033[97m  (用 curl -s http://<候选IP>:5000/v2/ 逐个探测, 无响应者可用)        \033[0m"
             echo -e "\033[41m\033[97m==============================================================\033[0m"
             echo ""
-            warn "registry VIP ${cand}:${REGISTRY_PORT:-5000} 冲突探测: 已有服务响应(可能被其他集群占用), 继续使用有风险"
+            err "registry VIP ${cand}:${REGISTRY_PORT:-5000} 已被占用(其他集群/设备), 部署中止 —— 请先修正 METALLB_POOL 避开该地址(或显式设 REGISTRY_IP)后重跑"
+            exit 1
         fi
     fi
 }
