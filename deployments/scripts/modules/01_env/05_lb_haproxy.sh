@@ -1,14 +1,17 @@
 #!/bin/bash
 # ============================================================
 # MODULE: lb_haproxy
-# DESC: 宿主机 HAProxy — K8s API 四层负载均衡(集群部署前准备)
+# DESC: HAProxy 服务器 HAProxy 配置 — K8s API 四层负载均衡(集群部署前准备)
 # PHASE: env
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: HAPROXY_ENABLED
 # 说明:
-#   · 从 cluster.conf 生成宿主机 HAProxy 配置(API 入口 → 所有 master apiserver)
+#   · 从 cluster.conf 生成 HAProxy 配置(API 入口 → 所有 master apiserver)
 #   · 复用 sync-haproxy.sh(生成 /etc/haproxy/haproxy.cfg + 重启服务)
+#   · ⚠ 执行位置: 必须在 **HAProxy 所在服务器**(持久化机器)上运行, 而非临时 installer
+#     服务器 —— installer 部署完成会被删除, 在其上配置的 haproxy 无意义且容器内无 systemd。
+#     在 haproxy 服务器放好仓库 + cluster.conf 后执行本模块(需 root + haproxy 已安装)。
 #   · 属于环境准备阶段: 在部署 kubespray 之前把 API 负载均衡入口准备好
 #   · 幂等: 每次执行重新收敛 master 列表; 需 root
 # 数据源: cluster.conf (APISERVER_ADDRESS / NODES / HAPROXY_ENABLED)
