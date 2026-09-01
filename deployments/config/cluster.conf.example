@@ -60,6 +60,7 @@ SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-nodePort}"
 
 # ---- 阶段一、宿主机环境 ----
 HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # API 四层负载均衡(modules/01_env/05_lb_haproxy.sh; 默认 master 直连, 需要时开)
+                                                        #   ⚠ 在 HAProxy 所在服务器上执行本模块(持久化机器), 非临时 installer 服务器(装完即删)
 KEEPALIVED_ENABLED="${KEEPALIVED_ENABLED:-false}"       # API VIP 高可用(modules/01_env/06_lb_keepalived.sh)
 HARBOR_ENABLED="${HARBOR_ENABLED:-false}"               # Harbor 外部镜像仓库(预留, 见 1.7)
 
