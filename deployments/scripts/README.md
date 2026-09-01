@@ -424,7 +424,7 @@ ctr -n k8s.io images push --plain-http registry.local:5000/dev/busybox:latest
 ```bash
 REGISTRY_ENABLED=1                 # 0 关闭 registry 信任/转发配置
 REGISTRY_DOMAIN="registry.local"   # 统一内部域名
-REGISTRY_IP="10.244.2.100"         # MetalLB 固定 VIP(须在 METALLB_POOL 内, 避开 .0/.255)
+REGISTRY_IP="10.244.2.100"         # 留空自动: nodeport 模式=首个 master IP(默认入口), metallb 模式=METALLB_POOL 首地址(VIP, 须在池内避开 .0/.255)
 REGISTRY_PORT="5000"
 REGISTRY_SERVICE_TYPE=""           # 留空=按 SERVICE_EXPOSE_MODE 自动(metallb→loadbalancer, nodeport→nodeport);
                                    # 显式覆盖: loadbalancer | nodeport(不依赖 MetalLB, 外部用 REGISTRY_NODEPORT) | clusterip
@@ -589,7 +589,7 @@ sudo ENVOY_EG_VERSION=v1.9.1 ./scripts/tools/images/envoy-load-images.sh /path/t
 | `*ai-gateway-controller*.tar` | `registry.local:5000/ai-gateway/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}` |
 
 - 纯离线(不联网): tar 内容经 `skopeo docker-archive → docker://` 推送, 3 次重试; 需本机装 `skopeo`。
-- **nodeport 模式**(无 MetalLB): 用 `ENVOY_PUSH_ENDPOINT=<节点IP>:${REGISTRY_NODEPORT}` 覆盖推送入口。
+- **nodeport 模式**(无 MetalLB): `registry.local:5000` 已由 `deploy-registry.sh` 自动 DNAT 到首个 master 的 `${REGISTRY_NODEPORT}`(默认可用); 也可用 `ENVOY_PUSH_ENDPOINT=<节点IP>:${REGISTRY_NODEPORT}` 显式覆盖推送入口。
 - 依赖: 集群内置 registry 已部署(`deploy-registry.sh` / `22_verify_registry_storage` 校验)。
 
 ---

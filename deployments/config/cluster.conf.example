@@ -50,12 +50,11 @@ METALLB_POOL="10.66.1.130-10.66.1.139"
 #                   · registry 固定 VIP / ingress 80,443 / EG 数据面 VIP
 # 大小写不敏感: 任意大小写组合均接受(判断前先 tr 转小写, 如 nodeport/NodePort/nodePort/NODEPORT
 #   统一归一化为 nodeport); 其它任何值(如 loadbalancer)一律归一化为 metallb。
-# ⚠ nodeport 模式下的节点拉取: 节点 /etc/hosts 的 registry.local 解析到 REGISTRY_IP; 但 nodeport 模式
-#   无 MetalLB, 自动从 METALLB_POOL 派生的 REGISTRY_IP 无服务监听 → 节点拉取 registry.local 镜像会失败。
-#   需把 REGISTRY_IP 显式设为可达入口(见阶段三 3.2), 二选一:
-#     ① REGISTRY_IP=<安装机 IP> + REGISTRY_EXPOSE_HOST=1(宿主机 DNAT 5000→节点:REGISTRY_NODEPORT, 节点经安装机拉取);
-#     ② REGISTRY_IP=<某节点 IP> 且该节点配 5000→REGISTRY_NODEPORT DNAT。
-#   推送端同理: 用 ENVOY_PUSH_ENDPOINT 指到 <节点IP>:REGISTRY_NODEPORT(见 envoy-load-images.sh / 22_verify_registry_storage.sh)。
+# ⚠ nodeport 模式(默认, 自动连通, 无需手动配置): 默认通过**集群第一个 IP(首个 master)**访问内置服务 ——
+#   REGISTRY_IP 自动 = 首个 master IP; 节点 containerd 经 hosts.toml 镜像直连 <首个master>:REGISTRY_NODEPORT
+#   拉取 registry.local 镜像(客户端侧改写, 不依赖节点 iptables); 宿主机 registry.local:5000 由
+#   deploy-registry.sh 自动 DNAT 到首个 master 的 REGISTRY_NODEPORT(systemd 持久化)。
+#   显式设 REGISTRY_IP 可覆盖; 集群外 push 另见 REGISTRY_EXPOSE_HOST / ENVOY_PUSH_ENDPOINT(阶段三 3.2)。
 # 各服务仍可单独覆盖: REGISTRY_SERVICE_TYPE(见阶段三 3.2); ingress-nginx 在 kubespray addons.yml。
 SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-nodePort}"
 
