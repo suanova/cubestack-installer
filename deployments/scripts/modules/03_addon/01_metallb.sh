@@ -11,6 +11,8 @@
 #   · MetalLB 由 kubespray addon 安装; 本模块仅做**就绪校验**(幂等), 不重复安装。
 #   · 依赖顺序: metallb(本模块)→ local-path → registry —— registry 的 LoadBalancer VIP
 #     依赖 metallb,故 registry 前先确认 metallb 就绪。
+#   · ⚠ SERVICE_EXPOSE_MODE 二选一: nodeport 模式自动关闭 MetalLB(sync-addons-config
+#     metallb_enabled=false), 此时本校验须跳过(集群本就不部署 MetalLB), 否则假阳性失败。
 #   · 校验: ① metallb-system 命名空间 ② controller/speaker 全部 Running
 #     ③ IPAddressPool / L2Advertisement 存在。
 # 用法:   sudo ./deploy-cluster.sh --with-k8s(TOGGLE 自动启用) 或 --enable metallb
@@ -22,6 +24,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
 [ "${METALLB_ENABLED:-true}" = "true" ] || { say "METALLB_ENABLED=false, 跳过 metallb 就绪检查"; exit 0; }
+[ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ] \
+    && { say "SERVICE_EXPOSE_MODE=nodeport(自动关闭 MetalLB), 跳过 metallb 就绪检查"; exit 0; }
 
 FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
 SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"

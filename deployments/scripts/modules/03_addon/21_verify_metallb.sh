@@ -9,6 +9,8 @@
 # 说明:
 #   · **验证模块不设 TOGGLE**(否则 METALLB_ENABLED=true 时会被安装流程自动启用);
 #     保持 DEFAULT:0, 仅由 --steps verify_metallb 在安装后单独执行。
+#   · ⚠ SERVICE_EXPOSE_MODE 二选一: nodeport 模式自动关闭 MetalLB(未部署),
+#     本验证须跳过(METALLB_ENABLED 默认 true 不代表已部署)。
 #   · 在 metallb 部署后执行, 做真实功能验证(不只查 pod Ready):
 #       ① controller/speaker pod Ready
 #       ② IPAddressPool / L2Advertisement 存在 + **预检池不含 .0/.255**(网络/广播地址,
@@ -18,7 +20,7 @@
 #          · 池内地址 **仅 1 个** → 该地址通常已被 registry 等既有 LoadBalancer 占用
 #            (新建必然拿不到 VIP → 90s 超时误报), 改为**直接验证已分配 VIP 工作是否正常**;
 #            若单地址池尚空闲则仍走新建分配验证
-#       ③ 需要新建时创建测试命名空间 + busybox httpd 后端 + LoadBalancer Service
+#       ③ 需要新建时创建测试命名空间 + nginx httpd 后端 + LoadBalancer Service
 #       ④ 等待分配到池内 VIP, 校验 VIP 在 METALLB_POOL 范围内
 #       ⑤ 从首个 master curl http://VIP 验证 L2 通告真正可达
 #       ⑥ 清理测试资源(命名空间, trap 兜底)
@@ -33,14 +35,19 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-# 开关检查: 未启用 MetalLB 则跳过(不报错)
+# 开关检查: 未启用 MetalLB 或 nodeport 暴露模式(未部署 MetalLB)则跳过(不报错)
 [ "${METALLB_ENABLED:-true}" = "true" ] || { say "METALLB_ENABLED=false, 跳过验证"; exit 0; }
+[ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ] \
+    && { say "SERVICE_EXPOSE_MODE=nodeport(未部署 MetalLB), 跳过验证"; exit 0; }
 
 FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
 SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
            "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
 K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+
+# 测试后端镜像: 离线优先, 幂等确保 nginx 已在集群 registry(不依赖节点 containerd 预加载)
+TEST_IMAGE="$(ensure_registry_nginx)" || exit 1
 
 TEST_NS="verify-metallb-$$"   # 唯一命名空间(带 PID 后缀), 避免与残留的 Terminating ns 冲突
 TEST_NAME="verify-lb"
@@ -163,7 +170,7 @@ else
     say "    多地址池(≥2 个): 走新建分配验证"
 fi
 if [ "${VERIFY_MODE}" = "allocate_new" ]; then
-    say "  ③ 创建测试后端(busybox httpd) + LoadBalancer Service..."
+    say "  ③ 创建测试后端(nginx httpd) + LoadBalancer Service..."
     cleanup
     LOCAL_YAML="$(mktemp)"
     cat > "${LOCAL_YAML}" <<YAML
@@ -182,9 +189,9 @@ metadata:
 spec:
   containers:
   - name: httpd
-    image: docker.io/library/busybox:latest
+    image: ${TEST_IMAGE}
     imagePullPolicy: IfNotPresent
-    command: ["/bin/sh","-c","mkdir -p /tmp/www && echo 'cubestack-verify-ok' > /tmp/www/index.html && httpd -f -p 8080 -h /tmp/www"]
+    command: ["/bin/sh","-c","echo 'cubestack-verify-ok' > /usr/share/nginx/html/index.html && nginx -g 'daemon off;'"]
 ---
 apiVersion: v1
 kind: Service
@@ -197,7 +204,7 @@ spec:
     app: ${TEST_NAME}
   ports:
   - port: 80
-    targetPort: 8080
+    targetPort: 80
 YAML
     # scp 方式提交(避免 heredoc→SSH stdin 管道挂起): 本地写文件 → scp → apply → 清理
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
@@ -252,7 +259,7 @@ for i in $(seq 1 12); do
     [ "${POD_OK}" = "Running" ] && break
     sleep 5
 done
-[ "${POD_OK}" = "Running" ] || { err "测试后端 ${TEST_NAME} 未 Running(phase=${POD_OK:-?}); 检查 busybox 镜像是否已预加载/拉取"; exit 1; }
+[ "${POD_OK}" = "Running" ] || { err "测试后端 ${TEST_NAME} 未 Running(phase=${POD_OK:-?}); 检查 nginx 镜像是否已推送进集群 registry(${TEST_IMAGE})与节点能否拉取"; exit 1; }
 
 HTTP_CODE=""
 for i in 1 2 3; do

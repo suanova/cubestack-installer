@@ -8,13 +8,18 @@
 # TOGGLE: ENVOY_AI_GATEWAY_ENABLED
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态, 重跑自动跳过; --fresh 清状态重装。
-#   · 定位(v1.x, 官方架构): Envoy AI Gateway = 独立控制器(AI Gateway Controller)+ AI 扩展 CRD +
-#     数据面**复用 Envoy Gateway**。v1.x 起不再有 AIGateway/Backend CRD, 也不走 v0.x 的 EG
-#     extensionManager 扩展服务器机制(官方 v1.x chart 无 18090 端口, 那套已废弃):
+#   · 定位(v1.1, 官方架构): Envoy AI Gateway = 独立控制器(AI Gateway Controller)+ AI 扩展 CRD +
+#     数据面**复用 Envoy Gateway**。v1.x 不再有 v0.x 的 AIGateway/Backend CRD; 控制器通过
+#     **EG extension server 机制**(控制器内嵌 gRPC 扩展服务器, 端口 1063)+ **Mutating Webhook +
+#     extProc sidecar 注入**, 对标准 Gateway(Gateway API, gatewayClassName=eg)提供 AI 能力:
 #       · AI 控制器: 安装 aigateway.envoyproxy.io 扩展 CRD(AIServiceBackend / AIGatewayRoute /
-#         GatewayConfig / BackendSecurityPolicy / ...), 通过 **Mutating Webhook + extProc 注入**
-#         对标准 Gateway(Gateway API, gatewayClassName=envoy-gateway)提供 AI 能力;
-#       · 用法: 用户建标准 Gateway(EG 的 envoy-gateway 类)+ AIServiceBackend(LLM 上游)
+#         GatewayConfig / BackendSecurityPolicy / ...), 运行 EG 扩展服务器 + 注入 extProc sidecar;
+#       · EG 接线(本模块 [5/6] 自动完成): EG 自身 config(envoy-gateway-config CM)须声明
+#         extensionManager.hooks.xdsTranslator 回调 → AI 控制器扩展服务器(1063), EG 每次 xDS 翻译
+#         回调插入 ext_proc/header_to_metadata 过滤器。漏配 → AI 请求 404 "No matching route found"
+#         (官方最小配置见 ai-gateway 仓库 manifests/envoy-gateway-values.yaml; 模块 09 **故意不配**:
+#         EG 连不上扩展服务器会 xDS 翻译失败, 独立 EG 验证模块 25 会挂, 故须等控制器就绪后本模块补上);
+#       · 用法: 用户建标准 Gateway(EG 的 eg 类)+ AIServiceBackend(LLM 上游)
 #         + AIGatewayRoute(路由到 /v1/chat/completions 等), 数据面由 EG 托管、AI 控制器注入 extProc。
 #   · **依赖 Envoy Gateway 先装**(模块 09, ENVOY_GATEWAY_ENABLED=true), 前置检查会强制确认。
 #   · Chart(两个官方 chart, **均托管在 DockerHub OCI**, 版本带 v 如 v1.1.0; 注意 ghcr 同名路径不存在会 403):
@@ -136,7 +141,7 @@ sync_kubeconfig \
 ok "前置检查通过(依赖 EG 就绪; chart_source=${ENVOY_AI_CHART_SOURCE}, version=${ENVOY_AI_VERSION})"
 
 # ---------------- 1. 推送 AI 镜像到集群内置 registry(本地源优先: 控制器 + extProc sidecar) ----------------
-say "[1/5] 推送 AI 镜像 → ${PUSH_REGISTRY_AI}(ai-gateway-controller + ai-gateway-extproc, tag=${ENVOY_AI_IMAGE_TAG}) ..."
+say "[1/6] 推送 AI 镜像 → ${PUSH_REGISTRY_AI}(ai-gateway-controller + ai-gateway-extproc, tag=${ENVOY_AI_IMAGE_TAG}) ..."
 # ⚠ extProc 是必推项: AI 控制器把数据面 pod 注入 extProc sidecar(镜像由控制器 --extProcImage 参数决定,
 #   chart 值 extProc.image.repository/tag)。漏推/漏改 → 数据面 pod 2/3 ImagePullBackOff(离线拉不到
 #   docker.io), AI 路由 404 "No matching route found"(见 envoy-save-images.sh 镜像清单)。
@@ -197,7 +202,7 @@ push_ai_image "ai-gateway-controller" "*ai-gateway-controller*.tar"
 push_ai_image "ai-gateway-extproc"    "*ai-gateway-extproc*.tar"
 
 # ---------------- 2. helm 安装 AI CRDs chart ----------------
-say "[2/5] helm 安装 AI CRDs(${ENVOY_AI_CRDS_RELEASE} → ${ENVOY_AI_CRDS_NS})..."
+say "[2/6] helm 安装 AI CRDs(${ENVOY_AI_CRDS_RELEASE} → ${ENVOY_AI_CRDS_NS})..."
 _CHART_ARG=""
 case "${ENVOY_AI_CHART_SOURCE}" in
     dir) _CHART_ARG="${ENVOY_AI_CHART_DIR}/ai-gateway-crds-helm" ;;
@@ -229,7 +234,7 @@ if [ "${ENVOY_AI_CRDS_NS}" != "ai-gateway-crds" ] && SSH "${K} get ns ai-gateway
 fi
 
 # ---------------- 3. helm 安装 AI 控制器 chart ----------------
-say "[3/5] helm 安装 AI 控制器(${ENVOY_AI_CTRL_RELEASE} → ${ENVOY_AI_NAMESPACE})..."
+say "[3/6] helm 安装 AI 控制器(${ENVOY_AI_CTRL_RELEASE} → ${ENVOY_AI_NAMESPACE})..."
 SSH "${K} delete ns ${ENVOY_AI_NAMESPACE} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
 sleep 3
 _CHART_ARG=""
@@ -260,18 +265,75 @@ SSH "${K} rollout status deployment -n ${ENVOY_AI_NAMESPACE} ${ENVOY_AI_CTRL_NAM
 sleep 5
 
 # ---------------- 4. 等待 AI 控制器就绪 + 数据面复用确认 ----------------
-say "[4/5] 等待 AI 控制器就绪..."
+say "[4/6] 等待 AI 控制器就绪..."
 SSH "${K} -n ${ENVOY_AI_NAMESPACE} rollout status deployment ${ENVOY_AI_CTRL_NAME} --timeout=120s >/dev/null 2>&1" \
     || SSH "${K} -n ${ENVOY_AI_NAMESPACE} rollout status deployment ai-gateway-controller --timeout=120s >/dev/null 2>&1" \
     || warn "  AI 控制器未就绪(检查日志 kubectl -n ${ENVOY_AI_NAMESPACE} logs deploy/${ENVOY_AI_CTRL_NAME})"
 sleep 5
-# v1.x 数据面复用 EG: 用户建标准 Gateway(gatewayClassName=envoy-gateway), AI 控制器通过 webhook/extProc 提供 AI 能力
-GC_EG="$(SSH "${K} get gatewayclass envoy-gateway --no-headers 2>/dev/null" || true)"
+# v1.x 数据面复用 EG: 用户建标准 Gateway(gatewayClassName=eg), AI 控制器通过 webhook/extProc 提供 AI 能力
+GC_EG="$(SSH "${K} get gatewayclass eg --no-headers 2>/dev/null" || true)"
 [ -n "${GC_EG}" ] \
-    && ok "  GatewayClass envoy-gateway 可用(AI Gateway 数据面复用 EG)" \
-    || warn "  未检测到 GatewayClass envoy-gateway(请确认模块 09 envoy_gateway 已装)"
+    && ok "  GatewayClass eg 可用(AI Gateway 数据面复用 EG)" \
+    || warn "  未检测到 GatewayClass eg(请确认模块 09 envoy_gateway 已装)"
 
-# ---------------- 5. 汇总 ----------------
+# ---------------- 5. 接线: 配置 EG extensionManager → AI 控制器扩展服务器 ----------------
+say "[5/6] 配置 Envoy Gateway extensionManager(核心接线: xDS 翻译回调 AI 控制器, 插入 ext_proc 过滤器)..."
+# 背景(v1.1 架构, 官方要求): AI 控制器进程内跑 gRPC 扩展服务器(端口 1063, 实现 EG 的
+# EnvoyGatewayExtensionServer 接口); EG 须在自身 config(envoy-gateway-config CM)声明
+# extensionManager.hooks.xdsTranslator 回调, 才在每次 xDS 翻译时调用 AI 控制器插入
+# ext_proc(ENDPOINT_PICKER) 与 header_to_metadata 等过滤器。漏配 → 数据面无 AI 过滤器,
+# AI 请求 404 "No matching route found"(历史调试曾误判为 extProc 镜像问题)。
+# 官方最小配置见 ai-gateway 仓库 manifests/envoy-gateway-values.yaml(仅 extensionManager 段 +
+# enableBackend; TLS 缺省为明文 gRPC, 无需证书)。
+# ⚠ 模块 09 **故意不声明** extensionManager(EG 控制面启动即连不上扩展服务器 → 所有 Gateway
+#   xDS 翻译失败, 独立 EG 验证模块 25 会挂); 因此必须等 AI 控制器就绪后由本模块补上并重启 EG 控制面。
+# 幂等: CM 已含 extensionManager 则跳过(重跑不重复接线)。
+_EG_CM="envoy-gateway-config"
+_EG_CM_NS="${ENVOY_EG_NAMESPACE}"
+# ⚠ chart 内控制面 Deployment 名固定为 envoy-gateway(release 名 eg 只是 helm 记录), 勿用 release 名重启
+_EG_DEPLOY="${ENVOY_EG_DEPLOY:-envoy-gateway}"
+_EXT_FQDN="${ENVOY_AI_CTRL_NAME}.${ENVOY_AI_NAMESPACE}.svc.cluster.local"
+_EXT_PORT=1063
+_TMP_CM="$(mktemp)"
+if SSH "${K} get cm -n ${_EG_CM_NS} ${_EG_CM} -o yaml" > "${_TMP_CM}" 2>/dev/null && [ -s "${_TMP_CM}" ]; then
+    # python: 读 EnvoyGateway 配置, 无 extensionManager 则注入并输出 merge patch JSON
+    _PATCH_OUT="$(python3 - "${_TMP_CM}" "${_EXT_FQDN}" "${_EXT_PORT}" <<'PYEOF' 2>/dev/null || true
+import json, sys, yaml
+cm = yaml.safe_load(open(sys.argv[1]))
+eg = yaml.safe_load(cm["data"]["envoy-gateway.yaml"])
+if "extensionManager" in eg:
+    print("already-present")
+    sys.exit(0)
+eg["extensionManager"] = {
+    "hooks": {"xdsTranslator": {
+        "translation": {"listener": {"includeAll": True}, "route": {"includeAll": True},
+                        "cluster": {"includeAll": True}, "secret": {"includeAll": True}},
+        "post": ["Translation", "Cluster", "Route"]}},
+    "service": {"fqdn": {"hostname": sys.argv[2], "port": int(sys.argv[3])}},
+}
+print(json.dumps({"data": {"envoy-gateway.yaml": yaml.safe_dump(eg, sort_keys=False)}}))
+PYEOF
+)"
+    if [ "${_PATCH_OUT}" = "already-present" ]; then
+        ok "  extensionManager 已在 EG 配置中, 跳过"
+    elif [ -n "${_PATCH_OUT}" ] && SSH "${K} patch cm ${_EG_CM} -n ${_EG_CM_NS} --type merge -p '${_PATCH_OUT}'" >/dev/null 2>&1; then
+        ok "  extensionManager 已写入 ${_EG_CM_NS}/${_EG_CM}(→ ${_EXT_FQDN}:${_EXT_PORT})"
+        say "  重启 EG 控制面加载新配置..."
+        if SSH "${K} rollout restart deployment -n ${_EG_CM_NS} ${_EG_DEPLOY}" >/dev/null 2>&1 \
+           && SSH "${K} rollout status deployment -n ${_EG_CM_NS} ${_EG_DEPLOY} --timeout=120s" >/dev/null 2>&1; then
+            ok "  EG 控制面已重启并就绪"
+        else
+            warn "  EG 控制面重启/就绪超时(检查: kubectl -n ${_EG_CM_NS} get deploy ${_EG_DEPLOY})"
+        fi
+    else
+        warn "  EG 配置注入失败(可手工在 CM ${_EG_CM_NS}/${_EG_CM} 的 data.envoy-gateway.yaml 加 extensionManager 段)"
+    fi
+else
+    warn "  读取 EG 配置 CM ${_EG_CM_NS}/${_EG_CM} 失败(可手工添加 extensionManager 段)"
+fi
+rm -f "${_TMP_CM}"
+
+# ---------------- 6. 汇总 ----------------
 PODS="$( (SSH "${K} -n ${ENVOY_AI_NAMESPACE} get pods -o wide 2>/dev/null" || true) )"
 echo "    ${PODS}" | sed 's/^/    /'
 
@@ -285,7 +347,8 @@ fi
 echo "  chart 来源:  ${ENVOY_AI_CHART_SOURCE}(${ENVOY_AI_VERSION})"
 echo "  控制器镜像:  ${ENVOY_AI_IMAGE_REPO}:${ENVOY_AI_IMAGE_TAG}"
 echo "  extProc 镜像: ${ENVOY_AI_EXTPROC_IMAGE_REPO}:${ENVOY_AI_IMAGE_TAG}"
-echo "  数据面:      复用 Envoy Gateway(${ENVOY_EG_NAMESPACE} 的 envoy-gateway GatewayClass; AI 控制器注入 extProc sidecar)"
+echo "  数据面:      复用 Envoy Gateway(${ENVOY_EG_NAMESPACE} 的 eg GatewayClass; AI 控制器注入 extProc sidecar)"
+echo "  EG 接线:     extensionManager → ${ENVOY_AI_CTRL_NAME}.${ENVOY_AI_NAMESPACE}.svc.cluster.local:1063(已写入 envoy-gateway-config)"
 echo "  AI CRD:      aigateway.envoyproxy.io(AIServiceBackend / AIGatewayRoute / GatewayConfig / ...)"
 echo "  资源查看:    kubectl get aiservicebackend,aigatewayroute -A"
 echo "  端到端验证:  sudo ./deploy-cluster.sh --steps verify_envoy_ai_gateway"
