@@ -41,7 +41,7 @@ else
     echo -e "\033[41m\033[97m    · 裸金属集群: 手动填节点物理网段空闲段(如 10.66.1.130-139)\033[0m"
     echo -e "\033[41m\033[97m  ⚠ MetalLB 注意事项:\033[0m"
     echo -e "\033[41m\033[97m    · 地址池建议 >1 个地址, 否则新建 LoadBalancer 可能无 VIP 可分配(verify_metallb 会校验)\033[0m"
-    echo -e "\033[41m\033[97m    · 改池后需重跑 tools/k8s/sync-kubespray-config.sh 并重新 apply 池 CR 再验证\033[0m"
+    echo -e "\033[41m\033[97m    · 改池后部署会自动核对并重 apply 池 CR(见 kubespray 前预检); 已存在的 LoadBalancer 需删除重建才换新 VIP\033[0m"
     echo -e "\033[41m\033[97m  如需修改: ${CLUSTER_CONF} 的 METALLB_POOL / SERVICE_EXPOSE_MODE 行\033[0m"
 fi
 echo -e "\033[41m\033[97m================================================================\033[0m"
@@ -83,6 +83,32 @@ if [ -f "${_ADDONS_YML}" ]; then
     unset _BAD _EXPOSE
 fi
 unset _ADDONS_YML
+
+# ⚠ MetalLB 地址池一致性: kubespray 重跑不重 apply 已存在的 IPAddressPool CR, 旧池残留
+# 会让新 LoadBalancer 分到过期/冲突地址(曾把 registry 分到其他集群已占用的 VIP, 导致
+# 节点拉镜像 NotFound)。集群已存在时, 显式核对并纠正池与 cluster.conf METALLB_POOL 一致。
+if [ -n "${METALLB_POOL:-}" ] && [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "metallb" ]; then
+    _FM_IP="$(first_master_ip 2>/dev/null || true)"
+    if [ -n "${_FM_IP}" ]; then
+        _cur_pool="$(ssh -i "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+            "${SSH_USER:-ubuntu}@${_FM_IP}" \
+            "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n metallb-system get ipaddresspool -o jsonpath='{.items[0].spec.addresses[0]}' 2>/dev/null" 2>/dev/null || true)"
+        if [ -n "${_cur_pool}" ] && [ "${_cur_pool}" != "${METALLB_POOL}" ]; then
+            warn "集群 MetalLB 池=${_cur_pool} 与 cluster.conf METALLB_POOL=${METALLB_POOL} 不一致, 重新应用池 CR..."
+            ssh -i "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}" \
+                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+                "${SSH_USER:-ubuntu}@${_FM_IP}" \
+                "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n metallb-system patch ipaddresspool primary --type=merge -p '{\"spec\":{\"addresses\":[\"${METALLB_POOL}\"]}}' 2>/dev/null" >/dev/null 2>&1 \
+                && ok "已重新应用 MetalLB 池 → ${METALLB_POOL}" \
+                || warn "重新应用池失败(请手动: kubectl -n metallb-system patch ipaddresspool primary --type=merge -p '{\"spec\":{\"addresses\":[\"${METALLB_POOL}\"]}}')"
+            # 已存在的 LoadBalancer(如 registry)不会自动换 VIP, 提示人工处理
+            warn "提示: 已存在的 LoadBalancer(如 registry)不会自动换 VIP; 需删除该 Service 让其按新池重新分配"
+        fi
+        unset _cur_pool
+    fi
+    unset _FM_IP
+fi
 
 OFFLINE_SCRIPT="${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
 [ -f "${OFFLINE_SCRIPT}" ] || { err "未找到 ${OFFLINE_SCRIPT}"; exit 1; }
