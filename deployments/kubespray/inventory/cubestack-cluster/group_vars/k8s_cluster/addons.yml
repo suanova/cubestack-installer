@@ -183,8 +183,11 @@ metallb_config:
         effect: "NoSchedule"
   address_pools:
     primary:
+      # ⚠ 占位默认(与 cluster.conf METALLB_POOL 默认一致, 非环境 IP);
+      #   部署时由 sync-kubespray-config.sh 从 METALLB_POOL 覆盖 —— 曾因模板残留旧环境
+      #   池(10.66.1.130-139)被新集群继承, 分到其他集群已占用的 VIP 导致镜像拉取失败。
       ip_range:
-        - 10.66.1.130-10.66.1.139
+        - 10.244.2.1-10.244.2.254
       auto_assign: true
   layer2:
     - primary

@@ -1,10 +1,12 @@
 #!/bin/bash
 # ============================================================
-# 宿主机对内置 registry 的对外端口转发管理(集群外 push 用)
-# 将 宿主机物理IP:REGISTRY_PORT 的入站流量 DNAT 到 MetalLB VIP(REGISTRY_IP):REGISTRY_PORT,
-# 使物理网(10.66.x)上的机器能 docker push registry.local:5000/xxx。
-# 同时写 PREROUTING(外部网卡流量) + OUTPUT(宿主机本机 push) 两条规则, 幂等。
-# 持久化: 安装 systemd 单元, 重启后自动重建规则。
+# ⚠ 已废弃(deprecated): registry 已由 MetalLB VIP / NodePort 直连暴露, 无需宿主机
+#   级 DNAT。本脚本保留仅作兼容, 不再由 deploy-registry.sh 调用; 集群外访问请直接用
+#   MetalLB VIP 或 NodePort(跨网段经路由/防火墙放行, 而非宿主机 NAT 转发)。
+# 历史用途: 将 宿主机物理IP:REGISTRY_PORT 的入站流量 DNAT 到 MetalLB VIP(REGISTRY_IP):REGISTRY_PORT,
+#   使物理网(10.66.x)上的机器能 docker push registry.local:5000/xxx。
+#   同时写 PREROUTING(外部网卡流量) + OUTPUT(宿主机本机 push) 两条规则, 幂等。
+#   持久化: 安装 systemd 单元, 重启后自动重建规则。
 # 用法: ./setup-registry-expose.sh [--add|--delete]   (默认 --add)
 # 数据源: config/cluster.conf (HOST_PHYS_IP / REGISTRY_ENABLED / REGISTRY_IP / REGISTRY_PORT)
 # ============================================================
