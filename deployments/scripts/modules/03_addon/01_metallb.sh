@@ -24,7 +24,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
 [ "${METALLB_ENABLED:-true}" = "true" ] || { say "METALLB_ENABLED=false, 跳过 metallb 就绪检查"; exit 0; }
-[ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ] \
+[ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ] \
     && { say "SERVICE_EXPOSE_MODE=nodeport(自动关闭 MetalLB), 跳过 metallb 就绪检查"; exit 0; }
 
 FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }

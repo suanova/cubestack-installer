@@ -364,13 +364,16 @@ load_config() {
         export REGISTRY_IP_EXPLICIT=1
     fi
     # 服务暴露方式归一化: SERVICE_EXPOSE_MODE ∈ {metallb, nodeport}
-    #   metallb|loadbalancer → metallb(生产, MetalLB LoadBalancer VIP)
-    #   nodeport             → nodeport(测试环境, NodePort 经 kube-proxy 路由, 不依赖 MetalLB)
+    # 大小写不敏感: 判断前先 tr 转小写, 任何大小写组合(nodeport/NodePort/nodePort/NODEPORT...)均接受
+    #   nodeport           → nodeport(默认, 测试环境, NodePort 经 kube-proxy 路由, 不依赖 MetalLB)
+    #   metallb/loadbalancer/其它 → metallb(生产, MetalLB LoadBalancer VIP)
     # 下游 sync-addons-config / sync-kubespray-config / verify / 部署汇总统一按此分支。
-    case "${SERVICE_EXPOSE_MODE:-metallb}" in
-        nodeport|NodePort)  SERVICE_EXPOSE_MODE="nodeport" ;;
-        *)                  SERVICE_EXPOSE_MODE="metallb" ;;
+    _EXPOSE_MODE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
+    case "${_EXPOSE_MODE}" in
+        nodeport) SERVICE_EXPOSE_MODE="nodeport" ;;
+        *)        SERVICE_EXPOSE_MODE="metallb" ;;
     esac
+    unset _EXPOSE_MODE
     export SERVICE_EXPOSE_MODE
     # registry 暴露方式: 留空 → 按全局模式派生; 显式设置(loadbalancer|nodeport|clusterip)则覆盖。
     # cluster.conf 留空 + 各脚本里 ":-loadbalancer" 兜底的默认值统一收敛到本处, 保证所有消费者拿到同一值。

@@ -41,7 +41,7 @@ set_key registry_enabled            "$(bool "${REGISTRY_ENABLED:-false}")"
 # 服务暴露方式: nodeport 模式(测试环境)自动关闭 MetalLB —— 对外访问全部走 NodePort, 不依赖 L2 VIP。
 # (生产 metallb 模式才按 METALLB_ENABLED 开关)
 _metallb="${METALLB_ENABLED:-true}"
-[ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ] && _metallb=false
+[ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ] && _metallb=false
 set_key metallb_enabled             "$(bool "${_metallb}")"
 set_key metallb_speaker_enabled     "$(bool "${_metallb}")"
 set_key local_path_provisioner_enabled "$(bool "${LOCAL_PATH_ENABLED:-false}")"
@@ -53,7 +53,7 @@ set_key cert_manager_enabled        "$(bool "${CERT_MANAGER_ENABLED:-false}")"
 set_key gateway_api_enabled         "$(bool "${GATEWAY_API_ENABLED:-false}")"
 
 # ingress-nginx Service 类型: 跟随全局暴露方式(metallb→LoadBalancer, nodeport→NodePort + 30080/30081)
-if [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ]; then
+if [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ]; then
     set_key ingress_nginx_service_type "NodePort"
     set_key ingress_nginx_service_nodeport_http "30080"
     set_key ingress_nginx_service_nodeport_https "30081"

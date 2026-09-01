@@ -265,7 +265,7 @@ for i in $(seq 1 36); do
     # AI 控制器在目标 Gateway 命名空间调和 Gateway(Gateway API): v1.x=TEST_GW, v0.x legacy=AIGateway 同名
     GW_LINE="$( (SSH "${K} -n ${TEST_NS} get gateway ${_TARGET_GW} --no-headers 2>/dev/null" || true) )"
     if [ -n "${GW_LINE}" ]; then
-        if [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ]; then
+        if [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ]; then
             # 无 MetalLB: 等数据面 Service 出现 → patch 成 NodePort → 访问入口 = 节点IP:NodePort
             # (数据面 Service 默认在控制面命名空间, 兜底找 Gateway 同命名空间; 与 25 模块一致)
             SVC_LINE="$( (SSH "${K} -n ${ENVOY_EG_NAMESPACE} get svc -l gateway.envoyproxy.io/owning-gateway-name=${_TARGET_GW} --no-headers 2>/dev/null" || true) | head -1 )"

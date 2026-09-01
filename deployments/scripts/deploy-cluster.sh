@@ -260,7 +260,7 @@ echo "  SSH 私钥:   ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s
 echo "  Kubeconfig: ${KUBESPRAY_INV_DIR}/artifacts/admin.conf"
 echo "              用法: kubectl --kubeconfig=${KUBESPRAY_INV_DIR}/artifacts/admin.conf get nodes"
 echo "  管理凭证:   无 kubeadmin 密码, 管理员权限=admin.conf(客户端证书); 节点 SSH 默认密码: ${SSH_DEFAULT_PASSWORD:-<未设置>}"
-if [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ]; then
+if [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ]; then
     _NIP="$(first_node_ip 2>/dev/null || echo '<节点IP>')"
     echo "  服务暴露:   测试环境 NodePort 模式(SERVICE_EXPOSE_MODE=nodeport, 未部署 MetalLB)"
     echo "               · registry:      http://${_NIP}:${REGISTRY_NODEPORT:-31148}/"
