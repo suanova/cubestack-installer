@@ -120,25 +120,34 @@ master_chrony_setup() {
     [ -n "${m_user:-}" ] || { warn "未找到第一个 master(${m_ip}) 连接信息, 跳过其 chrony 服务端配置"; return 0; }
 
     say "配置第一个 master ${m_ip} 为 NTP 权威服务端(local stratum + allow 集群网段) ..."
-    local MASTER_CONF="# === cubestack-managed ===\n"
-    [ -n "${NTP_UPSTREAM:-}" ] && MASTER_CONF+="${NTP_UPSTREAM}\n"
-    MASTER_CONF+="local stratum 10\n"
-    # NTP_ALLOW 独立于虚拟/裸金属网络: 默认空=仅本机; 多子网节点需显式填节点所在网段
-    for net in ${NTP_ALLOW:-}; do
-        [ -n "${net}" ] && MASTER_CONF+="allow ${net}\n"
-    done
-    MASTER_CONF+="driftfile /var/lib/chrony/drift\nmakestep 1.0 3\nrtcsync\nlogdir /var/log/chrony\n"
-
-    # 在首 master 写 chrony 配置并重启(有 chrony 用 chrony; 无则 chronyd 直拉)
+    # chrony 缺失则自动安装(apt 源可用时; 离线环境需镜像预装或离线源)
     node_cmd "${m_ip}" "${m_user}" "${m_pw}" \
-        "bash -c 'cat > /etc/chrony/chrony.conf <<EOF
-${MASTER_CONF}EOF
-systemctl disable --now systemd-timesyncd >/dev/null 2>&1 || true
-systemctl enable chrony >/dev/null 2>&1 || true
-systemctl restart chrony >/dev/null 2>&1 || systemctl restart chronyd >/dev/null 2>&1 || true
-chronyc -a makestep >/dev/null 2>&1 || true'" >/dev/null 2>&1 \
-        && ok "  第一个 master ${m_ip} chrony 服务端已就绪" \
-        || warn "  第一个 master ${m_ip} chrony 服务端配置失败(仍以一次性 date 硬对齐兜底)"
+        "command -v chronyd >/dev/null 2>&1 || { apt-get install -y chrony >/dev/null 2>&1 || true; }" >/dev/null 2>&1 || true
+    # ⚠ 配置用 scp 文件写入(真实换行), 不再用内联 heredoc —— 字面 \n 会把 chrony.conf 写坏
+    local mconf_tmp
+    mconf_tmp="$(mktemp)"
+    {
+        echo "# === cubestack-managed ==="
+        [ -n "${NTP_UPSTREAM:-}" ] && echo "${NTP_UPSTREAM}"
+        echo "local stratum 10"
+        # NTP_ALLOW 独立于虚拟/裸金属网络: 默认空=仅本机; 多子网节点需显式填节点所在网段
+        for net in ${NTP_ALLOW:-}; do
+            [ -n "${net}" ] && echo "allow ${net}"
+        done
+        echo "driftfile /var/lib/chrony/drift"
+        echo "makestep 1.0 3"
+        echo "rtcsync"
+        echo "logdir /var/log/chrony"
+    } > "${mconf_tmp}"
+    # 在首 master 写 chrony 配置并重启(有 chrony 用 chrony; 无则 chronyd 直拉)
+    if node_scp "${mconf_tmp}" "${m_ip}" "${m_user}" "${m_pw}" "/tmp/cubestack-chrony.conf" \
+        && node_cmd "${m_ip}" "${m_user}" "${m_pw}" \
+            "cp /tmp/cubestack-chrony.conf /etc/chrony/chrony.conf && rm -f /tmp/cubestack-chrony.conf && systemctl disable --now systemd-timesyncd >/dev/null 2>&1 || true && systemctl enable chrony >/dev/null 2>&1 || true && systemctl restart chrony >/dev/null 2>&1 || systemctl restart chronyd >/dev/null 2>&1 || true && chronyc -a makestep >/dev/null 2>&1 || true" >/dev/null 2>&1; then
+        ok "  第一个 master ${m_ip} chrony 服务端已就绪"
+    else
+        warn "  第一个 master ${m_ip} chrony 服务端配置失败(仍以一次性 date 硬对齐兜底)"
+    fi
+    rm -f "${mconf_tmp}"
 }
 
 # ---------------- 生成节点侧脚本(占位符经 sed 替换, 防止宿主展开节点变量) ----------------
@@ -179,7 +188,9 @@ CFG
         chronyc -a makestep >/dev/null 2>&1 && CHRONY_OK=1 || CHRONY_OK=0
     else
         # 裸金属(bm): 无 chrony 包 → systemd-timesyncd 客户端
-        sed -i '/^NTP=/d' /etc/systemd/timesyncd.conf 2>/dev/null || true
+        # ⚠ 幂等清理: 删除历史追加产生的重复 [Time] 段与 NTP 行(每次运行只保留一个干净 [Time]
+        #   段 —— 旧实现只删 NTP= 不删 [Time], 累积几十个 [Time] 段后 timesyncd 变 Idle 不再同步)
+        sed -i '/^\[Time\]/d; /^NTP=/d; /^FallbackNTP=/d' /etc/systemd/timesyncd.conf 2>/dev/null || true
         printf '\n[Time]\nNTP=%s\n' "${SERVER}" >> /etc/systemd/timesyncd.conf
         timedatectl set-ntp true >/dev/null 2>&1 || true
         systemctl restart systemd-timesyncd >/dev/null 2>&1 || true
