@@ -15,7 +15,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
 # ⚠ 部署 kubespray 前醒目提示当前服务暴露方式(nodeport / metallb)+ 各自注意事项,
-# (sleep 30 倒计时供人工确认/修改), 与原有 METALLB_POOL 提示合并为统一提醒。
+# (sleep 15 倒计时供人工确认/修改), 与原有 METALLB_POOL 提示合并为统一提醒。
 #   nodeport → 未部署 MetalLB, 提示入口/端口范围/单节点风险等;
 #   metallb  → 提示地址池要求(METALLB_POOL)与池管理注意事项。
 _EXPOSE_MODE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
@@ -26,7 +26,8 @@ if [ "${_EXPOSE_MODE}" = "nodeport" ]; then
     echo -e "\033[41m\033[97m ⚠⚠⚠  即将部署 kubespray — 当前为 NodePort 暴露模式  ⚠⚠⚠\033[0m"
     echo -e "\033[41m\033[97m  当前: SERVICE_EXPOSE_MODE=nodeport(未部署 MetalLB)\033[0m"
     echo -e "\033[41m\033[97m  访问入口 = 任意节点 IP + NodePort(自动取首个节点 IP: ${_NIP}):\033[0m"
-    echo -e "\033[41m\033[97m    · registry: http://${_NIP}:${REGISTRY_NODEPORT:-31148}/   · ingress-nginx: http://${_NIP}:30080/\033[0m"
+    echo -e "\033[41m\033[97m    · registry: http://${_NIP}:${REGISTRY_NODEPORT:-31148}/\033[0m"
+    echo -e "\033[41m\033[97m    · Envoy Gateway(若启用): 数据面转 NodePort 后访问 —— tools/lb/gateway-nodeport.sh <gateway名>\033[0m"
     echo -e "\033[41m\033[97m  ⚠ NodePort 注意事项:\033[0m"
     echo -e "\033[41m\033[97m    · 端口默认 30000-32767, 超限需改 kube-apiserver --service-node-port-range\033[0m"
     echo -e "\033[41m\033[97m    · 无固定 VIP, 入口=单节点 IP, 节点重启/换 IP 后入口会变\033[0m"
@@ -44,8 +45,8 @@ else
     echo -e "\033[41m\033[97m  如需修改: ${CLUSTER_CONF} 的 METALLB_POOL / SERVICE_EXPOSE_MODE 行\033[0m"
 fi
 echo -e "\033[41m\033[97m================================================================\033[0m"
-# 倒计时(单行刷新, 两种模式统一)
-for _c in $(seq 30 -1 1); do
+# 倒计时(单行刷新, 两种模式统一, 15s)
+for _c in $(seq 15 -1 1); do
     printf "\r%s" "$(printf '\033[41m\033[97m  ⏳ 倒计时 %d 秒继续        \033[0m' "${_c}")"
     sleep 1
 done

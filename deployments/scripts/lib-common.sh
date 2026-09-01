@@ -393,6 +393,17 @@ load_config() {
         export REGISTRY_SERVICE_TYPE
         vlog "REGISTRY_SERVICE_TYPE 留空, 按 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE} 派生 → ${REGISTRY_SERVICE_TYPE}"
     fi
+    # registry 宿主侧直连端点(预检 curl / skopeo push 用), 与镜像名 DOMAIN:PORT 解耦:
+    #   nodeport → 首个 master:REGISTRY_NODEPORT(无 VIP, 直连 NodePort; 容器/裸机均可达);
+    #   metallb   → REGISTRY_IP:REGISTRY_PORT(MetalLB VIP)。
+    # 镜像名统一 registry.local:5000(节点经 containerd hosts.toml 改写连接), 端口无需统一;
+    # 显式设 REGISTRY_DIRECT 可覆盖(如经代理/别名推送)。
+    if [ "${SERVICE_EXPOSE_MODE}" = "nodeport" ]; then
+        REGISTRY_DIRECT="${REGISTRY_DIRECT:-$(first_master_ip 2>/dev/null):${REGISTRY_NODEPORT:-31148}}"
+    else
+        REGISTRY_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP}:${REGISTRY_PORT:-5000}}"
+    fi
+    export REGISTRY_DIRECT
     # 虚拟机配置(独立于 cluster.conf): source vm-nodes.conf 提供 VM 创建/网络变量
     vm_conf_load
 }

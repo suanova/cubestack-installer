@@ -29,8 +29,9 @@ need_root() { [ "$(id -u)" -eq 0 ] || { err "需要 root, 请 sudo 执行"; exit
 need_root
 
 REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"   # 集群内置 registry 域名(registry.local:5000)
-# 推送直连入口: 默认 MetalLB VIP(REGISTRY_IP:REGISTRY_PORT); nodeport 模式无 VIP 时用 ENVOY_PUSH_ENDPOINT 覆盖
-PUSH_HOST="${ENVOY_PUSH_ENDPOINT:-${REGISTRY_IP}:${REGISTRY_PORT}}"
+# 推送直连入口: 默认 REGISTRY_DIRECT(metallb→VIP:PORT / nodeport→master:REGISTRY_NODEPORT);
+# 特殊代理/别名场景可用 ENVOY_PUSH_ENDPOINT 覆盖
+PUSH_HOST="${ENVOY_PUSH_ENDPOINT:-${REGISTRY_DIRECT}}"
 PUSH_REGISTRY_EG="${PUSH_HOST}/envoyproxy"   # 与 09 模块一致
 PUSH_REGISTRY_AI="${PUSH_HOST}/ai-gateway"   # 与 10 模块一致
 ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.1}"        # EG 控制面版本

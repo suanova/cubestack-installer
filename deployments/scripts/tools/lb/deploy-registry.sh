@@ -265,7 +265,7 @@ if [ "${REGISTRY_EXPOSE_HOST:-0}" = "1" ]; then
     say "[3/4] 配置宿主机对外 DNAT(REGISTRY_EXPOSE_HOST=1) ..."
     bash "${SCRIPT_DIR}/tools/lb/setup-registry-expose.sh" --add
 else
-    say "[3/4] 跳过宿主机对外 DNAT(REGISTRY_EXPOSE_HOST!=1; 集群内/节点直接用 MetalLB VIP 拉取, 仅集群外 push 需设 1)"
+    say "[3/4] 跳过宿主机对外 DNAT(REGISTRY_EXPOSE_HOST!=1; 集群内/节点经 containerd hosts.toml 直连 registry —— ${SERVICE_EXPOSE_MODE} 模式, 仅集群外 push 需设 1)"
 fi
 
 # ---------------- 4. 验证 + 用法 ----------------
@@ -308,7 +308,11 @@ fi
 
 echo "---------------------------------------------"
 ok "内置 registry 部署完成"
-echo "  集群内 pod 拉取:  image: ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/<namespace>/<image>:<tag>(走 MetalLB VIP ${REGISTRY_IP})"
+if [ "${SERVICE_EXPOSE_MODE}" = "nodeport" ]; then
+    echo "  集群内 pod 拉取:  image: ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/<namespace>/<image>:<tag>(节点经 containerd hosts.toml 直连 <master>:${REGISTRY_NODEPORT:-31148})"
+else
+    echo "  集群内 pod 拉取:  image: ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/<namespace>/<image>:<tag>(走 MetalLB VIP ${REGISTRY_IP}:${REGISTRY_PORT})"
+fi
 if [ "${REGISTRY_EXPOSE_HOST:-0}" = "1" ]; then
     echo "  集群外 push:     先让 push 机把 ${REGISTRY_DOMAIN} 解析到 ${HOST_PHYS_IP}(/etc/hosts 或内网 DNS),"
     echo "                    docker daemon insecure-registries 加 \"${REGISTRY_DOMAIN}:${REGISTRY_PORT}\", 然后"
