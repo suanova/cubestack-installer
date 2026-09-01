@@ -43,6 +43,30 @@ fi
 say "重新生成 inventory(依据当前 ${CLUSTER_CONF})..."
 bash "${SCRIPT_DIR}/tools/k8s/gen-inventory.sh"
 
+# registry 暴露归一化 + 预检(kubespray 对 registry_service_* 严格校验: 定义了 loadbalancer_ip 但
+# type≠LoadBalancer 直接 fail, 曾因 addons.yml 残留旧环境 VIP 导致整次部署中断)。
+# gen-inventory 已内部调用 sync, 此处再显式兜底归一化一次, 并在 kubespray 前快速失败给出可操作提示。
+bash "${SCRIPT_DIR}/tools/k8s/sync-kubespray-config.sh" >/dev/null 2>&1 || \
+    warn "sync-kubespray-config.sh 归一化失败(以下方预检为准)"
+_ADDONS_YML="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}/group_vars/k8s_cluster/addons.yml"
+if [ -f "${_ADDONS_YML}" ]; then
+    _EXPOSE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
+    _BAD=""
+    if [ "${_EXPOSE}" = "nodeport" ] && grep -qE '^[[:space:]]*registry_service_loadbalancer_ip:[[:space:]]*[^#[:space:]]' "${_ADDONS_YML}"; then
+        _BAD="registry_service_loadbalancer_ip(nodeport 模式须注释)"
+    fi
+    if [ "${_EXPOSE}" != "nodeport" ] && grep -qE '^[[:space:]]*registry_service_nodeport:' "${_ADDONS_YML}"; then
+        _BAD="${_BAD:+${_BAD} + }registry_service_nodeport(metallb 模式须注释)"
+    fi
+    if [ -n "${_BAD}" ]; then
+        err "addons.yml registry 暴露配置与 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE:-nodeport} 不一致: ${_BAD}"
+        err "修复: 重跑 bash tools/k8s/sync-kubespray-config.sh(自动归一化), 或手工注释 ${_ADDONS_YML} 对应行后再部署"
+        exit 1
+    fi
+    unset _BAD _EXPOSE
+fi
+unset _ADDONS_YML
+
 OFFLINE_SCRIPT="${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
 [ -f "${OFFLINE_SCRIPT}" ] || { err "未找到 ${OFFLINE_SCRIPT}"; exit 1; }
 
