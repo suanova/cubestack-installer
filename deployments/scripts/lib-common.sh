@@ -195,7 +195,7 @@ reg_has_tag() {
     if command -v skopeo >/dev/null 2>&1; then
         skopeo inspect --tls-verify=false --no-creds "docker://${pr}/${repo}:${ver}" >/dev/null 2>&1 && return 0
     fi
-    curl -s -m 6 "http://${REGISTRY_BASE}/v2/${path}/${repo}/tags/list" 2>/dev/null | grep -q "\"${ver}\""
+    curl -s -m 6 "http://${REGISTRY_DIRECT:-${REGISTRY_BASE}}/v2/${path}/${repo}/tags/list" 2>/dev/null | grep -q "\"${ver}\""
 }
 
 # 离线 tar 内容识别: 文件名 glob 快路径 + tar_first_image_tag 内容校验; glob 未命中时
@@ -245,8 +245,9 @@ find_offline_tar() {
 # 依赖: load_config 已执行(REGISTRY_* / LOCAL_REPO_DIR / OFFLINE_FILES_DIR / REPO_ROOT); 推送需 skopeo。
 ensure_registry_nginx() {
     local tag="${1:-latest}"
-    # 推送走 IP 直连(MetalLB VIP, 无 DNS 依赖); 返回的 ref 用 REGISTRY_DOMAIN(K8s 节点可解析)
-    local pr="${REGISTRY_IP}:${REGISTRY_PORT}/verify"
+    # 推送走 IP 直连(REGISTRY_DIRECT: metallb→VIP:PORT / nodeport→master:REGISTRY_NODEPORT, 无 DNS 依赖);
+    # 返回的 ref 用 REGISTRY_DOMAIN(K8s 节点可解析)
+    local pr="${REGISTRY_DIRECT}/verify"
     local ref="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT}/verify/nginx:${tag}"
     # reg_has_tag 的 curl 兜底(无 skopeo 时)依赖 REGISTRY_BASE, 先确保已派生(set -u 下未赋值即报错)
     REGISTRY_BASE="${REGISTRY_BASE:-${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT}}"
