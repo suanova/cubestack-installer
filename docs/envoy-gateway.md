@@ -149,7 +149,7 @@
 ### 3.3 镜像流向(与 LWS/gpu_operator 同一模式)
 
 1. 联网机: `envoy-save-images.sh` 从官方源 docker pull / skopeo 保存 tar → `deployments/offline-files/envoy/`;
-2. 部署机: 模块把 tar 经 skopeo 推送到**集群内置 registry**(`registry.local:5000/envoyproxy/...` 与 `registry.local:5000/ai-gateway/...`);
+2. 部署机: 模块把 tar 经 skopeo 推送到**集群内置 registry**(`registry.cubestack.io:5000/envoyproxy/...` 与 `registry.cubestack.io:5000/ai-gateway/...`);
    2b. 或先单独预加载(幂等): `sudo ./deployments/scripts/tools/images/envoy-load-images.sh`(适合先推镜像再装 chart);
 3. helm 安装时用 `--set deployment.envoyGateway.image.*`(控制面/certgen)+ `global.images.envoyProxy.image`(数据面)把 chart 默认镜像改写为集群内置 registry 路径, `pullPolicy=IfNotPresent`;
 4. K8s 节点按域名从集群内置 registry 拉取(节点已配 `/etc/hosts` + containerd 信任)。

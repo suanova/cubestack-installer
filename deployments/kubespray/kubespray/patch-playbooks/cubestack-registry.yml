@@ -3,10 +3,10 @@
 # cubestack-installer: 集群节点 /etc/hosts 写入内置 registry 域名解析 play
 #
 # 背景: kubespray registry addon 通过 MetalLB LoadBalancer 暴露固定 VIP(REGISTRY_IP),
-#   集群内节点 containerd 拉取 registry.local:5000 镜像时需先解析域名。
+#   集群内节点 containerd 拉取 registry.cubestack.io:5000 镜像时需先解析域名。
 #   本 play 在每个节点 /etc/hosts 写入 "REGISTRY_IP REGISTRY_DOMAIN",
 #   与 group_vars/all/containerd.yml 的 containerd_registries_mirrors(certs.d HTTP 信任)配合,
-#   实现集群内节点 → registry.local → 直达 registry 的完整链路。
+#   实现集群内节点 → registry.cubestack.io → 直达 registry 的完整链路。
 #
 # 变量来源: group_vars/all/registry.yml(sync-kubespray-config.sh 由 cluster.conf 生成):
 #   registry_domain / registry_ip / registry_port
@@ -23,8 +23,8 @@
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: >-
-          {{ '^[[:space:]]*' }}{{ registry_ip | default('10.244.2.100') }}[[:space:]]+{{ registry_domain | default('registry.local') }}([[:space:]]|$)
-        line: "{{ registry_ip | default('10.244.2.100') }} {{ registry_domain | default('registry.local') }}"
+          {{ '^[[:space:]]*' }}{{ registry_ip | default('10.244.2.100') }}[[:space:]]+{{ registry_domain | default('registry.cubestack.io') }}([[:space:]]|$)
+        line: "{{ registry_ip | default('10.244.2.100') }} {{ registry_domain | default('registry.cubestack.io') }}"
         create: true
         state: present
       when: registry_domain is defined and registry_domain | length > 0

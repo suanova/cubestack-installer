@@ -4,7 +4,7 @@
 # 对每台 worker:
 #   1. 用节点密码(NODES 第5字段显式密码或默认 SSH_DEFAULT_PASSWORD)注入 SSH 公钥(免密)
 #   2. 安装离线 .deb 包(iputils-ping/rsync/iptables/curl/ca-certificates)
-#   3. 推送 /etc/hosts 节点解析(k8s-api.nova.local + 全节点)
+#   3. 推送 /etc/hosts 节点解析(k8s-api.cubestack.io + 全节点)
 # 用法: sudo ./prepare-workers.sh [--only <hostname>]
 # 数据源: deployments/config/cluster.conf
 # ============================================================
@@ -86,10 +86,10 @@ for line in "${NODES[@]:-}"; do
 
     # 3. 推送 /etc/hosts
     say "更新 /etc/hosts ..."
-    # 先删旧块 + 旧裸条目(nova-k8s-*/mxgpu-*/k8s-api.nova.local), 再追加新块 → 主机名不重复
+    # 先删旧块 + 旧裸条目(nova-k8s-*/mxgpu-*/k8s-api.nova.local / k8s-api.cubestack.io), 再追加新块 → 主机名不重复
     ${SSH_SUDO} timeout 30 ssh ${SSH_OPTS} "${NODE_USER}@${NODE_IP}" "sudo bash -c '
         sed -i \"/# >>> cubestack-cluster/,/# <<< cubestack-cluster/d\" /etc/hosts
-        sed -i -E \"/nova-k8s-(master|node)/d; /mxgpu-[0-9]/d; /k8s-api\\\\.nova\\\\.local/d\" /etc/hosts
+        sed -i -E \"/nova-k8s-(master|node)/d; /mxgpu-[0-9]/d; /k8s-api\\\\.(nova\\\\.local|cubestack\\\\.io)/d\" /etc/hosts
         echo \"${HOSTS_BLOCK}\" >> /etc/hosts
     '" 2>&1 && ok "hosts 已更新" || warn "hosts 更新失败"
     vlog "  校验: ${NODE_USER}@${NODE_IP} hostname = $(${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" 'hostname' 2>/dev/null)"

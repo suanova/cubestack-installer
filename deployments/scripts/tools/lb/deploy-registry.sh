@@ -3,10 +3,10 @@
 # 内置 docker registry 部署/启用脚本(对已部署集群幂等; 新集群由 kubespray+patch-playbook 自动完成)
 #
 # 适用节点: 所有 k8s 节点 —— 虚拟机(node_type=vm)与裸金属(node_type=bm)一视同仁,
-#           只要该节点可能调度拉取 registry.local 镜像的 pod, 都要配置 /etc/hosts + containerd certs.d。
+#           只要该节点可能调度拉取 registry.cubestack.io 镜像的 pod, 都要配置 /etc/hosts + containerd certs.d。
 #
 # 目标:
-#   1) 集群内节点能从 registry.local:5000 拉取镜像部署 pod
+#   1) 集群内节点能从 registry.cubestack.io:5000 拉取镜像部署 pod
 #      · registry Service 固定 MetalLB LoadBalancer IP(REGISTRY_IP)
 #      · 各节点 /etc/hosts 写入 "REGISTRY_IP REGISTRY_DOMAIN"
 #      · 各节点 containerd certs.d hosts.toml 信任该 HTTP registry(幂等, 首次才重启 containerd)

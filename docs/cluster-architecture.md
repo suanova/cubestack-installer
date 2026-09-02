@@ -135,7 +135,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 - 架构: helm chart 安装 `metax-operator`(operator controller + ClusterOperator CRD); operator 依据
   ClusterOperator CR 创建组件 DaemonSet(`gpu-label` 打标 → `driver` / `container-runtime` / `maca` /
   `gpu-device` 设备插件), 设备插件把 `metax-tech.com/gpu` 注册进 kubelet allocatable。
-- 镜像: 全部放集群内置 registry `registry.local:5000/metax/...`(默认 **tar 离线加载**, 也可 `.run` 内嵌推送)。
+- 镜像: 全部放集群内置 registry `registry.cubestack.io:5000/metax/...`(默认 **tar 离线加载**, 也可 `.run` 内嵌推送)。
 - 为何采用 helm 原生安装: 官方 chart 有 3 处 bug(deployment 缺 namespace / openshift.deploy 无默认 /
   vendor 字段空值未加引号)会在 kubectl apply 时失败; 修复 chart 后 helm install 自动装 CRD+命名空间, 最稳。
 - master 节点: 用 `mx-smi` 在宿主机检测 GPU, 检测到 GPU 的 master 自动移除 control-plane 污点并 uncordon

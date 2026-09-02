@@ -288,7 +288,7 @@ Error response from daemon: client version 1.22 is too old. Minimum supported AP
 
 **解法(根治)** 改用 `docker save` 成 tar + `skopeo docker-archive` 推送(模块 `push_extra` 已实现):
 ```bash
-docker save <img> -o /tmp/x.tar && skopeo copy docker-archive:/tmp/x.tar docker://registry.local:5000/metax/<name>:<tag> --dest-tls-verify=false --dest-no-creds
+docker save <img> -o /tmp/x.tar && skopeo copy docker-archive:/tmp/x.tar docker://registry.cubestack.io:5000/metax/<name>:<tag> --dest-tls-verify=false --dest-no-creds
 ```
 
 #### 3.4 `metax-k8s-images.<ver>.run push` 报 `ctr: image "--plain-http": not found`
@@ -296,16 +296,16 @@ docker save <img> -o /tmp/x.tar && skopeo copy docker-archive:/tmp/x.tar docker:
 **根因** 工具的 ctr 分支把 `--plain-http` 放在镜像 ref **之后**(`push <ref> --plain-http`), 新版 ctr 把 flag 当镜像名。
 
 **解法(根治)** 不用工具自带 push: `.run ctr load` 把内嵌镜像加载进宿主 ctr, 再逐组件
-`ctr -n k8s.io images tag <src> registry.local:5000/metax/<comp>:<ver>` + `ctr -n k8s.io images push --plain-http <dst>`(flag 在前)。
+`ctr -n k8s.io images tag <src> registry.cubestack.io:5000/metax/<comp>:<ver>` + `ctr -n k8s.io images push --plain-http <dst>`(flag 在前)。
 
-#### 3.5 宿主机 curl `registry.local:5000` / helm 连 `k8s-api.nova.local` 失败(EOF / no route to host)
+#### 3.5 宿主机 curl `registry.cubestack.io:5000` / helm 连 `k8s-api.cubestack.io` 失败(EOF / no route to host)
 
 **根因** 宿主机 /etc/hosts 残留旧 IP(如 `10.66.3.37` = 宿主机自身)或 DNAT 被历史规则遮蔽(两条规则指向 10.244.2.100 与 10.66.1.130, 旧规则先命中)。
 
 **解法(根治)** 每次部署由模块修正 /etc/hosts:
 ```
-registry.local → REGISTRY_IP(集群 registry VIP, 如 10.66.1.130)
-k8s-api.nova.local → API_IP(全裸金属=第一个 master, 如 10.66.1.232)
+registry.cubestack.io → REGISTRY_IP(集群 registry VIP, 如 10.66.1.130)
+k8s-api.cubestack.io → API_IP(全裸金属=第一个 master, 如 10.66.1.232)
 ```
 不留 10.66.3.37 这类过期条目。
 
@@ -393,7 +393,7 @@ kubectl get validatingwebhookconfiguration lws-validating-webhook-configuration 
 |---|---|---|
 | `09_envoy_gateway.sh` 报 "EG chart 目录不存在/缺 Chart.yaml" | 离线 chart 未备料(联网机未跑 fetch 工具) | 联网机执行 `tools/images/envoy-fetch-charts.sh`(或手动 helm pull gateway-helm 解包)后拷到 `deployments/cubestack-addon/envoy-gateway/eg/` |
 | 部署报 "未找到 envoyproxy/gateway:... 镜像" | 离线镜像未备料 | 联网机执行 `tools/images/envoy-save-images.sh`, tar 放入 `deployments/offline-files/envoy/`(或本地 docker daemon 先 docker pull); 已备 tar 可单独跑 `tools/images/envoy-load-images.sh` 预加载 |
-| 部署后控制面/certgen 或数据面 pod `ImagePullBackOff`(docker.io 不可达) | chart 镜像未改写为集群内置 registry(gateway-helm v1.9.1 正确路径: 控制面/certgen `deployment.envoyGateway.image.repository/tag`, 数据面 `global.images.envoyProxy.image`; 旧写法 `image.repository` / `envoyGateway.image.*` 顶层不存在, 无效果) | 确认 09 模块 helm 安装已注入上述正确 `--set`; 已装错可 `helm upgrade eg <chart> --set deployment.envoyGateway.image.repository=registry.local:5000/envoyproxy/gateway --set deployment.envoyGateway.image.tag=v1.9.1 --set global.images.envoyProxy.image=registry.local:5000/envoyproxy/envoy:distroless-v1.39.1` 修复(certgen Job 会随模板变化重建), 或直接重跑 09 模块(内部先 delete ns) |
+| 部署后控制面/certgen 或数据面 pod `ImagePullBackOff`(docker.io 不可达) | chart 镜像未改写为集群内置 registry(gateway-helm v1.9.1 正确路径: 控制面/certgen `deployment.envoyGateway.image.repository/tag`, 数据面 `global.images.envoyProxy.image`; 旧写法 `image.repository` / `envoyGateway.image.*` 顶层不存在, 无效果) | 确认 09 模块 helm 安装已注入上述正确 `--set`; 已装错可 `helm upgrade eg <chart> --set deployment.envoyGateway.image.repository=registry.cubestack.io:5000/envoyproxy/gateway --set deployment.envoyGateway.image.tag=v1.9.1 --set global.images.envoyProxy.image=registry.cubestack.io:5000/envoyproxy/envoy:distroless-v1.39.1` 修复(certgen Job 会随模板变化重建), 或直接重跑 09 模块(内部先 delete ns) |
 | 创建 Gateway 后数据面 pod `CrashLoopBackOff`, 日志 `PARSE ERROR: Argument: --cpuset-threads` | **数据面 envoy 镜像 tag 用错**(用了 EG 版本号如 `envoy:v1.9.1`, 拉到远古 Envoy; EG 1.9.x 配套数据面 tag 应为 `ENVOY_PROXY_VERSION`=distroless-v1.39.1, 用 `kubectl exec deploy/envoy-gateway -- envoy-gateway version` 核对) | 09 模块已改为 `push_one envoy ... ${ENVOY_PROXY_VERSION}` + helm `global.images.envoyProxy.image` 用 ENVOY_PROXY_VERSION; 已错: 在联网机用 envoy-save-images.sh(已修)重新 save `envoyproxy/envoy:distroless-v1.39.1`, 离线推入 registry 后重跑 09 模块 |
 | `GatewayClass eg` 未 Accepted | 控制面未就绪 / controllerName 不匹配 | `kubectl -n envoy-gateway-system logs deploy/eg --tail=50`; GatewayClass 的 `spec.controllerName` 必须是 `gateway.envoyproxy.io/gatewayclass-controller` |
 | Gateway 一直没 VIP(ADDRESS 空) | MetalLB 池耗尽/网段冲突, 或数据面未起来 | `kubectl describe gateway` 看条件; `kubectl get svc -n <gw-ns>` 看 LoadBalancer pending 原因(参考 §三.1/§三.2) |

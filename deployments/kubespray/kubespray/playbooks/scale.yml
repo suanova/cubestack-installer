@@ -53,7 +53,7 @@
 
 # ──────────────────────────────────────────────────────────────────────
 # 在内置 registry(LoadBalancer)就绪前, 在节点 /etc/hosts 写入 registry 域名解析,
-# 配合 containerd certs.d HTTP 信任, 实现集群内节点拉取 registry.local 镜像。
+# 配合 containerd certs.d HTTP 信任, 实现集群内节点拉取 registry.cubestack.io 镜像。
 # 本 import 由入口脚本 ensure_registry_play 自动维护(kubespray 升级后重新挂载)
 # ──────────────────────────────────────────────────────────────────────
 - name: Configure nodes /etc/hosts for internal registry

@@ -338,9 +338,9 @@ load_config() {
     fi
     # 全局派生变量(由 cluster.conf 变量派生, 各脚本直接引用, 不各自设置本地变量):
     #   API_IP       API 入口地址 = APISERVER_ADDRESS(默认第一个 master IP; 显式设置时保留)
-    #   API_DOMAIN   API Server 域名(跨网段统一入口), 默认 k8s-api.nova.local
+    #   API_DOMAIN   API Server 域名(跨网段统一入口), 默认 k8s-api.cubestack.io
     API_IP="${API_IP:-${APISERVER_ADDRESS:-}}"
-    API_DOMAIN="${API_DOMAIN:-${APISERVER_DOMAIN:-k8s-api.nova.local}}"
+    API_DOMAIN="${API_DOMAIN:-${APISERVER_DOMAIN:-k8s-api.cubestack.io}}"
     export API_IP API_DOMAIN
     # 全局派生变量(续): 离线文件路径
     #   OFFLINE_FILES_DIR  离线文件根目录(二进制/镜像/离线包), 全局唯一可切换点
@@ -397,7 +397,7 @@ load_config() {
     # registry 宿主侧直连端点(预检 curl / skopeo push 用), 与镜像名 DOMAIN:PORT 解耦:
     #   nodeport → 首个 master:REGISTRY_NODEPORT(无 VIP, 直连 NodePort; 容器/裸机均可达);
     #   metallb   → REGISTRY_IP:REGISTRY_PORT(MetalLB VIP)。
-    # 镜像名统一 registry.local:5000(节点经 containerd hosts.toml 改写连接), 端口无需统一;
+    # 镜像名统一 registry.cubestack.io:5000(节点经 containerd hosts.toml 改写连接), 端口无需统一;
     # 显式设 REGISTRY_DIRECT 可覆盖(如经代理/别名推送)。
     if [ "${SERVICE_EXPOSE_MODE}" = "nodeport" ]; then
         REGISTRY_DIRECT="${REGISTRY_DIRECT:-$(first_master_ip 2>/dev/null):${REGISTRY_NODEPORT:-31148}}"
@@ -504,7 +504,7 @@ wait_registry_ready() {
 }
 
 # ---------------- 宿主机 /etc/hosts 收敛(共享, 防多集群残留 + 防重复行) ----------------
-# 多套集群/换环境时, 同一域名(registry.local / k8s-api.nova.local / 节点主机名)会在
+# 多套集群/换环境时, 同一域名(registry.cubestack.io / k8s-api.cubestack.io / 节点主机名)会在
 # /etc/hosts 残留多个旧 IP 行; getent 命中旧 IP → push/helm/kubectl 打到旧集群 → 误报失败。
 # 固定套路: 【先无条件删除该域名所有旧行, 再追加当前 IP 一行】。
 # ⚠ 不要加 "grep 已匹配则跳过" 的幂等守卫: 守卫会因第一行旧 IP 已匹配而跳过追加,
@@ -533,7 +533,7 @@ ensure_hosts_entry() {
 }
 
 # 幂等追加【整块】宿主机 hosts 条目(与 ensure_hosts_entry 同套防重复理念, 适用于多行块):
-#   · 命中任意主机名(含 k8s-api.nova.local / nova-k8s-* / mxgpu-* 旧版裸条目)即视为已有该块,
+#   · 命中任意主机名(含 k8s-api.cubestack.io / k8s-api.nova.local / nova-k8s-* / mxgpu-* 旧版裸条目)即视为已有该块,
 #     【先删除旧块标记段 + 匹配主机名的裸行, 再追加新块】, 主机名→IP 永不重复。
 #   · 块标记仅保留一段, 重复追加(历史版本多次写入)也会被收敛成一段。
 #   · bind-mount 安全(同 ensure_hosts_entry): 过滤→sponge 或临时文件+cat 覆盖写。
@@ -547,13 +547,13 @@ ensure_hosts_block() {
         sed -e "/${start}/,/${end}/d" \
             -e '/nova-k8s-\(master\|node\)/d' \
             -e '/mxgpu-[0-9]/d' \
-            -e '/k8s-api\.nova\.local/d' \
+            -e '/k8s-api\.\(nova\.local\|cubestack\.io\)/d' \
             /etc/hosts | sponge /etc/hosts 2>/dev/null || return 0
     else
         sed -e "/${start}/,/${end}/d" \
             -e '/nova-k8s-\(master\|node\)/d' \
             -e '/mxgpu-[0-9]/d' \
-            -e '/k8s-api\.nova\.local/d' \
+            -e '/k8s-api\.\(nova\.local\|cubestack\.io\)/d' \
             /etc/hosts > "${t}" 2>/dev/null || return 0
         cat "${t}" > /etc/hosts 2>/dev/null || { rm -f "${t}"; return 0; }
         rm -f "${t}"
@@ -563,7 +563,7 @@ ensure_hosts_block() {
 
 # ---------------- 宿主机 kubectl/helm 访问集群(共享, 防 TLS/DNAT 坑) ----------------
 # 从第一个 master 下载 /etc/kubernetes/admin.conf 并同步到 ~/.kube/config, 同时:
-#   ① server 改写为证书 SAN 内的 API_DOMAIN(k8s-api.nova.local) —— admin.conf 默认
+#   ① server 改写为证书 SAN 内的 API_DOMAIN(k8s-api.cubestack.io) —— admin.conf 默认
 #      直连 master IP, 证书 SAN 常不含该 IP → 宿主机 kubectl 会 TLS x509 校验失败;
 #   ② 调用 tools/lb/setup-api-expose.sh 幂等配置宿主机 6443→first master 的 DNAT
 #      (PREROUTING + OUTPUT), 让 API_DOMAIN 从宿主机可访问。
@@ -580,7 +580,7 @@ sync_kubeconfig() {
         || { rm -f "${tmp}"; return 1; }
     [ -s "${tmp}" ] || { rm -f "${tmp}"; return 1; }
     # ★ server 改写为证书 SAN 内的 API_DOMAIN(直连 master IP 不在 SAN → TLS 校验失败)
-    API_DOMAIN="${API_DOMAIN:-k8s-api.nova.local}"
+    API_DOMAIN="${API_DOMAIN:-k8s-api.cubestack.io}"
     sed -i -E "s|(server:[[:space:]]*https?://)[^:/]+(:[0-9]+)|\1${API_DOMAIN}\2|" "${tmp}"
     mkdir -p "${HOME}/.kube"
     newctx="$(grep -E '^[[:space:]]*current-context:' "${tmp}" | head -1 | awk '{print $2}')"

@@ -100,7 +100,7 @@ LWS_CERT_MODE=internal sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_
 | `LWS_CHART_TGZ` | `${LWS_CHART_DIR}/lws-chart-v0.10.0.tgz` | 本地发布包 |
 | `LWS_CHART_OCI` | `oci://registry.k8s.io/lws/charts/lws` | 官方 OCI registry |
 | `LWS_CERT_MODE` | `internal` | `internal`(默认; bundle 固定) / `cert-manager`(需 helm) |
-| `LWS_IMAGE_REPO` / `LWS_IMAGE_TAG` | `registry.local:5000/lws/manager` / `v0.10.0` | controller 镜像(对应 image.manager.*) |
+| `LWS_IMAGE_REPO` / `LWS_IMAGE_TAG` | `registry.cubestack.io:5000/lws/manager` / `v0.10.0` | controller 镜像(对应 image.manager.*) |
 | `LWS_IMAGE_ONLINE` | `false` | 允许在线拉取镜像的显式开关(默认离线; 仅 `oci` 源或置 `true` 才联网) |
 | `LWS_NAMESPACE` / `LWS_RELEASE_NAME` | `lws-system` / `lws` | 命名空间 / release 名 |
 | `LWS_DISAGGREGATEDSET_ENABLED` | `true` | 解耦推理支持(bundle 已含; helm 对应 enableDisaggregatedSet) |
@@ -138,7 +138,7 @@ spec:
       spec:
         containers:
           - name: vllm
-            image: registry.local:5000/llm/vllm:latest
+            image: registry.cubestack.io:5000/llm/vllm:latest
             ports:
               - containerPort: 8000
 ```
@@ -164,7 +164,7 @@ spec:
             spec:
               containers:
                 - name: prefill
-                  image: registry.local:5000/llm/prefill:latest
+                  image: registry.cubestack.io:5000/llm/prefill:latest
     - name: decode
       spec:
         leaderWorkerTemplate:
@@ -172,7 +172,7 @@ spec:
             spec:
               containers:
                 - name: decode
-                  image: registry.local:5000/llm/decode:latest
+                  image: registry.cubestack.io:5000/llm/decode:latest
 ```
 
 ## 四、卸载

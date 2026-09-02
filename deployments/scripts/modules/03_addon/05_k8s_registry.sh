@@ -28,6 +28,6 @@ if [ "${REGISTRY_ENABLED:-0}" != "1" ] && [ "${REGISTRY_ENABLED:-false}" != "tru
     exit 0
 fi
 
-say "配置集群内置 docker registry(域名=${REGISTRY_DOMAIN:-registry.local})..."
+say "配置集群内置 docker registry(域名=${REGISTRY_DOMAIN:-registry.cubestack.io})..."
 bash "${SCRIPT_DIR}/tools/lb/deploy-registry.sh"
 ok "内置 registry 配置完成"
