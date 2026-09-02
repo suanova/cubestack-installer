@@ -820,7 +820,7 @@ PYEOF
 
 # 将内置 registry 域名解析 play 注入 cluster.yml/scale.yml(幂等, 与 ensure_preload_play 同机制)
 # 作用: 在节点 /etc/hosts 写入 "REGISTRY_IP REGISTRY_DOMAIN", 配合 containerd certs.d 信任,
-#       实现集群内节点拉取 registry.local:5000 镜像。变量由 group_vars/all/registry.yml 提供。
+#       实现集群内节点拉取 registry.cubestack.io:5000 镜像。变量由 group_vars/all/registry.yml 提供。
 ensure_registry_play() {
     local py name
     for py in "${KUBESPRAY_DIR}/playbooks/cluster.yml" "${KUBESPRAY_DIR}/playbooks/scale.yml"; do
@@ -844,7 +844,7 @@ if not marker or marker not in src:
 block = (
     "# ──────────────────────────────────────────────────────────────────────\n"
     "# 在内置 registry(LoadBalancer)就绪前, 在节点 /etc/hosts 写入 registry 域名解析,\n"
-    "# 配合 containerd certs.d HTTP 信任, 实现集群内节点拉取 registry.local 镜像。\n"
+    "# 配合 containerd certs.d HTTP 信任, 实现集群内节点拉取 registry.cubestack.io 镜像。\n"
     "# 本 import 由入口脚本 ensure_registry_play 自动维护(kubespray 升级后重新挂载)\n"
     "# ──────────────────────────────────────────────────────────────────────\n"
     "- name: Configure nodes /etc/hosts for internal registry\n"

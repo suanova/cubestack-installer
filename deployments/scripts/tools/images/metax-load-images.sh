@@ -18,7 +18,7 @@ load_config
 need_root() { [ "$(id -u)" -eq 0 ] || { err "需要 root, 请 sudo 执行"; exit 1; }; }
 need_root
 
-REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"   # 集群内置 registry 域名(registry.local:5000)
+REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"   # 集群内置 registry 域名(registry.cubestack.io:5000)
 PUSH_REGISTRY="${REGISTRY_DIRECT}/metax" # 推送用直连端点(绕开宿主 DNAT, 大 blob 更稳): metallb→VIP:PORT / nodeport→master:REGISTRY_NODEPORT
 
 # 推送 skopeo(脚本级重试 3 次): 大 blob(如 maca 5.5G)连接中途断开时 skopeo 的 --retry-times 不覆盖, 这里整体重试
@@ -40,7 +40,7 @@ _push_skopeo() {
 }
 
 TAR_DIR="${1:-}"
-# 宿主机把 registry.local 解析到集群 registry VIP(供按域名推送, 不留过期 IP)
+# 宿主机把 registry.cubestack.io 解析到集群 registry VIP(供按域名推送, 不留过期 IP)
 # 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)
 ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
 curl -s -m 8 "http://${REGISTRY_BASE}/v2/" >/dev/null 2>&1 \

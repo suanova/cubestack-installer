@@ -114,14 +114,14 @@ if [ "${REGISTRY_ON}" = "1" ]; then
             "docker://${REGISTRY_ENDPOINT}/${PUSH_NS}/busybox:${TEST_TAG}" \
             || { err "skopeo push 失败(HTTP registry 已 --dest-tls-verify=false, 检查 VIP/端口与磁盘空间)"; exit 1; }
     else
-        # 回退: 经节点 ctr 推送(节点已信任 registry.local:PORT, 无需 daemon 配置; 离线可用)
+        # 回退: 经节点 ctr 推送(节点已信任 registry.cubestack.io:PORT, 无需 daemon 配置; 离线可用)
         say "    未找到 skopeo, 改用节点 ctr 加载本地 tar 并 --plain-http 推送..."
         REMOTE_TAR="/tmp/busybox-${TEST_TAG}.tar"
         scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
             "${TAR}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${REMOTE_TAR}" \
             || { err "scp busybox.tar 到 ${FIRST_MASTER} 失败"; exit 1; }
         SSH "sudo ctr -n k8s.io images import ${REMOTE_TAR} && sudo ctr -n k8s.io images tag docker.io/library/busybox:latest ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/${PUSH_NS}/busybox:${TEST_TAG} && sudo ctr -n k8s.io images push --plain-http ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/${PUSH_NS}/busybox:${TEST_TAG}" \
-            || { err "节点 ctr push 失败(检查: 节点 containerd certs.d 是否信任 registry.local / /etc/hosts 是否有 registry.local)"; exit 1; }
+            || { err "节点 ctr push 失败(检查: 节点 containerd certs.d 是否信任 registry.cubestack.io / /etc/hosts 是否有 registry.cubestack.io)"; exit 1; }
         SSH "sudo ctr -n k8s.io images rm ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/${PUSH_NS}/busybox:${TEST_TAG} docker.io/library/busybox:latest >/dev/null 2>&1; sudo rm -f ${REMOTE_TAR}" 2>/dev/null || true
     fi
     ok "    已推送 ${PUSH_NS}/busybox:${TEST_TAG}"

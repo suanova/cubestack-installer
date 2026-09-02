@@ -15,8 +15,8 @@
 #             本机容器运行时用 ctr, 支持 --plain-http 免 daemon 配置)
 #       tar = 从 METAX_OFFLINE_DIR(默认 offline-files/metax-gpu)加载离线 tar 逐镜像 skopeo
 #             推送到集群内置 registry(需先用 tools/images/metax-save-images.sh 在联网机生成 tar)
-#   · 镜像目标: 集群内置 registry 的 METAX_REGISTRY(默认 registry.local:5000/metax);
-#     模块自动把宿主机 /etc/hosts 的 registry.local/k8s-api 解析到正确 IP(registry VIP / API 入口,
+#   · 镜像目标: 集群内置 registry 的 METAX_REGISTRY(默认 registry.cubestack.io:5000/metax);
+#     模块自动把宿主机 /etc/hosts 的 registry.cubestack.io/k8s-api 解析到正确 IP(registry VIP / API 入口,
 #     不留 10.66.3.37 这类过期条目), 宿主机即可按域名 push 与 helm 连集群(外部机器同理改 /etc/hosts)。
 #   · METAX_LIST_IMAGES=true 可仅打印所需镜像的 docker pull+save 命令(离线 tar 预置清单), 不部署。
 #   · MACA SDK 与内核驱动镜像不在资源包内: 优先本地 docker / METAX_OFFLINE_DIR 离线 tar,
@@ -77,7 +77,7 @@ CHART_TGZ="${METAX_PKG_DIR}/metax-operator-${METAX_VERSION}.tgz"
 CHART_DIR="${METAX_CHART_DIR:-${METAX_PKG_DIR}/metax-operator}"   # 修复后的 chart 目录(直接 helm 安装, 不重新解包)
 WORK_DIR="${METAX_PKG_DIR}/_work"
 RENDER_YAML="${WORK_DIR}/metax-render.yaml"
-REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"    # 集群内置 registry(registry.local:5000, 节点/chart/宿主统一用域名)
+REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"    # 集群内置 registry(registry.cubestack.io:5000, 节点/chart/宿主统一用域名)
 # 推送到集群 registry 用直连端点(绕开宿主 DNAT 转发, 大镜像/大 blob 传输更稳, 避免 broken pipe):
 #   REGISTRY_DIRECT = metallb→VIP:PORT / nodeport→首个 master:REGISTRY_NODEPORT(见 lib-common)
 PUSH_REGISTRY="${REGISTRY_DIRECT}/metax"

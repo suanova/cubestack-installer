@@ -7,7 +7,7 @@
 ## 0. 架构前提(必读)
 
 - 网络: Calico + IPIP(见 `docs/cluster-architecture.md`), 集群内置 docker registry 用 MetalLB 分配 VIP。
-- 镜像仓库: 集群内置 `registry.local:5000`(registry.local 由宿主机 /etc/hosts → `REGISTRY_IP`), 仓库路径 `metax/<组件>:<tag>`。
+- 镜像仓库: 集群内置 `registry.cubestack.io:5000`(registry.cubestack.io 由宿主机 /etc/hosts → `REGISTRY_IP`), 仓库路径 `metax/<组件>:<tag>`。
 - 节点: 已装沐曦内核驱动(`lsmod | grep metax`), 用 `METAX_DRIVER_DEPLOY_POLICY=PreferHost`(宿主机驱动)。
 - master 节点也有 GPU: 部署时用 `mx-smi` 检测, 检测到 GPU 的 master 自动移除 control-plane 污点并 uncordon。
 
@@ -111,11 +111,11 @@ sudo ./deploy-cluster.sh --with-cubestack   # 全量: 基座 + cluster.conf 中�
 
 模块自动完成(默认 tar 模式):
 
-1. **前置**: 更新宿主机 /etc/hosts(`registry.local→REGISTRY_IP`、`k8s-api.nova.local→API_IP`, 不留过期 IP)、
+1. **前置**: 更新宿主机 /etc/hosts(`registry.cubestack.io→REGISTRY_IP`、`k8s-api.cubestack.io→API_IP`, 不留过期 IP)、
    下载 master 的 admin.conf 合并进 `~/.kube/config`(宿主 helm/kubectl 可访问集群)、校验 registry/集群可达。
 2. **确认资源**: 修复版 chart(`METAX_CHART_DIR`) + 镜像加载源。
 3. **加载镜像 → 集群 registry**:
-   - `tar`(默认): 从 `METAX_OFFLINE_DIR` 逐 tar `skopeo docker-archive → registry.local:5000/metax/...`;
+   - `tar`(默认): 从 `METAX_OFFLINE_DIR` 逐 tar `skopeo docker-archive → registry.cubestack.io:5000/metax/...`;
      **只推当前 operator 需要的版本**(maca 只推 `METAX_MACA_IMAGE`、driver 只推 `METAX_DRIVER_VERSION`,
      核心组件只推本机架构的 `METAX_VERSION`; 其他版本如 maca 3.8.0.11/3.8.1.2、driver 3.2.1.12、
      operator-bundle/catalog 均跳过);
@@ -157,7 +157,7 @@ GPU 任务测试(参考沐曦官方文档 §5, 需 maca 镜像就绪): 建 gpu-t
 | helm 拒绝安装 | 历史 kubectl apply 留下的资源无 Helm 标签 | 模块每次重部署先清理(含集群级 ClusterRole/RoleBinding) |
 | skopeo `docker-daemon:` 报 API 版本过旧 | 此 docker 版本 | 改 `docker save` 成 tar + `skopeo docker-archive` 推送 |
 | `.run push --plain-http` 报错 | 工具把 flag 置于镜像 ref 之后 | 模块用 `.run ctr load` + 自行 `ctr push --plain-http`(flag 在前) |
-| 宿主机 `registry.local`/`k8s-api` 连不通 | /etc/hosts 残留旧 IP(10.66.3.37) 或 DNAT 被旧规则遮蔽 | 模块每次部署修正 /etc/hosts 指向正确 IP |
+| 宿主机 `registry.cubestack.io`/`k8s-api` 连不通 | /etc/hosts 残留旧 IP(10.66.3.37) 或 DNAT 被旧规则遮蔽 | 模块每次部署修正 /etc/hosts 指向正确 IP |
 | 镜像不在 .run 包内(driver/maca) | 需单独推送 | 本地 docker(`docker save`+skopeo) / 离线 tar / 在线, 逐级尝试; 模块已实现 |
 | master 无 `gpu.installed` 标签 | metax DS 无 control-plane 容忍, 调度不到 master | 部署时 mx-smi 检测到 GPU 的 master 自动移除污点+uncordon(见 §4.5) |
 

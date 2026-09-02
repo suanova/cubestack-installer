@@ -28,7 +28,7 @@ load_config
 need_root() { [ "$(id -u)" -eq 0 ] || { err "需要 root, 请 sudo 执行"; exit 1; }; }
 need_root
 
-REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"   # 集群内置 registry 域名(registry.local:5000)
+REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"   # 集群内置 registry 域名(registry.cubestack.io:5000)
 # 推送直连入口: 默认 REGISTRY_DIRECT(metallb→VIP:PORT / nodeport→master:REGISTRY_NODEPORT);
 # 特殊代理/别名场景可用 ENVOY_PUSH_ENDPOINT 覆盖
 PUSH_HOST="${ENVOY_PUSH_ENDPOINT:-${REGISTRY_DIRECT}}"
@@ -45,7 +45,7 @@ ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"
 skopeo_require "envoy-load-images"
 
 TAR_DIR="${1:-${ENVOY_SAVE_DIR}}"   # argv1 = tar 目录(缺省 ENVOY_SAVE_DIR)
-# 宿主机把 registry.local 解析到集群 registry VIP(不留过期 IP; 复用 lib-common)
+# 宿主机把 registry.cubestack.io 解析到集群 registry VIP(不留过期 IP; 复用 lib-common)
 ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
 wait_registry_ready "http://${REGISTRY_BASE}/v2/" \
     || { err "集群内置 registry ${REGISTRY_BASE}/v2/ 不可达(检查 hosts 与 MetalLB VIP / nodeport 入口)"; exit 1; }

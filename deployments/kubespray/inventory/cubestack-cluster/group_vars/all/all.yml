@@ -18,16 +18,16 @@ bin_dir: /usr/local/bin
 
 ## Internal loadbalancers for apiservers
 loadbalancer_apiserver_localhost: false
-apiserver_loadbalancer_domain_name: "k8s-api.nova.local"
+apiserver_loadbalancer_domain_name: "k8s-api.cubestack.io"
 loadbalancer_apiserver:
-  address: 10.66.1.232   # 第一个 master 节点 IP(由 hosts.yml 自动同步)
+  address: 10.66.1.147   # 第一个 master 节点 IP(由 hosts.yml 自动同步)
   port: 6443
 
 supplementary_addresses_in_ssl_keys:
-  - k8s-api.nova.local
-  - 10.66.1.232
+  - k8s-api.cubestack.io
   - 10.66.1.147
   - 10.66.1.152
+  - 10.66.1.154
 # 由脚本按 hosts.yml 自动生成(API 域名 + 全部 master IP)
 
 # 如果 Kubespray 版本 ≥ 2.24 且 K8s ≥ 1.29，还需要启用 EndpointSlice 镜像

@@ -334,22 +334,22 @@ sudo ./scripts/tools/net/setup-libvirt-nat.sh --delete [网络名] # 删除回�
 
 ### 5.8.1 内置 Registry(镜像仓库)使用指南
 
-kubespray 的 registry addon 以 MetalLB **LoadBalancer** 暴露(默认),对外统一域名 `REGISTRY_DOMAIN`(默认 `registry.local`)、固定 VIP `REGISTRY_IP`(默认 `10.244.2.100`)、端口 `REGISTRY_PORT`(默认 `5000`,HTTP 无 TLS)。集群内拉镜像、集群外 push/pull 全走同一条链路:
+kubespray 的 registry addon 以 MetalLB **LoadBalancer** 暴露(默认),对外统一域名 `REGISTRY_DOMAIN`(默认 `registry.cubestack.io`)、固定 VIP `REGISTRY_IP`(默认 `10.244.2.100`)、端口 `REGISTRY_PORT`(默认 `5000`,HTTP 无 TLS)。集群内拉镜像、集群外 push/pull 全走同一条链路:
 
 ```
  集群外 push 机                        宿主机(HOST_PHYS_IP)                       集群内
  ──────────────                        ─────────────────                        ──────
- /etc/hosts: HOST_PHYS_IP registry.local
- docker push registry.local:5000/… ──► DNAT: HOST_PHYS_IP:5000 ──► 10.244.2.100:5000 (MetalLB VIP)
-                                          (setup-registry-expose.sh)   │  registry.local:5000
- docker pull registry.local:5000/… ◄──── 同上反向                        │  (registry pod, kube-system)
+ /etc/hosts: HOST_PHYS_IP registry.cubestack.io
+ docker push registry.cubestack.io:5000/… ──► DNAT: HOST_PHYS_IP:5000 ──► 10.244.2.100:5000 (MetalLB VIP)
+                                          (setup-registry-expose.sh)   │  registry.cubestack.io:5000
+ docker pull registry.cubestack.io:5000/… ◄──── 同上反向                        │  (registry pod, kube-system)
                                                                         │
-  各节点 /etc/hosts: 10.244.2.100 registry.local                        │
-  各节点 containerd certs.d/registry.local:5000 (HTTP + skip_verify) ◄──┘
-  集群内 pod 引用 image: registry.local:5000/<ns>/<img>:<tag> 直接拉取
+  各节点 /etc/hosts: 10.244.2.100 registry.cubestack.io                        │
+  各节点 containerd certs.d/registry.cubestack.io:5000 (HTTP + skip_verify) ◄──┘
+  集群内 pod 引用 image: registry.cubestack.io:5000/<ns>/<img>:<tag> 直接拉取
 ```
 
-`registry.local` 是「**双解析**」域名:集群内解析为 MetalLB VIP(`10.244.2.100`),集群外解析为宿主机物理 IP(`HOST_PHYS_IP`)——两个网络各用各的解析,不要混用。
+`registry.cubestack.io` 是「**双解析**」域名:集群内解析为 MetalLB VIP(`10.244.2.100`),集群外解析为宿主机物理 IP(`HOST_PHYS_IP`)——两个网络各用各的解析,不要混用。
 
 #### ① 集群内拉取镜像(部署 pod,主要场景)
 
@@ -357,14 +357,14 @@ kubespray 的 registry addon 以 MetalLB **LoadBalancer** 暴露(默认),对外�
 2. Deployment / pod 中直接引用:
 
 ```yaml
-image: registry.local:5000/dev/myapp:v1.0.0
+image: registry.cubestack.io:5000/dev/myapp:v1.0.0
 ```
 
 集群节点已在部署时自动写好 `/etc/hosts` 与 containerd `certs.d` 信任,任何能调度到该镜像的节点都可直接拉取。节点上也可手动验证:
 
 ```bash
-curl -s http://registry.local:5000/v2/            # 期望 {"repositories":[...]}
-crictl pull registry.local:5000/dev/myapp:v1.0.0  # 预拉到节点本地(可选, 拉取时不再联网)
+curl -s http://registry.cubestack.io:5000/v2/            # 期望 {"repositories":[...]}
+crictl pull registry.cubestack.io:5000/dev/myapp:v1.0.0  # 预拉到节点本地(可选, 拉取时不再联网)
 ```
 
 #### ② 集群外 push / pull(docker / containerd)
@@ -373,12 +373,12 @@ crictl pull registry.local:5000/dev/myapp:v1.0.0  # 预拉到节点本地(可选
 
 ```bash
 # ① 域名解析 → 宿主机物理 IP(注意是 HOST_PHYS_IP, 不是 VIP!)
-echo "<HOST_PHYS_IP> registry.local" | sudo tee -a /etc/hosts
+echo "<HOST_PHYS_IP> registry.cubestack.io" | sudo tee -a /etc/hosts
 
 # ② 让 docker 信任该 HTTP 仓库(无 TLS)
 sudo mkdir -p /etc/docker
 cat > /etc/docker/daemon.json <<'EOF'
-{ "insecure-registries": ["registry.local:5000"] }
+{ "insecure-registries": ["registry.cubestack.io:5000"] }
 EOF
 sudo systemctl restart docker
 ```
@@ -386,15 +386,15 @@ sudo systemctl restart docker
 push(与 docker.io 一致, `<namespace>` 即仓库一级目录):
 
 ```bash
-docker tag myapp:v1.0.0 registry.local:5000/dev/myapp:v1.0.0
-docker push registry.local:5000/dev/myapp:v1.0.0
+docker tag myapp:v1.0.0 registry.cubestack.io:5000/dev/myapp:v1.0.0
+docker push registry.cubestack.io:5000/dev/myapp:v1.0.0
 ```
 
 pull / 验证:
 
 ```bash
-docker pull registry.local:5000/dev/myapp:v1.0.0
-curl -s http://registry.local:5000/v2/    # 5000 端口由宿主机 DNAT 转发进集群
+docker pull registry.cubestack.io:5000/dev/myapp:v1.0.0
+curl -s http://registry.cubestack.io:5000/v2/    # 5000 端口由宿主机 DNAT 转发进集群
 ```
 
 > 需宿主机转发规则已启用:`sudo ./scripts/tools/lb/setup-registry-expose.sh --add`(部署流程已自动执行);撤销:`--delete`。
@@ -405,11 +405,11 @@ curl -s http://registry.local:5000/v2/    # 5000 端口由宿主机 DNAT 转发�
 
 ```bash
 ctr -n k8s.io images pull docker.io/library/busybox:latest
-ctr -n k8s.io images tag docker.io/library/busybox:latest registry.local:5000/dev/busybox:latest
-ctr -n k8s.io images push --plain-http registry.local:5000/dev/busybox:latest
+ctr -n k8s.io images tag docker.io/library/busybox:latest registry.cubestack.io:5000/dev/busybox:latest
+ctr -n k8s.io images push --plain-http registry.cubestack.io:5000/dev/busybox:latest
 ```
 
-> 集群内 **pod 的 DNS 不解析** `registry.local`(集群外域名)。pod 内若要 push,请改用固定 VIP `10.244.2.100:5000`(能路由到即可);跨网段不确定路由时,可把 registry 切成 NodePort 模式后经 `节点IP:REGISTRY_NODEPORT` 访问。
+> 集群内 **pod 的 DNS 不解析** `registry.cubestack.io`(集群外域名)。pod 内若要 push,请改用固定 VIP `10.244.2.100:5000`(能路由到即可);跨网段不确定路由时,可把 registry 切成 NodePort 模式后经 `节点IP:REGISTRY_NODEPORT` 访问。
 
 #### 部署 / 启用脚本
 
@@ -423,7 +423,7 @@ ctr -n k8s.io images push --plain-http registry.local:5000/dev/busybox:latest
 
 ```bash
 REGISTRY_ENABLED=1                 # 0 关闭 registry 信任/转发配置
-REGISTRY_DOMAIN="registry.local"   # 统一内部域名
+REGISTRY_DOMAIN="registry.cubestack.io"   # 统一内部域名
 REGISTRY_IP="10.244.2.100"         # 留空自动: nodeport 模式=首个 master IP(默认入口), metallb 模式=METALLB_POOL 首地址(VIP, 须在池内避开 .0/.255)
 REGISTRY_PORT="5000"
 REGISTRY_SERVICE_TYPE=""           # 留空=按 SERVICE_EXPOSE_MODE 自动(metallb→loadbalancer, nodeport→nodeport);
@@ -521,7 +521,7 @@ sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --auto       # 宿主�
 ./scripts/tools/offline/fetch-offline-from-minio.sh --list      # 只列出 MinIO 可用目录
 ```
 
-- **mc 检测**:未安装时给出安装指引,可选择自动下载(MinIO 官方二进制,与 Dockerfile-cli 同源);alias 优先用 cluster.conf 的 `MINIO_*` 自动配置,否则探测本机已有 alias,再否则交互录入。
+- **mc 检测**:未安装时给出安装指引,可选择自动下载(MinIO 官方二进制,与 Dockerfile-cli 同源);alias 优先用独立 MinIO 配置(`config/minio.conf` 或 `MINIO_*` 环境变量,本脚本刻意不读 cluster.conf —— 它是部署前置工具,下载时集群配置往往还不存在)自动配置,否则探测本机已有 alias,再否则交互录入。
 - **桶/目录自适应**:默认桶 `cubestack-installer`、目录 `offline-files`(与 MinIO 实际布局一致),自动回退探测旧布局 `cubestack-offline/kubespray`。
 - **子目录排除(默认开启)**:`DEFAULT_EXCLUDE_SUBS`(默认 `virtual-machine`, 体积大且仅创建 VM 时用)在默认/`--all` 下载时自动跳过;`--sub <目录>` 不受排除限制。
 - **磁盘空间检查(默认开启)**:醒目提示至少 `MIN_FREE_GB`(默认 50 GiB)空闲;比对本次下载所需(远程大小 + 缓冲)与目标可用空间,不足时红色横幅警告并中止(`--force` 强制继续)。
@@ -584,12 +584,12 @@ sudo ENVOY_EG_VERSION=v1.9.1 ./scripts/tools/images/envoy-load-images.sh /path/t
 
 | tar | 推送目标 |
 |---|---|
-| `*gateway_${ENVOY_EG_VERSION}.tar` | `registry.local:5000/envoyproxy/gateway:${ENVOY_EG_VERSION}` |
-| `*envoy_${ENVOY_PROXY_VERSION}.tar` | `registry.local:5000/envoyproxy/envoy:${ENVOY_PROXY_VERSION}`(数据面; ⚠ tag=ENVOY_PROXY_VERSION, 默认 `distroless-v1.39.1`, 勿用 EG 版本号) |
-| `*ai-gateway-controller*.tar` | `registry.local:5000/ai-gateway/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}` |
+| `*gateway_${ENVOY_EG_VERSION}.tar` | `registry.cubestack.io:5000/envoyproxy/gateway:${ENVOY_EG_VERSION}` |
+| `*envoy_${ENVOY_PROXY_VERSION}.tar` | `registry.cubestack.io:5000/envoyproxy/envoy:${ENVOY_PROXY_VERSION}`(数据面; ⚠ tag=ENVOY_PROXY_VERSION, 默认 `distroless-v1.39.1`, 勿用 EG 版本号) |
+| `*ai-gateway-controller*.tar` | `registry.cubestack.io:5000/ai-gateway/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}` |
 
 - 纯离线(不联网): tar 内容经 `skopeo docker-archive → docker://` 推送, 3 次重试; 需本机装 `skopeo`。
-- **nodeport 模式**(无 MetalLB): `registry.local:5000` 已由 `deploy-registry.sh` 自动 DNAT 到首个 master 的 `${REGISTRY_NODEPORT}`(默认可用); 也可用 `ENVOY_PUSH_ENDPOINT=<节点IP>:${REGISTRY_NODEPORT}` 显式覆盖推送入口。
+- **nodeport 模式**(无 MetalLB): `registry.cubestack.io:5000` 已由 `deploy-registry.sh` 自动 DNAT 到首个 master 的 `${REGISTRY_NODEPORT}`(默认可用); 也可用 `ENVOY_PUSH_ENDPOINT=<节点IP>:${REGISTRY_NODEPORT}` 显式覆盖推送入口。
 - 依赖: 集群内置 registry 已部署(`deploy-registry.sh` / `22_verify_registry_storage` 校验)。
 
 ---

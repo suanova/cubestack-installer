@@ -52,7 +52,7 @@ METALLB_POOL="10.66.1.131-10.66.1.132"   # ⚠ 必须排除已被其他集群/�
 #   统一归一化为 nodeport); 其它任何值(如 loadbalancer)一律归一化为 metallb。
 # ⚠ nodeport 模式(默认, 自动连通, 无需手动配置): 默认通过**集群第一个 IP(首个 master)**访问内置服务 ——
 #   REGISTRY_IP 自动 = 首个 master IP; 节点 containerd 经 hosts.toml 镜像直连 <首个master>:REGISTRY_NODEPORT
-#   拉取 registry.local 镜像(客户端侧改写, 不依赖节点 iptables); 宿主机 registry.local:5000 由
+#   拉取 registry.cubestack.io 镜像(客户端侧改写, 不依赖节点 iptables); 宿主机 registry.cubestack.io:5000 由
 #   deploy-registry.sh 自动 DNAT 到首个 master 的 REGISTRY_NODEPORT(systemd 持久化)。
 #   显式设 REGISTRY_IP 可覆盖; 集群外 push 另见 REGISTRY_EXPOSE_HOST / ENVOY_PUSH_ENDPOINT(阶段三 3.2)。
 # 各服务仍可单独覆盖: REGISTRY_SERVICE_TYPE(见阶段三 3.2); ingress-nginx 在 kubespray addons.yml。
@@ -168,6 +168,10 @@ NODE_GROUP_new_node="cubestack-k8s-worker02"
 # API 入口高可用: HAPROXY=四层 LB(默认 master 直连, 需要时开启); KEEPALIVED=VIP(留空取 API 地址)
 # 开关见顶部【组件启停开关】: HAPROXY_ENABLED / KEEPALIVED_ENABLED
 KEEPALIVED_VIP="${KEEPALIVED_VIP:-}"                    # Keepalived VIP(留空=取 APISERVER_ADDRESS)
+# K8s API 统一入口域名(跨网段统一访问, 需本地 /etc/hosts 解析): 会写入 kubespray
+# apiserver_loadbalancer_domain_name + 证书 SAN, 并同步到各节点 /etc/hosts / 宿主机 ~/.kube/config。
+# 留空=默认 k8s-api.cubestack.io; 显式设置则用该域名(如保留 k8s-api.nova.local 老域名)。
+API_DOMAIN="${API_DOMAIN:-k8s-api.cubestack.io}"
 
 # ---------------- 1.7 Harbor 镜像仓库(集群外私有仓库, 预留, 未来实现) ----------------
 # ⚠ 当前集群镜像仓库统一使用【集群内 docker registry】(见阶段三 3.2, REGISTRY_ENABLED=1)。
@@ -199,6 +203,9 @@ LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/
 # ---------------- 2.1b 离线文件下载(MinIO, 可选) ----------------
 # 离线文件缺失时, 用 tools/offline/fetch-offline-from-minio.sh 从 MinIO 下载到 OFFLINE_FILES_DIR;
 # 需要 mc(MinIO Client, 见 Dockerfile-cli)。不配置则手工拷贝离线文件。
+#   · ⚠ fetch-offline-from-minio.sh 是部署【前置】工具, 不读本文件 —— 它只读独立的
+#     config/minio.conf(模板 minio.conf.example)或 MINIO_* 环境变量(下载时集群配置往往还不存在)。
+#   · sync-to-minio.sh / fetch-offline-files.sh 仍读本文件(统一数据源)。
 #   · 已有 mc alias(如 minio)时, sync-to-minio.sh / fetch-offline-from-minio.sh 会优先复用,
 #     以下 MINIO_* 可留空; 无 alias 时才需填写。
 #   · 桶/目录: 推荐默认桶 cubestack-installer、目录 offline-files(与本地 offline-files 同名布局);
@@ -280,7 +287,7 @@ METALLB_POOL="${METALLB_POOL}"   # 引用顶部必改项定义(避免两处维�
 # **所有 operator(GPU/LWS/...)都往它推镜像、节点按域名拉取** → 阶段四的隐含依赖。
 # 集群外镜像仓库 Harbor 为预留配置(见阶段一 1.7)。
 # 关闭: 顶部【组件启停开关】REGISTRY_ENABLED=0(不部署 addon 及节点信任/DNAT)。
-REGISTRY_DOMAIN="${REGISTRY_DOMAIN:-registry.local}"   # 内部域名(需本地 /etc/hosts 解析)
+REGISTRY_DOMAIN="${REGISTRY_DOMAIN:-registry.cubestack.io}"   # 内部域名(需本地 /etc/hosts 解析)
 # REGISTRY_IP 留空 = sync 自动从 METALLB_POOL 取池内首地址作为 LoadBalancer VIP(换环境只改 METALLB_POOL, 免手改)。
 # ⚠ 多集群共用同一网段时, 首地址必然被第一个集群占用 → 后续集群必须显式指定 REGISTRY_IP
 #   为一个不冲突的池内空闲地址(如 10.66.1.13x; 用 curl -s http://<候选IP>:5000/v2/ 探测无响应者可用),
@@ -296,8 +303,8 @@ REGISTRY_PORT="${REGISTRY_PORT:-5000}"
 #   clusterip    = 仅集群内访问
 REGISTRY_SERVICE_TYPE="${REGISTRY_SERVICE_TYPE:-}"
 REGISTRY_NODEPORT="${REGISTRY_NODEPORT:-31148}"        # nodeport 模式: 固定 NodePort(30000-32767)
-# 宿主机对外 DNAT(默认 0 = 只用 MetalLB VIP, 不做宿主机 NAT): 集群内/节点直接从 registry.local(VIP)拉取,
-# 无需宿主机转发; 仅当需要"集群外 push → push 机把 registry.local 解析到宿主机"时才设 1。
+# 宿主机对外 DNAT(默认 0 = 只用 MetalLB VIP, 不做宿主机 NAT): 集群内/节点直接从 registry.cubestack.io(VIP)拉取,
+# 无需宿主机转发; 仅当需要"集群外 push → push 机把 registry.cubestack.io 解析到宿主机"时才设 1。
 REGISTRY_EXPOSE_HOST="${REGISTRY_EXPOSE_HOST:-0}"
 
 
@@ -331,7 +338,7 @@ METAX_SAVE_PATTERN="${METAX_SAVE_PATTERN:-^harbor\.isuanova\.com/metax/}"
 METAX_SAVE_EXCLUDE="${METAX_SAVE_EXCLUDE:-sglang}"
 # 核心组件列表(对应 metax-k8s-images.<ver>.run 内嵌镜像, 与版本配套; METAX_LIST_IMAGES=true 可打印保存命令)
 METAX_IMAGE_COMPONENTS="${METAX_IMAGE_COMPONENTS:-gpu-label gpu-device gpu-aware topo-master topo-worker operator-controller container-runtime driver-manager gpu-scheduler mx-exporter}"
-# 集群内置 registry 仓库路径(默认 registry.local:5000/metax, 即 REGISTRY_DOMAIN:REGISTRY_PORT/metax)
+# 集群内置 registry 仓库路径(默认 registry.cubestack.io:5000/metax, 即 REGISTRY_DOMAIN:REGISTRY_PORT/metax)
 METAX_REGISTRY="${METAX_REGISTRY:-${REGISTRY_DOMAIN}:${REGISTRY_PORT}/metax}"
 METAX_NAMESPACE="${METAX_NAMESPACE:-metax-operator}"            # 部署命名空间
 METAX_RELEASE_NAME="${METAX_RELEASE_NAME:-metax-gpu-operator}"  # Helm release 名

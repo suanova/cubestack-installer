@@ -2,7 +2,7 @@
 # ============================================================
 # setup-api-expose.sh — 宿主机 K8s API 入口 DNAT(6443 → 第一个 master)
 # ------------------------------------------------------------
-# 用途: kubespray 生成的 admin.conf 证书 SAN 通常含 API_DOMAIN(如 k8s-api.nova.local)
+# 用途: kubespray 生成的 admin.conf 证书 SAN 通常含 API_DOMAIN(如 k8s-api.cubestack.io)
 #       但不含 master 直连 IP(如 10.66.1.232 / 10.244.1.11)。宿主侧要让 kubectl/helm 能经
 #       API_DOMAIN 访问集群, 需要:
 #         1) /etc/hosts: API_DOMAIN → API_IP(统一=第一个 master IP, VM/裸金属均不使用宿主机物理 IP)
@@ -33,7 +33,7 @@ done
 [ -n "${FIRST_MASTER}" ] || { err "cluster.conf 中无 master 节点"; exit 1; }
 
 [ -n "${API_IP}" ] || { err "API_IP 未派生(需 load_config 提供)"; exit 1; }
-[ -n "${API_DOMAIN}" ] || API_DOMAIN="k8s-api.nova.local"
+[ -n "${API_DOMAIN}" ] || API_DOMAIN="k8s-api.cubestack.io"
 
 # /etc/hosts 确保 API_DOMAIN → API_IP
 # ★ 关键: 无论目标 IP 是否已匹配, 都先删除该域名的【所有旧行】(换环境时旧 IP 残留会
