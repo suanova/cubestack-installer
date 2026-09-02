@@ -15,8 +15,8 @@
 | 3 | 全套监控附属组件(P1刚需) | 部署kube-state-metrics、Perses可视化组件,全覆盖采集集群各类指标并可视化展示,具体刚需采集项:1. 节点指标:node-exporter(必须) 2. 容器指标:kubelet/cAdvisor(必须) 3. NVIDIA GPU指标:DCGM Exporter(NVIDIA环境必须) 4. MetaX GPU指标:MetaX官方接口/Exporter(MetaX环境必须) 5. RDMA指标:RDMA Exporter/采集适配(必须) 6. Ceph指标:Ceph Exporter/采集适配(必须) | 0% | 未开始 | - |  |  | `modules/03_addon/04_prometheus.sh` / `PROMETHEUS_ENABLED` |
 | 4 | Docker Registry(Harbor) | 搭建可用镜像仓库,实现镜像推送、拉取、目录同步,保障集群业务镜像正常部署 | 0% | 未开始 | - |  |  | `modules/03_addon/05_harbor.sh` / `HARBOR_ENABLED`(集群外私有仓库,唯一方案) |
 | 5 | 沐曦MetaX GPU Operator | 完成GPU驱动部署、硬件识别、集群GPU资源调度,配套MetaX指标采集,保障GPU容器正常启动运行 | 100% | ✅ 已完成(2026-08-23) | - |  | 2026-08-23 | `modules/03_addon/04_gpu_operator.sh` / `GPU_OPERATOR_ENABLED`(详见 `docs/metax-gpu-operator.md`) |
-| 6 | Ceph 存储集群 | 完成Ceph底层存储集群部署、集群健康自检、存储池初始化,为上层CSI服务提供稳定存储底座 | 0% | 未开始 | - |  |  | `modules/03_addon/06_ceph.sh` / `CEPH_ENABLED` |
-| 7 | Ceph CSI(RBD/RGW/CephFS) | 部署CSI驱动,对接Ceph存储集群,实现三类存储卷正常创建、挂载、读写,集群StorageReady状态正常置位 | 0% | 未开始 | - |  |  | `modules/03_addon/07_ceph_csi.sh` / `CEPH_CSI_ENABLED` |
+| 6 | Ceph 存储集群 | 完成Ceph底层存储集群部署、集群健康自检、存储池初始化,为上层CSI服务提供稳定存储底座 | 50% | 进行中 | 模块/离线镜像/裸盘检测已实现; 待实机验证(见 `docs/ceph-rook.md`) |  |  | `modules/03_addon/02_ceph.sh` / `CEPH_ENABLED`(Rook v1.20.2 + 自动检测裸盘 + node label) |
+| 7 | Ceph CSI(RBD/RGW/CephFS) | 部署CSI驱动,对接Ceph存储集群,实现三类存储卷正常创建、挂载、读写,集群StorageReady状态正常置位 | 50% | 进行中 | 模块已实现(rbd-pool + ceph-block SC + 可选 CephFS/RGW); 待实机验证 |  |  | `modules/03_addon/03_ceph_csi.sh` / `CEPH_CSI_ENABLED` |
 | 8 | LWS | 完成LWS组件部署、集群适配与基础校验,保障集群轻量调度与配套服务正常运行 | 100% | ✅ 已完成(2026-08-23) | - |  | 2026-08-23 | `modules/03_addon/05_gpu_lws.sh` / `LWS_ENABLED`(helm 离线 + cert-manager/internal 双证书 + DisaggregatedSet, 详见 `docs/lws.md`) |
 | 9 | Envoy AI 网关(Envoy Gateway + Envoy AI Gateway) | 搭建集群统一流量入口,完成路由配置与转发测试,保障外部业务URL可正常稳定访问(通用网关基座 + AI 扩展层) | 50% | 进行中 | 模块/离线 chart/离线镜像工具已实现; 待联网机跑 envoy-fetch-charts.sh / envoy-save-images.sh 备料后实机验证 |  |  | `modules/03_addon/09_envoy_gateway.sh` + `10_envoy_ai_gateway.sh` / `ENVOY_GATEWAY_ENABLED` + `ENVOY_AI_GATEWAY_ENABLED`(详见 `docs/envoy-gateway.md`) |
 
@@ -76,9 +76,9 @@
 | P1-2/3 | Prometheus + 监控附属 | `03_addon/04_prometheus.sh` | `PROMETHEUS_ENABLED` | 🧩 伪代码占位 |
 | P1-4 | Docker Registry(Harbor) | `01_env/04_harbor.sh`(集群外私有仓库) | `HARBOR_ENABLED` | 🧩 伪代码占位 |
 | P1-5 | 沐曦 MetaX GPU Operator | `03_addon/04_gpu_operator.sh` | `GPU_OPERATOR_ENABLED` | ✅ 已完成(helm 原生安装 + 离线 tar 加载, 9 节点 69 GPU; 见 `docs/metax-gpu-operator.md`) |
-| P1-6 | Ceph 存储集群 | `03_addon/05_ceph.sh` | `CEPH_ENABLED` | 🧩 伪代码占位 |
-| P1-7 | Ceph CSI | `03_addon/06_ceph_csi.sh` | `CEPH_CSI_ENABLED` | 🧩 伪代码占位 |
-| P1-8 | LWS | `03_addon/05_gpu_lws.sh` | `LWS_ENABLED` | ✅ 已实现(helm 离线 + 双证书 + DisaggregatedSet) |
+| P1-6 | Ceph 存储集群 | `03_addon/02_ceph.sh` | `CEPH_ENABLED` | 🚧 已实现(Rook v1.20.2 离线, 待实机验证; 见 `docs/ceph-rook.md`) |
+| P1-7 | Ceph CSI | `03_addon/03_ceph_csi.sh` | `CEPH_CSI_ENABLED` | 🚧 已实现(rbd-pool + ceph-block SC + 可选 CephFS/RGW, 待实机验证) |
+| P1-8 | LWS | `03_addon/07_gpu_lws.sh` | `LWS_ENABLED` | ✅ 已实现(helm 离线 + 双证书 + DisaggregatedSet) |
 | P1-9 | Envoy AI 网关(统一流量入口: Envoy Gateway + Envoy AI Gateway) | `03_addon/09_envoy_gateway.sh` + `10_envoy_ai_gateway.sh` | `ENVOY_GATEWAY_ENABLED` + `ENVOY_AI_GATEWAY_ENABLED` | 🚧 已实现(离线 chart+镜像工具齐, 待备料实机验证; 见 `docs/envoy-gateway.md`) |
 | P2-1 | Keycloak 统一认证 | `03_addon/08_keycloak.sh` | `KEYCLOAK_ENABLED` | 🧩 伪代码占位 |
 | P2-2 | Kueue 队列治理 | `03_addon/09_kueue.sh` | `KUEUE_ENABLED` | 🧩 伪代码占位 |

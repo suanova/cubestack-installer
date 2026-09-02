@@ -14,9 +14,11 @@
   gather_facts: false
   vars:
     repo_base: "{{ playbook_dir }}/../../offline-files/kubespray/{{ inventory_dir | basename }}"
+    repo_base_shared: "{{ playbook_dir }}/../../offline-files/kubespray"
     packages_dirs:
       - "{{ repo_base }}"
       - "{{ repo_base }}/packages"
+      - "{{ repo_base_shared }}/packages"
 
   tasks:
     - name: Ensure /tmp/packages directory exists on target
@@ -24,7 +26,7 @@
         path: /tmp/packages
         state: directory
 
-    - name: Find offline .deb packages (仓库根目录 + packages/)
+    - name: Find offline .deb packages (仓库根目录 + packages/ + 共享 packages/)
       find:
         paths: "{{ packages_dirs }}"
         patterns: "*.deb"
@@ -58,5 +60,6 @@
           - "'iptables' in ansible_facts.packages"
           - "'curl' in ansible_facts.packages"
           - "'ca-certificates' in ansible_facts.packages"
+          - "'lvm2' in ansible_facts.packages"
         fail_msg: "Required packages missing on {{ inventory_hostname }}"
         success_msg: "All required packages installed on {{ inventory_hostname }}"

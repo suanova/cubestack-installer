@@ -65,8 +65,9 @@ usage() {
           (默认执行 vm_sshkey; vm_network 默认关 — 宿主网络初始化改由 tools/vm/create-vms.sh 创建 VM 时自动执行; vm_create 默认关 — 虚拟机创建由 tools/vm/create-vms.sh 独立执行)
   02_k8s  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp           (默认执行)
           k8s_deploy(默认关, --with-k8s)  k8s_scale(默认关, --with-scale)
-  03_addon 依赖顺序: metallb local_path k8s_registry(基础) 中间件: gpu_operator gpu_lws prometheus ceph
-          ceph_csi envoy_gateway envoy_ai_gateway keycloak kueue kubevirt lustre_csi (默认关, --enable)
+  03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
+          local_path(可选) k8s_registry 中间件: gpu_operator gpu_lws prometheus
+          envoy_gateway envoy_ai_gateway keycloak kueue kubevirt lustre_csi (默认关, --enable)
           20 起自研: cubestack_apps(CUBESTACK_APPS_ENABLED, 默认关)
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
