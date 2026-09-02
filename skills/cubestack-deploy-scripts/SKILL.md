@@ -336,6 +336,29 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - **AI 与 EG 版本兼容**: 升级 AIG 版本时核对官方兼容矩阵; `extensionManager` 结构/CRD 字段随版本变化,
   全部走 cluster.conf `ENVOY_AI_*` 变量, 不硬编码。
 
+## Ceph / Rook 部署速查(Rook v1.20.2 + Ceph v20.2.2, 详见 docs/ceph-rook.md)
+
+- **定位**: 高可用分布式存储(块 RBD; 可选 CephFS/RGW)。生产设计 `size=3 + failureDomain=host + min_size=2 + mon=3`。
+- **离线三件套(联网机)**: `tools/k8s/rook-fetch-manifests.sh`(rook manifest → `cubestack-addon/rook/`)、
+  `tools/images/ceph-save-images.sh`(镜像 → `offline-files/ceph`, **每镜像独立 tar + --platform linux/amd64**,
+  多架构 tar 会让 `ctr import` 报 "content digest not found")、`tools/offline/fetch-lvm-packages.sh`
+  (lvm2 .deb → `offline-files/kubespray/packages`, OSD 重启需 lvm 激活逻辑卷)。
+- **节点选择**: `CEPH_NODES`(cluster.conf; 空=全部)→ 模块自动打 label `CEPH_NODE_LABEL`(默认 `ceph-storage=rook-ceph`)。
+- **裸盘自动检测(防覆盖)**: `tools/k8s/ceph-detect-disks.sh` 判定"未使用裸盘"(无分区/格式化/挂载/LVM 且非系统盘)
+  → 生成 CephCluster CR 的 per-node devices(精确盘名)。部署前**红底列出节点+盘并 sleep CEPH_CONFIRM_SLEEP(60s)**
+  double-check; CI 可 `CEPH_CONFIRM_SLEEP=0`。
+- **镜像同步**: `tools/images/ceph-sync-images.sh`(复制 tar 到全部节点 + `ctr -n k8s.io images import --no-unpack`)。
+- **VM 测试盘**: `vm-nodes.conf` 的 `VM_DATA_DISKS=3/VM_DATA_DISK_SIZE=200` → 每台 VM 附加 3×200GB 裸盘(Guest `/dev/vdb~`),
+  由 `tools/vm/create-vms.sh` 创建时自动附加。
+- **部署顺序(03_addon 已重排)**: `01_metallb → 02_ceph → 03_ceph_csi → 04_local_path → 05_k8s_registry → …`;
+  registry 后端设 `REGISTRY_STORAGE_CLASS=ceph-block` 即走 ceph(替代 local-path)。
+- **常用命令**:
+  ```bash
+  sudo ./deploy-cluster.sh --steps ceph,ceph_csi          # 部署(或 CEPH_ENABLED=true+CEPH_CSI_ENABLED=true 随全量)
+  sudo ./deploy-cluster.sh --steps verify_ceph            # 端到端: operator/CSI+Ready+ceph -s+RBD 块 I/O
+  kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
+  ```
+
 ## 审查清单(写完脚本后自检)
 
 - [ ] 文件名符合 `NN_category_action.sh`,序号不冲突

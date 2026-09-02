@@ -21,8 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 离线文件根目录(全局变量, load_config 已派生); 包目录 = 当前集群离线资源目录
 OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}"
 REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}/${CLUSTER_NAME:-cubestack-cluster}}"
-# 离线 .deb 包来源: 优先仓库根目录(与 kubeadm/etcd 等二进制同层),兼容 packages/ 子目录
-PKG_DIRS=("${REPO_DIR}" "${REPO_DIR}/packages")
+# 离线 .deb 包来源: 仓库根目录 + packages/ 子目录 + 共享 offline-files/kubespray/packages(lvm2 等放此处)
+PKG_DIRS=("${REPO_DIR}" "${REPO_DIR}/packages" "${OFFLINE_FILES_DIR}/packages" "${REPO_ROOT}/deployments/offline-files/kubespray/packages")
 
 # SSH 密钥配置: 优先 root 默认 id_rsa(物理 worker 已预配 root 免密), 回退 cubestack_k8s
 SSH_KEY_DIR="${SSH_KEY_DIR:-${REAL_HOME}/.ssh}"
@@ -71,4 +71,4 @@ say "安装中 (dpkg -i) ..."
 ${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" \
   "sudo dpkg -i /tmp/packages/*.deb 2>&1 | tail -5 && sudo rm -rf /tmp/packages"
 
-ok "✅ ${IP} 离线包安装完成: iputils-ping rsync iptables curl ca-certificates"
+ok "✅ ${IP} 离线包安装完成: iputils-ping rsync iptables curl ca-certificates lvm2(如 packages 内含)"

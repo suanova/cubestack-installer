@@ -125,6 +125,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 | **LeaderWorkerSet (LWS)** | LLM/AI 工作负载调度(Leader/Worker 组 + DisaggregatedSet) | 默认官方 manifests.yaml bundle(kubectl apply --server-side); helm chart 保留于 lws/charts; controller 管理 LeaderWorkerSet/DisaggregatedSet; webhook 打 `leaderworkerset.sigs.k8s.io/worker-index` 等标签 | 面向 LLM 推理/训练的组调度; 内建 DisaggregatedSet 解耦推理; 支持 cert-manager/internal 双证书 | `--steps gpu_lws`(立即部署)+ 见 `docs/lws.md` |
 | **Envoy Gateway (EG)** | 通用 K8s API 网关(Gateway API 标准实现) | 控制面 `envoy-gateway` 监听 GatewayClass/Gateway/HTTPRoute → xDS 推送按需动态创建的 Envoy Proxy 数据面 Deployment; 入口经 MetalLB 分配 VIP | 统一流量入口(P1-9 刚需): 路由/限流/重试/超时/TLS/JWT 等全走标准 Gateway API; 是 Envoy AI Gateway 的基座 | `ENVOY_GATEWAY_ENABLED=true` + `--enable envoy_gateway` + 见 `docs/envoy-gateway.md` |
 | **Envoy AI Gateway (AIG)** | LLM/AI 专用网关(多模型供应商统一入口/token 限流/语义缓存/failover) | 不是独立二进制: = 特制 EG 控制面 + AI 控制器(Extension Server 机制注册进 EG 的 extensionManager)+ AI CRD(AIGateway/Backend/BackendSecurityPolicy); AI 控制器把 AI CRD 翻译为 Gateway/HTTPRoute 交 EG 控制面 | AI 流量语义(token 级限流/多供应商适配/failover/guardrail)EG 本身不感知, 由 AI 层补齐; 依赖 EG 先装 | `ENVOY_AI_GATEWAY_ENABLED=true`(需 EG)+ `--enable envoy_ai_gateway` + 见 `docs/envoy-gateway.md` |
+| **Rook-Ceph** | 企业级分布式存储(块 RBD / 可选 CephFS / RGW) | Rook v1.20.2 operator + CephCluster(mon=3, host 故障域, 3 副本); OSD 用**自动检测的未使用裸盘**(per-node devices); 节点经 label(`ceph-storage=rook-ceph`)选择 | 可承受节点故障的高可用存储(P1-6/7 刚需); 供 registry 等 PVC 后端(替代 local-path); 离线镜像 ctr import + lvm2 离线包 | `CEPH_ENABLED=true`/`CEPH_CSI_ENABLED=true` + `--steps ceph,ceph_csi` + 见 `docs/ceph-rook.md` |
 
 > 详细部署/开关见 `cluster.conf` 组件开关段与 `deployments/scripts/modules/`。
 > 后续新增 operator 按 `skills/cubestack-operator-onboarding/SKILL.md` 流程添加并更新本表。
@@ -189,6 +190,22 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
   `docs/envoy-gateway.md`。本仓库验证模块仅做控制面调和 + mock 数据面调用, 真实 LLM 需配置真实
   Backend + API Key(未在离线环境端到端验证过真实模型调用)。
 - 部署/验证入口: `docs/envoy-gateway.md`。
+
+### 5.5 Rook-Ceph 架构与原理(高可用分布式存储)
+
+- 架构: Rook v1.20.2 operator(Rook 在 k8s 内自举 mon/mgr/osd)调和 CephCluster CR → 守护进程
+  Deployment/StatefulSet; 数据面 = OSD 直管节点**裸盘**(LVM/bluestore)。
+- 存储节点选择: `CEPH_NODES`(cluster.conf)决定候选; 模块自动给节点打 label `CEPH_NODE_LABEL`
+  (默认 `ceph-storage=rook-ceph`), CephCluster 的 placement + storage.nodes 只落这些节点。
+- 裸盘策略: `tools/k8s/ceph-detect-disks.sh` 自动检测"未使用裸盘"(整盘无分区/格式化/挂载/LVM,
+  非系统盘), 生成 CR 的 per-node devices(精确盘名防误选); 部署前红底确认 + sleep 60s 防覆盖。
+- 高可用: `size=3 + failureDomain=host + min_size=2 + mon.count=3`, 单主机故障池仍可写。
+- 离线: 镜像(`offline-files/ceph`)经 ctr import(保持原始 ref); lvm2 由
+  `offline-files/kubespray/packages` 离线 .deb 安装; VM 测试盘 = create-vms.sh 附加的 3×200GB 裸盘。
+- 部署顺序: `03_addon/02_ceph → 03_ceph_csi` 在 `05_k8s_registry` 之前 —— registry 可设
+  `REGISTRY_STORAGE_CLASS=ceph-block` 用 ceph RBD 作后端(替代 local-path)。
+- 验证: `--steps verify_ceph`(operator/CSI + phase=Ready + ceph -s + RBD 块 I/O 冒烟)。
+- 部署/验证入口: `docs/ceph-rook.md`。
 
 ### 5.1 MetalLB 架构与原理(裸金属 LoadBalancer)
 

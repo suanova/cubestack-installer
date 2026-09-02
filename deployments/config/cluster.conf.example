@@ -96,6 +96,40 @@ KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # 虚拟机能力(P2; �
 LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(P3; 见 4.5)
 CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # CubeStack 自研组件(占位; 见 4.6)
 
+# ---- 4.3b Rook/Ceph 配置(详见 docs/ceph-rook.md) ----
+# 部署方式: Rook Operator(v1.20.2 manifest, 离线 vendoring 于 deployments/cubestack-addon/rook/)
+#   + CephCluster CR(Rook 自建 mon/mgr/osd, 由 modules/03_addon/07_ceph.sh 编排)+ ceph-csi(RBD/CephFS)。
+# 存储节点选择: CEPH_NODES 显式列出(hostname, 逗号分隔); 留空 = 全部 NODES 节点(至少 3 台奇数更佳)。
+#   模块会先给这些节点打 node label(CEPH_NODE_LABEL), CephCluster 据此只调度到这些节点。
+CEPH_NODES="${CEPH_NODES:-}"                      # 部署 Ceph 的节点(hostname 逗号分隔); 空=全部节点
+CEPH_NODE_LABEL="${CEPH_NODE_LABEL:-ceph-storage=rook-ceph}"   # 存储节点 label(key=value; 模块自动打标)
+CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"     # Rook/Ceph 命名空间
+CEPH_VERSION="${CEPH_VERSION:-v20.2.2}"           # Ceph 守护进程镜像 tag
+ROOK_VERSION="${ROOK_VERSION:-v1.20.2}"           # Rook operator 版本(manifest 目录名+镜像 tag)
+CEPHCSI_VERSION="${CEPHCSI_VERSION:-v3.17.0}"     # cephcsi 驱动镜像 tag
+CEPH_CSI_OPERATOR_VERSION="${CEPH_CSI_OPERATOR_VERSION:-v1.0.4}"  # ceph-csi-operator(rook v1.20 必须)
+# 裸盘(OSD)策略: auto=模块自动检测每个存储节点的未使用裸盘(推荐, 需求 1);
+#   explicit=手工在 CEPH_DATA_DISKS 指定(node:/dev/vdb,/dev/vdc; 逗号分隔多节点, 分号分隔条目)。
+CEPH_DATA_DISK_POLICY="${CEPH_DATA_DISK_POLICY:-auto}"
+CEPH_DATA_DISKS="${CEPH_DATA_DISKS:-}"            # explicit 策略: 如 "cubestack-k8s-master01:/dev/vdb,/dev/vdc;cubestack-k8s-worker01:/dev/vdb"
+CEPH_DETECT_EXCLUDE="${CEPH_DETECT_EXCLUDE:-^(sda|sr0|vda)$}"   # 自动检测时排除的盘名(正则, 防误选系统盘)
+# 高可用与池(replicated 生产缺省: 3 副本 + host failureDomain + min_size 2; 见 docs/ceph-rook.md)
+CEPH_MON_COUNT="${CEPH_MON_COUNT:-3}"             # mon 数量(奇数, 默认 3)
+CEPH_POOL_REPLICAS="${CEPH_POOL_REPLICAS:-3}"     # 副本数
+CEPH_POOL_MIN_SIZE="${CEPH_POOL_MIN_SIZE:-2}"     # min_size(1 台主机宕机池仍可写)
+CEPH_OSD_MEMORY_TARGET="${CEPH_OSD_MEMORY_TARGET:-4}"   # 每 OSD 内存目标(GiB; 小盘 4G 足够, 大盘按文档调)
+CEPHFS_ENABLED="${CEPHFS_ENABLED:-false}"         # 可选: 启用 CephFS(RWX 共享文件)
+CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-false}"     # 可选: 启用 RGW/S3 对象存储
+CEPH_DASHBOARD_ENABLED="${CEPH_DASHBOARD_ENABLED:-true}"  # Ceph Dashboard
+# 安全确认: CEPH_ENABLED=true 部署时模块会红底列出将用的节点与裸盘并 sleep 60s 供 double-check;
+#   核对无误可 CEPH_CONFIRM_SLEEP=0(脚本环境变量)跳过, 生产不建议。
+CEPH_CONFIRM_SLEEP="${CEPH_CONFIRM_SLEEP:-60}"
+# 离线文件: ceph 镜像 tar(独立脚本 tools/images/ceph-save-images.sh 下载)
+CEPH_IMAGE_DIR="${CEPH_IMAGE_DIR:-${REPO_ROOT}/deployments/offline-files/ceph}"   # 默认 ~/cubestack-installer/deployments/offline-files/ceph
+CEPH_ROOK_MANIFEST_DIR="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}"
+# registry 后端存储: local-path(默认)| ceph-block(CEPH 启用后, registry 的 PVC 改走 ceph RBD)
+REGISTRY_STORAGE_CLASS="${REGISTRY_STORAGE_CLASS:-local-path}"
+
 # ============================================================
 # 其余配置按阶段组织(顺序即依赖方向):
 #   阶段一、宿主机环境 / 阶段二、kubespray 基座 / 阶段三、集群基础设施

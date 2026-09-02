@@ -50,6 +50,25 @@ virsh list --all | grep -qw "${VM_NAME}" && { echo -e "\033[31m【错误】VM ${
 [ -f "${VM_DISK}" ] && { echo -e "\033[31m【错误】磁盘 ${VM_DISK} 已存在\033[0m"; exit 1; }
 [ -f "${BASE_IMG}" ] || { echo -e "\033[31m【错误】基础镜像不存在：${BASE_IMG}\033[0m"; exit 1; }
 
+# ==================== 附加裸盘(默认 3×200GB, 供 Ceph OSD 等) ====================
+# 配置来源: vm-nodes.conf(VM_DATA_DISKS/VM_DATA_DISK_SIZE/VM_DATA_DISK_FORMAT)或环境变量。
+# 裸盘 = 空盘(无分区/文件系统), Guest 内以 /dev/vdb~vdX 呈现; 不格式化, 由 Rook/Ceph 等上层认领。
+VM_DATA_DISKS="${VM_DATA_DISKS:-3}"
+VM_DATA_DISK_SIZE="${VM_DATA_DISK_SIZE:-200}"
+VM_DATA_DISK_FORMAT="${VM_DATA_DISK_FORMAT:-qcow2}"
+DATA_DISK_ARGS=()
+DATA_DISK_FILES=()
+if [ "${VM_DATA_DISKS:-0}" -gt 0 ] 2>/dev/null; then
+    echo -e "\033[36m→ 附加裸盘: ${VM_DATA_DISKS}×${VM_DATA_DISK_SIZE}G(${VM_DATA_DISK_FORMAT}, 供 Ceph OSD 等使用) ...\033[0m"
+    for n in $(seq 1 "${VM_DATA_DISKS}"); do
+        _dd="${VM_DISK_DIR:-/k8s/vm-disks}/${VM_NAME}-data${n}.${VM_DATA_DISK_FORMAT}"
+        [ -f "${_dd}" ] && { echo -e "\033[31m【错误】裸盘文件已存在(避免误覆盖): ${_dd}\033[0m"; exit 1; }
+        DATA_DISK_FILES+=("${_dd}")
+        # size 仅在文件不存在时创建; sparse 稀疏分配, 实际占用随写入增长
+        DATA_DISK_ARGS+=(--disk "path=${_dd},size=${VM_DATA_DISK_SIZE},format=${VM_DATA_DISK_FORMAT},bus=virtio,sparse=true")
+    done
+fi
+
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
 # ==================== 网络参数解析 ====================
@@ -242,6 +261,7 @@ virt-install \
   --vcpus "${VCPU}" \
   --cpu host-passthrough \
   --disk path="${VM_DISK}",format=qcow2,bus=virtio \
+  ${DATA_DISK_ARGS[@]+"${DATA_DISK_ARGS[@]}"} \
   --network "${NET_ARG}",mac="${VM_MAC}",model=virtio \
   --os-variant ubuntu22.04 \
   --cloud-init user-data="${WORK_DIR}/user-data",meta-data="${WORK_DIR}/meta-data" \
@@ -311,6 +331,10 @@ auto_register_vm
 echo "✅ 登录: root/密码(镜像预埋, 由 create-vm-template.sh 的 GOLDEN_IMAGE_PASSWORD 指定, 默认 CHANGE_ME) 或 ubuntu/同密码 (sudo免密)"
 echo "  静态IP: ${VM_IP}/${PREFIX}  网关: ${GATEWAY}"
 echo "  规格: ${MEM_G}G/${VCPU}C/${DISK_G}G"
+if [ "${#DATA_DISK_FILES[@]}" -gt 0 ]; then
+    echo "  附加裸盘: ${#DATA_DISK_FILES[@]}×${VM_DATA_DISK_SIZE}G(供 Ceph OSD 等, Guest 内 /dev/vd[b-z]):"
+    for _dd in "${DATA_DISK_FILES[@]}"; do echo "    - $(basename "${_dd}")"; done
+fi
 if [ "${VM_NET_MODE}" = "bridge" ]; then
     echo "  网络: bridge 方案(${NET_ARG}), 跨二层互通由宿主 SNAT+回程路由保证"
 else

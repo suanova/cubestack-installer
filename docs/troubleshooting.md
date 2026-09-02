@@ -420,6 +420,33 @@ kubectl -n <gw-ns> get deploy -l gateway.envoyproxy.io/owning-gateway-name=<gw> 
 
 ---
 
+### 6. Ceph / Rook 部署故障速查
+
+> 设计与离线流程见 `docs/ceph-rook.md`。
+
+**症状/排查对照**
+
+| 症状 | 根因 | 解法(根治) |
+|---|---|---|
+| OSD Prepare 失败 / osd Pod CrashLoop | 裸盘残留文件系统/LVM/分区签名, Rook 视为"已使用" | 只在**确认空闲的数据盘**上清盘: `wipefs --all -f /dev/<盘>; sgdisk --zap-all /dev/<盘>; rm -rf /var/lib/rook`; 勿碰系统盘(先 `lsblk` 核对) |
+| 节点重启后 OSD 逻辑卷无法激活 | **lvm2 未安装**(Rook OSD 依赖 lvm 激活 LVM 卷) | 离线包放入 `offline-files/kubespray/packages`(联网机 `tools/offline/fetch-lvm-packages.sh`)后 `dpkg -i`; 或 apt 安装 lvm2 后重启 OSD |
+| ceph 镜像 ImagePullBackOff | 节点 containerd 无镜像(离线) | `tools/images/ceph-save-images.sh`(联网机, `--platform linux/amd64` 单架构)生成 tar → `ceph-sync-images.sh` 同步并 `ctr -n k8s.io images import --no-unpack` |
+| ctr import 报 "content digest not found" | 多架构(manifest-list)tar | 拉取用 `--platform linux/amd64` 单架构; import 加 `--no-unpack` |
+| `ceph -s` HEALTH_WARN clock skew | 存储节点时钟漂移(离线无上游) | 部署前 NTP 模块对齐; 生产存储节点用 chrony, `chronyc makestep`, offset<20ms |
+| registry PVC 一直 Pending | `REGISTRY_STORAGE_CLASS=ceph-block` 但 `ceph-block` SC 未创建 | 先部署 ceph_csi 模块(建 rbd-pool + SC); PVC 会自动绑定; 老 PVC 删除后 registry 重建即切换 |
+| mon/osd 未调度到目标节点 / 一直在 Pending | 节点缺 label 或 CEPH_NODES 与预期不符 | `kubectl get node --show-labels | grep ceph-storage`; 模块自动打 `CEPH_NODE_LABEL`; 核对 CEPH_NODES |
+| 部署模块报"所有存储节点均未检测到裸盘" | VM 未附加数据盘 / 盘已被分区 | VM: `vm-nodes.conf` 设 `VM_DATA_DISKS=3 VM_DATA_DISK_SIZE=200` 后重建 VM; 裸金属: 挂新盘; 或显式 `CEPH_DATA_DISKS="node:/dev/vdb,…"` |
+| CephCluster 删不掉/卡 Terminating | 未设 cleanupPolicy | `kubectl -n rook-ceph patch cephcluster rook-ceph --type merge -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}'` 后再 delete |
+
+**验证**
+```bash
+sudo ./deploy-cluster.sh --steps verify_ceph          # 端到端: operator/CSI + phase=Ready + ceph -s + RBD 块 I/O
+kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
+kubectl -n rook-ceph get cephcluster,cephblockpool; kubectl get sc ceph-block
+```
+
+---
+
 ## 四、离线部署
 
 ### 1. 【单机/重装】`Drain node` → `Remove-node | List nodes` 报 `error: stat /etc/kubernetes/admin.conf: no such file or directory`
