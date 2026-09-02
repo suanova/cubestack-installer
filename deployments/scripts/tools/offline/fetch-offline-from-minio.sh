@@ -8,7 +8,7 @@
 #       · 宿主机执行: 可 --auto 自动挑空闲最大的大磁盘下载, 完成后打印容器挂载命令。
 # 特性:
 #   · mc 检测: 未安装时给出安装指引, 并可选择自动下载(MinIO 官方二进制, 与 Dockerfile-cli 同源);
-#   · mc alias 检测/配置: 优先用 cluster.conf 的 MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY 自动配置;
+#   · mc alias 检测/配置: 优先用独立 MinIO 配置(config/minio.conf 或 MINIO_* 环境变量)自动配置;
 #     否则探测本机已有 alias 是否可访问(自动跳过占位 alias), 都没有则交互式录入并配置;
 #   · 桶/目录自适应: 默认桶 cubestack-installer、目录 offline-files(与 MinIO 实际布局一致),
 #     自动回退探测旧布局(cubestack-offline/kubespray);
@@ -32,33 +32,38 @@
 #   sudo ./fetch-offline-from-minio.sh --force                    # 跳过磁盘空间不足检查(谨慎)
 #   sudo ./fetch-offline-from-minio.sh --yes                      # 跳过交互确认(自动化)
 #   ./fetch-offline-from-minio.sh --list                          # 只列出 MinIO 可用目录(不需 root)
-# 数据源: cluster.conf (MINIO_ALIAS / MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY /
-#                       MINIO_BUCKET / MINIO_REMOTE_DIR)
+# 数据源: config/minio.conf(独立 MinIO 配置, 模板 minio.conf.example)或 MINIO_* 环境变量;
+#         刻意不依赖 cluster.conf / lib-common.sh —— 本脚本是部署【前置】的下载工具,
+#         下载离线文件时集群配置往往还不存在, 不应要求先配好集群。
 # ============================================================
 set -euo pipefail
 
-# 捕获"进程环境显式传入的 OFFLINE_FILES_DIR"(须在 load_config 之前, 否则已被 lib-common 默认覆盖)
-OFFLINE_FILES_DIR_RAW="${OFFLINE_FILES_DIR:-}"
+# ---------------- 独立配置加载(不依赖 cluster.conf / lib-common) ----------------
+# 本脚本是部署【前置】的下载工具: 下载离线文件时往往还没有集群配置, 因此刻意
+# 不 source lib-common.sh、不读 cluster.conf, 只读独立的 MinIO 配置(避免"先有鸡还是先有蛋")。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"   # tools/offline/ → 仓库根
 
-# shellcheck source=lib-common.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
-load_config
-# 记录"用户显式 OFFLINE_FILES_DIR"(环境变量):
-#   lib-common 会把未设置时的默认导出为 .../offline-files/kubespray(部署脚本专用内层语义),
-#   fetch 的下载目标是 offline-files 总根, 不能误用该默认 → 仅在用户显式设置时采用。
-# 判定"显式": ① 进程环境中确实传入了 OFFLINE_FILES_DIR(env 前导 / export); ② 或 cluster.conf
-# 里将其设成了 offline-files 根(.../offline-files, 而非 .../offline-files/kubespray 内层)。
-# ⚠ 默认(不显式设置): cluster.conf 里 OFFLINE_FILES_DIR 留空 → lib-common 解析为 .../offline-files/kubespray,
-#   属部署脚本内层默认, 此处忽略 → fetch 走 offline-files 总根(场景 1, 默认即下载到 offline-files/{kubespray,lws,metax-gpu,os})。
-OFFLINE_FILES_DIR_EXPLICIT=""
-if [ -n "${OFFLINE_FILES_DIR_RAW:-}" ]; then
-    OFFLINE_FILES_DIR_EXPLICIT="${OFFLINE_FILES_DIR_RAW}"
-elif [ -n "${OFFLINE_FILES_DIR:-}" ]; then
-    case "${OFFLINE_FILES_DIR}" in
-        */offline-files/kubespray) OFFLINE_FILES_DIR_EXPLICIT="" ;;  # lib-common 默认内层, 忽略
-        *) OFFLINE_FILES_DIR_EXPLICIT="${OFFLINE_FILES_DIR}" ;;      # 用户显式根
-    esac
+# 极简日志助手(风格与 lib-common 一致, 独立定义以免引入整个配置链)
+say()  { echo -e "\033[36m→  $*\033[0m"; }
+ok()   { echo -e "\033[32m✅ $*\033[0m"; }
+warn() { echo -e "\033[33m⚠  $*\033[0m"; }
+err()  { echo -e "\033[31m【错误】$*\033[0m" >&2; }
+
+# MinIO 配置来源(优先级: 环境变量 > minio.conf > 内置默认):
+#   · 默认读 config/minio.conf(独立文件, 模板 config/minio.conf.example; 含密钥已 gitignore);
+#     可用环境变量 MINIO_CONF 覆盖路径, 或完全不用文件、直接设 MINIO_* 环境变量。
+#   · minio.conf 内变量以 ${VAR:-默认} 形式定义 → 环境变量自然优先于文件。
+MINIO_CONF="${MINIO_CONF:-${REPO_ROOT}/deployments/config/minio.conf}"
+if [ -f "${MINIO_CONF}" ]; then
+    # shellcheck disable=SC1090
+    source "${MINIO_CONF}"
+    say "已加载 MinIO 配置: ${MINIO_CONF}"
 fi
+
+# 下载目标根目录: 仅用户显式设置 OFFLINE_FILES_DIR(环境变量/minio.conf)时采用;
+#   不设则走默认/--dest/--auto(offline-files 总根, 与 lib-common 的内层默认语义无关)。
+OFFLINE_FILES_DIR_EXPLICIT="${OFFLINE_FILES_DIR:-}"
 export OFFLINE_FILES_DIR_EXPLICIT
 
 # ---------------- 参数解析 ----------------
@@ -120,15 +125,15 @@ mc_has() { mc ls "$1" 2>/dev/null | grep -q .; }
 
 mc_alias_ready=0
 if [ -n "${MINIO_ENDPOINT:-}" ] && [ -n "${MINIO_ACCESS_KEY:-}" ] && [ -n "${MINIO_SECRET_KEY:-}" ]; then
-    say "cluster.conf 提供 MinIO 配置 → 配置 alias ${MINIO_ALIAS}: ${MINIO_ENDPOINT}"
+    say "MinIO 配置就绪(环境变量/minio.conf) → 配置 alias ${MINIO_ALIAS}: ${MINIO_ENDPOINT}"
     mc alias set "${MINIO_ALIAS}" "${MINIO_ENDPOINT}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" >/dev/null 2>&1 \
         || { err "mc alias 配置失败(检查 MINIO_ENDPOINT/凭证/网络)"; exit 1; }
     ok "alias ${MINIO_ALIAS} 配置就绪"
     mc_alias_ready=1
 else
-    say "探测本机已有 mc alias(无 cluster.conf MinIO 配置) ..."
-    # 先试默认 alias, 再遍历所有已配置 alias; 桶候选 = cluster.conf 值 + 已知布局
-    # (cluster.conf 示例默认 cubestack-offline 可能与实际 MinIO 布局不一致, 需逐个试)
+    say "探测本机已有 mc alias(无 MINIO_ENDPOINT 配置) ..."
+    # 先试默认 alias, 再遍历所有已配置 alias; 桶候选 = MINIO_BUCKET 值 + 已知布局
+    # (默认桶 cubestack-installer 可能与实际 MinIO 布局不一致, 需逐个试)
     for al in "${MINIO_ALIAS}" $(mc alias list 2>/dev/null | awk '/^[A-Za-z0-9_.-]+[[:space:]]*$/{print $1}'); do
         [ -n "${al}" ] || continue
         for _b in "${MINIO_BUCKET}" "cubestack-installer" "cubestack-offline"; do
@@ -142,9 +147,9 @@ else
 fi
 if [ "${mc_alias_ready}" != "1" ]; then
     if [ "${YES}" = "1" ]; then
-        err "无可用 mc alias(--yes 模式不交互), 请先在 cluster.conf 填 MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY 或配置 mc alias"; exit 1
+        err "无可用 mc alias(--yes 模式不交互), 请先在 config/minio.conf 填 MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY 或配置 mc alias"; exit 1
     fi
-    warn "未检测到可用的 MinIO 配置, 请交互录入(或先在 cluster.conf 配置 MINIO_* 变量):"
+    warn "未检测到可用的 MinIO 配置, 请交互录入(或先在 config/minio.conf 配置 MINIO_* 变量):"
     read -r -p "  MinIO 服务地址 (如 http://192.168.16.6:9000): " _ept
     read -r -p "  AccessKey: " _ak
     read -r -s -p "  SecretKey: " _sk; echo ""
@@ -169,7 +174,7 @@ probe_remote() {   # 找到可访问的 <bucket>/<remotedir>, 更新全局变量
 }
 if ! probe_remote; then
     err "MinIO 中找不到离线目录(尝试了 cubestack-installer / cubestack-offline 桶, offline-files / kubespray 目录)"
-    err "请检查 cluster.conf 的 MINIO_BUCKET / MINIO_REMOTE_DIR, 或 mc ls ${MINIO_ALIAS}/ 确认布局"
+    err "请检查 config/minio.conf 的 MINIO_BUCKET / MINIO_REMOTE_DIR, 或 mc ls ${MINIO_ALIAS}/ 确认布局"
     exit 1
 fi
 # probe_remote 会更新 MINIO_BUCKET/MINIO_REMOTE_DIR, 须在其后组装 SRC_ROOT
@@ -201,15 +206,15 @@ fi
 #   · 容器内: REPO_ROOT=/opt/cubestack-installer, 即默认 offline-files 路径;
 #   · 宿主机直跑本仓库: 默认同一路径; 磁盘不足时用 --auto 换更大磁盘。
 # 下载目录 = offline-files 总根(远端 offline-files/<子目录> 直接落到 <TARGET>/<子目录>):
-#   注意 lib-common 的 OFFLINE_FILES_DIR 默认是 .../offline-files/kubespray(kubespray 内层),
-#   与本脚本的 offline-files 总根语义不同 —— 因此这里只认: 环境变量显式 OFFLINE_FILES_DIR(用户自定义根) 或
-#   --dest 显式指定; lib-common 自动导出的默认值(指向 offline-files/kubespray)不采纳, 避免下载进 kubespray/ 内层。
+#   只认用户显式 OFFLINE_FILES_DIR(环境变量/minio.conf)或 --dest; 都不设则用默认总根。
+#   (本脚本不依赖 lib-common, 不会有它自动导出的 .../offline-files/kubespray 内层默认,
+#    天然就是 offline-files 总根语义, 不会下载进 kubespray/ 内层。)
 DEFAULT_DIR="${REPO_ROOT}/deployments/offline-files"
 if [ -n "${DEST_ARG}" ]; then
     TARGET="${DEST_ARG}"
     say "使用指定下载目录: ${TARGET}"
 elif [ -n "${OFFLINE_FILES_DIR_EXPLICIT:-}" ]; then
-    # 仅用户显式设置(环境变量)时才采用; lib-common 自动导出的默认(offline-files/kubespray)不采纳
+    # 仅用户显式设置(环境变量/minio.conf)时才采用
     TARGET="${OFFLINE_FILES_DIR_EXPLICIT}"
     say "使用显式 OFFLINE_FILES_DIR 下载目录: ${TARGET}"
 elif [ "${IS_CONTAINER}" = "1" ]; then

@@ -1,0 +1,22 @@
+# ============================================================
+# MinIO 独立配置(fetch-offline-from-minio.sh 等离线工具使用)
+# 复制为 config/minio.conf 后填写(真实配置含密钥, 已 gitignore):
+#   cp config/minio.conf.example config/minio.conf
+# ============================================================
+# 说明:
+#   · 本文件与 cluster.conf 解耦 —— fetch-offline-from-minio.sh 是部署【前置】的下载工具,
+#     下载离线文件时集群配置往往还不存在, 因此它【不读 cluster.conf / lib-common】,
+#     只读本文件(或 MINIO_* 环境变量)。
+#   · 优先级: 环境变量 > minio.conf > 内置默认。
+#   · 全部留空也可以: 脚本会探测本机已有 mc alias, 没有则交互式录入。
+#   · sync-to-minio.sh / fetch-offline-files.sh 仍走 cluster.conf(统一数据源), 未受影响。
+#
+# 用法示例(容器内):
+#   ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh
+#   MINIO_ENDPOINT=https://minio.example.com ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh
+MINIO_ALIAS="${MINIO_ALIAS:-minio}"                  # mc alias 名
+MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"                 # MinIO 服务地址(如 https://minio.example.com)
+MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-}"             # AccessKey
+MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-}"             # SecretKey
+MINIO_BUCKET="${MINIO_BUCKET:-cubestack-installer}"  # 离线文件桶(默认与 sync 一致)
+MINIO_REMOTE_DIR="${MINIO_REMOTE_DIR:-offline-files}"  # 桶内目录(留空=sync 取本地源同名 / fetch 默认 offline-files)
