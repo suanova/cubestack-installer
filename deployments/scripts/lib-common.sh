@@ -399,12 +399,35 @@ load_config() {
     #   metallb   → REGISTRY_IP:REGISTRY_PORT(MetalLB VIP)。
     # 镜像名统一 registry.cubestack.io:5000(节点经 containerd hosts.toml 改写连接), 端口无需统一;
     # 显式设 REGISTRY_DIRECT 可覆盖(如经代理/别名推送)。
+    # ⚠ nodeport 分支复用 REGISTRY_IP 而非直接 first_master_ip:
+    #   create-vms.sh 等场景 load_config 时 NODES 可能已被清空 → first_master_ip 返回 1,
+    #   在 set -euo pipefail 下命令替换失败会传导给赋值 → load_config 静默退出, 卡死 VM 创建。
+    #   REGISTRY_IP 自带 first_master_ip || first_pool_addr 兜底(见上), 此处直接复用其值。
     if [ "${SERVICE_EXPOSE_MODE}" = "nodeport" ]; then
-        REGISTRY_DIRECT="${REGISTRY_DIRECT:-$(first_master_ip 2>/dev/null):${REGISTRY_NODEPORT:-31148}}"
+        REGISTRY_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP}:${REGISTRY_NODEPORT:-31148}}"
     else
         REGISTRY_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP}:${REGISTRY_PORT:-5000}}"
     fi
     export REGISTRY_DIRECT
+    # ---------------- local-path / ceph 二选一(互斥, 集中派生) ----------------
+    # 单一事实来源 = CEPH_ENABLED:
+    #   · CEPH_ENABLED=true  → registry 后端强制 ceph-block, 并关闭 local-path(ceph 替代 local-path,
+    #     不再安装 local-path-provisioner; addons.yml local_path_provisioner_enabled 同步为 false)。
+    #   · CEPH_ENABLED=false → 保持 local-path 为默认后端(默认)。
+    # ⚠ 即使显式写了 REGISTRY_STORAGE_CLASS / LOCAL_PATH_ENABLED 也会被本规则覆盖(二选一, 不并存);
+    #   想用 local-path 就设 CEPH_ENABLED=false。
+    if [ "${CEPH_ENABLED:-false}" = "true" ]; then
+        # 仅当 cluster.conf 显式写了冲突值时提醒(默认值 local-path/true 不算冲突, 避免每次 run 刷屏)
+        if grep -qE '^[[:space:]]*REGISTRY_STORAGE_CLASS=.*(local-path)' "${CLUSTER_CONF}" 2>/dev/null; then
+            warn "CEPH_ENABLED=true → REGISTRY_STORAGE_CLASS 强制 ceph-block(local-path 被替代)"
+        fi
+        if grep -qE '^[[:space:]]*LOCAL_PATH_ENABLED=(true|1|yes|on)' "${CLUSTER_CONF}" 2>/dev/null; then
+            warn "CEPH_ENABLED=true → LOCAL_PATH_ENABLED 强制 false(local-path 与 ceph 二选一, 不再安装 local-path)"
+        fi
+        REGISTRY_STORAGE_CLASS="ceph-block"
+        LOCAL_PATH_ENABLED="false"
+    fi
+    export REGISTRY_STORAGE_CLASS LOCAL_PATH_ENABLED
     # 虚拟机配置(独立于 cluster.conf): source vm-nodes.conf 提供 VM 创建/网络变量
     vm_conf_load
 }

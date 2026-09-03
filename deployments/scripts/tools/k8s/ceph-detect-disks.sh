@@ -4,7 +4,7 @@
 # 判定"未使用裸盘": 整块 disk 未被分区/格式化/挂载/作 LVM PV, 且非系统盘
 #   (系统盘 = 持有 / 、/boot*、swap、LVM 的盘; 绝不被选中)。
 # 输出: 每节点一行 `hostname:/dev/vdb,/dev/vdc`(可 -m 仅机器可读);
-#       供 modules/03_addon/07_ceph.sh 生成 CephCluster CR(按节点精确 devices, 防误选)。
+#       供 modules/03_addon/02_ceph.sh 生成 CephCluster CR(按节点精确 devices, 防误选)。
 # 用法: sudo ./ceph-detect-disks.sh [--node <hostname|ip> ...] [-m]
 # 数据源: cluster.conf (NODES / SSH_KEY_NAME / CEPH_DETECT_EXCLUDE)
 # 前置: 节点 SSH 免密(部署 k8s_passwordless 后)。
@@ -14,6 +14,12 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 人工可读诊断(say/warn)一律走 stderr: -m 机器可读模式下 stdout 只留 "hostname:/dev/x"
+# 机器行供上层模块(02_ceph.sh / k8s_deploy 预检)捕获 —— 否则模块捕获 stdout 时会把
+# "SSH 失败/无裸盘"等提示吞掉(屏幕上只剩 Python traceback, 不知为何失败)。
+say()  { printf '\033[36m→  %s\033[0m\n' "$*" >&2; }
+warn() { printf '\033[33m⚠  %s\033[0m\n' "$*" >&2; }
 
 MACHINE=0
 NODE_FILTER=()
@@ -46,53 +52,56 @@ done
 [ "${#NODE_SELECT[@]}" -gt 0 ] || { err "未匹配到任何节点(检查 NODES / --node)"; exit 1; }
 
 parse_remote() {   # stdin=lsblk -J JSON → 输出未使用裸盘名(空格分隔, 已排除系统盘/EXCLUDE)
-    python3 - "${CEPH_DETECT_EXCLUDE}" <<'PY'
-import json, sys, re
+    # ★ 用 python3 -c 而非 heredoc: heredoc 会吃掉 stdin(set -euo pipefail + $( ) 下
+    #   stdin 被 /dev/null 占用), json.load 读到空输入 → JSONDecodeError(traceback)。
+    #   -c 把程序放参数, stdin 留给数据, 容器/宿主机均可用。
+    python3 -c "$_PRG" "${CEPH_DETECT_EXCLUDE}"
+}
+_PRG='import json, sys, re
 excl = re.compile(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] else None
 data = json.load(sys.stdin)
-blocks = data.get('blockdevices', [])
+blocks = data.get("blockdevices", [])
 
-# 1) 收集系统盘: 持有 /、/boot*、[SWAP] 挂载点的设备, 向上回溯到顶层 disk;
-#    以及含 LVM 子卷(child 中 type=lvm)的 disk。
 def walk(b, parent=None):
-    """yield (name, type, fstype, mount, children, parent_disk)"""
-    top = parent if parent else b['name']
-    yield (b['name'], b.get('type'), b.get('fstype'), b.get('mountpoint'), b.get('children'), top if b.get('type')=='disk' else None)
-    for c in b.get('children', []) or []:
-        # children 的父盘 = 顶层盘名(若父是分区链, 保持祖先 disk)
-        yield from walk(c, parent=top if b.get('type')=='disk' else parent)
+    top = parent if parent else b["name"]
+    yield (b["name"], b.get("type"), b.get("fstype"), b.get("mountpoint"), b.get("children"), top)
+    for c in b.get("children", []) or []:
+        yield from walk(c, parent=top if b.get("type") == "disk" else parent)
 
 flat = [r for b in blocks for r in walk(b)]
 system = set()
 for (name, typ, fstype, mnt, kids, top) in flat:
-    if mnt and (mnt == '/' or mnt == '[SWAP]' or str(mnt).startswith('/boot')):
+    # ★ 任何有挂载点的盘一律视为"在用"(无论挂载在 /、/boot、swap 还是 /mnt/data0、
+    #   /data 等数据路径)—— 已挂载 = 可能含数据, 绝不可作为裸盘(防覆盖用户数据)。
+    #   lvm/raid 子卷所在盘同样排除。
+    if mnt:
         if top: system.add(top)
-    if typ == 'lvm' and top: system.add(top)
+    if typ in ("lvm", "raid") and top: system.add(top)
 
-# 2) 未使用裸盘: 顶层 disk, 非系统盘, 无任何子设备(children 不存在/为空 → 整盘未分区),
-#    FSTYPE 为空, 未被 EXCLUDE 命中, 且不是 loop/ram/zram。
 cands = []
 for b in blocks:
-    if b.get('type') != 'disk':
+    if b.get("type") != "disk":
         continue
-    name = b['name']
-    if name.startswith(('loop', 'ram', 'zram', 'sr')):
+    name = b["name"]
+    # 盘名泛化: sda/sdb(裸金属 SATA/SAS)、nvme0n1/nvme1n1(裸金属 NVMe)、
+    # vda/vdb(云/VM 虚拟盘)一律纳入候选; 仅排除 loop/ram/zram/sr 等伪设备。
+    if name.startswith(("loop", "ram", "zram", "sr")):
         continue
     if name in system:
         continue
     if excl and excl.search(name):
         continue
-    kids = b.get('children')
-    # 有子设备(分区/LVM/raid) → 已有布局, 不算"裸盘"
-    if kids:
+    kids = b.get("children")
+    if kids:            # 已分区/已有子设备 → 在用, 排除
         continue
-    if b.get('fstype'):      # 整盘直接被格式化(如 mkfs.xfs /dev/vdb)
+    if b.get("fstype"): # 整盘已格式化 → 在用, 排除
         continue
-    cands.append(f"/dev/{name}")
+    if b.get("mountpoint"):  # 兜底: 顶层直接挂载(无分区) → 排除
+        continue
+    cands.append("/dev/%s" % name)
 for c in sorted(cands):
     print(c)
-PY
-}
+'
 
 say "检测节点裸盘(排除系统盘; EXCLUDE=${CEPH_DETECT_EXCLUDE})..."
 for entry in "${NODE_SELECT[@]}"; do

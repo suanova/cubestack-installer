@@ -863,6 +863,138 @@ PYEOF
     done
 }
 
+# 将"离线安装系统包(lvm2 等)"play 注入 cluster.yml/scale.yml(幂等, 与 ensure_registry_play 同机制)
+# 作用: 在 k8s 部署阶段把 offline-files/kubespray/packages 的 .deb(lvm2 全家桶等)自动
+#       安装到全部 kube_node —— 供后续 ceph/Rook OSD 使用(重启后逻辑卷激活依赖 lvm)。
+#       包来源与 lvm2 离线准备见 patch-playbooks/install-packages.yml 头部注释。
+ensure_packages_play() {
+    local py name packages_file="${KUBESPRAY_DIR}/patch-playbooks/install-packages.yml"
+    # kubespray 升级/重新 clone 会丢失 patch-playbooks → 从内置内容重新生成(与 ensure_preload_play 同机制)
+    if [ ! -f "${packages_file}" ]; then
+        log "重新生成 ${packages_file}(kubespray 升级后恢复)..."
+        mkdir -p "$(dirname "${packages_file}")" 2>/dev/null || true
+        cat > "${packages_file}" << 'PKG_EOF' 2>/dev/null || true
+---
+# ============================================================
+# 离线安装 worker 节点系统包(lvm2 等, 供 Ceph/Rook OSD 使用)
+# 将 offline-files 中的 .deb 包复制到目标节点并安装
+# 包来源: offline-files/kubespray/<集群>/*.deb(仓库根目录) + packages/ 子目录,
+#         集群名取自当前 inventory(inventory_dir | basename), 无硬编码
+# 路径说明: playbook 位于 kubespray/patch-playbooks/,
+#           ../../offline-files/kubespray = deployments/offline-files/kubespray
+# 挂载: 由 cubestack-offline.sh ensure_packages_play 自动注入 cluster.yml/scale.yml
+#       (k8s 部署阶段自动安装; kubespray 升级后自动重新挂载)。
+# lvm2: 离线包由联网机 tools/offline/fetch-lvm-packages.sh 生成到共享 packages/ 目录;
+#       未包含 lvm2 .deb 时仅告警不失败(其余包照常安装), 避免 packages/ 内容变化误失败。
+# ============================================================
+- name: Install required packages on worker nodes
+  hosts: kube_node
+  gather_facts: false
+  vars:
+    repo_base: "{{ playbook_dir }}/../../offline-files/kubespray/{{ inventory_dir | basename }}"
+    repo_base_shared: "{{ playbook_dir }}/../../offline-files/kubespray"
+    packages_dirs:
+      - "{{ repo_base }}"
+      - "{{ repo_base }}/packages"
+      - "{{ repo_base_shared }}/packages"
+
+  tasks:
+    - name: Ensure /tmp/packages directory exists on target
+      file:
+        path: /tmp/packages
+        state: directory
+
+    - name: Find offline .deb packages (仓库根目录 + packages/ + 共享 packages/)
+      find:
+        paths: "{{ packages_dirs }}"
+        patterns: "*.deb"
+        file_type: file
+      delegate_to: localhost
+      register: deb_files
+
+    - name: Copy offline .deb packages to target
+      copy:
+        src: "{{ item.path }}"
+        dest: /tmp/packages/
+      delegate_to: localhost
+      loop: "{{ deb_files.files }}"
+      when: deb_files.files | length > 0
+
+    - name: Install packages from local files
+      shell: dpkg -i /tmp/packages/*.deb && rm -rf /tmp/packages
+      args:
+        warn: false
+      become: true
+      when: deb_files.files | length > 0
+
+    - name: Derive expected package names from shipped .deb files
+      set_fact:
+        expected_packages: "{{ deb_files.files | map(attribute='path') | map('basename') | map('regex_replace', '_.*', '') | unique | list }}"
+      when: deb_files.files | length > 0
+
+    - name: Warn when lvm2 offline package is not shipped
+      debug:
+        msg: >-
+          ⚠ packages/ 未包含 lvm2 离线包 —— 存储节点无法离线安装 lvm2
+          (Rook OSD 重启后需 lvm 激活逻辑卷)。请先在联网机执行
+          tools/offline/fetch-lvm-packages.sh 并把 .deb 放到共享 packages/ 目录。
+      when:
+        - deb_files.files | length > 0
+        - "'lvm2' not in expected_packages"
+
+    - name: Verify required packages
+      package_facts:
+        manager: apt
+      when: deb_files.files | length > 0
+
+    - name: Check installation status (per shipped .deb, 不硬性要求 lvm2)
+      assert:
+        that:
+          - item in ansible_facts.packages
+        fail_msg: "Required package missing on {{ inventory_hostname }}: {{ item }}"
+        success_msg: "All shipped packages installed on {{ inventory_hostname }}"
+      loop: "{{ expected_packages }}"
+      when: deb_files.files | length > 0
+PKG_EOF
+    fi
+    for py in "${KUBESPRAY_DIR}/playbooks/cluster.yml" "${KUBESPRAY_DIR}/playbooks/scale.yml"; do
+        [ -f "${py}" ] || continue
+        name="$(basename "${py}")"
+        if grep -q "install-packages.yml" "${py}"; then
+            log "✅ ${name} 已挂载系统包安装 play"
+            continue
+        fi
+        python3 - "${py}" "${name}" << 'PYEOF'
+import sys
+path, name = sys.argv[1], sys.argv[2]
+src = open(path).read()
+marker = {
+    "cluster.yml": "- name: Install etcd",
+    "scale.yml": '- name: Target only workers to get kubelet installed and checking in on any new nodes(node)',
+}.get(name)
+if not marker or marker not in src:
+    print("marker not found, skip")
+    sys.exit(0)
+block = (
+    "# ──────────────────────────────────────────────────────────────────────\n"
+    "# 离线安装系统包(lvm2 全家桶等): 把 offline-files/kubespray/packages 的 .deb\n"
+    "# 装到全部 kube_node, 供后续 ceph/Rook OSD 使用(重启后逻辑卷激活依赖 lvm)。\n"
+    "# 本 import 由入口脚本 ensure_packages_play 自动维护(kubespray 升级后重新挂载)\n"
+    "# ──────────────────────────────────────────────────────────────────────\n"
+    "- name: Install offline packages (lvm2 etc.) on kube nodes\n"
+    "  import_playbook: ../patch-playbooks/install-packages.yml\n"
+)
+open(path, "w").write(src.replace(marker, block + "\n" + marker, 1))
+print("patched")
+PYEOF
+        if grep -q "install-packages.yml" "${py}"; then
+            log "✅ 已挂载系统包安装 play 到 ${name}"
+        else
+            warn "无法挂载系统包安装 play 到 ${name}(未找到插入标记, kubespray 版本结构可能已变化)"
+        fi
+    done
+}
+
 # 将"重启 containerd + kubelet 确保 CNI 初始化"play 注入 cluster.yml/scale.yml(幂等)
 # 作用: 在 Kubernetes+CNI 部署完成后、metallb 等 operator 安装前重启节点容器运行时,
 #       解决 containerd 因残留/缺失 /etc/cni/net.d 而标记 CNI 未初始化导致的节点
@@ -1442,6 +1574,9 @@ cmd_install() {
     # 确保 cluster.yml 已挂载 registry 节点 hosts play(域名解析, 配合 containerd certs.d)
     ensure_registry_play
 
+    # 确保 cluster.yml 已挂载系统包安装 play(lvm2 等离线 .deb, 供 ceph/Rook OSD)
+    ensure_packages_play
+
     # 确保 cluster.yml 已挂载 CNI 重启 play(K8s+CNI 之后、operator 之前重启 containerd+kubelet)
     ensure_cni_restart_play
 
@@ -1584,6 +1719,9 @@ cmd_scale() {
 
     # 确保 scale.yml 已挂载镜像预加载 play(kubespray 升级后自动重新挂载)
     ensure_preload_play
+
+    # 确保 scale.yml 已挂载系统包安装 play(新 worker 离线安装 lvm2 等)
+    ensure_packages_play
 
     # 确保 scale.yml 已挂载 CNI 重启 play(新节点 K8s+CNI 之后重启 containerd+kubelet)
     ensure_cni_restart_play

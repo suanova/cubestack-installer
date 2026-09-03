@@ -1,24 +1,31 @@
 ---
 # ============================================================
-# 离线安装 bare-metal worker 节点系统包
+# 离线安装 worker 节点系统包(lvm2 等, 供 Ceph/Rook OSD 使用)
 # 将 offline-files 中的 .deb 包复制到目标节点并安装
 # 包来源: offline-files/kubespray/<集群>/*.deb(仓库根目录) + packages/ 子目录,
 #         集群名取自当前 inventory(inventory_dir | basename), 无硬编码
 # 路径说明: playbook 位于 kubespray/patch-playbooks/,
 #           ../../offline-files/kubespray = deployments/offline-files/kubespray
-# 用法:
+# 挂载: 由 cubestack-offline.sh ensure_packages_play 自动注入 cluster.yml/scale.yml
+#       (k8s 部署阶段自动安装; kubespray 升级后自动重新挂载)。
+# lvm2: 离线包由联网机 tools/offline/fetch-lvm-packages.sh 生成到共享 packages/ 目录;
+#       未包含 lvm2 .deb 时仅告警不失败(其余包照常安装), 避免 packages/ 内容变化误失败。
+# 用法(手动):
 #   ansible-playbook -i <inventory> install-packages.yml
 # ============================================================
 - name: Install required packages on worker nodes
   hosts: kube_node
   gather_facts: false
   vars:
-    repo_base: "{{ playbook_dir }}/../../offline-files/kubespray/{{ inventory_dir | basename }}"
-    repo_base_shared: "{{ playbook_dir }}/../../offline-files/kubespray"
+    # ★ 离线目录解析: 优先用 offline.yml 注入的 download_cache_dir(= LOCAL_REPO_DIR, 由
+    #   cubestack-offline.sh 生成且 -e @offline.yml 全局可用), 保证与离线文件实际位置一致;
+    #   容器/standalone 下 playbook_dir 相对路径会算到 deployments/kubespray/offline-files(不存在)。
+    #   回退: 相对路径(inventory_dir | basename, 无硬编码)。
+    offline_dir: "{{ download_cache_dir | default(playbook_dir + '/../../offline-files/kubespray') }}"
     packages_dirs:
-      - "{{ repo_base }}"
-      - "{{ repo_base }}/packages"
-      - "{{ repo_base_shared }}/packages"
+      - "{{ offline_dir }}"
+      - "{{ offline_dir }}/packages"
+      - "{{ offline_dir }}/../packages"
 
   tasks:
     - name: Ensure /tmp/packages directory exists on target
@@ -47,19 +54,34 @@
       args:
         warn: false
       become: true
+      when: deb_files.files | length > 0
+
+    - name: Derive expected package names from shipped .deb files
+      # deb 文件名 <name>_<version>_<arch>.deb → 包名(如 lvm2_2.03.11-2.1ubuntu2_amd64.deb → lvm2)
+      set_fact:
+        expected_packages: "{{ deb_files.files | map(attribute='path') | map('basename') | map('regex_replace', '_.*', '') | unique | list }}"
+      when: deb_files.files | length > 0
+
+    - name: Warn when lvm2 offline package is not shipped
+      debug:
+        msg: >-
+          ⚠ packages/ 未包含 lvm2 离线包 —— 存储节点无法离线安装 lvm2
+          (Rook OSD 重启后需 lvm 激活逻辑卷)。请先在联网机执行
+          tools/offline/fetch-lvm-packages.sh 并把 .deb 放到共享 packages/ 目录。
+      when:
+        - deb_files.files | length > 0
+        - "'lvm2' not in expected_packages"
 
     - name: Verify required packages
       package_facts:
         manager: apt
+      when: deb_files.files | length > 0
 
-    - name: Check installation status
+    - name: Check installation status (per shipped .deb, 不硬性要求 lvm2)
       assert:
         that:
-          - "'iputils-ping' in ansible_facts.packages"
-          - "'rsync' in ansible_facts.packages"
-          - "'iptables' in ansible_facts.packages"
-          - "'curl' in ansible_facts.packages"
-          - "'ca-certificates' in ansible_facts.packages"
-          - "'lvm2' in ansible_facts.packages"
-        fail_msg: "Required packages missing on {{ inventory_hostname }}"
-        success_msg: "All required packages installed on {{ inventory_hostname }}"
+          - item in ansible_facts.packages
+        fail_msg: "Required package missing on {{ inventory_hostname }}: {{ item }}"
+        success_msg: "All shipped packages installed on {{ inventory_hostname }}"
+      loop: "{{ expected_packages }}"
+      when: deb_files.files | length > 0
