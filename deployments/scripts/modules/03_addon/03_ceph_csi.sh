@@ -8,7 +8,7 @@
 # TOGGLE: CEPH_CSI_ENABLED
 # 说明:
 #   · 断点续跑: REPEAT:0 → 成功后写状态; --fresh 重装。
-#   · 前置: Ceph 模块(07_ceph)已就绪(rook operator + CephCluster HEALTH_OK)。
+#   · 前置: Ceph 模块(02_ceph)已就绪(rook operator + CephCluster HEALTH_OK)。
 #   · 设计: rook v1.20 中 CSI 由 csi-operator.yaml + operator 调和自动部署(ceph-csi-operator);
 #     本模块负责"存储供给层": rbd-pool(3 副本/host 故障域/min_size 2)+ StorageClass ceph-block;
 #     CEPHFS_ENABLED=true 时创建 CephFilesystem + cephfs(WaitForFirstConsumer)与 cephfs-models(Retain/Immediate);

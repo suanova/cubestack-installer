@@ -23,6 +23,14 @@ load_config
 # 开关: 未启用 local-path 则跳过(不报错)
 [ "${LOCAL_PATH_ENABLED:-true}" = "true" ] || { say "LOCAL_PATH_ENABLED=false, 跳过 local-path 就绪检查"; exit 0; }
 
+# registry 后端走 ceph(REGISTRY_STORAGE_CLASS=ceph-block)时, registry 不依赖 local-path:
+# 跳过本校验, 避免"ceph 替代 local-path"场景下误失败(此时 local-path 可不部署, LOCAL_PATH_ENABLED=false 更干净)
+if [ -n "${REGISTRY_STORAGE_CLASS:-}" ] && [ "${REGISTRY_STORAGE_CLASS}" != "local-path" ]; then
+    say "REGISTRY_STORAGE_CLASS=${REGISTRY_STORAGE_CLASS}(非 local-path), registry PVC 不依赖 local-path, 跳过就绪检查"
+    say "  如需彻底不装 local-path: cluster.conf 设 LOCAL_PATH_ENABLED=false"
+    exit 0
+fi
+
 FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
 SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \

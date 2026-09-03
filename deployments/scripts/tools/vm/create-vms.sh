@@ -37,9 +37,23 @@ awk '
 echo "→ 已用模板重建 cluster.conf: cp ${CONF_TEMPLATE} ${CLUSTER_CONF}"
 echo "→ 更新完 NODES 后会自动校验 cluster.conf 合法性。"
 
-# ============ 再加载公共库 + 配置(此时 cluster.conf 已完整可 source) ============
+# ============ 加载公共库 + VM 配置(只取本脚本需要的, 不跑完整 load_config) ============
+# 本脚本创建虚拟机, 只依赖:
+#   ① lib-common 的纯函数(node_parse / mac_from_name / node_default_pw / replace_nodes_to_conf /
+#      ssh_port_open / 日志 say/ok/warn/err 等)—— 都不依赖 load_config 的派生结果;
+#   ② vm-nodes.conf 的虚拟机变量(经 vm_conf_load 加载);
+#   ③ cluster.conf 的 SSH_DEFAULT_PASSWORD(把 NODES 密码 "-" 归一化用)。
+# 因此【不调用 load_config()】: 它会派生整套集群部署变量(API_IP / REGISTRY_IP / REGISTRY_DIRECT /
+# NTP / MINIO_*...), 与创建虚拟机无关; 且本脚本刚把 cluster.conf 的 NODES 清空, load_config
+# 在 set -e 下会因 first_master_ip 失败(空 NODES)而中途退出 → 卡死 VM 创建(历史 bug)。
+# 子脚本(create-libvirt-vm.sh / setup-vm-network.sh)各自独立 load_config, 不受影响。
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
-load_config
+# 只加载 vm-nodes.conf(虚拟机创建/网络变量), 不触发 cluster.conf 派生链
+vm_conf_load
+# 单独取 cluster.conf 的 SSH_DEFAULT_PASSWORD(把 NODES 密码 "-" 归一化用)。
+# 本脚本刚用模板重建 cluster.conf 并校验过(见上), source 安全; 且只取纯数据变量,
+# 不触发 load_config 的派生链(API/registry/NTP...), 与创建虚拟机无关。
+source "${CLUSTER_CONF}"
 
 # ============ 校验 cluster.conf 合法性(重建/更新 NODES 后调用) ============
 # 任何对 cluster.conf 的写入完成后, 都 bash -n 校验; 不合法立即终止, 避免下游部署

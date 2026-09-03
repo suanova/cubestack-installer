@@ -81,11 +81,11 @@ gateway_api_enabled: false
 # Nginx ingress controller deployment
 ingress_nginx_enabled: false
 # ingress_nginx_host_network: false
-# ingress_nginx_service_type: LoadBalancer
+ingress_nginx_service_type: NodePort
 # ingress_nginx_service_annotations:
 #   example.io/loadbalancerIPs: 1.2.3.4
-# ingress_nginx_service_nodeport_http: 30080
-# ingress_nginx_service_nodeport_https: 30081
+ingress_nginx_service_nodeport_http: 30080
+ingress_nginx_service_nodeport_https: 30081
 ingress_publish_status_address: ""
 # ingress_nginx_nodeselector:
 #   kubernetes.io/os: "linux"
@@ -155,8 +155,8 @@ cert_manager_enabled: false
 #   - "--dns01-recursive-nameservers=1.1.1.1:53,8.8.8.8:53"
 
 # MetalLB deployment
-metallb_enabled: true
-metallb_speaker_enabled: true
+metallb_enabled: false
+metallb_speaker_enabled: false
 metallb_namespace: "metallb-system"
 # metallb_protocol: "layer2"
 # metallb_port: "7472"
@@ -187,7 +187,7 @@ metallb_config:
       #   部署时由 sync-kubespray-config.sh 从 METALLB_POOL 覆盖 —— 曾因模板残留旧环境
       #   池(10.66.1.130-139)被新集群继承, 分到其他集群已占用的 VIP 导致镜像拉取失败。
       ip_range:
-        - 10.244.2.1-10.244.2.254
+        - 10.244.1.200-10.244.1.209
       auto_assign: true
   layer2:
     - primary

@@ -240,6 +240,112 @@ say "完整部署日志: ${LOG_FILE}"
 
 print_plan
 
+# ⚠ Ceph 部署前强制确认(倒计时, 防覆盖磁盘 double-check 的兜底):
+#   print_plan 的红底提醒无倒计时(纯提示); 02_ceph 模块内部的倒计时在 k8s 部署之后,
+#   k8s_deploy 已被断点标记 done 跳过时会丢失 —— 这里在**真正开始部署前**再打断一次:
+#   CEPH_ENABLED=true 且本次会执行 ceph 相关模块(k8s_deploy 或 ceph)时, sleep 倒计时
+#   CEPH_CONFIRM_SLEEP(默认 60s, 设 0 跳过)供人工 double-check 存储节点/裸盘。
+if [ "${CEPH_ENABLED:-false}" = "true" ]; then
+    _ceph_confirm_in=""
+    for k in "${RUN_STEPS[@]:-}"; do
+        case "${k}" in k8s_deploy|ceph) _ceph_confirm_in=1; break ;; esac
+    done
+    if [ -n "${_ceph_confirm_in}" ]; then
+        _ceph_cs="${CEPH_CONFIRM_SLEEP:-60}"
+        echo ""
+        echo -e "\033[41m\033[97m================================================================================\033[0m"
+        echo -e "\033[41m\033[97m ⚠⚠⚠  CEPH_ENABLED=true — 部署开始前最后确认存储节点/裸盘(避免覆盖磁盘) ⚠⚠⚠\033[0m"
+        echo -e "\033[41m\033[97m   node label: ${CEPH_NODE_LABEL:-ceph-storage=rook-ceph}   裸盘策略: ${CEPH_DATA_DISK_POLICY:-auto}\033[0m"
+        echo -e "\033[41m\033[97m   存储节点与将使用的裸盘(SSH 直连自动检测/或 CEPH_DATA_DISKS 显式):\033[0m"
+        # 候选存储节点(hostname): CEPH_NODES 显式; 空=全部 NODES
+        declare -A _CEPH_CONFIRM_DISKS
+        _CEPH_CONFIRM_HOSTS=()
+        if [ -n "${CEPH_NODES:-}" ]; then
+            for _h in ${CEPH_NODES//,/ }; do [ -n "${_h}" ] && _CEPH_CONFIRM_HOSTS+=("${_h}"); done
+        else
+            for _line in "${NODES[@]:-}"; do
+                [ -z "${_line}" ] && continue
+                node_parse "${_line}"
+                [ -n "${NODE_HOSTNAME}" ] && _CEPH_CONFIRM_HOSTS+=("${NODE_HOSTNAME}")
+            done
+        fi
+        _CEPH_CONFIRM_DETECT_FAIL=0
+        if [ -n "${CEPH_DATA_DISKS:-}" ]; then
+            # 显式指定: 与 ceph 模块两轮解析一致(hostname 条目优先, 全节点条目仅填充未指定)
+            while IFS=';' read -ra _grp; do
+                for _g in "${_grp[@]}"; do
+                    [ -z "${_g}" ] && continue
+                    _hn="${_g%%:*}"; _ds="${_g#*:}"
+                    [ -z "${_hn}" ] || [ "${_hn}" = "${_ds}" ] && continue
+                    _norm=""
+                    for _d in ${_ds//,/ }; do _norm="${_norm:+${_norm},}/dev/${_d#/dev/}"; done
+                    _CEPH_CONFIRM_DISKS["${_hn}"]="${_norm}"
+                done
+            done <<< "${CEPH_DATA_DISKS}"
+            while IFS=';' read -ra _grp; do
+                for _g in "${_grp[@]}"; do
+                    [ -z "${_g}" ] && continue
+                    _hn="${_g%%:*}"; _ds="${_g#*:}"
+                    [ -z "${_hn}" ] || [ "${_hn}" = "${_ds}" ] || continue
+                    _norm=""
+                    for _d in ${_ds//,/ }; do _norm="${_norm:+${_norm},}/dev/${_d#/dev/}"; done
+                    for _h2 in "${_CEPH_CONFIRM_HOSTS[@]}"; do
+                        [ -n "${_CEPH_CONFIRM_DISKS[${_h2}]:-}" ] || _CEPH_CONFIRM_DISKS["${_h2}"]="${_norm}"
+                    done
+                done
+            done <<< "${CEPH_DATA_DISKS}"
+        else
+            # 自动检测(SSH 直连, 与 ceph 模块同工具); 节点免密未配置/无盘 → 降级提示
+            _DETECT_ARGS=()
+            for _h in "${_CEPH_CONFIRM_HOSTS[@]}"; do _DETECT_ARGS+=(--node "${_h}"); done
+            _DETECT_OUT="$(bash "${SCRIPT_DIR}/tools/k8s/ceph-detect-disks.sh" "${_DETECT_ARGS[@]}" -m 2>/dev/null)" || true
+            if [ -n "${_DETECT_OUT}" ]; then
+                while IFS= read -r _l; do
+                    [ -z "${_l}" ] && continue
+                    [[ "${_l}" == *"/dev/"* ]] || continue
+                    _hn="${_l%%:*}"; _ds="${_l#*:}"
+                    _CEPH_CONFIRM_DISKS["${_hn}"]="${_ds%,}"
+                done <<< "${_DETECT_OUT}"
+            else
+                _CEPH_CONFIRM_DETECT_FAIL=1
+            fi
+            unset _DETECT_ARGS _DETECT_OUT
+        fi
+        for _h in "${_CEPH_CONFIRM_HOSTS[@]:-}"; do
+            _ip=""
+            for _line in "${NODES[@]:-}"; do
+                [ -z "${_line}" ] && continue
+                node_parse "${_line}"
+                [ "${NODE_HOSTNAME}" = "${_h}" ] && { _ip="${NODE_IP}"; break; }
+            done
+            echo -e "\033[41m\033[97m   · ${_h}${_ip:+(${_ip})}  →  裸盘: ${_CEPH_CONFIRM_DISKS[${_h}]:-<未检测到>}\033[0m"
+        done
+        if [ "${_CEPH_CONFIRM_DETECT_FAIL}" = "1" ]; then
+            echo -e "\033[41m\033[97m   ⚠ 自动检测未返回(节点 SSH 免密可能未配置); 将在 ceph 模块部署时(SSH 就绪后)再确认盘名\033[0m"
+        fi
+        if [ -n "${REGISTRY_STORAGE_CLASS:-}" ] && [ "${REGISTRY_STORAGE_CLASS}" != "local-path" ]; then
+            echo -e "\033[41m\033[97m   registry 后端: REGISTRY_STORAGE_CLASS=${REGISTRY_STORAGE_CLASS}(PVC 等 ceph 就绪后自动绑定)\033[0m"
+        fi
+        echo -e "\033[41m\033[97m   auto 自动检测"未使用裸盘"(挂载/分区/格式化/系统盘一律不选); 显式用 CEPH_DATA_DISKS\033[0m"
+        echo -e "\033[41m\033[97m   有误请 Ctrl-C 中止, 修正 ${CLUSTER_CONF} 后重跑                    \033[0m"
+        echo -e "\033[41m\033[97m================================================================================\033[0m"
+        if [ "${_ceph_cs}" -gt 0 ] 2>/dev/null; then
+            say "Ceph 已启用: sleep ${_ceph_cs}s 供核对上方节点/裸盘(CEPH_CONFIRM_SLEEP=0 可跳过)..."
+            for _c in $(seq "${_ceph_cs}" -1 1); do
+                printf "\r%s" "$(printf '\033[41m\033[97m  ⏳ 倒计时 %d 秒继续(请核对上方 Ceph 存储节点/裸盘, 有误 Ctrl-C)      \033[0m' "${_c}")"
+                sleep 1
+            done
+            printf "\r%s\n" "$(printf '\033[0m  %s             ')"
+            printf "\r%s\n" "$(printf '\033[0m  %s             ')"
+            unset _c
+        else
+            say "CEPH_CONFIRM_SLEEP=0, 跳过等待(请务必已人工核对上方节点/裸盘)"
+        fi
+        unset _ceph_cs _CEPH_CONFIRM_HOSTS _CEPH_CONFIRM_DISKS _CEPH_CONFIRM_DETECT_FAIL _h _ip _line _l _ds _hn _g _grp _norm _h2 _d
+    fi
+    unset _ceph_confirm_in
+fi
+
 # ---------------- 调度: 按模块文件顺序执行选中的模块 ----------------
 say "==== 开始一键部署(共 ${#RUN_STEPS[@]} 个模块) ===="
 FAILED=0

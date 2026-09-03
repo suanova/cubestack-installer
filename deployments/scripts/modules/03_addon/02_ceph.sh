@@ -22,7 +22,7 @@
 #     核对无误自动继续。CI 可 CEPH_CONFIRM_SLEEP=0 跳过。
 #   · 节点准备: 每台存储节点加载并持久化 rbd 内核模块; 确保 lvm2
 #     (离线 .deb 由 tools/offline/fetch-lvm-packages.sh 放到 offline-files/kubespray/packages,
-#     本模块自动检测缺失时从该目录安装)。
+#     本模块部署前预检"离线包就绪 或 节点已在线装 lvm", 缺失硬失败; 部署时自动从该目录安装)。
 #   · 离线镜像(需求 5): tools/images/ceph-save-images.sh(联网机下载到 offline-files/ceph)
 #     → 本模块调 ceph-sync-images.sh 同步到存储节点并 ctr import(保持原始镜像 ref)。
 #   · registry 后端(需求 6): REGISTRY_STORAGE_CLASS=ceph-block(见 docs/ceph-rook.md)时,
@@ -81,33 +81,98 @@ fi
     exit 1
 }
 
-# ---------------- 2) 裸盘自动检测(逐存储节点) ----------------
-say "[1/8] 检测存储节点的未使用裸盘(tools/k8s/ceph-detect-disks.sh)..."
-declare -A NODE_DISKS
-DETECT_ARGS=()
-for _hn in "${CEPH_NODE_HOSTS[@]}"; do DETECT_ARGS+=(--node "${_hn}"); done
-DETECT_OUT="$(bash "${TOOLS_K8S}/ceph-detect-disks.sh" "${DETECT_ARGS[@]}" -m 2>/dev/null)" || true
-if [ -z "${DETECT_OUT}" ]; then
-    warn "  自动检测未返回结果; 若 VM 集群请确认 VM_DATA_DISKS>0 且已重建/附加数据盘; 可手工把盘加入 CEPH_DATA_DISKS"
+# 前置: lvm2 离线包就绪(需求: 先准备 lvm 离线包, 再在部署 ceph 前安装)。
+#   离线包来源: offline-files/kubespray/packages(lvm2_*.deb + 依赖), 由联网机
+#   tools/offline/fetch-lvm-packages.sh 生成。存储节点缺 lvm 且无离线包 → 硬失败,
+#   避免"看起来部署成功、OSD 因无 lvm 无法激活"的隐性失败(比 warn 更早暴露)。
+_LVM_DEB_PRESENT=0
+for _p in "${REPO_ROOT}"/deployments/offline-files/kubespray/packages/lvm2_*.deb \
+          "${REPO_ROOT}"/deployments/offline-files/kubespray/packages/lvm2_*.rpm; do
+    [ -f "${_p}" ] && _LVM_DEB_PRESENT=1
+done
+if [ "${_LVM_DEB_PRESENT}" = "0" ]; then
+    say "检查存储节点 lvm2 是否已在线安装(离线包未就绪时以此兜底)..."
+    _ALL_HAS_LVM=1
+    for _hn in "${CEPH_NODE_HOSTS[@]}"; do
+        _ip=""
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            node_parse "${line}"
+            [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
+        done
+        [ -n "${_ip}" ] || continue
+        NSSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_ip}" "$@"; }
+        NSSH "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1 || _ALL_HAS_LVM=0
+    done
+    if [ "${_ALL_HAS_LVM}" = "0" ]; then
+        err "lvm2 离线包未就绪且存储节点未安装 lvm —— 无法离线部署 Rook OSD(重启后逻辑卷需 lvm 激活)"
+        err "  请先在**联网机**执行: sudo ./deployments/scripts/tools/offline/fetch-lvm-packages.sh"
+        err "  生成 lvm2_*.deb → ${REPO_ROOT}/deployments/offline-files/kubespray/packages/, 再重跑本模块"
+        exit 1
+    fi
+    warn "  lvm2 离线包未就绪, 但存储节点已在线安装 lvm, 继续(重启后逻辑卷激活依赖已满足)"
 fi
-while IFS= read -r _l; do
-    [ -z "${_l}" ] && continue
-    _hn="${_l%%:*}"; _ds="${_l#*:}"
-    NODE_DISKS["${_hn}"]="${_ds%,}"
-done <<< "${DETECT_OUT}"
-# explicit 策略覆盖(auto 未检出时手工指定 CEPH_DATA_DISKS="host:/dev/x,/dev/y;host:/dev/z")
+
+# ---------------- 2) 裸盘选择(显式指定 或 自动检测) ----------------
+# 需求: 裸盘可在 cluster.conf 显式指定(CEPH_DATA_DISKS); 未指定则自动检测。
+#   explicit 格式: "hostname:盘名1,盘名2;hostname2:盘名3" —— hostname 可省略(无 ':' → 应用到全部存储节点,
+#   不同环境盘名不同, 如 VM 为 /dev/vdb,/dev/vdc,/dev/vdd、裸金属为 /dev/sdb,/dev/sdc 时, 全节点同规格写法最省);
+#   盘名可带或不带 /dev/ 前缀(自动补全)。
+declare -A NODE_DISKS
 if [ -n "${CEPH_DATA_DISKS:-}" ]; then
+    say "[1/8] 使用 cluster.conf 显式指定裸盘(CEPH_DATA_DISKS), 跳过自动检测..."
+    # 两轮: 先处理"具体节点"条目(hostname:盘), 再处理"全部节点"条目(无 hostname)——
+    # 使 hostname 条目优先, 不会被全节点条目覆盖(顺序无关)。
+    _ALL_DISKS=""
     while IFS=';' read -ra _grp; do
         for _g in "${_grp[@]}"; do
+            [ -z "${_g}" ] && continue
             _hn="${_g%%:*}"; _ds="${_g#*:}"
-            [ -n "${_hn}" ] && [ -n "${_ds}" ] && NODE_DISKS["${_hn}"]="${_ds%,}"
+            [ -z "${_hn}" ] || [ "${_hn}" = "${_ds}" ] && { _ALL_DISKS="${_ALL_DISKS:+${_ALL_DISKS};}${_g}"; continue; }
+            _norm=""
+            for _d in ${_ds//,/ }; do            # 盘名补 /dev/ 前缀(兼容裸名)
+                _d="/dev/${_d#/dev/}"
+                _norm="${_norm:+${_norm},}${_d}"
+            done
+            NODE_DISKS["${_hn}"]="${_norm}"
         done
     done <<< "${CEPH_DATA_DISKS}"
+    # 第二轮: "全部节点"条目(无 hostname), 仅填充尚未指定的节点
+    while IFS=';' read -ra _grp; do
+        for _g in "${_grp[@]}"; do
+            [ -z "${_g}" ] && continue
+            _hn="${_g%%:*}"; _ds="${_g#*:}"
+            [ -z "${_hn}" ] || [ "${_hn}" = "${_ds}" ] || continue
+            _norm=""
+            for _d in ${_ds//,/ }; do
+                _d="/dev/${_d#/dev/}"
+                _norm="${_norm:+${_norm},}${_d}"
+            done
+            for _h2 in "${CEPH_NODE_HOSTS[@]}"; do
+                [ -n "${NODE_DISKS[${_h2}]:-}" ] || NODE_DISKS["${_h2}"]="${_norm}"
+            done
+        done
+    done <<< "${CEPH_DATA_DISKS}"
+else
+    # auto 策略: 逐存储节点自动检测"未使用裸盘"(排除系统盘)
+    say "[1/8] 检测存储节点的未使用裸盘(tools/k8s/ceph-detect-disks.sh)..."
+    DETECT_ARGS=()
+    for _hn in "${CEPH_NODE_HOSTS[@]}"; do DETECT_ARGS+=(--node "${_hn}"); done
+    # 保留 stderr(不 2>/dev/null): detect 对"节点 SSH 失败/无裸盘"的 warn 必须可见, 否则人工无法判断检测是否可信
+    DETECT_OUT="$(bash "${TOOLS_K8S}/ceph-detect-disks.sh" "${DETECT_ARGS[@]}" -m)" || true
+    if [ -z "${DETECT_OUT}" ]; then
+        warn "  自动检测未返回结果; 若 VM 集群请确认 VM_DATA_DISKS>0 且已重建/附加数据盘; 可显式设 CEPH_DATA_DISKS 指定盘"
+    fi
+    while IFS= read -r _l; do
+        [ -z "${_l}" ] && continue
+        _hn="${_l%%:*}"; _ds="${_l#*:}"
+        NODE_DISKS["${_hn}"]="${_ds%,}"
+    done <<< "${DETECT_OUT}"
 fi
 # 至少一个节点有盘才继续; 否则明确报错(避免生成无 OSD 集群)
 _HAS_DISK=0
 for _hn in "${CEPH_NODE_HOSTS[@]}"; do [ -n "${NODE_DISKS[${_hn}]:-}" ] && _HAS_DISK=1; done
-[ "${_HAS_DISK}" = "1" ] || { err "所有存储节点均未检测到裸盘; 请先为节点附加数据盘(VM: VM_DATA_DISKS>0; 裸金属: 挂载新盘)或显式设 CEPH_DATA_DISKS"; exit 1; }
+[ "${_HAS_DISK}" = "1" ] || { err "所有存储节点均未指定/检测到裸盘; 请显式设 CEPH_DATA_DISKS(\"hostname:盘名,盘名\", 或省略 hostname 应用到全部节点)或先为节点附加数据盘"; exit 1; }
 
 # ---------------- 3) 醒目提醒 + sleep(防覆盖磁盘 double-check) ----------------
 say "[2/8] 部署前安全确认 ..."
@@ -127,7 +192,14 @@ echo -e "\033[41m\033[97m=======================================================
 echo ""
 if [ "${CEPH_CONFIRM_SLEEP:-60}" -gt 0 ] 2>/dev/null; then
     say "sleep ${CEPH_CONFIRM_SLEEP}s 供核对(CI 可设 CEPH_CONFIRM_SLEEP=0 跳过)..."
-    sleep "${CEPH_CONFIRM_SLEEP}"
+    # 逐秒刷新倒计时(单行, 红底), 与 k8s_deploy 部署前倒计时一致 —— 之前静默等待看不到进度
+    for _c in $(seq "${CEPH_CONFIRM_SLEEP}" -1 1); do
+        printf "\r%s" "$(printf '\033[41m\033[97m  ⏳ 倒计时 %d 秒继续(请核对上方 Ceph 存储节点/裸盘)      \033[0m' "${_c}")"
+        sleep 1
+    done
+    printf "\r%s\n" "$(printf '\033[0m  %s             ')"
+    printf "\r%s\n" "$(printf '\033[0m  %s             ')"
+    unset _c
 else
     say "CEPH_CONFIRM_SLEEP=0, 跳过等待(请务必已人工核对上方节点/裸盘)"
 fi
@@ -149,13 +221,15 @@ for _hn in "${CEPH_NODE_HOSTS[@]}"; do
         && ok "    rbd 内核模块就绪" || warn "    rbd 模块加载失败(VM 内核需支持, 检查 modprobe rbd)"
     # 4b. lvm2: 检测缺失 → 从离线 packages 安装(install-worker-packages.sh 含 offline-files/kubespray/packages)
     if ! NSSH "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1; then
-        say "    lvm2 缺失, 尝试离线 .deb 安装(packages 目录, 由 fetch-lvm-packages.sh 生成)..."
+        say "    lvm2 缺失, 从离线 .deb 安装(packages 目录, 由 fetch-lvm-packages.sh 生成)..."
         if [ -d "${REPO_ROOT}/deployments/offline-files/kubespray/packages" ] && \
             bash "${SCRIPT_DIR}/tools/node/install-worker-packages.sh" "${_ip}" "${_user}" >/dev/null 2>&1; then
             NSSH "command -v lvm >/dev/null 2>&1" >/dev/null 2>&1 \
-                && ok "    lvm2 已安装" || warn "    packages 无 lvm2 或安装失败(联网机先跑 tools/offline/fetch-lvm-packages.sh)"
+                && ok "    lvm2 已安装(离线包)" || err "    packages 无 lvm2 或安装失败 —— lvm2 离线包未就绪且节点无 lvm, 部署 OSD 必失败"
         else
-            warn "    lvm2 离线包不可用; 若已在线安装 lvm2 可忽略(重启后 Rook OSD 需 lvm 激活逻辑卷)"
+            # 前置 lvm 预检已保证"离线包存在 或 节点已在线装 lvm", 走到这里 = 前置被绕过/包缺失
+            err "    lvm2 离线安装失败(install-worker-packages.sh 退出非 0)。请联网机先跑 tools/offline/fetch-lvm-packages.sh 生成 lvm2_*.deb, 重跑本模块"
+            exit 1
         fi
     else
         ok "    lvm2 已就绪"
@@ -169,10 +243,13 @@ done
 # ---------------- 5) 同步离线镜像到存储节点 ----------------
 say "[4/8] 同步 ceph 离线镜像到存储节点(ctr import)..."
 if [ -d "${CEPH_IMAGE_DIR}" ] && ls "${CEPH_IMAGE_DIR}"/*.tar >/dev/null 2>&1; then
+    _SYNC_FAIL=0
     for _hn in "${CEPH_NODE_HOSTS[@]}"; do
-        bash "${SCRIPT_DIR}/tools/images/ceph-sync-images.sh" --node "${_hn}" >/dev/null 2>&1 \
-            && ok "  ${_hn} 镜像同步完成" || warn "  ${_hn} 镜像同步失败(检查 tools/images/ceph-save-images.sh 生成的 tar 与节点连通)"
+        # 同步/导入失败 → 硬失败(离线环境节点无镜像 → Rook pod 必 ImagePullBackOff, 半成品集群比失败更糟)
+        bash "${SCRIPT_DIR}/tools/images/ceph-sync-images.sh" --node "${_hn}" \
+            && ok "  ${_hn} 镜像同步完成" || { err "  ${_hn} 镜像同步失败(检查 offline-files/ceph 的 tar 是否完整, 及节点 SSH/磁盘空间; 可用 tools/images/ceph-save-images.sh 重新生成)"; _SYNC_FAIL=1; break; }
     done
+    [ "${_SYNC_FAIL}" = "0" ] || exit 1
 else
     warn "  ${CEPH_IMAGE_DIR} 无镜像 tar; 集群将尝试在线拉取(离线环境请先联网跑 tools/images/ceph-save-images.sh)"
 fi
@@ -196,7 +273,7 @@ done
 say "  等待 rook-ceph-operator Running(最长 180s)..."
 OP_OK=0
 for i in $(seq 1 18); do
-    OP_OK="$( (SSH "${K} -n rook-ceph get deploy rook-ceph-operator -o jsonpath='{.status.readyReplicas}' 2>/dev/null" || true) )"
+    OP_OK="$( (SSH "${K} -n ${CEPH_NAMESPACE} get deploy rook-ceph-operator -o jsonpath='{.status.readyReplicas}' 2>/dev/null" || true) )"
     [ "${OP_OK:-0}" -ge 1 ] 2>/dev/null && break
     sleep 10
 done
@@ -234,6 +311,15 @@ LOCAL_CR="$(mktemp)"
     echo "    provider: \"\""
     echo "  placement:"
     echo "    mon:"
+    echo "      nodeAffinity:"
+    echo "        requiredDuringSchedulingIgnoredDuringExecution:"
+    echo "          nodeSelectorTerms:"
+    echo "            - matchExpressions:"
+    echo "                - key: ${LABEL_KEY}"
+    echo "                  operator: In"
+    echo "                  values:"
+    echo "                    - ${CEPH_NODE_LABEL#*=}"
+    echo "    osd:"
     echo "      nodeAffinity:"
     echo "        requiredDuringSchedulingIgnoredDuringExecution:"
     echo "          nodeSelectorTerms:"

@@ -139,4 +139,4 @@ calico_vxlan_mode: 'Never'
 # calico_apiserver_enabled: false
 
 
-calico_ip_auto_method: "can-reach=10.66.1.154"
+calico_ip_auto_method: "can-reach=10.244.1.21"

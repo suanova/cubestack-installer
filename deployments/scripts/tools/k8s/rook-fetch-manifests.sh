@@ -33,4 +33,4 @@ for f in ${FILES}; do
 done
 [ -f "${DEST_DIR}/csi-operator.yaml" ] || { err "缺少 csi-operator.yaml(rook v1.20 必须, 见 docs/ceph-rook.md)"; exit 1; }
 ok "Rook manifests 就绪: ${DEST_DIR}"
-echo "  下一步(部署机): CEPH_ENABLED=true 部署 modules/03_addon/07_ceph.sh"
+echo "  下一步(部署机): CEPH_ENABLED=true 部署 modules/03_addon/02_ceph.sh"
