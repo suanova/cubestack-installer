@@ -112,7 +112,7 @@ CEPH_CSI_OPERATOR_VERSION="${CEPH_CSI_OPERATOR_VERSION:-v1.0.4}"  # ceph-csi-ope
 #   explicit=手工在 CEPH_DATA_DISKS 指定(node:/dev/vdb,/dev/vdc; 逗号分隔多节点, 分号分隔条目)。
 CEPH_DATA_DISK_POLICY="${CEPH_DATA_DISK_POLICY:-auto}"
 CEPH_DATA_DISKS="${CEPH_DATA_DISKS:-}"            # explicit 策略: 如 "cubestack-k8s-master01:/dev/vdb,/dev/vdc;cubestack-k8s-worker01:/dev/vdb"
-CEPH_DETECT_EXCLUDE="${CEPH_DETECT_EXCLUDE:-^(sda|sr0|vda)$}"   # 自动检测时排除的盘名(正则, 防误选系统盘)
+CEPH_DETECT_EXCLUDE="${CEPH_DETECT_EXCLUDE:-^(sda|sr0|vda|nbd[0-9]+)$}"   # 自动检测时排除的盘名(正则, 防误选系统盘; nbd* 为 qcow2/NBD 伪设备)
 # 高可用与池(replicated 生产缺省: 3 副本 + host failureDomain + min_size 2; 见 docs/ceph-rook.md)
 CEPH_MON_COUNT="${CEPH_MON_COUNT:-3}"             # mon 数量(奇数, 默认 3)
 CEPH_POOL_REPLICAS="${CEPH_POOL_REPLICAS:-3}"     # 副本数
@@ -120,12 +120,20 @@ CEPH_POOL_MIN_SIZE="${CEPH_POOL_MIN_SIZE:-2}"     # min_size(1 台主机宕机�
 CEPH_OSD_MEMORY_TARGET="${CEPH_OSD_MEMORY_TARGET:-4}"   # 每 OSD 内存目标(GiB; 小盘 4G 足够, 大盘按文档调)
 CEPHFS_ENABLED="${CEPHFS_ENABLED:-false}"         # 可选: 启用 CephFS(RWX 共享文件)
 CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-false}"     # 可选: 启用 RGW/S3 对象存储
+# 外部 Ceph 连接(本集群无集群内 CephCluster 时): ceph 模块检测到存储节点<CEPH_MIN_NODES 或
+#   CEPH_ENABLED 但无集群内 CephCluster 时, 由 ceph_csi 模块经 ceph-csi-operator 的 CephConnection
+#   连接外部 Ceph 集群并创建 StorageClass(跳过集群内 pool/cephfs/rgw 创建)。
+CEPH_MIN_NODES="${CEPH_MIN_NODES:-3}"            # 存储节点 < 此值 → 不创建集群内 CephCluster
+CEPH_EXTERNAL_MONITORS="${CEPH_EXTERNAL_MONITORS:-}"   # 外部 Ceph monitors, 如 "10.66.1.21:6789,10.66.1.22:6789"; 留空=不使用外部 Ceph
+CEPH_EXTERNAL_POOL="${CEPH_EXTERNAL_POOL:-rbd}"  # 外部 Ceph 使用的 RBD pool 名(外部集群已有)
+CEPH_EXTERNAL_USER="${CEPH_EXTERNAL_USER:-admin}"   # 外部 Ceph 认证用户(默认 admin)
+CEPH_EXTERNAL_KEYRING="${CEPH_EXTERNAL_KEYRING:-}"  # 外部 Ceph 认证 keyring(该用户的 key; 必填, 如 AQCxxx==)
 CEPH_DASHBOARD_ENABLED="${CEPH_DASHBOARD_ENABLED:-true}"  # Ceph Dashboard
 # 安全确认: CEPH_ENABLED=true 部署时模块会红底列出将用的节点与裸盘并 sleep 60s 供 double-check;
 #   核对无误可 CEPH_CONFIRM_SLEEP=0(脚本环境变量)跳过, 生产不建议。
 CEPH_CONFIRM_SLEEP="${CEPH_CONFIRM_SLEEP:-60}"
 # 离线文件: ceph 镜像 tar(独立脚本 tools/images/ceph-save-images.sh 下载)
-CEPH_IMAGE_DIR="${CEPH_IMAGE_DIR:-${REPO_ROOT}/deployments/offline-files/ceph}"   # 默认 ~/cubestack-installer/deployments/offline-files/ceph
+CEPH_IMAGE_DIR="${CEPH_IMAGE_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray/images}"   # 默认 kubespray/images(与 k8s 镜像同目录, 不再用独立 offline-files/ceph)
 CEPH_ROOK_MANIFEST_DIR="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}"
 # registry 后端存储: local-path(默认)| ceph-block(CEPH 启用后, registry 的 PVC 改走 ceph RBD)
 REGISTRY_STORAGE_CLASS="${REGISTRY_STORAGE_CLASS:-local-path}"

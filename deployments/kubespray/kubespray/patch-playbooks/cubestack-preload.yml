@@ -32,6 +32,7 @@
 
     - name: Preload | Build rsync include filter
       set_fact:
+        # ceph 镜像以硬链接/复制并入 images/ 源目录(见 resolve_preload_image_files), 均为真实文件
         preload_rsync_opts: "{{ preload_image_files | map('regex_replace', '^(.*)$', '--include=\\1') | list + ['--exclude=*'] }}"
       when: preload_image_files | length > 0
 

@@ -508,6 +508,44 @@ resolve_preload_image_files() {
         log "  同步集合: ${#PRELOAD_IMAGE_FILES[@]} 个镜像(最小集合: ${patterns[*]})"
     fi
 
+    # ★ Ceph 离线镜像纳入 k8s 阶段预加载(与 kubespray 镜像同机制): CEPH_ENABLED=true 时把
+    #   CEPH_IMAGE_DIR 的 *.tar(rook/ceph/cephcsi 等)一并写进 preload-images.lst,
+    #   由 cluster.yml 内置预加载 play 同步到全部节点并 ctr import —— 替代 ceph 模块的
+    #   ceph-sync-images.sh 独立同步, 统一在 k8s 部署阶段完成(需求)。
+    # ⚠ 必须用**真实复制(cp)**, 不用软链/硬链: 离线文件需经 mc mirror 上传 MinIO 再下载分发,
+    #   软链会被当小链接文件上传(下载回来是坏文件), 硬链虽传真实内容但在对象存储中无链接语义。
+    #   真实复制后 images/ 目录全是普通文件, mc mirror / rsync / preload 均安全。
+    #   幂等: 已存在且大小一致 → 跳过; 内容变化 → 覆盖。
+    if [ "${CEPH_ENABLED:-false}" = "true" ]; then
+        # ① 源目录存在 → 真实复制到 images/(不依赖软链, mc mirror 安全)
+        if [ -n "${CEPH_IMAGE_DIR:-}" ] && [ -d "${CEPH_IMAGE_DIR}" ]; then
+            mkdir -p "${LOCAL_REPO_DIR}/images"
+            for f in "${CEPH_IMAGE_DIR}"/*.tar; do
+                [ -f "${f}" ] || continue
+                base="$(basename "${f}")"
+                dst="${LOCAL_REPO_DIR}/images/${base}"
+                if [ ! -f "${dst}" ] || [ "$(stat -c%s "${dst}" 2>/dev/null || echo 0)" != "$(stat -c%s "${f}")" ]; then
+                    rm -f "${dst}"
+                    cp "${f}" "${dst}" 2>/dev/null || warn "  ceph 镜像复制失败: ${base}"
+                fi
+                PRELOAD_IMAGE_FILES+=("${base}")
+            done
+        fi
+        # ② 兜底: 源目录已删除(为省空间)时, images/ 中已有的 ceph tar 仍追加进清单(去重),
+        #    保证新节点/扩容时 ceph 镜像不丢失
+        for f in "${LOCAL_REPO_DIR}"/images/*.tar; do
+            [ -f "${f}" ] || continue
+            base="$(basename "${f}")"
+            case "${base}" in *rook*|*ceph*|*csi-*) ;;
+                *) continue ;;
+            esac
+            _in=0
+            for _p in "${PRELOAD_IMAGE_FILES[@]:-}"; do [ "${_p}" = "${base}" ] && { _in=1; break; }; done
+            [ "${_in}" = "0" ] && PRELOAD_IMAGE_FILES+=("${base}")
+        done
+        [ "${#patterns[@]}" -gt 0 ] && log "  CEPH_ENABLED=true → ceph 镜像并入预加载清单(源 ${CEPH_IMAGE_DIR:-<无>} / images/ 兜底)"
+    fi
+
     # 写入 inventory 目录: 每行一个 tar 文件名; 空文件表示无镜像可同步
     # (playbook 仅在清单文件不存在时才回退为全量同步)
     {
@@ -703,6 +741,7 @@ ensure_preload_play() {
 
     - name: Preload | Build rsync include filter
       set_fact:
+        # ceph 镜像以硬链接/复制并入 images/ 源目录(见 resolve_preload_image_files), 均为真实文件
         preload_rsync_opts: "{{ preload_image_files | map('regex_replace', '^(.*)$', '--include=\\1') | list + ['--exclude=*'] }}"
       when: preload_image_files | length > 0
 
@@ -913,18 +952,34 @@ ensure_packages_play() {
       register: deb_files
 
     - name: Copy offline .deb packages to target
+      # ★ 不能 delegate_to: localhost —— 那样 src/dest 都解析为控制器路径, 只会把 .deb 原地复制到
+      #   控制器 /tmp/packages, 节点永远收不到(此前 dpkg 报 cannot access archive)。
+      #   不 delegate 时任务在目标节点执行, copy 自动从控制器(src)拉取到节点(dest), 这才是跨主机传输。
       copy:
         src: "{{ item.path }}"
         dest: /tmp/packages/
-      delegate_to: localhost
       loop: "{{ deb_files.files }}"
       when: deb_files.files | length > 0
 
-    - name: Install packages from local files
-      shell: dpkg -i /tmp/packages/*.deb && rm -rf /tmp/packages
-      args:
-        warn: false
+    - name: Install packages from local files (逐包安装, 单包失败不阻断)
+      # ★ 逐个 dpkg -i + ignore_errors: 任何单个包失败(如 skopeo 缺 golang-github-containers-common /
+      #   libgpgme11, sysstat 缺 libsensors5)都只记失败、不中断整个 k8s 部署 —— 需要与否由下方
+      #   "Verify required packages" 按必需包校验(仅 base 工具 + lvm 家族, 非全部 .deb)。
+      shell: |
+        set -u
+        failed=""
+        for deb in /tmp/packages/*.deb; do
+          [ -e "${deb}" ] || continue
+          if ! dpkg -i "${deb}" >/dev/null 2>&1; then
+            failed="${failed} $(basename "${deb}")"
+          fi
+        done
+        rm -rf /tmp/packages
+        if [ -n "${failed}" ]; then
+          echo "⚠ 以下包安装失败(通常为可选工具缺依赖, 不影响 ceph):${failed}"
+        fi
       become: true
+      ignore_errors: true
       when: deb_files.files | length > 0
 
     - name: Derive expected package names from shipped .deb files
@@ -947,13 +1002,26 @@ ensure_packages_play() {
         manager: apt
       when: deb_files.files | length > 0
 
-    - name: Check installation status (per shipped .deb, 不硬性要求 lvm2)
+    - name: "Check installation status (仅必需包: base 工具 + lvm 家族; skopeo/sysstat 等可选包失败不阻断)"
       assert:
         that:
           - item in ansible_facts.packages
         fail_msg: "Required package missing on {{ inventory_hostname }}: {{ item }}"
-        success_msg: "All shipped packages installed on {{ inventory_hostname }}"
-      loop: "{{ expected_packages }}"
+        success_msg: "All required packages installed on {{ inventory_hostname }}"
+      loop: "{{ required_packages }}"
+      vars:
+        required_packages:
+          - iputils-ping
+          - rsync
+          - iptables
+          - curl
+          - ca-certificates
+          - lvm2
+          - dmsetup
+          - dmeventd
+          - libdevmapper1.02.1
+          - libdevmapper-event1.02.1
+          - thin-provisioning-tools
       when: deb_files.files | length > 0
 PKG_EOF
     fi

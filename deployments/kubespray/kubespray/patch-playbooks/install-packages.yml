@@ -42,18 +42,34 @@
       register: deb_files
 
     - name: Copy offline .deb packages to target
+      # ★ 不能 delegate_to: localhost —— 那样 src/dest 都解析为控制器路径, 只会把 .deb 原地复制到
+      #   控制器 /tmp/packages, 节点永远收不到(此前 dpkg 报 cannot access archive)。
+      #   不 delegate 时任务在目标节点执行, copy 自动从控制器(src)拉取到节点(dest), 这才是跨主机传输。
       copy:
         src: "{{ item.path }}"
         dest: /tmp/packages/
-      delegate_to: localhost
       loop: "{{ deb_files.files }}"
       when: deb_files.files | length > 0
 
-    - name: Install packages from local files
-      shell: dpkg -i /tmp/packages/*.deb && rm -rf /tmp/packages
-      args:
-        warn: false
+    - name: Install packages from local files (逐包安装, 单包失败不阻断)
+      # ★ 逐个 dpkg -i + ignore_errors: 任何单个包失败(如 skopeo 缺 golang-github-containers-common /
+      #   libgpgme11, sysstat 缺 libsensors5)都只记失败、不中断整个 k8s 部署 —— 需要与否由下方
+      #   "Verify required packages" 按必需包校验(仅 base 工具 + lvm 家族, 非全部 .deb)。
+      shell: |
+        set -u
+        failed=""
+        for deb in /tmp/packages/*.deb; do
+          [ -e "${deb}" ] || continue
+          if ! dpkg -i "${deb}" >/dev/null 2>&1; then
+            failed="${failed} $(basename "${deb}")"
+          fi
+        done
+        rm -rf /tmp/packages
+        if [ -n "${failed}" ]; then
+          echo "⚠ 以下包安装失败(通常为可选工具缺依赖, 不影响 ceph):${failed}"
+        fi
       become: true
+      ignore_errors: true
       when: deb_files.files | length > 0
 
     - name: Derive expected package names from shipped .deb files
@@ -77,11 +93,24 @@
         manager: apt
       when: deb_files.files | length > 0
 
-    - name: Check installation status (per shipped .deb, 不硬性要求 lvm2)
+    - name: "Check installation status (仅必需包: base 工具 + lvm 家族; skopeo/sysstat 等可选包失败不阻断)"
       assert:
         that:
           - item in ansible_facts.packages
         fail_msg: "Required package missing on {{ inventory_hostname }}: {{ item }}"
-        success_msg: "All shipped packages installed on {{ inventory_hostname }}"
-      loop: "{{ expected_packages }}"
+        success_msg: "All required packages installed on {{ inventory_hostname }}"
+      loop: "{{ required_packages }}"
+      vars:
+        required_packages:
+          - iputils-ping
+          - rsync
+          - iptables
+          - curl
+          - ca-certificates
+          - lvm2
+          - dmsetup
+          - dmeventd
+          - libdevmapper1.02.1
+          - libdevmapper-event1.02.1
+          - thin-provisioning-tools
       when: deb_files.files | length > 0
