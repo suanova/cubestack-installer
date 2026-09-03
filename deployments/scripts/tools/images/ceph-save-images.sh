@@ -2,11 +2,12 @@
 # ============================================================
 # ceph-save-images.sh — Rook/Ceph/ceph-csi 离线镜像: 下载 + 保存独立 tar
 # 用途: 在联网/内网机器上把 Rook + Ceph + ceph-csi 全部镜像拉取并保存为 tar,
-#       供离线环境使用: ceph 模块部署前由 ceph-sync-images.sh 同步到节点 ctr import。
+#       供离线环境使用: 输出到 kubespray images/ 目录, k8s 部署阶段随预加载统一同步到节点。
 # ⚠ 独立脚本: 不依赖 lib-common.sh / cluster.conf / 仓库目录结构 —— 可单独拷到
 #   联网机任意目录直接运行(如拷到 /opt 后 ./ceph-save-images.sh)。
-# 默认输出目录: 仓库内运行 → ${REPO_ROOT}/deployments/offline-files/ceph
-#   (即 ~/cubestack-installer/deployments/offline-files/ceph); 独立运行 → $(pwd)/offline-files/ceph;
+# 默认输出目录: 仓库内运行 → ${REPO_ROOT}/deployments/offline-files/kubespray/images
+#   (即 ~/cubestack-installer/deployments/offline-files/kubespray/images, 与 kubespray 镜像同目录,
+#   不再需要独立 offline-files/ceph); 独立运行 → $(pwd)/offline-files/kubespray/images;
 #   均可 CEPH_IMAGE_DIR 显式覆盖。
 # ⚠ tar 完整性: 保存后校验 <10MB 视为残缺(拉取中断/多架构 index-only)删除重下 ——
 #   曾出现 quay.io/ceph/ceph:v20.2.2 仅 7.6KB 的损坏 tar, 同步到节点 ctr import 缺层必失败。
@@ -23,9 +24,9 @@
 # 下载方式: ① 本地 docker 已有 → save; ② docker pull → save; ③ skopeo 兜底。
 #   每镜像独立 tar(多镜像 tar 会致 ctr import "content digest not found"); --platform linux/amd64 拉单架构。
 # 用法: sudo ./ceph-save-images.sh [镜像ref ...]
-#        sudo CEPH_IMAGE_DIR=/data/offline-files/ceph ./ceph-save-images.sh     # 指定输出目录
+#        sudo CEPH_IMAGE_DIR=/data/offline-files/kubespray/images ./ceph-save-images.sh   # 指定输出目录
 #        sudo CEPH_IMAGE_LIST="img1 img2" ./ceph-save-images.sh                # 整体覆盖默认清单
-# 同步到节点(部署机, 仓库内): sudo ./deployments/scripts/tools/images/ceph-sync-images.sh
+# 同步到节点: 仓库内 k8s 部署阶段自动预加载(cluster.yml 内置 play); 手工: sudo ./deployments/scripts/tools/images/ceph-sync-images.sh
 # ============================================================
 set -euo pipefail
 
@@ -38,15 +39,16 @@ warn() { echo -e "\033[33m⚠  $*\033[0m"; }
 err()  { echo -e "\033[31m【错误】$*\033[0m" >&2; }
 
 # ---------------- 输出目录 ----------------
-# 默认 = 仓库内 deployments/offline-files/ceph(脚本位于 cubestack-installer 仓库内时自动检测,
-#   即 ~/cubestack-installer/deployments/offline-files/ceph); 独立拷到联网机任意目录运行时
-#   回退 $(pwd)/offline-files/ceph; 均可 CEPH_IMAGE_DIR 显式覆盖。
+# 默认 = 仓库内 deployments/offline-files/kubespray/images(与 kubespray 镜像同目录,
+#   ceph 镜像并入 k8s 阶段预加载源, 无需独立 offline-files/ceph 目录);
+# 独立拷到联网机任意目录运行时回退 $(pwd)/offline-files/kubespray/images;
+# 均可 CEPH_IMAGE_DIR 显式覆盖(如需保存到别的目录)。
 _SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_CEPH_IMAGE_DIR_DEFAULT="$(pwd)/offline-files/ceph"
+_CEPH_IMAGE_DIR_DEFAULT="$(pwd)/offline-files/kubespray/images"
 case "${_SELF_DIR}" in
     *cubestack-installer/deployments/scripts/tools/images)
         _REPO_ROOT="$(cd "${_SELF_DIR}/../../../.." && pwd)"
-        [ -d "${_REPO_ROOT}/deployments" ] && _CEPH_IMAGE_DIR_DEFAULT="${_REPO_ROOT}/deployments/offline-files/ceph"
+        [ -d "${_REPO_ROOT}/deployments" ] && _CEPH_IMAGE_DIR_DEFAULT="${_REPO_ROOT}/deployments/offline-files/kubespray/images"
         ;;
 esac
 CEPH_IMAGE_DIR="${CEPH_IMAGE_DIR:-${_CEPH_IMAGE_DIR_DEFAULT}}"
@@ -148,5 +150,4 @@ done <<< "${CEPH_IMAGE_LIST}"
 echo "---------------------------------------------"
 ok "保存完成: ${count} 个镜像 → ${CEPH_IMAGE_DIR}"
 du -sh "${CEPH_IMAGE_DIR}" 2>/dev/null | awk '{print "  总大小: "$1}'
-echo "  同步到节点(部署机, 仓库内): sudo ./deployments/scripts/tools/images/ceph-sync-images.sh"
-echo "  或部署时(CEPH_ENABLED=true)由 ceph 模块自动同步"
+echo "  同步到节点: 仓库内 k8s 部署阶段自动预加载(cluster.yml 内置 play); 或 sudo ./deployments/scripts/tools/images/ceph-sync-images.sh"

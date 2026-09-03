@@ -54,96 +54,8 @@ printf "\r%s\n" "$(printf '\033[0m  %s             ')"
 printf "\r%s\n" "$(printf '\033[0m  %s             ')"
 unset _EXPOSE_MODE
 
-# ⚠ Ceph 部署前确认(需求: 部署 kubespray 之前提醒): CEPH_ENABLED=true 时, Rook 会在集群
-# 就绪后(模块 ceph, 03_addon)用检测到的"未使用裸盘"建 OSD。这里在 kubespray 部署之前
-# 提前亮出"存储节点 + 将使用的裸盘", sleep 倒计时供人工 double-check(节点/盘正确、避免覆盖
-# 系统盘), 避免跑完整个 k8s 部署才发现节点/盘选错。检测为 SSH 直连, 不依赖集群(kubespray 之前可用);
-# 结果仅供参考, 实际 OSD 设备以 ceph 模块部署时再次检测为准。CEPH_CONFIRM_SLEEP=0 可跳过。
-if [ "${CEPH_ENABLED:-false}" = "true" ]; then
-    _CEPH_CONFIRM_SLEEP="${CEPH_CONFIRM_SLEEP:-60}"
-    # 候选存储节点: CEPH_NODES(hostname) 显式列出; 空 = 全部 NODES
-    _CEPH_HOSTS=()
-    if [ -n "${CEPH_NODES:-}" ]; then
-        for _h in ${CEPH_NODES//,/ }; do [ -n "${_h}" ] && _CEPH_HOSTS+=("${_h}"); done
-    else
-        for _line in "${NODES[@]:-}"; do
-            [ -z "${_line}" ] && continue
-            node_parse "${_line}"
-            [ -n "${NODE_HOSTNAME}" ] && _CEPH_HOSTS+=("${NODE_HOSTNAME}")
-        done
-    fi
-    echo ""
-    echo -e "\033[41m\033[97m================================================================================\033[0m"
-    if [ "${#_CEPH_HOSTS[@]}" -ge 1 ]; then
-        declare -A _CEPH_DISKS
-        # 裸盘来源: 显式 CEPH_DATA_DISKS 优先(与 ceph 模块两轮解析一致: hostname 条目优先,
-        # 全部节点条目仅填充未指定节点); 否则 SSH 直连自动检测(同工具)。
-        if [ -n "${CEPH_DATA_DISKS:-}" ]; then
-            while IFS=';' read -ra _grp; do
-                for _g in "${_grp[@]}"; do
-                    [ -z "${_g}" ] && continue
-                    _hn="${_g%%:*}"; _ds="${_g#*:}"
-                    [ -z "${_hn}" ] || [ "${_hn}" = "${_ds}" ] && continue    # 全部节点条目第二轮再处理
-                    _norm=""
-                    for _d in ${_ds//,/ }; do                # 盘名补 /dev/ 前缀(兼容裸名)
-                        _norm="${_norm:+${_norm},}/dev/${_d#/dev/}"
-                    done
-                    _CEPH_DISKS["${_hn}"]="${_norm}"
-                done
-            done <<< "${CEPH_DATA_DISKS}"
-            while IFS=';' read -ra _grp; do
-                for _g in "${_grp[@]}"; do
-                    [ -z "${_g}" ] && continue
-                    _hn="${_g%%:*}"; _ds="${_g#*:}"
-                    [ -z "${_hn}" ] || [ "${_hn}" = "${_ds}" ] || continue
-                    _norm=""
-                    for _d in ${_ds//,/ }; do
-                        _norm="${_norm:+${_norm},}/dev/${_d#/dev/}"
-                    done
-                    for _h2 in "${_CEPH_HOSTS[@]}"; do
-                        [ -n "${_CEPH_DISKS[${_h2}]:-}" ] || _CEPH_DISKS["${_h2}"]="${_norm}"
-                    done
-                done
-            done <<< "${CEPH_DATA_DISKS}"
-        else
-            _DETECT_ARGS=()
-            for _h in "${_CEPH_HOSTS[@]}"; do _DETECT_ARGS+=(--node "${_h}"); done
-            _DETECT_OUT="$(bash "${SCRIPT_DIR}/tools/k8s/ceph-detect-disks.sh" "${_DETECT_ARGS[@]}" -m 2>/dev/null)" || true
-            if [ -n "${_DETECT_OUT}" ]; then
-                while IFS= read -r _l; do
-                    [ -z "${_l}" ] && continue
-                    [[ "${_l}" == *"/dev/"* ]] || continue   # 只取 host:/dev/x 机器行, 过滤 say/warn 噪音
-                    _hn="${_l%%:*}"; _ds="${_l#*:}"
-                    _CEPH_DISKS["${_hn}"]="${_ds%,}"
-                done <<< "${_DETECT_OUT}"
-            fi
-        fi
-        echo -e "\033[41m\033[97m ⚠⚠⚠  CEPH_ENABLED=true — 部署 kubespray 前请 double-check Ceph 存储规划 ⚠⚠⚠\033[0m"
-        echo -e "\033[41m\033[97m  Rook 将在集群就绪后(模块 ceph)用以下节点/裸盘建 OSD(副本=${CEPH_POOL_REPLICAS:-3}):\033[0m"
-        for _h in "${_CEPH_HOSTS[@]}"; do
-            echo -e "\033[41m\033[97m   · ${_h}  →  裸盘: ${_CEPH_DISKS[${_h}]:-<未指定/未检测到>}\033[0m"
-        done
-        echo -e "\033[41m\033[97m  ⚠ 确认要点: ① CEPH_NODES 是想部署 Ceph 的节点(空=全部 NODES)         \033[0m"
-        echo -e "\033[41m\033[97m    ② 每台存储节点裸盘存在且确实空闲; ③ 盘名正确, 不覆盖系统盘/在用盘 \033[0m"
-        echo -e "\033[41m\033[97m    有误请 Ctrl-C 中止, 修正 ${CLUSTER_CONF} 后重跑(CEPH_NODES/CEPH_DATA_DISKS)\033[0m"
-    else
-        echo -e "\033[41m\033[97m ⚠⚠⚠  CEPH_ENABLED=true, 但未找到存储节点(NODES / CEPH_NODES 为空) ⚠⚠⚠\033[0m"
-        echo -e "\033[41m\033[97m   请检查 ${CLUSTER_CONF} 的 NODES / CEPH_NODES; 否则 ceph 模块无法选择存储节点  \033[0m"
-    fi
-    echo -e "\033[41m\033[97m================================================================================\033[0m"
-    if [ "${_CEPH_CONFIRM_SLEEP}" -gt 0 ] 2>/dev/null; then
-        say "Ceph 已启用: sleep ${_CEPH_CONFIRM_SLEEP}s 供核对上方节点/裸盘(CEPH_CONFIRM_SLEEP=0 可跳过)..."
-        for _c in $(seq "${_CEPH_CONFIRM_SLEEP}" -1 1); do
-            printf "\r%s" "$(printf '\033[41m\033[97m  ⏳ 倒计时 %d 秒继续(请核对上方 Ceph 存储节点/裸盘)      \033[0m' "${_c}")"
-            sleep 1
-        done
-        printf "\r%s\n" "$(printf '\033[0m  %s             ')"
-        printf "\r%s\n" "$(printf '\033[0m  %s             ')"
-    else
-        say "CEPH_CONFIRM_SLEEP=0, 跳过 ceph 部署前等待(请务必已人工核对上方节点/裸盘)"
-    fi
-    unset _CEPH_HOSTS _CEPH_CONFIRM_SLEEP _DETECT_ARGS _DETECT_OUT _CEPH_DISKS _hn _ds _l _line _h _c
-fi
+# ⚠ Ceph 部署前确认已由 deploy-cluster.sh 在调度前统一执行(红底列出 节点+裸盘 并倒计时
+#   CEPH_CONFIRM_SLEEP)——这里不再重复, 避免同一确认出现两次; 02_ceph 模块 apply CR 前仍保留最终确认。
 
 # 部署前强制重新生成 inventory(hosts.yml + group_vars 均由当前 cluster.conf 派生):
 # 即使本次未执行 inventory 模块(--skip inventory / --steps k8s), 也保证 kubespray
@@ -213,6 +125,8 @@ OFFLINE_ENV=(
     "CUBESTACK_INVENTORY_DIR=${KUBESPRAY_INV_DIR}"
     "OFFLINE_FILES_DIR=${OFFLINE_FILES_DIR}"
     "CUBESTACK_LOCAL_REPO_DIR=${LOCAL_REPO_DIR}"
+    "CEPH_ENABLED=${CEPH_ENABLED:-false}"
+    "CEPH_IMAGE_DIR=${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}"
 )
 [ -n "${PRELOAD_IMAGE_PATTERNS+x}" ] && \
     OFFLINE_ENV+=("CUBESTACK_PRELOAD_IMAGE_PATTERNS=${PRELOAD_IMAGE_PATTERNS}")

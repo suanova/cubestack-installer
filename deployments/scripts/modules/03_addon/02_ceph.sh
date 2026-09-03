@@ -14,6 +14,10 @@
 #   · 存储节点选择(需求 3): CEPH_NODES(cluster.conf, hostname 逗号分隔; 空=全部 NODES) →
 #     模块给这些节点打 node label(CEPH_NODE_LABEL, 默认 ceph-storage=rook-ceph),
 #     CephCluster 的 placement/storage.nodes 只包含这些节点。
+#   · master 可调度(默认): kubespray 默认给 master 打 control-plane NoSchedule taint, Rook
+#     mon/osd 调度到 master 会被卡住(3 台 mon 至少需 3 台可调度节点)。本模块在部署前默认去掉
+#     master 的 control-plane taint(CEPH_ENABLE_MASTER_SCHEDULE=true, 幂等), 并给 CephCluster
+#     placement 加 control-plane tolerations 双保险; 恢复 taint: kubectl taint nodes <master> node-role.kubernetes.io/control-plane=:NoSchedule。
 #   · 裸盘自动检测(需求 1): tools/k8s/ceph-detect-disks.sh 逐节点检测"未使用裸盘"
 #     (整盘无分区/格式化/挂载/LVM, 且非系统盘), 生成 CephCluster CR 的 per-node devices ——
 #     精确盘名而非正则, 避免误选。VM 集群请确保 VM 附加数据盘(默认 3×200GB, VM_DATA_DISKS)。
@@ -23,8 +27,8 @@
 #   · 节点准备: 每台存储节点加载并持久化 rbd 内核模块; 确保 lvm2
 #     (离线 .deb 由 tools/offline/fetch-lvm-packages.sh 放到 offline-files/kubespray/packages,
 #     本模块部署前预检"离线包就绪 或 节点已在线装 lvm", 缺失硬失败; 部署时自动从该目录安装)。
-#   · 离线镜像(需求 5): tools/images/ceph-save-images.sh(联网机下载到 offline-files/ceph)
-#     → 本模块调 ceph-sync-images.sh 同步到存储节点并 ctr import(保持原始镜像 ref)。
+#   · 离线镜像(需求 5): tools/images/ceph-save-images.sh(联网机下载到 offline-files/kubespray/images,
+#     与 kubespray 镜像同目录) → k8s 阶段由 cluster.yml 内置预加载 play 统一同步到节点并 ctr import。
 #   · registry 后端(需求 6): REGISTRY_STORAGE_CLASS=ceph-block(见 docs/ceph-rook.md)时,
 #     registry 的 PVC 改走 ceph RBD(替代 local-path); 模块设计顺序在 registry 配置之前。
 #   · 参考: docs/ceph-rook.md(Rook v1.20.2 / Ceph v20.2.2 生产设计: 3 副本 host 故障域 + 3 mon)
@@ -56,7 +60,7 @@ CEPH_POOL_MIN_SIZE="${CEPH_POOL_MIN_SIZE:-2}"
 CEPH_OSD_MEMORY_TARGET="${CEPH_OSD_MEMORY_TARGET:-4}"
 CEPH_NODE_LABEL="${CEPH_NODE_LABEL:-ceph-storage=rook-ceph}"
 LABEL_KEY="${CEPH_NODE_LABEL%%=*}"
-CEPH_IMAGE_DIR="${CEPH_IMAGE_DIR:-${REPO_ROOT}/deployments/offline-files/ceph}"
+CEPH_IMAGE_DIR="${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}"
 CEPH_ROOK_MANIFEST_DIR="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}"
 CEPH_CONFIRM_SLEEP="${CEPH_CONFIRM_SLEEP:-60}"
 TOOLS_K8S="${SCRIPT_DIR}/tools/k8s"
@@ -74,6 +78,17 @@ else
     done
 fi
 [ "${#CEPH_NODE_HOSTS[@]}" -ge 1 ] || { err "未找到候选存储节点(检查 NODES / CEPH_NODES)"; exit 1; }
+
+# ★ 节点<3 不建集群内 CephCluster(mon 需 3 节点法定人数, allowMultiplePerNode=false):
+#   置 _CEPH_SKIP_CLUSTER=1 → 跳过 CephCluster CR 创建/等待(下方 [6/8]/[7/8] 分支);
+#   csi-operator 仍按需安装(可连外部 Ceph: cluster.conf 设 CEPH_EXTERNAL_MONITORS)。
+CEPH_MIN_NODES="${CEPH_MIN_NODES:-3}"
+_CEPH_SKIP_CLUSTER=0
+if [ "${#CEPH_NODE_HOSTS[@]}" -lt "${CEPH_MIN_NODES}" ]; then
+    warn "存储节点仅 ${#CEPH_NODE_HOSTS[@]} 台(<${CEPH_MIN_NODES}), 不创建集群内 CephCluster(mon 法定人数不足)"
+    warn "  可选: ① 增加存储节点至 ≥${CEPH_MIN_NODES}; ② 或设 CEPH_EXTERNAL_MONITORS 连接外部 Ceph(见 docs/ceph-rook.md)"
+    _CEPH_SKIP_CLUSTER=1
+fi
 
 # 前置: rook manifest 必须就绪(联网机已 fetch); 缺失给指引
 [ -f "${CEPH_ROOK_MANIFEST_DIR}/operator.yaml" ] && [ -f "${CEPH_ROOK_MANIFEST_DIR}/csi-operator.yaml" ] || {
@@ -204,6 +219,39 @@ else
     say "CEPH_CONFIRM_SLEEP=0, 跳过等待(请务必已人工核对上方节点/裸盘)"
 fi
 
+# ---------------- 3.5) 让 master 节点可调度(默认) ----------------
+# Rook mon/osd 会调度到 master(存储节点默认含 master, 3 副本 mon 需要 ≥3 台可调度节点);
+# kubespray 默认给 master 打了 control-plane NoSchedule taint → mon/osd 无法调度到 master,
+# 只有 worker 时 mon 会因 anti-affinity 卡 Pending(3 台 mon 至少要 3 台可调度节点)。
+# 默认去掉 master 的 control-plane taint(整个集群工作负载均可调度到 master, 符合"master 可调度"需求;
+# 需恢复 taint 时: kubectl taint nodes <master> node-role.kubernetes.io/control-plane=:NoSchedule)。
+if [ "${CEPH_ENABLE_MASTER_SCHEDULE:-true}" = "true" ]; then
+    say "[2.5/8] 默认允许 master 调度: 去掉 control-plane NoSchedule taint(幂等)..."
+    _MASTER_IPS=()
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        [ "${NODE_ROLE}" = "master" ] && _MASTER_IPS+=("${NODE_IP}")
+    done
+    for _mip in "${_MASTER_IPS[@]:-}"; do
+        _mhn=""
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            node_parse "${line}"
+            [ "${NODE_IP}" = "${_mip}" ] && { _mhn="${NODE_HOSTNAME}"; break; }
+        done
+        [ -n "${_mhn}" ] || continue
+        # 幂等: 有 taint 才去掉; 无 taint 直接 ok
+        if SSH "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf get node ${_mhn} -o jsonpath='{.spec.taints}' 2>/dev/null | grep -q 'control-plane'" 2>/dev/null; then
+            SSH "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes ${_mhn} node-role.kubernetes.io/control-plane- 2>/dev/null" \
+                && ok "  ${_mhn}(${_mip}) 已去掉 control-plane taint(master 可调度)" \
+                || warn "  ${_mhn}(${_mip}) 去 taint 失败(手动: kubectl taint nodes ${_mhn} node-role.kubernetes.io/control-plane-)"
+        else
+            ok "  ${_mhn}(${_mip}) 无 control-plane taint(已可调度)"
+        fi
+    done
+fi
+
 # ---------------- 4) 存储节点准备(rbd 模块 + lvm2 + node label) ----------------
 say "[3/8] 存储节点准备(rbd 内核模块 / lvm2 离线安装 / node label)..."
 for _hn in "${CEPH_NODE_HOSTS[@]}"; do
@@ -240,36 +288,104 @@ for _hn in "${CEPH_NODE_HOSTS[@]}"; do
         || warn "    label 失败(节点 ${_hn} 可能尚未就绪?)"
 done
 
-# ---------------- 5) 同步离线镜像到存储节点 ----------------
-say "[4/8] 同步 ceph 离线镜像到存储节点(ctr import)..."
+# ---------------- 5) Ceph 离线镜像就绪校验 ----------------
+# ★ 镜像已由 k8s 阶段预加载 play(cluster.yml 内置)随 kubespray 镜像一起同步到全部节点并
+#   ctr import(见 cubestack-offline.sh resolve_preload_image_files: CEPH_ENABLED=true 时把
+#   CEPH_IMAGE_DIR 的 *.tar 追加进 preload-images.lst)。此处不再重复同步, 只做就绪校验,
+#   并给离线环境明确指引(缺失时 warn + 提供 ceph-sync-images.sh 手工补救, 不阻断)。
+say "[4/8] 校验 ceph 离线镜像已预加载到节点(ctr -n k8s.io images ls)..."
+# 源目录 CEPH_IMAGE_DIR 可能已删除(镜像已并入 k8s 阶段 images/ 预加载, 源目录仅为保存副本):
+# 目录存在才逐节点校验缺失; 不存在则跳过校验(节点镜像由 k8s 阶段保证, 无需源目录)。
 if [ -d "${CEPH_IMAGE_DIR}" ] && ls "${CEPH_IMAGE_DIR}"/*.tar >/dev/null 2>&1; then
-    _SYNC_FAIL=0
+    _MISSING=()
     for _hn in "${CEPH_NODE_HOSTS[@]}"; do
-        # 同步/导入失败 → 硬失败(离线环境节点无镜像 → Rook pod 必 ImagePullBackOff, 半成品集群比失败更糟)
-        bash "${SCRIPT_DIR}/tools/images/ceph-sync-images.sh" --node "${_hn}" \
-            && ok "  ${_hn} 镜像同步完成" || { err "  ${_hn} 镜像同步失败(检查 offline-files/ceph 的 tar 是否完整, 及节点 SSH/磁盘空间; 可用 tools/images/ceph-save-images.sh 重新生成)"; _SYNC_FAIL=1; break; }
+        _ip=""
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            node_parse "${line}"
+            [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
+        done
+        [ -n "${_ip}" ] || continue
+        _has="$(SSH "sudo ctr -n k8s.io images ls -q 2>/dev/null | grep -E 'rook/ceph:|ceph/ceph:|cephcsi' | wc -l" 2>/dev/null | tr -d ' ')"
+        if [ "${_has:-0}" -lt 3 ]; then
+            _MISSING+=("${_hn}")
+        else
+            ok "  ${_hn} ceph 镜像已就绪(rook/ceph/cephcsi 均已在 containerd)"
+        fi
     done
-    [ "${_SYNC_FAIL}" = "0" ] || exit 1
+    if [ "${#_MISSING[@]}" -gt 0 ]; then
+        warn "  以下节点未检测到 ceph 镜像: ${_MISSING[*]} —— 可能预加载未覆盖(k8s 阶段 CEPH_ENABLED 需 true); 手工补救:"
+        warn "    bash ${SCRIPT_DIR}/tools/images/ceph-sync-images.sh --node ${_MISSING[0]}"
+        warn "    或在 cluster.conf 设 CEPH_ENABLED=true 后 --fresh 重跑 k8s_deploy 阶段"
+    fi
 else
-    warn "  ${CEPH_IMAGE_DIR} 无镜像 tar; 集群将尝试在线拉取(离线环境请先联网跑 tools/images/ceph-save-images.sh)"
+    say "  ${CEPH_IMAGE_DIR} 不存在或无镜像 tar(源目录可删除); 节点镜像由 k8s 阶段 images/ 预加载保证, 跳过校验"
 fi
 
 # ---------------- 6) 部署 Rook operator(crds → common → csi-operator → operator) ----------------
 say "[5/8] 部署 Rook operator(manifest: ${CEPH_ROOK_MANIFEST_DIR})..."
 REMOTE_DIR="/tmp/rook-manifests"
-SSH "sudo rm -rf ${REMOTE_DIR} && sudo mkdir -p ${REMOTE_DIR}" >/dev/null 2>&1
+# ★ 先建目录并立即 chown 给 SSH 用户: 此前 sudo mkdir 后目录属 root, scp(ubuntu)写不进去,
+#   5 个 manifest 全没拷过去 → apply crds.yaml 报 path does not exist(错误被 || true 吞掉)。
+SSH "sudo rm -rf ${REMOTE_DIR} && sudo mkdir -p ${REMOTE_DIR} && sudo chown ${SSH_USER:-ubuntu}:${SSH_USER:-ubuntu} ${REMOTE_DIR}" >/dev/null 2>&1
 for f in crds.yaml common.yaml csi-operator.yaml operator.yaml toolbox.yaml; do
     [ -f "${CEPH_ROOK_MANIFEST_DIR}/${f}" ] || { warn "  缺 manifest: ${f}(重跑 rook-fetch-manifests.sh)"; continue; }
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-        "${CEPH_ROOK_MANIFEST_DIR}/${f}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${REMOTE_DIR}/${f}" >/dev/null 2>&1 || true
+        "${CEPH_ROOK_MANIFEST_DIR}/${f}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${REMOTE_DIR}/${f}" \
+        || { err "  scp ${f} 到 master 失败(检查 SSH 密钥/节点连通)"; exit 1; }
 done
 SSH "sudo chown -R \$(id -un) ${REMOTE_DIR}" >/dev/null 2>&1 || true
-for f in crds.yaml common.yaml csi-operator.yaml operator.yaml; do
+# apply 顺序: crds → common → csi-operator(带 CRD: operatorconfigs.csi.ceph.io 等)
+for f in crds.yaml common.yaml; do
     say "  apply ${f} ..."
     SSH "${K} apply --server-side -f ${REMOTE_DIR}/${f} >/dev/null 2>&1" \
         || SSH "${K} apply -f ${REMOTE_DIR}/${f} >/dev/null 2>&1" \
         || { err "  apply ${f} 失败"; exit 1; }
 done
+# ★ ceph-csi-operator 按需安装(需求: 已装则不装, 未装才装):
+#   csi-operator 调和 CSI 驱动(集群内 CephCluster 或外部 Ceph 都需要)。
+#   已存在 ceph-csi-operator 且 CSI 驱动(csi-rbdplugin DS)已就绪 → 跳过(不需要重复安装);
+#   未就绪 → 安装(需要)。用 ssh 直连规避 "函数 + $(函数 \"串\")" 嵌套解析异常。
+_CSI_OP="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get deploy ceph-csi-operator --no-headers 2>/dev/null")" || true
+_CSI_DS="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get ds rook-ceph.rbd.csi.ceph.com-nodeplugin --no-headers 2>/dev/null")" || true
+if [ -n "${_CSI_OP}" ] && [ -n "${_CSI_DS}" ]; then
+    say "  ceph-csi-operator + CSI 驱动已存在, 跳过安装 csi-operator.yaml(不需要重复安装)"
+else
+    say "  apply csi-operator.yaml ..."
+    SSH "${K} apply --server-side -f ${REMOTE_DIR}/csi-operator.yaml >/dev/null 2>&1" \
+        || SSH "${K} apply -f ${REMOTE_DIR}/csi-operator.yaml >/dev/null 2>&1" \
+        || { err "  apply csi-operator.yaml 失败"; exit 1; }
+fi
+unset _CSI_OP _CSI_DS
+# ★ operator.yaml 的 operatorconfig CR 依赖 csi-operator 提供的 CRD; CRD 未 Established 时
+#   apply 会报 "no matches for kind"(竞态)。等 CRD Established 后再 apply, 失败留 stderr 便于定位。
+say "  等待 csi-operator CRD Established(最长 120s)..."
+_CRD_OK=0
+for _i in $(seq 1 24); do
+    if SSH "${K} get crd operatorconfigs.csi.ceph.io >/dev/null 2>&1" && \
+       SSH "${K} wait --for condition=Established crd/operatorconfigs.csi.ceph.io --timeout=5s >/dev/null 2>&1"; then
+        _CRD_OK=1; break
+    fi
+    sleep 5
+done
+[ "${_CRD_OK}" = "1" ] && ok "  operatorconfigs.csi.ceph.io CRD Established" \
+    || warn "  CRD 120s 内未 Established(继续尝试 apply, 若失败查看下方 kubectl 报错)"
+say "  apply operator.yaml ..."
+# 普通 apply 也做重试(CRD 刚建立时 discovery 可能瞬时未刷新)
+_OP_APPLY=0
+for _i in 1 2 3; do
+    if SSH "${K} apply --server-side -f ${REMOTE_DIR}/operator.yaml >/dev/null 2>&1" \
+        || SSH "${K} apply -f ${REMOTE_DIR}/operator.yaml >/dev/null 2>&1"; then
+        _OP_APPLY=1; break
+    fi
+    sleep 5
+done
+[ "${_OP_APPLY}" = "1" ] || {
+    err "  apply operator.yaml 失败; kubectl 报错:"
+    SSH "${K} apply -f ${REMOTE_DIR}/operator.yaml" 2>&1 | sed 's/^/    /' || true
+    exit 1
+}
+unset _CRD_OK _OP_APPLY
 say "  等待 rook-ceph-operator Running(最长 180s)..."
 OP_OK=0
 for i in $(seq 1 18); do
@@ -281,6 +397,11 @@ done
 ok "  Rook operator 已部署"
 
 # ---------------- 7) 生成并应用 CephCluster CR(按节点+裸盘) ----------------
+# ★ 节点<3 → 跳过集群内 CephCluster 创建(mon 法定人数不足; csi-operator 仍按需安装, 可连外部 Ceph)
+if [ "${_CEPH_SKIP_CLUSTER}" = "1" ]; then
+    say "  存储节点 <${CEPH_MIN_NODES}, 跳过生成 CephCluster CR(未创建集群内 CephCluster)"
+    say "  可选: 设 CEPH_EXTERNAL_MONITORS 由 ceph_csi 模块连接外部 Ceph 并创建 StorageClass"
+else
 say "[6/8] 生成并应用 CephCluster CR(mon=${CEPH_MON_COUNT}, 副本=${CEPH_POOL_REPLICAS}/${CEPH_POOL_MIN_SIZE})..."
 LOCAL_CR="$(mktemp)"
 {
@@ -311,6 +432,10 @@ LOCAL_CR="$(mktemp)"
     echo "    provider: \"\""
     echo "  placement:"
     echo "    mon:"
+    echo "      tolerations:"
+    echo "        - key: node-role.kubernetes.io/control-plane"
+    echo "          operator: Exists"
+    echo "          effect: NoSchedule"
     echo "      nodeAffinity:"
     echo "        requiredDuringSchedulingIgnoredDuringExecution:"
     echo "          nodeSelectorTerms:"
@@ -320,6 +445,10 @@ LOCAL_CR="$(mktemp)"
     echo "                  values:"
     echo "                    - ${CEPH_NODE_LABEL#*=}"
     echo "    osd:"
+    echo "      tolerations:"
+    echo "        - key: node-role.kubernetes.io/control-plane"
+    echo "          operator: Exists"
+    echo "          effect: NoSchedule"
     echo "      nodeAffinity:"
     echo "        requiredDuringSchedulingIgnoredDuringExecution:"
     echo "          nodeSelectorTerms:"
@@ -348,7 +477,10 @@ rm -f "${LOCAL_CR}"
 
 # toolbox
 say "  部署 toolbox(ceph CLI)..."
-SSH "${K} apply -f ${REMOTE_DIR}/toolbox.yaml >/dev/null 2>&1" || true
+# ★ toolbox.yaml 官方 manifest 写的是浮动 tag ceph:v20, 而离线 tar 保存的是精确版本
+#   v20.2.2(节点 containerd 无 v20 这个 tag) → ImagePullBackOff。apply 前统一改写为 CEPH_VERSION。
+SSH "sed -i 's|quay.io/ceph/ceph:[a-zA-Z0-9._-]*|quay.io/ceph/ceph:${CEPH_VERSION}|g' ${REMOTE_DIR}/toolbox.yaml" \
+    && SSH "${K} apply -f ${REMOTE_DIR}/toolbox.yaml >/dev/null 2>&1" || true
 
 # 等待 CephCluster Ready + HEALTH_OK(最长 600s)
 say "[7/8] 等待 Ceph 集群就绪(最长 600s, ceph -s HEALTH_OK)..."
@@ -368,6 +500,11 @@ done
 # 调优 osd_memory_target(200G 盘 4G 已够; 大盘按文档)
 say "  设置 OSD osd_memory_target=${CEPH_OSD_MEMORY_TARGET}GiB(经 toolbox)..."
 SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set osd osd_memory_target $((CEPH_OSD_MEMORY_TARGET * 1024 * 1024 * 1024)) >/dev/null 2>&1" || true
+# 放宽 mon 时钟偏差告警阈值(默认 0.05s 太严: NTP 同步后节点偏差仍可能 0.2~0.5s → 恒 HEALTH_WARN;
+# 放宽到 0.5s 消除误报, 实际偏差已在 k8s NTP 模块收敛 ≤500ms)
+say "  设置 mon clock skew 阈值=0.5s(默认 0.05s 过严, NTP 同步后消除 HEALTH_WARN)..."
+SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set mon mon_clock_drift_allowed 0.5 >/dev/null 2>&1" || true
+fi   # _CEPH_SKIP_CLUSTER=1 → 跳过集群内 CephCluster 创建
 
 # ---------------- 8) 汇总 ----------------
 echo "---------------------------------------------"

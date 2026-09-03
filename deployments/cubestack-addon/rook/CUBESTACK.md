@@ -29,8 +29,8 @@ sudo ./deployments/scripts/tools/k8s/rook-fetch-manifests.sh            # 默认
 ## 项目集成
 
 - 部署入口: `modules/03_addon/02_ceph.sh`(`CEPH_ENABLED=true`)+ `03_ceph_csi.sh`(`CEPH_CSI_ENABLED=true`)
-- 离线镜像: `tools/images/ceph-save-images.sh`(下载到 `offline-files/ceph`)→
-  `tools/images/ceph-sync-images.sh`(同步到节点 ctr import, 保持原始镜像 ref)
+- 离线镜像: `tools/images/ceph-save-images.sh`(下载到 `offline-files/kubespray/images`, 与 kubespray 镜像同目录)→
+  k8s 部署阶段由 cluster.yml 内置预加载 play 统一同步到节点并 ctr import; 手工补同步: `tools/images/ceph-sync-images.sh`
 - 裸盘检测: `tools/k8s/ceph-detect-disks.sh`(自动检测未使用裸盘)
 - 节点选择: `CEPH_NODES`(cluster.conf)+ node label(`CEPH_NODE_LABEL`)
 - lvm2 离线包: `tools/offline/fetch-lvm-packages.sh` → `offline-files/kubespray/packages`
