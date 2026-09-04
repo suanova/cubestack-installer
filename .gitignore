@@ -37,6 +37,7 @@ deployments/config/minio.conf
 deployments/cli-context/
 # 断点状态文件(含进度,勿提交)
 deployments/config/.deploy.state
+deployments/config/.deploy.state.lock
 # kubespray 生成的 artifacts(kubeconfig/kubectl,含凭据, root 属主)
 deployments/kubespray/inventory/*/artifacts/
 # 部署生成的 inventory(含密码)
