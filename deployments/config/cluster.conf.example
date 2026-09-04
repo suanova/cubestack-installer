@@ -355,7 +355,7 @@ METAX_CLUSTER_TYPE="${METAX_CLUSTER_TYPE:-k8s}"                 # 集群类型: 
 #   PreferCloud=Operator 经 DaemonSet 容器化安装驱动(需 driver-image, 会尝试卸载宿主驱动, 卸载失败会 CrashLoop)
 METAX_DRIVER_DEPLOY_POLICY="${METAX_DRIVER_DEPLOY_POLICY:-PreferHost}"
 METAX_DRIVER_VERSION="${METAX_DRIVER_VERSION:-3.8.1.6-amd64}"  # 内核驱动版本(driver-image:<ver>; 需与本地镜像/离线 tar 匹配)
-METAX_MACA_IMAGE="${METAX_MACA_IMAGE:-maca:3.8.1.2-ubuntu20.04-amd64}"  # MXMACA SDK 镜像(最新 3.8, 需与离线 tar/在线拉取匹配)
+METAX_MACA_IMAGE="${METAX_MACA_IMAGE:-maca:3.8.1.2-ubuntu22.04-amd64}"  # MXMACA SDK 镜像(最新 3.8, 需与离线 tar/在线拉取匹配)
 
 # ---------------- 4.2 LeaderWorkerSet / LWS(依赖: Registry; LLM 工作负载调度) ----------------
 # 开关见顶部【组件启停开关】: LWS_ENABLED(默认 false=关)

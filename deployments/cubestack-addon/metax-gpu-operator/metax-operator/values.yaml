@@ -135,7 +135,7 @@ maca:
     # - Tag-based: <image-name>:<tag>
     # - Digest-based: <image-name>@sha256:<hash>
     images:
-    - "maca:3.8.1.2-ubuntu20.04-amd64" # DEFAULT_MACA_VERSION(已升级到 3.8)
+    - "maca:3.8.1.2-ubuntu22.04-amd64" # DEFAULT_MACA_VERSION(已升级到 3.8)
   # legacy fields (used when cmInit is not provided)
   cleanupConfig:
     threshold: 5
