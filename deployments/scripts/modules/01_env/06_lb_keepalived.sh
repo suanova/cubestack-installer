@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: KEEPALIVED_ENABLED
+# REQUIRES: lb_haproxy vm_create
 # 说明:
 #   · 从 cluster.conf 生成 /etc/keepalived/keepalived.conf(VIP = KEEPALIVED_VIP,
 #     默认取 APISERVER_ADDRESS), 提供 API 入口 VIP 漂移高可用

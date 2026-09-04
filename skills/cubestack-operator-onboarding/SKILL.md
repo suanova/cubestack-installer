@@ -1,3 +1,8 @@
+---
+name: cubestack-operator-onboarding
+description: CubeStack 集群 Operator 上架标准流程技能。当需要新增、替换或删除一个集群 operator 组件时使用本技能。适用触发语:"新增 operator"、"上架组件"、"替换 XX operator"、"删除组件"。本技能强制按现有模型落地:模块化脚本 + cluster.conf 单一配置源 + 端到端验证 + 文档同步, 不破坏已有功能。
+---
+
 # CubeStack Operator 上架标准流程(Skill)
 
 > 当需要**新增 / 替换 / 删除**一个集群 operator(组件)时, 使用本技能。

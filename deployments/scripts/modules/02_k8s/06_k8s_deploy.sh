@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: K8S_ENABLED
+# REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp
 # 说明: 调用 cubestack-offline.sh install; 透传 cluster.conf 中 PRELOAD_IMAGE_PATTERNS
 # ============================================================
 set -euo pipefail
