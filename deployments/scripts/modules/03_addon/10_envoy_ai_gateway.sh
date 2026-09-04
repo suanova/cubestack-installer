@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: ENVOY_AI_GATEWAY_ENABLED
+# REQUIRES: envoy_gateway k8s_registry
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态, 重跑自动跳过; --fresh 清状态重装。
 #   · 定位(v1.1, 官方架构): Envoy AI Gateway = 独立控制器(AI Gateway Controller)+ AI 扩展 CRD +
@@ -54,11 +55,7 @@ load_config
 # ---- 开关 ----
 [ "${ENVOY_AI_GATEWAY_ENABLED:-false}" = "true" ] || { say "ENVOY_AI_GATEWAY_ENABLED=false, 跳过 Envoy AI Gateway"; exit 0; }
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 # ---------------- 派生变量(全部来自 cluster.conf, 无硬编码) ----------------
 ENVOY_AI_VERSION="${ENVOY_AI_VERSION:-v1.1.0}"           # chart 版本 + 控制器镜像 tag(带 v, 与官方一致)

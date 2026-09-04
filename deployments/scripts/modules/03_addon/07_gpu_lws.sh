@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: LWS_ENABLED
+# REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态, 重跑自动跳过; --fresh 清状态重装。
 #   · 双安装方式(LWS_INSTALL_MODE, 默认 bundle; 设 LWS_CERT_MODE=cert-manager 自动切 helm):
@@ -44,11 +45,7 @@ load_config
 # ---- 开关 ----
 [ "${LWS_ENABLED:-false}" = "true" ] || { say "LWS_ENABLED=false, 跳过 LeaderWorkerSet"; exit 0; }
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 # ---------------- 派生变量(全部来自 cluster.conf, 无硬编码) ----------------
 # 双安装方式(LWS_INSTALL_MODE):

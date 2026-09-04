@@ -7,6 +7,7 @@
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: METALLB_ENABLED
+# REQUIRES: k8s_deploy
 # 说明:
 #   · MetalLB 由 kubespray addon 安装; 本模块仅做**就绪校验**(幂等), 不重复安装。
 #   · 依赖顺序: metallb(本模块)→ local-path → registry —— registry 的 LoadBalancer VIP
@@ -27,11 +28,7 @@ load_config
 [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ] \
     && { say "SERVICE_EXPOSE_MODE=nodeport(自动关闭 MetalLB), 跳过 metallb 就绪检查"; exit 0; }
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 say "检查 MetalLB 就绪(registry 等 LoadBalancer 组件的前置依赖)..."
 say "  ① metallb-system 命名空间..."

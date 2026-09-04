@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: CEPH_CSI_ENABLED
+# REQUIRES: ceph
 # 说明:
 #   · 断点续跑: REPEAT:0 → 成功后写状态; --fresh 重装。
 #   · 前置: Ceph 模块(02_ceph)已就绪(rook operator + CephCluster HEALTH_OK)。
@@ -29,11 +30,7 @@ load_config
 [ "${CEPH_CSI_ENABLED:-false}" = "true" ] || { say "CEPH_CSI_ENABLED=false, 跳过 Ceph CSI"; exit 0; }
 [ "${CEPH_ENABLED:-false}" = "true" ] || { err "Ceph CSI 依赖 Ceph 存储底座(CEPH_ENABLED=true 先部署模块 ceph)"; exit 1; }
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
 CEPH_POOL_REPLICAS="${CEPH_POOL_REPLICAS:-3}"

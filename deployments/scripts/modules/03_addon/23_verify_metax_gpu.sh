@@ -5,6 +5,7 @@
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
+# REQUIRES: gpu_operator
 # 说明:
 #   · 验证模块不设 TOGGLE, 由 --steps verify_metax_gpu 或 --steps verify(自动纳入)显式执行。
 #   · 复用 tools/k8s/verify-metax-gpu.sh: 列出每节点 GPU capacity/allocatable/label/可调度,

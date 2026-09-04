@@ -8,6 +8,7 @@
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
+# REQUIRES: gpu_lws
 # 说明:
 #   · 验证模块不设 TOGGLE(避免被安装流程自动启用); DEFAULT:0, 由 --steps verify_lws 执行。
 #   · **门禁看实际部署, 不看配置开关**: 只要 LWS controller 实际在跑(无论 LWS_ENABLED 是 true 还是 false,
@@ -22,11 +23,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 LWS_NAMESPACE="${LWS_NAMESPACE:-lws-system}"
 

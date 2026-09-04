@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: PROMETHEUS_ENABLED
+# REQUIRES: k8s_deploy
 # 说明:
 #   【P1-2/P1-3 规划模块·伪代码占位】监控底座:
 #   · Prometheus + Prometheus Operator(kube-prometheus-stack)
@@ -26,21 +27,19 @@ if [ "${PROMETHEUS_ENABLED:-false}" != "true" ]; then
     exit 0
 fi
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH="ssh -i ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@${FIRST_MASTER}"
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 # ── 伪代码步骤(占位): 替换为真实实现 ──
 PROMETHEUS_STEPS=(
-  "创建 monitoring 命名空间|${SSH} \"${K} create ns monitoring 2>/dev/null || true\""
-  "部署 kube-prometheus-stack(离线 helm)|${SSH} \"helm install prometheus /opt/cubestack/addons/kube-prometheus-stack -n monitoring 2>/dev/null || true\""
-  "部署 node-exporter(节点指标)|${SSH} \"${K} apply -f /opt/cubestack/addons/node-exporter.yaml 2>/dev/null || true\""
-  "部署 kube-state-metrics(集群指标)|${SSH} \"${K} apply -f /opt/cubestack/addons/kube-state-metrics.yaml 2>/dev/null || true\""
-  "部署 Perses 可视化|${SSH} \"${K} apply -f /opt/cubestack/addons/perses.yaml 2>/dev/null || true\""
-  "部署 DCGM Exporter(NVIDIA GPU)|${SSH} \"${K} apply -f /opt/cubestack/addons/dcgm-exporter.yaml 2>/dev/null || true\""
-  "部署 MetaX Exporter(沐曦 GPU)|${SSH} \"${K} apply -f /opt/cubestack/addons/metax-exporter.yaml 2>/dev/null || true\""
-  "部署 RDMA Exporter|${SSH} \"${K} apply -f /opt/cubestack/addons/rdma-exporter.yaml 2>/dev/null || true\""
-  "部署 Ceph Exporter|${SSH} \"${K} apply -f /opt/cubestack/addons/ceph-exporter.yaml 2>/dev/null || true\""
-  "等待监控底座就绪并验证|${SSH} \"${K} -n monitoring get pods -o wide 2>/dev/null || true\""
+  "创建 monitoring 命名空间|${SSH_CMD} \"${K} create ns monitoring 2>/dev/null || true\""
+  "部署 kube-prometheus-stack(离线 helm)|${SSH_CMD} \"helm install prometheus /opt/cubestack/addons/kube-prometheus-stack -n monitoring 2>/dev/null || true\""
+  "部署 node-exporter(节点指标)|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/node-exporter.yaml 2>/dev/null || true\""
+  "部署 kube-state-metrics(集群指标)|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/kube-state-metrics.yaml 2>/dev/null || true\""
+  "部署 Perses 可视化|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/perses.yaml 2>/dev/null || true\""
+  "部署 DCGM Exporter(NVIDIA GPU)|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/dcgm-exporter.yaml 2>/dev/null || true\""
+  "部署 MetaX Exporter(沐曦 GPU)|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/metax-exporter.yaml 2>/dev/null || true\""
+  "部署 RDMA Exporter|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/rdma-exporter.yaml 2>/dev/null || true\""
+  "部署 Ceph Exporter|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/ceph-exporter.yaml 2>/dev/null || true\""
+  "等待监控底座就绪并验证|${SSH_CMD} \"${K} -n monitoring get pods -o wide 2>/dev/null || true\""
 )
 addon_stub "prometheus" PROMETHEUS_STEPS
