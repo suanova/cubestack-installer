@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: CUBESTACK_APPS_ENABLED
+# REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   【自研模块占位符】CubeStack 平台自研组件统一在此部署。
 #   序号约定: 03_addon/ 下 01~19 为第三方中间件预留;
@@ -26,16 +27,14 @@ if [ "${CUBESTACK_APPS_ENABLED:-false}" != "true" ]; then
     exit 0
 fi
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH="ssh -i ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@${FIRST_MASTER}"
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 # ── 伪代码步骤(占位): 替换为真实的自研组件部署 ──
 CUBESTACK_APPS_STEPS=(
-  "创建 cubestack 命名空间|${SSH} \"${K} create ns cubestack 2>/dev/null || true\""
-  "部署自研组件 A(示例: 平台后端)|${SSH} \"${K} apply -f /opt/cubestack/addons/cubestack-backend.yaml 2>/dev/null || true\""
-  "部署自研组件 B(示例: 平台前端/网关)|${SSH} \"${K} apply -f /opt/cubestack/addons/cubestack-frontend.yaml 2>/dev/null || true\""
-  "等待自研组件就绪|${SSH} \"${K} -n cubestack rollout status deploy --timeout=5m 2>/dev/null || true\""
-  "验证自研服务访问|${SSH} \"${K} -n cubestack get svc,pods -o wide 2>/dev/null || true\""
+  "创建 cubestack 命名空间|${SSH_CMD} \"${K} create ns cubestack 2>/dev/null || true\""
+  "部署自研组件 A(示例: 平台后端)|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/cubestack-backend.yaml 2>/dev/null || true\""
+  "部署自研组件 B(示例: 平台前端/网关)|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/cubestack-frontend.yaml 2>/dev/null || true\""
+  "等待自研组件就绪|${SSH_CMD} \"${K} -n cubestack rollout status deploy --timeout=5m 2>/dev/null || true\""
+  "验证自研服务访问|${SSH_CMD} \"${K} -n cubestack get svc,pods -o wide 2>/dev/null || true\""
 )
 addon_stub "cubestack_apps" CUBESTACK_APPS_STEPS

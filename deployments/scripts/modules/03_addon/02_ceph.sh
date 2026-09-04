@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: CEPH_ENABLED
+# REQUIRES: k8s_deploy
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态; --fresh 清状态重装。
 #   · 方式: Rook Operator(离线 manifest, deployments/cubestack-addon/rook, 需先联网跑
@@ -45,11 +46,7 @@ load_config
 # ---- 开关 ----
 [ "${CEPH_ENABLED:-false}" = "true" ] || { say "CEPH_ENABLED=false, 跳过 Ceph"; exit 0; }
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 # ---------------- 派生变量(全部来自 cluster.conf) ----------------
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"

@@ -798,6 +798,26 @@ first_master_ip() {
     return 1
 }
 
+# ---------------- 远端 kubectl 统一初始化(幂等) ----------------
+# ★ 所有需要 SSH 到 master 执行 kubectl 的模块/脚本**必须**调用本函数获取:
+#   FIRST_MASTER / SSH_KEY / SSH() 函数 / K(远端 kubectl 简写)。
+#   禁止在模块内重复定义这四个 —— 历史上 metallb/ceph 等模块各自定义, 新模块少复制
+#   一行就踩 set -u 的 "K: unbound variable"(05_k8s_registry 曾致部署成功后崩溃)。
+# 用法: init_remote_kubectl || exit 1   (失败已 err 说明, 调用方直接退出即可)
+# 注意: 本函数依赖 first_master_ip, 调用前须已 load_config(NODES)。
+init_remote_kubectl() {
+    [ "${_INIT_REMOTE_KUBECTL:-0}" = "1" ] && return 0   # 幂等: 同一进程只初始化一次
+    FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点(cluster.conf NODES 无 role=master)"; return 1; }
+    SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+               "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
+    # 字符串式(伪代码/单行命令场景, 如 addon_stub 步骤数组): ssh ... ${SSH_USER:-ubuntu}@${FIRST_MASTER}
+    SSH_CMD="ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 ${SSH_USER:-ubuntu}@${FIRST_MASTER}"
+    K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+    _INIT_REMOTE_KUBECTL=1
+    return 0
+}
+
 # 返回第一个节点 IP(NODES 顺序首位; NodePort 暴露模式的访问入口)
 # 用法: NODE_IP="$(first_node_ip)" || { err "未找到节点"; exit 1; }
 first_node_ip() {

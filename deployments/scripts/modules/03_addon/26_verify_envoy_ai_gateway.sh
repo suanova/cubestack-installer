@@ -8,6 +8,7 @@
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
+# REQUIRES: envoy_ai_gateway
 # 说明:
 #   · **验证模块不设 TOGGLE**(否则 ENVOY_AI_GATEWAY_ENABLED=true 时会被安装流程自动启用);
 #     保持 DEFAULT:0, 仅由 --steps verify_envoy_ai_gateway 在安装后单独执行。
@@ -39,11 +40,7 @@ load_config
 # 开关检查: 未启用则跳过(不报错)
 [ "${ENVOY_AI_GATEWAY_ENABLED:-false}" = "true" ] || { say "ENVOY_AI_GATEWAY_ENABLED=false, 跳过验证"; exit 0; }
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 # 测试后端镜像: 离线优先, 幂等确保 nginx 已在集群 registry(不依赖节点 containerd 预加载)
 TEST_IMAGE="$(ensure_registry_nginx)" || exit 1

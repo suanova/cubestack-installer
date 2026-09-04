@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: REGISTRY_ENABLED
+# REQUIRES: k8s_deploy local_path metallb
 # 说明:
 #   · 集群内 registry(kubespray addon), **默认部署**(REGISTRY_ENABLED 默认 1/true)
 #   · 对**已部署**集群幂等配置内置 registry, 需集群就绪后显式执行
@@ -51,11 +52,7 @@ fi
 # ★ K/SSH/FIRST_MASTER 定义(远端 kubectl): 本模块在"就绪等待"用 SSH "${K}" 轮询 PVC/pod。
 #   这些变量其他模块(metallb/ceph)在各自文件内定义, 不会跨模块可见 —— 必须在本文件定义,
 #   否则 set -u 下裸引用 unbound → 部署成功(registry 已部署)后模块崩溃(本次事故根因)。
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 bash "${SCRIPT_DIR}/tools/lb/deploy-registry.sh"
 
 # ---------------- 就绪等待(关键) ----------------

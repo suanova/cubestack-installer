@@ -6,6 +6,7 @@
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
+# REQUIRES: k8s_registry local_path
 # 说明:
 #   · **验证模块不设 TOGGLE**, 保持 DEFAULT:0, 仅由 --steps verify_registry_storage 显式执行。
 #   · registry 是集群内 Pod, 经 MetalLB LoadBalancer 分配 VIP 对外; 宿主机经 VIP 直连推送,
@@ -40,11 +41,7 @@ if [ "${REGISTRY_ON}" = "0" ] && [ "${LOCALPATH_ON}" = "0" ]; then
     exit 0
 fi
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 # 节点 hostname → IP(cluster.conf NODES, 供 kubectl nodeName→SSH 目标)
 node_ip_by_name() {

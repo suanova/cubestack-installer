@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: K8S_SCALE_ENABLED
+# REQUIRES: k8s_deploy
 #
 # 场景一: 新节点为虚拟机且尚未创建
 #   虚拟机创建由 tools/vm/create-vms.sh 独立执行(不经过主程序): 先在 tools/vm/vm-nodes.conf

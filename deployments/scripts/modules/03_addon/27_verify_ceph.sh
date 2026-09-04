@@ -8,6 +8,7 @@
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
+# REQUIRES: ceph ceph_csi
 # 说明:
 #   · **验证模块不设 TOGGLE**(否则 CEPH_ENABLED=true 时会被安装流程自动启用);
 #     保持 DEFAULT:0, 仅由 --steps verify_ceph 在安装后单独执行。
@@ -28,11 +29,7 @@ load_config
 [ "${CEPH_ENABLED:-false}" = "true" ] || { say "CEPH_ENABLED=false, 跳过 Ceph 验证"; exit 0; }
 [ "${CEPH_CSI_ENABLED:-false}" = "true" ] || { warn "CEPH_CSI_ENABLED=false(未建 StorageClass ceph-block); 仅验证 Ceph 集群本身"; }
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
 TEST_NS="verify-ceph-$$"     # 唯一命名空间(带 PID 后缀)

@@ -21,6 +21,11 @@
 #   # DEFAULT: <0|1>           是否默认启用(0=需 --enable / TOGGLE / --steps)
 #   # REPEAT: <0|1>            1=可重复执行(每次执行且不写断点状态)
 #   # TOGGLE: <VAR>            (可选) cluster.conf 变量名, 值为 true 时自动启用
+#   # REQUIRES: <k1> [k2...]   (可选) 依赖模块: 执行前须已完成的模块 key 列表。
+#                              框架在 resolve_run_steps 后做稳定拓扑排序(无依赖模块保持
+#                              文件顺序), 保证新模块声明依赖即自动排对顺序, 无需改序号;
+#                              循环依赖/引用未知模块会报错。--steps 精确模式还会自动
+#                              把 REQUIRES 依赖加入执行列表(闭包)。
 # 示例:
 #   # MODULE: k8s_deploy
 #   # DESC: 部署 kubespray 集群(离线)
@@ -28,6 +33,14 @@
 #   # DEFAULT: 0
 #   # REPEAT: 0
 #   # TOGGLE: K8S_ENABLED
+#   # REQUIRES: k8s_passwordless k8s_hosts k8s_inventory
+#
+# 模块内访问远端 kubectl 的统一入口(★ 必读):
+#   · 需要 SSH 到 master 执行 kubectl 的模块, 在 load_config 之后调用
+#     `init_remote_kubectl || exit 1`, 由 lib-common.sh 幂等定义
+#     FIRST_MASTER / SSH_KEY / SSH() 函数 / K(远端 kubectl 简写)。
+#   · **禁止**在模块内自行复制这段定义 —— 历史事故: 新模块少复制一行
+#     `${K}` 就在 set -u 下 unbound(05_k8s_registry 部署成功后崩溃)。
 #
 # 旧 key 别名(向后兼容, 旧用法 --steps vm,k8s 等仍然有效):
 #   net→vm_network ssh_key→vm_sshkey vm→vm_create ssh_passwordless→k8s_passwordless
@@ -59,16 +72,19 @@ normalize_key() {
     [ -n "${MODULE_ALIAS[$k]:-}" ] && echo "${MODULE_ALIAS[$k]}" || echo "$k"
 }
 
-# ---------------- operator 模块(显式调度用) ----------------
+# ---------------- operator 模块(显式调度用, 自动派生) ----------------
 # --steps 显式命名了任一 operator 时, 只部署被指定的 operator(+基座 env/k8s/metallb/local_path/k8s_registry),
 # 剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps lws 时不部署 gpu_operator);
 # 未命名任何 operator(纯默认 / --with-k8s / --with-cubestack)时, 全部默认启用的 operator 照常部署。
 # (--enable 只写 cluster.conf, 不经过本处; 见 deploy-cluster.sh)
-# 新增 operator 模块时把其 key 加入本列表(基座 metallb/local_path/k8s_registry 与 k8s_deploy/k8s_scale/verify_* 不属于 operator)。
-OPERATOR_MODULES=(
-    gpu_operator gpu_lws prometheus ceph ceph_csi envoy_gateway envoy_ai_gateway keycloak kueue kubevirt lustre_csi
-    cubestack_apps harbor lb_haproxy lb_keepalived
-)
+#
+# ★ 自动派生规则(无需手工维护列表): operator = 有 TOGGLE 的模块 - 基座模块。
+#   新增 operator 模块只需在头部写 # TOGGLE: XXX_ENABLED, 自动进入精确调度;
+#   新增基座模块(集群底座, 如新的 kubespray addon)把 key 加进 BASE_MODULES 即可。
+#   基座模块: k8s_deploy/k8s_scale(集群本体) + metallb/local_path/k8s_registry(kubespray 内置 addon,
+#   由 k8s 阶段统一安装, 不属于可单独调度的 operator)。
+BASE_MODULES=(k8s_deploy k8s_scale metallb local_path k8s_registry)
+OPERATOR_MODULES=()   # discover_modules 时按规则派生
 
 # ---------------- 元模块展开(verify → 全部 verify_* 模块) ----------------
 # 每次新增一个 verify_<组件>.sh 模块, 这里自动把它纳入 "verify" 集合;
@@ -108,9 +124,9 @@ module_meta() {
 
 # ---------------- 模块自动发现(子目录递归, 按 目录序号+文件序号 排序) ----------------
 # 结果写入并行数组: MODULE_KEY / MODULE_DESC / MODULE_SCRIPT(相对 modules/ 的路径) /
-#   MODULE_DEFAULT / MODULE_REPEAT / MODULE_PHASE / MODULE_TOGGLE
+#   MODULE_DEFAULT / MODULE_REPEAT / MODULE_PHASE / MODULE_TOGGLE / MODULE_REQUIRES
 discover_modules() {
-    MODULE_KEY=(); MODULE_DESC=(); MODULE_SCRIPT=(); MODULE_DEFAULT=(); MODULE_REPEAT=(); MODULE_PHASE=(); MODULE_TOGGLE=()
+    MODULE_KEY=(); MODULE_DESC=(); MODULE_SCRIPT=(); MODULE_DEFAULT=(); MODULE_REPEAT=(); MODULE_PHASE=(); MODULE_TOGGLE=(); MODULE_REQUIRES=()
     local f dir base key rel
     # 遍历 modules/NN_*/NN_*.sh(两级), 按路径字典序 = 目录序号+文件序号 排序
     for f in "${MODULES_DIR}"/[0-9][0-9]_*/[0-9][0-9]_*.sh; do
@@ -127,6 +143,21 @@ discover_modules() {
         MODULE_REPEAT+=("$(module_meta "${f}" REPEAT)")
         MODULE_PHASE+=("$(module_meta "${f}" PHASE)")
         MODULE_TOGGLE+=("$(module_meta "${f}" TOGGLE)")
+        MODULE_REQUIRES+=("$(module_meta "${f}" REQUIRES)")
+    done
+    # ★ operator 自动派生: 有 TOGGLE 且不在基座集合(BASE_MODULES)即 operator。
+    #   新增 operator 模块写 TOGGLE 即自动纳入 --steps 精确调度, 无需改本文件。
+    OPERATOR_MODULES=()
+    local _i _tgl _b _is_base
+    for _i in "${!MODULE_KEY[@]}"; do
+        _tgl="${MODULE_TOGGLE[$_i]:-}"
+        [ -n "${_tgl}" ] || continue
+        _is_base=0
+        for _b in "${BASE_MODULES[@]}"; do
+            [ "${MODULE_KEY[$_i]}" = "${_b}" ] && { _is_base=1; break; }
+        done
+        [ "${_is_base}" = "1" ] && continue
+        OPERATOR_MODULES+=("${MODULE_KEY[$_i]}")
     done
 }
 
@@ -155,10 +186,14 @@ module_default_on() {
 
 # ---------------- 运行步骤解析 ----------------
 # 优先级: --steps(立即部署, 自动带基座) > 默认启用 + --with-xxx - --skip
-# 注意: --steps 显式命名 operator 时只部署被指定的 operator(+基座), 见 OPERATOR_MODULES 说明。
-#       --steps verify 保持精确: 只跑全部验证模块, 不拉基座。
-#       --enable 不在本函数生效(只写 cluster.conf, 见 deploy-cluster.sh)。
-# 结果写入全局 RUN_STEPS(按模块文件顺序)
+# 注意:
+#   · --steps 精确模式: 只跑指定的模块 + 其 REQUIRES 闭包依赖, **不再带出默认启用的 operator**
+#     (曾因 --steps local_path,k8s_registry 意外带出 gpu_operator 而误部署); 基座模块
+#     (env/k8s 阶段 + metallb/local_path/k8s_registry)不受影响, 仍按默认启用参与。
+#   · --steps 显式命名 operator 时, 同样只部署被指定的 operator(+基座), 见 OPERATOR_MODULES 说明。
+#   · --steps verify 保持精确: 只跑全部验证模块, 不拉基座。
+#   · --enable 不在本函数生效(只写 cluster.conf, 见 deploy-cluster.sh)。
+# 结果写入全局 RUN_STEPS(先按模块文件顺序 + REQUIRES 闭包, 再做稳定拓扑排序)
 # 用法: resolve_run_steps <steps> <skip> <enable> [phase_filter]
 resolve_run_steps() {
     local steps_arg="$1" skip_arg="$2" enable_arg="$3" phase_filter="$4"
@@ -181,6 +216,8 @@ resolve_run_steps() {
         return 1
     }
 
+    # --steps 精确模式标记: 显式指定了模块(非 verify)时, 只保留指定 operator, 不带默认 operator
+    local _steps_precise=0
     if [ -n "${steps_arg}" ]; then
         # 全部为 verify_* 模块 → 保持"精确模式": 只跑验证模块, 不拉基座(verify 模块 REPEAT:1, 每次执行)。
         local _all_verify=1 _tok
@@ -200,8 +237,9 @@ resolve_run_steps() {
             done
             return 0
         fi
-        # 非 verify 模块: --steps 与 --enable 等价 = 自动带基座 + 只部署指定的 operator + 执行部署,
-        # 落入默认模式(base + enable - skip + operator 显式调度)。断点续跑感知, 重跑用 --fresh。
+        # 非 verify 模块: --steps 精确模式, 只跑指定模块 + REQUIRES 闭包; 基座默认启用模块仍参与。
+        # 断点续跑感知, 重跑用 --fresh。
+        _steps_precise=1
         enable_arg="${enable_arg},${steps_arg}"
     fi
 
@@ -235,13 +273,14 @@ resolve_run_steps() {
         nk="$(normalize_key "${s}")"
         for _op in "${OPERATOR_MODULES[@]}"; do [ "${nk}" = "${_op}" ] && _op_keep["${_op}"]=1; done
     done
-    if [ "${#_op_keep[@]}" -gt 0 ]; then
+    if [ "${#_op_keep[@]}" -gt 0 ] || [ "${_steps_precise}" = "1" ]; then
+        # ★ --steps 精确模式且未命名任何 operator → 剔除全部默认启用的 operator(本次只跑指定的 + 基座)
         local _kept=() _k2 _is_op=0
         for _k2 in "${RUN_STEPS[@]}"; do
             _is_op=0
             for _op in "${OPERATOR_MODULES[@]}"; do [ "${_k2}" = "${_op}" ] && _is_op=1; done
             if [ "${_is_op}" = "1" ] && [ -z "${_op_keep[${_k2}]:-}" ]; then
-                :   # operator 且未显式指定 → 剔除
+                :   # operator 且未显式指定(或精确模式未指定) → 剔除
             else
                 _kept+=("${_k2}")
             fi
@@ -251,16 +290,72 @@ resolve_run_steps() {
     fi
     unset _op_keep
 
-    # ★ 关键: 最终按"模块文件顺序(阶段目录 + NN 序号)"重排 RUN_STEPS。
-    # 否则 --enable/--with-xxx 加入的模块(如 k8s_deploy)会被 append 到末尾,
-    # 排到 addon 阶段模块之后 → addon(k8s_registry 等)会在 k8s_deploy 前执行 → 集群未部署就配置 addon → 失败。
-    local _ordered=() _k2
+    # ★ REQUIRES 闭包(--steps 精确模式): 在 operator 过滤**之后**执行 —— 闭包拉入的依赖
+    #   (如 --steps ceph_csi → ceph)是本模块需要的组件, 不能再被"未显式指定 operator"剔除。
+    #   递归加入显式指定模块的依赖链, 保证 --steps envoy_ai_gateway 自动带上 envoy_gateway。
+    if [ "${_steps_precise}" = "1" ]; then
+        local _added=1 _k3 _i3 _d3 _f3 _k4
+        while [ "${_added}" = "1" ]; do
+            _added=0
+            for _k3 in "${RUN_STEPS[@]}"; do
+                _i3="$(module_index "${_k3}")"
+                [ "${_i3}" -ge 0 ] || continue
+                for _d3 in ${MODULE_REQUIRES[$_i3]:-}; do
+                    module_index "${_d3}" >/dev/null 2>&1 || { err "模块 ${_k3} 的 REQUIRES 引用了未知模块: ${_d3}"; return 1; }
+                    _f3=0
+                    for _k4 in "${RUN_STEPS[@]}"; do [ "${_k4}" = "${_d3}" ] && _f3=1; done
+                    if [ "${_f3}" = "0" ]; then RUN_STEPS+=("${_d3}"); _added=1; fi
+                done
+            done
+        done
+    fi
+
+    # ★ 稳定拓扑排序(REQUIRES): 依赖者排在被依赖者之后; 无依赖约束的模块保持原(文件)顺序。
+    #   循环依赖 / 未知引用在此报错, 新模块声明 REQUIRES 后自动保证顺序, 无需改文件序号。
+    if ! _topo_sort_requires; then
+        return 1
+    fi
+}
+
+# 按 REQUIRES 对 RUN_STEPS 做稳定拓扑排序(Kahn 式多轮扫描, 无约束模块保持原顺序)
+# 成功返回 0; 循环依赖或引用未知模块返回 1(已 err 说明)
+_topo_sort_requires() {
+    local -A _remaining=() _done=()
+    local _k _i _d _progress _out=() _cycle
+    for _k in "${RUN_STEPS[@]:-}"; do _remaining["${_k}"]=1; done
+    # 先校验全部 REQUIRES 引用存在(任何模块的 REQUIRES 都必须命中已知模块)
     for _i in "${!MODULE_KEY[@]}"; do
-        for _k2 in "${RUN_STEPS[@]}"; do
-            [ "${_k2}" = "${MODULE_KEY[$_i]}" ] && _ordered+=("${_k2}")
+        for _d in ${MODULE_REQUIRES[$_i]:-}; do
+            module_index "${_d}" >/dev/null 2>&1 || { err "模块 ${MODULE_KEY[$_i]} 的 REQUIRES 引用了未知模块: ${_d}(--list-steps 查看有效 key)"; return 1; }
         done
     done
-    RUN_STEPS=("${_ordered[@]}")
+    # 多轮扫描: 每轮把"依赖全部已输出"的模块按原 RUN_STEPS 顺序加入输出
+    while [ "${#_remaining[@]}" -gt 0 ]; do
+        _progress=0
+        for _k in "${RUN_STEPS[@]}"; do
+            [ -n "${_remaining[${_k}]:-}" ] || continue
+            _i="$(module_index "${_k}")"
+            local _ok=1 _d2
+            for _d2 in ${MODULE_REQUIRES[$_i]:-}; do
+                # 依赖不在本次 RUN_STEPS(如 verify 模块要求已部署的组件)或已输出 → 视为满足
+                if [ -n "${_remaining[${_d2}]:-}" ] && [ -z "${_done[${_d2}]:-}" ]; then _ok=0; break; fi
+            done
+            if [ "${_ok}" = "1" ]; then
+                _out+=("${_k}")
+                unset _remaining["${_k}"]
+                _done["${_k}"]=1
+                _progress=1
+            fi
+        done
+        if [ "${_progress}" = "0" ]; then
+            _cycle="${!_remaining[*]}"
+            err "模块依赖循环(REQUIRES 成环): ${_cycle}"
+            err "  检查这些模块头部的 # REQUIRES: 声明, 删除/修正循环引用"
+            return 1
+        fi
+    done
+    RUN_STEPS=("${_out[@]}")
+    return 0
 }
 
 # ---------------- 调度: 执行单个模块(断点续跑感知) ----------------
@@ -299,8 +394,10 @@ print_steps() {
         local desc="${MODULE_DESC[$i]:-}"
         local phase="${MODULE_PHASE[$i]:-?}"
         local tgl="${MODULE_TOGGLE[$i]:-}"
+        local reqs="${MODULE_REQUIRES[$i]:-}"
         [ "${MODULE_REPEAT[$i]:-0}" = "1" ] && desc="${desc} [可重复执行]"
         [ -n "${tgl}" ] && flag="[${tgl}]"
+        [ -n "${reqs}" ] && desc="${desc} 依赖:${reqs}"
         printf "  %-18s %-6s 启用:%-8s %s\n" "${MODULE_KEY[$i]}" "(${MODULE_SCRIPT[$i]})" "${phase}/${flag}" "${desc}"
     done
     echo "---------------------------------------------"

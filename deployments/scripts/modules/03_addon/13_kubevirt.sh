@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: KUBEVIRT_ENABLED
+# REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   【P2-3 规划模块·伪代码占位(DEV-35)】KubeVirt:
 #   · 部署 KubeVirt 虚拟化组件, 完善集群虚拟化适配
@@ -24,16 +25,14 @@ if [ "${KUBEVIRT_ENABLED:-false}" != "true" ]; then
     exit 0
 fi
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH="ssh -i ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@${FIRST_MASTER}"
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 # ── 伪代码步骤(占位): 替换为真实实现 ──
 KUBEVIRT_STEPS=(
-  "部署 KubeVirt operator(离线 manifest)|${SSH} \"${K} apply -f /opt/cubestack/addons/kubevirt-operator.yaml 2>/dev/null || true\""
-  "创建 KubeVirt CR(启用虚拟化)|${SSH} \"${K} apply -f /opt/cubestack/addons/kubevirt-cr.yaml 2>/dev/null || true\""
-  "等待 virt-controller/virt-api 就绪|${SSH} \"${K} -n kubevirt rollout status deploy/virt-controller --timeout=5m 2>/dev/null || true\""
-  "创建测试虚拟机(VM CR)|${SSH} \"${K} apply -f /opt/cubestack/addons/kubevirt-smoke-vm.yaml 2>/dev/null || true\""
-  "验证虚拟机创建/启动|${SSH} \"${K} get vmi -o wide 2>/dev/null || true\""
+  "部署 KubeVirt operator(离线 manifest)|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/kubevirt-operator.yaml 2>/dev/null || true\""
+  "创建 KubeVirt CR(启用虚拟化)|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/kubevirt-cr.yaml 2>/dev/null || true\""
+  "等待 virt-controller/virt-api 就绪|${SSH_CMD} \"${K} -n kubevirt rollout status deploy/virt-controller --timeout=5m 2>/dev/null || true\""
+  "创建测试虚拟机(VM CR)|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/kubevirt-smoke-vm.yaml 2>/dev/null || true\""
+  "验证虚拟机创建/启动|${SSH_CMD} \"${K} get vmi -o wide 2>/dev/null || true\""
 )
 addon_stub "kubevirt" KUBEVIRT_STEPS

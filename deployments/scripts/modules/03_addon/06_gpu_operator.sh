@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: GPU_OPERATOR_ENABLED
+# REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态, 重跑部署自动跳过(不重复重装); --fresh 清状态后重装。
 #     (幂等的就绪检查类模块(metallb/local_path/k8s_registry)用 REPEAT:1 每次执行)
@@ -64,11 +65,7 @@ fi
 # ---- 开关 ----
 [ "${GPU_OPERATOR_ENABLED:-false}" = "true" ] || { say "GPU_OPERATOR_ENABLED=false, 跳过沐曦 GPU Operator"; exit 0; }
 
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1
 
 # ---------------- 派生变量(全部来自 cluster.conf, 无硬编码) ----------------
 PKG_TGZ="${METAX_PKG_DIR}/${METAX_PKG_TGZ}"
