@@ -84,8 +84,8 @@ for b in blocks:
         continue
     name = b["name"]
     # 盘名泛化: sda/sdb(裸金属 SATA/SAS)、nvme0n1/nvme1n1(裸金属 NVMe)、
-    # vda/vdb(云/VM 虚拟盘)一律纳入候选; 仅排除 loop/ram/zram/sr 等伪设备。
-    if name.startswith(("loop", "ram", "zram", "sr")):
+    # vda/vdb(云/VM 虚拟盘)一律纳入候选; 排除 loop/ram/zram/sr 伪设备 与 rbd(N 设备。
+    if name.startswith(("loop", "ram", "zram", "sr", "rbd")):
         continue
     if name in system:
         continue
@@ -94,7 +94,11 @@ for b in blocks:
     kids = b.get("children")
     if kids:            # 已分区/已有子设备 → 在用, 排除
         continue
-    if b.get("fstype"): # 整盘已格式化 → 在用, 排除
+    # fstype 判定: 普通在用盘(ext4/xfs/... )排除; **ceph_bluestore** = 旧 Rook OSD 盘
+    # (上一轮部署的 OSD 残留签名), 可被 Rook 重新认领(同 fsid 恢复)或需清理后复用 ——
+    # 作为候选输出, 由 ceph 模块决定"恢复/复用"还是"清理", 避免重装时误判为在用盘而漏选。
+    ft = b.get("fstype")
+    if ft and ft != "ceph_bluestore":
         continue
     if b.get("mountpoint"):  # 兜底: 顶层直接挂载(无分区) → 排除
         continue
