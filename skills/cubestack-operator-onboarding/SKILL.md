@@ -19,7 +19,7 @@
    - **预启用(写配置)**: `--enable X` = **只把 `XXX_ENABLED=true` 写入 cluster.conf(持久化), 不部署**; 下次 `--with-cubestack` / 默认部署生效。
    - **立即部署单个**: `--steps X` = 部署被指定的 X(**自动带基座, 且只部署被指定的 operator, 不带出其它默认启用的**); `--steps verify` = 只跑全部验证模块。
    - **排除**: `--skip X` = 全量部署时剔除。
-   **必须**: 新增 operator 把其 key 加进 `deployments/scripts/lib-module.sh` 的 `OPERATOR_MODULES` 列表(否则 `--steps X` / `--enable X` 无法识别调度)。
+   **必须**: 新增 operator **无需改任何列表** —— operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)即 operator), 写 TOGGLE 即自动进入 --steps/--enable 调度。
 4. **必须能离线**: 新增镜像进离线仓库 + `PRELOAD_IMAGE_PATTERNS`, 节点预加载。
 5. **必须可验证**: 每个 operator 配套 `verify_<name>.sh` 端到端验证(不只 pod Running)。
 6. **必须沉淀文档**: 架构文档 + troubleshooting + 本技能, 三处同步。
@@ -52,17 +52,20 @@ XXX_IP="${XXX_IP:-10.66.1.140}"         # 需要的外部 IP/端口从配置读,
 > - `--enable X` = 只写 `XXX_ENABLED=true` 到 cluster.conf(持久化), **不部署**; 下次 --with-cubestack 生效。
 > - `--steps X` = 立即部署被指定的 X(**自动带基座; 只部署被指定的 operator**); `--steps verify` = 只跑验证模块。
 > - `--skip X` = 全量部署时排除。
-> **必须**: 把 `<operator>` 的 key 加进 `deployments/scripts/lib-module.sh` 的 `OPERATOR_MODULES` 列表(否则无法被 --steps/--enable 识别)。
+> **必须**: 新增 operator 无需改任何列表 —— 框架自动派生(有 `TOGGLE` 且非 `BASE_MODULES` 即 operator), 写 TOGGLE 即自动进入调度。
 > 未实现的占位模块(addon_stub)保持 `false`。
 
 ### 2.2 写部署模块 `deployments/scripts/modules/<PHASE>/NN_<name>.sh`
 - `PHASE`: env / k8s / addon;
-- 元数据头(MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE)—— 参考 `modules/03_addon/21_verify_metallb.sh` 头部;
+- 元数据头(MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE/REQUIRES)—— 参考 `modules/03_addon/21_verify_metallb.sh` 头部;
 - `set -euo pipefail` + `source lib-common.sh` + `load_config`;
+- 需要 SSH 到 master 执行 kubectl 时**必须** `init_remote_kubectl || exit 1`(幂等; 禁止手抄初始化块);
 - 若组件由 kubespray 管理, 用 `TOGGLE: XXX_ENABLED` 并保持 DEFAULT:0;
 - **REPEAT 语义**: 重型安装模块用 `REPEAT: 0`(断点续跑 —— 完成后写状态跳过, `--fresh` 清状态重装);
   幂等快速检查类(metallb/local_path/k8s_registry/verify_*)用 `REPEAT: 1`(每次执行)。
+- 依赖其他模块时声明 `REQUIRES: <key1> [key2...]`(框架自动拓扑排序, 循环/未知引用会报错);
 - 若需额外前置(如 Harbor/Registry), 单独模块, 不塞进现有模块。
+- 完成后跑 `bash deployments/scripts/tools/check-modules.sh` 静态校验(必须 exit 0)。
 
 ### 2.3 需要同步 kubespray group_vars 时
 - 改 `deployments/scripts/tools/k8s/sync-kubespray-config.sh` 增加一节, 从 `cluster.conf` 派生写入对应 `group_vars/*.yml`(幂等, 用 `sed`/`python`, 与现有节风格一致);
@@ -106,8 +109,10 @@ XXX_IP="${XXX_IP:-10.66.1.140}"         # 需要的外部 IP/端口从配置读,
 ## 4. 审查清单(写完自检)
 
 - [ ] 文件名符合 `NN_<name>.sh`, 序号不与现有冲突(`ls deployments/scripts/modules/`)
-- [ ] 元数据头完整(MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE)
-- [ ] **新增 operator 的 key 已加入 `lib-module.sh` 的 `OPERATOR_MODULES`**(否则无法被 --steps/--enable 调度)
+- [ ] 元数据头完整(MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE/REQUIRES)
+- [ ] 需要远端 kubectl 时已调用 `init_remote_kubectl || exit 1`(未手抄初始化块)
+- [ ] REQUIRES 依赖引用存在且无循环
+- [ ] `bash deployments/scripts/tools/check-modules.sh` exit 0
 - [ ] `set -euo pipefail` + source lib-common + load_config
 - [ ] 未硬编码 IP/密码/路径(全部来自 cluster.conf)
 - [ ] `deploy-cluster.sh --list-steps` 能看到新模块

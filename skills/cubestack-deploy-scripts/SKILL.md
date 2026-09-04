@@ -7,6 +7,8 @@ description: CubeStack 部署脚本开发规范技能。当需要编写、修改
 
 本技能指导在 **CubeStackInstaller 仓库** 的 `deployments/scripts/` 下编写、修改、新增部署脚本。遵循本规范可保证:**模块化、可插拔、单一配置源、修改一个模块不影响其他模块、无需重写全部脚本**。
 
+> ⭐ **新增部署模块的专项流程技能: `skills/cubestack-add-module/SKILL.md`**(6 步流程 + 历史事故警示 + 测试用例)。本技能 = 通用规范速查,两者配合使用,内容已同步(2026-09-04 架构重构)。
+
 ## 何时使用本技能
 
 - 新增一个部署模块(如新的中间件/自研组件)
@@ -43,7 +45,7 @@ description: CubeStack 部署脚本开发规范技能。当需要编写、修改
 | `docs/scripts-development-spec.md` | 完整开发规范(本技能的详细版) |
 | `docs/cluster-components-plan.md` | P1/P2/P3 组件规划与进度追踪 |
 
-> 参考文件: `reference/scripts-development-spec.md`(完整规范)、`reference/cluster-components-plan.md`(组件规划)。
+> 参考文件: `docs/scripts-development-spec.md`(完整规范, 唯一维护)、`docs/cluster-components-plan.md`(组件规划)。
 
 ## 目录结构与阶段划分
 
@@ -77,6 +79,7 @@ deployments/scripts/
 # DEFAULT: 0                  # 1=默认启用; 0=需 --enable / TOGGLE / --steps
 # REPEAT: 0                   # 1=可重复执行(不写断点状态)
 # TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量名, true/1/yes/on 时自动启用
+# REQUIRES: k8s_deploy        # (可选) 依赖模块 key 列表(执行前须已完成); 框架自动拓扑排序
 # 说明: <详细说明, 可选>
 # ============================================================
 set -euo pipefail
@@ -88,15 +91,20 @@ load_config
 
 注意:模块在 `modules/<阶段>/` 二级目录,`lib-common.sh` 相对路径是 `../../lib-common.sh`(不是 `../lib-common.sh`)。
 
-## 新增模块标准流程(5 步)
+## 新增模块标准流程(6 步)
+
+> ⭐ **新增部署模块的专项可执行流程见 `skills/cubestack-add-module/SKILL.md`**(含历史事故警示与测试用例),本表为速览。
 
 1. **建文件**: `modules/<阶段>/NN_category_action.sh`(序号取当前阶段最大 +1; 03_addon 自研组件从 20 起)
-2. **写元数据头**: 按上面模板填写 MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE
-3. **实现逻辑**: 复用 `tools/` 工具脚本(`bash "${SCRIPT_DIR}/tools/<领域>/xxx.sh"`)或写新逻辑
-4. **加开关**(可选): 在 `config/cluster.conf.example` 加 `XXX_ENABLED` 变量, TOGGLE 指向它
-5. **完成**: 无需修改 `deploy-cluster.sh` / `lib-module.sh` / 任何注册表
+2. **写元数据头**: 按上面模板填写 MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE, 需要依赖顺序时加 `REQUIRES`(引用必须存在、不可成环)
+3. **统一远端初始化**: 需要 SSH 到 master 执行 kubectl 的模块**必须**调用 `init_remote_kubectl || exit 1`(幂等, 提供 FIRST_MASTER/SSH_KEY/SSH()/K/SSH_CMD)。**禁止**在模块内手抄 `FIRST_MASTER=.../SSH() {...}/K="sudo kubectl..."` 初始化块 —— 曾致 `K: unbound variable` 部署成功后崩溃
+4. **实现逻辑**: 复用 `tools/` 工具脚本(`bash "${SCRIPT_DIR}/tools/<领域>/xxx.sh"`)或写新逻辑
+5. **加开关**(可选): 在 `config/cluster.conf.example` 加 `XXX_ENABLED` 变量, TOGGLE 指向它
+6. **完成**: 无需修改 `deploy-cluster.sh` / `lib-module.sh` / 任何注册表(operator 自动派生)
 
-验证: `sudo ./deploy-cluster.sh --list-steps` 应出现新模块; `sudo ./deploy-cluster.sh --steps <key>` 可单独执行。
+验证: `bash deployments/scripts/tools/check-modules.sh`(静态校验, 必须 exit 0);
+`sudo ./deploy-cluster.sh --list-steps` 应出现新模块(带 `依赖:xxx` 标注);
+`sudo ./deploy-cluster.sh --steps <key>` 可单独执行(--steps 精确模式, 只跑指定模块+依赖)。
 
 > ⚠ **新增模块/功能后必须同步更新 `deploy-cluster.sh` 的 help(usage)**: 在"阶段目录与模块"列表与"示例"中补充新模块/命令(如 verify 模块加 `--steps verify_<组件>` 示例)。
 > 原则:**每次增加新功能,及时更新 help**(以及必要的 README/文档),保证 `--help` 始终与代码一致,避免文档与实现脱节。
@@ -106,18 +114,19 @@ load_config
 尚未实现真实逻辑的组件,统一用 `lib-common.sh` 的 **`addon_stub`** 框架写伪代码占位(一键流程可跑通,不真正执行; `ADDON_STUB_EXEC=1` 时试执行):
 
 ```bash
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH="ssh -i ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s} -o StrictHostKeyChecking=no ubuntu@${FIRST_MASTER}"
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1   # ★ 统一远端初始化(幂等: FIRST_MASTER/SSH_KEY/SSH()/K/SSH_CMD)
 
 # ── 伪代码步骤(占位): 替换为真实实现 ──
 MY_COMPONENT_STEPS=(
-  "创建命名空间|${SSH} \"${K} create ns my-component 2>/dev/null || true\""
-  "部署组件(离线 manifest)|${SSH} \"${K} apply -f /opt/cubestack/addons/my-component.yaml 2>/dev/null || true\""
-  "验证就绪|${SSH} \"${K} -n my-component get pods -o wide 2>/dev/null || true\""
+  "创建命名空间|${SSH_CMD} \"${K} create ns my-component 2>/dev/null || true\""
+  "部署组件(离线 manifest)|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/my-component.yaml 2>/dev/null || true\""
+  "验证就绪|${SSH_CMD} \"${K} -n my-component get pods -o wide 2>/dev/null || true\""
 )
 addon_stub "my_component" MY_COMPONENT_STEPS
 ```
+
+> ⚠ 旧写法 `SSH="ssh -i ... ubuntu@${FIRST_MASTER}"` + `K="sudo kubectl ..."` 已在 2026-09-04 架构重构中废弃:
+> 统一改 `init_remote_kubectl`(字符串式用 `${SSH_CMD}`), 防止新模块少复制一行导致 `K: unbound variable` 崩溃。
 
 实现真实逻辑时:把 `addon_stub "key" XXX_STEPS` 替换为真实命令即可,其余结构不变。
 
@@ -141,11 +150,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
 [ "${<TOGGLE>:-true}" = "true" ] || { say "跳过(未启用)"; exit 0; }
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1   # ★ 统一远端初始化(幂等: FIRST_MASTER/SSH_KEY/SSH()/K)
 trap '清理测试资源' EXIT
 # ① 组件 pod Ready → ② 核心 CR/资源存在 → ③ 建测试资源(用已预加载的离线镜像如 busybox/nginx)
 # ④ 等待关键状态(分配 VIP / Ready) → ⑤ 真实功能访问(curl VIP / 调 API / 查数据) → ⑥ trap 清理
@@ -175,7 +180,7 @@ trap '清理测试资源' EXIT
   - **预启用(写配置)**: `--enable X` = 只把 `XXX_ENABLED=true` 写入 cluster.conf, **不部署**; 下次全量部署生效。
   - **立即部署单个**: `--steps X` = 部署被指定的 X(自动带基座, 只部署被指定的 operator); `--steps verify` = 只跑验证模块。
   - **排除**: `--skip X` = 全量部署时剔除。
-  - 新增 operator 必须把 key 加进 `lib-module.sh` 的 `OPERATOR_MODULES` 列表, 否则无法被 --steps/--enable 调度。
+  - 新增 operator **无需改任何列表**: operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)= operator), 写 TOGGLE 即自动进入 --steps/--enable 调度。
   - lb_haproxy/lb_keepalived(API-HA)默认 false, 需要时用 `--enable` 预启用 或 `--steps` 立即部署。
 - 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认false,已实现:默认官方 manifests.yaml bundle + kubectl apply --server-side; helm chart 保留于 lws/charts 供 cert-manager 用; 见 `docs/lws.md`)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`PROMETHEUS_ENABLED`、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`ENVOY_GATEWAY_ENABLED`(**默认 false, 需显式启用**)、`ENVOY_AI_GATEWAY_ENABLED`(**默认 false, 依赖 EG**)、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
 - 新增配置项流程: ① cluster.conf.example 加带注释默认声明 → ② 脚本引用 → ③ 如需同步 kubespray group_vars, 在 `tools/k8s/sync-kubespray-config.sh` / `tools/k8s/sync-addons-config.sh` 加同步逻辑
@@ -362,10 +367,13 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 ## 审查清单(写完脚本后自检)
 
 - [ ] 文件名符合 `NN_category_action.sh`,序号不冲突
-- [ ] 元数据头完整且格式正确(MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE)
+- [ ] 元数据头完整且格式正确(MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE/REQUIRES)
 - [ ] `set -euo pipefail` + source lib-common + load_config
+- [ ] 需要远端 kubectl 时已调用 `init_remote_kubectl || exit 1`(未手抄初始化块)
+- [ ] REQUIRES 引用存在且无循环依赖
 - [ ] 未硬编码 IP/密码/路径(全部来自 cluster.conf 变量)
 - [ ] 开关类模块有 TOGGLE 检查
 - [ ] 引用的工具脚本存在于 `tools/<领域>/` 且路径正确
+- [ ] `bash deployments/scripts/tools/check-modules.sh` exit 0(静态校验全绿)
 - [ ] `deploy-cluster.sh --list-steps` 能看到新模块
 - [ ] 不影响其他模块(未改他人元数据/文件名)
