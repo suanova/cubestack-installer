@@ -63,6 +63,10 @@ LABEL_KEY="${CEPH_NODE_LABEL%%=*}"
 CEPH_IMAGE_DIR="${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}"
 CEPH_ROOK_MANIFEST_DIR="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}"
 CEPH_CONFIRM_SLEEP="${CEPH_CONFIRM_SLEEP:-60}"
+CEPH_PRE_CLEANUP_EXISTING="${CEPH_PRE_CLEANUP_EXISTING:-true}"   # 覆盖重装: 部署前完整清空上次 ceph 所用磁盘(OSD 盘数据销毁)
+CEPH_RESTORE_BACKUP="${CEPH_RESTORE_BACKUP:-false}"              # 覆盖重装: 认领旧 OSD 数据(注入旧 fsid; 与 PRE_CLEANUP 互斥)
+_CEPH_PRE_CLEANUP=0
+[ "${CEPH_PRE_CLEANUP_EXISTING}" = "true" ] && _CEPH_PRE_CLEANUP=1
 TOOLS_K8S="${SCRIPT_DIR}/tools/k8s"
 
 # 1) 候选 ceph 节点(hostname 列表)
@@ -397,13 +401,121 @@ done
 ok "  Rook operator 已部署"
 
 # ---------------- 7) 生成并应用 CephCluster CR(按节点+裸盘) ----------------
+# ★ 幂等重装策略(此前多起事故根因在此重构):
+#   ① 集群内已有 CephCluster → 幂等更新(不重建、不读备份);
+#   ② 无 CephCluster + CEPH_RESTORE_BACKUP=true + 备份 CR 存在 → 仅提取备份 status.fsid 注入
+#      spec.fsid(Rook 凭 fsid 认领旧 OSD 数据), storage/placement 仍按**当前**节点/裸盘生成;
+#   ③ 其余 → 全新部署(新 fsid)。
+#   绝不整份恢复旧 CR: 旧 CR 的 storage.nodes/devices/placement 来自上一代环境, apply 后
+#   ① 盘名/节点过时(历史残留 /dev/rbd0 → OSD 永不创建) ② 残留 mon store(/var/lib/rook/mon-*,
+#   集群无关路径)被新 mon 直接复用, monmap 还是旧集群的死 IP → quorum 永久卡死。
+CEPH_CR_BACKUP="${CEPH_CR_BACKUP:-${REPO_ROOT}/deployments/offline-files/cephcluster-backup.yaml}"
+CEPH_RESTORE_BACKUP="${CEPH_RESTORE_BACKUP:-false}"   # 兼容旧配置: true 强制认领(自动关闭清盘); 默认按 PRE_CLEANUP 自动决定
+_CEPH_FSID=""
+_HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+if [ -n "${_HAS_CC_NOW}" ]; then
+    say "  集群内已有 CephCluster($(echo "${_HAS_CC_NOW}" | awk '{print $1}')), 用当前 CR 幂等更新(不重建、不读备份)"
+else
+    # ★ 备份自动注入(部署时手动备份 → 新集群自动认领):
+    #   · 清盘模式(CEPH_PRE_CLEANUP_EXISTING=true, 默认)→ 完整清空旧盘, 全新 fsid, 不认领;
+    #   · 保留数据模式(PRE_CLEANUP=false)→ **自动**从备份读取 fsid 注入新 CR 的 spec.fsid,
+    #     Rook 凭 fsid 认领旧 OSD 数据(无需手工指定; 部署机备份优先, 节点根盘备份兜底)。
+    #   · CEPH_RESTORE_BACKUP=true(旧配置兼容)= 强制保留数据+自动注入(自动关闭清盘)。
+    if [ "${CEPH_RESTORE_BACKUP}" = "true" ] && [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
+        warn "CEPH_RESTORE_BACKUP=true 与 CEPH_PRE_CLEANUP_EXISTING=true 冲突 → 认领优先, 自动关闭清盘(绝不 wipe 旧数据盘)"
+        _CEPH_PRE_CLEANUP=0
+    fi
+    if [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
+        say "  清盘模式(默认): 完整清空旧盘 → 全新 fsid(不认领旧 OSD 数据)"
+    else
+        # 自动注入: 部署机备份 → 节点根盘备份兜底
+        if [ -s "${CEPH_CR_BACKUP}" ]; then
+            _CEPH_FSID="$(awk '/^status:/{f=1} f&&/fsid:/{print $2; exit}' "${CEPH_CR_BACKUP}")"
+        fi
+        if [ -z "${_CEPH_FSID}" ]; then
+            say "  部署机无备份, 尝试从节点备份目录读取(ceph-backup.sh fetch-fsid)..."
+            _CEPH_FSID="$( (LOG_VERBOSE=0 bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" fetch-fsid 2>/dev/null || true) | tail -1 )"
+        fi
+        if [ -n "${_CEPH_FSID}" ]; then
+            say "  保留数据模式 → 自动注入 spec.fsid=${_CEPH_FSID}(认领旧 OSD 数据)"
+            say "  storage/placement 仍按当前节点/裸盘生成(不整份恢复旧 CR, 见上方注释)"
+        else
+            say "  保留数据模式但未找到备份 fsid → 全新部署(新 fsid)"
+        fi
+    fi
+fi
+
 # ★ 节点<3 → 跳过集群内 CephCluster 创建(mon 法定人数不足; csi-operator 仍按需安装, 可连外部 Ceph)
 if [ "${_CEPH_SKIP_CLUSTER}" = "1" ]; then
     say "  存储节点 <${CEPH_MIN_NODES}, 跳过生成 CephCluster CR(未创建集群内 CephCluster)"
     say "  可选: 设 CEPH_EXTERNAL_MONITORS 由 ceph_csi 模块连接外部 Ceph 并创建 StorageClass"
 else
-say "[6/8] 生成并应用 CephCluster CR(mon=${CEPH_MON_COUNT}, 副本=${CEPH_POOL_REPLICAS}/${CEPH_POOL_MIN_SIZE})..."
-LOCAL_CR="$(mktemp)"
+    # ★ 全新部署(无现存 CephCluster)先清理各存储节点残留: 磁盘数据 + mon store + 遗留 rbd 设备。
+    if [ -z "${_HAS_CC_NOW}" ]; then
+        # --- 7a) CEPH_PRE_CLEANUP_EXISTING=true → 完整清空上次部署 ceph 所用的所有磁盘 ---
+        # 只按"当前检测到的裸盘"清(不依赖旧 CR 的 storage 列表 —— 旧 CR 过时时其列表无效,
+        # 曾导致 15 块盘未被 wipe, 新集群 OSD 因 "belonging to a different ceph cluster" 全部被跳过)。
+        # 清盘必须覆盖 bluestore 全部签名位置:
+        #   头 64MB(block 签名) + 1GB(签名块) + size/20 与 size/2(bluestore label 双副本,
+        #   ceph-bluestore-tool show-label 的 locations) + 尾 64MB(superblock)。
+        # 只清头尾会漏掉 locations → ceph-volume 仍报 "already prepared" → 0 OSD(此前事故根因)。
+        if [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
+            for _hn in "${CEPH_NODE_HOSTS[@]}"; do
+                _ip=""
+                for line in "${NODES[@]:-}"; do
+                    [ -z "${line}" ] && continue
+                    node_parse "${line}"
+                    [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
+                done
+                [ -n "${_ip}" ] || continue
+                NSSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_ip}" "$@"; }
+                for _d in ${NODE_DISKS[${_hn}]//,/ }; do
+                    say "  wipe ${_hn} ${_d}(完整清盘: 头/1GB/locations/尾)..."
+                    NSSH "sudo dd if=/dev/zero of=${_d} bs=1M count=64 conv=fsync status=none && \
+                          sudo dd if=/dev/zero of=${_d} bs=1M seek=1024 count=64 conv=fsync status=none && \
+                          _SZ=\$(sudo lsblk -b -o SIZE ${_d} 2>/dev/null | tail -1) && _SM=\$((_SZ/1048576)) && \
+                          sudo dd if=/dev/zero of=${_d} bs=1M seek=\$((_SM/20)) count=64 conv=fsync status=none && \
+                          sudo dd if=/dev/zero of=${_d} bs=1M seek=\$((_SM/2)) count=64 conv=fsync status=none && \
+                          sudo dd if=/dev/zero of=${_d} bs=1M seek=\$((_SM-64)) count=64 conv=fsync status=none" \
+                        && ok "    ${_hn} ${_d} 已完整清空" \
+                        || warn "    ${_hn} ${_d} wipe 失败(请手工: dd if=/dev/zero of=${_d} bs=1M seek=\$((\$(sudo lsblk -b -o SIZE ${_d}|tail -1)/1048576/20)) count=64)"
+                done
+                # 遗留 rbd 设备: 曾导致 osd-prepare 的 show-label 扫到挂起 IO(AIO 读 D 状态) → prepare 永久卡死
+                NSSH "ls /dev/rbd* >/dev/null 2>&1 && { sudo rm -f /dev/rbd* && echo '  残留 rbd 设备节点已删(/dev/rbd*)'; } || true" \
+                    | grep -v '^$' || true
+            done
+            unset NSSH
+        fi
+
+        # --- 7b) 清理 /var/lib/rook 残留(mon store + osd 元数据 + config/keyring) ---
+        # mon 数据在集群无关路径 <dataDirHostPath>/mon-*(如 /var/lib/rook/mon-a), 上一代集群删除后
+        # 仍残留; 新 mon 复用后从旧 store 恢复旧 monmap(死 IP)→ quorum 永久卡死(此前事故根因)。
+        # PRE_CLEANUP=true(清盘)时连 osd 元数据/配置一起清(盘已 wipe, 元数据无保留价值);
+        # 仅认领模式(CEPH_RESTORE_BACKUP=true)只清 mon-*, 保留 osd 元数据辅助认领。
+        for _hn in "${CEPH_NODE_HOSTS[@]}"; do
+            _ip=""
+            for line in "${NODES[@]:-}"; do
+                [ -z "${line}" ] && continue
+                node_parse "${line}"
+                [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
+            done
+            [ -n "${_ip}" ] || continue
+            NSSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_ip}" "$@"; }
+            if [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
+                say "  清理 ${_hn} /var/lib/rook 残留(mon-* + rook-ceph/osd 元数据 + config/keyring)..."
+                NSSH "sudo rm -rf /var/lib/rook/mon-* /var/lib/rook/rook-ceph 2>/dev/null; true" \
+                    && ok "    ${_hn} /var/lib/rook 已清空" || warn "    ${_hn} /var/lib/rook 清理失败"
+            else
+                say "  清理 ${_hn} 残留 mon store(/var/lib/rook/mon-*, 全新 mon 状态)..."
+                NSSH "sudo rm -rf /var/lib/rook/mon-*" || warn "    ${_hn} mon store 清理失败(节点全新无残留可忽略)"
+            fi
+        done
+    fi
+    # 生成并应用 CephCluster CR(当前节点/裸盘; _CEPH_FSID 非空时注入 spec.fsid 认领旧 OSD 数据)。
+    # 无论是否注入 fsid, 都必须走到下方 [7/8] 就绪等待 —— 此前 toolbox/[7/8] 等待/调优只写在部分
+    # 分支里, 曾导致"apply 完 CR 直接宣布完成(集群仍在 Progressing), ceph_csi 一进来就报错打断部署"。
+    say "[6/8] 生成并应用 CephCluster CR(mon=${CEPH_MON_COUNT}, 副本=${CEPH_POOL_REPLICAS}/${CEPH_POOL_MIN_SIZE})..."
+    LOCAL_CR="$(mktemp)"
 {
     echo "apiVersion: ceph.rook.io/v1"
     echo "kind: CephCluster"
@@ -411,6 +523,9 @@ LOCAL_CR="$(mktemp)"
     echo "  name: rook-ceph"
     echo "  namespace: ${CEPH_NAMESPACE}"
     echo "spec:"
+    if [ -n "${_CEPH_FSID}" ]; then
+        echo "  fsid: ${_CEPH_FSID}"
+    fi
     echo "  cephVersion:"
     echo "    image: quay.io/ceph/ceph:${CEPH_VERSION}"
     echo "    allowUnsupported: false"
@@ -475,35 +590,80 @@ scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null 
 SSH "${K} apply -f /tmp/cephcluster.yaml" || { rm -f "${LOCAL_CR}"; err "应用 CephCluster CR 失败(检查 /tmp/cephcluster.yaml 与 rook operator 日志)"; exit 1; }
 rm -f "${LOCAL_CR}"
 
-# toolbox
-say "  部署 toolbox(ceph CLI)..."
-# ★ toolbox.yaml 官方 manifest 写的是浮动 tag ceph:v20, 而离线 tar 保存的是精确版本
-#   v20.2.2(节点 containerd 无 v20 这个 tag) → ImagePullBackOff。apply 前统一改写为 CEPH_VERSION。
-SSH "sed -i 's|quay.io/ceph/ceph:[a-zA-Z0-9._-]*|quay.io/ceph/ceph:${CEPH_VERSION}|g' ${REMOTE_DIR}/toolbox.yaml" \
-    && SSH "${K} apply -f ${REMOTE_DIR}/toolbox.yaml >/dev/null 2>&1" || true
+    # toolbox(ceph CLI; 供 [7/8] 就绪检查与调优使用)
+    say "  部署 toolbox(ceph CLI)..."
+    # ★ toolbox.yaml 官方 manifest 写的是浮动 tag ceph:v20, 而离线 tar 保存的是精确版本
+    #   v20.2.2(节点 containerd 无 v20 这个 tag) → ImagePullBackOff。apply 前统一改写为 CEPH_VERSION。
+    SSH "sed -i 's|quay.io/ceph/ceph:[a-zA-Z0-9._-]*|quay.io/ceph/ceph:${CEPH_VERSION}|g' ${REMOTE_DIR}/toolbox.yaml" \
+        && SSH "${K} apply -f ${REMOTE_DIR}/toolbox.yaml >/dev/null 2>&1" || true
 
-# 等待 CephCluster Ready + HEALTH_OK(最长 600s)
-say "[7/8] 等待 Ceph 集群就绪(最长 600s, ceph -s HEALTH_OK)..."
-CLUSTER_OK=0
-for i in $(seq 1 60); do
-    _ph="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
-    if [ "${_ph}" = "Ready" ]; then
-        _hl="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null" || true) | grep -oE 'HEALTH_(OK|WARN|ERR)' | head -1 )"
-        [ "${_hl}" = "HEALTH_OK" ] && { CLUSTER_OK=1; break; }
-        [ "${i}" -eq 20 ] && say "  集群 Ready 但健康状态 ${_hl:-未知}(可能初始化中, 继续等待)..."
+    # 等待 CephCluster Ready + HEALTH_OK(最长 900s; 备份恢复认领旧 OSD 数据比新建更慢)
+    # 每 10s 轮询; Ready 后经 toolbox 执行 ceph -s 提取关键行(health/mon/osd/pgs),
+    # 每 30s 打印一行状态到终端(= 完整部署日志 /tmp/cubestack-cluster-install.log), 便于观察收敛进度。
+    say "[7/8] 等待 Ceph 集群就绪(最长 900s, ceph -s HEALTH_OK)..."
+    CLUSTER_OK=0
+    for i in $(seq 1 90); do
+        _ph="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+        if [ "${_ph}" = "Ready" ]; then
+            _CEPH_SUM="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null" || true) )"
+            _hl="$(printf '%s\n' "${_CEPH_SUM}" | grep -oE 'HEALTH_(OK|WARN|ERR)' | head -1 )"
+            if [ "${_hl}" = "HEALTH_OK" ]; then
+                ok "  Ceph 集群 HEALTH_OK"
+                # ★ 部署成功 → 保存恢复备份到节点根盘(部署时手动备份, 防 wipe/防覆盖)。
+                #   备份文件含 status.fsid: 下次保留数据模式(PRE_CLEANUP=false)重装时自动注入认领;
+                #   即使集群崩溃(k8s 不可用), 根盘 /var/lib/ceph/backup/ 的历史备份仍可读。
+                _CR_DUMP="$(mktemp)"
+                ( SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o yaml" > "${_CR_DUMP}" 2>/dev/null || true )
+                if [ -s "${_CR_DUMP}" ]; then
+                    _META="$(mktemp)"
+                    printf 'backup_time: %s\n' "$(date +%Y%m%d_%H%M%S)" > "${_META}"
+                    printf 'nodes:\n' >> "${_META}"
+                    for _hn2 in "${CEPH_NODE_HOSTS[@]}"; do
+                        printf '  %s: %s\n' "${_hn2}" "${NODE_DISKS[${_hn2}]:-<无>}" >> "${_META}"
+                    done
+                    bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" save "${_CR_DUMP}" "${_META}" \
+                        || warn "  Ceph 备份到节点失败(不影响部署; 可手工 tools/k8s/ceph-backup.sh save)"
+                    rm -f "${_META}"
+                else
+                    warn "  拉取 CephCluster CR 失败, 跳过自动备份(可手工 tools/k8s/ceph-backup.sh save)"
+                fi
+                rm -f "${_CR_DUMP}"
+                CLUSTER_OK=1
+                break
+            fi
+            if [ "${i}" -eq 1 ] || [ $((i % 3)) -eq 0 ]; then
+                _mon="$(printf '%s\n' "${_CEPH_SUM}" | grep -E '^\s+mon:' | sed 's/^\s*//')"
+                _osd="$(printf '%s\n' "${_CEPH_SUM}" | grep -E '^\s+osd:' | sed 's/^\s*//')"
+                _pgs="$(printf '%s\n' "${_CEPH_SUM}" | grep -E '^\s+pgs:' | sed 's/^\s*//')"
+                say "  [${i}/90] phase=${_ph} health=${_hl:-unknown}; ${_mon:-mon:?} ${_osd:-osd:?} ${_pgs:-pgs:?}(继续等待)"
+            fi
+        elif [ "${i}" -eq 1 ] || [ $((i % 6)) -eq 0 ]; then
+            say "  [${i}/90] phase=${_ph:-未知}(尚未 Ready, 继续等待)..."
+        fi
+        sleep 10
+    done
+    if [ "${CLUSTER_OK}" = "1" ]; then
+        ok "  Ceph 集群 HEALTH_OK"
+    else
+        # 区分失败性质: Ready 但 HEALTH_WARN(如个别 OSD down)→ 可用, 警告继续;
+        # 未 Ready(Progressing/Error)→ 硬失败 —— 否则 ceph_csi 模块必然报"未 Ready"且信息不如这里明确
+        _ph_now="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+        if [ "${_ph_now}" = "Ready" ]; then
+            warn "  Ceph 集群 Ready 但未 HEALTH_OK(ceph -s 见健康告警, 多数场景可继续)"
+        else
+            err "  Ceph 集群 900s 内未 Ready(phase=${_ph_now:-未知}); 查看: kubectl -n ${CEPH_NAMESPACE} get cephcluster,pods / ceph -s; 常见: 磁盘未清理/内存不足/镜像未同步"
+            exit 1
+        fi
+        unset _ph_now
     fi
-    sleep 10
-done
-[ "${CLUSTER_OK}" = "1" ] && ok "  Ceph 集群 HEALTH_OK" \
-    || warn "  Ceph 集群未在 600s 内 HEALTH_OK(查看: kubectl -n ${CEPH_NAMESPACE} get cephcluster / ceph -s; 常见: 磁盘未清理/内存不足/镜像未同步)"
 
-# 调优 osd_memory_target(200G 盘 4G 已够; 大盘按文档)
-say "  设置 OSD osd_memory_target=${CEPH_OSD_MEMORY_TARGET}GiB(经 toolbox)..."
-SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set osd osd_memory_target $((CEPH_OSD_MEMORY_TARGET * 1024 * 1024 * 1024)) >/dev/null 2>&1" || true
-# 放宽 mon 时钟偏差告警阈值(默认 0.05s 太严: NTP 同步后节点偏差仍可能 0.2~0.5s → 恒 HEALTH_WARN;
-# 放宽到 0.5s 消除误报, 实际偏差已在 k8s NTP 模块收敛 ≤500ms)
-say "  设置 mon clock skew 阈值=0.5s(默认 0.05s 过严, NTP 同步后消除 HEALTH_WARN)..."
-SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set mon mon_clock_drift_allowed 0.5 >/dev/null 2>&1" || true
+    # 调优 osd_memory_target(200G 盘 4G 已够; 大盘按文档)
+    say "  设置 OSD osd_memory_target=${CEPH_OSD_MEMORY_TARGET}GiB(经 toolbox)..."
+    SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set osd osd_memory_target $((CEPH_OSD_MEMORY_TARGET * 1024 * 1024 * 1024)) >/dev/null 2>&1" || true
+    # 放宽 mon 时钟偏差告警阈值(默认 0.05s 太严: NTP 同步后节点偏差仍可能 0.2~0.5s → 恒 HEALTH_WARN;
+    # 放宽到 0.5s 消除误报, 实际偏差已在 k8s NTP 模块收敛 ≤500ms)
+    say "  设置 mon clock skew 阈值=0.5s(默认 0.05s 过严, NTP 同步后消除 HEALTH_WARN)..."
+    SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set mon mon_clock_drift_allowed 0.5 >/dev/null 2>&1" || true
 fi   # _CEPH_SKIP_CLUSTER=1 → 跳过集群内 CephCluster 创建
 
 # ---------------- 8) 汇总 ----------------

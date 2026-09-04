@@ -47,9 +47,26 @@ CEPH_EXTERNAL_MONITORS="${CEPH_EXTERNAL_MONITORS:-}"   # 外部 Ceph monitors(�
 _PH="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
 _CEPH_EXTERNAL=0
 if [ -n "${_PH}" ]; then
+    # CephCluster 存在但未 Ready: Progressing 是"首次建集群 / 备份 fsid 认领旧 OSD 数据"期间的
+    # 正常瞬态(mon 逐个拉起 → mgr → OSD 认领, 恢复路径可达 10+ 分钟)。02_ceph 模块在备份恢复
+    # 路径下也可能提前返回(集群仍在收敛) → 此处等待 Ready(最长 600s)而非立即失败,
+    # 避免"集群还没起来, ceph_csi 一进来就把整个部署打断"(本次事故的直接触发点)。
     _PHASE="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
-    [ "${_PHASE}" = "Ready" ] || { err "CephCluster 未 Ready(phase=${_PHASE}); 请先部署 ceph 模块(CEPH_ENABLED=true)并等 HEALTH_OK"; exit 1; }
-    say "  集群内 CephCluster Ready → 使用集群内存储"
+    _CLUSTER_READY=0
+    for i in $(seq 1 60); do
+        [ "${_PHASE}" = "Ready" ] && { _CLUSTER_READY=1; break; }
+        [ "${i}" -eq 1 ] && say "  CephCluster phase=${_PHASE:-未知}, 等待 Ready(最长 600s; 恢复旧集群/首次建集群收敛较慢)..."
+        sleep 10
+        _PHASE="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+    done
+    if [ "${_CLUSTER_READY}" = "1" ]; then
+        say "  集群内 CephCluster Ready → 使用集群内存储"
+    else
+        err "  CephCluster 600s 内未 Ready(phase=${_PHASE:-未知}); 请先等 Ceph 集群 HEALTH_OK 后重跑本模块"
+        err "  查看: kubectl -n ${CEPH_NAMESPACE} get cephcluster,pods; 集群卡死时可 --fresh 重装 ceph 模块"
+        exit 1
+    fi
+    unset _CLUSTER_READY
 elif [ -n "${CEPH_EXTERNAL_MONITORS}" ]; then
     _CEPH_EXTERNAL=1
     say "  无集群内 CephCluster, 但已配置 CEPH_EXTERNAL_MONITORS=${CEPH_EXTERNAL_MONITORS} → 外部 Ceph 连接模式"

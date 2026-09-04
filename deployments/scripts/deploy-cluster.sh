@@ -329,6 +329,48 @@ if [ "${CEPH_ENABLED:-false}" = "true" ]; then
         echo -e "\033[41m\033[97m   auto 自动检测"未使用裸盘"(挂载/分区/格式化/系统盘一律不选); 显式用 CEPH_DATA_DISKS\033[0m"
         echo -e "\033[41m\033[97m   有误请 Ctrl-C 中止, 修正 ${CLUSTER_CONF} 后重跑                    \033[0m"
         echo -e "\033[41m\033[97m================================================================================\033[0m"
+
+        # ★ 检测已有 CephCluster(覆盖 K8s 重装时决定"清理销毁"还是"保留数据"):
+        #   默认清理(CEPH_PRE_CLEANUP_EXISTING=true): 重装前完整清空上次 ceph 所用磁盘, 旧数据销毁;
+        #   保留旧 OSD 数据用另一开关: CEPH_RESTORE_BACKUP=true(02_ceph 从备份 CR 提取 status.fsid
+        #   注入新 CR 的 spec.fsid, Rook 凭 fsid 认领旧盘)。检测失败不阻断(SSH 免密未就绪/集群不可达 → 降级提示)。
+        _CEPH_EXIST=""
+        _FM_IP="$(first_master_ip 2>/dev/null || true)"
+        _CEPH_SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+        if [ -n "${_FM_IP}" ] && [ -f "${_CEPH_SSH_KEY}" ]; then
+            _CEPH_EXIST="$(ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER:-ubuntu}@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster --no-headers 2>/dev/null" 2>/dev/null || true)"
+        fi
+        if [ -n "${_CEPH_EXIST}" ]; then
+            echo ""
+            echo -e "\033[41m\033[97m================================================================================\033[0m"
+            echo -e "\033[41m\033[97m ⚠⚠⚠  检测到已有 CephCluster: $(echo "${_CEPH_EXIST}" | awk '{print $1}') ⚠⚠⚠\033[0m"
+            if [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ]; then                echo -e "\033[41m\033[97m   覆盖 K8s 前将清理旧 Ceph(mon/osd/池, OSD 数据将销毁) —— 仅显式启用时  \033[0m"
+            else
+                echo -e "\033[41m\033[97m   默认【全新部署】: 重装生成新 fsid, 不认领旧 OSD 数据(盘上残留旧数据会被拒绝用) \033[0m"
+                echo -e "\033[41m\033[97m   销毁旧数据: CEPH_PRE_CLEANUP_EXISTING=true; 认领旧数据: CEPH_RESTORE_BACKUP=true \033[0m"
+            fi
+            echo -e "\033[41m\033[97m   保留 csi-operator(重装不再重复安装); 检测不影响其他 operator 部署    \033[0m"
+            echo -e "\033[41m\033[97m================================================================================\033[0m"
+            # ★ 备份旧 CephCluster CR(含 status.fsid): 供 02_ceph.sh 在 CEPH_RESTORE_BACKUP=true 时
+            #   提取 fsid 注入新 CR 的 spec.fsid(Rook 凭 fsid 识别"同一个集群"并认领旧 OSD 数据)。
+            #   只提取 fsid, 不整份恢复旧 CR —— 旧 CR 的 storage.nodes/devices 来自上一代环境,
+            #   直接 apply 会导致盘名/节点过时(OSD 永不创建)与残留 mon store 死锁。
+            CEPH_CR_BACKUP="${CEPH_CR_BACKUP:-${REPO_ROOT}/deployments/offline-files/cephcluster-backup.yaml}"
+            mkdir -p "$(dirname "${CEPH_CR_BACKUP}")"
+            if ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster rook-ceph -o yaml" 2>/dev/null > "${CEPH_CR_BACKUP}"; then
+                [ -s "${CEPH_CR_BACKUP}" ] && ok "已备份旧 CephCluster CR → ${CEPH_CR_BACKUP}(认领旧数据用)" \
+                    || warn "CephCluster CR 备份为空(请手工备份: kubectl -n rook-ceph get cephcluster rook-ceph -o yaml)"
+            else
+                warn "备份 CephCluster CR 失败(重装后如需认领旧 OSD 数据, 请手工备份原 CR 含 status.fsid)"
+            fi
+            # ★ 部署时手动备份: 把备份推送到节点根盘 /var/lib/ceph/backup/(防 wipe/防覆盖/防部署机丢失)。
+            #   下次保留数据模式(PRE_CLEANUP=false)重装时 02_ceph 自动从该目录读取 fsid 注入新集群认领旧数据。
+            if [ -s "${CEPH_CR_BACKUP}" ]; then
+                bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" save "${CEPH_CR_BACKUP}" \
+                    || warn "推送 Ceph 备份到节点失败(自动注入不可用; 可手工: tools/k8s/ceph-backup.sh save ${CEPH_CR_BACKUP})"
+            fi
+        fi
+
         if [ "${_ceph_cs}" -gt 0 ] 2>/dev/null; then
             say "Ceph 已启用: sleep ${_ceph_cs}s 供核对上方节点/裸盘(CEPH_CONFIRM_SLEEP=0 可跳过)..."
             for _c in $(seq "${_ceph_cs}" -1 1); do
@@ -341,6 +383,22 @@ if [ "${CEPH_ENABLED:-false}" = "true" ]; then
         else
             say "CEPH_CONFIRM_SLEEP=0, 跳过等待(请务必已人工核对上方节点/裸盘)"
         fi
+
+        # 已有 CephCluster 且显式允许销毁 → 覆盖 k8s 前卸载旧 Ceph(OSD 数据销毁)
+        if [ -n "${_CEPH_EXIST}" ] && [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ]; then
+            say "清理已有 Ceph(cleanupPolicy yes-really-destroy-data → 删 cephblockpool/cephcluster)..."
+            ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_FM_IP}" \
+                "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph patch cephcluster rook-ceph --type merge -p '{\"spec\":{\"cleanupPolicy\":{\"confirmation\":\"yes-really-destroy-data\"}}}' >/dev/null 2>&1; sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph delete cephblockpool rbd-pool --wait=false >/dev/null 2>&1; sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph delete cephcluster rook-ceph --wait=false >/dev/null 2>&1; true"
+            say "等待旧 Ceph 清理完成(最长 300s)..."
+            _CEPH_GONE=0
+            for _i in $(seq 1 60); do
+                _still="$(ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER:-ubuntu}@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster --no-headers 2>/dev/null" 2>/dev/null || true)"
+                [ -z "${_still}" ] && { _CEPH_GONE=1; break; }
+                sleep 5
+            done
+            [ "${_CEPH_GONE}" = "1" ] && ok "旧 Ceph 已清理, 可重新部署" || warn "旧 Ceph 未完全清理(重装前请手工确认 cephcluster 已删除)"
+        fi
+        unset _CEPH_EXIST _FM_IP _CEPH_SSH_KEY _CEPH_GONE
         unset _ceph_cs _CEPH_CONFIRM_HOSTS _CEPH_CONFIRM_DISKS _CEPH_CONFIRM_DETECT_FAIL _h _ip _line _l _ds _hn _g _grp _norm _h2 _d
     fi
     unset _ceph_confirm_in
