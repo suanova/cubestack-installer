@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # TOOL: ceph-backup
-# DESC: Ceph 恢复数据备份工具 —— 备份信息持久化到节点根盘(防 wipe) + 时间戳轮转(防覆盖) + crontab 定期刷新
+# DESC: Ceph 恢复数据备份工具 —— 备份信息持久化到节点根盘(防 wipe) + 时间戳轮转(防覆盖) + systemd timer 定期刷新(可选)
 # 背景:
 #   · Rook-Ceph 认领旧 OSD 数据的关键是 fsid(注入新 CR 的 spec.fsid)。仅靠部署机上的备份文件
 #     不可靠: 部署机/容器丢失即无备份; 单文件每次重装被覆盖 → 认领失败。
@@ -13,11 +13,11 @@
 #     (可选: install-cron 安装 systemd timer 每小时刷新, 适合长期运行环境)。
 #   · 恢复为**自动注入**: 保留数据模式(PRE_CLEANUP=false)重装时, 02_ceph.sh 自动 fetch-fsid
 #     注入新 CR 的 spec.fsid 认领旧 OSD 数据, 无需手工指定。
-# 用法(部署机, 需 SSH 免密 + 容器内):
+# 用法(部署机, 需 SSH 密钥 + 容器内):
 #   ceph-backup.sh save <cr.yaml> [meta.txt]      # 备份 CR(+meta) 到各节点, 时间戳轮转 + 更新 current/
 #   ceph-backup.sh fetch-fsid                      # 从第一个 master 备份目录读最新 fsid(恢复用)
-#   ceph-backup.sh install-cron [retention]        # 在第一个 master 安装 crontab 定期刷新
-#   ceph-backup.sh run-cron [retention]            # master 上执行: 从集群刷新 current/ + 轮转(crontab 条目)
+#   ceph-backup.sh install-cron [retention]        # 在第一个 master 安装 systemd timer 定期刷新
+#   ceph-backup.sh run-cron [retention]            # master 上执行: 从集群刷新 current/ + 轮转(timer 条目)
 # 数据源: cluster.conf (CEPH_BACKUP_DIR / CEPH_BACKUP_RETENTION / SSH_KEY_NAME / NODES)
 # ============================================================
 set -euo pipefail
@@ -28,10 +28,8 @@ load_config
 
 BACKUP_DIR="${CEPH_BACKUP_DIR:-/var/lib/ceph/backup}"
 RETENTION="${CEPH_BACKUP_RETENTION:-10}"
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
+# ★ 统一远端初始化(lib-common 幂等): 定义 FIRST_MASTER / SSH_KEY / SSH() / K / SSH_CMD
+init_remote_kubectl || { err "init_remote_kubectl 失败(cluster.conf NODES 无 master?)"; exit 1; }
 
 # ---- 工具: master 端轮转脚本(经 ssh 写入 /var/lib/ceph/backup/rotate.sh) ----
 gen_rotate_script() {   # <retention>
@@ -74,10 +72,21 @@ cmd_save() {
 }
 
 # ---- fetch-fsid: 从第一个 master 备份目录读最新 fsid(恢复用; 只输出 fsid 到 stdout, 供命令替换) ----
+# 读取顺序: ① latest.yaml(部署/定时刷新写入) ② current/cephcluster-backup.yaml
+#           ③ 历史时间戳目录中最新的 cephcluster-backup.yaml(latest 被清盘重装覆盖后兜底)
 cmd_fetch_fsid() {
-    local fsid
-    fsid="$( (SSH "cat ${BACKUP_DIR}/latest.yaml 2>/dev/null" || SSH "cat ${BACKUP_DIR}/current/cephcluster-backup.yaml 2>/dev/null" || true) \
-        | awk '/^status:/{f=1} f&&/fsid:/{print $2; exit}' )"
+    local fsid src=""
+    # ① ② 最新/current
+    for _p in "latest.yaml" "current/cephcluster-backup.yaml"; do
+        src="$( (SSH "cat ${BACKUP_DIR}/${_p} 2>/dev/null" || true) )"
+        [ -n "${src}" ] && break
+    done
+    # ③ 历史时间戳目录(按名字排序取最新一份)
+    if [ -z "${src}" ]; then
+        _ts="$( (SSH "ls -1d ${BACKUP_DIR}/[0-9]*_* 2>/dev/null | sort | tail -1" || true) )"
+        [ -n "${_ts}" ] && src="$( (SSH "cat ${_ts}/cephcluster-backup.yaml 2>/dev/null" || true) )"
+    fi
+    fsid="$(printf '%s\n' "${src}" | awk '/^status:/{f=1} f&&/fsid:/{print $2; exit}')"
     if [ -n "${fsid}" ]; then
         say "从节点备份读取到旧 fsid: ${fsid}" >&2
         printf '%s\n' "${fsid}"
@@ -85,6 +94,7 @@ cmd_fetch_fsid() {
         warn "节点备份目录无可用备份(${FIRST_MASTER}:${BACKUP_DIR})" >&2
         return 1
     fi
+    unset _p _ts
 }
 
 # ---- install-cron: 在第一个 master 安装 systemd timer, 定期刷新 current/ ----
