@@ -95,12 +95,13 @@ modules/<NN_phase>/<NN>_<category>_<action>.sh
 # DEFAULT: 0                  # 1=默认启用; 0=需 --enable / TOGGLE / --steps
 # REPEAT: 0                   # 1=可重复执行(每次执行且不写断点状态)
 # TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量名, 值为 true/1 时自动启用
+# REQUIRES: k8s_passwordless  # (可选) 依赖模块 key 列表(空格分隔), 执行前须已完成; 框架自动拓扑排序
 # 说明: <详细说明, 可选>
 # ============================================================
 set -euo pipefail
 
 # shellcheck source=lib-common.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib-common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 ```
 
@@ -114,17 +115,21 @@ load_config
 | `DEFAULT` | 推荐 | `1`=默认执行;`0`=需显式启用。缺省视为 `0` |
 | `REPEAT` | 推荐 | `1`=可重复执行(不写断点状态,每次收敛);`0`=断点续跑跳过 |
 | `TOGGLE` | 否 | cluster.conf 变量名;值为 `true/1/yes/on` 时自动默认启用(如 `TOGGLE: GPU_OPERATOR_ENABLED`) |
+| `REQUIRES` | 否 | 依赖模块 key 列表(空格分隔);执行前须已完成。框架按 REQUIRES 做稳定拓扑排序(无依赖模块保持文件顺序),循环依赖/引用未知模块会报错。`--steps` 精确模式还会自动把依赖加入执行列表 |
+
+> ★ **远端 kubectl 统一初始化(2026-09-04 架构重构,强制)**:需要 SSH 到 master 执行 kubectl 的模块,在 `load_config` 之后**必须**调用 `init_remote_kubectl || exit 1`(lib-common.sh 幂等函数,提供 FIRST_MASTER/SSH_KEY/SSH()/K/SSH_CMD)。**禁止**在模块内手抄 `FIRST_MASTER=.../SSH() {...}/K="sudo kubectl..."` 初始化块 —— 历史事故: 新模块少复制一行 → set -u 下 `K: unbound variable`, 部署成功后崩溃。
 
 ### 2.3 模块体内规范
 
 1. **必须** `set -euo pipefail`(除少数 `|| true` 兜底处)。
-2. **必须** source `lib-common.sh` 并 `load_config`(模块位于 `modules/`,相对路径为 `../lib-common.sh`)。
+2. **必须** source `lib-common.sh` 并 `load_config`(模块位于 `modules/<阶段>/`,相对路径为 `../../lib-common.sh`)。
 3. 输出用 `say`(信息)/`ok`(成功)/`warn`(告警)/`err`(致命,exit 1),会同时写日志文件。
 4. 开关类模块先检查 TOGGLE 变量,未启用则 `say "跳过..."` + `exit 0`(不要报错)。
-5. 复用逻辑:调用 `tools/` 下工具脚本 `bash "${SCRIPT_DIR}/tools/<领域>/xxx.sh"`(SCRIPT_DIR 由 lib-common 指向 scripts 目录)。
-6. 支持 `--only` 过滤的模块:用 `node_matches "${hostname}"` 判断。
-7. 模块退出码:0=成功/跳过,非 0=失败(调度器中断部署)。
-8. 头部注释保留"数据源: cluster.conf 的哪些变量",便于排查。
+5. **需要远端 kubectl 的模块必须 `init_remote_kubectl || exit 1`**(幂等;禁止手抄初始化块,见 §2.2)。
+6. 复用逻辑:调用 `tools/` 下工具脚本 `bash "${SCRIPT_DIR}/tools/<领域>/xxx.sh"`(SCRIPT_DIR 由 lib-common 指向 scripts 目录)。
+7. 支持 `--only` 过滤的模块:用 `node_matches "${hostname}"` 判断。
+8. 模块退出码:0=成功/跳过,非 0=失败(调度器中断部署)。
+9. 头部注释保留"数据源: cluster.conf 的哪些变量",便于排查。
 
 ---
 
@@ -162,17 +167,22 @@ load_config
 
 ---
 
-## 4. 新增模块的标准流程(5 步)
+## 4. 新增模块的标准流程(6 步)
 
 以新增"某某组件安装"为例:
 
-1. **建文件**:`modules/NN_<category>_<action>.sh`(序号取当前阶段最大 +1)。
-2. **写元数据头**:按 §2.2 模板填写 MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE。
-3. **实现逻辑**:复用现有工具脚本或写新逻辑(§2.3)。
-4. **加开关**(可选):在 `cluster.conf.example` 加 `XXX_ENABLED` 变量,TOGGLE 指向它。
-5. **完成**:**非 operator 组件**无需改任何注册表;**operator 组件**需把 key 加进 `lib-module.sh` 的 `OPERATOR_MODULES` 列表(否则无法被 `--steps` / `--enable` 调度)。
+1. **建文件**:`modules/<阶段>/NN_<category>_<action>.sh`(序号取当前阶段最大 +1)。
+2. **写元数据头**:按 §2.2 模板填写 MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE,需要依赖顺序时加 `REQUIRES`。
+3. **统一远端初始化**:需要 SSH 到 master 执行 kubectl 的模块调用 `init_remote_kubectl || exit 1`(见 §2.2,禁止手抄初始化块)。
+4. **实现逻辑**:复用现有工具脚本或写新逻辑(§2.3)。
+5. **加开关**(可选):在 `cluster.conf.example` 加 `XXX_ENABLED` 变量,TOGGLE 指向它。
+6. **完成**:**无需改任何注册表** —— operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)即 operator),新增 operator 写 TOGGLE 即自动进入 `--steps`/`--enable` 调度。
 
-> 验证:`sudo ./deploy-cluster.sh --list-steps` 应出现新模块;`sudo ./deploy-cluster.sh --steps <key>` 可单独执行。
+> 验证:`bash deployments/scripts/tools/check-modules.sh`(静态校验, 必须 exit 0);
+> `sudo ./deploy-cluster.sh --list-steps` 应出现新模块(带 `依赖:xxx` 标注);
+> `sudo ./deploy-cluster.sh --steps <key>` 可单独执行(--steps 精确模式: 只跑指定的模块 + REQUIRES 依赖, 不带出默认启用的其他 operator)。
+>
+> ⭐ 专项可执行流程见 `skills/cubestack-add-module/SKILL.md`(历史事故警示 + 测试用例)。
 
 ### 4.1 未实现组件的伪代码占位(推荐)
 
@@ -183,24 +193,25 @@ load_config
 模板:
 
 ```bash
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH="ssh -i ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s} -o StrictHostKeyChecking=no ubuntu@${FIRST_MASTER}"
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1   # ★ 统一远端初始化(幂等: FIRST_MASTER/SSH_KEY/SSH()/K/SSH_CMD)
 
 # ── 伪代码步骤(占位): 替换为真实实现 ──
 MY_COMPONENT_STEPS=(
-  "创建命名空间|${SSH} \"${K} create ns my-component 2>/dev/null || true\""
-  "部署组件(离线 manifest)|${SSH} \"${K} apply -f /opt/cubestack/addons/my-component.yaml 2>/dev/null || true\""
-  "验证就绪|${SSH} \"${K} -n my-component get pods -o wide 2>/dev/null || true\""
+  "创建命名空间|${SSH_CMD} \"${K} create ns my-component 2>/dev/null || true\""
+  "部署组件(离线 manifest)|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/my-component.yaml 2>/dev/null || true\""
+  "验证就绪|${SSH_CMD} \"${K} -n my-component get pods -o wide 2>/dev/null || true\""
 )
 addon_stub "my_component" MY_COMPONENT_STEPS
 ```
 
-> 现有占位模块(伪代码已实现):
+> ⚠ 旧写法 `FIRST_MASTER="$(first_master_ip)"...` + `SSH="ssh -i ... ubuntu@${FIRST_MASTER}"` + `K="sudo kubectl ..."` 已在 2026-09-04 架构重构中废弃:统一改 `init_remote_kubectl`(字符串式用 `${SSH_CMD}`), 防止新模块少复制一行导致 `K: unbound variable` 崩溃。
+
+> 现有占位模块(伪代码, 已用 `addon_stub`, 按 `grep -rl addon_stub deployments/scripts/modules/` 核实):
 > - `01_env/`: `harbor`(集群外仓库, 宿主机部署)
-> - `03_addon/01~11`: `gpu_operator` / `gpu_lws` / `k8s_registry` / `prometheus` / `ceph` / `ceph_csi` / `envoy_gateway` / `keycloak` / `kueue` / `kubevirt` / `lustre_csi`
+> - `03_addon/`: `prometheus` / `keycloak` / `kueue` / `kubevirt` / `lustre_csi`
 > - `03_addon/20`: `cubestack_apps`(CubeStack 自研模块占位, 20 起为自研序号)
-> 每个模块头部 `TODO` 注释即实现指引。
+> 其余模块(gpu_operator / gpu_lws / k8s_registry / ceph / ceph_csi / envoy_gateway 等)已是真实实现。
+> 每个占位模块头部 `TODO` 注释即实现指引。
 
 ### 4.2 组件功能验证模块模板(verify_<组件>.sh)
 
@@ -216,11 +227,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 [ "${<TOGGLE>:-true}" = "true" ] || { say "跳过(未启用)"; exit 0; }
-FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
-SSH() { ssh -i "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}" \
-           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
+init_remote_kubectl || exit 1   # ★ 统一远端初始化(幂等: FIRST_MASTER/SSH_KEY/SSH()/K)
 trap cleanup EXIT   # 失败也清理测试资源
 
 # ① 组件 pod Ready → ② 核心 CR/资源存在
