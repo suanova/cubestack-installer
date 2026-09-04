@@ -223,6 +223,18 @@ for i in "${!MODULE_KEY[@]}"; do
     done
 done
 
+# ★ 并发锁: 防两个 deploy-cluster.sh 实例同时运行 —— 状态文件 .deploy.state 是 grep+mv
+#   非原子写, 曾出现并发实例互相覆盖状态。--list/--list-steps 只读, 不加锁。
+#   锁文件常驻(.deploy.state.lock, 空文件), 由 fd 关闭自动释放, 不删除(删除会引入竞态)。
+if [ "${LIST_STEPS}" != "1" ] && [ "${LIST}" != "1" ]; then
+    exec 9>"${STATE_FILE}.lock"
+    if ! flock -n 9; then
+        err "检测到已有部署进程在运行(锁: ${STATE_FILE}.lock)"
+        err "  请等待其完成; 若确认无残留进程(ps aux | grep deploy-cluster), 可手工删除锁文件后重试"
+        exit 1
+    fi
+fi
+
 [ "${FRESH}" = "1" ] && { clear_state; say "已清除断点续跑状态(--fresh)" ; }
 
 # ---------------- 输出 ----------------
