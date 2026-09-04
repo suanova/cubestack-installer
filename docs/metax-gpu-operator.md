@@ -92,7 +92,7 @@ METAX_RELEASE_NAME="${METAX_RELEASE_NAME:-metax-gpu-operator}"
 METAX_CLUSTER_TYPE="${METAX_CLUSTER_TYPE:-k8s}"          # 必须 k8s(防 operator 探测 OpenShift API 崩溃)
 METAX_DRIVER_DEPLOY_POLICY="${METAX_DRIVER_DEPLOY_POLICY:-PreferHost}"  # 默认 PreferHost(用节点已装驱动; PreferCloud 会尝试卸载宿主驱动, 卸载失败 CrashLoop)
 METAX_DRIVER_VERSION="${METAX_DRIVER_VERSION:-3.8.1.6-amd64}"   # 需与本地镜像/tar 匹配
-METAX_MACA_IMAGE="${METAX_MACA_IMAGE:-maca:3.8.1.2-ubuntu20.04-amd64}"  # MXMACA SDK 镜像(最新 3.8)
+METAX_MACA_IMAGE="${METAX_MACA_IMAGE:-maca:3.8.1.2-ubuntu22.04-amd64}"  # MXMACA SDK 镜像(最新 3.8)
 METAX_IMAGE_COMPONENTS="..."   # 核心组件列表(run 模式 / 列表打印用)
 ```
 
