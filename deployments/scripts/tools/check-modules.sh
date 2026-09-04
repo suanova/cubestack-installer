@@ -158,6 +158,17 @@ while IFS= read -r -d '' f; do
 done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${NUM_FAIL}" = "0" ] && ok "文件名序号规范"
 
+# ---------- ⑨ tools/ 工具脚本语法检查 ----------
+# 模块外的部署工具(tools/**/*.sh: ceph-backup/deploy-registry/... )同样参与部署,
+# 漏检会在运行期炸(历史: registry 就绪等待 K unbound 崩溃)。
+say "[9/9] tools/ 工具脚本语法检查 ..."
+TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
+T_FAIL=0
+while IFS= read -r -d '' f; do
+    bash -n "$f" 2>/dev/null || { ck_fail "tools 语法错误: ${f#$TOOLS_DIR/}"; T_FAIL=1; }
+done < <(find "${TOOLS_DIR}" -name '*.sh' -print0)
+[ "${T_FAIL}" = "0" ] && ok "全部 $(find "${TOOLS_DIR}" -name '*.sh' | wc -l) 个 tools 脚本语法通过"
+
 echo "---------------------------------------------"
 if [ "${FAIL}" = "0" ]; then
     ok "模块校验全部通过(${#ALLKEYS[@]} 个模块)"

@@ -6,7 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: CEPH_ENABLED
-# REQUIRES: k8s_deploy
+# REQUIRES: k8s_deploy k8s_passwordless k8s_workerbm k8s_ntp
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态; --fresh 清状态重装。
 #   · 方式: Rook Operator(离线 manifest, deployments/cubestack-addon/rook, 需先联网跑
@@ -47,6 +47,15 @@ load_config
 [ "${CEPH_ENABLED:-false}" = "true" ] || { say "CEPH_ENABLED=false, 跳过 Ceph"; exit 0; }
 
 init_remote_kubectl || exit 1
+
+# ★ 逐节点 SSH 公共函数(替代历史 4 处重复 NSSH() 定义): node_ssh <ip> <user> <cmd...>
+#   user 传 NODE_USER 或 ${SSH_USER:-ubuntu} 均可; 不依赖任何外层函数定义。
+node_ssh() {
+    local _nip="$1" _nuser="$2"
+    shift 2
+    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "${_nuser}@${_nip}" "$@"
+}
 
 # ---------------- 派生变量(全部来自 cluster.conf) ----------------
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
@@ -117,8 +126,7 @@ if [ "${_LVM_DEB_PRESENT}" = "0" ]; then
             [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
         done
         [ -n "${_ip}" ] || continue
-        NSSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_ip}" "$@"; }
-        NSSH "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1 || _ALL_HAS_LVM=0
+        node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1 || _ALL_HAS_LVM=0
     done
     if [ "${_ALL_HAS_LVM}" = "0" ]; then
         err "lvm2 离线包未就绪且存储节点未安装 lvm —— 无法离线部署 Rook OSD(重启后逻辑卷需 lvm 激活)"
@@ -263,17 +271,16 @@ for _hn in "${CEPH_NODE_HOSTS[@]}"; do
         [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; _user="${NODE_USER}"; break; }
     done
     [ -n "${_ip}" ] || { warn "  ${_hn} 不在 cluster.conf NODES 中(仅打 label 会失败), 跳过"; continue; }
-    NSSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_user}@${_ip}" "$@"; }
     say "  ── [${_hn}](${_ip}) ──"
     # 4a. rbd 内核模块(立即加载 + 持久化)
-    NSSH "sudo modprobe rbd 2>/dev/null; grep -q '^rbd' /etc/modules-load.d/rbd.conf 2>/dev/null || echo 'rbd' | sudo tee /etc/modules-load.d/rbd.conf >/dev/null" \
+    node_ssh "${_ip}" "${_user}" "sudo modprobe rbd 2>/dev/null; grep -q '^rbd' /etc/modules-load.d/rbd.conf 2>/dev/null || echo 'rbd' | sudo tee /etc/modules-load.d/rbd.conf >/dev/null" \
         && ok "    rbd 内核模块就绪" || warn "    rbd 模块加载失败(VM 内核需支持, 检查 modprobe rbd)"
     # 4b. lvm2: 检测缺失 → 从离线 packages 安装(install-worker-packages.sh 含 offline-files/kubespray/packages)
-    if ! NSSH "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1; then
+    if ! node_ssh "${_ip}" "${_user}" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1; then
         say "    lvm2 缺失, 从离线 .deb 安装(packages 目录, 由 fetch-lvm-packages.sh 生成)..."
         if [ -d "${REPO_ROOT}/deployments/offline-files/kubespray/packages" ] && \
             bash "${SCRIPT_DIR}/tools/node/install-worker-packages.sh" "${_ip}" "${_user}" >/dev/null 2>&1; then
-            NSSH "command -v lvm >/dev/null 2>&1" >/dev/null 2>&1 \
+            node_ssh "${_ip}" "${_user}" "command -v lvm >/dev/null 2>&1" >/dev/null 2>&1 \
                 && ok "    lvm2 已安装(离线包)" || err "    packages 无 lvm2 或安装失败 —— lvm2 离线包未就绪且节点无 lvm, 部署 OSD 必失败"
         else
             # 前置 lvm 预检已保证"离线包存在 或 节点已在线装 lvm", 走到这里 = 前置被绕过/包缺失
@@ -465,10 +472,9 @@ else
                     [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
                 done
                 [ -n "${_ip}" ] || continue
-                NSSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_ip}" "$@"; }
                 for _d in ${NODE_DISKS[${_hn}]//,/ }; do
                     say "  wipe ${_hn} ${_d}(完整清盘: 头/1GB/locations/尾)..."
-                    NSSH "sudo dd if=/dev/zero of=${_d} bs=1M count=64 conv=fsync status=none && \
+                    node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo dd if=/dev/zero of=${_d} bs=1M count=64 conv=fsync status=none && \
                           sudo dd if=/dev/zero of=${_d} bs=1M seek=1024 count=64 conv=fsync status=none && \
                           _SZ=\$(sudo lsblk -b -o SIZE ${_d} 2>/dev/null | tail -1) && _SM=\$((_SZ/1048576)) && \
                           sudo dd if=/dev/zero of=${_d} bs=1M seek=\$((_SM/20)) count=64 conv=fsync status=none && \
@@ -478,10 +484,9 @@ else
                         || warn "    ${_hn} ${_d} wipe 失败(请手工: dd if=/dev/zero of=${_d} bs=1M seek=\$((\$(sudo lsblk -b -o SIZE ${_d}|tail -1)/1048576/20)) count=64)"
                 done
                 # 遗留 rbd 设备: 曾导致 osd-prepare 的 show-label 扫到挂起 IO(AIO 读 D 状态) → prepare 永久卡死
-                NSSH "ls /dev/rbd* >/dev/null 2>&1 && { sudo rm -f /dev/rbd* && echo '  残留 rbd 设备节点已删(/dev/rbd*)'; } || true" \
+                node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "ls /dev/rbd* >/dev/null 2>&1 && { sudo rm -f /dev/rbd* && echo '  残留 rbd 设备节点已删(/dev/rbd*)'; } || true" \
                     | grep -v '^$' || true
             done
-            unset NSSH
         fi
 
         # --- 7b) 清理 /var/lib/rook 残留(mon store + osd 元数据 + config/keyring) ---
@@ -497,14 +502,13 @@ else
                 [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
             done
             [ -n "${_ip}" ] || continue
-            NSSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_ip}" "$@"; }
             if [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
                 say "  清理 ${_hn} /var/lib/rook 残留(mon-* + rook-ceph/osd 元数据 + config/keyring)..."
-                NSSH "sudo rm -rf /var/lib/rook/mon-* /var/lib/rook/rook-ceph 2>/dev/null; true" \
+                node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-* /var/lib/rook/rook-ceph 2>/dev/null; true" \
                     && ok "    ${_hn} /var/lib/rook 已清空" || warn "    ${_hn} /var/lib/rook 清理失败"
             else
                 say "  清理 ${_hn} 残留 mon store(/var/lib/rook/mon-*, 全新 mon 状态)..."
-                NSSH "sudo rm -rf /var/lib/rook/mon-*" || warn "    ${_hn} mon store 清理失败(节点全新无残留可忽略)"
+                node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-*" || warn "    ${_hn} mon store 清理失败(节点全新无残留可忽略)"
             fi
         done
     fi
