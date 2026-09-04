@@ -48,6 +48,14 @@ say "配置集群内置 docker registry(域名=${REGISTRY_DOMAIN:-registry.cubes
 if [ -n "${REGISTRY_STORAGE_CLASS:-}" ] && [ "${REGISTRY_STORAGE_CLASS}" != "local-path" ]; then
     say "  后端存储: REGISTRY_STORAGE_CLASS=${REGISTRY_STORAGE_CLASS}(PVC 由 kubespray 在 k8s 阶段创建, 等该 SC 出现后自动绑定)"
 fi
+# ★ K/SSH/FIRST_MASTER 定义(远端 kubectl): 本模块在"就绪等待"用 SSH "${K}" 轮询 PVC/pod。
+#   这些变量其他模块(metallb/ceph)在各自文件内定义, 不会跨模块可见 —— 必须在本文件定义,
+#   否则 set -u 下裸引用 unbound → 部署成功(registry 已部署)后模块崩溃(本次事故根因)。
+FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
+SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
+K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 bash "${SCRIPT_DIR}/tools/lb/deploy-registry.sh"
 
 # ---------------- 就绪等待(关键) ----------------

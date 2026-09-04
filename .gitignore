@@ -30,6 +30,7 @@ nohup.out
 # 集群统一配置(含密码,勿提交;模板 cluster.conf.example 需提交)
 deployments/config/cluster.conf
 deployments/config/cluster.conf.bak
+deployments/config/cluster.conf.bak.*
 # MinIO 独立配置(含密钥,勿提交;模板 minio.conf.example 需提交, 供 fetch-offline-from-minio.sh 使用)
 deployments/config/minio.conf
 # Docker CLI 镜像独立构建上下文(生成目录, build-cli-context.sh 每次构建前重新生成)
