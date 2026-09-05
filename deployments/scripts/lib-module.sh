@@ -293,6 +293,9 @@ resolve_run_steps() {
     # ★ REQUIRES 闭包(--steps 精确模式): 在 operator 过滤**之后**执行 —— 闭包拉入的依赖
     #   (如 --steps ceph_csi → ceph)是本模块需要的组件, 不能再被"未显式指定 operator"剔除。
     #   递归加入显式指定模块的依赖链, 保证 --steps envoy_ai_gateway 自动带上 envoy_gateway。
+    # ★ 2026-09-06 修复: 依赖**已完成(done, 断点续跑语义)**时不拉入执行 —— 否则
+    #   `--steps ceph_csi`(补建 SC/FS/RGW)会因闭包拉入 ceph 而重跑 ceph 模块,
+    #   ceph 内部"已有集群+PRE_CLEANUP→删旧建新"会误删现有集群。
     if [ "${_steps_precise}" = "1" ]; then
         local _added=1 _k3 _i3 _d3 _f3 _k4
         while [ "${_added}" = "1" ]; do
@@ -302,6 +305,11 @@ resolve_run_steps() {
                 [ "${_i3}" -ge 0 ] || continue
                 for _d3 in ${MODULE_REQUIRES[$_i3]:-}; do
                     module_index "${_d3}" >/dev/null 2>&1 || { err "模块 ${_k3} 的 REQUIRES 引用了未知模块: ${_d3}"; return 1; }
+                    # 依赖已完成(状态 done, REPEAT!=1)→ 视为满足, 不拉入执行(防重跑破坏型模块)
+                    _d3i="$(module_index "${_d3}")"
+                    if [ "${MODULE_REPEAT[$_d3i]:-0}" != "1" ] && [ "$(get_state "${_d3}")" = "done" ]; then
+                        continue
+                    fi
                     _f3=0
                     for _k4 in "${RUN_STEPS[@]}"; do [ "${_k4}" = "${_d3}" ] && _f3=1; done
                     if [ "${_f3}" = "0" ]; then RUN_STEPS+=("${_d3}"); _added=1; fi
