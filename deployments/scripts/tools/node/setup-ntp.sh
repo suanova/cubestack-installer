@@ -135,7 +135,7 @@ master_chrony_setup() {
             [ -n "${net}" ] && echo "allow ${net}"
         done
         echo "driftfile /var/lib/chrony/drift"
-        echo "makestep 1.0 3"
+        echo "makestep 1 1"
         echo "rtcsync"
         echo "logdir /var/log/chrony"
     } > "${mconf_tmp}"
@@ -179,7 +179,7 @@ if [ -n "${SERVER}" ]; then
 server ${SERVER} iburst
 __UPSTREAM_LINE__
 driftfile /var/lib/chrony/drift
-makestep 1.0 3
+makestep 1 1
 rtcsync
 logdir /var/log/chrony
 CFG
