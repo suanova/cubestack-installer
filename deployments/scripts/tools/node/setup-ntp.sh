@@ -130,8 +130,28 @@ master_chrony_setup() {
         echo "# === cubestack-managed ==="
         [ -n "${NTP_UPSTREAM:-}" ] && echo "${NTP_UPSTREAM}"
         echo "local stratum 10"
-        # NTP_ALLOW 独立于虚拟/裸金属网络: 默认空=仅本机; 多子网节点需显式填节点所在网段
-        for net in ${NTP_ALLOW:-}; do
+        # ★ allow 网段自动推导(2026-09-05 事故修复): NTP_ALLOW 为空时, 从 NODES 所有节点 IP
+        #   推导所在网段(按 /16 粗粒度合并), 否则 chrony 只监听本机(local stratum 不对外),
+        #   客户端永远连不上(^? Reach 0) → 时间偏差 0.5~1.2s 无法收敛。
+        #   支持: 显式 NTP_ALLOW(覆盖) / 多子网(自动推导每个节点网段)。
+        _allow_nets=()
+        if [ -n "${NTP_ALLOW:-}" ]; then
+            for net in ${NTP_ALLOW}; do _allow_nets+=("${net}"); done
+        else
+            for e in "${NODE_ENTRIES[@]:-}"; do
+                local _nip _net
+                _nip="${e%%:*}"
+                case "${_nip}" in
+                    *.*.*.*) _net="$(printf '%s' "${_nip}" | cut -d. -f1-2).0.0/16" ;;
+                    *) continue ;;
+                esac
+                local _seen=0 _n2
+                for _n2 in "${_allow_nets[@]:-}"; do [ "${_n2}" = "${_net}" ] && _seen=1; done
+                [ "${_seen}" = "0" ] && _allow_nets+=("${_net}")
+            done
+        fi
+        [ "${#_allow_nets[@]}" -gt 0 ] && say "  chrony allow: ${_allow_nets[*]}(自动从 NODES 推导)"
+        for net in "${_allow_nets[@]:-}"; do
             [ -n "${net}" ] && echo "allow ${net}"
         done
         echo "driftfile /var/lib/chrony/drift"
@@ -286,6 +306,22 @@ verify_clocks() {
             fi
         else
             ok "  ${hn}(${ip}) 偏差 ${off}ms ✓"
+            # ★ NTP 同步有效性验证(2026-09-05 事故修复): 偏差小 ≠ NTP 在工作 —— chrony 服务端
+            #   缺 allow 时客户端永远 ^?(Reach 0), 只有一次性 makestep 兜底, 后续漂移无收敛。
+            #   客户端若是 chrony 且权威为首 master, 校验 sources 里权威源的 Reach(期望 377)。
+            if [ "${ip}" != "${NTP_AUTHORITY}" ] && node_cmd "${ip}" "${u}" "${pw}" \
+                "command -v chronyc >/dev/null 2>&1 && chronyc sources 2>/dev/null | awk '\$1 ~ /\\*|\\^/ {print \$NF}' | grep -q ." 2>/dev/null; then
+                _reach="$(node_cmd "${ip}" "${u}" "${pw}" \
+                    "chronyc sources 2>/dev/null | awk '/^\\^\\*/{print \\\$6}'" 2>/dev/null | tr -d ' \r')"
+                if [ "${_reach:-0}" -lt 37 ]; then
+                    warn "  ${hn}(${ip}) 偏差达标但 NTP 源 Reach=${_reach:-0}(<37, 同步不稳定/未生效), 强制 makestep 后复检 ..."
+                    node_cmd "${ip}" "${u}" "${pw}" "chronyc -a makestep >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+                    sleep 3
+                    _reach="$(node_cmd "${ip}" "${u}" "${pw}" \
+                        "chronyc sources 2>/dev/null | awk '/^\\^\\*/{print \\\$6}'" 2>/dev/null | tr -d ' \r')"
+                    [ "${_reach:-0}" -lt 37 ] && { warn "  ${hn}(${ip}) NTP 源仍 Reach=${_reach:-0}(检查: 权威 chrony 是否 allow 节点网段 / chronyc sources)"; FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "; }
+                fi
+            fi
         fi
     done
     if [ "${FAIL}" = "1" ]; then
