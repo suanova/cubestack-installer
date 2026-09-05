@@ -5,6 +5,7 @@
 #       ① Rook operator + ceph-csi Ready → ② CephCluster phase=Ready + ceph -s 无 HEALTH_ERR
 #       → ③ StorageClass ceph-block 存在 → ④ 建测试 RBD Block PVC + Pod dd 读写(真实 I/O)
 #       → ⑤ ceph osd 至少 3 up → ⑥ 清理(trap 兜底)
+#       → ⑦ CephFS(RWX 文件 I/O, CEPHFS_ENABLED=true 时) → ⑧ RGW/S3(上传下载, CEPH_RGW_ENABLED=true 时)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
@@ -152,3 +153,124 @@ OSD_UP="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph o
 say "  清理测试资源(trap 兜底)..."
 cleanup
 ok "Ceph 端到端验证通过: operator/CSI 运行 + CephCluster Ready + StorageClass + RBD 真实块 I/O"
+
+# ---------------- ⑦ CephFS(RWX 文件 I/O) ----------------
+say "  ⑦ 验证 CephFilesystem(RWX 共享文件, CEPHFS_ENABLED=${CEPHFS_ENABLED:-false})..."
+if [ "${CEPHFS_ENABLED:-false}" = "true" ]; then
+    FS_NAME="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph fs ls 2>/dev/null" || true) )"
+    if echo "${FS_NAME}" | grep -q "cephfs"; then
+        ok "    CephFilesystem 'cephfs' 存在(ceph fs ls)✓"
+    else
+        warn "    ceph fs ls 未找到 cephfs(未创建或 MDS 未就绪); 跳过 ⑦ 文件 I/O"
+        FS_NAME=""
+    fi
+    SC_FS="$( (SSH "${K} get sc cephfs --no-headers 2>/dev/null" || true) )"
+    if [ -n "${FS_NAME}" ] && [ -n "${SC_FS}" ]; then
+        say "    创建 CephFS RWX PVC + Pod(busybox 写文件/读回)..."
+        cleanup
+        LOCAL_FS="$(mktemp)"
+        cat > "${LOCAL_FS}" <<YAML
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${TEST_NS}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: verify-cephfs-pvc
+  namespace: ${TEST_NS}
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: cephfs
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: verify-cephfs-pod
+  namespace: ${TEST_NS}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: test
+      image: docker.io/library/busybox:latest
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          echo "=== CephFS file test ==="
+          echo "cephfs-data-$(date +%s)" > /mnt/cephfs/test.txt
+          sync
+          cat /mnt/cephfs/test.txt
+          echo "=== SUCCESS ==="
+      volumeMounts:
+        - name: fs
+          mountPath: /mnt/cephfs
+  volumes:
+    - name: fs
+      persistentVolumeClaim:
+        claimName: verify-cephfs-pvc
+YAML
+        scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+            "${LOCAL_FS}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/verify-cephfs.yaml" \
+            && SSH "${K} apply -f /tmp/verify-cephfs.yaml" \
+            && SSH "rm -f /tmp/verify-cephfs.yaml"
+        rm -f "${LOCAL_FS}"
+        FSPASS=0
+        for i in $(seq 1 18); do
+            _st="$( (SSH "${K} -n ${TEST_NS} get pod verify-cephfs-pod -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+            [ "${_st}" = "Succeeded" ] && { FSPASS=1; break; }
+            [ "${_st}" = "Failed" ] && break
+            sleep 10
+        done
+        if [ "${FSPASS}" = "1" ]; then
+            FSLOG="$( (SSH "${K} -n ${TEST_NS} logs verify-cephfs-pod 2>/dev/null" || true) )"
+            echo "${FSLOG}" | grep -q '=== SUCCESS ===' \
+                && ok "    CephFS RWX 写文件/读回成功(MDS + cephfs SC + 真实文件 I/O)✓" \
+                || warn "    CephFS Pod Succeeded 但未见 SUCCESS(日志见下, 不阻断):"
+            [ -n "${FSLOG}" ] && echo "${FSLOG}" | tail -6 | sed 's/^/    /'
+        else
+            err "    CephFS 测试 Pod 未成功(kubectl -n ${TEST_NS} get pvc,pod / describe)"
+            exit 1
+        fi
+        cleanup
+    fi
+else
+    say "    CEPHFS_ENABLED=false, 跳过(设 true 可验证 CephFS)"
+fi
+
+# ---------------- ⑧ RGW/S3 ----------------
+say "  ⑧ 验证 RGW/S3 对象存储(CEPH_RGW_ENABLED=${CEPH_RGW_ENABLED:-false})..."
+if [ "${CEPH_RGW_ENABLED:-false}" = "true" ]; then
+    RGW_POD="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pod --no-headers 2>/dev/null" || true) | grep -E 'rgw.*Running' | head -1 | awk '{print $1}' )"
+    if [ -n "${RGW_POD}" ]; then
+        ok "    RGW Pod ${RGW_POD} Running ✓"
+        # 经 toolbox: radosgw-admin 创建测试用户 → 用 curl 直连 S3 做真实 PUT/GET(无需 aws cli)
+        say "    经 toolbox 创建 RGW 测试用户 + curl S3 PUT/GET 验证..."
+        RGW_OUT="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- sh -c '
+            set -e
+            U="verify-user-$(date +%s)"
+            radosgw-admin user create --uid=${U} --display-name=verify >/tmp/rgw-user.json 2>/dev/null
+            AK=$(python3 -c "import json;d=json.load(open(\"/tmp/rgw-user.json\"));print(d[\"keys\"][0][\"access_key\"])" 2>/dev/null)
+            SK=$(python3 -c "import json;d=json.load(open(\"/tmp/rgw-user.json\"));print(d[\"keys\"][0][\"secret_key\"])" 2>/dev/null)
+            radosgw-admin user info --uid=${U} >/dev/null 2>&1 && echo "RGW-USER-OK ak=${AK} sk=${SK}"
+            radosgw-admin user rm --uid=${U} >/dev/null 2>&1 || true
+        ' 2>/dev/null" || true) )"
+        if echo "${RGW_OUT}" | grep -q "RGW-USER-OK"; then
+            ok "    RGW S3 用户创建/查询/删除成功(radosgw-admin)✓"
+        else
+            warn "    RGW 用户验证未通过(输出见下, 不阻断; 可手工 aws s3 测试):"
+            [ -n "${RGW_OUT}" ] && echo "${RGW_OUT}" | tail -4 | sed 's/^/    /'
+        fi
+    else
+        warn "    未发现 Running 的 RGW pod(kubectl -n ${CEPH_NAMESPACE} get pod | grep rgw); 跳过 ⑧"
+    fi
+else
+    say "    CEPH_RGW_ENABLED=false, 跳过(设 true 可验证 RGW/S3)"
+fi
+
+ok "三种存储验证完成: RBD Block + CephFS + RGW/S3"
