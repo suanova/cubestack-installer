@@ -38,6 +38,30 @@ delete_cluster() {
     # 幂等: 无集群直接成功
     _exists="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
     [ -z "${_exists}" ] && { ok "  无现有 CephCluster, 跳过"; return 0; }
+    # ★ 2026-09-05 事故预防: 删除集群前先清 ceph-block PVC 并删 rbd nodeplugin DaemonSet。
+    #   若直接删 CephCluster, nodeplugin 随之被删 → 节点上内核 rbd 映射无人 unmap →
+    #   [rbd0-tasks] 内核线程持锁残留 → sysfs remove 被拒(EACCES) → libceph cephx -13
+    #   刷屏, 只能重启节点。正确顺序: 先让 CSI 正常 unmap 卷, 再删集群。
+    say "  ① 删除使用 ceph-block 的 PVC(触发 CSI unmap)..."
+    SSH "${K} get pvc -A -o json 2>/dev/null" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    for pvc in d.get("items", []):
+        sc = pvc.get("spec", {}).get("storageClassName", "")
+        if "ceph" in sc:
+            ns, name = pvc["metadata"]["namespace"], pvc["metadata"]["name"]
+            print(f"{ns}/{name}")
+except Exception:
+    pass
+' | while read -r pvc; do
+        [ -z "${pvc}" ] && continue
+        say "     删除 PVC ${pvc}(数据将销毁)..."
+        SSH "${K} -n ${pvc%/*} delete pvc ${pvc#*/} --wait=false >/dev/null 2>&1" || true
+    done
+    say "  ② 删除 rbd csi nodeplugin DaemonSet(各节点执行内核 rbd unmap)..."
+    SSH "${K} -n ${CEPH_NAMESPACE} delete ds rook-ceph.rbd.csi.ceph.com-nodeplugin --wait=false >/dev/null 2>&1" || true
+    sleep 5
     SSH "${K} -n ${CEPH_NAMESPACE} patch cephcluster rook-ceph --type merge \
         -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}' >/dev/null 2>&1" || true
     SSH "${K} -n ${CEPH_NAMESPACE} delete cephblockpool --all --wait=false >/dev/null 2>&1" || true
@@ -100,7 +124,21 @@ done
 rm -rf /var/lib/rook /var/lib/ceph /etc/ceph /run/ceph 2>/dev/null || true
 rm -f /dev/rbd* 2>/dev/null || true
 udevadm settle 2>/dev/null || true
-# 6) 验证: 目标盘 FSTYPE/挂载应为空(只显示传入的目标盘, 不误匹配系统盘)
+# 6) ★ 内核 rbd 映射残留检测(2026-09-05 事故预防): 即使磁盘清空, 内核 rbd 映射
+#    ([rbd0-tasks] 线程持锁)仍在时, sysfs remove 会被 EACCES 拒绝, 且 libceph 持续
+#    cephx -13 刷屏, 只能重启节点清除。此处检测并明确提示, 不再静默继续。
+echo "--- 内核 rbd 映射检测 ---"
+RBD_N=0
+for d in /sys/bus/rbd/devices/*; do
+    [ -d "$d" ] || continue
+    RBD_N=$((RBD_N+1))
+    echo "残留 rbd 映射: $(cat $d/name 2>/dev/null) (pool=$(cat $d/pool 2>/dev/null))"
+done
+if [ "$RBD_N" -gt 0 ]; then
+    echo "!! 检测到 $RBD_N 个内核 rbd 映射残留: sysfs remove 被持锁拒绝, 必须重启本节点清除"
+    echo "!! (否则 libceph 持续 cephx 认证失败刷屏; 重启后重跑本清理即可)"
+    exit 9
+fi
 echo "--- 验证目标盘 FSTYPE/挂载(应全空) ---"
 for dev in __DISKS__; do
     [ -b "$dev" ] || continue
