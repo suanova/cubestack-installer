@@ -665,6 +665,36 @@ rm -f "${LOCAL_CR}"
     # 放宽到 0.5s 消除误报, 实际偏差已在 k8s NTP 模块收敛 ≤500ms)
     say "  设置 mon clock skew 阈值=0.5s(默认 0.05s 过严, NTP 同步后消除 HEALTH_WARN)..."
     SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set mon mon_clock_drift_allowed 0.5 >/dev/null 2>&1" || true
+    # ★ 清残留 clock skew 告警(2026-09-05 事故): 时间已同步但 ceph 仍报 MON_CLOCK_SKEW ——
+    #   chrony 收敛前记录的 skew 被 mon 缓存, timecheck 不会自动重采样刷新(恒定值如 1.233s)。
+    #   消除方法: ① 全节点 chronyc makestep 硬对齐 ② 重启 mon deployments 触发 timecheck 重检。
+    #   此前脚本只放宽阈值, 但偏差超过新阈值时仍 WARN; 现追加主动 makestep + 重启 mon, 让 HEALTH_OK 可达。
+    say "  清 mon clock skew 残留告警(chronyc makestep + 重启 mon 触发 timecheck 重检)..."
+    for _hn3 in "${CEPH_NODE_HOSTS[@]}"; do
+        _ip3=""
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            node_parse "${line}"
+            [ "${NODE_HOSTNAME}" = "${_hn3}" ] && { _ip3="${NODE_IP}"; break; }
+        done
+        [ -n "${_ip3}" ] || continue
+        node_ssh "${_ip3}" "${SSH_USER:-ubuntu}" "sudo chronyc makestep >/dev/null 2>&1 || true; sudo chronyc -a makestep >/dev/null 2>&1 || true" || true
+    done
+    # 重启 mon deployments 触发 timecheck 重新采样(Rook 会重建, quorum 短暂重建, 不影响存储)
+    SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-mon-a deploy/rook-ceph-mon-b deploy/rook-ceph-mon-c >/dev/null 2>&1" || true
+    SSH "${K} -n ${CEPH_NAMESPACE} rollout status deploy/rook-ceph-mon-a --timeout=120s >/dev/null 2>&1" || true
+    # 重启后等 timecheck 重检(最多 60s)
+    _SKEW_CLEAR=0
+    for _i2 in $(seq 1 6); do
+        _hl2="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null" || true) | grep -oE 'HEALTH_(OK|WARN)' | head -1 )"
+        [ "${_hl2}" = "HEALTH_OK" ] && { _SKEW_CLEAR=1; break; }
+        sleep 10
+    done
+    if [ "${_SKEW_CLEAR}" = "1" ]; then
+        ok "  Ceph 集群 HEALTH_OK(clock skew 已清除)"
+    else
+        warn "  clock skew 未完全清除(可手工: 全节点 chronyc makestep 后 kubectl -n rook-ceph rollout restart deploy/rook-ceph-mon-a)"
+    fi
 fi   # _CEPH_SKIP_CLUSTER=1 → 跳过集群内 CephCluster 创建
 
 # ---------------- 8) 汇总 ----------------
