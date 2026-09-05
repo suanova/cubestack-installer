@@ -249,17 +249,9 @@ if [ "${CEPH_RGW_ENABLED:-false}" = "true" ]; then
     RGW_POD="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pod --no-headers 2>/dev/null" || true) | grep -E 'rgw.*Running' | head -1 | awk '{print $1}' )"
     if [ -n "${RGW_POD}" ]; then
         ok "    RGW Pod ${RGW_POD} Running ✓"
-        # 经 toolbox: radosgw-admin 创建测试用户 → 用 curl 直连 S3 做真实 PUT/GET(无需 aws cli)
-        say "    经 toolbox 创建 RGW 测试用户 + curl S3 PUT/GET 验证..."
-        RGW_OUT="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- sh -c '
-            set -e
-            U="verify-user-$(date +%s)"
-            radosgw-admin user create --uid=${U} --display-name=verify >/tmp/rgw-user.json 2>/dev/null
-            AK=$(python3 -c "import json;d=json.load(open(\"/tmp/rgw-user.json\"));print(d[\"keys\"][0][\"access_key\"])" 2>/dev/null)
-            SK=$(python3 -c "import json;d=json.load(open(\"/tmp/rgw-user.json\"));print(d[\"keys\"][0][\"secret_key\"])" 2>/dev/null)
-            radosgw-admin user info --uid=${U} >/dev/null 2>&1 && echo "RGW-USER-OK ak=${AK} sk=${SK}"
-            radosgw-admin user rm --uid=${U} >/dev/null 2>&1 || true
-        ' 2>/dev/null" || true) )"
+        say "    经 toolbox 创建 RGW 测试用户并验证(radosgw-admin)..."
+        # 单行 sh -c(heredoc 经 ssh+exec stdin 传递不可靠), 全部转义防止父 shell set -u 展开
+        RGW_OUT="$(SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- sh -c 'U=\"verify-user-\$(date +%s)\"; radosgw-admin user create --uid=\"\${U}\" --display-name=verify >/tmp/rgw-user.json 2>/dev/null && radosgw-admin user info --uid=\"\${U}\" >/dev/null 2>&1 && echo \"RGW-USER-OK \${U}\" && radosgw-admin user rm --uid=\"\${U}\" >/dev/null 2>&1 || true' 2>/dev/null" || true)"
         if echo "${RGW_OUT}" | grep -q "RGW-USER-OK"; then
             ok "    RGW S3 用户创建/查询/删除成功(radosgw-admin)✓"
         else
