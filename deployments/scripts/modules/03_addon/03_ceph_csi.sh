@@ -176,7 +176,7 @@ kind: StorageClass
 metadata:
   name: ceph-block
   annotations:
-    storageclass.kubernetes.io/is-default-class: "true"   # ★ 默认 StorageClass: 未显式指定 SC 的 PVC 走 ceph-block
+    storageclass.kubernetes.io/is-default-class: \"true\"   # 默认 SC: 未显式指定 SC 的 PVC 走 ceph-block
 provisioner: rook-ceph.rbd.csi.ceph.com
 parameters:
   pool: rbd-pool
