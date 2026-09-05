@@ -117,7 +117,7 @@ CEPH_DETECT_EXCLUDE="${CEPH_DETECT_EXCLUDE:-^(sda|sr0|vda|nbd[0-9]+)$}"   # 自�
 CEPH_MON_COUNT="${CEPH_MON_COUNT:-3}"             # mon 数量(奇数, 默认 3)
 CEPH_POOL_REPLICAS="${CEPH_POOL_REPLICAS:-3}"     # 副本数
 CEPH_POOL_MIN_SIZE="${CEPH_POOL_MIN_SIZE:-2}"     # min_size(1 台主机宕机池仍可写)
-CEPH_OSD_MEMORY_TARGET="${CEPH_OSD_MEMORY_TARGET:-4}"   # 每 OSD 内存目标(GiB; 小盘 4G 足够, 大盘按文档调)
+CEPH_OSD_MEMORY_TARGET="${CEPH_OSD_MEMORY_TARGET:-12}"   # 每 OSD 内存目标(GiB; 默认 12G 适配 7TB 大盘, 小盘可改小省内存)
 CEPHFS_ENABLED="${CEPHFS_ENABLED:-false}"         # 可选: 启用 CephFS(RWX 共享文件)
 CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-false}"     # 可选: 启用 RGW/S3 对象存储
 # 外部 Ceph 连接(本集群无集群内 CephCluster 时): ceph 模块检测到存储节点<CEPH_MIN_NODES 或
