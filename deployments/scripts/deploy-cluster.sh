@@ -397,7 +397,12 @@ if [ "${CEPH_ENABLED:-false}" = "true" ]; then
         fi
 
         # 已有 CephCluster 且显式允许销毁 → 覆盖 k8s 前卸载旧 Ceph(OSD 数据销毁)
-        if [ -n "${_CEPH_EXIST}" ] && [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ]; then
+        # ★ 2026-09-05 修复: 仅当本次执行包含 ceph 模块时才清理 —— 否则 `--steps ceph_csi`
+        #   (只想补建 CephFS/RGW 等)会误删现有集群。ceph 模块内部已有"已有集群+PRE_CLEANUP
+        #   →先删后建"逻辑; 这里只负责 k8s 重装前的预清理(k8s reset 后 rook ns 清空)。
+        _RUN_CEPH=0
+        for _rk in "${RUN_STEPS[@]:-}"; do [ "${_rk}" = "ceph" ] && _RUN_CEPH=1; done
+        if [ -n "${_CEPH_EXIST}" ] && [ "${_RUN_CEPH}" = "1" ] && [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ]; then
             say "清理已有 Ceph(cleanupPolicy yes-really-destroy-data → 删 cephblockpool/cephcluster)..."
             ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_FM_IP}" \
                 "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph patch cephcluster rook-ceph --type merge -p '{\"spec\":{\"cleanupPolicy\":{\"confirmation\":\"yes-really-destroy-data\"}}}' >/dev/null 2>&1; sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph delete cephblockpool rbd-pool --wait=false >/dev/null 2>&1; sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph delete cephcluster rook-ceph --wait=false >/dev/null 2>&1; true"
