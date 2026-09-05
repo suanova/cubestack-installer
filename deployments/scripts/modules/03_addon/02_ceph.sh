@@ -419,6 +419,18 @@ ok "  Rook operator 已部署"
 CEPH_CR_BACKUP="${CEPH_CR_BACKUP:-${REPO_ROOT}/deployments/offline-files/cephcluster-backup.yaml}"
 CEPH_RESTORE_BACKUP="${CEPH_RESTORE_BACKUP:-false}"   # 兼容旧配置: true 强制认领(自动关闭清盘); 默认按 PRE_CLEANUP 自动决定
 _HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+# ★ 幂等卸载(2026-09-05 重构): PRE_CLEANUP=true(清盘重装)且检测到已有 CephCluster 时,
+#   先走标准卸载流程删旧集群(Rook cleanupPolicy yes-really-destroy-data 擦盘), 再走下方 7a 物理清盘。
+#   支持两种幂等场景:
+#     ① 只重装 Ceph(K8s 保留): --steps ceph,ceph_csi → 自动删旧集群+清盘 → 全新 fsid;
+#     ② K8s 重装后盘复用: k8s 重装中 rook ns 已清(_HAS_CC_NOW 空)→ 跳过本步, 7a 直接清盘。
+#   PRE_CLEANUP=false(保留数据模式)→ 不删不wipe, 走下方认领逻辑。
+if [ -n "${_HAS_CC_NOW}" ] && [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
+    say "  检测到已有 CephCluster($(echo "${_HAS_CC_NOW}" | awk '{print $1}')) + CEPH_PRE_CLEANUP_EXISTING=true → 幂等卸载旧集群(Rook 擦盘)..."
+    bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --delete-cluster \
+        || warn "  旧集群删除超时/失败(继续, 7a 将物理清盘兜底)"
+    _HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+fi
 if [ -n "${_HAS_CC_NOW}" ]; then
     say "  集群内已有 CephCluster($(echo "${_HAS_CC_NOW}" | awk '{print $1}')), 用当前 CR 幂等更新(不重建、不读备份)"
 else
@@ -662,9 +674,11 @@ rm -f "${LOCAL_CR}"
     say "  设置 OSD osd_memory_target=${CEPH_OSD_MEMORY_TARGET}GiB(经 toolbox)..."
     SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set osd osd_memory_target $((CEPH_OSD_MEMORY_TARGET * 1024 * 1024 * 1024)) >/dev/null 2>&1" || true
     # 放宽 mon 时钟偏差告警阈值(默认 0.05s 太严: NTP 同步后节点偏差仍可能 0.2~0.5s → 恒 HEALTH_WARN;
-    # 放宽到 0.5s 消除误报, 实际偏差已在 k8s NTP 模块收敛 ≤500ms)
-    say "  设置 mon clock skew 阈值=0.5s(默认 0.05s 过严, NTP 同步后消除 HEALTH_WARN)..."
-    SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set mon mon_clock_drift_allowed 0.5 >/dev/null 2>&1" || true
+    # 2026-09-05 实测: 新 VM 时钟初始偏差可达 0.5~1.2s, chrony 收敛前会超 0.5s 阈值 → 恒 WARN。
+    # 设 1.5s 消除误报(≤1.5s 对 Ceph 安全: mon 心跳/租约毫秒级, 1.5s 不影响 quorum);
+    # 真实偏差由 chrony 持续收敛(见 setup-ntp.sh makestep 1 1 秒级对齐)。)
+    say "  设置 mon clock skew 阈值=1.5s(默认 0.05s 过严, VM 初始偏差 0.5~1.2s 实测)..."
+    SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set mon mon_clock_drift_allowed 1.5 >/dev/null 2>&1" || true
     # ★ 清残留 clock skew 告警(2026-09-05 事故): 时间已同步但 ceph 仍报 MON_CLOCK_SKEW ——
     #   chrony 收敛前记录的 skew 被 mon 缓存, timecheck 不会自动重采样刷新(恒定值如 1.233s)。
     #   消除方法: ① 全节点 chronyc makestep 硬对齐 ② 重启 mon deployments 触发 timecheck 重检。
