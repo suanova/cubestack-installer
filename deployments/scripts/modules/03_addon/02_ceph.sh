@@ -407,24 +407,27 @@ ok "  Rook operator 已部署"
 # ---------------- 7) 生成并应用 CephCluster CR(按节点+裸盘) ----------------
 # ★ 幂等重装策略(此前多起事故根因在此重构):
 #   ① 集群内已有 CephCluster → 幂等更新(不重建、不读备份);
-#   ② 无 CephCluster + CEPH_RESTORE_BACKUP=true + 备份 CR 存在 → 仅提取备份 status.fsid 注入
-#      spec.fsid(Rook 凭 fsid 认领旧 OSD 数据), storage/placement 仍按**当前**节点/裸盘生成;
+#   ② 无 CephCluster + 保留数据模式(PRE_CLEANUP=false)→ 检查 namespace 中是否残留
+#      rook-ceph-mon secret(含 fsid + keyring —— Rook 凭它认领旧 OSD 数据)。有 → 直接复用,
+#      Rook 自动用 secret 的 fsid 启动 mon 并认领盘上旧数据; 无 secret → 全新部署(新 fsid)。
+#      ★ 注意: Rook 的 CephCluster CRD **没有 spec.fsid 字段**(fsid 在 status/secret 里),
+#        向 CR 注入 spec.fsid 会被 API 拒绝(unknown field) —— 认领凭证是 secret, 不是 CR 字段。
 #   ③ 其余 → 全新部署(新 fsid)。
 #   绝不整份恢复旧 CR: 旧 CR 的 storage.nodes/devices/placement 来自上一代环境, apply 后
 #   ① 盘名/节点过时(历史残留 /dev/rbd0 → OSD 永不创建) ② 残留 mon store(/var/lib/rook/mon-*,
 #   集群无关路径)被新 mon 直接复用, monmap 还是旧集群的死 IP → quorum 永久卡死。
 CEPH_CR_BACKUP="${CEPH_CR_BACKUP:-${REPO_ROOT}/deployments/offline-files/cephcluster-backup.yaml}"
 CEPH_RESTORE_BACKUP="${CEPH_RESTORE_BACKUP:-false}"   # 兼容旧配置: true 强制认领(自动关闭清盘); 默认按 PRE_CLEANUP 自动决定
-_CEPH_FSID=""
 _HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
 if [ -n "${_HAS_CC_NOW}" ]; then
     say "  集群内已有 CephCluster($(echo "${_HAS_CC_NOW}" | awk '{print $1}')), 用当前 CR 幂等更新(不重建、不读备份)"
 else
-    # ★ 备份自动注入(部署时手动备份 → 新集群自动认领):
+    # ★ 认领决策(部署时手动备份 → 新集群自动认领):
     #   · 清盘模式(CEPH_PRE_CLEANUP_EXISTING=true, 默认)→ 完整清空旧盘, 全新 fsid, 不认领;
-    #   · 保留数据模式(PRE_CLEANUP=false)→ **自动**从备份读取 fsid 注入新 CR 的 spec.fsid,
-    #     Rook 凭 fsid 认领旧 OSD 数据(无需手工指定; 部署机备份优先, 节点根盘备份兜底)。
-    #   · CEPH_RESTORE_BACKUP=true(旧配置兼容)= 强制保留数据+自动注入(自动关闭清盘)。
+    #   · 保留数据模式(PRE_CLEANUP=false)→ **自动**检查 namespace 残留的 rook-ceph-mon secret:
+    #       - secret 在 → 直接复用, Rook 自动认领旧 OSD 数据(无需任何注入);
+    #       - secret 不在(如整 ns 重建)→ 提示从节点备份恢复 secret 后重跑, 或全新部署。
+    #   · CEPH_RESTORE_BACKUP=true(旧配置兼容)= 强制保留数据+自动认领(自动关闭清盘)。
     if [ "${CEPH_RESTORE_BACKUP}" = "true" ] && [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
         warn "CEPH_RESTORE_BACKUP=true 与 CEPH_PRE_CLEANUP_EXISTING=true 冲突 → 认领优先, 自动关闭清盘(绝不 wipe 旧数据盘)"
         _CEPH_PRE_CLEANUP=0
@@ -432,19 +435,13 @@ else
     if [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
         say "  清盘模式(默认): 完整清空旧盘 → 全新 fsid(不认领旧 OSD 数据)"
     else
-        # 自动注入: 部署机备份 → 节点根盘备份兜底
-        if [ -s "${CEPH_CR_BACKUP}" ]; then
-            _CEPH_FSID="$(awk '/^status:/{f=1} f&&/fsid:/{print $2; exit}' "${CEPH_CR_BACKUP}")"
-        fi
-        if [ -z "${_CEPH_FSID}" ]; then
-            say "  部署机无备份, 尝试从节点备份目录读取(ceph-backup.sh fetch-fsid)..."
-            _CEPH_FSID="$( (LOG_VERBOSE=0 bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" fetch-fsid 2>/dev/null || true) | tail -1 )"
-        fi
-        if [ -n "${_CEPH_FSID}" ]; then
-            say "  保留数据模式 → 自动注入 spec.fsid=${_CEPH_FSID}(认领旧 OSD 数据)"
-            say "  storage/placement 仍按当前节点/裸盘生成(不整份恢复旧 CR, 见上方注释)"
+        _MON_SECRET="$( (SSH "${K} -n ${CEPH_NAMESPACE} get secret rook-ceph-mon --no-headers 2>/dev/null" || true) )"
+        if [ -n "${_MON_SECRET}" ]; then
+            _SECRET_FSID="$( (SSH "${K} -n ${CEPH_NAMESPACE} get secret rook-ceph-mon -o jsonpath='{.data.fsid}' 2>/dev/null" || true) | base64 -d 2>/dev/null )"
+            say "  保留数据模式 → 检测到残留 rook-ceph-mon secret(fsid=${_SECRET_FSID:-?}) → 直接复用, Rook 自动认领旧 OSD 数据"
         else
-            say "  保留数据模式但未找到备份 fsid → 全新部署(新 fsid)"
+            warn "  保留数据模式但 namespace 无 rook-ceph-mon secret(整 ns 重建场景) → 无法自动认领旧数据"
+            warn "  恢复方法: 从节点备份 /var/lib/ceph/backup/current/(ceph-backup.sh save 含 secret 备份)恢复 secret 后重跑; 或接受全新部署"
         fi
     fi
 fi
@@ -512,9 +509,11 @@ else
             fi
         done
     fi
-    # 生成并应用 CephCluster CR(当前节点/裸盘; _CEPH_FSID 非空时注入 spec.fsid 认领旧 OSD 数据)。
-    # 无论是否注入 fsid, 都必须走到下方 [7/8] 就绪等待 —— 此前 toolbox/[7/8] 等待/调优只写在部分
-    # 分支里, 曾导致"apply 完 CR 直接宣布完成(集群仍在 Progressing), ceph_csi 一进来就报错打断部署"。
+    # 生成并应用 CephCluster CR(当前节点/裸盘)。
+    # ★ 认领旧数据不依赖 CR: Rook 凭 namespace 残留的 rook-ceph-mon secret(fsid+keyring)
+    #   自动复用 fsid 认领盘上旧 OSD 数据 —— CR 无需也不允许注入 spec.fsid(CRD 无此字段)。
+    #   无论是否认领, 都必须走到下方 [7/8] 就绪等待 —— 此前 toolbox/[7/8] 等待/调优只写在部分
+    #   分支里, 曾导致"apply 完 CR 直接宣布完成(集群仍在 Progressing), ceph_csi 一进来就报错打断部署"。
     say "[6/8] 生成并应用 CephCluster CR(mon=${CEPH_MON_COUNT}, 副本=${CEPH_POOL_REPLICAS}/${CEPH_POOL_MIN_SIZE})..."
     LOCAL_CR="$(mktemp)"
 {
@@ -524,9 +523,6 @@ else
     echo "  name: rook-ceph"
     echo "  namespace: ${CEPH_NAMESPACE}"
     echo "spec:"
-    if [ -n "${_CEPH_FSID}" ]; then
-        echo "  fsid: ${_CEPH_FSID}"
-    fi
     echo "  cephVersion:"
     echo "    image: quay.io/ceph/ceph:${CEPH_VERSION}"
     echo "    allowUnsupported: false"
@@ -610,25 +606,6 @@ rm -f "${LOCAL_CR}"
             _hl="$(printf '%s\n' "${_CEPH_SUM}" | grep -oE 'HEALTH_(OK|WARN|ERR)' | head -1 )"
             if [ "${_hl}" = "HEALTH_OK" ]; then
                 ok "  Ceph 集群 HEALTH_OK"
-                # ★ 部署成功 → 保存恢复备份到节点根盘(部署时手动备份, 防 wipe/防覆盖)。
-                #   备份文件含 status.fsid: 下次保留数据模式(PRE_CLEANUP=false)重装时自动注入认领;
-                #   即使集群崩溃(k8s 不可用), 根盘 /var/lib/ceph/backup/ 的历史备份仍可读。
-                _CR_DUMP="$(mktemp)"
-                ( SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o yaml" > "${_CR_DUMP}" 2>/dev/null || true )
-                if [ -s "${_CR_DUMP}" ]; then
-                    _META="$(mktemp)"
-                    printf 'backup_time: %s\n' "$(date +%Y%m%d_%H%M%S)" > "${_META}"
-                    printf 'nodes:\n' >> "${_META}"
-                    for _hn2 in "${CEPH_NODE_HOSTS[@]}"; do
-                        printf '  %s: %s\n' "${_hn2}" "${NODE_DISKS[${_hn2}]:-<无>}" >> "${_META}"
-                    done
-                    bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" save "${_CR_DUMP}" "${_META}" \
-                        || warn "  Ceph 备份到节点失败(不影响部署; 可手工 tools/k8s/ceph-backup.sh save)"
-                    rm -f "${_META}"
-                else
-                    warn "  拉取 CephCluster CR 失败, 跳过自动备份(可手工 tools/k8s/ceph-backup.sh save)"
-                fi
-                rm -f "${_CR_DUMP}"
                 CLUSTER_OK=1
                 break
             fi
@@ -657,6 +634,29 @@ rm -f "${LOCAL_CR}"
         fi
         unset _ph_now
     fi
+
+    # ★ 部署完成 → 保存恢复备份到节点根盘(部署时手动备份, 防 wipe/防覆盖)。
+    #   独立于 HEALTH_OK 分支: 上一版备份块嵌在"HEALTH_OK"里, 集群在 900s 内仅
+    #   Ready+HEALTH_WARN(如 mon clock skew 未收敛)时超时走 warn 分支, 备份从未执行
+    #   → 节点 /var/lib/ceph/backup/ 为空, 重装无法认领旧数据(本次事故根因)。
+    #   备份文件含 status.fsid: 下次保留数据模式(PRE_CLEANUP=false)重装时自动注入认领;
+    #   即使集群崩溃(k8s 不可用), 根盘 /var/lib/ceph/backup/ 的历史备份仍可读。
+    _CR_DUMP="$(mktemp)"
+    ( SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o yaml" > "${_CR_DUMP}" 2>/dev/null || true )
+    if [ -s "${_CR_DUMP}" ]; then
+        _META="$(mktemp)"
+        printf 'backup_time: %s\n' "$(date +%Y%m%d_%H%M%S)" > "${_META}"
+        printf 'nodes:\n' >> "${_META}"
+        for _hn2 in "${CEPH_NODE_HOSTS[@]}"; do
+            printf '  %s: %s\n' "${_hn2}" "${NODE_DISKS[${_hn2}]:-<无>}" >> "${_META}"
+        done
+        bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" save "${_CR_DUMP}" "${_META}" \
+            || warn "  Ceph 备份到节点失败(不影响部署; 可手工 tools/k8s/ceph-backup.sh save)"
+        rm -f "${_META}"
+    else
+        warn "  拉取 CephCluster CR 失败, 跳过自动备份(可手工 tools/k8s/ceph-backup.sh save)"
+    fi
+    rm -f "${_CR_DUMP}"
 
     # 调优 osd_memory_target(200G 盘 4G 已够; 大盘按文档)
     say "  设置 OSD osd_memory_target=${CEPH_OSD_MEMORY_TARGET}GiB(经 toolbox)..."
