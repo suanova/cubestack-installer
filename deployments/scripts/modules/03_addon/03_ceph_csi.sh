@@ -265,6 +265,44 @@ spec:
     port: 80
     instances: 1" "rgw" \
         && ok "  CephObjectStore my-store 已创建" || warn "  RGW 创建失败"
+
+    # ★ RGW/S3 对外暴露(2026-09-06 新增): 复用 SERVICE_EXPOSE_MODE, 可用 CEPH_RGW_EXPOSE_MODE 覆盖:
+    #   nodeport     → Service 改 NodePort(CEPH_RGW_NODEPORT 指定端口, 默认自动分配), 任意节点 IP:端口 可达
+    #   loadbalancer → Service 改 LoadBalancer(需 MetalLB 已部署并分配 VIP), VIP:80 可达
+    #   clusterip    → 保持默认, 仅集群内可达
+    CEPH_RGW_EXPOSE_MODE="${CEPH_RGW_EXPOSE_MODE:-${SERVICE_EXPOSE_MODE:-clusterip}}"
+    if [ "${CEPH_RGW_EXPOSE_MODE}" = "nodeport" ]; then
+        say "  RGW 对外暴露: NodePort(CEPH_RGW_EXPOSE_MODE=nodeport)..."
+        _NP_PATCH="{\"spec\":{\"type\":\"NodePort\""
+        [ -n "${CEPH_RGW_NODEPORT:-}" ] && _NP_PATCH="${_NP_PATCH},\"ports\":[{\"port\":80,\"nodePort\":${CEPH_RGW_NODEPORT}}]"
+        _NP_PATCH="${_NP_PATCH}}}"
+        SSH "${K} -n ${CEPH_NAMESPACE} patch svc rook-ceph-rgw-my-store --type merge -p '${_NP_PATCH}' >/dev/null 2>&1" \
+            && ok "    RGW Service 已改 NodePort" || warn "    RGW Service 改 NodePort 失败(可手工: kubectl -n rook-ceph patch svc rook-ceph-rgw-my-store -p '{\"spec\":{\"type\":\"NodePort\"}}')"
+        _RGW_NP="$( (SSH "${K} -n ${CEPH_NAMESPACE} get svc rook-ceph-rgw-my-store -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
+        ok "    S3 访问: http://${FIRST_MASTER}:${_RGW_NP:-<NodePort>}(节点 NodePort; 集群内用 Service 名:80)"
+    elif [ "${CEPH_RGW_EXPOSE_MODE}" = "loadbalancer" ]; then
+        say "  RGW 对外暴露: LoadBalancer(需 MetalLB 已部署)..."
+        if [ -n "$( (SSH "${K} get ns metallb-system --no-headers 2>/dev/null" || true) )" ]; then
+            SSH "${K} -n ${CEPH_NAMESPACE} patch svc rook-ceph-rgw-my-store --type merge -p '{\"spec\":{\"type\":\"LoadBalancer\"}}' >/dev/null 2>&1" \
+                && ok "    RGW Service 已改 LoadBalancer" || warn "    RGW Service 改 LoadBalancer 失败"
+            # 等 MetalLB 分配 VIP(最长 120s)
+            _RGW_VIP=""
+            for _vi in $(seq 1 12); do
+                _RGW_VIP="$( (SSH "${K} -n ${CEPH_NAMESPACE} get svc rook-ceph-rgw-my-store -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null" || true) )"
+                [ -n "${_RGW_VIP}" ] && break
+                sleep 10
+            done
+            if [ -n "${_RGW_VIP}" ]; then
+                ok "    S3 访问: http://${_RGW_VIP}:80(MetalLB VIP)"
+            else
+                warn "    LoadBalancer VIP 120s 内未分配(检查 MetalLB: kubectl -n metallb-system get ipaddresspool / l2advertisement)"
+            fi
+        else
+            warn "    MetalLB 未部署(无 metallb-system 命名空间) —— 保持 ClusterIP; 可先用 CEPH_RGW_EXPOSE_MODE=nodeport, 或部署 MetalLB 后重跑"
+        fi
+    else
+        say "  RGW 保持 ClusterIP(CEPH_RGW_EXPOSE_MODE=${CEPH_RGW_EXPOSE_MODE}), 仅集群内可达(集群内用 Service 名:80)"
+    fi
 fi
 
 say "[4/4] 验证 StorageClass 与池..."

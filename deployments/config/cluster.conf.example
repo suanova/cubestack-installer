@@ -120,6 +120,10 @@ CEPH_POOL_MIN_SIZE="${CEPH_POOL_MIN_SIZE:-2}"     # min_size(1 台主机宕机�
 CEPH_OSD_MEMORY_TARGET="${CEPH_OSD_MEMORY_TARGET:-12}"   # 每 OSD 内存目标(GiB; 默认 12G 适配 7TB 大盘, 小盘可改小省内存)
 CEPHFS_ENABLED="${CEPHFS_ENABLED:-true}"         # 可选: 启用 CephFS(RWX 共享文件)
 CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-true}"     # 可选: 启用 RGW/S3 对象存储
+# RGW/S3 对外暴露方式(空=随 SERVICE_EXPOSE_MODE; nodeport/loadbalancer/clusterip 可覆盖):
+#   nodeport → Service 改 NodePort(CEPH_RGW_NODEPORT 指定端口, 默认自动); loadbalancer → 需 MetalLB 部署
+CEPH_RGW_EXPOSE_MODE="${CEPH_RGW_EXPOSE_MODE:-}"
+CEPH_RGW_NODEPORT="${CEPH_RGW_NODEPORT:-}"   # RGW NodePort(留空=自动分配 30000-32767)
 # 外部 Ceph 连接(本集群无集群内 CephCluster 时): ceph 模块检测到存储节点<CEPH_MIN_NODES 或
 #   CEPH_ENABLED 但无集群内 CephCluster 时, 由 ceph_csi 模块经 ceph-csi-operator 的 CephConnection
 #   连接外部 Ceph 集群并创建 StorageClass(跳过集群内 pool/cephfs/rgw 创建)。
