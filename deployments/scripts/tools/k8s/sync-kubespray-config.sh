@@ -15,6 +15,12 @@ INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubes
 [ -d "${INV_DIR}" ] || { err "Inventory 目录不存在: ${INV_DIR}, 请先运行 gen-inventory.sh"; exit 1; }
 
 # ---------------- 从 cluster.conf 派生全局变量 ----------------
+# bool 归一化: cluster.conf 可写 1/true/yes/on, 而 deploy-cluster.sh 的 TOGGLE 导出
+# 会把模块开关 export 成字符串 "true" —— 统一归一化避免 `= "1"` 严格比较被跳过
+# (曾致 4.1 节 registry 暴露方式/containerd 信任配置在 TOGGLE 导出场景下整体不执行,
+#  addons.yml 残留 loadbalancer_ip 行 → nodeport 模式预检失败中断部署)。
+_bool() { case "${1:-0}" in 1|true|yes|on) echo 1;; *) echo 0;; esac; }
+REGISTRY_ENABLED="$(_bool "${REGISTRY_ENABLED:-0}")"
 # API_IP / API_DOMAIN 由 lib-common load_config 统一提供:
 #   API_IP     = APISERVER_ADDRESS(默认第一个 master IP, VM 与裸金属一致; 显式设置时保留)
 #   API_DOMAIN = 跨网段统一入口域名(默认 k8s-api.cubestack.io, cluster.conf 可改)
@@ -279,6 +285,9 @@ while i < len(lines):
         continue
     out.append(line); i += 1
 if enabled == "1":
+    # 幂等: 先清掉历史 else 分支残留的注释行(REGISTRY_ENABLED=0 场景写的), 再写真实配置
+    marker = '# containerd_registries_mirrors:'
+    out = [l for l in out if not l.startswith(marker)]
     out.append('containerd_registries_mirrors:')
     out.append(f'  - prefix: "{d}:{port}"')
     out.append(f'    server: "http://{d}:{port}"')
