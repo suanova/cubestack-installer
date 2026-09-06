@@ -410,7 +410,14 @@ if [ "${CEPH_ENABLED:-false}" = "true" ]; then
         else
             for _rk in "${RUN_STEPS[@]:-}"; do [ "${_rk}" = "ceph" ] && _RUN_CEPH=1; done
         fi
-        if [ -n "${_CEPH_EXIST}" ] && [ "${_RUN_CEPH}" = "1" ] && [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ]; then
+        # ★ 断点续跑保护(2026-09-06): ceph 上次已成功(状态 done)时**绝不清理覆盖**。
+        #   断点重跑(其他模块失败续跑)时 ceph 模块会被 run_module 按状态跳过,
+        #   预检块若照常清理会把已就绪的 Ceph 删掉 → 数据丢失事故。
+        #   仅当 ceph 未完成/失败(状态非 done; --fresh 清状态后为空, 同样满足)时才覆盖清理。
+        _CEPH_STATE="$(get_state "ceph")"
+        if [ -n "${_CEPH_EXIST}" ] && [ "${_RUN_CEPH}" = "1" ] \
+            && [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ] \
+            && [ "${_CEPH_STATE}" != "done" ]; then
             say "清理已有 Ceph(cleanupPolicy yes-really-destroy-data → 删 cephblockpool/cephcluster)..."
             ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_FM_IP}" \
                 "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph patch cephcluster rook-ceph --type merge -p '{\"spec\":{\"cleanupPolicy\":{\"confirmation\":\"yes-really-destroy-data\"}}}' >/dev/null 2>&1; sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph delete cephblockpool rbd-pool --wait=false >/dev/null 2>&1; sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph delete cephcluster rook-ceph --wait=false >/dev/null 2>&1; true"
@@ -423,7 +430,7 @@ if [ "${CEPH_ENABLED:-false}" = "true" ]; then
             done
             [ "${_CEPH_GONE}" = "1" ] && ok "旧 Ceph 已清理, 可重新部署" || warn "旧 Ceph 未完全清理(重装前请手工确认 cephcluster 已删除)"
         fi
-        unset _CEPH_EXIST _FM_IP _CEPH_SSH_KEY _CEPH_GONE
+        unset _CEPH_EXIST _FM_IP _CEPH_SSH_KEY _CEPH_GONE _CEPH_STATE
         unset _ceph_cs _CEPH_CONFIRM_HOSTS _CEPH_CONFIRM_DISKS _CEPH_CONFIRM_DETECT_FAIL _h _ip _line _l _ds _hn _g _grp _norm _h2 _d
     fi
     unset _ceph_confirm_in
