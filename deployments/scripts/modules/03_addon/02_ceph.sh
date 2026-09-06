@@ -452,8 +452,16 @@ else
             _SECRET_FSID="$( (SSH "${K} -n ${CEPH_NAMESPACE} get secret rook-ceph-mon -o jsonpath='{.data.fsid}' 2>/dev/null" || true) | base64 -d 2>/dev/null )"
             say "  保留数据模式 → 检测到残留 rook-ceph-mon secret(fsid=${_SECRET_FSID:-?}) → 直接复用, Rook 自动认领旧 OSD 数据"
         else
-            warn "  保留数据模式但 namespace 无 rook-ceph-mon secret(整 ns 重建场景) → 无法自动认领旧数据"
-            warn "  恢复方法: 从节点备份 /var/lib/ceph/backup/current/(ceph-backup.sh save 含 secret 备份)恢复 secret 后重跑; 或接受全新部署"
+            # ★ 整 ns 重建场景: namespace 无 secret 时自动从节点备份恢复(ceph-backup.sh save 已备份)。
+            #   Rook v1.20 CRD 无 spec.fsid 字段, 认领旧 OSD 数据唯一途径 = 恢复 rook-ceph-mon secret。
+            say "  保留数据模式但 namespace 无 rook-ceph-mon secret(整 ns 重建) → 尝试从节点备份恢复..."
+            if bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" restore-secret; then
+                _SECRET_FSID="$( (SSH "${K} -n ${CEPH_NAMESPACE} get secret rook-ceph-mon -o jsonpath='{.data.fsid}' 2>/dev/null" || true) | base64 -d 2>/dev/null )"
+                ok "  rook-ceph-mon secret 已从备份恢复(fsid=${_SECRET_FSID:-?}) → Rook 将认领旧 OSD 数据"
+            else
+                warn "  备份恢复失败 → 无法自动认领旧数据, 将全新部署(新 fsid)"
+                warn "  手工恢复: ceph-backup.sh restore-secret 后重跑本模块"
+            fi
         fi
     fi
 fi
