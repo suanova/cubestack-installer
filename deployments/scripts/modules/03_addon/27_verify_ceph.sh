@@ -249,14 +249,38 @@ if [ "${CEPH_RGW_ENABLED:-false}" = "true" ]; then
     RGW_POD="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pod --no-headers 2>/dev/null" || true) | grep -E 'rgw.*Running' | head -1 | awk '{print $1}' )"
     if [ -n "${RGW_POD}" ]; then
         ok "    RGW Pod ${RGW_POD} Running ✓"
-        say "    经 toolbox 创建 RGW 测试用户并验证(radosgw-admin)..."
-        # 单行 sh -c(heredoc 经 ssh+exec stdin 传递不可靠), 全部转义防止父 shell set -u 展开
-        RGW_OUT="$(SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- sh -c 'U=\"verify-user-\$(date +%s)\"; radosgw-admin user create --uid=\"\${U}\" --display-name=verify >/tmp/rgw-user.json 2>/dev/null && radosgw-admin user info --uid=\"\${U}\" >/dev/null 2>&1 && echo \"RGW-USER-OK \${U}\" && radosgw-admin user rm --uid=\"\${U}\" >/dev/null 2>&1 || true' 2>/dev/null" || true)"
-        if echo "${RGW_OUT}" | grep -q "RGW-USER-OK"; then
-            ok "    RGW S3 用户创建/查询/删除成功(radosgw-admin)✓"
+        say "    经 toolbox: 创建 S3 测试用户 → 真实数据 PUT/GET 读写验证..."
+        # 步骤1: 创建 RGW 测试用户, 输出 access_key / secret_key
+        RGW_CRED="$(SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- sh -c 'U="verify-user-$(date +%s)"; radosgw-admin user create --uid="${U}" --display-name=verify >/tmp/rgw-user.json 2>/dev/null && python3 -c "import json;d=json.load(open(\"/tmp/rgw-user.json\"));print(d[\"keys\"][0][\"access_key\"]);print(d[\"keys\"][0][\"secret_key\"])" && radosgw-admin user rm --uid="${U}" >/dev/null 2>&1' 2>/dev/null" || true)"
+        RGW_AK="$(printf '%s\n' "${RGW_CRED}" | sed -n 1p)"
+        RGW_SK="$(printf '%s\n' "${RGW_CRED}" | sed -n 2p)"
+        if [ -z "${RGW_AK}" ] || [ -z "${RGW_SK}" ]; then
+            warn "    RGW 用户创建失败(输出见下, 不阻断):"
+            [ -n "${RGW_CRED}" ] && echo "${RGW_CRED}" | tail -4 | sed 's/^/    /'
         else
-            warn "    RGW 用户验证未通过(输出见下, 不阻断; 可手工 aws s3 测试):"
-            [ -n "${RGW_OUT}" ] && echo "${RGW_OUT}" | tail -4 | sed 's/^/    /'
+            # 步骤2: 注入 SigV4 验证脚本到 toolbox(kubectl cp 经 master 中转), 真实 S3 PUT/GET
+            RGW_S3PY="${SCRIPT_DIR}/tools/k8s/verify-rgw-s3.py"
+            if [ -f "${RGW_S3PY}" ]; then
+                _TP="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pod -l app=rook-ceph-tools -o jsonpath='{.items[0].metadata.name}' 2>/dev/null" || true) )"
+                scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
+                    "${RGW_S3PY}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/verify-rgw-s3.py" 2>/dev/null \
+                    && SSH "${K} -n ${CEPH_NAMESPACE} cp /tmp/verify-rgw-s3.py ${_TP}:/tmp/verify-rgw-s3.py >/dev/null 2>&1" \
+                    && SSH "rm -f /tmp/verify-rgw-s3.py" 2>/dev/null
+                RGW_S3="$(SSH "${K} -n ${CEPH_NAMESPACE} exec ${_TP} -- env \
+                    AK='${RGW_AK}' SK='${RGW_SK}' \
+                    ENDPOINT='http://rook-ceph-rgw-my-store.rook-ceph.svc:80' \
+                    python3 /tmp/verify-rgw-s3.py 2>/dev/null" || true)"
+                SSH "${K} -n ${CEPH_NAMESPACE} exec ${_TP} -- rm -f /tmp/verify-rgw-s3.py >/dev/null 2>&1" || true
+                if echo "${RGW_S3}" | grep -q "S3-PUT-GET-OK"; then
+                    ok "    S3 真实数据写入/读取成功(签名的 PUT bucket→PUT object→GET 校验→DELETE)✓"
+                    echo "${RGW_S3}" | grep "S3-PUT-GET-OK" | sed 's/^/      /'
+                else
+                    warn "    S3 读写验证未通过(输出见下, 不阻断; 检查 RGW Service 可达性):"
+                    [ -n "${RGW_S3}" ] && echo "${RGW_S3}" | tail -4 | sed 's/^/    /'
+                fi
+            else
+                warn "    验证脚本缺失: ${RGW_S3PY}(应随仓库同步); 跳过 S3 读写"
+            fi
         fi
     else
         warn "    未发现 Running 的 RGW pod(kubectl -n ${CEPH_NAMESPACE} get pod | grep rgw); 跳过 ⑧"
