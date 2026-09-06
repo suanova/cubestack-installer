@@ -611,9 +611,21 @@ rm -f "${LOCAL_CR}"
     # 每 30s 打印一行状态到终端(= 完整部署日志 /tmp/cubestack-cluster-install.log), 便于观察收敛进度。
     say "[7/8] 等待 Ceph 集群就绪(最长 900s, ceph -s HEALTH_OK)..."
     CLUSTER_OK=0
+    _CEPH_TUNED=0   # 阈值预调优标记(第一次 phase=Ready 时设, 避免 clock skew 卡等待)
     for i in $(seq 1 90); do
         _ph="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
         if [ "${_ph}" = "Ready" ]; then
+            # ★ 2026-09-06 修复: 阈值在等待**开始前**就设置, 否则等待期间用默认 0.05s,
+            #   mon 初始偏差 0.5~1.2s → 恒 HEALTH_WARN clock skew → 白等 900s 或超时。
+            #   phase=Ready 即 mon 已起/toolbox 可用, 立即放宽阈值, 之后轮询才可能到 HEALTH_OK。
+            if [ "${_CEPH_TUNED:-0}" = "0" ]; then
+                say "  预调优: mon clock skew 阈值 → 1.5s(在等待前设置, 避免 clock skew 卡 900s)..."
+                SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
+                    ceph config set mon mon_clock_drift_allowed 1.5 >/dev/null 2>&1" || true
+                SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
+                    ceph config set osd osd_memory_target $((CEPH_OSD_MEMORY_TARGET * 1024 * 1024 * 1024)) >/dev/null 2>&1" || true
+                _CEPH_TUNED=1
+            fi
             _CEPH_SUM="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null" || true) )"
             _hl="$(printf '%s\n' "${_CEPH_SUM}" | grep -oE 'HEALTH_(OK|WARN|ERR)' | head -1 )"
             if [ "${_hl}" = "HEALTH_OK" ]; then
@@ -670,15 +682,18 @@ rm -f "${LOCAL_CR}"
     fi
     rm -f "${_CR_DUMP}"
 
-    # 调优 osd_memory_target(200G 盘 4G 已够; 大盘按文档)
-    say "  设置 OSD osd_memory_target=${CEPH_OSD_MEMORY_TARGET}GiB(经 toolbox)..."
-    SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set osd osd_memory_target $((CEPH_OSD_MEMORY_TARGET * 1024 * 1024 * 1024)) >/dev/null 2>&1" || true
-    # 放宽 mon 时钟偏差告警阈值(默认 0.05s 太严: NTP 同步后节点偏差仍可能 0.2~0.5s → 恒 HEALTH_WARN;
-    # 2026-09-05 实测: 新 VM 时钟初始偏差可达 0.5~1.2s, chrony 收敛前会超 0.5s 阈值 → 恒 WARN。
-    # 设 1.5s 消除误报(≤1.5s 对 Ceph 安全: mon 心跳/租约毫秒级, 1.5s 不影响 quorum);
-    # 真实偏差由 chrony 持续收敛(见 setup-ntp.sh makestep 1 1 秒级对齐)。)
-    say "  设置 mon clock skew 阈值=1.5s(默认 0.05s 过严, VM 初始偏差 0.5~1.2s 实测)..."
-    SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set mon mon_clock_drift_allowed 1.5 >/dev/null 2>&1" || true
+    # 调优 osd_memory_target / mon clock skew 阈值 —— 已在 [7/8] 等待循环第一次 phase=Ready 时
+    # 预调优(_CEPH_TUNED=1), 这里仅兜底(集群超时未 Ready 等极端场景才重复设置, 幂等无害)。
+    if [ "${_CEPH_TUNED:-0}" = "0" ]; then
+        say "  设置 OSD osd_memory_target=${CEPH_OSD_MEMORY_TARGET}GiB(经 toolbox)..."
+        SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set osd osd_memory_target $((CEPH_OSD_MEMORY_TARGET * 1024 * 1024 * 1024)) >/dev/null 2>&1" || true
+        # 放宽 mon 时钟偏差告警阈值(默认 0.05s 太严: NTP 同步后节点偏差仍可能 0.2~0.5s → 恒 HEALTH_WARN;
+        # 2026-09-05 实测: 新 VM 时钟初始偏差可达 0.5~1.2s, chrony 收敛前会超 0.5s 阈值 → 恒 WARN。
+        # 设 1.5s 消除误报(≤1.5s 对 Ceph 安全: mon 心跳/租约毫秒级, 1.5s 不影响 quorum);
+        # 真实偏差由 chrony 持续收敛(见 setup-ntp.sh makestep 1 1 秒级对齐)。)
+        say "  设置 mon clock skew 阈值=1.5s(默认 0.05s 过严, VM 初始偏差 0.5~1.2s 实测)..."
+        SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set mon mon_clock_drift_allowed 1.5 >/dev/null 2>&1" || true
+    fi
     # ★ 清残留 clock skew 告警(2026-09-05 事故): 时间已同步但 ceph 仍报 MON_CLOCK_SKEW ——
     #   chrony 收敛前记录的 skew 被 mon 缓存, timecheck 不会自动重采样刷新(恒定值如 1.233s)。
     #   消除方法: ① 全节点 chronyc makestep 硬对齐 ② 重启 mon deployments 触发 timecheck 重检。
