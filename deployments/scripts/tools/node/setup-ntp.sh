@@ -150,7 +150,6 @@ master_chrony_setup() {
                 [ "${_seen}" = "0" ] && _allow_nets+=("${_net}")
             done
         fi
-        [ "${#_allow_nets[@]}" -gt 0 ] && say "  chrony allow: ${_allow_nets[*]}(自动从 NODES 推导)"
         for net in "${_allow_nets[@]:-}"; do
             [ -n "${net}" ] && echo "allow ${net}"
         done
@@ -159,6 +158,8 @@ master_chrony_setup() {
         echo "rtcsync"
         echo "logdir /var/log/chrony"
     } > "${mconf_tmp}"
+    # ★ 打印在重定向块外(say 走 stdout, 在 { } > 块内会被写进配置文件 → chrony 解析失败)
+    [ "${#_allow_nets[@]}" -gt 0 ] && say "  chrony allow: ${_allow_nets[*]}(自动从 NODES 推导)"
     # 在首 master 写 chrony 配置并重启(有 chrony 用 chrony; 无则 chronyd 直拉)
     if node_scp "${mconf_tmp}" "${m_ip}" "${m_user}" "${m_pw}" "/tmp/cubestack-chrony.conf" \
         && node_cmd "${m_ip}" "${m_user}" "${m_pw}" \
