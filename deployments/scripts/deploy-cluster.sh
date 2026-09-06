@@ -353,33 +353,41 @@ if [ "${CEPH_ENABLED:-false}" = "true" ]; then
             _CEPH_EXIST="$(ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER:-ubuntu}@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster --no-headers 2>/dev/null" 2>/dev/null || true)"
         fi
         if [ -n "${_CEPH_EXIST}" ]; then
+            _CEPH_STATE="$(get_state "ceph")"
             echo ""
             echo -e "\033[41m\033[97m================================================================================\033[0m"
             echo -e "\033[41m\033[97m ⚠⚠⚠  检测到已有 CephCluster: $(echo "${_CEPH_EXIST}" | awk '{print $1}') ⚠⚠⚠\033[0m"
-            if [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ]; then                echo -e "\033[41m\033[97m   覆盖 K8s 前将清理旧 Ceph(mon/osd/池, OSD 数据将销毁) —— 仅显式启用时  \033[0m"
+            if [ "${_CEPH_STATE}" = "done" ]; then
+                # ★ 断点续跑保护: ceph 上次已成功(done) → 不清理不覆盖, 保留现有数据
+                echo -e "\033[41m\033[97m   ✅ ceph 已部署成功(done) → 断点续跑: 跳过清理/覆盖, 保留现有 Ceph 数据  \033[0m"
+                echo -e "\033[41m\033[97m   如需重装 Ceph: --fresh(全量) 或 CEPH_PRE_CLEANUP_EXISTING=true + 清状态    \033[0m"
+            elif [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ]; then                echo -e "\033[41m\033[97m   覆盖 K8s 前将清理旧 Ceph(mon/osd/池, OSD 数据将销毁) —— 仅显式启用时  \033[0m"
             else
                 echo -e "\033[41m\033[97m   默认【全新部署】: 重装生成新 fsid, 不认领旧 OSD 数据(盘上残留旧数据会被拒绝用) \033[0m"
                 echo -e "\033[41m\033[97m   销毁旧数据: CEPH_PRE_CLEANUP_EXISTING=true; 认领旧数据: CEPH_RESTORE_BACKUP=true \033[0m"
             fi
             echo -e "\033[41m\033[97m   保留 csi-operator(重装不再重复安装); 检测不影响其他 operator 部署    \033[0m"
             echo -e "\033[41m\033[97m================================================================================\033[0m"
-            # ★ 备份旧 CephCluster CR(含 status.fsid): 供 02_ceph.sh 在 CEPH_RESTORE_BACKUP=true 时
-            #   提取 fsid 注入新 CR 的 spec.fsid(Rook 凭 fsid 识别"同一个集群"并认领旧 OSD 数据)。
-            #   只提取 fsid, 不整份恢复旧 CR —— 旧 CR 的 storage.nodes/devices 来自上一代环境,
-            #   直接 apply 会导致盘名/节点过时(OSD 永不创建)与残留 mon store 死锁。
-            CEPH_CR_BACKUP="${CEPH_CR_BACKUP:-${REPO_ROOT}/deployments/offline-files/cephcluster-backup.yaml}"
-            mkdir -p "$(dirname "${CEPH_CR_BACKUP}")"
-            if ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster rook-ceph -o yaml" 2>/dev/null > "${CEPH_CR_BACKUP}"; then
-                [ -s "${CEPH_CR_BACKUP}" ] && ok "已备份旧 CephCluster CR → ${CEPH_CR_BACKUP}(认领旧数据用)" \
-                    || warn "CephCluster CR 备份为空(请手工备份: kubectl -n rook-ceph get cephcluster rook-ceph -o yaml)"
-            else
-                warn "备份 CephCluster CR 失败(重装后如需认领旧 OSD 数据, 请手工备份原 CR 含 status.fsid)"
-            fi
-            # ★ 部署时手动备份: 把备份推送到节点根盘 /var/lib/ceph/backup/(防 wipe/防覆盖/防部署机丢失)。
-            #   下次保留数据模式(PRE_CLEANUP=false)重装时 02_ceph 自动从该目录读取 fsid 注入新集群认领旧数据。
-            if [ -s "${CEPH_CR_BACKUP}" ]; then
-                bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" save "${CEPH_CR_BACKUP}" \
-                    || warn "推送 Ceph 备份到节点失败(自动注入不可用; 可手工: tools/k8s/ceph-backup.sh save ${CEPH_CR_BACKUP})"
+            # ★ 断点续跑保护: ceph 已 done 时不备份不清理(备份用于重装时认领 fsid, done 场景无意义)
+            if [ "${_CEPH_STATE}" != "done" ]; then
+                # ★ 备份旧 CephCluster CR(含 status.fsid): 供 02_ceph.sh 在 CEPH_RESTORE_BACKUP=true 时
+                #   提取 fsid 注入新 CR 的 spec.fsid(Rook 凭 fsid 识别"同一个集群"并认领旧 OSD 数据)。
+                #   只提取 fsid, 不整份恢复旧 CR —— 旧 CR 的 storage.nodes/devices 来自上一代环境,
+                #   直接 apply 会导致盘名/节点过时(OSD 永不创建)与残留 mon store 死锁。
+                CEPH_CR_BACKUP="${CEPH_CR_BACKUP:-${REPO_ROOT}/deployments/offline-files/cephcluster-backup.yaml}"
+                mkdir -p "$(dirname "${CEPH_CR_BACKUP}")"
+                if ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster rook-ceph -o yaml" 2>/dev/null > "${CEPH_CR_BACKUP}"; then
+                    [ -s "${CEPH_CR_BACKUP}" ] && ok "已备份旧 CephCluster CR → ${CEPH_CR_BACKUP}(认领旧数据用)" \
+                        || warn "CephCluster CR 备份为空(请手工备份: kubectl -n rook-ceph get cephcluster rook-ceph -o yaml)"
+                else
+                    warn "备份 CephCluster CR 失败(重装后如需认领旧 OSD 数据, 请手工备份原 CR 含 status.fsid)"
+                fi
+                # ★ 部署时手动备份: 把备份推送到节点根盘 /var/lib/ceph/backup/(防 wipe/防覆盖/防部署机丢失)。
+                #   下次保留数据模式(PRE_CLEANUP=false)重装时 02_ceph 自动从该目录读取 fsid 注入新集群认领旧数据。
+                if [ -s "${CEPH_CR_BACKUP}" ]; then
+                    bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" save "${CEPH_CR_BACKUP}" \
+                        || warn "推送 Ceph 备份到节点失败(自动注入不可用; 可手工: tools/k8s/ceph-backup.sh save ${CEPH_CR_BACKUP})"
+                fi
             fi
         fi
 
