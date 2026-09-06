@@ -101,7 +101,10 @@ save_state() {
     mv "${STATE_FILE}.tmp" "${STATE_FILE}"
 }
 get_state() {
-    grep -F "$1=" "${STATE_FILE}" 2>/dev/null | tail -1 | cut -d= -f2-
+    # ⚠ || true: 状态文件可能不存在(--fresh 清状态后)或该 key 无记录 → 返回空且退出码 0,
+    #   否则 set -euo pipefail 下管道(grep 找不到文件)非零, 裸赋值处脚本静默退出
+    #   (曾致 --fresh 时部署在 ceph 预检块无报错中断)。
+    grep -F "$1=" "${STATE_FILE}" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 clear_state() {
     rm -f "${STATE_FILE}"
