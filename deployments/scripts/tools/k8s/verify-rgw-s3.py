@@ -19,10 +19,33 @@ import urllib.error
 
 AK = os.environ.get("AK", "")
 SK = os.environ.get("SK", "")
+UID = os.environ.get("RGW_UID", "verify-user")
 ENDPOINT = os.environ.get("ENDPOINT", "http://rook-ceph-rgw-my-store.rook-ceph.svc:80")
 REGION = os.environ.get("REGION", "us-east-1")
 SERVICE = "s3"
 HOST = urllib.request.urlparse(ENDPOINT).netloc
+
+
+def ensure_creds():
+    """无 AK/SK 时经 radosgw-admin 创建临时用户并取凭据(结束自动清理)"""
+    global AK, SK
+    if AK and SK:
+        return
+    import subprocess
+    out = subprocess.check_output(
+        ["radosgw-admin", "user", "create", "--uid", UID, "--display-name", "verify"],
+        stderr=subprocess.DEVNULL)
+    d = json.loads(out)
+    AK = d["keys"][0]["access_key"]
+    SK = d["keys"][0]["secret_key"]
+
+
+def cleanup_user():
+    if not AK or not SK:
+        return
+    import subprocess
+    subprocess.run(["radosgw-admin", "user", "rm", "--uid", UID],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 BUCKET = "verify-rgw-%d" % int(time.time())
 OBJ = "hello.txt"
@@ -75,17 +98,34 @@ def req(method, path, body=b"", extra_headers=None):
         if k != "host":
             r.add_header(k, v)
     r.add_header("Authorization", auth)
+    r.add_header("x-amz-date", amzdate)
+    r.add_header("x-amz-content-sha256", payload_hash)
     try:
         with urllib.request.urlopen(r, timeout=15) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
+        err_body = e.read().decode(errors="replace")[:400]
+        print("HTTP %s %s %s -> %s" % (method, path, e.code, err_body), file=sys.stderr)
         return e.code, e.read()
 
 
 def main():
+    # 有 AK/SK 直接用; 无则尝试 radosgw-admin 建临时用户(仅 toolbox 内可用)
+    if AK and SK:
+        _run_verify()
+        sys.exit(0)
+    ensure_creds()
     if not AK or not SK:
-        print("缺少 AK/SK 环境变量", file=sys.stderr)
+        print("缺少 AK/SK 且无法创建用户(RGW_UID/radosgw-admin)", file=sys.stderr)
         sys.exit(1)
+    try:
+        _run_verify()
+    finally:
+        cleanup_user()
+    sys.exit(0)
+
+
+def _run_verify():
     # 1. PUT bucket
     st, _ = req("PUT", "/" + BUCKET)
     if st not in (200, 204, 409):  # 409=已存在(幂等)
