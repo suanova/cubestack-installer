@@ -231,6 +231,14 @@ if [ -f "${ADDONS_YML}" ] && [ "${REGISTRY_ENABLED:-0}" = "1" ]; then
             fi
             # LoadBalancer 模式下残留的 nodeport 行会让 kubespray 校验对不上(registry_service_nodeport is defined → fail), 且未加引号的 int 会触发 | length 崩溃, 统一注释掉
             sed -i -E "s|^([[:space:]]*)#?[[:space:]]*registry_service_nodeport:.*|\1# registry_service_nodeport: 残留值已由 sync 脚本禁用|" "${ADDONS_YML}"
+            # ★ 2026-09-06 修复: 若 addons.yml 是 nodeport 残留版(registry_service_nodeport 未注释/无
+            #   loadbalancer_ip 行), 上面注释 nodeport 后还要**确保 loadbalancer_ip 行存在**,
+            #   否则 kubespray 校验缺 loadbalancer_ip 也 fail。同时 LoadBalancer 模式下 registry_service_nodeport
+            #   必须为注释状态(曾因模板残留 nodeport 行 + 无 loadbalancer_ip → k8s_deploy 预检报
+            #   "registry_service_nodeport(metallb 模式须注释)" 中断部署)。
+            if ! grep -qE '^[[:space:]]*registry_service_loadbalancer_ip:' "${ADDONS_YML}"; then
+                sed -i -E "s|^([[:space:]]*)registry_service_type:.*|&\n\1registry_service_loadbalancer_ip: ${REGISTRY_IP}|" "${ADDONS_YML}"
+            fi
             ok "已同步 registry Service → LoadBalancer:${REGISTRY_IP}"
             ;;
     esac
