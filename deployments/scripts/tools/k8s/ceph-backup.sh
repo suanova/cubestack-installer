@@ -62,6 +62,22 @@ cmd_save() {
          printf 'backup_time: %s\nfsid: %s\n' '${ts}' \"\$(awk '/^status:/{f=1} f&&/fsid:/{print \$2; exit}' ${BACKUP_DIR}/${ts}/cephcluster-backup.yaml)\" > ${BACKUP_DIR}/${ts}/meta.txt && \
          cp ${BACKUP_DIR}/${ts}/meta.txt ${BACKUP_DIR}/current/meta.txt" \
         || warn "  current/ 更新失败(时间戳备份仍保留)"
+    # ★ 关键凭据备份: rook-ceph-mon secret(含 fsid + mon-secret + ceph-secret)。
+    #   Rook v1.20 CRD 无 spec.fsid 字段, 认领旧 OSD 数据唯一途径 = 复用该 secret;
+    #   整 ns 重建(secret 丢失)后必须从本备份恢复才能认领(此前缺失导致恢复链断裂)。
+    _SECRET_YAML="$( (SSH "${K} -n rook-ceph get secret rook-ceph-mon -o yaml 2>/dev/null" || true) )"
+    if [ -n "${_SECRET_YAML}" ]; then
+        _SECRET_FILE="/tmp/rook-ceph-mon-${ts}.yaml"
+        printf '%s\n' "${_SECRET_YAML}" > "${_SECRET_FILE}"
+        scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
+            "${_SECRET_FILE}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/rook-ceph-mon-secret.yaml" \
+            && SSH "cp ${BACKUP_DIR}/${ts}/rook-ceph-mon-secret.yaml ${BACKUP_DIR}/current/rook-ceph-mon-secret.yaml" \
+            && ok "  已备份 rook-ceph-mon secret(认领旧 OSD 数据的凭据, 整 ns 重建后可 restore-secret 恢复)" \
+            || warn "  rook-ceph-mon secret 备份失败(整 ns 重建后将无法自动认领旧数据)"
+        rm -f "${_SECRET_FILE}"
+    else
+        warn "  未获取到 rook-ceph-mon secret(集群可能未就绪); 认领恢复将不可用"
+    fi
     if [ -n "${meta}" ] && [ -s "${meta}" ]; then
         scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
             "${meta}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/node-disks.txt" 2>/dev/null || true
@@ -69,6 +85,47 @@ cmd_save() {
     # 轮转清理
     SSH "bash -s" < <(gen_rotate_script "${RETENTION}") || true
     ok "Ceph 备份完成: ${BACKUP_DIR}/current/cephcluster-backup.yaml(历史 ${ts})"
+}
+
+# ---- restore-secret: 从节点备份恢复 rook-ceph-mon secret(整 ns 重建后认领旧 OSD 数据) ----
+# 恢复路径: current/rook-ceph-mon-secret.yaml → 无则历史时间戳目录取最新。
+# 幂等: namespace 已有该 secret 则跳过(避免覆盖运行中集群)。
+cmd_restore_secret() {
+    say "从节点备份恢复 rook-ceph-mon secret → namespace ${CEPH_NAMESPACE} ..."
+    # 已存在则跳过(认领已就绪)
+    if SSH "${K} -n ${CEPH_NAMESPACE} get secret rook-ceph-mon --no-headers" 2>/dev/null | grep -q .; then
+        ok "  namespace 已有 rook-ceph-mon secret, 无需恢复"
+        return 0
+    fi
+    # 备份文件: current 优先, 历史时间戳兜底
+    _SRC=""
+    if SSH "test -s ${BACKUP_DIR}/current/rook-ceph-mon-secret.yaml" 2>/dev/null; then
+        _SRC="${BACKUP_DIR}/current/rook-ceph-mon-secret.yaml"
+    else
+        _TS="$( (SSH "ls -1d ${BACKUP_DIR}/[0-9]*_* 2>/dev/null | sort | tail -1" || true) )"
+        if [ -n "${_TS}" ] && SSH "test -s ${_TS}/rook-ceph-mon-secret.yaml" 2>/dev/null; then
+            _SRC="${_TS}/rook-ceph-mon-secret.yaml"
+        fi
+    fi
+    [ -n "${_SRC}" ] || { err "节点备份目录无 rook-ceph-mon-secret.yaml(${FIRST_MASTER}:${BACKUP_DIR}) —— 需先在有 secret 时执行 ceph-backup.sh save"; return 1; }
+    # 拉回本地 → kubectl apply 恢复(secret 的 data 是 base64, 直接 apply 即可)
+    _TMP="/tmp/rook-ceph-mon-restore.yaml"
+    scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
+        "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${_SRC}" "${_TMP}" || { err "拉取备份 secret 失败"; return 1; }
+    if SSH "kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f -" < "${_TMP}" 2>/dev/null; then
+        _FSID="$( (SSH "${K} -n ${CEPH_NAMESPACE} get secret rook-ceph-mon -o jsonpath='{.data.fsid}' 2>/dev/null" || true) | base64 -d 2>/dev/null )"
+        ok "  rook-ceph-mon secret 已恢复(fsid=${_FSID:-?}); Rook 将凭它认领旧 OSD 数据"
+        rm -f "${_TMP}"
+        return 0
+    fi
+    # 回退: scp 拉回失败或 apply 失败 → 直接在节点上用 SSH_CMD 读远端文件 apply
+    if SSH "sudo sh -c 'cat ${_SRC} | kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f -'" 2>/dev/null; then
+        ok "  rook-ceph-mon secret 已恢复(节点侧 apply)"
+        rm -f "${_TMP}"
+        return 0
+    fi
+    err "  恢复 secret 失败; 可手工: kubectl apply -f ${_TMP} 后重跑"
+    return 1
 }
 
 # ---- fetch-fsid: 从第一个 master 备份目录读最新 fsid(恢复用; 只输出 fsid 到 stdout, 供命令替换) ----
@@ -157,7 +214,8 @@ cmd_run_cron() {
 case "${1:-}" in
     save)          cmd_save "${2:-}" "${3:-}" ;;
     fetch-fsid)    cmd_fetch_fsid ;;
+    restore-secret) cmd_restore_secret ;;
     install-cron)  cmd_install_cron ;;
     run-cron)      cmd_run_cron ;;
-    *) echo "用法: $0 {save <cr.yaml> [meta.txt] | fetch-fsid | install-cron | run-cron}"; exit 1 ;;
+    *) echo "用法: $0 {save <cr.yaml> [meta.txt] | fetch-fsid | restore-secret | install-cron | run-cron}"; exit 1 ;;
 esac
