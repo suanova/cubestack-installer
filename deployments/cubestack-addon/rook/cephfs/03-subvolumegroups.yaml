@@ -1,0 +1,35 @@
+# ============================================================
+# CephFilesystemSubVolumeGroup: ephemeral / durable(§9.1)
+# 按生命周期类型而非 workload 划分:
+#   ephemeral = 随 DevEnvironment/Agent 生灭的工作区(§11, Delete)
+#   durable   = 长期保留的平台共享数据(Skill Marketplace 等, Retain)
+# models group 已废弃(Model 仓库走 RGW, §10), 不再创建。
+# CephFS 动态 SC 路由: 把 SC parameters.clusterID 改为对应 group 的
+#   status.info.clusterID(见 cephfs/02-storageclass-cephfs.yaml 注释)。
+# 模板变量: __NAMESPACE__(由 03_ceph_csi.sh sed 替换)
+# ============================================================
+apiVersion: ceph.rook.io/v1
+kind: CephFilesystemSubVolumeGroup
+metadata:
+  name: ephemeral             # 工作区(DevEnvironment + Agent), 随 PVC 生灭
+  namespace: __NAMESPACE__
+spec:
+  filesystemName: cephfs
+  # name: ephemeral           # 可选; 不写则用 metadata.name
+  # quota: 5Ti                # 可选: group 级总配额
+  # dataPoolName: cephfs-data0 # 可选: 指定数据 pool
+  # pinning:                  # 可选: distributed / export / random 三选一
+  #   distributed: 1
+---
+apiVersion: ceph.rook.io/v1
+kind: CephFilesystemSubVolumeGroup
+metadata:
+  name: durable               # 平台共享资产(Skill Marketplace 等), 长期保留
+  namespace: __NAMESPACE__
+spec:
+  filesystemName: cephfs
+  # name: durable             # 可选; 不写则用 metadata.name
+  # quota: 5Ti                # 可选: group 级总配额
+  # dataPoolName: cephfs-data0 # 可选: 指定数据 pool
+  # pinning:                  # 可选: distributed / export / random 三选一
+  #   distributed: 1
