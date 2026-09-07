@@ -454,10 +454,21 @@ else
         else
             # ★ 整 ns 重建场景: namespace 无 secret 时自动从节点备份恢复(ceph-backup.sh save 已备份)。
             #   Rook v1.20 CRD 无 spec.fsid 字段, 认领旧 OSD 数据唯一途径 = 恢复 rook-ceph-mon secret。
+            #   ★ 2026-09-07: 恢复 secret 后还必须恢复 mon store —— OSD 本地 bluestore 缓存的 osdmap
+            #     epoch 远高于新 mon(旧 174 vs 新 20), 仅恢复 secret 时 mon 拒绝处理 OSD 的 osd_boot
+            #     (OSD 永远 down)。mon store 含 osdmap/PG map, 恢复后新 mon 以旧 epoch 启动 → OSD boot 成功。
             say "  保留数据模式但 namespace 无 rook-ceph-mon secret(整 ns 重建) → 尝试从节点备份恢复..."
             if bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" restore-secret; then
                 _SECRET_FSID="$( (SSH "${K} -n ${CEPH_NAMESPACE} get secret rook-ceph-mon -o jsonpath='{.data.fsid}' 2>/dev/null" || true) | base64 -d 2>/dev/null )"
                 ok "  rook-ceph-mon secret 已从备份恢复(fsid=${_SECRET_FSID:-?}) → Rook 将认领旧 OSD 数据"
+                # ★ 恢复 mon store(在 CR 应用前, 让新 mon 以旧 osdmap epoch 启动)
+                say "  恢复 mon store(各节点 /var/lib/rook/mon-*, 使新 mon osdmap 与 OSD 缓存一致)..."
+                if bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" restore-monstore; then
+                    ok "  mon store 已恢复 → 新 mon 将以旧 osdmap epoch 启动, OSD 可正常 boot"
+                    _CEPH_RESTORED_MONSTORE=1
+                else
+                    warn "  mon store 恢复失败 → OSD 可能仍卡 boot(可手工: ceph-backup.sh restore-monstore 后重跑)"
+                fi
             else
                 warn "  备份恢复失败 → 无法自动认领旧数据, 将全新部署(新 fsid)"
                 warn "  手工恢复: ceph-backup.sh restore-secret 后重跑本模块"
@@ -524,8 +535,15 @@ else
                 node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-* /var/lib/rook/rook-ceph 2>/dev/null; true" \
                     && ok "    ${_hn} /var/lib/rook 已清空" || warn "    ${_hn} /var/lib/rook 清理失败"
             else
-                say "  清理 ${_hn} 残留 mon store(/var/lib/rook/mon-*, 全新 mon 状态)..."
-                node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-*" || warn "    ${_hn} mon store 清理失败(节点全新无残留可忽略)"
+                # ★ 2026-09-07: 认领模式且已恢复 mon store(_CEPH_RESTORED_MONSTORE=1)时
+                #   **绝不能清 mon-*** —— 新 mon 要靠恢复的 store 拿到旧 osdmap epoch 才能让 OSD boot。
+                #   仅当未恢复 mon store(纯保留数据、无整 ns 重建)时才清旧 mon-*(避免旧 monmap 死锁)。
+                if [ "${_CEPH_RESTORED_MONSTORE:-0}" = "1" ]; then
+                    say "  已恢复 mon store, 跳过 mon-* 清理(新 mon 将复用恢复的 store)"
+                else
+                    say "  清理 ${_hn} 残留 mon store(/var/lib/rook/mon-*, 全新 mon 状态)..."
+                    node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-*" || warn "    ${_hn} mon store 清理失败(节点全新无残留可忽略)"
+                fi
             fi
         done
     fi

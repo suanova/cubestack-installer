@@ -82,6 +82,36 @@ cmd_save() {
         scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
             "${meta}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/node-disks.txt" 2>/dev/null || true
     fi
+    # ★ mon store 备份(2026-09-07 新增, 认领恢复的最后一块拼图):
+    #   Rook 认领旧 OSD 数据仅靠 secret(fsid)不够 —— OSD 本地 bluestore 里缓存的 osdmap epoch
+    #   远高于新 mon 重建后的 epoch(旧 174 vs 新 20), OSD boot 时 mon 认为 OSD map 更新、拒绝处理
+    #   (osd_boot 卡死, OSD 永远 down)。**mon store 里保存了 osdmap/PG map**, 恢复 mon store 后
+    #   新 mon 的 osdmap epoch 与 OSD 一致 → OSD 正常 boot。
+    #   因此 save 必须同时备份每个节点 /var/lib/rook/mon-*(mon store), 恢复流程见 restore-monstore。
+    _MON_SAVED=0
+    for _line in "${NODES[@]:-}"; do
+        [ -z "${_line}" ] && continue
+        node_parse "${_line}"
+        [ -n "${NODE_IP}" ] || continue
+        _MONS="$( (ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${NODE_USER:-ubuntu}@${NODE_IP}" "sudo ls -d /var/lib/rook/mon-* 2>/dev/null | head -5" || true) )"
+        [ -n "${_MONS}" ] || continue
+        # 打包该节点全部 mon-* 目录(store.db 等), 按节点 hostname 命名存到备份机
+        # ⚠ 通配符展开按 shell 当前目录, 必须先 cd 到 /var/lib/rook 再 tar(否则 mon-* 不展开)
+        ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${NODE_USER:-ubuntu}@${NODE_IP}" \
+            "sudo bash -c 'cd /var/lib/rook && tar czf /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz mon-* 2>/dev/null' && sudo chown \$(id -un) /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" \
+            && scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
+                "${NODE_USER:-ubuntu}@${NODE_IP}:/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" "/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" \
+            && scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
+                "/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/monstore-${NODE_HOSTNAME}.tar.gz" \
+            && SSH "cp ${BACKUP_DIR}/${ts}/monstore-${NODE_HOSTNAME}.tar.gz ${BACKUP_DIR}/current/monstore-${NODE_HOSTNAME}.tar.gz" \
+            && _MON_SAVED=1 \
+            || warn "  ${NODE_HOSTNAME} mon store 打包/备份失败(认领恢复将缺该节点 mon)"
+        rm -f "/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz"
+        ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${NODE_USER:-ubuntu}@${NODE_IP}" \
+            "sudo rm -f /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" 2>/dev/null || true
+    done
+    [ "${_MON_SAVED}" = "1" ] && ok "  已备份 mon store(各节点 /var/lib/rook/mon-*, 含 osdmap/PG map, 认领恢复必需)" \
+        || warn "  未备份到任何 mon store(节点无 mon-*? 或 SSH 失败); 整 ns 重建后将无法认领旧 OSD"
     # 轮转清理
     SSH "bash -s" < <(gen_rotate_script "${RETENTION}") || true
     ok "Ceph 备份完成: ${BACKUP_DIR}/current/cephcluster-backup.yaml(历史 ${ts})"
@@ -126,6 +156,64 @@ cmd_restore_secret() {
     fi
     err "  恢复 secret 失败; 可手工: kubectl apply -f ${_TMP} 后重跑"
     return 1
+}
+
+# ---- restore-monstore: 从备份恢复各节点 mon store(整 ns 重建后, 在 mon 启动前执行) ----
+# 背景: OSD 认领旧数据后, OSD 本地 bluestore 缓存的 osdmap epoch 远高于新 mon(旧 174 vs 新 20),
+#       mon 拒绝处理 OSD 的 osd_boot(认为 OSD map 更新) → OSD 永远 down。
+#       mon store 内含 osdmap/PG map(epoch 174), 恢复到各节点 /var/lib/rook/mon-* 后,
+#       新 mon 以旧 store 启动 → osdmap epoch 与 OSD 一致 → OSD 正常 boot。
+# 备份文件: backup/current/monstore-<hostname>.tar.gz(save 时按节点生成), 历史时间戳兜底。
+# 幂等: 节点已有 mon-* 且为当前集群(与备份 fsid 一致)则跳过。
+cmd_restore_monstore() {
+    say "从节点备份恢复 mon store → 各节点 /var/lib/rook/mon-* ..."
+    # 找备份时间戳目录(current 优先, 兜底历史最新)
+    _TS_DIR=""
+    if SSH "test -d ${BACKUP_DIR}/current" 2>/dev/null; then _TS_DIR="${BACKUP_DIR}/current"; fi
+    if [ -z "${_TS_DIR}" ]; then
+        _TS_DIR="$( (SSH "ls -1d ${BACKUP_DIR}/[0-9]*_* 2>/dev/null | sort | tail -1" || true) )"
+    fi
+    [ -n "${_TS_DIR}" ] || { err "节点备份目录不存在(${FIRST_MASTER}:${BACKUP_DIR}), 无法恢复 mon store"; return 1; }
+    # 遍历全部节点, 找到对应 hostname 的 monstore tar 并解包
+    _RESTORED=0
+    for _line in "${NODES[@]:-}"; do
+        [ -z "${_line}" ] && continue
+        node_parse "${_line}"
+        [ -n "${NODE_IP}" ] || continue
+        _TAR="${_TS_DIR}/monstore-${NODE_HOSTNAME}.tar.gz"
+        if ! SSH "test -s ${_TAR}" 2>/dev/null; then
+            # 历史时间戳兜底(按名字排序取最新)
+            _HIST="$( (SSH "ls -1d ${BACKUP_DIR}/[0-9]*_* 2>/dev/null | sort | tail -1" || true) )"
+            [ -n "${_HIST}" ] && _TAR="${_HIST}/monstore-${NODE_HOSTNAME}.tar.gz"
+        fi
+        if ! SSH "test -s ${_TAR}" 2>/dev/null; then
+            warn "  ${NODE_HOSTNAME}: 备份中无 monstore-${NODE_HOSTNAME}.tar.gz, 跳过"
+            continue
+        fi
+        # 幂等/安全判断: 节点已有 mon-* 目录 → 已恢复或集群在运行, **绝不覆盖**(否则毁掉运行中集群)。
+        #   restore 只应作用于"整 ns 重建、节点 mon store 已被清理"的场景。
+        if SSH "test -d /var/lib/rook/mon-a -o -d /var/lib/rook/mon-b -o -d /var/lib/rook/mon-c" 2>/dev/null; then
+            ok "  ${NODE_HOSTNAME}: 已有 mon store(/var/lib/rook/mon-*), 跳过恢复(避免覆盖运行中集群)"
+            _RESTORED=1
+            continue
+        fi
+        # 拉回本地 → 分发到节点解包到 /var/lib/rook/(保留 mon-* 目录名)
+        scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
+            "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${_TAR}" "/tmp/monstore-${NODE_HOSTNAME}.tar.gz" \
+            || { warn "  ${NODE_HOSTNAME}: 拉取 mon store 备份失败"; continue; }
+        # 先清旧 mon-*(避免新旧混用), 再解包到 /var/lib/rook
+        if ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${NODE_USER:-ubuntu}@${NODE_IP}" \
+            "sudo bash -c 'rm -rf /var/lib/rook/mon-* && mkdir -p /var/lib/rook && cd /var/lib/rook && tar xzf -'" < "/tmp/monstore-${NODE_HOSTNAME}.tar.gz" \
+            && ok "  ${NODE_HOSTNAME}: mon store 已恢复(/var/lib/rook/mon-*)"; then
+            _RESTORED=1
+        else
+            warn "  ${NODE_HOSTNAME}: mon store 解包失败"
+        fi
+        rm -f "/tmp/monstore-${NODE_HOSTNAME}.tar.gz"
+    done
+    [ "${_RESTORED}" = "1" ] && ok "mon store 恢复完成(新 mon 将以旧 osdmap epoch 启动, OSD 可正常 boot)" \
+        || warn "  未恢复任何 mon store(备份缺失或全部失败) → 认领恢复仍会卡 OSD boot"
+    return 0
 }
 
 # ---- fetch-fsid: 从第一个 master 备份目录读最新 fsid(恢复用; 只输出 fsid 到 stdout, 供命令替换) ----
@@ -215,7 +303,8 @@ case "${1:-}" in
     save)          cmd_save "${2:-}" "${3:-}" ;;
     fetch-fsid)    cmd_fetch_fsid ;;
     restore-secret) cmd_restore_secret ;;
+    restore-monstore) cmd_restore_monstore ;;
     install-cron)  cmd_install_cron ;;
     run-cron)      cmd_run_cron ;;
-    *) echo "用法: $0 {save <cr.yaml> [meta.txt] | fetch-fsid | restore-secret | install-cron | run-cron}"; exit 1 ;;
+    *) echo "用法: $0 {save <cr.yaml> [meta.txt] | fetch-fsid | restore-secret | restore-monstore | install-cron | run-cron}"; exit 1 ;;
 esac
