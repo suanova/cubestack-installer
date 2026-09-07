@@ -185,9 +185,13 @@ cmd_restore_secret() {
 #       mon store 内含 osdmap/PG map(epoch 174), 恢复到各节点 /var/lib/rook/mon-* 后,
 #       新 mon 以旧 store 启动 → osdmap epoch 与 OSD 一致 → OSD 正常 boot。
 # 备份文件: backup/current/monstore-<hostname>.tar.gz(save 时按节点生成), 历史时间戳兜底。
-# 幂等: 节点已有 mon-* 且为当前集群(与备份 fsid 一致)则跳过。
+# 用法:
+#   restore-monstore            # 幂等: 节点已有 mon-* 则跳过(健康集群保护, 绝不覆盖运行中集群)
+#   restore-monstore --force    # 强制恢复: 清掉节点全部残留 mon-*, 再从备份解包(整 ns 重建认领场景)
 cmd_restore_monstore() {
-    say "从节点备份恢复 mon store → 各节点 /var/lib/rook/mon-* ..."
+    local FORCE=0
+    [ "${1:-}" = "--force" ] && FORCE=1
+    say "从节点备份恢复 mon store → 各节点 /var/lib/rook/mon-* ${FORCE:+[--force 清残留]} ..."
     # 找备份时间戳目录(current 优先, 兜底历史最新)
     _TS_DIR=""
     if SSH "test -d ${BACKUP_DIR}/current" 2>/dev/null; then _TS_DIR="${BACKUP_DIR}/current"; fi
@@ -208,12 +212,19 @@ cmd_restore_monstore() {
             warn "  ${NODE_HOSTNAME}: current/ 无 monstore-${NODE_HOSTNAME}.tar.gz, 跳过(该节点当前无 mon 或本轮未备份)"
             continue
         fi
-        # 幂等/安全判断: 节点已有 mon-* 目录 → 已恢复或集群在运行, **绝不覆盖**(否则毁掉运行中集群)。
-        #   restore 只应作用于"整 ns 重建、节点 mon store 已被清理"的场景。
-        if SSH "test -d /var/lib/rook/mon-a -o -d /var/lib/rook/mon-b -o -d /var/lib/rook/mon-c" 2>/dev/null; then
+        # 幂等/安全判断: 非 force 时, 节点已有 mon-* 目录 → 已恢复或集群在运行, **绝不覆盖**
+        #   (否则毁掉运行中集群)。--force(整 ns 重建认领场景)则清残留再恢复。
+        if [ "${FORCE}" = "0" ] && SSH "test -d /var/lib/rook/mon-a -o -d /var/lib/rook/mon-b -o -d /var/lib/rook/mon-c" 2>/dev/null; then
             ok "  ${NODE_HOSTNAME}: 已有 mon store(/var/lib/rook/mon-*), 跳过恢复(避免覆盖运行中集群)"
             _RESTORED=1
             continue
+        fi
+        # ⚠ force 模式下, 节点残留的 mon-*(epoch 可能与备份不一致, 如本次重装的错误 store)
+        #   **必须清掉**再解包 —— 否则新 mon 仍用残留 store(epoch 10), OSD(epoch 139)仍卡 boot。
+        if [ "${FORCE}" = "1" ]; then
+            ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${NODE_USER:-ubuntu}@${NODE_IP}" \
+                "sudo rm -rf /var/lib/rook/mon-*" 2>/dev/null || true
+            say "  ${NODE_HOSTNAME}: 已清残留 mon-*(--force)"
         fi
         # 拉回本地 → 分发到节点解包到 /var/lib/rook/(保留 mon-* 目录名)
         scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
