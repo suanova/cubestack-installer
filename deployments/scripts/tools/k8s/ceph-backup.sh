@@ -88,13 +88,19 @@ cmd_save() {
     #   (osd_boot 卡死, OSD 永远 down)。**mon store 里保存了 osdmap/PG map**, 恢复 mon store 后
     #   新 mon 的 osdmap epoch 与 OSD 一致 → OSD 正常 boot。
     #   因此 save 必须同时备份每个节点 /var/lib/rook/mon-*(mon store), 恢复流程见 restore-monstore。
+    #   ⚠ mon failover 后 mon 可能不在原节点(如 mon-c→mon-d 换节点): 每轮 save 按**当前**实际
+    #   分布打包; 无 mon 目录的节点删除该节点旧 tar, 避免恢复时用过时 store(mon 布局已变)。
     _MON_SAVED=0
     for _line in "${NODES[@]:-}"; do
         [ -z "${_line}" ] && continue
         node_parse "${_line}"
         [ -n "${NODE_IP}" ] || continue
         _MONS="$( (ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${NODE_USER:-ubuntu}@${NODE_IP}" "sudo ls -d /var/lib/rook/mon-* 2>/dev/null | head -5" || true) )"
-        [ -n "${_MONS}" ] || continue
+        if [ -z "${_MONS}" ]; then
+            # 该节点当前无 mon: 删除历史 tar(过时布局), 防止 restore 误用
+            SSH "rm -f ${BACKUP_DIR}/current/monstore-${NODE_HOSTNAME}.tar.gz ${BACKUP_DIR}/${ts}/monstore-${NODE_HOSTNAME}.tar.gz" 2>/dev/null || true
+            continue
+        fi
         # 打包该节点全部 mon-* 目录(store.db 等), 按节点 hostname 命名存到备份机
         # ⚠ 通配符展开按 shell 当前目录, 必须先 cd 到 /var/lib/rook 再 tar(否则 mon-* 不展开)
         ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${NODE_USER:-ubuntu}@${NODE_IP}" \
@@ -182,12 +188,9 @@ cmd_restore_monstore() {
         [ -n "${NODE_IP}" ] || continue
         _TAR="${_TS_DIR}/monstore-${NODE_HOSTNAME}.tar.gz"
         if ! SSH "test -s ${_TAR}" 2>/dev/null; then
-            # 历史时间戳兜底(按名字排序取最新)
-            _HIST="$( (SSH "ls -1d ${BACKUP_DIR}/[0-9]*_* 2>/dev/null | sort | tail -1" || true) )"
-            [ -n "${_HIST}" ] && _TAR="${_HIST}/monstore-${NODE_HOSTNAME}.tar.gz"
-        fi
-        if ! SSH "test -s ${_TAR}" 2>/dev/null; then
-            warn "  ${NODE_HOSTNAME}: 备份中无 monstore-${NODE_HOSTNAME}.tar.gz, 跳过"
+            # 无该节点 tar: 可能是 mon failover 后该节点已无 mon, 或本轮 save 未打包 ——
+            # **不 fallback 到历史 tar**(mon 布局可能已变, 旧 store 会误导恢复), 跳过即可。
+            warn "  ${NODE_HOSTNAME}: current/ 无 monstore-${NODE_HOSTNAME}.tar.gz, 跳过(该节点当前无 mon 或本轮未备份)"
             continue
         fi
         # 幂等/安全判断: 节点已有 mon-* 目录 → 已恢复或集群在运行, **绝不覆盖**(否则毁掉运行中集群)。

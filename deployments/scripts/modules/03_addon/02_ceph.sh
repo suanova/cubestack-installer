@@ -702,6 +702,12 @@ rm -f "${LOCAL_CR}"
         done
         bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" save "${_CR_DUMP}" "${_META}" \
             || warn "  Ceph 备份到节点失败(不影响部署; 可手工 tools/k8s/ceph-backup.sh save)"
+        # ★ 部署机本地保留一份完整备份(CR + meta; secret/mon store 在节点根盘,
+        #   部署机离线文件目录保留 CR 与 meta 作兜底, 与节点备份互备)。
+        mkdir -p "$(dirname "${CEPH_CR_BACKUP}")"
+        cp "${_CR_DUMP}" "${CEPH_CR_BACKUP}" 2>/dev/null \
+            && ok "  部署机本地备份 CR → ${CEPH_CR_BACKUP}(与节点根盘备份互备)" \
+            || warn "  部署机本地备份失败(节点根盘备份仍有效)"
         rm -f "${_META}"
     else
         warn "  拉取 CephCluster CR 失败, 跳过自动备份(可手工 tools/k8s/ceph-backup.sh save)"
