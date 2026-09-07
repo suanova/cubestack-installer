@@ -1,0 +1,41 @@
+# ============================================================
+# CephFilesystem: cephfs(§7.2)
+# Rook 自动创建 cephfs-metadata 与 cephfs-data0 两个 pool 并拉起 MDS。
+# 设计: activeCount:2 双活跃 + 热备 + podAntiAffinity + 防误删。
+# 模板变量: __NAMESPACE__ / __REPLICAS__ / __MIN_SIZE__(由 03_ceph_csi.sh sed 替换)
+# ============================================================
+apiVersion: ceph.rook.io/v1
+kind: CephFilesystem
+metadata:
+  name: cephfs
+  namespace: __NAMESPACE__
+spec:
+  metadataPool:
+    replicated: { size: __REPLICAS__, requireSafeReplicaSize: true }
+    failureDomain: host
+  dataPools:
+    - name: data0
+      replicated: { size: __REPLICAS__, requireSafeReplicaSize: true }
+      failureDomain: host
+      parameters:
+        compression_mode: none
+  metadataServer:
+    activeCount: 2
+    activeStandby: true
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "512Mi"
+      limits:
+        memory: "1Gi"
+    priorityClassName: system-cluster-critical
+    placement:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+                - key: app
+                  operator: In
+                  values: [rook-ceph-mds]
+            topologyKey: kubernetes.io/hostname
+  preserveFilesystemOnDelete: true

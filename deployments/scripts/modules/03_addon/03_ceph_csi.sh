@@ -81,6 +81,17 @@ else
     exit 1
 fi
 
+# ★ 存储供给层 YAML 从 rook/{rbd,cephfs,rgw}/ 目录文件读取(§7 资源设计, 单一事实来源),
+#   经 sed 替换模板变量 __NAMESPACE__/__REPLICAS__/__MIN_SIZE__ 后 apply。
+#   文件由 tools/k8s/rook-fetch-manifests.sh 同源维护(见 cubestack-addon/rook/CUBESTACK-storage.md)。
+_ceph_yaml_file() {   # <subdir/file.yaml> → 变量替换后的 YAML(stdout), 失败返回 1
+    local f="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}/$1"
+    [ -f "${f}" ] || { err "存储供给层 YAML 缺失: ${f}(检查 cubestack-addon/rook/ 目录)"; return 1; }
+    sed -e "s|__NAMESPACE__|${CEPH_NAMESPACE}|g" \
+        -e "s|__REPLICAS__|${CEPH_POOL_REPLICAS}|g" \
+        -e "s|__MIN_SIZE__|${CEPH_POOL_MIN_SIZE}|g" "${f}"
+}
+
 say "[1/4] 确认 CSI 插件(ceph-csi-operator 调和)csi-rbdplugin / csi-cephfsplugin 就绪(最长 240s)..."
 CSI_OK=0
 for i in $(seq 1 24); do
@@ -160,95 +171,8 @@ volumeBindingMode: WaitForFirstConsumer"
         || { err "  创建外部 CephConnection/StorageClass 失败"; exit 1; }
     unset _MONS _EXT_YAML
 else
-RBD_POOL_YAML="apiVersion: ceph.rook.io/v1
-kind: CephBlockPool
-metadata:
-  name: rbd-pool
-  namespace: ${CEPH_NAMESPACE}
-spec:
-  failureDomain: host
-  replicated:
-    size: ${CEPH_POOL_REPLICAS}
-    requireSafeReplicaSize: true
-  enableCrushUpdates: true
-  parameters:
-    min_size: \"${CEPH_POOL_MIN_SIZE}\"
-  compressionMode: none
-  application: rbd
----
-# ★ RBD StorageClass 三个变体(§7.4-7.6 对齐, 2026-09-07):
-#   ceph-rbd-ephemeral(WFFC, Delete)      VM 盘/Golden Image 默认块 SC
-#   ceph-rbd-ephemeral-immediate(Immediate, Delete)  先建卷后挂载(CDI 预创建)
-#   ceph-rbd-durable(WFFC, Retain)        长期保留块数据(TSDB/registry/Harbor DB)
-#   各含 4 对 secret(provisioner/controller-expand/node-stage/node-expand)。
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: ceph-rbd-ephemeral
-  annotations:
-    storageclass.kubernetes.io/is-default-class: \"true\"   # 默认 SC: 未显式指定 SC 的 PVC 走 ceph-block
-provisioner: rook-ceph.rbd.csi.ceph.com
-parameters:
-  pool: rbd-pool
-  clusterID: rook-ceph
-  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
-  csi.storage.k8s.io/provisioner-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
-  csi.storage.k8s.io/node-stage-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
-  csi.storage.k8s.io/controller-expand-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/node-expand-secret-name: rook-csi-rbd-node
-  csi.storage.k8s.io/node-expand-secret-namespace: ${CEPH_NAMESPACE}
-  imageFormat: \"2\"
-  imageFeatures: layering,fast-diff,object-map,deep-flatten,exclusive-lock
-reclaimPolicy: Delete
-allowVolumeExpansion: true
-volumeBindingMode: WaitForFirstConsumer
----
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: ceph-rbd-ephemeral-immediate
-provisioner: rook-ceph.rbd.csi.ceph.com
-parameters:
-  pool: rbd-pool
-  clusterID: rook-ceph
-  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
-  csi.storage.k8s.io/provisioner-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
-  csi.storage.k8s.io/node-stage-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
-  csi.storage.k8s.io/controller-expand-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/node-expand-secret-name: rook-csi-rbd-node
-  csi.storage.k8s.io/node-expand-secret-namespace: ${CEPH_NAMESPACE}
-  imageFormat: \"2\"
-  imageFeatures: layering,fast-diff,object-map,deep-flatten,exclusive-lock
-reclaimPolicy: Delete
-allowVolumeExpansion: true
-volumeBindingMode: Immediate
----
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: ceph-rbd-durable
-provisioner: rook-ceph.rbd.csi.ceph.com
-parameters:
-  pool: rbd-pool
-  clusterID: rook-ceph
-  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
-  csi.storage.k8s.io/provisioner-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
-  csi.storage.k8s.io/node-stage-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
-  csi.storage.k8s.io/controller-expand-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/node-expand-secret-name: rook-csi-rbd-node
-  csi.storage.k8s.io/node-expand-secret-namespace: ${CEPH_NAMESPACE}
-  imageFormat: \"2\"
-  imageFeatures: layering,fast-diff,object-map,deep-flatten,exclusive-lock
-reclaimPolicy: Retain
-allowVolumeExpansion: true
-volumeBindingMode: WaitForFirstConsumer"
-apply_remote "${RBD_POOL_YAML}" "ceph-rbd" \
+_CEPH_RBD_YAML="$(_ceph_yaml_file rbd/01-cephblockpool-rbd-pool.yaml rbd/02-storageclass-rbd.yaml)" || exit 1
+apply_remote "${_CEPH_RBD_YAML}" "ceph-rbd" \
     && ok "  CephBlockPool rbd-pool + 3×RBD StorageClass(ephemeral WFFC / -immediate / durable Retain)已创建" \
     || { err "  创建 rbd-pool/StorageClass 失败"; exit 1; }
 fi
@@ -256,111 +180,14 @@ fi
 # 可选项: CephFS(metadata/data 池 + MDS + cephfs/cephfs-models SC) —— 仅集群内模式(外部 Ceph 由外部集群提供 CephFS)
 if [ "${_CEPH_EXTERNAL}" = "0" ] && [ "${CEPHFS_ENABLED}" = "true" ]; then
     say "[3/4] 创建 CephFilesystem + cephfs StorageClass..."
-    apply_remote "apiVersion: ceph.rook.io/v1
-kind: CephFilesystem
-metadata:
-  name: cephfs
-  namespace: ${CEPH_NAMESPACE}
-spec:
-  metadataPool:
-    replicated: { size: ${CEPH_POOL_REPLICAS}, requireSafeReplicaSize: true }
-    failureDomain: host
-  dataPools:
-    - name: data0
-      replicated: { size: ${CEPH_POOL_REPLICAS}, requireSafeReplicaSize: true }
-      failureDomain: host
-      parameters:
-        compression_mode: none
-  metadataServer:
-    activeCount: 2
-    activeStandby: true
-    resources:
-      requests:
-        cpu: \"250m\"
-        memory: \"512Mi\"
-      limits:
-        memory: \"1Gi\"
-    priorityClassName: system-cluster-critical
-    placement:
-      podAntiAffinity:
-        requiredDuringSchedulingIgnoredDuringExecution:
-          - labelSelector:
-              matchExpressions:
-                - key: app
-                  operator: In
-                  values: [rook-ceph-mds]
-            topologyKey: kubernetes.io/hostname
-  preserveFilesystemOnDelete: true
----
-# ★ CephFS StorageClass 两个变体(§7.7-7.8 对齐, 2026-09-07):
-#   cephfs-ephemeral(Delete, Immediate)  工作区动态 CephFS PVC(删 PVC → subvolume 随删)
-#   cephfs-durable(Retain, Immediate)    平台共享资产(Marketplace; 删 PVC 保留 subvolume)
-#   各含 4 对 secret; fsName=cephfs, pool=cephfs-data0。group 路由见 docs。
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: cephfs-ephemeral
-provisioner: rook-ceph.cephfs.csi.ceph.com
-parameters:
-  fsName: cephfs
-  pool: cephfs-data0
-  clusterID: rook-ceph
-  csi.storage.k8s.io/provisioner-secret-name: rook-csi-cephfs-provisioner
-  csi.storage.k8s.io/provisioner-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/node-stage-secret-name: rook-csi-cephfs-node
-  csi.storage.k8s.io/node-stage-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-cephfs-provisioner
-  csi.storage.k8s.io/controller-expand-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/node-expand-secret-name: rook-csi-cephfs-node
-  csi.storage.k8s.io/node-expand-secret-namespace: ${CEPH_NAMESPACE}
-reclaimPolicy: Delete
-allowVolumeExpansion: true
-volumeBindingMode: Immediate
----
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: cephfs-durable
-provisioner: rook-ceph.cephfs.csi.ceph.com
-parameters:
-  fsName: cephfs
-  pool: cephfs-data0
-  clusterID: rook-ceph
-  csi.storage.k8s.io/provisioner-secret-name: rook-csi-cephfs-provisioner
-  csi.storage.k8s.io/provisioner-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/node-stage-secret-name: rook-csi-cephfs-node
-  csi.storage.k8s.io/node-stage-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-cephfs-provisioner
-  csi.storage.k8s.io/controller-expand-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/node-expand-secret-name: rook-csi-cephfs-node
-  csi.storage.k8s.io/node-expand-secret-namespace: ${CEPH_NAMESPACE}
-reclaimPolicy: Retain
-allowVolumeExpansion: true
-volumeBindingMode: Immediate" "cephfs" \
+    apply_remote "$(_ceph_yaml_file cephfs/01-cephfilesystem.yaml cephfs/02-storageclass-cephfs.yaml)" "cephfs" \
         && ok "  CephFilesystem cephfs + StorageClass cephfs-ephemeral/cephfs-durable 已创建(等 MDS Running)" || warn "  CephFS 创建失败"
 fi
 
 # 可选项: RGW/S3 —— 仅集群内模式(外部 Ceph 由外部集群提供 RGW)
 if [ "${_CEPH_EXTERNAL}" = "0" ] && [ "${CEPH_RGW_ENABLED}" = "true" ]; then
     say "[3/4] 创建 CephObjectStore(RGW/S3, 集群内)..."
-    apply_remote "apiVersion: ceph.rook.io/v1
-kind: CephObjectStore
-metadata:
-  name: s3-store
-  namespace: ${CEPH_NAMESPACE}
-spec:
-  preservePoolsOnDelete: true   # 防误删 CR 连带删 RGW pool(模型桶数据)
-  metadataPool:
-    replicated: { size: ${CEPH_POOL_REPLICAS} }
-    failureDomain: host
-    parameters: { min_size: \"${CEPH_POOL_MIN_SIZE}\" }
-  dataPool:
-    replicated: { size: ${CEPH_POOL_REPLICAS} }
-    failureDomain: host
-    parameters: { min_size: \"${CEPH_POOL_MIN_SIZE}\" }
-  gateway:
-    port: 80
-    instances: 1" "rgw" \
+    apply_remote "$(_ceph_yaml_file rgw/01-cephobjectstore-s3-store.yaml)" "rgw" \
         && ok "  CephObjectStore s3-store 已创建" || warn "  RGW 创建失败"
 
     # ★ RGW/S3 对外暴露(2026-09-06 新增): 复用 SERVICE_EXPOSE_MODE, 可用 CEPH_RGW_EXPOSE_MODE 覆盖:
@@ -410,3 +237,4 @@ echo "  registry 后端: REGISTRY_STORAGE_CLASS=${REGISTRY_STORAGE_CLASS:-local-
 ok "Ceph CSI 供给层完成(StorageClass: ceph-block)"
 echo "  使用: PVC storageClassName=ceph-block(块, 可多挂); 详见 docs/ceph-rook.md §9"
 echo "  卸载: kubectl delete sc ceph-block; kubectl -n ${CEPH_NAMESPACE} delete cephblockpool rbd-pool"
+

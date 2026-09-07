@@ -1,0 +1,23 @@
+# ============================================================
+# CephObjectStore: s3-store / RGW(§7.3, 含删除保护)
+# RGW 承载 Model 仓库(§10)。preservePoolsOnDelete:true 防误删 CR 连带删 pool。
+# 模板变量: __NAMESPACE__ / __REPLICAS__ / __MIN_SIZE__(由 03_ceph_csi.sh sed 替换)
+# ============================================================
+apiVersion: ceph.rook.io/v1
+kind: CephObjectStore
+metadata:
+  name: s3-store
+  namespace: __NAMESPACE__
+spec:
+  preservePoolsOnDelete: true   # 防误删 CR 连带删 RGW pool(模型数据)
+  metadataPool:
+    replicated: { size: __REPLICAS__ }
+    failureDomain: host
+    parameters: { min_size: "__MIN_SIZE__" }
+  dataPool:
+    replicated: { size: __REPLICAS__ }
+    failureDomain: host
+    parameters: { min_size: "__MIN_SIZE__" }
+  gateway:
+    port: 80
+    instances: 1

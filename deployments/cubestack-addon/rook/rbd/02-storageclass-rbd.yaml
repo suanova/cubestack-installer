@@ -1,0 +1,75 @@
+# ============================================================
+# RBD StorageClass 三变体(§7.4-7.6 对齐)
+#   ceph-rbd-ephemeral(WFFC/Delete, 默认)      VM 盘/Golden Image 默认块 SC
+#   ceph-rbd-ephemeral-immediate(Immediate/Delete)  先建卷后挂载(CDI 预创建, §8.1)
+#   ceph-rbd-durable(WFFC/Retain)        长期保留块数据(TSDB §8.5 / Harbor DB §8.6)
+# 各含 4 对 secret(provisioner/controller-expand/node-stage/node-expand)。
+# 模板变量: __NAMESPACE__(由 03_ceph_csi.sh sed 替换)
+# ============================================================
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ceph-rbd-ephemeral
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"   # 默认 SC: 未显式指定 SC 的 PVC 走本 SC
+provisioner: rook-ceph.rbd.csi.ceph.com
+parameters:
+  pool: rbd-pool
+  clusterID: rook-ceph
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-stage-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/node-expand-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-expand-secret-namespace: __NAMESPACE__
+  imageFormat: "2"
+  imageFeatures: layering,fast-diff,object-map,deep-flatten,exclusive-lock
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ceph-rbd-ephemeral-immediate
+provisioner: rook-ceph.rbd.csi.ceph.com
+parameters:
+  pool: rbd-pool
+  clusterID: rook-ceph
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-stage-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/node-expand-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-expand-secret-namespace: __NAMESPACE__
+  imageFormat: "2"
+  imageFeatures: layering,fast-diff,object-map,deep-flatten,exclusive-lock
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ceph-rbd-durable
+provisioner: rook-ceph.rbd.csi.ceph.com
+parameters:
+  pool: rbd-pool
+  clusterID: rook-ceph
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-stage-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/node-expand-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-expand-secret-namespace: __NAMESPACE__
+  imageFormat: "2"
+  imageFeatures: layering,fast-diff,object-map,deep-flatten,exclusive-lock
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer

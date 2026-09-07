@@ -1,0 +1,40 @@
+# ============================================================
+# VM Disk(§8.2)
+# VM 根盘用 RBD Block + RWX(热迁移前提)。从 Golden Image 克隆(RBD Clone 秒级, 写时分配)。
+# SC: ceph-rbd-ephemeral(WFFC/Delete)。数据生命周期随 VM 结束(§8.4)。
+# ============================================================
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: vm001-rootdisk
+  namespace: default
+spec:
+  source:
+    pvc:
+      name: ubuntu-24.04-server-amd64-img   # 从 Golden Image 克隆
+      namespace: default
+  storage:
+    accessModes: [ReadWriteMany]
+    volumeMode: Block
+    storageClassName: ceph-rbd-ephemeral
+    resources:
+      requests:
+        storage: 30Gi
+---
+# VM 数据盘(§8.3): 与根盘同构(RBD Block / ceph-rbd-ephemeral / RWX)。
+# VM 内部看到 /dev/vdb 等块设备, 文件系统由 VM 内自行管理。
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: vm001-datadisk
+  namespace: default
+spec:
+  source:
+    blank: {}
+  storage:
+    accessModes: [ReadWriteMany]
+    volumeMode: Block
+    storageClassName: ceph-rbd-ephemeral
+    resources:
+      requests:
+        storage: 100Gi

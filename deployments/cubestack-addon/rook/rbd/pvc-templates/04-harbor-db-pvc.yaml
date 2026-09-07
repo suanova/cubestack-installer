@@ -1,0 +1,36 @@
+# ============================================================
+# Harbor 元数据数据库(§8.6, 可选 —— 仅选 Harbor 时建)
+# Harbor 依赖 PostgreSQL(业务元数据)+ Redis(session/缓存/配额),
+# 二者是有状态单写者 → RBD RWO 块盘。
+#   StorageClass: ceph-rbd-durable(与 TSDB 同 SC, Retain 防误删)
+#   VolumeMode: Filesystem / AccessMode: RWO
+# 产品未定: 先落地 registry 数据目录 PVC(§11.9), 选型 Zot/Kubespray builtin 时无需本节;
+#   选 Harbor 时再补建。DB 数据量小(~50Gi 级), RBD 快照即备份(§8.4)。
+# ============================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: harbor-postgresql
+  namespace: harbor
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  storageClassName: ceph-rbd-durable
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: harbor-redis
+  namespace: harbor
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  storageClassName: ceph-rbd-durable
+  resources:
+    requests:
+      storage: 10Gi
