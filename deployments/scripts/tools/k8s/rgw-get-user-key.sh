@@ -22,7 +22,7 @@ UID_NAME="${1:-verify-rgw-$(date +%s)}"
 
 # ① 创建用户, 纯 JSON(仅 stdout, 不带 stderr)
 RGW_JSON="$(SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
-    radosgw-admin user create --uid=${UID_NAME} --display-name=verify --format json --rgw-zone=my-store" 2>/dev/null || true)"
+    radosgw-admin user create --uid=${UID_NAME} --display-name=verify --format json --rgw-zone=s3-store" 2>/dev/null || true)"
 
 # ② 部署机本地 python 解析 AK/SK, stdout 只输出两行凭据
 if [ -n "${RGW_JSON}" ]; then

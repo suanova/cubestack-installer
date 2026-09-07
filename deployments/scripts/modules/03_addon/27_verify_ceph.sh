@@ -251,7 +251,7 @@ if [ "${CEPH_RGW_ENABLED:-false}" = "true" ]; then
         ok "    RGW Pod ${RGW_POD} Running ✓"
         # ① 取 RGW NodePort(独立 rgw-external 优先, 其次 Rook Service; 都没有则无法直连)
         RGW_NP="$( (SSH "${K} -n ${CEPH_NAMESPACE} get svc rgw-external -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
-        [ -z "${RGW_NP}" ] && RGW_NP="$( (SSH "${K} -n ${CEPH_NAMESPACE} get svc rook-ceph-rgw-my-store -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
+        [ -z "${RGW_NP}" ] && RGW_NP="$( (SSH "${K} -n ${CEPH_NAMESPACE} get svc rook-ceph-rgw-s3-store -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
         if [ -z "${RGW_NP}" ]; then
             warn "    RGW 未对外暴露(无 NodePort); 跳过 ⑧(可用 CEPH_RGW_EXPOSE_MODE=nodeport 重跑 ceph_csi 暴露)"
         else

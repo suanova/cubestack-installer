@@ -3,7 +3,7 @@
 """
 verify-rgw-s3.py — RGW/S3 真实数据读写验证(SigV4, 纯标准库, 无 aws cli 依赖)
 用法(在 rook-ceph toolbox 容器内):
-  AK=<access_key> SK=<secret_key> ENDPOINT=http://rook-ceph-rgw-my-store.rook-ceph.svc:80 \
+  AK=<access_key> SK=<secret_key> ENDPOINT=http://rook-ceph-rgw-s3-store.rook-ceph.svc:80 \
     python3 /tmp/verify-rgw-s3.py
 流程: PUT bucket → PUT object → GET object(校验内容) → DELETE object/bucket
 输出: 成功打印 S3-PUT-GET-OK; 失败抛异常/非 2xx 退出码 1
@@ -20,7 +20,7 @@ import urllib.error
 AK = os.environ.get("AK", "")
 SK = os.environ.get("SK", "")
 UID = os.environ.get("RGW_UID", "verify-user")
-ENDPOINT = os.environ.get("ENDPOINT", "http://rook-ceph-rgw-my-store.rook-ceph.svc:80")
+ENDPOINT = os.environ.get("ENDPOINT", "http://rook-ceph-rgw-s3-store.rook-ceph.svc:80")
 REGION = os.environ.get("REGION", "us-east-1")
 SERVICE = "s3"
 HOST = urllib.request.urlparse(ENDPOINT).netloc
