@@ -37,7 +37,9 @@ CEPH_POOL_REPLICAS="${CEPH_POOL_REPLICAS:-3}"
 CEPH_POOL_MIN_SIZE="${CEPH_POOL_MIN_SIZE:-2}"
 CEPHFS_ENABLED="${CEPHFS_ENABLED:-false}"
 CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-false}"
-CEPH_EXTERNAL_MONITORS="${CEPH_EXTERNAL_MONITORS:-}"   # 外部 Ceph monitors(节点<3 无集群内 CephCluster 时连接用)
+# ★ CEPH_MODE=external(由 load_config 归一化; 兼容旧 CEPH_MONITORS 自动迁移):
+#   不创建集群内 CephCluster, 经 ceph-csi-operator 的 CephConnection 接入外部已有 Ceph。
+#   连接参数统一用 CEPH_MONITORS / CEPH_POOL / CEPH_USER / CEPH_KEYRING(见 lib-common load_config)。
 
 # 前置: 集群内 CephCluster 已 Ready; 若无集群内 CephCluster 但配置了外部 monitors →
 # 走"外部 Ceph 连接"模式(由 csi-operator 连外部, 跳过 rbd-pool/集群资源创建)。
@@ -64,12 +66,12 @@ if [ -n "${_PH}" ]; then
         exit 1
     fi
     unset _CLUSTER_READY
-elif [ -n "${CEPH_EXTERNAL_MONITORS}" ]; then
+elif [ "${CEPH_MODE:-internal}" = "external" ]; then
     _CEPH_EXTERNAL=1
-    say "  无集群内 CephCluster, 但已配置 CEPH_EXTERNAL_MONITORS=${CEPH_EXTERNAL_MONITORS} → 外部 Ceph 连接模式"
+    say "  无集群内 CephCluster, CEPH_MODE=external → 外部 Ceph 连接模式(monitors=${CEPH_MONITORS:-<未配置>})"
 else
-    warn "  集群内无 CephCluster 且未配置 CEPH_EXTERNAL_MONITORS —— 无法创建 Ceph StorageClass"
-    warn "  请先: ① 部署集群内 ceph(节点≥3); 或 ② cluster.conf 设 CEPH_EXTERNAL_MONITORS 连接外部 Ceph"
+    warn "  集群内无 CephCluster 且 CEPH_MODE!=external —— 无法创建 Ceph StorageClass"
+    warn "  请先: ① 部署集群内 ceph(节点≥3, CEPH_MODE=internal); 或 ② cluster.conf 设 CEPH_MODE=external + CEPH_MONITORS 连接外部 Ceph"
     exit 1
 fi
 
@@ -99,13 +101,10 @@ say "[2/4] 创建 CephBlockPool rbd-pool(3 副本 / host 故障域 / min_size ${
 # ★ 外部 Ceph 模式(无集群内 CephCluster): 经 ceph-csi-operator 的 CephConnection 连外部集群,
 #   不创建集群内 pool(外部集群已有 pool), 仅建指向外部集群的 StorageClass。
 if [ "${_CEPH_EXTERNAL}" = "1" ]; then
-    CEPH_EXTERNAL_POOL="${CEPH_EXTERNAL_POOL:-rbd}"
-    CEPH_EXTERNAL_USER="${CEPH_EXTERNAL_USER:-admin}"
-    CEPH_EXTERNAL_KEYRING="${CEPH_EXTERNAL_KEYRING:-}"   # 外部 Ceph client keyring(base64 原文或明文 key)
-    say "  外部模式: 创建 CephConnection(${CEPH_EXTERNAL_MONITORS}) + StorageClass ceph-block(pool=${CEPH_EXTERNAL_POOL})"
-    [ -n "${CEPH_EXTERNAL_KEYRING}" ] || { err "外部 Ceph 需要认证: 请在 cluster.conf 设 CEPH_EXTERNAL_KEYRING(外部 Ceph client keyring, 如 admin 的 key)"; exit 1; }
+    say "  外部模式: 创建 CephConnection(${CEPH_MONITORS:-<未配置>}) + StorageClass ceph-block(pool=${CEPH_POOL:-rbd})"
+    [ -n "${CEPH_KEYRING:-}" ] || { err "外部 Ceph 需要认证: 请在 cluster.conf 设 CEPH_KEYRING(外部 Ceph client keyring, 如 admin 的 key)"; exit 1; }
     # monitors "a:6789","b:6789"(逗号分隔 → YAML 数组); CephConnection CRD spec.monitors(无 connection 层级)
-    _MONS="$(echo "${CEPH_EXTERNAL_MONITORS}" | sed 's/,/","/g')"
+    _MONS="$(echo "${CEPH_MONITORS:-}" | sed 's/,/","/g')"
     _EXT_YAML="apiVersion: csi.ceph.io/v1
 kind: CephConnection
 metadata:
@@ -121,8 +120,8 @@ metadata:
   name: rook-csi-rbd-provisioner
   namespace: ${CEPH_NAMESPACE}
 stringData:
-  userID: ${CEPH_EXTERNAL_USER}
-  userKey: ${CEPH_EXTERNAL_KEYRING}
+  userID: ${CEPH_USER:-admin}
+  userKey: ${CEPH_KEYRING:-}
 ---
 apiVersion: v1
 kind: Secret
@@ -130,8 +129,8 @@ metadata:
   name: rook-csi-rbd-node
   namespace: ${CEPH_NAMESPACE}
 stringData:
-  userID: ${CEPH_EXTERNAL_USER}
-  userKey: ${CEPH_EXTERNAL_KEYRING}
+  userID: ${CEPH_USER:-admin}
+  userKey: ${CEPH_KEYRING:-}
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -139,7 +138,7 @@ metadata:
   name: ceph-block
 provisioner: rook-ceph.rbd.csi.ceph.com
 parameters:
-  pool: ${CEPH_EXTERNAL_POOL}
+  pool: ${CEPH_POOL:-rbd}
   clusterID: ceph-connection
   csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
   csi.storage.k8s.io/provisioner-secret-namespace: ${CEPH_NAMESPACE}
@@ -151,7 +150,7 @@ reclaimPolicy: Delete
 allowVolumeExpansion: true
 volumeBindingMode: WaitForFirstConsumer"
     apply_remote "${_EXT_YAML}" "ceph-ext-rbd" \
-        && ok "  外部 CephConnection + 认证 secret + StorageClass ceph-block 已创建(外部 pool: ${CEPH_EXTERNAL_POOL})" \
+        && ok "  外部 CephConnection + 认证 secret + StorageClass ceph-block 已创建(外部 pool: ${CEPH_POOL:-rbd})" \
         || { err "  创建外部 CephConnection/StorageClass 失败"; exit 1; }
     unset _MONS _EXT_YAML
 else

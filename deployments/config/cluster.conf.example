@@ -88,6 +88,12 @@ LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"  # LWS Disa
 PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-false}"       # Prometheus+Operator 监控(P1; 见 4.3)
 CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # Ceph 存储底座(P1; 见 4.3)
 CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI RBD/RGW/CephFS(依赖 CEPH_ENABLED; 见 4.3)
+# ---- Ceph 双模式(CEPH_MODE, 二选一; 见 4.3) ----
+# CEPH_MODE=internal(默认): 集群内 Rook-Ceph, 部署 CephCluster CR + 本地 OSD(现有实现);
+# CEPH_MODE=external: 不创建集群内 CephCluster, 由 ceph_csi 模块经 ceph-csi-operator 的
+#   CephConnection 接入**外部已有 Ceph 集群**, 创建指向外部的 StorageClass ceph-block。
+#   (兼容旧配置: 仅设了 CEPH_EXTERNAL_MONITORS 会自动视为 external 并迁移, 见 lib-common)
+CEPH_MODE="${CEPH_MODE:-internal}"
 ENVOY_GATEWAY_ENABLED="${ENVOY_GATEWAY_ENABLED:-true}" # Envoy Gateway 通用 K8s 网关基座(P1; 见 4.3)
 ENVOY_AI_GATEWAY_ENABLED="${ENVOY_AI_GATEWAY_ENABLED:-true}"  # Envoy AI Gateway(LLM/AI 专用, 依赖 EG; 见 4.3)
 KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # 统一认证(P2; 见 4.4)
@@ -124,14 +130,15 @@ CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-true}"     # 可选: 启用 RGW/S3 对象�
 #   nodeport → Service 改 NodePort(CEPH_RGW_NODEPORT 指定端口, 默认自动); loadbalancer → 需 MetalLB 部署
 CEPH_RGW_EXPOSE_MODE="${CEPH_RGW_EXPOSE_MODE:-}"
 CEPH_RGW_NODEPORT="${CEPH_RGW_NODEPORT:-}"   # RGW NodePort(留空=自动分配 30000-32767)
-# 外部 Ceph 连接(本集群无集群内 CephCluster 时): ceph 模块检测到存储节点<CEPH_MIN_NODES 或
-#   CEPH_ENABLED 但无集群内 CephCluster 时, 由 ceph_csi 模块经 ceph-csi-operator 的 CephConnection
-#   连接外部 Ceph 集群并创建 StorageClass(跳过集群内 pool/cephfs/rgw 创建)。
-CEPH_MIN_NODES="${CEPH_MIN_NODES:-3}"            # 存储节点 < 此值 → 不创建集群内 CephCluster
-CEPH_EXTERNAL_MONITORS="${CEPH_EXTERNAL_MONITORS:-}"   # 外部 Ceph monitors, 如 "10.66.1.21:6789,10.66.1.22:6789"; 留空=不使用外部 Ceph
-CEPH_EXTERNAL_POOL="${CEPH_EXTERNAL_POOL:-rbd}"  # 外部 Ceph 使用的 RBD pool 名(外部集群已有)
-CEPH_EXTERNAL_USER="${CEPH_EXTERNAL_USER:-admin}"   # 外部 Ceph 认证用户(默认 admin)
-CEPH_EXTERNAL_KEYRING="${CEPH_EXTERNAL_KEYRING:-}"  # 外部 Ceph 认证 keyring(该用户的 key; 必填, 如 AQCxxx==)
+# ---- 外部 Ceph 连接参数(仅 CEPH_MODE=external 时使用) ----
+# 本集群不创建集群内 CephCluster, 由 ceph_csi 模块经 ceph-csi-operator 的 CephConnection
+# 连接外部已有 Ceph 集群, 创建指向外部的 StorageClass ceph-block(跳过集群内 pool/cephfs/rgw 创建)。
+# ⚠ 旧变量 CEPH_EXTERNAL_MONITORS/POOL/USER/KEYRING 已迁移到下面新变量(load_config 自动兼容旧配置)。
+CEPH_MIN_NODES="${CEPH_MIN_NODES:-3}"            # internal 模式: 存储节点 < 此值 → 不创建集群内 CephCluster
+CEPH_MONITORS="${CEPH_MONITORS:-}"               # external: 外部 Ceph monitors, 如 "10.66.1.21:6789,10.66.1.22:6789"; 留空=不启用外部 Ceph
+CEPH_POOL="${CEPH_POOL:-rbd}"                    # external: 外部 Ceph 使用的 RBD pool 名(外部集群已有)
+CEPH_USER="${CEPH_USER:-admin}"                  # external: 外部 Ceph 认证用户(默认 admin)
+CEPH_KEYRING="${CEPH_KEYRING:-}"                 # external: 外部 Ceph 认证 keyring(该用户的 key; 必填, 如 AQCxxx==)
 CEPH_DASHBOARD_ENABLED="${CEPH_DASHBOARD_ENABLED:-true}"  # Ceph Dashboard
 # 安全确认: CEPH_ENABLED=true 部署时模块会红底列出将用的节点与裸盘并 sleep 60s 供 double-check;
 #   核对无误可 CEPH_CONFIRM_SLEEP=0(脚本环境变量)跳过, 生产不建议。

@@ -258,11 +258,21 @@ print_plan
 #   CEPH_ENABLED=true 且本次会执行 ceph 相关模块(k8s_deploy 或 ceph)时, sleep 倒计时
 #   CEPH_CONFIRM_SLEEP(默认 60s, 设 0 跳过)供人工 double-check 存储节点/裸盘。
 if [ "${CEPH_ENABLED:-false}" = "true" ]; then
-    _ceph_confirm_in=""
-    for k in "${RUN_STEPS[@]:-}"; do
-        case "${k}" in k8s_deploy|ceph) _ceph_confirm_in=1; break ;; esac
-    done
-    if [ -n "${_ceph_confirm_in}" ]; then
+    # ★ CEPH_MODE=external(由 load_config 归一化): 接入外部已有 Ceph, 不涉及本地裸盘/
+    #   覆盖确认 —— 跳过存储节点/裸盘检测、倒计时、已有 CephCluster 清理, 仅提示外部连接。
+    if [ "${CEPH_MODE:-internal}" = "external" ]; then
+        echo -e "\033[41m\033[97m================================================================================\033[0m"
+        echo -e "\033[41m\033[97m ⚠⚠⚠  CEPH_MODE=external — 接入外部已有 Ceph 集群(不创建集群内 CephCluster) ⚠⚠⚠\033[0m"
+        echo -e "\033[41m\033[97m   monitors: ${CEPH_MONITORS:-<未配置, ceph_csi 模块将报错>}\033[0m"
+        echo -e "\033[41m\033[97m   pool: ${CEPH_POOL:-rbd}   user: ${CEPH_USER:-admin}\033[0m"
+        echo -e "\033[41m\033[97m   不执行裸盘检测/覆盖确认; 由 ceph_csi 模块经 CephConnection 连外部集群  \033[0m"
+        echo -e "\033[41m\033[97m================================================================================\033[0m"
+    else
+        _ceph_confirm_in=""
+        for k in "${RUN_STEPS[@]:-}"; do
+            case "${k}" in k8s_deploy|ceph) _ceph_confirm_in=1; break ;; esac
+        done
+        if [ -n "${_ceph_confirm_in}" ]; then
         _ceph_cs="${CEPH_CONFIRM_SLEEP:-60}"
         echo ""
         echo -e "\033[41m\033[97m================================================================================\033[0m"
@@ -440,7 +450,8 @@ if [ "${CEPH_ENABLED:-false}" = "true" ]; then
         fi
         unset _CEPH_EXIST _FM_IP _CEPH_SSH_KEY _CEPH_GONE _CEPH_STATE
         unset _ceph_cs _CEPH_CONFIRM_HOSTS _CEPH_CONFIRM_DISKS _CEPH_CONFIRM_DETECT_FAIL _h _ip _line _l _ds _hn _g _grp _norm _h2 _d
-    fi
+        fi   # if [ -n "${_ceph_confirm_in}" ](internal 模式确认块)
+    fi   # else(external 模式跳过确认)
     unset _ceph_confirm_in
 fi
 
