@@ -88,6 +88,9 @@ LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"  # LWS Disa
 PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-false}"       # Prometheus+Operator 监控(P1; 见 4.3)
 CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # Ceph 存储底座(P1; 见 4.3)
 CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI RBD/RGW/CephFS(依赖 CEPH_ENABLED; 见 4.3)
+# CEPH_FALLBACK_TO_LOCALPATH: CEPH_ENABLED=true 但 ceph 安装条件不足(manifest/裸盘/lvm2/
+#   external 参数缺失)时, 自动回退到 local-path 模式(registry 用 local-path, 跳过 ceph 模块)。
+#   默认 false=保持硬失败并提示; true=条件不足自动降级, 部署不中断(防掩盖配置错误, 显式启用才回退)。
 # ---- Ceph 双模式(CEPH_MODE, 二选一; 见 4.3) ----
 # CEPH_MODE=internal(默认): 集群内 Rook-Ceph, 部署 CephCluster CR + 本地 OSD(现有实现);
 # CEPH_MODE=external: 不创建集群内 CephCluster, 由 ceph_csi 模块经 ceph-csi-operator 的

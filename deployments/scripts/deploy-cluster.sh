@@ -258,6 +258,25 @@ print_plan
 #   CEPH_ENABLED=true 且本次会执行 ceph 相关模块(k8s_deploy 或 ceph)时, sleep 倒计时
 #   CEPH_CONFIRM_SLEEP(默认 60s, 设 0 跳过)供人工 double-check 存储节点/裸盘。
 if [ "${CEPH_ENABLED:-false}" = "true" ]; then
+    # ★ CEPH_FALLBACK_TO_LOCALPATH=true 时, 先检测 ceph 安装条件; 不足 → 自动回退 local-path
+    #   (REGISTRY_STORAGE_CLASS=local-path + LOCAL_PATH_ENABLED=true + 跳过 ceph 模块)。
+    #   仅显式启用才回退(防掩盖配置错误); 默认 false = 保持硬失败并给出指引。
+    if [ "${CEPH_FALLBACK_TO_LOCALPATH:-false}" = "true" ]; then
+        _CEPH_MISS="$(ceph_installable_check)"
+        if [ -n "${_CEPH_MISS}" ]; then
+            echo -e "\033[41m\033[97m================================================================================\033[0m"
+            echo -e "\033[41m\033[97m ⚠⚠⚠  CEPH_FALLBACK_TO_LOCALPATH=true 且 Ceph 安装条件不足 → 自动回退 local-path ⚠⚠⚠\033[0m"
+            echo -e "\033[41m\033[97m   不满足项: ${_CEPH_MISS}\033[0m"
+            echo -e "\033[41m\033[97m   registry 后端改为 local-path(REGISTRY_STORAGE_CLASS=local-path), 启用 local-path-provisioner\033[0m"
+            echo -e "\033[41m\033[97m   ceph/ceph_csi 模块本次跳过; 条件备齐后设 CEPH_ENABLED=true + CEPH_FALLBACK_TO_LOCALPATH=false 重跑\033[0m"
+            echo -e "\033[41m\033[97m================================================================================\033[0m"
+            CEPH_ENABLED="false"
+            REGISTRY_STORAGE_CLASS="local-path"
+            LOCAL_PATH_ENABLED="true"
+            export CEPH_ENABLED REGISTRY_STORAGE_CLASS LOCAL_PATH_ENABLED
+        fi
+        unset _CEPH_MISS
+    fi
     # ★ CEPH_MODE=external(由 load_config 归一化): 接入外部已有 Ceph, 不涉及本地裸盘/
     #   覆盖确认 —— 跳过存储节点/裸盘检测、倒计时、已有 CephCluster 清理, 仅提示外部连接。
     if [ "${CEPH_MODE:-internal}" = "external" ]; then

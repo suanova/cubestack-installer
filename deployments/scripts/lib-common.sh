@@ -442,6 +442,9 @@ load_config() {
     #   · CEPH_ENABLED=false → 保持 local-path 为默认后端(默认)。
     # ⚠ 即使显式写了 REGISTRY_STORAGE_CLASS / LOCAL_PATH_ENABLED 也会被本规则覆盖(二选一, 不并存);
     #   想用 local-path 就设 CEPH_ENABLED=false。
+    # ★ CEPH_FALLBACK_TO_LOCALPATH=true 且检测到 ceph 安装条件不足(manifest/裸盘/lvm2/external 参数
+    #   缺失)时, deploy-cluster.sh 预检会把 CEPH_ENABLED 置 false → 此处自然走 local-path 分支,
+    #   无需额外逻辑。检测函数见 ceph_installable_check(下方)。
     if [ "${CEPH_ENABLED:-false}" = "true" ]; then
         # 仅当 cluster.conf 显式写了冲突值时提醒(默认值 local-path/true 不算冲突, 避免每次 run 刷屏)
         if grep -qE '^[[:space:]]*REGISTRY_STORAGE_CLASS=.*(local-path)' "${CLUSTER_CONF}" 2>/dev/null; then
@@ -456,6 +459,62 @@ load_config() {
     export REGISTRY_STORAGE_CLASS LOCAL_PATH_ENABLED
     # 虚拟机配置(独立于 cluster.conf): source vm-nodes.conf 提供 VM 创建/网络变量
     vm_conf_load
+}
+
+# ---------------- Ceph 安装条件检测(供回退判定) ----------------
+# 检测当前环境是否**具备安装 Ceph** 的条件, 供 deploy-cluster.sh 预检在
+# CEPH_FALLBACK_TO_LOCALPATH=true 时决定是否回退到 local-path 模式。
+# 返回 0=具备(可装 ceph), 1=不具备(可回退); 不满足项输出到 stdout 供提示。
+# 判定(与 02_ceph.sh / 03_ceph_csi.sh 的前置校验一致):
+#   · external: CEPH_MONITORS 与 CEPH_KEYRING 必须非空
+#   · internal: rook manifest(operator.yaml/csi-operator.yaml)存在;
+#     存储节点数 ≥ CEPH_MIN_NODES; 至少一台节点有裸盘(CEPH_DATA_DISKS 显式 或
+#     自动检测到); lvm2 离线包或节点已装 lvm2(仅检查离线包目录, 不 SSH 探测)
+ceph_installable_check() {
+    local _miss=""
+    # external 模式: monitors + keyring
+    if [ "${CEPH_MODE:-internal}" = "external" ]; then
+        [ -n "${CEPH_MONITORS:-}" ] || _miss="${_miss} CEPH_MONITORS"
+        [ -n "${CEPH_KEYRING:-}" ] || _miss="${_miss} CEPH_KEYRING"
+        if [ -n "${_miss}" ]; then
+            echo "外部 Ceph 参数缺失:${_miss}"
+            return 1
+        fi
+        return 0
+    fi
+    # internal 模式: manifest + 存储节点数 + 裸盘 + lvm2 离线包
+    if [ ! -f "${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}/operator.yaml" ] \
+        || [ ! -f "${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}/csi-operator.yaml" ]; then
+        echo "Rook manifest 缺失(${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook})"
+        return 1
+    fi
+    # 存储节点数(与 02_ceph.sh 一致: CEPH_NODES 显式或全部 NODES)
+    local _cn=0 _hn line
+    if [ -n "${CEPH_NODES:-}" ]; then
+        for _hn in ${CEPH_NODES//,/ }; do [ -n "${_hn}" ] && _cn=$((_cn+1)); done
+    else
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            node_parse "${line}"
+            [ -n "${NODE_HOSTNAME}" ] && _cn=$((_cn+1))
+        done
+    fi
+    if [ "${_cn}" -lt "${CEPH_MIN_NODES:-3}" ]; then
+        echo "存储节点 ${_cn} 台 < CEPH_MIN_NODES=${CEPH_MIN_NODES:-3}"
+        return 1
+    fi
+    # 裸盘(显式 CEPH_DATA_DISKS 非空即视为具备; 自动检测需 SSH, 预检阶段不探测 → 显式才判为具备)
+    if [ -z "${CEPH_DATA_DISKS:-}" ]; then
+        echo "未显式指定 CEPH_DATA_DISKS(自动检测需节点 SSH, 预检不探测)"
+        return 1
+    fi
+    # lvm2 离线包(仅检查目录, 不 SSH)
+    if [ ! -d "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/packages" ] \
+        || ! ls "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/packages"/lvm2_*.deb >/dev/null 2>&1; then
+        echo "lvm2 离线包缺失(packages/ 无 lvm2_*.deb)"
+        return 1
+    fi
+    return 0
 }
 
 # ---------------- 指定节点过滤(--only) ----------------
