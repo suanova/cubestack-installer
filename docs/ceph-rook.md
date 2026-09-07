@@ -194,3 +194,17 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 `patch-playbooks/install-packages.yml`(lvm2 离线安装, cubestack-offline.sh 自动挂载)。
 
 > 更完整的手工操作手册(池播种/PG 调优/CephFS/RGW/快照/风险)见参考设计文档(按 Rook v1.20.2 官方 + 生产实践编写)。
+
+### 3.2 条件不足自动回退 local-path(CEPH_FALLBACK_TO_LOCALPATH)
+
+`CEPH_ENABLED=true` 但实际不具备 ceph 安装条件时,默认**硬失败并提示**(防掩盖配置错误)。
+设 `CEPH_FALLBACK_TO_LOCALPATH=true` 可让部署**自动降级到 local-path 模式**:
+
+- 预检阶段检测条件(internal: rook manifest / 存储节点≥CEPH_MIN_NODES / 显式 CEPH_DATA_DISKS /
+  lvm2 离线包; external: CEPH_MONITORS + CEPH_KEYRING)
+- 不足 → 自动置 `REGISTRY_STORAGE_CLASS=local-path` + `LOCAL_PATH_ENABLED=true` + 跳过 ceph/ceph_csi
+- registry 等下游用 local-path 正常部署, 部署不中断
+- 条件备齐后: 设回 `CEPH_ENABLED=true` + `CEPH_FALLBACK_TO_LOCALPATH=false` 重跑即可
+
+> ⚠ 回退在 k8s_deploy **之前**的预检阶段生效, 保证 local-path-provisioner 随 k8s 一起部署;
+> 若 k8s_deploy 已跑过(local-path 未装), 回退后需 `--fresh` 或手工补 local-path SC。

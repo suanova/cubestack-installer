@@ -28,7 +28,9 @@ load_config
 
 # ---- 开关 ----
 [ "${CEPH_CSI_ENABLED:-false}" = "true" ] || { say "CEPH_CSI_ENABLED=false, 跳过 Ceph CSI"; exit 0; }
-[ "${CEPH_ENABLED:-false}" = "true" ] || { err "Ceph CSI 依赖 Ceph 存储底座(CEPH_ENABLED=true 先部署模块 ceph)"; exit 1; }
+# CEPH_ENABLED=false → 跳过(含 CEPH_FALLBACK_TO_LOCALPATH 回退场景; 用户显式 ceph 但未启用底座时静默跳过,
+# 由 deploy-cluster 预检的 ceph 条件检测给出指引, 避免回退后 ceph_csi 硬失败拖垮部署)。
+[ "${CEPH_ENABLED:-false}" = "true" ] || { say "CEPH_ENABLED=false, 跳过 Ceph CSI(无 Ceph 存储底座)"; exit 0; }
 
 init_remote_kubectl || exit 1
 
