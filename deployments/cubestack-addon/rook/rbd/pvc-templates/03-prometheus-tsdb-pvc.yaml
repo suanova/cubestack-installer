@@ -1,0 +1,21 @@
+# ============================================================
+# Prometheus TSDB(§8.5)
+# 本地 TSDB: 单写者 + WAL/compaction 延迟敏感 → RBD 块设备 + 本地文件系统。
+#   StorageClass: ceph-rbd-durable(Retain, 防误删指标历史)
+#   VolumeMode: Filesystem(RBD 块上格式化 ext4)
+#   AccessMode: RWO(单实例独占; HA 2 副本 = 各一块独立 RWO, volumeClaimTemplates 生成)
+# 不使用 CephFS(共享语义无收益)/ 对象存储(仅 Thanos 远程归档)。
+# ============================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-tsdb
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  storageClassName: ceph-rbd-durable
+  resources:
+    requests:
+      storage: 100Gi

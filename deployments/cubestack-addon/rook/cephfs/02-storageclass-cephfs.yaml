@@ -1,0 +1,50 @@
+# ============================================================
+# CephFS StorageClass 两变体(§7.7-7.8 对齐)
+#   cephfs-ephemeral(Delete/Immediate)  工作区动态 CephFS PVC(删 PVC → subvolume 随删)
+#   cephfs-durable(Retain/Immediate)    平台共享资产(Marketplace; 删 PVC 保留 subvolume)
+# 各含 4 对 secret; fsName=cephfs, pool=cephfs-data0。
+# group 路由: 需要把 PVC 落进指定 subvolumegroup 时, 将 clusterID 改为该 group 的
+#   status.info.clusterID(见 docs §7.7 note)。
+# 模板变量: __NAMESPACE__(由 03_ceph_csi.sh sed 替换)
+# ============================================================
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: cephfs-ephemeral
+provisioner: rook-ceph.cephfs.csi.ceph.com
+parameters:
+  fsName: cephfs
+  pool: cephfs-data0
+  clusterID: rook-ceph
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-cephfs-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-cephfs-node
+  csi.storage.k8s.io/node-stage-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-cephfs-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/node-expand-secret-name: rook-csi-cephfs-node
+  csi.storage.k8s.io/node-expand-secret-namespace: __NAMESPACE__
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: cephfs-durable
+provisioner: rook-ceph.cephfs.csi.ceph.com
+parameters:
+  fsName: cephfs
+  pool: cephfs-data0
+  clusterID: rook-ceph
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-cephfs-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-cephfs-node
+  csi.storage.k8s.io/node-stage-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-cephfs-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/node-expand-secret-name: rook-csi-cephfs-node
+  csi.storage.k8s.io/node-expand-secret-namespace: __NAMESPACE__
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: Immediate

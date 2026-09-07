@@ -1,0 +1,20 @@
+# ============================================================
+# CephBlockPool: rbd-pool(§7.1)
+# VM 盘与 Golden Image 的块存储 pool。
+# 模板变量: __NAMESPACE__ / __REPLICAS__ / __MIN_SIZE__(由 03_ceph_csi.sh sed 替换)
+# ============================================================
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: rbd-pool
+  namespace: __NAMESPACE__
+spec:
+  failureDomain: host
+  replicated:
+    size: __REPLICAS__
+    requireSafeReplicaSize: true
+  enableCrushUpdates: true
+  parameters:
+    min_size: "__MIN_SIZE__"
+  compressionMode: none
+  application: rbd

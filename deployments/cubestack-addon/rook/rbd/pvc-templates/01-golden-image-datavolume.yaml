@@ -1,0 +1,23 @@
+# ============================================================
+# Golden Image 上传(§8.1)
+# Golden Image 用 RBD Block(RWO, 只读 clone 源)。
+# 上传: CDI http 源(也可 kubectl virt image-upload 上传本地镜像)。
+# 约定: 命名为 <distro>-<version>-img, 保持 RWO + 只读, 只作 clone 源。
+# SC: ceph-rbd-ephemeral-immediate(Immediate: PVC 创建即分配, 等 CDI 填充)。
+# ============================================================
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: ubuntu-24.04-server-amd64-img
+  namespace: default
+spec:
+  source:
+    http:
+      url: "http://<image-server>/images/ubuntu-24.04.qcow2"   # 镜像源, 替换为实际地址
+  storage:
+    accessModes: [ReadWriteOnce]
+    volumeMode: Block
+    storageClassName: ceph-rbd-ephemeral-immediate
+    resources:
+      requests:
+        storage: 4Gi
