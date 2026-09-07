@@ -462,8 +462,10 @@ else
                 _SECRET_FSID="$( (SSH "${K} -n ${CEPH_NAMESPACE} get secret rook-ceph-mon -o jsonpath='{.data.fsid}' 2>/dev/null" || true) | base64 -d 2>/dev/null )"
                 ok "  rook-ceph-mon secret 已从备份恢复(fsid=${_SECRET_FSID:-?}) → Rook 将认领旧 OSD 数据"
                 # ★ 恢复 mon store(在 CR 应用前, 让新 mon 以旧 osdmap epoch 启动)
+                #   --force: 整 ns 重建认领场景必须清掉节点残留 mon-*(可能来自更早部署,
+                #   osdmap epoch 与备份不一致), 再从备份恢复当时实际布局的 mon store。
                 say "  恢复 mon store(各节点 /var/lib/rook/mon-*, 使新 mon osdmap 与 OSD 缓存一致)..."
-                if bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" restore-monstore; then
+                if bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" restore-monstore --force; then
                     ok "  mon store 已恢复 → 新 mon 将以旧 osdmap epoch 启动, OSD 可正常 boot"
                     _CEPH_RESTORED_MONSTORE=1
                 else
@@ -537,9 +539,23 @@ else
             else
                 # ★ 2026-09-07: 认领模式且已恢复 mon store(_CEPH_RESTORED_MONSTORE=1)时
                 #   **绝不能清 mon-*** —— 新 mon 要靠恢复的 store 拿到旧 osdmap epoch 才能让 OSD boot。
-                #   仅当未恢复 mon store(纯保留数据、无整 ns 重建)时才清旧 mon-*(避免旧 monmap 死锁)。
+                #   但需**按当前节点名修正布局**: 备份 tar 按当时实际 mon 分布(如 master01[mon-b]),
+                #   重装后 Rook 生成的 mon-a/b/c 可能落到不同节点。若某节点残留了与备份布局
+                #   不一致的 mon-*(如 master01 上的 mon-a, 其 store 来自本集群上次部署, epoch 与
+                #   备份不一致 → 复用死锁), 必须删除, 只保留该节点备份 tar 里存在的 mon。
                 if [ "${_CEPH_RESTORED_MONSTORE:-0}" = "1" ]; then
-                    say "  已恢复 mon store, 跳过 mon-* 清理(新 mon 将复用恢复的 store)"
+                    # 只处理有 mon store 备份的节点(force 恢复过的); 用备份 tar 里存在的 mon 名单
+                    # 过滤该节点 /var/lib/rook/mon-*, 删掉多余的
+                    _BK_MONS="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${FIRST_MASTER}" \
+                        "sudo tar tzf ${BACKUP_DIR}/current/monstore-${_hn}.tar.gz 2>/dev/null | grep -oE '^mon-[a-d]' | sort -u | tr '\n' ' '")"
+                    if [ -n "${_BK_MONS}" ]; then
+                        say "  ${_hn}: 备份 mon=[${_BK_MONS}], 清理不一致残留 ..."
+                        node_ssh "${_ip}" "${SSH_USER:-ubuntu}" \
+                            "for d in /var/lib/rook/mon-*; do [ -e \"\$d\" ] || continue; bn=\$(basename \$d); case \" ${_BK_MONS} \" in *\" \$bn \"*) : ;; *) sudo rm -rf \"\$d\" && echo \"    删残留 \${bn}\" ;; esac; done" 2>/dev/null || true
+                    else
+                        # 该节点无备份 mon(如纯 worker)→ 直接清掉其残留(不影响恢复)
+                        node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-* 2>/dev/null" || true
+                    fi
                 else
                     say "  清理 ${_hn} 残留 mon store(/var/lib/rook/mon-*, 全新 mon 状态)..."
                     node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-*" || warn "    ${_hn} mon store 清理失败(节点全新无残留可忽略)"
