@@ -94,9 +94,15 @@ fi
 #   csi-operator 仍按需安装(可连外部 Ceph: cluster.conf 设 CEPH_EXTERNAL_MONITORS)。
 CEPH_MIN_NODES="${CEPH_MIN_NODES:-3}"
 _CEPH_SKIP_CLUSTER=0
-if [ "${#CEPH_NODE_HOSTS[@]}" -lt "${CEPH_MIN_NODES}" ]; then
+# ★ CEPH_MODE=external(外部 Ceph 接入) → 不创建集群内 CephCluster, 仅部署 operator/csi-operator,
+#   由 ceph_csi 模块经 CephConnection 连外部集群。兼容旧配置: 仅设 CEPH_EXTERNAL_MONITORS 时
+#   load_config 已把 CEPH_MODE 归一化为 external。
+if [ "${CEPH_MODE:-internal}" = "external" ]; then
+    say "CEPH_MODE=external → 不创建集群内 CephCluster(由 ceph_csi 模块经 ceph-csi-operator 接入外部 Ceph: ${CEPH_MONITORS:-<未配置>})"
+    _CEPH_SKIP_CLUSTER=1
+elif [ "${#CEPH_NODE_HOSTS[@]}" -lt "${CEPH_MIN_NODES}" ]; then
     warn "存储节点仅 ${#CEPH_NODE_HOSTS[@]} 台(<${CEPH_MIN_NODES}), 不创建集群内 CephCluster(mon 法定人数不足)"
-    warn "  可选: ① 增加存储节点至 ≥${CEPH_MIN_NODES}; ② 或设 CEPH_EXTERNAL_MONITORS 连接外部 Ceph(见 docs/ceph-rook.md)"
+    warn "  可选: ① 增加存储节点至 ≥${CEPH_MIN_NODES}; ② 或设 CEPH_MODE=external 连接外部 Ceph(见 docs/ceph-rook.md)"
     _CEPH_SKIP_CLUSTER=1
 fi
 
@@ -137,6 +143,9 @@ if [ "${_LVM_DEB_PRESENT}" = "0" ]; then
     warn "  lvm2 离线包未就绪, 但存储节点已在线安装 lvm, 继续(重启后逻辑卷激活依赖已满足)"
 fi
 
+# ★ external 模式(CEPH_MODE=external): 不涉及本地裸盘/覆盖确认, 跳过裸盘选择与安全确认段;
+#   仅 internal(集群内 Rook-Ceph)需要。operator/csi-operator 部署仍执行(供 CephConnection 使用)。
+if [ "${CEPH_MODE:-internal}" != "external" ]; then
 # ---------------- 2) 裸盘选择(显式指定 或 自动检测) ----------------
 # 需求: 裸盘可在 cluster.conf 显式指定(CEPH_DATA_DISKS); 未指定则自动检测。
 #   explicit 格式: "hostname:盘名1,盘名2;hostname2:盘名3" —— hostname 可省略(无 ':' → 应用到全部存储节点,
@@ -251,14 +260,19 @@ if [ "${CEPH_ENABLE_MASTER_SCHEDULE:-true}" = "true" ]; then
         done
         [ -n "${_mhn}" ] || continue
         # 幂等: 有 taint 才去掉; 无 taint 直接 ok
-        if SSH "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf get node ${_mhn} -o jsonpath='{.spec.taints}' 2>/dev/null | grep -q 'control-plane'" 2>/dev/null; then
+        # (jsonpath 用命令替换取回, 避免双引号内 '$' 组合的解析坑)
+        _TAINTS="$( (SSH "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf get node ${_mhn} -o jsonpath={.spec.taints} 2>/dev/null" || true) )"
+        if printf '%s' "${_TAINTS}" | grep -q control-plane; then
             SSH "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes ${_mhn} node-role.kubernetes.io/control-plane- 2>/dev/null" \
                 && ok "  ${_mhn}(${_mip}) 已去掉 control-plane taint(master 可调度)" \
                 || warn "  ${_mhn}(${_mip}) 去 taint 失败(手动: kubectl taint nodes ${_mhn} node-role.kubernetes.io/control-plane-)"
         else
             ok "  ${_mhn}(${_mip}) 无 control-plane taint(已可调度)"
         fi
+        unset _TAINTS
     done
+fi
+
 fi
 
 # ---------------- 4) 存储节点准备(rbd 模块 + lvm2 + node label) ----------------
@@ -481,8 +495,27 @@ fi
 
 # ★ 节点<3 → 跳过集群内 CephCluster 创建(mon 法定人数不足; csi-operator 仍按需安装, 可连外部 Ceph)
 if [ "${_CEPH_SKIP_CLUSTER}" = "1" ]; then
-    say "  存储节点 <${CEPH_MIN_NODES}, 跳过生成 CephCluster CR(未创建集群内 CephCluster)"
-    say "  可选: 设 CEPH_EXTERNAL_MONITORS 由 ceph_csi 模块连接外部 Ceph 并创建 StorageClass"
+    if [ "${CEPH_MODE:-internal}" = "external" ]; then
+        say "  CEPH_MODE=external → 不创建集群内 CephCluster(由 ceph_csi 模块经 CephConnection 接入外部 Ceph: ${CEPH_MONITORS:-<未配置>})"
+        say "  operator/csi-operator 已部署; 等待 operator Ready(供 CephConnection/CSI 使用)..."
+        _OP_OK=0
+        for _oi in $(seq 1 30); do
+            _OP_RDY="$( (SSH "${K} -n ${CEPH_NAMESPACE} get deploy rook-ceph-operator -o jsonpath={.status.readyReplicas} 2>/dev/null" || true) )"
+            [ "${_OP_RDY}" = "1" ] && { _OP_OK=1; break; }
+            [ "$((_oi % 6))" -eq 0 ] && say "  rook-ceph-operator 未 Ready(等待第 ${_oi}/30 次)..."
+            sleep 10
+        done
+        unset _OP_RDY
+        if [ "${_OP_OK}" = "1" ]; then
+            ok "  rook-ceph-operator Ready(外部 Ceph 接入就绪, 继续 ceph_csi 模块)"
+        else
+            warn "  rook-ceph-operator 300s 内未 Ready(检查 operator pod 日志; ceph_csi 模块仍会重试)"
+        fi
+        unset _OP_OK _oi
+    else
+        say "  存储节点 <${CEPH_MIN_NODES}, 跳过生成 CephCluster CR(未创建集群内 CephCluster)"
+        say "  可选: 设 CEPH_MODE=external 由 ceph_csi 模块连接外部 Ceph 并创建 StorageClass"
+    fi
 else
     # ★ 全新部署(无现存 CephCluster)先清理各存储节点残留: 磁盘数据 + mon store + 遗留 rbd 设备。
     if [ -z "${_HAS_CC_NOW}" ]; then
@@ -777,10 +810,18 @@ fi   # _CEPH_SKIP_CLUSTER=1 → 跳过集群内 CephCluster 创建
 # ---------------- 8) 汇总 ----------------
 echo "---------------------------------------------"
 ok "Ceph 存储集群部署完成(Rook ${ROOK_VERSION:-v1.20.2} / Ceph ${CEPH_VERSION})"
-echo "  命名空间:    ${CEPH_NAMESPACE}   存储节点 label: ${CEPH_NODE_LABEL}"
-echo "  存储节点与裸盘:"
-for _hn in "${CEPH_NODE_HOSTS[@]}"; do echo "    ${_hn}: ${NODE_DISKS[${_hn}]:-<无>}"; done
-echo "  资源查看:    kubectl -n ${CEPH_NAMESPACE} get cephcluster,pods;  exec deploy/rook-ceph-tools -- ceph -s"
+echo "  命名空间:    ${CEPH_NAMESPACE}"
+if [ "${CEPH_MODE:-internal}" = "external" ]; then
+    echo "  模式:        CEPH_MODE=external(外部 Ceph, 无集群内 CephCluster)"
+    echo "  外部连接:    monitors=${CEPH_MONITORS:-<未配置>}  pool=${CEPH_POOL:-rbd}  user=${CEPH_USER:-admin}"
+    echo "  资源查看:    kubectl -n ${CEPH_NAMESPACE} get deploy,cephconnection,csi.ceph.io"
+    echo "  下一步:      CEPH_CSI_ENABLED=true 部署模块 ceph_csi(创建 StorageClass ceph-block 指向外部 Ceph)"
+else
+    echo "  存储节点 label: ${CEPH_NODE_LABEL}"
+    echo "  存储节点与裸盘:"
+    for _hn in "${CEPH_NODE_HOSTS[@]}"; do echo "    ${_hn}: ${NODE_DISKS[${_hn}]:-<无>}"; done
+    echo "  资源查看:    kubectl -n ${CEPH_NAMESPACE} get cephcluster,pods;  exec deploy/rook-ceph-tools -- ceph -s"
+fi
 echo "  下一步:      CEPH_CSI_ENABLED=true 部署模块 ceph_csi(创建 rbd-pool + StorageClass ceph-block)"
 echo "  registry 后端: REGISTRY_STORAGE_CLASS=ceph-block 时 registry PVC 走 ceph RBD(替代 local-path)"
 echo "  使用文档:    docs/ceph-rook.md"

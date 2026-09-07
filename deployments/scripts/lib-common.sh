@@ -412,6 +412,29 @@ load_config() {
         REGISTRY_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP}:${REGISTRY_PORT:-5000}}"
     fi
     export REGISTRY_DIRECT
+    # ---------------- Ceph 模式统一归一化(2026-09-07 双模式) ----------------
+    # CEPH_MODE ∈ {internal, external}:
+    #   · internal(默认) = 集群内 Rook-Ceph, 部署 CephCluster CR(现有行为);
+    #   · external       = 不创建集群内 CephCluster, 由 ceph_csi 模块经 ceph-csi-operator
+    #                     的 CephConnection 接入外部已有 Ceph 集群。
+    # 兼容旧配置: 仅设了 CEPH_EXTERNAL_MONITORS(旧外部模式开关)→ 自动视为 external,
+    #   并把 CEPH_EXTERNAL_POOL/USER/KEYRING 迁移到新变量 CEPH_POOL/USER/KEYRING。
+    # 统一由本处归一化, 各模块只读 CEPH_MODE/CEPH_MONITORS/CEPH_POOL/CEPH_USER/CEPH_KEYRING。
+    if [ "${CEPH_MODE:-internal}" != "external" ]; then
+        if [ -n "${CEPH_EXTERNAL_MONITORS:-}" ]; then
+            CEPH_MODE="external"
+            CEPH_MONITORS="${CEPH_MONITORS:-${CEPH_EXTERNAL_MONITORS}}"
+            CEPH_POOL="${CEPH_POOL:-${CEPH_EXTERNAL_POOL:-rbd}}"
+            CEPH_USER="${CEPH_USER:-${CEPH_EXTERNAL_USER:-admin}}"
+            CEPH_KEYRING="${CEPH_KEYRING:-${CEPH_EXTERNAL_KEYRING:-}}"
+        else
+            CEPH_MODE="internal"
+        fi
+    fi
+    # external 模式下统一兜底默认值(显式 CEPH_MODE=external 未设 CEPH_POOL/USER 时也生效)
+    CEPH_POOL="${CEPH_POOL:-rbd}"
+    CEPH_USER="${CEPH_USER:-admin}"
+    export CEPH_MODE CEPH_MONITORS CEPH_POOL CEPH_USER CEPH_KEYRING
     # ---------------- local-path / ceph 二选一(互斥, 集中派生) ----------------
     # 单一事实来源 = CEPH_ENABLED:
     #   · CEPH_ENABLED=true  → registry 后端强制 ceph-block, 并关闭 local-path(ceph 替代 local-path,

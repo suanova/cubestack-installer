@@ -85,6 +85,37 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps ceph,ceph_csi
 > 设 `REGISTRY_STORAGE_CLASS=ceph-block` 后 PVC 会等待 `ceph-block` SC 出现自动绑定;
 > 若 registry 已用 local-path 建好 PVC, 删除旧 PVC(registry 重建)即可切到 ceph。
 
+### 3.1 双模式: 集群内 Rook-Ceph / 外部已有 Ceph(CEPH_MODE)
+
+`CEPH_MODE` 统一开关二选一(默认 internal, 兼容旧配置自动迁移):
+
+| 模式 | CEPH_MODE | 行为 |
+|---|---|---|
+| **集群内(默认, 现有实现)** | `internal` | 部署 CephCluster CR + 本地 OSD(裸盘检测/确认/15 OSD), registry 走集群内 ceph-block |
+| **外部接入** | `external` | **不创建集群内 CephCluster**, 02 仅部署 rook operator/csi-operator; 03 经 ceph-csi-operator 的 `CephConnection` 连外部已有 Ceph, 建指向外部的 `StorageClass ceph-block` |
+
+**external 模式配置**(cluster.conf):
+```bash
+CEPH_ENABLED=true
+CEPH_CSI_ENABLED=true
+CEPH_MODE=external
+CEPH_MONITORS="10.66.1.21:6789,10.66.1.22:6789"   # 外部 Ceph monitors(必填)
+CEPH_POOL="rbd"                                    # 外部 RBD pool(外部集群已有)
+CEPH_USER="admin"                                  # 外部认证用户
+CEPH_KEYRING="AQCxxx=="                            # 外部认证 keyring(必填)
+REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-block(与 internal 一致)
+```
+
+**external 模式下**:
+- `02_ceph.sh` 跳过裸盘检测/覆盖确认/CR 生成, 仅部署 operator + csi-operator 并等 operator Ready
+- `03_ceph_csi.sh` 创建 `CephConnection` + `rook-csi-rbd-*` secret + `StorageClass ceph-block`
+  (pool/认证指向外部), 跳过集群内 pool/cephfs/rgw 创建
+- `deploy-cluster.sh` 预检跳过裸盘/倒计时/已有集群清理, 只提示外部连接
+- registry 等下游继续用 `ceph-block` SC(无需改动)
+
+**兼容旧配置**: 仅设了旧变量 `CEPH_EXTERNAL_MONITORS`(旧外部开关)会自动视为 `external`,
+并把 `CEPH_EXTERNAL_POOL/USER/KEYRING` 迁移到 `CEPH_POOL/USER/KEYRING`(lib-common load_config 归一化)。
+
 > ⏱ **顺序与等待**: addon 阶段按文件序号执行 `metallb → ceph → ceph_csi → local_path → registry`,
 > 满足"ceph cluster → ceph-csi operator → registry"的依赖链:
 > - `02_ceph` 等 `cephcluster phase=Ready` + `ceph -s HEALTH_OK`(最长 600s);
