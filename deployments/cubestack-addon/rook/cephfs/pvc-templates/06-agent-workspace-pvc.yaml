@@ -1,0 +1,21 @@
+# ============================================================
+# Agent 独立工作区(§11.4)
+# Agent 不挂 DevEnvironment 的 /workspace —— 使用自己在 cephfs-ephemeral 下
+# 的独立 RWO PVC/subvolume, 与用户开发环境隔离:
+#   · RWO + cephfs-ephemeral: agent 独立 subvolume(ephemeral group 下)
+#   · 生命周期独立: 删 agent PVC → 其 subvolume 随删, 不影响用户工作区
+# 模型访问参数同理由平台注入(reader 凭证 + S3 端点 + 桶名), 模型不挂载。
+# ============================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-<xxx>             # 示例: agent-code-reviewer
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  storageClassName: cephfs-ephemeral
+  resources:
+    requests:
+      storage: 20Gi

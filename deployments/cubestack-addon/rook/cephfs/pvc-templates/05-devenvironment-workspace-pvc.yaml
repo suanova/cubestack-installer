@@ -1,0 +1,22 @@
+# ============================================================
+# DevEnvironment /workspace(§11.1-§11.3)
+# 用户开发环境工作区: cephfs-ephemeral(Delete/Immediate) + RWX(多实例/多容器共享)。
+#   · PVC 创建即由 CSI 在 ephemeral group 下建 subvolume(§9.1)。
+#   · 模型**不挂载**进 /workspace 或 /models —— 模型以对象存 RGW 桶,
+#     Pod 只持只读访问参数(reader 凭证 + S3 端点 + 桶名, 平台注入), 避免
+#     对每个使用实例复制一份模型(§17)。模型读取/消费由引擎侧完成。
+# 工作区回收: 删 PVC → subvolume 随删(ephemeral group, Delete 语义)。
+# ============================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: workspace-<user>        # 示例: workspace-alice
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteMany
+  volumeMode: Filesystem
+  storageClassName: cephfs-ephemeral
+  resources:
+    requests:
+      storage: 100Gi
