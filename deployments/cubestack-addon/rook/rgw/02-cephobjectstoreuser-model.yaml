@@ -1,0 +1,28 @@
+# ============================================================
+# CephObjectStoreUser: rgw-model-admin / rgw-model-reader(§10.4)
+# 全局两个角色用户(非 per-model), 凭证 = 桶级授权锚:
+#   rgw-model-admin   全部模型桶 owner(建桶/上传/删桶/配额), 仅落平台侧
+#   rgw-model-reader  全部模型桶只读(由各桶 reader policy 授权, §10.3), 仅落引擎侧
+# 生成 Secret(命名模式 rook-ceph-object-user-<store>-<用户名>):
+#   kubectl -n rook-ceph get secret rook-ceph-object-user-s3-store-rgw-model-admin
+# 凭证分发: 复制到使用方命名空间并改短名(rgw-model-admin / rgw-model-reader),
+#   admin→platform(Controller/上传 Job), reader→引擎命名空间(一次全引擎共享)。
+# 模板变量: __NAMESPACE__(由 03_ceph_csi.sh sed 替换)
+# ============================================================
+apiVersion: ceph.rook.io/v1
+kind: CephObjectStoreUser
+metadata:
+  name: rgw-model-admin       # 全部模型桶 owner: 建桶 / 上传 / 删桶 / 配额
+  namespace: __NAMESPACE__
+spec:
+  store: s3-store
+  displayName: RGW Model Admin
+---
+apiVersion: ceph.rook.io/v1
+kind: CephObjectStoreUser
+metadata:
+  name: rgw-model-reader      # 只读: 供引擎侧读取
+  namespace: __NAMESPACE__
+spec:
+  store: s3-store
+  displayName: RGW Model Reader

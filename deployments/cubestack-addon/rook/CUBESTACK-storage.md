@@ -9,11 +9,14 @@ deployments/cubestack-addon/rook/
 ├── rbd/        # CephBlockPool rbd-pool + RBD StorageClass 三变体(§7.1/§7.4-7.6)
 │   ├── 01-cephblockpool-rbd-pool.yaml
 │   └── 02-storageclass-rbd.yaml      # ceph-rbd-ephemeral / -immediate / -durable
-├── cephfs/     # CephFilesystem cephfs + CephFS StorageClass 两变体(§7.2/§7.7-7.8)
+├── cephfs/     # CephFilesystem cephfs + CephFS StorageClass 两变体 + subvolume groups(§7.2/§7.7-7.8/§9)
 │   ├── 01-cephfilesystem.yaml
-│   └── 02-storageclass-cephfs.yaml   # cephfs-ephemeral / cephfs-durable
-└── rgw/        # CephObjectStore s3-store / RGW(§7.3)
-    └── 01-cephobjectstore-s3-store.yaml
+│   ├── 02-storageclass-cephfs.yaml   # cephfs-ephemeral / cephfs-durable
+│   └── 03-subvolumegroups.yaml       # ephemeral / durable group(§9.1)
+└── rgw/        # CephObjectStore s3-store / RGW + Model 仓库用户与桶策略(§7.3/§10)
+    ├── 01-cephobjectstore-s3-store.yaml
+    ├── 02-cephobjectstoreuser-model.yaml  # rgw-model-admin / rgw-model-reader(§10.4)
+    └── reader-policy.json                 # 桶只读策略模板(§10.3)
 ```
 
 ## 用途对照(§7)
@@ -28,6 +31,9 @@ deployments/cubestack-addon/rook/
 | `cephfs/02-*` | `cephfs-ephemeral`(Delete/Immediate) | 工作区动态 CephFS PVC §7.7 |
 | `cephfs/02-*` | `cephfs-durable`(Retain/Immediate) | 平台共享资产 §7.8 |
 | `rgw/01-*` | CephObjectStore `s3-store` | 对象存储/Model 仓库(preservePoolsOnDelete)§7.3 |
+| `cephfs/03-*` | CephFilesystemSubVolumeGroup `ephemeral`/`durable` | 工作区/平台共享生命周期划分(§9.1) |
+| `rgw/02-*` | CephObjectStoreUser `rgw-model-admin`/`rgw-model-reader` | Model 仓库两个全局角色(§10.4) |
+| `rgw/reader-policy.json` | 桶只读策略模板 | per-model 桶授权给 reader(§10.3) |
 
 > 手工 apply 亦可(`kubectl apply -f <file>`, 先替换 `__NAMESPACE__` 等为实际值),
 > 正常部署走 03_ceph_csi.sh 自动完成。

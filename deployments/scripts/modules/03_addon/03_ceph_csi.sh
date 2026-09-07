@@ -17,7 +17,9 @@
 #       ceph-rbd-ephemeral-immediate(Immediate/Delete) / ceph-rbd-durable(WFFC/Retain)
 #     · CEPHFS_ENABLED=true → CephFilesystem cephfs(activeCount 2/热备/防误删)+
 #       StorageClass cephfs-ephemeral(Delete/Immediate) / cephfs-durable(Retain/Immediate)
+#       + subvolume groups ephemeral/durable(§9.1 工作区/平台共享划分)
 #     · CEPH_RGW_ENABLED=true → CephObjectStore s3-store(preservePoolsOnDelete, min_size 2)
+#       + Model 仓库用户 rgw-model-admin/rgw-model-reader(§10.4)
 #   · registry 后端(需求 6): 把 REGISTRY_STORAGE_CLASS 设为 ceph-block 后,
 #     registry 的 PVC 走 ceph RBD —— 本模块须在 registry 配置模块之前执行(设计顺序见 docs/ceph-rook.md)。
 #   · 参考: docs/ceph-rook.md
@@ -182,6 +184,9 @@ if [ "${_CEPH_EXTERNAL}" = "0" ] && [ "${CEPHFS_ENABLED}" = "true" ]; then
     say "[3/4] 创建 CephFilesystem + cephfs StorageClass..."
     apply_remote "$(_ceph_yaml_file cephfs/01-cephfilesystem.yaml cephfs/02-storageclass-cephfs.yaml)" "cephfs" \
         && ok "  CephFilesystem cephfs + StorageClass cephfs-ephemeral/cephfs-durable 已创建(等 MDS Running)" || warn "  CephFS 创建失败"
+    # ★ CephFilesystemSubVolumeGroup: ephemeral(工作区)/ durable(平台共享)(§9.1)
+    apply_remote "$(_ceph_yaml_file cephfs/03-subvolumegroups.yaml)" "cephfs-svgroups" \
+        && ok "  CephFS subvolume groups ephemeral/durable 已创建(工作区/平台共享划分)" || warn "  CephFS subvolume groups 创建失败"
 fi
 
 # 可选项: RGW/S3 —— 仅集群内模式(外部 Ceph 由外部集群提供 RGW)
@@ -189,6 +194,10 @@ if [ "${_CEPH_EXTERNAL}" = "0" ] && [ "${CEPH_RGW_ENABLED}" = "true" ]; then
     say "[3/4] 创建 CephObjectStore(RGW/S3, 集群内)..."
     apply_remote "$(_ceph_yaml_file rgw/01-cephobjectstore-s3-store.yaml)" "rgw" \
         && ok "  CephObjectStore s3-store 已创建" || warn "  RGW 创建失败"
+    # ★ Model 仓库两个全局角色用户(§10.4): rgw-model-admin(owner)/ rgw-model-reader(只读),
+    #   凭证 Secret = rook-ceph-object-user-s3-store-<用户名>, 由平台复制到使用方命名空间。
+    apply_remote "$(_ceph_yaml_file rgw/02-cephobjectstoreuser-model.yaml)" "rgw-users" \
+        && ok "  RGW Model 用户 rgw-model-admin/rgw-model-reader 已创建(Model 仓库凭证)" || warn "  RGW Model 用户创建失败"
 
     # ★ RGW/S3 对外暴露(2026-09-06 新增): 复用 SERVICE_EXPOSE_MODE, 可用 CEPH_RGW_EXPOSE_MODE 覆盖:
     #   nodeport     → Service 改 NodePort(CEPH_RGW_NODEPORT 指定端口, 默认自动分配), 任意节点 IP:端口 可达
