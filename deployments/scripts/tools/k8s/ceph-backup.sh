@@ -103,19 +103,34 @@ cmd_save() {
         fi
         # 打包该节点全部 mon-* 目录(store.db 等), 按节点 hostname 命名存到备份机
         # ⚠ 通配符展开按 shell 当前目录, 必须先 cd 到 /var/lib/rook 再 tar(否则 mon-* 不展开)
-        ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${NODE_USER:-ubuntu}@${NODE_IP}" \
-            "sudo bash -c 'cd /var/lib/rook && tar czf /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz mon-* 2>/dev/null' && sudo chown \$(id -un) /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" \
-            && scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-                "${NODE_USER:-ubuntu}@${NODE_IP}:/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" "/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" \
-            && scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-                "/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/monstore-${NODE_HOSTNAME}.tar.gz" \
-            && SSH "cp ${BACKUP_DIR}/${ts}/monstore-${NODE_HOSTNAME}.tar.gz ${BACKUP_DIR}/current/monstore-${NODE_HOSTNAME}.tar.gz" \
-            && _MON_SAVED=1 \
-            || warn "  ${NODE_HOSTNAME} mon store 打包/备份失败(认领恢复将缺该节点 mon)"
+        # ★ 间歇性 SSH 失败(网络抖动/连接数限制)会导致单节点缺 tar → 重试 2 次
+        _OK=0
+        for _try in 1 2 3; do
+            if ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${NODE_USER:-ubuntu}@${NODE_IP}" \
+                "sudo bash -c 'cd /var/lib/rook && tar czf /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz mon-* 2>/dev/null' && sudo chown \$(id -un) /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" \
+                && scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
+                    "${NODE_USER:-ubuntu}@${NODE_IP}:/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" "/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" \
+                && scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
+                    "/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/monstore-${NODE_HOSTNAME}.tar.gz" \
+                && SSH "cp ${BACKUP_DIR}/${ts}/monstore-${NODE_HOSTNAME}.tar.gz ${BACKUP_DIR}/current/monstore-${NODE_HOSTNAME}.tar.gz"; then
+                _OK=1; break
+            fi
+            [ "${_try}" -lt 3 ] && warn "  ${NODE_HOSTNAME} mon store 第 ${_try} 次失败, 重试..."
+            sleep 2
+        done
+        if [ "${_OK}" = "1" ]; then
+            _MON_SAVED=1
+        else
+            _MON_FAIL="${_MON_FAIL:-}${_MON_FAIL:+ }${NODE_HOSTNAME}"
+            warn "  ${NODE_HOSTNAME} mon store 备份失败(3 次; 认领恢复将缺该节点 mon)"
+        fi
         rm -f "/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz"
         ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${NODE_USER:-ubuntu}@${NODE_IP}" \
             "sudo rm -f /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" 2>/dev/null || true
     done
+    if [ -n "${_MON_FAIL:-}" ]; then
+        err "mon store 备份不完整, 失败节点: ${_MON_FAIL}(重跑 save 或手工打包该节点 mon-*); 恢复将缺这些节点 mon"
+    fi
     [ "${_MON_SAVED}" = "1" ] && ok "  已备份 mon store(各节点 /var/lib/rook/mon-*, 含 osdmap/PG map, 认领恢复必需)" \
         || warn "  未备份到任何 mon store(节点无 mon-*? 或 SSH 失败); 整 ns 重建后将无法认领旧 OSD"
     # 轮转清理
