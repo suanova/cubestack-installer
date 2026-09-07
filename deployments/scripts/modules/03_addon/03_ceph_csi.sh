@@ -86,12 +86,15 @@ fi
 # ★ 存储供给层 YAML 从 rook/{rbd,cephfs,rgw}/ 目录文件读取(§7 资源设计, 单一事实来源),
 #   经 sed 替换模板变量 __NAMESPACE__/__REPLICAS__/__MIN_SIZE__ 后 apply。
 #   文件由 tools/k8s/rook-fetch-manifests.sh 同源维护(见 cubestack-addon/rook/CUBESTACK-storage.md)。
-_ceph_yaml_file() {   # <subdir/file.yaml> → 变量替换后的 YAML(stdout), 失败返回 1
-    local f="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}/$1"
-    [ -f "${f}" ] || { err "存储供给层 YAML 缺失: ${f}(检查 cubestack-addon/rook/ 目录)"; return 1; }
-    sed -e "s|__NAMESPACE__|${CEPH_NAMESPACE}|g" \
-        -e "s|__REPLICAS__|${CEPH_POOL_REPLICAS}|g" \
-        -e "s|__MIN_SIZE__|${CEPH_POOL_MIN_SIZE}|g" "${f}"
+_ceph_yaml_file() {   # <subdir/file.yaml> [<file2.yaml>...] → 各文件变量替换后按序拼接(--- 分隔), 失败返回 1
+    local base="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}" f out=""
+    for f in "$@"; do
+        [ -f "${base}/${f}" ] || { err "存储供给层 YAML 缺失: ${base}/${f}(检查 cubestack-addon/rook/ 目录)"; return 1; }
+        out="${out}$(sed -e "s|__NAMESPACE__|${CEPH_NAMESPACE}|g" \
+            -e "s|__REPLICAS__|${CEPH_POOL_REPLICAS}|g" \
+            -e "s|__MIN_SIZE__|${CEPH_POOL_MIN_SIZE}|g" "${base}/${f}")"$'\n---\n'
+    done
+    printf '%s' "${out}"
 }
 
 say "[1/4] 确认 CSI 插件(ceph-csi-operator 调和)csi-rbdplugin / csi-cephfsplugin 就绪(最长 240s)..."
@@ -173,7 +176,7 @@ volumeBindingMode: WaitForFirstConsumer"
         || { err "  创建外部 CephConnection/StorageClass 失败"; exit 1; }
     unset _MONS _EXT_YAML
 else
-_CEPH_RBD_YAML="$(_ceph_yaml_file rbd/01-cephblockpool-rbd-pool.yaml rbd/02-storageclass-rbd.yaml)" || exit 1
+_CEPH_RBD_YAML="$(_ceph_yaml_file rbd/01-cephblockpool-rbd-pool.yaml rbd/02-storageclass-rbd.yaml rbd/03-storageclass-ceph-block-alias.yaml)" || exit 1
 apply_remote "${_CEPH_RBD_YAML}" "ceph-rbd" \
     && ok "  CephBlockPool rbd-pool + 3×RBD StorageClass(ephemeral WFFC / -immediate / durable Retain)已创建" \
     || { err "  创建 rbd-pool/StorageClass 失败"; exit 1; }

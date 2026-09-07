@@ -1,0 +1,29 @@
+# ============================================================
+# StorageClass: ceph-block(兼容别名, 2026-09-07)
+# §7.4 对齐后默认 RBD SC 名为 ceph-rbd-ephemeral; 但 k8s 阶段创建的 registry-pvc
+#   (kubespray registry addon)引用旧名 ceph-block —— 保留该兼容别名 SC(与
+#   ceph-rbd-ephemeral 同 pool/参数, WFFC/Delete), 使 registry 等现有组件不受
+#   SC 改名影响。同别名也兼容外部 CephConnection 场景。
+# 模板变量: __NAMESPACE__(由 03_ceph_csi.sh sed 替换)
+# ============================================================
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ceph-block
+provisioner: rook-ceph.rbd.csi.ceph.com
+parameters:
+  pool: rbd-pool
+  clusterID: rook-ceph
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-stage-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: __NAMESPACE__
+  csi.storage.k8s.io/node-expand-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-expand-secret-namespace: __NAMESPACE__
+  imageFormat: "2"
+  imageFeatures: layering,fast-diff,object-map,deep-flatten,exclusive-lock
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
