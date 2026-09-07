@@ -7,6 +7,7 @@
 |---|---|---|---|
 | `05-devenvironment-workspace-pvc.yaml` | DevEnvironment `/workspace`(§11.1-§11.3) | `cephfs-ephemeral` | RWX/Filesystem, ephemeral group 下 subvolume |
 | `06-agent-workspace-pvc.yaml` | Agent 独立工作区(§11.4) | `cephfs-ephemeral` | RWO/Filesystem, 与用户环境隔离 |
+| `07-skill-marketplace-pvc.yaml` | Skill Marketplace(§11.8) | `cephfs-durable` | RWX/Filesystem/Retain, durable group, 平台写/agent 只读 |
 
 ## 设计要点(§11)
 

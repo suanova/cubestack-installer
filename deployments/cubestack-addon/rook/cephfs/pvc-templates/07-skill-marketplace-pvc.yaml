@@ -1,0 +1,21 @@
+# ============================================================
+# Skill Marketplace PVC(§11.8)
+# 技能市场内容(skill 包/定义/插件/说明文档): 多消费者只读共享资产。
+#   StorageClass: cephfs-durable(Retain, durable group) —— 平台资产长期保留
+#   AccessMode: RWX(平台写, agent/用户只读; 单 PVC 全局共享)
+#   namespace: platform(使用方需与 PVC 同命名空间才能直接挂载)
+# 内容按子目录组织(/skills/<skill-name>/), quota 由 durable group 兜底(§9.1)。
+# Retain: 误删 PVC 数据仍在, 重建同名 PVC 可重新绑定(§11.7)。
+# ============================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: skill-marketplace
+  namespace: platform
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: cephfs-durable
+  resources:
+    requests:
+      storage: 100Gi

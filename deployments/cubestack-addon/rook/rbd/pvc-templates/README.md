@@ -9,6 +9,7 @@
 | `02-vm-disk-datavolume.yaml` | VM 根盘 + 数据盘(§8.2/§8.3) | `ceph-rbd-ephemeral` | RWX/Block/WFFC, 从 Golden Image 克隆 |
 | `03-prometheus-tsdb-pvc.yaml` | Prometheus 本地 TSDB(§8.5) | `ceph-rbd-durable` | RWO/Filesystem/Retain, 100Gi |
 | `04-harbor-db-pvc.yaml` | Harbor PostgreSQL/Redis(§8.6, 可选) | `ceph-rbd-durable` | RWO/Filesystem/Retain, 50Gi/10Gi |
+| `07-image-registry-pvc.yaml` | Image Registry 数据目录(§11.9) | `ceph-rbd-durable` | RWO/Filesystem/Retain, 2Ti(WFFC) |
 
 ## 设计要点(§8)
 

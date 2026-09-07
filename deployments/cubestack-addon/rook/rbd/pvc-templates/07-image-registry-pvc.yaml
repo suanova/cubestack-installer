@@ -1,0 +1,23 @@
+# ============================================================
+# Image Registry 数据目录 PVC(§11.9)
+# 镜像仓库数据(blob/manifest/索引): registry 单写者, 节点经 HTTP 拉取、不挂卷。
+#   StorageClass: ceph-rbd-durable(Retain, WFFC) —— 平台资产, 防误删
+#   VolumeMode: Filesystem(CSI 在 RBD 镜像上格式化 ext4)
+#   AccessMode: RWO(registry 单写者; HA 多副本共享时改 RWX)
+#   namespace: platform
+# WFFC: PVC 在第一个引用它的 registry workload 创建前保持 Pending —— 正常。
+# 元数据 DB(Harbor PG/Redis)是独立 RWO 盘(§8.6); KubeSpray builtin/Zot 无独立 DB。
+# ============================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: image-registry
+  namespace: platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  storageClassName: ceph-rbd-durable
+  resources:
+    requests:
+      storage: 2Ti

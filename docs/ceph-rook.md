@@ -208,3 +208,33 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 
 > ⚠ 回退在 k8s_deploy **之前**的预检阶段生效, 保证 local-path-provisioner 随 k8s 一起部署;
 > 若 k8s_deploy 已跑过(local-path 未装), 回退后需 `--fresh` 或手工补 local-path SC。
+
+## 9. 新设计指引(§9-§21, 存储资源已文件化)
+
+> 完整设计文档(`docs/ceph-workspace.md` 工作区 + `docs/ceph-backup-restore.md` 备份恢复)与
+> 资源 YAML(`deployments/cubestack-addon/rook/{rbd,cephfs,rgw}/`)对齐 §9-§21 规划。
+> 本文档 §1-§8 保留基础设计, 新能力汇总如下:
+
+### §9 CephFS subvolume groups(ephemeral / durable)
+- 资源: `rook/cephfs/03-subvolumegroups.yaml`(由 03_ceph_csi.sh 自动 apply)
+- 动态 SC 路由到 group: `tools/k8s/cephfs-group-route.sh apply`(取 group clusterID → patch SC)
+
+### §10 Model 仓库(RGW / S3)
+- `rook/rgw/01-cephobjectstore-s3-store.yaml`(preservePoolsOnDelete)+
+  `02-cephobjectstoreuser-model.yaml`(rgw-model-admin / rgw-model-reader)
+- per-model 桶只读策略: `rook/rgw/reader-policy.json`(建桶/授权 = Model Controller 职责, §10.3)
+
+### §11 工作区 / 平台共享 / 镜像
+- DevEnvironment /workspace(RWX): `cephfs/pvc-templates/05-*`
+- Agent(RWO 隔离): `cephfs/pvc-templates/06-*`
+- Skill Marketplace(RWX, durable): `cephfs/pvc-templates/07-*`
+- Image Registry(RBD Filesystem, Retain): `rbd/pvc-templates/07-*`
+
+### 命令清单(§21.1 对应)
+```bash
+# 03_ceph_csi.sh 已自动创建: rbd-pool / 5×SC / cephfs+subvolumegroups / s3-store+Model用户
+# 部署后补做:
+sudo ./deployments/scripts/tools/k8s/cephfs-group-route.sh apply   # SC 路由到 ephemeral/durable group
+kubectl apply -f <platform>/image-registry-pvc.yaml               # Image Registry(§11.9)
+kubectl apply -f <platform>/skill-marketplace-pvc.yaml            # Skill Marketplace(§11.8)
+```
