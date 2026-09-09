@@ -6,10 +6,12 @@
 # 背景: 容器 /opt/cubestack-installer 是独立副本(无 git, 不自动跟随仓库);
 #       docker cp 覆盖 overlay 可写层即可。
 # 流程(用户要求): 【本地修改完成 → sudo docker cp 到容器】—— 不在容器内跑 sed。
-#   cluster.conf: 本地先把 CEPH_ENABLED / CEPH_CSI_ENABLED 置 true(其余行不动),
-#   然后整体 docker cp; 容器内原配置先备份为 .bak.ceph。
+#   cluster.conf: ⚠ **默认不推送**(2026-09-08): 容器内 config 已含真实 Ceph keyring/
+#   monitors 等, 本地 cluster.conf 是占位符(`<占位: 如 AQxxx==>`, 防进 git), 推送会覆盖
+#   容器内真实密钥导致外部 Ceph 认证失败。需要推送时用 SYNC_CONF=1(推送前备份 .bak.ceph)。
 # ⚠ 需 sudo(本机 docker 无普通用户权限)。
 # 用法: sudo bash deployments/scripts/tools/offline/sync-to-container.sh
+#       sudo SYNC_CONF=1 bash deployments/scripts/tools/offline/sync-to-container.sh  # 强制推送 cluster.conf
 # ============================================================
 set -euo pipefail
 
@@ -26,13 +28,18 @@ need_root
 docker ps --filter "name=${CONTAINER}" --format '{{.Names}}' | grep -qx "${CONTAINER}" \
     || { echo "【错误】容器 ${CONTAINER} 未在运行(docker ps -a 查看)"; exit 1; }
 
-echo "── 0. 本地 cluster.conf: 启用 Ceph(仅翻两个开关行, 其余行不动) ──"
+echo "── 0. 本地 cluster.conf(默认不推送, 不动 ceph 开关)──"
 [ -f "${LOCAL_CONF}" ] || { echo "【错误】本地配置不存在: ${LOCAL_CONF}"; exit 1; }
-cp "${LOCAL_CONF}" "${LOCAL_CONF}.bak.ceph"
-sed -E 's|^(CEPH_ENABLED)="\$\{CEPH_ENABLED:-false\}".*|CEPH_ENABLED="\${CEPH_ENABLED:-true}"   # Ceph 存储底座(默认部署; sync-to-container)|; s|^(CEPH_CSI_ENABLED)="\$\{CEPH_CSI_ENABLED:-false\}".*|CEPH_CSI_ENABLED="\${CEPH_CSI_ENABLED:-true}"   # Ceph CSI(默认部署; sync-to-container)|' "${LOCAL_CONF}" > "${LOCAL_CONF}.tmp" \
-    && mv "${LOCAL_CONF}.tmp" "${LOCAL_CONF}"
-grep -nE '^(CEPH_ENABLED|CEPH_CSI_ENABLED)=' "${LOCAL_CONF}" | sed 's/^/  /'
-echo "  原配置已备份到 ${LOCAL_CONF}.bak.ceph"
+if [ "${SYNC_CONF:-0}" = "1" ]; then
+    echo "  SYNC_CONF=1 → 启用 Ceph(仅翻两个开关行, 其余行不动) ..."
+    cp "${LOCAL_CONF}" "${LOCAL_CONF}.bak.ceph"
+    sed -E 's|^(CEPH_ENABLED)="\$\{CEPH_ENABLED:-false\}".*|CEPH_ENABLED="\${CEPH_ENABLED:-true}"   # Ceph 存储底座(默认部署; sync-to-container)|; s|^(CEPH_CSI_ENABLED)="\$\{CEPH_CSI_ENABLED:-false\}".*|CEPH_CSI_ENABLED="\${CEPH_CSI_ENABLED:-true}"   # Ceph CSI(默认部署; sync-to-container)|' "${LOCAL_CONF}" > "${LOCAL_CONF}.tmp" \
+        && mv "${LOCAL_CONF}.tmp" "${LOCAL_CONF}"
+    grep -nE '^(CEPH_ENABLED|CEPH_CSI_ENABLED)=' "${LOCAL_CONF}" | sed 's/^/  /'
+    echo "  原配置已备份到 ${LOCAL_CONF}.bak.ceph"
+else
+    echo "  跳过(默认不推送 config, 保护容器内真实 keyring; 强制推送: SYNC_CONF=1)"
+fi
 
 echo ""
 echo "── 1. 同步代码文件(repo → 容器 ${CONTAINER}:${CT}) ──"
@@ -67,11 +74,16 @@ for f in "${FILES[@]}"; do
 done
 
 echo ""
-echo "── 2. 推送 cluster.conf(含 ceph 开关)──"
-# 先备份容器内原配置
-docker exec "${CONTAINER}" bash -c "cp ${CT_CONF} ${CT_CONF}.bak.ceph 2>/dev/null || true"
-docker cp "${LOCAL_CONF}" "${CONTAINER}:${CT_CONF}"
-echo "  已推送 ${LOCAL_CONF} → ${CT_CONF}(容器原配置备份 .bak.ceph)"
+echo "── 2. cluster.conf(默认不推送, 保留容器内真实 keyring)──"
+if [ "${SYNC_CONF:-0}" = "1" ]; then
+    # 先备份容器内原配置
+    docker exec "${CONTAINER}" bash -c "cp ${CT_CONF} ${CT_CONF}.bak.ceph 2>/dev/null || true"
+    docker cp "${LOCAL_CONF}" "${CONTAINER}:${CT_CONF}"
+    echo "  已推送 ${LOCAL_CONF} → ${CT_CONF}(容器原配置备份 .bak.ceph)"
+else
+    echo "  跳过推送: 容器内 config 保留(本地为占位 keyring, 覆盖会导致外部 Ceph 认证失败)"
+    echo "  容器内当前 ceph 配置:"; docker exec "${CONTAINER}" bash -c 'grep -nE "^(CEPH_MODE|CEPH_CSI_ENABLED|CEPH_MONITORS|CEPH_KEYRING|CEPHFS_KEYRING)=" '"${CT_CONF}" | sed 's/^/    /'
+fi
 
 echo ""
 echo "── 3. 清理断点续跑状态(建议 --fresh 重新部署)──"

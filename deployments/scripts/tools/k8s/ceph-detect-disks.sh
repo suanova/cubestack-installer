@@ -33,7 +33,10 @@ done
 
 CEPH_DETECT_EXCLUDE="${CEPH_DETECT_EXCLUDE:-^(sda|sr0|vda)$}"
 SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-[ -f "${SSH_KEY}" ] || { err "SSH 密钥不存在: ${SSH_KEY}(先 gen-ssh-key.sh + k8s_passwordless)"; exit 1; }
+# ★ 2026-09-07: 密钥缺失不再硬失败 —— 密码回退可完成检测(全新环境 k8s_passwordless 未跑 /
+#   容器未挂载密钥时); 密钥与节点密码都不可用才在逐节点处提示失败。
+[ -f "${SSH_KEY}" ] \
+    || warn "SSH 密钥不存在: ${SSH_KEY}(将尝试节点密码认证; 均失败请先 gen-ssh-key.sh + k8s_passwordless)"
 
 # 远端 lsblk 仅需读权限; 名称取相对名(vdb), 避免 /dev/mapper 等路径干扰
 NODE_SELECT=()
@@ -47,7 +50,7 @@ for line in "${NODES[@]:-}"; do
         done
         [ "${_hit}" = "1" ] || continue
     fi
-    NODE_SELECT+=("${NODE_HOSTNAME}|${NODE_IP}|${NODE_USER}")
+    NODE_SELECT+=("${NODE_HOSTNAME}|${NODE_IP}|${NODE_USER}|${NODE_PW}")
 done
 [ "${#NODE_SELECT[@]}" -gt 0 ] || { err "未匹配到任何节点(检查 NODES / --node)"; exit 1; }
 
@@ -107,12 +110,30 @@ for c in sorted(cands):
     print(c)
 '
 
+# 节点 SSH 取 lsblk JSON: 密钥优先, 失败回退密码(与 setup-passwordless.sh 同款 SSHPASS 模式)。
+# ★ 2026-09-07 修复: 全新环境(k8s_passwordless 尚未分发密钥)/容器未挂载密钥时,
+#   `ssh -i` 在全部节点失败 → 检测全空(表现为"裸盘: <未检测到>")。
+#   节点密码来自 NODES 第5字段(NODE_PW, node_parse 已归一为 SSH_DEFAULT_PASSWORD)。
+node_lsblk_json() {   # <user> <ip> <pw> → stdout=lsblk JSON(空=均失败)
+    local user="$1" ip="$2" pw="$3" out=""
+    if [ -f "${SSH_KEY}" ]; then
+        out="$(timeout 15 ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+            "${user}@${ip}" "lsblk -J -o NAME,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null" 2>/dev/null || true)"
+    fi
+    if [ -z "${out}" ] && [ -n "${pw}" ] && command -v sshpass >/dev/null 2>&1; then
+        out="$(timeout 15 env SSHPASS="${pw}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=8 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+            "${user}@${ip}" "lsblk -J -o NAME,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null" 2>/dev/null || true)"
+    fi
+    printf '%s' "${out}"
+}
+
 say "检测节点裸盘(排除系统盘; EXCLUDE=${CEPH_DETECT_EXCLUDE})..."
 for entry in "${NODE_SELECT[@]}"; do
-    hn="${entry%%|*}"; rest="${entry#*|}"; ip="${rest%%|*}"; user="${rest#*|}"
-    JSON="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${user}@${ip}" "lsblk -J -o NAME,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null" 2>/dev/null || echo '')"
-    [ -n "${JSON}" ] || { warn "  ${hn}(${ip}) 无法读取 lsblk(SSH/权限), 跳过"; continue; }
+    hn="${entry%%|*}"; rest="${entry#*|}"; ip="${rest%%|*}"
+    rest="${rest#*|}"; user="${rest%%|*}"; pw="${rest#*|}"
+    JSON="$(node_lsblk_json "${user}" "${ip}" "${pw}")"
+    [ -n "${JSON}" ] || { warn "  ${hn}(${ip}) 无法读取 lsblk(SSH 密钥/密码均失败), 跳过"; continue; }
     DISKS="$(parse_remote <<< "${JSON}" | tr '\n' ',')"; DISKS="${DISKS%,}"
     if [ -n "${DISKS}" ]; then
         if [ "${MACHINE}" = "1" ]; then

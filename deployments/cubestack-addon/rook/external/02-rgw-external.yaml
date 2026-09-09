@@ -1,0 +1,31 @@
+# ============================================================
+# RGW 外部 Service(供集群外 S3 访问, 如 Model 仓库 / 外部应用)
+# ★ 与 Rook 自管的 rook-ceph-rgw-s3-store(ClusterIP)并存; selector 匹配 RGW pod
+#   (app=rook-ceph-rgw, rgw=s3-store = CephObjectStore 名)。
+# 模板变量(sed 替换, 见 tools/k8s/ceph-expose-external.sh):
+#   __NAMESPACE__   → Ceph 命名空间(rook-ceph)
+#   __TYPE__        → NodePort | LoadBalancer
+#   __RGW_PORT__    → 对外端口(addr 规律; nodeport 模式=80, loadbalancer 模式=80; 可被空替换)
+#   __RGW_NODEPORT__ → nodeport 模式: 固定 NodePort(CEPH_RGW_NODEPORT 或规律 base+off);
+#                      空时该行被 sed 删除, 自动分配
+# ⚠ targetPort=8080: Rook RGW 容器实际监听 8080(rook 自管 svc 也是 80→8080);
+#   2026-09-09 修复: 原写 80 导致端点存在但后端无监听 → NodePort 30103 Connection refused。
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: rook-ceph-rgw-s3-store-external
+  namespace: __NAMESPACE__
+  labels:
+    app: rook-ceph-rgw-external
+    ceph-external-access: "true"
+spec:
+  type: __TYPE__
+  selector:
+    app: rook-ceph-rgw
+    rgw: s3-store
+  ports:
+    - name: rgw-http
+      port: __RGW_PORT__
+      targetPort: 8080
+      nodePort: __RGW_NODEPORT__

@@ -36,12 +36,14 @@ if [ "${REGISTRY_ENABLED:-0}" != "1" ] && [ "${REGISTRY_ENABLED:-false}" != "tru
     exit 0
 fi
 
-# 前置校验: registry 后端指定 ceph 但 Ceph 未启用 → PVC 永久 Pending, 直接中止给出指引
+# 前置校验: registry 后端指定 ceph 但 Ceph 体系未启用 → PVC 永久 Pending, 直接中止给出指引
+# ceph 体系 = CEPH_ENABLED(internal 自建)或 CEPH_CSI_ENABLED(external 接入外部 Ceph), 任一 true 即可。
 if [ -n "${REGISTRY_STORAGE_CLASS:-}" ] && [ "${REGISTRY_STORAGE_CLASS}" != "local-path" ] \
-    && [ "${CEPH_ENABLED:-false}" != "true" ]; then
-    err "REGISTRY_STORAGE_CLASS=${REGISTRY_STORAGE_CLASS} 但 CEPH_ENABLED!=true: registry 的 PVC 将永远 Pending"
-    err "  请任选其一: ① cluster.conf 设 CEPH_ENABLED=true(并先准备 ceph 离线镜像/裸盘, 见 docs/ceph-rook.md);"
-    err "  ② 改回 REGISTRY_STORAGE_CLASS=local-path"
+    && [ "${CEPH_ENABLED:-false}" != "true" ] && [ "${CEPH_CSI_ENABLED:-false}" != "true" ]; then
+    err "REGISTRY_STORAGE_CLASS=${REGISTRY_STORAGE_CLASS} 但 Ceph 未启用(CEPH_ENABLED/CEPH_CSI_ENABLED 均非 true): registry 的 PVC 将永远 Pending"
+    err "  请任选其一: ① cluster.conf 设 CEPH_ENABLED=true(集群内自建, 需先准备 ceph 离线镜像/裸盘, 见 docs/ceph-rook.md);"
+    err "  ② CEPH_MODE=external + CEPH_CSI_ENABLED=true + CEPH_MONITORS/CEPH_KEYRING 接入外部 Ceph(见 docs/ceph-rook.md);"
+    err "  ③ 改回 REGISTRY_STORAGE_CLASS=local-path"
     exit 1
 fi
 

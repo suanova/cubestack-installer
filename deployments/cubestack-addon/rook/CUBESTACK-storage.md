@@ -2,7 +2,8 @@
 
 本目录存放 **ceph_csi 模块(03_addon/03_ceph_csi.sh)apply 的存储供给层 YAML**(§7 资源设计),
 与 `docs/ceph-rook.md` / `docs/ceph-backup-restore.md` 对齐。文件由 03 模块读取后
-经 `sed` 替换 `__NAMESPACE__ / __REPLICAS__ / __MIN_SIZE__` 模板变量再 apply。
+经 `sed` 替换 `__NAMESPACE__ / __REPLICAS__ / __MIN_SIZE__` 模板变量再 apply;
+`external/` 由 `tools/k8s/ceph-expose-external.sh` 替换 `__TYPE__ / __MON_ID__ / __RGW_NODEPORT__` 后 apply。
 
 ```
 deployments/cubestack-addon/rook/
@@ -13,10 +14,13 @@ deployments/cubestack-addon/rook/
 │   ├── 01-cephfilesystem.yaml
 │   ├── 02-storageclass-cephfs.yaml   # cephfs-ephemeral / cephfs-durable
 │   └── 03-subvolumegroups.yaml       # ephemeral / durable group(§9.1)
-└── rgw/        # CephObjectStore s3-store / RGW + Model 仓库用户与桶策略(§7.3/§10)
-    ├── 01-cephobjectstore-s3-store.yaml
-    ├── 02-cephobjectstoreuser-model.yaml  # rgw-model-admin / rgw-model-reader(§10.4)
-    └── reader-policy.json                 # 桶只读策略模板(§10.3)
+├── rgw/        # CephObjectStore s3-store / RGW + Model 仓库用户与桶策略(§7.3/§10)
+│   ├── 01-cephobjectstore-s3-store.yaml
+│   ├── 02-cephobjectstoreuser-model.yaml  # rgw-model-admin / rgw-model-reader(§10.4)
+│   └── reader-policy.json                 # 桶只读策略模板(§10.3)
+└── external/   # Ceph 对外暴露 Service 模板(mon/RGW *-external, 供集群外 ceph-csi-operator 接入, §3.3)
+    ├── 01-mon-external.yaml               # rook-ceph-mon-<id>-external(type=__TYPE__ 占位)
+    └── 02-rgw-external.yaml               # rook-ceph-rgw-s3-store-external
 ```
 
 ## 用途对照(§7)
@@ -34,6 +38,8 @@ deployments/cubestack-addon/rook/
 | `cephfs/03-*` | CephFilesystemSubVolumeGroup `ephemeral`/`durable` | 工作区/平台共享生命周期划分(§9.1) |
 | `rgw/02-*` | CephObjectStoreUser `rgw-model-admin`/`rgw-model-reader` | Model 仓库两个全局角色(§10.4) |
 | `rgw/reader-policy.json` | 桶只读策略模板 | per-model 桶授权给 reader(§10.3) |
+| `external/01-*` | Service `rook-ceph-mon-<id>-external` | mon 对外暴露(6789, NodePort/LB, __TYPE__ 占位)§3.3 |
+| `external/02-*` | Service `rook-ceph-rgw-s3-store-external` | RGW 对外暴露(80, NodePort/LB)§3.3 |
 
 > 手工 apply 亦可(`kubectl apply -f <file>`, 先替换 `__NAMESPACE__` 等为实际值),
 > 正常部署走 03_ceph_csi.sh 自动完成。

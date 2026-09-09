@@ -169,6 +169,7 @@ _enable_persist() {   # <key,...>
         idx="$(module_index "${nk}")"
         [ "${idx}" -ge 0 ] || { err "未知模块: ${s}(可用 --list-steps 查看)"; exit 1; }
         tgl="${MODULE_TOGGLE[$idx]:-}"
+        tgl="${tgl%% *}"   # TOGGLE 多变量(空格分隔=OR)时持久化第一个(如 ceph → CEPH_ENABLED)
         if [ -z "${tgl}" ]; then
             warn "模块 ${nk} 无 cluster.conf 开关(TOGGLE 未定义, 如 verify 模块), 无法持久化; 请用 --steps ${s} 直接执行"
             continue
@@ -218,6 +219,7 @@ fi
 for i in "${!MODULE_KEY[@]}"; do
     tgl="${MODULE_TOGGLE[$i]:-}"
     [ -n "${tgl}" ] || continue
+    tgl="${tgl%% *}"   # TOGGLE 多变量(空格分隔=OR)时取第一个导出(如 ceph → CEPH_ENABLED; external 模式 ceph 的 CEPH_CSI_ENABLED 由 ceph_csi 导出)
     for k in "${RUN_STEPS[@]:-}"; do
         [ "${k}" = "${MODULE_KEY[$i]}" ] && { export "${tgl}=true"; break; }
     done
@@ -255,9 +257,9 @@ print_plan
 # ⚠ Ceph 部署前强制确认(倒计时, 防覆盖磁盘 double-check 的兜底):
 #   print_plan 的红底提醒无倒计时(纯提示); 02_ceph 模块内部的倒计时在 k8s 部署之后,
 #   k8s_deploy 已被断点标记 done 跳过时会丢失 —— 这里在**真正开始部署前**再打断一次:
-#   CEPH_ENABLED=true 且本次会执行 ceph 相关模块(k8s_deploy 或 ceph)时, sleep 倒计时
-#   CEPH_CONFIRM_SLEEP(默认 60s, 设 0 跳过)供人工 double-check 存储节点/裸盘。
-if [ "${CEPH_ENABLED:-false}" = "true" ]; then
+#   Ceph 启用(CEPH_ENABLED 或 CEPH_CSI_ENABLED)且本次会执行 ceph 相关模块(k8s_deploy 或 ceph)时,
+#   sleep 倒计时 CEPH_CONFIRM_SLEEP(默认 60s, 设 0 跳过)供人工 double-check 存储节点/裸盘。
+if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
     # ★ CEPH_FALLBACK_TO_LOCALPATH=true 时, 先检测 ceph 安装条件; 不足 → 自动回退 local-path
     #   (REGISTRY_STORAGE_CLASS=local-path + LOCAL_PATH_ENABLED=true + 跳过 ceph 模块)。
     #   仅显式启用才回退(防掩盖配置错误); 默认 false = 保持硬失败并给出指引。
@@ -271,9 +273,10 @@ if [ "${CEPH_ENABLED:-false}" = "true" ]; then
             echo -e "\033[41m\033[97m   ceph/ceph_csi 模块本次跳过; 条件备齐后设 CEPH_ENABLED=true + CEPH_FALLBACK_TO_LOCALPATH=false 重跑\033[0m"
             echo -e "\033[41m\033[97m================================================================================\033[0m"
             CEPH_ENABLED="false"
+            CEPH_CSI_ENABLED="false"
             REGISTRY_STORAGE_CLASS="local-path"
             LOCAL_PATH_ENABLED="true"
-            export CEPH_ENABLED REGISTRY_STORAGE_CLASS LOCAL_PATH_ENABLED
+            export CEPH_ENABLED CEPH_CSI_ENABLED REGISTRY_STORAGE_CLASS LOCAL_PATH_ENABLED
         fi
         unset _CEPH_MISS
     fi
@@ -339,7 +342,7 @@ if [ "${CEPH_ENABLED:-false}" = "true" ]; then
             # 自动检测(SSH 直连, 与 ceph 模块同工具); 节点免密未配置/无盘 → 降级提示
             _DETECT_ARGS=()
             for _h in "${_CEPH_CONFIRM_HOSTS[@]}"; do _DETECT_ARGS+=(--node "${_h}"); done
-            _DETECT_OUT="$(bash "${SCRIPT_DIR}/tools/k8s/ceph-detect-disks.sh" "${_DETECT_ARGS[@]}" -m 2>/dev/null)" || true
+            _DETECT_OUT="$(bash "${SCRIPT_DIR}/tools/k8s/ceph-detect-disks.sh" "${_DETECT_ARGS[@]}" -m)" || true   # stderr 透传: 显示检测过程与失败原因(SSH 失败/无裸盘)
             if [ -n "${_DETECT_OUT}" ]; then
                 while IFS= read -r _l; do
                     [ -z "${_l}" ] && continue
@@ -519,4 +522,17 @@ else
     echo "               · 测试环境无空闲地址时可用 nodeport(SERVICE_EXPOSE_MODE=nodeport)"
 fi
 echo "  下一步: 扩容用 --with-scale; 立即部署单个用 --steps gpu_operator,lws(...)(自动带基座); 预启用写入配置用 --enable ...(下次全量生效); 验证用 --steps verify"
+
+# ★ 外部 Ceph 接入信息(用户要求: 放安装末尾总结; 仅集群内 Ceph 且本次执行过暴露时提示)
+#   03_ceph_csi 已打印/导出, 此处收敛到"文件路径 + 单行入口", 不再重复打印含 key 的全文。
+if [ "${CEPH_ENABLED:-false}" = "true" ] && [ -f "${REPO_ROOT}/deployments/config/ceph-external-access.conf" ]; then
+    echo -e "${_C_BOLD}${_C_GREEN}★ 外部 ceph-csi operator 接入信息(完整配置在文件里):${_C_OFF}"
+    echo "  配置路径: ${REPO_ROOT}/deployments/config/ceph-external-access.conf"
+    echo "              拷贝到目标集群 cluster.conf 设 CEPH_MODE=external 即可接入;"
+    echo "              含 CEPH_MONITORS / CEPH_FSID / RBD(user+key+pool) / CephFS(user+key+fs) / RGW 端点"
+    echo "              入口(模式=${SERVICE_EXPOSE_MODE:-nodeport}: nodeport→IP+规律NodePort / metallb→VIP+Ceph原生端口6789):"
+    echo "              $(grep '^CEPH_MONITORS=' "${REPO_ROOT}/deployments/config/ceph-external-access.conf" 2>/dev/null | cut -d= -f2- | tr -d '\"')"
+    echo "  一键查看: cat ${REPO_ROOT}/deployments/config/ceph-external-access.conf"
+    echo "  5 层自检(含外部客户端协议级测试): bash ${SCRIPT_DIR}/tools/k8s/ceph-expose-external.sh status"
+fi
 echo "============================================="

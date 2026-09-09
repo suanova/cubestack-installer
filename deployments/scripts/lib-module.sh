@@ -20,7 +20,8 @@
 #   # PHASE: <env|k8s|addon>   阶段: env=环境准备 k8s=离线部署 addon=附加组件
 #   # DEFAULT: <0|1>           是否默认启用(0=需 --enable / TOGGLE / --steps)
 #   # REPEAT: <0|1>            1=可重复执行(每次执行且不写断点状态)
-#   # TOGGLE: <VAR>            (可选) cluster.conf 变量名, 值为 true 时自动启用
+#   # TOGGLE: <VAR> [VAR2...]  (可选) cluster.conf 变量名, 值为 true 时自动启用;
+#                              空格分隔多变量=OR(任一 true 即启用, 如 ceph: CEPH_ENABLED CEPH_CSI_ENABLED)
 #   # REQUIRES: <k1> [k2...]   (可选) 依赖模块: 执行前须已完成的模块 key 列表。
 #                              框架在 resolve_run_steps 后做稳定拓扑排序(无依赖模块保持
 #                              文件顺序), 保证新模块声明依赖即自动排对顺序, 无需改序号;
@@ -172,16 +173,21 @@ module_index() {
 }
 
 # 模块是否应默认启用: DEFAULT=1 或 TOGGLE 变量为 true/1/yes/on
+# TOGGLE 支持空格分隔多变量(OR 语义): 任一变量为 true → 启用。
+# 例: ceph 模块 `TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED` —— internal 自建靠 CEPH_ENABLED,
+#     external(接入外部 Ceph, CEPH_ENABLED=false)靠 CEPH_CSI_ENABLED 调度 ceph 装 operator/csi-operator。
 module_default_on() {
     local i="$1" tgl val
     [ "${MODULE_DEFAULT[$i]:-0}" = "1" ] && return 0
     tgl="${MODULE_TOGGLE[$i]:-}"
     [ -n "${tgl}" ] || return 1
-    val="${!tgl:-false}"
-    case "${val,,}" in
-        true|1|yes|on) return 0 ;;
-        *) return 1 ;;
-    esac
+    for tgl in ${tgl}; do
+        val="${!tgl:-false}"
+        case "${val,,}" in
+            true|1|yes|on) return 0 ;;
+        esac
+    done
+    return 1
 }
 
 # ---------------- 运行步骤解析 ----------------
@@ -330,7 +336,13 @@ resolve_run_steps() {
 _topo_sort_requires() {
     local -A _remaining=() _done=()
     local _k _i _d _progress _out=() _cycle
-    for _k in "${RUN_STEPS[@]:-}"; do _remaining["${_k}"]=1; done
+    # ⚠ 空 RUN_STEPS(--fresh 清状态/全跳过)时 `"${RUN_STEPS[@]:-}"` 会展开成一个空元素,
+    #   关联数组 _remaining[""] 赋值 → bash 5.1 报 bad array subscript → 拓扑排序崩溃,
+    #   导致 RUN_STEPS 残留未排序/半填充, 调度顺序错乱(历史事故: ceph_csi 排在 k8s_deploy 前)。
+    #   先判空再遍历, 空数组直接返回 0(无模块可排)。
+    if [ "${#RUN_STEPS[@]}" -gt 0 ]; then
+        for _k in "${RUN_STEPS[@]}"; do _remaining["${_k}"]=1; done
+    fi
     # 先校验全部 REQUIRES 引用存在(任何模块的 REQUIRES 都必须命中已知模块)
     for _i in "${!MODULE_KEY[@]}"; do
         for _d in ${MODULE_REQUIRES[$_i]:-}; do

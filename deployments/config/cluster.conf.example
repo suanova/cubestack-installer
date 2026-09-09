@@ -91,12 +91,7 @@ CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI RBD/RGW/CephF
 # CEPH_FALLBACK_TO_LOCALPATH: CEPH_ENABLED=true 但 ceph 安装条件不足(manifest/裸盘/lvm2/
 #   external 参数缺失)时, 自动回退到 local-path 模式(registry 用 local-path, 跳过 ceph 模块)。
 #   默认 false=保持硬失败并提示; true=条件不足自动降级, 部署不中断(防掩盖配置错误, 显式启用才回退)。
-# ---- Ceph 双模式(CEPH_MODE, 二选一; 见 4.3) ----
-# CEPH_MODE=internal(默认): 集群内 Rook-Ceph, 部署 CephCluster CR + 本地 OSD(现有实现);
-# CEPH_MODE=external: 不创建集群内 CephCluster, 由 ceph_csi 模块经 ceph-csi-operator 的
-#   CephConnection 接入**外部已有 Ceph 集群**, 创建指向外部的 StorageClass ceph-block。
-#   (兼容旧配置: 仅设了 CEPH_EXTERNAL_MONITORS 会自动视为 external 并迁移, 见 lib-common)
-CEPH_MODE="${CEPH_MODE:-internal}"
+# ---- Ceph 模式见 4.3b(CEPH_MODE 唯一开关: internal 集群内 / external 接入外部; 定义在下方 Ceph 段) ----
 ENVOY_GATEWAY_ENABLED="${ENVOY_GATEWAY_ENABLED:-true}" # Envoy Gateway 通用 K8s 网关基座(P1; 见 4.3)
 ENVOY_AI_GATEWAY_ENABLED="${ENVOY_AI_GATEWAY_ENABLED:-true}"  # Envoy AI Gateway(LLM/AI 专用, 依赖 EG; 见 4.3)
 KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # 统一认证(P2; 见 4.4)
@@ -106,13 +101,43 @@ LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(P3; 见 4.5
 CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # CubeStack 自研组件(占位; 见 4.6)
 
 # ---- 4.3b Rook/Ceph 配置(详见 docs/ceph-rook.md) ----
+# ════════════════════════════════════════════════════════════════════════
+# ★ Ceph 两种模式【二选一, 不要同时配置两种模式的连接参数】:
+#
+#   ╔══ internal = 集群内部署 Rook-Ceph(默认)══════════════════════════════╗
+#   ║ · ceph 模块(02_ceph)创建 CephCluster CR + 本地 OSD(裸盘)              ║
+#   ║ · 需要配置下方【internal 段】: CEPH_NODES / 裸盘策略 / 池副本等        ║
+#   ║   其中没有无外部 Ceph 相关参数。                                      ║
+#   ║ · 部署后可选"对外暴露"(CEPH_EXTERNAL_*, 见下方内部分支产物)供其它      ║
+#   ║   集群以 CEPH_MODE=external 接入。                                    ║
+#   ╚═══════════════════════════════════════════════════════════════════════╝
+#
+#   ╔═══ external = 仅接入外部已有 Ceph(不创建集群内 CephCluster)═══════════╗
+#   ║ · 本集群【不创建】CephCluster / 不创建 pool / 不触碰本地磁盘            ║
+#   ║ · 【必须配置】(其余 Ceph 配置项可全部不动/留空):                       ║
+#   ║     CEPH_MODE="external"                                              ║
+#   ║     CEPH_MONITORS="外部 mon 地址(逗号分隔)"                           ║
+#   ║     CEPH_USER="外部用户"    CEPH_KEYRING="外部用户 key"               ║
+#   ║ · 可选: CEPH_POOL(外部 RBD pool, 默认 rbd)/ CEPHFS_*(外部 CephFS)     ║
+#   ║ · ceph_csi 模块经 ceph-csi-operator 建 CephConnection →                ║
+#   ║   StorageClass ceph-block, 只拿外部 Ceph 当后端, 不建集群内存储。       ║
+#   ╚═══════════════════════════════════════════════════════════════════════╝
+#
+# ⚠ CEPH_MODE 是唯一开关, 切换只需改这一个变量; 机械上两套变量会同时存在,
+#   但模块内已按 CEPH_MODE 分支读取, 不会混淆。
+# ⚠ 兼容旧配置: 仅设了 CEPH_EXTERNAL_MONITORS 会自动视为 external(load_config 归一化)。
+# ═══════════════════════════════════════════════════════════════════════════
+CEPH_MODE="${CEPH_MODE:-internal}"          # internal(默认, 集群内) | external(接入外部 Ceph)
+
+# ───────────────── internal 模式(集群内部署 Ceph)专用配置 ─────────────────
+# 仅 CEPH_MODE=internal 时生效; external 模式可全部保持默认/留空(模块内按 CEPH_MODE 分支)。
 # 部署方式: Rook Operator(v1.20.2 manifest, 离线 vendoring 于 deployments/cubestack-addon/rook/)
-#   + CephCluster CR(Rook 自建 mon/mgr/osd, 由 modules/03_addon/07_ceph.sh 编排)+ ceph-csi(RBD/CephFS)。
+#   + CephCluster CR(Rook 自建 mon/mgr/osd, 由 modules/03_addon/02_ceph.sh 编排)+ ceph-csi(RBD/CephFS)。
 # 存储节点选择: CEPH_NODES 显式列出(hostname, 逗号分隔); 留空 = 全部 NODES 节点(至少 3 台奇数更佳)。
 #   模块会先给这些节点打 node label(CEPH_NODE_LABEL), CephCluster 据此只调度到这些节点。
 CEPH_NODES="${CEPH_NODES:-}"                      # 部署 Ceph 的节点(hostname 逗号分隔); 空=全部节点
 CEPH_NODE_LABEL="${CEPH_NODE_LABEL:-ceph-storage=rook-ceph}"   # 存储节点 label(key=value; 模块自动打标)
-CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"     # Rook/Ceph 命名空间
+CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"     # Rook/Ceph 命名空间(与 03_ceph_csi 的 secret 命名空间一致)
 CEPH_VERSION="${CEPH_VERSION:-v20.2.2}"           # Ceph 守护进程镜像 tag
 ROOK_VERSION="${ROOK_VERSION:-v1.20.2}"           # Rook operator 版本(manifest 目录名+镜像 tag)
 CEPHCSI_VERSION="${CEPHCSI_VERSION:-v3.17.0}"     # cephcsi 驱动镜像 tag
@@ -124,25 +149,102 @@ CEPH_DATA_DISKS="${CEPH_DATA_DISKS:-}"            # explicit 策略: 如 "cubest
 CEPH_DETECT_EXCLUDE="${CEPH_DETECT_EXCLUDE:-^(sda|sr0|vda|nbd[0-9]+)$}"   # 自动检测时排除的盘名(正则, 防误选系统盘; nbd* 为 qcow2/NBD 伪设备)
 # 高可用与池(replicated 生产缺省: 3 副本 + host failureDomain + min_size 2; 见 docs/ceph-rook.md)
 CEPH_MON_COUNT="${CEPH_MON_COUNT:-3}"             # mon 数量(奇数, 默认 3)
+# ★ hostNetwork(2026-09-09 默认): mon/osd/mgr 直接监听**节点 IP**(不占 pod 网段, 公告节点地址)。
+#   历史: 默认 pod 网络下, 外部 ceph-csi-operator 经 *-external NodePort 走 kube-proxy DNAT 时
+#   mon msgr v1 握手(发 auth 后无响应)在 CNI fabric 上损坏 → 外部接入不可用。
+#   true(默认) → CephCluster spec.network.hostNetwork=true, mon 公告 <节点IP>:6789(v1)/3300(v2),
+#   对外暴露模式随之变为"节点 IP + 原生端口"(见下 CEPH_EXPOSE_HOSTNETWORK);
+#   false → 恢复 pod 网络 + NodePort 暴露(经 kube-proxy, 外部 msgr 可能不工作)。
+CEPH_HOST_NETWORK="${CEPH_HOST_NETWORK:-true}"
+# ★ 对外暴露方式(仅 CEPH_MODE=internal):
+#   host-network(默认, 匹配 CEPH_HOST_NETWORK=true) → 直接对节点 IP 暴露 mon 原生 6789/3300 +
+#   RGW port 80。外部 CEPH_MONITORS=<mon 所在节点 IP>:6789 直连, **完全绕开 kube-proxy/NodePort**,
+#   与 ceph-csi-operator 长连接 msgr 帧不经过任何 DNAT/SNAT(2026-09-09 推荐)。
+#   nodeport → NodePort + 规律端口(CEPH_MON_NODEPORT_BASE)(历史; NodePort 环对 mon msgr 不可靠,
+#     仅供参考); metallb → LoadBalancer VIP。
+CEPH_EXPOSE_MODE="${CEPH_EXPOSE_MODE:-host-network}"   # host-network | nodeport | loadbalancer/metallb
+CEPH_EXPOSE_NODES="${CEPH_EXPOSE_NODES:-}"             # host-network 模式: 公告哪些节点 IP(空=mon 所在全部节点)
 CEPH_POOL_REPLICAS="${CEPH_POOL_REPLICAS:-3}"     # 副本数
 CEPH_POOL_MIN_SIZE="${CEPH_POOL_MIN_SIZE:-2}"     # min_size(1 台主机宕机池仍可写)
 CEPH_OSD_MEMORY_TARGET="${CEPH_OSD_MEMORY_TARGET:-12}"   # 每 OSD 内存目标(GiB; 默认 12G 适配 7TB 大盘, 小盘可改小省内存)
 CEPHFS_ENABLED="${CEPHFS_ENABLED:-true}"         # 可选: 启用 CephFS(RWX 共享文件)
 CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-true}"     # 可选: 启用 RGW/S3 对象存储
-# RGW/S3 对外暴露方式(空=随 SERVICE_EXPOSE_MODE; nodeport/loadbalancer/clusterip 可覆盖):
-#   nodeport → Service 改 NodePort(CEPH_RGW_NODEPORT 指定端口, 默认自动); loadbalancer → 需 MetalLB 部署
+# ---- 对外暴露与规律 NodePort(仅 CEPH_MODE=internal; 供其它集群 CEPH_MODE=external 接入本集群) ----
+# 部署 ceph_csi 模块时自动完成(把本集群 Ceph 暴露给外部集群):
+#   ① 网络层: mon/RGW *-external Service(YAML 声明式, cubestack-addon/rook/external/),
+#      模式跟随 SERVICE_EXPOSE_MODE:
+#        nodeport(默认)→ NodePort + 规律端口(CEPH_MON_NODEPORT_BASE, 见下)
+#        metallb → LoadBalancer VIP, 端口回退 Ceph 原生 6789/80(不套规律)
+#   ② 资源层: 外部专用 RBD pool + 外部 CephFS(fs + meta/data pools, CEPHFS_ENABLED=true 时)
+#   ③ 认证层: 外部专用用户(profile rbd caps, 非 admin)
+#   ④ 导出: config/ceph-external-access.conf(FSID/MONs/RBD+CephFS 全部连接信息)——
+#      拷贝到目标集群 cluster.conf 即可接入
+# 自检: --steps verify_ceph ⑨ 或 tools/k8s/ceph-expose-external.sh status(5 层, 含外部客户端协议级测试)。
+# ⚠ 下面 (CEPH_EXTERNAL_* / CEPH_MON_NODEPORT_* / CEPH_RGW_*) 全部只属于 internal 模式的"对外暴露"——
+#    external(internal)接入方千万不要设置这些(它们是从内部集群带上来的)。
+# ★ 2026-09-09: CEPH_EXPOSE=host-network(默认)时, mon/RGW 只按节点 IP 公告原生端口,
+#   上面 nodeport 相关(CEPH_MON_NODEPORT_BASE/RGW_NODEPORT)不生效;
+CEPH_EXTERNAL_EXPOSE="${CEPH_EXTERNAL_EXPOSE:-true}"          # 总开关: internal 集群默认对外暴露(供 external 接入)
+CEPH_EXTERNAL_EXPOSE_MODE="${CEPH_EXTERNAL_EXPOSE_MODE:-}"    # 覆盖暴露模式(nodeport/loadbalancer/metallb/clusterip; 空=随 SERVICE_EXPOSE_MODE)
+# 外部 RBD(独立于集群内 rbd-pool, 与集群内资源隔离)
+CEPH_EXTERNAL_USER="${CEPH_EXTERNAL_USER:-cubestack-ext-rbd}" # 外部 RBD 专用用户(mon/osd/mgr profile rbd, 非 admin)
+CEPH_EXTERNAL_RBD_POOL="${CEPH_EXTERNAL_RBD_POOL:-cubestack-ext-rbd-pool}"  # 外部专用 RBD pool
+CEPH_EXTERNAL_RBD_PG="${CEPH_EXTERNAL_RBD_PG:-32}"            # 外部 RBD pool PG 数
+# 外部 CephFS(默认随 CEPHFS_ENABLED; 外部 csi-operator 用 CephFS 时需要)
+CEPH_EXTERNAL_CEPHFS="${CEPH_EXTERNAL_CEPHFS:-}"              # 空=随 CEPHFS_ENABLED; true/false 可显式
+CEPH_EXTERNAL_CEPHFS_USER="${CEPH_EXTERNAL_CEPHFS_USER:-cubestack-ext-cephfs}"  # 外部 CephFS 专用用户(mon allow r / mds allow rw fsname / osd allow rw)
+CEPH_EXTERNAL_CEPHFS_FS="${CEPH_EXTERNAL_CEPHFS_FS:-cubestack-ext-fs}"         # 外部 CephFilesystem 名
+CEPH_EXTERNAL_CEPHFS_META_POOL="${CEPH_EXTERNAL_CEPHFS_META_POOL:-cubestack-ext-cephfs-metadata}"
+CEPH_EXTERNAL_CEPHFS_DATA_POOL="${CEPH_EXTERNAL_CEPHFS_DATA_POOL:-cubestack-ext-cephfs-data}"
+CEPH_EXTERNAL_CEPHFS_META_PG="${CEPH_EXTERNAL_CEPHFS_META_PG:-16}"   # meta pool PG 数
+CEPH_EXTERNAL_CEPHFS_DATA_PG="${CEPH_EXTERNAL_CEPHFS_DATA_PG:-32}"   # data pool PG 数
+CEPH_EXTERNAL_CONF="${CEPH_EXTERNAL_CONF:-}"                  # 导出文件路径(空=config/ceph-external-access.conf)
+# RGW 独立覆盖(仅影响 RGW, mon 仍随主模式; 大小写不敏感):
+#   nodeport/loadbalancer/metallb/clusterip; clusterip=不对外暴露 RGW
 CEPH_RGW_EXPOSE_MODE="${CEPH_RGW_EXPOSE_MODE:-}"
 CEPH_RGW_NODEPORT="${CEPH_RGW_NODEPORT:-}"   # RGW NodePort(留空=自动分配 30000-32767)
-# ---- 外部 Ceph 连接参数(仅 CEPH_MODE=external 时使用) ----
-# 本集群不创建集群内 CephCluster, 由 ceph_csi 模块经 ceph-csi-operator 的 CephConnection
-# 连接外部已有 Ceph 集群, 创建指向外部的 StorageClass ceph-block(跳过集群内 pool/cephfs/rgw 创建)。
-# ⚠ 旧变量 CEPH_EXTERNAL_MONITORS/POOL/USER/KEYRING 已迁移到下面新变量(load_config 自动兼容旧配置)。
+# ---- 规律 NodePort(2026-09-08; 可选, 方便外部固定端口接入) ----
+# mon 按 mon_list 顺序连续分配: base → base+1 → base+2(...)
+#   默认 30100 → mon a/b/c = 30100/30101/30102(默认 apiserver service-node-port-range=30000-32767 内, 无需扩范围)。
+# 若想用 36789 这类风格(i.e. 6789 前加 3), 需先把 apiserver range 扩到 30000-40000
+# (kubespray 新集群: kube_apiserver_node_port_range; 已运行集群: 各 master 改 kube-apiserver.yaml 的
+#  --service-node-port-range 后 kubelet 自动重启), 并把 CEPH_MON_NODEPORT_MAX 调到 40000 以下。
+CEPH_MON_NODEPORT_BASE="${CEPH_MON_NODEPORT_BASE:-30100}"   # 规律分配起始端口(留空=自动分配随机端口, 原行为)
+CEPH_MON_NODEPORT_MAX="${CEPH_MON_NODEPORT_MAX:-32767}"     # 规律分配硬上限(≤ apiserver range 上限; 多 mon/扩 range 时调大)
+# ---- CEPH_MODE=external(接入外部 Ceph)—— 本集群不创建集群内 CephCluster ----
+# [必填] 只需 4 项: CEPH_MODE / CEPH_MONITORS / CEPH_USER / CEPH_KEYRING(其余可不动)
+# [可选] CEPH_POOL(外部 RBD pool, 默认 rbd)、CEPHFS_*(外部 CephFS)
+# ⚠ 旧变量 CEPH_EXTERNAL_MONITORS/POOL/USER/KEYRING 已迁移到下面新变量(load_config 自动兼容)。
+# ⚠ internal 模式的对外暴露配置(CEPH_EXTERNAL_* / CEPH_MON_NODEPORT_* / CEPH_RGW_*)与本段无关——
+#   那是"我把自己暴露出去"用的; 本段是"我接入外部别人的"。external 模式请忽略上方暴露段。
 CEPH_MIN_NODES="${CEPH_MIN_NODES:-3}"            # internal 模式: 存储节点 < 此值 → 不创建集群内 CephCluster
 CEPH_MONITORS="${CEPH_MONITORS:-}"               # external: 外部 Ceph monitors, 如 "10.66.1.21:6789,10.66.1.22:6789"; 留空=不启用外部 Ceph
 CEPH_POOL="${CEPH_POOL:-rbd}"                    # external: 外部 Ceph 使用的 RBD pool 名(外部集群已有)
 CEPH_USER="${CEPH_USER:-admin}"                  # external: 外部 Ceph 认证用户(默认 admin)
 CEPH_KEYRING="${CEPH_KEYRING:-}"                 # external: 外部 Ceph 认证 keyring(该用户的 key; 必填, 如 AQCxxx==)
 CEPH_DASHBOARD_ENABLED="${CEPH_DASHBOARD_ENABLED:-true}"  # Ceph Dashboard
+
+# ════════════════════════════════════════════════════════════════════════
+# 【示例】接入外部 Ceph 集群(CEPH_MODE=external) —— 连接配置写法参考
+# 下面是一套【真实测试环境】的 ceph-external-access.conf 内容(由暴露方集群的
+# ceph-expose-external.sh 生成后粘贴/拷贝到本集群 cluster.conf)。
+# ⚠ 使用前:
+#   ① 把 CEPH_KEYRING / CEPHFS_KEYRING 替换为实际 key(下面 key 已打码, 不是真实值);
+#   ② CEPH_MONITORS 等按被接入集群实测填写; 本块仅作"接入方该写哪些变量"的模板。
+#   (如果你把本示例原样贴上去, 会连到 10.244.1.2xx 那套开发测试网, 不是你想要的集群。)
+#   用法: 拷入 cluster.conf → CEPH_MODE=external → ./deploy-cluster.sh --steps ceph_csi
+CEPH_MODE="external"
+CEPH_MONITORS="10.244.1.201:6789,10.244.1.202:6789,10.244.1.203:6789"
+CEPH_POOL="cubestack-ext-rbd-pool"
+CEPH_USER="cubestack-ext-rbd"
+CEPH_KEYRING="<占位: 如 AQxxx==>"            # ⚠ 不要放真实 key(会进 git); 运行前填测试集群给的外部用户 key
+CEPHFS_FS="cubestack-ext-fs"
+CEPHFS_META_POOL="cubestack-ext-cephfs-metadata"
+CEPHFS_DATA_POOL="cubestack-ext-cephfs-data"
+CEPHFS_USER="cubestack-ext-cephfs"
+CEPHFS_KEYRING="<占位: 如 AQA///==>"
+CEPH_RGW_EXTERNAL_ENDPOINT="10.244.1.204:80"
+# ════════════════════════════════════════════════════════════════════════
 # 安全确认: CEPH_ENABLED=true 部署时模块会红底列出将用的节点与裸盘并 sleep 60s 供 double-check;
 #   核对无误可 CEPH_CONFIRM_SLEEP=0(脚本环境变量)跳过, 生产不建议。
 CEPH_CONFIRM_SLEEP="${CEPH_CONFIRM_SLEEP:-60}"

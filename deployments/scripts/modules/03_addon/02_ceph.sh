@@ -5,7 +5,7 @@
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 0
-# TOGGLE: CEPH_ENABLED
+# TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED
 # REQUIRES: k8s_deploy k8s_passwordless k8s_workerbm k8s_ntp
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态; --fresh 清状态重装。
@@ -44,7 +44,16 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
 # ---- 开关 ----
-[ "${CEPH_ENABLED:-false}" = "true" ] || { say "CEPH_ENABLED=false, 跳过 Ceph"; exit 0; }
+# ★ TOGGLE = CEPH_ENABLED CEPH_CSI_ENABLED(任一 true 即调度本模块):
+#   · internal(自建 CephCluster)→ CEPH_ENABLED=true;
+#   · external(仅接入外部 Ceph)→ CEPH_ENABLED=false 但 CEPH_CSI_ENABLED=true 时仍调度本模块
+#     (02 只需部署 operator/csi-operator 供 03 使用, 不创建 CephCluster)。
+#   模块内部再按 CEPH_MODE 精确分流(下方开关检查)。
+if [ "${CEPH_MODE:-internal}" = "external" ]; then
+    [ "${CEPH_CSI_ENABLED:-false}" = "true" ] || { say "CEPH_CSI_ENABLED=false, 跳过 Ceph(external 模式需要 CSI 才运行)"; exit 0; }
+else
+    [ "${CEPH_ENABLED:-false}" = "true" ] || { say "CEPH_ENABLED=false, 跳过 Ceph"; exit 0; }
+fi
 
 init_remote_kubectl || exit 1
 
@@ -629,6 +638,13 @@ else
     echo "    ssl: true"
     echo "  network:"
     echo "    provider: \"\""
+    # ★ hostNetwork(2026-09-09): CEPH_HOST_NETWORK=true(默认)时, mon/osd/mgr 直接监听节点 IP;
+    #   CephCluster spec.network.hostNetwork=true → mon 公告节点 IP:6789(v1)/3300(v2),
+    #   外部 ceph-csi-operator / 上层 *-external NodePort 直连 mon 完整 msgr 帧不再受
+    #   kube-proxy DNAT 影响(历史: NodePort 环 v1 握手发 auth 后无响应 —— CNI fabric +
+    #   SNAT 对 mon 长连接 msgr 帧损坏)。hostNetwork 下对外暴露走 CEPH_EXPOSE_HOSTNETWORK
+    #   (tools/k8s/ceph-expose-external.sh 改为对节点 IP 直连端口)。
+    echo "    hostNetwork: $(echo "${CEPH_HOST_NETWORK:-true}" | tr '[:upper:]' '[:lower:]')"
     echo "  placement:"
     echo "    mon:"
     echo "      tolerations:"

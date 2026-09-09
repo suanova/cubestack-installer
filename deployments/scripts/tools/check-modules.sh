@@ -138,7 +138,10 @@ if [ -f "${CONF_EXAMPLE}" ]; then
     while IFS= read -r -d '' f; do
         tgl="$(meta "$f" TOGGLE)"
         [ -n "${tgl}" ] || continue
-        grep -qE "${tgl}=" "${CONF_EXAMPLE}" || { ck_fail "$(basename "$f"): TOGGLE=${tgl} 未在 cluster.conf.example 中声明默认值"; TOG_MISS=1; }
+        # TOGGLE 支持空格分隔多变量(OR, 如 ceph: CEPH_ENABLED CEPH_CSI_ENABLED) → 逐个校验
+        for tv in ${tgl}; do
+            grep -qE "${tv}=" "${CONF_EXAMPLE}" || { ck_fail "$(basename "$f"): TOGGLE=${tv} 未在 cluster.conf.example 中声明默认值"; TOG_MISS=1; }
+        done
     done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
     [ "${TOG_MISS}" = "0" ] && ok "全部 TOGGLE 变量均有 cluster.conf.example 默认值"
 else
