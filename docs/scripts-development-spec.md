@@ -158,7 +158,7 @@ load_config
 | `K8S_ENABLED` | `false` | `k8s_deploy` 模块 | 一键部署是否默认执行 kubespray |
 | `K8S_SCALE_ENABLED` | `false` | `k8s_scale` 模块 | 扩容 |
 | `GPU_OPERATOR_ENABLED` | `false` | `gpu_operator` 模块 | 沐曦 GPU Operator |
-| `LWS_ENABLED` | `false` | `gpu_lws` 模块 | LeaderWorkerSet |
+| `LWS_ENABLED` | `true` | `gpu_lws` 模块 | LeaderWorkerSet |
 | `HAPROXY_ENABLED` | `false` | `lb_haproxy` 模块 | API 四层负载均衡(部署前准备) |
 | `KEEPALIVED_ENABLED` | `false` | `lb_keepalived` 模块 | API VIP 高可用(部署前准备) |
 
