@@ -13,7 +13,9 @@
 #   添加新节点并单独执行 sudo ./deployments/scripts/tools/vm/create-vms.sh, 再执行本模块扩容。
 #   本模块只做集群侧准备(全部幂等):
 #     vm_sshkey → k8s_passwordless(全部节点注入公钥) → k8s_workerbm(worker 离线装包)
-#     → k8s_hosts(/etc/hosts, 可选) → k8s_ntp(新节点时间同步, kubeadm join 前)
+#     → k8s_hosts(部署机 /etc/hosts, 可选) → k8s_ntp(新节点时间同步, kubeadm join 前)
+#     → [1.5/3] 新节点 /etc/hosts 同步 API/registry 域名(幂等; 新增 worker 解析
+#       k8s-api.cubestack.io / registry.cubestack.io → 首 master IP)
 #   再重新生成 inventory(新节点进入 hosts.yml), 最后执行 kubespray 扩容
 #
 # 场景二: 新节点环境已存在(VM 已运行 / 裸金属已就绪)
@@ -131,6 +133,55 @@ bash "${SCRIPT_DIR}/modules/02_k8s/02_k8s_workerbm.sh"
 bash "${SCRIPT_DIR}/modules/02_k8s/03_k8s_hosts.sh"
 bash "${SCRIPT_DIR}/modules/02_k8s/05_k8s_ntp.sh"
 ok "环境就绪(节点可 SSH, 时间已同步)"
+
+# ── 1.5 新节点 /etc/hosts 域名同步(API/registry 域名 → 首 master IP; 幂等) ──
+# ★ 2026-09-09(用户要求): 扩容时新增 worker 也必须拿到 k8s-api.cubestack.io /
+#   registry.cubestack.io 解析 —— 03_k8s_hosts 只写**部署机** /etc/hosts,
+#   节点侧此处补上(与 deploy-registry.sh 同款远端脚本: 先删旧域名行再追加当前 IP,
+#   换集群/换 IP 不残留)。API_IP/REGISTRY_IP 由 load_config 派生(nodeport=首 master IP)。
+if [ -n "${NEW_NODE_HOSTS}" ] && [ -n "${API_IP:-}" ]; then
+    say "[1.5/3] 新节点 /etc/hosts 同步 API/registry 域名(${API_DOMAIN} / ${REGISTRY_DOMAIN}) ..."
+    _HOSTS_SCRIPT="$(mktemp)"
+    cat > "${_HOSTS_SCRIPT}" <<EOF
+#!/bin/bash
+set -e
+_rd1="\$(echo '${API_DOMAIN}' | sed 's/\\./\\\\\\./g')"
+sed -i -E "/[[:space:]]\${_rd1}([[:space:]]|\$)/d" /etc/hosts 2>/dev/null || true
+echo "${API_IP} ${API_DOMAIN}" >> /etc/hosts
+_rd2="\$(echo '${REGISTRY_DOMAIN}' | sed 's/\\./\\\\\\./g')"
+sed -i -E "/[[:space:]]\${_rd2}([[:space:]]|\$)/d" /etc/hosts 2>/dev/null || true
+echo "${REGISTRY_IP} ${REGISTRY_DOMAIN}" >> /etc/hosts
+EOF
+    _node_hosts_sync() {   # <ip> <user> <pw> → 0=成功(密钥 BatchMode 优先, 失败回退 sshpass 密码)
+        local ip="$1" user="$2" pw="$3"
+        local key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+        if [ -f "${key}" ]; then
+            ssh -i "${key}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+                "${user}@${ip}" "sudo bash -s" < "${_HOSTS_SCRIPT}" 2>/dev/null && return 0
+        fi
+        if [ -n "${pw}" ] && command -v sshpass >/dev/null 2>&1; then
+            env SSHPASS="${pw}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=8 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                "${user}@${ip}" "sudo bash -s" < "${_HOSTS_SCRIPT}" 2>/dev/null && return 0
+        fi
+        return 1
+    }
+    for _hn in ${NEW_NODE_HOSTS//,/ }; do
+        [ -z "${_hn}" ] && continue
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            node_parse "${line}"
+            [ "${NODE_HOSTNAME}" = "${_hn}" ] || continue
+            if _node_hosts_sync "${NODE_IP}" "${NODE_USER}" "${NODE_PW}"; then
+                ok "  ${_hn}(${NODE_IP}) /etc/hosts 已同步(${API_DOMAIN} / ${REGISTRY_DOMAIN})"
+            else
+                warn "  ${_hn}(${NODE_IP}) /etc/hosts 同步失败(密钥/密码均不可达; 检查 k8s_passwordless)"
+            fi
+            break
+        done
+    done
+    rm -f "${_HOSTS_SCRIPT}"
+fi
 
 # ── 2. 重新生成 inventory: 新节点进入 hosts.yml(含扩容专用组) ──
 SCALE_GROUP_NAME="${SCALE_GROUP_NAME:-new_node}"
