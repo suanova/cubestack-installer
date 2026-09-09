@@ -114,11 +114,17 @@ for c in sorted(cands):
 # ★ 2026-09-07 修复: 全新环境(k8s_passwordless 尚未分发密钥)/容器未挂载密钥时,
 #   `ssh -i` 在全部节点失败 → 检测全空(表现为"裸盘: <未检测到>")。
 #   节点密码来自 NODES 第5字段(NODE_PW, node_parse 已归一为 SSH_DEFAULT_PASSWORD)。
+# ★ 2026-09-09 修复(卡死根因): 密钥分支必须 `BatchMode=yes` + `</dev/null` ——
+#   交互终端下 timeout 会给命令新开进程组(后台), 若公钥认证瞬间失败(如 kubespray
+#   刚收尾时 authorized_keys 未就绪), ssh 回退密码提示会读 /dev/tty → SIGTTIN →
+#   进程永久 T(stopped), timeout 的 SIGTERM 杀不死它 → 部署无限卡死。
+#   BatchMode 让密钥失败立即返回(不提示、不读 tty), 自然落到下方 sshpass 密码分支
+#   (sshpass 自带 pty, 不碰部署终端, 无此问题)。
 node_lsblk_json() {   # <user> <ip> <pw> → stdout=lsblk JSON(空=均失败)
     local user="$1" ip="$2" pw="$3" out=""
     if [ -f "${SSH_KEY}" ]; then
-        out="$(timeout 15 ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-            "${user}@${ip}" "lsblk -J -o NAME,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null" 2>/dev/null || true)"
+        out="$(timeout 15 ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+            "${user}@${ip}" "lsblk -J -o NAME,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null" </dev/null 2>/dev/null || true)"
     fi
     if [ -z "${out}" ] && [ -n "${pw}" ] && command -v sshpass >/dev/null 2>&1; then
         out="$(timeout 15 env SSHPASS="${pw}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
