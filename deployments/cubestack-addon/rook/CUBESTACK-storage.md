@@ -18,9 +18,10 @@ deployments/cubestack-addon/rook/
 │   ├── 01-cephobjectstore-s3-store.yaml
 │   ├── 02-cephobjectstoreuser-model.yaml  # rgw-model-admin / rgw-model-reader(§10.4)
 │   └── reader-policy.json                 # 桶只读策略模板(§10.3)
-└── external/   # Ceph 对外暴露 Service 模板(mon/RGW *-external, 供集群外 ceph-csi-operator 接入, §3.3)
+└── external/   # Ceph 对外暴露模板(mon/RGW Service + 外部 CephFS CR, 供集群外接入, §3.3)
     ├── 01-mon-external.yaml               # rook-ceph-mon-<id>-external(type=__TYPE__ 占位)
-    └── 02-rgw-external.yaml               # rook-ceph-rgw-s3-store-external
+    ├── 02-rgw-external.yaml               # rook-ceph-rgw-s3-store-external
+    └── 03-cephfilesystem-external.yaml    # 外部专用 CephFilesystem CR(必须 CR 建, CLI 建无 MDS)
 ```
 
 ## 用途对照(§7)
@@ -40,6 +41,7 @@ deployments/cubestack-addon/rook/
 | `rgw/reader-policy.json` | 桶只读策略模板 | per-model 桶授权给 reader(§10.3) |
 | `external/01-*` | Service `rook-ceph-mon-<id>-external` | mon 对外暴露(6789, NodePort/LB, __TYPE__ 占位)§3.3 |
 | `external/02-*` | Service `rook-ceph-rgw-s3-store-external` | RGW 对外暴露(80, NodePort/LB)§3.3 |
+| `external/03-*` | CephFilesystem `cubestack-ext-fs`(activeCount 1/activeStandby false) | 外部专用 CephFS, Rook 部署 MDS(CLI 建的 fs 无 MDS)§3.3 |
 
 > 手工 apply 亦可(`kubectl apply -f <file>`, 先替换 `__NAMESPACE__` 等为实际值),
 > 正常部署走 03_ceph_csi.sh 自动完成。

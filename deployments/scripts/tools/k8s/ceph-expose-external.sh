@@ -375,14 +375,35 @@ apply_main() {
             _ceph_exec osd pool set "${_fp_pool}" min_size "${CEPH_POOL_MIN_SIZE:-2}" >/dev/null 2>&1 || true
             _ceph_exec osd pool application enable "${_fp_pool}" cephfs >/dev/null 2>&1 || true
         done
-        if _ceph_exec fs get "${EXT_FS}" >/dev/null 2>&1; then
-            ok "  外部 CephFilesystem ${EXT_FS} 已存在"
-        else
-            _ceph_exec fs new "${EXT_FS}" "${EXT_FS_META}" "${EXT_FS_DATA}" \
-                && ok "  已创建外部 CephFilesystem ${EXT_FS}(meta=${EXT_FS_META}/data=${EXT_FS_DATA})" \
-                || warn "  CephFilesystem ${EXT_FS} 创建失败"
-        fi
-        unset _fp _fp_pool _fp_pg
+        # ★ 2026-09-09: 必须用 CephFilesystem CR 创建, 不能用 `ceph fs new` CLI ——
+        #   CLI 建的 fs 没有 MDS 守护进程(MDS 只由 Rook 依据 CR 部署), fs 永久 offline
+        #   → 提供方 HEALTH_ERR, 消费方 CephFS SC 无法 provision。
+        #   已存在同名 fs/pool(历史 CLI 建的)时 Rook 自动接管, 幂等。
+        say "  apply CephFilesystem CR ${EXT_FS}(Rook 部署 MDS; 已存在同名 fs 则接管)..."
+        _FS_CR="$(sed -e "s|__NAMESPACE__|${CEPH_NAMESPACE}|g" \
+            -e "s|__FS_NAME__|${EXT_FS}|g" \
+            -e "s|__FS_META_POOL__|${EXT_FS_META}|g" \
+            -e "s|__FS_DATA_POOL__|${EXT_FS_DATA}|g" \
+            -e "s|__REPLICAS__|${CEPH_POOL_REPLICAS:-3}|g" \
+            -e "s|__MIN_SIZE__|${CEPH_POOL_MIN_SIZE:-2}|g" \
+            "${ROOK_DIR}/external/03-cephfilesystem-external.yaml")" \
+            || { warn "  CephFilesystem CR 模板缺失: ${ROOK_DIR}/external/03-cephfilesystem-external.yaml"; unset _fp _fp_pool _fp_pg; return 0; }
+        printf '%s' "${_FS_CR}" | ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "cat > /tmp/ceph-ext-fs.yaml && ${K} apply -f /tmp/ceph-ext-fs.yaml" \
+            && ok "  CephFilesystem CR ${EXT_FS} 已 apply(Rook 部署 MDS)" \
+            || warn "  CephFilesystem CR apply 失败"
+        # 等 MDS 拉起(fs active; 最长 300s)—— 消费方 CephFS SC 要等 fs 在线
+        say "  等待外部 CephFilesystem MDS 就绪(最长 300s)..."
+        _FS_ACTIVE=0
+        for _fi in $(seq 1 30); do
+            if _ceph_exec fs status "${EXT_FS}" 2>/dev/null | grep -q "active"; then
+                _FS_ACTIVE=1; break
+            fi
+            sleep 10
+        done
+        [ "${_FS_ACTIVE}" = "1" ] && ok "  外部 CephFilesystem ${EXT_FS} MDS active" \
+            || warn "  MDS 300s 内未 active(检查 rook operator 日志; 消费方 CephFS SC 将暂不可用)"
+        unset _fp _fp_pool _fp_pg _FS_CR _FS_ACTIVE _fi
     else
         say "  外部 CephFS 跳过(CEPHFS_ENABLED=${CEPHFS_ENABLED:-false}; 设 true 可同时预定义外部 CephFS)"
     fi

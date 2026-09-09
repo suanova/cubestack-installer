@@ -1,0 +1,44 @@
+# ============================================================
+# CephFilesystem: 外部专用 CephFS(默认 cubestack-ext-fs, §3.3 预定义)
+# ⚠ 必须用 CephFilesystem CR 创建, 不能用 `ceph fs new` CLI ——
+#   CLI 建的 fs 没有 MDS 守护进程(MDS 只由 Rook 依据 CR 部署),
+#   fs 永久 offline → 提供方 HEALTH_ERR(1 filesystem is offline),
+#   消费方 cephfs-* StorageClass 无法 provision(2026-09-09 实机事故)。
+# 已存在同名 fs/pool(历史 CLI 建的)时 Rook 自动接管, 幂等;
+# preservePoolsOnDelete: 删 CR 不删 pool(数据保护)。
+# 模板变量: __NAMESPACE__ / __FS_NAME__ / __FS_META_POOL__ / __FS_DATA_POOL__ /
+#           __REPLICAS__ / __MIN_SIZE__(由 ceph-expose-external.sh sed 替换)
+# ============================================================
+apiVersion: ceph.rook.io/v1
+kind: CephFilesystem
+metadata:
+  name: __FS_NAME__
+  namespace: __NAMESPACE__
+spec:
+  metadataPool:
+    replicated: { size: __REPLICAS__, requireSafeReplicaSize: true }
+    failureDomain: host
+  dataPools:
+    - name: __FS_DATA_POOL__
+      replicated: { size: __REPLICAS__, requireSafeReplicaSize: true }
+      failureDomain: host
+  preservePoolsOnDelete: true
+  metadataServer:
+    activeCount: 1
+    activeStandby: false
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "512Mi"
+      limits:
+        memory: "1Gi"
+    priorityClassName: system-cluster-critical
+    placement:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+                - key: app
+                  operator: In
+                  values: [rook-ceph-mds]
+            topologyKey: kubernetes.io/hostname
