@@ -436,22 +436,23 @@ load_config() {
     CEPH_USER="${CEPH_USER:-admin}"
     export CEPH_MODE CEPH_MONITORS CEPH_POOL CEPH_USER CEPH_KEYRING
     # ---------------- local-path / ceph 二选一(互斥, 集中派生) ----------------
-    # 单一事实来源 = CEPH_ENABLED:
-    #   · CEPH_ENABLED=true  → registry 后端强制 ceph-block, 并关闭 local-path(ceph 替代 local-path,
+    # 单一事实来源 = CEPH_ENABLED **或 CEPH_CSI_ENABLED**(任一 true 即视为 ceph 体系:
+    #   internal 自建 CephCluster / external 只接外部 Ceph 都算 ceph 底座):
+    #   · ceph 启用(任一 true) → registry 后端强制 ceph-block, 并关闭 local-path(ceph 替代 local-path,
     #     不再安装 local-path-provisioner; addons.yml local_path_provisioner_enabled 同步为 false)。
-    #   · CEPH_ENABLED=false → 保持 local-path 为默认后端(默认)。
+    #   · 都 false → 保持 local-path 为默认后端(默认)。
     # ⚠ 即使显式写了 REGISTRY_STORAGE_CLASS / LOCAL_PATH_ENABLED 也会被本规则覆盖(二选一, 不并存);
-    #   想用 local-path 就设 CEPH_ENABLED=false。
+    #   想用 local-path 就设 CEPH_ENABLED=false 且 CEPH_CSI_ENABLED=false。
     # ★ CEPH_FALLBACK_TO_LOCALPATH=true 且检测到 ceph 安装条件不足(manifest/裸盘/lvm2/external 参数
     #   缺失)时, deploy-cluster.sh 预检会把 CEPH_ENABLED 置 false → 此处自然走 local-path 分支,
     #   无需额外逻辑。检测函数见 ceph_installable_check(下方)。
-    if [ "${CEPH_ENABLED:-false}" = "true" ]; then
+    if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
         # 仅当 cluster.conf 显式写了冲突值时提醒(默认值 local-path/true 不算冲突, 避免每次 run 刷屏)
         if grep -qE '^[[:space:]]*REGISTRY_STORAGE_CLASS=.*(local-path)' "${CLUSTER_CONF}" 2>/dev/null; then
-            warn "CEPH_ENABLED=true → REGISTRY_STORAGE_CLASS 强制 ceph-block(local-path 被替代)"
+            warn "Ceph 已启用(CEPH_ENABLED/CEPH_CSI_ENABLED) → REGISTRY_STORAGE_CLASS 强制 ceph-block(local-path 被替代)"
         fi
         if grep -qE '^[[:space:]]*LOCAL_PATH_ENABLED=(true|1|yes|on)' "${CLUSTER_CONF}" 2>/dev/null; then
-            warn "CEPH_ENABLED=true → LOCAL_PATH_ENABLED 强制 false(local-path 与 ceph 二选一, 不再安装 local-path)"
+            warn "Ceph 已启用(CEPH_ENABLED/CEPH_CSI_ENABLED) → LOCAL_PATH_ENABLED 强制 false(local-path 与 ceph 二选一, 不再安装 local-path)"
         fi
         REGISTRY_STORAGE_CLASS="ceph-block"
         LOCAL_PATH_ENABLED="false"
@@ -594,6 +595,38 @@ node_default_pw() {
 node_password() {
     local pw="$2"
     if [ -n "${pw}" ] && [ "${pw}" != "-" ]; then echo "${pw}"; else node_default_pw "$1"; fi
+}
+
+# ---------------- 规律 NodePort 分配(共享, 供各类 *-external/NodePort 服务复用) ----------------
+# 让"连续规律端口"(mon a/b/c → 30100/30101/30102)与"自动分配"统一走一个入口,
+# 其他模块回调本函数即可得到同样的端口序列(base 连续 + 上限校验)。
+# 用法: nodeport_alloc <base> <count> <max> [off]
+#   base  = 起始端口; 空/0 → 自动分配(输出空字符串, 由 kube-apiserver 随机)
+#   count = 需要的端口个数(用于 base+0..base+count-1 的总上限校验)
+#   max   = 硬上限(一般 = kube-apiserver --service-node-port-range 上限; 扩 range 时调大)
+#   off   = (可选)本次要第几个偏移量(0 起); 输出 base+off; 省略 → 输出 base+count-1(即最后一个, 便于校验)
+# ⚠ 校验: base..base+count-1 全部 ≤ max, 且 base >= 30000(K8s 默认下限), 超则 err + exit 1。
+# 示例:
+#   nodeport_alloc 30100 3 32767        # → 30102(校验 base..base+2 ≤ 32767 后打印最后一个)
+#   nodeport_alloc 30100 3 32767 1      # → 30101
+#   nodeport_alloc "" 3 32767 0         # → (空)
+nodeport_alloc() {
+    local base="$1" count="$2" max="$3" off="$4" np
+    if [ -z "${base}" ]; then
+        echo ""; return 0
+    fi
+    # 校验: base..base+count-1 全部 ≤ max, 且 base ≥ 30000(默认下限)
+    if [ -n "${count}" ] && [ "${count}" -gt 0 ] 2>/dev/null \
+       && [ "$(( base + count - 1 ))" -gt "${max}" ] 2>/dev/null; then
+        err "规律 NodePort 超上限: base=${base} count=${count} 末端口=$(( base + count - 1 )) > max=${max}; 需先扩 apiserver service-node-port-range, 或调小 base/count"; exit 1
+    fi
+    [ "${base}" -lt 30000 ] 2>/dev/null \
+        && err "规律 NodePort base=${base} < 30000(K8s 默认 service-node-port-range 下限); 请用 30000-40000 区间" && exit 1
+    if [ -z "${off}" ]; then
+        echo "$(( base + count - 1 ))"     # 省略 off: 打印区间末端口(base+count-1)
+    else
+        echo "$(( base + off ))"           # 指定 off: 打印 base+off
+    fi
 }
 
 # ---------------- 集群内置 registry 就绪等待(共享, 防 MetalLB 竞态) ----------------

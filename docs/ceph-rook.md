@@ -128,6 +128,142 @@ REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-blo
 > 就绪判定链完整覆盖 ceph 集群 → csi → registry 三级依赖, 无需人工 sleep:
 > 各模块内部已内建轮询等待(见上), `05_k8s_registry` 是链上最后一道门。
 
+### 3.3 对外暴露(供集群外 ceph-csi-operator 接入; 默认开启)
+
+**目标**: 允许**其他 K8s 集群**的 ceph-csi-operator 以 `CEPH_MODE=external` 连接本集群的 CephCluster
+(mon 端点 + pool + 认证), 实现跨集群共享存储。
+
+**默认行为**(2026-09-07 YAML 化重构 + 完整预定义): 部署 `ceph_csi` 模块时, 若 `CEPH_EXTERNAL_EXPOSE=true`(默认)
+自动完成 4 步(预定义 ceph-csi-operator 连接所需的**全部信息**):
+
+1. **网络层**: 从 `cubestack-addon/rook/external/{01-mon,02-rgw}-external.yaml` 模板生成并 `kubectl apply`
+   独立 `*-external` Service(selector 指向 mon/RGW pod, **不碰 Rook 自管 ClusterIP svc** ——
+   operator 会调和回滚对自管 svc 的修改, 独立 svc 无回滚/时序问题):
+   - `rook-ceph-mon-<a|b|c>-external`(port 6789, 按 `rook-ceph-mon-endpoints` CM 实际 mon 列表展开)
+   - `rook-ceph-rgw-s3-store-external`(port 80, `CEPH_RGW_ENABLED=true` 且 RGW 模式非 clusterip 时)
+   - nodePort **自动分配**(30000-32767; 显式 6789 超出 `service-node-port-range` 会失败),
+     apply 后读取实际端口写入导出配置
+2. **资源层**(与集群内资源隔离, 对齐外部 csi 需求): 外部专用 RBD pool `cubestack-ext-rbd-pool`
+   (32 PG, application=rbd); `CEPHFS_ENABLED=true` 时另建外部 CephFilesystem
+   `cubestack-ext-fs`(meta 16 PG + data 32 PG, application=cephfs)
+3. **认证层**: 外部专用用户(profile caps, 非 admin):
+   - `cubestack-ext-rbd`: `mon 'profile rbd' osd 'profile rbd pool=cubestack-ext-rbd-pool' mgr 'profile rbd pool=…'`
+   - `cubestack-ext-cephfs`: `mon 'allow r' mds 'allow rw fsname=cubestack-ext-fs' osd 'allow rw pool=cubestack-ext-cephfs-data'`
+4. **导出**: 写 `deployments/config/ceph-external-access.conf` —— 全部连接信息
+   (CEPH_MONITORS=真实可达 ip:port / FSID / RBD: USER+KEYRING+POOL / CephFS: USER+KEYRING+FS+两池 / RGW 端点),
+   拷贝到目标集群 `cluster.conf` 设 `CEPH_MODE=external` 即可接入
+
+**暴露模式**(大小写不敏感, 均经 `tr` 转小写归一):
+- 跟随 `SERVICE_EXPOSE_MODE`(默认): `nodeport` → NodePort Service / `metallb` → LoadBalancer(MetalLB VIP)
+- `CEPH_EXTERNAL_EXPOSE_MODE=nodeport|loadbalancer|metallb|clusterip` 显式覆盖全部;
+  `clusterip/off` = 不对外暴露(仅集群内可达)
+- `CEPH_RGW_EXPOSE_MODE` 仅覆盖 RGW(mon 仍随主模式); `CEPH_RGW_NODEPORT` 固定 RGW NodePort(空=自动)
+
+**配置**(cluster.conf):
+```bash
+CEPH_EXTERNAL_EXPOSE=true                       # 总开关(默认 true)
+CEPH_EXTERNAL_EXPOSE_MODE=""                    # 空=随 SERVICE_EXPOSE_MODE
+CEPH_RGW_EXPOSE_MODE=""                         # RGW 独立覆盖(默认随主模式)
+```
+
+**手动操作 / 自检(5 层, 含外部客户端协议级测试)**:
+```bash
+bash deployments/scripts/tools/k8s/ceph-expose-external.sh apply [--mode nodeport|loadbalancer|metallb|clusterip]  # 重新暴露+预定义(幂等)
+bash deployments/scripts/tools/k8s/ceph-expose-external.sh show     # 当前暴露状态
+bash deployments/scripts/tools/k8s/ceph-expose-external.sh status   # 5 层自检:
+#    [1/5] mon 网络可达(集群外 TCP) [2/5] 认证用户(profile caps) [3/5] 外部资源(pool/fs/app tag)
+#    [4/5] fsid+CephFS [5/5] 外部客户端协议级测试(模拟 ceph-csi-operator 从集群外连接:
+#    mon msgr 握手 + cephx 认证 + rbd ls/create/rm 写路径; 客户端=Dockerfile-cli 预装 ceph-common)
+sudo ./deploy-cluster.sh --steps verify_ceph                        # ⑨ 自动跑 status(含 [5/5])
+```
+> Dockerfile-cli 已预装 `ceph-common`(部署容器内自带 ceph/rbd 客户端); 旧容器未重建时
+> [5/5] 自动回退为 toolbox 内经外部端点测试(连接路径经 kube-proxy DNAT, 与外部一致)。
+
+**接入方集群**(目标集群, 消费本集群 Ceph): `cluster.conf` 设 `CEPH_MODE=external` +
+`CEPH_MONITORS/CEPH_POOL/CEPH_USER/CEPH_KEYRING/CEPH_FSID`(值来自 `ceph-external-access.conf`),
+详见上表"外部接入"行与 §3.1。
+
+---
+
+### 3.4 两集群 A/B 共享 Ceph 完整流程(2026-09-08)
+
+**场景**: 两套独立 K8s 集群, 共享一套 Ceph 存储。集群 A 自建 Rook-Ceph(internal 模式)并对外暴露;
+集群 B 只部署 ceph csi operator(external 模式)接入 A 的 Ceph, **不创建 CephCluster/pool/磁盘**。两集群存储供给层使用**同名同类的 6 个 StorageClass**, 应用/平台可无差别使用。
+
+#### 3.4.1 集群 A(存储提供方, internal)
+
+1. 打开 `cluster.conf`, 确认关键项:
+   ```bash
+   CEPH_MODE="internal"                        # 集群 A = 自建 Ceph
+   CEPH_ENABLED=true
+   CEPH_CSI_ENABLED=true
+   CEPH_EXTERNAL_EXPOSE=true                # 默认开: 部署完自动对外暴露 + 导出配置
+   CEPH_RGW_ENABLED=true                    # 可选: 需要 S3 时
+   CEPHFS_ENABLED=true                      # 可选: 需要外部 CephFS 时(给 B 提供 cephfs-ephemeral/durable)
+   CEPH_MON_NODEPORT_BASE=30100             # 规律 NodePort(默认; ≤ apiserver range)
+   # SERVICE_EXPOSE_MODE 决定对外端口: nodeport(默认)→ IP:30100/30101/30102(规律);
+   #                                metallb → VIP:6789 等 Ceph 原生端口
+   ```
+2. 部署:
+   ```bash
+   sudo ./deploy-cluster.sh --with-cubestack       # 全量; 或 --steps ceph,ceph_csi(只 Ceph 相关)
+   ```
+   完成后自动:
+   - 创建 mon/RGW *-external Service + 外部专用 pool + 用户(§3.3)
+   - 导出外部接入配置 **`deployments/config/ceph-external-access.conf`**
+   - 安装末尾总结打印配置路径 + 入口行
+3. 自检(5 层, 含外部客户端协议级测试, 模拟 B 的 csi 从集群外连接):
+   ```bash
+   bash deployments/scripts/tools/k8s/ceph-expose-external.sh status
+   ```
+
+#### 3.4.2 集群 B(存储消费方, external)
+
+打开 B 的 `cluster.conf`, 把 A 导出的 `ceph-external-access.conf` 关键值拷入下述字段(只改这些):
+
+```bash
+CEPH_MODE=external                          # 切到外部接入
+CEPH_ENABLED=true                            # 让 02/03 模块运行(02 会 "仅部署 operator/csi-operator")
+CEPH_CSI_ENABLED=true
+# --- 以下来自集群 A 的 ceph-external-access.conf(按实际值替换) ---
+CEPH_MONITORS="10.244.1.31:30100,10.244.1.31:30101,10.244.1.31:30102"   # A 导出的 mon 端点(规律端口)
+CEPH_POOL="cubestack-ext-rbd-pool"          # pool 必须与 A 导出一致
+CEPH_USER="cubestack-ext-rbd"
+CEPH_KEYRING="AQx...=="                      # A 导出的 RBD key
+# --- 可选: CEPHFS(外部 A 有 CephFilesystem 时才需要) ---
+CEPHFS_FS="cubestack-ext-fs"
+CEPHFS_DATA_POOL="cubestack-ext-cephfs-data"
+CEPHFS_USER="cubestack-ext-cephfs"
+CEPHFS_KEYRING="AQa...=="                    # A 导出的 CephFS key
+# --- 不要设置以下内部部署相关(它们只用于集群 A) ---
+# CEPH_NODES CEPH_DATA_DISK_POLICY CEPH_MON_COUNT CEPH_LVM...
+```
+
+部署(只跑 Ceph 两个模块, REQUIRES 自动带上 operator):
+```bash
+sudo ./deploy-cluster.sh --steps ceph,ceph_csi
+```
+
+`02_ceph`(external): 不建 CephCluster/不碰磁盘, 只部署 rook operator + csi-operator 并等 Ready;
+`03_ceph_csi`(external): 创建 `CephConnection ceph-connection`(clusterID=ceph-connection, monitors=CEPH_MONITORS)
++ RBD secret ×2 + CephFS secret ×2(仅 CEPHFS_FS 时)+ **6 个 StorageClass**(clusterID/pool/fsName/secret 指向外部集):
+
+| StorageClass | 类型 | reclaim | binding | clusterID |
+|---|---|---|---|---|
+| `ceph-block` | RBD | Delete | WFFC | ceph-connection |
+| `ceph-rbd-ephemeral`(default) | RBD | Delete | WFFC | ceph-connection |
+| `ceph-rbd-ephemeral-immediate` | RBD | Delete | Immediate | ceph-connection |
+| `ceph-rbd-durable` | RBD | Retain | WFFC | ceph-connection |
+| `cephfs-ephemeral`* | CephFS | Delete | Immediate | ceph-connection |
+| `cephfs-durable`* | CephFS | Retain | Immediate | ceph-connection |
+> \\* 仅当 `CEPHFS_FS` 非空时生成; 否则 B 只有 4 个 RBD SC。`CEPHFS_FS` 已设但 `CEPHFS_DATA_POOL` 为空 → 模块硬失败并提示缺字段(避免静默缺 SC)。
+
+#### 3.4.3 切换/回退与安全性
+- 两集群使用**同一命名空间 `rook-ceph`**(不再引入 `rook-ceph-external`, 简化)。
+- B 的 CephFS/RBD secret 与 SC 全部在 `rook-ceph` 下, clusterID=ceph-connection 是唯一指向 A 的标识。
+- A 的导出文件 **包含 `CEPH_FSID`**, 但经 `CephConnection` 接入时 csi-operator 从 monitors 自动读 fsid, 无需手动向 B 提供 fsid; 若 B 需要 fsid(如 `ceph fsid` 检测)可直接由 A 提供。
+- **共享注意**: 外部 pool 只能同时被一个 ceph-csi-operator 强一致使用, 若两个集群同时写同一 pool 会有镜像/动态卷冲突 —— 设计上一个 Ceph 集群服务一个 Kubernetes 集群的卷; 若需多集群共享, 用 CephFilesystem 而非 RBD, 且注意 MDS 并发访问语义。
+
 ## 4. 裸盘自动检测(需求)
 
 `tools/k8s/ceph-detect-disks.sh [--node <hostname|ip>...] [-m]`

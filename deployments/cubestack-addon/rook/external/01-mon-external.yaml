@@ -1,0 +1,38 @@
+# ============================================================
+# mon 外部 Service(供集群外 ceph-csi-operator 以 CEPH_MODE=external 接入)
+# ★ 与 Rook 自管的 rook-ceph-mon-<id>(ClusterIP)并存, 互不影响:
+#   Rook operator 会调和回滚对其自管 svc 的修改, 故新建独立 *-external svc,
+#   selector 匹配 mon pod 标签(app=rook-ceph-mon, mon=<id> a/b/c — rook 给 mon pod 打的是单字母 id,
+#   不是 "rook-ceph-mon-<id>"; 2026-09-09 修复: 原写错前缀导致 selector 永不匹配、端点为空)。
+# 模板变量(sed 替换, 见 tools/k8s/ceph-expose-external.sh):
+#   __NAMESPACE__   → Ceph 命名空间(rook-ceph)
+#   __MON_ID__      → mon 标识(a/b/c, 按 rook-ceph-mon-endpoints CM 实际列表展开)
+#   __TYPE__        → NodePort | LoadBalancer(按 SERVICE_EXPOSE_MODE 派生)
+#   __MON_PORT__    → 对外端口(规律 base+off, 如 30100/30101/30102):
+#                       · nodeport 模式: 外部端点 = <master>:<nodePort 30100+off>(nodePort 填规律值)
+#                       · loadbalancer: 外部端点 = <VIP>:<port 30100+off>(port 填规律值)
+#   __MON_NODEPORT__→ nodeport 模式: 固定 NodePort(base+off); loadbalancer 模式: 该行被 sed 删除(不分配)
+# targetPort 恒为 6789(mon 实际监听端口)。
+# ⚠ nodePort 必须落在 kube-apiserver --service-node-port-range 内(默认 30000-32767):
+#   如 base=36789 超出默认范围, 需先扩 apiserver range 到 30000-40000(kubespray
+#   kube_apiserver_node_port_range / 已运行集群改 manifest 重启)。
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: rook-ceph-mon-__MON_ID__-external
+  namespace: __NAMESPACE__
+  labels:
+    app: rook-ceph-mon-external
+    ceph-external-access: "true"
+spec:
+  type: __TYPE__
+  selector:
+    app: rook-ceph-mon
+    mon: __MON_ID__
+  ports:
+    - name: mon-v1
+      port: __MON_PORT__
+      targetPort: 6789
+      nodePort: __MON_NODEPORT__
+  publishNotReadyAddresses: true

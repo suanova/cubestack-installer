@@ -6,6 +6,7 @@
 #       → ③ StorageClass ceph-block 存在 → ④ 建测试 RBD Block PVC + Pod dd 读写(真实 I/O)
 #       → ⑤ ceph osd 至少 3 up → ⑥ 清理(trap 兜底)
 #       → ⑦ CephFS(RWX 文件 I/O, CEPHFS_ENABLED=true 时) → ⑧ RGW/S3(上传下载, CEPH_RGW_ENABLED=true 时)
+#       → ⑨ 对外暴露自检(mon/RGW *-external 可达 + 外部用户/pool, CEPH_EXTERNAL_EXPOSE=true 时)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
@@ -249,14 +250,23 @@ if [ "${CEPH_RGW_ENABLED:-false}" = "true" ]; then
     RGW_POD="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pod --no-headers 2>/dev/null" || true) | grep -E 'rgw.*Running' | head -1 | awk '{print $1}' )"
     if [ -n "${RGW_POD}" ]; then
         ok "    RGW Pod ${RGW_POD} Running ✓"
-        # ① 取 RGW NodePort(独立 rgw-external 优先, 其次 Rook Service; 都没有则无法直连)
-        RGW_NP="$( (SSH "${K} -n ${CEPH_NAMESPACE} get svc rgw-external -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
-        [ -z "${RGW_NP}" ] && RGW_NP="$( (SSH "${K} -n ${CEPH_NAMESPACE} get svc rook-ceph-rgw-s3-store -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
-        if [ -z "${RGW_NP}" ]; then
-            warn "    RGW 未对外暴露(无 NodePort); 跳过 ⑧(可用 CEPH_RGW_EXPOSE_MODE=nodeport 重跑 ceph_csi 暴露)"
-        else
+        # ① 取 RGW 外部端点(独立 rook-ceph-rgw-s3-store-external 优先, 其次旧 rgw-external/rook svc;
+        #    NodePort 与 LoadBalancer VIP 都支持; 都没有则无法直连)
+        RGW_ENDPOINT=""
+        RGW_NP="$( (SSH "${K} -n ${CEPH_NAMESPACE} get svc rook-ceph-rgw-s3-store-external -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
+        RGW_VIP="$( (SSH "${K} -n ${CEPH_NAMESPACE} get svc rook-ceph-rgw-s3-store-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null" || true) )"
+        [ -z "${RGW_NP}" ] && [ -z "${RGW_VIP}" ] && RGW_NP="$( (SSH "${K} -n ${CEPH_NAMESPACE} get svc rgw-external -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
+        [ -z "${RGW_NP}" ] && [ -z "${RGW_VIP}" ] && RGW_NP="$( (SSH "${K} -n ${CEPH_NAMESPACE} get svc rook-ceph-rgw-s3-store -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
+        if [ -n "${RGW_NP}" ]; then
             RGW_ENDPOINT="http://${FIRST_MASTER}:${RGW_NP}"
             say "    RGW NodePort=${RGW_NP} → ${RGW_ENDPOINT}"
+        elif [ -n "${RGW_VIP}" ]; then
+            RGW_ENDPOINT="http://${RGW_VIP}:80"
+            say "    RGW LoadBalancer VIP=${RGW_VIP} → ${RGW_ENDPOINT}"
+        else
+            warn "    RGW 未对外暴露; 跳过 ⑧(设 CEPH_EXTERNAL_EXPOSE=true + SERVICE_EXPOSE_MODE=nodeport/metallb 后重跑 ceph_csi)"
+        fi
+        if [ -n "${RGW_ENDPOINT:-}" ]; then
             # ② 经 toolbox 创建测试用户取 AK/SK(独立脚本; 取最后两行非空凭据)
             RGW_AK=""; RGW_SK=""
             RGW_CRED="$(bash "${SCRIPT_DIR}/tools/k8s/rgw-get-user-key.sh" "verify-rgw-$(date +%s)" 2>/dev/null || true)"
@@ -286,4 +296,13 @@ else
     say "    CEPH_RGW_ENABLED=false, 跳过(设 true 可验证 RGW/S3)"
 fi
 
-ok "三种存储验证完成: RBD Block + CephFS + RGW/S3"
+# ---------------- ⑨ 对外暴露(外部 ceph-csi-operator 接入) ----------------
+say "  ⑨ 检查 Ceph 对外暴露(CEPH_EXTERNAL_EXPOSE=${CEPH_EXTERNAL_EXPOSE:-true})..."
+if [ "${CEPH_EXTERNAL_EXPOSE:-true}" = "true" ]; then
+    bash "${SCRIPT_DIR}/tools/k8s/ceph-expose-external.sh" status \
+        || warn "    对外暴露自检失败(检查工具脚本输出; 不影响已通过的 ①-⑧)"
+else
+    say "    CEPH_EXTERNAL_EXPOSE=false, 跳过(设 true 默认允许外部 ceph-csi-operator 接入)"
+fi
+
+ok "三种存储验证完成: RBD Block + CephFS + RGW/S3 + 对外暴露"
