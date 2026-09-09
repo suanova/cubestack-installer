@@ -28,7 +28,8 @@
 #     registry 的 PVC 走 ceph RBD —— 本模块须在 registry 配置模块之前执行(设计顺序见 docs/ceph-rook.md)。
 #   · 参考: docs/ceph-rook.md
 # 数据源: cluster.conf (CEPH_CSI_ENABLED / CEPH_ENABLED / CEPH_* / CEPHFS_ENABLED / CEPH_RGW_ENABLED /
-#         CEPH_EXTERNAL_EXPOSE / CEPH_EXTERNAL_EXPOSE_MODE / CEPH_RGW_EXPOSE_MODE / SERVICE_EXPOSE_MODE / NODES)
+#         CEPH_EXTERNAL_EXPOSE / CEPH_EXTERNAL_EXPOSE_MODE / CEPH_RGW_EXPOSE_MODE /
+#         CEPH_EXTERNAL_PROVISION_SMOKE / SERVICE_EXPOSE_MODE / NODES)
 # 用法:   sudo ./deploy-cluster.sh --enable ceph_csi  或  CEPH_CSI_ENABLED=true
 # ============================================================
 set -euo pipefail
@@ -359,6 +360,48 @@ volumeBindingMode: Immediate"
             ok "  config.json 已投递进 provisioner pod(外部 Ceph provision 就绪)"
         else
             warn "  config.json 60s 内未投递进 pod(kubelet 延迟; 不影响部署, csi-provisioner 会自动重试成功)"
+        fi
+        # ★ 外部 provision 冒烟测试(2026-09-09, 目标"一次性部署成功"): 用 Immediate 模式 SC
+        #   (ceph-rbd-ephemeral-immediate)建 1Gi scratch PVC → 等 Bound → 删除。作用:
+        #   · 端到端打通 provision 全链(mon 连接/cephx 认证/外部 pool/建卷/删卷)——
+        #     提供方未就绪(pool/用户/网络)在此立刻硬失败并给出排查命令,
+        #     不会拖到 k8s_registry 才断(历史事故: registry 90s 超时中断部署);
+        #   · 预热 provisioner 首触路径(消除冷启动/投递延迟), registry 正式 PVC 秒绑。
+        #   CEPH_EXTERNAL_PROVISION_SMOKE=false 可跳过(提供方未就绪但需先装其它组件时)。
+        if [ "${CEPH_EXTERNAL_PROVISION_SMOKE:-true}" = "true" ]; then
+            say "  外部 Ceph provision 冒烟测试(1Gi scratch PVC, 最长 180s)..."
+            SMOKE_YAML="apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ceph-csi-smoke-test
+  namespace: ${CEPH_NAMESPACE}
+spec:
+  storageClassName: ceph-rbd-ephemeral-immediate
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi"
+            apply_remote "${SMOKE_YAML}" "ceph-csi-smoke" \
+                || { err "  冒烟测试 PVC 创建失败"; exit 1; }
+            _SMOKE_OK=0
+            for _ci in $(seq 1 36); do
+                _smoke="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pvc ceph-csi-smoke-test -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+                if [ "${_smoke}" = "Bound" ]; then _SMOKE_OK=1; break; fi
+                sleep 5
+            done
+            # 无论成败都删除冒烟 PVC(Delete reclaim 自动清 PV/外部卷)
+            ( SSH "${K} -n ${CEPH_NAMESPACE} delete pvc ceph-csi-smoke-test --ignore-not-found" >/dev/null 2>&1 || true )
+            if [ "${_SMOKE_OK}" = "1" ]; then
+                ok "  冒烟测试通过(1Gi 卷真实创建于外部 pool, 已清理)"
+            else
+                err "  冒烟测试失败: 1Gi scratch PVC 180s 内未 Bound —— 外部 Ceph 提供方异常"
+                err "  排查: ① 提供方集群 HEALTH_OK: kubectl -n rook-ceph get cephcluster(提供方) + ceph -s"
+                err "  ② 外部用户/pool 存在: ceph auth get ${CEPH_USER:-cubestack-ext-rbd}; ceph osd lspools | grep ${CEPH_POOL}"
+                err "  ③ provisioner 日志: kubectl -n rook-ceph logs deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin -c csi-rbdplugin --tail=50"
+                err "  (提供方未就绪又需先装其它组件时, 可 CEPH_EXTERNAL_PROVISION_SMOKE=false 跳过本测试)"
+                exit 1
+            fi
+            unset _SMOKE_OK _smoke SMOKE_YAML
         fi
     else
         err "  ceph-csi-config 60s 内未生成(ceph-csi-operator 未调和 ClientProfile/CephConnection)"

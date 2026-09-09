@@ -214,6 +214,9 @@ CEPH_MON_NODEPORT_MAX="${CEPH_MON_NODEPORT_MAX:-32767}"     # 规律分配硬上
 # ---- CEPH_MODE=external(接入外部 Ceph)—— 本集群不创建集群内 CephCluster ----
 # [必填] 只需 4 项: CEPH_MODE / CEPH_MONITORS / CEPH_USER / CEPH_KEYRING(其余可不动)
 # [可选] CEPH_POOL(外部 RBD pool, 默认 rbd)、CEPHFS_*(外部 CephFS)
+# CEPH_EXTERNAL_PROVISION_SMOKE: ceph_csi 部署末尾对 provision 全链做冒烟测试
+#   (1Gi scratch PVC → Bound → 删除; 提供方异常在此立刻报错, 不拖到 k8s_registry)。
+#   提供方未就绪但需先装其它组件时可设 false 跳过(registry PVC 会 Pending)。
 # ⚠ 旧变量 CEPH_EXTERNAL_MONITORS/POOL/USER/KEYRING 已迁移到下面新变量(load_config 自动兼容)。
 # ⚠ internal 模式的对外暴露配置(CEPH_EXTERNAL_* / CEPH_MON_NODEPORT_* / CEPH_RGW_*)与本段无关——
 #   那是"我把自己暴露出去"用的; 本段是"我接入外部别人的"。external 模式请忽略上方暴露段。
@@ -222,6 +225,7 @@ CEPH_MONITORS="${CEPH_MONITORS:-}"               # external: 外部 Ceph monitor
 CEPH_POOL="${CEPH_POOL:-rbd}"                    # external: 外部 Ceph 使用的 RBD pool 名(外部集群已有)
 CEPH_USER="${CEPH_USER:-admin}"                  # external: 外部 Ceph 认证用户(默认 admin)
 CEPH_KEYRING="${CEPH_KEYRING:-}"                 # external: 外部 Ceph 认证 keyring(该用户的 key; 必填, 如 AQCxxx==)
+CEPH_EXTERNAL_PROVISION_SMOKE="${CEPH_EXTERNAL_PROVISION_SMOKE:-true}"  # external: provision 冒烟测试(默认开; 提供方未就绪时可 false 跳过)
 CEPH_DASHBOARD_ENABLED="${CEPH_DASHBOARD_ENABLED:-true}"  # Ceph Dashboard
 
 # ════════════════════════════════════════════════════════════════════════
