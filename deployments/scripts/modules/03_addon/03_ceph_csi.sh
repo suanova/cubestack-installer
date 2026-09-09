@@ -342,13 +342,25 @@ volumeBindingMode: Immediate"
     done
     if [ "${_CFG_OK}" = "1" ]; then
         ok "  ceph-csi-config 已生成(clusterID=ceph-connection, 外部 Ceph 接入就绪)"
-        # ★ 2026-09-09: CM 数据就绪 ≠ provisioner pod 可见 —— kubelet 把 CM 投递进
-        #   /etc/ceph-csi-config/ 有 ~1 分钟同步延迟。若不等到投递完成, k8s_registry 的
-        #   首次 provision 报 InvalidArgument(config.json not found) 被 csi-provisioner
-        #   判为 **infeasible error** → 退避翻倍到 256s 级, registry 90s 等待超时中断部署
-        #   (实机事故: 首次失败 06:50:17 → 06:58:49 才重试成功)。此处等投递完成(最长 60s,
-        #   超时仅告警不硬失败 —— provisioner 会自行重试成功)。
-        say "  等待 config.json 投递进 provisioner pod(最长 60s)..."
+        # ★ 2026-09-09(二修): kubelet 把 CM 数据更新投递进**运行中** pod 实测要 60~90s
+        #   (同步周期级延迟, 非事件级; 实机: 数据 06:50:17 → 文件 06:51:37)。
+        #   与其赌传播, 不如 CM 数据就绪后 **rollout restart** provisioner deployment:
+        #   新 pod 启动时直接挂载含数据的 CM, 确定性跳过传播延迟 —— 首次 provision
+        #   不再撞 config.json 缺失 → 不再触发 csi-provisioner 的 infeasible 256s 级
+        #   退避(10 分钟才建 PV 的根因), PV 秒级创建。
+        #   restart 只滚动 pod(模板不变, operator 不回收), 对后续 provision 无副作用。
+        say "  滚动重启 provisioner deployment(新 pod 直接挂载含数据的 CM)..."
+        ( SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin" >/dev/null 2>&1 || true )
+        _RS_OK=0
+        for _ci in $(seq 1 24); do
+            if ( SSH "${K} -n ${CEPH_NAMESPACE} rollout status deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin --timeout=2s" 2>/dev/null ) | grep -q "successfully rolled out"; then
+                _RS_OK=1; break
+            fi
+            sleep 5
+        done
+        [ "${_RS_OK}" = "1" ] && ok "  provisioner 滚动完成" || warn "  provisioner 滚动 120s 未完成(继续, 投递检查兜底)"
+        # 兜底检查(restart 后新 pod 挂载即时可见; 失败仅告警 —— provisioner 会自愈重试)
+        say "  确认 config.json 已挂载进 provisioner pod..."
         _MOUNT_OK=0
         for _ci in $(seq 1 12); do
             if ( SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin -c csi-rbdplugin -- test -f /etc/ceph-csi-config/config.json" 2>/dev/null ); then
@@ -357,9 +369,9 @@ volumeBindingMode: Immediate"
             sleep 5
         done
         if [ "${_MOUNT_OK}" = "1" ]; then
-            ok "  config.json 已投递进 provisioner pod(外部 Ceph provision 就绪)"
+            ok "  config.json 已挂载进 provisioner pod(外部 Ceph provision 就绪)"
         else
-            warn "  config.json 60s 内未投递进 pod(kubelet 延迟; 不影响部署, csi-provisioner 会自动重试成功)"
+            warn "  config.json 60s 内未挂载(kubelet 延迟; 不影响部署, csi-provisioner 会自动重试成功)"
         fi
         # ★ 外部 provision 冒烟测试(2026-09-09, 目标"一次性部署成功"): 用 Immediate 模式 SC
         #   (ceph-rbd-ephemeral-immediate)建 1Gi scratch PVC → 等 Bound → 删除。作用:
@@ -408,7 +420,7 @@ spec:
         err "  排查: kubectl -n ${CEPH_NAMESPACE} get clientprofile,cephconnection; kubectl -n ${CEPH_NAMESPACE} logs deploy/ceph-csi-controller-manager --tail=50"
         exit 1
     fi
-    unset _MONS _EXT_YAML EXT_CEPHFS_ENABLED _CEPHFS_PROVISIONER_SECRET _CEPHFS_NODE_SECRET _CFG_OK _MOUNT_OK _cfg _ci _EXT_NUM
+    unset _MONS _EXT_YAML EXT_CEPHFS_ENABLED _CEPHFS_PROVISIONER_SECRET _CEPHFS_NODE_SECRET _CFG_OK _MOUNT_OK _RS_OK _rs _cfg _ci _EXT_NUM
 else
 _CEPH_RBD_YAML="$(_ceph_yaml_file rbd/01-cephblockpool-rbd-pool.yaml rbd/02-storageclass-rbd.yaml rbd/03-storageclass-ceph-block-alias.yaml)" || exit 1
 apply_remote "${_CEPH_RBD_YAML}" "ceph-rbd" \
