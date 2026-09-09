@@ -78,8 +78,8 @@ LABEL_KEY="${CEPH_NODE_LABEL%%=*}"
 CEPH_IMAGE_DIR="${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}"
 CEPH_ROOK_MANIFEST_DIR="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}"
 CEPH_CONFIRM_SLEEP="${CEPH_CONFIRM_SLEEP:-60}"
-CEPH_PRE_CLEANUP_EXISTING="${CEPH_PRE_CLEANUP_EXISTING:-true}"   # 覆盖重装: 部署前完整清空上次 ceph 所用磁盘(OSD 盘数据销毁)
-CEPH_RESTORE_BACKUP="${CEPH_RESTORE_BACKUP:-false}"              # 覆盖重装: 认领旧 OSD 数据(注入旧 fsid; 与 PRE_CLEANUP 互斥)
+CEPH_PRE_CLEANUP_EXISTING="${CEPH_PRE_CLEANUP_EXISTING:-true}"   # 覆盖安装: 部署前完整清空上次 ceph 所用磁盘(OSD 盘数据销毁);
+                                                                 #   false=保留旧盘数据(备份/恢复由独立模块 ceph_backup 处理, 见 15_ceph_backup.sh)
 _CEPH_PRE_CLEANUP=0
 [ "${CEPH_PRE_CLEANUP_EXISTING}" = "true" ] && _CEPH_PRE_CLEANUP=1
 TOOLS_K8S="${SCRIPT_DIR}/tools/k8s"
@@ -428,26 +428,25 @@ done
 ok "  Rook operator 已部署"
 
 # ---------------- 7) 生成并应用 CephCluster CR(按节点+裸盘) ----------------
-# ★ 幂等重装策略(此前多起事故根因在此重构):
-#   ① 集群内已有 CephCluster → 幂等更新(不重建、不读备份);
-#   ② 无 CephCluster + 保留数据模式(PRE_CLEANUP=false)→ 检查 namespace 中是否残留
-#      rook-ceph-mon secret(含 fsid + keyring —— Rook 凭它认领旧 OSD 数据)。有 → 直接复用,
-#      Rook 自动用 secret 的 fsid 启动 mon 并认领盘上旧数据; 无 secret → 全新部署(新 fsid)。
-#      ★ 注意: Rook 的 CephCluster CRD **没有 spec.fsid 字段**(fsid 在 status/secret 里),
-#        向 CR 注入 spec.fsid 会被 API 拒绝(unknown field) —— 认领凭证是 secret, 不是 CR 字段。
-#   ③ 其余 → 全新部署(新 fsid)。
+# ★ 重装策略(2026-09-07 简化: 备份/恢复已拆出为独立模块 ceph_backup, 部署脚本只保留覆盖安装/清理):
+#   ① 集群内已有 CephCluster → 幂等更新(不重建);
+#   ② 无 CephCluster + CEPH_PRE_CLEANUP_EXISTING=true(默认)→ 清盘覆盖安装, 全新 fsid;
+#   ③ 无 CephCluster + PRE_CLEANUP=false(保留数据)→ 不wipe不清理:
+#      namespace 残留 rook-ceph-mon secret(含 fsid+keyring)时 Rook 自动认领旧 OSD 数据;
+#      无 secret(整 ns 重建)→ 全新 fsid。整 ns 重建后需认领旧数据时, 先单独执行
+#      --steps ceph_backup(CEPH_BACKUP_ACTION=restore)从节点根盘备份恢复 secret+mon store,
+#      再以 PRE_CLEANUP=false 重跑本模块 —— 认领凭证是 secret, 不是 CR 字段
+#      (CephCluster CRD 无 spec.fsid, 向 CR 注入会被 API 拒绝)。
 #   绝不整份恢复旧 CR: 旧 CR 的 storage.nodes/devices/placement 来自上一代环境, apply 后
 #   ① 盘名/节点过时(历史残留 /dev/rbd0 → OSD 永不创建) ② 残留 mon store(/var/lib/rook/mon-*,
 #   集群无关路径)被新 mon 直接复用, monmap 还是旧集群的死 IP → quorum 永久卡死。
-CEPH_CR_BACKUP="${CEPH_CR_BACKUP:-${REPO_ROOT}/deployments/offline-files/cephcluster-backup.yaml}"
-CEPH_RESTORE_BACKUP="${CEPH_RESTORE_BACKUP:-false}"   # 兼容旧配置: true 强制认领(自动关闭清盘); 默认按 PRE_CLEANUP 自动决定
 _HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
-# ★ 幂等卸载(2026-09-05 重构): PRE_CLEANUP=true(清盘重装)且检测到已有 CephCluster 时,
+# ★ 幂等卸载(2026-09-05 重构): PRE_CLEANUP=true(覆盖安装)且检测到已有 CephCluster 时,
 #   先走标准卸载流程删旧集群(Rook cleanupPolicy yes-really-destroy-data 擦盘), 再走下方 7a 物理清盘。
 #   支持两种幂等场景:
 #     ① 只重装 Ceph(K8s 保留): --steps ceph,ceph_csi → 自动删旧集群+清盘 → 全新 fsid;
 #     ② K8s 重装后盘复用: k8s 重装中 rook ns 已清(_HAS_CC_NOW 空)→ 跳过本步, 7a 直接清盘。
-#   PRE_CLEANUP=false(保留数据模式)→ 不删不wipe, 走下方认领逻辑。
+#   PRE_CLEANUP=false(保留数据模式)→ 不删不wipe, 保留盘上旧数据(见下方认领说明)。
 if [ -n "${_HAS_CC_NOW}" ] && [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
     say "  检测到已有 CephCluster($(echo "${_HAS_CC_NOW}" | awk '{print $1}')) + CEPH_PRE_CLEANUP_EXISTING=true → 幂等卸载旧集群(Rook 擦盘)..."
     bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --delete-cluster \
@@ -455,49 +454,24 @@ if [ -n "${_HAS_CC_NOW}" ] && [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
     _HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
 fi
 if [ -n "${_HAS_CC_NOW}" ]; then
-    say "  集群内已有 CephCluster($(echo "${_HAS_CC_NOW}" | awk '{print $1}')), 用当前 CR 幂等更新(不重建、不读备份)"
+    say "  集群内已有 CephCluster($(echo "${_HAS_CC_NOW}" | awk '{print $1}')), 用当前 CR 幂等更新(不重建)"
 else
-    # ★ 认领决策(部署时手动备份 → 新集群自动认领):
-    #   · 清盘模式(CEPH_PRE_CLEANUP_EXISTING=true, 默认)→ 完整清空旧盘, 全新 fsid, 不认领;
-    #   · 保留数据模式(PRE_CLEANUP=false)→ **自动**检查 namespace 残留的 rook-ceph-mon secret:
+    # ★ 覆盖/保留决策(备份恢复走独立模块 ceph_backup, 见 15_ceph_backup.sh):
+    #   · 覆盖安装(CEPH_PRE_CLEANUP_EXISTING=true, 默认)→ 完整清空旧盘, 全新 fsid(7a 执行 wipe);
+    #   · 保留数据模式(PRE_CLEANUP=false)→ 不wipe不清理, 检查 namespace 残留的 rook-ceph-mon secret:
     #       - secret 在 → 直接复用, Rook 自动认领旧 OSD 数据(无需任何注入);
-    #       - secret 不在(如整 ns 重建)→ 提示从节点备份恢复 secret 后重跑, 或全新部署。
-    #   · CEPH_RESTORE_BACKUP=true(旧配置兼容)= 强制保留数据+自动认领(自动关闭清盘)。
-    if [ "${CEPH_RESTORE_BACKUP}" = "true" ] && [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
-        warn "CEPH_RESTORE_BACKUP=true 与 CEPH_PRE_CLEANUP_EXISTING=true 冲突 → 认领优先, 自动关闭清盘(绝不 wipe 旧数据盘)"
-        _CEPH_PRE_CLEANUP=0
-    fi
+    #       - secret 不在(如整 ns 重建)→ 全新 fsid; 如需认领旧数据, 先 --steps ceph_backup
+    #         (CEPH_BACKUP_ACTION=restore)恢复 secret+mon store 后重跑本模块。
     if [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
-        say "  清盘模式(默认): 完整清空旧盘 → 全新 fsid(不认领旧 OSD 数据)"
+        say "  覆盖安装(默认): 完整清空旧盘 → 全新 fsid(不认领旧 OSD 数据)"
     else
         _MON_SECRET="$( (SSH "${K} -n ${CEPH_NAMESPACE} get secret rook-ceph-mon --no-headers 2>/dev/null" || true) )"
         if [ -n "${_MON_SECRET}" ]; then
             _SECRET_FSID="$( (SSH "${K} -n ${CEPH_NAMESPACE} get secret rook-ceph-mon -o jsonpath='{.data.fsid}' 2>/dev/null" || true) | base64 -d 2>/dev/null )"
             say "  保留数据模式 → 检测到残留 rook-ceph-mon secret(fsid=${_SECRET_FSID:-?}) → 直接复用, Rook 自动认领旧 OSD 数据"
         else
-            # ★ 整 ns 重建场景: namespace 无 secret 时自动从节点备份恢复(ceph-backup.sh save 已备份)。
-            #   Rook v1.20 CRD 无 spec.fsid 字段, 认领旧 OSD 数据唯一途径 = 恢复 rook-ceph-mon secret。
-            #   ★ 2026-09-07: 恢复 secret 后还必须恢复 mon store —— OSD 本地 bluestore 缓存的 osdmap
-            #     epoch 远高于新 mon(旧 174 vs 新 20), 仅恢复 secret 时 mon 拒绝处理 OSD 的 osd_boot
-            #     (OSD 永远 down)。mon store 含 osdmap/PG map, 恢复后新 mon 以旧 epoch 启动 → OSD boot 成功。
-            say "  保留数据模式但 namespace 无 rook-ceph-mon secret(整 ns 重建) → 尝试从节点备份恢复..."
-            if bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" restore-secret; then
-                _SECRET_FSID="$( (SSH "${K} -n ${CEPH_NAMESPACE} get secret rook-ceph-mon -o jsonpath='{.data.fsid}' 2>/dev/null" || true) | base64 -d 2>/dev/null )"
-                ok "  rook-ceph-mon secret 已从备份恢复(fsid=${_SECRET_FSID:-?}) → Rook 将认领旧 OSD 数据"
-                # ★ 恢复 mon store(在 CR 应用前, 让新 mon 以旧 osdmap epoch 启动)
-                #   --force: 整 ns 重建认领场景必须清掉节点残留 mon-*(可能来自更早部署,
-                #   osdmap epoch 与备份不一致), 再从备份恢复当时实际布局的 mon store。
-                say "  恢复 mon store(各节点 /var/lib/rook/mon-*, 使新 mon osdmap 与 OSD 缓存一致)..."
-                if bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" restore-monstore --force; then
-                    ok "  mon store 已恢复 → 新 mon 将以旧 osdmap epoch 启动, OSD 可正常 boot"
-                    _CEPH_RESTORED_MONSTORE=1
-                else
-                    warn "  mon store 恢复失败 → OSD 可能仍卡 boot(可手工: ceph-backup.sh restore-monstore 后重跑)"
-                fi
-            else
-                warn "  备份恢复失败 → 无法自动认领旧数据, 将全新部署(新 fsid)"
-                warn "  手工恢复: ceph-backup.sh restore-secret 后重跑本模块"
-            fi
+            warn "  保留数据模式但 namespace 无 rook-ceph-mon secret(整 ns 重建)→ 全新 fsid(不认领旧 OSD 数据)"
+            warn "  如需认领旧数据: 先 --steps ceph_backup(CEPH_BACKUP_ACTION=restore)从节点根盘备份恢复, 再重跑本模块"
         fi
     fi
 fi
@@ -564,8 +538,8 @@ else
         # --- 7b) 清理 /var/lib/rook 残留(mon store + osd 元数据 + config/keyring) ---
         # mon 数据在集群无关路径 <dataDirHostPath>/mon-*(如 /var/lib/rook/mon-a), 上一代集群删除后
         # 仍残留; 新 mon 复用后从旧 store 恢复旧 monmap(死 IP)→ quorum 永久卡死(此前事故根因)。
-        # PRE_CLEANUP=true(清盘)时连 osd 元数据/配置一起清(盘已 wipe, 元数据无保留价值);
-        # 仅认领模式(CEPH_RESTORE_BACKUP=true)只清 mon-*, 保留 osd 元数据辅助认领。
+        # 覆盖安装(默认)连 osd 元数据/配置一起清(盘已 wipe, 元数据无保留价值);
+        # 保留数据模式(PRE_CLEANUP=false)只清 mon-*, 保留 osd 元数据辅助 Rook 认领。
         for _hn in "${CEPH_NODE_HOSTS[@]}"; do
             _ip=""
             for line in "${NODES[@]:-}"; do
@@ -579,29 +553,8 @@ else
                 node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-* /var/lib/rook/rook-ceph 2>/dev/null; true" \
                     && ok "    ${_hn} /var/lib/rook 已清空" || warn "    ${_hn} /var/lib/rook 清理失败"
             else
-                # ★ 2026-09-07: 认领模式且已恢复 mon store(_CEPH_RESTORED_MONSTORE=1)时
-                #   **绝不能清 mon-*** —— 新 mon 要靠恢复的 store 拿到旧 osdmap epoch 才能让 OSD boot。
-                #   但需**按当前节点名修正布局**: 备份 tar 按当时实际 mon 分布(如 master01[mon-b]),
-                #   重装后 Rook 生成的 mon-a/b/c 可能落到不同节点。若某节点残留了与备份布局
-                #   不一致的 mon-*(如 master01 上的 mon-a, 其 store 来自本集群上次部署, epoch 与
-                #   备份不一致 → 复用死锁), 必须删除, 只保留该节点备份 tar 里存在的 mon。
-                if [ "${_CEPH_RESTORED_MONSTORE:-0}" = "1" ]; then
-                    # 只处理有 mon store 备份的节点(force 恢复过的); 用备份 tar 里存在的 mon 名单
-                    # 过滤该节点 /var/lib/rook/mon-*, 删掉多余的
-                    _BK_MONS="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${FIRST_MASTER}" \
-                        "sudo tar tzf ${BACKUP_DIR}/current/monstore-${_hn}.tar.gz 2>/dev/null | grep -oE '^mon-[a-d]' | sort -u | tr '\n' ' '")"
-                    if [ -n "${_BK_MONS}" ]; then
-                        say "  ${_hn}: 备份 mon=[${_BK_MONS}], 清理不一致残留 ..."
-                        node_ssh "${_ip}" "${SSH_USER:-ubuntu}" \
-                            "for d in /var/lib/rook/mon-*; do [ -e \"\$d\" ] || continue; bn=\$(basename \$d); case \" ${_BK_MONS} \" in *\" \$bn \"*) : ;; *) sudo rm -rf \"\$d\" && echo \"    删残留 \${bn}\" ;; esac; done" 2>/dev/null || true
-                    else
-                        # 该节点无备份 mon(如纯 worker)→ 直接清掉其残留(不影响恢复)
-                        node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-* 2>/dev/null" || true
-                    fi
-                else
-                    say "  清理 ${_hn} 残留 mon store(/var/lib/rook/mon-*, 全新 mon 状态)..."
-                    node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-*" || warn "    ${_hn} mon store 清理失败(节点全新无残留可忽略)"
-                fi
+                say "  清理 ${_hn} 残留 mon store(/var/lib/rook/mon-*, 全新 mon 状态; osd 元数据保留辅助认领)..."
+                node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-*" || warn "    ${_hn} mon store 清理失败(节点全新无残留可忽略)"
             fi
         done
     fi
@@ -750,34 +703,16 @@ rm -f "${LOCAL_CR}"
         unset _ph_now
     fi
 
-    # ★ 部署完成 → 保存恢复备份到节点根盘(部署时手动备份, 防 wipe/防覆盖)。
-    #   独立于 HEALTH_OK 分支: 上一版备份块嵌在"HEALTH_OK"里, 集群在 900s 内仅
-    #   Ready+HEALTH_WARN(如 mon clock skew 未收敛)时超时走 warn 分支, 备份从未执行
-    #   → 节点 /var/lib/ceph/backup/ 为空, 重装无法认领旧数据(本次事故根因)。
-    #   备份文件含 status.fsid: 下次保留数据模式(PRE_CLEANUP=false)重装时自动注入认领;
-    #   即使集群崩溃(k8s 不可用), 根盘 /var/lib/ceph/backup/ 的历史备份仍可读。
-    _CR_DUMP="$(mktemp)"
-    ( SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o yaml" > "${_CR_DUMP}" 2>/dev/null || true )
-    if [ -s "${_CR_DUMP}" ]; then
-        _META="$(mktemp)"
-        printf 'backup_time: %s\n' "$(date +%Y%m%d_%H%M%S)" > "${_META}"
-        printf 'nodes:\n' >> "${_META}"
-        for _hn2 in "${CEPH_NODE_HOSTS[@]}"; do
-            printf '  %s: %s\n' "${_hn2}" "${NODE_DISKS[${_hn2}]:-<无>}" >> "${_META}"
-        done
-        bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" save "${_CR_DUMP}" "${_META}" \
-            || warn "  Ceph 备份到节点失败(不影响部署; 可手工 tools/k8s/ceph-backup.sh save)"
-        # ★ 部署机本地保留一份完整备份(CR + meta; secret/mon store 在节点根盘,
-        #   部署机离线文件目录保留 CR 与 meta 作兜底, 与节点备份互备)。
-        mkdir -p "$(dirname "${CEPH_CR_BACKUP}")"
-        cp "${_CR_DUMP}" "${CEPH_CR_BACKUP}" 2>/dev/null \
-            && ok "  部署机本地备份 CR → ${CEPH_CR_BACKUP}(与节点根盘备份互备)" \
-            || warn "  部署机本地备份失败(节点根盘备份仍有效)"
-        rm -f "${_META}"
-    else
-        warn "  拉取 CephCluster CR 失败, 跳过自动备份(可手工 tools/k8s/ceph-backup.sh save)"
-    fi
-    rm -f "${_CR_DUMP}"
+    # ★ 备份/恢复已拆出为独立模块(2026-09-07): 部署不再自动备份, 降低部署复杂度。
+    #   需要备份时单独执行: --steps ceph_backup(CEPH_BACKUP_ACTION=save), 见 15_ceph_backup.sh。
+
+    # ★ 残留 rbd 映射清理(2026-09-07): 集群重建/删 ns 后, 旧集群的 CSI RBD 卷映射残留在
+    #   内核(/sys/bus/rbd/devices/*), 用旧 keyring 持续认证新集群 → 内核日志刷屏
+    #   "libceph: auth protocol 'cephx' authorization to osd failed: -13"。此处自动清理
+    #   (保留在用卷, 如 registry-pvc); 手动重跑: tools/k8s/ceph-rbd-cleanup.sh
+    say "  清理残留 rbd 内核映射(旧集群遗留, 避免 -13 认证刷屏)..."
+    bash "${SCRIPT_DIR}/tools/k8s/ceph-rbd-cleanup.sh" \
+        || warn "  rbd 残留清理失败(可手工 tools/k8s/ceph-rbd-cleanup.sh; 或重启节点清除)"
 
     # 调优 osd_memory_target / mon clock skew 阈值 —— 已在 [7/8] 等待循环第一次 phase=Ready 时
     # 预调优(_CEPH_TUNED=1), 这里仅兜底(集群超时未 Ready 等极端场景才重复设置, 幂等无害)。

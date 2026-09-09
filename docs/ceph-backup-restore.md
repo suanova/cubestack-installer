@@ -2,6 +2,9 @@
 
 > 适用:Rook-Ceph 集群的**数据保护**与**整 ns 重建后的认领恢复**。
 > 本文档基于 2026-09-04 ~ 09-07 的实测验证(含事故复盘)沉淀,命令均在当前环境跑通。
+> ⚠ **2026-09-07 拆分**:备份/恢复已从部署流程(02_ceph.sh / deploy-cluster.sh 预检)移出,
+> 改为**独立模块 `ceph_backup` 单独执行**(`--steps ceph_backup`)。部署脚本只保留
+> 覆盖安装(`CEPH_PRE_CLEANUP_EXISTING=true` 清盘)与清理旧集群(ceph-cleanup.sh),不再自动备份/恢复。
 
 ## 1. 备份什么(三件套,缺一不可)
 
@@ -14,14 +17,13 @@
 > ⚠ **只备份 CR + secret 不够**(此前缺失 mon store 导致的完整事故链,见 §4)。
 > mon store 里保存了 osdmap/PG map,恢复后新 mon 以旧 epoch 启动,OSD 才能正常 boot。
 
-## 2. 备份命令(部署机执行)
+## 2. 备份命令(部署机执行, 独立模块)
 
 ```bash
-# ① 拉取当前 CR(或由 deploy-cluster.sh 预检自动执行)
-kubectl --kubeconfig=/root/.kube/config -n rook-ceph get cephcluster rook-ceph -o yaml > /tmp/cc.yaml
-
-# ② 一键备份: CR + secret + mon store 全部存入第一个 master 根盘
+# 一键备份: 拉取 CR + secret + mon store 全部存入第一个 master 根盘
 #    /var/lib/ceph/backup/current/(防 wipe, 时间戳轮转保留 CEPH_BACKUP_RETENTION 份)
+sudo ./deployments/scripts/deploy-cluster.sh --steps ceph_backup            # CEPH_BACKUP_ACTION=save 默认
+# 等价手工(调试用):
 bash deployments/scripts/tools/k8s/ceph-backup.sh save /tmp/cc.yaml
 ```
 
@@ -34,26 +36,30 @@ monstore-<hostname>.tar.gz         # 每节点 mon store(含 osdmap/PG map)
 meta.txt                           # backup_time + fsid
 ```
 
-> 自动触发:deploy-cluster.sh 预检检测到已有 CephCluster 时自动备份;
-> 02_ceph.sh HEALTH_OK 后也会 save 一次。可选 `install-cron` 每小时刷新。
+> ⚠ 部署流程**不再自动备份**(2026-09-07 拆分):集群 HEALTH_OK 后请手动执行一次
+> `--steps ceph_backup` 入库新 fsid。可选 `CEPH_BACKUP_ACTION=install-cron` 每小时刷新。
 
-## 3. 恢复命令(整 ns 重建场景)
+## 3. 恢复命令(整 ns 重建场景, 独立模块)
 
 > 适用:rook-ceph namespace 被删/丢失(模拟完全重建),OSD 磁盘数据完好。
 > **不清盘、不 wipe**,走认领恢复。
 
 ```bash
-# ① 保留数据模式重跑 ceph 模块(自动完成全部恢复, 无需手工步骤)
+# ① 独立模块恢复 secret + mon store(从节点根盘备份)
+sudo CEPH_BACKUP_ACTION=restore ./deployments/scripts/deploy-cluster.sh --steps ceph_backup
+
+# ② 保留数据模式重跑 ceph 模块(Rook 凭 secret 认领旧 OSD 数据)
 CEPH_PRE_CLEANUP_EXISTING=false CEPH_CONFIRM_SLEEP=0 \
   ./deployments/scripts/deploy-cluster.sh --steps ceph
 ```
 
-模块自动执行(02_ceph.sh 认领分支):
+ceph_backup 模块 restore 动作执行:
 
 1. **restore-secret** → namespace 重建 rook-ceph-mon secret(fsid 与旧集群一致)
-2. **restore-monstore** → 恢复各节点 `/var/lib/rook/mon-*`(新 mon 以旧 osdmap epoch 启动)
-3. 跳过 7b 的 mon-* 清理(已恢复的 store 不删)
-4. 生成 CephCluster CR → Rook 凭 secret 认领旧 OSD 数据 → 15 OSD boot up
+2. **restore-monstore --force** → 恢复各节点 `/var/lib/rook/mon-*`(新 mon 以旧 osdmap epoch 启动)
+
+随后 02_ceph.sh(PRE_CLEANUP=false)生成 CephCluster CR → Rook 凭 secret 认领旧 OSD 数据
+→ 15 OSD boot up(7b 只清不一致残留, 不干扰已恢复的 store)。
 
 **手工等价命令**(调试用):
 
@@ -89,11 +95,12 @@ OSD 永远 down, 数据在盘上但集群不可用
 | mon quorum 少一个 | mon failover 中 | 等 Rook 自动重建(mon-a/b 健康时可安全 failover) |
 | `RECENT_CRASH` HEALTH_WARN | mon 崩溃记录残留 | `ceph crash archive-all` 清除 |
 
-## 6. 覆盖安装(默认路径,不受影响)
+## 6. 覆盖安装(默认路径,保留在部署脚本内)
 
 - `CEPH_PRE_CLEANUP_EXISTING=true`(默认)= **清盘覆盖**:完整 wipe 旧 OSD 盘 + 清 mon-*/rook-ceph → 全新 fsid
-- 与认领恢复(§3)互斥,由 PRE_CLEANUP / RESTORE_BACKUP 开关控制,两路径互不干扰
+- 与认领恢复(§3)互斥:`true`=覆盖 / `false`=保留数据(配合 §3 认领),两路径互不干扰
 - 断点续跑保护:ceph 状态 done 时不执行覆盖(见 deploy-cluster.sh 预检)
+- 清理旧集群工具:`tools/k8s/ceph-cleanup.sh --delete-cluster`(幂等卸载, 02_ceph.sh 覆盖安装路径自动调用)
 
 ## 7. 验证清单(恢复后)
 

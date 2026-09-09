@@ -245,6 +245,14 @@ CEPHFS_USER="cubestack-ext-cephfs"
 CEPHFS_KEYRING="<占位: 如 AQA///==>"
 CEPH_RGW_EXTERNAL_ENDPOINT="10.244.1.204:80"
 # ════════════════════════════════════════════════════════════════════════
+# ---- Ceph 备份/恢复(独立运维模块, 不随部署执行; 见 docs/ceph-backup-restore.md) ----
+# 2026-09-07 拆分: 备份/恢复从部署流程移出, 部署脚本只保留覆盖安装(CEPH_PRE_CLEANUP_EXISTING=true)
+#   与清理旧集群; 备份/恢复单独执行:
+#   sudo ./deploy-cluster.sh --steps ceph_backup                            # 默认 save(CR+secret+mon store → master 根盘)
+#   CEPH_BACKUP_ACTION=restore sudo ./deploy-cluster.sh --steps ceph_backup # 整 ns 重建后恢复, 认领旧 OSD 数据
+CEPH_BACKUP_ACTION="${CEPH_BACKUP_ACTION:-save}"           # save | restore | fetch-fsid | install-cron | run-cron
+CEPH_BACKUP_DIR="${CEPH_BACKUP_DIR:-/var/lib/ceph/backup}" # master 根盘备份目录(防 wipe/防覆盖)
+CEPH_BACKUP_RETENTION="${CEPH_BACKUP_RETENTION:-10}"       # 时间戳备份保留份数
 # 安全确认: CEPH_ENABLED=true 部署时模块会红底列出将用的节点与裸盘并 sleep 60s 供 double-check;
 #   核对无误可 CEPH_CONFIRM_SLEEP=0(脚本环境变量)跳过, 生产不建议。
 CEPH_CONFIRM_SLEEP="${CEPH_CONFIRM_SLEEP:-60}"
