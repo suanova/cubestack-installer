@@ -283,6 +283,38 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         fi
         unset _CEPH_MISS
     fi
+    # ★ 2026-09-09(用户要求): internal 模式存储节点数 < CEPH_MIN_NODES(默认 3)时,
+    #   跳过 Ceph 集群部署 —— mon 法定人数不足, 02_ceph 本就不会创建 CephCluster;
+    #   此处提前跳过裸盘确认横幅/倒计时/已有集群清理, registry 后端回退 local-path
+    #   (与 CEPH_FALLBACK_TO_LOCALPATH 同款翻转), ceph/ceph_csi 模块运行时按
+    #   TOGGLE=false 自行跳过, 部署不中断。
+    if [ "${CEPH_MODE:-internal}" != "external" ]; then
+        _CN=0
+        if [ -n "${CEPH_NODES:-}" ]; then
+            for _h in ${CEPH_NODES//,/ }; do [ -n "${_h}" ] && _CN=$((_CN+1)); done
+        else
+            for _line in "${NODES[@]:-}"; do
+                [ -z "${_line}" ] && continue
+                _CN=$((_CN+1))
+            done
+        fi
+        if [ "${_CN}" -lt "${CEPH_MIN_NODES:-3}" ]; then
+            echo ""
+            echo -e "\033[43m\033[30m================================================================================\033[0m"
+            echo -e "\033[43m\033[30m ⚠⚠⚠  存储节点 ${_CN} 台 < CEPH_MIN_NODES=${CEPH_MIN_NODES:-3} → 跳过 Ceph 集群部署 ⚠⚠⚠\033[0m"
+            echo -e "\033[43m\033[30m   mon 法定人数不足, 不创建 CephCluster(无裸盘覆盖风险, 跳过确认倒计时)   \033[0m"
+            echo -e "\033[43m\033[30m   registry 后端回退 local-path; ceph/ceph_csi 模块本次跳过               \033[0m"
+            echo -e "\033[43m\033[30m   如需 Ceph: ① 存储节点增至 ≥${CEPH_MIN_NODES:-3} 台; 或 ② CEPH_MODE=external 接入外部 Ceph\033[0m"
+            echo -e "\033[43m\033[30m================================================================================\033[0m"
+            CEPH_ENABLED="false"
+            CEPH_CSI_ENABLED="false"
+            REGISTRY_STORAGE_CLASS="local-path"
+            LOCAL_PATH_ENABLED="true"
+            export CEPH_ENABLED CEPH_CSI_ENABLED REGISTRY_STORAGE_CLASS LOCAL_PATH_ENABLED
+            _CEPH_SKIP_SMALL=1
+        fi
+        unset _CN
+    fi
     # ★ CEPH_MODE=external(由 load_config 归一化): 接入外部已有 Ceph, 不涉及本地裸盘/
     #   覆盖确认 —— 跳过存储节点/裸盘检测、倒计时、已有 CephCluster 清理, 仅提示外部连接。
     if [ "${CEPH_MODE:-internal}" = "external" ]; then
@@ -292,6 +324,8 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         echo -e "\033[41m\033[97m   pool: ${CEPH_POOL:-rbd}   user: ${CEPH_USER:-admin}\033[0m"
         echo -e "\033[41m\033[97m   不执行裸盘检测/覆盖确认; 由 ceph_csi 模块经 CephConnection 连外部集群  \033[0m"
         echo -e "\033[41m\033[97m================================================================================\033[0m"
+    elif [ "${_CEPH_SKIP_SMALL:-0}" = "1" ]; then
+        :   # 存储节点数 < CEPH_MIN_NODES: 上方已打印跳过横幅, 不弹确认/不做已有集群清理
     else
         _ceph_confirm_in=""
         for k in "${RUN_STEPS[@]:-}"; do
