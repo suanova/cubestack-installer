@@ -44,6 +44,10 @@ fi
 echo ""
 echo "── 1. 同步代码文件(repo → 容器 ${CONTAINER}:${CT}) ──"
 FILES=(
+    # ★ cluster.conf.example 必须同步(2026-09-09): 旧模板底部【示例】块是活配置,
+    #   CEPH_MODE="external" 覆盖唯一开关行 → 容器内 cp example→conf 会把默认配置
+    #   静默变 external。容器内 cluster.conf 本身仍默认不推送(见步骤 2)。
+    deployments/config/cluster.conf.example
     deployments/scripts/lib-common.sh
     deployments/scripts/lib-module.sh
     deployments/scripts/deploy-cluster.sh
@@ -52,10 +56,17 @@ FILES=(
     deployments/scripts/modules/03_addon/03_ceph_csi.sh
     deployments/scripts/modules/03_addon/04_local_path.sh
     deployments/scripts/modules/03_addon/05_k8s_registry.sh
+    deployments/scripts/modules/03_addon/06_gpu_operator.sh
+    deployments/scripts/modules/03_addon/15_ceph_backup.sh
+    deployments/scripts/modules/03_addon/27_verify_ceph.sh
     deployments/scripts/tools/images/ceph-save-images.sh
     deployments/scripts/tools/images/ceph-sync-images.sh
+    deployments/scripts/tools/k8s/ceph-backup.sh
     deployments/scripts/tools/k8s/ceph-detect-disks.sh
+    deployments/scripts/tools/k8s/ceph-expose-external.sh
+    deployments/scripts/tools/k8s/ceph-rbd-cleanup.sh
     deployments/scripts/tools/k8s/rook-fetch-manifests.sh
+    deployments/scripts/tools/node/setup-ntp.sh
     deployments/scripts/tools/offline/fetch-lvm-packages.sh
     deployments/scripts/tools/vm/create-vms.sh
     deployments/kubespray/cubestack-offline.sh
@@ -66,6 +77,8 @@ FILES=(
     deployments/cubestack-addon/rook/csi-operator.yaml
     deployments/cubestack-addon/rook/operator.yaml
     deployments/cubestack-addon/rook/toolbox.yaml
+    deployments/cubestack-addon/rook/external/01-mon-external.yaml
+    deployments/cubestack-addon/rook/external/02-rgw-external.yaml
 )
 for f in "${FILES[@]}"; do
     [ -f "${REPO}/${f}" ] || { echo "  ⚠ 跳过(仓库无此文件): ${f}"; continue; }
