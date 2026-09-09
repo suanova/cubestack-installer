@@ -154,6 +154,35 @@ sync_kubeconfig \
     || { err "宿主机无法访问集群(admin.conf 下载/同步失败; 检查 ${FIRST_MASTER} 的 /etc/kubernetes/admin.conf, 以及 ${API_DOMAIN}→${API_IP} 解析)"; exit 1; }
 ok "前置检查通过(registry=${REGISTRY_BASE}, API=${API_DOMAIN}→${API_IP})"
 
+# ---------------- 0. GPU 节点检测(mx-smi)决定等待路径 ----------------
+# 先判断集群是否存在 GPU 节点(逐节点宿主机 mx-smi):
+#   · 有 GPU 节点 → 保持原有完整等待逻辑: 等全部组件 DaemonSet Ready + 解除 master 污点
+#     + gpu-label 打标 + allocatable 验证。
+#   · 无 GPU 节点(纯 CPU 集群)→ 快速路径: 只需 metax-gpu-operator deployment 与
+#     metax-gpu-label DaemonSet Ready 即可, 缩短等待时间(不再等 driver/container-runtime/
+#     maca/gpu-device/gpu-scheduler/topo 等组件就绪)。
+say "检测集群是否有 GPU 节点(逐节点 mx-smi)..."
+HAS_GPU_NODE="0"; GPU_BOARD_COUNT="0"
+for _line in "${NODES[@]:-}"; do
+    [ -z "${_line}" ] && continue
+    node_parse "${_line}"
+    [ -n "${NODE_IP}" ] || continue
+    _ngpu="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "${SSH_USER:-ubuntu}@${NODE_IP}" "sudo mx-smi 2>/dev/null | grep 'Attached GPUs' | awk '{print \$NF}'" 2>/dev/null || echo 0)"
+    _ngpu="$(echo "${_ngpu:-0}" | tr -d '[:space:]' | grep -E '^[0-9]+$' || echo 0)"
+    if [ "${_ngpu}" -gt 0 ] 2>/dev/null; then
+        HAS_GPU_NODE="1"; GPU_BOARD_COUNT="$((GPU_BOARD_COUNT + _ngpu))"
+        ok "节点 ${NODE_HOSTNAME}(${NODE_IP}) 检测到 ${_ngpu} 张 GPU"
+    else
+        say "节点 ${NODE_HOSTNAME}(${NODE_IP}) 无 GPU(mx-smi 未识别到卡)"
+    fi
+done
+if [ "${HAS_GPU_NODE}" = "1" ]; then
+    ok "检测到 GPU 节点(共 ${GPU_BOARD_COUNT} 张卡), 保持完整等待流程(全部组件 DS Ready + allocatable 验证)"
+else
+    warn "集群未检测到 GPU 节点(纯 CPU): 采用快速路径, 仅等 operator + gpu-label Ready 即完成"
+fi
+
 # ---------------- 1. 确认资源(修复后的 chart + 镜像加载源) ----------------
 say "[1/5] 确认资源: 修复后的 helm chart + 镜像加载源 ..."
 [ -f "${CHART_DIR}/Chart.yaml" ] || { err "修复后的 helm chart 不存在: ${CHART_DIR}(应放在 deployments/cubestack-addon/metax-gpu-operator/metax-operator)"; exit 1; }
@@ -381,6 +410,10 @@ helm upgrade --install "${METAX_RELEASE_NAME}" "${CHART_DIR}" \
     || warn "  helm 安装/等待超时(检查 --set 与 chart; 资源可能已创建, 继续等待 DS)..."
 
 # ---------------- 5. 等待就绪 + 验证 ----------------
+# 有 GPU 节点: 保持原有完整等待(全部 DS Ready + 解除 master + 打标 + allocatable 验证)
+# 无 GPU 节点: 快速路径, 只需 operator deployment + metax-gpu-label DaemonSet Ready, 不再等其余组件
+if [ "${HAS_GPU_NODE}" = "1" ]; then
+# ───────────────── 有 GPU 节点: 完整等待流程 ─────────────────
 say "[5/5] 等待 GPU Operator 组件就绪(最长 300s)..."
 SSH "${K} rollout status deployment -n ${METAX_NAMESPACE} ${METAX_RELEASE_NAME}-metax-operator --timeout=120s" >/dev/null 2>&1 \
     || warn "  operator deployment rollout 未在 120s 内完成(继续等待 DS)..."
@@ -462,3 +495,33 @@ echo "  资源查看:    kubectl get pods,ds -n ${METAX_NAMESPACE}"
 echo "  节点 GPU:    kubectl get nodes -o json | jq '.items[].status.allocatable | with_entries(select(.key|startswith(\"metax\")))'"
 echo "  GPU 任务测试: 参考文档 §5 gpu-task.yaml(vectorAdd), 需 MACA 镜像就绪"
 echo "  卸载:        删除 ${METAX_NAMESPACE} 与 CRD(gpu.metax-tech.com) 后重跑本模块"
+
+# ───────────────── 无 GPU 节点(纯 CPU): 快速路径等待 ─────────────────
+else
+say "[5/5] 等待 GPU Operator 核心组件就绪(快速路径, 无 GPU 节点)..."
+# 只需 operator deployment + metax-gpu-label DaemonSet Ready, 不再等 driver/container-runtime/
+# maca/gpu-device/gpu-scheduler/topo 等组件(它们依赖 GPU 卡, 纯 CPU 集群不会就绪)。
+# 注: gpu-label DaemonSet 名实测为 metax-gpu-label(部分版本/环境可能是 gpu-label),
+#     用正则匹配结尾 gpu-label 的 DS, 兼容两种命名。
+SSH "${K} rollout status deployment -n ${METAX_NAMESPACE} ${METAX_RELEASE_NAME}-metax-operator --timeout=120s" >/dev/null 2>&1 \
+    || warn "  operator deployment rollout 未在 120s 内完成(继续等 gpu-label DS)..."
+GPU_LABEL_READY=0
+for _i in $(seq 1 24); do   # 最长 120s(gpu-label 是轻量打标 DS, 通常几十秒内就绪)
+    # ⚠ (SSH ... || true) 必须加括号, 否则 `A || true | awk` 会让 awk 收不到 SSH 输出
+    GPU_LABEL_READY="$( (SSH "${K} -n ${METAX_NAMESPACE} get ds --no-headers 2>/dev/null" || true) | awk '$1 ~ /gpu-label$/ && $2>0 && $2==$4 {r=1} END{print r+0}' )"
+    [ "${GPU_LABEL_READY}" = "1" ] && break
+    sleep 5
+done
+if [ "${GPU_LABEL_READY}" = "1" ]; then
+    ok "gpu-label DaemonSet Ready(operator + gpu-label 就绪, 纯 CPU 集群快速路径完成)"
+else
+    warn "gpu-label DaemonSet 120s 内未 Ready(不阻塞; 用 kubectl -n ${METAX_NAMESPACE} get ds,pods 复查)"
+fi
+echo "---------------------------------------------"
+ok "沐曦 GPU Operator 部署完成(纯 CPU 集群: operator + gpu-label 已就绪, 无 GPU 资源)"
+echo "  namespace:   ${METAX_NAMESPACE}"
+echo "  镜像仓库:    ${METAX_REGISTRY}"
+echo "  资源查看:    kubectl get pods,ds -n ${METAX_NAMESPACE}"
+echo "  说明:       当前集群无 GPU 节点, 已跳过 driver/maca/device/scheduler 等 GPU 组件等待;"
+echo "              后续插入 GPU 卡并确保驱动就绪后, 用 --steps verify_metax_gpu 复查节点是否发现 GPU 资源"
+fi

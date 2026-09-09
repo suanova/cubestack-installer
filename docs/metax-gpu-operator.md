@@ -123,10 +123,15 @@ sudo ./deploy-cluster.sh --with-cubestack   # 全量: 基座 + cluster.conf 中�
    - `run`: `.run ctr load` + 逐组件 `ctr tag + push --plain-http`(规避 .run 自带 push 的 flag 顺序 bug)。
 4. **清理残留**(CR/CRD/命名空间/default 旧资源/集群级 ClusterRole) → **helm upgrade --install**(修复版 chart)。
 5. **等待就绪 + 验证**:
-   - 等 DaemonSet 就绪(container-runtime / driver / maca / gpu-label / gpu-device)。
-   - **mx-smi 检测 master GPU**: 检测到 GPU 的 master 移除 control-plane/master 污点并 uncordon(可调度);
-     无 GPU 的 master 保持不可调度。
-   - 验证节点 `metax-tech.com/gpu` allocatable。
+   - **先逐节点 `mx-smi` 检测 GPU**(`sudo mx-smi | grep "Attached GPUs"`, 检测放在镜像推送前):
+     - **存在 GPU 节点** → 保持完整流程: 等 DaemonSet 就绪(container-runtime / driver / maca / gpu-label / gpu-device) +
+       mx-smi 检测 master GPU(检测到 GPU 的 master 移除 control-plane/master 污点并 uncordon, 无 GPU 的 master 保持不可调度) +
+       验证节点 `metax-tech.com/gpu` allocatable。
+     - **无 GPU 节点(纯 CPU 集群)** → **快速路径**: 只等 operator deployment(`metax-gpu-operator-metax-operator` Ready)
+       与 gpu-label DaemonSet(`metax-gpu-label`)Ready 即算完成, **不再等** driver/container-runtime/maca/gpu-device/
+       gpu-scheduler/topo 等依赖 GPU 卡的组件 → 大幅缩短纯 CPU 集群部署等待时间(不再 300s 空等)。
+       快速路径不解除 master 污点、不打 `gpu.installed` 标签、不查 allocatable(无 GPU 卡本就不会发生),
+       完成后提示用 `--steps verify_metax_gpu` 复查。
 
 > 也可手动加载镜像: `sudo ./deployments/scripts/tools/images/metax-load-images.sh`。
 
