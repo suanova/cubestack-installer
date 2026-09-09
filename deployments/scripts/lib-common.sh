@@ -716,7 +716,9 @@ sync_kubeconfig() {
     local fm="${FIRST_MASTER:-$(first_master_ip)}"
     [ -n "${fm}" ] || { rm -f "${tmp}"; err "未找到 master 节点(无法下载 admin.conf)"; return 1; }
     # admin.conf 属 root(600), scp 会 Permission denied → 用 ssh + sudo cat 读取
-    ssh -i "${SSH_KEY:-${HOME}/.ssh/cubestack_k8s}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+    # BatchMode=yes: 密钥失败立即返回(不读 tty 密码提示; 交互终端下读 tty 会 SIGTTIN
+    #   永久卡死, 见 ceph-detect-disks.sh 2026-09-09 注释)
+    ssh -i "${SSH_KEY:-${HOME}/.ssh/cubestack_k8s}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
         "${SSH_USER:-ubuntu}@${fm}" "sudo cat /etc/kubernetes/admin.conf" > "${tmp}" 2>/dev/null \
         || { rm -f "${tmp}"; return 1; }
     [ -s "${tmp}" ] || { rm -f "${tmp}"; return 1; }
@@ -927,10 +929,10 @@ init_remote_kubectl() {
     [ "${_INIT_REMOTE_KUBECTL:-0}" = "1" ] && return 0   # 幂等: 同一进程只初始化一次
     FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点(cluster.conf NODES 无 role=master)"; return 1; }
     SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-    SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+    SSH() { ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
                "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
     # 字符串式(伪代码/单行命令场景, 如 addon_stub 步骤数组): ssh ... ${SSH_USER:-ubuntu}@${FIRST_MASTER}
-    SSH_CMD="ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 ${SSH_USER:-ubuntu}@${FIRST_MASTER}"
+    SSH_CMD="ssh -i ${SSH_KEY} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 ${SSH_USER:-ubuntu}@${FIRST_MASTER}"
     K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
     _INIT_REMOTE_KUBECTL=1
     return 0
