@@ -319,16 +319,21 @@ volumeBindingMode: Immediate"
         unset _CEPHFS_FS _CEPHFS_DATA_POOL
     fi
 
+    # 外部模式 SC 数量(供完成提示; 4×RBD + 2×CephFS)
+    _EXT_NUM="4"; [ -n "${EXT_CEPHFS_ENABLED}" ] && _EXT_NUM="6"
     apply_remote "${_EXT_YAML}" "ceph-ext-rbd" \
         && ok "  外部 CephConnection + 认证 secret + ${_EXT_NUM:-}个 StorageClass 已创建(外部 pool: ${CEPH_POOL:-rbd})" \
         || { err "  创建外部 CephConnection/StorageClass 失败"; exit 1; }
     # ★ 等 ceph-csi-operator 生成 ceph-csi-config ConfigMap(config.json: clusterID→monitors)。
     #   无该 CM(或内容空)→ provisioner 无法解析 clusterID, 所有 PVC 永久 Pending(registry 卡死,
     #   NodePort 不可达)。operator 调和是异步的, 等待最长 60s; 超时硬失败(防静默回归)。
+    #   ⚠ 判定必须用 `-o yaml`(2026-09-09 修复): `-o jsonpath='{.data}'` 输出 map 时会把
+    #   config.json 内的双引号转义成 `\"clusterID\":\"ceph-connection\"` → 未转义模式的
+    #   grep 永远不匹配 → CM 实际已生成却误报 60s 超时(假阴性, 实机事故)。
     say "  等待 ceph-csi-operator 生成 ceph-csi-config(config.json, 最长 60s)..."
     _CFG_OK=0
     for _ci in $(seq 1 12); do
-        _cfg="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cm ceph-csi-config -o jsonpath='{.data}' 2>/dev/null" || true) )"
+        _cfg="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cm ceph-csi-config -o yaml 2>/dev/null" || true) )"
         if [ -n "${_cfg}" ] && echo "${_cfg}" | grep -q '"clusterID":"ceph-connection"'; then
             _CFG_OK=1; break
         fi
@@ -341,7 +346,7 @@ volumeBindingMode: Immediate"
         err "  排查: kubectl -n ${CEPH_NAMESPACE} get clientprofile,cephconnection; kubectl -n ${CEPH_NAMESPACE} logs deploy/ceph-csi-controller-manager --tail=50"
         exit 1
     fi
-    unset _MONS _EXT_YAML EXT_CEPHFS_ENABLED _CEPHFS_PROVISIONER_SECRET _CEPHFS_NODE_SECRET _CFG_OK _cfg _ci
+    unset _MONS _EXT_YAML EXT_CEPHFS_ENABLED _CEPHFS_PROVISIONER_SECRET _CEPHFS_NODE_SECRET _CFG_OK _cfg _ci _EXT_NUM
 else
 _CEPH_RBD_YAML="$(_ceph_yaml_file rbd/01-cephblockpool-rbd-pool.yaml rbd/02-storageclass-rbd.yaml rbd/03-storageclass-ceph-block-alias.yaml)" || exit 1
 apply_remote "${_CEPH_RBD_YAML}" "ceph-rbd" \
