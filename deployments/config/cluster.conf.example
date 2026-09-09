@@ -83,7 +83,7 @@ REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"               # 集群内置 Registry(
 
 # ---- 阶段四、附加组件(operator) ----
 GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 沐曦 GPU Operator(默认启用; 见 4.1)
-LWS_ENABLED="${LWS_ENABLED:-false}"                     # LeaderWorkerSet(LLM 工作负载调度; 见 4.2)
+LWS_ENABLED="${LWS_ENABLED:-true}"                      # LeaderWorkerSet(LLM 工作负载调度; 默认启用; 见 4.2)
 LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"  # LWS DisaggregatedSet(解耦推理; 见 4.2)
 PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-false}"       # Prometheus+Operator 监控(P1; 见 4.3)
 CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # Ceph 存储底座(P1; 见 4.3)
@@ -482,7 +482,7 @@ METAX_DRIVER_VERSION="${METAX_DRIVER_VERSION:-3.8.1.6-amd64}"  # 内核驱动版
 METAX_MACA_IMAGE="${METAX_MACA_IMAGE:-maca:3.8.1.2-ubuntu22.04-amd64}"  # MXMACA SDK 镜像(最新 3.8, 需与离线 tar/在线拉取匹配)
 
 # ---------------- 4.2 LeaderWorkerSet / LWS(依赖: Registry; LLM 工作负载调度) ----------------
-# 开关见顶部【组件启停开关】: LWS_ENABLED(默认 false=关)
+# 开关见顶部【组件启停开关】: LWS_ENABLED(默认 true=开)
 # 安装方式(二选一, LWS_INSTALL_MODE):
 #   bundle(默认, 推荐)= 官方 manifests.yaml 单文件, kubectl apply --server-side 整体下发
 #     (含 namespace+CRD+RBAC+controller+webhook; 逐资源应用不受 helm Secret 1MiB 上限; 证书=internal 自签)

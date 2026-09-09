@@ -7,7 +7,7 @@
 
 ### 1.1 启用
 
-`cluster.conf` 中 `LWS_ENABLED=true`(默认 false):
+`cluster.conf` 中 `LWS_ENABLED=true`(默认 true):
 
 ```bash
 # 单独立即部署
@@ -91,7 +91,7 @@ LWS_CERT_MODE=internal sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `LWS_ENABLED` | `false` | 总开关 |
+| `LWS_ENABLED` | `true` | 总开关 |
 | `LWS_INSTALL_MODE` | `bundle` | `bundle`(官方 manifests.yaml, 默认)/ `helm`(chart; cert-manager 自动切 helm) |
 | `LWS_MANIFEST` | `${REPO_ROOT}/deployments/cubestack-addon/lws/manifests.yaml` | 官方 bundle(离线 vendoring) |
 | `LWS_CHART_SOURCE` | `dir` | `dir` / `tgz` / `oci`(chart 来源, 仅 helm 方式) |
