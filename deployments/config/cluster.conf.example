@@ -228,22 +228,26 @@ CEPH_DASHBOARD_ENABLED="${CEPH_DASHBOARD_ENABLED:-true}"  # Ceph Dashboard
 # 【示例】接入外部 Ceph 集群(CEPH_MODE=external) —— 连接配置写法参考
 # 下面是一套【真实测试环境】的 ceph-external-access.conf 内容(由暴露方集群的
 # ceph-expose-external.sh 生成后粘贴/拷贝到本集群 cluster.conf)。
+# ⚠ 本块全部为注释模板, **不会生效** —— 防止与上方真实变量冲突
+#   (历史事故: 示例块曾是活配置, source 后 CEPH_MODE="external" 覆盖上方唯一开关行,
+#   默认配置静默变成 external 模式, 占位 key 还会覆盖真实 CEPH_KEYRING)。
 # ⚠ 使用前:
-#   ① 把 CEPH_KEYRING / CEPHFS_KEYRING 替换为实际 key(下面 key 已打码, 不是真实值);
-#   ② CEPH_MONITORS 等按被接入集群实测填写; 本块仅作"接入方该写哪些变量"的模板。
-#   (如果你把本示例原样贴上去, 会连到 10.244.1.2xx 那套开发测试网, 不是你想要的集群。)
-#   用法: 拷入 cluster.conf → CEPH_MODE=external → ./deploy-cluster.sh --steps ceph_csi
-CEPH_MODE="external"
-CEPH_MONITORS="10.244.1.201:6789,10.244.1.202:6789,10.244.1.203:6789"
-CEPH_POOL="cubestack-ext-rbd-pool"
-CEPH_USER="cubestack-ext-rbd"
-CEPH_KEYRING="<占位: 如 AQxxx==>"            # ⚠ 不要放真实 key(会进 git); 运行前填测试集群给的外部用户 key
-CEPHFS_FS="cubestack-ext-fs"
-CEPHFS_META_POOL="cubestack-ext-cephfs-metadata"
-CEPHFS_DATA_POOL="cubestack-ext-cephfs-data"
-CEPHFS_USER="cubestack-ext-cephfs"
-CEPHFS_KEYRING="<占位: 如 AQA///==>"
-CEPH_RGW_EXTERNAL_ENDPOINT="10.244.1.204:80"
+#   ① 取消注释下面变量, 把 CEPH_KEYRING / CEPHFS_KEYRING 替换为实际 key
+#     (下面 key 已打码, 不是真实值);
+#   ② CEPH_MONITORS 等按被接入集群实测填写;
+#   (如果你原样取消注释贴上去, 会连到 10.244.1.2xx 那套开发测试网, 不是你想要的集群。)
+#   用法: 取消注释并填实际值 → 把上方【唯一】CEPH_MODE 开关行改为 external
+#         → ./deploy-cluster.sh --steps ceph_csi
+# CEPH_MONITORS="10.244.1.201:6789,10.244.1.202:6789,10.244.1.203:6789"
+# CEPH_POOL="cubestack-ext-rbd-pool"
+# CEPH_USER="cubestack-ext-rbd"
+# CEPH_KEYRING="<占位: 如 AQxxx==>"         # ⚠ 不要放真实 key(会进 git); 运行前填测试集群给的外部用户 key
+# CEPHFS_FS="cubestack-ext-fs"
+# CEPHFS_META_POOL="cubestack-ext-cephfs-metadata"
+# CEPHFS_DATA_POOL="cubestack-ext-cephfs-data"
+# CEPHFS_USER="cubestack-ext-cephfs"
+# CEPHFS_KEYRING="<占位: 如 AQA///==>"
+# CEPH_RGW_EXTERNAL_ENDPOINT="10.244.1.204:80"
 # ════════════════════════════════════════════════════════════════════════
 # ---- Ceph 备份/恢复(独立运维模块, 不随部署执行; 见 docs/ceph-backup-restore.md) ----
 # 2026-09-07 拆分: 备份/恢复从部署流程移出, 部署脚本只保留覆盖安装(CEPH_PRE_CLEANUP_EXISTING=true)
