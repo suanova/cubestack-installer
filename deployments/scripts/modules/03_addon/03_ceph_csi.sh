@@ -341,12 +341,31 @@ volumeBindingMode: Immediate"
     done
     if [ "${_CFG_OK}" = "1" ]; then
         ok "  ceph-csi-config 已生成(clusterID=ceph-connection, 外部 Ceph 接入就绪)"
+        # ★ 2026-09-09: CM 数据就绪 ≠ provisioner pod 可见 —— kubelet 把 CM 投递进
+        #   /etc/ceph-csi-config/ 有 ~1 分钟同步延迟。若不等到投递完成, k8s_registry 的
+        #   首次 provision 报 InvalidArgument(config.json not found) 被 csi-provisioner
+        #   判为 **infeasible error** → 退避翻倍到 256s 级, registry 90s 等待超时中断部署
+        #   (实机事故: 首次失败 06:50:17 → 06:58:49 才重试成功)。此处等投递完成(最长 60s,
+        #   超时仅告警不硬失败 —— provisioner 会自行重试成功)。
+        say "  等待 config.json 投递进 provisioner pod(最长 60s)..."
+        _MOUNT_OK=0
+        for _ci in $(seq 1 12); do
+            if ( SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin -c csi-rbdplugin -- test -f /etc/ceph-csi-config/config.json" 2>/dev/null ); then
+                _MOUNT_OK=1; break
+            fi
+            sleep 5
+        done
+        if [ "${_MOUNT_OK}" = "1" ]; then
+            ok "  config.json 已投递进 provisioner pod(外部 Ceph provision 就绪)"
+        else
+            warn "  config.json 60s 内未投递进 pod(kubelet 延迟; 不影响部署, csi-provisioner 会自动重试成功)"
+        fi
     else
         err "  ceph-csi-config 60s 内未生成(ceph-csi-operator 未调和 ClientProfile/CephConnection)"
         err "  排查: kubectl -n ${CEPH_NAMESPACE} get clientprofile,cephconnection; kubectl -n ${CEPH_NAMESPACE} logs deploy/ceph-csi-controller-manager --tail=50"
         exit 1
     fi
-    unset _MONS _EXT_YAML EXT_CEPHFS_ENABLED _CEPHFS_PROVISIONER_SECRET _CEPHFS_NODE_SECRET _CFG_OK _cfg _ci _EXT_NUM
+    unset _MONS _EXT_YAML EXT_CEPHFS_ENABLED _CEPHFS_PROVISIONER_SECRET _CEPHFS_NODE_SECRET _CFG_OK _MOUNT_OK _cfg _ci _EXT_NUM
 else
 _CEPH_RBD_YAML="$(_ceph_yaml_file rbd/01-cephblockpool-rbd-pool.yaml rbd/02-storageclass-rbd.yaml rbd/03-storageclass-ceph-block-alias.yaml)" || exit 1
 apply_remote "${_CEPH_RBD_YAML}" "ceph-rbd" \
