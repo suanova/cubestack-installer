@@ -133,7 +133,41 @@ echo x | nc -u <节点IP> 8472
 
 ## 二、时间同步
 
-> (示例占位) setup-ntp.sh 时钟偏差误报 —— 见该脚本注释与 git 历史;后续问题按模板追加。
+### 1. 【2026-09-08 事故】k8s_ntp 失败: 个别节点偏差稳定 ~2s 不收敛, 其余节点 ~1s 但"通过"
+
+**症状**: 新集群部署, `k8s_ntp` 模块失败 —— master12 偏差 2018ms→复测 2017ms 稳定不收敛(>2000ms 阈值);
+master13/worker11/worker12 偏差 995~1239ms 但"通过"; 权威 master11 "chrony 服务端已就绪" 显示成功。
+
+**根因**(证据链, 详见 git 提交/setup-ntp.sh 注释):
+1. **权威 chronyd 从未加载部署配置**: 各节点 `chronyc sources` 全部 `^? 10.244.1.31  Reach 0 / stratum 0`;
+   master11 `ss -ulnp` 只有 `127.0.0.1:323`(命令 socket), **无 `0.0.0.0:123` NTP 端口监听**;
+   `systemctl status chrony` 显示进程自开机起运行, **journal 无部署时的 restart 记录**(配置 mtime 晚于进程启动)。
+2. **代码 bug**: `node_cmd` 的 `full="sudo $*"` **只给命令链的第一个命令(cp)加 sudo**; 旧 `master_chrony_setup`
+   把整条 `cp && ... && systemctl restart chrony && chronyc makestep` 链传给 node_cmd →
+   链中 `systemctl enable/restart`、`chronyc makestep` 全部以 ubuntu 用户执行 → **静默失败**
+   (`>/dev/null 2>&1 || true` 吞掉, `|| true` 使链恒返回 0) → "已就绪" 假阳性。
+3. 全集群客户端只有一次性 `date -s` 硬对齐兜底(偏差残留 ~1s), 无真正 NTP 收敛。
+
+**解法(根治, 2026-09-08)**:
+- `master_chrony_setup` 重写: 配置+重启+自检全部放入**远程脚本**, 经「单个 `sudo bash`」执行(整脚本 root,
+  与客户端侧 NODE_SCRIPT 同模式); 脚本内置自检(`ss -ulnp | grep ':123 '`), 未监听 123 即 `exit 1` →
+  模块硬失败, 不再假阳性。
+- 修复后二次确认: 权威 `chronyc tracking` stratum 应为 10(local)。
+- `verify_clocks` AUTO_SYNC 重对齐基准改用**权威时钟**(原取部署机时钟, 偏差可达数百 ms)。
+- 客户端侧: `chronyc -a makestep` 重试 3 次(间隔 2s)—— 刚重启的 chronyd 首轮 iburst 前 makestep 必失败。
+
+**验证**: 修复后重跑 `setup-ntp.sh apply` → "已就绪(监听 123, local stratum 10)"; 全节点偏差
+2018ms→**301~313ms**(真正 chrony 同步, 非硬对齐残留); `verify_clocks` 全绿。
+
+**相关命令**:
+```bash
+# 权威是否监听 NTP 端口(关键判据)
+sudo ss -ulnp | grep ':123 '
+# 客户端是否真正同步
+chronyc sources; chronyc tracking
+# 强制重启权威 chrony(手工抢救)
+sudo systemctl restart chrony; sleep 2; chronyc tracking | head -4
+```
 
 ---
 
