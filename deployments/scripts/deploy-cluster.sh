@@ -15,10 +15,11 @@
 #   env 阶段:  vm_network vm_sshkey vm_create harbor lb_haproxy lb_keepalived
 #   k8s 阶段:  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp
 #              k8s_deploy(默认关) k8s_scale(默认关)
-#   addon 阶段: gpu_operator gpu_lws k8s_registry prometheus ceph ceph_csi
+#   addon 阶段: gpu_operator gpu_lws k8s_registry prometheus ceph ceph_csi ceph_backup
 #              envoy_gateway envoy_ai_gateway keycloak kueue kubevirt lustre_csi   (01~19 中间件, 默认关)
 #              cubestack_apps(20 起自研模块占位, 默认关)
 #   验证:      verify_<组件>(自动发现; --steps verify 不指定 operator 默认执行全部 verify_*)
+#   运维:      ceph_backup(Ceph 备份/恢复, 默认关, --steps ceph_backup 单独执行)
 #
 # vm / k8s_passwordless / k8s_workerbm / k8s_hosts / k8s_inventory 为可重复(幂等)模块。
 # 断点续跑: 每模块完成后写入状态文件; --fresh 清状态重跑。
@@ -106,6 +107,8 @@ usage() {
   sudo ./deploy-cluster.sh --only worker02 --with-scale
   sudo ./deploy-cluster.sh --steps verify           # 只跑全部验证模块(端到端验证, 不拉基座)
   sudo ./deploy-cluster.sh --steps verify_metallb   # 只验证某个组件(验后自动清理)
+  sudo ./deploy-cluster.sh --steps ceph_backup      # Ceph 备份(CR+secret+mon store → master 根盘)
+  sudo CEPH_BACKUP_ACTION=restore ./deploy-cluster.sh --steps ceph_backup  # Ceph 恢复(认领旧 OSD 数据)
 EOF
     exit 0
 }
@@ -396,30 +399,14 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
             elif [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ]; then                echo -e "\033[41m\033[97m   覆盖 K8s 前将清理旧 Ceph(mon/osd/池, OSD 数据将销毁) —— 仅显式启用时  \033[0m"
             else
                 echo -e "\033[41m\033[97m   默认【全新部署】: 重装生成新 fsid, 不认领旧 OSD 数据(盘上残留旧数据会被拒绝用) \033[0m"
-                echo -e "\033[41m\033[97m   销毁旧数据: CEPH_PRE_CLEANUP_EXISTING=true; 认领旧数据: CEPH_RESTORE_BACKUP=true \033[0m"
+                echo -e "\033[41m\033[97m   销毁旧数据: CEPH_PRE_CLEANUP_EXISTING=true(覆盖安装); 备份/恢复: --steps ceph_backup \033[0m"
             fi
             echo -e "\033[41m\033[97m   保留 csi-operator(重装不再重复安装); 检测不影响其他 operator 部署    \033[0m"
             echo -e "\033[41m\033[97m================================================================================\033[0m"
-            # ★ 断点续跑保护: ceph 已 done 时不备份不清理(备份用于重装时认领 fsid, done 场景无意义)
+            # ★ 断点续跑保护: ceph 已 done 时不清理不覆盖(备份/恢复已拆出为独立模块 ceph_backup,
+            #   部署预检不再自动备份 —— 需要时单独执行 --steps ceph_backup, 见 15_ceph_backup.sh)
             if [ "${_CEPH_STATE}" != "done" ]; then
-                # ★ 备份旧 CephCluster CR(含 status.fsid): 供 02_ceph.sh 在 CEPH_RESTORE_BACKUP=true 时
-                #   提取 fsid 注入新 CR 的 spec.fsid(Rook 凭 fsid 识别"同一个集群"并认领旧 OSD 数据)。
-                #   只提取 fsid, 不整份恢复旧 CR —— 旧 CR 的 storage.nodes/devices 来自上一代环境,
-                #   直接 apply 会导致盘名/节点过时(OSD 永不创建)与残留 mon store 死锁。
-                CEPH_CR_BACKUP="${CEPH_CR_BACKUP:-${REPO_ROOT}/deployments/offline-files/cephcluster-backup.yaml}"
-                mkdir -p "$(dirname "${CEPH_CR_BACKUP}")"
-                if ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster rook-ceph -o yaml" 2>/dev/null > "${CEPH_CR_BACKUP}"; then
-                    [ -s "${CEPH_CR_BACKUP}" ] && ok "已备份旧 CephCluster CR → ${CEPH_CR_BACKUP}(认领旧数据用)" \
-                        || warn "CephCluster CR 备份为空(请手工备份: kubectl -n rook-ceph get cephcluster rook-ceph -o yaml)"
-                else
-                    warn "备份 CephCluster CR 失败(重装后如需认领旧 OSD 数据, 请手工备份原 CR 含 status.fsid)"
-                fi
-                # ★ 部署时手动备份: 把备份推送到节点根盘 /var/lib/ceph/backup/(防 wipe/防覆盖/防部署机丢失)。
-                #   下次保留数据模式(PRE_CLEANUP=false)重装时 02_ceph 自动从该目录读取 fsid 注入新集群认领旧数据。
-                if [ -s "${CEPH_CR_BACKUP}" ]; then
-                    bash "${SCRIPT_DIR}/tools/k8s/ceph-backup.sh" save "${CEPH_CR_BACKUP}" \
-                        || warn "推送 Ceph 备份到节点失败(自动注入不可用; 可手工: tools/k8s/ceph-backup.sh save ${CEPH_CR_BACKUP})"
-                fi
+                say "Ceph 备份/恢复已独立: 重装前如需保留旧数据, 先执行 --steps ceph_backup(CEPH_BACKUP_ACTION=save)"
             fi
         fi
 

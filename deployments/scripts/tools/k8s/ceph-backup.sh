@@ -3,16 +3,18 @@
 # TOOL: ceph-backup
 # DESC: Ceph 恢复数据备份工具 —— 备份信息持久化到节点根盘(防 wipe) + 时间戳轮转(防覆盖) + systemd timer 定期刷新(可选)
 # 背景:
-#   · Rook-Ceph 认领旧 OSD 数据的关键是 fsid(注入新 CR 的 spec.fsid)。仅靠部署机上的备份文件
-#     不可靠: 部署机/容器丢失即无备份; 单文件每次重装被覆盖 → 认领失败。
+#   · Rook-Ceph 认领旧 OSD 数据的关键是 fsid。⚠ CephCluster CRD **没有 spec.fsid 字段**,
+#     认领凭证 = namespace 的 rook-ceph-mon secret(fsid+keyring)+ 节点 mon store(osdmap epoch);
+#     仅靠部署机上的备份文件不可靠: 部署机/容器丢失即无备份; 单文件每次重装被覆盖 → 认领失败。
 #   · 本工具把备份写到第一个 master 根盘 /var/lib/ceph/backup/(数据盘会被 wipe, 根盘不会):
 #       current/cephcluster-backup.yaml   最新备份
 #       <时间戳>/cephcluster-backup.yaml  历史版本(防覆盖, 保留 CEPH_BACKUP_RETENTION 份)
-#   · 备份在**部署时手动执行**: deploy-cluster.sh 预检检测到旧集群 → 备份 CR → save 推送到节点根盘;
-#     02_ceph.sh HEALTH_OK 后也会 save 一次(新集群 fsid 入库)。无后台定时备份
+#   · 2026-09-07 拆分: 备份/恢复不再由部署流程自动执行(02_ceph.sh / deploy-cluster.sh 预检),
+#     改由独立模块 ceph_backup 单独调用(--steps ceph_backup, CEPH_BACKUP_ACTION=save|restore)。
+#     save 需在集群 HEALTH_OK 后手工执行一次(新集群 fsid 入库); 无后台定时备份
 #     (可选: install-cron 安装 systemd timer 每小时刷新, 适合长期运行环境)。
-#   · 恢复为**自动注入**: 保留数据模式(PRE_CLEANUP=false)重装时, 02_ceph.sh 自动 fetch-fsid
-#     注入新 CR 的 spec.fsid 认领旧 OSD 数据, 无需手工指定。
+#   · 恢复流程: CEPH_BACKUP_ACTION=restore → restore-secret + restore-monstore, 然后以
+#     CEPH_PRE_CLEANUP_EXISTING=false 重跑 ceph 模块, Rook 凭 secret 认领旧 OSD 数据。
 # 用法(部署机, 需 SSH 密钥 + 容器内):
 #   ceph-backup.sh save <cr.yaml> [meta.txt]      # 备份 CR(+meta) 到各节点, 时间戳轮转 + 更新 current/
 #   ceph-backup.sh fetch-fsid                      # 从第一个 master 备份目录读最新 fsid(恢复用)
