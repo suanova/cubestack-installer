@@ -128,11 +128,439 @@ apply_remote() {   # <本地YAML内容> <临时文件名> → 远端 kubectl app
         "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "cat > /tmp/${name}.yaml && ${K} apply -f /tmp/${name}.yaml"
 }
 
+# ════════════════════════════════════════════════════════════════════
+# ★ 2026-09-10 官方导入路径: 消费者读提供方导出的 external-ceph.env(Rook 官方格式),
+#   复刻 import-external-cluster.sh 的资源创建(声明式 YAML + apply_remote, 不依赖官方
+#   脚本的交互/kubectl 直连), 再 apply cluster-external.yaml —— Rook operator 据此
+#   自动创建 CephConnection/ClientProfile 并做 mon 健康检查 → STATE=Connected 上报
+#   (官方 healthCheck 机制, 即 Bug D 的官方解法)。RGW 密钥存在时自动接外部对象存储。
+#   参考: cubestack-addon/rook/external/{import-external-cluster.sh,cluster-external.yaml,
+#   common-external.yaml,object-external.yaml}(v1.20.2 vendored)
+# ════════════════════════════════════════════════════════════════════
+_ext_import_official() {
+    local _env_file="${CEPH_EXTERNAL_ENV_FILE}"
+    [ -f "${_env_file}" ] || { err "CEPH_EXTERNAL_ENV_FILE=${_env_file} 文件不存在(提供方 ceph-external-cluster-details.sh 导出的 external-ceph.env)"; exit 1; }
+    say "  官方导入模式: 读取 ${_env_file} ..."
+    # shellcheck disable=SC1090
+    source "${_env_file}"
+    # 必填校验(与官方 import-external-cluster.sh checkEnvVars 一致)
+    local _miss=""
+    [ -n "${ROOK_EXTERNAL_FSID:-}" ]            || _miss="${_miss} ROOK_EXTERNAL_FSID"
+    [ -n "${ROOK_EXTERNAL_CEPH_MON_DATA:-}" ]   || _miss="${_miss} ROOK_EXTERNAL_CEPH_MON_DATA"
+    [ -n "${ROOK_EXTERNAL_USERNAME:-}" ]        || _miss="${_miss} ROOK_EXTERNAL_USERNAME"
+    [ -n "${ROOK_EXTERNAL_USER_SECRET:-}" ]     || _miss="${_miss} ROOK_EXTERNAL_USER_SECRET"
+    [ -n "${_miss}" ] && { err "external-ceph.env 缺必填变量:${_miss}(提供方导出不完整? 见 docs/ceph-rook.md §外部接入)"; exit 1; }
+    # userID 语义 = <secret_name> + ".<generation>"(generation 空/0 不加后缀)——
+    #   与官方 import-external-cluster.sh getUserId() 逐字一致(不带 client. 前缀)
+    local _gen="${CEPHX_KEY_GENERATION:-0}"
+    _ext_uid() { local _n="$1"; [ -z "${_gen}" ] || [ "${_gen}" = "0" ] && { echo "${_n}"; return 0; }; echo "${_n}.${_gen}"; }
+
+    say "  [import 1/4] 创建 rook-ceph-mon secret + mon-endpoints CM + CSI secrets ..."
+    _EXT_IMP_YAML="apiVersion: v1
+kind: Secret
+metadata:
+  name: rook-ceph-mon
+  namespace: ${CEPH_NAMESPACE}
+type: kubernetes.io/rook
+stringData:
+  cluster-name: ${CEPH_NAMESPACE}
+  fsid: ${ROOK_EXTERNAL_FSID}
+  admin-secret: ${ROOK_EXTERNAL_ADMIN_SECRET:-admin-secret}
+  mon-secret: ${ROOK_EXTERNAL_MONITOR_SECRET:-mon-secret}
+  ceph-username: $(_ext_uid "${ROOK_EXTERNAL_USERNAME}")
+  ceph-secret: ${ROOK_EXTERNAL_USER_SECRET}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rook-ceph-mon-endpoints
+  namespace: ${CEPH_NAMESPACE}
+data:
+  data: ${ROOK_EXTERNAL_CEPH_MON_DATA}
+  mapping: \"{}\"
+  maxMonId: \"2\""
+    # 官方 import 脚本还建 external-cluster-user-command CM(记录提供方导出参数, 供排障);
+    # 有 ARGS 时一并创建(与官方行为一致)。
+    if [ -n "${ARGS:-}" ]; then
+        _EXT_IMP_YAML="${_EXT_IMP_YAML}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: external-cluster-user-command
+  namespace: ${CEPH_NAMESPACE}
+data:
+  args: |-
+    ${ARGS}"
+    fi
+    # 4 个 CSI secret(双角色凭据天然分开 —— Bug A 在官方路径天然成立)
+    if [ -n "${CSI_RBD_NODE_SECRET_NAME:-}" ] && [ -n "${CSI_RBD_NODE_SECRET:-}" ]; then
+        _EXT_IMP_YAML="${_EXT_IMP_YAML}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rook-${CSI_RBD_NODE_SECRET_NAME}
+  namespace: ${CEPH_NAMESPACE}
+type: kubernetes.io/rook
+stringData:
+  userID: $(_ext_uid "${CSI_RBD_NODE_SECRET_NAME}")
+  userKey: ${CSI_RBD_NODE_SECRET}"
+    fi
+    if [ -n "${CSI_RBD_PROVISIONER_SECRET_NAME:-}" ] && [ -n "${CSI_RBD_PROVISIONER_SECRET:-}" ]; then
+        _EXT_IMP_YAML="${_EXT_IMP_YAML}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rook-${CSI_RBD_PROVISIONER_SECRET_NAME}
+  namespace: ${CEPH_NAMESPACE}
+type: kubernetes.io/rook
+stringData:
+  userID: $(_ext_uid "${CSI_RBD_PROVISIONER_SECRET_NAME}")
+  userKey: ${CSI_RBD_PROVISIONER_SECRET}"
+    fi
+    if [ -n "${CSI_CEPHFS_NODE_SECRET_NAME:-}" ] && [ -n "${CSI_CEPHFS_NODE_SECRET:-}" ]; then
+        _EXT_IMP_YAML="${_EXT_IMP_YAML}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rook-${CSI_CEPHFS_NODE_SECRET_NAME}
+  namespace: ${CEPH_NAMESPACE}
+type: kubernetes.io/rook
+stringData:
+  userID: $(_ext_uid "${CSI_CEPHFS_NODE_SECRET_NAME}")
+  userKey: ${CSI_CEPHFS_NODE_SECRET}"
+    fi
+    if [ -n "${CSI_CEPHFS_PROVISIONER_SECRET_NAME:-}" ] && [ -n "${CSI_CEPHFS_PROVISIONER_SECRET:-}" ]; then
+        _EXT_IMP_YAML="${_EXT_IMP_YAML}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rook-${CSI_CEPHFS_PROVISIONER_SECRET_NAME}
+  namespace: ${CEPH_NAMESPACE}
+type: kubernetes.io/rook
+stringData:
+  userID: $(_ext_uid "${CSI_CEPHFS_PROVISIONER_SECRET_NAME}")
+  userKey: ${CSI_CEPHFS_PROVISIONER_SECRET}"
+    fi
+    # RGW admin ops user(§6 对象存储用; Rook 对象控制器经它管理外部 RGW)
+    if [ -n "${RGW_ADMIN_OPS_USER_ACCESS_KEY:-}" ] && [ -n "${RGW_ADMIN_OPS_USER_SECRET_KEY:-}" ]; then
+        _EXT_IMP_YAML="${_EXT_IMP_YAML}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rgw-admin-ops-user
+  namespace: ${CEPH_NAMESPACE}
+type: kubernetes.io/rook
+stringData:
+  accessKey: ${RGW_ADMIN_OPS_USER_ACCESS_KEY}
+  secretKey: ${RGW_ADMIN_OPS_USER_SECRET_KEY}"
+    fi
+    apply_remote "${_EXT_IMP_YAML}" "ceph-ext-import" \
+        || { err "  官方导入资源创建失败(secrets/CM)"; exit 1; }
+    ok "  rook-ceph-mon secret + mon-endpoints CM + CSI secrets 已创建"
+
+    say "  [import 2/4] apply common-external.yaml + cluster-external.yaml(官方 RBAC + 外部 CephCluster CR)..."
+    local _rook_dir="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}"
+    for _f in common-external.yaml cluster-external.yaml; do
+        [ -f "${_rook_dir}/external/${_f}" ] || { err "  vendored 文件缺失: ${_rook_dir}/external/${_f}"; exit 1; }
+        apply_remote "$(cat "${_rook_dir}/external/${_f}")" "ceph-${_f%.yaml}" \
+            || { err "  apply ${_f} 失败"; exit 1; }
+    done
+    ok "  cluster-external.yaml 已 apply(Rook operator 将自动建 CephConnection/ClientProfile)"
+
+    say "  [import 3/4] 等 CephCluster rook-ceph-external Connected(最长 300s)..."
+    _EXT_CONN=0
+    for _ci in $(seq 1 60); do
+        _conn="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph-external -o jsonpath='{.status.conditions[?(@.type==\"Connected\")].status}' 2>/dev/null" || true) )"
+        [ "${_conn}" = "True" ] && { _EXT_CONN=1; break; }
+        sleep 5
+    done
+    if [ "${_EXT_CONN}" = "1" ]; then
+        ok "  CephCluster external STATE=Connected(官方 healthCheck 已接线, Bug D 解法)"
+    else
+        err "  CephCluster rook-ceph-external 300s 内未 Connected —— 外部 mon 不可达或凭据错误"
+        err "  排查: ① mon 可达性(ROOK_EXTERNAL_CEPH_MON_DATA 地址) ② rook-ceph-mon secret 的 ceph-username/ceph-secret"
+        err "  ③ kubectl -n ${CEPH_NAMESPACE} describe cephcluster rook-ceph-external"
+        exit 1
+    fi
+
+    say "  [import 4/4] Rook operator 自动建 CephConnection/ClientProfile + csi-config 校验..."
+    _EXT_CFG=0
+    for _ci in $(seq 1 24); do
+        _cfg="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cm ceph-csi-config -o yaml 2>/dev/null" || true) )"
+        if [ -n "${_cfg}" ] && echo "${_cfg}" | grep -q "\"clusterID\":\"${CEPH_NAMESPACE}\""; then
+            _EXT_CFG=1; break
+        fi
+        sleep 5
+    done
+    [ "${_EXT_CFG}" = "1" ] && ok "  ceph-csi-config 已含外部集群(clusterID=${CEPH_NAMESPACE}, Rook operator 自动生成)" \
+        || warn "  ceph-csi-config 120s 内未见外部集群(等待收敛; provision 会自动重试)"
+
+    # ★ 对外暴露信息: 官方 SC ceph-rbd/cephfs 已由 import 逻辑等价创建(见下方 SC 块);
+    #   RGW 对象存储接入(§6): RGW 密钥存在时登记外部 RGW 端点
+    if [ -n "${RGW_ADMIN_OPS_USER_ACCESS_KEY:-}" ] && [ -n "${RGW_ENDPOINT:-}" ]; then
+        say "  外部 RGW/S3 接入: 创建 CephObjectStore external-store(endpoint=${RGW_ENDPOINT})..."
+        local _rgw_ip="${RGW_ENDPOINT%:*}" _rgw_port="${RGW_ENDPOINT##*:}"
+        [ -z "${_rgw_port}" ] && _rgw_port=80
+        apply_remote "$(sed -e "s|192.168.39.182|${_rgw_ip}|g" \
+            -e "s|port: 80|port: ${_rgw_port}|g" \
+            "${_rook_dir}/external/object-external.yaml")" "ceph-object-external" \
+            && ok "  CephObjectStore external-store 已创建(RGW 端点 ${_rgw_ip}:${_rgw_port})" \
+            || warn "  CephObjectStore external-store 创建失败(检查 RGW_ENDPOINT 可达性)"
+        # 等 PHASE=Ready(外部对象存储登记完成)
+        _EXT_RGW_OK=0
+        for _ci in $(seq 1 24); do
+            _rgw_phase="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephobjectstore external-store -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+            [ "${_rgw_phase}" = "Ready" ] && { _EXT_RGW_OK=1; break; }
+            sleep 5
+        done
+        [ "${_EXT_RGW_OK}" = "1" ] && ok "  CephObjectStore external-store Ready(应用可经 S3 端点 ${RGW_ENDPOINT} 读写对象)" \
+            || warn "  CephObjectStore external-store 未 Ready(检查 rgw-admin-ops-user secret 与 RGW 连通)"
+        unset _EXT_RGW_OK _rgw_phase _rgw_ip _rgw_port
+    fi
+
+    # 官方路径 SC 集合: ceph-rbd / cephfs(import-external-cluster.sh 同名), 平台兼容别名 ceph-block
+    say "  官方路径 StorageClass: ceph-rbd / cephfs / ceph-block(alias)..."
+    _EXT_SC_YAML="apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ceph-rbd
+provisioner: ${CEPH_NAMESPACE}.rbd.csi.ceph.com
+parameters:
+  clusterID: ${CEPH_NAMESPACE}
+  pool: ${RBD_POOL_NAME:-rbd-pool}
+  imageFormat: \"2\"
+  imageFeatures: ${ROOK_RBD_FEATURES:-layering}
+  csi.storage.k8s.io/provisioner-secret-name: rook-${CSI_RBD_PROVISIONER_SECRET_NAME}
+  csi.storage.k8s.io/provisioner-secret-namespace: ${CEPH_NAMESPACE}
+  csi.storage.k8s.io/controller-expand-secret-name: rook-${CSI_RBD_PROVISIONER_SECRET_NAME}
+  csi.storage.k8s.io/controller-expand-secret-namespace: ${CEPH_NAMESPACE}
+  csi.storage.k8s.io/node-stage-secret-name: rook-${CSI_RBD_NODE_SECRET_NAME}
+  csi.storage.k8s.io/node-stage-secret-namespace: ${CEPH_NAMESPACE}
+  csi.storage.k8s.io/fstype: ext4
+allowVolumeExpansion: true
+reclaimPolicy: Delete"
+    if [ -n "${CEPHFS_FS_NAME:-}" ] && [ -n "${CEPHFS_POOL_NAME:-}" ]; then
+        _EXT_SC_YAML="${_EXT_SC_YAML}
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: cephfs
+provisioner: ${CEPH_NAMESPACE}.cephfs.csi.ceph.com
+parameters:
+  clusterID: ${CEPH_NAMESPACE}
+  fsName: ${CEPHFS_FS_NAME}
+  pool: ${CEPHFS_POOL_NAME}
+  csi.storage.k8s.io/provisioner-secret-name: rook-${CSI_CEPHFS_PROVISIONER_SECRET_NAME}
+  csi.storage.k8s.io/provisioner-secret-namespace: ${CEPH_NAMESPACE}
+  csi.storage.k8s.io/controller-expand-secret-name: rook-${CSI_CEPHFS_PROVISIONER_SECRET_NAME}
+  csi.storage.k8s.io/controller-expand-secret-namespace: ${CEPH_NAMESPACE}
+  csi.storage.k8s.io/node-stage-secret-name: rook-${CSI_CEPHFS_NODE_SECRET_NAME}
+  csi.storage.k8s.io/node-stage-secret-namespace: ${CEPH_NAMESPACE}
+allowVolumeExpansion: true
+reclaimPolicy: Delete"
+    fi
+    # 平台兼容别名(registry 等引用 ceph-block; 与集群内模式同名)
+    _EXT_SC_YAML="${_EXT_SC_YAML}
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ceph-block
+provisioner: ${CEPH_NAMESPACE}.rbd.csi.ceph.com
+parameters:
+  clusterID: ${CEPH_NAMESPACE}
+  pool: ${RBD_POOL_NAME:-rbd-pool}
+  imageFormat: \"2\"
+  imageFeatures: ${ROOK_RBD_FEATURES:-layering}
+  csi.storage.k8s.io/provisioner-secret-name: rook-${CSI_RBD_PROVISIONER_SECRET_NAME}
+  csi.storage.k8s.io/provisioner-secret-namespace: ${CEPH_NAMESPACE}
+  csi.storage.k8s.io/controller-expand-secret-name: rook-${CSI_RBD_PROVISIONER_SECRET_NAME}
+  csi.storage.k8s.io/controller-expand-secret-namespace: ${CEPH_NAMESPACE}
+  csi.storage.k8s.io/node-stage-secret-name: rook-${CSI_RBD_NODE_SECRET_NAME}
+  csi.storage.k8s.io/node-stage-secret-namespace: ${CEPH_NAMESPACE}
+  csi.storage.k8s.io/fstype: ext4
+allowVolumeExpansion: true
+reclaimPolicy: Delete"
+    apply_remote "${_EXT_SC_YAML}" "ceph-ext-sc" \
+        && ok "  官方路径 StorageClass 已创建" || { err "  StorageClass 创建失败"; exit 1; }
+
+    # 冒烟测试(官方 SC 名) —— 复用同一数据面验证逻辑(见 _ext_smoke 函数)
+    if [ "${CEPH_EXTERNAL_PROVISION_SMOKE:-true}" = "true" ]; then
+        _ext_smoke "ceph-rbd" "cephfs" "${CEPHFS_FS_NAME:-}"
+    fi
+    unset _EXT_IMP_YAML _EXT_SC_YAML _EXT_CONN _EXT_CFG _cfg _conn _ci _gen _env_file _miss
+}
+
+# ════════════════════════════════════════════════════════════════════
+# 外部 Ceph 数据面冒烟(2026-09-10 Bug C 加固, 手填/官方两路径共用):
+#   RBD: <rbd_sc> 建 1Gi scratch PVC → 等 Bound → busybox pod 真实写读(数据面)
+#   CephFS(<cephfs_enabled> 非空): <cephfs_sc> 同款写读 —— 检出"node 角色无 data 池
+#   写权限"(Bug A)。RBD 未 Bound 硬失败; 数据面写读失败仅告警不阻断(不误伤 caps 较严提供方)。
+#   ⚠ 清理顺序: 写读 pod 跑完后才删 PVC(先删 PVC 会让 pod 永久 Pending, 冒烟假通过)。
+# ════════════════════════════════════════════════════════════════════
+_ext_smoke() {
+    local _rbd_sc="$1" _cephfs_sc="$2" _cephfs_on="$3"
+    say "  外部 Ceph provision 冒烟测试(RBD 1Gi scratch PVC + 真实写读, 最长 180s)..."
+    SMOKE_YAML="apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ceph-csi-smoke-test
+  namespace: ${CEPH_NAMESPACE}
+spec:
+  storageClassName: ${_rbd_sc}
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi"
+    apply_remote "${SMOKE_YAML}" "ceph-csi-smoke" \
+        || { err "  冒烟测试 PVC 创建失败"; exit 1; }
+    _SMOKE_OK=0
+    for _ci in $(seq 1 36); do
+        _smoke="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pvc ceph-csi-smoke-test -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+        if [ "${_smoke}" = "Bound" ]; then _SMOKE_OK=1; break; fi
+        sleep 5
+    done
+    if [ "${_SMOKE_OK}" = "1" ]; then
+        SMOKE_POD_YAML="apiVersion: v1
+kind: Pod
+metadata:
+  name: ceph-csi-smoke-writer
+  namespace: ${CEPH_NAMESPACE}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: docker.io/library/busybox:latest
+      imagePullPolicy: IfNotPresent
+      command: [\"/bin/sh\", \"-c\"]
+      args: [\"echo cubestack-smoke-ok > /mnt/probe.txt && sync && cat /mnt/probe.txt && rm /mnt/probe.txt\"]
+      volumeMounts:
+        - name: smoke-vol
+          mountPath: /mnt
+  volumes:
+    - name: smoke-vol
+      persistentVolumeClaim:
+        claimName: ceph-csi-smoke-test"
+        apply_remote "${SMOKE_POD_YAML}" "ceph-csi-smoke-writer" \
+            || { warn "  冒烟写读 pod 创建失败(跳过数据面验证)"; }
+        _SMOKE_WR_OK=0
+        for _ci in $(seq 1 24); do
+            _wr_phase="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pod ceph-csi-smoke-writer -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+            if [ "${_wr_phase}" = "Succeeded" ]; then _SMOKE_WR_OK=1; break; fi
+            [ "${_wr_phase}" = "Failed" ] && break
+            sleep 5
+        done
+        if [ "${_SMOKE_WR_OK}" = "1" ]; then
+            ok "  冒烟数据面验证通过(busybox 写/读回成功 —— node 角色数据池写权限 ✓)"
+        else
+            warn "  冒烟数据面验证未通过(busybox 写读失败; 不影响部署, 但请核对 node 角色 caps:"
+            warn "    典型故障: node 角色无数据池写权限(EPERM)或 key 不正确 —— 见 docs/ceph-rook.md §外部接入)"
+        fi
+        ( SSH "${K} -n ${CEPH_NAMESPACE} delete pod ceph-csi-smoke-writer --ignore-not-found" >/dev/null 2>&1 || true )
+        unset _SMOKE_WR_OK _wr_phase SMOKE_POD_YAML
+    fi
+    # 无论成败都删除冒烟 PVC(Delete reclaim 自动清 PV/外部卷)
+    ( SSH "${K} -n ${CEPH_NAMESPACE} delete pvc ceph-csi-smoke-test --ignore-not-found" >/dev/null 2>&1 || true )
+    if [ "${_SMOKE_OK}" = "1" ]; then
+        ok "  冒烟测试通过(RBD 1Gi 卷真实创建于外部 pool + 数据面写读验证, 已清理)"
+    else
+        err "  冒烟测试失败: RBD 1Gi scratch PVC 180s 内未 Bound —— 外部 Ceph 提供方异常"
+        err "  排查: ① 提供方集群 HEALTH_OK: kubectl -n rook-ceph get cephcluster(提供方) + ceph -s"
+        err "  ② 外部用户/pool 存在: ceph auth get ${CEPH_USER:-<user>}; ceph osd lspools | grep pool"
+        err "  ③ provisioner 日志: kubectl -n rook-ceph logs deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin -c csi-rbdplugin --tail=50"
+        err "  (提供方未就绪又需先装其它组件时, 可 CEPH_EXTERNAL_PROVISION_SMOKE=false 跳过本测试)"
+        exit 1
+    fi
+    # ★ CephFS 数据面(Bug C 加固): 启用时同款写读, 失败仅告警不阻断
+    if [ "${_SMOKE_OK}" = "1" ] && [ -n "${_cephfs_on}" ]; then
+        say "  外部 CephFS provision + 数据面冒烟(1Gi scratch PVC + busybox 写读, 最长 180s)..."
+        CEPHFS_SMOKE_YAML="apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ceph-csi-smoke-test-fs
+  namespace: ${CEPH_NAMESPACE}
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: ${_cephfs_sc}
+  resources:
+    requests:
+      storage: 1Gi"
+        apply_remote "${CEPHFS_SMOKE_YAML}" "ceph-csi-smoke-fs" \
+            || { warn "  CephFS 冒烟 PVC 创建失败(跳过 CephFS 冒烟)"; }
+        _FS_SMOKE_OK=0
+        for _ci in $(seq 1 36); do
+            _fs_smoke="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pvc ceph-csi-smoke-test-fs -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+            if [ "${_fs_smoke}" = "Bound" ]; then _FS_SMOKE_OK=1; break; fi
+            sleep 5
+        done
+        if [ "${_FS_SMOKE_OK}" != "1" ]; then
+            warn "  CephFS 冒烟: PVC 180s 内未 Bound(跳过数据面写读; 请检查 fs/双用户配置, 见 docs/ceph-rook.md §外部接入)"
+        else
+            FS_SMOKE_POD_YAML="apiVersion: v1
+kind: Pod
+metadata:
+  name: ceph-csi-smoke-fs-writer
+  namespace: ${CEPH_NAMESPACE}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: docker.io/library/busybox:latest
+      imagePullPolicy: IfNotPresent
+      command: [\"/bin/sh\", \"-c\"]
+      args: [\"echo cubestack-cephfs-smoke-ok > /mnt/probe.txt && sync && cat /mnt/probe.txt && rm /mnt/probe.txt\"]
+      volumeMounts:
+        - name: smoke-vol
+          mountPath: /mnt
+  volumes:
+    - name: smoke-vol
+      persistentVolumeClaim:
+        claimName: ceph-csi-smoke-test-fs"
+            apply_remote "${FS_SMOKE_POD_YAML}" "ceph-csi-smoke-fs-writer" \
+                || { warn "  CephFS 冒烟写读 pod 创建失败(跳过数据面验证)"; }
+            _FS_WR_OK=0
+            for _ci in $(seq 1 24); do
+                _fs_wr="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pod ceph-csi-smoke-fs-writer -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+                [ "${_fs_wr}" = "Succeeded" ] && { _FS_WR_OK=1; break; }
+                [ "${_fs_wr}" = "Failed" ] && break
+                sleep 5
+            done
+            ( SSH "${K} -n ${CEPH_NAMESPACE} delete pod ceph-csi-smoke-fs-writer --ignore-not-found" >/dev/null 2>&1 || true )
+            if [ "${_FS_WR_OK}" = "1" ]; then
+                ok "  CephFS 冒烟数据面验证通过(busybox 写/读回成功 —— CephFS node 角色写权限 ✓)"
+            else
+                warn "  CephFS 冒烟数据面验证未通过(busybox 写读失败; 不影响部署, 但请核对:"
+                warn "    ① node 角色凭据 caps 是否含 data 池 rw; ② 提供方 CephFilesystem 已 active"
+                warn "    (见 docs/ceph-rook.md §3.4)"
+            fi
+            unset _FS_WR_OK _fs_wr FS_SMOKE_POD_YAML
+        fi
+        # 写读 pod 跑完后才删 PVC(顺序重要: 先删 PVC 会让 pod 永久 Pending, 冒烟假通过)
+        ( SSH "${K} -n ${CEPH_NAMESPACE} delete pvc ceph-csi-smoke-test-fs --ignore-not-found" >/dev/null 2>&1 || true )
+        unset _FS_SMOKE_OK _fs_smoke CEPHFS_SMOKE_YAML
+    fi
+    unset _SMOKE_OK _smoke SMOKE_YAML _rbd_sc _cephfs_sc _cephfs_on
+}
+
 say "[2/4] 创建 CephBlockPool rbd-pool(3 副本 / host 故障域 / min_size ${CEPH_POOL_MIN_SIZE})..."
 # ★ 外部 Ceph 模式(无集群内 CephCluster): 经 ceph-csi-operator 的 CephConnection 连外部集群,
 #   不创建集群内 pool/fs(外部集群已有), 创建指向外部集群的 6 个默认 StorageClass
 #   (与集群内模式同名的 SC 集合, 供应用/平台无差别使用)。
 if [ "${_CEPH_EXTERNAL}" = "1" ]; then
+    # ★ 2026-09-10 双路径分流:
+    #   · 官方导入(主路径, 推荐): CEPH_EXTERNAL_ENV_FILE 指向提供方导出的 external-ceph.env
+    #     → _ext_import_official(secret/CM + cluster-external.yaml + 自动 RGW + 官方 SC 集合);
+    #   · 手填(兼容 fallback): 未设 env 文件 → 原 CephConnection/ClientProfile 路径(存量部署不变)。
+    if [ -n "${CEPH_EXTERNAL_ENV_FILE:-}" ]; then
+        _ext_import_official
+    else
     say "  外部模式: 创建 CephConnection(${CEPH_MONITORS:-<未配置>}) + 6×StorageClass(指向外部 Ceph)"
     # ★ 2026-09-10(Bug B 修复): external 凭据 preflight 结构校验 —— 在 apply 前逐项核验
     #   user/keyring 成对性与必填字段, 缺项立即硬失败并点名缺失字段(而非拖到部署后期
@@ -427,155 +855,7 @@ volumeBindingMode: Immediate"
         #   · 预热 provisioner 首触路径(消除冷启动/投递延迟), registry 正式 PVC 秒绑。
         #   CEPH_EXTERNAL_PROVISION_SMOKE=false 可跳过(提供方未就绪但需先装其它组件时)。
         if [ "${CEPH_EXTERNAL_PROVISION_SMOKE:-true}" = "true" ]; then
-            say "  外部 Ceph provision 冒烟测试(RBD 1Gi scratch PVC + 真实写读, 最长 180s)..."
-            SMOKE_YAML="apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ceph-csi-smoke-test
-  namespace: ${CEPH_NAMESPACE}
-spec:
-  storageClassName: ceph-rbd-ephemeral-immediate
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 1Gi"
-            apply_remote "${SMOKE_YAML}" "ceph-csi-smoke" \
-                || { err "  冒烟测试 PVC 创建失败"; exit 1; }
-            _SMOKE_OK=0
-            for _ci in $(seq 1 36); do
-                _smoke="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pvc ceph-csi-smoke-test -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
-                if [ "${_smoke}" = "Bound" ]; then _SMOKE_OK=1; break; fi
-                sleep 5
-            done
-            # ★ Bug C 加固: Bound 只验证 provision, 不验证数据面。挂 pod 真实写读:
-            #   busybox 写 /mnt 下文件 → 读回比对 —— node 角色无数据池写权限时这里 EPERM 硬失败。
-            #   (busybox 已在 preload-images.lst, 节点 containerd 预加载; 失败仅告警不阻断 ——
-            #   部分提供方 caps 较严时数据面测试可能被拒, 但 provision 已通, 不因测试误伤部署。)
-            if [ "${_SMOKE_OK}" = "1" ]; then
-                SMOKE_POD_YAML="apiVersion: v1
-kind: Pod
-metadata:
-  name: ceph-csi-smoke-writer
-  namespace: ${CEPH_NAMESPACE}
-spec:
-  restartPolicy: Never
-  containers:
-    - name: writer
-      image: docker.io/library/busybox:latest
-      imagePullPolicy: IfNotPresent
-      command: [\"/bin/sh\", \"-c\"]
-      args: [\"echo cubestack-smoke-ok > /mnt/probe.txt && sync && cat /mnt/probe.txt && rm /mnt/probe.txt\"]
-      volumeMounts:
-        - name: smoke-vol
-          mountPath: /mnt
-  volumes:
-    - name: smoke-vol
-      persistentVolumeClaim:
-        claimName: ceph-csi-smoke-test"
-                apply_remote "${SMOKE_POD_YAML}" "ceph-csi-smoke-writer" \
-                    || { warn "  冒烟写读 pod 创建失败(跳过数据面验证)"; }
-                _SMOKE_WR_OK=0
-                for _ci in $(seq 1 24); do
-                    _wr_phase="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pod ceph-csi-smoke-writer -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
-                    if [ "${_wr_phase}" = "Succeeded" ]; then _SMOKE_WR_OK=1; break; fi
-                    [ "${_wr_phase}" = "Failed" ] && break
-                    sleep 5
-                done
-                if [ "${_SMOKE_WR_OK}" = "1" ]; then
-                    ok "  冒烟数据面验证通过(busybox 写/读回成功 —— node 角色数据池写权限 ✓)"
-                else
-                    warn "  冒烟数据面验证未通过(busybox 写读失败; 不影响部署, 但请核对 node 角色 caps:"
-                    warn "    ceph auth get client.${_CEPHFS_NODE_USER:-<node 用户>} 应含数据池 rw;"
-                    warn "    典型故障: node 角色无数据池写权限(EPERM)或 key 不正确 —— 见 docs/ceph-rook.md §外部接入)"
-                fi
-                ( SSH "${K} -n ${CEPH_NAMESPACE} delete pod ceph-csi-smoke-writer --ignore-not-found" >/dev/null 2>&1 || true )
-                unset _SMOKE_WR_OK _wr_phase SMOKE_POD_YAML
-            fi
-            # 无论成败都删除冒烟 PVC(Delete reclaim 自动清 PV/外部卷)
-            ( SSH "${K} -n ${CEPH_NAMESPACE} delete pvc ceph-csi-smoke-test --ignore-not-found" >/dev/null 2>&1 || true )
-            if [ "${_SMOKE_OK}" = "1" ]; then
-                ok "  冒烟测试通过(RBD 1Gi 卷真实创建于外部 pool + 数据面写读验证, 已清理)"
-            else
-                err "  冒烟测试失败: RBD 1Gi scratch PVC 180s 内未 Bound —— 外部 Ceph 提供方异常"
-                err "  排查: ① 提供方集群 HEALTH_OK: kubectl -n rook-ceph get cephcluster(提供方) + ceph -s"
-                err "  ② 外部用户/pool 存在: ceph auth get ${CEPH_USER:-cubestack-ext-rbd}; ceph osd lspools | grep ${CEPH_POOL}"
-                err "  ③ provisioner 日志: kubectl -n rook-ceph logs deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin -c csi-rbdplugin --tail=50"
-                err "  (提供方未就绪又需先装其它组件时, 可 CEPH_EXTERNAL_PROVISION_SMOKE=false 跳过本测试)"
-                exit 1
-            fi
-            # ★ Bug C 加固(CephFS 数据面): 外部 CephFS 启用时, 同样做 scratch PVC + 真实写读。
-            #   这能检出 Bug A 的"node 角色无 data 池写权限"(PVC 建卷成功但写 EPERM),
-            #   而仅做 PVC Bound 无法暴露; 失败**只告警不阻断** —— 提供方 caps 配置不同时
-            #   不应因测试误伤整个 ceph_csi 部署。
-            if [ "${_SMOKE_OK}" = "1" ] && [ -n "${EXT_CEPHFS_ENABLED}" ]; then
-                say "  外部 CephFS provision + 数据面冒烟(1Gi scratch PVC + busybox 写读, 最长 180s)..."
-                CEPHFS_SMOKE_YAML="apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ceph-csi-smoke-test-fs
-  namespace: ${CEPH_NAMESPACE}
-spec:
-  accessModes: [ReadWriteMany]
-  storageClassName: cephfs-ephemeral
-  resources:
-    requests:
-      storage: 1Gi"
-                apply_remote "${CEPHFS_SMOKE_YAML}" "ceph-csi-smoke-fs" \
-                    || { warn "  CephFS 冒烟 PVC 创建失败(跳过 CephFS 冒烟)"; }
-                _FS_SMOKE_OK=0
-                for _ci in $(seq 1 36); do
-                    _fs_smoke="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pvc ceph-csi-smoke-test-fs -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
-                    if [ "${_fs_smoke}" = "Bound" ]; then _FS_SMOKE_OK=1; break; fi
-                    sleep 5
-                done
-                if [ "${_FS_SMOKE_OK}" != "1" ]; then
-                    warn "  CephFS 冒烟: PVC 180s 内未 Bound(跳过数据面写读; 请检查 CEPHFS_FS/双用户配置, 见 docs/ceph-rook.md §外部接入)"
-                else
-                    FS_SMOKE_POD_YAML="apiVersion: v1
-kind: Pod
-metadata:
-  name: ceph-csi-smoke-fs-writer
-  namespace: ${CEPH_NAMESPACE}
-spec:
-  restartPolicy: Never
-  containers:
-    - name: writer
-      image: docker.io/library/busybox:latest
-      imagePullPolicy: IfNotPresent
-      command: [\"/bin/sh\", \"-c\"]
-      args: [\"echo cubestack-cephfs-smoke-ok > /mnt/probe.txt && sync && cat /mnt/probe.txt && rm /mnt/probe.txt\"]
-      volumeMounts:
-        - name: smoke-vol
-          mountPath: /mnt
-  volumes:
-    - name: smoke-vol
-      persistentVolumeClaim:
-        claimName: ceph-csi-smoke-test-fs"
-                    apply_remote "${FS_SMOKE_POD_YAML}" "ceph-csi-smoke-fs-writer" \
-                        || { warn "  CephFS 冒烟写读 pod 创建失败(跳过数据面验证)"; }
-                    _FS_WR_OK=0
-                    for _ci in $(seq 1 24); do
-                        _fs_wr="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pod ceph-csi-smoke-fs-writer -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
-                        [ "${_fs_wr}" = "Succeeded" ] && { _FS_WR_OK=1; break; }
-                        [ "${_fs_wr}" = "Failed" ] && break
-                        sleep 5
-                    done
-                    ( SSH "${K} -n ${CEPH_NAMESPACE} delete pod ceph-csi-smoke-fs-writer --ignore-not-found" >/dev/null 2>&1 || true )
-                    if [ "${_FS_WR_OK}" = "1" ]; then
-                        ok "  CephFS 冒烟数据面验证通过(busybox 写/读回成功 —— CephFS node 角色写权限 ✓)"
-                    else
-                        warn "  CephFS 冒烟数据面验证未通过(busybox 写读失败; 不影响部署, 但请核对:"
-                        warn "    ① CEPHFS_NODE_USER/CEPHFS_NODE_KEYRING 的 caps 是否含 data 池 rw"
-                        warn "    ② 提供方 CephFilesystem/CephFS 已 active(见 docs/ceph-rook.md §3.4)"
-                    fi
-                    unset _FS_WR_OK _fs_wr FS_SMOKE_POD_YAML
-                fi
-                # 无论成败、且在写读 pod 跑完后删除 CephFS 冒烟 PVC(顺序必须在此: 先删 PVC 会让
-                #   上面 pod 永久 Pending, 数据面验证永远不执行 → 冒烟假通过)
-                ( SSH "${K} -n ${CEPH_NAMESPACE} delete pvc ceph-csi-smoke-test-fs --ignore-not-found" >/dev/null 2>&1 || true )
-                unset _FS_SMOKE_OK _fs_smoke CEPHFS_SMOKE_YAML
-            fi
-            unset _SMOKE_OK _smoke SMOKE_YAML
+            _ext_smoke "ceph-rbd-ephemeral-immediate" "cephfs-ephemeral" "${EXT_CEPHFS_ENABLED}"
         fi
     else
         err "  ceph-csi-config 60s 内未生成(ceph-csi-operator 未调和 ClientProfile/CephConnection)"
@@ -583,6 +863,7 @@ spec:
         exit 1
     fi
     unset _MONS _EXT_YAML EXT_CEPHFS_ENABLED _CEPHFS_PROVISIONER_SECRET _CEPHFS_NODE_SECRET _CEPHFS_NODE_USER _CEPHFS_NODE_KEY _CFG_OK _MOUNT_OK _RS_OK _rs _cfg _ci _EXT_NUM
+    fi   # 双路径分流结束(官方导入 / 手填 fallback)
 else
 _CEPH_RBD_YAML="$(_ceph_yaml_file rbd/01-cephblockpool-rbd-pool.yaml rbd/02-storageclass-rbd.yaml rbd/03-storageclass-ceph-block-alias.yaml)" || exit 1
 apply_remote "${_CEPH_RBD_YAML}" "ceph-rbd" \
