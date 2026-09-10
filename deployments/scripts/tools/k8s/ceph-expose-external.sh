@@ -475,10 +475,22 @@ apply_main() {
     fi
 
     # ③ 认证层: 外部专用用户(profile caps, 非 admin)
-    say "[认证层] 创建外部专用用户(profile rbd caps)..."
-    _RBD_KEY="$( ( _ceph_exec auth get-or-create "client.${EXT_USER}" mon 'profile rbd' osd "profile rbd pool=${EXT_RBD_POOL}" mgr "profile rbd pool=${EXT_RBD_POOL}" 2>/dev/null || true) )"
-    if [ -n "${_RBD_KEY}" ] && echo "${_RBD_KEY}" | grep -q "key = "; then
-        EXT_RBD_KEY="$(echo "${_RBD_KEY}" | awk '/key = /{print $3; exit}')"
+    # ⚠ 2026-09-10 实机: `auth get-or-create` 对**已存在用户**且 caps 参数与现有不同时
+    #   报 EINVAL(key exists but cap does not match)而非幂等返回 —— 池名修正后重跑即命中。
+    #   故统一走 _ext_cephx_user: 已存在 → auth caps 覆盖(修旧 caps) + get-key; 不存在 → get-or-create。
+    _ext_cephx_user() {   # <用户名> <caps 参数...> → echo key(失败空)
+        local _u="$1"; shift
+        if _ceph_exec auth get "client.${_u}" >/dev/null 2>&1; then
+            _ceph_exec auth caps "client.${_u}" "$@" >/dev/null 2>&1 \
+                || { warn "    ${_u} caps 更新失败"; return 1; }
+            _ceph_exec auth get-key "client.${_u}" 2>/dev/null | tr -d '[:space:]'
+        else
+            _ceph_exec auth get-or-create "client.${_u}" "$@" 2>/dev/null | awk '/key = /{print $3; exit}'
+        fi
+    }
+    say "[认证层] 创建外部专用用户(profile caps, 非 admin)..."
+    EXT_RBD_KEY="$(_ext_cephx_user "${EXT_USER}" mon 'profile rbd' osd "profile rbd pool=${EXT_RBD_POOL}" mgr "profile rbd pool=${EXT_RBD_POOL}")"
+    if [ -n "${EXT_RBD_KEY}" ]; then
         ok "  用户 ${EXT_USER}(mon/osd/mgr profile rbd, pool=${EXT_RBD_POOL})"
     else
         warn "  用户 ${EXT_USER} 创建失败(检查 ceph auth caps 语法); key 将为空"
@@ -493,16 +505,14 @@ apply_main() {
         #   · ${EXT_CEPHFS_NODE_USER}(csi-cephfs-node 用): 挂载 fs 承载全部文件 I/O, 需要
         #     metadata+data 池读写(osd allow rw pool=meta,data)
         #   消费者集群 secret 独立指定(03_ceph_csi.sh): CEPHFS_USER=provisioner / CEPHFS_NODE_USER=node。
-        _FS_KEY="$( ( _ceph_exec auth get-or-create "client.${EXT_CEPHFS_USER}" mon 'allow r' mds "allow rw fsname=${EXT_FS}" osd "allow rw pool=${EXT_FS_META_REAL}" 2>/dev/null || true) )"
-        if [ -n "${_FS_KEY}" ] && echo "${_FS_KEY}" | grep -q "key = "; then
-            EXT_CEPHFS_KEY="$(echo "${_FS_KEY}" | awk '/key = /{print $3; exit}')"
+        EXT_CEPHFS_KEY="$(_ext_cephx_user "${EXT_CEPHFS_USER}" mon 'allow r' mds "allow rw fsname=${EXT_FS}" osd "allow rw pool=${EXT_FS_META_REAL}")"
+        if [ -n "${EXT_CEPHFS_KEY}" ]; then
             ok "  用户 ${EXT_CEPHFS_USER}(provisioner: mon allow r / mds allow rw / osd allow rw pool=${EXT_FS_META_REAL})"
         else
             warn "  用户 ${EXT_CEPHFS_USER} 创建失败; key 将为空"
         fi
-        _FS_NODE_KEY="$( ( _ceph_exec auth get-or-create "client.${EXT_CEPHFS_NODE_USER}" mon 'allow r' mds "allow rw fsname=${EXT_FS}" osd "allow rw pool=${EXT_FS_META_REAL}, allow rw pool=${EXT_FS_DATA_REAL}" 2>/dev/null || true) )"
-        if [ -n "${_FS_NODE_KEY}" ] && echo "${_FS_NODE_KEY}" | grep -q "key = "; then
-            EXT_CEPHFS_NODE_KEY="$(echo "${_FS_NODE_KEY}" | awk '/key = /{print $3; exit}')"
+        EXT_CEPHFS_NODE_KEY="$(_ext_cephx_user "${EXT_CEPHFS_NODE_USER}" mon 'allow r' mds "allow rw fsname=${EXT_FS}" osd "allow rw pool=${EXT_FS_META_REAL}, allow rw pool=${EXT_FS_DATA_REAL}")"
+        if [ -n "${EXT_CEPHFS_NODE_KEY}" ]; then
             ok "  用户 ${EXT_CEPHFS_NODE_USER}(node: mon allow r / mds allow rw / osd allow rw pool=${EXT_FS_META_REAL},${EXT_FS_DATA_REAL})"
         else
             warn "  用户 ${EXT_CEPHFS_NODE_USER} 创建失败; key 将为空"
