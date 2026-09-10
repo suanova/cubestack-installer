@@ -34,7 +34,7 @@
 #   sudo ./deploy-cluster.sh --enable envoy_gateway,envoy_ai_gateway   # Envoy 网关二件套预启用(EG 基座 + AI 扩展, AI 依赖 EG 先装)
 #   sudo ./deploy-cluster.sh --phase k8s                    # 仅运行 k8s 阶段
 #   sudo ./deploy-cluster.sh --only <host> --with-k8s       # 仅处理指定节点
-#   sudo ./deploy-cluster.sh --with-scale                   # 扩容(新节点先写入 cluster.conf / tools/vm/vm-nodes.conf)
+#   sudo ./deploy-cluster.sh --with-scale                   # 扩容(仅 k8s_scale; 先登录 master 核对后 diff 新节点, 填入 cluster.conf)
 #   sudo ./deploy-cluster.sh --list / --list-steps / --fresh
 # 数据源: config/cluster.conf
 #
@@ -86,7 +86,9 @@ usage() {
                         不含任何 operator(= --enable k8s, 并跳过全部 operator)
   --with-cubestack      全量部署: = 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主)
                         (如设 GPU_OPERATOR_ENABLED=true 即部署 gpu_operator; lb_haproxy/lb_keepalived 默认 false)
-  --with-scale          启用 k8s_scale 扩容模块(= --enable scale)
+  --with-scale          仅执行 k8s_scale 扩容模块(不连带 operator/已部署组件): 登录首个 master 核对
+                        实际集群节点 → 自动 diff 新节点(新节点先写入 cluster.conf)→ 仅对新节点
+                        环境准备/装包/NTP/registry → 更新 inventory(new_node 组)→ cubestack-offline scale
   --steps k1,k2         立即部署指定模块(自动带基座; verify=只跑验证模块, 不拉基座)
   --skip k1,k2          跳过模块(verify=跳过全部验证模块)
   --enable k1,k2        只把模块开关写入 cluster.conf(持久化, 不部署); 下次 --with-cubestack / 默认部署生效
@@ -103,7 +105,8 @@ usage() {
   sudo ./deploy-cluster.sh --skip gpu_operator --fresh   # 全量重装但排除 gpu_operator(--fresh 清状态)
   sudo ./deploy-cluster.sh --enable lws             # 只把 LWS_ENABLED=true 写入 cluster.conf(不部署)
   sudo ./deploy-cluster.sh --steps gpu_operator     # 立即部署 gpu_operator(自动带基座, 只部署指定的)
-  sudo ./deploy-cluster.sh --with-scale             # 扩容: 新节点先写入 cluster.conf / tools/vm/vm-nodes.conf
+  sudo ./deploy-cluster.sh --with-scale             # 扩容: 仅 k8s_scale(先登录 master 核对集群→diff 新节点→只动新节点)
+  sudo ./deploy-cluster.sh --with-scale --only worker02   # 扩容指定节点(--only 也先经集群核对)
   sudo ./deploy-cluster.sh --only worker02 --with-scale
   sudo ./deploy-cluster.sh --steps verify           # 只跑全部验证模块(端到端验证, 不拉基座)
   sudo ./deploy-cluster.sh --steps verify_metallb   # 只验证某个组件(验后自动清理)
@@ -116,6 +119,7 @@ EOF
 # ---------------- 参数解析 ----------------
 FRESH=0; LIST=0; LIST_STEPS=0
 STEPS_ARG=""; SKIP_ARG=""; ENABLE_ARG=""; PHASE_ARG=""; ENABLE_PERSIST_ARG=""
+SCALE_ONLY=0
 ONLY_HOSTS=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -124,7 +128,8 @@ while [ $# -gt 0 ]; do
         --list-steps) LIST_STEPS=1; shift ;;
         # --with-k8s: 仅 kubespray 基座(k8s + metallb/local-path/registry), 不含任何 operator
         --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; SKIP_ARG="${SKIP_ARG},gpu_operator,gpu_lws,lb_haproxy,lb_keepalived,prometheus,ceph,ceph_csi,envoy_gateway,envoy_ai_gateway,keycloak,kueue,kubevirt,lustre_csi,cubestack_apps"; shift ;;
-        --with-scale) ENABLE_ARG="${ENABLE_ARG},scale"; shift ;;
+        # --with-scale: 仅扩容模块(k8s_scale), 不连带 operator/外层重复模块 —— 见下方 SCALE_ONLY 过滤
+        --with-scale) ENABLE_ARG="${ENABLE_ARG},scale"; SCALE_ONLY=1; shift ;;
         # --with-cubestack = 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主, 不强制启用)
         #   lb_haproxy/lb_keepalived 默认 false, 需要时在 cluster.conf 设 true 或 --enable
         --with-cubestack) ENABLE_ARG="${ENABLE_ARG},k8s"; shift ;;
@@ -214,6 +219,17 @@ fi
 
 if ! resolve_run_steps "${STEPS_ARG}" "${SKIP_ARG}" "${ENABLE_ARG}" "${PHASE_ARG}"; then
     exit 1
+fi
+
+# ★ 扩容专用模式(--with-scale): 只执行 k8s_scale 模块(内部自包含: 登录首 master 核对集群 →
+#   自动 diff 新节点 → 仅对新节点环境准备/装包/NTP/registry → 重生成 inventory(new_node 组)
+#   → cubestack-offline.sh scale)。
+#   过滤掉外层默认模块(metallb/local_path/k8s_registry 等)与 operator —— 扩容不重跑已部署组件,
+#   更不连带 gpu_operator/envoy 等 operator(历史事故: --with-scale 连带全部 TOGGLE=true 的
+#   operator, 扩容变成"全量部署 + 扩容")。--steps 显式指定时以用户为准(不覆盖)。
+if [ "${SCALE_ONLY}" = "1" ] && [ -z "${STEPS_ARG}" ]; then
+    RUN_STEPS=(k8s_scale)
+    say "扩容模式(--with-scale): 仅执行 k8s_scale(不连带 operator/已部署组件)"
 fi
 
 # 让显式启用的模块真正生效: 为 RUN_STEPS 中带 TOGGLE 的模块导出 TOGGLE=true。
