@@ -494,14 +494,86 @@ spec:
             # 无论成败都删除冒烟 PVC(Delete reclaim 自动清 PV/外部卷)
             ( SSH "${K} -n ${CEPH_NAMESPACE} delete pvc ceph-csi-smoke-test --ignore-not-found" >/dev/null 2>&1 || true )
             if [ "${_SMOKE_OK}" = "1" ]; then
-                ok "  冒烟测试通过(1Gi 卷真实创建于外部 pool + 数据面写读验证, 已清理)"
+                ok "  冒烟测试通过(RBD 1Gi 卷真实创建于外部 pool + 数据面写读验证, 已清理)"
             else
-                err "  冒烟测试失败: 1Gi scratch PVC 180s 内未 Bound —— 外部 Ceph 提供方异常"
+                err "  冒烟测试失败: RBD 1Gi scratch PVC 180s 内未 Bound —— 外部 Ceph 提供方异常"
                 err "  排查: ① 提供方集群 HEALTH_OK: kubectl -n rook-ceph get cephcluster(提供方) + ceph -s"
                 err "  ② 外部用户/pool 存在: ceph auth get ${CEPH_USER:-cubestack-ext-rbd}; ceph osd lspools | grep ${CEPH_POOL}"
                 err "  ③ provisioner 日志: kubectl -n rook-ceph logs deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin -c csi-rbdplugin --tail=50"
                 err "  (提供方未就绪又需先装其它组件时, 可 CEPH_EXTERNAL_PROVISION_SMOKE=false 跳过本测试)"
                 exit 1
+            fi
+            # ★ Bug C 加固(CephFS 数据面): 外部 CephFS 启用时, 同样做 scratch PVC + 真实写读。
+            #   这能检出 Bug A 的"node 角色无 data 池写权限"(PVC 建卷成功但写 EPERM),
+            #   而仅做 PVC Bound 无法暴露; 失败**只告警不阻断** —— 提供方 caps 配置不同时
+            #   不应因测试误伤整个 ceph_csi 部署。
+            if [ "${_SMOKE_OK}" = "1" ] && [ -n "${EXT_CEPHFS_ENABLED}" ]; then
+                say "  外部 CephFS provision + 数据面冒烟(1Gi scratch PVC + busybox 写读, 最长 180s)..."
+                CEPHFS_SMOKE_YAML="apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ceph-csi-smoke-test-fs
+  namespace: ${CEPH_NAMESPACE}
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: cephfs-ephemeral
+  resources:
+    requests:
+      storage: 1Gi"
+                apply_remote "${CEPHFS_SMOKE_YAML}" "ceph-csi-smoke-fs" \
+                    || { warn "  CephFS 冒烟 PVC 创建失败(跳过 CephFS 冒烟)"; }
+                _FS_SMOKE_OK=0
+                for _ci in $(seq 1 36); do
+                    _fs_smoke="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pvc ceph-csi-smoke-test-fs -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+                    if [ "${_fs_smoke}" = "Bound" ]; then _FS_SMOKE_OK=1; break; fi
+                    sleep 5
+                done
+                if [ "${_FS_SMOKE_OK}" != "1" ]; then
+                    warn "  CephFS 冒烟: PVC 180s 内未 Bound(跳过数据面写读; 请检查 CEPHFS_FS/双用户配置, 见 docs/ceph-rook.md §外部接入)"
+                else
+                    FS_SMOKE_POD_YAML="apiVersion: v1
+kind: Pod
+metadata:
+  name: ceph-csi-smoke-fs-writer
+  namespace: ${CEPH_NAMESPACE}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: docker.io/library/busybox:latest
+      imagePullPolicy: IfNotPresent
+      command: [\"/bin/sh\", \"-c\"]
+      args: [\"echo cubestack-cephfs-smoke-ok > /mnt/probe.txt && sync && cat /mnt/probe.txt && rm /mnt/probe.txt\"]
+      volumeMounts:
+        - name: smoke-vol
+          mountPath: /mnt
+  volumes:
+    - name: smoke-vol
+      persistentVolumeClaim:
+        claimName: ceph-csi-smoke-test-fs"
+                    apply_remote "${FS_SMOKE_POD_YAML}" "ceph-csi-smoke-fs-writer" \
+                        || { warn "  CephFS 冒烟写读 pod 创建失败(跳过数据面验证)"; }
+                    _FS_WR_OK=0
+                    for _ci in $(seq 1 24); do
+                        _fs_wr="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pod ceph-csi-smoke-fs-writer -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+                        [ "${_fs_wr}" = "Succeeded" ] && { _FS_WR_OK=1; break; }
+                        [ "${_fs_wr}" = "Failed" ] && break
+                        sleep 5
+                    done
+                    ( SSH "${K} -n ${CEPH_NAMESPACE} delete pod ceph-csi-smoke-fs-writer --ignore-not-found" >/dev/null 2>&1 || true )
+                    if [ "${_FS_WR_OK}" = "1" ]; then
+                        ok "  CephFS 冒烟数据面验证通过(busybox 写/读回成功 —— CephFS node 角色写权限 ✓)"
+                    else
+                        warn "  CephFS 冒烟数据面验证未通过(busybox 写读失败; 不影响部署, 但请核对:"
+                        warn "    ① CEPHFS_NODE_USER/CEPHFS_NODE_KEYRING 的 caps 是否含 data 池 rw"
+                        warn "    ② 提供方 CephFilesystem/CephFS 已 active(见 docs/ceph-rook.md §3.4)"
+                    fi
+                    unset _FS_WR_OK _fs_wr FS_SMOKE_POD_YAML
+                fi
+                # 无论成败、且在写读 pod 跑完后删除 CephFS 冒烟 PVC(顺序必须在此: 先删 PVC 会让
+                #   上面 pod 永久 Pending, 数据面验证永远不执行 → 冒烟假通过)
+                ( SSH "${K} -n ${CEPH_NAMESPACE} delete pvc ceph-csi-smoke-test-fs --ignore-not-found" >/dev/null 2>&1 || true )
+                unset _FS_SMOKE_OK _fs_smoke CEPHFS_SMOKE_YAML
             fi
             unset _SMOKE_OK _smoke SMOKE_YAML
         fi
