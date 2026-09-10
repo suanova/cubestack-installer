@@ -51,6 +51,15 @@ EXT_FS_META="${CEPH_EXTERNAL_CEPHFS_META_POOL:-cubestack-ext-cephfs-metadata}"
 EXT_FS_DATA="${CEPH_EXTERNAL_CEPHFS_DATA_POOL:-cubestack-ext-cephfs-data}"
 EXT_FS_META_PG="${CEPH_EXTERNAL_CEPHFS_META_PG:-16}"
 EXT_FS_DATA_PG="${CEPH_EXTERNAL_CEPHFS_DATA_PG:-32}"
+# ★ Rook CephFilesystem CR 的实际池命名规则(v1.20, 2026-09-10 实机核实):
+#   metadataPool 未指定 name → 自动 `<fs>-metadata`;
+#   dataPools[].name=<N>     → 实际 `<fs>-<N>`。
+#   短名(EXT_FS_META/EXT_FS_DATA)只在 CR 模板 dataPools.name 里用;
+#   所有外部接口(caps/conf 导出/官方脚本参数)必须用真实名, 否则:
+#   · 官方脚本按 `ceph fs get` 真实列表校验 → 短名不匹配硬报错
+#   · caps 绑到不存在(孤儿)池 → 真实 data 池无写权限(Bug A"写 EPERM"深层原因)
+EXT_FS_META_REAL="${EXT_FS}-metadata"
+EXT_FS_DATA_REAL="${EXT_FS}-${EXT_FS_DATA}"
 # ---- 规律 NodePort(2026-09-08): mon 按 mon_list 顺序(base, base+1, base+2 ...), RGW 固定 ----
 # 默认 30100 → mon a/b/c = 30100/30101/30102(默认 apiserver service-node-port-range=30000-32767 内, 无需扩范围)。
 # 想要 36789 这种风格需先把 apiserver range 扩到 30000-40000(见 cluster.conf.example 说明)。
@@ -232,7 +241,7 @@ _export_official_env() {
     local _py_args="--namespace ${CEPH_NAMESPACE} --format bash --output /tmp/external-ceph.env"
     _py_args="${_py_args} --rbd-data-pool-name ${EXT_RBD_POOL}"
     if [ "${EXT_CEPHFS_ENABLED}" = "true" ]; then
-        _py_args="${_py_args} --cephfs-filesystem-name ${EXT_FS} --cephfs-data-pool-name ${EXT_FS_DATA} --cephfs-metadata-pool-name ${EXT_FS_META}"
+        _py_args="${_py_args} --cephfs-filesystem-name ${EXT_FS} --cephfs-data-pool-name ${EXT_FS_DATA_REAL} --cephfs-metadata-pool-name ${EXT_FS_META_REAL}"
     fi
     if [ -n "${RGW_EP:-}" ]; then
         # 官方脚本 --rgw-endpoint 期望 ip:port(剥 http:// 前缀); realm/zone 跟随 CephObjectStore 名
@@ -418,7 +427,9 @@ apply_main() {
             && ok "  ${EXT_RBD_POOL} application=rbd" || warn "  ${EXT_RBD_POOL} application 设置失败"
     fi
     if [ "${EXT_CEPHFS_ENABLED}" = "true" ]; then
-        for _fp in "${EXT_FS_META}:${EXT_FS_META_PG}" "${EXT_FS_DATA}:${EXT_FS_DATA_PG}"; do
+        # ★ 用真实池名预建(与 Rook CR 命名一致: <fs>-metadata / <fs>-<dataPool>);
+        #   短名池是历史孤儿(2026-09-10 实机核实), 不再新建/使用。
+        for _fp in "${EXT_FS_META_REAL}:${EXT_FS_META_PG}" "${EXT_FS_DATA_REAL}:${EXT_FS_DATA_PG}"; do
             _fp_pool="${_fp%%:*}"; _fp_pg="${_fp##*:}"
             if _ceph_exec osd pool get "${_fp_pool}" size >/dev/null 2>&1; then
                 ok "  CephFS pool ${_fp_pool} 已存在"
@@ -482,17 +493,17 @@ apply_main() {
         #   · ${EXT_CEPHFS_NODE_USER}(csi-cephfs-node 用): 挂载 fs 承载全部文件 I/O, 需要
         #     metadata+data 池读写(osd allow rw pool=meta,data)
         #   消费者集群 secret 独立指定(03_ceph_csi.sh): CEPHFS_USER=provisioner / CEPHFS_NODE_USER=node。
-        _FS_KEY="$( ( _ceph_exec auth get-or-create "client.${EXT_CEPHFS_USER}" mon 'allow r' mds "allow rw fsname=${EXT_FS}" osd "allow rw pool=${EXT_FS_META}" 2>/dev/null || true) )"
+        _FS_KEY="$( ( _ceph_exec auth get-or-create "client.${EXT_CEPHFS_USER}" mon 'allow r' mds "allow rw fsname=${EXT_FS}" osd "allow rw pool=${EXT_FS_META_REAL}" 2>/dev/null || true) )"
         if [ -n "${_FS_KEY}" ] && echo "${_FS_KEY}" | grep -q "key = "; then
             EXT_CEPHFS_KEY="$(echo "${_FS_KEY}" | awk '/key = /{print $3; exit}')"
-            ok "  用户 ${EXT_CEPHFS_USER}(provisioner: mon allow r / mds allow rw / osd allow rw pool=${EXT_FS_META})"
+            ok "  用户 ${EXT_CEPHFS_USER}(provisioner: mon allow r / mds allow rw / osd allow rw pool=${EXT_FS_META_REAL})"
         else
             warn "  用户 ${EXT_CEPHFS_USER} 创建失败; key 将为空"
         fi
-        _FS_NODE_KEY="$( ( _ceph_exec auth get-or-create "client.${EXT_CEPHFS_NODE_USER}" mon 'allow r' mds "allow rw fsname=${EXT_FS}" osd "allow rw pool=${EXT_FS_META}, allow rw pool=${EXT_FS_DATA}" 2>/dev/null || true) )"
+        _FS_NODE_KEY="$( ( _ceph_exec auth get-or-create "client.${EXT_CEPHFS_NODE_USER}" mon 'allow r' mds "allow rw fsname=${EXT_FS}" osd "allow rw pool=${EXT_FS_META_REAL}, allow rw pool=${EXT_FS_DATA_REAL}" 2>/dev/null || true) )"
         if [ -n "${_FS_NODE_KEY}" ] && echo "${_FS_NODE_KEY}" | grep -q "key = "; then
             EXT_CEPHFS_NODE_KEY="$(echo "${_FS_NODE_KEY}" | awk '/key = /{print $3; exit}')"
-            ok "  用户 ${EXT_CEPHFS_NODE_USER}(node: mon allow r / mds allow rw / osd allow rw pool=${EXT_FS_META},data)"
+            ok "  用户 ${EXT_CEPHFS_NODE_USER}(node: mon allow r / mds allow rw / osd allow rw pool=${EXT_FS_META_REAL},${EXT_FS_DATA_REAL})"
         else
             warn "  用户 ${EXT_CEPHFS_NODE_USER} 创建失败; key 将为空"
         fi
@@ -515,8 +526,8 @@ CEPH_USER="${EXT_USER}"
 CEPH_KEYRING="${EXT_RBD_KEY}"
 # --- CephFS(ceph-csi CephFS provisioner/node 分用户使用, 2026-09-10) ---
 CEPHFS_FS="${EXT_FS}"
-CEPHFS_META_POOL="${EXT_FS_META}"
-CEPHFS_DATA_POOL="${EXT_FS_DATA}"
+CEPHFS_META_POOL="${EXT_FS_META_REAL}"
+CEPHFS_DATA_POOL="${EXT_FS_DATA_REAL}"
 # CephFS provisioner 角色(建删 subvolume; 提供方 caps 只给 meta 池 rw)
 CEPHFS_USER="${EXT_CEPHFS_USER}"
 CEPHFS_KEYRING="${EXT_CEPHFS_KEY}"

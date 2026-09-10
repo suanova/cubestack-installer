@@ -601,7 +601,7 @@ if [ "${_CEPH_EXTERNAL}" = "1" ]; then
 # CEPHFS_FS 为空则跳过 CephFS 两个 SC(仅 RBD); CEPHFS_FS 非空但缺 DATA_POOL → 硬失败(明确提示缺什么)。
     EXT_CEPHFS_ENABLED="${CEPHFS_FS:-}"
     if [ -n "${EXT_CEPHFS_ENABLED}" ] && [ -z "${CEPHFS_DATA_POOL:-}" ]; then
-        err "CEPHFS_FS 已设置但 CEPHFS_DATA_POOL 为空: external CephFS 需要外部集群的 data pool 名(如 cubestack-ext-cephfs-data)"; exit 1
+        err "CEPHFS_FS 已设置但 CEPHFS_DATA_POOL 为空: external CephFS 需要外部集群的 data pool 真实名(如 cubestack-ext-fs-cubestack-ext-cephfs-data)"; exit 1
     fi
     # RBD SC parameters(不含 `parameters:` 键头 —— 该键已由 SC 模板头写出, 避免重复键导致 YAML 解析错误;
     #   末尾固定换行, 与后续 reclaimPolicy 正常分行)
@@ -719,7 +719,7 @@ volumeBindingMode: WaitForFirstConsumer"
         # external CephFS 必要字段(来自 ceph-external-access.conf 导入): CEPHFS_FS / CEPHFS_DATA_POOL 必填
         # CephConnection clusterID=ceph-connection; fsName/pool 指向外部集群已存在的 fs/data pool
         _CEPHFS_FS="${CEPHFS_FS:?external CephFS 需要 CEPHFS_FS(外部集群 fs 名, 如 cubestack-ext-fs)}"
-        _CEPHFS_DATA_POOL="${CEPHFS_DATA_POOL:?external CephFS 需要 CEPHFS_DATA_POOL(外部集群 data pool, 如 cubestack-ext-cephfs-data)}"
+        _CEPHFS_DATA_POOL="${CEPHFS_DATA_POOL:?external CephFS 需要 CEPHFS_DATA_POOL(外部集群 data pool 真实名, 如 cubestack-ext-fs-cubestack-ext-cephfs-data)}"
         # ★ 2026-09-10(Bug A 修复): csi-cephfs **node** 角色与 **provisioner** 角色 caps 不同
         #   (node 挂载 fs 承载全部文件 I/O, 需要 metadata/data 全读写; provisioner 只建删 subvolume,
         #   被提供方限定 metadata 读)。两个 secret 必须可独立指定凭据:
