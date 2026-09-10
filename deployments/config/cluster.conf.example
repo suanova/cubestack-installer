@@ -209,8 +209,13 @@ CEPH_EXTERNAL_CEPHFS="${CEPH_EXTERNAL_CEPHFS:-}"              # 空=随 CEPHFS_E
 CEPH_EXTERNAL_CEPHFS_USER="${CEPH_EXTERNAL_CEPHFS_USER:-cubestack-ext-cephfs}"  # 外部 CephFS 专用用户(provisioner 角色: mon allow r / mds allow rw / osd allow rw meta)
 CEPH_EXTERNAL_CEPHFS_NODE_USER="${CEPH_EXTERNAL_CEPHFS_NODE_USER:-cubestack-ext-cephfs-node}"  # 外部 CephFS node 角色用户(挂载 fs, 需 meta+data 池 rw; 2026-09-10 Bug A 分用户)
 CEPH_EXTERNAL_CEPHFS_FS="${CEPH_EXTERNAL_CEPHFS_FS:-cubestack-ext-fs}"         # 外部 CephFilesystem 名
-CEPH_EXTERNAL_CEPHFS_META_POOL="${CEPH_EXTERNAL_CEPHFS_META_POOL:-cubestack-ext-cephfs-metadata}"
-CEPH_EXTERNAL_CEPHFS_DATA_POOL="${CEPH_EXTERNAL_CEPHFS_DATA_POOL:-cubestack-ext-cephfs-data}"
+CEPH_EXTERNAL_CEPHFS_META_POOL="${CEPH_EXTERNAL_CEPHFS_META_POOL:-cubestack-ext-cephfs-metadata}"  # (预留) meta 池名:
+                                                 # ⚠ metadata 池名由 Rook 自动生成 <fs>-metadata(CR metadataPool 无 name 字段),
+                                                 #   本变量未参与 CR 生成; 实际池以 ceph fs get 为准
+CEPH_EXTERNAL_CEPHFS_DATA_POOL="${CEPH_EXTERNAL_CEPHFS_DATA_POOL:-cubestack-ext-cephfs-data}"       # ★ CephFilesystem CR 的
+                                                 # dataPools.name 输入(短名)。⚠ 实际池名 = <fs>-<本变量>
+                                                 #   (如 cubestack-ext-fs-cubestack-ext-cephfs-data)——
+                                                 #   所有对外接口(caps/conf 导出/官方 env)自动用实际名
 CEPH_EXTERNAL_CEPHFS_META_PG="${CEPH_EXTERNAL_CEPHFS_META_PG:-16}"   # meta pool PG 数
 CEPH_EXTERNAL_CEPHFS_DATA_PG="${CEPH_EXTERNAL_CEPHFS_DATA_PG:-32}"   # data pool PG 数
 CEPH_EXTERNAL_CONF="${CEPH_EXTERNAL_CONF:-}"                  # 导出文件路径(空=config/ceph-external-access.conf)
