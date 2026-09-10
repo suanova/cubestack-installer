@@ -236,6 +236,14 @@ CEPH_MON_NODEPORT_MAX="${CEPH_MON_NODEPORT_MAX:-32767}"     # 规律分配硬上
 # ⚠ internal 模式的对外暴露配置(CEPH_EXTERNAL_* / CEPH_MON_NODEPORT_* / CEPH_RGW_*)与本段无关——
 #   那是"我把自己暴露出去"用的; 本段是"我接入外部别人的"。external 模式请忽略上方暴露段。
 CEPH_MIN_NODES="${CEPH_MIN_NODES:-3}"            # internal 模式: 存储节点 < 此值 → 不创建集群内 CephCluster
+CEPH_EXTERNAL_ENV_FILE="${CEPH_EXTERNAL_ENV_FILE:-}"  # ★ external 官方导入路径(2026-09-10, 推荐):
+                                                 #   提供方 Rook 集群导出的 external-ceph.env 文件路径
+                                                 #   (提供方执行 create-external-cluster-resources.py 生成)。
+                                                 #   设置后 ceph_csi 走官方导入: source env → 建 rook-ceph-mon secret /
+                                                 #   mon-endpoints CM / CSI 双角色 secret / rgw-admin-ops-user /
+                                                 #   cluster-external.yaml(CephCluster external → STATE=Connected 健康上报)
+                                                 #   → 官方 SC 集合(ceph-rbd/cephfs/ceph-block) → 自动接外部 RGW(env 带 RGW_* 时)。
+                                                 #   留空 = 手填路径(CEPH_MONITORS/CEPH_USER/CEPH_KEYRING 等, 存量兼容)。
 CEPH_MONITORS="${CEPH_MONITORS:-}"               # external: 外部 Ceph monitors, 如 "10.66.1.21:6789,10.66.1.22:6789"; 留空=不启用外部 Ceph
 CEPH_POOL="${CEPH_POOL:-rbd}"                    # external: 外部 Ceph 使用的 RBD pool 名(外部集群已有)
 CEPH_USER="${CEPH_USER:-admin}"                  # external: 外部 Ceph 认证用户(默认 admin)

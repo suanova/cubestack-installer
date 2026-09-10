@@ -226,7 +226,50 @@ sudo ./deploy-cluster.sh --steps verify_ceph                        # ⑨ 自动
 
 #### 3.4.2 集群 B(存储消费方, external)
 
-打开 B 的 `cluster.conf`, 把 A 导出的 `ceph-external-access.conf` 关键值拷入下述字段(只改这些):
+**两条路径**(2026-09-10 双轨, 主路径 = 官方导入):
+
+##### 路径一: 官方导入(推荐, 全自动)
+
+提供方在 **A 集群** 上执行官方导出脚本生成 `external-ceph.env`(含 CSI 双角色 secret /
+healthchecker / mon 数据 / RGW admin 密钥):
+
+```bash
+# A 集群(toolbox 内或部署机, 有 ceph admin keyring):
+python3 create-external-cluster-resources.py --rbd-data-pool-name rbd-pool \
+  --cephfs-filesystem-name cephfs --cephfs-data-pool-name cephfs-data0 \
+  --cephfs-metadata-pool-name cephfs-metadata \
+  --rgw-endpoint <RGW 端点 ip:port> --rgw-realm-name s3-store \
+  --rgw-zonegroup-name s3-store --rgw-zone-name s3-store \
+  --namespace rook-ceph --format bash --output external-ceph.env
+```
+
+把 `external-ceph.env` 拷到 **B 集群**部署机任意路径, 在 B 的 `cluster.conf` 只设 **3 行**:
+
+```bash
+CEPH_MODE=external
+CEPH_ENABLED=true                 # 让 02 部署 operator/csi-operator(03 官方导入的前提)
+CEPH_CSI_ENABLED=true
+CEPH_EXTERNAL_ENV_FILE="/opt/cubestack-installer/external-ceph.env"   # ★ env 文件路径
+```
+
+`03_ceph_csi.sh` 检测到 `CEPH_EXTERNAL_ENV_FILE` 后全自动完成(无需任何手工 kubectl):
+
+1. source env → 建 `rook-ceph-mon` secret + `rook-ceph-mon-endpoints` CM +
+   4 个 CSI secret(**双角色凭据天然分开** = Bug A 官方路径天然成立)+
+   `rgw-admin-ops-user` secret(env 带 RGW 密钥时);
+2. apply `common-external.yaml` + `cluster-external.yaml`(vendored, v1.20.2)→
+   Rook operator 自动建 `CephConnection`/`ClientProfile` 并做 mon 健康检查;
+3. 等 `CephCluster rook-ceph-external` **STATE=Connected**(官方 healthCheck 机制,
+   §3.4.5 已知限制在本路径不适用);
+4. 建官方 SC 集合: `ceph-rbd` / `cephfs`(env 带 CephFS 时)+ `ceph-block`(平台兼容别名);
+5. env 带 `RGW_ADMIN_OPS_USER_*` + `RGW_ENDPOINT` → 自动建 `CephObjectStore external-store`
+   (externalRgwEndpoints → 提供方 RGW), 应用可经 S3 端点读写对象(§6);
+6. 数据面冒烟测试(RBD + CephFS 真实写读)。
+
+##### 路径二: 手填(存量兼容)
+
+不设 `CEPH_EXTERNAL_ENV_FILE` 时走原路径(ceph-csi-operator `CephConnection`/`ClientProfile`,
+集群 B 的配置同 §3.4.2 原样)。打开 B 的 `cluster.conf`, 把 A 导出的 `ceph-external-access.conf` 关键值拷入下述字段(只改这些):
 
 ```bash
 CEPH_MODE=external                          # 切到外部接入
@@ -303,25 +346,29 @@ kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph auth caps client.csi-ce
 - `ceph fs subvolume create 报 RADOS permission error` → provisioner 角色 caps 不足
   (node caps 只有 metadata) → 换用 provisioner 凭据。
 
-#### 3.4.5 已知限制: 外部接入无 health-check / STATE 上报(Bug D, 2026-09-10 确认)
+#### 3.4.5 已知限制: 手填路径无 health-check / STATE 上报(Bug D, 2026-09-10 确认; 官方导入路径已解决)
 
-**现象**: 消费者集群的 `CephConnection`/`ClientProfile` 无 `cephx` 块; Rook 提供方导出的
+**现象(仅手填路径)**: 消费者集群的 `CephConnection`/`ClientProfile` 无 `cephx` 块; Rook 提供方导出的
 `ROOK_EXTERNAL_USERNAME`(client.healthchecker)/`ROOK_EXTERNAL_USER_SECRET` 在消费者侧**无处接线**。
 
-**根因(已核实, 非接线遗漏)**: 消费者接入走 **ceph-csi-operator**(`csi.ceph.io` 组 v1.0.4,
+**根因(已核实, 非接线遗漏)**: 手填路径走 **ceph-csi-operator**(`csi.ceph.io` 组 v1.0.4,
 `CephConnection`/`ClientProfile` CRD)——两个 CRD 的 structured schema **没有 `cephx`/`healthCheck`
 字段**(`CephConnection.spec` 仅 `monitors`/`rbdMirrorDaemonCount`/`readAffinity`;
 `ClientProfile.spec` 仅 `cephConnectionRef`/`cephFs`/`nfs`/`nvmeof`/`rbd`)。硬塞 `cephx:` 会被
-CRD 校验拒绝, 破坏 apply。`ROOK_EXTERNAL_*` 是 **Rook 提供方 `ceph-external-cluster-details.sh`**
-为自身 `CephCluster` external 模式导出的变量, 与本项目消费者的 csi-operator 路径无关。
+CRD 校验拒绝, 破坏 apply。
 
-**影响面**: 无功能影响 —— csi-operator 的 `STATE=Connected` / provision 与挂载不依赖 health-checker;
+**★ 官方导入路径已解决(§3.4.2 路径一, 2026-09-10)**: 设 `CEPH_EXTERNAL_ENV_FILE` 后走
+Rook 官方 import 流程 —— 消费者侧 apply `cluster-external.yaml`(`CephCluster` CR external 模式,
+`spec.healthCheck.daemonHealth.mon` 开启), Rook operator 经 `rook-ceph-mon` secret 的
+`ceph-username=client.healthchecker.<gen>`/`ceph-secret` 做 mon 健康检查 →
+`kubectl -n rook-ceph get cephcluster` 显示 **STATE=Connected** / 健康上报。同时 Rook operator
+还会自动创建 `CephConnection`/`ClientProfile`(与手填路径同名资源, 名字=命名空间), csi 配置照常生成。
+
+**影响面**: 手填路径无功能影响 —— csi-operator 的 provision 与挂载不依赖 health-checker;
 历史 "failed-to-fetch-monitor-list" 根因是缺 `ClientProfile`(已修复), 与缺 healthcheck 无关。
 
-**修复路径(如需, 属架构演进, 不在当前范围)**:
-1. 升级 ceph-csi-operator 至含 health-check 字段的版本(需向上游确认对应版本);
-2. 或改用 Rook `CephCluster` external 模式接入(架构变更, 与当前 csi-operator 两套并存)。
-当前默认方案(ceph-csi-operator 经 `CephConnection`)保留不修, 文档如实标注。
+**结论**: 手填路径保留现状(无 health-check, 已如实标注); 需要健康上报/对象存储的部署改用
+官方导入路径(§3.4.2 路径一)。
 
 ## 4. 裸盘自动检测(需求)
 
