@@ -571,5 +571,15 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] && [ -f "${REPO_ROOT}/deployments/confi
     echo "              $(grep '^CEPH_MONITORS=' "${REPO_ROOT}/deployments/config/ceph-external-access.conf" 2>/dev/null | cut -d= -f2- | tr -d '\"')"
     echo "  一键查看: cat ${REPO_ROOT}/deployments/config/ceph-external-access.conf"
     echo "  5 层自检(含外部客户端协议级测试): bash ${SCRIPT_DIR}/tools/k8s/ceph-expose-external.sh status"
+    # ★ 官方导入路径(2026-09-10): env 文件导出成功时提示 —— 目标集群设 CEPH_EXTERNAL_ENV_FILE
+    #   即走官方导入(health-check/STATE=Connected + 自动 RGW/S3 对象存储), 见 docs §3.4.2 路径一。
+    if [ -f "${REPO_ROOT}/deployments/config/external-ceph.env" ]; then
+        echo -e "${_C_BOLD}${_C_GREEN}★ 官方 external-ceph.env(推荐接入方式):${_C_OFF}"
+        echo "  已导出: ${REPO_ROOT}/deployments/config/external-ceph.env"
+        echo "              (含官方 CSI 双角色 secret / healthchecker / RGW admin 密钥; gitignore 勿提交)"
+        echo "  目标集群用法: 把该文件拷到目标集群部署机, cluster.conf 设 CEPH_MODE=external +"
+        echo "              CEPH_EXTERNAL_ENV_FILE=<路径>(或放默认目录 deployments/config/ 自动检测)→"
+        echo "              全自动官方导入(STATE=Connected 健康上报 + 对象存储 S3 接入)"
+    fi
 fi
 echo "============================================="
