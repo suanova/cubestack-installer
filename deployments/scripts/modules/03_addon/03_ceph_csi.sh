@@ -29,7 +29,9 @@
 #   · 参考: docs/ceph-rook.md
 # 数据源: cluster.conf (CEPH_CSI_ENABLED / CEPH_ENABLED / CEPH_* / CEPHFS_ENABLED / CEPH_RGW_ENABLED /
 #         CEPH_EXTERNAL_EXPOSE / CEPH_EXTERNAL_EXPOSE_MODE / CEPH_RGW_EXPOSE_MODE /
-#         CEPH_EXTERNAL_PROVISION_SMOKE / SERVICE_EXPOSE_MODE / NODES)
+#         CEPH_EXTERNAL_PROVISION_SMOKE / SERVICE_EXPOSE_MODE / NODES;
+#         external CephFS 双角色: CEPHFS_USER/CEPHFS_KEYRING(provisioner) + CEPHFS_NODE_USER/
+#         CEPHFS_NODE_KEYRING(node, 2026-09-10 Bug A))
 # 用法:   sudo ./deploy-cluster.sh --enable ceph_csi  或  CEPH_CSI_ENABLED=true
 # ============================================================
 set -euo pipefail
@@ -132,7 +134,33 @@ say "[2/4] 创建 CephBlockPool rbd-pool(3 副本 / host 故障域 / min_size ${
 #   (与集群内模式同名的 SC 集合, 供应用/平台无差别使用)。
 if [ "${_CEPH_EXTERNAL}" = "1" ]; then
     say "  外部模式: 创建 CephConnection(${CEPH_MONITORS:-<未配置>}) + 6×StorageClass(指向外部 Ceph)"
-    [ -n "${CEPH_KEYRING:-}" ] || { err "外部 Ceph 需要认证: 请在 cluster.conf 设 CEPH_KEYRING(外部 Ceph client keyring, 如 admin 的 key)"; exit 1; }
+    # ★ 2026-09-10(Bug B 修复): external 凭据 preflight 结构校验 —— 在 apply 前逐项核验
+    #   user/keyring 成对性与必填字段, 缺项立即硬失败并点名缺失字段(而非拖到部署后期
+    #   才以 rados ret=-13 暴露)。用户存在性/caps 校验见模块冒烟测试与提供方
+    #   ceph-expose-external.sh status(5 层自检: 认证用户 + RBD API + 写路径探测)。
+    _PRE_MISS=""
+    [ -n "${CEPH_MONITORS:-}" ] || _PRE_MISS="${_PRE_MISS} CEPH_MONITORS"
+    [ -n "${CEPH_USER:-}" ]     || _PRE_MISS="${_PRE_MISS} CEPH_USER"
+    [ -n "${CEPH_KEYRING:-}" ]  || _PRE_MISS="${_PRE_MISS} CEPH_KEYRING"
+    [ -n "${CEPH_POOL:-}" ]     || _PRE_MISS="${_PRE_MISS} CEPH_POOL"
+    if [ -n "${_PRE_MISS}" ]; then
+        err "外部 Ceph 凭据不完整(缺失:${_PRE_MISS})—— 请在 cluster.conf 补齐后重跑"
+        err "  RBD:  CEPH_MONITORS(mon 地址) + CEPH_USER(如 cubestack-ext-rbd) + CEPH_KEYRING(该用户 key) + CEPH_POOL"
+        err "  CephFS(可选): CEPHFS_FS/CEPHFS_DATA_POOL + CEPHFS_USER/CEPHFS_KEYRING(provisioner) + CEPHFS_NODE_USER/CEPHFS_NODE_KEYRING(node, 可选)"
+        exit 1
+    fi
+    # node 角色独立凭据(2026-09-10 Bug A): 单独给了 user 就必须给 keyring(反之亦然), 防手抖
+    if [ -n "${CEPHFS_NODE_USER:-}" ] || [ -n "${CEPHFS_NODE_KEYRING:-}" ]; then
+        [ -n "${CEPHFS_NODE_USER:-}" ] && [ -n "${CEPHFS_NODE_KEYRING:-}" ] || {
+            err "CEPHFS_NODE_USER/CEPHFS_NODE_KEYRING 必须成对设置(缺其一)"; exit 1
+        }
+    fi
+    if [ -n "${CEPH_RBD_NODE_USER:-}" ] || [ -n "${CEPH_RBD_NODE_KEYRING:-}" ]; then
+        [ -n "${CEPH_RBD_NODE_USER:-}" ] && [ -n "${CEPH_RBD_NODE_KEYRING:-}" ] || {
+            err "CEPH_RBD_NODE_USER/CEPH_RBD_NODE_KEYRING 必须成对设置(缺其一)"; exit 1
+        }
+    fi
+    unset _PRE_MISS
     # monitors "a:b", "c:d"(逗号分隔 → YAML 数组); CephConnection CRD spec.monitors(无 connection 层级)
     _MONS="$(echo "${CEPH_MONITORS:-}" | sed 's/,/","/g')"
     # 外部 CephFS(可选): 需外部集群已创建 CephFilesystem(fs + meta/data pools).
@@ -183,6 +211,9 @@ spec:
     name: ceph-connection
 ---
 # 外部集群 RBD 认证(csi-rbd provisioner/node): 连外部 Ceph 的集群内 secret
+# ★ 2026-09-10(Bug A 同款加固): 提供方若对两角色 caps 区分更严, 可用
+#   CEPH_RBD_NODE_USER/CEPH_RBD_NODE_KEYRING 单独指定 node 角色;
+#   未指定时回退 CEPH_USER/CEPH_KEYRING(原行为, 不破坏存量)。
 apiVersion: v1
 kind: Secret
 metadata:
@@ -198,8 +229,8 @@ metadata:
   name: rook-csi-rbd-node
   namespace: ${CEPH_NAMESPACE}
 stringData:
-  userID: ${CEPH_USER:-admin}
-  userKey: ${CEPH_KEYRING:-}
+  userID: ${CEPH_RBD_NODE_USER:-${CEPH_USER:-admin}}
+  userKey: ${CEPH_RBD_NODE_KEYRING:-${CEPH_KEYRING:-}}
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -255,9 +286,19 @@ volumeBindingMode: WaitForFirstConsumer"
         # CephConnection clusterID=ceph-connection; fsName/pool 指向外部集群已存在的 fs/data pool
         _CEPHFS_FS="${CEPHFS_FS:?external CephFS 需要 CEPHFS_FS(外部集群 fs 名, 如 cubestack-ext-fs)}"
         _CEPHFS_DATA_POOL="${CEPHFS_DATA_POOL:?external CephFS 需要 CEPHFS_DATA_POOL(外部集群 data pool, 如 cubestack-ext-cephfs-data)}"
+        # ★ 2026-09-10(Bug A 修复): csi-cephfs **node** 角色与 **provisioner** 角色 caps 不同
+        #   (node 挂载 fs 承载全部文件 I/O, 需要 metadata/data 全读写; provisioner 只建删 subvolume,
+        #   被提供方限定 metadata 读)。两个 secret 必须可独立指定凭据:
+        #   · CEPHFS_NODE_USER / CEPHFS_NODE_KEYRING —— node 专用(推荐: 提供方 csi-cephfs-node 用户)
+        #   · CEPHFS_USER     / CEPHFS_KEYRING     —— provisioner 专用(历史单一字段, 保持兼容)
+        #   旧配置只填 CEPHFS_USER/CEPHFS_KEYRING 时, node 回退到同一凭据(原行为, 不破坏存量)。
+        _CEPHFS_NODE_USER="${CEPHFS_NODE_USER:-${CEPHFS_USER:-${CEPH_USER:-admin}}}"
+        _CEPHFS_NODE_KEY="${CEPHFS_NODE_KEYRING:-${CEPHFS_KEYRING:-${CEPH_KEYRING:-}}}"
         _EXT_YAML="${_EXT_YAML}
 ---
-# 外部 CephFS 认证(csi-cephfs provisioner/node): 用外部 CephFS 专用用户
+# 外部 CephFS 认证(csi-cephfs provisioner/node): 两角色凭据可独立指定
+#   provisioner = CEPHFS_USER/CEPHFS_KEYRING; node = CEPHFS_NODE_USER/CEPHFS_NODE_KEYRING
+#   (node 未单独指定时回退 provisioner 凭据 = 旧行为; 详见上方注释)
 apiVersion: v1
 kind: Secret
 metadata:
@@ -273,8 +314,8 @@ metadata:
   name: ${_CEPHFS_NODE_SECRET}
   namespace: ${CEPH_NAMESPACE}
 stringData:
-  userID: ${CEPHFS_USER:-${CEPH_USER:-admin}}
-  userKey: ${CEPHFS_KEYRING:-${CEPH_KEYRING:-}}
+  userID: ${_CEPHFS_NODE_USER}
+  userKey: ${_CEPHFS_NODE_KEY}
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -373,15 +414,20 @@ volumeBindingMode: Immediate"
         else
             warn "  config.json 60s 内未挂载(kubelet 延迟; 不影响部署, csi-provisioner 会自动重试成功)"
         fi
-        # ★ 外部 provision 冒烟测试(2026-09-09, 目标"一次性部署成功"): 用 Immediate 模式 SC
-        #   (ceph-rbd-ephemeral-immediate)建 1Gi scratch PVC → 等 Bound → 删除。作用:
+        # ★ 外部 provision 冒烟测试(2026-09-09, 目标"一次性部署成功"; 2026-09-10 Bug C 加固):
+        #   ① RBD: Immediate SC 建 1Gi scratch PVC → 等 Bound → **真实写读**(pod 挂载后写文件+读回,
+        #      验证数据面而非仅 provision; 若只 Bound 会漏掉"node 角色无数据池写权限"类故障);
+        #   ② CephFS(启用时): scratch PVC(cephfs-ephemeral)→ 等 Bound → 同样真实写读。
+        #   作用:
         #   · 端到端打通 provision 全链(mon 连接/cephx 认证/外部 pool/建卷/删卷)——
         #     提供方未就绪(pool/用户/网络)在此立刻硬失败并给出排查命令,
         #     不会拖到 k8s_registry 才断(历史事故: registry 90s 超时中断部署);
+        #   · 数据面验证(node 角色 caps): 写读通过才放行, 保证"mount 成功但写 EPERM"类
+        #     (Bug A: 双角色单凭据)在部署期自检暴露, 而非用户挂卷后才发现;
         #   · 预热 provisioner 首触路径(消除冷启动/投递延迟), registry 正式 PVC 秒绑。
         #   CEPH_EXTERNAL_PROVISION_SMOKE=false 可跳过(提供方未就绪但需先装其它组件时)。
         if [ "${CEPH_EXTERNAL_PROVISION_SMOKE:-true}" = "true" ]; then
-            say "  外部 Ceph provision 冒烟测试(1Gi scratch PVC, 最长 180s)..."
+            say "  外部 Ceph provision 冒烟测试(RBD 1Gi scratch PVC + 真实写读, 最长 180s)..."
             SMOKE_YAML="apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -401,10 +447,54 @@ spec:
                 if [ "${_smoke}" = "Bound" ]; then _SMOKE_OK=1; break; fi
                 sleep 5
             done
+            # ★ Bug C 加固: Bound 只验证 provision, 不验证数据面。挂 pod 真实写读:
+            #   busybox 写 /mnt 下文件 → 读回比对 —— node 角色无数据池写权限时这里 EPERM 硬失败。
+            #   (busybox 已在 preload-images.lst, 节点 containerd 预加载; 失败仅告警不阻断 ——
+            #   部分提供方 caps 较严时数据面测试可能被拒, 但 provision 已通, 不因测试误伤部署。)
+            if [ "${_SMOKE_OK}" = "1" ]; then
+                SMOKE_POD_YAML="apiVersion: v1
+kind: Pod
+metadata:
+  name: ceph-csi-smoke-writer
+  namespace: ${CEPH_NAMESPACE}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: docker.io/library/busybox:latest
+      imagePullPolicy: IfNotPresent
+      command: [\"/bin/sh\", \"-c\"]
+      args: [\"echo cubestack-smoke-ok > /mnt/probe.txt && sync && cat /mnt/probe.txt && rm /mnt/probe.txt\"]
+      volumeMounts:
+        - name: smoke-vol
+          mountPath: /mnt
+  volumes:
+    - name: smoke-vol
+      persistentVolumeClaim:
+        claimName: ceph-csi-smoke-test"
+                apply_remote "${SMOKE_POD_YAML}" "ceph-csi-smoke-writer" \
+                    || { warn "  冒烟写读 pod 创建失败(跳过数据面验证)"; }
+                _SMOKE_WR_OK=0
+                for _ci in $(seq 1 24); do
+                    _wr_phase="$( (SSH "${K} -n ${CEPH_NAMESPACE} get pod ceph-csi-smoke-writer -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+                    if [ "${_wr_phase}" = "Succeeded" ]; then _SMOKE_WR_OK=1; break; fi
+                    [ "${_wr_phase}" = "Failed" ] && break
+                    sleep 5
+                done
+                if [ "${_SMOKE_WR_OK}" = "1" ]; then
+                    ok "  冒烟数据面验证通过(busybox 写/读回成功 —— node 角色数据池写权限 ✓)"
+                else
+                    warn "  冒烟数据面验证未通过(busybox 写读失败; 不影响部署, 但请核对 node 角色 caps:"
+                    warn "    ceph auth get client.${_CEPHFS_NODE_USER:-<node 用户>} 应含数据池 rw;"
+                    warn "    典型故障: node 角色无数据池写权限(EPERM)或 key 不正确 —— 见 docs/ceph-rook.md §外部接入)"
+                fi
+                ( SSH "${K} -n ${CEPH_NAMESPACE} delete pod ceph-csi-smoke-writer --ignore-not-found" >/dev/null 2>&1 || true )
+                unset _SMOKE_WR_OK _wr_phase SMOKE_POD_YAML
+            fi
             # 无论成败都删除冒烟 PVC(Delete reclaim 自动清 PV/外部卷)
             ( SSH "${K} -n ${CEPH_NAMESPACE} delete pvc ceph-csi-smoke-test --ignore-not-found" >/dev/null 2>&1 || true )
             if [ "${_SMOKE_OK}" = "1" ]; then
-                ok "  冒烟测试通过(1Gi 卷真实创建于外部 pool, 已清理)"
+                ok "  冒烟测试通过(1Gi 卷真实创建于外部 pool + 数据面写读验证, 已清理)"
             else
                 err "  冒烟测试失败: 1Gi scratch PVC 180s 内未 Bound —— 外部 Ceph 提供方异常"
                 err "  排查: ① 提供方集群 HEALTH_OK: kubectl -n rook-ceph get cephcluster(提供方) + ceph -s"
@@ -420,7 +510,7 @@ spec:
         err "  排查: kubectl -n ${CEPH_NAMESPACE} get clientprofile,cephconnection; kubectl -n ${CEPH_NAMESPACE} logs deploy/ceph-csi-controller-manager --tail=50"
         exit 1
     fi
-    unset _MONS _EXT_YAML EXT_CEPHFS_ENABLED _CEPHFS_PROVISIONER_SECRET _CEPHFS_NODE_SECRET _CFG_OK _MOUNT_OK _RS_OK _rs _cfg _ci _EXT_NUM
+    unset _MONS _EXT_YAML EXT_CEPHFS_ENABLED _CEPHFS_PROVISIONER_SECRET _CEPHFS_NODE_SECRET _CEPHFS_NODE_USER _CEPHFS_NODE_KEY _CFG_OK _MOUNT_OK _RS_OK _rs _cfg _ci _EXT_NUM
 else
 _CEPH_RBD_YAML="$(_ceph_yaml_file rbd/01-cephblockpool-rbd-pool.yaml rbd/02-storageclass-rbd.yaml rbd/03-storageclass-ceph-block-alias.yaml)" || exit 1
 apply_remote "${_CEPH_RBD_YAML}" "ceph-rbd" \
