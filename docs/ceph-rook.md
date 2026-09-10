@@ -151,7 +151,7 @@ REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-blo
    - `cubestack-ext-cephfs`(provisioner 角色): `mon 'allow r' mds 'allow rw fsname=cubestack-ext-fs' osd 'allow rw pool=cubestack-ext-fs-metadata'`
      —— 只给 **metadata** 池 rw(建删 subvolume 用); **不给 data 池**(Rook 命名约定: 外部
      csi-cephfs 两角色 caps 不同, provisioner 被限定 metadata, node 才拿 data)
-   - `cubestack-ext-cephfs-node`(node 角色, 2026-09-10 Bug A 分用户):`mon 'allow r' mds 'allow rw fsname=cubestack-ext-fs' osd 'allow rw pool=cubestack-ext-cephfs-metadata, allow rw pool=cubestack-ext-cephfs-data'`
+   - `cubestack-ext-cephfs-node`(node 角色, 2026-09-10 Bug A 分用户):`mon 'allow r' mds 'allow rw fsname=cubestack-ext-fs' osd 'allow rw pool=cubestack-ext-fs-metadata, allow rw pool=cubestack-ext-fs-cubestack-ext-cephfs-data'`
      —— 挂载 fs 承载全部文件 I/O, 需要 **meta+data** 两池 rw
 4. **导出**: 写 `deployments/config/ceph-external-access.conf` —— 全部连接信息
    (CEPH_MONITORS=真实可达 ip:port / FSID / RBD: USER+KEYRING+POOL / CephFS: **provisioner+node 双用户**+KEYRING+FS+两池 / RGW 端点),
