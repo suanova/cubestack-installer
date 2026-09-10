@@ -86,6 +86,20 @@ GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 沐曦 GPU Operator(�
 LWS_ENABLED="${LWS_ENABLED:-true}"                      # LeaderWorkerSet(LLM 工作负载调度; 默认启用; 见 4.2)
 LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"  # LWS DisaggregatedSet(解耦推理; 见 4.2)
 PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-false}"       # Prometheus+Operator 监控(P1; 见 4.3)
+# ---- Prometheus 监控底座(kube-prometheus-stack; 详见 deployments/cubestack-addon/observability/prometheus/README.md) ----
+# chart vendored 于 cubestack-addon/observability/prometheus/(默认 90.0.0); 刷新: tools/images/prometheus-fetch-charts.sh
+# 离线镜像: 联网机 tools/images/prometheus-save-images.sh 下载 tar → 08_prometheus 模块推送进内置 registry
+PROMETHEUS_NAMESPACE="${PROMETHEUS_NAMESPACE:-monitoring}"        # 监控命名空间
+PROMETHEUS_RETENTION_DAYS="${PROMETHEUS_RETENTION_DAYS:-15d}"     # Prometheus 数据保留时长
+PROMETHEUS_STORAGE_SIZE="${PROMETHEUS_STORAGE_SIZE:-50Gi}"        # Prometheus PVC 容量(不指定 SC, 用系统默认 StorageClass)
+PROMETHEUS_APP_VERSION="${PROMETHEUS_APP_VERSION:-v0.93.1}"       # operator/config-reloader/admission-webhook 镜像 tag
+PROMETHEUS_IMAGE_PROMETHEUS="${PROMETHEUS_IMAGE_PROMETHEUS:-v3.14.0-distroless}"
+PROMETHEUS_IMAGE_ALERTMANAGER="${PROMETHEUS_IMAGE_ALERTMANAGER:-v0.34.0}"
+PROMETHEUS_IMAGE_NODE_EXPORTER="${PROMETHEUS_IMAGE_NODE_EXPORTER:-1.12.1}"
+PROMETHEUS_IMAGE_KSM="${PROMETHEUS_IMAGE_KSM:-2.20.0}"            # kube-state-metrics
+PROMETHEUS_IMAGE_GRAFANA="${PROMETHEUS_IMAGE_GRAFANA:-13.2.1-distroless}"
+PROMETHEUS_IMAGE_SIDECAR="${PROMETHEUS_IMAGE_SIDECAR:-2.11.2}"    # grafana k8s-sidecar
+PROMETHEUS_IMAGE_CERTGEN="${PROMETHEUS_IMAGE_CERTGEN:-1.8.8}"     # webhook 证书生成 Job
 CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # Ceph 存储底座(P1; 见 4.3)
 CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI RBD/RGW/CephFS(依赖 CEPH_ENABLED; 见 4.3)
 # CEPH_FALLBACK_TO_LOCALPATH: CEPH_ENABLED=true 但 ceph 安装条件不足(manifest/裸盘/lvm2/
