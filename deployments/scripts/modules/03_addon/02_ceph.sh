@@ -107,8 +107,31 @@ _CEPH_SKIP_CLUSTER=0
 #   由 ceph_csi 模块经 CephConnection 连外部集群。兼容旧配置: 仅设 CEPH_EXTERNAL_MONITORS 时
 #   load_config 已把 CEPH_MODE 归一化为 external。
 if [ "${CEPH_MODE:-internal}" = "external" ]; then
-    say "CEPH_MODE=external → 不创建集群内 CephCluster(由 ceph_csi 模块经 ceph-csi-operator 接入外部 Ceph: ${CEPH_MONITORS:-<未配置>})"
+    say "CEPH_MODE=external → 不创建集群内 CephCluster(由 ceph_csi 模块接入外部 Ceph: ${CEPH_MONITORS:-<未配置>})"
     _CEPH_SKIP_CLUSTER=1
+    # ★ 2026-09-10: external-ceph.env 检测 + 倒计时警告(部署前提示, 目标"一次性部署成功")
+    #   · CEPH_EXTERNAL_ENV_FILE 未显式设置时探测默认目录 deployments/config/external-ceph.env;
+    #   · 文件缺失 → 红底倒计时(CEPH_ENV_CONFIRM_SLEEP, 默认 60s, CI 可设 0 跳过)——
+    #     未检测到该文件, 部署可能失败(官方导入路径硬依赖; 手填路径不受影响但无健康上报/对象存储)。
+    _EXT_ENV_FILE="${CEPH_EXTERNAL_ENV_FILE:-${REPO_ROOT}/deployments/config/external-ceph.env}"
+    if [ -n "${CEPH_EXTERNAL_ENV_FILE:-}" ] || [ -f "${_EXT_ENV_FILE}" ]; then
+        [ -f "${_EXT_ENV_FILE}" ] && say "  检测到 external-ceph.env: ${_EXT_ENV_FILE}(ceph_csi 将走官方导入路径)" \
+            || warn "  CEPH_EXTERNAL_ENV_FILE=${CEPH_EXTERNAL_ENV_FILE} 不存在(ceph_csi 将回退手填路径)"
+    else
+        warn "  ⚠ 未检测到 external-ceph.env(默认路径: ${_EXT_ENV_FILE})"
+        warn "    请先把提供方导出的 external-ceph.env 放到该路径(A 侧部署完自动导出; 或手工拷贝)"
+        warn "    没有该文件, ceph_csi 外部接入可能部署失败(官方导入路径硬依赖; 手填 CEPH_MONITORS 等仍可用但无健康上报)"
+        _ENV_SLEEP="${CEPH_ENV_CONFIRM_SLEEP:-60}"
+        if [ "${_ENV_SLEEP}" -gt 0 ] 2>/dev/null; then
+            for _eci in $(seq "${_ENV_SLEEP}" -1 1); do
+                printf '\r\033[31m  %3ds 后继续(放入文件后按 Ctrl-C 重启, 或等待倒计时结束)...\033[0m' "${_eci}"
+                sleep 1
+            done
+            echo ""
+        fi
+        unset _eci
+    fi
+    unset _EXT_ENV_FILE _ENV_SLEEP
 elif [ "${#CEPH_NODE_HOSTS[@]}" -lt "${CEPH_MIN_NODES}" ]; then
     warn "存储节点仅 ${#CEPH_NODE_HOSTS[@]} 台(<${CEPH_MIN_NODES}), 不创建集群内 CephCluster(mon 法定人数不足)"
     warn "  可选: ① 增加存储节点至 ≥${CEPH_MIN_NODES}; ② 或设 CEPH_MODE=external 连接外部 Ceph(见 docs/ceph-rook.md)"

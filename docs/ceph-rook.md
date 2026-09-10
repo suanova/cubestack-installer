@@ -217,7 +217,12 @@ sudo ./deploy-cluster.sh --steps verify_ceph                        # ⑨ 自动
    ```
    完成后自动:
    - 创建 mon/RGW *-external Service + 外部专用 pool + 用户(§3.3)
-   - 导出外部接入配置 **`deployments/config/ceph-external-access.conf`**
+   - 导出外部接入配置 **`deployments/config/ceph-external-access.conf`**(自研格式, 手填路径用)
+   - **★ 自动导出官方 `deployments/config/external-ceph.env`**(2026-09-10):
+     ceph-expose-external.sh 经 toolbox 运行官方 `create-external-cluster-resources.py`
+     (vendored, v1.20.2)—— 在 A 上创建官方 CSI 双角色用户(csi-rbd-node/provisioner +
+     csi-cephfs-node/provisioner)+ client.healthchecker + rgw-admin-ops-user(RGW 启用时),
+     `--format bash` 输出 export 行。该文件含真实 key(gitignore), **拷给集群 B 即可**。
    - 安装末尾总结打印配置路径 + 入口行
 3. 自检(5 层, 含外部客户端协议级测试, 模拟 B 的 csi 从集群外连接):
    ```bash
@@ -230,11 +235,12 @@ sudo ./deploy-cluster.sh --steps verify_ceph                        # ⑨ 自动
 
 ##### 路径一: 官方导入(推荐, 全自动)
 
-提供方在 **A 集群** 上执行官方导出脚本生成 `external-ceph.env`(含 CSI 双角色 secret /
-healthchecker / mon 数据 / RGW admin 密钥):
+提供方 **A 集群部署完自动导出**(§3.4.1, ceph-expose-external.sh 经 toolbox 运行官方
+`create-external-cluster-resources.py` —— 已创建官方 CSI 双角色用户/healthchecker/RGW admin
+密钥, 无需手工执行导出脚本)。手工重导出(可选):
 
 ```bash
-# A 集群(toolbox 内或部署机, 有 ceph admin keyring):
+# A 集群(需要时手工重导出; 常规部署已自动完成):
 python3 create-external-cluster-resources.py --rbd-data-pool-name rbd-pool \
   --cephfs-filesystem-name cephfs --cephfs-data-pool-name cephfs-data0 \
   --cephfs-metadata-pool-name cephfs-metadata \
@@ -243,16 +249,21 @@ python3 create-external-cluster-resources.py --rbd-data-pool-name rbd-pool \
   --namespace rook-ceph --format bash --output external-ceph.env
 ```
 
-把 `external-ceph.env` 拷到 **B 集群**部署机任意路径, 在 B 的 `cluster.conf` 只设 **3 行**:
+把 A 导出的 `external-ceph.env` 拷到 **B 集群部署机的默认目录** `deployments/config/external-ceph.env`
+(或任意路径 + `CEPH_EXTERNAL_ENV_FILE` 显式指定), 在 B 的 `cluster.conf` 只设 **3 行**:
 
 ```bash
 CEPH_MODE=external
 CEPH_ENABLED=true                 # 让 02 部署 operator/csi-operator(03 官方导入的前提)
 CEPH_CSI_ENABLED=true
-CEPH_EXTERNAL_ENV_FILE="/opt/cubestack-installer/external-ceph.env"   # ★ env 文件路径
+CEPH_EXTERNAL_ENV_FILE=""         # 留空 = 自动探测默认目录 deployments/config/external-ceph.env
 ```
 
-`03_ceph_csi.sh` 检测到 `CEPH_EXTERNAL_ENV_FILE` 后全自动完成(无需任何手工 kubectl):
+**部署前检测(02_ceph.sh)**: `CEPH_MODE=external` 时检查 env 文件 —— 存在则提示"将走官方导入路径";
+**未检测到 → 红底倒计时警告**(默认 60s, `CEPH_ENV_CONFIRM_SLEEP` 可调/CI 设 0):
+"未检测到 external-ceph.env, 请先放到指定目录; 没有该文件, 部署可能失败"。
+
+`03_ceph_csi.sh` 检测到 env 文件后全自动完成(无需任何手工 kubectl):
 
 1. source env → 建 `rook-ceph-mon` secret + `rook-ceph-mon-endpoints` CM +
    4 个 CSI secret(**双角色凭据天然分开** = Bug A 官方路径天然成立)+
@@ -268,8 +279,9 @@ CEPH_EXTERNAL_ENV_FILE="/opt/cubestack-installer/external-ceph.env"   # ★ env 
 
 ##### 路径二: 手填(存量兼容)
 
-不设 `CEPH_EXTERNAL_ENV_FILE` 时走原路径(ceph-csi-operator `CephConnection`/`ClientProfile`,
-集群 B 的配置同 §3.4.2 原样)。打开 B 的 `cluster.conf`, 把 A 导出的 `ceph-external-access.conf` 关键值拷入下述字段(只改这些):
+`CEPH_EXTERNAL_ENV_FILE` 未设且默认目录也无 env 文件时走原路径(ceph-csi-operator
+`CephConnection`/`ClientProfile`, 02 模块会先倒计时警告)。打开 B 的 `cluster.conf`,
+把 A 导出的 `ceph-external-access.conf` 关键值拷入下述字段(只改这些):
 
 ```bash
 CEPH_MODE=external                          # 切到外部接入
