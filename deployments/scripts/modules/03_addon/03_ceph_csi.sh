@@ -555,9 +555,15 @@ say "[2/4] 创建 CephBlockPool rbd-pool(3 副本 / host 故障域 / min_size ${
 #   (与集群内模式同名的 SC 集合, 供应用/平台无差别使用)。
 if [ "${_CEPH_EXTERNAL}" = "1" ]; then
     # ★ 2026-09-10 双路径分流:
-    #   · 官方导入(主路径, 推荐): CEPH_EXTERNAL_ENV_FILE 指向提供方导出的 external-ceph.env
+    #   · 官方导入(主路径, 推荐): CEPH_EXTERNAL_ENV_FILE 指向提供方导出的 external-ceph.env;
+    #     未显式设置时探测默认目录 deployments/config/external-ceph.env(文件在即走官方路径)
     #     → _ext_import_official(secret/CM + cluster-external.yaml + 自动 RGW + 官方 SC 集合);
-    #   · 手填(兼容 fallback): 未设 env 文件 → 原 CephConnection/ClientProfile 路径(存量部署不变)。
+    #   · 手填(兼容 fallback): 均无 → 原 CephConnection/ClientProfile 路径(存量部署不变)。
+    if [ -n "${CEPH_EXTERNAL_ENV_FILE:-}" ]; then
+        CEPH_EXTERNAL_ENV_FILE="${CEPH_EXTERNAL_ENV_FILE}"
+    elif [ -f "${REPO_ROOT}/deployments/config/external-ceph.env" ]; then
+        CEPH_EXTERNAL_ENV_FILE="${REPO_ROOT}/deployments/config/external-ceph.env"
+    fi
     if [ -n "${CEPH_EXTERNAL_ENV_FILE:-}" ]; then
         _ext_import_official
     else

@@ -213,6 +213,56 @@ _mon_np() {   # <idx>
     nodeport_alloc "${MON_NP_BASE}" "${_mc}" "${MON_NP_MAX}" "${_i}"
 }
 
+# ════════════════════════════ 官方 external-ceph.env 导出(2026-09-10) ════════════════════════════
+# 经 toolbox 运行官方 create-external-cluster-resources.py(vendored, v1.20.2):
+#   · 在提供方 Ceph 上创建官方 CSI 双角色用户(csi-rbd-node/provisioner + csi-cephfs-node/provisioner,
+#     带 caps)/ client.healthchecker / rgw-admin-ops-user(RGW 启用时)
+#   · --format bash 输出 export 行(Rook 官方 external-ceph.env 格式), 供消费方
+#     CEPH_EXTERNAL_ENV_FILE 官方导入路径直接使用(见 03_ceph_csi.sh _ext_import_official)
+# 输出: ${REPO_ROOT}/deployments/config/external-ceph.env(gitignore, 勿提交真实 key)
+_export_official_env() {
+    local _py="${ROOK_DIR}/external/create-external-cluster-resources.py"
+    [ -f "${_py}" ] || { warn "  vendored 官方导出脚本缺失: ${_py}(联网机从 rook v1.20.2 deploy/examples/external 拷贝)"; return 1; }
+    say "[导出] 官方 external-ceph.env(create-external-cluster-resources.py 经 toolbox)..."
+    # ① 脚本拷进 toolbox(toolbox 内有 ceph.conf + admin keyring + python3)
+    if ! base64 -w0 "${_py}" | SSH "${K} -n ${CEPH_NAMESPACE} exec -i deploy/rook-ceph-tools -- bash -c 'base64 -d > /tmp/create-external-cluster-resources.py'" >/dev/null 2>&1; then
+        warn "  官方导出脚本拷入 toolbox 失败(检查 toolbox 是否 Ready: kubectl -n ${CEPH_NAMESPACE} get pods | grep tools)"; return 1
+    fi
+    # ② 组装参数: RBD 池必填; CephFS 启用时带 fs/两池; RGW 启用时带端点+realm/zone
+    local _py_args="--namespace ${CEPH_NAMESPACE} --format bash --output /tmp/external-ceph.env"
+    _py_args="${_py_args} --rbd-data-pool-name ${EXT_RBD_POOL}"
+    if [ "${EXT_CEPHFS_ENABLED}" = "true" ]; then
+        _py_args="${_py_args} --cephfs-filesystem-name ${EXT_FS} --cephfs-data-pool-name ${EXT_FS_DATA} --cephfs-metadata-pool-name ${EXT_FS_META}"
+    fi
+    if [ -n "${RGW_EP:-}" ]; then
+        # 官方脚本 --rgw-endpoint 期望 ip:port(剥 http:// 前缀); realm/zone 跟随 CephObjectStore 名
+        local _rgw_ep="${RGW_EP#http://}" _rgw_ep="${_rgw_ep#https://}"
+        _py_args="${_py_args} --rgw-endpoint ${_rgw_ep} --rgw-realm-name s3-store --rgw-zonegroup-name s3-store --rgw-zone-name s3-store"
+    fi
+    # ③ toolbox 内运行(用户已存在 → 脚本幂等: EEXIST 回退 user info; 密钥轮换 CEPHX_KEY_GENERATION 自动递增)
+    say "  toolbox 运行官方导出脚本(${_py_args})..."
+    if ! SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- python3 /tmp/create-external-cluster-resources.py ${_py_args}" >/tmp/ceph-ext-export.log 2>&1; then
+        warn "  官方导出脚本运行失败(见 /tmp/ceph-ext-export.log; 常见: rgw 参数与 RGW 部署不一致/池不存在)"
+        SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- tail -5 /tmp/create-external-cluster-resources.py.log" >/dev/null 2>&1 || true
+        return 1
+    fi
+    # ④ 取回 env 输出 → 部署机指定目录
+    local _env_out="${REPO_ROOT}/deployments/config/external-ceph.env"
+    mkdir -p "$(dirname "${_env_out}")"
+    if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- cat /tmp/external-ceph.env" > "${_env_out}" 2>/dev/null \
+        && grep -q "ROOK_EXTERNAL_FSID\|ROOK_EXTERNAL_CEPH_MON_DATA" "${_env_out}"; then
+        chmod 600 "${_env_out}" 2>/dev/null || true
+        ok "  官方 external-ceph.env 已导出 → ${_env_out}"
+        echo "  (消费方把此文件放到其部署机, cluster.conf 设 CEPH_EXTERNAL_ENV_FILE=<路径> 即走官方导入)"
+    else
+        warn "  env 输出取回失败/内容不完整(见 /tmp/ceph-ext-export.log)"
+        return 1
+    fi
+    # 清理 toolbox 内临时文件
+    SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- rm -f /tmp/external-ceph.env /tmp/create-external-cluster-resources.py" >/dev/null 2>&1 || true
+    return 0
+}
+
 # ════════════════════════════ apply ════════════════════════════
 apply_main() {
     say "==== Ceph 对外暴露 apply(模式=${MODE}, Service type=${SVC_TYPE:-host-network 直连}) ===="
@@ -476,6 +526,9 @@ EOF
     chmod 600 "${EXPORT_CONF}" 2>/dev/null || true
     ok "外部接入配置已导出 → ${EXPORT_CONF}(含 RBD/CephFS 全部连接信息)"
     echo "  (拷贝到目标集群 cluster.conf 即可; 详细自检见 status)"
+
+    # ★ ⑤ 导出官方 external-ceph.env(2026-09-10, 供消费方 CEPH_EXTERNAL_ENV_FILE 官方导入路径)
+    _export_official_env || warn "  官方 external-ceph.env 导出失败(自研 conf 已导出, 不影响手填路径消费方)"
 }
 
 # ════════════════════════════ show ════════════════════════════
