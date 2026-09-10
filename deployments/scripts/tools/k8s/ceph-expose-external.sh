@@ -236,7 +236,10 @@ _export_official_env() {
     fi
     if [ -n "${RGW_EP:-}" ]; then
         # 官方脚本 --rgw-endpoint 期望 ip:port(剥 http:// 前缀); realm/zone 跟随 CephObjectStore 名
-        local _rgw_ep="${RGW_EP#http://}" _rgw_ep="${_rgw_ep#https://}"
+        # ⚠ 不能 `local a="${X#http://}" a="${a#https://}"`: 同一 local 语句中第二个 ${a} 在
+        #   声明生效前展开 → set -u 下 unbound variable(2026-09-10 实机命中)。拆两行。
+        local _rgw_ep="${RGW_EP#http://}"
+        _rgw_ep="${_rgw_ep#https://}"
         _py_args="${_py_args} --rgw-endpoint ${_rgw_ep} --rgw-realm-name s3-store --rgw-zonegroup-name s3-store --rgw-zone-name s3-store"
     fi
     # ③ toolbox 内运行(用户已存在 → 脚本幂等: EEXIST 回退 user info; 密钥轮换 CEPHX_KEY_GENERATION 自动递增)
