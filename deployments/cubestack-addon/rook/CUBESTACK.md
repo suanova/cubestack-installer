@@ -7,7 +7,7 @@
 > `deployments/scripts/tools/k8s/rook-fetch-manifests.sh` 下载到本目录, 再拷到部署机。
 > ceph 模块检测到 manifest 缺失会报错并给出指引, 不会静默跳过。
 
-## 目录内容(fetch 脚本生成)
+## 目录内容
 
 ```
 deployments/cubestack-addon/rook/
@@ -16,8 +16,33 @@ deployments/cubestack-addon/rook/
 ├── common.yaml          # 公共 RBAC/命名空间
 ├── csi-operator.yaml    # ⚠ rook v1.20 新增且必须(ceph-csi-operator), 跳过会静默破坏 CSI Provision
 ├── operator.yaml        # Rook operator Deployment
-└── toolbox.yaml         # toolbox(ceph/rbd CLI, 可选)
+├── toolbox.yaml         # toolbox(ceph/rbd CLI, 可选)
+├── external/            # ★ 外部 Ceph 接入(官方 import 流程, 2026-09-10 vendored; 见下)
+└── (charts 见 ../rook-charts/, 单独目录)
 ```
+
+## external/ — 官方外部 Ceph 接入文件(2026-09-10 vendored)
+
+来源: Rook v1.20.2 `deploy/examples/external/`(与上方 manifest 同版本, 离线拷贝, 无需联网)。
+用于 **CEPH_MODE=external** 消费者接入外部 Rook-Ceph(官方 import-external-cluster 流程):
+
+| 文件 | 用途 |
+|---|---|
+| `import-external-cluster.sh` | 官方导入脚本: source external-ceph.env 后执行, 创建 rook-ceph-mon secret / mon-endpoints CM / 4 个 CSI secret / rgw-admin-ops-user secret / SC(ceph-rbd, cephfs) |
+| `cluster-external.yaml` | CephCluster CR(external 模式): 开启 mon 健康检查 → STATE=Connected / 健康上报 |
+| `common-external.yaml` | 外部模式 RBAC(RoleBinding/SA, 经 operator 调和消费 secret/CM) |
+| `object-external.yaml` | CephObjectStore(externalRgwEndpoints → 提供方 RGW; 消费侧对象存储接入) |
+| `create-external-cluster-resources.py` | **提供方**导出脚本(在外部 Ceph 集群上生成 external-ceph.env, 含 CSI secret / healthchecker / RGW admin 密钥) |
+| `storageclass-bucket-delete.yaml` / `storageclass-bucket-retain.yaml` | OBC 桶供给 StorageClass(对象存储第 6 步) |
+| `object-bucket-claim-delete.yaml` / `object-bucket-claim-retain.yaml` | OBC 示例(声明桶, Rook 自动建桶注入凭据) |
+| `01-mon-external.yaml` / `02-rgw-external.yaml` / `03-cephfilesystem-external.yaml` | 本项目自研模板(提供方对外暴露用, 由 ceph-expose-external.sh 消费) |
+
+## rook-charts/ — Helm charts(单独目录)
+
+`deployments/cubestack-addon/rook-charts/` 存放 Rook 官方 Helm charts(v1.20.2 `deploy/charts/`):
+`rook-ceph`(operator, 依赖 library + ceph-csi-operator)/ `rook-ceph-cluster`(CephCluster 声明)/
+`library`(共享 helper)/ `ceph-csi-drivers`。当前部署走 kubectl apply manifest 路线,
+charts 备用(helm 部署路线/参考 values), 不与 manifest 混放。
 
 ## 获取(联网机)
 
