@@ -277,8 +277,8 @@ CEPH_DASHBOARD_ENABLED="${CEPH_DASHBOARD_ENABLED:-true}"  # Ceph Dashboard
 # CEPH_USER="cubestack-ext-rbd"
 # CEPH_KEYRING="<占位: 如 AQxxx==>"         # ⚠ 不要放真实 key(会进 git); 运行前填测试集群给的外部用户 key
 # CEPHFS_FS="cubestack-ext-fs"
-# CEPHFS_META_POOL="cubestack-ext-cephfs-metadata"
-# CEPHFS_DATA_POOL="cubestack-ext-cephfs-data"
+# CEPHFS_META_POOL="cubestack-ext-fs-metadata"                        # ⚠ 真实池名 = <fs>-metadata(Rook 自动命名)
+# CEPHFS_DATA_POOL="cubestack-ext-fs-cubestack-ext-cephfs-data"       # ⚠ 真实池名 = <fs>-<dataPoolName>
 # CEPHFS_USER="cubestack-ext-cephfs"          # CephFS provisioner 角色用户(建删 subvolume; 提供方限定 metadata 读)
 # CEPHFS_KEYRING="<占位: 如 AQA///==>"
 # CEPHFS_NODE_USER="cubestack-ext-cephfs-node"   # 可选: CephFS **node** 角色用户(挂载 fs/承载文件 I/O;

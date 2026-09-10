@@ -148,7 +148,7 @@ REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-blo
    `cubestack-ext-fs`(meta 16 PG + data 32 PG, application=cephfs)
 3. **认证层**: 外部专用用户(profile caps, 非 admin):
    - `cubestack-ext-rbd`: `mon 'profile rbd' osd 'profile rbd pool=cubestack-ext-rbd-pool' mgr 'profile rbd pool=…'`
-   - `cubestack-ext-cephfs`(provisioner 角色): `mon 'allow r' mds 'allow rw fsname=cubestack-ext-fs' osd 'allow rw pool=cubestack-ext-cephfs-metadata'`
+   - `cubestack-ext-cephfs`(provisioner 角色): `mon 'allow r' mds 'allow rw fsname=cubestack-ext-fs' osd 'allow rw pool=cubestack-ext-fs-metadata'`
      —— 只给 **metadata** 池 rw(建删 subvolume 用); **不给 data 池**(Rook 命名约定: 外部
      csi-cephfs 两角色 caps 不同, provisioner 被限定 metadata, node 才拿 data)
    - `cubestack-ext-cephfs-node`(node 角色, 2026-09-10 Bug A 分用户):`mon 'allow r' mds 'allow rw fsname=cubestack-ext-fs' osd 'allow rw pool=cubestack-ext-cephfs-metadata, allow rw pool=cubestack-ext-cephfs-data'`
@@ -294,7 +294,7 @@ CEPH_USER="cubestack-ext-rbd"
 CEPH_KEYRING="AQx...=="                      # A 导出的 RBD key
 # --- 可选: CEPHFS(外部 A 有 CephFilesystem 时才需要; 双用户分别指定, 2026-09-10) ---
 CEPHFS_FS="cubestack-ext-fs"
-CEPHFS_DATA_POOL="cubestack-ext-cephfs-data"
+CEPHFS_DATA_POOL="cubestack-ext-fs-cubestack-ext-cephfs-data"
 CEPHFS_USER="cubestack-ext-cephfs"          # provisioner 角色(建删 subvolume)
 CEPHFS_KEYRING="AQa...=="                    # A 导出的 CephFS provisioner key
 CEPHFS_NODE_USER="cubestack-ext-cephfs-node" # node 角色(挂载 fs/文件 I/O; ★ 必须与 provisioner 分开)
