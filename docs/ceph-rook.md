@@ -303,6 +303,26 @@ kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph auth caps client.csi-ce
 - `ceph fs subvolume create 报 RADOS permission error` → provisioner 角色 caps 不足
   (node caps 只有 metadata) → 换用 provisioner 凭据。
 
+#### 3.4.5 已知限制: 外部接入无 health-check / STATE 上报(Bug D, 2026-09-10 确认)
+
+**现象**: 消费者集群的 `CephConnection`/`ClientProfile` 无 `cephx` 块; Rook 提供方导出的
+`ROOK_EXTERNAL_USERNAME`(client.healthchecker)/`ROOK_EXTERNAL_USER_SECRET` 在消费者侧**无处接线**。
+
+**根因(已核实, 非接线遗漏)**: 消费者接入走 **ceph-csi-operator**(`csi.ceph.io` 组 v1.0.4,
+`CephConnection`/`ClientProfile` CRD)——两个 CRD 的 structured schema **没有 `cephx`/`healthCheck`
+字段**(`CephConnection.spec` 仅 `monitors`/`rbdMirrorDaemonCount`/`readAffinity`;
+`ClientProfile.spec` 仅 `cephConnectionRef`/`cephFs`/`nfs`/`nvmeof`/`rbd`)。硬塞 `cephx:` 会被
+CRD 校验拒绝, 破坏 apply。`ROOK_EXTERNAL_*` 是 **Rook 提供方 `ceph-external-cluster-details.sh`**
+为自身 `CephCluster` external 模式导出的变量, 与本项目消费者的 csi-operator 路径无关。
+
+**影响面**: 无功能影响 —— csi-operator 的 `STATE=Connected` / provision 与挂载不依赖 health-checker;
+历史 "failed-to-fetch-monitor-list" 根因是缺 `ClientProfile`(已修复), 与缺 healthcheck 无关。
+
+**修复路径(如需, 属架构演进, 不在当前范围)**:
+1. 升级 ceph-csi-operator 至含 health-check 字段的版本(需向上游确认对应版本);
+2. 或改用 Rook `CephCluster` external 模式接入(架构变更, 与当前 csi-operator 两套并存)。
+当前默认方案(ceph-csi-operator 经 `CephConnection`)保留不修, 文档如实标注。
+
 ## 4. 裸盘自动检测(需求)
 
 `tools/k8s/ceph-detect-disks.sh [--node <hostname|ip>...] [-m]`
