@@ -148,10 +148,17 @@ REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-blo
    `cubestack-ext-fs`(meta 16 PG + data 32 PG, application=cephfs)
 3. **认证层**: 外部专用用户(profile caps, 非 admin):
    - `cubestack-ext-rbd`: `mon 'profile rbd' osd 'profile rbd pool=cubestack-ext-rbd-pool' mgr 'profile rbd pool=…'`
-   - `cubestack-ext-cephfs`: `mon 'allow r' mds 'allow rw fsname=cubestack-ext-fs' osd 'allow rw pool=cubestack-ext-cephfs-data'`
+   - `cubestack-ext-cephfs`(provisioner 角色): `mon 'allow r' mds 'allow rw fsname=cubestack-ext-fs' osd 'allow rw pool=cubestack-ext-cephfs-metadata'`
+     —— 只给 **metadata** 池 rw(建删 subvolume 用); **不给 data 池**(Rook 命名约定: 外部
+     csi-cephfs 两角色 caps 不同, provisioner 被限定 metadata, node 才拿 data)
+   - `cubestack-ext-cephfs-node`(node 角色, 2026-09-10 Bug A 分用户):`mon 'allow r' mds 'allow rw fsname=cubestack-ext-fs' osd 'allow rw pool=cubestack-ext-cephfs-metadata, allow rw pool=cubestack-ext-cephfs-data'`
+     —— 挂载 fs 承载全部文件 I/O, 需要 **meta+data** 两池 rw
 4. **导出**: 写 `deployments/config/ceph-external-access.conf` —— 全部连接信息
-   (CEPH_MONITORS=真实可达 ip:port / FSID / RBD: USER+KEYRING+POOL / CephFS: USER+KEYRING+FS+两池 / RGW 端点),
+   (CEPH_MONITORS=真实可达 ip:port / FSID / RBD: USER+KEYRING+POOL / CephFS: **provisioner+node 双用户**+KEYRING+FS+两池 / RGW 端点),
    拷贝到目标集群 `cluster.conf` 设 `CEPH_MODE=external` 即可接入
+   > ⚠ CephFS **必须双用户分开指定**(`CEPHFS_USER`=provisioner / `CEPHFS_NODE_USER`=node):
+   > 共用同一凭据会导致: ① 只有 provisioner caps(无 data) → PVC 建卷成功但**挂载后写 EPERM**;
+   > ② 只有 node caps → **建卷失败**(RADOS permission error)。详见 §外部接入常见故障。
 
 **暴露模式**(大小写不敏感, 均经 `tr` 转小写归一):
 - 跟随 `SERVICE_EXPOSE_MODE`(默认): `nodeport` → NodePort Service / `metallb` → LoadBalancer(MetalLB VIP)
@@ -230,11 +237,15 @@ CEPH_MONITORS="10.244.1.31:30100,10.244.1.31:30101,10.244.1.31:30102"   # A 导�
 CEPH_POOL="cubestack-ext-rbd-pool"          # pool 必须与 A 导出一致
 CEPH_USER="cubestack-ext-rbd"
 CEPH_KEYRING="AQx...=="                      # A 导出的 RBD key
-# --- 可选: CEPHFS(外部 A 有 CephFilesystem 时才需要) ---
+# --- 可选: CEPHFS(外部 A 有 CephFilesystem 时才需要; 双用户分别指定, 2026-09-10) ---
 CEPHFS_FS="cubestack-ext-fs"
 CEPHFS_DATA_POOL="cubestack-ext-cephfs-data"
-CEPHFS_USER="cubestack-ext-cephfs"
-CEPHFS_KEYRING="AQa...=="                    # A 导出的 CephFS key
+CEPHFS_USER="cubestack-ext-cephfs"          # provisioner 角色(建删 subvolume)
+CEPHFS_KEYRING="AQa...=="                    # A 导出的 CephFS provisioner key
+CEPHFS_NODE_USER="cubestack-ext-cephfs-node" # node 角色(挂载 fs/文件 I/O; ★ 必须与 provisioner 分开)
+CEPHFS_NODE_KEYRING="AQb...=="               # A 导出的 CephFS node key
+# ⚠ 若只填 CEPHFS_USER/CEPHFS_KEYRING(2026-09-10 前配置): node 回退同一凭据 —— provisioner caps
+#   无 data 池写权限时 PVC 能建但**挂载后写 EPERM**。升级配置: 见 §3.3 认证层双用户。
 # --- 不要设置以下内部部署相关(它们只用于集群 A) ---
 # CEPH_NODES CEPH_DATA_DISK_POLICY CEPH_MON_COUNT CEPH_LVM...
 ```
@@ -263,6 +274,34 @@ sudo ./deploy-cluster.sh --steps ceph,ceph_csi
 - B 的 CephFS/RBD secret 与 SC 全部在 `rook-ceph` 下, clusterID=ceph-connection 是唯一指向 A 的标识。
 - A 的导出文件 **包含 `CEPH_FSID`**, 但经 `CephConnection` 接入时 csi-operator 从 monitors 自动读 fsid, 无需手动向 B 提供 fsid; 若 B 需要 fsid(如 `ceph fsid` 检测)可直接由 A 提供。
 - **共享注意**: 外部 pool 只能同时被一个 ceph-csi-operator 强一致使用, 若两个集群同时写同一 pool 会有镜像/动态卷冲突 —— 设计上一个 Ceph 集群服务一个 Kubernetes 集群的卷; 若需多集群共享, 用 CephFilesystem 而非 RBD, 且注意 MDS 并发访问语义。
+
+#### 3.4.4 发现提供方真实 CephX 用户名(Bug E 修复, 2026-09-10)
+
+> ⚠ Rook v1.20 会给内部 CSI 用户加**数字后缀**(如 `client.csi-cephfs-node.1`), 文档/脚本里不带
+> 后缀的名字(如 `client.csi-rbd-provisioner`)**在提供方集群上并不存在** —— 不要照抄名字填
+> `CEPH_USER/CEPHFS_USER`。本项目推荐的做法是**使用提供方导出的专用用户**(§3.3, 无后缀,
+> 由 ceph-expose-external.sh 创建并导出真实 key), 不必碰 Rook 内部 CSI 用户。
+
+在提供方集群上发现真实用户名的命令(A 侧, toolbox 或任一 mon 节点):
+
+```bash
+# 列出全部 cephx 实体(含后缀的真实 CSI 用户)
+kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph auth ls --format json | jq -r '.[].entity'
+
+# 取某用户的 key(提供方/被接入方确认凭据用)
+kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph auth get client.csi-cephfs-node.1
+kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph auth get-key client.csi-cephfs-node.1
+
+# 验证某用户的实际 caps(区分: provisioner 应只有 metadata rw, node 应有 meta+data rw)
+kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph auth print-key client.csi-cephfs-node.1
+kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph auth caps client.csi-cephfs-node.1
+```
+
+排查指引(消费者 B 侧):
+- `PVC 建卷成功但挂载后写 EPERM` → node 角色 caps 无 data 池写权限(多半 node/provisioner 共用
+  了 provisioner 凭据) → 换/补 `CEPHFS_NODE_USER/CEPHFS_NODE_KEYRING`。
+- `ceph fs subvolume create 报 RADOS permission error` → provisioner 角色 caps 不足
+  (node caps 只有 metadata) → 换用 provisioner 凭据。
 
 ## 4. 裸盘自动检测(需求)
 

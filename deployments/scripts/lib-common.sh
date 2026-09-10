@@ -467,18 +467,26 @@ load_config() {
 # CEPH_FALLBACK_TO_LOCALPATH=true 时决定是否回退到 local-path 模式。
 # 返回 0=具备(可装 ceph), 1=不具备(可回退); 不满足项输出到 stdout 供提示。
 # 判定(与 02_ceph.sh / 03_ceph_csi.sh 的前置校验一致):
-#   · external: CEPH_MONITORS 与 CEPH_KEYRING 必须非空
+#   · external: CEPH_MONITORS 与 CEPH_KEYRING 必须非空; CEPH_USER 与 CEPH_KEYRING 必须成对
+#     (2026-09-10 Bug B: 只查 keyring 存在不校验 user 会让"用户不存在/key 不匹配"拖到部署后期
+#     才以 rados ret=-13 暴露 —— 这里做结构校验; 用户存在性/caps 的真实校验在 ceph_csi 模块
+#     的 preflight(见 03_ceph_csi.sh)与提供方 ceph-expose-external.sh status 5 层自检)
 #   · internal: rook manifest(operator.yaml/csi-operator.yaml)存在;
 #     存储节点数 ≥ CEPH_MIN_NODES; 至少一台节点有裸盘(CEPH_DATA_DISKS 显式 或
 #     自动检测到); lvm2 离线包或节点已装 lvm2(仅检查离线包目录, 不 SSH 探测)
 ceph_installable_check() {
     local _miss=""
-    # external 模式: monitors + keyring
+    # external 模式: monitors + keyring(+ user 成对)
     if [ "${CEPH_MODE:-internal}" = "external" ]; then
         [ -n "${CEPH_MONITORS:-}" ] || _miss="${_miss} CEPH_MONITORS"
         [ -n "${CEPH_KEYRING:-}" ] || _miss="${_miss} CEPH_KEYRING"
+        [ -n "${CEPH_USER:-}" ] || _miss="${_miss} CEPH_USER"
+        # CephFS 启用时 provisioner 凭据成对(node 可回退, 不强制)
+        if [ -n "${CEPHFS_FS:-}" ] && { [ -z "${CEPHFS_USER:-}" ] || [ -z "${CEPHFS_KEYRING:-}" ]; }; then
+            _miss="${_miss} CEPHFS_USER/CEPHFS_KEYRING(成对)"
+        fi
         if [ -n "${_miss}" ]; then
-            echo "外部 Ceph 参数缺失:${_miss}"
+            echo "外部 Ceph 参数缺失/不成对:${_miss}"
             return 1
         fi
         return 0

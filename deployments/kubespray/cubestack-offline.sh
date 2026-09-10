@@ -543,7 +543,7 @@ resolve_preload_image_files() {
             for _p in "${PRELOAD_IMAGE_FILES[@]:-}"; do [ "${_p}" = "${base}" ] && { _in=1; break; }; done
             [ "${_in}" = "0" ] && PRELOAD_IMAGE_FILES+=("${base}")
         done
-        [ "${#patterns[@]}" -gt 0 ] && log "  CEPH_ENABLED=true → ceph 镜像并入预加载清单(源 ${CEPH_IMAGE_DIR:-<无>} / images/ 兜底)"
+        [ "${#patterns[@]}" -gt 0 ] && log "  ceph 体系开启(CEPH_ENABLED=${CEPH_ENABLED:-false} CEPH_CSI_ENABLED=${CEPH_CSI_ENABLED:-false}) → ceph 镜像并入预加载清单(源 ${CEPH_IMAGE_DIR:-<无>} / images/ 兜底)"
     fi
 
     # 写入 inventory 目录: 每行一个 tar 文件名; 空文件表示无镜像可同步

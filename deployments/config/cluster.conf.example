@@ -206,7 +206,8 @@ CEPH_EXTERNAL_RBD_POOL="${CEPH_EXTERNAL_RBD_POOL:-cubestack-ext-rbd-pool}"  # �
 CEPH_EXTERNAL_RBD_PG="${CEPH_EXTERNAL_RBD_PG:-32}"            # 外部 RBD pool PG 数
 # 外部 CephFS(默认随 CEPHFS_ENABLED; 外部 csi-operator 用 CephFS 时需要)
 CEPH_EXTERNAL_CEPHFS="${CEPH_EXTERNAL_CEPHFS:-}"              # 空=随 CEPHFS_ENABLED; true/false 可显式
-CEPH_EXTERNAL_CEPHFS_USER="${CEPH_EXTERNAL_CEPHFS_USER:-cubestack-ext-cephfs}"  # 外部 CephFS 专用用户(mon allow r / mds allow rw fsname / osd allow rw)
+CEPH_EXTERNAL_CEPHFS_USER="${CEPH_EXTERNAL_CEPHFS_USER:-cubestack-ext-cephfs}"  # 外部 CephFS 专用用户(provisioner 角色: mon allow r / mds allow rw / osd allow rw meta)
+CEPH_EXTERNAL_CEPHFS_NODE_USER="${CEPH_EXTERNAL_CEPHFS_NODE_USER:-cubestack-ext-cephfs-node}"  # 外部 CephFS node 角色用户(挂载 fs, 需 meta+data 池 rw; 2026-09-10 Bug A 分用户)
 CEPH_EXTERNAL_CEPHFS_FS="${CEPH_EXTERNAL_CEPHFS_FS:-cubestack-ext-fs}"         # 外部 CephFilesystem 名
 CEPH_EXTERNAL_CEPHFS_META_POOL="${CEPH_EXTERNAL_CEPHFS_META_POOL:-cubestack-ext-cephfs-metadata}"
 CEPH_EXTERNAL_CEPHFS_DATA_POOL="${CEPH_EXTERNAL_CEPHFS_DATA_POOL:-cubestack-ext-cephfs-data}"
@@ -239,6 +240,10 @@ CEPH_MONITORS="${CEPH_MONITORS:-}"               # external: 外部 Ceph monitor
 CEPH_POOL="${CEPH_POOL:-rbd}"                    # external: 外部 Ceph 使用的 RBD pool 名(外部集群已有)
 CEPH_USER="${CEPH_USER:-admin}"                  # external: 外部 Ceph 认证用户(默认 admin)
 CEPH_KEYRING="${CEPH_KEYRING:-}"                 # external: 外部 Ceph 认证 keyring(该用户的 key; 必填, 如 AQCxxx==)
+CEPH_RBD_NODE_USER="${CEPH_RBD_NODE_USER:-}"     # external(可选): csi-rbd **node** 角色独立用户 —— 提供方对 node/provisioner
+                                                 # 两角色 caps 区分更严时使用(2026-09-10 Bug A 加固);
+                                                 # 留空 = 回退 CEPH_USER(旧行为)。与 CEPH_RBD_NODE_KEYRING 必须成对。
+CEPH_RBD_NODE_KEYRING="${CEPH_RBD_NODE_KEYRING:-}"  # external(可选): 上述 node 用户的 keyring; 留空 = 回退 CEPH_KEYRING
 CEPH_EXTERNAL_PROVISION_SMOKE="${CEPH_EXTERNAL_PROVISION_SMOKE:-true}"  # external: provision 冒烟测试(默认开; 提供方未就绪时可 false 跳过)
 CEPH_DASHBOARD_ENABLED="${CEPH_DASHBOARD_ENABLED:-true}"  # Ceph Dashboard
 
@@ -263,8 +268,12 @@ CEPH_DASHBOARD_ENABLED="${CEPH_DASHBOARD_ENABLED:-true}"  # Ceph Dashboard
 # CEPHFS_FS="cubestack-ext-fs"
 # CEPHFS_META_POOL="cubestack-ext-cephfs-metadata"
 # CEPHFS_DATA_POOL="cubestack-ext-cephfs-data"
-# CEPHFS_USER="cubestack-ext-cephfs"
+# CEPHFS_USER="cubestack-ext-cephfs"          # CephFS provisioner 角色用户(建删 subvolume; 提供方限定 metadata 读)
 # CEPHFS_KEYRING="<占位: 如 AQA///==>"
+# CEPHFS_NODE_USER="cubestack-ext-cephfs-node"   # 可选: CephFS **node** 角色用户(挂载 fs/承载文件 I/O;
+#                                                #   提供方须给 metadata+data 池读写 caps, 见 ceph-rook.md §外部接入;
+#                                                #   留空 = 回退 CEPHFS_USER, 与 CEPHFS_KEYRING 成对)
+# CEPHFS_NODE_KEYRING="<占位: 如 AQA///==>"
 # CEPH_RGW_EXTERNAL_ENDPOINT="10.244.1.204:80"
 # ════════════════════════════════════════════════════════════════════════
 # ---- Ceph 备份/恢复(独立运维模块, 不随部署执行; 见 docs/ceph-backup-restore.md) ----

@@ -6,7 +6,8 @@
 # 设计(对齐 ceph-csi-operator 外部连接需求):
 #   ① 网络层: mon/RGW *-external Service(YAML 模板 → kubectl apply, 与集群内访问共存)
 #   ② 资源层: 专用外部 RBD pool + 外部 CephFS(fs + meta/data pools)+ application tag
-#   ③ 认证层: 专用用户(profile caps, 非 admin): cubestack-ext-rbd / cubestack-ext-cephfs
+#   ③ 认证层: 专用用户(profile caps, 非 admin): cubestack-ext-rbd / cubestack-ext-cephfs(provisioner)
+#      + cubestack-ext-cephfs-node(node 角色, 2026-09-10 Bug A 分用户: meta+data 池 rw)
 #   ④ 导出:   ceph-external-access.conf(FSID/MONs/双用户 key/pool/fs 名, 拷贝到目标集群即可)
 #   ⑤ 自检:   status 5 层, 含**外部客户端协议级测试**(mon 握手 + cephx 认证 + RBD API,
 #              模拟 ceph-csi-operator 从集群外连接; 客户端=Dockerfile-cli 预装 ceph-common)
@@ -43,7 +44,8 @@ EXT_USER="${CEPH_EXTERNAL_USER:-cubestack-ext-rbd}"                 # 外部 RBD
 EXT_RBD_POOL="${CEPH_EXTERNAL_RBD_POOL:-cubestack-ext-rbd-pool}"    # 外部专用 RBD pool(独立于集群内 rbd-pool)
 EXT_RBD_PG="${CEPH_EXTERNAL_RBD_PG:-32}"                            # 外部 RBD pool PG 数
 EXT_CEPHFS_ENABLED="${CEPH_EXTERNAL_CEPHFS:-${CEPHFS_ENABLED:-false}}"  # 外部 CephFS(随集群 CEPHFS_ENABLED)
-EXT_CEPHFS_USER="${CEPH_EXTERNAL_CEPHFS_USER:-cubestack-ext-cephfs}"   # 外部 CephFS 专用用户
+EXT_CEPHFS_USER="${CEPH_EXTERNAL_CEPHFS_USER:-cubestack-ext-cephfs}"   # 外部 CephFS 专用用户(provisioner 角色: mon allow r / mds allow rw / osd allow rw meta)
+EXT_CEPHFS_NODE_USER="${CEPH_EXTERNAL_CEPHFS_NODE_USER:-cubestack-ext-cephfs-node}"  # 外部 CephFS node 角色用户(挂载 fs, 需 meta+data 池 rw; 2026-09-10 Bug A 分用户)
 EXT_FS="${CEPH_EXTERNAL_CEPHFS_FS:-cubestack-ext-fs}"               # 外部 CephFS 名
 EXT_FS_META="${CEPH_EXTERNAL_CEPHFS_META_POOL:-cubestack-ext-cephfs-metadata}"
 EXT_FS_DATA="${CEPH_EXTERNAL_CEPHFS_DATA_POOL:-cubestack-ext-cephfs-data}"
@@ -419,13 +421,27 @@ apply_main() {
         EXT_RBD_KEY=""
     fi
     EXT_CEPHFS_KEY=""
+    EXT_CEPHFS_NODE_KEY=""
     if [ "${EXT_CEPHFS_ENABLED}" = "true" ]; then
-        _FS_KEY="$( ( _ceph_exec auth get-or-create "client.${EXT_CEPHFS_USER}" mon 'allow r' mds "allow rw fsname=${EXT_FS}" osd "allow rw pool=${EXT_FS_DATA}" 2>/dev/null || true) )"
+        # ★ 2026-09-10(Bug A 修复): 外部 CephFS 两角色**分用户** ——
+        #   · ${EXT_CEPHFS_USER}(csi-cephfs-provisioner 用): 建删 subvolume, 提供方限定 metadata 读
+        #     (osd allow rw pool=meta; 不给 data 池 —— 避免过度授权)
+        #   · ${EXT_CEPHFS_NODE_USER}(csi-cephfs-node 用): 挂载 fs 承载全部文件 I/O, 需要
+        #     metadata+data 池读写(osd allow rw pool=meta,data)
+        #   消费者集群 secret 独立指定(03_ceph_csi.sh): CEPHFS_USER=provisioner / CEPHFS_NODE_USER=node。
+        _FS_KEY="$( ( _ceph_exec auth get-or-create "client.${EXT_CEPHFS_USER}" mon 'allow r' mds "allow rw fsname=${EXT_FS}" osd "allow rw pool=${EXT_FS_META}" 2>/dev/null || true) )"
         if [ -n "${_FS_KEY}" ] && echo "${_FS_KEY}" | grep -q "key = "; then
             EXT_CEPHFS_KEY="$(echo "${_FS_KEY}" | awk '/key = /{print $3; exit}')"
-            ok "  用户 ${EXT_CEPHFS_USER}(mon allow r / mds allow rw fsname=${EXT_FS} / osd allow rw pool=${EXT_FS_DATA})"
+            ok "  用户 ${EXT_CEPHFS_USER}(provisioner: mon allow r / mds allow rw / osd allow rw pool=${EXT_FS_META})"
         else
             warn "  用户 ${EXT_CEPHFS_USER} 创建失败; key 将为空"
+        fi
+        _FS_NODE_KEY="$( ( _ceph_exec auth get-or-create "client.${EXT_CEPHFS_NODE_USER}" mon 'allow r' mds "allow rw fsname=${EXT_FS}" osd "allow rw pool=${EXT_FS_META}, allow rw pool=${EXT_FS_DATA}" 2>/dev/null || true) )"
+        if [ -n "${_FS_NODE_KEY}" ] && echo "${_FS_NODE_KEY}" | grep -q "key = "; then
+            EXT_CEPHFS_NODE_KEY="$(echo "${_FS_NODE_KEY}" | awk '/key = /{print $3; exit}')"
+            ok "  用户 ${EXT_CEPHFS_NODE_USER}(node: mon allow r / mds allow rw / osd allow rw pool=${EXT_FS_META},data)"
+        else
+            warn "  用户 ${EXT_CEPHFS_NODE_USER} 创建失败; key 将为空"
         fi
     fi
 
@@ -444,12 +460,16 @@ CEPH_FSID="${FSID}"
 CEPH_POOL="${EXT_RBD_POOL}"
 CEPH_USER="${EXT_USER}"
 CEPH_KEYRING="${EXT_RBD_KEY}"
-# --- CephFS(ceph-csi CephFS provisioner 使用) ---
+# --- CephFS(ceph-csi CephFS provisioner/node 分用户使用, 2026-09-10) ---
 CEPHFS_FS="${EXT_FS}"
 CEPHFS_META_POOL="${EXT_FS_META}"
 CEPHFS_DATA_POOL="${EXT_FS_DATA}"
+# CephFS provisioner 角色(建删 subvolume; 提供方 caps 只给 meta 池 rw)
 CEPHFS_USER="${EXT_CEPHFS_USER}"
 CEPHFS_KEYRING="${EXT_CEPHFS_KEY}"
+# CephFS node 角色(挂载 fs 承载文件 I/O; 提供方给 meta+data 池 rw) —— 不设则消费者回退 CEPHFS_USER(旧行为)
+CEPHFS_NODE_USER="${EXT_CEPHFS_NODE_USER}"
+CEPHFS_NODE_KEYRING="${EXT_CEPHFS_NODE_KEY}"
 # --- RGW(S3, 供外部应用如 Model 仓库; csi-operator 不需要) ---
 CEPH_RGW_EXTERNAL_ENDPOINT="${RGW_EP}"
 EOF
@@ -571,11 +591,19 @@ status_main() {
         warn "  用户 ${EXT_USER} 不存在(先 apply)"
     fi
     if [ "${EXT_CEPHFS_ENABLED}" = "true" ]; then
+        # provisioner 角色用户
         _AUTH2="$( ( _ceph_exec auth get "client.${EXT_CEPHFS_USER}" 2>/dev/null || true) )"
         if echo "${_AUTH2}" | grep -q "fsname=${EXT_FS}"; then
-            ok "  ${EXT_CEPHFS_USER}: fsname=${EXT_FS} caps ✓"
+            ok "  ${EXT_CEPHFS_USER}(provisioner): fsname=${EXT_FS} caps ✓"
         else
             warn "  用户 ${EXT_CEPHFS_USER} 缺失/非 fsname caps(检查)"
+        fi
+        # node 角色用户(2026-09-10 Bug A: 两角色分用户)
+        _AUTH3="$( ( _ceph_exec auth get "client.${EXT_CEPHFS_NODE_USER}" 2>/dev/null || true) )"
+        if echo "${_AUTH3}" | grep -q "fsname=${EXT_FS}"; then
+            ok "  ${EXT_CEPHFS_NODE_USER}(node): fsname=${EXT_FS} caps ✓"
+        else
+            warn "  用户 ${EXT_CEPHFS_NODE_USER}(node) 缺失/非 fsname caps(检查; 消费者 CEPHFS_NODE_USER 需要)"
         fi
     fi
     # [3/5] 资源层: 外部 pool + fs + application tag
