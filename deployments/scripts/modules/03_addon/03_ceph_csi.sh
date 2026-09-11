@@ -373,6 +373,11 @@ stringData:
         # ★ 2026-09-11(用户要求): 对象存储供给层 —— bucket StorageClass + Model 仓库 OBC。
         #   provisioner rook-ceph.ceph.rook.io/bucket 为 Rook operator 内建 bucket provisioner
         #   (前缀 = operator 命名空间); OBC CRD(objectbucket.io)已随 crds.yaml apply。
+        #   ⚠ OBC 必须显式带 namespace —— 初版漏写 namespace 落到 kubectl 默认 ns, 与下方
+        #   等待检查错位(检查永远 NotFound → 假"未 Bound"); OBC 实际在 default 已 Bound
+        #   + 凭证 Secret 已生成(链路本身正常)。统一放 ${CEPH_NAMESPACE}。
+        #   ⚠ 注释必须写在字符串外: bash 双引号字符串内的注释会把 " 和反引号当 bash 语法解析
+        #   (2026-09-11 实机事故: 字符串提前闭合 + 反引号命令替换 → "command not found")。
         say "  对象存储供给: bucket SC rook-ceph-bucket + OBC model-repo(外部 RGW)..."
         _EXT_BUCKET_YAML="apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -388,9 +393,6 @@ apiVersion: objectbucket.io/v1alpha1
 kind: ObjectBucketClaim
 metadata:
   name: model-repo
-  # ★ 2026-09-11 修复: 必须显式带 namespace —— 初版漏写 namespace 落到 kubectl 默认 ns,
-  #   与下方 `-n ${CEPH_NAMESPACE}` 等待检查错位(检查永远 NotFound → 假"未 Bound");
-  #   OBC 实际在 default 已 Bound + 凭证 Secret 已生成(链路本身正常)。统一放 ${CEPH_NAMESPACE}。
   namespace: ${CEPH_NAMESPACE}
 spec:
   generateBucketName: model
