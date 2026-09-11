@@ -110,7 +110,9 @@ REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-blo
 - `02_ceph.sh` 跳过裸盘检测/覆盖确认/CR 生成, 仅部署 operator + csi-operator 并等 operator Ready
 - `03_ceph_csi.sh` 创建 `CephConnection` + `rook-csi-rbd-*` secret + `StorageClass ceph-block`
   (pool/认证指向外部), 跳过集群内 pool/cephfs/rgw 创建
-- `deploy-cluster.sh` 预检跳过裸盘/倒计时/已有集群清理, 只提示外部连接
+- `deploy-cluster.sh` 预检跳过裸盘/已有集群清理, 但会在**K8s 集群部署开始前**红底列出外部连接参数
+  (external-ceph.env / monitors / pool / user)并倒计时确认(`CEPH_ENV_CONFIRM_SLEEP`, 默认 60s;
+  未配置 monitors 会红底强调"ceph_csi 将报错", 供部署前 Ctrl-C 修正 —— 2026-09-11)
 - registry 等下游继续用 `ceph-block` SC(无需改动)
 
 **兼容旧配置**: 仅设了旧变量 `CEPH_EXTERNAL_MONITORS`(旧外部开关)会自动视为 `external`,
@@ -153,7 +155,7 @@ REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-blo
      csi-cephfs 两角色 caps 不同, provisioner 被限定 metadata, node 才拿 data)
    - `cubestack-ext-cephfs-node`(node 角色, 2026-09-10 Bug A 分用户):`mon 'allow r' mds 'allow rw fsname=cubestack-ext-fs' osd 'allow rw pool=cubestack-ext-fs-metadata, allow rw pool=cubestack-ext-fs-cubestack-ext-cephfs-data'`
      —— 挂载 fs 承载全部文件 I/O, 需要 **meta+data** 两池 rw
-4. **导出**: 写 `deployments/config/ceph-external-access.conf` —— 全部连接信息
+4. **导出**: 写 `deployments/config/external-ceph-self-define-access.conf` —— 全部连接信息
    (CEPH_MONITORS=真实可达 ip:port / FSID / RBD: USER+KEYRING+POOL / CephFS: **provisioner+node 双用户**+KEYRING+FS+两池 / RGW 端点),
    拷贝到目标集群 `cluster.conf` 设 `CEPH_MODE=external` 即可接入
    > ⚠ CephFS **必须双用户分开指定**(`CEPHFS_USER`=provisioner / `CEPHFS_NODE_USER`=node):
@@ -187,7 +189,7 @@ sudo ./deploy-cluster.sh --steps verify_ceph                        # ⑨ 自动
 > [5/5] 自动回退为 toolbox 内经外部端点测试(连接路径经 kube-proxy DNAT, 与外部一致)。
 
 **接入方集群**(目标集群, 消费本集群 Ceph): `cluster.conf` 设 `CEPH_MODE=external` +
-`CEPH_MONITORS/CEPH_POOL/CEPH_USER/CEPH_KEYRING/CEPH_FSID`(值来自 `ceph-external-access.conf`),
+`CEPH_MONITORS/CEPH_POOL/CEPH_USER/CEPH_KEYRING/CEPH_FSID`(值来自 `external-ceph-self-define-access.conf`),
 详见上表"外部接入"行与 §3.1。
 
 ---
@@ -217,7 +219,7 @@ sudo ./deploy-cluster.sh --steps verify_ceph                        # ⑨ 自动
    ```
    完成后自动:
    - 创建 mon/RGW *-external Service + 外部专用 pool + 用户(§3.3)
-   - 导出外部接入配置 **`deployments/config/ceph-external-access.conf`**(自研格式, 手填路径用)
+   - 导出外部接入配置 **`deployments/config/external-ceph-self-define-access.conf`**(自研格式, 手填路径用)
    - **★ 自动导出官方 `deployments/config/external-ceph.env`**(2026-09-10):
      ceph-expose-external.sh 经 toolbox 运行官方 `create-external-cluster-resources.py`
      (vendored, v1.20.2)—— 在 A 上创建官方 CSI 双角色用户(csi-rbd-node/provisioner +
@@ -259,9 +261,13 @@ CEPH_CSI_ENABLED=true
 CEPH_EXTERNAL_ENV_FILE=""         # 留空 = 自动探测默认目录 deployments/config/external-ceph.env
 ```
 
-**部署前检测(02_ceph.sh)**: `CEPH_MODE=external` 时检查 env 文件 —— 存在则提示"将走官方导入路径";
-**未检测到 → 红底倒计时警告**(默认 60s, `CEPH_ENV_CONFIRM_SLEEP` 可调/CI 设 0):
-"未检测到 external-ceph.env, 请先放到指定目录; 没有该文件, 部署可能失败"。
+**部署前检测(2026-09-11 起在 deploy-cluster.sh, K8s 集群部署开始前)**: `CEPH_MODE=external` 时
+检查 env 文件(默认目录 `deployments/config/external-ceph.env` 或 `CEPH_EXTERNAL_ENV_FILE`)——
+存在则显示其真实 monitors/user 并提示"将走官方导入路径"; **未检测到(且 `CEPH_MONITORS` 未填)→
+红底强调 "ceph_csi 模块将报错" + 倒计时**(默认 60s, `CEPH_ENV_CONFIRM_SLEEP` 可调/CI 设 0):
+"请先放置 external-ceph.env, 或 cluster.conf 设 CEPH_MONITORS/CEPH_KEYRING"。倒计时期间可
+Ctrl-C 修正配置再重跑, 不必等整轮 K8s 部署跑完才发现(02_ceph 模块仍保留同款告警,
+但 deploy-cluster 已确认过时不再重复倒计时)。
 
 `03_ceph_csi.sh` 检测到 env 文件后全自动完成(无需任何手工 kubectl):
 
@@ -272,22 +278,31 @@ CEPH_EXTERNAL_ENV_FILE=""         # 留空 = 自动探测默认目录 deployment
    Rook operator 自动建 `CephConnection`/`ClientProfile` 并做 mon 健康检查;
 3. 等 `CephCluster rook-ceph-external` **STATE=Connected**(官方 healthCheck 机制,
    §3.4.5 已知限制在本路径不适用);
-4. 建官方 SC 集合: `ceph-rbd` / `cephfs`(env 带 CephFS 时)+ `ceph-block`(平台兼容别名);
+3.5. **滚动重启 provisioner + 确认 config.json 已挂载**(2026-09-11, 与手填路径同款防线):
+   ceph-csi-config CM 生成 ≠ provisioner pod 可见(kubelet 投递延迟 ~60-90s),
+   不等待直接 provision 会撞 config.json 缺失 → infeasible 毒化 → PVC 永不 Bound;
+4. 建 **6 个 StorageClass(与提供方/手填路径完全一致, 2026-09-11)**: `ceph-block`(WFFC) /
+   `ceph-rbd-ephemeral`(**default**, WFFC) / `ceph-rbd-ephemeral-immediate`(Immediate) /
+   `ceph-rbd-durable`(Retain, WFFC) / `cephfs-ephemeral`(Immediate) / `cephfs-durable`(Retain,
+   Immediate, env 带 CephFS 时);clusterID=rook-ceph(官方导入的 csi-config), pool/fsName 取 env;
 5. env 带 `RGW_ADMIN_OPS_USER_*` + `RGW_ENDPOINT` → 自动建 `CephObjectStore external-store`
    (externalRgwEndpoints → 提供方 RGW), 应用可经 S3 端点读写对象(§6);
+5.5. **对象存储供给层**(2026-09-11, 用户要求): bucket SC `rook-ceph-bucket`(provisioner
+   `rook-ceph.ceph.rook.io/bucket`, operator 内建, 指向 external-store)+ `model-repo`
+   ObjectBucketClaim(`generateBucketName: model`)→ 等 OBC Phase=Bound(凭证 Secret 自动生成);
 6. 数据面冒烟测试(RBD + CephFS 真实写读)。
 
 ##### 路径二: 手填(存量兼容)
 
 `CEPH_EXTERNAL_ENV_FILE` 未设且默认目录也无 env 文件时走原路径(ceph-csi-operator
 `CephConnection`/`ClientProfile`, 02 模块会先倒计时警告)。打开 B 的 `cluster.conf`,
-把 A 导出的 `ceph-external-access.conf` 关键值拷入下述字段(只改这些):
+把 A 导出的 `external-ceph-self-define-access.conf` 关键值拷入下述字段(只改这些):
 
 ```bash
 CEPH_MODE=external                          # 切到外部接入
 CEPH_ENABLED=true                            # 让 02/03 模块运行(02 会 "仅部署 operator/csi-operator")
 CEPH_CSI_ENABLED=true
-# --- 以下来自集群 A 的 ceph-external-access.conf(按实际值替换) ---
+# --- 以下来自集群 A 的 external-ceph-self-define-access.conf(按实际值替换) ---
 CEPH_MONITORS="10.244.1.31:30100,10.244.1.31:30101,10.244.1.31:30102"   # A 导出的 mon 端点(规律端口)
 CEPH_POOL="cubestack-ext-rbd-pool"          # pool 必须与 A 导出一致
 CEPH_USER="cubestack-ext-rbd"

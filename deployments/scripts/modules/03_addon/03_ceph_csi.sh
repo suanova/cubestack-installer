@@ -128,6 +128,43 @@ apply_remote() {   # <本地YAML内容> <临时文件名> → 远端 kubectl app
         "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "cat > /tmp/${name}.yaml && ${K} apply -f /tmp/${name}.yaml"
 }
 
+# ★ 2026-09-11(官方导入路径补防线, 与手填路径 827-857 同款逻辑):
+#   kubelet 把 ceph-csi-config CM 数据投递进**运行中** provisioner pod 有 ~60-90s 延迟,
+#   CM 就绪 ≠ pod 可见。不等待就 provision 会撞
+#   `open /etc/ceph-csi-config/config.json: no such file or directory` → InvalidArgument
+#   被 csi-provisioner 判 **infeasible(永久)→ PVC 永不 Bound**(实机 2026-09-11:
+#   冒烟 PVC 180s 超时, 日志 "skipping volume provisioning ... infeasible error")。
+#   解法(与手填路径一致): rollout restart provisioner(新 pod 启动即挂载含数据的 CM)
+#   + 确认 config.json 已挂载进 pod; 挂载检查失败硬失败(继续必撞 infeasible 毒化)。
+_ext_wait_csi_config_ready() {
+    say "  滚动重启 provisioner deployment(新 pod 直接挂载含数据的 csi-config CM)..."
+    ( SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin" >/dev/null 2>&1 || true )
+    _RS_OK=0
+    for _ci in $(seq 1 24); do
+        if ( SSH "${K} -n ${CEPH_NAMESPACE} rollout status deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin --timeout=2s" 2>/dev/null ) | grep -q "successfully rolled out"; then
+            _RS_OK=1; break
+        fi
+        sleep 5
+    done
+    [ "${_RS_OK}" = "1" ] && ok "  provisioner 滚动完成" || warn "  provisioner 滚动 120s 未完成(继续, 投递检查兜底)"
+    say "  确认 config.json 已挂载进 provisioner pod..."
+    _MOUNT_OK=0
+    for _ci in $(seq 1 12); do
+        if ( SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin -c csi-rbdplugin -- test -f /etc/ceph-csi-config/config.json" 2>/dev/null ); then
+            _MOUNT_OK=1; break
+        fi
+        sleep 5
+    done
+    if [ "${_MOUNT_OK}" = "1" ]; then
+        ok "  config.json 已挂载进 provisioner pod(外部 Ceph provision 就绪)"
+    else
+        err "  config.json 60s 内未挂载进 provisioner pod —— 继续则首次 provision 必撞 infeasible(冒烟必失败)"
+        err "  排查: kubectl -n ${CEPH_NAMESPACE} get cm ceph-csi-config; kubectl -n ${CEPH_NAMESPACE} get pods -l app=rook-ceph.rbd.csi.ceph.com-ctrlplugin"
+        exit 1
+    fi
+    unset _RS_OK _MOUNT_OK
+}
+
 # ════════════════════════════════════════════════════════════════════
 # ★ 2026-09-10 官方导入路径: 消费者读提供方导出的 external-ceph.env(Rook 官方格式),
 #   复刻 import-external-cluster.sh 的资源创建(声明式 YAML + apply_remote, 不依赖官方
@@ -182,6 +219,12 @@ data:
     # 官方 import 脚本还建 external-cluster-user-command CM(记录提供方导出参数, 供排障);
     # 有 ARGS 时一并创建(与官方行为一致)。
     if [ -n "${ARGS:-}" ]; then
+        # ★ 2026-09-11 修复: 提供方导出的 ARGS 可能是**多行**(export 带 --config-file 时
+        #   写入 [Configurations] 块) —— 必须逐行加 4 空格缩进再嵌入 block scalar;
+        #   只缩进首行会让后续行落在第 0 列, block scalar 提前终止, 裸标量
+        #   "key = value" 触发 yaml: line N: could not find expected ':' 解析失败
+        #   (实测: external-cluster-user-command CM 生成后 apply 报错, 后续 CSI secret 全部未建)。
+        _ARGS_BLOCK="$(printf '%s\n' "${ARGS}" | sed 's/^/    /')"
         _EXT_IMP_YAML="${_EXT_IMP_YAML}
 ---
 apiVersion: v1
@@ -191,7 +234,8 @@ metadata:
   namespace: ${CEPH_NAMESPACE}
 data:
   args: |-
-    ${ARGS}"
+${_ARGS_BLOCK}"
+        unset _ARGS_BLOCK
     fi
     # 4 个 CSI secret(双角色凭据天然分开 —— Bug A 在官方路径天然成立)
     if [ -n "${CSI_RBD_NODE_SECRET_NAME:-}" ] && [ -n "${CSI_RBD_NODE_SECRET:-}" ]; then
@@ -300,6 +344,10 @@ stringData:
     done
     [ "${_EXT_CFG}" = "1" ] && ok "  ceph-csi-config 已含外部集群(clusterID=${CEPH_NAMESPACE}, Rook operator 自动生成)" \
         || warn "  ceph-csi-config 120s 内未见外部集群(等待收敛; provision 会自动重试)"
+    # ★ 2026-09-11: CM 就绪 ≠ provisioner pod 可见(kubelet 投递延迟 ~60-90s)——
+    #   必须在冒烟/RGW 前滚动重启 provisioner 并确认 config.json 已挂载, 否则
+    #   首次 provision 撞 config.json 缺失 → infeasible 毒化 → PVC 永不 Bound。
+    _ext_wait_csi_config_ready
 
     # ★ 对外暴露信息: 官方 SC ceph-rbd/cephfs 已由 import 逻辑等价创建(见下方 SC 块);
     #   RGW 对象存储接入(§6): RGW 密钥存在时登记外部 RGW 端点
@@ -322,19 +370,62 @@ stringData:
         [ "${_EXT_RGW_OK}" = "1" ] && ok "  CephObjectStore external-store Ready(应用可经 S3 端点 ${RGW_ENDPOINT} 读写对象)" \
             || warn "  CephObjectStore external-store 未 Ready(检查 rgw-admin-ops-user secret 与 RGW 连通)"
         unset _EXT_RGW_OK _rgw_phase _rgw_ip _rgw_port
-    fi
-
-    # 官方路径 SC 集合: ceph-rbd / cephfs(import-external-cluster.sh 同名), 平台兼容别名 ceph-block
-    say "  官方路径 StorageClass: ceph-rbd / cephfs / ceph-block(alias)..."
-    _EXT_SC_YAML="apiVersion: storage.k8s.io/v1
+        # ★ 2026-09-11(用户要求): 对象存储供给层 —— bucket StorageClass + Model 仓库 OBC。
+        #   provisioner rook-ceph.ceph.rook.io/bucket 为 Rook operator 内建 bucket provisioner
+        #   (前缀 = operator 命名空间); OBC CRD(objectbucket.io)已随 crds.yaml apply。
+        say "  对象存储供给: bucket SC rook-ceph-bucket + OBC model-repo(外部 RGW)..."
+        _EXT_BUCKET_YAML="apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: ceph-rbd
-provisioner: ${CEPH_NAMESPACE}.rbd.csi.ceph.com
+  name: rook-ceph-bucket
+provisioner: ${CEPH_NAMESPACE}.ceph.rook.io/bucket
+reclaimPolicy: Delete
 parameters:
+  objectStoreName: external-store
+  objectStoreNamespace: ${CEPH_NAMESPACE}
+---
+apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: model-repo
+  # ★ 2026-09-11 修复: 必须显式带 namespace —— 初版漏写 namespace 落到 kubectl 默认 ns,
+  #   与下方 `-n ${CEPH_NAMESPACE}` 等待检查错位(检查永远 NotFound → 假"未 Bound");
+  #   OBC 实际在 default 已 Bound + 凭证 Secret 已生成(链路本身正常)。统一放 ${CEPH_NAMESPACE}。
+  namespace: ${CEPH_NAMESPACE}
+spec:
+  generateBucketName: model
+  storageClassName: rook-ceph-bucket"
+        apply_remote "${_EXT_BUCKET_YAML}" "ceph-ext-bucket" \
+            && ok "  bucket SC rook-ceph-bucket + OBC model-repo 已创建" \
+            || warn "  bucket SC/OBC 创建失败(检查 object-external 与 RGW 就绪)"
+        # 清理初版(2026-09-11 上午)漏 namespace 落在 default ns 的残留 OBC(幂等, 连带删其 bucket)
+        ( SSH "${K} -n default delete obc model-repo --ignore-not-found" >/dev/null 2>&1 || true )
+        # 等 OBC Phase=Bound(bucket + RGW user + 凭证 Secret 真实创建)
+        _EXT_OBC_OK=0
+        for _ci in $(seq 1 24); do
+            _obc_phase="$( (SSH "${K} -n ${CEPH_NAMESPACE} get obc model-repo -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+            [ "${_obc_phase}" = "Bound" ] && { _EXT_OBC_OK=1; break; }
+            sleep 5
+        done
+        if [ "${_EXT_OBC_OK}" = "1" ]; then
+            ok "  OBC model-repo Bound(外部 RGW bucket 已建, 凭证 Secret 生成)"
+        else
+            warn "  OBC model-repo 120s 内未 Bound(检查: kubectl -n ${CEPH_NAMESPACE} describe obc model-repo; 多为 rgw-admin-ops-user caps 不足)"
+        fi
+        unset _EXT_OBC_OK _obc_phase _EXT_BUCKET_YAML
+    fi
+
+    # ★ 2026-09-11(用户要求): 官方路径 SC 集合与提供方(手填路径同款)**完全一致** ——
+    #   6 个: ceph-block(WFFC) / ceph-rbd-ephemeral(default, WFFC) /
+    #   ceph-rbd-ephemeral-immediate(Immediate) / ceph-rbd-durable(Retain, WFFC) /
+    #   cephfs-ephemeral(Immediate) / cephfs-durable(Retain, Immediate)。
+    #   (旧实现只建 ceph-rbd/cephfs/ceph-block 3 个且全 Immediate —— 与提供方数量/类型不一致;
+    #   clusterID=rook-ceph 指向 csi-config 中的外部集群, secret 用 import 已建的 rook-* 名)
+    _ext_official_rbd_params() {   # 官方路径 RBD SC parameters(clusterID=rook-ceph, import secret 名)
+        cat << RBD
   clusterID: ${CEPH_NAMESPACE}
   pool: ${RBD_POOL_NAME:-rbd-pool}
-  imageFormat: \"2\"
+  imageFormat: "2"
   imageFeatures: ${ROOK_RBD_FEATURES:-layering}
   csi.storage.k8s.io/provisioner-secret-name: rook-${CSI_RBD_PROVISIONER_SECRET_NAME}
   csi.storage.k8s.io/provisioner-secret-namespace: ${CEPH_NAMESPACE}
@@ -343,15 +434,61 @@ parameters:
   csi.storage.k8s.io/node-stage-secret-name: rook-${CSI_RBD_NODE_SECRET_NAME}
   csi.storage.k8s.io/node-stage-secret-namespace: ${CEPH_NAMESPACE}
   csi.storage.k8s.io/fstype: ext4
+RBD
+    }
+    say "  官方路径 StorageClass(与提供方一致, 6 个): ceph-block / ceph-rbd-ephemeral(默认) / -immediate / -durable ..."
+    _EXT_SC_YAML="apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ceph-block
+provisioner: ${CEPH_NAMESPACE}.rbd.csi.ceph.com
+parameters:
+$(_ext_official_rbd_params)
+reclaimPolicy: Delete
 allowVolumeExpansion: true
-reclaimPolicy: Delete"
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ceph-rbd-ephemeral
+  annotations:
+    storageclass.kubernetes.io/is-default-class: \"true\"
+provisioner: ${CEPH_NAMESPACE}.rbd.csi.ceph.com
+parameters:
+$(_ext_official_rbd_params)
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ceph-rbd-ephemeral-immediate
+provisioner: ${CEPH_NAMESPACE}.rbd.csi.ceph.com
+parameters:
+$(_ext_official_rbd_params)
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ceph-rbd-durable
+provisioner: ${CEPH_NAMESPACE}.rbd.csi.ceph.com
+parameters:
+$(_ext_official_rbd_params)
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer"
     if [ -n "${CEPHFS_FS_NAME:-}" ] && [ -n "${CEPHFS_POOL_NAME:-}" ]; then
         _EXT_SC_YAML="${_EXT_SC_YAML}
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: cephfs
+  name: cephfs-ephemeral
 provisioner: ${CEPH_NAMESPACE}.cephfs.csi.ceph.com
 parameters:
   clusterID: ${CEPH_NAMESPACE}
@@ -364,36 +501,47 @@ parameters:
   csi.storage.k8s.io/node-stage-secret-name: rook-${CSI_CEPHFS_NODE_SECRET_NAME}
   csi.storage.k8s.io/node-stage-secret-namespace: ${CEPH_NAMESPACE}
 allowVolumeExpansion: true
-reclaimPolicy: Delete"
-    fi
-    # 平台兼容别名(registry 等引用 ceph-block; 与集群内模式同名)
-    _EXT_SC_YAML="${_EXT_SC_YAML}
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: ceph-block
-provisioner: ${CEPH_NAMESPACE}.rbd.csi.ceph.com
+  name: cephfs-durable
+provisioner: ${CEPH_NAMESPACE}.cephfs.csi.ceph.com
 parameters:
   clusterID: ${CEPH_NAMESPACE}
-  pool: ${RBD_POOL_NAME:-rbd-pool}
-  imageFormat: \"2\"
-  imageFeatures: ${ROOK_RBD_FEATURES:-layering}
-  csi.storage.k8s.io/provisioner-secret-name: rook-${CSI_RBD_PROVISIONER_SECRET_NAME}
+  fsName: ${CEPHFS_FS_NAME}
+  pool: ${CEPHFS_POOL_NAME}
+  csi.storage.k8s.io/provisioner-secret-name: rook-${CSI_CEPHFS_PROVISIONER_SECRET_NAME}
   csi.storage.k8s.io/provisioner-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/controller-expand-secret-name: rook-${CSI_RBD_PROVISIONER_SECRET_NAME}
+  csi.storage.k8s.io/controller-expand-secret-name: rook-${CSI_CEPHFS_PROVISIONER_SECRET_NAME}
   csi.storage.k8s.io/controller-expand-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/node-stage-secret-name: rook-${CSI_RBD_NODE_SECRET_NAME}
+  csi.storage.k8s.io/node-stage-secret-name: rook-${CSI_CEPHFS_NODE_SECRET_NAME}
   csi.storage.k8s.io/node-stage-secret-namespace: ${CEPH_NAMESPACE}
-  csi.storage.k8s.io/fstype: ext4
 allowVolumeExpansion: true
-reclaimPolicy: Delete"
+reclaimPolicy: Retain
+volumeBindingMode: Immediate"
+    fi
     apply_remote "${_EXT_SC_YAML}" "ceph-ext-sc" \
-        && ok "  官方路径 StorageClass 已创建" || { err "  StorageClass 创建失败"; exit 1; }
+        && ok "  官方路径 StorageClass 已创建(6 个, 与提供方一致)" || { err "  StorageClass 创建失败"; exit 1; }
+    # ★ 2026-09-11: 旧版官方路径只建 ceph-rbd/cephfs/ceph-block 3 个, apply 不会删除旧 SC
+    #   → 升级后集群会残留 ceph-rbd/cephfs(数量 8 ≠ 6)。仅当旧 SC 的 pool 指向外部 pool
+    #   (本模块旧版所建)时删除, 用户自建的其它 SC 不受影响。
+    for _old_sc in "ceph-rbd:${RBD_POOL_NAME:-rbd-pool}" "cephfs:${CEPHFS_POOL_NAME:-}"; do
+        _sc="${_old_sc%%:*}"; _match="${_old_sc#*:}"
+        [ -n "${_match}" ] || continue
+        if ( SSH "${K} get sc ${_sc} -o jsonpath='{.parameters.pool}'" 2>/dev/null | grep -qx "${_match}" ); then
+            ( SSH "${K} delete sc ${_sc} --ignore-not-found" >/dev/null 2>&1 || true ) \
+                && say "  已删除旧版 SC ${_sc}(被新 6-SC 集合取代, 指向外部 pool)"
+        fi
+    done
+    unset _old_sc _sc _match
+    unset _ext_official_rbd_params
 
-    # 冒烟测试(官方 SC 名) —— 复用同一数据面验证逻辑(见 _ext_smoke 函数)
+    # 冒烟测试(与手填路径同 SC 名) —— 复用同一数据面验证逻辑(见 _ext_smoke 函数)
     if [ "${CEPH_EXTERNAL_PROVISION_SMOKE:-true}" = "true" ]; then
-        _ext_smoke "ceph-rbd" "cephfs" "${CEPHFS_FS_NAME:-}"
+        _ext_smoke "ceph-rbd-ephemeral-immediate" "cephfs-ephemeral" "${CEPHFS_FS_NAME:-}"
     fi
     unset _EXT_IMP_YAML _EXT_SC_YAML _EXT_CONN _EXT_CFG _cfg _conn _ci _gen _env_file _miss
 }
@@ -716,7 +864,7 @@ volumeBindingMode: WaitForFirstConsumer"
     if [ -n "${EXT_CEPHFS_ENABLED}" ]; then
         _CEPHFS_PROVISIONER_SECRET="rook-csi-cephfs-provisioner"
         _CEPHFS_NODE_SECRET="rook-csi-cephfs-node"
-        # external CephFS 必要字段(来自 ceph-external-access.conf 导入): CEPHFS_FS / CEPHFS_DATA_POOL 必填
+        # external CephFS 必要字段(来自 external-ceph-self-define-access.conf 导入): CEPHFS_FS / CEPHFS_DATA_POOL 必填
         # CephConnection clusterID=ceph-connection; fsName/pool 指向外部集群已存在的 fs/data pool
         _CEPHFS_FS="${CEPHFS_FS:?external CephFS 需要 CEPHFS_FS(外部集群 fs 名, 如 cubestack-ext-fs)}"
         _CEPHFS_DATA_POOL="${CEPHFS_DATA_POOL:?external CephFS 需要 CEPHFS_DATA_POOL(外部集群 data pool 真实名, 如 cubestack-ext-fs-cubestack-ext-cephfs-data)}"
@@ -902,7 +1050,7 @@ fi
 # ★ Ceph 对外暴露(mon + RGW, YAML 声明式; 2026-09-07 重构)——
 #   默认允许集群外 ceph-csi-operator(CEPH_MODE=external)接入:
 #   · CEPH_EXTERNAL_EXPOSE=true(默认)→ 创建 mon/RGW *-external Service + 外部专用用户
-#     + 导出 config/ceph-external-access.conf(拷贝到目标集群 cluster.conf 即可接入)
+#     + 导出 config/external-ceph-self-define-access.conf(拷贝到目标集群 cluster.conf 即可接入)
 #   · 模式跟随 SERVICE_EXPOSE_MODE(nodeport→NodePort 端口自动分配 / metallb→LoadBalancer VIP),
 #     可用 CEPH_EXTERNAL_EXPOSE_MODE / CEPH_RGW_EXPOSE_MODE 显式覆盖(大小写不敏感)
 #   · 实现: tools/k8s/ceph-expose-external.sh(从 rook/external/ YAML 模板生成 → kubectl apply 幂等;
@@ -911,14 +1059,14 @@ if [ "${_CEPH_EXTERNAL}" = "0" ]; then
     bash "${SCRIPT_DIR}/tools/k8s/ceph-expose-external.sh" apply \
         || warn "  Ceph 对外暴露应用失败(可 CEPH_EXTERNAL_EXPOSE=false 关闭后重跑, 或手工执行工具脚本排查)"
     # ★ 部署完成 → 终端打印外部 ceph-csi operator 接入所需信息(用户要求: 部署完可读)
-    if [ -f "${REPO_ROOT}/deployments/config/ceph-external-access.conf" ]; then
-        say "外部 ceph-csi operator 接入所需信息(同时写入 ${REPO_ROOT}/deployments/config/ceph-external-access.conf):"
+    if [ -f "${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf" ]; then
+        say "外部 ceph-csi operator 接入所需信息(同时写入 ${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf):"
         echo "---------------------------------------------"
-        sed 's/^/  /' "${REPO_ROOT}/deployments/config/ceph-external-access.conf"
+        sed 's/^/  /' "${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf"
         echo "---------------------------------------------"
-        ok "接入配置文件: ${REPO_ROOT}/deployments/config/ceph-external-access.conf(拷贝到目标集群 cluster.conf 设 CEPH_MODE=external 即可接入)"
+        ok "接入配置文件: ${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf(拷贝到目标集群 cluster.conf 设 CEPH_MODE=external 即可接入)"
     else
-        warn "  未找到 ${REPO_ROOT}/deployments/config/ceph-external-access.conf(确认 expose 工具已 apply 成功)"
+        warn "  未找到 ${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf(确认 expose 工具已 apply 成功)"
     fi
 fi
 

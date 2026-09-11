@@ -8,7 +8,7 @@
 #   ② 资源层: 专用外部 RBD pool + 外部 CephFS(fs + meta/data pools)+ application tag
 #   ③ 认证层: 专用用户(profile caps, 非 admin): cubestack-ext-rbd / cubestack-ext-cephfs(provisioner)
 #      + cubestack-ext-cephfs-node(node 角色, 2026-09-10 Bug A 分用户: meta+data 池 rw)
-#   ④ 导出:   ceph-external-access.conf(FSID/MONs/双用户 key/pool/fs 名, 拷贝到目标集群即可)
+#   ④ 导出:   external-ceph-self-define-access.conf(FSID/MONs/双用户 key/pool/fs 名, 拷贝到目标集群即可; 2026-09-11 由 ceph-external-access.conf 改名)
 #   ⑤ 自检:   status 5 层, 含**外部客户端协议级测试**(mon 握手 + cephx 认证 + RBD API,
 #              模拟 ceph-csi-operator 从集群外连接; 客户端=Dockerfile-cli 预装 ceph-common)
 # 实现要点:
@@ -27,7 +27,7 @@
 #   bash ceph-expose-external.sh status                                                 # 5 层自检(含外部客户端测试)
 # 数据源: cluster.conf(CEPH_* / CEPH_EXTERNAL_* / CEPH_RGW_EXPOSE_MODE / CEPHFS_ENABLED /
 #         CEPH_POOL_REPLICAS / SERVICE_EXPOSE_MODE / NODES / CEPH_HOST_NETWORK / CEPH_EXPOSE_MODE)
-# 输出:   config/ceph-external-access.conf(外部集群配置用, 见 CEPH_MODE=external)
+# 输出:   config/external-ceph-self-define-access.conf(外部集群配置用, 见 CEPH_MODE=external)
 # ============================================================
 set -euo pipefail
 
@@ -37,7 +37,7 @@ load_config
 init_remote_kubectl || { err "init_remote_kubectl 失败"; exit 1; }
 
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
-EXPORT_CONF="${CEPH_EXTERNAL_CONF:-${REPO_ROOT}/deployments/config/ceph-external-access.conf}"
+EXPORT_CONF="${CEPH_EXTERNAL_CONF:-${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf}"
 ROOK_DIR="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}"
 # ---- 外部专用资源/用户(2026-09-07 完整预定义; 对齐"外部 ceph-csi-operator 连接所需全部信息") ----
 EXT_USER="${CEPH_EXTERNAL_USER:-cubestack-ext-rbd}"                 # 外部 RBD 专用用户
