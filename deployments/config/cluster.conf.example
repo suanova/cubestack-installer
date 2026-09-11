@@ -91,7 +91,10 @@ PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-false}"       # Prometheus+Operator �
 # 离线镜像: 联网机 tools/images/prometheus-save-images.sh 下载 tar → 08_prometheus 模块推送进内置 registry
 PROMETHEUS_NAMESPACE="${PROMETHEUS_NAMESPACE:-monitoring}"        # 监控命名空间
 PROMETHEUS_RETENTION_DAYS="${PROMETHEUS_RETENTION_DAYS:-15d}"     # Prometheus 数据保留时长
-PROMETHEUS_STORAGE_SIZE="${PROMETHEUS_STORAGE_SIZE:-50Gi}"        # Prometheus PVC 容量(不指定 SC, 用系统默认 StorageClass)
+PROMETHEUS_STORAGE_SIZE="${PROMETHEUS_STORAGE_SIZE:-50Gi}"
+# Prometheus/Grafana 对外暴露(与 RGW 同款): nodeport(默认, 随 SERVICE_EXPOSE_MODE) / loadbalancer(需 MetalLB) / clusterip
+PROMETHEUS_EXPOSE_MODE="${PROMETHEUS_EXPOSE_MODE:-}"
+PROMETHEUS_NODEPORT_BASE="${PROMETHEUS_NODEPORT_BASE:-31000}"   # NodePort 基址: Prometheus=base, Grafana=base+1        # Prometheus PVC 容量(不指定 SC, 用系统默认 StorageClass)
 PROMETHEUS_APP_VERSION="${PROMETHEUS_APP_VERSION:-v0.93.1}"       # operator/config-reloader/admission-webhook 镜像 tag
 PROMETHEUS_IMAGE_PROMETHEUS="${PROMETHEUS_IMAGE_PROMETHEUS:-v3.14.0-distroless}"
 PROMETHEUS_IMAGE_ALERTMANAGER="${PROMETHEUS_IMAGE_ALERTMANAGER:-v0.34.0}"
