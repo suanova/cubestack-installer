@@ -57,9 +57,11 @@ FILES=(
     deployments/scripts/modules/03_addon/04_local_path.sh
     deployments/scripts/modules/03_addon/05_k8s_registry.sh
     deployments/scripts/modules/03_addon/06_gpu_operator.sh
+    deployments/scripts/modules/03_addon/08_prometheus.sh
     deployments/scripts/modules/03_addon/15_ceph_backup.sh
     deployments/scripts/modules/03_addon/27_verify_ceph.sh
     deployments/scripts/tools/images/ceph-save-images.sh
+    deployments/scripts/tools/images/prometheus-save-images.sh
     deployments/scripts/tools/images/ceph-sync-images.sh
     deployments/scripts/tools/k8s/ceph-backup.sh
     deployments/scripts/tools/k8s/ceph-detect-disks.sh
