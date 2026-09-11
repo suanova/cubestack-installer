@@ -237,7 +237,8 @@ echo "  namespace:    ${PROMETHEUS_NAMESPACE}"
 echo "  retention:    ${PROMETHEUS_RETENTION_DAYS}   Prometheus PVC: ${PROMETHEUS_STORAGE_SIZE}(默认 StorageClass)"
 echo "  查询:         kubectl -n ${PROMETHEUS_NAMESPACE} get pods,svc"
 if [ "${PROMETHEUS_EXPOSE_MODE}" = "nodeport" ]; then
-    echo "  访问(NodePort): Prometheus http://<节点IP>:${PROMETHEUS_NODEPORT_BASE:-31000}  Grafana http://<节点IP>:$((PROMETHEUS_NODEPORT_BASE:-31000 + 1))"
+    _prom_np="${PROMETHEUS_NODEPORT_BASE:-31000}"
+    echo "  访问(NodePort): Prometheus http://<节点IP>:${_prom_np}  Grafana http://<节点IP>:$((_prom_np + 1))"
 elif [ "${PROMETHEUS_EXPOSE_MODE}" = "loadbalancer" ]; then
     echo "  访问(LoadBalancer): 见 kubectl -n monitoring get svc ${PROMETHEUS_RELEASE_NAME}-prometheus / -grafana EXTERNAL-IP"
 else
