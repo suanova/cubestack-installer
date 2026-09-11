@@ -95,8 +95,8 @@ PROMETHEUS_STORAGE_SIZE="${PROMETHEUS_STORAGE_SIZE:-50Gi}"        # Prometheus P
 PROMETHEUS_APP_VERSION="${PROMETHEUS_APP_VERSION:-v0.93.1}"       # operator/config-reloader/admission-webhook 镜像 tag
 PROMETHEUS_IMAGE_PROMETHEUS="${PROMETHEUS_IMAGE_PROMETHEUS:-v3.14.0-distroless}"
 PROMETHEUS_IMAGE_ALERTMANAGER="${PROMETHEUS_IMAGE_ALERTMANAGER:-v0.34.0}"
-PROMETHEUS_IMAGE_NODE_EXPORTER="${PROMETHEUS_IMAGE_NODE_EXPORTER:-1.12.1}"
-PROMETHEUS_IMAGE_KSM="${PROMETHEUS_IMAGE_KSM:-2.20.0}"            # kube-state-metrics
+PROMETHEUS_IMAGE_NODE_EXPORTER="${PROMETHEUS_IMAGE_NODE_EXPORTER:-v1.12.1}"   # ⚠ 带 v 前缀(registry 实际 tag)
+PROMETHEUS_IMAGE_KSM="${PROMETHEUS_IMAGE_KSM:-v2.20.0}"            # kube-state-metrics; ⚠ 带 v 前缀(registry 实际 tag)
 PROMETHEUS_IMAGE_GRAFANA="${PROMETHEUS_IMAGE_GRAFANA:-13.2.1-distroless}"
 PROMETHEUS_IMAGE_SIDECAR="${PROMETHEUS_IMAGE_SIDECAR:-2.11.2}"    # grafana k8s-sidecar
 PROMETHEUS_IMAGE_CERTGEN="${PROMETHEUS_IMAGE_CERTGEN:-1.8.8}"     # webhook 证书生成 Job
@@ -191,7 +191,7 @@ CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-true}"     # 可选: 启用 RGW/S3 对象�
 #        metallb → LoadBalancer VIP, 端口回退 Ceph 原生 6789/80(不套规律)
 #   ② 资源层: 外部专用 RBD pool + 外部 CephFS(fs + meta/data pools, CEPHFS_ENABLED=true 时)
 #   ③ 认证层: 外部专用用户(profile rbd caps, 非 admin)
-#   ④ 导出: config/ceph-external-access.conf(FSID/MONs/RBD+CephFS 全部连接信息)——
+#   ④ 导出: config/external-ceph-self-define-access.conf(FSID/MONs/RBD+CephFS 全部连接信息; 2026-09-11 由 ceph-external-access.conf 改名)——
 #      拷贝到目标集群 cluster.conf 即可接入
 # 自检: --steps verify_ceph ⑨ 或 tools/k8s/ceph-expose-external.sh status(5 层, 含外部客户端协议级测试)。
 # ⚠ 下面 (CEPH_EXTERNAL_* / CEPH_MON_NODEPORT_* / CEPH_RGW_*) 全部只属于 internal 模式的"对外暴露"——
@@ -218,7 +218,7 @@ CEPH_EXTERNAL_CEPHFS_DATA_POOL="${CEPH_EXTERNAL_CEPHFS_DATA_POOL:-cubestack-ext-
                                                  #   所有对外接口(caps/conf 导出/官方 env)自动用实际名
 CEPH_EXTERNAL_CEPHFS_META_PG="${CEPH_EXTERNAL_CEPHFS_META_PG:-16}"   # meta pool PG 数
 CEPH_EXTERNAL_CEPHFS_DATA_PG="${CEPH_EXTERNAL_CEPHFS_DATA_PG:-32}"   # data pool PG 数
-CEPH_EXTERNAL_CONF="${CEPH_EXTERNAL_CONF:-}"                  # 导出文件路径(空=config/ceph-external-access.conf)
+CEPH_EXTERNAL_CONF="${CEPH_EXTERNAL_CONF:-}"                  # 导出文件路径(空=config/external-ceph-self-define-access.conf)
 # RGW 独立覆盖(仅影响 RGW, mon 仍随主模式; 大小写不敏感):
 #   nodeport/loadbalancer/metallb/clusterip; clusterip=不对外暴露 RGW
 CEPH_RGW_EXPOSE_MODE="${CEPH_RGW_EXPOSE_MODE:-}"
@@ -250,8 +250,10 @@ CEPH_EXTERNAL_ENV_FILE="${CEPH_EXTERNAL_ENV_FILE:-}"  # ★ external 官方导�
                                                  #   → 官方 SC 集合(ceph-rbd/cephfs/ceph-block) → 自动接外部 RGW(env 带 RGW_* 时)。
                                                  #   留空 = 自动探测默认目录 deployments/config/external-ceph.env
                                                  #   (文件存在即走官方路径; 不存在 → 02 模块倒计时警告 + 回退手填路径)。
-CEPH_ENV_CONFIRM_SLEEP="${CEPH_ENV_CONFIRM_SLEEP:-60}"  # external: 未检测到 external-ceph.env 时的
-                                                 #   倒计时警告秒数(默认 60; CI 设 0 跳过等待)
+CEPH_ENV_CONFIRM_SLEEP="${CEPH_ENV_CONFIRM_SLEEP:-60}"  # external: 部署开始前(deploy-cluster.sh 红底核对
+                                                 #   外部连接参数)与 02_ceph 模块的 external-ceph.env
+                                                 #   检测倒计时秒数(默认 60; 未配置 monitors 会红底告警;
+                                                 #   CI 设 0 跳过等待)。internal 模式请用 CEPH_CONFIRM_SLEEP。
 CEPH_MONITORS="${CEPH_MONITORS:-}"               # external: 外部 Ceph monitors, 如 "10.66.1.21:6789,10.66.1.22:6789"; 留空=不启用外部 Ceph
 CEPH_POOL="${CEPH_POOL:-rbd}"                    # external: 外部 Ceph 使用的 RBD pool 名(外部集群已有)
 CEPH_USER="${CEPH_USER:-admin}"                  # external: 外部 Ceph 认证用户(默认 admin)
@@ -265,7 +267,7 @@ CEPH_DASHBOARD_ENABLED="${CEPH_DASHBOARD_ENABLED:-true}"  # Ceph Dashboard
 
 # ════════════════════════════════════════════════════════════════════════
 # 【示例】接入外部 Ceph 集群(CEPH_MODE=external) —— 连接配置写法参考
-# 下面是一套【真实测试环境】的 ceph-external-access.conf 内容(由暴露方集群的
+# 下面是一套【真实测试环境】的 external-ceph-self-define-access.conf 内容(由暴露方集群的
 # ceph-expose-external.sh 生成后粘贴/拷贝到本集群 cluster.conf)。
 # ⚠ 本块全部为注释模板, **不会生效** —— 防止与上方真实变量冲突
 #   (历史事故: 示例块曾是活配置, source 后 CEPH_MODE="external" 覆盖上方唯一开关行,

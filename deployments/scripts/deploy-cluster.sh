@@ -332,14 +332,56 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         unset _CN
     fi
     # ★ CEPH_MODE=external(由 load_config 归一化): 接入外部已有 Ceph, 不涉及本地裸盘/
-    #   覆盖确认 —— 跳过存储节点/裸盘检测、倒计时、已有 CephCluster 清理, 仅提示外部连接。
+    #   覆盖确认 —— 跳过存储节点/裸盘检测、已有 CephCluster 清理, 仅提示外部连接。
+    # ★ 2026-09-11(用户要求): external 模式部署前**倒计时确认**(与 internal 裸盘确认对称)——
+    #   在 K8s 集群部署**开始前**检查 external-ceph.env / CEPH_MONITORS 并供人工核对;
+    #   02_ceph 模块内的倒计时在 k8s_deploy 之后(太晚), 未配置时等整个集群装完才发现
+    #   ceph_csi 报错, 浪费整轮部署。此处未配置 → 红底强调"将报错", 供用户 Ctrl-C 修正。
     if [ "${CEPH_MODE:-internal}" = "external" ]; then
+        _EXT_ENV_FILE="${CEPH_EXTERNAL_ENV_FILE:-${REPO_ROOT}/deployments/config/external-ceph.env}"
+        _EXT_MONS="${CEPH_MONITORS:-}"
+        _EXT_USER="${CEPH_USER:-admin}"
         echo -e "\033[41m\033[97m================================================================================\033[0m"
         echo -e "\033[41m\033[97m ⚠⚠⚠  CEPH_MODE=external — 接入外部已有 Ceph 集群(不创建集群内 CephCluster) ⚠⚠⚠\033[0m"
-        echo -e "\033[41m\033[97m   monitors: ${CEPH_MONITORS:-<未配置, ceph_csi 模块将报错>}\033[0m"
-        echo -e "\033[41m\033[97m   pool: ${CEPH_POOL:-rbd}   user: ${CEPH_USER:-admin}\033[0m"
-        echo -e "\033[41m\033[97m   不执行裸盘检测/覆盖确认; 由 ceph_csi 模块经 CephConnection 连外部集群  \033[0m"
+        if [ -f "${_EXT_ENV_FILE}" ]; then
+            # 官方导入路径文件已就绪 → 展示其真实连接参数(mon 端点/用户名, 供人工核对)
+            _EXT_ENV_MONS="$( (source "${_EXT_ENV_FILE}" 2>/dev/null && printf '%s' "${ROOK_EXTERNAL_CEPH_MON_DATA:-}") )"
+            _EXT_ENV_USER="$( (source "${_EXT_ENV_FILE}" 2>/dev/null && printf '%s' "${ROOK_EXTERNAL_USERNAME:-}") )"
+            [ -n "${_EXT_MONS}" ] || _EXT_MONS="${_EXT_ENV_MONS}"
+            [ -n "${_EXT_ENV_USER}" ] && _EXT_USER="${_EXT_ENV_USER}"
+            echo -e "\033[41m\033[97m   ✅ 官方 external-ceph.env 已就绪: ${_EXT_ENV_FILE}\033[0m"
+        else
+            echo -e "\033[41m\033[97m   ⚠ 未检测到 external-ceph.env(默认路径: ${_EXT_ENV_FILE})\033[0m"
+        fi
+        echo -e "\033[41m\033[97m   monitors: ${_EXT_MONS:-<未配置, ceph_csi 模块将报错>}\033[0m"
+        echo -e "\033[41m\033[97m   pool: ${CEPH_POOL:-rbd}   user: ${_EXT_USER:-admin}\033[0m"
+        if [ -f "${_EXT_ENV_FILE}" ]; then
+            echo -e "\033[41m\033[97m   ceph_csi 将走官方导入路径读取 env 文件(优先于手填 CEPH_MONITORS); 不执行裸盘检测/覆盖确认\033[0m"
+        else
+            echo -e "\033[41m\033[97m   未放文件时请 cluster.conf 设 CEPH_MONITORS/CEPH_KEYRING(手填路径可用, 但无健康上报)      \033[0m"
+            echo -e "\033[41m\033[97m   不执行裸盘检测/覆盖确认; 由 ceph_csi 模块经 CephConnection 连外部集群  \033[0m"
+        fi
         echo -e "\033[41m\033[97m================================================================================\033[0m"
+        # ★ 倒计时确认(与 internal 裸盘确认对称): 部署前供人工核对外部连接参数;
+        #   CEPH_ENV_CONFIRM_SLEEP(默认 60s, 设 0 跳过)。monitors 未配置 → 红底强调"将失败"。
+        _env_cs="${CEPH_ENV_CONFIRM_SLEEP:-60}"
+        if [ -z "${_EXT_MONS}" ]; then
+            say "⚠ external-ceph.env / CEPH_MONITORS 未配置 → ceph_csi 模块将报错; 建议 Ctrl-C 修正连接配置后重跑(或等待倒计时继续)"
+        else
+            say "Ceph(external)已启用: sleep ${_env_cs}s 供核对上方外部连接参数(CEPH_ENV_CONFIRM_SLEEP=0 可跳过)..."
+        fi
+        if [ "${_env_cs}" -gt 0 ] 2>/dev/null; then
+            for _c in $(seq "${_env_cs}" -1 1); do
+                printf "\r%s" "$(printf '\033[41m\033[97m  ⏳ 倒计时 %d 秒继续(请核对上方外部 Ceph 连接参数, 有误 Ctrl-C)      \033[0m' "${_c}")"
+                sleep 1
+            done
+            printf "\r%s\n" "$(printf '\033[0m  %s             ')"
+        else
+            say "CEPH_ENV_CONFIRM_SLEEP=0, 跳过等待(请务必已人工核对上方外部连接参数)"
+        fi
+        unset _c _env_cs
+        export CEPH_EXT_ENV_CONFIRMED=1   # 02_ceph 模块识别"deploy-cluster 已确认过" → 跳过其重复倒计时
+        unset _EXT_ENV_FILE _EXT_MONS _EXT_USER _EXT_ENV_MONS _EXT_ENV_USER
     elif [ "${_CEPH_SKIP_SMALL:-0}" = "1" ]; then
         :   # 存储节点数 < CEPH_MIN_NODES: 上方已打印跳过横幅, 不弹确认/不做已有集群清理
     else
@@ -562,14 +604,17 @@ echo "  下一步: 扩容用 --with-scale; 立即部署单个用 --steps gpu_ope
 
 # ★ 外部 Ceph 接入信息(用户要求: 放安装末尾总结; 仅集群内 Ceph 且本次执行过暴露时提示)
 #   03_ceph_csi 已打印/导出, 此处收敛到"文件路径 + 单行入口", 不再重复打印含 key 的全文。
-if [ "${CEPH_ENABLED:-false}" = "true" ] && [ -f "${REPO_ROOT}/deployments/config/ceph-external-access.conf" ]; then
+#   ⚠ 2026-09-11(用户要求): CEPH_MODE=external 时是**消费方**, 不导出自身接入配置 ——
+#   跳过整段(否则会误导打印"已导出 external-ceph.env"; 该文件是提供方拷来的真实文件,
+#   导出/覆盖会毁掉官方导入路径的输入)。
+if [ "${CEPH_MODE:-internal}" != "external" ] && [ "${CEPH_ENABLED:-false}" = "true" ] && [ -f "${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf" ]; then
     echo -e "${_C_BOLD}${_C_GREEN}★ 外部 ceph-csi operator 接入信息(完整配置在文件里):${_C_OFF}"
-    echo "  配置路径: ${REPO_ROOT}/deployments/config/ceph-external-access.conf"
+    echo "  配置路径: ${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf"
     echo "              拷贝到目标集群 cluster.conf 设 CEPH_MODE=external 即可接入;"
     echo "              含 CEPH_MONITORS / CEPH_FSID / RBD(user+key+pool) / CephFS(user+key+fs) / RGW 端点"
     echo "              入口(模式=${SERVICE_EXPOSE_MODE:-nodeport}: nodeport→IP+规律NodePort / metallb→VIP+Ceph原生端口6789):"
-    echo "              $(grep '^CEPH_MONITORS=' "${REPO_ROOT}/deployments/config/ceph-external-access.conf" 2>/dev/null | cut -d= -f2- | tr -d '\"')"
-    echo "  一键查看: cat ${REPO_ROOT}/deployments/config/ceph-external-access.conf"
+    echo "              $(grep '^CEPH_MONITORS=' "${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf" 2>/dev/null | cut -d= -f2- | tr -d '\"')"
+    echo "  一键查看: cat ${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf"
     echo "  5 层自检(含外部客户端协议级测试): bash ${SCRIPT_DIR}/tools/k8s/ceph-expose-external.sh status"
     # ★ 官方导入路径(2026-09-10): env 文件导出成功时提示 —— 目标集群设 CEPH_EXTERNAL_ENV_FILE
     #   即走官方导入(health-check/STATE=Connected + 自动 RGW/S3 对象存储), 见 docs §3.4.2 路径一。

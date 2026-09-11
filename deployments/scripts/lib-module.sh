@@ -450,11 +450,17 @@ print_plan() {
         node_parse "${line}"
         echo "    [${NODE_ROLE}] ${NODE_HOSTNAME}  ${NODE_IP}  (user=${NODE_USER})"
     done
-    # Ceph 启用提示(精简一行; 部署开始前由 deploy-cluster.sh 红底列出 节点+裸盘 并倒计时确认,
-    # 避免两处重复 —— 此处仅供 --list 只读场景知悉 ceph 将启用, 不执行检测/倒计时)
-    if [ "${CEPH_ENABLED:-false}" = "true" ]; then
-        echo "  ⚠ CEPH_ENABLED=true → Ceph(ceph/ceph_csi)将启用; 部署开始前会红底列出存储节点+裸盘并倒计时"
-        echo "    ${CEPH_CONFIRM_SLEEP:-60}s 确认(防覆盖系统盘/在用盘; --list 仅提示, 部署时才有倒计时确认)"
+    # Ceph 启用提示(精简一行; 部署开始前由 deploy-cluster.sh 红底列出 节点+裸盘(internal)
+    # 或外部连接参数(external)并倒计时确认, 避免两处重复 —— 此处仅供 --list 只读场景知悉
+    # ceph 将启用, 不执行检测/倒计时)
+    if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
+        if [ "${CEPH_MODE:-internal}" = "external" ]; then
+            echo "  ⚠ Ceph 启用(CEPH_MODE=external 接入外部 Ceph); 部署开始前会红底列出外部连接参数并倒计时"
+            echo "    ${CEPH_ENV_CONFIRM_SLEEP:-60}s 确认(核对 external-ceph.env / CEPH_MONITORS; --list 仅提示, 部署时才有倒计时)"
+        else
+            echo "  ⚠ CEPH_ENABLED=true → Ceph(ceph/ceph_csi)将启用; 部署开始前会红底列出存储节点+裸盘并倒计时"
+            echo "    ${CEPH_CONFIRM_SLEEP:-60}s 确认(防覆盖系统盘/在用盘; --list 仅提示, 部署时才有倒计时确认)"
+        fi
     fi
     echo "---------------------------------------------"
 }

@@ -121,15 +121,19 @@ if [ "${CEPH_MODE:-internal}" = "external" ]; then
         warn "  ⚠ 未检测到 external-ceph.env(默认路径: ${_EXT_ENV_FILE})"
         warn "    请先把提供方导出的 external-ceph.env 放到该路径(A 侧部署完自动导出; 或手工拷贝)"
         warn "    没有该文件, ceph_csi 外部接入可能部署失败(官方导入路径硬依赖; 手填 CEPH_MONITORS 等仍可用但无健康上报)"
-        _ENV_SLEEP="${CEPH_ENV_CONFIRM_SLEEP:-60}"
-        if [ "${_ENV_SLEEP}" -gt 0 ] 2>/dev/null; then
-            for _eci in $(seq "${_ENV_SLEEP}" -1 1); do
-                printf '\r\033[31m  %3ds 后继续(放入文件后按 Ctrl-C 重启, 或等待倒计时结束)...\033[0m' "${_eci}"
-                sleep 1
-            done
-            echo ""
+        # ★ 2026-09-11: deploy-cluster.sh 部署开始前已倒计时确认过(CEPH_EXT_ENV_CONFIRMED=1)时
+        #   不重复倒计时(仅保留告警), 避免整轮部署中 60s 等待出现两次; 单独 --steps ceph 仍会提示。
+        if [ "${CEPH_EXT_ENV_CONFIRMED:-0}" != "1" ]; then
+            _ENV_SLEEP="${CEPH_ENV_CONFIRM_SLEEP:-60}"
+            if [ "${_ENV_SLEEP}" -gt 0 ] 2>/dev/null; then
+                for _eci in $(seq "${_ENV_SLEEP}" -1 1); do
+                    printf '\r\033[31m  %3ds 后继续(放入文件后按 Ctrl-C 重启, 或等待倒计时结束)...\033[0m' "${_eci}"
+                    sleep 1
+                done
+                echo ""
+            fi
+            unset _eci
         fi
-        unset _eci
     fi
     unset _EXT_ENV_FILE _ENV_SLEEP
 elif [ "${#CEPH_NODE_HOSTS[@]}" -lt "${CEPH_MIN_NODES}" ]; then
