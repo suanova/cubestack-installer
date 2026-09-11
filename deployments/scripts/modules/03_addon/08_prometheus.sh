@@ -53,7 +53,9 @@ PROMETHEUS_IMAGE_GRAFANA="${PROMETHEUS_IMAGE_GRAFANA:-13.2.1-distroless}"
 PROMETHEUS_IMAGE_SIDECAR="${PROMETHEUS_IMAGE_SIDECAR:-2.11.2}"
 PROMETHEUS_IMAGE_CERTGEN="${PROMETHEUS_IMAGE_CERTGEN:-1.8.8}"
 CHART_DIR="${REPO_ROOT}/deployments/cubestack-addon/observability/prometheus/kube-prometheus-stack"
-SAVE_DIR="${PROMETHEUS_SAVE_DIR:-${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files}/prometheus}"
+# ★ 2026-09-11: prometheus 镜像目录默认 `offline-files/prometheus`(save 脚本默认, 与 envoy/lws 同构)。
+#   早期错误套过 ${OFFLINE_FILES_DIR}(→.../kubespray)致找不到; 已修回独立目录。
+SAVE_DIR="${PROMETHEUS_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/prometheus}"
 REG_BASE="${REGISTRY_BASE:-registry.cubestack.io:5000}"      # helm --set 用的集群内解析域(节点 containerd hosts.toml 已改写)
 REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-31148}}"  # skopeo 直连推送地址(免域名解析)
 
@@ -79,7 +81,10 @@ _push_skopeo() {
 say "[1/4] 校验离线资源(chart + 镜像 tar)..."
 [ -f "${CHART_DIR}/Chart.yaml" ] || { err "chart 缺失: ${CHART_DIR}(联网机执行 tools/images/prometheus-fetch-charts.sh 下载)"; exit 1; }
 [ -d "${SAVE_DIR}" ] || { err "离线镜像目录缺失: ${SAVE_DIR}(联网机执行 tools/images/prometheus-save-images.sh 下载)"; exit 1; }
-# 镜像表: 原仓库路径(去注册域, 与 chart 默认 repository 一致)→ 版本变量
+# ⚠ 2026-09-11 修复: tar 文件名与 IMG_REPO key 的映射必须**去注册域**(save 脚本用完整 ref
+#   的 repository 部分做文件名: 如 registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0
+#   → registry.k8s.io_kube-state-metrics_kube-state-metrics_v2.20.0.tar)。
+#   IMG_REPO 里 key 一律用 <repo>(去注册域), 版本值与 save 脚本 tag 一致(含 v 前缀)。
 declare -A IMG_REPO=(
     [prometheus-operator/prometheus-operator]="${PROMETHEUS_APP_VERSION}"
     [prometheus-operator/prometheus-config-reloader]="${PROMETHEUS_APP_VERSION}"
@@ -93,9 +98,17 @@ declare -A IMG_REPO=(
     [kiwigrid/k8s-sidecar]="${PROMETHEUS_IMAGE_SIDECAR}"
 )
 _MISSING=""
+# halves: 用 ls 通配末段匹配(注册域前缀不定),直接对目录校验
+echo "  ✓ 离线镜像目录: ${SAVE_DIR}"
 for _repo in "${!IMG_REPO[@]}"; do
-    _tar="${SAVE_DIR}/$(echo "${_repo}" | sed 's#/#_#g')_${IMG_REPO[${_repo}]}.tar"
-    [ -f "${_tar}" ] || _MISSING="${_MISSING} ${_repo}:${IMG_REPO[${_repo}]}"
+    _tag="${IMG_REPO[${_repo}]}"
+    _pat="$(echo "${_repo}" | sed 's#/#_#g')_${_tag}.tar"
+    # 文件名必须整体结束于 <repo>_<tag>.tar(如 registry.k8s.io_kube-state-metrics_kube-state-metrics_v2.20.0.tar)
+    if ls "${SAVE_DIR}"/*"${_pat}" >/dev/null 2>&1; then
+        :   # 命中
+    else
+        _MISSING="${_MISSING} ${_repo}:${_tag}"
+    fi
 done
 if [ -n "${_MISSING}" ]; then
     err "离线镜像 tar 缺失:${_MISSING}"
@@ -108,7 +121,10 @@ ok "chart + ${#IMG_REPO[@]} 个镜像 tar 就绪(目录: ${SAVE_DIR})"
 say "[2/4] 推送镜像到内置 registry(${REG_DIRECT})..."
 for _repo in "${!IMG_REPO[@]}"; do
     _tag="${IMG_REPO[${_repo}]}"
-    _tar="${SAVE_DIR}/$(echo "${_repo}" | sed 's#/#_#g')_${_tag}.tar"
+    _pat="$(echo "${_repo}" | sed 's#/#_#g')_${_tag}.tar"
+    # 目录里唯一以 _pat 结尾的 tar(注册域前缀不定, 取实际存在的那个)
+    _tar="$(ls "${SAVE_DIR}"/*"${_pat}" 2>/dev/null | head -1)"
+    [ -n "${_tar}" ] || { err "  tar 缺失: ${_repo}:${_tag}(校验应已拦截)"; exit 1; }
     _push_skopeo "docker-archive:${_tar}" "docker://${REG_DIRECT}/${_repo}:${_tag}" \
         && ok "  ${_repo}:${_tag} 已推送" \
         || { err "  ${_repo}:${_tag} 推送失败(重试 3 次)"; exit 1; }
@@ -130,6 +146,7 @@ helm upgrade --install "${PROMETHEUS_RELEASE_NAME}" "${CHART_DIR}" \
     --set "kube-state-metrics.image.registry=${REG_BASE}" --set "kube-state-metrics.image.tag=${PROMETHEUS_IMAGE_KSM}" \
     --set "kube-state-metrics.kubeRBACProxy.enabled=false" \
     --set "prometheus-node-exporter.image.registry=${REG_BASE}" --set "prometheus-node-exporter.image.tag=${PROMETHEUS_IMAGE_NODE_EXPORTER}" \
+    --set "prometheus-node-exporter.image.distroless=false" \
     --set "grafana.image.registry=${REG_BASE}" --set "grafana.image.tag=${PROMETHEUS_IMAGE_GRAFANA}" \
     --set "grafana.sidecar.image.registry=${REG_BASE}" --set "grafana.sidecar.image.tag=${PROMETHEUS_IMAGE_SIDECAR}" \
     --set "thanosRuler.enabled=false" \
@@ -156,11 +173,75 @@ else
 fi
 unset _pending _running _PODS_READY _i
 
+# ★ 2026-09-11(用户要求): 部署流程内自动做**真实功能验证**(不只 pod Running)。
+#   取出 Prometheus pod IP, 从首个 master curl PromQL API 查询 `up == 1` + node 指标:
+#   若 operator 只把 pod 拉起来但 采集/存储/查询 链断, data.result 为空即此处失败提示;
+#   不阻断部署(组成为 Base 在继续), 只 ok/warn 供早暴露故障(同 22/27 verify 的"早暴露"意图)。
+_PROM_CR_N="${PROMETHEUS_RELEASE_NAME}-kube-prome-prometheus"
+_PROM_IP_JSON=$(SSH "${K}" -n "${PROMETHEUS_NAMESPACE}" get pod -l operator.prometheus.io/name="${_PROM_CR_N}" -o jsonpath '{.items[0].status.podIP}' 2>/dev/null || true)
+if [ -n "${_PROM_IP_JSON}" ]; then
+    say "  数据链自检: curl ${_PROM_IP_JSON}:9090 PromQL up ..."
+    # ★ 2026-09-11 修复: curl 必须在首个 master 节点上执行(部署机/容器 bridge 网络
+    #   到不了集群 overlay 的 10.233.x pod IP, 本地 curl 返回空 → 误报"无结果")
+    _PROM_UP=$(SSH "curl -s --max-time 15 'http://${_PROM_IP_JSON}:9090/api/v1/query?query=up'" 2>/dev/null || true)
+    _PROM_N=$(printf '%s\n' "${_PROM_UP}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('data',{}).get('result',[])))" 2>/dev/null || echo 0)
+    if [ "${_PROM_N:-0}" -gt 0 ] 2>/dev/null; then
+        ok "  Prometheus 数据链自检通过: up 查询 → ${_PROM_N} 个采集目标"
+    else
+        warn "  Prometheus 数据链自检: up 查询暂无结果(非必现, 稍后 kubectl -n ${PROMETHEUS_NAMESPACE} get servicemonitor 复核)"
+    fi
+    unset _PROM_UP _PROM_N
+else
+    warn "  取不到 Prometheus pod IP, 跳过数据链自检"
+fi
+unset _PROM_CR_N _PROM_IP_JSON
+
+# ── 5. Prometheus/Grafana 对外暴露(nodeport / loadbalancer 两种模式, 与 RGW 同款配置) ──
+# PROMETHEUS_EXPOSE_MODE: nodeport(默认, 随 SERVICE_EXPOSE_MODE) / loadbalancer / clusterip
+#   nodeport     → prometheus 9090 + grafana 3000 各建 NodePort Service(独立, 防 helm 覆盖)
+#   loadbalancer → 改 LoadBalancer(需 MetalLB 已部署); 否则 warn 保持 ClusterIP
+#   clusterip    → 保持默认仅集群内
+say "配置 Prometheus/Grafana 对外暴露(PROMETHEUS_EXPOSE_MODE=${PROMETHEUS_EXPOSE_MODE:-<随 SERVICE_EXPOSE_MODE>})..."
+PROMETHEUS_EXPOSE_MODE="${PROMETHEUS_EXPOSE_MODE:-${SERVICE_EXPOSE_MODE:-clusterip}}"
+PROMETHEUS_EXPOSE_MODE="$(echo "${PROMETHEUS_EXPOSE_MODE}" | tr '[:upper:]' '[:lower:]')"
+_PROM_APPS=(prometheus grafana)
+_PROM_NP_BASE="${PROMETHEUS_NODEPORT_BASE:-31000}"   # prometheus=31000, grafana=31001
+for _idx in "${!_PROM_APPS[@]}"; do
+    _app="${_PROM_APPS[$_idx]}"
+    _svc="${PROMETHEUS_RELEASE_NAME}-${_app}"
+    _port="$((_PROM_NP_BASE + _idx))"
+    case "${PROMETHEUS_EXPOSE_MODE}" in
+        nodeport)
+            say "  ${_app}: NodePort ${_port}(独立 Service ${_svc}-external)..."
+            SSH "${K} -n ${PROMETHEUS_NAMESPACE} delete svc ${_svc}-external --ignore-not-found >/dev/null 2>&1" || true
+            SSH "${K} -n ${PROMETHEUS_NAMESPACE} create service nodeport ${_svc}-external --tcp=${_port}:${_port} >/dev/null 2>&1" || true
+            SSH "${K} -n ${PROMETHEUS_NAMESPACE} patch svc ${_svc}-external --type merge \
+                -p '{"spec":{"selector":{"app.kubernetes.io/name":"'${_app}'","app.kubernetes.io/instance":"'${PROMETHEUS_RELEASE_NAME}'"}}}' >/dev/null 2>&1" || true
+            ;;
+        loadbalancer)
+            if [ -n "$( (SSH "${K} get ns metallb-system --no-headers 2>/dev/null" || true) )" ]; then
+                say "  ${_app}: LoadBalancer(需 MetalLB)..."
+                SSH "${K} -n ${PROMETHEUS_NAMESPACE} patch svc ${_svc} --type merge -p '{"spec":{"type":"LoadBalancer"}}' >/dev/null 2>&1" || true
+            else
+                warn "  MetalLB 未部署; ${_app} 保持 ClusterIP(可先 CEPH/PROMETHEUS_EXPOSE_MODE=nodeport)"
+            fi
+            ;;
+        *) say "  ${_app}: ClusterIP(仅集群内)" ;;
+    esac
+done
+unset _idx _app _svc _port
+
 echo "---------------------------------------------"
 ok "Prometheus 监控底座部署完成(kube-prometheus-stack)"
 echo "  namespace:    ${PROMETHEUS_NAMESPACE}"
 echo "  retention:    ${PROMETHEUS_RETENTION_DAYS}   Prometheus PVC: ${PROMETHEUS_STORAGE_SIZE}(默认 StorageClass)"
 echo "  查询:         kubectl -n ${PROMETHEUS_NAMESPACE} get pods,svc"
-echo "  Prometheus:   kubectl -n ${PROMETHEUS_NAMESPACE} port-forward svc/${PROMETHEUS_RELEASE_NAME}-prometheus 9090"
-echo "  Grafana:      kubectl -n ${PROMETHEUS_NAMESPACE} port-forward svc/${PROMETHEUS_RELEASE_NAME}-grafana 3000"
+if [ "${PROMETHEUS_EXPOSE_MODE}" = "nodeport" ]; then
+    echo "  访问(NodePort): Prometheus http://<节点IP>:${PROMETHEUS_NODEPORT_BASE:-31000}  Grafana http://<节点IP>:$((PROMETHEUS_NODEPORT_BASE:-31000 + 1))"
+elif [ "${PROMETHEUS_EXPOSE_MODE}" = "loadbalancer" ]; then
+    echo "  访问(LoadBalancer): 见 kubectl -n monitoring get svc ${PROMETHEUS_RELEASE_NAME}-prometheus / -grafana EXTERNAL-IP"
+else
+    echo "  Prometheus:   kubectl -n ${PROMETHEUS_NAMESPACE} port-forward svc/${PROMETHEUS_RELEASE_NAME}-prometheus 9090"
+    echo "  Grafana:      kubectl -n ${PROMETHEUS_NAMESPACE} port-forward svc/${PROMETHEUS_RELEASE_NAME}-grafana 3000"
+fi
 echo "  卸载:         helm uninstall ${PROMETHEUS_RELEASE_NAME} -n ${PROMETHEUS_NAMESPACE}"
