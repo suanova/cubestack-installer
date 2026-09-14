@@ -115,7 +115,20 @@ KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # 统一认证(P2; 见 4
 KUEUE_ENABLED="${KUEUE_ENABLED:-false}"                 # 队列治理(P2; 见 4.4)
 KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # 虚拟机能力(P2; 见 4.4)
 LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(P3; 见 4.5)
+MULTUS_ENABLED="${MULTUS_ENABLED:-false}"               # Multus CNI 容器多网卡(附加接口经 NAD CRD 定义; 见 4.7)
 CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # CubeStack 自研组件(占位; 见 4.6)
+# ---- 4.7 Multus CNI(容器多网卡; 详见 deployments/cubestack-addon/multus/CUBESTACK.md) ----
+# 离线镜像: 联网机 docker save ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
+#   → deployments/offline-files/multus/multus-cni.tar → 16_multus 模块推送进内置 registry
+MULTUS_SAVE_DIR="${MULTUS_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/multus}"
+MULTUS_IMAGE_TAG="${MULTUS_IMAGE_TAG:-snapshot-thick}"   # 镜像 tag(与离线 tar / vendored manifest 一致)
+# 示例 macvlan 网络(模块自动创建的 NetworkAttachmentDefinition 参数; 仿官方 quickstart)
+MULTUS_MASTER_IFACE="${MULTUS_MASTER_IFACE:-eth0}"       # master 参数=宿主机网卡名(需与集群节点实际网卡一致)
+MULTUS_SUBNET="${MULTUS_SUBNET:-192.168.99.0/24}"
+MULTUS_RANGE_START="${MULTUS_RANGE_START:-192.168.99.200}"
+MULTUS_RANGE_END="${MULTUS_RANGE_END:-192.168.99.216}"
+MULTUS_GATEWAY="${MULTUS_GATEWAY:-192.168.99.1}"
+MULTUS_NAD_NAME="${MULTUS_NAD_NAME:-multus-nad}"         # 示例 NAD 名(pod 注解 k8s.v1.cni.cncf.io/networks 引用)
 
 # ---- 4.3b Rook/Ceph 配置(详见 docs/ceph-rook.md) ----
 # ════════════════════════════════════════════════════════════════════════
