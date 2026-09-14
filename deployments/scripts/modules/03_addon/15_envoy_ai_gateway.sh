@@ -18,11 +18,11 @@
 #       · EG 接线(本模块 [5/6] 自动完成): EG 自身 config(envoy-gateway-config CM)须声明
 #         extensionManager.hooks.xdsTranslator 回调 → AI 控制器扩展服务器(1063), EG 每次 xDS 翻译
 #         回调插入 ext_proc/header_to_metadata 过滤器。漏配 → AI 请求 404 "No matching route found"
-#         (官方最小配置见 ai-gateway 仓库 manifests/envoy-gateway-values.yaml; 模块 09 **故意不配**:
+#         (官方最小配置见 ai-gateway 仓库 manifests/envoy-gateway-values.yaml; 模块 14 **故意不配**:
 #         EG 连不上扩展服务器会 xDS 翻译失败, 独立 EG 验证模块 25 会挂, 故须等控制器就绪后本模块补上);
 #       · 用法: 用户建标准 Gateway(EG 的 eg 类)+ AIServiceBackend(LLM 上游)
 #         + AIGatewayRoute(路由到 /v1/chat/completions 等), 数据面由 EG 托管、AI 控制器注入 extProc。
-#   · **依赖 Envoy Gateway 先装**(模块 09, ENVOY_GATEWAY_ENABLED=true), 前置检查会强制确认。
+#   · **依赖 Envoy Gateway 先装**(模块 14, ENVOY_GATEWAY_ENABLED=true), 前置检查会强制确认。
 #   · Chart(两个官方 chart, **均托管在 DockerHub OCI**, 版本带 v 如 v1.1.0; 注意 ghcr 同名路径不存在会 403):
 #       ai-gateway-crds-helm   = CRD chart(所有 aigateway.envoyproxy.io CRD)
 #       ai-gateway-helm        = AI 控制器 chart(controller Deployment/Service/webhook)
@@ -271,7 +271,7 @@ sleep 5
 GC_EG="$(SSH "${K} get gatewayclass eg --no-headers 2>/dev/null" || true)"
 [ -n "${GC_EG}" ] \
     && ok "  GatewayClass eg 可用(AI Gateway 数据面复用 EG)" \
-    || warn "  未检测到 GatewayClass eg(请确认模块 09 envoy_gateway 已装)"
+    || warn "  未检测到 GatewayClass eg(请确认模块 14 envoy_gateway 已装)"
 
 # ---------------- 5. 接线: 配置 EG extensionManager → AI 控制器扩展服务器 ----------------
 say "[5/6] 配置 Envoy Gateway extensionManager(核心接线: xDS 翻译回调 AI 控制器, 插入 ext_proc 过滤器)..."
@@ -282,7 +282,7 @@ say "[5/6] 配置 Envoy Gateway extensionManager(核心接线: xDS 翻译回调 
 # AI 请求 404 "No matching route found"(历史调试曾误判为 extProc 镜像问题)。
 # 官方最小配置见 ai-gateway 仓库 manifests/envoy-gateway-values.yaml(仅 extensionManager 段 +
 # enableBackend; TLS 缺省为明文 gRPC, 无需证书)。
-# ⚠ 模块 09 **故意不声明** extensionManager(EG 控制面启动即连不上扩展服务器 → 所有 Gateway
+# ⚠ 模块 14 **故意不声明** extensionManager(EG 控制面启动即连不上扩展服务器 → 所有 Gateway
 #   xDS 翻译失败, 独立 EG 验证模块 25 会挂); 因此必须等 AI 控制器就绪后由本模块补上并重启 EG 控制面。
 # 幂等: CM 已含 extensionManager 则跳过(重跑不重复接线)。
 _EG_CM="envoy-gateway-config"
