@@ -78,6 +78,21 @@
   (`ENVOY_AI_EXAMPLE_GATEWAY*` 可改, 见 cluster.conf; 不想自动建可置 `ENVOY_AI_EXAMPLE_GATEWAY_ENABLED=false`)。
 - **扩展**: `ExtensionRef` 外部处理器(ext_proc)、Wasm、Lua; 限流/熔断/重试/超时/故障注入; TLS/mTLS/JWT/OAuth2; Prometheus metrics / OTel。
 
+### 2.1b 平台统一网关(cubestack-gateway, 单入口多服务)
+
+> 说明: 上述 `default/ai-gateway` 是 **AI Gateway 模块(16)的示例 Gateway**。平台对外服务(监控/推理/API/开发测试)建议统一走
+> **平台网关 `cubestack-gateway`**(`deployments/cubestack-addon/gateway/`), 复用同一个 `eg` GatewayClass, 架构为:
+> **单 Gateway + 单 HTTP Listener(80) + 多 hostname**, 每服务一条 HTTPRoute(服务所在命名空间, 跨 ns 绑定)。
+
+- **基座**: `deployments/cubestack-addon/gateway/base-gateway.yaml`(Namespace `cubestack-gateway-system` + Gateway `cubestack-gateway`)。
+  - 放独立基础设施命名空间(不混入 `envoy-gateway-system`/`default`), 复用 `eg` 不重复建 GatewayClass;
+  - 数据面类型用注解 `gateway.envoyproxy.io/service-type: NodePort` 声明(nodeport 模式持久化, 避免手动 patch 被控制器 reconcile 回 LoadBalancer)。
+- **路由**: `deployments/cubestack-addon/gateway/routes/<ns>.yaml`, 每条 HTTPRoute `parentRefs` 显式带
+  `namespace: cubestack-gateway-system`, `hostnames: <svc>.cubestack.io`, `backendRefs` 指向既有 ClusterIP Service。
+- **接入新服务**: 加一条 HTTPRoute 即可, 网关不动; 已有示例 monitoring(Grafana/Prometheus, 已验证)。
+- **清理**: 只撤服务删 `routes/`(保留网关); 彻底撤网删 Gateway+ns。
+- 详见 `deployments/cubestack-addon/gateway/README.md`。
+
 ### 2.2 Envoy AI Gateway(AI 专用扩展)
 
 ```

@@ -1,0 +1,49 @@
+# ============================================================
+# 平台统一网关基座(cubestack-gateway)
+# 说明: 单 Gateway + 单 HTTP Listener + 多 hostname 承载全部对外服务。
+#       新增服务只需在 routes/<ns>.yaml 加一条 HTTPRoute, 本基座不动。
+# 使用:
+#   kubectl apply -f base-gateway.yaml
+#   deployments/scripts/tools/lb/gateway-nodeport.sh cubestack-gateway
+#   然后 apply routes/ 下各服务的 HTTPRoute
+# 清理(app 层, 保留网关):
+#   kubectl delete -f routes/            # 或按需删单条 route
+# 彻底撤网(连数据面一并删):
+#   kubectl delete gateway cubestack-gateway -n cubestack-gateway-system
+#   kubectl delete ns cubestack-gateway-system
+# ============================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cubestack-gateway-system
+  labels:
+    app.kubernetes.io/component: gateway-infra
+---
+# 平台统一入口: 复用集群已有 GatewayClass eg(Envoy Gateway 控制面),
+# 不重复新建 -> 避免对同一控制器重复挂两个 class。
+# ⚠ listener 设 hostname: 平台承接多服务, 各服务由 HTTPRoute 按 hostname 区分;
+#   allowedRoutes.namespaces.from: All 允许各业务命名空间挂路由(生产可按需收窄)。
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: cubestack-gateway
+  namespace: cubestack-gateway-system
+  labels:
+    app.kubernetes.io/component: platform-gateway
+  annotations:
+    # ★ 数据面 Service 类型声明(持久, 防 EG 控制器回滚):
+    #   直接 patch 数据面 svc type 会在数秒内被控制器 reconcile 回 LoadBalancer(实测)。
+    #   在 Gateway 注解声明后, 控制器创建/管理数据面 svc 时即按此 type=NodePort。
+    #   nodePort 由 k8s 自动分配(30000-32767); 如需固定端口可跑
+    #   gateway-nodeport.sh cubestack-gateway 建 <gw>-external 固定别名(默认 30880)。
+    gateway.envoyproxy.io/service-type: "NodePort"
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      # 不设 hostname: 平台统一入口, 由各 HTTPRoute 的 hostnames 区分服务
+      allowedRoutes:
+        namespaces:
+          from: All
