@@ -46,7 +46,7 @@ NetworkAttachmentDefinition。**`macvlan/vlan/bridge` 等参考插件由 kubelet
 (默认 `kube-system/multus-nad`, master=eth0, `192.168.99.0/24`), 给 pod 挂网卡:
 
 ```bash
-kubectl get -n kube-system networkattachmentdefinitions.multus.k8s.cni.cncf.io multus-nad
+kubectl get -n kube-system network-attachment-definitions.k8s.cni.cncf.io multus-nad
 
 # pod 注解选用(默认建在 kube-system, default 下 pod 需带命名空间前缀):
 kubectl run samplepod --image=busybox --restart=Never \

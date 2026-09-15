@@ -1601,6 +1601,12 @@ cmd_install() {
         echo "download_localhost: true"
         echo "download_force_cache: true"
         echo "download_always_pull: false"
+        # ★ 2026-09-14 修复: download_localhost:true 使 download 任务的 remove 阶段
+        #   delegate 到部署机(localhost)执行 → delete 的是部署机 off线缓存
+        #   local_release_dir 下的镜像 tar; 而挂载的 preload 同步 play 重新从同一
+        #   缓存目录(download_cache_dir=LOCAL_REPO_DIR)同步 → 源已被删 → 每个全新多节点
+        #   首次部署预加载必失败。download_keep_remote_cache:true 保留缓存, preload 才有源。
+        echo "download_keep_remote_cache: true"
         echo ""
         echo "## 缓存目录"
         echo "download_cache_dir: \"${LOCAL_REPO_DIR}\""

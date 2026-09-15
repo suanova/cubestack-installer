@@ -637,6 +637,29 @@ nodeport_alloc() {
     fi
 }
 
+# ---------------- CRD Established 等待(共享, 防 apply 竞态) ----------------
+# CRD 同批 apply 后 API server 需要时间注册 group/version(Established), 期间 apply
+# 依赖该 CRD 的资源会报 "no matches for kind" / "server doesn't have a resource type"
+# (discovery 未刷新)。所有"先 apply CRD manifest、后建 CR 资源"的模块统一用本函数
+# 等待: ① CRD 对象 Established; ② discovery 已能看到该资源(plural 验证)。
+# 前置: 已调用 init_remote_kubectl(需要 SSH/K)。
+# 用法: wait_crd_established <crd名> <plural资源名> [重试次数=24(每次5s)] → 退出码 0=就绪
+wait_crd_established() {
+    local crd="$1" plural="$2" tries="${3:-24}" t ok=0
+    for t in $(seq 1 "${tries}"); do
+        # ① CRD Established(对象可见 + 条件就绪)
+        if SSH "${K} wait --for condition=Established crd/${crd} --timeout=5s >/dev/null 2>&1"; then
+            # ② discovery 可见该资源(kubectl 缓存/聚合层可能瞬时未刷新, 单独验证)
+            if SSH "${K} get ${plural} -A >/dev/null 2>&1"; then
+                ok=1; break
+            fi
+        fi
+        [ "${t}" -lt "${tries}" ] && sleep 5
+    done
+    [ "${ok}" = "1" ] || { warn "  CRD ${crd} 在 $((tries * 5))s 内未就绪(Established/discovery); 用 kubectl get crd ${crd} 复查"; return 1; }
+    return 0
+}
+
 # ---------------- 集群内置 registry 就绪等待(共享, 防 MetalLB 竞态) ----------------
 # MetalLB Layer2 VIP 出现后, speaker ARP 通告与 kube-proxy DNAT 规则需时间才生效;
 # kubespray 刚部署完时 speaker 冷启动可能被 liveness 误杀重启, registry pod 可能仍在拉镜像,

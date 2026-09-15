@@ -114,11 +114,15 @@ if [ "${REGISTRY_ON}" = "1" ]; then
         # 回退: 经节点 ctr 推送(节点已信任 registry.cubestack.io:PORT, 无需 daemon 配置; 离线可用)
         say "    未找到 skopeo, 改用节点 ctr 加载本地 tar 并 --plain-http 推送..."
         REMOTE_TAR="/tmp/busybox-${TEST_TAG}.tar"
+        # ★ 2026-09-14 防御: 部署机兼 master(自 scp)时源 tar 可能属 root(0600, 如离线下载经 sudo 生成),
+        #   ssh 以 ${SSH_USER} 读源会 EACCES → 先预检可读性给出明确指引(而非 scp 裸报错)。
+        [ -r "${TAR}" ] || { err "离线 tar 不可读(属主/权限): ${TAR}(若由 sudo 下载, 请 chmod 644 或 chown ${SSH_USER:-ubuntu})"; exit 1; }
         scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
             "${TAR}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${REMOTE_TAR}" \
             || { err "scp busybox.tar 到 ${FIRST_MASTER} 失败"; exit 1; }
         SSH "sudo ctr -n k8s.io images import ${REMOTE_TAR} && sudo ctr -n k8s.io images tag docker.io/library/busybox:latest ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/${PUSH_NS}/busybox:${TEST_TAG} && sudo ctr -n k8s.io images push --plain-http ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/${PUSH_NS}/busybox:${TEST_TAG}" \
             || { err "节点 ctr push 失败(检查: 节点 containerd certs.d 是否信任 registry.cubestack.io / /etc/hosts 是否有 registry.cubestack.io)"; exit 1; }
+        # ★ 2026-09-14 防御: 远程 rm 加 sudo(若该 tar 曾被 root 改写, /tmp sticky 位下 ubuntu 删不了 root 文件)
         SSH "sudo ctr -n k8s.io images rm ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/${PUSH_NS}/busybox:${TEST_TAG} docker.io/library/busybox:latest >/dev/null 2>&1; sudo rm -f ${REMOTE_TAR}" 2>/dev/null || true
     fi
     ok "    已推送 ${PUSH_NS}/busybox:${TEST_TAG}"

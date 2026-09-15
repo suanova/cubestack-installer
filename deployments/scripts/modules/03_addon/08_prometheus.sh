@@ -213,10 +213,41 @@ for _idx in "${!_PROM_APPS[@]}"; do
     case "${PROMETHEUS_EXPOSE_MODE}" in
         nodeport)
             say "  ${_app}: NodePort ${_port}(独立 Service ${_svc}-external)..."
-            SSH "${K} -n ${PROMETHEUS_NAMESPACE} delete svc ${_svc}-external --ignore-not-found >/dev/null 2>&1" || true
-            SSH "${K} -n ${PROMETHEUS_NAMESPACE} create service nodeport ${_svc}-external --tcp=${_port}:${_port} >/dev/null 2>&1" || true
-            SSH "${K} -n ${PROMETHEUS_NAMESPACE} patch svc ${_svc}-external --type merge \
-                -p '{"spec":{"selector":{"app.kubernetes.io/name":"'${_app}'","app.kubernetes.io/instance":"'${PROMETHEUS_RELEASE_NAME}'"}}}' >/dev/null 2>&1" || true
+            # ★ 2026-09-14 修复(两处缺陷):
+            #   1. kubectl create service nodeport --tcp=<port>:<port> 会把 targetPort 也写成外部端口
+            #      (31000/31001), 而 Prometheus 实际监听 9090、Grafana 3000 → 转发目标错, 连接失败。
+            #      正确: service port 用 NodePort 外部端口, targetPort 用应用真实端口。
+            #   2. 该 create 自带 selector(app=<svc名>, 指向不存在的 label), 之后 merge patch 追加
+            #      两个 selector 键 → 与默认合并成 AND(要求同时匹配 app=<svc名>)→ Endpoints 永远为空。
+            #      修复: 先删默认 selector(app=键), 再 merge patch 真正的 selector。
+            #   改用直接 apply 完整 YAML(幂等), 不再 create+patch 两段式。
+            _ext_port="$((_PROM_NP_BASE + _idx))"          # 外部 NodePort
+            _app_port="9090"; [ "${_app}" = "grafana" ] && _app_port="3000"   # 应用真实端口
+            _ext_yaml="$(mktemp)"
+            cat > "${_ext_yaml}" <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${_svc}-external
+  namespace: ${PROMETHEUS_NAMESPACE}
+  labels:
+    app.kubernetes.io/name: ${_svc}-external
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: ${_app}
+    app.kubernetes.io/instance: ${PROMETHEUS_RELEASE_NAME}
+  ports:
+    - port: ${_ext_port}
+      targetPort: ${_app_port}
+      nodePort: ${_ext_port}
+      protocol: TCP
+EOF
+            SSH "${K} -n ${PROMETHEUS_NAMESPACE} delete svc ${_svc}-external --ignore-not-found=true >/dev/null 2>&1" || true
+            SSH "${K} -n ${PROMETHEUS_NAMESPACE} apply -f -" < "${_ext_yaml}" >/dev/null 2>&1 \
+                && ok "  ${_app} 外部入口: http://<节点IP>:${_ext_port}/  (target ${_app_port})" \
+                || warn "  ${_app} 外部 Service 创建失败(kubectl -n ${PROMETHEUS_NAMESPACE} get svc ${_svc}-external)"
+            rm -f "${_ext_yaml}"
             ;;
         loadbalancer)
             if [ -n "$( (SSH "${K} get ns metallb-system --no-headers 2>/dev/null" || true) )" ]; then

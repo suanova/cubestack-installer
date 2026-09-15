@@ -66,6 +66,16 @@
 - **入口暴露(nodeport 模式, 测试环境)**: `SERVICE_EXPOSE_MODE=nodeport` 时不部署 MetalLB, 数据面 Service 默认仍创建为 LoadBalancer, 需转 NodePort 才可访问:
   - 创建 Gateway 时加注解(推荐, 持久): `gateway.envoyproxy.io/service-type: NodePort`, 之后数据面自动以 NodePort 暴露;
   - 对已创建、未带注解的 Gateway/AIGateway: 运行 `sudo ./deployments/scripts/tools/lb/gateway-nodeport.sh <gateway名> [namespace]`, 一键 patch 数据面 Service 为 NodePort 并打印 `节点IP:NodePort` 访问地址。
+- **固定名别名 Service(对外入口稳定)**: 控制器为每个 Gateway 生成的数据面 Service 名为
+  `envoy-<ns>-<gateway名>-<hash>`(含 hash, 由控制器拥有命名权, 不可由用户改名)。`gateway-nodeport.sh`
+  转换后会**自动创建固定名别名 Service `<gateway名>-external`**(如 `ai-gateway` → `ai-gateway-external`,
+  与数据面 pod 同命名空间, selector 按 `gateway.envoyproxy.io/owning-gateway-name` 匹配), 对外访问
+  **一律用固定名**: `kubectl -n <ns> get svc <gateway名>-external`; 该工具对 **nodeport / metallb 双模式兼容**:
+  - `SERVICE_EXPOSE_MODE=nodeport`: 别名 type=NodePort, 固定 NodePort = `GATEWAY_EXTERNAL_NODEPORT`(默认 30880);
+  - `SERVICE_EXPOSE_MODE=metallb`: 别名 type=LoadBalancer, 由 MetalLB 在 `METALLB_POOL` 分配固定 VIP;
+  **两种模式下固定别名名一致**(`<gw>-external`)。控制器生成的 `envoy-<ns>-<gw>-<hash>` 仅供内部, 不写死在任何脚本/文档。
+  **AI Gateway 模块(16)部署后自动创建示例 Gateway `default/ai-gateway`(listener 8080)并生成固定别名**
+  (`ENVOY_AI_EXAMPLE_GATEWAY*` 可改, 见 cluster.conf; 不想自动建可置 `ENVOY_AI_EXAMPLE_GATEWAY_ENABLED=false`)。
 - **扩展**: `ExtensionRef` 外部处理器(ext_proc)、Wasm、Lua; 限流/熔断/重试/超时/故障注入; TLS/mTLS/JWT/OAuth2; Prometheus metrics / OTel。
 
 ### 2.2 Envoy AI Gateway(AI 专用扩展)
