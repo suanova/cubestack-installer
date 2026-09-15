@@ -1,0 +1,44 @@
+# ============================================================
+# monitoring 服务 → 平台网关 的 HTTPRoute 示例
+# 原理: 跨命名空间把监控服务(monitoring)挂接到底座
+#   cubestack-gateway-system/cubestack-gateway, 按 hostname 区分服务。
+# 访问:
+#   curl -H "Host: grafana.cubestack.io"  http://<节点IP>:30880/
+#   curl -H "Host: prometheus.cubestack.io" http://<节点IP>:30880/
+# ============================================================
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: grafana-route
+  namespace: monitoring
+spec:
+  parentRefs:
+    - name: cubestack-gateway
+      namespace: cubestack-gateway-system   # 跨命名空间引用平台网关
+      group: gateway.networking.k8s.io
+      kind: Gateway
+  hostnames:
+    - grafana.cubestack.io
+  rules:
+    - backendRefs:
+        - name: kube-prometheus-grafana     # 现有 ClusterIP svc (80 -> grafana 3000)
+          port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: prometheus-route
+  namespace: monitoring
+spec:
+  parentRefs:
+    - name: cubestack-gateway
+      namespace: cubestack-gateway-system
+      group: gateway.networking.k8s.io
+      kind: Gateway
+  hostnames:
+    - prometheus.cubestack.io
+  rules:
+    - backendRefs:
+        - name: kube-prometheus-kube-prome-prometheus   # ClusterIP svc (9090)
+          port: 9090
