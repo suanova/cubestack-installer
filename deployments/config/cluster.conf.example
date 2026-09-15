@@ -85,7 +85,7 @@ REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"               # 集群内置 Registry(
 GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 沐曦 GPU Operator(默认启用; 见 4.1)
 LWS_ENABLED="${LWS_ENABLED:-true}"                      # LeaderWorkerSet(LLM 工作负载调度; 默认启用; 见 4.2)
 LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"  # LWS DisaggregatedSet(解耦推理; 见 4.2)
-PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-false}"       # Prometheus+Operator 监控(P1; 见 4.3)
+PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-true}"       # Prometheus+Operator 监控(P1; 见 4.3)
 # ---- Prometheus 监控底座(kube-prometheus-stack; 详见 deployments/cubestack-addon/observability/prometheus/README.md) ----
 # chart vendored 于 cubestack-addon/observability/prometheus/(默认 90.0.0); 刷新: tools/images/prometheus-fetch-charts.sh
 # 离线镜像: 联网机 tools/images/prometheus-save-images.sh 下载 tar → 08_prometheus 模块推送进内置 registry
@@ -115,7 +115,8 @@ KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # 统一认证(P2; 见 4
 KUEUE_ENABLED="${KUEUE_ENABLED:-false}"                 # 队列治理(P2; 见 4.4)
 KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # 虚拟机能力(P2; 见 4.4)
 LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(P3; 见 4.5)
-MULTUS_ENABLED="${MULTUS_ENABLED:-false}"               # Multus CNI 容器多网卡(附加接口经 NAD CRD 定义; 见 4.7)
+MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多网卡(附加接口经 NAD CRD 定义; 见 4.7)
+RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(Device Plugin, 暴露 RDMA 网卡为扩展资源; 见 4.8)
 CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # CubeStack 自研组件(占位; 见 4.6)
 # ---- 4.7 Multus CNI(容器多网卡; 详见 deployments/cubestack-addon/multus/CUBESTACK.md) ----
 # 离线镜像: 联网机 docker save ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
@@ -129,6 +130,21 @@ MULTUS_RANGE_START="${MULTUS_RANGE_START:-192.168.99.200}"
 MULTUS_RANGE_END="${MULTUS_RANGE_END:-192.168.99.216}"
 MULTUS_GATEWAY="${MULTUS_GATEWAY:-192.168.99.1}"
 MULTUS_NAD_NAME="${MULTUS_NAD_NAME:-multus-nad}"         # 示例 NAD 名(pod 注解 k8s.v1.cni.cncf.io/networks 引用)
+
+# ---- 4.8 RDMA 共享设备插件(Device Plugin; 详见 deployments/cubestack-addon/rdma/CUBESTACK.md) ----
+# 离线镜像: 联网机 tools/images/rdma-save-images.sh 下载
+#   ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:${RDMA_IMAGE_TAG} → offline-files/rdma/ → 17_rdma 模块推送进内置 registry
+RDMA_SAVE_DIR="${RDMA_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/rdma}"
+RDMA_IMAGE_TAG="${RDMA_IMAGE_TAG:-v1.5.4}"              # ⚠ 官方源在 ghcr.io/mellanox(非 Docker Hub); 1.4.0 无 v 前缀(ghcr 上 v1.4.0 404), v1.5.1+ 带 v; 默认 v1.5.4 最新(修复 RoCE 口 issm 硬检查); 部署模块按 tar 内实际 tag 自适应
+RDMA_RESOURCE_PREFIX="${RDMA_RESOURCE_PREFIX:-nvidia.com}"  # 扩展资源前缀
+RDMA_RESOURCE_NAME="${RDMA_RESOURCE_NAME:-mlx5_0}"      # 扩展资源名(pool 模式; 与 RDMA_IF_NAMES 对应的网卡; pod 申请 nvidia.com/mlx5_0)。per-hca 模式忽略此值(资源名=实际设备名)
+RDMA_HCA_MODE="${RDMA_HCA_MODE:-per-hca}"                  # 资源模式: pool=全部 HCA 聚合为单个扩展资源(默认, 兼容旧部署); per-hca=每块 HCA 独立扩展资源(如 nvidia.com/mlx5_0 / nvidia.com/mlx5_1..., pod 通过 resources.limits 按资源名选择用哪块卡)
+RDMA_HCA_MAX="${RDMA_HCA_MAX:-100}"                     # 每资源最大共享 Pod 数(rdmaHcaMax; per-hca 模式下每块卡各一份配额)
+RDMA_IF_NAMES="${RDMA_IF_NAMES:-}"                       # 宿主机 RDMA 网卡名(逗号分隔, selectors.ifNames); ⚠ 留空 = 模块自动扫描所有节点 /sys/class/infiniband/*/device/net/ 收集真实设备名+网卡名(兼容 IB=ibsX / RoCE=ens*/manage0 混合), 显式设置则按此精确过滤
+RDMA_ACTIVE_ONLY="${RDMA_ACTIVE_ONLY:-true}"             # 自动检测时只收录链路状态 ACTIVE 的 HCA(读 /sys/class/infiniband/*/ports/*/state); DOWN/DISABLED 卡(DISABLED)不建资源不暴露; false=全部暴露。仅作用自动检测(RDMA_IF_NAMES 为空时), 显式 RDMA_IF_NAMES 时忽略本项
+RDMA_VENDORS="${RDMA_VENDORS:-15b3}"                    # PCI Vendor ID(逗号分隔; Mellanox/NVIDIA=15b3)
+RDMA_UPDATE_INTERVAL="${RDMA_UPDATE_INTERVAL:-300}"     # periodicUpdateInterval 秒(0=关闭周期更新)
+RDMA_NAMESPACE="${RDMA_NAMESPACE:-kube-system}"         # 插件命名空间
 
 # ---- 4.3b Rook/Ceph 配置(详见 docs/ceph-rook.md) ----
 # ════════════════════════════════════════════════════════════════════════
@@ -609,6 +625,9 @@ ENVOY_AI_IMAGE_ONLINE="${ENVOY_AI_IMAGE_ONLINE:-false}"     # 同上(AI 控制�
 ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"   # 离线镜像 tar 目录(save 工具输出)
 ENVOY_EG_NAMESPACE="${ENVOY_EG_NAMESPACE:-envoy-gateway-system}"   # EG 部署命名空间
 ENVOY_AI_NAMESPACE="${ENVOY_AI_NAMESPACE:-ai-gateway-system}"      # AI 控制器部署命名空间
+# 数据面对外固定入口: gateway-nodeport.sh 转换后自动创建固定名别名 Service(<gw>-external,
+#   NodePort 固定于此)。控制器生成的 envoy-<ns>-<gw>-<hash> 名含 hash 且由控制器拥有, 对外一律用固定别名。
+GATEWAY_EXTERNAL_NODEPORT="${GATEWAY_EXTERNAL_NODEPORT:-30880}"
 # CRD chart 命名空间: 默认与控制器合并(CRD 为 cluster-scoped, namespace 仅 helm release 归属;
 # 早期独立 ai-gateway-crds 空 ns 易误判废弃, 已合并; 设 ai-gateway-crds 可恢复拆分)
 ENVOY_AI_CRDS_NS="${ENVOY_AI_CRDS_NS:-${ENVOY_AI_NAMESPACE}}"

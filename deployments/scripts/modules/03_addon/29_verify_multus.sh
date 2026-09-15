@@ -67,7 +67,7 @@ _CNI_CONF="$(SSH "sudo ls /etc/cni/net.d/00-multus.conf 2>/dev/null" || true)"
 say "  ② 检查 NAD CRD + 目标示例 NAD..."
 _CRD="$(SSH "${K}" get crd network-attachment-definitions.k8s.cni.cncf.io --no-headers 2>/dev/null || true)"
 [ -n "${_CRD}" ] && ok "    NAD CRD 已注册 ✓" || { err "NAD CRD 未注册(multus DaemonSet 未正常初始化)"; exit 1; }
-_NAD="$(SSH "${K}" -n ${NAD_NS} get networkattachmentdefinitions ${NAD_NAME} --no-headers 2>/dev/null || true)"
+_NAD="$(SSH "${K}" -n ${NAD_NS} get network-attachment-definitions ${NAD_NAME} --no-headers 2>/dev/null || true)"
 [ -n "${_NAD}" ] && ok "    示例 NAD ${NAD_NS}/${NAD_NAME} 存在 ✓" \
     || { err "示例 NAD ${NAD_NS}/${NAD_NAME} 不存在(先 --steps multus 重建, 或设 MULTUS_NAD_NAME 指向已有 NAD)"; exit 1; }
 
@@ -124,5 +124,5 @@ echo "${_NSTATUS}" | grep -q "${NAD_NAME}" && ok "    network-status 注解含 $
 
 echo "---------------------------------------------"
 ok "Multus 验证通过: DaemonSet → NAD → pod 附加接口(${_NET_IFACE})全链可用"
-echo "  清理: 测试 pod 已自动删除; 示例网络保留(kubectl -n ${NAD_NS} get networkattachmentdefinitions ${NAD_NAME})"
+echo "  清理: 测试 pod 已自动删除; 示例网络保留(kubectl -n ${NAD_NS} get network-attachment-definitions ${NAD_NAME})"
 unset _NRUN _NTOT _CRD _NAD _POD_RUNNING _NET_IFACE _NSTATUS _IFACES _st _st2 _i

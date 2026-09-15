@@ -1,17 +1,30 @@
 #!/bin/bash
 # ============================================================
-# 把 Gateway/AIGateway 的数据面 Service 转成 NodePort(测试环境/无 MetalLB 时暴露)
+# 把 Gateway/AIGateway 的数据面 Service 暴露为固定名(双模式: nodeport / metallb)
 #
 # 背景: Envoy Gateway 的数据面(Envoy Proxy)Service 由控制器动态创建, 默认 type=LoadBalancer
 #        (依赖 MetalLB 分配 VIP)。SERVICE_EXPOSE_MODE=nodeport(测试环境, 无 MetalLB)下
 #        需把该 Service 转成 NodePort, 外部用 <节点IP>:<NodePort> 访问。
 #       · 更持久做法: 创建 Gateway 时加注解 gateway.envoyproxy.io/service-type: NodePort;
 #         本脚本用于**已创建、未带注解**的 Gateway/AIGateway 一键转换(幂等)。
+#       · ★ 本脚本同时兼容 metallb 场景: 数据面 Service 保持 LoadBalancer(MetalLB 分配 VIP),
+#         不 patch。
+#
+# ★ 固定名别名 Service(对外入口稳定, 双模式一致):
+#   数据面 Service 名 <envoy>-<ns>-<gw>-<hash> 由控制器生成且带 hash, 控制器拥有命名权,
+#   用户无法改其名。本脚本自动创建固定名别名 Service <gw>-external(与数据面 pod 同命名空间,
+#   selector 按 gateway.envoyproxy.io/owning-gateway-name 匹配):
+#     · nodeport 模式 → 别名 type=NodePort, 数据面端口 → 固定 NodePort(GATEWAY_EXTERNAL_NODEPORT 默认 30880)
+#     · metallb 模式  → 别名 type=LoadBalancer, 由 MetalLB 分配固定 VIP
+#   两种模式下固定别名名一致(<gw>-external), 对外访问一律用固定名, 不依赖 hash 名。
+#
 # 用法: sudo ./gateway-nodeport.sh <gateway名> [namespace]
 #   <gateway名>: Gateway 或 AIGateway 名称(数据面 Service 按 owning-gateway-name 标签匹配)
 #   [namespace]: 省略 = 全命名空间按标签搜索(标签唯一, 一般直接省略)
-# 输出: 访问地址 = 首个节点 IP:NodePort(任一节点 IP:NodePort 均可)
-# 数据源: config/cluster.conf (NODES / SSH_KEY_NAME)
+# 输出:
+#   nodeport → 访问地址 = 首个节点 IP:固定 NodePort(任一节点 IP 均可)
+#   metallb  → 访问地址 = MetalLB VIP:数据面端口
+# 数据源: config/cluster.conf (NODES / SSH_KEY_NAME / SERVICE_EXPOSE_MODE / GATEWAY_EXTERNAL_NODEPORT)
 # ============================================================
 set -euo pipefail
 
@@ -43,14 +56,81 @@ else
     SVC_NAME="$(echo "${SVC}" | awk '{print $2}')"
 fi
 
-say "转换数据面 Service ${SVC_NS}/${SVC_NAME} → NodePort(幂等)..."
-if ! SSH "${K} -n ${SVC_NS} patch svc ${SVC_NAME} -p '{\"spec\":{\"type\":\"NodePort\"}}' >/dev/null 2>&1"; then
-    err "patch 数据面 Service 失败(kubectl -n ${SVC_NS} get svc ${SVC_NAME})"
-    exit 1
-fi
-NODE_PORT="$( (SSH "${K} -n ${SVC_NS} get svc ${SVC_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
-[ -n "${NODE_PORT}" ] || { err "未取到 nodePort(kubectl -n ${SVC_NS} get svc ${SVC_NAME} -o yaml)"; exit 1; }
-NODE_IP="$(first_node_ip)" || { err "未找到节点 IP(NODES)"; exit 1; }
+# ---- 数据面端口(两种模式都用) ----
+EXT_PORT="$( (SSH "${K} -n ${SVC_NS} get svc ${SVC_NAME} -o jsonpath='{.spec.ports[0].port}' 2>/dev/null" || true) )"
+[ -n "${EXT_PORT}" ] || EXT_PORT="8080"
 
-ok "数据面已暴露为 NodePort: http://${NODE_IP}:${NODE_PORT}/  (任一节点 IP:${NODE_PORT} 均可)"
-say "提示: 更持久做法是在 Gateway 上注解 gateway.envoyproxy.io/service-type: NodePort(创建时即生效, 无需每次转换)"
+# ---- nodeport / metallb 分支 ----
+GATEWAY_EXTERNAL_NODEPORT="${GATEWAY_EXTERNAL_NODEPORT:-30880}"
+EXT_SVC_NAME="${GW}-external"
+
+if [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ]; then
+    # ── nodeport 模式: 数据面 svc patch 成 NodePort; 固定别名 NodePort ──
+    say "数据面 Service ${SVC_NS}/${SVC_NAME} → NodePort(幂等)..."
+    if ! SSH "${K} -n ${SVC_NS} patch svc ${SVC_NAME} -p '{\"spec\":{\"type\":\"NodePort\"}}' >/dev/null 2>&1"; then
+        err "patch 数据面 Service 失败(kubectl -n ${SVC_NS} get svc ${SVC_NAME})"
+        exit 1
+    fi
+    NODE_PORT="$( (SSH "${K} -n ${SVC_NS} get svc ${SVC_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
+    [ -n "${NODE_PORT}" ] || { err "未取到 nodePort(kubectl -n ${SVC_NS} get svc ${SVC_NAME} -o yaml)"; exit 1; }
+    NODE_IP="$(first_node_ip)" || { err "未找到节点 IP(NODES)"; exit 1; }
+    EXT_TYPE="NodePort"
+else
+    # ── metallb 模式: 数据面保持 LoadBalancer(MetalLB 分配 VIP), 不 patch ──
+    say "metallb 模式: 数据面 Service ${SVC_NS}/${SVC_NAME} 保持 LoadBalancer(不 patch)"
+    EXT_TYPE="LoadBalancer"
+fi
+
+say "  创建固定名别名 Service ${SVC_NS}/${EXT_SVC_NAME}(type=${EXT_TYPE}, 数据面端口 ${EXT_PORT})..."
+SSH "${K} -n ${SVC_NS} delete svc ${EXT_SVC_NAME} --ignore-not-found=true >/dev/null 2>&1" || true
+_EXT_YAML="$(mktemp)"
+# nodeport 模式别名固定 NodePort(GATEWAY_EXTERNAL_NODEPORT); metallb 模式不写 nodePort(由 MetalLB 分配 VIP)
+_EXT_NODEPORT_LINE=""
+[ "${EXT_TYPE}" = "NodePort" ] && _EXT_NODEPORT_LINE="      nodePort: ${GATEWAY_EXTERNAL_NODEPORT}"
+cat > "${_EXT_YAML}" <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${EXT_SVC_NAME}
+  namespace: ${SVC_NS}
+  labels:
+    app.kubernetes.io/name: ${EXT_SVC_NAME}
+    gateway.envoyproxy.io/external-alias: "${GW}"
+spec:
+  type: ${EXT_TYPE}
+  selector:
+    gateway.envoyproxy.io/owning-gateway-name: "${GW}"
+  ports:
+    - port: ${EXT_PORT}
+      targetPort: ${EXT_PORT}
+${_EXT_NODEPORT_LINE}
+      protocol: TCP
+EOF
+if SSH "${K} -n ${SVC_NS} apply -f -" < "${_EXT_YAML}" >/dev/null 2>&1; then
+    if [ "${EXT_TYPE}" = "NodePort" ]; then
+        ok "  固定入口: http://${NODE_IP}:${GATEWAY_EXTERNAL_NODEPORT}/  (固定名 ${SVC_NS}/${EXT_SVC_NAME})"
+    else
+        EXT_VIP=""
+        for _i in $(seq 1 30); do
+            EXT_VIP="$( (SSH "${K} -n ${SVC_NS} get svc ${EXT_SVC_NAME} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null" || true) )"
+            [ -n "${EXT_VIP}" ] && break
+            sleep 2
+        done
+        if [ -n "${EXT_VIP}" ]; then
+            ok "  固定入口可用: http://${EXT_VIP}:${EXT_PORT}/  (固定名 ${SVC_NS}/${EXT_SVC_NAME}, MetalLB VIP)"
+        else
+            warn "  固定别名已创建但 MetalLB 60s 内未分配 VIP(kubectl -n ${SVC_NS} get svc ${EXT_SVC_NAME} -o yaml 复查; 检查 METALLB_POOL 是否有空闲地址)"
+        fi
+    fi
+else
+    warn "  固定名别名 Service 创建失败(可稍后重跑本脚本); 数据面原 Service 仍可访问"
+fi
+rm -f "${_EXT_YAML}"
+
+if [ "${EXT_TYPE}" = "NodePort" ]; then
+    ok "数据面已暴露为 NodePort: http://${NODE_IP}:${NODE_PORT}/  (任一节点 IP:${NODE_PORT} 均可)"
+    say "提示: 更持久做法是在 Gateway 上注解 gateway.envoyproxy.io/service-type: NodePort(创建时即生效, 无需每次转换)"
+else
+    ok "metallb 模式完成: 数据面 + 固定别名均 LoadBalancer(MetalLB 分配 VIP)"
+fi
+say "提示: 对外入口固定用 ${SVC_NS}/${EXT_SVC_NAME}; 控制器生成的 envoy-<ns>-<gw>-<hash> 名仅供内部"

@@ -117,7 +117,7 @@ if grep -q "ghcr.io/k8snetworkplumbingwg" "${MANIFEST}"; then
     warn "  vendored manifest 仍含源 ghcr ref${IMG_REF}(apply 副本已重写, 源文件保持原样)  "
 fi
 
-# ── [4/4] 等待 DaemonSet Ready + 建示例网络 ──
+# ── [4/4] 等待 DaemonSet Ready + CRD Established + 建示例网络 ──
 say "[4/4] 等待 kube-multus-ds DaemonSet 全节点 Ready..."
 DS_READY=0
 for _i in $(seq 1 45); do
@@ -133,6 +133,13 @@ else
     warn "  kube-multus-ds 45s 内未 Ready(用 kubectl -n kube-system get ds/kube-multus-ds 复查; 可能节点镜像拉取慢)"
 fi
 unset _ds _i
+
+# ★ CRD 竞态: manifest 同批 apply 的 CRD 需 Established + discovery 刷新后才可建 NAD,
+#   否则报 "no matches for kind" / "server doesn't have a resource type"(2026-09-15 线上故障)。
+#   共享函数 wait_crd_established(lib-common.sh)统一等待, 避免各模块重复实现。
+if ! wait_crd_established "network-attachment-definitions.k8s.cni.cncf.io" "network-attachment-definitions" 24; then
+    err "NAD CRD 未就绪, 无法创建示例网络(用 kubectl get crd network-attachment-definitions.k8s.cni.cncf.io 复查)"; exit 1
+fi
 
 # 建示例 macvlan NAD(仿官方 quickstart; 不 attach 到任何工作负载, 由 pod 注解选用)
 say "  创建示例网络 NetworkAttachmentDefinition(${NAD_NAMESPACE:-kube-system}/${NAD_NAME}; macvlan@${MASTER_IFACE})..."
@@ -164,7 +171,7 @@ unset _NAD_NS
 echo "---------------------------------------------"
 ok "Multus CNI 部署完成(kube-multus-ds 全节点 Ready)"
 echo "  镜像:   ${IMG_REF}"
-echo "  示例网络: kubectl -n ${NAD_NAMESPACE:-kube-system} get networkattachmentdefinitions ${NAD_NAME}"
+echo "  示例网络: kubectl -n ${NAD_NAMESPACE:-kube-system} get network-attachment-definitions ${NAD_NAME}"
 echo "  使用(给 pod 挂网卡): 在 pod 加注解 k8s.v1.cni.cncf.io/networks: ${NAD_NAME}"
 echo "  卸载的声明:  kubectl -n kube-system delete ds kube-multus-ds; kubectl delete crd network-attachment-definitions.k8s.cni.cncf.io"
 unset _ds _ds_ready
