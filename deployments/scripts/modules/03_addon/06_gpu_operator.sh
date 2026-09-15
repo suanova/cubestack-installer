@@ -462,15 +462,28 @@ done
 
 # 验证节点 GPU allocatable(metax-tech.com/gpu)
 say "  验证节点 GPU 资源 allocatable ..."
+# ⚠ 等待 gpu-device DaemonSet 把设备插件注册进 kubelet(最长 300s)再查 allocatable:
+#   DS Ready ≠ 扩展资源已注册 —— 设备插件启动→ListAndWatch→kubelet 刷新 node status 有
+#   秒级~几十秒时延, 立即查询会误报"未发现 GPU"(2026-09-16 实测此竞态)。
+#   把"取 allocatable" 做成函数, 有 GPU 就绪 / 超时才往下走。
 # 注: jsonpath 的 ["metax-tech.com/gpu"] 在 kubectl 会报 invalid array index, 改用 python 解析
 #      ⚠ (SSH ... || true) 必须加括号, 否则 `A || true | python3` 会让 python3 收不到 SSH 输出
-GPU_NODES="$( (SSH "${K} get nodes -o json 2>/dev/null" || true) | python3 -c 'import json,sys
+_gpu_allocatable() {
+    (SSH "${K} get nodes -o json 2>/dev/null" || true) | python3 -c 'import json,sys
 try:
     d=json.load(sys.stdin)
     for n in d["items"]:
         g=n["status"]["allocatable"].get("metax-tech.com/gpu")
         if g: print(n["metadata"]["name"], g)
-except Exception: pass')"
+except Exception: pass'
+}
+GPU_NODES=""
+for _gpui in $(seq 1 60); do   # 最长 300s(每 5s; 设备插件注册通常数秒内完成)
+    GPU_NODES="$(_gpu_allocatable)"
+    [ -n "${GPU_NODES}" ] && break
+    [ "${_gpui}" -lt 60 ] && sleep 5
+done
+unset -f _gpu_allocatable
 # 分两种结果明确提示, 避免"无 GPU 的集群"误以为 GPU 已可用:
 #   · 有 GPU → 正常流程: 列出已发现 GPU 的节点, 确认资源可调度
 #   · 无 GPU → operator 部署仍算成功(组件已就绪), 但明确"暂未发现 GPU 卡", 不误导
