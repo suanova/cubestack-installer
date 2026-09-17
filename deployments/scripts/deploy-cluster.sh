@@ -67,12 +67,38 @@ usage() {
   02_k8s  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp           (默认执行)
           k8s_deploy(默认关, --with-k8s)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
-          local_path(可选) k8s_registry 中间件: gpu_operator gpu_lws prometheus
-          envoy_gateway envoy_ai_gateway keycloak kueue kubevirt lustre_csi (默认关, --enable)
-          20 起自研: cubestack_apps(CUBESTACK_APPS_ENABLED, 默认关)
+          local_path(可选) k8s_registry 组件(全部可单独部署的组件见下方"组件单独部署"清单)
+          自研: cubepilot cubestack_gateway cubestack_apps(占位)
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
+
+单独安装某个组件(本段自动生成, 新增组件模块自动出现):
+  · 命令: sudo ./deploy-cluster.sh --steps <组件>          # 例: --steps prometheus
+  · 只装该组件: 不跑基座(k8s_deploy/metallb/local_path/k8s_registry)与环境准备模块;
+    组件自身依赖仍会带上(如 envoy_ai_gateway → envoy_gateway)。
+  · 集群接入自动处理: 本地 kubeconfig 能用(kubectl get nodes 通)→ 直接用, 不动集群;
+    否则用 cluster.conf NODES 的 IP/用户名/密码引导: 生成密钥对 → 注入公钥 →
+    从首个 master 取 admin.conf 到本地 ~/.kube/config。之后组件模块自己完成
+    推送离线镜像进内置 registry(skopeo) → helm 部署。
+  · 组件 → cluster.conf 开关(已实现, 可直接部署):
+$(_component_meta_list)
+  · 规划中未实现(伪代码占位, 打开开关也只有伪代码流程):
+$(_component_meta_list stub)
+  · 重跑已装过的组件(REPEAT:0 会被断点续跑跳过): --steps <组件> --fresh
+  · 部署后验证: sudo ./deploy-cluster.sh --steps verify_<组件>
+
+三种使用方式(按场景选):
+  ① 全新集群/覆盖重装: sudo ./deploy-cluster.sh               # 默认 = 覆盖安装: k8s + cluster.conf 中启用的全部组件
+                                                            # (目标集群**已存在**时同样是覆盖重装; 支持断点续跑)
+  ② 清状态重来:        sudo ./deploy-cluster.sh --fresh        # = ① 且**先清断点状态**(REPEAT:0 的模块强制重跑)
+  ③ 单独装组件:        sudo ./deploy-cluster.sh --steps prometheus   # 只装该组件(不动基座; 集群接入自动处理)
+  · state 文件 deployments/config/.deploy.state 只记录"本机装到哪一步": 全新容器没有它是正常的(等价①)。
+  · ⚠ ①/② 是**重装集群**的路: 节点上已有的旧 K8s 会被 kubeadm reset(既有防线: kubespray 侧检测到残留时
+    醒目警告 + 60s 倒计时, 期间 Ctrl-C 可中止; 集群已存在时部署也会打印醒目提示)。
+    只想装组件、**不动集群** → 用 ③(--steps <组件> 的计划里不含 k8s_deploy/metallb/registry 等基座)。
+  · 前提: 容器里挂载 cluster.conf(含 NODES 的 IP/用户/密码)与 deployments/offline-files
+    (镜像 tar 不入镜像; 见 README §容器化 CLI 的 docker run 挂载示例)。
 
 注:
   · cluster.conf 的 NODES(5字段: role,hostname,ip,ssh_user,ssh_password)不区分虚拟机/裸金属;
@@ -89,12 +115,13 @@ usage() {
   --with-scale          仅执行 k8s_scale 扩容模块(不连带 operator/已部署组件): 登录首个 master 核对
                         实际集群节点 → 自动 diff 新节点(新节点先写入 cluster.conf)→ 仅对新节点
                         环境准备/装包/NTP/registry → 更新 inventory(new_node 组)→ cubestack-offline scale
-  --steps k1,k2         立即部署指定模块(自动带基座; verify=只跑验证模块, 不拉基座)
+  --steps k1,k2         单独安装指定组件(只跑该组件 + 其非基座依赖; 集群接入自动处理)
+                        verify=只跑验证模块; verify_<组件>=只验证该组件
   --skip k1,k2          跳过模块(verify=跳过全部验证模块)
   --enable k1,k2        只把模块开关写入 cluster.conf(持久化, 不部署); 下次 --with-cubestack / 默认部署生效
   --phase env|k8s|addon 仅运行指定阶段(可逗号分隔)
   --only HOST           仅处理指定节点(可多次; 支持 hostname 或 group 名)
-  --fresh, --refresh    清断点续跑状态重新执行
+  --fresh, --refresh    默认流程 + **先清断点状态**(REPEAT:0 的模块强制重跑; 见"三种使用方式"②)
   --list                仅打印集群规划(只读)
   --list-steps          列出全部模块
   --help, -h            显示本帮助
@@ -102,9 +129,11 @@ usage() {
 示例:
   sudo ./deploy-cluster.sh                          # 默认 = --with-cubestack(全量部署)
   sudo ./deploy-cluster.sh --with-k8s              # 仅部署 kubespray 基座(k8s+metallb+local-path+registry)
-  sudo ./deploy-cluster.sh --skip gpu_operator --fresh   # 全量重装但排除 gpu_operator(--fresh 清状态)
+  sudo ./deploy-cluster.sh --skip gpu_operator --fresh   # 覆盖安装但排除 gpu_operator(--fresh 清状态)
   sudo ./deploy-cluster.sh --enable lws             # 只把 LWS_ENABLED=true 写入 cluster.conf(不部署)
-  sudo ./deploy-cluster.sh --steps gpu_operator     # 立即部署 gpu_operator(自动带基座, 只部署指定的)
+  sudo ./deploy-cluster.sh --steps prometheus      # 单独装/重跑 Prometheus(不动基座; 接入自动处理)
+  sudo ./deploy-cluster.sh --steps prometheus --fresh   # 同上, 且清断点状态(REPEAT:0 模块重跑用)
+  sudo ./deploy-cluster.sh --steps verify_prometheus    # 只验证 Prometheus
   sudo ./deploy-cluster.sh --with-scale             # 扩容: 仅 k8s_scale(先登录 master 核对集群→diff 新节点→只动新节点)
   sudo ./deploy-cluster.sh --with-scale --only worker02   # 扩容指定节点(--only 也先经集群核对)
   sudo ./deploy-cluster.sh --only worker02 --with-scale
@@ -112,6 +141,7 @@ usage() {
   sudo ./deploy-cluster.sh --steps verify_metallb   # 只验证某个组件(验后自动清理)
   sudo ./deploy-cluster.sh --steps ceph_backup      # Ceph 备份(CR+secret+mon store → master 根盘)
   sudo CEPH_BACKUP_ACTION=restore ./deploy-cluster.sh --steps ceph_backup  # Ceph 恢复(认领旧 OSD 数据)
+  sudo ./deploy-cluster.sh --steps cubestack_gateway  # 平台统一网关(幂等: 重下发 routes/ 下各组件的 HTTPRoute)
 EOF
     exit 0
 }
@@ -256,14 +286,31 @@ if [ "${LIST_STEPS}" != "1" ] && [ "${LIST}" != "1" ]; then
     fi
 fi
 
-[ "${FRESH}" = "1" ] && { clear_state; say "已清除断点续跑状态(--fresh)" ; }
-
-# ---------------- 输出 ----------------
+# ---------------- 输出(只读路径) ----------------
+# ⚠ 必须在 --fresh 清状态**之前**: --list/--list-steps 是只读命令, 不能因为顺手带了 --fresh
+#   就把断点状态清掉(否则"只看一眼计划"会毁掉断点续跑信息)。
 if [ "${LIST_STEPS}" = "1" ]; then print_steps; exit 0; fi
 if [ "${LIST}" = "1" ]; then print_plan; exit 0; fi
 
+[ "${FRESH}" = "1" ] && { clear_state; say "已清除断点续跑状态(--fresh)" ; }
+
 need_root() { [ "$(id -u)" -eq 0 ] || { err "需要 root 权限,请执行: sudo $0"; exit 1; }; }
 need_root
+
+# ★ 覆盖安装可见化(实现见 lib-module.sh notify_base_redeploy; --list/--list-steps 只读路径不探测集群,
+#   改由 print_plan 打印提示行)。**只提示、不拦停** —— 默认全量运行 = 覆盖安装(2026-09-17 定案):
+#   目标集群已存在时照常重装, 只把"会发生什么"打出来(节点旧 K8s 会被 kubeadm reset; 该步骤自带 60s
+#   倒计时可 Ctrl-C)。只想装组件不动集群 → --steps <组件>(计划里不含基座)。
+#   ⚠ 可靠判定点在 run_module(执行 k8s_deploy 之前): 新容器此处可能**还没有 SSH 密钥** →
+#   cluster_exists 判不出集群; 而 vm_sshkey/k8s_passwordless 恰好排在 k8s_deploy 之前, 到那时才可探测。
+notify_base_redeploy
+
+# ★ 集群接入预检(仅 --steps 精确模式: 单独装组件 / 跑验证):
+#   本地 kubeconfig 可用则直接用; 否则用 cluster.conf NODES 的密码引导(生成密钥 → 注入公钥 →
+#   取 admin.conf 到本地)。全量部署/覆盖安装由各自的基座模块处理接入, 不走这里。
+if [ -n "${STEPS_ARG}" ]; then
+    ensure_cluster_access || exit 1
+fi
 
 # 启动全量日志
 LOG_FILE="/tmp/cubestack-cluster-install.log"
@@ -627,4 +674,8 @@ if [ "${CEPH_MODE:-internal}" != "external" ] && [ "${CEPH_ENABLED:-false}" = "t
         echo "              全自动官方导入(STATE=Connected 健康上报 + 对象存储 S3 接入)"
     fi
 fi
+# ★ 收尾再汇总一次"本次未部署的组件"(与计划开始时同一函数, 见 lib-module.sh):
+#   防"部署全绿结束、但某组件资源根本不存在"被漏看 —— TOGGLE 关闭的模块全流程 0 行输出
+#   (2026-09-17 实例: CUBESTACK_GATEWAY_ENABLED=false → 网关模块不进计划, 事后才发现)。
+print_undeployed_summary
 echo "============================================="

@@ -3,8 +3,10 @@
 # 原理: 跨命名空间把监控服务(monitoring)挂接到底座
 #   cubestack-gateway-system/cubestack-gateway, 按 hostname 区分服务。
 # 访问:
-#   curl -H "Host: grafana.cubestack.io"  http://<节点IP>:30880/
-#   curl -H "Host: prometheus.cubestack.io" http://<节点IP>:30880/
+#   curl -H "Host: grafana.cubestack.io"  http://<节点IP>:30080/
+#   curl -H "Host: prometheus.cubestack.io" http://<节点IP>:30080/
+#   (平台网关固定入口 NodePort = CUBESTACK_GATEWAY_NODEPORT, 默认 30080;
+#    30880 是 AI 示例网关 ai-gateway-external 的端口, 别混)
 # ============================================================
 ---
 apiVersion: gateway.networking.k8s.io/v1

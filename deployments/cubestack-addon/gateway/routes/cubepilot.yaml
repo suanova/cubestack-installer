@@ -1,0 +1,40 @@
+# ============================================================
+# CubePilot API → 平台统一网关 的 HTTPRoute
+# 原理: 跨命名空间把 cubepilot 命名空间内的服务挂接到底座
+#   cubestack-gateway-system/cubestack-gateway, 按 hostname 区分服务。
+#
+# 后端 = **cubepilot-api**(chart 的 api Service, 与内置 Portal 开关无关, 始终存在)。
+#   ⚠ 不是 svc/cubepilot —— 那个是内置 Portal 的 nginx 入口, **仅 web.enabled=true 时才有**
+#   (见姊妹路由 cubepilot-portal.yaml)。历史版本这里写的是 svc/cubepilot:8080,
+#   在默认配置(内置 Portal 关闭)下后端不存在 → 路由停在 ResolvedRefs=False。
+#
+# 服务特性: REST/SSE 元数据服务, 根路径无路由(**404 属正常**); 探活用 /healthz(200)、/metrics。
+#
+# 下发条件: 由模块 33_cubestack_gateway.sh 在 **CUBEPILOT_ENABLED=true** 时下发;
+#   CubePilot 未部署(命名空间/后端 Service 不存在)时模块会跳过并提示 ——
+#   避免 HTTPRoute 停在 ResolvedRefs=False 的噪音状态。
+#   网关整体未启用(CUBESTACK_GATEWAY_ENABLED!=true)时本文件不生效 ——
+#   此时按 CubePilot 模块汇总里的 port-forward 方式访问。
+#
+# 访问:
+#   curl -H "Host: cubepilot-api.cubestack.io" http://<节点IP>:30080/healthz
+#   (部署机 /etc/hosts 由模块 33 第 [7/7] 步自动写入 cubepilot-api.cubestack.io)
+# ============================================================
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: cubepilot-api-route
+  namespace: cubepilot
+spec:
+  parentRefs:
+    - name: cubestack-gateway
+      namespace: cubestack-gateway-system   # 跨命名空间引用平台网关
+      group: gateway.networking.k8s.io
+      kind: Gateway
+  hostnames:
+    - cubepilot-api.cubestack.io
+  rules:
+    - backendRefs:
+        - name: cubepilot-api                # kubectl -n cubepilot get svc 核对
+          port: 8080

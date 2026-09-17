@@ -15,12 +15,21 @@
 #   · RDMA 插件是纯 Device Plugin: 在 /var/lib/kubelet/device-plugins 注册扩展资源
 #     (resourcePrefix/resourceName, 如 nvidia.com/mlx5_0), 让 Pod 经 resources.limits 申请;
 #     rdmaHcaMax=每资源最大共享 Pod 数(如 100 表示允许 100 个 Pod 共享这块网卡)。
-#   · 资源模式(RDMA_HCA_MODE): pool=全部 HCA 聚合为单个资源(RDMA_RESOURCE_NAME, 默认, 兼容旧部署);
-#     per-hca=每块 HCA 独立扩展资源(资源名=节点实际 RDMA 设备名, 如 nvidia.com/mlx5_0/1/2...),
-#     Pod 按资源名选择用哪块卡; 链路类型自动识别(网卡 type 32=IB(ibsX) / 1=RoCE(ens*/manage0))。
+#   · 资源模式(RDMA_HCA_MODE): per-hca=每块 HCA 独立扩展资源(资源名=节点实际 RDMA 设备名, 如
+#     nvidia.com/mlx5_0/1/2...), Pod 按资源名选择用哪块卡 —— cluster.conf.example 默认值(推荐);
+#     pool=全部 HCA 聚合为单个资源(RDMA_RESOURCE_NAME, 兼容旧部署; 也是代码内建回退值);
+#     链路类型自动识别(网卡 type 32=IB(ibsX) / 1=RoCE(ens*/manage0))。
 #   · ACTIVE 过滤(RDMA_ACTIVE_ONLY, 默认 true): 自动检测时只收录链路状态 ACTIVE 的 HCA
 #     (/sys/class/infiniband/<dev>/ports/*/state 含 ACTIVE), DOWN/DISABLED 卡不建资源不暴露;
 #     =false 时全部暴露。仅作用于自动检测; 显式 RDMA_IF_NAMES 时尊重用户配置不过滤。
+#   · 占位模式(RDMA_PLACEHOLDER_HCAS; cluster.conf.example 默认 mlx5_0,mlx5_1,mlx5_2):
+#     **纯 VM 无 RDMA 卡时跑通部署流水线用**。自动检测到 0 块 HCA 时, 用这些占位设备名生成
+#     config.json —— 插件 DaemonSet 正常起来, 但占位名不可能是节点真实 netdev 名 → selectors
+#     永不匹配 → **不注册任何扩展资源**。仅作用自动检测; 检测到真实 HCA 时本项被忽略(物理机零影响)。
+#     ConfigMap 会带标注 cubestack.io/rdma-placeholder=true, verify 模块据此放行并明确标注"未验收真实 RDMA"。
+#     ⚠ 本行代码回退为空 = 严格模式(per-hca 检测不到 HCA 即报错退出, 防静默掩盖真实故障);
+#     走严格模式: 把 cluster.conf 该行改成 RDMA_PLACEHOLDER_HCAS=""(去掉 :- 默认值; 只 export 空环境
+#     变量无效 —— cluster.conf 的赋值优先于环境变量); 配置里完全没写该键时也走严格模式。
 #   · 前置条件: 节点已装 Mellanox RDMA 网卡(ConnectX)+ MLNX_OFED/ib_core 驱动, ibstat/rdma link show
 #     可见 HCA; K8s kubelet Device Plugin 特性默认开启。插件 DaemonSet 全节点跑, 无 HCA 节点空转不报错(自探测)。
 #   · 数据面隔离(可选): 与 Multus CNI(模块 09_multus)配合, 基于 RDMA 网卡(master)再建 macvlan NAD 给 Pod 独立业务 IP。
@@ -30,7 +39,8 @@
 #   · 区别于 SR-IOV: 本插件用于 PF(Physical Function)共享; 若开 SR-IOV(VF)应改用 k8s-sriov-network-device-plugin。
 # 数据源: cluster.conf (RDMA_ENABLED / RDMA_SAVE_DIR / RDMA_IMAGE_TAG / RDMA_RESOURCE_PREFIX /
 #         RDMA_RESOURCE_NAME / RDMA_HCA_MODE / RDMA_HCA_MAX / RDMA_IF_NAMES / RDMA_ACTIVE_ONLY /
-#         RDMA_VENDORS / RDMA_UPDATE_INTERVAL / RDMA_NAMESPACE / REGISTRY_* / NODES / SSH_KEY_NAME)
+#         RDMA_PLACEHOLDER_HCAS / RDMA_VENDORS / RDMA_UPDATE_INTERVAL / RDMA_NAMESPACE /
+#         REGISTRY_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps rdma_shared_dev_plugin  或  RDMA_ENABLED=true
 # 验证:   sudo ./deploy-cluster.sh --steps verify_rdma_shared_dev_plugin
 # ============================================================
@@ -65,7 +75,9 @@ RES_PREFIX="${RDMA_RESOURCE_PREFIX:-nvidia.com}"
 RES_NAME="${RDMA_RESOURCE_NAME:-mlx5_0}"
 RES_FULL="${RES_PREFIX}/${RES_NAME}"
 HCA_MAX="${RDMA_HCA_MAX:-100}"
-# 资源模式: pool=全部 HCA 聚合为单个扩展资源(默认, 兼容旧部署); per-hca=每块 HCA 独立资源(资源名=实际设备名)
+# 资源模式: per-hca=每块 HCA 独立扩展资源, 资源名=实际设备名(cluster.conf.example 默认, 推荐: pod 可
+#           按资源名选卡); pool=全部 HCA 聚合为单个扩展资源(兼容旧部署; 本行是**代码内建回退值**,
+#           配置里没写 RDMA_HCA_MODE 键时才生效)
 HCA_MODE="${RDMA_HCA_MODE:-pool}"
 # ⚠ 自动检测: 默认不写死网卡名 —— 各节点 RDMA 网卡名可能不同(IB=ibsX / RoCE=ens*/manage0),
 #   手写 RDMA_IF_NAMES 只适配单形态。**留空 = 模块自动扫描所有节点 /sys/class/infiniband/*
@@ -73,6 +85,14 @@ HCA_MODE="${RDMA_HCA_MODE:-pool}"
 IF_NAMES="${RDMA_IF_NAMES:-}"      # 逗号分隔; 空 = 自动检测(见下方 [1/4] 检测段)
 # ⚠ ACTIVE 过滤: 仅自动检测时生效, 显式 RDMA_IF_NAMES 时忽略(尊重用户配置)
 ACTIVE_ONLY="${RDMA_ACTIVE_ONLY:-true}"      # true=只收录链路状态 ACTIVE 的 HCA; false=全部
+# ⚠ 占位模式(纯 VM 无 RDMA 卡): 自动检测到 0 块 HCA 时, 若本项非空则以这些**占位设备名**生成
+#   config.json(如 per-hca → nvidia.com/mlx5_0/1/2), 插件正常起来但**不注册任何扩展资源**。
+#   cluster.conf.example 默认带 mlx5_0,mlx5_1,mlx5_2 → 无卡 VM 直接可跑通; 本行代码回退为空
+#   = 严格模式(per-hca 检测不到 HCA 即报错退出, 不静默掩盖真实故障); 走严格模式要把 cluster.conf
+#   该行改成 RDMA_PLACEHOLDER_HCAS=""(只 export 一个空环境变量无效, cluster.conf 赋值优先)。
+#   仅作用自动检测(RDMA_IF_NAMES 为空); 检测到真实 HCA 时本项被忽略 → 物理机零影响。
+PLACEHOLDER_HCAS="${RDMA_PLACEHOLDER_HCAS:-}"    # 逗号分隔; 空 = 严格模式(不启用占位)
+PLACEHOLDER_MODE=0                               # 1 = 本次走了占位(由下方检测分支置位)
 VENDORS="${RDMA_VENDORS:-15b3}"          # 逗号分隔; Mellanox/NVIDIA PCI Vendor ID
 UPDATE_INTERVAL="${RDMA_UPDATE_INTERVAL:-300}"
 CM_NAME="rdma-devices"
@@ -173,8 +193,29 @@ REMOTE_DETECT
         IF_NAMES="$(echo "${IF_NAMES}" | cut -d: -f2 | tr ',' '\n' | sort -u | tr '\n' ',')"
         IF_NAMES="${IF_NAMES%,}"
         say "  pool 模式 ifNames: ${IF_NAMES}"
+    elif [ -n "${PLACEHOLDER_HCAS}" ]; then
+        # ── 占位模式(纯 VM 无 RDMA 卡)──
+        # 技巧: 只把占位名塞进 IF_NAMES —— 下游 :IF_LIST 生成 与 :DETECTED_HCAS 推导(把"网卡名"
+        # 展开成 设备名:网卡名:类型 三元组)会原样处理, per-hca / pool 两种模式**均无需额外分支**。
+        # 占位名(mlx5_0 等)是**设备名**不是 netdev 名, 节点上永远不存在同名网卡 → 插件 selectors
+        # 永不匹配 → 空资源池, 节点 allocatable 不会出现 RDMA 扩展资源(= 需求"不真正注册")。
+        PLACEHOLDER_MODE=1
+        IF_NAMES="${PLACEHOLDER_HCAS}"
+        warn "  全集群未检测到 RDMA 网卡, 但已配置 RDMA_PLACEHOLDER_HCAS → 走【占位模式】"
+        warn "  ⚠ 占位模式不含真实 RDMA 硬件: ConfigMap 按占位名生成(${PLACEHOLDER_HCAS}), 插件空转, **不会注册任何扩展资源**"
+        warn "  ⚠ 若本机本应有 RDMA 卡: 先查驱动(ibstat / rdma link show)与 RDMA_ACTIVE_ONLY(DOWN/DISABLED 会被过滤);"
+        warn "    驱动修好后本项自动失效(检测到真卡即走真实配置), 再用 --steps rdma_shared_dev_plugin --fresh 重跑本模块重建 ConfigMap"
     else
-        warn "  全集群未检测到 ${ACTIVE_ONLY:+} RDMA 网卡(无 /sys/class/infiniband/* 设备节点或全部链路 DOWN/DISABLED); 插件 DaemonSet 将空转, 无扩展资源"
+        warn "  全集群未检测到 RDMA 网卡(无 /sys/class/infiniband/* 设备节点或全部链路 DOWN/DISABLED)"
+        # ⚠ 提示必须与随后的**实际结果**一致: per-hca 在下方 :DETECTED_HCAS 为空处硬失败, 只有 pool 才空转。
+        #   (曾统一打印"插件 DaemonSet 将空转", 与 per-hca 随后报错退出自相矛盾, 易被误判为程序 bug。)
+        if [ "${HCA_MODE}" = "per-hca" ]; then
+            warn "  ⚠ HCA_MODE=per-hca 且无任何 HCA → 本模块随后将报错退出:"
+            warn "    纯 VM 无卡集群: 在 cluster.conf 设 RDMA_PLACEHOLDER_HCAS=\"mlx5_0,mlx5_1,mlx5_2\" 走占位模式(跑通但不注册资源)"
+            warn "    或改 RDMA_HCA_MODE=pool(空转不报错); 详见 deployments/cubestack-addon/rdma/CUBESTACK.md"
+        else
+            warn "  HCA_MODE=pool: 插件 DaemonSet 将空转, 无扩展资源(ifNames 为空, 不报错)"
+        fi
         IF_NAMES=""
     fi
 fi
@@ -205,7 +246,8 @@ VENDOR_LIST="$(_to_json_list "${VENDORS}")"
 # 注意: configList 内资源名不得重复(同一名字的多个条目会被插件合并/报错)。
 CM_JSON=""
 if [ "${HCA_MODE}" = "per-hca" ]; then
-    [ -n "${DETECTED_HCAS}" ] || { err "RDMA_HCA_MODE=per-hca 但未检测到任何 HCA(检查驱动 / RDMA_IF_NAMES)"; exit 1; }
+    [ -n "${DETECTED_HCAS}" ] || { err "RDMA_HCA_MODE=per-hca 但未检测到任何 HCA(检查驱动 / RDMA_IF_NAMES)"; \
+        err "  纯 VM 无 RDMA 卡: 在 cluster.conf 设 RDMA_PLACEHOLDER_HCAS=\"mlx5_0,mlx5_1,mlx5_2\" 走占位模式, 或改 RDMA_HCA_MODE=pool"; exit 1; }
     # 按设备名分组: 同名设备(同款 HCA)可能出现在多节点/多网卡, 合并 ifNames 并集, 只生成一个资源
     declare -A _dev_nets _dev_types
     for _h in ${DETECTED_HCAS//,/ }; do
@@ -227,6 +269,9 @@ if [ "${HCA_MODE}" = "per-hca" ]; then
         _hint="?"
         [ "${_dev_types[${_dev}]:-}" = "32" ] && _hint="IB"
         [ "${_dev_types[${_dev}]:-}" = "1" ] && _hint="RoCE"
+        # 占位模式: 设备名非真实 HCA、无对应网卡, 标注清楚避免被误读成已部署真实资源
+        _from=" ← 网卡 ${_dev_nets[${_dev}]}"
+        [ "${PLACEHOLDER_MODE}" = "1" ] && { _hint="占位"; _from=" ← 无真实设备(占位名匹配不到任何网卡)"; }
         CM_JSON="${CM_JSON}${CM_JSON:+,}
         {
             \"resourcePrefix\": \"${RES_PREFIX}\",
@@ -237,14 +282,18 @@ if [ "${HCA_MODE}" = "per-hca" ]; then
                 \"ifNames\": ${_nets_json}
             }
         }"
-        say "    per-hca 资源: ${RES_PREFIX}/${_dev}(${_hint}) ← 网卡 ${_dev_nets[${_dev}]}"
+        say "    per-hca 资源: ${RES_PREFIX}/${_dev}(${_hint})${_from}"
         _ENTRIES=$((_ENTRIES + 1))
     done
     CM_JSON="$(printf '{\n    "periodicUpdateInterval": %s,\n    "configList": [\n%s\n    ]\n}\n' "${UPDATE_INTERVAL}" "${CM_JSON}")"
     say "  per-hca 模式: 生成 ${_ENTRIES} 个独立扩展资源"
 else
     CM_JSON="$(printf '{\n    "periodicUpdateInterval": %s,\n    "configList": [\n        {\n            "resourcePrefix": "%s",\n            "resourceName": "%s",\n            "rdmaHcaMax": %s,\n            "selectors": {\n                "vendors": %s,\n                "ifNames": %s\n            }\n        }\n    ]\n}\n' "${UPDATE_INTERVAL}" "${RES_PREFIX}" "${RES_NAME}" "${HCA_MAX}" "${VENDOR_LIST}" "${IF_LIST}")"
-    say "  pool 模式: 全部网卡聚合为 ${RES_FULL}(rdmaHcaMax=${HCA_MAX}, ifNames=${IF_NAMES}, vendors=${VENDORS})"
+    if [ "${PLACEHOLDER_MODE}" = "1" ]; then
+        say "  pool 模式(占位): ${RES_FULL}(rdmaHcaMax=${HCA_MAX}, ifNames=${IF_NAMES}[占位名, 匹配不到任何网卡], vendors=${VENDORS})"
+    else
+        say "  pool 模式: 全部网卡聚合为 ${RES_FULL}(rdmaHcaMax=${HCA_MAX}, ifNames=${IF_NAMES}, vendors=${VENDORS})"
+    fi
 fi
 
 # ---- [2/4] registry 预检 + push ----
@@ -268,6 +317,10 @@ sync_kubeconfig || { err "宿主机无法访问集群(admin.conf 同步失败)";
 # 3a. ConfigMap(config.json 内容由上方按 HCA_MODE 生成于 CM_JSON; 全局单份, 所有节点同一套资源)
 # ⚠ YAML 块标量(config.json: |)的内容行必须比键多缩进(≥4 空格), 故用 sed 对每行加 4 空格;
 #   顶格 JSON 会让 kubectl 解析失败("mapping values are not allowed in this context")。
+# ⚠ 占位标注(cubestack.io/rdma-placeholder): 恒写 true/false, 让 verify 模块能**从集群实际状态**
+#   判断本次是否占位(而不是读本地 cluster.conf —— 防"配置文件换了、集群没换"的错配)。
+#   值必须带引号: 裸 true 会被 YAML 当布尔, kubectl 拒绝非字符串的 annotation 值。
+_PH_ANNO="false"; [ "${PLACEHOLDER_MODE}" = "1" ] && _PH_ANNO="true"
 _CM_TMP="$(mktemp)"
 {
     echo "apiVersion: v1"
@@ -275,13 +328,17 @@ _CM_TMP="$(mktemp)"
     echo "metadata:"
     echo "  name: ${CM_NAME}"
     echo "  namespace: ${NS}"
+    echo "  annotations:"
+    echo "    cubestack.io/rdma-placeholder: \"${_PH_ANNO}\""
     echo "data:"
     echo "  config.json: |"
     sed 's/^/    /' <<< "${CM_JSON}"
 } > "${_CM_TMP}"
 SSH "${K} -n ${NS} apply -f -" < "${_CM_TMP}" || { err "ConfigMap apply 失败"; rm -f "${_CM_TMP}"; exit 1; }
 rm -f "${_CM_TMP}"
-ok "  ConfigMap 已创建(全局单份, 多节点共用: ${NS}/${CM_NAME})"
+[ "${PLACEHOLDER_MODE}" = "1" ] \
+    && ok "  ConfigMap 已创建(全局单份, 多节点共用: ${NS}/${CM_NAME}; ⚠ 占位模式 rdma-placeholder=true)" \
+    || ok "  ConfigMap 已创建(全局单份, 多节点共用: ${NS}/${CM_NAME})"
 
 # 3b. DaemonSet(镜像行重写为 img ref; 与 ConfigMap 分开 apply)
 _DS_TMP="$(mktemp)"
@@ -369,13 +426,26 @@ fi
 unset _ds _i
 
 echo "---------------------------------------------"
-ok "RDMA 共享设备插件部署完成(${DS_NAME} DaemonSet)"
+[ "${PLACEHOLDER_MODE}" = "1" ] \
+    && ok "RDMA 共享设备插件部署完成(${DS_NAME} DaemonSet; ⚠ 占位模式)" \
+    || ok "RDMA 共享设备插件部署完成(${DS_NAME} DaemonSet)"
 echo "  镜像:   ${IMG_REF}"
+if [ "${PLACEHOLDER_MODE}" = "1" ]; then
+    warn "⚠ 占位模式(RDMA_PLACEHOLDER_HCAS=${PLACEHOLDER_HCAS}): 本机无真实 RDMA 硬件, ConfigMap 只按占位名生成,"
+    warn "  DaemonSet 空转且【不会注册任何 RDMA 扩展资源】—— kubectl describe node 看不到 ${RES_PREFIX}/mlx5_* 属预期。"
+    warn "  如需真实 RDMA: 装卡/加载驱动后**本项自动失效**(检测到真卡即走真实配置), 但已下发的 ConfigMap 仍是占位版,"
+    warn "  需用 --steps rdma_shared_dev_plugin --fresh 重跑本模块重建 ConfigMap(REPEAT:0, 否则会被断点续跑跳过);"
+    warn "  (--steps 只跑该组件, 不会连带 k8s_deploy; --fresh 仅清断点状态)"
+fi
 if [ "${HCA_MODE}" = "per-hca" ]; then
     echo "  资源:   每块 HCA 独立扩展资源(rdmaHcaMax=${HCA_MAX} 各; 全局 ConfigMap ${NS}/${CM_NAME})"
     echo "  可用资源列表(以节点实际设备名为准, 见上面日志):"
     for _dev in $(printf '%s\n' "${!_dev_nets[@]}" | sort); do
-        echo "    ${RES_PREFIX}/${_dev} ← 网卡 ${_dev_nets[${_dev}]}"
+        if [ "${PLACEHOLDER_MODE}" = "1" ]; then
+            echo "    ${RES_PREFIX}/${_dev}   (占位, 无真实设备 → 不会注册)"
+        else
+            echo "    ${RES_PREFIX}/${_dev} ← 网卡 ${_dev_nets[${_dev}]}"
+        fi
     done
     echo "  验证:   --steps verify_rdma_shared_dev_plugin(逐个检查各资源在各节点 allocatable)"
     echo "  使用(给 Pod 申请指定 HCA 的 RDMA 设备):"

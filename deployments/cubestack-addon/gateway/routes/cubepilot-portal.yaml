@@ -1,0 +1,39 @@
+# ============================================================
+# CubePilot 内置 Portal → 平台统一网关 的 HTTPRoute
+# 原理: 跨命名空间把 cubepilot 命名空间内的服务挂接到底座
+#   cubestack-gateway-system/cubestack-gateway, 按 hostname 区分服务。
+#
+# 后端 = **cubepilot**(chart 内置 Portal 的 nginx: SPA 页面 + 把 /api 反代给 cubepilot-api)。
+#   该 Service 由 chart 的 web.enabled 门控 —— **仅 CUBEPILOT_WEB_ENABLED=true 时存在**
+#   (默认 true, 见 31_cubepilot.sh / cluster.conf)。
+#
+# 姊妹路由: cubepilot.yaml(纯 API 入口 cubepilot-api.cubestack.io, 始终可用)。
+#   两者独立: 关闭内置 Portal 只是少一条 UI 路由, API 入口不受影响。
+#
+# 下发条件: 由模块 33_cubestack_gateway.sh 在 **CUBEPILOT_ENABLED=true 且
+#   CUBEPILOT_WEB_ENABLED=true** 时下发(任一不满足即跳过, 不给网关留 ResolvedRefs=False 噪音);
+#   命名空间/后端 Service 不存在时模块也会跳过并提示(部署完成后重跑本模块即下发)。
+#   网关整体未启用(CUBESTACK_GATEWAY_ENABLED!=true)时本文件不生效。
+#
+# 访问:
+#   浏览器打开 http://cubepilot.cubestack.io:30080/
+#   (部署机 /etc/hosts 由模块 33 第 [7/7] 步自动写入 cubepilot.cubestack.io)
+# ============================================================
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: cubepilot-portal-route
+  namespace: cubepilot
+spec:
+  parentRefs:
+    - name: cubestack-gateway
+      namespace: cubestack-gateway-system   # 跨命名空间引用平台网关
+      group: gateway.networking.k8s.io
+      kind: Gateway
+  hostnames:
+    - cubepilot.cubestack.io
+  rules:
+    - backendRefs:
+        - name: cubepilot                    # kubectl -n cubepilot get svc 核对(Portal 关闭时不存在)
+          port: 8080                         # 8080 → nginx targetPort 80(SPA + /api 反代)
