@@ -374,7 +374,7 @@ if [ -d "${CEPH_IMAGE_DIR}" ] && ls "${CEPH_IMAGE_DIR}"/*.tar >/dev/null 2>&1; t
     if [ "${#_MISSING[@]}" -gt 0 ]; then
         warn "  以下节点未检测到 ceph 镜像: ${_MISSING[*]} —— 可能预加载未覆盖(k8s 阶段 CEPH_ENABLED 需 true); 手工补救:"
         warn "    bash ${SCRIPT_DIR}/tools/images/ceph-sync-images.sh --node ${_MISSING[0]}"
-        warn "    或在 cluster.conf 设 CEPH_ENABLED=true 后 --fresh 重跑 k8s_deploy 阶段"
+        warn "    或在 cluster.conf 设 CEPH_ENABLED=true 后重跑 k8s_deploy 阶段(全量覆盖安装: ./deploy-cluster.sh --fresh)"
     fi
 else
     say "  ${CEPH_IMAGE_DIR} 不存在或无镜像 tar(源目录可删除); 节点镜像由 k8s 阶段 images/ 预加载保证, 跳过校验"

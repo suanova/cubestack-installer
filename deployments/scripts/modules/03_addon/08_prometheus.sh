@@ -18,9 +18,13 @@
 #     用系统默认 StorageClass); namespace=monitoring
 #   · 组件: operator + prometheus + alertmanager + node-exporter + kube-state-metrics + grafana;
 #     thanosRuler / kubeRBACProxy / windows-exporter / CRD 升级 Job 默认关闭(不备料)
+#   · 对外暴露(第 5 步): PROMETHEUS_EXPOSE_MODE=nodeport(*-external NodePort 31000/31001) /
+#     loadbalancer / clusterip; ★ CUBESTACK_GATEWAY_ENABLED=true 时由平台统一网关接管
+#     (走模块 cubestack_gateway 的 HTTPRoute hostname, 不再建 *-external, 并清理历史遗留)。
 #   · 参考: deployments/cubestack-addon/observability/prometheus/README.md
 # 数据源: cluster.conf (PROMETHEUS_ENABLED / PROMETHEUS_NAMESPACE / PROMETHEUS_RETENTION_DAYS /
-#         PROMETHEUS_STORAGE_SIZE / PROMETHEUS_APP_VERSION / PROMETHEUS_IMAGE_* / REGISTRY_BASE / NODES)
+#         PROMETHEUS_STORAGE_SIZE / PROMETHEUS_APP_VERSION / PROMETHEUS_IMAGE_* / REGISTRY_BASE /
+#         PROMETHEUS_EXPOSE_MODE / CUBESTACK_GATEWAY_ENABLED / CUBESTACK_GATEWAY_NODEPORT / NODES)
 # 用法:   sudo ./deploy-cluster.sh --steps prometheus  或  PROMETHEUS_ENABLED=true
 # ============================================================
 set -euo pipefail
@@ -204,6 +208,27 @@ unset _PROM_CR_N _PROM_IP_JSON
 say "配置 Prometheus/Grafana 对外暴露(PROMETHEUS_EXPOSE_MODE=${PROMETHEUS_EXPOSE_MODE:-<随 SERVICE_EXPOSE_MODE>})..."
 PROMETHEUS_EXPOSE_MODE="${PROMETHEUS_EXPOSE_MODE:-${SERVICE_EXPOSE_MODE:-clusterip}}"
 PROMETHEUS_EXPOSE_MODE="$(echo "${PROMETHEUS_EXPOSE_MODE}" | tr '[:upper:]' '[:lower:]')"
+
+# ★ 2026-09-16 平台统一网关接管(模块 18 cubestack_gateway):
+#   CUBESTACK_GATEWAY_ENABLED=true 时, 监控对外**改走网关 HTTPRoute 按 hostname 暴露**
+#   (grafana/prometheus.cubestack.io, 见 cubestack-addon/gateway/routes/monitoring.yaml),
+#   不再建 *-external NodePort(31000/31001) —— 单入口替代"每组件一个 *-external"。
+#   同时清理历史遗留的 *-external(旧集群切过来时它们会一直占着 31000/31001)。
+if [ "${CUBESTACK_GATEWAY_ENABLED:-false}" = "true" ]; then
+    say "  平台网关接管对外暴露(CUBESTACK_GATEWAY_ENABLED=true): 监控走 HTTPRoute, 不建 *-external NodePort"
+    for _app in prometheus grafana; do
+        _svc="${PROMETHEUS_RELEASE_NAME}-${_app}"
+        if [ -n "$( (SSH "${K} -n ${PROMETHEUS_NAMESPACE} get svc ${_svc}-external --no-headers 2>/dev/null" || true) )" ]; then
+            if SSH "${K} -n ${PROMETHEUS_NAMESPACE} delete svc ${_svc}-external --ignore-not-found=true >/dev/null 2>&1"; then
+                ok "  已清理历史 ${_svc}-external(对外改走 ${_app}.cubestack.io)"
+            else
+                warn "  清理 ${_svc}-external 失败(可手工 kubectl -n ${PROMETHEUS_NAMESPACE} delete svc ${_svc}-external)"
+            fi
+        fi
+    done
+    unset _app _svc
+    PROMETHEUS_EXPOSE_MODE="gateway"     # 下面 case 的 gateway 分支: 不建任何外部 Service
+fi
 _PROM_APPS=(prometheus grafana)
 _PROM_NP_BASE="${PROMETHEUS_NODEPORT_BASE:-31000}"   # prometheus=31000, grafana=31001
 for _idx in "${!_PROM_APPS[@]}"; do
@@ -257,6 +282,7 @@ EOF
                 warn "  MetalLB 未部署; ${_app} 保持 ClusterIP(可先 CEPH/PROMETHEUS_EXPOSE_MODE=nodeport)"
             fi
             ;;
+        gateway) say "  ${_app}: 由平台网关 cubestack-gateway 按 hostname 暴露(${_app}.cubestack.io; 不建节点端口)" ;;
         *) say "  ${_app}: ClusterIP(仅集群内)" ;;
     esac
 done
@@ -272,6 +298,11 @@ if [ "${PROMETHEUS_EXPOSE_MODE}" = "nodeport" ]; then
     echo "  访问(NodePort): Prometheus http://<节点IP>:${_prom_np}  Grafana http://<节点IP>:$((_prom_np + 1))"
 elif [ "${PROMETHEUS_EXPOSE_MODE}" = "loadbalancer" ]; then
     echo "  访问(LoadBalancer): 见 kubectl -n monitoring get svc ${PROMETHEUS_RELEASE_NAME}-prometheus / -grafana EXTERNAL-IP"
+elif [ "${PROMETHEUS_EXPOSE_MODE}" = "gateway" ]; then
+    # 平台网关接管: 端口/命名空间随模块 18(cubestack_gateway); 固定入口 NodePort 默认 30080
+    echo "  访问(平台网关): Grafana    curl -H 'Host: grafana.cubestack.io'    http://<节点IP>:${CUBESTACK_GATEWAY_NODEPORT:-30080}/"
+    echo "                  Prometheus curl -H 'Host: prometheus.cubestack.io' http://<节点IP>:${CUBESTACK_GATEWAY_NODEPORT:-30080}/"
+    echo "                  (路由由模块 cubestack_gateway 下发: cubestack-addon/gateway/routes/monitoring.yaml)"
 else
     echo "  Prometheus:   kubectl -n ${PROMETHEUS_NAMESPACE} port-forward svc/${PROMETHEUS_RELEASE_NAME}-prometheus 9090"
     echo "  Grafana:      kubectl -n ${PROMETHEUS_NAMESPACE} port-forward svc/${PROMETHEUS_RELEASE_NAME}-grafana 3000"

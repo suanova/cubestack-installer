@@ -111,6 +111,7 @@ CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI RBD/RGW/CephF
 # ---- Ceph 模式见 4.3b(CEPH_MODE 唯一开关: internal 集群内 / external 接入外部; 定义在下方 Ceph 段) ----
 ENVOY_GATEWAY_ENABLED="${ENVOY_GATEWAY_ENABLED:-true}" # Envoy Gateway 通用 K8s 网关基座(P1; 见 4.3)
 ENVOY_AI_GATEWAY_ENABLED="${ENVOY_AI_GATEWAY_ENABLED:-true}"  # Envoy AI Gateway(LLM/AI 专用, 依赖 EG; 见 4.3)
+CUBESTACK_GATEWAY_ENABLED="${CUBESTACK_GATEWAY_ENABLED:-true}"  # 平台统一网关 cubestack-gateway(单入口多 hostname, 依赖 EG; 见 4.3)。默认 true = 全量部署自动创建 Namespace cubestack-gateway-system + Gateway + routes/*.yaml(monitoring/cubepilot), 并建固定入口别名(默认 NodePort 30080)+ 把已下发路由的 hostname 写进部署机 /etc/hosts。⚠ 打开后的连带影响: 08_prometheus **不再建** *-external NodePort(监控改走网关 HTTPRoute, 详见 PROMETHEUS_EXPOSE_MODE 段), cubepilot 验证改走网关入口(不再 port-forward)。关掉 = 这些资源**不会创建**, 且部署日志里不出现本组件名字(收尾会汇总"本次未部署的组件"提示)
 KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # 统一认证(P2; 见 4.4)
 KUEUE_ENABLED="${KUEUE_ENABLED:-false}"                 # 队列治理(P2; 见 4.4)
 KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # 虚拟机能力(P2; 见 4.4)
@@ -118,6 +119,7 @@ LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(P3; 见 4.5
 MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多网卡(附加接口经 NAD CRD 定义; 见 4.7)
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(Device Plugin, 暴露 RDMA 网卡为扩展资源; 见 4.8)
 CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # CubeStack 自研组件(占位; 见 4.6)
+CUBEPILOT_ENABLED="${CUBEPILOT_ENABLED:-true}"          # CubePilot AI Agent 平台(自研; 见 4.6; 私服公开只读免凭据, 同步后统一经内置 registry 部署)
 # ---- 4.7 Multus CNI(容器多网卡; 详见 deployments/cubestack-addon/multus/CUBESTACK.md) ----
 # 离线镜像: 联网机 docker save ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
 #   → deployments/offline-files/multus/multus-cni.tar → 16_multus 模块推送进内置 registry
@@ -133,15 +135,16 @@ MULTUS_NAD_NAME="${MULTUS_NAD_NAME:-multus-nad}"         # 示例 NAD 名(pod �
 
 # ---- 4.8 RDMA 共享设备插件(Device Plugin; 详见 deployments/cubestack-addon/rdma/CUBESTACK.md) ----
 # 离线镜像: 联网机 tools/images/rdma-save-images.sh 下载
-#   ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:${RDMA_IMAGE_TAG} → offline-files/rdma/ → 17_rdma 模块推送进内置 registry
+#   ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:${RDMA_IMAGE_TAG} → offline-files/rdma/ → 10_rdma_shared_dev_plugin 模块推送进内置 registry
 RDMA_SAVE_DIR="${RDMA_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/rdma}"
 RDMA_IMAGE_TAG="${RDMA_IMAGE_TAG:-v1.5.4}"              # ⚠ 官方源在 ghcr.io/mellanox(非 Docker Hub); 1.4.0 无 v 前缀(ghcr 上 v1.4.0 404), v1.5.1+ 带 v; 默认 v1.5.4 最新(修复 RoCE 口 issm 硬检查); 部署模块按 tar 内实际 tag 自适应
 RDMA_RESOURCE_PREFIX="${RDMA_RESOURCE_PREFIX:-nvidia.com}"  # 扩展资源前缀
 RDMA_RESOURCE_NAME="${RDMA_RESOURCE_NAME:-mlx5_0}"      # 扩展资源名(pool 模式; 与 RDMA_IF_NAMES 对应的网卡; pod 申请 nvidia.com/mlx5_0)。per-hca 模式忽略此值(资源名=实际设备名)
-RDMA_HCA_MODE="${RDMA_HCA_MODE:-per-hca}"                  # 资源模式: pool=全部 HCA 聚合为单个扩展资源(默认, 兼容旧部署); per-hca=每块 HCA 独立扩展资源(如 nvidia.com/mlx5_0 / nvidia.com/mlx5_1..., pod 通过 resources.limits 按资源名选择用哪块卡)
+RDMA_HCA_MODE="${RDMA_HCA_MODE:-per-hca}"                  # 资源模式: per-hca=每块 HCA 独立扩展资源(**本文件默认**, 推荐: pod 按资源名选卡, 如 nvidia.com/mlx5_0 / mlx5_1...); pool=全部 HCA 聚合为单个扩展资源(兼容旧部署; 也是模块代码的**内建回退值**)。⚠ per-hca 下检测到 0 块 HCA 会报错退出 —— 除非下方 RDMA_PLACEHOLDER_HCAS 非空(本文件默认非空, 见其说明)
 RDMA_HCA_MAX="${RDMA_HCA_MAX:-100}"                     # 每资源最大共享 Pod 数(rdmaHcaMax; per-hca 模式下每块卡各一份配额)
 RDMA_IF_NAMES="${RDMA_IF_NAMES:-}"                       # 宿主机 RDMA 网卡名(逗号分隔, selectors.ifNames); ⚠ 留空 = 模块自动扫描所有节点 /sys/class/infiniband/*/device/net/ 收集真实设备名+网卡名(兼容 IB=ibsX / RoCE=ens*/manage0 混合), 显式设置则按此精确过滤
 RDMA_ACTIVE_ONLY="${RDMA_ACTIVE_ONLY:-true}"             # 自动检测时只收录链路状态 ACTIVE 的 HCA(读 /sys/class/infiniband/*/ports/*/state); DOWN/DISABLED 卡(DISABLED)不建资源不暴露; false=全部暴露。仅作用自动检测(RDMA_IF_NAMES 为空时), 显式 RDMA_IF_NAMES 时忽略本项
+RDMA_PLACEHOLDER_HCAS="${RDMA_PLACEHOLDER_HCAS:-mlx5_0,mlx5_1,mlx5_2}"  # 纯 VM 无 RDMA 卡时的占位设备名(**默认带 3 个**): 自动检测到 0 块 HCA 时按这些名字生成 config.json(如 per-hca → nvidia.com/mlx5_0/1/2), 插件 DaemonSet 正常起来但**不注册任何扩展资源**(占位名是设备名、不是 netdev 名 → selectors 永不匹配), ConfigMap 带标注 cubestack.io/rdma-placeholder=true, verify 模块据此放行并标注"未验收真实 RDMA"。**检测到真实 HCA 时本项被忽略 → 物理机零影响**(仅作用自动检测, 显式 RDMA_IF_NAMES 时也不生效)。要恢复"无卡即报错退出"(仅 per-hca 会报错; pool 本来就空转不报错): 把本行改成 RDMA_PLACEHOLDER_HCAS=""(去掉 :- 默认值; 只 export 一个空环境变量无效 —— 本行赋值会覆盖环境变量)
 RDMA_VENDORS="${RDMA_VENDORS:-15b3}"                    # PCI Vendor ID(逗号分隔; Mellanox/NVIDIA=15b3)
 RDMA_UPDATE_INTERVAL="${RDMA_UPDATE_INTERVAL:-300}"     # periodicUpdateInterval 秒(0=关闭周期更新)
 RDMA_NAMESPACE="${RDMA_NAMESPACE:-kube-system}"         # 插件命名空间
@@ -599,7 +602,7 @@ LWS_RELEASE_NAME="${LWS_RELEASE_NAME:-lws}"             # Helm release 名
 
 # ---------------- 4.3 P1 阶段附加组件(依赖: Registry + 部分依赖 GPU/Ceph) ----------------
 # 开关见顶部【组件启停开关】: PROMETHEUS_ENABLED / CEPH_ENABLED / CEPH_CSI_ENABLED /
-#   ENVOY_GATEWAY_ENABLED / ENVOY_AI_GATEWAY_ENABLED
+#   ENVOY_GATEWAY_ENABLED / ENVOY_AI_GATEWAY_ENABLED / CUBESTACK_GATEWAY_ENABLED
 # Envoy 网关二件套(P1-9 统一流量入口): Envoy Gateway=通用 K8s API 网关基座;
 # Envoy AI Gateway=LLM/AI 专用扩展层(依赖 Envoy Gateway 先装)。详见 docs/envoy-gateway.md
 
@@ -628,6 +631,19 @@ ENVOY_AI_NAMESPACE="${ENVOY_AI_NAMESPACE:-ai-gateway-system}"      # AI 控制�
 # 数据面对外固定入口: gateway-nodeport.sh 转换后自动创建固定名别名 Service(<gw>-external,
 #   NodePort 固定于此)。控制器生成的 envoy-<ns>-<gw>-<hash> 名含 hash 且由控制器拥有, 对外一律用固定别名。
 GATEWAY_EXTERNAL_NODEPORT="${GATEWAY_EXTERNAL_NODEPORT:-30880}"
+# ---- 平台统一网关 cubestack-gateway(模块 cubestack_gateway; 见 4.3) ----
+# 架构: 单 Gateway + 单 HTTP Listener(80) + 多 hostname; 每服务一条 HTTPRoute 跨 ns 绑定,
+#   替代"每个组件一个 NodePort *-external"的分散暴露。基座 = cubestack-addon/gateway/base-gateway.yaml
+#   (Namespace cubestack-gateway-system + Gateway cubestack-gateway; 复用 EG 的 GatewayClass eg);
+#   路由 = cubestack-addon/gateway/routes/*.yaml(加服务只需加一条 HTTPRoute, 网关不动)。
+# ⚠ 启用后监控对外暴露改走本网关(grafana/prometheus.cubestack.io), 08_prometheus 不再建
+#   *-external NodePort(31000/31001)并清理历史遗留 —— 见 PROMETHEUS_EXPOSE_MODE 段。
+# ⚠ 模块序号 33 = **排在所有组件之后**(路由落在后端组件的命名空间里, 提前 apply 会 namespaces not found
+#   → 路由静默缺失; 2026-09-17 cubepilot 路由即此因丢失)。新增组件模块请用小序号, 或部署后重跑
+#   `--steps cubestack_gateway` 补下发(模块内有后端存在性预检, 会明确提示哪条被跳过)。
+CUBESTACK_GATEWAY_FIXED_ENTRY="${CUBESTACK_GATEWAY_FIXED_ENTRY:-true}"     # 建固定名别名 <gw>-external + 固定 NodePort
+CUBESTACK_GATEWAY_NODEPORT="${CUBESTACK_GATEWAY_NODEPORT:-30080}"          # 固定入口 NodePort(与 AI 示例网关 30880 区分, 防同节点端口冲突)
+CUBESTACK_GATEWAY_NODEPORT_MAX="${CUBESTACK_GATEWAY_NODEPORT_MAX:-32767}"  # 上限(≤ apiserver --service-node-port-range 上限)
 # CRD chart 命名空间: 默认与控制器合并(CRD 为 cluster-scoped, namespace 仅 helm release 归属;
 # 早期独立 ai-gateway-crds 空 ns 易误判废弃, 已合并; 设 ai-gateway-crds 可恢复拆分)
 ENVOY_AI_CRDS_NS="${ENVOY_AI_CRDS_NS:-${ENVOY_AI_NAMESPACE}}"
@@ -640,7 +656,67 @@ ENVOY_AI_CRDS_NS="${ENVOY_AI_CRDS_NS:-${ENVOY_AI_NAMESPACE}}"
 
 # ---------------- 4.6 自研模块(CubeStack 平台组件) ----------------
 # 03_addon/ 下 01~19 为第三方中间件预留, 20 起为 CubeStack 自研模块
-# 开关见顶部【组件启停开关】: CUBESTACK_APPS_ENABLED
+# 开关见顶部【组件启停开关】: CUBESTACK_APPS_ENABLED / CUBEPILOT_ENABLED
+
+# ---- CubePilot AI Agent 平台(模块 cubepilot / verify_cubepilot) ----
+# 制品: 4 个镜像 cubepilot-{openclaw,operator,api,web} + 1 个 chart, 均托管在
+#   **私服 Harbor**(harbor.isuanova.com/suanova), 由 cubepilot 发布流水线推送 ——
+#   与 metax 镜像同源(harbor.isuanova.com 即本项目自己的 Harbor)。
+#   ⚠ chart 仓库名是 **cubepilot-chart**(带 -chart 后缀), 不是 cubepilot。
+#   发布线(chart 版本 ↔ 镜像 tag 一一对应):
+#     main 分支 → chart 0.1.0-latest + 镜像 :latest; 正式 tag vX.Y.Z → chart X.Y.Z + 镜像 :X.Y.Z。
+# ⚠ chart 各镜像默认 tag 是 :latest(会跟上游漂移), 本模块恒显式传 4 个镜像 ref 锁版本。
+#
+# ★ 双模式(CUBEPILOT_MODE; **默认 online** —— 与仓库其它组件的"离线优先"相反, 当前为测试节点):
+#   **两种模式的部署路径完全相同**: 节点**只从集群内置 registry 拉镜像**, 部署机 helm 装**本地 chart tgz**。
+#   online  = 部署前先从私服 Harbor 同步制品到本地(chart → cubestack-addon/cubepilot/,
+#             镜像 → offline-files/cubepilot/*.tar), 再推入内置 registry, 之后与 offline 同路部署
+#   offline = 不碰外网, 直接用盘上已有制品推入内置 registry 后部署
+#   ⇒ online 跑过一次后制品已在盘上, **改 CUBEPILOT_MODE=offline 即可切纯离线, 无需任何额外准备**。
+#   ⇒ online 在私服不可达时**自动降级**: 拉不到就退回本地已有制品(告警不中断); 本地也没有才报错。
+#   制品刷新: online 每次部署都比对私服 digest 与本地 <tar>.digest 边车 —— 未变则跳过下载(不白传), 变了才重拉。
+#            想强制重拉: 删掉对应 tar(或其 .digest 边车)。
+#   本机无外网 / 隔离集群: 要么置 offline 并预置制品(工具见 CUBESTACK.md §2), 要么直接 CUBEPILOT_ENABLED=false。
+#
+# ⚠ Harbor 的 suanova 项目**公开只读(anonymous pull)**: 无需配置任何凭据即可 online。
+#   若将来收紧为私有项目, 再填 CUBEPILOT_HARBOR_USER / CUBEPILOT_HARBOR_PASSWORD 即可。
+CUBEPILOT_MODE="${CUBEPILOT_MODE:-online}"                           # online(先从私服同步制品)|offline(只用本地制品)
+CUBEPILOT_HARBOR="${CUBEPILOT_HARBOR:-harbor.isuanova.com}"          # 私服域名(与 metax 同源)
+CUBEPILOT_PROJECT="${CUBEPILOT_PROJECT:-suanova}"                     # Harbor 项目名(也是内置 registry 下的仓库前缀)
+CUBEPILOT_VERSION="${CUBEPILOT_VERSION:-0.1.0-latest}"                # chart 版本(OCI tag; 发布 tag 时如 0.1.0)
+CUBEPILOT_IMAGE_TAG="${CUBEPILOT_IMAGE_TAG:-}"                        # 镜像 tag; 留空自动派生(-latest 结尾→latest, 否则=chart 版本)
+CUBEPILOT_HARBOR_USER="${CUBEPILOT_HARBOR_USER:-}"                    # (可选)私有化后填; 留空=匿名拉取(该 Harbor 公开只读)
+CUBEPILOT_HARBOR_PASSWORD="${CUBEPILOT_HARBOR_PASSWORD:-}"            # Harbor 密码/token(本文件已 gitignore, 勿提交)
+CUBEPILOT_HARBOR_INSECURE="${CUBEPILOT_HARBOR_INSECURE:-false}"       # online: true=拉取时跳过 TLS 校验(私服自签证书时用)
+CUBEPILOT_CHART_DIR="${CUBEPILOT_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/cubepilot}"  # chart 目录(online 同步落盘于此; 也可放平台 CRD)
+CUBEPILOT_OFFLINE_DIR="${CUBEPILOT_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/cubepilot}"  # 镜像 tar 目录(online 同步落盘于此; offline 从此处取)
+CUBEPILOT_NAMESPACE="${CUBEPILOT_NAMESPACE:-cubepilot}"               # 部署命名空间
+CUBEPILOT_RELEASE="${CUBEPILOT_RELEASE:-cubepilot}"                   # helm release 名
+# 内置 Portal(chart 自带的 React 门户 cubepilot-web: SPA 页面 + /api 反代给 cubepilot-api)：
+# 默认启用 —— 装完即可访问(平台网关 cubepilot.cubestack.io, 或 port-forward svc/cubepilot)。
+# 置 false 则不建 cubepilot-web Deployment 与相关 Service(同步/推送阶段也会跳过 web 镜像, 不白传),
+# 此时只剩 API 入口(网关 cubepilot-api.cubestack.io / port-forward svc/cubepilot-api)。
+CUBEPILOT_WEB_ENABLED="${CUBEPILOT_WEB_ENABLED:-true}"
+# 两个 PVC(cubepilot-api-data 元数据 / cubepilot-api-skill-repo 共享技能仓)的 StorageClass。
+# 留空 = 自动派生: Ceph 体系启用 → ceph-block; 否则留空(PVC 回落集群默认 StorageClass)。
+# ⚠ chart 语义是"storageClassName 非空才生效", 故留空时模块不传该参数。
+CUBEPILOT_STORAGE_CLASS="${CUBEPILOT_STORAGE_CLASS:-}"
+# 说明: **不需要节点级私服凭据, 也不需要 imagePullSecret** —— 节点只访问集群内置 registry
+# (免认证且节点已信任), operator 运行时铸造的 ServiceAccount 同样能拉。
+# (旧版 online 直连私服时才需要 containerd certs.d 下发, 已随"统一走内置 registry"一并移除。)
+# LLM 预置(**默认不预置**: 不假设平台已有 LLM; 装完在 Portal → Agent Config → LLM Config 添加)。
+# 要安装时预置平台默认模型: 填 ENDPOINT + MODEL + API_KEY(ENDPOINT/API_KEY 任一非空即进入预置流程)。
+# API_KEY 会写入命名空间内 Secret(cubepilot-llm); 本文件已 gitignore, 勿提交。
+CUBEPILOT_LLM_ENDPOINT="${CUBEPILOT_LLM_ENDPOINT:-}"                 # 如 https://api.deepseek.com
+CUBEPILOT_LLM_MODEL="${CUBEPILOT_LLM_MODEL:-}"                       # 如 deepseek-v4-flash
+CUBEPILOT_LLM_API_KEY="${CUBEPILOT_LLM_API_KEY:-}"                   # API Key(留空则不建 Secret)
+CUBEPILOT_LLM_SECRET="${CUBEPILOT_LLM_SECRET:-cubepilot-llm}"        # Secret 名(operator 按此名 watch)
+# CubeStack 平台 CRD(DevEnvironment / InferenceService / ...): chart **不含**(chart 只带 6 个
+# ai.cubestack.io CRD)。仅当内置 skills/chat 需要平台资源时才装 → 默认关闭。
+# 开启前把 cubepilot 源仓库 test/e2e/framework/testdata/cubestack-crds/ 下的 YAML 拷到该目录。
+CUBEPILOT_PLATFORM_CRDS_ENABLED="${CUBEPILOT_PLATFORM_CRDS_ENABLED:-false}"
+CUBEPILOT_PLATFORM_CRDS_DIR="${CUBEPILOT_PLATFORM_CRDS_DIR:-${CUBEPILOT_CHART_DIR}/cubestack-crds}"
+CUBEPILOT_WAIT_SECONDS="${CUBEPILOT_WAIT_SECONDS:-300}"              # helm --wait / rollout 等待上限(首次拉镜像较慢, 可调大)
 
 
 # ════════════════════════════════════════════════════════════

@@ -369,11 +369,15 @@ GWE
     # (envoy-gateway-system), 不在 Gateway 命名空间(default)。最长 180s。
     # ⚠ 列序敏感(与 gateway-nodeport.sh 注释同坑): 单命名空间 get 输出列为 NAME TYPE...,
     #   `-A` 输出列为 NAMESPACE NAME...。这里**统一用 -A 查询并解析 $1=ns/$2=名称**, 避免列序混用。
+    # ⚠⚠ -A 必须放在动词**之后**(kubectl get svc -A): kubectl v1.32 下 `-A` 非全局 flag,
+    #   写成 `kubectl -A get svc` 直接报 "flags cannot be placed before plugin name" 并返回空,
+    #   在循环里表现为"180s 永远发现不了数据面 Service" → 静默退回 warn, 固定入口永不创建
+    #   (2026-09-16 实测 kubectl v1.32.5; 同坑见 tools/lb/gateway-nodeport.sh)。
     #   兜底校验 ns 为 default/envoy-gateway-system(数据面真实所在), 排除其它含同名标签的临时资源。
     say "  等待数据面 Service 调和(最长 180s)..."
     _EGWSVC=""; _EGW_DP_NS=""; _EGW_DP_NAME=""
     for _i in $(seq 1 36); do
-        _EGWSVC="$( (SSH "${K} -A get svc -l gateway.envoyproxy.io/owning-gateway-name=${ENVOY_AI_EXAMPLE_GATEWAY} --no-headers 2>/dev/null" || true) | head -1 )"
+        _EGWSVC="$( (SSH "${K} get svc -A -l gateway.envoyproxy.io/owning-gateway-name=${ENVOY_AI_EXAMPLE_GATEWAY} --no-headers 2>/dev/null" || true) | head -1 )"
         _EGW_DP_NS="$(echo "${_EGWSVC}" | awk '{print $1}')"
         case "${_EGW_DP_NS}" in default|envoy-gateway-system) _EGW_DP_NAME="$(echo "${_EGWSVC}" | awk '{print $2}')"; break ;; esac
         _EGWSVC=""; sleep 5
@@ -382,7 +386,10 @@ GWE
         ok "  数据面 Service 已调和: ${_EGW_DP_NS}/${_EGW_DP_NAME}"
         say "  生成固定名别名 Service(${ENVOY_AI_EXAMPLE_GATEWAY}-external)..."
         # ⚠ 固定别名建在**数据面所在命名空间**(默认 envoy-gateway-system), 非 Gateway 命名空间
-        if bash "${SCRIPT_DIR}/../tools/lb/gateway-nodeport.sh" "${ENVOY_AI_EXAMPLE_GATEWAY}" "${_EGW_DP_NS}"; then
+        # ⚠ 路径必须是 ${SCRIPT_DIR}/tools/...(SCRIPT_DIR = deployments/scripts; 曾误写成
+        #   ${SCRIPT_DIR}/../tools/... 指向不存在的 deployments/tools/ → bash 直接失败,
+        #   被下面的 warn 分支静默吞掉, 表现为"示例网关建了但固定入口/别名一直不存在")。
+        if bash "${SCRIPT_DIR}/tools/lb/gateway-nodeport.sh" "${ENVOY_AI_EXAMPLE_GATEWAY}" "${_EGW_DP_NS}"; then
             ok "  固定入口已就绪: kubectl -n ${_EGW_DP_NS} get svc ${ENVOY_AI_EXAMPLE_GATEWAY}-external"
         else
             warn "  gateway-nodeport.sh 失败(稍后手工: sudo deployments/scripts/tools/lb/gateway-nodeport.sh ${ENVOY_AI_EXAMPLE_GATEWAY} ${_EGW_DP_NS})"

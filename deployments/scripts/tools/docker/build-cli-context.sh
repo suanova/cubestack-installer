@@ -71,6 +71,7 @@ rsync -a \
     --exclude '.git' --exclude '.venv' --exclude 'venv' --exclude '.ansible' --exclude '.cache' \
     --exclude 'config/cluster.conf' --exclude 'config/cluster.conf.bak' --exclude 'config/.deploy.state' \
     --exclude 'hosts.yml' --exclude 'inventory.ini' --exclude 'artifacts' \
+    --exclude '*.swp' --exclude '*.swo' --exclude '*.swx' --exclude '*~' \
     "${REPO_ROOT}/deployments/" "${OUT}/deployments/"
 say "同步 skills ..."
 rsync -a --exclude '.git' "${REPO_ROOT}/skills" "${OUT}/"

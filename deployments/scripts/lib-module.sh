@@ -201,10 +201,12 @@ module_default_on() {
 #   · --enable 不在本函数生效(只写 cluster.conf, 见 deploy-cluster.sh)。
 # 结果写入全局 RUN_STEPS(先按模块文件顺序 + REQUIRES 闭包, 再做稳定拓扑排序)
 # 用法: resolve_run_steps <steps> <skip> <enable> [phase_filter]
+#   --steps <组件> 走"单组件安装模式": 只跑该组件 + 其非基座依赖(见函数内 ★ 注释)。
 resolve_run_steps() {
     local steps_arg="$1" skip_arg="$2" enable_arg="$3" phase_filter="$4"
     local s k nk i found=0
     RUN_STEPS=()
+    STEPS_PRECISE_MODE=0    # 单组件安装模式标记(--steps 指定了非 verify 模块); 供汇总/提示共用
 
     # 元模块展开: --steps/--skip/--enable 中的 "verify" → 全部 verify_* 模块
     # (新增 verify_<组件>.sh 自动纳入, 无需指定 operator 名即可验证全部组件)
@@ -246,6 +248,7 @@ resolve_run_steps() {
         # 非 verify 模块: --steps 精确模式, 只跑指定模块 + REQUIRES 闭包; 基座默认启用模块仍参与。
         # 断点续跑感知, 重跑用 --fresh。
         _steps_precise=1
+        STEPS_PRECISE_MODE=1
         enable_arg="${enable_arg},${steps_arg}"
     fi
 
@@ -324,6 +327,32 @@ resolve_run_steps() {
         done
     fi
 
+    # ★ --steps <组件> = **单组件安装模式**(2026-09-17 用户定案, 不再兼容旧的"自动带基座"语义):
+    #   剔除"重装/基座类"模块(基座集合 + env/k8s 阶段全部), 只保留:
+    #     ① --steps/--enable 显式点名的模块(显式优先, 如 --steps k8s_registry)
+    #     ② 组件的**非基座**依赖(如 envoy_ai_gateway → envoy_gateway, 真依赖不丢)
+    #   集群接入不靠模块, 由 deploy-cluster.sh 的接入预检负责: 本地 kubeconfig 可用(pod 能
+    #   kubectl get nodes)则直接装组件; 否则用 cluster.conf NODES 的密码引导(生成密钥 →
+    #   注入公钥 → 从首个 master 取 admin.conf 到本地), 见 ensure_cluster_access。
+    #   ⇒ 因此这里**不再**把 k8s_deploy/metallb/k8s_registry/vm_sshkey/k8s_passwordless 排进计划。
+    if [ "${_steps_precise}" = "1" ] && [ "${#RUN_STEPS[@]}" -gt 0 ]; then
+        local _keep_explicit=" ${steps_arg//,/ } ${enable_arg//,/ } "
+        local _kept=() _k5 _i5 _is_base
+        for _k5 in "${RUN_STEPS[@]}"; do
+            [ -z "${_k5}" ] && continue
+            _i5="$(module_index "${_k5}")"
+            _is_base=0
+            if [ "${_i5}" -ge 0 ]; then
+                case " ${BASE_MODULES[*]} " in *" ${_k5} "*) _is_base=1 ;; esac
+                case "${MODULE_PHASE[$_i5]:-}" in env|k8s) _is_base=1 ;; esac
+            fi
+            [ "${_is_base}" = "0" ] && { _kept+=("${_k5}"); continue; }
+            case "${_keep_explicit}" in *" ${_k5} "*) _kept+=("${_k5}") ;; esac
+        done
+        RUN_STEPS=("${_kept[@]}")
+        unset _kept _k5 _i5 _is_base _keep_explicit
+    fi
+
     # ★ 稳定拓扑排序(REQUIRES): 依赖者排在被依赖者之后; 无依赖约束的模块保持原(文件)顺序。
     #   循环依赖 / 未知引用在此报错, 新模块声明 REQUIRES 后自动保证顺序, 无需改文件序号。
     if ! _topo_sort_requires; then
@@ -394,6 +423,12 @@ run_module() {
 
     script="${MODULES_DIR}/${MODULE_SCRIPT[$idx]}"
     [ -f "${script}" ] || { err "模块脚本缺失: ${script}"; return 1; }
+    # ★ 覆盖安装可见化的**可靠判定点**: 就在真正执行 k8s_deploy 之前。
+    #   计划阶段(deploy-cluster.sh)也提示过一次, 但那时新容器可能**还没有 SSH 密钥** →
+    #   cluster_exists 判不出集群; 而接入引导(vm_sshkey/k8s_passwordless)恰好排在本模块之前,
+    #   到这里密钥已装好、集群可探测 —— 新容器对着已有集群的场景在这里把"会发生什么"打出来。
+    #   ⚠ 只提示**不拦停**(默认全量运行 = 覆盖安装, 见 notify_base_redeploy 注释)。
+    [ "${key}" = "k8s_deploy" ] && notify_base_redeploy
     say "[${key}] ${MODULE_DESC[$idx]:-${MODULE_SCRIPT[$idx]}} ..."
     say "  执行: ${script}"
     if bash "${script}"; then
@@ -438,11 +473,174 @@ _verify_meta_list() {
     echo "${out# }"
 }
 
+# ---------------- 基座重跑提示(覆盖安装可见化; **不拦停**) ----------------
+# 定案(2026-09-17): **默认全量运行 = 覆盖安装** —— 新 installer 容器对着已有集群跑
+#   ./deploy-cluster.sh 本来就是"重装集群"的正常用法, 不做拦截。本组函数只做一件事:
+#   集群确实已存在时把"会发生什么"显式打出来(否则日志里 0 行提示, 容易被误读成"装到新集群")。
+#   · 只想装组件、不动集群 → --steps <组件>: 单组件安装模式**结构上不含基座**
+#     (resolve_run_steps 剔除 BASE_MODULES + env/k8s 阶段), 不会碰 k8s_deploy。
+#   · 2026-09-17 之前这里是 fail-closed 拦停(2026-09-11 一次 "--steps 误触发 k8s_deploy" 事故的补丁):
+#     该事故已被当天的单组件模式**结构性消除**(证据: `--list --steps prometheus` 的计划里没有
+#     k8s_deploy), 拦停反而挡住了正常的覆盖重装(实机: 新容器默认部署被拦在 k8s_deploy) → 改提示。
+#   · 覆盖重装本身仍有既有防线(kubespray 侧, 见 deployments/kubespray/cubestack-offline.sh):
+#     检测旧 K8s 残留 → 醒目警告 + 60s 倒计时(Ctrl-C 可中止) → kubeadm reset。
+#
+# cluster_exists(): 只读探测, 无副作用(不建目录、不写 kubeconfig)。
+#   SSH_KEY 存在 + 首个 master 可达 + 远端 kubectl 能列出节点 → 视为"集群已存在"。
+#   任何一步失败(网络/密钥/未 init/无 sudo 权限)一律返回 1 = "无集群" → 不提示,
+#   保证首次部署与网络抖动时不出误导性提示(只对"确定已存在"发话)。
+cluster_exists() {
+    local fm key
+    fm="$(first_master_ip 2>/dev/null)" || return 1
+    [ -n "${fm}" ] || return 1
+    key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    [ -f "${key}" ] || return 1     # 无密钥 → 连不上(新容器初始态), 交给接入引导, 不算"已存在"
+    # ⚠ -n: 不让 ssh 读 stdin —— 否则会把调用方的 stdin(如 `bash -s < script`、管道)吃掉。
+    ssh -n -i "${key}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${fm}" \
+        "sudo -n kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes -o name >/dev/null 2>&1" \
+        >/dev/null 2>&1
+}
+
+# 执行期提示: 恒返回 0(调用方不看返回值, 只借它打印); 同一次运行只打印一次。
+notify_base_redeploy() {
+    [ "${_REDEPLOY_NOTED:-0}" = "1" ] && return 0
+    local _k _in=0
+    for _k in "${RUN_STEPS[@]:-}"; do [ "${_k}" = "k8s_deploy" ] && _in=1; done
+    [ "${_in}" = "1" ] || return 0                       # 计划里没有 k8s_deploy → 不涉及
+    [ "$(get_state k8s_deploy)" = "done" ] && return 0   # 本机已装过 → 断点续跑会跳过 k8s_deploy
+    cluster_exists || return 0                           # 探测不到(首装/无密钥/网络不通) → 保持安静
+    _REDEPLOY_NOTED=1
+    warn "检测到集群已存在 → 本次为「覆盖安装」(默认语义): k8s_deploy 会重跑 kubespray"
+    warn "  节点上已有的旧 K8s 状态会被 kubeadm reset —— 该步骤自带 60s 醒目倒计时, 期间 Ctrl-C 可中止"
+    warn "  只想装某个组件、不动集群: sudo $0 --steps <组件>(如 --steps prometheus; 计划里不含基座)"
+}
+
+# 计划阶段提示(--list/--list-steps 只读路径用): 只提示, 不探测集群
+#   (只读命令不产生副作用 / 不发网络探测; 真探测在部署时由 notify_base_redeploy 做)。
+plan_warn_base_redeploy() {
+    local _k _in=0
+    for _k in "${RUN_STEPS[@]:-}"; do [ "${_k}" = "k8s_deploy" ] && _in=1; done
+    [ "${_in}" = "1" ] || return 0
+    [ "$(get_state k8s_deploy)" = "done" ] && return 0
+    echo "  ℹ 本次含 k8s_deploy: 目标集群**已存在**时即为覆盖安装(重跑 kubespray; 部署时另打印醒目提示)"
+    echo "     不想动集群 → --steps <组件>(计划里不含基座); 还要清掉本机断点状态 → --fresh"
+    return 0
+}
+
+# ---------------- 集群接入预检(单独装组件 / 精确 --steps 用) ----------------
+# 目标(2026-09-17 用户定案): 全新的 installer 容器只有 cluster.conf 的 NODES(IP/用户/密码) 时,
+#   `--steps <组件>` 也要能把组件直接装到**已存在**的集群上:
+#     ① 本地已有可用 kubeconfig(能 kubectl get nodes) → 直接用, 不动集群;
+#     ② 否则按密码引导: 生成密钥对(vm_sshkey) → 用密码注入公钥(k8s_passwordless)
+#        → sync_kubeconfig 从首个 master 取 admin.conf 到本地 ~/.kube/config。
+#   两步都幂等(已有密钥/公钥则无副作用); 返回 1 = 接入失败(调用方应退出并提示查 NODES)。
+ensure_cluster_access() {
+    if command -v kubectl >/dev/null 2>&1 \
+       && timeout 15 kubectl get nodes --no-headers >/dev/null 2>&1; then
+        say "集群接入: 本地 kubeconfig 可用 → 直接使用(跳过接入引导)"
+        return 0
+    fi
+    say "集群接入: 本地无法访问集群 → 走接入引导(密码注入公钥 + 从首个 master 取 admin.conf)"
+    run_module vm_sshkey || { err "集群接入: 生成 SSH 密钥对失败"; return 1; }
+    run_module k8s_passwordless || { err "集群接入: 注入公钥失败(检查 cluster.conf NODES 的用户名/密码/网络)"; return 1; }
+    sync_kubeconfig || { err "集群接入: 取回 admin.conf 失败(检查首个 master 是否可达、集群是否正常)"; return 1; }
+    say "集群接入: kubeconfig 就绪(${HOME}/.kube/config)"
+    return 0
+}
+
+# 输出可单独部署的组件清单(供 --help 自动渲染, 新增组件自动出现)。
+#   参数: implemented(默认, 已实现的组件) | stub(规划中未实现的伪代码占位模块)
+#   排除: verify_*(按需执行) / k8s_scale(扩容模式) / 基座模块(BASE_MODULES, 不属于"单独部署的组件")
+_component_meta_list() {
+    local want="${1:-implemented}" i key tgl script is_stub
+    for i in "${!MODULE_KEY[@]}"; do
+        key="${MODULE_KEY[$i]}"
+        [[ "${key}" == verify_* || "${key}" == k8s_scale ]] && continue
+        tgl="${MODULE_TOGGLE[$i]:-}"
+        [ -n "${tgl}" ] || continue
+        case " ${BASE_MODULES[*]} " in *" ${key} "*) continue ;; esac
+        script="${MODULES_DIR}/${MODULE_SCRIPT[$i]}"
+        is_stub=0
+        grep -q "addon_stub" "${script}" 2>/dev/null && is_stub=1
+        if [ "${want}" = "stub" ]; then
+            [ "${is_stub}" = "1" ] && printf "      %-22s %s\n" "${key}" "${tgl}"
+        else
+            [ "${is_stub}" = "0" ] && printf "      %-22s %s\n" "${key}" "${tgl}"
+        fi
+    done
+}
+
+# ---------------- 未部署组件汇总(防"静默缺失") ----------------
+# ⚠ 背景(2026-09-17 实例, 第二次同类):
+#   TOGGLE 关闭的模块**不会进 RUN_STEPS** —— run_module 只对已调度的模块打印, 于是"部署全绿结束",
+#   但 cubestack-gateway-system/Gateway/HTTPRoute 全都**不存在**: 日志 0 行、state 无记录,
+#   只能靠人工比对 --list 与 state 才发现(第一次是 2026-09-16: 提交里根本没有模块文件)。
+#   本函数把"本次不会部署的组件"显式列出来, 计划开始时(print_plan, 含 --list)与部署收尾各调一次。
+# 分组:
+#   ① 开关关闭(已实现, 打开即部署)   ② 开关已开但本次未调度(--steps 精确模式/--skip/阶段过滤)
+#   ③ 规划中未实现(伪代码占位, 调 addon_stub —— 即使打开开关也只有伪代码流程)
+# 不列: verify_*(按需执行, 不进默认计划) / k8s_scale(扩容模式, 不是组件) / 无 TOGGLE 的基座模块。
+print_undeployed_summary() {
+    local i key tgl script alloff vars k _v
+    local _off="" _idle="" _stub=""
+    local -A _in_run=()
+    for k in "${RUN_STEPS[@]:-}"; do [ -n "${k}" ] && _in_run["${k}"]=1; done
+
+    for i in "${!MODULE_KEY[@]}"; do
+        key="${MODULE_KEY[$i]}"
+        [ -n "${_in_run[${key}]:-}" ] && continue
+        [[ "${key}" == verify_* || "${key}" == k8s_scale ]] && continue
+        tgl="${MODULE_TOGGLE[$i]:-}"
+        [ -n "${tgl}" ] || continue
+        # 单组件安装模式(--steps <组件>)下基座模块已由 ℹ 行说明, 不再混进"开关关闭"组
+        # (否则误导: 它们不是被开关关掉的, 而是该模式按设计不跑)
+        if [ "${STEPS_PRECISE_MODE:-0}" = "1" ]; then
+            case " ${BASE_MODULES[*]} " in *" ${key} "*) continue ;; esac
+        fi
+        alloff=1; vars=""
+        for k in ${tgl}; do
+            _v="${!k:-<未设置>}"
+            vars="${vars}${vars:+,}${k}=${_v}"
+            case "${_v}" in true|1|yes|on) alloff=0 ;; esac
+        done
+        if [ "${alloff}" = "1" ]; then
+            script="${MODULES_DIR}/${MODULE_SCRIPT[$i]}"
+            if grep -q "addon_stub" "${script}" 2>/dev/null; then
+                _stub="${_stub}${_stub:+, }${key}"
+            else
+                _off="${_off}${_off:+, }${key}(${vars})"
+            fi
+        else
+            _idle="${_idle}${_idle:+, }${key}"
+        fi
+    done
+    unset _in_run
+
+    [ -z "${_off}${_idle}${_stub}" ] && {
+        # 单组件模式即使各组为空也要说明一句(否则"什么都不列"会让人以为漏了)
+        [ "${STEPS_PRECISE_MODE:-0}" = "1" ] && echo "  ℹ 单组件安装模式(--steps): 只跑指定组件 + 其非基座依赖; 基座类(k8s_deploy/metallb/local_path/k8s_registry 等)按设计未纳入"
+        return 0
+    }
+    echo "---------------------------------------------"
+    [ "${STEPS_PRECISE_MODE:-0}" = "1" ] && \
+        echo "  ℹ 单组件安装模式(--steps): 只跑指定组件 + 其非基座依赖; 基座类(k8s_deploy/metallb/local_path/k8s_registry 等)按设计未纳入"
+    if [ -n "${_off}" ]; then
+        echo "  ⚠ 本次未部署的组件(开关关闭, 打开即部署): ${_off}"
+        echo "     ↳ 立即单跑: --steps <组件名>(如 --steps cubestack_gateway); 持久启用: --enable <组件名>"
+    fi
+    [ -n "${_idle}" ] && echo "  ⚠ 开关已开但本次未调度(如 --steps 精确模式/--skip/阶段过滤): ${_idle}"
+    [ -n "${_stub}" ] && echo "  ○ 规划中未实现(伪代码占位, 打开开关也只有伪代码流程): ${_stub}"
+    return 0
+}
+
 print_plan() {
     say "==== 集群规划(配置: ${CLUSTER_CONF}) ===="
     echo "  网络模式: ${NET_MODE:-bridge}   虚拟机网段: ${VM_SUBNET:-10.244.0.0/16}   物理Worker: ${PHYS_WORKER_NET:-10.66.1.0/24}"
     echo "  SSH密钥: ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}   默认密码: ${SSH_DEFAULT_PASSWORD:-<未配置>}"
     echo "  本次执行模块: ${RUN_STEPS[*]:-<空>}"
+    print_undeployed_summary
+    plan_warn_base_redeploy
     echo "  节点规划(5字段: role,hostname,ip,ssh_user,ssh_password; 虚拟机创建由 tools/vm/create-vms.sh 独立执行):"
     local line
     for line in "${NODES[@]:-}"; do

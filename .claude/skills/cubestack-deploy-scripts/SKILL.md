@@ -158,8 +158,14 @@ trap '清理测试资源' EXIT
 
 要点:
 - **核心是第 ⑤ 步的真实功能验证**(访问/调用/查询能通才算过),不是 `get pods` 就完事;
-- 测试后端用已预加载的离线镜像(`busybox:latest` httpd / `nginx`),避免离线拉镜像失败;
-- 测试命名空间固定前缀 `verify-` 便于清理;`trap cleanup EXIT` 保证失败也清理;
+- 测试后端镜像**必须离线可用**:`TEST_IMAGE="$(ensure_registry_nginx)" || exit 1`(lib-common 助手,
+  把 nginx 推进**集群内置 registry**,pod 从内置 registry 拉;来源 = 本地 docker → 离线 tar
+  `offline-files/nginx/nginx.tar` → 仅 `VERIFY_IMAGE_ONLINE=true` 才走在线)。**不碰 docker.io、
+  也不依赖节点 containerd 预载**;别再用 `docker.io/library/busybox` 这类 ref。用到它就把
+  `k8s_registry` 加进 `REQUIRES`(见 21_verify_metallb);
+- 测试命名空间固定前缀 `verify-<组件>-$$`(PID 后缀防残留 Terminating ns 冲突);`trap cleanup EXIT` 保证失败也清理;
+- **验证边界要在文件头如实标注**:测到哪一步就写哪一步,够不到的(如需额外镜像的真实流量/吞吐测试)
+  必须写明"不含",别让后续人误判已验收;
 - VIP 在池内校验、HTTP 状态码判定等边界,可加独立小函数(`_ip_in_pool` 等)便于复用;
 - 每个 operator 一个 `verify_<组件>.sh`,本文件就是模板,复制改 MODULE/DESC/TOGGLE 与 ③⑤ 步。
 
@@ -189,12 +195,41 @@ trap '清理测试资源' EXIT
 
 1. **必须** `set -euo pipefail`(少数 `|| true` 兜底处除外)
 2. **必须** source `lib-common.sh` 并 `load_config`
-3. 输出用 `say`(信息)/`ok`(成功)/`warn`(告警)/`err`(致命, exit 1),会同时写日志文件
+3. 输出用 `say`(信息)/`ok`(成功)/`warn`(告警)/`err`(致命),会同时写日志文件。
+   ⚠ **`err()` 只打印、不退出** —— 每个错误分支必须显式跟 `exit 1`(漏了会静默继续往下跑)
 4. 开关类模块先检查 TOGGLE 变量,未启用则 `say "跳过..."` + `exit 0`(不要报错)
 5. 复用逻辑: `bash "${SCRIPT_DIR}/tools/<领域>/xxx.sh"`
 6. 支持 `--only` 过滤的模块: 用 `node_matches "${hostname}"` 判断
 7. 退出码: 0=成功/跳过, 非0=失败(调度器中断部署)
 8. 头部注释保留"数据源: cluster.conf 的哪些变量"
+
+## SSH 取回远端值的引号惯例(踩坑, 强制)
+
+模块里大量"远端取一个值回来"的写法,**一行内的双引号总数必须是偶数**。少写一个引号 → bash 会一路
+找闭合引号直到文件尾,报 `unexpected EOF while looking for matching ')'`,而且**行号指向无关行**,
+极难定位(2026-09-16 实测)。两种正确写法:
+
+```bash
+# ① 内层参数整体带引号(推荐, 与 29_verify_multus 一致): "SSH "${K}" -n ..."
+_st="$(SSH "${K}" -n ${NS} get pod x -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+
+# ② 引号在 2>/dev/null 后闭合, || true 落在引号外: 2>/dev/null" || true)
+_alloc="$(SSH "${K} get node ${_node} -o jsonpath='{.status.x}' 2>/dev/null" || true)"
+```
+
+❌ 坏写法(`"${K} -n ... || true)"` 只有 3 个引号 = 奇数,整个文件语法崩):
+
+```bash
+_st="$(SSH "${K} -n ${NS} get pod x ... 2>/dev/null || true)"
+```
+
+**写完自检**(比 `bash -n` 更早定位;多行 `'...'` awk 块正常报奇数, 对照 git 原版确认):
+
+```bash
+python3 -c "print([i for i,l in enumerate(open('模块.sh'),1) if not l.strip().startswith('#') and l.strip() and l.count(chr(34))%2])"
+```
+
+然后 **`bash -n` + `tools/check-modules.sh` 双绿**才算过。
 
 ## 常用调度命令
 

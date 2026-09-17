@@ -26,6 +26,11 @@ backend/workspace/
 # 系统文件
 .DS_Store
 nohup.out
+# 编辑器残留(vim 交换文件/备份): 曾差点被 build-cli-context 的 rsync 一起打进分发镜像
+*.swp
+*.swo
+*.swx
+*~
 
 # 集群统一配置(含密码,勿提交;模板 cluster.conf.example 需提交)
 deployments/config/cluster.conf

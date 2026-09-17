@@ -493,6 +493,37 @@ kubectl -n rook-ceph get cephcluster,cephblockpool; kubectl get sc ceph-block
 
 ---
 
+### 7. 平台统一网关 cubestack-gateway 故障速查
+
+> 架构/部署/接入新服务见 `deployments/cubestack-addon/gateway/README.md` 与各 `routes/*.yaml` 头部注释。
+
+**症状/排查对照**
+
+| 症状 | 根因 | 解法(根治) |
+|---|---|---|
+| 某组件的 HTTPRoute **压根不存在**(网关本身正常、其它 hostname 可访问, 该 hostname 返回 404) | ① **模块顺序**: 路由落在后端组件自己的命名空间里, 网关模块若排在组件模块之前, `kubectl apply` 直接报 `namespaces "x" not found` 失败 —— 旧版只落一行 `warn` 就继续, 全量日志里被淹没, 路由**静默缺失**。② 组件开关与路由门控不匹配 | **2026-09-17 已修(两处)**: ① 网关模块重排为 `33_cubestack_gateway.sh`(**排在所有组件之后**); ② 下发前做**后端存在性预检**(路由的 metadata.namespace / 第一条 backendRef 的 Service 不存在 → 明确跳过 + 计数, 汇总打印 `⚠ 另有 N 条路由因后端未就绪被跳过`)。**补下发**: 组件部署完成后重跑 `sudo ./deploy-cluster.sh --steps cubestack_gateway`(幂等)。新增组件模块序号请 < 33 |
+| 路由存在但 `ResolvedRefs=False`, 经网关访问 404 | backendRef 指向的 Service 不存在 | 核对 `kubectl -n <ns> get svc`。典型踩坑: CubePilot 写 `svc/cubepilot` —— 那是**内置 Portal 的 nginx 入口**, 仅 `web.enabled=true` 时才渲染; 关 Portal 的部署里只有 `svc/cubepilot-api`。现已拆两条路由各自门控: API `cubepilot-api:8080`(恒有) / Portal `cubepilot:8080`(需 `CUBEPILOT_WEB_ENABLED=true`) |
+| `Gateway` 长期 `Programmed=False (AddressNotAssigned)`, 数据面 Service 是 `LoadBalancer` 且 `EXTERNAL-IP <pending>`, 但 NodePort 别名能访问 | Gateway 注解 `gateway.envoyproxy.io/service-type: NodePort` 在 **EG v1.9.1 未生效**(实测: 注解在, 控制器仍建 LoadBalancer 类型数据面; 集群无 MetalLB → 永远无地址 → 条件不转 True) | 访问不受影响(入口 = `gateway-nodeport.sh` 建的固定别名 `<gw>-external`)。要让状态转绿: 跑一次 `tools/lb/gateway-nodeport.sh <gw>` —— 它把数据面 Service 转成 NodePort 后 EG 立即置 `Programmed=True`(2026-09-17 实测)。**别只信注解** |
+| `sync-to-container.sh` 同步后, 容器内 `check-modules.sh` 报 `MODULE key 重复: xxx (NN_old.sh 与 NN_new.sh)` | 该工具用 `docker cp` **合并式**同步 —— 容器里不存在"源已删则目标也删"的语义; 模块**改名/改序号**后旧文件残留, 同一个 MODULE key 出现两份 | 容器里删掉旧文件后重跑校验: `docker exec <容器> rm -f /opt/cubestack-installer/deployments/scripts/modules/03_addon/NN_old.sh`。同步工具末尾的"容器内静态校验"就是用来拦这个的(报错务必处理, 别当噪音) |
+
+**验证**
+```bash
+sudo ./deploy-cluster.sh --steps cubestack_gateway     # 幂等重下发(含后端预检 + 固定入口 + 部署机 /etc/hosts)
+kubectl get httproute -A                               # 每条应 Accepted=True / ResolvedRefs=True
+curl -i -H "Host: cubepilot-api.cubestack.io" http://<节点IP>:30080/healthz   # 200
+curl -i -H "Host: cubepilot.cubestack.io"     http://<节点IP>:30080/          # 200(Portal SPA)
+```
+
+**相关命令**
+```bash
+kubectl -n cubestack-gateway-system get gateway cubestack-gateway \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'   # Accepted / Programmed
+kubectl -n envoy-gateway-system get svc | grep cubestack-gateway     # 数据面 + 固定别名 <gw>-external(NodePort 30080)
+kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=50  # EG 控制面(路由翻译/backend 解析报错)
+```
+
+---
+
 ## 四、离线部署
 
 ### 1. 【单机/重装】`Drain node` → `Remove-node | List nodes` 报 `error: stat /etc/kubernetes/admin.conf: no such file or directory`

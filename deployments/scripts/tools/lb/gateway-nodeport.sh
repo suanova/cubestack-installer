@@ -44,21 +44,34 @@ K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 # 定位数据面 Service: EG 对 Gateway 所属资源统一打标签 gateway.envoyproxy.io/owning-gateway-name=<名>
 # ⚠ 列序敏感: 指定命名空间时 get svc 输出 NAME TYPE CLUSTER-IP...(名称=$1);
 #   用 -A 全命名空间时输出 NAMESPACE NAME TYPE...(ns=$1, 名称=$2)。两者取列不同, 勿混用。
+# ⚠⚠ -A 必须放在动词**之后**(kubectl get svc -A): kubectl v1.32 下 `-A` 非全局 flag,
+#   写成 `kubectl -A get svc` 会报 "flags cannot be placed before plugin name" 并返回空 ——
+#   未显式传 namespace 的调用方(如 16_envoy_ai_gateway.sh)会因此一直"找不到数据面 Service"。
+#   (2026-09-16 实测 kubectl v1.32.5; 传了 namespace 的调用方不受影响。)
 if [ -n "${NS}" ]; then
     SVC="$( (SSH "${K} -n ${NS} get svc -l gateway.envoyproxy.io/owning-gateway-name=${GW} --no-headers 2>/dev/null" || true) | head -1 )"
     [ -n "${SVC}" ] || { err "未找到数据面 Service(owning-gateway-name=${GW}, ns=${NS}); 先确认 Gateway/AIGateway 已调和: kubectl get gateway -A / kubectl get aigateway -A"; exit 1; }
     SVC_NS="${NS}"
     SVC_NAME="$(echo "${SVC}" | awk '{print $1}')"
 else
-    SVC="$( (SSH "${K} -A get svc -l gateway.envoyproxy.io/owning-gateway-name=${GW} --no-headers 2>/dev/null" || true) | head -1 )"
+    SVC="$( (SSH "${K} get svc -A -l gateway.envoyproxy.io/owning-gateway-name=${GW} --no-headers 2>/dev/null" || true) | head -1 )"
     [ -n "${SVC}" ] || { err "未找到数据面 Service(owning-gateway-name=${GW}); 先确认 Gateway/AIGateway 已调和: kubectl get gateway -A / kubectl get aigateway -A"; exit 1; }
     SVC_NS="$(echo "${SVC}" | awk '{print $1}')"
     SVC_NAME="$(echo "${SVC}" | awk '{print $2}')"
 fi
 
 # ---- 数据面端口(两种模式都用) ----
+# ★ 别名 Service 的 targetPort 必须取**数据面的 targetPort**, 不能用 port —— 数据面 svc 的
+#   port 与 targetPort 常常不同: EG 为 Gateway listener(port 80)生成的数据面 svc 是
+#   port:80 → targetPort:10080(envoy 容器实际监听端口), 别名若照抄成 targetPort:80 则
+#   Endpoints 指向 pod 上没监听的端口 → 节点 IP:固定 NodePort 直接 Connection refused
+#   (2026-09-16 实测: 别名 targetPort=80 连接被拒, 而数据面自身 NodePort 31197 正常 302)。
+#   AI 示例网关(port 8080 == targetPort 8080)掩盖了该缺陷, listener 非 8080 时必现。
 EXT_PORT="$( (SSH "${K} -n ${SVC_NS} get svc ${SVC_NAME} -o jsonpath='{.spec.ports[0].port}' 2>/dev/null" || true) )"
 [ -n "${EXT_PORT}" ] || EXT_PORT="8080"
+EXT_TARGET_PORT="$( (SSH "${K} -n ${SVC_NS} get svc ${SVC_NAME} -o jsonpath='{.spec.ports[0].targetPort}' 2>/dev/null" || true) )"
+# 数据面未显式声明 targetPort 时 K8s 默认 = port; 具名端口(targetPort 为字符串)原样透传也可正常解析
+[ -n "${EXT_TARGET_PORT}" ] || EXT_TARGET_PORT="${EXT_PORT}"
 
 # ---- nodeport / metallb 分支 ----
 GATEWAY_EXTERNAL_NODEPORT="${GATEWAY_EXTERNAL_NODEPORT:-30880}"
@@ -102,7 +115,7 @@ spec:
     gateway.envoyproxy.io/owning-gateway-name: "${GW}"
   ports:
     - port: ${EXT_PORT}
-      targetPort: ${EXT_PORT}
+      targetPort: ${EXT_TARGET_PORT}
 ${_EXT_NODEPORT_LINE}
       protocol: TCP
 EOF

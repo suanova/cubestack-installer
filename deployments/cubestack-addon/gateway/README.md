@@ -14,27 +14,40 @@ CubeStack 对外服务的**单一入口**,基于 Envoy Gateway(复用集群 `eg`
 ```
 
 - **基座**: `base-gateway.yaml`(Namespace + Gateway, 一次上手, 长期保留)。
-- **路由**: `routes/<ns>.yaml`(每服务一条 HTTPRoute, 可整体 apply/delete)。
-- **访问**: `curl -H "Host: <svc>.cubestack.io" http://<节点IP>:<NodePort>/`
+- **路由**: `routes/<服务>.yaml`(每服务一条 HTTPRoute, 可整体 apply/delete)。
+- **访问**: `curl -H "Host: <svc>.cubestack.io" http://<节点IP>:<NodePort>/`(固定入口 NodePort 默认 **30080**)
 
 ## 部署
 
 ```bash
+# 0. 一键(推荐): 模块 33_cubestack_gateway.sh 幂等下发基座 + 路由 + 固定入口 + /etc/hosts
+sudo ./deploy-cluster.sh --steps cubestack_gateway      # 改完 routes/ 重跑即生效
+
+# 手工等价步骤(排查用):
 # 1. 基座(命名空间 + Gateway)
 kubectl apply -f base-gateway.yaml
 
 # 2. 数据面暴露到节点 NodePort
 #    (base-gateway.yaml 已用 service-type=NodePort 注解持久声明; nodePort 自动分配)
-#    若需固定 NodePort, 跑一趟 gateway-nodeport.sh 建固定别名 <gw>-external(默认 30880):
+#    固定 NodePort 用 gateway-nodeport.sh 建固定别名 <gw>-external:
+#      模块走 CUBESTACK_GATEWAY_NODEPORT(默认 30080);  工具裸跑默认 GATEWAY_EXTERNAL_NODEPORT=30880
 deployments/scripts/tools/lb/gateway-nodeport.sh cubestack-gateway
 
-# 3. 各服务路由(m ⊃ 示例: monitoring 的 Grafana/Prometheus)
+# 3. 各服务路由(示例: monitoring 的 Grafana/Prometheus + CubePilot)
 kubectl apply -f routes/monitoring.yaml
+kubectl apply -f routes/cubepilot.yaml          # API(需 CUBEPILOT_ENABLED)
+kubectl apply -f routes/cubepilot-portal.yaml   # Portal(另需 CUBEPILOT_WEB_ENABLED)
 
 # 4. 查状态(应 True/True/True)
 kubectl get httproute -A
 kubectl get gateway cubestack-gateway -n cubestack-gateway-system -o jsonpath='{.status.listeners[0].conditions[?(@.type=="Programmed")].status}'
 ```
+
+> ⚠ **模块序号 33 = 排在所有组件之后**(2026-09-17 起,原名 `18_cubestack_gateway.sh`):
+> 路由落在**后端组件自己的命名空间**里, 排在组件之前 apply 会 `namespaces "x" not found` 失败
+> → 路由静默缺失(cubepilot 曾因此丢路由)。模块现在有**后端存在性预检**: 命名空间/Service 不存在
+> 就明确跳过并在汇总里提示 —— 组件部署完成后**重跑本模块**即补下发。
+> 新增组件模块请用**小于 33 的序号**(或在部署后重跑 `--steps cubestack_gateway`)。
 
 ## 接入新服务(5 分钟)
 
@@ -60,6 +73,14 @@ spec:
 ```
 
 > 若目标 Service 端口与对外端口不同: HTTPRoute `port` 写 **Service 端口**, EG 自动转发 targetPort。
+>
+> **两处配套**(缺一不可):
+> 1. 路由文件放进 `routes/`(模块 33 会逐文件下发, hostname 自动写入部署机 `/etc/hosts`);
+> 2. 在 `33_cubestack_gateway.sh` 的 `case "${_rbase}"` 里加一条**门控**(组件开关为真才下发,
+>    否则该 HTTPRoute 会停在 `ResolvedRefs=False` 的噪音状态)。
+>
+> ⚠ 后端的**命名空间与 Service 必须先存在**: 模块会预检, 不存在就跳过该条并提示
+> (组件模块序号要 < 33; 组件部署晚于网关时, 部署完成后重跑本模块即补下发)。
 
 ## 验证
 
@@ -88,8 +109,13 @@ kubectl delete ns cubestack-gateway-system
 |---|---|---|---|
 | Grafana | `grafana.cubestack.io` | `monitoring/kube-prometheus-grafana:80` | ✅ |
 | Prometheus | `prometheus.cubestack.io` | `monitoring/kube-prometheus-kube-prome-prometheus:9090` | ✅ |
+| CubePilot API | `cubepilot-api.cubestack.io` | `cubepilot/cubepilot-api:8080`(恒存在) | ✅ |
+| CubePilot Portal | `cubepilot.cubestack.io` | `cubepilot/cubepilot:8080`(需 `CUBEPILOT_WEB_ENABLED`) | ✅ |
 | AI 推理/API(示例) | `api.cubestack.io` | 待接入 | ⏳ |
 | 开发/测试环境 | `<svc>.cubestack.io` | 按需 | ⏳ |
+
+> 实测(2026-09-17): `curl -H "Host: cubepilot-api.cubestack.io" http://<节点IP>:30080/healthz` → 200;
+> `curl -H "Host: cubepilot.cubestack.io" http://<节点IP>:30080/` → 200(Portal SPA)。
 
 ## 备注
 
