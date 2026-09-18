@@ -156,17 +156,11 @@ WIPESCRIPT
 # ---------------- ③ 全流程: 删集群 + 全部存储节点清盘 ----------------
 cleanup_all() {
     delete_cluster || true
-    # 收集存储节点(CEPH_NODES 显式 或 全部 NODES)
+    # 收集存储节点(统一走 ceph_storage_hosts: CEPH_NODES 显式 > CEPH_NODE_ROLE, 默认 master)
     local hosts=() _h
-    if [ -n "${CEPH_NODES:-}" ]; then
-        for _h in ${CEPH_NODES//,/ }; do hosts+=("${_h}"); done
-    else
-        for line in "${NODES[@]:-}"; do
-            [ -z "${line}" ] && continue
-            node_parse "${line}"
-            hosts+=("${NODE_HOSTNAME}")
-        done
-    fi
+    while IFS= read -r _h; do
+        [ -n "${_h}" ] && hosts+=("${_h}")
+    done < <(ceph_storage_hosts)
     for _h in "${hosts[@]:-}"; do
         local _ip="" _user="${SSH_USER:-ubuntu}"
         for line in "${NODES[@]:-}"; do

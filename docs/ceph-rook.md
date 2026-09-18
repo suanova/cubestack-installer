@@ -21,7 +21,7 @@
 | 副本模型 | replicated **size=3, min_size=2** | 1 台主机故障池仍可写 |
 | failureDomain | **host** | 每主机一份副本, 真正跨主机冗余(≥3 台存储节点) |
 | mon | **3**(allowMultiplePerNode=false) | 3 台主机真实法定人数(奇数) |
-| 存储节点选择 | `CEPH_NODES` + node label(`CEPH_NODE_LABEL`, 默认 `ceph-storage=rook-ceph`) | 只调度到指定的存储节点(需求: node label 选择部署节点) |
+| 存储节点选择 | `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master**) + node label(`CEPH_NODE_LABEL`, 默认 `ceph-storage=rook-ceph`) | 只调度到指定的存储节点(**默认只装在 master 节点**) |
 | 裸盘 | **自动检测**未使用裸盘(`tools/k8s/ceph-detect-disks.sh`) | 整盘无分区/格式化/挂载/LVM 且非系统盘; 生成 per-node devices(精确盘名, 不用正则, 防误选) |
 | 安全确认 | 部署前红底列出"节点+裸盘", **sleep 60s**(`CEPH_CONFIRM_SLEEP`) | 防覆盖系统盘/在用盘(CI 可 `CEPH_CONFIRM_SLEEP=0`); **k8s 部署阶段**(`k8s_deploy`)也预检一次 |
 | 镜像 | 离线 tar → `ctr -n k8s.io import --no-unpack` | 保持原始 ref, 无需改 manifest; 多架构需 `--platform linux/amd64` 单架构拉取 |
@@ -58,7 +58,7 @@ cluster.conf:
 ```bash
 CEPH_ENABLED=true
 CEPH_CSI_ENABLED=true
-# CEPH_NODES= "cubestack-k8s-master01,cubestack-k8s-worker01,cubestack-k8s-worker02"  # 空=全部节点(≥3 奇数更佳)
+# CEPH_NODES= "cubestack-k8s-master01,cubestack-k8s-worker01"  # 显式指定(优先); 留空则按 CEPH_NODE_ROLE 选, 默认 master
 # REGISTRY_STORAGE_CLASS=ceph-block        # registry 后端走 ceph(替代 local-path)
 # LOCAL_PATH_ENABLED=false                 # 建议: registry 走 ceph 后彻底不装 local-path
 ```
@@ -70,7 +70,7 @@ sudo ./deployments/scripts/deploy-cluster.sh          # 默认全量(含 ceph/ce
 sudo ./deployments/scripts/deploy-cluster.sh --steps ceph,ceph_csi
 ```
 
-`02_ceph.sh` 流程: ① 确定存储节点(CEPH_NODES/全部) ② 逐节点自动检测裸盘
+`02_ceph.sh` 流程: ① 确定存储节点(ceph_storage_hosts: CEPH_NODES 显式 > CEPH_NODE_ROLE, 默认 master) ② 逐节点自动检测裸盘
 ③ **红底确认 + sleep CEPH_CONFIRM_SLEEP(60s)** double-check 节点与盘名
 ④ 节点准备(modprobe rbd 持久化 + lvm2 离线安装 + 打 label `ceph-storage=rook-ceph`)
 ⑤ `ceph-sync-images.sh` 同步镜像到存储节点并 `ctr import`

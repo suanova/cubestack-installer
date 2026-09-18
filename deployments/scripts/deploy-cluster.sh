@@ -359,15 +359,7 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
     #   (与 CEPH_FALLBACK_TO_LOCALPATH 同款翻转), ceph/ceph_csi 模块运行时按
     #   TOGGLE=false 自行跳过, 部署不中断。
     if [ "${CEPH_MODE:-internal}" != "external" ]; then
-        _CN=0
-        if [ -n "${CEPH_NODES:-}" ]; then
-            for _h in ${CEPH_NODES//,/ }; do [ -n "${_h}" ] && _CN=$((_CN+1)); done
-        else
-            for _line in "${NODES[@]:-}"; do
-                [ -z "${_line}" ] && continue
-                _CN=$((_CN+1))
-            done
-        fi
+        _CN="$(ceph_storage_host_count)"
         if [ "${_CN}" -lt "${CEPH_MIN_NODES:-3}" ]; then
             echo ""
             echo -e "\033[43m\033[30m================================================================================\033[0m"
@@ -450,18 +442,13 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         echo -e "\033[41m\033[97m ⚠⚠⚠  CEPH_ENABLED=true — 部署开始前最后确认存储节点/裸盘(避免覆盖磁盘) ⚠⚠⚠\033[0m"
         echo -e "\033[41m\033[97m   node label: ${CEPH_NODE_LABEL:-ceph-storage=rook-ceph}   裸盘策略: ${CEPH_DATA_DISK_POLICY:-auto}\033[0m"
         echo -e "\033[41m\033[97m   存储节点与将使用的裸盘(SSH 直连自动检测/或 CEPH_DATA_DISKS 显式):\033[0m"
-        # 候选存储节点(hostname): CEPH_NODES 显式; 空=全部 NODES
+        # 候选存储节点(hostname): 统一走 ceph_storage_hosts(CEPH_NODES 显式 > CEPH_NODE_ROLE)
         declare -A _CEPH_CONFIRM_DISKS
         _CEPH_CONFIRM_HOSTS=()
-        if [ -n "${CEPH_NODES:-}" ]; then
-            for _h in ${CEPH_NODES//,/ }; do [ -n "${_h}" ] && _CEPH_CONFIRM_HOSTS+=("${_h}"); done
-        else
-            for _line in "${NODES[@]:-}"; do
-                [ -z "${_line}" ] && continue
-                node_parse "${_line}"
-                [ -n "${NODE_HOSTNAME}" ] && _CEPH_CONFIRM_HOSTS+=("${NODE_HOSTNAME}")
-            done
-        fi
+        while IFS= read -r _h; do
+            [ -n "${_h}" ] && _CEPH_CONFIRM_HOSTS+=("${_h}")
+        done < <(ceph_storage_hosts)
+        unset _h
         _CEPH_CONFIRM_DETECT_FAIL=0
         if [ -n "${CEPH_DATA_DISKS:-}" ]; then
             # 显式指定: 与 ceph 模块两轮解析一致(hostname 条目优先, 全节点条目仅填充未指定)

@@ -390,7 +390,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   `tools/images/ceph-save-images.sh`(镜像 → `offline-files/ceph`, **每镜像独立 tar + --platform linux/amd64**,
   多架构 tar 会让 `ctr import` 报 "content digest not found")、`tools/offline/fetch-lvm-packages.sh`
   (lvm2 .deb → `offline-files/kubespray/packages`, OSD 重启需 lvm 激活逻辑卷)。
-- **节点选择**: `CEPH_NODES`(cluster.conf; 空=全部)→ 模块自动打 label `CEPH_NODE_LABEL`(默认 `ceph-storage=rook-ceph`)。
+- **节点选择**: `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master**)→ 唯一实现为 lib-common 的 `ceph_storage_hosts()`; 模块自动打 label `CEPH_NODE_LABEL`(默认 `ceph-storage=rook-ceph`)。
 - **裸盘自动检测(防覆盖)**: `tools/k8s/ceph-detect-disks.sh` 判定"未使用裸盘"(无分区/格式化/挂载/LVM 且非系统盘)
   → 生成 CephCluster CR 的 per-node devices(精确盘名)。部署前**红底列出节点+盘并 sleep CEPH_CONFIRM_SLEEP(60s)**
   double-check; CI 可 `CEPH_CONFIRM_SLEEP=0`。
