@@ -287,6 +287,9 @@ sudo ./deploy-cluster.sh --steps verify_prometheus
 | `35318517294` | push | ❌ 卡在 Harbor 登录 —— 密钥值错误(见下"踩坑") |
 | `35318757075` | 手动 `groups=lws,multus` | ✅ 4m16s, 2 个镜像真实落库 |
 | `35319233170` | push(全量) | ✅ 43 min,**新同步 43 个 / digest 未变跳过 4 个 / 失败 0**, 另 16 个同台复制按预期跳过 |
+| `35323314387` | push | ✅ 5m45s,**跳过 46 / 新同步 1** —— 仍是 pause:3.10 被重传 |
+| `35324836924` | push(`--preserve-digests`) | ✅ 仍有 1 次重传(= 用新旗标重新落地的那一次, **属预期**) |
+| `35325640510` | push | ✅ **新同步 0 个, 全部 47 个 digest 未变跳过** ⇒ 幂等达成 |
 
 最终态(用 `check-image-manifest.sh --harbor` 复核):
 
@@ -298,6 +301,17 @@ sudo ./deploy-cluster.sh --steps verify_prometheus
 **关键旁证**: `registry.k8s.io/pause:3.10` 从本机同步**失败**(该域名会 302 到
 `europe-west3-docker.pkg.dev`, 本机不可达), 但 GitHub runner **成功了** ——
 这正是"把镜像准备搬到一个可达的环境里做"的价值所在。
+
+**过程中修掉的两个真问题**(详见 `docs/troubleshooting.md` §四.3.6 / §四.3.7):
+
+1. **密钥设错**: `gh secret set --body -` 会把字面量 `-` 存成密钥值(见下)。
+2. **多架构镜像被重写导致每次重传**: `skopeo copy` 搬运多架构镜像时会重写 manifest list 的
+   序列化, 落地 digest ≠ 源 digest ⇒ 比对永不相等 ⇒ 每次整包重传(受害者
+   `registry.k8s.io/pause:3.10`, 552 MB / 每次 64 秒)。加 `--preserve-digests` 根治,
+   库 digest 由 `e9622b01…` 变为源的 `ee6521f2…`。
+   > ⚠ **验证时机**: 要在**加了旗标那轮重传之后的下一轮**看结果。做重传的那一轮必然仍打印
+   > "不一致"(它读的是旧制品), 第一轮曾据此误判为无效。同理, 幂等性不能只看一轮。
+
 
 ### 配置步骤(一次性)
 
