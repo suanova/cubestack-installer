@@ -9,7 +9,7 @@
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态, 重跑自动跳过; --fresh 清状态重装。
-#   · 定位: Envoy Gateway = 通用 K8s API 网关基座; Envoy AI Gateway(模块 15_envoy_ai_gateway.sh)
+#   · 定位: Envoy Gateway = 通用 K8s API 网关基座; Envoy AI Gateway(模块 16_envoy_ai_gateway.sh)
 #     基于它构建。本模块只装 EG 基座(GatewayClass/Gateway/HTTPRoute 通用能力)。
 #   · Chart 来源(三选一, ENVOY_EG_CHART_SOURCE 控制; **本地源优先, 默认离线安装**):
 #       dir  = 本地解包目录(ENVOY_EG_CHART_DIR = deployments/cubestack-addon/envoy-gateway/eg)

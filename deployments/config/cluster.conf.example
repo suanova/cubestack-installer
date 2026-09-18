@@ -111,7 +111,6 @@ CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI RBD/RGW/CephF
 # ---- Ceph 模式见 4.3b(CEPH_MODE 唯一开关: internal 集群内 / external 接入外部; 定义在下方 Ceph 段) ----
 ENVOY_GATEWAY_ENABLED="${ENVOY_GATEWAY_ENABLED:-true}" # Envoy Gateway 通用 K8s 网关基座(P1; 见 4.3)
 ENVOY_AI_GATEWAY_ENABLED="${ENVOY_AI_GATEWAY_ENABLED:-true}"  # Envoy AI Gateway(LLM/AI 专用, 依赖 EG; 见 4.3)
-CUBESTACK_GATEWAY_ENABLED="${CUBESTACK_GATEWAY_ENABLED:-true}"  # 平台统一网关 cubestack-gateway(单入口多 hostname, 依赖 EG; 见 4.3)。默认 true = 全量部署自动创建 Namespace cubestack-gateway-system + Gateway + routes/*.yaml(monitoring/cubepilot), 并建固定入口别名(默认 NodePort 30080)+ 把已下发路由的 hostname 写进部署机 /etc/hosts。⚠ 打开后的连带影响: 08_prometheus **不再建** *-external NodePort(监控改走网关 HTTPRoute, 详见 PROMETHEUS_EXPOSE_MODE 段), cubepilot 验证改走网关入口(不再 port-forward)。关掉 = 这些资源**不会创建**, 且部署日志里不出现本组件名字(收尾会汇总"本次未部署的组件"提示)
 KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # 统一认证(P2; 见 4.4)
 KUEUE_ENABLED="${KUEUE_ENABLED:-false}"                 # 队列治理(P2; 见 4.4)
 KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # 虚拟机能力(P2; 见 4.4)
@@ -523,6 +522,51 @@ REGISTRY_NODEPORT="${REGISTRY_NODEPORT:-31148}"        # nodeport 模式: 固定
 # 无需宿主机转发; 仅当需要"集群外 push → push 机把 registry.cubestack.io 解析到宿主机"时才设 1。
 REGISTRY_EXPOSE_HOST="${REGISTRY_EXPOSE_HOST:-0}"
 
+# ---------------- 3.3 镜像统一镜像源(Harbor mirrors; 在线源) ----------------
+# 目的: 把"上游原始镜像"统一收敛到一台内网 Harbor, 部署机只认一个源 ——
+#   上游(docker.io/quay.io/registry.k8s.io/ghcr.io …) ──CI──▶ Harbor /mirrors/**
+#   部署机 ──从 Harbor pull──▶ 离线 tar ──▶ 推入集群内置 registry ──▶ 节点拉取
+# 清单(唯一数据源): deployments/config/images.manifest(声明全部镜像 + ${VAR} 版本占位)
+#   · 同步到 Harbor(CI 或联网机): tools/images/harbor-sync-images.sh
+#   · Harbor → 离线 tar(联网机) : tools/images/harbor-save-images.sh
+#   · 校验清单                   : tools/images/check-image-manifest.sh
+# 详见 docs/harbor-mirror.md。
+HARBOR_MIRROR_ENABLED="${HARBOR_MIRROR_ENABLED:-true}"        # true=save/load 工具优先从 Harbor 拉镜像; false=直连上游
+HARBOR_MIRROR_REGISTRY="${HARBOR_MIRROR_REGISTRY:-harbor.isuanova.com}"   # Harbor 域名(与 metax/cubepilot 同源)
+HARBOR_MIRROR_PROJECT="${HARBOR_MIRROR_PROJECT:-mirrors}"     # 镜像专用项目(不存在时由同步工具自动创建)
+# 路径规则(见 images.manifest 头部): mirrors/<上游注册域>/<仓库路径>:<tag>
+#   例 docker.io/grafana/grafana:13.2.1-distroless
+#      → harbor.isuanova.com/mirrors/docker.io/grafana/grafana:13.2.1-distroless
+HARBOR_MIRROR_USER="${HARBOR_MIRROR_USER:-}"                  # (可选)留空=匿名拉取(该项目公开只读)
+HARBOR_MIRROR_PASSWORD="${HARBOR_MIRROR_PASSWORD:-}"          # Harbor 密码/token(本文件已 gitignore, 勿提交)
+HARBOR_MIRROR_INSECURE="${HARBOR_MIRROR_INSECURE:-false}"     # true=跳过 TLS 校验(自签证书时用)
+IMAGE_MANIFEST="${IMAGE_MANIFEST:-${REPO_ROOT}/deployments/config/images.manifest}"   # 镜像清单路径
+
+# ---- 镜像版本(★ 升级入口: 改这里一处, 清单/Harbor/离线 tar/部署自动跟随) ----
+# 这些变量被 images.manifest 以 ${VAR} 引用。⚠ 改完必须重新同步制品, 否则 tar 与期望版本不符。
+# 基座(kubespray; ⚠ 必须与 kubespray 实际解析出的版本一致, 改了要重跑 k8s_deploy)
+K8S_VERSION="${K8S_VERSION:-v1.32.5}"                    # kube-apiserver/controller-manager/scheduler/proxy
+PAUSE_VERSION="${PAUSE_VERSION:-3.10}"
+COREDNS_VERSION="${COREDNS_VERSION:-v1.11.3}"
+DNS_NODE_CACHE_VERSION="${DNS_NODE_CACHE_VERSION:-1.25.0}"
+METRICS_SERVER_VERSION="${METRICS_SERVER_VERSION:-v0.7.0}"
+CPA_VERSION="${CPA_VERSION:-v1.8.8}"                     # cluster-proportional-autoscaler
+ETCD_VERSION="${ETCD_VERSION:-v3.5.16}"
+CALICO_VERSION="${CALICO_VERSION:-v3.29.3}"
+METALLB_VERSION="${METALLB_VERSION:-v0.13.9}"
+REGISTRY_IMAGE_TAG="${REGISTRY_IMAGE_TAG:-2.8.1}"        # docker.io/library/registry
+LOCAL_PATH_VERSION="${LOCAL_PATH_VERSION:-v0.0.24}"      # rancher/local-path-provisioner
+BUSYBOX_TAG="${BUSYBOX_TAG:-latest}"                     # 验证用(registry 存储校验)
+NGINX_TAG="${NGINX_TAG:-1.27}"                           # 验证用(verify 模块测试后端; 见 ensure_registry_nginx)
+# Ceph CSI 附属组件(随 CEPH_ENABLED/CEPH_CSI_ENABLED)
+CSIADDONS_SIDECAR_VERSION="${CSIADDONS_SIDECAR_VERSION:-v0.14.0}"
+CSI_ATTACHER_VERSION="${CSI_ATTACHER_VERSION:-v4.12.0}"
+CSI_NODE_DRIVER_REGISTRAR_VERSION="${CSI_NODE_DRIVER_REGISTRAR_VERSION:-v2.17.0}"
+CSI_PROVISIONER_VERSION="${CSI_PROVISIONER_VERSION:-v6.2.0}"
+CSI_RESIZER_VERSION="${CSI_RESIZER_VERSION:-v2.1.0}"
+CSI_SNAPSHOTTER_VERSION="${CSI_SNAPSHOTTER_VERSION:-v8.5.0}"
+SNAPSHOT_CONTROLLER_VERSION="${SNAPSHOT_CONTROLLER_VERSION:-v8.0.1}"
+
 
 # ════════════════════════════════════════════════════════════
 # 阶段四、附加组件(operator)                   依赖: 阶段三(Registry 推镜像)
@@ -550,6 +594,10 @@ METAX_TAR_PATTERN="${METAX_TAR_PATTERN:-metax}"                 # tar 模式: �
 #   默认 ^harbor.isuanova.com/metax/(内网 Harbor 仓库); 也可选 ^cr\.metax-tech\.com/cloud/(沐曦官方仓库,
 #   仅取 cloud 前缀避免 public-* 下的大推理镜像重复)。两者都含同内容镜像, 选其一即可。
 METAX_SAVE_PATTERN="${METAX_SAVE_PATTERN:-^harbor\.isuanova\.com/metax/}"
+# 沐曦镜像的上游 Harbor(沐曦不发布到公共 registry, 上游就是内网 Harbor 的 metax 项目):
+#   images.manifest 用 ${METAX_HARBOR}/${METAX_PROJECT}/<组件>:<tag> 拼镜像 ref
+METAX_HARBOR="${METAX_HARBOR:-harbor.isuanova.com}"     # 沐曦镜像所在 Harbor
+METAX_PROJECT="${METAX_PROJECT:-metax}"                 # 沐曦镜像所在项目
 # metax-save-images.sh: 枚举中命中即跳过的镜像(正则; 默认排除 sglang 等大推理镜像)
 METAX_SAVE_EXCLUDE="${METAX_SAVE_EXCLUDE:-sglang}"
 # 核心组件列表(对应 metax-k8s-images.<ver>.run 内嵌镜像, 与版本配套; METAX_LIST_IMAGES=true 可打印保存命令)
@@ -602,7 +650,7 @@ LWS_RELEASE_NAME="${LWS_RELEASE_NAME:-lws}"             # Helm release 名
 
 # ---------------- 4.3 P1 阶段附加组件(依赖: Registry + 部分依赖 GPU/Ceph) ----------------
 # 开关见顶部【组件启停开关】: PROMETHEUS_ENABLED / CEPH_ENABLED / CEPH_CSI_ENABLED /
-#   ENVOY_GATEWAY_ENABLED / ENVOY_AI_GATEWAY_ENABLED / CUBESTACK_GATEWAY_ENABLED
+#   ENVOY_GATEWAY_ENABLED / ENVOY_AI_GATEWAY_ENABLED
 # Envoy 网关二件套(P1-9 统一流量入口): Envoy Gateway=通用 K8s API 网关基座;
 # Envoy AI Gateway=LLM/AI 专用扩展层(依赖 Envoy Gateway 先装)。详见 docs/envoy-gateway.md
 
@@ -612,6 +660,8 @@ LWS_RELEASE_NAME="${LWS_RELEASE_NAME:-lws}"             # Helm release 名
 #   tgz = 本地 chart 压缩包(默认; 仓库只存 tgz 不膨胀, 部署时临时解压)/ oci = 官方 registry(需联网)
 ENVOY_EG_CHART_SOURCE="${ENVOY_EG_CHART_SOURCE:-tgz}"       # Envoy Gateway chart 来源: dir|tgz|oci
 ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.1}"               # Envoy Gateway 版本(控制面 gateway + 数据面 envoy 同 tag)
+# ⚠ 数据面 envoy 镜像的 tag 与 EG 版本**不同**(官方独立发版); 由 envoy-save-images.sh 的默认值同步而来。
+ENVOY_PROXY_VERSION="${ENVOY_PROXY_VERSION:-distroless-v1.39.1}"   # 数据面 envoyproxy/envoy 镜像 tag
 ENVOY_EG_CHART_DIR="${ENVOY_EG_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/eg}"
 ENVOY_EG_CHART_TGZ="${ENVOY_EG_CHART_TGZ:-${ENVOY_EG_CHART_DIR}/gateway-helm-${ENVOY_EG_VERSION}.tgz}"
 ENVOY_EG_CHART_OCI="${ENVOY_EG_CHART_OCI:-oci://docker.io/envoyproxy/gateway-helm}"
@@ -628,22 +678,11 @@ ENVOY_AI_IMAGE_ONLINE="${ENVOY_AI_IMAGE_ONLINE:-false}"     # 同上(AI 控制�
 ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"   # 离线镜像 tar 目录(save 工具输出)
 ENVOY_EG_NAMESPACE="${ENVOY_EG_NAMESPACE:-envoy-gateway-system}"   # EG 部署命名空间
 ENVOY_AI_NAMESPACE="${ENVOY_AI_NAMESPACE:-ai-gateway-system}"      # AI 控制器部署命名空间
-# 数据面对外固定入口: gateway-nodeport.sh 转换后自动创建固定名别名 Service(<gw>-external,
-#   NodePort 固定于此)。控制器生成的 envoy-<ns>-<gw>-<hash> 名含 hash 且由控制器拥有, 对外一律用固定别名。
+# 数据面对外固定入口: tools/lb/gateway-nodeport.sh <gateway名> [ns] 转换后自动创建固定名别名
+#   Service(<gw>-external, NodePort 固定于此)。控制器生成的 envoy-<ns>-<gw>-<hash> 名含 hash
+#   且由控制器拥有, 对外一律用固定别名。⚠ 网关与路由由**专门的网关模块**统一创建(尚在重构中),
+#   当前配置仅对该工具的手工调用生效。
 GATEWAY_EXTERNAL_NODEPORT="${GATEWAY_EXTERNAL_NODEPORT:-30880}"
-# ---- 平台统一网关 cubestack-gateway(模块 cubestack_gateway; 见 4.3) ----
-# 架构: 单 Gateway + 单 HTTP Listener(80) + 多 hostname; 每服务一条 HTTPRoute 跨 ns 绑定,
-#   替代"每个组件一个 NodePort *-external"的分散暴露。基座 = cubestack-addon/gateway/base-gateway.yaml
-#   (Namespace cubestack-gateway-system + Gateway cubestack-gateway; 复用 EG 的 GatewayClass eg);
-#   路由 = cubestack-addon/gateway/routes/*.yaml(加服务只需加一条 HTTPRoute, 网关不动)。
-# ⚠ 启用后监控对外暴露改走本网关(grafana/prometheus.cubestack.io), 08_prometheus 不再建
-#   *-external NodePort(31000/31001)并清理历史遗留 —— 见 PROMETHEUS_EXPOSE_MODE 段。
-# ⚠ 模块序号 33 = **排在所有组件之后**(路由落在后端组件的命名空间里, 提前 apply 会 namespaces not found
-#   → 路由静默缺失; 2026-09-17 cubepilot 路由即此因丢失)。新增组件模块请用小序号, 或部署后重跑
-#   `--steps cubestack_gateway` 补下发(模块内有后端存在性预检, 会明确提示哪条被跳过)。
-CUBESTACK_GATEWAY_FIXED_ENTRY="${CUBESTACK_GATEWAY_FIXED_ENTRY:-true}"     # 建固定名别名 <gw>-external + 固定 NodePort
-CUBESTACK_GATEWAY_NODEPORT="${CUBESTACK_GATEWAY_NODEPORT:-30080}"          # 固定入口 NodePort(与 AI 示例网关 30880 区分, 防同节点端口冲突)
-CUBESTACK_GATEWAY_NODEPORT_MAX="${CUBESTACK_GATEWAY_NODEPORT_MAX:-32767}"  # 上限(≤ apiserver --service-node-port-range 上限)
 # CRD chart 命名空间: 默认与控制器合并(CRD 为 cluster-scoped, namespace 仅 helm release 归属;
 # 早期独立 ai-gateway-crds 空 ns 易误判废弃, 已合并; 设 ai-gateway-crds 可恢复拆分)
 ENVOY_AI_CRDS_NS="${ENVOY_AI_CRDS_NS:-${ENVOY_AI_NAMESPACE}}"

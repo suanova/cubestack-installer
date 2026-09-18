@@ -124,8 +124,6 @@ chart 来源          deployments/cubestack-addon/cubepilot/cubepilot-<ver>.tgz 
 PVC                 cubepilot-api-data          (元数据; api.storageClassName)
                     cubepilot-api-skill-repo    (共享技能仓; api.skillRepo.storageClassName)
 Secret              cubepilot-llm          (仅预置 LLM 时创建; operator watch 此名)
-平台网关路由        deployments/cubestack-addon/gateway/routes/cubepilot.yaml(API)+
-                    deployments/cubestack-addon/gateway/routes/cubepilot-portal.yaml(Portal)(§7)
 ```
 
 一条命令安装:
@@ -209,32 +207,22 @@ sudo ./deploy-cluster.sh --steps cubepilot --fresh   # --steps 只跑该组件; 
 
 ## 7. 对外访问
 
-### 方式一:平台统一网关(需 `CUBESTACK_GATEWAY_ENABLED=true`)
+> ⚠ **平台网关方式已移除(2026-09-18)**: 原先的两条 HTTPRoute
+> (`deployments/cubestack-addon/gateway/routes/cubepilot{,-portal}.yaml` + 模块 `33_cubestack_gateway.sh`)
+> 已随平台网关模块一并删除 —— 网关(Gateway)与路由(HTTPRoute)统一改由**专门的网关模块**创建(尚在重构中)。
+> 该模块落地后, 本节会重新给出 `cubepilot-api.cubestack.io` / `cubepilot.cubestack.io` 两条路由的接入方式
+> (要点记档, 供新模块落地时复用):
+>
+> | hostname | 后端 | 条件 |
+> |---|---|---|
+> | `cubepilot-api.cubestack.io` | `svc/cubepilot-api:8080`(REST/SSE API, **恒存在**; 探活 `/healthz` → 200) | CubePilot 已部署 |
+> | `cubepilot.cubestack.io` | `svc/cubepilot:8080`(内置 Portal 的 nginx: SPA + `/api` 反代) | 另需 `CUBEPILOT_WEB_ENABLED=true` |
+>
+> ⚠ **两个后端不要写混**(2026-09-17 修): `svc/cubepilot` 是**内置 Portal 的 nginx 入口**, 只在
+> `web.enabled=true` 时有; 纯 API 入口是 `svc/cubepilot-api`。历史版本路由文件写成 `svc/cubepilot:8080`,
+> 在"关闭 Portal"的部署里后端根本不存在(→ `ResolvedRefs=False`)。
 
-两条路由(都在 `deployments/cubestack-addon/gateway/routes/` 下),由模块 `cubestack_gateway`
-在 `CUBEPILOT_ENABLED=true` 时下发(未部署 CubePilot 时自动跳过,避免 HTTPRoute 停在
-`ResolvedRefs=False` 的噪音状态):
-
-| hostname | 后端 | 下发条件 | 说明 |
-|---|---|---|---|
-| `cubepilot-api.cubestack.io` | `svc/cubepilot-api:8080` | `CUBEPILOT_ENABLED=true` | REST/SSE API,**恒存在**;探活 `/healthz`(200) |
-| `cubepilot.cubestack.io` | `svc/cubepilot:8080` | 另需 `CUBEPILOT_WEB_ENABLED=true` | 内置 Portal(nginx:SPA + `/api` 反代) |
-
-```bash
-# API(REST 服务根路径无路由, 404 属正常 —— 探活用 /healthz)
-curl -i -H "Host: cubepilot-api.cubestack.io" http://<节点IP>:30080/healthz     # 200
-# Portal 页面(默认启用内置 Portal)
-curl -I -H "Host: cubepilot.cubestack.io"     http://<节点IP>:30080/            # 200 text/html
-# 浏览器: http://cubepilot.cubestack.io:30080/
-```
-
-> ⚠ **两个后端不要写混**(2026-09-17 修):`svc/cubepilot` 是**内置 Portal 的 nginx 入口**,
-> 只在 `web.enabled=true` 时有;纯 API 入口是 `svc/cubepilot-api`。历史版本的路由文件写的是
-> `svc/cubepilot:8080`,在"关闭 Portal"的部署里后端根本不存在。
-> ⚠ 路由由模块 `cubestack_gateway`(**序号 33,排在所有组件之后**)下发;若组件部署晚于网关,
-> 模块会跳过该路由并提示 —— **组件部署完成后重跑 `--steps cubestack_gateway` 即补下发**。
-
-### 方式二:port-forward(不启用网关时或临时排查)
+### 当前入口: port-forward
 
 ```bash
 kubectl -n cubepilot port-forward svc/cubepilot     8080:8080   # Portal(SPA + /api)
@@ -246,11 +234,10 @@ kubectl -n cubepilot port-forward svc/cubepilot-api 8080:8080   # 仅 API(/healt
 ## 8. 内置 Portal 与 StorageClass
 
 - **内置 Portal(`cubepilot-web`)默认启用**(`CUBEPILOT_WEB_ENABLED=true`):chart 自带的 React
-  门户(nginx:SPA 页面 + `/api` 反代给 `cubepilot-api`),装完即可用 ——
-  平台网关 `cubepilot.cubestack.io`(见 §7)或 `port-forward svc/cubepilot`。
+  门户(nginx:SPA 页面 + `/api` 反代给 `cubepilot-api`),装完即可用 —— `port-forward svc/cubepilot`(见 §7)。
   置 `CUBEPILOT_WEB_ENABLED=false`(如已有统一 UI 接管前端)则不创建 `cubepilot-web` Deployment
   与相关 Service;同步与推送阶段也**不会处理** `cubepilot-web` 镜像(没人会拉它,不白传流量),
-  此时只剩 API 入口(`cubepilot-api.cubestack.io` / `svc/cubepilot-api`)。
+  此时只剩 API 入口(`svc/cubepilot-api`; 平台网关路由待专门模块落地后接入, 见 §7)。
 - **两个 PVC 的 StorageClass** 由 `CUBEPILOT_STORAGE_CLASS` 控制,默认**自动派生**:
 
   | 场景 | 取值 |
@@ -287,8 +274,6 @@ Service 有 Ready Endpoints → HTTP 探针(master 上 port-forward 回环探测
 | 想强制刷新制品 | 删掉 `offline-files/cubepilot/` 下的 tar 与 `.digest` 边车后重跑 |
 | PVC 一直 `Pending` | `CUBEPILOT_STORAGE_CLASS` 指定的 SC 不存在(如纯 local-path 集群却指定了 `ceph-block`) |
 | 无 AgentInstance | operator 日志:`kubectl -n cubepilot logs deploy/<operator>`;CRD 是否齐全 |
-| 网关路由 404/502 | `kubectl -n cubepilot get svc` 核对后端名/端口与 `routes/cubepilot*.yaml` 是否一致(API=`cubepilot-api`, Portal=`cubepilot`);`kubectl -n cubepilot get httproute` 看 Accepted/ResolvedRefs |
-| 网关里 CubePilot 路由**根本不存在** | 组件部署晚于网关模块(序号 33)时会被"后端存在性预检"跳过 —— 看网关模块汇总里的 `⚠ 另有 N 条路由因后端未就绪被跳过`,**部署完成后重跑 `--steps cubestack_gateway`** 即下发 |
 
 **切换模式**:改 `CUBEPILOT_MODE` 后 `sudo ./deploy-cluster.sh --steps cubepilot --fresh`(--steps 只跑该组件)。
 由 online 切 offline **不需要任何额外准备**(制品已在盘上);由 offline 切 online 也无额外准备。

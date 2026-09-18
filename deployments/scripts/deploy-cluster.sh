@@ -68,7 +68,7 @@ usage() {
           k8s_deploy(默认关, --with-k8s)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           local_path(可选) k8s_registry 组件(全部可单独部署的组件见下方"组件单独部署"清单)
-          自研: cubepilot cubestack_gateway cubestack_apps(占位)
+          自研: cubepilot cubestack_apps(占位)
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
@@ -101,6 +101,13 @@ $(_component_meta_list stub)
     (镜像 tar 不入镜像; 见 README §容器化 CLI 的 docker run 挂载示例)。
 
 注:
+  · 镜像统一镜像源(Harbor): 全部上游镜像声明在 deployments/config/images.manifest,
+    先经 CI 同步到 harbor.isuanova.com/mirrors/**, 再由工具拉成离线 tar 供各模块推入内置
+    registry(集群无需访问公网)。三个工具(tools/images/):
+      harbor-sync-images.sh      上游 → Harbor(CI/联网机; 项目不存在自动创建)
+      harbor-save-images.sh      Harbor → offline-files/<group>/*.tar(联网机)
+      check-image-manifest.sh    清单静态校验(+ --kubespray 交叉核对 / --harbor 漂移报告)
+    升级组件版本只改 cluster.conf §3.3「镜像版本」一处, 全链自动跟随。详见 docs/harbor-mirror.md。
   · cluster.conf 的 NODES(5字段: role,hostname,ip,ssh_user,ssh_password)不区分虚拟机/裸金属;
     主程序不判断节点类型 — 需要创建虚拟机的节点在 tools/vm/vm-nodes.conf(10字段)定义,
     由 sudo ./deployments/scripts/tools/vm/create-vms.sh 独立执行(创建后自动注入 NODES)。
@@ -141,7 +148,7 @@ $(_component_meta_list stub)
   sudo ./deploy-cluster.sh --steps verify_metallb   # 只验证某个组件(验后自动清理)
   sudo ./deploy-cluster.sh --steps ceph_backup      # Ceph 备份(CR+secret+mon store → master 根盘)
   sudo CEPH_BACKUP_ACTION=restore ./deploy-cluster.sh --steps ceph_backup  # Ceph 恢复(认领旧 OSD 数据)
-  sudo ./deploy-cluster.sh --steps cubestack_gateway  # 平台统一网关(幂等: 重下发 routes/ 下各组件的 HTTPRoute)
+  sudo ./deploy-cluster.sh --steps cubepilot           # 单个组件(自动带基座; 见上方"单独安装某个组件"清单)
 EOF
     exit 0
 }
@@ -676,6 +683,6 @@ if [ "${CEPH_MODE:-internal}" != "external" ] && [ "${CEPH_ENABLED:-false}" = "t
 fi
 # ★ 收尾再汇总一次"本次未部署的组件"(与计划开始时同一函数, 见 lib-module.sh):
 #   防"部署全绿结束、但某组件资源根本不存在"被漏看 —— TOGGLE 关闭的模块全流程 0 行输出
-#   (2026-09-17 实例: CUBESTACK_GATEWAY_ENABLED=false → 网关模块不进计划, 事后才发现)。
+#   (2026-09-17 实例: 某组件 TOGGLE=false → 模块不进计划, 事后才发现)。
 print_undeployed_summary
 echo "============================================="

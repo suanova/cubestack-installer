@@ -7,7 +7,6 @@
 #       (admin-agent-for-cloud 等, 证明 operator 真正在调和而不只是 Pod Running)
 #       → ⑤ cubepilot 命名空间 pods 全部 Running/Ready
 #       → ⑥ Service 与 Endpoints 就绪 → ⑦ HTTP 探针(master 上 port-forward 内网回环探测, 尽力而为)
-#       → ⑧ 平台网关探针(启用 cubestack-gateway 时: 经网关 NodePort 带 Host 头访问 API, 尽力而为)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
@@ -19,14 +18,15 @@
 #     或 helm release 实际存在就验证(无论 CUBEPILOT_ENABLED true/false, 例如 --steps cubepilot
 #     单独装过); 仅当"两者都不存在 且 CUBEPILOT_ENABLED≠true"才跳过(exit 0)。
 #   · **验证边界(如实标注)**: ①②③④⑤⑥ 证明"控制面已装好且 operator 真的在工作";
-#     ⑦ 只是 HTTP 可达性(服务端口有响应), ⑧ 只是"经平台网关的 HTTP 可达性"(Host 路由 + 后端解析);
+#     ⑦ 只是 HTTP 可达性(服务端口有响应);
 #     **均不含** Portal 鉴权/LLM 对话的端到端验收 ——
 #     那需要真实 LLM API Key, 装完在 Portal → Agent Config → LLM Config 配置后人工验收。
-#     ⑦⑧ 失败只 warn 不 err(未启用内置 Portal / 未启用网关时本就可能不通)。
-#   · **离线可用**: 本模块不拉任何镜像、不依赖集群内置 registry(只读集群状态 + 一次 port-forward
-#     + 一次经网关的 curl), 故 REQUIRES 只需 cubepilot。
-# 数据源: cluster.conf (CUBEPILOT_ENABLED / CUBEPILOT_NAMESPACE / CUBEPILOT_RELEASE /
-#                       CUBESTACK_GATEWAY_ENABLED / CUBESTACK_GATEWAY_NODEPORT / NODES)
+#     ⑦ 失败只 warn 不 err(未启用内置 Portal 时本就可能不通)。
+#     ⚠ 原 ⑧「平台网关探针」已随平台网关模块一起移除(2026-09-18): 网关与路由改由专门的网关模块
+#     统一创建(尚在重构中), 待其落地后可在此加回"经网关带 Host 头访问"的探针。
+#   · **离线可用**: 本模块不拉任何镜像、不依赖集群内置 registry(只读集群状态 + 一次 port-forward),
+#     故 REQUIRES 只需 cubepilot。
+# 数据源: cluster.conf (CUBEPILOT_ENABLED / CUBEPILOT_NAMESPACE / CUBEPILOT_RELEASE / NODES)
 # 用法: sudo ./deploy-cluster.sh --steps verify_cubepilot
 # ============================================================
 set -euo pipefail
@@ -222,40 +222,13 @@ else
     unset _CODE
 fi
 
-# ---------------- ⑧ 平台网关探针(启用 cubestack-gateway 时才跑, 尽力而为) ----------------
-# 用户实际入口是平台网关(见 routes/cubepilot.yaml), 这里顺带验一次"经网关"的对外链路:
-#   入口 = 任一节点 IP + CUBESTACK_GATEWAY_NODEPORT(默认 30080; NodePort 跨节点可达, 取第一个节点);
-#   从**部署机**发起(不通只 warn —— 部署机可能不在节点网段, 不代表集群侧有问题)。
-# ⚠ 边界: 只验 HTTP 可达(Host 头路由命中 + 后端解析 + 转发), 不含鉴权/Portal 交互。
-if [ "${CUBESTACK_GATEWAY_ENABLED:-false}" = "true" ]; then
-    _GW_NP="${CUBESTACK_GATEWAY_NODEPORT:-30080}"
-    _GW_IP="$(first_node_ip || true)"
-    if [ -z "${_GW_IP}" ]; then
-        warn "  ⑧ 未取到节点 IP, 跳过平台网关探针"
-    else
-        say "  ⑧ 平台网关探针(Host: cubepilot-api.cubestack.io → http://${_GW_IP}:${_GW_NP}/healthz)..."
-        _GW_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H 'Host: cubepilot-api.cubestack.io' "http://${_GW_IP}:${_GW_NP}/healthz" 2>/dev/null || echo 000)"
-        case "${_GW_CODE}" in
-            2*) _GW_OK=1; ok "    网关链路通过: /healthz → ${_GW_CODE}(Host 路由命中 + 后端解析 + 转发全通)" ;;
-            404) warn "    网关返回 404: HTTPRoute 未下发(组件部署晚于网关模块时会被预检跳过) —— 重跑 sudo ./deploy-cluster.sh --steps cubestack_gateway 即补下发" ;;
-            000|"") warn "    网关不可达(部署机到 ${_GW_IP}:${_GW_NP} 不通; 确认 SERVICE_EXPOSE_MODE 与固定入口是否存在)" ;;
-            *) warn "    网关探针返回 ${_GW_CODE}(kubectl get httproute -A 看 Accepted/ResolvedRefs)" ;;
-        esac
-        unset _GW_CODE
-    fi
-    unset _GW_NP _GW_IP
-fi
-
 echo "---------------------------------------------"
 ok "CubePilot 验证通过: release deployed → Deployment 全部可用 → ai.cubestack.io CRD ${_CRD_CNT} 个"
 ok "  → AgentInstance ${_AI_CNT} 个 → pod ${_POD_TOTAL} 个 Running → Service/Endpoints 就绪"
-if [ "${_GW_OK:-}" = "1" ]; then
-    ok "  → 平台网关链路已通: cubepilot-api.cubestack.io(NodePort ${CUBESTACK_GATEWAY_NODEPORT:-30080})/healthz"
-fi
 echo "  ⚠ 验证边界: 本次**未验收** Portal 鉴权与 LLM 对话(需真实 API Key):"
 echo "     kubectl -n ${NS} port-forward svc/${_SVC_NAME:-cubepilot} 8080:${_SVC_PORT:-8080}  # http://127.0.0.1:8080"
 echo "     在 Portal → Agent Config → LLM Config 配置模型后人工验收对话链路"
 echo "  资源查看: kubectl -n ${NS} get agentinstances,pods,svc"
 unset _HAS_NS _HAS_REL _REL_ST _DEPLOYS _DEP_TOTAL _DEP_OK _DEP_BAD _CRD_LIST _CRD_CNT \
       _AI_CNT _AI_NAMES _PODS _POD_TOTAL _POD_BAD _SVC_LINES _SVC_CNT _SVC_NAME _SVC_PORT \
-      _EP_BAD _EP_OK _GW_OK 2>/dev/null || true
+      _EP_BAD _EP_OK 2>/dev/null || true

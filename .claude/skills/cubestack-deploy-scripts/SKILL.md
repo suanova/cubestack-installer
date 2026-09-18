@@ -352,17 +352,17 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   `envoyproxy/ai-gateway-extproc:<v>`**(⚠ 必收: 漏收则数据面 pod 2/3 ImagePullBackOff, AI 路由 404)。
 - **离线关键点(镜像改写)**: 创建 Gateway 后控制器动态创建的数据面 Deployment 默认用 docker.io 镜像,
   离线必 ImagePullBackOff → helm 必须改写: EG `envoyGateway.image.repository/tag` + 数据面
-  `global.images.envoyProxy.image`(09 模块已做); AI 同理 `controller.image.repository/tag` +
-  **`extProc.image.repository/tag`**(控制器 --extProcImage, 决定注入数据面的 extProc sidecar 镜像, 10 模块已做)。
+  `global.images.envoyProxy.image`(15 模块已做); AI 同理 `controller.image.repository/tag` +
+  **`extProc.image.repository/tag`**(控制器 --extProcImage, 决定注入数据面的 extProc sidecar 镜像, 16 模块已做)。
 - **EG Backend API(必须启用)**: AIG v1.1+ 的 AIServiceBackend 必须引用 EG `Backend` 资源, 该 API 默认禁用
-  (安全原因, 参考 CVE-2021-25740) → 09 模块 helm 已默认 `config.envoyGateway.extensionApis.enableBackend=true`;
+  (安全原因, 参考 CVE-2021-25740) → 15 模块 helm 已默认 `config.envoyGateway.extensionApis.enableBackend=true`;
   不启用则 HTTPRoute 报 "Backend is disabled in Envoy Gateway configuration" (ResolvedRefs=False)。
-- **EG extensionManager 接线(核心, 10 模块自动完成)**: AI 控制器内嵌 gRPC 扩展服务器(端口 1063);
-  模块 10 [5/6] 把 `extensionManager.hooks.xdsTranslator`(post=[Translation,Cluster,Route],
+- **EG extensionManager 接线(核心, 16 模块自动完成)**: AI 控制器内嵌 gRPC 扩展服务器(端口 1063);
+  模块 16 [5/6] 把 `extensionManager.hooks.xdsTranslator`(post=[Translation,Cluster,Route],
   translation includeAll listener/route/cluster/secret)+ `service.fqdn` 指向
   `ai-gateway-controller.<AI ns>.svc.cluster.local:1063` 写入 EG 的 `envoy-gateway-config` ConfigMap,
   并重启 EG 控制面(明文 gRPC, 无需证书)。**漏配 → 数据面无 AI 过滤器, AI 请求 404
-  "No matching route found"**(历史调试曾误判为 extProc 镜像问题)。模块 09 **故意不配**
+  "No matching route found"**(历史调试曾误判为 extProc 镜像问题)。模块 15 **故意不配**
   (EG 连不上扩展服务器 → 所有 Gateway xDS 翻译失败, 独立 EG 验证会挂)。
 - **默认版本**: `ENVOY_EG_VERSION=v1.9.1`(GA)、`ENVOY_AI_VERSION=v1.1.0`(GA, API `v1beta1`, `ENVOY_AI_API_VERSION`)。
 - **常用命令**:
@@ -375,6 +375,13 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   ```
 - **AI 与 EG 版本兼容**: 升级 AIG 版本时核对官方兼容矩阵; `extensionManager` 结构/CRD 字段随版本变化,
   全部走 cluster.conf `ENVOY_AI_*` 变量, 不硬编码。
+- ⚠ **架构规则(2026-09-18 起): 网关与路由由"专门的网关模块"统一创建, 组件模块不得自建。**
+  EG 模块(15)只装控制面 + 创建默认 GatewayClass `eg`(**保留**; 图表不带, 去掉就没有 class);
+  AI 模块(16)只做 extensionManager 接线 —— 两者都**不创建 Gateway / HTTPRoute**。
+  原模块 16 尾部的示例 Gateway(`default/ai-gateway` + 别名 `ai-gateway-external`)与原平台网关模块
+  (`33_cubestack_gateway.sh` + `cubestack-addon/gateway/` 的基座与 `routes/*.yaml`)已于 2026-09-18 移除,
+  新的专用网关模块**待落地**。新增组件模块时: 不要自己 apply Gateway/HTTPRoute, 也不要假设平台网关存在
+  (对外入口先给 port-forward 指引); 设计要点见 `docs/envoy-gateway.md` §2.1b。
 
 ## Ceph / Rook 部署速查(Rook v1.20.2 + Ceph v20.2.2, 详见 docs/ceph-rook.md)
 
@@ -398,6 +405,36 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   sudo ./deploy-cluster.sh --steps verify_ceph            # 端到端: operator/CSI+Ready+ceph -s+RBD 块 I/O
   kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
   ```
+
+## Harbor 统一镜像源(镜像清单 / 同步 / 备料, 详见 docs/harbor-mirror.md)
+
+- **唯一数据源**: `deployments/config/images.manifest`, 格式 `<group> <上游ref> [tar文件名覆盖]`;
+  ref 用 `${VAR}` 引用 **cluster.conf** 的版本变量(CI 上回退 cluster.conf.example 默认值)
+  ⇒ **升级只改 cluster.conf §3.3 一处**, 全链跟随。
+- **group → 目录**: 默认 `offline-files/<group>/`; 例外 `k8s-base`/`ceph` → `offline-files/kubespray/images/`
+  (节点预加载走 kubespray); `kubelet-cadvisor` 组**刻意为空**(kubelet 内置, 无镜像)。
+- **Harbor 路径规则**(唯一): `mirrors/<上游注册域>/<仓库路径>:<tag>`; 上游就是本 Harbor 时去掉域名前缀
+  (`harbor.isuanova.com/metax/x` → `mirrors/metax/x`)。**保留注册域是有意的** —— 上游 ref 是 Harbor 路径的
+  后缀, 因此 tar 按上游 ref 命名(`<repo>_<tag>.tar`)可与既有模块的通配查找**零改动**兼容。
+- **三个工具**(`tools/images/`):
+  ```bash
+  harbor-sync-images.sh          # 上游 → Harbor(CI/联网机; 自动建项目; 增量比 digest)
+  harbor-save-images.sh          # Harbor → offline-files/<group>/*.tar(联网机)
+  check-image-manifest.sh        # 静态校验; --kubespray 交叉核对; --harbor 漂移报告
+  ```
+- **CI**: `.github/workflows/sync-images-to-harbor.yml`(push 清单 / 手动 / 每周定时);
+  凭据走 GitHub **Secrets**(`HARBOR_MIRROR_USER` / `HARBOR_MIRROR_PASSWORD`, 密码必须放 Secret)。
+- ⚠ **5 个静默坑**(详见 troubleshooting §四.3): skopeo 默认 auth 文件路径不可读(显式设 `REGISTRY_AUTH_FILE`);
+  `inspect` 用 `--tls-verify` 而 `copy` 用 `--src-tls-verify`(传错被 `2>/dev/null` 吞成"幂等失效");
+  Harbor API repository 名要**双重 URL 编码** `%252F` 且不含项目前缀;
+  `docker-archive:<file>` 末尾**必须带 `:<ref>`** 否则 RepoTags 为空;
+  Harbor **项目**必须预建(仓库才自动建), 建项目需登录。
+- ⚠ **加镜像时别忘了同步 `tools/offline/trim-offline-files.sh` 的 `PRELOAD_IMAGE_PATTERNS`**
+  (k8s-base 组), 否则备料后被 trim 静默删掉 —— 用 `check-image-manifest.sh --kubespray` 兜底。
+- **监控三件套**: kube-state-metrics / node-exporter 是 kube-prometheus-stack 的 subchart(模块 08),
+  各自有独立 group 与 offline-files 子目录; **kubelet/cAdvisor 无镜像、无需部署**, 由 chart 的
+  kubelet ServiceMonitor 抓 kubelet 的 10250 端点(/metrics/cadvisor)。验证在 `28_verify_prometheus.sh` 第 ④ 步
+  (查 `kube_pod_info` / `node_cpu_seconds_total` / `container_cpu_usage_seconds_total`)。
 
 ## 审查清单(写完脚本后自检)
 

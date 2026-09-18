@@ -1,0 +1,194 @@
+# ============================================================
+# images.manifest — CubeStack 全量镜像清单(**唯一数据源**)
+# ============================================================
+# 用途: 声明本仓库部署所需的**所有上游原始镜像**。三处消费, 全部读本文件:
+#   ① CI   : .github/workflows/sync-images-to-harbor.yml → tools/images/harbor-sync-images.sh
+#             把每个镜像从上游同步到 Harbor(harbor.isuanova.com/mirrors/**, 项目不存在自动创建)
+#   ② 联网机: tools/images/harbor-save-images.sh   → 从 Harbor 拉取并保存成离线 tar
+#   ③ 部署机: 模块读 deployments/offline-files/<group>/ 下的 tar 推入集群内置 registry
+#
+# ── 格式(每行; # 开头为注释; 空行忽略) ──────────────────────
+#     <group>   <上游镜像 ref>   [tar 文件名覆盖]
+#   · 前三列以空白分隔, 第三列**可选**(省略时按 ref 自动派生 tar 名)。
+#   · group = 离线目录分组, 对应 deployments/offline-files/<group>/
+#     (少数 group 有目录覆盖, 见 tools/images/lib-image-manifest.sh 的 image_group_dir())
+#   · ref 支持 ${VAR} 占位符 —— 取值来自 deployments/config/cluster.conf
+#     (CI 上没有 cluster.conf 时自动回退 cluster.conf.example 的内置默认值)。
+#     ⇒ **升级版本只改 cluster.conf 一处**, 本文件与 CI/Harbor 自动跟随。
+#   · ref 必须**全限定**(带注册域), 短名(busybox/nginx)一律补 docker.io/library/。
+#   · 第 3 列用于"历史短名"镜像: 既有模块按字面文件名读取(如 22_verify_registry_storage.sh
+#     读 busybox.tar、ensure_registry_nginx 读 nginx.tar), 这类 tar 不能按 ref 改名。
+#
+# ── Harbor 目标路径规则(唯一规则, 见 lib-image-manifest.sh 的 image_mirror_ref) ──
+#     mirrors/<注册域>/<仓库路径>:<tag>         上游注册域 ≠ Harbor 时
+#     mirrors/<仓库路径>:<tag>                  上游就在同一台 Harbor 上时(去掉域名前缀)
+#   例: docker.io/grafana/grafana:13.2.1-distroless
+#         → harbor.isuanova.com/mirrors/docker.io/grafana/grafana:13.2.1-distroless
+#       harbor.isuanova.com/suanova/cubepilot-api:latest
+#         → harbor.isuanova.com/mirrors/suanova/cubepilot-api:latest
+#   ⚠ 保留注册域是有意的: 上游 ref 是 Harbor 路径的**后缀**, 因此离线 tar 按上游 ref
+#     命名(如 registry.k8s.io_kube-state-metrics_kube-state-metrics_v2.20.0.tar)时,
+#     各部署模块原有的 *<repo>_<tag>.tar 通配仍然命中, 无需改动匹配逻辑。
+#
+# ── 校验 ──────────────────────────────────────────────────
+#   bash deployments/scripts/tools/images/check-image-manifest.sh          # 静态校验(格式/变量/重复)
+#   bash deployments/scripts/tools/images/check-image-manifest.sh --harbor # 额外比对 Harbor 已有 tag(漂移报告)
+# ============================================================
+
+# ------------------------------------------------------------
+# [group: k8s-base] kubespray 基座(节点 containerd 预加载)
+#   目录: deployments/offline-files/kubespray/images/
+#   ⚠ 版本必须与 kubespray 实际解析出的 kube_version / 各 addon 版本一致;
+#     升级 K8s 时改 K8S_VERSION。清单来源 = tools/offline/trim-offline-files.sh 的
+#     PRELOAD_IMAGE_PATTERNS(两者必须同步: 改了这里也要改那里, 否则镜像会被裁掉)。
+# ------------------------------------------------------------
+k8s-base  registry.k8s.io/kube-apiserver:${K8S_VERSION}
+k8s-base  registry.k8s.io/kube-controller-manager:${K8S_VERSION}
+k8s-base  registry.k8s.io/kube-scheduler:${K8S_VERSION}
+k8s-base  registry.k8s.io/kube-proxy:${K8S_VERSION}
+k8s-base  registry.k8s.io/pause:${PAUSE_VERSION}
+k8s-base  registry.k8s.io/coredns/coredns:${COREDNS_VERSION}
+k8s-base  registry.k8s.io/dns/k8s-dns-node-cache:${DNS_NODE_CACHE_VERSION}
+k8s-base  registry.k8s.io/metrics-server/metrics-server:${METRICS_SERVER_VERSION}
+k8s-base  registry.k8s.io/cpa/cluster-proportional-autoscaler:${CPA_VERSION}
+k8s-base  quay.io/coreos/etcd:${ETCD_VERSION}
+k8s-base  quay.io/calico/cni:${CALICO_VERSION}
+k8s-base  quay.io/calico/node:${CALICO_VERSION}
+k8s-base  quay.io/calico/kube-controllers:${CALICO_VERSION}
+k8s-base  quay.io/metallb/controller:${METALLB_VERSION}
+k8s-base  quay.io/metallb/speaker:${METALLB_VERSION}
+k8s-base  docker.io/library/registry:${REGISTRY_IMAGE_TAG}
+k8s-base  docker.io/rancher/local-path-provisioner:${LOCAL_PATH_VERSION}
+# 验证/工具镜像(verify 模块与 registry 存储校验用; 见 lib-common 的 ensure_registry_nginx)
+# ⚠ busybox 用第 3 列锁死文件名: 22_verify_registry_storage.sh 按字面 "busybox.tar" 读取
+k8s-base  docker.io/library/busybox:${BUSYBOX_TAG}   busybox.tar
+
+# ------------------------------------------------------------
+# [group: nginx] verify 模块测试后端(统一 HTTP 测试服务)
+#   目录: deployments/offline-files/nginx/
+#   ⚠ 文件名锁死 "nginx.tar": lib-common 的 ensure_registry_nginx 按 nginx*.tar 查找并推入
+#     内置 registry 供 verify 模块当测试后端用(不依赖 docker.io, 也不靠节点预载)。
+# ------------------------------------------------------------
+nginx  docker.io/library/nginx:${NGINX_TAG}   nginx.tar
+
+# ------------------------------------------------------------
+# [group: ceph] Rook + Ceph(internal 模式; CEPH_ENABLED / CEPH_CSI_ENABLED)
+#   目录: deployments/offline-files/kubespray/images/(与 kubespray 同目录 —— 节点预加载走同一条
+#   路径, 见 02_ceph.sh 的 CEPH_IMAGE_DIR=${OFFLINE_FILES_DIR}/images)
+#   ⚠ ceph-csi 四件套与 snapshot-controller 也在此: kubespray 的 csi 相关 addon 会用到
+# ------------------------------------------------------------
+ceph      docker.io/rook/ceph:${ROOK_VERSION}
+ceph      quay.io/cephcsi/ceph-csi-operator:${CEPH_CSI_OPERATOR_VERSION}
+ceph      quay.io/ceph/ceph:${CEPH_VERSION}
+ceph      quay.io/cephcsi/cephcsi:${CEPHCSI_VERSION}
+ceph      quay.io/csiaddons/k8s-sidecar:${CSIADDONS_SIDECAR_VERSION}
+ceph      registry.k8s.io/sig-storage/csi-attacher:${CSI_ATTACHER_VERSION}
+ceph      registry.k8s.io/sig-storage/csi-node-driver-registrar:${CSI_NODE_DRIVER_REGISTRAR_VERSION}
+ceph      registry.k8s.io/sig-storage/csi-provisioner:${CSI_PROVISIONER_VERSION}
+ceph      registry.k8s.io/sig-storage/csi-resizer:${CSI_RESIZER_VERSION}
+ceph      registry.k8s.io/sig-storage/csi-snapshotter:${CSI_SNAPSHOTTER_VERSION}
+ceph      registry.k8s.io/sig-storage/snapshot-controller:${SNAPSHOT_CONTROLLER_VERSION}
+
+# ------------------------------------------------------------
+# [group: prometheus] kube-prometheus-stack(Prometheus Operator 全栈)
+#   目录: deployments/offline-files/prometheus/
+#   ⚠ KSM 与 node-exporter **不在本组** —— 它们是独立监控组件, 各自有 group/目录
+#     (kube-state-metrics / node-exporter), 见下方。本组只放 operator/prometheus/
+#     alertmanager/grafana 及各自 sidecar。
+# ------------------------------------------------------------
+prometheus  quay.io/prometheus-operator/prometheus-operator:${PROMETHEUS_APP_VERSION}
+prometheus  quay.io/prometheus-operator/prometheus-config-reloader:${PROMETHEUS_APP_VERSION}
+prometheus  quay.io/prometheus-operator/admission-webhook:${PROMETHEUS_APP_VERSION}
+prometheus  quay.io/prometheus/prometheus:${PROMETHEUS_IMAGE_PROMETHEUS}
+prometheus  quay.io/prometheus/alertmanager:${PROMETHEUS_IMAGE_ALERTMANAGER}
+prometheus  docker.io/grafana/grafana:${PROMETHEUS_IMAGE_GRAFANA}
+prometheus  quay.io/kiwigrid/k8s-sidecar:${PROMETHEUS_IMAGE_SIDECAR}
+prometheus  docker.io/jkroepke/kube-webhook-certgen:${PROMETHEUS_IMAGE_CERTGEN}
+
+# ------------------------------------------------------------
+# [group: kube-state-metrics] 集群对象状态指标(监听 API Server)
+#   目录: deployments/offline-files/kube-state-metrics/
+#   由 kube-prometheus-stack 以 subchart 部署; 但 tag/来源独立维护, 便于单独升级与离线备料。
+#   ⚠ tag 带 v 前缀(v2.20.0), 裸 2.20.0 在 registry 上不存在。
+# ------------------------------------------------------------
+kube-state-metrics  registry.k8s.io/kube-state-metrics/kube-state-metrics:${PROMETHEUS_IMAGE_KSM}
+
+# ------------------------------------------------------------
+# [group: node-exporter] 节点级主机指标(DaemonSet, hostNetwork)
+#   目录: deployments/offline-files/node-exporter/
+#   ⚠ tag 带 v 前缀(v1.12.1); ⚠ distroless=false 时拉的是带 shell 的镜像(见 08_prometheus 的 --set)
+# ------------------------------------------------------------
+node-exporter  quay.io/prometheus/node-exporter:${PROMETHEUS_IMAGE_NODE_EXPORTER}
+
+# ------------------------------------------------------------
+# [group: kubelet-cadvisor] 容器指标(内置于 kubelet, **无独立镜像**)
+#   目录: deployments/offline-files/kubelet-cadvisor/(占位, 只放说明文档)
+#   kubelet 在 10250 暴露 /metrics、/metrics/cadvisor、/metrics/probes, 由 Prometheus
+#   Operator 通过 chart 内置的 kubelet ServiceMonitor 自动抓取 —— **无需部署, 无镜像可同步**。
+#   本组刻意留空(不声明任何镜像), 以文档形式固定"这里确实不需要镜像"这一结论。
+#   端到端验证见 modules/03_addon/28_verify_prometheus.sh(check_cadvisor)。
+# ------------------------------------------------------------
+
+# ------------------------------------------------------------
+# [group: envoy] Envoy Gateway + Envoy AI Gateway(二件套)
+#   目录: deployments/offline-files/envoy/
+#   ⚠ 数据面 envoy 的 tag 与 EG 控制面版本**不同**(ENVOY_PROXY_VERSION, 如 distroless-v1.39.1)
+#   ⚠ ai-gateway-* 官方源在 docker.io(不是 ghcr)
+# ------------------------------------------------------------
+envoy  docker.io/envoyproxy/gateway:${ENVOY_EG_VERSION}
+envoy  docker.io/envoyproxy/envoy:${ENVOY_PROXY_VERSION}
+envoy  docker.io/envoyproxy/ai-gateway-controller:${ENVOY_AI_VERSION}
+envoy  docker.io/envoyproxy/ai-gateway-extproc:${ENVOY_AI_VERSION}
+
+# ------------------------------------------------------------
+# [group: multus] Multus CNI(容器多网卡)
+#   目录: deployments/offline-files/multus/
+# ------------------------------------------------------------
+multus  ghcr.io/k8snetworkplumbingwg/multus-cni:${MULTUS_IMAGE_TAG}
+
+# ------------------------------------------------------------
+# [group: rdma] RDMA 共享设备插件
+#   目录: deployments/offline-files/rdma/
+#   ⚠ 官方源已迁 ghcr.io/mellanox(Docker Hub 无此镜像); 1.4.0 无 v 前缀, v1.5.1+ 带 v
+# ------------------------------------------------------------
+rdma  ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:${RDMA_IMAGE_TAG}
+
+# ------------------------------------------------------------
+# [group: lws] LeaderWorkerSet(多机推理编排)
+#   目录: deployments/offline-files/lws/
+# ------------------------------------------------------------
+lws  registry.k8s.io/lws/lws:${LWS_IMAGE_TAG}
+
+# ------------------------------------------------------------
+# [group: cubepilot] CubePilot AI Agent 平台(自研; 已在 Harbor suanova 项目下)
+#   目录: deployments/offline-files/cubepilot/
+#   ⚠ 镜像 tag 与 chart 版本联动(-latest 结尾 → latest); 由 CI 构建发布, 本清单只做
+#     Harbor → mirrors/ 的**同台镜像复制**(上游注册域 = Harbor 自身, 按规则去掉域名前缀)。
+#   ⚠ cubepilot-chart 是 **OCI chart 制品**, 不是镜像, 不在此清单(helm pull 直接取)。
+# ------------------------------------------------------------
+cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-openclaw:${CUBEPILOT_IMAGE_TAG}
+cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-operator:${CUBEPILOT_IMAGE_TAG}
+cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-api:${CUBEPILOT_IMAGE_TAG}
+cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-web:${CUBEPILOT_IMAGE_TAG}
+
+# ------------------------------------------------------------
+# [group: metax-gpu] 沐曦 GPU Operator(已在 Harbor metax 项目下)
+#   目录: deployments/offline-files/metax-gpu/
+#   ⚠ 沐曦不发布到公共 registry, 上游就是内网 Harbor metax 项目 → 同台复制到 mirrors/。
+#   ⚠ 镜像 tag 带 -amd64 架构后缀(沐曦约定, 模块会把核心组件去后缀), 不要"修正"。
+#   ⚠ driver-image / maca 体积大(GB 级); 不需要时可 --group 排除该组同步。
+#   组件清单与 METAX_IMAGE_COMPONENTS 对应; driver/maca 版本另有变量:
+# ------------------------------------------------------------
+metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/gpu-label:${METAX_VERSION}-amd64
+metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/gpu-device:${METAX_VERSION}-amd64
+metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/gpu-aware:${METAX_VERSION}-amd64
+metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/topo-master:${METAX_VERSION}-amd64
+metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/topo-worker:${METAX_VERSION}-amd64
+metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/operator-controller:${METAX_VERSION}-amd64
+metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/container-runtime:${METAX_VERSION}-amd64
+metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/driver-manager:${METAX_VERSION}-amd64
+metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/gpu-scheduler:${METAX_VERSION}-amd64
+metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/mx-exporter:${METAX_VERSION}-amd64
+metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/driver-image:${METAX_DRIVER_VERSION}
+# maca: METAX_MACA_IMAGE 本身已含 "仓库名:tag"(maca:3.8.1.2-ubuntu22.04-amd64), 故整体拼接
+metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/${METAX_MACA_IMAGE}
