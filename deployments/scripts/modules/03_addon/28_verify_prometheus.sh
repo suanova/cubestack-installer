@@ -4,8 +4,12 @@
 # DESC: 端到端验证 Prometheus(kube-prometheus-stack)真正工作(非仅 pod running):
 #       ① monitoring 组件 pod 全部 Running
 #       → ② Prometheus CR Ready + 取到查询入口(prometheus pod ClusterIP:9090)
-#       → ③ 真实 PromQL 执行: `up == 1` 与 node 指标 → 校验 JSON data.result 非空
-#       → ④ 证明 采集→存储→查询 全链通(不只 pod 活着), 并展示关键指标样例
+#       → ③ 真实 PromQL 执行: `up == 1` → 校验 JSON data.result 非空
+#       → ④ **监控三件套数据源断言**(2026-09-18 用户要求, 本轮新增):
+#            kube-state-metrics(kube_*) / node-exporter(node_*) / kubelet-cAdvisor(container_*)
+#            各查一条"只有它会产生"的指标, 轮询 VERIFY_METRIC_WAIT 秒仍为空即判失败
+#       → ⑤ 展示关键指标样例
+#       证明 采集→存储→查询 全链通(不只 pod 活着)。
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
@@ -16,10 +20,15 @@
 #   · 依赖: 模块 08_prometheus(kube-prometheus-stack, PROMETHEUS_ENABLED=true)。
 #   · 查询端点: prometheus CR 生成的 statefulset pod 为无头 svc `prometheus-operated`
 #     (无 ClusterIP, 只能直连 pod IP)。验证从首个 master 直接 curl pod IP:9090。
-#   · 真实功能验证: 若 operator 只把 pod 拉起来但 采集/存储/查询 链路断, 这里
-#     data.result 为空即失败 —— 不是"pod Running"就放行, 能提前暴露 node-exporter
-#     未采集 / Prometheus 没抓取 / TSDB 没写等故障。
-# 资料: cluster.conf(PROMETHEUS_ENABLED / PROMETHEUS_NAMESPACE / PROMETHEUS_RELEASE_NAME / NODES)
+#   · 三件套里 **kubelet/cAdvisor 没有独立镜像/工作负载** —— 它内置于每个节点的 kubelet,
+#     由 chart 自带的 kubelet ServiceMonitor 抓 /metrics/cadvisor。镜像层面只需备料 KSM 与
+#     node-exporter(见 deployments/config/images.manifest 的 kube-state-metrics / node-exporter 组)。
+#   · 验证边界(如实标注): ④ 证明"每条数据源有数据"; **不含**指标基数/采集延迟/存储膨胀等
+#     性能维度, 也不含 PromQL 告警规则触发验证(那属于 kube-prometheus-stack 自身规则)。
+#   · 环境确实不支持时(如需特殊 kubelet 证书配置), 用 VERIFY_MONITORING_STRICT=false 重跑,
+#     ④ 降级为告警不阻断; 默认 true=严格。
+# 资料: cluster.conf(PROMETHEUS_ENABLED / PROMETHEUS_NAMESPACE / PROMETHEUS_RELEASE_NAME /
+#        VERIFY_MONITORING_STRICT / VERIFY_METRIC_WAIT / NODES)
 # 用法: sudo ./deploy-cluster.sh --steps verify_prometheus
 # ============================================================
 set -euo pipefail
@@ -78,10 +87,75 @@ _NODE_N="$( _prom_curl 'node_cpu_seconds_total' | python3 -c 'import json,sys; d
 [ "${_NODE_N:-0}" -gt 0 ] && ok "    node_cpu_seconds_total → ${_NODE_N} 个时序 ✓" \
     || warn "    node_cpu_seconds_total 暂时为空(等 node-exporter 就绪后自动出数据; up==1 已证明查询链通)"
 
-say "  ④ 展示关键指标样例(任意一条 up==1 metric):"
+say "  ④ 监控三件套真实采集断言(KSM / node-exporter / kubelet-cAdvisor)..."
+# ★ 2026-09-18(用户要求): 这三个是 Prometheus 生态的核心数据源, 必须**各自有数据**才算通 ——
+#   只查 up==1 不够: target up 只说明"能连上", 采集到的指标为空同样不可用。
+#   断言方式: 每个组件查一条**只有它会产生**的指标, 轮询等待后仍为空即判失败。
+#   ① kube-state-metrics : kube_*            (监听 API Server 生成对象状态指标)
+#   ② node-exporter      : node_*            (DaemonSet 采集主机指标)
+#   ③ kubelet/cAdvisor   : container_*       (kubelet 自带, 抓 /metrics/cadvisor)
+#   ⚠ 边界: cAdvisor 指标来自 kubelet 的 10250 ServiceMonitor, 若集群 kubelet 证书/RBAC 特殊,
+#     可能需手动放行; 此时用 VERIFY_MONITORING_STRICT=false 降级为告警(默认为严格=失败)。
+VERIFY_MONITORING_STRICT="${VERIFY_MONITORING_STRICT:-true}"
+VERIFY_METRIC_WAIT="${VERIFY_METRIC_WAIT:-120}"     # 每个指标最多等多久(秒)
+
+# 查一条指标在轮询窗口内的时序数; 有数据即返回
+_metric_count() {   # <PromQL> → 时序数(0=无数据)
+    local _n
+    _n="$( _prom_curl "$1" | python3 -c 'import json,sys
+try:
+    print(len(json.load(sys.stdin).get("data",{}).get("result",[])))
+except Exception:
+    print(0)' 2>/dev/null || echo 0 )"
+    printf '%s' "${_n:-0}"
+}
+
+# 三件套断言: <显示名> <PromQL> <最低时序数> <缺失时的排查提示>
+_COMPS_FAILED=""
+_check_component() {
+    local _name="$1" _q="$2" _min="$3" _hint="$4" _n=0 _waited=0
+    while [ "${_waited}" -lt "${VERIFY_METRIC_WAIT}" ]; do
+        _n="$(_metric_count "${_q}")"
+        [ "${_n:-0}" -ge "${_min}" ] && break
+        sleep 10; _waited=$((_waited + 10))
+    done
+    if [ "${_n:-0}" -ge "${_min}" ]; then
+        ok "    ${_name}: ${_n} 条时序 ✓(指标 ${_q%%\{*})"
+        return 0
+    fi
+    err "    ${_name}: ${VERIFY_METRIC_WAIT}s 内无数据(指标 ${_q%%\{*})"
+    err "      ${_hint}"
+    _COMPS_FAILED="${_COMPS_FAILED} ${_name}"
+    return 1
+}
+
+# ① kube-state-metrics(kube_pod_info 由 KSM 独有)
+_check_component "kube-state-metrics" "kube_pod_info" 1 \
+    "查 kubectl -n ${PROMETHEUS_NAMESPACE} get deploy ${PROMETHEUS_RELEASE_NAME}-kube-state-metrics 与 servicemonitor; 镜像在离线目录 kube-state-metrics/"
+# ② node-exporter(node_cpu_seconds_total 由 node-exporter 独有)
+_check_component "node-exporter" "node_cpu_seconds_total" 1 \
+    "查 kubectl -n ${PROMETHEUS_NAMESPACE} get ds ${PROMETHEUS_RELEASE_NAME}-prometheus-node-exporter(需每节点 Running); 镜像在离线目录 node-exporter/"
+# ③ kubelet/cAdvisor(container_* 由 kubelet 的 /metrics/cadvisor 提供, 无独立镜像/工作负载)
+_check_component "kubelet-cAdvisor" "container_cpu_usage_seconds_total" 1 \
+    "查 kubectl -n ${PROMETHEUS_NAMESPACE} get servicemonitor ${PROMETHEUS_RELEASE_NAME}-kubelet; 需 kubelet 10250 可达且 chart 的 kubelet.enabled=true"
+
+if [ -n "${_COMPS_FAILED}" ]; then
+    if [ "${VERIFY_MONITORING_STRICT}" = "true" ]; then
+        err "监控三件套未全部通过:${_COMPS_FAILED}"
+        err "  若环境确实不适用(如需特殊 kubelet 证书配置), 用 VERIFY_MONITORING_STRICT=false 重跑可降级为告警"
+        exit 1
+    fi
+    warn "监控三件套未全部通过:${_COMPS_FAILED}(VERIFY_MONITORING_STRICT=false, 仅告警)"
+else
+    ok "    三件套全部有数据: 对象状态(KSM) + 主机(node-exporter) + 容器(cAdvisor) ✓"
+fi
+unset _COMP 2>/dev/null || true
+
+say "  ⑤ 展示关键指标样例(任意一条 up==1 metric):"
 echo "${_UP}" | python3 -c 'import json,sys; r=json.load(sys.stdin).get("data",{}).get("result",[]); [print("    {} → value={}".format(m["metric"].get("__name__", "up"), m.get("value",[None,""] ) [1])) for m in r[:3]]' 2>/dev/null | sed 's/^/    /' || true
 
 echo "---------------------------------------------"
 ok "Prometheus 验证通过: 采集→存储→查询 全链可用(${_UP_N} 个 up 目标)"
+echo "  监控三件套:  kube-state-metrics(对象状态) / node-exporter(主机) / kubelet-cAdvisor(容器)"
 echo "  入口: kubectl -n ${PROMETHEUS_NAMESPACE} port-forward svc/${PROMETHEUS_RELEASE_NAME}-prometheus 9090"
 echo "  Grafana: kubectl -n ${PROMETHEUS_NAMESPACE} port-forward svc/${PROMETHEUS_RELEASE_NAME}-grafana 3000"

@@ -318,7 +318,7 @@ if [ -n "${AIG_ENDPOINT}" ]; then
     BODY="$( (SSH "curl -s -m 10 -X POST http://${AIG_ENDPOINT}/v1/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"mock\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}' 2>/dev/null" || true) )"
     case "${BODY}" in
         *envoy-ai-gateway-verify-ok*) ok "    HTTP ${HTTP_CODE}, mock LLM 响应透传成功 ✓(AI Gateway 数据面转发正常)" ;;
-        *) warn "    调用未返回期望响应(HTTP_CODE='${HTTP_CODE}', body='${BODY:0:120}...'); 常见原因: ① EG extensionManager 未接线(模块 10 [5/6], 缺则数据面无 AI ext_proc 过滤器, 404 'No matching route found') ② AIGatewayRoute 路由未配置/字段版本差异 ③ Backend url 格式; 资源调和已通过, 真实 LLM 需按官方文档配 AIGatewayRoute + 真实 AIServiceBackend" ;;
+        *) warn "    调用未返回期望响应(HTTP_CODE='${HTTP_CODE}', body='${BODY:0:120}...'); 常见原因: ① EG extensionManager 未接线(模块 16 [5/6], 缺则数据面无 AI ext_proc 过滤器, 404 'No matching route found') ② AIGatewayRoute 路由未配置/字段版本差异 ③ Backend url 格式; 资源调和已通过, 真实 LLM 需按官方文档配 AIGatewayRoute + 真实 AIServiceBackend" ;;
     esac
 else
     warn "    数据面入口未就绪, 跳过真实调用(资源调和已证明 AI 控制面工作正常)"

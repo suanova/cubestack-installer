@@ -425,16 +425,18 @@ kubectl get validatingwebhookconfiguration lws-validating-webhook-configuration 
 
 | 症状 | 根因 | 解法(根治) |
 |---|---|---|
-| `09_envoy_gateway.sh` 报 "EG chart 目录不存在/缺 Chart.yaml" | 离线 chart 未备料(联网机未跑 fetch 工具) | 联网机执行 `tools/images/envoy-fetch-charts.sh`(或手动 helm pull gateway-helm 解包)后拷到 `deployments/cubestack-addon/envoy-gateway/eg/` |
+| `15_envoy_gateway.sh` 报 "EG chart 目录不存在/缺 Chart.yaml" | 离线 chart 未备料(联网机未跑 fetch 工具) | 联网机执行 `tools/images/envoy-fetch-charts.sh`(或手动 helm pull gateway-helm 解包)后拷到 `deployments/cubestack-addon/envoy-gateway/eg/` |
 | 部署报 "未找到 envoyproxy/gateway:... 镜像" | 离线镜像未备料 | 联网机执行 `tools/images/envoy-save-images.sh`, tar 放入 `deployments/offline-files/envoy/`(或本地 docker daemon 先 docker pull); 已备 tar 可单独跑 `tools/images/envoy-load-images.sh` 预加载 |
-| 部署后控制面/certgen 或数据面 pod `ImagePullBackOff`(docker.io 不可达) | chart 镜像未改写为集群内置 registry(gateway-helm v1.9.1 正确路径: 控制面/certgen `deployment.envoyGateway.image.repository/tag`, 数据面 `global.images.envoyProxy.image`; 旧写法 `image.repository` / `envoyGateway.image.*` 顶层不存在, 无效果) | 确认 09 模块 helm 安装已注入上述正确 `--set`; 已装错可 `helm upgrade eg <chart> --set deployment.envoyGateway.image.repository=registry.cubestack.io:5000/envoyproxy/gateway --set deployment.envoyGateway.image.tag=v1.9.1 --set global.images.envoyProxy.image=registry.cubestack.io:5000/envoyproxy/envoy:distroless-v1.39.1` 修复(certgen Job 会随模板变化重建), 或直接重跑 09 模块(内部先 delete ns) |
-| 创建 Gateway 后数据面 pod `CrashLoopBackOff`, 日志 `PARSE ERROR: Argument: --cpuset-threads` | **数据面 envoy 镜像 tag 用错**(用了 EG 版本号如 `envoy:v1.9.1`, 拉到远古 Envoy; EG 1.9.x 配套数据面 tag 应为 `ENVOY_PROXY_VERSION`=distroless-v1.39.1, 用 `kubectl exec deploy/envoy-gateway -- envoy-gateway version` 核对) | 09 模块已改为 `push_one envoy ... ${ENVOY_PROXY_VERSION}` + helm `global.images.envoyProxy.image` 用 ENVOY_PROXY_VERSION; 已错: 在联网机用 envoy-save-images.sh(已修)重新 save `envoyproxy/envoy:distroless-v1.39.1`, 离线推入 registry 后重跑 09 模块 |
+| 部署后控制面/certgen 或数据面 pod `ImagePullBackOff`(docker.io 不可达) | chart 镜像未改写为集群内置 registry(gateway-helm v1.9.1 正确路径: 控制面/certgen `deployment.envoyGateway.image.repository/tag`, 数据面 `global.images.envoyProxy.image`; 旧写法 `image.repository` / `envoyGateway.image.*` 顶层不存在, 无效果) | 确认 15 模块 helm 安装已注入上述正确 `--set`; 已装错可 `helm upgrade eg <chart> --set deployment.envoyGateway.image.repository=registry.cubestack.io:5000/envoyproxy/gateway --set deployment.envoyGateway.image.tag=v1.9.1 --set global.images.envoyProxy.image=registry.cubestack.io:5000/envoyproxy/envoy:distroless-v1.39.1` 修复(certgen Job 会随模板变化重建), 或直接重跑 15 模块(内部先 delete ns) |
+| 创建 Gateway 后数据面 pod `CrashLoopBackOff`, 日志 `PARSE ERROR: Argument: --cpuset-threads` | **数据面 envoy 镜像 tag 用错**(用了 EG 版本号如 `envoy:v1.9.1`, 拉到远古 Envoy; EG 1.9.x 配套数据面 tag 应为 `ENVOY_PROXY_VERSION`=distroless-v1.39.1, 用 `kubectl exec deploy/envoy-gateway -- envoy-gateway version` 核对) | 15 模块已改为 `push_one envoy ... ${ENVOY_PROXY_VERSION}` + helm `global.images.envoyProxy.image` 用 ENVOY_PROXY_VERSION; 已错: 在联网机用 envoy-save-images.sh(已修)重新 save `envoyproxy/envoy:distroless-v1.39.1`, 离线推入 registry 后重跑 15 模块 |
 | `GatewayClass eg` 未 Accepted | 控制面未就绪 / controllerName 不匹配 | `kubectl -n envoy-gateway-system logs deploy/eg --tail=50`; GatewayClass 的 `spec.controllerName` 必须是 `gateway.envoyproxy.io/gatewayclass-controller` |
 | Gateway 一直没 VIP(ADDRESS 空) | MetalLB 池耗尽/网段冲突, 或数据面未起来 | `kubectl describe gateway` 看条件; `kubectl get svc -n <gw-ns>` 看 LoadBalancer pending 原因(参考 §三.1/§三.2) |
-| `10_envoy_ai_gateway.sh` 报 "未检测到 Envoy Gateway(GatewayClass eg 未 Accepted)" | AI 依赖 EG, 但 EG 未装/未就绪 | 先 `ENVOY_GATEWAY_ENABLED=true` 部署模块 `envoy_gateway`, 再装 AI |
-| AI 控制器 pod CrashLoop / webhook 不生效(v1.x) | `envoyGateway.namespace` 未指向 EG 命名空间 / EG 版本不匹配(AI 与 EG 版本兼容矩阵) | 确认模块 10 helm 安装注入 `--set envoyGateway.namespace` = `envoy-gateway-system`(`kubectl -n ai-gateway-system get deploy ai-gateway-controller -o yaml \| grep envoyGatewayNamespace`); 核对 AI↔EG 版本兼容矩阵 |
+| `16_envoy_ai_gateway.sh` 报 "未检测到 Envoy Gateway(GatewayClass eg 未 Accepted)" | AI 依赖 EG, 但 EG 未装/未就绪 | 先 `ENVOY_GATEWAY_ENABLED=true` 部署模块 `envoy_gateway`, 再装 AI |
+| AI 控制器 pod CrashLoop / webhook 不生效(v1.x) | `envoyGateway.namespace` 未指向 EG 命名空间 / EG 版本不匹配(AI 与 EG 版本兼容矩阵) | 确认模块 16 helm 安装注入 `--set envoyGateway.namespace` = `envoy-gateway-system`(`kubectl -n ai-gateway-system get deploy ai-gateway-controller -o yaml \| grep envoyGatewayNamespace`); 核对 AI↔EG 版本兼容矩阵 |
 | AI CRD apply 报 `no matches for kind "AIGateway"` | v1.x 无 AIGateway/Backend CRD(改为 AIServiceBackend/AIGatewayRoute); 或 CRD 未装 | `kubectl get crd \| grep aigateway`; 按 `docs/envoy-gateway.md` §4.2 / 官方 `examples/basic/basic.yaml` 使用 v1.x 资源 |
 | 部署报 "未找到 skopeo" | 推送镜像到集群内置 registry 需要 `skopeo` | 宿主机安装 `skopeo`(如 `apt install skopeo`), 或使用项目 CLI 镜像(`tools/docker/build-cli-context.sh` 内置 skopeo-1.16.1-amd64) |
+| `Gateway` 长期 `Programmed=False (AddressNotAssigned)`, 数据面 Service 是 `LoadBalancer` 且 `EXTERNAL-IP <pending>`, 但 NodePort 别名能访问 | Gateway 注解 `gateway.envoyproxy.io/service-type: NodePort` 在 **EG v1.9.1 未生效**(实测: 注解在, 控制器仍建 LoadBalancer 类型数据面; 集群无 MetalLB → 永远无地址 → 条件不转 True) | 访问不受影响(入口 = `tools/lb/gateway-nodeport.sh` 建的固定别名 `<gw>-external`)。要让状态转绿: 跑一次 `tools/lb/gateway-nodeport.sh <gw>` —— 它把数据面 Service 转成 NodePort 后 EG 立即置 `Programmed=True`(2026-09-17 实测)。**别只信注解** |
+| HTTPRoute `ResolvedRefs=False`, 经网关访问 404/500 | backendRef 指向的 Service 不存在 | 核对 `kubectl -n <ns> get svc`。典型踩坑: CubePilot 写 `svc/cubepilot` —— 那是**内置 Portal 的 nginx 入口**, 仅 `web.enabled=true` 时才渲染; 关 Portal 的部署里只有 `svc/cubepilot-api`(两条路由需各自门控: API `cubepilot-api:8080` 恒有 / Portal `cubepilot:8080` 需 `CUBEPILOT_WEB_ENABLED=true`) |
 
 **验证**
 ```bash
@@ -493,34 +495,20 @@ kubectl -n rook-ceph get cephcluster,cephblockpool; kubectl get sc ceph-block
 
 ---
 
-### 7. 平台统一网关 cubestack-gateway 故障速查
+### 7. 平台统一网关(原 cubestack-gateway)—— 模块已移除
 
-> 架构/部署/接入新服务见 `deployments/cubestack-addon/gateway/README.md` 与各 `routes/*.yaml` 头部注释。
-
-**症状/排查对照**
-
-| 症状 | 根因 | 解法(根治) |
-|---|---|---|
-| 某组件的 HTTPRoute **压根不存在**(网关本身正常、其它 hostname 可访问, 该 hostname 返回 404) | ① **模块顺序**: 路由落在后端组件自己的命名空间里, 网关模块若排在组件模块之前, `kubectl apply` 直接报 `namespaces "x" not found` 失败 —— 旧版只落一行 `warn` 就继续, 全量日志里被淹没, 路由**静默缺失**。② 组件开关与路由门控不匹配 | **2026-09-17 已修(两处)**: ① 网关模块重排为 `33_cubestack_gateway.sh`(**排在所有组件之后**); ② 下发前做**后端存在性预检**(路由的 metadata.namespace / 第一条 backendRef 的 Service 不存在 → 明确跳过 + 计数, 汇总打印 `⚠ 另有 N 条路由因后端未就绪被跳过`)。**补下发**: 组件部署完成后重跑 `sudo ./deploy-cluster.sh --steps cubestack_gateway`(幂等)。新增组件模块序号请 < 33 |
-| 路由存在但 `ResolvedRefs=False`, 经网关访问 404 | backendRef 指向的 Service 不存在 | 核对 `kubectl -n <ns> get svc`。典型踩坑: CubePilot 写 `svc/cubepilot` —— 那是**内置 Portal 的 nginx 入口**, 仅 `web.enabled=true` 时才渲染; 关 Portal 的部署里只有 `svc/cubepilot-api`。现已拆两条路由各自门控: API `cubepilot-api:8080`(恒有) / Portal `cubepilot:8080`(需 `CUBEPILOT_WEB_ENABLED=true`) |
-| `Gateway` 长期 `Programmed=False (AddressNotAssigned)`, 数据面 Service 是 `LoadBalancer` 且 `EXTERNAL-IP <pending>`, 但 NodePort 别名能访问 | Gateway 注解 `gateway.envoyproxy.io/service-type: NodePort` 在 **EG v1.9.1 未生效**(实测: 注解在, 控制器仍建 LoadBalancer 类型数据面; 集群无 MetalLB → 永远无地址 → 条件不转 True) | 访问不受影响(入口 = `gateway-nodeport.sh` 建的固定别名 `<gw>-external`)。要让状态转绿: 跑一次 `tools/lb/gateway-nodeport.sh <gw>` —— 它把数据面 Service 转成 NodePort 后 EG 立即置 `Programmed=True`(2026-09-17 实测)。**别只信注解** |
-| `sync-to-container.sh` 同步后, 容器内 `check-modules.sh` 报 `MODULE key 重复: xxx (NN_old.sh 与 NN_new.sh)` | 该工具用 `docker cp` **合并式**同步 —— 容器里不存在"源已删则目标也删"的语义; 模块**改名/改序号**后旧文件残留, 同一个 MODULE key 出现两份 | 容器里删掉旧文件后重跑校验: `docker exec <容器> rm -f /opt/cubestack-installer/deployments/scripts/modules/03_addon/NN_old.sh`。同步工具末尾的"容器内静态校验"就是用来拦这个的(报错务必处理, 别当噪音) |
-
-**验证**
-```bash
-sudo ./deploy-cluster.sh --steps cubestack_gateway     # 幂等重下发(含后端预检 + 固定入口 + 部署机 /etc/hosts)
-kubectl get httproute -A                               # 每条应 Accepted=True / ResolvedRefs=True
-curl -i -H "Host: cubepilot-api.cubestack.io" http://<节点IP>:30080/healthz   # 200
-curl -i -H "Host: cubepilot.cubestack.io"     http://<节点IP>:30080/          # 200(Portal SPA)
-```
-
-**相关命令**
-```bash
-kubectl -n cubestack-gateway-system get gateway cubestack-gateway \
-  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'   # Accepted / Programmed
-kubectl -n envoy-gateway-system get svc | grep cubestack-gateway     # 数据面 + 固定别名 <gw>-external(NodePort 30080)
-kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=50  # EG 控制面(路由翻译/backend 解析报错)
-```
+> ⚠ **2026-09-18: 模块 `33_cubestack_gateway.sh` 与 `deployments/cubestack-addon/gateway/`
+> (基座 `base-gateway.yaml` + `routes/*.yaml` + README)已从仓库删除。**
+> 网关(Gateway)与路由(HTTPRoute)统一改由**专门的网关模块**创建(尚在重构中), 各组件模块不再自建网关与路由。
+>
+> - 与模块无关的两条**通用 EG 现象**(`Programmed=False (AddressNotAssigned)` / `ResolvedRefs=False`)
+>   已上移到 **§三.5 Envoy Gateway 故障速查**;
+> - 设计要点(单入口多 hostname、路由须晚于后端组件下发、固定别名入口等)保留在
+>   `docs/envoy-gateway.md` §2.1b, 供新模块落地时参考;
+> - 历史实现与当时的排查过程见 git: `1cfbcf0`(引入)/ `45afb4a`(修路由静默缺失 + 模块重排 18→33)。
+>
+> ⚠ 已部署过旧模块的集群: 网关资源**不会被自动删除**(模块只是不再被调度), 需要时手工清:
+> `kubectl delete gateway cubestack-gateway -n cubestack-gateway-system; kubectl delete ns cubestack-gateway-system`。
 
 ---
 
@@ -567,3 +555,84 @@ docker 不用手动卸载, 留给 kubespray "Remove Docker" 流程处理。
 
 > 排查线索: 先确认节点是否残留旧容器运行时/kubelet unit ——
 > `ssh <user>@<node> "systemctl is-active docker kubelet; ls /etc/systemd/system/kubelet.service"`
+
+### 2. 部署容器同步后 `check-modules.sh` 报 `MODULE key 重复: xxx (NN_old.sh 与 NN_new.sh)`
+
+**症状:** `tools/sync-to-container.sh` 同步到部署容器后, 容器内静态校验报同一个 MODULE key 出现两份。
+
+**根因:** 该工具用 `docker cp` **合并式**同步 —— 容器里不存在"源已删则目标也删"的语义;
+模块**改名/改序号/删除**后旧文件残留在容器里(例: `33_cubestack_gateway.sh` 删除后, 容器里那份还在)。
+
+**解法:** 容器里删掉旧文件后重跑校验:
+```bash
+docker exec <容器> rm -f /opt/cubestack-installer/deployments/scripts/modules/03_addon/NN_old.sh
+```
+同步工具末尾的"容器内静态校验"就是用来拦这个的 —— **报错务必处理, 别当噪音**。
+
+### 3. Harbor 统一镜像源(上游→Harbor→离线 tar)工具链的 5 个坑
+
+**背景:** `docs/harbor-mirror.md` 的统一镜像源工具(`tools/images/harbor-{sync,save}-images.sh`、
+`check-image-manifest.sh`)实现时踩到的坑。都不报"明显错误", 而是**静默失效**, 特此沉淀。
+
+#### 3.1 skopeo 连公开镜像都 fatal: `reading JSON file "/run/containers/<uid>/auth.json": permission denied`
+
+**症状:** 拉公开镜像(无需任何凭据)也失败, 报读不到默认 auth 文件。
+**根因:** skopeo 默认 auth 文件路径是 `${XDG_RUNTIME_DIR}/containers/auth.json`, 未设该变量时
+退到 `/run/containers/<uid>/auth.json` —— **容器内 / 非 root 场景该目录普遍不可读**, skopeo 直接 fatal。
+**解法(根治):** 显式指定自建 auth 文件, 不让 skopeo 猜默认路径:
+```bash
+AUTH=$(mktemp); chmod 600 "$AUTH"; printf '{"auths":{}}' > "$AUTH"
+export REGISTRY_AUTH_FILE="$AUTH"        # 有凭据时写入 {"auths":{"<host>":{"auth":"<base64 u:p>"}}}
+```
+顺带好处: 凭据写文件而非 `--src-creds/--dest-creds`, **不进 argv / 不进 ps / 不进 CI 日志**。
+**验证:** `REGISTRY_AUTH_FILE=$AUTH skopeo inspect docker://registry.k8s.io/pause:3.10` 能返回 digest。
+
+#### 3.2 `skopeo inspect` 报 `unknown flag: --src-tls-verify` 被 2>/dev/null 吞掉 → 幂等静默失效
+
+**症状:** 同步工具每次都全量重传, "digest 未变则跳过"从不生效。
+**根因:** `copy` 与 `inspect` 的 TLS 旗标名**不同**: `copy` 用 `--src-tls-verify`/`--dest-tls-verify`,
+**`inspect` 用 `--tls-verify`(单数)**。传错 → 命令失败 → 被 `2>/dev/null || true` 吞成"取不到 digest"
+→ 退化成"跳过比对直接同步" → 每次全传。
+**解法(根治):** 两套参数**分开维护**(`SKOPEO_SRC_OPTS` vs `INSPECT_SRC_OPTS`)。
+**验证:** 连跑两次 `harbor-sync-images.sh --group rdma`, 第二次必须打印 `digest 未变, 跳过`。
+> 教训: `2>/dev/null` 会把"参数写错"伪装成"环境问题"。关键判据(这里=digest)取空时要有
+> 独立的告警, 不能只当"无数据"处理。
+
+#### 3.3 Harbor 漂移检查把**已存在**的镜像全报"缺失"
+
+**症状:** `check-image-manifest.sh --harbor` 把 63 个镜像全报缺失, 但 Harbor 上确实有。
+**根因:** Harbor API `GET /projects/{p}/repositories/{repo}/artifacts/{ref}` 有两条硬规则:
+① repository 名要**双重 URL 编码**(`/` → `%252F`, 单重 `%2F` 一律 404);
+② 路径里的 repository 名**不含项目前缀**(项目已在路径段里)。
+**解法(根治):**
+```bash
+path="${dst#<host>/<project>/}"; tag="${path##*:}"; repo="${path%:*}"
+enc_repo="$(printf '%s' "$repo" | sed 's#/#%252F#g')"
+curl -u u:p "$API/api/v2.0/projects/<project>/repositories/${enc_repo}/artifacts/${tag}"
+```
+**验证:** 该端点对已存在镜像返回 200, 不存在返回 404。
+
+#### 3.4 离线 tar 的 `RepoTags` 为空 → 模块识别不出 tar 内容
+
+**症状:** 用 skopeo 生成的 tar, `tar -xOf x.tar manifest.json` 看到 `"RepoTags": []`;
+`lib-common.sh` 的 `tar_first_image_tag` 返回空 → 依赖内容匹配的逻辑(cubepilot 推送兜底、
+`ensure_registry_nginx`)全部失效。
+**根因:** `skopeo copy ... docker-archive:<file>` **末尾不带 `:<ref>` 时 skopeo 不写 RepoTags**
+(docker save 会写, 所以老的 tar 都正常)。
+**解法(根治):** 目标写成 `docker-archive:<file>:<上游 ref>`, 且 ref 用**上游 ref**
+(与 docker save 产出一致, 既有模块的通配/内容匹配都不用改)。
+**验证:** `bash -c 'source deployments/scripts/lib-common.sh; tar_first_image_tag <tar>'`
+应打印 `quay.io/prometheus/node-exporter:v1.12.1`。
+
+#### 3.5 Harbor 项目不存在导致 push 失败(仓库会自动建, 项目不会)
+
+**症状:** `skopeo copy` 推到 `harbor.isuanova.com/mirrors/...` 报项目不存在/未授权。
+**根因:** Harbor 只在首次 push 时自动创建**仓库(repository)**; **项目(project)必须预先存在**,
+且**创建项目需要登录**(匿名建项 401)。
+**解法(根治):** 同步工具先探测项目(HTTP 200?), 不存在则用凭据 POST 创建(公开只读,
+便于部署机匿名拉取); 无凭据时给出明确指引而不是让 push 以一个含糊错误失败。
+**验证:** `curl -u u:p -X POST "$API/api/v2.0/projects" -d '{"project_name":"mirrors","metadata":{"public":"true"}}'`
+返回 201(已存在则 409)。
+
+> 另: Harbor 上 `clquan` **不是 sysadmin**, 但仍可创建项目(实测 201)——
+> 判断"能不能建"要实测, 不要凭 `sysadmin_flag` 推断。

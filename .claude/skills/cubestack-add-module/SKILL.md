@@ -78,6 +78,9 @@ init_remote_kubectl || exit 1
 - 开关类模块先检查 TOGGLE:`[ "${TOGGLE_VAR:-true}" = "true" ] || { say "跳过"; exit 0; }`(未启用不报错)
 - 重型安装模块 `REPEAT: 0`(断点续跑);幂等就绪检查/verify `REPEAT: 1`
 - 新增配置变量:① `deployments/config/cluster.conf.example` 加带注释默认声明(格式 `VAR="${VAR:-default}"`)→ ② 脚本引用 → ③ 如需同步 kubespray group_vars,在 `tools/k8s/sync-*-config.sh` 加同步逻辑
+- ⚠ **不要在自己的模块里创建 Gateway / HTTPRoute**(2026-09-18 起): 网关与路由统一由**专门的网关模块**创建,
+  组件模块只装组件;对外入口在模块末尾给 port-forward 指引即可。也不要假设平台网关一定存在
+  (原 `33_cubestack_gateway.sh` 及其 `cubestack-addon/gateway/` 已移除,新网关模块待落地)
 
 ### 步骤 4:静态校验(合入前强制)
 

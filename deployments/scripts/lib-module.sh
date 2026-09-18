@@ -574,8 +574,8 @@ _component_meta_list() {
 # ---------------- 未部署组件汇总(防"静默缺失") ----------------
 # ⚠ 背景(2026-09-17 实例, 第二次同类):
 #   TOGGLE 关闭的模块**不会进 RUN_STEPS** —— run_module 只对已调度的模块打印, 于是"部署全绿结束",
-#   但 cubestack-gateway-system/Gateway/HTTPRoute 全都**不存在**: 日志 0 行、state 无记录,
-#   只能靠人工比对 --list 与 state 才发现(第一次是 2026-09-16: 提交里根本没有模块文件)。
+#   但该组件应有的资源全都**不存在**: 日志 0 行、state 无记录,
+#   只能靠人工比对 --list 与 state 才发现(2026-09-16 实例: 提交里根本没有模块文件)。
 #   本函数把"本次不会部署的组件"显式列出来, 计划开始时(print_plan, 含 --list)与部署收尾各调一次。
 # 分组:
 #   ① 开关关闭(已实现, 打开即部署)   ② 开关已开但本次未调度(--steps 精确模式/--skip/阶段过滤)
@@ -627,7 +627,7 @@ print_undeployed_summary() {
         echo "  ℹ 单组件安装模式(--steps): 只跑指定组件 + 其非基座依赖; 基座类(k8s_deploy/metallb/local_path/k8s_registry 等)按设计未纳入"
     if [ -n "${_off}" ]; then
         echo "  ⚠ 本次未部署的组件(开关关闭, 打开即部署): ${_off}"
-        echo "     ↳ 立即单跑: --steps <组件名>(如 --steps cubestack_gateway); 持久启用: --enable <组件名>"
+        echo "     ↳ 立即单跑: --steps <组件名>(如 --steps keycloak); 持久启用: --enable <组件名>"
     fi
     [ -n "${_idle}" ] && echo "  ⚠ 开关已开但本次未调度(如 --steps 精确模式/--skip/阶段过滤): ${_idle}"
     [ -n "${_stub}" ] && echo "  ○ 规划中未实现(伪代码占位, 打开开关也只有伪代码流程): ${_stub}"

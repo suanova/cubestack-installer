@@ -43,17 +43,15 @@
 #     Ceph 体系启用(lib-common 已归一 REGISTRY_STORAGE_CLASS=ceph-block)→ 传 ceph-block;
 #     否则留空(用集群默认), 避免纯 local-path 集群上 PVC 永久 Pending。
 #   · 内置 Portal: chart 自带 React 门户(cubepilot-web; nginx 提供 SPA 页面并把 /api 反代给 api)。
-#     **CUBEPILOT_WEB_ENABLED 默认 true** —— 装完即可用: 平台网关 cubepilot.cubestack.io(见下)
-#     或 port-forward svc/cubepilot 8080:8080。
+#     **CUBEPILOT_WEB_ENABLED 默认 true** —— 装完即可用: port-forward svc/cubepilot 8080:8080。
 #     置 false(如已有统一 UI 接管前端)则不建 cubepilot-web Deployment 与相关 Service,
 #     同步/推送阶段也会跳过 web 镜像, 不白传。
 #   · LLM: 默认**无心智模型**(不假设平台已有 LLM), 装完在 Portal 的 Agent Config → LLM Config 里加。
 #     要在安装时预置平台默认模型: 填 CUBEPILOT_LLM_ENDPOINT / CUBEPILOT_LLM_MODEL
 #     + CUBEPILOT_LLM_API_KEY。
-#   · 平台统一网关(模块 cubestack_gateway, 序号 33 —— **排在组件之后**才能下发路由, 见该模块头部):
-#       cubepilot-api.cubestack.io  → svc/cubepilot-api:8080   (CUBEPILOT_ENABLED=true 即下发)
-#       cubepilot.cubestack.io      → svc/cubepilot:8080       (内置 Portal; 另需 WEB_ENABLED=true)
-#     网关未启用(CUBESTACK_GATEWAY_ENABLED!=true)时走 port-forward。
+#   · 对外访问: 本模块只装组件, **不管暴露** —— 平台网关与各服务路由由**专门的网关模块**统一
+#     创建(尚在重构中, 待落地后 cubepilot-api.cubestack.io / cubepilot.cubestack.io 由该模块下发)。
+#     当前入口: port-forward(见模块末尾汇总)。
 # 数据源: cluster.conf (CUBEPILOT_* / REGISTRY_* / SERVICE_EXPOSE_MODE / REGISTRY_STORAGE_CLASS /
 #                       CEPH_ENABLED / CEPH_CSI_ENABLED / SSH_KEY_NAME / NODES)
 # 用法:   sudo ./deploy-cluster.sh --steps cubepilot
@@ -487,12 +485,6 @@ if [ "${CUBEPILOT_WEB_ENABLED}" = "true" ]; then
     echo "  端口转发:    kubectl -n ${CUBEPILOT_NAMESPACE} port-forward svc/cubepilot 8080:8080       # Portal(SPA + /api)"
 fi
 echo "               kubectl -n ${CUBEPILOT_NAMESPACE} port-forward svc/cubepilot-api 8080:8080   # 仅 API(/healthz)"
-if [ "${CUBESTACK_GATEWAY_ENABLED:-false}" = "true" ]; then
-    echo "  网关路由:    cubepilot-api.cubestack.io → cubepilot-api:8080(模块 cubestack_gateway 下发)"
-    if [ "${CUBEPILOT_WEB_ENABLED}" = "true" ]; then
-        echo "               cubepilot.cubestack.io     → cubepilot:8080(Portal)"
-    fi
-fi
 if [ -n "${CUBEPILOT_LLM_ENDPOINT:-}" ]; then
     echo "  LLM:         ${CUBEPILOT_LLM_ENDPOINT}(${CUBEPILOT_LLM_MODEL:-<未指定模型>}); 密钥 Secret ${CUBEPILOT_NAMESPACE}/${CUBEPILOT_LLM_SECRET}"
 else

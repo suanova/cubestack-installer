@@ -19,12 +19,11 @@
 #   · 组件: operator + prometheus + alertmanager + node-exporter + kube-state-metrics + grafana;
 #     thanosRuler / kubeRBACProxy / windows-exporter / CRD 升级 Job 默认关闭(不备料)
 #   · 对外暴露(第 5 步): PROMETHEUS_EXPOSE_MODE=nodeport(*-external NodePort 31000/31001) /
-#     loadbalancer / clusterip; ★ CUBESTACK_GATEWAY_ENABLED=true 时由平台统一网关接管
-#     (走模块 cubestack_gateway 的 HTTPRoute hostname, 不再建 *-external, 并清理历史遗留)。
+#     loadbalancer / clusterip。
 #   · 参考: deployments/cubestack-addon/observability/prometheus/README.md
 # 数据源: cluster.conf (PROMETHEUS_ENABLED / PROMETHEUS_NAMESPACE / PROMETHEUS_RETENTION_DAYS /
 #         PROMETHEUS_STORAGE_SIZE / PROMETHEUS_APP_VERSION / PROMETHEUS_IMAGE_* / REGISTRY_BASE /
-#         PROMETHEUS_EXPOSE_MODE / CUBESTACK_GATEWAY_ENABLED / CUBESTACK_GATEWAY_NODEPORT / NODES)
+#         PROMETHEUS_EXPOSE_MODE / NODES)
 # 用法:   sudo ./deploy-cluster.sh --steps prometheus  或  PROMETHEUS_ENABLED=true
 # ============================================================
 set -euo pipefail
@@ -58,8 +57,37 @@ PROMETHEUS_IMAGE_SIDECAR="${PROMETHEUS_IMAGE_SIDECAR:-2.11.2}"
 PROMETHEUS_IMAGE_CERTGEN="${PROMETHEUS_IMAGE_CERTGEN:-1.8.8}"
 CHART_DIR="${REPO_ROOT}/deployments/cubestack-addon/observability/prometheus/kube-prometheus-stack"
 # ★ 2026-09-11: prometheus 镜像目录默认 `offline-files/prometheus`(save 脚本默认, 与 envoy/lws 同构)。
-#   早期错误套过 ${OFFLINE_FILES_DIR}(→.../kubespray)致找不到; 已修回独立目录。
+#   早期错误套过 ${OFFLINE_FILES_DIR}(→.../kubespray) 致找不到; 已修回独立目录。
 SAVE_DIR="${PROMETHEUS_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/prometheus}"
+# ★ 2026-09-18: 监控三件套各自独立成组/目录(用户要求 + 便于单独升级与离线备料)。
+#   kube-state-metrics / node-exporter 有自己的 offline-files 子目录(见 images.manifest);
+#   kubelet/cAdvisor **无镜像**(内置于 kubelet), 故只列文档目录、不参与 tar 查找。
+#   查找策略: **优先组件自己的目录, 再回退 prometheus/** —— 老布局(tar 全在 prometheus/)
+#   与新布局(各自目录)都能工作, 升级/迁移期不炸。
+_COMP_DIR_OF() {   # <repo(去注册域)> → 优先查找目录
+    case "$1" in
+        kube-state-metrics/*) echo "${REPO_ROOT}/deployments/offline-files/kube-state-metrics" ;;
+        prometheus/node-exporter) echo "${REPO_ROOT}/deployments/offline-files/node-exporter" ;;
+        *) echo "${SAVE_DIR}" ;;
+    esac
+}
+# 按优先级返回全部候选目录(去重), 供"找不到就换个目录再找"
+_TAR_DIRS_FOR() {   # <repo>
+    local pref; pref="$(_COMP_DIR_OF "$1")"
+    printf '%s\n' "${pref}"
+    [ "${pref}" != "${SAVE_DIR}" ] && printf '%s\n' "${SAVE_DIR}"
+    return 0
+}
+# 在候选目录里找 **唯一以 <pat> 结尾** 的 tar(注册域前缀不定, 取实际存在的那个)
+_find_tar() {   # <repo> <pat>
+    local _repo="$1" _pat="$2" _d _hit
+    while IFS= read -r _d; do
+        [ -d "${_d}" ] || continue
+        _hit="$(ls "${_d}"/*"${_pat}" 2>/dev/null | head -1)"
+        [ -n "${_hit}" ] && { printf '%s\n' "${_hit}"; return 0; }
+    done < <(_TAR_DIRS_FOR "${_repo}")
+    return 1
+}
 REG_BASE="${REGISTRY_BASE:-registry.cubestack.io:5000}"      # helm --set 用的集群内解析域(节点 containerd hosts.toml 已改写)
 REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-31148}}"  # skopeo 直连推送地址(免域名解析)
 
@@ -102,32 +130,33 @@ declare -A IMG_REPO=(
     [kiwigrid/k8s-sidecar]="${PROMETHEUS_IMAGE_SIDECAR}"
 )
 _MISSING=""
-# halves: 用 ls 通配末段匹配(注册域前缀不定),直接对目录校验
-echo "  ✓ 离线镜像目录: ${SAVE_DIR}"
+# halves: 用 ls 通配末段匹配(注册域前缀不定), 在**候选目录**里逐个校验
+echo "  ✓ 离线镜像目录: ${SAVE_DIR}(KSM → offline-files/kube-state-metrics, node-exporter → offline-files/node-exporter)"
 for _repo in "${!IMG_REPO[@]}"; do
     _tag="${IMG_REPO[${_repo}]}"
     _pat="$(echo "${_repo}" | sed 's#/#_#g')_${_tag}.tar"
     # 文件名必须整体结束于 <repo>_<tag>.tar(如 registry.k8s.io_kube-state-metrics_kube-state-metrics_v2.20.0.tar)
-    if ls "${SAVE_DIR}"/*"${_pat}" >/dev/null 2>&1; then
-        :   # 命中
+    if _find_tar "${_repo}" "${_pat}" >/dev/null; then
+        :   # 命中(组件自有目录优先, 回退 prometheus/)
     else
         _MISSING="${_MISSING} ${_repo}:${_tag}"
     fi
 done
 if [ -n "${_MISSING}" ]; then
     err "离线镜像 tar 缺失:${_MISSING}"
-    err "  联网机执行: sudo bash deployments/scripts/tools/images/prometheus-save-images.sh(下载到 ${SAVE_DIR})"
+    err "  统一取法(推荐, 从 Harbor 镜像源拉): sudo bash deployments/scripts/tools/images/harbor-save-images.sh --group prometheus,kube-state-metrics,node-exporter"
+    err "  或直连上游: sudo bash deployments/scripts/tools/images/prometheus-save-images.sh"
     exit 1
 fi
-ok "chart + ${#IMG_REPO[@]} 个镜像 tar 就绪(目录: ${SAVE_DIR})"
+ok "chart + ${#IMG_REPO[@]} 个镜像 tar 就绪(目录: ${SAVE_DIR} 等)"
 
 # ── 2. 推送镜像 → 集群内置 registry ──
 say "[2/4] 推送镜像到内置 registry(${REG_DIRECT})..."
 for _repo in "${!IMG_REPO[@]}"; do
     _tag="${IMG_REPO[${_repo}]}"
     _pat="$(echo "${_repo}" | sed 's#/#_#g')_${_tag}.tar"
-    # 目录里唯一以 _pat 结尾的 tar(注册域前缀不定, 取实际存在的那个)
-    _tar="$(ls "${SAVE_DIR}"/*"${_pat}" 2>/dev/null | head -1)"
+    # 候选目录里唯一以 _pat 结尾的 tar(注册域前缀不定, 取实际存在的那个)
+    _tar="$(_find_tar "${_repo}" "${_pat}" || true)"
     [ -n "${_tar}" ] || { err "  tar 缺失: ${_repo}:${_tag}(校验应已拦截)"; exit 1; }
     _push_skopeo "docker-archive:${_tar}" "docker://${REG_DIRECT}/${_repo}:${_tag}" \
         && ok "  ${_repo}:${_tag} 已推送" \
@@ -209,26 +238,6 @@ say "配置 Prometheus/Grafana 对外暴露(PROMETHEUS_EXPOSE_MODE=${PROMETHEUS_
 PROMETHEUS_EXPOSE_MODE="${PROMETHEUS_EXPOSE_MODE:-${SERVICE_EXPOSE_MODE:-clusterip}}"
 PROMETHEUS_EXPOSE_MODE="$(echo "${PROMETHEUS_EXPOSE_MODE}" | tr '[:upper:]' '[:lower:]')"
 
-# ★ 2026-09-16 平台统一网关接管(模块 18 cubestack_gateway):
-#   CUBESTACK_GATEWAY_ENABLED=true 时, 监控对外**改走网关 HTTPRoute 按 hostname 暴露**
-#   (grafana/prometheus.cubestack.io, 见 cubestack-addon/gateway/routes/monitoring.yaml),
-#   不再建 *-external NodePort(31000/31001) —— 单入口替代"每组件一个 *-external"。
-#   同时清理历史遗留的 *-external(旧集群切过来时它们会一直占着 31000/31001)。
-if [ "${CUBESTACK_GATEWAY_ENABLED:-false}" = "true" ]; then
-    say "  平台网关接管对外暴露(CUBESTACK_GATEWAY_ENABLED=true): 监控走 HTTPRoute, 不建 *-external NodePort"
-    for _app in prometheus grafana; do
-        _svc="${PROMETHEUS_RELEASE_NAME}-${_app}"
-        if [ -n "$( (SSH "${K} -n ${PROMETHEUS_NAMESPACE} get svc ${_svc}-external --no-headers 2>/dev/null" || true) )" ]; then
-            if SSH "${K} -n ${PROMETHEUS_NAMESPACE} delete svc ${_svc}-external --ignore-not-found=true >/dev/null 2>&1"; then
-                ok "  已清理历史 ${_svc}-external(对外改走 ${_app}.cubestack.io)"
-            else
-                warn "  清理 ${_svc}-external 失败(可手工 kubectl -n ${PROMETHEUS_NAMESPACE} delete svc ${_svc}-external)"
-            fi
-        fi
-    done
-    unset _app _svc
-    PROMETHEUS_EXPOSE_MODE="gateway"     # 下面 case 的 gateway 分支: 不建任何外部 Service
-fi
 _PROM_APPS=(prometheus grafana)
 _PROM_NP_BASE="${PROMETHEUS_NODEPORT_BASE:-31000}"   # prometheus=31000, grafana=31001
 for _idx in "${!_PROM_APPS[@]}"; do
@@ -282,7 +291,6 @@ EOF
                 warn "  MetalLB 未部署; ${_app} 保持 ClusterIP(可先 CEPH/PROMETHEUS_EXPOSE_MODE=nodeport)"
             fi
             ;;
-        gateway) say "  ${_app}: 由平台网关 cubestack-gateway 按 hostname 暴露(${_app}.cubestack.io; 不建节点端口)" ;;
         *) say "  ${_app}: ClusterIP(仅集群内)" ;;
     esac
 done
@@ -298,11 +306,6 @@ if [ "${PROMETHEUS_EXPOSE_MODE}" = "nodeport" ]; then
     echo "  访问(NodePort): Prometheus http://<节点IP>:${_prom_np}  Grafana http://<节点IP>:$((_prom_np + 1))"
 elif [ "${PROMETHEUS_EXPOSE_MODE}" = "loadbalancer" ]; then
     echo "  访问(LoadBalancer): 见 kubectl -n monitoring get svc ${PROMETHEUS_RELEASE_NAME}-prometheus / -grafana EXTERNAL-IP"
-elif [ "${PROMETHEUS_EXPOSE_MODE}" = "gateway" ]; then
-    # 平台网关接管: 端口/命名空间随模块 18(cubestack_gateway); 固定入口 NodePort 默认 30080
-    echo "  访问(平台网关): Grafana    curl -H 'Host: grafana.cubestack.io'    http://<节点IP>:${CUBESTACK_GATEWAY_NODEPORT:-30080}/"
-    echo "                  Prometheus curl -H 'Host: prometheus.cubestack.io' http://<节点IP>:${CUBESTACK_GATEWAY_NODEPORT:-30080}/"
-    echo "                  (路由由模块 cubestack_gateway 下发: cubestack-addon/gateway/routes/monitoring.yaml)"
 else
     echo "  Prometheus:   kubectl -n ${PROMETHEUS_NAMESPACE} port-forward svc/${PROMETHEUS_RELEASE_NAME}-prometheus 9090"
     echo "  Grafana:      kubectl -n ${PROMETHEUS_NAMESPACE} port-forward svc/${PROMETHEUS_RELEASE_NAME}-grafana 3000"
