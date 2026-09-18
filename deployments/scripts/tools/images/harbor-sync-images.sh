@@ -326,14 +326,32 @@ while IFS=$'\t' read -r group src_ref; do
         unset _src_dg _dst_dg
     fi
 
-    # 同步: 网络抖动重试 3 次
+    # 同步: 网络抖动重试 3 次。
+    # --preserve-digests: 要求 skopeo **原样保留源侧 manifest(list) 的 digest**。
+    #   不加这个旗标时, 搬运多架构镜像可能会**重写 manifest list 的序列化**, 导致落地 digest
+    #   与源不一致 —— 后果是: digest 比对永远不相等 → **每次同步都把这个镜像整包重传一遍**。
+    #   实测症状: registry.k8s.io/pause:3.10 连续两次全量同步都被重传, 且落地 digest 稳定
+    #   (说明是确定性的重写, 不是上游内容变化); 库侧 list 里出现两条重复的 amd64/windows 条目,
+    #   正是 list 被重写过的特征。而同一批里的 node-exporter(6 平台 list)digest 完全一致 ——
+    #   所以是特定镜像触发, 不是所有多架构镜像都这样。
+    # 若某个镜像确实无法保 digest(skopeo 会直接报错), 回退到不带该旗标重试一次, 不因此中断。
     _ok=0
     for _try in 1 2 3; do
-        if _skopeo copy --quiet \
+        if _skopeo copy --quiet --preserve-digests \
                 "${SKOPEO_SRC_OPTS[@]}" "${SKOPEO_ARCH[@]}" \
                 "${SKOPEO_DST_OPTS[@]}" \
                 "docker://${src_ref}" "docker://${dst_ref}" 2>/tmp/.harbor-sync-err.$$; then
             _ok=1; break
+        fi
+        # 保 digest 不被支持的镜像: 立刻改用普通搬运(不再耗完 3 次重试)
+        if grep -qiE 'preserve|digest' /tmp/.harbor-sync-err.$$ 2>/dev/null; then
+            warn "  该镜像不支持 --preserve-digests, 回退普通搬运"
+            if _skopeo copy --quiet \
+                    "${SKOPEO_SRC_OPTS[@]}" "${SKOPEO_ARCH[@]}" \
+                    "${SKOPEO_DST_OPTS[@]}" \
+                    "docker://${src_ref}" "docker://${dst_ref}" 2>/tmp/.harbor-sync-err.$$; then
+                _ok=1; break
+            fi
         fi
         if [ "${_try}" -lt 3 ]; then
             warn "  同步失败(第 ${_try}/3 次): $(tail -1 /tmp/.harbor-sync-err.$$ 2>/dev/null | head -c 200)"
