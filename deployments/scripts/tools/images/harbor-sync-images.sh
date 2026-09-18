@@ -30,6 +30,10 @@
 #   ./harbor-sync-images.sh --list                 # 只列出将同步的镜像(不联网)
 #   ./harbor-sync-images.sh --group prometheus,envoy   # 只同步指定分组
 #   ./harbor-sync-images.sh --exclude-group metax-gpu  # 排除大体积分组
+#   ./harbor-sync-images.sh --exclude-same-harbor      # 跳过"上游就是本台 Harbor"的同台复制
+#                                                     # (metax/cubepilot; 这类在 CI 上跑是把 GB 级
+#                                                     #  镜像下载到 runner 再传回同一台 Harbor, 纯浪费
+#                                                     #  —— 改由靠近 Harbor 的机器本地跑一次)
 #   ./harbor-sync-images.sh --force                # 强制重新同步(忽略 digest 相同)
 #   ./harbor-sync-images.sh --platform amd64       # 只同步单架构(默认 --all 保留多架构)
 #   HARBOR_MIRROR_USER=u HARBOR_MIRROR_PASSWORD=p ./harbor-sync-images.sh
@@ -52,6 +56,7 @@ err()  { local m="【错误】$*"; echo -e "\033[31m${m}\033[0m" >&2; _log_file 
 MODE="sync"; FORCE=0; DRY_RUN=0; NO_CREATE=0
 PLATFORM_MODE="all"                     # all(默认, 保留多架构 manifest list) | 单架构值(如 amd64)
 INCLUDE_GROUPS=""; EXCLUDE_GROUPS=""
+SAME_HARBOR="include"                   # include(默认) | exclude —— 见 --exclude-same-harbor
 while [ $# -gt 0 ]; do
     case "$1" in
         --list|-l)        MODE="list" ;;
@@ -64,6 +69,8 @@ while [ $# -gt 0 ]; do
         --group=*)        INCLUDE_GROUPS="${1#*=}" ;;
         --exclude-group)  EXCLUDE_GROUPS="${2:?--exclude-group 需要值}"; shift ;;
         --exclude-group=*) EXCLUDE_GROUPS="${1#*=}" ;;
+        --exclude-same-harbor) SAME_HARBOR="exclude" ;;
+        --include-same-harbor) SAME_HARBOR="include" ;;
         --help|-h)        sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) err "未知参数: $1(--help 看用法)"; exit 1 ;;
     esac
@@ -95,9 +102,20 @@ _group_selected() {   # <group> → 0=选中
 }
 
 # ---- 收集清单(过滤后) ----
+# --exclude-same-harbor: 跳过"上游就是本台 Harbor"的镜像(metax / suanova 等)。
+# 理由: 这类是 **Harbor → Harbor 的同台复制**, 在 CI 上跑等于把 GB 级镜像先下载到 runner
+# 再传回同一台 Harbor, 纯浪费(metax 的 driver/maca 就是 GB 级)。它们应由**靠近 Harbor 的机器**
+# 本地跑一次(脚本本身不依赖 CI), 之后极少变动。
+# ⚠ 跳过不是静默的: 汇总会打印跳过了哪些, 避免"看起来全同步了"的错觉。
+SAME_HARBOR_SKIPPED=()
 LIST_FILE="$(mktemp)"
 while IFS=$'\t' read -r g r _n; do
-    _group_selected "${g}" && printf '%s\t%s\n' "${g}" "${r}"
+    _group_selected "${g}" || continue
+    if [ "${SAME_HARBOR}" = "exclude" ]; then
+        _reg="${r%%/*}"
+        [ "${_reg}" = "${HARBOR_HOST}" ] && { SAME_HARBOR_SKIPPED+=("${g}:${r}"); continue; }
+    fi
+    printf '%s\t%s\n' "${g}" "${r}"
 done < <(image_manifest_entries) > "${LIST_FILE}"
 
 TOTAL="$(wc -l < "${LIST_FILE}" | tr -d ' ')"
@@ -321,6 +339,12 @@ done < "${LIST_FILE}"
 # ---- 汇总 ----
 echo "---------------------------------------------"
 ok "同步完成: 新同步 ${SYNCED} 个, digest 未变跳过 ${SKIPPED} 个, 失败 ${FAILED} 个"
+if [ "${#SAME_HARBOR_SKIPPED[@]}" -gt 0 ]; then
+    warn "另有 ${#SAME_HARBOR_SKIPPED[@]} 个**同台 Harbor 复制**被 --exclude-same-harbor 跳过(CI 上跑纯浪费带宽):"
+    for _s in "${SAME_HARBOR_SKIPPED[@]}"; do echo "    - ${_s}"; done
+    echo "  补法(在**靠近 Harbor 的机器**上本地跑一次即可, 与 CI 无关):"
+    echo "    ./harbor-sync-images.sh --group metax-gpu,cubepilot"
+fi
 echo "  Harbor:  ${HARBOR_API}/${HARBOR_PROJ}/"
 echo "  下一步:  联网机执行 tools/images/harbor-save-images.sh 生成离线 tar"
 if [ "${FAILED}" -gt 0 ]; then
