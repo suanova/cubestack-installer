@@ -636,3 +636,23 @@ curl -u u:p "$API/api/v2.0/projects/<project>/repositories/${enc_repo}/artifacts
 
 > 另: Harbor 上 `clquan` **不是 sysadmin**, 但仍可创建项目(实测 201)——
 > 判断"能不能建"要实测, 不要凭 `sysadmin_flag` 推断。
+#### 3.6 CI 登录 Harbor 报 `unauthorized` —— `gh secret set --body -` 把字面量 `-` 存成了密钥值
+
+**症状:** GitHub Actions 工作流在 `docker/login-action` 步骤失败:
+`Error response from daemon: Get "https://harbor.isuanova.com/v2/": unauthorized:`;
+但同一组用户名/密码用 `curl -u` 在本机验证完全正常。
+
+**根因:** 设密钥时用了 `printf '%s' 'EErMChQa123' | gh secret set NAME --body -`。
+`gh secret set` 的 `-b/--body` 是"**直接给出值**", 不是"从 stdin 读"的标记 ——
+传 `-` 会把**字面量 `-`** 存成密钥值。要走 stdin 必须**省略 `--body`**。
+(密钥一旦写入无法读回校验, 所以只能从"登录失败 + 本机 curl 正常"这个矛盾反推出来。)
+
+**解法(根治):**
+```bash
+gh secret set HARBOR_MIRROR_USER     --repo <owner>/<repo>   # ← 不写 --body, 管道喂 stdin
+gh secret set HARBOR_MIRROR_PASSWORD --repo <owner>/<repo>
+```
+**验证:** 重跑工作流, 日志里 `HARBOR_MIRROR_PASSWORD` 显示为 `***` 且登录成功。
+
+> ⚠ **附带教训(本项目实测踩到)**: 凭证自检步骤**不要回显密码长度**。
+> 仓库是 public 时工作流日志公开可见, 长度属可被利用的旁路信息。只回显用户名即可。

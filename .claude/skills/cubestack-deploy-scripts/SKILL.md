@@ -422,8 +422,14 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   harbor-save-images.sh          # Harbor → offline-files/<group>/*.tar(联网机)
   check-image-manifest.sh        # 静态校验; --kubespray 交叉核对; --harbor 漂移报告
   ```
+- **默认不镜像"上游就是本台 Harbor"的组**(metax-gpu 12 + cubepilot 4): 它们本就在本台 Harbor 上,
+  部署模块直接从 `metax/` 与 `suanova/` 项目拉, 再镜像只多占 8.4 GB 且升级要重跑。
+  判据是**推导**的(注册域 == HARBOR_MIRROR_REGISTRY), 不是硬编码名单; 要副本用 `--include-same-harbor`。
 - **CI**: `.github/workflows/sync-images-to-harbor.yml`(push 清单 / 手动 / 每周定时);
   凭据走 GitHub **Secrets**(`HARBOR_MIRROR_USER` / `HARBOR_MIRROR_PASSWORD`, 密码必须放 Secret)。
+  ⚠ 设密钥: `gh secret set NAME`(**省略 `--body`** 才读 stdin); `--body -` 会把字面量 `-` 存进去。
+  ⚠ 凭证自检**别回显密码长度** —— public 仓库的 Actions 日志公开可见。
+- 实测(2026-09-18): 全量同步 43min → 新同步 43 / digest 未变跳过 4 / 失败 0; 47 个镜像零漂移。
 - ⚠ **5 个静默坑**(详见 troubleshooting §四.3): skopeo 默认 auth 文件路径不可读(显式设 `REGISTRY_AUTH_FILE`);
   `inspect` 用 `--tls-verify` 而 `copy` 用 `--src-tls-verify`(传错被 `2>/dev/null` 吞成"幂等失效");
   Harbor API repository 名要**双重 URL 编码** `%252F` 且不含项目前缀;
