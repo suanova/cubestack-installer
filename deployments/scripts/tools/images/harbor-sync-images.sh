@@ -312,6 +312,17 @@ while IFS=$'\t' read -r group src_ref; do
         if [ -n "${_dst_dg}" ] && [ -z "${_src_dg}" ]; then
             warn "  取不到上游 digest(网络/权限?), 跳过比对直接同步"
         fi
+        # 两边都能取到但不同 → 打印两个 digest。
+        # 原实现这里什么都不打印, 于是"为什么又传了一遍"完全无法从日志判断(2026-09-18 实测
+        # registry.k8s.io/pause:3.10 出现此情况但看不出原因)。带上 digest 才能事后追查:
+        #   · 上游确实换了内容(浮动 tag 的正常情况) → 重传正确;
+        #   · 两边都不变却每次都重传 → 说明是**镜像元数据层面的差异**(如 manifest list 的
+        #     mediaType/attestation 条目在搬运中被改写), 属已知的重复传输, 不影响可用性。
+        if [ -n "${_dst_dg}" ] && [ -n "${_src_dg}" ] && [ "${_src_dg}" != "${_dst_dg}" ]; then
+            warn "  digest 不一致, 重新同步:"
+            echo "        源: ${_src_dg}"
+            echo "        库: ${_dst_dg}"
+        fi
         unset _src_dg _dst_dg
     fi
 
