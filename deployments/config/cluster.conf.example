@@ -181,9 +181,16 @@ CEPH_MODE="${CEPH_MODE:-internal}"          # internal(默认, 集群内) | exte
 # 仅 CEPH_MODE=internal 时生效; external 模式可全部保持默认/留空(模块内按 CEPH_MODE 分支)。
 # 部署方式: Rook Operator(v1.20.2 manifest, 离线 vendoring 于 deployments/cubestack-addon/rook/)
 #   + CephCluster CR(Rook 自建 mon/mgr/osd, 由 modules/03_addon/02_ceph.sh 编排)+ ceph-csi(RBD/CephFS)。
-# 存储节点选择: CEPH_NODES 显式列出(hostname, 逗号分隔); 留空 = 全部 NODES 节点(至少 3 台奇数更佳)。
+# 存储节点选择(优先级从上到下, 唯一实现见 lib-common.sh 的 ceph_storage_hosts):
+#   ① CEPH_NODES 非空 → 用它(hostname 逗号分隔), 不做任何角色过滤
+#   ② CEPH_NODE_ROLE  → 从 NODES 里挑该角色的节点(**默认 master**, 即"默认只装在 master 节点")
+#      · CEPH_NODE_ROLE=master(默认) / worker / all(= 旧行为: 全部节点)
 #   模块会先给这些节点打 node label(CEPH_NODE_LABEL), CephCluster 据此只调度到这些节点。
-CEPH_NODES="${CEPH_NODES:-}"                      # 部署 Ceph 的节点(hostname 逗号分隔); 空=全部节点
+# ⚠ 与 CEPH_MIN_NODES 的关系: mon 需 3 台法定人数, 存储节点 < 3 时**不会创建 CephCluster**
+#   (registry 后端回退 local-path, 部署不中断)。所以默认 master 时, master 少于 3 台的集群
+#   需显式指定 CEPH_NODES(如把 worker 也算上)才能真正部署 Ceph。
+CEPH_NODES="${CEPH_NODES:-}"                      # 显式指定存储节点(hostname 逗号分隔); 非空则优先级最高, 覆盖下面的角色选择
+CEPH_NODE_ROLE="${CEPH_NODE_ROLE:-master}"        # 未显式指定 CEPH_NODES 时, 按此角色从 NODES 中选: master(默认)/ worker / all(全部节点)
 CEPH_NODE_LABEL="${CEPH_NODE_LABEL:-ceph-storage=rook-ceph}"   # 存储节点 label(key=value; 模块自动打标)
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"     # Rook/Ceph 命名空间(与 03_ceph_csi 的 secret 命名空间一致)
 CEPH_VERSION="${CEPH_VERSION:-v20.2.2}"           # Ceph 守护进程镜像 tag

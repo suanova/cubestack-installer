@@ -195,7 +195,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 
 - 架构: Rook v1.20.2 operator(Rook 在 k8s 内自举 mon/mgr/osd)调和 CephCluster CR → 守护进程
   Deployment/StatefulSet; 数据面 = OSD 直管节点**裸盘**(LVM/bluestore)。
-- 存储节点选择: `CEPH_NODES`(cluster.conf)决定候选; 模块自动给节点打 label `CEPH_NODE_LABEL`
+- 存储节点选择: `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master** — 即默认只装在 master 节点; worker/all 可选); 候选由 `lib-common.sh` 的 `ceph_storage_hosts()` 统一给出; 模块自动给节点打 label `CEPH_NODE_LABEL`
   (默认 `ceph-storage=rook-ceph`), CephCluster 的 placement + storage.nodes 只落这些节点。
 - 裸盘策略: `tools/k8s/ceph-detect-disks.sh` 自动检测"未使用裸盘"(整盘无分区/格式化/挂载/LVM,
   非系统盘), 生成 CR 的 per-node devices(精确盘名防误选); 部署前红底确认 + sleep 60s 防覆盖。

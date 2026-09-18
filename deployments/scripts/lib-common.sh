@@ -497,17 +497,9 @@ ceph_installable_check() {
         echo "Rook manifest 缺失(${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook})"
         return 1
     fi
-    # 存储节点数(与 02_ceph.sh 一致: CEPH_NODES 显式或全部 NODES)
-    local _cn=0 _hn line
-    if [ -n "${CEPH_NODES:-}" ]; then
-        for _hn in ${CEPH_NODES//,/ }; do [ -n "${_hn}" ] && _cn=$((_cn+1)); done
-    else
-        for line in "${NODES[@]:-}"; do
-            [ -z "${line}" ] && continue
-            node_parse "${line}"
-            [ -n "${NODE_HOSTNAME}" ] && _cn=$((_cn+1))
-        done
-    fi
+    # 存储节点数(与 02_ceph.sh 同源: 统一走 ceph_storage_hosts, 不再各写一遍)
+    local _cn
+    _cn="$(ceph_storage_host_count)"
     if [ "${_cn}" -lt "${CEPH_MIN_NODES:-3}" ]; then
         echo "存储节点 ${_cn} 台 < CEPH_MIN_NODES=${CEPH_MIN_NODES:-3}"
         return 1
@@ -603,6 +595,45 @@ node_default_pw() {
 node_password() {
     local pw="$2"
     if [ -n "${pw}" ] && [ "${pw}" != "-" ]; then echo "${pw}"; else node_default_pw "$1"; fi
+}
+
+# ---------------- Ceph 存储节点选择(唯一实现) ----------------
+# ⚠ 这段逻辑**曾在本仓库散落 5 处各写一遍**(02_ceph.sh / lib-common 的预检 / deploy-cluster.sh
+#   两处 / ceph-cleanup.sh), 改一处漏一处就会出现"预检说 3 台、真装却装到别的节点"这类不一致。
+#   统一收敛到这里, 所有消费方都调本函数。
+#
+# 选择规则(优先级从上到下):
+#   ① CEPH_NODES 非空      → 显式列表优先(hostname, 逗号分隔), 不做任何过滤
+#   ② CEPH_NODE_ROLE=all   → NODES 全量(2026-09-18 之前的旧默认行为)
+#   ③ 其它                 → 只取 NODES 中 role == CEPH_NODE_ROLE 的节点
+#                            (**默认 master**: 即"ceph 默认只装在 master 节点")
+# 输出: hostname 每行一个(调用方用 mapfile/while read 接)。
+# ⚠ 在**命令替换**中调用($(...)), 内部 node_parse 设的全局变量不会污染调用方 —— 这是有意的,
+#   避免把 NODE_* 全局态留在调用者的 shell 里。
+ceph_storage_hosts() {
+    local _h _line _role="${CEPH_NODE_ROLE:-master}"
+    if [ -n "${CEPH_NODES:-}" ]; then
+        for _h in ${CEPH_NODES//,/ }; do
+            [ -n "${_h}" ] && echo "${_h}"
+        done
+        return 0
+    fi
+    for _line in "${NODES[@]:-}"; do
+        [ -z "${_line}" ] && continue
+        node_parse "${_line}"
+        [ -n "${NODE_HOSTNAME}" ] || continue
+        if [ "${_role}" = "all" ] || [ "${NODE_ROLE}" = "${_role}" ]; then
+            echo "${NODE_HOSTNAME}"
+        fi
+    done
+    return 0
+}
+
+# Ceph 存储节点数量(复用上面的选择规则; 供预检/提示用)
+ceph_storage_host_count() {
+    local n
+    n="$(ceph_storage_hosts | grep -c . || true)"
+    echo "${n:-0}"
 }
 
 # ---------------- 规律 NodePort 分配(共享, 供各类 *-external/NodePort 服务复用) ----------------

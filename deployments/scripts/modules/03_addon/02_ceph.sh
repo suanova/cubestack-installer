@@ -12,7 +12,9 @@
 #   · 方式: Rook Operator(离线 manifest, deployments/cubestack-addon/rook, 需先联网跑
 #     tools/k8s/rook-fetch-manifests.sh)+ CephCluster CR(本模块按"检测到的节点+裸盘"生成)+
 #     CephBlockPool/StorageClass 在模块 ceph_csi(08)创建。
-#   · 存储节点选择(需求 3): CEPH_NODES(cluster.conf, hostname 逗号分隔; 空=全部 NODES) →
+#   · 存储节点选择(需求 3): CEPH_NODES(cluster.conf, hostname 逗号分隔; 非空则优先),
+#     否则按 CEPH_NODE_ROLE 从 NODES 里选(**默认 master** — 默认只装在 master 节点)。
+#     ⚠ 唯一实现是 lib-common.sh 的 ceph_storage_hosts(); 不要在这里另写一份判断。
 #     模块给这些节点打 node label(CEPH_NODE_LABEL, 默认 ceph-storage=rook-ceph),
 #     CephCluster 的 placement/storage.nodes 只包含这些节点。
 #   · master 可调度(默认): kubespray 默认给 master 打 control-plane NoSchedule taint, Rook
@@ -84,19 +86,15 @@ _CEPH_PRE_CLEANUP=0
 [ "${CEPH_PRE_CLEANUP_EXISTING}" = "true" ] && _CEPH_PRE_CLEANUP=1
 TOOLS_K8S="${SCRIPT_DIR}/tools/k8s"
 
-# 1) 候选 ceph 节点(hostname 列表)
+# 1) 候选 ceph 节点(hostname 列表) —— 选择规则统一在 lib-common 的 ceph_storage_hosts():
+#    CEPH_NODES 显式 > CEPH_NODE_ROLE(默认 master, 即默认只装在 master 节点)
 CEPH_NODES="${CEPH_NODES:-}"
 CEPH_NODE_HOSTS=()
-if [ -n "${CEPH_NODES}" ]; then
-    for _h in ${CEPH_NODES//,/ }; do CEPH_NODE_HOSTS+=("${_h}"); done
-else
-    for line in "${NODES[@]:-}"; do
-        [ -z "${line}" ] && continue
-        node_parse "${line}"
-        CEPH_NODE_HOSTS+=("${NODE_HOSTNAME}")
-    done
-fi
-[ "${#CEPH_NODE_HOSTS[@]}" -ge 1 ] || { err "未找到候选存储节点(检查 NODES / CEPH_NODES)"; exit 1; }
+while IFS= read -r _h; do
+    [ -n "${_h}" ] && CEPH_NODE_HOSTS+=("${_h}")
+done < <(ceph_storage_hosts)
+unset _h
+[ "${#CEPH_NODE_HOSTS[@]}" -ge 1 ] || { err "未找到候选存储节点(检查 NODES / CEPH_NODES / CEPH_NODE_ROLE)"; exit 1; }
 
 # ★ 节点<3 不建集群内 CephCluster(mon 需 3 节点法定人数, allowMultiplePerNode=false):
 #   置 _CEPH_SKIP_CLUSTER=1 → 跳过 CephCluster CR 创建/等待(下方 [6/8]/[7/8] 分支);
