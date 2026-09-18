@@ -327,14 +327,22 @@ while IFS=$'\t' read -r group src_ref; do
     fi
 
     # 同步: 网络抖动重试 3 次。
-    # --preserve-digests: 要求 skopeo **原样保留源侧 manifest(list) 的 digest**。
-    #   不加这个旗标时, 搬运多架构镜像可能会**重写 manifest list 的序列化**, 导致落地 digest
-    #   与源不一致 —— 后果是: digest 比对永远不相等 → **每次同步都把这个镜像整包重传一遍**。
-    #   实测症状: registry.k8s.io/pause:3.10 连续两次全量同步都被重传, 且落地 digest 稳定
-    #   (说明是确定性的重写, 不是上游内容变化); 库侧 list 里出现两条重复的 amd64/windows 条目,
-    #   正是 list 被重写过的特征。而同一批里的 node-exporter(6 平台 list)digest 完全一致 ——
-    #   所以是特定镜像触发, 不是所有多架构镜像都这样。
-    # 若某个镜像确实无法保 digest(skopeo 会直接报错), 回退到不带该旗标重试一次, 不因此中断。
+    # --preserve-digests: 要求 skopeo 原样保留源侧 manifest(list) 的 digest —— 对"镜像"而言
+    #   这是语义上正确的选择(镜像应逐字节一致)。
+    #   ⚠ 实测(2026-09-18): 该旗标**未能解决** registry.k8s.io/pause:3.10 的 digest 不一致问题
+    #     (加旗标前后源/库 digest 完全相同), 根因**未定位** —— 见下方说明与
+    #     docs/troubleshooting.md §四.3.7。它就是镜像语义的正确默认, 故保留, 但**不要**
+    #     把它当作那个问题的解法。
+    #   个别镜像确实无法保 digest 时 skopeo 会报错, 此时立即回退普通搬运并告警, 不中断整批。
+    #
+    # ⚠ 已知未解问题: registry.k8s.io/pause:3.10 每次同步都会被整包重传(约 552 MB / 64 秒)。
+    #   证据: 源 digest sha256:ee6521f290b2168b... 与库 digest sha256:e9622b01071c38e4...
+    #   在连续多次运行中**各自稳定且始终不等** ⇒ 确定性的元数据差异, 不是上游内容变化。
+    #   旁证: 库侧 list 有 7 条(含两条 amd64/windows, 属 pause 的正常多 windows 版本形态);
+    #   同批的 node-exporter(6 平台 list)digest 则完全一致 ⇒ 特定镜像触发, 非普遍现象。
+    #   卡点: registry.k8s.io 的 manifest 请求也会 302 到 pkg.dev, 而该域名在可控环境里不可达
+    #   ⇒ 拿不到源侧 raw manifest 逐条对比。**下一步**: 在 CI 里 dump 源侧 raw manifest
+    #   (skopeo inspect --raw)与库侧逐条比对平台条目, 即可定位; 在此之前属"可接受的已知损耗"。
     _ok=0
     for _try in 1 2 3; do
         if _skopeo copy --quiet --preserve-digests \
