@@ -47,6 +47,13 @@ on:
         type: boolean
         required: false
         default: false
+      include_same_harbor:
+        description: '包含"上游就是本台 Harbor"的镜像(metax/cubepilot)。默认 false ——
+          这类是同台复制, 在 CI 上跑要把 GB 级镜像下载到 runner 再传回同一台 Harbor,
+          建议改在靠近 Harbor 的机器上本地执行 harbor-sync-images.sh --group metax-gpu,cubepilot'
+        type: boolean
+        required: false
+        default: false
   push:
     branches: [main]
     paths:
@@ -108,7 +115,7 @@ jobs:
             echo "::error::缺少凭据 secret/variable:${missing}。请在仓库 Settings → Secrets and variables → Actions 配置后重试。"
             exit 1
           fi
-          echo "凭据已配置(用户名: ${HARBOR_MIRROR_USER}; 密码长度: ${#HARBOR_MIRROR_PASSWORD})"
+          echo "凭据已配置(用户名: ${HARBOR_MIRROR_USER})"
 
       - name: Log in to Harbor
         # 参考 suanova/cuberouter 的 release.yml: 提前登录, 凭据错误在这里就明确失败
@@ -149,6 +156,13 @@ jobs:
             *)      platform="${{ inputs.platform }}" ;;
           esac
           args+=( --platform "${platform}" )
+
+          # 同台 Harbor 复制(metax / cubepilot: 上游就是本台 Harbor)默认跳过 ——
+          # 在 CI 上做这件事等于把 GB 级镜像先拉到 runner 再传回同一台 Harbor, 纯浪费带宽与时间。
+          # 它们改由靠近 Harbor 的机器本地跑: harbor-sync-images.sh --group metax-gpu,cubepilot
+          if [ "${{ inputs.include_same_harbor }}" != "true" ]; then
+            args+=( --exclude-same-harbor )
+          fi
 
           echo "执行: harbor-sync-images.sh ${args[*]}"
           bash deployments/scripts/tools/images/harbor-sync-images.sh "${args[@]}"
