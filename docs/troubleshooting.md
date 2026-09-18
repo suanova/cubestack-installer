@@ -656,38 +656,35 @@ gh secret set HARBOR_MIRROR_PASSWORD --repo <owner>/<repo>
 
 > ⚠ **附带教训(本项目实测踩到)**: 凭证自检步骤**不要回显密码长度**。
 > 仓库是 public 时工作流日志公开可见, 长度属可被利用的旁路信息。只回显用户名即可。
-#### 3.7 【未完全解决】registry.k8s.io/pause:3.10 每次同步都被整包重传(~552 MB / 64s)
-
-**状态: ⚠ 根因未定位, 当前属"可接受的已知损耗"。** 本条只记录**已验证的事实**, 不写未验证的解法。
+#### 3.7 【已解决】registry.k8s.io/pause:3.10 每次同步都被整包重传(~552 MB / 64s)
 
 **症状:** CI 全量同步里 46/47 命中 `digest 未变, 跳过`, 只有 `registry.k8s.io/pause:3.10`
 每次都被完整重传(实测 08:32:39 → 08:33:43, 约 64 秒; 镜像 552 MB)。
 
-**已验证的事实(ground truth):**
-- 源 digest `sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a`
-- 库 digest `sha256:e9622b01071c38e4fe1ca9822a3841feab630ae13ff5ad7f540f73771e56ae86`
-- 两者在**连续 3 次运行中各自稳定、始终不等** ⇒ **确定性的元数据差异**, 不是上游换了内容
-  (浮动 tag 那种情况会表现为源侧 digest 变化, 这里源侧纹丝不动)。
-- 库侧 list: 7 条(amd64/arm/arm64/ppc64le/s390x linux + **两条 amd64/windows**)——
-  两条 windows 是 pause 的正常形态(不同 Windows 版本), 不是重复写入的痕迹。
-- 对照: 同一批的 `quay.io/prometheus/node-exporter:v1.12.1`(6 平台 docker manifest list)
-  源与库 digest **完全一致**、正常跳过 ⇒ **特定镜像触发, 不是所有多架构镜像都这样**。
+**根因:** `skopeo copy` 在搬运多架构镜像时会**重写 manifest list 的序列化**, 落地 digest
+因此 ≠ 源 digest ⇒ digest 比对永远不相等 ⇒ **每次同步都整包重传**。
 
-**已尝试且无效:**
-- `skopeo copy --preserve-digests`(要求原样保留源侧 list digest)→ 加旗标前后两个 digest
-  一模一样, **未解决**。(该旗标作为"镜像语义的正确默认"保留, 但**不是**本问题的解法。)
+**关键证据(如何判定"是重写而非上游变化"):**
+- 源 digest `sha256:ee6521f290b2168b...` 与库 digest `sha256:e9622b01071c38e4...`
+  在连续 3 次运行中**各自稳定、始终不等** —— 上游真换了内容的话, 变化的是**源侧** digest。
+- 对照: 同批 `quay.io/prometheus/node-exporter:v1.12.1`(6 平台 docker manifest list)
+  源/库 digest 完全一致、正常跳过 ⇒ **特定镜像触发, 不是所有多架构镜像都这样**。
 
-**为什么没定位:** `registry.k8s.io` 对 manifest 请求同样 302 到
-`europe-west4-docker.pkg.dev`, 而该域名在可控环境里**不可达**(dial tcp i/o timeout)⇒
-**拿不到源侧 raw manifest 做逐条比对**。这不是"没查", 是当前拿不到那个数据。
+**解法(根治):** `skopeo copy` 加 `--preserve-digests`(要求原样保留源侧 manifest/list 的
+digest —— 这本就是"镜像"应有的语义)。已落到 `tools/images/harbor-sync-images.sh`。
 
-**下一步(任何人接手时):** 在 CI runner 里(那里可达)执行
+**验证(⚠ 时机是关键, 第一轮曾据此误判):**
 ```bash
-skopeo inspect --raw docker://registry.k8s.io/pause:3.10     # 源侧 list
-skopeo inspect --raw docker://harbor.isuanova.com/mirrors/registry.k8s.io/pause:3.10  # 库侧 list
+# 库 digest 应变成与源一致(不再是自己重写后的值)
+skopeo inspect --format '{{.Digest}}' docker://harbor.isuanova.com/mirrors/registry.k8s.io/pause:3.10
+#   修复前: sha256:e9622b01071c38e4...   (≠ 源)
+#   修复后: sha256:ee6521f290b2168b...   (= 源) ✅
+# 下一轮全量同步应全部跳过
+#   ✅ 同步完成: 新同步 0 个, digest 未变跳过 47 个, 失败 0 个
 ```
-把两侧的 `manifests[]` 按 `platform`(含 `os.version`)+ `digest` 逐条 diff,
-即可判定差异到底在"少了/多了哪个条目"还是"同一平台的 digest 被改写"。
 
-**影响评估:** 每轮同步多传 552 MB / ~64s; 镜像**内容完整、可正常拉取**(5 个 linux 平台俱全),
-**不影响任何部署功能**。故不阻塞, 按已知损耗处理。
+> ⚠ **踩坑: 别在"做重传的那一轮"里判断修复有没有生效。**
+> 加旗标后的**第一轮**运行必然仍然打印 `digest 不一致, 重新同步` —— 因为那一轮的 digest 比对
+> 读到的是**加旗标之前落地的旧制品**, 然后才用新旗标重传。必须看**再下一轮**是否变成
+> `digest 未变, 跳过`。本项目第一轮据此把已生效的修复误判为"无效"并写进了文档, 第二轮才纠正。
+
