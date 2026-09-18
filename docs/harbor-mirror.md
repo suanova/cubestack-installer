@@ -77,6 +77,33 @@
 > 自动创建; **项目**(project)必须预先存在 —— `harbor-sync-images.sh` 会自动建(公开只读,
 > 便于部署机匿名拉取)。
 
+### ⚠ 特例: "上游就是本台 Harbor"的组不镜像
+
+`metax-gpu`(12 个)与 `cubepilot`(4 个)的**上游就是这台 Harbor 本身**
+(`harbor.isuanova.com/metax/` 与 `/suanova/` 项目), 属于**同台复制**。
+它们的部署模块现在就直接从那些项目拉取 —— 也就是说, **"集群不访公网"这个目标对它们已经达成**,
+不需要任何改动。
+
+再复制一份到 `mirrors/` 只会:
+
+- 多占一份存储(实测 **8.4 GB**, 其中 `maca` 5.3 GB、`driver-image` 1.15 GB);
+- 每次升级 metax / cubepilot 版本都要重跑一次复制;
+- 若走 CI(GitHub runner)还要把 GB 级镜像先下载到 runner 再传回同一台 Harbor, 纯浪费带宽。
+
+因此**默认跳过**。判据是**推导**出来的(该 ref 的注册域 == `HARBOR_MIRROR_REGISTRY`),
+不是硬编码名单 —— 将来某个组件改成从公网拉, 它会自动重新进入镜像范围。
+
+跳过是**显式报告**的(汇总里逐个列出), 不会造成"看起来全同步了"的错觉。
+真要那份副本:
+
+```bash
+./harbor-sync-images.sh --include-same-harbor --group metax-gpu,cubepilot
+```
+
+> 它们仍**列在清单里** —— 清单同时承担"本仓库用到哪些镜像"的登记职责,
+> 只是不会被镜像到 `mirrors/`。`check-image-manifest.sh --harbor` 同样跳过它们,
+> 否则每次漂移检查都会把 16 个"永远不该出现"的镜像报成缺失, 噪声淹没真问题。
+
 ---
 
 ## 4. 镜像清单(唯一数据源)
@@ -115,7 +142,8 @@
 ./harbor-sync-images.sh                      # 全部(增量: digest 相同则跳过)
 ./harbor-sync-images.sh --list               # 只列清单(不联网)
 ./harbor-sync-images.sh --group prometheus,envoy
-./harbor-sync-images.sh --exclude-group metax-gpu   # 沐曦 driver/maca 体积大
+./harbor-sync-images.sh --exclude-group metax-gpu
+./harbor-sync-images.sh --include-same-harbor # 连"上游就是本台 Harbor"的也镜像(默认不镜像, 见 §3)
 ./harbor-sync-images.sh --platform amd64     # 单架构(默认 --all 保留多架构 manifest list)
 ./harbor-sync-images.sh --force              # 忽略 digest 强制重传
 ```
@@ -249,7 +277,43 @@ sudo ./deploy-cluster.sh --steps verify_prometheus
 
 ---
 
-## 9. 相关文档
+## 9. 实测记录(2026-09-18)
+
+在 `suanova/cubestack-installer` 的 GitHub Actions 上跑通, **Harbor 现状由独立代码路径复核**
+(直接查 Harbor API, 不看同步脚本自己的输出):
+
+| Run | 模式 | 结果 |
+|---|---|---|
+| `35318517294` | push | ❌ 卡在 Harbor 登录 —— 密钥值错误(见下"踩坑") |
+| `35318757075` | 手动 `groups=lws,multus` | ✅ 4m16s, 2 个镜像真实落库 |
+| `35319233170` | push(全量) | ✅ 43 min,**新同步 43 个 / digest 未变跳过 4 个 / 失败 0**, 另 16 个同台复制按预期跳过 |
+
+最终态(用 `check-image-manifest.sh --harbor` 复核):
+
+```
+✅ Harbor 已含清单内全部应镜像的 47 个镜像(无漂移)
+   已跳过 16 个"本就在本台 Harbor 上"的镜像(metax/cubepilot; 预期不镜像)
+```
+
+**关键旁证**: `registry.k8s.io/pause:3.10` 从本机同步**失败**(该域名会 302 到
+`europe-west3-docker.pkg.dev`, 本机不可达), 但 GitHub runner **成功了** ——
+这正是"把镜像准备搬到一个可达的环境里做"的价值所在。
+
+### 配置步骤(一次性)
+
+```bash
+gh secret set HARBOR_MIRROR_USER     --repo suanova/cubestack-installer   # 从 stdin 读
+gh secret set HARBOR_MIRROR_PASSWORD --repo suanova/cubestack-installer
+# 或: GitHub 网页 → Settings → Secrets and variables → Actions → New repository secret
+```
+
+⚠ **`gh secret set --body -` 不会读 stdin**: `-b/--body` 是"直接给值",
+传 `-` 会把字面量 `-` 存成密钥值(本项目首轮 CI 失败就是这么来的)。
+要走 stdin 就**省略 `--body`**。
+
+---
+
+## 10. 相关文档
 
 - 镜像清单: `deployments/config/images.manifest`
 - 版本变量(升级入口): `deployments/config/cluster.conf.example` §3.3

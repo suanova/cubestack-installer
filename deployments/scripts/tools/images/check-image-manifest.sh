@@ -150,8 +150,14 @@ if [ "${DO_HARBOR}" = "1" ]; then
     if ! curl -s -o /dev/null -w '%{http_code}' "${CU[@]}" "${API}/api/v2.0/projects/${HARBOR_PROJ}" 2>/dev/null | grep -q '^200$'; then
         warn "⑥ Harbor 项目 ${HARBOR_PROJ} 不可达或不存在, 跳过漂移检查"
     else
-        N_DRIFT=0
+        N_DRIFT=0; N_SAME=0
         while IFS=$'\t' read -r g r n; do
+            # "上游就是本台 Harbor"的镜像**不镜像到 mirrors/**(预期行为, 见 harbor-sync-images.sh):
+            # metax / cubepilot 本就在本台 Harbor 上, 部署模块直接从其原项目拉取。
+            # 不排除的话, 每次漂移检查都会把 16 个"永远不该出现"的镜像报成缺失, 噪声淹没真问题。
+            case "${r}" in
+                "${HARBOR_HOST}"/*) N_SAME=$((N_SAME+1)); continue ;;
+            esac
             dst="$(image_mirror_ref "${r}")"
             # Harbor API 细节(实测, 易踩):
             #   ① 路径里的 repository 名**不含项目前缀**(项目已在路径段里), 要从 <host>/<project>/ 之后切;
@@ -170,9 +176,11 @@ if [ "${DO_HARBOR}" = "1" ]; then
             fi
         done < "${ENTRIES}"
         if [ "${N_DRIFT}" = "0" ]; then
-            ok "⑥ Harbor 已含清单全部 ${TOTAL} 个镜像(无漂移)"
+            ok "⑥ Harbor 已含清单内全部应镜像的 $((${TOTAL}-${N_SAME})) 个镜像(无漂移)"
+            [ "${N_SAME}" -gt 0 ] && say "   已跳过 ${N_SAME} 个\"本就在本台 Harbor 上\"的镜像(metax/cubepilot; 预期不镜像)"
         else
-            warn "⑥ Harbor 缺 ${N_DRIFT}/${TOTAL} 个镜像(如上)。执行 harbor-sync-images.sh 补齐"
+            warn "⑥ Harbor 缺 ${N_DRIFT}/$((${TOTAL}-${N_SAME})) 个应镜像的镜像(如上)。执行 harbor-sync-images.sh 补齐"
+            [ "${N_SAME}" -gt 0 ] && say "   另已跳过 ${N_SAME} 个\"本就在本台 Harbor 上\"的镜像(预期不镜像)"
         fi
     fi
 else

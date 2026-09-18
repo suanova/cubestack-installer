@@ -27,8 +27,16 @@
 #       harbor.isuanova.com/suanova/cubepilot-api:latest
 #         → harbor.isuanova.com/mirrors/suanova/cubepilot-api:latest
 #   ⚠ 保留注册域是有意的: 上游 ref 是 Harbor 路径的**后缀**, 因此离线 tar 按上游 ref
-#     命名(如 registry.k8s.io_kube-state-metrics_kube-state-metrics_v2.20.0.tar)时,
+#     命名(如 registry.k8s.io/kube-state-metrics_kube-state-metrics_v2.20.0.tar)时,
 #     各部署模块原有的 *<repo>_<tag>.tar 通配仍然命中, 无需改动匹配逻辑。
+#
+# ── 特例: "上游就是本台 Harbor"的组(metax-gpu / cubepilot)**默认不镜像** ──
+#   它们本就在本台 Harbor 上(metax/ 与 suanova/ 项目), "集群不访公网"的目标**已经达成**
+#   —— 对应部署模块现在就直接从那些项目拉取, 无需任何改动。再复制一份到 mirrors/ 只会
+#   多占一份存储(实测 8.4 GB)且每次版本升级都要重跑, 故默认跳过。
+#   判据是推导的(注册域 == HARBOR_MIRROR_REGISTRY), 不是硬编码名单。
+#   真要那份副本: harbor-sync-images.sh --include-same-harbor --group metax-gpu,cubepilot
+#   (它们仍列在本清单里, 因为清单同时承担"本仓库用到哪些镜像"的登记职责。)
 #
 # ── 校验 ──────────────────────────────────────────────────
 #   bash deployments/scripts/tools/images/check-image-manifest.sh          # 静态校验(格式/变量/重复)
@@ -160,11 +168,14 @@ rdma  ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:${RDMA_IMAGE_TAG}
 lws  registry.k8s.io/lws/lws:${LWS_IMAGE_TAG}
 
 # ------------------------------------------------------------
-# [group: cubepilot] CubePilot AI Agent 平台(自研; 已在 Harbor suanova 项目下)
+# [group: cubepilot] CubePilot AI Agent 平台(自研)
 #   目录: deployments/offline-files/cubepilot/
-#   ⚠ 镜像 tag 与 chart 版本联动(-latest 结尾 → latest); 由 CI 构建发布, 本清单只做
-#     Harbor → mirrors/ 的**同台镜像复制**(上游注册域 = Harbor 自身, 按规则去掉域名前缀)。
-#   ⚠ cubepilot-chart 是 **OCI chart 制品**, 不是镜像, 不在此清单(helm pull 直接取)。
+#   ⚠ **本组默认不镜像到 mirrors/**: 上游就是本台 Harbor 的 suanova 项目。
+#     "集群不访公网"的目标对它们**已经达成** —— 模块 31_cubepilot.sh 现在就是从
+#     harbor.isuanova.com/suanova/ 拉取制品(online 模式), 无需任何改动。
+#     再复制一份到 mirrors/ 只会多占存储且每次升级都要重跑, 故不镜像。
+#     ⚠ 与 chart 版本联动: -latest 结尾 → 镜像 tag=latest(模块自动派生, 见 CUBEPILOT_IMAGE_TAG)。
+#     ⚠ cubepilot-chart 是 **OCI chart 制品**, 不是镜像, 不在此清单(helm pull 直接取)。
 # ------------------------------------------------------------
 cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-openclaw:${CUBEPILOT_IMAGE_TAG}
 cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-operator:${CUBEPILOT_IMAGE_TAG}
@@ -172,11 +183,12 @@ cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-api:${CUBEPILOT_IM
 cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-web:${CUBEPILOT_IMAGE_TAG}
 
 # ------------------------------------------------------------
-# [group: metax-gpu] 沐曦 GPU Operator(已在 Harbor metax 项目下)
+# [group: metax-gpu] 沐曦 GPU Operator
 #   目录: deployments/offline-files/metax-gpu/
-#   ⚠ 沐曦不发布到公共 registry, 上游就是内网 Harbor metax 项目 → 同台复制到 mirrors/。
+#   ⚠ **本组默认不镜像到 mirrors/**: 沐曦不发布到公共 registry, 上游就是本台 Harbor 的
+#     metax 项目 —— 与 cubepilot 同理, 部署模块直接从 harbor.isuanova.com/metax/ 拉取,
+#     再复制一份只多占 8.4 GB(其中 maca 5.3 GB、driver-image 1.15 GB)且升级要重跑。
 #   ⚠ 镜像 tag 带 -amd64 架构后缀(沐曦约定, 模块会把核心组件去后缀), 不要"修正"。
-#   ⚠ driver-image / maca 体积大(GB 级); 不需要时可 --group 排除该组同步。
 #   组件清单与 METAX_IMAGE_COMPONENTS 对应; driver/maca 版本另有变量:
 # ------------------------------------------------------------
 metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/gpu-label:${METAX_VERSION}-amd64

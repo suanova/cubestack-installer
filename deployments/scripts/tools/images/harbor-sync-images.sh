@@ -30,10 +30,10 @@
 #   ./harbor-sync-images.sh --list                 # 只列出将同步的镜像(不联网)
 #   ./harbor-sync-images.sh --group prometheus,envoy   # 只同步指定分组
 #   ./harbor-sync-images.sh --exclude-group metax-gpu  # 排除大体积分组
-#   ./harbor-sync-images.sh --exclude-same-harbor      # 跳过"上游就是本台 Harbor"的同台复制
-#                                                     # (metax/cubepilot; 这类在 CI 上跑是把 GB 级
-#                                                     #  镜像下载到 runner 再传回同一台 Harbor, 纯浪费
-#                                                     #  —— 改由靠近 Harbor 的机器本地跑一次)
+#   ./harbor-sync-images.sh --include-same-harbor      # 连"上游就是本台 Harbor"的镜像一起镜像
+#                                                     # (默认**不镜像**这些: metax/cubepilot 本就在
+#                                                     #  本台 Harbor 上, 部署模块直接从其原项目拉,
+#                                                     #  再复制一份只多占 8.4 GB 且升级要重跑)
 #   ./harbor-sync-images.sh --force                # 强制重新同步(忽略 digest 相同)
 #   ./harbor-sync-images.sh --platform amd64       # 只同步单架构(默认 --all 保留多架构)
 #   HARBOR_MIRROR_USER=u HARBOR_MIRROR_PASSWORD=p ./harbor-sync-images.sh
@@ -56,7 +56,7 @@ err()  { local m="【错误】$*"; echo -e "\033[31m${m}\033[0m" >&2; _log_file 
 MODE="sync"; FORCE=0; DRY_RUN=0; NO_CREATE=0
 PLATFORM_MODE="all"                     # all(默认, 保留多架构 manifest list) | 单架构值(如 amd64)
 INCLUDE_GROUPS=""; EXCLUDE_GROUPS=""
-SAME_HARBOR="include"                   # include(默认) | exclude —— 见 --exclude-same-harbor
+SAME_HARBOR="exclude"                   # 默认**不镜像**"上游就是本台 Harbor"的镜像; 见 --include-same-harbor
 while [ $# -gt 0 ]; do
     case "$1" in
         --list|-l)        MODE="list" ;;
@@ -102,11 +102,14 @@ _group_selected() {   # <group> → 0=选中
 }
 
 # ---- 收集清单(过滤后) ----
-# --exclude-same-harbor: 跳过"上游就是本台 Harbor"的镜像(metax / suanova 等)。
-# 理由: 这类是 **Harbor → Harbor 的同台复制**, 在 CI 上跑等于把 GB 级镜像先下载到 runner
-# 再传回同一台 Harbor, 纯浪费(metax 的 driver/maca 就是 GB 级)。它们应由**靠近 Harbor 的机器**
-# 本地跑一次(脚本本身不依赖 CI), 之后极少变动。
-# ⚠ 跳过不是静默的: 汇总会打印跳过了哪些, 避免"看起来全同步了"的错觉。
+# 默认**跳过"上游就是本台 Harbor"的镜像**(metax / cubepilot): 它们是 Harbor → Harbor 的同台复制,
+# 目标"集群不访公网"对它们**已经达成**(部署模块现在就分别从 harbor.isuanova.com/metax 与
+# /suanova 拉取, 无需任何改动)。再复制一份到 mirrors/ 只会: ①多占一份存储(实测 8.4 GB, 其中
+# maca 5.3 GB); ②每次版本升级都要重跑一次。
+# 判据是**推导**出来的(注册域 == HARBOR_MIRROR_REGISTRY), 不是硬编码名单 ——
+# 将来若某个组件改成从公网拉, 它会自动重新进入镜像范围。
+# 少数情况下确实想要那份副本: --include-same-harbor。
+# ⚠ 跳过是**显式报告**的(汇总列出被跳过的项), 不会造成"看起来全同步了"的错觉。
 SAME_HARBOR_SKIPPED=()
 LIST_FILE="$(mktemp)"
 while IFS=$'\t' read -r g r _n; do
@@ -340,10 +343,10 @@ done < "${LIST_FILE}"
 echo "---------------------------------------------"
 ok "同步完成: 新同步 ${SYNCED} 个, digest 未变跳过 ${SKIPPED} 个, 失败 ${FAILED} 个"
 if [ "${#SAME_HARBOR_SKIPPED[@]}" -gt 0 ]; then
-    warn "另有 ${#SAME_HARBOR_SKIPPED[@]} 个**同台 Harbor 复制**被 --exclude-same-harbor 跳过(CI 上跑纯浪费带宽):"
+    warn "另有 ${#SAME_HARBOR_SKIPPED[@]} 个镜像**本就在本台 Harbor 上, 不镜像到 mirrors/**(这是预期行为):"
     for _s in "${SAME_HARBOR_SKIPPED[@]}"; do echo "    - ${_s}"; done
-    echo "  补法(在**靠近 Harbor 的机器**上本地跑一次即可, 与 CI 无关):"
-    echo "    ./harbor-sync-images.sh --group metax-gpu,cubepilot"
+    echo "  说明: 这些组件的部署模块直接从其现有项目(metax/ 与 suanova/)拉取, 无需改代码、无重复存储。"
+    echo "  确实想要 mirrors/ 下的副本时: ./harbor-sync-images.sh --include-same-harbor --group metax-gpu,cubepilot"
 fi
 echo "  Harbor:  ${HARBOR_API}/${HARBOR_PROJ}/"
 echo "  下一步:  联网机执行 tools/images/harbor-save-images.sh 生成离线 tar"
