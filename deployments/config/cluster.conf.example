@@ -86,6 +86,7 @@ GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 沐曦 GPU Operator(�
 LWS_ENABLED="${LWS_ENABLED:-true}"                      # LeaderWorkerSet(LLM 工作负载调度; 默认启用; 见 4.2)
 LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"  # LWS DisaggregatedSet(解耦推理; 见 4.2)
 PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-true}"       # Prometheus+Operator 监控(P1; 见 4.3)
+PERSES_ENABLED="${PERSES_ENABLED:-true}"               # Perses 云原生看板(P1 可视化; 默认启用; 见 4.3b)
 # ---- Prometheus 监控底座(kube-prometheus-stack; 详见 deployments/cubestack-addon/observability/prometheus/README.md) ----
 # chart vendored 于 cubestack-addon/observability/prometheus/(默认 90.0.0); 刷新: tools/images/prometheus-fetch-charts.sh
 # 离线镜像: 联网机 tools/images/prometheus-save-images.sh 下载 tar → 08_prometheus 模块推送进内置 registry
@@ -125,6 +126,48 @@ CUBESTACK_OBSERVABILITY_DIR="${CUBESTACK_OBSERVABILITY_DIR:-}"
 # MetaX GPU mx-exporter(§7.1): 打开 ClusterOperator 的 dataExporter 并建 ServiceMonitor。
 # true 时若集群没有 MetaX ClusterOperator 会自动跳过(未装 GPU Operator 时正常)。
 MX_EXPORTER_ENABLED="${MX_EXPORTER_ENABLED:-true}"
+# ---- Perses 云原生看板(P1 可视化; 模块 perses / verify_perses; 详见 docs/perses.md) ----
+# 制品: 1 chart(perses-<ver>.tgz, **vendored 在 cubestack-addon/perses/**, 随 git 分发)
+#       + 2 镜像(perses 本体 / 看板供给用的 k8s-sidecar)。
+# ★ 双模式(PERSES_MODE, **默认 online**):
+#   **两种模式的部署路径完全相同** —— 节点只从集群内置 registry 拉镜像, 部署机 helm 装本地 chart 副本。
+#   online  = 部署前先从私服 mirrors 同步镜像到本地 tar, 再推入内置 registry, 之后与 offline 同路部署。
+#   offline = 不碰外网, 直接用盘上已有 tar 推入内置 registry 后部署。
+#   ⚠ chart **恒用仓库内 vendored 的离线副本**: online 只拿远端 digest 与 <tgz>.digest 边车比对,
+#     有更新才覆盖那份副本(会弄脏工作区, 提示 commit), 没更新就用本地的; 拉取失败直接回退本地。
+#   ⚠ 上游 chart 走**经典 helm repo**(perses.github.io), 其 digest 就是 tgz 的 sha256。
+# 镜像在线源是私服 **mirrors 项目**(不是 suanova): Perses 是第三方上游镜像, 由 CI 读
+#   images.manifest 的 perses 组从 docker.io 同步过去(mirrors 公开只读, 通常免凭据)。
+PERSES_MODE="${PERSES_MODE:-online}"                          # online(先同步制品)|offline(只用本地制品)
+PERSES_NAMESPACE="${PERSES_NAMESPACE:-perses}"                # 独立命名空间(与其它组件一致, 便于整块卸载)
+PERSES_RELEASE="${PERSES_RELEASE:-perses}"                    # helm release 名(= 工作负载/Service 名)
+PERSES_CHART_VERSION="${PERSES_CHART_VERSION:-0.23.2}"        # chart 版本(经典 helm repo 的版本号)
+PERSES_IMAGE_VERSION="${PERSES_IMAGE_VERSION:-v0.54.0}"       # 镜像 tag(= chart 的 appVersion; ⚠ 带 v 前缀)
+# 镜像仓库路径(上游 docker.io 下的名字; images.manifest 直接引用这两个变量, 故必须在此声明)
+PERSES_IMAGE_NAME="${PERSES_IMAGE_NAME:-persesdev/perses}"
+PERSES_SIDECAR_IMAGE_NAME="${PERSES_SIDECAR_IMAGE_NAME:-kiwigrid/k8s-sidecar}"
+PERSES_CHART_REF="${PERSES_CHART_REF:-perses}"                # chart 名
+PERSES_CHART_REPO="${PERSES_CHART_REPO:-https://perses.github.io/helm-charts}"
+PERSES_HARBOR="${PERSES_HARBOR:-harbor.isuanova.com}"         # 私服域名(mirrors 公开只读)
+PERSES_HARBOR_USER="${PERSES_HARBOR_USER:-}"                  # (可选)私有化后填; 留空=匿名拉取
+PERSES_HARBOR_PASSWORD="${PERSES_HARBOR_PASSWORD:-}"          # 私服密码/token(本文件已 gitignore, 勿提交)
+PERSES_HARBOR_INSECURE="${PERSES_HARBOR_INSECURE:-false}"     # online: true=拉取时跳过 TLS 校验(自签证书时用)
+# 持久化: **必须开** —— chart 在 persistence.enabled=false 时用 emptyDir, Pod 重建即丢全部看板。
+PERSES_STORAGE_SIZE="${PERSES_STORAGE_SIZE:-8Gi}"
+PERSES_STORAGE_CLASS="${PERSES_STORAGE_CLASS:-}"              # 留空自动派生: ceph 体系→ceph-block, 否则用集群默认 SC
+PERSES_WAIT_SECONDS="${PERSES_WAIT_SECONDS:-300}"
+# 数据源/看板供给(默认开): 建带 perses.dev/resource=true 标签的 ConfigMap, 由 chart 自带 k8s-sidecar
+# 写进 provisioning 目录。关闭则装完需在 UI 里手工配数据源。
+PERSES_PROVISION_ENABLED="${PERSES_PROVISION_ENABLED:-true}"
+PERSES_SIDECAR_ENABLED="${PERSES_SIDECAR_ENABLED:-true}"
+PERSES_SIDECAR_IMAGE_VERSION="${PERSES_SIDECAR_IMAGE_VERSION:-2.11.2}"   # 对齐 08_prometheus 在用的版本(离线只备一份)
+PERSES_DATASOURCE_NAME="${PERSES_DATASOURCE_NAME:-prometheus}"           # GlobalDatasource 名(verify 用同名断言)
+PERSES_PROMETHEUS_NAMESPACE="${PERSES_PROMETHEUS_NAMESPACE:-monitoring}" # 后端 Prometheus 所在命名空间(留空=跟 PROMETHEUS_NAMESPACE)
+PERSES_PROMETHEUS_URL="${PERSES_PROMETHEUS_URL:-}"            # 留空=自动发现 Prometheus Service; 也可显式指定后端地址
+# 对外暴露: nodeport(随 SERVICE_EXPOSE_MODE) / loadbalancer(需 MetalLB) / clusterip
+# ⚠ 按 2026-09-18 定案, 模块**不创建** Gateway/HTTPRoute/Ingress —— 对外路由应由专门的网关模块统一下发。
+PERSES_EXPOSE_MODE="${PERSES_EXPOSE_MODE:-}"
+PERSES_NODEPORT_BASE="${PERSES_NODEPORT_BASE:-31010}"         # 避开 Prometheus 的 31000/31001
 CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # Ceph 存储底座(P1; 见 4.3)
 CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI RBD/RGW/CephFS(依赖 CEPH_ENABLED; 见 4.3)
 # CEPH_FALLBACK_TO_LOCALPATH: CEPH_ENABLED=true 但 ceph 安装条件不足(manifest/裸盘/lvm2/

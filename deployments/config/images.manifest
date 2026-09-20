@@ -114,6 +114,20 @@ prometheus  quay.io/kiwigrid/k8s-sidecar:${PROMETHEUS_IMAGE_SIDECAR}
 prometheus  docker.io/jkroepke/kube-webhook-certgen:${PROMETHEUS_IMAGE_CERTGEN}
 
 # ------------------------------------------------------------
+# [group: perses] Perses 云原生看板(P1 可视化; 模块 18_perses)
+#   目录: deployments/offline-files/perses/
+#   chart 是 **经典 helm repo 制品**(perses.github.io), 不是镜像, 不在此清单 ——
+#     它 vendored 在 cubestack-addon/perses/perses-<ver>.tgz, 由 tools/images/perses-fetch-charts.sh 刷新。
+#   ⚠ sidecar 与 prometheus 组**是同一个软件**(kiwigrid/k8s-sidecar), 但上游注册域不同:
+#     本组用 docker.io(chart 的 sidecar.image.registry 默认值), prometheus 组用 quay.io。
+#     两者推入内置 registry 后落点是同一个仓库路径(kiwigrid/k8s-sidecar),
+#     所以先跑的那个推、后跑的 reg_has_tag 跳过 —— 不会重复传, 也不会冲突。
+#   ⚠ Perses 镜像 tag **带 v 前缀**(v0.54.0), 与 chart 的 appVersion 一致。
+# ------------------------------------------------------------
+perses  docker.io/${PERSES_IMAGE_NAME}:${PERSES_IMAGE_VERSION}
+perses  docker.io/${PERSES_SIDECAR_IMAGE_NAME}:${PERSES_SIDECAR_IMAGE_VERSION}
+
+# ------------------------------------------------------------
 # [group: kube-state-metrics] 集群对象状态指标(监听 API Server)
 #   目录: deployments/offline-files/kube-state-metrics/
 #   由 kube-prometheus-stack 以 subchart 部署; 但 tag/来源独立维护, 便于单独升级与离线备料。
