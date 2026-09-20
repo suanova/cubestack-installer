@@ -131,6 +131,61 @@ load_config
 8. 模块退出码:0=成功/跳过,非 0=失败(调度器中断部署)。
 9. 头部注释保留"数据源: cluster.conf 的哪些变量",便于排查。
 
+### 2.4 helm chart 离线副本(强制)
+
+**凡安装 helm chart 的模块,其 chart 必须有一份 vendored 在 `deployments/cubestack-addon/<组件>/`
+下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
+
+模板:`deployments/scripts/modules/03_addon/18_perses.sh`(最简形态)、`31_cubepilot.sh`(带私服凭据)。
+
+1. **一个 chart 一个子目录**:`deployments/cubestack-addon/<组件>/`。形态二选一,同一组件内保持一致:
+   - **`.tgz`**:小 chart 用这个(如 `perses-0.23.2.tgz`),并**同时提交 `<tgz>.digest` 边车**
+     (写 helm 报告的 `Digest:` 值;经典 helm repo 的 digest 就是文件 sha256);
+   - **解包源码目录**(含 `Chart.yaml`):大 chart 用这个(如 kube-prometheus-stack 带几十个子 chart)。
+2. **安装恒用本地副本**,不要直接装刚拉下来的那份。走共享助手收敛:
+   ```bash
+   helm_chart_ensure <组件名> <本地tgz路径> <版本> <online|offline> <ref> [repoURL] || exit 1
+   ```
+   它负责:online 拉远端 → 取 `Digest:` 与边车比对 → 未变继续用本地(仓库保持干净)、
+   变了覆盖本地并提示 commit、拉取失败降级回退本地;offline 完全不联网;最后判一次本地副本在不在。
+   `ref` 传 `oci://…` 或经典 repo 的 chart 名(后者要同时给 `repoURL`)。
+3. **离线副本缺失 = 致命错误**(`err` + 退出),提示里必须给出获取方法;不要静默降级成"用线上那份"。
+4. **刷新走显式工具 + commit**,不要靠部署过程自动落盘:
+   - chart:`tools/images/<组件>-fetch-charts.sh`(仿 `prometheus-fetch-charts.sh` / `perses-fetch-charts.sh`);
+   - 镜像:`tools/images/harbor-save-images.sh --group <组>`,源与命名由 `config/images.manifest` 统一声明。
+5. **`bash tools/check-modules.sh` 的第 ⑩ 项会强制校验这条**(行首是 helm 安装命令的模块,
+   其引用的 `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`)。合入前必须全绿。
+
+> 为什么定成"恒用本地副本"而不是"线上优先":`31_cubepilot` / `33_bmc_exporter` 原本**都写了**
+> "私服拉取失败就回退本地 chart",但仓库里压根没有那份文件 —— 私服一抖动,回退就是空转。
+> 回退逻辑只有在**本地确实有一份**时才有意义,所以那份副本必须是仓库的一部分,不能只在部署时落到盘上。
+
+### 2.5 镜像离线登记与目录(强制)
+
+**凡模块部署时要拉取的镜像,必须在 `config/images.manifest` 登记(唯一数据源),`group` 取组件名;
+对应的离线目录 `deployments/offline-files/<group>/` 首次即建,并放入 `README.md`。**
+
+1. **登记**:在 `deployments/config/images.manifest` 追加 `<group>  <上游全限定 ref>` 行。
+   `group` = **组件名**(与 `cubestack-addon/<组件>/`、模块 key 对齐),离线目录由 group 推导
+   (见 `tools/images/lib-image-manifest.sh` 的 `image_group_dir()`;`k8s-base`/`ceph` 两组例外 → `kubespray/images/`)。
+   ref 必须全限定(短名补 `docker.io/library/`),版本一律写 `${VAR}` 占位。
+2. **版本变量**:`XXX_IMAGE_VERSION` 集中放 `cluster.conf.example` 的「镜像版本(★ 升级入口)」节
+   —— 升级只改这一处,清单 / CI / 离线包自动跟随。
+3. **建目录 + README**:`deployments/offline-files/<group>/README.md`,照抄
+   `offline-files/kube-state-metrics/README.md`(镜像 ref / 版本真相变量 / tar 命名 / 取镜像命令 / 谁消费 / 升级)。
+   ⚠ **空目录 git 存不下,且 `.gitignore` 忽略 `offline-files/` 下所有文件、只放行 `*/README.md`**
+   —— 不写 README,新目录提交后会消失(现有 14 个子目录里只有 3 个带 README)。
+4. **tar 不入库**:离线 tar 由 `tools/images/harbor-save-images.sh --group <组>` 生成
+   (从 Harbor 拉取 → 落到该组对应目录,目录不存在会自动补建)。入库的是 manifest + README。
+5. **特例**:上游本身就是本台 Harbor 的组(`metax-gpu`/`cubepilot`/`bmc`)**默认不镜像**,
+   但仍登记在清单里 —— 清单同时承担"本仓库用到哪些镜像"的登记职责。
+6. **为什么强制**:同一份清单有三处消费者(CI 同步 Harbor / 联网机拉离线 tar / 部署模块推集群内置
+   registry),漏登记**不会有任何脚本报错**,只在离线部署时表现为"这个镜像没在离线包里"。
+   校验:`bash tools/images/check-image-manifest.sh`(格式/变量/重复;`--harbor` 额外比对漂移)。
+
+> 与 §2.4 的分工:chart 是**随 git 入仓**的 vendored 副本(`cubestack-addon/`),镜像 tar 是**不入仓**的
+> 大文件(只登记 + 备料,`offline-files/`)。共同点:**首次就把资产放到约定目录**,不许靠部署过程自动落盘。
+
 ---
 
 ## 3. cluster.conf 规范(单一配置源)
@@ -175,6 +230,8 @@ load_config
 2. **写元数据头**:按 §2.2 模板填写 MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE,需要依赖顺序时加 `REQUIRES`。
 3. **统一远端初始化**:需要 SSH 到 master 执行 kubectl 的模块调用 `init_remote_kubectl || exit 1`(见 §2.2,禁止手抄初始化块)。
 4. **实现逻辑**:复用现有工具脚本或写新逻辑(§2.3)。
+   - 装 helm chart → chart 必须 vendored 到 `deployments/cubestack-addon/<组件>/`(§2.4,check-modules 第 ⑩ 项强制);
+   - 拉容器镜像 → 必须登记 `config/images.manifest` + 建 `deployments/offline-files/<group>/`(含 README,§2.5)。
 5. **加开关**(可选):在 `cluster.conf.example` 加 `XXX_ENABLED` 变量,TOGGLE 指向它。
 6. **完成**:**无需改任何注册表** —— operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)即 operator),新增 operator 写 TOGGLE 即自动进入 `--steps`/`--enable` 调度。
 

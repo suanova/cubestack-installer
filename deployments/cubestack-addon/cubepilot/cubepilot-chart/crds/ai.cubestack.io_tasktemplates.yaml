@@ -1,0 +1,109 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: tasktemplates.ai.cubestack.io
+spec:
+  group: ai.cubestack.io
+  names:
+    kind: TaskTemplate
+    listKind: TaskTemplateList
+    plural: tasktemplates
+    singular: tasktemplate
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.displayName
+      name: DisplayName
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          TaskTemplate is a parameterized task template (design §3.3.2) -- template !=
+          instance != run: TaskTemplate (what to do) != Task (whose task, when it runs)
+          != TaskRun (run report).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              TaskTemplateSpec is a parameterized task template (design §3.3.2) -- the
+              template (what to do), the "class" of tasks. Preloaded: daily-inspection.
+            properties:
+              defaultCron:
+                description: |-
+                  DefaultCron is the creation-wizard default schedule hint (design §3.5:
+                  the Task's own cron wins).
+                type: string
+              description:
+                description: Description explains what the template does.
+                type: string
+              displayName:
+                description: DisplayName is the human-facing template name.
+                type: string
+              instruction:
+                description: Instruction is the parameterized prompt ({{param}} interpolation).
+                type: string
+              paramsSchema:
+                description: ParamsSchema declares the parameters.
+                items:
+                  description: ParamSchema describes one task parameter (design §3.3.2
+                    paramsSchema).
+                  properties:
+                    default:
+                      description: Default is the value used when the Task does not
+                        override this parameter.
+                      type: string
+                    enum:
+                      description: Enum, when set, restricts the accepted values.
+                      items:
+                        type: string
+                      type: array
+                    name:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              requiredPermissions:
+                description: RequiredPermissions is the permission hint.
+                properties:
+                  level:
+                    type: string
+                  note:
+                    type: string
+                type: object
+              skills:
+                description: |-
+                  Skills declares the skills the task needs (design §3.5: resolved at
+                  execution time against the current versions; the actual revisions used
+                  are recorded on the TaskRun).
+                items:
+                  type: string
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}

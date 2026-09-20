@@ -1,0 +1,124 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: taskruns.ai.cubestack.io
+spec:
+  group: ai.cubestack.io
+  names:
+    kind: TaskRun
+    listKind: TaskRunList
+    plural: taskruns
+    singular: taskrun
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.trigger
+      name: Type
+      type: string
+    - jsonPath: .spec.creatorTaskRef.name
+      name: Task
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          TaskRun is the execution report (design §3.3.4) -- written by the scheduler
+          with the platform identity, completing the template -> task -> run report
+          loop.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              TaskRunSpec is the execution report of a task (design §3.3.4). It is
+              created and written by the scheduler with the platform identity.
+            properties:
+              creatorTaskRef:
+                description: CreatorTaskRef links back to the owning Task.
+                properties:
+                  name:
+                    type: string
+                  uid:
+                    type: string
+                required:
+                - name
+                type: object
+              owner:
+                description: |-
+                  Owner is the task owner (execution identity; derived from the Task's
+                  owner -- design §3.5).
+                type: string
+              trigger:
+                description: |-
+                  Trigger records how this run was started -- the same Task can be fired by
+                  cron and by hand, so this is provenance about the run, not something
+                  derivable from the Task it came from.
+                enum:
+                - Manual
+                - Cron
+                type: string
+            required:
+            - creatorTaskRef
+            type: object
+          status:
+            description: |-
+              TaskRunStatus is the execution report written by the scheduler with the
+              platform identity (design §3.3.4: written with the platform identity;
+              Agent instances and user credentials never write CRDs directly).
+            properties:
+              content:
+                description: Content is the full natural-language report text.
+                type: string
+              error:
+                description: Error carries the failure detail.
+                type: string
+              finishedAt:
+                format: date-time
+                type: string
+              phase:
+                description: Phase is Pending / Running / Completed / Failed / Cancelled.
+                type: string
+              skillRevision:
+                description: |-
+                  SkillRevision is the skill revision actually used for this run
+                  (design §3.5: resolved at run time, recorded for audit/rollback).
+                type: string
+              startedAt:
+                description: StartedAt / FinishedAt bound the run.
+                format: date-time
+                type: string
+              templateRevision:
+                description: |-
+                  TemplateRevision is the TaskTemplate revision actually used for this run
+                  (design §3.5: resolved at run time, recorded for audit/rollback).
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

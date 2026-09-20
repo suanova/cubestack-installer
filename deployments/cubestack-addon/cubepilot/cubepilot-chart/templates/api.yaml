@@ -1,0 +1,112 @@
+# API -- Portal REST/SSE + JSON metadata store. Stateless except a single
+# claim that holds the API's JSON metadata at the api.dataDir root and the
+# skill repository in its skills/ subdirectory. ReadWriteOnce by default (the API
+# is single-replica and kind's default StorageClass is RWO-only); a future
+# multi-replica API sets api.accessModes [ReadWriteMany] on a shared
+# StorageClass (design §9 / §11.1). Note RWX alone is not enough for replicas
+# > 1 -- the JSON metadata store is single-writer and per-session state
+# (SSE hub / HITL) is in-memory, so app-level state handling is the real gate.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.api.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.api.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.api.name }}
+        {{- include "cubepilot.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccounts.api }}
+      # Container runs as a non-root uid (1000); make the data PVC writable.
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: api
+          image: {{ .Values.api.image }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          env:
+            {{- include "cubepilot.agentEnv" . | nindent 12 }}
+            - name: CUBEPILOT_DATA_DIR
+              value: {{ .Values.api.dataDir }}
+            - name: CUBEPILOT_SKILLS_DIR
+              value: {{ .Values.api.dataDir }}/skills
+            {{- range .Values.api.extraEnv }}
+            - name: {{ .name }}
+              {{- if .secretKeyRef }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretKeyRef.name }}
+                  key: {{ .secretKeyRef.key }}
+              {{- else }}
+              value: {{ .value | quote }}
+              {{- end }}
+            {{- end }}
+          ports:
+            - containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.api.dataDir }}
+          {{- with .Values.api.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.api.name }}-data
+---
+# Single claim for the API: its JSON metadata (audit tables) lives at the
+# api.dataDir root and the skill repository (published skill tars) in the
+# api.dataDir/skills subdirectory (the app mkdirs both -- store.New and the
+# skill repository). ReadWriteMany + a shared StorageClass enables API
+# replicas > 1 (see header).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.api.name }}-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes: {{ toYaml .Values.api.accessModes | nindent 2 }}
+  {{- with .Values.api.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.api.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.api.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Values.api.name }}
+  ports:
+    - port: 8080
+      targetPort: 8080
