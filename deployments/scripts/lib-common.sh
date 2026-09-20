@@ -187,6 +187,64 @@ push_image_skopeo() {
     rm -f "${errf}"; return 1
 }
 
+# ---------------- 共享 skopeo 拉取助手(私服 docker:// → 本地 docker-archive tar) ----------------
+# 与 push_image_skopeo 对称: 私服链路(尤其外网 Harbor)的 TLS 握手**间歇性超时**,
+#   单次失败在调用方那里会变成"静默降级为本地旧 tar", 且 stderr 被吞掉 → 事后无从排查。
+#   故拉取统一走这里: ① 整包 3 次重试; ② 失败原因经全局 SKOPEO_PULL_ERR 回传给调用方写进告警;
+#   ③ 先写 <tar>.tmp 再原子 mv —— 拉取失败**绝不动**原有可用 tar
+#      (否则回退路径会按 [ -f <tar> ] 把半截包当成"本地可用制品"推出去)。
+# 全部为**新符号**, 不改任何现有调用方。
+
+# 取私服上该 tag 的 digest(决定"要不要重下")。结果写全局 SKOPEO_REMOTE_DIGEST, 失败原因写 SKOPEO_PULL_ERR。
+# ⚠ 刻意**不用 stdout 回显**: 调用方写成 $(...) 就在子 shell 里跑, 函数设的 SKOPEO_PULL_ERR 传不出来
+#   (只剩"私服不可达"却不知道为什么)。调用方按 [ -n "${SKOPEO_REMOTE_DIGEST}" ] 判定"可达且有该 tag"。
+# 恒 return 0 —— set -e 下裸调用不会退出模块; 判据一律看 SKOPEO_REMOTE_DIGEST 是否为空。
+# 3 次重试很关键: 单次 TLS 超时若被当成"私服没这个镜像", 会静默跳过下载并回退旧 tar。
+# 用法: remote_image_digest <src> [额外 skopeo 参数...]
+SKOPEO_REMOTE_DIGEST=""
+remote_image_digest() {
+    local src="$1"; shift
+    local d="" n=1 errf="/tmp/skopeo-inspect-err-$$"
+    SKOPEO_REMOTE_DIGEST=""; SKOPEO_PULL_ERR=""
+    for n in 1 2 3; do
+        d="$(skopeo inspect --format '{{.Digest}}' "$@" "docker://${src}" 2>"${errf}" || true)"
+        if [ -n "${d}" ]; then SKOPEO_REMOTE_DIGEST="${d}"; rm -f "${errf}"; return 0; fi
+        SKOPEO_PULL_ERR="$(tail -1 "${errf}" 2>/dev/null || true)"
+        if [ "${n}" -lt 3 ]; then
+            warn "  私服 digest 查询失败(第 ${n}/3 次: ${SKOPEO_PULL_ERR:-未知错误}), 3s 后重试..."
+            sleep 3
+        fi
+    done
+    rm -f "${errf}"
+    SKOPEO_PULL_ERR="${SKOPEO_PULL_ERR:-私服不可达或该 tag 不存在}"
+    return 0
+}
+
+# 3 次整包重试的 skopeo 拉取(与 push_image_skopeo 同款: 大 blob 连接中断时
+# skopeo 的 --retry-times 不覆盖)。错误文件按 PID 隔离(并行安全)。
+# 用法: pull_image_skopeo <src> <tar 路径> [额外 skopeo 参数...](参数须在 ref 之前, skopeo 用 Go flag 解析)
+pull_image_skopeo() {
+    local src="$1" tar="$2"; shift 2
+    local tmp="${tar}.tmp" n=1 errf="/tmp/skopeo-pull-err-$$" err=""
+    SKOPEO_PULL_ERR=""
+    for n in 1 2 3; do
+        if skopeo copy --quiet "$@" "docker://${src}" "docker-archive:${tmp}" 2>"${errf}"; then
+            mv -f "${tmp}" "${tar}"      # 同目录 rename, 原子替换: 旧 tar 在成功前一直可用
+            rm -f "${errf}"
+            return 0
+        fi
+        err="$(tail -1 "${errf}" 2>/dev/null || true)"
+        rm -f "${tmp}"                  # 半截包一律不留(回退路径只认完整 tar)
+        if [ "${n}" -lt 3 ]; then
+            warn "  拉取失败(第 ${n}/3 次: ${err:-未知错误}), 3s 后重试整包..."
+            sleep 3
+        fi
+    done
+    SKOPEO_PULL_ERR="${err:-未知错误}"
+    rm -f "${errf}"
+    return 1
+}
+
 # 幂等检查: registry 是否已有 <repo>:<tag>(优先 skopeo inspect, 缺失时 curl tags/list)
 # 需调用方先设置 REGISTRY_BASE(各模块/load 脚本在 load_config 后派生)。
 # 用法: reg_has_tag <push_registry> <repo> <tag>
@@ -233,6 +291,88 @@ find_offline_tar() {
         done
     done
     return 1
+}
+
+# ---------------- Helm chart 离线副本助手(全仓库唯一实现) ----------------
+# 规则(见 docs/scripts-development-spec.md §2.4): **每个 helm chart 都必须在
+# deployments/cubestack-addon/<组件>/ 下有一份随 git 分发的离线副本**(.tgz 或解包源码目录),
+# 且**安装一律用这份本地副本** —— 线上拉到的东西不直接装。缺了它, 私服/上游一抖动就装不上
+# (cubepilot 与 bmc-exporter 曾经就是这样: 回退代码写好了, 却压根没有可回退的文件)。
+#
+# 本助手把"本地副本就绪"这件事收敛到一处:
+#   online : helm pull 到临时目录 → 取远端 digest, 与 <tgz>.digest 边车比对
+#              未变 → 丢弃刚拉的文件, 继续用本地那份(**仓库保持干净**)
+#              变了 → 覆盖本地副本 + 更新边车并**提示 commit**(会弄脏工作区, 但这是有意的:
+#                      vendored 副本的刷新必须落到版本库里才有意义)
+#              拉取失败 → **降级**回退本地副本(告警不中断)
+#   offline: 完全不联网, 直接用本地副本
+#   两种模式收尾都判一次"本地副本在不在"—— 不在就 err 并给出获取方法。
+#
+# 用法: helm_chart_ensure <组件名> <本地tgz路径> <版本> <online|offline> <ref> [repoURL]
+#         ref : oci://host/proj/chart  或  chart 名(需同时给 repoURL)
+#         repoURL 非空 → helm pull <ref> --repo <repoURL> --version <版本>(经典 helm repo)
+#       返回 0 = 本地副本就绪(调用方直接 helm install <本地tgz路径>); 1 = 缺失且无法获取
+#       ⚠ 本函数进度消息一律走 stderr(与 ensure_registry_nginx 同理), 便于将来在 $(...) 中使用;
+#         err() 只打印不退出, 由本函数 return 1 / 调用方 || exit 1 决定是否中断。
+# 依赖: load_config 已执行; online 模式另需 helm。digest 边车缺失视为"未知"→ 刷新(安全默认,
+#       与镜像 tar 的 <tar>.digest 同一约定)。
+helm_chart_ensure() {
+    local comp="$1" tgz="$2" version="$3" mode="$4" ref="$5" repo="${6:-}"
+    local dgfile="${tgz}.digest" tmpd="" pulled="" rdig="" ldig="" out="" args=()
+
+    case "${mode}" in
+        online|offline) ;;
+        *) err "helm_chart_ensure: 模式仅支持 online|offline(当前=${mode})"; return 1 ;;
+    esac
+    mkdir -p "$(dirname "${tgz}")"
+
+    if [ "${mode}" = "online" ]; then
+        if ! command -v helm >/dev/null 2>&1; then
+            warn "  未找到 helm, 跳过在线校验(改用本地离线副本: $(basename "${tgz}"))" >&2
+        else
+            tmpd="$(mktemp -d)"
+            if [ -n "${repo}" ]; then
+                args=( "${ref}" --repo "${repo}" --version "${version}" --destination "${tmpd}" )
+            else
+                args=( "${ref}" --version "${version}" --destination "${tmpd}" )
+            fi
+            if out="$(helm pull "${args[@]}" 2>&1)"; then
+                pulled="$(ls -1t "${tmpd}"/*.tgz 2>/dev/null | head -1 || true)"
+                # helm 各版本把 "Digest:" 写 stdout 还是 stderr 不一致 → 上面已合并捕获
+                rdig="$(printf '%s\n' "${out}" | sed -n 's/^Digest:[[:space:]]*//p' | head -1)"
+                [ -f "${dgfile}" ] && ldig="$(cat "${dgfile}" 2>/dev/null || true)"
+                if [ -n "${pulled}" ] && [ -n "${rdig}" ] && [ -n "${ldig}" ] && [ "${rdig}" = "${ldig}" ]; then
+                    ok "  ${comp} chart 远端 digest 未变, 继续用本地离线副本(仓库保持干净)" >&2
+                elif [ -n "${pulled}" ]; then
+                    mv -f "${pulled}" "${tgz}"
+                    # 覆盖原因必须如实区分: "远端确实变了" 与 "没法比对所以按变了处理" 是两回事,
+                    # 后者会误伤(把本地那份未经证实的覆盖掉), 混为一谈会让人查不出真相。
+                    if [ -z "${rdig}" ]; then
+                        warn "  ${comp} chart 未取到远端 digest(无法比对, 按已变更处理) → 已用刚拉取的覆盖 $(basename "${tgz}")" >&2
+                    elif [ -z "${ldig}" ]; then
+                        warn "  ${comp} chart 本地无边车 $(basename "${dgfile}")(无法比对, 按已变更处理) → 已覆盖 $(basename "${tgz}")" >&2
+                    else
+                        warn "  ${comp} chart 远端有更新 → 已覆盖离线副本 $(basename "${tgz}")" >&2
+                    fi
+                    [ -n "${rdig}" ] && printf '%s' "${rdig}" > "${dgfile}"
+                    warn "    ⚠ 该文件是仓库内的 vendored 副本, 请 git add/commit 固化; 不提交则下次部署又回到旧版本" >&2
+                fi
+            else
+                printf '%s\n' "${out}" | tail -3 | sed 's/^/    /' >&2
+                warn "  ${comp} chart 远端拉取失败, **回退使用本地离线副本** $(basename "${tgz}")" >&2
+            fi
+            rm -rf "${tmpd}"; unset out
+        fi
+    fi
+
+    if [ ! -f "${tgz}" ]; then
+        err "  ${comp} 离线 chart 缺失: ${tgz}"
+        err "    获取: helm pull ${ref}${repo:+ --repo ${repo}} --version ${version} -d $(dirname "${tgz}")"
+        err "          然后把产出改名为 $(basename "${tgz}")(并写 <同名>.digest 边车), 提交入库"
+        err "    注意: 离线副本**必须随仓库分发**, 只在部署时拉到盘上不算数"
+        return 1
+    fi
+    return 0
 }
 
 # ---------------- 共享 nginx 校验镜像助手(verify 模块测试后端共用) ----------------
