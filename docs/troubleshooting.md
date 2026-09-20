@@ -512,6 +512,178 @@ kubectl -n rook-ceph get cephcluster,cephblockpool; kubectl get sc ceph-block
 
 ---
 
+### 8. CubeStack 可观测性落地(kube-prometheus-stack values / recording rules / dashboards / mx-exporter / BMC)
+
+**背景:** 按 `suanova/cubestack` 的 `observability/docs/installer-requirements.md` 把 recording rules、
+dashboard、mx-exporter、BMC exporter 落到安装环境。实现细节与需求对照见
+**`docs/prometheus-observability.md`**; 这里只沉淀**故障模式**(全部是"静默失效"类 ——
+不报错、不失败, 只是功能不生效)。
+
+#### 8.1 `kubectl get prometheusrule` 有 CR, 但 `/api/v1/rules` 里没有 cubestack 规则
+
+**症状:** 6 个 PrometheusRule 对象都建出来了, `kubectl get prometheusrule -n monitoring | grep cubestack`
+看得到, 但 Prometheus 里查不到对应规则组 —— **没有任何报错**。
+
+**根因:** **CR 存在 ≠ 规则被加载**。加载与否取决于 Prometheus CR 的 `ruleSelector` 能否选中该 CR。
+两种典型写法都会踩:
+- 按需求文档 §1.2 字面写 `ruleSelector.matchLabels: {app.kubernetes.io/part-of: cubestack-observability}`
+  → 能选中 CubeStack 规则, **但会把 chart 自带的 35 个 PrometheusRule 一起丢掉**
+  (它们带的是 `release: <release名>` + `part-of: kube-prometheus-stack`);
+- 只给 CubeStack 规则打 `release` 标签、不动 selector → 反过来只有默认规则在。
+
+**解法:** 用 `matchExpressions` 取**并集**(`In [cubestack-observability, kube-prometheus-stack]`),
+即同时覆盖两边。`08_prometheus.sh` 已如此实现, 并且**额外**给 CubeStack 规则补 `release` 标签作冗余
+(静默失效代价太大, 值这一层保险)。详见 `docs/prometheus-observability.md` §2.2。
+
+**验证:** 别用 `kubectl get prometheusrule` 判断 —— 用 `/api/v1/rules` 逐组断言,
+或直接 `--steps verify_prometheus`(⑥ 段就是干这个的)。
+
+#### 8.2 写了 `serviceMonitorSelector: {}` 却没生效, 跨 ns 的 ServiceMonitor 全丢
+
+**症状:** values 里明明写了 `serviceMonitorSelector: {}`(想全选), 但 `kubectl get prometheus -o jsonpath='{.spec.serviceMonitorSelector}'`
+输出的是 `{"matchLabels":{"release":"kube-prometheus"}}` —— 跨 namespace 的 ServiceMonitor
+(如 metax-operator 里的 mx-exporter)因此全被忽略。
+
+**根因:** chart 的 `prometheus.yaml` 模板是 `if selector → else if *NilUsesHelmValues → else {}`,
+而 `serviceMonitorSelectorNilUsesHelmValues` **默认 true** → 空 `{}` 被**改写**成 `release: <release名>`。
+**"写 `{}` 并不等于全选"**, `ruleSelector` / `scrapeConfigSelector` 同理。
+
+**解法:** 要全选必须**同时**置对应的 `*SelectorNilUsesHelmValues: false`。
+三组 selector 与配套开关见 `docs/prometheus-observability.md` §2.3。
+
+#### 8.3 KSM label allowlist 不生效(所有 `kube_pod_labels` join 全空)
+
+**症状:** recording rule 的 `* on(namespace,pod) group_left(label_ai_cubestack_io_*) kube_pod_labels{...}`
+结果为空, 但 KSM pod 正常、`kube_pod_labels` 本身有数据。
+
+**根因:** allowlist 没配上(或被 `--set` 切断)。这个值**含逗号**:
+`pods=[a,b,c],statefulsets=[d]` —— 逗号既是值的分隔符也是 `--set` 的键分隔符,
+用 `--set` 传必被切成畸形键, 静默为空。
+
+**解法:** 走 **values 文件**(`-f`)而不是 `--set`; 并核对 KSM pod 的 args 里那串是完整的:
+```bash
+kubectl -n monitoring get deploy <KSM名> -o jsonpath='{.spec.template.spec.containers[0].args}' | tr ',' '\n' | grep -c 'part-of'
+```
+**另有一条实测结论:** allowlist **只作用于 `<resource>_labels` 指标**,
+**不会**加到 `kube_statefulset_replicas` / `kube_pod_status_ready` 这类指标上
+(2026-09-20 用 KSM v2.20.0 实机确认)。所以要那些指标带 label 时必须走 join ——
+本仓库的 recording rules 已全部按 join 实现。源仓库 `docs/dependencies.md` §2.1 里
+`count(kube_statefulset_replicas{label_ai_cubestack_io_dev_environment!=""})` 那种直接过滤的写法
+会返回空(其 recording rules 实际并未这么写, 是散文与实现的偏差)。
+
+#### 8.4 node-exporter 的 `--collector.infiniband` 加上去了, RDMA 指标还是空
+
+**症状:** `node_infiniband_*` 一个都没有, RDMA dashboard 无数据。
+
+**根因(两种):**
+1. 覆盖 `extraArgs` 时**只写了新增的那一条** —— Helm 对 **list 是整体替换不是合并**,
+   chart 默认的两条 filesystem 过滤被一起删掉(这个会顺带让 `node_filesystem_*` 指标爆炸);
+   反过来说, 如果连默认两条都没了, 说明覆盖写法本身就错了。
+2. 误以为要额外挂载 `/sys/class/infiniband` —— **不需要**: chart 已把宿主 `/sys` 挂到 `/host/sys`
+   并传了 `--path.sysfs=/host/sys`, infiniband collector 走的就是 sysfsPath。
+   (与 §三.6/`10_rdma` 那次"无 IB 设备节点挂 `/sys/class/infiniband` 报 operation not permitted"
+   是两回事, 别混。)
+
+**解法:** 覆盖 `extraArgs` 时把 chart 默认两条**原样带上**, 第三条才是 `--collector.infiniband`。
+`08_prometheus.sh` 已如此实现并注释了原因。
+
+#### 8.5 BMC exporter 起来了、target 是 up, 但指标全空
+
+> ⚠ **先破除一个误导: `up{job="bmc-oem-exporter"} == 1` 不代表 BMC 是通的。**
+> 该 exporter 走 `/probe?target=<ip>` 的**多目标**模式 —— 目标 BMC 不可达/凭据错时,
+> 它只是返回"探测失败", **exporter 自己仍然 `up=1`**。真正的目标健康在
+> **`bmc_pcie_scrape_success`**(0/1, 每 BMC 一条)。
+> (`idrac-exporter` 走 `/metrics?target=` 则是另一种: 目标不可达时**抓取直接失败 → up=0**。
+>  两个 exporter 模式不同, 别用同一套判断。)
+>
+> 2026-09-20 实测: 指向不可达 IP 时 4 条 `up` 序列里有 2 条为 1,
+> 而 `bmc_pcie_scrape_success` 全为 0 —— **只看 `up` 会得到假绿灯**。
+
+**症状:** exporter pod Running, `up` 有值, 但 BMC 相关指标没有数据
+(或 `bmc_pcie_scrape_success == 0`)。
+
+**根因(按概率):**
+1. **`BMC_HOSTS` 里的 IP 不是该环境的真实 BMC** —— 主机 ↔ BMC **不是按末位对应的**,
+   按规律推会连到别的机器/连不通;
+2. 节点到 BMC 管理网段不通(部署机探不到 BMC 网段, 必须在**节点侧**测);
+3. `BMC_HOSTS` 没设或口令错 → 早已被模块的硬校验拦下, 不会走到这一步
+   (但**口令错但格式对**不会被拦, 表现为 scrape 失败 —— 这时看 exporter 日志的 401);
+4. ScrapeConfig 的 `release` 标签与 Prometheus CR 的 `scrapeConfigSelector` 不匹配
+   → **ScrapeConfig 根本不生效**(但不会报错)。
+
+**解法/排查:**
+```bash
+kubectl -n monitoring get scrapeconfig | grep bmc                  # 有对象吗
+kubectl -n monitoring get deploy | grep bmc                        # 两个 deployment 都 Ready 吗
+# 查**目标层**健康, 而不是 up:
+#   bmc_pcie_scrape_success == 0        → BMC 没通/凭据错
+#   up{job="idrac-exporter"} == 0       → 同上(这个 exporter 的抓取本身就失败)
+kubectl -n monitoring logs deploy/cubestack-bmc-exporter-bmc-oem-exporter | tail -20   # 看 401/timeout
+# 从**节点**侧测 BMC 可达性(不是从部署机):
+ssh <master> "timeout 5 bash -c '</dev/tcp/<BMC_IP>/443' && echo ok"
+```
+模块部署时会自动从**节点侧**探测每个 BMC 的 443 并给出告警 —— 出现告警就别急着看 dashboard。
+
+#### 8.6 新增配置项后, 宿主机 `check-modules.sh` 通过、容器内报 `TOGGLE 未声明`
+
+**症状:** 加了一个带 `TOGGLE` 的新模块, 宿主机 `bash deployments/scripts/tools/check-modules.sh` 全绿,
+同步进部署容器后容器内校验报 `TOGGLE=XXX 未在 cluster.conf.example 中声明默认值`。
+
+**根因:** `tools/sync-to-container.sh` 的默认同步范围**刻意不含 `deployments/config/`**
+(避免覆盖容器里那份**环境实际**的 `cluster.conf`)—— 但 `cluster.conf.example` 是**模板不是环境配置**,
+它不跟着同步就会与源码脱节, 而 `check-modules.sh` 的 TOGGLE 检查读的正是模板。
+
+**解法:** 该工具的 `DEFAULT_PATHS` 已加入 `deployments/config/cluster.conf.example`(2026-09-20)。
+**live `cluster.conf` 仍然不参与同步** —— 那才是各环境独立的配置。
+存量容器若仍报此错, 手工补一次:
+```bash
+docker cp deployments/config/cluster.conf.example <容器>:/opt/cubestack-installer/deployments/config/
+```
+
+#### 8.7 大 dashboard 导入失败: `metadata.annotations: Too long: may not be more than 262144 bytes`
+
+**症状:** 11 个 Grafana 看板里**只有 `node-exporter-1860` 一个**导入失败(其余 10 个正常),
+`kubectl get cm -l grafana_dashboard=1` 少一个, 但 Grafana 里只表现为"少了那个看板"。
+
+**根因:** 客户端 `kubectl apply` 会把**整个配置**存进
+`kubectl.kubernetes.io/last-applied-configuration` 注解, 该注解有 **256KiB 硬上限**。
+`node-exporter-1860.json` 460KB → 生成的 ConfigMap 约 522KB → 必超。
+**与 ConfigMap 自身 1MiB 的容量上限无关** —— 卡的是注解, 不是对象大小, 所以"才 522KB 怎么会超"
+的直觉是错的。只有它失败正是因为只有它过了这条线。
+
+**解法:** 大对象一律用 **`kubectl apply --server-side`**(服务端 apply 不走该注解):
+
+```bash
+kubectl create configmap <名> -n monitoring --from-file=<文件> --dry-run=client -o yaml \
+  | kubectl apply --server-side -f -
+```
+`08_prometheus.sh` 的看板块已改用 `--server-side`(实机验证 522KB 正常创建, label 与 data 完整)。
+
+**通用教训:** 任何可能超过 256KiB 的 ConfigMap / Secret 都不要用客户端 apply。
+另外, **模块里管道 apply 时别把 stderr 全 `2>/dev/null` 吞掉** —— 这条错误信息就这么被吞过,
+只剩一句"导入失败", 排查时得手工重放才知道是注解超限。
+
+#### 8.8 `--steps prometheus` 每次都报 "operator 180s 内未 Ready", 但 operator 明明是 Running
+
+**症状:** 模块第 4 步稳定输出 `⚠ operator 180s 内未 Ready`, 而 `kubectl -n monitoring get deploy`
+显示 operator 1/1 Running 已很久。
+
+**根因:** 模块原来查的是 `rollout status deploy ${RELEASE}-operator`, 但 chart 生成的
+operator Deployment 名是 **`<release>-kube-prome-operator`**(kube-prometheus-stack 对子组件
+加了 `kube-prome-` 中缀)。名字对不上 → `NotFound` → `rollout status` 恒非零 → 恒报未就绪。
+**这条告警从来没成功过**, 属于"永久假告警"。
+
+**解法:** 不硬编码名字, 按名字动态查(与 `31_cubepilot.sh` 同款):
+```bash
+_OP_DEPLOY="$( (SSH "${K}" -n "${NS}" get deploy -o name) | sed -n 's#.*/##p' | grep -m1 'operator' )"
+```
+已在 `08_prometheus.sh` 修复(2026-09-20)。
+
+**为什么要修这种"无害"的假告警:** 它会训练所有人忽略这条告警 —— 真出问题时没人看。
+排查成本最低的正是这类"一直都有, 不用管"的输出。
+
+---
+
 ## 四、离线部署
 
 ### 1. 【单机/重装】`Drain node` → `Remove-node | List nodes` 报 `error: stat /etc/kubernetes/admin.conf: no such file or directory`

@@ -1,0 +1,9 @@
+# 本目录由 tools/observability/fetch-observability-assets.sh 自动拉取, 请勿手工编辑。
+# 升级方式: 重跑该脚本后提交本目录的变更。
+source_repo: suanova/cubestack
+source_ref: main
+source_commit: b8550305e68ef144d0a95b5a8beae5c21f1447b3
+fetcher: gh
+recording_rules: 6
+dashboards: 11
+fetched_at_utc: 2026-09-20T03:50:01Z

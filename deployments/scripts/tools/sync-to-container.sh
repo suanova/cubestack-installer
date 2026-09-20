@@ -8,7 +8,7 @@
 #   sync-to-container.sh                 # 全量同步 scripts/ 到容器
 #   sync-to-container.sh --check         # 只显示将同步的文件数(不实际同步)
 #   sync-to-container.sh <文件或目录...>  # 只同步指定路径(相对 deployments/ 或仓库根)
-# 数据源: 无(cluster.conf 不参与同步 —— 各环境配置不同, 手工维护)
+# 数据源: 无(live cluster.conf 不参与同步 —— 各环境配置不同, 手工维护; 模板 cluster.conf.example 会同步)
 # ============================================================
 set -euo pipefail
 
@@ -18,7 +18,11 @@ REPO_ROOT="$(cd "${TOOL_DIR}/../../.." && pwd)"
 CONTAINER="${SYNC_CONTAINER:-cubestack-install}"
 REMOTE_BASE="/opt/cubestack-installer"
 
-# 默认同步范围: 部署脚本全集(cluster.conf 除外 —— 各环境配置独立)
+# 默认同步范围: 部署脚本全集
+#   ⚠ **cluster.conf 不参与同步**(各环境配置独立, 手工维护);
+#     但 **cluster.conf.example 要同步** —— 它是模板不是环境配置, 且 check-modules.sh 的
+#     "TOGGLE 变量已声明"检查读的就是它。不同步的话, 每次新增配置项都会出现
+#     "宿主机 check 通过、容器内 check 报 TOGGLE 未声明"的假故障(2026-09-20 实际遇到)。
 DEFAULT_PATHS=(
     "deployments/scripts/lib-common.sh"
     "deployments/scripts/lib-module.sh"
@@ -26,6 +30,7 @@ DEFAULT_PATHS=(
     "deployments/scripts/modules"
     "deployments/scripts/tools"
     "deployments/cubestack-addon"
+    "deployments/config/cluster.conf.example"
 )
 
 say()  { echo -e "\033[36m→  $*\033[0m"; }

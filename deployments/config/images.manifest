@@ -30,12 +30,12 @@
 #     命名(如 registry.k8s.io/kube-state-metrics_kube-state-metrics_v2.20.0.tar)时,
 #     各部署模块原有的 *<repo>_<tag>.tar 通配仍然命中, 无需改动匹配逻辑。
 #
-# ── 特例: "上游就是本台 Harbor"的组(metax-gpu / cubepilot)**默认不镜像** ──
+# ── 特例: "上游就是本台 Harbor"的组(metax-gpu / cubepilot / bmc)**默认不镜像** ──
 #   它们本就在本台 Harbor 上(metax/ 与 suanova/ 项目), "集群不访公网"的目标**已经达成**
 #   —— 对应部署模块现在就直接从那些项目拉取, 无需任何改动。再复制一份到 mirrors/ 只会
 #   多占一份存储(实测 8.4 GB)且每次版本升级都要重跑, 故默认跳过。
 #   判据是推导的(注册域 == HARBOR_MIRROR_REGISTRY), 不是硬编码名单。
-#   真要那份副本: harbor-sync-images.sh --include-same-harbor --group metax-gpu,cubepilot
+#   真要那份副本: harbor-sync-images.sh --include-same-harbor --group metax-gpu,cubepilot,bmc
 #   (它们仍列在本清单里, 因为清单同时承担"本仓库用到哪些镜像"的登记职责。)
 #
 # ── 校验 ──────────────────────────────────────────────────
@@ -181,6 +181,19 @@ cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-openclaw:${CUBEPIL
 cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-operator:${CUBEPILOT_IMAGE_TAG}
 cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-api:${CUBEPILOT_IMAGE_TAG}
 cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-web:${CUBEPILOT_IMAGE_TAG}
+
+# ------------------------------------------------------------
+# [group: bmc] BMC 带外监控(bmc-oem-exporter + idrac-exporter)
+#   目录: deployments/offline-files/bmc/
+#   ⚠ **本组默认不镜像到 mirrors/**: 与 cubepilot 同理 —— 上游就是本台 Harbor 的 suanova
+#     项目, 部署模块(33_bmc_exporter)直接从那里拉取到本地 tar 再推入集群内置 registry,
+#     再复制一份到 mirrors/ 只多占存储且每次镜像更新都要重跑。
+#   ⚠ 两个 exporter 上游只发 :latest(main 线), **会跟上游漂移** → 33_bmc_exporter 用
+#     <tar>.digest 边车文件比对私服 digest, 未变才跳过下载(不白传)。
+#   ⚠ cubestack-bmc-exporter-chart 是 **OCI chart 制品**, 不是镜像, 不在此清单(helm pull 直接取)。
+# ------------------------------------------------------------
+bmc  ${BMC_EXPORTER_HARBOR}/${BMC_EXPORTER_PROJECT}/bmc-oem-exporter:${BMC_EXPORTER_IMAGE_TAG}
+bmc  ${BMC_EXPORTER_HARBOR}/${BMC_EXPORTER_PROJECT}/idrac-exporter:${BMC_EXPORTER_IMAGE_TAG}
 
 # ------------------------------------------------------------
 # [group: metax-gpu] 沐曦 GPU Operator
