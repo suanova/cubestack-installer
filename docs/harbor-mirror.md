@@ -173,6 +173,11 @@ bash ./check-image-manifest.sh --kubespray    # 额外: 与 PRELOAD_IMAGE_PATTER
 bash ./check-image-manifest.sh --harbor       # 额外: 比对 Harbor 现状, 列出漂移项
 ```
 
+> ⚠ 第 ④ 项是**拼路径**检查: 只验证"能从 group 推出离线目录路径",**不检查目录是否存在**
+> (目录要跑过 `harbor-save-images.sh` 才出现, 拿存在性当硬门禁会误伤部署机/CI)。
+> 目录与 README 的真实就位情况由 **④b 软检查**提示(只 `warn`, 不影响退出码),
+> 规则见 [`scripts-development-spec.md` §2.5](scripts-development-spec.md)。
+
 `--kubespray` 那一项**真的抓到过问题**: `nginx` 曾被放进 `k8s-base` 组, 而它不在
 `tools/offline/trim-offline-files.sh` 的 `PRELOAD_IMAGE_PATTERNS` 里 → 备料后会被 trim
 静默删掉。两个列表**必须同步**。

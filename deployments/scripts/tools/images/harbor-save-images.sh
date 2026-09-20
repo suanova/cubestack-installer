@@ -178,7 +178,13 @@ while IFS=$'\t' read -r group src dest name up_ref; do
     #   而 lib-common 的 tar_first_image_tag 正是读 RepoTags 来识别 tar 内容(内容兜底匹配、
     #   ensure_registry_nginx 等都依赖它)。这里填**上游 ref**, 与 docker save 产出的 tar 一致。
     _src_ref="docker://${src}"
-    _dst_ref="docker-archive:${dest}:${up_ref}"
+    # ⚠ 先写临时文件、成功后再 mv 落位(踩过, 会真丢东西):
+    #   ① skopeo **不能覆盖已存在的 docker-archive**("doesn't support modifying existing images"),
+    #      所以 --force 想覆盖时, 目标路径必须不存在 —— 直接写 ${dest} 会连试 3 次全失败;
+    #   ② 失败分支**绝不能删 ${dest}** —— 那是上一轮留下的好 tar(实测丢过一个 226MB 的镜像)。
+    _dst_tmp="${dest}.part"
+    _dst_ref="docker-archive:${_dst_tmp}:${up_ref}"
+    rm -f "${_dst_tmp}" 2>/dev/null || ${_sudo} rm -f "${_dst_tmp}" 2>/dev/null || true
     _ok=0
     for _try in 1 2 3; do
         if skopeo copy --quiet "${SRC_TLS[@]}" "${ARCH[@]}" \
@@ -195,10 +201,11 @@ while IFS=$'\t' read -r group src dest name up_ref; do
         err "  保存失败: ${src}"
         err "    原因: $(tail -1 /tmp/.harbor-save-err.$$ 2>/dev/null | head -c 300)"
         FAILED=$((FAILED + 1)); FAIL_LIST+=("${src}")
-        rm -f "${dest}"; rm -f /tmp/.harbor-save-err.$$
+        rm -f "${_dst_tmp}" /tmp/.harbor-save-err.$$    # 只删本次的临时件, 不动已有 tar
         continue
     fi
     rm -f /tmp/.harbor-save-err.$$
+    mv -f "${_dst_tmp}" "${dest}" 2>/dev/null || ${_sudo} mv -f "${_dst_tmp}" "${dest}"
     chmod 644 "${dest}" 2>/dev/null || ${_sudo} chmod 644 "${dest}" 2>/dev/null || true
     ok "  已保存: $(du -h "${dest}" 2>/dev/null | awk '{print $1}')"
     SAVED=$((SAVED + 1))

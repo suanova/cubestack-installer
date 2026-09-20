@@ -7,7 +7,7 @@
 #   ① 清单能被解析, 所有 ${VAR} 都能展开(变量未声明/为空 → 报错)
 #   ② 每条 ref 全限定(带注册域), 且能推出合法 Harbor 目标路径
 #   ③ 无重复 ref(同一镜像声明两次 → 同步两遍)
-#   ④ group 都有对应的离线目录(拼得出来路径)
+#   ④ group 能推出离线目录路径(硬判); 目录/README 是否就位只做提示(④b, warn, 不影响退出码)
 #   ⑤ [--kubespray] k8s-base 组与 tools/offline/trim-offline-files.sh 的 PRELOAD_IMAGE_PATTERNS
 #      交叉核对 —— 两者不一致会导致镜像被裁掉(真实事故类型: 清单加了镜像却被 trim 删除)
 #   ⑥ [--harbor] 联网比对 Harbor 现状: 列出"清单有但 Harbor 没有 / tag 不一致"的漂移项
@@ -91,13 +91,44 @@ else
     ok "③ 无重复 ref"
 fi
 
-# ---------- ④ group 目录 ----------
+# ---------- ④ group 目录(硬判: 拼得出路径) ----------
 N_DIR=0
 while read -r g; do
     d="$(image_group_dir "${g}")"
     [ -n "${d}" ] || { ck "④ group 无对应目录: ${g}"; N_DIR=$((N_DIR+1)); }
 done < <(image_groups)
-[ "${N_DIR}" = "0" ] && ok "④ 全部 group 均有对应离线目录"
+[ "${N_DIR}" = "0" ] && ok "④ 各 group 均能推出离线目录路径"
+
+# ---------- ④b 目录/README 就位情况(软检查: 只 warn, 不影响退出码) ----------
+# 硬判据只有"拼得出路径" —— 目录是**备料后才出现**的(联网机跑 harbor-save-images.sh),
+# 部署机/CI 上不一定有, 拿存在性当硬门禁会误伤。但"新模块首次就得建目录 + 写 README"
+# 是强制规则(docs/scripts-development-spec.md §2.5), 漏了没有任何脚本会报错, 所以这里提示。
+# ⚠ 目录必须带 README 才受 git 跟踪: .gitignore 忽略 offline-files/ 下所有文件, 只放行 */README.md;
+#   空目录 git 存不下 —— 不写 README 的新目录, 提交后就消失了。
+NO_DIR=""; NO_README=""
+while read -r g; do
+    # k8s-base / ceph 走 kubespray 的 images/ 目录(节点预加载, 由 kubespray 工具链管), 不套本规则
+    case "${g}" in k8s-base|ceph) continue ;; esac
+    d="$(image_group_dir "${g}")"
+    rel="${d#"${IM_REPO_ROOT}"/}"
+    if [ ! -d "${d}" ]; then
+        NO_DIR="${NO_DIR} ${g}"
+        continue
+    fi
+    if git -C "${IM_REPO_ROOT}" rev-parse --git-dir >/dev/null 2>&1; then
+        [ -n "$(git -C "${IM_REPO_ROOT}" ls-files -- "${rel}/README.md" 2>/dev/null)" ] || NO_README="${NO_README} ${g}"
+    elif [ ! -f "${d}/README.md" ]; then
+        NO_README="${NO_README} ${g}"
+    fi
+done < <(image_groups)
+if [ -z "${NO_DIR}" ] && [ -z "${NO_README}" ]; then
+    ok "④b 全部 group 的离线目录与 README 均已就位"
+else
+    warn "④b 离线资产未就位(仅提示, 不影响退出码):"
+    [ -n "${NO_DIR}" ] && warn "     无目录  :${NO_DIR}    → 备料(联网机): harbor-save-images.sh --group <组>"
+    [ -n "${NO_README}" ] && warn "     无 README:${NO_README}    → 照抄 offline-files/kube-state-metrics/README.md 并 git add"
+    say  "     规则见 docs/scripts-development-spec.md §2.5(新增模块首次即建目录+README)"
+fi
 
 # ---------- ⑤ kubespray PRELOAD_IMAGE_PATTERNS 交叉核对 ----------
 if [ "${DO_KUBESPRAY}" = "1" ]; then
