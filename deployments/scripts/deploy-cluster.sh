@@ -69,6 +69,7 @@ usage() {
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           local_path(可选) k8s_registry 组件(全部可单独部署的组件见下方"组件单独部署"清单)
           自研: cubepilot cubestack_apps(占位)
+          监控: prometheus(kube-prometheus-stack + CubeStack 规则/看板) bmc_exporter(BMC 带外监控, 默认关)
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
@@ -140,7 +141,8 @@ $(_component_meta_list stub)
   sudo ./deploy-cluster.sh --enable lws             # 只把 LWS_ENABLED=true 写入 cluster.conf(不部署)
   sudo ./deploy-cluster.sh --steps prometheus      # 单独装/重跑 Prometheus(不动基座; 接入自动处理)
   sudo ./deploy-cluster.sh --steps prometheus --fresh   # 同上, 且清断点状态(REPEAT:0 模块重跑用)
-  sudo ./deploy-cluster.sh --steps verify_prometheus    # 只验证 Prometheus
+  sudo ./deploy-cluster.sh --steps verify_prometheus    # 只验证 Prometheus(含 CubeStack 规则/看板/各 exporter)
+  sudo ./deploy-cluster.sh --steps bmc_exporter    # 单独装 BMC 带外监控(需先配 BMC_HOSTS/USERNAME/PASSWORD)
   sudo ./deploy-cluster.sh --with-scale             # 扩容: 仅 k8s_scale(先登录 master 核对集群→diff 新节点→只动新节点)
   sudo ./deploy-cluster.sh --with-scale --only worker02   # 扩容指定节点(--only 也先经集群核对)
   sudo ./deploy-cluster.sh --only worker02 --with-scale

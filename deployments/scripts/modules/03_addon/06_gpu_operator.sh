@@ -28,8 +28,11 @@
 #   · master 节点: 用 mx-smi 在宿主机检测 GPU 卡; 检测到 GPU 的 master 自动移除 control-plane 污点并
 #     uncordon(使其可调度, 供 PD 分离等 pod 使用); 无 GPU 的 master 保持默认不可调度。
 #   · 验证: tools/k8s/verify-metax-gpu.sh 或 --steps verify_metax_gpu(列各节点 GPU 清单/汇总)。
+#   · ★ 2026-09-20: 默认给 ClusterOperator 打开 spec.dataExporter.deploy=true(起 mx-exporter
+#     DaemonSet, 供 Prometheus 抓 MetaX GPU 指标, 对应 observability §7.1)。开关 MX_EXPORTER_ENABLED。
+#     08_prometheus 会再建一个 ServiceMonitor 把它接入 Prometheus。
 #   · 参考: Kubernetes 沐曦GPU Operator部署文档(metax-gpu-k8s 0.15.3, MXMACA 3.7.0.7)
-# 数据源: cluster.conf (GPU_OPERATOR_ENABLED / METAX_* / REGISTRY_* / NODES / SSH_KEY_NAME)
+# 数据源: cluster.conf (GPU_OPERATOR_ENABLED / METAX_* / MX_EXPORTER_ENABLED / REGISTRY_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --enable gpu_operator  或  GPU_OPERATOR_ENABLED=true
 # ============================================================
 set -euo pipefail
@@ -393,6 +396,16 @@ for _res in "deployment ${METAX_RELEASE_NAME}-metax-operator" "job metax-pre-del
 done
 SSH "${K} delete clusterrolebinding metax-operator-rolebinding metax-gpu-scheduler --ignore-not-found >/dev/null 2>&1" || true
 sleep 3
+# ★ 2026-09-20: 打开 dataExporter(mx-exporter DaemonSet), 供 Prometheus 抓 GPU 指标(§7.1)。
+#   为什么走 helm value 而不是 patch CR: 本模块每次部署都 helm upgrade, CR 会被**重新渲染**;
+#   patch 出来的 spec 在下次 upgrade 时被冲回 chart 默认的 false, 于是"装完好了, 升级后又没了"。
+#   设成 helm value 则每次都带上, 与 helm upgrade 天然一致。
+#   (08_prometheus 里另有一次 patch 兜底, 用于"用旧版脚本装过、没带这个 value"的集群。)
+_MX_EXPORTER_SET=()
+if [ "${MX_EXPORTER_ENABLED:-true}" = "true" ]; then
+    _MX_EXPORTER_SET=( --set "dataExporter.deploy=true" )
+    say "  启用 MetaX dataExporter(mx-exporter; 置 MX_EXPORTER_ENABLED=false 可关)"
+fi
 # 说明: 使用修复过的 chart(已补 deployment namespace + openshift.deploy=false);
 # helm 自动安装 crds/ 目录的 CRD、自动把资源放进 release 命名空间(不再需要手工 CRD/kubectl apply)。
 helm upgrade --install "${METAX_RELEASE_NAME}" "${CHART_DIR}" \
@@ -406,6 +419,7 @@ helm upgrade --install "${METAX_RELEASE_NAME}" "${CHART_DIR}" \
     --set "maca.payload.images[0]=${METAX_MACA_IMAGE}" \
     --set "vendor.vendorID=" --set "vendor.driver=" --set "vendor.domain=" \
     --set "vendor.charDev=" --set "vendor.virtDriver=" \
+    ${_MX_EXPORTER_SET[@]} \
     --wait --timeout 300s \
     || warn "  helm 安装/等待超时(检查 --set 与 chart; 资源可能已创建, 继续等待 DS)..."
 

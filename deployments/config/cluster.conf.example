@@ -103,6 +103,28 @@ PROMETHEUS_IMAGE_KSM="${PROMETHEUS_IMAGE_KSM:-v2.20.0}"            # kube-state-
 PROMETHEUS_IMAGE_GRAFANA="${PROMETHEUS_IMAGE_GRAFANA:-13.2.1-distroless}"
 PROMETHEUS_IMAGE_SIDECAR="${PROMETHEUS_IMAGE_SIDECAR:-2.11.2}"    # grafana k8s-sidecar
 PROMETHEUS_IMAGE_CERTGEN="${PROMETHEUS_IMAGE_CERTGEN:-1.8.8}"     # webhook 证书生成 Job
+# chart 目录(留空用仓库内 vendored 路径; 离线包把 chart 放别处时用这个覆盖)
+PROMETHEUS_CHART_DIR="${PROMETHEUS_CHART_DIR:-}"
+# ---- CubeStack 可观测性(recording rules + dashboards + mx-exporter; ★ 2026-09-20) ----
+# 需求源: cubestack 源仓库 observability/docs/installer-requirements.md
+# 本仓库实现说明与踩坑: docs/prometheus-observability.md
+# 抓取/评估间隔(installer-requirements §1.4)
+PROMETHEUS_SCRAPE_INTERVAL="${PROMETHEUS_SCRAPE_INTERVAL:-30s}"
+PROMETHEUS_EVALUATION_INTERVAL="${PROMETHEUS_EVALUATION_INTERVAL:-60s}"
+# Grafana 管理员口令(**必填**, 无默认值):
+#   · 未设置/为空/仍为 CHANGE_ME → 08_prometheus 模块在 helm 之前**硬失败退出**;
+#   · 不留默认值是有意的 —— helm 在未传时会随机生成口令存进 secret, 用户无法预知(实测因此手工重置过);
+#   · 口令只经临时 values 文件(600, 用后即删)传给 helm, 不进 argv(ps 可见)。
+GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
+GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-}"
+# observability 资产目录(recording rules + dashboards), 留空走三级回退:
+#   ① 本变量(非空即用) → ② /opt/cubestack/observability(离线包约定, 见 §5) → ③ 仓库内 vendored
+#     (deployments/cubestack-addon/observability/cubestack/)
+# 刷新资产: tools/observability/fetch-observability-assets.sh [--dir /opt/cubestack/observability]
+CUBESTACK_OBSERVABILITY_DIR="${CUBESTACK_OBSERVABILITY_DIR:-}"
+# MetaX GPU mx-exporter(§7.1): 打开 ClusterOperator 的 dataExporter 并建 ServiceMonitor。
+# true 时若集群没有 MetaX ClusterOperator 会自动跳过(未装 GPU Operator 时正常)。
+MX_EXPORTER_ENABLED="${MX_EXPORTER_ENABLED:-true}"
 CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # Ceph 存储底座(P1; 见 4.3)
 CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI RBD/RGW/CephFS(依赖 CEPH_ENABLED; 见 4.3)
 # CEPH_FALLBACK_TO_LOCALPATH: CEPH_ENABLED=true 但 ceph 安装条件不足(manifest/裸盘/lvm2/
@@ -119,6 +141,7 @@ MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多�
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(Device Plugin, 暴露 RDMA 网卡为扩展资源; 见 4.8)
 CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # CubeStack 自研组件(占位; 见 4.6)
 CUBEPILOT_ENABLED="${CUBEPILOT_ENABLED:-true}"          # CubePilot AI Agent 平台(自研; 见 4.6; 私服公开只读免凭据, 同步后统一经内置 registry 部署)
+BMC_EXPORTER_ENABLED="${BMC_EXPORTER_ENABLED:-false}"   # BMC 带外监控(bmc-oem-exporter + idrac-exporter; **默认关**: 需真实 BMC IP/凭据; 见 4.9)
 # ---- 4.7 Multus CNI(容器多网卡; 详见 deployments/cubestack-addon/multus/CUBESTACK.md) ----
 # 离线镜像: 联网机 docker save ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
 #   → deployments/offline-files/multus/multus-cni.tar → 16_multus 模块推送进内置 registry
@@ -763,6 +786,46 @@ CUBEPILOT_LLM_SECRET="${CUBEPILOT_LLM_SECRET:-cubepilot-llm}"        # Secret �
 CUBEPILOT_PLATFORM_CRDS_ENABLED="${CUBEPILOT_PLATFORM_CRDS_ENABLED:-false}"
 CUBEPILOT_PLATFORM_CRDS_DIR="${CUBEPILOT_PLATFORM_CRDS_DIR:-${CUBEPILOT_CHART_DIR}/cubestack-crds}"
 CUBEPILOT_WAIT_SECONDS="${CUBEPILOT_WAIT_SECONDS:-300}"              # helm --wait / rollout 等待上限(首次拉镜像较慢, 可调大)
+
+
+# ---------------- 4.9 BMC 带外监控(bmc-oem-exporter + idrac-exporter) ----------------
+# 需求源: cubestack 源仓库 observability/docs/installer-requirements.md §7.2
+# 交付形态: helm chart cubestack-bmc-exporter-chart(Deployment×2 + Service×2 + ScrapeConfig×2
+#   + Secret×2), 与两个 exporter 镜像均由 CI 发布到私服 Harbor 的 suanova 项目(公开只读)。
+# ⚠ 默认关闭: 需要**真实 BMC 管理网 IP 与凭据**才能用; 没填就装会得到"target up 但指标为空"。
+#
+# ★ 双模式(BMC_EXPORTER_MODE; 默认 online, 与 CUBEPILOT 同款语义):
+#   **两种模式的部署路径完全相同**: 节点只从集群内置 registry 拉镜像, 部署机 helm 装本地 chart tgz。
+#   online  = 先从私服同步制品(chart → cubestack-addon/bmc-exporter/, 镜像 → offline-files/bmc/*.tar),
+#             再推入内置 registry, 之后与 offline 同路部署
+#   offline = 不碰外网, 直接用盘上已有制品推入内置 registry 后部署
+#   ⇒ online 跑过一次后制品已在盘上, **改 BMC_EXPORTER_MODE=offline 即可切纯离线**。
+#   ⇒ online 在私服不可达时**自动降级**: 拉不到就退回本地已有制品(告警不中断); 本地也没有才报错。
+BMC_EXPORTER_MODE="${BMC_EXPORTER_MODE:-online}"                     # online(先从私服同步制品)|offline(只用本地制品)
+BMC_EXPORTER_HARBOR="${BMC_EXPORTER_HARBOR:-harbor.isuanova.com}"    # 私服域名(与 cubepilot/metax 同源)
+BMC_EXPORTER_PROJECT="${BMC_EXPORTER_PROJECT:-suanova}"              # Harbor 项目名(也是内置 registry 下的仓库前缀)
+BMC_EXPORTER_CHART_VERSION="${BMC_EXPORTER_CHART_VERSION:-1.0.0}"    # chart 版本(OCI tag)
+BMC_EXPORTER_IMAGE_TAG="${BMC_EXPORTER_IMAGE_TAG:-latest}"           # 镜像 tag(上游 main 线只发 latest; 用 digest 边车防漂移)
+BMC_EXPORTER_RELEASE="${BMC_EXPORTER_RELEASE:-cubestack-bmc-exporter}"  # helm release 名
+BMC_EXPORTER_NAMESPACE="${BMC_EXPORTER_NAMESPACE:-monitoring}"       # ⚠ 必须与 Prometheus 同 ns, ScrapeConfig 才会被选中
+# ---- BMC 目标与凭据(**必填**, 无默认值) ----
+# ⚠ BMC IP 必须**按环境实际确认**: 主机 ↔ BMC 不是按末位对应的关系(源仓库 docs/bmc-progress.md 有记录),
+#   按规律推会连到别的机器 → exporter up 但指标全是空/串味, 且极难发现。
+# 模块会从节点侧探测这些 IP 的 443 端口, 不可达时给出告警与排查方向(可用 BMC_EXPORTER_SKIP_REACHABILITY=true 跳过)。
+BMC_HOSTS="${BMC_HOSTS:-}"                                           # BMC 管理 IP 列表, 空格或逗号分隔; 例: "10.6.2.14 10.6.2.18"
+BMC_USERNAME="${BMC_USERNAME:-}"                                     # BMC 用户名(通常 root)
+BMC_PASSWORD="${BMC_PASSWORD:-}"                                     # BMC 口令; 未设置/为空/仍为 CHANGE_ME → 模块硬失败退出
+BMC_TLS_INSECURE="${BMC_TLS_INSECURE:-true}"                         # true=跳过 BMC 自签证书校验; 生产应配 CA 并置 false
+# ---- 调度 ----
+# 钉到指定节点(如 control-plane): 填节点名(kubernetes.io/hostname), 留空=由调度器决定。
+# ⚠ 钉节点时**必须**同时容忍 control-plane 污点, 否则 pod 永远 Pending(2026-09-14 实测) ——
+#   下面这个开关默认 true 就是干这个的, 不要关。
+BMC_EXPORTER_NODE_SELECTOR="${BMC_EXPORTER_NODE_SELECTOR:-}"
+BMC_EXPORTER_TOLERATE_CONTROL_PLANE="${BMC_EXPORTER_TOLERATE_CONTROL_PLANE:-true}"
+BMC_EXPORTER_WAIT_SECONDS="${BMC_EXPORTER_WAIT_SECONDS:-300}"        # helm --wait / rollout 等待上限
+BMC_EXPORTER_OFFLINE_DIR="${BMC_EXPORTER_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/bmc}"   # 镜像 tar 目录
+BMC_EXPORTER_CHART_DIR="${BMC_EXPORTER_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/bmc-exporter}"  # chart 目录
+# 本机无外网 / 隔离集群: 置 offline 并在联网机预置制品(tools/images/bmc-save-images.sh), 或直接保持 ENABLED=false。
 
 
 # ════════════════════════════════════════════════════════════
