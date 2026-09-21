@@ -163,17 +163,26 @@ if [ -d /sys/class/infiniband ] && [ -n "$(ls -A /sys/class/infiniband 2>/dev/nu
         echo "  ${mark} ${dev}  [${layer:-未知}]  ${rate:-速率未知}  ${state:-状态未知}  verbs=[${verbs:-无}]"
     done
     echo "  ⚠ 网卡名(如 ibs2/manage0)在 pod 内**看不到**: 容器有自己的 net namespace, /sys/class/net 只有 pod 自己的网卡。"
-    echo "    要网卡名请到节点上跑: rdma link show | ip -br addr; 或看设备插件 ConfigMap:"
+    echo "    设备状态/速率看上面即可(容器内可读); 要网卡名请到节点上跑: rdma link show | ip -br addr; 或看设备插件 ConfigMap:"
     echo "    kubectl -n kube-system get cm rdma-devices -o go-template='{{index .data \"config.json\"}}'"
 else
     echo "  (无) 本节点没有 RDMA HCA(或容器内看不到 sysfs)"
+fi
+echo
+echo "[RDMA 链路 rdma link show(容器 netns 视角)]"
+if command -v rdma >/dev/null 2>&1; then
+    rdma link show 2>&1 | sed 's/^/  /' | head -10
+    echo "  ⚠ 列出的是本 netns 的**全部** HCA(含未授予本容器的): 真正能用的只有上面 ★ 标记的设备。"
+    echo "    网卡名字段(netdev)属宿主 netns, 此处为空 —— 要网卡名到节点上跑 rdma link show。"
+else
+    echo "  (缺 rdma 命令: 当前镜像未含 iproute2-rdma —— 用 ibv_devinfo 看设备; 节点上有 rdma link show)"
 fi
 echo
 echo "[网络接口]"
 ip -br link show 2>/dev/null | sed 's/^/  /' | head -12 || echo "  (ip 不可用)"
 echo
 echo "[工具在位清单]"
-for t in tcpdump ip ss ethtool mtr ping nslookup curl nc socat iperf3 ibv_devices ibv_devinfo ib_write_bw ib_read_bw ib_write_lat; do
+for t in tcpdump ip ss ethtool mtr ping nslookup curl nc socat iperf3 rdma ibv_devices ibv_devinfo ib_write_bw ib_read_bw ib_write_lat; do
     if command -v "$t" >/dev/null 2>&1; then printf "  ok  %s\n" "$t"; else printf "  --  %s (缺)\n" "$t"; fi
 done
 echo
@@ -191,6 +200,7 @@ echo "  ip addr / ip route / ss -tunap     # 地址/路由/连接"
 echo "  ethtool -S eth0 / ethtool eth0     # 网卡统计/速率"
 echo "  mtr -rw <host> / ping <host>       # 链路质量"
 echo "  ibv_devinfo / ibv_devices          # RDMA 卡与端口(verbs)"
+echo "  rdma link show / rdma dev          # RDMA 链路状态(state/physical_state)"
 echo "  ib_write_bw -d mlx5_0 -a           # 带宽实测(需对端服务端起 ib_write_bw)"
 echo "================================================================="
 # 容器启动时带 --keep-running: 打印完视图后常驻(诊断 pod 要能 exec 进去);
@@ -200,6 +210,21 @@ if [ "${1:-}" = "--keep-running" ]; then
     exec sleep infinity
 fi
 DIAG
+
+# pod 入口提示(挂到 /root/motd, 覆盖基础镜像的欢迎语): exec 进去 ls/cat motd 就能看到 RDMA 用法
+_MOTD_TMP="$(mktemp)"
+cat > "${_MOTD_TMP}" <<'MOTD'
+
+  CubeStack 诊断 pod(网络 + RDMA)        完整视图: sh /diag/diag.sh
+  ──────────────────────────────────────────────────────────────────────
+  RDMA(本容器已申请扩展资源, 设备已注入 /dev/infiniband, 可直接用):
+    rdma link show            # RDMA 链路状态(state / physical_state)
+    ibv_devinfo               # 设备/端口详情(verbs 层)
+    ib_write_bw -d mlx5_0     # 带宽实测(对端同样跑 ib_write_bw -d mlx5_0 当服务端)
+  网络:
+    tcpdump -i any -nn | ip addr | ss -tunap | mtr <host> | ethtool -S eth0
+  ⚠ 网卡名(ibs2/manage0)属宿主 net namespace, pod 内看不到; 设备本身可用(如上)。
+MOTD
 _CM_TMP="$(mktemp)"
 {
     echo "apiVersion: v1"
@@ -210,8 +235,10 @@ _CM_TMP="$(mktemp)"
     echo "data:"
     echo "  diag.sh: |"
     sed 's/^/    /' "${_DIAG_TMP}"
+    echo "  motd: |"
+    sed 's/^/    /' "${_MOTD_TMP}"
 } > "${_CM_TMP}"
-rm -f "${_DIAG_TMP}"
+rm -f "${_DIAG_TMP}" "${_MOTD_TMP}"
 
 _POD_TMP="$(mktemp)"
 {
@@ -233,6 +260,9 @@ _POD_TMP="$(mktemp)"
     echo "      volumeMounts:"
     echo "        - name: diag"
     echo "          mountPath: /diag"
+    echo "        - name: diag"
+    echo "          mountPath: /root/motd"
+    echo "          subPath: motd"
     if [ "${RDMA_MODE}" = "1" ]; then
         echo "      resources:"
         echo "        limits:"
