@@ -128,4 +128,11 @@
 
 
 
-# containerd_registries_mirrors:  # (REGISTRY_ENABLED=0, 未配置)
+
+containerd_registries_mirrors:
+  - prefix: "registry.cubestack.io:5000"
+    server: "http://registry.cubestack.io:5000"
+    mirrors:
+      - host: "http://10.244.1.11:31148"
+        capabilities: ["pull", "resolve"]
+        skip_verify: true

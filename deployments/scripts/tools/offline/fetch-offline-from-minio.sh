@@ -121,7 +121,11 @@ MINIO_BUCKET="${MINIO_BUCKET:-cubestack-installer}"
 MINIO_REMOTE_DIR="${MINIO_REMOTE_DIR:-offline-files}"
 
 # mc ls 对不存在的路径也返回 0(空输出), 需以"输出非空"判定路径存在
-mc_has() { mc ls "$1" 2>/dev/null | grep -q .; }
+# ⚠ 不要写成 `mc ls "$1" | grep -q .`:grep -q 命中第一行即退出 → mc 收到 SIGPIPE(退出码 141),
+#   而本脚本是 `set -euo pipefail` → 整条管线被判为失败 → **输出多行的目录恒被判成"不存在"**
+#   (桶级只有 1 行输出时 mc 已写完, 反而正常 —— 于是表现为"桶能访问、离线目录却找不到")。
+#   实测: 17 行输出的目录 = 141; 改用命令替换读完所有输出则正常。
+mc_has() { [ -n "$(mc ls "$1" 2>/dev/null)" ]; }
 
 mc_alias_ready=0
 if [ -n "${MINIO_ENDPOINT:-}" ] && [ -n "${MINIO_ACCESS_KEY:-}" ] && [ -n "${MINIO_SECRET_KEY:-}" ]; then
