@@ -15,10 +15,16 @@
 #   · RDMA 插件是纯 Device Plugin: 在 /var/lib/kubelet/device-plugins 注册扩展资源
 #     (resourcePrefix/resourceName, 如 nvidia.com/mlx5_0), 让 Pod 经 resources.limits 申请;
 #     rdmaHcaMax=每资源最大共享 Pod 数(如 100 表示允许 100 个 Pod 共享这块网卡)。
-#   · 资源模式(RDMA_HCA_MODE): per-hca=每块 HCA 独立扩展资源(资源名=节点实际 RDMA 设备名, 如
-#     nvidia.com/mlx5_0/1/2...), Pod 按资源名选择用哪块卡 —— cluster.conf.example 默认值(推荐);
+#   · 资源模式(RDMA_HCA_MODE): by-link=按链路类型分成 IB / RoCE **两个资源池**(资源名
+#     RDMA_IB_RESOURCE / RDMA_ROCE_RESOURCE, 默认 rdma/hca_shared_devices 与
+#     rdma/roce_hca_shared_devices —— 与真实 GPU 集群 cm rdma-devices 命名一致, 同一份 Pod 清单
+#     两边通用) —— cluster.conf.example 默认值(推荐);
+#     per-hca=每块 HCA 独立扩展资源(资源名=节点实际 RDMA 设备名, 如 nvidia.com/mlx5_0/1/2...),
+#     Pod 按资源名精确选择用哪块卡;
 #     pool=全部 HCA 聚合为单个资源(RDMA_RESOURCE_NAME, 兼容旧部署; 也是代码内建回退值);
 #     链路类型自动识别(网卡 type 32=IB(ibsX) / 1=RoCE(ens*/manage0))。
+#   · by-link 的边界: 显式 RDMA_IF_NAMES 且未写类型时无法判定链路类型 → 归入 RoCE 池并告警
+#     (要精确分类请写 <设备名>:<网卡名>:<类型>); 某类型一张卡都没有时不生成该池条目。
 #   · ACTIVE 过滤(RDMA_ACTIVE_ONLY, 默认 true): 自动检测时只收录链路状态 ACTIVE 的 HCA
 #     (/sys/class/infiniband/<dev>/ports/*/state 含 ACTIVE), DOWN/DISABLED 卡不建资源不暴露;
 #     =false 时全部暴露。仅作用于自动检测; 显式 RDMA_IF_NAMES 时尊重用户配置不过滤。
@@ -38,7 +44,8 @@
 #   · manifest: ConfigMap + DaemonSet 由模块 heredoc 生成(镜像行重写为镜像副本 ref; 源不落盘)。
 #   · 区别于 SR-IOV: 本插件用于 PF(Physical Function)共享; 若开 SR-IOV(VF)应改用 k8s-sriov-network-device-plugin。
 # 数据源: cluster.conf (RDMA_ENABLED / RDMA_SAVE_DIR / RDMA_IMAGE_TAG / RDMA_RESOURCE_PREFIX /
-#         RDMA_RESOURCE_NAME / RDMA_HCA_MODE / RDMA_HCA_MAX / RDMA_IF_NAMES / RDMA_ACTIVE_ONLY /
+#         RDMA_RESOURCE_NAME / RDMA_HCA_MODE / RDMA_IB_RESOURCE / RDMA_ROCE_RESOURCE /
+#         RDMA_HCA_MAX / RDMA_IF_NAMES / RDMA_ACTIVE_ONLY /
 #         RDMA_PLACEHOLDER_HCAS / RDMA_VENDORS / RDMA_UPDATE_INTERVAL / RDMA_NAMESPACE /
 #         REGISTRY_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps rdma_shared_dev_plugin  或  RDMA_ENABLED=true
@@ -75,10 +82,31 @@ RES_PREFIX="${RDMA_RESOURCE_PREFIX:-nvidia.com}"
 RES_NAME="${RDMA_RESOURCE_NAME:-mlx5_0}"
 RES_FULL="${RES_PREFIX}/${RES_NAME}"
 HCA_MAX="${RDMA_HCA_MAX:-100}"
-# 资源模式: per-hca=每块 HCA 独立扩展资源, 资源名=实际设备名(cluster.conf.example 默认, 推荐: pod 可
-#           按资源名选卡); pool=全部 HCA 聚合为单个扩展资源(兼容旧部署; 本行是**代码内建回退值**,
-#           配置里没写 RDMA_HCA_MODE 键时才生效)
+# 资源模式: by-link=按链路类型分成 IB / RoCE **两个资源池**(cluster.conf.example 默认; 资源名与真实
+#           GPU 集群一致, 见下方 RDMA_IB_RESOURCE / RDMA_ROCE_RESOURCE);
+#           per-hca=每块 HCA 独立扩展资源, 资源名=实际设备名(pod 可按资源名精确选卡);
+#           pool=全部 HCA 聚合为单个扩展资源(兼容旧部署; 本行是**代码内建回退值**, 配置里没写
+#           RDMA_HCA_MODE 键时才生效)
 HCA_MODE="${RDMA_HCA_MODE:-pool}"
+# by-link 模式的两个池资源(值必须写成 <前缀>/<名字>; 前缀默认 rdma —— 与真实集群的插件注册名一致)。
+# ⚠ 名字不一致的后果是**静默的**: pod 申请的资源名在这台集群上根本不存在 → 永远 Pending。
+#   真实集群对应物: kubectl -n kube-system get cm rdma-devices -o yaml 里各条目的 resourceName。
+IB_RESOURCE="${RDMA_IB_RESOURCE:-rdma/hca_shared_devices}"
+ROCE_RESOURCE="${RDMA_ROCE_RESOURCE:-rdma/roce_hca_shared_devices}"
+IB_PREFIX="${IB_RESOURCE%%/*}"; IB_NAME="${IB_RESOURCE##*/}"
+ROCE_PREFIX="${ROCE_RESOURCE%%/*}"; ROCE_NAME="${ROCE_RESOURCE##*/}"
+if [ "${HCA_MODE}" = "by-link" ]; then
+    for _rv in "RDMA_IB_RESOURCE=${IB_RESOURCE}" "RDMA_ROCE_RESOURCE=${ROCE_RESOURCE}"; do
+        _rn="${_rv%%=*}"; _rv="${_rv#*=}"
+        case "${_rv}" in
+            */*) [ -n "${_rv%%/*}" ] && [ -n "${_rv##*/}" ] \
+                     || { err "${_rn} 前缀或名字为空: '${_rv}'(应为 <前缀>/<名字>, 如 rdma/hca_shared_devices)"; exit 1; } ;;
+            *)   err "${_rn} 必须写成 <前缀>/<名字>(如 rdma/hca_shared_devices), 当前为 '${_rv}'"; exit 1 ;;
+        esac
+    done
+    [ "${IB_RESOURCE}" != "${ROCE_RESOURCE}" ] \
+        || { err "RDMA_IB_RESOURCE 与 RDMA_ROCE_RESOURCE 相同('${IB_RESOURCE}'), 两个池无法区分"; exit 1; }
+fi
 # ⚠ 自动检测: 默认不写死网卡名 —— 各节点 RDMA 网卡名可能不同(IB=ibsX / RoCE=ens*/manage0),
 #   手写 RDMA_IF_NAMES 只适配单形态。**留空 = 模块自动扫描所有节点 /sys/class/infiniband/*
 #   /device/net/ 取真实网卡名并集**, 兼容 IB + RoCE 混合集群。显式设置则尊重用户配置。
@@ -189,8 +217,10 @@ REMOTE_DETECT
     if [ -n "${DETECTED_HCAS}" ]; then
         say "  自动检测结果: ${DETECTED_HCAS}"
         # pool 兼容模式: IF_NAMES = 去重网卡名并集
-        IF_NAMES="$(echo "${DETECTED_HCAS}" | tr '\n' ',')"
-        IF_NAMES="$(echo "${IF_NAMES}" | cut -d: -f2 | tr ',' '\n' | sort -u | tr '\n' ',')"
+        # ⚠ 必须先按逗号拆多行再 cut -d: -f2 —— DETECTED_HCAS 是**单行**逗号串, 直接 cut 会把整串
+        #   当一行, 只取到第一个冒号后的字段 → ifNames 只剩第一块网卡(其余卡不被插件匹配, 静默;
+        #   2026-09-21 由本地自检 ⑧ 复现: 3 块卡检测出来, ifNames 只有 ibs2)。
+        IF_NAMES="$(echo "${DETECTED_HCAS}" | tr ',' '\n' | cut -d: -f2 | sort -u | tr '\n' ',')"
         IF_NAMES="${IF_NAMES%,}"
         say "  pool 模式 ifNames: ${IF_NAMES}"
     elif [ -n "${PLACEHOLDER_HCAS}" ]; then
@@ -207,15 +237,17 @@ REMOTE_DETECT
         warn "    驱动修好后本项自动失效(检测到真卡即走真实配置), 再用 --steps rdma_shared_dev_plugin --fresh 重跑本模块重建 ConfigMap"
     else
         warn "  全集群未检测到 RDMA 网卡(无 /sys/class/infiniband/* 设备节点或全部链路 DOWN/DISABLED)"
-        # ⚠ 提示必须与随后的**实际结果**一致: per-hca 在下方 :DETECTED_HCAS 为空处硬失败, 只有 pool 才空转。
-        #   (曾统一打印"插件 DaemonSet 将空转", 与 per-hca 随后报错退出自相矛盾, 易被误判为程序 bug。)
-        if [ "${HCA_MODE}" = "per-hca" ]; then
-            warn "  ⚠ HCA_MODE=per-hca 且无任何 HCA → 本模块随后将报错退出:"
-            warn "    纯 VM 无卡集群: 在 cluster.conf 设 RDMA_PLACEHOLDER_HCAS=\"mlx5_0,mlx5_1,mlx5_2\" 走占位模式(跑通但不注册资源)"
-            warn "    或改 RDMA_HCA_MODE=pool(空转不报错); 详见 deployments/cubestack-addon/rdma/CUBESTACK.md"
-        else
-            warn "  HCA_MODE=pool: 插件 DaemonSet 将空转, 无扩展资源(ifNames 为空, 不报错)"
-        fi
+        # ⚠ 提示必须与随后的**实际结果**一致: per-hca / by-link 在下方 :DETECTED_HCAS 为空处硬失败,
+        #   只有 pool 才空转。(曾统一打印"插件 DaemonSet 将空转", 与 per-hca 随后报错退出自相矛盾,
+        #   易被误判为程序 bug。2026-09-21 加入 by-link —— 它同样硬失败, 一并纳入本分支。)
+        case "${HCA_MODE}" in
+            per-hca|by-link)
+                warn "  ⚠ HCA_MODE=${HCA_MODE} 且无任何 HCA → 本模块随后将报错退出:"
+                warn "    纯 VM 无卡集群: 在 cluster.conf 设 RDMA_PLACEHOLDER_HCAS=\"mlx5_0,mlx5_1,mlx5_2\" 走占位模式(跑通但不注册资源)"
+                warn "    或改 RDMA_HCA_MODE=pool(空转不报错); 详见 deployments/cubestack-addon/rdma/CUBESTACK.md" ;;
+            *)
+                warn "  HCA_MODE=pool: 插件 DaemonSet 将空转, 无扩展资源(ifNames 为空, 不报错)" ;;
+        esac
         IF_NAMES=""
     fi
 fi
@@ -255,7 +287,11 @@ if [ "${HCA_MODE}" = "per-hca" ]; then
         _dev="${_h%%:*}"
         _rest="${_h#*:}"
         _net="${_rest%%:*}"
-        _type="${_rest##*:}"
+        # ⚠ 三元组是 <设备名>:<网卡名>:<链路类型>[:<链路状态>] —— 取类型必须先跳过网卡名再取第一段;
+        #   用 ${_rest##*:} 会取到**末尾的链路状态**(ACTIVE/DOWN), 32/1 永远匹配不上 → 日志里
+        #   IB/RoCE 提示恒为 "?"(2026-09-21 修复; 只影响日志提示, 不影响资源名/接口)。
+        _rest="${_rest#*:}"
+        _type="${_rest%%:*}"
         [ -n "${_dev}" ] || continue
         case ",${_dev_nets[${_dev}]:-}," in *",${_net},"*) : ;; *) _dev_nets["${_dev}"]="${_dev_nets[${_dev}]:-}${_dev_nets[${_dev}]:+,}${_net}" ;; esac
         # 链路类型取第一个已知值(32=IB / 1=RoCE; 手动指定 IF_NAMES 时为 0=未知)
@@ -287,6 +323,65 @@ if [ "${HCA_MODE}" = "per-hca" ]; then
     done
     CM_JSON="$(printf '{\n    "periodicUpdateInterval": %s,\n    "configList": [\n%s\n    ]\n}\n' "${UPDATE_INTERVAL}" "${CM_JSON}")"
     say "  per-hca 模式: 生成 ${_ENTRIES} 个独立扩展资源"
+elif [ "${HCA_MODE}" = "by-link" ]; then
+    # ── by-link: 按链路类型(检测三元组第 3 段: 32=IB / 1=RoCE)归池, 每池一个资源 ──
+    #    池内多块卡合并成一份 ifNames 并集(插件按 selectors.ifNames 匹配设备); 资源名取
+    #    RDMA_IB_RESOURCE / RDMA_ROCE_RESOURCE —— 与真实 GPU 集群的 cm rdma-devices 命名一致,
+    #    保证同一份 Pod 清单在两种集群都能申请到 RDMA 资源(名字不一致 = pod 永远 Pending)。
+    _append_net() {   # <现有逗号串> <网卡名> → 去重追加
+        case ",${1}," in *",${2},"*) printf '%s' "$1" ;; *) printf '%s' "${1}${1:+,}${2}" ;; esac
+    }
+    _cm_entry() {     # <前缀> <资源名> <ifNames JSON> → configList 单条目(每键一行: verify 的 awk 依赖此格式)
+        printf '        {\n            "resourcePrefix": "%s",\n            "resourceName": "%s",\n            "rdmaHcaMax": %s,\n            "selectors": {\n                "vendors": %s,\n                "ifNames": %s\n            }\n        }' \
+            "$1" "$2" "${HCA_MAX}" "${VENDOR_LIST}" "$3"
+    }
+    _ib_nets=""; _roce_nets=""; _unknown_nets=""; _ib_devs=""; _roce_devs=""
+    if [ "${PLACEHOLDER_MODE}" = "1" ]; then
+        # 占位模式(纯 VM 无卡): 两池都生成、都用占位 ifNames —— 占位名(mlx5_0 等)是设备名不是网卡名,
+        # 节点上不存在同名 netdev → selectors 永不匹配 → 插件空转, 仍**不注册任何扩展资源**。
+        _ib_nets="${IF_NAMES}"; _roce_nets="${IF_NAMES}"
+    else
+        for _h in ${DETECTED_HCAS//,/ }; do
+            [ -z "${_h}" ] && continue
+            _dev="${_h%%:*}"; _rest="${_h#*:}"; _net="${_rest%%:*}"; _rest="${_rest#*:}"; _type="${_rest%%:*}"
+            [ -n "${_net}" ] || continue
+            case "${_type}" in
+                32) _ib_nets="$(_append_net "${_ib_nets}" "${_net}")"
+                    _ib_devs="${_ib_devs}${_ib_devs:+ }${_dev}" ;;
+                1)  _roce_nets="$(_append_net "${_roce_nets}" "${_net}")"
+                    _roce_devs="${_roce_devs}${_roce_devs:+ }${_dev}" ;;
+                *)  # 链路类型未知(显式 RDMA_IF_NAMES 只写网卡名/设备名, 没给类型) → 归 RoCE 池并告警
+                    _roce_nets="$(_append_net "${_roce_nets}" "${_net}")"
+                    _unknown_nets="${_unknown_nets}${_unknown_nets:+,}${_net}" ;;
+            esac
+        done
+    fi
+    [ -z "${_unknown_nets}" ] || warn "  无法判定链路类型的网卡 ${_unknown_nets} → 已归入 RoCE 池 ${ROCE_RESOURCE}; 要精确分类请把 RDMA_IF_NAMES 写成 <设备名>:<网卡名>:<类型>(32=IB / 1=RoCE)"
+    _entries=()
+    if [ -n "${_ib_nets}" ]; then
+        _entries+=("$(_cm_entry "${IB_PREFIX}" "${IB_NAME}" "$(_to_json_list "${_ib_nets}")")")
+        [ "${PLACEHOLDER_MODE}" = "1" ] \
+            && say "  by-link IB  池: ${IB_RESOURCE}(占位 ifNames=${_ib_nets}; 无真实设备 → 不会注册)" \
+            || say "  by-link IB  池: ${IB_RESOURCE} ← 设备 ${_ib_devs}(网卡 ${_ib_nets})"
+    fi
+    if [ -n "${_roce_nets}" ]; then
+        _entries+=("$(_cm_entry "${ROCE_PREFIX}" "${ROCE_NAME}" "$(_to_json_list "${_roce_nets}")")")
+        [ "${PLACEHOLDER_MODE}" = "1" ] \
+            && say "  by-link RoCE 池: ${ROCE_RESOURCE}(占位 ifNames=${_roce_nets}; 无真实设备 → 不会注册)" \
+            || say "  by-link RoCE 池: ${ROCE_RESOURCE} ← 设备 ${_roce_devs}(网卡 ${_roce_nets})"
+    fi
+    if [ "${#_entries[@]}" -eq 0 ]; then
+        # 与 per-hca 同样**硬失败**: 两池皆空等于"什么都没部署出来", 静默空转会把真实故障藏起来。
+        err "HCA_MODE=by-link 但 IB/RoCE 两个池都没有可用 HCA(全集群检测到 0 块 RDMA 网卡)"
+        err "  纯 VM 无卡集群: 在 cluster.conf 设 RDMA_PLACEHOLDER_HCAS=\"mlx5_0,mlx5_1,mlx5_2\" 走占位模式(跑通但不注册资源)"
+        err "  或改 RDMA_HCA_MODE=pool(空转不报错); 详见 deployments/cubestack-addon/rdma/CUBESTACK.md"
+        exit 1
+    fi
+    # ⚠ $( ) 会吃掉 printf 末尾的换行 → 表头不能以 \n 结尾, 每条目自己在前面补换行。
+    CM_JSON="$(printf '{\n    "periodicUpdateInterval": %s,\n    "configList": [' "${UPDATE_INTERVAL}")"
+    _sep=""
+    for _e in "${_entries[@]}"; do CM_JSON="${CM_JSON}${_sep}"$'\n'"${_e}"; _sep=','; done
+    CM_JSON="${CM_JSON}"$'\n    ]\n}'
 else
     CM_JSON="$(printf '{\n    "periodicUpdateInterval": %s,\n    "configList": [\n        {\n            "resourcePrefix": "%s",\n            "resourceName": "%s",\n            "rdmaHcaMax": %s,\n            "selectors": {\n                "vendors": %s,\n                "ifNames": %s\n            }\n        }\n    ]\n}\n' "${UPDATE_INTERVAL}" "${RES_PREFIX}" "${RES_NAME}" "${HCA_MAX}" "${VENDOR_LIST}" "${IF_LIST}")"
     if [ "${PLACEHOLDER_MODE}" = "1" ]; then
@@ -431,8 +526,13 @@ echo "---------------------------------------------"
     || ok "RDMA 共享设备插件部署完成(${DS_NAME} DaemonSet)"
 echo "  镜像:   ${IMG_REF}"
 if [ "${PLACEHOLDER_MODE}" = "1" ]; then
+    case "${HCA_MODE}" in
+        by-link) _res_hint="${IB_RESOURCE} / ${ROCE_RESOURCE}" ;;
+        per-hca) _res_hint="${RES_PREFIX}/<设备名>(如 ${RES_PREFIX}/mlx5_0)" ;;
+        *)       _res_hint="${RES_FULL}" ;;
+    esac
     warn "⚠ 占位模式(RDMA_PLACEHOLDER_HCAS=${PLACEHOLDER_HCAS}): 本机无真实 RDMA 硬件, ConfigMap 只按占位名生成,"
-    warn "  DaemonSet 空转且【不会注册任何 RDMA 扩展资源】—— kubectl describe node 看不到 ${RES_PREFIX}/mlx5_* 属预期。"
+    warn "  DaemonSet 空转且【不会注册任何 RDMA 扩展资源】—— kubectl describe node 看不到 ${_res_hint} 属预期。"
     warn "  如需真实 RDMA: 装卡/加载驱动后**本项自动失效**(检测到真卡即走真实配置), 但已下发的 ConfigMap 仍是占位版,"
     warn "  需用 --steps rdma_shared_dev_plugin --fresh 重跑本模块重建 ConfigMap(REPEAT:0, 否则会被断点续跑跳过);"
     warn "  (--steps 只跑该组件, 不会连带 k8s_deploy; --fresh 仅清断点状态)"
@@ -452,6 +552,15 @@ if [ "${HCA_MODE}" = "per-hca" ]; then
     echo "    resources:"
     echo "      limits:"
     echo "        ${RES_PREFIX}/<设备名>: 1    # 例如 ${RES_PREFIX}/mlx5_0: 1 选第一块卡"
+elif [ "${HCA_MODE}" = "by-link" ]; then
+    echo "  资源:   IB 池 ${IB_RESOURCE} / RoCE 池 ${ROCE_RESOURCE}(每池 rdmaHcaMax=${HCA_MAX}; 全局 ConfigMap ${NS}/${CM_NAME})"
+    echo "          ⚠ 只生成非空池: 某类网卡一张都没有时, 该池的条目不会出现(不去集群里注册空资源名)"
+    echo "  验证:   --steps verify_rdma_shared_dev_plugin(逐池检查各节点 allocatable)"
+    echo "  使用(给 Pod 申请 RDMA 设备; 与真实集群的命名一致, 同一份清单两边通用):"
+    echo "    resources:"
+    echo "      limits:"
+    echo "        ${IB_RESOURCE}: 1      # InfiniBand 网卡(ibsX 等)"
+    echo "        ${ROCE_RESOURCE}: 1    # RoCE 网卡(ensX*/manage0 等)"
 else
     echo "  资源:   ${RES_FULL}(rdmaHcaMax=${HCA_MAX}; 全局 ConfigMap ${NS}/${CM_NAME})"
     echo "  验证:   --steps verify_rdma_shared_dev_plugin(检查各节点 allocatable 含 ${RES_FULL})"

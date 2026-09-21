@@ -46,39 +46,55 @@ sudo ./deployments/scripts/tools/images/rdma-save-images.sh
 
 | cluster.conf 变量 | 默认 | 说明 |
 |---|---|---|
-| `RDMA_RESOURCE_PREFIX` | `nvidia.com` | 扩展资源前缀 |
-| `RDMA_RESOURCE_NAME` | `mlx5_0` | 扩展资源名(**pool 模式**; pod 申请 `nvidia.com/mlx5_0`; per-hca 模式忽略) |
-| `RDMA_HCA_MODE` | `per-hca` | 资源模式: **`per-hca`**=每块 HCA 独立资源(资源名=节点实际 RDMA 设备名如 `mlx5_0`/`mlx5_1`/..., pod 可按资源名精确选卡; **cluster.conf.example 默认值, 推荐**); **`pool`**=全部 HCA 聚合为单个资源(兼容旧部署; 也是模块**代码内建回退值** —— 配置里没写该键时才生效) |
-| `RDMA_HCA_MAX` | `100` | 每资源最大共享 Pod 数(rdmaHcaMax; per-hca 模式下每块卡各一份配额) |
+| `RDMA_RESOURCE_PREFIX` | `nvidia.com` | 扩展资源前缀(**pool 模式**用) |
+| `RDMA_RESOURCE_NAME` | `mlx5_0` | 扩展资源名(**pool 模式**; pod 申请 `nvidia.com/mlx5_0`; by-link / per-hca 模式忽略) |
+| `RDMA_HCA_MODE` | `by-link` | 资源模式(三选一): **`by-link`**=按链路类型分成 IB / RoCE **两个资源池**(**cluster.conf.example 默认值**, 资源名与真实 GPU 集群一致 —— 同一份 Pod 清单在两种集群都能申请到 RDMA 资源); **`per-hca`**=每块 HCA 独立资源(资源名=节点实际 RDMA 设备名如 `mlx5_0`/`mlx5_1`/..., pod 可按资源名精确选卡); **`pool`**=全部 HCA 聚合为单个资源(兼容旧部署; 也是模块**代码内建回退值** —— 配置里没写该键时才生效) |
+| `RDMA_IB_RESOURCE` | `rdma/hca_shared_devices` | **by-link**: IB 池资源名(必须 `<前缀>/<名字>`)。默认值 = 真实集群 `kubectl -n kube-system get cm rdma-devices` 里的 `resourceName`(对应插件侧 `--rdma-ib-resource`) |
+| `RDMA_ROCE_RESOURCE` | `rdma/roce_hca_shared_devices` | **by-link**: RoCE 池资源名(同上, 对应 `--rdma-roce-resource`) |
+| `RDMA_HCA_MAX` | `100` | 每资源最大共享 Pod 数(rdmaHcaMax; by-link 模式下每个池各一份配额, per-hca 模式下每块卡各一份) |
 | `RDMA_IF_NAMES` | *(自动检测)* | 宿主机 RDMA 网卡名(逗号分隔, selectors.ifNames); ⚠ **留空 = 模块自动扫描所有节点 `/sys/class/infiniband/*/device/net/` 收集真实设备名+网卡名**(兼容 IB=ibsX / RoCE=ens*/manage0 混合), 显式设置则按此精确过滤 |
 | `RDMA_ACTIVE_ONLY` | `true` | 自动检测只收录**链路状态 ACTIVE** 的 HCA(读 `/sys/class/infiniband/*/ports/*/state`); DOWN/DISABLED 卡不建资源不暴露; `false`=全部暴露。仅作用自动检测(RDMA_IF_NAMES 为空), 显式 IF_NAMES 时忽略 |
-| `RDMA_PLACEHOLDER_HCAS` | `mlx5_0,mlx5_1,mlx5_2` | **纯 VM 无 RDMA 卡**时的占位设备名: 自动检测到 0 块 HCA 时按这些名字生成 config.json, 插件正常起来但**不注册任何扩展资源**(见下方"纯 VM 无 RDMA 卡: 占位模式")。**检测到真实 HCA 时本项被忽略 → 物理机零影响**。把该行改成空值 = 严格模式(per-hca 检测不到即报错退出; 模块代码内建回退也是空) |
+| `RDMA_PLACEHOLDER_HCAS` | `mlx5_0,mlx5_1,mlx5_2` | **纯 VM 无 RDMA 卡**时的占位设备名: 自动检测到 0 块 HCA 时按这些名字生成 config.json(by-link → 两池都用占位名), 插件正常起来但**不注册任何扩展资源**(见下方"纯 VM 无 RDMA 卡: 占位模式")。**检测到真实 HCA 时本项被忽略 → 物理机零影响**。把该行改成空值 = 严格模式(by-link / per-hca 检测不到即报错退出; pool 本来就空转不报错; 模块代码内建回退也是空) |
 | `RDMA_VENDORS` | `15b3` | PCI Vendor ID(逗号分隔; Mellanox/NVIDIA=15b3) |
 | `RDMA_UPDATE_INTERVAL` | `300` | periodicUpdateInterval 秒(0=关闭周期更新) |
 | `RDMA_NAMESPACE` | `kube-system` | 插件命名空间 |
 
-### 两种资源模式(关键)
+### 三种资源模式(关键)
 
-- **`pool`(默认)**: 全部匹配网卡聚合进一个资源 `nvidia.com/mlx5_0`, 容量=rdmaHcaMax。
-  Pod 只能声明"我要用 RDMA", **不能选择用哪一块卡**。适用于不关心具体网卡的共享场景。
+- **`by-link`(cluster.conf.example 默认)**: 按**链路类型**把网卡分成两个池 —— IB 池
+  `rdma/hca_shared_devices`(链路 `type=32` 的 `ibsX`)、RoCE 池 `rdma/roce_hca_shared_devices`
+  (链路 `type=1` 的 `ens*`/`manage0`); 每池的多块网卡合并成一份 `ifNames` 并集。
+  **资源名与真实 GPU 集群对齐**(那边由 metax 侧插件以 `--rdma-ib-resource`/`--rdma-roce-resource`
+  配置, 核对命令 `kubectl -n kube-system get cm rdma-devices -o yaml`), 因此同一份 Pod 清单
+  在真实集群与本安装器部署的集群上都能申请到 RDMA 资源。
+  某类型一张卡都没有时**不生成该池条目**(不去集群里注册空资源名)。
+  ⚠ 显式 `RDMA_IF_NAMES` 且未写链路类型时无法判定种类 → 该网卡归入 RoCE 池并告警;
+  要精确分类请写成 `<设备名>:<网卡名>:<类型>`(32=IB / 1=RoCE)。
+  ⚠ 资源名写错的后果是**静默的**: pod 申请的资源名在本集群不存在 → 永远 Pending。
 - **`per-hca`**: 每块 HCA 一个 configList 条目 → 一个独立扩展资源, 资源名 = 节点实际
   RDMA 设备名(`/sys/class/infiniband/*` 下的名字, 如 `mlx5_0`/`mlx5_1`/`mlx5_2`...)。
   Pod 通过 `resources.limits` 声明资源名, **精确选择用哪块卡**(如 IB 走 ibsX 设备、RoCE 走 ens*/manage0 设备)。
   多节点同名 HCA(同款设备)自动合并 ifNames, 全集群资源名一致。
   ⚠ 资源名来自节点实际设备名, 部署后以 `kubectl describe node` 的 allocatable 为准。
+- **`pool`**: 全部匹配网卡聚合进**单个**资源 `nvidia.com/mlx5_0`, 容量 = rdmaHcaMax。
+  Pod 只能声明"我要用 RDMA", **不能区分类型也不能选卡**。兼容旧部署用; 新环境按需选
+  by-link(要两类池)或 per-hca(要按卡选)。
 
-> 多网卡: pool 模式可把 `RDMA_IF_NAMES` 设多个网卡, 插件按 selectors 匹配聚合到同一资源;
-> per-hca 模式则每块卡天然独立(推荐, 需要选卡能力时)。selectors 内同字段取 OR, 字段之间取 AND。
+> 网卡集合三种模式通用: `RDMA_IF_NAMES` 显式指定, 或留空由模块自动检测(IB+RoCE 混合集群自动兼容)。
+> selectors 内同一字段取 OR、字段之间取 AND。
 
 ## 纯 VM 无 RDMA 卡: 占位模式
 
-在没有 RDMA 网卡的**虚拟机**上跑完整部署流水线时, 自动检测会得到 0 块 HCA; 而 `per-hca`
-模式(`cluster.conf.example` 默认)下模块会直接报错中断:
+在没有 RDMA 网卡的**虚拟机**上跑完整部署流水线时, 自动检测会得到 0 块 HCA; 而 `by-link`
+模式(`cluster.conf.example` 默认)与 `per-hca` 模式下模块会直接报错中断:
 
 ```
-【错误】RDMA_HCA_MODE=per-hca 但未检测到任何 HCA(检查驱动 / RDMA_IF_NAMES)
-【错误】  纯 VM 无 RDMA 卡: 在 cluster.conf 设 RDMA_PLACEHOLDER_HCAS="mlx5_0,mlx5_1,mlx5_2" 走占位模式, 或改 RDMA_HCA_MODE=pool
+【错误】HCA_MODE=by-link 但 IB/RoCE 两个池都没有可用 HCA(全集群检测到 0 块 RDMA 网卡)
+【错误】  纯 VM 无卡集群: 在 cluster.conf 设 RDMA_PLACEHOLDER_HCAS="mlx5_0,mlx5_1,mlx5_2" 走占位模式(跑通但不注册资源)
+【错误】  或改 RDMA_HCA_MODE=pool(空转不报错); 详见 deployments/cubestack-addon/rdma/CUBESTACK.md
 ```
+
+(`per-hca` 的报错同款, 只是首行换成 `HCA_MODE=per-hca 但未检测到任何 HCA`。)
 
 `cluster.conf.example` **默认已带占位名**(照 example 配的集群不会撞上这个错; 旧 cluster.conf
 没写该键时模块走严格模式, 需按下行显式补上):
@@ -89,11 +105,13 @@ RDMA_PLACEHOLDER_HCAS="mlx5_0,mlx5_1,mlx5_2"   # 仅当自动检测到 0 块 HCA
 
 占位模式下的行为:
 
-- ConfigMap 按占位名生成 —— `per-hca` 得到三条 `nvidia.com/mlx5_0` / `mlx5_1` / `mlx5_2`;
+- ConfigMap 按占位名生成 —— `by-link` 得到两条(IB / RoCE 两池)且都用同一份占位名;
+  `per-hca` 得到三条 `nvidia.com/mlx5_0` / `mlx5_1` / `mlx5_2`;
   `pool` 得到单条 `nvidia.com/mlx5_0` 且 `ifNames` 为三个占位名;
 - DaemonSet 正常起来, 插件空转, **不会注册任何扩展资源** —— 占位名是 *RDMA 设备名*而不是
   *netdev 名*, `selectors.ifNames` 永远匹配不到 → 空资源池。因此 `kubectl describe node`
-  里看不到 `nvidia.com/mlx5_*` 属**预期**(这正是"装得上但不真注册"的达成方式);
+  里看不到任何 RDMA 扩展资源(`nvidia.com/mlx5_*` 或 `rdma/hca_shared_devices` 等)属**预期**
+  (这正是"装得上但不真注册"的达成方式);
 - ConfigMap 带标注 `cubestack.io/rdma-placeholder: "true"`。`verify_rdma_shared_dev_plugin`
   从集群实际状态读该标注, 命中则 ①② 照常真检查、③ 无资源注册**放行 exit 0** 并明确标注
   "未验收真实 RDMA"; **非占位集群维持硬失败**, 标注不会被绕过。
@@ -122,7 +140,31 @@ sudo ./deploy-cluster.sh --steps verify_rdma_shared_dev_plugin
 
 ## Pod 使用
 
-**pool 模式**(不选卡, 只申请 RDMA):
+**by-link 模式**(默认; 按链路类型申请 IB / RoCE 池 —— 与真实 GPU 集群命名一致):
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rdma-test-pod-ib
+spec:
+  containers:
+    - name: rdma-app
+      image: mellanox/rping-test
+      command: ["sleep", "infinity"]
+      resources:
+        limits:
+          rdma/hca_shared_devices: 1        # InfiniBand 池(ibsX; 名字可用 RDMA_IB_RESOURCE 改)
+          # rdma/roce_hca_shared_devices: 1  # RoCE 池(ens*/manage0; 需要时申请这一个)
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK"]        # RDMA 内存注册(mlock)必需
+```
+
+申请的资源名以集群实际注册的为准: `kubectl describe node <节点> | grep -A5 rdma/`
+(某类网卡一张都没有时, 该池不会出现在 allocatable 里 —— 属预期, 见上面 by-link 说明)。
+
+**pool 模式**(不选卡不分类, 只申请 RDMA):
 
 ```yaml
 apiVersion: v1
