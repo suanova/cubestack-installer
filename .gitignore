@@ -38,6 +38,9 @@ deployments/config/cluster.conf.bak
 deployments/config/cluster.conf.bak.*
 # 外部 Ceph 官方接入 env(含真实 CSI key/RGW admin 密钥, 勿提交; 由提供方导出)
 deployments/config/external-ceph.env
+# 外部 Ceph 自研导出配置(**由 ceph-expose-external.sh 生成, 含真实 keyring**, 勿提交)
+# ⚠ 2026-09-20 事故: 该文件被生成器从"示例"覆写成真值后仍处于**被跟踪**状态, 险些随提交入库
+deployments/config/external-ceph-self-define-access.conf
 # MinIO 独立配置(含密钥,勿提交;模板 minio.conf.example 需提交, 供 fetch-offline-from-minio.sh 使用)
 deployments/config/minio.conf
 # Docker CLI 镜像独立构建上下文(生成目录, build-cli-context.sh 每次构建前重新生成)
