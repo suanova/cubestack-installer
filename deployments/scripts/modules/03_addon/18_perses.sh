@@ -115,13 +115,20 @@ case "${PERSES_RELEASE}" in
     *)        _PERSES_FULLNAME="${PERSES_RELEASE}-perses" ;;
 esac
 
-# StorageClass 自动派生: 显式配置优先; 否则 ceph 体系 → ceph-block; 非 ceph → 留空(用集群默认 SC)
+# StorageClass 派生: 显式配置优先; ceph 体系 → ceph-block; 否则**自动发现集群默认 SC**。
+# ⚠ 2026-09-21 实机踩坑: 该 chart 的 NOTES.txt 有硬性校验 ——
+#   `if and .Values.persistence.enabled (eq .Values.persistence.storageClass "")` → **fail**
+#   ("persistencen.storageClass must be set"), 即**不接受空值**(与 values.yaml 注释里说的
+#   "不填就用默认 SC" 相反) → 必须显式传一个具体 SC 名, 否则 helm 直接拒绝安装。
 if [ -n "${PERSES_STORAGE_CLASS:-}" ]; then
     _SC="${PERSES_STORAGE_CLASS}"
 elif [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
     _SC="ceph-block"
 else
-    _SC=""
+    # 自动发现: kubectl 在默认 SC 名字后标 "(default)"; 没有默认就取第一个可用的 SC
+    _SC="$( (SSH "${K} get sc --no-headers 2>/dev/null" || true) | awk '/\(default\)/{gsub(/\(default\)/,"",$1); print $1; exit}' )"
+    [ -n "${_SC}" ] || _SC="$( (SSH "${K} get sc --no-headers 2>/dev/null" || true) | awk 'NR==1{print $1}' )"
+    [ -n "${_SC}" ] || { err "集群内没有可用 StorageClass, 而 Perses 需要持久化卷; 请先在 cluster.conf 设 PERSES_STORAGE_CLASS"; exit 1; }
 fi
 
 # 镜像 tar 规范文件名: / 与 : → _(与 cubepilot-save-images.sh、harbor-save-images.sh 同一约定)
@@ -385,7 +392,9 @@ replicas: 1
 
 persistence:
   enabled: true              # false 时 chart 用 emptyDir → Pod 重建即丢全部看板
-  storageClass: ${_SC}
+  # ⚠ 必须传具体 SC 名: chart 的 NOTES.txt 对空值直接 fail; 也不能写无值(会渲染成 YAML null,
+  #   被 values.schema.json 判为 Invalid type: Expected string, given null)
+  storageClass: "${_SC}"
   size: ${PERSES_STORAGE_SIZE}
   securityContext:
     fsGroup: 2000            # v0.53+ 容器用户 nobody→nonroot, 文件存储必须让 PVC 可写
@@ -449,20 +458,23 @@ for _k in statefulset deployment; do
     if [ -n "${_n}" ]; then _WL_KIND="${_k}"; _WL_NAME="${_n}"; break; fi
 done
 unset _k _n
+# ⚠ 2026-09-21 修复"假绿": 原来工作负载/PVC 检查只 warn → helm 装失败(如 values 不满足 chart
+#   schema)时模块仍打印"✅ Perses 部署完成", 而命名空间里一个 pod 都没有。现改为硬失败。
 if [ -z "${_WL_NAME}" ]; then
-    warn "  未发现 Perses 工作负载(helm 安装是否成功? kubectl -n ${PERSES_NAMESPACE} get all)"
-else
-    SSH "${K} -n ${PERSES_NAMESPACE} rollout status ${_WL_KIND}/${_WL_NAME} --timeout=${PERSES_WAIT_SECONDS}s" >/dev/null 2>&1 \
-        && ok "  ${_WL_KIND}/${_WL_NAME} 就绪" \
-        || warn "  ${_WL_KIND}/${_WL_NAME} 未在 ${PERSES_WAIT_SECONDS}s 内就绪(检查 pods 与镜像拉取)"
+    err "  未发现 Perses 工作负载 —— helm 安装很可能失败(回看上面 helm 输出; kubectl -n ${PERSES_NAMESPACE} get all)"
+    exit 1
 fi
+SSH "${K} -n ${PERSES_NAMESPACE} rollout status ${_WL_KIND}/${_WL_NAME} --timeout=${PERSES_WAIT_SECONDS}s" >/dev/null 2>&1 \
+    && ok "  ${_WL_KIND}/${_WL_NAME} 就绪" \
+    || { err "  ${_WL_KIND}/${_WL_NAME} 未在 ${PERSES_WAIT_SECONDS}s 内就绪(检查 pods 与镜像拉取)"; exit 1; }
 # PVC 已绑定? (未绑定说明 StorageClass 有问题, 是"看着在跑但数据其实在 emptyDir"之外的另一种坑)
 _PVC_PH="$( (SSH "${K} -n ${PERSES_NAMESPACE} get pvc ${_PERSES_FULLNAME} -o jsonpath='{.status.phase}' 2>/dev/null" || true) || true)"
 if [ -n "${_PVC_PH}" ]; then
     [ "${_PVC_PH}" = "Bound" ] && ok "  PVC ${_PERSES_FULLNAME} 已 Bound(${_SC:-集群默认 SC})" \
-                               || warn "  PVC ${_PERSES_FULLNAME} 状态 ${_PVC_PH}(StorageClass 是否可用?)"
+                               || { err "  PVC ${_PERSES_FULLNAME} 状态 ${_PVC_PH}(StorageClass 是否可用?)"; exit 1; }
 else
-    warn "  未找到 PVC ${_PERSES_FULLNAME}(persistence.enabled=true 却没建出来? 检查 values)"
+    err "  未找到 PVC ${_PERSES_FULLNAME}(persistence.enabled=true 却没建出来? 检查 values)"
+    exit 1
 fi
 
 # ---------------- 6. 对外暴露(nodeport / loadbalancer; 默认随 SERVICE_EXPOSE_MODE) ----------------
