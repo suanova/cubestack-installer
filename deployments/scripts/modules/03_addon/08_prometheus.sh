@@ -40,6 +40,7 @@
 #       ⑤ Prometheus/Grafana 对外暴露(原有)
 #   · Grafana 口令**硬校验**(§4): GRAFANA_ADMIN_PASSWORD 未设/为空/仍为 CHANGE_ME → 立即报错退出。
 #     不设置时 helm 会随机生成口令存 secret, 用户无法预知(实测环境因此手工重置过), 不可接受。
+#     出厂默认值是 admin(见 cluster.conf.example), 用它部署**只告警不阻断**(见下方 warn)。
 #     口令只经 values 文件传递, **不进 argv**(ps 可见), 文件权限 600 且用后即删。
 #   · 资产目录(§5, 三级回退, 会打印实际用了哪个): CUBESTACK_OBSERVABILITY_DIR >
 #     /opt/cubestack/observability(离线包约定) > 仓库内 vendored(cubestack-addon/observability/cubestack/)。
@@ -123,6 +124,13 @@ case "${GRAFANA_ADMIN_PASSWORD}" in
         err "  请在 cluster.conf 改成实际口令(与 BMC exporter 的凭据校验同理)。"
         exit 1 ;;
 esac
+
+# ★ 2026-09-21: 出厂默认口令(cluster.conf.example 的 GRAFANA_ADMIN_PASSWORD 默认值)—— 不阻断部署,
+#   但每次都在日志里显式提醒。监控入口常对外暴露(NodePort/LoadBalancer), 默认口令等于公开知识。
+if [ "${GRAFANA_ADMIN_PASSWORD}" = "admin" ]; then
+    warn "GRAFANA_ADMIN_PASSWORD 仍是出厂默认口令 'admin'(用户名 ${GRAFANA_ADMIN_USER})"
+    warn "  若监控入口对外可达, 请尽快在 cluster.conf 改成实际口令后重跑本模块。"
+fi
 
 # ★ 2026-09-18: 监控三件套各自独立成组/目录(用户要求 + 便于单独升级与离线备料)。
 #   kube-state-metrics / node-exporter 有自己的 offline-files 子目录(见 images.manifest);
