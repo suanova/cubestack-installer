@@ -277,6 +277,29 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   **红底醒目提示**并给出准备指引(不阻断)。部署前务必保证 `${LOCAL_REPO_DIR}` 下有
   `images/`(镜像 tar)+ 二进制 + `packages/`(系统包)。
 
+## helm chart 离线副本(全仓库强制约定)
+
+**凡安装 helm chart 的模块,其 chart 必须有一份 vendored 在 `deployments/cubestack-addon/<组件>/`
+下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
+
+- **放哪**:`deployments/cubestack-addon/<组件>/`(一个 chart 一个子目录)。`.gitignore` 只挡
+  `offline-files/*`,不挡 `cubestack-addon/`,所以 `.tgz` 直接 `git add` 即可(envoy 的三张已在库里)。
+- **什么形态**:小 chart 放 `.tgz` + **同时提交 `<tgz>.digest` 边车**;大 chart(带几十个子 chart)
+  放解包源码目录(含 `Chart.yaml`)。
+- **怎么装**:走共享助手,**不要手抄 pull/回退逻辑**:
+  ```bash
+  helm_chart_ensure "<组件名>" "$XXX_CHART_TGZ" "$XXX_CHART_VERSION" \
+      "$XXX_MODE" "$XXX_CHART_REF" "$XXX_CHART_REPO" || exit 1
+  ```
+  语义:online 拉远端 → 比 `Digest:` 与边车 → **未变继续用本地**(仓库保持干净)、有更新才覆盖本地
+  并提示 commit、拉取失败降级回退本地;offline 完全不联网;最后判一次本地副本在不在,不在就 `err`。
+- **怎么刷新**:`tools/images/<组件>-fetch-charts.sh`(照抄 `prometheus-fetch-charts.sh` 解包版 /
+  `perses-fetch-charts.sh` tgz+边车版),跑完**必须 commit** —— 不提交等于没刷新。
+- **为什么是"恒用本地"而不是"线上优先"**:`31_cubepilot` / `33_bmc_exporter` 原本都写了"拉取失败回退
+  本地 chart",但仓库里压根没有那份文件 —— 私服一抖动回退就是空转。回退只有在本地确实有一份时才有意义。
+- **强制校验**:`tools/check-modules.sh` 第 ⑩ 项。行首是 helm 安装命令的模块,其引用的
+  `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`,否则报错。
+
 ## 断点续跑(REPEAT 语义, 重要)
 
 - **`REPEAT: 0`(可断点续跑)**: 安装成功后写状态文件, 重跑部署自动**跳过已完成模块**(断点继续, 不从头开始);
@@ -452,6 +475,8 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - [ ] 未硬编码 IP/密码/路径(全部来自 cluster.conf 变量)
 - [ ] 开关类模块有 TOGGLE 检查
 - [ ] 引用的工具脚本存在于 `tools/<领域>/` 且路径正确
-- [ ] `bash deployments/scripts/tools/check-modules.sh` exit 0(静态校验全绿)
+- [ ] **(装 chart 的模块)chart 已 vendored 到 `cubestack-addon/<组件>/`(tgz 附 `.digest` 边车)且已 `git add`**
+- [ ] **(装 chart 的模块)走 `helm_chart_ensure` 恒用本地副本;缺副本时 `err` 退出并给获取方法**
+- [ ] `bash deployments/scripts/tools/check-modules.sh` exit 0(含第 ⑩ 项离线副本检查)
 - [ ] `deploy-cluster.sh --list-steps` 能看到新模块
 - [ ] 不影响其他模块(未改他人元数据/文件名)

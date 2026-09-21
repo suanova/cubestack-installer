@@ -35,7 +35,7 @@ ck_fail() { bad "$*"; FAIL=1; }
 say "==== 模块静态校验(${MODULES_DIR}) ===="
 
 # ---------- ① bash -n 语法 ----------
-say "[1/8] bash -n 语法检查 ..."
+say "[1/10] bash -n 语法检查 ..."
 SYNTAX_FAIL=0
 while IFS= read -r -d '' f; do
     bash -n "$f" 2>/dev/null || { bad "语法错误: ${f#$MODULES_DIR/}"; SYNTAX_FAIL=1; FAIL=1; }
@@ -47,7 +47,7 @@ meta() { sed -nE "s/^#[[:space:]]*${2}:[[:space:]]*(.*)$/\1/p" "$1" | head -1; }
 phase_dir() { case "$(basename "$(dirname "$1")")" in
     01_env) echo "env";; 02_k8s) echo "k8s";; 03_addon) echo "addon";; *) echo "?";; esac; }
 
-say "[2/8] 头部元数据齐全性 ..."
+say "[2/10] 头部元数据齐全性 ..."
 declare -A KEYS=()
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -65,10 +65,10 @@ while IFS= read -r -d '' f; do
 done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] && ok "元数据齐全"
 
-say "[3/8] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
+say "[3/10] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
 [ "${FAIL}" = "0" ] || true
 
-say "[4/8] PHASE 合法性 + 目录一致性 ..."
+say "[4/10] PHASE 合法性 + 目录一致性 ..."
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
     ph="$(meta "$f" PHASE)"
@@ -78,7 +78,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] || true
 
 # ---------- ⑤ REQUIRES 引用 + 全量拓扑 ----------
-say "[5/8] REQUIRES 引用存在性 + 全量无环 ..."
+say "[5/10] REQUIRES 引用存在性 + 全量无环 ..."
 REQ_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -118,7 +118,7 @@ else
 fi
 
 # ---------- ⑥ init_remote_kubectl 使用检查 ----------
-say "[6/8] 远端 kubectl 初始化(K/SSH)调用检查 ..."
+say "[6/10] 远端 kubectl 初始化(K/SSH)调用检查 ..."
 INIT_MISS=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -132,7 +132,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${INIT_MISS}" = "0" ] && ok "使用 K/SSH 的模块均已调用 init_remote_kubectl"
 
 # ---------- ⑦ TOGGLE 与 cluster.conf.example 一致性 ----------
-say "[7/8] TOGGLE 变量在 cluster.conf.example 声明 ..."
+say "[7/10] TOGGLE 变量在 cluster.conf.example 声明 ..."
 if [ -f "${CONF_EXAMPLE}" ]; then
     TOG_MISS=0
     while IFS= read -r -d '' f; do
@@ -149,7 +149,7 @@ else
 fi
 
 # ---------- ⑧ 文件序号与目录 ----------
-say "[8/8] 文件名序号规范(NN_ 前缀) ..."
+say "[8/10] 文件名序号规范(NN_ 前缀) ..."
 NUM_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -164,13 +164,62 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 # ---------- ⑨ tools/ 工具脚本语法检查 ----------
 # 模块外的部署工具(tools/**/*.sh: ceph-backup/deploy-registry/... )同样参与部署,
 # 漏检会在运行期炸(历史: registry 就绪等待 K unbound 崩溃)。
-say "[9/9] tools/ 工具脚本语法检查 ..."
+say "[9/10] tools/ 工具脚本语法检查 ..."
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 T_FAIL=0
 while IFS= read -r -d '' f; do
     bash -n "$f" 2>/dev/null || { ck_fail "tools 语法错误: ${f#$TOOLS_DIR/}"; T_FAIL=1; }
 done < <(find "${TOOLS_DIR}" -name '*.sh' -print0)
 [ "${T_FAIL}" = "0" ] && ok "全部 $(find "${TOOLS_DIR}" -name '*.sh' | wc -l) 个 tools 脚本语法通过"
+
+# ---------- ⑩ helm chart 离线副本(全仓库约定) ----------
+# 规则: 凡安装 helm chart 的模块, 其 chart **必须有一份 vendored 在 deployments/cubestack-addon/**
+# 下并随 git 分发 —— 模块安装时**恒用这份本地副本**, 在线只用于比对刷新
+# (见 lib-common 的 helm_chart_ensure, 以及 docs/scripts-development-spec.md §2.4)。
+# 为什么要有这一条: 31_cubepilot / 33_bmc_exporter 原本**都写了**"私服拉取失败就回退本地 chart",
+# 但仓库里压根没有那份文件 —— 私服一抖动, 回退就是空转, 回退代码形同虚设。
+# 光靠文档挡不住这种缺失(写的时候都以为回退能兜住), 所以放进静态校验。
+say "[10/10] helm chart 离线副本检查 ..."
+ADDON_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/cubestack-addon"
+CHART_FAIL=0; CHART_WARN=0; CHART_OKN=0
+# 判据: **行首就是 helm 命令** —— 只排除注释不够, 变量/err 字符串里提到
+#   "helm upgrade --install" 的地方(如 32_verify_cubepilot 的排查提示)会被误判成"装了 chart"。
+HELM_RE='^[[:space:]]*helm[[:space:]]+(upgrade[[:space:]]+--install|install)[[:space:]]'
+while IFS= read -r -d '' f; do
+    rel="${f#$MODULES_DIR/}"
+    grep -qE "${HELM_RE}" "$f" || continue
+    grep -q 'addon_stub ' "$f" && continue      # 伪代码占位(未实现), 不参与本检查
+    # 提取该模块引用的 cubestack-addon/<路径> 候选(含被变量截断的前缀, 后面靠存在性过滤)
+    cands="$(sed -n 's#.*cubestack-addon/\([A-Za-z0-9_./-]*\).*#\1#p' "$f" | sort -u || true)"
+    if [ -z "${cands}" ]; then
+        warn "  ${rel}: 装了 helm chart 却未引用 cubestack-addon/ 下任何路径"
+        warn "     → 无法静态确认离线副本; 若 chart 在仓库外(占位/特例), 请忽略本告警"
+        CHART_WARN=$((CHART_WARN + 1)); continue
+    fi
+    hit=0
+    while IFS= read -r c; do
+        [ -z "${c}" ] && continue
+        p="${ADDON_DIR}/${c}"
+        if [ -f "${p}" ]; then
+            case "${p}" in *.tgz) hit=1 ;; esac
+        elif [ -d "${p}" ]; then
+            # 目录里直接含 .tgz 或 Chart.yaml 才算 vendored chart(与各组件实际布局一致)
+            ls "${p}"/*.tgz >/dev/null 2>&1 && hit=1
+            [ -f "${p}/Chart.yaml" ] && hit=1
+        fi
+        [ "${hit}" = "1" ] && break
+    done <<< "${cands}"
+    if [ "${hit}" = "1" ]; then
+        CHART_OKN=$((CHART_OKN + 1))
+    else
+        ck_fail "${rel}: 引用了 cubestack-addon/ 却**找不到 vendored chart**(.tgz 或 Chart.yaml)"
+        ck_fail "      → 模块安装时恒用本地副本, 缺了它私服/上游一抖动就装不上(回退代码会空转)"
+        ck_fail "      → 修法: 把 chart 放进 deployments/cubestack-addon/<组件>/ 并提交,"
+        ck_fail "             tgz 形式请一并提交 <tgz>.digest 边车(供 helm_chart_ensure 比对刷新)"
+        CHART_FAIL=$((CHART_FAIL + 1))
+    fi
+done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
+[ "${CHART_FAIL}" = "0" ] && ok "安装 chart 的模块均有 vendored 离线副本(${CHART_OKN} 个模块通过)"
 
 echo "---------------------------------------------"
 if [ "${FAIL}" = "0" ]; then

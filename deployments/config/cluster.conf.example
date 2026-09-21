@@ -10,6 +10,7 @@
 # ║ ① SSH_DEFAULT_PASSWORD  节点 SSH 默认密码(NODES 中密码为 "-" 时使用)   ║
 # ║ ② NODES                集群节点(role,hostname,ip,ssh_user,ssh_password)║
 # ║ ③ METALLB_POOL         MetalLB 负载均衡地址池(与节点同二层且空闲)      ║
+# ║ ④ GRAFANA_ADMIN_PASSWORD  Grafana 管理员口令(默认 admin/admin)         ║
 # ║                                                                        ║
 # ║ · 裸金属集群: 必须手动填 NODES 全部节点 + METALLB_POOL 物理网段空闲段   ║
 # ║ · 虚拟机集群: NODES 由 tools/vm/create-vms.sh 自动注入, 通常无需手改;   ║
@@ -33,6 +34,13 @@ NODES=(
 # ---- ③ MetalLB 地址池(必改; 见 3.1 详细说明) ----
 #   池内 IP 与节点同一二层网络且空闲; 多集群务必避免与其他集群 LB IP 冲突
 METALLB_POOL="10.66.1.131-10.66.1.132"   # ⚠ 必须排除已被其他集群/主机占用的地址(曾用 130-139 把 registry 分到别的集群 VIP 导致镜像拉取失败)
+
+# ---- ④ Grafana 管理员口令(必改; 默认 admin/admin, ★ 生产/对外暴露前务必改掉) ----
+#   · 口令只经临时 values 文件(600, 用后即删)传给 helm, 不进 argv(ps 可见);
+#   · 留空 或 仍为 CHANGE_ME → 08_prometheus 模块在 helm 之前直接报错退出(留空时 helm 会随机
+#     生成口令存进 secret, 用户无法预知 —— 实测环境因此手工重置过, 故不接受留空)。
+GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
+GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin}"
 
 # ════════════════════════════════════════════════════════════
 # ★★ 组件启停开关(全部集中在此, 一键启停; 按阶段分组) ★★
@@ -112,12 +120,9 @@ PROMETHEUS_CHART_DIR="${PROMETHEUS_CHART_DIR:-}"
 # 抓取/评估间隔(installer-requirements §1.4)
 PROMETHEUS_SCRAPE_INTERVAL="${PROMETHEUS_SCRAPE_INTERVAL:-30s}"
 PROMETHEUS_EVALUATION_INTERVAL="${PROMETHEUS_EVALUATION_INTERVAL:-60s}"
-# Grafana 管理员口令(**必填**, 无默认值):
-#   · 未设置/为空/仍为 CHANGE_ME → 08_prometheus 模块在 helm 之前**硬失败退出**;
-#   · 不留默认值是有意的 —— helm 在未传时会随机生成口令存进 secret, 用户无法预知(实测因此手工重置过);
-#   · 口令只经临时 values 文件(600, 用后即删)传给 helm, 不进 argv(ps 可见)。
-GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
-GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-}"
+# Grafana 管理员口令: 定义在**顶部核心必改项 ④**(此处引用, 保持唯一事实来源, 避免两处维护)。
+GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER}"
+GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD}"
 # observability 资产目录(recording rules + dashboards), 留空走三级回退:
 #   ① 本变量(非空即用) → ② /opt/cubestack/observability(离线包约定, 见 §5) → ③ 仓库内 vendored
 #     (deployments/cubestack-addon/observability/cubestack/)
@@ -203,16 +208,34 @@ MULTUS_NAD_NAME="${MULTUS_NAD_NAME:-multus-nad}"         # 示例 NAD 名(pod �
 #   ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:${RDMA_IMAGE_TAG} → offline-files/rdma/ → 10_rdma_shared_dev_plugin 模块推送进内置 registry
 RDMA_SAVE_DIR="${RDMA_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/rdma}"
 RDMA_IMAGE_TAG="${RDMA_IMAGE_TAG:-v1.5.4}"              # ⚠ 官方源在 ghcr.io/mellanox(非 Docker Hub); 1.4.0 无 v 前缀(ghcr 上 v1.4.0 404), v1.5.1+ 带 v; 默认 v1.5.4 最新(修复 RoCE 口 issm 硬检查); 部署模块按 tar 内实际 tag 自适应
-RDMA_RESOURCE_PREFIX="${RDMA_RESOURCE_PREFIX:-nvidia.com}"  # 扩展资源前缀
-RDMA_RESOURCE_NAME="${RDMA_RESOURCE_NAME:-mlx5_0}"      # 扩展资源名(pool 模式; 与 RDMA_IF_NAMES 对应的网卡; pod 申请 nvidia.com/mlx5_0)。per-hca 模式忽略此值(资源名=实际设备名)
-RDMA_HCA_MODE="${RDMA_HCA_MODE:-per-hca}"                  # 资源模式: per-hca=每块 HCA 独立扩展资源(**本文件默认**, 推荐: pod 按资源名选卡, 如 nvidia.com/mlx5_0 / mlx5_1...); pool=全部 HCA 聚合为单个扩展资源(兼容旧部署; 也是模块代码的**内建回退值**)。⚠ per-hca 下检测到 0 块 HCA 会报错退出 —— 除非下方 RDMA_PLACEHOLDER_HCAS 非空(本文件默认非空, 见其说明)
-RDMA_HCA_MAX="${RDMA_HCA_MAX:-100}"                     # 每资源最大共享 Pod 数(rdmaHcaMax; per-hca 模式下每块卡各一份配额)
+RDMA_RESOURCE_PREFIX="${RDMA_RESOURCE_PREFIX:-nvidia.com}"  # 扩展资源前缀(pool 模式用; by-link 模式的前缀写在下面两个资源名里)
+RDMA_RESOURCE_NAME="${RDMA_RESOURCE_NAME:-mlx5_0}"      # 扩展资源名(pool 模式; 与 RDMA_IF_NAMES 对应的网卡; pod 申请 nvidia.com/mlx5_0)。by-link / per-hca 模式忽略此值
+RDMA_HCA_MODE="${RDMA_HCA_MODE:-by-link}"                  # 资源模式: by-link=按链路类型分成 IB / RoCE **两个资源池**(**本文件默认**, 资源名与真实 GPU 集群一致, 同一份 Pod 清单两边通用, 见下两行); per-hca=每块 HCA 独立扩展资源(pod 按资源名选卡, 如 nvidia.com/mlx5_0 / mlx5_1...); pool=全部 HCA 聚合为单个扩展资源(兼容旧部署; 也是模块代码的**内建回退值**)。⚠ by-link / per-hca 下检测到 0 块 HCA 会报错退出 —— 除非下方 RDMA_PLACEHOLDER_HCAS 非空(本文件默认非空, 见其说明)
+RDMA_IB_RESOURCE="${RDMA_IB_RESOURCE:-rdma/hca_shared_devices}"          # by-link: InfiniBand 池资源名(必须 <前缀>/<名字>)。默认值 = 真实集群 kubectl -n kube-system get cm rdma-devices 里的 resourceName(对应插件侧 --rdma-ib-resource); ⚠ 名字写错是**静默**故障: pod 申请的资源名在本集群不存在 → 永远 Pending
+RDMA_ROCE_RESOURCE="${RDMA_ROCE_RESOURCE:-rdma/roce_hca_shared_devices}"  # by-link: RoCE 池资源名(同上, 对应 --rdma-roce-resource)
+RDMA_HCA_MAX="${RDMA_HCA_MAX:-100}"                     # 每资源最大共享 Pod 数(rdmaHcaMax; by-link 模式下每个池各一份配额, per-hca 模式下每块卡各一份)
 RDMA_IF_NAMES="${RDMA_IF_NAMES:-}"                       # 宿主机 RDMA 网卡名(逗号分隔, selectors.ifNames); ⚠ 留空 = 模块自动扫描所有节点 /sys/class/infiniband/*/device/net/ 收集真实设备名+网卡名(兼容 IB=ibsX / RoCE=ens*/manage0 混合), 显式设置则按此精确过滤
 RDMA_ACTIVE_ONLY="${RDMA_ACTIVE_ONLY:-true}"             # 自动检测时只收录链路状态 ACTIVE 的 HCA(读 /sys/class/infiniband/*/ports/*/state); DOWN/DISABLED 卡(DISABLED)不建资源不暴露; false=全部暴露。仅作用自动检测(RDMA_IF_NAMES 为空时), 显式 RDMA_IF_NAMES 时忽略本项
-RDMA_PLACEHOLDER_HCAS="${RDMA_PLACEHOLDER_HCAS:-mlx5_0,mlx5_1,mlx5_2}"  # 纯 VM 无 RDMA 卡时的占位设备名(**默认带 3 个**): 自动检测到 0 块 HCA 时按这些名字生成 config.json(如 per-hca → nvidia.com/mlx5_0/1/2), 插件 DaemonSet 正常起来但**不注册任何扩展资源**(占位名是设备名、不是 netdev 名 → selectors 永不匹配), ConfigMap 带标注 cubestack.io/rdma-placeholder=true, verify 模块据此放行并标注"未验收真实 RDMA"。**检测到真实 HCA 时本项被忽略 → 物理机零影响**(仅作用自动检测, 显式 RDMA_IF_NAMES 时也不生效)。要恢复"无卡即报错退出"(仅 per-hca 会报错; pool 本来就空转不报错): 把本行改成 RDMA_PLACEHOLDER_HCAS=""(去掉 :- 默认值; 只 export 一个空环境变量无效 —— 本行赋值会覆盖环境变量)
+RDMA_PLACEHOLDER_HCAS="${RDMA_PLACEHOLDER_HCAS:-mlx5_0,mlx5_1,mlx5_2}"  # 纯 VM 无 RDMA 卡时的占位设备名(**默认带 3 个**): 自动检测到 0 块 HCA 时按这些名字生成 config.json(by-link → IB/RoCE 两池都用这些占位名; per-hca → nvidia.com/mlx5_0/1/2), 插件 DaemonSet 正常起来但**不注册任何扩展资源**(占位名是设备名、不是 netdev 名 → selectors 永不匹配), ConfigMap 带标注 cubestack.io/rdma-placeholder=true, verify 模块据此放行并标注"未验收真实 RDMA"。**检测到真实 HCA 时本项被忽略 → 物理机零影响**(仅作用自动检测, 显式 RDMA_IF_NAMES 时也不生效)。要恢复"无卡即报错退出"(by-link / per-hca 会报错; pool 本来就空转不报错): 把本行改成 RDMA_PLACEHOLDER_HCAS=""(去掉 :- 默认值; 只 export 一个空环境变量无效 —— 本行赋值会覆盖环境变量)
 RDMA_VENDORS="${RDMA_VENDORS:-15b3}"                    # PCI Vendor ID(逗号分隔; Mellanox/NVIDIA=15b3)
 RDMA_UPDATE_INTERVAL="${RDMA_UPDATE_INTERVAL:-300}"     # periodicUpdateInterval 秒(0=关闭周期更新)
 RDMA_NAMESPACE="${RDMA_NAMESPACE:-kube-system}"         # 插件命名空间
+
+# ---- 4.8b 网络/RDMA 诊断 pod(netshoot + rdma-core + perftest; 模块 netshoot; 详见 docs/netshoot.md) ----
+# 集群里常驻一台"网络工具箱": kubectl exec 进去就能用 tcpdump / ip / ss / ethtool / mtr / ping;
+# 额外装了 rdma-core(ibv_devices/ibv_devinfo)与 perftest(ib_write_bw…), 做 RDMA 链路与带宽诊断。
+# 镜像(离线): 联网机 tools/images/netshoot-rdma-build.sh 构建 → offline-files/netshoot/*.tar → 模块推入内置 registry。
+#   ⚠ 自建 tar 缺失时模块回退用原始 netshoot(offline-files/os/netshoot.tar): pod 照常起, 但**无 ibv_*/perftest**(会告警)。
+# ★ 默认不随全量部署安装(TOGGLE 默认 false): 按需 `--steps netshoot` 部署; 想要全量带上就把本行改 true。
+NETSHOOT_ENABLED="${NETSHOOT_ENABLED:-false}"
+NETSHOOT_NAMESPACE="${NETSHOOT_NAMESPACE:-default}"      # 部署命名空间(默认 default)
+NETSHOOT_POD_NAME="${NETSHOOT_POD_NAME:-cubestack-netshoot}"   # pod 固定名(便于 exec)
+NETSHOOT_SAVE_DIR="${NETSHOOT_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/netshoot}"   # 自建镜像 tar 目录
+NETSHOOT_RDMA_VERSION="${NETSHOOT_RDMA_VERSION:-26.04.17}"   # 自建镜像 tag(= perftest 版本, 与构建脚本默认一致)
+# pod 申请的 RDMA 扩展资源: 留空 = 跟随 RDMA_IB_RESOURCE(by-link 的 IB 池, 默认 rdma/hca_shared_devices);
+#   ⚠ 集群节点没注册该资源时模块**自动不申请**(pod 仍可起, 只做通用网络诊断)
+NETSHOOT_RDMA_RESOURCE="${NETSHOOT_RDMA_RESOURCE:-}"
+NETSHOOT_BASE_TAR="${NETSHOOT_BASE_TAR:-${REPO_ROOT}/deployments/offline-files/os/netshoot.tar}"   # 回退用的原始 netshoot tar
 
 # ---- 4.3b Rook/Ceph 配置(详见 docs/ceph-rook.md) ----
 # ════════════════════════════════════════════════════════════════════════
@@ -750,6 +773,17 @@ ENVOY_EG_IMAGE_ONLINE="${ENVOY_EG_IMAGE_ONLINE:-false}"     # 允许在线拉取
 ENVOY_AI_IMAGE_ONLINE="${ENVOY_AI_IMAGE_ONLINE:-false}"     # 同上(AI 控制器)
 ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"   # 离线镜像 tar 目录(save 工具输出)
 ENVOY_EG_NAMESPACE="${ENVOY_EG_NAMESPACE:-envoy-gateway-system}"   # EG 部署命名空间
+# 数据面暴露方式 + 数据面镜像(★ 两者都由 EnvoyProxy CR 决定, GatewayClass eg 经 parametersRef 引用):
+#   · auto(默认)= 跟随全局 SERVICE_EXPOSE_MODE: nodeport → 数据面 Service type=NodePort(端口由 K8s
+#     自动分配, 模块/verify 会打印实际端口); metallb → type=LoadBalancer(需 MetalLB 池内有空闲 IP)。
+#   · 也可强制 NodePort / LoadBalancer(与全局模式解耦时用)。
+#   · ⚠ 给 Gateway 加注解 gateway.envoyproxy.io/service-type: NodePort **EG v1.9.1 不认**(实测),
+#     别再走那条路; 存量 Gateway 用 tools/lb/gateway-nodeport.sh 转换。
+#   · ⚠ 该 class 下**所有** Gateway(含 Envoy AI Gateway)都继承此设置。
+ENVOY_EG_SERVICE_TYPE="${ENVOY_EG_SERVICE_TYPE:-auto}"
+ENVOY_EG_PROXY_NAME="${ENVOY_EG_PROXY_NAME:-cubestack-dataplane}"  # EnvoyProxy CR 名(parametersRef 指向它)
+# 数据面镜像 = ${ENVOY_EG_IMAGE_BASE}/envoy:${ENVOY_PROXY_VERSION}(由模块写进上面的 EnvoyProxy CR;
+#   离线关键: 必须来自集群内置 registry, 否则数据面 ImagePullBackOff)。
 ENVOY_AI_NAMESPACE="${ENVOY_AI_NAMESPACE:-ai-gateway-system}"      # AI 控制器部署命名空间
 # 数据面对外固定入口: tools/lb/gateway-nodeport.sh <gateway名> [ns] 转换后自动创建固定名别名
 #   Service(<gw>-external, NodePort 固定于此)。控制器生成的 envoy-<ns>-<gw>-<hash> 名含 hash
