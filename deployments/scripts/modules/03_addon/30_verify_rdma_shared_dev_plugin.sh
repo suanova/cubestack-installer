@@ -4,7 +4,7 @@
 # DESC: 端到端验证 k8s-rdma-shared-dev-plugin 真正工作(非仅 DaemonSet Running):
 #       ① DaemonSet pod 全 Running → ② ConfigMap(资源池)存在
 #       → ③ 从 ConfigMap 解析全部扩展资源 + 逐个资源遍历节点检查 allocatable 注册
-#       (pool 单资源 / per-hca 每块 HCA 一个资源, 自动适配; 无 HCA 节点自然没有, warn 说明)
+#       (by-link 每类链路一个资源 / pool 单资源 / per-hca 每块 HCA 一个资源, 自动适配; 无 HCA 节点自然没有, warn 说明)
 #       → ④ 创建测试 pod **申请 RDMA 设备资源**(取首个已注册资源)并等待 Running
 #       → ⑤ 容器内断言 /dev/infiniband 字符设备已注入(uverbs* 必需, rdma_cm 缺失仅告警)
 #       → 测试命名空间由 trap 清理
@@ -22,7 +22,8 @@
 #     仅当"DaemonSet 不在 且 RDMA_ENABLED≠true"才跳过。
 #   · 资源注册: 插件经 /var/lib/kubelet/device-plugins 把资源注册进 kubelet → 节点
 #     allocatable 出现扩展资源。无 HCA 节点不注册(自然)。
-#   · **资源名动态解析**: 不依赖 RDMA_RESOURCE_NAME 单一资源(pool 模式是单资源, per-hca
+#   · **资源名动态解析**: 不依赖 RDMA_RESOURCE_NAME 单一资源(by-link 每类链路一个资源, 默认
+#     rdma/hca_shared_devices + rdma/roce_hca_shared_devices; pool 模式是单资源, per-hca
 #     模式每块 HCA 一个资源名如 mlx5_0/mlx5_1...)。本模块从 ConfigMap 的 config.json 解析
 #     configList 全部条目, 逐个资源逐个节点检查 allocatable。
 #   · **离线可用(硬要求)**: ④ 的测试 pod 镜像**不碰 docker.io、也不依赖节点 containerd 预载** ——
@@ -95,7 +96,7 @@ case "${_PH_CM}" in *true*) _PLACEHOLDER="1" ;; *) _PLACEHOLDER="0" ;; esac
 [ "${_PLACEHOLDER}" = "1" ] && warn "    占位模式: ConfigMap 标注 rdma-placeholder=true(无真实 RDMA 硬件, ③ 无资源注册属预期)"
 
 say "  ③ 从 ConfigMap 解析全部扩展资源, 遍历节点检查 allocatable..."
-# config.json 由 10_rdma 模块生成: pool=单条目, per-hca=每块 HCA 一个条目
+# config.json 由 10_rdma 模块生成: by-link=每类链路一个条目, pool=单条目, per-hca=每块 HCA 一个条目
 # 取 data["config.json"]: 键含点号不能走 jsonpath 点路径, 用 go-template index
 _CM_JSON="$(SSH "${K} -n ${NS} get cm rdma-devices -o go-template='{{index .data \"config.json\"}}' 2>/dev/null" || true)"
 # 解析 configList 各条目 resourcePrefix + resourceName(纯 awk, 不依赖 jq/python3):

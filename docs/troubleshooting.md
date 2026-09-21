@@ -684,6 +684,81 @@ _OP_DEPLOY="$( (SSH "${K}" -n "${NS}" get deploy -o name) | sed -n 's#.*/##p' | 
 
 ---
 
+### 9. RDMA 共享设备插件: pool 模式 selectors.ifNames 只剩第一块网卡(其余卡静默不匹配)
+
+**症状**
+`RDMA_HCA_MODE=pool` + 自动检测时, 日志里检测到 N 块 RDMA 网卡, 但生成的 ConfigMap 里
+`selectors.ifNames` **只有第一块**网卡的网卡名:
+
+```
+→      10.244.1.11: 检测到 RDMA 设备 → ibs2:ibs2:32:ACTIVE ibs3:ibs3:32:ACTIVE ens1np0:ens1np0:1:ACTIVE
+→    自动检测结果: ibs2:ibs2:32:ACTIVE,ibs3:ibs3:32:ACTIVE,ens1np0:ens1np0:1:ACTIVE
+→    pool 模式 ifNames: ibs2            ← 只有第一块(应为 ibs2,ibs3,ens1np0)
+```
+后果: 某节点只有 ibs3(没有 ibs2)时该资源**不注册** → 那台节点 `allocatable` 里没有 RDMA 资源,
+按资源名调度的 Pod 落不上去。插件与模块**都不报错**, 属静默故障。
+
+**根因**
+`10_rdma_shared_dev_plugin.sh` 的 pool 分支把「设备三元组」单行逗号串直接 `cut -d: -f2`:
+`DETECTED_HCAS` 是**一行**(逗号分隔, 串内无换行), `cut` 按整行切分 → 只取到第一个冒号后的字段;
+前面的 `tr '\n' ','` 是空操作。→ 取到的永远只是第一个设备的网卡名。
+
+> **同类的第二处(同日修复, 只影响日志)**: per-hca 分支用 `${_rest##*:}` 取链路类型, 而三元组是
+> `<设备名>:<网卡名>:<类型>[:<状态>]` → 取到的是末尾的**状态**(`ACTIVE`), `32|1` 永远匹配不上,
+> 部署日志里 IB/RoCE 提示恒为 `?`。修法是先 `${_rest#*:}` 跳过网卡名再 `${_rest%%:*}` 取首段。
+
+**解法(根治)**
+先按逗号拆成多行再 `cut`(2026-09-21 已修):
+```bash
+IF_NAMES="$(echo "${DETECTED_HCAS}" | tr ',' '\n' | cut -d: -f2 | sort -u | tr '\n' ',')"
+IF_NAMES="${IF_NAMES%,}"
+```
+`per-hca` / `by-link` 不走这条路径(前者用 `_dev_nets` 逐设备映射, 后者按链路类型归池), 不受影响。
+
+**验证**
+本地打桩自检(**不碰集群**: 打桩 ssh/skopeo/curl 跑真模块, 再解析生成的 ConfigMap):
+输入 3 块卡(2 IB + 1 RoCE) → `ifNames: ["ens1np0","ibs2","ibs3"]`; 修复前为 `["ibs2"]`。
+regression: per-hca 自动检测 3 资源、pool 显式名单单资源均不变。
+
+**相关命令**
+```bash
+kubectl -n kube-system get cm rdma-devices -o go-template='{{index .data "config.json"}}'
+```
+
+---
+
+### 10. RDMA 资源名与真实 GPU 集群不一致 → Pod 申请 `rdma/hca_shared_devices` 永久 Pending
+
+**症状**
+同一份 Pod 清单在真实 GPU 集群能跑, 在本安装器部署的集群上 Pending:
+`0/N nodes are available: ... Insufficient rdma/hca_shared_devices`。集群本身"部署成功"。
+
+**根因**
+两端资源名不同源: 真实集群的插件由 metax 侧以 `--rdma-ib-resource` / `--rdma-roce-resource`
+配置(实测 `cm rdma-devices` 里为 `hca_shared_devices` / `roce_hca_shared_devices`, 前缀 `rdma`),
+而本安装器默认走 per-hca(`nvidia.com/<设备名>`)/ pool(`nvidia.com/mlx5_0`)—— 名字对不上时
+Pod 申请的资源名在集群里**根本不存在**, 且报错只出现在 Pod 事件里, 部署日志一片绿。
+
+**解法(根治)**
+`RDMA_HCA_MODE=by-link`(**cluster.conf.example 默认值**, 2026-09-21 起): 按链路类型分成两池,
+资源名取 `RDMA_IB_RESOURCE`(默认 `rdma/hca_shared_devices`)/ `RDMA_ROCE_RESOURCE`
+(默认 `rdma/roce_hca_shared_devices`), 与真实集群对齐; 名字可在 cluster.conf 改(插件侧对应
+`--rdma-ib-resource` / `--rdma-roce-resource`)。
+⚠ 显式 `RDMA_IF_NAMES` 且未写类型时无法判定链路类型 → 归 RoCE 池并告警, 要精确分类写
+`<设备名>:<网卡名>:<类型>`(32=IB / 1=RoCE); 某类型无卡则不生成该池条目。
+
+**验证**
+本地打桩自检 ①: 2 IB + 1 RoCE → 恰好两条 `rdma/hca_shared_devices`(ifNames 2 张 IB 卡)+
+`rdma/roce_hca_shared_devices`(1 张 RoCE 卡); ④ 占位模式两池 + `rdma-placeholder=true` 标注不变。
+
+**相关命令**
+```bash
+kubectl -n kube-system get cm rdma-devices -o yaml        # 真实集群/本集群的实际资源名
+kubectl describe node <节点> | grep -A5 rdma/             # 节点上真正注册了哪些资源
+```
+
+---
+
 ## 四、离线部署
 
 ### 1. 【单机/重装】`Drain node` → `Remove-node | List nodes` 报 `error: stat /etc/kubernetes/admin.conf: no such file or directory`
