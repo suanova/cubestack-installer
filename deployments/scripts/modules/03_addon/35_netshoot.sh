@@ -39,8 +39,27 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-# ---- 开关 ----
-[ "${NETSHOOT_ENABLED:-false}" = "true" ] || { say "NETSHOOT_ENABLED=false, 跳过网络诊断 pod"; exit 0; }
+# ---- 开关(默认 false = **不创建**)----
+# 开(true): 创建/更新诊断 pod; 关(默认): 不创建, 且**确保不存在**(顺带清理历史遗留 pod/CM, 幂等)。
+# ⚠ 走 `--steps netshoot` 时框架会强制把本开关当 true(所有 operator 的统一规则, deploy-cluster.sh),
+#   要执行"关闭路径"请直接跑模块脚本: bash deployments/scripts/modules/03_addon/35_netshoot.sh
+if [ "${NETSHOOT_ENABLED:-false}" != "true" ]; then
+    say "NETSHOOT_ENABLED=false(默认不创建诊断 pod)"
+    init_remote_kubectl || exit 1
+    _ns="${NETSHOOT_NAMESPACE:-default}"
+    _pod="${NETSHOOT_POD_NAME:-cubestack-netshoot}"
+    _cm="${NETSHOOT_POD_NAME:-cubestack-netshoot}-diag"
+    if SSH "${K} -n ${_ns} get pod ${_pod} --no-headers >/dev/null 2>&1" \
+       || SSH "${K} -n ${_ns} get cm ${_cm} --no-headers >/dev/null 2>&1"; then
+        say "  发现历史遗留(pod/${_pod} 或 cm/${_cm}) → 开关=false 时不留: 清理"
+        SSH "${K} -n ${_ns} delete pod ${_pod} --ignore-not-found=true >/dev/null 2>&1" || true
+        SSH "${K} -n ${_ns} delete cm ${_cm} --ignore-not-found=true >/dev/null 2>&1" || true
+        ok "  已清理: pod/${_pod} + cm/${_cm}(需要时 --steps netshoot 可随时重建)"
+    else
+        say "  无残留(pod/${_pod} 不存在), 跳过"
+    fi
+    exit 0
+fi
 
 init_remote_kubectl || exit 1
 

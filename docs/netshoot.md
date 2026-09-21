@@ -28,8 +28,12 @@
 ## 2. 部署与使用
 
 ```bash
-# 部署(默认不随全量部署安装; TOGGLE 默认 false)
-sudo ./deploy-cluster.sh --steps netshoot          # 或 cluster.conf 设 NETSHOOT_ENABLED=true
+# 部署(默认不随全量部署安装; TOGGLE 默认 false = 不创建)
+sudo ./deploy-cluster.sh --steps netshoot          # 立即创建(框架对 --steps 会强制打开开关)
+# 或 cluster.conf 设 NETSHOOT_ENABLED=true → 随全量部署一起创建
+
+# 关闭(默认即关): 不创建; 若已有历史遗留 pod, 跑一次模块即清理(开关=false 时不留)
+bash deployments/scripts/modules/03_addon/35_netshoot.sh
 
 # 用法
 kubectl -n default exec -it cubestack-netshoot -- bash
