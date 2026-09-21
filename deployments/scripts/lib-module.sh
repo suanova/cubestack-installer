@@ -551,15 +551,21 @@ ensure_cluster_access() {
 
 # 输出可单独部署的组件清单(供 --help 自动渲染, 新增组件自动出现)。
 #   参数: implemented(默认, 已实现的组件) | stub(规划中未实现的伪代码占位模块)
-#   排除: verify_*(按需执行) / k8s_scale(扩容模式) / 基座模块(BASE_MODULES, 不属于"单独部署的组件")
+#   排除: verify_*(按需执行, help 另有"验证"段) / k8s_scale(扩容模式) / 基座模块(BASE_MODULES)
+#   无 TOGGLE 的 addon 模块(如 ceph_backup 运维模块)也列出 —— 它们同样用 --steps <key> 单独执行,
+#   只是没有 cluster.conf 开关(env/k8s 阶段模块属基座, 见 help 的"阶段目录与模块"段)。
 _component_meta_list() {
     local want="${1:-implemented}" i key tgl script is_stub
     for i in "${!MODULE_KEY[@]}"; do
         key="${MODULE_KEY[$i]}"
         [[ "${key}" == verify_* || "${key}" == k8s_scale ]] && continue
         tgl="${MODULE_TOGGLE[$i]:-}"
-        [ -n "${tgl}" ] || continue
         case " ${BASE_MODULES[*]} " in *" ${key} "*) continue ;; esac
+        if [ -z "${tgl}" ]; then
+            # 无开关: 只在 addon 阶段收录(运维/工具类), 其余(env/k8s 阶段)属基座
+            [ "$(module_meta "${MODULES_DIR}/${MODULE_SCRIPT[$i]}" PHASE)" = "addon" ] || continue
+            tgl="(无开关: 运维类, 直接 --steps)"
+        fi
         script="${MODULES_DIR}/${MODULE_SCRIPT[$i]}"
         is_stub=0
         grep -q "addon_stub" "${script}" 2>/dev/null && is_stub=1
