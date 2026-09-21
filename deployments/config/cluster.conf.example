@@ -231,7 +231,12 @@ NETSHOOT_ENABLED="${NETSHOOT_ENABLED:-false}"
 NETSHOOT_NAMESPACE="${NETSHOOT_NAMESPACE:-default}"      # 部署命名空间(默认 default)
 NETSHOOT_POD_NAME="${NETSHOOT_POD_NAME:-cubestack-netshoot}"   # pod 固定名(便于 exec)
 NETSHOOT_SAVE_DIR="${NETSHOOT_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/netshoot}"   # 自建镜像 tar 目录
-NETSHOOT_RDMA_VERSION="${NETSHOOT_RDMA_VERSION:-26.04.17}"   # 自建镜像 tag(= perftest 版本, 与构建脚本默认一致)
+NETSHOOT_RDMA_VERSION="${NETSHOOT_RDMA_VERSION:-26.04.17}"   # 自建镜像 tag(= 构建脚本的 IMAGE_TAG; 也是 pod 拉的 tag)
+#   ⚠ 改了镜像内容(加包/打补丁)必须**换新 tag**: 同 tag 重建时模块 35 见 registry 已有同名 tag 会跳过推送,
+#     且 pod imagePullPolicy=IfNotPresent 命中节点旧缓存 → 新镜像到不了集群。
+#   约定 <perftest 版本>-r<N>(如 26.04.17-r2 = 含 iproute2-rdma 的那版):
+#     构建: sudo IMAGE_TAG=26.04.17-r2 <repo>/deployments/scripts/tools/images/netshoot-rdma-build.sh --force
+#     然后本行改成该 tag, 重跑 --steps netshoot
 # pod 申请的 RDMA 扩展资源: 留空 = 跟随 RDMA_IB_RESOURCE(by-link 的 IB 池, 默认 rdma/hca_shared_devices);
 #   ⚠ 集群节点没注册该资源时模块**自动不申请**(pod 仍可起, 只做通用网络诊断)
 NETSHOOT_RDMA_RESOURCE="${NETSHOOT_RDMA_RESOURCE:-}"

@@ -46,7 +46,12 @@ warn() { echo -e "\033[33m⚠  $*\033[0m"; }
 err()  { echo -e "\033[31m【错误】$*\033[0m" >&2; }
 
 # ---- 可配项(环境变量优先; 默认与 cluster.conf.example 声明一致) ----
-PERFTEST_VERSION="${PERFTEST_VERSION:-26.04.17}"                       # 自建镜像 tag 与 perftest 版本
+PERFTEST_VERSION="${PERFTEST_VERSION:-26.04.17}"                       # perftest 源码版本(编译哪一版)
+# ⚠ 镜像 tag 默认 = perftest 版本, 但**改了镜像内容(加包/打补丁)必须换新 tag** —— 同 tag 重建
+#   到不了集群: 模块 35 见 registry 已有同名 tag 会跳过推送, 且 pod imagePullPolicy=IfNotPresent
+#   命中节点缓存。约定 <perftest 版本>-r<N>(如 26.04.17-r2); 构建后同步改 cluster.conf 的
+#   NETSHOOT_RDMA_VERSION(那个值就是 pod 用的 tag)。
+IMAGE_TAG="${IMAGE_TAG:-${PERFTEST_VERSION}}"                          # 镜像 tag(默认=perftest 版本)
 IMAGE_REPO="${NETSHOOT_RDMA_IMAGE:-netshoot-rdma}"                     # 本地构建 tag 的仓库名
 SAVE_DIR="${NETSHOOT_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/netshoot}"
 BASE_IMAGE="${NETSHOOT_BASE_IMAGE:-nicolaka/netshoot:latest}"           # perftest 版本 = 镜像 tag
@@ -55,15 +60,15 @@ BASE_TAR="${NETSHOOT_BASE_TAR:-${REPO_ROOT}/deployments/offline-files/os/netshoo
 # 慢网络传国内镜像, 例如: sudo APK_MIRROR=https://mirrors.aliyun.com/alpine ./netshoot-rdma-build.sh
 APK_MIRROR="${APK_MIRROR:-}"
 DOCKERFILE="${SCRIPT_DIR}/netshoot-rdma.Dockerfile"
-IMG_REF="${IMAGE_REPO}:${PERFTEST_VERSION}"
-TAR_PATH="${SAVE_DIR}/netshoot-rdma-${PERFTEST_VERSION}.tar"
+IMG_REF="${IMAGE_REPO}:${IMAGE_TAG}"
+TAR_PATH="${SAVE_DIR}/netshoot-rdma-${IMAGE_TAG}.tar"
 
 FORCE=0; ONLINE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --force|-f)  FORCE=1 ;;
         --online)    ONLINE=1 ;;
-        --output)    shift; SAVE_DIR="${1:?--output 需要目录参数}"; TAR_PATH="${SAVE_DIR}/netshoot-rdma-${PERFTEST_VERSION}.tar" ;;
+        --output)    shift; SAVE_DIR="${1:?--output 需要目录参数}"; TAR_PATH="${SAVE_DIR}/netshoot-rdma-${IMAGE_TAG}.tar" ;;
         *) err "未知参数: $1(用法见脚本头)"; exit 1 ;;
     esac
     shift
@@ -81,7 +86,7 @@ if [ -f "${TAR_PATH}" ] && [ "${FORCE}" != "1" ]; then
     exit 0
 fi
 
-say "构建 ${IMG_REF}(基础镜像 ${BASE_IMAGE}, perftest ${PERFTEST_VERSION})..."
+say "构建 ${IMG_REF}(基础镜像 ${BASE_IMAGE}, perftest ${PERFTEST_VERSION}, 镜像 tag ${IMAGE_TAG})..."
 
 # ---- 基础镜像: 优先本地 tar(离线), 缺失或 --online 时 docker pull ----
 if docker image inspect "${BASE_IMAGE}" >/dev/null 2>&1; then

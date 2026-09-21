@@ -4,6 +4,7 @@
 # 用途: 离线集群里的网络/RDMA 诊断 pod 用镜像(模块 35_netshoot.sh)。
 #   在 netshoot(Alpine, 自带 tcpdump/ethtool/ip/ss/mtr/ping/nslookup)基础上加:
 #     · rdma-core  → ibv_devices / ibv_devinfo(verbs 层: 这块卡能不能被 verbs 看到)
+#     · iproute2-rdma → rdma link show / rdma dev(链路层: state / physical_state, 容器内可用)
 #     · perftest   → ib_write_bw / ib_read_bw / ib_write_lat ...(带宽/时延实测)
 #   ⚠ Alpine **没有 perftest 包**(社区源里查不到), 只能源码编译 → 两阶段构建, 构建期不留编译工具。
 #
@@ -53,5 +54,8 @@ LABEL org.opencontainers.image.title="netshoot-rdma" \
       org.opencontainers.image.version="${PERFTEST_VERSION}" \
       org.opencontainers.image.source="https://github.com/nicolaka/netshoot"
 # perftest 运行期依赖 pciutils-libs(configure 要求 pciutils 头; 二进制动态链 libpci)
-RUN apk add --no-cache rdma-core pciutils-libs
+# ⚠ iproute2-rdma 必须显式装: Alpine 的 iproute2 拆包仅含 iproute2-minimal/-ss/-tc,
+#   **不含 /sbin/rdma** —— 缺它时容器里 `rdma link show` 报 command not found, 会被误判成
+#   "pod 里没有 RDMA"(2026-09-22 实机踩坑)。补上后容器 netns 内可直接列 HCA 与 state。
+RUN apk add --no-cache rdma-core pciutils-libs iproute2-rdma
 COPY --from=builder /out/ /

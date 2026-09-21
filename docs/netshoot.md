@@ -15,8 +15,12 @@
 上游 `nicolaka/netshoot`(Alpine)**不含 RDMA 用户态工具**:
 
 - 镜像里没有 libibverbs、没有 `ibv_*`、也没有 `rdma` 二进制(实测它的 `ip` 不带 `rdma` 子命令);
+- ⚠ **Alpine 的 iproute2 是拆包的**: 默认只有 `iproute2-minimal`(ip)/`-ss`/`-tc`,
+  `/sbin/rdma` 在独立包 **`iproute2-rdma`** 里 —— 不显式装就会遇到
+  `rdma: command not found`,容易被误判成"pod 里没有 RDMA"(2026-09-22 实机踩坑);
 - Alpine 社区源**没有 perftest 包** → 只能源码编译;
-- 离线集群没有软件源,pod 里 `apk add` 跑不通 → **必须构建期装好**。
+- 离线集群按设计不带软件源 → RDMA 工具**必须构建期装好**(实测某集群 pod 能连 apk 源,
+  但离线交付不能依赖这点)。
 
 于是有了 `tools/images/netshoot-rdma.Dockerfile`(两阶段构建)+ `tools/images/netshoot-rdma-build.sh`
 (联网机执行)。构建与踩坑见 §4。
@@ -29,6 +33,7 @@ sudo ./deploy-cluster.sh --steps netshoot          # 或 cluster.conf 设 NETSHO
 
 # 用法
 kubectl -n default exec -it cubestack-netshoot -- bash
+ls; cat motd                                             # 入口提示(挂载的 motd: RDMA/网络速查)
 kubectl -n default logs cubestack-netshoot                       # 启动时的设备视图
 kubectl -n default exec cubestack-netshoot -- sh /diag/diag.sh   # 重跑设备视图
 ```
@@ -40,6 +45,7 @@ tcpdump -i any -nn                       # 抓包
 ip addr; ip route; ss -tunap             # 地址/路由/连接
 ethtool eth0; ethtool -S eth0            # 网卡速率/统计
 mtr -rw <host>; ping <host>              # 链路质量
+rdma link show; rdma dev                 # RDMA 链路状态(state/physical_state)
 ibv_devices; ibv_devinfo                 # RDMA 卡与端口(verbs 视角)
 ib_write_bw -d mlx5_0 -a                 # 带宽实测(对端要同步起 ib_write_bw 服务端)
 ```
@@ -82,14 +88,24 @@ perftest 源码 → 两阶段构建 → **容器内自检**(缺 `ibv_*`/`ib_writ
 
 升级 perftest: 改 `cluster.conf` 的 `NETSHOOT_RDMA_VERSION`(= 镜像 tag = perftest 版本)后重建镜像。
 
+> ⚠ **改了镜像内容(加包/打补丁)必须换新 tag** —— 同 tag 重建到不了集群: 模块 35 见 registry
+> 已有同名 tag 会**跳过推送**, 且 pod `imagePullPolicy: IfNotPresent` 会命中节点旧缓存。
+> 约定 `<perftest 版本>-r<N>`(如 `26.04.17-r2`):
+> ```bash
+> sudo IMAGE_TAG=26.04.17-r2 ./deployments/scripts/tools/images/netshoot-rdma-build.sh --force
+> # 再把 cluster.conf 的 NETSHOOT_RDMA_VERSION 改成 26.04.17-r2, 重跑 --steps netshoot
+> ```
+
 ## 5. 容器里怎么看 RDMA 设备(设备视图)
 
-`kubectl logs` 输出的视图由 `/diag/diag.sh` 生成,分三段:
+`kubectl logs` 输出的视图由 `/diag/diag.sh` 生成(进 pod 后 `cat motd` 是精简版速查):
 
 ```
-[/dev/infiniband]      ← 设备插件**实际授予本容器**的: uverbsN / rdma_cm(为空 = 没申请到/集群无卡)
-[/sys/class/infiniband] ← 宿主全部 HCA(只读): mlx5_0 netdev=ibs2 verbs=[uverbs0] state=ACTIVE
-[工具在位清单] + [ibv_devinfo -l] + [常用命令]
+[/dev/infiniband]       ← 设备插件**实际授予本容器**的: uverbsN / rdma_cm/umad/issm(为空 = 没申请到/集群无卡)
+[/sys/class/infiniband] ← 宿主全部 HCA(只读): ★ mlx5_0 [InfiniBand] 400 Gb/sec 4:ACTIVE verbs=[uverbs0]
+                           ★ = 本容器实际拿到的(其 uverbsN 出现在上面 /dev/infiniband 里)
+[RDMA 链路]             ← rdma link show(容器 netns 视角): 列全部 HCA 的 state/physical_state
+[网络接口] + [工具在位清单] + [ibv_devinfo -l] + [常用命令]
 ```
 
 ⚠ 两个名字不是一回事: `mlx5_2` 是 **RDMA 设备名**,`ibs2` 是它的 **netdev 名**,**编号不通用**
