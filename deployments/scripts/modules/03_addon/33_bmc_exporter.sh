@@ -13,13 +13,18 @@
 #     chart 与两个 exporter 镜像均由 CI 在 main 合入后发布到私服 harbor.isuanova.com/suanova,
 #     该项目**公开只读(anonymous pull), 无需凭据**。
 #   · **制品流向统一(核心)**: 不论哪种模式, 节点**只从集群内置 registry 拉镜像**, 部署机 helm 装**本地 chart tgz**。
-#       online  = 部署前先从私服同步制品到本地(chart pull 到 cubestack-addon/bmc-exporter/,
-#                 镜像 pull 成 offline-files/bmc/*.tar), 再推入内置 registry, 之后与 offline **同路**部署
+#       online  = 部署前先从私服同步制品到本地(镜像 pull 成 offline-files/bmc/*.tar),
+#                 再推入内置 registry, 之后与 offline **同路**部署; chart 另见下条(恒用本地副本)
 #       offline = 不碰外网, 直接用盘上已有制品(联网机预置的, 或上一次 online 留下的)推入内置 registry 后部署
 #     ⇒ 两种模式的**部署路径是同一段代码**, 差别只在"开头要不要联网同步"。
 #     ⚠ online 在私服不可达时**自动降级**: 拉不到就退回本地已有制品(告警, 不中断); 本地也没有才报错。
 #     ⚠ 上游只发 :latest(main 线), 会跟上游漂移 → 本模块用 **digest 边车文件**检测"私服上这个
 #       tag 变没变", 变了才重下(不白传)。想强制重拉: 删掉对应 tar(或它的 .digest 边车)即可。
+#   · **chart 恒用仓库内 vendored 的离线副本**(cubestack-addon/bmc-exporter/cubestack-bmc-exporter-<ver>.tgz,
+#     随 git 分发)。online **不直接装私服上拉到的那份** —— 它只负责拿远端 digest 与 <tgz>.digest
+#     边车比对: 未变 → 继续用本地那份(仓库保持干净); 有更新 → 覆盖本地副本并提示 commit;
+#     拉取失败 → 回退本地那份。实现收敛在 lib-common 的 helm_chart_ensure。
+#     ⇒ **离线副本缺失就是致命错误**(拿不到任何 chart), 必须随仓库提交, 不能只在部署时拉到盘上。
 #   · ⚠ 与 31_cubepilot 的**一处有意差异**: 不提供"节点本地构建"离线路径。
 #     cubestack 源仓库文档给的是 buildah 在节点多阶段构建 bmc-oem-exporter(需 golang:1.26
 #     基础镜像)再 ctr import —— 那要求每个部署节点都有 buildah + Go 工具链, 与仓库其它组件
@@ -136,62 +141,34 @@ SSH "${K} get crd scrapeconfigs.monitoring.coreos.com >/dev/null 2>&1" \
 ok "  ScrapeConfig CRD 就绪"
 
 # ============================================================
-# 1. 制品就绪 —— online 先从私服同步到本地, 之后两条路完全同路
+# 1. 制品就绪 —— 节点只从内置 registry 拉镜像, chart 恒用本地离线副本
 # ============================================================
 # 本段结束后的**不变量**(后续步骤只依赖它, 不再关心模式):
 #   · ${BMC_EXPORTER_CHART_TGZ} 存在                  (helm 从这里装)
 #   · 两个组件在内置 registry 里已有 <tag> 镜像        (节点从这里拉)
 mkdir -p "${BMC_EXPORTER_CHART_DIR}" "${BMC_EXPORTER_OFFLINE_DIR}"
 
-# ---- 1a. online: chart 同步(私服 pull 成功即覆盖本地; 失败回退本地文件) ----
-if [ "${BMC_EXPORTER_MODE}" = "online" ]; then
-    say "[1/6] online: 从私服同步 chart(${BMC_EXPORTER_CHART_REF}:${BMC_EXPORTER_CHART_VERSION})..."
-    _TMPD="$(mktemp -d)"
-    _CHART_OK=0
+# ---- 1a. chart 就绪: 恒用仓库内 vendored 的离线副本 ----
+# online **不直接装私服上拉到的那份** —— 它的作用是拿远端 digest 与 <tgz>.digest 边车比对,
+# 决定要不要刷新本地这份副本(见 lib-common helm_chart_ensure):
+#   digest 未变 → 继续用本地那份(仓库保持干净); 有更新 → 覆盖并提示 commit;
+#   拉取失败    → 降级回退本地那份(这正是本地副本存在的意义)。
+# offline 完全不联网。⚠ 离线副本必须**随 git 分发** —— 只在部署时拉到盘上不算数。
+say "[1/6] chart 离线副本 $(basename "${BMC_EXPORTER_CHART_TGZ}")(模式=${BMC_EXPORTER_MODE})..."
+if [ "${BMC_EXPORTER_MODE}" = "online" ] && [ "${_HAVE_CREDS}" = "1" ]; then
     # --password-stdin: 不把密码放进 argv(ps 可见); 无凭据时 helm 走匿名(该 Harbor 公开只读)
-    if [ "${_HAVE_CREDS}" = "1" ]; then
-        printf '%s' "${BMC_EXPORTER_HARBOR_PASSWORD}" | helm registry login "${BMC_EXPORTER_HARBOR}" \
-            -u "${BMC_EXPORTER_HARBOR_USER}" --password-stdin >/dev/null 2>&1 \
-            || warn "  helm registry login 失败(继续尝试匿名拉取)"
-    fi
-    if helm pull "${BMC_EXPORTER_CHART_REF}" --version "${BMC_EXPORTER_CHART_VERSION}" --destination "${_TMPD}" >/dev/null 2>&1; then
-        # helm 落盘名 = <chart>-<ver>.tgz = cubestack-bmc-exporter-chart-<ver>.tgz;
-        # 统一改名为本模块派生路径(与 offline 模式约定一致)
-        _PULLED="$(ls -1t "${_TMPD}"/*.tgz 2>/dev/null | head -1 || true)"
-        if [ -n "${_PULLED}" ]; then
-            mv -f "${_PULLED}" "${BMC_EXPORTER_CHART_TGZ}"
-            ok "  chart 已更新: $(basename "${BMC_EXPORTER_CHART_TGZ}")"
-            _CHART_OK=1
-        fi
-    fi
-    rm -rf "${_TMPD}"; unset _TMPD _PULLED
-    if [ "${_CHART_OK}" != "1" ]; then
-        if [ -f "${BMC_EXPORTER_CHART_TGZ}" ]; then
-            warn "  私服拉取失败, **回退使用本地 chart**: $(basename "${BMC_EXPORTER_CHART_TGZ}")"
-        else
-            err "  私服拉取失败且本地无 chart: ${BMC_EXPORTER_CHART_TGZ}"
-            err "  核对: helm pull ${BMC_EXPORTER_CHART_REF} --version ${BMC_EXPORTER_CHART_VERSION} -d ${BMC_EXPORTER_CHART_DIR}"
-            exit 1
-        fi
-    fi
-    unset _CHART_OK
-else
-    say "[1/6] offline: 跳过私服同步(只用本地制品)"
+    printf '%s' "${BMC_EXPORTER_HARBOR_PASSWORD}" | helm registry login "${BMC_EXPORTER_HARBOR}" \
+        -u "${BMC_EXPORTER_HARBOR_USER}" --password-stdin >/dev/null 2>&1 \
+        || warn "  helm registry login 失败(继续尝试匿名拉取)"
 fi
-
-# chart 是后续 helm 安装的唯一来源(两种模式都必须存在)
-[ -f "${BMC_EXPORTER_CHART_TGZ}" ] || {
-    err "chart tgz 不存在: ${BMC_EXPORTER_CHART_TGZ}"
-    err "  online : 检查私服可达性后重跑"
-    err "  离线机 : 在联网机跑一次 online 模式(或 helm pull)后, 把 tgz 拷入该目录"
-    exit 1
-}
+helm_chart_ensure "bmc-exporter" "${BMC_EXPORTER_CHART_TGZ}" "${BMC_EXPORTER_CHART_VERSION}" \
+    "${BMC_EXPORTER_MODE}" "${BMC_EXPORTER_CHART_REF}" || exit 1
 
 # ---- 1b. online: 镜像同步(私服 pull → 本地 tar; digest 未变则跳过下载) ----
 # 只负责"私服 → 本地 tar"这一段; 推入内置 registry 由 1c 统一做(两种模式共用)。
 if [ "${BMC_EXPORTER_MODE}" = "online" ]; then
     skopeo_require "bmc"     # 拉取与推送都依赖 skopeo
-    _SYNC_N=0; _SYNC_SKIP=0
+    _SYNC_N=0; _SYNC_SKIP=0; _SYNC_FB=0
     sync_bmc_tar() {   # <comp>
         local comp="$1"
         local src="${_SRC_IMAGE_BASE}/${comp}:${BMC_EXPORTER_IMAGE_TAG}"
@@ -204,17 +181,19 @@ if [ "${BMC_EXPORTER_MODE}" = "online" ]; then
         done < <(_skopeo_src_opts)
 
         # ① 取私服上该 tag 的 digest(同时验证"镜像存在 + 私服可达")
-        remote_dg="$(skopeo inspect --format '{{.Digest}}' "${srcopts[@]}" "docker://${src}" 2>/dev/null || true)"
+        #    走共享助手(3 次重试): 单次 TLS 超时不得被当成"私服没这个镜像"而静默跳过下载
+        #    结果经全局回传(**不能写成 $(...)**: 子 shell 里函数设的 SKOPEO_PULL_ERR 传不出来)
+        remote_image_digest "${src}" "${srcopts[@]}"; remote_dg="${SKOPEO_REMOTE_DIGEST}"
         # ② 与本地边车比对: digest 相同且 tar 在 → 跳过下载(不白传)
         [ -f "${dgfile}" ] && local_dg="$(cat "${dgfile}" 2>/dev/null || true)"
         if [ -n "${remote_dg}" ] && [ -n "${local_dg}" ] && [ "${remote_dg}" = "${local_dg}" ] && [ -f "${tar}" ]; then
             ok "  ${comp}:${BMC_EXPORTER_IMAGE_TAG} 私服 digest 未变, 跳过下载(本地已有 $(basename "${tar}"))"
             _SYNC_SKIP=$((_SYNC_SKIP + 1)); return 0
         fi
-        # ③ 下载(覆盖旧 tar)
+        # ③ 下载(走共享助手: 3 次整包重试 + 失败不动原有 tar; 原因回传给下面的告警)
         if [ -n "${remote_dg}" ]; then
             say "  [拉取] ${comp}:${BMC_EXPORTER_IMAGE_TAG} → $(basename "${tar}")"
-            if skopeo copy --quiet "${srcopts[@]}" "docker://${src}" "docker-archive:${tar}" >/dev/null 2>&1; then
+            if pull_image_skopeo "${src}" "${tar}" "${srcopts[@]}"; then
                 printf '%s' "${remote_dg}" > "${dgfile}"
                 chmod 644 "${tar}" "${dgfile}" 2>/dev/null || true
                 ok "  ${comp} 已落盘(digest ${remote_dg:0:19}...)"
@@ -223,11 +202,14 @@ if [ "${BMC_EXPORTER_MODE}" = "online" ]; then
         fi
         if [ "${ok_dl}" != "1" ]; then
             # 私服不可达/拉取失败 → 回退本地已有 tar(与 chart 的降级语义对称)
+            # ⚠ 回退是**降级**不是成功: 必须把原因打出来, 否则"用着旧制品"这件事没人看得见
             if [ -f "${tar}" ]; then
-                warn "  ${comp} 私服拉取失败, **回退使用本地 tar**(可能是旧版本)"
+                warn "  ${comp} 私服拉取失败(${SKOPEO_PULL_ERR:-未知原因}), **回退使用本地 tar**(可能是旧版本)"
+                _SYNC_FB=$((_SYNC_FB + 1))
                 return 0
             fi
             err "  ${comp} 私服拉取失败且本地无 tar: ${tar}"
+            err "  原因: ${SKOPEO_PULL_ERR:-未知原因}"
             err "  排查: skopeo inspect docker://${src}(私服可达? tag 存在?)"
             return 1
         fi
@@ -235,8 +217,13 @@ if [ "${BMC_EXPORTER_MODE}" = "online" ]; then
     }
     say "[1/6] online: 从私服同步镜像(${_SRC_IMAGE_BASE}/{bmc-oem-exporter,idrac-exporter}:${BMC_EXPORTER_IMAGE_TAG})..."
     for _c in "${_BMC_COMPONENTS[@]}"; do sync_bmc_tar "${_c}" || exit 1; done
-    ok "  镜像同步完成(新下载 ${_SYNC_N} 个, digest 未变跳过 ${_SYNC_SKIP} 个)"
-    unset _SYNC_N _SYNC_SKIP _c
+    # 汇总里必须出现"回退 N 个" —— 否则"0 新下载 0 跳过"读起来像一切正常, 实际是全部用了旧 tar
+    if [ "${_SYNC_FB}" -gt 0 ]; then
+        warn "  镜像同步完成(新下载 ${_SYNC_N} 个, digest 未变跳过 ${_SYNC_SKIP} 个, **回退本地旧 tar ${_SYNC_FB} 个**)"
+    else
+        ok "  镜像同步完成(新下载 ${_SYNC_N} 个, digest 未变跳过 ${_SYNC_SKIP} 个)"
+    fi
+    unset _SYNC_N _SYNC_SKIP _SYNC_FB _c
 fi
 
 # ---- 1c. 推入集群内置 registry(两种模式共用; 节点只从这里拉) ----
@@ -455,19 +442,20 @@ fi
 echo "---------------------------------------------"
 ok "BMC exporter 部署完成"
 echo "  模式:        ${BMC_EXPORTER_MODE}$( [ "${BMC_EXPORTER_MODE}" = "online" ] && echo "(已从私服 ${BMC_EXPORTER_HARBOR} 同步制品)" || echo "(未联网, 使用本地制品)" )"
-echo "  chart:       $(basename "${BMC_EXPORTER_CHART_TGZ}")(本地 tgz)"
+echo "  chart:       $(basename "${BMC_EXPORTER_CHART_TGZ}")(仓库内 vendored 离线副本, 随 git 分发)"
 echo "  镜像:        ${BMC_EXPORTER_IMAGE_BASE}/{bmc-oem-exporter,idrac-exporter}:${BMC_EXPORTER_IMAGE_TAG}"
 echo "               (统一来自集群内置 registry; 节点不需任何私服凭据)"
 echo "  namespace:   ${BMC_EXPORTER_NAMESPACE}(helm release ${BMC_EXPORTER_RELEASE})"
 echo "  BMC 目标:    ${#_BMC_HOSTS[@]} 个(${_BMC_HOSTS[*]})"
 echo "  TLS 校验:    $( [ "${BMC_TLS_INSECURE}" = "true" ] && echo "已跳过(自签证书; 生产应配 CA 并置 false)" || echo "开启" )"
 echo "  ScrapeConfig releaseLabel: ${PROMETHEUS_RELEASE_NAME}(须与 Prometheus CR 的 scrapeConfigSelector 匹配)"
-echo "  离线制品:    ${BMC_EXPORTER_OFFLINE_DIR}/(已含本次 chart 与镜像 tar, 可直接切纯离线)"
+echo "  离线制品:    ${BMC_EXPORTER_OFFLINE_DIR}/(镜像 tar, 可直接切纯离线)"
 if [ -n "${_ROLL_FAIL}" ]; then
     echo "  ⚠ 未就绪:${_ROLL_FAIL}(kubectl -n ${BMC_EXPORTER_NAMESPACE} get pods 复查)"
 fi
 echo "  资源查看:    kubectl -n ${BMC_EXPORTER_NAMESPACE} get deploy,scrapeconfig | grep -i bmc"
 echo "  端到端验证:  sudo ./deploy-cluster.sh --steps verify_prometheus   # ⑧ 段断言 bmc target up"
-echo "  切纯离线:    cluster.conf 置 BMC_EXPORTER_MODE=offline(制品已在上面的目录里), 无需其他准备"
+echo "  切纯离线:    cluster.conf 置 BMC_EXPORTER_MODE=offline —— chart 用仓库内离线副本,"
+echo "               镜像用 ${BMC_EXPORTER_OFFLINE_DIR}/(上面那次 online 已备好), 无需其他准备"
 echo "  卸载:        helm uninstall ${BMC_EXPORTER_RELEASE} -n ${BMC_EXPORTER_NAMESPACE}"
 unset _BMC_HOSTS _ROLL_FAIL

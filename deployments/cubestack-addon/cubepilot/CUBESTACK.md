@@ -9,18 +9,22 @@
 
 | | `online`(默认) | `offline` |
 |---|---|---|
-| 同步 | 部署前从私服拉 chart + 4 镜像**落盘到本地** | **不碰外网**,直接用盘上已有制品 |
-| chart 来源 | 同步落盘 `cubestack-addon/cubepilot/cubepilot-<ver>.tgz` | 同左(同一路径) |
+| 同步 | 部署前从私服同步 **4 镜像 → 本地 tar**,并拿私服 digest 与**离线 chart** 比对 | **不碰外网**,直接用盘上已有制品 |
+| chart 来源 | **本目录的 `cubepilot-<ver>.tgz`**(vendored 离线副本);online 仅在有更新时覆盖它 | 同左(同一路径) |
 | 镜像来源 | **集群内置 registry** `<REGISTRY_DOMAIN>:<PORT>/suanova/cubepilot-*` | 同左(同一路径) |
 | 部署路径 | **与 offline 完全相同**(同一段代码) | — |
 | 外网依赖 | 仅**部署机**需可达 `harbor.isuanova.com`(节点不需要) | 无 |
 | 凭据 | **不需要**(私服公开只读;私有化后才需 `CUBEPILOT_HARBOR_USER/PASSWORD`) | 不需要 |
 | 适用 | 联网环境 / 在线测试 | 生产 / 隔离 / 离线集群 |
 
-**两条关键性质:**
+**三条关键性质:**
 
-- **online 跑过一次后,制品已在盘上 → 改 `CUBEPILOT_MODE=offline` 即可切纯离线**,无需任何额外准备。
-- **online 在私服不可达时自动降级**:拉不到就退回本地已有制品(告警不中断);本地也没有才报错。
+- **chart 恒用本目录这份离线副本**:online 只是「拉远端 → 比 digest → 有更新才覆盖 → 提示 commit」,
+  安装用的始终是本地这份。所以**它必须随 git 提交** —— 只在部署时落到盘上不算数。
+- **online 跑过一次后,镜像已在盘上 → 改 `CUBEPILOT_MODE=offline` 即可切纯离线**,无需任何额外准备。
+- **online 在私服不可达时自动降级**:拉不到就退回本地已有制品(告警不中断);本地也没有才报错 ——
+  本地也没有时,chart 那份会因「离线副本缺失」直接 `err` 退出(这是有意的,见全局规范
+  `docs/scripts-development-spec.md` §2.4)。
 
 本目录**不存 manifest / 镜像 tar**:online 由模块在部署时同步,offline 的产物由下方工具在联网机生成后放置。
 

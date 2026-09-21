@@ -9,12 +9,16 @@
 # REQUIRES: k8s_registry
 # 说明:
 #   · **制品流向统一(核心)**: 不论哪种模式, 节点**只从集群内置 registry 拉镜像**, 部署机 helm 装**本地 chart tgz**。
-#       online  = 部署前先从私服 Harbor 同步制品到本地(chart pull 到 cubestack-addon/cubepilot/,
-#                 镜像 pull 成 offline-files/cubepilot/*.tar), 再推入内置 registry, 之后与 offline **同路**部署
+#       online  = 部署前先从私服 Harbor 同步制品到本地(镜像 pull 成 offline-files/cubepilot/*.tar),
+#                 再推入内置 registry, 之后与 offline **同路**部署; chart 另见下条(恒用本地副本)
 #       offline = 不碰外网, 直接用盘上已有制品(联网机预置的, 或上一次 online 留下的)推入内置 registry 后部署
 #     ⇒ 两种模式的**部署路径是同一段代码**, 差别只在"开头要不要联网同步"。
-#       因此 online 跑过一次后制品已在盘上, **改 CUBEPILOT_MODE=offline 即可切纯离线**(无需额外准备)。
 #     ⚠ online 在私服不可达时**自动降级**: 拉不到就退回本地已有制品(告警, 不中断); 本地也没有才报错。
+#   · **chart 恒用仓库内 vendored 的离线副本**(cubestack-addon/cubepilot/cubepilot-<ver>.tgz, 随 git 分发)。
+#     online **不直接装私服上拉到的那份** —— 它只负责拿远端 digest 与 <tgz>.digest 边车比对:
+#     未变 → 继续用本地那份(仓库保持干净); 有更新 → 覆盖本地副本并提示 commit; 拉取失败 → 回退本地那份。
+#     实现收敛在 lib-common 的 helm_chart_ensure(全仓库统一约定, 见 docs/scripts-development-spec.md §2.4)。
+#     ⇒ 所以**离线副本缺失就是致命错误**(拿不到任何 chart), 必须随仓库提交, 不能只在部署时拉到盘上。
 #   · 私服 Harbor: harbor.isuanova.com/suanova —— 该项目**公开只读(anonymous pull)**, 无需任何凭据;
 #     如将来收紧为私有, 配 CUBEPILOT_HARBOR_USER/PASSWORD 即可(helm 与 skopeo 两侧都会带上)。
 #     私服自签证书时置 CUBEPILOT_HARBOR_INSECURE=true 跳过 TLS 校验。
@@ -142,63 +146,34 @@ sync_kubeconfig \
     || { err "本机无法访问集群(admin.conf 下载/同步失败), helm 无法安装"; exit 1; }
 
 # ============================================================
-# 1. 制品就绪 —— online 先从私服同步到本地, 之后两条路完全同路
+# 1. 制品就绪 —— 节点只从内置 registry 拉镜像, chart 恒用本地离线副本
 # ============================================================
 # 本段结束后的**不变量**(后续步骤只依赖它, 不再关心模式):
 #   · ${CUBEPILOT_CHART_TGZ} 存在                       (helm 从这里装)
 #   · 用到的每个组件在内置 registry 里已有 <tag> 镜像    (节点从这里拉)
 mkdir -p "${CUBEPILOT_CHART_DIR}" "${CUBEPILOT_OFFLINE_DIR}"
 
-# ---- 1a. online: chart 同步(私服 pull 成功即覆盖本地; 失败回退本地文件) ----
-if [ "${CUBEPILOT_MODE}" = "online" ]; then
-    say "[1/7] online: 从私服同步 chart(${CUBEPILOT_CHART_REF}:${CUBEPILOT_VERSION})..."
-    _TMPD="$(mktemp -d)"
-    _CHART_OK=0
+# ---- 1a. chart 就绪: 恒用仓库内 vendored 的离线副本 ----
+# online **不直接装私服上拉到的那份** —— 它的作用是拿远端 digest 与 <tgz>.digest 边车比对,
+# 决定要不要刷新本地这份副本(见 lib-common helm_chart_ensure):
+#   digest 未变 → 继续用本地那份(仓库保持干净); 有更新 → 覆盖并提示 commit;
+#   拉取失败    → 降级回退本地那份(这正是本地副本存在的意义)。
+# offline 完全不联网。⚠ 离线副本必须**随 git 分发** —— 只在部署时拉到盘上不算数。
+say "[1/7] chart 离线副本 $(basename "${CUBEPILOT_CHART_TGZ}")(模式=${CUBEPILOT_MODE})..."
+if [ "${CUBEPILOT_MODE}" = "online" ] && [ "${_HAVE_CREDS}" = "1" ]; then
     # --password-stdin: 不把密码放进 argv(ps 可见); 无凭据时 helm 走匿名(该 Harbor 公开只读)
-    if [ "${_HAVE_CREDS}" = "1" ]; then
-        printf '%s' "${CUBEPILOT_HARBOR_PASSWORD}" | helm registry login "${CUBEPILOT_HARBOR}" \
-            -u "${CUBEPILOT_HARBOR_USER}" --password-stdin >/dev/null 2>&1 \
-            || warn "  helm registry login 失败(继续尝试匿名拉取)"
-    fi
-    if helm pull "${CUBEPILOT_CHART_REF}" --version "${CUBEPILOT_VERSION}" --destination "${_TMPD}" >/dev/null 2>&1; then
-        # helm 落盘名 = <chart>-<ver>.tgz, 即 **cubepilot-chart-<ver>.tgz**;
-        # 统一改名为模块派生路径 cubepilot-<ver>.tgz(与 offline 模式、fetch-charts.sh 一致)
-        _PULLED="$(ls -1t "${_TMPD}"/*.tgz 2>/dev/null | head -1 || true)"
-        if [ -n "${_PULLED}" ]; then
-            mv -f "${_PULLED}" "${CUBEPILOT_CHART_TGZ}"
-            ok "  chart 已更新: $(basename "${CUBEPILOT_CHART_TGZ}")"
-            _CHART_OK=1
-        fi
-    fi
-    rm -rf "${_TMPD}"; unset _TMPD _PULLED
-    if [ "${_CHART_OK}" != "1" ]; then
-        if [ -f "${CUBEPILOT_CHART_TGZ}" ]; then
-            warn "  私服拉取失败, **回退使用本地 chart**: $(basename "${CUBEPILOT_CHART_TGZ}")"
-        else
-            err "  私服拉取失败且本地无 chart: ${CUBEPILOT_CHART_TGZ}"
-            err "  核对: helm pull ${CUBEPILOT_CHART_REF} --version ${CUBEPILOT_VERSION} -d ${CUBEPILOT_CHART_DIR}"
-            err "  或在联网机执行: ./deployments/scripts/tools/images/cubepilot-fetch-charts.sh"
-            exit 1
-        fi
-    fi
-    unset _CHART_OK
-else
-    say "[1/7] offline: 跳过私服同步(只用本地制品)"
+    printf '%s' "${CUBEPILOT_HARBOR_PASSWORD}" | helm registry login "${CUBEPILOT_HARBOR}" \
+        -u "${CUBEPILOT_HARBOR_USER}" --password-stdin >/dev/null 2>&1 \
+        || warn "  helm registry login 失败(继续尝试匿名拉取)"
 fi
-
-# chart 是后续 helm 安装的唯一来源(两种模式都必须存在)
-[ -f "${CUBEPILOT_CHART_TGZ}" ] || {
-    err "chart tgz 不存在: ${CUBEPILOT_CHART_TGZ}"
-    err "  online : 检查私服可达性后重跑"
-    err "  离线机 : ./deployments/scripts/tools/images/cubepilot-fetch-charts.sh 生成后拷入该目录"
-    exit 1
-}
+helm_chart_ensure "cubepilot" "${CUBEPILOT_CHART_TGZ}" "${CUBEPILOT_VERSION}" \
+    "${CUBEPILOT_MODE}" "${CUBEPILOT_CHART_REF}" || exit 1
 
 # ---- 1b. online: 镜像同步(私服 pull → 本地 tar; digest 未变则跳过下载) ----
 # 只负责"私服 → 本地 tar"这一段; 推入内置 registry 由 1c 统一做(两种模式共用)。
 if [ "${CUBEPILOT_MODE}" = "online" ]; then
     skopeo_require "cubepilot"     # 拉取与推送都依赖 skopeo
-    _SYNC_N=0; _SYNC_SKIP=0
+    _SYNC_N=0; _SYNC_SKIP=0; _SYNC_FB=0
     sync_cubepilot_tar() {   # <comp>
         local comp="$1"
         local src="${_SRC_IMAGE_BASE}/cubepilot-${comp}:${_IMG_TAG}"
@@ -211,17 +186,19 @@ if [ "${CUBEPILOT_MODE}" = "online" ]; then
         done < <(_skopeo_src_opts)
 
         # ① 取私服上该 tag 的 digest(同时验证"镜像存在 + 私服可达")
-        remote_dg="$(skopeo inspect --format '{{.Digest}}' "${srcopts[@]}" "docker://${src}" 2>/dev/null || true)"
+        #    走共享助手(3 次重试): 单次 TLS 超时不得被当成"私服没这个镜像"而静默跳过下载
+        #    结果经全局回传(**不能写成 $(...)**: 子 shell 里函数设的 SKOPEO_PULL_ERR 传不出来)
+        remote_image_digest "${src}" "${srcopts[@]}"; remote_dg="${SKOPEO_REMOTE_DIGEST}"
         # ② 与本地边车比对: digest 相同且 tar 在 → 跳过下载(不白传)
         [ -f "${dgfile}" ] && local_dg="$(cat "${dgfile}" 2>/dev/null || true)"
         if [ -n "${remote_dg}" ] && [ -n "${local_dg}" ] && [ "${remote_dg}" = "${local_dg}" ] && [ -f "${tar}" ]; then
             ok "  cubepilot-${comp}:${_IMG_TAG} 私服 digest 未变, 跳过下载(本地已有 $(basename "${tar}"))"
             _SYNC_SKIP=$((_SYNC_SKIP + 1)); return 0
         fi
-        # ③ 下载(覆盖旧 tar)
+        # ③ 下载(走共享助手: 3 次整包重试 + 失败不动原有 tar; 原因回传给下面的告警)
         if [ -n "${remote_dg}" ]; then
             say "  [拉取] cubepilot-${comp}:${_IMG_TAG} → $(basename "${tar}")"
-            if skopeo copy --quiet "${srcopts[@]}" "docker://${src}" "docker-archive:${tar}" >/dev/null 2>&1; then
+            if pull_image_skopeo "${src}" "${tar}" "${srcopts[@]}"; then
                 printf '%s' "${remote_dg}" > "${dgfile}"
                 chmod 644 "${tar}" "${dgfile}" 2>/dev/null || true
                 ok "  cubepilot-${comp} 已落盘(digest ${remote_dg:0:19}...)"
@@ -230,11 +207,14 @@ if [ "${CUBEPILOT_MODE}" = "online" ]; then
         fi
         if [ "${ok_dl}" != "1" ]; then
             # 私服不可达/拉取失败 → 回退本地已有 tar(与 chart 的降级语义对称)
+            # ⚠ 回退是**降级**不是成功: 必须把原因打出来, 否则"用着旧制品"这件事没人看得见
             if [ -f "${tar}" ]; then
-                warn "  cubepilot-${comp} 私服拉取失败, **回退使用本地 tar**(可能是旧版本)"
+                warn "  cubepilot-${comp} 私服拉取失败(${SKOPEO_PULL_ERR:-未知原因}), **回退使用本地 tar**(可能是旧版本)"
+                _SYNC_FB=$((_SYNC_FB + 1))
                 return 0
             fi
             err "  cubepilot-${comp} 私服拉取失败且本地无 tar: ${tar}"
+            err "  原因: ${SKOPEO_PULL_ERR:-未知原因}"
             err "  排查: skopeo inspect docker://${src}(私服可达? tag 存在?)"
             return 1
         fi
@@ -251,8 +231,13 @@ if [ "${CUBEPILOT_MODE}" = "online" ]; then
     else
         say "  跳过 cubepilot-web(内置 Portal 未启用; 需要时置 CUBEPILOT_WEB_ENABLED=true 重跑)"
     fi
-    ok "  镜像同步完成(新下载 ${_SYNC_N} 个, digest 未变跳过 ${_SYNC_SKIP} 个)"
-    unset _SYNC_N _SYNC_SKIP
+    # 汇总里必须出现"回退 N 个" —— 否则"0 新下载 0 跳过"读起来像一切正常, 实际是全部用了旧 tar
+    if [ "${_SYNC_FB}" -gt 0 ]; then
+        warn "  镜像同步完成(新下载 ${_SYNC_N} 个, digest 未变跳过 ${_SYNC_SKIP} 个, **回退本地旧 tar ${_SYNC_FB} 个**)"
+    else
+        ok "  镜像同步完成(新下载 ${_SYNC_N} 个, digest 未变跳过 ${_SYNC_SKIP} 个)"
+    fi
+    unset _SYNC_N _SYNC_SKIP _SYNC_FB
 fi
 
 # ---- 1c. 推入集群内置 registry(两种模式共用; 节点只从这里拉) ----
@@ -469,11 +454,11 @@ fi
 echo "---------------------------------------------"
 ok "CubePilot 部署完成"
 echo "  模式:        ${CUBEPILOT_MODE}$( [ "${CUBEPILOT_MODE}" = "online" ] && echo "(已从私服 ${CUBEPILOT_HARBOR} 同步制品)" || echo "(未联网, 使用本地制品)" )"
-echo "  chart:       $(basename "${CUBEPILOT_CHART_TGZ}")(本地 tgz)"
+echo "  chart:       $(basename "${CUBEPILOT_CHART_TGZ}")(仓库内 vendored 离线副本, 随 git 分发)"
 echo "  镜像:        ${CUBEPILOT_IMAGE_BASE}/cubepilot-{openclaw,operator,api,web}:${_IMG_TAG}"
 echo "               (统一来自集群内置 registry; 节点不需任何私服凭据)"
 echo "  namespace:   ${CUBEPILOT_NAMESPACE}(helm release ${CUBEPILOT_RELEASE})"
-echo "  离线制品:    ${CUBEPILOT_OFFLINE_DIR}/(已含本次 chart 与镜像 tar, 可直接切纯离线)"
+echo "  离线制品:    ${CUBEPILOT_OFFLINE_DIR}/(镜像 tar, 可直接切纯离线)"
 if [ "${CUBEPILOT_WEB_ENABLED}" = "true" ]; then
     echo "  内置 Portal: 已启用(cubepilot-web; 置 CUBEPILOT_WEB_ENABLED=false 可关)"
 else
@@ -491,5 +476,6 @@ else
     echo "  LLM:         未预置(默认无心智模型; 在 Portal → Agent Config → LLM Config 添加)"
 fi
 echo "  端到端验证:  sudo ./deploy-cluster.sh --steps verify_cubepilot"
-echo "  切纯离线:    cluster.conf 置 CUBEPILOT_MODE=offline(制品已在上面的目录里), 无需其他准备"
+echo "  切纯离线:    cluster.conf 置 CUBEPILOT_MODE=offline —— chart 用仓库内离线副本,"
+echo "               镜像用 ${CUBEPILOT_OFFLINE_DIR}/(上面那次 online 已备好), 无需其他准备"
 echo "  卸载:        helm uninstall ${CUBEPILOT_RELEASE} -n ${CUBEPILOT_NAMESPACE}"
