@@ -2,8 +2,11 @@
 # ============================================================
 # MODULE: verify_envoy_gateway
 # DESC: 端到端验证 Envoy Gateway 真正工作(非仅 pod running):
-#       ① 控制面 pod Ready → ② GatewayClass eg Accepted → ③ 建测试 Gateway+HTTPRoute+nginx httpd 后端
-#       → ④ 等 MetalLB 分配 VIP / 后端 Ready / 数据面 pod Ready(Programmed) → ⑤ curl VIP 真实转发 HTTP 200(重试吸收 L2 通告尾延迟) → ⑥ 清理(trap 兜底)
+#       ① 控制面 pod Ready → ② GatewayClass eg Accepted + parametersRef 生效(数据面暴露方式)
+#       → ③ 建测试 Gateway+HTTPRoute+nginx httpd 后端
+#       → ④ nodeport 模式**断言数据面 Service 类型=NodePort**(不做 patch)/ metallb 等 VIP, 且后端 +
+#         数据面 pod Ready(Programmed)、数据面镜像来自内置 registry
+#       → ⑤ curl 入口真实转发 HTTP 200(重试吸收 L2 通告尾延迟) → ⑥ 清理(trap 兜底)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
@@ -15,7 +18,8 @@
 #     离线可用), 验证 EG 数据面真实转发
 #     (Gateway → MetalLB VIP → Envoy 数据面 → 后端 pod)。
 #   · 参考: https://gateway.envoyproxy.io/ 与 docs/envoy-gateway.md §4.1
-# 数据源: cluster.conf (ENVOY_GATEWAY_ENABLED / ENVOY_EG_NAMESPACE / NODES / SSH_KEY_NAME / METALLB_POOL)
+# 数据源: cluster.conf (ENVOY_GATEWAY_ENABLED / ENVOY_EG_NAMESPACE / ENVOY_EG_PROXY_NAME /
+#         SERVICE_EXPOSE_MODE / NODES / SSH_KEY_NAME / METALLB_POOL / REGISTRY_DOMAIN)
 # 用法:   sudo ./deploy-cluster.sh --steps verify_envoy_gateway
 # ============================================================
 set -euo pipefail
@@ -33,6 +37,7 @@ init_remote_kubectl || exit 1
 TEST_IMAGE="$(ensure_registry_nginx)" || exit 1
 
 ENVOY_EG_NAMESPACE="${ENVOY_EG_NAMESPACE:-envoy-gateway-system}"
+ENVOY_EG_PROXY_NAME="${ENVOY_EG_PROXY_NAME:-cubestack-dataplane}"   # 数据面 EnvoyProxy(暴露方式 + 镜像的来源)
 TEST_NS="verify-eg-$$"   # 唯一命名空间(带 PID 后缀)
 TEST_GW="verify-eg-gw"
 TEST_HTTPROUTE="verify-eg-route"
@@ -126,7 +131,7 @@ scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null 
     && SSH "rm -f /tmp/${TEST_GW}.yaml"
 rm -f "${LOCAL_YAML}"
 
-say "  ④ 等待 Gateway 数据面就绪且后端 Ready(nodeport 模式: 数据面转 NodePort; metallb 模式: 等 VIP; 最长 150s)..."
+say "  ④ 等待 Gateway 数据面就绪且后端 Ready(nodeport 模式: 断言数据面 Service 已是 NodePort; metallb 模式: 等 VIP; 最长 150s)..."
 GW_ENDPOINT=""
 BACKEND_READY=0
 DP_READY=0
@@ -144,17 +149,24 @@ for i in $(seq 1 30); do
     # ⚠ jsonpath 内的双引号必须写成 \" 才能在多层 shell 传递后保留(裸 " 会被吞, 返回空)
     GW_PROG="$( (SSH "${K} -n ${TEST_NS} get gateway ${TEST_GW} -o jsonpath='{.status.conditions[?(@.type==\"Programmed\")].status}' 2>/dev/null" || true) )"
     if [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ]; then
-        # 无 MetalLB: 等数据面 Service 出现 → patch 成 NodePort → 访问入口 = 节点IP:NodePort
-        # (数据面 Service 默认在控制面命名空间, 兜底找 Gateway 同命名空间)
+        # nodeport 模式: 数据面 Service 必须**本来就是** NodePort —— 由 GatewayClass eg 的
+        # parametersRef(EnvoyProxy/${ENVOY_EG_PROXY_NAME}) 声明。
+        # ⚠ 本模块 2026-09-21 前是"等 Service 出现 → patch 成 NodePort": 那是事后打补丁, 会把
+        #   "class 配置没生效"这类真问题掩盖成"验证通过"。现在改为**断言**, 类型不符直接失败。
         SVC_LINE="$( (SSH "${K} -n ${ENVOY_EG_NAMESPACE} get svc -l gateway.envoyproxy.io/owning-gateway-name=${TEST_GW} --no-headers 2>/dev/null" || true) | head -1 )"
         [ -z "${SVC_LINE}" ] && SVC_LINE="$( (SSH "${K} -n ${TEST_NS} get svc -l gateway.envoyproxy.io/owning-gateway-name=${TEST_GW} --no-headers 2>/dev/null" || true) | head -1 )"
         if [ -n "${SVC_LINE}" ]; then
-            # 单命名空间 get svc 列序: NAME TYPE CLUSTER-IP ... → 名称取 $1(勿用 $2, 那是 TYPE)
+            # 单命名空间 get svc 列序: NAME TYPE CLUSTER-IP ... → 名称取 $1, 类型取 $2
             DP_NAME="$(echo "${SVC_LINE}" | awk '{print $1}')"
-            SSH "${K} -n ${ENVOY_EG_NAMESPACE} patch svc ${DP_NAME} -p '{\"spec\":{\"type\":\"NodePort\"}}' >/dev/null 2>&1" || true
-            NPORT="$( (SSH "${K} -n ${ENVOY_EG_NAMESPACE} get svc ${DP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
-            [ -z "${NPORT}" ] && NPORT="$( (SSH "${K} -n ${TEST_NS} get svc ${DP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
-            [ -n "${NPORT}" ] && GW_ENDPOINT="$(first_node_ip):${NPORT}"
+            DP_TYPE="$(echo "${SVC_LINE}" | awk '{print $2}')"
+            if [ "${DP_TYPE}" = "NodePort" ]; then
+                NPORT="$( (SSH "${K} -n ${ENVOY_EG_NAMESPACE} get svc ${DP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
+                [ -z "${NPORT}" ] && NPORT="$( (SSH "${K} -n ${TEST_NS} get svc ${DP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true) )"
+                [ -n "${NPORT}" ] && GW_ENDPOINT="$(first_node_ip):${NPORT}"
+            else
+                DP_TYPE_BAD="${DP_TYPE}"; DP_NAME_BAD="${DP_NAME}"   # 类型不符不会自愈 → 跳出等待循环
+                break
+            fi
         fi
     else
         GW_ENDPOINT="$( (SSH "${K} -n ${TEST_NS} get gateway ${TEST_GW} -o jsonpath='{.status.addresses[0].value}' 2>/dev/null" || true) )"
@@ -162,6 +174,10 @@ for i in $(seq 1 30); do
     [ -n "${GW_ENDPOINT}" ] && [ "${BACKEND_READY:-0}" -ge 1 ] && [ "${DP_READY:-0}" -ge 1 ] && [ "${GW_PROG}" = "True" ] && break
     sleep 5
 done
+[ -n "${DP_TYPE_BAD:-}" ] && { err "数据面 Service(${DP_NAME_BAD:-?}) 类型为 '${DP_TYPE_BAD}', 但 SERVICE_EXPOSE_MODE=nodeport 要求 NodePort"; \
+    err "  说明 GatewayClass eg 的 parametersRef(EnvoyProxy/${ENVOY_EG_PROXY_NAME}) 未生效(该 class 下所有 Gateway 都受影响);"; \
+    err "  排查: kubectl get gatewayclass eg -o jsonpath='{.spec.parametersRef}'; kubectl -n ${ENVOY_EG_NAMESPACE} get envoyproxy ${ENVOY_EG_PROXY_NAME};"; \
+    err "  修复: sudo ./deploy-cluster.sh --steps envoy_gateway --fresh(重建 EnvoyProxy + GatewayClass 后重跑本验证)"; exit 1; }
 [ -n "${GW_ENDPOINT}" ] || { err "Gateway 数据面未就绪(kubectl -n ${TEST_NS} get gateway ${TEST_GW} / get svc -A -l gateway.envoyproxy.io/owning-gateway-name=${TEST_GW}; nodeport 模式检查数据面 Service 是否出现)"; exit 1; }
 [ "${BACKEND_READY:-0}" -ge 1 ] || { err "测试后端未 Ready(kubectl -n ${TEST_NS} get pods; 检查 nginx 镜像是否已推送进集群 registry(${TEST_IMAGE})与节点能否拉取)"; exit 1; }
 [ "${DP_READY:-0}" -ge 1 ] || { err "EG 数据面 pod 未 Ready(kubectl -n ${ENVOY_EG_NAMESPACE} get pods -l gateway.envoyproxy.io/owning-gateway-name=${TEST_GW}; 检查数据面镜像/日志: ${ENVOY_EG_NAMESPACE} 内 get logs <数据面pod> -c envoy)"; exit 1; }
@@ -176,7 +192,13 @@ if [ -n "${DP_IMG}" ]; then
     echo "    数据面镜像: ${DP_IMG}"
     case "${DP_IMG}" in
         *"${REGISTRY_DOMAIN}"*) ok "    数据面镜像来自集群内置 registry ✓" ;;
-        *) warn "    数据面镜像不是内置 registry(${DP_IMG}); 离线集群可能 ImagePullBackOff, 检查 chart values envoyGateway.image.*" ;;
+        *) # ★ 硬失败: 数据面镜像不在内置 registry = 离线集群迟早 ImagePullBackOff。
+           #   数据面镜像**唯一**来源是 EnvoyProxy/${ENVOY_EG_PROXY_NAME} 的 envoyDeployment.container.image
+           #   (helm 的 global.images.envoyProxy.image 只兜底不经本 class 的 Gateway)。
+           err "    数据面镜像不在集群内置 registry: ${DP_IMG}"
+           err "      期望前缀: ${REGISTRY_DOMAIN}(由 EnvoyProxy ${ENVOY_EG_NAMESPACE}/${ENVOY_EG_PROXY_NAME} 决定)"
+           err "      排查: kubectl -n ${ENVOY_EG_NAMESPACE} get envoyproxy ${ENVOY_EG_PROXY_NAME} -o jsonpath='{.spec.provider.kubernetes.envoyDeployment.container.image}'"
+           exit 1 ;;
     esac
 else
     warn "    未找到数据面 Deployment(检查 Gateway 状态: kubectl -n ${TEST_NS} describe gateway ${TEST_GW})"
