@@ -63,9 +63,16 @@
 - **控制面** `eg`(release 名, Deployment 在 `envoy-gateway-system`): 监听 Gateway API 资源 → 翻译成 xDS(Listener/Route/Cluster/Endpoint)→ gRPC 推送数据面。
 - **数据面** Envoy Proxy: 用户创建 `Gateway` 后, 控制器自动在集群内创建 Envoy Proxy Deployment/Service(非 Sidecar), 承担真实流量。
 - **入口暴露(metallb 模式, 默认/生产)**: Gateway 的 Listener 通过 MetalLB(本集群)分配 VIP → 外部 URL 可达。
-- **入口暴露(nodeport 模式, 测试环境)**: `SERVICE_EXPOSE_MODE=nodeport` 时不部署 MetalLB, 数据面 Service 默认仍创建为 LoadBalancer, 需转 NodePort 才可访问:
-  - 创建 Gateway 时加注解(推荐, 持久): `gateway.envoyproxy.io/service-type: NodePort`, 之后数据面自动以 NodePort 暴露;
-  - 对已创建、未带注解的 Gateway/AIGateway: 运行 `sudo ./deployments/scripts/tools/lb/gateway-nodeport.sh <gateway名> [namespace]`, 一键 patch 数据面 Service 为 NodePort 并打印 `节点IP:NodePort` 访问地址。
+- **入口暴露(nodeport 模式, 测试环境)**: `SERVICE_EXPOSE_MODE=nodeport` 时不部署 MetalLB, 数据面 Service
+  必须**本来就是** NodePort, 否则一直 `EXTERNAL-IP=<pending>`。做法是 **EnvoyProxy CR + GatewayClass
+  parametersRef**(见 §3.5), 模块 15 按模式自动声明 —— 该 class 下所有 Gateway 自动继承, **无需**逐个处理:
+  - `nodeport` 模式 → 数据面 Service type=NodePort, 访问入口 = `<任一节点IP>:<自动分配的 NodePort>`
+    (验证模块会把实际端口打印出来);
+  - `metallb` 模式 → type=LoadBalancer, 由 MetalLB 分配 VIP。
+  - ⚠ **不要**再走"给 Gateway 加注解 `gateway.envoyproxy.io/service-type: NodePort`"那条路 ——
+    **EG v1.9.1 根本不认该注解**(2026-09-17 实测, 加了也还是 LoadBalancer);
+  - 存量(本次改动之前创建)Gateway 的数据面 Service 可用
+    `sudo ./deployments/scripts/tools/lb/gateway-nodeport.sh <gateway名> [namespace]` 一键转换。
 - **固定名别名 Service(对外入口稳定)**: 控制器为每个 Gateway 生成的数据面 Service 名为
   `envoy-<ns>-<gateway名>-<hash>`(含 hash, 由控制器拥有命名权, 不可由用户改名)。`gateway-nodeport.sh`
   转换后会**自动创建固定名别名 Service `<gateway名>-external`**(如 `ai-gateway` → `ai-gateway-external`,
@@ -91,7 +98,7 @@
 > - **单 Gateway + 单 HTTP Listener(80) + 多 hostname**, 每服务一条 HTTPRoute(放服务自己的命名空间, 跨 ns 绑定),
 >   替代"每个组件一个 NodePort `*-external`"的分散暴露;
 > - 复用 EG 的 `eg` GatewayClass(**不重复建 class**); Gateway 放独立基础设施命名空间, 不混入 `envoy-gateway-system`/`default`;
-> - 数据面类型用注解 `gateway.envoyproxy.io/service-type: NodePort` 声明(nodeport 模式持久化, 避免手动 patch 被控制器 reconcile 回 LoadBalancer);
+> - 数据面类型由 `eg` class 的 EnvoyProxy 统一声明(§3.5): nodeport 模式 NodePort / metallb 模式 LoadBalancer —— 不用注解(EG v1.9.1 不认 `gateway.envoyproxy.io/service-type`), 也不用逐 Gateway patch;
 > - 路由必须**晚于后端组件**下发(后端命名空间/Service 不存在时会 `namespaces "x" not found` → 路由静默缺失), 需带后端存在性预检;
 > - 固定入口用 `tools/lb/gateway-nodeport.sh <gw>` 建别名 Service `<gw>-external`。
 >
@@ -199,6 +206,63 @@
 
 > 数据面镜像改写是关键: 用户创建 `Gateway` 后控制器动态创建的 Envoy Proxy Deployment 必须能从集群内置 registry 拉镜像(默认 docker.io 在离线集群不可达)。
 
+### 3.5 数据面暴露方式与镜像: EnvoyProxy + GatewayClass parametersRef
+
+数据面(Envoy Proxy)的 **Service 类型**与**镜像**都只能在 EnvoyProxy CR 里声明 —— 控制器为每个 Gateway
+动态创建数据面资源时按该 CR 渲染。模块 15 创建一份, 并让 GatewayClass `eg` 用 `parametersRef` 引用它
+(**该 class 下所有 Gateway 自动继承**, 含 AI Gateway):
+
+```yaml
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: cubestack-dataplane            # ENVOY_EG_PROXY_NAME
+  namespace: envoy-gateway-system      # ENVOY_EG_NAMESPACE
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: NodePort                 # auto: nodeport 模式→NodePort / metallb 模式→LoadBalancer
+      envoyDeployment:                 # 与 envoyService 同级; 仅为换镜像而加
+        container:
+          image: registry.cubestack.io:5000/envoyproxy/envoy:distroless-v1.39.1   # 内置 registry(离线必需)
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: cubestack-dataplane
+    namespace: envoy-gateway-system
+```
+
+| 配置项(cluster.conf) | 默认 | 说明 |
+|---|---|---|
+| `ENVOY_EG_SERVICE_TYPE` | `auto` | auto = 跟随全局 `SERVICE_EXPOSE_MODE`; 也可强制 `NodePort` / `LoadBalancer` |
+| `ENVOY_EG_PROXY_NAME` | `cubestack-dataplane` | EnvoyProxy CR 名(parametersRef 指向它) |
+| `ENVOY_EG_IMAGE_BASE` | `<registry>/envoyproxy` | 数据面镜像前缀 → image = `<base>/envoy:${ENVOY_PROXY_VERSION}` |
+
+```bash
+kubectl get gatewayclass eg -o jsonpath='{.spec.parametersRef}'; echo        # 确认挂了 parametersRef
+kubectl -n envoy-gateway-system get envoyproxy cubestack-dataplane -o yaml   # 暴露方式 + 数据面镜像
+kubectl -n envoy-gateway-system get svc -l gateway.envoyproxy.io/owning-gateway-name=<Gateway名>  # 看 TYPE
+kubectl describe node <节点> | grep -B2 -A4 NodePort                          # nodeport 模式查实际分配端口
+```
+
+生效范围与顺序(实测 2026-09-21):
+- 模块 15 **先建 EnvoyProxy 再建 GatewayClass** —— parametersRef 指向不存在的 CR 会让 class 判 Invalid;
+- 改 `ENVOY_EG_SERVICE_TYPE` 后重跑模块, **存量 Gateway 由控制器自动 reconcile**(Service 类型原地变更:
+  LoadBalancer→NodePort 会释放 VIP、端口由 K8s 重新分配);
+- 只影响**经 class `eg`** 的 Gateway; 不经 parametersRef 的其它 GatewayClass 仍靠 helm 的
+  `global.images.envoyProxy.image` 兜底镜像(该值保留, 与 CR 里同一个);
+- 验证模块 `verify_envoy_gateway` 会**断言**数据面 Service 类型与模式一致 + 断言数据面镜像来自内置 registry
+  (2026-09-21 前是"事后 patch 成 NodePort", 会把 class 配置没生效的真问题掩盖掉, 已废弃)。
+
 ---
 
 ## 四、使用示例
@@ -219,8 +283,9 @@
 > ```
 >
 > 暴露提示: `metallb` 模式下数据面 Service 直接拿 VIP; `nodeport` 模式(`SERVICE_EXPOSE_MODE=nodeport`)
-> 下需给 Gateway 加注解 `gateway.envoyproxy.io/service-type: NodePort`(持久声明, 防控制器 reconcile 回
-> LoadBalancer), 或用 `tools/lb/gateway-nodeport.sh <gateway名> [ns]` 对已建 Gateway 一键转换。
+> 下由 `eg` class 的 EnvoyProxy 声明为 NodePort(§3.5, 模块 15 自动下发, 无需逐个 Gateway 处理),
+> 访问入口 = `<任一节点IP>:<自动分配的 NodePort>`; 存量 Gateway 可用
+> `tools/lb/gateway-nodeport.sh <gateway名> [ns]` 一键转换。
 
 ### 4.2 Envoy AI Gateway: 统一接入 OpenAI 兼容服务(v1.x: AI 扩展 CRD)
 

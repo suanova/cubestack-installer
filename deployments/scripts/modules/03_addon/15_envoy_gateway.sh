@@ -27,12 +27,20 @@
 #   · ⚠ 默认启用 extensionApis.enableBackend(EG Backend API): AI Gateway v1.1+ 的 AIServiceBackend
 #     必须引用 EG Backend 资源; 该 API 默认禁用(安全原因), 离线内网集群启用无额外风险。
 #   · 默认 GatewayClass: eg(gateway.envoyproxy.io/gatewayclass-controller), 安装后自动创建。
-#   · nodeport 暴露模式(SERVICE_EXPOSE_MODE=nodeport, 无 MetalLB): 数据面 Service 默认仍创建为
-#     LoadBalancer, 需转 NodePort 才可访问 —— 创建 Gateway 时加注解 gateway.envoyproxy.io/service-type: NodePort,
-#     或对已创建 Gateway 运行 tools/lb/gateway-nodeport.sh 转换; 详见 docs/envoy-gateway.md。
+#   · 数据面暴露方式(EnvoyProxy + class parametersRef, 2026-09-21 起): 数据面 Service 由控制器动态
+#     创建、**默认 LoadBalancer**; nodeport 模式(无 MetalLB)下必须显式改成 NodePort, 否则一直
+#     EXTERNAL-IP=<pending>。本模块创建 EnvoyProxy/${ENVOY_EG_PROXY_NAME}, 其
+#     provider.kubernetes.envoyService.type = NodePort(nodeport 模式)/ LoadBalancer(metallb 模式),
+#     由 GatewayClass eg 的 parametersRef 引用 —— 该 class 下所有 Gateway(含 AI Gateway)自动继承。
+#     ⚠ 给 Gateway 加注解 `gateway.envoyproxy.io/service-type: NodePort` **EG v1.9.1 不认**
+#     (2026-09-17 实测), 唯一可靠入口就是 EnvoyProxy; 存量 Gateway 可用 tools/lb/gateway-nodeport.sh 转换。
+#   · 数据面镜像同理只由该 EnvoyProxy 决定(envoyDeployment.container.image = 内置 registry 路径);
+#     helm 的 global.images.envoyProxy.image 只兜底"不经本 class"的 Gateway。
 #   · 参考: https://gateway.envoyproxy.io/ 与 docs/envoy-gateway.md
 # 数据源: cluster.conf (ENVOY_GATEWAY_ENABLED / ENVOY_EG_CHART_SOURCE / ENVOY_EG_CHART_DIR / ENVOY_EG_CHART_TGZ /
-#                       ENVOY_EG_CHART_OCI / ENVOY_EG_VERSION / ENVOY_EG_IMAGE_* / ENVOY_SAVE_DIR / REGISTRY_* / NODES)
+#                       ENVOY_EG_CHART_OCI / ENVOY_EG_VERSION / ENVOY_EG_IMAGE_* / ENVOY_EG_SERVICE_TYPE /
+#                       ENVOY_EG_PROXY_NAME / SERVICE_EXPOSE_MODE / ENVOY_PROXY_VERSION / ENVOY_SAVE_DIR /
+#                       REGISTRY_* / NODES)
 # 用法:   sudo ./deploy-cluster.sh --enable envoy_gateway  或  ENVOY_GATEWAY_ENABLED=true
 # ============================================================
 set -euo pipefail
@@ -57,9 +65,28 @@ ENVOY_EG_CHART_TGZ="${ENVOY_EG_CHART_TGZ:-${REPO_ROOT}/deployments/cubestack-add
 ENVOY_EG_CHART_OCI="${ENVOY_EG_CHART_OCI:-oci://docker.io/envoyproxy/gateway-helm}"
 ENVOY_EG_NAMESPACE="${ENVOY_EG_NAMESPACE:-envoy-gateway-system}"
 ENVOY_EG_RELEASE_NAME="${ENVOY_EG_RELEASE_NAME:-eg}"
+# ---- 数据面暴露方式(EnvoyProxy + GatewayClass parametersRef)----
+# 数据面 Envoy 的 Service 由控制器动态创建, **默认 type=LoadBalancer**(依赖 MetalLB 分 VIP):
+#   · nodeport 模式(无 MetalLB) 必须让它成为 NodePort, 否则 Service 永远 EXTERNAL-IP=<pending>;
+#   · EG v1.9.1 **不认** `gateway.envoyproxy.io/service-type` 注解(2026-09-17 实测) —— 唯一可靠做法
+#     是 EnvoyProxy CR 的 provider.kubernetes.envoyService.type, 并由 GatewayClass 的 parametersRef 引用;
+#   · 同一个 CR 还负责**数据面镜像**(envoyDeployment.container.image): EnvoyProxy 是唯一能改数据面
+#     镜像的地方(helm 的 global.images.envoyProxy.image 只覆盖不经本 class 的 Gateway)。
+# ENVOY_EG_SERVICE_TYPE: auto(默认, 跟随全局 SERVICE_EXPOSE_MODE) | NodePort | LoadBalancer
+ENVOY_EG_SERVICE_TYPE="${ENVOY_EG_SERVICE_TYPE:-auto}"
+ENVOY_EG_PROXY_NAME="${ENVOY_EG_PROXY_NAME:-cubestack-dataplane}"   # EnvoyProxy CR 名(GatewayClass parametersRef 指向它)
 # 镜像: 内置 registry 路径(helm --set 用域名, K8s 节点按域名拉取)
 REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
 ENVOY_EG_IMAGE_BASE="${ENVOY_EG_IMAGE_BASE:-${REGISTRY_BASE}/envoyproxy}"
+# 数据面镜像(内置 registry 路径, 写进 EnvoyProxy CR —— 数据面唯一的镜像来源)
+# ⚠ 离线关键点: 该 tag 由本模块 [1/5] 推进内置 registry; 写成 docker.io 会让数据面在离线集群 ImagePullBackOff。
+EG_PROXY_IMAGE="${ENVOY_EG_IMAGE_BASE}/envoy:${ENVOY_PROXY_VERSION}"
+# 数据面 Service 类型: auto 跟随全局 SERVICE_EXPOSE_MODE(load_config 已归一化为 nodeport|metallb)
+case "${ENVOY_EG_SERVICE_TYPE}" in
+    auto) [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ] && EG_SVC_TYPE="NodePort" || EG_SVC_TYPE="LoadBalancer" ;;
+    NodePort|LoadBalancer) EG_SVC_TYPE="${ENVOY_EG_SERVICE_TYPE}" ;;
+    *) err "ENVOY_EG_SERVICE_TYPE 仅支持 auto|NodePort|LoadBalancer(当前='${ENVOY_EG_SERVICE_TYPE}')"; exit 1 ;;
+esac
 # 推送用直连端点(与 gpu_operator/lws 一致): REGISTRY_DIRECT = metallb→VIP:PORT / nodeport→master:REGISTRY_NODEPORT
 PUSH_REGISTRY="${REGISTRY_DIRECT}/envoyproxy"
 ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"
@@ -118,7 +145,7 @@ ok "前置检查通过(chart_source=${ENVOY_EG_CHART_SOURCE}, version=${ENVOY_EG
 # 离线优先策略(与 lws 一致):
 #   · dir/tgz(本地源, 默认) → 镜像强制走本地 docker daemon / 离线 tar, 绝不尝试联网
 #   · oci 源或 ENVOY_EG_IMAGE_ONLINE=true → 才允许在线 skopeo 拉取官方镜像
-say "[1/4] 推送 EG 镜像 → ${PUSH_REGISTRY}(控制面 gateway + 数据面 envoy, tag=${ENVOY_EG_VERSION}) ..."
+say "[1/5] 推送 EG 镜像 → ${PUSH_REGISTRY}(控制面 gateway + 数据面 envoy, tag=${ENVOY_EG_VERSION}) ..."
 # 推送助手复用 lib-common 的 push_image_skopeo(3 次重试)/ reg_has_tag(幂等)/
 # find_offline_tar(离线 tar 内容识别, 兼容改名/异常命名)
 _ALLOW_ONLINE=0
@@ -182,7 +209,7 @@ push_one "gateway" "*gateway_${ENVOY_EG_VERSION}.tar" "${ENVOY_EG_VERSION}"
 push_one "envoy"   "*envoy_${ENVOY_PROXY_VERSION}.tar" "${ENVOY_PROXY_VERSION}"
 
 # ---------------- 2. helm 安装 gateway-helm(三种 chart 源) ----------------
-say "[2/4] helm 安装 ${ENVOY_EG_RELEASE_NAME} → ${ENVOY_EG_NAMESPACE}(chart=${ENVOY_EG_CHART_SOURCE}, version=${ENVOY_EG_VERSION}) ..."
+say "[2/5] helm 安装 ${ENVOY_EG_RELEASE_NAME} → ${ENVOY_EG_NAMESPACE}(chart=${ENVOY_EG_CHART_SOURCE}, version=${ENVOY_EG_VERSION}) ..."
 # 清理上次残留(避免 helm 无法接管)
 SSH "${K} delete ns ${ENVOY_EG_NAMESPACE} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
 sleep 3
@@ -217,21 +244,59 @@ helm upgrade --install "${ENVOY_EG_RELEASE_NAME}" ${_CHART_ARG} \
     --wait --timeout 180s \
     || warn "  helm 安装/等待超时(检查 --set 与 chart; 资源可能已创建, 继续等待 Deployment)..."
 
-# ---------------- 3. 创建默认 GatewayClass(eg) ----------------
-say "[3/4] 创建默认 GatewayClass(eg)..."
+# ---------------- 3. 数据面 EnvoyProxy(暴露方式 + 镜像) ----------------
+# 顺序要紧: **先建 EnvoyProxy 再建 GatewayClass** —— class 的 parametersRef 指向不存在的 CR 会被判 Invalid。
+say "[3/5] 创建数据面 EnvoyProxy(${ENVOY_EG_NAMESPACE}/${ENVOY_EG_PROXY_NAME}; service.type=${EG_SVC_TYPE}, image=${EG_PROXY_IMAGE})..."
+# 镜像预检: 数据面镜像必须已在集群内置 registry(离线集群拉不到 docker.io)。
+# 本模块 [1/5] 已推送, 这里只做**廉价复核** —— 防止 registry 里 tag 缺失时静默下发一个拉不动的 CR。
+if reg_has_tag "${PUSH_REGISTRY}" "envoy" "${ENVOY_PROXY_VERSION}"; then
+    ok "  数据面镜像已在内置 registry: ${EG_PROXY_IMAGE}"
+else
+    err "内置 registry 缺少数据面镜像 envoy:${ENVOY_PROXY_VERSION}(期望 ${EG_PROXY_IMAGE})"
+    err "  [1/5] 应已推送; 请检查离线 tar(deployments/offline-files/envoy/)与 [1/5] 的推送日志后重跑"
+    exit 1
+fi
+# yaml 块标量不受影响: 纯 JSON/YAML, 无内嵌字符串注释(避免历史事故: 注释含引号/反引号炸 YAML)
+SSH "${K} apply -f - <<YAML
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: ${ENVOY_EG_PROXY_NAME}
+  namespace: ${ENVOY_EG_NAMESPACE}
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: ${EG_SVC_TYPE}
+      envoyDeployment:
+        container:
+          image: ${EG_PROXY_IMAGE}
+YAML
+" || { err "EnvoyProxy ${ENVOY_EG_PROXY_NAME} 创建失败(检查 CRD: kubectl get crd envoyproxies.gateway.envoyproxy.io)"; exit 1; }
+ok "  EnvoyProxy 已下发(数据面 Service 类型=${EG_SVC_TYPE}; 端口由 K8s 自动分配)"
+
+# ---------------- 4. 创建默认 GatewayClass(eg, 引用上面的 EnvoyProxy) ----------------
+say "[4/5] 创建默认 GatewayClass(eg, parametersRef → ${ENVOY_EG_PROXY_NAME})..."
 # 控制器名: gateway.envoyproxy.io/gatewayclass-controller(与 chart config 一致)
-SSH "${K} apply -f - <<'YAML'
+# parametersRef: 让本 class 的所有 Gateway 的数据面都走上面那份 EnvoyProxy(NodePort/LoadBalancer + 内置镜像)。
+SSH "${K} apply -f - <<YAML
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
   name: eg
 spec:
   controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: ${ENVOY_EG_PROXY_NAME}
+    namespace: ${ENVOY_EG_NAMESPACE}
 YAML
 " || warn "  GatewayClass eg 创建失败(可稍后手工 kubectl apply)"
 
 # ---------------- 4. 等待就绪 + 验证 ----------------
-say "[4/4] 等待 Envoy Gateway 控制面就绪(最长 180s)..."
+say "[5/5] 等待 Envoy Gateway 控制面就绪(最长 180s)..."
 SSH "${K} rollout status deployment -n ${ENVOY_EG_NAMESPACE} ${ENVOY_EG_RELEASE_NAME} --timeout=120s" >/dev/null 2>&1 \
     || SSH "${K} rollout status deployment -n ${ENVOY_EG_NAMESPACE} envoy-gateway --timeout=120s" >/dev/null 2>&1 \
     || warn "  控制面 rollout 未在 120s 内完成(继续检查 pod)..."
@@ -251,9 +316,12 @@ ok "Envoy Gateway 部署完成"
 echo "  namespace:   ${ENVOY_EG_NAMESPACE}"
 echo "  chart 来源:  ${ENVOY_EG_CHART_SOURCE}(${ENVOY_EG_VERSION})"
 echo "  控制面镜像:  ${ENVOY_EG_IMAGE_BASE}/gateway:${ENVOY_EG_VERSION}"
-echo "  数据面镜像:  ${ENVOY_EG_IMAGE_BASE}/envoy:${ENVOY_EG_VERSION}(Gateway 创建后动态拉起)"
-echo "  GatewayClass: eg(已 Accepted)"
-echo "  资源查看:    kubectl get gatewayclass,gateway,httproute -A"
+# ⚠ 数据面 tag 与 EG 版本**不同**(ENVOY_PROXY_VERSION, 如 distroless-v1.39.1); 曾误打印 EG 版本易误导排查
+echo "  数据面镜像:  ${EG_PROXY_IMAGE}"
+echo "  GatewayClass: eg(已 Accepted; parametersRef → ${ENVOY_EG_NAMESPACE}/${ENVOY_EG_PROXY_NAME})"
+echo "  数据面暴露:  ${EG_SVC_TYPE}$([ "${EG_SVC_TYPE}" = "NodePort" ] && echo "(节点IP:自动分配的 NodePort, 查看: kubectl -n ${ENVOY_EG_NAMESPACE} get svc -l gateway.envoyproxy.io/owning-gateway-name=<Gateway名>)" || echo "(MetalLB VIP, 需池内有空闲 IP)")"
+echo "  切换暴露:    改 cluster.conf 的 SERVICE_EXPOSE_MODE(或 ENVOY_EG_SERVICE_TYPE)后重跑本模块"
+echo "  资源查看:    kubectl get gatewayclass,gateway,httproute -A; kubectl -n ${ENVOY_EG_NAMESPACE} get envoyproxy"
 echo "  端到端验证:  sudo ./deploy-cluster.sh --steps verify_envoy_gateway"
 echo "  AI 扩展:     Envoy AI Gateway 见 --enable envoy_ai_gateway(docs/envoy-gateway.md)"
-echo "  卸载:        helm uninstall ${ENVOY_EG_RELEASE_NAME} -n ${ENVOY_EG_NAMESPACE}; kubectl delete gatewayclass eg"
+echo "  卸载:        helm uninstall ${ENVOY_EG_RELEASE_NAME} -n ${ENVOY_EG_NAMESPACE}; kubectl delete gatewayclass eg; kubectl -n ${ENVOY_EG_NAMESPACE} delete envoyproxy ${ENVOY_EG_PROXY_NAME}"

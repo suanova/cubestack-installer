@@ -5,8 +5,12 @@
 # 背景: Envoy Gateway 的数据面(Envoy Proxy)Service 由控制器动态创建, 默认 type=LoadBalancer
 #        (依赖 MetalLB 分配 VIP)。SERVICE_EXPOSE_MODE=nodeport(测试环境, 无 MetalLB)下
 #        需把该 Service 转成 NodePort, 外部用 <节点IP>:<NodePort> 访问。
-#       · 更持久做法: 创建 Gateway 时加注解 gateway.envoyproxy.io/service-type: NodePort;
-#         本脚本用于**已创建、未带注解**的 Gateway/AIGateway 一键转换(幂等)。
+#       · ★ 更持久的做法(2026-09-21 起): 由 GatewayClass 的 parametersRef 指向 EnvoyProxy CR
+#         (envoy-gateway-system/cubestack-dataplane, 模块 15 自动创建维护), 在其中声明
+#         provider.kubernetes.envoyService.type=NodePort —— 该 class 下所有 Gateway 自动继承。
+#         ⚠ 注解 gateway.envoyproxy.io/service-type: NodePort **EG v1.9.1 不认**(2026-09-17 实测),
+#           加了也还是 LoadBalancer, 别再走那条路。
+#         本脚本用于**存量**(class 未配 parametersRef 时创建的)Gateway/AIGateway 一键转换(幂等)。
 #       · ★ 本脚本同时兼容 metallb 场景: 数据面 Service 保持 LoadBalancer(MetalLB 分配 VIP),
 #         不 patch。
 #
