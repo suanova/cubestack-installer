@@ -71,13 +71,17 @@ fi
 _TMPD="$(mktemp -d)"
 trap 'rm -rf "${_TMPD}"' EXIT
 say "helm pull ${CUBEPILOT_CHART_REF} --version ${CUBEPILOT_VERSION} → ${CUBEPILOT_CHART_DIR}/ ..."
-if ! helm pull "${CUBEPILOT_CHART_REF}" --version "${CUBEPILOT_VERSION}" --destination "${_TMPD}"; then
+# helm 的 "Digest:" 行要留下来写边车; 各版本把它写 stdout 还是 stderr 不一致 → 合并捕获再回显
+if ! helm pull "${CUBEPILOT_CHART_REF}" --version "${CUBEPILOT_VERSION}" --destination "${_TMPD}" 2>&1 | tee "${_TMPD}/pull.log"; then
     err "chart 下载失败: ${CUBEPILOT_CHART_REF} --version ${CUBEPILOT_VERSION}"
     err "  常见原因: ① 私服不可达/未登录(该项目公开只读, 通常无需凭据; 私有化后设 CUBEPILOT_HARBOR_USER/PASSWORD);"
     err "            ② chart 仓库名写错(**是 cubepilot-chart**, 不是 cubepilot);"
     err "            ③ 版本号不存在(核对发布流水线的 tag: main→0.1.0-latest, tag vX.Y.Z→X.Y.Z)"
     exit 1
 fi
+# ⚠ OCI chart 的 Digest 是 **manifest 摘要**, 不是文件 sha256 → **不能**用 sha256sum 重算,
+#   必须从 helm 输出里取。模块的 helm_chart_ensure 就是拿它跟 <tgz>.digest 边车比对的。
+_DIGEST="$(sed -n 's/^Digest:[[:space:]]*//p' "${_TMPD}/pull.log" | head -1 || true)"
 
 # helm 落盘名 = <chart>-<version>.tgz, 即 **cubepilot-chart-<version>.tgz**;
 # 统一改名为模块派生路径 cubepilot-<version>.tgz(模块 CUBEPILOT_CHART_TGZ 按此派生)。
@@ -89,11 +93,22 @@ if [ -z "${_FOUND}" ]; then
 fi
 mv -f "${_FOUND}" "${_TGZ}"
 ok "已下载: ${_TGZ}"
+# 边车一并写出 —— 缺了它 helm_chart_ensure 只能判定"无法比对, 按已变更处理",
+# 每次在线部署都会白白覆盖一遍这份副本。
+if [ -n "${_DIGEST}" ]; then
+    printf '%s' "${_DIGEST}" > "${_TGZ}.digest"
+    chmod 644 "${_TGZ}" "${_TGZ}.digest" 2>/dev/null || true
+    ok "   digest 边车: ${_TGZ}.digest(${_DIGEST})"
+else
+    warn "helm 未报告 Digest, **边车未写出** —— 请手工把 helm pull 的 Digest: 值写进 ${_TGZ}.digest"
+fi
 
 echo "---------------------------------------------"
 ok "CubePilot chart 下载完成"
 echo "  chart tgz:  ${_TGZ}"
-echo "  下一步:     下载镜像(cubepilot-save-images.sh), 把两处产物拷到部署机,"
-echo "              cluster.conf 置 CUBEPILOT_MODE=offline 后 --steps cubepilot"
-echo "  ⚠ 仅在\"离线机没有私服访问\"时才需要本脚本; 部署机若可访问私服,"
-echo "    CUBEPILOT_MODE=online(默认) 会在部署时自动完成同样的同步(见模块 31_cubepilot.sh)"
+echo "  digest 边车:${_TGZ}.digest"
+echo "  下一步:     ① 下载镜像: ./deployments/scripts/tools/images/cubepilot-save-images.sh"
+echo "              ② **把 chart 与 .digest 提交进 git** —— 模块安装时恒用仓库内这份离线副本,"
+echo "                 只在部署时落到盘上不算数(私服抖动时回退会空转)"
+echo "  提示:       部署机若可访问私服, CUBEPILOT_MODE=online(默认) 会拿私服 digest 与边车比对,"
+echo "              有更新才覆盖这份副本; 本脚本是**在没有部署机可访问私服时**的替代刷新路径"
