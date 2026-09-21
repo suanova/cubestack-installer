@@ -354,14 +354,18 @@ for g in json.load(sys.stdin)['data']['groups']:
 ## 7. 配置项
 
 见 `cluster.conf.example`:
-- **PROMETHEUS 段附近**: `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`(必填)/
-  `PROMETHEUS_SCRAPE_INTERVAL` / `PROMETHEUS_EVALUATION_INTERVAL` /
+- **顶部核心必改项 ④**: `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`(出厂默认 admin/admin;
+  下方 PROMETHEUS 段只做引用, 保持唯一事实来源 —— 与 `METALLB_POOL` 同款写法)
+- **PROMETHEUS 段附近**: `PROMETHEUS_SCRAPE_INTERVAL` / `PROMETHEUS_EVALUATION_INTERVAL` /
   `CUBESTACK_OBSERVABILITY_DIR` / `MX_EXPORTER_ENABLED`
 - **4.9 段**: `BMC_EXPORTER_ENABLED`(默认 false)/ `BMC_EXPORTER_MODE` / `BMC_HOSTS` /
   `BMC_USERNAME` / `BMC_PASSWORD` / `BMC_TLS_INSECURE` / `BMC_EXPORTER_*`
 
-⚠ `GRAFANA_ADMIN_PASSWORD` **没有默认值**, 且未设置时模块**拒绝部署**。
-不留默认是有意的: helm 在未传时会随机生成口令存进 secret, 用户拿不到(实测环境因此手工重置过)。
+⚠ `GRAFANA_ADMIN_PASSWORD` **出厂默认 admin**(用户名也是 admin, 2026-09-21 起), 开箱即可部署/登录;
+用默认值部署时模块只**告警**不阻断 —— 监控入口常对外暴露(NodePort/LoadBalancer), 请尽快改掉。
+
+仍会被**硬失败拒绝**的只有两种: ① 留空/未设置(helm 会随机生成口令存进 secret, 用户拿不到,
+实测环境因此手工重置过); ② 仍是 `CHANGE_ME` 之类的占位符。
 
 ---
 
