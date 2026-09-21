@@ -65,11 +65,19 @@ ok "已同步 Dockerfile-cli(-incremental) / .dockerignore → ${OUT}"
 
 # ---------------- 部署代码/配置模板(全量同步, 仅排除离线大文件与运行时凭据) ----------------
 say "同步整个 deployments/(排除 offline-files 大文件与运行时凭据) ..."
+# ⚠ 凭据类文件必须逐个挡掉(2026-09-20 事故): 原先只挡 cluster.conf / cluster.conf.bak,
+#   结果 cluster.conf.bak.ceph(带后缀)、external-ceph.env、external-ceph-self-define-access.conf
+#   全都进了构建上下文 → 被烧进 CLI 镜像层(镜像会分发, 等同凭据泄露)。
+#   external-ceph* 用通配, 覆盖生成器以后新增的同族文件。
+# ⚠ 注释只能写在命令**之前**: 续行符(\)之后的 `#` 不是注释, 会被当成 rsync 参数(踩过, 报
+#   "syntax or usage error ... [Receiver]")。
 rsync -a \
     --exclude 'offline-files' \
     --exclude 'cli-context' \
     --exclude '.git' --exclude '.venv' --exclude 'venv' --exclude '.ansible' --exclude '.cache' \
-    --exclude 'config/cluster.conf' --exclude 'config/cluster.conf.bak' --exclude 'config/.deploy.state' \
+    --exclude 'config/cluster.conf' --exclude 'config/cluster.conf.bak' --exclude 'config/cluster.conf.bak.*' \
+    --exclude 'config/external-ceph*' --exclude 'config/minio.conf' \
+    --exclude 'config/.deploy.state' --exclude 'config/.deploy.state.lock' \
     --exclude 'hosts.yml' --exclude 'inventory.ini' --exclude 'artifacts' \
     --exclude '*.swp' --exclude '*.swo' --exclude '*.swx' --exclude '*~' \
     "${REPO_ROOT}/deployments/" "${OUT}/deployments/"

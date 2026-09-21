@@ -6,6 +6,7 @@ download_run_once: true
 download_localhost: true
 download_force_cache: true
 download_always_pull: false
+download_keep_remote_cache: true
 
 ## 缓存目录
 download_cache_dir: "/home/supperadm/cubestack-installer/deployments/offline-files/kubespray"

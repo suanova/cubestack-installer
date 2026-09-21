@@ -59,6 +59,14 @@
 - name: Configure nodes /etc/hosts for internal registry
   import_playbook: ../patch-playbooks/cubestack-registry.yml
 
+# ──────────────────────────────────────────────────────────────────────
+# 离线安装系统包(lvm2 全家桶等): 把 offline-files/kubespray/packages 的 .deb
+# 装到全部 kube_node, 供后续 ceph/Rook OSD 使用(重启后逻辑卷激活依赖 lvm)。
+# 本 import 由入口脚本 ensure_packages_play 自动维护(kubespray 升级后重新挂载)
+# ──────────────────────────────────────────────────────────────────────
+- name: Install offline packages (lvm2 etc.) on kube nodes
+  import_playbook: ../patch-playbooks/install-packages.yml
+
 - name: Target only workers to get kubelet installed and checking in on any new nodes(node)
   hosts: kube_node
   gather_facts: false
