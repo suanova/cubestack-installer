@@ -18,8 +18,10 @@
 #     用系统默认 StorageClass); namespace=monitoring
 #   · 组件: operator + prometheus + alertmanager + node-exporter + kube-state-metrics + grafana;
 #     thanosRuler / kubeRBACProxy / windows-exporter / CRD 升级 Job 默认关闭(不备料)
-#   · 对外暴露(末步): PROMETHEUS_EXPOSE_MODE=nodeport(*-external NodePort 31000/31001) /
-#     loadbalancer / clusterip。
+#   · 对外暴露(末步): 默认**只暴露 Grafana**(PROMETHEUS_EXPOSE_PROMETHEUS=true 才连 Prometheus 一起):
+#     PROMETHEUS_EXPOSE_MODE=nodeport(*-external NodePort; grafana=base+1=31001) /
+#     metallb|loadbalancer(独立 *-external LoadBalancer, 默认**共用 registry 的 VIP**、以端口区分) /
+#     clusterip。⚠ metallb 与 loadbalancer 同义, 见末段归一化注释。
 #   ★ 2026-09-20(用户要求): 按 cubestack 源仓库 observability/docs/installer-requirements.md
 #     补齐 CubeStack 可观测性落地, 共 5 块(详见 docs/prometheus-observability.md):
 #       ① kube-prometheus-stack values(§1) —— 全部走**临时 values 文件**(mktemp + umask 077), 不用 --set:
@@ -50,7 +52,8 @@
 #         PROMETHEUS_RETENTION_DAYS / PROMETHEUS_STORAGE_SIZE / PROMETHEUS_APP_VERSION /
 #         PROMETHEUS_IMAGE_* / PROMETHEUS_SCRAPE_INTERVAL / PROMETHEUS_EVALUATION_INTERVAL /
 #         GRAFANA_ADMIN_USER / GRAFANA_ADMIN_PASSWORD / CUBESTACK_OBSERVABILITY_DIR /
-#         MX_EXPORTER_ENABLED / METAX_NAMESPACE / REGISTRY_BASE / PROMETHEUS_EXPOSE_MODE / NODES)
+#         MX_EXPORTER_ENABLED / METAX_NAMESPACE / REGISTRY_BASE / PROMETHEUS_EXPOSE_MODE /
+#         PROMETHEUS_EXPOSE_PROMETHEUS / PROMETHEUS_SHARE_REGISTRY_VIP / REGISTRY_IP / NODES)
 # 用法:   sudo ./deploy-cluster.sh --steps prometheus  或  PROMETHEUS_ENABLED=true
 # ============================================================
 set -euo pipefail
@@ -92,10 +95,27 @@ PROMETHEUS_SCRAPE_INTERVAL="${PROMETHEUS_SCRAPE_INTERVAL:-30s}"        # §1.4
 PROMETHEUS_EVALUATION_INTERVAL="${PROMETHEUS_EVALUATION_INTERVAL:-60s}"   # §1.4
 GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
 GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-}"
+# Grafana 13.2 起**数据源插件外置**(prometheus/loki/elasticsearch/… 不再内置, 启动时去 grafana.com
+# 下载) —— 离线环境装不上 → 数据源对象存在但查询报 "Unable to find datasource plugin", 看板全空
+# (2026-09-22 实机定位)。解法: 用预装插件的**派生镜像**(tools/images/grafana-plugin-build.sh),
+# 并把下面这个变量设为镜像内插件目录 —— 插件必须放在 /var/lib/grafana **之外**: 该路径被 chart
+# 挂成 emptyDir, 烤在里面的插件会被挂载点整个遮住。留空 = 不覆盖(Grafana ≤13.1 / 在线环境用默认值)。
+PROMETHEUS_GRAFANA_PLUGIN_DIR="${PROMETHEUS_GRAFANA_PLUGIN_DIR:-}"
+# 数据源可用性校验的失败动作: fail(默认, 硬失败) / warn(只告警) / off(跳过)
+GRAFANA_DS_VERIFY="${GRAFANA_DS_VERIFY:-fail}"
+# 看板数据源自动绑定(★ 2026-09-22): 上游看板里写死的是**别人环境的数据源 uid**(如 rYdddlPWk、
+# eefhg6y1xs8owa)或用小写名字, 导入后那些面板一律 "Datasource not found" → 导入前统一改绑到
+# 本集群这份数据源(chart 默认 uid=prometheus / name=Prometheus, 见 lib-common 里 provisioning 那段)。
+# 关掉它 = 保留原始 JSON 导入(需要手工在 Grafana 里逐面板选数据源)。
+GRAFANA_DS_AUTOBIND="${GRAFANA_DS_AUTOBIND:-true}"
+GRAFANA_DATASOURCE_UID="${GRAFANA_DATASOURCE_UID:-prometheus}"
+GRAFANA_DATASOURCE_NAME="${GRAFANA_DATASOURCE_NAME:-Prometheus}"
 MX_EXPORTER_ENABLED="${MX_EXPORTER_ENABLED:-true}"                     # §7.1(auto: 无 metax 时自动跳过)
 METAX_NAMESPACE="${METAX_NAMESPACE:-metax-operator}"
 
-# 资产目录三级回退(§5): 显式配置 > 离线包约定目录 > 仓库内 vendored。
+# 资产目录四级回退(§5): 显式配置 > 离线包约定目录 > **offline-files 离线包落点** > 仓库内 vendored。
+# 第 3 级是 2026-09-22 补的: 走 MinIO 离线通道时资产落在 offline-files/observability/(由
+# tools/offline/pack-observability-assets.sh 装配), 之前没有这一级 → 拉下来的那份没人读。
 # 一次性解析成 _OBS_DIR, 后续步骤只用它 —— 避免每处都重复判断, 也让"实际用了哪个"只打印一次。
 _OBS_DIR=""
 _OBS_SRC=""
@@ -103,6 +123,8 @@ if [ -n "${CUBESTACK_OBSERVABILITY_DIR:-}" ]; then
     _OBS_DIR="${CUBESTACK_OBSERVABILITY_DIR}"; _OBS_SRC="CUBESTACK_OBSERVABILITY_DIR"
 elif [ -d "/opt/cubestack/observability/recording-rules" ]; then
     _OBS_DIR="/opt/cubestack/observability"; _OBS_SRC="离线包默认目录 /opt/cubestack/observability"
+elif [ -d "${REPO_ROOT}/deployments/offline-files/observability/recording-rules" ]; then
+    _OBS_DIR="${REPO_ROOT}/deployments/offline-files/observability"; _OBS_SRC="offline-files 离线包(MinIO 通道)"
 else
     _OBS_DIR="${REPO_ROOT}/deployments/cubestack-addon/observability/cubestack"; _OBS_SRC="仓库内 vendored"
 fi
@@ -260,6 +282,14 @@ sync_kubeconfig || { err "宿主机无法访问集群(admin.conf 同步失败; �
 # ⚠ 口令只经本文件传递, 不进 argv; 文件 umask 077 + 用后即删。
 _VALUES_YAML="$(mktemp)"
 chmod 600 "${_VALUES_YAML}"
+# 插件目录覆盖块(仅当 PROMETHEUS_GRAFANA_PLUGIN_DIR 非空时非空)。
+# 用 printf -v 而非 $(...): 命令替换会吃掉行尾换行, 拼进 YAML 时会把两行黏成一行。
+# ⚠ 必须并进**同一个 grafana:** 映射(YAML 顶层重复键后者覆盖前者 → 会把 adminUser/Password 顶掉)。
+_PROM_GRAFANA_PLUGIN_BLOCK=""
+if [ -n "${PROMETHEUS_GRAFANA_PLUGIN_DIR}" ]; then
+    printf -v _PROM_GRAFANA_PLUGIN_BLOCK '  grafana.ini:\n    paths:\n      plugins: %s\n  env:\n    # 插件随镜像预装且目录只读 → 关掉自动更新(否则每次重启都尝试更新并报 permission denied)\n    GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"\n' "${PROMETHEUS_GRAFANA_PLUGIN_DIR}"
+    say "  Grafana 插件目录覆盖为 ${PROMETHEUS_GRAFANA_PLUGIN_DIR}(配合预装插件的派生镜像)"
+fi
 # 第一段: 静态结构, 用**带引号的 heredoc** 以免 bash 误展开 regex 里的 $ 与 [](chart 的默认 extraArgs 是逐字复制而来的)
 cat > "${_VALUES_YAML}" <<'PROM_VALUES_STATIC'
 # ── §1.1 kube-state-metrics label allowlist ──
@@ -308,6 +338,7 @@ prometheus:
 PROM_VALUES_STATIC
 
 # 第二段: 需要展开变量的少量标量(interval / 口令)。单独一段是为了让第一段能用带引号的 heredoc。
+# 外加 PROMETHEUS_GRAFANA_PLUGIN_DIR 非空时的插件目录覆盖(见下)。
 cat >> "${_VALUES_YAML}" <<PROM_VALUES_DYN
     scrapeInterval: "${PROMETHEUS_SCRAPE_INTERVAL}"
     evaluationInterval: "${PROMETHEUS_EVALUATION_INTERVAL}"
@@ -315,6 +346,9 @@ grafana:
   adminUser: "${GRAFANA_ADMIN_USER}"
   adminPassword: "${GRAFANA_ADMIN_PASSWORD}"
 PROM_VALUES_DYN
+# 插件目录覆盖块必须**单独追加**: heredoc 结束符要求顶格独占一行, 不能写成 ${VAR}DELIM。
+# 内容是缩进的键, 直接续在上面的 `grafana:` 映射里(YAML 合法)。
+[ -n "${_PROM_GRAFANA_PLUGIN_BLOCK}" ] && printf '%s' "${_PROM_GRAFANA_PLUGIN_BLOCK}" >> "${_VALUES_YAML}"
 
 # 第三段: node-exporter —— IB 采集 + node label(§1.3)
 # ⚠ extraArgs 是**整体替换**: 前两条是 chart 默认值(必须原样保留), 第三条才是本次新增。
@@ -468,6 +502,19 @@ for _df in "${_OBS_DASHS[@]}"; do
     _d_base="$(basename "${_df}" .json)"
     _d_cm="cubestack-${_d_base}"
     _d_tmp="$(mktemp)"
+    _d_src="${_df}"
+    # ★ 数据源自动绑定: 上游看板里的数据源引用是别人环境的 uid/名字 → 统一改绑本集群这份,
+    #   否则面板报 "Datasource not found"(看板导入成功但全空)。改的是**临时副本**, 仓库源不动。
+    if bool_is_true "${GRAFANA_DS_AUTOBIND}"; then
+        _d_norm="$(mktemp)"
+        if python3 "${SCRIPT_DIR}/tools/observability/normalize-dashboard-datasource.py" \
+                "${_df}" "${_d_norm}" "${GRAFANA_DATASOURCE_UID}" "${GRAFANA_DATASOURCE_NAME}" 2>>"${LOG_FILE:-/dev/null}"; then
+            _d_src="${_d_norm}"
+        else
+            warn "  ${_d_base} 数据源引用规范化失败, 按原始 JSON 导入(该看板面板可能选不到数据源)"
+        fi
+    fi
+    # ⚠ CM 的 key 必须仍是原始文件名(用 --from-file=<key>=<path>): 规范化后是临时文件名
     # 本地生成 CM YAML(kubectl 负责把 JSON 正确地渲染成块标量), 再管道给集群 apply。
     # `kubectl label --local` 只改本地对象、不碰 API → 一次 apply 就带上 label,
     # 避免"先 apply 再 label"让 sidecar 看到两次变更而重复重载。
@@ -478,7 +525,7 @@ for _df in "${_OBS_DASHS[@]}"; do
     #   服务端 apply 不走这个注解, 522KB 正常创建(实机验证)。
     #   本模块独占管理这些 CM, 不存在与其它 field manager 的冲突。
     if kubectl create configmap "${_d_cm}" -n "${PROMETHEUS_NAMESPACE}" \
-            --from-file="${_df}" --dry-run=client -o yaml 2>/dev/null \
+            --from-file="${_d_base}.json=${_d_src}" --dry-run=client -o yaml 2>/dev/null \
         | kubectl label --local -f - -o yaml \
             grafana_dashboard=1 \
             app.kubernetes.io/part-of=cubestack-observability \
@@ -489,7 +536,7 @@ for _df in "${_OBS_DASHS[@]}"; do
     else
         warn "  ${_d_base} 导入失败(kubectl create configmap --dry-run=client 本地复查)"
     fi
-    rm -f "${_d_tmp}"
+    rm -f "${_d_tmp}" "${_d_norm:-}"
 done
 if [ "${_DASH_OK}" -eq 0 ]; then
     err "  没有一条 dashboard 导入成功"
@@ -549,24 +596,101 @@ MXSM_YAML
     unset _MXDEPLOY _MXSM
 fi
 
-# ── 8. Prometheus/Grafana 对外暴露(nodeport / loadbalancer 两种模式, 与 RGW 同款配置) ──
-# PROMETHEUS_EXPOSE_MODE: nodeport(默认, 随 SERVICE_EXPOSE_MODE) / loadbalancer / clusterip
-#   nodeport     → prometheus 9090 + grafana 3000 各建 NodePort Service(独立, 防 helm 覆盖)
-#   loadbalancer → 改 LoadBalancer(需 MetalLB 已部署); 否则 warn 保持 ClusterIP
-#   clusterip    → 保持默认仅集群内
-say "[8/8] 配置 Prometheus/Grafana 对外暴露(PROMETHEUS_EXPOSE_MODE=${PROMETHEUS_EXPOSE_MODE:-<随 SERVICE_EXPOSE_MODE>})..."
+# ── 8. Grafana 对外暴露(nodeport / loadbalancer; MetalLB 模式下与 registry 共用同一 VIP) ──
+# PROMETHEUS_EXPOSE_MODE: 空 = 随 SERVICE_EXPOSE_MODE(nodeport / metallb); 也可显式
+#                         nodeport | loadbalancer | metallb | clusterip
+#   ⚠ **metallb 与 loadbalancer 同义**(全局开关写 metallb, 本变量历史上写 loadbalancer)。
+#     不做归一化的话 SERVICE_EXPOSE_MODE=metallb 会掉进 *) 分支 → 静默变成 ClusterIP,
+#     只给 port-forward 提示(2026-09-22 实机踩到: 用户以为暴露了, 实际根本没建 Service)。
+# PROMETHEUS_EXPOSE_PROMETHEUS: 是否连 Prometheus 一起暴露(默认 false —— 从 Grafana 里当数据源看即可)
+#   nodeport     → <svc>-external NodePort(prometheus=base+0 / grafana=base+1, 偏移固定不随暴露清单变)
+#   loadbalancer → <svc>-external LoadBalancer; 默认**共用 registry 的 VIP**(不同端口区分),
+#                  共用不成立时自动降级为独立 VIP 并打印实际地址(绝不静默停在 <pending>)
+#   clusterip    → 保持仅集群内(末尾给 port-forward 指引)
+say "[8/8] 配置 Grafana 对外暴露(PROMETHEUS_EXPOSE_MODE=${PROMETHEUS_EXPOSE_MODE:-<随 SERVICE_EXPOSE_MODE>})..."
 PROMETHEUS_EXPOSE_MODE="${PROMETHEUS_EXPOSE_MODE:-${SERVICE_EXPOSE_MODE:-clusterip}}"
-PROMETHEUS_EXPOSE_MODE="$(echo "${PROMETHEUS_EXPOSE_MODE}" | tr '[:upper:]' '[:lower:]')"
+case "$(echo "${PROMETHEUS_EXPOSE_MODE}" | tr '[:upper:]' '[:lower:]')" in
+    metallb|loadbalancer|lb) PROMETHEUS_EXPOSE_MODE="loadbalancer" ;;
+    nodeport|np)             PROMETHEUS_EXPOSE_MODE="nodeport" ;;
+    ""|clusterip|none)       PROMETHEUS_EXPOSE_MODE="clusterip" ;;
+    *) warn "  PROMETHEUS_EXPOSE_MODE=${PROMETHEUS_EXPOSE_MODE} 无法识别(可用 nodeport|metallb|loadbalancer|clusterip) → 按 clusterip 处理"
+       PROMETHEUS_EXPOSE_MODE="clusterip" ;;
+esac
 
-_PROM_APPS=(prometheus grafana)
-_PROM_NP_BASE="${PROMETHEUS_NODEPORT_BASE:-31000}"   # prometheus=31000, grafana=31001
+_PROM_APPS=(grafana)                                  # 默认只暴露 Grafana
+bool_is_true "${PROMETHEUS_EXPOSE_PROMETHEUS:-false}" && _PROM_APPS=(prometheus grafana)
+_PROM_NP_BASE="${PROMETHEUS_NODEPORT_BASE:-31000}"    # prometheus=base+0, grafana=base+1
+_prom_app_port() { case "$1" in prometheus) echo 9090 ;; grafana) echo 3000 ;; *) echo "" ;; esac; }
+_prom_np_port()  { case "$1" in prometheus) echo "$(( _PROM_NP_BASE + 0 ))" ;; grafana) echo "$(( _PROM_NP_BASE + 1 ))" ;; esac; }
+_PROM_ACCESS=()                                       # 汇总可访问地址(供末尾打印)
+_PROM_NODE_IP="<节点IP>"                              # nodeport 模式的入口 = 任意节点 IP(打印具体值更省事)
+if [ "${PROMETHEUS_EXPOSE_MODE}" = "nodeport" ]; then
+    _PROM_NODE_IP="$(first_node_ip 2>/dev/null || echo '<节点IP>')"
+fi
+
+# 共用 registry 的 VIP: 需要 registry 侧带同一个 sharing key 注解(MetalLB 的硬要求, 见 lib-common.sh 约定)。
+_PROM_SHARE_VIP=0
+if [ "${PROMETHEUS_EXPOSE_MODE}" = "loadbalancer" ] && bool_is_true "${PROMETHEUS_SHARE_REGISTRY_VIP:-true}" && [ -n "${REGISTRY_IP:-}" ]; then
+    _PROM_SHARE_VIP=1
+    # 存量集群: registry Service 由 kubespray 建, 其 manifest 里的 sharing key 注解要等下次
+    # k8s_deploy 才生效 → 这里幂等补一次, 否则 MetalLB 不会让 Grafana 共用它的 VIP。
+    SSH "${K}" -n kube-system annotate svc registry "${SHARED_VIP_ANNOTATION}=${SHARED_VIP_KEY}" --overwrite >/dev/null 2>&1 \
+        && vlog "已确保 registry Service 带共用注解 ${SHARED_VIP_ANNOTATION}=${SHARED_VIP_KEY}" \
+        || warn "  registry Service 注解补写失败(kubectl -n kube-system annotate svc registry ${SHARED_VIP_ANNOTATION}=${SHARED_VIP_KEY} --overwrite)"
+fi
+
+# 建/更新 <svc>-external 的 LoadBalancer Service 并等 MetalLB 分配。
+#   $1=app 名 $2=svc 名 $3=应用端口 $4=1 表示带共用 VIP 配置(注解 + 固定 loadBalancerIP)
+# 结果放全局 _PROM_LB_IP(拿不到 VIP 时为空); apply 提交失败返回 1。
+_prom_lb_apply() {
+    local _app="$1" _svc="$2" _port="$3" _share="$4" _ann="" _ip="" _yaml _t
+    _PROM_LB_IP=""
+    if [ "${_share}" = "1" ]; then
+        # printf -v(而非 $(...)): 命令替换会吃掉行尾换行, 拼进 YAML 时会把两行黏成一行
+        printf -v _ann '  annotations:\n    %s: %s\n' "${SHARED_VIP_ANNOTATION}" "${SHARED_VIP_KEY}"
+        printf -v _ip '  loadBalancerIP: %s\n' "${REGISTRY_IP}"
+    fi
+    _yaml="$(mktemp)"
+    cat > "${_yaml}" <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${_svc}-external
+  namespace: ${PROMETHEUS_NAMESPACE}
+  labels:
+    app.kubernetes.io/name: ${_svc}-external
+${_ann}spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Cluster
+${_ip}  selector:
+    app.kubernetes.io/name: ${_app}
+    app.kubernetes.io/instance: ${PROMETHEUS_RELEASE_NAME}
+  ports:
+    - port: ${_port}
+      targetPort: ${_port}
+      protocol: TCP
+EOF
+    if ! SSH "${K}" -n "${PROMETHEUS_NAMESPACE}" apply -f - < "${_yaml}" >/dev/null 2>&1; then
+        rm -f "${_yaml}"; return 1
+    fi
+    rm -f "${_yaml}"
+
+    for _t in $(seq 1 "${PROMETHEUS_LB_WAIT_TRIES:-20}"); do   # 最长 tries × 3s
+        _PROM_LB_IP="$(SSH "${K}" -n "${PROMETHEUS_NAMESPACE}" get svc "${_svc}-external" -o 'jsonpath={.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+        [ -n "${_PROM_LB_IP}" ] && break
+        sleep 3
+    done
+    return 0
+}
+
 for _idx in "${!_PROM_APPS[@]}"; do
     _app="${_PROM_APPS[$_idx]}"
     _svc="${PROMETHEUS_RELEASE_NAME}-${_app}"
-    _port="$((_PROM_NP_BASE + _idx))"
+    _app_port="$(_prom_app_port "${_app}")"
     case "${PROMETHEUS_EXPOSE_MODE}" in
         nodeport)
-            say "  ${_app}: NodePort ${_port}(独立 Service ${_svc}-external)..."
+            _ext_port="$(_prom_np_port "${_app}")"        # 外部 NodePort(偏移固定, 与是否暴露 prometheus 无关)
+            say "  ${_app}: NodePort ${_ext_port}(独立 Service ${_svc}-external)..."
             # ★ 2026-09-14 修复(两处缺陷):
             #   1. kubectl create service nodeport --tcp=<port>:<port> 会把 targetPort 也写成外部端口
             #      (31000/31001), 而 Prometheus 实际监听 9090、Grafana 3000 → 转发目标错, 连接失败。
@@ -575,8 +699,6 @@ for _idx in "${!_PROM_APPS[@]}"; do
             #      两个 selector 键 → 与默认合并成 AND(要求同时匹配 app=<svc名>)→ Endpoints 永远为空。
             #      修复: 先删默认 selector(app=键), 再 merge patch 真正的 selector。
             #   改用直接 apply 完整 YAML(幂等), 不再 create+patch 两段式。
-            _ext_port="$((_PROM_NP_BASE + _idx))"          # 外部 NodePort
-            _app_port="9090"; [ "${_app}" = "grafana" ] && _app_port="3000"   # 应用真实端口
             _ext_yaml="$(mktemp)"
             cat > "${_ext_yaml}" <<EOF
 apiVersion: v1
@@ -597,24 +719,112 @@ spec:
       nodePort: ${_ext_port}
       protocol: TCP
 EOF
-            SSH "${K} -n ${PROMETHEUS_NAMESPACE} delete svc ${_svc}-external --ignore-not-found=true >/dev/null 2>&1" || true
-            SSH "${K} -n ${PROMETHEUS_NAMESPACE} apply -f -" < "${_ext_yaml}" >/dev/null 2>&1 \
-                && ok "  ${_app} 外部入口: http://<节点IP>:${_ext_port}/  (target ${_app_port})" \
+            SSH "${K}" -n "${PROMETHEUS_NAMESPACE}" delete svc "${_svc}-external" --ignore-not-found=true >/dev/null 2>&1 || true
+            SSH "${K}" -n "${PROMETHEUS_NAMESPACE}" apply -f - < "${_ext_yaml}" >/dev/null 2>&1 \
+                && ok "  ${_app} 外部入口: http://${_PROM_NODE_IP}:${_ext_port}/  (target ${_app_port})" \
                 || warn "  ${_app} 外部 Service 创建失败(kubectl -n ${PROMETHEUS_NAMESPACE} get svc ${_svc}-external)"
             rm -f "${_ext_yaml}"
+            _PROM_ACCESS+=("${_app}|http://${_PROM_NODE_IP}:${_ext_port}/")
             ;;
         loadbalancer)
-            if [ -n "$( (SSH "${K} get ns metallb-system --no-headers 2>/dev/null" || true) )" ]; then
-                say "  ${_app}: LoadBalancer(需 MetalLB)..."
-                SSH "${K} -n ${PROMETHEUS_NAMESPACE} patch svc ${_svc} --type merge -p '{"spec":{"type":"LoadBalancer"}}' >/dev/null 2>&1" || true
+            # 用独立 *-external Service(而不是把 helm 管的 Service 改成 LoadBalancer):
+            # helm upgrade 不会把这个类型改回去, 也不会与 chart 的期望状态打架。
+            if [ "${_PROM_SHARE_VIP}" = "1" ]; then
+                say "  ${_app}: LoadBalancer 端口 ${_app_port} —— 与 registry 共用 VIP ${REGISTRY_IP} ..."
             else
-                warn "  MetalLB 未部署; ${_app} 保持 ClusterIP(可先 CEPH/PROMETHEUS_EXPOSE_MODE=nodeport)"
+                say "  ${_app}: LoadBalancer 端口 ${_app_port} —— MetalLB 自动分配 VIP ..."
+            fi
+            if ! _prom_lb_apply "${_app}" "${_svc}" "${_app_port}" "${_PROM_SHARE_VIP}"; then
+                warn "  ${_app} 外部 Service 创建失败(kubectl -n ${PROMETHEUS_NAMESPACE} get svc ${_svc}-external 复查)"
+            elif [ -n "${_PROM_LB_IP}" ]; then
+                [ "${_PROM_SHARE_VIP}" = "1" ] && [ "${_PROM_LB_IP}" != "${REGISTRY_IP}" ] && \
+                    warn "  期望共用 ${REGISTRY_IP}, 实际拿到 ${_PROM_LB_IP}(MetalLB 未接受共用, 端口冲突?)"
+                ok "  ${_app} 入口: http://${_PROM_LB_IP}:${_app_port}/"
+                _PROM_ACCESS+=("${_app}|http://${_PROM_LB_IP}:${_app_port}/")
+            elif [ "${_PROM_SHARE_VIP}" = "1" ]; then
+                # 共用没成(注解未生效 / 该 IP 已被别人占) → 降级为独立 VIP 重建, 绝不静默停在 <pending>。
+                warn "  共用 ${REGISTRY_IP} 超时未分配到 VIP → 降级为独立 VIP(从 METALLB_POOL 自动分配)重试"
+                if _prom_lb_apply "${_app}" "${_svc}" "${_app_port}" 0 && [ -n "${_PROM_LB_IP}" ]; then
+                    ok "  ${_app} 入口(独立 VIP): http://${_PROM_LB_IP}:${_app_port}/"
+                    _PROM_ACCESS+=("${_app}|http://${_PROM_LB_IP}:${_app_port}/")
+                else
+                    warn "  ${_app} 仍未拿到 VIP —— 检查 METALLB_POOL 是否还有空闲地址(kubectl -n ${PROMETHEUS_NAMESPACE} describe svc ${_svc}-external)"
+                fi
+            else
+                warn "  ${_app} 超时未拿到 VIP —— 检查 METALLB_POOL 是否还有空闲地址(kubectl -n ${PROMETHEUS_NAMESPACE} describe svc ${_svc}-external)"
             fi
             ;;
         *) say "  ${_app}: ClusterIP(仅集群内)" ;;
     esac
 done
-unset _idx _app _svc _port
+unset _idx _app _svc _app_port _ext_port _ext_yaml
+
+# ── 9. 数据源可用性校验(★ 2026-09-22 新增; 这一步的存在本身就是一次事故的产物) ──
+# 为什么必须"真查一次": Grafana 13.2 起数据源插件外置(见开头 PROMETHEUS_GRAFANA_PLUGIN_DIR 注释),
+# 离线环境装不上插件时 —— 数据源**对象**照样被 provisioning 建出来、Grafana 也照样 Running,
+# 但任何查询都报 "Unable to find datasource plugin", **所有看板无数据**。
+# 2026-09-22 实机就是这样一路绿灯装完、用户点开看板才发现是空的。所以本模块不再"装完即成功"。
+#   判据(两条都要过): ① 数据源 health 正常; ② 经 Grafana 代理跑一条真实 PromQL 返回 success。
+# 口令处理: 经 heredoc 文本(SSH stdin)下发 → 落成 master 上 600 的临时 netrc 用后即删,
+# **不进任何一端 argv/ps**; 含单引号的口令为避免转义风险跳过自动校验并提示手工验。
+if [ "${GRAFANA_DS_VERIFY}" = "off" ]; then
+    say "[9/9] 数据源可用性校验: 已关闭(GRAFANA_DS_VERIFY=off)"
+else
+    say "[9/9] 校验 Grafana → Prometheus 数据源真的可用..."
+    _g_ip="$( (SSH "${K}" -n "${PROMETHEUS_NAMESPACE}" get svc "${PROMETHEUS_RELEASE_NAME}-grafana" -o 'jsonpath={.spec.clusterIP}' 2>/dev/null || true) )"
+    _ds_ok=0; _ds_msg=""
+    if [ -z "${_g_ip}" ]; then
+        _ds_msg="取不到 Grafana Service ClusterIP(kubectl -n ${PROMETHEUS_NAMESPACE} get svc ${PROMETHEUS_RELEASE_NAME}-grafana)"
+    elif case "${GRAFANA_ADMIN_PASSWORD}" in *"'"*) true;; *) false;; esac; then
+        warn "  GRAFANA_ADMIN_PASSWORD 含单引号, 跳过自动校验(避免远端转义踩坑); 请手工验证:"
+        warn "    curl -u admin:'<口令>' http://<grafana>:3000/api/datasources/uid/prometheus/health"
+        _ds_ok=2
+    else
+        _ds_out="$(SSH "bash -s" <<REMOTE 2>/dev/null || true
+umask 077
+_nrc="/tmp/.grafana-ds-netrc.\$\$"
+printf 'machine %s login %s password %s\n' "${_g_ip}" "${GRAFANA_ADMIN_USER}" '${GRAFANA_ADMIN_PASSWORD}' > "\${_nrc}"
+trap 'rm -f "\${_nrc}"' EXIT
+echo "HEALTH:\$(curl -s -m 10 --netrc-file "\${_nrc}" "http://${_g_ip}/api/datasources/uid/prometheus/health")"
+echo "QUERY:\$(curl -s -m 10 --netrc-file "\${_nrc}" --get --data-urlencode 'query=count(up)' "http://${_g_ip}/api/datasources/proxy/uid/prometheus/api/v1/query")"
+REMOTE
+)"
+        _ds_health="$(printf '%s' "${_ds_out}" | sed -n 's/^HEALTH://p')"
+        _ds_query="$(printf '%s' "${_ds_out}"  | sed -n 's/^QUERY://p')"
+        if printf '%s' "${_ds_health}${_ds_query}" | grep -q 'plugin.notRegistered\|Unable to find datasource plugin'; then
+            _ds_msg="Grafana 找不到 prometheus 数据源插件(插件未预装)"
+        elif printf '%s' "${_ds_query}" | grep -q '"status":"success"'; then
+            _ds_ok=1
+        else
+            _ds_msg="查询未返回 success: health=${_ds_health:-<空>} query=${_ds_query:-<空>}"
+        fi
+    fi
+
+    if [ "${_ds_ok}" = "1" ]; then
+        _ds_val="$(printf '%s' "${_ds_query}" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); r=d["data"]["result"]
+    print(r[0]["value"][1] if r else "0")
+except Exception: print("?")' 2>/dev/null || echo "?")"
+        ok "  数据源可用: Prometheus 查询正常(count(up)=${_ds_val}); Grafana 看板可出数"
+    elif [ "${_ds_ok}" = "2" ]; then
+        :   # 上面已提示手工验
+    else
+        err "  Grafana 数据源不可用: ${_ds_msg}"
+        err "  影响: Grafana 能登录, 但所有 dashboard 无数据(数据源对象存在 ≠ 能用)。"
+        err "  最常见的根因: Grafana ≥13.2 把数据源改成**独立插件**, 离线环境下载不到。"
+        err "  修法(二选一):"
+        err "    ① 用预装插件的派生镜像 —— 联网机执行:"
+        err "         bash deployments/scripts/tools/images/grafana-plugin-build.sh"
+        err "       然后 cluster.conf 设 PROMETHEUS_IMAGE_GRAFANA=<构建出的 tag>(如 13.2.1-distroless-r1)"
+        err "       与 PROMETHEUS_GRAFANA_PLUGIN_DIR=/opt/grafana-plugins 后重跑本模块;"
+        err "    ② 或把 Grafana 换回仍内置数据源的版本(≤13.1, 改 PROMETHEUS_IMAGE_GRAFANA)。"
+        err "  排查: kubectl -n ${PROMETHEUS_NAMESPACE} logs deploy/${PROMETHEUS_RELEASE_NAME}-grafana -c grafana | grep -i 'plugins installed'"
+        err "  (确认是环境问题想先放过: cluster.conf 设 GRAFANA_DS_VERIFY=warn)"
+        [ "${GRAFANA_DS_VERIFY}" = "warn" ] && warn "  GRAFANA_DS_VERIFY=warn → 仅告警, 继续" || exit 1
+    fi
+    unset _g_ip _ds_out _ds_health _ds_query _ds_ok _ds_msg _ds_val
+fi
 
 echo "---------------------------------------------"
 ok "Prometheus 监控底座部署完成(kube-prometheus-stack + CubeStack 可观测性)"
@@ -633,14 +843,15 @@ echo "  发现范围:     serviceMonitorSelector/ruleSelector/scrapeConfigSelect
 if [ "${MX_EXPORTER_ENABLED}" = "true" ]; then
     echo "  mx-exporter:  已尝试开启(ns ${METAX_NAMESPACE} 无 ClusterOperator 时自动跳过)"
 fi
-if [ "${PROMETHEUS_EXPOSE_MODE}" = "nodeport" ]; then
-    _prom_np="${PROMETHEUS_NODEPORT_BASE:-31000}"
-    echo "  访问(NodePort): Prometheus http://<节点IP>:${_prom_np}  Grafana http://<节点IP>:$((_prom_np + 1))"
-elif [ "${PROMETHEUS_EXPOSE_MODE}" = "loadbalancer" ]; then
-    echo "  访问(LoadBalancer): 见 kubectl -n monitoring get svc ${PROMETHEUS_RELEASE_NAME}-prometheus / -grafana EXTERNAL-IP"
-else
-    echo "  Prometheus:   kubectl -n ${PROMETHEUS_NAMESPACE} port-forward svc/${PROMETHEUS_RELEASE_NAME}-prometheus 9090"
+if [ "${#_PROM_ACCESS[@]}" -gt 0 ]; then
+    echo "  访问地址(浏览器打开即可):"
+    for _l in "${_PROM_ACCESS[@]}"; do printf '    %-12s %s\n' "${_l%%|*}" "${_l#*|}"; done
+    if [ "${_PROM_SHARE_VIP}" = "1" ]; then
+        echo "    (Grafana 与 registry 共用 VIP ${REGISTRY_IP}, 以端口区分: registry ${REGISTRY_PORT:-5000} / Grafana 3000)"
+    fi
+elif [ "${PROMETHEUS_EXPOSE_MODE}" = "clusterip" ]; then
     echo "  Grafana:      kubectl -n ${PROMETHEUS_NAMESPACE} port-forward svc/${PROMETHEUS_RELEASE_NAME}-grafana 3000"
+    echo "                (要对外暴露: cluster.conf 设 SERVICE_EXPOSE_MODE=metallb 或 nodeport 后重跑)"
 fi
 echo "  端到端验证:   sudo ./deploy-cluster.sh --steps verify_prometheus"
 echo "  卸载:         helm uninstall ${PROMETHEUS_RELEASE_NAME} -n ${PROMETHEUS_NAMESPACE}"

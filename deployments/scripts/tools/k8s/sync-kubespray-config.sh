@@ -260,6 +260,40 @@ fi
 #   loadbalancer → LoadBalancer + 固定 VIP(REGISTRY_IP), 避免 MetalLB auto-assign 分到网段边界地址
 #   nodeport     → NodePort + 固定 REGISTRY_NODEPORT(不依赖 MetalLB)
 # 集群内节点 /etc/hosts + containerd 引用的是 REGISTRY_DOMAIN, 与 Service type 无关
+#
+# 写/清 addons.yml 的 registry_service_annotations(共用 MetalLB VIP 的 sharing key, 见 lib-common.sh
+# 顶部约定)。**必须写进 manifest 而不是事后 kubectl annotate**: kubespray 每次重跑都会重新
+# apply 这个 Service, 手工补的注解会被冲掉; 写进模板变量才能跟着 manifest 长期存在。
+# 注解本身只是"允许他人与本 Service 共用同一 VIP"的许可, 没人请求该 IP 时无任何作用 →
+# loadbalancer 模式下无条件写入; 离开该模式时清理掉, 免留跨模式残留。
+# 用法: _sync_registry_annotations <注解键> <值>   (键为空 = 只清理不写入)
+_sync_registry_annotations() {
+    python3 - "${ADDONS_YML}" "${1:-}" "${2:-}" <<'PYEOF'
+import re, sys
+path, ann, val = sys.argv[1:4]
+lines = open(path).read().split('\n')
+out, i = [], 0
+# ① 先摘掉旧的 registry_service_annotations 块(键行 + 其后所有缩进更深的行)
+while i < len(lines):
+    if re.match(r'^registry_service_annotations:', lines[i]):
+        i += 1
+        while i < len(lines) and (lines[i].strip() == '' or lines[i].startswith((' ', '\t'))):
+            i += 1
+        continue
+    out.append(lines[i]); i += 1
+# ② 需要写入时插到 registry_service_type 行之后(该项已由上面的分支写定)
+if ann:
+    res = []
+    for l in out:
+        res.append(l)
+        if re.match(r'^[ \t]*registry_service_type:', l):
+            res.append('registry_service_annotations:')
+            res.append('  %s: %s' % (ann, val))
+    out = res
+open(path, 'w').write('\n'.join(out) + '\n')
+PYEOF
+}
+
 if [ -f "${ADDONS_YML}" ] && [ "${REGISTRY_ENABLED:-0}" = "1" ]; then
     # REGISTRY_IP 自动派生: 留空则从 METALLB_POOL 取首地址(换环境只改池, 不用手改 VIP)
     # load_config 已派生, 此处仅兜底(防单独直接运行本脚本时未走 load_config 派生分支)
@@ -279,6 +313,7 @@ if [ -f "${ADDONS_YML}" ] && [ "${REGISTRY_ENABLED:-0}" = "1" ]; then
             fi
             # NodePort 模式下残留的 loadbalancer_ip 行会让 kubespray 校验失败(定义了 VIP 但 type != LoadBalancer), 统一注释掉
             sed -i -E "s|^([[:space:]]*)(#?)[[:space:]]*registry_service_loadbalancer_ip:.*|\1# registry_service_loadbalancer_ip: 已由 sync 脚本禁用(nodeport 模式)|" "${ADDONS_YML}"
+            _sync_registry_annotations "" ""   # 离开 loadbalancer 模式 → 清掉共用 VIP 注解(免留残留)
             ok "已同步 registry Service → NodePort:${REGISTRY_NODEPORT:-31148}"
             ;;
         *)  # loadbalancer(默认)
@@ -299,7 +334,10 @@ if [ -f "${ADDONS_YML}" ] && [ "${REGISTRY_ENABLED:-0}" = "1" ]; then
             if ! grep -qE '^[[:space:]]*registry_service_loadbalancer_ip:' "${ADDONS_YML}"; then
                 sed -i -E "s|^([[:space:]]*)registry_service_type:.*|&\n\1registry_service_loadbalancer_ip: ${REGISTRY_IP}|" "${ADDONS_YML}"
             fi
-            ok "已同步 registry Service → LoadBalancer:${REGISTRY_IP}"
+            # 共用 VIP 许可(见上方 _sync_registry_annotations 说明): 监控 Grafana 与 registry
+            # 共用一个 MetalLB VIP、以端口区分(5000 registry / 3000 grafana)。
+            _sync_registry_annotations "${SHARED_VIP_ANNOTATION}" "${SHARED_VIP_KEY}"
+            ok "已同步 registry Service → LoadBalancer:${REGISTRY_IP}(允许共用 VIP: ${SHARED_VIP_ANNOTATION}=${SHARED_VIP_KEY})"
             ;;
     esac
 fi
