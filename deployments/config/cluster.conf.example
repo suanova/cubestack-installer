@@ -89,6 +89,24 @@ METALLB_ENABLED="${METALLB_ENABLED:-true}"              # MetalLB 负载均衡(�
 KUBE_VIP_ENABLED="${KUBE_VIP_ENABLED:-true}"            # 默认开: 消除 API 入口单点(修复"全集群指向第一个 master")
 K8S_API_VIP="${K8S_API_VIP:-}"                          # 留空=自动推导(各 master 探测 .210 起找空闲地址); 显式值优先
 KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"            # 留空=kube-vip 自动检测网卡; 多网卡环境显式指定(如 ens5)
+KUBE_VIP_CP_DETECT="${KUBE_VIP_CP_DETECT:-true}"        # apiserver 进程级故障检测(默认开, 覆盖 kubespray 的 false)
+                                                        #   false(仅租约): 节点活着但 apiserver 进程死了 → VIP 不漂移
+                                                        #   true(kube-vip 探本机 apiserver /healthz): 探失败即置健康为假
+                                                        #     → 不再续租 → 租约到期(约 5s)即漂移, 与节点宕机同一量级
+                                                        #   代价: 短时抖动可能触发不必要的 VIP 迁移(HTTP 探针, 非 TCP 连通)
+# 本地代理(kubespray 原生 nginx-proxy 静态 Pod: 每节点 127.0.0.1:6443 → 全部 master)
+#   · 与 kube-vip 是**叠加**关系: kube-vip 管"全集群/外部统一入口", 本地代理管"每节点就近出口"
+#   · ⚠ **只设 loadbalancer_apiserver_localhost=true 是无效的**(假修复): kubespray 的
+#     kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支优先,
+#     只要外部 LB 定义了, kubelet 永远走 <域名>:6443, 本地代理装了也没人用。
+#     本开关为 true 时脚本会**硬失败**并给出修法(见 sync-kubespray-config.sh)。
+#   · 真正启用需要**二选一**:
+#       路线1(推荐, 保留域名/VIP 对外入口): 显式声明 kubelet 走 localhost
+#       路线2(全集群改用本地代理): 摘掉 all.yml 的 loadbalancer_apiserver 块
+#   · 收益: kubelet 侧故障切换 ~1s(1s 连接超时 + 无健康检查, 靠连接失败即时摘除)
+#     实测(3 master, 2/3 后端为黑洞时): 20/20 请求成功, 19 次 ~4.4ms, 1 次 1.0045s
+#   · 代价: 每节点多一个静态 Pod; 且它只解决"节点→API", 外部入口仍需 kube-vip
+KUBE_VIP_LOCAL_PROXY="${KUBE_VIP_LOCAL_PROXY:-false}"   # 默认关: 保持单一路径, 需要 worker 侧快速切换再开
 LOCAL_PATH_ENABLED="${LOCAL_PATH_ENABLED:-true}"        # local-path-provisioner 默认 StorageClass
 METRICS_SERVER_ENABLED="${METRICS_SERVER_ENABLED:-true}"  # metrics-server(HPA 依赖)
 HELM_ENABLED="${HELM_ENABLED:-true}"                    # Helm(registry 等组件依赖)

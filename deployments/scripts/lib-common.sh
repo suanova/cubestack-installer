@@ -778,6 +778,22 @@ kube_vip_validate_config() {
         warn "kube-vip 已启用但仅 ${_master_count} 台 master —— VIP 只能在现存 master 之间漂移,"
         warn "少于 3 台时无真正的多数派容错(建议 3 台及以上)"
     fi
+
+    # ⑤ 本地代理(kubespray nginx-proxy): 拦住"以为改了开关就生效"的假修复
+    #    kubespray 的 kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支优先,
+    #    只要外部 LB 还在, kubelet 永远走 <域名>:6443 —— 本地代理装了也没人用。
+    #    这不是"少配一个变量", 是两个互斥的拓扑选择, 所以硬失败而不是警告。
+    if bool_is_true "${KUBE_VIP_LOCAL_PROXY:-false}"; then
+        err "KUBE_VIP_LOCAL_PROXY=true 与当前拓扑冲突, 单改开关不会生效(本地代理会装上但没流量):"
+        err "  原因: kubespray 模板中 loadbalancer_apiserver 分支优先于 localhost 分支,"
+        err "        只要 all.yml 里还定义着 loadbalancer_apiserver, kubelet 就始终走域名:6443"
+        err "  二选一:"
+        err "    · 路线1(推荐, 保留域名/VIP 对外入口): 待支持后由脚本显式声明 kubelet 端点"
+        err "    · 路线2(全集群改用本地代理): 摘掉 all.yml 的 loadbalancer_apiserver 块"
+        err "        代价: 对外稳定入口丢失(除非另有外部 LB), kube-vip 的价值也随之消失"
+        err "  当前建议: 保持 KUBE_VIP_LOCAL_PROXY=false, 走 kube-vip 单一路径"
+        return 1
+    fi
     return 0
 }
 
@@ -980,6 +996,11 @@ update_kube_vip_addons_yml() {
             [ -n "${vip}" ] && echo "kube_vip_address: ${vip}"
             echo "kube_vip_arp_enabled: true"
             echo "kube_vip_controlplane_enabled: true"
+            # apiserver 进程级故障检测: 开启后 kube-vip 探本机 apiserver /healthz, 探失败即把
+            # 自身健康置假 → 不再续租 → 约 5s(租约时长)后 VIP 漂走。这是"节点活着但 apiserver
+            # 死了"这一场景唯一的快速切换手段(关闭时只能等租约自然过期, 与节点宕机同速)。
+            # 默认开(与 kubespray 的 false 不同): 该场景在真实运维中比整机宕机更常见。
+            echo "kube_vip_cp_detect: $(bool_is_true "${KUBE_VIP_CP_DETECT:-true}" && echo true || echo false)"
             # 服务 LB 归 MetalLB —— 两者都实现 LoadBalancer 语义, 同时开会让 kube-vip 抢走
             # MetalLB 的地址分配权(实机已验证的分工, 见 docs/kube-vip-api-ha.md 决策 D1)
             echo "kube_vip_services_enabled: false"

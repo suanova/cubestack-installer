@@ -568,3 +568,156 @@ bash ./deployments/scripts/tools/images/harbor-save-images.sh --list --group k8s
 3. 若 ⑥ 通过, 再跑一次 `--steps k8s_deploy` —— 这次应弹出**阶段二切换确认**(红底 + 30s 倒计时)
 4. 切换后再跑 `--steps verify_kube_vip` —— ⑤ 应显示 EndpointSlice 含全部 master
 5. 全程关注第 11 节 R1/R2 两个风险项的实际表现
+
+---
+
+## 15. cp_detect:apiserver 进程级故障检测(2026-09-22 增补)
+
+### 15.1 它解决什么
+
+`kube_vip_cp_detect`(kubespray 默认 **false**,本项目默认 **true**)开启后,kube-vip 探测**本机
+apiserver 的 `/healthz`**;探失败即把自身健康置为假 → 不再续租 → 约 `leaseduration`(5s)后
+VIP 漂走。
+
+**没有它时漏掉的场景**:节点活着、kubelet 正常、网络正常,但 **apiserver 进程死掉/卡死**。
+这时租约照常续(续租看的是进程存活,不是 apiserver 健康),VIP 永远不漂 —— 外部客户端会
+一直打到一个没有 API 的地址。整机宕机反而没问题(续租自然中断)。
+
+真实运维中"节点活着但 apiserver 死了"比整机宕机更常见(OOM、证书过期、etcd 抖动、盘满),
+这是默认开启的理由。
+
+### 15.2 代价与调参
+
+- 探针是 **HTTP `/healthz`**,比 TCP 连通更严格 → 短时抖动可能触发一次不必要的 VIP 迁移。
+  迁移本身只影响 ARP 通告(约 5s),不会重签证书,所以代价可控。
+- 想回到 kubespray 的行为: `KUBE_VIP_CP_DETECT=false`。
+- 与租约参数的关系: 两者**串联** —— 探测置假 → 停续租 → 等 `leaseduration` 到期 → 漂移。
+  所以端到端仍是 5s 量级,不会更快;它的价值是**补上"永远不会漂"这个洞**,而不是提速。
+
+### 15.3 落地
+
+- 配置面: `cluster.conf` 的 `KUBE_VIP_CP_DETECT`(默认 true)
+- 写入: `lib-common.sh#update_kube_vip_addons_yml()` → `addons.yml` 的 `kube_vip_cp_detect`
+- 上游接线: `roles/kubernetes/node/templates/manifests/kube-vip.manifest.j2:44-45`
+  (`{% if kube_vip_controlplane_enabled %}` 块内的 `cp_detect` env)
+
+---
+
+## 16. kubespray 原生本地代理(nginx-proxy):调查结论与实测
+
+### 16.1 结论先行:只改开关是**假修复**
+
+kubespray 的 `kube_apiserver_endpoint`(`kubespray_defaults/defaults/main/main.yml:643`)
+是一条**优先级 if 链**:
+
+```jinja
+{% if loadbalancer_apiserver is defined %}          ← 最高优先, 外部 LB 永远赢
+    https://{{ apiserver_loadbalancer_domain_name }}:{{ port }}
+{% elif ('kube_control_plane' not in group_names) and loadbalancer_apiserver_localhost %}
+    https://localhost:{{ port }}                     ← kubelet 走本地代理的**唯一**出口
+{% elif 'kube_control_plane' in group_names %}
+    https://127.0.0.1:{{ kube_apiserver_port }}      ← 控制面走自己的 apiserver
+{% else %}
+    https://{{ first_kube_control_plane_address }}:{{ port }}
+{% endif %}
+```
+
+**只要 all.yml 里还定义着 `loadbalancer_apiserver`(本项目为 kube-vip 提供对外入口而必须保留),
+第二个分支永远进不去** —— kubelet 始终打 `<域名>:6443`。
+
+而 `loadbalancer_apiserver_localhost` 同时控制**两件事**:
+
+| 它控制 | 位置 |
+|---|---|
+| 是否安装 nginx-proxy 静态 Pod | `roles/kubernetes/node/tasks/main.yml` 安装条件 |
+| kubelet 的 API 端点是否为 localhost | 上面 if 链的第二个分支 |
+
+所以"把 `loadbalancer_apiserver_localhost` 设成 true"会让 **nginx-proxy 装上、但没有任何流量经过它** ——
+多了一个静态 Pod 和一个 8081 监听,收益为零。这是最容易踩的坑,已做成**硬失败护栏**
+(`lib-common.sh#kube_vip_validate_config()` 第 ⑤ 条),不会静默无效。
+
+**真正启用需要二选一**(都是拓扑变更,不是改开关):
+
+- **路线1(推荐)**:保留 `loadbalancer_apiserver`(域名/VIP 对外入口不动),另外显式把
+  kubelet 的端点声明为 localhost。kubespray 的模板没给这个开关 —— 需要改模板或
+  post-task 覆盖 `kubelet.conf` 的 `server:` 字段。
+- **路线2**:摘掉 all.yml 的 `loadbalancer_apiserver` 块,全集群改用本地代理。
+  代价:kube-vip 失去意义(它存在的理由是给外部/跨系统一个稳定入口),对外入口也没了。
+  **只有当"不需要对外稳定 API 入口"时才成立** —— 与本方案的目标直接冲突,故不采用。
+
+### 16.2 实测(2026-09-22, bare-metal 集群 mxgpu-1-147/152/154 + worker 165)
+
+**测法**:在 worker 165 上用 kubespray 同款 nginx 配置(`least_conn` + `proxy_connect_timeout 1s`)
+起一个本地代理,upstream 里放入**黑洞地址**模拟已死的 apiserver,完全不触碰集群节点。
+镜像用的是节点上现成的 `docker.io/library/nginx:1.27.4-alpine`。
+
+| 场景 | 结果 |
+|---|---|
+| **成功路径**(3 后端全健康, 经本地代理) | 稳定 **~4.4ms**,与直连无差异 |
+| **1/3 后端为黑洞** | **30/30 成功**,全部 ~4.4ms,无任何请求失败 |
+| **2/3 后端为黑洞**(只有 1 台健康) | **20/20 成功**;**19 次 ~4.4ms,1 次 1.0045s** |
+
+**关键结论**:
+
+1. nginx stream 对**同一请求内**的失败会自动转投下一个 upstream(`proxy_next_upstream`
+   默认含 error/timeout),所以**只要还有一台健康 master,客户端零失败**。
+2. 最坏单次延迟 = `proxy_connect_timeout` = **1s**(不是失败,是慢 1s)。
+   命中死后端的概率 ≈ 死后端占比,所以 3 master 挂 2 台时约 1/3 请求慢 1s。
+3. nginx 对已挂的后端会**临时标记**并优先选健康的,故实际触发 1s 惩罚的频率低于理论占比。
+
+**已知短板(与 haproxy 的关键差异)**:kubespray 的 nginx-proxy 配置里**没有任何健康检查**
+(`proxy_connect_timeout 1s` 是连接超时,不是健康检查;模板里那个
+`loadbalancer_apiserver_healthcheck_port: 8081` 是给**上游 LB 探 nginx 自己**用的,
+不是 nginx 探 apiserver)。后果:
+
+- **已建立的连接**在后端静默死亡时不会被立刻感知,会等到 `proxy_timeout`(kubespray 配的是 **10m**)。
+  对 kubelet 的 watch 长连接意味着最长 10 分钟才重连。
+- 对比 haproxy 的 `option tcp-check` + `default-server inter 10s fall 2 rise 3` 是**主动**健康检查,
+  能提前把死后端踢出。
+
+### 16.3 为什么本项目仍不启用本地代理
+
+| | 本地代理(kubespray nginx-proxy) | kube-vip VIP |
+|---|---|---|
+| 覆盖 | **仅**"节点 → API"(集群内) | 集群内 + 外部 + `controlPlaneEndpoint` |
+| 故障切换 | 新连接 **~1s**(连接超时后同请求转投) | 租约到期,**约 5s**(与 `cp_detect` 串联) |
+| 已建立连接 | 要等 `proxy_timeout`(**10m**) | 同(VIP 漂移不影响已建立连接) |
+| 感知 apiserver 进程死 | 新连接能(连接失败);旧连接不能 | 需 `cp_detect`(已默认开启) |
+| 是否需改拓扑 | **是**(见 16.1 的 if 链冲突) | 否(kubespray 原生变量) |
+| 外部稳定入口 | ❌ 不提供 | ✅ 提供 |
+
+**两者不互斥,是叠加的两个层面**:kube-vip 给全集群/外部一个稳定入口,本地代理给每个节点
+一个快速失败的就近出口。理论上可以都要(路线1)。
+
+**暂不启用的理由**:路线1 需要改 kubespray 模板或 post-task 覆写 kubelet.conf,属于签名外的
+改动,且收益(worker 侧从"约 5s 随 VIP 漂移"变成"约 1s 换后端")与新增的故障面相比不划算;
+kube-vip 的 `cp_detect` 已经把"apiserver 进程死"这个最危险的场景补上了。
+**若将来实测发现 VIP 漂移的 5s 对 worker 负载影响过大,再按路线1 引入。**
+
+### 16.4 回答"kubelet 默认访问哪个 apiserver"
+
+由上面那条 if 链决定,**本项目当前**(`loadbalancer_apiserver` 已定义)是:
+
+```
+kubelet → https://k8s-api.cubestack.io:6443 → /etc/hosts → loadbalancer_apiserver.address
+```
+
+阶段一 = **第一个 master**;阶段二(切换后) = **VIP**。
+
+- **worker**:经上面这条链 → 单点(阶段一)或 VIP(阶段二)
+- **control plane 自身**:`kubeadm` 生成的 `kubelet.conf` 里 `server:` 也被 kubespray 的
+  `kubeadm-fix-apiserver.yml` / `kubeadm/tasks/main.yml:102` 改写成同一个
+  `kube_apiserver_endpoint` —— **所以控制面节点也走同一个地址**,而不是自己的本地 apiserver。
+  这点与直觉相反,值得注意:master02/03 的 kubelet 也是打 master01(阶段一)。
+
+验证命令(任一节点): `sudo grep -m1 'server:' /etc/kubernetes/kubelet.conf`
+
+### 16.5 本地代理安装位置与镜像
+
+- **位置**:静态 Pod manifest `/etc/kubernetes/manifests/nginx-proxy.yml`,
+  配置 `/etc/nginx/nginx.conf`(由 `nginx.conf.j2` 渲染)
+- **镜像**:不在 `images.manifest` 里 —— 它是 kubespray 自己的**二进制**资产
+  (`roles/kubespray_defaults/defaults/main/download.yml` 的 `nginx_image_repo`),
+  随 kubespray 离线包分发,由 `resolve_preload_image_files()` 负责加载。
+  **若将来启用本地代理,需确认该镜像已在离线预加载集合内**,否则 nginx-proxy 起不来。
+- **客户端证书**:本地代理是纯 TCP 转发(`stream` 模块),**不终止 TLS**,所以证书 SAN 不受影响。
