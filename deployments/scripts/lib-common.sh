@@ -128,7 +128,26 @@ say()  { local m="→  $*"; echo -e "\033[36m${m}\033[0m"; _log_file "${m}"; }
 ok()   { local m="✅ $*"; echo -e "\033[32m${m}\033[0m"; _log_file "${m}"; }
 warn() { local m="⚠  $*"; echo -e "\033[33m${m}\033[0m"; _log_file "${m}"; }
 err()  { local m="【错误】$*"; echo -e "\033[31m${m}\033[0m" >&2; _log_file "${m}"; }
-vlog() { [ "${LOG_VERBOSE}" = "1" ] && { local m="[DEBUG] $*"; echo -e "\033[90m${m}\033[0m"; _log_file "${m}"; } || true; }
+# ⚠ vlog 必须走 stderr —— 它是诊断输出, 而 "$(...)" 命令替换**只捕获 stdout**。
+#   历史事故(2026-09-22 实机): kube_vip_resolve_target 内部的 vlog 走了 stdout,
+#   于是 api_addr="$(kube_vip_resolve_target)" 抓到 "[DEBUG] …\n<master01>" 两行,
+#   该值组进 sed 表达式时换行把表达式截断 → "unterminated `s' command" →
+#   k8s_inventory 在写 all.yml 处中断, 整个部署(含 kube-vip)根本没开始。
+#   约定: 值函数(返回地址/列表者)的 stdout 只允许出现"值"本身, 出口用 emit_ip 兜底。
+vlog() { [ "${LOG_VERBOSE}" = "1" ] && { local m="[DEBUG] $*"; echo -e "\033[90m${m}\033[0m" >&2; _log_file "${m}"; } || true; }
+
+# 值函数出口(与 vlog 同一条约定): 只把一个 IPv4 字面量写进 stdout。
+# 用法: emit_ip "${vip}" || return 1
+# 双重作用: ① 保证 stdout 干净(无颜色码/无换行); ② 兜底校验 —— 万一将来又有诊断输出
+# 混进 stdout, 这里明确报"非 IPv4", 而不是让它流进 sed/YAML 变成静默错配(见 vlog 注释里的事故)。
+emit_ip() {
+    if [[ ! "${1:-}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        err "内部错误: 期望 IPv4 地址, 实得 '${1:-}'"
+        err "  多半是某个函数把诊断输出写进了 stdout 而被 \$(...) 捕获 —— 见本文件 vlog 的注释"
+        return 1
+    fi
+    printf '%s\n' "$1"
+}
 
 # ---------------- skopeo 运行时最小 trust policy(/etc/containers/policy.json) ----------------
 # 本机(尤其 CLI 容器内)无容器运行时 daemon 配置目录时, skopeo copy/inspect 会因读不到
@@ -899,7 +918,7 @@ kube_vip_derive() {
         # 阶段一里 APISERVER_ADDRESS 常被显式设成第一个 master(用于固定入口)—— 那不是 VIP, 不能当种子
         seed=""
     fi
-    [ -n "${seed}" ] && { echo "${seed}"; return 0; }
+    if [ -n "${seed}" ]; then emit_ip "${seed}" || return 1; return 0; fi
 
     # 2) 库存里已有**可当 VIP 用**的地址 —— 直接复用(保证幂等, 不因重跑而漂移)
     #    例外: KUBE_VIP_SWITCH_CONFIRMED=1(用户已在倒计时窗口确认切换)时跳过复用, 重新推导
@@ -907,20 +926,21 @@ kube_vip_derive() {
     if [ -n "${cur}" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
         if kube_vip_is_viable_candidate "${cur}"; then
             vlog "沿用已生效的 API 入口地址: ${cur}"
-            echo "${cur}"; return 0
+            emit_ip "${cur}" || return 1; return 0
         fi
         vlog "当前入口 ${cur} 不是可用 VIP(节点 IP 或落在 MetalLB 池内)→ 重新推导"
     fi
 
     # 3) 自动探测: 从 K8S_API_VIP_START(默认 210)到 .254
     local start="${K8S_API_VIP_START:-210}"
-    say "推导 API VIP(起于 ${base}.${start}, 逐个探测直至 .254)..."
+    # ⚠ >&2: 本函数是值函数(返回值走 stdout), 进度提示绝不能混进 $(...) 的捕获结果
+    say "推导 API VIP(起于 ${base}.${start}, 逐个探测直至 .254)..." >&2
     local i ip
     for i in $(seq "${start}" 254); do
         ip="${base}.${i}"
         if _kube_vip_candidate_free "${ip}"; then
             vlog "VIP 候选 ${ip} 空闲(已排除节点 IP 与 MetalLB 池)"
-            echo "${ip}"; return 0
+            emit_ip "${ip}" || return 1; return 0
         fi
     done
 
@@ -980,7 +1000,8 @@ kube_vip_resolve_target() {
     # kube-vip 未启用 → 维持既有行为(第一个 master), 不引入任何新路径
     if [ "${KUBE_VIP_ENABLED:-true}" != "true" ]; then
         API_ENTRY_PHASE=0
-        first_master_ip; return $?
+        local _m; _m="$(first_master_ip)" || return 1
+        emit_ip "${_m}" || return 1; return 0
     fi
 
     local vip; vip="$(kube_vip_derive)" || return 1
@@ -988,16 +1009,16 @@ kube_vip_resolve_target() {
 
     if [ "${vip}" = "${master01}" ]; then
         API_ENTRY_PHASE=0
-        echo "${master01}"; return 0
+        emit_ip "${master01}" || return 1; return 0
     fi
 
     if kube_vip_is_bound "${vip}"; then
         API_ENTRY_PHASE=2
-        echo "${vip}"; return 0
+        emit_ip "${vip}" || return 1; return 0
     fi
 
     vlog "VIP ${vip} 尚未绑定 → 阶段一(本轮仅就位 VIP, API 入口保持 ${master01})"
-    echo "${master01}"; return 0
+    emit_ip "${master01}" || return 1; return 0
 }
 
 # 布尔归一化(cluster.conf 里 true/1/yes/on 都算开) —— 与 sync-kubespray-config.sh 的 _bool 同语义
