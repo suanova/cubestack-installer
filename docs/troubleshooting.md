@@ -1001,6 +1001,49 @@ sudo ./deploy-cluster.sh --steps kube_vip --list | grep 本次执行模块
 
 ---
 
+### 13. Grafana 只给了 port-forward(以为暴露了, 实际是 ClusterIP): `PROMETHEUS_EXPOSE_MODE` 继承了 `metallb` 但 case 只认 `loadbalancer`
+
+**症状:** `SERVICE_EXPOSE_MODE=metallb` 部署完成后, monitoring 里的 Grafana 仍是 ClusterIP;
+模块末尾打印的是 `kubectl -n monitoring port-forward svc/kube-prometheus-grafana 3000`;
+`kubectl -n monitoring get svc` 里没有任何 `*-external` 的 LoadBalancer/NodePort。**全程零报错。**
+
+**根因:** 全局开关取值是 `metallb`, 而 `08_prometheus.sh` 里 `PROMETHEUS_EXPOSE_MODE` 的 `case`
+只认 `nodeport|loadbalancer|clusterip` —— `metallb` 落进 `*)`(本意是"用户显式要求仅集群内")被**静默**
+当 ClusterIP 处理。同段代码的 `PERSES_EXPOSE_MODE` 有一样的坑(Ceph 那套两种写法都认, 所以没暴露出来)。
+
+**解法(根治):** ① 模式归一化: `metallb|loadbalancer|lb → loadbalancer`、`nodeport|np → nodeport`、
+空|`clusterip|none → clusterip`, 无法识别的值**告警**后按 clusterip(不再静默)。
+② 监控暴露改为**独立 `<svc>-external` Service**(不动的 helm 管的 Service → helm 升级不会把类型改回去),
+并支持与 registry **共用一个 MetalLB VIP**、以端口区分(registry 5000 / Grafana 3000):
+
+- MetalLB 共用 IP 的硬前提(缺一不可): 每个共用方都带同一个 sharing key 注解
+  (`metallb.universe.tf/allow-shared-ip`, v0.13.x 的键名)、端口不重叠、
+  `externalTrafficPolicy` 一致(都 `Cluster`)、两边都显式请求同一 IP(`spec.loadBalancerIP`)。
+- registry 侧注解**写进 kubespray manifest**(`addons.yml` 的 `registry_service_annotations`, 由
+  `tools/k8s/sync-kubespray-config.sh` 同步)→ kubespray 每次重跑 apply 都带着它, 不会被冲掉;
+  存量集群(manifest 还没这行)由模块幂等 `kubectl annotate --overwrite` 兜住。
+- ⚠ 官方文档说"注解在 Service 创建后再改无效" —— **本环境(v0.13.9)实测不成立**: 给存量 registry 补注解后
+  新 Service 立刻共用了同一 VIP。所以"存量集群补注解"这条路可用, 但仍把注解写进 manifest, 不依赖该行为。
+
+**验证(2026-09-22 实机, 全部通过)**
+```bash
+kubectl -n monitoring get svc kube-prometheus-grafana-external -o wide  # EXTERNAL-IP=10.66.1.130, 3000:31255
+kubectl -n monitoring get endpoints kube-prometheus-grafana-external    # 有真实后端(证明 selector 正确)
+kubectl -n kube-system get svc registry                                # 仍持有同一 VIP(5000:30991), 未受影响
+curl -s -o /dev/null -w '%{http_code}\n' http://10.66.1.130:3000/api/health  # 200(真实 Grafana 健康 JSON)
+curl -s -o /dev/null -w '%{http_code}\n' http://10.66.1.130:5000/v2/         # 200(registry 未受影响)
+```
+
+**相关命令**
+```bash
+# 默认只暴露 Grafana; 要连 Prometheus 一起: cluster.conf PROMETHEUS_EXPOSE_PROMETHEUS=true
+# 不共用 registry 的 VIP(另分一个 MetalLB 地址): cluster.conf PROMETHEUS_SHARE_REGISTRY_VIP=false
+# ⚠ 已 done 的模块会被 `--steps prometheus` 跳过 → 补跑直接执行模块脚本:
+bash deployments/scripts/modules/03_addon/08_prometheus.sh
+```
+
+---
+
 ## 四、离线部署
 
 ### 1. 【单机/重装】`Drain node` → `Remove-node | List nodes` 报 `error: stat /etc/kubernetes/admin.conf: no such file or directory`

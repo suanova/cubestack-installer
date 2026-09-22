@@ -1,0 +1,116 @@
+name: build-grafana-plugin-image
+
+# ============================================================
+# 构建 Grafana 派生镜像(预装 prometheus 数据源插件)并推送到 Harbor
+#
+# 为什么需要: Grafana 13.2 起数据源插件外置, 离线环境必须用预装插件的镜像
+#   (见 deployments/scripts/tools/images/grafana-plugin.Dockerfile)。
+#   插件包托管在 Google Storage, 部分站点直连很慢/不通 → 本工作流用 CI 的出口网络
+#   取插件、构建镜像、推到 Harbor; 部署机再从 Harbor 拉(tools/images/grafana-plugin-build.sh --from-harbor)。
+#
+# 产物: ${HARBOR_MIRROR_REGISTRY}/cubestack/grafana:<image_tag>
+# 用法: Actions → build-grafana-plugin-image → Run workflow
+#   · image_tag 每次内容变化都要**递增 rN**(如 13.2.1-distroless-r2), 否则节点
+#     imagePullPolicy=IfNotPresent 会命中旧缓存, 改了等于没改;
+#   · 构建后把该 tag 写进 cluster.conf 的 PROMETHEUS_IMAGE_GRAFANA, 并设
+#     PROMETHEUS_GRAFANA_PLUGIN_DIR=/opt/grafana-plugins。
+# ============================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      grafana_version:
+        description: 'Grafana 基础镜像 tag(如 13.2.1-distroless)'
+        required: true
+        default: '13.2.1-distroless'
+      plugin_version:
+        description: 'prometheus 数据源插件版本(如 13.1.9)'
+        required: true
+        default: '13.1.9'
+      image_tag:
+        description: '输出镜像 tag(约定 <grafana版本>-rN, 内容变了必须递增)'
+        required: true
+        default: '13.2.1-distroless-r1'
+      push:
+        description: '推送到 Harbor(true/false; false=只构建验证)'
+        required: true
+        default: 'true'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      HARBOR_REGISTRY: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
+      HARBOR_USER: ${{ secrets.HARBOR_MIRROR_USER || vars.HARBOR_MIRROR_USER }}
+      HARBOR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验凭据(push=true 时必须有)
+        run: |
+          if [ "${{ inputs.push }}" = "true" ] && { [ -z "${HARBOR_USER}" ] || [ -z "${HARBOR_PASSWORD}" ]; }; then
+            echo "::error::缺少 HARBOR_MIRROR_USER / HARBOR_MIRROR_PASSWORD(Secrets)"
+            exit 1
+          fi
+          echo "Harbor: ${HARBOR_REGISTRY}  输出 tag: ${{ inputs.image_tag }}"
+
+      - name: 下载 prometheus 数据源插件(GCS 直链, 绕开 grafana.com API 重定向)
+        run: |
+          set -euo pipefail
+          ver="${{ inputs.plugin_version }}"
+          url="https://storage.googleapis.com/grafana-plugins-catalog/prometheus/release/${ver}/prometheus-${ver}.zip"
+          echo "下载: ${url}"
+          curl -fL --retry 3 --retry-delay 5 -o /tmp/plugin.zip "${url}"
+          ls -lh /tmp/plugin.zip
+          python3 - <<'PY'
+          import json, zipfile
+          z = zipfile.ZipFile('/tmp/plugin.zip')
+          assert z.testzip() is None, "zip 损坏"
+          names = z.namelist()
+          assert any(n.endswith('plugin.json') for n in names), "缺 plugin.json"
+          assert any(n.endswith('MANIFEST.txt') for n in names), "缺 MANIFEST.txt(签名清单)"
+          m = json.loads(z.read([n for n in names if n.endswith('plugin.json')][0]))
+          print(f"插件: id={m['id']} type={m['type']} version={m['info']['version']}")
+          assert m['id'] == 'prometheus' and m['type'] == 'datasource', "插件 ID/类型不符"
+          PY
+
+      - name: 构建镜像
+        run: |
+          set -euo pipefail
+          # 官方 zip 自带顶层目录(prometheus/…): 先解到临时目录, 再动态定位 plugin.json 所在目录
+          mkdir -p /tmp/ctx /tmp/extract
+          python3 -c "import zipfile; zipfile.ZipFile('/tmp/plugin.zip').extractall('/tmp/extract')"
+          pjdir="$(dirname "$(find /tmp/extract -name plugin.json -print -quit)")"
+          [ -n "${pjdir}" ] && [ -d "${pjdir}" ] || { echo "::error::插件包内找不到 plugin.json"; exit 1; }
+          mkdir -p /tmp/ctx/prometheus
+          cp -a "${pjdir}/." /tmp/ctx/prometheus/
+          cp deployments/scripts/tools/images/grafana-plugin.Dockerfile /tmp/ctx/
+          docker build -f /tmp/ctx/grafana-plugin.Dockerfile \
+            --build-arg "BASE_IMAGE=grafana/grafana:${{ inputs.grafana_version }}" \
+            -t "grafana:${{ inputs.image_tag }}" /tmp/ctx
+
+      - name: 自检(distroless 无 shell → 用 docker cp 取镜像内文件验证路径)
+        run: |
+          set -euo pipefail
+          cid="$(docker create grafana:${{ inputs.image_tag }})"
+          # ⚠ docker cp 到 `-` 输出的是 tar 流, 不是裸文件 → 拷到目录再读
+          docker cp "${cid}:/opt/grafana-plugins/prometheus/plugin.json" /tmp/ >/dev/null || {
+            echo "::error::镜像内没有 /opt/grafana-plugins/prometheus/plugin.json(插件路径与模块不一致?)"; exit 1; }
+          docker rm -f "${cid}" >/dev/null
+          python3 -c "import json;m=json.load(open('/tmp/plugin.json'));print('镜像内插件:',m['id'],m['info']['version'])"
+
+      - name: 推送到 Harbor
+        if: inputs.push == 'true'
+        run: |
+          set -euo pipefail
+          echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_REGISTRY}" -u "${HARBOR_USER}" --password-stdin
+          ref="${HARBOR_REGISTRY}/cubestack/grafana:${{ inputs.image_tag }}"
+          docker tag "grafana:${{ inputs.image_tag }}" "${ref}"
+          docker push "${ref}"
+          echo "### 已推送: \`${ref}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "部署机取用: bash deployments/scripts/tools/images/grafana-plugin-build.sh --from-harbor IMAGE_TAG=${{ inputs.image_tag }}" >> "$GITHUB_STEP_SUMMARY"
+          docker logout "${HARBOR_REGISTRY}"

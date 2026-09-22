@@ -390,3 +390,90 @@ sudo bash deployments/scripts/tools/images/bmc-save-images.sh
 kubectl -n monitoring delete cm -l app.kubernetes.io/part-of=cubestack-observability
 kubectl -n monitoring delete prometheusrule -l app.kubernetes.io/part-of=cubestack-observability
 ```
+
+---
+
+## 9. Grafana 数据源插件(★ 2026-09-22; 离线环境必读)
+
+### 9.1 症状与根因
+
+**症状**: Grafana 能登录、看板都在, 但**所有面板无数据**。数据源对象存在且是默认数据源,
+可 `/api/datasources/uid/prometheus/health` 报 `plugin.notRegistered`,
+经数据源代理查询报 `Unable to find datasource plugin`。
+
+**根因**: **Grafana 13.2 起把 Prometheus 等数据源从内置改为独立插件**, 启动时去 grafana.com
+下载安装。离线环境拉不到 → 插件从未注册。铁证是 Grafana 日志:
+
+```
+msg="Installing plugins" plugins="[{ID:prometheus …} {ID:loki …} {ID:elasticsearch …} …]"
+msg="Plugins installed"  plugins=[]          ← 一个都没装上
+```
+
+版本边界(官方文档): 独立插件需 Grafana ≥12.3; **13.1 及更早仍内置数据源**。
+同批被外置的还有 Loki / Elasticsearch / InfluxDB / MySQL / PostgreSQL / MSSQL / Jaeger /
+Zipkin / OpenTSDB / Stackdriver / Pyroscope —— 将来接这些数据源会踩同一个坑。
+
+### 9.2 解法: 派生镜像预装插件
+
+```bash
+# 联网机(直连 GCS 慢时用 --from-harbor 走 CI 产物, 见 9.3)
+sudo bash deployments/scripts/tools/images/grafana-plugin-build.sh
+# → offline-files/prometheus/docker.io_grafana_grafana_13.2.1-distroless-r1.tar
+```
+
+然后 cluster.conf:
+
+```bash
+PROMETHEUS_IMAGE_GRAFANA="13.2.1-distroless-r1"      # 派生 tag 约定 <基础 tag>-rN
+PROMETHEUS_GRAFANA_PLUGIN_DIR="/opt/grafana-plugins"  # 镜像内插件目录
+```
+
+要点与坑:
+
+- **插件必须放在 `/var/lib/grafana` 之外**: 该路径被 chart 挂成 emptyDir(volume `storage`),
+  烤在里面的插件会被挂载点**整个遮住**。模块用 `grafana.ini.paths.plugins` 把 `GF_PATHS_PLUGINS`
+  指到 `/opt/grafana-plugins`(helm template 实测: env 与 ini 同步生效, 且只有一条 env, 无重复)。
+- **改内容必须换新 tag**(递增 `-rN`): 否则节点 `imagePullPolicy=IfNotPresent` 命中旧缓存, 改了等于没改。
+- 顺带关掉插件自动更新(`GF_PLUGINS_PREINSTALL_AUTO_UPDATE=false`)—— 插件目录只读, 否则每次重启
+  都尝试更新并报 permission denied。
+- 用**官方签名**插件包(带 `MANIFEST.txt`): 构建脚本会校验 ID/type/签名清单, 缺签名直接拒建
+  (不产出"要关掉签名校验才能用"的镜像)。
+- 插件包源: `https://storage.googleapis.com/grafana-plugins-catalog/prometheus/release/<ver>/prometheus-<ver>.zip`
+  (grafana.com API 的 download 接口只是 302 到这个直链; **直链快得多**, 实测 12 KB/s → 163 KB/s)。
+
+### 9.3 站点直连 GCS 慢/不通: 走 CI → Harbor
+
+`.github/workflows/build-grafana-plugin-image.yml`(手动触发)在 CI 里取插件、构建、推
+`<harbor>/cubestack/grafana:<tag>`; 部署机再:
+
+```bash
+sudo IMAGE_TAG=13.2.1-distroless-r1 bash deployments/scripts/tools/images/grafana-plugin-build.sh --from-harbor
+```
+
+`--from-harbor` 跳过本地构建与插件下载, 只做"拉 Harbor 镜像 → 自检 → 存离线 tar", 产物与本地构建一致。
+
+### 9.4 模块侧的护栏
+
+模块 `[9/9]` 会**真查一次**数据源: 数据源 health + 经 Grafana 代理跑一条真实 PromQL,
+不过就报错退出(默认 `GRAFANA_DS_VERIFY=fail`, 可设 `warn`/`off`)。这一步的存在本身就是一次事故的产物:
+在此之前"装完即成功", 而数据源用不了时部署全程零报错。口令经 SSH stdin 下发、落成 master 上
+600 的临时 netrc 用后即删, 不进任何一端 argv。
+
+---
+
+## 10. 离线包资产装配(★ 2026-09-22)
+
+走**只投递 offline-files** 的纯离线通道时(不跟随仓库/CLI 镜像), 用装配工具把三类文本资产打包:
+
+```bash
+bash deployments/scripts/tools/offline/pack-observability-assets.sh
+# → deployments/offline-files/observability/{recording-rules,dashboards/grafana,helm/cubestack-bmc-exporter-chart}
+# 单机场景也可直接产出到需求约定路径:
+bash deployments/scripts/tools/offline/pack-observability-assets.sh --dir /opt/cubestack/observability
+```
+
+- 源是仓库内 vendored 副本; 输出目录是**生成物**(每次先清空受管子目录, 免得源里删掉的旧规则残留)。
+- 分发**不用改任何白名单**: `sync-to-minio.sh` / `fetch-offline-from-minio.sh` 都自动发现新子目录;
+  `trim-offline-files.sh` 也不碰它。`.gitignore` 只放行该目录二级的 `README.md`(工具会自动生成)。
+- 模块侧查找顺序(`08_prometheus.sh` 与 `28_verify_prometheus.sh` 同一口径):
+  `CUBESTACK_OBSERVABILITY_DIR` > `/opt/cubestack/observability` > **`offline-files/observability`** > 仓库内 vendored。

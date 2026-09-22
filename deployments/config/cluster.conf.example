@@ -128,17 +128,46 @@ PERSES_ENABLED="${PERSES_ENABLED:-true}"               # Perses 云原生看板(
 # chart vendored 于 cubestack-addon/observability/prometheus/(默认 90.0.0); 刷新: tools/images/prometheus-fetch-charts.sh
 # 离线镜像: 联网机 tools/images/prometheus-save-images.sh 下载 tar → 08_prometheus 模块推送进内置 registry
 PROMETHEUS_NAMESPACE="${PROMETHEUS_NAMESPACE:-monitoring}"        # 监控命名空间
+# helm release 名(决定 Service/PrometheusCR 等对象名, 如 <release>-grafana / <release>-prometheus)。
+# ⚠ 改动会影响: BMC 导出器的 ScrapeConfig releaseLabel、dashboard 的 instance 过滤、各验证脚本的断言;
+#   已有环境请勿轻易改(改了等于换一套对象名), 需同步 BMC_EXPORTER_* 相关配置并重跑相关模块。
+PROMETHEUS_RELEASE_NAME="${PROMETHEUS_RELEASE_NAME:-kube-prometheus}"
 PROMETHEUS_RETENTION_DAYS="${PROMETHEUS_RETENTION_DAYS:-15d}"     # Prometheus 数据保留时长
-PROMETHEUS_STORAGE_SIZE="${PROMETHEUS_STORAGE_SIZE:-50Gi}"
-# Prometheus/Grafana 对外暴露(与 RGW 同款): nodeport(默认, 随 SERVICE_EXPOSE_MODE) / loadbalancer(需 MetalLB) / clusterip
+PROMETHEUS_STORAGE_SIZE="${PROMETHEUS_STORAGE_SIZE:-50Gi}"   # Prometheus PVC 容量(不指定 SC, 用系统默认 StorageClass)
+# 监控对外暴露: 空=随 SERVICE_EXPOSE_MODE(nodeport / metallb)。也可显式写:
+#   metallb | loadbalancer → *-external LoadBalancer Service(MetalLB VIP; 两者同义)
+#   nodeport               → *-external NodePort(不依赖 MetalLB)
+#   clusterip              → 仅集群内(给 port-forward 指引)
 PROMETHEUS_EXPOSE_MODE="${PROMETHEUS_EXPOSE_MODE:-}"
-PROMETHEUS_NODEPORT_BASE="${PROMETHEUS_NODEPORT_BASE:-31000}"   # NodePort 基址: Prometheus=base, Grafana=base+1        # Prometheus PVC 容量(不指定 SC, 用系统默认 StorageClass)
+# 默认只暴露 Grafana(Prometheus 从 Grafana 当数据源看即可); true = 连 Prometheus 一起暴露
+PROMETHEUS_EXPOSE_PROMETHEUS="${PROMETHEUS_EXPOSE_PROMETHEUS:-false}"
+# LoadBalancer 模式下是否与 registry **共用同一个 VIP**(以端口区分: registry 5000 / Grafana 3000)。
+# MetalLB 要求两边带同一个 sharing key 注解 —— registry 侧由 sync 写进 kubespray manifest, 见
+# lib-common.sh 的 SHARED_VIP_ANNOTATION/SHARED_VIP_KEY。置 false = Grafana 另分一个 VIP。
+PROMETHEUS_SHARE_REGISTRY_VIP="${PROMETHEUS_SHARE_REGISTRY_VIP:-true}"
+PROMETHEUS_NODEPORT_BASE="${PROMETHEUS_NODEPORT_BASE:-31000}"   # NodePort 基址: Prometheus=base, Grafana=base+1
 PROMETHEUS_APP_VERSION="${PROMETHEUS_APP_VERSION:-v0.93.1}"       # operator/config-reloader/admission-webhook 镜像 tag
 PROMETHEUS_IMAGE_PROMETHEUS="${PROMETHEUS_IMAGE_PROMETHEUS:-v3.14.0-distroless}"
 PROMETHEUS_IMAGE_ALERTMANAGER="${PROMETHEUS_IMAGE_ALERTMANAGER:-v0.34.0}"
 PROMETHEUS_IMAGE_NODE_EXPORTER="${PROMETHEUS_IMAGE_NODE_EXPORTER:-v1.12.1}"   # ⚠ 带 v 前缀(registry 实际 tag)
 PROMETHEUS_IMAGE_KSM="${PROMETHEUS_IMAGE_KSM:-v2.20.0}"            # kube-state-metrics; ⚠ 带 v 前缀(registry 实际 tag)
 PROMETHEUS_IMAGE_GRAFANA="${PROMETHEUS_IMAGE_GRAFANA:-13.2.1-distroless}"
+# ⚠ Grafana ≥13.2 把**数据源插件外置**(prometheus/loki/elasticsearch/… 不再内置, 启动时去 grafana.com 下载)
+#   → 离线环境装不上插件, 数据源对象存在但查询报 "Unable to find datasource plugin", **所有看板无数据**。
+#   解法: 用预装插件的**派生镜像**(联网机执行 tools/images/grafana-plugin-build.sh 构建,
+#   tar 落到 offline-files/prometheus/), 然后:
+#     PROMETHEUS_IMAGE_GRAFANA="13.2.1-distroless-r1"      # 派生 tag 约定 <基础 tag>-rN, 必须与构建时一致
+#     PROMETHEUS_GRAFANA_PLUGIN_DIR="/opt/grafana-plugins"  # 镜像内插件目录(必须与 Dockerfile 一致)
+#   ⚠ 绝不能把插件放 /var/lib/grafana 下 —— 该路径被 chart 挂成 emptyDir, 会遮住镜像内文件。
+#   换回 ≤13.1 的镜像可不用派生镜像(那些版本数据源仍内置), 此时两个变量都留空/默认。
+PROMETHEUS_GRAFANA_PLUGIN_DIR="${PROMETHEUS_GRAFANA_PLUGIN_DIR:-}"   # 空=不覆盖 Grafana 插件目录(默认 /var/lib/grafana/plugins)
+GRAFANA_DS_VERIFY="${GRAFANA_DS_VERIFY:-fail}"   # 模块末尾数据源可用性校验的失败动作: fail(默认硬失败)/warn/off
+# 看板数据源自动绑定(★ 2026-09-22): 上游看板里写死的是**别人环境的数据源 uid**(如 rYdddlPWk/
+# eefhg6y1xs8owa)或小写名字, 导入后那些面板报 "Datasource not found" → 导入前统一改绑到本集群这份
+# (改的是临时副本, 仓库源 JSON 不动)。置 false = 原始 JSON 导入(需人工在 Grafana 里逐面板选数据源)。
+GRAFANA_DS_AUTOBIND="${GRAFANA_DS_AUTOBIND:-true}"
+GRAFANA_DATASOURCE_UID="${GRAFANA_DATASOURCE_UID:-prometheus}"     # 与 chart provisioning 的 uid 一致(勿轻改)
+GRAFANA_DATASOURCE_NAME="${GRAFANA_DATASOURCE_NAME:-Prometheus}"
 PROMETHEUS_IMAGE_SIDECAR="${PROMETHEUS_IMAGE_SIDECAR:-2.11.2}"    # grafana k8s-sidecar
 PROMETHEUS_IMAGE_CERTGEN="${PROMETHEUS_IMAGE_CERTGEN:-1.8.8}"     # webhook 证书生成 Job
 # chart 目录(留空用仓库内 vendored 路径; 离线包把 chart 放别处时用这个覆盖)

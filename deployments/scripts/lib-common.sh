@@ -1228,6 +1228,19 @@ ceph_storage_host_count() {
     echo "${n:-0}"
 }
 
+# ---------------- 共用 MetalLB VIP 的约定(多服务共用一个 IP、不同端口) ----------------
+# 默认关闭: 共用 VIP 需要**每个共用方**都带同一个 sharing key 注解, MetalLB 才肯把同一地址
+# 分给多个 Service。约定集中在这里, 是因为它必须**三处完全一致**, 分散写必有一处漂移:
+#   ① tools/k8s/sync-kubespray-config.sh —— 写进 registry 的 kubespray manifest(registry_service_annotations)
+#   ② modules/03_addon/08_prometheus.sh  —— Grafana 的 *-external Service(共用 registry 的 VIP)
+#   ③ 将来的统一网关模块(Envoy Gateway 数据面)
+# ⚠ 注解键名随 MetalLB 版本演进: v0.13.x 用 metallb.universe.tf/allow-shared-ip,
+#   新版(v0.14+)改 metallb.io/allow-shared-ip。本集群实测 v0.13.9 → 用前者(可用变量覆盖)。
+# ⚠ 共用的硬前提(缺一不可): 端口不重叠 / externalTrafficPolicy 一致(都 Cluster) /
+#   两边都显式请求同一 IP(spec.loadBalancerIP)。
+SHARED_VIP_ANNOTATION="${SHARED_VIP_ANNOTATION:-metallb.universe.tf/allow-shared-ip}"
+SHARED_VIP_KEY="${SHARED_VIP_KEY:-cubestack-shared-vip}"
+
 # ---------------- 规律 NodePort 分配(共享, 供各类 *-external/NodePort 服务复用) ----------------
 # 让"连续规律端口"(mon a/b/c → 30100/30101/30102)与"自动分配"统一走一个入口,
 # 其他模块回调本函数即可得到同样的端口序列(base 连续 + 上限校验)。

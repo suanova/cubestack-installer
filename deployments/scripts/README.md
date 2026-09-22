@@ -334,6 +334,8 @@ sudo ./scripts/tools/net/setup-libvirt-nat.sh --delete [网络名] # 删除回�
 > 说明:集群已默认启用 **MetalLB**(Layer2,地址池来自 `METALLB_POOL`);**Registry(集群内)默认不部署**(`REGISTRY_ENABLED=0`),集群外镜像仓库用 **Harbor**(`HARBOR_ENABLED`);**local-path-provisioner 默认不启动**(`LOCAL_PATH_ENABLED=false`,需本地 PVC 持久化时启用)。组件开关配置见 `group_vars/k8s_cluster/addons.yml`(由 `sync-addons-config.sh` 从 cluster.conf 生成)。
 >
 > **对外暴露方式(`SERVICE_EXPOSE_MODE`)**:默认 `nodeport` 用 NodePort 暴露(`sync-addons-config.sh` 自动**关闭 MetalLB**、registry→NodePort、ingress-nginx(若启用)→NodePort(30080/30081)、Envoy Gateway 数据面需转 NodePort(`tools/lb/gateway-nodeport.sh`));设 `metallb`(生产)则部署 MetalLB 用 LoadBalancer VIP。见 `docs/envoy-gateway.md`。
+>
+> **监控暴露(`PROMETHEUS_EXPOSE_MODE`,默认随 `SERVICE_EXPOSE_MODE`)**:默认**只暴露 Grafana**(Prometheus 从 Grafana 当数据源看即可,要一起暴露设 `PROMETHEUS_EXPOSE_PROMETHEUS=true`)。`metallb`/`loadbalancer` 模式下建独立 `kube-prometheus-grafana-external` Service,并默认**与 registry 共用一个 MetalLB VIP**、以端口区分(registry 5000 / Grafana 3000;`PROMETHEUS_SHARE_REGISTRY_VIP=false` 可另分 VIP)。共用依赖 sharing key 注解,registry 侧由 `sync-kubespray-config.sh` 写进 kubespray manifest(`registry_service_annotations`);共用不成立时自动降级为独立 VIP 并打印实际地址。排查见 `docs/troubleshooting.md` 三.13。
 
 ### 5.8.1 内置 Registry(镜像仓库)使用指南
 
