@@ -13,7 +13,7 @@
 #   ⑧ 文件序号 NN_ 与目录序号在发现结果中不重名冲突
 #   ⑨ tools/ 下全部脚本 bash -n 通过
 #   ⑩ 安装 helm chart 的模块必须有 vendored 离线副本
-#   ⑪ kube-vip 启用时 inventory 配置自洽(kube_vip_enabled / address / 不与 MetalLB 抢地址)
+#   ⑪ kube-vip: 单一写入者契约(kube_vip_enabled 恒 false)+ 启用时取值自洽(address / 不与 MetalLB 抢地址)
 # 用法: bash check-modules.sh           # 校验全部模块(只读, 无需 root)
 #       bash check-modules.sh --quiet   # 只输出违规项
 # 退出码: 0=全部通过; 1=存在违规(列出清单)
@@ -248,19 +248,41 @@ K8S_API_VIP="$(printf '%s' "${KV_SNAPSHOT}" | sed -n 2p)"
 METALLB_POOL="$(printf '%s' "${KV_SNAPSHOT}" | sed -n 3p)"
 unset KV_SNAPSHOT
 
+# ⑪-A 单一写入者契约 —— **与 KUBE_VIP_ENABLED 无关, 恒成立**
+#   addons.yml 的 kube_vip_enabled 控制的是"kubespray 要不要写这个静态 Pod"; 而静态 Pod 归
+#   02_k8s/09_kube_vip.sh 独占, 所以它必须恒为 false。若为 true: kubespray 会回来写同一个文件,
+#   且对**首台** master 用 super-admin.conf(roles/kubernetes/node/tasks/loadbalancer/kube-vip.yml:26-31),
+#   与本模块渲染的 admin.conf 不同 → 每次全量运行该文件被改写两次, kube-vip pod 跟着重启两次。
+#   注: 纯 checkout(CI)里这个键就是 kubespray 模板里的 false, 故本条在 CI 上同样成立、不会误报。
+if [ ! -f "${KV_ADDONS}" ]; then
+    warn "  未找到 ${KV_ADDONS}, 跳过 kube-vip 单一写入者契约校验(未生成 inventory?)"
+else
+    kv_en="$(awk -F': *' '/^kube_vip_enabled:/{print $2; exit}' "${KV_ADDONS}")"
+    kv_svc="$(awk -F': *' '/^kube_vip_services_enabled:/{print $2; exit}' "${KV_ADDONS}")"
+    if [ "${kv_en}" = "true" ]; then
+        ck_fail "addons.yml 的 kube_vip_enabled=true —— 违反单一写入者契约(kubespray 会与本模块抢写同一个 manifest)" \
+            "      → 静态 Pod 由 02_k8s/09_kube_vip.sh 独占; 置 false 后重跑 tools/k8s/sync-kubespray-config.sh" \
+            "      → 详见 docs/kube-vip-api-ha.md 第 18 节"
+    fi
+    # 无条件违规项: 与是否部署过无关, 只要写进 inventory 就是错的
+    if [ "${kv_svc}" = "true" ]; then
+        ck_fail "kube_vip_services_enabled=true —— kube-vip 与 MetalLB 都在实现 LoadBalancer, 会互相抢地址" \
+            "      → 服务 LB 归 MetalLB(见 docs/kube-vip-api-ha.md 决策 D1); 修法: 置 false 后重跑 sync"
+    fi
+fi
+
+# ⑪-B 开关**开启**时才有意义的取值自洽(关闭态那些值会连同 VIP 一起经清理路径收敛掉)
 if [ "${KUBE_VIP_ENABLED:-true}" = "true" ]; then
     if [ ! -f "${KV_ADDONS}" ]; then
         warn "  未找到 ${KV_ADDONS}, 跳过(未生成 inventory?)"
     else
-        kv_en="$(awk -F': *' '/^kube_vip_enabled:/{print $2; exit}' "${KV_ADDONS}")"
         kv_addr="$(awk -F': *' '/^kube_vip_address:/{print $2; exit}' "${KV_ADDONS}")"
-        kv_svc="$(awk -F': *' '/^kube_vip_services_enabled:/{print $2; exit}' "${KV_ADDONS}")"
         lb_addr="$(awk '/^loadbalancer_apiserver:/{f=1; next} f && /^[[:space:]]+address:/{print $2; exit}' "${KV_ALL_YML}" 2>/dev/null || true)"
 
         # ★ 门禁看**实际部署**, 不看配置开关(与 verify_* 模块同一惯例):
-        #   kube_vip_enabled 是 sync-kubespray-config.sh 在部署流程里才写的, 纯 checkout(如 CI)
-        #   里它必然还是模板里的 false —— 此时 KUBE_VIP_ENABLED=true 是"待部署"而非"不一致",
-        #   判失败会让 CI 在干净仓库上必然挂。已部署过(k8s_deploy 有断点)才做等值断言。
+        #   kube_vip_address 是 sync-kubespray-config.sh 在部署流程里才写的, 纯 checkout(如 CI)
+        #   里它必然还不存在 —— 此时"为空"是"待部署"而非"不一致", 判失败会让 CI 在干净仓库上
+        #   必然挂。已部署过(k8s_deploy 有断点)才做非空断言。
         #   `.deploy.state` 在 .gitignore 内, 故 CI 上恒不存在, 本条自动跳过。
         KV_DEPLOYED=0
         if [ -f "${REPO_ROOT}/deployments/config/.deploy.state" ] && \
@@ -268,17 +290,9 @@ if [ "${KUBE_VIP_ENABLED:-true}" = "true" ]; then
             KV_DEPLOYED=1
         fi
 
-        # 无条件违规项: 与是否部署过无关, 只要写进 inventory 就是错的
-        if [ "${kv_svc}" = "true" ]; then
-            ck_fail "kube_vip_services_enabled=true —— kube-vip 与 MetalLB 都在实现 LoadBalancer, 会互相抢地址" \
-                "      → 服务 LB 归 MetalLB(见 docs/kube-vip-api-ha.md 决策 D1); 修法: 置 false 后重跑 sync"
-        fi
-
         if [ "${KV_DEPLOYED}" = "1" ]; then
-            [ "${kv_en}" = "true" ] || ck_fail "KUBE_VIP_ENABLED=true 但 addons.yml 的 kube_vip_enabled='${kv_en}'(已部署过)" \
-                "      → 修法: 重跑 tools/k8s/sync-kubespray-config.sh"
-            [ -n "${kv_addr}" ] || ck_fail "kube_vip_address 为空(静态 Pod 拿不到 VIP)" \
-                "      → 修法: 重跑 sync-kubespray-config.sh(K8S_API_VIP 留空会自动推导)"
+            [ -n "${kv_addr}" ] || ck_fail "KUBE_VIP_ENABLED=true 但 kube_vip_address 为空(静态 Pod 拿不到 VIP, 证书 SAN 也会丢 VIP)" \
+                "      → 修法: 重跑 tools/k8s/sync-kubespray-config.sh(K8S_API_VIP 留空会自动推导)"
         fi
 
         # VIP 不得落在 MetalLB 地址池内
@@ -299,10 +313,10 @@ if [ "${KUBE_VIP_ENABLED:-true}" = "true" ]; then
         if [ -n "${kv_addr}" ] && [ -n "${lb_addr}" ] && [ "${kv_addr}" != "${lb_addr}" ]; then
             say "  ℹ️ API 入口(${lb_addr})≠ kube_vip_address(${kv_addr}) —— 阶段一状态(VIP 就位后重跑即切换)"
         fi
-        [ "${FAIL}" = "0" ] && ok "kube-vip 配置自洽(enabled=${kv_en}, VIP=${kv_addr:-<未设置>}, 已部署=${KV_DEPLOYED})"
+        [ "${FAIL}" = "0" ] && ok "kube-vip 配置自洽(单一写入者契约成立, VIP=${kv_addr:-<未设置>}, 已部署=${KV_DEPLOYED})"
     fi
 else
-    say "  KUBE_VIP_ENABLED≠true, 跳过"
+    say "  KUBE_VIP_ENABLED≠true —— 跳过启用态断言(⑪-A 的单一写入者契约不受开关影响, 仍已校验)"
 fi
 
 echo "---------------------------------------------"

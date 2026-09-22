@@ -686,7 +686,9 @@ CALICO_VERSION="${CALICO_VERSION:-v3.29.3}"
 METALLB_VERSION="${METALLB_VERSION:-v0.13.9}"
 KUBE_VIP_VERSION="${KUBE_VIP_VERSION:-v0.8.9}"           # ⚠ 必须与 kubespray download.yml:285 的
                                                         #   kube_vip_image_tag 一致, 否则离线集群拉不到镜像
-                                                        #   → kube-vip 起不来 → 首装 kubeadm init 失败
+                                                        #   → 09_kube_vip 前置自检硬失败("缺少 kube-vip 镜像")
+                                                        #   ★ 不会再导致 kubeadm init 失败 —— 静态 Pod 现在
+                                                        #     只在集群就绪后由模块落位(见 docs/kube-vip-api-ha.md 第 18 节)
 
 REGISTRY_IMAGE_TAG="${REGISTRY_IMAGE_TAG:-2.8.1}"        # docker.io/library/registry
 LOCAL_PATH_VERSION="${LOCAL_PATH_VERSION:-v0.0.24}"      # rancher/local-path-provisioner
