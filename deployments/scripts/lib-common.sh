@@ -689,6 +689,340 @@ cidr_contains() {
     [ $(( ip_int & mask )) -eq $(( net_int & mask )) ]
 }
 
+# ---------------- kube-vip: API Server VIP 推导与校验 ----------------
+# 详见 docs/kube-vip-api-ha.md。三个关键约束(任一违反都是确定性故障, 故为硬失败):
+#   ① 与 HAPROXY_ENABLED / KEEPALIVED_ENABLED 互斥 —— 三者都在争 loadbalancer_apiserver.address 的解释权
+#   ② VIP 不得落在 METALLB_POOL 内 —— 否则 MetalLB 可能把同一个 IP 分配给某个 Service, 抢走控制平面入口
+#   ③ VIP 不得等于任一节点 IP —— 会与真实网卡地址冲突(ARP 打架)
+
+# <IP> → 退出码 0=落在 METALLB_POOL 内(支持 起止区间 / CIDR / 单地址; 留空视为不冲突)
+metallb_pool_contains() {
+    local ip="$1" pool="${METALLB_POOL:-}"
+    [ -n "${pool}" ] || return 1
+    local ipint lo hi
+    ipint=$(ip2int "${ip}")
+    case "${pool}" in
+        *-*)
+            lo=$(ip2int "${pool%%-*}"); hi=$(ip2int "${pool##*-}")
+            [ "${ipint}" -ge "${lo}" ] && [ "${ipint}" -le "${hi}" ]
+            ;;
+        */*) cidr_contains "${ip}" "${pool}" ;;
+        *)   [ "$(ip2int "${pool}")" -eq "${ipint}" ] ;;
+    esac
+}
+
+# 收集全部 master 主机名(空格分隔; 供逐台 SSH 探测复用)
+master_hosts() {
+    local line
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        [ "${NODE_ROLE}" = "master" ] && [ -n "${NODE_HOSTNAME}" ] && printf '%s ' "${NODE_HOSTNAME}"
+    done
+}
+
+# 收集全部节点 IP(空格分隔; 供 VIP 冲突判定复用)
+all_node_ips() {
+    local line
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        [ -n "${NODE_IP}" ] && printf '%s ' "${NODE_IP}"
+    done
+}
+
+# 静态校验(无网络交互): kube-vip 开关与取值的一致性
+# 硬失败项直接 err+exit 1; 通过则返回 0
+# 用法: kube_vip_validate_config || exit 1   (须已 load_config)
+kube_vip_validate_config() {
+    [ "${KUBE_VIP_ENABLED:-true}" = "true" ] || return 0
+
+    # ① 互斥
+    if [ "${HAPROXY_ENABLED:-false}" = "true" ] || [ "${KEEPALIVED_ENABLED:-false}" = "true" ]; then
+        err "KUBE_VIP_ENABLED=true 与 HAPROXY_ENABLED/KEEPALIVED_ENABLED 互斥, 二者都在争 API 入口:"
+        err "  kube-vip  : KUBE_VIP_ENABLED=true"
+        err "  HAProxy+KA: HAPROXY_ENABLED=${HAPROXY_ENABLED:-false} KEEPALIVED_ENABLED=${KEEPALIVED_ENABLED:-false}"
+        err "二者只能留一个(推荐保留 kube-vip, 见 docs/kube-vip-api-ha.md)"
+        return 1
+    fi
+
+    local vip="${K8S_API_VIP:-}"
+
+    # ② VIP 不在 MetalLB 池内
+    if [ -n "${vip}" ] && metallb_pool_contains "${vip}"; then
+        err "K8S_API_VIP=${vip} 落在 METALLB_POOL=${METALLB_POOL} 内 —— MetalLB 可能把该地址分配给"
+        err "某个 LoadBalancer Service, 直接抢走 API 控制平面入口。请改用池外地址。"
+        return 1
+    fi
+
+    # ③ VIP 不等于任一节点 IP
+    if [ -n "${vip}" ]; then
+        local _ips _ip
+        _ips="$(all_node_ips)"
+        for _ip in ${_ips}; do
+            if [ "${_ip}" = "${vip}" ]; then
+                err "K8S_API_VIP=${vip} 与节点 IP 冲突(节点 IP 不能同时作 VIP: ARP 会打架)"
+                return 1
+            fi
+        done
+    fi
+
+    # ④ master 数量(单 master 无高可用可言, 但不算错误 —— 只提示)
+    local _master_count=0 _line
+    for _line in "${NODES[@]:-}"; do
+        [ -z "${_line}" ] && continue
+        node_parse "${_line}"
+        [ "${NODE_ROLE}" = "master" ] && _master_count=$((_master_count + 1))
+    done
+    if [ "${_master_count}" -lt 3 ]; then
+        warn "kube-vip 已启用但仅 ${_master_count} 台 master —— VIP 只能在现存 master 之间漂移,"
+        warn "少于 3 台时无真正的多数派容错(建议 3 台及以上)"
+    fi
+    return 0
+}
+
+# 读取 inventory 中当前已生效的 API 入口地址(all.yml 的 loadbalancer_apiserver.address)
+# 用途: 让 VIP 在多次运行间保持稳定 —— 一旦写进库存就不再重新推导(否则每次跑都可能漂到别的地址,
+# 导致 kube_vip_address 与 loadbalancer_apiserver.address 失配、证书 SAN 反复重签)。
+# 用法: cur="$(kube_vip_current_entry)"   (无库存/读不到时输出空串)
+kube_vip_current_entry() {
+    local all_yml="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}/group_vars/all/all.yml"
+    [ -f "${all_yml}" ] || return 0
+    awk '/^loadbalancer_apiserver:/{f=1; next} f && /^[[:space:]]+address:/{print $2; exit}' "${all_yml}" 2>/dev/null
+}
+
+# VIp 是否是一个"可以当 VIP 用"的候选(排掉节点自身 IP 与 MetalLB 池内地址)
+# 用法: kube_vip_is_viable_candidate <ip>
+kube_vip_is_viable_candidate() {
+    local ip="$1" _ip
+    [ -n "${ip}" ] || return 1
+    for _ip in $(all_node_ips); do [ "${_ip}" = "${ip}" ] && return 1; done
+    metallb_pool_contains "${ip}" && return 1
+    return 0
+}
+
+# VIP 自动推导: 在各 master 上探测, 找同网段的空闲地址
+# 判定"空闲" = ICMP 无应答(地址真的没被占) 且 6443 端口连不上(不是别的集群的 API VIP)
+# ⚠ 探测必须在各 master 上经 SSH 执行 —— 部署机不一定有到节点网段的路由, 从部署机探测会把
+#   "路由不通"误判成"地址空闲", 这比不探测更危险(会把别人的 IP 当 VIP 用)。
+# 推导顺序(确保幂等): 已写入 all.yml 的地址 > K8S_API_VIP / APISERVER_ADDRESS 显式值 > 从 .210 起探测
+# ⚠ "复用 all.yml 现值"有个陷阱: 存量集群首跑时现值是 master01 —— 那是**节点 IP**, 不是 VIP。
+#   若照抄会得到"VIP = master01"这种自相矛盾的配置(等于让 kube-vip 去抢一个真实节点地址),
+#   且阶段判定会短路成"已切换"。故复用时必须过 kube_vip_is_viable_candidate 校验。
+# 用法: vip="$(kube_vip_derive)" || exit 1     (输出推导出的 VIP; 失败 err 并返回 1)
+kube_vip_derive() {
+    local node_ips; node_ips="$(all_node_ips)"
+    local m1; m1="$(first_master_ip)" || { err "无 master 节点, 无法推导 VIP"; return 1; }
+    local base="${m1%.*}" ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    local _user="${SSH_USER:-ubuntu}"
+
+    # 探测器(在目标机上执行): 0 = 该地址空闲
+    #   -c1 -W1   : ICMP 一次, 最多等 1s
+    #   /dev/tcp  : bash 内建 TCP 连接, 1s 超时(节点上不保证装了 nc)
+    local probe='
+        ip="__IP__"
+        ping -c1 -W1 "$ip" >/dev/null 2>&1 && exit 1
+        timeout 1 bash -c "echo > /dev/tcp/$ip/6443" 2>/dev/null && exit 1
+        exit 0'
+
+    # 候选地址是否可用(排除节点 IP / MetalLB 池 / 被占用)
+    _kube_vip_candidate_free() {
+        local ip="$1" _ip
+        for _ip in ${node_ips}; do [ "${_ip}" = "${ip}" ] && return 1; done
+        metallb_pool_contains "${ip}" && return 1
+        local _host
+        for _host in $(master_hosts); do
+            ssh -i "${ssh_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+                "${_user}@${_host}" "${probe//__IP__/${ip}}" >/dev/null 2>&1 || return 1
+        done
+        return 0
+    }
+
+    # 1) 显式指定优先(cluster.conf K8S_API_VIP; APISERVER_ADDRESS 仅作兼容兜底)
+    local seed="${K8S_API_VIP:-}"
+    [ -n "${seed}" ] || seed="$(nonnumeric_entry "${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}/group_vars/all/all.yml" 2>/dev/null || true)"
+    if [ -z "${seed}" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
+        # 阶段一里 APISERVER_ADDRESS 常被显式设成第一个 master(用于固定入口)—— 那不是 VIP, 不能当种子
+        seed=""
+    fi
+    [ -n "${seed}" ] && { echo "${seed}"; return 0; }
+
+    # 2) 库存里已有**可当 VIP 用**的地址 —— 直接复用(保证幂等, 不因重跑而漂移)
+    #    例外: KUBE_VIP_SWITCH_CONFIRMED=1(用户已在倒计时窗口确认切换)时跳过复用, 重新推导
+    local cur; cur="$(kube_vip_current_entry)"
+    if [ -n "${cur}" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
+        if kube_vip_is_viable_candidate "${cur}"; then
+            vlog "沿用已生效的 API 入口地址: ${cur}"
+            echo "${cur}"; return 0
+        fi
+        vlog "当前入口 ${cur} 不是可用 VIP(节点 IP 或落在 MetalLB 池内)→ 重新推导"
+    fi
+
+    # 3) 自动探测: 从 K8S_API_VIP_START(默认 210)到 .254
+    local start="${K8S_API_VIP_START:-210}"
+    say "推导 API VIP(起于 ${base}.${start}, 逐个探测直至 .254)..."
+    local i ip
+    for i in $(seq "${start}" 254); do
+        ip="${base}.${i}"
+        if _kube_vip_candidate_free "${ip}"; then
+            vlog "VIP 候选 ${ip} 空闲(已排除节点 IP 与 MetalLB 池)"
+            echo "${ip}"; return 0
+        fi
+    done
+
+    err "在 ${base}.${start}-${base}.254 范围内未找到空闲 VIP(全部被占用/被排除)"
+    err "请在 ${CLUSTER_CONF} 显式指定 K8S_API_VIP=<同网段空闲地址>"
+    return 1
+}
+
+# 探测: VIP 是否已真实绑定在某台 master 的网卡上(kube-vip 已就位)。
+# ⚠ 必须经 SSH 在各 master 上探测: 部署机不一定有到节点网段的路由, 从部署机探测会把"路由不通"
+#   误判成"VIP 未就绪" —— 而对存量集群来说, 这个误判会让切换被无谓拦停(fail-closed 方向是对的,
+#   但会一直卡住)。用路由表查法(ip route get)而非 ping: 不需要 ICMP 可达, 只看本机是否持有该地址。
+# 用法: if kube_vip_is_bound "<VIP>"; then ... fi
+kube_vip_is_bound() {
+    local vip="${1:-}"
+    [ -n "${vip}" ] || return 1
+    local _user="${SSH_USER:-ubuntu}" ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    local _host
+    for _host in $(master_hosts); do
+        if ssh -i "${ssh_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+               -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_user}@${_host}" \
+               "ip route get '${vip}' 2>/dev/null | grep -q 'local ${vip} '" 2>/dev/null; then
+            vlog "VIP ${vip} 已绑定在 ${_host}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 阶段判定: 决定本次运行 API 入口地址取什么值(两阶段切换的核心, 见 docs/kube-vip-api-ha.md 第 7 节)
+# 输出: 要写入 all.yml 的 loadbalancer_apiserver.address; 同时设置 API_ENTRY_PHASE(1/2)
+#
+#   与"集群是不是新建"无关, 只看一件事: **VIP 此刻是否已经真的绑上了**。
+#   原因是 kubespray 的时序: 写 /etc/hosts 的 0090-etchosts.yml 在 **preinstall 角色**里,
+#   而拉起 kube-vip 的 kubernetes/node 角色排在 **etcd 安装之后** —— 两者差一个 etcd 安装的时间。
+#   所以无论新建还是存量, 只要 VIP 还没绑, 把入口指向 VIP 就等于指向一个不存在的地址。
+#
+#   VIP 未绑 → 阶段一: 写 master01(既有行为, 零风险); 本轮的唯一产出是让 kube-vip 就位
+#   VIP 已绑 → 阶段二: 写 VIP(切换入口)
+#
+# 用法: api_addr="$(kube_vip_resolve_target)" && api_phase="${API_ENTRY_PHASE}"
+kube_vip_resolve_target() {
+    API_ENTRY_PHASE=1
+
+    # kube-vip 未启用 → 维持既有行为(第一个 master), 不引入任何新路径
+    if [ "${KUBE_VIP_ENABLED:-true}" != "true" ]; then
+        API_ENTRY_PHASE=0
+        first_master_ip; return $?
+    fi
+
+    local vip; vip="$(kube_vip_derive)" || return 1
+    local master01; master01="$(first_master_ip)" || return 1
+
+    if [ "${vip}" = "${master01}" ]; then
+        API_ENTRY_PHASE=0
+        echo "${master01}"; return 0
+    fi
+
+    if kube_vip_is_bound "${vip}"; then
+        API_ENTRY_PHASE=2
+        echo "${vip}"; return 0
+    fi
+
+    vlog "VIP ${vip} 尚未绑定 → 阶段一(本轮仅就位 VIP, API 入口保持 ${master01})"
+    echo "${master01}"; return 0
+}
+
+# 布尔归一化(cluster.conf 里 true/1/yes/on 都算开) —— 与 sync-kubespray-config.sh 的 _bool 同语义
+bool_is_true() { case "${1:-0}" in 1|true|yes|on) return 0;; *) return 1;; esac; }
+
+# all.yml 里"非数值的 API 入口地址"(如 kube-vip 启用后的 VIP 走的是 Jinja 表达式)。
+# 现有的 sed 同步只认 [0-9.]+ 字面量, 这类值不会被误覆盖; 但仍需在写入前确认,
+# 否则一次误改就会把真正生效的表达式抹掉。
+# 用法: nonnumeric_entry "<all.yml 路径>" → 输出该值(无则空)
+nonnumeric_entry() {
+    local f="$1" v
+    v="$(awk '/^loadbalancer_apiserver:/{f=1; next} f && /^[[:space:]]+address:/{print $2; exit}' "${f}" 2>/dev/null)"
+    case "${v}" in
+        ""|*[!0-9.]*) printf '%s' "${v}" ;;   # 含非数字/点字符 → 不是字面 IP
+        *) printf '' ;;
+    esac
+}
+
+# 重写 addons.yml 的 kube-vip 配置块(幂等)
+# 以 "# Kube VIP" 行为锚点: 丢弃旧块(锚点行 + 紧随其后的注释行 + 其后连续的 kube_vip_*/loadbalancer_apiserver 行),
+# 再按当前配置重写。用 awk 脚本文件而非内联程序 —— 内联的复杂引号规则经 shell 传递易被破坏。
+# 用法: update_kube_vip_addons_yml "<addons.yml 路径>" "<VIP>"
+update_kube_vip_addons_yml() {
+    local f="$1" vip="${2:-}"
+    [ -f "${f}" ] || { warn "未找到 ${f}, 跳过 kube-vip 同步"; return 1; }
+    grep -q '^# Kube VIP' "${f}" || { warn "${f} 中未找到 '# Kube VIP' 锚点行, 跳过 kube-vip 同步"; return 1; }
+
+    local tmp; tmp="$(mktemp)"
+    awk '
+        function is_block_line(s) {
+            return (s ~ /^[[:space:]]*#/ || s ~ /^[[:space:]]*kube_vip_/ ||
+                    s ~ /^[[:space:]]*loadbalancer_apiserver:/ || s ~ /^[[:space:]]*address:/ ||
+                    s ~ /^[[:space:]]*port:/)
+        }
+        /^# Kube VIP/ { dropping = 1; next }
+        dropping && is_block_line($0) { next }
+        dropping { dropping = 0 }
+        { print }
+    ' "${f}" > "${tmp}"
+
+    {
+        echo "# Kube VIP"
+        if bool_is_true "${KUBE_VIP_ENABLED:-true}"; then
+            echo "kube_vip_enabled: true"
+            [ -n "${vip}" ] && echo "kube_vip_address: ${vip}"
+            echo "kube_vip_arp_enabled: true"
+            echo "kube_vip_controlplane_enabled: true"
+            # 服务 LB 归 MetalLB —— 两者都实现 LoadBalancer 语义, 同时开会让 kube-vip 抢走
+            # MetalLB 的地址分配权(实机已验证的分工, 见 docs/kube-vip-api-ha.md 决策 D1)
+            echo "kube_vip_services_enabled: false"
+            # 纯故障切换: apiserver 自身有 leader election, 再加一层转发收益有限却多一个故障点
+            echo "kube_vip_lb_enable: false"
+            [ -n "${KUBE_VIP_INTERFACE:-}" ] && echo "kube_vip_interface: ${KUBE_VIP_INTERFACE}"
+        else
+            echo "kube_vip_enabled: false"
+        fi
+    } >> "${tmp}"
+
+    cat "${tmp}" > "${f}"
+    rm -f "${tmp}"
+
+    if bool_is_true "${KUBE_VIP_ENABLED:-true}"; then
+        [ -n "${vip}" ] || { err "kube-vip 已启用但 VIP 为空 —— 不能写入 kube_vip_address"; return 1; }
+        local wrote; wrote="$(awk '/^kube_vip_address:/{print $2; exit}' "${f}")"
+        [ "${wrote}" = "${vip}" ] || { err "kube_vip_address 写入校验失败(期望 ${vip}, 实际 ${wrote})"; return 1; }
+    fi
+    return 0
+}
+
+# 把 k8s-cluster.yml 的 advertise-address 修为"按节点各写各的"(幂等修复, 非同步)
+# 原实现统一写死第一个 master IP → 三个 apiserver 都对外宣告同一地址 →
+# kubernetes Service 的 EndpointSlice 只有一条 → 集群内经 Service 访问 API 同样单点。
+# ⚠ 这是独立于 kube-vip 的一处单点修复, 详见 docs/kube-vip-api-ha.md 2.5 节。
+#   值必须保持 Jinja 表达式, 改成具体 IP 会直接抵消本修复。
+# 用法: update_advertise_address_yml "<k8s-cluster.yml 路径>"
+update_advertise_address_yml() {
+    local f="$1" want='  advertise-address: "{{ kube_apiserver_address }}"'
+    [ -f "${f}" ] || { warn "未找到 ${f}, 跳过 advertise-address 同步"; return 1; }
+
+    if grep -qE '^[[:space:]]+advertise-address:[[:space:]]*' "${f}"; then
+        grep -qF "${want}" "${f}" && return 0    # 已是目标值 → 幂等跳过
+        sed -i -E 's|^([[:space:]]+advertise-address:).*|\1 "{{ kube_apiserver_address }}"|' "${f}"
+        say "  advertise-address 已修正为按节点取值(原为固定 IP, 会造成 kubernetes Service 单点)"
+    else
+        sed -i -E "/^kube_apiserver_extra_args:/a\\${want}" "${f}"
+    fi
+    grep -qF "${want}" "${f}" || { err "advertise-address 写入校验失败"; return 1; }
+    return 0
+}
+
 # ---------------- MAC 生成 ----------------
 # 未显式指定 MAC 时,按主机名确定性生成(幂等,重复部署 MAC 不变)
 # <hostname> → 52:54:00:xx:xx:xx

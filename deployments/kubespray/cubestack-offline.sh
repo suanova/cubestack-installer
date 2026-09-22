@@ -1296,11 +1296,12 @@ PYEOF
 # ============================================================
 # 依据 hosts.yml 自动同步 kubespray group_vars 中的环境 IP(与 inventory 同源)
 #   group_vars/all/all.yml
-#     loadbalancer_apiserver.address            = 第一个 master 节点 IP
+#     loadbalancer_apiserver.address            = 本次的 API 入口(阶段一=第一个 master / 阶段二=VIP),
+#                                                 **以 all.yml 现值 + sync-kubespray-config.sh 的判定为准**
 #     apiserver_loadbalancer_domain_name        = 保持 all.yml 现有值(默认 lb.k8s.local)
 #     supplementary_addresses_in_ssl_keys       = API 域名 + 全部 master 节点 IP
 #   group_vars/k8s_cluster/k8s-cluster.yml
-#     kube_apiserver_extra_args.advertise-address = 第一个 master 节点 IP
+#     kube_apiserver_extra_args.advertise-address = **按节点各写各的**(Jinja 表达式, 不再同步具体 IP)
 #   group_vars/k8s_cluster/k8s-net-calico.yml
 #     calico_ip_auto_method: can-reach=<第一个 worker IP>(无 worker 时回退第一个 master)
 # 数据源: 全部节点 IP 来自 hosts.yml(kube_control_plane / kube_node 组), 随 inventory 自动更新
@@ -1324,7 +1325,22 @@ update_loadbalancer_all_yml() {
     ' "${inv}")
     [ "${#master_ips[@]}" -gt 0 ] || { warn "hosts.yml 中无 master 节点(kube_control_plane), 跳过同步"; return 0; }
 
-    local api_ip="${master_ips[0]}"
+    # API 入口: **以 sync-kubespray-config.sh 已写入 all.yml 的值为准**, 不在本脚本重新判定阶段。
+    # 原因: 阶段判定含 SSH 探测与用户确认(倒计时), 只能有一处权威实现; 本脚本若自己算一遍,
+    # 会用不同值把 sync 的写法顶掉(本函数在 kubespray 启动前还会再跑一次)。
+    # 正常路径下 06_k8s_deploy.sh 已先调用 sync, all.yml 的值就是本次要用的入口(阶段一=master01 /
+    # 阶段二=VIP); 仅在直连本脚本时 all.yml 可能未就绪, 此时按第一阶段回退。
+    local all_yml_path="${INVENTORY_DIR}/group_vars/all/all.yml"
+    local api_ip=""
+    if [ -f "${all_yml_path}" ]; then
+        api_ip="$(awk '/^loadbalancer_apiserver:/{f=1; next} f && /^[[:space:]]+address:/{print $2; exit}' "${all_yml_path}")"
+    fi
+    if [ -z "${api_ip}" ]; then
+        if [ "${KUBE_VIP_ENABLED:-true}" = "true" ]; then
+            log "all.yml 尚无 API 入口(未先跑 sync)→ 按阶段一回退第一个 master; kube-vip 就位后重跑即切换"
+        fi
+        api_ip="${master_ips[0]}"
+    fi
     local calico_ip="${worker_ips[0]:-${api_ip}}"   # 无 worker 时回退第一个 master
 
     # ---------- 1. all.yml: API 负载均衡 + SAN ----------
@@ -1362,16 +1378,24 @@ update_loadbalancer_all_yml() {
     fi
 
     # ---------- 2. k8s-cluster.yml: kube_apiserver_extra_args.advertise-address ----------
+    # ⚠ 该字段已改为"按节点各写各的"Jinja 表达式(kube_apiserver_address), **不再随主机 IP 同步**。
+    #   旧实现统一写死第一个 master IP → 三个 apiserver 都宣告同一地址 → kubernetes Service 的
+    #   EndpointSlice 只有一条 → 集群内经 Service 访问 API 单点(详见 docs/kube-vip-api-ha.md 2.5)。
+    #   这里是幂等修复: 只在发现它还是具体 IP 时改写, 已经是表达式则不动。
     local cluster_yml="${INVENTORY_DIR}/group_vars/k8s_cluster/k8s-cluster.yml"
     if [ -f "${cluster_yml}" ]; then
-        if grep -qE '^[[:space:]]+advertise-address:[[:space:]]*"' "${cluster_yml}"; then
-            sed -i -E "s/^(\s+advertise-address:)\s+\"[0-9.]+\"/\1 \"${api_ip}\"/" "${cluster_yml}"
+        local _adv_want='  advertise-address: "{{ kube_apiserver_address }}"'
+        if grep -qF "${_adv_want}" "${cluster_yml}"; then
+            :   # 已是目标值, 无需动作(常规路径)
+        elif grep -qE '^[[:space:]]+advertise-address:[[:space:]]*' "${cluster_yml}"; then
+            sed -i -E 's|^([[:space:]]+advertise-address:).*|\1 "{{ kube_apiserver_address }}"|' "${cluster_yml}"
+            log "✅ advertise-address 已修正为按节点取值(原为固定 IP, 会造成 kubernetes Service 单点)"
         else
-            sed -i -E "/^kube_apiserver_extra_args:/a\  advertise-address: \"${api_ip}\"" "${cluster_yml}"
+            sed -i -E "/^kube_apiserver_extra_args:/a\\${_adv_want}" "${cluster_yml}"
+            log "✅ advertise-address 已补写为按节点取值"
         fi
-        log "✅ 已依据 hosts.yml 同步 ${cluster_yml}: advertise-address=${api_ip}"
     else
-        warn "未找到 ${cluster_yml}, 跳过 advertise-address 同步"
+        warn "未找到 ${cluster_yml}, 跳过 advertise-address 检查"
     fi
 
     # ---------- 3. k8s-net-calico.yml: calico_ip_auto_method can-reach ----------
@@ -1967,7 +1991,7 @@ elif [ -f "${PRELOAD_CONF}" ]; then
 elif [ -z "${PRELOAD_IMAGE_PATTERNS:-}" ]; then
     # 内置默认最小集合: kubespray 默认部署 + calico 网络插件 + metallb/registry/local-path 附加组件所需镜像
     # (排除 cilium/flannel/ingress-nginx/dashboard 等未启用组件的镜像)
-    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb library_registry local-path-provisioner busybox"
+    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb kube-vip library_registry local-path-provisioner busybox"
     log "预加载镜像集合(内置默认最小集合): ${PRELOAD_IMAGE_PATTERNS}"
 fi
 export PRELOAD_IMAGE_PATTERNS

@@ -38,7 +38,7 @@ METAX_DIR="${OFFLINE_ROOT}/metax-gpu"
 
 # ---------------- ① 冗余镜像: 未匹配 PRELOAD_IMAGE_PATTERNS ----------------
 # PRELOAD_IMAGE_PATTERNS: 空格分隔; 含 ".tar" 为精确文件名匹配, 否则为文件名包含匹配
-PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb library_registry local-path-provisioner busybox lws_manager}"
+PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb kube-vip library_registry local-path-provisioner busybox lws_manager}"
 _img_match() {   # <文件名> → 0=匹配(PRELOAD 需要)
     local f="$1" p
     for p in ${PRELOAD_IMAGE_PATTERNS}; do
