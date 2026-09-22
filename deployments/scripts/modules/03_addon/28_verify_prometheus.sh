@@ -171,9 +171,14 @@ echo "${_UP}" | python3 -c 'import json,sys; r=json.load(sys.stdin).get("data",{
 #   PrometheusRule **对象存在**与**规则被加载**是两件事 —— 后者取决于 Prometheus CR 的
 #   ruleSelector 能否选中该 CR。选不中时 CR 建得好好的, 规则却完全不加载, **且无任何报错**
 #   (这正是 installer-requirements §2 反复强调的坑)。所以逐组断言实际加载结果。
+# 资产目录回退(与 08_prometheus.sh 同一口径, 四处保持一致):
+#   显式配置 > /opt/cubestack/observability > offline-files 离线包落点 > 仓库内 vendored
 _OBS_DIR_V="${CUBESTACK_OBSERVABILITY_DIR:-}"
 if [ -z "${_OBS_DIR_V}" ] && [ -d "/opt/cubestack/observability/recording-rules" ]; then
     _OBS_DIR_V="/opt/cubestack/observability"
+fi
+if [ -z "${_OBS_DIR_V}" ] && [ -d "${REPO_ROOT}/deployments/offline-files/observability/recording-rules" ]; then
+    _OBS_DIR_V="${REPO_ROOT}/deployments/offline-files/observability"
 fi
 [ -n "${_OBS_DIR_V}" ] || _OBS_DIR_V="${REPO_ROOT}/deployments/cubestack-addon/observability/cubestack"
 _RULES_DIR_V="${_OBS_DIR_V}/recording-rules"
