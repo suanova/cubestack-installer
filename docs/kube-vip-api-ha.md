@@ -1,8 +1,9 @@
 # Kubernetes API Server 高可用(kube-vip VIP)设计方案
 
-> 状态: **已实施**(2026-09-22)—— 代码全部落地, `check-modules` 全绿; **实机验证待执行**
-> 涉及模块: `02_k8s/06_k8s_deploy.sh`(阶段确认门)· 新增 `02_k8s/08_verify_kube_vip.sh`
-> 开关: `KUBE_VIP_ENABLED`(**默认 true**)· 配置项 `K8S_API_VIP` / `KUBE_VIP_INTERFACE`
+> 状态: **已实施 + 已实机验收**(2026-09-22)—— 代码落地、`check-modules` 全绿,
+> **裸金属 3 master 集群上 `--steps kube_vip` 与 `--steps verify_kube_vip` 六项全过**(见第 17 节)
+> 涉及模块: `02_k8s/09_kube_vip.sh`(部署)· `02_k8s/08_verify_kube_vip.sh`(验证)· `02_k8s/06_k8s_deploy.sh`(阶段确认门)
+> 开关: `KUBE_VIP_ENABLED`(**默认 true**)· 配置项 `K8S_API_VIP` / `KUBE_VIP_INTERFACE` / `KUBE_VIP_CP_DETECT` / `KUBE_VIP_LOCAL_PROXY`
 > 上游资产: kubespray 原生支持(`deployments/kubespray/kubespray/`), 无需自研
 >
 > **❗ 实施过程中对本文档的 4 处修正**(详见第 14 节, 读下文时以此为准):
@@ -10,6 +11,10 @@
 > 2. 两阶段**对新建集群同样必需** —— `/etc/hosts` 写在 preinstall 角色, kube-vip 在 etcd 之后, 差约 10 分钟
 > 3. `advertise-address` 必须写成 **Jinja 表达式**(按节点取值), 写回具体 IP 会抵消修复
 > 4. 切换确认的倒计时放在 **`06_k8s_deploy.sh`**, 不能放 sync 脚本(其 stdout 被重定向到 /dev/null)
+>
+> **⚠ 实机验收推翻的两处预估**(详见第 17.3 节):
+> - 漂移实测 **1–2 秒**,不是预估的 5–10 秒(kube-vip 退出时主动释放租约,不必等租约过期)
+> - ② 判定 VIP 持有者**不能用 `ip route get`**(同网段下对所有节点都返回 local),须用 `ip -o addr show`
 
 ---
 
@@ -724,3 +729,74 @@ kubelet → https://k8s-api.cubestack.io:6443 → /etc/hosts → loadbalancer_ap
   随 kubespray 离线包分发,由 `resolve_preload_image_files()` 负责加载。
   **若将来启用本地代理,需确认该镜像已在离线预加载集合内**,否则 nginx-proxy 起不来。
 - **客户端证书**:本地代理是纯 TCP 转发(`stream` 模块),**不终止 TLS**,所以证书 SAN 不受影响。
+
+---
+
+## 17. 固化模块与实机验收(2026-09-22 晚)
+
+### 17.1 与 kubespray 的关系:固化,但不重跑 kubespray
+
+新增 `02_k8s/09_kube_vip.sh`(MODULE `kube_vip`, `REPEAT: 1`),把原先的临时脚本固化为标准模块。
+**它不声明 `REQUIRES: k8s_deploy`** —— 否则 `--steps kube_vip` 会连带拉起整套 kubespray。
+取而代之是**四项前置自检**(集群可达 / 各 master 有镜像 / 模板与渲染器存在 / python3 可用),
+任一不满足即明确报错并给出修法。
+
+- **渲染**:不手抄 manifest,直接渲染 kubespray 原版
+  `roles/kubernetes/node/templates/manifests/kube-vip.manifest.j2`。
+  由 `tools/k8s/render-kube-vip-manifest.py`(python3 + jinja2)完成,已实测与 `ansible template`
+  **逐字节一致**。这样上游模板更新会自动跟随,不产生分叉。
+- **等幂等**:目标状态 =「各 master 都有正确的 manifest + VIP 恰好绑一台」。
+  按 manifest 的 sha256 与节点现状比对,一致则跳过(实测两次连跑全部跳过)。
+- **脑裂守卫**:逐台按各自 hostname 渲染,并在渲染后**立即断言** `vip_nodename` 与
+  `address` 正确,不符则中止 —— 见 17.2。
+
+### 17.2 ⚠ 脑裂事故与根因(必读)
+
+实测中**真的踩到了脑裂**:三台 master **同时**绑定了同一个 VIP。根因是渲染时
+`inventory_hostname` 被统一成了 `localhost`:
+
+```jinja
+- name: vip_nodename
+  value: {{ inventory_hostname }}     # ← 每台必须不同!它是租约 election 的节点标识
+```
+
+三台 kube-vip 的 `vip_nodename` 相同 → 抢同一个 `plndr-cp-lock` 租约 →
+"Failed to update lock optimistically ... the object has been modified" 无限刷 →
+**三台都认为自己该持有 VIP**。
+
+生产路径(`kubespray` 真部署)不会遇到,因为 `inventory_hostname` 天然是各自节点名;
+**但任何"批量渲染再分发"的实现都必须防这一条**。模块已把它做成硬断言。
+
+### 17.3 实机验收结果(裸金属 3 master + 4 worker)
+
+| 项 | 结果 |
+|---|---|
+| `--steps kube_vip` 首次 | ✅ 渲染/分发/选举/校验一次通过 |
+| 再次运行(等幂等) | ✅ 三台全部"manifest 已是最新, 跳过" |
+| `--steps verify_kube_vip` | ✅ **六项全过** |
+| ② VIP 唯一绑定 | ✅ 唯一持有者(无脑裂) |
+| ④ 网卡正确性 | ✅ VIP 网卡 = 节点主 IP 网卡(`manage0`) |
+| ⑤ EndpointSlice | ✅ 3 个地址(非单点) |
+| ⑥ **漂移实测** | ✅ **1s / 2s**(两次演练),API 全程可达 |
+
+**漂移实测 1–2 秒,远快于设计文档预估的 5–10 秒。** 原因:演练是"摘除 manifest 让容器退出",
+kube-vip 退出时会**主动释放租约**(而非等租约自然过期),故切换接近即时。
+只有"进程被 SIGKILL / 节点瞬间断电"这种来不及释放的场景才需要等满 `leaseduration`。
+→ 第 2.4 节"退步到 5-10s"的担忧可以下调:常见故障下 worker 侧感知延迟与 nginx 方案同级。
+(注:此结论来自"进程主动退出"这一演练形态;真实宕机是否等同,需按第 11 节 R1 继续观察。)
+
+### 17.4 本轮修复的既有 bug(与 kube-vip 无关,但都会静默致瘫)
+
+| # | 位置 | 问题 |
+|---|------|------|
+| 1 | `lib-common.sh#node_parse` | 纯解析函数在 `if` 分支未命中时返回 1;`set -e` 下 `X=$(...)` 会**静默中止调用方**(09_kube_vip 遍历到 worker 时无报错直接死掉) |
+| 2 | `lib-common.sh#master_hosts`/`all_node_ips` | 同上:`A && B && printf` 在条件不成立时整条返回 1,命令替换下会中止调用方。已改显式 `if` + `return 0` |
+| 3 | `08_verify_kube_vip.sh` | VIP 持有判定误用 `ip route get` —— 同网段下它对**所有**节点都返回 `local`,会误报 N 个持有者。改用 `ip -4 -o addr show`(09_kube_vip 同) |
+| 4 | 两个 kube-vip 模块 | 用**主机名**做 SSH —— 部署容器里没有节点名的 `/etc/hosts` 解析,静默连不上(表现为"镜像缺失"/"VIP 未绑定"这类假故障)。已统一改用 IP |
+
+### 17.5 新增配置项
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `KUBE_VIP_CP_DETECT` | `true` | apiserver 进程级故障检测(见第 15 节) |
+| `KUBE_VIP_LOCAL_PROXY` | `false` | kubespray 原生本地代理;置 true 会因 16.1 的优先级冲突而**硬失败**,防假修复 |

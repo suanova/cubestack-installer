@@ -37,18 +37,26 @@ SSH_KEY_PATH="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 SSH_USER_NAME="${SSH_USER:-ubuntu}"
 
 # ---- 门禁: 以实际部署为准(静态 Pod 是否落盘), 不看配置开关 ----
-_host_ssh() {   # _host_ssh <host> <command...>
+# ⚠ _host_ssh 一律传 **IP**, 不传主机名: 部署容器里通常没有节点名的 /etc/hosts 解析,
+#   用主机名会静默连不上(stderr 被丢弃时表现为"VIP 未绑定"这类假故障)。
+_host_ssh() {   # _host_ssh <ip> <command...>
     local h="$1"; shift
     ssh -i "${SSH_KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER_NAME}@${h}" "$@" 2>/dev/null
 }
 
-MASTERS=($(master_hosts))
-[ "${#MASTERS[@]}" -gt 0 ] || { err "cluster.conf 中无 master 节点"; exit 1; }
+_MHOST=($(master_hosts))
+[ "${#_MHOST[@]}" -gt 0 ] || { err "cluster.conf 中无 master 节点"; exit 1; }
+# 主机名(用于 vip_nodename 核对)与 IP(用于 SSH)成对准备
+_MIP=()
+for _h in "${_MHOST[@]}"; do
+    _ip="$(node_ip_by_hostname "${_h}")" || { err "无法解析节点 ${_h} 的 IP"; exit 1; }
+    _MIP+=("${_ip}")
+done
 
 _HAVE_MANIFEST=0
-for _h in "${MASTERS[@]}"; do
-    _host_ssh "${_h}" "test -f ${MANIFEST}" && { _HAVE_MANIFEST=1; break; }
+for _ip in "${_MIP[@]}"; do
+    _host_ssh "${_ip}" "test -f ${MANIFEST}" && { _HAVE_MANIFEST=1; break; }
 done
 if [ "${_HAVE_MANIFEST}" = "0" ] && ! bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
     say "kube-vip 未部署(各 master 上无 ${MANIFEST} 且 KUBE_VIP_ENABLED≠true), 跳过验证"
@@ -81,9 +89,11 @@ ok "  kube-vip Pod Running: ${_NRUN}/${_NTOT}"
 
 # ---------------- ② VIP 恰好绑在一台 master 上(防脑裂) ----------------
 say "  ② 检查 VIP 绑定唯一性(防脑裂)..."
+# ⚠ 用 `ip addr` 判断地址是否**真的绑定在本机网卡**上, 不能用 `ip route get` ——
+#   后者对同网段地址会命中本地路由表并返回 `local`, 导致同网段所有节点都被误判为持有者。
 _HOLDERS=()
-for _h in "${MASTERS[@]}"; do
-    if _host_ssh "${_h}" "ip route get '${_VIP}' 2>/dev/null | grep -q 'local ${_VIP} '"; then
+for _h in "${_MIP[@]}"; do
+    if _host_ssh "${_h}" "ip -4 -o addr show | grep -q '${_VIP}/'"; then
         _HOLDERS+=("${_h}")
     fi
 done
@@ -112,15 +122,16 @@ else
 fi
 
 # ---------------- ④ VIP 所在网卡 == 承载节点主 IP 的网卡 ----------------
+# 该节点主 IP 通过 API 查 Node 的 InternalIP 得到, 不去解析 hosts.yml ——
+# 裸金属集群部署布局与 VM 集群不同(可能没有 /etc/kubernetes/hosts.yml), 靠文件会漏判。
 say "  ④ 检查 VIP 落在正确的网卡上..."
 _VIP_IF="$(_host_ssh "${_LEADER}" "ip -o addr show | awk -v v='${_VIP}' '\$4 ~ \"^\" v \"/\" {print \$2; exit}'" || true)"
-_NODE_IP="$(awk -v h="${_LEADER}" '
-    /^kube_control_plane:/ {cp=1; next}
-    /^[A-Za-z0-9_]+:/ {if (cp) cp=0}
-    cp && /^[[:space:]]*'"${_LEADER}"':/ {f=1; next}
-    f && /^[[:space:]]*access_ip:[[:space:]]*[0-9.]+/ {print $2; exit}
-    f && /^[[:space:]]*ip:[[:space:]]*[0-9.]+/ {print $2; exit}
-' "${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}/hosts.yml" 2>/dev/null || true)"
+_NODE_IP="$(SSH "${K} get node -o wide --no-headers 2>/dev/null" | awk -v ip="${_LEADER}" '$6==ip{print $6; exit}' || true)"
+if [ -z "${_NODE_IP}" ]; then
+    # 回退: 按 InternalIP 反查
+    _NODE_IP="$(SSH "${K} get nodes -o jsonpath='{range .items[*]}{.status.addresses[?(@.type==\"InternalIP\")].address}{\" \"}{end}' 2>/dev/null" \
+        | tr ' ' '\n' | grep -x "${_LEADER}" | head -1 || true)"
+fi
 _NODE_IF=""
 [ -n "${_NODE_IP}" ] && _NODE_IF="$(_host_ssh "${_LEADER}" "ip -o addr show | awk -v v='${_NODE_IP}' '\$4 ~ \"^\" v \"/\" {print \$2; exit}'" || true)"
 if [ -n "${_VIP_IF}" ] && [ -n "${_NODE_IF}" ] && [ "${_VIP_IF}" = "${_NODE_IF}" ]; then
@@ -135,9 +146,16 @@ fi
 
 # ---------------- ⑤ kubernetes Service EndpointSlice 非单点 ----------------
 say "  ⑤ 检查 kubernetes Service 的 EndpointSlice(advertise-address 单点修复)..."
-_EPS="$(SSH "${K}" get endpointslice -n default -l kubernetes.io/service-name=kubernetes \
-    -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}{"\n"}{end}' 2>/dev/null || true)"
-_EPN="$(printf '%s\n' "${_EPS}" | grep -c . || true)"
+# ⚠ 用 ${SSH_CMD}(字符串形式)而非 SSH(...) 函数: jsonpath 里含单引号与花括号,
+#   经函数参数 + 命令替换两层引号解析会失败(本模块实测踩到过); SSH_CMD 是仓库为此准备的写法。
+# ⚠ 不用 {"\n"} 做分隔 —— 嵌套转义引号在这里极易解析失败。改为**按地址个数**统计:
+#   先把输出规范成"一到多个 IP", 再逐个匹配计数, 不依赖换行。
+_EPS_RAW="$(${SSH_CMD} "${K} get endpointslice -n default -l kubernetes.io/service-name=kubernetes -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}{end}'" 2>/dev/null || true)"
+if [ -z "${_EPS_RAW}" ]; then
+    _EPS_RAW="$(${SSH_CMD} "${K} get endpointslice -n default -l kubernetes.io/service-name=kubernetes --no-headers" 2>/dev/null || true)"
+fi
+_EPS="$(printf '%s' "${_EPS_RAW}" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)"
+_EPN="$(printf '%s' "${_EPS}" | grep -c . || true)"
 if [ "${_EPN:-0}" -ge 2 ]; then
     ok "  EndpointSlice 含 ${_EPN} 个地址(非单点): $(printf '%s' "${_EPS}" | tr '\n' ' ')"
 elif [ "${_EPN:-0}" -eq 1 ]; then
@@ -155,8 +173,8 @@ if ! bool_is_true "${DRILL}"; then
     exit 0
 fi
 
-if [ "${#MASTERS[@]}" -lt 3 ]; then
-    warn "  ⑥ 漂移演练: 仅 ${#MASTERS[@]} 台 master, 跳过(移走一台后无第三台可接管)"
+if [ "${#_MIP[@]}" -lt 3 ]; then
+    warn "  ⑥ 漂移演练: 仅 ${#_MIP[@]} 台 master, 跳过(移走一台后无第三台可接管)"
     say "kube-vip 验证完成"
     exit 0
 fi
@@ -184,7 +202,7 @@ _START="$(date +%s)"
 _NEW_LEADER=""
 while [ "$(( $(date +%s) - _START ))" -lt "${_DRILL_TIMEOUT}" ]; do
     sleep 1
-    for _h in "${MASTERS[@]}"; do
+    for _h in "${_MIP[@]}"; do
         [ "${_h}" = "${_LEADER}" ] && continue
         if _host_ssh "${_h}" "ip route get '${_VIP}' 2>/dev/null | grep -q 'local ${_VIP} '"; then
             _NEW_LEADER="${_h}"; break

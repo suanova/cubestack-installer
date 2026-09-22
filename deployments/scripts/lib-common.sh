@@ -711,14 +711,37 @@ metallb_pool_contains() {
     esac
 }
 
+# 由节点主机名反查其 IP(供 SSH/端口探测复用)。
+# ⚠ 必须用 IP 而不是主机名去做 SSH: 部署容器里通常没有各节点的 /etc/hosts 解析,
+#   用主机名会**静默连不上**(stderr 被丢弃时尤其难查)。09_kube_vip 曾因此误报镜像缺失。
+# 用法: ip="$(node_ip_by_hostname mxgpu-1-147)"
+node_ip_by_hostname() {
+    local want="$1" line
+    [ -n "${want}" ] || return 1
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        if [ "${NODE_HOSTNAME}" = "${want}" ] && [ -n "${NODE_IP}" ]; then
+            printf '%s' "${NODE_IP}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # 收集全部 master 主机名(空格分隔; 供逐台 SSH 探测复用)
+# ⚠ 用显式 if 而非 `A && B && printf`: 后者在条件不成立时整条返回 1, 在 set -e 下
+# 会让 `X=$(master_hosts)` 这种命令替换**静默中止调用方**(09_kube_vip 曾因此死掉)。
 master_hosts() {
     local line
     for line in "${NODES[@]:-}"; do
         [ -z "${line}" ] && continue
         node_parse "${line}"
-        [ "${NODE_ROLE}" = "master" ] && [ -n "${NODE_HOSTNAME}" ] && printf '%s ' "${NODE_HOSTNAME}"
+        if [ "${NODE_ROLE}" = "master" ] && [ -n "${NODE_HOSTNAME}" ]; then
+            printf '%s ' "${NODE_HOSTNAME}"
+        fi
     done
+    return 0
 }
 
 # 收集全部节点 IP(空格分隔; 供 VIP 冲突判定复用)
@@ -727,8 +750,11 @@ all_node_ips() {
     for line in "${NODES[@]:-}"; do
         [ -z "${line}" ] && continue
         node_parse "${line}"
-        [ -n "${NODE_IP}" ] && printf '%s ' "${NODE_IP}"
+        if [ -n "${NODE_IP}" ]; then
+            printf '%s ' "${NODE_IP}"
+        fi
     done
+    return 0
 }
 
 # 静态校验(无网络交互): kube-vip 开关与取值的一致性
@@ -890,6 +916,18 @@ kube_vip_derive() {
     err "在 ${base}.${start}-${base}.254 范围内未找到空闲 VIP(全部被占用/被排除)"
     err "请在 ${CLUSTER_CONF} 显式指定 K8S_API_VIP=<同网段空闲地址>"
     return 1
+}
+
+# 探测: 集群是否已经在运行(首个 master 上能列出 Node)。
+# 用途: kube_vip 模块的前置自检 —— 它需要一个已存在的集群才能动手(VIP 是给 API 用的)。
+# 用法: if is_cluster_live; then ... fi     (探测失败一律视为"未运行")
+is_cluster_live() {
+    local m1; m1="$(first_master_ip)" || return 1
+    local _user="${SSH_USER:-ubuntu}" ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    ssh -i "${ssh_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_user}@${m1}" \
+        "command -v kubectl >/dev/null 2>&1 && sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes -o name 2>/dev/null | head -1" \
+        2>/dev/null | grep -q .
 }
 
 # 探测: VIP 是否已真实绑定在某台 master 的网卡上(kube-vip 已就位)。
@@ -1077,6 +1115,10 @@ node_parse() {
     if [ -z "${NODE_PW}" ] || [ "${NODE_PW}" = "-" ]; then
         NODE_PW="$(node_default_pw "${NODE_ROLE}")"
     fi
+    # ⚠ 显式 return 0: 本函数是纯解析器, 上面的 if 分支未命中时退出码会是 1。
+    # 调用方(set -e 下的模块)若写成 `X=$(...)` 就会**静默退出** —— 曾致 09_kube_vip
+    # 在遍历到 worker 节点时无任何报错直接死掉(排查花掉很久)。解析成功就该返回 0。
+    return 0
 }
 
 # 默认密码: 全节点默认一致(SSH_DEFAULT_PASSWORD); 节点独立密码在 NODES 第5字段显式填写
