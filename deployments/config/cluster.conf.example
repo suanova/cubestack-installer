@@ -67,9 +67,13 @@ GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin}"
 SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-nodePort}"
 
 # ---- 阶段一、宿主机环境 ----
+# ⚠ API 入口高可用二选一(由代码强制互斥, 同时开启会硬失败):
+#     kube-vip  : 不占额外机器, VIP 跑在各 master 上(推荐, 默认开)
+#     HAProxy+Keepalived: 需要 2 台专职 LB 机器才成立, 且现有实现是单机 VIP 非真 HA(见 docs/kube-vip-api-ha.md)
 HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # API 四层负载均衡(modules/01_env/05_lb_haproxy.sh; 默认 master 直连, 需要时开)
                                                         #   ⚠ 在 HAProxy 所在服务器上执行本模块(持久化机器), 非临时 installer 服务器(装完即删)
 KEEPALIVED_ENABLED="${KEEPALIVED_ENABLED:-false}"       # API VIP 高可用(modules/01_env/06_lb_keepalived.sh)
+                                                        #   ⚠ 当前实现 state/priority/virtual_router_id 均写死 = 单机 VIP, 多机同时跑会双主脑裂
 HARBOR_ENABLED="${HARBOR_ENABLED:-false}"               # Harbor 外部镜像仓库(预留, 见 1.7)
 
 # ---- 阶段二、kubespray 基座 ----
@@ -78,6 +82,13 @@ NTP_ENABLED="${NTP_ENABLED:-1}"                         # 节点时间同步(0=�
 K8S_ENABLED="${K8S_ENABLED:-false}"                     # 部署 kubespray 基座(modules/02_k8s/06_k8s_deploy.sh, = --with-k8s)
 K8S_SCALE_ENABLED="${K8S_SCALE_ENABLED:-false}"         # 扩容模块(modules/02_k8s/07_k8s_scale.sh, = --with-scale)
 METALLB_ENABLED="${METALLB_ENABLED:-true}"              # MetalLB 负载均衡(依赖 3.1 地址池; 需 strict_arp)
+# API Server VIP 高可用(kubespray 原生 kube-vip 静态 Pod, 见 docs/kube-vip-api-ha.md)
+#   · 与 HAPROXY_ENABLED / KEEPALIVED_ENABLED 互斥(同时开启硬失败), 详见阶段一注释
+#   · VIP 不在 MetalLB 地址池内(否则会与 LoadBalancer 抢地址, 硬失败)
+#   · 存量集群首次切换入口需显式确认(倒计时窗口), 详见文档第 7 节两阶段流程
+KUBE_VIP_ENABLED="${KUBE_VIP_ENABLED:-true}"            # 默认开: 消除 API 入口单点(修复"全集群指向第一个 master")
+K8S_API_VIP="${K8S_API_VIP:-}"                          # 留空=自动推导(各 master 探测 .210 起找空闲地址); 显式值优先
+KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"            # 留空=kube-vip 自动检测网卡; 多网卡环境显式指定(如 ens5)
 LOCAL_PATH_ENABLED="${LOCAL_PATH_ENABLED:-true}"        # local-path-provisioner 默认 StorageClass
 METRICS_SERVER_ENABLED="${METRICS_SERVER_ENABLED:-true}"  # metrics-server(HPA 依赖)
 HELM_ENABLED="${HELM_ENABLED:-true}"                    # Helm(registry 等组件依赖)
@@ -655,6 +666,10 @@ CPA_VERSION="${CPA_VERSION:-v1.8.8}"                     # cluster-proportional-
 ETCD_VERSION="${ETCD_VERSION:-v3.5.16}"
 CALICO_VERSION="${CALICO_VERSION:-v3.29.3}"
 METALLB_VERSION="${METALLB_VERSION:-v0.13.9}"
+KUBE_VIP_VERSION="${KUBE_VIP_VERSION:-v0.8.9}"           # ⚠ 必须与 kubespray download.yml:285 的
+                                                        #   kube_vip_image_tag 一致, 否则离线集群拉不到镜像
+                                                        #   → kube-vip 起不来 → 首装 kubeadm init 失败
+
 REGISTRY_IMAGE_TAG="${REGISTRY_IMAGE_TAG:-2.8.1}"        # docker.io/library/registry
 LOCAL_PATH_VERSION="${LOCAL_PATH_VERSION:-v0.0.24}"      # rancher/local-path-provisioner
 BUSYBOX_TAG="${BUSYBOX_TAG:-latest}"                     # 验证用(registry 存储校验)
@@ -919,4 +934,4 @@ BMC_EXPORTER_CHART_DIR="${BMC_EXPORTER_CHART_DIR:-${REPO_ROOT}/deployments/cubes
 # 格式: 空格分隔的匹配条目; 含 ".tar" 为精确文件名匹配, 否则为文件名包含匹配(匹配 images/ 下 *.tar 文件名)
 # 留空 = 全量同步 images/ 目录
 # 也可在 inventory/${CLUSTER_NAME}/preload-images.conf 中单独覆盖(standalone 运行 cubestack-offline.sh 时)
-PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb library_registry local-path-provisioner busybox lws_manager}"
+PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb kube-vip library_registry local-path-provisioner busybox lws_manager}"

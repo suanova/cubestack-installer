@@ -65,6 +65,11 @@ k8s-base  quay.io/calico/node:${CALICO_VERSION}
 k8s-base  quay.io/calico/kube-controllers:${CALICO_VERSION}
 k8s-base  quay.io/metallb/controller:${METALLB_VERSION}
 k8s-base  quay.io/metallb/speaker:${METALLB_VERSION}
+# kube-vip: 控制平面 API VIP(静态 Pod)。⚠ 必须进 PRELOAD_IMAGE_PATTERNS ——
+# kube-vip 在 kubeadm init **之前**就要起来并绑上 VIP, 拉不到镜像会直接卡死首次部署。
+# 镜像名不带 -iptables 后缀 = kube_vip_lb_fwdmethod 为 local(kubespray 默认, 本项目也用这个);
+# 若改成 masquerade, 上例会变成 kube-vip-iptables, 此处需同步加一条。
+k8s-base  ghcr.io/kube-vip/kube-vip:${KUBE_VIP_VERSION}
 k8s-base  docker.io/library/registry:${REGISTRY_IMAGE_TAG}
 k8s-base  docker.io/rancher/local-path-provisioner:${LOCAL_PATH_VERSION}
 # 验证/工具镜像(verify 模块与 registry 存储校验用; 见 lib-common 的 ensure_registry_nginx)

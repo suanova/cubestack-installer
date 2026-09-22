@@ -69,6 +69,43 @@ bash "${SCRIPT_DIR}/tools/k8s/gen-inventory.sh"
 # gen-inventory 已内部调用 sync, 此处再显式兜底归一化一次, 并在 kubespray 前快速失败给出可操作提示。
 bash "${SCRIPT_DIR}/tools/k8s/sync-kubespray-config.sh" >/dev/null 2>&1 || \
     warn "sync-kubespray-config.sh 归一化失败(以下方预检为准)"
+
+# ---------------- kube-vip: 阶段二的切换确认(必须在模块里做, 不能在 sync 里) ----------------
+# sync 的 stdout 上面被重定向到 /dev/null, 把倒计时放 sync 里用户看不见还会白等 30 秒。
+# 流程: 模块判阶段 → 需要切换则红底提示 + 倒计时 → 确认后 export 标志 → sync 才真正切入口。
+if [ "${KUBE_VIP_ENABLED:-true}" = "true" ] && [ "${HAPROXY_ENABLED:-false}" != "true" ] && [ "${KEEPALIVED_ENABLED:-false}" != "true" ]; then
+    _KV_VIP="$(kube_vip_derive 2>/dev/null || true)"
+    _KV_OLD="$(kube_vip_current_entry)"
+    # 阶段二 = VIP 已真实绑在某台 master 上(与 sync 里的判定同一口径)
+    if [ -n "${_KV_VIP}" ] && kube_vip_is_bound "${_KV_VIP}"; then
+        if [ "${_KV_OLD}" != "${_KV_VIP}" ]; then
+            echo ""
+            echo -e "\033[41m\033[97m================================================================\033[0m"
+            echo -e "\033[41m\033[97m ⚠⚠⚠  kube-vip: API 入口切换(阶段二)即将执行  ⚠⚠⚠\033[0m"
+            echo -e "\033[41m\033[97m   API 入口  ${_KV_OLD:-<未设置>}  →  ${_KV_VIP}\033[0m"
+            echo -e "\033[41m\033[97m   VIP ${_KV_VIP} 已绑定, 切换后全集群经 VIP 访问 API Server;\033[0m"
+            echo -e "\033[41m\033[97m   会重签证书 SAN 并重启各节点 apiserver。\033[0m"
+            echo -e "\033[41m\033[97m   回滚: docs/kube-vip-api-ha.md 7.4 节\033[0m"
+            echo -e "\033[41m\033[97m   30 秒内 Ctrl-C 可中止\033[0m"
+            echo -e "\033[41m\033[97m================================================================\033[0m"
+            for _c in $(seq 30 -1 1); do
+                printf "\r%s" "$(printf '\033[41m\033[97m  ⏳ 切换倒计时 %d 秒继续        \033[0m' "${_c}")"
+                sleep 1
+            done
+            printf "\r%s\n" "$(printf '\033[0m  ✅ 已确认切换                          ')"
+            export KUBE_VIP_SWITCH_CONFIRMED=1
+            # 重新跑 sync: 这次带上确认标志, 才会把入口真正切到 VIP
+            bash "${SCRIPT_DIR}/tools/k8s/sync-kubespray-config.sh" >/dev/null 2>&1 || \
+                warn "sync-kubespray-config.sh 切换后归一化失败"
+        fi
+    elif [ -n "${_KV_VIP}" ] && [ "${_KV_OLD}" = "${_KV_VIP}" ]; then
+        # 入口已指向 VIP 但探测不到绑定 —— 集群可能正指向一个不存在地址, 醒目告警(本次由 kubespray 重装 kube-vip 收敛)
+        warn "API 入口已指向 ${_KV_VIP}, 但各 master 上探测不到该 VIP 绑定 —— 集群可能已失联"
+        warn "本次部署会重装 kube-vip 静态 Pod, 若仍不绑定请查 docs/kube-vip-api-ha.md 第 7.2 节"
+    fi
+    unset _KV_VIP _KV_OLD _c
+fi
+
 _ADDONS_YML="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}/group_vars/k8s_cluster/addons.yml"
 if [ -f "${_ADDONS_YML}" ]; then
     _EXPOSE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"

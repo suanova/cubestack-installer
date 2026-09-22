@@ -41,9 +41,35 @@ done
 # 第一个 worker IP(用于 Calico can-reach 探测),无 worker 时回退到 API 入口(第一个 master)
 FIRST_WORKER="${WORKER_IPS[0]:-${API_IP}}"
 
-# API 入口地址统一 = API_IP(第一个 master IP), VM 与裸金属均不依赖宿主机物理 IP
-API_ADDR="${API_IP}"
-say "节点类型: API 入口=第一个 master(${API_ADDR})"
+# ---------------- kube-vip: API 入口地址(两阶段, 见 docs/kube-vip-api-ha.md 第 7 节) ----------------
+# 静态校验先行(互斥 / MetalLB 池隔离 / 与节点 IP 冲突) —— 配置错就早失败, 不要等到 kubespray 跑一半
+kube_vip_validate_config || exit 1
+
+# 阶段判定: VIP 已绑=阶段二(切入口), 未绑=阶段一(写 master01, 本轮只让 VIP 就位)
+_KV_VIP="$(kube_vip_derive)" || exit 1
+_KV_OLD_ADDR="$(kube_vip_current_entry)"
+
+# 阶段二的切换门(确认动作在**调用方**完成, 本脚本只执行)。
+# ⚠ 本脚本的 stdout 会被 06_k8s_deploy.sh 重定向到 /dev/null(见该模块第 70 行), 所以
+#   任何倒计时/确认提示放在这里用户都看不见, 还会白等。故约定:
+#     · 调用方(06_k8s_deploy.sh)负责判阶段 + 提示 + 倒计时, 确认后 export KUBE_VIP_SWITCH_CONFIRMED=1
+#     · 本脚本见到该标志才做切换; 未见则一律按阶段一(写 master01)—— fail-closed, 绝不自行切换
+#     · 直接手工运行本脚本时若尚未确认, 会明确提示需要什么才能切换
+if [ "${API_ENTRY_PHASE:-0}" = "2" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
+    warn "VIP ${_KV_VIP} 已就位, 但尚未获得切换确认 → 本次仍按阶段一处理(入口保持 ${_KV_OLD_ADDR})"
+    warn "如需切换: 走 06_k8s_deploy.sh(会给出倒计时确认); 或 export KUBE_VIP_SWITCH_CONFIRMED=1 后重跑本脚本"
+    API_ENTRY_PHASE=1
+fi
+
+_KV_NEW_ADDR="$(kube_vip_resolve_target)" || exit 1
+
+# API 入口地址统一 = 本次运行的判定结果(阶段一=第一个 master / 阶段二=VIP)
+API_ADDR="${_KV_NEW_ADDR}"
+if [ "${API_ENTRY_PHASE:-0}" = "2" ]; then
+    say "节点类型: kube-vip 阶段二 — API 入口=VIP(${API_ADDR})"
+else
+    say "节点类型: API 入口=第一个 master(${API_ADDR})"
+fi
 say "API 域名: ${API_DOMAIN}"
 say "Master IPs: ${MASTER_IPS[*]}"
 say "Worker IPs: ${WORKER_IPS[*]:-<无>}"
@@ -52,7 +78,18 @@ say "Worker IPs: ${WORKER_IPS[*]:-<无>}"
 ALL_YML="${INV_DIR}/group_vars/all/all.yml"
 if [ -f "${ALL_YML}" ]; then
     say "更新 ${ALL_YML} ..."
-    # loadbalancer_apiserver.address → API 入口地址(全裸金属=第一个 master / 含 VM=宿主机物理 IP)
+    # 防线: 入口地址一旦是"非数值字面量"(如手工填的 VIP 或 Jinja 表达式), 绝不能被我方的
+    # sed 覆盖 —— 那会静默改掉真正生效的 API 入口。宁可停下让人确认。
+    _prot="$(nonnumeric_entry "${ALL_YML}")"
+    if [ -n "${_prot}" ] && [ "${_prot}" != "${API_ADDR}" ]; then
+        err "all.yml 的 API 入口已是非数值地址 '${_prot}', 与本次要写入的 '${API_ADDR}' 不同:"
+        err "  ${ALL_YML}"
+        err "如确认要改成 ${API_ADDR}, 请手工修改该行后重跑(此保护避免自动覆盖手工/外部设置的入口)"
+        exit 1
+    fi
+    unset _prot
+
+    # loadbalancer_apiserver.address → 本次运行的 API 入口(阶段一=第一个 master / 阶段二=VIP)
     sed -i -E "s/^(\s+address:)\s+[0-9.]+(\s*#.*)?\$/\1 ${API_ADDR}\2/" "${ALL_YML}"
 
     # apiserver_loadbalancer_domain_name → 集群 API 域名
@@ -100,13 +137,14 @@ fi
 CLUSTER_YML="${INV_DIR}/group_vars/k8s_cluster/k8s-cluster.yml"
 if [ -f "${CLUSTER_YML}" ]; then
     say "更新 ${CLUSTER_YML} ..."
-    if grep -q "advertise-address" "${CLUSTER_YML}"; then
-        sed -i -E "s/^(\s+advertise-address:)\s+\"[0-9.]+\"/\1 \"${API_ADDR}\"/" "${CLUSTER_YML}"
-    else
-        # 在 kube_apiserver_extra_args 下追加 advertise-address
-        sed -i -E "/^kube_apiserver_extra_args:/a\  advertise-address: \"${API_ADDR}\"" "${CLUSTER_YML}"
-    fi
-    ok "已同步 kube_apiserver_extra_args.advertise-address → ${API_ADDR}"
+
+    # advertising address: **按节点各写各的**(kubespray 惯用法, 见 kubespray-defaults main.yml:628
+    # 的 kube_apiserver_address)。曾统一写死第一个 master IP, 导致三个 apiserver 都对外宣告同一个
+    # 地址 → kubernetes Service 的 EndpointSlice 只有一条 → 集群内经 Service 访问 API 也是单点。
+    # ⚠ 这是 Jinja 表达式而非数值字面量, 因此**不再随主机 IP 变化而"同步"**, 只做幂等修复。
+    update_advertise_address_yml "${CLUSTER_YML}" || exit 1
+    ok "已同步 kube_apiserver_extra_args.advertise-address → 按节点各写各的(kube_apiserver_address)"
+
     # 集群内部网络 CIDR(从 cluster.conf 读取, 不硬编码在 group_vars 中)
     sed -i -E "s|^kube_service_addresses:[[:space:]]*[0-9.]+/[0-9]+|kube_service_addresses: ${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18}|" "${CLUSTER_YML}"
     sed -i -E "s|^kube_pods_subnet:[[:space:]]*[0-9.]+/[0-9]+|kube_pods_subnet: ${KUBE_PODS_SUBNET:-10.233.64.0/18}|" "${CLUSTER_YML}"
@@ -196,6 +234,22 @@ if [ -f "${ADDONS_YML}" ]; then
     ok "已同步 MetalLB 地址池 → ${METALLB_POOL}"
 else
     warn "未找到 ${ADDONS_YML},跳过 MetalLB 地址池同步"
+fi
+
+# ---------------- 5. 更新 addons.yml (kube-vip 控制平面 VIP) ----------------
+# 落点是 addons.yml 而非 k8s-cluster.yml —— 仓库里原本就有 kubespray 自带的 kube-vip 注释块,
+# 照它的键名写即可。重写逻辑在 lib-common.sh 的 update_kube_vip_addons_yml(它与 kubespray
+# 入口脚本共用同一份, 避免两边写不同步导致互相覆盖)。
+# ⚠ kube_vip_address 恒为 VIP(静态 Pod 的 args.address), 与 loadbalancer_apiserver.address
+#   **不是同一个值** —— 后者按阶段在 master01 / VIP 之间切换(见本脚本开头的阶段判定)。
+if [ -f "${ADDONS_YML}" ]; then
+    say "更新 ${ADDONS_YML} (kube-vip 控制平面 VIP) ..."
+    update_kube_vip_addons_yml "${ADDONS_YML}" "${_KV_VIP}" || exit 1
+    if bool_is_true "${KUBE_VIP_ENABLED:-true}"; then
+        ok "已同步 kube-vip → VIP=${_KV_VIP}, interface=${KUBE_VIP_INTERFACE:-<自动检测>}, 阶段=${API_ENTRY_PHASE:-1}"
+    else
+        ok "已同步 kube-vip → 关闭(kube_vip_enabled: false)"
+    fi
 fi
 
 # REGISTRY_IP 自动派生统一在 lib-common.sh load_config 中完成(first_pool_addr):
