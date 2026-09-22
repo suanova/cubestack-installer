@@ -274,9 +274,14 @@ fi
 # 让显式启用的模块真正生效: 为 RUN_STEPS 中带 TOGGLE 的模块导出 TOGGLE=true。
 # 否则 --enable gpu_operator / --with-cubestack 只把模块加入执行列表, 模块内部 `[ "${TOGGLE}" = true ]`
 # 自检读的是 cluster.conf 默认 false → 会跳过。导出后子进程模块脚本自检通过。
+# ⚠ 只对**非默认启用**的模块导出。默认启用的模块其 TOGGLE 本来就已是 true, 导出是空操作;
+#   而 DEFAULT: 1 + TOGGLE 的模块(kube_vip)恰恰**要靠开关为 false 才走清理分支** ——
+#   无条件导出会把用户在 cluster.conf 里写的 false 冲成 true, 于是"关掉开关"永远清不掉残留。
+#   显式 --enable <模块> 仍然有效: 那条路径会把开关**持久化写回 cluster.conf**(见上文 --enable 处理)。
 for i in "${!MODULE_KEY[@]}"; do
     tgl="${MODULE_TOGGLE[$i]:-}"
     [ -n "${tgl}" ] || continue
+    module_default_on "${i}" && continue
     tgl="${tgl%% *}"   # TOGGLE 多变量(空格分隔=OR)时取第一个导出(如 ceph → CEPH_ENABLED; external 模式 ceph 的 CEPH_CSI_ENABLED 由 ceph_csi 导出)
     for k in "${RUN_STEPS[@]:-}"; do
         [ "${k}" = "${MODULE_KEY[$i]}" ] && { export "${tgl}=true"; break; }

@@ -759,6 +759,248 @@ kubectl describe node <节点> | grep -A5 rdma/             # 节点上真正注
 
 ---
 
+### 11. kube-vip 控制面负载均衡(`lb_enable`):`lb_fwdmethod: local` 是**静默零效果**,且 ipvs 模式集群上还有一道 kube-proxy 关卡
+
+**症状**
+给 kube-vip 的 manifest 加 `lb_enable: true`(其余不动)后**没有任何报错**,日志还会打
+`Starting IPVS LoadBalancer`,但:
+
+- `ipvsadm -L -n -t <VIP>:6443` 在 leader 上列出的 3 个后端**全是摆设** —— 所有经 VIP 的连接
+  仍然只落在 leader 本机那台 apiserver(masquerade/haproxy 那类"流量分散"完全没发生);**或者**
+- 条目确实建起来了,但约 **30 秒后自己消失**(`syncPeriod: 30s`)。
+
+两种表现都是**静默失效** —— 没有 error、没有 CrashLoop,`verify_kube_vip` 现有六项也全部通过
+(它验的是"VIP 在、healthz 通",这两件事在 LB 失效时依然成立)。
+
+**根因(两条,互相独立)**
+
+**① `lb_fwdmethod: local` 在内核里等于"不转发"。**
+这是 kubespray 的默认值(`kubespray_defaults/defaults/main/main.yml:88`),kube-vip 的 CLI 默认也是它。
+`net/netfilter/ipvs/ip_vs_conn.c:1043`:
+
+```c
+case IP_VS_CONN_F_LOCALNODE:
+    cp->packet_xmit = ip_vs_null_xmit;
+```
+
+`ip_vs_xmit.c:722` 的 `ip_vs_null_xmit` 注释直言 `we do not touch skb` —— 包原样交回本机协议栈。
+而 kube-vip v0.8.9 的 `NodeWatcher`(`pkg/cluster/clusterLeaderElection.go:308`)确实按
+`node-role.kubernetes.io/control-plane` 把**全部**控制面节点登记成了后端 ——
+**登记是真的,转发是没有的**。两者合起来就是"看起来配好了、实际零效果"。
+
+> 要真负载均衡只能用 **`masquerade`**。kubespray 官方文档也是这么配对的
+> (`docs/ingress/kube-vip.md`:`kube_vip_lb_enable: true` + `kube_vip_lb_fwdmethod: masquerade`)。
+> kube-vip 文档里那句 *"with local forwarding method, the API server will be added as a backend only
+> if its IP address is present locally on the node"* 说的是同一件事的另一种表述。
+
+**② 本集群 `kube_proxy_mode: ipvs`,kube-proxy 会删掉一切不是它自己建的 IPVS 规则。**
+kube-proxy **v1.32.5**(本集群实际版本)`pkg/proxy/ipvs/proxier.go:1972`:
+
+```go
+func (proxier *Proxier) cleanLegacyService(activeServices sets.Set[string], currentServices map[string]*VirtualServer) {
+	for cs, svc := range currentServices {                      // 内核里现有的全部 IPVS service
+		if proxier.isIPInExcludeCIDRs(svc.Address) { continue } // ← 只有排除段内的才放过
+		if !activeServices.Has(cs) {
+			proxier.ipvs.DeleteVirtualServer(svc)               // ← 不是自己建的 → 删
+		}
+	}
+}
+```
+
+唯一解是 `ipvs.excludeCIDRs` 把 VIP 排除掉(kubespray 侧变量 `kube_proxy_exclude_cidrs`)。
+⚠ kube-proxy **只在启动时读**该字段 —— 改完 ConfigMap 必须
+`kubectl -n kube-system rollout restart daemonset/kube-proxy`,否则改了也不生效(实测:改完 45s 内
+`restartCount` 仍为 0,条目照旧)。
+
+**解法(本项目决策:不开)**
+
+D4 保持"纯故障切换"、不开 `lb_enable`。理由是收益/代价不划算,且**破坏"单一配置源"**:
+
+- 开 LB 的额外前提:换 `kube-vip-iptables` 镜像 + privileged 容器 + 改宿主机 sysctl
+  (`net.ipv4.ip_forward` / `net.ipv4.vs.conntrack`,由 kube-vip 自己写) + 上述 excludeCIDRs 耦合。
+- `excludeCIDRs` 必须与 VIP **长期保持一致**,而本项目 VIP 是**自动推导**的 —— VIP 一漂移,
+  排除段忘了跟就会静默失效(又回到"看起来配了其实没生效")。
+- 排除 VIP 还有个连带副作用: kube-proxy 从此**不再管理 VIP 上的 NodePort 规则**,已有条目被冻结。
+  实测 `10.66.1.139:31680` 的后端被摘掉后不再恢复(本集群 registry 拉镜像走 `registry.cubestack.io`
+  → `10.66.1.131`,**不依赖** VIP 的 NodePort,故影响有限,但确实是个反直觉的行为变化)。
+- 而"API 入口不单点"这件事,**现状已经做到**(`verify_kube_vip` ⑥ 漂移演练实测通过)。
+
+**若将来仍要开**,唯一推荐做法:由部署模块从**同一个 VIP 变量**同时生成 kube-vip manifest 与
+`kube_proxy_exclude_cidrs`,让两处永远一致(把耦合自动化),并按 ① 用 `masquerade`。
+
+**验证(边界必须看清)**
+
+已验证:
+- **① 的结论**:内核 `ip_vs_conn.c:1043` + `ip_vs_xmit.c:722` 逐行确认 `local` → `null_xmit`;
+  kube-vip v0.8.9 的 `NodeWatcher` 登记全部控制面节点。**这是源码级判定,不是实机跑出来的**
+  ("后端登记了但不会被转发"这个结论由两侧代码共同支撑)。
+- **② 的结论**:读本集群实际版本 kube-proxy **v1.32.5** 的 `cleanLegacyService` 确认;
+  实机配置 `excludeCIDRs` 并重启后,VIP 上的既有 IPVS 条目**保留未被清理**,与代码里的
+  `isIPInExcludeCIDRs` 跳过分支一致。
+- **本集群现状**:VIP `10.66.1.139` 由 `10.66.1.154` 持有,IPVS 中**无** `10.66.1.139:6443` 条目
+  —— 即 LB 未启用(设计如此)。
+
+**未验证(不要当成已验收)**:
+- **`masquerade` 的端到端效果从未实测** —— 经 VIP 的请求是否真轮询到三台、单台 apiserver 挂掉后的
+  收敛耗时,本次都没测(只做了源码与 kube-proxy 侧验证就按决策回退了)。
+- **②的"删除"一幕没有取到反例**:本次是先配排除段、后重启,没有先目击"不配排除段时规则被删"。
+  删除行为目前按源码判定(有 kube-vip 官方 known-issue 佐证:
+  *"if kube-proxy is configured with ipvs mode, it will monitor all ipvs rules on the Node and remove
+  those that are not created by it"*)。
+
+**相关命令**
+```bash
+# kube-vip 的 LB 条目只会出现在 leader 上(ARP 模式)
+ssh <master> sudo ipvsadm -L -n -t <VIP>:6443
+
+# 本机 IPVS 全貌(注意 kube-proxy 建的 NodePort/ClusterIP 也在这里, 别误判成 kube-vip 的)
+ssh <master> sudo ipvsadm -L -n
+
+# kube-proxy 的模式与排除段
+kubectl -n kube-system get cm kube-proxy -o jsonpath='{.data.config\.conf}' | sed -n '/^ipvs:/,/^kind:/p'
+
+# 改了 kube-proxy 配置后必须滚动重启才生效
+kubectl -n kube-system rollout restart daemonset/kube-proxy
+```
+
+---
+
+### 12. kube-vip 的三个"以为收敛了其实没有":关开关不清理 / 每轮白重启两次 / 全新集群部署中断
+
+三个问题的根因相邻(都是"目标状态与实际状态不一致,但没有任何东西去发现它"),
+于 2026-09-22 一并修复。设计说明见 `docs/kube-vip-api-ha.md` 第 18 节。
+
+#### 12.1 `KUBE_VIP_ENABLED=false` 重跑后,manifest 还在、VIP 还被持有
+
+**症状**
+把开关改成 `false` 重跑,日志只有一行 `跳过 kube-vip(配置 KUBE_VIP_ENABLED=true 可启用)`,
+但:
+
+```bash
+ssh <master> sudo ls /etc/kubernetes/manifests/kube-vip.yml   # ← 文件还在
+ssh <master> sudo crictl ps | grep kube-vip                    # ← 容器还在跑
+ssh <master> ip -4 -o addr show | grep '<VIP>/'                # ← VIP 还被绑着
+```
+
+即"以为关掉了,其实它照跑、照持有 VIP、还继续参与租约选举"。
+
+**根因(两层,第二层才是关键)**
+① `09_kube_vip.sh` 里只有 `say "跳过"` + `exit 0`,从来没有删除逻辑 ——
+   而文档 §7.4 从设计之初就承诺了"关开关重跑 = 删 static pod manifest"。
+② 更根本: **模块根本不会被调度。** 模块框架的规则是"带 `TOGGLE` 的模块,开关为 false 时
+   不进 RUN_STEPS"(`lib-module.sh#module_default_on`),而该模块原是 `DEFAULT: 0` ——
+   开关一关,脚本连那一行"跳过"都没有打印过。
+
+**解法**
+模块改 `DEFAULT: 1`(常驻全量运行)+ 内部按开关分派到"安装/清理";同时
+`deploy-cluster.sh` 的 TOGGLE 导出循环加 `! module_default_on` 前置条件 —— 否则它会对
+RUN_STEPS 里的任何 TOGGLE 模块无条件 `export KUBE_VIP_ENABLED=true`,把用户写的 `false`
+冲掉,清理分支永远不可达。
+
+**相关命令**
+```bash
+# 关闭态清理(第 3 步起才动文件, 前两步都在拦停)
+sudo ./deploy-cluster.sh --steps kube_vip
+
+# 手动确认清干净了(三样都要为空)
+for h in <master1> <master2> <master3>; do
+  ssh $h "sudo ls /etc/kubernetes/manifests/kube-vip.yml 2>&1; sudo crictl ps | grep kube-vip; ip -4 -o addr show | grep '<VIP>/'"
+done
+```
+
+> ⚠ **阶段二下不能直接关**:API 入口已经指向 VIP 时删 kube-vip = 全集群 API 立刻失联。
+> 模块会**硬拦停**并给出两步走法(先把入口退回 master01 → 再关开关清理)。
+
+#### 12.2 每次全量运行,master01 上的 kube-vip 都会重启两次
+
+**症状**
+每跑一次全量部署,`crictl ps` 里 master01 的 kube-vip 容器 `started-at` 都会变
+(最直观的是看 `crictl ps -a | grep kube-vip` 的退出记录)。master02/03 不受影响。
+如果 master01 正好是 VIP 持有者,这一轮里 VIP 会跟着抖动两次。
+
+**根因: 同一个文件有两个写入者,而它们渲染出来的字节不一样。**
+
+| 写入者 | 首台 master 的 hostPath |
+|---|---|
+| kubespray(`node/tasks/main.yml:19`,条件 `kube_vip_enabled`) | `/etc/kubernetes/super-admin.conf` |
+| `09_kube_vip.sh` | `/etc/kubernetes/admin.conf` |
+
+kubespray 对**首台** CP 会走 `loadbalancer/kube-vip.yml:26-31` 的 `set_fact`,在
+"`super-admin.conf` 存在 或 kubeadm 没跑过"时选 `super-admin.conf`;我们的渲染器恒用 `admin.conf`。
+于是: kubespray 先写 → 静态 Pod 被 kubelet 重启一次 → 本模块按 sha256 比对发现不一致、写回
+→ 再重启一次。
+
+**实测复现(2026-09-22)**: 用真正的 ansible `template` 模块复刻 kubespray 的变量解析后逐台对拍 ——
+master02/03 **逐字节一致**,master01 **只差上面那一行**。也就是说**唯一的分歧点就是
+`kube_vip_admin_conf`**;`kube_vip_cidr`/`dns_mode`/`leasename`/`leaseduration` 等
+(`node/defaults/main.yml:60-84`)与渲染器硬编码的那组值逐条相同。
+
+**解法(单一写入者)**
+`addons.yml` 里的 `kube_vip_enabled` **恒写 `false`** —— 含义不是"kube-vip 没启用",
+而是"不要让 kubespray 写这个静态 Pod"。写这个值的是 `lib-common.sh#update_kube_vip_addons_yml`。
+
+**不要**试图去复刻 kubespray 的 `super-admin.conf` 判定来"对齐渲染" —— 那是**节点状态相关的
+启发式**,复刻它等于把模块重新绑回 inventory 状态机(而模块的立身之本正是不依赖它),
+且上游一次改动就会静默复发。
+
+**相关命令**
+```bash
+# 看 master01 的 manifest 到底用的是哪个 kubeconfig
+ssh <master01> "sudo grep -A1 'hostPath' /etc/kubernetes/manifests/kube-vip.yml"
+
+# 确认单一写入者契约成立(应为 false)
+grep '^kube_vip_enabled' deployments/kubespray/inventory/*/group_vars/k8s_cluster/addons.yml
+
+# 密码: 全量运行前后各取一次 hash, 应当全程不变
+ssh <master01> "sudo sha256sum /etc/kubernetes/manifests/kube-vip.yml"
+```
+
+> ⚠ `kube_vip_address` 与上面的开关**无关**,开关关闭时**也要保留** —— 它只喂 apiserver
+> 证书 SAN(`kubeadm-setup.yml:48` 的 `sans_kube_vip_address` 只看它是否定义)。删掉它会导致
+> 下次开回来时证书重签。
+
+#### 12.3 全新集群部署在 `k8s_deploy` **之前**就中断了
+
+**症状**
+全新环境跑全量部署,日志走到 `k8s_ntp` 之后、`k8s_deploy` 之前就报:
+
+```
+【错误】集群不可达或尚未部署(首个 master 上列不出 Node)
+【错误】kube-vip 需要一个已存在的集群; 请先跑 --steps k8s_deploy
+部署中断: 模块 kube_vip 失败 ...
+```
+
+"请先跑 k8s_deploy" 这句提示本身自相矛盾 —— 它明明就在计划里,只是**排错了位置**。
+
+**根因**
+模块文件序号 `09` > `06` **不足以定序**。`resolve_run_steps` 会按 `REQUIRES` 做稳定拓扑排序
+(`lib-module.sh#_topo_sort_requires`),而 `09_kube_vip` 原先**故意不声明 `REQUIRES`** ——
+于是它被排在 `k8s_deploy` **之前**。而 `deploy-cluster.sh:611` 是:
+
+```bash
+run_module "${key}" || { FAILED=1; break; }
+```
+
+模块失败即 `break`,`is_cluster_live` 自检失败 → `exit 1` → **整个部署在装集群之前停住**。
+而 `KUBE_VIP_ENABLED` 的默认值就是 `true`。
+
+**解法**
+补 `REQUIRES: k8s_deploy`。原先不写它的顾虑是"`--steps kube_vip` 会把整套 kubespray 拉进来",
+该顾虑已不成立: ① `--steps` 精确模式下,依赖已完成(`REPEAT≠1` 且 `state=done`)时不拉入执行;
+② `k8s_deploy` 在 `BASE_MODULES` 内,未被显式命名时会被剔除。实测 `--steps kube_vip`
+仍然只跑 `kube_vip` 一个模块。
+
+**相关命令**
+```bash
+# 确认执行顺序(应看到 k8s_deploy 在 kube_vip 之前)
+sudo ./deploy-cluster.sh --list | grep 本次执行模块
+
+# 确认 --steps 没被 REQUIRES 拖大
+sudo ./deploy-cluster.sh --steps kube_vip --list | grep 本次执行模块
+```
+
+---
+
 ## 四、离线部署
 
 ### 1. 【单机/重装】`Drain node` → `Remove-node | List nodes` 报 `error: stat /etc/kubernetes/admin.conf: no such file or directory`

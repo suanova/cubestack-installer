@@ -833,6 +833,17 @@ kube_vip_current_entry() {
     awk '/^loadbalancer_apiserver:/{f=1; next} f && /^[[:space:]]+address:/{print $2; exit}' "${all_yml}" 2>/dev/null
 }
 
+# 读取 inventory 里记录的 kube-vip VIP(addons.yml 的 kube_vip_address)
+# 用途: 关闭态清理时的"阶段二"判定 —— 若 API 入口仍指向这个地址, 就绝不能删 manifest。
+# ⚠ 这个键与 kube_vip_enabled 开关**无关**(它只喂 apiserver 证书 SAN), 所以关闭态下它依然在,
+#   正好可以当"这台集群的 VIP 是哪个"的记录来用。
+# 用法: vip="$(kube_vip_recorded_address)"   (无库存/读不到时输出空串)
+kube_vip_recorded_address() {
+    local addons="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}/group_vars/k8s_cluster/addons.yml"
+    [ -f "${addons}" ] || return 0
+    awk '/^kube_vip_address:/{print $2; exit}' "${addons}" 2>/dev/null
+}
+
 # VIp 是否是一个"可以当 VIP 用"的候选(排掉节点自身 IP 与 MetalLB 池内地址)
 # 用法: kube_vip_is_viable_candidate <ip>
 kube_vip_is_viable_candidate() {
@@ -1009,6 +1020,15 @@ nonnumeric_entry() {
 # 以 "# Kube VIP" 行为锚点: 丢弃旧块(锚点行 + 紧随其后的注释行 + 其后连续的 kube_vip_*/loadbalancer_apiserver 行),
 # 再按当前配置重写。用 awk 脚本文件而非内联程序 —— 内联的复杂引号规则经 shell 传递易被破坏。
 # 用法: update_kube_vip_addons_yml "<addons.yml 路径>" "<VIP>"
+#
+# ⚠ **单一写入者契约**: 本函数写入的 kube_vip_enabled **恒为 false**, 与 KUBE_VIP_ENABLED 无关。
+#   含义不是"kube-vip 没启用", 而是"不要让 kubespray 写这个静态 Pod" —— 静态 Pod 由
+#   02_k8s/09_kube_vip.sh 独占。原因是两边的渲染结果**必然不同**: kubespray 对**首台** master
+#   会把 manifest 的 hostPath 渲染成 super-admin.conf
+#   (roles/kubernetes/node/tasks/loadbalancer/kube-vip.yml:26-31 的 set_fact), 而我们的渲染器
+#   恒用 admin.conf → 每次全量运行该文件被改写两次 → kube-vip pod 跟着重启两次。
+#   把 kubespray 侧关掉之后, 它对本集群 kube-vip 的唯一贡献就只剩 "把 VIP 写进证书 SAN"。
+#   详见 docs/kube-vip-api-ha.md 第 18 节。
 update_kube_vip_addons_yml() {
     local f="$1" vip="${2:-}"
     [ -f "${f}" ] || { warn "未找到 ${f}, 跳过 kube-vip 同步"; return 1; }
@@ -1029,25 +1049,34 @@ update_kube_vip_addons_yml() {
 
     {
         echo "# Kube VIP"
-        if bool_is_true "${KUBE_VIP_ENABLED:-true}"; then
-            echo "kube_vip_enabled: true"
-            [ -n "${vip}" ] && echo "kube_vip_address: ${vip}"
-            echo "kube_vip_arp_enabled: true"
-            echo "kube_vip_controlplane_enabled: true"
-            # apiserver 进程级故障检测: 开启后 kube-vip 探本机 apiserver /healthz, 探失败即把
-            # 自身健康置假 → 不再续租 → 约 5s(租约时长)后 VIP 漂走。这是"节点活着但 apiserver
-            # 死了"这一场景唯一的快速切换手段(关闭时只能等租约自然过期, 与节点宕机同速)。
-            # 默认开(与 kubespray 的 false 不同): 该场景在真实运维中比整机宕机更常见。
-            echo "kube_vip_cp_detect: $(bool_is_true "${KUBE_VIP_CP_DETECT:-true}" && echo true || echo false)"
-            # 服务 LB 归 MetalLB —— 两者都实现 LoadBalancer 语义, 同时开会让 kube-vip 抢走
-            # MetalLB 的地址分配权(实机已验证的分工, 见 docs/kube-vip-api-ha.md 决策 D1)
-            echo "kube_vip_services_enabled: false"
-            # 纯故障切换: apiserver 自身有 leader election, 再加一层转发收益有限却多一个故障点
-            echo "kube_vip_lb_enable: false"
-            [ -n "${KUBE_VIP_INTERFACE:-}" ] && echo "kube_vip_interface: ${KUBE_VIP_INTERFACE}"
-        else
-            echo "kube_vip_enabled: false"
-        fi
+        # ⚠ 恒为 false, 且**不跟随 KUBE_VIP_ENABLED** —— 含义是"kubespray 不要插手这个静态 Pod",
+        #   静态 Pod 由 02_k8s/09_kube_vip.sh 独占(单一写入者)。理由见本函数头注释。
+        echo "kube_vip_enabled: false"
+        # kube_vip_address 与上面的开关**无关**: 它只喂 apiserver 证书 SAN
+        # (control-plane/tasks/kubeadm-setup.yml:48 的 sans_kube_vip_address, 只看它是否定义,
+        #  不看 kube_vip_enabled)。**KUBE_VIP_ENABLED=false 时也保留它** → 关掉 kube-vip 后再开回来
+        #  不必重签证书(阶段二切换的主要代价之一就是证书 SAN 重签, 能省则省)。
+        [ -n "${vip}" ] && echo "kube_vip_address: ${vip}"
+        # 以下键在 kube_vip_enabled: false 下**全部不生效**(kubespray 的 kube-vip 任务整个被跳过),
+        # 保留它们纯粹是逃生口: 万一手工把上面的开关翻成 true, kubespray 渲染出来的仍是这套策略
+        # (ARP + 控制面 + cp_detect + 不开服务 LB), 而不是一份 arp 全关的坏 manifest。
+        echo "kube_vip_arp_enabled: true"
+        echo "kube_vip_controlplane_enabled: true"
+        # apiserver 进程级故障检测: 开启后 kube-vip 探本机 apiserver /healthz, 探失败即把
+        # 自身健康置假 → 不再续租 → 约 5s(租约时长)后 VIP 漂走。这是"节点活着但 apiserver
+        # 死了"这一场景唯一的快速切换手段(关闭时只能等租约自然过期, 与节点宕机同速)。
+        # 默认开(与 kubespray 的 false 不同): 该场景在真实运维中比整机宕机更常见。
+        echo "kube_vip_cp_detect: $(bool_is_true "${KUBE_VIP_CP_DETECT:-true}" && echo true || echo false)"
+        # 服务 LB 归 MetalLB —— 两者都实现 LoadBalancer 语义, 同时开会让 kube-vip 抢走
+        # MetalLB 的地址分配权(实机已验证的分工, 见 docs/kube-vip-api-ha.md 决策 D1)
+        echo "kube_vip_services_enabled: false"
+        # 不开控制面负载均衡(决策 D4)。⚠ 不是"收益有限"那么含糊 —— 是 kube_vip_lb_fwdmethod
+        # 的默认值 local 在内核里等于 ip_vs_null_xmit(包原样交回本机栈, 根本不转发),
+        # 开了也只会得到一个"后端登记了但不用"的 IPVS 表; 要真 LB 得换 masquerade, 那又要
+        # privileged + kube-vip-iptables 镜像 + kube-proxy excludeCIDRs 与 VIP 同步。
+        # 详见 docs/kube-vip-api-ha.md 决策 D4 与 docs/troubleshooting.md 三.11。
+        echo "kube_vip_lb_enable: false"
+        [ -n "${KUBE_VIP_INTERFACE:-}" ] && echo "kube_vip_interface: ${KUBE_VIP_INTERFACE}"
     } >> "${tmp}"
 
     cat "${tmp}" > "${f}"
@@ -1055,9 +1084,14 @@ update_kube_vip_addons_yml() {
 
     if bool_is_true "${KUBE_VIP_ENABLED:-true}"; then
         [ -n "${vip}" ] || { err "kube-vip 已启用但 VIP 为空 —— 不能写入 kube_vip_address"; return 1; }
+    fi
+    if [ -n "${vip}" ]; then
         local wrote; wrote="$(awk '/^kube_vip_address:/{print $2; exit}' "${f}")"
         [ "${wrote}" = "${vip}" ] || { err "kube_vip_address 写入校验失败(期望 ${vip}, 实际 ${wrote})"; return 1; }
     fi
+    # 单一写入者契约的写入校验: 这一行必须恒为 false, 否则 kubespray 会回来写 manifest
+    local _en; _en="$(awk '/^kube_vip_enabled:/{print $2; exit}' "${f}")"
+    [ "${_en}" = "false" ] || { err "kube_vip_enabled 应为 false(静态 Pod 由 09_kube_vip 独占), 实际 '${_en}'"; return 1; }
     return 0
 }
 

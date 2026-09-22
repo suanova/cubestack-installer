@@ -75,9 +75,9 @@ def main():
         "kube_vip_controlplane_enabled": True,
         "kube_vip_cp_detect": args.cp_detect == "true",
         "kube_vip_services_enabled": False,       # D1: 服务 LB 归 MetalLB
-        "kube_vip_lb_enable": False,              # D4: 纯故障切换
+        "kube_vip_lb_enable": False,              # D4: 不开控制面 LB(local 转发在内核里是 null_xmit, 见 docs/troubleshooting.md 三.11)
         "kube_vip_leader_election_enabled": True, # ARP 模式下由 kube_vip_arp_enabled 派生的默认
-        "kube_vip_lb_fwdmethod": "local",         # local 不需要 privileged / -iptables 镜像变体
+        "kube_vip_lb_fwdmethod": "local",         # 仅因不开 LB 才安全; 它不转发(见 troubleshooting 三.11), 开 LB 必须换 masquerade
         "kube_vip_cidr": 32,
         "kube_vip_dns_mode": "first",
         "kube_vip_ddns_enabled": False,
