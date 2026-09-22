@@ -659,11 +659,14 @@ kubespray 的 `kube_apiserver_endpoint`(`kubespray_defaults/defaults/main/main.y
 
 **关键结论**:
 
-1. nginx stream 对**同一请求内**的失败会自动转投下一个 upstream(`proxy_next_upstream`
-   默认含 error/timeout),所以**只要还有一台健康 master,客户端零失败**。
+1. 一个 TCP 连接只绑一个 upstream —— 失败的连接会在 `proxy_connect_timeout 1s` 到期后
+   **换一个 upstream** 重建(stream 模块的连接级重试;注意这不是 HTTP 的
+   `proxy_next_upstream`,该指令不适用于 stream 模块)。所以**只要还有一台健康 master,
+   客户端零失败**,代价是最坏慢 1s。
 2. 最坏单次延迟 = `proxy_connect_timeout` = **1s**(不是失败,是慢 1s)。
    命中死后端的概率 ≈ 死后端占比,所以 3 master 挂 2 台时约 1/3 请求慢 1s。
-3. nginx 对已挂的后端会**临时标记**并优先选健康的,故实际触发 1s 惩罚的频率低于理论占比。
+3. nginx 对刚失败过的后端会**临时标记并优先选健康的**(`max_fails`/`fail_timeout` 机制),
+   故实际触发 1s 惩罚的频率低于理论占比。
 
 **已知短板(与 haproxy 的关键差异)**:kubespray 的 nginx-proxy 配置里**没有任何健康检查**
 (`proxy_connect_timeout 1s` 是连接超时,不是健康检查;模板里那个
