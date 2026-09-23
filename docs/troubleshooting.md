@@ -813,6 +813,88 @@ sudo ./deploy-cluster.sh --steps kube_vip --list | grep 本次执行模块
 
 ---
 
+### 12. 【2026-09-23 事故】部署跑 22 分钟后 `kubeadm join` 报 `[ERROR Port-10250]: Port 10250 is in use` —— 节点上的 RKE2 agent 占着端口, 而部署前清理对它"免疫"
+
+**症状**
+
+全量部署跑到 kubespray 的 join 阶段中断, 9 台里**只有一台**失败, 且 0.08 秒就失败:
+
+```
+fatal: [mxgpu-3-32]: FAILED! => {"cmd": ["timeout","-k","120s","120s","/usr/local/bin/kubeadm","join", ...],
+  "delta": "0:00:00.084779",
+  "stderr": "error execution phase preflight: [preflight] Some fatal errors occurred:\n\t[ERROR Port-10250]: Port 10250 is in use"}
+PLAY RECAP: mxgpu-3-32 failed=1, 其余 8 台 failed=0
+```
+
+迷惑点: 同一轮部署**开头**刚打印过 `✅ 清理完成: 7 台成功, 0 台失败`。
+
+**根因(两层, 缺一不可)**
+
+① **节点上跑着 RKE2 agent**(`rke2-agent.service`, enabled 且已运行 9 天, 注册到外部 server),
+其内嵌 kubelet 监听 `*:10250`。而部署前的清理逻辑是**纯 kubespray 视角**, 对第三方发行版完全无效:
+
+| 清理动作 | 对 RKE2 的效果 |
+|---|---|
+| `kubeadm reset -f` | 空操作(它不是 kubeadm 集群) |
+| `systemctl stop kubelet` | 停不到 —— RKE2 的内嵌 kubelet 由 `rke2-agent.service` 托管, 不叫 `kubelet.service` |
+| 删 `/etc/systemd/system/kubelet.service`、`/etc/kubernetes`、`/var/lib/kubelet` | RKE2 的 unit 在 `/usr/local/lib/systemd/system/rke2-agent.service`, 不受影响 |
+
+**为什么只有一台炸**: 另外 4 台也装了 RKE2, 但 `rke2-agent` 已是 disabled + 未运行 → 端口空着, join 正常。
+换句话说, 该故障的触发条件是"某台节点上恰好有个**活着的**外来 kubelet", 与节点数量无关。
+
+② **"清理成功"是假信号**: 远端清理脚本以 `true` 收尾 → ssh 退出码恒为 0, 计数逻辑
+(`reset_ok/reset_fail`)只能统计 ssh 传输失败, **从没校验过端口是否真的让出**。
+于是故障被推迟 22 分钟、在离真因隔了一整个 playbook 的地方才爆出来。
+
+**解法(根治)**
+
+`deployments/kubespray/cubestack-offline.sh` 的 `reset_kubernetes_if_needed()` 重做成三层:
+
+① **检测**: 判据从"kubeadm 残留"扩展为"**任何占着 10250 的东西**"(与发行版无关的硬判据),
+加上第三方发行版单元探测(`rke2-agent/rke2-server/k3s/k3s-agent/microk8s`, 区分 `running`/`installed`);
+探针第三行回传命中详情, 供告警点名"到底占了什么"。
+② **中立化**: 清理前先 `systemctl disable --now` 这些单元(`disable` 防重启后复活重新占端口);
+端口仍被占才升级到官方 `rke2-killall.sh`/`k3s-killall.sh` 兜底。
+**契约是"让出 10250"而非"卸载别人的集群": 只 stop+disable, `/var/lib/rancher` 等数据目录一律保留。**
+③ **复核 + 快速失败**: 以"10250 是否真的空出来"为唯一判据(最多等 10s 让 LISTEN socket 释放);
+仍被占则打印**占用者 PID / 启动时间 / 完整命令行**, 脚本非 0 退出 → 函数返回 1 → 调用方 `err` 中止部署。
+部署在**开始阶段**就停下来并指名元凶, 而不是 22 分钟后在 kubespray 里抛一句 `Port-10250`。
+
+顺带修掉两个相邻问题: 探测失败的节点不再**静默跳过**(点名告警, 否则它若占着 10250 又要等 20 分钟才暴露);
+`sync-to-container.sh` 的默认同步路径补上 `deployments/kubespray/cubestack-offline.sh`
+(原来漏同步该文件, 且会静默打印"✅ 同步完成", 详见该文件注释)。
+
+**验证(2026-09-23 实机)**
+
+```bash
+# ① 检测层: 9 台真机跑新探针 —— 只有真因节点被点名 rke2-agent:running
+#    mxgpu-3-32 → port-10250;rke2-agent:running;rke2-server:installed;kubelet-unit;...
+#    mxgpu-3-33 → port-10250;rke2-agent:installed;kubelet:running;...   ← 装了但没跑
+# ② 清理层: 对 3-32 实跑清理脚本
+sudo ss -lntp | grep 10250          # 清理前: kubelet(pid=127993) 占着 *:10250
+                                    # 清理后: 无监听、无残留 kubelet/rke2 进程
+systemctl is-active rke2-agent      # inactive(stopped) ; is-enabled → disabled
+sudo du -sh /var/lib/rancher/rke2   # 2.4G 原样保留(未删数据)
+# ③ 失败路径: 用 python3 人造一个占用 10250 的未知进程 → 脚本返回 1, 并打印
+#    PORT_BUSY: ... + LISTEN ...users:(("python3",pid=685106,fd=3)) + ps 全命令行; 耗时 11.9s(=10s 重试窗口)
+# ④ 本地侧四场景 stub 测试: 清理成功/干净节点/清理失败/节点不可达 → 计数与返回码均符合预期
+```
+
+**相关命令**
+
+```bash
+# 手动判断某节点是否有"外来 kubelet"占着端口(部署前可自查)
+ssh <node> 'sudo ss -lntp | grep 10250'
+ssh <node> 'systemctl list-unit-files | grep -Ei "rke2|k3s|microk8s"'
+
+# 处置: 让出端口但不卸载对方集群(数据保留)
+ssh <node> 'sudo systemctl disable --now rke2-agent'
+# 仍占着才需要官方兜底(只杀进程/清 CNI 运行态, 不动 /var/lib/rancher)
+ssh <node> 'sudo /usr/local/bin/rke2-killall.sh'
+```
+
+---
+
 ## 四、离线部署
 
 ### 1. 【单机/重装】`Drain node` → `Remove-node | List nodes` 报 `error: stat /etc/kubernetes/admin.conf: no such file or directory`

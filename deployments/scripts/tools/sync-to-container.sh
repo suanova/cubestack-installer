@@ -31,6 +31,11 @@ DEFAULT_PATHS=(
     "deployments/scripts/tools"
     "deployments/cubestack-addon"
     "deployments/config/cluster.conf.example"
+    # kubespray 目录整体**不能**同步(971M 源码树 + inventory/artifacts, 会把容器运行态冲掉),
+    # 但其中的 cubestack-offline.sh 是 k8s 部署的入口脚本、改动频繁 —— 漏同步的后果是
+    # "宿主机改好了、容器里跑的还是旧版", 且 sync 会打印"✅ 同步完成"完全看不出来(2026-09-23
+    # 实测: 修完 RKE2 占用 10250 的 bug 后 sync, 容器内文件 md5 纹丝不动)
+    "deployments/kubespray/cubestack-offline.sh"
 )
 
 say()  { echo -e "\033[36m→  $*\033[0m"; }
@@ -46,7 +51,13 @@ container_ok() {
 
 # ---- 同步一个路径(src 为仓库相对路径) ----
 sync_one() {
-    local rel="$1" src="${REPO_ROOT}/${rel}" dst="${REMOTE_BASE}/${rel}"
+    # ⚠ 必须分行赋值: bash 在同一条 local 里, 赋值右侧**先于**赋值求值 —— 写成
+    #   `local rel="$1" src="${REPO_ROOT}/${rel}"` 时, ${rel} 解析的是外层同名变量。
+    #   当前唯一调用方(for rel in PATHS 循环)里外层 rel 恰好等于 $1, 所以一直"正常";
+    #   一旦换调用方式, src 会退化成 ${REPO_ROOT}/ → docker cp 把整个仓库根
+    #   (含 971M kubespray 源码树与 .git)灌进容器。别合并回一行(2026-09-23 实测)
+    local rel="$1"
+    local src="${REPO_ROOT}/${rel}" dst="${REMOTE_BASE}/${rel}"
     [ -e "${src}" ] || { warn "  跳过(不存在): ${rel}"; return 0; }
     if [ -d "${src}" ]; then
         # 目录: 复制内容到远端对应目录(尾部斜杠防嵌套)
