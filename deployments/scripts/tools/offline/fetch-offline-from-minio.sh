@@ -14,7 +14,7 @@
 #     自动回退探测旧布局(cubestack-offline/kubespray);
 #   · 磁盘检查(默认开启): 醒目提示磁盘至少需 MIN_FREE_GB(默认 50)GiB 空闲, 并比对
 #     本次下载所需(远程总大小 + 缓冲)与目标可用空间; 不足时红色横幅警告并中止(--force 强制继续);
-#   · 下载范围: 默认下载【部署必需】子目录(kubespray/metax-gpu/lws/os/envoy 等),
+#   · 下载范围: 默认下载【部署必需】子目录(kubespray/metax-gpu/lws/os 等),
 #     不下载 virtual-machine(虚拟机镜像, 体积大且仅创建 VM 时用);
 #     需要时可 --sub virtual-machine 只拉 VM 镜像, 或 --all 全量(含 VM 镜像)。
 #   · 子目录排除: DEFAULT_EXCLUDE_SUBS(默认 virtual-machine)在默认/全量下载时自动跳过;

@@ -2,7 +2,7 @@
 # ============================================================
 # sync-to-minio.sh — 本地 offline-files 全量镜像同步到 MinIO(结构一致)
 # ------------------------------------------------------------
-# 用途: 把本机 offline-files(envoy/kubespray/lws/metax-gpu/os/virtual-machine ...)
+# 用途: 把本机 offline-files(kubespray/lws/metax-gpu/os/virtual-machine ...)
 #       **所有子目录**整体镜像到 MinIO 的 <桶>/offline-files/ 下, 远端目录结构与本地
 #       完全一致; 供其他部署机 fetch-offline-from-minio.sh 拉取(下载侧逻辑不变)。
 # 命令(等价):
@@ -14,7 +14,7 @@
 #     都没有则报错并给指引(不再做多别名/多桶启发式探测)
 #   · mc mirror --overwrite 增量同步全部子目录(自动发现新增/变更文件), 远端结构 = 本地结构
 #   · 同步前可读性预检: mc mirror 对不可读文件(如 root 0600 的 docker save tar)会**静默跳过**,
-#     预检发现即报错给指引, 避免"envoy 目录没同步过去"这类部分同步假成功
+#     预检发现即报错给指引, 避免"某个组件目录没同步过去"这类部分同步假成功
 #   · 可选 --prune: 删除远端有而本地没有的文件(与本地严格一致, 远端其他集群共享时勿用)
 #   · 可选 --dry-run: 只预览不实际同步
 # 用法:
@@ -34,7 +34,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 # 判定"用户显式 OFFLINE_FILES_DIR"(同上 fetch-offline-from-minio.sh):
 #   lib-common 会把未设置时的默认导出为 .../offline-files/kubespray(部署脚本专用内层语义),
-#   sync 的源是 offline-files 总根(envoy/kubespray/lws/metax-gpu/os/virtual-machine 全部子目录),
+#   sync 的源是 offline-files 总根(kubespray/lws/metax-gpu/os/virtual-machine 全部子目录),
 #   不能误用该内层默认 → 仅在用户显式设置时采用, 否则回退 offline-files 总根。
 OFFLINE_FILES_DIR_EXPLICIT=""
 if [ -n "${OFFLINE_FILES_DIR_RAW:-}" ]; then
@@ -88,7 +88,7 @@ LOCAL_SRC="${OFFLINE_FILES_DIR_EXPLICIT:-${REPO_ROOT}/deployments/offline-files}
 [ -d "${LOCAL_SRC}" ] || { err "本地 offline-files 目录不存在: ${LOCAL_SRC}"; exit 1; }
 REMOTE_DST="${MINIO_ALIAS}/${MINIO_BUCKET}/${MINIO_REMOTE_DIR}"
 
-# 可读性预检: mc mirror 对不可读文件会静默跳过(曾致 envoy 的 root-0600 docker-save tar 未同步,
+# 可读性预检: mc mirror 对不可读文件会静默跳过(曾致 root-0600 的 docker-save tar 未同步,
 # 却仍报"同步完成")。同步前先全量扫描, 发现不可读文件立即报错给指引, 杜绝部分同步假成功。
 _UNREADABLE="$(find "${LOCAL_SRC}" -type f ! -readable 2>/dev/null)"
 if [ -n "${_UNREADABLE}" ]; then

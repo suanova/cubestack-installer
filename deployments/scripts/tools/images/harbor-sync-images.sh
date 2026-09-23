@@ -28,7 +28,7 @@
 # 用法:
 #   ./harbor-sync-images.sh                        # 同步全部(幂等增量)
 #   ./harbor-sync-images.sh --list                 # 只列出将同步的镜像(不联网)
-#   ./harbor-sync-images.sh --group prometheus,envoy   # 只同步指定分组
+#   ./harbor-sync-images.sh --group ceph,rdma        # 只同步指定分组
 #   ./harbor-sync-images.sh --exclude-group metax-gpu  # 排除大体积分组
 #   ./harbor-sync-images.sh --include-same-harbor      # 连"上游就是本台 Harbor"的镜像一起镜像
 #                                                     # (默认**不镜像**这些: metax/cubepilot 本就在

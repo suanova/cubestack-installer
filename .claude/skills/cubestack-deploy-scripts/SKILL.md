@@ -188,7 +188,7 @@ trap '清理测试资源' EXIT
   - **排除**: `--skip X` = 全量部署时剔除。
   - 新增 operator **无需改任何列表**: operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)= operator), 写 TOGGLE 即自动进入 --steps/--enable 调度。
   - lb_haproxy/lb_keepalived(API-HA)默认 false, 需要时用 `--enable` 预启用 或 `--steps` 立即部署。
-- 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认false,已实现:默认官方 manifests.yaml bundle + kubectl apply --server-side; helm chart 保留于 lws/charts 供 cert-manager 用; 见 `docs/lws.md`)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`PROMETHEUS_ENABLED`、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`ENVOY_GATEWAY_ENABLED`(**默认 false, 需显式启用**)、`ENVOY_AI_GATEWAY_ENABLED`(**默认 false, 依赖 EG**)、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
+- 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认false,已实现:默认官方 manifests.yaml bundle + kubectl apply --server-side; helm chart 保留于 lws/charts 供 cert-manager 用; 见 `docs/lws.md`)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
 - 新增配置项流程: ① cluster.conf.example 加带注释默认声明 → ② 脚本引用 → ③ 如需同步 kubespray group_vars, 在 `tools/k8s/sync-kubespray-config.sh` / `tools/k8s/sync-addons-config.sh` 加同步逻辑
 
 ## 模块体内规范
@@ -283,7 +283,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
 - **放哪**:`deployments/cubestack-addon/<组件>/`(一个 chart 一个子目录)。`.gitignore` 只挡
-  `offline-files/*`,不挡 `cubestack-addon/`,所以 `.tgz` 直接 `git add` 即可(envoy 的三张已在库里)。
+  `offline-files/*`,不挡 `cubestack-addon/`,所以 `.tgz` 直接 `git add` 即可(如 lws / cubepilot / rook 的 chart 已在库里)。
 - **什么形态**:小 chart 放 `.tgz` + **同时提交 `<tgz>.digest` 边车**;大 chart(带几十个子 chart)
   放解包源码目录(含 `Chart.yaml`)。
 - **怎么装**:走共享助手,**不要手抄 pull/回退逻辑**:
@@ -293,10 +293,10 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   ```
   语义:online 拉远端 → 比 `Digest:` 与边车 → **未变继续用本地**(仓库保持干净)、有更新才覆盖本地
   并提示 commit、拉取失败降级回退本地;offline 完全不联网;最后判一次本地副本在不在,不在就 `err`。
-- **怎么刷新**:`tools/images/<组件>-fetch-charts.sh`(照抄 `prometheus-fetch-charts.sh` 解包版 /
-  `perses-fetch-charts.sh` tgz+边车版),跑完**必须 commit** —— 不提交等于没刷新。
-- **为什么是"恒用本地"而不是"线上优先"**:`31_cubepilot` / `33_bmc_exporter` 原本都写了"拉取失败回退
-  本地 chart",但仓库里压根没有那份文件 —— 私服一抖动回退就是空转。回退只有在本地确实有一份时才有意义。
+- **怎么刷新**:`tools/images/<组件>-fetch-charts.sh`(照抄 `cubepilot-fetch-charts.sh`
+  tgz+边车版),跑完**必须 commit** —— 不提交等于没刷新。
+- **为什么是"恒用本地"而不是"线上优先"**:`31_cubepilot` 原本写了"拉取失败回退本地 chart",
+  但仓库里压根没有那份文件 —— 私服一抖动回退就是空转。回退只有在本地确实有一份时才有意义。
 - **强制校验**:`tools/check-modules.sh` 第 ⑩ 项。行首是 helm 安装命令的模块,其引用的
   `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`,否则报错。
 
@@ -360,52 +360,6 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   METAX_LIST_IMAGES=true bash modules/03_addon/04_gpu_operator.sh   # 打印所需镜像 pull/save 命令
   ```
 
-## Envoy Gateway / Envoy AI Gateway 部署速查(统一流量入口)
-
-> 完整分析/部署/使用/故障见 `docs/envoy-gateway.md` 与 `docs/troubleshooting.md` §三.5。
-
-- **两者关系**: Envoy Gateway(EG)= 通用 K8s API 网关基座(Gateway API 标准实现); Envoy AI Gateway(AIG)
-  = **不是独立二进制**, = 标准 EG 基座 + AI 控制器(内嵌 EG 扩展服务器, gRPC 1063)+ AI CRD
-  (`aigateway.envoyproxy.io`), 经 EG 的 `extensionManager` 机制接线(见下)。**AIG 依赖 EG 先装**。
-- **离线备料(联网机, 两件套)**: chart 用 `tools/images/envoy-fetch-charts.sh`(helm pull 解包到
-  `deployments/cubestack-addon/envoy-gateway/{eg,ai}`); 镜像用 `tools/images/envoy-save-images.sh`
-  (默认 `deployments/offline-files/envoy`): EG 控制面 `envoyproxy/gateway:<v>` + **数据面
-  `envoyproxy/envoy:<v>`**(tag 与 EG 版本不同, 见 ENVOY_PROXY_VERSION)+ AIG 控制器
-  `envoyproxy/ai-gateway-controller:<v>`(docker.io 源, 非 ghcr)+ **extProc sidecar
-  `envoyproxy/ai-gateway-extproc:<v>`**(⚠ 必收: 漏收则数据面 pod 2/3 ImagePullBackOff, AI 路由 404)。
-- **离线关键点(镜像改写)**: 创建 Gateway 后控制器动态创建的数据面 Deployment 默认用 docker.io 镜像,
-  离线必 ImagePullBackOff → helm 必须改写: EG `envoyGateway.image.repository/tag` + 数据面
-  `global.images.envoyProxy.image`(15 模块已做); AI 同理 `controller.image.repository/tag` +
-  **`extProc.image.repository/tag`**(控制器 --extProcImage, 决定注入数据面的 extProc sidecar 镜像, 16 模块已做)。
-- **EG Backend API(必须启用)**: AIG v1.1+ 的 AIServiceBackend 必须引用 EG `Backend` 资源, 该 API 默认禁用
-  (安全原因, 参考 CVE-2021-25740) → 15 模块 helm 已默认 `config.envoyGateway.extensionApis.enableBackend=true`;
-  不启用则 HTTPRoute 报 "Backend is disabled in Envoy Gateway configuration" (ResolvedRefs=False)。
-- **EG extensionManager 接线(核心, 16 模块自动完成)**: AI 控制器内嵌 gRPC 扩展服务器(端口 1063);
-  模块 16 [5/6] 把 `extensionManager.hooks.xdsTranslator`(post=[Translation,Cluster,Route],
-  translation includeAll listener/route/cluster/secret)+ `service.fqdn` 指向
-  `ai-gateway-controller.<AI ns>.svc.cluster.local:1063` 写入 EG 的 `envoy-gateway-config` ConfigMap,
-  并重启 EG 控制面(明文 gRPC, 无需证书)。**漏配 → 数据面无 AI 过滤器, AI 请求 404
-  "No matching route found"**(历史调试曾误判为 extProc 镜像问题)。模块 15 **故意不配**
-  (EG 连不上扩展服务器 → 所有 Gateway xDS 翻译失败, 独立 EG 验证会挂)。
-- **默认版本**: `ENVOY_EG_VERSION=v1.9.1`(GA)、`ENVOY_AI_VERSION=v1.1.0`(GA, API `v1beta1`, `ENVOY_AI_API_VERSION`)。
-- **常用命令**:
-  ```bash
-  sudo ./deploy-cluster.sh --enable envoy_gateway                 # 只装 EG 基座
-  sudo ./deploy-cluster.sh --enable envoy_gateway,envoy_ai_gateway  # EG + AI 二件套(AI 依赖 EG)
-  sudo ./deploy-cluster.sh --steps verify_envoy_gateway            # 端到端: GatewayClass+VIP+真实 HTTP 转发
-  sudo ./deploy-cluster.sh --steps verify_envoy_ai_gateway         # 端到端: AIGateway→Gateway 调和(+mock 边界)
-  kubectl get gatewayclass,gateway,httproute -A; kubectl get aigateway,backend -A
-  ```
-- **AI 与 EG 版本兼容**: 升级 AIG 版本时核对官方兼容矩阵; `extensionManager` 结构/CRD 字段随版本变化,
-  全部走 cluster.conf `ENVOY_AI_*` 变量, 不硬编码。
-- ⚠ **架构规则(2026-09-18 起): 网关与路由由"专门的网关模块"统一创建, 组件模块不得自建。**
-  EG 模块(15)只装控制面 + 创建默认 GatewayClass `eg`(**保留**; 图表不带, 去掉就没有 class);
-  AI 模块(16)只做 extensionManager 接线 —— 两者都**不创建 Gateway / HTTPRoute**。
-  原模块 16 尾部的示例 Gateway(`default/ai-gateway` + 别名 `ai-gateway-external`)与原平台网关模块
-  (`33_cubestack_gateway.sh` + `cubestack-addon/gateway/` 的基座与 `routes/*.yaml`)已于 2026-09-18 移除,
-  新的专用网关模块**待落地**。新增组件模块时: 不要自己 apply Gateway/HTTPRoute, 也不要假设平台网关存在
-  (对外入口先给 port-forward 指引); 设计要点见 `docs/envoy-gateway.md` §2.1b。
-
 ## Ceph / Rook 部署速查(Rook v1.20.2 + Ceph v20.2.2, 详见 docs/ceph-rook.md)
 
 - **定位**: 高可用分布式存储(块 RBD; 可选 CephFS/RGW)。生产设计 `size=3 + failureDomain=host + min_size=2 + mon=3`。
@@ -435,7 +389,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   ref 用 `${VAR}` 引用 **cluster.conf** 的版本变量(CI 上回退 cluster.conf.example 默认值)
   ⇒ **升级只改 cluster.conf §3.3 一处**, 全链跟随。
 - **group → 目录**: 默认 `offline-files/<group>/`; 例外 `k8s-base`/`ceph` → `offline-files/kubespray/images/`
-  (节点预加载走 kubespray); `kubelet-cadvisor` 组**刻意为空**(kubelet 内置, 无镜像)。
+  (节点预加载走 kubespray)。
 - **Harbor 路径规则**(唯一): `mirrors/<上游注册域>/<仓库路径>:<tag>`; 上游就是本 Harbor 时去掉域名前缀
   (`harbor.isuanova.com/metax/x` → `mirrors/metax/x`)。**保留注册域是有意的** —— 上游 ref 是 Harbor 路径的
   后缀, 因此 tar 按上游 ref 命名(`<repo>_<tag>.tar`)可与既有模块的通配查找**零改动**兼容。
@@ -460,11 +414,6 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   Harbor **项目**必须预建(仓库才自动建), 建项目需登录。
 - ⚠ **加镜像时别忘了同步 `tools/offline/trim-offline-files.sh` 的 `PRELOAD_IMAGE_PATTERNS`**
   (k8s-base 组), 否则备料后被 trim 静默删掉 —— 用 `check-image-manifest.sh --kubespray` 兜底。
-- **监控三件套**: kube-state-metrics / node-exporter 是 kube-prometheus-stack 的 subchart(模块 08),
-  各自有独立 group 与 offline-files 子目录; **kubelet/cAdvisor 无镜像、无需部署**, 由 chart 的
-  kubelet ServiceMonitor 抓 kubelet 的 10250 端点(/metrics/cadvisor)。验证在 `28_verify_prometheus.sh` 第 ④ 步
-  (查 `kube_pod_info` / `node_cpu_seconds_total` / `container_cpu_usage_seconds_total`)。
-
 ## 审查清单(写完脚本后自检)
 
 - [ ] 文件名符合 `NN_category_action.sh`,序号不冲突

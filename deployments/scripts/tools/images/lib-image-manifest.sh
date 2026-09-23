@@ -212,7 +212,7 @@ image_mirror_ref() {
 }
 
 # ---------- 6. 上游 ref → 离线 tar 路径 ----------
-# ⚠ 默认**按上游 ref 命名**(如 registry.k8s.io_kube-state-metrics_kube-state-metrics_v2.20.0.tar):
+# ⚠ 默认**按上游 ref 命名**(如 registry.k8s.io_sig-storage_csi-provisioner_v5.1.0.tar):
 #   既有部署模块都用 "*<repo>_<tag>.tar" 通配查找, 沿用上游命名可**零改动**兼容。
 #   `override` 非空时用它 —— 少数"历史短名"镜像(如 busybox.tar / nginx.tar)由既有模块
 #   按字面文件名读取, 不能改名, 在清单里用第 3 列显式指定。

@@ -35,7 +35,7 @@ sudo docker exec -it cubestack-install bash
 
 # ⑤ 从 MinIO 拉取离线文件(默认下载部署必需子目录, 排除 virtual-machine; 已挂载即落盘宿主机)
 mc alias set minio http://192.168.16.6:9000 admin CHANGE_ME    # 换真实 MinIO 地址/凭证
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh   # 默认: kubespray/metax-gpu/lws/os/envoy(排除 VM 镜像)
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh   # 默认: kubespray/metax-gpu/lws/os/ceph(排除 VM 镜像)
 
 # ⑥ 首次: 从模板生成真实配置(cluster.conf 是唯一数据源, 所有 IP 不硬编码)
 cd /opt/cubestack-installer
@@ -99,24 +99,21 @@ deployments/scripts/
 │       ├── 05_k8s_registry.sh #    集群内内置 registry addon(REGISTRY_ENABLED; 后端可用 ceph-block 替代 local-path)
 │       ├── 06_gpu_operator.sh #    沐曦 GPU Operator(P1-5, GPU_OPERATOR_ENABLED)
 │       ├── 07_gpu_lws.sh      #    LeaderWorkerSet(P1-8, LWS_ENABLED)
-│       ├── 08_prometheus.sh   #    Prometheus+Operator+监控附属(P1-2/3, PROMETHEUS_ENABLED)
-│       ├── 09_envoy_gateway.sh#    Envoy Gateway 通用 K8s API 网关(P1-9, ENVOY_GATEWAY_ENABLED)
-│       ├── 10_envoy_ai_gateway.sh # Envoy AI Gateway AI 专用网关(P1-9, ENVOY_AI_GATEWAY_ENABLED, 依赖 EG)
 │       ├── 11_keycloak.sh     #    Keycloak 统一认证(P2-1, KEYCLOAK_ENABLED)
 │       ├── 12_kueue.sh        #    Kueue 队列治理(P2-2 DEV-29, KUEUE_ENABLED)
 │       ├── 13_kubevirt.sh     #    KubeVirt 虚拟机能力(P2-3 DEV-35, KUBEVIRT_ENABLED)
 │       ├── 14_lustre_csi.sh   #    Lustre CSI(P3-1 DEV-26, LUSTRE_CSI_ENABLED)
 │       ├── 20_cubestack_apps.sh#   CubeStack 自研模块占位(20 起, CUBESTACK_APPS_ENABLED)
 │       └── 2x_verify_*.sh     #    端到端验证(verify_metallb / verify_registry_storage / verify_metax_gpu
-│                              #    / verify_lws / verify_ceph / verify_envoy_gateway / verify_envoy_ai_gateway; --steps verify 全跑)
+│                              #    / verify_lws / verify_ceph; --steps verify 全跑)
 ├── tools/                     # ★ 工具脚本(模块的底层实现, 按领域分目录)
 │   ├── vm/                    #   虚拟机: create-libvirt-vm.sh / create-vm-template.sh / register-vm.sh
 │   ├── net/                   #   网络: setup-vm-network.sh / verify-vm-network.sh / teardown-vm-network.sh / setup-libvirt-nat.sh
 │   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / install-worker-packages.sh / prepare-workers.sh
 │   │                         #        setup-ntp.sh / sync-hosts.sh / sync-ca*.sh / rebootstrap*.sh
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
-│   ├── images/                #   离线镜像工具: metax-save/load-images.sh / lws-save-images.sh
-│   │                         #        envoy-save/load-images.sh(EG+AI 镜像) / envoy-fetch-charts.sh(EG+AI 离线 chart)
+│   ├── images/                #   离线镜像工具: metax-save/load-images.sh / lws-save-images.sh / ceph-save-images.sh
+│   │                         #        cubepilot-save-images.sh / harbor-save-images.sh / rdma-save-images.sh / netshoot-rdma-build.sh
 │   ├── offline/               #   MinIO 离线文件: fetch-offline-from-minio.sh(拉取) / sync-to-minio.sh(推送) / trim-offline-files.sh(清理) / fetch-offline-files.sh(旧)
 │   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 └── README.md                  # 本文件
@@ -333,9 +330,7 @@ sudo ./scripts/tools/net/setup-libvirt-nat.sh --delete [网络名] # 删除回�
 > 说明:`kube_service_addresses` / `kube_pods_subnet` 为集群内部 CIDR(10.233.x),属 kubespray 默认值,无需从环境同步。
 > 说明:集群已默认启用 **MetalLB**(Layer2,地址池来自 `METALLB_POOL`);**Registry(集群内)默认不部署**(`REGISTRY_ENABLED=0`),集群外镜像仓库用 **Harbor**(`HARBOR_ENABLED`);**local-path-provisioner 默认不启动**(`LOCAL_PATH_ENABLED=false`,需本地 PVC 持久化时启用)。组件开关配置见 `group_vars/k8s_cluster/addons.yml`(由 `sync-addons-config.sh` 从 cluster.conf 生成)。
 >
-> **对外暴露方式(`SERVICE_EXPOSE_MODE`)**:默认 `nodeport` 用 NodePort 暴露(`sync-addons-config.sh` 自动**关闭 MetalLB**、registry→NodePort、ingress-nginx(若启用)→NodePort(30080/30081)、Envoy Gateway 数据面需转 NodePort(`tools/lb/gateway-nodeport.sh`));设 `metallb`(生产)则部署 MetalLB 用 LoadBalancer VIP。见 `docs/envoy-gateway.md`。
->
-> **监控暴露(`PROMETHEUS_EXPOSE_MODE`,默认随 `SERVICE_EXPOSE_MODE`)**:默认**只暴露 Grafana**(Prometheus 从 Grafana 当数据源看即可,要一起暴露设 `PROMETHEUS_EXPOSE_PROMETHEUS=true`)。`metallb`/`loadbalancer` 模式下建独立 `kube-prometheus-grafana-external` Service,并默认**与 registry 共用一个 MetalLB VIP**、以端口区分(registry 5000 / Grafana 3000;`PROMETHEUS_SHARE_REGISTRY_VIP=false` 可另分 VIP)。共用依赖 sharing key 注解,registry 侧由 `sync-kubespray-config.sh` 写进 kubespray manifest(`registry_service_annotations`);共用不成立时自动降级为独立 VIP 并打印实际地址。排查见 `docs/troubleshooting.md` 三.13。
+> **对外暴露方式(`SERVICE_EXPOSE_MODE`)**:默认 `nodeport` 用 NodePort 暴露(`sync-addons-config.sh` 自动**关闭 MetalLB**、registry→NodePort、ingress-nginx(若启用)→NodePort(30080/30081));设 `metallb`(生产)则部署 MetalLB 用 LoadBalancer VIP。
 
 ### 5.8.1 内置 Registry(镜像仓库)使用指南
 
@@ -508,7 +503,7 @@ bare-metal worker(Ubuntu)无法联网时,用 offline-files 中的离线 `.deb` �
 
 ### 5.11 fetch-offline-from-minio.sh —— 从 MinIO 拉取离线文件
 
-部署机/新机器缺离线文件时,从 MinIO 下载(**默认拉取部署必需子目录**: kubespray/metax-gpu/lws/os/envoy 等,**排除 virtual-machine** 虚拟机镜像;需要时可 `--sub virtual-machine` 按需拉 VM 镜像,或 `--all` 真正全量)。
+部署机/新机器缺离线文件时,从 MinIO 下载(**默认拉取部署必需子目录**: kubespray/metax-gpu/lws/os/ceph 等,**排除 virtual-machine** 虚拟机镜像;需要时可 `--sub virtual-machine` 按需拉 VM 镜像,或 `--all` 真正全量)。
 
 **默认下载目录: `/opt/cubestack-installer/deployments/offline-files`(即 `OFFLINE_FILES_DIR` 根)**:
 - 在 CLI 容器内执行:下载直接落到容器挂载的 offline-files(宿主机大磁盘),**即装即用**;
@@ -534,7 +529,7 @@ sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --auto       # 宿主�
 
 ### 5.12 sync-to-minio.sh —— 本地 offline-files 全量镜像同步到 MinIO
 
-源机器把本地 `offline-files` 的**所有子目录**(envoy/kubespray/lws/metax-gpu/os/virtual-machine ...)整体镜像到 MinIO 的 `<桶>/offline-files/`(远端目录结构与本地完全一致),供各部署机 `fetch-offline-from-minio.sh` 拉取(下载侧不变)。等价于 `mc mirror --overwrite ./offline-files/ minio/cubestack-installer/offline-files/`:
+源机器把本地 `offline-files` 的**所有子目录**(ceph/kubespray/lws/metax-gpu/os/virtual-machine ...)整体镜像到 MinIO 的 `<桶>/offline-files/`(远端目录结构与本地完全一致),供各部署机 `fetch-offline-from-minio.sh` 拉取(下载侧不变)。等价于 `mc mirror --overwrite ./offline-files/ minio/cubestack-installer/offline-files/`:
 
 ```bash
 ./scripts/tools/offline/sync-to-minio.sh               # 增量同步(默认 mc mirror --overwrite, 自动发现新增/变更文件)
@@ -573,29 +568,6 @@ sudo ./scripts/tools/offline/trim-offline-files.sh              # 实际清理
 - **后台运行 + `docker exec`**(非交互式启动):`sudo docker run -itd --name cubestack-install --network host ...` 后 `sudo docker exec -it cubestack-install bash`(见 §1 步骤③④)。
 - **离线文件不下载进容器**:离线镜像/二进制不入镜像,由挂载目录共享 —— 容器内 `fetch-offline-from-minio.sh` 下载即落宿主机大磁盘,多集群/换环境复用。
 - 根 `README.md` §十四 还有镜像构建(`build-cli-context.sh`)与挂载参数说明。
-
-### 5.15 envoy-load-images.sh —— 预加载 envoy 镜像到集群内置 registry
-
-把 `envoy-save-images.sh` 生成的离线镜像 tar 批量推送到**集群内置 registry**(幂等, 已存在则跳过)。
-09/10 部署模块(envoy_gateway / envoy_ai_gateway)部署时也会自动推送; 本脚本用于**独立预加载**
-(如先推镜像再装 chart、或补齐某次推送失败缺的镜像)。
-
-```bash
-sudo ./scripts/tools/images/envoy-load-images.sh                # tar 目录缺省 = ENVOY_SAVE_DIR
-sudo ENVOY_EG_VERSION=v1.9.1 ./scripts/tools/images/envoy-load-images.sh /path/to/envoy-tars
-```
-
-**推送目标(与 09/10 模块 helm `--set` 一致)**:
-
-| tar | 推送目标 |
-|---|---|
-| `*gateway_${ENVOY_EG_VERSION}.tar` | `registry.cubestack.io:5000/envoyproxy/gateway:${ENVOY_EG_VERSION}` |
-| `*envoy_${ENVOY_PROXY_VERSION}.tar` | `registry.cubestack.io:5000/envoyproxy/envoy:${ENVOY_PROXY_VERSION}`(数据面; ⚠ tag=ENVOY_PROXY_VERSION, 默认 `distroless-v1.39.1`, 勿用 EG 版本号) |
-| `*ai-gateway-controller*.tar` | `registry.cubestack.io:5000/ai-gateway/ai-gateway-controller:${ENVOY_AI_IMAGE_TAG}` |
-
-- 纯离线(不联网): tar 内容经 `skopeo docker-archive → docker://` 推送, 3 次重试; 需本机装 `skopeo`。
-- **nodeport 模式**(无 MetalLB): `registry.cubestack.io:5000` 已由 `deploy-registry.sh` 自动 DNAT 到首个 master 的 `${REGISTRY_NODEPORT}`(默认可用); 也可用 `ENVOY_PUSH_ENDPOINT=<节点IP>:${REGISTRY_NODEPORT}` 显式覆盖推送入口。
-- 依赖: 集群内置 registry 已部署(`deploy-registry.sh` / `22_verify_registry_storage` 校验)。
 
 ---
 

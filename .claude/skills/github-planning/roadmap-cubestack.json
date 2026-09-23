@@ -90,13 +90,13 @@
       "body": "### Context\n代码库托管在 GitLab(glab.isuanova.com), github-planning skill 的 gp 底层是 gh api。\n\n### Goal\ngp 支持 GITLAB_BASE+TOKEN 走 GitLab REST(labels/milestones/issues/sub-issues/依赖/release), 并把本 roadmap 落到 GitLab。\n\n### Status\n部分完成: gp 已加 GitLab 分支并归一响应(labels/milestones/issues/sub-issues/依赖/release 适配, 见 README.cubestack.md); 尚待用真实 token 实测创建 milestone/issues。\n\n### Acceptance criteria\n- [x] gp 加 GitLab 分支, 响应归一\n- [x] 保留 GitHub 路径, smoke-test 通过\n- [ ] 提供 token 后实测创建 milestone/issues"
     },
     {
-      "title": "Feature: 组件覆盖(GPU/LWS/监控/存储/网关)",
+      "title": "Feature: 组件覆盖(GPU/LWS/存储)",
       "type": "feature",
       "priority": "P1",
       "story_points": null,
       "children": [
         "Epic: 计算组件",
-        "Epic: 存储与网关"
+        "Epic: 存储"
       ]
     },
     {
@@ -124,13 +124,12 @@
       "body": "### Context\nLWS(LeaderWorkerSet)是 LLM 工作负载调度组件, 需验证离线部署链路。\n\n### Goal\nLWS bundle/helm 安装可离线完成, 集群可创建 LWS CR。\n\n### Status\n部分完成: 双模式安装(bundle=官方 manifests.yaml 默认 / helm=本地 chart v0.10.0)已实现, verify-lws.sh 存在; 尚待离线全链路回归与 DisaggregatedSet 覆盖。\n\n### Acceptance criteria\n- [ ] LWS 安装成功(bundle + helm 双模式)\n- [ ] 示例 LWS CR 可创建\n- [x] 单元测试: 安装分支(部分)"
     },
     {
-      "title": "Epic: 存储与网关",
+      "title": "Epic: 存储",
       "type": "epic",
       "priority": "P2",
       "story_points": null,
       "children": [
-        "Ceph 存储 + CSI 验证",
-        "Envoy 网关二件套验证"
+        "Ceph 存储 + CSI 验证"
       ]
     },
     {
@@ -139,13 +138,6 @@
       "priority": "P2",
       "story_points": 8,
       "body": "### Context\nCeph 提供 RBD/RGW/CephFS 存储底座, 离线部署链路需验证。\n\n### Goal\nCeph 集群 + Ceph CSI 可离线安装, PVC 可用。\n\n### Status\n未实现(伪代码占位): modules/03_addon/07_ceph.sh 与 08_ceph_csi.sh 为 ADDON_STUB 伪代码占位(未接入真实 Rook-Ceph/CSI 逻辑)。\n\n### Acceptance criteria\n- [ ] Ceph 集群就绪(替换 07 占位为真实实现)\n- [ ] Ceph CSI PVC 可创建/挂载(替换 08 占位)\n- [ ] 单元测试: 部署分支"
-    },
-    {
-      "title": "Envoy 网关二件套验证",
-      "type": "story",
-      "priority": "P2",
-      "story_points": 5,
-      "body": "### Context\nEnvoy Gateway + Envoy AI Gateway 提供统一/ AI 流量入口。\n\n### Goal\n离线安装 EG + AI 网关, 示例 HTTPRoute/Gateway 可用。\n\n### Status\n部分完成: 09/10 模块已实现(离线 helm + 内置 registry 镜像), envoy-fetch-charts.sh / envoy-save-images.sh 存在, verify_envoy_* 元模块已加; 尚待一次离线全链路回归与示例路由验证。\n\n### Acceptance criteria\n- [ ] EG 控制面/数据面就绪(离线回归)\n- [ ] AI 网关扩展就绪\n- [x] 单元测试: 安装分支(部分)"
     },
     {
       "title": "Feature: 工具链与质量",
@@ -185,7 +177,7 @@
       "type": "story",
       "priority": "P3",
       "story_points": 3,
-      "body": "### Context\n部署文档需覆盖容器化/离线/多集群场景。\n\n### Goal\nREADME/部署文档与当前代码一致。\n\n### Status\n部分完成: README §十四(CLI 容器化)+ deployments/README 已补; 仍待新增特性(verify 元模块、LWS 双模式、Envoy 二件套、阶段五离线)文档补全。\n\n### Acceptance criteria\n- [ ] 文档与 cluster.conf 结构一致\n- [x] 新增特性有文档(部分)\n- [ ] 单元测试: 文档链接有效"
+      "body": "### Context\n部署文档需覆盖容器化/离线/多集群场景。\n\n### Goal\nREADME/部署文档与当前代码一致。\n\n### Status\n部分完成: README §十四(CLI 容器化)+ deployments/README 已补; 仍待新增特性(verify 元模块、LWS 双模式、阶段五离线)文档补全。\n\n### Acceptance criteria\n- [ ] 文档与 cluster.conf 结构一致\n- [x] 新增特性有文档(部分)\n- [ ] 单元测试: 文档链接有效"
     },
     {
       "title": "Feature: P2 能力增强模块落地(Keycloak/Kueue)",

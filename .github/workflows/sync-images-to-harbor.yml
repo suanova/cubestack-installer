@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       groups:
-        description: '只同步指定分组(逗号分隔; 留空=全部。如 prometheus,envoy)'
+        description: '只同步指定分组(逗号分隔; 留空=全部。如 ceph,rdma)'
         required: false
         default: ''
       exclude_groups:

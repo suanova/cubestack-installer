@@ -121,7 +121,7 @@ elif [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "
 else
     _SC=""
 fi
-# 镜像 tar 规范文件名: / 与 : → _(与 cubepilot-save-images.sh、envoy-save-images.sh 同一约定)
+# 镜像 tar 规范文件名: / 与 : → _(与 cubepilot-save-images.sh、ceph-save-images.sh 同一约定)
 _tar_name_of() { echo "$(echo "$1" | sed 's#/#_#g; s#:#_#g').tar"; }
 # 私服凭据(可选): 该 Harbor 公开只读, 留空即匿名 pull; 配了则 helm/skopeo 两侧都带上
 _HAVE_CREDS=0
@@ -140,7 +140,7 @@ say "检查 CubePilot 前置条件(模式=${CUBEPILOT_MODE}, chart ${CUBEPILOT_V
 command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 安装本地 chart 必需"; exit 1; }
 SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
     || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
-# 本机 helm 直连集群(与 16_envoy_ai_gateway 同款: server 改写为证书 SAN 内的 API_DOMAIN)
+# 本机 helm 直连集群(sync_kubeconfig: server 改写为证书 SAN 内的 API_DOMAIN)
 sync_kubeconfig \
     && ok "本机 ~/.kube/config 已同步(admin.conf → API ${API_DOMAIN}→${API_IP})" \
     || { err "本机无法访问集群(admin.conf 下载/同步失败), helm 无法安装"; exit 1; }

@@ -301,7 +301,7 @@ resolve_run_steps() {
 
     # ★ REQUIRES 闭包(--steps 精确模式): 在 operator 过滤**之后**执行 —— 闭包拉入的依赖
     #   (如 --steps ceph_csi → ceph)是本模块需要的组件, 不能再被"未显式指定 operator"剔除。
-    #   递归加入显式指定模块的依赖链, 保证 --steps envoy_ai_gateway 自动带上 envoy_gateway。
+    #   递归加入显式指定模块的依赖链, 保证 --steps ceph_csi 自动带上 ceph。
     # ★ 2026-09-06 修复: 依赖**已完成(done, 断点续跑语义)**时不拉入执行 —— 否则
     #   `--steps ceph_csi`(补建 SC/FS/RGW)会因闭包拉入 ceph 而重跑 ceph 模块,
     #   ceph 内部"已有集群+PRE_CLEANUP→删旧建新"会误删现有集群。
@@ -330,7 +330,7 @@ resolve_run_steps() {
     # ★ --steps <组件> = **单组件安装模式**(2026-09-17 用户定案, 不再兼容旧的"自动带基座"语义):
     #   剔除"重装/基座类"模块(基座集合 + env/k8s 阶段全部), 只保留:
     #     ① --steps/--enable 显式点名的模块(显式优先, 如 --steps k8s_registry)
-    #     ② 组件的**非基座**依赖(如 envoy_ai_gateway → envoy_gateway, 真依赖不丢)
+    #     ② 组件的**非基座**依赖(如 ceph_csi → ceph, 真依赖不丢)
     #   集群接入不靠模块, 由 deploy-cluster.sh 的接入预检负责: 本地 kubeconfig 可用(pod 能
     #   kubectl get nodes)则直接装组件; 否则用 cluster.conf NODES 的密码引导(生成密钥 →
     #   注入公钥 → 从首个 master 取 admin.conf 到本地), 见 ensure_cluster_access。
@@ -480,7 +480,7 @@ _verify_meta_list() {
 #   · 只想装组件、不动集群 → --steps <组件>: 单组件安装模式**结构上不含基座**
 #     (resolve_run_steps 剔除 BASE_MODULES + env/k8s 阶段), 不会碰 k8s_deploy。
 #   · 2026-09-17 之前这里是 fail-closed 拦停(2026-09-11 一次 "--steps 误触发 k8s_deploy" 事故的补丁):
-#     该事故已被当天的单组件模式**结构性消除**(证据: `--list --steps prometheus` 的计划里没有
+#     该事故已被当天的单组件模式**结构性消除**(证据: `--list --steps ceph` 的计划里没有
 #     k8s_deploy), 拦停反而挡住了正常的覆盖重装(实机: 新容器默认部署被拦在 k8s_deploy) → 改提示。
 #   · 覆盖重装本身仍有既有防线(kubespray 侧, 见 deployments/kubespray/cubestack-offline.sh):
 #     检测旧 K8s 残留 → 醒目警告 + 60s 倒计时(Ctrl-C 可中止) → kubeadm reset。
@@ -513,7 +513,7 @@ notify_base_redeploy() {
     _REDEPLOY_NOTED=1
     warn "检测到集群已存在 → 本次为「覆盖安装」(默认语义): k8s_deploy 会重跑 kubespray"
     warn "  节点上已有的旧 K8s 状态会被 kubeadm reset —— 该步骤自带 60s 醒目倒计时, 期间 Ctrl-C 可中止"
-    warn "  只想装某个组件、不动集群: sudo $0 --steps <组件>(如 --steps prometheus; 计划里不含基座)"
+    warn "  只想装某个组件、不动集群: sudo $0 --steps <组件>(如 --steps ceph; 计划里不含基座)"
 }
 
 # 计划阶段提示(--list/--list-steps 只读路径用): 只提示, 不探测集群

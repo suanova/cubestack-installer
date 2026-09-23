@@ -62,7 +62,6 @@ deployments/offline-files/kubespray/runc-*
 deployments/offline-files/kubespray/yq-*
 deployments/offline-files/metax-gpu
 deployments/offline-files/lws
-deployments/offline-files/envoy
 deployments/offline-files/os
 deployments/offline-files/*.tar
 deployments/offline-files/*.tgz

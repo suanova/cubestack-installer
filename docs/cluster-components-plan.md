@@ -11,14 +11,11 @@
 | 序号 | P1必做核心组件 | 核心交付目标(极简) | 当前进度 | 当前状态 | 现存问题/阻塞点 | 计划完成时间 | 实际完成时间 | 对应模块/开关 |
 |---|---|---|---|---|---|---|---|---|
 | 1 | Kubernetes(Kubespray部署) | 基于Kubespray完成集群部署,核心资源(StatefulSet/PVC/Service等)正常创建调度,集群基础环境稳定可用 | 0% | 未开始 | - |  |  | `modules/02_k8s/06_k8s_deploy.sh` / `K8S_ENABLED` |
-| 2 | Prometheus + Prometheus Operator | 完成监控底座部署,通过Operator标准化管理监控规则,实现集群基础指标采集、存储、可查询 | 0% | 未开始 | - |  |  | `modules/03_addon/04_prometheus.sh` / `PROMETHEUS_ENABLED` |
-| 3 | 全套监控附属组件(P1刚需) | 部署kube-state-metrics、Perses可视化组件,全覆盖采集集群各类指标并可视化展示,具体刚需采集项:1. 节点指标:node-exporter(必须) 2. 容器指标:kubelet/cAdvisor(必须) 3. NVIDIA GPU指标:DCGM Exporter(NVIDIA环境必须) 4. MetaX GPU指标:MetaX官方接口/Exporter(MetaX环境必须) 5. RDMA指标:RDMA Exporter/采集适配(必须) 6. Ceph指标:Ceph Exporter/采集适配(必须) | 60% | 进行中 | 采集侧(1/2/4)已随 08_prometheus 落地并实机验证; **Perses 模块已实现但未实机验证** —— 待跑 `--steps perses` + `--steps verify_perses`; 3/5/6 待对应 exporter 接入 |  |  | 采集: `modules/03_addon/08_prometheus.sh` / `PROMETHEUS_ENABLED`; 可视化: `modules/03_addon/18_perses.sh` + `34_verify_perses.sh` / `PERSES_ENABLED`(详见 `docs/perses.md`) |
 | 4 | Docker Registry(Harbor) | 搭建可用镜像仓库,实现镜像推送、拉取、目录同步,保障集群业务镜像正常部署 | 0% | 未开始 | - |  |  | `modules/03_addon/05_harbor.sh` / `HARBOR_ENABLED`(集群外私有仓库,唯一方案) |
 | 5 | 沐曦MetaX GPU Operator | 完成GPU驱动部署、硬件识别、集群GPU资源调度,配套MetaX指标采集,保障GPU容器正常启动运行 | 100% | ✅ 已完成(2026-08-23) | - |  | 2026-08-23 | `modules/03_addon/04_gpu_operator.sh` / `GPU_OPERATOR_ENABLED`(详见 `docs/metax-gpu-operator.md`) |
 | 6 | Ceph 存储集群 | 完成Ceph底层存储集群部署、集群健康自检、存储池初始化,为上层CSI服务提供稳定存储底座 | 100% | ✅ 已完成(2026-09-06) | - |  | 2026-09-06 | `modules/03_addon/02_ceph.sh` / `CEPH_ENABLED`(Rook v1.20.2 + 自动检测裸盘 + node label) |
 | 7 | Ceph CSI(RBD/RGW/CephFS) | 部署CSI驱动,对接Ceph存储集群,实现三类存储卷正常创建、挂载、读写,集群StorageReady状态正常置位 | 100% | ✅ 已完成(2026-09-06) | - |  | 2026-09-06 | `modules/03_addon/03_ceph_csi.sh` / `CEPH_CSI_ENABLED` |
 | 8 | LWS | 完成LWS组件部署、集群适配与基础校验,保障集群轻量调度与配套服务正常运行 | 100% | ✅ 已完成(2026-08-23) | - |  | 2026-08-23 | `modules/03_addon/05_gpu_lws.sh` / `LWS_ENABLED`(helm 离线 + cert-manager/internal 双证书 + DisaggregatedSet, 详见 `docs/lws.md`) |
-| 9 | Envoy AI 网关(Envoy Gateway + Envoy AI Gateway) | 搭建集群统一流量入口,完成路由配置与转发测试,保障外部业务URL可正常稳定访问(通用网关基座 + AI 扩展层) | 50% | 进行中 | 模块/离线 chart/离线镜像工具已实现; 待联网机跑 envoy-fetch-charts.sh / envoy-save-images.sh 备料后实机验证 |  |  | `modules/03_addon/09_envoy_gateway.sh` + `10_envoy_ai_gateway.sh` / `ENVOY_GATEWAY_ENABLED` + `ENVOY_AI_GATEWAY_ENABLED`(详见 `docs/envoy-gateway.md`) |
 
 **P1附属基础依赖(必过验收·极简核对):**
 
@@ -26,7 +23,7 @@
 |---|---|---|
 | NTP时间同步 | 全节点时钟统一,无时间漂移问题 | `modules/02_k8s/05_k8s_ntp.sh` |
 | Calico/Multus网络 | Pod基础网络、多网卡通信正常 | kubespray `k8s-net-calico.yml` / k8s_cluster group_vars |
-| RDMA驱动协议栈 | 高速网络环境适配就绪,功能可用 | 规划:并入 `04_prometheus.sh` 采集 / 独立模块(待定) |
+| RDMA驱动协议栈 | 高速网络环境适配就绪,功能可用 | `modules/03_addon/10_rdma_shared_dev_plugin.sh`(+ `30_verify_rdma_shared_dev_plugin.sh` 验证) |
 
 ## 二、P2 阶段(能力增强·进阶刚需)
 
@@ -34,15 +31,15 @@
 
 | 序号 | P2必做核心组件 | 核心交付目标(极简) | 当前进度 | 当前状态 | 现存问题/阻塞点 | 计划完成时间 | 实际完成时间 | 对应模块/开关 |
 |---|---|---|---|---|---|---|---|---|
-| 1 | Keycloak 统一认证 | 部署Keycloak服务,实现集群统一身份认证、用户权限管控,完成Envoy网关对接,支持统一登录鉴权;兼容P1兜底认证方案平滑过渡 | 0% | 未开始 | - |  |  | `modules/03_addon/09_keycloak.sh` / `KEYCLOAK_ENABLED` |
+| 1 | Keycloak 统一认证 | 部署Keycloak服务,实现集群统一身份认证、用户权限管控,支持统一登录鉴权;兼容P1兜底认证方案平滑过渡 | 0% | 未开始 | - |  |  | `modules/03_addon/09_keycloak.sh` / `KEYCLOAK_ENABLED` |
 | 2 | Kueue 队列治理(DEV-29) | 部署Kueue组件,配置任务队列规则、资源配额与调度策略,实现集群任务排队、资源抢占管控、算力资源合理分配 | 0% | 未开始 | - |  |  | `modules/03_addon/10_kueue.sh` / `KUEUE_ENABLED` |
 | 3 | KubeVirt 虚拟机能力(DEV-35) | 部署KubeVirt虚拟化组件,完善集群虚拟化适配,支持虚拟机创建、启动、启停、管理,补齐集群VM形态业务交付能力 | 0% | 未开始 | - |  |  | `modules/03_addon/11_kubevirt.sh` / `KUBEVIRT_ENABLED` |
 | 4 | Ceph 备份与恢复(DR,独立 Epic) | Ceph 集群数据保护与灾难恢复: 备份三件套(CR + rook-ceph-mon secret + mon store)自动留存, k8s/ceph 重装后经 `CEPH_PRE_CLEANUP_EXISTING=false` 自动认领恢复旧 OSD 数据, 恢复后集群 fsid 不变、OSD/池/数据完整, 集群内 registry 继续使用恢复的 ceph-block 后端 | 60% | 进行中 | 备份链路已实现并验证(三件套落盘); 恢复链路已实现(restore-secret + restore-monstore --force), 但**整链端到端验证未完成**: mon store 恢复存在 monmap 旧地址与新调度不一致问题(mon-c 自杀), 需 `ceph-monstore-tool rebuild` 同步 monmap 后重验证(见 `docs/ceph-backup-restore.md`) |  |  | `tools/k8s/ceph-backup.sh`(save/restore-secret/restore-monstore) + `modules/03_addon/02_ceph.sh` 认领分支 + `CEPH_PRE_CLEANUP_EXISTING=false` |
 
 **P2阶段特性说明:**
 
-- 无强阻塞依赖:P2组件不影响P1集群基础运行、监控、存储、网关核心能力
-- 认证兼容:P1可通过本地凭据、Jupyter Token、SSH密钥兜底,P2完成后切换为网关统一认证
+- 无强阻塞依赖:P2组件不影响P1集群基础运行、存储核心能力
+- 认证兼容:P1可通过本地凭据、Jupyter Token、SSH密钥兜底,P2完成后切换为 Keycloak 统一认证
 - 能力补强:聚焦资源治理、统一鉴权、虚拟化拓展,提升集群运维与场景适配能力
 - 数据保护(P2-4):Ceph 备份/恢复为独立 Epic,保障集群数据可灾备、可重装认领,是生产化必备能力
 
@@ -75,13 +72,11 @@
 | 前置 | 环境准备(VM/SSH/Harbor/HAProxy/Keepalived) | `01_env/01~06` | `HARBOR_ENABLED` 等 | ✅ 已实现(Harbor 🧩 伪代码) |
 | 前置 | kubespray 离线部署(网络/inventory/NTP/部署/扩容) | `02_k8s/01~07` | `K8S_ENABLED` / `K8S_SCALE_ENABLED` | ✅ 已实现 |
 | P1-1 | Kubernetes(Kubespray) | `02_k8s/06_k8s_deploy.sh` | `K8S_ENABLED` | ✅ 已实现 |
-| P1-2/3 | Prometheus + 监控附属 | `03_addon/04_prometheus.sh` | `PROMETHEUS_ENABLED` | 🧩 伪代码占位 |
 | P1-4 | Docker Registry(Harbor) | `01_env/04_harbor.sh`(集群外私有仓库) | `HARBOR_ENABLED` | 🧩 伪代码占位 |
 | P1-5 | 沐曦 MetaX GPU Operator | `03_addon/04_gpu_operator.sh` | `GPU_OPERATOR_ENABLED` | ✅ 已完成(helm 原生安装 + 离线 tar 加载, 9 节点 69 GPU; 见 `docs/metax-gpu-operator.md`) |
 | P1-6 | Ceph 存储集群 | `03_addon/02_ceph.sh` | `CEPH_ENABLED` | ✅ 已完成(Rook v1.20.2 离线, 实机验证 HEALTH_OK 15 OSD; 见 `docs/ceph-rook.md`) |
 | P1-7 | Ceph CSI | `03_addon/03_ceph_csi.sh` | `CEPH_CSI_ENABLED` | ✅ 已完成(RBD/cephfs/rgw 三存储卷实测读写) |
 | P1-8 | LWS | `03_addon/07_gpu_lws.sh` | `LWS_ENABLED` | ✅ 已实现(helm 离线 + 双证书 + DisaggregatedSet) |
-| P1-9 | Envoy AI 网关(统一流量入口: Envoy Gateway + Envoy AI Gateway) | `03_addon/09_envoy_gateway.sh` + `10_envoy_ai_gateway.sh` | `ENVOY_GATEWAY_ENABLED` + `ENVOY_AI_GATEWAY_ENABLED` | 🚧 已实现(离线 chart+镜像工具齐, 待备料实机验证; 见 `docs/envoy-gateway.md`) |
 | P2-1 | Keycloak 统一认证 | `03_addon/08_keycloak.sh` | `KEYCLOAK_ENABLED` | 🧩 伪代码占位 |
 | P2-2 | Kueue 队列治理 | `03_addon/09_kueue.sh` | `KUEUE_ENABLED` | 🧩 伪代码占位 |
 | P2-3 | KubeVirt 虚拟机能力 | `03_addon/10_kubevirt.sh` | `KUBEVIRT_ENABLED` | 🧩 伪代码占位 |

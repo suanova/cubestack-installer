@@ -4,7 +4,7 @@
 # ============================================================
 # 作用: 读 deployments/config/images.manifest, 把**每个镜像从 Harbor 拉下来并保存为 tar**,
 #       落到各组件既有的离线目录(deployments/offline-files/<group>/)。之后由部署模块
-#       (08_prometheus / 02_ceph / 15_envoy_gateway / ...)推入集群内置 registry —— 节点只
+#       (02_ceph / 07_gpu_lws / 09_multus / ...)推入集群内置 registry —— 节点只
 #       从内置 registry 拉取。全程**不需要上游 registry**, 只要一台能连 Harbor 的机器。
 #
 # 制品流向(本脚本 = 中间那一段):
@@ -16,7 +16,7 @@
 #   可混用、可互相补缺。
 #
 # ── tar 命名(关键兼容点) ──────────────────────────────────
-#   按**上游 ref** 命名(如 registry.k8s.io_kube-state-metrics_kube-state-metrics_v2.20.0.tar),
+#   按**上游 ref** 命名(如 registry.k8s.io_sig-storage_csi-provisioner_v5.1.0.tar),
 #   而不是按 Harbor ref —— 因为既有部署模块都用 "*<repo>_<tag>.tar" 通配查找。
 #   少数"历史短名"镜像(busybox.tar / nginx.tar)由清单第 3 列显式指定文件名。
 #
@@ -26,7 +26,7 @@
 # 用法:
 #   sudo ./harbor-save-images.sh                     # 全部镜像 → 各自离线目录
 #   sudo ./harbor-save-images.sh --list              # 只列清单(不下载)
-#   sudo ./harbor-save-images.sh --group prometheus  # 只拉指定分组
+#   sudo ./harbor-save-images.sh --group ceph       # 只拉指定分组
 #   sudo ./harbor-save-images.sh --exclude-group metax-gpu
 #   sudo ./harbor-save-images.sh --force             # 强制重下
 #   sudo ./harbor-save-images.sh --from-upstream     # 直连上游(不用 Harbor; 等价 HARBOR_MIRROR_ENABLED=false)

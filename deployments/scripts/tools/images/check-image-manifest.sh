@@ -126,7 +126,7 @@ if [ -z "${NO_DIR}" ] && [ -z "${NO_README}" ]; then
 else
     warn "④b 离线资产未就位(仅提示, 不影响退出码):"
     [ -n "${NO_DIR}" ] && warn "     无目录  :${NO_DIR}    → 备料(联网机): harbor-save-images.sh --group <组>"
-    [ -n "${NO_README}" ] && warn "     无 README:${NO_README}    → 照抄 offline-files/kube-state-metrics/README.md 并 git add"
+    [ -n "${NO_README}" ] && warn "     无 README:${NO_README}    → 照抄 offline-files/rdma/README.md 并 git add"
     say  "     规则见 docs/scripts-development-spec.md §2.5(新增模块首次即建目录+README)"
 fi
 

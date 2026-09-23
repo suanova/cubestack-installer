@@ -61,17 +61,17 @@
 
 | 上游 ref | Harbor 目标 |
 |---|---|
-| `docker.io/grafana/grafana:13.2.1` | `harbor.isuanova.com/mirrors/docker.io/grafana/grafana:13.2.1` |
-| `quay.io/prometheus/node-exporter:v1.12.1` | `harbor.isuanova.com/mirrors/quay.io/prometheus/node-exporter:v1.12.1` |
+| `docker.io/rook/ceph:v20.2.2` | `harbor.isuanova.com/mirrors/docker.io/rook/ceph:v20.2.2` |
+| `quay.io/ceph/ceph:v20.2.2` | `harbor.isuanova.com/mirrors/quay.io/ceph/ceph:v20.2.2` |
 | `registry.k8s.io/pause:3.10` | `harbor.isuanova.com/mirrors/registry.k8s.io/pause:3.10` |
 | `harbor.isuanova.com/metax/gpu-label:x` | `harbor.isuanova.com/mirrors/metax/gpu-label:x` ⟵ 同台 Harbor, 去掉域名前缀 |
 | `harbor.isuanova.com/suanova/cubepilot-api:latest` | `harbor.isuanova.com/mirrors/suanova/cubepilot-api:latest` |
 
-**为什么要保留注册域**(而不是把 `docker.io/grafana/grafana` 压成 `grafana/grafana`):
+**为什么要保留注册域**(而不是把 `docker.io/rook/ceph` 压成 `rook/ceph`):
 
 1. **零歧义**: 上游 ref 是 Harbor 路径的**后缀**, 因此"离线 tar 按上游 ref 命名"这个约定
    (既有模块靠 `*<repo>_<tag>.tar` 通配查找)可以**零改动**沿用;
-2. **不撞车**: 不同注册域下的同名仓库(如多来源的 `prometheus/node-exporter`)各占独立路径。
+2. **不撞车**: 不同注册域下的同名仓库(如 `docker.io/rook/ceph` 与 `quay.io/rook/ceph`)各占独立路径。
 
 > 项目名固定 `mirrors`(`HARBOR_MIRROR_PROJECT`)。仓库(repository)在首次 push 时由 Harbor
 > 自动创建; **项目**(project)必须预先存在 —— `harbor-sync-images.sh` 会自动建(公开只读,
@@ -141,7 +141,7 @@
 ```bash
 ./harbor-sync-images.sh                      # 全部(增量: digest 相同则跳过)
 ./harbor-sync-images.sh --list               # 只列清单(不联网)
-./harbor-sync-images.sh --group prometheus,envoy
+./harbor-sync-images.sh --group ceph,rdma
 ./harbor-sync-images.sh --exclude-group metax-gpu
 ./harbor-sync-images.sh --include-same-harbor # 连"上游就是本台 Harbor"的也镜像(默认不镜像, 见 §3)
 ./harbor-sync-images.sh --platform amd64     # 单架构(默认 --all 保留多架构 manifest list)
@@ -156,7 +156,7 @@
 
 ```bash
 sudo ./harbor-save-images.sh                 # 全部 → 各组件 offline-files 子目录
-sudo ./harbor-save-images.sh --group kube-state-metrics
+sudo ./harbor-save-images.sh --group ceph
 sudo ./harbor-save-images.sh --force         # 覆盖已有 tar
 sudo ./harbor-save-images.sh --from-upstream # 绕过 Harbor, 直连上游(应急)
 ```
@@ -226,26 +226,26 @@ cluster.conf  ──(唯一版本真相)──▶  images.manifest ${VAR}  ─�
    └──────────────── 改这里一处, 下游全部自动跟随 ◀────────────────────┘
 ```
 
-- 版本**只声明在 `cluster.conf`**(`PROMETHEUS_IMAGE_KSM`、`ENVOY_EG_VERSION`、`K8S_VERSION` …);
+- 版本**只声明在 `cluster.conf`**(`CEPH_VERSION`、`LWS_CHART_VERSION`、`K8S_VERSION` …);
 - `images.manifest` 用 `${VAR}` 引用, 不重复写死版本;
 - 三个工具与 CI 都从清单读 —— 所以**改一处, 全链跟随**;
 - 新增的版本变量集中在 `cluster.conf.example` 的 **3.3 节「镜像版本(★ 升级入口)」**。
 
-### 升级某个组件(以 kube-state-metrics 为例)
+### 升级某个组件(以 ceph 为例)
 
 ```bash
 # ① 改版本(cluster.conf 一处)
-#    PROMETHEUS_IMAGE_KSM="v2.21.0"
+#    CEPH_VERSION="v20.2.3"
 # ② 校验清单仍自洽
 bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray
 # ③ 同步到 Harbor(CI 会随 push 自动做; 也可本地跑)
-./deployments/scripts/tools/images/harbor-sync-images.sh --group kube-state-metrics
+./deployments/scripts/tools/images/harbor-sync-images.sh --group ceph
 # ④ 拉成离线 tar
-sudo ./deployments/scripts/tools/images/harbor-save-images.sh --group kube-state-metrics --force
-# ⑤ 重新部署(模块推新 tar 进内置 registry + helm upgrade)
-sudo ./deploy-cluster.sh --steps prometheus
-# ⑥ 验证数据源真的有数据
-sudo ./deploy-cluster.sh --steps verify_prometheus
+sudo ./deployments/scripts/tools/images/harbor-save-images.sh --group ceph --force
+# ⑤ 重新部署(模块同步新 tar 到存储节点并 ctr import + apply manifest)
+sudo ./deploy-cluster.sh --steps ceph,ceph_csi
+# ⑥ 验证存储真的可用
+sudo ./deploy-cluster.sh --steps verify_ceph
 ```
 
 第 ④ 步的 `--force` 是必要的: 文件名按 `<repo>_<tag>.tar` 生成, **tag 变了文件名就变**,
@@ -336,6 +336,5 @@ gh secret set HARBOR_MIRROR_PASSWORD --repo suanova/cubestack-installer
 
 - 镜像清单: `deployments/config/images.manifest`
 - 版本变量(升级入口): `deployments/config/cluster.conf.example` §3.3
-- 监控三件套: `deployments/cubestack-addon/observability/{kube-state-metrics,node-exporter,kubelet-cadvisor}/README.md`
 - 部署脚本规范: `docs/scripts-development-spec.md`
 - 故障沉淀: `docs/troubleshooting.md`

@@ -55,12 +55,10 @@
 
 | 阶段 | 组件 | 开关(cluster.conf) | 模块 |
 |---|---|---|---|
-| P1-2/3 | Prometheus + Operator + 监控附属(node-exporter/DCGM/MetaX/RDMA/Ceph) | `PROMETHEUS_ENABLED` | `03_addon/04_prometheus.sh` |
 | P1-4 | Harbor 镜像仓库(**集群外私有仓库**, 环境准备阶段于宿主机就绪) | `HARBOR_ENABLED` | `01_env/04_harbor.sh` |
 | P1-5 | 沐曦 MetaX GPU Operator | `GPU_OPERATOR_ENABLED` | `03_addon/01_gpu_operator.sh` |
 | P1-6/7 | Ceph 存储集群 + Ceph CSI(RBD/RGW/CephFS) | `CEPH_ENABLED` / `CEPH_CSI_ENABLED` | `03_addon/06_ceph.sh` / `07_ceph_csi.sh` |
 | P1-8 | LeaderWorkerSet(LWS) | `LWS_ENABLED` | `03_addon/02_gpu_lws.sh` |
-| P1-9 | Envoy 网关二件套: Envoy Gateway(通用 API 网关)+ Envoy AI Gateway(AI 专用扩展层) | `ENVOY_GATEWAY_ENABLED` / `ENVOY_AI_GATEWAY_ENABLED` | `03_addon/09_envoy_gateway.sh` / `10_envoy_ai_gateway.sh`(见 `docs/envoy-gateway.md`) |
 | P2-1 | Keycloak 统一认证 | `KEYCLOAK_ENABLED` | `03_addon/09_keycloak.sh` |
 | P2-2 | Kueue 队列治理(DEV-29) | `KUEUE_ENABLED` | `03_addon/10_kueue.sh` |
 | P2-3 | KubeVirt 虚拟机能力(DEV-35) | `KUBEVIRT_ENABLED` | `03_addon/11_kubevirt.sh` |
@@ -101,7 +99,7 @@
 ┌──────────────▼──────────────────────────────────────────────────┐
 │ Kubernetes 集群                                                  │
 │  · 基础: kube-apiserver/etcd/Calico/CoreDNS/MetalLB/local-path   │
-│  · P1/P2/P3: GPU/监控/Harbor/Ceph/Envoy/Keycloak/Kueue/KubeVirt │
+│  · P1/P2/P3: GPU/Harbor/Ceph/Keycloak/Kueue/KubeVirt/Lustre      │
 │  · 离线: 镜像经预加载进 containerd, 不依赖公网                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -153,7 +151,7 @@ deployments/
 |---|---|---|---|
 | `modules/01_env/` | `env` | VM 网络/SSH 密钥/创建 VM/Harbor/HAProxy/Keepalived | **部署 kubespray 之前** |
 | `modules/02_k8s/` | `k8s` | 免密/裸金属 worker/hosts/inventory/NTP/部署/扩容 | 不依赖 VM 还是裸金属 |
-| `modules/03_addon/` | `addon` | GPU/监控/Ceph/Envoy/Keycloak/Kueue/KubeVirt/Lustre(01~19 中间件)+ 自研模块(20 起) | 集群部署后 |
+| `modules/03_addon/` | `addon` | GPU/Ceph/Keycloak/Kueue/KubeVirt/Lustre(01~19 中间件)+ 自研模块(20 起) | 集群部署后 |
 
 **模块 = `modules/<阶段>/NN_category_action.sh` 一个文件**,头部注释声明元数据(`MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE`),框架**自动发现**——新增模块只需放一个文件,无需改任何注册表/入口(详见 `docs/scripts-development-spec.md`)。
 
@@ -179,7 +177,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps vm_create,k8s_deploy
 sudo ./deployments/scripts/deploy-cluster.sh --phase k8s
 
 # 4) 启用附加组件(集群部署后)
-sudo ./deployments/scripts/deploy-cluster.sh --enable harbor,prometheus
+sudo ./deployments/scripts/deploy-cluster.sh --enable harbor,ceph
 #    或 cluster.conf 里 HARBOR_ENABLED=true 后直接 --with-k8s
 
 # 5) 单独执行某个模块(绕过入口)
@@ -189,7 +187,7 @@ sudo bash deployments/scripts/modules/03_addon/05_harbor.sh
 sudo ./deployments/scripts/deploy-cluster.sh --with-scale
 ```
 
-**组件开关**(`cluster.conf` 中 `true/false`):`K8S_ENABLED` / `K8S_SCALE_ENABLED` / `HARBOR_ENABLED` / `PROMETHEUS_ENABLED` / `CEPH_ENABLED` / `CEPH_CSI_ENABLED` / `GPU_OPERATOR_ENABLED` / `LWS_ENABLED` / `ENVOY_GATEWAY_ENABLED` / `KEYCLOAK_ENABLED` / `KUEUE_ENABLED` / `KUBEVIRT_ENABLED` / `LUSTRE_CSI_ENABLED` / `LOCAL_PATH_ENABLED`(默认 false) / `REGISTRY_ENABLED`(默认 0) 等。
+**组件开关**(`cluster.conf` 中 `true/false`):`K8S_ENABLED` / `K8S_SCALE_ENABLED` / `HARBOR_ENABLED` / `CEPH_ENABLED` / `CEPH_CSI_ENABLED` / `GPU_OPERATOR_ENABLED` / `LWS_ENABLED` / `KEYCLOAK_ENABLED` / `KUEUE_ENABLED` / `KUBEVIRT_ENABLED` / `LUSTRE_CSI_ENABLED` / `LOCAL_PATH_ENABLED`(默认 false) / `REGISTRY_ENABLED`(默认 0) 等。
 
 ---
 

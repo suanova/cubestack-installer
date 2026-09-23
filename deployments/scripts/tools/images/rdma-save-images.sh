@@ -13,7 +13,7 @@
 #   /etc/containers/registries.conf 的 unqualified-search-registries, 未配置会解析失败)。
 # ⚠ tag 风格随版本不统一: 1.4.0 无 v 前缀(ghcr 上 v1.4.0 不存在, 404); v1.5.1+ 带 v。
 #
-# 下载方式(按顺序尝试, 与 prometheus-save-images.sh 一致):
+# 下载方式(按顺序尝试, 与 metax-save-images.sh 一致):
 #   ① 本地 docker daemon 已有 → docker save 直接导出
 #   ② docker pull(5 次重试)→ docker save
 #   ③ skopeo copy docker:// → docker-archive(--platform linux/amd64, docker 不可用时兜底)

@@ -59,5 +59,4 @@ echo "  结构参考:"
 echo "    ${DEST_DIR}/kubespray/          kubespray 离线仓库(镜像 images/ + 二进制 + packages/)"
 echo "    ${DEST_DIR}/metax-gpu/          沐曦 GPU Operator 离线文件(可选)"
 echo "    ${DEST_DIR}/lws/                LWS 控制器镜像 tar(可选)"
-echo "    ${DEST_DIR}/envoy/              Envoy Gateway/AI Gateway 镜像 tar(可选)"
 check_offline_files || true
