@@ -18,7 +18,7 @@ description: CubeStackInstaller 新增部署模块的端到端标准流程技能
 | `--steps local_path,k8s_registry` 意外带出 gpu_operator 部署 | OPERATOR_MODULES 手写列表漏配/语义不清,默认启用的 operator 被自动带出 | **规则 4: 依赖自动派生,用 `--list` 验证调度** |
 | 新模块插错序号 → registry 在 local_path 前执行 | 模块顺序全靠文件名序号,无依赖声明 | **规则 3: REQUIRES 声明依赖,拓扑排序保证顺序** |
 | 两个 deploy-cluster.sh 并发跑互相覆盖状态文件 | 无并发锁 | **规则 6: flock 已在入口生效,提醒用户不要并发** |
-| 私服抖动时 cubepilot 装不上,"回退本地 chart" 空转 | 回退代码**写了**,但仓库里压根没有那份离线 chart —— 从没被提交过 | **规则 7: chart 离线副本必须 vendored 进 `cubestack-addon/<组件>/` 并随 git 分发** |
+| 私服抖动时组件装不上,"回退本地 chart" 空转 | 回退代码**写了**,但仓库里压根没有那份离线 chart —— 从没被提交过 | **规则 7: chart 离线副本必须 vendored 进 `cubestack-addon/<组件>/` 并随 git 分发** |
 | 文档/脚本里写着 `offline-files/<组>/`,机器上目录却不存在(清单里登记了 group, 却没人建目录) | 新模块只"登记/写路径",没人负责首次建目录、放 README、把镜像列进清单 | **规则 8: 镜像登记 `images.manifest` + 首建 `offline-files/<group>/`(带 README)** |
 
 ## 新增模块 6 步标准流程
@@ -96,7 +96,8 @@ init_remote_kubectl || exit 1
 > 完整规范见 `docs/scripts-development-spec.md` §2.4。这里只给可照抄的动作。
 
 1. **放在哪**:`deployments/cubestack-addon/<组件>/`,一个 chart 一个子目录。`.gitignore` 不覆盖
-   `cubestack-addon/`,所以直接 `git add` 即可(参考已在库里的 `cubepilot/cubepilot-*.tgz` + `.digest` 边车)。
+   `cubestack-addon/`,所以直接 `git add` 即可(参考已在库里的 `rook-charts/rook-ceph` 解包目录、
+   `lws/charts/`)。
 2. **什么形态**:小 chart 放 `.tgz` **并同时提交 `<tgz>.digest` 边车**;大 chart(带几十个子 chart)
    放解包源码目录(含 `Chart.yaml`)。
 3. **边车怎么写**:值是 helm 报告的 `Digest:` 那一行(`sha256:...`)。经典 helm repo 的 digest 就是
@@ -110,8 +111,9 @@ init_remote_kubectl || exit 1
    ```
    `ref` 是 `oci://…` 或经典 repo 的 chart 名(后者同时给 `repoURL`);只需要本地副本、不需要在线刷新时,
    把 `mode` 传 `offline` 即可(纯本地组件就该这么写)。
-5. **刷新工具**:`tools/images/<组件>-fetch-charts.sh`,照抄 `cubepilot-fetch-charts.sh`
-   (tgz + 边车)。**随 git 提交**才算刷新完成。
+5. **刷新**:目前**没有**脚本化刷新工具 —— 手工 `helm pull` 覆盖 vendored 副本
+   (示例见 `deployments/cubestack-addon/lws/CUBESTACK.md` 的"升级到新版本"),`.tgz` 形态
+   要一并更新 `<tgz>.digest` 边车。**随 git 提交**才算刷新完成。
 6. **自检**:`bash deployments/scripts/tools/check-modules.sh` 第 ⑩ 项必须过。想确认它真会拦,
    把刚放的 chart 临时挪走再跑一次 —— 应该报 `找不到 vendored chart`。
 
@@ -133,7 +135,7 @@ init_remote_kubectl || exit 1
    (从 Harbor 拉到该组目录,目录不存在会自动补建)。这是**联网机**上的动作,不要在部署机上现拉。
 5. **自检**:`bash deployments/scripts/tools/images/check-image-manifest.sh`
    (格式/变量/重复;加 `--harbor` 额外比对 Harbor 漂移)。
-6. **特例**:上游就是本台 Harbor 的组(`metax-gpu`/`cubepilot`)**默认不镜像**,但仍要登记
+6. **特例**:上游就是本台 Harbor 的组(`metax-gpu`)**默认不镜像**,但仍要登记
    —— 清单同时是"本仓库用到哪些镜像"的登记簿。
 
 ### 步骤 4:静态校验(合入前强制)

@@ -5,7 +5,7 @@
 # 职责(单一实现, 供 harbor-sync-images.sh / harbor-save-images.sh / check-image-manifest.sh 共用):
 #   ① 加载版本变量默认值(cluster.conf 优先, 缺失回退 cluster.conf.example)
 #   ② 解析 deployments/config/images.manifest 的 <group> <ref> 两列
-#   ③ 展开 ref 里的 ${VAR} 占位符(带派生: CUBEPILOT_IMAGE_TAG 留空时按 chart 版本派生)
+#   ③ 展开 ref 里的 ${VAR} 占位符
 #   ④ group → 离线目录(offline-files/<...>)映射
 #   ⑤ 上游 ref → Harbor 镜像 ref 映射(唯一规则)
 #   ⑥ 上游 ref → 离线 tar 文件名(**按上游 ref 命名**, 保证既有模块的通配匹配不失效)
@@ -54,8 +54,7 @@ image_manifest_load() {
     # 保存调用方已显式设置的关键变量(有值才保护; 空值不保护 —— 空=用清单默认)
     local -a _protected=()
     local _v
-    for _v in CUBEPILOT_IMAGE_TAG CUBEPILOT_VERSION CUBEPILOT_HARBOR CUBEPILOT_PROJECT \
-              METAX_HARBOR METAX_PROJECT METAX_VERSION METAX_DRIVER_VERSION METAX_MACA_IMAGE \
+    for _v in METAX_HARBOR METAX_PROJECT METAX_VERSION METAX_DRIVER_VERSION METAX_MACA_IMAGE \
               HARBOR_MIRROR_REGISTRY HARBOR_MIRROR_PROJECT HARBOR_MIRROR_USER HARBOR_MIRROR_PASSWORD \
               REPO_ROOT K8S_VERSION; do
         [ -n "${!_v:-}" ] && _protected+=( "${_v}=${!_v}" )
@@ -104,21 +103,6 @@ image_manifest_load() {
     return 0
 }
 
-# ---------- 2. 派生: CUBEPILOT_IMAGE_TAG 留空时按 chart 版本派生 ----------
-# 规则与 modules/03_addon/31_cubepilot.sh 完全一致: chart 版本以 -latest 结尾 → 镜像 tag=latest;
-# 否则 tag=chart 版本。两处必须同步, 否则清单里的 ref 与模块实际拉的镜像不是同一个。
-image_derive_globals() {
-    if [ -z "${CUBEPILOT_IMAGE_TAG:-}" ]; then
-        local _cv="${CUBEPILOT_VERSION:-0.1.0-latest}"
-        if [ "${_cv%-latest}" != "${_cv}" ]; then
-            CUBEPILOT_IMAGE_TAG="latest"
-        else
-            CUBEPILOT_IMAGE_TAG="${_cv}"
-        fi
-    fi
-    return 0
-}
-
 # ---------- 3. 清单解析 ----------
 image_manifest_path() {
     echo "${IMAGE_MANIFEST:-${IM_REPO_ROOT}/deployments/config/images.manifest}"
@@ -128,7 +112,6 @@ image_manifest_path() {
 image_manifest_entries() {
     local _mf; _mf="$(image_manifest_path)"
     [ -f "${_mf}" ] || { echo "【错误】镜像清单不存在: ${_mf}" >&2; return 1; }
-    image_derive_globals
     local _line _group _ref _name _rest
     while IFS= read -r _line || [ -n "${_line}" ]; do
         # 去注释与首尾空白; 支持行尾 "# 注释"

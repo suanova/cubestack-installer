@@ -206,64 +206,6 @@ push_image_skopeo() {
     rm -f "${errf}"; return 1
 }
 
-# ---------------- 共享 skopeo 拉取助手(私服 docker:// → 本地 docker-archive tar) ----------------
-# 与 push_image_skopeo 对称: 私服链路(尤其外网 Harbor)的 TLS 握手**间歇性超时**,
-#   单次失败在调用方那里会变成"静默降级为本地旧 tar", 且 stderr 被吞掉 → 事后无从排查。
-#   故拉取统一走这里: ① 整包 3 次重试; ② 失败原因经全局 SKOPEO_PULL_ERR 回传给调用方写进告警;
-#   ③ 先写 <tar>.tmp 再原子 mv —— 拉取失败**绝不动**原有可用 tar
-#      (否则回退路径会按 [ -f <tar> ] 把半截包当成"本地可用制品"推出去)。
-# 全部为**新符号**, 不改任何现有调用方。
-
-# 取私服上该 tag 的 digest(决定"要不要重下")。结果写全局 SKOPEO_REMOTE_DIGEST, 失败原因写 SKOPEO_PULL_ERR。
-# ⚠ 刻意**不用 stdout 回显**: 调用方写成 $(...) 就在子 shell 里跑, 函数设的 SKOPEO_PULL_ERR 传不出来
-#   (只剩"私服不可达"却不知道为什么)。调用方按 [ -n "${SKOPEO_REMOTE_DIGEST}" ] 判定"可达且有该 tag"。
-# 恒 return 0 —— set -e 下裸调用不会退出模块; 判据一律看 SKOPEO_REMOTE_DIGEST 是否为空。
-# 3 次重试很关键: 单次 TLS 超时若被当成"私服没这个镜像", 会静默跳过下载并回退旧 tar。
-# 用法: remote_image_digest <src> [额外 skopeo 参数...]
-SKOPEO_REMOTE_DIGEST=""
-remote_image_digest() {
-    local src="$1"; shift
-    local d="" n=1 errf="/tmp/skopeo-inspect-err-$$"
-    SKOPEO_REMOTE_DIGEST=""; SKOPEO_PULL_ERR=""
-    for n in 1 2 3; do
-        d="$(skopeo inspect --format '{{.Digest}}' "$@" "docker://${src}" 2>"${errf}" || true)"
-        if [ -n "${d}" ]; then SKOPEO_REMOTE_DIGEST="${d}"; rm -f "${errf}"; return 0; fi
-        SKOPEO_PULL_ERR="$(tail -1 "${errf}" 2>/dev/null || true)"
-        if [ "${n}" -lt 3 ]; then
-            warn "  私服 digest 查询失败(第 ${n}/3 次: ${SKOPEO_PULL_ERR:-未知错误}), 3s 后重试..."
-            sleep 3
-        fi
-    done
-    rm -f "${errf}"
-    SKOPEO_PULL_ERR="${SKOPEO_PULL_ERR:-私服不可达或该 tag 不存在}"
-    return 0
-}
-
-# 3 次整包重试的 skopeo 拉取(与 push_image_skopeo 同款: 大 blob 连接中断时
-# skopeo 的 --retry-times 不覆盖)。错误文件按 PID 隔离(并行安全)。
-# 用法: pull_image_skopeo <src> <tar 路径> [额外 skopeo 参数...](参数须在 ref 之前, skopeo 用 Go flag 解析)
-pull_image_skopeo() {
-    local src="$1" tar="$2"; shift 2
-    local tmp="${tar}.tmp" n=1 errf="/tmp/skopeo-pull-err-$$" err=""
-    SKOPEO_PULL_ERR=""
-    for n in 1 2 3; do
-        if skopeo copy --quiet "$@" "docker://${src}" "docker-archive:${tmp}" 2>"${errf}"; then
-            mv -f "${tmp}" "${tar}"      # 同目录 rename, 原子替换: 旧 tar 在成功前一直可用
-            rm -f "${errf}"
-            return 0
-        fi
-        err="$(tail -1 "${errf}" 2>/dev/null || true)"
-        rm -f "${tmp}"                  # 半截包一律不留(回退路径只认完整 tar)
-        if [ "${n}" -lt 3 ]; then
-            warn "  拉取失败(第 ${n}/3 次: ${err:-未知错误}), 3s 后重试整包..."
-            sleep 3
-        fi
-    done
-    SKOPEO_PULL_ERR="${err:-未知错误}"
-    rm -f "${errf}"
-    return 1
-}
-
 # 幂等检查: registry 是否已有 <repo>:<tag>(优先 skopeo inspect, 缺失时 curl tags/list)
 # 需调用方先设置 REGISTRY_BASE(各模块/load 脚本在 load_config 后派生)。
 # 用法: reg_has_tag <push_registry> <repo> <tag>
@@ -316,7 +258,7 @@ find_offline_tar() {
 # 规则(见 docs/scripts-development-spec.md §2.4): **每个 helm chart 都必须在
 # deployments/cubestack-addon/<组件>/ 下有一份随 git 分发的离线副本**(.tgz 或解包源码目录),
 # 且**安装一律用这份本地副本** —— 线上拉到的东西不直接装。缺了它, 私服/上游一抖动就装不上
-# (cubepilot 曾经就是这样: 回退代码写好了, 却压根没有可回退的文件)。
+# (曾有模块就是这样: 回退代码写好了, 却压根没有可回退的文件)。
 #
 # 本助手把"本地副本就绪"这件事收敛到一处:
 #   online : helm pull 到临时目录 → 取远端 digest, 与 <tgz>.digest 边车比对

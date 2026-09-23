@@ -126,7 +126,6 @@ LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(P3; 见 4.5
 MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多网卡(附加接口经 NAD CRD 定义; 见 4.7)
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(Device Plugin, 暴露 RDMA 网卡为扩展资源; 见 4.8)
 CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # CubeStack 自研组件(占位; 见 4.6)
-CUBEPILOT_ENABLED="${CUBEPILOT_ENABLED:-true}"          # CubePilot AI Agent 平台(自研; 见 4.6; 私服公开只读免凭据, 同步后统一经内置 registry 部署)
 # ---- 4.7 Multus CNI(容器多网卡; 详见 deployments/cubestack-addon/multus/CUBESTACK.md) ----
 # 离线镜像: 联网机 docker save ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
 #   → deployments/offline-files/multus/multus-cni.tar → 16_multus 模块推送进内置 registry
@@ -568,7 +567,7 @@ REGISTRY_EXPOSE_HOST="${REGISTRY_EXPOSE_HOST:-0}"
 #   · 校验清单                   : tools/images/check-image-manifest.sh
 # 详见 docs/harbor-mirror.md。
 HARBOR_MIRROR_ENABLED="${HARBOR_MIRROR_ENABLED:-true}"        # true=save/load 工具优先从 Harbor 拉镜像; false=直连上游
-HARBOR_MIRROR_REGISTRY="${HARBOR_MIRROR_REGISTRY:-harbor.isuanova.com}"   # Harbor 域名(与 metax/cubepilot 同源)
+HARBOR_MIRROR_REGISTRY="${HARBOR_MIRROR_REGISTRY:-harbor.isuanova.com}"   # Harbor 域名(与 metax 同源)
 HARBOR_MIRROR_PROJECT="${HARBOR_MIRROR_PROJECT:-mirrors}"     # 镜像专用项目(不存在时由同步工具自动创建)
 # 路径规则(见 images.manifest 头部): mirrors/<上游注册域>/<仓库路径>:<tag>
 #   例 registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
@@ -700,67 +699,7 @@ LWS_RELEASE_NAME="${LWS_RELEASE_NAME:-lws}"             # Helm release 名
 
 # ---------------- 4.6 自研模块(CubeStack 平台组件) ----------------
 # 03_addon/ 下 01~19 为第三方中间件预留, 20 起为 CubeStack 自研模块
-# 开关见顶部【组件启停开关】: CUBESTACK_APPS_ENABLED / CUBEPILOT_ENABLED
-
-# ---- CubePilot AI Agent 平台(模块 cubepilot / verify_cubepilot) ----
-# 制品: 4 个镜像 cubepilot-{openclaw,operator,api,web} + 1 个 chart, 均托管在
-#   **私服 Harbor**(harbor.isuanova.com/suanova), 由 cubepilot 发布流水线推送 ——
-#   与 metax 镜像同源(harbor.isuanova.com 即本项目自己的 Harbor)。
-#   ⚠ chart 仓库名是 **cubepilot-chart**(带 -chart 后缀), 不是 cubepilot。
-#   发布线(chart 版本 ↔ 镜像 tag 一一对应):
-#     main 分支 → chart 0.1.0-latest + 镜像 :latest; 正式 tag vX.Y.Z → chart X.Y.Z + 镜像 :X.Y.Z。
-# ⚠ chart 各镜像默认 tag 是 :latest(会跟上游漂移), 本模块恒显式传 4 个镜像 ref 锁版本。
-#
-# ★ 双模式(CUBEPILOT_MODE; **默认 online** —— 与仓库其它组件的"离线优先"相反, 当前为测试节点):
-#   **两种模式的部署路径完全相同**: 节点**只从集群内置 registry 拉镜像**, 部署机 helm 装**本地 chart tgz**。
-#   online  = 部署前先从私服 Harbor 同步制品到本地(chart → cubestack-addon/cubepilot/,
-#             镜像 → offline-files/cubepilot/*.tar), 再推入内置 registry, 之后与 offline 同路部署
-#   offline = 不碰外网, 直接用盘上已有制品推入内置 registry 后部署
-#   ⇒ online 跑过一次后制品已在盘上, **改 CUBEPILOT_MODE=offline 即可切纯离线, 无需任何额外准备**。
-#   ⇒ online 在私服不可达时**自动降级**: 拉不到就退回本地已有制品(告警不中断); 本地也没有才报错。
-#   制品刷新: online 每次部署都比对私服 digest 与本地 <tar>.digest 边车 —— 未变则跳过下载(不白传), 变了才重拉。
-#            想强制重拉: 删掉对应 tar(或其 .digest 边车)。
-#   本机无外网 / 隔离集群: 要么置 offline 并预置制品(工具见 CUBESTACK.md §2), 要么直接 CUBEPILOT_ENABLED=false。
-#
-# ⚠ Harbor 的 suanova 项目**公开只读(anonymous pull)**: 无需配置任何凭据即可 online。
-#   若将来收紧为私有项目, 再填 CUBEPILOT_HARBOR_USER / CUBEPILOT_HARBOR_PASSWORD 即可。
-CUBEPILOT_MODE="${CUBEPILOT_MODE:-online}"                           # online(先从私服同步制品)|offline(只用本地制品)
-CUBEPILOT_HARBOR="${CUBEPILOT_HARBOR:-harbor.isuanova.com}"          # 私服域名(与 metax 同源)
-CUBEPILOT_PROJECT="${CUBEPILOT_PROJECT:-suanova}"                     # Harbor 项目名(也是内置 registry 下的仓库前缀)
-CUBEPILOT_VERSION="${CUBEPILOT_VERSION:-0.1.0-latest}"                # chart 版本(OCI tag; 发布 tag 时如 0.1.0)
-CUBEPILOT_IMAGE_TAG="${CUBEPILOT_IMAGE_TAG:-}"                        # 镜像 tag; 留空自动派生(-latest 结尾→latest, 否则=chart 版本)
-CUBEPILOT_HARBOR_USER="${CUBEPILOT_HARBOR_USER:-}"                    # (可选)私有化后填; 留空=匿名拉取(该 Harbor 公开只读)
-CUBEPILOT_HARBOR_PASSWORD="${CUBEPILOT_HARBOR_PASSWORD:-}"            # Harbor 密码/token(本文件已 gitignore, 勿提交)
-CUBEPILOT_HARBOR_INSECURE="${CUBEPILOT_HARBOR_INSECURE:-false}"       # online: true=拉取时跳过 TLS 校验(私服自签证书时用)
-CUBEPILOT_CHART_DIR="${CUBEPILOT_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/cubepilot}"  # chart 目录(online 同步落盘于此; 也可放平台 CRD)
-CUBEPILOT_OFFLINE_DIR="${CUBEPILOT_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/cubepilot}"  # 镜像 tar 目录(online 同步落盘于此; offline 从此处取)
-CUBEPILOT_NAMESPACE="${CUBEPILOT_NAMESPACE:-cubepilot}"               # 部署命名空间
-CUBEPILOT_RELEASE="${CUBEPILOT_RELEASE:-cubepilot}"                   # helm release 名
-# 内置 Portal(chart 自带的 React 门户 cubepilot-web: SPA 页面 + /api 反代给 cubepilot-api)：
-# 默认启用 —— 装完即可访问(平台网关 cubepilot.cubestack.io, 或 port-forward svc/cubepilot)。
-# 置 false 则不建 cubepilot-web Deployment 与相关 Service(同步/推送阶段也会跳过 web 镜像, 不白传),
-# 此时只剩 API 入口(网关 cubepilot-api.cubestack.io / port-forward svc/cubepilot-api)。
-CUBEPILOT_WEB_ENABLED="${CUBEPILOT_WEB_ENABLED:-true}"
-# 两个 PVC(cubepilot-api-data 元数据 / cubepilot-api-skill-repo 共享技能仓)的 StorageClass。
-# 留空 = 自动派生: Ceph 体系启用 → ceph-block; 否则留空(PVC 回落集群默认 StorageClass)。
-# ⚠ chart 语义是"storageClassName 非空才生效", 故留空时模块不传该参数。
-CUBEPILOT_STORAGE_CLASS="${CUBEPILOT_STORAGE_CLASS:-}"
-# 说明: **不需要节点级私服凭据, 也不需要 imagePullSecret** —— 节点只访问集群内置 registry
-# (免认证且节点已信任), operator 运行时铸造的 ServiceAccount 同样能拉。
-# (旧版 online 直连私服时才需要 containerd certs.d 下发, 已随"统一走内置 registry"一并移除。)
-# LLM 预置(**默认不预置**: 不假设平台已有 LLM; 装完在 Portal → Agent Config → LLM Config 添加)。
-# 要安装时预置平台默认模型: 填 ENDPOINT + MODEL + API_KEY(ENDPOINT/API_KEY 任一非空即进入预置流程)。
-# API_KEY 会写入命名空间内 Secret(cubepilot-llm); 本文件已 gitignore, 勿提交。
-CUBEPILOT_LLM_ENDPOINT="${CUBEPILOT_LLM_ENDPOINT:-}"                 # 如 https://api.deepseek.com
-CUBEPILOT_LLM_MODEL="${CUBEPILOT_LLM_MODEL:-}"                       # 如 deepseek-v4-flash
-CUBEPILOT_LLM_API_KEY="${CUBEPILOT_LLM_API_KEY:-}"                   # API Key(留空则不建 Secret)
-CUBEPILOT_LLM_SECRET="${CUBEPILOT_LLM_SECRET:-cubepilot-llm}"        # Secret 名(operator 按此名 watch)
-# CubeStack 平台 CRD(DevEnvironment / InferenceService / ...): chart **不含**(chart 只带 6 个
-# ai.cubestack.io CRD)。仅当内置 skills/chat 需要平台资源时才装 → 默认关闭。
-# 开启前把 cubepilot 源仓库 test/e2e/framework/testdata/cubestack-crds/ 下的 YAML 拷到该目录。
-CUBEPILOT_PLATFORM_CRDS_ENABLED="${CUBEPILOT_PLATFORM_CRDS_ENABLED:-false}"
-CUBEPILOT_PLATFORM_CRDS_DIR="${CUBEPILOT_PLATFORM_CRDS_DIR:-${CUBEPILOT_CHART_DIR}/cubestack-crds}"
-CUBEPILOT_WAIT_SECONDS="${CUBEPILOT_WAIT_SECONDS:-300}"              # helm --wait / rollout 等待上限(首次拉镜像较慢, 可调大)
+# 开关见顶部【组件启停开关】: CUBESTACK_APPS_ENABLED
 
 # ════════════════════════════════════════════════════════════
 # 阶段五、离线镜像预加载                         依赖: 2.1 离线目录

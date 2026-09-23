@@ -49,8 +49,8 @@ on:
         default: false
       include_same_harbor:
         description: >-
-          包含"上游就是本台 Harbor"的镜像(metax/cubepilot)。默认 false ——
-          这些镜像本就在本台 Harbor 上, 部署模块直接从 metax/ 与 suanova/ 项目拉取,
+          包含"上游就是本台 Harbor"的镜像(metax)。默认 false ——
+          这些镜像本就在本台 Harbor 上, 部署模块直接从 metax/ 项目拉取,
           集群不访公网的目标对它们已经达成。镜像到 mirrors/ 只会多占 8.4 GB
           (其中 maca 5.3 GB)且每次版本升级都要重跑
         type: boolean
@@ -159,8 +159,8 @@ jobs:
           esac
           args+=( --platform "${platform}" )
 
-          # 同台 Harbor 复制(metax / cubepilot: 上游就是本台 Harbor)默认**不镜像** ——
-          # 目标"集群不访公网"对它们已经达成(部署模块直接从 metax/ 与 suanova/ 项目拉取),
+          # 同台 Harbor 复制(metax: 上游就是本台 Harbor)默认**不镜像** ——
+          # 目标"集群不访公网"对它们已经达成(部署模块直接从 metax/ 项目拉取),
           # 再复制到 mirrors/ 只会多占 8.4 GB 且每次升级都要重跑。要那份副本才勾选本项。
           if [ "${{ inputs.include_same_harbor }}" = "true" ]; then
             args+=( --include-same-harbor )

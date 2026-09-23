@@ -113,7 +113,7 @@ deployments/scripts/
 │   │                         #        setup-ntp.sh / sync-hosts.sh / sync-ca*.sh / rebootstrap*.sh
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
 │   ├── images/                #   离线镜像工具: metax-save/load-images.sh / lws-save-images.sh / ceph-save-images.sh
-│   │                         #        cubepilot-save-images.sh / harbor-save-images.sh / rdma-save-images.sh / netshoot-rdma-build.sh
+│   │                         #        harbor-save-images.sh / rdma-save-images.sh / netshoot-rdma-build.sh
 │   ├── offline/               #   MinIO 离线文件: fetch-offline-from-minio.sh(拉取) / sync-to-minio.sh(推送) / trim-offline-files.sh(清理) / fetch-offline-files.sh(旧)
 │   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 └── README.md                  # 本文件
