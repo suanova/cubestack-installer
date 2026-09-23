@@ -1412,11 +1412,20 @@ update_loadbalancer_all_yml() {
     fi
 }
 
-# 在真正部署前, 通过 SSH 检查并重置目标节点上的旧 Kubernetes 状态
-# 检测到残留 → 醒目警告 + sleep 60 → kubeadm reset -f + IPVS 清理
-# 未检测到 → 直接部署, 不执行 reset
-# 用法: reset_kubernetes_if_needed
-# 返回: 始终 0(不因 reset 失败中断部署)
+# 在真正部署前, 通过 SSH 检查并中立化目标节点上的旧 Kubernetes 状态
+# 检测到残留 → 醒目警告 + sleep 60 → 中立化旧 K8s + kubeadm reset -f + IPVS 清理
+# 未检测到 → 直接部署, 不执行清理
+# 用法: reset_kubernetes_if_needed <scope>
+# 返回: 0 = 目标节点的 kubelet API 端口(10250)已确认让出(部署可继续)
+#       1 = 仍有节点被占(调用方**必须中止** —— 见下方"真实退出码")
+#
+# ⚠ 要让路的对象不止 kubeadm 残留, 而是**任何占着 10250 的东西**, 包括 RKE2/k3s/microK8s
+#   这类第三方发行版: 它们的内嵌 kubelet 由各自的 agent 单元托管(不叫 kubelet.service),
+#   对 `kubeadm reset -f` 和 `systemctl stop kubelet` 完全免疫。
+#   2026-09-23 实机事故: 9 台节点里只有 mxgpu-3-32 的 rke2-agent 还在跑(另外 4 台装了 RKE2
+#   但已 disabled), 旧清理逻辑对它三个判据全部漏检 → 部署跑 22 分钟后才在 kubespray 的
+#   kubeadm join 阶段报 `[ERROR Port-10250]: Port 10250 is in use` 中断, 报错点离真因
+#   (RKE2 agent)隔了一整个 playbook, 且现场早已"✅ 清理完成: 7 台成功"。
 # 检查并重置节点上的旧 Kubernetes 状态(部署/扩容前清理残留)
 # 参数 scope:
 #   all — 检查并重置全部有残留的节点(全新部署场景, 旧集群将被整体替换)
@@ -1493,24 +1502,49 @@ print("%s|%s|%s" % (
         IFS='|' read -r node host user key <<< "${line}"
         [ -z "${node}" ] && continue
 
-        # 探针: 首行为远端 hostname, 其后为 YES(有残留)/NO(干净)
-        local probe
+        # 探针: 首行远端 hostname; 次行 YES(需清理)/NO(干净); 第三行起为详情(供告警点名)
+        #   判"需清理"的三个来源:
+        #     ① kubelet API 端口 10250 被监听 —— 与发行版无关的硬判据: kubeadm join 的
+        #        preflight 只要看到 10250 被占, 就 [ERROR Port-10250] 直接失败。
+        #     ② 第三方发行版单元存在(RKE2/k3s/microK8s): 即使当前没在跑也要 disable,
+        #        否则重启后复活重新占端口。
+        #     ③ kubeadm/kubespray 残留(原有判据, 全部保留 —— 每条都对应过一次实机事故)
+        local probe probe_rc=0
         probe=$(ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
             "${user}@${host}" \
             "sudo bash -c '
                 hostname
-                systemctl is-active kubelet 2>/dev/null | grep -qx active && { echo YES; exit 0; }
+                _d=\"\"
+                # ① 端口被占(kubeadm join 的硬门槛)
+                ss -lnt 2>/dev/null | grep -qE \"[:.]10250[[:space:]]\" && _d=\"\${_d}port-10250;\"
+                # ② 第三方 K8s 发行版: 内嵌 kubelet 由各自 agent 单元托管, 不叫 kubelet.service
+                for _u in rke2-agent rke2-server k3s k3s-agent microk8s; do
+                    if systemctl is-active \"\${_u}.service\" >/dev/null 2>&1; then
+                        _d=\"\${_d}\${_u}:running;\"
+                    elif [ -f \"/etc/systemd/system/\${_u}.service\" ] || [ -f \"/usr/local/lib/systemd/system/\${_u}.service\" ] || [ -f \"/lib/systemd/system/\${_u}.service\" ]; then
+                        _d=\"\${_d}\${_u}:installed;\"
+                    fi
+                done
+                # ③ kubeadm 残留
+                systemctl is-active kubelet 2>/dev/null | grep -qx active && _d=\"\${_d}kubelet:running;\"
                 # 残留 kubelet.service unit(即使 /etc/kubernetes 等目录已被手动清理, 只要 unit
                 # 还在, kubespray validate-container-engine 就误判节点曾加入集群 → 卸载
                 # docker/containerd 前先 drain → kubectl get nodes 读 admin.conf(全新部署
-                # 尚未生成) 失败, 单机重装必踩, 见 "Drain node" 报 admin.conf 不存在)
-                [ -f /etc/systemd/system/kubelet.service ] && { echo YES; exit 0; }
-                [ -f /lib/systemd/system/kubelet.service ] && { echo YES; exit 0; }
-                [ -d /etc/kubernetes ] && [ -n \"\$(ls -A /etc/kubernetes 2>/dev/null)\" ] && { echo YES; exit 0; }
-                [ -d /var/lib/etcd/member ] && { echo YES; exit 0; }
-                [ -d /var/lib/kubelet ] && [ -n \"\$(ls -A /var/lib/kubelet 2>/dev/null)\" ] && { echo YES; exit 0; }
+                # 尚未生成) 失败, 单机重装必踩, 见 “Drain node” 报 admin.conf 不存在)
+                [ -f /etc/systemd/system/kubelet.service ] && _d=\"\${_d}kubelet-unit;\"
+                [ -f /lib/systemd/system/kubelet.service ] && _d=\"\${_d}kubelet-unit;\"
+                [ -d /etc/kubernetes ] && [ -n \"\$(ls -A /etc/kubernetes 2>/dev/null)\" ] && _d=\"\${_d}etc-kubernetes;\"
+                [ -d /var/lib/etcd/member ] && _d=\"\${_d}etcd-member;\"
+                [ -d /var/lib/kubelet ] && [ -n \"\$(ls -A /var/lib/kubelet 2>/dev/null)\" ] && _d=\"\${_d}var-lib-kubelet;\"
+                [ -n \"\${_d}\" ] && { echo YES; echo \"\${_d}\"; exit 0; }
                 echo NO
-            '" 2>/dev/null || true)
+            '" 2>/dev/null) || probe_rc=$?
+        # 探测不到 ≠ 干净: 不静默跳过, 点名告警 —— 否则该节点若占着 10250,
+        # 又要等 20 分钟后 kubespray 报 [ERROR Port-10250] 才知道
+        if [ "${probe_rc}" != "0" ] || [ -z "${probe}" ]; then
+            warn "  → [${node}](${host}) 探测失败(ssh rc=${probe_rc}), 无法确认其 K8s 状态, 跳过清理"
+            continue
+        fi
 
         # 扩容: 已属于运行中集群的节点绝不重置(清单名/ansible_host/远端 hostname 匹配)
         if [ "${scope}" = "new" ]; then
@@ -1531,7 +1565,10 @@ print("%s|%s|%s" % (
         fi
 
         if grep -qx "YES" <<< "${probe}"; then
-            log "  → [${node}](${host}) 检测到旧 Kubernetes 残留"
+            # 详情行(第 3 行)用于点名"到底占了什么", 让 60 秒倒计时可判断
+            local pdet
+            pdet=$(sed -n '3p' <<< "${probe}")
+            log "  → [${node}](${host}) 检测到旧 Kubernetes 残留/占用${pdet:+ [${pdet}]}"
             found=1
             reset_targets+=("${line}")
         fi
@@ -1548,7 +1585,9 @@ print("%s|%s|%s" % (
     highlight "╔══════════════════════════════════════════════════════════╗"
     highlight "║   ⚠️  检测到节点上已有 Kubernetes 部署! ⚠️                 ║"
     highlight "║                                                          ║"
-    highlight "║  将在 60 秒后自动清理这些节点上的旧 Kubernetes 状态      ║"
+    highlight "║  将在 60 秒后自动让出这些节点(kubelet API 端口 10250)     ║"
+    highlight "║  含第三方发行版(RKE2/k3s/microK8s): 只 stop + disable     ║"
+    highlight "║  其数据目录(/var/lib/rancher 等)保留, 不卸载不删除        ║"
     highlight "║  如需中断, 请按 Ctrl+C 退出                              ║"
     highlight "╚══════════════════════════════════════════════════════════╝"
     echo ""
@@ -1561,30 +1600,52 @@ print("%s|%s|%s" % (
     printf "\r  ✅ 继续部署...                          \n"
     echo ""
 
-    # 执行 reset: kubeadm reset -f + IPVS 清理 + 删除残留(仅重置检测到残留的节点)
-    log "清理节点上的旧 Kubernetes 状态(kubeadm reset -f + IPVS 清理)..."
+    # 执行清理: 先让出 10250(第三方发行版 stop+disable) → 再 kubeadm reset -f + IPVS 清理 + 删残留
+    log "清理节点上的旧 Kubernetes 状态(第三方发行版 stop+disable + kubeadm reset -f + IPVS 清理)..."
     local reset_ok=0 reset_fail=0
     for line in "${reset_targets[@]}"; do
         IFS='|' read -r node host user key <<< "${line}"
         [ -z "${node}" ] && continue
         log "  → [${node}](${host}) 清理中..."
-        if ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+        local cleanup_out="" cleanup_rc=0
+        cleanup_out=$(ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
             "${user}@${host}" \
             "sudo bash -c '
-                kubeadm reset -f 2>/dev/null;
+                # ── ① 第三方 K8s 发行版(RKE2/k3s/microK8s): 先把 10250 让出来 ────────
+                # 它们的内嵌 kubelet 由各自的 agent 单元托管, 不叫 kubelet.service:
+                #   · kubeadm reset -f       → 对它们是完全的空操作
+                #   · systemctl stop kubelet → 停的是 kubespray 那个 unit, 停不到点子上
+                # 于是其 kubelet 继续占着 10250 → kubespray 的 kubeadm join preflight 报
+                # [ERROR Port-10250] 中断整个部署(2026-09-23 实机事故)。
+                # disable(而非只 stop): 防止节点重启后复活重新占端口。
+                # 契约是“让出端口”而非“卸载别人的集群”: 只 stop+disable, 不卸载不删数据
+                # (/var/lib/rancher 等一律原样保留)。
+                for _u in rke2-agent rke2-server k3s k3s-agent microk8s; do
+                    systemctl disable --now \"\${_u}.service\" >/dev/null 2>&1 || true
+                done
+                # 兜底: 上面的 stop 靠各自 unit 的 ExecStopPost 清理 cgroup 内的 kubelet
+                # (rke2 是 KillMode=process, 只保证杀主进程, kubelet 靠 ExecStopPost 尽力扫),
+                # 扫漏时用官方 killall 补刀 —— 它只杀进程并清理 /var/lib/cni、pod 日志等运行态,
+                # 不动 /var/lib/rancher 数据
+                if ss -lnt 2>/dev/null | grep -qE \"[:.]10250[[:space:]]\"; then
+                    [ -x /usr/local/bin/rke2-killall.sh ] && /usr/local/bin/rke2-killall.sh >/dev/null 2>&1 || true
+                    [ -x /usr/local/bin/k3s-killall.sh ] && /usr/local/bin/k3s-killall.sh >/dev/null 2>&1 || true
+                fi
+                # ── ② kubeadm/kubespray 残留(原有逻辑) ──────────────────────────────
+                kubeadm reset -f 2>/dev/null || true;
                 # 清理 IPVS 规则与 kube-ipvs0 虚拟接口
                 ipvsadm -C 2>/dev/null;
                 ip link del kube-ipvs0 2>/dev/null;
                 rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd 2>/dev/null;
                 # 清理 CNI 配置与旧插件残留(切 CNI 时旧插件配置会残留并优先于新 CNI 被
-                # kubelet 选用 → pod sandbox 报 "plugin type=cilium-cni failed: connection refused")
+                # kubelet 选用 → pod sandbox 报 “plugin type=cilium-cni failed: connection refused”)
                 rm -rf /etc/cni/net.d 2>/dev/null;
                 rm -f /opt/cni/bin/cilium* 2>/dev/null;
                 rm -rf /var/run/cilium 2>/dev/null;
                 systemctl stop kubelet 2>/dev/null || true;
                 systemctl stop etcd 2>/dev/null || true;
                 # 移除残留 kubelet systemd unit(/etc/kubernetes 等目录可能已被清空, 但 unit
-                # 文件仍在 → validate-container-engine "Ensure kubelet systemd unit exists"
+                # 文件仍在 → validate-container-engine “Ensure kubelet systemd unit exists”
                 # 误判节点已部署 → 卸载 docker/containerd 前先 drain → kubectl get nodes 读
                 # /etc/kubernetes/admin.conf(全新部署尚未生成) 失败, 单机重装必踩)
                 rm -f /etc/systemd/system/kubelet.service \
@@ -1594,15 +1655,34 @@ print("%s|%s|%s" % (
                       /etc/kubernetes/kubelet.env 2>/dev/null;
                 systemctl daemon-reload 2>/dev/null || true;
                 rm -f /etc/etcd.env /etc/systemd/system/etcd.service 2>/dev/null;
-                true
-            '" >/dev/null 2>&1; then
+                # ── ③ 复核: 10250 必须真的空出来 ──────────────────────────────────
+                # 原实现这里以 true 收尾 → ssh 恒返回 0 → “N 台成功” 是**假信号**:
+                # 2026-09-23 事故里 mxgpu-3-32 被报“清理成功”, 22 分钟后却因 10250 被占中断部署。
+                # 改成真实判据: 最多等 10s 让 LISTEN socket 释放, 仍被占则打印元凶并以非 0 退出。
+                for _i in 1 2 3 4 5 6 7 8 9 10; do
+                    ss -lnt 2>/dev/null | grep -qE \"[:.]10250[[:space:]]\" || exit 0
+                    sleep 1
+                done
+                echo \"PORT_BUSY: 10250 仍被占用, kubeadm join 必然失败:\"
+                ss -lntp 2>/dev/null | grep -E \"[:.]10250[[:space:]]\" | head -3
+                _pid=\$(ss -lntp 2>/dev/null | grep -E \"[:.]10250[[:space:]]\" | grep -oE \"pid=[0-9]+\" | head -1 | cut -d= -f2)
+                [ -n \"\${_pid}\" ] && ps -o pid,lstart,cmd -p \"\${_pid}\" | tail -1
+                exit 1
+            '" 2>&1) || cleanup_rc=$?
+        if [ "${cleanup_rc}" = "0" ]; then
             reset_ok=$((reset_ok + 1))
         else
-            warn "  ${node}: 清理失败, 跳过"
             reset_fail=$((reset_fail + 1))
+            warn "  ${node}: 清理后 kubelet API 端口(10250)仍未让出(ssh rc=${cleanup_rc}):"
+            if [ -n "${cleanup_out}" ]; then printf '%s\n' "${cleanup_out}" | sed 's/^/      /'; fi
         fi
     done
-    log "✅ 清理完成: ${reset_ok} 台成功, ${reset_fail} 台失败"
+    if [ "${reset_fail}" -gt 0 ]; then
+        log "⚠ 清理完成: ${reset_ok} 台成功, ${reset_fail} 台失败(元凶见上方输出)"
+        return 1
+    fi
+    log "✅ 清理完成: ${reset_ok} 台成功(10250 均已确认让出)"
+    return 0
 }
 
 cmd_install() {
@@ -1612,8 +1692,11 @@ cmd_install() {
     cmd_check
     # 依据 hosts.yml 自动同步 all.yml 的 API 负载均衡/SAN 配置
     update_loadbalancer_all_yml
-    # 部署前: 检查并重置旧 Kubernetes 状态(检测到残留才 reset; 全新部署覆盖全部节点)
-    reset_kubernetes_if_needed all
+    # 部署前: 检查并重置旧 Kubernetes 状态(检测到残留/第三方 K8s/10250 被占 才清理;
+    # 全新部署覆盖全部节点)。清理后仍被占 → 立刻中止: 否则要等 20 分钟后 kubespray 在
+    # join 阶段才报 [ERROR Port-10250], 报错点离真因隔了一整个 playbook(2026-09-23 事故)
+    reset_kubernetes_if_needed all \
+        || err "节点 10250 端口清理未通过(元凶见上方输出), 已中止部署"
     log "注入离线安装变量..."
     OFFLINE_VARS="${INVENTORY_DIR}/group_vars/all/offline.yml"
     {
@@ -1727,7 +1810,9 @@ cmd_scale() {
     update_loadbalancer_all_yml
     # 扩容前: 仅检查并重置"新加入"节点上的旧 Kubernetes 状态
     # (已在运行集群中的节点绝不重置; 无法获取集群状态时跳过全部 reset)
-    reset_kubernetes_if_needed new
+    # 新节点若占着 10250 同样是硬失败(与全量部署同理), 中止优于 20 分钟后才报
+    reset_kubernetes_if_needed new \
+        || err "新节点 10250 端口清理未通过(元凶见上方输出), 已中止扩容"
 
     # 确保离线变量文件存在
     OFFLINE_VARS="${INVENTORY_DIR}/group_vars/all/offline.yml"

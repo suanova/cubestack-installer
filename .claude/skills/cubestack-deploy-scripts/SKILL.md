@@ -231,6 +231,46 @@ python3 -c "print([i for i,l in enumerate(open('模块.sh'),1) if not l.strip().
 
 然后 **`bash -n` + `tools/check-modules.sh` 双绿**才算过。
 
+### 变体: `ssh host "sudo bash -c '...'"` 内嵌远端脚本 —— 注释里的 ASCII 引号会**静默拆散载荷**
+
+同一条规则的另一面: 内嵌脚本外层 `"..."`、内层 `'...'`, 若**注释里出现未转义的 ASCII 双引号**,
+本地 shell 会提前闭合外层引号 → 这次 ssh 调用的参数被**拆成多个**。bash/ssh 会把额外参数用
+**一个空格**重新拼接成远端命令, 所以**多数时候看起来是好的**(只是注释里少俩引号、多几个空格),
+直到引号奇偶性被带偏, 把后面**功能性代码**里的 `$()`、`[[:space:]]`、`)` 拖进错误的引用状态 ——
+那时才炸, 且报错点离真因很远(2026-09-23 实测: `deployments/kubespray/cubestack-offline.sh` 的
+内嵌清理脚本被拆成 2 个参数, 断点落在注释 `见 "Drain node" 报 ...`)。
+
+**落地规则**: 内嵌远端脚本内的注释**不要用 ASCII 双引号**, 改用全角 `“ ”`(多字节, 对 shell 完全惰性)。
+
+**自检(比肉眼可靠)**: 用 stub `ssh` 把真正发给远端的载荷打出来, 看**参数个数**:
+
+```bash
+cat > /tmp/pt.sh <<'OUTER'
+#!/bin/bash
+key=/tmp/k; user=ubuntu; host=10.0.0.1
+ssh() { echo "### ssh 收到 $# 个参数 ###"; local i=1 a; for a in "$@"; do
+    if [ $i -ge 10 ]; then echo "--- arg$i ---"; printf '%s\n' "$a"; fi; i=$((i+1)); done; }
+OUTER
+sed -n "${P1},${P2}p" 脚本.sh >> /tmp/pt.sh   # P1/P2 = 该 ssh 调用的行范围
+printf '\nprintf "%%s\\n" "$probe"\n' >> /tmp/pt.sh
+bash /tmp/pt.sh    # 期望: 除 ssh 选项外**只有 1 个参数**(即整段远端脚本)
+```
+
+⚠ 必须**逐字核对功能性行**是否原样送达(`$(...)`、`\"` 转义、`[[:space:]]`), 不能只看"跑通了"。
+
+### 另一条同源坑: 同一条 `local` 里, 赋值右侧**先于**赋值求值
+
+```bash
+local rel="$1" src="${REPO_ROOT}/${rel}"   # ❌ ${rel} 取的是**外层**同名变量, 不是刚赋的 $1
+local rel="$1"                             # ✅ 分行写
+local src="${REPO_ROOT}/${rel}"
+```
+
+只在外层恰好存在同名变量且值相同时才"看起来正常" —— 2026-09-23 在 `sync-to-container.sh` 实测:
+`sync_one` 仅从 `for rel in PATHS` 循环调用, 外层 `rel` 恰等于 `$1`, 所以一直没暴露;
+一旦换调用方式, `src` 会退化成 `${REPO_ROOT}/` → `docker cp` 把**整个仓库根**(含 971M kubespray
+源码树与 `.git`)灌进容器。
+
 ## 常用调度命令
 
 ```bash
@@ -426,6 +466,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - [ ] 引用的工具脚本存在于 `tools/<领域>/` 且路径正确
 - [ ] **(装 chart 的模块)chart 已 vendored 到 `cubestack-addon/<组件>/`(tgz 附 `.digest` 边车)且已 `git add`**
 - [ ] **(装 chart 的模块)走 `helm_chart_ensure` 恒用本地副本;缺副本时 `err` 退出并给获取方法**
+- [ ] **(改含内嵌远端脚本的文件)注释里没有 ASCII 双引号**(用全角 `“ ”`); 改完用 stub `ssh` 数参数个数, 确认载荷没被拆散
 - [ ] `bash deployments/scripts/tools/check-modules.sh` exit 0(含第 ⑩ 项离线副本检查)
 - [ ] `deploy-cluster.sh --list-steps` 能看到新模块
 - [ ] 不影响其他模块(未改他人元数据/文件名)
