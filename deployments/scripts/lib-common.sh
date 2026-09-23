@@ -442,7 +442,10 @@ load_config() {
     fi
     # 全局派生变量(由 cluster.conf 变量派生, 各脚本直接引用, 不各自设置本地变量):
     #   API_IP       API 入口地址 = APISERVER_ADDRESS(默认第一个 master IP; 显式设置时保留)
+    #                ⚠ "能通 NodePort 的节点 IP"语义 —— registry mirror 与 DNAT 判定依赖它。
+    #                要写 API_DOMAIN 的域名解析时**别用它**, 用 api_entry_ip()(见该函数说明)。
     #   API_DOMAIN   API Server 域名(跨网段统一入口), 默认 k8s-api.cubestack.io
+    #                (其解析地址 = api_entry_ip(): kube-vip 已绑 → VIP, 否则首个 master)
     API_IP="${API_IP:-${APISERVER_ADDRESS:-}}"
     API_DOMAIN="${API_DOMAIN:-${APISERVER_DOMAIN:-k8s-api.cubestack.io}}"
     export API_IP API_DOMAIN
@@ -922,6 +925,48 @@ kube_vip_is_bound() {
         fi
     done
     return 1
+}
+
+# API 入口地址(**域名解析专用**)= kube-vip 已绑 → VIP; 否则第一个 master。
+#
+# ⚠ 与 API_IP 的分工, 二者**不可互换**:
+#   API_IP        = "一个能通 NodePort 的**节点** IP", 恒为首个 master。registry 的 containerd
+#                   mirror(`http://${API_IP}:${REGISTRY_NODEPORT}`)与 setup-api-expose 的 DNAT
+#                   判定都依赖"这是一台真实节点"。若改成 VIP 会坏两处:
+#                     ① VIP 不代理 NodePort → 扩容的新节点拉不到 registry 镜像;
+#                     ② 宿主机被装一条 `DNAT VIP:6443 → master01:6443`, 把 kube-vip 的高可用打回单点。
+#   API_ENTRY_IP  = "集群 API 该从哪个地址进" —— /etc/hosts 里 API_DOMAIN 的解析、kubeconfig 用。
+#                   本函数只服务后者; 写域名的调用点用它, 其余一律继续用 API_IP。
+#
+# 判据与两阶段切换同款(见 kube_vip_resolve_target): **VIP 此刻是否真的绑上了**。
+#   VIP 已绑 → 用 VIP(域名真正指向高可用入口)
+#   VIP 未绑 → 首个 master —— 全新集群首次部署时 kube-vip 还没起来(k8s_hosts 早于 k8s_deploy),
+#              此时指向 VIP 等于指向一个空地址, 会把首次部署自己搞挂。
+#
+# 成本: kube_vip_is_bound 要 SSH 逐台 master 探测, 故本函数**不进 load_config 热路径**,
+#   由调用方按需调用 + 一次运行内缓存。且只对"已知的 VIP"(K8S_API_VIP 或库存记录)探测 ——
+#   不做候选地址扫描(那是 kube_vip_derive 的活, 代价高, 属安装期行为)。
+# 用法: API_ENTRY_IP="$(api_entry_ip)" || exit 1
+api_entry_ip() {
+    [ -n "${API_ENTRY_IP_CACHE:-}" ] && { printf '%s' "${API_ENTRY_IP_CACHE}"; return 0; }
+    local m1; m1="$(first_master_ip)" || return 1
+    local entry="${API_ENTRY_IP:-}"          # cluster.conf 显式设置优先
+
+    if [ -z "${entry}" ] && bool_is_true "${KUBE_VIP_ENABLED:-true}"; then
+        local vip="${K8S_API_VIP:-}"
+        [ -n "${vip}" ] || vip="$(kube_vip_recorded_address)"
+        # 排除自相矛盾的配置(VIP 实为节点 IP / 落在 MetalLB 池内)后才值得去探测
+        if [ -n "${vip}" ] && [ "${vip}" != "${m1}" ] \
+           && kube_vip_is_viable_candidate "${vip}" \
+           && kube_vip_is_bound "${vip}"; then
+            entry="${vip}"
+        elif [ -n "${vip}" ]; then
+            vlog "API 域名: VIP ${vip} 未绑定 → 仍指向首个 master ${m1}(未绑定时指向 VIP 等于指向空地址)"
+        fi
+    fi
+
+    API_ENTRY_IP_CACHE="${entry:-${m1}}"
+    printf '%s' "${API_ENTRY_IP_CACHE}"
 }
 
 # 阶段判定: 决定本次运行 API 入口地址取什么值(两阶段切换的核心, 见 docs/kube-vip-api-ha.md 第 7 节)

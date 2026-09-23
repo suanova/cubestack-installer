@@ -339,9 +339,14 @@ docker save <img> -o /tmp/x.tar && skopeo copy docker-archive:/tmp/x.tar docker:
 **解法(根治)** 每次部署由模块修正 /etc/hosts:
 ```
 registry.cubestack.io → REGISTRY_IP(集群 registry VIP, 如 10.66.1.130)
-k8s-api.cubestack.io → API_IP(全裸金属=第一个 master, 如 10.66.1.232)
+k8s-api.cubestack.io → API_ENTRY_IP(kube-vip 已绑 → VIP; 否则第一个 master)
 ```
 不留 10.66.3.37 这类过期条目。
+
+> ⚠ 两个域名的目标 IP 语义**不同**, 别照抄成同一个变量:
+> `REGISTRY_IP` / `API_IP` 是"能通 NodePort 的**节点** IP"(registry 的 containerd mirror、DNAT 判定依赖它),
+> 而 API 域名的解析地址是 `api_entry_ip()` —— kube-vip 已绑时取 VIP。把 API 域名指向 `API_IP`
+> 会让 kube-vip 的高可用形同虚设(入口仍是单台 master)。详见 `docs/kube-vip-api-ha.md`。
 
 #### 3.6 driver / maca 镜像拉不到(`ErrImagePull: ... not found`)
 

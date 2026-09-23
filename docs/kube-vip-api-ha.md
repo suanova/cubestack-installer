@@ -235,6 +235,24 @@ KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"      # 留空=kube-vip 自动检测
 `supplementary_addresses_in_ssl_keys` 中的各 master IP **保持不动**(第 6 节改为按节点
 宣告自身 IP 后,这些 IP 仍是必需的)。
 
+> **2026-09-23 补充 —— 部署侧写域名的几个地方也收敛了。** 上面讲的是 kubespray 侧。部署框架
+> 自己还有若干处会写 `k8s-api.cubestack.io` 的解析(`03_k8s_hosts`、`07_k8s_scale` 推给新节点、
+> `tools/node/sync-hosts.sh`、`tools/node/prepare-workers.sh`、`tools/lb/setup-api-expose.sh`、
+> `06_gpu_operator`、`07_gpu_lws`),原先是**一律写第一个 master** —— 与 kubespray 阶段二写入的
+> VIP **互相打架**(谁后跑谁生效),典型表现是"kube-vip 装好了,域名却还指着单台 master"。
+>
+> 现统一收敛到 `lib-common.sh` 的 **`api_entry_ip()`**: **VIP 已绑 → VIP,否则第一个 master**。
+>
+> ⚠ **判据是"VIP 已绑",不等于阶段二的人工确认。** 也就是说 VIP 一绑上,部署侧写的域名就会切到
+> VIP,而 kubespray 侧(`loadbalancer_apiserver.address`)仍要等 `KUBE_VIP_SWITCH_CONFIRMED=1`。
+> 在"已绑但未确认"这个窗口里两边**不一致**:此刻 VIP 确实在服务,部署侧先切不影响可用性,但
+> 若希望两边严格同步,就别在那个窗口里跑 `03_k8s_hosts`(`UPDATE_ETC_HOSTS=0`,默认即不跑)。
+>
+> ⚠ **`API_IP` 与 `API_ENTRY_IP` 不可互换。** `API_IP` 是"能通 NodePort 的**节点** IP":
+> registry 的 containerd mirror 用 `http://${API_IP}:${REGISTRY_NODEPORT}`、`setup-api-expose`
+> 的 DNAT 判定也依赖它。VIP **不代理 NodePort**,改成 VIP 会让扩容的新节点拉不到镜像;
+> DNAT 分支还会给 VIP 装一条打回 master01 的规则,把高可用废掉。
+
 ---
 
 ## 6. 实现落点(逐文件)

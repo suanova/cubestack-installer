@@ -34,9 +34,11 @@ SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/n
 [ -f "${SSH_KEY}" ] || { err "SSH 密钥不存在: ${SSH_KEY}, 先运行 gen-ssh-key.sh"; exit 1; }
 
 # 宿主机解析块(与 sync-hosts.sh 一致)
-# API_IP / API_DOMAIN 由 lib-common load_config 统一提供(从 cluster.conf 派生), 不再本地设置
+# API_DOMAIN 的解析地址 = api_entry_ip()(kube-vip 已绑 → VIP, 未绑 → 首个 master),
+# 不是 API_IP(那是"能通 NodePort 的节点 IP"语义, 见 lib-common 该函数说明)。
+API_ENTRY_IP="$(api_entry_ip)" || exit 1
 HOSTS_BLOCK="# >>> cubestack-cluster
-${API_IP}          ${API_DOMAIN}"
+${API_ENTRY_IP}          ${API_DOMAIN}"
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
     node_parse "${line}"

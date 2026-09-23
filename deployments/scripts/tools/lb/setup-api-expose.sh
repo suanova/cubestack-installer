@@ -5,7 +5,7 @@
 # 用途: kubespray 生成的 admin.conf 证书 SAN 通常含 API_DOMAIN(如 k8s-api.cubestack.io)
 #       但不含 master 直连 IP(如 10.66.1.232 / 10.244.1.11)。宿主侧要让 kubectl/helm 能经
 #       API_DOMAIN 访问集群, 需要:
-#         1) /etc/hosts: API_DOMAIN → API_IP(统一=第一个 master IP, VM/裸金属均不使用宿主机物理 IP)
+#         1) /etc/hosts: API_DOMAIN → API_ENTRY_IP(kube-vip 已绑 → VIP; 未绑 → 第一个 master)
 #         2) DNAT: 仅当 API_IP != 第一个 master 时才需要(本脚本默认直连 master, 无需 DNAT)
 #   本脚本幂等写入 /etc/hosts 并校验 API 可达(重复执行安全), 顺带清理历史遗留的 6443 DNAT。
 # 用法: sudo ./setup-api-expose.sh [--delete]
@@ -35,12 +35,15 @@ done
 [ -n "${API_IP}" ] || { err "API_IP 未派生(需 load_config 提供)"; exit 1; }
 [ -n "${API_DOMAIN}" ] || API_DOMAIN="k8s-api.cubestack.io"
 
-# /etc/hosts 确保 API_DOMAIN → API_IP
+# /etc/hosts 确保 API_DOMAIN → API_ENTRY_IP
 # ★ 关键: 无论目标 IP 是否已匹配, 都先删除该域名的【所有旧行】(换环境时旧 IP 残留会
-#   让 getent hosts 命中旧 IP → kubectl 打到旧集群 → 误报失败), 再写当前 API_IP 一行。
+#   让 getent hosts 命中旧 IP → kubectl 打到旧集群 → 误报失败), 再写当前一行。
 #   复用 lib-common 的 ensure_hosts_entry(先删旧行再写, 无 grep 守卫 → 多集群不残留旧 IP)。
-ensure_hosts_entry "${API_IP}" "${API_DOMAIN}"
-ok "/etc/hosts 写入 ${API_DOMAIN} → ${API_IP}(先删旧 IP 残留, 确保只有一行)"
+# ⚠ 域名用 api_entry_ip()(kube-vip 已绑 → VIP; 未绑 → 首个 master), **不是** API_IP ——
+#   下面的 DNAT 判定仍必须用 API_IP(节点 IP 语义), 两者不可互换, 见 lib-common 该函数说明。
+API_ENTRY_IP="$(api_entry_ip)" || exit 1
+ensure_hosts_entry "${API_ENTRY_IP}" "${API_DOMAIN}"
+ok "/etc/hosts 写入 ${API_DOMAIN} → ${API_ENTRY_IP}(先删旧 IP 残留, 确保只有一行)"
 
 # ---------------- DNAT 管理(仅当 API_IP ≠ 第一个 master 时需要) ----------------
 # 默认 API_IP = 第一个 master IP(VM/裸金属统一), 宿主机直连 master:6443, 无需 DNAT。
