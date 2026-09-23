@@ -11,7 +11,7 @@
 #     ⚠ 仓库名带 -chart 后缀, 不是 cubepilot —— 曾经写错, 那个仓库根本不存在)。
 #     该项目**公开只读**, 通常免凭据即可拉; 私有化后用 CUBEPILOT_HARBOR_USER/PASSWORD。
 #   · **只下载 tgz, 不 --untar 解包**: 部署模块在部署时直接 helm install <tgz>,
-#     仓库只保留小体积 tgz, 避免代码库体积膨胀(与 envoy/lws 的 tgz-only 约定一致)。
+#     仓库只保留小体积 tgz, 避免代码库体积膨胀(与 lws 的 tgz-only 约定一致)。
 #   · 版本联动: main 分支 → 0.1.0-latest(镜像 tag 为 latest);
 #     正式 tag vX.Y.Z → X.Y.Z(镜像 tag 同为 X.Y.Z)。本脚本只负责 chart, 镜像另用
 #     cubepilot-save-images.sh(其 CUBEPILOT_IMAGE_TAG 派生规则与模块一致)。

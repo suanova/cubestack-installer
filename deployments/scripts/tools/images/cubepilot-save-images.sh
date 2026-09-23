@@ -9,7 +9,7 @@
 #   cubepilot-operator  → operator.image
 #   cubepilot-api       → api.image
 #   cubepilot-web       → web.image(仅内置 Portal 启用时需要; CUBEPILOT_WEB_ENABLED=true)
-# 获取顺序(与 envoy-save-images.sh 一致, 逐级兜底):
+# 获取顺序(与 metax-save-images.sh 一致, 逐级兜底):
 #   ① 本地 docker 已有该镜像 → docker save
 #   ② docker pull(5 次重试)→ docker save
 #   ③ skopeo copy docker:// → docker-archive(docker 不可用时兜底)

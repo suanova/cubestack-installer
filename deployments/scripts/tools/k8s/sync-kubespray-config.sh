@@ -334,8 +334,8 @@ if [ -f "${ADDONS_YML}" ] && [ "${REGISTRY_ENABLED:-0}" = "1" ]; then
             if ! grep -qE '^[[:space:]]*registry_service_loadbalancer_ip:' "${ADDONS_YML}"; then
                 sed -i -E "s|^([[:space:]]*)registry_service_type:.*|&\n\1registry_service_loadbalancer_ip: ${REGISTRY_IP}|" "${ADDONS_YML}"
             fi
-            # 共用 VIP 许可(见上方 _sync_registry_annotations 说明): 监控 Grafana 与 registry
-            # 共用一个 MetalLB VIP、以端口区分(5000 registry / 3000 grafana)。
+            # 共用 VIP 许可(见上方 _sync_registry_annotations 说明): 允许 registry 与
+            # 其它 Service 共用一个 MetalLB VIP、以端口区分(registry 占 5000)。
             _sync_registry_annotations "${SHARED_VIP_ANNOTATION}" "${SHARED_VIP_KEY}"
             ok "已同步 registry Service → LoadBalancer:${REGISTRY_IP}(允许共用 VIP: ${SHARED_VIP_ANNOTATION}=${SHARED_VIP_KEY})"
             ;;

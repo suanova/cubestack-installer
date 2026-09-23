@@ -1,3 +1,0 @@
-gatewayAPI:
-  safeUpgradePolicy:
-    enabled: true

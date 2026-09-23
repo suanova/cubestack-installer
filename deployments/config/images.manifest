@@ -22,20 +22,20 @@
 # ── Harbor 目标路径规则(唯一规则, 见 lib-image-manifest.sh 的 image_mirror_ref) ──
 #     mirrors/<注册域>/<仓库路径>:<tag>         上游注册域 ≠ Harbor 时
 #     mirrors/<仓库路径>:<tag>                  上游就在同一台 Harbor 上时(去掉域名前缀)
-#   例: docker.io/grafana/grafana:13.2.1-distroless
-#         → harbor.isuanova.com/mirrors/docker.io/grafana/grafana:13.2.1-distroless
+#   例: registry.k8s.io/sig-storage/csi-provisioner:${CSI_PROVISIONER_VERSION}
+#         → harbor.isuanova.com/mirrors/registry.k8s.io/sig-storage/csi-provisioner:<tag>
 #       harbor.isuanova.com/suanova/cubepilot-api:latest
 #         → harbor.isuanova.com/mirrors/suanova/cubepilot-api:latest
 #   ⚠ 保留注册域是有意的: 上游 ref 是 Harbor 路径的**后缀**, 因此离线 tar 按上游 ref
-#     命名(如 registry.k8s.io/kube-state-metrics_kube-state-metrics_v2.20.0.tar)时,
+#     命名(如 registry.k8s.io_sig-storage_csi-provisioner_v5.1.0.tar)时,
 #     各部署模块原有的 *<repo>_<tag>.tar 通配仍然命中, 无需改动匹配逻辑。
 #
-# ── 特例: "上游就是本台 Harbor"的组(metax-gpu / cubepilot / bmc)**默认不镜像** ──
+# ── 特例: "上游就是本台 Harbor"的组(metax-gpu / cubepilot)**默认不镜像** ──
 #   它们本就在本台 Harbor 上(metax/ 与 suanova/ 项目), "集群不访公网"的目标**已经达成**
 #   —— 对应部署模块现在就直接从那些项目拉取, 无需任何改动。再复制一份到 mirrors/ 只会
 #   多占一份存储(实测 8.4 GB)且每次版本升级都要重跑, 故默认跳过。
 #   判据是推导的(注册域 == HARBOR_MIRROR_REGISTRY), 不是硬编码名单。
-#   真要那份副本: harbor-sync-images.sh --include-same-harbor --group metax-gpu,cubepilot,bmc
+#   真要那份副本: harbor-sync-images.sh --include-same-harbor --group metax-gpu,cubepilot
 #   (它们仍列在本清单里, 因为清单同时承担"本仓库用到哪些镜像"的登记职责。)
 #
 # ── 校验 ──────────────────────────────────────────────────
@@ -105,69 +105,16 @@ ceph      registry.k8s.io/sig-storage/csi-snapshotter:${CSI_SNAPSHOTTER_VERSION}
 ceph      registry.k8s.io/sig-storage/snapshot-controller:${SNAPSHOT_CONTROLLER_VERSION}
 
 # ------------------------------------------------------------
-# [group: prometheus] kube-prometheus-stack(Prometheus Operator 全栈)
-#   目录: deployments/offline-files/prometheus/
-#   ⚠ KSM 与 node-exporter **不在本组** —— 它们是独立监控组件, 各自有 group/目录
-#     (kube-state-metrics / node-exporter), 见下方。本组只放 operator/prometheus/
-#     alertmanager/grafana 及各自 sidecar。
-# ------------------------------------------------------------
-prometheus  quay.io/prometheus-operator/prometheus-operator:${PROMETHEUS_APP_VERSION}
-prometheus  quay.io/prometheus-operator/prometheus-config-reloader:${PROMETHEUS_APP_VERSION}
-prometheus  quay.io/prometheus-operator/admission-webhook:${PROMETHEUS_APP_VERSION}
-prometheus  quay.io/prometheus/prometheus:${PROMETHEUS_IMAGE_PROMETHEUS}
-prometheus  quay.io/prometheus/alertmanager:${PROMETHEUS_IMAGE_ALERTMANAGER}
-prometheus  docker.io/grafana/grafana:${PROMETHEUS_IMAGE_GRAFANA}
-prometheus  quay.io/kiwigrid/k8s-sidecar:${PROMETHEUS_IMAGE_SIDECAR}
-prometheus  docker.io/jkroepke/kube-webhook-certgen:${PROMETHEUS_IMAGE_CERTGEN}
 
-# ------------------------------------------------------------
-# [group: perses] Perses 云原生看板(P1 可视化; 模块 18_perses)
-#   目录: deployments/offline-files/perses/
-#   chart 是 **经典 helm repo 制品**(perses.github.io), 不是镜像, 不在此清单 ——
-#     它 vendored 在 cubestack-addon/perses/perses-<ver>.tgz, 由 tools/images/perses-fetch-charts.sh 刷新。
-#   ⚠ sidecar 与 prometheus 组**是同一个软件**(kiwigrid/k8s-sidecar), 但上游注册域不同:
-#     本组用 docker.io(chart 的 sidecar.image.registry 默认值), prometheus 组用 quay.io。
-#     两者推入内置 registry 后落点是同一个仓库路径(kiwigrid/k8s-sidecar),
-#     所以先跑的那个推、后跑的 reg_has_tag 跳过 —— 不会重复传, 也不会冲突。
-#   ⚠ Perses 镜像 tag **带 v 前缀**(v0.54.0), 与 chart 的 appVersion 一致。
-# ------------------------------------------------------------
-perses  docker.io/${PERSES_IMAGE_NAME}:${PERSES_IMAGE_VERSION}
-perses  docker.io/${PERSES_SIDECAR_IMAGE_NAME}:${PERSES_SIDECAR_IMAGE_VERSION}
-
-# ------------------------------------------------------------
-# [group: kube-state-metrics] 集群对象状态指标(监听 API Server)
-#   目录: deployments/offline-files/kube-state-metrics/
-#   由 kube-prometheus-stack 以 subchart 部署; 但 tag/来源独立维护, 便于单独升级与离线备料。
-#   ⚠ tag 带 v 前缀(v2.20.0), 裸 2.20.0 在 registry 上不存在。
-# ------------------------------------------------------------
-kube-state-metrics  registry.k8s.io/kube-state-metrics/kube-state-metrics:${PROMETHEUS_IMAGE_KSM}
-
-# ------------------------------------------------------------
-# [group: node-exporter] 节点级主机指标(DaemonSet, hostNetwork)
-#   目录: deployments/offline-files/node-exporter/
-#   ⚠ tag 带 v 前缀(v1.12.1); ⚠ distroless=false 时拉的是带 shell 的镜像(见 08_prometheus 的 --set)
-# ------------------------------------------------------------
-node-exporter  quay.io/prometheus/node-exporter:${PROMETHEUS_IMAGE_NODE_EXPORTER}
-
-# ------------------------------------------------------------
-# [group: kubelet-cadvisor] 容器指标(内置于 kubelet, **无独立镜像**)
-#   目录: deployments/offline-files/kubelet-cadvisor/(占位, 只放说明文档)
-#   kubelet 在 10250 暴露 /metrics、/metrics/cadvisor、/metrics/probes, 由 Prometheus
-#   Operator 通过 chart 内置的 kubelet ServiceMonitor 自动抓取 —— **无需部署, 无镜像可同步**。
-#   本组刻意留空(不声明任何镜像), 以文档形式固定"这里确实不需要镜像"这一结论。
-#   端到端验证见 modules/03_addon/28_verify_prometheus.sh(check_cadvisor)。
 # ------------------------------------------------------------
 
 # ------------------------------------------------------------
-# [group: envoy] Envoy Gateway + Envoy AI Gateway(二件套)
-#   目录: deployments/offline-files/envoy/
-#   ⚠ 数据面 envoy 的 tag 与 EG 控制面版本**不同**(ENVOY_PROXY_VERSION, 如 distroless-v1.39.1)
-#   ⚠ ai-gateway-* 官方源在 docker.io(不是 ghcr)
+
 # ------------------------------------------------------------
-envoy  docker.io/envoyproxy/gateway:${ENVOY_EG_VERSION}
-envoy  docker.io/envoyproxy/envoy:${ENVOY_PROXY_VERSION}
-envoy  docker.io/envoyproxy/ai-gateway-controller:${ENVOY_AI_VERSION}
-envoy  docker.io/envoyproxy/ai-gateway-extproc:${ENVOY_AI_VERSION}
+
+# ------------------------------------------------------------
+
+# ------------------------------------------------------------
 
 # ------------------------------------------------------------
 # [group: multus] Multus CNI(容器多网卡)
@@ -217,17 +164,6 @@ cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-api:${CUBEPILOT_IM
 cubepilot  ${CUBEPILOT_HARBOR}/${CUBEPILOT_PROJECT}/cubepilot-web:${CUBEPILOT_IMAGE_TAG}
 
 # ------------------------------------------------------------
-# [group: bmc] BMC 带外监控(bmc-oem-exporter + idrac-exporter)
-#   目录: deployments/offline-files/bmc/
-#   ⚠ **本组默认不镜像到 mirrors/**: 与 cubepilot 同理 —— 上游就是本台 Harbor 的 suanova
-#     项目, 部署模块(33_bmc_exporter)直接从那里拉取到本地 tar 再推入集群内置 registry,
-#     再复制一份到 mirrors/ 只多占存储且每次镜像更新都要重跑。
-#   ⚠ 两个 exporter 上游只发 :latest(main 线), **会跟上游漂移** → 33_bmc_exporter 用
-#     <tar>.digest 边车文件比对私服 digest, 未变才跳过下载(不白传)。
-#   ⚠ cubestack-bmc-exporter-chart 是 **OCI chart 制品**, 不是镜像, 不在此清单(helm pull 直接取)。
-# ------------------------------------------------------------
-bmc  ${BMC_EXPORTER_HARBOR}/${BMC_EXPORTER_PROJECT}/bmc-oem-exporter:${BMC_EXPORTER_IMAGE_TAG}
-bmc  ${BMC_EXPORTER_HARBOR}/${BMC_EXPORTER_PROJECT}/idrac-exporter:${BMC_EXPORTER_IMAGE_TAG}
 
 # ------------------------------------------------------------
 # [group: metax-gpu] 沐曦 GPU Operator

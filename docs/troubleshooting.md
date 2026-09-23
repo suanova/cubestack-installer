@@ -417,46 +417,7 @@ kubectl get validatingwebhookconfiguration lws-validating-webhook-configuration 
 
 ---
 
-### 5. Envoy Gateway / Envoy AI Gateway 部署故障速查
-
-> 分析/部署/使用详见 `docs/envoy-gateway.md`。
-
-**症状/排查对照**
-
-| 症状 | 根因 | 解法(根治) |
-|---|---|---|
-| `15_envoy_gateway.sh` 报 "EG chart 目录不存在/缺 Chart.yaml" | 离线 chart 未备料(联网机未跑 fetch 工具) | 联网机执行 `tools/images/envoy-fetch-charts.sh`(或手动 helm pull gateway-helm 解包)后拷到 `deployments/cubestack-addon/envoy-gateway/eg/` |
-| 部署报 "未找到 envoyproxy/gateway:... 镜像" | 离线镜像未备料 | 联网机执行 `tools/images/envoy-save-images.sh`, tar 放入 `deployments/offline-files/envoy/`(或本地 docker daemon 先 docker pull); 已备 tar 可单独跑 `tools/images/envoy-load-images.sh` 预加载 |
-| 部署后控制面/certgen 或数据面 pod `ImagePullBackOff`(docker.io 不可达) | chart 镜像未改写为集群内置 registry(gateway-helm v1.9.1 正确路径: 控制面/certgen `deployment.envoyGateway.image.repository/tag`, 数据面 `global.images.envoyProxy.image`; 旧写法 `image.repository` / `envoyGateway.image.*` 顶层不存在, 无效果) | 确认 15 模块 helm 安装已注入上述正确 `--set`; 已装错可 `helm upgrade eg <chart> --set deployment.envoyGateway.image.repository=registry.cubestack.io:5000/envoyproxy/gateway --set deployment.envoyGateway.image.tag=v1.9.1 --set global.images.envoyProxy.image=registry.cubestack.io:5000/envoyproxy/envoy:distroless-v1.39.1` 修复(certgen Job 会随模板变化重建), 或直接重跑 15 模块(内部先 delete ns) |
-| 创建 Gateway 后数据面 pod `CrashLoopBackOff`, 日志 `PARSE ERROR: Argument: --cpuset-threads` | **数据面 envoy 镜像 tag 用错**(用了 EG 版本号如 `envoy:v1.9.1`, 拉到远古 Envoy; EG 1.9.x 配套数据面 tag 应为 `ENVOY_PROXY_VERSION`=distroless-v1.39.1, 用 `kubectl exec deploy/envoy-gateway -- envoy-gateway version` 核对) | 15 模块已改为 `push_one envoy ... ${ENVOY_PROXY_VERSION}` + helm `global.images.envoyProxy.image` 用 ENVOY_PROXY_VERSION; 已错: 在联网机用 envoy-save-images.sh(已修)重新 save `envoyproxy/envoy:distroless-v1.39.1`, 离线推入 registry 后重跑 15 模块 |
-| `GatewayClass eg` 未 Accepted | 控制面未就绪 / controllerName 不匹配 | `kubectl -n envoy-gateway-system logs deploy/eg --tail=50`; GatewayClass 的 `spec.controllerName` 必须是 `gateway.envoyproxy.io/gatewayclass-controller` |
-| Gateway 一直没 VIP(ADDRESS 空) | MetalLB 池耗尽/网段冲突, 或数据面未起来 | `kubectl describe gateway` 看条件; `kubectl get svc -n <gw-ns>` 看 LoadBalancer pending 原因(参考 §三.1/§三.2) |
-| `16_envoy_ai_gateway.sh` 报 "未检测到 Envoy Gateway(GatewayClass eg 未 Accepted)" | AI 依赖 EG, 但 EG 未装/未就绪 | 先 `ENVOY_GATEWAY_ENABLED=true` 部署模块 `envoy_gateway`, 再装 AI |
-| AI 控制器 pod CrashLoop / webhook 不生效(v1.x) | `envoyGateway.namespace` 未指向 EG 命名空间 / EG 版本不匹配(AI 与 EG 版本兼容矩阵) | 确认模块 16 helm 安装注入 `--set envoyGateway.namespace` = `envoy-gateway-system`(`kubectl -n ai-gateway-system get deploy ai-gateway-controller -o yaml \| grep envoyGatewayNamespace`); 核对 AI↔EG 版本兼容矩阵 |
-| AI CRD apply 报 `no matches for kind "AIGateway"` | v1.x 无 AIGateway/Backend CRD(改为 AIServiceBackend/AIGatewayRoute); 或 CRD 未装 | `kubectl get crd \| grep aigateway`; 按 `docs/envoy-gateway.md` §4.2 / 官方 `examples/basic/basic.yaml` 使用 v1.x 资源 |
-| 部署报 "未找到 skopeo" | 推送镜像到集群内置 registry 需要 `skopeo` | 宿主机安装 `skopeo`(如 `apt install skopeo`), 或使用项目 CLI 镜像(`tools/docker/build-cli-context.sh` 内置 skopeo-1.16.1-amd64) |
-| `Gateway` 长期 `Programmed=False (AddressNotAssigned)`, 数据面 Service 是 `LoadBalancer` 且 `EXTERNAL-IP <pending>`, 但 NodePort 别名能访问 | Gateway 注解 `gateway.envoyproxy.io/service-type: NodePort` 在 **EG v1.9.1 未生效**(实测: 注解在, 控制器仍建 LoadBalancer 类型数据面; 集群无 MetalLB → 永远无地址 → 条件不转 True) | 访问不受影响(入口 = `tools/lb/gateway-nodeport.sh` 建的固定别名 `<gw>-external`)。要让状态转绿: 跑一次 `tools/lb/gateway-nodeport.sh <gw>` —— 它把数据面 Service 转成 NodePort 后 EG 立即置 `Programmed=True`(2026-09-17 实测)。**别只信注解** |
-| HTTPRoute `ResolvedRefs=False`, 经网关访问 404/500 | backendRef 指向的 Service 不存在 | 核对 `kubectl -n <ns> get svc`。典型踩坑: CubePilot 写 `svc/cubepilot` —— 那是**内置 Portal 的 nginx 入口**, 仅 `web.enabled=true` 时才渲染; 关 Portal 的部署里只有 `svc/cubepilot-api`(两条路由需各自门控: API `cubepilot-api:8080` 恒有 / Portal `cubepilot:8080` 需 `CUBEPILOT_WEB_ENABLED=true`) |
-
-**验证**
-```bash
-sudo ./deploy-cluster.sh --steps verify_envoy_gateway      # 控制面 + GatewayClass + VIP + 真实 HTTP 转发
-sudo ./deploy-cluster.sh --steps verify_envoy_ai_gateway   # AI 控制器 + CRD + 资源调和(运行时 CRD 版本自动分支)
-sudo ./scripts/tools/images/envoy-load-images.sh           # (可选)独立预加载镜像到集群内置 registry
-kubectl get gatewayclass,gateway,httproute -A
-kubectl get aiservicebackend,aigatewayroute -A
-```
-
-**相关命令**
-```bash
-kubectl -n envoy-gateway-system get pods,cm envoy-gateway    # EG 控制面 + 运行时配置
-kubectl -n ai-gateway-system logs deploy/ai-gateway-controller --tail=50
-kubectl -n <gw-ns> get deploy -l gateway.envoyproxy.io/owning-gateway-name=<gw> -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'   # 数据面镜像
-```
-
----
-
-### 6. Ceph / Rook 部署故障速查
+### 5. Ceph / Rook 部署故障速查
 
 > 设计与离线流程见 `docs/ceph-rook.md`。
 
@@ -495,136 +456,7 @@ kubectl -n rook-ceph get cephcluster,cephblockpool; kubectl get sc ceph-block
 
 ---
 
-### 7. 平台统一网关(原 cubestack-gateway)—— 模块已移除
-
-> ⚠ **2026-09-18: 模块 `33_cubestack_gateway.sh` 与 `deployments/cubestack-addon/gateway/`
-> (基座 `base-gateway.yaml` + `routes/*.yaml` + README)已从仓库删除。**
-> 网关(Gateway)与路由(HTTPRoute)统一改由**专门的网关模块**创建(尚在重构中), 各组件模块不再自建网关与路由。
->
-> - 与模块无关的两条**通用 EG 现象**(`Programmed=False (AddressNotAssigned)` / `ResolvedRefs=False`)
->   已上移到 **§三.5 Envoy Gateway 故障速查**;
-> - 设计要点(单入口多 hostname、路由须晚于后端组件下发、固定别名入口等)保留在
->   `docs/envoy-gateway.md` §2.1b, 供新模块落地时参考;
-> - 历史实现与当时的排查过程见 git: `1cfbcf0`(引入)/ `45afb4a`(修路由静默缺失 + 模块重排 18→33)。
->
-> ⚠ 已部署过旧模块的集群: 网关资源**不会被自动删除**(模块只是不再被调度), 需要时手工清:
-> `kubectl delete gateway cubestack-gateway -n cubestack-gateway-system; kubectl delete ns cubestack-gateway-system`。
-
----
-
-### 8. CubeStack 可观测性落地(kube-prometheus-stack values / recording rules / dashboards / mx-exporter / BMC)
-
-**背景:** 按 `suanova/cubestack` 的 `observability/docs/installer-requirements.md` 把 recording rules、
-dashboard、mx-exporter、BMC exporter 落到安装环境。实现细节与需求对照见
-**`docs/prometheus-observability.md`**; 这里只沉淀**故障模式**(全部是"静默失效"类 ——
-不报错、不失败, 只是功能不生效)。
-
-#### 8.1 `kubectl get prometheusrule` 有 CR, 但 `/api/v1/rules` 里没有 cubestack 规则
-
-**症状:** 6 个 PrometheusRule 对象都建出来了, `kubectl get prometheusrule -n monitoring | grep cubestack`
-看得到, 但 Prometheus 里查不到对应规则组 —— **没有任何报错**。
-
-**根因:** **CR 存在 ≠ 规则被加载**。加载与否取决于 Prometheus CR 的 `ruleSelector` 能否选中该 CR。
-两种典型写法都会踩:
-- 按需求文档 §1.2 字面写 `ruleSelector.matchLabels: {app.kubernetes.io/part-of: cubestack-observability}`
-  → 能选中 CubeStack 规则, **但会把 chart 自带的 35 个 PrometheusRule 一起丢掉**
-  (它们带的是 `release: <release名>` + `part-of: kube-prometheus-stack`);
-- 只给 CubeStack 规则打 `release` 标签、不动 selector → 反过来只有默认规则在。
-
-**解法:** 用 `matchExpressions` 取**并集**(`In [cubestack-observability, kube-prometheus-stack]`),
-即同时覆盖两边。`08_prometheus.sh` 已如此实现, 并且**额外**给 CubeStack 规则补 `release` 标签作冗余
-(静默失效代价太大, 值这一层保险)。详见 `docs/prometheus-observability.md` §2.2。
-
-**验证:** 别用 `kubectl get prometheusrule` 判断 —— 用 `/api/v1/rules` 逐组断言,
-或直接 `--steps verify_prometheus`(⑥ 段就是干这个的)。
-
-#### 8.2 写了 `serviceMonitorSelector: {}` 却没生效, 跨 ns 的 ServiceMonitor 全丢
-
-**症状:** values 里明明写了 `serviceMonitorSelector: {}`(想全选), 但 `kubectl get prometheus -o jsonpath='{.spec.serviceMonitorSelector}'`
-输出的是 `{"matchLabels":{"release":"kube-prometheus"}}` —— 跨 namespace 的 ServiceMonitor
-(如 metax-operator 里的 mx-exporter)因此全被忽略。
-
-**根因:** chart 的 `prometheus.yaml` 模板是 `if selector → else if *NilUsesHelmValues → else {}`,
-而 `serviceMonitorSelectorNilUsesHelmValues` **默认 true** → 空 `{}` 被**改写**成 `release: <release名>`。
-**"写 `{}` 并不等于全选"**, `ruleSelector` / `scrapeConfigSelector` 同理。
-
-**解法:** 要全选必须**同时**置对应的 `*SelectorNilUsesHelmValues: false`。
-三组 selector 与配套开关见 `docs/prometheus-observability.md` §2.3。
-
-#### 8.3 KSM label allowlist 不生效(所有 `kube_pod_labels` join 全空)
-
-**症状:** recording rule 的 `* on(namespace,pod) group_left(label_ai_cubestack_io_*) kube_pod_labels{...}`
-结果为空, 但 KSM pod 正常、`kube_pod_labels` 本身有数据。
-
-**根因:** allowlist 没配上(或被 `--set` 切断)。这个值**含逗号**:
-`pods=[a,b,c],statefulsets=[d]` —— 逗号既是值的分隔符也是 `--set` 的键分隔符,
-用 `--set` 传必被切成畸形键, 静默为空。
-
-**解法:** 走 **values 文件**(`-f`)而不是 `--set`; 并核对 KSM pod 的 args 里那串是完整的:
-```bash
-kubectl -n monitoring get deploy <KSM名> -o jsonpath='{.spec.template.spec.containers[0].args}' | tr ',' '\n' | grep -c 'part-of'
-```
-**另有一条实测结论:** allowlist **只作用于 `<resource>_labels` 指标**,
-**不会**加到 `kube_statefulset_replicas` / `kube_pod_status_ready` 这类指标上
-(2026-09-20 用 KSM v2.20.0 实机确认)。所以要那些指标带 label 时必须走 join ——
-本仓库的 recording rules 已全部按 join 实现。源仓库 `docs/dependencies.md` §2.1 里
-`count(kube_statefulset_replicas{label_ai_cubestack_io_dev_environment!=""})` 那种直接过滤的写法
-会返回空(其 recording rules 实际并未这么写, 是散文与实现的偏差)。
-
-#### 8.4 node-exporter 的 `--collector.infiniband` 加上去了, RDMA 指标还是空
-
-**症状:** `node_infiniband_*` 一个都没有, RDMA dashboard 无数据。
-
-**根因(两种):**
-1. 覆盖 `extraArgs` 时**只写了新增的那一条** —— Helm 对 **list 是整体替换不是合并**,
-   chart 默认的两条 filesystem 过滤被一起删掉(这个会顺带让 `node_filesystem_*` 指标爆炸);
-   反过来说, 如果连默认两条都没了, 说明覆盖写法本身就错了。
-2. 误以为要额外挂载 `/sys/class/infiniband` —— **不需要**: chart 已把宿主 `/sys` 挂到 `/host/sys`
-   并传了 `--path.sysfs=/host/sys`, infiniband collector 走的就是 sysfsPath。
-   (与 §三.6/`10_rdma` 那次"无 IB 设备节点挂 `/sys/class/infiniband` 报 operation not permitted"
-   是两回事, 别混。)
-
-**解法:** 覆盖 `extraArgs` 时把 chart 默认两条**原样带上**, 第三条才是 `--collector.infiniband`。
-`08_prometheus.sh` 已如此实现并注释了原因。
-
-#### 8.5 BMC exporter 起来了、target 是 up, 但指标全空
-
-> ⚠ **先破除一个误导: `up{job="bmc-oem-exporter"} == 1` 不代表 BMC 是通的。**
-> 该 exporter 走 `/probe?target=<ip>` 的**多目标**模式 —— 目标 BMC 不可达/凭据错时,
-> 它只是返回"探测失败", **exporter 自己仍然 `up=1`**。真正的目标健康在
-> **`bmc_pcie_scrape_success`**(0/1, 每 BMC 一条)。
-> (`idrac-exporter` 走 `/metrics?target=` 则是另一种: 目标不可达时**抓取直接失败 → up=0**。
->  两个 exporter 模式不同, 别用同一套判断。)
->
-> 2026-09-20 实测: 指向不可达 IP 时 4 条 `up` 序列里有 2 条为 1,
-> 而 `bmc_pcie_scrape_success` 全为 0 —— **只看 `up` 会得到假绿灯**。
-
-**症状:** exporter pod Running, `up` 有值, 但 BMC 相关指标没有数据
-(或 `bmc_pcie_scrape_success == 0`)。
-
-**根因(按概率):**
-1. **`BMC_HOSTS` 里的 IP 不是该环境的真实 BMC** —— 主机 ↔ BMC **不是按末位对应的**,
-   按规律推会连到别的机器/连不通;
-2. 节点到 BMC 管理网段不通(部署机探不到 BMC 网段, 必须在**节点侧**测);
-3. `BMC_HOSTS` 没设或口令错 → 早已被模块的硬校验拦下, 不会走到这一步
-   (但**口令错但格式对**不会被拦, 表现为 scrape 失败 —— 这时看 exporter 日志的 401);
-4. ScrapeConfig 的 `release` 标签与 Prometheus CR 的 `scrapeConfigSelector` 不匹配
-   → **ScrapeConfig 根本不生效**(但不会报错)。
-
-**解法/排查:**
-```bash
-kubectl -n monitoring get scrapeconfig | grep bmc                  # 有对象吗
-kubectl -n monitoring get deploy | grep bmc                        # 两个 deployment 都 Ready 吗
-# 查**目标层**健康, 而不是 up:
-#   bmc_pcie_scrape_success == 0        → BMC 没通/凭据错
-#   up{job="idrac-exporter"} == 0       → 同上(这个 exporter 的抓取本身就失败)
-kubectl -n monitoring logs deploy/cubestack-bmc-exporter-bmc-oem-exporter | tail -20   # 看 401/timeout
-# 从**节点**侧测 BMC 可达性(不是从部署机):
-ssh <master> "timeout 5 bash -c '</dev/tcp/<BMC_IP>/443' && echo ok"
-```
-模块部署时会自动从**节点侧**探测每个 BMC 的 443 并给出告警 —— 出现告警就别急着看 dashboard。
-
-#### 8.6 新增配置项后, 宿主机 `check-modules.sh` 通过、容器内报 `TOGGLE 未声明`
+### 6. 新增配置项后, 宿主机 `check-modules.sh` 通过、容器内报 `TOGGLE 未声明`
 
 **症状:** 加了一个带 `TOGGLE` 的新模块, 宿主机 `bash deployments/scripts/tools/check-modules.sh` 全绿,
 同步进部署容器后容器内校验报 `TOGGLE=XXX 未在 cluster.conf.example 中声明默认值`。
@@ -640,51 +472,31 @@ ssh <master> "timeout 5 bash -c '</dev/tcp/<BMC_IP>/443' && echo ok"
 docker cp deployments/config/cluster.conf.example <容器>:/opt/cubestack-installer/deployments/config/
 ```
 
-#### 8.7 大 dashboard 导入失败: `metadata.annotations: Too long: may not be more than 262144 bytes`
+### 7. 大 ConfigMap 用客户端 apply 报 `metadata.annotations: Too long: may not be more than 262144 bytes`
 
-**症状:** 11 个 Grafana 看板里**只有 `node-exporter-1860` 一个**导入失败(其余 10 个正常),
-`kubectl get cm -l grafana_dashboard=1` 少一个, 但 Grafana 里只表现为"少了那个看板"。
+**症状:** 批量导入一堆配置(实测: 11 个 Grafana 看板 JSON 中**只有 460KB 的那一个**失败, 其余 10 个正常),
+`kubectl get cm -l <label>` 少一个, 但组件侧只表现为"少了那一条", 没有任何报错。
 
 **根因:** 客户端 `kubectl apply` 会把**整个配置**存进
 `kubectl.kubernetes.io/last-applied-configuration` 注解, 该注解有 **256KiB 硬上限**。
-`node-exporter-1860.json` 460KB → 生成的 ConfigMap 约 522KB → 必超。
+460KB 的 JSON → 生成的 ConfigMap 约 522KB → 必超。
 **与 ConfigMap 自身 1MiB 的容量上限无关** —— 卡的是注解, 不是对象大小, 所以"才 522KB 怎么会超"
 的直觉是错的。只有它失败正是因为只有它过了这条线。
 
 **解法:** 大对象一律用 **`kubectl apply --server-side`**(服务端 apply 不走该注解):
 
 ```bash
-kubectl create configmap <名> -n monitoring --from-file=<文件> --dry-run=client -o yaml \
+kubectl create configmap <名> -n <ns> --from-file=<文件> --dry-run=client -o yaml \
   | kubectl apply --server-side -f -
 ```
-`08_prometheus.sh` 的看板块已改用 `--server-side`(实机验证 522KB 正常创建, label 与 data 完整)。
+(实机验证: 522KB 的 ConfigMap 正常创建, label 与 data 完整。)
 
-**通用教训:** 任何可能超过 256KiB 的 ConfigMap / Secret 都不要用客户端 apply。
-另外, **模块里管道 apply 时别把 stderr 全 `2>/dev/null` 吞掉** —— 这条错误信息就这么被吞过,
-只剩一句"导入失败", 排查时得手工重放才知道是注解超限。
+**通用教训:**
+1. 任何可能超过 256KiB 的 ConfigMap / Secret 都不要用客户端 apply;
+2. **模块里管道 apply 时别把 stderr 全 `2>/dev/null` 吞掉** —— 上面这条错误信息就这么被吞过,
+   只剩一句"导入失败", 排查时得手工重放才知道是注解超限。
 
-#### 8.8 `--steps prometheus` 每次都报 "operator 180s 内未 Ready", 但 operator 明明是 Running
-
-**症状:** 模块第 4 步稳定输出 `⚠ operator 180s 内未 Ready`, 而 `kubectl -n monitoring get deploy`
-显示 operator 1/1 Running 已很久。
-
-**根因:** 模块原来查的是 `rollout status deploy ${RELEASE}-operator`, 但 chart 生成的
-operator Deployment 名是 **`<release>-kube-prome-operator`**(kube-prometheus-stack 对子组件
-加了 `kube-prome-` 中缀)。名字对不上 → `NotFound` → `rollout status` 恒非零 → 恒报未就绪。
-**这条告警从来没成功过**, 属于"永久假告警"。
-
-**解法:** 不硬编码名字, 按名字动态查(与 `31_cubepilot.sh` 同款):
-```bash
-_OP_DEPLOY="$( (SSH "${K}" -n "${NS}" get deploy -o name) | sed -n 's#.*/##p' | grep -m1 'operator' )"
-```
-已在 `08_prometheus.sh` 修复(2026-09-20)。
-
-**为什么要修这种"无害"的假告警:** 它会训练所有人忽略这条告警 —— 真出问题时没人看。
-排查成本最低的正是这类"一直都有, 不用管"的输出。
-
----
-
-### 9. RDMA 共享设备插件: pool 模式 selectors.ifNames 只剩第一块网卡(其余卡静默不匹配)
+### 8. RDMA 共享设备插件: pool 模式 selectors.ifNames 只剩第一块网卡(其余卡静默不匹配)
 
 **症状**
 `RDMA_HCA_MODE=pool` + 自动检测时, 日志里检测到 N 块 RDMA 网卡, 但生成的 ConfigMap 里
@@ -727,7 +539,7 @@ kubectl -n kube-system get cm rdma-devices -o go-template='{{index .data "config
 
 ---
 
-### 10. RDMA 资源名与真实 GPU 集群不一致 → Pod 申请 `rdma/hca_shared_devices` 永久 Pending
+### 9. RDMA 资源名与真实 GPU 集群不一致 → Pod 申请 `rdma/hca_shared_devices` 永久 Pending
 
 **症状**
 同一份 Pod 清单在真实 GPU 集群能跑, 在本安装器部署的集群上 Pending:
@@ -759,7 +571,7 @@ kubectl describe node <节点> | grep -A5 rdma/             # 节点上真正注
 
 ---
 
-### 11. kube-vip 控制面负载均衡(`lb_enable`):`lb_fwdmethod: local` 是**静默零效果**,且 ipvs 模式集群上还有一道 kube-proxy 关卡
+### 10. kube-vip 控制面负载均衡(`lb_enable`):`lb_fwdmethod: local` 是**静默零效果**,且 ipvs 模式集群上还有一道 kube-proxy 关卡
 
 **症状**
 给 kube-vip 的 manifest 加 `lb_enable: true`(其余不动)后**没有任何报错**,日志还会打
@@ -865,12 +677,12 @@ kubectl -n kube-system rollout restart daemonset/kube-proxy
 
 ---
 
-### 12. kube-vip 的三个"以为收敛了其实没有":关开关不清理 / 每轮白重启两次 / 全新集群部署中断
+### 11. kube-vip 的三个"以为收敛了其实没有":关开关不清理 / 每轮白重启两次 / 全新集群部署中断
 
 三个问题的根因相邻(都是"目标状态与实际状态不一致,但没有任何东西去发现它"),
 于 2026-09-22 一并修复。设计说明见 `docs/kube-vip-api-ha.md` 第 18 节。
 
-#### 12.1 `KUBE_VIP_ENABLED=false` 重跑后,manifest 还在、VIP 还被持有
+#### 11.1 `KUBE_VIP_ENABLED=false` 重跑后,manifest 还在、VIP 还被持有
 
 **症状**
 把开关改成 `false` 重跑,日志只有一行 `跳过 kube-vip(配置 KUBE_VIP_ENABLED=true 可启用)`,
@@ -911,7 +723,7 @@ done
 > ⚠ **阶段二下不能直接关**:API 入口已经指向 VIP 时删 kube-vip = 全集群 API 立刻失联。
 > 模块会**硬拦停**并给出两步走法(先把入口退回 master01 → 再关开关清理)。
 
-#### 12.2 每次全量运行,master01 上的 kube-vip 都会重启两次
+#### 11.2 每次全量运行,master01 上的 kube-vip 都会重启两次
 
 **症状**
 每跑一次全量部署,`crictl ps` 里 master01 的 kube-vip 容器 `started-at` 都会变
@@ -959,7 +771,7 @@ ssh <master01> "sudo sha256sum /etc/kubernetes/manifests/kube-vip.yml"
 > 证书 SAN(`kubeadm-setup.yml:48` 的 `sans_kube_vip_address` 只看它是否定义)。删掉它会导致
 > 下次开回来时证书重签。
 
-#### 12.3 全新集群部署在 `k8s_deploy` **之前**就中断了
+#### 11.3 全新集群部署在 `k8s_deploy` **之前**就中断了
 
 **症状**
 全新环境跑全量部署,日志走到 `k8s_ntp` 之后、`k8s_deploy` 之前就报:
@@ -997,49 +809,6 @@ sudo ./deploy-cluster.sh --list | grep 本次执行模块
 
 # 确认 --steps 没被 REQUIRES 拖大
 sudo ./deploy-cluster.sh --steps kube_vip --list | grep 本次执行模块
-```
-
----
-
-### 13. Grafana 只给了 port-forward(以为暴露了, 实际是 ClusterIP): `PROMETHEUS_EXPOSE_MODE` 继承了 `metallb` 但 case 只认 `loadbalancer`
-
-**症状:** `SERVICE_EXPOSE_MODE=metallb` 部署完成后, monitoring 里的 Grafana 仍是 ClusterIP;
-模块末尾打印的是 `kubectl -n monitoring port-forward svc/kube-prometheus-grafana 3000`;
-`kubectl -n monitoring get svc` 里没有任何 `*-external` 的 LoadBalancer/NodePort。**全程零报错。**
-
-**根因:** 全局开关取值是 `metallb`, 而 `08_prometheus.sh` 里 `PROMETHEUS_EXPOSE_MODE` 的 `case`
-只认 `nodeport|loadbalancer|clusterip` —— `metallb` 落进 `*)`(本意是"用户显式要求仅集群内")被**静默**
-当 ClusterIP 处理。同段代码的 `PERSES_EXPOSE_MODE` 有一样的坑(Ceph 那套两种写法都认, 所以没暴露出来)。
-
-**解法(根治):** ① 模式归一化: `metallb|loadbalancer|lb → loadbalancer`、`nodeport|np → nodeport`、
-空|`clusterip|none → clusterip`, 无法识别的值**告警**后按 clusterip(不再静默)。
-② 监控暴露改为**独立 `<svc>-external` Service**(不动的 helm 管的 Service → helm 升级不会把类型改回去),
-并支持与 registry **共用一个 MetalLB VIP**、以端口区分(registry 5000 / Grafana 3000):
-
-- MetalLB 共用 IP 的硬前提(缺一不可): 每个共用方都带同一个 sharing key 注解
-  (`metallb.universe.tf/allow-shared-ip`, v0.13.x 的键名)、端口不重叠、
-  `externalTrafficPolicy` 一致(都 `Cluster`)、两边都显式请求同一 IP(`spec.loadBalancerIP`)。
-- registry 侧注解**写进 kubespray manifest**(`addons.yml` 的 `registry_service_annotations`, 由
-  `tools/k8s/sync-kubespray-config.sh` 同步)→ kubespray 每次重跑 apply 都带着它, 不会被冲掉;
-  存量集群(manifest 还没这行)由模块幂等 `kubectl annotate --overwrite` 兜住。
-- ⚠ 官方文档说"注解在 Service 创建后再改无效" —— **本环境(v0.13.9)实测不成立**: 给存量 registry 补注解后
-  新 Service 立刻共用了同一 VIP。所以"存量集群补注解"这条路可用, 但仍把注解写进 manifest, 不依赖该行为。
-
-**验证(2026-09-22 实机, 全部通过)**
-```bash
-kubectl -n monitoring get svc kube-prometheus-grafana-external -o wide  # EXTERNAL-IP=10.66.1.130, 3000:31255
-kubectl -n monitoring get endpoints kube-prometheus-grafana-external    # 有真实后端(证明 selector 正确)
-kubectl -n kube-system get svc registry                                # 仍持有同一 VIP(5000:30991), 未受影响
-curl -s -o /dev/null -w '%{http_code}\n' http://10.66.1.130:3000/api/health  # 200(真实 Grafana 健康 JSON)
-curl -s -o /dev/null -w '%{http_code}\n' http://10.66.1.130:5000/v2/         # 200(registry 未受影响)
-```
-
-**相关命令**
-```bash
-# 默认只暴露 Grafana; 要连 Prometheus 一起: cluster.conf PROMETHEUS_EXPOSE_PROMETHEUS=true
-# 不共用 registry 的 VIP(另分一个 MetalLB 地址): cluster.conf PROMETHEUS_SHARE_REGISTRY_VIP=false
-# ⚠ 已 done 的模块会被 `--steps prometheus` 跳过 → 补跑直接执行模块脚本:
-bash deployments/scripts/modules/03_addon/08_prometheus.sh
 ```
 
 ---
@@ -1154,7 +923,7 @@ curl -u u:p "$API/api/v2.0/projects/<project>/repositories/${enc_repo}/artifacts
 **解法(根治):** 目标写成 `docker-archive:<file>:<上游 ref>`, 且 ref 用**上游 ref**
 (与 docker save 产出一致, 既有模块的通配/内容匹配都不用改)。
 **验证:** `bash -c 'source deployments/scripts/lib-common.sh; tar_first_image_tag <tar>'`
-应打印 `quay.io/prometheus/node-exporter:v1.12.1`。
+应打印 `<上游 ref>`, 如 `registry.k8s.io/pause:3.10`(与 tar 名后缀一致)。
 
 #### 3.5 Harbor 项目不存在导致 push 失败(仓库会自动建, 项目不会)
 
@@ -1199,7 +968,8 @@ gh secret set HARBOR_MIRROR_PASSWORD --repo <owner>/<repo>
 **关键证据(如何判定"是重写而非上游变化"):**
 - 源 digest `sha256:ee6521f290b2168b...` 与库 digest `sha256:e9622b01071c38e4...`
   在连续 3 次运行中**各自稳定、始终不等** —— 上游真换了内容的话, 变化的是**源侧** digest。
-- 对照: 同批 `quay.io/prometheus/node-exporter:v1.12.1`(6 平台 docker manifest list)
+- 对照: 同批的另一个多架构镜像(6 平台 docker manifest list; 当时取的是
+  `quay.io/prometheus/node-exporter:v1.12.1`, 该镜像已随监控栈移除, 此处仅作测量记录)
   源/库 digest 完全一致、正常跳过 ⇒ **特定镜像触发, 不是所有多架构镜像都这样**。
 
 **解法(根治):** `skopeo copy` 加 `--preserve-digests`(要求原样保留源侧 manifest/list 的

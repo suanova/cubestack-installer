@@ -124,7 +124,7 @@ REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-blo
 > - `03_ceph_csi` 等 ceph-csi 控制器/插件就绪(最长 240s), 然后创建 `CephBlockPool rbd-pool` + `StorageClass ceph-block`;
 > - `05_k8s_registry` 配置完成后**额外等待** `registry-pvc Bound + pod Ready + /v2/ 可达`
 >   (默认 `REGISTRY_WAIT_SECONDS=600`, 覆盖首次 RBD 卷创建 + 镜像下载);
->   任一层未就绪即硬失败并给出排查指引 —— 避免后续 push 镜像的模块(gpu_operator/envoy/...)
+>   任一层未就绪即硬失败并给出排查指引 —— 避免后续 push 镜像的模块(gpu_operator/cubepilot/...)
 >   ImagePullBackOff 且难以定位。
 >
 > 就绪判定链完整覆盖 ceph 集群 → csi → registry 三级依赖, 无需人工 sleep:

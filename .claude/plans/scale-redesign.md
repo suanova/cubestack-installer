@@ -1,14 +1,14 @@
 # 扩容(worker 节点)流程重构方案
 
 ## 目标
-1. `--with-scale` 只做扩容,绝不连带执行 operator(gpu_operator/lws/envoy 等)或 k8s_deploy
+1. `--with-scale` 只做扩容,绝不连带执行 operator(gpu_operator/lws/ceph 等)或 k8s_deploy
 2. 扩容前先登录首个 master 核对**实际集群节点**,基于实际节点做 diff,集群不可达则中止(绝不盲扩)
 3. 修复 kubespray runc role `apt-get remove runc` 失败(apt 状态被 workerbm 的 `dpkg -i` 破坏)
 4. 扩容只对新节点上传/安装(workerbm/ntp/registry 配置),不重复触碰已有节点
 5. inventory/registry 保持默认: 首个 master 节点 IP(nodeport 模式 REGISTRY_IP=首 master, API 入口=首 master, 已由 load_config 派生, 不改)
 
 ## 现状问题(已核实)
-- `deploy-cluster.sh:127` `--with-scale` 仅 `ENABLE_ARG+=scale` → resolve_run_steps 默认全量 + scale 一起跑 → 连带 gpu_operator/gpu_lws/envoy_gateway/envoy_ai_gateway(用户日志实锤, 停在 gpu_operator 推镜像)
+- `deploy-cluster.sh:127` `--with-scale` 仅 `ENABLE_ARG+=scale` → resolve_run_steps 默认全量 + scale 一起跑 → 连带 gpu_operator/gpu_lws 等默认启用的 operator(用户日志实锤, 停在 gpu_operator 推镜像)
 - `07_k8s_scale.sh:130-134` 内部调子模块(vm_sshkey/passwordless/workerbm/hosts/ntp)时**未传 ONLY_HOSTS** → 对全部节点(含已有 worker)重复装 21 个离线包
 - `07_k8s_scale.sh:9` `REQUIRES: k8s_deploy` → `--steps k8s_scale` 时闭包可能拉入 k8s_deploy 重装集群(**覆盖风险**)
 - `tools/node/install-worker-packages.sh:71-72` `sudo dpkg -i ... | tail -5 && rm` — 远端 shell 无 pipefail, dpkg 失败退出码被 tail(0) 吞掉 → 半装 curl 25 导致 apt 状态损坏 → 之后 kubespray runc role `apt-get remove runc` 报 `E: Unmet dependencies`

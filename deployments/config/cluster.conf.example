@@ -10,7 +10,6 @@
 # ║ ① SSH_DEFAULT_PASSWORD  节点 SSH 默认密码(NODES 中密码为 "-" 时使用)   ║
 # ║ ② NODES                集群节点(role,hostname,ip,ssh_user,ssh_password)║
 # ║ ③ METALLB_POOL         MetalLB 负载均衡地址池(与节点同二层且空闲)      ║
-# ║ ④ GRAFANA_ADMIN_PASSWORD  Grafana 管理员口令(默认 admin/admin)         ║
 # ║                                                                        ║
 # ║ · 裸金属集群: 必须手动填 NODES 全部节点 + METALLB_POOL 物理网段空闲段   ║
 # ║ · 虚拟机集群: NODES 由 tools/vm/create-vms.sh 自动注入, 通常无需手改;   ║
@@ -35,34 +34,26 @@ NODES=(
 #   池内 IP 与节点同一二层网络且空闲; 多集群务必避免与其他集群 LB IP 冲突
 METALLB_POOL="10.66.1.131-10.66.1.132"   # ⚠ 必须排除已被其他集群/主机占用的地址(曾用 130-139 把 registry 分到别的集群 VIP 导致镜像拉取失败)
 
-# ---- ④ Grafana 管理员口令(必改; 默认 admin/admin, ★ 生产/对外暴露前务必改掉) ----
-#   · 口令只经临时 values 文件(600, 用后即删)传给 helm, 不进 argv(ps 可见);
-#   · 留空 或 仍为 CHANGE_ME → 08_prometheus 模块在 helm 之前直接报错退出(留空时 helm 会随机
-#     生成口令存进 secret, 用户无法预知 —— 实测环境因此手工重置过, 故不接受留空)。
-GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
-GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin}"
-
 # ════════════════════════════════════════════════════════════
 # ★★ 组件启停开关(全部集中在此, 一键启停; 按阶段分组) ★★
 # 设 1/true 启用, 0/false 关闭。只改这里即可启停组件, 不用翻各阶段配置。
 # 各组件详细参数仍在下方对应阶段(此块只保留开关, 避免两处维护)。
 # ════════════════════════════════════════════════════════════
 
-# ---- 服务暴露方式(全局开关; 决定 registry/ingress-nginx/Envoy Gateway 的对外暴露形态) ----
+# ---- 服务暴露方式(全局开关; 决定 registry/ingress-nginx 的对外暴露形态) ----
 # 支持参数(默认二选一, 互斥 —— 要么 nodeport 要么 metallb, 不能同时):
 #   nodeport(默认) = NodePort 暴露(不依赖 MetalLB 与 L2 同网段空闲 IP; 外部访问 <任一节点IP>:<NodePort>)
 #                   · 自动关闭 MetalLB; registry → NodePort(REGISTRY_NODEPORT 31148)
 #                   · ingress-nginx(若启用) → NodePort(30080/30081)
-#                   · Envoy Gateway 数据面 → NodePort(已创建的 Gateway 用 tools/lb/gateway-nodeport.sh 转换)
 #   metallb         = MetalLB LoadBalancer VIP 暴露(生产; 需 METALLB_POOL 提供同网段空闲 IP)
-#                   · registry 固定 VIP / ingress 80,443 / EG 数据面 VIP
+#                   · registry 固定 VIP / ingress 80,443
 # 大小写不敏感: 任意大小写组合均接受(判断前先 tr 转小写, 如 nodeport/NodePort/nodePort/NODEPORT
 #   统一归一化为 nodeport); 其它任何值(如 loadbalancer)一律归一化为 metallb。
 # ⚠ nodeport 模式(默认, 自动连通, 无需手动配置): 默认通过**集群第一个 IP(首个 master)**访问内置服务 ——
 #   REGISTRY_IP 自动 = 首个 master IP; 节点 containerd 经 hosts.toml 镜像直连 <首个master>:REGISTRY_NODEPORT
 #   拉取 registry.cubestack.io 镜像(客户端侧改写, 不依赖节点 iptables); 宿主机 registry.cubestack.io:5000 由
 #   deploy-registry.sh 自动 DNAT 到首个 master 的 REGISTRY_NODEPORT(systemd 持久化)。
-#   显式设 REGISTRY_IP 可覆盖; 集群外 push 另见 REGISTRY_EXPOSE_HOST / ENVOY_PUSH_ENDPOINT(阶段三 3.2)。
+#   显式设 REGISTRY_IP 可覆盖; 集群外 push 另见 REGISTRY_EXPOSE_HOST(阶段三 3.2)。
 # 各服务仍可单独覆盖: REGISTRY_SERVICE_TYPE(见阶段三 3.2); ingress-nginx 在 kubespray addons.yml。
 SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-nodePort}"
 
@@ -122,123 +113,12 @@ REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"               # 集群内置 Registry(
 GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 沐曦 GPU Operator(默认启用; 见 4.1)
 LWS_ENABLED="${LWS_ENABLED:-true}"                      # LeaderWorkerSet(LLM 工作负载调度; 默认启用; 见 4.2)
 LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"  # LWS DisaggregatedSet(解耦推理; 见 4.2)
-PROMETHEUS_ENABLED="${PROMETHEUS_ENABLED:-true}"       # Prometheus+Operator 监控(P1; 见 4.3)
-PERSES_ENABLED="${PERSES_ENABLED:-true}"               # Perses 云原生看板(P1 可视化; 默认启用; 见 4.3b)
-# ---- Prometheus 监控底座(kube-prometheus-stack; 详见 deployments/cubestack-addon/observability/prometheus/README.md) ----
-# chart vendored 于 cubestack-addon/observability/prometheus/(默认 90.0.0); 刷新: tools/images/prometheus-fetch-charts.sh
-# 离线镜像: 联网机 tools/images/prometheus-save-images.sh 下载 tar → 08_prometheus 模块推送进内置 registry
-PROMETHEUS_NAMESPACE="${PROMETHEUS_NAMESPACE:-monitoring}"        # 监控命名空间
-# helm release 名(决定 Service/PrometheusCR 等对象名, 如 <release>-grafana / <release>-prometheus)。
-# ⚠ 改动会影响: BMC 导出器的 ScrapeConfig releaseLabel、dashboard 的 instance 过滤、各验证脚本的断言;
-#   已有环境请勿轻易改(改了等于换一套对象名), 需同步 BMC_EXPORTER_* 相关配置并重跑相关模块。
-PROMETHEUS_RELEASE_NAME="${PROMETHEUS_RELEASE_NAME:-kube-prometheus}"
-PROMETHEUS_RETENTION_DAYS="${PROMETHEUS_RETENTION_DAYS:-15d}"     # Prometheus 数据保留时长
-PROMETHEUS_STORAGE_SIZE="${PROMETHEUS_STORAGE_SIZE:-50Gi}"   # Prometheus PVC 容量(不指定 SC, 用系统默认 StorageClass)
-# 监控对外暴露: 空=随 SERVICE_EXPOSE_MODE(nodeport / metallb)。也可显式写:
-#   metallb | loadbalancer → *-external LoadBalancer Service(MetalLB VIP; 两者同义)
-#   nodeport               → *-external NodePort(不依赖 MetalLB)
-#   clusterip              → 仅集群内(给 port-forward 指引)
-PROMETHEUS_EXPOSE_MODE="${PROMETHEUS_EXPOSE_MODE:-}"
-# 默认只暴露 Grafana(Prometheus 从 Grafana 当数据源看即可); true = 连 Prometheus 一起暴露
-PROMETHEUS_EXPOSE_PROMETHEUS="${PROMETHEUS_EXPOSE_PROMETHEUS:-false}"
-# LoadBalancer 模式下是否与 registry **共用同一个 VIP**(以端口区分: registry 5000 / Grafana 3000)。
-# MetalLB 要求两边带同一个 sharing key 注解 —— registry 侧由 sync 写进 kubespray manifest, 见
-# lib-common.sh 的 SHARED_VIP_ANNOTATION/SHARED_VIP_KEY。置 false = Grafana 另分一个 VIP。
-PROMETHEUS_SHARE_REGISTRY_VIP="${PROMETHEUS_SHARE_REGISTRY_VIP:-true}"
-PROMETHEUS_NODEPORT_BASE="${PROMETHEUS_NODEPORT_BASE:-31000}"   # NodePort 基址: Prometheus=base, Grafana=base+1
-PROMETHEUS_APP_VERSION="${PROMETHEUS_APP_VERSION:-v0.93.1}"       # operator/config-reloader/admission-webhook 镜像 tag
-PROMETHEUS_IMAGE_PROMETHEUS="${PROMETHEUS_IMAGE_PROMETHEUS:-v3.14.0-distroless}"
-PROMETHEUS_IMAGE_ALERTMANAGER="${PROMETHEUS_IMAGE_ALERTMANAGER:-v0.34.0}"
-PROMETHEUS_IMAGE_NODE_EXPORTER="${PROMETHEUS_IMAGE_NODE_EXPORTER:-v1.12.1}"   # ⚠ 带 v 前缀(registry 实际 tag)
-PROMETHEUS_IMAGE_KSM="${PROMETHEUS_IMAGE_KSM:-v2.20.0}"            # kube-state-metrics; ⚠ 带 v 前缀(registry 实际 tag)
-PROMETHEUS_IMAGE_GRAFANA="${PROMETHEUS_IMAGE_GRAFANA:-13.2.1-distroless}"
-# ⚠ Grafana ≥13.2 把**数据源插件外置**(prometheus/loki/elasticsearch/… 不再内置, 启动时去 grafana.com 下载)
-#   → 离线环境装不上插件, 数据源对象存在但查询报 "Unable to find datasource plugin", **所有看板无数据**。
-#   解法: 用预装插件的**派生镜像**(联网机执行 tools/images/grafana-plugin-build.sh 构建,
-#   tar 落到 offline-files/prometheus/), 然后:
-#     PROMETHEUS_IMAGE_GRAFANA="13.2.1-distroless-r1"      # 派生 tag 约定 <基础 tag>-rN, 必须与构建时一致
-#     PROMETHEUS_GRAFANA_PLUGIN_DIR="/opt/grafana-plugins"  # 镜像内插件目录(必须与 Dockerfile 一致)
-#   ⚠ 绝不能把插件放 /var/lib/grafana 下 —— 该路径被 chart 挂成 emptyDir, 会遮住镜像内文件。
-#   换回 ≤13.1 的镜像可不用派生镜像(那些版本数据源仍内置), 此时两个变量都留空/默认。
-PROMETHEUS_GRAFANA_PLUGIN_DIR="${PROMETHEUS_GRAFANA_PLUGIN_DIR:-}"   # 空=不覆盖 Grafana 插件目录(默认 /var/lib/grafana/plugins)
-GRAFANA_DS_VERIFY="${GRAFANA_DS_VERIFY:-fail}"   # 模块末尾数据源可用性校验的失败动作: fail(默认硬失败)/warn/off
-# 看板数据源自动绑定(★ 2026-09-22): 上游看板里写死的是**别人环境的数据源 uid**(如 rYdddlPWk/
-# eefhg6y1xs8owa)或小写名字, 导入后那些面板报 "Datasource not found" → 导入前统一改绑到本集群这份
-# (改的是临时副本, 仓库源 JSON 不动)。置 false = 原始 JSON 导入(需人工在 Grafana 里逐面板选数据源)。
-GRAFANA_DS_AUTOBIND="${GRAFANA_DS_AUTOBIND:-true}"
-GRAFANA_DATASOURCE_UID="${GRAFANA_DATASOURCE_UID:-prometheus}"     # 与 chart provisioning 的 uid 一致(勿轻改)
-GRAFANA_DATASOURCE_NAME="${GRAFANA_DATASOURCE_NAME:-Prometheus}"
-PROMETHEUS_IMAGE_SIDECAR="${PROMETHEUS_IMAGE_SIDECAR:-2.11.2}"    # grafana k8s-sidecar
-PROMETHEUS_IMAGE_CERTGEN="${PROMETHEUS_IMAGE_CERTGEN:-1.8.8}"     # webhook 证书生成 Job
-# chart 目录(留空用仓库内 vendored 路径; 离线包把 chart 放别处时用这个覆盖)
-PROMETHEUS_CHART_DIR="${PROMETHEUS_CHART_DIR:-}"
-# ---- CubeStack 可观测性(recording rules + dashboards + mx-exporter; ★ 2026-09-20) ----
-# 需求源: cubestack 源仓库 observability/docs/installer-requirements.md
-# 本仓库实现说明与踩坑: docs/prometheus-observability.md
-# 抓取/评估间隔(installer-requirements §1.4)
-PROMETHEUS_SCRAPE_INTERVAL="${PROMETHEUS_SCRAPE_INTERVAL:-30s}"
-PROMETHEUS_EVALUATION_INTERVAL="${PROMETHEUS_EVALUATION_INTERVAL:-60s}"
-# Grafana 管理员口令: 定义在**顶部核心必改项 ④**(此处引用, 保持唯一事实来源, 避免两处维护)。
-GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER}"
-GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD}"
-# observability 资产目录(recording rules + dashboards), 留空走三级回退:
-#   ① 本变量(非空即用) → ② /opt/cubestack/observability(离线包约定, 见 §5) → ③ 仓库内 vendored
-#     (deployments/cubestack-addon/observability/cubestack/)
-# 刷新资产: tools/observability/fetch-observability-assets.sh [--dir /opt/cubestack/observability]
-CUBESTACK_OBSERVABILITY_DIR="${CUBESTACK_OBSERVABILITY_DIR:-}"
-# MetaX GPU mx-exporter(§7.1): 打开 ClusterOperator 的 dataExporter 并建 ServiceMonitor。
-# true 时若集群没有 MetaX ClusterOperator 会自动跳过(未装 GPU Operator 时正常)。
-MX_EXPORTER_ENABLED="${MX_EXPORTER_ENABLED:-true}"
-# ---- Perses 云原生看板(P1 可视化; 模块 perses / verify_perses; 详见 docs/perses.md) ----
-# 制品: 1 chart(perses-<ver>.tgz, **vendored 在 cubestack-addon/perses/**, 随 git 分发)
-#       + 2 镜像(perses 本体 / 看板供给用的 k8s-sidecar)。
-# ★ 双模式(PERSES_MODE, **默认 online**):
-#   **两种模式的部署路径完全相同** —— 节点只从集群内置 registry 拉镜像, 部署机 helm 装本地 chart 副本。
-#   online  = 部署前先从私服 mirrors 同步镜像到本地 tar, 再推入内置 registry, 之后与 offline 同路部署。
-#   offline = 不碰外网, 直接用盘上已有 tar 推入内置 registry 后部署。
-#   ⚠ chart **恒用仓库内 vendored 的离线副本**: online 只拿远端 digest 与 <tgz>.digest 边车比对,
-#     有更新才覆盖那份副本(会弄脏工作区, 提示 commit), 没更新就用本地的; 拉取失败直接回退本地。
-#   ⚠ 上游 chart 走**经典 helm repo**(perses.github.io), 其 digest 就是 tgz 的 sha256。
-# 镜像在线源是私服 **mirrors 项目**(不是 suanova): Perses 是第三方上游镜像, 由 CI 读
-#   images.manifest 的 perses 组从 docker.io 同步过去(mirrors 公开只读, 通常免凭据)。
-PERSES_MODE="${PERSES_MODE:-online}"                          # online(先同步制品)|offline(只用本地制品)
-PERSES_NAMESPACE="${PERSES_NAMESPACE:-perses}"                # 独立命名空间(与其它组件一致, 便于整块卸载)
-PERSES_RELEASE="${PERSES_RELEASE:-perses}"                    # helm release 名(= 工作负载/Service 名)
-PERSES_CHART_VERSION="${PERSES_CHART_VERSION:-0.23.2}"        # chart 版本(经典 helm repo 的版本号)
-PERSES_IMAGE_VERSION="${PERSES_IMAGE_VERSION:-v0.54.0}"       # 镜像 tag(= chart 的 appVersion; ⚠ 带 v 前缀)
-# 镜像仓库路径(上游 docker.io 下的名字; images.manifest 直接引用这两个变量, 故必须在此声明)
-PERSES_IMAGE_NAME="${PERSES_IMAGE_NAME:-persesdev/perses}"
-PERSES_SIDECAR_IMAGE_NAME="${PERSES_SIDECAR_IMAGE_NAME:-kiwigrid/k8s-sidecar}"
-PERSES_CHART_REF="${PERSES_CHART_REF:-perses}"                # chart 名
-PERSES_CHART_REPO="${PERSES_CHART_REPO:-https://perses.github.io/helm-charts}"
-PERSES_HARBOR="${PERSES_HARBOR:-harbor.isuanova.com}"         # 私服域名(mirrors 公开只读)
-PERSES_HARBOR_USER="${PERSES_HARBOR_USER:-}"                  # (可选)私有化后填; 留空=匿名拉取
-PERSES_HARBOR_PASSWORD="${PERSES_HARBOR_PASSWORD:-}"          # 私服密码/token(本文件已 gitignore, 勿提交)
-PERSES_HARBOR_INSECURE="${PERSES_HARBOR_INSECURE:-false}"     # online: true=拉取时跳过 TLS 校验(自签证书时用)
-# 持久化: **必须开** —— chart 在 persistence.enabled=false 时用 emptyDir, Pod 重建即丢全部看板。
-PERSES_STORAGE_SIZE="${PERSES_STORAGE_SIZE:-8Gi}"
-PERSES_STORAGE_CLASS="${PERSES_STORAGE_CLASS:-}"              # 留空自动派生: ceph 体系→ceph-block, 否则用集群默认 SC
-PERSES_WAIT_SECONDS="${PERSES_WAIT_SECONDS:-300}"
-# 数据源/看板供给(默认开): 建带 perses.dev/resource=true 标签的 ConfigMap, 由 chart 自带 k8s-sidecar
-# 写进 provisioning 目录。关闭则装完需在 UI 里手工配数据源。
-PERSES_PROVISION_ENABLED="${PERSES_PROVISION_ENABLED:-true}"
-PERSES_SIDECAR_ENABLED="${PERSES_SIDECAR_ENABLED:-true}"
-PERSES_SIDECAR_IMAGE_VERSION="${PERSES_SIDECAR_IMAGE_VERSION:-2.11.2}"   # 对齐 08_prometheus 在用的版本(离线只备一份)
-PERSES_DATASOURCE_NAME="${PERSES_DATASOURCE_NAME:-prometheus}"           # GlobalDatasource 名(verify 用同名断言)
-PERSES_PROMETHEUS_NAMESPACE="${PERSES_PROMETHEUS_NAMESPACE:-monitoring}" # 后端 Prometheus 所在命名空间(留空=跟 PROMETHEUS_NAMESPACE)
-PERSES_PROMETHEUS_URL="${PERSES_PROMETHEUS_URL:-}"            # 留空=自动发现 Prometheus Service; 也可显式指定后端地址
-# 对外暴露: nodeport(随 SERVICE_EXPOSE_MODE) / loadbalancer(需 MetalLB) / clusterip
-# ⚠ 按 2026-09-18 定案, 模块**不创建** Gateway/HTTPRoute/Ingress —— 对外路由应由专门的网关模块统一下发。
-PERSES_EXPOSE_MODE="${PERSES_EXPOSE_MODE:-}"
-PERSES_NODEPORT_BASE="${PERSES_NODEPORT_BASE:-31010}"         # 避开 Prometheus 的 31000/31001
 CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # Ceph 存储底座(P1; 见 4.3)
 CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI RBD/RGW/CephFS(依赖 CEPH_ENABLED; 见 4.3)
 # CEPH_FALLBACK_TO_LOCALPATH: CEPH_ENABLED=true 但 ceph 安装条件不足(manifest/裸盘/lvm2/
 #   external 参数缺失)时, 自动回退到 local-path 模式(registry 用 local-path, 跳过 ceph 模块)。
 #   默认 false=保持硬失败并提示; true=条件不足自动降级, 部署不中断(防掩盖配置错误, 显式启用才回退)。
 # ---- Ceph 模式见 4.3b(CEPH_MODE 唯一开关: internal 集群内 / external 接入外部; 定义在下方 Ceph 段) ----
-ENVOY_GATEWAY_ENABLED="${ENVOY_GATEWAY_ENABLED:-true}" # Envoy Gateway 通用 K8s 网关基座(P1; 见 4.3)
-ENVOY_AI_GATEWAY_ENABLED="${ENVOY_AI_GATEWAY_ENABLED:-true}"  # Envoy AI Gateway(LLM/AI 专用, 依赖 EG; 见 4.3)
 KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # 统一认证(P2; 见 4.4)
 KUEUE_ENABLED="${KUEUE_ENABLED:-false}"                 # 队列治理(P2; 见 4.4)
 KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # 虚拟机能力(P2; 见 4.4)
@@ -247,7 +127,6 @@ MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多�
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(Device Plugin, 暴露 RDMA 网卡为扩展资源; 见 4.8)
 CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # CubeStack 自研组件(占位; 见 4.6)
 CUBEPILOT_ENABLED="${CUBEPILOT_ENABLED:-true}"          # CubePilot AI Agent 平台(自研; 见 4.6; 私服公开只读免凭据, 同步后统一经内置 registry 部署)
-BMC_EXPORTER_ENABLED="${BMC_EXPORTER_ENABLED:-false}"   # BMC 带外监控(bmc-oem-exporter + idrac-exporter; **默认关**: 需真实 BMC IP/凭据; 见 4.9)
 # ---- 4.7 Multus CNI(容器多网卡; 详见 deployments/cubestack-addon/multus/CUBESTACK.md) ----
 # 离线镜像: 联网机 docker save ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
 #   → deployments/offline-files/multus/multus-cni.tar → 16_multus 模块推送进内置 registry
@@ -556,7 +435,6 @@ HARBOR_DOMAIN="${HARBOR_DOMAIN:-harbor.local}"         # 预留: Harbor 访问�
 HARBOR_IP="${HARBOR_IP:-10.244.2.200}"                 # 预留: Harbor 监听地址(宿主机 IP 或网卡地址)
 HARBOR_STORAGE_CLASS="${HARBOR_STORAGE_CLASS:-local-path}"  # 预留: 数据持久化 StorageClass(如走集群外则用数据目录)
 
-
 # ════════════════════════════════════════════════════════════
 # 阶段二、kubespray 基座(modules/02_k8s + kubespray addon)  依赖: 阶段一
 # ════════════════════════════════════════════════════════════
@@ -565,7 +443,7 @@ HARBOR_STORAGE_CLASS="${HARBOR_STORAGE_CLASS:-local-path}"  # 预留: 数据持�
 # 注意: ${CLUSTER_NAME} 由 lib-common.sh 自动解析(环境变量或默认 cubestack-cluster)
 KUBESPRAY_INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}"
 KUBESPRAY_DIR="${KUBESPRAY_DIR:-${REPO_ROOT}/deployments/kubespray/kubespray}"
-# 离线资源缓存根目录(二进制/镜像); 各组件离线子目录: kubespray / metax-gpu / lws / envoy 等
+# 离线资源缓存根目录(二进制/镜像); 各组件离线子目录: kubespray / metax-gpu / lws 等
 # ⚠ 默认留空: 部署脚本经 lib-common 自动解析为 offline-files/kubespray(内层),
 #   fetch-offline-from-minio.sh 默认下载到 offline-files 总根(offline-files/{kubespray,lws,metax-gpu,os});
 #   两处解耦, 不需要在此显式设置 OFFLINE_FILES_DIR(显式设置会同时改变 fetch 目标)。
@@ -631,7 +509,6 @@ KUBE_NETWORK_PLUGIN="${KUBE_NETWORK_PLUGIN:-calico}"
 #   HELM_ENABLED / INGRESS_NGINX_ENABLED / DASHBOARD_ENABLED / CERT_MANAGER_ENABLED / GATEWAY_API_ENABLED
 # (已移除 metallb controller 钉首 master 的 workaround —— IPIP 数据面保证跨节点 webhook 可达, 无需再钉)
 
-
 # ════════════════════════════════════════════════════════════
 # 阶段三、集群基础设施(addon 基座)              依赖: 阶段二(集群已部署)
 # ════════════════════════════════════════════════════════════
@@ -694,8 +571,8 @@ HARBOR_MIRROR_ENABLED="${HARBOR_MIRROR_ENABLED:-true}"        # true=save/load �
 HARBOR_MIRROR_REGISTRY="${HARBOR_MIRROR_REGISTRY:-harbor.isuanova.com}"   # Harbor 域名(与 metax/cubepilot 同源)
 HARBOR_MIRROR_PROJECT="${HARBOR_MIRROR_PROJECT:-mirrors}"     # 镜像专用项目(不存在时由同步工具自动创建)
 # 路径规则(见 images.manifest 头部): mirrors/<上游注册域>/<仓库路径>:<tag>
-#   例 docker.io/grafana/grafana:13.2.1-distroless
-#      → harbor.isuanova.com/mirrors/docker.io/grafana/grafana:13.2.1-distroless
+#   例 registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+#      → harbor.isuanova.com/mirrors/registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
 HARBOR_MIRROR_USER="${HARBOR_MIRROR_USER:-}"                  # (可选)留空=匿名拉取(该项目公开只读)
 HARBOR_MIRROR_PASSWORD="${HARBOR_MIRROR_PASSWORD:-}"          # Harbor 密码/token(本文件已 gitignore, 勿提交)
 HARBOR_MIRROR_INSECURE="${HARBOR_MIRROR_INSECURE:-false}"     # true=跳过 TLS 校验(自签证书时用)
@@ -731,7 +608,6 @@ CSI_PROVISIONER_VERSION="${CSI_PROVISIONER_VERSION:-v6.2.0}"
 CSI_RESIZER_VERSION="${CSI_RESIZER_VERSION:-v2.1.0}"
 CSI_SNAPSHOTTER_VERSION="${CSI_SNAPSHOTTER_VERSION:-v8.5.0}"
 SNAPSHOT_CONTROLLER_VERSION="${SNAPSHOT_CONTROLLER_VERSION:-v8.0.1}"
-
 
 # ════════════════════════════════════════════════════════════
 # 阶段四、附加组件(operator)                   依赖: 阶段三(Registry 推镜像)
@@ -814,54 +690,7 @@ LWS_RELEASE_NAME="${LWS_RELEASE_NAME:-lws}"             # Helm release 名
 # (LWS_DISAGGREGATEDSET_ENABLED 开关已移至顶部【组件启停开关】)
 
 # ---------------- 4.3 P1 阶段附加组件(依赖: Registry + 部分依赖 GPU/Ceph) ----------------
-# 开关见顶部【组件启停开关】: PROMETHEUS_ENABLED / CEPH_ENABLED / CEPH_CSI_ENABLED /
-#   ENVOY_GATEWAY_ENABLED / ENVOY_AI_GATEWAY_ENABLED
-# Envoy 网关二件套(P1-9 统一流量入口): Envoy Gateway=通用 K8s API 网关基座;
-# Envoy AI Gateway=LLM/AI 专用扩展层(依赖 Envoy Gateway 先装)。详见 docs/envoy-gateway.md
-
-# ---------------- Envoy Gateway / Envoy AI Gateway 配置 ----------------
-# Chart 来源(二选一/三选一, 与 LWS 一致; **本地源优先, 默认离线安装**):
-#   dir = 本地解包目录(deployments/cubestack-addon/envoy-gateway/{eg,ai})
-#   tgz = 本地 chart 压缩包(默认; 仓库只存 tgz 不膨胀, 部署时临时解压)/ oci = 官方 registry(需联网)
-ENVOY_EG_CHART_SOURCE="${ENVOY_EG_CHART_SOURCE:-tgz}"       # Envoy Gateway chart 来源: dir|tgz|oci
-ENVOY_EG_VERSION="${ENVOY_EG_VERSION:-v1.9.1}"               # Envoy Gateway 版本(控制面 gateway + 数据面 envoy 同 tag)
-# ⚠ 数据面 envoy 镜像的 tag 与 EG 版本**不同**(官方独立发版); 由 envoy-save-images.sh 的默认值同步而来。
-ENVOY_PROXY_VERSION="${ENVOY_PROXY_VERSION:-distroless-v1.39.1}"   # 数据面 envoyproxy/envoy 镜像 tag
-ENVOY_EG_CHART_DIR="${ENVOY_EG_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/eg}"
-ENVOY_EG_CHART_TGZ="${ENVOY_EG_CHART_TGZ:-${ENVOY_EG_CHART_DIR}/gateway-helm-${ENVOY_EG_VERSION}.tgz}"
-ENVOY_EG_CHART_OCI="${ENVOY_EG_CHART_OCI:-oci://docker.io/envoyproxy/gateway-helm}"
-ENVOY_AI_CHART_SOURCE="${ENVOY_AI_CHART_SOURCE:-tgz}"       # Envoy AI Gateway chart 来源: dir|tgz|oci
-ENVOY_AI_VERSION="${ENVOY_AI_VERSION:-v1.1.0}"               # Envoy AI Gateway chart 版本 + 控制器镜像 tag(带 v)
-ENVOY_AI_API_VERSION="${ENVOY_AI_API_VERSION:-v1beta1}"      # AI CRD apiVersion(aigateway.envoyproxy.io/<v>; v1.0 起 v1beta1)
-ENVOY_AI_CHART_DIR="${ENVOY_AI_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/envoy-gateway/ai}"
-ENVOY_AI_CHART_OCI="${ENVOY_AI_CHART_OCI:-oci://docker.io/envoyproxy}"   # AI chart OCI 前缀(官方 docker.io; 追加 ai-gateway-crds-helm / ai-gateway-helm)
-# 镜像(推送到集群内置 registry, K8s 节点按域名拉取; 离线 tar 由 tools/images/envoy-save-images.sh 生成)
-ENVOY_EG_IMAGE_BASE="${ENVOY_EG_IMAGE_BASE:-${REGISTRY_DOMAIN}:${REGISTRY_PORT}/envoyproxy}"   # EG 控制面/数据面镜像前缀
-ENVOY_AI_IMAGE_REPO="${ENVOY_AI_IMAGE_REPO:-${REGISTRY_DOMAIN}:${REGISTRY_PORT}/ai-gateway/ai-gateway-controller}"
-ENVOY_EG_IMAGE_ONLINE="${ENVOY_EG_IMAGE_ONLINE:-false}"     # 允许在线拉取镜像(仅 oci 源或置 true 才联网)
-ENVOY_AI_IMAGE_ONLINE="${ENVOY_AI_IMAGE_ONLINE:-false}"     # 同上(AI 控制器)
-ENVOY_SAVE_DIR="${ENVOY_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/envoy}"   # 离线镜像 tar 目录(save 工具输出)
-ENVOY_EG_NAMESPACE="${ENVOY_EG_NAMESPACE:-envoy-gateway-system}"   # EG 部署命名空间
-# 数据面暴露方式 + 数据面镜像(★ 两者都由 EnvoyProxy CR 决定, GatewayClass eg 经 parametersRef 引用):
-#   · auto(默认)= 跟随全局 SERVICE_EXPOSE_MODE: nodeport → 数据面 Service type=NodePort(端口由 K8s
-#     自动分配, 模块/verify 会打印实际端口); metallb → type=LoadBalancer(需 MetalLB 池内有空闲 IP)。
-#   · 也可强制 NodePort / LoadBalancer(与全局模式解耦时用)。
-#   · ⚠ 给 Gateway 加注解 gateway.envoyproxy.io/service-type: NodePort **EG v1.9.1 不认**(实测),
-#     别再走那条路; 存量 Gateway 用 tools/lb/gateway-nodeport.sh 转换。
-#   · ⚠ 该 class 下**所有** Gateway(含 Envoy AI Gateway)都继承此设置。
-ENVOY_EG_SERVICE_TYPE="${ENVOY_EG_SERVICE_TYPE:-auto}"
-ENVOY_EG_PROXY_NAME="${ENVOY_EG_PROXY_NAME:-cubestack-dataplane}"  # EnvoyProxy CR 名(parametersRef 指向它)
-# 数据面镜像 = ${ENVOY_EG_IMAGE_BASE}/envoy:${ENVOY_PROXY_VERSION}(由模块写进上面的 EnvoyProxy CR;
-#   离线关键: 必须来自集群内置 registry, 否则数据面 ImagePullBackOff)。
-ENVOY_AI_NAMESPACE="${ENVOY_AI_NAMESPACE:-ai-gateway-system}"      # AI 控制器部署命名空间
-# 数据面对外固定入口: tools/lb/gateway-nodeport.sh <gateway名> [ns] 转换后自动创建固定名别名
-#   Service(<gw>-external, NodePort 固定于此)。控制器生成的 envoy-<ns>-<gw>-<hash> 名含 hash
-#   且由控制器拥有, 对外一律用固定别名。⚠ 网关与路由由**专门的网关模块**统一创建(尚在重构中),
-#   当前配置仅对该工具的手工调用生效。
-GATEWAY_EXTERNAL_NODEPORT="${GATEWAY_EXTERNAL_NODEPORT:-30880}"
-# CRD chart 命名空间: 默认与控制器合并(CRD 为 cluster-scoped, namespace 仅 helm release 归属;
-# 早期独立 ai-gateway-crds 空 ns 易误判废弃, 已合并; 设 ai-gateway-crds 可恢复拆分)
-ENVOY_AI_CRDS_NS="${ENVOY_AI_CRDS_NS:-${ENVOY_AI_NAMESPACE}}"
+# 开关见顶部【组件启停开关】: CEPH_ENABLED / CEPH_CSI_ENABLED
 
 # ---------------- 4.4 P2 阶段附加组件 ----------------
 # 开关见顶部【组件启停开关】: KEYCLOAK_ENABLED / KUEUE_ENABLED / KUBEVIRT_ENABLED
@@ -932,47 +761,6 @@ CUBEPILOT_LLM_SECRET="${CUBEPILOT_LLM_SECRET:-cubepilot-llm}"        # Secret �
 CUBEPILOT_PLATFORM_CRDS_ENABLED="${CUBEPILOT_PLATFORM_CRDS_ENABLED:-false}"
 CUBEPILOT_PLATFORM_CRDS_DIR="${CUBEPILOT_PLATFORM_CRDS_DIR:-${CUBEPILOT_CHART_DIR}/cubestack-crds}"
 CUBEPILOT_WAIT_SECONDS="${CUBEPILOT_WAIT_SECONDS:-300}"              # helm --wait / rollout 等待上限(首次拉镜像较慢, 可调大)
-
-
-# ---------------- 4.9 BMC 带外监控(bmc-oem-exporter + idrac-exporter) ----------------
-# 需求源: cubestack 源仓库 observability/docs/installer-requirements.md §7.2
-# 交付形态: helm chart cubestack-bmc-exporter-chart(Deployment×2 + Service×2 + ScrapeConfig×2
-#   + Secret×2), 与两个 exporter 镜像均由 CI 发布到私服 Harbor 的 suanova 项目(公开只读)。
-# ⚠ 默认关闭: 需要**真实 BMC 管理网 IP 与凭据**才能用; 没填就装会得到"target up 但指标为空"。
-#
-# ★ 双模式(BMC_EXPORTER_MODE; 默认 online, 与 CUBEPILOT 同款语义):
-#   **两种模式的部署路径完全相同**: 节点只从集群内置 registry 拉镜像, 部署机 helm 装本地 chart tgz。
-#   online  = 先从私服同步制品(chart → cubestack-addon/bmc-exporter/, 镜像 → offline-files/bmc/*.tar),
-#             再推入内置 registry, 之后与 offline 同路部署
-#   offline = 不碰外网, 直接用盘上已有制品推入内置 registry 后部署
-#   ⇒ online 跑过一次后制品已在盘上, **改 BMC_EXPORTER_MODE=offline 即可切纯离线**。
-#   ⇒ online 在私服不可达时**自动降级**: 拉不到就退回本地已有制品(告警不中断); 本地也没有才报错。
-BMC_EXPORTER_MODE="${BMC_EXPORTER_MODE:-online}"                     # online(先从私服同步制品)|offline(只用本地制品)
-BMC_EXPORTER_HARBOR="${BMC_EXPORTER_HARBOR:-harbor.isuanova.com}"    # 私服域名(与 cubepilot/metax 同源)
-BMC_EXPORTER_PROJECT="${BMC_EXPORTER_PROJECT:-suanova}"              # Harbor 项目名(也是内置 registry 下的仓库前缀)
-BMC_EXPORTER_CHART_VERSION="${BMC_EXPORTER_CHART_VERSION:-1.0.0}"    # chart 版本(OCI tag)
-BMC_EXPORTER_IMAGE_TAG="${BMC_EXPORTER_IMAGE_TAG:-latest}"           # 镜像 tag(上游 main 线只发 latest; 用 digest 边车防漂移)
-BMC_EXPORTER_RELEASE="${BMC_EXPORTER_RELEASE:-cubestack-bmc-exporter}"  # helm release 名
-BMC_EXPORTER_NAMESPACE="${BMC_EXPORTER_NAMESPACE:-monitoring}"       # ⚠ 必须与 Prometheus 同 ns, ScrapeConfig 才会被选中
-# ---- BMC 目标与凭据(**必填**, 无默认值) ----
-# ⚠ BMC IP 必须**按环境实际确认**: 主机 ↔ BMC 不是按末位对应的关系(源仓库 docs/bmc-progress.md 有记录),
-#   按规律推会连到别的机器 → exporter up 但指标全是空/串味, 且极难发现。
-# 模块会从节点侧探测这些 IP 的 443 端口, 不可达时给出告警与排查方向(可用 BMC_EXPORTER_SKIP_REACHABILITY=true 跳过)。
-BMC_HOSTS="${BMC_HOSTS:-}"                                           # BMC 管理 IP 列表, 空格或逗号分隔; 例: "10.6.2.14 10.6.2.18"
-BMC_USERNAME="${BMC_USERNAME:-}"                                     # BMC 用户名(通常 root)
-BMC_PASSWORD="${BMC_PASSWORD:-}"                                     # BMC 口令; 未设置/为空/仍为 CHANGE_ME → 模块硬失败退出
-BMC_TLS_INSECURE="${BMC_TLS_INSECURE:-true}"                         # true=跳过 BMC 自签证书校验; 生产应配 CA 并置 false
-# ---- 调度 ----
-# 钉到指定节点(如 control-plane): 填节点名(kubernetes.io/hostname), 留空=由调度器决定。
-# ⚠ 钉节点时**必须**同时容忍 control-plane 污点, 否则 pod 永远 Pending(2026-09-14 实测) ——
-#   下面这个开关默认 true 就是干这个的, 不要关。
-BMC_EXPORTER_NODE_SELECTOR="${BMC_EXPORTER_NODE_SELECTOR:-}"
-BMC_EXPORTER_TOLERATE_CONTROL_PLANE="${BMC_EXPORTER_TOLERATE_CONTROL_PLANE:-true}"
-BMC_EXPORTER_WAIT_SECONDS="${BMC_EXPORTER_WAIT_SECONDS:-300}"        # helm --wait / rollout 等待上限
-BMC_EXPORTER_OFFLINE_DIR="${BMC_EXPORTER_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/bmc}"   # 镜像 tar 目录
-BMC_EXPORTER_CHART_DIR="${BMC_EXPORTER_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/bmc-exporter}"  # chart 目录
-# 本机无外网 / 隔离集群: 置 offline 并在联网机预置制品(tools/images/bmc-save-images.sh), 或直接保持 ENABLED=false。
-
 
 # ════════════════════════════════════════════════════════════
 # 阶段五、离线镜像预加载                         依赖: 2.1 离线目录

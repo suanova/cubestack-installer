@@ -152,7 +152,7 @@ emit_ip() {
 # ---------------- skopeo 运行时最小 trust policy(/etc/containers/policy.json) ----------------
 # 本机(尤其 CLI 容器内)无容器运行时 daemon 配置目录时, skopeo copy/inspect 会因读不到
 # policy.json 而 fatal: "Error loading trust policy: open /etc/containers/policy.json: no such file or directory"。
-# 所有用 skopeo 的模块(tar 镜像推送: gpu_operator/lws/envoy/... )source 本库后即自动就绪。
+# 所有用 skopeo 的模块(tar 镜像推送: gpu_operator/lws/ceph/... )source 本库后即自动就绪。
 # 幂等: 已存在则不覆盖。insecureAcceptAnything 与本仓库离线内网 registry(--tls-verify=false)语义一致。
 ensure_skopeo_policy() {
     [ -f "/etc/containers/policy.json" ] && return 0
@@ -175,8 +175,8 @@ POLICY_EOF
 ensure_skopeo_policy
 
 # ---------------- 共享 skopeo 推送助手(tar → 集群内置 registry) ----------------
-# gpu_operator / lws / envoy(09/10) / metax-load 曾各自复制同一份 _push_skopeo/_reg_has_tag;
-# 集中到本库供新代码复用(envoy 家族 + 独立 load 脚本), 已有 metax/gpu/lws 维持原状避免回归。
+# gpu_operator / lws / metax-load 曾各自复制同一份 _push_skopeo/_reg_has_tag;
+# 集中到本库供新代码复用, 已有 metax/gpu/lws 维持原状避免回归。
 # 全部为**新符号**, 不改任何现有调用方。
 
 # 前置检查: 缺失 skopeo 时给明确指引(而非 3 次重试后误报"未找到镜像")
@@ -316,7 +316,7 @@ find_offline_tar() {
 # 规则(见 docs/scripts-development-spec.md §2.4): **每个 helm chart 都必须在
 # deployments/cubestack-addon/<组件>/ 下有一份随 git 分发的离线副本**(.tgz 或解包源码目录),
 # 且**安装一律用这份本地副本** —— 线上拉到的东西不直接装。缺了它, 私服/上游一抖动就装不上
-# (cubepilot 与 bmc-exporter 曾经就是这样: 回退代码写好了, 却压根没有可回退的文件)。
+# (cubepilot 曾经就是这样: 回退代码写好了, 却压根没有可回退的文件)。
 #
 # 本助手把"本地副本就绪"这件事收敛到一处:
 #   online : helm pull 到临时目录 → 取远端 digest, 与 <tgz>.digest 边车比对
@@ -395,7 +395,7 @@ helm_chart_ensure() {
 }
 
 # ---------------- 共享 nginx 校验镜像助手(verify 模块测试后端共用) ----------------
-# verify_metallb / verify_envoy_gateway / verify_envoy_ai_gateway / verify-lws 的测试后端
+# verify_metallb / verify_lws / verify_ceph 等的测试后端
 # 统一用 **nginx**(测试 HTTP 后端, 静态页/JSON mock 皆可), 曾用 busybox httpd(依赖节点
 # containerd 预加载, 漏预加载即 Pending)。统一收敛到本助手:
 # 幂等确保 nginx 已推送进集群内置 registry, echo 出 **K8s 可见镜像 ref**(调用方在 $(...) 捕获,
@@ -1232,8 +1232,7 @@ ceph_storage_host_count() {
 # 默认关闭: 共用 VIP 需要**每个共用方**都带同一个 sharing key 注解, MetalLB 才肯把同一地址
 # 分给多个 Service。约定集中在这里, 是因为它必须**三处完全一致**, 分散写必有一处漂移:
 #   ① tools/k8s/sync-kubespray-config.sh —— 写进 registry 的 kubespray manifest(registry_service_annotations)
-#   ② modules/03_addon/08_prometheus.sh  —— Grafana 的 *-external Service(共用 registry 的 VIP)
-#   ③ 将来的统一网关模块(Envoy Gateway 数据面)
+#   ② 将来若要再让某个 Service 与 registry 共用 VIP(如统一网关数据面), 复用同一组变量即可
 # ⚠ 注解键名随 MetalLB 版本演进: v0.13.x 用 metallb.universe.tf/allow-shared-ip,
 #   新版(v0.14+)改 metallb.io/allow-shared-ip。本集群实测 v0.13.9 → 用前者(可用变量覆盖)。
 # ⚠ 共用的硬前提(缺一不可): 端口不重叠 / externalTrafficPolicy 一致(都 Cluster) /
@@ -1375,7 +1374,7 @@ ensure_hosts_block() {
 #      直连 master IP, 证书 SAN 常不含该 IP → 宿主机 kubectl 会 TLS x509 校验失败;
 #   ② 调用 tools/lb/setup-api-expose.sh 幂等配置宿主机 6443→first master 的 DNAT
 #      (PREROUTING + OUTPUT), 让 API_DOMAIN 从宿主机可访问。
-# 所有连 API 的模块(gpu_operator/gpu_lws/envoy_*/...)统一复用本函数, 不各自复制。
+# 所有连 API 的模块(gpu_operator/gpu_lws/ceph_*/...)统一复用本函数, 不各自复制。
 # 用法: sync_kubeconfig → 退出码 0=宿主机可访问集群
 sync_kubeconfig() {
     local tmp newctx
@@ -1404,7 +1403,7 @@ sync_kubeconfig() {
     [ -n "${newctx}" ] && KUBECONFIG="${HOME}/.kube/config" kubectl config use-context "${newctx}" >/dev/null 2>&1 || true
     # ★ 强制收敛: 合并可能保留旧集群残留(如 lb.k8s.local / 直连 master IP, 不在证书 SAN → TLS 失败)。
     #   只把当前 context 对应 cluster 的 server 改写为 SAN 内 API_DOMAIN(保留证书校验), 不动其它集群。
-    #   注意: K/_ctx/_cl 必须 local —— 各 addon 模块(gpu_operator/lws/envoy_*)顶层也有同名
+    #   注意: K/_ctx/_cl 必须 local —— 各 addon 模块(gpu_operator/lws/ceph_*)顶层也有同名
     #   全局 K(远端 kubectl), 若此处用全局并 unset 会把调用方的 K 冲掉 → set -u 报 unbound。
     local K _ctx _cl
     K="KUBECONFIG=${HOME}/.kube/config kubectl"

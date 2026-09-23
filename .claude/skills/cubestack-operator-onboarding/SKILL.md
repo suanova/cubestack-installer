@@ -11,7 +11,7 @@ description: CubeStack 集群 Operator 上架标准流程技能。当需要新�
 
 ## 何时使用本技能
 
-- 新增组件(如 cert-manager / ingress-nginx / prometheus / keycloak / ceph 等);
+- 新增组件(如 cert-manager / ingress-nginx / keycloak / ceph 等);
 - 替换现有组件或切换其网络/数据面方式;
 - 添加一个需要离线镜像的 operator。
 

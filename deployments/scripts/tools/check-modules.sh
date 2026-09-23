@@ -179,7 +179,7 @@ done < <(find "${TOOLS_DIR}" -name '*.sh' -print0)
 # 规则: 凡安装 helm chart 的模块, 其 chart **必须有一份 vendored 在 deployments/cubestack-addon/**
 # 下并随 git 分发 —— 模块安装时**恒用这份本地副本**, 在线只用于比对刷新
 # (见 lib-common 的 helm_chart_ensure, 以及 docs/scripts-development-spec.md §2.4)。
-# 为什么要有这一条: 31_cubepilot / 33_bmc_exporter 原本**都写了**"私服拉取失败就回退本地 chart",
+# 为什么要有这一条: 31_cubepilot 原本**写了**"私服拉取失败就回退本地 chart",
 # 但仓库里压根没有那份文件 —— 私服一抖动, 回退就是空转, 回退代码形同虚设。
 # 光靠文档挡不住这种缺失(写的时候都以为回退能兜住), 所以放进静态校验。
 say "[10/11] helm chart 离线副本检查 ..."

@@ -10,7 +10,7 @@
 # 说明:
 #   【P2-1 规划模块·伪代码占位】Keycloak:
 #   · 部署 Keycloak, 实现集群统一身份认证、用户权限管控
-#   · 对接 Envoy 网关统一登录鉴权; 兼容 P1 兜底认证方案平滑过渡
+#   · 统一登录鉴权(对接方式待定: 平台网关模块落地后, 由它下发 ext_authz 路由)
 #   · 接入方法: 将下方 STEPS 伪代码替换为真实命令, 或 ADDON_STUB_EXEC=1 试执行
 # 数据源: cluster.conf (KEYCLOAK_ENABLED / NODES)
 # ============================================================
@@ -33,7 +33,6 @@ KEYCLOAK_STEPS=(
   "部署 Keycloak(离线 helm, 指定存储类/密码)|${SSH_CMD} \"helm install keycloak /opt/cubestack/addons/keycloak -n keycloak --set auth.adminPassword=<ADMIN_PW> --set postgresql.persistence.storageClass=${LOCAL_PATH_ENABLED:+local-path} 2>/dev/null || true\""
   "等待 Keycloak 就绪|${SSH_CMD} \"${K} -n keycloak rollout status deploy/keycloak --timeout=5m 2>/dev/null || true\""
   "创建 Realm 与 Client(统一认证域)|${SSH_CMD} \"${K} -n keycloak exec deploy/keycloak -- kcadm.sh create realms -s realm=cubestack 2>/dev/null || true\""
-  "对接 Envoy 网关 ext_authz(统一登录鉴权)|${SSH_CMD} \"${K} apply -f /opt/cubestack/addons/envoy-extauthz-keycloak.yaml 2>/dev/null || true\""
   "验证统一登录与鉴权流程|${SSH_CMD} \"curl -s -o /dev/null -w '%{http_code}' https://<gateway>/auth 2>/dev/null || true\""
 )
 addon_stub "keycloak" KEYCLOAK_STEPS

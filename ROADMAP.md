@@ -8,9 +8,9 @@
 
 | 里程碑 | 总 issue | 已完成 | 剩余 | 进度 |
 |---|---|---|---|---|
-| CubeStack Installer 开发 Roadmap | 27 | 7 | 20 | **26%** |
+| CubeStack Installer 开发 Roadmap | 26 | 7 | 19 | **27%** |
 
-完成度 **26%**
+完成度 **27%**
 
 ## ✅ 已完成 (closed)
 
@@ -28,13 +28,12 @@
 - [ ] #2 Epic: 基座稳定性加固
 - [ ] #6 Epic: 离线资源管理
 - [ ] #11 GitLab 侧 gp 适配 + roadmap 落地
-- [ ] #12 Feature: 组件覆盖(GPU/LWS/监控/存储/网关)
+- [ ] #12 Feature: 组件覆盖(GPU/LWS/存储)
 - [ ] #13 Epic: 计算组件
 - [ ] #14 GPU Operator 镜像全量同步与 registry 可靠性
 - [ ] #15 LWS 部署链路验证
-- [ ] #16 Epic: 存储与网关
+- [ ] #16 Epic: 存储
 - [ ] #17 Ceph 存储 + CSI 验证
-- [ ] #18 Envoy 网关二件套验证
 - [ ] #19 Feature: 工具链与质量
 - [ ] #20 验证套件增强
 - [ ] #21 Feature: 发布与文档

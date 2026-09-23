@@ -9,14 +9,14 @@
 # 阶段目录(按部署环境准备的阶段组织):
 #   01_env/    阶段一: 环境准备(VM/SSH/本地registry/HAProxy/Keepalived — 部署 kubespray 之前)
 #   02_k8s/    阶段二: 离线部署 kubespray(不依赖 VM/裸金属)
-#   03_addon/  阶段三: 附加组件(集群部署后: GPU/LWS/监控/Harbor/Ceph/Envoy/P2/P3)
+#   03_addon/  阶段三: 附加组件(集群部署后: GPU/LWS/Harbor/Ceph/P2/P3)
 #
 # 模块(stages):
 #   env 阶段:  vm_network vm_sshkey vm_create harbor lb_haproxy lb_keepalived
 #   k8s 阶段:  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp
 #              k8s_deploy(默认关) k8s_scale(默认关)
-#   addon 阶段: gpu_operator gpu_lws k8s_registry prometheus ceph ceph_csi ceph_backup
-#              envoy_gateway envoy_ai_gateway keycloak kueue kubevirt lustre_csi   (01~19 中间件, 默认关)
+#   addon 阶段: gpu_operator gpu_lws k8s_registry ceph ceph_csi ceph_backup
+#              keycloak kueue kubevirt lustre_csi   (01~19 中间件, 默认关)
 #              cubestack_apps(20 起自研模块占位, 默认关)
 #   验证:      verify_<组件>(自动发现; --steps verify 不指定 operator 默认执行全部 verify_*)
 #   运维:      ceph_backup(Ceph 备份/恢复, 默认关, --steps ceph_backup 单独执行)
@@ -31,8 +31,7 @@
 #   sudo ./deploy-cluster.sh --steps vm_create,k8s_deploy   # 只跑指定模块
 #   sudo ./deploy-cluster.sh --skip k8s_hosts --with-cubestack   # 跳过某模块的全量部署
 #   sudo ./deploy-cluster.sh --enable gpu_operator,lws      # 只把开关写入 cluster.conf 预启用(不部署)
-#   sudo ./deploy-cluster.sh --enable envoy_gateway,envoy_ai_gateway   # Envoy 网关二件套预启用(EG 基座 + AI 扩展, AI 依赖 EG 先装)
-#   sudo ./deploy-cluster.sh --phase k8s                    # 仅运行 k8s 阶段
+# #   sudo ./deploy-cluster.sh --phase k8s                    # 仅运行 k8s 阶段
 #   sudo ./deploy-cluster.sh --only <host> --with-k8s       # 仅处理指定节点
 #   sudo ./deploy-cluster.sh --with-scale                   # 扩容(仅 k8s_scale; 先登录 master 核对后 diff 新节点, 填入 cluster.conf)
 #   sudo ./deploy-cluster.sh --list / --list-steps / --fresh
@@ -69,15 +68,14 @@ usage() {
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           local_path(可选) k8s_registry 组件(全部可单独部署的组件见下方"组件单独部署"清单)
           自研: cubepilot cubestack_apps(占位)
-          监控: prometheus(kube-prometheus-stack + CubeStack 规则/看板) bmc_exporter(BMC 带外监控, 默认关)
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
 
 单独安装某个组件(本段自动生成, 新增组件模块自动出现):
-  · 命令: sudo ./deploy-cluster.sh --steps <组件>          # 例: --steps prometheus
+  · 命令: sudo ./deploy-cluster.sh --steps <组件>          # 例: --steps ceph
   · 只装该组件: 不跑基座(k8s_deploy/metallb/local_path/k8s_registry)与环境准备模块;
-    组件自身依赖仍会带上(如 envoy_ai_gateway → envoy_gateway)。
+    组件自身依赖仍会带上(如 ceph_csi → ceph)。
   · 集群接入自动处理: 本地 kubeconfig 能用(kubectl get nodes 通)→ 直接用, 不动集群;
     否则用 cluster.conf NODES 的 IP/用户名/密码引导: 生成密钥对 → 注入公钥 →
     从首个 master 取 admin.conf 到本地 ~/.kube/config。之后组件模块自己完成
@@ -93,7 +91,7 @@ $(_component_meta_list stub)
   ① 全新集群/覆盖重装: sudo ./deploy-cluster.sh               # 默认 = 覆盖安装: k8s + cluster.conf 中启用的全部组件
                                                             # (目标集群**已存在**时同样是覆盖重装; 支持断点续跑)
   ② 清状态重来:        sudo ./deploy-cluster.sh --fresh        # = ① 且**先清断点状态**(REPEAT:0 的模块强制重跑)
-  ③ 单独装组件:        sudo ./deploy-cluster.sh --steps prometheus   # 只装该组件(不动基座; 集群接入自动处理)
+  ③ 单独装组件:        sudo ./deploy-cluster.sh --steps ceph         # 只装该组件(不动基座; 集群接入自动处理)
   · state 文件 deployments/config/.deploy.state 只记录"本机装到哪一步": 全新容器没有它是正常的(等价①)。
   · ⚠ ①/② 是**重装集群**的路: 节点上已有的旧 K8s 会被 kubeadm reset(既有防线: kubespray 侧检测到残留时
     醒目警告 + 60s 倒计时, 期间 Ctrl-C 可中止; 集群已存在时部署也会打印醒目提示)。
@@ -139,10 +137,9 @@ $(_component_meta_list stub)
   sudo ./deploy-cluster.sh --with-k8s              # 仅部署 kubespray 基座(k8s+metallb+local-path+registry)
   sudo ./deploy-cluster.sh --skip gpu_operator --fresh   # 覆盖安装但排除 gpu_operator(--fresh 清状态)
   sudo ./deploy-cluster.sh --enable lws             # 只把 LWS_ENABLED=true 写入 cluster.conf(不部署)
-  sudo ./deploy-cluster.sh --steps prometheus      # 单独装/重跑 Prometheus(不动基座; 接入自动处理)
-  sudo ./deploy-cluster.sh --steps prometheus --fresh   # 同上, 且清断点状态(REPEAT:0 模块重跑用)
-  sudo ./deploy-cluster.sh --steps verify_prometheus    # 只验证 Prometheus(含 CubeStack 规则/看板/各 exporter)
-  sudo ./deploy-cluster.sh --steps bmc_exporter    # 单独装 BMC 带外监控(需先配 BMC_HOSTS/USERNAME/PASSWORD)
+  sudo ./deploy-cluster.sh --steps ceph            # 单独装/重跑 Ceph(不动基座; 接入自动处理)
+  sudo ./deploy-cluster.sh --steps ceph --fresh     # 同上, 且清断点状态(REPEAT:0 模块重跑用)
+  sudo ./deploy-cluster.sh --steps verify_ceph      # 只验证 Ceph(operator/CSI + ceph -s + RBD 块 I/O)
   sudo ./deploy-cluster.sh --with-scale             # 扩容: 仅 k8s_scale(先登录 master 核对集群→diff 新节点→只动新节点)
   sudo ./deploy-cluster.sh --with-scale --only worker02   # 扩容指定节点(--only 也先经集群核对)
   sudo ./deploy-cluster.sh --only worker02 --with-scale
@@ -166,7 +163,7 @@ while [ $# -gt 0 ]; do
         --list)     LIST=1; shift ;;
         --list-steps) LIST_STEPS=1; shift ;;
         # --with-k8s: 仅 kubespray 基座(k8s + metallb/local-path/registry), 不含任何 operator
-        --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; SKIP_ARG="${SKIP_ARG},gpu_operator,gpu_lws,lb_haproxy,lb_keepalived,prometheus,ceph,ceph_csi,envoy_gateway,envoy_ai_gateway,keycloak,kueue,kubevirt,lustre_csi,cubestack_apps"; shift ;;
+        --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; SKIP_ARG="${SKIP_ARG},gpu_operator,gpu_lws,lb_haproxy,lb_keepalived,ceph,ceph_csi,keycloak,kueue,kubevirt,lustre_csi,cubestack_apps"; shift ;;
         # --with-scale: 仅扩容模块(k8s_scale), 不连带 operator/外层重复模块 —— 见下方 SCALE_ONLY 过滤
         --with-scale) ENABLE_ARG="${ENABLE_ARG},scale"; SCALE_ONLY=1; shift ;;
         # --with-cubestack = 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主, 不强制启用)
@@ -264,7 +261,7 @@ fi
 #   自动 diff 新节点 → 仅对新节点环境准备/装包/NTP/registry → 重生成 inventory(new_node 组)
 #   → cubestack-offline.sh scale)。
 #   过滤掉外层默认模块(metallb/local_path/k8s_registry 等)与 operator —— 扩容不重跑已部署组件,
-#   更不连带 gpu_operator/envoy 等 operator(历史事故: --with-scale 连带全部 TOGGLE=true 的
+#   更不连带 gpu_operator/ceph 等 operator(历史事故: --with-scale 连带全部 TOGGLE=true 的
 #   operator, 扩容变成"全量部署 + 扩容")。--steps 显式指定时以用户为准(不覆盖)。
 if [ "${SCALE_ONLY}" = "1" ] && [ -z "${STEPS_ARG}" ]; then
     RUN_STEPS=(k8s_scale)
@@ -632,7 +629,6 @@ if [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ]; then
     echo -e "${_C_BOLD}${_C_YELLOW}⚠ 服务暴露方式: 当前为 NodePort 模式(SERVICE_EXPOSE_MODE=nodeport, 未部署 MetalLB)${_C_OFF}"
     echo "  访问入口 = 任意节点 IP + NodePort(自动取集群第一个节点 IP: ${_NIP}, 跨节点自动转发):"
     echo "               · registry:      http://${_NIP}:${REGISTRY_NODEPORT:-31148}/"
-    echo "               · Envoy Gateway(若启用): 数据面转 NodePort 后访问 —— tools/lb/gateway-nodeport.sh <gateway名>"
     echo "  ⚠ NodePort 注意事项:"
     echo "               · 端口默认 30000-32767, 超出需改 kube-apiserver --service-node-port-range"
     echo "               · 无固定 VIP, 入口=单节点 IP, 节点重启/换 IP 后入口会变(部署时自动取新 IP)"
@@ -641,7 +637,7 @@ if [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ]; then
 else
     echo -e "${_C_BOLD}${_C_GREEN}✅ 服务暴露方式: 当前为 MetalLB LoadBalancer 模式(SERVICE_EXPOSE_MODE=metallb, 生产默认)${_C_OFF}"
     echo "  访问入口 = LoadBalancer VIP(registry 固定 VIP ${REGISTRY_IP:-<自动派生>}:${REGISTRY_PORT:-5000};"
-    echo "               ingress/Envoy Gateway 经各自 LoadBalancer VIP)"
+    echo "               ingress 经各自 LoadBalancer VIP)"
     echo "  ⚠ MetalLB 注意事项:"
     echo "               · METALLB_POOL 必须与节点同网段、不含网络/广播地址(.0/.255), 且地址空闲"
     echo "               · 地址池建议 >1 个地址, 否则新建 LoadBalancer 可能无 VIP 可分配(verify_metallb 会校验)"
