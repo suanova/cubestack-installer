@@ -100,8 +100,10 @@ if [ "${LWS_INSTALL_MODE}" = "helm" ] && [ "${LWS_CERT_MODE}" = "cert-manager" ]
 fi
 # 宿主机 /etc/hosts 更新(registry 域名 → VIP), 与 gpu_operator 一致
 # 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)
+# API_DOMAIN 的解析地址: kube-vip 已绑 → VIP, 未绑 → 首个 master(api_entry_ip 说明见 lib-common)
+API_ENTRY_IP="$(api_entry_ip)" || exit 1
 ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
-ensure_hosts_entry "${API_IP}" "${API_DOMAIN}"
+ensure_hosts_entry "${API_ENTRY_IP}" "${API_DOMAIN}"
 grep -qE "^${REGISTRY_IP}[[:space:]]+${REGISTRY_DOMAIN}" /etc/hosts 2>/dev/null \
     || warn "无法写入宿主机 /etc/hosts(非 root?), ${REGISTRY_DOMAIN} 可能无法从宿主按域名访问"
 wait_registry_ready "http://${REGISTRY_DIRECT}/v2/" \
@@ -110,8 +112,8 @@ SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
     || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
 # helm 需要从宿主连 API Server: 复用 lib-common 的 sync_kubeconfig(server→API_DOMAIN + 宿主机 DNAT)
 sync_kubeconfig \
-    && ok "宿主机 ~/.kube/config 已同步(admin.conf → API ${API_DOMAIN}→${API_IP})" \
-    || { err "宿主机无法访问集群(admin.conf 下载/同步失败; 检查 ${FIRST_MASTER} 的 /etc/kubernetes/admin.conf, 以及 ${API_DOMAIN}→${API_IP} 解析)"; exit 1; }
+    && ok "宿主机 ~/.kube/config 已同步(admin.conf → API ${API_DOMAIN}→${API_ENTRY_IP})" \
+    || { err "宿主机无法访问集群(admin.conf 下载/同步失败; 检查 ${FIRST_MASTER} 的 /etc/kubernetes/admin.conf, 以及 ${API_DOMAIN}→${API_ENTRY_IP} 解析)"; exit 1; }
 ok "前置检查通过(chart_source=${LWS_CHART_SOURCE}, cert_mode=${LWS_CERT_MODE}, version=${LWS_CHART_VERSION})"
 
 # ---------------- 1. 推送 LWS controller 镜像到集群内置 registry(本地源优先, 离线安装) ----------------

@@ -424,6 +424,11 @@ KEEPALIVED_VIP="${KEEPALIVED_VIP:-}"                    # Keepalived VIP(留空=
 # apiserver_loadbalancer_domain_name + 证书 SAN, 并同步到各节点 /etc/hosts / 宿主机 ~/.kube/config。
 # 留空=默认 k8s-api.cubestack.io; 显式设置则用该域名(如保留 k8s-api.nova.local 老域名)。
 API_DOMAIN="${API_DOMAIN:-k8s-api.cubestack.io}"
+# 该域名解析到哪个地址(留空=自动, 一般不用设):
+#   kube-vip 启用且 VIP **已绑上** → VIP(域名指向真正的高可用入口)
+#   否则                        → 第一个 master
+# 显式设置则强制用该地址(压过自动判定)。自动判据在同一次运行内缓存, 只在写域名的模块里探测。
+API_ENTRY_IP="${API_ENTRY_IP:-}"
 
 # ---------------- 1.7 Harbor 镜像仓库(集群外私有仓库, 预留, 未来实现) ----------------
 # ⚠ 当前集群镜像仓库统一使用【集群内 docker registry】(见阶段三 3.2, REGISTRY_ENABLED=1)。
