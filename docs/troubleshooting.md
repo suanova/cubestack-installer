@@ -998,7 +998,7 @@ curl -u u:p "$API/api/v2.0/projects/<project>/repositories/${enc_repo}/artifacts
 #### 3.4 离线 tar 的 `RepoTags` 为空 → 模块识别不出 tar 内容
 
 **症状:** 用 skopeo 生成的 tar, `tar -xOf x.tar manifest.json` 看到 `"RepoTags": []`;
-`lib-common.sh` 的 `tar_first_image_tag` 返回空 → 依赖内容匹配的逻辑(cubepilot 推送兜底、
+`lib-common.sh` 的 `tar_first_image_tag` 返回空 → 依赖内容匹配的逻辑(lws/multus/rdma 的 tar 识别、
 `ensure_registry_nginx`)全部失效。
 **根因:** `skopeo copy ... docker-archive:<file>` **末尾不带 `:<ref>` 时 skopeo 不写 RepoTags**
 (docker save 会写, 所以老的 tar 都正常)。

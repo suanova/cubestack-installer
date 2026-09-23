@@ -179,14 +179,14 @@ done < <(find "${TOOLS_DIR}" -name '*.sh' -print0)
 # 规则: 凡安装 helm chart 的模块, 其 chart **必须有一份 vendored 在 deployments/cubestack-addon/**
 # 下并随 git 分发 —— 模块安装时**恒用这份本地副本**, 在线只用于比对刷新
 # (见 lib-common 的 helm_chart_ensure, 以及 docs/scripts-development-spec.md §2.4)。
-# 为什么要有这一条: 31_cubepilot 原本**写了**"私服拉取失败就回退本地 chart",
+# 为什么要有这一条: 曾有模块**写了**"私服拉取失败就回退本地 chart",
 # 但仓库里压根没有那份文件 —— 私服一抖动, 回退就是空转, 回退代码形同虚设。
 # 光靠文档挡不住这种缺失(写的时候都以为回退能兜住), 所以放进静态校验。
 say "[10/11] helm chart 离线副本检查 ..."
 ADDON_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/cubestack-addon"
 CHART_FAIL=0; CHART_WARN=0; CHART_OKN=0
 # 判据: **行首就是 helm 命令** —— 只排除注释不够, 变量/err 字符串里提到
-#   "helm upgrade --install" 的地方(如 32_verify_cubepilot 的排查提示)会被误判成"装了 chart"。
+#   "helm upgrade --install" 的地方(如 verify 模块的排查提示)会被误判成"装了 chart"。
 HELM_RE='^[[:space:]]*helm[[:space:]]+(upgrade[[:space:]]+--install|install)[[:space:]]'
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"

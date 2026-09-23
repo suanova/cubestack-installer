@@ -323,7 +323,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
 - **放哪**:`deployments/cubestack-addon/<组件>/`(一个 chart 一个子目录)。`.gitignore` 只挡
-  `offline-files/*`,不挡 `cubestack-addon/`,所以 `.tgz` 直接 `git add` 即可(如 lws / cubepilot / rook 的 chart 已在库里)。
+  `offline-files/*`,不挡 `cubestack-addon/`,所以 `.tgz` 直接 `git add` 即可(如 lws / rook 的 chart 已在库里)。
 - **什么形态**:小 chart 放 `.tgz` + **同时提交 `<tgz>.digest` 边车**;大 chart(带几十个子 chart)
   放解包源码目录(含 `Chart.yaml`)。
 - **怎么装**:走共享助手,**不要手抄 pull/回退逻辑**:
@@ -333,9 +333,10 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   ```
   语义:online 拉远端 → 比 `Digest:` 与边车 → **未变继续用本地**(仓库保持干净)、有更新才覆盖本地
   并提示 commit、拉取失败降级回退本地;offline 完全不联网;最后判一次本地副本在不在,不在就 `err`。
-- **怎么刷新**:`tools/images/<组件>-fetch-charts.sh`(照抄 `cubepilot-fetch-charts.sh`
-  tgz+边车版),跑完**必须 commit** —— 不提交等于没刷新。
-- **为什么是"恒用本地"而不是"线上优先"**:`31_cubepilot` 原本写了"拉取失败回退本地 chart",
+- **怎么刷新**:目前**没有**脚本化刷新工具 —— 手工 `helm pull` 覆盖 vendored 副本
+  (示例见 `deployments/cubestack-addon/lws/CUBESTACK.md` 的"升级到新版本"),`.tgz` 形态要一并更新
+  `<tgz>.digest` 边车。跑完**必须 commit** —— 不提交等于没刷新。
+- **为什么是"恒用本地"而不是"线上优先"**:曾有模块写了"拉取失败回退本地 chart",
   但仓库里压根没有那份文件 —— 私服一抖动回退就是空转。回退只有在本地确实有一份时才有意义。
 - **强制校验**:`tools/check-modules.sh` 第 ⑩ 项。行首是 helm 安装命令的模块,其引用的
   `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`,否则报错。
@@ -439,8 +440,8 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   harbor-save-images.sh          # Harbor → offline-files/<group>/*.tar(联网机)
   check-image-manifest.sh        # 静态校验; --kubespray 交叉核对; --harbor 漂移报告
   ```
-- **默认不镜像"上游就是本台 Harbor"的组**(metax-gpu 12 + cubepilot 4): 它们本就在本台 Harbor 上,
-  部署模块直接从 `metax/` 与 `suanova/` 项目拉, 再镜像只多占 8.4 GB 且升级要重跑。
+- **默认不镜像"上游就是本台 Harbor"的组**(metax-gpu 12): 它们本就在本台 Harbor 上,
+  部署模块直接从 `metax/` 项目拉, 再镜像只多占 8.4 GB 且升级要重跑。
   判据是**推导**的(注册域 == HARBOR_MIRROR_REGISTRY), 不是硬编码名单; 要副本用 `--include-same-harbor`。
 - **CI**: `.github/workflows/sync-images-to-harbor.yml`(push 清单 / 手动 / 每周定时);
   凭据走 GitHub **Secrets**(`HARBOR_MIRROR_USER` / `HARBOR_MIRROR_PASSWORD`, 密码必须放 Secret)。

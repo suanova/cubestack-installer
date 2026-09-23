@@ -77,10 +77,10 @@ modules/<NN_phase>/<NN>_<category>_<action>.sh
   - `k8s` — kubespray 部署相关(与 VM/裸金属无关)
   - `gpu` — GPU 组件
   - `lb` — 负载均衡/高可用(HAProxy/Keepalived)
-  - 其他:P1/P2/P3 组件用组件名作分类(如 `ceph`/`keycloak`/`cubepilot`)
+  - 其他:P1/P2/P3 组件用组件名作分类(如 `ceph`/`keycloak`/`lws`)
 - `action`:模块动作(动词,如 `network`/`create`/`deploy`/`scale`/`registry`)。
 
-示例:`modules/01_env/01_vm_network.sh`、`modules/02_k8s/06_k8s_deploy.sh`、`modules/03_addon/31_cubepilot.sh`。
+示例:`modules/01_env/01_vm_network.sh`、`modules/02_k8s/06_k8s_deploy.sh`、`modules/03_addon/07_gpu_lws.sh`。
 
 ### 2.2 模块元数据头(必填)
 
@@ -136,10 +136,15 @@ load_config
 **凡安装 helm chart 的模块,其 chart 必须有一份 vendored 在 `deployments/cubestack-addon/<组件>/`
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
-模板:`deployments/scripts/modules/03_addon/31_cubepilot.sh`(走 `helm_chart_ensure` 的唯一模块, 带私服凭据)。
+模板(定位/安装 chart 的模块):`deployments/scripts/modules/03_addon/07_gpu_lws.sh` 与
+`06_gpu_operator.sh` 展示了 chart 路径定位与 `helm upgrade --install` 的完整写法。
+
+共享助手 `helm_chart_ensure`(用法见下面第 2 条)把"本地副本就绪 + digest 比对刷新"收敛到一处。
+⚠ 它**当前没有任何模块调用**(原调用方已下架),但约定与 `check-modules.sh` 第 ⑩ 项仍在生效 ——
+新模块**应当**直接用它,而不要再手写一套比对逻辑。
 
 1. **一个 chart 一个子目录**:`deployments/cubestack-addon/<组件>/`。形态二选一,同一组件内保持一致:
-   - **`.tgz`**:小 chart 用这个(如 `cubepilot-0.1.0-latest.tgz`),并**同时提交 `<tgz>.digest` 边车**
+   - **`.tgz`**:小 chart 用这个,并**同时提交 `<tgz>.digest` 边车**
      (写 helm 报告的 `Digest:` 值;经典 helm repo 的 digest 就是文件 sha256);
    - **解包源码目录**(含 `Chart.yaml`):大 chart 用这个(如 `rook-charts/rook-ceph` 带 `charts/` 子 chart)。
 2. **安装恒用本地副本**,不要直接装刚拉下来的那份。走共享助手收敛:
@@ -151,12 +156,13 @@ load_config
    `ref` 传 `oci://…` 或经典 repo 的 chart 名(后者要同时给 `repoURL`)。
 3. **离线副本缺失 = 致命错误**(`err` + 退出),提示里必须给出获取方法;不要静默降级成"用线上那份"。
 4. **刷新走显式工具 + commit**,不要靠部署过程自动落盘:
-   - chart:`tools/images/<组件>-fetch-charts.sh`(仿 `tools/images/cubepilot-fetch-charts.sh`);
+   - chart:目前**没有**脚本化刷新工具 —— 手工 `helm pull` 覆盖 vendored 副本后 commit,
+     步骤示例见 `deployments/cubestack-addon/lws/CUBESTACK.md` 的"升级到新版本";
    - 镜像:`tools/images/harbor-save-images.sh --group <组>`,源与命名由 `config/images.manifest` 统一声明。
 5. **`bash tools/check-modules.sh` 的第 ⑩ 项会强制校验这条**(行首是 helm 安装命令的模块,
    其引用的 `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`)。合入前必须全绿。
 
-> 为什么定成"恒用本地副本"而不是"线上优先":`31_cubepilot` 原本**写了**
+> 为什么定成"恒用本地副本"而不是"线上优先":曾有模块**写了**
 > "私服拉取失败就回退本地 chart",但仓库里压根没有那份文件 —— 私服一抖动,回退就是空转。
 > 回退逻辑只有在**本地确实有一份**时才有意义,所以那份副本必须是仓库的一部分,不能只在部署时落到盘上。
 
@@ -177,7 +183,7 @@ load_config
    —— 不写 README,新目录提交后会消失(现有 8 个随 git 分发的子目录都是靠 README 才存在)。
 4. **tar 不入库**:离线 tar 由 `tools/images/harbor-save-images.sh --group <组>` 生成
    (从 Harbor 拉取 → 落到该组对应目录,目录不存在会自动补建)。入库的是 manifest + README。
-5. **特例**:上游本身就是本台 Harbor 的组(`metax-gpu`/`cubepilot`)**默认不镜像**,
+5. **特例**:上游本身就是本台 Harbor 的组(`metax-gpu`)**默认不镜像**,
    但仍登记在清单里 —— 清单同时承担"本仓库用到哪些镜像"的登记职责。
 6. **为什么强制**:同一份清单有三处消费者(CI 同步 Harbor / 联网机拉离线 tar / 部署模块推集群内置
    registry),漏登记**不会有任何脚本报错**,只在离线部署时表现为"这个镜像没在离线包里"。
