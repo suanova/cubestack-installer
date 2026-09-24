@@ -436,7 +436,7 @@ kubectl get validatingwebhookconfiguration lws-validating-webhook-configuration 
 | ctr import 报 "content digest not found" | 多架构(manifest-list)tar | 拉取用 `--platform linux/amd64` 单架构; import 加 `--no-unpack` |
 | `ceph -s` HEALTH_WARN clock skew | 存储节点时钟漂移(离线无上游) | 部署前 NTP 模块对齐; 生产存储节点用 chrony, `chronyc makestep`, offset<20ms |
 | registry PVC 一直 Pending | `REGISTRY_STORAGE_CLASS=ceph-block` 但 `ceph-block` SC 未创建 | 先部署 ceph_csi 模块(建 rbd-pool + SC); PVC 会自动绑定; 老 PVC 删除后 registry 重建即切换 |
-| mon/osd 未调度到目标节点 / 一直在 Pending | 节点缺 label 或 CEPH_NODES 与预期不符 | `kubectl get node --show-labels | grep ceph-storage`; 模块自动打 `CEPH_NODE_LABEL`; 核对 CEPH_NODES |
+| mon/osd 未调度到目标节点 / 一直在 Pending | 节点缺 label 或 CEPH_NODES 与预期不符 | `kubectl get node --show-labels \| grep ceph-storage`; 模块自动打 `CEPH_NODE_LABEL`; 核对 CEPH_NODES |
 | 部署模块报"所有存储节点均未检测到裸盘" | VM 未附加数据盘 / 盘已被分区 | VM: `vm-nodes.conf` 设 `VM_DATA_DISKS=3 VM_DATA_DISK_SIZE=200` 后重建 VM; 裸金属: 挂新盘; 或显式 `CEPH_DATA_DISKS="node:/dev/vdb,…"` |
 | 预检显示全节点裸盘 `<未检测到>` 但节点 `lsblk` 确有裸盘(如 vdb/vdc/vdd) | `ceph-detect-disks.sh` 仅用 `ssh -i` 密钥认证: 全新环境 k8s_passwordless 未分发密钥 / 容器未挂载密钥 → 全部节点 SSH 失败; 且预检 `2>/dev/null` 吞掉"无法读取 lsblk"原因 | **2026-09-07 已修复**: 脚本密钥缺失不再硬退出, 新增**密码回退**(SSHPASS + NODES 第5字段密码, 与 setup-passwordless.sh 同款; 密钥优先、失败回退密码); 预检 stderr 透传显示真实原因。验证: `bash deployments/scripts/tools/k8s/ceph-detect-disks.sh -m` 应输出各节点 `/dev/vdb,...` |
 | CephCluster 删不掉/卡 Terminating | 未设 cleanupPolicy | `kubectl -n rook-ceph patch cephcluster rook-ceph --type merge -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}'` 后再 delete |
@@ -449,8 +449,11 @@ kubectl get validatingwebhookconfiguration lws-validating-webhook-configuration 
 | 重装后 registry-pvc 长时间 Pending/无 PV; provisioner 报 `InvalidArgument ... open /etc/ceph-csi-config/config.json: no such file or directory`, 且后续重试全是 `skipping volume provisioning ... previously failed with infeasible error` | **kubelet CM 投递竞态**: ceph_csi 检查 CM data 就绪 ≠ provisioner pod 可见(投递有 ~1min 延迟)→ 首次 provision 撞上文件未挂载 → InvalidArgument 被 csi-provisioner 判为 **infeasible**(永久)→ 退避翻倍到 256s 级, 数分钟后才真正重试成功(实机: 06:50:17 失败 → 06:58:49 ProvisioningSucceeded)→ k8s_registry 的 90s 等待提前超时中断部署 | **2026-09-09 已修复**: 03_ceph_csi external 分支在 CM data 就绪后**再等 config.json 投递进 provisioner pod**(`kubectl exec ... test -f /etc/ceph-csi-config/config.json`, 最长 60s, 超时仅告警不硬失败)→ registry 首次 provision 即成功, 不再走 infeasible 退避。验证: 容器 b 重跑模块, 投递检查首次迭代即命中 ✓ |
 | 提供方 HEALTH_ERR `1 filesystem is offline` / 消费方 cephfs-* SC provision 失败(外部 CephFS `cubestack-ext-fs` 无 MDS; **RBD 不受影响**) | `ceph-expose-external.sh` 用 `ceph fs new`(CLI)建外部 fs —— CLI 建的 fs **没有 MDS 守护进程**(MDS 只由 Rook 依据 CephFilesystem CR 部署)→ fs 永久 offline | **2026-09-09 已修复**: 新增 `rook/external/03-cephfilesystem-external.yaml` 模板(activeCount 1 + activeStandby false + preservePoolsOnDelete), 工具改 apply CR + 等 MDS active(≤300s); 已存在同名 fs/pool(历史 CLI 建的)时 Rook 自动接管, 幂等。验证: 提供方 apply 后 `cubestack-ext-fs:1 up:active`, ceph -s **HEALTH_ERR → HEALTH_OK** |
 | cluster.conf 里 `grep CEPH_MODE` 出现两处赋值, 默认配置静默变 external 模式 / CEPH_MONITORS、CEPH_KEYRING 被示例值覆盖 | cluster.conf.example 底部【示例】块曾是**活配置**(11 行未注释): source 时 `CEPH_MODE="external"` 覆盖上方唯一开关行 `CEPH_MODE="${CEPH_MODE:-internal}"`(bash 最后赋值生效)→ 默认配置变 external + 占位 key | **2026-09-09 已修复**: 示例块全部注释为纯模板(不生效); CEPH_MODE 全文件只保留开关行一处(`CEPH_MODE="${CEPH_MODE:-internal}"`, 切 external 只改这一处)。存量 cluster.conf(容器内/用户自持, gitignored)手工处理: 注释或删除示例块 11 行; 若外部接入配置本来就写在示例块里, 把值移到上方真实声明段(CEPH_MONITORS/CEPH_USER/CEPH_KEYRING/CEPHFS_*)。验证: `bash -c 'source deployments/config/cluster.conf.example; echo $CEPH_MODE'` → internal; check-modules 全绿 |
-| external 模式 ceph_csi 失败: `error: error parsing /tmp/ceph-ext-import.yaml: error converting YAML to JSON: yaml: line 10: could not find expected ':'`(日志里 secret/rook-ceph-mon + CM 已 created, 但后续 CSI secret 全部未建) | 03_ceph_csi.sh 的 `external-cluster-user-command` CM 构造里 `args: |-` block scalar 只给 ARGS **首行**加了 4 空格缩进: 提供方导出的 ARGS 是**多行**内容(export 带 `--config-file` 时写入 `[Configurations]` + `key = value` 块), 后续行落在第 0 列 → block scalar 提前终止, `rgw-pool-prefix = default` 等裸标量被当成新 YAML 节点 → "could not find expected ':'"(第 10 行正是 `rgw-pool-prefix`)。kubectl 流式解析先成功 apply 前 2 个文档, 到第 3 个文档报错中止 | **2026-09-11 已修复**: 嵌入前用 `printf '%s\n' "${ARGS}" | sed 's/^/    /'` **逐行加 4 空格缩进**成 `_ARGS_BLOCK` 再拼接(`args: |-\n${_ARGS_BLOCK}`)。验证: 以真实多行 ARGS 本地复现, 修复前 kubectl 报错与线上逐字一致(line 10); 修复后 kubectl 解析通过 + pyyaml 往返校验内容逐行等于 ARGS、无失真; check-modules 全绿。实机: 容器 b 重跑后 8 个资源(secret×5+CM×2+rbd secret 组)全部 created, 外部 CephCluster Connected —— **ARGS 段已实机验证通过** |
-| external 模式 ceph_csi **官方导入路径**冒烟失败: `RBD 1Gi scratch PVC 180s 内未 Bound`(前面 import 1-4 全绿: secret/CM/Connected/csi-config 均正常, SC/RGW 也建好) | **kubelet CM 投递竞态在官方导入路径复发**(同 2026-09-09 手填路径事故, 但官方路径**缺那道防线**): ceph-csi-config CM 03:35:12 生成, ctrlplugin pod 03:35:14 启动 —— 启动时 kubelet 挂载的 CM 还是旧/空 → 首次 CreateVolume 03:35:32 撞 `open /etc/ceph-csi-config/config.json: no such file or directory` → InvalidArgument 被 csi-provisioner 判 **infeasible(永久)** → 日志 `skipping volume provisioning ... previously failed with infeasible error`, PVC 永不 Bound → 冒烟 180s 超时。手填路径(827-857 行)有 rollout restart + config.json 挂载检查, **官方导入路径没有** | **2026-09-11 已修复**: 抽出公共函数 `_ext_wait_csi_config_ready()`(rollout restart provisioner + 等 rollout + `kubectl exec test -f config.json` 挂载确认, 挂载失败硬失败), 官方路径 csi-config 检查后立即调用。验证: 根因证据链完整(provisioner 日志 InvalidArgument + infeasible); check-modules 全绿; 已同步容器 b, 重跑 --steps ceph_csi 实机验证进行中 |
+| external 模式 ceph_csi 失败: `error: error parsing /tmp/ceph-ext-import.yaml: error converting YAML to JSON: yaml: line 10: could not find expected ':'`(日志里 secret/rook-ceph-mon + CM 已 created, 但后续 CSI secret 全部未建) | 03_ceph_csi.sh 的 `external-cluster-user-command` CM 构造里 `args: \|-` block scalar 只给 ARGS **首行**加了 4 空格缩进: 提供方导出的 ARGS 是**多行**内容(export 带 `--config-file` 时写入 `[Configurations]` + `key = value` 块), 后续行落在第 0 列 → block scalar 提前终止, `rgw-pool-prefix = default` 等裸标量被当成新 YAML 节点 → "could not find expected ':'"(第 10 行正是 `rgw-pool-prefix`)。kubectl 流式解析先成功 apply 前 2 个文档, 到第 3 个文档报错中止 | **2026-09-11 已修复**: 嵌入前用 `printf '%s\n' "${ARGS}" \| sed 's/^/    /'` **逐行加 4 空格缩进**成 `_ARGS_BLOCK` 再拼接(`args: \|-\n${_ARGS_BLOCK}`)。验证: 以真实多行 ARGS 本地复现, 修复前 kubectl 报错与线上逐字一致(line 10); 修复后 kubectl 解析通过 + pyyaml 往返校验内容逐行等于 ARGS、无失真; check-modules 全绿。实机: 容器 b 重跑后 8 个资源(secret×5+CM×2+rbd secret 组)全部 created, 外部 CephCluster Connected —— **ARGS 段已实机验证通过** |
+| external 模式 ceph_csi **官方导入路径**冒烟失败(★ 该冒烟自 2026-09-24 起**默认关**, 需 `CEPH_EXTERNAL_PROVISION_SMOKE=true` 才会跑; 下表证据是它默认开时期的): `RBD 1Gi scratch PVC 180s 内未 Bound`(前面 import 1-4 全绿: secret/CM/Connected/csi-config 均正常, SC/RGW 也建好) | **kubelet CM 投递竞态在官方导入路径复发**(同 2026-09-09 手填路径事故, 但官方路径**缺那道防线**): ceph-csi-config CM 03:35:12 生成, ctrlplugin pod 03:35:14 启动 —— 启动时 kubelet 挂载的 CM 还是旧/空 → 首次 CreateVolume 03:35:32 撞 `open /etc/ceph-csi-config/config.json: no such file or directory` → InvalidArgument 被 csi-provisioner 判 **infeasible(永久)** → 日志 `skipping volume provisioning ... previously failed with infeasible error`, PVC 永不 Bound → 冒烟 180s 超时。手填路径(827-857 行)有 rollout restart + config.json 挂载检查, **官方导入路径没有** | **2026-09-11 已修复**: 抽出公共函数 `_ext_wait_csi_config_ready()`(rollout restart provisioner + 等 rollout + `kubectl exec test -f config.json` 挂载确认, 挂载失败硬失败), 官方路径 csi-config 检查后立即调用。验证: 根因证据链完整(provisioner 日志 InvalidArgument + infeasible); check-modules 全绿; 已同步容器 b, 重跑 --steps ceph_csi 实机验证进行中 |
+| 重装时 `ceph [1/8]`/部署预检显示某几台节点 `裸盘: <未检测到>`(节点 `lsblk` 明明有盘, 且这些盘就是上次 Ceph 用的 OSD 盘); `ceph-cleanup.sh --all` 也清不到它们 | `ceph-detect-disks.sh` 只认"未使用裸盘"(整盘无子设备), 而 Rook/`ceph-volume lvm` 建的 OSD 盘是**有分区/LVM 的** → 被判为"在用"排除: ① CR 的 `storage.nodes[].devices` 漏掉这些盘 → 那几台节点 0 OSD; ② `--all` 拿到的"待清理盘"为空 → **清理空转**(盘上旧 ceph VG/LV 无人解绑, 重装时 osd-prepare 报 "already prepared"); ③ 确认屏只剩 `<未检测到>`, 人工分不清"没盘"还是"被上次部署占着" | **2026-09-24 已修复**: 新增 `tools/k8s/ceph-disk-classify.py` 分类器(只认强证据: bluestore 签名 / ceph 分区 GUID / 分区名 `ceph ` / `ceph-*` VG·`ceph.*` 标签 / `ceph--` dm 名), `ceph-detect-disks.sh` 新增 `--classify`, 盘分 `free`/`ceph`/`inuse`/`mixed` 四类并单独呈现 `ceph` 类; CR 取 `free ∪ ceph`; `ceph-cleanup.sh --wipe-disks`/`--all` 只清 `ceph` 类(新增 `--list` 只读计划); 02_ceph 7a 先调标准清除(解 LVM/dm)再跑原有 dd 签名擦除; `--wipe-node` 默认**拒绝**清 `inuse`/`mixed` 盘(需 `--force`)。⚠ **审查挖出的两类新坑**(都已修, 都是“看着干净”害死人): ① **整盘 LVM PV**(无分区表、无文件系统、VG 未激活时连 dm 子设备都没有)曾被判 `free` → 会被写进 CR 并被 7a 的 dd 清空, 而它可能装着任意业务数据(旧版把 `LVM2_member` 排除在候选外 = inuse, 属**反向回归**) —— 现规则: 见到 `LVM2_member` 或设备本身在 `pvs` 里却认不出归属 → 判 `inuse`(宁可不擦); 且因 `pvs` 不依赖 dm, **未激活的 `ceph-*` VG 也认得出** → 该清的仍清得到; ② `nbd*` 未被排除(默认 `CEPH_DETECT_EXCLUDE` 也不含 nbd)→ 当空闲盘擦会**写穿到背后 RBD 卷**, 现恒判 `inuse`。另: 清盘脚本的 LVM/dm 解除按**目标盘**收敛(不按名字正则扫全节点 —— `... \| grep ceph` 会误伤 `data-vg/cephbackup` 这类卷; `dmsetup remove_all` 已移除), 因 7a 让这段进了默认部署流程, 作用域必须严格。**验证边界: stub `ssh` + 逐节点 lsblk fixture 端到端跑通选盘/护栏/载荷完整性(--all 只擦 ceph 盘、/data 与混合盘被排除、护栏 5 种情形退出码全对、远端载荷语法通过); LVM 收敛逻辑用桩 `pvs/lvs/lvremove/vgremove` 实跑断言(目标盘 VG 选中、无关 `ceph-backup-vg` 零触碰); 分类器 12 用例覆盖整盘 PV/混合/挂载/nbd/空分区; 静态检查全过 —— **仍未在真实集群实机验证** |
+| `ceph-detect-disks.sh` 把 `nbd0..nbdN` 当**空闲裸盘**输出(会被写进 CR 当 OSD, 被 `ceph-cleanup.sh` 当 Ceph 盘擦) | 旧版只排除 `loop/ram/zram/sr/rbd` 前缀, **漏了 nbd**; 而 `CEPH_DETECT_EXCLUDE` 默认值 `^(sda\|sr0\|vda)$` 也不含 nbd → 配置兜不住。nbd 是网络块设备, 现场很可能是 `rbd-nbd` 映射(实测部署机上 `nbd0..nbd15`)→ `dd` 会写穿到背后的 RBD 卷, **销毁真实数据** | **2026-09-24 已修复**: `ceph-disk-classify.py` 里 `nbd*` 恒定判为 `inuse`(理由写清"可能是 rbd-nbd 映射, 用 rbd unmap 或重启解除"), 绝不进 CR、绝不清理; 不依赖 `CEPH_DETECT_EXCLUDE`。验证: 对本机真实 `lsblk`(含 nbd0..15, 排除规则只写 `^(sda\|sr0\|vda)$`)运行分类器 → 16 个 nbd 全部 `inuse`, 4 块挂载中 xfs 盘与 sda 也全部 `inuse`, 无一条 `free` |
+| k8s 阶段 ansible **长时间无输出**(实测 38 分钟以上), 最后停在 `Copy offline .deb packages to target` / `Install packages from local files`; 日志最后一行是那条 copy 的 profile 行, 之后整段空白 —— 看起来像"卡在拷贝 lvm2 包"; **只有部分节点会卡**(8 台里实测 2 台) | 卡的不是 copy, 是它后面的逐个 `dpkg -i`: `dmsetup`/`lvm2` 的 postinst 触发 `update-initramfs -u` → `mkinitramfs` → `hooks/mdadm` → **`/sbin/mdadm --examine --scan`(遍历所有块设备)** 读到**上一代集群遗留、后端已不可达的 `/dev/rbd0`** → 进程进 **D 状态(不可中断)** 永不返回; 同节点还有 ext4 挂在那块 rbd 上, 其 `jbd2` 线程一并卡死(实测内核线程 `[registry]` D 态 1h37m)。诊断方法: 在卡住的节点上 `ps -eo pid,stat,wchan,cmd | grep -E '^ *[0-9]+ D'` + `ls -l /proc/<pid>/fd \| grep /dev/` → 看它读的是哪块盘 | **① 代码侧(2026-09-24 已修, `patch-playbooks/install-packages.yml`)**: 安装期间临时置 `update_initramfs=no`(装完恢复)→ 整条 initramfs 链(hooks 会跑 pvscan/vgscan/mdadm 扫设备)根本不被触发; 另加"已装同版本跳过"与"本节点存在内核 rbd 映射"告警。**② 环境侧(必须人工)**: 这类节点**只能重启**清除 —— hung 的 rbd 映射 unmap 会 EBUSY, D 态进程杀不掉; 重启后再部署即可。判据: `ls /sys/bus/rbd/devices` 非空 + 存在 D 态进程 |
 
 **验证**
 ```bash
@@ -817,6 +820,59 @@ sudo ./deploy-cluster.sh --steps kube_vip --list | grep 本次执行模块
 ```
 
 ---
+
+#### 11.4 `KUBE_VIP_ENABLED=false` 仍去推导 VIP → 部署中断在 `k8s_inventory`(第 4 个"以为收敛了其实没有")
+
+**症状**
+把 `KUBE_VIP_ENABLED` 置 `false` 后重跑,**依然**出现:
+```
+[DEBUG] 当前入口 10.66.3.28 不是可用 VIP(节点 IP 或落在 MetalLB 池内)→ 重新推导
+→  推导 API VIP(起于 10.66.3.210, 逐个探测直至 .254)...
+【错误】在 10.66.3.210-10.66.3.254 范围内未找到空闲 VIP(全部被占用/被排除)
+【错误】请在 .../cluster.conf 显式指定 K8S_API_VIP=<同网段空闲地址>
+【错误】模块 [k8s_inventory] ... 退出码 1 → 部署中断
+```
+
+**根因**
+`tools/k8s/sync-kubespray-config.sh` 里的 `kube_vip_derive` 调用**是唯一一处没有开关护栏的**
+(其余 4 处: 06_k8s_deploy / 08_verify_kube_vip / 09_kube_vip / `kube_vip_resolve_target` 都有),
+而且还带 `|| exit 1`:
+```bash
+_KV_VIP="$(kube_vip_derive)" || exit 1     # ← 不看 KUBE_VIP_ENABLED
+```
+`kube_vip_derive` 会对每台 master **逐地址扫描**(起于 `.210`, SSH + ICMP + TCP)。于是:
+① 关掉 kube-vip 的集群纯白跑一遍昂贵扫描;② 只要整段地址被占用/落在 MetalLB 池内就**硬失败**,
+而调用链是 `k8s_inventory → gen-inventory.sh → sync-kubespray-config.sh` —— **整个部署在这里中断**。
+(开关开着时同样会失败, 只是没人注意; 关掉开关后本不该有任何 VIP 逻辑, 才暴露出来。)
+
+**解法(根治, 2026-09-24)**
+按开关分派, 关闭态**不扫描**: 只取显式配置的 `K8S_API_VIP`(它只喂 apiserver 证书 SAN,
+留着可免去将来重新启用时的证书重签; 没配就留空, 该键自然不进 addons.yml):
+```bash
+if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
+    _KV_VIP="$(kube_vip_derive)" || exit 1
+else
+    _KV_VIP="${K8S_API_VIP:-}"
+fi
+```
+**验证(对照实验, 决定性)**: 把 `kube_vip_derive` 换成"打标记 + return 1"的探针, 用临时副本
+(临时 inventory + 临时 cluster.conf, 不动仓库文件)跑真实脚本:
+| 条件 | 退出码 | 探针被触发 |
+|---|---|---|
+| 修复**前** + `false` | **1**(复现用户报错) | **是** ← 就是它 |
+| 修复后 + `false` | 0 | 否 |
+| 修复后 + `true`(对照组) | 1 | 是 ← 证明探针确实能测到调用 |
+> 对照组不可省: 没有它就无法区分"没调用"与"探针本身失效"。
+
+**相关命令**
+```bash
+# 当前开关(应为 false)
+grep '^KUBE_VIP_ENABLED=' deployments/config/cluster.conf
+# 想确认关闭态不会再扫 VIP: 直接跑一次 sync, 应无 "推导 API VIP" 输出
+KUBESPRAY_INV_DIR=<inventory 副本> CLUSTER_CONF=<conf 副本> \
+  bash deployments/scripts/tools/k8s/sync-kubespray-config.sh
+```
+
 
 ### 12. 【2026-09-23 事故】部署跑 22 分钟后 `kubeadm join` 报 `[ERROR Port-10250]: Port 10250 is in use` —— 节点上的 RKE2 agent 占着端口, 而部署前清理对它"免疫"
 

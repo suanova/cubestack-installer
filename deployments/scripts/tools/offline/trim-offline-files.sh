@@ -65,7 +65,7 @@ _bin_keep() {   # <文件名> → 0=保留(白名单前缀匹配)
 # 保留: 当前 METAX_VERSION 的 amd64 核心组件 + METAX_MACA_IMAGE + METAX_DRIVER_VERSION 对应 tar
 # 删除: arm64 / 非当前 maca/driver 版本 / operator-bundle/catalog(非本部署组件)
 METAX_VERSION="${METAX_VERSION:-0.15.3}"
-METAX_IMAGE_COMPONENTS="${METAX_IMAGE_COMPONENTS:-gpu-label gpu-device gpu-aware topo-master topo-worker operator-controller container-runtime driver-manager gpu-scheduler mx-exporter}"
+METAX_IMAGE_COMPONENTS="${METAX_IMAGE_COMPONENTS:-gpu-label gpu-device gpu-aware topo-master topo-worker operator-controller container-runtime driver-manager gpu-scheduler}"   # ★ 2026-09-24: mx-exporter 清除(组件已随可观测性栈移除)
 METAX_MACA_TAG="${METAX_MACA_IMAGE:-maca:3.8.1.2-ubuntu22.04-amd64}"; METAX_MACA_TAG="${METAX_MACA_TAG##*:}"
 METAX_DRIVER_TAG="${METAX_DRIVER_VERSION:-3.8.1.6-amd64}"
 # 判断 tar 是否为当前部署需要

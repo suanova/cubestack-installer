@@ -1336,7 +1336,7 @@ update_loadbalancer_all_yml() {
         api_ip="$(awk '/^loadbalancer_apiserver:/{f=1; next} f && /^[[:space:]]+address:/{print $2; exit}' "${all_yml_path}")"
     fi
     if [ -z "${api_ip}" ]; then
-        if [ "${KUBE_VIP_ENABLED:-true}" = "true" ]; then
+        if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
             log "all.yml 尚无 API 入口(未先跑 sync)→ 按阶段一回退第一个 master; kube-vip 就位后重跑即切换"
         fi
         api_ip="${master_ips[0]}"

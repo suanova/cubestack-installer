@@ -19,6 +19,18 @@ deployments/cubestack-addon/multus/
 镜像 ref: `ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick`(DaemonSet 主容器 + initContainer 同镜像;
 amd64)。
 
+## 与上游的偏离(改动前先看这里)
+
+| 项 | 上游 quickstart | 本项目 | 原因 |
+|---|---|---|---|
+| 主容器 `resources` | `requests=limits= cpu 100m / memory 50Mi` | `requests: cpu 100m / memory 128Mi`<br>`limits: cpu 500m / memory 512Mi` | **2026-09-24 实机 OOMKilled → CrashLoopBackOff**(6 次重启/28min, 该节点 CNI 长时间不可用)。实测**空闲仅 8Mi**, 但整轮部署一次拉起大量 pod 时会出现内存尖峰 → 直接撞 50Mi 硬上限; 另外 100m 的 CPU 上限在 CNI ADD 突发时会被限流、拖慢 pod 创建。⚠ **重新从上游 vendoring 本文件时, 必须把这两处改回来** |
+
+> ⚠ multus 在本仓库是**每节点 CNI 主路径**: 它一 OOM, 该节点上**所有新建 pod 都拿不到网络**(直到 pod 被拉起来又 OOM), 比"放宽资源"的代价大得多 —— 所以这里宁可给足余量。
+>
+> 排查建议: 若放宽到 512Mi 后仍 OOM, 说明不是容量问题(可能是 NAD 配置异常导致 multus 反复重建/泄漏):
+> `kubectl -n kube-system top pod -l app=multus --containers`(看增长曲线)+
+> `kubectl -n kube-system logs ds/kube-multus-ds`。
+
 ## 离线镜像
 
 ```bash

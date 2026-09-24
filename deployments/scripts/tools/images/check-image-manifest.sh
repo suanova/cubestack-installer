@@ -137,7 +137,9 @@ if [ "${DO_KUBESPRAY}" = "1" ]; then
         warn "⑤ 找不到 ${TRIM}, 跳过交叉核对"
     else
         # 取 trim 脚本里的默认 PRELOAD_IMAGE_PATTERNS(该行形如 PRELOAD_IMAGE_PATTERNS="${VAR:-...默认...}")
-        PATS="$(grep -m1 '^PRELOAD_IMAGE_PATTERNS=' "${TRIM}" | sed 's/.*:-//; s/}".*//')"
+        # `|| true`: 该行不在 trim 脚本里时 grep 无匹配 → set -e+pipefail 会让这个校验脚本
+        # 崩掉; 下面正是靠 `[ -z "${PATS}" ]` 走"解析不出, 跳过"分支。
+        PATS="$(grep -m1 '^PRELOAD_IMAGE_PATTERNS=' "${TRIM}" | sed 's/.*:-//; s/}".*//' || true)"
         if [ -z "${PATS}" ]; then
             warn "⑤ 未能从 trim-offline-files.sh 解析出 PRELOAD_IMAGE_PATTERNS, 跳过"
         else

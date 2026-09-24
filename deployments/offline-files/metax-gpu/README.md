@@ -2,11 +2,11 @@
 
 沐曦(MetaX)GPU Operator 的**离线镜像 tar** + **GPU 资源包**。
 
-镜像共 12 个,全部来自本台 Harbor 的 `metax/` 项目(`${METAX_HARBOR}/${METAX_PROJECT}/…`,默认 `harbor.isuanova.com/metax/`):
+镜像共 11 个,全部来自本台 Harbor 的 `metax/` 项目(`${METAX_HARBOR}/${METAX_PROJECT}/…`,默认 `harbor.isuanova.com/metax/`):
 
 | 组件 | 版本变量(`cluster.conf`) |
 |---|---|
-| `gpu-label` `gpu-device` `gpu-aware` `topo-master` `topo-worker` `operator-controller` `container-runtime` `driver-manager` `gpu-scheduler` `mx-exporter` | `METAX_VERSION`(默认 `0.15.3`,tag 形如 `0.15.3-amd64`) |
+| `gpu-label` `gpu-device` `gpu-aware` `topo-master` `topo-worker` `operator-controller` `container-runtime` `driver-manager` `gpu-scheduler` | `METAX_VERSION`(默认 `0.15.3`,tag 形如 `0.15.3-amd64`) |
 | `driver-image` | `METAX_DRIVER_VERSION`(默认 `3.8.1.6-amd64`) |
 | `maca`(MXMACA SDK 镜像) | `METAX_MACA_IMAGE`(默认 `maca:3.8.1.2-ubuntu22.04-amd64`) |
 

@@ -55,16 +55,57 @@
       # ★ 逐个 dpkg -i + ignore_errors: 任何单个包失败(如 skopeo 缺 golang-github-containers-common /
       #   libgpgme11, sysstat 缺 libsensors5)都只记失败、不中断整个 k8s 部署 —— 需要与否由下方
       #   "Verify required packages" 按必需包校验(仅 base 工具 + lvm 家族, 非全部 .deb)。
+      # ★ 2026-09-24 事故修复(实机: ansible 任务"有时候卡在这里很长时间", 实测卡 38 分钟以上):
+      #   链式根因 —— dpkg -i dmsetup/lvm2 → initramfs-tools.postinst → `update-initramfs -u`
+      #   → mkinitramfs → hooks/mdadm → `mdadm --examine --scan`(遍历**所有**块设备)
+      #   → 读到**上一代集群遗留、后端已不可达的 /dev/rbd0** → 进程进 D 状态(不可中断), 永不返回;
+      #   同一节点上还有 ext4 挂在那块 rbd 上, 其 jbd2 线程也一并卡死(实测 [registry] 内核线程
+      #   D 态 1h37m)。8 台里只有 2 台(3-33/3-36)有该残留 → 于是表现为"有时候"卡住。
+      #   两层修复:
+      #     ① **安装期间禁用 initramfs 重建**(update_initramfs=no, 装完恢复): 我们发的包
+      #        (lvm2/dmsetup 家族)在这些节点上**不需要**重建 initrd(内核没变、root 不在 LVM 上),
+      #        而重建会把 initramfs 的所有 hooks 跑一遍(pvscan/vgscan/mdadm 都会扫设备)——
+      #        只要有 hang 住的块设备就必卡。禁用后这条链根本不会被触发。
+      #     ② **已安装且版本相同 → 跳过**: 之前每次部署都对同一批 .deb 重跑 dpkg -i,
+      #        不仅重复触发 postinst/触发器链, 也在无谓地消耗时间。
       shell: |
         set -u
+        ir_conf=/etc/initramfs-tools/update-initramfs.conf
+        ir_backup=""
+        if [ -f "${ir_conf}" ] && ! grep -qE '^[[:space:]]*update_initramfs[[:space:]]*=[[:space:]]*no' "${ir_conf}"; then
+          ir_backup="$(mktemp)"
+          cp -a "${ir_conf}" "${ir_backup}"
+          if grep -qE '^[[:space:]]*update_initramfs=' "${ir_conf}"; then
+            sed -i -E 's|^[[:space:]]*update_initramfs=.*|update_initramfs=no|' "${ir_conf}"
+          else
+            echo 'update_initramfs=no' >> "${ir_conf}"
+          fi
+          echo "[install-packages] 本次安装期间已禁用 initramfs 重建(避免 mdadm/lvm hooks 扫描块设备而卡死)"
+        fi
+        n_rbd="$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ')"
+        if [ "${n_rbd:-0}" -gt 0 ]; then
+          echo "[install-packages] ⚠ 本节点存在 ${n_rbd} 个内核 rbd 映射 —— 若其后端已不可达, 任何设备扫描都会卡死; 见 docs/troubleshooting.md"
+        fi
         failed=""
+        skipped=""
         for deb in /tmp/packages/*.deb; do
           [ -e "${deb}" ] || continue
+          pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"
+          newver="$(dpkg-deb -f "${deb}" Version 2>/dev/null)"
+          curver="$(dpkg-query -W -f='${Version}' "${pkg}" 2>/dev/null || true)"
+          if [ -n "${pkg}" ] && [ -n "${newver}" ] && [ "${curver}" = "${newver}" ]; then
+            skipped="${skipped} ${pkg}"
+            continue
+          fi
           if ! dpkg -i "${deb}" >/dev/null 2>&1; then
             failed="${failed} $(basename "${deb}")"
           fi
         done
+        if [ -n "${ir_backup}" ] && [ -f "${ir_backup}" ]; then
+          cp -a "${ir_backup}" "${ir_conf}"; rm -f "${ir_backup}"
+        fi
         rm -rf /tmp/packages
+        [ -n "${skipped}" ] && echo "[install-packages] 已装同版本, 跳过:${skipped}"
         if [ -n "${failed}" ]; then
           echo "⚠ 以下包安装失败(通常为可选工具缺依赖, 不影响 ceph):${failed}"
         fi

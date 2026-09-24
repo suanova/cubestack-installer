@@ -38,7 +38,7 @@ ck_fail() { bad "$*"; FAIL=1; }
 say "==== 模块静态校验(${MODULES_DIR}) ===="
 
 # ---------- ① bash -n 语法 ----------
-say "[1/11] bash -n 语法检查 ..."
+say "[1/12] bash -n 语法检查 ..."
 SYNTAX_FAIL=0
 while IFS= read -r -d '' f; do
     bash -n "$f" 2>/dev/null || { bad "语法错误: ${f#$MODULES_DIR/}"; SYNTAX_FAIL=1; FAIL=1; }
@@ -50,7 +50,7 @@ meta() { sed -nE "s/^#[[:space:]]*${2}:[[:space:]]*(.*)$/\1/p" "$1" | head -1; }
 phase_dir() { case "$(basename "$(dirname "$1")")" in
     01_env) echo "env";; 02_k8s) echo "k8s";; 03_addon) echo "addon";; *) echo "?";; esac; }
 
-say "[2/11] 头部元数据齐全性 ..."
+say "[2/12] 头部元数据齐全性 ..."
 declare -A KEYS=()
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -68,10 +68,10 @@ while IFS= read -r -d '' f; do
 done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] && ok "元数据齐全"
 
-say "[3/11] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
+say "[3/12] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
 [ "${FAIL}" = "0" ] || true
 
-say "[4/11] PHASE 合法性 + 目录一致性 ..."
+say "[4/12] PHASE 合法性 + 目录一致性 ..."
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
     ph="$(meta "$f" PHASE)"
@@ -81,7 +81,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] || true
 
 # ---------- ⑤ REQUIRES 引用 + 全量拓扑 ----------
-say "[5/11] REQUIRES 引用存在性 + 全量无环 ..."
+say "[5/12] REQUIRES 引用存在性 + 全量无环 ..."
 REQ_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -121,7 +121,7 @@ else
 fi
 
 # ---------- ⑥ init_remote_kubectl 使用检查 ----------
-say "[6/11] 远端 kubectl 初始化(K/SSH)调用检查 ..."
+say "[6/12] 远端 kubectl 初始化(K/SSH)调用检查 ..."
 INIT_MISS=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -135,7 +135,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${INIT_MISS}" = "0" ] && ok "使用 K/SSH 的模块均已调用 init_remote_kubectl"
 
 # ---------- ⑦ TOGGLE 与 cluster.conf.example 一致性 ----------
-say "[7/11] TOGGLE 变量在 cluster.conf.example 声明 ..."
+say "[7/12] TOGGLE 变量在 cluster.conf.example 声明 ..."
 if [ -f "${CONF_EXAMPLE}" ]; then
     TOG_MISS=0
     while IFS= read -r -d '' f; do
@@ -152,7 +152,7 @@ else
 fi
 
 # ---------- ⑧ 文件序号与目录 ----------
-say "[8/11] 文件名序号规范(NN_ 前缀) ..."
+say "[8/12] 文件名序号规范(NN_ 前缀) ..."
 NUM_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -167,7 +167,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 # ---------- ⑨ tools/ 工具脚本语法检查 ----------
 # 模块外的部署工具(tools/**/*.sh: ceph-backup/deploy-registry/... )同样参与部署,
 # 漏检会在运行期炸(历史: registry 就绪等待 K unbound 崩溃)。
-say "[9/11] tools/ 工具脚本语法检查 ..."
+say "[9/12] tools/ 工具脚本语法检查 ..."
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 T_FAIL=0
 while IFS= read -r -d '' f; do
@@ -182,7 +182,7 @@ done < <(find "${TOOLS_DIR}" -name '*.sh' -print0)
 # 为什么要有这一条: 曾有模块**写了**"私服拉取失败就回退本地 chart",
 # 但仓库里压根没有那份文件 —— 私服一抖动, 回退就是空转, 回退代码形同虚设。
 # 光靠文档挡不住这种缺失(写的时候都以为回退能兜住), 所以放进静态校验。
-say "[10/11] helm chart 离线副本检查 ..."
+say "[10/12] helm chart 离线副本检查 ..."
 ADDON_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/cubestack-addon"
 CHART_FAIL=0; CHART_WARN=0; CHART_OKN=0
 # 判据: **行首就是 helm 命令** —— 只排除注释不够, 变量/err 字符串里提到
@@ -225,7 +225,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${CHART_FAIL}" = "0" ] && ok "安装 chart 的模块均有 vendored 离线副本(${CHART_OKN} 个模块通过)"
 
 # ---------- ⑪ kube-vip 控制平面 VIP(与 kubespray inventory 的一致性) ----------
-say "[11/11] kube-vip 控制平面 VIP 配置检查 ..."
+say "[11/12] kube-vip 控制平面 VIP 配置检查 ..."
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 KV_ADDONS="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/k8s_cluster/addons.yml"
 KV_ALL_YML="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/all/all.yml"
@@ -241,7 +241,7 @@ KV_SNAPSHOT="$(
     # shellcheck disable=SC1090
     . "${KV_CONF}" >/dev/null 2>&1 || true
     printf '%s\n%s\n%s\n' \
-        "${KUBE_VIP_ENABLED:-true}" "${K8S_API_VIP:-}" "${METALLB_POOL:-}"
+        "${KUBE_VIP_ENABLED:-false}" "${K8S_API_VIP:-}" "${METALLB_POOL:-}"
 )"
 KUBE_VIP_ENABLED="$(printf '%s' "${KV_SNAPSHOT}" | sed -n 1p)"
 K8S_API_VIP="$(printf '%s' "${KV_SNAPSHOT}" | sed -n 2p)"
@@ -271,8 +271,26 @@ else
     fi
 fi
 
+# ⑪-C 兜底默认一致性(2026-09-24 增补): 同一个开关的**默认值**散落在多处兜底里 ——
+#   cluster.conf.example(模板) / 09_kube_vip.sh(渲染调用) / lib-common.sh(addons.yml 写入)
+#   / render-kube-vip-manifest.py(CLI 默认)。改默认时漏改一处 → 行为随调用路径漂移
+#   (本仓库实测踩过: 文档与代码不同步; KUBE_VIP_ENABLED 当年也是改了 11 处兜底才一致)。
+#   这里只断言"各处彼此一致", **不写死具体值** —— 将来再翻转也不会误报。
+_cpd="$(grep -rhoE 'KUBE_VIP_CP_DETECT:-[a-z]+' \
+        "${CONF_EXAMPLE}" \
+        "${REPO_ROOT}/deployments/scripts/modules/02_k8s/09_kube_vip.sh" \
+        "${REPO_ROOT}/deployments/scripts/lib-common.sh" 2>/dev/null | sed 's/.*:-//' | sort -u)"
+_cpdr="$(grep -oE '"--cp-detect", default="[a-z]+"' \
+         "${REPO_ROOT}/deployments/scripts/tools/k8s/render-kube-vip-manifest.py" 2>/dev/null | grep -oE '(true|false)' | head -1)"
+if [ -n "${_cpd}" ] && [ "$(printf '%s\n' "${_cpd}" | grep -c .)" = "1" ] && [ "${_cpd}" = "${_cpdr}" ]; then
+    ok "KUBE_VIP_CP_DETECT 各处兜底默认一致(${_cpd})"
+else
+    ck_fail "KUBE_VIP_CP_DETECT 兜底默认不一致: shell 侧=[${_cpd:-未取到}] 渲染器=[${_cpdr:-未取到}]" \
+        "      → 改默认须同时改: cluster.conf.example / 02_k8s/09_kube_vip.sh / lib-common.sh / tools/k8s/render-kube-vip-manifest.py"
+fi
+
 # ⑪-B 开关**开启**时才有意义的取值自洽(关闭态那些值会连同 VIP 一起经清理路径收敛掉)
-if [ "${KUBE_VIP_ENABLED:-true}" = "true" ]; then
+if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
     if [ ! -f "${KV_ADDONS}" ]; then
         warn "  未找到 ${KV_ADDONS}, 跳过(未生成 inventory?)"
     else
@@ -317,6 +335,25 @@ if [ "${KUBE_VIP_ENABLED:-true}" = "true" ]; then
     fi
 else
     say "  KUBE_VIP_ENABLED≠true —— 跳过启用态断言(⑪-A 的单一写入者契约不受开关影响, 仍已校验)"
+fi
+
+# ---------- ⑫ ceph 磁盘链路回归测试(离线 stub, 不连真机) ----------
+# 为什么放进静态校验: ceph-disk-classify.py / ceph-cleanup.sh 是**会销毁磁盘数据**的代码,
+# 判错一类盘就是毁一块业务盘。它们的判定分支(整盘 LVM PV、未激活 VG、混合盘、nbd…)
+# 在普通 fixture 里造不出来、在真机上又不敢试 —— 所以用 stub ssh + lsblk fixture 驱动真实
+# 脚本, 把"选哪些盘 / 拒哪些盘 / 远端载荷"全断言一遍。用例已做过变异验证(故意改坏判定会红)。
+say "[12/12] ceph 磁盘链路回归测试(离线 stub) ..."
+CEPH_TEST_SH="${SCRIPT_DIR}/tests/ceph-disk-tests.sh"
+if [ -f "${CEPH_TEST_SH}" ]; then
+    if CEPH_TEST_OUT="$(bash "${CEPH_TEST_SH}" 2>&1)"; then
+        ok "$(grep -E '通过 [0-9]+' <<< "${CEPH_TEST_OUT}" | tail -1)"
+    else
+        printf '%s\n' "${CEPH_TEST_OUT}" | sed 's/^/    /'
+        ck_fail "ceph 磁盘链路回归测试未通过(详见上方失败项)"
+    fi
+    unset CEPH_TEST_OUT
+else
+    warn "  跳过(未找到 ${CEPH_TEST_SH})"
 fi
 
 echo "---------------------------------------------"

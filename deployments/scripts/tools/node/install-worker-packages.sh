@@ -225,10 +225,43 @@ for f in "${NEED_DEBS[@]}"; do
 done
 
 # ── 安装(dpkg -i; 远端 pipefail 保证 dpkg 失败不被 tail 管道吞掉, 失败显式中止) ──
-say "安装中 (dpkg -i, 失败将中止) ..."
+# ★ 2026-09-24 事故修复: 安装期间临时**禁用 initramfs 重建**, 装完恢复。
+#   与 patch-playbooks/install-packages.yml 同一根因(那边已修): `dpkg -i lvm2/dmsetup`
+#   → initramfs-tools.postinst → `update-initramfs -u` → `mkinitramfs` → `hooks/mdadm`
+#   → `mdadm --examine --scan` 遍历所有块设备 → 若节点上有**后端不可达的内核 rbd 映射/挂死块设备**,
+#   进程进 D 状态(不可中断) → 本脚本的 ssh 调用**永不返回**, 表现为部署"卡在这里很长时间"
+#   (实测 10.66.3.36 卡 38 分钟以上, mdadm 的 fd 直指 /dev/rbd0)。
+#   我们装的包(lvm2 家族)在节点上不需要重建 initrd(内核未变、root 不在 LVM 上), 禁用是安全的。
+#   载荷用**引号 heredoc** 构造(仓库既有风格): 免去多层转义, 也便于离线测试。
+INSTALL_PAYLOAD="$(cat <<'PAYLOAD'
+set -o pipefail
+_ir=/etc/initramfs-tools/update-initramfs.conf
+_bak=""
+if [ -f "${_ir}" ] && ! grep -qE '^[[:space:]]*update_initramfs[[:space:]]*=[[:space:]]*no' "${_ir}"; then
+    _bak="$(mktemp)"
+    cp -a "${_ir}" "${_bak}"
+    if grep -qE '^[[:space:]]*update_initramfs=' "${_ir}"; then
+        sed -i -E 's|^[[:space:]]*update_initramfs=.*|update_initramfs=no|' "${_ir}"
+    else
+        echo 'update_initramfs=no' >> "${_ir}"
+    fi
+    echo "[install] 本次安装期间已临时禁用 initramfs 重建(避免 mdadm/lvm hooks 扫描块设备而卡死)"
+fi
+n_rbd="$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${n_rbd:-0}" -gt 0 ]; then
+    echo "[install] ⚠ 节点存在 ${n_rbd} 个内核 rbd 映射 —— 后端不可达时任何设备扫描都可能卡死; 见 docs/troubleshooting.md"
+fi
+dpkg -i /tmp/packages/*.deb 2>&1 | tail -20
+_rc="${PIPESTATUS[0]}"
+if [ -n "${_bak}" ] && [ -f "${_bak}" ]; then
+    cp -a "${_bak}" "${_ir}"; rm -f "${_bak}"
+fi
+exit "${_rc}"
+PAYLOAD
+)"
+say "安装中 (dpkg -i, 失败将中止; 期间禁用 initramfs 重建) ..."
 INSTALL_LOG="$(mktemp)"
-if ! ${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" \
-    "set -o pipefail; sudo dpkg -i /tmp/packages/*.deb 2>&1 | tail -20" \
+if ! ${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" "sudo bash -s" <<< "${INSTALL_PAYLOAD}" \
     > "${INSTALL_LOG}" 2>&1; then
     err "dpkg -i 安装失败(节点 ${IP}), 日志:"
     cat "${INSTALL_LOG}" >&2 || true

@@ -187,7 +187,9 @@ _mon_ip() {   # <mon_id> → 节点 IP(空=未知)
     # ① 从 CM mapping 字段取 Address(JSON: "a":{"Name":...,"Address":"10.244.1.33"})
     mapping="$( ( SSH "${K} -n ${CEPH_NAMESPACE} get cm rook-ceph-mon-endpoints -o jsonpath='{.data.mapping}' 2>/dev/null" || true) )"
     if [ -n "${mapping}" ]; then
-        addr="$(echo "${mapping}" | python3 -c "import sys,json; d=json.load(sys.stdin).get('node',{}); print(d.get('${id}',{}).get('Address',''))" 2>/dev/null)"
+        # `|| true`: mapping 不是合法 JSON 时 python3 非 0 → 赋值非 0 → set -e 结束脚本;
+        # 下面正是靠 `[ -n "${addr}" ]` 判"这条路取不到, 走回退 ②"。
+        addr="$(echo "${mapping}" | python3 -c "import sys,json; d=json.load(sys.stdin).get('node',{}); print(d.get('${id}',{}).get('Address',''))" 2>/dev/null || true)"
         [ -n "${addr}" ] && { echo "${addr}"; return 0; }
     fi
     # ② 回退: 在 NODES 中按 hostname 找 IP
@@ -303,7 +305,9 @@ apply_main() {
         ok "  mon 外部端点(hostNetwork 直连): ${EXT_MONS}"
         # RGW: hostNetwork 的 rgw pod 也直接监听节点 IP:80
         RGW_EP=""
-        _rgw_host="$(_mon_ip "$(mon_list | awk '{print $1}')")"
+        # `|| true`: mon_list 取不到 → 内层为空 → _mon_ip "" 返回非 0 → 外层赋值非 0 → set -e 结束;
+        # 下一行正是靠 `[ -n "${_rgw_host}" ]` 判"取不到就不给 RGW 端点"。
+        _rgw_host="$(_mon_ip "$(mon_list | awk '{print $1}' || true)" || true)"
         [ -n "${_rgw_host}" ] && RGW_EP="http://${_rgw_host}:80"
         say "  RGW s3-store → 节点 IP:80(http://${_rgw_host}:80)"
     else

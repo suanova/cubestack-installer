@@ -57,8 +57,8 @@ def main():
     ap.add_argument("--image-tag", default="v0.8.9")
     ap.add_argument("--port", type=int, default=6443)
     ap.add_argument("--pull-policy", default="IfNotPresent")
-    ap.add_argument("--cp-detect", default="true", choices=["true", "false"],
-                    help="apiserver 进程级故障检测")
+    ap.add_argument("--cp-detect", default="false", choices=["true", "false"],
+                    help="apiserver 进程级故障检测(默认 false = kubespray 行为; ★ 2026-09-24 由 true 改为 false, 与 cluster.conf.example 的 KUBE_VIP_CP_DETECT 默认保持一致)")
     args = ap.parse_args()
 
     variables = {

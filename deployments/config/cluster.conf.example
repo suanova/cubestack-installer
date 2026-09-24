@@ -59,7 +59,7 @@ SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-nodePort}"
 
 # ---- 阶段一、宿主机环境 ----
 # ⚠ API 入口高可用二选一(由代码强制互斥, 同时开启会硬失败):
-#     kube-vip  : 不占额外机器, VIP 跑在各 master 上(推荐, 默认开)
+#     kube-vip  : 不占额外机器, VIP 跑在各 master 上(默认**关**, 需显式 KUBE_VIP_ENABLED=true)
 #     HAProxy+Keepalived: 需要 2 台专职 LB 机器才成立, 且现有实现是单机 VIP 非真 HA(见 docs/kube-vip-api-ha.md)
 HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # API 四层负载均衡(modules/01_env/05_lb_haproxy.sh; 默认 master 直连, 需要时开)
                                                         #   ⚠ 在 HAProxy 所在服务器上执行本模块(持久化机器), 非临时 installer 服务器(装完即删)
@@ -77,10 +77,17 @@ METALLB_ENABLED="${METALLB_ENABLED:-true}"              # MetalLB 负载均衡(�
 #   · 与 HAPROXY_ENABLED / KEEPALIVED_ENABLED 互斥(同时开启硬失败), 详见阶段一注释
 #   · VIP 不在 MetalLB 地址池内(否则会与 LoadBalancer 抢地址, 硬失败)
 #   · 存量集群首次切换入口需显式确认(倒计时窗口), 详见文档第 7 节两阶段流程
-KUBE_VIP_ENABLED="${KUBE_VIP_ENABLED:-true}"            # 默认开: 消除 API 入口单点(修复"全集群指向第一个 master")
+KUBE_VIP_ENABLED="${KUBE_VIP_ENABLED:-false}"           # 默认关: 不部署 kube-vip, API 入口=首个 master(见下)
+#   · 关(默认): 不部署 kube-vip 静态 Pod, 不推导/不扫描 VIP, API 入口 = 第一个 master(单点可用, 零额外机制)。
+#   · 开(true): 消除 API 入口单点 —— 装 kube-vip, 入口切到 VIP。开启方式: 置 true 后 `--steps kube_vip`,
+#     或写回 cluster.conf 后全量重跑; 存量集群首次切换还需走两阶段(先让 VIP 就位, 人工确认后再切入口),
+#     见 docs/kube-vip-api-ha.md 第 7 节。关回去: 置 false 重跑 → 09_kube_vip 走清理分支(带 fail-closed 护栏:
+#     入口仍指向 VIP 时会**拦停**而不是自毁, 回退顺序见文档 §7.4)。
+#   · ⚠ 开启前先确认网段里**真有空闲地址**可当 VIP: 留空 K8S_API_VIP 时会在 .210~.254 逐个探测,
+#     整段被占用/落在 MetalLB 池内 → 硬失败。(关闭态不会触发这个扫描。)
 K8S_API_VIP="${K8S_API_VIP:-}"                          # 留空=自动推导(各 master 探测 .210 起找空闲地址); 显式值优先
 KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"            # 留空=kube-vip 自动检测网卡; 多网卡环境显式指定(如 ens5)
-KUBE_VIP_CP_DETECT="${KUBE_VIP_CP_DETECT:-true}"        # apiserver 进程级故障检测(默认开, 覆盖 kubespray 的 false)
+KUBE_VIP_CP_DETECT="${KUBE_VIP_CP_DETECT:-false}"       # apiserver 进程级故障检测(**默认关**, 与 kubespray 一致; ★ 2026-09-24 由默认开改为默认关)
                                                         #   false(仅租约): 节点活着但 apiserver 进程死了 → VIP 不漂移
                                                         #   true(kube-vip 探本机 apiserver /healthz): 探失败即置健康为假
                                                         #     → 不再续租 → 租约到期(约 5s)即漂移, 与节点宕机同一量级
@@ -111,7 +118,8 @@ REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"               # 集群内置 Registry(
 
 # ---- 阶段四、附加组件(operator) ----
 GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 沐曦 GPU Operator(默认启用; 见 4.1)
-LWS_ENABLED="${LWS_ENABLED:-true}"                      # LeaderWorkerSet(LLM 工作负载调度; 默认启用; 见 4.2)
+LWS_ENABLED="${LWS_ENABLED:-false}"                     # LeaderWorkerSet(LLM 工作负载调度; 默认**关**; 见 4.2)
+                                                        #   开启: --enable lws 预启用 / --steps gpu_lws 立即部署 / 置 true 后全量
 LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"  # LWS DisaggregatedSet(解耦推理; 见 4.2)
 CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # Ceph 存储底座(P1; 见 4.3)
 CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI RBD/RGW/CephFS(依赖 CEPH_ENABLED; 见 4.3)
@@ -234,6 +242,7 @@ CEPH_DATA_DISKS="${CEPH_DATA_DISKS:-}"            # explicit 策略: 如 "cubest
 CEPH_DETECT_EXCLUDE="${CEPH_DETECT_EXCLUDE:-^(sda|sr0|vda|nbd[0-9]+)$}"   # 自动检测时排除的盘名(正则, 防误选系统盘; nbd* 为 qcow2/NBD 伪设备)
 # 高可用与池(replicated 生产缺省: 3 副本 + host failureDomain + min_size 2; 见 docs/ceph-rook.md)
 CEPH_MON_COUNT="${CEPH_MON_COUNT:-3}"             # mon 数量(奇数, 默认 3)
+CEPH_MGR_COUNT="${CEPH_MGR_COUNT:-2}"             # mgr 数量(默认 2 = active+standby; 1 = 无备用, 该节点挂会短暂 no active mgr)
 # ★ hostNetwork(2026-09-09 默认): mon/osd/mgr 直接监听**节点 IP**(不占 pod 网段, 公告节点地址)。
 #   历史: 默认 pod 网络下, 外部 ceph-csi-operator 经 *-external NodePort 走 kube-proxy DNAT 时
 #   mon msgr v1 握手(发 auth 后无响应)在 CNI fabric 上损坏 → 外部接入不可用。
@@ -305,9 +314,10 @@ CEPH_MON_NODEPORT_MAX="${CEPH_MON_NODEPORT_MAX:-32767}"     # 规律分配硬上
 # ---- CEPH_MODE=external(接入外部 Ceph)—— 本集群不创建集群内 CephCluster ----
 # [必填] 只需 4 项: CEPH_MODE / CEPH_MONITORS / CEPH_USER / CEPH_KEYRING(其余可不动)
 # [可选] CEPH_POOL(外部 RBD pool, 默认 rbd)、CEPHFS_*(外部 CephFS)
-# CEPH_EXTERNAL_PROVISION_SMOKE: ceph_csi 部署末尾对 provision 全链做冒烟测试
-#   (1Gi scratch PVC → Bound → 删除; 提供方异常在此立刻报错, 不拖到 k8s_registry)。
-#   提供方未就绪但需先装其它组件时可设 false 跳过(registry PVC 会 Pending)。
+# CEPH_EXTERNAL_PROVISION_SMOKE: ceph_csi 部署末尾对 provision 全链做冒烟测试(**默认关**)
+#   开启 = 真建 1Gi RBD/CephFS scratch PVC → 等 Bound → busybox 真实写读 → 删除;
+#   提供方异常(pool/用户/node caps)会在此立刻硬失败并给排查命令, 不拖到 k8s_registry。
+#   代价: 每段最长 180s 且失败会中断模块 → 日常重装默认跳过; 需要端到端自检时置 true。
 # ⚠ 旧变量 CEPH_EXTERNAL_MONITORS/POOL/USER/KEYRING 已迁移到下面新变量(load_config 自动兼容)。
 # ⚠ internal 模式的对外暴露配置(CEPH_EXTERNAL_* / CEPH_MON_NODEPORT_* / CEPH_RGW_*)与本段无关——
 #   那是"我把自己暴露出去"用的; 本段是"我接入外部别人的"。external 模式请忽略上方暴露段。
@@ -333,7 +343,7 @@ CEPH_RBD_NODE_USER="${CEPH_RBD_NODE_USER:-}"     # external(可选): csi-rbd **n
                                                  # 两角色 caps 区分更严时使用(2026-09-10 Bug A 加固);
                                                  # 留空 = 回退 CEPH_USER(旧行为)。与 CEPH_RBD_NODE_KEYRING 必须成对。
 CEPH_RBD_NODE_KEYRING="${CEPH_RBD_NODE_KEYRING:-}"  # external(可选): 上述 node 用户的 keyring; 留空 = 回退 CEPH_KEYRING
-CEPH_EXTERNAL_PROVISION_SMOKE="${CEPH_EXTERNAL_PROVISION_SMOKE:-true}"  # external: provision 冒烟测试(默认开; 提供方未就绪时可 false 跳过)
+CEPH_EXTERNAL_PROVISION_SMOKE="${CEPH_EXTERNAL_PROVISION_SMOKE:-false}"  # external: provision 冒烟测试(**默认关**, ★ 2026-09-24 由默认开改为默认关)。开=真建 1Gi RBD/CephFS 卷+busybox 写读各最长 180s, 失败硬失败模块; 需要端到端自检时置 true
 CEPH_DASHBOARD_ENABLED="${CEPH_DASHBOARD_ENABLED:-true}"  # Ceph Dashboard
 
 # ════════════════════════════════════════════════════════════════════════
@@ -646,7 +656,7 @@ METAX_PROJECT="${METAX_PROJECT:-metax}"                 # 沐曦镜像所在项�
 # metax-save-images.sh: 枚举中命中即跳过的镜像(正则; 默认排除 sglang 等大推理镜像)
 METAX_SAVE_EXCLUDE="${METAX_SAVE_EXCLUDE:-sglang}"
 # 核心组件列表(对应 metax-k8s-images.<ver>.run 内嵌镜像, 与版本配套; METAX_LIST_IMAGES=true 可打印保存命令)
-METAX_IMAGE_COMPONENTS="${METAX_IMAGE_COMPONENTS:-gpu-label gpu-device gpu-aware topo-master topo-worker operator-controller container-runtime driver-manager gpu-scheduler mx-exporter}"
+METAX_IMAGE_COMPONENTS="${METAX_IMAGE_COMPONENTS:-gpu-label gpu-device gpu-aware topo-master topo-worker operator-controller container-runtime driver-manager gpu-scheduler}"   # ★ 2026-09-24: 去掉 mx-exporter —— dataExporter 已随可观测性栈移除(chart 默认 dataExporter.deploy=false), 该镜像不再需要
 # 集群内置 registry 仓库路径(默认 registry.cubestack.io:5000/metax, 即 REGISTRY_DOMAIN:REGISTRY_PORT/metax)
 METAX_REGISTRY="${METAX_REGISTRY:-${REGISTRY_DOMAIN}:${REGISTRY_PORT}/metax}"
 METAX_NAMESPACE="${METAX_NAMESPACE:-metax-operator}"            # 部署命名空间
@@ -659,7 +669,7 @@ METAX_DRIVER_VERSION="${METAX_DRIVER_VERSION:-3.8.1.6-amd64}"  # 内核驱动版
 METAX_MACA_IMAGE="${METAX_MACA_IMAGE:-maca:3.8.1.2-ubuntu22.04-amd64}"  # MXMACA SDK 镜像(最新 3.8, 需与离线 tar/在线拉取匹配)
 
 # ---------------- 4.2 LeaderWorkerSet / LWS(依赖: Registry; LLM 工作负载调度) ----------------
-# 开关见顶部【组件启停开关】: LWS_ENABLED(默认 true=开)
+# 开关见顶部【组件启停开关】: LWS_ENABLED(默认 false=关; --enable lws 或 --steps gpu_lws 开启)
 # 安装方式(二选一, LWS_INSTALL_MODE):
 #   bundle(默认, 推荐)= 官方 manifests.yaml 单文件, kubectl apply --server-side 整体下发
 #     (含 namespace+CRD+RBAC+controller+webhook; 逐资源应用不受 helm Secret 1MiB 上限; 证书=internal 自签)

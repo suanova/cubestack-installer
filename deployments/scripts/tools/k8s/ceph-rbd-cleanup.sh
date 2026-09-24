@@ -87,10 +87,10 @@ cleanup_node() {   # <ip>
             continue
         fi
         # 该映射是否有有效挂载(kubelet 引用)
-        mounted=""
-        ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
-            "mount | grep -qE '[[:space:]]/dev/rbd${id}[[:space:]]' && echo yes || echo no" 2>/dev/null \
-            && mounted="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" "mount | grep -qE '[[:space:]]/dev/rbd${id}[[:space:]]' && echo yes || echo no" 2>/dev/null)"
+        # ★ 2026-09-24: 原来这条 ssh 被**写了两遍**(先判断、再把同一条命令塞进 `mounted="$(...)"`,
+        #   且赋值处在 `A && B` 的末位 —— B 失败时 set -e 会直接结束脚本)。合并成一次取值 + `|| true`。
+        mounted="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+            "mount | grep -qE '[[:space:]]/dev/rbd${id}[[:space:]]' && echo yes || echo no" 2>/dev/null || true)"
         if [ "${LIST_ONLY}" = "1" ]; then
             echo "    [残留] ${name}(id=${id}, pool=${pool}, mounted=${mounted:-?})"
             continue
@@ -102,12 +102,25 @@ cleanup_node() {   # <ip>
             warn "    ${name}(id=${id}): 已卸载挂载点"
         fi
         # unmap(经 sysfs, 设备节点缺失也有效)
+        # ★ 2026-09-24 修复: 内核有**两套** remove 接口, 用错那套只会拿到 EINVAL ——
+        #   · 单 major 模式(默认): /sys/bus/rbd/remove_single_major ← 设备号(rbd0 → 0)
+        #   · 多 major 模式:      /sys/bus/rbd/remove              ← "major:minor"
+        #   旧版固定写 `echo <设备号> > /sys/bus/rbd/remove` → 恒 EINVAL, 于是
+        #   "unmap 失败(可能被内核占用)"在**根本没被占用**时也会打印, 把排查带偏
+        #   (实机对照: 正确接口 remove_single_major 返回 EBUSY 才是"真被占用", 而
+        #    `remove`+设备号返回的是 EINVAL=参数不对)。现按序试两套接口。
+        #   设备目录已不存在 = 映射本来就没有 → 幂等视为成功。
         if ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
-            "sudo bash -c 'echo ${id} > /sys/bus/rbd/remove' 2>/dev/null" ; then
+            "sudo bash -c '
+                [ -d /sys/bus/rbd/devices/${id} ] || exit 0
+                echo ${id} > /sys/bus/rbd/remove_single_major 2>/dev/null && exit 0
+                mm=\$(cat /sys/bus/rbd/devices/${id}/block/rbd*/dev 2>/dev/null | head -1)
+                [ -n \"\${mm}\" ] && echo \"\${mm}\" > /sys/bus/rbd/remove 2>/dev/null && exit 0
+                exit 1' 2>/dev/null" ; then
             ok "    ${name}(id=${id}): 已 unmap"
             cleaned=$((cleaned+1))
         else
-            warn "    ${name}(id=${id}): unmap 失败(可能被内核占用, 可重启节点清除)"
+            warn "    ${name}(id=${id}): unmap 失败(两套 sysfs 接口均未成功; EBUSY=内核仍持有引用 → 需重启节点清除)"
         fi
     done <<< "${maps}"
     # 清理失效设备节点文件与空挂载目录(kubelet 残留)

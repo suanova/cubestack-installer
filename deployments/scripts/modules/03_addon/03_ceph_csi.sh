@@ -24,6 +24,10 @@
 #       + subvolume groups ephemeral/durable(§9.1 工作区/平台共享划分)
 #     · CEPH_RGW_ENABLED=true → CephObjectStore s3-store(preservePoolsOnDelete, min_size 2)
 #       + Model 仓库用户 rgw-model-admin/rgw-model-reader(§10.4)
+#   · external 模式的可选自检: `CEPH_EXTERNAL_PROVISION_SMOKE`(**默认关**, ★ 2026-09-24 起)——
+#     开启后模块末尾会真建 1Gi RBD/CephFS scratch PVC + busybox 真实写读(RBD/CephFS 两段,
+#     每段最长 180s; 提供方异常会**硬失败**并给排查命令)。默认关的原因: 不拖慢/不中断日常重装;
+#     需要"接入外部 Ceph 时一次性端到端验证"时置 true(详见函数 _ext_smoke 上方注释)。
 #   · registry 后端(需求 6): 把 REGISTRY_STORAGE_CLASS 设为 ceph-block 后,
 #     registry 的 PVC 走 ceph RBD —— 本模块须在 registry 配置模块之前执行(设计顺序见 docs/ceph-rook.md)。
 #   · 参考: docs/ceph-rook.md
@@ -541,9 +545,11 @@ volumeBindingMode: Immediate"
     unset _old_sc _sc _match
     unset _ext_official_rbd_params
 
-    # 冒烟测试(与手填路径同 SC 名) —— 复用同一数据面验证逻辑(见 _ext_smoke 函数)
-    if [ "${CEPH_EXTERNAL_PROVISION_SMOKE:-true}" = "true" ]; then
+    # provision 冒烟测试(复用 _ext_smoke; ★ 2026-09-24 起**默认关**, 见模块头与 cluster.conf)
+    if [ "${CEPH_EXTERNAL_PROVISION_SMOKE:-false}" = "true" ]; then
         _ext_smoke "ceph-rbd-ephemeral-immediate" "cephfs-ephemeral" "${CEPHFS_FS_NAME:-}"
+    else
+        say "  跳过 provision 冒烟测试(默认关; 需要端到端自检时设 CEPH_EXTERNAL_PROVISION_SMOKE=true 重跑本模块)"
     fi
     unset _EXT_IMP_YAML _EXT_SC_YAML _EXT_CONN _EXT_CFG _cfg _conn _ci _gen _env_file _miss
 }
@@ -625,7 +631,7 @@ spec:
         err "  排查: ① 提供方集群 HEALTH_OK: kubectl -n rook-ceph get cephcluster(提供方) + ceph -s"
         err "  ② 外部用户/pool 存在: ceph auth get ${CEPH_USER:-<user>}; ceph osd lspools | grep pool"
         err "  ③ provisioner 日志: kubectl -n rook-ceph logs deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin -c csi-rbdplugin --tail=50"
-        err "  (提供方未就绪又需先装其它组件时, 可 CEPH_EXTERNAL_PROVISION_SMOKE=false 跳过本测试)"
+        err "  (本测试是可选的; 若这次是手动开启的, 去掉 CEPH_EXTERNAL_PROVISION_SMOKE=true 即回到默认跳过)"
         exit 1
     fi
     # ★ CephFS 数据面(Bug C 加固): 启用时同款写读, 失败仅告警不阻断
@@ -998,20 +1004,24 @@ volumeBindingMode: Immediate"
         else
             warn "  config.json 60s 内未挂载(kubelet 延迟; 不影响部署, csi-provisioner 会自动重试成功)"
         fi
-        # ★ 外部 provision 冒烟测试(2026-09-09, 目标"一次性部署成功"; 2026-09-10 Bug C 加固):
+        # ★ 外部 provision 冒烟测试(2026-09-09 加; ★ 2026-09-24 起**默认关**, 需显式开启):
         #   ① RBD: Immediate SC 建 1Gi scratch PVC → 等 Bound → **真实写读**(pod 挂载后写文件+读回,
         #      验证数据面而非仅 provision; 若只 Bound 会漏掉"node 角色无数据池写权限"类故障);
         #   ② CephFS(启用时): scratch PVC(cephfs-ephemeral)→ 等 Bound → 同样真实写读。
-        #   作用:
+        #   作用(开启后):
         #   · 端到端打通 provision 全链(mon 连接/cephx 认证/外部 pool/建卷/删卷)——
         #     提供方未就绪(pool/用户/网络)在此立刻硬失败并给出排查命令,
         #     不会拖到 k8s_registry 才断(历史事故: registry 90s 超时中断部署);
         #   · 数据面验证(node 角色 caps): 写读通过才放行, 保证"mount 成功但写 EPERM"类
         #     (Bug A: 双角色单凭据)在部署期自检暴露, 而非用户挂卷后才发现;
         #   · 预热 provisioner 首触路径(消除冷启动/投递延迟), registry 正式 PVC 秒绑。
-        #   CEPH_EXTERNAL_PROVISION_SMOKE=false 可跳过(提供方未就绪但需先装其它组件时)。
-        if [ "${CEPH_EXTERNAL_PROVISION_SMOKE:-true}" = "true" ]; then
+        #   ⚠ 代价: 真实建/删 1Gi 卷 + busybox pod, 每段最长 180s(RBD 与 CephFS 两段),
+        #     且失败会**硬失败整个模块**。故自 2026-09-24 起改为**默认关**(用户要求):
+        #     日常重装不再被这段拖住; 需要端到端自检时置 CEPH_EXTERNAL_PROVISION_SMOKE=true。
+        if [ "${CEPH_EXTERNAL_PROVISION_SMOKE:-false}" = "true" ]; then
             _ext_smoke "ceph-rbd-ephemeral-immediate" "cephfs-ephemeral" "${EXT_CEPHFS_ENABLED}"
+        else
+            say "  跳过 provision 冒烟测试(默认关; 需要端到端自检时设 CEPH_EXTERNAL_PROVISION_SMOKE=true 重跑本模块)"
         fi
     else
         err "  ceph-csi-config 60s 内未生成(ceph-csi-operator 未调和 ClientProfile/CephConnection)"

@@ -166,7 +166,8 @@ metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/operator-controller:${METAX_VERSION}
 metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/container-runtime:${METAX_VERSION}-amd64
 metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/driver-manager:${METAX_VERSION}-amd64
 metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/gpu-scheduler:${METAX_VERSION}-amd64
-metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/mx-exporter:${METAX_VERSION}-amd64
+# ★ 2026-09-24: 移除 mx-exporter —— dataExporter 已随可观测性栈整体移除(chart 默认
+#   dataExporter.deploy=false, 模块也不再 --set 打开), 该镜像不再需要
 metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/driver-image:${METAX_DRIVER_VERSION}
 # maca: METAX_MACA_IMAGE 本身已含 "仓库名:tag"(maca:3.8.1.2-ubuntu22.04-amd64), 故整体拼接
 metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/${METAX_MACA_IMAGE}

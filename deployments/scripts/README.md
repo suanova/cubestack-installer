@@ -89,7 +89,7 @@ deployments/scripts/
 │   │   ├── 06_k8s_deploy.sh        # 部署 kubespray(默认关, K8S_ENABLED; 完成后单节点集群自动解除 master 污点使其可调度)
 │   │   ├── 07_k8s_scale.sh         # 扩容集群(默认关, K8S_SCALE_ENABLED; 扩容后单 control-plane 重新解除污点)
 │   │   ├── 08_verify_kube_vip.sh   # 验证 API VIP 高可用(六项含漂移演练; --steps verify_kube_vip)
-│   │   └── 09_kube_vip.sh          # API Server VIP 高可用(双向收敛: KUBE_VIP_ENABLED=true 装/修,
+│   │   └── 09_kube_vip.sh          # API Server VIP 高可用(默认关; 双向收敛: KUBE_VIP_ENABLED=true 装/修,
 │   │                               #   =false 清理并校验无残留; DEFAULT:1 常驻全量运行; 见 docs/kube-vip-api-ha.md 第 18 节)
 │   └── 03_addon/              #   阶段三: 附加组件(集群部署后; 01~19 中间件, 20 起自研)
 │       ├── 01_metallb.sh      #    MetalLB 负载均衡(基座, METALLB_ENABLED)
