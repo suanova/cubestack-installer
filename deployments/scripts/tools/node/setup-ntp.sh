@@ -191,7 +191,9 @@ EOF
         && node_cmd "${m_ip}" "${m_user}" "${m_pw}" "bash /tmp/cubestack-chrony-master.sh" >/dev/null 2>&1; then
         node_cmd "${m_ip}" "${m_user}" "${m_pw}" "rm -f /tmp/cubestack-chrony-master.sh" >/dev/null 2>&1 || true
         # 二次确认(防自检误判): 权威自身 stratum 应为 10(local)
-        _STRATUM="$(node_cmd "${m_ip}" "${m_user}" "${m_pw}" "chronyc tracking 2>/dev/null | awk '/Stratum/{print \$3}'" 2>/dev/null | tr -d ' \r')"
+        # `|| true`: node_cmd(ssh)一抖就会让管道非 0 → 赋值非 0 → set -e 结束模块;
+        # 下面按 `${_STRATUM:-?}` 处理空值(打印"应为 10"的 warn 并继续), 语义上允许为空。
+        _STRATUM="$(node_cmd "${m_ip}" "${m_user}" "${m_pw}" "chronyc tracking 2>/dev/null | awk '/Stratum/{print \$3}'" 2>/dev/null | tr -d ' \r' || true)"
         if [ "${_STRATUM:-0}" = "10" ]; then
             ok "  第一个 master ${m_ip} chrony 服务端已就绪(监听 123, local stratum 10)"
         else
@@ -358,14 +360,15 @@ verify_clocks() {
             #   客户端若是 chrony 且权威为首 master, 校验 sources 里权威源的 Reach(期望 377)。
             if [ "${ip}" != "${NTP_AUTHORITY}" ] && node_cmd "${ip}" "${u}" "${pw}" \
                 "command -v chronyc >/dev/null 2>&1 && chronyc sources 2>/dev/null | awk '\$1 ~ /\\*|\\^/ {print \$NF}' | grep -q ." 2>/dev/null; then
+                # `|| true`: 同上 —— 取不到就按 `${_reach:-0}` 走"Reach 偏低, 强制 makestep 复检"分支
                 _reach="$(node_cmd "${ip}" "${u}" "${pw}" \
-                    "chronyc sources 2>/dev/null | awk '/^\\^\\*/{print \\\$6}'" 2>/dev/null | tr -d ' \r')"
+                    "chronyc sources 2>/dev/null | awk '/^\\^\\*/{print \\\$6}'" 2>/dev/null | tr -d ' \r' || true)"
                 if [ "${_reach:-0}" -lt 37 ]; then
                     warn "  ${hn}(${ip}) 偏差达标但 NTP 源 Reach=${_reach:-0}(<37, 同步不稳定/未生效), 强制 makestep 后复检 ..."
                     node_cmd "${ip}" "${u}" "${pw}" "chronyc -a makestep >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
                     sleep 3
                     _reach="$(node_cmd "${ip}" "${u}" "${pw}" \
-                        "chronyc sources 2>/dev/null | awk '/^\\^\\*/{print \\\$6}'" 2>/dev/null | tr -d ' \r')"
+                        "chronyc sources 2>/dev/null | awk '/^\\^\\*/{print \\\$6}'" 2>/dev/null | tr -d ' \r' || true)"
                     [ "${_reach:-0}" -lt 37 ] && { warn "  ${hn}(${ip}) NTP 源仍 Reach=${_reach:-0}(检查: 权威 chrony 是否 allow 节点网段 / chronyc sources)"; FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "; }
                 fi
             fi

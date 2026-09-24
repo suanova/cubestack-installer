@@ -286,7 +286,9 @@ else
     if [ "${INSTALL_CRD}" = "true" ] && [ "${LWS_CHART_SOURCE}" = "dir" ] && [ -d "${LWS_CHART_DIR}/crds" ]; then
         say "  用 kubectl 逐文件安装 CRD(${LWS_CHART_DIR}/crds) ..."
         for _crd in "${LWS_CHART_DIR}"/crds/*.yaml; do
-            _name="$(grep -E '^  name: ' "${_crd}" | head -1 | awk '{print $2}')"
+            # `|| true`: CRD 里没有 `  name: ` 行时 grep 无匹配, set -e+pipefail 会让这条赋值带走
+            # 整个模块(下一行本就按 `_name` 可空处理)。
+            _name="$(grep -E '^  name: ' "${_crd}" | head -1 | awk '{print $2}' || true)"
             # 先删旧 CRD 再 apply: 同名 CRD 内容变更时 kubectl apply 无法直接替换(结构冲突), 删后重建保证幂等
             [ -n "${_name}" ] && SSH "${K} delete crd ${_name} --ignore-not-found >/dev/null 2>&1" || true
             if cat "${_crd}" | SSH "${K} apply -f -" >/dev/null 2>&1; then

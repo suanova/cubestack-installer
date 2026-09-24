@@ -86,6 +86,14 @@ if [ "${_READY}" = "1" ]; then
     ok "  registry 就绪: PVC ${_pc} / pod Running / ${_base}/v2/ 可达"
 else
     err "  registry 未在 ${REGISTRY_WAIT_SECONDS}s 内就绪 —— 后端 ${REGISTRY_STORAGE_CLASS:-local-path}"
+    # ★ 2026-09-24: 超时时**自动打印现场快照**(PVC 阶段 / pod 状态 / 最近的 PVC 事件)。
+    #   之前只给"排查: kubectl get pvc,pods"的提示, 而真正费时的是猜"卡在哪一步"——
+    #   实机那次的关键证据就是 PVC 事件里先后两条 `storageclass "ceph-block" not found`
+    #   与随后的 `Provisioning ... Succeeded`(即 SC 出现得比 PVC 晚, 但最终自愈)。
+    err "  —— 现场快照 ——"
+    ( SSH "${K} -n kube-system get pvc registry-pvc -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,VOLUME:.spec.volumeName,SC:.spec.storageClassName --no-headers 2>/dev/null" || true ) | sed 's/^/    PVC  /' >&2
+    ( SSH "${K} -n kube-system get pods -l k8s-app=registry -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,READY:.status.containerStatuses[0].ready,NODE:.spec.nodeName --no-headers 2>/dev/null" || true ) | sed 's/^/    POD  /' >&2
+    ( SSH "${K} -n kube-system get events --sort-by=.lastTimestamp 2>/dev/null | grep -iE registry | tail -6" || true ) | sed 's/^/    EVT  /' >&2
     err "  排查: kubectl -n kube-system get pvc,pods | grep registry(ceph-block: 先确认 ceph_csi 已建 SC ceph-block; 检查 rbd 卷创建, 见 docs/ceph-rook.md §8)"
     exit 1
 fi

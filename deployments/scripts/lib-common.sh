@@ -29,16 +29,19 @@ export CLUSTER_NAME
 
 # ---------------- 宿主机物理 IP 自动检测 ----------------
 # 不 hardcode: 自动检测宿主机物理网卡 IP(排除虚拟网桥 docker0/privbr0/virbr0 等)
+# ★ 方法 2/3 的管道必须带 `|| true`: 本仓库脚本普遍 `set -euo pipefail`, 而"所有 IP 都被
+#   过滤掉"时 grep 退出码非 0 → `ip="$(...)"` 这个**赋值**也非 0 → set -e 直接把调用方
+#   (整轮部署)带走。语义上这里只该表示"这个方法没找到", 交给下一个方法 / 兜底 127.0.0.1。
 detect_host_ip() {
     local ip=""
     # 方法1: 默认路由出口源 IP(最可靠)
     ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
     [ -n "${ip}" ] && echo "${ip}" && return 0
     # 方法2: hostname -I 过滤虚拟网桥/保留地址
-    ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.244\.|10\.245\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[0-1]\.|192\.168\.122\.|127\.|169\.254\.)' | head -1)"
+    ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.244\.|10\.245\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[0-1]\.|192\.168\.122\.|127\.|169\.254\.)' | head -1 || true)"
     [ -n "${ip}" ] && echo "${ip}" && return 0
     # 方法3: 枚举物理网卡 IP
-    ip="$(ip -4 addr show 2>/dev/null | grep -oP 'inet \K[0-9.]+' | grep -vE '^(10\.244\.|10\.245\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[0-1]\.|192\.168\.122\.|127\.|169\.254\.)' | head -1)"
+    ip="$(ip -4 addr show 2>/dev/null | grep -oP 'inet \K[0-9.]+' | grep -vE '^(10\.244\.|10\.245\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[0-1]\.|192\.168\.122\.|127\.|169\.254\.)' | head -1 || true)"
     [ -n "${ip}" ] && echo "${ip}" || echo "127.0.0.1"
 }
 
@@ -725,7 +728,7 @@ all_node_ips() {
 # 硬失败项直接 err+exit 1; 通过则返回 0
 # 用法: kube_vip_validate_config || exit 1   (须已 load_config)
 kube_vip_validate_config() {
-    [ "${KUBE_VIP_ENABLED:-true}" = "true" ] || return 0
+    [ "${KUBE_VIP_ENABLED:-false}" = "true" ] || return 0
 
     # ① 互斥
     if [ "${HAPROXY_ENABLED:-false}" = "true" ] || [ "${KEEPALIVED_ENABLED:-false}" = "true" ]; then
@@ -952,7 +955,7 @@ api_entry_ip() {
     local m1; m1="$(first_master_ip)" || return 1
     local entry="${API_ENTRY_IP:-}"          # cluster.conf 显式设置优先
 
-    if [ -z "${entry}" ] && bool_is_true "${KUBE_VIP_ENABLED:-true}"; then
+    if [ -z "${entry}" ] && bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
         local vip="${K8S_API_VIP:-}"
         [ -n "${vip}" ] || vip="$(kube_vip_recorded_address)"
         # 排除自相矛盾的配置(VIP 实为节点 IP / 落在 MetalLB 池内)后才值得去探测
@@ -970,7 +973,7 @@ api_entry_ip() {
 }
 
 # 阶段判定: 决定本次运行 API 入口地址取什么值(两阶段切换的核心, 见 docs/kube-vip-api-ha.md 第 7 节)
-# 输出: 要写入 all.yml 的 loadbalancer_apiserver.address; 同时设置 API_ENTRY_PHASE(1/2)
+# 输出: 要写入 all.yml 的 loadbalancer_apiserver.address; 同时设置 API_ENTRY_PHASE(0/1/2)
 #
 #   与"集群是不是新建"无关, 只看一件事: **VIP 此刻是否已经真的绑上了**。
 #   原因是 kubespray 的时序: 写 /etc/hosts 的 0090-etchosts.yml 在 **preinstall 角色**里,
@@ -980,13 +983,31 @@ api_entry_ip() {
 #   VIP 未绑 → 阶段一: 写 master01(既有行为, 零风险); 本轮的唯一产出是让 kube-vip 就位
 #   VIP 已绑 → 阶段二: 写 VIP(切换入口)
 #
-# 用法: api_addr="$(kube_vip_resolve_target)" && api_phase="${API_ENTRY_PHASE}"
+# ★ 阶段怎么取(2026-09-24 修): 调用方通常写成 `api_addr="$(kube_vip_resolve_target)"` —— 而
+#   **命令替换是子 shell**: 函数里 `API_ENTRY_PHASE=` 的赋值**回不到调用方**(2026-09-22 已知未修)。
+#   后果不是"少个变量", 而是**"切到 VIP 需人工确认"那道 fail-closed 护栏静默失效**(阶段恒为
+#   未设 → 护栏与"阶段二"分支永不成立), 地址却照样按 VIP 写下去。
+#   所以阶段同时**落盘**, 调用方一律用 `api_entry_phase()` 回读:
+#     api_addr="$(kube_vip_resolve_target)" || exit 1
+#     phase="$(api_entry_phase)"          # ← 必须紧跟其后回读(别用丢失的 $API_ENTRY_PHASE)
+API_ENTRY_PHASE_FILE="${API_ENTRY_PHASE_FILE:-${TMPDIR:-/tmp}/.cubestack-api-entry-phase}"
+
+_api_entry_phase_set() {   # <0|1|2> 记录阶段(全局 + 落盘, 后者供子 shell 调用方回读)
+    API_ENTRY_PHASE="$1"
+    printf '%s' "$1" > "${API_ENTRY_PHASE_FILE}" 2>/dev/null || true
+}
+
+api_entry_phase() {        # → 回读最近一次 kube_vip_resolve_target 判定的阶段(取不到=0)
+    local f="${API_ENTRY_PHASE_FILE}"
+    if [ -s "${f}" ]; then cat "${f}"; else echo 0; fi
+}
+
 kube_vip_resolve_target() {
-    API_ENTRY_PHASE=1
+    _api_entry_phase_set 1
 
     # kube-vip 未启用 → 维持既有行为(第一个 master), 不引入任何新路径
-    if [ "${KUBE_VIP_ENABLED:-true}" != "true" ]; then
-        API_ENTRY_PHASE=0
+    if [ "${KUBE_VIP_ENABLED:-false}" != "true" ]; then
+        _api_entry_phase_set 0
         local _m; _m="$(first_master_ip)" || return 1
         emit_ip "${_m}" || return 1; return 0
     fi
@@ -995,12 +1016,12 @@ kube_vip_resolve_target() {
     local master01; master01="$(first_master_ip)" || return 1
 
     if [ "${vip}" = "${master01}" ]; then
-        API_ENTRY_PHASE=0
+        _api_entry_phase_set 0
         emit_ip "${master01}" || return 1; return 0
     fi
 
     if kube_vip_is_bound "${vip}"; then
-        API_ENTRY_PHASE=2
+        _api_entry_phase_set 2
         emit_ip "${vip}" || return 1; return 0
     fi
 
@@ -1074,7 +1095,7 @@ update_kube_vip_addons_yml() {
         # 自身健康置假 → 不再续租 → 约 5s(租约时长)后 VIP 漂走。这是"节点活着但 apiserver
         # 死了"这一场景唯一的快速切换手段(关闭时只能等租约自然过期, 与节点宕机同速)。
         # 默认开(与 kubespray 的 false 不同): 该场景在真实运维中比整机宕机更常见。
-        echo "kube_vip_cp_detect: $(bool_is_true "${KUBE_VIP_CP_DETECT:-true}" && echo true || echo false)"
+        echo "kube_vip_cp_detect: $(bool_is_true "${KUBE_VIP_CP_DETECT:-false}" && echo true || echo false)"
         # 服务 LB 归 MetalLB —— 两者都实现 LoadBalancer 语义, 同时开会让 kube-vip 抢走
         # MetalLB 的地址分配权(实机已验证的分工, 见 docs/kube-vip-api-ha.md 决策 D1)
         echo "kube_vip_services_enabled: false"
@@ -1090,7 +1111,7 @@ update_kube_vip_addons_yml() {
     cat "${tmp}" > "${f}"
     rm -f "${tmp}"
 
-    if bool_is_true "${KUBE_VIP_ENABLED:-true}"; then
+    if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
         [ -n "${vip}" ] || { err "kube-vip 已启用但 VIP 为空 —— 不能写入 kube_vip_address"; return 1; }
     fi
     if [ -n "${vip}" ]; then
@@ -1213,6 +1234,72 @@ ceph_storage_host_count() {
     local n
     n="$(ceph_storage_hosts | grep -c . || true)"
     echo "${n:-0}"
+}
+
+# ---------------- BlueStore 磁盘彻底擦除(共享: ceph-cleanup.sh 与 ceph 模块 7a) ----------------
+# ★ 为什么不能只 dd 头/尾(2026-09-24 实机事故, 直接导致新集群 0 OSD):
+#   Ceph v20(本仓库 CEPH_VERSION=v20.2.2)把 bdev label **复制到固定偏移 10GiB / 100GiB / 1000GiB**
+#   —— 见 `ceph-bluestore-tool show-label --dev <盘>` 输出里的 locations 字段(实机 verify:
+#   三处副本各含 "bluestore block device" + "ceph osd volume v026")。
+#   旧实现只擦 头/尾/1GB/size÷20/size÷2, 这三处副本原样留下; 而 blkid / wipefs /
+#   `ceph-volume inventory` 全都只看 offset 0 → 盘"看起来是干净的", 但 `ceph-volume raw list`
+#   仍读得出旧 OSD(带旧 fsid)→ Rook osd-prepare 判 "Raw device ... is already prepared" →
+#   试图认领这些(属于别的集群的)OSD → "belonging to a different ceph cluster" 全部跳过 →
+#   **0 OSD**(CephCluster 还是 Ready, 只是 HEALTH_WARN "OSD count 0"), 重装必失败且看不出原因。
+# ★ 首选官方 zap: `ceph-bluestore-tool zap-device --yes-i-really-really-mean-it` 读 label 自带的
+#   locations 逐处清零, 与 Ceph 版本/偏移方案无关 —— **别再往脚本里写死偏移量**(写死正是本次根因)。
+#   ceph 工具宿主机上没有(这正是旧版退回 dd 的原因), 但**预加载的 ceph 镜像**在节点 containerd 里
+#   (kubespray 预加载 / k8s 阶段保证), 用 ctr 起来跑即可, 全程不联网。
+# ★ 兜底: 镜像不可得(单独使用清理工具等)→ 按**已知候选偏移** dd(头 + 10/100/1000GiB + 旧方案的
+#   size÷20, size÷2 + 尾)。无论走哪条路, 最后都擦一遍候选偏移并**校验** —— 残留时返回非 0,
+#   由调用方明确报错, 绝不"假装擦干净了"(那正是本次 0 OSD 的成因)。
+# 用法(部署机侧; 片段走 SSH stdin 送到节点执行):
+#   ssh <节点> "sudo bash -s -- <盘>" <<< "$(bluestore_wipe_remote_lib; echo 'bluestore_wipe_dev "$@"')"
+bluestore_wipe_remote_lib() {   # 只输出节点端函数定义, 不在本机执行
+    cat <<'WIPELIB'
+# 预加载的 ceph 镜像(用于官方 zap; 空 = 镜像不可得 → 走 dd 兜底)
+_BSTORE_IMG="$( (ctr -n k8s.io images ls -q 2>/dev/null || true) | grep -m1 -E '^(quay\.io/ceph/ceph|docker\.io/ceph/ceph):' || true)"
+[ -n "${_BSTORE_IMG}" ] || _BSTORE_IMG="$( (ctr -n k8s.io images ls -q 2>/dev/null || true) | grep -m1 -E '(^|/)ceph/ceph:' || true)"
+
+_bstore_offsets() {   # <盘> → 候选偏移(MiB, 每行一个): 头 + label 副本 10/100/1000GiB + 尾(含旧方案比例位)
+    local sz
+    sz="$(blockdev --getsize64 "$1" 2>/dev/null || echo 0)"
+    printf '%s\n' 0 10240 102400 1024000
+    [ "${sz:-0}" -gt 0 ] 2>/dev/null || return 0
+    printf '%s\n' "$((sz/1048576/20))" "$((sz/1048576/2))" "$(( sz/1048576 > 64 ? sz/1048576 - 64 : 0 ))"
+}
+
+bluestore_wipe_dev() {   # <盘> → 0=已擦净(校验通过); 非 0=仍有 bluestore 残留(调用方须报错)
+    local d="$1" o r=0
+    [ -b "$d" ] || return 1
+    # ① 官方 zap(读 label 的 locations 逐处清零; 失败不致命 —— ② 会兜底并校验)
+    if [ -n "${_BSTORE_IMG}" ]; then
+        ctr -n k8s.io containers rm cubestack-bstore-zap >/dev/null 2>&1 || true
+        ctr -n k8s.io run --rm --privileged \
+            --mount type=bind,src=/dev,dst=/dev,options=rbind:rw \
+            "${_BSTORE_IMG}" cubestack-bstore-zap \
+            ceph-bluestore-tool zap-device --dev "$d" --yes-i-really-really-mean-it \
+            </dev/null >/dev/null 2>&1 || true
+    fi
+    # ② 签名/分区表 + 候选偏移 dd(始终执行: zap 只管 label 位置, 不管 offset 0 的
+    #    "bluestore block device" 魔法/GPT; 也是镜像不可得时的唯一手段)
+    wipefs -a -f "$d" >/dev/null 2>&1 || true
+    sgdisk --zap-all "$d" >/dev/null 2>&1 || true
+    for o in $(_bstore_offsets "$d"); do
+        dd if=/dev/zero of="$d" bs=1M seek="$o" count=64 conv=fsync status=none >/dev/null 2>&1 || true
+    done
+    partprobe "$d" >/dev/null 2>&1 || true
+    # ③ 校验: 逐处读回, 找 bluestore 物证; 还在 → 非 0(把"静默 0 OSD"变成清盘期就报错)
+    for o in 0 10240 102400 1024000; do
+        if dd if="$d" bs=1M skip="$o" count=4 status=none 2>/dev/null \
+             | grep -qaE 'bluestore block device|ceph osd volume'; then
+            echo "    !! ${d} 偏移 $(( o / 1024 ))GiB 仍有 bluestore label 残留(未擦净)"
+            r=1
+        fi
+    done
+    return "$r"
+}
+WIPELIB
 }
 
 # ---------------- 共用 MetalLB VIP 的约定(多服务共用一个 IP、不同端口) ----------------
@@ -1379,7 +1466,9 @@ sync_kubeconfig() {
     API_DOMAIN="${API_DOMAIN:-k8s-api.cubestack.io}"
     sed -i -E "s|(server:[[:space:]]*https?://)[^:/]+(:[0-9]+)|\1${API_DOMAIN}\2|" "${tmp}"
     mkdir -p "${HOME}/.kube"
-    newctx="$(grep -E '^[[:space:]]*current-context:' "${tmp}" | head -1 | awk '{print $2}')"
+    # ★ `|| true`: kubeconfig 里没有 current-context 时 grep 无匹配, set -e+pipefail 会让这个
+    #   赋值带走调用方(下面只在 newctx 非空时才重命名 ctx, 语义上本就允许为空)。
+    newctx="$(grep -E '^[[:space:]]*current-context:' "${tmp}" | head -1 | awk '{print $2}' || true)"
     if [ -f "${HOME}/.kube/config" ]; then
         # 合并(新 admin.conf 在前, 同名校则新集群优先); 合并失败则直接覆盖
         KUBECONFIG="${tmp}:${HOME}/.kube/config" kubectl config view --flatten > "${tmp}.merged" 2>/dev/null \
@@ -1395,7 +1484,7 @@ sync_kubeconfig() {
     local K _ctx _cl
     K="KUBECONFIG=${HOME}/.kube/config kubectl"
     _ctx="$(${K} config current-context 2>/dev/null || echo "${newctx}")"
-    _cl="$(${K} config view -o jsonpath="{.contexts[?(@.name==\"${_ctx}\")].context.cluster}" 2>/dev/null | head -1)"
+    _cl="$(${K} config view -o jsonpath="{.contexts[?(@.name==\"${_ctx}\")].context.cluster}" 2>/dev/null | head -1 || true)"
     if [ -n "${_cl}" ]; then
         ${K} config set-cluster "${_cl}" --server="https://${API_DOMAIN}:6443" >/dev/null 2>&1 || true
     fi

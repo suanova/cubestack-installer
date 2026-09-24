@@ -72,7 +72,7 @@ bash "${SCRIPT_DIR}/tools/k8s/sync-kubespray-config.sh" >/dev/null 2>&1 || \
 # ---------------- kube-vip: 阶段二的切换确认(必须在模块里做, 不能在 sync 里) ----------------
 # sync 的 stdout 上面被重定向到 /dev/null, 把倒计时放 sync 里用户看不见还会白等 30 秒。
 # 流程: 模块判阶段 → 需要切换则红底提示 + 倒计时 → 确认后 export 标志 → sync 才真正切入口。
-if [ "${KUBE_VIP_ENABLED:-true}" = "true" ] && [ "${HAPROXY_ENABLED:-false}" != "true" ] && [ "${KEEPALIVED_ENABLED:-false}" != "true" ]; then
+if [ "${KUBE_VIP_ENABLED:-false}" = "true" ] && [ "${HAPROXY_ENABLED:-false}" != "true" ] && [ "${KEEPALIVED_ENABLED:-false}" != "true" ]; then
     _KV_VIP="$(kube_vip_derive 2>/dev/null || true)"
     _KV_OLD="$(kube_vip_current_entry)"
     # 阶段二 = VIP 已真实绑在某台 master 上(与 sync 里的判定同一口径)

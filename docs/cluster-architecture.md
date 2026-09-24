@@ -123,7 +123,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 | **metrics-server** | HPA 依赖的指标 | kubelet Summary API 聚合 | kubespray 标准组件, HPA 必需 | `METRICS_SERVER_ENABLED=true` |
 | **MetaX GPU Operator** | 沐曦 GPU 驱动/识别/调度 | helm chart + CRD(ClusterOperator)驱动组件 DaemonSet; 内置 registry 存放镜像 | 裸金属沐曦 GPU 必备; 离线 tar 加载 + helm 原生安装; master 有 GPU 时自动解除不可调度 | `GPU_OPERATOR_ENABLED=true` + 见 `docs/metax-gpu-operator.md` |
 | **LeaderWorkerSet (LWS)** | LLM/AI 工作负载调度(Leader/Worker 组 + DisaggregatedSet) | 默认官方 manifests.yaml bundle(kubectl apply --server-side); helm chart 保留于 lws/charts; controller 管理 LeaderWorkerSet/DisaggregatedSet; webhook 打 `leaderworkerset.sigs.k8s.io/worker-index` 等标签 | 面向 LLM 推理/训练的组调度; 内建 DisaggregatedSet 解耦推理; 支持 cert-manager/internal 双证书 | `--steps gpu_lws`(立即部署)+ 见 `docs/lws.md` |
-| **Rook-Ceph** | 企业级分布式存储(块 RBD / 可选 CephFS / RGW) | Rook v1.20.2 operator + CephCluster(mon=3, host 故障域, 3 副本); OSD 用**自动检测的未使用裸盘**(per-node devices); 节点经 label(`ceph-storage=rook-ceph`)选择 | 可承受节点故障的高可用存储(P1-6/7 刚需); 供 registry 等 PVC 后端(替代 local-path); 离线镜像 ctr import + lvm2 离线包 | `CEPH_ENABLED=true`/`CEPH_CSI_ENABLED=true` + `--steps ceph,ceph_csi` + 见 `docs/ceph-rook.md` |
+| **Rook-Ceph** | 企业级分布式存储(块 RBD / 可选 CephFS / RGW) | Rook v1.20.2 operator + CephCluster(mon=3, host 故障域, 3 副本); OSD 用**自动分类出的可用盘**(`free ∪ ceph`, per-node devices); 节点经 label(`ceph-storage=rook-ceph`)选择 | 可承受节点故障的高可用存储(P1-6/7 刚需); 供 registry 等 PVC 后端(替代 local-path); 离线镜像 ctr import + lvm2 离线包 | `CEPH_ENABLED=true`/`CEPH_CSI_ENABLED=true` + `--steps ceph,ceph_csi` + 见 `docs/ceph-rook.md` |
 
 > 详细部署/开关见 `cluster.conf` 组件开关段与 `deployments/scripts/modules/`。
 > 后续新增 operator 按 `skills/cubestack-operator-onboarding/SKILL.md` 流程添加并更新本表。
@@ -164,8 +164,10 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
   Deployment/StatefulSet; 数据面 = OSD 直管节点**裸盘**(LVM/bluestore)。
 - 存储节点选择: `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master** — 即默认只装在 master 节点; worker/all 可选); 候选由 `lib-common.sh` 的 `ceph_storage_hosts()` 统一给出; 模块自动给节点打 label `CEPH_NODE_LABEL`
   (默认 `ceph-storage=rook-ceph`), CephCluster 的 placement + storage.nodes 只落这些节点。
-- 裸盘策略: `tools/k8s/ceph-detect-disks.sh` 自动检测"未使用裸盘"(整盘无分区/格式化/挂载/LVM,
-  非系统盘), 生成 CR 的 per-node devices(精确盘名防误选); 部署前红底确认 + sleep 60s 防覆盖。
+- 裸盘策略: `tools/k8s/ceph-detect-disks.sh` **分类**各节点磁盘(`free` 空闲裸盘 / `ceph` 上次 Ceph
+  占用 / `inuse` 在用 / `mixed` 混合, 判定实现 `ceph-disk-classify.py`), CR 的 per-node devices
+  取 `free ∪ ceph`(精确盘名防误选); `inuse`/`mixed` 既不写入 CR 也不清理。
+  部署前红底确认(**按分类分组 + 判定证据**) + sleep 60s 防覆盖。
 - 高可用: `size=3 + failureDomain=host + min_size=2 + mon.count=3`, 单主机故障池仍可写。
 - 离线: 镜像(`offline-files/ceph`)经 ctr import(保持原始 ref); lvm2 由
   `offline-files/kubespray/packages` 离线 .deb 安装; VM 测试盘 = create-vms.sh 附加的 3×200GB 裸盘。

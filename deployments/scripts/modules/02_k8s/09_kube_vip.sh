@@ -275,7 +275,7 @@ while [ "${_i}" -lt "${#_MHOST[@]}" ]; do
         --template "${TEMPLATE}" \
         --image-repo "${KUBE_VIP_IMAGE_REPO:-ghcr.io/kube-vip/kube-vip}" \
         --image-tag "${KUBE_VIP_VERSION:-v0.8.9}" \
-        --cp-detect "$(bool_is_true "${KUBE_VIP_CP_DETECT:-true}" && echo true || echo false)" \
+        --cp-detect "$(bool_is_true "${KUBE_VIP_CP_DETECT:-false}" && echo true || echo false)" \
         > "${_TMPDIR}/${H}.yml" || { err "渲染失败: ${H}"; exit 1; }
     # 渲染后立即断言 —— vip_nodename 是脑裂唯一致命点, 宁可早失败
     _rendered="$(awk '/name: vip_nodename/{getline; print $2; exit}' "${_TMPDIR}/${H}.yml")"

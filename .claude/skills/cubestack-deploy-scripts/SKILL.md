@@ -409,9 +409,14 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   多架构 tar 会让 `ctr import` 报 "content digest not found")、`tools/offline/fetch-lvm-packages.sh`
   (lvm2 .deb → `offline-files/kubespray/packages`, OSD 重启需 lvm 激活逻辑卷)。
 - **节点选择**: `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master**)→ 唯一实现为 lib-common 的 `ceph_storage_hosts()`; 模块自动打 label `CEPH_NODE_LABEL`(默认 `ceph-storage=rook-ceph`)。
-- **裸盘自动检测(防覆盖)**: `tools/k8s/ceph-detect-disks.sh` 判定"未使用裸盘"(无分区/格式化/挂载/LVM 且非系统盘)
-  → 生成 CephCluster CR 的 per-node devices(精确盘名)。部署前**红底列出节点+盘并 sleep CEPH_CONFIRM_SLEEP(60s)**
-  double-check; CI 可 `CEPH_CONFIRM_SLEEP=0`。
+- **磁盘分类(防覆盖)**: `tools/k8s/ceph-detect-disks.sh` 把每块盘分四类 —— `free`(空闲裸盘)/
+  `ceph`(上次 Ceph 占用的 OSD 盘)/ `inuse`(挂载中·非 ceph 文件系统·非 ceph LVM·系统盘)/ `mixed`(同盘两者皆有);
+  CR 的 per-node devices 取 `free ∪ ceph`(精确盘名), `inuse`/`mixed` 不选不清理。
+  **只认强证据**(bluestore 签名 / ceph 分区 GUID 或分区名 / `ceph-*` VG·`ceph.*` 标签 / `ceph--` dm 名),
+  判定实现在同目录 `ceph-disk-classify.py`(纯函数, 可离线单测) —— 改判定口径只改这一处。
+  ⚠ 有 LVM 签名但认不出归属时判 `inuse`(**宁可不擦**); `nbd*` 恒 `inuse`(可能是 rbd-nbd 映射, 擦它会写穿 RBD 卷)。
+  清理走 `tools/k8s/ceph-cleanup.sh --list`(只读计划)/`--wipe-disks`/`--all`, 显式 `--wipe-node` 默认拒清 `inuse`/`mixed` 盘。
+  部署前**红底按四类分组 + 判定证据列出节点与盘, sleep CEPH_CONFIRM_SLEEP(60s)** double-check; CI 可 `CEPH_CONFIRM_SLEEP=0`。
 - **镜像同步**: `tools/images/ceph-sync-images.sh`(复制 tar 到全部节点 + `ctr -n k8s.io images import --no-unpack`)。
 - **VM 测试盘**: `vm-nodes.conf` 的 `VM_DATA_DISKS=3/VM_DATA_DISK_SIZE=200` → 每台 VM 附加 3×200GB 裸盘(Guest `/dev/vdb~`),
   由 `tools/vm/create-vms.sh` 创建时自动附加。

@@ -3,7 +3,7 @@
 > 状态: **已实施 + 已实机验收**(2026-09-22)—— 代码落地、`check-modules` 全绿,
 > **裸金属 3 master 集群上 `--steps kube_vip` 与 `--steps verify_kube_vip` 六项全过**(见第 17 节)
 > 涉及模块: `02_k8s/09_kube_vip.sh`(部署)· `02_k8s/08_verify_kube_vip.sh`(验证)· `02_k8s/06_k8s_deploy.sh`(阶段确认门)
-> 开关: `KUBE_VIP_ENABLED`(**默认 true**)· 配置项 `K8S_API_VIP` / `KUBE_VIP_INTERFACE` / `KUBE_VIP_CP_DETECT` / `KUBE_VIP_LOCAL_PROXY`
+> 开关: `KUBE_VIP_ENABLED`(**默认 false**, 2026-09-24 由默认开改为默认关)· 配置项 `K8S_API_VIP` / `KUBE_VIP_INTERFACE` / `KUBE_VIP_CP_DETECT`(**默认 false**, 2026-09-24 由默认开改为默认关) / `KUBE_VIP_LOCAL_PROXY`
 > 上游资产: kubespray 原生支持(`deployments/kubespray/kubespray/`), 无需自研
 >
 > **❗ 实施过程中对本文档的 4 处修正**(详见第 14 节, 读下文时以此为准):
@@ -135,7 +135,7 @@ kube-vip 与被它取代的 nginx-proxy 解决的是**不同层面**的问题,�
   而旧 leader 若未及时察觉会继续持有 VIP,风险高于多等几秒。
 - 在 verify 的漂移演练中**实测并记录**这个时间作为基线(第 9.2 节 ⑥ 应输出耗时数字)。
 - 若实测发现"节点存活但 apiserver 进程已死"这一场景恢复过慢,再评估启用
-  `kube_vip_cp_detect=true`(kubespray 已暴露该变量,默认 `false`)——
+  `kube_vip_cp_detect=true`(kubespray 与本项目的默认都是 `false`,★ 2026-09-24 起)——
   它按本地 apiserver 健康状态判定,不必等租约到期。**先测后调,不预先启用。**
 
 ### 2.5 集群内 `kubernetes` Service 也是单点
@@ -183,7 +183,7 @@ MetalLB 在做(见第 4 节决策 D1)。
 | # | 决策 | 取值 | 理由 |
 |---|------|------|------|
 | D1 | 职责边界 | **只做控制平面 VIP**;`kube_vip_services_enabled: false` | MetalLB 已承载 registry / ingress / EG 的 LoadBalancer VIP 且实机验证充分。两者分工会互相抢 LoadBalancer 分配权 |
-| D2 | 启用策略 | **默认开启**;存量集群需**显式重跑**才切换 | 修复 2.1 的伪高可用;不改变存量集群的既有行为直到用户主动重跑 |
+| D2 | 启用策略 | **默认关闭**;需要时显式开启(存量集群还需显式重跑才切换) | ~~原为默认开启~~ —— 2026-09-24 改为默认关: 本项目的实际用法停在"阶段一"(VIP 上无流量、入口仍是首个 master), 默认开只是让每次部署多跑一遍昂贵且可能硬失败的 VIP 推导。开/关双向都有护栏与清盘路径, 见第 18 节 |
 | D3 | VIP 来源 | **自动推导 + 可显式覆盖** | 零配置可跑通;多集群共用网段时用 `K8S_API_VIP` 覆盖 |
 | D4 | 转发模式 | **纯故障切换**;`kube_vip_lb_enable: false` | ① `kube_vip_lb_fwdmethod` 的默认值 `local` 在内核里是 `ip_vs_null_xmit`(**不转发**),配了也没有任何负载均衡 —— 它只是让后端"登记上了";要真 LB 必须用 `masquerade`。② `masquerade` 有四个额外前提: privileged 容器 + `kube-vip-iptables` 镜像变体进离线资产 + kube-proxy `ipvs.excludeCIDRs` 与本项目**自动推导**的 VIP 长期保持一致 + 改宿主机 sysctl。第③条破坏"单一配置源":VIP 漂移后忘了同步排除段即**静默失效**。收益(API 请求三分摊)不足以抵消这些长期维护成本。详见 `docs/troubleshooting.md` 三.11 |
 | D5 | 新集群路径 | **两阶段**(与存量集群同一套机制) | 用一次额外运行换掉第 7 节风险 R2 整条时序不确定性 |
@@ -197,7 +197,8 @@ MetalLB 在做(见第 4 节决策 D1)。
 ### 5.1 `deployments/config/cluster.conf` 新增(阶段二 k8s 区块)
 
 ```bash
-KUBE_VIP_ENABLED="${KUBE_VIP_ENABLED:-true}"      # API Server VIP 高可用(kubespray 原生 kube-vip 静态 Pod)
+KUBE_VIP_ENABLED="${KUBE_VIP_ENABLED:-false}"     # API Server VIP 高可用(kubespray 原生 kube-vip 静态 Pod)
+                                                  #   ⚠ 默认**关**(2026-09-24 起); 要实现 API 入口高可用需显式置 true
 K8S_API_VIP="${K8S_API_VIP:-}"                    # 留空=自动推导; 显式值优先
 KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"      # 留空=kube-vip 自动检测; 多网卡环境显式指定
 ```
@@ -323,7 +324,7 @@ kube_vip_address: "10.244.1.210"          # 恒为 VIP(静态 Pod 的 args.addre
                                           # 开关关闭时**也保留** → 重新开启不必重签证书
 kube_vip_arp_enabled: true
 kube_vip_controlplane_enabled: true
-kube_vip_cp_detect: true                  # 见第 15 节(覆盖 kubespray 的 false)
+kube_vip_cp_detect: false                 # 见第 15 节(★ 2026-09-24 起默认关 = kubespray 行为; 置 true 可启用进程级检测)
 kube_vip_services_enabled: false          # D1: 服务 LB 归 MetalLB
 kube_vip_lb_enable: false                 # D4: 纯故障切换
 kube_vip_interface: ens5                  # 仅当 cluster.conf 显式指定时写入
@@ -401,6 +402,15 @@ kube_apiserver_extra_args:
 人工确认/修改"),倒计时期间 Ctrl-C 可中止,走完即视为确认。
 
 这样既满足 D2 的"存量需显式重跑才切",也不会因为一次无关的全量重跑而意外触发切换。
+
+> ★ **2026-09-24 修复(这道护栏原先根本没生效)**: 阶段是由 `kube_vip_resolve_target()` 判定的,
+> 而它总被写成 `addr="$(kube_vip_resolve_target)"` —— **命令替换是子 shell**, 函数里
+> `API_ENTRY_PHASE=` 的赋值**回不到调用方**。于是 `sync-kubespray-config.sh` 里
+> 「阶段=2 且未确认 → 降级回阶段一」这条 fail-closed 护栏**永不成立**, 阶段二会被直接写进
+> `all.yml`(地址是 VIP), 而提示永远打印"阶段一"。
+> 现在: 函数每次判定都把阶段落盘(`$API_ENTRY_PHASE_FILE`), 调用方一律
+> `phase="$(api_entry_phase)"` 回读; 护栏也移到"判定之后"再跑。回归用例见
+> `tools/tests/ceph-disk-tests.sh` H 组(含反证: 换回读旧全局即判红)。
 
 ### 7.4 回滚
 
@@ -627,7 +637,7 @@ bash ./deployments/scripts/tools/images/harbor-save-images.sh --list --group k8s
 
 ### 15.1 它解决什么
 
-`kube_vip_cp_detect`(kubespray 默认 **false**,本项目默认 **true**)开启后,kube-vip 探测**本机
+`kube_vip_cp_detect`(kubespray 默认 **false**;本项目 **2026-09-24 起同样是默认 false**,需要时显式开启)开启后,kube-vip 探测**本机
 apiserver 的 `/healthz`**;探失败即把自身健康置为假 → 不再续租 → 约 `leaseduration`(5s)后
 VIP 漂走。
 
@@ -636,19 +646,20 @@ VIP 漂走。
 一直打到一个没有 API 的地址。整机宕机反而没问题(续租自然中断)。
 
 真实运维中"节点活着但 apiserver 死了"比整机宕机更常见(OOM、证书过期、etcd 抖动、盘满),
-这是默认开启的理由。
+所以这是**值得开启**的能力;但**默认关闭**(见 15.2),需要时显式开。
 
 ### 15.2 代价与调参
 
 - 探针是 **HTTP `/healthz`**,比 TCP 连通更严格 → 短时抖动可能触发一次不必要的 VIP 迁移。
   迁移本身只影响 ARP 通告(约 5s),不会重签证书,所以代价可控。
-- 想回到 kubespray 的行为: `KUBE_VIP_CP_DETECT=false`。
+- **默认就是 kubespray 的行为**(`KUBE_VIP_CP_DETECT=false`,★ 2026-09-24 由默认开改为默认关);
+  想启用进程级检测: `KUBE_VIP_CP_DETECT=true`(开启后也仍是"探测置假 → 等租约到期"的串联链路)。
 - 与租约参数的关系: 两者**串联** —— 探测置假 → 停续租 → 等 `leaseduration` 到期 → 漂移。
   所以端到端仍是 5s 量级,不会更快;它的价值是**补上"永远不会漂"这个洞**,而不是提速。
 
 ### 15.3 落地
 
-- 配置面: `cluster.conf` 的 `KUBE_VIP_CP_DETECT`(默认 true)
+- 配置面: `cluster.conf` 的 `KUBE_VIP_CP_DETECT`(**默认 false**,★ 2026-09-24 由默认开改为默认关)
 - 写入: `lib-common.sh#update_kube_vip_addons_yml()` → `addons.yml` 的 `kube_vip_cp_detect`
 - 上游接线: `roles/kubernetes/node/templates/manifests/kube-vip.manifest.j2:44-45`
   (`{% if kube_vip_controlplane_enabled %}` 块内的 `cp_detect` env)
@@ -737,7 +748,7 @@ kubespray 的 `kube_apiserver_endpoint`(`kubespray_defaults/defaults/main/main.y
 | 覆盖 | **仅**"节点 → API"(集群内) | 集群内 + 外部 + `controlPlaneEndpoint` |
 | 故障切换 | 新连接 **~1s**(连接超时后同请求转投) | 租约到期,**约 5s**(与 `cp_detect` 串联) |
 | 已建立连接 | 要等 `proxy_timeout`(**10m**) | 同(VIP 漂移不影响已建立连接) |
-| 感知 apiserver 进程死 | 新连接能(连接失败);旧连接不能 | 需 `cp_detect`(已默认开启) |
+| 感知 apiserver 进程死 | 新连接能(连接失败);旧连接不能 | 需 `cp_detect`(`KUBE_VIP_CP_DETECT=true`; ★ 2026-09-24 起默认关) |
 | 是否需改拓扑 | **是**(见 16.1 的 if 链冲突) | 否(kubespray 原生变量) |
 | 外部稳定入口 | ❌ 不提供 | ✅ 提供 |
 
@@ -746,7 +757,8 @@ kubespray 的 `kube_apiserver_endpoint`(`kubespray_defaults/defaults/main/main.y
 
 **暂不启用的理由**:路线1 需要改 kubespray 模板或 post-task 覆写 kubelet.conf,属于签名外的
 改动,且收益(worker 侧从"约 5s 随 VIP 漂移"变成"约 1s 换后端")与新增的故障面相比不划算;
-kube-vip 的 `cp_detect` 已经把"apiserver 进程死"这个最危险的场景补上了。
+kube-vip 的 `cp_detect` 能把"apiserver 进程死"这个最危险的场景补上(`KUBE_VIP_CP_DETECT=true`
+时; ★ 2026-09-24 起默认关,需要时显式开,见第 15 节)。
 **若将来实测发现 VIP 漂移的 5s 对 worker 负载影响过大,再按路线1 引入。**
 
 ### 16.4 回答"kubelet 默认访问哪个 apiserver"
@@ -858,7 +870,7 @@ kube-vip 退出时会**主动释放租约**(而非等租约自然过期),故切�
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `KUBE_VIP_CP_DETECT` | `true` | apiserver 进程级故障检测(见第 15 节) |
+| `KUBE_VIP_CP_DETECT` | `false` | apiserver 进程级故障检测(见第 15 节;★ 2026-09-24 由默认开改为默认关) |
 | `KUBE_VIP_LOCAL_PROXY` | `false` | kubespray 原生本地代理;置 true 会因 16.1 的优先级冲突而**硬失败**,防假修复 |
 
 ---

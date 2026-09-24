@@ -21,8 +21,11 @@
 | 副本模型 | replicated **size=3, min_size=2** | 1 台主机故障池仍可写 |
 | failureDomain | **host** | 每主机一份副本, 真正跨主机冗余(≥3 台存储节点) |
 | mon | **3**(allowMultiplePerNode=false) | 3 台主机真实法定人数(奇数) |
+| mgr | **2**(`CEPH_MGR_COUNT`, active+standby) | 单 mgr 是滚动单点: 它所在节点挂/被排空 → 集群进 `no active mgr`(dashboard/模块/PG autoscaler 停摆)。mgr 很轻, 1→2 成本可忽略 |
+| 守护进程 placement | mon/**osd**/**mgr** 各自显式写 nodeAffinity(`ceph-storage` label)+ control-plane toleration | 2026-09-24 事故: 只写了 mon/osd → **mgr 被调度到 worker**(还带出 crashcollector/exporter 往那台写 `/var/lib/rook`), 与"只调度到存储节点"冲突。⚠ 不要改用 `placement.all`: Rook 会把 `all` 一并套到 **CSI daemonsets** 上, 把必须跑在**每个**节点的 rbd/cephfs nodeplugin 钉死在存储节点 → worker 上的 PVC 挂不上 |
+| toolbox | `rook-ceph-tools` 也 patch 上同一 nodeSelector | 它只是 CLI pod, 但同样属于"ceph 组件只在存储节点"的约定(实测 Rook reconcile 不会回滚该 patch) |
 | 存储节点选择 | `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master**) + node label(`CEPH_NODE_LABEL`, 默认 `ceph-storage=rook-ceph`) | 只调度到指定的存储节点(**默认只装在 master 节点**) |
-| 裸盘 | **自动检测**未使用裸盘(`tools/k8s/ceph-detect-disks.sh`) | 整盘无分区/格式化/挂载/LVM 且非系统盘; 生成 per-node devices(精确盘名, 不用正则, 防误选) |
+| 裸盘 | **自动分类**磁盘(`tools/k8s/ceph-detect-disks.sh`, 判定见 §4) | CR 取 `free ∪ ceph`(空闲 + 上次 Ceph 占用); `inuse`(在用)/`mixed`(混合)不选不清理; 精确盘名, 不用正则, 防误选 |
 | 安全确认 | 部署前红底列出"节点+裸盘", **sleep 60s**(`CEPH_CONFIRM_SLEEP`) | 防覆盖系统盘/在用盘(CI 可 `CEPH_CONFIRM_SLEEP=0`); **k8s 部署阶段**(`k8s_deploy`)也预检一次 |
 | 镜像 | 离线 tar → `ctr -n k8s.io import --no-unpack` | 保持原始 ref, 无需改 manifest; 多架构需 `--platform linux/amd64` 单架构拉取 |
 | lvm2 | 离线 `.deb`(`offline-files/kubespray/packages`) | 重启后 Rook OSD 逻辑卷需 lvm 激活; **k8s 部署阶段由 install-packages.yml 自动安装**(见 §2) |
@@ -75,8 +78,10 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps ceph,ceph_csi
 ④ 节点准备(modprobe rbd 持久化 + lvm2 离线安装 + 打 label `ceph-storage=rook-ceph`)
 ⑤ `ceph-sync-images.sh` 同步镜像到存储节点并 `ctr import`
 ⑥ apply rook crds/common/csi-operator/operator, 等 operator Ready
-⑦ 生成 CephCluster CR(mon=3, storage.nodes[].devices=检测盘, placement 按 label)并 apply,
-   等 `cephcluster phase=Ready` + `ceph -s HEALTH_OK`(最长 600s)⑧ 调优 osd_memory_target。
+⑦ 生成 CephCluster CR(mon=3 / mgr=2, storage.nodes[].devices=检测盘, mon·osd·**mgr** 各自按
+   label 钉存储节点)并 apply, 等 `cephcluster phase=Ready` + `ceph -s HEALTH_OK`(最长 900s)
+   —— 进等待前会先 **重启 toolbox 并确认 ceph CLI 可用**(旧集群 keyring 不会随已挂载卷刷新,
+   否则 `ceph -s` 一直报 RADOS permission denied, 等待全程 `health=unknown`)⑧ 调优 osd_memory_target。
 
 `03_ceph_csi.sh`: ① 等 ceph-csi 控制器/插件就绪 ② 建 CephBlockPool `rbd-pool` + StorageClass
 `ceph-block`(WaitForFirstConsumer) ③ 可选 CephFilesystem+`cephfs`(CEPHFS_ENABLED) ④ 可选 RGW(CEPH_RGW_ENABLED)。
@@ -290,7 +295,10 @@ Ctrl-C 修正配置再重跑, 不必等整轮 K8s 部署跑完才发现(02_ceph 
 5.5. **对象存储供给层**(2026-09-11, 用户要求): bucket SC `rook-ceph-bucket`(provisioner
    `rook-ceph.ceph.rook.io/bucket`, operator 内建, 指向 external-store)+ `model-repo`
    ObjectBucketClaim(`generateBucketName: model`)→ 等 OBC Phase=Bound(凭证 Secret 自动生成);
-6. 数据面冒烟测试(RBD + CephFS 真实写读)。
+6. (**可选, 默认关**)数据面冒烟测试(RBD + CephFS 真实写读)。开启方式:
+   `CEPH_EXTERNAL_PROVISION_SMOKE=true` —— 会真建 1Gi scratch PVC + busybox 写读
+   (RBD 与 CephFS 两段, 每段最长 180s), 失败**硬失败整个模块**; 关掉(默认)则不跑,
+   提供方问题会推迟到实际挂卷时才暴露。★ 2026-09-24 由默认开改为默认关。
 
 ##### 路径二: 手填(存量兼容)
 
@@ -397,15 +405,71 @@ Rook 官方 import 流程 —— 消费者侧 apply `cluster-external.yaml`(`Cep
 **结论**: 手填路径保留现状(无 health-check, 已如实标注); 需要健康上报/对象存储的部署改用
 官方导入路径(§3.4.2 路径一)。
 
-## 4. 裸盘自动检测(需求)
+## 4. 裸盘检测与分类(需求)
 
-`tools/k8s/ceph-detect-disks.sh [--node <hostname|ip>...] [-m]`
-判定未使用裸盘: 顶层 disk、无子设备(未分区)、无 FSTYPE(未格式化)、非系统盘
-(排除持有 `/`、`/boot*`、swap、LVM 的盘)且不命中 `CEPH_DETECT_EXCLUDE`(默认 `^(sda|sr0|vda)$`)。
-输出 `hostname:/dev/vdb,/dev/vdc`, ceph 模块据此生成 CephCluster `storage.nodes[].devices`。
+`tools/k8s/ceph-detect-disks.sh [--node <hostname|ip>...] [-m] [--classify]`
+
+逐节点把顶层磁盘**分类**(判定实现 = 同目录 `ceph-disk-classify.py`, 纯函数、可离线单测):
+
+| 分类 | 含义 | 部署/清理行为 |
+|---|---|---|
+| `free` | 未使用裸盘(无分区/无 FSTYPE/未挂载, 非系统盘) | 写入 CR 作新 OSD |
+| `ceph` | **被上次 Ceph 占用**(OSD 数据盘) | 写入 CR; 覆盖安装先清空复用, 保留数据模式交 Rook 认领 |
+| `inuse` | 被别的方式占用(挂载中/非 ceph 文件系统/非 ceph VG·LV/RAID 成员/系统盘) | **绝不写入 CR、绝不清理** |
+| `mixed` | 同盘既有 Ceph 物证又有别的数据 | 只报告, 不自动清理(人工判断) |
+
+**判定只认强证据**(任一命中即算, 证据串会打印出来供人工复核):
+
+1. `FSTYPE ∈ {ceph_bluestore, ceph, ceph_journal, ceph_luks}` —— 整盘 raw 模式 OSD 与
+   LVM 模式 OSD 的 LV 都会命中(lsblk 会探测 dm 设备);
+2. GPT 分区类型 GUID 是 Ceph 专用类型(`4FBD7E29-…` data / `45B0969E-…` journal /
+   `30CD0809-…` block / `5CE17FCE-…` block.db / `FB3AABF9-…` block.wal / `89C57F98-…` ceph-volume);
+3. 分区名(`PARTLABEL`)以 `ceph ` 开头(`ceph data` / `block` / `block.db` / `block.wal` / `journal`;
+   **必须有那个空格** —— `ceph-backup` 这类人工起的名字不算, 否则会误擦);
+4. LVM: VG 名以 `ceph-` 开头 / VG·LV 带 `ceph.*` 标签 / dm 名以 `ceph--` 开头(Rook 的
+   `ceph-volume lvm` 命名 `ceph--<fsid>-osd--block--<uuid>`);
+5. **BlueStore label 副本探针**(2026-09-24 新增): 逐盘读 10GiB/100GiB/1000GiB 三处各 4KB, 命中
+   `ceph osd volume` magic 即判 ceph —— 上面 1~4 全都依赖 `lsblk`/`blkid`, 而它们**只看 offset 0**:
+   "头被擦过、副本还在"的盘会四条全不命中 → 误判 `free` → 进 CR → Rook 判 `already prepared` →
+   **0 OSD**。探针由 `ceph-detect-disks.sh` 的 `LABEL_PROBE_CMD` 采集, 作为第 4 个位置参数传给
+   分类器(取不到就只少这一条证据, **绝不**据此判 ceph)。
+
+> ⚠ **"有 LVM 签名但认不出归属" 判 `inuse`, 绝不判 `free`**。磁盘/分区上只要出现 `LVM2_member`,
+> 或该设备本身出现在 `pvs` 里(VG 未激活也查得到 —— **新装机器还没装 lvm2 时就是这种状态**),
+> 而四条证据一条都没命中 → 判 `inuse`。整盘 PV(无分区表)尤其危险: 它在 `lsblk` 里无子设备、
+> 无文件系统, 只按"看着干净"判会当成空闲盘擦掉, **而它可能装着任意业务数据**(旧版直接把
+> `LVM2_member` 排除在候选外, 等价于 inuse)。反过来, 未激活的 `ceph-*` VG 也能靠 `pvs` 认出来
+> → 该清的盘照样清得到(否则又是"清理空转")。
+
+> ⚠ 明确**不用**启发式猜测。"有分区 + 未挂载"曾被当作"典型 OSD 盘", 但一块"刚分区还没格式化"
+> 的业务数据盘长得一模一样 → 已弃用。名字里带 `osd-block-` 但 VG 不是 `ceph-*` 的卷也**不算**
+> (用户自己的卷可能这么起名), 宁可按 `inuse` 漏判, 也不猜着擦。
+
+> ⚠ **`nbd*` 恒为 `inuse`, 永不清理/永不进 CR**。nbd 是网络块设备, 现场很可能是 ceph `rbd-nbd`
+> 的映射(实测一台机器上有 `nbd0..nbd15`)→ 擦它会直接写穿到背后的 RBD 卷销毁真实数据。
+> `CEPH_DETECT_EXCLUDE` 默认值不含 `nbd`, **不能靠配置兜底**, 已在分类器里硬编码。
+> 解除映射: `rbd unmap` 或重启节点。
+
+输出:
+- 默认 → 人工可读(按分类分组 + 证据);
+- `-m` → 每节点一行 `hostname:/dev/vdb,/dev/vdc` = **可作为 OSD 的盘(free ∪ ceph)**;
+- `-m --classify` → 每行 `<hostname>\t<设备>\t<分类>\t<证据>`(清理工具与部署预检据此选盘/展示)。
+
+节点 SSH 密钥优先、失败自动回退节点密码(NODES 第 5 字段), 密钥分支带 `BatchMode=yes`+`</dev/null`
+防 SIGTTIN 卡死(见 troubleshooting)。LVM 佐证用 `sudo -n`(不可交互)取 `pvs`/`lvs`, 取不到只少一条
+证据(lsblk 侧物证仍足以判定)。
 
 **VM 测试集群**: `vm-nodes.conf` 设 `VM_DATA_DISKS=3 VM_DATA_DISK_SIZE=200`,
 重跑 `tools/vm/create-vms.sh`(仅新 VM 生效)后节点内出现 `/dev/vdb~vdX` 裸盘。
+
+**清理(退役/重装前)**: `tools/k8s/ceph-cleanup.sh --list`(只读计划)→ `--wipe-disks`
+(只清 `ceph` 类盘)/ `--all`(先删 CephCluster 再清)。显式指定盘时 `--wipe-node <ip> --disks "..."`
+默认会**拒绝**被判为 `inuse`/`mixed` 的盘, 需 `--force` 才越过。
+
+清盘步骤里的 LVM/dm 解除**按盘收敛**: 只 `lvremove/vgremove` **目标盘上** PV 所属的 VG, 只拆
+**目标盘之上**的 dm/crypt 层 —— 不按名字正则扫全节点(`... | grep ceph` 会误伤 `data-vg/cephbackup`
+这类名字里恰好带 ceph 的无关卷), 也不用 `dmsetup remove_all`(那会拆掉本节点所有 dm 映射)。
+这段现在跑在**默认部署流程**(02_ceph.sh 7a)里, 所以作用域必须严格。
 
 ## 5. 手动(参考)安装要点 —— Rook v1.20
 
@@ -442,9 +506,34 @@ kubectl get sc ceph-block                                        # StorageClass
 kubectl -n rook-ceph patch cephcluster rook-ceph --type merge -p \
   '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}'
 kubectl -n rook-ceph delete cephcluster rook-ceph                # operator 保留, 清理数据
-# 各节点: wipefs --all -f /dev/vdX && sgdisk --zap-all /dev/vdX; rm -rf /var/lib/rook
+# 各节点(推荐直接用仓库工具, 它负责"擦干净并校验"):
+#   bash deployments/scripts/tools/k8s/ceph-cleanup.sh --wipe-disks      # 只清判为 Ceph 占用的盘
+#   bash deployments/scripts/tools/k8s/ceph-cleanup.sh --wipe-node <ip> --disks "/dev/nvme1n1,..."
 kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载 operator(可选)
 ```
+
+> ⚠ **清盘不能只擦磁盘头尾**(2026-09-24 实机事故, 直接导致新集群 **0 OSD**): Ceph v20 把 bdev
+> label **复制到固定偏移 10GiB / 100GiB / 1000GiB**(`ceph-bluestore-tool show-label` 的
+> `locations`, 头副本存在时该列表里还有 `0x0`)。只擦头/尾/`size÷20`/`size÷2` 会留下这些副本 →
+> 而 `blkid`/`wipefs`/`ceph-volume inventory` **都只看 offset 0**, 于是盘"看起来是干净的", 但
+> `ceph-volume raw list` 仍读得出旧 OSD(旧 fsid)→ Rook osd-prepare 判 `Raw device ... is already
+> prepared` → 认领"属于别的集群"的 OSD 被跳过 → **0 OSD**(CephCluster 照样 Ready, 只
+> `HEALTH_WARN OSD count 0`)。
+>
+> 正确做法 = `ceph-bluestore-tool zap-device --dev <盘> --yes-i-really-really-mean-it`(它读 label
+> 自带的 `locations` 逐处清零, 与版本/偏移方案无关)。宿主机没有 ceph 工具, 但**预加载的 ceph
+> 镜像**就在节点 containerd 里, 用 `ctr -n k8s.io run --rm --privileged --mount
+> type=bind,src=/dev,dst=/dev,options=rbind:rw <ceph 镜像> <名> ceph-bluestore-tool zap-device ...`
+> 即可, 全程离线 —— 这正是 `lib-common.sh::bluestore_wipe_dev` 的做法(ceph-cleanup.sh 与
+> 02_ceph.sh 7a 共用同一份, 擦完还会**逐处校验**, 残留就报错而不是假装成功)。
+
+> ⚠ **非存储节点上的 ceph 残留不在自动清理范围内**(2026-09-24 补注): `02_ceph.sh` 7b 只清
+> `CEPH_NODE_HOSTS` 各节点的 `/var/lib/rook`。历史上 ceph 曾在 worker 上跑过(那时 CR 没约束
+> mgr → mgr + 伴生 crashcollector/exporter 落到了 worker), 那类机器会留下
+> `/var/lib/rook/{exporter,rook-ceph}`(mgr 的 `.asok`、crash、log)与 `/dev/rbd*` 设备节点。
+> 现在 mgr/toolbox 都已按 label 钉在存储节点, 不会再产生新的此类残留; 若要清历史残留:
+> 逐台 `sudo rm -rf /var/lib/rook /var/lib/ceph /etc/ceph /run/ceph` + 重启持有内核 rbd 映射
+> 的节点(`ceph-rbd-cleanup.sh` 会先试两套 sysfs 接口, EBUSY 就说明只能重启)。
 
 ## 8. 常见问题速查(详细见 docs/troubleshooting.md)
 
@@ -458,7 +547,9 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 ## 9. 关键文件
 
 `deployments/cubestack-addon/rook/`(manifests + CUBESTACK.md)、`02_ceph.sh`、`03_ceph_csi.sh`、
-`tools/k8s/ceph-detect-disks.sh`、`tools/images/ceph-save-images.sh`、`tools/images/ceph-sync-images.sh`、
+`tools/k8s/ceph-detect-disks.sh`、`tools/k8s/ceph-disk-classify.py`(分类判定唯一实现)、
+`tools/k8s/ceph-cleanup.sh`(`--list`/`--wipe-disks`/`--all`/`--wipe-node`)、
+`tools/images/ceph-save-images.sh`、`tools/images/ceph-sync-images.sh`、
 `tools/offline/fetch-lvm-packages.sh`、`tools/k8s/rook-fetch-manifests.sh`、cluster.conf `CEPH_*` 配置段、
 `patch-playbooks/install-packages.yml`(lvm2 离线安装, cubestack-offline.sh 自动挂载)。
 

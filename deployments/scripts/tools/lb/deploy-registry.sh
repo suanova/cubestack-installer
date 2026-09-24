@@ -224,16 +224,26 @@ fi
 say "[4/4] 验证 ..."
 # registry(MetalLB VIP / NodePort)就绪存在时序竞态: kubespray 刚部署完, MetalLB speaker
 # 冷启动时可能被 liveness probe 误杀重启, ARP 通告与 kube-proxy DNAT 需更久才稳定;
-# registry pod 也可能仍在拉镜像。→ 重试 90s(每 2s 一次, 45 次), 避免误报不可达。
+# registry pod 也可能仍在拉镜像。
+# ★ 2026-09-24 修复(实机事故): 这里**只提示, 不再硬失败**。原因: 本工具是"部署 registry"的执行体,
+#   而**就绪的权威判定在 05_k8s_registry.sh**(它紧接着会等 PVC Bound + pod Ready + /v2/ 可达,
+#   上限 REGISTRY_WAIT_SECONDS 默认 600s)。两处各设一道闸、且本工具那道更短(45×2s=90s) →
+#   冷路径(registry-pvc 先于 SC 创建 + 外部 Ceph 首次 provision + pod 启动)实测要 ~150s:
+#     9m57s/8m50s ProvisioningFailed(storageclass ceph-block not found)
+#     6m10s ProvisioningSucceeded → 5m59s pod Started registry
+#   于是本工具在 90s 处 return 1 → 模块**根本没机会**用它的 600s 兜底, 整轮部署中断在 k8s_registry。
+#   现在: 超时只 warn(附提示谁在继续等), 交回模块的权威闸决定成败。
 # 注: 不能用 ping VIP 判活(ICMP 无 DNAT 规则必回 "port unreachable"), 只能 curl 服务端口。
-_wait_ready() {   # <url> <desc> → 0=可达
-    local url="$1" desc="$2" t
-    for t in $(seq 1 45); do
+_wait_ready() {   # <url> <desc> → 恒定返回 0(可达=ok / 超时=warn, 都不阻断)
+    local url="$1" desc="$2" t tries=45
+    for t in $(seq 1 "${tries}"); do
         curl -s -m 5 "${url}" >/dev/null 2>&1 && { ok "  ${desc} 可达"; return 0; }
-        [ "${t}" -lt 45 ] && { say "  ${desc} 未就绪, 等待第 ${t}/45 次(MetalLB 数据面/registry pod 初始化) ..."; sleep 2; }
+        # 每 30s 打一行(原实现每 2s 一行, 45 行刷屏且淹没了真正的错误信息)
+        [ "$((t % 15))" -eq 0 ] && say "  ${desc} 未就绪, 已等 $((t * 2))s(MetalLB 数据面/registry pod 初始化) ..."
+        [ "${t}" -lt "${tries}" ] && sleep 2
     done
-    warn "  ${desc} 90s 内不可达"
-    return 1
+    warn "  ${desc} ${tries} 次 × 2s 内未就绪 —— **不阻断**: 就绪判定交由 05_k8s_registry.sh 的权威等待继续(上限 ${REGISTRY_WAIT_SECONDS:-600}s)"
+    return 0
 }
 if [ "${REGISTRY_SERVICE_TYPE:-loadbalancer}" = "nodeport" ]; then
     NP_OK=$(node_cmd "${FIRST_MASTER}" "${FIRST_MASTER_USER}" "${FIRST_MASTER_PW}" \

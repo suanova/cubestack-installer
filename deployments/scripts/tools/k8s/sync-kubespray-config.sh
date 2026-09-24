@@ -46,8 +46,26 @@ FIRST_WORKER="${WORKER_IPS[0]:-${API_IP}}"
 kube_vip_validate_config || exit 1
 
 # 阶段判定: VIP 已绑=阶段二(切入口), 未绑=阶段一(写 master01, 本轮只让 VIP 就位)
-_KV_VIP="$(kube_vip_derive)" || exit 1
+# ★ kube-vip 关闭时**绝不推导 VIP**(2026-09-24 实机修复): kube_vip_derive 会对每台 master
+#   逐地址扫描(起于 .210), 既贵又可能**硬失败**(整段被占用/落在 MetalLB 池内), 而它带着
+#   `|| exit 1` —— 于是 `KUBE_VIP_ENABLED=false` 的集群仍会在 k8s_inventory
+#   (gen-inventory.sh → 本脚本)处中断**整个部署**。关掉 kube-vip 的集群里这纯属白跑。
+#   关闭态只取**显式配置**的 K8S_API_VIP(不扫描): 它只喂 apiserver 证书 SAN, 留着能让
+#   "以后想重新启用"不必重签证书(见 update_kube_vip_addons_yml 的注释); 没配就留空,
+#   该键自然不出现在 addons.yml 里。
+if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
+    _KV_VIP="$(kube_vip_derive)" || exit 1
+else
+    _KV_VIP="${K8S_API_VIP:-}"
+fi
 _KV_OLD_ADDR="$(kube_vip_current_entry)"
+
+_KV_NEW_ADDR="$(kube_vip_resolve_target)" || exit 1
+# ★ 2026-09-24 修复: 阶段必须**回读**(api_entry_phase), 不能读 $API_ENTRY_PHASE ——
+#   上面这行是命令替换(子 shell), 函数里设的全局回不到这里。旧写法下阶段恒为空:
+#   下面的切换护栏与"阶段二"提示**永不成立**, 等于护栏静默失效(阶段二会被直接写进 all.yml,
+#   而"未见确认标志则按阶段一"这条 fail-closed 约定根本没生效)。
+API_ENTRY_PHASE="$(api_entry_phase)"
 
 # 阶段二的切换门(确认动作在**调用方**完成, 本脚本只执行)。
 # ⚠ 本脚本的 stdout 会被 06_k8s_deploy.sh 重定向到 /dev/null(见该模块第 70 行), 所以
@@ -55,13 +73,13 @@ _KV_OLD_ADDR="$(kube_vip_current_entry)"
 #     · 调用方(06_k8s_deploy.sh)负责判阶段 + 提示 + 倒计时, 确认后 export KUBE_VIP_SWITCH_CONFIRMED=1
 #     · 本脚本见到该标志才做切换; 未见则一律按阶段一(写 master01)—— fail-closed, 绝不自行切换
 #     · 直接手工运行本脚本时若尚未确认, 会明确提示需要什么才能切换
-if [ "${API_ENTRY_PHASE:-0}" = "2" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
+#   ⚠ 护栏必须在**判定之后**再跑(旧版放在判定之前, 用的是一个还没算出来的阶段)。
+if [ "${API_ENTRY_PHASE}" = "2" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
     warn "VIP ${_KV_VIP} 已就位, 但尚未获得切换确认 → 本次仍按阶段一处理(入口保持 ${_KV_OLD_ADDR})"
     warn "如需切换: 走 06_k8s_deploy.sh(会给出倒计时确认); 或 export KUBE_VIP_SWITCH_CONFIRMED=1 后重跑本脚本"
     API_ENTRY_PHASE=1
+    _KV_NEW_ADDR="$(first_master_ip)" || exit 1     # 降级 = 阶段一: 入口回到第一个 master
 fi
-
-_KV_NEW_ADDR="$(kube_vip_resolve_target)" || exit 1
 
 # API 入口地址统一 = 本次运行的判定结果(阶段一=第一个 master / 阶段二=VIP)
 API_ADDR="${_KV_NEW_ADDR}"
@@ -245,7 +263,7 @@ fi
 if [ -f "${ADDONS_YML}" ]; then
     say "更新 ${ADDONS_YML} (kube-vip 控制平面 VIP) ..."
     update_kube_vip_addons_yml "${ADDONS_YML}" "${_KV_VIP}" || exit 1
-    if bool_is_true "${KUBE_VIP_ENABLED:-true}"; then
+    if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
         ok "已同步 kube-vip → VIP=${_KV_VIP}, interface=${KUBE_VIP_INTERFACE:-<自动检测>}, 阶段=${API_ENTRY_PHASE:-1}"
     else
         ok "已同步 kube-vip → 关闭(kube_vip_enabled: false)"
