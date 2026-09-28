@@ -27,7 +27,7 @@ amd64)。
 
 > ⚠ multus 在本仓库是**每节点 CNI 主路径**: 它一 OOM, 该节点上**所有新建 pod 都拿不到网络**(直到 pod 被拉起来又 OOM), 比"放宽资源"的代价大得多 —— 所以这里宁可给足余量。
 >
-> 排查建议: 若放宽到 512Mi 后仍 OOM, 说明不是容量问题(可能是 NAD 配置异常导致 multus 反复重建/泄漏):
+> 排查建议: 若放宽到 512Mi 后仍 OOM, 先检查内存峰值是否仍触及限制; 若未触及, 再检查 NAD 配置及进程是否反复重建或泄漏:
 > `kubectl -n kube-system top pod -l app=multus --containers`(看增长曲线)+
 > `kubectl -n kube-system logs ds/kube-multus-ds`。
 
