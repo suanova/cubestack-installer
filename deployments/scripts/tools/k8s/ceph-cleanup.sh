@@ -130,11 +130,7 @@ sleep 1
 _TARGET_VGS=""
 for dev in __DISKS__; do
     [ -b "$dev" ] || continue
-    for pv in $(pvs --noheadings -o pv_name 2>/dev/null | tr -d ' '); do
-        case "$pv" in
-            "$dev"|"$dev"p[0-9]*|"$dev"[0-9]*) ;;      # 盘本身 或 它的分区(nvme0n1p1 / sdb1)
-            *) continue ;;
-        esac
+    for pv in $(lsblk -nrpo NAME,TYPE "$dev" 2>/dev/null | awk '$2=="disk" || $2=="part" {print $1}'); do
         _vg="$(pvs --noheadings -o vg_name "$pv" 2>/dev/null | tr -d ' ')"
         [ -n "${_vg}" ] && _TARGET_VGS="${_TARGET_VGS} ${_vg}"
     done
