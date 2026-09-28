@@ -296,7 +296,7 @@ wipe_ceph_disks_all_nodes() {
     print_classified "${tsv}"
     echo ""
     # 按节点聚合 -- 一台节点一次 SSH 跑一遍标准清除步骤(LVM/VG 解绑只需做一次), 多盘一起擦
-    local _h _ip _user _disks _n
+    local _h _ip _user _disks _n _failed=0
     _n=0
     while IFS= read -r _h; do
         [ -n "${_h}" ] || continue
@@ -306,8 +306,16 @@ wipe_ceph_disks_all_nodes() {
         [ -n "${_HOST_IP}" ] || { warn "  ${_h}: 无 IP, 跳过"; continue; }
         _ip="${_HOST_IP}"; _user="${_HOST_USER}"
         say "  节点 ${_h}(${_ip}): 清理 ${_disks}"
-        wipe_node "${_ip}" "${_disks}" "${_user}" && _n=$((_n + 1)) || true
+        if wipe_node "${_ip}" "${_disks}" "${_user}"; then
+            _n=$((_n + 1))
+        else
+            _failed=$((_failed + 1))
+        fi
     done < <(ceph_storage_hosts)
+    if [ "${_failed}" -gt 0 ]; then
+        err "Ceph 磁盘清理失败: ${_failed} 个节点失败, ${_n} 个节点成功"
+        return 1
+    fi
     if [ "${_n}" -eq 0 ]; then
         warn "没有节点需要清理(未检出任何 Ceph 占用盘; 若确认有旧 OSD 盘, 见上方分类说明)"
     fi

@@ -106,9 +106,9 @@ LVM_CMD="sudo -n pvs --noheadings -o pv_name,vg_name,vg_tags 2>/dev/null; echo '
 # 会被判成"空闲"。这正是 2026-09-24 的 0 OSD 事故成因: 这种盘进 CR → Rook 判
 # "Raw device ... is already prepared" → 认领失败被跳过 → 新集群 0 OSD。
 # 这里逐盘读 3 处各 4KB 找 label magic("ceph osd volume"), 命中就打盘名。
-# 无 sudo/无盘 → 空输出, 只少一条证据(绝不当成命中)。
+# 无 sudo → 显式标记并告警; 无盘/无命中 → 空输出(绝不当成命中)。
 # 偏移换算: 10/100/1000 GiB ÷ 4096B = 2621440 / 26214400 / 262144000。
-LABEL_PROBE_CMD='for D in /sys/block/*; do N=${D##*/}; case "$N" in loop*|ram*|zram*|sr*|dm-*|md*|nbd*|rbd*) continue;; esac; B=/dev/$N; [ -b "$B" ] || continue; for O in 2621440 26214400 262144000; do if sudo -n dd if=$B bs=4096 skip=$O count=1 status=none 2>/dev/null | grep -qa "ceph osd volume"; then echo "$N"; break; fi; done; done'
+LABEL_PROBE_CMD='sudo -n true 2>/dev/null || { echo __CEPH_LABEL_PROBE_UNAVAILABLE__; exit 0; }; for D in /sys/block/*; do N=${D##*/}; case "$N" in loop*|ram*|zram*|sr*|dm-*|md*|nbd*|rbd*) continue;; esac; B=/dev/$N; [ -b "$B" ] || continue; for O in 2621440 26214400 262144000; do if sudo -n dd if=$B bs=4096 skip=$O count=1 status=none 2>/dev/null | grep -qa "ceph osd volume"; then echo "$N"; break; fi; done; done'
 
 # 单节点分类: stdout = 分类器 TSV(<设备>\t<分类>\t<证据>); 诊断信息走 stderr。
 # 返回 0=成功; 1=lsblk 取数失败(SSH/认证问题)。
@@ -134,6 +134,10 @@ classify_node() {   # <hostname> <ip> <user> <pw>
     # BlueStore label 副本佐证(可选): 每盘 3×4KB 读, 成本可忽略, 故无条件探测;
     # 取不到 → 空串, 分类器只会"少一条证据", 绝不因此判 ceph。
     probed="$(node_run "${user}" "${ip}" "${pw}" "${LABEL_PROBE_CMD}")"
+    if [[ "${probed}" == *"__CEPH_LABEL_PROBE_UNAVAILABLE__"* ]]; then
+        warn "  ${hn}: BlueStore label 副本探针不可用(sudo -n 失败) → 缺少 label 副本佐证"
+        probed="${probed//__CEPH_LABEL_PROBE_UNAVAILABLE__/}"
+    fi
     printf '%s' "${json}" | python3 "${CLASSIFY_PY}" "${CEPH_DETECT_EXCLUDE}" "${pvs}" "${lvs}" "${probed}" \
         || { warn "  ${hn}: 分类器执行失败(见上方错误)" >&2; return 1; }
 }

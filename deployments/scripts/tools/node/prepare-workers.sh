@@ -81,7 +81,7 @@ for line in "${NODES[@]:-}"; do
     #     先删除旧的 cubestack-cluster 行(grep -F 会因注释误判存在), 再追加正确公钥
     say "注入 cubestack_k8s 公钥(幂等)..."
     CSPUBKEY="$(cat "${SSH_KEY_DIR}/${SSH_KEY_NAME}.pub" 2>/dev/null || true)"
-    [ -n "${CSPUBKEY}" ] || warn "  本机公钥 ${SSH_KEY_DIR}/${SSH_KEY_NAME}.pub 读不到(先跑 gen-ssh-key/vm_sshkey?)"
+    [ -n "${CSPUBKEY}" ] || { err "本机公钥 ${SSH_KEY_DIR}/${SSH_KEY_NAME}.pub 读不到(先跑 gen-ssh-key/vm_sshkey)"; exit 1; }
     ${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" \
         "sed -i '/cubestack-cluster/d' ~/.ssh/authorized_keys 2>/dev/null; echo '${CSPUBKEY}' >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys" 2>/dev/null \
         && ok "cubestack_k8s 公钥已就绪" || warn "cubestack_k8s 公钥注入失败"

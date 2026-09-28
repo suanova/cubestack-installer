@@ -251,7 +251,7 @@ n_rbd="$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ')"
 if [ "${n_rbd:-0}" -gt 0 ]; then
     echo "[install] ⚠ 节点存在 ${n_rbd} 个内核 rbd 映射 —— 后端不可达时任何设备扫描都可能卡死; 见 docs/troubleshooting.md"
 fi
-dpkg -i /tmp/packages/*.deb 2>&1 | tail -20
+dpkg -i /tmp/packages/*.deb </dev/null 2>&1 | tail -20
 _rc="${PIPESTATUS[0]}"
 if [ -n "${_bak}" ] && [ -f "${_bak}" ]; then
     cp -a "${_bak}" "${_ir}"; rm -f "${_bak}"
