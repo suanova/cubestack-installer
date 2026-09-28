@@ -1,0 +1,157 @@
+---
+# ============================================================
+# 离线安装 worker 节点系统包(lvm2 等, 供 Ceph/Rook OSD 使用)
+# 将 offline-files 中的 .deb 包复制到目标节点并安装
+# 包来源: offline-files/kubespray/<集群>/*.deb(仓库根目录) + packages/ 子目录,
+#         集群名取自当前 inventory(inventory_dir | basename), 无硬编码
+# 路径说明: playbook 位于 kubespray/patch-playbooks/,
+#           ../../offline-files/kubespray = deployments/offline-files/kubespray
+# 挂载: 由 cubestack-offline.sh ensure_packages_play 自动注入 cluster.yml/scale.yml
+#       (k8s 部署阶段自动安装; kubespray 升级后自动重新挂载)。
+# lvm2: 离线包由联网机 tools/offline/fetch-lvm-packages.sh 生成到共享 packages/ 目录;
+#       未包含 lvm2 .deb 时仅告警不失败(其余包照常安装), 避免 packages/ 内容变化误失败。
+# 用法(手动):
+#   ansible-playbook -i <inventory> install-packages.yml
+# ============================================================
+- name: Install required packages on worker nodes
+  hosts: kube_node
+  gather_facts: false
+  vars:
+    # ★ 离线目录解析: 优先用 offline.yml 注入的 download_cache_dir(= LOCAL_REPO_DIR, 由
+    #   cubestack-offline.sh 生成且 -e @offline.yml 全局可用), 保证与离线文件实际位置一致;
+    #   容器/standalone 下 playbook_dir 相对路径会算到 deployments/kubespray/offline-files(不存在)。
+    #   回退: 相对路径(inventory_dir | basename, 无硬编码)。
+    offline_dir: "{{ download_cache_dir | default(playbook_dir + '/../../offline-files/kubespray') }}"
+    packages_dirs:
+      - "{{ offline_dir }}"
+      - "{{ offline_dir }}/packages"
+      - "{{ offline_dir }}/../packages"
+
+  tasks:
+    - name: Ensure /tmp/packages directory exists on target
+      file:
+        path: /tmp/packages
+        state: directory
+
+    - name: Find offline .deb packages (仓库根目录 + packages/ + 共享 packages/)
+      find:
+        paths: "{{ packages_dirs }}"
+        patterns: "*.deb"
+        file_type: file
+      delegate_to: localhost
+      register: deb_files
+
+    - name: Copy offline .deb packages to target
+      # ★ 不能 delegate_to: localhost —— 那样 src/dest 都解析为控制器路径, 只会把 .deb 原地复制到
+      #   控制器 /tmp/packages, 节点永远收不到(此前 dpkg 报 cannot access archive)。
+      #   不 delegate 时任务在目标节点执行, copy 自动从控制器(src)拉取到节点(dest), 这才是跨主机传输。
+      copy:
+        src: "{{ item.path }}"
+        dest: /tmp/packages/
+      loop: "{{ deb_files.files }}"
+      when: deb_files.files | length > 0
+
+    - name: Install packages from local files (逐包安装, 单包失败不阻断)
+      # ★ 逐个 dpkg -i + ignore_errors: 任何单个包失败(如 skopeo 缺 golang-github-containers-common /
+      #   libgpgme11, sysstat 缺 libsensors5)都只记失败、不中断整个 k8s 部署 —— 需要与否由下方
+      #   "Verify required packages" 按必需包校验(仅 base 工具 + lvm 家族, 非全部 .deb)。
+      # ★ 2026-09-24 事故修复(实机: ansible 任务"有时候卡在这里很长时间", 实测卡 38 分钟以上):
+      #   链式根因 —— dpkg -i dmsetup/lvm2 → initramfs-tools.postinst → `update-initramfs -u`
+      #   → mkinitramfs → hooks/mdadm → `mdadm --examine --scan`(遍历**所有**块设备)
+      #   → 读到**上一代集群遗留、后端已不可达的 /dev/rbd0** → 进程进 D 状态(不可中断), 永不返回;
+      #   同一节点上还有 ext4 挂在那块 rbd 上, 其 jbd2 线程也一并卡死(实测 [registry] 内核线程
+      #   D 态 1h37m)。8 台里只有 2 台(3-33/3-36)有该残留 → 于是表现为"有时候"卡住。
+      #   两层修复:
+      #     ① **安装期间禁用 initramfs 重建**(update_initramfs=no, 装完恢复): 我们发的包
+      #        (lvm2/dmsetup 家族)在这些节点上**不需要**重建 initrd(内核没变、root 不在 LVM 上),
+      #        而重建会把 initramfs 的所有 hooks 跑一遍(pvscan/vgscan/mdadm 都会扫设备)——
+      #        只要有 hang 住的块设备就必卡。禁用后这条链根本不会被触发。
+      #     ② **已安装且版本相同 → 跳过**: 之前每次部署都对同一批 .deb 重跑 dpkg -i,
+      #        不仅重复触发 postinst/触发器链, 也在无谓地消耗时间。
+      shell: |
+        set -u
+        ir_conf=/etc/initramfs-tools/update-initramfs.conf
+        ir_backup=""
+        if [ -f "${ir_conf}" ] && ! grep -qE '^[[:space:]]*update_initramfs[[:space:]]*=[[:space:]]*no' "${ir_conf}"; then
+          ir_backup="$(mktemp)"
+          cp -a "${ir_conf}" "${ir_backup}"
+          if grep -qE '^[[:space:]]*update_initramfs=' "${ir_conf}"; then
+            sed -i -E 's|^[[:space:]]*update_initramfs=.*|update_initramfs=no|' "${ir_conf}"
+          else
+            echo 'update_initramfs=no' >> "${ir_conf}"
+          fi
+          echo "[install-packages] 本次安装期间已禁用 initramfs 重建(避免 mdadm/lvm hooks 扫描块设备而卡死)"
+        fi
+        n_rbd="$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ')"
+        if [ "${n_rbd:-0}" -gt 0 ]; then
+          echo "[install-packages] ⚠ 本节点存在 ${n_rbd} 个内核 rbd 映射 —— 若其后端已不可达, 任何设备扫描都会卡死; 见 docs/troubleshooting.md"
+        fi
+        failed=""
+        skipped=""
+        for deb in /tmp/packages/*.deb; do
+          [ -e "${deb}" ] || continue
+          pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"
+          newver="$(dpkg-deb -f "${deb}" Version 2>/dev/null)"
+          curstat="$(dpkg-query -W -f='${db:Status-Abbrev}|${Version}' "${pkg}" 2>/dev/null || true)"
+          if [ -n "${pkg}" ] && [ -n "${newver}" ] && [ "${curstat}" = "ii |${newver}" ]; then
+            skipped="${skipped} ${pkg}"
+            continue
+          fi
+          if ! dpkg -i "${deb}" >/dev/null 2>&1; then
+            failed="${failed} $(basename "${deb}")"
+          fi
+        done
+        if [ -n "${ir_backup}" ] && [ -f "${ir_backup}" ]; then
+          cp -a "${ir_backup}" "${ir_conf}"; rm -f "${ir_backup}"
+        fi
+        rm -rf /tmp/packages
+        [ -n "${skipped}" ] && echo "[install-packages] 已装同版本, 跳过:${skipped}"
+        if [ -n "${failed}" ]; then
+          echo "⚠ 以下包安装失败(通常为可选工具缺依赖, 不影响 ceph):${failed}"
+        fi
+      become: true
+      ignore_errors: true
+      when: deb_files.files | length > 0
+
+    - name: Derive expected package names from shipped .deb files
+      # deb 文件名 <name>_<version>_<arch>.deb → 包名(如 lvm2_2.03.11-2.1ubuntu2_amd64.deb → lvm2)
+      set_fact:
+        expected_packages: "{{ deb_files.files | map(attribute='path') | map('basename') | map('regex_replace', '_.*', '') | unique | list }}"
+      when: deb_files.files | length > 0
+
+    - name: Warn when lvm2 offline package is not shipped
+      debug:
+        msg: >-
+          ⚠ packages/ 未包含 lvm2 离线包 —— 存储节点无法离线安装 lvm2
+          (Rook OSD 重启后需 lvm 激活逻辑卷)。请先在联网机执行
+          tools/offline/fetch-lvm-packages.sh 并把 .deb 放到共享 packages/ 目录。
+      when:
+        - deb_files.files | length > 0
+        - "'lvm2' not in expected_packages"
+
+    - name: Verify required packages
+      package_facts:
+        manager: apt
+      when: deb_files.files | length > 0
+
+    - name: "Check installation status (仅必需包: base 工具 + lvm 家族; skopeo/sysstat 等可选包失败不阻断)"
+      assert:
+        that:
+          - item in ansible_facts.packages
+        fail_msg: "Required package missing on {{ inventory_hostname }}: {{ item }}"
+        success_msg: "All required packages installed on {{ inventory_hostname }}"
+      loop: "{{ required_packages }}"
+      vars:
+        required_packages:
+          - iputils-ping
+          - rsync
+          - iptables
+          - curl
+          - ca-certificates
+          - lvm2
+          - dmsetup
+          - dmeventd
+          - libdevmapper1.02.1
+          - libdevmapper-event1.02.1
+          - thin-provisioning-tools
+      when: deb_files.files | length > 0

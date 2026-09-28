@@ -19,7 +19,7 @@
 | `05-apps-meta-registry-order.patch` | `roles/kubernetes-apps/meta/main.yml` | `kubernetes-apps/registry` 由 metallb **之前**挪到**之后** —— registry 的 LB VIP 依赖 metallb 先就位(`registry_service_type=LoadBalancer` 时);丢了则 registry 的 VIP 一直 pending | 上游 `meta/main.yml` 中 registry role 已排在 metallb 之后 | 不提(本环境特有: 我们把 registry 以 LoadBalancer 暴露; 上游默认 ClusterIP) |
 | `06-metallb-crd-race.patch` | `roles/kubernetes-apps/metallb/tasks/main.yml` | 裸金属新集群首装 metallb 的 CRD 注册竞态(Established 等待 + controller `rollout restart` + apply 重试);丢了则池子 CR 不被 controller 处理, LB 永远分不到 VIP | 上游该文件出现 `Established` 等待或 apply `retries` | **建议提 PR**(§3.5 首批上游化项; 见 `docs/kubespray-upgrade.md` 的"待上游化"清单) |
 | `07-download-yml-k8s-cluster-group.patch` | `roles/kubespray_defaults/defaults/main/download.yml` | `dnsautoscaler` / `metrics_server` 镜像的下载组补 `- k8s_cluster`(原仅 `kube_control_plane`; 闸门见 `roles/download/tasks/main.yml` 的 `group_names \| intersect(download.groups)`);丢了则 worker 不下载这两个镜像, 离线节点上组件起不来 | 上游这两个条目 `groups` 含 `k8s_cluster` | 不提(会改变上游默认下载面: 全部节点都下载; 本环境离线自持所需) |
-| `08-kubeadm-secondary-join-stat.patch` | `roles/kubernetes/control-plane/tasks/kubeadm-secondary.yml` | "是否已 join 成功"以 `admin.conf` 是否存在为准(文件顶部 `stat` + 4 处 join 前置任务的 gate 加 `or not admin_conf_stat.stat.exists`);丢了则 kubelet config 已存在(上次部分运行)但 admin.conf 未生成时, Reset cert directory / Create kubeadm ControlPlane config / 两处 discovery kubeconfig 任务全被跳过, 次 master 卡在"kubelet 已配好但未 join" | 上游该文件出现 `admin.conf` 存在性守卫(stat / `is exists`), 或上游把"是否已 join"的判据从 kubelet config 换成 admin.conf | 建议提 PR(通用幂等健壮性; 非 §3.5 首批) |
+| `08-kubeadm-secondary-join-stat.patch` | `roles/kubernetes/control-plane/tasks/kubeadm-secondary.yml` | "是否已 join 成功"以 `admin.conf` 是否存在为准(文件顶部 `stat` + **5 处** gate 加 `or not admin_conf_stat.stat.exists`:4 处 join 前置任务 + **join 任务自身**);丢了则 kubelet config 已存在(上次 join 半途失败)但 admin.conf 未生成时, 前置任务被跳过、join 也被自己的 gate 跳过 → 次 master 卡在"kubelet 已配好但未 join";**补上 join 那处**才能交付"admin.conf 缺 ⇒ 重新 join"(否则前 4 处会先做 `kubeadm reset` 却不重新 join) | 上游该文件出现 `admin.conf` 存在性守卫(stat / `is exists`), 或上游把"是否已 join"的判据从 kubelet config 换成 admin.conf | 建议提 PR(通用幂等健壮性; 非 §3.5 首批) |
 
 ### 已退休(1 处,别再加回来)
 
@@ -37,12 +37,37 @@
    `import_playbook: patch-playbooks/cubestack-*.yml`,以及 `patch-playbooks/` 目录本身,
    由 `cubestack-offline.sh` 的"**内嵌内容重建**"机制负责(**树里没有就在部署时写进去**);
    本目录**不**含这两个文件,否则会变成两套互相打架的来源。
+
+   **登记(2026-09-28 裁决,别再加回来)**:这 4 行 import 由 `cubestack-offline.sh` 的
+   `ensure_*_play` 在**部署时按锚点注入**(preload / registry+single-node / install-packages /
+   cni-restart,共覆盖 `patch-playbooks/` 下 5 个 play),**不**做成补丁、也**不**写进仓库树。
+   理由(执行级):
+   - **四处注入点都带"已存在则跳过"守卫 → 注入幂等,"固化后会双插"的风险不存在**。实测(2026-09-28):
+     `ensure_preload_play` @`cubestack-offline.sh:814`、`ensure_registry_play` @L868、
+     `ensure_packages_play` @L1031、`ensure_cni_restart_play` @L1171,形如
+     `if grep -q "<play 文件名>" "${py}"; then log "✅ …"; continue; fi`(守卫按**文件名** grep,
+     所以即使把 import 行固化进树、命中守卫也只是 `continue`,不会重复插入)。
+   - **不固化的唯一理由 = 单一来源**:这 4 行由机制在部署时注入;若再固化进仓库树/补丁层,
+     同一件事就有两份副本要同步(升级、幂等判定、评审都会纠缠)。
+   - 锚点已在 **v2.32.0** 上逐条核对**仍存在**(锚点在 → 机制不会静默失效;锚点缺失时
+     `ensure_*_play` 只 `warn` 跳过,不会误插):
+     `playbooks/cluster.yml:19 - name: Install etcd`、
+     `playbooks/cluster.yml:76 - name: Install Kubernetes apps`、
+     `playbooks/scale.yml:43 - name: Target only workers to get kubelet installed and checking in on any new nodes(node)`、
+     `playbooks/scale.yml:86 - name: Apply resolv.conf changes now that cluster DNS is up`、
+     `roles/download/tasks/download_container.yml:104 - name: Download_container | Upload image to node if it is cached`
+     (⚠ 行号口径:**打过本目录补丁 01 之后**的行号;纯净 v2.32.0 里该行在 `:95`)。
+   - 注:`patch-playbooks/` 目录**本身**必须留在树里(换树要保留,见 `cubestack-kubespray-upgrade.sh`
+     的保留集)—— 机制只在文件**缺失时**才用内置副本重建,而 `cubestack-registry.yml` /
+     `cubestack-single-node.yml` 连内置副本都没有。
 2. **已作废(1 处)**:`playbooks/ansible_version.yml` 的 `maximal_ansible_version: 2.17 → 2.18`
    —— v2.32.0 要求 ansible ≥2.19、<2.20,我们这处 2.17→2.18 的上限已无意义,**升级时随树丢弃,不迁移**。
 3. ~~**手工项(1 处)**:`roles/kubernetes/control-plane/tasks/kubeadm-secondary.yml`~~ —— **2026-09-28 已固化**为
    `08-kubeadm-secondary-join-stat.patch`(见上表),不再走人肉重做。⚠ 原文写的"VIP / SAN / advertise-address
    相关 18 行"与实测不符:该文件对纯净 v2.28.0 的净差只有 `admin.conf` 存在性守卫(新增 8 行 stat 任务 +
    4 处 gate 各改 1 行),与 VIP/SAN 无关 —— 实测见文末"已知的文档偏差"。
+   ⚠ 固化到 v2.32 时按评审裁决(Ruling 19)**补了第 5 处 gate**(join 任务自身),故补丁 08 是 **5 处**:
+   只保留旧改动的 4 处会"先 `kubeadm reset` 却不重新 join",比不打更糟。
 
 ## 如何重放与自检
 
@@ -77,6 +102,7 @@ done
   `06-metallb-crd-race.patch`(前缀 01–07 是**补丁层的顺序号**,不等于 §2.2 的表行号;对照见上表说明)。
 - spec §2.2 第 7 行(`kubeadm-secondary.yml`)原记"VIP / SAN / advertise-address 相关 18 行";
   2026-09-28 实测(与纯净 v2.28.0 逐行对比)净差**只有** `admin.conf` 存在性守卫 —— 新增 8 行 stat 任务 +
-  4 处 gate 各改 1 行,**不含 VIP/SAN/advertise-address 任何内容**;同日固化为 `08-*.patch`。
+  4 处 gate 各改 1 行,**不含 VIP/SAN/advertise-address 任何内容**;同日固化为 `08-*.patch`
+  (固化时按 Ruling 19 补第 5 处 gate = join 任务自身 —— 旧改动的 4 处会让半 join 节点被 reset 却不重 join)。
 - 前缀序号 = 固化时的历史顺序号,**退休不重排**:补丁 03 退休后保留空号,新增项续编 `08`(不补 03 的位),
   以免与既有的升级记录/文档中的编号对不上。

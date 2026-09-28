@@ -17,16 +17,21 @@
 # 步骤(括号内是 SOP 步号):
 #   [1/8] 前置: 工作区干净?(SOP 0)          [2/8] 备份: 旧树 tag + 指纹(SOP 2)
 #   [3/8] 取树(SOP 1)                       [4/8] 核验: galaxy 版本 + k8s 钉子(SOP 1)
-#   [5/8] 换树, 保留 inventory/local + .venv/(SOP 3)
+#   [5/8] 换树, 保留 inventory/local + .venv/ + patch-playbooks/(SOP 3)
 #   [6/8] 退休判定 --check-retired(SOP 6)   [7/8] 重放 --apply(SOP 4)
 #   [8/8] 打印后续人工步骤(SOP 5/7/8/9)
 #
 # ⚠ 时机语义(重要, 不要调换 [6] 与 [7]): --check-retired 的判据是"这棵树已经等于打过之后
 #   的样子", 只有**刚换完的纯净树**上跑才有意义。先 --apply 再跑 → 刚打进去的补丁也会报
 #   RETIRE(假信号, 分不清"上游吸收了"与"我们刚打的")。详见 cubestack-patch-apply.sh 头部。
-# ⚠ 破坏性: [5] 会删除 <root>/kubespray 下除 **inventory/local 与 .venv/** 之外的**全部**内容。
+# ⚠ 破坏性: [5] 会删除 <root>/kubespray 下除 **inventory/local、patch-playbooks 与 .venv/** 之外的**全部**内容。
 #   保留 .venv 的理由: 它是**裸机路径的 ansible 运行环境**(cubestack-offline.sh 的 ensure_venv
 #   在没有预装 ansible 时靠它跑), 删了裸机升级后跑不起来。
+#   保留 patch-playbooks 的理由: 它是**我们自持的注入 play**(cubestack-registry / single-node /
+#   cni-restart / preload / install-packages), **不是上游文件** —— 上游任何版本都不带它。
+#   cubestack-offline.sh 的 ensure_*_play 只在**文件缺失时**从内置副本重建(且 registry /
+#   single-node 两个 play 连内置副本都没有, 见 ensure_registry_play), 故换树丢掉它 = 注入内容
+#   退化为脚本内置的旧版(实测 install-packages.yml 的内置副本比树内副本旧), 必须原样保留。
 #   保留粒度 = 只保 `inventory/local`(Ruling 15): 树内 `inventory/sample` 是**上游模板**
 #   (新集群种子, 见 cubestack-offline.sh:191-192 的 cp -rn), 必须随新树刷新; 本仓库的实盘
 #   inventory 在**树外** `deployments/kubespray/inventory/cubestack-cluster`, 不在这里。
@@ -57,6 +62,8 @@ die()  { printf '\n!! 中止: %s\n' "$*" >&2; exit 2; }
 # 全仓库工作区门(`git status --porcelain --untracked-files=no`)挡住 —— 正确姿势是先把换树结果落盘。
 rerun_hint() {
     printf '  %s\n' "重跑方式: 更新对应 .patch → **若已换过树, 先 git add + git commit(把换树结果落盘)再重跑**;"
+    printf '  %s\n' "          落盘范围 = 整个部署根(如仓库内 deployments/kubespray), **不只是树** —— 冲突处置改的"
+    printf '  %s\n' "          cubestack-patches/*.patch 在树外, 漏了就白改(下次换树又丢)。"
     printf '  %s\n' "          未换树的场景(失败发生在 [5/8] 之前)直接重跑本脚本。"
 }
 
@@ -224,12 +231,13 @@ else
 fi
 
 # ---------------------------------------------------------------- [5/8] 换树
-say "[5/8] 换树(SOP 3: 保留 inventory/local + .venv/)"
-warn "破坏性: 将删除 ${TREE} 下除 inventory/local 与 .venv/ 之外的全部内容"
+say "[5/8] 换树(SOP 3: 保留 inventory/local + .venv/ + patch-playbooks/)"
+warn "破坏性: 将删除 ${TREE} 下除 inventory/local、patch-playbooks 与 .venv/ 之外的全部内容"
 KEEP_LIST=""
 [ -d "${TREE}/inventory/local" ] && KEEP_LIST="${KEEP_LIST} inventory/local(实盘 inventory 若在树内, 通常在 local/)"
+[ -d "${TREE}/patch-playbooks" ] && KEEP_LIST="${KEEP_LIST} patch-playbooks(我们自持的注入 play, 非上游文件)"
 [ -d "${TREE}/.venv" ]           && KEEP_LIST="${KEEP_LIST} .venv(ansible 运行环境)"
-log "保留:${KEEP_LIST:- (无 —— 该树里没有 inventory/local 与 .venv/)}"
+log "保留:${KEEP_LIST:- (无 —— 该树里没有 inventory/local、patch-playbooks 与 .venv/)}"
 [ -d "${TREE}/.venv" ] || warn "该树没有 .venv/: 裸机(ansible 未预装)环境升级后可能需要重建 venv"
 
 # 保留粒度 = inventory/local(Ruling 15): 树内 inventory/sample 是**上游模板**(新集群种子, 见
@@ -238,9 +246,20 @@ log "保留:${KEEP_LIST:- (无 —— 该树里没有 inventory/local 与 .venv/
 # 顺带避开 F1: 上游 inventory/local/group_vars 是指向 sample 的**符号链接**, 与本树被物化的
 # 真实目录相撞会让 rsync 报 "could not make way for new symlink" 而中止 —— 排除 local 后
 # 上游那份根本不进来。
+# patch-playbooks/ 是**我们的**目录(上游不带同名目录), 换树必须原样保留:
+# 它是 cubestack-offline.sh 的 ensure_*_play 注入的 5 个 play 的载体, 而机制**只在文件缺失时**
+# 才从内置副本重建(registry / single-node 两个 play 连内置副本都没有) → 丢了就退化为旧版注入内容。
 KEPT_INV=0
 [ -d "${TREE}/inventory/local" ] && KEPT_INV=1
-find "${TREE}" -mindepth 1 -maxdepth 1 ! -name inventory ! -name .venv -exec rm -rf {} + \
+KEPT_PP=0
+[ -d "${TREE}/patch-playbooks" ] && KEPT_PP=1
+# 换树前记录 patch-playbooks 指纹, 换树后逐字节复核(保住与否必须**可验证**, 不靠人看)
+PP_BEFORE=""
+if [ "${KEPT_PP}" = 1 ]; then
+    PP_BEFORE="$( (cd "${TREE}/patch-playbooks" && find . -type f -print0 | sort -z | xargs -0 -r md5sum) | md5sum | awk '{print $1}')"
+    PP_FILES="$(find "${TREE}/patch-playbooks" -type f | wc -l)"
+fi
+find "${TREE}" -mindepth 1 -maxdepth 1 ! -name inventory ! -name .venv ! -name patch-playbooks -exec rm -rf {} + \
     || die "删除旧树内容失败: ${TREE}"
 [ "${KEPT_INV}" = 1 ] && { find "${TREE}/inventory" -mindepth 1 -maxdepth 1 ! -name local -exec rm -rf {} + \
     || die "清理旧 inventory/(只留 local)失败: ${TREE}/inventory"; }
@@ -250,6 +269,8 @@ RSYNC_EXCLUDES=(--exclude='/.git' --exclude='/.github' --exclude='/.gitlab-ci' -
                 --exclude='/.gitattributes' --exclude='/.gitignore' --exclude='/.gitmodules'
                 --exclude='/.venv')
 [ "${KEPT_INV}" = 1 ] && RSYNC_EXCLUDES+=(--exclude='/inventory/local')
+# 上游任何 tag 都不带 patch-playbooks/ → 无条件排除即可(不需要 KEPT_PP 条件)
+RSYNC_EXCLUDES+=(--exclude='/patch-playbooks')
 rsync -a "${RSYNC_EXCLUDES[@]}" "${TREE_SRC}/" "${TREE}/" \
     || die "rsync 失败(树可能不完整; 用备份 tag / 指纹回退)"
 rm -rf "${TREE}/contrib/offline/temp"   # 上游离线脚本的临时目录, 属残留, 不清会跟着树漂移
@@ -261,6 +282,18 @@ NEW_FP="$(tree_fingerprint "${TREE}")"
 log "换树完成: ${OLD_VER} → ${NEW_VER}(指纹 ${NEW_FP})"
 if [ "${KEPT_INV}" = 1 ]; then
     log "树内 inventory/local 原样保留(实盘 inventory 若在树内通常在此; 其余 inventory/ 已被新树替换)"
+fi
+# 自检(patch-playbooks 保留的直接判据): 文件数 + 逐字节指纹都不能变
+if [ "${KEPT_PP}" = 1 ]; then
+    PP_AFTER="$( (cd "${TREE}/patch-playbooks" && find . -type f -print0 | sort -z | xargs -0 -r md5sum) | md5sum | awk '{print $1}')"
+    PP_FILES_AFTER="$(find "${TREE}/patch-playbooks" -type f | wc -l)"
+    if [ "${PP_BEFORE}" = "${PP_AFTER}" ]; then
+        log "patch-playbooks/ 原样保留(${PP_FILES} → ${PP_FILES_AFTER} 个文件, 指纹 ${PP_AFTER} 未变)"
+    else
+        warn "patch-playbooks/ 内容变了(换树没保住?): 指纹 ${PP_BEFORE} → ${PP_AFTER}; 回退见 [2/8] 的备份 tag"
+    fi
+else
+    warn "该树没有 patch-playbooks/: 换树后注入 play 将由 cubestack-offline.sh 的内置副本重建(可能不是最新版)"
 fi
 # 自检(换树正确性的直接判据): 上游模板 sample 必须已随新树刷新
 if [ -d "${TREE_SRC}/inventory/sample" ]; then
@@ -334,10 +367,12 @@ cat <<EOF
        (预期只剩: 7 个补丁目标文件 + 保留的 inventory/local + 剔除的顶层点文件)
   5) 记录(SOP 9): 在 docs/kubespray-upgrade.md 追加一条(旧→新 tag、k8s/插件版本变化、
      冲突与处置、踩的坑、新增的可上游化补丁)
-  6) 换树结果**落盘**(仅当树在 git 仓库内): git add -A ${TREE} && git commit —— 否则下一次
-     运行会被 [1/8] 的工作区门挡住(换树改写了成千上万个已跟踪文件)。保留项只有
-     inventory/local 与 .venv/: 实盘 inventory 在本仓库树外(deployments/kubespray/inventory/
-     cubestack-cluster); 若某环境把实盘 inventory 放在树内其它路径, 换树前自行备份。
+  6) 换树结果**落盘**(仅当树在 git 仓库内): git add -A <部署根> && git commit —— 否则下一次
+     运行会被 [1/8] 的工作区门挡住(换树改写了成千上万个已跟踪文件)。⚠ 范围是**整个部署根**
+     (仓库内 = deployments/kubespray), **不只是树**: 冲突处置改的 cubestack-patches/*.patch
+     在树外, 漏了就白改。保留项 = inventory/local + patch-playbooks + .venv/: 实盘 inventory 在
+     本仓库树外(deployments/kubespray/inventory/cubestack-cluster); 若某环境把实盘 inventory
+     放在树内其它路径, 换树前自行备份。
   详见 docs/kubespray-upgrade.md §8
 EOF
 if [ -n "${REPO}" ]; then

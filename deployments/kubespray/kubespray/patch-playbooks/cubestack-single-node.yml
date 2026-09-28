@@ -1,0 +1,73 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# cubestack-installer: 单节点集群控制面可调度收敛 play
+#
+# 背景: 仅 1 个 control-plane 且 0 个 worker 时(单节点 all-in-one), 该 master 是
+#   集群唯一可调度节点。若其带 node-role.kubernetes.io/control-plane:NoSchedule 污点,
+#   无该污点容忍的普通 pod(metallb controller / local-path-provisioner / 内置
+#   registry / gpu-operator 等)会一直 Pending:
+#     · registry 起不来 → 部署机推镜像失败;
+#     · operator pod 拉不到镜像 → ImagePullBackOff(镜像其实已推成功, 只是拉不到)。
+#
+# 本 play 在 Kubernetes+CNI 部署完成、metallb/local-path/registry 等 addon 安装之前
+# 执行(与 cubestack-registry.yml 同一插入块, 由 ensure_registry_play 挂载), 仅当
+# 集群恰好 1 个 control-plane 时, 移除该节点的 control-plane/master 污点并 uncordon:
+#   · 单节点 → master 可调度, 后续 addon/operator pod 可调度到它;
+#   · 多 control-plane → 不动作(保持默认不可调度, 不破坏生产集群隔离);
+#   · 污点已不存在/已可调度 → kubectl 幂等, 无副作用。
+#
+# 与 gen-inventory.sh 的"单节点模式"(master 同时加入 kube_node 组, 从 kubeadm 层面
+# 不打污点)互补: 本 play 用 kubectl 直接收敛, 对"NODES 被临时改单节点"或"扩容后
+# kubespray 重新打回污点"等 inventory 判定覆盖不到的场景也生效。
+#
+# 挂载位置: cluster.yml / scale.yml 的 "Install etcd" 之前。
+# 由入口脚本 ensure_registry_play 自动维护(kubespray 升级后重新挂载)。
+# ═══════════════════════════════════════════════════════════════════════════
+- name: Make single control-plane node schedulable (before addon/operator)
+  hosts: kube_control_plane[0]
+  gather_facts: false
+  any_errors_fatal: false
+  environment: "{{ proxy_disable_env }}"
+  roles:
+    - { role: kubespray_defaults }
+  tasks:
+    - name: Single-node | Count control-plane nodes
+      command: >-
+        {{ kubectl }} get nodes --selector=node-role.kubernetes.io/control-plane
+        --no-headers
+      register: single_node_cp
+      changed_when: false
+
+    - name: Single-node | Set single_control_plane fact
+      set_fact:
+        single_control_plane: "{{ single_node_cp.stdout_lines | length == 1 }}"
+
+    - name: Single-node | Remove NoSchedule taint from the only control-plane node
+      command: >-
+        {{ kubectl }} taint node {{ kube_override_hostname | default(inventory_hostname) }}
+        node-role.kubernetes.io/control-plane- node-role.kubernetes.io/master-
+      when:
+        - single_control_plane
+        - inventory_hostname == groups['kube_control_plane'][0]
+      register: single_node_taint
+      changed_when: false
+      failed_when: false   # 污点已不存在时 kubectl 返回非零, 幂等忽略
+
+    - name: Single-node | Uncordon the only control-plane node
+      command: >-
+        {{ kubectl }} uncordon {{ kube_override_hostname | default(inventory_hostname) }}
+      when:
+        - single_control_plane
+        - inventory_hostname == groups['kube_control_plane'][0]
+      register: single_node_uncordon
+      changed_when: false
+      failed_when: false   # 已可调度时 uncordon 返回非零, 幂等忽略
+
+    - name: Single-node | Confirm the only control-plane node is schedulable
+      command: >-
+        {{ kubectl }} get node {{ kube_override_hostname | default(inventory_hostname) }}
+        -o jsonpath='{{ "{{.spec.unschedulable}}" }}'
+      when: single_control_plane
+      register: single_node_sched
+      changed_when: false
+      failed_when: false

@@ -94,7 +94,7 @@
 - name: Joining control plane node to the cluster.
   when:
     - inventory_hostname != first_kube_control_plane
-    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists
+    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists or not admin_conf_stat.stat.exists
   environment:
     PATH: "{{ bin_dir }}:{{ ansible_env.PATH }}"
   block:
