@@ -298,6 +298,13 @@ def classify(doc, exclude=None):
 
 
 def main():
+    """从 stdin 读取 lsblk JSON，向 stdout 输出设备、分类、证据三列 TSV。
+
+    输入可为裸 lsblk JSON 或含 lsblk/lvm/label_probe 的对象；可选位置参数依次为
+    排除设备名的正则、pvs 文本、lvs 文本、label 探针命中列表，后三项只补缺失字段。
+    返回 0 表示成功，1 表示排除正则非法，2 表示输入为空或 JSON 解码失败；
+    这些输入错误的诊断写入 stderr。
+    """
     exclude = None
     if len(sys.argv) > 1 and sys.argv[1]:
         try:
