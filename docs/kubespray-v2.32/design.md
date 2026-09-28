@@ -68,7 +68,7 @@ k8s 版本面(v2.32 表):支持 1.34/1.35/1.36;**1.33 不可用**;calico 默认 
 | 5 | `roles/kubernetes/client/tasks/main.yml` | kube config 目录权限 `0750 → 0777` | 保留补丁(部署容器内非 root 用户要读 kubeconfig;**必须在补丁里写明理由**) |
 | 6 | `roles/kubernetes/control-plane/tasks/kubeadm-fix-apiserver.yml` | +stat 探测 kubeconfig 是否存在(缺文件时不再硬失败) | 保留补丁 |
 | 7 | `.../kubeadm-secondary.yml` | VIP/SAN/advertise-address 相关 18 行 | **手工重写**(打 v2.32 时 6 处 hunk 冲突) |
-| 8 | `.../kubeadm-setup.yml` | `kube_vip_address` 进证书 SAN 等 14 行 | 保留补丁(dry-run 干净) |
+| 8 | `.../kubeadm-setup.yml` | SAN 检查块前加 `apiserver.crt` 存在性守卫(实测净差 +12;**证书 SAN 部分上游 v2.28.0 早就有 `sans_kube_vip_address`(纯净树第 28/48 行),不属本补丁** —— 原表述有误,2026-09-28 按实测修正) | 保留补丁(dry-run 干净) |
 | 9 | `roles/kubernetes-apps/meta/main.yml` | `kubernetes-apps/registry` role 的**顺序**调整 | 保留补丁(顺序关键:registry 的 LB VIP 依赖 metallb 先就位) |
 | 10 | `roles/kubernetes-apps/metallb/tasks/main.yml` | 4 处竞态修复:CRD `Established` 等待 + controller `rollout restart` + pools/layer2/layer3 apply 重试 | **保留补丁(核心)** |
 | 11 | `roles/kubespray_defaults/defaults/main/download.yml` | +2 行:`- k8s_cluster`(镜像下载组) | 复核后保留 |
@@ -109,6 +109,8 @@ docs/kubespray-v2.32/             # 版本专属: 本次的设计/计划/人工�
 
 逐条判定"能不能从上游文件里移出来":能移的移到我们自己的脚本/模块(补丁面越小越好)。本次已判定**不能移**的例子:metallb 的竞态修复时序在 role 内部(apply manifest 与 apply pools 之间),移出来就失去意义。判定结论写进 `cubestack-patches/README.md`。
 
+**下沉候选(本次未实施,记为后续收敛项)**:`02-client-kubeconfig-mode.patch`(kube config 目录 0750→0777)可下沉 —— 在我们的模块里于 client role 之后 `chmod`,即可从补丁层删掉这一条。实施它需要先确认"模块的 chmod 时机早于任何消费者"。
+
 ### 3.4 可重复的升级流程(SOP,与具体版本无关)
 
 > 目标:**下一次升级(v2.32 → 未来任意 tag)不需要重新发明流程**。机制写在稳定路径 `docs/kubespray-upgrade.md`,
@@ -132,7 +134,7 @@ docs/kubespray-v2.32/             # 版本专属: 本次的设计/计划/人工�
 每个 `.patch` 文件头带元数据(注释块):
 
 ```
-# patch: 04-metallb-crd-race.patch
+# patch: 06-metallb-crd-race.patch
 # 加入: 2026-09-28(随 v2.28→v2.32 升级迁移)
 # 原因: 裸金属新集群首装 metallb 的 CRD 注册竞态(Established 等待 + controller rollout restart + apply 重试)
 # 上游吸收判据: roles/kubernetes-apps/metallb/tasks/main.yml 中出现 Established 等待或 apply retries

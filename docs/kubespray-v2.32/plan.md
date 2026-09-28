@@ -115,7 +115,7 @@ git commit -m "chore(kubespray): 固化补丁层 —— 7 处上游改动导出�
 - Create: `deployments/kubespray/cubestack-patch-apply.sh`、`deployments/scripts/tools/tests/test-kubespray-patches.sh`
 
 **Interfaces:**
-- Produces: `cubestack-patch-apply.sh [--root <kubespray 树根>] {--apply|--check|--check-retired|--list}`;退出码 0=成功/全部在位, 1=有冲突或缺失;**输出三态** `APPLY/SKIP/CONFLICT`(每行一个补丁)。
+- Produces: `cubestack-patch-apply.sh [--root <kubespray 树根>] [--patches <补丁目录>] {--apply|--check|--check-retired|--list}`;退出码 0=成功/全部在位, 1=有冲突或缺失;**输出三态** `APPLY/SKIP/CONFLICT`(每行一个补丁)。`--patches` 默认 `${SELF_DIR}/cubestack-patches`(**离线回归靠它把 fixture 补丁目录指进来**, 否则测试会误打真补丁)。
 
 - [ ] **Step 1: 先写失败的测试(fixture 三态 + 退役判定)**
 
@@ -123,7 +123,7 @@ git commit -m "chore(kubespray): 固化补丁层 —— 7 处上游改动导出�
 
 ```bash
 #!/bin/bash
-# 离线回归: cubestack-patch-apply.sh 的三态与退役判定(不联网, 用 fixture 树)
+# 离线回归: cubestack-patch-apply.sh 的三态与退役判定(不联网; fixture 树 + fixture 补丁目录)
 set -uo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SELF_DIR}/../../../.." && pwd)"
@@ -132,33 +132,32 @@ PASS=0; FAIL=0
 ok(){ echo "  ok  $1"; PASS=$((PASS+1)); }
 bad(){ echo "  FAIL $1"; FAIL=$((FAIL+1)); }
 
-mk_fixture() {   # $1=目标目录; 造一个"纯净树 + 我们的补丁"的最小 fixture
-    local d="$1"; rm -rf "$d"; mkdir -p "$d/target"
+mk_fixture() {   # $1=目录: 造 {target/f.txt 纯净, patches/01-demo.patch}
+    local d="$1"; rm -rf "$d"; mkdir -p "$d/target" "$d/patches"
     printf 'line1\nline2\n' > "$d/target/f.txt"
-    mkdir -p "$d/patches"
     printf '# patch: 01-demo.patch\n# 目标: target/f.txt\n--- a/target/f.txt\n+++ b/target/f.txt\n@@ -1,2 +1,2 @@\n line1\n-line2\n+line2-changed\n' > "$d/patches/01-demo.patch"
 }
 
 # 未打 → APPLY
 mk_fixture /tmp/pt-unapplied
-out="$("$APPLY" --root /tmp/pt-unapplied --apply 2>&1)"; rc=$?
+out="$("$APPLY" --root /tmp/pt-unapplied --patches /tmp/pt-unapplied/patches --apply 2>&1)"; rc=$?
 [ "$rc" = 0 ] && grep -q 'APPLY.*01-demo' <<<"$out" && ok "未打 → APPLY, 退出 0" || bad "未打场景: rc=$rc out=$out"
 grep -q 'line2-changed' /tmp/pt-unapplied/target/f.txt && ok "内容确实变了" || bad "内容没变"
 
 # 已打 → SKIP
-out="$("$APPLY" --root /tmp/pt-unapplied --apply 2>&1)"; rc=$?
+out="$("$APPLY" --root /tmp/pt-unapplied --patches /tmp/pt-unapplied/patches --apply 2>&1)"; rc=$?
 [ "$rc" = 0 ] && grep -q 'SKIP.*01-demo' <<<"$out" && ok "已打 → SKIP(幂等)" || bad "幂等场景: rc=$rc out=$out"
 
 # 冲突 → CONFLICT + 非 0
 mk_fixture /tmp/pt-conflict
 printf 'line1\nline2-DIFFERENT\n' > /tmp/pt-conflict/target/f.txt
-out="$("$APPLY" --root /tmp/pt-conflict --apply 2>&1)"; rc=$?
+out="$("$APPLY" --root /tmp/pt-conflict --patches /tmp/pt-conflict/patches --apply 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q 'CONFLICT.*01-demo' <<<"$out" && ok "冲突 → CONFLICT + 非 0" || bad "冲突场景: rc=$rc out=$out"
 
-# 退役: 上游已等于"打过之后"的样子 → 该补丁应被列为可退休
+# 退役: 树已等于"打过之后"的样子 → 该补丁应被列为可退休
 mk_fixture /tmp/pt-retired
 printf 'line1\nline2-changed\n' > /tmp/pt-retired/target/f.txt
-out="$("$APPLY" --root /tmp/pt-retired --check-retired 2>&1)"
+out="$("$APPLY" --root /tmp/pt-retired --patches /tmp/pt-retired/patches --check-retired 2>&1)"
 grep -q 'RETIRE.*01-demo' <<<"$out" && ok "已被上游吸收 → RETIRE" || bad "退役场景: out=$out"
 
 echo "---------------------------------------------"
@@ -182,7 +181,7 @@ set -uo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${SELF_DIR}/kubespray"; PATCH_DIR="${SELF_DIR}/cubestack-patches"
 MODE="--check"
-while [ $# -gt 0 ]; do case "$1" in --root) ROOT="$2"; shift 2;; --apply|--check|--check-retired|--list) MODE="$1"; shift;; *) echo "未知参数: $1" >&2; exit 2;; esac; done
+while [ $# -gt 0 ]; do case "$1" in --root) ROOT="$2"; shift 2;; --patches) PATCH_DIR="$2"; shift 2;; --apply|--check|--check-retired|--list) MODE="$1"; shift;; *) echo "未知参数: $1" >&2; exit 2;; esac; done
 rc=0
 for p in "${PATCH_DIR}"/*.patch; do
     name="$(basename "$p")"
@@ -211,8 +210,12 @@ Run: `bash deployments/scripts/tools/tests/test-kubespray-patches.sh`
 ```bash
 cd /home/supperadm/cubestack-installer/deployments/kubespray
 bash cubestack-patch-apply.sh --check; echo "check rc=$?"     # 期望 0(7 处都在位)
-bash cubestack-patch-apply.sh --check-retired                  # 期望 7 个 KEEP
+bash cubestack-patch-apply.sh --check-retired                  # 期望 7 个 **RETIRE**
 ```
+⚠ **为什么这里是 RETIRE 而不是 KEEP**(2026-09-28 实测修正,原计划写反了):`--check-retired` 的判据是
+"这棵树已经等于`打过之后`的样子"。**我们的当前树本来就是这个样子**,所以 7 个全 RETIRE 是正确输出;
+`KEEP` 只会出现在**未打补丁的纯净树**上(那才是"上游还没吸收、补丁仍需保留"的信号)。
+⇒ 由此得出一条硬语义(已写进 T3):**`--check-retired` 只在换树后、`--apply` 之前跑才有意义**。
 - [ ] **Step 6: 提交**
 
 ```bash
@@ -237,11 +240,16 @@ git commit -m "feat(kubespray): 补丁幂等重放器(三态 + 退役判定) + �
          (失败 → 提示"本机不可达, 改用 --tree-src 由联网机取后拷入")
 4) 核验: galaxy.yml 版本 == <tag>; checksums.yml 里必须有 cluster.conf 当前 K8S_VERSION(去掉 v 前缀)
          → 没有就**停下**并提示该 tag 支持的 k8s 版本范围
-5) 换树: 删除 root/kubespray 下除 inventory/ 之外的内容(保留 inventory), rsync 新树进来,
-         排除 .github/.gitlab-ci/.gitattributes/.gitignore/.gitmodules
-6) 重放: 调 cubestack-patch-apply.sh --root <root>/kubespray --apply → 三态输出;
-         CONFLICT 即**停下**(退出 1)并打印"人工处置后, 更新对应 .patch 再重跑"
-7) 退役: cubestack-patch-apply.sh --check-retired → 打印 RETIRE 清单(人工决定删哪些)
+5) 换树: 删除 root/kubespray 下除 **`inventory/local` 与 `.venv/`** 之外的内容(⚠ 只保留 `inventory/local` ——
+   它承载本树自带的那份 inventory;`inventory/sample` 是**上游模板**(新集群种子, `cubestack-offline.sh:191-192`
+   会 `cp -rn` 它),必须随新树刷新;`.venv` 是裸机路径的 ansible 运行环境);
+   同时清掉 `contrib/offline/temp/` 这类残留;rsync 新树进来时排除 `.github/.gitlab-ci/.gitattributes/.gitignore/.gitmodules`
+6) 退休判定(**必须在重放之前**!): `cubestack-patch-apply.sh --check-retired` → 打印 RETIRE 清单
+   (人工决定删哪些)。⚠ 语义: RETIRE = "这棵树已经等于打过之后的样子"。换树后先跑它、再 `--apply`;
+   反过来(打完再跑)会得到恒 RETIRE 的假信号 —— 因为它分不清"上游吸收了"与"我们刚打的"。
+   同时在 `cubestack-patch-apply.sh` 头部补一行注释固化这条时机语义(改注释, 不改行为)。
+7) 重放: 调 cubestack-patch-apply.sh --root <root>/kubespray --apply → 三态输出;
+   CONFLICT 即**停下**(退出 1)并打印"人工处置后, 更新对应 .patch 再重跑"
 8) 打印后续人工步骤: 版本面核对(⑯)/渲染器对拍/离线缺口/回归(指向 docs/kubespray-upgrade.md §8)
 ```
 
@@ -253,10 +261,10 @@ rm -rf /tmp/up-rehearsal && mkdir -p /tmp/up-rehearsal && cp -a kubespray /tmp/u
 bash cubestack-kubespray-upgrade.sh v2.30.0 --root /tmp/up-rehearsal --tree-src /tmp/kubespray-2.30 2>&1 | tail -25
 echo "rc=$?"
 ```
-预期(与 spec §2.2 dry-run 一致): 换树成功;`APPLY` 7 处里 **5 处成功**、`CONFLICT` **2 处**(`kubeadm-secondary`、以及 `download.yml`/`cluster.yml` 中实际冲突者),脚本**停下并点名文件**;仓库内树未被触碰(`git -C /home/supperadm/cubestack-installer status --short` 只有新文件)。
+预期: 换树成功;补丁层 **7 处全部 `APPLY` 成功、`CONFLICT` 0**(v2.30 树上实测干净可重放 —— 见 spec §2.2 的 dry-run;`cluster.yml` / `ansible_version.yml` 那两处冲突**不在补丁层**:前者走 `cubestack-offline.sh` 内嵌重建,后者已作废);脚本打印后续人工步骤(`--check-retired` 结果 + 版本面核对提醒);仓库内树未被触碰(`git -C /home/supperadm/cubestack-installer status --short` 只有新文件)。
 
 - [ ] **Step 3: 二次演练(v2.31.0)+ 差异记录**
-同 Step 2 换成 `v2.31.0`(需先 `git clone --depth 1 --branch v2.31.0 … /tmp/kubespray-2.31`);把两次演练的"冲突清单/退休清单"差异写进 `docs/kubespray-upgrade.md` 的 §演练记录 —— **这就是"下次升级不用人肉记忆"的验收证据**。
+同 Step 2 换成 `v2.31.0`(纯净树已在 `/tmp/kubespray-2.31`;若缺失再 `git clone --depth 1 --branch v2.31.0 … /tmp/kubespray-2.31`);把两次演练的"APPY/RETIRE 计数 + 冲突清单"整理进**本任务的报告文件** —— `docs/kubespray-upgrade.md` 由 **T5** 创建,它会读本任务报告把 §4 演练记录一并写进去(避免 T3 先建一个半成品文档)。这份记录就是"下次升级不用人肉记忆"的验收证据。
 
 - [ ] **Step 4: 提交**
 
@@ -300,6 +308,7 @@ bash cubestack-kubespray-upgrade.sh v2.32.0 --tree-src /tmp/kubespray-2.32 2>&1 
 ```
 把 v2.32 版文件中所有 `- not kubeadm_already_run.stat.exists` 与 `- kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists` 的门,按语义改成带 `or not admin_conf_stat.stat.exists`(逐处核:v2.32 若有重构过的新写法, 以"等价语义"为准, 并在补丁元数据头里注明差异)。
 验证: `cd kubespray && bash ../cubestack-patch-apply.sh --check`(更新完 patch 后应全绿) + `ansible-playbook --syntax-check` 不需要(树不是 play 入口),改跑 `bash -n` 不适用 → **验证用 YAML 解析**:`python3 -c "import yaml,sys;yaml.safe_load(open('roles/kubernetes/control-plane/tasks/kubeadm-secondary.yml'))"`。
+**并把重写结果固化成第 8 个补丁** `cubestack-patches/08-kubeadm-secondary-join-stat.patch`(目标文件 + 元数据头,`# v2.32 冲突处置: …` 行写明与旧补丁的差异)—— 不固化的话 `--check` 会把它报成 MISSING,下次升级又得人肉重做。
 
 - [ ] **Step 4: 其余冲突逐个处置并回写 `.patch`**(每个都要在元数据头补一行 `# v2.32 冲突处置: <做了什么>`)
 
@@ -307,9 +316,9 @@ bash cubestack-kubespray-upgrade.sh v2.32.0 --tree-src /tmp/kubespray-2.32 2>&1 
 
 ```bash
 cd /home/supperadm/cubestack-installer/deployments/kubespray
-diff -rq --exclude=.git kubespray /tmp/kubespray-2.32 | grep -v '^Only in kubespray: \(inventory\|cubestack-patches\|\.venv\)' | head -20
+diff -rq --no-dereference --exclude=.git kubespray /tmp/kubespray-2.32 | grep -v '^Only in kubespray: \(inventory/local\|cubestack-patches\|\.venv\)'
 ```
-预期: 只剩我们的 7 个补丁文件 + `kubeadm-secondary.yml` 等人工项,且**没有**"只在纯净树里有"的意外删除(除 dotfile)。
+预期: 只剩我们的补丁文件与人工项(`kubeadm-secondary.yml` 等);**没有** `inventory/sample/**` 的差异(该目录已随新树刷新)、也没有符号链接假差异(树内 `inventory/local/group_vars` 是相对符号链接,`--no-dereference` 必须加)。
 
 - [ ] **Step 6: 提交**
 
@@ -325,7 +334,7 @@ git commit -m "chore(kubespray): 树升级 v2.28.0 → v2.32.0(补丁全部重�
 - Modify: `deployments/scripts/tools/check-modules.sh`(新增 ⑮;项数 14 → 15)
 
 - [ ] **Step 1: 写 `docs/kubespray-upgrade.md`**
-结构: §1 SOP(照抄 spec §3.4 的 9 步,补上每条的实际命令) / §2 历次升级记录(首条 = 本次: v2.28.0→v2.32.0、k8s 1.32.5→1.35.8、冲突与处置、踩的坑) / §3 待上游化清单(首批 metallb 4 处) / §4 演练记录(v2.30.0/v2.31.0) / §5 **回退**(旧树 tag `kubespray-v2.28.0-cubestack` 恢复 + 补丁层整层不应用 + ⚠ k8s 版本变量**不能单独回退**到 1.32:v2.32 表里没有 1.32, 回退必须连同树一起)。
+结构: §1 SOP(照抄 spec §3.4 的 9 步,补上每条的实际命令) / §2 历次升级记录(首条 = 本次: v2.28.0→v2.32.0、k8s 1.32.5→1.35.8、冲突与处置、踩的坑) / §3 待上游化清单(首批 metallb 4 处) / §4 演练记录(**取自 T3 的报告**: v2.30.0 / v2.31.0 两次靶子的 APPLY/RETIRE 计数与冲突清单) / §5 **回退**(旧树 tag `kubespray-v2.28.0-cubestack` 恢复 + 补丁层整层不应用 + ⚠ k8s 版本变量**不能单独回退**到 1.32:v2.32 表里没有 1.32, 回退必须连同树一起)。
 
 - [ ] **Step 2: check-modules 新增 ⑮(补丁在位)**
 

@@ -1,0 +1,25 @@
+# patch: 07-download-yml-k8s-cluster-group.patch
+# 目标: roles/kubespray_defaults/defaults/main/download.yml
+# 加入: 2026-09-28(随 v2.28.0 → v2.32.0 迁移)
+# 原因: dnsautoscaler / metrics_server 两个镜像的下载组补上 - k8s_cluster(原仅 kube_control_plane; 下载闸门见 roles/download/tasks/main.yml 的 group_names | intersect(download.groups));丢了则 worker 不参与这两个镜像的下载/分发, 离线(无外网)节点上对应组件起不来。
+# 上游吸收判据: 上游 roles/kubespray_defaults/defaults/main/download.yml 中 dnsautoscaler / metrics_server 的 groups 含 k8s_cluster(而非仅 kube_control_plane)。
+# 上游化: 不提(会改变上游默认下载面: 加 k8s_cluster = 全部节点都下载; 本环境为离线自持所需; 若上游引入更细的 air-gap 下载面开关再评估)。
+# ------------------------------------------------------------
+--- a/roles/kubespray_defaults/defaults/main/download.yml
++++ b/roles/kubespray_defaults/defaults/main/download.yml
+@@ -904,6 +904,7 @@
+     checksum: "{{ dnsautoscaler_digest_checksum | default(None) }}"
+     groups:
+       - kube_control_plane
++      - k8s_cluster
+ 
+   helm:
+     enabled: "{{ helm_enabled }}"
+@@ -934,6 +935,7 @@
+     checksum: "{{ metrics_server_digest_checksum | default(None) }}"
+     groups:
+       - kube_control_plane
++      - k8s_cluster
+ 
+   local_volume_provisioner:
+     enabled: "{{ local_volume_provisioner_enabled }}"
