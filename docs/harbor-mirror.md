@@ -65,7 +65,6 @@
 | `quay.io/ceph/ceph:v20.2.2` | `harbor.isuanova.com/mirrors/quay.io/ceph/ceph:v20.2.2` |
 | `registry.k8s.io/pause:3.10` | `harbor.isuanova.com/mirrors/registry.k8s.io/pause:3.10` |
 | `harbor.isuanova.com/metax/gpu-label:x` | `harbor.isuanova.com/mirrors/metax/gpu-label:x` ⟵ 同台 Harbor, 去掉域名前缀 |
-| `harbor.isuanova.com/suanova/cubepilot-api:latest` | `harbor.isuanova.com/mirrors/suanova/cubepilot-api:latest` |
 
 **为什么要保留注册域**(而不是把 `docker.io/rook/ceph` 压成 `rook/ceph`):
 
@@ -79,15 +78,15 @@
 
 ### ⚠ 特例: "上游就是本台 Harbor"的组不镜像
 
-`metax-gpu`(12 个)与 `cubepilot`(4 个)的**上游就是这台 Harbor 本身**
-(`harbor.isuanova.com/metax/` 与 `/suanova/` 项目), 属于**同台复制**。
-它们的部署模块现在就直接从那些项目拉取 —— 也就是说, **"集群不访公网"这个目标对它们已经达成**,
-不需要任何改动。
+`metax-gpu`(11 个)的**上游就是这台 Harbor 本身** (`harbor.isuanova.com/metax/` 项目),
+属于**同台复制**。它的部署模块现在就直接从那个项目拉取 —— 也就是说,
+**"集群不访公网"这个目标对它已经达成**, 不需要任何改动。
 
 再复制一份到 `mirrors/` 只会:
 
-- 多占一份存储(实测 **8.4 GB**, 其中 `maca` 5.3 GB、`driver-image` 1.15 GB);
-- 每次升级 metax / cubepilot 版本都要重跑一次复制;
+- 多占一份存储(2026-09-18 实测 **8.4 GB**, 其中 `maca` 5.3 GB、`driver-image` 1.15 GB ——
+  当时该组 12 个, 现 11 个, 数字为那次实测留证);
+- 每次升级 metax 版本都要重跑一次复制;
 - 若走 CI(GitHub runner)还要把 GB 级镜像先下载到 runner 再传回同一台 Harbor, 纯浪费带宽。
 
 因此**默认跳过**。判据是**推导**出来的(该 ref 的注册域 == `HARBOR_MIRROR_REGISTRY`),
@@ -97,12 +96,12 @@
 真要那份副本:
 
 ```bash
-./harbor-sync-images.sh --include-same-harbor --group metax-gpu,cubepilot
+./harbor-sync-images.sh --include-same-harbor --group metax-gpu
 ```
 
-> 它们仍**列在清单里** —— 清单同时承担"本仓库用到哪些镜像"的登记职责,
-> 只是不会被镜像到 `mirrors/`。`check-image-manifest.sh --harbor` 同样跳过它们,
-> 否则每次漂移检查都会把 16 个"永远不该出现"的镜像报成缺失, 噪声淹没真问题。
+> 它仍**列在清单里** —— 清单同时承担"本仓库用到哪些镜像"的登记职责,
+> 只是不会被镜像到 `mirrors/`。`check-image-manifest.sh --harbor` 同样跳过它,
+> 否则每次漂移检查都会把 11 个"永远不该出现"的镜像报成缺失, 噪声淹没真问题。
 
 ---
 
@@ -296,12 +295,26 @@ sudo ./deploy-cluster.sh --steps verify_ceph
 | `35324836924` | push(`--preserve-digests`) | ✅ 仍有 1 次重传(= 用新旗标重新落地的那一次, **属预期**) |
 | `35325640510` | push | ✅ **新同步 0 个, 全部 47 个 digest 未变跳过** ⇒ 幂等达成 |
 
-最终态(用 `check-image-manifest.sh --harbor` 复核):
+当时的最终态(用 `check-image-manifest.sh --harbor` 复核):
 
 ```
 ✅ Harbor 已含清单内全部应镜像的 47 个镜像(无漂移)
    已跳过 16 个"本就在本台 Harbor 上"的镜像(metax/cubepilot; 预期不镜像)
 ```
+
+> ⚠ 上表是当时的 CI 实测记录(Run ID 可查), 其中"47 / 16"对应当次运行时的清单规模;
+> 清单后续有增减(组件上架/下架), 当前值以实际运行输出为准。
+
+清单现状(2026-09-28 现场重跑 `check-image-manifest.sh --harbor` 复核; 与上表那些 CI run 记录是两回事):
+
+```
+✅ Harbor 已含清单内全部应镜像的 35 个镜像(无漂移)
+   已跳过 11 个"本就在本台 Harbor 上"的镜像(metax; 预期不镜像)
+```
+
+> ⚠ 演变: 2026-09-18 是 63 条 = 应镜像 47 + 同台跳过 16(那 16 里含 CubePilot); 之后
+> 16→12(移除 CubePilot)、12→11(移除 mx-exporter), 现在是 **46 条 = 应镜像 35 + 同台跳过 11**。
+> **口径冲突时以现场重跑为准** —— 就是上面那条命令。
 
 **关键旁证**: `registry.k8s.io/pause:3.10` 从本机同步**失败**(该域名会 302 到
 `europe-west3-docker.pkg.dev`, 本机不可达), 但 GitHub runner **成功了** ——

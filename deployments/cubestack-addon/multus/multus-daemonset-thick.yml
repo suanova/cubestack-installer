@@ -166,13 +166,18 @@ spec:
         - name: kube-multus
           image: ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
           command: [ "/usr/src/multus-cni/bin/multus-daemon" ]
+          # ★ 2026-09-24 偏离上游(quickstart 原文是 requests=limits=cpu 100m/memory 50Mi):
+          #   实机出现 **OOMKilled → CrashLoopBackOff**(50Mi 是硬上限, multus-daemon 的内存随
+          #   节点上 pod 数与网络附件数增长, 默认值太紧); 同时 100m 的 **CPU 上限**在 CNI ADD
+          #   突发时会被限流, 拖慢 pod 创建。故: 内存 requests 128Mi / limits 512Mi,
+          #   CPU 上限放宽到 500m。偏离记录见同目录 CUBESTACK.md("与上游的偏离")。
           resources:
             requests:
               cpu: "100m"
-              memory: "50Mi"
+              memory: "128Mi"
             limits:
-              cpu: "100m"
-              memory: "50Mi"
+              cpu: "500m"
+              memory: "512Mi"
           securityContext:
             privileged: true
           terminationMessagePolicy: FallbackToLogsOnError

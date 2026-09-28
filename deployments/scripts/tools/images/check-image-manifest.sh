@@ -137,7 +137,9 @@ if [ "${DO_KUBESPRAY}" = "1" ]; then
         warn "⑤ 找不到 ${TRIM}, 跳过交叉核对"
     else
         # 取 trim 脚本里的默认 PRELOAD_IMAGE_PATTERNS(该行形如 PRELOAD_IMAGE_PATTERNS="${VAR:-...默认...}")
-        PATS="$(grep -m1 '^PRELOAD_IMAGE_PATTERNS=' "${TRIM}" | sed 's/.*:-//; s/}".*//')"
+        # `|| true`: 该行不在 trim 脚本里时 grep 无匹配 → set -e+pipefail 会让这个校验脚本
+        # 崩掉; 下面正是靠 `[ -z "${PATS}" ]` 走"解析不出, 跳过"分支。
+        PATS="$(grep -m1 '^PRELOAD_IMAGE_PATTERNS=' "${TRIM}" | sed 's/.*:-//; s/}".*//' || true)"
         if [ -z "${PATS}" ]; then
             warn "⑤ 未能从 trim-offline-files.sh 解析出 PRELOAD_IMAGE_PATTERNS, 跳过"
         else
@@ -184,8 +186,10 @@ if [ "${DO_HARBOR}" = "1" ]; then
         N_DRIFT=0; N_SAME=0
         while IFS=$'\t' read -r g r n; do
             # "上游就是本台 Harbor"的镜像**不镜像到 mirrors/**(预期行为, 见 harbor-sync-images.sh):
-            # metax / cubepilot 本就在本台 Harbor 上, 部署模块直接从其原项目拉取。
-            # 不排除的话, 每次漂移检查都会把 16 个"永远不该出现"的镜像报成缺失, 噪声淹没真问题。
+            # metax 本就在本台 Harbor 上, 部署模块直接从其原项目拉取。
+            # 不排除的话, 每次漂移检查都会把 11 个"永远不该出现"的镜像报成缺失, 噪声淹没真问题。
+            # ⚠ 这个个数会随组件上架/下架增减(2026-09-24 移除 mx-exporter 时 12→11); 运行时的
+            #   真实个数见下面 N_SAME 的输出, 以那个为准。
             case "${r}" in
                 "${HARBOR_HOST}"/*) N_SAME=$((N_SAME+1)); continue ;;
             esac
@@ -208,7 +212,7 @@ if [ "${DO_HARBOR}" = "1" ]; then
         done < "${ENTRIES}"
         if [ "${N_DRIFT}" = "0" ]; then
             ok "⑥ Harbor 已含清单内全部应镜像的 $((${TOTAL}-${N_SAME})) 个镜像(无漂移)"
-            [ "${N_SAME}" -gt 0 ] && say "   已跳过 ${N_SAME} 个\"本就在本台 Harbor 上\"的镜像(metax/cubepilot; 预期不镜像)"
+            [ "${N_SAME}" -gt 0 ] && say "   已跳过 ${N_SAME} 个\"本就在本台 Harbor 上\"的镜像(metax; 预期不镜像)"
         else
             warn "⑥ Harbor 缺 ${N_DRIFT}/$((${TOTAL}-${N_SAME})) 个应镜像的镜像(如上)。执行 harbor-sync-images.sh 补齐"
             [ "${N_SAME}" -gt 0 ] && say "   另已跳过 ${N_SAME} 个\"本就在本台 Harbor 上\"的镜像(预期不镜像)"

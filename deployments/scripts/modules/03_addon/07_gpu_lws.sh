@@ -100,8 +100,10 @@ if [ "${LWS_INSTALL_MODE}" = "helm" ] && [ "${LWS_CERT_MODE}" = "cert-manager" ]
 fi
 # 宿主机 /etc/hosts 更新(registry 域名 → VIP), 与 gpu_operator 一致
 # 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)
+# API_DOMAIN 的解析地址: kube-vip 已绑 → VIP, 未绑 → 首个 master(api_entry_ip 说明见 lib-common)
+API_ENTRY_IP="$(api_entry_ip)" || exit 1
 ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
-ensure_hosts_entry "${API_IP}" "${API_DOMAIN}"
+ensure_hosts_entry "${API_ENTRY_IP}" "${API_DOMAIN}"
 grep -qE "^${REGISTRY_IP}[[:space:]]+${REGISTRY_DOMAIN}" /etc/hosts 2>/dev/null \
     || warn "无法写入宿主机 /etc/hosts(非 root?), ${REGISTRY_DOMAIN} 可能无法从宿主按域名访问"
 wait_registry_ready "http://${REGISTRY_DIRECT}/v2/" \
@@ -110,8 +112,8 @@ SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
     || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
 # helm 需要从宿主连 API Server: 复用 lib-common 的 sync_kubeconfig(server→API_DOMAIN + 宿主机 DNAT)
 sync_kubeconfig \
-    && ok "宿主机 ~/.kube/config 已同步(admin.conf → API ${API_DOMAIN}→${API_IP})" \
-    || { err "宿主机无法访问集群(admin.conf 下载/同步失败; 检查 ${FIRST_MASTER} 的 /etc/kubernetes/admin.conf, 以及 ${API_DOMAIN}→${API_IP} 解析)"; exit 1; }
+    && ok "宿主机 ~/.kube/config 已同步(admin.conf → API ${API_DOMAIN}→${API_ENTRY_IP})" \
+    || { err "宿主机无法访问集群(admin.conf 下载/同步失败; 检查 ${FIRST_MASTER} 的 /etc/kubernetes/admin.conf, 以及 ${API_DOMAIN}→${API_ENTRY_IP} 解析)"; exit 1; }
 ok "前置检查通过(chart_source=${LWS_CHART_SOURCE}, cert_mode=${LWS_CERT_MODE}, version=${LWS_CHART_VERSION})"
 
 # ---------------- 1. 推送 LWS controller 镜像到集群内置 registry(本地源优先, 离线安装) ----------------
@@ -284,7 +286,9 @@ else
     if [ "${INSTALL_CRD}" = "true" ] && [ "${LWS_CHART_SOURCE}" = "dir" ] && [ -d "${LWS_CHART_DIR}/crds" ]; then
         say "  用 kubectl 逐文件安装 CRD(${LWS_CHART_DIR}/crds) ..."
         for _crd in "${LWS_CHART_DIR}"/crds/*.yaml; do
-            _name="$(grep -E '^  name: ' "${_crd}" | head -1 | awk '{print $2}')"
+            # `|| true`: CRD 里没有 `  name: ` 行时 grep 无匹配, set -e+pipefail 会让这条赋值带走
+            # 整个模块(下一行本就按 `_name` 可空处理)。
+            _name="$(grep -E '^  name: ' "${_crd}" | head -1 | awk '{print $2}' || true)"
             # 先删旧 CRD 再 apply: 同名 CRD 内容变更时 kubectl apply 无法直接替换(结构冲突), 删后重建保证幂等
             [ -n "${_name}" ] && SSH "${K} delete crd ${_name} --ignore-not-found >/dev/null 2>&1" || true
             if cat "${_crd}" | SSH "${K} apply -f -" >/dev/null 2>&1; then

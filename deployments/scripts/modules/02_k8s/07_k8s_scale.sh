@@ -212,7 +212,10 @@ ok "环境就绪(新节点可 SSH, 时间已同步)"
 #   拉 registry.cubestack.io 镜像 ImagePullBackOff)。与 deploy-registry.sh [2/4] 同款 hosts.toml。
 if [ -n "${NEW_NODE_HOSTS}" ] && [ -n "${API_IP:-}" ]; then
     say "[1.5/3] 新节点 /etc/hosts + registry certs.d 同步(${API_DOMAIN} / ${REGISTRY_DOMAIN}) ..."
+    # API_DOMAIN 的解析地址: kube-vip 已绑 → VIP, 未绑 → 首个 master(api_entry_ip 说明见 lib-common)
+    API_ENTRY_IP="$(api_entry_ip)" || exit 1
     # nodeport 模式: 节点侧经 NodePort 直连首个 master; 否则经 REGISTRY_DOMAIN:REGISTRY_PORT(VIP)
+    # ⚠ mirror 这里仍然用 API_IP(节点 IP 语义) —— VIP 不代理 NodePort, 换成 VIP 会让新节点拉不到镜像
     _np_mirror="http://${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
     if [ "${REGISTRY_SERVICE_TYPE:-loadbalancer}" = "nodeport" ] || [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ]; then
         _np_mirror="http://${API_IP}:${REGISTRY_NODEPORT:-31148}"
@@ -224,7 +227,7 @@ if [ -n "${NEW_NODE_HOSTS}" ] && [ -n "${API_IP:-}" ]; then
 set -e
 _rd1="\$(echo '${API_DOMAIN}' | sed 's/\\./\\\\\\./g')"
 sed -i -E "/[[:space:]]\${_rd1}([[:space:]]|\$)/d" /etc/hosts 2>/dev/null || true
-echo "${API_IP} ${API_DOMAIN}" >> /etc/hosts
+echo "${API_ENTRY_IP} ${API_DOMAIN}" >> /etc/hosts
 _rd2="\$(echo '${REGISTRY_DOMAIN}' | sed 's/\\./\\\\\\./g')"
 sed -i -E "/[[:space:]]\${_rd2}([[:space:]]|\$)/d" /etc/hosts 2>/dev/null || true
 echo "${REGISTRY_IP:-${API_IP}} ${REGISTRY_DOMAIN}" >> /etc/hosts

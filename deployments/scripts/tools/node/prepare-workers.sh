@@ -34,9 +34,11 @@ SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/n
 [ -f "${SSH_KEY}" ] || { err "SSH 密钥不存在: ${SSH_KEY}, 先运行 gen-ssh-key.sh"; exit 1; }
 
 # 宿主机解析块(与 sync-hosts.sh 一致)
-# API_IP / API_DOMAIN 由 lib-common load_config 统一提供(从 cluster.conf 派生), 不再本地设置
+# API_DOMAIN 的解析地址 = api_entry_ip()(kube-vip 已绑 → VIP, 未绑 → 首个 master),
+# 不是 API_IP(那是"能通 NodePort 的节点 IP"语义, 见 lib-common 该函数说明)。
+API_ENTRY_IP="$(api_entry_ip)" || exit 1
 HOSTS_BLOCK="# >>> cubestack-cluster
-${API_IP}          ${API_DOMAIN}"
+${API_ENTRY_IP}          ${API_DOMAIN}"
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue
     node_parse "${line}"
@@ -65,7 +67,10 @@ for line in "${NODES[@]:-}"; do
         PWD="${NODE_PW:-}"
         [ -n "${PWD}" ] || { warn "免密失败且无密码,跳过 ${NODE_HOSTNAME}"; continue; }
         say "注入公钥(密码认证 ${NODE_USER}@${NODE_IP})..."
-        PUBKEY="$(sudo cat /root/.ssh/id_rsa.pub 2>/dev/null)"
+        # `|| true` + 空值护栏: 本机没有 root 公钥时 cat 非 0 → set -e 结束整个脚本(以前是
+        # 静默死), 而现在会明确告知"没公钥可选、跳过这台"。
+        PUBKEY="$(sudo cat /root/.ssh/id_rsa.pub 2>/dev/null || true)"
+        [ -n "${PUBKEY}" ] || { warn "本机 /root/.ssh/id_rsa.pub 不存在, 无法注入公钥, 跳过 ${NODE_HOSTNAME}"; continue; }
         SSHPASS="${PWD}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             -o ConnectTimeout=10 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
             "${NODE_USER}@${NODE_IP}" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '${PUBKEY}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" 2>/dev/null \
@@ -75,7 +80,8 @@ for line in "${NODES[@]:-}"; do
     # 1b. 确保 cubestack_k8s 公钥在 authorized_keys(kubespray 统一用此密钥连接)
     #     先删除旧的 cubestack-cluster 行(grep -F 会因注释误判存在), 再追加正确公钥
     say "注入 cubestack_k8s 公钥(幂等)..."
-    CSPUBKEY="$(cat "${SSH_KEY_DIR}/${SSH_KEY_NAME}.pub" 2>/dev/null)"
+    CSPUBKEY="$(cat "${SSH_KEY_DIR}/${SSH_KEY_NAME}.pub" 2>/dev/null || true)"
+    [ -n "${CSPUBKEY}" ] || { err "本机公钥 ${SSH_KEY_DIR}/${SSH_KEY_NAME}.pub 读不到(先跑 gen-ssh-key/vm_sshkey)"; exit 1; }
     ${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" \
         "sed -i '/cubestack-cluster/d' ~/.ssh/authorized_keys 2>/dev/null; echo '${CSPUBKEY}' >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys" 2>/dev/null \
         && ok "cubestack_k8s 公钥已就绪" || warn "cubestack_k8s 公钥注入失败"

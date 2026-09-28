@@ -149,7 +149,8 @@ else
 fi
 
 if [ -z "${DNS_SERVERS:-}" ]; then
-    DNS_SERVERS="$(awk '/^nameserver/ && !s[$2]++ {print $2}' /etc/resolv.conf 2>/dev/null | head -3 | tr '\n' ' ' | sed 's/ *$//')"
+    # `|| true`: /etc/resolv.conf 读不到时 awk 非 0 → 赋值非 0 → set -e 结束(下一行本就按空处理)
+    DNS_SERVERS="$(awk '/^nameserver/ && !s[$2]++ {print $2}' /etc/resolv.conf 2>/dev/null | head -3 | tr '\n' ' ' | sed 's/ *$//' || true)"
     [ -z "${DNS_SERVERS}" ] && DNS_SERVERS="${GATEWAY} 8.8.8.8"
 fi
 
