@@ -87,3 +87,5 @@ deployments/kubespray/kubespray/.gitmodules
 # 部署引擎在宿主机生成的临时拷贝(按 ssh 目标命名)
 /deployments/*@*/
 cluster.conf.backup
+# Claude Code 本机权限白名单(含本机路径/命令, 不入库)
+.claude/settings.local.json

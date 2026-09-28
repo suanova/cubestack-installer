@@ -14,6 +14,8 @@
 #   ⑨ tools/ 下全部脚本 bash -n 通过
 #   ⑩ 安装 helm chart 的模块必须有 vendored 离线副本
 #   ⑪ kube-vip: 单一写入者契约(kube_vip_enabled 恒 false)+ 启用时取值自洽(address / 不与 MetalLB 抢地址)
+#   ⑬ API 入口: all.yml 本地代理语义自洽(localhost: true ⇒ loadbalancer_apiserver 块必须被注释)
+#   ⑭ 离线预加载: PRELOAD_IMAGE_PATTERNS 四处副本逐字节一致(漂移会被备料静默 trim 掉)
 # 用法: bash check-modules.sh           # 校验全部模块(只读, 无需 root)
 #       bash check-modules.sh --quiet   # 只输出违规项
 # 退出码: 0=全部通过; 1=存在违规(列出清单)
@@ -38,7 +40,7 @@ ck_fail() { bad "$*"; FAIL=1; }
 say "==== 模块静态校验(${MODULES_DIR}) ===="
 
 # ---------- ① bash -n 语法 ----------
-say "[1/12] bash -n 语法检查 ..."
+say "[1/14] bash -n 语法检查 ..."
 SYNTAX_FAIL=0
 while IFS= read -r -d '' f; do
     bash -n "$f" 2>/dev/null || { bad "语法错误: ${f#$MODULES_DIR/}"; SYNTAX_FAIL=1; FAIL=1; }
@@ -50,7 +52,7 @@ meta() { sed -nE "s/^#[[:space:]]*${2}:[[:space:]]*(.*)$/\1/p" "$1" | head -1; }
 phase_dir() { case "$(basename "$(dirname "$1")")" in
     01_env) echo "env";; 02_k8s) echo "k8s";; 03_addon) echo "addon";; *) echo "?";; esac; }
 
-say "[2/12] 头部元数据齐全性 ..."
+say "[2/14] 头部元数据齐全性 ..."
 declare -A KEYS=()
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -68,10 +70,10 @@ while IFS= read -r -d '' f; do
 done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] && ok "元数据齐全"
 
-say "[3/12] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
+say "[3/14] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
 [ "${FAIL}" = "0" ] || true
 
-say "[4/12] PHASE 合法性 + 目录一致性 ..."
+say "[4/14] PHASE 合法性 + 目录一致性 ..."
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
     ph="$(meta "$f" PHASE)"
@@ -81,7 +83,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] || true
 
 # ---------- ⑤ REQUIRES 引用 + 全量拓扑 ----------
-say "[5/12] REQUIRES 引用存在性 + 全量无环 ..."
+say "[5/14] REQUIRES 引用存在性 + 全量无环 ..."
 REQ_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -121,7 +123,7 @@ else
 fi
 
 # ---------- ⑥ init_remote_kubectl 使用检查 ----------
-say "[6/12] 远端 kubectl 初始化(K/SSH)调用检查 ..."
+say "[6/14] 远端 kubectl 初始化(K/SSH)调用检查 ..."
 INIT_MISS=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -135,7 +137,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${INIT_MISS}" = "0" ] && ok "使用 K/SSH 的模块均已调用 init_remote_kubectl"
 
 # ---------- ⑦ TOGGLE 与 cluster.conf.example 一致性 ----------
-say "[7/12] TOGGLE 变量在 cluster.conf.example 声明 ..."
+say "[7/14] TOGGLE 变量在 cluster.conf.example 声明 ..."
 if [ -f "${CONF_EXAMPLE}" ]; then
     TOG_MISS=0
     while IFS= read -r -d '' f; do
@@ -152,7 +154,7 @@ else
 fi
 
 # ---------- ⑧ 文件序号与目录 ----------
-say "[8/12] 文件名序号规范(NN_ 前缀) ..."
+say "[8/14] 文件名序号规范(NN_ 前缀) ..."
 NUM_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -167,7 +169,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 # ---------- ⑨ tools/ 工具脚本语法检查 ----------
 # 模块外的部署工具(tools/**/*.sh: ceph-backup/deploy-registry/... )同样参与部署,
 # 漏检会在运行期炸(历史: registry 就绪等待 K unbound 崩溃)。
-say "[9/12] tools/ 工具脚本语法检查 ..."
+say "[9/14] tools/ 工具脚本语法检查 ..."
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 T_FAIL=0
 while IFS= read -r -d '' f; do
@@ -182,7 +184,7 @@ done < <(find "${TOOLS_DIR}" -name '*.sh' -print0)
 # 为什么要有这一条: 曾有模块**写了**"私服拉取失败就回退本地 chart",
 # 但仓库里压根没有那份文件 —— 私服一抖动, 回退就是空转, 回退代码形同虚设。
 # 光靠文档挡不住这种缺失(写的时候都以为回退能兜住), 所以放进静态校验。
-say "[10/12] helm chart 离线副本检查 ..."
+say "[10/14] helm chart 离线副本检查 ..."
 ADDON_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/cubestack-addon"
 CHART_FAIL=0; CHART_WARN=0; CHART_OKN=0
 # 判据: **行首就是 helm 命令** —— 只排除注释不够, 变量/err 字符串里提到
@@ -225,13 +227,13 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${CHART_FAIL}" = "0" ] && ok "安装 chart 的模块均有 vendored 离线副本(${CHART_OKN} 个模块通过)"
 
 # ---------- ⑪ kube-vip 控制平面 VIP(与 kubespray inventory 的一致性) ----------
-say "[11/12] kube-vip 控制平面 VIP 配置检查 ..."
+say "[11/14] kube-vip 控制平面 VIP 配置检查 ..."
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 KV_ADDONS="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/k8s_cluster/addons.yml"
 KV_ALL_YML="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/all/all.yml"
 KV_CONF="${REPO_ROOT}/deployments/config/cluster.conf"
 [ -f "${KV_CONF}" ] || KV_CONF="${CONF_EXAMPLE}"
-# 在**子 shell 内**求值 cluster.conf, 只回传需要的三个值。理由:
+# 在**子 shell 内**求值 cluster.conf, 只回传需要的五个值。理由:
 #   ① cluster.conf 依赖 REPO_ROOT 等多个变量, 在当前 set -u 下直接 source 会中断;
 #      子 shell 里 set +u 给它宽松环境, 且不污染本脚本状态(本脚本有 FAIL 等同名变量)
 #   ② 用 shell 自己解析(而非正则抠字符串), 才能正确处理 "${VAR:-default}" / 字面量 / 注释
@@ -240,13 +242,26 @@ KV_SNAPSHOT="$(
     REPO_ROOT="${REPO_ROOT}" SCRIPT_DIR="${SCRIPT_DIR}" CONF_EXAMPLE="${CONF_EXAMPLE}"
     # shellcheck disable=SC1090
     . "${KV_CONF}" >/dev/null 2>&1 || true
-    printf '%s\n%s\n%s\n' \
-        "${KUBE_VIP_ENABLED:-false}" "${K8S_API_VIP:-}" "${METALLB_POOL:-}"
+    printf '%s\n%s\n%s\n%s\n%s\n' \
+        "${KUBE_VIP_ENABLED:-false}" "${K8S_API_VIP:-}" "${METALLB_POOL:-}" \
+        "${API_LOCAL_LB_ENABLED:-}" "${KUBE_VIP_LOCAL_PROXY:-false}"
 )"
 KUBE_VIP_ENABLED="$(printf '%s' "${KV_SNAPSHOT}" | sed -n 1p)"
 K8S_API_VIP="$(printf '%s' "${KV_SNAPSHOT}" | sed -n 2p)"
 METALLB_POOL="$(printf '%s' "${KV_SNAPSHOT}" | sed -n 3p)"
+API_LOCAL_LB_RAW="$(printf '%s' "${KV_SNAPSHOT}" | sed -n 4p)"
+KUBE_VIP_LOCAL_PROXY_RAW="$(printf '%s' "${KV_SNAPSHOT}" | sed -n 5p)"
 unset KV_SNAPSHOT
+
+# 本地代理是否启用 —— 与 lib-common#api_local_lb_enabled 同语义:
+#   显式 API_LOCAL_LB_ENABLED 优先; 为空则回退旧别名 KUBE_VIP_LOCAL_PROXY。
+# (本脚本不 source lib-common, 只能就地复刻; 两者若漂移, 本项判据就会与部署行为脱节)
+case "${API_LOCAL_LB_RAW}" in
+    '')            case "${KUBE_VIP_LOCAL_PROXY_RAW}" in 1|true|yes|on) _LOCAL_LB=1 ;; *) _LOCAL_LB=0 ;; esac ;;
+    1|true|yes|on) _LOCAL_LB=1 ;;
+    *)             _LOCAL_LB=0 ;;
+esac
+_LOCAL_LB_TXT="关闭"; [ "${_LOCAL_LB}" = "1" ] && _LOCAL_LB_TXT="开启"
 
 # ⑪-A 单一写入者契约 —— **与 KUBE_VIP_ENABLED 无关, 恒成立**
 #   addons.yml 的 kube_vip_enabled 控制的是"kubespray 要不要写这个静态 Pod"; 而静态 Pod 归
@@ -342,7 +357,7 @@ fi
 # 判错一类盘就是毁一块业务盘。它们的判定分支(整盘 LVM PV、未激活 VG、混合盘、nbd…)
 # 在普通 fixture 里造不出来、在真机上又不敢试 —— 所以用 stub ssh + lsblk fixture 驱动真实
 # 脚本, 把"选哪些盘 / 拒哪些盘 / 远端载荷"全断言一遍。用例已做过变异验证(故意改坏判定会红)。
-say "[12/12] ceph 磁盘链路回归测试(离线 stub) ..."
+say "[12/14] ceph 磁盘链路回归测试(离线 stub) ..."
 CEPH_TEST_SH="${SCRIPT_DIR}/tests/ceph-disk-tests.sh"
 if [ -f "${CEPH_TEST_SH}" ]; then
     if CEPH_TEST_OUT="$(bash "${CEPH_TEST_SH}" 2>&1)"; then
@@ -355,6 +370,123 @@ if [ -f "${CEPH_TEST_SH}" ]; then
 else
     warn "  跳过(未找到 ${CEPH_TEST_SH})"
 fi
+
+# ---------- ⑬ API 入口: 本地代理语义与 all.yml 的自洽 ----------
+# 背景: kubespray 的 kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支
+#   **优先于** localhost 分支 —— 只要 all.yml 里还有**未注释**的 loadbalancer_apiserver 块,
+#   kubelet 就仍走 <域名>:6443, 本地代理(nginx-proxy 静态 Pod)装了也没有流量 = **静默假修复**。
+# 判据(裁定 R11): 看 all.yml **自身两个字段是否自洽**, 而不是"配置开关开了就必须注释"。
+#   这两个字段由 tools/k8s/sync-kubespray-config.sh **同一次写入**成对落盘:
+#     本地代理开 → loadbalancer_apiserver_localhost: true  + 块被注释
+#     本地代理关 → loadbalancer_apiserver_localhost: false + 块取消注释
+#   所以:
+#     localhost: true  ⇒ 块必须处于注释态; 否则**真违规**(kubespray 按本地代理装了, 却仍走域名单点)
+#     localhost ≠ true ⇒ 属"尚未同步到本地代理语义"(纯 checkout / 开发机的常态) —— 只提示跳过
+#   为什么不用配置开关当门: 本地工作副本还没跑过 sync, all.yml 仍是旧形态, 用开关当门会在
+#   干净仓库上必然误报(⑪ 已因同一根因提示着, 再加一条只是噪音)。开关值仅在诊断信息里出现。
+say "[13/14] API 入口: 本地代理语义与 all.yml 一致性 ..."
+API_HA_BAD=0
+if [ ! -f "${KV_ALL_YML}" ]; then
+    warn "  未找到 ${KV_ALL_YML}, 跳过 ⑬(未生成 inventory?)"
+else
+    # 与 ⑪ 读的是同一个文件(KV_ALL_YML 在上方已推导), 不重复定义路径
+    lb_localhost="$(awk -F': *' '/^loadbalancer_apiserver_localhost:/{print $2; exit}' "${KV_ALL_YML}" | tr -d '[:space:]')"
+    if [ "${lb_localhost}" = "true" ]; then
+        if grep -qE '^loadbalancer_apiserver:[[:space:]]*$' "${KV_ALL_YML}"; then
+            ck_fail "all.yml 自相矛盾: loadbalancer_apiserver_localhost=true 但 loadbalancer_apiserver 块未注释" \
+                "      → kubespray 走域名单点分支, 节点本地代理形同虚设(静默假修复; 配置开关 API_LOCAL_LB_ENABLED=${_LOCAL_LB_TXT})" \
+                "      → 修法: 重跑 tools/k8s/sync-kubespray-config.sh(它会按开关成对改写这两个字段)"
+            API_HA_BAD=1
+        else
+            ok "  ⑬ all.yml 本地代理语义自洽(localhost=true 且 loadbalancer_apiserver 块已注释)"
+        fi
+    else
+        if [ "${_LOCAL_LB}" = "1" ]; then
+            say "  all.yml 的 loadbalancer_apiserver_localhost≠true(现值: ${lb_localhost:-<未设置>}) —— 尚未同步到本地代理语义, 跳过 ⑬"
+        else
+            say "  loadbalancer_apiserver_localhost≠true 且本地代理开关=${_LOCAL_LB_TXT} —— 跳过 ⑬(节点走 loadbalancer_apiserver 块的回退形态)"
+        fi
+    fi
+fi
+
+# ---------- ⑭ 离线预加载: PRELOAD_IMAGE_PATTERNS 四处副本一致性(裁定 R6) ----------
+# 不变量(Global Constraints): 同一份模式串必须在**四处逐字节一致** ——
+#   ① deployments/config/cluster.conf                             本地部署配置(未纳入 git, 含密码)
+#   ② deployments/config/cluster.conf.example                     模板(随 git 分发; CI 上唯一在场的那份)
+#   ③ deployments/scripts/tools/offline/trim-offline-files.sh:41  备料时**真正执行** trim 用的默认值
+#   ④ deployments/kubespray/cubestack-offline.sh               standalone 直跑预加载脚本时的内置兜底
+#      (该文件里有两条赋值: 上面那条是环境变量透传, 底下 elif 分支里的才是内置默认模式串 ——
+#       断言取后者, 见 _preload_patterns 的说明)
+# 为什么必须有这一条: 既有 CI 只覆盖「trim ↔ images.manifest」一对(check-image-manifest.sh ⑤),
+#   漂移若只发生在 ①/②, CI 照样通过 → 联网机备料后镜像**仍被静默 trim 掉**(装了却没有镜像)。
+# 比较的是**模式串本身**(各处变量名可能不同), 不是整行; 引号/行尾注释等写法差异先归一化掉。
+# 注: 第 ④ 份曾长期陈旧(缺 lws_manager / library_nginx), 2026-09-28 Task 7 已补齐并与前三分逐字节相同,
+#     故自本轮起纳入断言(此前注释写的"有意不纳入"已过期)。
+say "[14/14] PRELOAD_IMAGE_PATTERNS 四处副本一致性 ..."
+
+# 取某个文件里 PRELOAD_IMAGE_PATTERNS 的**模式串本身**(取不到时输出空串, 由调用方判存在性)。
+# 兼容三种写法: PRELOAD_IMAGE_PATTERNS="${VAR:-<串>}"(本仓库四处均如此) / "<串>" / <串>
+# ⚠ 一个文件里可能有**多条**赋值行: cubestack-offline.sh 上面那条是"环境变量透传"
+#   (PRELOAD_IMAGE_PATTERNS="${CUBESTACK_PRELOAD_IMAGE_PATTERNS}"), elif 分支里那条才是内置默认模式串。
+#   断言要的是后者 —— 故逐条扫描并**跳过解不出字面量的 ${...} 引用行**(只取 -m1 会拿到透传行 → 假红)。
+_preload_patterns() {
+    local line v
+    while IFS= read -r line; do
+        v="${line#*=}"                               # 去键名
+        v="${v%%[[:space:]]#*}"                      # 去行尾注释(模式串里不含 ' #')
+        v="${v%"${v##*[![:space:]]}"}"               # 去尾随空白
+        v="${v#\"}"; v="${v%\"}"                     # 去包裹引号
+        case "${v}" in '${'*:-*) v="${v#*:-}"; v="${v%\}}" ;; esac   # 去 ${VAR:- ... } 包装
+        case "${v}" in '${'*) continue ;; esac       # 仍是 ${...} 引用(纯透传行) → 解不出, 看下一条
+        printf '%s' "${v}"; return 0
+    done < <(grep '^[[:space:]]*PRELOAD_IMAGE_PATTERNS=' "$1" 2>/dev/null || true)
+    return 0
+}
+
+PRELOAD_BAD=0; PRELOAD_N=0
+PRELOAD_PATHS=(
+    "${REPO_ROOT}/deployments/config/cluster.conf"
+    "${CONF_EXAMPLE}"
+    "${REPO_ROOT}/deployments/scripts/tools/offline/trim-offline-files.sh"
+    "${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
+)
+PRELOAD_NAMES=( cluster.conf cluster.conf.example trim-offline-files.sh cubestack-offline.sh )
+PRELOAD_VALS=(); PRELOAD_SEEN=()
+for _i in "${!PRELOAD_PATHS[@]}"; do
+    _p="${PRELOAD_PATHS[$_i]}"; _n="${PRELOAD_NAMES[$_i]}"
+    if [ ! -f "${_p}" ]; then
+        warn "  未找到 ${_p}(跳过该副本; cluster.conf 不入库, CI 上属正常)"
+        continue
+    fi
+    _v="$(_preload_patterns "${_p}")"
+    if [ -z "${_v}" ]; then
+        ck_fail "⑭ ${_n}: 解析不出 PRELOAD_IMAGE_PATTERNS 的取值" \
+            "      → 赋值行应形如 PRELOAD_IMAGE_PATTERNS=\"\${VAR:-<模式串>}\""
+        PRELOAD_BAD=1
+        continue
+    fi
+    PRELOAD_VALS+=("${_v}"); PRELOAD_SEEN+=("${_n}"); PRELOAD_N=$((PRELOAD_N + 1))
+done
+
+if [ "${PRELOAD_N}" -ge 2 ]; then
+    _ref="${PRELOAD_VALS[0]}"; _drift=0
+    for _j in "${!PRELOAD_VALS[@]}"; do
+        [ "${PRELOAD_VALS[$_j]}" = "${_ref}" ] || _drift=1
+    done
+    if [ "${_drift}" = "1" ]; then
+        ck_fail "PRELOAD_IMAGE_PATTERNS 各副本不一致(必须逐字节一字不差; 漂移会让镜像被备料静默 trim 掉)" \
+            "      → 修法: 把四处改成同一份模式串(新增镜像时四处都要加)"
+        for _j in "${!PRELOAD_VALS[@]}"; do
+            bad "      ${PRELOAD_SEEN[$_j]}(${#PRELOAD_VALS[$_j]} 字符): ${PRELOAD_VALS[$_j]}"
+        done
+        PRELOAD_BAD=1
+    fi
+else
+    say "  可用副本不足 2 份(共 ${PRELOAD_N} 份) —— 跳过 ⑭"
+fi
+[ "${PRELOAD_BAD}" = "0" ] && [ "${PRELOAD_N}" -ge 2 ] && \
+    ok "  ⑭ PRELOAD_IMAGE_PATTERNS ${PRELOAD_N} 份副本逐字节一致(${#PRELOAD_VALS[0]} 字符)"
+unset _i _j _p _n _v _ref _drift
 
 echo "---------------------------------------------"
 if [ "${FAIL}" = "0" ]; then

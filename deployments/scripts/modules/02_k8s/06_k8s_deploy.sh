@@ -76,7 +76,13 @@ if [ "${KUBE_VIP_ENABLED:-false}" = "true" ] && [ "${HAPROXY_ENABLED:-false}" !=
     _KV_VIP="$(kube_vip_derive 2>/dev/null || true)"
     _KV_OLD="$(kube_vip_current_entry)"
     # 阶段二 = VIP 已真实绑在某台 master 上(与 sync 里的判定同一口径)
-    if [ -n "${_KV_VIP}" ] && kube_vip_is_bound "${_KV_VIP}"; then
+    # ⚠ 还要求 _KV_OLD 非空:**没有旧入口就没有可保护的切换**。本地代理模式下 all.yml 的
+    #   loadbalancer_apiserver 块恒为注释(摘块正是该模式的本体, 见 docs/api-ha/04-decision.md D7)
+    #   → _KV_OLD 恒空 → 若不拦, 每次运行都会误判"要切换": 既白弹 30 秒红底倒计时, 又会 export
+    #   KUBE_VIP_SWITCH_CONFIRMED=1 让 sync 重跑(历史上那次重跑会重新推导 VIP → 每次部署漂一次,
+    #   已由 lib-common 的 kube_vip_derive 第 2 步修复)。取舍: 本地代理 + 首装 路径不再弹
+    #   倒计时 —— 该架构下节点侧已免疫, 且全新安装的 VIP 绑定即目标态(存量迁移不在本项目范围)。
+    if [ -n "${_KV_VIP}" ] && kube_vip_is_bound "${_KV_VIP}" && [ -n "${_KV_OLD}" ]; then
         if [ "${_KV_OLD}" != "${_KV_VIP}" ]; then
             echo ""
             echo -e "\033[41m\033[97m================================================================\033[0m"

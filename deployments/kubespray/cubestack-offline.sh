@@ -1307,6 +1307,32 @@ PYEOF
 # 数据源: 全部节点 IP 来自 hosts.yml(kube_control_plane / kube_node 组), 随 inventory 自动更新
 # ============================================================
 update_loadbalancer_all_yml() {
+    # ★ 本地代理模式(API_LOCAL_LB_ENABLED=true, 兼容别名 KUBE_VIP_LOCAL_PROXY): all.yml 的
+    #   loadbalancer_apiserver 块由 tools/k8s/sync-kubespray-config.sh **独占维护并保持注释**。
+    #   本函数是 all.yml 的**第二个写入者** —— 若按"读不到入口就回退首 master 并写回", 会把注释
+    #   恢复成未注释态 → 上游 kube_apiserver_endpoint 模板随即走域名分支 → 本地代理**静默失效**
+    #   (看着装好了, kubelet 仍走域名单点)。故本地代理模式下**只跳过 all.yml 那一段**。
+    #   ⚠ 不整体 return: 下面第 2/3 段(k8s-cluster.yml 的 advertise-address 按节点取值、
+    #     calico can-reach 探测点)与入口模式无关, 跳掉会让 kubernetes Service 退回单点 /
+    #     calico 探测点漂移 —— 那是另外两个静默故障。
+    #   ⚠ 本脚本**不 source lib-common**, 故用最小解析而非 api_local_lb_enabled():
+    #     环境变量优先, 否则子 shell 求值 cluster.conf(与 check-modules.sh 第 ⑫ 项同法)。
+    local _local_lb="${API_LOCAL_LB_ENABLED:-}"
+    if [ -z "${_local_lb}" ]; then
+        local _conf="${REPO_ROOT:-}/deployments/config/cluster.conf"
+        [ -f "${_conf}" ] || _conf="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/deployments/config/cluster.conf"
+        if [ -f "${_conf}" ]; then
+            _local_lb="$( ( set +u; . "${_conf}" >/dev/null 2>&1 || true
+                            printf '%s' "${API_LOCAL_LB_ENABLED:-${KUBE_VIP_LOCAL_PROXY:-false}}" ) )"
+        else
+            _local_lb="false"
+        fi
+    fi
+    local _skip_all_yml=0
+    case "${_local_lb}" in
+        1|true|yes|on) _skip_all_yml=1 ;;
+    esac
+
     local inv="${INVENTORY_DIR}/hosts.yml"
     local all_yml="${INVENTORY_DIR}/group_vars/all/all.yml"
     [ -f "${inv}" ] || { warn "未找到 ${inv}, 跳过 hosts.yml 同步"; return 0; }
@@ -1336,7 +1362,13 @@ update_loadbalancer_all_yml() {
         api_ip="$(awk '/^loadbalancer_apiserver:/{f=1; next} f && /^[[:space:]]+address:/{print $2; exit}' "${all_yml_path}")"
     fi
     if [ -z "${api_ip}" ]; then
-        if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
+        # ⚠ 2026-09-28 rebase 取舍: 保留 api-ha 的"本地代理模式"分支(它解释得对: 安静是设计如此),
+        #   但兜底默认取 main 的 false —— 9832975 已把 kube-vip 默认翻成关, api-ha 那版是翻之前的。
+        if [ "${_skip_all_yml}" = "1" ]; then
+            # 本地代理模式下 all.yml 里没有生效入口是**设计如此**(块须保持注释) —— 不是"忘了跑 sync",
+            # 别让运维照旧文案去重跑 sync。此处回退值仅供下面 calico can-reach 兜底使用。
+            log "本地代理模式: all.yml 无生效 API 入口(块保持注释, 设计如此) —— 该值仅作 calico can-reach 兜底"
+        elif [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
             log "all.yml 尚无 API 入口(未先跑 sync)→ 按阶段一回退第一个 master; kube-vip 就位后重跑即切换"
         fi
         api_ip="${master_ips[0]}"
@@ -1344,7 +1376,10 @@ update_loadbalancer_all_yml() {
     local calico_ip="${worker_ips[0]:-${api_ip}}"   # 无 worker 时回退第一个 master
 
     # ---------- 1. all.yml: API 负载均衡 + SAN ----------
-    if [ -f "${all_yml}" ] && grep -qE '^loadbalancer_apiserver:' "${all_yml}" && grep -qE '^supplementary_addresses_in_ssl_keys:' "${all_yml}"; then
+    if [ "${_skip_all_yml}" = "1" ]; then
+        # 本地代理模式: 该段整体交由 sync-kubespray-config.sh 独占(块保持注释 = 上游走 localhost:6443)
+        log "本地代理模式: 跳过 all.yml 的 loadbalancer_apiserver 同步(由 sync 脚本独占)"
+    elif [ -f "${all_yml}" ] && grep -qE '^loadbalancer_apiserver:' "${all_yml}" && grep -qE '^supplementary_addresses_in_ssl_keys:' "${all_yml}"; then
         local domain port
         domain="$(sed -nE 's/^apiserver_loadbalancer_domain_name:[[:space:]]*"?([^" ]+)"?.*/\1/p' "${all_yml}" | tail -1)"
         [ -n "${domain}" ] || domain="lb.k8s.local"
@@ -2074,9 +2109,15 @@ elif [ -f "${PRELOAD_CONF}" ]; then
     source "${PRELOAD_CONF}"
     log "预加载镜像集合(preload-images.conf): ${PRELOAD_IMAGE_PATTERNS:-<空=全量>}"
 elif [ -z "${PRELOAD_IMAGE_PATTERNS:-}" ]; then
-    # 内置默认最小集合: kubespray 默认部署 + calico 网络插件 + metallb/registry/local-path 附加组件所需镜像
+    # 内置默认最小集合: kubespray 默认部署 + calico 网络插件 + metallb/registry/local-path/lws/nginx 附加组件所需镜像
     # (排除 cilium/flannel/ingress-nginx/dashboard 等未启用组件的镜像)
-    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb kube-vip library_registry local-path-provisioner busybox"
+    # ⚠ 本行是**第 4 份**副本(standalone 直跑本脚本时的兜底默认值), 必须与 cluster.conf /
+    #   cluster.conf.example / tools/offline/trim-offline-files.sh 三份**逐字节一致** ——
+    #   check-modules.sh 第 ⑬ 项断言这**四份**(2026-09-28 起本份已纳入; 本行不在 file 顶部,
+    #   断言脚本会跳过上面那条 ${CUBESTACK_PRELOAD_IMAGE_PATTERNS} 透传行, 取到本行);
+    #   本份漂移会让"备料保留 / 节点预加载"两边不一致
+    #   (典型症状: 装了却没有镜像)。新增镜像 token 时四处都要加。
+    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb kube-vip library_registry local-path-provisioner busybox lws_manager library_nginx"
     log "预加载镜像集合(内置默认最小集合): ${PRELOAD_IMAGE_PATTERNS}"
 fi
 export PRELOAD_IMAGE_PATTERNS

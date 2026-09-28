@@ -112,6 +112,19 @@ nginx-proxy 确实是零成本高可用,但它**不能替代** kube-vip:
 与本次"统一入口"的目标冲突,且会与 `loadbalancer_apiserver` 的定义互斥。
 记录在此以备将来评估。
 
+> **2026-09-28 更新: 本节那个"值得保留的叠加选项"已经落地。** 节点侧 kubespray 原生
+> nginx-proxy 本地代理(`API_LOCAL_LB_ENABLED`, 默认 **true**) + 入口侧 kube-vip VIP 的
+> 组合已实施: 由 `sync-kubespray-config.sh` 作 `all.yml` 的**唯一写入者**, 按入口模式
+> **摘除/保留** `loadbalancer_apiserver` 块 —— 上面第 3 点的"互斥"因此由脚本保证,
+> 而不再是"二者只能要一个"。方案与实施细节见 [api-ha/](api-ha/README.md)
+> (机制 [02](api-ha/02-kubespray-native-lb.md)、决策 [04](api-ha/04-decision.md))。
+>
+> **由此 §7 两阶段切换的风险面缩小到"外部/管理客户端"**: 节点侧(kubelet / kube-proxy)
+> 已改走本机 `127.0.0.1:6443` 的本地代理, 不再依赖 VIP 是否已绑/已切; §2.4 中
+> "worker 侧故障切换慢一个数量级"的退步也一并消失(回到本地代理的 ~1s)。
+> 本文 §2.3"本方案不采用"、§16.3"仍不启用本地代理"、§16.5"镜像不在 `images.manifest` 里"
+> 三处旧结论, 均以本次实施为准(后两处已就地标注)。
+
 ### 2.4 一个必须承认的退步: worker 侧故障切换会比原来**慢**
 
 kube-vip 与被它取代的 nginx-proxy 解决的是**不同层面**的问题,不能简单说"更好":
@@ -743,6 +756,12 @@ kubespray 的 `kube_apiserver_endpoint`(`kubespray_defaults/defaults/main/main.y
 
 ### 16.3 为什么本项目仍不启用本地代理
 
+> ⚠ **2026-09-28 更新: 本节的"暂不启用"结论已被推翻。** 方案演进为"节点侧本地代理 +
+> 入口侧 VIP"的组合并已落地(`API_LOCAL_LB_ENABLED` 默认 true), 见
+> [api-ha/](api-ha/README.md)。下表的对比数据与 16.1 的 if 链分析仍然有效 ——
+> 它们正是本次实施的技术依据(消解互斥的办法: 由 `sync-kubespray-config.sh` 按模式
+> 摘除/保留 `loadbalancer_apiserver` 块)。
+
 | | 本地代理(kubespray nginx-proxy) | kube-vip VIP |
 |---|---|---|
 | 覆盖 | **仅**"节点 → API"(集群内) | 集群内 + 外部 + `controlPlaneEndpoint` |
@@ -787,6 +806,12 @@ kubelet → https://k8s-api.cubestack.io:6443 → /etc/hosts → loadbalancer_ap
   (`roles/kubespray_defaults/defaults/main/download.yml` 的 `nginx_image_repo`),
   随 kubespray 离线包分发,由 `resolve_preload_image_files()` 负责加载。
   **若将来启用本地代理,需确认该镜像已在离线预加载集合内**,否则 nginx-proxy 起不来。
+- ⚠ **2026-09-28 更新(启用本地代理之后)**: 该镜像**已显式登记**进
+  `deployments/config/images.manifest`(`k8s-base  docker.io/library/nginx:${API_LB_NGINX_IMAGE_TAG}`,
+  默认 `1.27.4-alpine`,须与上游 `nginx_image_tag` 同值),并加入 `PRELOAD_IMAGE_PATTERNS`
+  (`library_nginx`)—— 上面那句"需确认已在离线预加载集合内"由此闭环。
+  细节(含"为什么不能给它加第 3 列短名")见
+  [offline-files/kubespray/README.md](../deployments/offline-files/kubespray/README.md) 的 nginx 一节。
 - **客户端证书**:本地代理是纯 TCP 转发(`stream` 模块),**不终止 TLS**,所以证书 SAN 不受影响。
 
 ---
