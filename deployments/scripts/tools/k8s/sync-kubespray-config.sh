@@ -53,7 +53,7 @@ kube_vip_validate_config || exit 1
 #   关闭态只取**显式配置**的 K8S_API_VIP(不扫描): 它只喂 apiserver 证书 SAN, 留着能让
 #   "以后想重新启用"不必重签证书(见 update_kube_vip_addons_yml 的注释); 没配就留空,
 #   该键自然不出现在 addons.yml 里。
-if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
+if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
     _KV_VIP="$(kube_vip_derive)" || exit 1
 else
     _KV_VIP="${K8S_API_VIP:-}"
@@ -71,10 +71,10 @@ API_ENTRY_PHASE="$(api_entry_phase)"
 # ⚠ 本脚本的 stdout 会被 06_k8s_deploy.sh 重定向到 /dev/null(见该模块第 70 行), 所以
 #   任何倒计时/确认提示放在这里用户都看不见, 还会白等。故约定:
 #     · 调用方(06_k8s_deploy.sh)负责判阶段 + 提示 + 倒计时, 确认后 export KUBE_VIP_SWITCH_CONFIRMED=1
-#     · 本脚本见到该标志才做切换; 未见则一律按阶段一(写 master01)—— fail-closed, 绝不自行切换
+#     · 本脚本见到该标志才做切换; 未见且入口尚未指向 VIP 则按阶段一(写 master01)—— fail-closed, 绝不自行切换
 #     · 直接手工运行本脚本时若尚未确认, 会明确提示需要什么才能切换
 #   ⚠ 护栏必须在**判定之后**再跑(旧版放在判定之前, 用的是一个还没算出来的阶段)。
-if [ "${API_ENTRY_PHASE}" = "2" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
+if [ "${API_ENTRY_PHASE}" = "2" ] && [ "${_KV_OLD_ADDR}" != "${_KV_VIP}" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
     warn "VIP ${_KV_VIP} 已就位, 但尚未获得切换确认 → 本次仍按阶段一处理(入口保持 ${_KV_OLD_ADDR})"
     warn "如需切换: 走 06_k8s_deploy.sh(会给出倒计时确认); 或 export KUBE_VIP_SWITCH_CONFIRMED=1 后重跑本脚本"
     API_ENTRY_PHASE=1
@@ -263,7 +263,7 @@ fi
 if [ -f "${ADDONS_YML}" ]; then
     say "更新 ${ADDONS_YML} (kube-vip 控制平面 VIP) ..."
     update_kube_vip_addons_yml "${ADDONS_YML}" "${_KV_VIP}" || exit 1
-    if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
+    if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
         ok "已同步 kube-vip → VIP=${_KV_VIP}, interface=${KUBE_VIP_INTERFACE:-<自动检测>}, 阶段=${API_ENTRY_PHASE:-1}"
     else
         ok "已同步 kube-vip → 关闭(kube_vip_enabled: false)"

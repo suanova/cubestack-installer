@@ -63,7 +63,9 @@ DIRS=(
 )
 for d in "${DIRS[@]}"; do
     [ -d "${REPO}/${d}" ] || { echo "  ⚠ 跳过(仓库无此目录): ${d}"; continue; }
-    docker exec "${CONTAINER}" mkdir -p "$(dirname "${CT}/${d}")" 2>/dev/null || true
+    # 仅替换仓库管理的代码目录; 保留容器的 config/、offline-files/ 与 kubespray 运行数据。
+    docker exec "${CONTAINER}" rm -rf -- "${CT}/${d}"
+    docker exec "${CONTAINER}" mkdir -p "$(dirname "${CT}/${d}")"
     _n="$(cd "${REPO}" && find "${d}" -type f -not -path '*__pycache__*' | wc -l)"
     docker cp "${REPO}/${d}" "${CONTAINER}:$(dirname "${CT}/${d}")/" >/dev/null \
         && echo "  ✅ ${d}/(整目录, ${_n} 个文件)"
@@ -146,7 +148,7 @@ for d in "${DIRS[@]}"; do
         echo "  ✅ ${d}/ 全部一致($(printf '%s\n' "${_repo_md5}" | grep -c .) 个文件)"
     else
         echo "  ❌ ${d}/ 有差异(左=仓库, 右=容器):"
-        diff <(printf '%s\n' "${_repo_md5}") <(printf '%s\n' "${_ct_md5}") | head -15 | sed 's/^/      /'
+        diff <(printf '%s\n' "${_repo_md5}") <(printf '%s\n' "${_ct_md5}") | head -15 | sed 's/^/      /' || true
         _bad=$((_bad + 1))
     fi
 done
@@ -159,6 +161,7 @@ if [ "${_bad}" = "0" ]; then
     echo "  ✅ 单文件清单亦全部一致(共 ${#FILES[@]} 个)"
 else
     echo "  ⚠ 共 ${_bad} 处不一致 —— 别急着部署, 先查为什么(上方已点名)"
+    exit 1
 fi
 
 echo ""

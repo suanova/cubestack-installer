@@ -187,7 +187,7 @@ if [ "${DO_HARBOR}" = "1" ]; then
         while IFS=$'\t' read -r g r n; do
             # "上游就是本台 Harbor"的镜像**不镜像到 mirrors/**(预期行为, 见 harbor-sync-images.sh):
             # metax 本就在本台 Harbor 上, 部署模块直接从其原项目拉取。
-            # 不排除的话, 每次漂移检查都会把 12 个"永远不该出现"的镜像报成缺失, 噪声淹没真问题。
+            # 不排除的话, 每次漂移检查都会把 11 个"永远不该出现"的镜像报成缺失, 噪声淹没真问题。
             case "${r}" in
                 "${HARBOR_HOST}"/*) N_SAME=$((N_SAME+1)); continue ;;
             esac

@@ -78,7 +78,7 @@
 
 ### ⚠ 特例: "上游就是本台 Harbor"的组不镜像
 
-`metax-gpu`(12 个)的**上游就是这台 Harbor 本身** (`harbor.isuanova.com/metax/` 项目),
+`metax-gpu`(11 个)的**上游就是这台 Harbor 本身** (`harbor.isuanova.com/metax/` 项目),
 属于**同台复制**。它的部署模块现在就直接从那个项目拉取 —— 也就是说,
 **"集群不访公网"这个目标对它已经达成**, 不需要任何改动。
 
@@ -100,7 +100,7 @@
 
 > 它仍**列在清单里** —— 清单同时承担"本仓库用到哪些镜像"的登记职责,
 > 只是不会被镜像到 `mirrors/`。`check-image-manifest.sh --harbor` 同样跳过它,
-> 否则每次漂移检查都会把 12 个"永远不该出现"的镜像报成缺失, 噪声淹没真问题。
+> 否则每次漂移检查都会把 11 个"永远不该出现"的镜像报成缺失, 噪声淹没真问题。
 
 ---
 
@@ -294,15 +294,18 @@ sudo ./deploy-cluster.sh --steps verify_ceph
 | `35324836924` | push(`--preserve-digests`) | ✅ 仍有 1 次重传(= 用新旗标重新落地的那一次, **属预期**) |
 | `35325640510` | push | ✅ **新同步 0 个, 全部 47 个 digest 未变跳过** ⇒ 幂等达成 |
 
-最终态(用 `check-image-manifest.sh --harbor` 复核):
+当时的最终态(用 `check-image-manifest.sh --harbor` 复核):
 
 ```
-✅ Harbor 已含清单内全部应镜像的 35 个镜像(无漂移)
-   已跳过 12 个"本就在本台 Harbor 上"的镜像(metax; 预期不镜像)
+✅ Harbor 已含清单内全部应镜像的 47 个镜像(无漂移)
+   已跳过 16 个"本就在本台 Harbor 上"的镜像(metax; 预期不镜像)
 ```
 
 > ⚠ 上表是当时的 CI 实测记录(Run ID 可查), 其中"47 / 16"对应当次运行时的清单规模;
 > 清单后续有增减(组件上架/下架), 当前值以实际运行输出为准。
+
+当前清单(静态统计, 不代表 Harbor 实时状态): 共 46 个镜像, 应镜像 35 个,
+同台 Harbor 的 Metax 镜像跳过 11 个。
 
 **关键旁证**: `registry.k8s.io/pause:3.10` 从本机同步**失败**(该域名会 302 到
 `europe-west3-docker.pkg.dev`, 本机不可达), 但 GitHub runner **成功了** ——

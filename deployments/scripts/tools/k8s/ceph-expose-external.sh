@@ -160,7 +160,7 @@ ext_mon_eps() {
         # 从 rook-ceph-mon-endpoints CM mapping 读 mon 所在节点 IP(node ptr → Address)
         local mons data mapping
         for m in $(mon_list); do
-            _nip="$(_mon_ip "${m}")"
+            _nip="$(_mon_ip "${m}")" || _nip=""
             [ -n "${_nip}" ] && out="${out:+${out},}${_nip}:6789"
         done
         echo "${out}"
@@ -290,7 +290,7 @@ apply_main() {
     if [ "${MODE}" = "host-network" ]; then
         say "[网络层] host-network 模式: mon 直连节点 IP:6789(无 Service, 绕开 kube-proxy)..."
         for m in $(mon_list); do
-            _nip="$(_mon_ip "${m}")"
+            _nip="$(_mon_ip "${m}")" || _nip=""
             if [ -n "${_nip}" ]; then
                 say "    - mon.${m} → ${_nip}:6789(mon 所在节点 IP; v2=3300)"
                 EXT_MONS="${EXT_MONS:+${EXT_MONS},}${_nip}:6789"
