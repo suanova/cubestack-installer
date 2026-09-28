@@ -17,7 +17,7 @@
 # 步骤(括号内是 SOP 步号):
 #   [1/8] 前置: 工作区干净?(SOP 0)          [2/8] 备份: 旧树 tag + 指纹(SOP 2)
 #   [3/8] 取树(SOP 1)                       [4/8] 核验: galaxy 版本 + k8s 钉子(SOP 1)
-#   [5/8] 换树, 保留 inventory/local + .venv/ + patch-playbooks/(SOP 3)
+#   [5/8] 换树, 保留 inventory/local + .venv/ + patch-playbooks/ + ansible 版本自检(SOP 3)
 #   [6/8] 退休判定 --check-retired(SOP 6)   [7/8] 重放 --apply(SOP 4)
 #   [8/8] 打印后续人工步骤(SOP 5/7/8/9)
 #
@@ -27,6 +27,9 @@
 # ⚠ 破坏性: [5] 会删除 <root>/kubespray 下除 **inventory/local、patch-playbooks 与 .venv/** 之外的**全部**内容。
 #   保留 .venv 的理由: 它是**裸机路径的 ansible 运行环境**(cubestack-offline.sh 的 ensure_venv
 #   在没有预装 ansible 时靠它跑), 删了裸机升级后跑不起来。
+#   ⚠ 保留 ≠ 不管: 换树后 [5/8] 会拿新树 playbooks/ansible_version.yml 的 minimal_ansible_version
+#   与 .venv 实测值比对, 过旧即**停住**(rc=2)—— ansible 大版本换了(如 2.16 → 2.19), 必须依新
+#   requirements.txt 重建 venv, 否则陈旧 venv 会顶掉 CLI 镜像的新 ansible, 部署第一个 play 硬失败。
 #   保留 patch-playbooks 的理由: 它是**我们自持的注入 play**(cubestack-registry / single-node /
 #   cni-restart / preload / install-packages), **不是上游文件** —— 上游任何版本都不带它。
 #   cubestack-offline.sh 的 ensure_*_play 只在**文件缺失时**从内置副本重建(且 registry /
@@ -302,6 +305,48 @@ if [ -d "${TREE_SRC}/inventory/sample" ]; then
     else
         warn "inventory/sample 与新树模板不一致(换树未刷干净?): diff -rq --no-dereference ${TREE}/inventory/sample ${TREE_SRC}/inventory/sample"
     fi
+fi
+
+# 自检(ansible 大版本, 2026-09-28 评审 I1): 换树**有意保留** .venv(裸机路径的 ansible 运行环境),
+#   而新树的 playbooks/ansible_version.yml 会对 ansible-core 版本**硬断言**(v2.32: ≥2.19 <2.20)。
+#   陈旧 venv(实测 core 2.16.19)在部署的**第一个 play** 就硬失败; 且 cubestack-offline.sh 的
+#   ensure_venv 只判"目录在不在"→ 永远重建不了它, 于是旧 venv 会一直顶掉 CLI 镜像里的新 ansible。
+#   故换树后立刻把两侧读出来比一比: 过旧就**停住**(rc=2)并给出修法 —— 别让它留到部署期才炸。
+#   ⚠ 判据取新树自己的 ansible_version.yml(不写死 2.19): 换树/换门后本自检自动跟随。
+AV_YML="${TREE}/playbooks/ansible_version.yml"
+AV_MIN=""
+if [ -f "${AV_YML}" ]; then
+    AV_MIN="$(sed -n 's/^[[:space:]]*minimal_ansible_version:[[:space:]]*//p' "${AV_YML}" | head -1 | tr -d "\"'")"
+fi
+if [ -z "${AV_MIN}" ]; then
+    warn "读不出新树的 minimal_ansible_version(${AV_YML}): 无法核对 .venv 的 ansible 版本"
+fi
+AV_HAVE=""
+if [ -x "${TREE}/.venv/bin/ansible" ]; then
+    AV_LINE="$("${TREE}/.venv/bin/ansible" --version 2>/dev/null | head -1)"
+    AV_HAVE="$(printf '%s' "${AV_LINE}" | sed -nE 's/.*\[core ([0-9][0-9.]*)\].*/\1/p')"
+    # 老式输出(`ansible 2.9.x`, 无 [core …])也认, 免得把"没版本号"误判成"版本合格"
+    [ -n "${AV_HAVE}" ] || AV_HAVE="$(printf '%s' "${AV_LINE}" | sed -nE 's/^ansible[[:space:]]+v?([0-9][0-9.]*).*/\1/p')"
+    [ -n "${AV_HAVE}" ] || warn "读不出 .venv 的 ansible 版本(${TREE}/.venv/bin/ansible --version 首行: ${AV_LINE:-空})"
+elif [ -d "${TREE}/.venv" ]; then
+    warn ".venv/ 在, 但没有可执行的 bin/ansible: 无法核对版本(裸机路径跑不动, 部署前先重建)"
+fi
+# 版本比较: sort -V 取小者(与上游 assert 的语义一致: 恰好等于门也算通过)
+_av_lt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
+if [ -n "${AV_MIN}" ] && [ -n "${AV_HAVE}" ]; then
+    if _av_lt "${AV_HAVE}" "${AV_MIN}"; then
+        warn ".venv 的 ansible-core ${AV_HAVE} **低于**新树要求(${TAG} 要 ≥ ${AV_MIN})—— 部署第一个 play 就硬失败:"
+        warn "  ${AV_YML} 断言 ${AV_MIN} <= ansible < $(sed -n 's/^[[:space:]]*maximal_ansible_version:[[:space:]]*//p' "${AV_YML}" | head -1)"
+        warn "  (换树保留 .venv 是有意的 —— cubestack-offline.sh 的 ensure_venv 只判目录在不在, 不会帮你重建)"
+        warn "  修法(二选一):"
+        warn "    ① 依新 requirements.txt **重建** venv(需要 pip 可达, 联网机/容器内做):"
+        warn "         rm -rf ${TREE}/.venv && python3 -m venv ${TREE}/.venv && ${TREE}/.venv/bin/pip install -r ${TREE}/requirements.txt"
+        warn "    ② 直接删掉 .venv/: 走 CLI 镜像里预装的 ansible(容器路径就是这条; 裸机路径会在部署时另建)"
+        warn "  修完重跑本脚本(会重新换树 + 重放补丁)"
+        rerun_hint >&2
+        die "[5/8] .venv 的 ansible-core ${AV_HAVE} 过旧(新树 ${TAG} 要求 ≥ ${AV_MIN})—— 修法见上"
+    fi
+    log ".venv 的 ansible-core ${AV_HAVE} 满足新树要求(≥ ${AV_MIN})"
 fi
 
 # ---------------------------------------------------------------- [6/8] 退休判定

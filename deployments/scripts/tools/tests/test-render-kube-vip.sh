@@ -17,4 +17,15 @@ out2="$(python3 "$R" --nodename n2 --vip 10.0.0.9 --template "$T" --image-tag v1
 [ "$(grep -cE '^      value: n1$' <<<"$out")" = 1 ] && ! grep -q 'n2' <<<"$out" \
   && [ "$(grep -cE '^      value: n2$' <<<"$out2")" = 1 ] && ! grep -q 'n1' <<<"$out2" \
   && echo "  ok  逐节点渲染不同(防脑裂)" || { echo "  FAIL 逐节点渲染异常"; exit 1; }
+
+# ---- 反向断言(M3): 旧版 tag 必须走 vip_cidr 分支 ----
+# 只断言"新版 → vip_subnet"是**单向**的: 若渲染器把 env 名硬编码成 vip_subnet(不看模板的
+# version() 分支), 上面的断言照样全绿 —— 而旧版 kube-vip(<0.9.0)只认 vip_cidr, 收到
+# vip_subnet 会**静默忽略**(VIP 起不来), 属只在实机暴露的缺陷。故两个 tag 都要各验一侧。
+out3="$(python3 "$R" --nodename n3 --vip 10.0.0.9 --template "$T" --image-tag v0.8.9 2>&1)"; rc=$?
+[ "$rc" = 0 ] || { echo "  FAIL 旧 tag 渲染失败: $out3"; exit 1; }
+grep -q 'name: vip_cidr' <<<"$out3" && echo "  ok  v0.8.9 → env = vip_cidr(旧版分支)" \
+  || { echo "  FAIL v0.8.9 没有 vip_cidr(旧版 kube-vip 会忽略 vip_subnet, VIP 起不来)"; exit 1; }
+! grep -q 'vip_subnet' <<<"$out3" && echo "  ok  v0.8.9 不再发 vip_subnet" \
+  || { echo "  FAIL v0.8.9 仍在发 vip_subnet"; exit 1; }
 echo "✅ 渲染断言全过"

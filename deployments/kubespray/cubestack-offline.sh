@@ -150,28 +150,77 @@ ensure_kubespray() {
     fi
 }
 
+# .venv 是否**真的可用**: 目录在 ≠ 环境能用(2026-09-28 实机事故)
+#   失败或中断的 `python3 -m venv`(典型: Ubuntu 缺 python3-venv, ensurepip 不可用)会在目标目录
+#   留下**空壳**: pyvenv.cfg + bin/python* + lib/, 但**没有 bin/activate**(venv 在写 activate
+#   脚本之前就中止了)。原实现只判 `[ -d .venv ]`, 于是下次运行走 else 分支直接
+#   `source .venv/bin/activate` → "No such file or directory", 既没有修法提示, 也永远不会自愈。
+#   bin/python 也要求真能跑: venv 从别的机器/别的 python 版本拷来时, activate 在但 python 是
+#   悬空符号链接 → 之后 ansible-playbook 全报 bad interpreter。
+venv_is_usable() {
+    local v="${KUBESPRAY_DIR}/.venv"
+    [ -f "${v}/bin/activate" ] && "${v}/bin/python" -c "" >/dev/null 2>&1
+}
+
+# 版本比较: sort -V 取小者(与树里 assert 的语义一致: 恰好等于门算通过)
+_venv_av_lt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
+
 ensure_venv() {
     cd "${KUBESPRAY_DIR}"
+
+    # 半成品 .venv(空壳 / 悬空 python): 留着只会把下一次运行卡死在 source 上, 直接删掉重建
+    if [ -d ".venv" ] && ! venv_is_usable; then
+        warn ".venv/ 存在但不可用(缺 bin/activate 或 bin/python 跑不起来) —— 判为创建失败/中断的半成品, 删除重建"
+        rm -rf .venv || err "删除半成品 .venv 失败(权限/属主): 请手工执行 rm -rf ${KUBESPRAY_DIR}/.venv 后重试"
+    fi
+
     if [ ! -d ".venv" ]; then
         highlight "创建 Python 虚拟环境(继承镜像预装的系统依赖, 完全离线)..."
         # --system-site-packages: 复用镜像/系统已预装的 ansible 等依赖(见 Dockerfile-cli),
         # 避免新建空 venv 后联网 pip install 拉取失败(离线环境)。
-        python3 -m venv --system-site-packages .venv
-        source .venv/bin/activate
-        # 校验 ansible 可用; 若镜像未预装(宿主机裸跑), 回退本地 wheel 缓存离线安装
-        if ! python3 -c "import ansible, ansible_runner" >/dev/null 2>&1; then
-            if ls .venv_wheels/*.whl >/dev/null 2>&1; then
-                highlight "系统无预装 ansible, 从 .venv_wheels/ 离线安装 ..."
-                pip install --no-index --find-links=.venv_wheels -r requirements.txt -q \
-                    || { err "离线安装 ansible 失败(缺少 .venv_wheels 缓存)"; return 1; }
-            else
-                warn "系统未预装 ansible 且无 .venv_wheels 缓存: 请用 CLI 镜像(已预装)或联网装"
-            fi
+        if ! python3 -m venv --system-site-packages .venv; then
+            # ⚠ 失败时目标目录里已经留了空壳 —— 不清掉的话, 下次运行会把它当"已就绪"(见上)
+            rm -rf .venv 2>/dev/null || true
+            err "创建 venv 失败(见上方 python3 报错); Ubuntu/Debian 缺 venv 模块时: 装 python3-venv 后重试"
         fi
+        venv_is_usable || { rm -rf .venv 2>/dev/null || true; err "venv 创建后仍不可用(无 bin/activate): 请确认发行版提供可用的 python3 -m venv"; }
         log "✅ 虚拟环境就绪"
     else
-        source .venv/bin/activate
         log "✅ 虚拟环境已激活"
+    fi
+
+    source .venv/bin/activate
+
+    # ansible 可用性: **两条路径都要查** —— 原实现只在"新建"分支查, 复用路径上一套没装 ansible 的
+    # venv 会被静默放行, 直到 ansible-playbook 报 command not found 才炸。
+    # ⚠ 判据用 ansible-playbook 本尊, 不用 `python3 -c "import ansible, ansible_runner"`:
+    #   ansible_runner **不在** kubespray 的 requirements.txt 里(树里也没人用), 那个 import 恒失败
+    #   → 无论 ansible 装没装都报"未预装"(假阴性)。
+    if ! command -v ansible-playbook >/dev/null 2>&1; then
+        if ls .venv_wheels/*.whl >/dev/null 2>&1; then
+            highlight "系统无预装 ansible, 从 .venv_wheels/ 离线安装 ..."
+            pip install --no-index --find-links=.venv_wheels -r requirements.txt -q \
+                || err "离线安装 ansible 失败(缺少 .venv_wheels 缓存)"
+        else
+            warn "当前环境没有 ansible-playbook, 且无 .venv_wheels 缓存: 请用 CLI 镜像(已预装), 或本机 pip install -r ${KUBESPRAY_DIR}/requirements.txt"
+        fi
+    fi
+
+    # ansible 大版本自检(判据与 cubestack-kubespray-upgrade.sh [5/8] 一致): 换树后 .venv 是被
+    # **有意保留**的, 而树里 playbooks/ansible_version.yml 对 ansible-core 硬断言(v2.32: ≥2.19
+    # <2.20)。陈旧 venv(实测 core 2.16.19)会顶掉 CLI 镜像里预装的新 ansible → 部署第一个 play
+    # 硬失败。此处只警告不拦停(download/init 用不到新版特性), 但把修法写清楚。
+    if command -v ansible-playbook >/dev/null 2>&1 && [ -f "${KUBESPRAY_DIR}/playbooks/ansible_version.yml" ]; then
+        local av_min av_line av_have
+        av_min="$(sed -n 's/^[[:space:]]*minimal_ansible_version:[[:space:]]*//p' \
+                    "${KUBESPRAY_DIR}/playbooks/ansible_version.yml" | head -1 | tr -d "\"'")"
+        av_line="$(ansible --version 2>/dev/null | head -1 || true)"
+        av_have="$(printf '%s' "${av_line}" | sed -nE 's/.*\[core ([0-9][0-9.]*)\].*/\1/p')"
+        [ -n "${av_have}" ] || av_have="$(printf '%s' "${av_line}" | sed -nE 's/^ansible[[:space:]]+v?([0-9][0-9.]*).*/\1/p')"
+        if [ -n "${av_min}" ] && [ -n "${av_have}" ] && _venv_av_lt "${av_have}" "${av_min}"; then
+            warn "ansible-core ${av_have} 低于本树要求(≥ ${av_min}): 部署第一个 play 就会硬失败"
+            warn "  修法: rm -rf ${KUBESPRAY_DIR}/.venv 后重跑本脚本(会重建), 或删掉它走 CLI 镜像预装的 ansible"
+        fi
     fi
 }
 
@@ -316,9 +365,17 @@ DOWNLOAD_EOF
 
 build_extra_vars() {
     EXTRA_VARS_STR=""
+    # ⚠ k8s-versions.yml 必须在列: 它才是**版本钉子的单一来源**(kube_version/calico_version…)。
+    #   不带它时两个 ansible 调用会各算一套版本 —— generate_list.sh 用 `-i <hosts.yml>` 拿得到
+    #   它(经 inventory 的 group_vars), 而下面生成 URL→dest 映射的 play 用的是 `-i localhost,`
+    #   (不加载任何 group_vars, 有意不碰集群), 于是 kube_version 退回**树里 checksum 表的第一
+    #   个键**(v2.32 树 = 1.36.4)。后果: files.list 的 URL 是 v1.35.8, 映射表里却是 v1.36.4 →
+    #   按 URL 查不到 → 全部退回 URL basename → kubelet/kubectl/kubeadm 被存成**没有版本号的
+    #   `kubelet`/`kubectl`/`kubeadm`**(2026-09-28 实测), 装机时按 dl.dest 找不到, 离线必失败。
     for vars_file in \
         "${INVENTORY_DIR}/group_vars/all/offline.yml" \
         "${INVENTORY_DIR}/group_vars/all/all.yml" \
+        "${INVENTORY_DIR}/group_vars/all/k8s-versions.yml" \
         "${INVENTORY_DIR}/group_vars/k8s_cluster/k8s-cluster.yml" \
         "${INVENTORY_DIR}/group_vars/k8s_cluster/addons.yml"; do
         if [ -f "$vars_file" ]; then
@@ -447,7 +504,11 @@ PLAYBOOK_EOF
             filename="$mapped_dest"
         else
             filename=$(basename "$url" | sed 's/[?#].*//')
-            warn "    未找到映射: $filename，使用 URL basename"
+            # 映射表按 URL 精确匹配缺失时退回 URL basename —— 该名字多半**不等于**树里这条的
+            # dest(kubespray 用 `download_cache_dir/<dest | basename>` 找缓存文件), 装机时就
+            # 找不到、转而联网下载, 离线必失败。常见根因是 files.list 与 url_dest.map 的版本
+            # 不一致(见 build_extra_vars 里 k8s-versions.yml 的注释), 故把后果写在这里。
+            warn "    $filename 未找到映射，使用 URL basename(⚠ 该名未必等于装机期望的 dest, 离线装机可能找不到它)"
         fi
         dest="${LOCAL_REPO_DIR}/${filename}"
 

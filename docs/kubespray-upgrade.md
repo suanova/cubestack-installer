@@ -43,7 +43,7 @@ K8S_VERSION=v1.35.8 bash deployments/kubespray/cubestack-kubespray-upgrade.sh v2
 | 8 | 回归:静态 / 补丁 / 树 diff / 渲染器对拍 / 离线缺口 / 实机 | 见 §6 回归清单 | 脚本 + 人 |
 | 9 | 记录:在本文 §2 追加一条(旧→新 tag、k8s/插件版本变化、冲突与处置、踩的坑、**新增的可上游化补丁**) | 照 §2.1 的格式 | 人 |
 
-### 1.3 六条铁律(每条都踩过或差点踩)
+### 1.3 七条铁律(每条都踩过或差点踩)
 
 1. **`K8S_VERSION` 环境变量优先,且必须在新树的 `kubelet_checksums` 表内**。不带它时脚本读 `cluster.conf`, 而 `cluster.conf` 的钉子常常还没更新 → 直接停在 [4/8] 版本门(rc=2)。它只是**本次声明**, 正式钉子仍要落进 `cluster.conf` 与 `.example`,否则下次部署退回旧钉子。
 2. **`--check-retired` 必须在 `--apply` 之前**(顺序是硬要求,重放器头部有同一句)。退休判定的判据是"这棵树已经等于我们打过之后的样子",只有**刚换完的纯净树**上跑才有意义;反过来(打完再跑)恒报 RETIRE,分不清"上游吸收了"与"我们刚打的"。
@@ -52,6 +52,13 @@ K8S_VERSION=v1.35.8 bash deployments/kubespray/cubestack-kubespray-upgrade.sh v2
 5. **`--check-retired` 在"目标文件被上游删除"时会误报 KEEP**。反打不上 ≠ 上游未吸收(文件都没了, 自然反打不上)。这类目标必须**人工判去向**(随上游丢弃 / 迁到新机制),不能靠脚本的 RETIRE/KEEP 结论。
 6. **换树必须保留 `patch-playbooks/`**(用户明确要求)。它是 `cubestack-offline.sh` 的 `ensure_*_play` 注入的 5 个 play 的载体, 而机制**只在文件缺失时**才从**内置副本**重建 —— 其中 `cubestack-registry.yml` / `cubestack-single-node.yml` 连内置副本都没有;且内置副本是**旧版**(install-packages play 内置 110 行 vs 树内 157 行)→ 丢了 `patch-playbooks/` 会**静默退化**。入口脚本已把它加进保留集,并在换树后按**文件数 + 内容指纹**复核。
    ⚠ 注:那 4 行 `import_playbook: patch-playbooks/...` **不**做成补丁、也不写进仓库树 —— 由机制在部署时按锚点注入(单一来源)。
+7. **换了 ansible 大版本,必须依新 `requirements.txt` 重建 `.venv`**。换树**有意保留** `.venv/`(它是裸机路径的 ansible 运行环境),但里面那套 ansible 是**旧门**的产物 —— 实测 v2.28 的 venv 是 `ansible-core 2.16.19`,而 v2.32 的 `playbooks/ansible_version.yml` 断言 `2.19.0 ≤ ansible < 2.20.0`。陈旧 venv 会**顶掉** CLI 镜像里预装的新 ansible(`cubestack-offline.sh` 的 `ensure_venv` 只判目录在不在,不会重建),部署跑**第一个 play** 就硬失败。入口 **[5/8]** 换树后会读新树的 `minimal_ansible_version` 与 `.venv` 实测值比对,**过旧即停住(rc=2)**并打印修法:
+   ```bash
+   rm -rf deployments/kubespray/kubespray/.venv
+   python3 -m venv deployments/kubespray/kubespray/.venv
+   deployments/kubespray/kubespray/.venv/bin/pip install -r deployments/kubespray/kubespray/requirements.txt
+   # 或者:直接 rm -rf .venv/ 走 CLI 镜像里预装的 ansible(容器路径就是这条)
+   ```
 
 ### 1.4 命令备查
 
@@ -77,8 +84,20 @@ bash deployments/kubespray/cubestack-patch-apply.sh --list        # 只列补丁
 grep -nE '^(K8S_VERSION|CALICO_VERSION|ETCD_VERSION|COREDNS_VERSION|PAUSE_VERSION|DNS_NODE_CACHE_VERSION|METRICS_SERVER_VERSION|CPA_VERSION)=' \
   deployments/config/cluster.conf deployments/config/cluster.conf.example
 
-# 静态校验(含 ⑮ 补丁在位)
+# 静态校验(含 ⑮ 补丁在位 + 两个离线回归套件)
 bash deployments/scripts/tools/check-modules.sh
+
+# 树怎么进部署容器(容器 CLI 重跑部署时必看):
+#   ⚠ 同步工具(sync-to-container.sh)**不搬 kubespray 树** —— 那条 DIRS 路径是 `rm -rf` + 整拷,
+#     会连容器内的 inventory/ 与 .venv/ 一起删掉(有害); 逐文件列整棵树又太大。
+#     它只同步 cubestack-patches/ + 两个入口脚本, 并在步骤 5 **核对**容器内 kubespray/galaxy.yml
+#     的版本与仓库那份: 不一致 → 醒目告警 + 计入不一致计数(工具不会替你换树)。
+#   → 两条正路(二选一):
+#     ① 容器内换树(与仓库同一套脚本/补丁层):
+#          sudo docker exec -it <容器> bash
+#          cd /opt/cubestack-installer/deployments/kubespray
+#          K8S_VERSION=v1.35.8 bash cubestack-kubespray-upgrade.sh v2.32.0 --tree-src <容器内纯净树>
+#     ② 重建 CLI 镜像(树是 COPY 进镜像的), 再用新镜像起容器。
 ```
 
 ---
