@@ -92,8 +92,8 @@
           [ -e "${deb}" ] || continue
           pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"
           newver="$(dpkg-deb -f "${deb}" Version 2>/dev/null)"
-          curver="$(dpkg-query -W -f='${Version}' "${pkg}" 2>/dev/null || true)"
-          if [ -n "${pkg}" ] && [ -n "${newver}" ] && [ "${curver}" = "${newver}" ]; then
+          curstat="$(dpkg-query -W -f='${db:Status-Abbrev}|${Version}' "${pkg}" 2>/dev/null || true)"
+          if [ -n "${pkg}" ] && [ -n "${newver}" ] && [ "${curstat}" = "ii |${newver}" ]; then
             skipped="${skipped} ${pkg}"
             continue
           fi
