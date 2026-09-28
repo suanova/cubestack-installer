@@ -84,7 +84,7 @@ normalize_key() {
 #   新增基座模块(集群底座, 如新的 kubespray addon)把 key 加进 BASE_MODULES 即可。
 #   基座模块: k8s_deploy/k8s_scale(集群本体) + metallb/local_path/k8s_registry(kubespray 内置 addon,
 #   由 k8s 阶段统一安装, 不属于可单独调度的 operator)。
-BASE_MODULES=(k8s_deploy k8s_scale metallb local_path k8s_registry)
+BASE_MODULES=(k8s_deploy k8s_scale metallb local_path k8s_registry api_local_lb)
 OPERATOR_MODULES=()   # discover_modules 时按规则派生
 
 # ---------------- 元模块展开(verify → 全部 verify_* 模块) ----------------

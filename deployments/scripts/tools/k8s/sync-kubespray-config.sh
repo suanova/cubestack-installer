@@ -44,6 +44,11 @@ FIRST_WORKER="${WORKER_IPS[0]:-${API_IP}}"
 # ---------------- kube-vip: API 入口地址(两阶段, 见 docs/kube-vip-api-ha.md 第 7 节) ----------------
 # 静态校验先行(互斥 / MetalLB 池隔离 / 与节点 IP 冲突) —— 配置错就早失败, 不要等到 kubespray 跑一半
 kube_vip_validate_config || exit 1
+# 入口开关的硬校验(external ↔ kube-vip ↔ HAProxy/KA 互斥 + 入口地址取值合法性)。
+# ⚠ 与上一条**有意重复**: kube_vip_validate_config 内部已先调用它(为了覆盖 KUBE_VIP_ENABLED=false
+#   的早退分支), 这里再显式调一次, 是把"入口配置必须自洽"钉成本脚本自己的前置条件 ——
+#   将来任一侧被重构(如 kube-vip 校验改了早退顺序), 本脚本的护栏都还在。
+api_entry_validate_config || exit 1
 
 # 阶段判定: VIP 已绑=阶段二(切入口), 未绑=阶段一(写 master01, 本轮只让 VIP 就位)
 # ★ kube-vip 关闭时**绝不推导 VIP**(2026-09-24 实机修复): kube_vip_derive 会对每台 master
@@ -53,12 +58,15 @@ kube_vip_validate_config || exit 1
 #   关闭态只取**显式配置**的 K8S_API_VIP(不扫描): 它只喂 apiserver 证书 SAN, 留着能让
 #   "以后想重新启用"不必重签证书(见 update_kube_vip_addons_yml 的注释); 没配就留空,
 #   该键自然不出现在 addons.yml 里。
+# ⚠ 2026-09-28 rebase 取舍: 保留 main 这道开关护栏(api-ha 侧是无护栏的裸 kube_vip_derive —— 它基于
+#   翻默认值之前的写法, 不能照搬)。
 if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
     _KV_VIP="$(kube_vip_derive)" || exit 1
 else
     _KV_VIP="${K8S_API_VIP:-}"
 fi
-_KV_OLD_ADDR="$(kube_vip_current_entry)"
+# all.yml 的块被注释时(本地代理模式)读不到入口 → 回退到 VIP 兜底, 免得下面的运维提示出现"入口保持 "空白
+_KV_OLD_ADDR="$(kube_vip_current_entry)"; _KV_OLD_ADDR="${_KV_OLD_ADDR:-${_KV_VIP:-}}"
 
 _KV_NEW_ADDR="$(kube_vip_resolve_target)" || exit 1
 # ★ 2026-09-24 修复: 阶段必须**回读**(api_entry_phase), 不能读 $API_ENTRY_PHASE ——
@@ -74,6 +82,10 @@ API_ENTRY_PHASE="$(api_entry_phase)"
 #     · 本脚本见到该标志才做切换; 未见且入口尚未指向 VIP 则按阶段一(写 master01)—— fail-closed, 绝不自行切换
 #     · 直接手工运行本脚本时若尚未确认, 会明确提示需要什么才能切换
 #   ⚠ 护栏必须在**判定之后**再跑(旧版放在判定之前, 用的是一个还没算出来的阶段)。
+# ⚠ 2026-09-28 rebase 说明: api-ha 分支(728f9a4)曾把这段门标注为"恒不成立的死代码" —— 那个结论
+#   成立于它的基线(阶段读的是子 shell 变量); main 的 9832975 已修成"落盘 + api_entry_phase() 回读",
+#   所以这段门在合并后**是活的**, fail-closed 约定照常生效。api-ha 侧"确认标志无功能效果"的说法同样
+#   只对旧基线成立, 不再适用。
 if [ "${API_ENTRY_PHASE}" = "2" ] && [ "${_KV_OLD_ADDR}" != "${_KV_VIP}" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
     warn "VIP ${_KV_VIP} 已就位, 但尚未获得切换确认 → 本次仍按阶段一处理(入口保持 ${_KV_OLD_ADDR})"
     warn "如需切换: 走 06_k8s_deploy.sh(会给出倒计时确认); 或 export KUBE_VIP_SWITCH_CONFIRMED=1 后重跑本脚本"
@@ -81,11 +93,19 @@ if [ "${API_ENTRY_PHASE}" = "2" ] && [ "${_KV_OLD_ADDR}" != "${_KV_VIP}" ] && [ 
     _KV_NEW_ADDR="$(first_master_ip)" || exit 1     # 降级 = 阶段一: 入口回到第一个 master
 fi
 
-# API 入口地址统一 = 本次运行的判定结果(阶段一=第一个 master / 阶段二=VIP)
-API_ADDR="${_KV_NEW_ADDR}"
-if [ "${API_ENTRY_PHASE:-0}" = "2" ]; then
+# API 入口地址统一 = 本次运行的判定结果(模式见 lib-common.sh#api_entry_mode):
+#   external → API_EXTERNAL_ADDR(环境已有 LB/VIP) / vip → 两阶段判定 / node → 第一个 master
+# ⚠ 2026-09-28 rebase 取舍: vip/node 两条都取**上面已算好的** _KV_NEW_ADDR, 不重算 api_entry_addr ——
+#   重算会绕过上面那道"阶段二未获确认即降级为阶段一"的门(fail-closed), 把 VIP 直接写进
+#   all.yml 与证书 SAN。api-ha 侧原写法(直接重算)在它自己的分支上等价, 合到 main 后不等价。
+if [ "$(api_entry_mode)" = "external" ]; then
+    API_ADDR="$(api_entry_addr)" || exit 1
+    say "节点类型: 外部入口模式 — API 入口=外部 LB(${API_ADDR})"
+elif [ "${API_ENTRY_PHASE:-0}" = "2" ]; then
+    API_ADDR="${_KV_NEW_ADDR}"
     say "节点类型: kube-vip 阶段二 — API 入口=VIP(${API_ADDR})"
 else
+    API_ADDR="${_KV_NEW_ADDR}"
     say "节点类型: API 入口=第一个 master(${API_ADDR})"
 fi
 say "API 域名: ${API_DOMAIN}"
@@ -93,6 +113,78 @@ say "Master IPs: ${MASTER_IPS[*]}"
 say "Worker IPs: ${WORKER_IPS[*]:-<无>}"
 
 # ---------------- 1. 更新 all.yml ----------------
+
+# 按入口模式收敛 all.yml 的 API 入口相关三件事(幂等):
+#   ① loadbalancer_apiserver 块: 本地代理开 → 注释掉; 关 → 取消注释
+#   ② loadbalancer_apiserver_localhost: true/false
+#   ③ loadbalancer_apiserver_type: 仅当非默认(nginx)时写入, 默认时清掉覆盖
+#
+# 为什么"摘掉块"才是这套方案的开关本体(而不是只写 localhost: true):
+#   kubespray 的 kube_apiserver_endpoint(kubespray_defaults/defaults/main/main.yml)
+#   里 `loadbalancer_apiserver is defined` 的分支**优先于** localhost 分支 —— 只要块还在,
+#   kubelet/kube-proxy 就永远走 <域名>:6443, 每节点 nginx-proxy 装了也没人用(假修复)。
+#   注释掉 = 该变量未定义 → worker 走 https://localhost:6443(本机 nginx-proxy 静态 Pod),
+#   master 走 https://127.0.0.1:6443。见 docs/api-ha/04-decision.md D7。
+# 用法: update_api_entry_all_yml "<all.yml 路径>"
+update_api_entry_all_yml() {
+    local yml="$1"
+    if api_local_lb_enabled; then
+        # ① 注释掉 loadbalancer_apiserver 块(带标记, 幂等)
+        awk '
+            /^loadbalancer_apiserver:[[:space:]]*$/ {
+                print "# [api-ha] 本地代理模式: 该块必须保持注释 —— 否则 kubelet 走域名, 本地代理静默失效"
+                print "# " $0; in_b=1; next
+            }
+            in_b && /^[[:space:]]+/ { print "# " $0; next }
+            in_b { in_b=0 }
+            { print }
+        ' "${yml}" > "${yml}.tmp" && mv "${yml}.tmp" "${yml}"
+        # ② localhost: true
+        if grep -q '^loadbalancer_apiserver_localhost:' "${yml}"; then
+            sed -i -E 's/^loadbalancer_apiserver_localhost:.*/loadbalancer_apiserver_localhost: true/' "${yml}"
+        else
+            printf 'loadbalancer_apiserver_localhost: true\n' >> "${yml}"
+        fi
+        # ③ type: 仅非默认时写
+        if [ "${API_LOCAL_LB_TYPE:-nginx}" != "nginx" ]; then
+            if grep -qE '^([[:space:]]*)#?[[:space:]]*loadbalancer_apiserver_type:' "${yml}"; then
+                sed -i -E "s|^([[:space:]]*)#?[[:space:]]*loadbalancer_apiserver_type:.*|\1loadbalancer_apiserver_type: ${API_LOCAL_LB_TYPE}|" "${yml}"
+            else
+                printf 'loadbalancer_apiserver_type: %s\n' "${API_LOCAL_LB_TYPE}" >> "${yml}"
+            fi
+        elif grep -qE '^[[:space:]]*loadbalancer_apiserver_type:' "${yml}"; then
+            # 回到默认(nginx)时清掉历史覆盖: 否则用户从 haproxy 改回默认后, 残留行仍然生效
+            # ("生效的是键的取值, 不是行是否在场" —— 只有注释掉才等于回到 kubespray 默认)
+            sed -i -E 's|^([[:space:]]*)loadbalancer_apiserver_type:.*|\1# loadbalancer_apiserver_type: 已由 sync 脚本注释(取值非默认时才写入)|' "${yml}"
+        fi
+    else
+        # 反向: 取消注释。**只解紧跟 [api-ha] 标记的那一块** —— 不能见到 `# loadbalancer_apiserver:`
+        # 就解: kubespray 的 all.yml 里本来就带一段**示例注释块**(`## External LB example config`
+        # 下的 `# loadbalancer_apiserver:` + `#   address: 1.2.3.4`), 解错就会造出第二个
+        # loadbalancer_apiserver 键 —— 而 kube_vip_current_entry/nonnumeric_entry 只读**首个**
+        # 匹配块 → 读到 1.2.3.4, 它又不是节点 IP/不在地址池 → 会被 kube_vip_derive 当成可用 VIP 接管
+        # (VIP 漂移)。见 tests/test-sync-api-entry.sh 的"示例块"用例。
+        awk '
+            /^# \[api-ha\] 本地代理模式/ { mark=1; next }
+            mark && /^# loadbalancer_apiserver:[[:space:]]*$/ {
+                print "loadbalancer_apiserver:"; in_b=1; mark=0; next
+            }
+            in_b && /^# [[:space:]]/ { print substr($0, 3); next }
+            in_b { in_b=0 }
+            { mark=0; print }
+        ' "${yml}" > "${yml}.tmp" && mv "${yml}.tmp" "${yml}"
+        grep -q '^loadbalancer_apiserver:' "${yml}" \
+            && sed -i -E 's/^loadbalancer_apiserver_localhost:.*/loadbalancer_apiserver_localhost: false/' "${yml}" \
+            || printf 'loadbalancer_apiserver_localhost: false\n' >> "${yml}"
+        # 兜底告警: 关掉本地代理后块仍是注释态(如手工注释、没有我们的标记) → 上游拿不到
+        # loadbalancer_apiserver, worker 会**静默**退回"第一个 master"(不是域名单点). 必须让操作者看见。
+        if ! grep -q '^loadbalancer_apiserver:' "${yml}" && grep -q '^# loadbalancer_apiserver:' "${yml}"; then
+            warn "${yml}: loadbalancer_apiserver 块仍处于注释态(未找到 [api-ha] 标记, 非本脚本所写)"
+            warn "  本地代理已关闭 → 该块须取消注释, 否则 worker 的 kubelet 退回第一个 master; 请手工处理"
+        fi
+    fi
+}
+
 ALL_YML="${INV_DIR}/group_vars/all/all.yml"
 if [ -f "${ALL_YML}" ]; then
     say "更新 ${ALL_YML} ..."
@@ -107,14 +199,23 @@ if [ -f "${ALL_YML}" ]; then
     fi
     unset _prot
 
-    # loadbalancer_apiserver.address → 本次运行的 API 入口(阶段一=第一个 master / 阶段二=VIP)
-    sed -i -E "s/^(\s+address:)\s+[0-9.]+(\s*#.*)?\$/\1 ${API_ADDR}\2/" "${ALL_YML}"
+    if api_local_lb_enabled; then
+        # 本地代理模式: 该块马上要被注释掉 → **不写** address(写进去只会落在注释行里, 徒增误导)
+        say "  本地代理已启用 → 摘掉 loadbalancer_apiserver 块(上游据此改走 localhost:6443)"
+    else
+        # loadbalancer_apiserver.address → 本次运行的 API 入口(阶段一=第一个 master / 阶段二=VIP / external=环境 LB)
+        sed -i -E "s/^(\s+address:)\s+[0-9.]+(\s*#.*)?\$/\1 ${API_ADDR}\2/" "${ALL_YML}"
+    fi
+    # 块注释/恢复 + localhost + type —— 两条路径都要收敛, 保证文件形态与模式一致
+    update_api_entry_all_yml "${ALL_YML}"
 
     # apiserver_loadbalancer_domain_name → 集群 API 域名
     sed -i -E "s/^apiserver_loadbalancer_domain_name:.*/apiserver_loadbalancer_domain_name: \"${API_DOMAIN}\"/" "${ALL_YML}"
 
-    # supplementary_addresses_in_ssl_keys → API 域名 + 所有 master IP(不使用宿主机物理 IP)
-    awk -v domain="${API_DOMAIN}" -v masters="${MASTER_IPS[*]}" '
+    # supplementary_addresses_in_ssl_keys → API 域名 + 所有 master IP + 本次入口地址(不使用宿主机物理 IP)
+    # 追加 entry 的原因: external 模式下入口(环境 LB/VIP)不属于任何 master, 不加就进不了证书 SAN;
+    # vip/node 模式下与 masters 重复也无害(kubeadm 侧 `| unique`)。
+    awk -v domain="${API_DOMAIN}" -v masters="${MASTER_IPS[*]}" -v entry="${API_ADDR}" '
         /^supplementary_addresses_in_ssl_keys:/ { in_sec=1; print; next }
         in_sec && /^[[:space:]]*-/ {
             # 跳过旧的域名/IP 条目(保留 k8s-api.cubestack.io / nova.local / lb.k8s.local 等历史域名)
@@ -122,17 +223,18 @@ if [ -f "${ALL_YML}" ]; then
             next
         }
         in_sec && !/^[[:space:]]*-/ {
-            # 区块结束,输出 API 域名 + masters 条目
+            # 区块结束,输出 API 域名 + masters 条目 + 本次入口地址
             print "  - " domain
             split(masters, arr, " ")
             for (i in arr) print "  - " arr[i]
+            if (entry != "") print "  - " entry
             in_sec=0
             print
             next
         }
         { print }
     ' "${ALL_YML}" > "${ALL_YML}.tmp" && mv "${ALL_YML}.tmp" "${ALL_YML}"
-    ok "已同步 loadbalancer_apiserver / apiserver_loadbalancer_domain_name / supplementary_addresses_in_ssl_keys"
+    ok "已同步 loadbalancer_apiserver(入口模式: $(api_entry_mode), 本地代理: $(api_local_lb_enabled && echo 开 || echo 关)) / apiserver_loadbalancer_domain_name / supplementary_addresses_in_ssl_keys"
 else
     warn "未找到 ${ALL_YML},跳过"
 fi

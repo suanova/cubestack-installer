@@ -203,17 +203,23 @@ unset ONLY_HOSTS
 bash "${SCRIPT_DIR}/modules/02_k8s/03_k8s_hosts.sh"        # 宿主机 /etc/hosts 全量收敛(幂等, 默认关)
 ok "环境就绪(新节点可 SSH, 时间已同步)"
 
-# ── 1.5 新节点 /etc/hosts + registry certs.d 域名同步(API/registry 域名 → 首 master IP; 幂等) ──
+# ── 1.5 新节点 /etc/hosts + registry certs.d 域名同步(API 域名 → 生效入口 / registry 域名 → REGISTRY_IP; 幂等) ──
 # ★ 2026-09-09(用户要求): 扩容时新增 worker 也必须拿到 k8s-api.cubestack.io /
 #   registry.cubestack.io 解析 —— 03_k8s_hosts 只写**部署机** /etc/hosts,
 #   节点侧此处补上(与 deploy-registry.sh 同款远端脚本: 先删旧域名行再追加当前 IP,
-#   换集群/换 IP 不残留)。API_IP/REGISTRY_IP 由 load_config 派生(nodeport=首 master IP)。
+#   换集群/换 IP 不残留)。API 入口地址由 api_entry_addr() 按入口模式解析(见下);
+#   REGISTRY_IP 由 load_config 派生(nodeport=首 master IP)。
 # ★ 2026-09-10(用户要求): 新节点还需 containerd certs.d 信任内置 registry(否则 join 后
 #   拉 registry.cubestack.io 镜像 ImagePullBackOff)。与 deploy-registry.sh [2/4] 同款 hosts.toml。
 if [ -n "${NEW_NODE_HOSTS}" ] && [ -n "${API_IP:-}" ]; then
     say "[1.5/3] 新节点 /etc/hosts + registry certs.d 同步(${API_DOMAIN} / ${REGISTRY_DOMAIN}) ..."
-    # API_DOMAIN 的解析地址: kube-vip 已绑 → VIP, 未绑 → 首个 master(api_entry_ip 说明见 lib-common)
-    API_ENTRY_IP="$(api_entry_ip)" || exit 1
+    # ★ API 域名解析到**本次生效的入口地址**, 而不是 API_IP(= APISERVER_ADDRESS, 默认首 master):
+    #   external=环境 LB / vip=VIP(未绑时阶段一回退首 master) / node=首 master。
+    #   新节点 join 后 kubelet 与 containerd 都经该域名访问 API —— 写错会让它绕过正式入口
+    #   (入口形同虚设, 且是"能通"的静默故障)。解析失败即中止, 绝不写入一个错地址。
+    # ⚠ 2026-09-28 rebase 取舍: api_entry_addr 在非 external 模式下**委托** api_entry_ip
+    #   (见 lib-common)—— 于是 main 的"显式 API_ENTRY_IP 优先 / VIP 可用性体检"一并保留。
+    _entry="$(api_entry_addr)" || { err "无法解析 API 入口地址(检查 cluster.conf 的 API_EXTERNAL_ADDR / KUBE_VIP_ENABLED 入口配置)"; exit 1; }
     # nodeport 模式: 节点侧经 NodePort 直连首个 master; 否则经 REGISTRY_DOMAIN:REGISTRY_PORT(VIP)
     # ⚠ mirror 这里仍然用 API_IP(节点 IP 语义) —— VIP 不代理 NodePort, 换成 VIP 会让新节点拉不到镜像
     _np_mirror="http://${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
@@ -227,7 +233,7 @@ if [ -n "${NEW_NODE_HOSTS}" ] && [ -n "${API_IP:-}" ]; then
 set -e
 _rd1="\$(echo '${API_DOMAIN}' | sed 's/\\./\\\\\\./g')"
 sed -i -E "/[[:space:]]\${_rd1}([[:space:]]|\$)/d" /etc/hosts 2>/dev/null || true
-echo "${API_ENTRY_IP} ${API_DOMAIN}" >> /etc/hosts
+echo "${_entry} ${API_DOMAIN}" >> /etc/hosts
 _rd2="\$(echo '${REGISTRY_DOMAIN}' | sed 's/\\./\\\\\\./g')"
 sed -i -E "/[[:space:]]\${_rd2}([[:space:]]|\$)/d" /etc/hosts 2>/dev/null || true
 echo "${REGISTRY_IP:-${API_IP}} ${REGISTRY_DOMAIN}" >> /etc/hosts

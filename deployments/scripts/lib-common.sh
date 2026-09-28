@@ -728,6 +728,12 @@ all_node_ips() {
 # 硬失败项直接 err+exit 1; 通过则返回 0
 # 用法: kube_vip_validate_config || exit 1   (须已 load_config)
 kube_vip_validate_config() {
+    # 入口来源互斥(external ↔ kube-vip / HAProxy+KA / 非法 IPv4)先行 —— 放在早退**之前**,
+    # 否则 KUBE_VIP_ENABLED≠true 时直接 return 0, external 的几项就永远验不到。
+    api_entry_validate_config || return 1
+
+    # ⚠ 2026-09-28 rebase 取舍: 这里的兜底默认取 main 的 `false`(9832975 已把 kube-vip 默认
+    #   翻成关, 全仓 11 处一起翻); api-ha 分支那版 `:-true` 是翻之前的写法, 不能照搬。
     [ "${KUBE_VIP_ENABLED:-false}" = "true" ] || return 0
 
     # ① 互斥
@@ -772,27 +778,24 @@ kube_vip_validate_config() {
         warn "少于 3 台时无真正的多数派容错(建议 3 台及以上)"
     fi
 
-    # ⑤ 本地代理(kubespray nginx-proxy): 拦住"以为改了开关就生效"的假修复
-    #    kubespray 的 kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支优先,
-    #    只要外部 LB 还在, kubelet 永远走 <域名>:6443 —— 本地代理装了也没人用。
-    #    这不是"少配一个变量", 是两个互斥的拓扑选择, 所以硬失败而不是警告。
-    if bool_is_true "${KUBE_VIP_LOCAL_PROXY:-false}"; then
-        err "KUBE_VIP_LOCAL_PROXY=true 与当前拓扑冲突, 单改开关不会生效(本地代理会装上但没流量):"
-        err "  原因: kubespray 模板中 loadbalancer_apiserver 分支优先于 localhost 分支,"
-        err "        只要 all.yml 里还定义着 loadbalancer_apiserver, kubelet 就始终走域名:6443"
-        err "  二选一:"
-        err "    · 路线1(推荐, 保留域名/VIP 对外入口): 待支持后由脚本显式声明 kubelet 端点"
-        err "    · 路线2(全集群改用本地代理): 摘掉 all.yml 的 loadbalancer_apiserver 块"
-        err "        代价: 对外稳定入口丢失(除非另有外部 LB), kube-vip 的价值也随之消失"
-        err "  当前建议: 保持 KUBE_VIP_LOCAL_PROXY=false, 走 kube-vip 单一路径"
+    # ⑤ 本地代理: 旧开关 KUBE_VIP_LOCAL_PROXY 已并入 API_LOCAL_LB_ENABLED, 本方案起**真正生效**
+    #    (实现路径 = 摘掉 all.yml 的 loadbalancer_apiserver 块, 让上游按 localhost 分支分派,
+    #     见 docs/api-ha/04-decision.md §2 与 sync-kubespray-config.sh 的模式分派)
+    if bool_is_true "${KUBE_VIP_LOCAL_PROXY:-false}" && [ -n "${API_LOCAL_LB_ENABLED:-}" ] \
+       && ! bool_is_true "${API_LOCAL_LB_ENABLED}"; then
+        err "KUBE_VIP_LOCAL_PROXY=true 但 API_LOCAL_LB_ENABLED=false —— 两个开关冲突, 请只留一个"
         return 1
     fi
     return 0
 }
 
-# 读取 inventory 中当前已生效的 API 入口地址(all.yml 的 loadbalancer_apiserver.address)
-# 用途: 让 VIP 在多次运行间保持稳定 —— 一旦写进库存就不再重新推导(否则每次跑都可能漂到别的地址,
-# 导致 kube_vip_address 与 loadbalancer_apiserver.address 失配、证书 SAN 反复重签)。
+# 读取 all.yml 里当前已生效的 API 入口地址(loadbalancer_apiserver.address) —— **只读库存事实, 不回退**。
+# 用途: 让 VIP 在多次运行间保持稳定(复用逻辑在 kube_vip_derive 第 2 步)。
+# ⚠ 语义必须保持**窄**(读不到就输出空串): 另两个消费者把它当"库存里当前生效的入口"用,
+#   一旦它在读不到时伪造出一个值, 这两处安全判定都会 fail-open —— 要回退请下沉到 kube_vip_derive:
+#     · modules/02_k8s/09_kube_vip.sh#kube_vip_cleanup 清理护栏: 入口"非空且非节点 IP"即拒绝清理,
+#       伪造值会让"明明没有入口"的集群永远清不掉 kube-vip(而它给的解法在本地代理模式下也走不通)
+#     · modules/02_k8s/06_k8s_deploy.sh 阶段二切换确认门: _KV_OLD==_KV_VIP 会**静默跳过**红底倒计时
 # 用法: cur="$(kube_vip_current_entry)"   (无库存/读不到时输出空串)
 kube_vip_current_entry() {
     local all_yml="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}/group_vars/all/all.yml"
@@ -869,9 +872,15 @@ kube_vip_derive() {
     if [ -n "${seed}" ]; then emit_ip "${seed}" || return 1; return 0; fi
 
     # 2) 库存里已有**可当 VIP 用**的地址 —— 直接复用(保证幂等, 不因重跑而漂移)
-    #    例外: KUBE_VIP_SWITCH_CONFIRMED=1(用户已在倒计时窗口确认切换)时跳过复用, 重新推导
+    #    ⚠ 不再因 KUBE_VIP_SWITCH_CONFIRMED=1 跳过复用: 那会退回第 3 步的逐地址探测, 而
+    #      **当前已绑定的 VIP 在探测口径里恰恰是"被占用"** → 每确认一次就换一个地址(VIP 漂移, 见 R8)。
+    #      "要换地址"的诉求由第 1 步的显式 K8S_API_VIP 承担, 不需要在这里重新推导。
     local cur; cur="$(kube_vip_current_entry)"
-    if [ -n "${cur}" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
+    # 本地代理模式下 all.yml 的 loadbalancer_apiserver 块保持注释 → 回退到 addons.yml 记录值,
+    # 让 VIP 在多次运行间保持稳定(不因重跑漂移)。⚠ **只在这一步回退**:
+    # kube_vip_current_entry 的其它消费者(清理护栏/切换确认门)需要它保持"all.yml 事实"的窄语义。
+    [ -n "${cur}" ] || cur="$(kube_vip_recorded_address)"
+    if [ -n "${cur}" ]; then
         if kube_vip_is_viable_candidate "${cur}"; then
             vlog "沿用已生效的 API 入口地址: ${cur}"
             emit_ip "${cur}" || return 1; return 0
@@ -1031,6 +1040,99 @@ kube_vip_resolve_target() {
 
 # 布尔归一化(cluster.conf 里 true/1/yes/on 都算开) —— 与 sync-kubespray-config.sh 的 _bool 同语义
 bool_is_true() { case "${1:-0}" in 1|true|yes|on) return 0;; *) return 1;; esac; }
+
+# ---------------- API 入口: 模式判定与地址解析(见 docs/api-ha/04-decision.md §2) ----------------
+
+# 节点侧本地代理(kubespray nginx-proxy 静态 Pod)是否启用。
+# 兼容别名: 旧开关 KUBE_VIP_LOCAL_PROXY(新方案起并入本开关, 见 cluster.conf 注释)。
+# 用法: api_local_lb_enabled && echo 开
+api_local_lb_enabled() {
+    if [ -n "${API_LOCAL_LB_ENABLED:-}" ]; then
+        bool_is_true "${API_LOCAL_LB_ENABLED}"
+    else
+        bool_is_true "${KUBE_VIP_LOCAL_PROXY:-false}"
+    fi
+}
+
+# 入口模式三选一(优先级: external > vip > node)。纯函数, 只读开关。
+# 用法: mode="$(api_entry_mode)"
+api_entry_mode() {
+    if [ -n "${API_EXTERNAL_ADDR:-}" ]; then printf 'external\n'; return 0; fi
+    if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then printf 'vip\n'; return 0; fi
+    printf 'node\n'; return 0
+}
+
+# 当前生效的 API 入口地址(全部返回值都是 IPv4 字面量, 供 /etc/hosts、kubeconfig 等消费)。
+#   external → API_EXTERNAL_ADDR
+#   vip      → kube_vip_resolve_target(内含两阶段: 未绑=首 master / 已绑=VIP)
+#   node     → 第一个 master IP(无 HA —— 不拦停, 但 api_entry_validate_config 会**显式 warn**)
+# 用法: addr="$(api_entry_addr)" || exit 1
+api_entry_addr() {
+    # ⚠ 2026-09-28 rebase 合并: 原先 vip/node 两条各调 kube_vip_resolve_target / first_master_ip,
+    #   与 api_entry_ip 是**两套并行机制**(它们不认显式 API_ENTRY_IP, 也不做 VIP 可用性体检)。
+    #   现在只留一条: external 走外部入口, 其余一律委托 api_entry_ip。
+    if [ "$(api_entry_mode)" = "external" ]; then
+        emit_ip "${API_EXTERNAL_ADDR}" || return 1
+        return 0
+    fi
+    api_entry_ip
+}
+
+# 入口配置的硬校验(互斥 + 取值合法性 + node 模式的"无 HA"提示)。失败即 err 并 return 1。
+# 用法: api_entry_validate_config || exit 1   (须已 load_config)
+#
+# ⚠ **调用点必须是语句上下文, 不得写成 `x="$(api_entry_validate_config)"`** ——
+#   本函数在 node 模式下会 warn, 而 say/ok/warn 写的是 **stdout**(只有 vlog/err 走 stderr),
+#   被 `$(...)` 捕获就会把提示文字混进返回值(与 vlog 写 stdout 那次部署中断同源, 见本文件顶部注释)。
+#   全仓库调用点(2026-09-28 核查, 两个生产调用点均为语句上下文, 无捕获):
+#     · `kube_vip_validate_config()` 内(紧随本函数定义之后)   `api_entry_validate_config || return 1`
+#     · `tools/k8s/sync-kubespray-config.sh` 顶部              `api_entry_validate_config || exit 1`
+#     · 测试桩 `tools/tests/test-api-entry-mode.sh` **有意**在 `$(...)` 里捕获(为了断言"node 模式确实
+#       打印了提示")—— 那是观察手段, 捕获到的提示**不是**被消费的返回值
+#   ⚠ **可见性**: sync-kubespray-config.sh 的 stdout 在 `06_k8s_deploy.sh` 里被 `>/dev/null 2>&1` 吞掉
+#     (两处调用皆如此), 那条路径**看不到**本提示; 但 `gen-inventory.sh` 调用它时**不重定向**
+#     (06_k8s_deploy.sh 第一步就会跑它), 所以正常全量部署里这条 warn 是**可见**的。
+api_entry_validate_config() {
+    if [ -n "${API_EXTERNAL_ADDR:-}" ]; then
+        if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
+            err "API_EXTERNAL_ADDR=${API_EXTERNAL_ADDR} 与 KUBE_VIP_ENABLED=true 互斥 —— 入口只能有一个来源:"
+            err "  复用环境已有 LB/VIP → 请设 KUBE_VIP_ENABLED=false"
+            err "  由本方案自带 VIP → 请清空 API_EXTERNAL_ADDR"
+            return 1
+        fi
+        if bool_is_true "${HAPROXY_ENABLED:-false}" || bool_is_true "${KEEPALIVED_ENABLED:-false}"; then
+            err "API_EXTERNAL_ADDR 与 HAPROXY_ENABLED/KEEPALIVED_ENABLED 互斥(三者都在提供 API 入口)"
+            return 1
+        fi
+        emit_ip "${API_EXTERNAL_ADDR}" >/dev/null 2>&1 || {
+            err "API_EXTERNAL_ADDR 不是合法 IPv4 字面量: ${API_EXTERNAL_ADDR}"
+            return 1
+        }
+    fi
+    if bool_is_true "${KUBE_VIP_LOCAL_PROXY:-false}" && [ -n "${API_LOCAL_LB_ENABLED:-}" ] \
+       && ! bool_is_true "${API_LOCAL_LB_ENABLED}"; then
+        err "KUBE_VIP_LOCAL_PROXY=true 与 API_LOCAL_LB_ENABLED=false 冲突:"
+        err "  KUBE_VIP_LOCAL_PROXY 已是 API_LOCAL_LB_ENABLED 的兼容别名, 只保留其中一个"
+        return 1
+    fi
+
+    # ⑤ node 模式(既无 kube-vip VIP, 也无 API_EXTERNAL_ADDR) → 外部/管理入口回退第一个 master。
+    #   这**正是本方案要消灭的静默单点**(D5 / §2.2 判定图, docs/api-ha/04-decision.md) ——
+    #   不拦停(无 VIP 是可接受的现场条件), 但绝不允许悄无声息: 否则运维会以为拿到了高可用入口。
+    #   放这里的原因: 本函数是全部部署路径共同的静态入口关(sync / 09_kube_vip / 06_k8s_deploy 都经过);
+    #   只把它放进某一个模块, 别的入口(如单独跑 sync)就漏掉了。
+    #   ⚠ 去重: 同一进程内只提示一次 —— 单次部署会经过本函数 2~4 次(见上方调用点), 刷屏只会让人无视它。
+    #     去重是**进程内**的: 各脚本是独立进程, 因此"可见的那次"不会被隐藏的那次吞掉(06 里 sync 两次重定向,
+    #     gen-inventory 那次不重定向 → 提示仍可见)。
+    if [ "$(api_entry_mode)" = "node" ] && [ "${_API_ENTRY_NODE_WARNED:-0}" != "1" ]; then
+        _API_ENTRY_NODE_WARNED=1
+        local _fm=""; _fm="$(first_master_ip)" || _fm="<第一个 master>"
+        warn "API 入口模式 = node: 外部/管理入口回退到第一个 master(${_fm}) —— **无 HA**"
+        warn "  该 master 宕机 ⇒ kubectl/CI/外部系统失联(节点侧不受影响, 仍走各节点本地代理)"
+        warn "  如需外部入口高可用: 设 KUBE_VIP_ENABLED=true(自带浮动 VIP), 或 API_EXTERNAL_ADDR=<环境已有 LB/VIP>"
+    fi
+    return 0
+}
 
 # all.yml 里"非数值的 API 入口地址"(如 kube-vip 启用后的 VIP 走的是 Jinja 表达式)。
 # 现有的 sed 同步只认 [0-9.]+ 字面量, 这类值不会被误覆盖; 但仍需在写入前确认,

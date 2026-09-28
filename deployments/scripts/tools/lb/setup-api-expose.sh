@@ -5,8 +5,11 @@
 # 用途: kubespray 生成的 admin.conf 证书 SAN 通常含 API_DOMAIN(如 k8s-api.cubestack.io)
 #       但不含 master 直连 IP(如 10.66.1.232 / 10.244.1.11)。宿主侧要让 kubectl/helm 能经
 #       API_DOMAIN 访问集群, 需要:
-#         1) /etc/hosts: API_DOMAIN → API_ENTRY_IP(kube-vip 已绑 → VIP; 未绑 → 第一个 master)
-#         2) DNAT: 仅当 API_IP != 第一个 master 时才需要(本脚本默认直连 master, 无需 DNAT)
+#         1) /etc/hosts: API_DOMAIN → API_ENTRY_IP(= api_entry_ip(): kube-vip 已绑 → VIP, 未绑 → 首个
+#            master; 入口模式 external 时 = 环境 LB 地址)
+#         2) DNAT: 仅**入口模式=node** 且 API_IP != 第一个 master 时才需要(默认直连 master, 无需 DNAT);
+#                 external/vip 模式由入口组件(环境 LB / kube-vip)负责转发, 宿主机一律不加 —— 加了会把
+#                 本该去入口的流量劫持回第一个 master(入口形同虚设), 历史遗留规则仍照常清理。
 #   本脚本幂等写入 /etc/hosts 并校验 API 可达(重复执行安全), 顺带清理历史遗留的 6443 DNAT。
 # 用法: sudo ./setup-api-expose.sh [--delete]
 # 数据源: config/cluster.conf (API_DOMAIN / API_IP / NODES)
@@ -85,14 +88,24 @@ fi
 # add: 先清旧 IP 残留(无论直连与否都清), 再按需添加 DNAT
 dnat_purge_old PREROUTING
 dnat_purge_old OUTPUT
-if [ "${API_IP}" = "${FIRST_MASTER}" ]; then
+# ★ 入口模式白名单: **只有 node 模式才可能加 DNAT**。
+#   external/vip 模式下 API 入口(VIP / 环境 LB)由入口组件负责转发到各 master; 宿主机再加
+#   一条 DNAT 会把经入口进来的流量兜底劫持回**第一个 master** —— 入口形同虚设, 且故障态是
+#   "看起来能通"(单点仍可用, HA 已失效)。历史遗留规则上面已无条件清理, 与模式无关。
+if [ "$(api_entry_mode)" != "node" ]; then
+    _entry_now="$(api_entry_addr || printf '%s' "${API_IP}")"
+    _entry_desc="由入口组件转发(${_entry_now})"
+    say "API 入口为 $(api_entry_mode) 模式(${_entry_now}) —— 由入口组件负责转发, 宿主机不加 DNAT(已清理历史规则)"
+elif [ "${API_IP}" = "${FIRST_MASTER}" ]; then
+    _entry_desc="宿主机直连(${API_IP})"
     say "API 入口=第一个 master(${API_IP}), 宿主机直连, 无需 DNAT(已清理历史遗留规则)"
 else
+    _entry_desc="宿主机 DNAT → ${FIRST_MASTER}"
     dnat_add PREROUTING
     dnat_add OUTPUT
 fi
 
-# 校验: 经 API_DOMAIN(宿主机 DNAT)访问 API 应 200
+# 校验: 经 API_DOMAIN(入口组件转发 / 宿主机直连 / 宿主机 DNAT)访问 API 应 200
 say "校验 https://${API_DOMAIN}:${PORT}/version ..."
 READY=0
 for _t in $(seq 1 10); do
@@ -102,7 +115,7 @@ for _t in $(seq 1 10); do
     sleep 2
 done
 if [ "${READY}" = "1" ]; then
-    ok "API 可达: https://${API_DOMAIN}:${PORT}/version (经宿主机 DNAT → ${FIRST_MASTER})"
+    ok "API 可达: https://${API_DOMAIN}:${PORT}/version (${_entry_desc})"
 else
-    warn "API 经 ${API_DOMAIN}:${PORT} 暂不可达(可稍后重试; 检查 DNAT 与 master apiserver 状态)"
+    warn "API 经 ${API_DOMAIN}:${PORT} 暂不可达(可稍后重试; 检查 ${_entry_desc} 与 master apiserver 状态)"
 fi

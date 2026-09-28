@@ -78,6 +78,9 @@ k8s-base  docker.io/rancher/local-path-provisioner:${LOCAL_PATH_VERSION}
 # ⚠ busybox 用第 3 列锁死文件名: 22_verify_registry_storage.sh 按字面 "busybox.tar" 读取
 k8s-base  docker.io/library/busybox:${BUSYBOX_TAG}   busybox.tar
 
+# API 本地代理(kubespray nginx-proxy 静态 Pod)用; tag 必须与 kubespray download.yml 的 nginx_image_tag 一致
+k8s-base  docker.io/library/nginx:${API_LB_NGINX_IMAGE_TAG}
+
 # ------------------------------------------------------------
 # [group: nginx] verify 模块测试后端(统一 HTTP 测试服务)
 #   目录: deployments/offline-files/nginx/
