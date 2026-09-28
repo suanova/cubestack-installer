@@ -594,8 +594,18 @@ else
             #   在用盘/混合盘一律不碰。旧版 7a 只有下面的 dd 擦除, 于是残留在盘上的 ceph VG/LV
             #   没人解绑 → Rook/osd-prepare 认到旧 LVM 元数据报 "already prepared" / 0 OSD。
             say "  7a) 标准清除上次 Ceph 占用的磁盘(停进程/解 LVM/dm/签名/分区表; tools/k8s/ceph-cleanup.sh)..."
-            bash "${TOOLS_K8S}/ceph-cleanup.sh" --wipe-disks \
-                || warn "    标准清除未全部成功(见上方输出); 继续走下面的签名擦除兜底"
+            for _hn in "${CEPH_NODE_HOSTS[@]}"; do
+                [ -n "${NODE_DISKS[${_hn}]:-}" ] || continue
+                _ip=""
+                for line in "${NODES[@]:-}"; do
+                    [ -z "${line}" ] && continue
+                    node_parse "${line}"
+                    [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
+                done
+                [ -n "${_ip}" ] || continue
+                bash "${TOOLS_K8S}/ceph-cleanup.sh" --wipe-node "${_ip}" --disks "${NODE_DISKS[${_hn}]}" \
+                    || warn "    ${_hn}: 标准清除未全部成功(见上方输出); 继续走下面的签名擦除兜底"
+            done
             # 7a-② 逐盘彻底擦除兜底(★ 2026-09-24 事故修复: 这里原来手写 dd 只擦
             #   头 64MB/1GB/size÷20/size÷2/尾 64MB, 与 Ceph v20 **实际**的 label 副本位置
             #   (10GiB/100GiB/1000GiB, 见 `ceph-bluestore-tool show-label` 的 locations)对不上
