@@ -11,18 +11,20 @@
 #      (历史事故: 新模块少复制初始化块 → set -u 下 "K: unbound variable" 部署崩溃)
 #   ⑦ TOGGLE 变量在 cluster.conf.example 中有默认声明(防漏配)
 #   ⑧ 文件序号 NN_ 与目录序号在发现结果中不重名冲突
-#   ⑨ tools/ 下全部脚本 bash -n 通过
+#   ⑨ tools/ 与 deployments/kubespray/ 顶格脚本 bash -n 通过
 #   ⑩ 安装 helm chart 的模块必须有 vendored 离线副本
 #   ⑪ kube-vip: 单一写入者契约(kube_vip_enabled 恒 false)+ 启用时取值自洽(address / 不与 MetalLB 抢地址)
 #   ⑬ API 入口: all.yml 本地代理语义自洽(localhost: true ⇒ loadbalancer_apiserver 块必须被注释)
 #   ⑭ 离线预加载: PRELOAD_IMAGE_PATTERNS 四处副本逐字节一致(漂移会被备料静默 trim 掉)
 #   ⑮ kubespray 补丁在位(cubestack-patch-apply.sh --check 全绿; 换树后没重放会静默降级)
+#      + 两个离线回归套件(tests/test-kubespray-patches.sh、test-render-kube-vip.sh)实跑通过
 #   ⑯ k8s 基座钉子闭环(三件):
 #      A) 钉子 vs 上游树内表值 —— cluster.conf 的 K8S/CALICO/ETCD/COREDNS/PAUSE/DNS_NODE_CACHE/
-#         METRICS_SERVER/CPA + API_LB_NGINX_IMAGE_TAG 必须与 vendored kubespray 的表一致
+#         METRICS_SERVER/CPA/LOCAL_VOLUME_PROVISIONER/NFD + API_LB_NGINX_IMAGE_TAG 必须与
+#         vendored kubespray 的表一致
 #         (只判一致, 期望值现算不写死; 换树/换钉子即报)
 #      B) 两个无模块开关键(LOCAL_VOLUME_PROVISIONER_ENABLED / NFD_ENABLED)的 .example 默认声明
-#      C) **写入者闭环**: inventory 的 group_vars/all/k8s-versions.yml 里 8 个 kubespray 版本变量
+#      C) **写入者闭环**: inventory 的 group_vars/all/k8s-versions.yml 里 10 个 kubespray 版本变量
 #         确实存在且 == cluster.conf 的钉子(写入者 = tools/k8s/sync-kubespray-config.sh 3.2 节)
 #      A 只证"钉子自洽"(== 表值), C 才证"部署真会用钉子"; 缺 C 时删掉写入节/改错值照样全绿。
 # 用法: bash check-modules.sh           # 校验全部模块(只读, 无需 root)
@@ -40,7 +42,6 @@ QUIET=0
 say() { [ "${QUIET}" = "1" ] || echo -e "\033[36m→ $*\033[0m"; }
 ok()  { echo -e "\033[32m✅ $*\033[0m"; }
 bad() { echo -e "\033[31m❌ $*\033[0m"; }
-warn() { echo -e "\033[33m⚠  $*\033[0m"; }
 warn() { echo -e "\033[33m⚠  $*\033[0m"; }
 
 FAIL=0
@@ -178,13 +179,22 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 # ---------- ⑨ tools/ 工具脚本语法检查 ----------
 # 模块外的部署工具(tools/**/*.sh: ceph-backup/deploy-registry/... )同样参与部署,
 # 漏检会在运行期炸(历史: registry 就绪等待 K unbound 崩溃)。
-say "[9/16] tools/ 工具脚本语法检查 ..."
+# ★ 2026-09-28(评审 I6): 范围补上 deployments/kubespray/ 的**顶格**入口脚本(cubestack-offline.sh /
+#   cubestack-patch-apply.sh / cubestack-kubespray-upgrade.sh)—— 它们既不是模块也不在 scripts/ 下,
+#   于是本支新增的两个脚本从未被 bash -n 过(写错一行要到实机升级时才发现)。
+#   只取**顶格一层**: vendored 树与 cubestack-patches/ 里的 .sh 属上游/数据文件, 不归本项管。
+say "[9/16] tools/ + kubespray 入口脚本语法检查 ..."
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
+KSD_SH_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/kubespray"
+SH_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 T_FAIL=0
+T_N=0
 while IFS= read -r -d '' f; do
-    bash -n "$f" 2>/dev/null || { ck_fail "tools 语法错误: ${f#$TOOLS_DIR/}"; T_FAIL=1; }
-done < <(find "${TOOLS_DIR}" -name '*.sh' -print0)
-[ "${T_FAIL}" = "0" ] && ok "全部 $(find "${TOOLS_DIR}" -name '*.sh' | wc -l) 个 tools 脚本语法通过"
+    bash -n "$f" 2>/dev/null || { ck_fail "语法错误: ${f#${SH_ROOT}/}"; T_FAIL=1; }
+    T_N=$((T_N + 1))
+done < <(find "${TOOLS_DIR}" -name '*.sh' -print0; find "${KSD_SH_DIR}" -maxdepth 1 -name '*.sh' -print0)
+[ "${T_FAIL}" = "0" ] && ok "全部 ${T_N} 个 tools/kubespray 脚本语法通过"
+unset SH_ROOT 2>/dev/null || true
 
 # ---------- ⑩ helm chart 离线副本(全仓库约定) ----------
 # 规则: 凡安装 helm chart 的模块, 其 chart **必须有一份 vendored 在 deployments/cubestack-addon/**
@@ -503,7 +513,7 @@ unset _i _j _p _n _v _ref _drift
 # 为什么必须有这一条: 换树/手工覆盖树之后, 补丁若没重放, 部署**照样能跑**但缺我们的修复
 #   (metallb CRD 竞态 / registry 顺序 / 离线备料建目录 / SAN 与 join 守卫…), 属静默降级。
 # 见 docs/kubespray-upgrade.md(升级 SOP 与历次记录)。
-say "[15/16] kubespray 补丁在位 ..."
+say "[15/16] kubespray 补丁在位 + 离线套件 ..."
 if [ -x "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" ]; then
     if _out="$(bash "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" --check 2>&1)"; then
         ok "  ⑮ kubespray 补丁全部在位"
@@ -513,6 +523,22 @@ if [ -x "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" ]; then
 else
     warn "  跳过 ⑮(未找到 cubestack-patch-apply.sh)"
 fi
+# ★ 2026-09-28(评审 I6): 两个离线回归套件此前**无人调度** —— 写了就当"有测试", 但全仓没有任何入口
+#   会跑它们(本仓库没有 CI)→ 回归等于不存在。挂在这里正合适: ⑮ 本就是"补丁层可用的证据", 而这两个
+#   套件正是它的回归(test-kubespray-patches 覆盖重放器三态/退休判定, test-render-kube-vip 覆盖
+#   kube-vip 渲染器的 version() 分支)。两者都只用仓库内 fixture, 不联网、不碰集群, 秒级完成。
+#   ⚠ 任一失败即 ck_fail(与 ⑮ 主判据同口径): 套件跑不起来 = 没有证据, 不能算通过。
+for _t in test-kubespray-patches.sh test-render-kube-vip.sh; do
+    _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
+    if [ ! -f "${_tp}" ]; then
+        ck_fail "⑮ 离线套件缺失: ${_tp#${REPO_ROOT}/}(⑮ 的回归证据没了)"
+    elif _tout="$(bash "${_tp}" 2>&1)"; then
+        ok "  ⑮ 离线套件通过: ${_t}"
+    else
+        ck_fail "⑮ 离线套件失败: ${_t}" "$(printf '%s' "${_tout}" | grep -E '^  FAIL' | head -5)"
+    fi
+done
+unset _t _tp _tout 2>/dev/null || true
 
 # ---------- ⑯ k8s 基座钉子闭环: A 钉子 vs 树内表值 / B 无模块开关键 / C 写入者(inventory) ----------
 # 为什么必须有 A: cluster.conf 的"k8s 基座组"是**显式钉子**(离线 tar / Harbor 同步需要确定的
@@ -633,6 +659,8 @@ KSD_PINS=(
     "CPA_VERSION:dnsautoscaler_version"
     "ETCD_VERSION:etcd_version"
     "CALICO_VERSION:calico_version"
+    "LOCAL_VOLUME_PROVISIONER_VERSION:local_volume_provisioner_version"
+    "NFD_VERSION:node_feature_discovery_version"
 )
 KSD_INV_YML="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/all/k8s-versions.yml"
 if [ ! -f "${KSD_INV_YML}" ]; then
@@ -683,9 +711,13 @@ else
         _want_metrics="$(_ksd_scalar "${KSD_DL}" metrics_server_version)"
         _want_cpa="$(_ksd_scalar "${KSD_DL}" dnsautoscaler_version)"
         _want_nginx="$(_ksd_scalar "${KSD_DL}" nginx_image_tag)"
+        # LVP / NFD(2026-09-28 评审 I4): 这两个钉子是 v2.32 支新加的(README 明写"须与上游同值"),
+        # 却零断言 —— 上游同一文件里的标量, 取法与 metrics_server 完全一致(*_image_tag 由 *_version 拼)。
+        _want_lvp="$(_ksd_scalar "${KSD_DL}" local_volume_provisioner_version)"
+        _want_nfd="$(_ksd_scalar "${KSD_DL}" node_feature_discovery_version)"
         if [ -z "${_want_calico}" ] || [ -z "${_want_etcd}" ] || [ -z "${_want_coredns}" ] || \
            [ -z "${_want_pause}" ] || [ -z "${_want_ndc}" ] || [ -z "${_want_metrics}" ] || \
-           [ -z "${_want_cpa}" ] || [ -z "${_want_nginx}" ]; then
+           [ -z "${_want_cpa}" ] || [ -z "${_want_nginx}" ] || [ -z "${_want_lvp}" ] || [ -z "${_want_nfd}" ]; then
             ck_fail "⑯ ${_cn}: 解析不出上游期望值(K8S_VERSION=${_k8s} → kube_major=${_major})" \
                 "      → 树内表可能没有 ${_major} 这一线(如 1.33 在 v2.32 表里就不可用); 请改用表内线"
             KSD_BAD=1; continue
@@ -717,8 +749,10 @@ else
         _ksd_cmp METRICS_SERVER_VERSION "${_want_metrics}" "metrics_server_version"
         _ksd_cmp CPA_VERSION          "${_want_cpa}"     "dnsautoscaler_version(cluster-proportional-autoscaler)"
         _ksd_cmp API_LB_NGINX_IMAGE_TAG "${_want_nginx}" "nginx_image_tag(download.yml:265, 节点侧 API 本地代理静态 Pod)"
+        _ksd_cmp LOCAL_VOLUME_PROVISIONER_VERSION "${_want_lvp}" "local_volume_provisioner_version(download.yml:299)"
+        _ksd_cmp NFD_VERSION          "${_want_nfd}"   "node_feature_discovery_version(download.yml:370)"
 
-        # ---- ⑯-C 写入者闭环: inventory 的 8 个版本键 == 本 conf 的钉子(逐键点名) ----
+        # ---- ⑯-C 写入者闭环: inventory 的 10 个版本键 == 本 conf 的钉子(逐键点名) ----
         # 这一节回答的是"部署真会用这些钉子吗" —— 见文件头 ⑯-C 说明。取不到钉子侧时**不重复报**
         # (那已由上面的 ⑯-A 报过红), 只报 inventory 侧缺键/值不符。
         if [ -f "${KSD_INV_YML}" ]; then
@@ -764,9 +798,9 @@ else
     done
 
     [ "${KSD_BAD}" = "0" ] && \
-        ok "  ⑯ k8s 基座钉子闭环通过(A: K8S_VERSION 在 kubelet_checksums 表内, calico/etcd/coredns/pause/node-cache/metrics/cpa/nginx-tag 与树内表逐项对齐; B: 两个无模块开关声明在位; C: inventory 8 个版本键 == 钉子)"
+        ok "  ⑯ k8s 基座钉子闭环通过(A: K8S_VERSION 在 kubelet_checksums 表内, calico/etcd/coredns/pause/node-cache/metrics/cpa/nginx-tag/lvp/nfd 与树内表逐项对齐; B: 两个无模块开关声明在位; C: inventory 10 个版本键 == 钉子)"
 fi
-unset _cn _cf _k8s _k8s_bare _major _want_calico _want_etcd _want_coredns _want_pause _want_ndc _want_metrics _want_cpa _want_nginx _k _v _pv _kv _pin _got _pair KSD_PINS KSD_INV_YML 2>/dev/null || true
+unset _cn _cf _k8s _k8s_bare _major _want_calico _want_etcd _want_coredns _want_pause _want_ndc _want_metrics _want_cpa _want_nginx _want_lvp _want_nfd _k _v _pv _kv _pin _got _pair KSD_PINS KSD_INV_YML 2>/dev/null || true
 
 echo "---------------------------------------------"
 if [ "${FAIL}" = "0" ]; then
