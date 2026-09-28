@@ -316,7 +316,7 @@ bash cubestack-kubespray-upgrade.sh v2.32.0 --tree-src /tmp/kubespray-2.32 2>&1 
 
 ```bash
 cd /home/supperadm/cubestack-installer/deployments/kubespray
-diff -rq --no-dereference --exclude=.git kubespray /tmp/kubespray-2.32 | grep -v '^Only in kubespray: \(inventory/local\|cubestack-patches\|\.venv\)'
+diff -rq --no-dereference --exclude=.git kubespray /tmp/kubespray-2.32 | grep -v '^Only in kubespray: \(inventory/local\|cubestack-patches\|patch-playbooks\|\.venv\)'
 ```
 预期: 只剩我们的补丁文件与人工项(`kubeadm-secondary.yml` 等);**没有** `inventory/sample/**` 的差异(该目录已随新树刷新)、也没有符号链接假差异(树内 `inventory/local/group_vars` 是相对符号链接,`--no-dereference` 必须加)。
 
@@ -334,7 +334,7 @@ git commit -m "chore(kubespray): 树升级 v2.28.0 → v2.32.0(补丁全部重�
 - Modify: `deployments/scripts/tools/check-modules.sh`(新增 ⑮;项数 14 → 15)
 
 - [ ] **Step 1: 写 `docs/kubespray-upgrade.md`**
-结构: §1 SOP(照抄 spec §3.4 的 9 步,补上每条的实际命令) / §2 历次升级记录(首条 = 本次: v2.28.0→v2.32.0、k8s 1.32.5→1.35.8、冲突与处置、踩的坑) / §3 待上游化清单(首批 metallb 4 处) / §4 演练记录(**取自 T3 的报告**: v2.30.0 / v2.31.0 两次靶子的 APPLY/RETIRE 计数与冲突清单) / §5 **回退**(旧树 tag `kubespray-v2.28.0-cubestack` 恢复 + 补丁层整层不应用 + ⚠ k8s 版本变量**不能单独回退**到 1.32:v2.32 表里没有 1.32, 回退必须连同树一起)。
+结构: §1 SOP(照抄 spec §3.4 的 9 步,补上每条的实际命令) / §2 历次升级记录(首条 = 本次: v2.28.0→v2.32.0、k8s 1.32.5→1.35.8、冲突与处置、踩的坑) / §3 待上游化清单(首批 metallb 4 处) / §4 演练记录(**取自 T3 的报告**: v2.30.0 / v2.31.0 两次靶子的 APPLY/RETIRE 计数与冲突清单) / §5 **回退**(⚠ 树与补丁层**耦合**,必须一起回:`git checkout kubespray-2.28.0-cubestack -- deployments/kubespray` —— 因为现行补丁层已删 03(旧树需要它)且新增 08(打不上旧树);另注:k8s 版本变量**不能单独回退**到 1.32,v2.32 表里没有 1.32)。
 
 - [ ] **Step 2: check-modules 新增 ⑮(补丁在位)**
 

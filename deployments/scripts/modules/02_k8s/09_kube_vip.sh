@@ -241,7 +241,7 @@ if ! is_cluster_live; then
 fi
 
 # 镜像必须已在各节点 —— 离线方案的硬前提
-_KV_IMAGE="${KUBE_VIP_IMAGE_REPO:-ghcr.io/kube-vip/kube-vip}:${KUBE_VIP_VERSION:-v0.8.9}"
+_KV_IMAGE="${KUBE_VIP_IMAGE_REPO:-ghcr.io/kube-vip/kube-vip}:${KUBE_VIP_VERSION:-v1.0.3}"
 _MISSING=()
 for _ip in "${_MIP[@]}"; do
     _ssh "${_ip}" "sudo ctr -n k8s.io i ls -q 2>/dev/null | grep -qF '${_KV_IMAGE}'" || _MISSING+=("${_ip}")
@@ -274,7 +274,7 @@ while [ "${_i}" -lt "${#_MHOST[@]}" ]; do
         --interface "${KUBE_VIP_INTERFACE:-}" \
         --template "${TEMPLATE}" \
         --image-repo "${KUBE_VIP_IMAGE_REPO:-ghcr.io/kube-vip/kube-vip}" \
-        --image-tag "${KUBE_VIP_VERSION:-v0.8.9}" \
+        --image-tag "${KUBE_VIP_VERSION:-v1.0.3}" \
         --cp-detect "$(bool_is_true "${KUBE_VIP_CP_DETECT:-false}" && echo true || echo false)" \
         > "${_TMPDIR}/${H}.yml" || { err "渲染失败: ${H}"; exit 1; }
     # 渲染后立即断言 —— vip_nodename 是脑裂唯一致命点, 宁可早失败

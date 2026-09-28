@@ -15,6 +15,8 @@
 # 用法:
 #   render-kube-vip-manifest.py --nodename <节点名> --vip <VIP> [--interface <网卡>] \
 #       [--template <path>] [--image-repo <repo>] [--image-tag <tag>] [--port 6443]
+#   --image-tag 默认 v1.0.3(对齐 kubespray v2.32 download.yml 的 kube_vip_version: 1.0.3),
+#   它的去 v 形态同时驱动模板里的 version() 比较 → 决定发 vip_subnet(v1.0.3)还是 vip_cidr(旧版)。
 # 输出: 渲染好的 YAML 到 stdout
 # ============================================================
 import argparse
@@ -33,6 +35,18 @@ def to_json(value):
     return json.dumps(value)
 
 
+def ansible_version_test(value, other, operator="=="):
+    """复刻 ansible 的 version test(模板用 `x is version('0.9.0', '>=')` 选 vip_subnet/vip_cidr)。
+
+    jinja2 原生没有这个 test; 不注册的话模板直接 `No test named 'version' found` 报错。
+    """
+    def norm(s):
+        return [int(p) if p.isdigit() else p for p in str(s).lstrip("v").split(".")]
+    a, b = norm(value), norm(other)
+    return {"<": a < b, "<=": a <= b, "==": a == b,
+            ">=": a >= b, ">": a > b, "!=": a != b}[operator]
+
+
 def render(template_path, variables):
     with open(template_path, encoding="utf-8") as fh:
         source = fh.read()
@@ -43,6 +57,7 @@ def render(template_path, variables):
         keep_trailing_newline=True,
     )
     env.filters["to_json"] = to_json
+    env.tests["version"] = ansible_version_test
     return env.from_string(source).render(**variables)
 
 
@@ -54,7 +69,7 @@ def main():
     ap.add_argument("--interface", default="", help="承载 VIP 的网卡(留空 = kube-vip 自动检测)")
     ap.add_argument("--template", required=True, help="kube-vip.manifest.j2 路径")
     ap.add_argument("--image-repo", default="ghcr.io/kube-vip/kube-vip")
-    ap.add_argument("--image-tag", default="v0.8.9")
+    ap.add_argument("--image-tag", default="v1.0.3")
     ap.add_argument("--port", type=int, default=6443)
     ap.add_argument("--pull-policy", default="IfNotPresent")
     ap.add_argument("--cp-detect", default="false", choices=["true", "false"],
@@ -68,6 +83,8 @@ def main():
         "kube_apiserver_port": args.port,
         "kube_vip_image_repo": args.image_repo,
         "kube_vip_image_tag": args.image_tag,
+        # v2.32 模板用它做 version() 比较 → vip_subnet / vip_cidr 分支(需纯数字形态, 故去前导 v)
+        "kube_vip_version": args.image_tag.lstrip("v"),
         "k8s_image_pull_policy": args.pull_policy,
         "kube_vip_admin_conf": "admin.conf",
         # --- 固定策略(与 docs/kube-vip-api-ha.md 的决策 D1/D4 一致)---
@@ -89,8 +106,14 @@ def main():
         "kube_vip_renewdeadline": 3,
         "kube_vip_retryperiod": 1,
         "kube_vip_services_interface": "",
+        # v2.32 模板新增: 裸 if(无 default) → StrictUndefined 下必须显式给值。
+        # False = 不开指标端口, 与 D1/D4(不用 kube-vip 做 LB/服务暴露)及"可观测栈已移除"一致。
+        "kube_vip_metrics_enabled": False,
         # BGP 未实现(见文档 R6), 关闭以免模板引用未定义变量
         "kube_vip_bgp_enabled": False,
+        # 模板里是 default('', true), 本可省; 但显式给空串更稳(不依赖 default 的第二参数语义)
+        "kube_vip_bgp_sourceip": "",
+        "kube_vip_bgp_sourceif": "",
     }
 
     try:
