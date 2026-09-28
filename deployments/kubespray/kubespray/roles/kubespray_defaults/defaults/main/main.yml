@@ -11,10 +11,14 @@ ping_access_ip: true
 
 # Setting this value to false will fail
 # For details, read this comment https://github.com/kubernetes-sigs/kubespray/pull/11016#issuecomment-2004985001
+# if kube_api_anonymous_auth: "{{ undef() }}", remove --anonymous-auth argument
 kube_api_anonymous_auth: true
 
 # Default value, but will be set to true automatically if detected
 is_fedora_coreos: false
+
+# Kubernetes 1.35+: fail on cgroup v1 by default
+kubelet_fail_cgroup_v1: true
 
 # Swap settings
 kubelet_fail_swap_on: true
@@ -26,12 +30,12 @@ kube_version: "{{ (kubelet_checksums['amd64'] | dict2items)[0].key }}"
 ## The minimum version working
 kube_version_min_required: "{{ (kubelet_checksums['amd64'] | dict2items)[-1].key }}"
 
-## Kube Proxy mode One of ['iptables', 'ipvs']
+## Kube Proxy mode One of ['ipvs', 'iptables', 'nftables']
 kube_proxy_mode: ipvs
 
-# Kubeadm config api version
-# If kube_version is v1.31 or higher, it will be v1beta4, otherwise it will be v1beta3.
-kubeadm_config_api_version: "{{ 'v1beta4' if kube_version is version('1.31.0', '>=') else 'v1beta3' }}"
+# When true, kubeadm skips the kube-proxy addon (for example Cilium kube-proxy replacement).
+# Node and package tasks that exist only for kube-proxy also honor this (IPVS/nftables modules, ipvsadm, strict_arp checks).
+kube_proxy_remove: false
 
 # Debugging option for the kubeadm config validate command
 # Set to false only for development and testing scenarios where validation is expected to fail (pre-release Kubernetes versions, etc.)
@@ -66,6 +70,15 @@ kubeadm_join_phases_skip_default: []
 kubeadm_join_phases_skip: >-
  {{ kubeadm_join_phases_skip_default }}
 
+# List of kubeadm upgrade node phases that should be skipped when upgrading a secondary control plane node (supports different phases than kubeadm init and kubeadm upgrade apply)
+kubeadm_upgrade_node_phases_skip_default: []
+kubeadm_upgrade_node_phases_skip: >-
+  {%- if kube_version is version('1.32.0', '>=') -%}
+  {{ kubeadm_upgrade_node_phases_skip_default + kubeadm_init_phases_skip }}
+  {%- else -%}
+  {{ kubeadm_upgrade_node_phases_skip_default }}
+  {%- endif -%}
+
 # Set to true to remove the role binding to anonymous users created by kubeadm
 remove_anonymous_access: false
 
@@ -86,6 +99,7 @@ ignore_assert_errors: false
 # kube-vip
 kube_vip_enabled: false
 kube_vip_lb_fwdmethod: local
+kube_vip_address:
 
 # nginx-proxy configure
 nginx_config_dir: "/etc/nginx"
@@ -100,7 +114,7 @@ containerd_bin_dir: "{{ bin_dir }}"
 etcd_data_dir: /var/lib/etcd
 # Where the binaries will be downloaded.
 # Note: ensure that you've enough disk space (about 1G)
-local_release_dir: "/tmp/releases"
+local_release_dir: "{{ default_local_release_dir }}"
 # Random shifts for retrying failed ops like pushing/downloading
 retry_stagger: 5
 
@@ -138,8 +152,6 @@ manual_dns_server: ""
 
 # Can be host_resolvconf, docker_dns or none
 resolvconf_mode: host_resolvconf
-# Deploy netchecker app to verify DNS resolve as an HTTP service
-deploy_netchecker: false
 # Ip address of the kubernetes DNS service (called skydns for historical reasons)
 skydns_server: "{{ kube_service_subnets.split(',') | first | ansible.utils.ipaddr('net') | ansible.utils.ipaddr(3) | ansible.utils.ipaddr('address') }}"
 skydns_server_secondary: "{{ kube_service_subnets.split(',') | first | ansible.utils.ipaddr('net') | ansible.utils.ipaddr(4) | ansible.utils.ipaddr('address') }}"
@@ -199,7 +211,7 @@ kube_external_ca_mode: false
 # Cluster Loglevel configuration
 kube_log_level: 2
 
-# Choose network plugin (cilium, calico, kube-ovn, weave or flannel. Use cni for generic cni plugin)
+# Choose network plugin (cilium, calico, kube-ovn or flannel. Use cni for generic cni plugin)
 # Can also be set to 'cloud', which lets the cloud provider setup appropriate routing
 kube_network_plugin: calico
 kube_network_plugin_multus: false
@@ -210,8 +222,24 @@ kube_network_plugin_multus: false
 # This enables to deploy cilium alongside another CNI to replace kube-proxy.
 cilium_deploy_additionally: false
 
-# Determines if calico_rr group exists
-peer_with_calico_rr: "{{ 'calico_rr' in groups and groups['calico_rr'] | length > 0 }}"
+# Identity allocation mode selects how identities are shared between cilium
+# nodes by setting how they are stored. The options are "crd" or "kvstore".
+# - "crd" stores identities in kubernetes as CRDs (custom resource definition).
+#   These can be queried with:
+#     `kubectl get ciliumid`
+# - "kvstore" stores identities in an etcd kvstore.
+# - In order to support External Workloads, "crd" is required
+#   - Ref: https://docs.cilium.io/en/stable/gettingstarted/external-workloads/#setting-up-support-for-external-workloads-beta
+# - KVStore operations are only required when cilium-operator is running with any of the below options:
+#   - --synchronize-k8s-services
+#   - --synchronize-k8s-nodes
+#   - --identity-allocation-mode=kvstore
+#   - Ref: https://docs.cilium.io/en/stable/internals/cilium_operator/#kvstore-operations
+cilium_identity_allocation_mode: crd
+
+# The default IP address management mode is "Cluster Scope".
+# https://docs.cilium.io/en/stable/concepts/networking/ipam/
+cilium_ipam_mode: cluster-pool
 
 # Choose data store type for calico: "etcd" or "kdd" (kubernetes datastore)
 calico_datastore: "kdd"
@@ -400,6 +428,9 @@ docker_plugins: []
 # Containerd options - thse are relevant when container_manager == 'containerd'
 containerd_use_systemd_cgroup: true
 
+# Use static containerd binary for compatibility with older distributions (e.g., Debian 11).
+containerd_static_binary: false
+
 # Containerd conf default dir
 containerd_storage_dir: "/var/lib/containerd"
 containerd_state_dir: "/run/containerd"
@@ -422,10 +453,6 @@ credentials_dir: "{{ inventory_dir }}/credentials"
 # K8s image pull policy (imagePullPolicy)
 k8s_image_pull_policy: IfNotPresent
 
-# Kubernetes dashboard
-# RBAC required. see docs/getting-started.md for access details.
-dashboard_enabled: false
-
 # Addons which can be enabled
 helm_enabled: false
 registry_enabled: false
@@ -442,7 +469,6 @@ vsphere_csi_enabled: false
 upcloud_csi_enabled: false
 csi_snapshot_controller_enabled: false
 persistent_volumes_enabled: false
-ingress_nginx_enabled: false
 ingress_alb_enabled: false
 cert_manager_enabled: false
 expand_persistent_volumes: false
@@ -450,6 +476,7 @@ metallb_enabled: false
 metallb_speaker_enabled: "{{ metallb_enabled }}"
 argocd_enabled: false
 gateway_api_enabled: false
+prometheus_operator_crds_enabled: false
 
 ## When OpenStack is used, Cinder version can be explicitly specified if autodetection fails (Fixed in 1.9: https://github.com/kubernetes/kubernetes/issues/50461)
 # openstack_blockstorage_version: "v1/v2/auto (default)"
@@ -499,6 +526,33 @@ external_hcloud_cloud:
   ##    arg2: "value2"
   controller_extra_args: {}
 
+## Structured authentication config
+## Structured AuthenticationConfiguration (GA in k8s v1.34) configures the API server's authentication with a structured configuration file.
+## Note: The `--authentication-config` and `--oidc-*` flags are mutually exclusive. The two features cannot be used at the same time.
+## Docs: https://kubernetes.io/docs/reference/access-authn-authz/authentication/#using-authentication-configuration
+## KEP: https://github.com/kubernetes/enhancements/tree/master/keps/sig-auth/3331-structured-authentication-configuration
+## Config API Reference: https://kubernetes.io/docs/reference/config-api/apiserver-config.v1/#apiserver-config-k8s-io-v1-AuthenticationConfiguration
+kube_apiserver_use_authentication_config_file: false
+kube_apiserver_authentication_config_api_version: "{{ 'v1beta1' if kube_version is version('1.34.0', '<') else 'v1' }}"
+kube_apiserver_authentication_config_anonymous:
+  enabled: "{{ kube_api_anonymous_auth }}"
+  conditions: []
+kube_apiserver_authentication_config_jwt: []
+## Example structured authentication issuer config that replicates --oidc-* flag based config by reusing the kube_oidc_* variables
+# kube_apiserver_authentication_config_jwt:
+#   - issuer:
+#       url: "{{ kube_oidc_url }}"
+#       certificateAuthority: "{{ kube_oidc_ca_file }}"
+#       audiences:
+#       - "{{ kube_oidc_client_id }}"
+#     claimMappings:
+#       username:
+#         claim: "{{ kube_oidc_username_claim }}"
+#         prefix: "{{ kube_oidc_username_prefix }}"
+#       groups:
+#         claim: "{{ kube_oidc_groups_claim }}"
+#         prefix: "{{ kube_oidc_groups_prefix }}"
+
 ## List of authorization modes that must be configured for
 ## the k8s cluster. Only 'AlwaysAllow', 'AlwaysDeny', 'Node' and
 ## 'RBAC' modes are tested. Order is important.
@@ -544,21 +598,6 @@ kube_apiserver_authorization_config_authorizers:
 #     - expression: "!('kubeadm:cluster-admins' in request.groups)"
 #     - expression: "!('system:masters' in request.groups)"
 
-## Two workarounds are required to use AuthorizationConfiguration with kubeadm v1.29.x:
-## 1. Enable the StructuredAuthorizationConfiguration feature gate:
-# kube_apiserver_feature_gates:
-# - StructuredAuthorizationConfiguration=true
-## 2. Use the following kubeadm_patches to remove defaulted authorization-mode flags (Workaround for a kubeadm defaulting bug on v1.29.x. fixed in 1.30+ via: https://github.com/kubernetes/kubernetes/pull/123654)
-# kubeadm_patches:
-# - target: kube-apiserver
-#   type: strategic
-#   patch:
-#     spec:
-#       containers:
-#       - name: kube-apiserver
-#         $deleteFromPrimitiveList/command:
-#           - --authorization-mode=Node,RBAC
-
 rbac_enabled: "{{ ('RBAC' in authorization_modes and not kube_apiserver_use_authorization_config_file) or (kube_apiserver_use_authorization_config_file and kube_apiserver_authorization_config_authorizers | selectattr('type', 'equalto', 'RBAC') | list | length > 0) }}"
 
 # When enabled, API bearer tokens (including service account tokens) can be used to authenticate to the kubelet's HTTPS endpoint
@@ -578,9 +617,20 @@ kubelet_protect_kernel_defaults: true
 
 # Set additional sysctl variables to modify Linux kernel variables, for example:
 # additional_sysctl:
-#  - { name: kernel.pid_max, value: 131072 }
+#  - { name: vm.swappiness, value: 10 }
 #
+# `additional_sysctl` uses exact-value semantics. For floor semantics
+# (only apply when the node's current value is lower), use
+# `additional_sysctl_min` below.
 additional_sysctl: []
+
+# User-defined sysctl floors, merged on top of the built-in floor values
+# (user values take precedence). Set a key to 0 to disable a default floor.
+# Example:
+# additional_sysctl_min:
+#   net.core.somaxconn: 65535
+#   kernel.pid_max: 0
+additional_sysctl_min: {}
 
 ## List of key=value pairs that describe feature gates for
 ## the k8s cluster.
@@ -592,57 +642,33 @@ kube_proxy_feature_gates: []
 kubelet_feature_gates: []
 kubeadm_feature_gates: []
 
-# Local volume provisioner storage classes
-# Levarages Ansibles string to Python datatype casting. Otherwise the dict_key isn't substituted
-# see https://github.com/ansible/ansible/issues/17324
-local_volume_provisioner_storage_classes: |
-  {
-    "{{ local_volume_provisioner_storage_class | default('local-storage') }}": {
-      "host_dir": "{{ local_volume_provisioner_base_dir | default('/mnt/disks') }}",
-      "mount_dir": "{{ local_volume_provisioner_mount_dir | default('/mnt/disks') }}",
-      "volume_mode": "Filesystem",
-      "fs_type": "ext4"
+local_volume_provisioner_storage_class: local-storage
+local_volume_provisioner_base_dir: /mnt/disks
+local_volume_provisioner_mount_dir: /mnt/disks
+local_volume_provisioner_storage_classes: "{{ local_volume_provisioner_storage_classes_default | items2dict }}"
 
-    }
-  }
-
-# weave's network password for encryption
-# if null then no network encryption
-# you can use --extra-vars to pass the password in command line
-weave_password: EnterPasswordHere
-
-ssl_ca_dirs: |-
-  [
-  {% if ansible_os_family in ['Flatcar', 'Flatcar Container Linux by Kinvolk'] -%}
-  '/usr/share/ca-certificates',
-  {% elif ansible_os_family == 'RedHat' -%}
-  '/etc/pki/tls',
-  '/etc/pki/ca-trust',
-  {% elif ansible_os_family == 'Debian' -%}
-  '/usr/share/ca-certificates',
-  {% endif -%}
-  ]
-
+ssl_ca_dirs: "{{ ssl_ca_dirs_per_os_family[ansible_facts['os_family']] | d([]) }}"
+# used for delegating tasks on a working control plane node
+first_kube_control_plane: "{{ groups['kube_control_plane'] | first }}"
 # Vars for pointing to kubernetes api endpoints
-kube_apiserver_count: "{{ groups['kube_control_plane'] | length }}"
 kube_apiserver_address: "{{ hostvars[inventory_hostname]['main_ip'] }}"
 kube_apiserver_access_address: "{{ hostvars[inventory_hostname]['main_access_ip'] }}"
 first_kube_control_plane_address: "{{ hostvars[groups['kube_control_plane'][0]]['main_access_ip'] }}"
 loadbalancer_apiserver_localhost: "{{ loadbalancer_apiserver is not defined }}"
 loadbalancer_apiserver_type: "nginx"
 # applied if only external loadbalancer_apiserver is defined, otherwise ignored
-apiserver_loadbalancer_domain_name: "lb-apiserver.kubernetes.local"
+apiserver_loadbalancer_domain_name: "{{ 'localhost' if loadbalancer_apiserver_localhost else (loadbalancer_apiserver.address | d(undef())) }}"
 kube_apiserver_global_endpoint: |-
   {% if loadbalancer_apiserver is defined -%}
-      https://{{ apiserver_loadbalancer_domain_name }}:{{ loadbalancer_apiserver.port | default(kube_apiserver_port) }}
-  {%- elif loadbalancer_apiserver_localhost and (loadbalancer_apiserver_port is not defined or loadbalancer_apiserver_port == kube_apiserver_port) -%}
-      https://localhost:{{ kube_apiserver_port }}
+      https://{{ apiserver_loadbalancer_domain_name | ansible.utils.ipwrap }}:{{ loadbalancer_apiserver.port | default(kube_apiserver_port) }}
+  {%- elif loadbalancer_apiserver_localhost -%}
+      https://localhost:{{ loadbalancer_apiserver_port | default(kube_apiserver_port) }}
   {%- else -%}
       https://{{ first_kube_control_plane_address | ansible.utils.ipwrap }}:{{ kube_apiserver_port }}
   {%- endif %}
 kube_apiserver_endpoint: |-
   {% if loadbalancer_apiserver is defined -%}
-      https://{{ apiserver_loadbalancer_domain_name }}:{{ loadbalancer_apiserver.port | default(kube_apiserver_port) }}
+      https://{{ apiserver_loadbalancer_domain_name | ansible.utils.ipwrap }}:{{ loadbalancer_apiserver.port | default(kube_apiserver_port) }}
   {%- elif ('kube_control_plane' not in group_names) and loadbalancer_apiserver_localhost -%}
       https://localhost:{{ loadbalancer_apiserver_port | default(kube_apiserver_port) }}
   {%- elif 'kube_control_plane' in group_names -%}
@@ -671,12 +697,11 @@ etcd_access_addresses: |-
   {% for item in etcd_hosts -%}
     https://{{ hostvars[item]['main_access_ip'] | ansible.utils.ipwrap }}:2379{% if not loop.last %},{% endif %}
   {%- endfor %}
-etcd_events_access_addresses_list: |-
-  [
-  {% for item in etcd_hosts -%}
-    'https://{{ hostvars[item].main_access_ip | ansible.utils.ipwrap }}:2383'{% if not loop.last %},{% endif %}
-  {%- endfor %}
-  ]
+etcd_events_access_addresses_list: "{{
+                  ['https://'] | product(
+                    etcd_hosts | map('extract', hostvars, morekeys='main_access_ip') | map('ansible.utils.ipwrap'),
+                    [':2383'])
+                  | map('join') }}"
 etcd_metrics_addresses: |-
   {% for item in etcd_hosts -%}
     https://{{ hostvars[item]['main_access_ip'] | ansible.utils.ipwrap }}:{{ etcd_metrics_port | default(2381) }}{% if not loop.last %},{% endif %}
@@ -717,10 +742,10 @@ _host_architecture_groups:
   aarch64: arm64
   armv7l: arm
 host_architecture: >-
-  {%- if ansible_architecture in _host_architecture_groups -%}
-  {{ _host_architecture_groups[ansible_architecture] }}
+  {%- if ansible_facts['architecture'] in _host_architecture_groups -%}
+  {{ _host_architecture_groups[ansible_facts['architecture']] }}
   {%- else -%}
-  {{ ansible_architecture }}
+  {{ ansible_facts['architecture'] }}
   {%- endif -%}
 
 _host_os_groups:
@@ -728,10 +753,10 @@ _host_os_groups:
   Darwin: darwin
   Win32NT: windows
 host_os: >-
-  {%- if ansible_system in _host_os_groups -%}
-  {{ _host_os_groups[ansible_system] }}
+  {%- if ansible_facts['system'] in _host_os_groups -%}
+  {{ _host_os_groups[ansible_facts['system']] }}
   {%- else -%}
-  {{ ansible_system }}
+  {{ ansible_facts['system'] }}
   {%- endif -%}
 
 # Sets the eventRecordQPS parameter in kubelet-config.yaml.
@@ -765,8 +790,12 @@ proxy_disable_env:
 # sysctl_file_path to add sysctl conf to
 sysctl_file_path: "/etc/sysctl.d/99-sysctl.conf"
 
+# ignore sysctl errors about unknown keys
+sysctl_ignore_unknown_keys: false
+
 system_upgrade: false
 system_upgrade_reboot: on-upgrade  # never, always
+system_upgrade_autoclean: false
 
 # Enables or disables the scheduler plugins.
 scheduler_plugins_enabled: false
@@ -782,7 +811,7 @@ ntp_enabled: false
 # The default is ntp for most platforms, or chrony on RHEL/CentOS 7 and later.
 # The ntp_package can be one of ['ntp', 'ntpsec', 'chrony']
 ntp_package: >-
-      {% if ansible_os_family == "RedHat" -%}
+      {% if ansible_facts['os_family'] == "RedHat" -%}
       chrony
       {%- else -%}
       ntp

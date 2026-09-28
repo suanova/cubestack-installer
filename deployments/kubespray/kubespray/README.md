@@ -22,7 +22,7 @@ Ensure you have installed Docker then
 ```ShellSession
 docker run --rm -it --mount type=bind,source="$(pwd)"/inventory/sample,dst=/inventory \
   --mount type=bind,source="${HOME}"/.ssh/id_rsa,dst=/root/.ssh/id_rsa \
-  quay.io/kubespray/kubespray:v2.27.0 bash
+  quay.io/kubespray/kubespray:v2.31.0 bash
 # Inside the container you may now run the kubespray playbooks:
 ansible-playbook -i /inventory/inventory.ini --private-key /root/.ssh/id_rsa cluster.yml
 ```
@@ -87,15 +87,15 @@ vagrant up
 ## Supported Linux Distributions
 
 - **Flatcar Container Linux by Kinvolk**
-- **Debian** Bookworm, Bullseye
-- **Ubuntu** 20.04, 22.04, 24.04
-- **CentOS/RHEL** [8, 9](docs/operating_systems/rhel.md#rhel-8)
-- **Fedora** 39, 40
+- **Debian** Bookworm, Trixie
+- **Ubuntu** 22.04, 24.04, 26.04
+- **CentOS Stream / RHEL** 9, 10
+- **Fedora** 39, 40, 41, 42
 - **Fedora CoreOS** (see [fcos Note](docs/operating_systems/fcos.md))
-- **openSUSE** Leap 15.x/Tumbleweed
-- **Oracle Linux** [8, 9](docs/operating_systems/rhel.md#rhel-8)
-- **Alma Linux** [8, 9](docs/operating_systems/rhel.md#rhel-8)
-- **Rocky Linux** [8, 9](docs/operating_systems/rhel.md#rhel-8)
+- **openSUSE** Leap 16.x/Tumbleweed/MicroOS (containerd only; see [openSUSE notes](docs/operating_systems/opensuse.md))
+- **Oracle Linux** 9, 10
+- **Alma Linux** 9, 10
+- **Rocky Linux** 9, 10 (experimental in 10: see [Rocky Linux 10 notes](docs/operating_systems/rhel.md#rocky-linux-10))
 - **Kylin Linux Advanced Server V10** (experimental: see [kylin linux notes](docs/operating_systems/kylinlinux.md))
 - **Amazon Linux 2** (experimental: see [amazon linux notes](docs/operating_systems/amazonlinux.md))
 - **UOS Linux** (experimental: see [uos linux notes](docs/operating_systems/uoslinux.md))
@@ -111,27 +111,25 @@ Note:
 <!-- BEGIN ANSIBLE MANAGED BLOCK -->
 
 - Core
-  - [kubernetes](https://github.com/kubernetes/kubernetes) 1.32.5
-  - [etcd](https://github.com/etcd-io/etcd) 3.5.16
-  - [docker](https://www.docker.com/) 28.0
-  - [containerd](https://containerd.io/) 2.0.5
-  - [cri-o](http://cri-o.io/) 1.32.0 (experimental: see [CRI-O Note](docs/CRI/cri-o.md). Only on fedora, ubuntu and centos based OS)
+  - [kubernetes](https://github.com/kubernetes/kubernetes) 1.36.4
+  - [etcd](https://github.com/etcd-io/etcd) 3.6.14
+  - [docker](https://www.docker.com/) 28.3
+  - [containerd](https://containerd.io/) 2.3.5
+  - [cri-o](https://cri-o.io/) 1.36.5 (experimental: see [CRI-O Note](docs/CRI/cri-o.md). Only on fedora, ubuntu and centos based OS)
 - Network Plugin
-  - [cni-plugins](https://github.com/containernetworking/plugins) 1.4.1
-  - [calico](https://github.com/projectcalico/calico) 3.29.3
-  - [cilium](https://github.com/cilium/cilium) 1.17.3
-  - [flannel](https://github.com/flannel-io/flannel) 0.22.0
+  - [cni-plugins](https://github.com/containernetworking/plugins) 1.9.1
+  - [calico](https://github.com/projectcalico/calico) 3.31.7
+  - [cilium](https://github.com/cilium/cilium) 1.20.2
+  - [flannel](https://github.com/flannel-io/flannel) 0.28.9
   - [kube-ovn](https://github.com/alauda/kube-ovn) 1.12.21
   - [kube-router](https://github.com/cloudnativelabs/kube-router) 2.1.1
-  - [multus](https://github.com/k8snetworkplumbingwg/multus-cni) 4.1.0
-  - [weave](https://github.com/rajch/weave) 2.8.7
-  - [kube-vip](https://github.com/kube-vip/kube-vip) 0.8.0
+  - [multus](https://github.com/k8snetworkplumbingwg/multus-cni) 4.2.2
+  - [kube-vip](https://github.com/kube-vip/kube-vip) 1.0.3
 - Application
   - [cert-manager](https://github.com/jetstack/cert-manager) 1.15.3
-  - [coredns](https://github.com/coredns/coredns) 1.11.3
-  - [ingress-nginx](https://github.com/kubernetes/ingress-nginx) 1.12.1
+  - [coredns](https://github.com/coredns/coredns) 1.14.2
   - [argocd](https://argoproj.github.io/) 2.14.5
-  - [helm](https://helm.sh/) 3.16.4
+  - [helm](https://helm.sh/) 3.22.0
   - [metallb](https://metallb.universe.tf/) 0.13.9
   - [registry](https://github.com/distribution/distribution) 2.8.1
 - Storage Plugin
@@ -139,19 +137,20 @@ Note:
   - [azure-csi-plugin](https://github.com/kubernetes-sigs/azuredisk-csi-driver) 1.10.0
   - [cinder-csi-plugin](https://github.com/kubernetes/cloud-provider-openstack/blob/master/docs/cinder-csi-plugin/using-cinder-csi-plugin.md) 1.30.0
   - [gcp-pd-csi-plugin](https://github.com/kubernetes-sigs/gcp-compute-persistent-disk-csi-driver) 1.9.2
-  - [local-path-provisioner](https://github.com/rancher/local-path-provisioner) 0.0.24
+  - [local-path-provisioner](https://github.com/rancher/local-path-provisioner) 0.0.37
   - [local-volume-provisioner](https://github.com/kubernetes-sigs/sig-storage-local-static-provisioner) 2.5.0
-  - [node-feature-discovery](https://github.com/kubernetes-sigs/node-feature-discovery) 0.16.4
+  - [node-feature-discovery](https://github.com/kubernetes-sigs/node-feature-discovery) 0.19.0
 
 <!-- END ANSIBLE MANAGED BLOCK -->
 
 ## Container Runtime Notes
 
-- The cri-o version should be aligned with the respective kubernetes version (i.e. kube_version=1.20.x, crio_version=1.20)
+- The CRI-O minor version should match the Kubernetes minor version.
 
 ## Requirements
 
-- **Minimum required version of Kubernetes is v1.30**
+- **Minimum required version of Kubernetes is v1.34.0**
+
 - **Ansible v2.14+, Jinja 2.11+ and python-netaddr is installed on the machine that will run Ansible commands**
 - The target servers must have **access to the Internet** in order to pull docker images. Otherwise, additional configuration is required (See [Offline Environment](docs/operations/offline-environment.md))
 - The target servers are configured to allow **IPv4 forwarding**.
@@ -183,9 +182,6 @@ You can choose among ten network plugins. (default: `calico`, except Vagrant use
 
 - [cilium](http://docs.cilium.io/en/latest/): layer 3/4 networking (as well as layer 7 to protect and secure application protocols), supports dynamic insertion of BPF bytecode into the Linux kernel to implement security services, networking and visibility logic.
 
-- [weave](docs/CNI/weave.md): Weave is a lightweight container overlay network that doesn't require an external K/V database cluster.
-    (Please refer to `weave` [troubleshooting documentation](https://www.weave.works/docs/net/latest/troubleshooting/)).
-
 - [kube-ovn](docs/CNI/kube-ovn.md): Kube-OVN integrates the OVN-based Network Virtualization with Kubernetes. It offers an advanced Container Network Fabric for Enterprises.
 
 - [kube-router](docs/CNI/kube-router.md): Kube-router is a L3 CNI for Kubernetes networking aiming to provide operational
@@ -205,8 +201,6 @@ option to leverage built-in cloud provider networking instead.
 See also [Network checker](docs/advanced/netcheck.md).
 
 ## Ingress Plugins
-
-- [nginx](https://kubernetes.github.io/ingress-nginx): the NGINX Ingress Controller.
 
 - [metallb](docs/ingress/metallb.md): the MetalLB bare-metal service LoadBalancer provider.
 

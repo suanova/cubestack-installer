@@ -56,13 +56,10 @@ system_pid_reserved: 1000
 ## Eviction Thresholds to avoid system OOMs
 # https://kubernetes.io/docs/tasks/administer-cluster/reserve-compute-resources/#eviction-thresholds
 eviction_hard: {}
-eviction_hard_control_plane: {}
 
 kubelet_status_update_frequency: 10s
 
 # kube-vip
-kube_vip_version: 0.8.0
-
 kube_vip_arp_enabled: false
 kube_vip_interface:
 kube_vip_services_interface:
@@ -80,7 +77,6 @@ kube_vip_bgp_peeraddress:
 kube_vip_bgp_peerpass:
 kube_vip_bgp_peeras: 65000
 kube_vip_bgppeers:
-kube_vip_address:
 kube_vip_enableServicesElection: false
 kube_vip_lb_enable: false
 kube_vip_leasename: plndr-cp-lock
@@ -89,6 +85,11 @@ kube_vip_leaseduration: 5
 kube_vip_renewdeadline: 3
 kube_vip_retryperiod: 1
 kube_vip_enable_node_labeling: false
+kube_vip_bgp_sourceip:
+kube_vip_bgp_sourceif:
+kube_vip_metrics_enabled: false
+# TCP port for kube-vip Prometheus metrics; manifest sets prometheus_server to :PORT (same as kube-vip upstream default, see cmd/kube-vip.go).
+kube_vip_metrics_port: 2112
 
 # Requests for load balancer app
 loadbalancer_apiserver_memory_requests: 32M
@@ -182,12 +183,6 @@ kube_proxy_ipvs_modules:
   - ip_vs_sh
   - ip_vs_wlc
   - ip_vs_lc
-
-# Kubespray will use the first module of this list which it can successfully modprobe
-conntrack_modules:
-  - nf_conntrack
-  - nf_conntrack_ipv4
-
 
 ## Enable distributed tracing for kubelet
 kubelet_tracing: false

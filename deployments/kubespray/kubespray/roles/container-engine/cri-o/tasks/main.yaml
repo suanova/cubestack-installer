@@ -28,7 +28,7 @@
 
 - name: Cri-o | special handling for amazon linux
   import_tasks: "setup-amazon.yaml"
-  when: ansible_distribution in ["Amazon"]
+  when: ansible_facts['distribution'] in ["Amazon"]
 
 - name: Cri-o | build a list of crio runtimes with Katacontainers runtimes
   set_fact:
@@ -54,6 +54,46 @@
     crio_runtimes: "{{ crio_runtimes + [youki_runtime] }}"
   when:
     - youki_enabled
+
+- name: Cri-o | Stop kubelet service if running
+  service:
+    name: kubelet
+    state: stopped
+  when:
+    - crio_runtime_switch
+    - ansible_facts.services['kubelet.service'] is defined and ansible_facts.services['kubelet.service'].state == 'running'
+
+- name: Cri-o | Get all pods
+  ansible.builtin.command: "{{ bin_dir }}/crictl pods -o json"
+  changed_when: false
+  register: crio_pods
+  when:
+    - crio_runtime_switch
+    - ansible_facts.services['crio.service'] is defined
+
+- name: Cri-o | Stop and remove pods not on host network
+  ansible.builtin.command: "{{ bin_dir }}/crictl rmp -f {{ item.id }}"
+  loop: "{{ (crio_pods.stdout | from_json).items | default([]) | selectattr('metadata.namespace', 'ne', 'NODE') }}"
+  changed_when: true
+  when:
+    - crio_runtime_switch
+    - ansible_facts.services['crio.service'] is defined
+    - crio_pods.stdout is defined
+
+- name: Cri-o | Stop and remove all remaining pods
+  ansible.builtin.command: "{{ bin_dir }}/crictl rmp -fa"
+  changed_when: true
+  when:
+    - crio_runtime_switch
+    - ansible_facts.services['crio.service'] is defined
+
+- name: Cri-o | stop crio service if running
+  service:
+    name: crio
+    state: stopped
+  when:
+    - crio_runtime_switch
+    - ansible_facts.services['crio.service'] is defined and ansible_facts.services['crio.service'].state == 'running'
 
 - name: Cri-o | make sure needed folders exist in the system
   with_items:
@@ -110,7 +150,7 @@
   copy:
     src: "{{ local_release_dir }}/cri-o/contrib/crio.service"
     dest: /etc/systemd/system/crio.service
-    mode: "0755"
+    mode: "0644"
     remote_src: true
   notify: Restart crio
 
@@ -144,12 +184,12 @@
   notify: Restart crio
 
 - name: Cri-o | copy mounts.conf
-  copy:
-    src: mounts.conf
+  template:
+    src: mounts.conf.j2
     dest: /etc/containers/mounts.conf
     mode: "0644"
   when:
-    - ansible_os_family == 'RedHat'
+    - ansible_facts['os_family'] == 'RedHat'
   notify: Restart crio
 
 - name: Cri-o | create directory for oci hooks
@@ -180,7 +220,9 @@
     dest: /etc/containers/storage.conf
     section: storage.options.overlay
     option: mountopt
-    value: '{{ ''"nodev"'' if ansible_kernel is version(("4.18" if ansible_os_family == "RedHat" else "4.19"), "<") else ''"nodev,metacopy=on"'' }}'
+    value: >-
+      {{ '"nodev"' if ansible_facts['kernel'] is version(('4.18' if ansible_facts['os_family'] == 'RedHat' else '4.19'), '<')
+      else '"nodev,metacopy=on"' }}
     mode: "0644"
 
 - name: Cri-o | create directory registries configs
@@ -250,3 +292,16 @@
   changed_when: false
   retries: 5
   delay: "{{ retry_stagger | random + 3 }}"
+
+# The kubelet service status can be 'not-found' if something depends on it.
+# This check prevents failures when the service is in this indeterminate state,
+# which can occur when adding new nodes to a cluster.
+# See: https://superuser.com/questions/1755211/cleaning-debugging-services/1755215#1755215
+
+- name: Cri-o | ensure kubelet service is started if present and stopped
+  service:
+    name: kubelet
+    state: started
+  when:
+    - crio_runtime_switch
+    - ansible_facts.services['kubelet.service'] is defined and ansible_facts.services['kubelet.service']['status'] != 'not-found'
