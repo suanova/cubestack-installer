@@ -3,7 +3,12 @@ images_dir: /images/base
 
 docker_user: kubespray+buildvmimages
 docker_host: quay.io
+docker_login: true
 registry: quay.io/kubespray
+kubevirt_images_push: true
+kubevirt_images_selected: []
+kubevirt_container_builder: docker
+kubevirt_buildkit_output_dir: "{{ images_dir }}/buildkit-output"
 
 images:
   ubuntu-2004:
@@ -21,9 +26,16 @@ images:
     tag: "latest"
 
   ubuntu-2404:
-    filename: noble-server-cloudimg-amd64.img
-    url: https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
-    checksum: sha256:0cf56a2b23b430c350311dbcb9221b64823a5f7a401b5cf6ab4821f2ffdabe76
+    filename: ubuntu-24.04-server-cloudimg-amd64.img
+    url: https://cloud-images.ubuntu.com/releases/noble/release-20260826/ubuntu-24.04-server-cloudimg-amd64.img
+    checksum: sha256:d0fe84bb5f80853425fa6be28e2c106f30104c3cfe8611933f2e65c9b63f0e30
+    converted: false
+    tag: "latest"
+
+  ubuntu-2604:
+    filename: ubuntu-26.04-server-cloudimg-amd64.img
+    url: https://cloud-images.ubuntu.com/releases/resolute/release-20260823/ubuntu-26.04-server-cloudimg-amd64.img
+    checksum: sha256:8196be9d7958059cb56c6c75c80fdf6cee8a8885bc149ea791d7db1c7ef93035
     converted: false
     tag: "latest"
 
@@ -52,6 +64,27 @@ images:
     filename: Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2
     url: https://download.fedoraproject.org/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2
     checksum: sha256:ac58f3c35b73272d5986fa6d3bc44fd246b45df4c334e99a07b3bbd00684adee
+    converted: true
+    tag: "latest"
+
+  fedora-41:
+    filename: Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2
+    url: https://download.fedoraproject.org/pub/fedora/linux/releases/41/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2
+    checksum: sha256:6205ae0c524b4d1816dbd3573ce29b5c44ed26c9fbc874fbe48c41c89dd0bac2
+    converted: true
+    tag: "latest"
+
+  fedora-43:
+    filename: Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2
+    url: https://download.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2
+    checksum: sha256:846574c8a97cd2d8dc1f231062d73107cc85cbbbda56335e264a46e3a6c8ab2f
+    converted: true
+    tag: "latest"
+
+  fedora-44:
+    filename: Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
+    url: https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
+    checksum: sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f
     converted: true
     tag: "latest"
 
@@ -97,6 +130,17 @@ images:
     converted: true
     tag: "latest"
 
+  rockylinux-10:
+    filename: Rocky-10-GenericCloud-Base-10.0-20250609.1.x86_64.qcow2
+    url: https://download.rockylinux.org/pub/rocky/10.0/images/x86_64/Rocky-10-GenericCloud-Base-10.0-20250609.1.x86_64.qcow2
+    checksum: sha256:20e771c654724e002c32fb92a05fdfdd7ac878c192f50e2fc21f53e8f098b8f9
+    converted: true
+    tag: "latest"
+
+  # rockylinux-10-extra:
+  #   default cloud image doesn't included `kernel-modules-extra`. How to build RockyLinux 10 + `kernel-module-extra` with dib
+  #   https://github.com/kubernetes-sigs/kubespray/pull/12355#issuecomment-3705400093
+
   debian-10:
     filename: debian-10-openstack-amd64.qcow2
     url: https://cdimage.debian.org/cdimage/openstack/current-10/debian-10-openstack-amd64.qcow2
@@ -118,6 +162,13 @@ images:
     converted: true
     tag: "latest"
 
+  debian-13:
+    filename: debian-13-generic-amd64-20250806-2196.qcow2
+    url: https://cdimage.debian.org/cdimage/cloud/trixie/20250806-2196/debian-13-generic-amd64-20250806-2196.qcow2
+    checksum: sha512:a7dfe434afc40afb0a791c777f3edba6b1a5c4b7315a61073fe5e34752d3bc5fd44ff67ef054eb4263687a97f7ce4896bf5bad5f216ef8b9d4a84541759e743d
+    converted: true
+    tag: "latest"
+
   oracle-7:
     filename: oracle-linux-76.qcow2
     url: https://storage.googleapis.com/born-images/oracle76/oracle-linux-76.qcow2
@@ -125,17 +176,24 @@ images:
     converted: true
     tag: "latest"
 
-  opensuse-leap-15:
-    filename: openSUSE-Leap-15.3.x86_64-1.0.1-NoCloud-Build2.63.qcow2
-    url: https://download.opensuse.org/repositories/Cloud:/Images:/Leap_15.3/images/openSUSE-Leap-15.3.x86_64-1.0.1-NoCloud-Build2.63.qcow2
-    checksum: sha256:289248945e2d058551c71c1bdcb31a361cefe7136c7fd88a09b524eedfaf5215
-    converted: true
-    tag: "latest"
-
   opensuse-leap-15-6:
     filename: openSUSE-Leap-15.6.x86_64-1.0.1-NoCloud-Build1.177.qcow2
     url: https://download.opensuse.org/repositories/Cloud:/Images:/Leap_15.6/images/openSUSE-Leap-15.6.x86_64-1.0.1-NoCloud-Build1.177.qcow2
     checksum: sha256:9ecd197b34faf1b43627946d0c26e38b5c3058207d1c86c4784b8f765c3289f3
+    converted: true
+    tag: "latest"
+
+  opensuse-leap-16-0:
+    filename: Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2
+    url: https://download.opensuse.org/distribution/leap/16.0/appliances/Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2
+    checksum: sha256:c5cd6904632c86d5368dea3896da8c17571c238ef96a0e2c8b0ca1835d796e07
+    converted: true
+    tag: "latest"
+
+  opensuse-microos:
+    filename: openSUSE-MicroOS.x86_64-16.0.0-ContainerHost-OpenStack-Cloud-Build99.19.qcow2
+    url: https://download.opensuse.org/repositories/devel:/microos:/images/openSUSE_Tumbleweed/openSUSE-MicroOS.x86_64-16.0.0-ContainerHost-OpenStack-Cloud-Build99.19.qcow2
+    checksum: sha256:7192d8a34ac7821a0d2ea0818eb4dd4dff62e0e07b35c6f582e52fc71fd027cf
     converted: true
     tag: "latest"
 

@@ -2,38 +2,49 @@
 - name: Ensure kube-apiserver is up before upgrade
   import_tasks: check-api.yml
 
-  # kubeadm-config.v1beta4 with UpgradeConfiguration requires some values that were previously allowed as args to be specified in the config file
-- name: Kubeadm | Upgrade first control plane node
+- name: Kubeadm | Preflight admission readiness check
+  command:
+    cmd: "{{ kubectl }} create --dry-run=server -f -"
+    stdin: >-
+      {"apiVersion":"batch/v1","kind":"Job","metadata":{"generateName":"upgrade-preflight-probe-","namespace":"kube-system"},"spec":{"template":{"spec":{"containers":[{"name":"pause","image":"{{ pod_infra_image_repo }}:{{ pod_infra_image_tag }}"}],"restartPolicy":"Never"}}}}
+  register: preflight_check_result
+  retries: "{{ kubeadm_upgrade_preflight_check_retries }}"
+  delay: "{{ kubeadm_upgrade_preflight_check_delay }}"
+  until: preflight_check_result.rc == 0
+  changed_when: false
+  failed_when: false
+  when:
+  - kubeadm_upgrade_preflight_check_enabled
+  - inventory_hostname == first_kube_control_plane
+  environment:
+    PATH: "{{ bin_dir }}:{{ ansible_env.PATH }}"
+
+- name: Kubeadm | Warn if preflight admission check failed
+  debug:
+    msg: >-
+      WARNING: Preflight admission dry-run failed after {{ kubeadm_upgrade_preflight_check_retries }} retries.
+      The admission pipeline may not be ready. kubeadm upgrade apply may fail with [ERROR CreateJob].
+      See Kubernetes issue https://github.com/kubernetes/kubernetes/issues/124237 for details.
+  when:
+  - kubeadm_upgrade_preflight_check_enabled
+  - inventory_hostname == first_kube_control_plane
+  - preflight_check_result.rc is defined and preflight_check_result.rc != 0
+
+- name: Kubeadm | Upgrade first control plane node to {{ kube_version }}
   command: >-
     timeout -k 600s 600s
     {{ bin_dir }}/kubeadm upgrade apply -y v{{ kube_version }}
-    {%- if kubeadm_config_api_version == 'v1beta3' %}
-    --certificate-renewal={{ kubeadm_upgrade_auto_cert_renewal }}
-    --ignore-preflight-errors={{ kubeadm_ignore_preflight_errors | join(',') }}
-    --allow-experimental-upgrades
-    --etcd-upgrade={{ (etcd_deployment_type == "kubeadm") | lower }}
-    {% if kubeadm_patches | length > 0 %}--patches={{ kubeadm_patches_dir }}{% endif %}
-    --force
-    {%- else %}
     --config={{ kube_config_dir }}/kubeadm-config.yaml
-    {%- endif -%}
   register: kubeadm_upgrade
   when: inventory_hostname == first_kube_control_plane
   failed_when: kubeadm_upgrade.rc != 0 and "field is immutable" not in kubeadm_upgrade.stderr
   environment:
     PATH: "{{ bin_dir }}:{{ ansible_env.PATH }}"
 
-- name: Kubeadm | Upgrade other control plane nodes
+- name: Kubeadm | Upgrade other control plane nodes to {{ kube_version }}
   command: >-
     {{ bin_dir }}/kubeadm upgrade node
-    {%- if kubeadm_config_api_version == 'v1beta3' %}
-    --certificate-renewal={{ kubeadm_upgrade_auto_cert_renewal }}
-    --ignore-preflight-errors={{ kubeadm_ignore_preflight_errors | join(',') }}
-    --etcd-upgrade={{ (etcd_deployment_type == "kubeadm") | lower }}
-    {% if kubeadm_patches | length > 0 %}--patches={{ kubeadm_patches_dir }}{% endif %}
-    {%- else %}
     --config={{ kube_config_dir }}/kubeadm-config.yaml
-    {%- endif -%}
   register: kubeadm_upgrade
   when: inventory_hostname != first_kube_control_plane
   failed_when: kubeadm_upgrade.rc != 0 and "field is immutable" not in kubeadm_upgrade.stderr
@@ -103,3 +114,6 @@
   - kubeadm_scale_down_coredns_enabled
   - dns_mode not in ['coredns', 'coredns_dual']
   changed_when: false
+
+- name: Kubeadm | cleanup old upgrade backups
+  import_tasks: kubeadm-backup-cleanup.yml

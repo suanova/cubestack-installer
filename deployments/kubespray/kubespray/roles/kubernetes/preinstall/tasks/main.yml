@@ -77,19 +77,13 @@
   tags:
     - bootstrap_os
 
-- name: Configure /etc/hosts
-  import_tasks: 0090-etchosts.yml
-  tags:
-    - bootstrap_os
-    - etchosts
-
 - name: Configure dhclient
   import_tasks: 0100-dhclient-hooks.yml
   when:
     - dns_mode != 'none'
     - resolvconf_mode == 'host_resolvconf'
     - dhclientconffile is defined
-    - not ansible_os_family in ["Flatcar", "Flatcar Container Linux by Kinvolk"]
+    - ansible_facts['os_family'] != "Flatcar"
   tags:
     - bootstrap_os
     - resolvconf
@@ -100,7 +94,7 @@
     - dns_mode != 'none'
     - resolvconf_mode != 'host_resolvconf'
     - dhclientconffile is defined
-    - not ansible_os_family in ["Flatcar", "Flatcar Container Linux by Kinvolk"]
+    - ansible_facts['os_family'] != "Flatcar"
   tags:
     - bootstrap_os
     - resolvconf

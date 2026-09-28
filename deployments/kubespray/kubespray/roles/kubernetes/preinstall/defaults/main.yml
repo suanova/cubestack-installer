@@ -8,6 +8,9 @@ cloud_resolver: []
 disable_host_nameservers: false
 # Kubespray sets this to true after clusterDNS is running to apply changes to the host resolv.conf
 dns_late: false
+# DNS resolver option timeout and retry attempts.
+dns_timeout: 2
+dns_attempts: 2
 
 # Set to true if your network does not support IPv6
 # This may be necessary for pulling Docker images from
@@ -28,27 +31,8 @@ kubelet_flexvolumes_plugins_dir: /usr/libexec/kubernetes/kubelet-plugins/volume/
 # for hostnet pods and infra needs
 resolveconf_cloud_init_conf: /etc/resolveconf_cloud_init.conf
 
-# All inventory hostnames will be written into each /etc/hosts file.
-populate_inventory_to_hosts_file: true
-# K8S Api FQDN will be written into /etc/hosts file.
-populate_loadbalancer_apiserver_to_hosts_file: true
-# etc_hosts_localhost_entries will be written into /etc/hosts file.
-populate_localhost_entries_to_hosts_file: true
-
+# sysctl_file_path to add sysctl conf to
 sysctl_file_path: "/etc/sysctl.d/99-sysctl.conf"
-
-etc_hosts_localhost_entries:
-  127.0.0.1:
-    expected:
-      - localhost
-      - localhost.localdomain
-  ::1:
-    expected:
-      - localhost6
-      - localhost6.localdomain
-    unexpected:
-      - localhost
-      - localhost.localdomain
 
 # Minimal memory requirement in MB for safety checks
 minimal_node_memory_mb: 1024
@@ -103,9 +87,9 @@ supported_os_distributions:
   - 'Ubuntu'
   - 'Debian'
   - 'Flatcar'
-  - 'Flatcar Container Linux by Kinvolk'
   - 'Suse'
   - 'openSUSE Leap'
+  - 'openSUSE MicroOS'
   - 'openSUSE Tumbleweed'
   - 'ClearLinux'
   - 'OracleLinux'
@@ -123,7 +107,7 @@ redhat_os_family_extensions:
   - "UniontechOS"
 
 # Sets DNSStubListener=no, useful if you get "0.0.0.0:53: bind: address already in use"
-systemd_resolved_disable_stub_listener: "{{ ansible_os_family in ['Flatcar', 'Flatcar Container Linux by Kinvolk'] }}"
+systemd_resolved_disable_stub_listener: "{{ ansible_facts['os_family'] == 'Flatcar' }}"
 
 # Used to disable File Access Policy Daemon service.
 # If service is enabled, the CNI plugin installation will fail
