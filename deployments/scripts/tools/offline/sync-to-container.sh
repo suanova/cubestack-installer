@@ -94,7 +94,12 @@ if [ "${SYNC_CONF:-0}" = "1" ]; then
     echo "  已推送 ${LOCAL_CONF} → ${CT_CONF}(容器原配置备份 .bak.ceph)"
 else
     echo "  跳过推送: 容器内 config 保留(本地为占位 keyring, 覆盖会导致外部 Ceph 认证失败)"
-    echo "  容器内当前 ceph 配置:"; docker exec "${CONTAINER}" bash -c 'grep -nE "^(CEPH_MODE|CEPH_CSI_ENABLED|CEPH_MONITORS|CEPH_KEYRING|CEPHFS_KEYRING)=" '"${CT_CONF}" | sed 's/^/    /'
+    echo "  容器内当前 ceph 配置:"
+    # ⚠ 宿主机管道 + set -o pipefail: 容器里 grep 一个都没匹配到(或容器内没有这份 cluster.conf)
+    #   就退 1/2, docker exec 把该退出码原样带回 → 整条管道非 0 → set -e 让脚本**死在步骤 2**,
+    #   步骤 3/4/5 全都不执行(用户只看到标题后面空着, 还以为容器 conf 是空的)。信息性输出
+    #   不该有终止权 → `|| echo` 兜住(与步骤 4 里那些 `|| echo`/`|| true` 同理)。
+    docker exec "${CONTAINER}" bash -c 'grep -nE "^(CEPH_MODE|CEPH_CSI_ENABLED|CEPH_MONITORS|CEPH_KEYRING|CEPHFS_KEYRING)=" '"${CT_CONF}" | sed 's/^/    /' || echo "    (未读到: 容器内 cluster.conf 缺失, 或其中没有这几个键)"
 fi
 
 echo ""
@@ -148,6 +153,10 @@ for d in "${DIRS[@]}"; do
         echo "  ✅ ${d}/ 全部一致($(printf '%s\n' "${_repo_md5}" | grep -c .) 个文件)"
     else
         echo "  ❌ ${d}/ 有差异(左=仓库, 右=容器):"
+        # ⚠ diff 的退出码 1 = "两边不一样", 正是本分支的预期结果 —— 但 set -euo pipefail 下裸管道
+        #   会当场终止整个校验(_bad 不累加、单文件清单不查、末尾汇总不打印); 差异很大时 diff 输出
+        #   超过管道缓冲, head 读满 15 行即关管子 → diff 被 SIGPIPE 打断 → 141, 同样自断。
+        #   `|| true` 兜住这个预期失败, 让校验跑完(有差异时末尾统一 exit 1)。
         diff <(printf '%s\n' "${_repo_md5}") <(printf '%s\n' "${_ct_md5}") | head -15 | sed 's/^/      /' || true
         _bad=$((_bad + 1))
     fi
@@ -160,7 +169,10 @@ done
 if [ "${_bad}" = "0" ]; then
     echo "  ✅ 单文件清单亦全部一致(共 ${#FILES[@]} 个)"
 else
+    # ★ 非 0 退出: 否则包装脚本/CI 拿到 0 会把"没同步全"当成功; 而且末尾那句"同步完成。接下来
+    #   在容器内重新部署…"会照常打印 —— 在没同步全时鼓励去部署, 正是本工具要防的事。
     echo "  ⚠ 共 ${_bad} 处不一致 —— 别急着部署, 先查为什么(上方已点名)"
+    echo "  ⚠ 同步不完整: 本次以退出码 1 结束(供脚本/CI 判断); 上面每个 ❌ 都是没同步全的文件"
     exit 1
 fi
 
