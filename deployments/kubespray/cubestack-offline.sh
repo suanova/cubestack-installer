@@ -2113,11 +2113,11 @@ elif [ -z "${PRELOAD_IMAGE_PATTERNS:-}" ]; then
     # (排除 cilium/flannel/ingress-nginx/dashboard 等未启用组件的镜像)
     # ⚠ 本行是**第 4 份**副本(standalone 直跑本脚本时的兜底默认值), 必须与 cluster.conf /
     #   cluster.conf.example / tools/offline/trim-offline-files.sh 三份**逐字节一致** ——
-    #   check-modules.sh 第 ⑬ 项断言这**四份**(2026-09-28 起本份已纳入; 本行不在 file 顶部,
+    #   check-modules.sh 第 ⑭ 项断言这**四份**(2026-09-28 起本份已纳入; 本行不在 file 顶部,
     #   断言脚本会跳过上面那条 ${CUBESTACK_PRELOAD_IMAGE_PATTERNS} 透传行, 取到本行);
     #   本份漂移会让"备料保留 / 节点预加载"两边不一致
     #   (典型症状: 装了却没有镜像)。新增镜像 token 时四处都要加。
-    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb kube-vip library_registry local-path-provisioner busybox lws_manager library_nginx"
+    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause local-volume-provisioner node-feature-discovery metallb kube-vip library_registry local-path-provisioner busybox lws_manager library_nginx"
     log "预加载镜像集合(内置默认最小集合): ${PRELOAD_IMAGE_PATTERNS}"
 fi
 export PRELOAD_IMAGE_PATTERNS

@@ -92,6 +92,35 @@ sudo ./deployments/scripts/tools/images/harbor-save-images.sh         --group k8
 > 两处不同值 = 节点预加载的 tag 与静态 Pod 实际拉取的 tag 不是同一个, 离线环境直接拉不到。
 > 改 `API_LB_NGINX_IMAGE_TAG` 时两边一起改。
 
+## LVP / NFD(kubespray addon,默认关)
+
+两个 kubespray 原生 addon 的镜像:`registry.k8s.io/sig-storage/local-volume-provisioner:v2.5.0`
+(开关 `LOCAL_VOLUME_PROVISIONER_ENABLED`)与 `registry.k8s.io/nfd/node-feature-discovery:v0.19.0`
+(开关 `NFD_ENABLED`,`v2.5.0` / `v0.19.0` 为当前展开值)。两个开关在 `cluster.conf` 里**默认 `false`**
+—— 本目录已把镜像备好、清单与预载 token 已登记,将来要用只需把开关置 `true`(再重跑 `k8s_deploy`
+阶段),不必再改仓库。
+
+| 项 | 值 |
+|---|---|
+| 上游 ref | `registry.k8s.io/sig-storage/local-volume-provisioner:v${LOCAL_VOLUME_PROVISIONER_VERSION}` / `registry.k8s.io/nfd/node-feature-discovery:v${NFD_VERSION}`(当前展开 = `v2.5.0` / `v0.19.0`) |
+| 版本变量 | `LOCAL_VOLUME_PROVISIONER_VERSION` / `NFD_VERSION`(= kubespray v2.32 表值;须与上游 `roles/kubespray_defaults/defaults/main/download.yml` 同值) |
+| 离线 tar | `images/registry.k8s.io_sig-storage_local-volume-provisioner_v2.5.0.tar`、`images/registry.k8s.io_nfd_node-feature-discovery_v0.19.0.tar`(按上游 ref 派生: `/`→`_`, `:`→`_`) |
+| 清单条目 | `images.manifest` 的 `k8s-base` 组, **不带第 3 列**(用派生名) |
+| 预加载模式 | `PRELOAD_IMAGE_PATTERNS` 里的 `local-volume-provisioner` / `node-feature-discovery` |
+
+```bash
+# 联网机备料(产物落到本目录 images/)
+bash ./deployments/scripts/tools/images/harbor-save-images.sh --list  --group k8s-base   # 先看会拉什么
+sudo ./deployments/scripts/tools/images/harbor-save-images         --group k8s-base
+```
+
+> ⚠ **为什么必须在预载集合里**: 开关打开后这两个 addon 由 **kubespray 自己的 role** 安装
+> (不是本仓库的模块), 镜像由**节点 containerd 按上游 ref 拉取** —— 离线环境出不了网,
+> 预载漏了就是 `ImagePullBackOff`。两个 tag 都是**开机即用的官方 tag**(上游直接拼 `v<版本>`),
+> 清单条目照仓库惯例走 `${LOCAL_VOLUME_PROVISIONER_VERSION}` / `${NFD_VERSION}` 占位 ——
+> **版本只有一处真相**(`cluster.conf` 的版本变量),升级只改那一处,清单/Harbor/离线 tar
+> 全部跟随(改完重走 Harbor 同步 → 离线 tar → `trim-offline-files.sh` 备料)。
+
 ## 谁消费
 
 `deployments/kubespray/cubestack-offline.sh` 的 `resolve_preload_image_files()` 按

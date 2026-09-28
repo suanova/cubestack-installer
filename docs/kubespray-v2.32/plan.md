@@ -446,6 +446,7 @@ git commit -m "feat(kube-vip): 升 v1.0.3 并适配 v2.32 模板(vip_subnet/vers
 
 **Files:**
 - Modify: `deployments/config/cluster.conf` / `.example`(MULTUS_IMAGE_TAG)、`deployments/config/images.manifest`、`deployments/cubestack-addon/multus/multus-daemonset-thick.yml`(两处 image)、`deployments/cubestack-addon/multus/CUBESTACK.md`
+  —— 另经 T7 评审追认的两处(钉版真正生效所必需,见 §8 记录):`deployments/scripts/modules/03_addon/09_multus.sh`(活值兜底默认 + **离线 tar 选取改内容校验**:拿错 tar 响亮拒绝,不再冒充钉版)、`deployments/offline-files/multus/README.md`(默认值与 tar 名)
 
 - [ ] **Step 1: 四处改动**
 
@@ -699,6 +700,16 @@ grep -iE 'fail|失败|missing|未找到' /tmp/save.log | sort -u
       校验: sha256=<…>(用 skopeo inspect --raw 或 docker inspect 取)
 ```
 **非镜像制品清单**(同样逐条给 URL 与目标路径):`kubelet`/`kubectl`(dl.k8s.io)、`calicoctl`(GitHub release)、`etcd` 二进制、CNI 插件、`crictl`、helm、以及 spec §7.2 里 kubespray 会下载的其它项 —— **上游 URL 从 v2.32 的 `roles/kubespray_defaults/defaults/main/download.yml` 的 `*_download_url` 变量抄, 不要凭记忆写**。
+
+**必做重做项(T7 评审挖出, 属"钉版真正生效"的前提)**:
+- `deployments/offline-files/multus/multus-cni.tar` —— 盘上那份 RepoTags 实测仍是 `snapshot-thick`;T7 已把模块改成**内容校验**(拿错 tar 响亮拒绝), 所以这是**硬门禁**:必须产出 `v4.2.2-thick` 的新 tar(联网机 `skopeo copy` 或 `docker save`), 否则 `--steps multus` 会直接失败。
+- `ghcr.io/kube-vip/kube-vip:v1.0.3` 的 tar —— 本地不存在(T6 遗留), 同样必须产出, 否则 `09_kube_vip` 镜像自检 fail-closed。
+- **整套 k8s-base tar 随钉子换代(最终审查补充, 实测)** —— `offline-files/kubespray/images/` 现仍是旧件:
+  `kube-apiserver/kube-controller-manager/kube-proxy/kube-scheduler v1.32.5`、`pause 3.10`、`coredns v1.11.3`、
+  `metrics-server v0.7.0`、`cpa v1.8.8`、`etcd v3.5.16`、`calico v3.29.3`, 而钉子线是 **1.35.8 / 3.10.1 / v1.12.4 / v0.9.0 / v1.10.3 / v3.6.14 / v3.31.7**;
+  `docker.io_library_nginx_1.30.1-alpine.tar` 亦缺。
+  ⚠ 这些旧 tar 会被**文件名子串匹配静默接受**(`trim-offline-files.sh:41-52`), 只有 multus/kube-vip 两条是 fail-closed → 其余要到 Pod 拉镜像才暴露。
+  ⇒ T13 的备料范围不止 LVP/NFD 两条, 而是**整套 k8s-base + ceph 复核**;建议顺手加一条便宜护栏(遍历 tar 的 RepoTags vs 清单展开值, 不一致即 warn), 那是本链条上唯一"看不见"的环节。
 
 - [ ] **Step 4: 提交**
 

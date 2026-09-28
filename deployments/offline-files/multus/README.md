@@ -2,8 +2,8 @@
 
 Multus CNI 的**离线镜像 tar**(容器多网卡; 单镜像)。
 
-- 镜像: `ghcr.io/k8snetworkplumbingwg/multus-cni:${MULTUS_IMAGE_TAG}`(默认 `snapshot-thick`)
-- tar 名: 按上游 ref 自动派生 → `ghcr.io_k8snetworkplumbingwg_multus-cni_snapshot-thick.tar`
+- 镜像: `ghcr.io/k8snetworkplumbingwg/multus-cni:${MULTUS_IMAGE_TAG}`(默认 `v4.2.2-thick`; 已从上游浮动 tag `snapshot-thick` 钉版)
+- tar 名: 按上游 ref 自动派生 → `ghcr.io_k8snetworkplumbingwg_multus-cni_v4.2.2-thick.tar`(`multus-cni.tar` 等改名也认 —— 模块按 **tar 内容**校验, 不按文件名)
 - 版本真相: `cluster.conf` 的 `MULTUS_IMAGE_TAG`(须与 vendored manifest 一致)
 - 目录变量: `cluster.conf` 的 `MULTUS_SAVE_DIR`(默认指本目录)
 - 取镜像:

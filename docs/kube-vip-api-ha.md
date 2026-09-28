@@ -444,7 +444,7 @@ kube_apiserver_extra_args:
 
 | 项 | 内容 |
 |---|---|
-| 镜像 | `ghcr.io/kube-vip/kube-vip:v0.8.9`(kubespray `download.yml:284-285`) |
+| 镜像 | `ghcr.io/kube-vip/kube-vip:v1.0.3`(kubespray `download.yml:261-263`; tag = `v` + `kube_vip_version`) |
 | 登记 | `deployments/config/images.manifest` 新增条目 → CI 同步至 Harbor `mirrors` |
 | tar | `deployments/offline-files/kubespray/` |
 | **预加载** | ⚠ 必须进 `PRELOAD_IMAGE_PATTERNS`(默认集合已含 `kube-vip`),否则预加载会把它裁掉 → `09_kube_vip` 的前置自检以"以下 master 上缺少 kube-vip 镜像"**硬失败**。失败模式是响亮的,不是静默降级 |

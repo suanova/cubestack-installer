@@ -16,14 +16,16 @@ deployments/cubestack-addon/multus/
                                       #       init: install-multus 装 /opt/cni/bin)
 ```
 
-镜像 ref: `ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick`(DaemonSet 主容器 + initContainer 同镜像;
-amd64)。
+镜像 ref: `ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick`(DaemonSet 主容器 + initContainer 同镜像;
+amd64)。tag = `cluster.conf` 的 `MULTUS_IMAGE_TAG`(默认 `v4.2.2-thick`), 三者须一致。
 
 ## 与上游的偏离(改动前先看这里)
 
 | 项 | 上游 quickstart | 本项目 | 原因 |
 |---|---|---|---|
 | 主容器 `resources` | `requests=limits= cpu 100m / memory 50Mi` | `requests: cpu 100m / memory 128Mi`<br>`limits: cpu 500m / memory 512Mi` | **2026-09-24 实机 OOMKilled → CrashLoopBackOff**(6 次重启/28min, 该节点 CNI 长时间不可用)。实测**空闲仅 8Mi**, 但整轮部署一次拉起大量 pod 时会出现内存尖峰 → 直接撞 50Mi 硬上限; 另外 100m 的 CPU 上限在 CNI ADD 突发时会被限流、拖慢 pod 创建。⚠ **重新从上游 vendoring 本文件时, 必须把这两处改回来** |
+| 镜像 tag | 官方 thick quickstart 默认 `snapshot-thick` | `v4.2.2-thick` | `snapshot-thick` 是**浮动 tag**(内容随上游快照变化), 与仓库"防漂移"原则冲突 —— CI 同步/离线备料/集群实际拉取三处的 digest 会随时间漂开。上游 release workflow 在发行时推 `:<版本>-thick`(已核), 故钉到 `v4.2.2-thick`: 版本号与 kubespray v2.32 的 `multus_version: 4.2.2` **同源**, 只差变体(thick) |
+| 为何不用 kubespray 的 multus role(`kube_network_plugin_multus`) | 该 role 装 `v4.2.2`(**thin** 模式, 不带 `-thick`)、只下发 CRD/SA/RBAC/DaemonSet(**不建任何 NAD 实例**)、`kube:` 模块直接 apply(**不等 CRD Established**), 主容器 `requests=limits= cpu 100m / memory 90Mi` **硬顶**(v2.32 树实测仍是) | 自持 thick DaemonSet(`multus-daemonset-thick.yml`): thick 自带 multus-daemon/install_multus; 模块建示例 macvlan NAD; apply 后 `wait_crd_established` 等 CRD(2026-09-15 线上 CRD 竞态事故的修复); 资源 128Mi/512Mi 留余量 |
 
 > ⚠ multus 在本仓库是**每节点 CNI 主路径**: 它一 OOM, 该节点上**所有新建 pod 都拿不到网络**(直到 pod 被拉起来又 OOM), 比"放宽资源"的代价大得多 —— 所以这里宁可给足余量。
 >
@@ -35,12 +37,12 @@ amd64)。
 
 ```bash
 # 联网机(docker 或 skopeo):
-docker pull ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
-docker save ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick -o multus-cni.tar
+docker pull ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick
+docker save ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick -o multus-cni.tar
 # 放到部署机: deployments/offline-files/multus/multus-cni.tar
 ```
 
-16_multus 模块把 tar 推送进集群内置 registry(目标 `<reg>/k8snetworkplumbingwg/multus-cni:snapshot-thick`),
+16_multus 模块把 tar 推送进集群内置 registry(目标 `<reg>/k8snetworkplumbingwg/multus-cni:<MULTUS_IMAGE_TAG>`),
 再 sed 重写 manifest 镜像名后 `kubectl apply`。tar 缺失时模块报错并给出指引(不静默跳过)。
 
 ## 项目集成

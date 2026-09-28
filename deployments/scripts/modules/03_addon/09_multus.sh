@@ -16,7 +16,7 @@
 #     对应的 NetworkAttachmentDefinition —— 模块按 MULTUS_* 配置自动创建一个 host-local
 #     macvlan 示例 NAD(仿官方 quickstart), 供 pod 注解 k8s.v1.cni.cncf.io/networks 引用。
 #   · 离线镜像: deployments/offline-files/multus/multus-cni.tar(联网机 docker save
-#     ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick 生成)→ 本模块推送到
+#     ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick 生成)→ 本模块推送到
 #     集群内置 registry(目标 ghcr.io/k8snetworkplumbingwg/multus-cni, 保 repo 路径去注册域)。
 #   · manifest: deployments/cubestack-addon/multus/multus-daemonset-thick.yml(官方 thick
 #     quickstart); 模块用 sed 把镜像名重写为镜像副本 ref 后 apply(不污染源文件)。
@@ -41,7 +41,7 @@ init_remote_kubectl || exit 1
 
 # ---------------- 派生变量(全部来自 cluster.conf / load_config, 无硬编码) ----------------
 SAVE_DIR="${MULTUS_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/multus}"
-IMG_TAG="${MULTUS_IMAGE_TAG:-snapshot-thick}"
+IMG_TAG="${MULTUS_IMAGE_TAG:-v4.2.2-thick}"
 # skopeo push 直连端点(nodeport → master:REGISTRY_NODEPORT; metallb → VIP:5000; 见 lib-common)
 REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-5000}}"
 # 节点可解析的 registry 域名(:5000, 节点 containerd hosts.toml 已改写)
@@ -69,19 +69,24 @@ _push() {
 
 # ---- [1/4] 校验离线资源(tar) ----
 say "[1/4] 校验 Multus 离线镜像 tar..."
-[ -d "${SAVE_DIR}" ] || { err "离线镜像目录缺失: ${SAVE_DIR}(联网机: docker save ghcr.io/k8snetworkplumbingwg/multus-cni:${IMG_TAG} -o ${SAVE_DIR}/multus-cni.tar)"; exit 1; }
+# ★ 内容校验, 不做名称猜测(2026-09-28 评审): 早期实现有一条 `*multus-cni*` 通配兜底, 它接受
+#   **任意** multus tar, 而 [2/4] 是按**目标 tag** 推送的 —— 钉版(v4.2.2-thick)之后, 这会把
+#   snapshot-thick 的内容冒充成钉死版本供进集群(共享 find_offline_tar 是按内容拒绝的, 两者必须一致)。
+#   现在的语义: 只用共享的内容校验路径取 tar; 取不到就**不猜**, 记录诊断信息, 由 [2/4] 在
+#   "registry 尚无该 tag" 时响亮拒绝 —— registry 已有该 tag 时本轮不推任何东西, 幂等路径不受影响。
 TAR_FILE="$(find_offline_tar "multus-cni:${IMG_TAG}" "*.tar" "${SAVE_DIR}")" || TAR_FILE=""
+TAR_DIAG=""
 if [ -z "${TAR_FILE}" ]; then
-    # 兜底: 目录里任一 .tar 按内容匹配(兼容改名)
+    [ -d "${SAVE_DIR}" ] || warn "  离线镜像目录缺失: ${SAVE_DIR}"
     for _t in "${SAVE_DIR}"/*.tar; do
         [ -f "${_t}" ] || continue
-        case "$(tar_first_image_tag "${_t}")" in
-            *multus-cni:${IMG_TAG}|*multus-cni*) TAR_FILE="${_t}"; break ;;
-        esac
+        TAR_DIAG="${TAR_DIAG}${TAR_DIAG:+; }$(basename "${_t}")[内容 $(tar_first_image_tag "${_t}")]"
     done
+    warn "  离线 tar 未通过内容校验 —— 期望内容 …multus-cni:${IMG_TAG}; 实际: ${TAR_DIAG:-<无 .tar>}"
+else
+    ok "离线镜像 tar 就绪: ${TAR_FILE}(内容 $(tar_first_image_tag "${TAR_FILE}"))"
 fi
-[ -n "${TAR_FILE}" ] || { err "未找到 Multus 离线镜像 tar(应含 ghcr.io/k8snetworkplumbingwg/multus-cni:${IMG_TAG}); 请先生成并放入 ${SAVE_DIR}"; exit 1; }
-ok "离线镜像 tar 就绪: ${TAR_FILE}"
+unset _t
 
 # ── [2/4] registry 预检 + skopeo 就绪 ──
 say "[2/4] 推送 Multus 镜像到集群内置 registry(${REG_DIRECT}/k8snetworkplumbingwg)..."
@@ -90,10 +95,15 @@ if ! wait_registry_ready "http://${REG_DIRECT}/v2/" 30; then
     err "集群内置 registry ${REG_DIRECT}/v2/ 30s 内不可达(检查 SERVICE_EXPOSE_MODE / registry pod / REGISTRY_DIRECT)"
     exit 1
 fi
-# 幂等: registry 已有该 tag 则跳过 push
+# 幂等: registry 已有该 tag 则跳过 push(此时不需要离线 tar, 与上面 [1/4] 的"不猜内容"不冲突)
 if reg_has_tag "${REG_DIRECT}/k8snetworkplumbingwg" "multus-cni" "${IMG_TAG}"; then
     say "  registry 已有 k8snetworkplumbingwg/multus-cni:${IMG_TAG}, 跳过推送"
 else
+    # 响亮拒绝: 宁可中止, 也不把别的 tag 的内容顶着 ${IMG_TAG} 推上去(钉版的意义所在)
+    [ -n "${TAR_FILE}" ] || { err "拒绝推送: 无内容匹配的 Multus 离线 tar, 不能把其它 tag 的内容冒充为 multus-cni:${IMG_TAG}。
+  期望: 内容含 ghcr.io/k8snetworkplumbingwg/multus-cni:${IMG_TAG} 的 tar
+  实际: ${TAR_DIAG:-${SAVE_DIR} 内无 .tar}
+  修复: 联网机 docker pull/save ghcr.io/k8snetworkplumbingwg/multus-cni:${IMG_TAG} -o ${SAVE_DIR}/multus-cni.tar(旧 tag 的 tar 请移出/删除)"; exit 1; }
     push_image_skopeo "docker-archive:${TAR_FILE}" "docker://${PUSH_REPO}/multus-cni:${IMG_TAG}" \
         && ok "  镜像已推送: ${PUSH_REPO}/multus-cni:${IMG_TAG}" \
         || { err "Multus 镜像推送失败(重试 3 次后); 检查宿主机能否达 ${REG_DIRECT}"; exit 1; }

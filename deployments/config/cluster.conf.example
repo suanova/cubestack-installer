@@ -115,6 +115,8 @@ INGRESS_NGINX_ENABLED="${INGRESS_NGINX_ENABLED:-false}" # ingress-nginx(HTTP 入
 DASHBOARD_ENABLED="${DASHBOARD_ENABLED:-false}"         # Kubernetes dashboard
 CERT_MANAGER_ENABLED="${CERT_MANAGER_ENABLED:-false}"   # cert-manager(证书签发; LWS cert-manager 模式依赖)
 GATEWAY_API_ENABLED="${GATEWAY_API_ENABLED:-false}"     # Gateway API CRDs
+LOCAL_VOLUME_PROVISIONER_ENABLED="${LOCAL_VOLUME_PROVISIONER_ENABLED:-false}" # kubespray addon: 本地卷静态供给(2.5.0); 默认关, 需要时置 true
+NFD_ENABLED="${NFD_ENABLED:-false}"                     # kubespray addon: node-feature-discovery(0.19.0); 默认关, 需要时置 true
 
 # ---- 阶段三、集群基础设施 ----
 REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"               # 集群内置 Registry(默认部署; 0=不部署 addon/节点信任, 见 3.2)
@@ -138,10 +140,10 @@ MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多�
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(Device Plugin, 暴露 RDMA 网卡为扩展资源; 见 4.8)
 CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # CubeStack 自研组件(占位; 见 4.6)
 # ---- 4.7 Multus CNI(容器多网卡; 详见 deployments/cubestack-addon/multus/CUBESTACK.md) ----
-# 离线镜像: 联网机 docker save ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
+# 离线镜像: 联网机 docker save ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick
 #   → deployments/offline-files/multus/multus-cni.tar → 16_multus 模块推送进内置 registry
 MULTUS_SAVE_DIR="${MULTUS_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/multus}"
-MULTUS_IMAGE_TAG="${MULTUS_IMAGE_TAG:-snapshot-thick}"   # 镜像 tag(与离线 tar / vendored manifest 一致)
+MULTUS_IMAGE_TAG="${MULTUS_IMAGE_TAG:-v4.2.2-thick}"     # 镜像 tag(与离线 tar / vendored manifest 一致)
 # 示例 macvlan 网络(模块自动创建的 NetworkAttachmentDefinition 参数; 仿官方 quickstart)
 MULTUS_MASTER_IFACE="${MULTUS_MASTER_IFACE:-eth0}"       # master 参数=宿主机网卡名(需与集群节点实际网卡一致)
 MULTUS_SUBNET="${MULTUS_SUBNET:-192.168.99.0/24}"
@@ -523,7 +525,8 @@ KUBE_NETWORK_PLUGIN="${KUBE_NETWORK_PLUGIN:-calico}"
 # ---------------- 2.5 kubespray 附加组件开关(由 sync-addons-config.sh 同步到 addons.yml) ----------------
 # 这些开关决定 kubespray 附加组件是否安装; 组件详细配置(地址池/存储类等)仍保留在 addons.yml
 # 开关见顶部【组件启停开关】: METALLB_ENABLED / LOCAL_PATH_ENABLED / METRICS_SERVER_ENABLED /
-#   HELM_ENABLED / INGRESS_NGINX_ENABLED / DASHBOARD_ENABLED / CERT_MANAGER_ENABLED / GATEWAY_API_ENABLED
+#   HELM_ENABLED / INGRESS_NGINX_ENABLED / DASHBOARD_ENABLED / CERT_MANAGER_ENABLED / GATEWAY_API_ENABLED /
+#   LOCAL_VOLUME_PROVISIONER_ENABLED / NFD_ENABLED
 # (已移除 metallb controller 钉首 master 的 workaround —— IPIP 数据面保证跨节点 webhook 可达, 无需再钉)
 
 # ════════════════════════════════════════════════════════════
@@ -598,26 +601,31 @@ IMAGE_MANIFEST="${IMAGE_MANIFEST:-${REPO_ROOT}/deployments/config/images.manifes
 # ---- 镜像版本(★ 升级入口: 改这里一处, 清单/Harbor/离线 tar/部署自动跟随) ----
 # 这些变量被 images.manifest 以 ${VAR} 引用。⚠ 改完必须重新同步制品, 否则 tar 与期望版本不符。
 # 基座(kubespray; ⚠ 必须与 kubespray 实际解析出的版本一致, 改了要重跑 k8s_deploy)
-K8S_VERSION="${K8S_VERSION:-v1.32.5}"                    # kube-apiserver/controller-manager/scheduler/proxy
-PAUSE_VERSION="${PAUSE_VERSION:-3.10}"
-COREDNS_VERSION="${COREDNS_VERSION:-v1.11.3}"
+K8S_VERSION="${K8S_VERSION:-v1.35.8}"                    # kube-apiserver/controller-manager/scheduler/proxy
+PAUSE_VERSION="${PAUSE_VERSION:-3.10.1}"
+COREDNS_VERSION="${COREDNS_VERSION:-v1.12.4}"
 DNS_NODE_CACHE_VERSION="${DNS_NODE_CACHE_VERSION:-1.25.0}"
-METRICS_SERVER_VERSION="${METRICS_SERVER_VERSION:-v0.7.0}"
-CPA_VERSION="${CPA_VERSION:-v1.8.8}"                     # cluster-proportional-autoscaler
-ETCD_VERSION="${ETCD_VERSION:-v3.5.16}"
-CALICO_VERSION="${CALICO_VERSION:-v3.29.3}"
+METRICS_SERVER_VERSION="${METRICS_SERVER_VERSION:-v0.9.0}"
+CPA_VERSION="${CPA_VERSION:-v1.10.3}"                    # cluster-proportional-autoscaler
+ETCD_VERSION="${ETCD_VERSION:-v3.6.14}"
+CALICO_VERSION="${CALICO_VERSION:-v3.31.7}"
 METALLB_VERSION="${METALLB_VERSION:-v0.13.9}"
-KUBE_VIP_VERSION="${KUBE_VIP_VERSION:-v1.0.3}"           # ⚠ 必须与 kubespray download.yml:285 的
-                                                        #   kube_vip_image_tag 一致, 否则离线集群拉不到镜像
+KUBE_VIP_VERSION="${KUBE_VIP_VERSION:-v1.0.3}"           # ⚠ 必须与 kubespray download.yml:261 的
+                                                        #   kube_vip_version 一致(镜像 tag = "v"+该值,
+                                                        #   见同文件 :263 的 kube_vip_image_tag), 否则离线集群拉不到镜像
                                                         #   → 09_kube_vip 前置自检硬失败("缺少 kube-vip 镜像")
                                                         #   ★ 不会再导致 kubeadm init 失败 —— 静态 Pod 现在
                                                         #     只在集群就绪后由模块落位(见 docs/kube-vip-api-ha.md 第 18 节)
 
 REGISTRY_IMAGE_TAG="${REGISTRY_IMAGE_TAG:-2.8.1}"        # docker.io/library/registry
 LOCAL_PATH_VERSION="${LOCAL_PATH_VERSION:-v0.0.24}"      # rancher/local-path-provisioner
+# kubespray addon 版本(须与上游 kubespray_defaults/defaults/main/download.yml 同值; 开关默认关;
+# 打开开关前需先把这两个镜像登记进 images.manifest 并走离线同步, 否则离线集群拉不到)
+LOCAL_VOLUME_PROVISIONER_VERSION="${LOCAL_VOLUME_PROVISIONER_VERSION:-2.5.0}"
+NFD_VERSION="${NFD_VERSION:-0.19.0}"
 BUSYBOX_TAG="${BUSYBOX_TAG:-latest}"                     # 验证用(registry 存储校验)
 NGINX_TAG="${NGINX_TAG:-1.27}"                           # 验证用(verify 模块测试后端; 见 ensure_registry_nginx)
-API_LB_NGINX_IMAGE_TAG="${API_LB_NGINX_IMAGE_TAG:-1.27.4-alpine}"  # API 本地代理静态 Pod 用; 必须与 kubespray nginx_image_tag 同值
+API_LB_NGINX_IMAGE_TAG="${API_LB_NGINX_IMAGE_TAG:-1.30.1-alpine}"  # API 本地代理静态 Pod 用; 必须与 kubespray download.yml 的 nginx_image_tag 同值(树内 download.yml:265; 不一致时离线节点拉不到该 tag 的镜像)
 # Ceph CSI 附属组件(随 CEPH_ENABLED/CEPH_CSI_ENABLED)
 CSIADDONS_SIDECAR_VERSION="${CSIADDONS_SIDECAR_VERSION:-v0.14.0}"
 CSI_ATTACHER_VERSION="${CSI_ATTACHER_VERSION:-v4.12.0}"
@@ -729,4 +737,4 @@ LWS_RELEASE_NAME="${LWS_RELEASE_NAME:-lws}"             # Helm release 名
 # 格式: 空格分隔的匹配条目; 含 ".tar" 为精确文件名匹配, 否则为文件名包含匹配(匹配 images/ 下 *.tar 文件名)
 # 留空 = 全量同步 images/ 目录
 # 也可在 inventory/${CLUSTER_NAME}/preload-images.conf 中单独覆盖(standalone 运行 cubestack-offline.sh 时)
-PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb kube-vip library_registry local-path-provisioner busybox lws_manager library_nginx}"
+PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause local-volume-provisioner node-feature-discovery metallb kube-vip library_registry local-path-provisioner busybox lws_manager library_nginx}"
