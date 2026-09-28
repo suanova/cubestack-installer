@@ -84,7 +84,8 @@
 
 再复制一份到 `mirrors/` 只会:
 
-- 多占一份存储(实测 **8.4 GB**, 其中 `maca` 5.3 GB、`driver-image` 1.15 GB);
+- 多占一份存储(2026-09-18 实测 **8.4 GB**, 其中 `maca` 5.3 GB、`driver-image` 1.15 GB ——
+  当时该组 12 个, 现 11 个, 数字为那次实测留证);
 - 每次升级 metax 版本都要重跑一次复制;
 - 若走 CI(GitHub runner)还要把 GB 级镜像先下载到 runner 再传回同一台 Harbor, 纯浪费带宽。
 
@@ -298,14 +299,22 @@ sudo ./deploy-cluster.sh --steps verify_ceph
 
 ```
 ✅ Harbor 已含清单内全部应镜像的 47 个镜像(无漂移)
-   已跳过 16 个"本就在本台 Harbor 上"的镜像(metax; 预期不镜像)
+   已跳过 16 个"本就在本台 Harbor 上"的镜像(metax/cubepilot; 预期不镜像)
 ```
 
 > ⚠ 上表是当时的 CI 实测记录(Run ID 可查), 其中"47 / 16"对应当次运行时的清单规模;
 > 清单后续有增减(组件上架/下架), 当前值以实际运行输出为准。
 
-当前清单(静态统计, 不代表 Harbor 实时状态): 共 46 个镜像, 应镜像 35 个,
-同台 Harbor 的 Metax 镜像跳过 11 个。
+清单现状(2026-09-28 现场重跑 `check-image-manifest.sh --harbor` 复核; 与上表那些 CI run 记录是两回事):
+
+```
+✅ Harbor 已含清单内全部应镜像的 35 个镜像(无漂移)
+   已跳过 11 个"本就在本台 Harbor 上"的镜像(metax; 预期不镜像)
+```
+
+> ⚠ 演变: 2026-09-18 是 63 条 = 应镜像 47 + 同台跳过 16(那 16 里含 CubePilot); 之后
+> 16→12(移除 CubePilot)、12→11(移除 mx-exporter), 现在是 **46 条 = 应镜像 35 + 同台跳过 11**。
+> **口径冲突时以现场重跑为准** —— 就是上面那条命令。
 
 **关键旁证**: `registry.k8s.io/pause:3.10` 从本机同步**失败**(该域名会 302 到
 `europe-west3-docker.pkg.dev`, 本机不可达), 但 GitHub runner **成功了** ——

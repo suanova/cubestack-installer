@@ -445,7 +445,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   harbor-save-images.sh          # Harbor → offline-files/<group>/*.tar(联网机)
   check-image-manifest.sh        # 静态校验; --kubespray 交叉核对; --harbor 漂移报告
   ```
-- **默认不镜像"上游就是本台 Harbor"的组**(metax-gpu 12): 它们本就在本台 Harbor 上,
+- **默认不镜像"上游就是本台 Harbor"的组**(metax-gpu 11): 它们本就在本台 Harbor 上,
   部署模块直接从 `metax/` 项目拉, 再镜像只多占 8.4 GB 且升级要重跑。
   判据是**推导**的(注册域 == HARBOR_MIRROR_REGISTRY), 不是硬编码名单; 要副本用 `--include-same-harbor`。
 - **CI**: `.github/workflows/sync-images-to-harbor.yml`(push 清单 / 手动 / 每周定时);
