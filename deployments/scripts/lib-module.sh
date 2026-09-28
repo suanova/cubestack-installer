@@ -662,8 +662,8 @@ print_plan() {
             echo "  ⚠ Ceph 启用(CEPH_MODE=external 接入外部 Ceph); 部署开始前会红底列出外部连接参数并倒计时"
             echo "    ${CEPH_ENV_CONFIRM_SLEEP:-60}s 确认(核对 external-ceph.env / CEPH_MONITORS; --list 仅提示, 部署时才有倒计时)"
         else
-            echo "  ⚠ CEPH_ENABLED=true → Ceph(ceph/ceph_csi)将启用; 部署开始前会红底列出存储节点+裸盘并倒计时"
-            echo "    ${CEPH_CONFIRM_SLEEP:-60}s 确认(防覆盖系统盘/在用盘; --list 仅提示, 部署时才有倒计时确认)"
+            echo "  ⚠ CEPH_ENABLED=true → Ceph(ceph/ceph_csi)将启用; 部署开始前会红底列出存储节点+磁盘分类并倒计时"
+            echo "    ${CEPH_CONFIRM_SLEEP:-60}s 确认(空闲/上次 Ceph 占用/在用/混合 分类 + 判定证据, 防覆盖在用盘)"
         fi
     fi
     echo "---------------------------------------------"

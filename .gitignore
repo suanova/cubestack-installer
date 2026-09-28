@@ -53,6 +53,11 @@ deployments/kubespray/inventory/*/artifacts/
 # 部署生成的 inventory(含密码)
 deployments/kubespray/inventory/cubestack-cluster/hosts.yml
 deployments/kubespray/inventory/cubestack-cluster/inventory.ini
+# 磁盘链路回归测试的夹具(含**生产集群标识**: IP 10.66.3.28/29/31、主机名 mxgpu-3-*、真实 Ceph fsid
+# 与生产节点 lsblk 布局)。测试脚本与夹具是一套、缺夹具跑不起来, 故整个目录暂不入库;
+# ★ 待脱敏(IP/主机名/fsid 换成中性值并重跑 41 项断言)后**删掉本行**再提交。
+# ⚠ 注意: `check-modules.sh` 第 ⑫ 项在此目录缺席时会打印"跳过(未找到)" —— 这是设计好的降级, 不是错误。
+deployments/scripts/tools/tests/
 
 # 虚拟机基础镜像/磁盘(大文件,勿提交)
 deployments/virtual-machine/

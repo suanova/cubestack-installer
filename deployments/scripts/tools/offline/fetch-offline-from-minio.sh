@@ -226,10 +226,12 @@ elif [ "${IS_CONTAINER}" = "1" ]; then
     say "容器内执行: 下载到默认目录 ${TARGET}"
 elif [ "${AUTO}" = "1" ]; then
     _minkib="$(( MIN_FREE_GB * 1024 * 1024 ))"
+    # `|| true`: df/sort 任一环节失败都会让赋值非 0 → set -e 结束脚本; 下面正是靠
+    # `[ -n "${BEST}" ]` 判"没探到合适挂载点 → 用默认目录 + warn"。
     BEST="$(df -Pk 2>/dev/null \
         | awk -v mink="${_minkib}" 'NR>1 && $4 >= mink && $1 !~ /^\/dev\/loop/ && $1 !~ /^(tmpfs|devtmpfs|overlay|squashfs|shm|udev|none|proc|sysfs|iso9660|nfs|fuse|cgroup)/ \
                && $6 !~ /^\/(proc|sys|dev|run|snap|boot)/ {print $4, $6}' \
-        | sort -rn | head -1 | awk '{print $2}')"
+        | sort -rn | head -1 | awk '{print $2}' || true)"
     if [ -n "${BEST}" ]; then
         BEST_AVAIL="$(df -Pk "${BEST}" 2>/dev/null | awk 'NR==2 {printf "%.1f", $4/1024/1024}')"
         TARGET="${BEST}/offline-files"
@@ -308,7 +310,8 @@ for s in "${SUBS[@]}"; do
     [ -n "${s}" ] || continue
     # 本次下载所需 = 远程待下载总大小 + 缓冲; mc du 输出 "大小<TAB>N objects<TAB>路径",
     # 大小在第 1 列(如 1.1GiB), 取 $1 即可
-    _rsize="$(mc du "${SRC_ROOT}/${s}" 2>/dev/null | awk -F'\t' '{print $1}')"
+    # `|| true`: mc 取不到(网络/路径不存在)时管道非 0 → set -e 结束; 下面按 `${_rsize:-?}` 展示
+    _rsize="$(mc du "${SRC_ROOT}/${s}" 2>/dev/null | awk -F'\t' '{print $1}' || true)"
     _rbytes="$(echo "${_rsize}" | awk '
         /[0-9.]+[Tt](i?B)?$/ { x=$1; sub(/[Tt](i?B)?$/,"",x); printf "%d", x*1024^4; exit }
         /[0-9.]+[Gg](i?B)?$/ { x=$1; sub(/[Gg](i?B)?$/,"",x); printf "%d", x*1024^3; exit }
@@ -357,7 +360,8 @@ mkdir -p "${DST_ROOT}"
 TARGET_AVAIL="$(df -Pk "${TARGET}" 2>/dev/null | awk 'NR==2 {gsub(/,/,"",$4); printf "%.0f", $4*1024}')"
 for s in "${SUBS[@]}"; do
     [ -n "${s}" ] || continue
-    _rsize="$(mc du "${SRC_ROOT}/${s}" 2>/dev/null | awk -F'\t' '{print $1}')"
+    # `|| true`: mc 取不到(网络/路径不存在)时管道非 0 → set -e 结束; 下面按 `${_rsize:-?}` 展示
+    _rsize="$(mc du "${SRC_ROOT}/${s}" 2>/dev/null | awk -F'\t' '{print $1}' || true)"
     _rbytes="$(echo "${_rsize}" | awk '
         /[0-9.]+[Tt](i?B)?$/ { x=$1; sub(/[Tt](i?B)?$/,"",x); printf "%d", x*1024^4; exit }
         /[0-9.]+[Gg](i?B)?$/ { x=$1; sub(/[Gg](i?B)?$/,"",x); printf "%d", x*1024^3; exit }

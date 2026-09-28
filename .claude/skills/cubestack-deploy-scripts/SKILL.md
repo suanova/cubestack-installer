@@ -231,6 +231,46 @@ python3 -c "print([i for i,l in enumerate(open('模块.sh'),1) if not l.strip().
 
 然后 **`bash -n` + `tools/check-modules.sh` 双绿**才算过。
 
+### 变体: `ssh host "sudo bash -c '...'"` 内嵌远端脚本 —— 注释里的 ASCII 引号会**静默拆散载荷**
+
+同一条规则的另一面: 内嵌脚本外层 `"..."`、内层 `'...'`, 若**注释里出现未转义的 ASCII 双引号**,
+本地 shell 会提前闭合外层引号 → 这次 ssh 调用的参数被**拆成多个**。bash/ssh 会把额外参数用
+**一个空格**重新拼接成远端命令, 所以**多数时候看起来是好的**(只是注释里少俩引号、多几个空格),
+直到引号奇偶性被带偏, 把后面**功能性代码**里的 `$()`、`[[:space:]]`、`)` 拖进错误的引用状态 ——
+那时才炸, 且报错点离真因很远(2026-09-23 实测: `deployments/kubespray/cubestack-offline.sh` 的
+内嵌清理脚本被拆成 2 个参数, 断点落在注释 `见 "Drain node" 报 ...`)。
+
+**落地规则**: 内嵌远端脚本内的注释**不要用 ASCII 双引号**, 改用全角 `“ ”`(多字节, 对 shell 完全惰性)。
+
+**自检(比肉眼可靠)**: 用 stub `ssh` 把真正发给远端的载荷打出来, 看**参数个数**:
+
+```bash
+cat > /tmp/pt.sh <<'OUTER'
+#!/bin/bash
+key=/tmp/k; user=ubuntu; host=10.0.0.1
+ssh() { echo "### ssh 收到 $# 个参数 ###"; local i=1 a; for a in "$@"; do
+    if [ $i -ge 10 ]; then echo "--- arg$i ---"; printf '%s\n' "$a"; fi; i=$((i+1)); done; }
+OUTER
+sed -n "${P1},${P2}p" 脚本.sh >> /tmp/pt.sh   # P1/P2 = 该 ssh 调用的行范围
+printf '\nprintf "%%s\\n" "$probe"\n' >> /tmp/pt.sh
+bash /tmp/pt.sh    # 期望: 除 ssh 选项外**只有 1 个参数**(即整段远端脚本)
+```
+
+⚠ 必须**逐字核对功能性行**是否原样送达(`$(...)`、`\"` 转义、`[[:space:]]`), 不能只看"跑通了"。
+
+### 另一条同源坑: 同一条 `local` 里, 赋值右侧**先于**赋值求值
+
+```bash
+local rel="$1" src="${REPO_ROOT}/${rel}"   # ❌ ${rel} 取的是**外层**同名变量, 不是刚赋的 $1
+local rel="$1"                             # ✅ 分行写
+local src="${REPO_ROOT}/${rel}"
+```
+
+只在外层恰好存在同名变量且值相同时才"看起来正常" —— 2026-09-23 在 `sync-to-container.sh` 实测:
+`sync_one` 仅从 `for rel in PATHS` 循环调用, 外层 `rel` 恰等于 `$1`, 所以一直没暴露;
+一旦换调用方式, `src` 会退化成 `${REPO_ROOT}/` → `docker cp` 把**整个仓库根**(含 971M kubespray
+源码树与 `.git`)灌进容器。
+
 ## 常用调度命令
 
 ```bash
@@ -283,7 +323,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
 - **放哪**:`deployments/cubestack-addon/<组件>/`(一个 chart 一个子目录)。`.gitignore` 只挡
-  `offline-files/*`,不挡 `cubestack-addon/`,所以 `.tgz` 直接 `git add` 即可(如 lws / cubepilot / rook 的 chart 已在库里)。
+  `offline-files/*`,不挡 `cubestack-addon/`,所以 `.tgz` 直接 `git add` 即可(如 lws / rook 的 chart 已在库里)。
 - **什么形态**:小 chart 放 `.tgz` + **同时提交 `<tgz>.digest` 边车**;大 chart(带几十个子 chart)
   放解包源码目录(含 `Chart.yaml`)。
 - **怎么装**:走共享助手,**不要手抄 pull/回退逻辑**:
@@ -293,9 +333,10 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   ```
   语义:online 拉远端 → 比 `Digest:` 与边车 → **未变继续用本地**(仓库保持干净)、有更新才覆盖本地
   并提示 commit、拉取失败降级回退本地;offline 完全不联网;最后判一次本地副本在不在,不在就 `err`。
-- **怎么刷新**:`tools/images/<组件>-fetch-charts.sh`(照抄 `cubepilot-fetch-charts.sh`
-  tgz+边车版),跑完**必须 commit** —— 不提交等于没刷新。
-- **为什么是"恒用本地"而不是"线上优先"**:`31_cubepilot` 原本写了"拉取失败回退本地 chart",
+- **怎么刷新**:目前**没有**脚本化刷新工具 —— 手工 `helm pull` 覆盖 vendored 副本
+  (示例见 `deployments/cubestack-addon/lws/CUBESTACK.md` 的"升级到新版本"),`.tgz` 形态要一并更新
+  `<tgz>.digest` 边车。跑完**必须 commit** —— 不提交等于没刷新。
+- **为什么是"恒用本地"而不是"线上优先"**:曾有模块写了"拉取失败回退本地 chart",
   但仓库里压根没有那份文件 —— 私服一抖动回退就是空转。回退只有在本地确实有一份时才有意义。
 - **强制校验**:`tools/check-modules.sh` 第 ⑩ 项。行首是 helm 安装命令的模块,其引用的
   `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`,否则报错。
@@ -368,9 +409,14 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   多架构 tar 会让 `ctr import` 报 "content digest not found")、`tools/offline/fetch-lvm-packages.sh`
   (lvm2 .deb → `offline-files/kubespray/packages`, OSD 重启需 lvm 激活逻辑卷)。
 - **节点选择**: `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master**)→ 唯一实现为 lib-common 的 `ceph_storage_hosts()`; 模块自动打 label `CEPH_NODE_LABEL`(默认 `ceph-storage=rook-ceph`)。
-- **裸盘自动检测(防覆盖)**: `tools/k8s/ceph-detect-disks.sh` 判定"未使用裸盘"(无分区/格式化/挂载/LVM 且非系统盘)
-  → 生成 CephCluster CR 的 per-node devices(精确盘名)。部署前**红底列出节点+盘并 sleep CEPH_CONFIRM_SLEEP(60s)**
-  double-check; CI 可 `CEPH_CONFIRM_SLEEP=0`。
+- **磁盘分类(防覆盖)**: `tools/k8s/ceph-detect-disks.sh` 把每块盘分四类 —— `free`(空闲裸盘)/
+  `ceph`(上次 Ceph 占用的 OSD 盘)/ `inuse`(挂载中·非 ceph 文件系统·非 ceph LVM·系统盘)/ `mixed`(同盘两者皆有);
+  CR 的 per-node devices 取 `free ∪ ceph`(精确盘名), `inuse`/`mixed` 不选不清理。
+  **只认强证据**(bluestore 签名 / ceph 分区 GUID 或分区名 / `ceph-*` VG·`ceph.*` 标签 / `ceph--` dm 名),
+  判定实现在同目录 `ceph-disk-classify.py`(纯函数, 可离线单测) —— 改判定口径只改这一处。
+  ⚠ 有 LVM 签名但认不出归属时判 `inuse`(**宁可不擦**); `nbd*` 恒 `inuse`(可能是 rbd-nbd 映射, 擦它会写穿 RBD 卷)。
+  清理走 `tools/k8s/ceph-cleanup.sh --list`(只读计划)/`--wipe-disks`/`--all`, 显式 `--wipe-node` 默认拒清 `inuse`/`mixed` 盘。
+  部署前**红底按四类分组 + 判定证据列出节点与盘, sleep CEPH_CONFIRM_SLEEP(60s)** double-check; CI 可 `CEPH_CONFIRM_SLEEP=0`。
 - **镜像同步**: `tools/images/ceph-sync-images.sh`(复制 tar 到全部节点 + `ctr -n k8s.io images import --no-unpack`)。
 - **VM 测试盘**: `vm-nodes.conf` 的 `VM_DATA_DISKS=3/VM_DATA_DISK_SIZE=200` → 每台 VM 附加 3×200GB 裸盘(Guest `/dev/vdb~`),
   由 `tools/vm/create-vms.sh` 创建时自动附加。
@@ -399,8 +445,8 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   harbor-save-images.sh          # Harbor → offline-files/<group>/*.tar(联网机)
   check-image-manifest.sh        # 静态校验; --kubespray 交叉核对; --harbor 漂移报告
   ```
-- **默认不镜像"上游就是本台 Harbor"的组**(metax-gpu 12 + cubepilot 4): 它们本就在本台 Harbor 上,
-  部署模块直接从 `metax/` 与 `suanova/` 项目拉, 再镜像只多占 8.4 GB 且升级要重跑。
+- **默认不镜像"上游就是本台 Harbor"的组**(metax-gpu 11): 它们本就在本台 Harbor 上,
+  部署模块直接从 `metax/` 项目拉, 再镜像只多占 8.4 GB 且升级要重跑。
   判据是**推导**的(注册域 == HARBOR_MIRROR_REGISTRY), 不是硬编码名单; 要副本用 `--include-same-harbor`。
 - **CI**: `.github/workflows/sync-images-to-harbor.yml`(push 清单 / 手动 / 每周定时);
   凭据走 GitHub **Secrets**(`HARBOR_MIRROR_USER` / `HARBOR_MIRROR_PASSWORD`, 密码必须放 Secret)。
@@ -426,6 +472,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - [ ] 引用的工具脚本存在于 `tools/<领域>/` 且路径正确
 - [ ] **(装 chart 的模块)chart 已 vendored 到 `cubestack-addon/<组件>/`(tgz 附 `.digest` 边车)且已 `git add`**
 - [ ] **(装 chart 的模块)走 `helm_chart_ensure` 恒用本地副本;缺副本时 `err` 退出并给获取方法**
+- [ ] **(改含内嵌远端脚本的文件)注释里没有 ASCII 双引号**(用全角 `“ ”`); 改完用 stub `ssh` 数参数个数, 确认载荷没被拆散
 - [ ] `bash deployments/scripts/tools/check-modules.sh` exit 0(含第 ⑩ 项离线副本检查)
 - [ ] `deploy-cluster.sh --list-steps` 能看到新模块
 - [ ] 不影响其他模块(未改他人元数据/文件名)

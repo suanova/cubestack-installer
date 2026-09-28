@@ -67,7 +67,7 @@ usage() {
           k8s_deploy(默认关, --with-k8s)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           local_path(可选) k8s_registry 组件(全部可单独部署的组件见下方"组件单独部署"清单)
-          自研: cubepilot cubestack_apps(占位)
+          自研: cubestack_apps(占位)
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
@@ -147,7 +147,7 @@ $(_component_meta_list stub)
   sudo ./deploy-cluster.sh --steps verify_metallb   # 只验证某个组件(验后自动清理)
   sudo ./deploy-cluster.sh --steps ceph_backup      # Ceph 备份(CR+secret+mon store → master 根盘)
   sudo CEPH_BACKUP_ACTION=restore ./deploy-cluster.sh --steps ceph_backup  # Ceph 恢复(认领旧 OSD 数据)
-  sudo ./deploy-cluster.sh --steps cubepilot           # 单个组件(自动带基座; 见上方"单独安装某个组件"清单)
+  sudo ./deploy-cluster.sh --steps multus              # 单个组件(自动带基座; 见上方"单独安装某个组件"清单)
 EOF
     exit 0
 }
@@ -448,6 +448,10 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         echo -e "\033[41m\033[97m   存储节点与将使用的裸盘(SSH 直连自动检测/或 CEPH_DATA_DISKS 显式):\033[0m"
         # 候选存储节点(hostname): 统一走 ceph_storage_hosts(CEPH_NODES 显式 > CEPH_NODE_ROLE)
         declare -A _CEPH_CONFIRM_DISKS
+        # 分类原始 TSV(<设备>\t<分类>\t<证据>): 确认框按类分组显示, 让"上次 Ceph 占用的盘"
+        # 与"空闲盘"分开列出 —— 旧版只有一个裸盘列表, Ceph 存量盘被判为"在用"后只显示
+        # <未检测到>, 人工看不出到底是"没有盘"还是"盘被上次部署占着"。
+        declare -A _CEPH_CONFIRM_TSV
         _CEPH_CONFIRM_HOSTS=()
         while IFS= read -r _h; do
             [ -n "${_h}" ] && _CEPH_CONFIRM_HOSTS+=("${_h}")
@@ -482,19 +486,39 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
             # 自动检测(SSH 直连, 与 ceph 模块同工具); 节点免密未配置/无盘 → 降级提示
             _DETECT_ARGS=()
             for _h in "${_CEPH_CONFIRM_HOSTS[@]}"; do _DETECT_ARGS+=(--node "${_h}"); done
-            _DETECT_OUT="$(bash "${SCRIPT_DIR}/tools/k8s/ceph-detect-disks.sh" "${_DETECT_ARGS[@]}" -m)" || true   # stderr 透传: 显示检测过程与失败原因(SSH 失败/无裸盘)
+            _DETECT_OUT="$(bash "${SCRIPT_DIR}/tools/k8s/ceph-detect-disks.sh" "${_DETECT_ARGS[@]}" -m --classify)" || true   # stderr 透传: 显示检测过程与失败原因(SSH 失败/无裸盘)
             if [ -n "${_DETECT_OUT}" ]; then
-                while IFS= read -r _l; do
-                    [ -z "${_l}" ] && continue
-                    [[ "${_l}" == *"/dev/"* ]] || continue
-                    _hn="${_l%%:*}"; _ds="${_l#*:}"
-                    _CEPH_CONFIRM_DISKS["${_hn}"]="${_ds%,}"
+                while IFS=$'\t' read -r _hn _dev _cls _ev; do
+                    [ -n "${_hn}" ] && [ -n "${_dev}" ] || continue
+                    _CEPH_CONFIRM_TSV["${_hn}"]="${_CEPH_CONFIRM_TSV[${_hn}]:-}${_dev}"$'\t'"${_cls}"$'\t'"${_ev}"$'\n'
+                    # 将写入 CR 的盘 = 空闲 + 上次 Ceph 占用(覆盖安装会先清空), 与 02_ceph.sh 同一口径
+                    case "${_cls}" in
+                        free|ceph) _CEPH_CONFIRM_DISKS["${_hn}"]="${_CEPH_CONFIRM_DISKS[${_hn}]:-}${_CEPH_CONFIRM_DISKS[${_hn}]:+,}${_dev}" ;;
+                    esac
                 done <<< "${_DETECT_OUT}"
             else
                 _CEPH_CONFIRM_DETECT_FAIL=1
             fi
             unset _DETECT_ARGS _DETECT_OUT
         fi
+        # 按分类分组显示各节点磁盘(含判定证据); 显式 CEPH_DATA_DISKS 路径没有分类数据,
+        # 退回单行显示(那条路径盘名是人指定的, 本来就不需要分类)
+        _ceph_show_cls() {   # <hostname> <分类> <标题>
+            local _sh="$1" _sw="$2" _st="$3" _sd _sc _se _slist=""
+            [ -n "${_CEPH_CONFIRM_TSV[${_sh}]:-}" ] || return 0
+            while IFS=$'\t' read -r _sd _sc _se; do
+                [ -n "${_sd}" ] || continue
+                [ "${_sc}" = "${_sw}" ] || continue
+                _slist="${_slist:+${_slist},}${_sd}"
+            done <<< "${_CEPH_CONFIRM_TSV[${_sh}]}"
+            [ -n "${_slist}" ] || return 0
+            echo -e "\033[41m\033[97m   · ${_sh}  ${_st}: ${_slist}\033[0m"
+            while IFS=$'\t' read -r _sd _sc _se; do
+                [ -n "${_sd}" ] || continue
+                [ "${_sc}" = "${_sw}" ] || continue
+                echo -e "\033[41m\033[97m        ${_sd} ← ${_se}\033[0m"
+            done <<< "${_CEPH_CONFIRM_TSV[${_sh}]}"
+        }
         for _h in "${_CEPH_CONFIRM_HOSTS[@]:-}"; do
             _ip=""
             for _line in "${NODES[@]:-}"; do
@@ -502,15 +526,28 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
                 node_parse "${_line}"
                 [ "${NODE_HOSTNAME}" = "${_h}" ] && { _ip="${NODE_IP}"; break; }
             done
-            echo -e "\033[41m\033[97m   · ${_h}${_ip:+(${_ip})}  →  裸盘: ${_CEPH_CONFIRM_DISKS[${_h}]:-<未检测到>}\033[0m"
+            if [ -n "${_CEPH_CONFIRM_TSV[${_h}]:-}" ]; then
+                echo -e "\033[41m\033[97m  ── ${_h}${_ip:+(${_ip})} ──\033[0m"
+                _ceph_show_cls "${_h}" free  "空闲裸盘(将作新 OSD)"
+                _ceph_show_cls "${_h}" ceph  "上次 Ceph 占用(覆盖安装将清空复用)"
+                _ceph_show_cls "${_h}" mixed "混合盘(不清理, 需人工判断)"
+                _ceph_show_cls "${_h}" inuse "在用盘(不会触碰)"
+                [ -n "${_CEPH_CONFIRM_DISKS[${_h}]:-}" ] \
+                    || echo -e "\033[41m\033[97m     <无可用盘! 该节点不会创建 OSD>\033[0m"
+            else
+                echo -e "\033[41m\033[97m   · ${_h}${_ip:+(${_ip})}  →  裸盘(显式): ${_CEPH_CONFIRM_DISKS[${_h}]:-<未检测到>}\033[0m"
+            fi
         done
+        unset -f _ceph_show_cls
         if [ "${_CEPH_CONFIRM_DETECT_FAIL}" = "1" ]; then
             echo -e "\033[41m\033[97m   ⚠ 自动检测未返回(节点 SSH 免密可能未配置); 将在 ceph 模块部署时(SSH 就绪后)再确认盘名\033[0m"
         fi
         if [ -n "${REGISTRY_STORAGE_CLASS:-}" ] && [ "${REGISTRY_STORAGE_CLASS}" != "local-path" ]; then
             echo -e "\033[41m\033[97m   registry 后端: REGISTRY_STORAGE_CLASS=${REGISTRY_STORAGE_CLASS}(PVC 等 ceph 就绪后自动绑定)\033[0m"
         fi
-        echo -e "\033[41m\033[97m   auto 自动检测"未使用裸盘"(挂载/分区/格式化/系统盘一律不选); 显式用 CEPH_DATA_DISKS\033[0m"
+        echo -e "\033[41m\033[97m   auto 自动分类磁盘 = 空闲裸盘 + 上次 Ceph 占用盘(后者覆盖安装会清空复用)\033[0m"
+        echo -e "\033[41m\033[97m   在用盘(挂载中/非 ceph 文件系统/非 ceph LVM/系统盘)与混合盘一律不选不清理\033[0m"
+        echo -e "\033[41m\033[97m   判定证据见各盘下方(判定按强证据, 不做猜测); 显式用 CEPH_DATA_DISKS 可指定盘\033[0m"
         echo -e "\033[41m\033[97m   有误请 Ctrl-C 中止, 修正 ${CLUSTER_CONF} 后重跑                    \033[0m"
         echo -e "\033[41m\033[97m================================================================================\033[0m"
 
@@ -595,7 +632,7 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
             [ "${_CEPH_GONE}" = "1" ] && ok "旧 Ceph 已清理, 可重新部署" || warn "旧 Ceph 未完全清理(重装前请手工确认 cephcluster 已删除)"
         fi
         unset _CEPH_EXIST _FM_IP _CEPH_SSH_KEY _CEPH_GONE _CEPH_STATE
-        unset _ceph_cs _CEPH_CONFIRM_HOSTS _CEPH_CONFIRM_DISKS _CEPH_CONFIRM_DETECT_FAIL _h _ip _line _l _ds _hn _g _grp _norm _h2 _d
+        unset _ceph_cs _CEPH_CONFIRM_HOSTS _CEPH_CONFIRM_DISKS _CEPH_CONFIRM_TSV _CEPH_CONFIRM_DETECT_FAIL _h _ip _line _l _ds _hn _g _grp _norm _h2 _d
         fi   # if [ -n "${_ceph_confirm_in}" ](internal 模式确认块)
     fi   # else(external 模式跳过确认)
     unset _ceph_confirm_in

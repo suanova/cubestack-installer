@@ -122,10 +122,11 @@ command -v skopeo >/dev/null 2>&1 || { warn "未找到 skopeo(tar 模式推送�
 # skopeo 所需最小 trust policy 已在 lib-common.sh source 时自动生成(ensure_skopeo_policy)
 # 宿主机 /etc/hosts 每次部署统一更新为正确 IP(不允许遗留 10.66.3.37 等过期条目):
 #   REGISTRY_DOMAIN → REGISTRY_IP(集群内置 registry VIP, 供宿主按域名 push)
-#   API_DOMAIN      → API_IP(API Server 入口, 供宿主 helm/kubectl 连集群)
+#   API_DOMAIN      → API_ENTRY_IP(API Server 入口: kube-vip 已绑 → VIP, 未绑 → 首个 master)
 # 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)
+API_ENTRY_IP="$(api_entry_ip)" || exit 1
 ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
-ensure_hosts_entry "${API_IP}" "${API_DOMAIN}"
+ensure_hosts_entry "${API_ENTRY_IP}" "${API_DOMAIN}"
 grep -qE "^${REGISTRY_IP}[[:space:]]+${REGISTRY_DOMAIN}" /etc/hosts 2>/dev/null \
     || warn "无法写入宿主机 /etc/hosts(非 root?), ${REGISTRY_DOMAIN}/${API_DOMAIN} 可能无法从宿主按域名访问"
 # registry(MetalLB VIP)就绪存在时序竞态: Service EXTERNAL-IP 出现后, speaker ARP 通告 /
@@ -150,9 +151,9 @@ SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
 # (每次部署后执行, 确保安装机 kubectl/helm 可访问集群; 合并而非覆盖, 避免破坏其他集群配置)
 # 宿主机 kubectl/helm 访问集群: 复用 lib-common 的 sync_kubeconfig(server→API_DOMAIN + 宿主机 DNAT)
 sync_kubeconfig \
-    && ok "宿主机 ~/.kube/config 已同步(admin.conf → API ${API_DOMAIN}→${API_IP})" \
-    || { err "宿主机无法访问集群(admin.conf 下载/同步失败; 检查 ${FIRST_MASTER} 的 /etc/kubernetes/admin.conf, 以及 ${API_DOMAIN}→${API_IP} 解析)"; exit 1; }
-ok "前置检查通过(registry=${REGISTRY_BASE}, API=${API_DOMAIN}→${API_IP})"
+    && ok "宿主机 ~/.kube/config 已同步(admin.conf → API ${API_DOMAIN}→${API_ENTRY_IP})" \
+    || { err "宿主机无法访问集群(admin.conf 下载/同步失败; 检查 ${FIRST_MASTER} 的 /etc/kubernetes/admin.conf, 以及 ${API_DOMAIN}→${API_ENTRY_IP} 解析)"; exit 1; }
+ok "前置检查通过(registry=${REGISTRY_BASE}, API=${API_DOMAIN}→${API_ENTRY_IP})"
 
 # ---------------- 0. GPU 节点检测(mx-smi)决定等待路径 ----------------
 # 先判断集群是否存在 GPU 节点(逐节点宿主机 mx-smi):

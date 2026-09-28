@@ -31,7 +31,7 @@
 #   ./harbor-sync-images.sh --group ceph,rdma        # 只同步指定分组
 #   ./harbor-sync-images.sh --exclude-group metax-gpu  # 排除大体积分组
 #   ./harbor-sync-images.sh --include-same-harbor      # 连"上游就是本台 Harbor"的镜像一起镜像
-#                                                     # (默认**不镜像**这些: metax/cubepilot 本就在
+#                                                     # (默认**不镜像**这些: metax 本就在
 #                                                     #  本台 Harbor 上, 部署模块直接从其原项目拉,
 #                                                     #  再复制一份只多占 8.4 GB 且升级要重跑)
 #   ./harbor-sync-images.sh --force                # 强制重新同步(忽略 digest 相同)
@@ -102,9 +102,9 @@ _group_selected() {   # <group> → 0=选中
 }
 
 # ---- 收集清单(过滤后) ----
-# 默认**跳过"上游就是本台 Harbor"的镜像**(metax / cubepilot): 它们是 Harbor → Harbor 的同台复制,
-# 目标"集群不访公网"对它们**已经达成**(部署模块现在就分别从 harbor.isuanova.com/metax 与
-# /suanova 拉取, 无需任何改动)。再复制一份到 mirrors/ 只会: ①多占一份存储(实测 8.4 GB, 其中
+# 默认**跳过"上游就是本台 Harbor"的镜像**(metax): 它们是 Harbor → Harbor 的同台复制,
+# 目标"集群不访公网"对它们**已经达成**(部署模块现在就直接从 harbor.isuanova.com/metax
+# 拉取, 无需任何改动)。再复制一份到 mirrors/ 只会: ①多占一份存储(实测 8.4 GB, 其中
 # maca 5.3 GB); ②每次版本升级都要重跑一次。
 # 判据是**推导**出来的(注册域 == HARBOR_MIRROR_REGISTRY), 不是硬编码名单 ——
 # 将来若某个组件改成从公网拉, 它会自动重新进入镜像范围。
@@ -377,8 +377,8 @@ ok "同步完成: 新同步 ${SYNCED} 个, digest 未变跳过 ${SKIPPED} 个, �
 if [ "${#SAME_HARBOR_SKIPPED[@]}" -gt 0 ]; then
     warn "另有 ${#SAME_HARBOR_SKIPPED[@]} 个镜像**本就在本台 Harbor 上, 不镜像到 mirrors/**(这是预期行为):"
     for _s in "${SAME_HARBOR_SKIPPED[@]}"; do echo "    - ${_s}"; done
-    echo "  说明: 这些组件的部署模块直接从其现有项目(metax/ 与 suanova/)拉取, 无需改代码、无重复存储。"
-    echo "  确实想要 mirrors/ 下的副本时: ./harbor-sync-images.sh --include-same-harbor --group metax-gpu,cubepilot"
+    echo "  说明: 这些组件的部署模块直接从其现有项目(metax/)拉取, 无需改代码、无重复存储。"
+    echo "  确实想要 mirrors/ 下的副本时: ./harbor-sync-images.sh --include-same-harbor --group metax-gpu"
 fi
 echo "  Harbor:  ${HARBOR_API}/${HARBOR_PROJ}/"
 echo "  下一步:  联网机执行 tools/images/harbor-save-images.sh 生成离线 tar"

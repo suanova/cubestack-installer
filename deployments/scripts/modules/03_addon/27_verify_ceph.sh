@@ -271,8 +271,10 @@ if [ "${CEPH_RGW_ENABLED:-false}" = "true" ]; then
             RGW_AK=""; RGW_SK=""
             RGW_CRED="$(bash "${SCRIPT_DIR}/tools/k8s/rgw-get-user-key.sh" "verify-rgw-$(date +%s)" 2>/dev/null || true)"
             # AK/SK 是脚本输出的最后两行(前面可能有 warn 污染); 用 tail+过滤取凭据行
-            RGW_AK="$(printf '%s\n' "${RGW_CRED}" | grep -E '^[A-Za-z0-9+/=]{16,}$' | tail -2 | sed -n 1p)"
-            RGW_SK="$(printf '%s\n' "${RGW_CRED}" | grep -E '^[A-Za-z0-9+/=]{16,}$' | tail -1)"
+            # `|| true`: 凭据行一条都没有时 grep 无匹配, set -e+pipefail 会当场结束模块 ——
+            # 而下面正是靠 `[ -z "${RGW_AK}" ]` 判"创建失败并给指引", 语义上必须允许为空。
+            RGW_AK="$(printf '%s\n' "${RGW_CRED}" | grep -E '^[A-Za-z0-9+/=]{16,}$' | tail -2 | sed -n 1p || true)"
+            RGW_SK="$(printf '%s\n' "${RGW_CRED}" | grep -E '^[A-Za-z0-9+/=]{16,}$' | tail -1 || true)"
             if [ -z "${RGW_AK}" ] || [ -z "${RGW_SK}" ]; then
                 warn "    RGW 测试用户创建失败(输出见下, 不阻断):"
                 [ -n "${RGW_CRED}" ] && echo "${RGW_CRED}" | tail -3 | sed 's/^/    /'
