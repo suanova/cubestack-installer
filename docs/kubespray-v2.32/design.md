@@ -279,6 +279,12 @@ kubespray 还要下载:`kubelet/kubectl`(dl.k8s.io)、`calicoctl`(GitHub release
 
 ## 11. 未决项(实施时必须先回答)
 
+> ★ 最终审查(2026-09-28)追加两条**部署前必答**(合并可放行, 但必须进交付说明):
+> - **I5 生态兼容**:metax operator / rook v1.20 / ceph-csi × **k8s 1.35** 的支持声明仍未核(D1 自写"实施前先核"却无交付物记录)→ 下次全量部署就会装 1.35.8。
+> - **ansible 大版本**:`deployments/kubespray/kubespray/.venv` 实测 **ansible-core 2.16.19**, 而 v2.32 要求 ≥2.19 <2.20 → 裸机路径必须按新 `requirements.txt`(**ansible==12.3.0**)**重建** `.venv`(修复波次已加入口自检 + 文档补充)。
+> - **trim 会删 13 个 tar**(Ruling 25 复核确认):新增登记/改钉子后**先读交付说明再跑 trim**, 否则 ceph 组 11 个离线交付 tar + `ubuntu_22.04.tar` + 旧 `nginx_1.27.tar` 会被删。
+
+
 1. **升级时机**:现有集群 A/B 是否接受"下次全量部署即升到 1.35.8"?若否,本任务拆两步:先在**不换 k8s 版本**的前提下只换树+插件(注:v2.32 的表里没有 1.32,**做不到**——所以真正的折中是"先只做插件与补丁层、k8s 升级另行择期",届时要选定"树停在 v2.28 还是 v2.32 但暂不部署")。
 2. **CI 触发方式**:合并到 main 后自动同步,还是先 `workflow_dispatch` 在本分支手动跑一次验证。
 3. **ansible wheel 来源**:哪台机器能取 PyPI;是否也放 Harbor。

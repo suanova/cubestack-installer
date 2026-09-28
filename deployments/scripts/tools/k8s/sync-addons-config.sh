@@ -44,6 +44,8 @@ _metallb="${METALLB_ENABLED:-true}"
 [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ] && _metallb=false
 set_key metallb_enabled             "$(bool "${_metallb}")"
 set_key metallb_speaker_enabled     "$(bool "${_metallb}")"
+set_key local_volume_provisioner_enabled "$(bool "${LOCAL_VOLUME_PROVISIONER_ENABLED:-false}")"
+set_key node_feature_discovery_enabled   "$(bool "${NFD_ENABLED:-false}")"
 set_key local_path_provisioner_enabled "$(bool "${LOCAL_PATH_ENABLED:-false}")"
 set_key metrics_server_enabled      "$(bool "${METRICS_SERVER_ENABLED:-true}")"
 set_key helm_enabled                "$(bool "${HELM_ENABLED:-true}")"

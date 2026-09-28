@@ -17,6 +17,14 @@
 #   ⑬ API 入口: all.yml 本地代理语义自洽(localhost: true ⇒ loadbalancer_apiserver 块必须被注释)
 #   ⑭ 离线预加载: PRELOAD_IMAGE_PATTERNS 四处副本逐字节一致(漂移会被备料静默 trim 掉)
 #   ⑮ kubespray 补丁在位(cubestack-patch-apply.sh --check 全绿; 换树后没重放会静默降级)
+#   ⑯ k8s 基座钉子闭环(三件):
+#      A) 钉子 vs 上游树内表值 —— cluster.conf 的 K8S/CALICO/ETCD/COREDNS/PAUSE/DNS_NODE_CACHE/
+#         METRICS_SERVER/CPA + API_LB_NGINX_IMAGE_TAG 必须与 vendored kubespray 的表一致
+#         (只判一致, 期望值现算不写死; 换树/换钉子即报)
+#      B) 两个无模块开关键(LOCAL_VOLUME_PROVISIONER_ENABLED / NFD_ENABLED)的 .example 默认声明
+#      C) **写入者闭环**: inventory 的 group_vars/all/k8s-versions.yml 里 8 个 kubespray 版本变量
+#         确实存在且 == cluster.conf 的钉子(写入者 = tools/k8s/sync-kubespray-config.sh 3.2 节)
+#      A 只证"钉子自洽"(== 表值), C 才证"部署真会用钉子"; 缺 C 时删掉写入节/改错值照样全绿。
 # 用法: bash check-modules.sh           # 校验全部模块(只读, 无需 root)
 #       bash check-modules.sh --quiet   # 只输出违规项
 # 退出码: 0=全部通过; 1=存在违规(列出清单)
@@ -41,7 +49,7 @@ ck_fail() { bad "$*"; FAIL=1; }
 say "==== 模块静态校验(${MODULES_DIR}) ===="
 
 # ---------- ① bash -n 语法 ----------
-say "[1/15] bash -n 语法检查 ..."
+say "[1/16] bash -n 语法检查 ..."
 SYNTAX_FAIL=0
 while IFS= read -r -d '' f; do
     bash -n "$f" 2>/dev/null || { bad "语法错误: ${f#$MODULES_DIR/}"; SYNTAX_FAIL=1; FAIL=1; }
@@ -53,7 +61,7 @@ meta() { sed -nE "s/^#[[:space:]]*${2}:[[:space:]]*(.*)$/\1/p" "$1" | head -1; }
 phase_dir() { case "$(basename "$(dirname "$1")")" in
     01_env) echo "env";; 02_k8s) echo "k8s";; 03_addon) echo "addon";; *) echo "?";; esac; }
 
-say "[2/15] 头部元数据齐全性 ..."
+say "[2/16] 头部元数据齐全性 ..."
 declare -A KEYS=()
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -71,10 +79,10 @@ while IFS= read -r -d '' f; do
 done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] && ok "元数据齐全"
 
-say "[3/15] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
+say "[3/16] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
 [ "${FAIL}" = "0" ] || true
 
-say "[4/15] PHASE 合法性 + 目录一致性 ..."
+say "[4/16] PHASE 合法性 + 目录一致性 ..."
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
     ph="$(meta "$f" PHASE)"
@@ -84,7 +92,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] || true
 
 # ---------- ⑤ REQUIRES 引用 + 全量拓扑 ----------
-say "[5/15] REQUIRES 引用存在性 + 全量无环 ..."
+say "[5/16] REQUIRES 引用存在性 + 全量无环 ..."
 REQ_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -124,7 +132,7 @@ else
 fi
 
 # ---------- ⑥ init_remote_kubectl 使用检查 ----------
-say "[6/15] 远端 kubectl 初始化(K/SSH)调用检查 ..."
+say "[6/16] 远端 kubectl 初始化(K/SSH)调用检查 ..."
 INIT_MISS=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -138,7 +146,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${INIT_MISS}" = "0" ] && ok "使用 K/SSH 的模块均已调用 init_remote_kubectl"
 
 # ---------- ⑦ TOGGLE 与 cluster.conf.example 一致性 ----------
-say "[7/15] TOGGLE 变量在 cluster.conf.example 声明 ..."
+say "[7/16] TOGGLE 变量在 cluster.conf.example 声明 ..."
 if [ -f "${CONF_EXAMPLE}" ]; then
     TOG_MISS=0
     while IFS= read -r -d '' f; do
@@ -155,7 +163,7 @@ else
 fi
 
 # ---------- ⑧ 文件序号与目录 ----------
-say "[8/15] 文件名序号规范(NN_ 前缀) ..."
+say "[8/16] 文件名序号规范(NN_ 前缀) ..."
 NUM_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -170,7 +178,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 # ---------- ⑨ tools/ 工具脚本语法检查 ----------
 # 模块外的部署工具(tools/**/*.sh: ceph-backup/deploy-registry/... )同样参与部署,
 # 漏检会在运行期炸(历史: registry 就绪等待 K unbound 崩溃)。
-say "[9/15] tools/ 工具脚本语法检查 ..."
+say "[9/16] tools/ 工具脚本语法检查 ..."
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 T_FAIL=0
 while IFS= read -r -d '' f; do
@@ -185,7 +193,7 @@ done < <(find "${TOOLS_DIR}" -name '*.sh' -print0)
 # 为什么要有这一条: 曾有模块**写了**"私服拉取失败就回退本地 chart",
 # 但仓库里压根没有那份文件 —— 私服一抖动, 回退就是空转, 回退代码形同虚设。
 # 光靠文档挡不住这种缺失(写的时候都以为回退能兜住), 所以放进静态校验。
-say "[10/15] helm chart 离线副本检查 ..."
+say "[10/16] helm chart 离线副本检查 ..."
 ADDON_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/cubestack-addon"
 CHART_FAIL=0; CHART_WARN=0; CHART_OKN=0
 # 判据: **行首就是 helm 命令** —— 只排除注释不够, 变量/err 字符串里提到
@@ -228,7 +236,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${CHART_FAIL}" = "0" ] && ok "安装 chart 的模块均有 vendored 离线副本(${CHART_OKN} 个模块通过)"
 
 # ---------- ⑪ kube-vip 控制平面 VIP(与 kubespray inventory 的一致性) ----------
-say "[11/15] kube-vip 控制平面 VIP 配置检查 ..."
+say "[11/16] kube-vip 控制平面 VIP 配置检查 ..."
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 KV_ADDONS="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/k8s_cluster/addons.yml"
 KV_ALL_YML="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/all/all.yml"
@@ -358,7 +366,7 @@ fi
 # 判错一类盘就是毁一块业务盘。它们的判定分支(整盘 LVM PV、未激活 VG、混合盘、nbd…)
 # 在普通 fixture 里造不出来、在真机上又不敢试 —— 所以用 stub ssh + lsblk fixture 驱动真实
 # 脚本, 把"选哪些盘 / 拒哪些盘 / 远端载荷"全断言一遍。用例已做过变异验证(故意改坏判定会红)。
-say "[12/15] ceph 磁盘链路回归测试(离线 stub) ..."
+say "[12/16] ceph 磁盘链路回归测试(离线 stub) ..."
 CEPH_TEST_SH="${SCRIPT_DIR}/tests/ceph-disk-tests.sh"
 if [ -f "${CEPH_TEST_SH}" ]; then
     if CEPH_TEST_OUT="$(bash "${CEPH_TEST_SH}" 2>&1)"; then
@@ -385,7 +393,7 @@ fi
 #     localhost ≠ true ⇒ 属"尚未同步到本地代理语义"(纯 checkout / 开发机的常态) —— 只提示跳过
 #   为什么不用配置开关当门: 本地工作副本还没跑过 sync, all.yml 仍是旧形态, 用开关当门会在
 #   干净仓库上必然误报(⑪ 已因同一根因提示着, 再加一条只是噪音)。开关值仅在诊断信息里出现。
-say "[13/15] API 入口: 本地代理语义与 all.yml 一致性 ..."
+say "[13/16] API 入口: 本地代理语义与 all.yml 一致性 ..."
 API_HA_BAD=0
 if [ ! -f "${KV_ALL_YML}" ]; then
     warn "  未找到 ${KV_ALL_YML}, 跳过 ⑬(未生成 inventory?)"
@@ -423,7 +431,7 @@ fi
 # 比较的是**模式串本身**(各处变量名可能不同), 不是整行; 引号/行尾注释等写法差异先归一化掉。
 # 注: 第 ④ 份曾长期陈旧(缺 lws_manager / library_nginx), 2026-09-28 Task 7 已补齐并与前三分逐字节相同,
 #     故自本轮起纳入断言(此前注释写的"有意不纳入"已过期)。
-say "[14/15] PRELOAD_IMAGE_PATTERNS 四处副本一致性 ..."
+say "[14/16] PRELOAD_IMAGE_PATTERNS 四处副本一致性 ..."
 
 # 取某个文件里 PRELOAD_IMAGE_PATTERNS 的**模式串本身**(取不到时输出空串, 由调用方判存在性)。
 # 兼容三种写法: PRELOAD_IMAGE_PATTERNS="${VAR:-<串>}"(本仓库四处均如此) / "<串>" / <串>
@@ -495,7 +503,7 @@ unset _i _j _p _n _v _ref _drift
 # 为什么必须有这一条: 换树/手工覆盖树之后, 补丁若没重放, 部署**照样能跑**但缺我们的修复
 #   (metallb CRD 竞态 / registry 顺序 / 离线备料建目录 / SAN 与 join 守卫…), 属静默降级。
 # 见 docs/kubespray-upgrade.md(升级 SOP 与历次记录)。
-say "[15/15] kubespray 补丁在位 ..."
+say "[15/16] kubespray 补丁在位 ..."
 if [ -x "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" ]; then
     if _out="$(bash "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" --check 2>&1)"; then
         ok "  ⑮ kubespray 补丁全部在位"
@@ -505,6 +513,260 @@ if [ -x "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" ]; then
 else
     warn "  跳过 ⑮(未找到 cubestack-patch-apply.sh)"
 fi
+
+# ---------- ⑯ k8s 基座钉子闭环: A 钉子 vs 树内表值 / B 无模块开关键 / C 写入者(inventory) ----------
+# 为什么必须有 A: cluster.conf 的"k8s 基座组"是**显式钉子**(离线 tar / Harbor 同步需要确定的
+#   ref —— images.manifest 直接以 ${VAR} 引用它们), 而它们的真值在 vendored kubespray 的版本表里。
+#   两边漂移时**部署期才发现**: 表里没有该补丁 / addon 版本与表不符 → 离线集群拉不到镜像。
+#   人工抄表必然出错(版本靠人记), 所以这里每次跑 check 都**从树内表机械重算一遍**期望值。
+#   ⚠ 与 ⑪-C 同原则: **不写死任何期望值** —— 换树/换钉子后本项自动给出新的期望值。
+# 期望值取法(与上游 kubespray 的解析式逐条对应; 上游用 Jinja 求值, 这里用 awk 复刻同一语义):
+#   K8S_VERSION            → kubelet_checksums 表**成员判定**。上游 kube_version 默认取表首(=最新线,
+#                            当前 1.36.4), 而我们**有意**钉在 1.35 线(设计 D1: 1.33 不可用、1.36
+#                            生态兼容面窄), 故只断言"钉值在表内" —— 与 cubestack-kubespray-upgrade.sh
+#                            [4/8] 的核验口径一致(它也只判成员)。
+#   CALICO_VERSION         → calicoctl_binary_checksums['amd64'] 首键(上游 calico_version 的定义)
+#   ETCD_VERSION           → etcd_supported_versions[kube_major] → etcd_binary_checksums 里
+#                            **文件顺序首个** < 该线上界 的键(上游 Jinja `select(version, B, '<')[0]`)
+#   COREDNS_VERSION        → coredns_supported_versions[kube_major]
+#   PAUSE_VERSION          → pod_infra_supported_versions[kube_major](上游 pod_infra_version)
+#   DNS_NODE_CACHE_VERSION → nodelocaldns_version
+#   METRICS_SERVER_VERSION → metrics_server_version
+#   CPA_VERSION            → dnsautoscaler_version(上游镜像 tag 为 v{{ ... }})
+#   API_LB_NGINX_IMAGE_TAG → nginx_image_tag(节点侧 API 本地代理静态 Pod; 上游是**带形态的全值**,
+#                            不能用 v 前缀规则改写 —— 1.30.1-alpine 是一整个 tag)
+#   kube_major 一律由**本文件自己的 K8S_VERSION 钉值**推出(1.35.8 → '1.35'), 故钉子换线时
+#   其余 7 项的期望值会跟着换线, 而不是静默沿用旧线。
+# ⑯-B(裁定 R23): LOCAL_VOLUME_PROVISIONER_ENABLED / NFD_ENABLED 在 cluster.conf.example 里
+#   必须有默认声明 —— 这两个键由 tools/k8s/sync-addons-config.sh 消费、**没有对应模块**, 而
+#   ⑦ 是"模块 TOGGLE → example"的单向断言 → 照不到它们, 误删(或漏加)无护栏。
+# ⑯-C(2026-09-28 评审 Critical 的闭环): A 只断言"钉子 == 表值"(钉子自洽), **照不到钉子有没有
+#   被写进 inventory**。在此之前那 8 个变量在 vendored 树之外**没有任何写入者**, 于是部署按
+#   **树内默认**解析(ansible 实测 kube_version=1.36.4 / coredns=1.14.2 / pod_infra=3.10.2),
+#   与我们钉的 1.35 线**不是同一套** → 离线 tar 与部署期要的镜像不符, download/validate 阶段
+#   响亮失败(与 images.manifest:49 的"必须与 kubespray 实际解析出的版本一致"自相矛盾)。
+#   写入者已落地 = tools/k8s/sync-kubespray-config.sh 3.2 节(group_vars/all/k8s-versions.yml),
+#   C 断言其产物与钉子逐键一致 —— 删掉写入节 / 手工改错值 / 换了 conf 忘跑 sync 都会被点名。
+say "[16/16] k8s 基座钉子闭环(A 树内表值 / B 无模块开关 / C inventory 写入者) ..."
+
+KSD_ROLE="${REPO_ROOT}/deployments/kubespray/kubespray/roles/kubespray_defaults"
+KSD_DL="${KSD_ROLE}/defaults/main/download.yml"
+KSD_CK="${KSD_ROLE}/vars/main/checksums.yml"
+KSD_VM="${KSD_ROLE}/vars/main/main.yml"
+
+# 取 conf 里某变量的**声明值**(支持 VAR="${VAR:-<v>}" / VAR="<v>" / VAR=<v>; 解不出则输出空)。
+# 取"声明值"而非 source 结果: 环境里的同名变量不该改变"这个文件钉了什么"的判定。
+_ksd_conf_value() {   # <file> <VAR>
+    local line v
+    line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$2=" "$1" 2>/dev/null | head -1)" || true
+    [ -n "${line}" ] || return 0
+    v="${line#*=}"
+    v="${v%%[[:space:]]#*}"                                   # 去行尾注释
+    v="${v%"${v##*[![:space:]]}"}"; v="${v#"${v%%[![:space:]]*}"}"   # trim 两端空白
+    v="${v#\"}"; v="${v%\"}"                                  # 去包裹引号
+    case "${v}" in '${'*:-*) v="${v#*:-}"; v="${v%\}}" ;; esac  # 去 ${VAR:- ... } 包装
+    case "${v}" in '${'*) return 0 ;; esac                    # 仍是 ${...} 引用 → 解不出
+    printf '%s' "${v}"
+}
+
+# checksums.yml: 某小节下 <arch> 的**首个**版本键(上游 (…|dict2items)[0].key 的语义)
+_ksd_first_key() {   # <section> <arch>
+    awk -v want="$1" -v arch="$2" '
+        /^[a-zA-Z_]+_checksums:/ { sec=$1; sub(/:$/,"",sec); a=0 }
+        sec==want && /^  [a-z0-9_]+:$/ { a=($1 == arch ":"); next }
+        a && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+:$/ { v=$1; sub(/:$/,"",v); print v; exit }
+    ' "${KSD_CK}"
+}
+
+# checksums.yml: etcd_binary_checksums 里文件顺序首个 < <bound> 的键(bound 从 vars/main/main.yml 现读)
+_ksd_etcd() {   # <major>
+    local bound
+    bound="$(sed -n "/^etcd_supported_versions:/,/^[^[:space:]]/p" "${KSD_VM}" \
+             | grep -F "'$1':" \
+             | sed -n "s/.*select('version', '\([^']*\)',.*/\1/p" | head -1)"
+    [ -n "${bound}" ] || return 0
+    awk -v b="${bound}" '
+        function vlt(x, y,   n, m, i, xa, ya) {
+            n=split(x, X, "."); m=split(y, Y, ".")
+            for (i=1; i<=(n>m?n:m); i++) {
+                xa=(i<=n)?X[i]+0:0; ya=(i<=m)?Y[i]+0:0
+                if (xa<ya) return 1; if (xa>ya) return 0
+            }
+            return 0
+        }
+        /^[a-zA-Z_]+_checksums:/ { sec=$1; sub(/:$/,"",sec); a=0 }
+        sec=="etcd_binary_checksums" && /^  [a-z0-9_]+:$/ { a=($1=="amd64:"); next }
+        a && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+:$/ { v=$1; sub(/:$/,"",v); if (vlt(v,b)) { print v; exit } }
+    ' "${KSD_CK}"
+}
+
+# yml 里的内联查表(coredns_supported_versions / pod_infra_supported_versions)取 <major> 行
+_ksd_inline() {   # <file> <table> <major>
+    sed -n "/^$2:/,/^[^[:space:]]/p" "$1" | grep -F "'$3':" | head -1 \
+        | sed -E "s/^[^:]+:[[:space:]]*//; s/[[:space:]]*#.*//" | tr -d "\"'"
+}
+
+# yml 里的标量版本变量(如 nodelocaldns_version: "1.25.0")
+_ksd_scalar() {   # <file> <var>
+    grep -m1 -E "^$2:" "$1" | sed -E "s/^[^:]+:[[:space:]]*//; s/[[:space:]]*#.*//" | tr -d "\"'"
+}
+
+# kubelet_checksums 成员判定(<ver> → 输出 1/0)
+_ksd_kubelet_has() {   # <ver>
+    awk -v want="$1" '
+        /^kubelet_checksums:/ { s=1; next }
+        /^[a-zA-Z_]+_checksums:/ { s=0 }
+        s && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+:$/ { v=$1; sub(/:$/,"",v); if (v==want) { print "1"; exit } }
+    ' "${KSD_CK}"
+}
+
+KSD_BAD=0
+# ⑯-C 的键映射: <cluster.conf 钉子变量>:<kubespray 变量>。
+# ⚠ **必须镜像** tools/k8s/sync-kubespray-config.sh 3.2 节的 _vpin_line 调用表(改一处要改两处);
+#   顺序与该节一致, 便于人工对照。新增钉子进 cluster.conf 时, 这里与写入节都要加。
+KSD_PINS=(
+    "K8S_VERSION:kube_version"
+    "PAUSE_VERSION:pod_infra_version"
+    "COREDNS_VERSION:coredns_version"
+    "DNS_NODE_CACHE_VERSION:nodelocaldns_version"
+    "METRICS_SERVER_VERSION:metrics_server_version"
+    "CPA_VERSION:dnsautoscaler_version"
+    "ETCD_VERSION:etcd_version"
+    "CALICO_VERSION:calico_version"
+)
+KSD_INV_YML="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/all/k8s-versions.yml"
+if [ ! -f "${KSD_INV_YML}" ]; then
+    ck_fail "⑯-C 未找到 inventory 版本钉子文件: ${KSD_INV_YML#${REPO_ROOT}/}" \
+        "      → 它是 ⑯-C 的证据本体: 缺了它, kubespray 按**树内默认**解析版本(与离线 tar 不是一套)," \
+        "        部署会在 download/validate 阶段失败; 而 ⑯-A 照样全绿(钉子自洽 ≠ 部署会用钉子)" \
+        "      → 修法: 跑 bash deployments/scripts/tools/k8s/gen-inventory.sh(内部调 sync-kubespray-config.sh)"
+    KSD_BAD=1
+fi
+if [ ! -f "${KSD_DL}" ] || [ ! -f "${KSD_CK}" ] || [ ! -f "${KSD_VM}" ]; then
+    warn "  跳过 ⑯(未找到 vendored 版本表 ${KSD_ROLE#${REPO_ROOT}/})"
+else
+    # 钉子来源文件: cluster.conf(在盘上才查; 它不入库) + cluster.conf.example(纯 checkout 上唯一在场的那份)
+    KSD_CONFS=("${CONF_EXAMPLE}")
+    [ -f "${KV_CONF}" ] && [ "${KV_CONF}" != "${CONF_EXAMPLE}" ] && KSD_CONFS=("${KV_CONF}" "${CONF_EXAMPLE}")
+
+    for _cf in "${KSD_CONFS[@]}"; do
+        _cn="$(basename "${_cf}")"
+        _k8s="$(_ksd_conf_value "${_cf}" K8S_VERSION)"
+        if [ -z "${_k8s}" ]; then
+            ck_fail "⑯ ${_cn}: 取不到 K8S_VERSION 的钉值(未声明/写法解不出)"
+            KSD_BAD=1; continue
+        fi
+        _k8s_bare="${_k8s#v}"
+        _major="${_k8s_bare%.*}"
+
+        # ---- K8S_VERSION: 表成员判定(不是"等于表首" —— 我们有意钉在 1.35 线, 见上方注释) ----
+        if [ "$(_ksd_kubelet_has "${_k8s_bare}")" = "1" ]; then
+            # 表范围(跨 arch 去重; 与 cubestack-kubespray-upgrade.sh [4/8] 的口径一致)现算, 不写死
+            _kb_range="$(awk '
+                /^kubelet_checksums:/ { s=1; next }
+                /^[a-zA-Z_]+_checksums:/ { s=0 }
+                s && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+:$/ { v=$1; sub(/:$/,"",v); print v }
+            ' "${KSD_CK}" | sort -Vu | awk 'NR==1 { min=$0 } { max=$0 } END { print min "–" max }')"
+            say "  ${_cn}: K8S_VERSION=${_k8s} 在 kubelet_checksums 表内(表范围 ${_kb_range})"
+        else
+            ck_fail "⑯ ${_cn}: K8S_VERSION=${_k8s} 不在 kubespray 的 kubelet_checksums 表内(该表=可安装版本全集)" \
+                "      → 表里没有的版本没有二进制校验和, 部署会失败; 修法: 改成表内版本(见 ${KSD_CK#${REPO_ROOT}/})"
+            KSD_BAD=1; continue
+        fi
+
+        # ---- 其余 7 项: 与上游解析结果逐字一致(kube_major 取自本文件的 K8S_VERSION) ----
+        _want_calico="$(_ksd_first_key calicoctl_binary_checksums amd64)"
+        _want_etcd="$(_ksd_etcd "${_major}")"
+        _want_coredns="$(_ksd_inline "${KSD_DL}" coredns_supported_versions "${_major}")"
+        _want_pause="$(_ksd_inline "${KSD_VM}" pod_infra_supported_versions "${_major}")"
+        _want_ndc="$(_ksd_scalar "${KSD_DL}" nodelocaldns_version)"
+        _want_metrics="$(_ksd_scalar "${KSD_DL}" metrics_server_version)"
+        _want_cpa="$(_ksd_scalar "${KSD_DL}" dnsautoscaler_version)"
+        _want_nginx="$(_ksd_scalar "${KSD_DL}" nginx_image_tag)"
+        if [ -z "${_want_calico}" ] || [ -z "${_want_etcd}" ] || [ -z "${_want_coredns}" ] || \
+           [ -z "${_want_pause}" ] || [ -z "${_want_ndc}" ] || [ -z "${_want_metrics}" ] || \
+           [ -z "${_want_cpa}" ] || [ -z "${_want_nginx}" ]; then
+            ck_fail "⑯ ${_cn}: 解析不出上游期望值(K8S_VERSION=${_k8s} → kube_major=${_major})" \
+                "      → 树内表可能没有 ${_major} 这一线(如 1.33 在 v2.32 表里就不可用); 请改用表内线"
+            KSD_BAD=1; continue
+        fi
+
+        # 比较: 只判"我方钉值 == 上游表值", **v 前缀等价**(我方钉子可带/不带 v; 上游变量侧不带 v,
+        #   镜像 tag 侧另有 'v' 前缀 —— 那是 images.manifest 的职责, 本项不做形态断言)
+        _ksd_cmp() {   # <变量> <上游期望> <上游出处>
+            local got
+            got="$(_ksd_conf_value "${_cf}" "$1")"
+            if [ -z "${got}" ]; then
+                ck_fail "⑯ ${_cn}: 取不到 $1 的钉值(未声明/写法解不出)"
+                KSD_BAD=1; return 0
+            fi
+            if [ "${got#v}" = "$2" ]; then
+                say "  ${_cn}: $1=${got} == 上游 $2"
+            else
+                ck_fail "⑯ ${_cn}: $1='${got}' 与上游表值不符(上游='$2')" \
+                    "      → 上游出处: $3" \
+                    "      → 修法: 把 cluster.conf 与 cluster.conf.example 的 $1 都改成 '$2'(v 前缀按现有写法保留/去掉均可)"
+                KSD_BAD=1
+            fi
+        }
+        _ksd_cmp CALICO_VERSION       "${_want_calico}"  "calicoctl_binary_checksums['amd64'] 首键(calico_version)"
+        _ksd_cmp ETCD_VERSION         "${_want_etcd}"    "etcd_supported_versions['${_major}'] → etcd_binary_checksums"
+        _ksd_cmp COREDNS_VERSION      "${_want_coredns}" "coredns_supported_versions['${_major}']"
+        _ksd_cmp PAUSE_VERSION        "${_want_pause}"   "pod_infra_supported_versions['${_major}'](pod_infra_version)"
+        _ksd_cmp DNS_NODE_CACHE_VERSION "${_want_ndc}"   "nodelocaldns_version"
+        _ksd_cmp METRICS_SERVER_VERSION "${_want_metrics}" "metrics_server_version"
+        _ksd_cmp CPA_VERSION          "${_want_cpa}"     "dnsautoscaler_version(cluster-proportional-autoscaler)"
+        _ksd_cmp API_LB_NGINX_IMAGE_TAG "${_want_nginx}" "nginx_image_tag(download.yml:265, 节点侧 API 本地代理静态 Pod)"
+
+        # ---- ⑯-C 写入者闭环: inventory 的 8 个版本键 == 本 conf 的钉子(逐键点名) ----
+        # 这一节回答的是"部署真会用这些钉子吗" —— 见文件头 ⑯-C 说明。取不到钉子侧时**不重复报**
+        # (那已由上面的 ⑯-A 报过红), 只报 inventory 侧缺键/值不符。
+        if [ -f "${KSD_INV_YML}" ]; then
+            for _pair in "${KSD_PINS[@]}"; do
+                _pv="${_pair%%:*}"; _kv="${_pair#*:}"
+                _pin="$(_ksd_conf_value "${_cf}" "${_pv}")"
+                [ -n "${_pin}" ] || continue
+                _got="$(  # inventory 侧的取值(与上游标量同解析法)
+                    grep -m1 -E "^${_kv}:" "${KSD_INV_YML}" 2>/dev/null \
+                    | sed -E "s/^[^:]+:[[:space:]]*//; s/[[:space:]]*#.*//" | tr -d "\"'"
+                )" || true
+                if [ -z "${_got}" ]; then
+                    ck_fail "⑯-C ${_cn}: inventory 缺 ${_kv} 键(${KSD_INV_YML#${REPO_ROOT}/})" \
+                        "      → 对应钉子 ${_pv}=${_pin}; 缺键 ⇒ kubespray 退回**树内默认**(与离线 tar 不是一套)" \
+                        "      → 修法: 跑 sync-kubespray-config.sh(3.2 节会按 cluster.conf 重新生成该文件)"
+                    KSD_BAD=1
+                elif [ "${_got#v}" != "${_pin#v}" ]; then
+                    ck_fail "⑯-C ${_cn}: ${_kv}='${_got}' 与钉子 ${_pv}='${_pin}' 不符" \
+                        "      → 部署用的是 inventory 里的 '${_got}'(不是钉子), 与离线 tar / images.manifest 对不上" \
+                        "      → 修法: 重跑 sync-kubespray-config.sh(写入节会按 cluster.conf 覆盖); 勿手改该文件"
+                    KSD_BAD=1
+                else
+                    say "  ⑯-C ${_cn}: ${_kv}=${_got} == ${_pv} 钉子(写入者在位)"
+                fi
+            done
+            unset _pv _kv _pin _got _pair
+        fi
+    done
+    unset -f _ksd_cmp 2>/dev/null || true
+    unset _cf
+
+    # ---- ⑯-B 两个开关键在 .example 的默认声明(⑦ 覆盖不到: 它们没有模块) ----
+    for _k in LOCAL_VOLUME_PROVISIONER_ENABLED NFD_ENABLED; do
+        _v="$(_ksd_conf_value "${CONF_EXAMPLE}" "${_k}")"
+        if [ -z "${_v}" ]; then
+            ck_fail "⑯ $(basename "${CONF_EXAMPLE}") 缺 ${_k} 的默认声明" \
+                "      → 它由 tools/k8s/sync-addons-config.sh 消费(无对应模块, ⑦ 照不到); 删了会让开关静默丢默认" \
+                "      → 修法: 组件开关区加 ${_k}=\"\${${_k}:-false}\", 真 cluster.conf 同步加一份"
+            KSD_BAD=1
+        else
+            say "  ⑯-B ${_k}=${_v}(.example 声明在位)"
+        fi
+    done
+
+    [ "${KSD_BAD}" = "0" ] && \
+        ok "  ⑯ k8s 基座钉子闭环通过(A: K8S_VERSION 在 kubelet_checksums 表内, calico/etcd/coredns/pause/node-cache/metrics/cpa/nginx-tag 与树内表逐项对齐; B: 两个无模块开关声明在位; C: inventory 8 个版本键 == 钉子)"
+fi
+unset _cn _cf _k8s _k8s_bare _major _want_calico _want_etcd _want_coredns _want_pause _want_ndc _want_metrics _want_cpa _want_nginx _k _v _pv _kv _pin _got _pair KSD_PINS KSD_INV_YML 2>/dev/null || true
 
 echo "---------------------------------------------"
 if [ "${FAIL}" = "0" ]; then

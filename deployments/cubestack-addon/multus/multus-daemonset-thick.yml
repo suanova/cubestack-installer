@@ -164,7 +164,7 @@ spec:
       serviceAccountName: multus
       containers:
         - name: kube-multus
-          image: ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
+          image: ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick
           command: [ "/usr/src/multus-cni/bin/multus-daemon" ]
           # ★ 2026-09-24 偏离上游(quickstart 原文是 requests=limits=cpu 100m/memory 50Mi):
           #   实机出现 **OOMKilled → CrashLoopBackOff**(50Mi 是硬上限, multus-daemon 的内存随
@@ -216,7 +216,7 @@ spec:
                   fieldPath: spec.nodeName
       initContainers:
         - name: install-multus-binary
-          image: ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
+          image: ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick
           command:
             - "/usr/src/multus-cni/bin/install_multus"
             - "-d"

@@ -58,7 +58,7 @@ $KUBESPRAY/roles/kubernetes/node/
 
 | 维度 | `nginx`（默认） | `haproxy` |
 |---|---|---|
-| 镜像 | `docker.io/library/nginx:1.27.4-alpine`（`download.yml:286-287`） | `docker.io/library/haproxy:3.1.3-alpine`（`download.yml:288-289`） |
+| 镜像 | `docker.io/library/nginx:1.30.1-alpine`（`download.yml:265`） | `docker.io/library/haproxy:3.2.19-alpine`（`download.yml:267`） |
 | 静态 Pod | `/etc/kubernetes/manifests/nginx-proxy.yml` | `/etc/kubernetes/manifests/haproxy.yml` |
 | 配置 | `/etc/nginx/nginx.conf`（hostPath → 容器 `/etc/nginx`，只读） | `/etc/haproxy/haproxy.cfg`（hostPath → `/usr/local/etc/haproxy/`） |
 | 监听 | `127.0.0.1:6443`（stream 块，`nginx.conf.j2:22`） | `bind 127.0.0.1:6443`（`haproxy.cfg.j2:33`） |

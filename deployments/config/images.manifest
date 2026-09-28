@@ -59,6 +59,12 @@ k8s-base  registry.k8s.io/coredns/coredns:${COREDNS_VERSION}
 k8s-base  registry.k8s.io/dns/k8s-dns-node-cache:${DNS_NODE_CACHE_VERSION}
 k8s-base  registry.k8s.io/metrics-server/metrics-server:${METRICS_SERVER_VERSION}
 k8s-base  registry.k8s.io/cpa/cluster-proportional-autoscaler:${CPA_VERSION}
+# LVP / NFD: kubespray addon(开关 LOCAL_VOLUME_PROVISIONER_ENABLED / NFD_ENABLED 默认 false)。
+# ⚠ 开关打开后 kubespray 会在节点上直接拉这两个镜像(开机即用官方 tag) → 必须留在本组
+#   **并且** 在 PRELOAD_IMAGE_PATTERNS 内, 否则离线集群拉不到。
+#   版本取值 = cluster.conf 的 LOCAL_VOLUME_PROVISIONER_VERSION / NFD_VERSION(= v2.32 表值)。
+k8s-base  registry.k8s.io/sig-storage/local-volume-provisioner:v${LOCAL_VOLUME_PROVISIONER_VERSION}
+k8s-base  registry.k8s.io/nfd/node-feature-discovery:v${NFD_VERSION}
 k8s-base  quay.io/coreos/etcd:${ETCD_VERSION}
 k8s-base  quay.io/calico/cni:${CALICO_VERSION}
 k8s-base  quay.io/calico/node:${CALICO_VERSION}
