@@ -408,8 +408,18 @@ CEPH_CONFIRM_SLEEP="${CEPH_CONFIRM_SLEEP:-60}"
 # 离线文件: ceph 镜像 tar(独立脚本 tools/images/ceph-save-images.sh 下载)
 CEPH_IMAGE_DIR="${CEPH_IMAGE_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray/images}"   # 默认 kubespray/images(与 k8s 镜像同目录, 不再用独立 offline-files/ceph)
 CEPH_ROOK_MANIFEST_DIR="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}"
-# registry 后端存储: local-path(默认)| ceph-block(CEPH 启用后, registry 的 PVC 改走 ceph RBD)
-REGISTRY_STORAGE_CLASS="${REGISTRY_STORAGE_CLASS:-local-path}"
+# registry 后端存储: **默认随 Ceph** —— 启用了 Ceph 底座(CEPH_ENABLED + CEPH_CSI_ENABLED 都为 true)时用
+#   ceph-block(RBD 复制盘:节点挂掉注册表数据不丢);否则用 local-path(单机本地盘)。
+#   ⚠ 为什么不能固定写 local-path: Ceph 模式下 local-path provisioner 是**关的**
+#     (local_path_provisioner_enabled=false, 集群里没有 local-path SC)⇒ 该 SC 名会让 registry PVC
+#     **永远 Pending**(实机 2026-09-29 复盘)。显式赋任意 SC 名可强制覆盖(优先级最高)。
+if [ -z "${REGISTRY_STORAGE_CLASS:-}" ]; then
+    if [ "${CEPH_ENABLED:-false}" = "true" ] && [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
+        REGISTRY_STORAGE_CLASS="ceph-block"
+    else
+        REGISTRY_STORAGE_CLASS="local-path"
+    fi
+fi
 
 # ============================================================
 # 其余配置按阶段组织(顺序即依赖方向):

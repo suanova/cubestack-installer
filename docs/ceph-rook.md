@@ -22,7 +22,7 @@
 | failureDomain | **host** | 每主机一份副本, 真正跨主机冗余(≥3 台存储节点) |
 | mon | **3**(allowMultiplePerNode=false) | 3 台主机真实法定人数(奇数) |
 | mgr | **2**(`CEPH_MGR_COUNT`, active+standby) | 单 mgr 是滚动单点: 它所在节点挂/被排空 → 集群进 `no active mgr`(dashboard/模块/PG autoscaler 停摆)。mgr 很轻, 1→2 成本可忽略 |
-| 守护进程 placement | mon/**osd**/**mgr** 各自显式写 nodeAffinity(`ceph-storage` label)+ control-plane toleration | 2026-09-24 事故: 只写了 mon/osd → **mgr 被调度到 worker**(还带出 crashcollector/exporter 往那台写 `/var/lib/rook`), 与"只调度到存储节点"冲突。⚠ 不要改用 `placement.all`: Rook 会把 `all` 一并套到 **CSI daemonsets** 上, 把必须跑在**每个**节点的 rbd/cephfs nodeplugin 钉死在存储节点 → worker 上的 PVC 挂不上 |
+| 守护进程 placement | mon/**osd**/**mgr**(写在 `CephCluster.placement`)+ **mds**(写在 `CephFilesystem.metadataServer.placement`)+ **rgw**(写在 `CephObjectStore.gateway.placement`)各自显式写 nodeAffinity(`ceph-storage` label)+ control-plane toleration | 2026-09-24 事故: 只写了 mon/osd → **mgr 被调度到 worker**(还带出 crashcollector/exporter 往那台写 `/var/lib/rook`)。⭐ 2026-09-29 补齐 **mds/rgw**: 它们是**存储守护进程但不在 CephCluster 里**, 原先完全没有 placement ⇒ 实机 MDS 落到 mxgpu-3-36、`cubestack-ext-fs` 的 MDS 落到 3-32、RGW 落到 3-34(同样带出 crashcollector/exporter)。⚠ 不要改用 `placement.all`: Rook 会把 `all` 一并套到 **CSI daemonsets** 上, 把必须跑在**每个**节点的 rbd/cephfs nodeplugin 钉死在存储节点 → worker 上的 PVC 挂不上。**CSI nodeplugin 全节点是设计使然, 不属于"该约束"的范围** |
 | toolbox | `rook-ceph-tools` 也 patch 上同一 nodeSelector | 它只是 CLI pod, 但同样属于"ceph 组件只在存储节点"的约定(实测 Rook reconcile 不会回滚该 patch) |
 | 存储节点选择 | `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master**) + node label(`CEPH_NODE_LABEL`, 默认 `ceph-storage=rook-ceph`) | 只调度到指定的存储节点(**默认只装在 master 节点**) |
 | 裸盘 | **自动分类**磁盘(`tools/k8s/ceph-detect-disks.sh`, 判定见 §4) | CR 取 `free ∪ ceph`(空闲 + 上次 Ceph 占用); `inuse`(在用)/`mixed`(混合)不选不清理; 精确盘名, 不用正则, 防误选 |
@@ -592,7 +592,7 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 
 ### 命令清单(§21.1 对应)
 ```bash
-# 03_ceph_csi.sh 已自动创建: rbd-pool / 5×SC / cephfs+subvolumegroups / s3-store+Model用户
+# 03_ceph_csi.sh 已自动创建: rbd-pool / 6×SC(4 RBD + 2 CephFS) / cephfs+subvolumegroups / s3-store+Model用户
 # 部署后补做:
 sudo ./deployments/scripts/tools/k8s/cephfs-group-route.sh apply   # SC 路由到 ephemeral/durable group
 kubectl apply -f <platform>/image-registry-pvc.yaml               # Image Registry(§11.9)

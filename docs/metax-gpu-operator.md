@@ -46,7 +46,7 @@ sudo ./deployments/scripts/tools/images/metax-save-images.sh
 ```
 
 生成的 tar 共 **27 个(约 19G)**, 含: 核心组件(10 个 × amd64/arm64)、maca(3 个版本)、driver-image(2 个版本)、operator-bundle/catalog。
-也可用 `METAX_LIST_IMAGES=true bash modules/03_addon/04_gpu_operator.sh` 打印所需镜像的 `docker pull/save` 命令。
+也可用 `METAX_LIST_IMAGES=true bash modules/03_addon/06_gpu_operator.sh` 打印所需镜像的 `docker pull/save` 命令。
 
 ---
 
@@ -62,7 +62,7 @@ deployments/
 │   ├── metax-k8s-driver-image.<ver>.run
 │   └── metax-operator-<ver>.tgz / metax-gpu-extensions-<ver>.tgz
 └── scripts/
-    ├── modules/03_addon/04_gpu_operator.sh       # 部署模块(默认 tar 加载)
+    ├── modules/03_addon/06_gpu_operator.sh       # 部署模块(默认 tar 加载)
     ├── modules/03_addon/23_verify_metax_gpu.sh   # 验证模块(--steps verify 自动纳入)
     └── tools/images/metax-save-images.sh         # 保存镜像 → tar
     └── tools/images/metax-load-images.sh         # 加载 tar → 集群 registry(手动)
@@ -76,7 +76,7 @@ deployments/
 > 已加入 `cluster.conf` 与 `cluster.conf.example`。关键项:
 
 ```bash
-GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-false}"   # 总开关, 默认 false; 本集群设为 true → --with-cubestack 即部署; 也可 --steps gpu_operator 立即部署
+GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 总开关, **默认 true**(见 cluster.conf.example:139)→ 全量(--with-cubestack)即部署; 也可 --steps gpu_operator 立即部署
 METAX_VERSION="${METAX_VERSION:-0.15.3}"                 # 版本(决定包名/镜像 tag/Chart)
 METAX_OFFLINE_DIR="${METAX_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/metax-gpu}"
 METAX_PKG_DIR="${METAX_PKG_DIR:-${METAX_OFFLINE_DIR}}"   # 大文件(.run/资源包)所在目录
@@ -178,7 +178,7 @@ sudo ./deployments/scripts/tools/images/metax-save-images.sh
 # 加载 tar 到集群 registry(手动, 与模块 tar 模式等价)
 sudo ./deployments/scripts/tools/images/metax-load-images.sh
 # 打印所需镜像的 pull/save 命令
-METAX_LIST_IMAGES=true bash deployments/scripts/modules/03_addon/04_gpu_operator.sh
+METAX_LIST_IMAGES=true bash deployments/scripts/modules/03_addon/06_gpu_operator.sh
 # 部署 / 验证
 sudo ./deploy-cluster.sh --steps gpu_operator
 sudo ./deploy-cluster.sh --steps verify_metax_gpu

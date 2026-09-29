@@ -215,6 +215,7 @@ $ ssh <worker> "sudo grep -A5 upstream /etc/nginx/nginx.conf"
 **关键设计取舍**(为什么这么组网):
 
 - **OSD 用裸盘直挂**:每块盘一个 OSD(不做 RAID),副本交给 Ceph。**磁盘选择是自动的**(见 §3.1),且"整盘 LVM/已有文件系统"的盘会被判为**在用**而不碰。
+- **全部 Ceph 守护进程只跑在存储节点上**(默认 = 3 台 master):mon/osd/mgr 由 `CephCluster.placement` 约束,**mds/rgw 由各自 CR 的 placement 约束**(`CephFilesystem.metadataServer` / `CephObjectStore.gateway`),都靠节点标签 `ceph-storage=rook-ceph`(`CEPH_NODE_LABEL`)选点。⚠ **唯一例外是 CSI nodeplugin** —— 它必须跑在每个可能挂 Ceph 卷的节点(含 worker),这是设计使然,不要试图约束它。
 - **mon 必须在 3 台不同主机上**(`mon.count=3` + `failureDomain=host`):单机宕机仍能满足 `min_size=2` 继续写。
 - **数据面默认 host-network**:Ceph 的 mon/osd 通信走节点网络(O 卡/NVMe 性能优先),见 `CEPH_HOST_NETWORK`。
 - **CSI 与 Rook 分离成两个模块**(`02_ceph` / `03_ceph_csi`):前者管集群,后者管"池 + StorageClass + 可选 FS/RGW",便于单独演进。
@@ -482,10 +483,12 @@ kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
 kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph osd tree   # 【实机】9 个 OSD / 3 台存储节点
 ```
 
-> **内置 registry 的后端**:`REGISTRY_STORAGE_CLASS` 决定它走哪条 SC;Ceph 启用后推荐 `ceph-block`
-> (【实机】本环境 `registry-pvc` 10Gi 就绑在 `ceph-block`)。
-> ⚠ 设成非 `local-path` 的 SC 而 Ceph 又没启用 → 模块**直接报错**(PVC 会永远 Pending);
-> 若 registry 已用 local-path 建好 PVC,要**删旧 PVC** 才能切到 ceph。
+> **内置 registry 的后端**:`REGISTRY_STORAGE_CLASS` 决定它走哪条 SC —— **默认自动跟随 Ceph**:
+> 启用了 Ceph(`CEPH_ENABLED` + `CEPH_CSI_ENABLED` 都为 true)时取 `ceph-block`(RBD 复制盘),否则取 `local-path`。
+> 【实机】本环境 `registry-pvc` 10Gi 就绑在 `ceph-block`。
+> ⚠ 不要手工把它写成 `local-path`:Ceph 模式下 local-path provisioner 是**关的**(集群里没有该 SC),
+> registry PVC 会**永远 Pending**。要强制别的 SC 就显式赋值(优先级最高)。
+> ⚠ 若 registry 已用旧 SC 建好 PVC,换 SC 需**删旧 PVC** 重建。
 
 ### 3.3 对象存储(S3):接入与使用
 
@@ -528,6 +531,12 @@ kubectl -n rook-ceph get secret rook-ceph-object-user-s3-store-rgw-model-admin \
 AK=<access_key> SK=<secret_key> ENDPOINT=http://rook-ceph-rgw-s3-store.rook-ceph.svc:80 \
   python3 deployments/scripts/tools/k8s/verify-rgw-s3.py
 #  流程:PUT bucket → PUT object → GET(校验内容) → DELETE;成功打印 S3-PUT-GET-OK
+#  ⚠ 三条易错点(2026-09-29 实测):
+#    · 三个变量必须**在同一行**(或先 export)—— 逐行写 `AK=..` 不带 export 时子进程读不到,
+#      脚本会转去自建临时用户, 在宿主机/部署容器里会报 radosgw-admin 找不到
+#    · `ENDPOINT` 可以只写 `<host>:<port>`(自动补 http://), 但**别省端口**
+#    · 不给 AK/SK 也能跑:脚本会经 `kubectl exec` 进 rook-ceph-tools 建临时用户(用完自动删);
+#      zone 取 `RGW_ZONE`(默认 s3-store, 与 CephObjectStore 名一致)
 ```
 
 ```bash

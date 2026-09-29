@@ -34,11 +34,36 @@ spec:
         memory: "1Gi"
     priorityClassName: system-cluster-critical
     placement:
-      podAntiAffinity:
+      # ★ 2026-09-29: 与内部 cephfs 同理 —— MDS 是存储守护进程, 必须钉在存储节点
+      #   (实机踩过: cubestack-ext-fs 的 MDS 落在 worker mxgpu-3-32)。
+      #   本 FS 只有 1 个 MDS(activeCount:1, activeStandby:false), 钉住可避免它漂到
+      #   非存储节点后, 外部消费方的挂载依赖 worker 可用性。
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      nodeAffinity:
         requiredDuringSchedulingIgnoredDuringExecution:
-          - labelSelector:
-              matchExpressions:
-                - key: app
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: __STORAGE_LABEL_KEY__
                   operator: In
-                  values: [rook-ceph-mds]
-            topologyKey: kubernetes.io/hostname
+                  values:
+                    - __STORAGE_LABEL_VALUE__
+      podAntiAffinity:
+        # ★ 2026-09-29 由 required 改为 preferred(软): 存储节点只有 3 台, 而 MDS 数量会超过 3 ——
+        #   内部 cephfs(activeCount:2 + activeStandby:true)= 4 个 pod(2 active + 2 standby-replay)
+        #   + 外部 cubestack-ext-fs = 1 个, 共 **5 个**; 加上 nodeAffinity 只认 3 台存储节点后,
+        #   required 反亲和会让第 4 个 MDS **永远 Pending**(实机 2026-09-29 复现:
+        #   FailedScheduling "3 node(s) didn't match pod anti-affinity rules")并让集群停在
+        #   HEALTH_WARN(insufficient standby MDS daemons)。软亲和保留"尽量分散"的意图,
+        #   但不会在节点故障/数量不足时把 pod 卡死。
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values: [rook-ceph-mds]
+              topologyKey: kubernetes.io/hostname
