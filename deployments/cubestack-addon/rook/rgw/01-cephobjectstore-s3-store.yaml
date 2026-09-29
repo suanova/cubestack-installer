@@ -20,4 +20,31 @@ spec:
     parameters: { min_size: "__MIN_SIZE__" }
   gateway:
     port: 80
-    instances: 1
+    instances: 2                # ★ 2026-09-29 由 1 → 2: 单实例是单点, 重启/漂移期间 S3 完全不可用
+    # ★ 2026-09-29: RGW 也是**存储守护进程**(网关, 往宿主机 /var/lib/rook 写数据),
+    #   必须钉在存储节点 —— 否则会落到 worker(实机踩过: rgw-s3-store-a 落在 mxgpu-3-34)。
+    #   ⚠ 这是 CephObjectStore.gateway 的 placement, CephCluster 里的 mon/osd/mgr 管不到它。
+    placement:
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: __STORAGE_LABEL_KEY__
+                  operator: In
+                  values:
+                    - __STORAGE_LABEL_VALUE__
+      podAntiAffinity:
+        # 用 preferred(软): 两个 RGW 尽量分散到不同存储节点, 但存储节点故障时**不阻塞**重调度
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values: [rook-ceph-rgw]
+              topologyKey: kubernetes.io/hostname

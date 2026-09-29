@@ -28,6 +28,8 @@
 #      C) **写入者闭环**: inventory 的 group_vars/all/k8s-versions.yml 里 10 个 kubespray 版本变量
 #         确实存在且 == cluster.conf 的钉子(写入者 = tools/k8s/sync-kubespray-config.sh 3.2 节)
 #      A 只证"钉子自洽"(== 表值), C 才证"部署真会用钉子"; 缺 C 时删掉写入节/改错值照样全绿。
+#   ⑰ 凭据卫生: 含密钥的"生成物"(external-ceph 导出 / minio.conf / cluster.conf)必须**未被 git 跟踪**
+#      且被 .gitignore 覆盖 —— ⚠ 忽略规则对**已跟踪**文件无效, "看着封堵了"≠"封堵了"
 # 用法: bash check-modules.sh           # 校验全部模块(只读, 无需 root)
 #       bash check-modules.sh --quiet   # 只输出违规项
 # 退出码: 0=全部通过; 1=存在违规(列出清单)
@@ -51,7 +53,7 @@ ck_fail() { bad "$*"; FAIL=1; }
 say "==== 模块静态校验(${MODULES_DIR}) ===="
 
 # ---------- ① bash -n 语法 ----------
-say "[1/16] bash -n 语法检查 ..."
+say "[1/17] bash -n 语法检查 ..."
 SYNTAX_FAIL=0
 while IFS= read -r -d '' f; do
     bash -n "$f" 2>/dev/null || { bad "语法错误: ${f#$MODULES_DIR/}"; SYNTAX_FAIL=1; FAIL=1; }
@@ -63,7 +65,7 @@ meta() { sed -nE "s/^#[[:space:]]*${2}:[[:space:]]*(.*)$/\1/p" "$1" | head -1; }
 phase_dir() { case "$(basename "$(dirname "$1")")" in
     01_env) echo "env";; 02_k8s) echo "k8s";; 03_addon) echo "addon";; *) echo "?";; esac; }
 
-say "[2/16] 头部元数据齐全性 ..."
+say "[2/17] 头部元数据齐全性 ..."
 declare -A KEYS=()
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -81,10 +83,10 @@ while IFS= read -r -d '' f; do
 done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] && ok "元数据齐全"
 
-say "[3/16] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
+say "[3/17] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
 [ "${FAIL}" = "0" ] || true
 
-say "[4/16] PHASE 合法性 + 目录一致性 ..."
+say "[4/17] PHASE 合法性 + 目录一致性 ..."
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
     ph="$(meta "$f" PHASE)"
@@ -94,7 +96,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] || true
 
 # ---------- ⑤ REQUIRES 引用 + 全量拓扑 ----------
-say "[5/16] REQUIRES 引用存在性 + 全量无环 ..."
+say "[5/17] REQUIRES 引用存在性 + 全量无环 ..."
 REQ_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -134,7 +136,7 @@ else
 fi
 
 # ---------- ⑥ init_remote_kubectl 使用检查 ----------
-say "[6/16] 远端 kubectl 初始化(K/SSH)调用检查 ..."
+say "[6/17] 远端 kubectl 初始化(K/SSH)调用检查 ..."
 INIT_MISS=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -148,7 +150,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${INIT_MISS}" = "0" ] && ok "使用 K/SSH 的模块均已调用 init_remote_kubectl"
 
 # ---------- ⑦ TOGGLE 与 cluster.conf.example 一致性 ----------
-say "[7/16] TOGGLE 变量在 cluster.conf.example 声明 ..."
+say "[7/17] TOGGLE 变量在 cluster.conf.example 声明 ..."
 if [ -f "${CONF_EXAMPLE}" ]; then
     TOG_MISS=0
     while IFS= read -r -d '' f; do
@@ -165,7 +167,7 @@ else
 fi
 
 # ---------- ⑧ 文件序号与目录 ----------
-say "[8/16] 文件名序号规范(NN_ 前缀) ..."
+say "[8/17] 文件名序号规范(NN_ 前缀) ..."
 NUM_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -184,7 +186,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 #   cubestack-patch-apply.sh / cubestack-kubespray-upgrade.sh)—— 它们既不是模块也不在 scripts/ 下,
 #   于是本支新增的两个脚本从未被 bash -n 过(写错一行要到实机升级时才发现)。
 #   只取**顶格一层**: vendored 树与 cubestack-patches/ 里的 .sh 属上游/数据文件, 不归本项管。
-say "[9/16] tools/ + kubespray 入口脚本语法检查 ..."
+say "[9/17] tools/ + kubespray 入口脚本语法检查 ..."
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 KSD_SH_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/kubespray"
 SH_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
@@ -204,7 +206,7 @@ unset SH_ROOT 2>/dev/null || true
 # 为什么要有这一条: 曾有模块**写了**"私服拉取失败就回退本地 chart",
 # 但仓库里压根没有那份文件 —— 私服一抖动, 回退就是空转, 回退代码形同虚设。
 # 光靠文档挡不住这种缺失(写的时候都以为回退能兜住), 所以放进静态校验。
-say "[10/16] helm chart 离线副本检查 ..."
+say "[10/17] helm chart 离线副本检查 ..."
 ADDON_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/cubestack-addon"
 CHART_FAIL=0; CHART_WARN=0; CHART_OKN=0
 # 判据: **行首就是 helm 命令** —— 只排除注释不够, 变量/err 字符串里提到
@@ -247,7 +249,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${CHART_FAIL}" = "0" ] && ok "安装 chart 的模块均有 vendored 离线副本(${CHART_OKN} 个模块通过)"
 
 # ---------- ⑪ kube-vip 控制平面 VIP(与 kubespray inventory 的一致性) ----------
-say "[11/16] kube-vip 控制平面 VIP 配置检查 ..."
+say "[11/17] kube-vip 控制平面 VIP 配置检查 ..."
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 KV_ADDONS="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/k8s_cluster/addons.yml"
 KV_ALL_YML="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/all/all.yml"
@@ -387,7 +389,7 @@ fi
 # 判错一类盘就是毁一块业务盘。它们的判定分支(整盘 LVM PV、未激活 VG、混合盘、nbd…)
 # 在普通 fixture 里造不出来、在真机上又不敢试 —— 所以用 stub ssh + lsblk fixture 驱动真实
 # 脚本, 把"选哪些盘 / 拒哪些盘 / 远端载荷"全断言一遍。用例已做过变异验证(故意改坏判定会红)。
-say "[12/16] ceph 磁盘链路回归测试(离线 stub) ..."
+say "[12/17] ceph 磁盘链路回归测试(离线 stub) ..."
 CEPH_TEST_SH="${SCRIPT_DIR}/tests/ceph-disk-tests.sh"
 if [ -f "${CEPH_TEST_SH}" ]; then
     if CEPH_TEST_OUT="$(bash "${CEPH_TEST_SH}" 2>&1)"; then
@@ -414,7 +416,7 @@ fi
 #     localhost ≠ true ⇒ 属"尚未同步到本地代理语义"(纯 checkout / 开发机的常态) —— 只提示跳过
 #   为什么不用配置开关当门: 本地工作副本还没跑过 sync, all.yml 仍是旧形态, 用开关当门会在
 #   干净仓库上必然误报(⑪ 已因同一根因提示着, 再加一条只是噪音)。开关值仅在诊断信息里出现。
-say "[13/16] API 入口: 本地代理语义与 all.yml 一致性 ..."
+say "[13/17] API 入口: 本地代理语义与 all.yml 一致性 ..."
 API_HA_BAD=0
 if [ ! -f "${KV_ALL_YML}" ]; then
     warn "  未找到 ${KV_ALL_YML}, 跳过 ⑬(未生成 inventory?)"
@@ -452,7 +454,7 @@ fi
 # 比较的是**模式串本身**(各处变量名可能不同), 不是整行; 引号/行尾注释等写法差异先归一化掉。
 # 注: 第 ④ 份曾长期陈旧(缺 lws_manager / library_nginx), 2026-09-28 Task 7 已补齐并与前三分逐字节相同,
 #     故自本轮起纳入断言(此前注释写的"有意不纳入"已过期)。
-say "[14/16] PRELOAD_IMAGE_PATTERNS 四处副本一致性 ..."
+say "[14/17] PRELOAD_IMAGE_PATTERNS 四处副本一致性 ..."
 
 # 取某个文件里 PRELOAD_IMAGE_PATTERNS 的**模式串本身**(取不到时输出空串, 由调用方判存在性)。
 # 兼容三种写法: PRELOAD_IMAGE_PATTERNS="${VAR:-<串>}"(本仓库四处均如此) / "<串>" / <串>
@@ -524,7 +526,7 @@ unset _i _j _p _n _v _ref _drift
 # 为什么必须有这一条: 换树/手工覆盖树之后, 补丁若没重放, 部署**照样能跑**但缺我们的修复
 #   (metallb CRD 竞态 / registry 顺序 / 离线备料建目录 / SAN 与 join 守卫…), 属静默降级。
 # 见 docs/kubespray-upgrade.md(升级 SOP 与历次记录)。
-say "[15/16] kubespray 补丁在位 + 离线套件 ..."
+say "[15/17] kubespray 补丁在位 + 离线套件 ..."
 if [ -x "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" ]; then
     if _out="$(bash "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" --check 2>&1)"; then
         ok "  ⑮ kubespray 补丁全部在位"
@@ -589,7 +591,7 @@ unset _t _tp _tout 2>/dev/null || true
 #   响亮失败(与 images.manifest:49 的"必须与 kubespray 实际解析出的版本一致"自相矛盾)。
 #   写入者已落地 = tools/k8s/sync-kubespray-config.sh 3.2 节(group_vars/all/k8s-versions.yml),
 #   C 断言其产物与钉子逐键一致 —— 删掉写入节 / 手工改错值 / 换了 conf 忘跑 sync 都会被点名。
-say "[16/16] k8s 基座钉子闭环(A 树内表值 / B 无模块开关 / C inventory 写入者) ..."
+say "[16/17] k8s 基座钉子闭环(A 树内表值 / B 无模块开关 / C inventory 写入者) ..."
 
 KSD_ROLE="${REPO_ROOT}/deployments/kubespray/kubespray/roles/kubespray_defaults"
 KSD_DL="${KSD_ROLE}/defaults/main/download.yml"
@@ -817,6 +819,34 @@ else
         ok "  ⑯ k8s 基座钉子闭环通过(A: K8S_VERSION 在 kubelet_checksums 表内, calico/etcd/coredns/pause/node-cache/metrics/cpa/nginx-tag/lvp/nfd 与树内表逐项对齐; B: 两个无模块开关声明在位; C: inventory 10 个版本键 == 钉子)"
 fi
 unset _cn _cf _k8s _k8s_bare _major _want_calico _want_etcd _want_coredns _want_pause _want_ndc _want_metrics _want_cpa _want_nginx _want_lvp _want_nfd _k _v _pv _kv _pin _got _pair KSD_PINS KSD_INV_YML 2>/dev/null || true
+
+# ---------- ⑰ 凭据卫生: 含密钥的"生成物"不得被 git 跟踪 ----------
+# 背景(2026-09-20 事故, 2026-09-29 复核才发现"其实没修好"): external-ceph 的自研导出配置由生成器
+# 写成真值后被**误提交并持续跟踪**, 而 .gitignore 里早就列了它 —— ⚠ **忽略规则对已跟踪文件无效**,
+# 于是"看着封堵了、其实一直在库里", 还被烧进 CLI 镜像。
+# 本项把这条关系变成**可执行断言**: 这些路径 ① 必须被 .gitignore 覆盖 ② 且不得出现在 git 索引里。
+say "[17/17] 凭据卫生(含密钥的生成物不得被 git 跟踪) ..."
+_GIT=(git -C "${REPO_ROOT}")
+_SECRET_PATHS=(
+    deployments/config/external-ceph-self-define-access.conf   # 生成器写出三个真 keyring
+    deployments/config/external-ceph.env                       # Rook 官方导出(mon/CSI/RGW 用户密钥)
+    deployments/config/minio.conf                              # 含 MinIO 密钥
+    deployments/config/cluster.conf                            # 含全部集群密码
+)
+for _p in "${_SECRET_PATHS[@]}"; do
+    if "${_GIT[@]}" ls-files --error-unmatch "${_p}" >/dev/null 2>&1; then
+        ck_fail "⑰ ${_p} **被 git 跟踪** —— 该文件含真实密钥" \
+            "      → 修法: git rm --cached ${_p} && git commit(磁盘文件保留)" \
+            "      → ⚠ 若已被 push: 密钥视为泄露, 必须在服务端轮换并重新导出" \
+            "      → ⚠ 只加 .gitignore 不算修好: 忽略规则对**已跟踪**文件无效"
+    elif ! "${_GIT[@]}" check-ignore -q "${_p}"; then
+        ck_fail "⑰ ${_p} 既未被跟踪、也未被 .gitignore 覆盖 —— 一次 git add -A 就会把它带进提交" \
+            "      → 修法: 仓库根 .gitignore 加一行 ${_p}"
+    else
+        say "  ⑰ ${_p}(未跟踪 + 已被忽略) ✓"
+    fi
+done
+unset _GIT _SECRET_PATHS _p 2>/dev/null || true
 
 echo "---------------------------------------------"
 if [ "${FAIL}" = "0" ]; then
