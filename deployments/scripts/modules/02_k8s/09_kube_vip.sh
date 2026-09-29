@@ -28,15 +28,21 @@
 #     ⚠ 配套改动: deploy-cluster.sh 的"为 RUN_STEPS 中的 TOGGLE 模块导出开关=true"那个循环
 #       加了 `! module_default_on` 前置条件 —— 否则它会无条件把 KUBE_VIP_ENABLED 冲成 true,
 #       用户的 false 永远到不了这里。显式 `--enable kube_vip` 不受影响(那条路径写回 cluster.conf)。
-#   · **单一写入者**: /etc/kubernetes/manifests/kube-vip.yml 由本模块独占。
-#     addons.yml 里恒写 kube_vip_enabled: false, 让 kubespray 不要插手。
-#     原因: 两边渲染结果**必然不同** —— kubespray 对**首台** master 会把 hostPath 渲染成
-#     super-admin.conf(roles/kubernetes/node/tasks/loadbalancer/kube-vip.yml:26-31 的 set_fact),
-#     我们的渲染器恒用 admin.conf → 每次全量运行该文件被改写两次 → kube-vip pod 重启两次。
-#     详见 lib-common.sh#update_kube_vip_addons_yml 与 docs/kube-vip-api-ha.md 第 18 节。
-#   · **等幂等**: 目标状态 = 「每台 master 上都有 m/ kube-vip 静态 Pod, 且 VIP 恰好绑在其中一台」。
-#     基于该状态收敛, 而不是"装过就跳过" —— 支持修复被手工改坏的 manifest。
-#     内容一致时按 sha256 比对跳过(不碰文件 → 不重启 kube-vip → 零抖动)。
+#   · **清单由 kubespray 渲染(2026-09-28 收编)**: `/etc/kubernetes/manifests/kube-vip.yml` 由
+#     kubespray 在 "Install Kubernetes nodes" 里按 addons.yml 的 kube_vip_* 渲染落盘
+#     (roles/kubernetes/node/tasks/loadbalancer/kube-vip.yml)。本模块**不再代劳渲染**,
+#     只负责: 推导 VIP → 校验变量已就位 → 等就位并核验(清单/vip_nodename/唯一性/healthz)
+#     → 关闭时清理。上游做不到的这四件事正是本模块存在的理由。
+#     ⚠ 历史: 2026-09-22~09-28 曾自持渲染、并把 kubespray 侧**恒关**("单一写入者契约"),
+#       起因是**双写者**对同一路径轮流改写(上游对首台 master 用 super-admin.conf、我们的渲染器
+#       恒用 admin.conf)→ 每次全量运行清单被改写两次、Pod 重启两次。收编后写入者只剩上游一家,
+#       那份分叉本身是稳定的 ⇒ 契约不需要, 自持渲染器已删除。
+#       详见 docs/api-ha/07-kube-vip-upstream-assessment.md。
+#   · **等幂等**: 目标状态 = 「每台 master 上都有 kube-vip 静态 Pod, 且 VIP 恰好绑在其中一台」。
+#     基于该状态收敛, 而不是"装过就跳过"; 清单内容由上游保证幂等(内容不变不重写 → 不重启)。
+#   · ⚠ **vip_nodename 陷阱**(历史事故): 若所有节点渲染成同一个 vip_nodename, 多台 kube-vip 会
+#     抢同一租约 → **三台同时绑 VIP(脑裂)**。收编后这条由上游按 inventory_hostname 逐台渲染保证;
+#     本模块在收敛后**逐台读回清单里的 vip_nodename 核对**(廉价哨兵, 见步骤 3)。
 #   · **两种 VIP 来源**(K8S_API_VIP):
 #       显式值 → 直接用, 不探测
 #       留空   → 自动推导: 在各 master 上逐地址探测(ICMP 无应答 且 6443 不可达 = 空闲),
@@ -46,9 +52,9 @@
 #       会以"以下 master 上缺少 kube-vip 镜像"硬失败。
 #       (注: 早期版本的说明是"否则首装 kubeadm init 会失败" —— 那是 kubespray 还在 init 之前
 #        写 manifest 时的说法。现在静态 Pod 只由本模块在集群起来之后落位, 该依赖已不存在。)
-#   · ⚠ **vip_nodename 陷阱**: 渲染时必须按节点传各自的 hostname。若所有节点渲染成
-#     同一个值, 多台 kube-vip 会抢同一租约 → **三台同时绑 VIP(脑裂)**。
-#     本模块通过 render-kube-vip-manifest.py --nodename 逐个渲染来规避。
+#   · ⚠ **vip_nodename 陷阱**(历史事故): 渲染时若所有节点用同一个 hostname, 多台 kube-vip 会抢
+#     同一租约 → **三台同时绑 VIP(脑裂)**。收编后由上游逐台按 inventory_hostname 渲染保证;
+#     本模块在收敛后逐台读回核对(哨兵), 见"校验 kubespray 渲染的清单"一段。
 # 数据源: cluster.conf (KUBE_VIP_ENABLED / K8S_API_VIP / KUBE_VIP_INTERFACE / NODES / SSH_KEY_NAME)
 # 用法: sudo ./deploy-cluster.sh --steps kube_vip
 # ============================================================
@@ -69,10 +75,6 @@ SSH_KEY_PATH="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 _ssh() {   # _ssh <ip> <cmd>
     ssh -i "${SSH_KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${1}" "$2" 2>/dev/null
-}
-_scp() {   # _scp <local> <ip> <remote>
-    scp -q -i "${SSH_KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null "${1}" "${SSH_USER:-ubuntu}@${2}:${3}"
 }
 
 # 并行数组: _MHOST[i] = 主机名(vip_nodename), _MIP[i] = IP(SSH 目标)
@@ -221,17 +223,32 @@ fi
 kube_vip_validate_config || exit 1
 init_remote_kubectl || exit 1
 
-TEMPLATE="${KUBESPRAY_DIR:-${REPO_ROOT}/deployments/kubespray/kubespray}/roles/kubernetes/node/templates/manifests/kube-vip.manifest.j2"
-RENDERER="${SCRIPT_DIR}/tools/k8s/render-kube-vip-manifest.py"
-[ -f "${TEMPLATE}" ] || { err "未找到 kubespray manifest 模板: ${TEMPLATE}"; exit 1; }
-[ -f "${RENDERER}" ] || { err "未找到渲染器: ${RENDERER}"; exit 1; }
-command -v python3 >/dev/null 2>&1 || { err "需要 python3(渲染 kubespray 模板)"; exit 1; }
+# ---- 渲染已交给 kubespray: 校验 addons.yml 的 kube_vip_* 已就位 ----
+# (由 sync-kubespray-config.sh#update_kube_vip_addons_yml 按 cluster.conf 写; 收编见模块头)
+ADDONS_YML="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}/group_vars/k8s_cluster/addons.yml"
+[ -f "${ADDONS_YML}" ] || { err "未找到 ${ADDONS_YML}(kubespray 靠它渲染 kube-vip 静态 Pod)"; exit 1; }
+_kv_expect() {   # _kv_expect <键> <期望值>
+    local got; got="$(awk -v k="${1}" 'index($0, k ":")==1 {sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' "${ADDONS_YML}")"
+    [ "${got}" = "${2}" ] || {
+        err "addons.yml 的 ${1} 期望 '${2}', 实际 '${got}'"
+        err "  → 先跑 k8s_inventory / k8s_deploy(sync-kubespray-config 会按 cluster.conf 重写该块)"
+        exit 1
+    }
+}
+_kv_expect kube_vip_enabled true
+_kv_expect kube_vip_controlplane_enabled true   # 上游默认 false; 不写就没有控制面 VIP
+_kv_expect kube_vip_arp_enabled true            # 上游默认 false; kube_vip_leader_election_enabled 由它派生
+_kv_expect kube_vip_services_enabled false      # D1: 服务 LB 归 MetalLB
+_kv_expect kube_vip_lb_enable false             # D4: local 转发在内核里等于不转发
 
 # ---- VIP: 显式优先(all.yml 显式值也算), 否则自动推导 ----
 # ⚠ 只推导一次: kube_vip_derive 会对每台 master 做逐地址探测(SSH + ICMP + TCP), 很贵,
 #   且两次调用之间集群状态若变化还可能给出不同答案。
 VIP="$(kube_vip_derive)" || exit 1
 [ -n "${VIP}" ] || { err "无法确定 VIP"; exit 1; }
+# VIP 必须与 inventory 里记录的一致 —— 它同时喂 manifest 的 address 与 apiserver 证书 SAN,
+# 不一致会让"清单持有 A、证书只认 B"这种撕裂状态出现(TLS 校验失败)。
+_kv_expect kube_vip_address "${VIP}"
 
 # ---- 前置条件自检(用自检替代 REQUIRES, 避免 --steps kube_vip 连带拉起整套 kubespray) ----
 if ! is_cluster_live; then
@@ -260,51 +277,24 @@ else
     ok "前置检查通过(集群可达, 镜像已在 ${#_MIP[@]} 台 master); VIP=${VIP}(自动推导)"
 fi
 
-# ---- 逐台渲染(必须各用各的 hostname, 否则脑裂) ----
-_TMPDIR="$(mktemp -d)"
-trap 'rm -rf "${_TMPDIR}"' EXIT
-
-say "渲染 kube-vip manifest(每台 master 各自 hostname)..."
-_i=0
-while [ "${_i}" -lt "${#_MHOST[@]}" ]; do
-    H="${_MHOST[${_i}]}"
-    python3 "${RENDERER}" \
-        --nodename "${H}" \
-        --vip "${VIP}" \
-        --interface "${KUBE_VIP_INTERFACE:-}" \
-        --template "${TEMPLATE}" \
-        --image-repo "${KUBE_VIP_IMAGE_REPO:-ghcr.io/kube-vip/kube-vip}" \
-        --image-tag "${KUBE_VIP_VERSION:-v1.0.3}" \
-        --cp-detect "$(bool_is_true "${KUBE_VIP_CP_DETECT:-false}" && echo true || echo false)" \
-        > "${_TMPDIR}/${H}.yml" || { err "渲染失败: ${H}"; exit 1; }
-    # 渲染后立即断言 —— vip_nodename 是脑裂唯一致命点, 宁可早失败
-    _rendered="$(awk '/name: vip_nodename/{getline; print $2; exit}' "${_TMPDIR}/${H}.yml")"
-    [ "${_rendered}" = "${H}" ] || { err "渲染出的 vip_nodename='${_rendered}' 与节点 '${H}' 不符 —— 会脑裂, 中止"; exit 1; }
-    _addr="$(awk '/name: address/{getline; print $2; exit}' "${_TMPDIR}/${H}.yml")"
-    [ "${_addr}" = "\"${VIP}\"" ] || { err "渲染出的 address=${_addr} 与 VIP=${VIP} 不符, 中止"; exit 1; }
-    _i=$((_i + 1))
-done
-ok "manifest 渲染完成(${#_MHOST[@]} 台, vip_nodename 已逐台核对)"
-
-say "分发并落位静态 Pod manifest..."
-_i=0
+# ---- 校验 kubespray 渲染的清单(kubespray 已在 k8s_deploy 的阶段里落盘) ----
+say "校验 kubespray 渲染的 kube-vip 清单(逐台核对 vip_nodename)..."
+_i=0; _BAD=()
 while [ "${_i}" -lt "${#_MHOST[@]}" ]; do
     H="${_MHOST[${_i}]}"; IP="${_MIP[${_i}]}"
-    # 与目标状态比对, 一致则跳过(等幂等)
-    # ⚠ 远程命令里不能用 `cut -d' '` —— 那对单引号会提前闭合外层的单引号字符串,
-    #   导致远端命令语法错乱、返回空值, 于是每次都误判为"有变化"(实测踩到)。
-    _cur_hash="$(_ssh "${IP}" "sudo sha256sum ${MANIFEST_PATH} 2>/dev/null | cut -d\" \" -f1" || true)"
-    _new_hash="$(sha256sum "${_TMPDIR}/${H}.yml" | cut -d' ' -f1)"
-    if [ "${_cur_hash}" = "${_new_hash}" ]; then
-        vlog "  ${IP}(${H}): manifest 已是最新, 跳过"
-        _i=$((_i + 1)); continue
-    fi
-    _scp "${_TMPDIR}/${H}.yml" "${IP}" "/tmp/kube-vip.yml" || { err "  ${IP}: 分发失败"; exit 1; }
-    _ssh "${IP}" "sudo cp /tmp/kube-vip.yml ${MANIFEST_PATH} && sudo chmod 640 ${MANIFEST_PATH} && rm -f /tmp/kube-vip.yml" \
-        || { err "  ${IP}: 落位失败"; exit 1; }
-    say "  ${IP}(${H}): manifest 已更新"
+    # ⚠ 远端命令里不写 awk 程序(单引号载荷禁忌, 见本仓库既有教训): 只 grep 取两行, 本地解析
+    _out="$(_ssh "${IP}" "sudo grep -A1 'name: vip_nodename' ${MANIFEST_PATH} 2>/dev/null" || true)"
+    _rendered="$(printf '%s\n' "${_out}" | awk 'NR==2{print $2}')"
+    [ "${_rendered}" = "${H}" ] || _BAD+=("${IP}(vip_nodename=${_rendered:-清单缺失})")
     _i=$((_i + 1))
 done
+if [ "${#_BAD[@]}" -gt 0 ]; then
+    err "以下 master 的 kube-vip 清单异常: ${_BAD[*]}"
+    err "  期望 vip_nodename == 该节点名; 『清单缺失』= kube_vip_enabled 未生效或 k8s_deploy 尚未跑到该阶段"
+    err "  · 清单由 kubespray 渲染 —— 先查 addons.yml 的 kube_vip_*(本模块开头已校验)与 k8s_deploy 日志"
+    exit 1
+fi
+ok "清单已就位且 vip_nodename 逐台正确(${#_MHOST[@]} 台)"
 
 # ---- 等待收敛并校验 ----
 say "等待 kube-vip 选举收敛(20s)..."
@@ -335,8 +325,8 @@ case "${#_HOLDERS[@]}" in
        err "排查: 各 master 执行 crictl logs \$(crictl ps --name kube-vip -q) 看租约报错"
        exit 1 ;;
     *) err "VIP ${VIP} 同时绑定在 ${#_HOLDERS[@]} 台 master 上(${_HOLDERS[*]}) —— **脑裂**"
-       err "常见原因: manifest 被批量分发成了同一个 vip_nodename(见模块头说明)"
-       err "处置: 用本模块重跑(会按节点逐个渲染), 或临时摘除多余节点的 ${MANIFEST_PATH}"
+       err "常见原因: 清单里的 vip_nodename 被渲染成同一个值(收编后由上游按节点渲染, 出现即上游行为异常)"
+       err "处置: 查各 master 的 ${MANIFEST_PATH} 与 k8s_deploy 日志; 临时可摘除多余节点的该文件"
        exit 1 ;;
 esac
 

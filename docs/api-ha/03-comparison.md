@@ -58,6 +58,13 @@
 **架构**：三台 master 上各跑一个 kube-vip 静态 Pod，通过租约选举出一台持有 VIP（ARP 通告），
 VIP 加入 apiserver 证书 SAN，域名解析到 VIP。
 
+> 🔁 **2026-09-28 收编**：静态 Pod 清单改由 **kubespray 自己**渲染（`addons.yml` 的 `kube_vip_*` 驱动，
+> 在 kubeadm init 之前落盘），自持渲染器与其测试已删除；本仓库只留 VIP 推导 / 入口与 hosts /
+> 关闭清理 / 验证。**对本方案的能力与代价没有影响**（"谁写那份清单"与 VIP 机制正交），
+> 但两处细节变了：① `kube_proxy_strict_arp: true` 成为硬前置（上游 kube-vip 任务在 ipvs 集群上要求，
+> 收编前被自持渲染器绕过）；② 既有集群首次收编后清单换代一次 ⇒ Pod 重启一次（预期）。
+> 见 [07-kube-vip-upstream-assessment.md](07-kube-vip-upstream-assessment.md)。
+
 **优点**
 - **一个稳定地址**：域名/VIP 不随 master 增减变化
 - 零额外机器；VIP 跑在 master 上
@@ -75,8 +82,8 @@ VIP 加入 apiserver 证书 SAN，域名解析到 VIP。
 |---|---|---|---|
 | 1 | leader 节点断电 | 全集群入口消失 ~5s（等租约过期） | ⚠ 上游默认租约；仓库明确不调参（改短会误判） |
 | 2 | leader 进程正常退出 | 实测漂移 1–2s | ✅ 退出时主动释放租约 |
-| 3 | 节点活着但 apiserver 进程死 | 无 `cp_detect` 时 VIP 永不漂移 | ✅ 仓库默认 `KUBE_VIP_CP_DETECT=true` |
-| 4 | 脑裂（多台同时持 VIP） | API 行为不确定 | ✅ 渲染后断言 `vip_nodename` 逐台唯一（**实测踩过**） |
+| 3 | 节点活着但 apiserver 进程死 | 无 `cp_detect` 时 VIP 永不漂移 | ✅ 仓库默认 `KUBE_VIP_CP_DETECT=false`(★ 2026-09-24 由默认开改为默认关,与 kubespray 一致) |
+| 4 | 脑裂（多台同时持 VIP） | API 行为不确定 | ✅ `vip_nodename` 逐台唯一 —— 收编后由上游按 `inventory_hostname` 渲染，我们**逐台读回清单核对**（哨兵；**实测踩过**） |
 | 5 | VIP 落在 MetalLB 池 / 与节点 IP 冲突 | ARP 打架 | ✅ 硬失败护栏 |
 | 6 | 多网卡选错 | VIP 绑错网卡（静默） | ✅ `KUBE_VIP_INTERFACE` + verify ④ 可检出 |
 | 7 | 扩容 master 不参与选举 | 极端情况丢入口 | ❌ 未修（当前 scale 只扩 worker，无实际影响） |

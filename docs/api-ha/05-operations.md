@@ -14,7 +14,7 @@ kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'; echo
 # ② 这个名字解析到哪（决定一切）
 getent hosts k8s-api.cubestack.io
 
-# ③ 节点侧解析（kubespray 写的第 N 行；本方案的模块会收敛它）
+# ③ 节点侧解析（**v2.32 起不是 kubespray 写的**：由本仓库 03_k8s_hosts / 10_api_local_lb 收敛）
 for i in 28 29 31 32 33 34 35 36; do
   printf '3-%-3s ' $i; ssh -o BatchMode=yes ubuntu@10.66.3.$i "grep -h 'k8s-api' /etc/hosts"
 done
@@ -38,7 +38,7 @@ kubectl get endpoints kubernetes -n default
 |---|---|
 | **节点侧** | `kubelet.conf` = `https://localhost:6443`（worker）/ `https://127.0.0.1:6443`（master），且节点 `/etc/hosts` 域名行 = 当前入口地址（`vip` 模式=VIP；`node` 模式=第一台 master）。核查用上面 ③④ |
 | **集群内 Pod** | `kubectl get endpoints kubernetes -n default` 有 3 条端点（上面 ⑥） |
-| **管理侧（部署机）** | ⚠ **仍是"单台 IP"**：部署机的 `/etc/hosts` 与 kubectl 直连 `API_IP`（第一台 master），**本方案未改这里**（不属回归，见 04 §4.1 的已知限制）。所以在本机看到"域名 → 单台 IP"**不代表配置没生效** —— 请以节点侧那两条为准，本机只用来发命令 |
+| **管理侧（部署机）** | ⚠ **仍是"单台 IP"**：部署机的 `/etc/hosts` 与 kubectl 直连 `API_IP`（第一台 master），**本方案未改这里**（不属回归，见 04 §4.1 的已知限制）。所以在本机看到"域名 → 单台 IP"**不代表配置没生效** —— 请以节点侧那两条为准，本机只用来发命令<br>⚠ **2026-09-28 更正**：这一行说的是**部署宿主机**自己那份 `/etc/hosts`（`deploy` 不碰它，要跟的话得手工跑 `tools/node/sync-hosts.sh`）。**部署脚本运行环境**（部署容器）里那份**已跟随入口** —— `sync_kubeconfig` 改为写 `api_entry_ip()`（VIP 已绑=VIP，否则首 master）。⚠ 容器与宿主是**两份不同的文件**（`md5sum` 不同），排查时先确认自己在看哪一份 |
 
 > 换句话说：**别拿部署机的 `getent hosts k8s-api.cubestack.io` 当验收判据** —— 它在 `vip` 模式下也不会变成 VIP，
 > 这是已知限制而非故障。`master01` 宕机时部署机 kubectl 会失联，属 [01 §8](01-current-state.md#8-单点清单本集群实测) 里**本方案未消除**的那一条。
@@ -93,6 +93,16 @@ ssh ubuntu@<master> "sudo openssl x509 -in /etc/kubernetes/pki/apiserver.crt -no
 kubectl -n kube-system get pod -l k8s-app=kube-vip -o wide 2>/dev/null || true
 ssh ubuntu@<master> 'sudo crictl ps --name kube-vip'
 ssh ubuntu@<master> 'sudo crictl logs $(sudo crictl ps --name kube-vip -q) --tail 50 | grep -iE "leader|vip|lock"'
+
+# ── 这个 VIP 是不是被"另一套集群"共用（kubectl 时好时坏 x509 时的第一手判据）──
+#   原理：连取几次**同一地址**上的服务端证书指纹 —— 出现多个不同指纹 = 多个 apiserver 在应答。
+#   判定逻辑与 lib-common.sh#sync_kubeconfig 的末校验同一套（≥2 种即报"被多个 apiserver 共用"）。
+for i in 1 2 3 4; do
+  echo | openssl s_client -connect k8s-api.cubestack.io:6443 -servername k8s-api.cubestack.io 2>/dev/null \
+    | openssl x509 -noout -fingerprint -sha256
+  sleep 1
+done | sort -u
+# ⇒ 只有 1 行 = 正常；多行 = 同网段另有集群抢同一个 VIP（处置见 §7 决策树 + cluster.conf 的 K8S_API_VIP 注释）
 
 # ── 本地代理是否健康（启用后）──
 ssh ubuntu@<worker> "curl -sk https://localhost:6443/healthz; echo; curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8081/healthz"
@@ -234,6 +244,11 @@ kubectl 报错 / 节点 NotReady
 │    └─ 解析到 VIP
 │          └─ VIP 现在被谁持有？ sudo crictl ps --name kube-vip / ip addr
 │                └─ 无人持有 → kube-vip 静态 Pod 是否 Running？日志里的 leader 选举？
+│    ⚠ 解析到 VIP、ping 通，但 kubectl **时好时坏**（x509: certificate signed by unknown authority）
+│        → 先怀疑"同网段另一套集群抢同一个 VIP"（不是证书坏了）：
+│          跑 §3 的证书指纹探测（4 次取样只应有 1 个指纹）；
+│          处置 = 两套集群各用不同 K8S_API_VIP + METALLB_POOL，或先拆除另一套
+│          （⚠ 改 VIP 后**必须重装集群** —— 证书 SAN 在 kubeadm init 时固化）
 │
 ├─ ② 单个节点失联，其余正常
 │    ssh <node> 'curl -sk https://localhost:6443/healthz'     ← 本地代理模式

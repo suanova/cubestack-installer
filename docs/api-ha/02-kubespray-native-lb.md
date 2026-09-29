@@ -233,7 +233,8 @@ kubeadm_discovery_address: >-
 ### 7.1 路线 2 需要我们自己补的两件事
 
 1. **节点 `/etc/hosts` 的域名行**：摘掉 `loadbalancer_apiserver` 后，
-   上游写入任务的条件为假（`0090-etchosts.yml:27-38` 的 `when: loadbalancer_apiserver is defined`），
+   上游写入任务的条件为假（`0090-etchosts.yml:27-38` 的 `when: loadbalancer_apiserver is defined`；
+   ⚠ 2026-09-28 注：该任务在 v2.32 树**已不存在**，hosts 行现由本仓库 `03_k8s_hosts.sh` 写，这里的结论仍成立——本地代理模式下没人写域名行），
    **没人再写**。而人 SSH 到节点上用 kubectl（admin.conf 的 server 是域名）仍然需要它 →
    由我们的模块收敛（域名 → 当前入口地址）。
 2. **关闭时的 manifest 清理**：上游**只**互相删 nginx/haproxy 的 manifest，
@@ -286,7 +287,7 @@ spec:
   priorityClassName: system-node-critical        # 优先调度，不易被驱逐
   containers:
   - name: nginx-proxy
-    image: {{ nginx_image_repo }}:{{ nginx_image_tag }}     # docker.io/library/nginx:1.27.4-alpine
+    image: {{ nginx_image_repo }}:{{ nginx_image_tag }}     # docker.io/library/nginx:1.30.1-alpine
     livenessProbe:  { httpGet: { path: /healthz, port: 8081 } }   # 仅当 healthcheck_port 定义
     readinessProbe: { httpGet: { path: /healthz, port: 8081 } }
     volumeMounts:
@@ -308,13 +309,13 @@ spec:
 
 > ✅ **2026-09-28 更新：nginx 版已补齐**（标题里的"硬缺口"与下表 **只剩 haproxy 行成立**，
 > 本轮 `API_LOCAL_LB_TYPE` 默认 `nginx`，不走 haproxy）：`docker.io/library/nginx:${API_LB_NGINX_IMAGE_TAG}`
-> （默认 `1.27.4-alpine`）已登记进 `deployments/config/images.manifest`（`k8s-base` 组），
+> （默认 `1.30.1-alpine`）已登记进 `deployments/config/images.manifest`（`k8s-base` 组），
 > `PRELOAD_IMAGE_PATTERNS` 已加 `library_nginx`。落地细节与坑见
 > [offline-files/kubespray/README.md](../../deployments/offline-files/kubespray/README.md) 的 nginx 一节。
 
 | 需要 | 值 | 现状 |
 |---|---|---|
-| nginx 版 | `docker.io/library/nginx:1.27.4-alpine` | ✅ **2026-09-28 已补齐**（登记 `images.manifest` + `PRELOAD_IMAGE_PATTERNS` 加 `library_nginx`）。**原缺口**：`PRELOAD_IMAGE_PATTERNS` 不含 nginx；`offline-files/kubespray/images/nginx_1.27.tar` 的 tag 是 `1.27`，**对不上** |
+| nginx 版 | `docker.io/library/nginx:1.30.1-alpine` | ✅ **2026-09-28 已补齐**（登记 `images.manifest` + `PRELOAD_IMAGE_PATTERNS` 加 `library_nginx`）。**原缺口**：`PRELOAD_IMAGE_PATTERNS` 不含 nginx；`offline-files/kubespray/images/nginx_1.27.tar` 的 tag 是 `1.27`，**对不上** |
 | haproxy 版 | `docker.io/library/haproxy:3.1.3-alpine` | ❌ 同上，完全缺失 |
 
 `offline-files/nginx/nginx.tar` **不能**直接复用：那是 verify 模块的测试后端镜像
