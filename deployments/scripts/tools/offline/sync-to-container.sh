@@ -89,6 +89,14 @@ FILES=(
     #   也不含运行数据, 走 FILES 逐个同步最稳(树本体见上面 DIRS 的注释)。
     deployments/kubespray/cubestack-patch-apply.sh
     deployments/kubespray/cubestack-kubespray-upgrade.sh
+    # ★ 2026-09-28: 5 个注入 play 全部逐个同步 —— 原先只列了 install-packages.yml,
+    #   另外 4 个(preload/registry/cni-restart/single-node)改了永远进不去容器
+    #   (树本体有意不整拷, 见上面 DIRS 注释; 这几个是**我们自持**的 play, 不是上游树内容)。
+    #   代价是修单节点收敛 play 的挂载位置时, 得靠入口脚本的 ensure_* 迁移逻辑(已实现)。
+    deployments/kubespray/kubespray/patch-playbooks/cubestack-preload.yml
+    deployments/kubespray/kubespray/patch-playbooks/cubestack-registry.yml
+    deployments/kubespray/kubespray/patch-playbooks/cubestack-cni-restart.yml
+    deployments/kubespray/kubespray/patch-playbooks/cubestack-single-node.yml
     deployments/kubespray/kubespray/patch-playbooks/install-packages.yml
     # (rook 离线 manifests 已由上面 DIRS 的 cubestack-addon 整目录覆盖, 不再逐条列)
 )

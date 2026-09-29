@@ -648,6 +648,11 @@ grep -m1 '^ansible==' deployments/kubespray/kubespray/requirements.txt
 ```
 预期: `ansible==12.3.0`。
 
+⚠ **同时核 Python 下限**(2026-09-28 实测补):`ansible==12.3.0` = ansible-core 2.19.x,**在控制端要求 Python ≥3.11** ——
+ubuntu 22.04 的 `python3` 是 3.10 ⇒ 镜像里 `python3 -m pip install` 会直接失败。修法已落进
+`Dockerfile-cli` / `Dockerfile-cli-incremental`(装 deadsnakes `python3.11` 并让 ansible 走它)。
+判据:`python3.11 -m pip index versions ansible 2>/dev/null | head -1` 或直接看 pip 报错里的 `Requires-Python`。
+
 - [ ] **Step 2: 重建 CLI 镜像**(构建机需能访问 PyPI 镜像;按仓库既有 CLI 镜像构建流程)
 
 ```bash

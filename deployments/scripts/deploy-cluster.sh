@@ -91,6 +91,8 @@ $(_component_meta_list stub)
   ① 全新集群/覆盖重装: sudo ./deploy-cluster.sh               # 默认 = 覆盖安装: k8s + cluster.conf 中启用的全部组件
                                                             # (目标集群**已存在**时同样是覆盖重装; 支持断点续跑)
   ② 清状态重来:        sudo ./deploy-cluster.sh --fresh        # = ① 且**先清断点状态**(REPEAT:0 的模块强制重跑)
+     · 覆盖安装遇到节点上的**旧集群残留**(跨小版本 / 旧 etcd 二进制)时, k8s_deploy 前置会自动清除它
+       (交互 15s 倒计时可中止; 加 --yes 免交互 —— 无人值守务必显式给)。原地升级未实现, 见 docs/cluster-upgrade-path.md
   ③ 单独装组件:        sudo ./deploy-cluster.sh --steps ceph         # 只装该组件(不动基座; 集群接入自动处理)
   · state 文件 deployments/config/.deploy.state 只记录"本机装到哪一步": 全新容器没有它是正常的(等价①)。
   · ⚠ ①/② 是**重装集群**的路: 节点上已有的旧 K8s 会被 kubeadm reset(既有防线: kubespray 侧检测到残留时
@@ -153,13 +155,16 @@ EOF
 }
 
 # ---------------- 参数解析 ----------------
-FRESH=0; LIST=0; LIST_STEPS=0
+FRESH=0; LIST=0; LIST_STEPS=0; ASSUME_YES=0
 STEPS_ARG=""; SKIP_ARG=""; ENABLE_ARG=""; PHASE_ARG=""; ENABLE_PERSIST_ARG=""
 SCALE_ONLY=0
 ONLY_HOSTS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --fresh|--refresh) FRESH=1; shift ;;
+        # --yes = 覆盖安装时免交互确认(透传给"旧集群残留 → 自动 reset"那一步; 见 k8s_deploy 前置)。
+        #   不给 --yes 时: 交互终端仍有 15s 倒计时; 非交互环境**拒绝自动 reset**(避免无人值守误清集群)。
+        --yes|-y) ASSUME_YES=1; shift ;;
         --list)     LIST=1; shift ;;
         --list-steps) LIST_STEPS=1; shift ;;
         # --with-k8s: 仅 kubespray 基座(k8s + metallb/local-path/registry), 不含任何 operator
@@ -304,6 +309,8 @@ if [ "${LIST_STEPS}" = "1" ]; then print_steps; exit 0; fi
 if [ "${LIST}" = "1" ]; then print_plan; exit 0; fi
 
 [ "${FRESH}" = "1" ] && { clear_state; say "已清除断点续跑状态(--fresh)" ; }
+# --yes 透传给下游(k8s_deploy 前置的"旧集群残留 → 自动 reset"); 见 tools/k8s/reset-old-cluster.sh
+[ "${ASSUME_YES}" = "1" ] && { export CUBESTACK_ASSUME_YES=1; say "已开启免交互确认(--yes): 覆盖安装时旧集群残留将**自动**清除"; }
 
 need_root() { [ "$(id -u)" -eq 0 ] || { err "需要 root 权限,请执行: sudo $0"; exit 1; }; }
 need_root

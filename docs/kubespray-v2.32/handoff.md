@@ -22,29 +22,55 @@
 
 ## 二、待办(交回本机/联网机/真机环境执行)
 
-**T12 重建 CLI 镜像** —— 树内 `requirements.txt` 已是 `ansible==12.3.0`;`Dockerfile-cli` 直接 COPY 它,重建是机械动作。**不重建则任何部署都会撞 ansible 2.19 版本门**(≥2.19 <2.20)。同时 `.venv_wheels/` 缓存若要用于裸机路径需刷新。
+**T12 重建 CLI 镜像** —— 树内 `requirements.txt` 已是 `ansible==12.3.0`;`Dockerfile-cli` 直接 COPY 它。**不重建则任何部署都会撞 ansible 2.19 版本门**(≥2.19 <2.20)。同时 `.venv_wheels/` 缓存若要用于裸机路径需刷新。
+⚠ **2026-09-28 实测更正:这不是"机械动作"** —— `ansible==12.3.0`(= ansible-core 2.19.x)**在控制端要求 Python ≥3.11**,而基础镜像/ubuntu 22.04 是 **3.10** ⇒ `python3 -m pip install -r requirements.txt` 直接失败(`Requires-Python >=3.11`)。已修:
+`Dockerfile-cli` + `Dockerfile-cli-incremental` 装 **deadsnakes python3.11** 并让 ansible 走它(系统 python3 仍 3.10,不动 python3-libvirt);
+`cubestack-offline.sh:ensure_venv` 改为**优先挑 python3.12/3.11**(裸机路径),宿主要装 ≥3.11;
+`.venv_wheels/` 已加 gitignore(原机制在、缓存从没产出)。SOP 同步:`docs/kubespray-upgrade.md` 新增第 8 条。
 
-**T13 离线备料**(联网机 + Harbor;管道:清单 → GitHub Actions → Harbor → `harbor-save-images.sh`):
-- ⚠ 盘上现存的离线 tar **整体落后钉子线**,需整套重出(实测旧件):`kube-apiserver/controller-manager/proxy/scheduler v1.32.5`、`pause 3.10`、`coredns v1.11.3`、`metrics-server v0.7.0`、`cpa v1.8.8`、`etcd v3.5.16`、`calico v3.29.3`;
-- **`multus-cni.tar` 内容仍是 `snapshot-thick`** —— 模块已改**内容校验**,拿错 tar 会**硬拒绝** ⇒ 必须产出 `v4.2.2-thick` 的新 tar;
-- `ghcr.io/kube-vip/kube-vip:v1.0.3` 的 tar 本地**不存在**;
-- `docker.io_library_nginx_1.30.1-alpine.tar` 亦缺;
-- LVP/NFD 两条新登记镜像需出 tar;
-- 产出 **`manual-download-list.md`**(逐条 ref/URL → 目标路径 → 校验 → 手动命令;含非镜像制品:kubelet/kubectl/calicoctl/etcd/CNI/crictl/wheels)。
+**T13 离线备料** —— ✅ **2026-09-28 已执行**(联网机下载件 → 仓库;不用 Harbor 管道,因为 mirrors 还没同步 1.35 线):
+- ✅ 盘上离线 tar 整套换代到 1.35 线(kube-apiserver/controller-manager/proxy/scheduler **1.35.8**、pause 3.10.1、coredns 1.12.4、metrics-server 0.9.0、cpa 1.10.3、etcd 3.6.14、calico 3.31.7;二进制 kubelet/kubectl/kubeadm 1.35.8、cni 1.9.1、calicoctl 3.31.7、containerd 2.3.5、crictl 1.35.0、runc 1.4.3、helm 3.22.0、nerdctl 2.3.5)—— 二进制 sha256 对 `checksums.yml` 全过;
+- ✅ `multus-cni:v4.2.2-thick` tar 已产出(`offline-files/multus/`,旧 `snapshot-thick` 移走)→ **硬门禁解除**;
+- ✅ `ghcr.io/kube-vip/kube-vip:v1.0.3` tar 已就位;✅ `docker.io_library_nginx_1.30.1-alpine.tar` 已就位;
+- ✅ LVP 2.5.0 tar 已就位;⏳ **NFD 0.19.0 tar 仍缺**(新下载件与 Harbor 都没有;`NFD_ENABLED` 默认 false ⇒ 不阻塞);
+- ✅ 3 个**残缺**控制面镜像(12288B 空壳)已按上游 manifest 摘要重取并逐层校验(来源:阿里云官方镜像站,digest 与上游一致);
+- ✅ 产出 `manual-download-list.md`(含本次"换代执行记录"节);旧件 30 个在 `/data/offline-superseded-20260928/`(可回滚,未删)。
 
 **T14 实机验证**:全新集群全量部署(k8s 1.35.8),再分别开/关 LVP·NFD 各一次。
 ⚠ **对现有集群 A/B 的部署另行择期**(换树后全量部署会把它从 1.32.5 升到 1.35.8)。
+
+⚠ **2026-09-28 首次实跑暴露的阻断(已修,待重跑验收)**:容器 a 全量部署中断在
+`patch-playbooks/cubestack-single-node.yml:34`,mxgpu-3-28 报 `stat /etc/kubernetes/admin.conf: no such file or directory`。
+- **根因**:该 play 用 `kubectl`(读 admin.conf)数 control-plane 节点,却和 registry hosts play 一起被
+  `ensure_registry_play` 插在 **"Install etcd" 之前** ⇒ 全新集群上控制面还没起,admin.conf 必然不存在。
+  `scale.yml` 场景(集群已存在)掩盖了它,直到第一次用它跑**全新集群**才暴露。
+- **修法**:拆出 `ensure_single_node_play()`,改用与 `cubestack-cni-restart.yml` **同一组锚点**
+  (`- name: Install Kubernetes apps` / scale.yml 的 `- name: Apply resolv.conf changes now that cluster DNS is up`),
+  即 **K8s+CNI 就绪之后、addon/operator 之前**;并把"摘旧挂载点 → 重挂"的**迁移逻辑**做进函数里
+  (老容器里的旧注入会被自动摘掉,连同它自己的注释块;marker 前空行归一 ⇒ 实测连跑 5 次 md5 不变)。
+  已在容器 a 就地执行并复核:cluster.yml 的挂载点从第 36 行(etcd 前)移到第 117 行(Install Kubernetes apps 前),scale.yml 同步。
+- **顺带修的同类隐患**:`sync-to-container.sh` 的 FILES 清单**只列了 5 个注入 play 中的 1 个**
+  ⇒ 另外 4 个(preload/registry/cni-restart/single-node)改了永远进不去容器(与"树本体不整拷"叠加,
+  正是历次"改了没生效"的老坑)。已把 5 个全部列入,本次同步复核为"单文件清单 9 个全部一致"。
+- ⚠ 未做:该 play 在**多 control-plane**集群下只做计数不做动作(设计如此);单节点集群(1 cp)的
+  taint/uncordon 行为仍需一次真机单节点部署验收。
 
 **四条"部署前必答"**:
 1. **生态兼容未核**:metax operator / rook v1.20 / ceph-csi × k8s **1.35**(design.md D1 自写"实施前先核",至今无交付物记录);
 2. **容器内 `cluster.conf` 必须含 8 个钉子(值要新的 1.35.8 线)** —— 否则 sync §3.2 的 fail-loud 会停在 `k8s_inventory`(有意设计);
 3. **跑 `trim-offline-files.sh` 之前先读本文第五节** —— 它会删 13 个离线 tar;
-4. 离线 tar 按 T13 重出(旧件会被**文件名子串匹配静默接受**,唯 multus/kube-vip 两条 fail-closed)。
+4. ~~离线 tar 按 T13 重出~~ ✅ 2026-09-28 已完成(见 T13 段);~~唯 multus/kube-vip 两条 fail-closed~~ 两条硬门禁均已满足。
 
 ## 三、独立工单(不在本支范围)
 
+0. **2026-09-28 深夜暴露的两类新问题(已修, 见 §T14 之后的"apt 事故"段)**:① 离线 .deb 集与节点已装
+   系统包的**版本漂移**打破 dpkg 依赖(新增模块 `12_node_pkgs` + `tools/node/reconcile-node-packages.sh`
+   解决, 语义 = 交给 apt 求解器"先摘后装");② **容器读的离线件是 `/data/offline-files`(挂载)**,
+   不是仓库 `deployments/offline-files/` ⇒ 两侧曾分叉(`/data` 里新旧混杂), 现已 rsync 对齐;
+   以后改离线件**必须两边同步**。
+
 1. **trim 护栏**:`trim-offline-files.sh` 第①步会删 `kubespray/images/` 下未匹配 PRELOAD 的 tar → 实测 **13 个 DROP** = ceph 组全部 11 个交付 tar + `ubuntu_22.04.tar` + 旧 `nginx_1.27.tar`;而 check-modules ⑤ 只覆盖 k8s-base(`check-image-manifest.sh:149` 跳过其它组)→ **ceph 两侧无护栏**。建议:给 ceph 组补 PRELOAD token,或把 ⑤ 扩到 ceph 组,并让 trim 打印 DROP 清单要求 `--yes`。
-2. **陈旧引用清理**:`docs/api-ha/02-kubespray-native-lb.md:289/311/317/318`、`docs/kube-vip-api-ha.md:629/728/811`、`deployments/offline-files/kubespray/README.md:50/75/91`(其 `:75` 的 tar 名**永远不可能被生成**)、`cluster.conf.example:144` 与 `multus/CUBESTACK.md:45/59` 的 `16_multus` 旧模块号。
+2. **陈旧引用清理**:`docs/api-ha/02-kubespray-native-lb.md:289/311/317/318`、`docs/kube-vip-api-ha.md:629/728/811`、`cluster.conf.example:144` 与 `multus/CUBESTACK.md:45/59` 的 `16_multus` 旧模块号。(`deployments/offline-files/kubespray/README.md:50/75/91` 的 nginx 1.27.4 陈旧引用 **2026-09-28 已随换代修掉**。)
 3. **`.gitignore` 窄化**:第 60 行整目录忽略 `deployments/scripts/tools/tests/` → 现有 5 个套件已跟踪(⑮ 在全新 checkout 不红),但**新增第 6 个套件会被静默忽略**;另 `sync PKG_EOF` 的内嵌 install-packages play 比树内旧(110 vs 157 行)→ 建议:窄化 gitignore + 对齐 PKG_EOF + 给"tar 内容 vs 清单"加一条静态护栏(本链条唯一"看不见"的环节)。
 
 ## 四、裁决记录(Rulings,执行期我替你做的决定;逐条穷举)

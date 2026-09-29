@@ -6,7 +6,10 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: K8S_ENABLED
-# REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp
+# REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs
+#   · node_pkgs(12_node_pkgs.sh): 节点系统包对账 —— 必须在 kubespray 之前(它的 bootstrap_os →
+#     system_packages 遇到 apt 依赖图破损会直接失败; 实测 2026-09-28 libudev1/udev 配对被打断)。
+#     ⚠ 序号 12 > 06 排不到前面 ⇒ 靠这行 REQUIRES 定序(与 kube_vip 当年同一手法)。
 # 说明: 调用 cubestack-offline.sh install; 透传 cluster.conf 中 PRELOAD_IMAGE_PATTERNS
 # ============================================================
 set -euo pipefail
@@ -155,6 +158,18 @@ if [ -n "${METALLB_POOL:-}" ] && [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "metallb
     fi
     unset _FM_IP
 fi
+
+# ⚠ 覆盖安装前置: 检测节点上的**旧集群残留**(跨小版本 / 旧二进制)并(经确认后)自动清除。
+#   不处理的后果(2026-09-28 实测): kubespray 按【升级】处理, 跑 6 分钟后才在 etcd 关卡硬失败 ——
+#   ① etcd 版本闸读的是 **etcd 二进制 --version**(install_host.yml:24)⇒ 只删数据留二进制照样拦;
+#   ② kubeadm 不允许跨小版本(1.32→1.35)。
+#   工具行为: 无残留 → 直接过; 有残留 → 打印将清除什么 → 交互 15s 倒计时 / 非交互必须 --yes
+#   (deploy-cluster.sh --yes 会导出 CUBESTACK_ASSUME_YES=1 透传到这) → 执行 reset → 继续部署。
+_pre_args=()
+[ "${CUBESTACK_ASSUME_YES:-0}" = "1" ] && _pre_args=(--yes)
+"${REPO_ROOT}/deployments/scripts/tools/k8s/reset-old-cluster.sh" "${_pre_args[@]}" \
+    || { err "覆盖安装前置检查未通过(详见上方输出: 有旧集群残留但未确认清除)"; exit 1; }
+unset _pre_args
 
 OFFLINE_SCRIPT="${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
 [ -f "${OFFLINE_SCRIPT}" ] || { err "未找到 ${OFFLINE_SCRIPT}"; exit 1; }

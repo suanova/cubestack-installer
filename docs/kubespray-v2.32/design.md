@@ -36,6 +36,11 @@
 
 **非目标**
 - 不动单写入者契约、不动 D1/D4(kube-vip 不开 LB)、不动 `KUBE_VIP_CP_DETECT=true` 的既有选择。
+
+> ⚠ **2026-09-28 追注(收编)**:本条已被[收编](收编说明见 `../api-ha/07-kube-vip-upstream-assessment.md`)**取代** ——
+> 静态 Pod 清单改由 kubespray 自己渲染(`addons.yml` 的 `kube_vip_enabled` 跟随 `KUBE_VIP_ENABLED`),
+> 自持渲染器与"恒 false 的单一写入者契约"已删除;D1/D4(`services_enabled=false` / `lb_enable=false`)不变。
+> 下文 §176 的渲染器条目、`plan.md:20/36` 的"不改"清单同理作废(以收编评估篇为准)。
 - 不做现有集群的 in-place 编排升级(它们由"下次全量部署"自然升级,见 §9 风险)。
 - 不给 LVP/NFD 写自研模块或 verify 模块(它们的能力完全来自上游 role)。
 

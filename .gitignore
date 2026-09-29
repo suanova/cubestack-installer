@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 .venv/
+# kubespray 离线 wheel 缓存(裸机路径用: ensure_venv 在无预装 ansible 时从它离线安装;
+# 出自 kubespray 树的 requirements.txt, ~百 MB 级, 不入库 —— 用 tools 重新产出)
+.venv_wheels/
 .pytest_cache/
 userhub.db
 
@@ -83,9 +86,16 @@ deployments/kubespray/kubespray/.gitignore
 deployments/kubespray/kubespray/.gitlab-ci
 deployments/kubespray/kubespray/.gitlab-ci.yml
 deployments/kubespray/kubespray/.gitmodules
+# kubespray 离线下载脚本(contrib/offline/generate_list.sh 等)的**运行产物**目录:
+#   files.list / images.list / url_dest.map + 两个 .template —— 按当前树重新生成即可,
+#   且它属于"换树时被整体替换"的树内运行时数据 ⇒ 不入库(2026-09-28 实测整目录未跟踪)。
+#   ⚠ 写在这里(仓库根)而不是树内 .gitignore: 树内那份会被换树替换掉, 本行不会。
+deployments/kubespray/kubespray/contrib/offline/temp/
 
 # 部署引擎在宿主机生成的临时拷贝(按 ssh 目标命名)
 /deployments/*@*/
 cluster.conf.backup
 # Claude Code 本机权限白名单(含本机路径/命令, 不入库)
 .claude/settings.local.json
+# Claude Code 官方文档转储(排查本机 TUI 问题时整站抓的 ~450KB; 非本仓库内容, 不入库)
+/settings-reference.md

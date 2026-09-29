@@ -125,6 +125,12 @@ CERT_MANAGER_ENABLED="${CERT_MANAGER_ENABLED:-false}"   # cert-manager(证书签
 GATEWAY_API_ENABLED="${GATEWAY_API_ENABLED:-false}"     # Gateway API CRDs
 LOCAL_VOLUME_PROVISIONER_ENABLED="${LOCAL_VOLUME_PROVISIONER_ENABLED:-false}" # kubespray addon: 本地卷静态供给(2.5.0); 默认关, 需要时置 true
 NFD_ENABLED="${NFD_ENABLED:-false}"                     # kubespray addon: node-feature-discovery(0.19.0); 默认关, 需要时置 true
+CONTAINERD_CONFIG_VERSION="${CONTAINERD_CONFIG_VERSION:-3}"  # containerd 配置版本(写进 inventory, 覆盖树内默认):
+                                                        #   3 = 默认。沐曦 GPU operator 的 container-runtime 组件只支持 ≤3
+                                                        #       (v2.32 把 containerd 升到 2.3.5 后树内默认变 4 ⇒ 该组件 CrashLoop:
+                                                        #        "config version 4 is not support")。
+                                                        #   4 = containerd 2.x 上游默认; **待沐曦包支持 containerd 2.x 后可切**。
+                                                        #   ⚠ 只接受 3 或 4; 未设/留空一律按 3 处理(留空静默回落 4 会让沐曦组件崩, 故不设该模式)。
 
 # ---- 阶段三、集群基础设施 ----
 REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"               # 集群内置 Registry(默认部署; 0=不部署 addon/节点信任, 见 3.2)
@@ -626,7 +632,7 @@ KUBE_VIP_VERSION="${KUBE_VIP_VERSION:-v1.0.3}"           # ⚠ 必须与 kubespr
                                                         #     只在集群就绪后由模块落位(见 docs/kube-vip-api-ha.md 第 18 节)
 
 REGISTRY_IMAGE_TAG="${REGISTRY_IMAGE_TAG:-2.8.1}"        # docker.io/library/registry
-LOCAL_PATH_VERSION="${LOCAL_PATH_VERSION:-v0.0.24}"      # rancher/local-path-provisioner
+LOCAL_PATH_VERSION="${LOCAL_PATH_VERSION:-v0.0.37}"      # rancher/local-path-provisioner(与 kubespray 树 download.yml:302 同值; 2026-09-28 随 v2.32 换代从 v0.0.24 更新)
 # kubespray addon 版本(须与上游 kubespray_defaults/defaults/main/download.yml 同值; 开关默认关;
 # 打开开关前需先把这两个镜像登记进 images.manifest 并走离线同步, 否则离线集群拉不到)
 LOCAL_VOLUME_PROVISIONER_VERSION="${LOCAL_VOLUME_PROVISIONER_VERSION:-2.5.0}"

@@ -33,6 +33,28 @@
   when:
     - inventory_hostname == groups['kube_control_plane'][0]
 
+- name: MetalLB | Ensure memberlist secret exists (上游 v2.32 模板只引用不创建)
+  # ★ 2026-09-28 实测(全新安装): kubespray v2.32 的 metallb.yaml.j2 **只引用** memberlist 这个 Secret
+  #   (speaker 的 METALLB_ML_SECRET_KEY env + 卷挂载), 而模板与角色任务**都没有创建它** ⇒
+  #   speaker 全部 `CreateContainerConfigError: secret "memberlist" not found`
+  #   ⇒ metallb 的 L2/L3 通告永远起不来(池子建了也分不到 VIP)。
+  # ★ 位置(2026-09-28 二次实机被咬, 别再往前挪): 必须排在 "Install and configure MetalLB" **之后**
+  #   —— `metallb-system` 命名空间正是那条 apply 创建的(清单首个对象就是 Namespace)。
+  #   插在 apply 之前时: 上一轮能过只是侥幸(命名空间已被更早的一轮建过), **全新集群必失败**:
+  #   `error: failed to create secret namespaces "metallb-system" not found`(22:11 中断点)。
+  #   排在 apply 之后: speaker Pod 可能先报几秒 CreateContainerConfigError, 拿到 Secret 后自愈, 无需干预。
+  #   幂等: 已存在则不动; 不存在则用随机 key 创建(与 metallb 官方 manifest 的做法一致)。
+  shell: |
+    set -e
+    if ! {{ bin_dir }}/kubectl -n {{ metallb_namespace }} get secret memberlist >/dev/null 2>&1; then
+      {{ bin_dir }}/kubectl -n {{ metallb_namespace }} create secret generic memberlist \
+        --from-literal=secretkey="$(openssl rand -base64 128)"
+    fi
+  changed_when: false
+  become: true
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+
 - name: Kubernetes Apps | Wait for MetalLB controller to be running
   command: "{{ bin_dir }}/kubectl rollout status -n {{ metallb_namespace }} deployment -l app=metallb,component=controller --timeout=2m"
   become: true
