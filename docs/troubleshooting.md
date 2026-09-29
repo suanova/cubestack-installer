@@ -685,10 +685,16 @@ kubectl -n kube-system rollout restart daemonset/kube-proxy
 
 ---
 
-### 11. kube-vip 的三个"以为收敛了其实没有":关开关不清理 / 每轮白重启两次 / 全新集群部署中断
+### 11. kube-vip 的几处"以为收敛了其实没有":关开关不清理 / 每轮白重启两次 / 全新集群部署中断 / 关闭态仍扫 VIP / 两套集群抢同一 VIP
 
-三个问题的根因相邻(都是"目标状态与实际状态不一致,但没有任何东西去发现它"),
-于 2026-09-22 一并修复。设计说明见 `docs/kube-vip-api-ha.md` 第 18 节。
+前三个问题的根因相邻(都是"目标状态与实际状态不一致,但没有任何东西去发现它"),
+于 2026-09-22 一并修复;11.4 / 11.5 是后来追加的两条。设计说明见 `docs/kube-vip-api-ha.md` 第 18 节。
+
+> 🔁 **2026-09-28 收编**: **11.2 的"解法"已反转** —— 静态 Pod 清单改由 **kubespray 自己**渲染
+> (`addons.yml` 的 `kube_vip_enabled` **跟随** `KUBE_VIP_ENABLED`),自持渲染器已删除。
+> 也就是说: 双写者问题依旧消除,但消除的方向从"关掉上游"改成"**关掉我们自己**"。
+> 11.1 / 11.3 / 11.4 的结论**不受影响**(开关语义、清理路径、定序、VIP 推导都还在)。
+> 详见 `docs/api-ha/07-kube-vip-upstream-assessment.md` 与 `docs/kube-vip-api-ha.md` §19。
 
 #### 11.1 `KUBE_VIP_ENABLED=false` 重跑后,manifest 还在、VIP 还被持有
 
@@ -755,23 +761,31 @@ master02/03 **逐字节一致**,master01 **只差上面那一行**。也就是�
 `kube_vip_admin_conf`**;`kube_vip_cidr`/`dns_mode`/`leasename`/`leaseduration` 等
 (`node/defaults/main.yml:60-84`)与渲染器硬编码的那组值逐条相同。
 
-**解法(单一写入者)**
-`addons.yml` 里的 `kube_vip_enabled` **恒写 `false`** —— 含义不是"kube-vip 没启用",
-而是"不要让 kubespray 写这个静态 Pod"。写这个值的是 `lib-common.sh#update_kube_vip_addons_yml`。
+**解法(2026-09-28 收编后: 写入权交还上游)**
+`addons.yml` 里的 `kube_vip_enabled` 现在**跟随 `KUBE_VIP_ENABLED`**,静态 Pod 由 **kubespray 自己**
+在 `Install Kubernetes nodes` 里渲染 —— 即把另一方(我们自己)彻底关掉,而不是把上游关掉。
+写这个值的是 `lib-common.sh#update_kube_vip_addons_yml`(写入后回读校验)。
 
-**不要**试图去复刻 kubespray 的 `super-admin.conf` 判定来"对齐渲染" —— 那是**节点状态相关的
-启发式**,复刻它等于把模块重新绑回 inventory 状态机(而模块的立身之本正是不依赖它),
-且上游一次改动就会静默复发。
+那份 `super-admin.conf` 分叉**本身是逐节点稳定的**(按 `inventory_hostname == kube_control_plane[0]`
+判定,同一节点每次渲染同值),双写者消失后它不再造成重启 —— 这正是可以撤掉契约的理由。
+
+> **历史(2026-09-22 ~ 09-28)**: 当年用的是**反向**解法 —— `kube_vip_enabled` **恒写 `false`**
+> ("不要让 kubespray 写这个静态 Pod"),由自持渲染器独占。它同样消除了双写者,代价是维护
+> ~430 行渲染器;收编后契约与渲染器一起删除(见 `docs/kube-vip-api-ha.md` §19)。
+> 上面那句"**不要**复刻 kubespray 的 `super-admin.conf` 判定来对齐渲染"**仍然成立** ——
+> 那正是收编要避免的事: 渲染是上游的职责,我们不再对齐它。
 
 **相关命令**
 ```bash
 # 看 master01 的 manifest 到底用的是哪个 kubeconfig
+# 收编后的**正确**结果: 首台 master = super-admin.conf, 其余 = admin.conf（08 的 ①b 哨兵就查这个）
 ssh <master01> "sudo grep -A1 'hostPath' /etc/kubernetes/manifests/kube-vip.yml"
 
-# 确认单一写入者契约成立(应为 false)
+# 收编后: kube_vip_enabled 应**跟随** cluster.conf 的 KUBE_VIP_ENABLED(不再恒 false)
 grep '^kube_vip_enabled' deployments/kubespray/inventory/*/group_vars/k8s_cluster/addons.yml
+grep '^KUBE_VIP_ENABLED' deployments/config/cluster.conf
 
-# 密码: 全量运行前后各取一次 hash, 应当全程不变
+# 幂等: 全量运行前后各取一次 hash, 应当全程不变
 ssh <master01> "sudo sha256sum /etc/kubernetes/manifests/kube-vip.yml"
 ```
 
@@ -873,6 +887,36 @@ KUBESPRAY_INV_DIR=<inventory 副本> CLUSTER_CONF=<conf 副本> \
   bash deployments/scripts/tools/k8s/sync-kubespray-config.sh
 ```
 
+
+#### 11.5 `kubectl` 时好时坏地报 `x509: certificate signed by unknown authority` —— 两套集群抢同一个 API VIP(2026-09-29 实机)
+
+**症状**
+同一条 `kubectl` 命令连跑三次: **成功 / 失败 / 失败**; 失败时报
+`x509: certificate signed by unknown authority`。
+⚠ 关键指纹: 部署脚本里**前一行**的 `curl -sk https://<域名>:6443/healthz` 还说"API 可达",
+**后一行** kubectl 就失败 —— 因为 `-k` 跳过了证书校验 ⇒ **病灶在 TLS 层, 不是网络层**。
+
+**根因(实机取证, 不是代码缺陷)**
+同网段**两套集群共用同一个 `K8S_API_VIP`** —— 两边的 kube-vip 都持有该地址(各自 ARP 通告),
+到 `VIP:6443` 的流量**随机落到任一套集群的 apiserver**。两套集群 CA 不同 ⇒ 落在"另一套"上时,
+客户端拿到的服务端证书不由本集群 CA 签发。
+
+⚠ 这种情况**覆盖安装治不了**: 覆盖安装只清 inventory 内节点的旧集群残留, **另一套集群的节点不在其中**。
+
+**判据(自包含, 不需要本机有集群 pki)**
+连取 4 次同一地址上的服务端证书指纹, 出现**多个不同**指纹即命中
+(命令块见 `docs/api-ha/05-operations.md` §3"这个 VIP 是不是被另一套集群共用")。
+旁证: `ssh <master> "ip -4 -o addr show | grep '<VIP>'"` 在**两套**集群里会各有一台节点命中。
+
+**处置(二选一, 都要人工介入)**
+① 给两套集群分配不同的 `K8S_API_VIP` + `METALLB_POOL`(`cluster.conf`) —— ⚠ **改 VIP 后必须重装集群**:
+   证书 SAN 在 `kubeadm init` 时固化, 现有集群的 SAN 只含旧 VIP;
+② 先拆除另一套集群(用它自己的拆除入口, **不是**本仓库的 `--fresh`)。
+
+**代码侧硬化(已落)**
+`lib-common.sh#sync_kubeconfig` 的末校验改为: 失败时连取 4 次指纹, `≥2` 种即直接报
+"该地址被多个 apiserver 共用"并打印上面两条处置; 指纹稳定则提示"非多集群抢 VIP, 去 master 上核对集群健康"。
+`cluster.conf.example` 的 `K8S_API_VIP` 与 `METALLB_POOL` 注释都补了同款警告。
 
 ### 12. 【2026-09-23 事故】部署跑 22 分钟后 `kubeadm join` 报 `[ERROR Port-10250]: Port 10250 is in use` —— 节点上的 RKE2 agent 占着端口, 而部署前清理对它"免疫"
 

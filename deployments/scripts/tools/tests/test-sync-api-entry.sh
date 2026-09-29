@@ -58,6 +58,10 @@ kube_service_addresses: 10.233.0.0/18
 kube_pods_subnet: 10.233.64.0/18
 nodelocaldns_ip: 169.254.25.10
 kube_network_plugin: calico
+# 2026-09-28 补: 真库存里本来就有这一行(k8s-cluster.yml:124);sync 在 KUBE_VIP_ENABLED=true 时
+# 会**确保**它为 true 并在此行缺失时 fail-loud(kubespray 的 kube-vip 任务在 ipvs 集群上硬要求它)。
+# 桩里缺它 ⇒ 所有 KUBE_VIP_ENABLED=true 的用例都会因这条前置而失败。
+kube_proxy_strict_arp: true
 EOF
     cat > "${d}/group_vars/k8s_cluster/addons.yml" <<'EOF'
 # Kube VIP
@@ -83,6 +87,20 @@ mk_conf() {  # mk_conf <文件> <API_LOCAL_LB_ENABLED true|false> [追加的配�
         echo 'K8S_API_VIP=10.0.0.211'
         echo "API_LOCAL_LB_ENABLED=${local_lb}"
         echo 'METALLB_POOL="10.244.2.1-10.244.2.254"'
+        # 10 个 k8s 基座版本钉子:sync 的"写 k8s-versions.yml"一步**缺任一个即 err 退出**,
+        # 而本测试断言 sync 的退出码(用例 ⑤)⇒ 不补这组钉子会恒红。
+        # ⚠ 2026-09-28 补:此前这里没有钉子, 例 ⑤ 已静默失败一段时间(本测试当时不在 check-modules ⑮
+        #   的调度清单里 ⇒ 没人跑到)。现已在 ⑮ 挂了调度, 这类"写了没人跑"的回归不会再无声无息。
+        echo 'K8S_VERSION=v1.35.8'
+        echo 'COREDNS_VERSION=v1.12.4'
+        echo 'PAUSE_VERSION=3.10.1'
+        echo 'ETCD_VERSION=v3.6.14'
+        echo 'CALICO_VERSION=v3.31.7'
+        echo 'METRICS_SERVER_VERSION=v0.9.0'
+        echo 'CPA_VERSION=v1.10.3'
+        echo 'DNS_NODE_CACHE_VERSION=1.25.0'
+        echo 'LOCAL_VOLUME_PROVISIONER_VERSION=2.5.0'
+        echo 'NFD_VERSION=0.19.0'
         printf '%s\n' "$@"
     } > "${f}"
 }

@@ -265,6 +265,20 @@ if [ -f "${CLUSTER_YML}" ]; then
     update_advertise_address_yml "${CLUSTER_YML}" || exit 1
     ok "已同步 kube_apiserver_extra_args.advertise-address → 按节点各写各的(kube_apiserver_address)"
 
+    # kube-vip(ARP 模式)在 ipvs 集群上的**硬前置**: kubespray 的 kube-vip 任务会 fail
+    # (roles/kubernetes/node/tasks/loadbalancer/kube-vip.yml:1-8: "kube-vip require
+    #  kube_proxy_strict_arp = true")。2026-09-28 收编后静态 Pod 由 kubespray 渲染 ⇒ 这道检查
+    # 会真的生效(此前自持渲染器绕过了它)。树默认 false, 故启用 kube-vip 时必须确保它为 true。
+    if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
+        if grep -q '^kube_proxy_strict_arp:' "${CLUSTER_YML}"; then
+            sed -i -E 's|^kube_proxy_strict_arp:.*|kube_proxy_strict_arp: true|' "${CLUSTER_YML}"
+            ok "已确保 kube_proxy_strict_arp=true(kube-vip ARP 模式在 ipvs 集群上的硬前置)"
+        else
+            err "启用 kube-vip 需要 ${CLUSTER_YML} 里显式 kube_proxy_strict_arp: true(kubespray 树默认 false, 它会硬失败)"
+            exit 1
+        fi
+    fi
+
     # 集群内部网络 CIDR(从 cluster.conf 读取, 不硬编码在 group_vars 中)
     sed -i -E "s|^kube_service_addresses:[[:space:]]*[0-9.]+/[0-9]+|kube_service_addresses: ${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18}|" "${CLUSTER_YML}"
     sed -i -E "s|^kube_pods_subnet:[[:space:]]*[0-9.]+/[0-9]+|kube_pods_subnet: ${KUBE_PODS_SUBNET:-10.233.64.0/18}|" "${CLUSTER_YML}"

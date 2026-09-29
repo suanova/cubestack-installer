@@ -35,12 +35,19 @@ API_LOCAL_LB_TYPE="${API_LOCAL_LB_TYPE:-nginx}"         # nginx | haproxy
 
 # ── 管理/外部侧：三选一（新 + 既有）──
 API_EXTERNAL_ADDR="${API_EXTERNAL_ADDR:-}"              # 环境已有 LB/VIP 地址（新）
-KUBE_VIP_ENABLED="${KUBE_VIP_ENABLED:-true}"            # kube-vip 自持 VIP（既有）
+KUBE_VIP_ENABLED="${KUBE_VIP_ENABLED:-false}"           # ⚠ 现版默认 **false**（2026-09-24 翻转）；本方案推荐组合要显式置 true
 K8S_API_VIP="${K8S_API_VIP:-}"                          # 空=自动推导（既有）
 
 # ── 既有、本方案调整语义 ──
 KUBE_VIP_LOCAL_PROXY="${KUBE_VIP_LOCAL_PROXY:-false}"   # 兼容别名 → API_LOCAL_LB_ENABLED
 ```
+
+> ⚠ **默认值以 `deployments/config/cluster.conf.example` 为准**（2026-09-29 逐字核对过）。
+> 本节的取值曾写作 `KUBE_VIP_ENABLED:-true`（= 本方案推荐的"节点侧 + 外部侧全 HA"组合），
+> 但该开关 **2026-09-24 已翻转为默认 `false`**（理由见 [../kube-vip-api-ha.md](../kube-vip-api-ha.md) 决策 D2：
+> 实际用法长期停在阶段一，默认开只是让每轮部署多跑一遍昂贵且可能硬失败的 VIP 推导）。
+> ⇒ 想拿到本方案推荐的全高可用组合，**必须显式置 `KUBE_VIP_ENABLED=true`**（D9 的"默认即最优"
+> 自 2026-09-24 起只对节点侧成立）。
 
 ### 2.2 模式判定（`api_entry_mode()`）
 
@@ -106,8 +113,8 @@ API_EXTERNAL_ADDR 非空 ────────────────→ ext
 | 3 | `deployments/scripts/tools/k8s/sync-kubespray-config.sh` | 入口的**唯一写入者**：按模式写/摘 `loadbalancer_apiserver`；写 `loadbalancer_apiserver_localhost` + `_type`；入口地址进 `supplementary_addresses_in_ssl_keys`；`kube_vip_address` 继续写（喂 SAN） | `API_LOCAL_LB_ENABLED=true` ⇒ **必须删掉** `loadbalancer_apiserver` 块，否则假修复 |
 | 4 | `deployments/scripts/modules/02_k8s/10_api_local_lb.sh`（**新**） | `TOGGLE: API_LOCAL_LB_ENABLED`、`DEFAULT: 1`、`REQUIRES: k8s_deploy`。启用态：断言各 worker 静态 Pod + `127.0.0.1:6443` + `kubelet.conf` server，并**收敛节点 `/etc/hosts` 域名行**；关闭态：**清理 `nginx-proxy.yml`**（上游不删）+ 收敛 hosts | `DEFAULT: 1` 与 kube-vip 模块同因：关掉开关时必须有东西去清理 |
 | 5 | `deployments/scripts/modules/02_k8s/11_verify_api_ha.sh`（**新**） | 断言 ①–⑦（**七项**：本地代理容器 / kubelet.conf / hosts 域名行 / Service 端点 / 证书 SAN）+ 黑洞演练（演练步骤见 [05-operations.md](05-operations.md) §6） | 无 TOGGLE，仅 `--steps` 显式触发（同 `08_verify_kube_vip.sh` 的理由） |
-| 6 | `deployments/config/images.manifest`<br>`cluster.conf` 预加载<br>`deployments/offline-files/kubespray/` | 登记 `docker.io/library/nginx:1.27.4-alpine`；`PRELOAD_IMAGE_PATTERNS` 加 `library_nginx`；tar 放 **kubespray 镜像集**（不要放 `offline-files/nginx/`，那里文件名被 `ensure_registry_nginx` 锁死） | 不补 = 静态 Pod `ImagePullBackOff` |
-| 7 | `deployments/scripts/tools/check-modules.sh` | 新增第 ⑫ 项：开关组合合法性 + `all.yml` 收敛状态断言 | 与既有 ⑪ 并列 |
+| 6 | `deployments/config/images.manifest`<br>`cluster.conf` 预加载<br>`deployments/offline-files/kubespray/` | 登记 `docker.io/library/nginx:1.30.1-alpine`；`PRELOAD_IMAGE_PATTERNS` 加 `library_nginx`；tar 放 **kubespray 镜像集**（不要放 `offline-files/nginx/`，那里文件名被 `ensure_registry_nginx` 锁死） | 不补 = 静态 Pod `ImagePullBackOff` |
+| 7 | `deployments/scripts/tools/check-modules.sh` | 新增第 ⑬ 项：开关组合合法性 + `all.yml` 收敛状态断言 | 与既有 ⑪ 并列 |
 | 8 | `deployments/kubespray/cubestack-offline.sh` | `update_loadbalancer_all_yml()` 跟随新模式（不再无条件写 address） | 它是 `all.yml` 的**第二个写入者**，必须同步 |
 | 9 | `deployments/scripts/tools/lb/setup-api-expose.sh` | DNAT 加白名单：入口为 VIP/外部地址时**不得**加 DNAT（当前会误加并劫持到首 master） | 现状 `:85-90` 判据是 `API_IP != FIRST_MASTER`，VIP 会命中等号右边 |
 | 10 | `deployments/scripts/modules/02_k8s/07_k8s_scale.sh` | 新节点 `/etc/hosts` 写入口地址（跟随 `api_entry_addr()`） | 与 `01_env` 的 hosts 写入保持一致 |
@@ -115,11 +122,18 @@ API_EXTERNAL_ADDR 非空 ────────────────→ ext
 
 ### 4.1 不变的部分（明确边界）
 
-- **`09_kube_vip.sh` 与两阶段流程不动** —— 它在 `vip` 模式下照旧工作；只是受影响面从"全集群"缩小到"外部/管理客户端"
-- **`08_verify_kube_vip.sh` 不动**
+- **`09_kube_vip.sh` 瘦身(2026-09-28 收编),两阶段流程保留** —— 静态 Pod 清单改由 kubespray 自己渲染
+  (见 [07-kube-vip-upstream-assessment.md](07-kube-vip-upstream-assessment.md)),该模块只留 VIP 推导、
+  变量校验、收敛核验与关闭清理；两阶段在 `vip` 模式下照旧工作,受影响面从"全集群"缩小到"外部/管理客户端"
+- **`08_verify_kube_vip.sh`** 保留,并加一条"双写者回归"哨兵(清单 hostPath 应为首台 `super-admin.conf`、其余 `admin.conf`)
 - **`01_env/05/06`（HAProxy/Keepalived）不动** —— 保留但不推荐，注释里补一句指向本组文档
 - **Calico / kube-proxy / MetalLB / Ceph 全部不动**
 - **部署机/管理机的 `/etc/hosts` 仍解析到第一台 master —— 本方案未消除，属已知限制/后续项**。
+  ⚠ **2026-09-28 细分**：这句说的是**部署宿主机**自己那份 `/etc/hosts`（`deploy` 不碰它；要跟记得手工跑
+  `tools/node/sync-hosts.sh`）。**部署脚本运行环境**（部署容器）里那份已随同日修复**跟随入口** ——
+  `sync_kubeconfig` 原先写死 `API_IP`（节点 IP 语义）⇒ 容器里域名永远指向首 master，与
+  `setup-api-expose.sh` 用的 `api_entry_ip()` 不一致；现改为写 `api_entry_ip()`（VIP 已绑 = VIP，否则首 master）。
+  ⚠ 容器与宿主的 `/etc/hosts` 是**两份不同的文件**（`md5sum` 不同），排查时先确认在看哪一份。
   节点侧（模块 10 收敛）与外部侧入口都跟随 `api_entry_addr()`，但**运行部署脚本的这台机器自己**
   的域名解析仍写 `API_IP`（= 默认第一台 master），涉及 6 个写入点：
   `lib-common.sh` 的 `sync_kubeconfig()`（把 kubeconfig 的 server 改写成域名，而域名靠 `/etc/hosts` 解析）、
@@ -141,7 +155,7 @@ API_EXTERNAL_ADDR 非空 ────────────────→ ext
 
 ```bash
 # 目标镜像（LB 本地代理用）
-#   docker.io/library/nginx:1.27.4-alpine      （API_LOCAL_LB_TYPE=nginx）
+#   docker.io/library/nginx:1.30.1-alpine      （API_LOCAL_LB_TYPE=nginx）
 #   docker.io/library/haproxy:3.1.3-alpine     （API_LOCAL_LB_TYPE=haproxy，可选）
 #
 # 本环境无法直连 docker.io，走既有通道：
@@ -157,10 +171,10 @@ API_EXTERNAL_ADDR 非空 ────────────────→ ext
 ### S1 · 配置
 
 ```bash
-# cluster.conf（默认值即推荐组合，通常无需改动）
-API_LOCAL_LB_ENABLED=true        # 节点侧本地代理
+# cluster.conf（本方案推荐的"节点侧 + 外部侧全 HA"组合；⚠ 见下）
+API_LOCAL_LB_ENABLED=true        # 节点侧本地代理（现版默认即 true，可省）
 API_LOCAL_LB_TYPE=nginx
-KUBE_VIP_ENABLED=true            # 外部/管理侧 VIP（无 VIP 环境见下）
+KUBE_VIP_ENABLED=true            # 外部/管理侧 VIP（⚠ 现版默认 false，必须**显式**写；无 VIP 环境见下）
 API_EXTERNAL_ADDR=               # 环境已有 LB 时填这里，并把 KUBE_VIP_ENABLED 置 false
 K8S_API_VIP=                     # 留空=自动推导（各 master 从 .210 起探测空闲地址）
 ```
@@ -244,7 +258,7 @@ KUBE_VIP_ENABLED=false           # 不装 kube-vip；节点侧 HA 不受影响
 | R5 | 路线 2 下 `controlPlaneEndpoint` 变首 master IP | 仅影响 kubeadm 相关操作（join/upgrade）的默认目标 | 接受；文档明示 |
 | R6 | 上游对 nginx-proxy 无活跃 CI 覆盖（同 kube-vip） | 无回归保护 | 靠 `11_verify_api_ha.sh` + 演练 |
 | R7 | 离线镜像漏补 | 静态 Pod `ImagePullBackOff`（**响亮**，非静默） | S0 + `check-modules` 断言 |
-| R8 | 上游 `loadbalancer_apiserver_localhost` 与 `loadbalancer_apiserver` 的派生关系依赖"不定义后者" | 若将来有人手工定义了它，本地代理会静默失效 | `check-modules.sh` 第 ⑫ 项静态断言 + verify 模块实测 `kubelet.conf` |
+| R8 | 上游 `loadbalancer_apiserver_localhost` 与 `loadbalancer_apiserver` 的派生关系依赖"不定义后者" | 若将来有人手工定义了它，本地代理会静默失效 | `check-modules.sh` 第 ⑬ 项静态断言 + verify 模块实测 `kubelet.conf` |
 
 ---
 

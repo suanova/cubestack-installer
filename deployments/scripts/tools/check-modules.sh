@@ -13,11 +13,12 @@
 #   ⑧ 文件序号 NN_ 与目录序号在发现结果中不重名冲突
 #   ⑨ tools/ 与 deployments/kubespray/ 顶格脚本 bash -n 通过
 #   ⑩ 安装 helm chart 的模块必须有 vendored 离线副本
-#   ⑪ kube-vip: 单一写入者契约(kube_vip_enabled 恒 false)+ 启用时取值自洽(address / 不与 MetalLB 抢地址)
+#   ⑪ kube-vip: 写入者契约(kube_vip_enabled 必须**跟随** KUBE_VIP_ENABLED —— 2026-09-28 收编后静态 Pod
+#      改由 kubespray 渲染)+ 启用时取值自洽(address / 不与 MetalLB 抢地址)
 #   ⑬ API 入口: all.yml 本地代理语义自洽(localhost: true ⇒ loadbalancer_apiserver 块必须被注释)
 #   ⑭ 离线预加载: PRELOAD_IMAGE_PATTERNS 四处副本逐字节一致(漂移会被备料静默 trim 掉)
 #   ⑮ kubespray 补丁在位(cubestack-patch-apply.sh --check 全绿; 换树后没重放会静默降级)
-#      + 两个离线回归套件(tests/test-kubespray-patches.sh、test-render-kube-vip.sh)实跑通过
+#      + 两个离线回归套件(tests/test-kubespray-patches.sh、test-update-kube-vip-addons.sh)实跑通过
 #   ⑯ k8s 基座钉子闭环(三件):
 #      A) 钉子 vs 上游树内表值 —— cluster.conf 的 K8S/CALICO/ETCD/COREDNS/PAUSE/DNS_NODE_CACHE/
 #         METRICS_SERVER/CPA/LOCAL_VOLUME_PROVISIONER/NFD + API_LB_NGINX_IMAGE_TAG 必须与
@@ -282,21 +283,33 @@ case "${API_LOCAL_LB_RAW}" in
 esac
 _LOCAL_LB_TXT="关闭"; [ "${_LOCAL_LB}" = "1" ] && _LOCAL_LB_TXT="开启"
 
-# ⑪-A 单一写入者契约 —— **与 KUBE_VIP_ENABLED 无关, 恒成立**
-#   addons.yml 的 kube_vip_enabled 控制的是"kubespray 要不要写这个静态 Pod"; 而静态 Pod 归
-#   02_k8s/09_kube_vip.sh 独占, 所以它必须恒为 false。若为 true: kubespray 会回来写同一个文件,
-#   且对**首台** master 用 super-admin.conf(roles/kubernetes/node/tasks/loadbalancer/kube-vip.yml:26-31),
-#   与本模块渲染的 admin.conf 不同 → 每次全量运行该文件被改写两次, kube-vip pod 跟着重启两次。
-#   注: 纯 checkout(CI)里这个键就是 kubespray 模板里的 false, 故本条在 CI 上同样成立、不会误报。
+# ⑪-A kube-vip 写入者契约(2026-09-28 收编后)—— addons.yml 的 kube_vip_enabled 必须**跟随** KUBE_VIP_ENABLED:
+#   静态 Pod 改由 kubespray 渲染(roles/kubernetes/node/tasks/loadbalancer/kube-vip.yml), 我们的
+#   02_k8s/09_kube_vip.sh 只负责 VIP 推导/变量校验/收敛核验/关闭清理。两者不一致的后果:
+#   开关开着而 inventory 里是 false → 静态 Pod 永不出现; 开关关了而 inventory 里是 true →
+#   kubespray 每轮把清单写回来, 我们的清理白做。
+#   历史: 2026-09-22~09-28 此处曾是"恒 false"的单一写入者契约(自持渲染器已删除, 见 docs/api-ha/07)。
+#   注: 纯 checkout(CI)里该键来自 kubespray 模板(false), 与 cluster.conf.example 的默认 false 一致 ⇒ 不误报。
 if [ ! -f "${KV_ADDONS}" ]; then
-    warn "  未找到 ${KV_ADDONS}, 跳过 kube-vip 单一写入者契约校验(未生成 inventory?)"
+    warn "  未找到 ${KV_ADDONS}, 跳过 kube-vip 契约校验(未生成 inventory?)"
 else
     kv_en="$(awk -F': *' '/^kube_vip_enabled:/{print $2; exit}' "${KV_ADDONS}")"
     kv_svc="$(awk -F': *' '/^kube_vip_services_enabled:/{print $2; exit}' "${KV_ADDONS}")"
-    if [ "${kv_en}" = "true" ]; then
-        ck_fail "addons.yml 的 kube_vip_enabled=true —— 违反单一写入者契约(kubespray 会与本模块抢写同一个 manifest)" \
-            "      → 静态 Pod 由 02_k8s/09_kube_vip.sh 独占; 置 false 后重跑 tools/k8s/sync-kubespray-config.sh" \
-            "      → 详见 docs/kube-vip-api-ha.md 第 18 节"
+    kv_addr_chk="$(awk -F': *' '/^kube_vip_address:/{print $2; exit}' "${KV_ADDONS}")"
+    _kv_want="${KUBE_VIP_ENABLED:-false}"
+    # ★ 门禁看**实际同步过没有**, 不看配置开关(与 ⑪-B 同一哲学): kube_vip_address 是 sync 在
+    #   部署流程里才写的 ⇒ 它为空就意味着"这份 inventory 还没按当前 cluster.conf 同步过",
+    #   此时开关与存量值不一致属"待同步"而非"写错了"。仅在**已同步**(address 非空)时才硬判 ——
+    #   那时两者还不一致才是真 bug(kubespray 每轮把清单写回/或永不渲染)。
+    #   注: 仓库里那份 tracked 示例 inventory(10.244.x)与本机未入库的 cluster.conf 常处于此形态。
+    if [ -n "${kv_en}" ] && [ "${kv_en}" != "${_kv_want}" ]; then
+        if [ -z "${kv_addr_chk}" ]; then
+            say "  ℹ️ inventory 的 kube_vip_enabled=${kv_en} ≠ cluster.conf 的 ${_kv_want}: 该 inventory 尚未同步(kube_vip_address 为空)⇒ 视为待同步, 不判失败"
+        else
+            ck_fail "addons.yml 的 kube_vip_enabled=${kv_en} 与 cluster.conf 的 KUBE_VIP_ENABLED=${_kv_want} 不一致(且 inventory 已同步过)" \
+                "      → 静态 Pod 由 kubespray 按该键渲染: 不一致会得到『开关开着却没有 VIP』或『关掉了清单又被写回』" \
+                "      → 修法: 重跑 tools/k8s/sync-kubespray-config.sh(按 cluster.conf 重写该块); 详见 docs/api-ha/07"
+        fi
     fi
     # 无条件违规项: 与是否部署过无关, 只要写进 inventory 就是错的
     if [ "${kv_svc}" = "true" ]; then
@@ -305,22 +318,20 @@ else
     fi
 fi
 
-# ⑪-C 兜底默认一致性(2026-09-24 增补): 同一个开关的**默认值**散落在多处兜底里 ——
-#   cluster.conf.example(模板) / 09_kube_vip.sh(渲染调用) / lib-common.sh(addons.yml 写入)
-#   / render-kube-vip-manifest.py(CLI 默认)。改默认时漏改一处 → 行为随调用路径漂移
+# ⑪-C 兜底默认一致性(2026-09-24 增补; 2026-09-28 收编后去掉渲染器那处): 同一个开关的**默认值**
+#   散落在多处兜底里 —— cluster.conf.example(模板) / 09_kube_vip.sh(前置校验与清理) /
+#   lib-common.sh(addons.yml 写入)。改默认时漏改一处 → 行为随调用路径漂移
 #   (本仓库实测踩过: 文档与代码不同步; KUBE_VIP_ENABLED 当年也是改了 11 处兜底才一致)。
 #   这里只断言"各处彼此一致", **不写死具体值** —— 将来再翻转也不会误报。
 _cpd="$(grep -rhoE 'KUBE_VIP_CP_DETECT:-[a-z]+' \
         "${CONF_EXAMPLE}" \
         "${REPO_ROOT}/deployments/scripts/modules/02_k8s/09_kube_vip.sh" \
         "${REPO_ROOT}/deployments/scripts/lib-common.sh" 2>/dev/null | sed 's/.*:-//' | sort -u)"
-_cpdr="$(grep -oE '"--cp-detect", default="[a-z]+"' \
-         "${REPO_ROOT}/deployments/scripts/tools/k8s/render-kube-vip-manifest.py" 2>/dev/null | grep -oE '(true|false)' | head -1)"
-if [ -n "${_cpd}" ] && [ "$(printf '%s\n' "${_cpd}" | grep -c .)" = "1" ] && [ "${_cpd}" = "${_cpdr}" ]; then
+if [ -n "${_cpd}" ] && [ "$(printf '%s\n' "${_cpd}" | grep -c .)" = "1" ]; then
     ok "KUBE_VIP_CP_DETECT 各处兜底默认一致(${_cpd})"
 else
-    ck_fail "KUBE_VIP_CP_DETECT 兜底默认不一致: shell 侧=[${_cpd:-未取到}] 渲染器=[${_cpdr:-未取到}]" \
-        "      → 改默认须同时改: cluster.conf.example / 02_k8s/09_kube_vip.sh / lib-common.sh / tools/k8s/render-kube-vip-manifest.py"
+    ck_fail "KUBE_VIP_CP_DETECT 兜底默认不一致: [${_cpd:-未取到}]" \
+        "      → 改默认须同时改: cluster.conf.example / 02_k8s/09_kube_vip.sh / lib-common.sh"
 fi
 
 # ⑪-B 开关**开启**时才有意义的取值自洽(关闭态那些值会连同 VIP 一起经清理路径收敛掉)
@@ -365,7 +376,7 @@ if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
         if [ -n "${kv_addr}" ] && [ -n "${lb_addr}" ] && [ "${kv_addr}" != "${lb_addr}" ]; then
             say "  ℹ️ API 入口(${lb_addr})≠ kube_vip_address(${kv_addr}) —— 阶段一状态(VIP 就位后重跑即切换)"
         fi
-        [ "${FAIL}" = "0" ] && ok "kube-vip 配置自洽(单一写入者契约成立, VIP=${kv_addr:-<未设置>}, 已部署=${KV_DEPLOYED})"
+        [ "${FAIL}" = "0" ] && ok "kube-vip 配置自洽(开关↔inventory 一致, VIP=${kv_addr:-<未设置>}, 已部署=${KV_DEPLOYED})"
     fi
 else
     say "  KUBE_VIP_ENABLED≠true —— 跳过启用态断言(⑪-A 的单一写入者契约不受开关影响, 仍已校验)"
@@ -523,12 +534,17 @@ if [ -x "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" ]; then
 else
     warn "  跳过 ⑮(未找到 cubestack-patch-apply.sh)"
 fi
-# ★ 2026-09-28(评审 I6): 两个离线回归套件此前**无人调度** —— 写了就当"有测试", 但全仓没有任何入口
-#   会跑它们(本仓库没有 CI)→ 回归等于不存在。挂在这里正合适: ⑮ 本就是"补丁层可用的证据", 而这两个
-#   套件正是它的回归(test-kubespray-patches 覆盖重放器三态/退休判定, test-render-kube-vip 覆盖
-#   kube-vip 渲染器的 version() 分支)。两者都只用仓库内 fixture, 不联网、不碰集群, 秒级完成。
+# ★ 2026-09-28(评审 I6): 离线回归套件此前**无人调度** —— 写了就当"有测试", 但全仓没有任何入口
+#   会跑它们(本仓库没有 CI)→ 回归等于不存在。挂在这里正合适: ⑮ 本就是"补丁层可用的证据", 而这些
+#   套件正是它的回归(test-kubespray-patches 覆盖重放器三态/退休判定;
+#   test-update-kube-vip-addons 覆盖 2026-09-28 收编后的开关↔addons.yml 映射与幂等)。
+#   两者都只用仓库内 fixture, 不联网、不碰集群, 秒级完成。
 #   ⚠ 任一失败即 ck_fail(与 ⑮ 主判据同口径): 套件跑不起来 = 没有证据, 不能算通过。
-for _t in test-kubespray-patches.sh test-render-kube-vip.sh; do
+# ★ 2026-09-28: 把 api-ha 线写的三个套件也挂进来 —— 它们此前**从来没被调度过** ⇒ test-sync-api-entry
+#   在 sync 新增"10 个版本钉子"要求后静默变红(用例 ⑤ 断言退出码)而无人发现。这四类回归
+#   (补丁层 / 收编映射 / 入口模式 / 本地代理)现在每轮 check-modules 都会跑到。
+for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
+           test-api-entry-mode.sh test-api-local-lb.sh test-sync-api-entry.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
     if [ ! -f "${_tp}" ]; then
         ck_fail "⑮ 离线套件缺失: ${_tp#${REPO_ROOT}/}(⑮ 的回归证据没了)"

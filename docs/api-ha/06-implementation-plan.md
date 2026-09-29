@@ -26,6 +26,17 @@
 
 ## Task 1: 离线镜像补齐 `nginx:1.27.4-alpine`
 
+> ⚠ **2026-09-28 两处追注(本文件是当时的任务日志, 正文保留原样)**:
+> ① 文中 nginx tag `1.27.4-alpine` 随 kubespray v2.32 换代已改为 **`1.30.1-alpine`**(活文档 02/04 与
+>    `cluster.conf.example` 均已更新);
+> ② 文中 Task 6 写的"第 ⑫ 项"在落地时为 **⑬ 项**(⑫ 被 ceph 磁盘链路回归占用),活文档 04/README 已按 ⑬ 表述。
+>
+> ⚠ **2026-09-29 第三处追注**：下文代码块里的 `KUBE_VIP_ENABLED:-true` 是**当时的兜底默认值**，
+> 该开关 **2026-09-24 已翻转为 `false`**（理由见 [../kube-vip-api-ha.md](../kube-vip-api-ha.md) 决策 D2），
+> 活代码（`lib-common.sh` 的 `api_entry_mode` / `api_entry_validate_config`）用的是 `:-false`。
+> 另：kube-vip 的静态 Pod 清单在 2026-09-28 **收编**后改由 kubespray 渲染（见
+> [07-kube-vip-upstream-assessment.md](07-kube-vip-upstream-assessment.md)），本文件里凡涉及"自持渲染"的描述均已作废。
+
 **Files:**
 - Modify: `deployments/config/cluster.conf.example`（镜像版本节，`NGINX_TAG` 附近）
 - Modify: `deployments/config/cluster.conf`（同节）

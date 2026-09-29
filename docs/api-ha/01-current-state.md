@@ -3,6 +3,15 @@
 > 取证时间：**2026-09-27** · 集群：`mxgpu-3-28/29/31`（control-plane）+ `mxgpu-3-32…36`（worker），共 8 台
 > 取证方式：`kubectl`（部署机）+ `ssh ubuntu@10.66.3.28/29/31/32`（免密 sudo），全程只读
 > 复现命令见本文 [附录](#附录一键复现)
+>
+> 🔁 **后续状态（2026-09-28 起）**：本文是**取证时刻的快照**，它测出的那个单点已被落地消除 ——
+> `docs/api-ha/` 的 ①+② 组合方案已实施（见 [04-decision.md](04-decision.md)），kube-vip 实机生效：
+> `/etc/kubernetes/manifests/kube-vip.yml` 在场、容器 Running、**VIP `10.66.3.240` 已绑定到节点网卡**。
+> 因此 **§3.5 / §3.6（"kube-vip 从未部署"）与 §8 单点清单第 1 行属于历史快照**，保留作为基线，
+> **不再代表现状**（这张快照证明的"当时确实没有 VIP"，正是后面所有验证要对照的起点）。
+> ⚠ kube-vip 侧实现在 2026-09-28 又变过一次（**收编**：静态 Pod 清单改由 kubespray 自己渲染），
+> 见 [07-kube-vip-upstream-assessment.md](07-kube-vip-upstream-assessment.md) 与
+> [../kube-vip-api-ha.md §19](../kube-vip-api-ha.md#19-收编静态-pod-写入权交还上游2026-09-28)。
 
 ---
 
@@ -80,7 +89,8 @@ $ for i in 28 29 31 32; do ssh ubuntu@10.66.3.$i "grep -h 'k8s-api' /etc/hosts";
 10.66.3.28      k8s-api.cubestack.io       # ← worker01 也指向 .28
 ```
 
-这行由 kubespray 的 preinstall 任务写入（`roles/kubernetes/preinstall/tasks/0090-etchosts.yml:31`），
+这行由 kubespray 的 preinstall 任务写入（`roles/kubernetes/preinstall/tasks/0090-etchosts.yml:31`；
+⚠ 2026-09-28 注：**v2.32 树已删除该任务**，现由本仓库 `modules/02_k8s/03_k8s_hosts.sh` 写；当时（v2.28 树）的判断无误），
 数据源是 `group_vars/all/all.yml` 的 `loadbalancer_apiserver.address`。
 
 ### 3.3 证据：kubelet 的实际 server
@@ -273,7 +283,7 @@ clusterCIDR: 10.233.64.0/18
 |---|---|---|
 | **master01（10.66.3.28）** | 全集群 API 失联 | **全部**节点级 + 管理级 + 外部 |
 | master02 / master03 | 无影响（当前无客户端使用） | — |
-| 部署机 `/etc/hosts` | 部署机 kubectl/CI 失联 | 运维面 · ⚠ **本方案未消除**（只解决了节点侧/外部侧；部署机自身解析仍写第一台 master，见 [04 §4.1](04-decision.md#41-不变的部分明确边界)） |
+| 部署机 `/etc/hosts` | 部署机 kubectl/CI 失联 | 运维面 · ⚠ **本方案未消除**（只解决了节点侧/外部侧；**部署宿主机**自身解析仍写第一台 master，见 [04 §4.1](04-decision.md#41-不变的部分明确边界)）—— ⚠ 2026-09-28 起**部署容器**里那份改为跟随入口，两份文件不是一回事 |
 | MetalLB speaker 单点 | registry 等 LB 地址失联（L2 模式下由 elected speaker 播报） | 南北向 components |
 
 > 只有第一条是"入口 HA"要解决的问题。第二条恰好说明**已经具备 HA 的物理条件，只是没接线**。

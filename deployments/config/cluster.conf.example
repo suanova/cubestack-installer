@@ -85,7 +85,15 @@ KUBE_VIP_ENABLED="${KUBE_VIP_ENABLED:-false}"           # 默认关: 不部署 k
 #     入口仍指向 VIP 时会**拦停**而不是自毁, 回退顺序见文档 §7.4)。
 #   · ⚠ 开启前先确认网段里**真有空闲地址**可当 VIP: 留空 K8S_API_VIP 时会在 .210~.254 逐个探测,
 #     整段被占用/落在 MetalLB 池内 → 硬失败。(关闭态不会触发这个扫描。)
+#   · 静态 Pod 清单由 **kubespray 自己**渲染(2026-09-28 收编; 见 docs/api-ha/07-kube-vip-upstream-assessment.md):
+#     本开关经 sync 写进 addons.yml 的 kube_vip_enabled, kubespray 在 "Install Kubernetes nodes" 里落盘;
+#     我们的 09_kube_vip 只负责 VIP 推导/变量校验/收敛核验/关闭清理。
+#   · ⚠ 开启时会确保 kube_proxy_strict_arp=true(kubespray 的 kube-vip 任务在 ipvs 集群上硬要求它)。
 K8S_API_VIP="${K8S_API_VIP:-}"                          # 留空=自动推导(各 master 探测 .210 起找空闲地址); 显式值优先
+                                                        # ⚠ 同网段跑**多套集群**时必须各用**不同** VIP:两边 kube-vip 会抢同一地址 ⇒
+                                                        #   客户端到 VIP 的流量随机落到另一套集群 ⇒ TLS 时好时坏
+                                                        #   ("x509: certificate signed by unknown authority", 2026-09-29 实机)。
+                                                        #   同理 METALLB_POOL 也必须各用不同段(见 3.1)。
 KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"            # 留空=kube-vip 自动检测网卡; 多网卡环境显式指定(如 ens5)
 KUBE_VIP_CP_DETECT="${KUBE_VIP_CP_DETECT:-false}"       # apiserver 进程级故障检测(**默认关**, 与 kubespray 一致; ★ 2026-09-24 由默认开改为默认关)
                                                         #   false(仅租约): 节点活着但 apiserver 进程死了 → VIP 不漂移
