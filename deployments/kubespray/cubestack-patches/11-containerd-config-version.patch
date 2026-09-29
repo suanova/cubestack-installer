@@ -1,0 +1,29 @@
+# patch: 11-containerd-config-version.patch
+# 目标: roles/container-engine/containerd/templates/config.toml.j2
+# 加入: 2026-09-28(实机: 沐曦 GPU operator 的 container-runtime 组件 CrashLoop)
+# 原因: 上游模板对 containerd ≥2.3 恒写 `version = 4`;而沐曦 container-runtime 组件
+#       (/metax-runtime-install.sh)只支持 containerd 配置版本 ≤3 ⇒
+#       `failed to register runtime: failed to setup docker config: config version 4 is not support`
+#       ⇒ CrashLoopBackOff ⇒ 注册不了 metax 运行时。
+#       本补丁加一个"可用 inventory 变量 containerd_config_version 覆盖"的分支(默认行为不变),
+#       由 tools/k8s/sync-kubespray-config.sh 写值 —— 取值来自 cluster.conf 的
+#       CONTAINERD_CONFIG_VERSION(默认 3; 可改 4; 留空 = 不覆盖回落树内默认)。
+#       ⚠ 降 3 的行为等价性已实测(containerd 2.3.5 `config dump` 对比: 只差 [grpc] 段,
+#         而模板值 16MiB 恰是 containerd 内建默认)。
+# 上游吸收判据: 模板出现 containerd_config_version(或等价的版本覆盖机制)
+# 上游化: 不建议提 PR(沐曦厂商约束, 非通用需求); 待沐曦包支持 containerd 2.x 后删除本补丁
+# ------------------------------------------------------------
+diff --git a/roles/container-engine/containerd/templates/config.toml.j2 b/roles/container-engine/containerd/templates/config.toml.j2
+index 61e361a..cb5a797 100644
+--- a/roles/container-engine/containerd/templates/config.toml.j2
++++ b/roles/container-engine/containerd/templates/config.toml.j2
+@@ -1,4 +1,8 @@
+-{% if containerd_version is version('2.3.0', '>=') %}
++{# containerd 配置版本: 默认随上游(2.3+ ⇒ 4, 否则 3); 可用 inventory 变量 containerd_config_version 覆盖 ——
++   沐曦 GPU operator 的 container-runtime 组件只支持 ≤3(2026-09-28 实机, 见 cubestack-patches/11-containerd-config-version.patch)。#}
++{% if containerd_config_version is defined %}
++version = {{ containerd_config_version }}
++{% elif containerd_version is version('2.3.0', '>=') %}
+ version = 4
+ {% else %}
+ version = 3

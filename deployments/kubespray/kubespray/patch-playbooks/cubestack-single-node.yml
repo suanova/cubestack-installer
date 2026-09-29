@@ -20,8 +20,13 @@
 # 不打污点)互补: 本 play 用 kubectl 直接收敛, 对"NODES 被临时改单节点"或"扩容后
 # kubespray 重新打回污点"等 inventory 判定覆盖不到的场景也生效。
 #
-# 挂载位置: cluster.yml / scale.yml 的 "Install etcd" 之前。
-# 由入口脚本 ensure_registry_play 自动维护(kubespray 升级后重新挂载)。
+# 挂载位置: cluster.yml / scale.yml 的 "Install Kubernetes apps" 之前(K8s+CNI 就绪之后)。
+#   ⚠ **必须在控制面起来之后**: 本 play 用 kubectl(读 /etc/kubernetes/admin.conf)数 control-plane
+#     节点, 在 "Install etcd"/kubeadm 之前跑必然失败 —— 2026-09-28 实机就是这条:全新集群全量
+#     部署中断在 mxgpu-3-28("stat /etc/kubernetes/admin.conf: no such file or directory")。
+#     历史实现把它和 registry hosts play 一起插在 "Install etcd" 之前;scale.yml 场景(集群已存在)
+#     掩盖了这个 bug, 直到第一次用它跑**全新集群**才暴露。
+# 由入口脚本 ensure_single_node_play 自动维护(kubespray 升级后重新挂载)。
 # ═══════════════════════════════════════════════════════════════════════════
 - name: Make single control-plane node schedulable (before addon/operator)
   hosts: kube_control_plane[0]

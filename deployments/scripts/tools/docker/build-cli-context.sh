@@ -90,7 +90,7 @@ say "拷贝 CLI 二进制到 bin/(kubectl/helm/skopeo, 文件名取自 Dockerfil
 mapfile -t CLI_FILES < <(grep -oP 'COPY bin/\K[^ ]+' \
     "${REPO_ROOT}/Dockerfile-cli" 2>/dev/null | sort -u || true)
 if [ "${#CLI_FILES[@]}" -eq 0 ]; then
-    CLI_FILES=(kubectl-1.32.5-amd64 helm-3.16.4-linux-amd64.tar.gz skopeo-1.16.1-amd64)
+    CLI_FILES=(kubectl-1.35.8-amd64 helm-3.22.0-linux-amd64.tar.gz skopeo-1.16.1-amd64)
 fi
 for f in "${CLI_FILES[@]}"; do
     [ -n "${f}" ] || continue

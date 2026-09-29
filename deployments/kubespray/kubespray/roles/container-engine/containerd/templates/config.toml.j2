@@ -1,4 +1,8 @@
-{% if containerd_version is version('2.3.0', '>=') %}
+{# containerd 配置版本: 默认随上游(2.3+ ⇒ 4, 否则 3); 可用 inventory 变量 containerd_config_version 覆盖 ——
+   沐曦 GPU operator 的 container-runtime 组件只支持 ≤3(2026-09-28 实机, 见 cubestack-patches/11-containerd-config-version.patch)。#}
+{% if containerd_config_version is defined %}
+version = {{ containerd_config_version }}
+{% elif containerd_version is version('2.3.0', '>=') %}
 version = 4
 {% else %}
 version = 3

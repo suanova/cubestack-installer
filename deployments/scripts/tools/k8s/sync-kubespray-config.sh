@@ -309,7 +309,27 @@ if [ -f "${CALICO_YML}" ]; then
     sed -i -E "s/^calico_ipip_mode:.*/calico_ipip_mode: 'Always'/" "${CALICO_YML}"
     sed -i -E "s/^calico_vxlan_mode:.*/calico_vxlan_mode: 'Never'/" "${CALICO_YML}"
     sed -i -E "s/^calico_mtu:.*/calico_mtu: 1480/" "${CALICO_YML}"
-    ok "已同步 ${CALICO_YML} → calico+IPIP(backend=bird, ipip_mode=Always, vxlan_mode=Never, mtu=1480)"
+    # calico-node 内存上限: 树默认 500M 在**大核数节点**上不够 —— 实机取证 2026-09-28(全新安装, mxgpu-3-28 等 6 台 / 160 vCPU / 2TB):
+    #   · 现象: calico-node 6/6 CrashLoopBackOff(Last State: OOMKilled/137), 每轮启动约 2s 即被杀。
+    #   · 根因(dmesg OOM 报告 + 调用栈, 决定性): constraint=CONSTRAINT_MEMCG, cgroup 用量
+    #     `memory: usage 488268kB, limit 488280kB`, 分解 **anon 172MB + percpu 218MB**;
+    #     触发分配的是 `bpf_map_alloc_percpu → prealloc_init → htab_map_alloc` —— Felix 建
+    #     **per-CPU 类型 eBPF map**(日志 "XDP acceleration enabled", 节点 bpffs 有 pinned
+    #     /sys/fs/bpf/calico/xdp), 而内核按 **num_possible_cpus** 分配 ⇒ 160 核上单 percpu 一项
+    #     就 218MB。**内存需求随核数放大**, 进程自身 RSS 只有几十 MB —— 别按进程 RSS 判"限额够用"。
+    #   · 后果(为什么必须修): calico 数据面不在 ⇒ Pod→ClusterIP 转发被丢(hostNetwork 的 kube-proxy
+    #     反而正常, 现象像"只有 Pod 出不了网") ⇒ metallb controller `dial tcp 10.233.0.1:443:
+    #     i/o timeout`、CoreDNS/metrics-server/calico-kube-controllers 同源不健康, kubespray 在
+    #     metallb 的 rollout 等待处中断(rollout status 120s 超时)。
+    #   · 验证: 限额临时抬到 2Gi 后 calico 6/6 Running、节点全 Ready、metallb controller+speaker 全绿。
+    #   取 2G: 实测该机型 cgroup 用量约 0.5G, 留 4x 余量; percpu 随核数线性增长, 更大机型仍够。
+    #   幂等: 有该键就改值, 没有就补一行。
+    if grep -q '^calico_node_memory_limit:' "${CALICO_YML}"; then
+        sed -i -E 's|^calico_node_memory_limit:.*|calico_node_memory_limit: 2G|' "${CALICO_YML}"
+    else
+        echo 'calico_node_memory_limit: 2G' >> "${CALICO_YML}"
+    fi
+    ok "已同步 ${CALICO_YML} → calico+IPIP(backend=bird, ipip_mode=Always, vxlan_mode=Never, mtu=1480, node_mem_limit=2G)"
 else
     warn "未找到 ${CALICO_YML}, 跳过 calico 数据面同步"
 fi
@@ -597,6 +617,34 @@ else:
 open(path, 'w').write('\n'.join(out) + '\n')
 PYEOF
     ok "已同步 containerd registry 信任 → ${REGISTRY_DOMAIN:-registry.cubestack.io}:${REGISTRY_PORT:-5000}(镜像 host: ${_MIRROR_HOST})"
+
+    # containerd **配置版本**(默认 3; cluster.conf 可改; 2026-09-28 实机定位):
+    #   沐曦 container-runtime 组件(/metax-runtime-install.sh, DaemonSet metax-container-runtime)只支持
+    #   containerd 配置版本 ≤3; 而 containerd 2.3.x 上游模板写 `version = 4` ⇒ 该组件报
+    #     failed to register runtime: failed to setup docker config: config version 4 is not support
+    #   ⇒ CrashLoopBackOff, 注册不了 metax 运行时(实机证据: 09-24/09-26 成功日志里是
+    #   "containerd config version = 3", 那时节点是 containerd 1.7 线; v2.32 把 containerd 升到 2.3.5
+    #   后模板改发 4 ⇒ 从此必失败)。
+    #   ⚠ 降 3 的**行为等价性已实测**(containerd 2.3.5 上 `containerd config dump` 对比 v4/v3:
+    #     有效配置只差一个 [grpc] 段, 而模板写进去的 16MiB 恰是 containerd 内建默认 ⇒ 无行为差异)。
+    #   ⚠ 没有更"干净"的替代: 厂商工具不认 v4, 也不接受任何跳过参数(实测 --help 被忽略直接执行);
+    #     待沐曦包支持 containerd 2.x 后, 把 cluster.conf 的 CONTAINERD_CONFIG_VERSION 改成 4 即可。
+    #   cluster.conf 语义: CONTAINERD_CONFIG_VERSION = 3(默认)/4; 未设或留空一律按 3 处理(不引入第三种模式:
+    #     "留空=回落树内默认"会让"留空"这个动作在沐曦场景下静默 CrashLoop —— 宁可只有两个显式取值)。
+    case "${CONTAINERD_CONFIG_VERSION:-3}" in
+        3|4)
+            if grep -q '^containerd_config_version:' "${CONTAINERD_YML}"; then
+                sed -i -E "s|^containerd_config_version:.*|containerd_config_version: ${CONTAINERD_CONFIG_VERSION:-3}|" "${CONTAINERD_YML}"
+            else
+                echo "containerd_config_version: ${CONTAINERD_CONFIG_VERSION:-3}" >> "${CONTAINERD_YML}"
+            fi
+            ok "containerd 配置版本 = ${CONTAINERD_CONFIG_VERSION:-3}(来自 CONTAINERD_CONFIG_VERSION; 沐曦 container-runtime 需 ≤3)"
+            ;;
+        *)
+            err "CONTAINERD_CONFIG_VERSION='${CONTAINERD_CONFIG_VERSION}' 非法(只接受 3 或 4; 未设/留空 = 默认 3)"
+            exit 1
+            ;;
+    esac
 else
     warn "未找到 ${CONTAINERD_YML},跳过 containerd registry 配置"
 fi

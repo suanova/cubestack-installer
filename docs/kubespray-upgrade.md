@@ -40,7 +40,7 @@ K8S_VERSION=v1.35.8 bash deployments/kubespray/cubestack-kubespray-upgrade.sh v2
 | 5 | 处置冲突:人工把改动**重做到新树** → 同步更新对应 `.patch` 与 README | 改完 `git add <部署根>` + `git commit`(见铁律 3),再重跑入口脚本 | 人 |
 | 6 | 退休判定(试判"这个补丁是否已被上游吸收") | `bash deployments/kubespray/cubestack-patch-apply.sh --root deployments/kubespray/kubespray --check-retired`(入口 **[6/8]**,**必须先于 --apply**,见铁律 2) | 脚本 |
 | 7 | 版本面:核 `cluster.conf` 的钉子 vs 上游表值(命令见 §1.4) | 与 `.../roles/kubespray_defaults/defaults/main/download.yml` 等的表值逐字对照;`check-modules.sh` ⑯(版本一致性断言)落地后自动报差异 | 脚本 + 人 |
-| 8 | 回归:静态 / 补丁 / 树 diff / 渲染器对拍 / 离线缺口 / 实机 | 见 §6 回归清单 | 脚本 + 人 |
+| 8 | 回归:静态 / 补丁 / 树 diff / ~~渲染器对拍~~(2026-09-28 收编后**废止**,见 §6) / 离线缺口 / 实机 | 见 §6 回归清单 | 脚本 + 人 |
 | 9 | 记录:在本文 §2 追加一条(旧→新 tag、k8s/插件版本变化、冲突与处置、踩的坑、**新增的可上游化补丁**) | 照 §2.1 的格式 | 人 |
 
 ### 1.3 七条铁律(每条都踩过或差点踩)
@@ -55,10 +55,20 @@ K8S_VERSION=v1.35.8 bash deployments/kubespray/cubestack-kubespray-upgrade.sh v2
 7. **换了 ansible 大版本,必须依新 `requirements.txt` 重建 `.venv`**。换树**有意保留** `.venv/`(它是裸机路径的 ansible 运行环境),但里面那套 ansible 是**旧门**的产物 —— 实测 v2.28 的 venv 是 `ansible-core 2.16.19`,而 v2.32 的 `playbooks/ansible_version.yml` 断言 `2.19.0 ≤ ansible < 2.20.0`。陈旧 venv 会**顶掉** CLI 镜像里预装的新 ansible(`cubestack-offline.sh` 的 `ensure_venv` 只判目录在不在,不会重建),部署跑**第一个 play** 就硬失败。入口 **[5/8]** 换树后会读新树的 `minimal_ansible_version` 与 `.venv` 实测值比对,**过旧即停住(rc=2)**并打印修法:
    ```bash
    rm -rf deployments/kubespray/kubespray/.venv
-   python3 -m venv deployments/kubespray/kubespray/.venv
+   python3.11 -m venv deployments/kubespray/kubespray/.venv        # ⚠ 见下: 必须是 ≥3.11 的解释器
    deployments/kubespray/kubespray/.venv/bin/pip install -r deployments/kubespray/kubespray/requirements.txt
    # 或者:直接 rm -rf .venv/ 走 CLI 镜像里预装的 ansible(容器路径就是这条)
    ```
+   ⚠ **8. 换了 ansible 大版本往往同时抬高 Python 下限, 要连镜像一起换**。实测 v2.32:
+   `requirements.txt` 钉 `ansible==12.3.0`(= ansible-core **2.19.x**), 而它**在控制端**硬要求
+   **Python ≥3.11** —— ubuntu 22.04 自带 `python3` 是 **3.10**, 于是:
+   · **CLI 镜像**:`python3 -m pip install -r requirements.txt` 直接失败
+     (`Ignored … 12.3.0 Requires-Python >=3.11` / `No matching distribution found`);
+     修法是镜像里装 `python3.11`(deadsnakes;jammy universe 那个是 3.11.0~rc1 的 RC 版)并让 ansible 走它,
+     见 `Dockerfile-cli` / `Dockerfile-cli-incremental` 的 "Python 3.11(deadsnakes)" 段。
+   · **裸机路径**:`ensure_venv` 已改为**优先挑 `python3.12`/`python3.11`**(挑不到才回退 `python3`),
+     宿主需先装一个 ≥3.11 的解释器;`.venv_wheels/` 缓存也要用 3.11 重出(cp311 的 cryptography/bcrypt)。
+   ⇒ 升级前先跑 `grep -m1 '^ansible==' <新树>/requirements.txt` 并核对它的 `Requires-Python`。
 
 ### 1.4 命令备查
 
@@ -288,7 +298,7 @@ bash deployments/scripts/tools/check-modules.sh
 | 静态 | `bash deployments/scripts/tools/check-modules.sh` | 全绿(⑮ 补丁在位为绿;既有的 KUBE_VIP 红项除外) |
 | 补丁 | `bash deployments/kubespray/cubestack-patch-apply.sh --check` | rc=0(全部在位) |
 | 树 | 见 §1.4 的 `diff -rq --no-dereference …`(**须在 `deployments/kubespray` 目录内跑**,过滤器才生效) | 14 行 = 7 行 `Files … differ`(= 全部补丁目标文件)+ 1 行 `inventory/local/group_vars`(目录 vs 符号链接,已知项)+ 6 行目标树独有的顶层点文件(剔除项) |
-| 渲染器 | 自持 manifest 渲染器 vs 新树模板对拍(如 kube-vip) | 逐台逐字节一致 |
+| ~~渲染器~~ | ~~自持 manifest 渲染器 vs 新树模板对拍(如 kube-vip)~~ **已废止(2026-09-28 收编)**: kube-vip 清单由上游自己渲染 ⇒ 无对拍对象;改由实机套件验收 —— `--steps verify_kube_vip`(含漂移演练)+ `verify_api_ha` | kube-vip Pod Running / VIP 唯一绑定 / healthz 通过 |
 | 离线 | `images.manifest` 新镜像 / `offline-files/` 备料 | 缺口清单为空 |
 | 实机 | 全新集群全量部署 | 部署成功 |
 

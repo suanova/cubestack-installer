@@ -44,10 +44,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client sshpass rsync iputils-ping iptables dnsutils \
         netcat-openbsd \
         python3 python3-pip python3-venv \
-        libvirt-clients vim gnupg \
+        libvirt-clients vim gnupg software-properties-common \
         iproute2 kmod systemd procps bridge-utils chrony \
         moreutils \
     && rm -rf /var/lib/apt/lists/*
+
+# ---------- Python 3.11(deadsnakes)—— ansible 12.x 在**控制端**硬要求 Python ≥3.11 ----------
+# 树内 requirements.txt 是 ansible==12.3.0(= ansible-core 2.19.x);22.04 自带 python3=3.10
+# → pip 直接拒绝("Ignored … Requires-Python >=3.11" / "No matching distribution found")。
+# 只装 python3.11 并让 **ansible 走它**(console script 带 3.11 shebang, 落在 /usr/local/bin,
+# 先于 /usr/bin 命中);系统 python3 保持 3.10 不动 ⇒ python3-libvirt 等 3.10 扩展不受影响。
+# (jammy universe 的 python3.11 是 3.11.0~rc1 的 RC 版, 不适合跑生产 ansible。)
+RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends python3.11 python3.11-venv python3.11-dev \
+    && python3.11 -m ensurepip --upgrade \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3.11 -V
 
 # ---------- 更新部署脚本/源码(基础镜像已含旧 deployments, 先清空再拷入) ----------
 WORKDIR ${REPO_ROOT}
@@ -57,11 +70,15 @@ COPY skills ${REPO_ROOT}/skills
 
 # 预装 kubespray Python 依赖(随 requirements.txt 精确锁定; 让运行时 ensure_venv
 # 用 --system-site-packages 直接继承, 完全离线, 不再新建空 venv 联网 pip install)。
-# 基础镜像已含早期 ansible, 此处幂等补装 + 对齐当前 requirements.txt 版本。
+# 基础镜像已含早期 ansible(2.16.x, 装在 3.10 下), 此处用 python3.11 覆盖式补装
+# ⇒ /usr/local/bin/ansible* 的 shebang 换成 3.11, 跑的就是 ansible-core 2.19.x。
+# ⚠ 必须 python3.11: 系统 python3=3.10 装不了 ansible 12.3.0。
 COPY deployments/kubespray/kubespray/requirements.txt /tmp/kubespray-requirements.txt
-RUN python3 -m pip install -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
+RUN python3.11 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && python3.11 -m pip install -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
     && rm -f /tmp/kubespray-requirements.txt \
-    && ansible --version 2>/dev/null | head -1
+    && ansible --version 2>/dev/null | head -1 \
+    && ansible-playbook --version 2>/dev/null | head -1
 
 # 校验关键路径就位
 RUN test -f ${REPO_ROOT}/deployments/scripts/deploy-cluster.sh \
