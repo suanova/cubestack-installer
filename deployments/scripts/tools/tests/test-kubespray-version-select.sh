@@ -190,5 +190,29 @@ env "${_vd2[@]}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.
 chk "verify 对 new 出来的目录 → rc!=0(images/ 空, 如实报缺)" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
 rm -rf "${_src}" "${_ro2}"
 
+echo "== ⑨ 离线链路: sync 源目录/本地临时排除; trim 版本范围; fetch 参数校验 =="
+_ro3="$(mktemp -d)"; mkdir -p "${_ro3}/kubespray/v9.9.9/images" "${_ro3}/kubespray/v9.9.8/images"
+printf 'LOCAL_ONLY\n' > "${_ro3}/kubespray/v9.9.9/LOCAL_ONLY"
+touch "${_ro3}/kubespray/v9.9.9/images/a.tar" "${_ro3}/kubespray/v9.9.8/images/b.tar"
+sout="$(OFFLINE_FILES_ROOT="${_ro3}" bash "${REPO_ROOT}/deployments/scripts/tools/offline/sync-to-minio.sh" --plan-versions 2>/dev/null)"
+chk "sync 源目录 = offline-files 真根(哨兵回归护栏)" "${_ro3}" \
+    "$(printf '%s\n' "${sout}" | awk -F': ' '/^源目录:/{print $2}')"
+printf '%s\n' "${sout}" | grep -q '将跳过.*v9.9.9' && chk "sync 跳过 LOCAL_ONLY 版本" 1 1 || chk "sync 跳过 LOCAL_ONLY 版本" 1 0
+printf '%s\n' "${sout}" | grep -q '将上传: kubespray/v9.9.8' && chk "sync 计划上传在库版本" 1 1 || chk "sync 计划上传在库版本" 1 0
+sout2="$(OFFLINE_FILES_DIR=/mnt/x bash "${REPO_ROOT}/deployments/scripts/tools/offline/sync-to-minio.sh" --plan-versions 2>/dev/null)"
+chk "显式 OFFLINE_FILES_DIR(旧用法)仍生效" "/mnt/x" \
+    "$(printf '%s\n' "${sout2}" | awk -F': ' '/^源目录:/{print $2}')"
+rc=0; OFFLINE_FILES_ROOT="${_ro3}" bash "${REPO_ROOT}/deployments/scripts/tools/offline/sync-to-minio.sh" --prune >/dev/null 2>&1 || rc=$?
+chk "--prune 无 --force-full-prune → 拒绝(多版本互删保护)" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+tout="$(OFFLINE_FILES_ROOT="${_ro3}" bash "${REPO_ROOT}/deployments/scripts/tools/offline/trim-offline-files.sh" --dry-run --version v9.9.8 2>/dev/null)"
+printf '%s\n' "${tout}" | grep -q 'v9.9.9' && chk "trim 声明其它版本不触碰" 1 1 || chk "trim 声明其它版本不触碰" 1 0
+rc=0; OFFLINE_FILES_ROOT="${_ro3}" bash "${REPO_ROOT}/deployments/scripts/tools/offline/trim-offline-files.sh" --dry-run --version v7.7.7 >/dev/null 2>&1 || rc=$?
+chk "trim 对不存在版本 → 拒绝" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+rc=0; bash "${REPO_ROOT}/deployments/scripts/tools/offline/fetch-offline-from-minio.sh" --kubespray-version v9.9.9 --sub kubespray/v9.9.9 >/dev/null 2>&1 || rc=$?
+chk "fetch --kubespray-version 与 --sub 互斥 → 拒绝" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+rc=0; bash "${REPO_ROOT}/deployments/scripts/tools/offline/fetch-offline-from-minio.sh" --sub /etc >/dev/null 2>&1 || rc=$?
+chk "fetch --sub 绝对路径 → 拒绝" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+rm -rf "${_ro3}"
+
 if [ "${fail}" = "0" ]; then echo "== 全部通过 =="; else echo "== 有失败项 =="; fi
 exit "${fail}"
