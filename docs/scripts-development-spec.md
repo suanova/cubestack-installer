@@ -361,6 +361,19 @@ sudo ./deploy-cluster.sh --list-steps | --list | --fresh
 
 ---
 
+## 6.6 版本目录规范(2026-09-30 起)
+
+离线资产按 **`offline-files/<组件>/<版本>/`** 组织(版本名 = 上游 tag 全名);kubespray 基座另有
+版本档案(`config/profiles/<版本>.profile`)与物化树(`deployments/kubespray/versions/<版本>/`,
+运行期产物、不进 git/镜像/MinIO)。
+
+- 完整机制与操作规程:**[`docs/kubespray-versioning/README.md`](../kubespray-versioning/README.md)**
+  (产出新版本 / 选版部署 / 只下载指定版本 / operator 接入规范);
+- 设计决策:D1–D8 见 [`design.md`](../kubespray-versioning/design.md);
+- 静态校验:`check-modules.sh` ⑱(逐版本档案 ↔ 树表值、版本目录自检);
+- **新增/迁移一个"按版本选"的组件时, 四条一起改**(资产目录 / 版本开关 / `images.manifest` 落点 /
+  trim 的 `--version`), 详见上述手册 §5。
+
 ## 7. 静态校验与 CI(提交前必过)
 
 三支**开发期 + CI 两用**的校验脚本(只读、不联网、无需 root);PR 由 GitHub Actions 自动跑

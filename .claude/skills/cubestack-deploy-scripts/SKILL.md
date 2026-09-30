@@ -464,6 +464,23 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   Harbor **项目**必须预建(仓库才自动建), 建项目需登录。
 - ⚠ **加镜像时别忘了同步 `tools/offline/trim-offline-files.sh` 的 `PRELOAD_IMAGE_PATTERNS`**
   (k8s-base 组), 否则备料后被 trim 静默删掉 —— 用 `check-image-manifest.sh --kubespray` 兜底。
+## 版本目录(离线资产按版本组织,2026-09-30 起)
+
+离线件按 **`offline-files/<组件>/<版本>/`** 组织(版本名 = 上游 tag 全名);kubespray 另有版本档案
+与物化树。**完整规程见 [`docs/kubespray-versioning/README.md`](docs/kubespray-versioning/README.md)**,
+要点速查:
+
+- **选版本**:`KUBESPRAY_VERSION`(或 `deploy-cluster.sh --profile <版本>`);档案接管版本面变量,
+  `KUBESPRAY_PROFILE=none` 退回"全按 cluster.conf"。
+- **路径一律经变量**:`OFFLINE_FILES_ROOT`(真根)/ `OFFLINE_FILES_DIR`(= `<root>/kubespray/<版本>`,
+  即 `LOCAL_REPO_DIR`)。**禁止**再写字面量 `offline-files/kubespray/<文件>`;
+  自派生版本的写法见 `lib-image-manifest.sh` 的 `_kubespray_version()`(不 source lib-common 的脚本用)。
+- **本地临时版本**:打 `LOCAL_ONLY`(上传工具自动跳过;`--prune` 需显式 `--force-full-prune`)。
+- **新增/迁移"按版本选"的组件**四条一起改:① 资产目录 ② 版本开关变量 ③ `images.manifest` 落点
+  ④ `trim-offline-files.sh` 只清选定版本(`--version`)。
+- **CLI 镜像只含 `deployments/` 代码**:kubectl/helm/skopeo 由容器运行期从挂载的版本目录挂 PATH
+  (`deployments/scripts/tools/docker/cli-toolchain-from-offline.sh`)⇒ 容器内用 `bash -lc`。
+
 ## 审查清单(写完脚本后自检)
 
 - [ ] 文件名符合 `NN_category_action.sh`,序号不冲突
@@ -479,6 +496,8 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - [ ] **(改含内嵌远端脚本的文件)注释里没有 ASCII 双引号**(用全角 `“ ”`); 改完用 stub `ssh` 数参数个数, 确认载荷没被拆散
 - [ ] `bash deployments/scripts/tools/check-modules.sh` exit 0(含第 ⑩ 项离线副本检查)
 - [ ] 新增/改动了 YAML 清单时 `bash deployments/scripts/tools/check-manifests.sh` exit 0
+- [ ] 涉及离线资产时:路径经 `OFFLINE_FILES_DIR`/版本变量(无新增字面量),`check-modules.sh` ⑱ 绿
+- [ ] 新增了"按版本选"的组件时:按手册 §5 四条一起改(资产目录/版本开关/manifest 落点/trim --version)
 - [ ] 新增回归套件时已**入库**(`git ls-files` 能看到; 目录被 .gitignore 忽略过 —— 见 §7)
 - [ ] `deploy-cluster.sh --list-steps` 能看到新模块
 - [ ] 不影响其他模块(未改他人元数据/文件名)
