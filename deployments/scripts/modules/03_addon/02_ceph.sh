@@ -160,8 +160,8 @@ fi
 #   tools/offline/fetch-lvm-packages.sh 生成。存储节点缺 lvm 且无离线包 → 硬失败,
 #   避免"看起来部署成功、OSD 因无 lvm 无法激活"的隐性失败(比 warn 更早暴露)。
 _LVM_DEB_PRESENT=0
-for _p in "${REPO_ROOT}"/deployments/offline-files/kubespray/packages/lvm2_*.deb \
-          "${REPO_ROOT}"/deployments/offline-files/kubespray/packages/lvm2_*.rpm; do
+for _p in "${OFFLINE_FILES_DIR}"/packages/lvm2_*.deb \
+          "${OFFLINE_FILES_DIR}"/packages/lvm2_*.rpm; do
     [ -f "${_p}" ] && _LVM_DEB_PRESENT=1
 done
 if [ "${_LVM_DEB_PRESENT}" = "0" ]; then

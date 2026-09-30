@@ -51,8 +51,8 @@ fi
 [ "${#IPS[@]}" -gt 0 ] || { err "没有目标节点(cluster.conf NODES 为空?)"; exit 1; }
 
 # 离线 .deb 来源: packages/ 与 packages/repair/(后者专放"修复用"的配对版本)
-DEB_DIRS=("${REPO_ROOT}/deployments/offline-files/kubespray/packages"
-          "${REPO_ROOT}/deployments/offline-files/kubespray/packages/repair")
+DEB_DIRS=("${OFFLINE_FILES_DIR}/packages"
+          "${OFFLINE_FILES_DIR}/packages/repair")
 DEBS=()
 for d in "${DEB_DIRS[@]}"; do
     [ -d "${d}" ] || continue

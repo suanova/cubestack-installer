@@ -8,8 +8,9 @@
 # 原则: ① 全量同步 deployments/(仅排除 offline-files 大文件与运行时凭据), 保证除离线
 #       **大文件**外, 所有部署代码/脚本/配置模板(kubespray 源码 / inventory group_vars /
 #       cubestack-addon / config 模板 / skills 等)都打进容器, 避免漏文件;
-#       ② 3 个轻量 CLI 二进制(kubectl/helm/skopeo)临时拷入 cli-context/bin/, 文件名从
-#       Dockerfile-cli 的 COPY 行自动提取, 版本升级无需改本脚本。
+#       ② **不打任何离线文件**(2026-09-30 起): kubectl/helm/skopeo 由容器**运行期**从挂载的
+#       版本目录挂到 PATH(见 deployments/scripts/tools/docker/cli-toolchain-from-offline.sh),
+#       镜像只含 deployments/ 代码 ⇒ 构建上下文与离线件体积彻底解耦。
 # 不复制: 离线大文件(images/镜像 tar/节点侧二进制/VM 镜像/OS 镜像)、运行时凭据文件
 #         (cluster.conf / hosts.yml / inventory.ini / artifacts)。
 # 基础镜像: 默认 ubuntu:22.04 完整重建; 本地缺失时自动从
@@ -51,7 +52,7 @@ done
 
 say "生成 CLI 镜像构建上下文 → ${OUT}"
 rm -rf "${OUT}"
-mkdir -p "${OUT}/deployments" "${OUT}/bin"
+mkdir -p "${OUT}/deployments"
 
 # ---------------- 同步 Dockerfile-cli / Dockerfile-cli-incremental / .dockerignore(构建上下文 = 仓库根 Dockerfile) ----------------
 # 构建统一以仓库根的 Dockerfile 为唯一事实来源: 先拷进上下文(便于 --output 独立上下文/离线),
@@ -74,6 +75,7 @@ say "同步整个 deployments/(排除 offline-files 大文件与运行时凭据)
 rsync -a \
     --exclude 'offline-files' \
     --exclude 'cli-context' \
+    --exclude 'kubespray/versions' \
     --exclude '.git' --exclude '.venv' --exclude 'venv' --exclude '.ansible' --exclude '.cache' \
     --exclude 'config/cluster.conf' --exclude 'config/cluster.conf.bak' --exclude 'config/cluster.conf.bak.*' \
     --exclude 'config/external-ceph*' --exclude 'config/minio.conf' \
@@ -84,23 +86,10 @@ rsync -a \
 say "同步 skills ..."
 rsync -a --exclude '.git' "${REPO_ROOT}/skills" "${OUT}/"
 
-# ---------------- 轻量 CLI 二进制(临时拷入 cli-context/bin/, 文件名从 Dockerfile-cli COPY 行自动提取) ----------------
-# 保证与镜像 COPY 内容一致: kubectl-<ver>-amd64 / helm-<ver>-linux-amd64.tar.gz / skopeo-<ver>-amd64 / mc
-say "拷贝 CLI 二进制到 bin/(kubectl/helm/skopeo, 文件名取自 Dockerfile-cli COPY 行) ..."
-mapfile -t CLI_FILES < <(grep -oP 'COPY bin/\K[^ ]+' \
-    "${REPO_ROOT}/Dockerfile-cli" 2>/dev/null | sort -u || true)
-if [ "${#CLI_FILES[@]}" -eq 0 ]; then
-    CLI_FILES=(kubectl-1.35.8-amd64 helm-3.22.0-linux-amd64.tar.gz skopeo-1.16.1-amd64)
-fi
-for f in "${CLI_FILES[@]}"; do
-    [ -n "${f}" ] || continue
-    if [ -f "${REPO_ROOT}/deployments/offline-files/kubespray/${f}" ]; then
-        cp "${REPO_ROOT}/deployments/offline-files/kubespray/${f}" "${OUT}/bin/"
-        ok "  ${f}"
-    else
-        warn "缺失 ${f}(可先运行 tools/offline/fetch-offline-from-minio.sh 下载)"
-    fi
-done
+# ---------------- CLI 工具链: 不再拷入(运行期从挂载离线目录挂载) ----------------
+# 镜像只含 deployments/ 代码(用户口径 2026-09-30); 容器内 /etc/profile.d/50-cubestack-tools.sh
+# 在**登录 shell**里把 kubectl/helm/skopeo 从挂载的版本目录挂到 PATH。故此处不再有 bin/ 段落。
+say "跳过 CLI 二进制打包 —— kubectl/helm/skopeo 运行期从挂载的版本目录挂载(bash -lc 生效)"
 
 echo ""
 ok "构建上下文就绪: ${OUT}  ($(du -sh "${OUT}" 2>/dev/null | awk '{print $1}'))"
