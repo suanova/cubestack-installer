@@ -106,3 +106,6 @@ cluster.conf.backup
 .claude/settings.local.json
 # Claude Code 官方文档转储(排查本机 TUI 问题时整站抓的 ~450KB; 非本仓库内容, 不入库)
 /settings-reference.md
+
+# 物化版本树(由 cubestack-version-dir.sh materialize 生成; 见 docs/kubespray-versioning/)
+deployments/kubespray/versions/

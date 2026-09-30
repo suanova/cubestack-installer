@@ -106,5 +106,25 @@ rc=$?
 set -e
 chk "缺档案 → 非零退出" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
 
+echo "== ⑦ version-dir: list/verify 对 fixture 版本目录的行为 =="
+_ro="$(mktemp -d)"; _vd="${_ro}/kubespray/v9.9.9"
+mkdir -p "${_vd}/images" "${_vd}/packages"
+printf 'LOCAL_ONLY\n' > "${_vd}/LOCAL_ONLY"
+printf 'KUBESPRAY_VERSION=v9.9.9\n' > "${_vd}/VERSION.profile"
+vout="$(OFFLINE_FILES_ROOT="${_ro}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.sh" list 2>&1)"
+printf '%s\n' "${vout}" | grep -q 'v9.9.9' && chk "list 找到 fixture 版本" 1 1 || chk "list 找到 fixture 版本" 1 0
+printf '%s\n' "${vout}" | grep -q '本地临时' && chk "list 标注本地临时档位" 1 1 || chk "list 标注本地临时档位" 1 0
+set +e
+OFFLINE_FILES_ROOT="${_ro}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.sh" verify v9.9.9 >/dev/null 2>&1
+rc=$?
+set -e
+chk "verify 对残缺版本目录 → 非零(缺 tree.tar.gz)" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+set +e
+OFFLINE_FILES_ROOT="${_ro}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.sh" verify >/dev/null 2>&1
+rc=$?
+set -e
+chk "verify 缺参数 → rc=2" 2 "${rc}"
+rm -rf "${_ro}"
+
 if [ "${fail}" = "0" ]; then echo "== 全部通过 =="; else echo "== 有失败项 =="; fi
 exit "${fail}"
