@@ -50,7 +50,7 @@ sudo ./deployments/scripts/tools/images/rdma-save-images.sh
 | `RDMA_RESOURCE_NAME` | `mlx5_0` | 扩展资源名(**pool 模式**; pod 申请 `nvidia.com/mlx5_0`; by-link / per-hca 模式忽略) |
 | `RDMA_HCA_MODE` | `by-link` | 资源模式(三选一): **`by-link`**=按链路类型分成 IB / RoCE **两个资源池**(**cluster.conf.example 默认值**, 资源名与真实 GPU 集群一致 —— 同一份 Pod 清单在两种集群都能申请到 RDMA 资源); **`per-hca`**=每块 HCA 独立资源(资源名=节点实际 RDMA 设备名如 `mlx5_0`/`mlx5_1`/..., pod 可按资源名精确选卡); **`pool`**=全部 HCA 聚合为单个资源(兼容旧部署; 也是模块**代码内建回退值** —— 配置里没写该键时才生效) |
 | `RDMA_IB_RESOURCE` | `rdma/hca_shared_devices` | **by-link**: IB 池资源名(必须 `<前缀>/<名字>`)。默认值 = 真实集群 `kubectl -n kube-system get cm rdma-devices` 里的 `resourceName`(对应插件侧 `--rdma-ib-resource`) |
-| `RDMA_ROCE_RESOURCE` | `rdma/roce_hca_shared_devices` | **by-link**: RoCE 池资源名(同上, 对应 `--rdma-roce-resource`) |
+| `RDMA_ROCE_RESOURCE` | `rdma/roce_shared_devices` | **by-link**: RoCE 池资源名(同上, 对应 `--rdma-roce-resource`) |
 | `RDMA_HCA_MAX` | `100` | 每资源最大共享 Pod 数(rdmaHcaMax; by-link 模式下每个池各一份配额, per-hca 模式下每块卡各一份) |
 | `RDMA_IF_NAMES` | *(自动检测)* | 宿主机 RDMA 网卡名(逗号分隔, selectors.ifNames); ⚠ **留空 = 模块自动扫描所有节点 `/sys/class/infiniband/*/device/net/` 收集真实设备名+网卡名**(兼容 IB=ibsX / RoCE=ens*/manage0 混合), 显式设置则按此精确过滤 |
 | `RDMA_ACTIVE_ONLY` | `true` | 自动检测只收录**链路状态 ACTIVE** 的 HCA(读 `/sys/class/infiniband/*/ports/*/state`); DOWN/DISABLED 卡不建资源不暴露; `false`=全部暴露。仅作用自动检测(RDMA_IF_NAMES 为空), 显式 IF_NAMES 时忽略 |
@@ -62,7 +62,7 @@ sudo ./deployments/scripts/tools/images/rdma-save-images.sh
 ### 三种资源模式(关键)
 
 - **`by-link`(cluster.conf.example 默认)**: 按**链路类型**把网卡分成两个池 —— IB 池
-  `rdma/hca_shared_devices`(链路 `type=32` 的 `ibsX`)、RoCE 池 `rdma/roce_hca_shared_devices`
+  `rdma/hca_shared_devices`(链路 `type=32` 的 `ibsX`)、RoCE 池 `rdma/roce_shared_devices`
   (链路 `type=1` 的 `ens*`/`manage0`); 每池的多块网卡合并成一份 `ifNames` 并集。
   **资源名与真实 GPU 集群对齐**(那边由 metax 侧插件以 `--rdma-ib-resource`/`--rdma-roce-resource`
   配置, 核对命令 `kubectl -n kube-system get cm rdma-devices -o yaml`), 因此同一份 Pod 清单
@@ -155,7 +155,7 @@ spec:
       resources:
         limits:
           rdma/hca_shared_devices: 1        # InfiniBand 池(ibsX; 名字可用 RDMA_IB_RESOURCE 改)
-          # rdma/roce_hca_shared_devices: 1  # RoCE 池(ens*/manage0; 需要时申请这一个)
+          # rdma/roce_shared_devices: 1  # RoCE 池(ens*/manage0; 需要时申请这一个)
       securityContext:
         capabilities:
           add: ["IPC_LOCK"]        # RDMA 内存注册(mlock)必需
