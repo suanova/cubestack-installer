@@ -145,9 +145,13 @@ bash deployments/scripts/tools/check-modules.sh
 ```
 
 检查项:bash -n 语法 / 元数据齐全(MODULE/DESC/PHASE/DEFAULT/REPEAT)/ key 唯一且合法 / PHASE 与目录一致 / REQUIRES 引用存在且全量无环 / 用了 K/SSH 的模块必须调用 init_remote_kubectl / TOGGLE 在 cluster.conf.example 有默认值 / 文件名 NN_ 前缀 / tools 脚本语法 / **⑩ 装 chart 的模块必须有 vendored 离线副本**。
-清单侧另跑 `bash deployments/scripts/tools/images/check-image-manifest.sh`(镜像登记,规则 8)。
+清单侧另跑 `bash deployments/scripts/tools/images/check-image-manifest.sh`(镜像登记,规则 8);
+新增了 YAML 清单则再跑 `bash deployments/scripts/tools/check-manifests.sh`(清单能否解析)。
 
 **全部通过(exit 0)才允许继续**;任何 ❌ 先修复。
+
+> ⭐ 这几支校验在**每次 PR** 上由 GitHub Actions 自动跑(`.github/workflows/ci-validate.yml`),
+> 本地漏跑就等 CI 替你发现;全口径一条命令见 `docs/scripts-development-spec.md` §7。
 
 ### 步骤 5:调度与执行验证
 

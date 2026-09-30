@@ -110,6 +110,8 @@ deployments/scripts/
 │       └── 2x_verify_*.sh     #    端到端验证(verify_metallb / verify_registry_storage / verify_metax_gpu
 │                              #    / verify_lws / verify_ceph; --steps verify 全跑)
 ├── tools/                     # ★ 工具脚本(模块的底层实现, 按领域分目录)
+│   ├── check-modules.sh       #   静态校验(全 17 项) — 开发期 + CI, 本地可一条命令复现
+│   ├── check-manifests.sh     #   静态校验: 仓库自有 YAML 清单能否解析
 │   ├── vm/                    #   虚拟机: create-libvirt-vm.sh / create-vm-template.sh / register-vm.sh
 │   ├── net/                   #   网络: setup-vm-network.sh / verify-vm-network.sh / teardown-vm-network.sh / setup-libvirt-nat.sh
 │   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / install-worker-packages.sh / prepare-workers.sh
