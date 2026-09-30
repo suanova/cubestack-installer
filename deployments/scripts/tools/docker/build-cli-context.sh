@@ -16,6 +16,11 @@
 # 基础镜像: 默认 ubuntu:22.04 完整重建; 本地缺失时自动从
 #           deployments/offline-files/os/ubuntu-22.04.tar docker load(离线可构建)。
 # 增量构建(--incremental): 基础 = Harbor 旧 CLI 镜像, 只补装缺失 package + 更新 deployments, 秒级。
+#   ⚠ **层数累积(2026-09-30 实测)**:增量每次在旧镜像上再叠十几层 ⇒ 层数单调增长;几百层时
+#     containerd overlayfs 的 lowerdir(全部祖先层)超过内核 PAGE_SIZE 上限(4096 字节)⇒ buildkit 报
+#     `mount source: overlay ... invalid argument`(实测 443 → 590 层, 第 5 步即挂不上, 与 Dockerfile 无关)。
+#     ⇒ 有**层数守卫**(默认阈值 INCREMENTAL_MAX_LAYERS=300, 超了直接拒绝并提示改全量);
+#     定期做一次**全量构建**即可把层数归零(基础 ubuntu:22.04 只有几层)。
 # 用法: sudo ./build-cli-context.sh                  # 生成 deployments/cli-context/
 #       sudo ./build-cli-context.sh --build           # 全量构建(基础 ubuntu:22.04)
 #       sudo ./build-cli-context.sh --build --push    # 全量构建并推送 Harbor
@@ -103,6 +108,20 @@ if [ "${DO_BUILD}" = "1" ]; then
                 err "增量构建需要基础镜像 ${INC_BASE_IMAGE}(本地或 Harbor); 首次构建请用全量 --build 或 docker pull"; exit 1; }
         fi
         say "增量构建(基础 ${INC_BASE_IMAGE}: 补装缺失包 + 更新 deployments) ..."
+        # ---- 层数守卫(2026-09-30 实测血泪) ----
+        #   增量构建每次都在旧镜像上再叠十几层 ⇒ 层数**单调累积**;层数到几百层时,
+        #   containerd overlayfs 会把**全部祖先层**拼成 lowerdir,挂载选项字符串超过内核
+        #   PAGE_SIZE(4096 字节)上限 ⇒ buildkit 报 "mount source: overlay ... invalid argument"
+        #   (实测: 2026-09-24 镜像 443 层 → latest 590 层, 第 5 步就挂不上; 与 Dockerfile 内容无关)。
+        #   ⇒ 超阈值直接拒绝增量, 让操作者做一次**全量构建**(基础 ubuntu:22.04, 层数归零)。
+        _blayers="$(docker history --no-trunc "${INC_BASE_IMAGE}" 2>/dev/null | tail -n +2 | wc -l)"
+        if [ -n "${_blayers}" ] && [ "${_blayers}" -gt "${INCREMENTAL_MAX_LAYERS:-300}" ]; then
+            err "基础镜像层数 ${_blayers} 已超阈值 ${INCREMENTAL_MAX_LAYERS:-300} —— 继续增量会撞内核 overlay 挂载上限"
+            err "  → 改做一次全量构建(层数归零): sudo $0 --build"
+            err "  → 原因与阈值说明见本脚本头部「层数累积」段"
+            exit 1
+        fi
+        say "基础镜像层数 ${_blayers}(阈值 ${INCREMENTAL_MAX_LAYERS:-300}; 超了就改全量构建)"
         docker build -f "${OUT}/Dockerfile-cli-incremental" -t "${IMAGE}" "${OUT}" \
             || { err "增量构建失败"; exit 1; }
     else
