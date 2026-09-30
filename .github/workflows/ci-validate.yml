@@ -1,0 +1,137 @@
+name: Validate scripts & manifests
+
+# ============================================================================
+# PR / 推送到 main 的基础验证 —— 无集群、无密钥、不联网(仅 manifests job 装一个 PyYAML)。
+#
+#   job scripts    ① 全仓 shell 语法(`bash -n`, 按 git 清单逐个过)
+#                  ② check-modules.sh 全 17 项(模块元数据/依赖拓扑/helm 离线副本/
+#                     kubespray 补丁在位/5 个离线回归套件/版本钉子闭环/凭据卫生)
+#                  ③ images.manifest ↔ kubespray 交叉校验
+#   job manifests  ④ 仓库自有 YAML 清单解析(check-manifests.sh)
+#
+# 为什么是这两支脚本: check-modules.sh / check-manifests.sh 本身就是"开发期 + CI"两用的
+# (见 docs/scripts-development-spec.md 第 7 节), CI 只是把它们挂上了调度 —— 本地一条命令即可
+# 复现同一口径, 不会出现"CI 特有的红":
+#
+#   bash deployments/scripts/tools/check-modules.sh \
+#     && bash deployments/scripts/tools/check-manifests.sh \
+#     && bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray
+#
+# 这里只做**静态**验证: 语法/元数据/依赖/清单/补丁在位。集群侧的真实功能验证仍是各模块的
+# verify_* 与 tools/k8s/verify-*.sh(需真集群), 不在本工作流范围内。
+# ============================================================================
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一分支连推时取消旧 run(PR 上反复提交很常见)
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── ① 部署脚本与模块: 语法 + 17 项静态校验 + 镜像清单 ──
+  scripts:
+    name: 脚本与模块静态校验
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 全仓 shell 语法(bash -n)
+        run: |
+          set -uo pipefail
+          total=0 bad=0
+          while IFS= read -r f; do
+            total=$((total+1))
+            if ! out="$(bash -n "$f" 2>&1)"; then
+              bad=$((bad+1))
+              echo "::error file=${f}::bash -n 语法错误: $(printf '%s' "$out" | head -1)"
+            fi
+          done < <(git ls-files '*.sh')
+          echo "已检查 ${total} 个 shell 脚本(含 vendored kubespray 树), 语法错误 ${bad} 个"
+          if [ "${total}" = "0" ]; then
+            echo "::error::git ls-files 没列出任何脚本 —— 快照异常, 不予判定"
+            exit 1
+          fi
+          if [ "${bad}" != "0" ]; then
+            {
+              echo "## shell 语法错误 ${bad} 个 / 共 ${total} 个脚本"
+              echo ""
+              echo "本地复现: git ls-files '*.sh' | xargs -n1 bash -n"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: 模块静态校验(check-modules.sh 全 17 项)
+        run: |
+          set -uo pipefail
+          log="${RUNNER_TEMP}/check-modules.log"
+          if bash deployments/scripts/tools/check-modules.sh 2>&1 | tee "${log}"; then
+            echo "check-modules.sh 全 17 项通过(模块元数据 / 依赖拓扑 / helm 离线副本 / kubespray 补丁在位 / 离线回归套件 / 版本钉子闭环 / 凭据卫生)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## 模块静态校验未通过"
+              echo ""
+              echo "失败项(已剥 ANSI 颜色):"
+              echo ""
+              echo '```'
+              sed -E 's/\x1B\[[0-9;]*[mK]//g' "${log}" | grep -E '❌|修法|→ ⚠' | head -40
+              echo '```'
+              echo ""
+              echo "完整输出见本步骤日志; 本地复现: bash deployments/scripts/tools/check-modules.sh"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: 镜像清单校验(images.manifest ↔ kubespray)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray
+
+  # ── ② 自有 YAML 清单: 能不能解析(部署期才会炸的低级错误提前到 PR) ──
+  manifests:
+    name: 清单 YAML 解析
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 准备 PyYAML
+        # runner 上通常已带; 兜底顺序 = 常规 pip → 突破 PEP-668 托管环境 → apt
+        # (不静默跳过: 末尾再 import 一次确认, 缺了就红 —— 否则整个 job 会"假绿")
+        run: |
+          set -euo pipefail
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            python3 -m pip install --quiet pyyaml 2>/dev/null \
+              || python3 -m pip install --quiet --break-system-packages pyyaml 2>/dev/null \
+              || sudo apt-get install -y -qq python3-yaml >/dev/null
+          fi
+          python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
+
+      - name: 解析自有 YAML/清单(check-manifests.sh)
+        run: |
+          set -uo pipefail
+          log="${RUNNER_TEMP}/check-manifests.log"
+          if bash deployments/scripts/tools/check-manifests.sh 2>&1 | tee "${log}"; then
+            sed -E 's/\x1B\[[0-9;]*[mK]//g' "${log}" | tail -1 >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## 清单 YAML 解析未通过"
+              echo ""
+              echo '```'
+              sed -E 's/\x1B\[[0-9;]*[mK]//g' "${log}" | grep -E '❌' | head -40
+              echo '```'
+              echo ""
+              echo "本地复现: bash deployments/scripts/tools/check-manifests.sh"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

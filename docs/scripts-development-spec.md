@@ -361,7 +361,36 @@ sudo ./deploy-cluster.sh --list-steps | --list | --fresh
 
 ---
 
-## 7. 常见问题
+## 7. 静态校验与 CI(提交前必过)
+
+三支**开发期 + CI 两用**的校验脚本(只读、不联网、无需 root);PR 由 GitHub Actions 自动跑
+(`.github/workflows/ci-validate.yml`,触发于 `pull_request` 与 `push: main`):
+
+| 脚本 | 管什么 |
+|---|---|
+| `deployments/scripts/tools/check-modules.sh` | 全 17 项:模块元数据 / `REQUIRES` 拓扑 / `bash -n` / TOGGLE 声明 / helm 离线副本 / kubespray 补丁在位 / 离线回归套件 / 版本钉子闭环 / 凭据卫生 |
+| `deployments/scripts/tools/check-manifests.sh` | 仓库自有 YAML 能否解析(排除 vendored 上游树 / chart 的 Go 模板 / INI 格式 inventory) |
+| `deployments/scripts/tools/images/check-image-manifest.sh --kubespray` | `images.manifest` ↔ kubespray 预加载清单交叉核对 |
+
+一条命令本地复现 CI 全口径(失败即 `exit 1`):
+
+```bash
+bash deployments/scripts/tools/check-modules.sh \
+  && bash deployments/scripts/tools/check-manifests.sh \
+  && bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray
+```
+
+CI 只做**静态**验证(语法 / 元数据 / 依赖 / 清单 / 补丁在位);集群侧的真实功能验证仍是各模块的
+`verify_*` 与 `tools/k8s/verify-*.sh`(需真集群),**不在 CI 范围内**。
+
+**离线回归套件**:`tools/tests/test-*.sh`(补丁层重放器 / 收编映射 / API 入口模式 / 本地代理)
+由 `check-modules.sh` 第 ⑮ 项实跑 ⇒ 每次 PR 都会跑到。新增回归套件请放进该目录,并**保持零夹具、
+零生产标识** —— 仓库根 `.gitignore` 只放行 `test-*.sh`,夹具(含生产集群标识)仍不入库,
+要用夹具的套件请沿用 `ceph-disk-tests.sh` 那种非 `test-` 前缀命名。
+
+---
+
+## 8. 常见问题
 
 - **新增模块没出现在 `--list-steps`**:检查文件名是否匹配 `[0-9][0-9]_*.sh` 且元数据头格式正确。
 - **旧命令失效**:检查模块 key 是否被 `MODULE_ALIAS` 覆盖;旧名(`net/vm/k8s/...`)应仍可用。

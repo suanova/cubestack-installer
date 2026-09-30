@@ -33,6 +33,8 @@
 # 用法: bash check-modules.sh           # 校验全部模块(只读, 无需 root)
 #       bash check-modules.sh --quiet   # 只输出违规项
 # 退出码: 0=全部通过; 1=存在违规(列出清单)
+# CI: .github/workflows/ci-validate.yml 在每次 PR / 推送 main 时跑本脚本(全 17 项);
+#     同一条命令本地可复现 —— 见 docs/scripts-development-spec.md §7。
 # ============================================================
 set -u
 
@@ -537,9 +539,13 @@ else
     warn "  跳过 ⑮(未找到 cubestack-patch-apply.sh)"
 fi
 # ★ 2026-09-28(评审 I6): 离线回归套件此前**无人调度** —— 写了就当"有测试", 但全仓没有任何入口
-#   会跑它们(本仓库没有 CI)→ 回归等于不存在。挂在这里正合适: ⑮ 本就是"补丁层可用的证据", 而这些
+#   会跑它们(当时本仓库还没有 CI)→ 回归等于不存在。挂在这里正合适: ⑮ 本就是"补丁层可用的证据", 而这些
 #   套件正是它的回归(test-kubespray-patches 覆盖重放器三态/退休判定;
 #   test-update-kube-vip-addons 覆盖 2026-09-28 收编后的开关↔addons.yml 映射与幂等)。
+# ★ 2026-09-30: CI 已落地(.github/workflows/ci-validate.yml)⇒ 本项全 17 项现在每次 PR 都跑,
+#   这些套件不再依赖"人记得跑"。⚠ 套件本身必须**入库**: test-update-kube-vip-addons.sh 曾被
+#   .gitignore 的"整个 tests/ 目录忽略"规则吞掉(从未提交)而 ⑮ 对缺失是硬失败 —— 上 CI 才发现;
+#   现规则只放行 test-*.sh, 新增套件若发现"本地绿、CI 红", 先查 git ls-files 里有没有它。
 #   两者都只用仓库内 fixture, 不联网、不碰集群, 秒级完成。
 #   ⚠ 任一失败即 ck_fail(与 ⑮ 主判据同口径): 套件跑不起来 = 没有证据, 不能算通过。
 # ★ 2026-09-28: 把 api-ha 线写的三个套件也挂进来 —— 它们此前**从来没被调度过** ⇒ test-sync-api-entry

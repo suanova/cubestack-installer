@@ -103,8 +103,12 @@ load_config
 6. **完成**: 无需修改 `deploy-cluster.sh` / `lib-module.sh` / 任何注册表(operator 自动派生)
 
 验证: `bash deployments/scripts/tools/check-modules.sh`(静态校验, 必须 exit 0);
+`bash deployments/scripts/tools/check-manifests.sh`(改了/新增了 YAML 清单时);
 `sudo ./deploy-cluster.sh --list-steps` 应出现新模块(带 `依赖:xxx` 标注);
 `sudo ./deploy-cluster.sh --steps <key>` 可单独执行(--steps 精确模式, 只跑指定模块+依赖)。
+
+> ⭐ 这两支校验脚本在**每次 PR** 上由 GitHub Actions 自动跑(`.github/workflows/ci-validate.yml`)
+> —— 本地不跑就等于让 CI 替你发现, 详见 `docs/scripts-development-spec.md` §7。
 
 > ⚠ **新增模块/功能后必须同步更新 `deploy-cluster.sh` 的 help(usage)**: 在"阶段目录与模块"列表与"示例"中补充新模块/命令(如 verify 模块加 `--steps verify_<组件>` 示例)。
 > 原则:**每次增加新功能,及时更新 help**(以及必要的 README/文档),保证 `--help` 始终与代码一致,避免文档与实现脱节。
@@ -474,5 +478,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - [ ] **(装 chart 的模块)走 `helm_chart_ensure` 恒用本地副本;缺副本时 `err` 退出并给获取方法**
 - [ ] **(改含内嵌远端脚本的文件)注释里没有 ASCII 双引号**(用全角 `“ ”`); 改完用 stub `ssh` 数参数个数, 确认载荷没被拆散
 - [ ] `bash deployments/scripts/tools/check-modules.sh` exit 0(含第 ⑩ 项离线副本检查)
+- [ ] 新增/改动了 YAML 清单时 `bash deployments/scripts/tools/check-manifests.sh` exit 0
+- [ ] 新增回归套件时已**入库**(`git ls-files` 能看到; 目录被 .gitignore 忽略过 —— 见 §7)
 - [ ] `deploy-cluster.sh --list-steps` 能看到新模块
 - [ ] 不影响其他模块(未改他人元数据/文件名)
