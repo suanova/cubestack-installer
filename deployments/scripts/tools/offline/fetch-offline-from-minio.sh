@@ -211,9 +211,11 @@ echo ""
 if [ "${LIST_ONLY}" = "1" ]; then
     echo ""
     echo "  二级(版本目录; 版本名 = 上游 tag 全名):"
-    for _c in $(mc ls "${SRC_ROOT}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##'); do
+    # ⚠ 本脚本是 set -euo pipefail: 组件无版本子目录时 grep 退出 1 ⇒ 管道失败 ⇒ **整支脚本中止**
+    #   (实测: 第一个组件没版本目录就静默退出, 连下面的提示都不打)。故每处都 || true。
+    for _c in $(mc ls "${SRC_ROOT}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##' || true); do
         [ -n "${_c}" ] || continue
-        _vs="$(mc ls "${SRC_ROOT}/${_c}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##' | grep -E '^v[0-9]+' | tr '\n' ' ')"
+        _vs="$( { mc ls "${SRC_ROOT}/${_c}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##' | grep -E '^v[0-9]+' || true; } | tr '\n' ' ')"
         [ -n "${_vs}" ] && echo "    ${_c}: ${_vs}"
     done | head -20
     echo ""
