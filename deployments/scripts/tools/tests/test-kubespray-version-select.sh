@@ -6,6 +6,12 @@
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 
+# 密闭基线: 清掉调用者环境里的版本面变量 —— check-modules ⑱ 的反证会用
+# OFFLINE_FILES_ROOT=<fixture> 跑整支脚本, 该变量会漏进这里, 把"默认值"类断言打红。
+# (用例需要"显式设置"时, 由该用例自己传, 不靠外部环境 —— 见 ④ 的 `VAR=值 _probe …`。)
+unset OFFLINE_FILES_ROOT OFFLINE_FILES_DIR LOCAL_REPO_DIR KUBESPRAY_VERSION \
+      KUBESPRAY_BASE_DIR KUBESPRAY_PROFILE
+
 fail=0
 chk() { # chk <描述> <期望> <实际>
     if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi
