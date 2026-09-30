@@ -35,6 +35,26 @@ fi
 # kubespray 版本(单一开关; 目录名 = 上游 tag 全名, 决策 D8)。
 #   派生源 = **实际要用的那棵树**的 galaxy.yml(CUBESTACK_KUBESPRAY_DIR 优先) —— 不是脚本目录:
 #   物化版本(versions/<V>)时脚本仍在仓库里, 按脚本目录派生会取到"仓库当前树版本"⇒ 资产与树错配。
+#   默认 = **最新版本** = max(仓库树版本, 有入库档案的版本目录)—— 与 lib-common 的
+#   kubespray_latest_version() 同口径(本脚本不 source lib-common, 故内联一份; 改动要同步两处)。
+if [ -z "${KUBESPRAY_VERSION:-}" ]; then
+    # ① 被指向的树在 → **以那棵树为准**(物化版本根/仓库树都适用; "你指哪棵树"比"仓库最新"更接近意图)
+    _tree_ver="$(awk '/^version:/{print "v"$2; exit}' "${KUBESPRAY_DIR}/galaxy.yml" 2>/dev/null || true)"
+    if [ -n "${_tree_ver}" ]; then
+        KUBESPRAY_VERSION="${_tree_ver}"
+    else
+        # ② 树不在 → 最新版本 = max(仓库树版本, 有入库档案的版本目录)
+        #    (与 lib-common 的 kubespray_latest_version() 同口径; 本脚本不 source lib-common, 内联一份)
+        _rt_ver="$(awk '/^version:/{print "v"$2; exit}' "${SCRIPT_DIR}/kubespray/galaxy.yml" 2>/dev/null || true)"
+        KUBESPRAY_VERSION="$( { printf '%s\n' "${_rt_ver}"
+            for _pf in "${SCRIPT_DIR}"/../config/profiles/*.profile; do
+                [ -f "${_pf}" ] || continue
+                sed -nE 's/^[[:space:]]*KUBESPRAY_VERSION=([^[:space:]#]+).*/\1/p' "${_pf}" | head -1
+            done; } | sed '/^$/d' | sort -V | tail -1 )"
+        unset _rt_ver _pf
+    fi
+    unset _tree_ver
+fi
 KUBESPRAY_VERSION="${KUBESPRAY_VERSION:-$(awk '/^version:/{print "v"$2; exit}' "${KUBESPRAY_DIR}/galaxy.yml" 2>/dev/null || true)}"
 OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}}"
 LOCAL_REPO_BASE="${OFFLINE_FILES_DIR}"
@@ -167,11 +187,23 @@ get_save_cmd() {
 ensure_kubespray() {
     if [ -d "${KUBESPRAY_DIR}/.git" ] || [ -f "${KUBESPRAY_DIR}/cluster.yml" ]; then
         log "✅ Kubespray 源码已就绪: ${KUBESPRAY_DIR}"
-    else
-        highlight "正在克隆 Kubespray ${KUBESPRAY_VERSION}..."
-        git clone --depth 1 --branch "${KUBESPRAY_VERSION}" "${KUBESPRAY_REPO}" "${KUBESPRAY_DIR}" || err "Git clone 失败，请检查网络或版本号"
-        log "✅ Kubespray 源码克隆完成"
+        return 0
     fi
+    # ① 版本目录自带**预打补丁的树 tar** → 优先物化(离线、含补丁层、可验指纹; 2026-09-30 起)
+    #    仅当"选定版本 ≠ 仓库树版本"(= 目标是物化树)且本机有该版本目录时才走这条路;
+    #    仓库树版本仍走下面的原路径(不改变原来的部署模式)。
+    local _tree_tar="${OFFLINE_FILES_DIR:-}/tree.tar.gz"
+    if [ -n "${OFFLINE_FILES_DIR:-}" ] && [ -f "${_tree_tar}" ]; then
+        highlight "从版本目录物化 Kubespray ${KUBESPRAY_VERSION}(离线, 顶层 kubespray/)"
+        mkdir -p "$(dirname "${KUBESPRAY_DIR}")"
+        tar -xzf "${_tree_tar}" -C "$(dirname "${KUBESPRAY_DIR}")" || err "解树失败: ${_tree_tar}"
+        log "✅ 已物化: ${KUBESPRAY_DIR}(版本 ${KUBESPRAY_VERSION}; .venv 由 ensure_venv 按需重建)"
+        return 0
+    fi
+    # ② 原路径: 联网 clone(行为不变)
+    highlight "正在克隆 Kubespray ${KUBESPRAY_VERSION}..."
+    git clone --depth 1 --branch "${KUBESPRAY_VERSION}" "${KUBESPRAY_REPO}" "${KUBESPRAY_DIR}" || err "Git clone 失败，请检查网络或版本号"
+    log "✅ Kubespray 源码克隆完成"
 }
 
 # .venv 是否**真的可用**: 目录在 ≠ 环境能用(2026-09-28 实机事故)
@@ -2389,8 +2421,8 @@ cmd_reset() {
 
 # 只读自检: 打印全部路径推导(排障 + 版本目录回归套件用; 不联网/不碰集群/不需 root)
 cmd_paths() {
-    printf 'BASE_DIR=%s\nKUBESPRAY_DIR=%s\nOFFLINE_LAYOUT=%s\nOFFLINE_FILES_ROOT=%s\nOFFLINE_FILES_DIR=%s\nLOCAL_REPO_DIR=%s\nINVENTORY_DIR=%s\n' \
-        "${BASE_DIR}" "${KUBESPRAY_DIR}" "${OFFLINE_LAYOUT}" "${OFFLINE_FILES_ROOT}" \
+    printf 'KUBESPRAY_VERSION=%s\nBASE_DIR=%s\nKUBESPRAY_DIR=%s\nOFFLINE_LAYOUT=%s\nOFFLINE_FILES_ROOT=%s\nOFFLINE_FILES_DIR=%s\nLOCAL_REPO_DIR=%s\nINVENTORY_DIR=%s\n' \
+        "${KUBESPRAY_VERSION}" "${BASE_DIR}" "${KUBESPRAY_DIR}" "${OFFLINE_LAYOUT}" "${OFFLINE_FILES_ROOT}" \
         "${OFFLINE_FILES_DIR}" "${LOCAL_REPO_DIR}" "${INVENTORY_DIR}"
 }
 
