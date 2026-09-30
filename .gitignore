@@ -73,19 +73,25 @@ deployments/scripts/tools/tests/*
 deployments/virtual-machine/
 
 # 离线文件(镜像 tar / 二进制 / .deb / 资源包, 大文件不入库; 路径由 OFFLINE_FILES_DIR 等变量切换)
-#   ⚠ 这里分四行写而不是直接忽略整个目录: 需要放行**各组件子目录下的 README.md**
+#   ⚠ 这里逐层写而不是直接忽略整个目录: 需要放行**各层目录下的 README.md**
 #     (说明该目录放什么、怎么备料), 其余内容(镜像 tar / 二进制 / .deb)仍全部忽略。
 #     顺序要紧(git 后匹配者优先):
 #       ① 忽略 offline-files 下所有内容
 #       ② 放行一级子目录本身(否则 git 不往里走, 后面的 ! 无从生效)
-#       ③ 重新忽略二级内容(把 ② 放行进来的 tar/二进制挡回去; 三级及以下随目录一起被忽略)
-#       ④ 只把二级的 README.md 放行
+#       ③ 重新忽略二级内容(把 ② 放行进来的 tar/二进制挡回去)
+#       ④ 放行二级子目录本身 —— 版本目录(如 kubespray/v2.32.0/, 见 docs/kubespray-versioning/)
+#       ⑤ 重新忽略三级内容(版本目录里的 tar/二进制/子目录)
+#       ⑥ 只把二级与三级的 README.md 放行
 #     若改回单行 `deployments/offline-files/`, README 会进不了 git;
-#     若只写 ①②, 离线 tar 会被误纳入版本控制(2026-09-18 踩过)。
+#     若只写 ①②, 离线 tar 会被误纳入版本控制(2026-09-18 踩过);
+#     少写 ④ 则三级 README 放行规则失效 —— 版本目录里的 README 会**静默从库里消失**(2026-09-30 实测)。
 deployments/offline-files/*
 !deployments/offline-files/*/
 deployments/offline-files/*/*
+!deployments/offline-files/*/*/
+deployments/offline-files/*/*/*
 !deployments/offline-files/*/README.md
+!deployments/offline-files/*/*/README.md
 deployments/kubespray/kubespray/.git
 deployments/kubespray/kubespray/.gitattributes
 deployments/kubespray/kubespray/.github

@@ -161,13 +161,23 @@ image_groups() {
 
 # ---------- 4. group → 离线目录 ----------
 # 默认: <offline-files>/<group>/  ; 例外见 case。
+# k8s 资产的版本层(2026-09-30): <offline-files>/kubespray/<版本>/images —— 版本目录见
+#   docs/kubespray-versioning/design.md。⚠ 本库**不 source lib-common**(CI 必须独立跑, 见文件头),
+#   故 KUBESPRAY_VERSION 未设时**自己从树内 galaxy.yml 派生**(否则会拼出 kubespray//images)。
+_kubespray_version() {
+    [ -n "${KUBESPRAY_VERSION:-}" ] && { printf '%s\n' "${KUBESPRAY_VERSION}"; return; }
+    local g="${IM_REPO_ROOT}/deployments/kubespray/kubespray/galaxy.yml"
+    [ -f "${g}" ] && awk '/^version:/{print "v"$2; exit}' "${g}"
+}
 image_group_dir() {
     local group="$1"
     local base="${IMAGE_OFFLINE_ROOT:-${IM_REPO_ROOT}/deployments/offline-files}"
+    local ver; ver="$(_kubespray_version)"
     case "${group}" in
         # kubespray 基座 + ceph: 节点 containerd **预加载**走 kubespray 的 images/ 目录
         # (见 02_ceph.sh 的 CEPH_IMAGE_DIR 与 tools/offline/trim-offline-files.sh), 必须同目录
-        k8s-base|ceph) echo "${IMAGE_K8S_IMAGES_DIR:-${base}/kubespray/images}" ;;
+        # ⇒ 两者都带版本层(这些 tar 属于某个 kubespray 版本, 见 k8s-base 组清单)
+        k8s-base|ceph) echo "${IMAGE_K8S_IMAGES_DIR:-${base}/kubespray/${ver}/images}" ;;
         *)             echo "${base}/${group}" ;;
     esac
 }

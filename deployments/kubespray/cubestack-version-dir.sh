@@ -106,6 +106,17 @@ cmd_materialize() {
 #   上游默认取表首(最新线), 而我们有意钉较稳的线(如 v2.32.0 树钉 1.35 而非表首 1.36)。
 #   故 --k8s-version 必须显式给(或在库档案已有该版本时沿用), 且**校验其在表内**;
 #   其余 10 项全部从树内表机械取值(禁手抄)。
+# v 前缀风格继承: 镜像 ref 直接把变量当 tag(registry.k8s.io/kube-apiserver:${K8S_VERSION}),
+#   而真实 tag 是 v1.35.8 ⇒ **v 是值的一部分**(少了就拉不到镜像)。树内表值多数不带 v,
+#   故按 cluster.conf.example 的同名声明继承写法(它是这些钉子的单一事实源)。
+_style_prefix() {   # <键> → 输出 "v" 或 ""
+    local line v
+    line="$(grep -m1 -E "^$1=" "${REPO_ROOT}/deployments/config/cluster.conf.example" 2>/dev/null)"
+    [ -n "${line}" ] || return 0
+    v="${line#*=}"
+    case "${v}" in *'${'*:-v*) printf 'v' ;; esac
+}
+
 _derive_profile() {   # <树根> <版本> <k8s_version>
     local tree="$1" ver="$2" k8s="$3"
     local dl="${tree}/roles/kubespray_defaults/defaults/main/download.yml"
@@ -142,17 +153,17 @@ _derive_profile() {   # <树根> <版本> <k8s_version>
 #   · 字段真值由 check-modules.sh ⑯ 对照该版本树表值逐项断言。
 #   · K8S_VERSION=${k8s} 为**人工选定**的线(kubelet_checksums 表内; 表内全集见 ⑯ 输出), 其余为推导值。
 KUBESPRAY_VERSION=${ver}
-K8S_VERSION=${k8s}
-PAUSE_VERSION=${pause}
-COREDNS_VERSION=${coredns}
-DNS_NODE_CACHE_VERSION=${ndc}
-ETCD_VERSION=${etcd}
-CALICO_VERSION=${calico}
-METRICS_SERVER_VERSION=${metrics}
-CPA_VERSION=${cpa}
-API_LB_NGINX_IMAGE_TAG=${nginx}
-LOCAL_VOLUME_PROVISIONER_VERSION=${lvp}
-NFD_VERSION=${nfd}
+K8S_VERSION=$(_style_prefix K8S_VERSION)${k8s#v}
+PAUSE_VERSION=$(_style_prefix PAUSE_VERSION)${pause#v}
+COREDNS_VERSION=$(_style_prefix COREDNS_VERSION)${coredns#v}
+DNS_NODE_CACHE_VERSION=$(_style_prefix DNS_NODE_CACHE_VERSION)${ndc#v}
+ETCD_VERSION=$(_style_prefix ETCD_VERSION)${etcd#v}
+CALICO_VERSION=$(_style_prefix CALICO_VERSION)${calico#v}
+METRICS_SERVER_VERSION=$(_style_prefix METRICS_SERVER_VERSION)${metrics#v}
+CPA_VERSION=$(_style_prefix CPA_VERSION)${cpa#v}
+API_LB_NGINX_IMAGE_TAG=$(_style_prefix API_LB_NGINX_IMAGE_TAG)${nginx#v}
+LOCAL_VOLUME_PROVISIONER_VERSION=$(_style_prefix LOCAL_VOLUME_PROVISIONER_VERSION)${lvp#v}
+NFD_VERSION=$(_style_prefix NFD_VERSION)${nfd#v}
 EOF
 }
 
