@@ -1,7 +1,7 @@
 # kubespray 按版本部署实施计划
 
 > **给执行者:** REQUIRED SUB-SKILL: 用 superpowers:subagent-driven-development(推荐)或
-> superpowers:executing-plans 逐任务执行。步骤用 `- [ ]` 勾选跟踪。
+> superpowers:executing-plans 逐任务执行。步骤用 `- [x]` 勾选跟踪。
 >
 > **Spec:** `docs/kubespray-versioning/design.md`(决策 D1–D8;计划从 spec 论证,执行时两份都读)
 
@@ -44,7 +44,7 @@
   函数 `kubespray_tree_version()`(输出 `vX.Y.Z` 或空)
 - Consumes: 无
 
-- [ ] **Step 1: 写失败套件(前 4 条断言)**
+- [x] **Step 1: 写失败套件(前 4 条断言)**
 
 创建 `deployments/scripts/tools/tests/test-kubespray-version-select.sh`(风格对齐同目录
 `test-update-kube-vip-addons.sh`:桩式、mktemp、`chk` 断言、退出码):
@@ -110,13 +110,13 @@ exit "${fail}"
 > ⚠ `_probe` 里 `export CLUSTER_CONF` 之后 lib-common 才会读它;`set +u` 是因为 lib-common 内部有
 > `${VAR:-}` 之外的历史写法。若 lib-common 需要更多桩变量,按报错补齐(不要改 lib-common 去迎合测试)。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `bash deployments/scripts/tools/tests/test-kubespray-version-select.sh`
 Expected: FAIL —— `OFFLINE_FILES_DIR` 实际为 `…/offline-files/kubespray`(无版本层)、
 `LOCAL_REPO_DIR` 含 `cubestack-cluster`、`OFFLINE_FILES_ROOT` 为空
 
-- [ ] **Step 3: 实现 lib-common 派生**
+- [x] **Step 3: 实现 lib-common 派生**
 
 `lib-common.sh:455-464` 整块替换为:
 
@@ -159,7 +159,7 @@ kubespray_tree_version() {
 }
 ```
 
-- [ ] **Step 4: cluster.conf.example 声明新变量**
+- [x] **Step 4: cluster.conf.example 声明新变量**
 
 `cluster.conf.example:491-497` 的"离线资源缓存根目录"整段替换为:
 
@@ -180,12 +180,12 @@ OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-}"
 LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-}"
 ```
 
-- [ ] **Step 5: 跑测试确认通过**
+- [x] **Step 5: 跑测试确认通过**
 
 Run: `bash deployments/scripts/tools/tests/test-kubespray-version-select.sh`
 Expected: `== 全部通过 ==`,rc=0
 
-- [ ] **Step 6: 挂进 check-modules ⑮ 套件清单**
+- [x] **Step 6: 挂进 check-modules ⑮ 套件清单**
 
 `check-modules.sh` ⑮ 的 `for _t in …` 列表末尾追加 `test-kubespray-version-select.sh`:
 
@@ -195,7 +195,7 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-kubespray-version-select.sh; do
 ```
 
-- [ ] **Step 7: 全量静态校验 + 提交**
+- [x] **Step 7: 全量静态校验 + 提交**
 
 Run:
 ```bash
@@ -227,7 +227,7 @@ git commit -m "feat(kubespray): 版本目录变量层(OFFLINE_FILES_ROOT/KUBESPR
   `BASE_DIR/KUBESPRAY_DIR/OFFLINE_LAYOUT/OFFLINE_FILES_ROOT/OFFLINE_FILES_DIR/LOCAL_REPO_DIR/INVENTORY_DIR`
   每行 `KEY=VALUE`);环境变量 `CUBESTACK_BASE_DIR`(版本根)、`CUBESTACK_LAYOUT=repo|flat`
 
-- [ ] **Step 1: 套件加断言(先失败)**
+- [x] **Step 1: 套件加断言(先失败)**
 
 追加到套件(在最后 `if [ "${fail}"` 之前):
 
@@ -247,12 +247,12 @@ chk "OFFLINE_FILES_DIR 仍带版本层" \
 rm -rf "${_fix}"
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `bash deployments/scripts/tools/tests/test-kubespray-version-select.sh`
 Expected: FAIL(未知参数 `paths` / 或 `OFFLINE_LAYOUT` 为空)
 
-- [ ] **Step 3: 实现探针替换 + `paths` 子命令**
+- [x] **Step 3: 实现探针替换 + `paths` 子命令**
 
 `cubestack-offline.sh:9-44` 的"布局判定 + default_local_repo_dir"整段替换为:
 
@@ -295,7 +295,7 @@ default_local_repo_dir() { printf '%s\n' "${OFFLINE_FILES_DIR}"; }
 
 并把 `paths` 写进 usage 块(该脚本头部 `echo "  download [名称] …"` 那一段)。
 
-- [ ] **Step 4: 模块传入 CUBESTACK_BASE_DIR**
+- [x] **Step 4: 模块传入 CUBESTACK_BASE_DIR**
 
 `06_k8s_deploy.sh:188-197` 与 `07_k8s_scale.sh:297-303` 的 `OFFLINE_ENV=( … )` 各加一行:
 
@@ -303,7 +303,7 @@ default_local_repo_dir() { printf '%s\n' "${OFFLINE_FILES_DIR}"; }
     "CUBESTACK_BASE_DIR=${KUBESPRAY_BASE_DIR:-${REPO_ROOT}/deployments/kubespray}"
 ```
 
-- [ ] **Step 5: 跑测试 + 全量校验**
+- [x] **Step 5: 跑测试 + 全量校验**
 
 Run:
 ```bash
@@ -313,7 +313,7 @@ bash deployments/scripts/tools/check-modules.sh
 ```
 Expected: 套件全通过;check-modules 全绿(⑨ 会 bash -n 该脚本)
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add deployments/kubespray/cubestack-offline.sh \
@@ -338,7 +338,7 @@ git commit -m "fix(kubespray): 布局探针改显式变量 + paths 自检子命�
 - Produces: `KUBESPRAY_PROFILE`(值 = 档案名或 `none`);档案文件 `deployments/config/profiles/<名>.profile`
   (可被 source 的纯赋值行,含 `KUBESPRAY_VERSION=` 与版本面变量)
 
-- [ ] **Step 1: 套件加断言(先失败)**
+- [x] **Step 1: 套件加断言(先失败)**
 
 ```bash
 echo "== ⑥ 档案: 选定档案接管版本面; none = 不用档案; 缺档案 = 响亮失败 =="
@@ -372,12 +372,12 @@ set -e
 chk "缺档案 → 非零退出" "1" "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `bash deployments/scripts/tools/tests/test-kubespray-version-select.sh`
 Expected: FAIL(档案机制不存在;`KUBESPRAY_PROFILE` 未生效)
 
-- [ ] **Step 3: 写档案文件(值 = 当前树表值)**
+- [x] **Step 3: 写档案文件(值 = 当前树表值)**
 
 创建 `deployments/config/profiles/v2.32.0.profile`(值从 `cluster.conf.example` §3.3 原样搬,
 它们已被 ⑯ 断言与 v2.32 树表值一致):
@@ -402,7 +402,7 @@ LOCAL_VOLUME_PROVISIONER_VERSION=2.5.0
 NFD_VERSION=0.19.0
 ```
 
-- [ ] **Step 4: 实现档案接管**
+- [x] **Step 4: 实现档案接管**
 
 `lib-common.sh` 的 `load_config()` 中,在 `source "${CLUSTER_CONF}"`(第 424 行)之后、
 `# 宿主机物理 IP 自动检测` 之前插入:
@@ -440,7 +440,7 @@ NFD_VERSION=0.19.0
 并在调用 `load_config` 之前 `[ -n "${PROFILE_ARG:-}" ] && export KUBESPRAY_PROFILE="${PROFILE_ARG}"`,
 同时写进 usage(与 `--steps/--enable` 同段,示例:`--profile v2.32.0   使用该版本档案(不写回 cluster.conf)`)。
 
-- [ ] **Step 5: 跑测试确认通过 + 全量校验**
+- [x] **Step 5: 跑测试确认通过 + 全量校验**
 
 Run:
 ```bash
@@ -450,7 +450,7 @@ bash deployments/scripts/tools/check-modules.sh
 ```
 Expected: 全绿(⑯ 读 cluster.conf.example,不受档案文件影响)
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add deployments/config/profiles/v2.32.0.profile deployments/scripts/lib-common.sh \
@@ -472,7 +472,7 @@ git commit -m "feat(kubespray): 版本套装档案机制(档案接管版本面 +
   退出码 0=通过,1=校验不过,2=参数/环境错
 - Consumes: `OFFLINE_FILES_ROOT`、`KUBESPRAY_VERSION`
 
-- [ ] **Step 1: 写 fixture 断言(先失败)**
+- [x] **Step 1: 写 fixture 断言(先失败)**
 
 ```bash
 echo "== ⑦ version-dir: list/verify 对 fixture 版本目录的行为 =="
@@ -491,12 +491,12 @@ chk "verify 对残缺版本目录 → 非零(缺 tree.tar.gz)" 1 "$([ "${rc}" -n
 rm -rf "${_ro}"
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `bash deployments/scripts/tools/tests/test-kubespray-version-select.sh`
 Expected: FAIL(脚本不存在)
 
-- [ ] **Step 3: 实现 `cubestack-version-dir.sh`**
+- [x] **Step 3: 实现 `cubestack-version-dir.sh`**
 
 头部注释写清用途/退出码;核心内容(骨架 + 三个子命令):
 
@@ -574,12 +574,12 @@ cmd_materialize() {
 
 `main` 分发:`list` / `verify <v>` / `materialize <v>`,未知子命令打印用法并 `exit 2`。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `bash deployments/scripts/tools/tests/test-kubespray-version-select.sh`
 Expected: 全通过
 
-- [ ] **Step 5: 全量校验 + 提交**
+- [x] **Step 5: 全量校验 + 提交**
 
 Run: `bash -n deployments/kubespray/cubestack-version-dir.sh && bash deployments/scripts/tools/check-modules.sh`
 Expected: 全绿(⑮ 新套件也跑)
@@ -608,7 +608,7 @@ git commit -m "feat(kubespray): 版本目录工具 list/verify/materialize + 忽
   产出 `<版本>/tree.tar.gz` + `tree.tar.gz.sha256` + `VERSION.profile` + (可选)`LOCAL_ONLY`
 - Consumes: 上游树 + 该版本的 `cubestack-patch-apply.sh --check`(补丁在位判据)
 
-- [ ] **Step 1: fixture 断言(先失败)**
+- [x] **Step 1: fixture 断言(先失败)**
 
 用**假树**造一个最小 `--from-root`(含 `kubespray/galaxy.yml` + 桩 `cubestack-patch-apply.sh --check` rc=0):
 
@@ -634,9 +634,9 @@ chk "补丁不在位 → rc!=0 且不产物" 1 "$([ "${rc}" -ne 0 ] && [ ! -d "$
 rm -rf "${_src}" "${_ro2}"
 ```
 
-- [ ] **Step 2: 跑测试确认失败** → FAIL(未知子命令 new)
+- [x] **Step 2: 跑测试确认失败** → FAIL(未知子命令 new)
 
-- [ ] **Step 3: 实现 `new`**
+- [x] **Step 3: 实现 `new`**
 
 ```bash
 cmd_new() { # new <标签> --from-root DIR [--local] [--assets-from DIR]
@@ -679,8 +679,8 @@ cmd_new() { # new <标签> --from-root DIR [--local] [--assets-from DIR]
 的现有 awk 与 `_ksd_cmp` 取法**(kubelet_checksums 成员判定见 `:664-670`/`:718-724`;download.yml 表值
 见 `:745-777`)—— 不得另造一套口径。先支持 k8s 基座 12 项;任一取不到 → 报错退出(不写空值骨架)。
 
-- [ ] **Step 4: 跑测试确认通过**
-- [ ] **Step 5: 全量校验 + 提交**
+- [x] **Step 4: 跑测试确认通过**
+- [x] **Step 5: 全量校验 + 提交**
 
 ```bash
 git add deployments/kubespray/cubestack-version-dir.sh deployments/scripts/tools/tests/test-kubespray-version-select.sh
@@ -698,7 +698,7 @@ git commit -m "feat(kubespray): version-dir new —— 预验证补丁在位后�
 - Consumes: Task 3 的档案文件;Task 4/5 的版本目录结构
 - Produces: ⑯ 对"在库档案"与"在场版本目录"逐版本断言;⑱ 断言 tar 指纹/档案副本一致/LOCAL_ONLY 不自相矛盾
 
-- [ ] **Step 1: 写反证 fixture(先证明检查能红)**
+- [x] **Step 1: 写反证 fixture(先证明检查能红)**
 
 ```bash
 # 在临时 OFFLINE_FILES_ROOT 里放一个"钉子与树表值不符"的 fixture, 断言 ⑯ 报错
@@ -706,8 +706,8 @@ git commit -m "feat(kubespray): version-dir new —— 预验证补丁在位后�
 (实现方式:⑯ 的版本目录分支读 `OFFLINE_FILES_ROOT` 环境变量;用 fixture 跑 `check-modules.sh --quiet`
 并断言 rc!=0 且输出含"版本目录"。)
 
-- [ ] **Step 2: 跑一次确认当前不报错(即新检查确实还没生效)** → rc=0(现 ⑯ 不覆盖)
-- [ ] **Step 3: 实现 ⑯ 扩展 + ⑱**
+- [x] **Step 2: 跑一次确认当前不报错(即新检查确实还没生效)** → rc=0(现 ⑯ 不覆盖)
+- [x] **Step 3: 实现 ⑯ 扩展 + ⑱**
 
 ⑯ 追加(在现有 A/B/C 断言之后):对 `deployments/config/profiles/*.profile` 逐个断言其版本面值
 == 对应版本树表值(档案与树目录名同源时读仓库树;否则读该版本目录里的 `tree.tar.gz` 解出的树);
@@ -720,7 +720,7 @@ git commit -m "feat(kubespray): version-dir new —— 预验证补丁在位后�
 
 `check-modules.sh` 头部注释的项数(`1/17 … 17/17`)与清单同步改成 18 项。
 
-- [ ] **Step 4: 跑反证 + 全量校验**
+- [x] **Step 4: 跑反证 + 全量校验**
 
 Run:
 ```bash
@@ -730,7 +730,7 @@ OFFLINE_FILES_ROOT=<fixture> bash deployments/scripts/tools/check-modules.sh --q
 ```
 Expected: 正例 rc=0;反例 rc=1 且点名 fixture
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git commit -m "feat(check-modules): ⑯ 逐版本断言 + ⑱ 版本目录自检"
@@ -750,7 +750,7 @@ git commit -m "feat(check-modules): ⑯ 逐版本断言 + ⑱ 版本目录自检
 - Produces: `fetch --kubespray-version <V>` ≡ `--sub kubespray/<V>`;`sync` 自动跳过 `LOCAL_ONLY`;
   `trim --version <V>`(默认 = `KUBESPRAY_VERSION`)
 
-- [ ] **Step 1: 断言(先失败,全部离线可跑)**
+- [x] **Step 1: 断言(先失败,全部离线可跑)**
 
 ```bash
 echo "== ⑨ 离线链路: 本地临时版本排除 / trim 只动选定版本 / fetch 参数 =="
@@ -773,8 +773,8 @@ chk "fetch 识别 --kubespray-version" 0 "${rc}"
 rm -rf "${_ro3}"
 ```
 
-- [ ] **Step 2: 跑测试确认失败** → FAIL(未知参数)
-- [ ] **Step 3: 实现三处改动**
+- [x] **Step 2: 跑测试确认失败** → FAIL(未知参数)
+- [x] **Step 3: 实现三处改动**
 
 - `sync-to-minio.sh`:
   - 🔴 **必带回归护栏**:Task 1 改 `OFFLINE_FILES_DIR` 语义时,`:44` 的字面哨兵
@@ -798,7 +798,7 @@ rm -rf "${_ro3}"
   - 启动时列出同组件其它版本目录并声明"本次不触碰";
   - `--dry-run` 不再要求 root(只读)。
 
-- [ ] **Step 4: 跑测试确认通过;全量校验**
+- [x] **Step 4: 跑测试确认通过;全量校验**
 
 Run:
 ```bash
@@ -807,7 +807,7 @@ bash -n deployments/scripts/tools/offline/{fetch-offline-from-minio,sync-to-mini
 bash deployments/scripts/tools/check-modules.sh
 ```
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git commit -m "feat(offline): 版本目录支持 —— fetch 二级选择/sync 排除本地临时版本/trim 版本化"
@@ -828,7 +828,7 @@ git commit -m "feat(offline): 版本目录支持 —— fetch 二级选择/sync 
 - Consumes: Task 1/3 的变量与档案;Task 5 的 `new`
 - Produces: 在库版本 `v2.32.0`(资产齐套 + 树 tar + 档案副本 + 版本目录 README)
 
-- [ ] **Step 1a: `.gitignore` 放行两层 README(迁移的**前置**,顺序不能反)**
+- [x] **Step 1a: `.gitignore` 放行两层 README(迁移的**前置**,顺序不能反)**
 
 现有四行规则之后追加两行(顺序要紧:先放行二级**目录**本身,git 才会往里走,深度三的 README 才可能被放行):
 
@@ -852,7 +852,7 @@ git add .gitignore deployments/offline-files/kubespray/README.md   # 此时 READ
 git commit -m "chore(offline): gitignore 放行版本目录内的 README(迁移前置)"
 ```
 
-- [ ] **Step 1b: 落点版本化(代码)**
+- [x] **Step 1b: 落点版本化(代码)**
 
 `lib-image-manifest.sh` **不 source lib-common**(文件头第 13-14 行明确:CI 上必须独立跑)⇒ 本库要
 **自派生** `KUBESPRAY_VERSION`(否则会拼出 `kubespray//images`):
@@ -878,7 +878,7 @@ image_group_dir() {
 }
 ```
 
-- [ ] **Step 2: 迁移本地资产(文件系统操作,可回滚)**
+- [x] **Step 2: 迁移本地资产(文件系统操作,可回滚)**
 
 ```bash
 cd deployments/offline-files/kubespray
@@ -893,7 +893,7 @@ for x in $(ls -1 | grep -v '^v2\.32\.0$'); do mv "${x}" v2.32.0/; done
 > 迁移后立刻核对:`git status --short deployments/offline-files/kubespray/` 应显示
 > `R  README.md -> v2.32.0/README.md`(重命名),**不得**显示 `D README.md`。
 
-- [ ] **Step 3: 产出 tree.tar.gz + VERSION.profile(用 Task 5 的工具)**
+- [x] **Step 3: 产出 tree.tar.gz + VERSION.profile(用 Task 5 的工具)**
 
 ```bash
 bash deployments/kubespray/cubestack-version-dir.sh new v2.32.0 \
@@ -902,7 +902,7 @@ bash deployments/kubespray/cubestack-version-dir.sh verify v2.32.0
 ```
 ⚠ `new` 会拒收补丁不在位的树 —— 这正是"预验证"闸门;若报 MISSING,先按 `docs/kubespray-upgrade.md` 处理。
 
-- [ ] **Step 4: 校验落点**
+- [x] **Step 4: 校验落点**
 
 ```bash
 bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray      # ④/⑤ 必须过
@@ -916,7 +916,7 @@ Expected: 全绿。
 > + check-modules ⑱ + `check_offline_files` 预检,不是这个脚本;② ⑤(k8s-base ↔ PRELOAD_IMAGE_PATTERNS
 > 交叉核对)必须仍绿 —— 它只比模式串,不受目录层级影响。
 
-- [ ] **Step 5: 提交(只提交代码与 README;资产/tar 均 gitignored)**
+- [x] **Step 5: 提交(只提交代码与 README;资产/tar 均 gitignored)**
 
 ```bash
 git add deployments/scripts/tools/images/lib-image-manifest.sh \
@@ -936,7 +936,7 @@ git commit -m "feat(images): k8s-base/ceph 镜像落点跟随版本目录 + v2.3
 - Consumes: Task 5 的 `new --local`、Task 4 的 `materialize/verify`
 - Produces: 第二个真实版本目录,用于验证"选择/预检/物化/钉子"
 
-- [ ] **Step 1: 从 tag 取 v2.28 树(不改工作区)**
+- [x] **Step 1: 从 tag 取 v2.28 树(不改工作区)**
 
 ```bash
 _ts="$(mktemp -d)"
@@ -944,7 +944,7 @@ git archive kubespray-2.28.0-cubestack deployments/kubespray | tar -x -C "${_ts}
 ls "${_ts}/deployments/kubespray/kubespray/galaxy.yml"   # 期望 version: 2.28.0
 ```
 
-- [ ] **Step 2: 造本地临时版本目录**
+- [x] **Step 2: 造本地临时版本目录**
 
 ```bash
 bash deployments/kubespray/cubestack-version-dir.sh new v2.28.0 \
@@ -952,7 +952,7 @@ bash deployments/kubespray/cubestack-version-dir.sh new v2.28.0 \
      --assets-from /data/offline-superseded-20260928 --local
 ```
 
-- [ ] **Step 3: 按 v2.28 树表值核对资产齐套并补齐**
+- [x] **Step 3: 按 v2.28 树表值核对资产齐套并补齐**
 
 ```bash
 bash deployments/kubespray/cubestack-version-dir.sh verify v2.28.0     # 列出缺失件
@@ -961,7 +961,7 @@ bash deployments/kubespray/cubestack-version-dir.sh verify v2.28.0     # 列出�
 ```
 Expected: `verify` 全绿(或明确列出**补齐不了**的件,如实记录在 README)
 
-- [ ] **Step 4: 物化 + 版本选择实证(不装集群)**
+- [x] **Step 4: 物化 + 版本选择实证(不装集群)**
 
 ```bash
 bash deployments/kubespray/cubestack-version-dir.sh materialize v2.28.0
@@ -971,7 +971,7 @@ diff /tmp/p28 /tmp/p32      # 期望: 资产目录/树/BASE_DIR 三处不同, �
 KUBESPRAY_VERSION=v2.28.0 sudo bash deployments/scripts/deploy-cluster.sh --list-steps >/dev/null  # 不报错
 ```
 
-- [ ] **Step 5: 记录验证结论(本地临时版本的边界)**
+- [x] **Step 5: 记录验证结论(本地临时版本的边界)**
 
 在 `docs/kubespray-versioning/README.md` 中记录:两版本共存实证、v2.28 的补齐情况、
 **明确未做**(未真装集群)。
@@ -982,23 +982,23 @@ KUBESPRAY_VERSION=v2.28.0 sudo bash deployments/scripts/deploy-cluster.sh --list
 
 **Files:** 无代码改动(纯操作 + 记录)
 
-- [ ] **Step 1: 干跑(只读)**
+- [x] **Step 1: 干跑(只读)**
 
 ```bash
 sudo bash deployments/scripts/tools/offline/sync-to-minio.sh --dry-run
 ```
 Expected: 输出里 **v2.28.0 被跳过(本地临时版本)**、v2.32.0 的上传清单可见
 
-- [ ] **Step 2: 请用户确认上传**(⚠ 对外动作:远端会新增对象)
+- [x] **Step 2: 请用户确认上传**(⚠ 对外动作:远端会新增对象)
 
-- [ ] **Step 3: 真上传 + 核对**
+- [x] **Step 3: 真上传 + 核对**
 
 ```bash
 sudo bash deployments/scripts/tools/offline/sync-to-minio.sh
 mc ls minio/cubestack-installer/offline-files/kubespray/          # 期望只看到 v2.32.0/
 ```
 
-- [ ] **Step 4: 二级下载实证(只拉一个小子目录,避免 4GB)**
+- [x] **Step 4: 二级下载实证(只拉一个小子目录,避免 4GB)**
 
 ```bash
 bash deployments/scripts/tools/offline/fetch-offline-from-minio.sh --list           # 二级列表可见 v2.32.0
@@ -1007,7 +1007,7 @@ bash deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
 ls /tmp/fetch-probe/kubespray/v2.32.0/packages | head
 ```
 
-- [ ] **Step 5: 记录**(README 里补"如何只下载指定版本"一段)
+- [x] **Step 5: 记录**(README 里补"如何只下载指定版本"一段)
 
 ---
 
@@ -1021,10 +1021,10 @@ ls /tmp/fetch-probe/kubespray/v2.32.0/packages | head
 - Modify: `deployments/scripts/tools/docker/build-cli-context.sh:97-98`
 - Modify: `.dockerignore:40-64`
 
-- [ ] **Step 1: 逐处改经变量**(统一口径:`${OFFLINE_FILES_DIR}` = 版本资产目录;`${OFFLINE_FILES_ROOT}` = 真根)
-- [ ] **Step 2: `.dockerignore`** 路径加版本层(`deployments/offline-files/kubespray/*/images` 等)——
+- [x] **Step 1: 逐处改经变量**(统一口径:`${OFFLINE_FILES_DIR}` = 版本资产目录;`${OFFLINE_FILES_ROOT}` = 真根)
+- [x] **Step 2: `.dockerignore`** 路径加版本层(`deployments/offline-files/kubespray/*/images` 等)——
   该文件无变量能力,只能逐条改;以 `Dockerfile-cli` 的 `COPY` 清单为准逐条对齐(两处必须成对改)
-- [ ] **Step 3: 校验**
+- [x] **Step 3: 校验**
 
 ```bash
 bash -n <改动的脚本>
@@ -1042,9 +1042,9 @@ bash deployments/scripts/tools/check-modules.sh
 - Modify: `.claude/skills/cubestack-deploy-scripts/SKILL.md`(新增"版本目录"小节 + 审查清单两项)
 - Modify: `.claude/skills/cubestack-add-module/SKILL.md`(新模块若带离线资产 → 版本目录规范)
 
-- [ ] **Step 1: 写 `docs/kubespray-versioning/README.md`**(含 Task 9/10 的实证结论与边界)
-- [ ] **Step 2: 三处引用同步修改**
-- [ ] **Step 3: 最终全量验证**
+- [x] **Step 1: 写 `docs/kubespray-versioning/README.md`**(含 Task 9/10 的实证结论与边界)
+- [x] **Step 2: 三处引用同步修改**
+- [x] **Step 3: 最终全量验证**
 
 ```bash
 bash deployments/scripts/tools/check-modules.sh
@@ -1054,7 +1054,7 @@ bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray
 加 CI 等价快照验证(用 `git ls-files --cached --others --exclude-standard | tar` 造快照 + 抽 run 块真跑,
 做法同 2026-09-30 的 CI 落地)。
 
-- [ ] **Step 4: 提交** `docs(kubespray): 版本目录使用手册 + 升级/规范/skill 同步`
+- [x] **Step 4: 提交** `docs(kubespray): 版本目录使用手册 + 升级/规范/skill 同步`
 
 ---
 
@@ -1075,3 +1075,29 @@ D7(Task 12 的 operator 迁移规范)、D8(Task 1/5 的全 tag 约束)、§4(Tas
 - Task 9 Step 3:1.32 线缺件能否补齐取决于 Harbor/网络;补不齐就**如实记录**,不得把缺失写成已验证。
 - Task 8 Step 4 的判据边界:版本目录齐套**不看** `check-image-manifest.sh` ④b(它主动跳过 k8s-base/ceph
   且只是 warn),看 `version-dir verify` + ⑱ + `check_offline_files`。
+
+---
+
+## 执行记录(2026-09-30 完成, 12/12)
+
+全部任务已完成;提交 15 个(见下),最终 CI 等价快照验证全绿
+(142 脚本 0 语法错 / check-modules 18 项 / 80 YAML / 49 镜像;快照无泄漏)。
+
+**与计划的偏差(均为实测发现, 优于计划或用户追加)**:
+
+| 任务 | 偏差 | 原因 |
+|---|---|---|
+| T2 | 版本从**实际要用的树**(`CUBESTACK_KUBESPRAY_DIR/`galaxy.yml)派生, 而非脚本目录 | 物化版本时脚本仍在仓库里, 按脚本目录派生会取到仓库树版本 ⇒ 资产与树错配 |
+| T5 | 档案推导新增 **v 前缀继承**(跟随 cluster.conf.example 的写法) | 镜像 ref 直接把变量当 tag(`kube-apiserver:${K8S_VERSION}`), 真实 tag 是 `v1.35.8` ⇒ v 是值的一部分 |
+| T5 | 树 tar **统一为顶层 `kubespray/`** + 新增 `repack` 子命令 | 原 `-C 树 .` 打包成内容平铺 ⇒ 物化幂等与 BASE_DIR/kubespray 推导全对不上 |
+| T6 | ⑱ 独立成节(而非并入 ⑯) | 语义更清晰: ⑯=cluster.conf↔仓库树; ⑱=档案/版本目录逐版本闭合 |
+| T9 | 新增**跨版本表形态容忍层**(`kb_tables_version_for`) | 实测 kubespray 支持矩阵三种形态漂移(表位置/字面量 vs Jinja select/条件表达式) |
+| T8/T10 | `/data` 用"重排+归档"、MinIO 用"服务端 mv 重排+增量" | 用户确认;避免 4.2GB 重传与全量 `--delete` |
+| T11 | 追加**"CLI 镜像只含 deployments 代码"**(计划外, 用户口径) | 三处二进制不再打进镜像 + 运行期 profile.d 钩子挂载 |
+| T10 | 远端**新旧并存**(扁平层恢复) + **暂不 prune** | 用户口径: 兼容旧 CLI 镜像, 测试成功+新镜像后再手动清 |
+
+**遗留(待用户侧)**:
+1. 构建/测试新 CLI 镜像(全量构建得到 code-only 镜像;容器内用 `bash -lc`);
+2. 测试成功后按手册 §7 清理兼容层并 `--prune --force-full-prune`(远端扁平旧文件 + `_superseded-20260930/`);
+3. v2.28 的 gateway-api 清单 / skopeo / yq 缺口(仅影响该本地临时版本真部署, 已记在版本目录 NOTE);
+4. 本批提交**尚未 push**(用户口径: 先不 push)。
