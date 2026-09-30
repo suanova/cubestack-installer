@@ -66,6 +66,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends software-proper
 WORKDIR ${REPO_ROOT}
 RUN rm -rf ${REPO_ROOT}/deployments ${REPO_ROOT}/skills 2>/dev/null || true
 COPY deployments ${REPO_ROOT}/deployments
+
+# 运行期 CLI 工具链钩子(与 Dockerfile-cli 一致; 镜像只含 deployments/ 代码 ——
+#   kubectl/helm/skopeo 由容器运行期从挂载的版本目录挂到 PATH, 见该钩子头部说明)
+COPY deployments/scripts/tools/docker/cli-toolchain-from-offline.sh /etc/profile.d/50-cubestack-tools.sh
+RUN chmod 0644 /etc/profile.d/50-cubestack-tools.sh
 COPY skills ${REPO_ROOT}/skills
 
 # 预装 kubespray Python 依赖(随 requirements.txt 精确锁定; 让运行时 ensure_venv
