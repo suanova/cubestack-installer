@@ -129,8 +129,13 @@ init_remote_kubectl || exit 1
    —— 升级只改这一处,清单 / CI / 离线包自动跟随。
 3. **建目录 + README(最容易漏)**:`deployments/offline-files/<group>/README.md`,照抄
    `offline-files/rdma/README.md`。⚠ **空目录 git 存不下,`.gitignore` 也只放行
-   `offline-files/*/README.md`** —— 不写 README,新目录提交后会消失(用 `check-image-manifest.sh`
-   的 ④b 项兜底: 它会列出"清单里有 group、却没有目录/README"的项)。
+   `offline-files/*/README.md`(版本目录内是 `offline-files/*/*/README.md`, 两行缺一不可 —
+   少了"放行二级目录本身"那行, 版本目录的 README 会静默从 git 消失)** —— 不写 README,新目录
+   提交后会消失(用 `check-image-manifest.sh` 的 ④b 项兜底: 它会列出"清单里有 group、却没有目录/README"的项)。
+   ⚠ **版本层(2026-09-30 起)**:若该组件的离线资产要**按版本选**, 资产放
+   `offline-files/<group>/<版本>/`(版本名 = 上游 tag 全名), 并四条一起改(资产目录 / 版本开关 /
+   `images.manifest` 落点 / `trim-offline-files.sh --version`); 规程见
+   [`docs/kubespray-versioning/README.md`](docs/kubespray-versioning/README.md) §5。
 4. **备料 tar**:`sudo ./deployments/scripts/tools/images/harbor-save-images.sh --group <组>`
    (从 Harbor 拉到该组目录,目录不存在会自动补建)。这是**联网机**上的动作,不要在部署机上现拉。
 5. **自检**:`bash deployments/scripts/tools/images/check-image-manifest.sh`
