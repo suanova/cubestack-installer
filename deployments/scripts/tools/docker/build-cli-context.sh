@@ -30,11 +30,15 @@
 #       sudo ./build-cli-context.sh --build --incremental --push   # 增量构建并推送
 #       sudo ./build-cli-context.sh --base            # **只在系统/工具/依赖变化时**重建 base 层
 #       sudo ./build-cli-context.sh --base --push     # 重建并推送 base 层
+#       sudo ./build-cli-context.sh --build --engine podman    # 用 podman 构建(docker/podman 都支持)
+# 容器引擎: 默认自动探测(docker 优先, 无 docker 用 podman);可用 --engine docker|podman 或
+#   CONTAINER_ENGINE 环境变量指定。podman 构建统一 `--format docker`(清单格式与 Makefile 一致)。
 # ★ 两层结构(2026-09-30): base(Dockerfile-cli-base: 系统+工具链+ansible+mc)极少变;
 #   --build / --incremental 都只做**代码层**(FROM base + copy deployments)⇒ 快, 且**层数不累积**。
 #       sudo ./build-cli-context.sh --output /tmp/cli-ctx
-# 构建(手动): 生成后执行
+# 构建(手动): 生成后执行(引擎按需替换 docker / podman; podman 要加 --format docker)
 #       sudo docker build -f Dockerfile-cli -t harbor.isuanova.com/suanova/cubestack-installer-cli:latest deployments/cli-context/
+#       sudo podman build --format docker -f Dockerfile-cli -t harbor.isuanova.com/suanova/cubestack-installer-cli:latest deployments/cli-context/
 # 说明: cli-context/ 为生成目录(gitignore), 每次构建前重新生成即可保证与源码一致。
 # ============================================================
 set -euo pipefail
@@ -61,10 +65,25 @@ while [ $# -gt 0 ]; do
         --push)   DO_BUILD=1; DO_PUSH=1; shift ;;
         --incremental) DO_BUILD=1; INCREMENTAL=1; shift ;;
         --base)   DO_BASE=1; DO_BUILD=1; shift ;;
+        --engine) ENGINE_ARG="${2:?--engine 需要 docker 或 podman}"; shift 2 ;;
         -h|--help) head -20 "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) err "未知参数: $1(可用 --output/--build/--push/--incremental/--base)"; exit 1 ;;
+        *) err "未知参数: $1(可用 --output/--build/--push/--incremental/--base/--engine)"; exit 1 ;;
     esac
 done
+
+# ---------- 容器引擎: docker / podman 皆可(2026-09-30) ----------
+# 优先级: --engine > CONTAINER_ENGINE 环境变量 > 自动探测(docker 优先, 没有则 podman)。
+# podman 构建统一加 `--format docker`(manifest 用 docker v2s2; 与 Makefile 的 installer 镜像一致,
+#   对 Harbor/k8s 拉取的兼容性最好)。
+ENGINE="${ENGINE_ARG:-${CONTAINER_ENGINE:-}}"
+if [ -z "${ENGINE}" ]; then
+    if command -v docker >/dev/null 2>&1; then ENGINE=docker
+    elif command -v podman >/dev/null 2>&1; then ENGINE=podman
+    else err "没有可用的容器引擎(docker / podman 都找不到); 装一个或用 --engine 指定"; exit 1; fi
+fi
+command -v "${ENGINE}" >/dev/null 2>&1 || { err "--engine ${ENGINE} 不可用(命令不存在)"; exit 1; }
+ENGINE_FMT_ARGS=()
+[ "${ENGINE}" = "podman" ] && ENGINE_FMT_ARGS=(--format docker)
 
 say "生成 CLI 镜像构建上下文 → ${OUT}"
 rm -rf "${OUT}"
@@ -152,52 +171,52 @@ ok "构建上下文就绪: ${OUT}  ($(du -sh "${OUT}" 2>/dev/null | awk '{print 
 if [ "${DO_BUILD}" = "1" ]; then
     if [ "${DO_BASE}" = "1" ]; then
         # ---- 只重建 base 层(系统+工具链): 新增 package/工具/依赖版本变化时才需要 ----
-        if ! docker image inspect "${BASE_IMAGE}" >/dev/null 2>&1; then
+        if ! ${ENGINE} image inspect "${BASE_IMAGE}" >/dev/null 2>&1; then
             if [ -f "${OS_TAR}" ]; then
-                say "本地无 ${BASE_IMAGE}, 从离线文件 docker load ..."
-                docker load -i "${OS_TAR}"
+                say "本地无 ${BASE_IMAGE}, 从离线文件 ${ENGINE} load ..."
+                ${ENGINE} load -i "${OS_TAR}"
             else
-                err "基础镜像 ${BASE_IMAGE} 缺失且离线文件不存在(${OS_TAR}); 先运行 fetch-offline-from-minio.sh 或 docker pull ${BASE_IMAGE}"
+                err "基础镜像 ${BASE_IMAGE} 缺失且离线文件不存在(${OS_TAR}); 先运行 fetch-offline-from-minio.sh 或 ${ENGINE} pull ${BASE_IMAGE}"
                 exit 1
             fi
         fi
         [ -f "${OUT}/Dockerfile-cli-base" ] || { err "上下文缺 Dockerfile-cli-base(仓库里没有 ${CLI_BASE_DOCKERFILE}?)"; exit 1; }
         say "构建 base 层(系统+工具链; 需要联网 apt/pip) → ${CLI_BASE_TAG} ..."
-        docker build -f "${OUT}/Dockerfile-cli-base" -t "${CLI_BASE_TAG}" "${OUT}" \
+        ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f "${OUT}/Dockerfile-cli-base" -t "${CLI_BASE_TAG}" "${OUT}" \
             || { err "base 构建失败"; exit 1; }
-        _base_layers="$(docker history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l)"
+        _base_layers="$(${ENGINE} history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l)"
         ok "base 层完成: ${CLI_BASE_TAG}(${_base_layers} 层)"
     fi
 
     # ---- 代码层构建(两种 Dockerfile 都 FROM base): 只 copy deployments 代码, 层数不累积 ----
-    if ! docker image inspect "${CLI_BASE_TAG}" >/dev/null 2>&1; then
+    if ! ${ENGINE} image inspect "${CLI_BASE_TAG}" >/dev/null 2>&1; then
         say "本地无 base 镜像 ${CLI_BASE_TAG}, 尝试从 Harbor 拉取 ..."
-        docker pull "${CLI_BASE_TAG}" 2>/dev/null || {
+        ${ENGINE} pull "${CLI_BASE_TAG}" 2>/dev/null || {
             err "缺 base 镜像 ${CLI_BASE_TAG}(本地与 Harbor 都没有)"
             err "  → 首次/系统或工具变化时先建 base: sudo $0 --base     (需要联网 apt/pip)"
             exit 1; }
     fi
     _df="Dockerfile-cli"; [ "${INCREMENTAL}" = "1" ] && _df="Dockerfile-cli-incremental"
     # 层数信息(base 是固定的, 代码层每次只加 1~2 层; 这里给个可观察的数字)
-    _base_layers="$(docker history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l)"
-    _cur_layers="$(docker history --no-trunc "${IMAGE}" 2>/dev/null | tail -n +2 | wc -l)"
+    _base_layers="$(${ENGINE} history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l)"
+    _cur_layers="$(${ENGINE} history --no-trunc "${IMAGE}" 2>/dev/null | tail -n +2 | wc -l)"
     say "代码层构建(${_df} ← base ${CLI_BASE_TAG}(base ${_base_layers} 层 / 当前 latest ${_cur_layers:-0} 层)) ..."
     if [ "${INCREMENTAL}" = "1" ]; then
         say "  说明: --incremental 只 copy 代码(不跑依赖对齐); 依赖变化请用 --build"
     fi
-    docker build -f "${OUT}/${_df}" --build-arg "CLI_BASE_TAG=${CLI_BASE_TAG}" -t "${IMAGE}" "${OUT}" \
+    ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f "${OUT}/${_df}" --build-arg "CLI_BASE_TAG=${CLI_BASE_TAG}" -t "${IMAGE}" "${OUT}" \
         || { err "代码层构建失败"; exit 1; }
     ok "构建完成: ${IMAGE}"
     if [ "${DO_PUSH}" = "1" ]; then
         say "推送到 Harbor ..."
-        docker push "${IMAGE}" || { err "推送失败(需先 docker login)"; exit 1; }
+        ${ENGINE} push "${IMAGE}" || { err "推送失败(需先 ${ENGINE} login ${IMAGE%%/*})"; exit 1; }
         ok "已推送: ${IMAGE}"
     fi
 else
     echo "  构建镜像(全量, 基础 ubuntu:22.04):"
-    echo "    sudo docker build -f Dockerfile-cli -t ${IMAGE} ${OUT}"
+    echo "    sudo ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f Dockerfile-cli -t ${IMAGE} ${OUT}"
     echo "  构建镜像(增量, 基础 Harbor latest):"
-    echo "    sudo docker build -f Dockerfile-cli-incremental -t ${IMAGE} ${OUT}"
+    echo "    sudo ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f Dockerfile-cli-incremental -t ${IMAGE} ${OUT}"
     echo "  推送:"
-    echo "    sudo docker push ${IMAGE}"
+    echo "    sudo ${ENGINE} push ${IMAGE}"
 fi

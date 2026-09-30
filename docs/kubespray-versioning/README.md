@@ -180,6 +180,11 @@ sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build --increment
 sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base --push  # base 也要推 Harbor(别人才拉得到)
 ```
 
+**容器引擎**:`docker` 与 **`podman` 都支持** —— 默认自动探测(docker 优先, 没有则 podman),
+可用 `--engine docker|podman` 或 `CONTAINER_ENGINE` 环境变量指定;podman 构建统一加 `--format docker`
+(清单格式与 `Makefile` 的 installer 镜像一致)。⚠ 两个引擎**镜像存储互相独立**:用 podman 构建时
+若 base 不在 podman store 里,先 `--engine podman --base`(或从 Harbor 拉,需先推过 base)。
+
 **为什么必须分层**:旧的"增量 = `FROM 上一版 latest`"会让层数**单调累积**(实测 443 → 590 层),
 而 containerd overlayfs 把全部祖先层拼进 `lowerdir`,选项字符串超过内核 `PAGE_SIZE`(4096B)⇒
 buildkit 在**任意 RUN 步**报 `mount source: "overlay" ... invalid argument`。现在代码层每次
