@@ -378,13 +378,11 @@ ensure_registry_nginx() {
     # find_offline_tar 是 endswith 语义, 版本化 tag(nginx:1.31.4)不命中, 下方按内容兜底。
     _t="$(find_offline_tar "nginx:latest" "nginx*.tar" \
             "${REPO_ROOT}/deployments/offline-files/nginx" \
-            "${LOCAL_REPO_DIR}/images" \
-            "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME:-cubestack-cluster}/images")" || _t=""
+            "${LOCAL_REPO_DIR}/images")" || _t=""
     if [ -z "${_t}" ]; then
         # 兜底: 版本化 tag(如 nginx:1.31.4)按内容匹配(含 "nginx:" 即接受)
         for _d in "${REPO_ROOT}/deployments/offline-files/nginx" \
-                  "${LOCAL_REPO_DIR}/images" \
-                  "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME:-cubestack-cluster}/images"; do
+                  "${LOCAL_REPO_DIR}/images"; do
             [ -d "${_d}" ] || continue
             for _f in "${_d}"/nginx*.tar; do
                 [ -f "${_f}" ] || continue

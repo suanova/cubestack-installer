@@ -79,23 +79,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends software-proper
     && python3.11 -V
 
 # ---------- kubectl(构建上下文 bin/ 临时拷入, 规避被墙的 dl.k8s.io) ----------
-# bin/ 由 build-cli-context.sh 从 deployments/offline-files/kubespray 临时拷入
-# (与 kubespray 集群二进制同源, 文件名 kubectl-<版本>-amd64)。helm 同理。
-# 注: 用精确文件名明确锁定版本(避免 shell 通配紧邻 '.' 解析的坑)。
-COPY bin/kubectl-1.35.8-amd64 /usr/local/bin/kubectl
-RUN chmod +x /usr/local/bin/kubectl && kubectl version --client 2>/dev/null | head -1
-
-COPY bin/helm-3.22.0-linux-amd64.tar.gz /tmp/helm.tar.gz
-RUN tar xzf /tmp/helm.tar.gz -C /tmp \
-    && mv /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/linux-amd64 /tmp/helm.tar.gz \
-    && helm version --short
-
-# ---------- skopeo(离线镜像 docker-archive → 集群 registry 推送) ----------
-# 从构建上下文 bin/ 拷入(静态二进制, 无动态依赖); 若缺失则由 fetch-offline-files.sh
-# 补齐后重新生成上下文, 或回退用 apt 装的 skopeo。
-COPY bin/skopeo-1.16.1-amd64 /usr/local/bin/skopeo
-RUN chmod +x /usr/local/bin/skopeo \
-    && (skopeo --version 2>/dev/null || true)
+# ---------- CLI 工具链(kubectl / helm / skopeo): **不打进镜像** ----------
+# 2026-09-30 起: 镜像只含 deployments/ 代码; 这三个工具随离线件挂在
+#   deployments/offline-files/kubespray/<版本>/, 由下面的 profile.d 钩子在**登录 shell**里
+#   幂等地挂到 /usr/local/bin(实现见 deployments/scripts/tools/docker/cli-toolchain-from-offline.sh)。
+#   ⇒ 构建上下文不再需要 bin/, 也不受离线件体积影响; 部署流程用 `bash -lc`(文档口径)。
+COPY deployments/scripts/tools/docker/cli-toolchain-from-offline.sh /etc/profile.d/50-cubestack-tools.sh
+RUN chmod 0644 /etc/profile.d/50-cubestack-tools.sh
 
 # ---------- mc(MinIO Client, 下载离线文件; 走 MinIO 官方二进制直下) ----------
 # 注: 之前华为云镜像 URL 返回 HTML 页面、官方 apt 仓库 key.gpg 亦不稳定,
