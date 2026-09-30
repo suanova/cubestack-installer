@@ -166,7 +166,27 @@ operator **不搞批量搬迁**;凡要"按版本选"的组件,按同一套四条
 - 构建上下文 `build-cli-context.sh`:无 `bin/`、排除 `kubespray/versions/`(物化树不进镜像),
   实测 218M → **87M(纯代码)**。全量构建得到纯净的 code-only 镜像;增量构建继承基础镜像内容。
 
-### ⚠ 增量构建的**层数累积**(2026-09-30 实测, 已加守卫)
+### 两层镜像结构(2026-09-30, 用户口径; 根治层数累积)
+
+| 层 | Dockerfile | 内容 | 何时重建 |
+|---|---|---|---|
+| **base** | `Dockerfile-cli-base` | ubuntu 22.04 + apt 工具 + python3.11 + ansible(requirements.txt)+ **mc** | **只在新增 package/工具或依赖版本变化时**(`--base`; 需联网 apt/pip, 约 10 分钟) |
+| **代码层** | `Dockerfile-cli`(带依赖对齐)/ `Dockerfile-cli-incremental`(跳过对齐) | `FROM <base>` + 只 copy `deployments/`+`skills` + 运行期工具链钩子 + 自检 | 日常改了部署脚本就重建(`--build` / `--incremental`; 秒级~分钟级) |
+
+```bash
+sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base       # 仅系统/工具/依赖变化时
+sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build      # 日常: 代码层(自动取 base)
+sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build --incremental   # 同上, 跳过依赖对齐
+sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base --push  # base 也要推 Harbor(别人才拉得到)
+```
+
+**为什么必须分层**:旧的"增量 = `FROM 上一版 latest`"会让层数**单调累积**(实测 443 → 590 层),
+而 containerd overlayfs 把全部祖先层拼进 `lowerdir`,选项字符串超过内核 `PAGE_SIZE`(4096B)⇒
+buildkit 在**任意 RUN 步**报 `mount source: "overlay" ... invalid argument`。现在代码层每次
+`FROM <固定的 base>`,层数是**常数**(base 层数 + 2~3)⇒ 该问题从结构上消失。
+(脚本仍保留层数显示与 `INCREMENTAL_MAX_LAYERS` 守卫作为兜底观察。)
+
+### ⚠ 旧的"增量层数累积"问题(2026-09-30 实测, 保留作为历史与判据)
 
 `--incremental` 每次都在旧镜像上再叠十几层 ⇒ **层数单调增长**。层数到几百层时, containerd 的
 overlayfs 会把**全部祖先层**拼进 `lowerdir`,挂载选项字符串超过内核 `PAGE_SIZE`(4096 字节)上限 ⇒
