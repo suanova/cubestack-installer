@@ -673,7 +673,7 @@ kubectl -n rook-ceph get secret rook-ceph-mon -o jsonpath="{.data.fsid}" | base6
 
 | 模式 | 语义 | 资源名形态 | 何时选 |
 |---|---|---|---|
-| **`by-link`(默认,推荐)** | 按**链路类型**分成 **IB / RoCE 两个资源池**,同类型多卡合并为一份 `ifNames` 并集 | `rdma/hca_shared_devices`(IB)、`rdma/roce_hca_shared_devices`(RoCE) | **要与真实 GPU 集群共用同一份 Pod 清单**时选它 —— 资源名与那边对齐 |
+| **`by-link`(默认,推荐)** | 按**链路类型**分成 **IB / RoCE 两个资源池**,同类型多卡合并为一份 `ifNames` 并集 | `rdma/hca_shared_devices`(IB)、`rdma/roce_shared_devices`(RoCE) | **要与真实 GPU 集群共用同一份 Pod 清单**时选它 —— 资源名与那边对齐 |
 | `per-hca` | **每块卡一个独立扩展资源**,Pod 按资源名精确选卡 | `${PREFIX}/<设备名>`,如 `nvidia.com/mlx5_0` / `nvidia.com/mlx5_1` | 需要"按卡分配"(IB 走 ibsX、RoCE 走 ens*) |
 | `pool` | 全部 HCA 聚合为**单个**资源 | `${PREFIX}/${NAME}` = `nvidia.com/mlx5_0` | 兼容旧部署;Pod 只能说"我要 RDMA",不能选类型也不能选卡 |
 
@@ -687,7 +687,7 @@ RDMA_IMAGE_TAG="${RDMA_IMAGE_TAG:-v1.5.4}"                # ⚠ 源在 ghcr.io/m
 RDMA_SAVE_DIR="${RDMA_SAVE_DIR:-.../offline-files/rdma}"  # 离线 tar 目录(不入库)
 RDMA_HCA_MODE="${RDMA_HCA_MODE:-by-link}"                 # by-link | per-hca | pool
 RDMA_IB_RESOURCE="${RDMA_IB_RESOURCE:-rdma/hca_shared_devices}"          # by-link: IB 池资源名
-RDMA_ROCE_RESOURCE="${RDMA_ROCE_RESOURCE:-rdma/roce_hca_shared_devices}" # by-link: RoCE 池资源名
+RDMA_ROCE_RESOURCE="${RDMA_ROCE_RESOURCE:-rdma/roce_shared_devices}" # by-link: RoCE 池资源名
 RDMA_IF_NAMES="${RDMA_IF_NAMES:-}"                        # ⚠ 留空 = 自动扫描各节点真实网卡(推荐;兼容 IB+RoCE 混合)
 RDMA_ACTIVE_ONLY="${RDMA_ACTIVE_ONLY:-true}"              # 只暴露链路 ACTIVE 的卡(DOWN/DISABLED 跳过)
 RDMA_HCA_MAX="${RDMA_HCA_MAX:-100}"                       # 每个资源最多允许多少 Pod 共享
@@ -737,7 +737,7 @@ spec:
       resources:
         limits:
           rdma/hca_shared_devices: 1          # IB 池(名字由 RDMA_IB_RESOURCE 决定)
-          # rdma/roce_hca_shared_devices: 1   # RoCE 池(需要时开这一条)
+          # rdma/roce_shared_devices: 1   # RoCE 池(需要时开这一条)
       securityContext:
         capabilities:
           add: ["IPC_LOCK"]                   # ⚠ RDMA 内存注册(mlock)必需,缺了 ibv_reg_mr 会失败
@@ -773,7 +773,7 @@ $ kubectl -n kube-system get cm rdma-devices -o jsonpath='{.data.config\.json}'
   "configList": [
     { "resourcePrefix":"rdma", "resourceName":"hca_shared_devices",      "rdmaHcaMax":100,
       "selectors": { "vendors":["15b3"], "ifNames":["ibs2","ibs3"] } },
-    { "resourcePrefix":"rdma", "resourceName":"roce_hca_shared_devices", "rdmaHcaMax":100,
+    { "resourcePrefix":"rdma", "resourceName":"roce_shared_devices", "rdmaHcaMax":100,
       "selectors": { "vendors":["15b3"], "ifNames":["manage0"] } } ] }
 $ kubectl -n kube-system get ds rdma-shared-dp-ds
 NAME              DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE

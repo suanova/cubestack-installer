@@ -555,21 +555,21 @@ kubectl -n kube-system get cm rdma-devices -o go-template='{{index .data "config
 
 **根因**
 两端资源名不同源: 真实集群的插件由 metax 侧以 `--rdma-ib-resource` / `--rdma-roce-resource`
-配置(实测 `cm rdma-devices` 里为 `hca_shared_devices` / `roce_hca_shared_devices`, 前缀 `rdma`),
+配置(实测 `cm rdma-devices` 里为 `hca_shared_devices` / `roce_shared_devices`, 前缀 `rdma`),
 而本安装器默认走 per-hca(`nvidia.com/<设备名>`)/ pool(`nvidia.com/mlx5_0`)—— 名字对不上时
 Pod 申请的资源名在集群里**根本不存在**, 且报错只出现在 Pod 事件里, 部署日志一片绿。
 
 **解法(根治)**
 `RDMA_HCA_MODE=by-link`(**cluster.conf.example 默认值**, 2026-09-21 起): 按链路类型分成两池,
 资源名取 `RDMA_IB_RESOURCE`(默认 `rdma/hca_shared_devices`)/ `RDMA_ROCE_RESOURCE`
-(默认 `rdma/roce_hca_shared_devices`), 与真实集群对齐; 名字可在 cluster.conf 改(插件侧对应
+(默认 `rdma/roce_shared_devices`), 与真实集群对齐; 名字可在 cluster.conf 改(插件侧对应
 `--rdma-ib-resource` / `--rdma-roce-resource`)。
 ⚠ 显式 `RDMA_IF_NAMES` 且未写类型时无法判定链路类型 → 归 RoCE 池并告警, 要精确分类写
 `<设备名>:<网卡名>:<类型>`(32=IB / 1=RoCE); 某类型无卡则不生成该池条目。
 
 **验证**
 本地打桩自检 ①: 2 IB + 1 RoCE → 恰好两条 `rdma/hca_shared_devices`(ifNames 2 张 IB 卡)+
-`rdma/roce_hca_shared_devices`(1 张 RoCE 卡); ④ 占位模式两池 + `rdma-placeholder=true` 标注不变。
+`rdma/roce_shared_devices`(1 张 RoCE 卡); ④ 占位模式两池 + `rdma-placeholder=true` 标注不变。
 
 **相关命令**
 ```bash
