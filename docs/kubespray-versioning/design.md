@@ -13,6 +13,7 @@
 | D1 | 版本目录是否自带源码树 | **自带 `tree.tar.gz`(预打补丁、预验证)**;仓库只保留当前版本的树 |
 | D2 | 版本机制的维度 | **两级**:组件各自选版(组件级) + 套装档案 profile 把一组绑成套(套装级) |
 | D3 | 版本目录层级 | **两层**:`offline-files/<组件>/<版本>/`(如 `kubespray/v2.32.0/`);fetch 扩展二级选择 |
+| D8 | 版本目录命名 | **全 tag**(`v2.32.0`)—— 与树内 `galaxy.yml version:`、升级脚本的 `<tag>` 参数、`git tag` 三处一致 |
 | D4 | 本次实证范围 | **v2.32 迁入并入库**(档案进 git、资产上 MinIO);**v2.28 仅作本地验证/临时测试**,不入 git、不传 MinIO |
 | D5 | 验证边界 | 验到"版本选择 / 路径推导 / 树物化 / 离线预检 / 钉子↔树表值 / 回归套件";**不用 v2.28 重装现集群** |
 | D6 | 升级路线 | **独立**:升级 = 原地换仓库树(`cubestack-kubespray-upgrade.sh`),不经版本目录;版本目录也不依赖升级脚本 |
@@ -131,9 +132,9 @@ deployments/offline-files/                     ← OFFLINE_FILES_ROOT(git 只跟
 └── …
 ```
 
-- **版本目录名 = kubespray tag 全名**(`v2.32.0`,与 `galaxy.yml version: 2.32.0`、升级脚本的 `<tag>`
-  参数、`git tag` 三处一致)。⚠ 待你在评审时确认:你举例写的是 `v2.32`(短名),本设计建议用全 tag
-  —— 短名在将来出现 `v2.32.1` 时会歧义。改为一处常量即可切换。
+- **版本目录名 = kubespray tag 全名**(`v2.32.0`,D8):与 `galaxy.yml version: 2.32.0`、升级脚本的 `<tag>`
+  参数、`git tag` 三处一致。短名(`v2.32`)在将来出现 `v2.32.1` 时会歧义,故不采用。
+  ⇒ 目录名可直接当 tag 用(`cubestack-version-dir.sh new v2.32.0`、`--kubespray-version v2.32.0`)。
 - 组件级规范(`<组件>/<版本>/`)对 operator 同样适用;operator 目录的资产形态由各自模块决定,
   本次只登记规范,不迁移(D7)。
 
