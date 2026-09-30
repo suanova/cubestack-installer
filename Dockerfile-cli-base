@@ -65,11 +65,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends software-proper
     && rm -rf /var/lib/apt/lists/* \
     && python3.11 -V
 
-# ---------- CLI 工具链(kubectl / helm / skopeo): **不打进镜像** ----------
-# 镜像只含 deployments/ 代码; 这三个工具随离线件挂在
-#   deployments/offline-files/kubespray/<版本>/, 由 profile.d 钩子在**登录 shell**里
-#   幂等地补到 PATH(实现见 deployments/scripts/tools/docker/cli-toolchain-from-offline.sh;
-#   代码层构建会把它 COPY 进 /etc/profile.d)。⇒ 部署流程用 `bash -lc`(文档口径)。
+# ---------- CLI 工具链(kubectl / helm / skopeo / yq)---------- 
+# ⚠ 2026-09-30 用户口径修订: **常用且版本固定的工具全部打进 base 镜像**(不再靠运行期挂载补)——
+#   实测事故: 运行期钩子只在**登录 shell** 生效, `docker exec … bash` / 脚本里的非登录 shell
+#   拿不到工具 ⇒ `kubectl: command not found`(部署流程里也有这种调用面)。
+#   工具版本随 kubespray 版本目录(cluster.conf 钉子)走: 升级改版本 → 重建 base 即可。
+#   取值: build-cli-context.sh 从 <版本目录> 拷进构建上下文 bin/(离线件优先, 缺失才回退联网/宿主机)。
+COPY bin/kubectl /usr/local/bin/kubectl
+RUN chmod +x /usr/local/bin/kubectl && kubectl version --client 2>/dev/null | head -1
+
+COPY bin/helm-archive.tar.gz /tmp/helm.tar.gz
+RUN tar xzf /tmp/helm.tar.gz -C /tmp \
+    && mv /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/linux-amd64 /tmp/helm.tar.gz \
+    && helm version --short
+
+COPY bin/skopeo /usr/local/bin/skopeo
+RUN chmod +x /usr/local/bin/skopeo && skopeo --version
+
+COPY bin/yq /usr/local/bin/yq
+RUN chmod +x /usr/local/bin/yq && yq --version
 
 # ---------- mc(MinIO Client, 拉离线文件的**引导工具**) ----------
 # ⚠ mc 是**唯一必须打进镜像**的工具: 容器正是靠它去 MinIO **拉**离线文件 —— 不能像

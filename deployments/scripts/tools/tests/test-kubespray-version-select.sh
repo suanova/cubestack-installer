@@ -231,17 +231,14 @@ rm -rf "${_ro3}"
 echo "== ⑩ CLI 镜像契约: 只含 deployments/ 代码(静态断言, 防回归) =="
 # 用户口径 2026-09-30: 离线二进制不打进 CLI 镜像; kubectl/helm/skopeo 由容器运行期从挂载的
 # 版本目录挂 PATH。以下三条是这条契约的**可执行**形式(改坏任何一条, 部署容器会静默少工具)。
-for _df in Dockerfile-cli Dockerfile-cli-incremental; do
-    if grep -qE '^COPY bin/(kubectl|helm|skopeo)' "${REPO_ROOT}/${_df}"; then
-        chk "${_df} 不得打离线二进制(kubectl/helm/skopeo)" "无" "有"
-    else
-        chk "${_df} 不得打离线二进制(kubectl/helm/skopeo)" "无" "无"
-    fi
-    if grep -q '/etc/profile.d/50-cubestack-tools.sh' "${REPO_ROOT}/${_df}"; then
-        chk "${_df} 已安装运行期工具链钩子" "有" "有"
-    else
-        chk "${_df} 已安装运行期工具链钩子" "有" "无"
-    fi
+# 代码层只有一个 Dockerfile; 工具链必须在 **base** 层(用户口径 2026-09-30)
+for _df in Dockerfile-cli; do
+    chk "${_df}(代码层)不得打工具二进制" "无" "$(grep -qE '^COPY bin/' "${REPO_ROOT}/${_df}" && echo 有 || echo 无)"
+    chk "${_df} 已安装运行期工具链钩子" "有" "$(grep -q '/etc/profile.d/50-cubestack-tools.sh' "${REPO_ROOT}/${_df}" && echo 有 || echo 无)"
+    chk "${_df} 不跑 pip(依赖属 base)" "无" "$(grep -q 'pip install' "${REPO_ROOT}/${_df}" && echo 有 || echo 无)"
+done
+for _t in kubectl skopeo yq mc helm-archive.tar.gz; do
+    chk "base 层打进 ${_t}" "有" "$(grep -q "COPY bin/${_t}" "${REPO_ROOT}/Dockerfile-cli-base" && echo 有 || echo 无)"
 done
 chk "钩子源文件在位" "有" "$([ -f "${REPO_ROOT}/deployments/scripts/tools/docker/cli-toolchain-from-offline.sh" ] && echo 有 || echo 无)"
 # mc 是**唯一例外**: 必须打进镜像(拉离线文件的引导工具, 不能被挂载提供; 上游 URL 已 410 Gone)
@@ -251,9 +248,8 @@ chk "base 层不再用已失效的 dl.min.io 下载" "无" "$(grep -qE '(wget|cu
 chk "构建工具会把 mc 拷进上下文(离线件/宿主机)" "有" "$(grep -q 'offline-files/os/mc-' "${REPO_ROOT}/deployments/scripts/tools/docker/build-cli-context.sh" && echo 有 || echo 无)"
 # 两层结构(2026-09-30): base(系统/工具链) + 代码层(FROM base);代码层不再 FROM 上一版 latest ⇒ 层数不累积
 chk "存在 base 层 Dockerfile" "有" "$([ -f "${REPO_ROOT}/Dockerfile-cli-base" ] && echo 有 || echo 无)"
-for _df in Dockerfile-cli Dockerfile-cli-incremental; do
-    chk "${_df} FROM base 层(而非上一版 latest)" "有" "$(grep -q '^FROM ${CLI_BASE_TAG}' "${REPO_ROOT}/${_df}" && echo 有 || echo 无)"
-done
+chk "Dockerfile-cli FROM base 层(而非上一版 latest)" "有" "$(grep -q '^FROM ${CLI_BASE_TAG}' "${REPO_ROOT}/Dockerfile-cli" && echo 有 || echo 无)"
+chk "incremental Dockerfile 已并入(不该还在)" "无" "$([ -f "${REPO_ROOT}/Dockerfile-cli-incremental" ] && echo 有 || echo 无)"
 # .dockerignore 必须挡住版本目录整层与物化树(否则整仓上下文构建会把 GB 级离线件打进镜像)
 for _pat in 'deployments/offline-files/kubespray/\*/' 'deployments/kubespray/versions'; do
     if grep -qE "^${_pat}" "${REPO_ROOT}/.dockerignore"; then
@@ -262,6 +258,16 @@ for _pat in 'deployments/offline-files/kubespray/\*/' 'deployments/kubespray/ver
         chk ".dockerignore 含 ${_pat}" "有" "无"
     fi
 done
+
+echo "== ⑫ 节点系统包链路(2026-09-30 事故的防回归) =="
+# 事故: install-packages 的 play 只跑 kube_node(worker) ⇒ **master 从未拿到离线 .deb**,
+# 而 master 上 curl 只在这条 play 里发 ⇒ 探针拿到空串被误判成网络故障。以下四条锁死修复。
+_PLAY="${REPO_ROOT}/deployments/kubespray/kubespray/patch-playbooks/install-packages.yml"
+chk "play 覆盖 master(hosts 含 kube_control_plane)" "有" "$(grep -q 'hosts: kube_node:kube_control_plane' "${_PLAY}" && echo 有 || echo 无)"
+chk "play 的 required_packages 含 curl" "有" "$(grep -qE '^\s+- curl$' "${_PLAY}" && echo 有 || echo 无)"
+# ⚠ 必须钉**当前版本目录**(用 v*/ 通配会命中别的版本目录 ⇒ 假绿; 本断言自己踩过一次)
+# ⚠ 通配符不能放进双引号(会变字面量 ⇒ 恒报无); 也不能用 v*/ 通配(会命中别的版本 ⇒ 假绿)
+chk "curl 的 .deb 在当前版本的主包集里(不是只在 repair/)" "有" "$(ls ${REPO_ROOT}/deployments/offline-files/kubespray/${TREE_VER}/packages/curl_*.deb >/dev/null 2>&1 && echo 有 || echo 无)"
 
 echo "== ⑪ 默认版本 = 最新(用户口径); 本地临时版本不进默认; 目录副本回退 =="
 # 带夹具根的探针(OFFLINE_FILES_ROOT 指向夹具, 用于"版本目录自带档案副本"的回退路径)
