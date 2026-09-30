@@ -174,7 +174,7 @@ RDMA_IMAGE_TAG="${RDMA_IMAGE_TAG:-v1.5.4}"              # ⚠ 官方源在 ghcr.
 RDMA_RESOURCE_PREFIX="${RDMA_RESOURCE_PREFIX:-nvidia.com}"  # 扩展资源前缀(pool 模式用; by-link 模式的前缀写在下面两个资源名里)
 RDMA_RESOURCE_NAME="${RDMA_RESOURCE_NAME:-mlx5_0}"      # 扩展资源名(pool 模式; 与 RDMA_IF_NAMES 对应的网卡; pod 申请 nvidia.com/mlx5_0)。by-link / per-hca 模式忽略此值
 RDMA_HCA_MODE="${RDMA_HCA_MODE:-by-link}"                  # 资源模式: by-link=按链路类型分成 IB / RoCE **两个资源池**(**本文件默认**, 资源名与真实 GPU 集群一致, 同一份 Pod 清单两边通用, 见下两行); per-hca=每块 HCA 独立扩展资源(pod 按资源名选卡, 如 nvidia.com/mlx5_0 / mlx5_1...); pool=全部 HCA 聚合为单个扩展资源(兼容旧部署; 也是模块代码的**内建回退值**)。⚠ by-link / per-hca 下检测到 0 块 HCA 会报错退出 —— 除非下方 RDMA_PLACEHOLDER_HCAS 非空(本文件默认非空, 见其说明)
-RDMA_IB_RESOURCE="${RDMA_IB_RESOURCE:-rdma/hca_shared_devices}"          # by-link: InfiniBand 池资源名(必须 <前缀>/<名字>)。默认值 = 真实集群 kubectl -n kube-system get cm rdma-devices 里的 resourceName(对应插件侧 --rdma-ib-resource); ⚠ 名字写错是**静默**故障: pod 申请的资源名在本集群不存在 → 永远 Pending
+RDMA_IB_RESOURCE="${RDMA_IB_RESOURCE:-rdma/ib_shared_devices}"          # by-link: InfiniBand 池资源名(必须 <前缀>/<名字>)。默认值 = 真实集群 kubectl -n kube-system get cm rdma-devices 里的 resourceName(对应插件侧 --rdma-ib-resource); ⚠ 名字写错是**静默**故障: pod 申请的资源名在本集群不存在 → 永远 Pending
 RDMA_ROCE_RESOURCE="${RDMA_ROCE_RESOURCE:-rdma/roce_shared_devices}"  # by-link: RoCE 池资源名(同上, 对应 --rdma-roce-resource)
 RDMA_HCA_MAX="${RDMA_HCA_MAX:-100}"                     # 每资源最大共享 Pod 数(rdmaHcaMax; by-link 模式下每个池各一份配额, per-hca 模式下每块卡各一份)
 RDMA_IF_NAMES="${RDMA_IF_NAMES:-}"                       # 宿主机 RDMA 网卡名(逗号分隔, selectors.ifNames); ⚠ 留空 = 模块自动扫描所有节点 /sys/class/infiniband/*/device/net/ 收集真实设备名+网卡名(兼容 IB=ibsX / RoCE=ens*/manage0 混合), 显式设置则按此精确过滤
@@ -200,7 +200,7 @@ NETSHOOT_RDMA_VERSION="${NETSHOOT_RDMA_VERSION:-26.04.17}"   # 自建镜像 tag(
 #   约定 <perftest 版本>-r<N>(如 26.04.17-r2 = 含 iproute2-rdma 的那版):
 #     构建: sudo IMAGE_TAG=26.04.17-r2 <repo>/deployments/scripts/tools/images/netshoot-rdma-build.sh --force
 #     然后本行改成该 tag, 重跑 --steps netshoot
-# pod 申请的 RDMA 扩展资源: 留空 = 跟随 RDMA_IB_RESOURCE(by-link 的 IB 池, 默认 rdma/hca_shared_devices);
+# pod 申请的 RDMA 扩展资源: 留空 = 跟随 RDMA_IB_RESOURCE(by-link 的 IB 池, 默认 rdma/ib_shared_devices);
 #   ⚠ 集群节点没注册该资源时模块**自动不申请**(pod 仍可起, 只做通用网络诊断)
 NETSHOOT_RDMA_RESOURCE="${NETSHOOT_RDMA_RESOURCE:-}"
 NETSHOOT_BASE_TAR="${NETSHOOT_BASE_TAR:-${REPO_ROOT}/deployments/offline-files/os/netshoot.tar}"   # 回退用的原始 netshoot tar
