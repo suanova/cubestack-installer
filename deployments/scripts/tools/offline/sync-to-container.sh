@@ -8,8 +8,10 @@
 # 流程(用户要求): 【本地修改完成 → sudo docker cp 到容器】—— 不在容器内跑 sed。
 # ★ 2026-09-24 范围变了(重要): `deployments/scripts/` 走**整目录**同步 —— 不再需要"改了哪个文件
 #   就往清单里加一行"(那个模型反复漏文件: ceph-cleanup.sh / sync-kubespray-config.sh / tools/tests/
-#   / 本轮 6 个脚本都漏过, 后果是"以为同步了、容器里其实没变")。只有 kubespray 树与
-#   cubestack-addon manifests 仍走显式清单 + 目录同步之后的 md5 整树复核(不一致会点名)。
+#   / 本轮 6 个脚本都漏过, 后果是"以为同步了、容器里其实没变")。
+#   ★ 2026-09-28: cubestack-addon 与 kubespray 补丁层(cubestack-patches/)也走 DIRS;
+#   **kubespray 树本体有意不进同步**(整拷会删掉容器内的 inventory/ 与 .venv/)—— 它只能在容器内
+#   用 cubestack-kubespray-upgrade.sh 换, 或重建 CLI 镜像; 本工具**只核对**树版本并点名(步骤 5)。
 #   cluster.conf: ⚠ **默认不推送**(2026-09-08): 容器内 config 已含真实 Ceph keyring/
 #   monitors 等, 本地 cluster.conf 是占位符(`<占位: 如 AQxxx==>`, 防进 git), 推送会覆盖
 #   容器内真实密钥导致外部 Ceph 认证失败。需要推送时用 SYNC_CONF=1(推送前备份 .bak.ceph)。
@@ -52,14 +54,20 @@ echo "── 1. 同步代码文件(repo → 容器 ${CONTAINER}:${CT}) ──"
 #   原来这里是一份**逐文件清单**, 加/改一个文件就得记得补一行 —— 历史上反复漏:
 #   ceph-cleanup.sh、sync-kubespray-config.sh、tools/tests/、以及本轮 6 个脚本都漏过。
 #   漏同步的后果最坑: **改了、也"跑过同步"了, 但容器里其实没变**(排查时结论必然对不上)。
-#   整目录 copy 之后, 新增/修改脚本无需再动这里; kubespray 树(巨大, 只同步仓库真改过的少数
-#   文件)与 cubestack-addon manifests(按需)仍走下面的显式 FILES 清单。
+#   整目录 copy 之后, 新增/修改脚本无需再动这里; 只有树外的少数独立文件走下面的显式 FILES 清单
+#   —— kubespray 树本体**有意不同步**, 理由见头注与本数组末尾注释。
 DIRS=(
     deployments/scripts        # 模块 + 工具 + 公共库 + 离线回归测试, 整棵树
     # ★ 2026-09-24: vendored 资产也改整目录 —— 原来只列了 10 个 addon 条目(实际 111 个 yaml),
     #   于是"改了 vendored manifest 却没进容器"必然发生(multus 资源限额修复就落在清单外)。
-    #   体积仅 ~10M/158 文件, 整拷代价可忽略。kubespray 树仍走下面的显式 FILES(那个太大)。
+    #   体积仅 ~10M/158 文件, 整拷代价可忽略。
     deployments/cubestack-addon
+    # ★ 2026-09-28(评审 I2): 补丁层也整目录同步。它是 kubespray 树的"源码改动的唯一载体"
+    #   (换树会丢弃树内手工改动, 只有 .patch 是可复现的), 而本支新增/重放了补丁 —— 漏同步的后果
+    #   是"容器里重跑仍用旧补丁层"(容器内 ⑮ 只会 warn 跳过, 没有护栏)。目录很小(~64K)。
+    #   ⚠ 树本体**不在这里**(整拷那条路会删掉容器内的 inventory/ 与 .venv/): 树只能按步骤 5 的
+    #     指引在容器内换树, 或重建 CLI 镜像。
+    deployments/kubespray/cubestack-patches
 )
 for d in "${DIRS[@]}"; do
     [ -d "${REPO}/${d}" ] || { echo "  ⚠ 跳过(仓库无此目录): ${d}"; continue; }
@@ -76,6 +84,19 @@ FILES=(
     #   静默变 external。容器内 cluster.conf 本身仍默认不推送(见步骤 2)。
     deployments/config/cluster.conf.example
     deployments/kubespray/cubestack-offline.sh
+    # ★ 2026-09-28(评审 I2): 两个入口脚本此前**不在清单里** → 容器里根本没有"换树/重放补丁"
+    #   的能力(只有离线入口), 遇到需要重放补丁的场景只能靠人手抄。它们是独立文件(非整树),
+    #   也不含运行数据, 走 FILES 逐个同步最稳(树本体见上面 DIRS 的注释)。
+    deployments/kubespray/cubestack-patch-apply.sh
+    deployments/kubespray/cubestack-kubespray-upgrade.sh
+    # ★ 2026-09-28: 5 个注入 play 全部逐个同步 —— 原先只列了 install-packages.yml,
+    #   另外 4 个(preload/registry/cni-restart/single-node)改了永远进不去容器
+    #   (树本体有意不整拷, 见上面 DIRS 注释; 这几个是**我们自持**的 play, 不是上游树内容)。
+    #   代价是修单节点收敛 play 的挂载位置时, 得靠入口脚本的 ensure_* 迁移逻辑(已实现)。
+    deployments/kubespray/kubespray/patch-playbooks/cubestack-preload.yml
+    deployments/kubespray/kubespray/patch-playbooks/cubestack-registry.yml
+    deployments/kubespray/kubespray/patch-playbooks/cubestack-cni-restart.yml
+    deployments/kubespray/kubespray/patch-playbooks/cubestack-single-node.yml
     deployments/kubespray/kubespray/patch-playbooks/install-packages.yml
     # (rook 离线 manifests 已由上面 DIRS 的 cubestack-addon 整目录覆盖, 不再逐条列)
 )
@@ -166,6 +187,29 @@ for f in "${FILES[@]}"; do
     docker exec "${CONTAINER}" cat "${CT}/${f}" 2>/dev/null | diff -q - "${REPO}/${f}" >/dev/null 2>&1 \
         || { echo "  ❌ 内容不一致: ${f}"; _bad=$((_bad + 1)); }
 done
+
+# ★ 2026-09-28(评审 I2): kubespray 树**不在同步清单里**(见文件头), 而它恰恰是本支的头号产物 ——
+#   容器里那棵树是哪个版本, 只能"问"出来。不核对的话, 用户看到"同步完成"就去容器里重跑,
+#   用的还是旧树(v2.28), 而容器内 ⑮ 找不到补丁层只会 warn 跳过 → 静默降级。
+#   ⚠ 本段**只报告不修**(不自动换树): 换树是有 SOP 的破坏性动作(保留 inventory/.venv/
+#     patch-playbooks、先退休判定再重放), 必须由人按 docs/kubespray-upgrade.md 走。
+_TREE_REL="deployments/kubespray/kubespray/galaxy.yml"
+_repo_tree_ver="$(grep -m1 '^version:' "${REPO}/${_TREE_REL}" 2>/dev/null | awk '{print $2}')"
+# 容器侧读取整段放在容器里执行(宿主机只取回版本号); `|| true` 兜住"文件不存在/容器没这棵树"
+_ct_tree_ver="$(docker exec "${CONTAINER}" bash -c "grep -m1 '^version:' ${CT}/${_TREE_REL} 2>/dev/null | awk '{print \$2}'" 2>/dev/null || true)"
+if [ -n "${_ct_tree_ver}" ] && [ "${_ct_tree_ver}" = "${_repo_tree_ver}" ]; then
+    echo "  ✅ kubespray 树版本一致: ${_ct_tree_ver}(仓库 == 容器)"
+else
+    echo "  ❌❌ kubespray 树版本不一致 —— 容器里重跑用的**不是**仓库这棵树:"
+    echo "        仓库: ${_repo_tree_ver:-(读不出 ${_TREE_REL})}   容器: ${_ct_tree_ver:-(读不出/容器无此树)}"
+    echo "      本工具**不会**同步树(整拷会删掉容器内的 inventory/ 与 .venv/, 有害)。两条修法:"
+    echo "      ① 容器内换树: docker exec -it ${CONTAINER} bash"
+    echo "           cd /opt/cubestack-installer/deployments/kubespray"
+    echo "           K8S_VERSION=<ver> bash cubestack-kubespray-upgrade.sh <tag> --tree-src <容器内纯净树>"
+    echo "      ② 重建 CLI 镜像(树是 COPY 进镜像的), 再用新镜像起容器"
+    echo "      (SOP 见 docs/kubespray-upgrade.md §1.3/§1.4)"
+    _bad=$((_bad + 1))
+fi
 if [ "${_bad}" = "0" ]; then
     echo "  ✅ 单文件清单亦全部一致(共 ${#FILES[@]} 个)"
 else

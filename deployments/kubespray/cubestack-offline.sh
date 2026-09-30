@@ -11,13 +11,37 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="${CUBESTACK_BASE_DIR:-${SCRIPT_DIR}}"
 KUBESPRAY_DIR="${BASE_DIR}/kubespray"
 # 离线文件根目录(全局切换变量): 二进制/镜像/离线包统一存放位置
-# 优先级: OFFLINE_FILES_DIR 环境变量 > 默认 ${BASE_DIR}/offline-files/kubespray
-#   (BASE_DIR=deployments/kubespray/ 时 → deployments/kubespray/offline-files/kubespray;
-#    standalone /opt/cubestack-installer 时 → /opt/cubestack-installer/offline-files/kubespray)
-# 注: 仓库本地布局为 deployments/offline-files/kubespray(与 kubespray/ 同级),
-#     由 deploy-cluster.sh 通过 OFFLINE_FILES_DIR 显式传入; 此处为 standalone 内部布局兜底。
-OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${BASE_DIR}/offline-files/kubespray}"
+# 优先级: OFFLINE_FILES_DIR 环境变量 > 默认(按部署布局自动判定):
+#   ① 仓库/容器布局 —— 脚本位于 <root>/deployments/kubespray/:
+#        <root>/deployments/offline-files/kubespray
+#      · 与全仓库其它脚本(lib-common.sh / install-worker-packages.sh / ceph-sync-images.sh)同一默认值;
+#      · 与 cluster.conf 的 LOCAL_REPO_DIR 约定一致 —— 仓库布局**不按集群名加子目录**;
+#      · 也与本脚本生成的 install-packages.yml 里 ../../offline-files/kubespray 一致。
+#   ② 扁平 standalone 布局 —— 脚本与 kubespray/、inventory/ 平铺同一层(如 /opt/cubestack-installer/):
+#        ${BASE_DIR}/offline-files/kubespray(按集群名隔离, 见 deployments/kubespray/README.md)
+# 注(2026-09-28 改): 此前两种布局都按 ② 推导 ⇒ 在仓库里直跑会把离线件下到
+#   deployments/kubespray/offline-files/…, 而部署流程读的是 deployments/offline-files/…,
+#   两者不是同一个目录 → 下载"成功"但部署时静默找不到镜像/二进制。现按布局区分。
+if [ "$(basename "$(dirname "${BASE_DIR}")")" = "deployments" ]; then
+    OFFLINE_LAYOUT="repo"
+    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-$(dirname "${BASE_DIR}")/offline-files/kubespray}"
+else
+    OFFLINE_LAYOUT="flat"
+    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${BASE_DIR}/offline-files/kubespray}"
+fi
 LOCAL_REPO_BASE="${OFFLINE_FILES_DIR}"
+
+# 离线资源目录(LOCAL_REPO_DIR)的默认值 —— 是否按集群名隔离由布局决定:
+#   仓库布局: ${OFFLINE_FILES_DIR}(= <root>/deployments/offline-files/kubespray, 同 cluster.conf)
+#   扁平布局: ${OFFLINE_FILES_DIR}/${CLUSTER_NAME}(历史布局)
+# 环境变量 CUBESTACK_LOCAL_REPO_DIR 优先级最高 —— 部署流程 06_k8s_deploy 就靠它传入。
+default_local_repo_dir() {
+    if [ "${OFFLINE_LAYOUT}" = "flat" ]; then
+        printf '%s/%s\n' "${OFFLINE_FILES_DIR}" "${CLUSTER_NAME}"
+    else
+        printf '%s\n' "${OFFLINE_FILES_DIR}"
+    fi
+}
 INVENTORY_BASE="${BASE_DIR}/inventory"
 REMOTE_USER="${CUBESTACK_REMOTE_USER:-ubuntu}"
 CONTAINER_RUNTIME="containerd"
@@ -79,8 +103,10 @@ usage() {
     echo "  init       [名称]           初始化环境"
     echo "  download   [名称]           下载离线资源（使用 download-hosts.yml，本地 root）"
     echo "  install    [名称] [选项]    执行集群安装（使用 hosts.yml，目标节点 ubuntu）"
+    echo "  reset      [名称] --yes     清除目标节点上的旧集群状态（覆盖安装的前置步骤; 见下）"
     echo "  scale      [名称] [选项]    扩容集群 — 添加新节点到已有集群"
     echo "  check      [名称]           预检资源与连通性"
+    echo "  # upgrade  [名称] [选项]    (未实现) 原地升级到新版本 —— 设计见 docs/cluster-upgrade-path.md"
     echo ""
     echo "选项:"
     echo "  --limit <group>   限制目标组，可选值:"
@@ -150,28 +176,88 @@ ensure_kubespray() {
     fi
 }
 
+# .venv 是否**真的可用**: 目录在 ≠ 环境能用(2026-09-28 实机事故)
+#   失败或中断的 `python3 -m venv`(典型: Ubuntu 缺 python3-venv, ensurepip 不可用)会在目标目录
+#   留下**空壳**: pyvenv.cfg + bin/python* + lib/, 但**没有 bin/activate**(venv 在写 activate
+#   脚本之前就中止了)。原实现只判 `[ -d .venv ]`, 于是下次运行走 else 分支直接
+#   `source .venv/bin/activate` → "No such file or directory", 既没有修法提示, 也永远不会自愈。
+#   bin/python 也要求真能跑: venv 从别的机器/别的 python 版本拷来时, activate 在但 python 是
+#   悬空符号链接 → 之后 ansible-playbook 全报 bad interpreter。
+venv_is_usable() {
+    local v="${KUBESPRAY_DIR}/.venv"
+    [ -f "${v}/bin/activate" ] && "${v}/bin/python" -c "" >/dev/null 2>&1
+}
+
+# 版本比较: sort -V 取小者(与树里 assert 的语义一致: 恰好等于门算通过)
+_venv_av_lt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
+
 ensure_venv() {
     cd "${KUBESPRAY_DIR}"
+
+    # 半成品 .venv(空壳 / 悬空 python): 留着只会把下一次运行卡死在 source 上, 直接删掉重建
+    if [ -d ".venv" ] && ! venv_is_usable; then
+        warn ".venv/ 存在但不可用(缺 bin/activate 或 bin/python 跑不起来) —— 判为创建失败/中断的半成品, 删除重建"
+        rm -rf .venv || err "删除半成品 .venv 失败(权限/属主): 请手工执行 rm -rf ${KUBESPRAY_DIR}/.venv 后重试"
+    fi
+
     if [ ! -d ".venv" ]; then
         highlight "创建 Python 虚拟环境(继承镜像预装的系统依赖, 完全离线)..."
         # --system-site-packages: 复用镜像/系统已预装的 ansible 等依赖(见 Dockerfile-cli),
         # 避免新建空 venv 后联网 pip install 拉取失败(离线环境)。
-        python3 -m venv --system-site-packages .venv
-        source .venv/bin/activate
-        # 校验 ansible 可用; 若镜像未预装(宿主机裸跑), 回退本地 wheel 缓存离线安装
-        if ! python3 -c "import ansible, ansible_runner" >/dev/null 2>&1; then
-            if ls .venv_wheels/*.whl >/dev/null 2>&1; then
-                highlight "系统无预装 ansible, 从 .venv_wheels/ 离线安装 ..."
-                pip install --no-index --find-links=.venv_wheels -r requirements.txt -q \
-                    || { err "离线安装 ansible 失败(缺少 .venv_wheels 缓存)"; return 1; }
-            else
-                warn "系统未预装 ansible 且无 .venv_wheels 缓存: 请用 CLI 镜像(已预装)或联网装"
-            fi
+        # ⚠ 解释器选择: 树内 requirements.txt 是 ansible==12.3.0(= ansible-core 2.19.x), 它在
+        #   **控制端**硬要求 Python ≥3.11;ubuntu 22.04 自带的 python3 是 3.10 → 建 3.10 venv 时
+        #   pip 会直接拒绝装 ansible 12。故优先挑一个 ≥3.11 的解释器(裸机装 deadsnakes 的
+        #   python3.11 即可), 挑不到才回退 python3(回退时下面的版本自检会打印修法)。
+        local _venv_py=""
+        for _c in python3.12 python3.11 python3.13; do
+            command -v "${_c}" >/dev/null 2>&1 && { _venv_py="${_c}"; break; }
+        done
+        [ -n "${_venv_py}" ] || _venv_py=python3
+        log "虚拟环境解释器: ${_venv_py}($(${_venv_py} -V 2>&1))"
+        if ! "${_venv_py}" -m venv --system-site-packages .venv; then
+            # ⚠ 失败时目标目录里已经留了空壳 —— 不清掉的话, 下次运行会把它当"已就绪"(见上)
+            rm -rf .venv 2>/dev/null || true
+            err "创建 venv 失败(见上方 python3 报错); Ubuntu/Debian 缺 venv 模块时: 装 python3-venv 后重试"
         fi
+        venv_is_usable || { rm -rf .venv 2>/dev/null || true; err "venv 创建后仍不可用(无 bin/activate): 请确认发行版提供可用的 python3 -m venv"; }
         log "✅ 虚拟环境就绪"
     else
-        source .venv/bin/activate
         log "✅ 虚拟环境已激活"
+    fi
+
+    source .venv/bin/activate
+
+    # ansible 可用性: **两条路径都要查** —— 原实现只在"新建"分支查, 复用路径上一套没装 ansible 的
+    # venv 会被静默放行, 直到 ansible-playbook 报 command not found 才炸。
+    # ⚠ 判据用 ansible-playbook 本尊, 不用 `python3 -c "import ansible, ansible_runner"`:
+    #   ansible_runner **不在** kubespray 的 requirements.txt 里(树里也没人用), 那个 import 恒失败
+    #   → 无论 ansible 装没装都报"未预装"(假阴性)。
+    if ! command -v ansible-playbook >/dev/null 2>&1; then
+        if ls .venv_wheels/*.whl >/dev/null 2>&1; then
+            highlight "系统无预装 ansible, 从 .venv_wheels/ 离线安装 ..."
+            pip install --no-index --find-links=.venv_wheels -r requirements.txt -q \
+                || err "离线安装 ansible 失败(缺少 .venv_wheels 缓存)"
+        else
+            warn "当前环境没有 ansible-playbook, 且无 .venv_wheels 缓存: 请用 CLI 镜像(已预装), 或本机 pip install -r ${KUBESPRAY_DIR}/requirements.txt"
+        fi
+    fi
+
+    # ansible 大版本自检(判据与 cubestack-kubespray-upgrade.sh [5/8] 一致): 换树后 .venv 是被
+    # **有意保留**的, 而树里 playbooks/ansible_version.yml 对 ansible-core 硬断言(v2.32: ≥2.19
+    # <2.20)。陈旧 venv(实测 core 2.16.19)会顶掉 CLI 镜像里预装的新 ansible → 部署第一个 play
+    # 硬失败。此处只警告不拦停(download/init 用不到新版特性), 但把修法写清楚。
+    if command -v ansible-playbook >/dev/null 2>&1 && [ -f "${KUBESPRAY_DIR}/playbooks/ansible_version.yml" ]; then
+        local av_min av_line av_have
+        av_min="$(sed -n 's/^[[:space:]]*minimal_ansible_version:[[:space:]]*//p' \
+                    "${KUBESPRAY_DIR}/playbooks/ansible_version.yml" | head -1 | tr -d "\"'")"
+        av_line="$(ansible --version 2>/dev/null | head -1 || true)"
+        av_have="$(printf '%s' "${av_line}" | sed -nE 's/.*\[core ([0-9][0-9.]*)\].*/\1/p')"
+        [ -n "${av_have}" ] || av_have="$(printf '%s' "${av_line}" | sed -nE 's/^ansible[[:space:]]+v?([0-9][0-9.]*).*/\1/p')"
+        if [ -n "${av_min}" ] && [ -n "${av_have}" ] && _venv_av_lt "${av_have}" "${av_min}"; then
+            warn "ansible-core ${av_have} 低于本树要求(≥ ${av_min}): 部署第一个 play 就会硬失败"
+            warn "  修法: rm -rf ${KUBESPRAY_DIR}/.venv 后重跑本脚本(会重建), 或删掉它走 CLI 镜像预装的 ansible"
+            warn "  ⚠ 若系统 python3 < 3.11: 先装 python3.11(ansible 12 在控制端硬要求 ≥3.11;ubuntu 22.04 需 deadsnakes), 再重建 venv"
+        fi
     fi
 }
 
@@ -316,9 +402,17 @@ DOWNLOAD_EOF
 
 build_extra_vars() {
     EXTRA_VARS_STR=""
+    # ⚠ k8s-versions.yml 必须在列: 它才是**版本钉子的单一来源**(kube_version/calico_version…)。
+    #   不带它时两个 ansible 调用会各算一套版本 —— generate_list.sh 用 `-i <hosts.yml>` 拿得到
+    #   它(经 inventory 的 group_vars), 而下面生成 URL→dest 映射的 play 用的是 `-i localhost,`
+    #   (不加载任何 group_vars, 有意不碰集群), 于是 kube_version 退回**树里 checksum 表的第一
+    #   个键**(v2.32 树 = 1.36.4)。后果: files.list 的 URL 是 v1.35.8, 映射表里却是 v1.36.4 →
+    #   按 URL 查不到 → 全部退回 URL basename → kubelet/kubectl/kubeadm 被存成**没有版本号的
+    #   `kubelet`/`kubectl`/`kubeadm`**(2026-09-28 实测), 装机时按 dl.dest 找不到, 离线必失败。
     for vars_file in \
         "${INVENTORY_DIR}/group_vars/all/offline.yml" \
         "${INVENTORY_DIR}/group_vars/all/all.yml" \
+        "${INVENTORY_DIR}/group_vars/all/k8s-versions.yml" \
         "${INVENTORY_DIR}/group_vars/k8s_cluster/k8s-cluster.yml" \
         "${INVENTORY_DIR}/group_vars/k8s_cluster/addons.yml"; do
         if [ -f "$vars_file" ]; then
@@ -447,7 +541,11 @@ PLAYBOOK_EOF
             filename="$mapped_dest"
         else
             filename=$(basename "$url" | sed 's/[?#].*//')
-            warn "    未找到映射: $filename，使用 URL basename"
+            # 映射表按 URL 精确匹配缺失时退回 URL basename —— 该名字多半**不等于**树里这条的
+            # dest(kubespray 用 `download_cache_dir/<dest | basename>` 找缓存文件), 装机时就
+            # 找不到、转而联网下载, 离线必失败。常见根因是 files.list 与 url_dest.map 的版本
+            # 不一致(见 build_extra_vars 里 k8s-versions.yml 的注释), 故把后果写在这里。
+            warn "    $filename 未找到映射，使用 URL basename(⚠ 该名未必等于装机期望的 dest, 离线装机可能找不到它)"
         fi
         dest="${LOCAL_REPO_DIR}/${filename}"
 
@@ -888,9 +986,11 @@ block = (
     "# ──────────────────────────────────────────────────────────────────────\n"
     "- name: Configure nodes /etc/hosts for internal registry\n"
     "  import_playbook: ../patch-playbooks/cubestack-registry.yml\n"
-    "- name: Make single control-plane node schedulable (before addon/operator)\n"
-    "  import_playbook: ../patch-playbooks/cubestack-single-node.yml\n"
 )
+# 注: "单节点控制面污点收敛"play 原先是和上面这条一起插在这里的 —— 那是**错的**:
+#     它要用 kubectl 读 /etc/kubernetes/admin.conf, 而此处还在 "Install etcd"/kubeadm 之前,
+#     全新集群上 admin.conf 必然不存在(2026-09-28 实机中断在 mxgpu-3-28)。
+#     现由 ensure_single_node_play 挂在"K8s+CNI 之后、addon 之前"(见该函数)。
 open(path, "w").write(src.replace(marker, block + "\n" + marker, 1))
 print("patched")
 PYEOF
@@ -906,6 +1006,76 @@ PYEOF
 # 作用: 在 k8s 部署阶段把 offline-files/kubespray/packages 的 .deb(lvm2 全家桶等)自动
 #       安装到全部 kube_node —— 供后续 ceph/Rook OSD 使用(重启后逻辑卷激活依赖 lvm)。
 #       包来源与 lvm2 离线准备见 patch-playbooks/install-packages.yml 头部注释。
+# 将"单节点集群控制面污点收敛"play 注入 cluster.yml/scale.yml(幂等, 与 ensure_cni_restart_play 同机制)
+# ⚠ 位置必须在**控制面起来之后**:该 play 用 kubectl(`/etc/kubernetes/admin.conf`)数 control-plane 节点,
+#   在 "Install etcd"/kubeadm 之前跑必然失败(2026-09-28 实机:全新集群全量部署中断在 mxgpu-3-28,
+#   报 "stat /etc/kubernetes/admin.conf: no such file or directory")。旧实现把它和 registry hosts play
+#   一起插在 "Install etcd" 之前 —— 那个位置对 registry(只写 /etc/hosts)无害, 对本 play 是错的;
+#   scale.yml 场景(集群已存在)掩盖了这个 bug。现与 cubestack-cni-restart.yml 用同一组锚点。
+ensure_single_node_play() {
+    local py name
+    for py in "${KUBESPRAY_DIR}/playbooks/cluster.yml" "${KUBESPRAY_DIR}/playbooks/scale.yml"; do
+        [ -f "${py}" ] || continue
+        name="$(basename "${py}")"
+        # ① 迁移: 先摘掉任何位置的旧注入(含历史上插在 "Install etcd" 之前的那份)
+        #    连同它自己的注释块一起摘 —— 否则每跑一次都会再堆一层注释(不幂等)。
+        #    只回扫紧邻的注释行: 旧形态里 import 上面是 registry 的 import 行(非注释)⇒ 不会误伤它的注释。
+        python3 - "${py}" << 'PYEOF'
+import sys
+path = sys.argv[1]
+lines = open(path).read().splitlines(keepends=True)
+out, removed = [], 0
+for ln in lines:
+    if "cubestack-single-node.yml" in ln:
+        removed += 1
+        if out and "Make single control-plane node schedulable" in out[-1]:
+            out.pop()                      # 紧邻其上的 - name: 行
+        while out and out[-1].lstrip().startswith("#"):
+            out.pop()                      # 它自己的注释块
+        continue
+    out.append(ln)
+if removed:
+    open(path, "w").write("".join(out))
+print("stripped %d" % removed)
+PYEOF
+        if grep -q "cubestack-single-node.yml" "${py}"; then
+            log "✅ ${name} 已挂载单节点收敛 play"
+            continue
+        fi
+        python3 - "${py}" "${name}" << 'PYEOF'
+import re, sys
+path, name = sys.argv[1], sys.argv[2]
+src = open(path).read()
+marker = {
+    "cluster.yml": "- name: Install Kubernetes apps",
+    "scale.yml": "- name: Apply resolv.conf changes now that cluster DNS is up",
+}.get(name)
+if not marker or marker not in src:
+    print("marker not found, skip")
+    sys.exit(0)
+# ⚠ marker 前若有多个空行, 先收敛成一个 —— 否则"摘除→重挂"每跑一次会多留一行空行(不幂等)
+src = re.sub(r"\n{3,}" + re.escape(marker), "\n\n" + marker, src)
+block = (
+    "# ──────────────────────────────────────────────────────────────────────\n"
+    "# K8s+CNI 就绪后、addon/operator 之前: 若集群恰好 1 个 control-plane, 去掉它的\n"
+    "# NoSchedule 污点并 uncordon(否则 metallb/local-path/registry/operator 等会一直 Pending)。\n"
+    "# ⚠ 本 play 用 kubectl 读 admin.conf ⇒ 必须在控制面起来之后, **不要**挪到 etcd 之前。\n"
+    "# 本 import 由入口脚本 ensure_single_node_play 自动维护(kubespray 升级后重新挂载)。\n"
+    "# ──────────────────────────────────────────────────────────────────────\n"
+    "- name: Make single control-plane node schedulable (before addon/operator)\n"
+    "  import_playbook: ../patch-playbooks/cubestack-single-node.yml\n"
+)
+open(path, "w").write(src.replace(marker, block + "\n" + marker, 1))
+print("patched")
+PYEOF
+        if grep -q "cubestack-single-node.yml" "${py}"; then
+            log "✅ 已挂载单节点收敛 play 到 ${name}(K8s+CNI 之后)"
+        else
+            warn "无法挂载单节点收敛 play 到 ${name}(未找到插入标记, kubespray 版本结构可能已变化)"
+        fi
+    done
+}
+
 ensure_packages_play() {
     local py name packages_file="${KUBESPRAY_DIR}/patch-playbooks/install-packages.yml"
     # kubespray 升级/重新 clone 会丢失 patch-playbooks → 从内置内容重新生成(与 ensure_preload_play 同机制)
@@ -1307,6 +1477,32 @@ PYEOF
 # 数据源: 全部节点 IP 来自 hosts.yml(kube_control_plane / kube_node 组), 随 inventory 自动更新
 # ============================================================
 update_loadbalancer_all_yml() {
+    # ★ 本地代理模式(API_LOCAL_LB_ENABLED=true, 兼容别名 KUBE_VIP_LOCAL_PROXY): all.yml 的
+    #   loadbalancer_apiserver 块由 tools/k8s/sync-kubespray-config.sh **独占维护并保持注释**。
+    #   本函数是 all.yml 的**第二个写入者** —— 若按"读不到入口就回退首 master 并写回", 会把注释
+    #   恢复成未注释态 → 上游 kube_apiserver_endpoint 模板随即走域名分支 → 本地代理**静默失效**
+    #   (看着装好了, kubelet 仍走域名单点)。故本地代理模式下**只跳过 all.yml 那一段**。
+    #   ⚠ 不整体 return: 下面第 2/3 段(k8s-cluster.yml 的 advertise-address 按节点取值、
+    #     calico can-reach 探测点)与入口模式无关, 跳掉会让 kubernetes Service 退回单点 /
+    #     calico 探测点漂移 —— 那是另外两个静默故障。
+    #   ⚠ 本脚本**不 source lib-common**, 故用最小解析而非 api_local_lb_enabled():
+    #     环境变量优先, 否则子 shell 求值 cluster.conf(与 check-modules.sh 第 ⑫ 项同法)。
+    local _local_lb="${API_LOCAL_LB_ENABLED:-}"
+    if [ -z "${_local_lb}" ]; then
+        local _conf="${REPO_ROOT:-}/deployments/config/cluster.conf"
+        [ -f "${_conf}" ] || _conf="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/deployments/config/cluster.conf"
+        if [ -f "${_conf}" ]; then
+            _local_lb="$( ( set +u; . "${_conf}" >/dev/null 2>&1 || true
+                            printf '%s' "${API_LOCAL_LB_ENABLED:-${KUBE_VIP_LOCAL_PROXY:-false}}" ) )"
+        else
+            _local_lb="false"
+        fi
+    fi
+    local _skip_all_yml=0
+    case "${_local_lb}" in
+        1|true|yes|on) _skip_all_yml=1 ;;
+    esac
+
     local inv="${INVENTORY_DIR}/hosts.yml"
     local all_yml="${INVENTORY_DIR}/group_vars/all/all.yml"
     [ -f "${inv}" ] || { warn "未找到 ${inv}, 跳过 hosts.yml 同步"; return 0; }
@@ -1336,7 +1532,13 @@ update_loadbalancer_all_yml() {
         api_ip="$(awk '/^loadbalancer_apiserver:/{f=1; next} f && /^[[:space:]]+address:/{print $2; exit}' "${all_yml_path}")"
     fi
     if [ -z "${api_ip}" ]; then
-        if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
+        # ⚠ 2026-09-28 rebase 取舍: 保留 api-ha 的"本地代理模式"分支(它解释得对: 安静是设计如此),
+        #   但兜底默认取 main 的 false —— 9832975 已把 kube-vip 默认翻成关, api-ha 那版是翻之前的。
+        if [ "${_skip_all_yml}" = "1" ]; then
+            # 本地代理模式下 all.yml 里没有生效入口是**设计如此**(块须保持注释) —— 不是"忘了跑 sync",
+            # 别让运维照旧文案去重跑 sync。此处回退值仅供下面 calico can-reach 兜底使用。
+            log "本地代理模式: all.yml 无生效 API 入口(块保持注释, 设计如此) —— 该值仅作 calico can-reach 兜底"
+        elif [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
             log "all.yml 尚无 API 入口(未先跑 sync)→ 按阶段一回退第一个 master; kube-vip 就位后重跑即切换"
         fi
         api_ip="${master_ips[0]}"
@@ -1344,7 +1546,10 @@ update_loadbalancer_all_yml() {
     local calico_ip="${worker_ips[0]:-${api_ip}}"   # 无 worker 时回退第一个 master
 
     # ---------- 1. all.yml: API 负载均衡 + SAN ----------
-    if [ -f "${all_yml}" ] && grep -qE '^loadbalancer_apiserver:' "${all_yml}" && grep -qE '^supplementary_addresses_in_ssl_keys:' "${all_yml}"; then
+    if [ "${_skip_all_yml}" = "1" ]; then
+        # 本地代理模式: 该段整体交由 sync-kubespray-config.sh 独占(块保持注释 = 上游走 localhost:6443)
+        log "本地代理模式: 跳过 all.yml 的 loadbalancer_apiserver 同步(由 sync 脚本独占)"
+    elif [ -f "${all_yml}" ] && grep -qE '^loadbalancer_apiserver:' "${all_yml}" && grep -qE '^supplementary_addresses_in_ssl_keys:' "${all_yml}"; then
         local domain port
         domain="$(sed -nE 's/^apiserver_loadbalancer_domain_name:[[:space:]]*"?([^" ]+)"?.*/\1/p' "${all_yml}" | tail -1)"
         [ -n "${domain}" ] || domain="lb.k8s.local"
@@ -1755,6 +1960,9 @@ cmd_install() {
     # 确保 cluster.yml 已挂载 registry 节点 hosts play(域名解析, 配合 containerd certs.d)
     ensure_registry_play
 
+    # 确保 cluster.yml 已挂载单节点控制面收敛 play(⚠ 必须在 K8s+CNI 之后, 见函数注释)
+    ensure_single_node_play
+
     # 确保 cluster.yml 已挂载系统包安装 play(lvm2 等离线 .deb, 供 ceph/Rook OSD)
     ensure_packages_play
 
@@ -1909,6 +2117,9 @@ cmd_scale() {
     # 确保 scale.yml 已挂载 CNI 重启 play(新节点 K8s+CNI 之后重启 containerd+kubelet)
     ensure_cni_restart_play
 
+    # 确保 scale.yml 已挂载单节点控制面收敛 play(扩容后 master 可能被 kubeadm 重新打回污点)
+    ensure_single_node_play
+
     log "执行 Kubespray 扩容 (scale.yml)..."
     log "ansible 日志: 同时显示终端 + 写入 /tmp/${CLUSTER_NAME}-scale.log"
     [ "${ANSIBLE_LOG_TERMINAL:-1}" != "1" ] && log "ansible 日志: 仅写入文件(ANSIBLE_LOG_TERMINAL=0, 终端不显示)"
@@ -2021,6 +2232,7 @@ PYEOF
 LIMIT_GROUP=""
 COMMAND=""
 CLUSTER_ARG=""
+RESET_YES=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -2028,6 +2240,11 @@ while [ $# -gt 0 ]; do
             [ -z "${2:-}" ] && err "--limit 需要指定一个组名 (kube_control_plane, kube_node, etcd)"
             LIMIT_GROUP="$2"
             shift 2
+            ;;
+        --yes|-y)
+            # 仅供 reset 使用: 显式确认"清空旧集群"
+            RESET_YES=1
+            shift
             ;;
         --help|-h)
             usage
@@ -2050,14 +2267,15 @@ done
 CLUSTER_NAME=$(resolve_cluster_name "${COMMAND}" "${CLUSTER_ARG}")
 OFFLINE_CONTRIB="${KUBESPRAY_DIR}/contrib/offline"
 INVENTORY_DIR="${INVENTORY_BASE}/${CLUSTER_NAME}"
-LOCAL_REPO_DIR="${LOCAL_REPO_BASE}/${CLUSTER_NAME}"
+LOCAL_REPO_DIR="$(default_local_repo_dir)"
 
 # ── 环境变量覆盖(让调用方如 deploy-cluster.sh 可传入项目路径) ──
 KUBESPRAY_DIR="${CUBESTACK_KUBESPRAY_DIR:-${KUBESPRAY_DIR}}"
 INVENTORY_DIR="${CUBESTACK_INVENTORY_DIR:-${INVENTORY_DIR}}"
 # OFFLINE_FILES_DIR 可整体切换离线文件根目录(全局变量); LOCAL_REPO_DIR 仍可单独覆盖(最高优先)
+# 默认值由 default_local_repo_dir() 按布局给出 —— 仓库布局不加集群名子目录(见文件头 §离线文件根目录)
 OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${LOCAL_REPO_BASE}}"
-LOCAL_REPO_DIR="${CUBESTACK_LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}/${CLUSTER_NAME}}"
+LOCAL_REPO_DIR="${CUBESTACK_LOCAL_REPO_DIR:-$(default_local_repo_dir)}"
 OFFLINE_CONTRIB="${KUBESPRAY_DIR}/contrib/offline"
 
 # ── 预加载镜像集合配置(仅同步部署 kubespray 所需的最小镜像集合) ──
@@ -2074,9 +2292,15 @@ elif [ -f "${PRELOAD_CONF}" ]; then
     source "${PRELOAD_CONF}"
     log "预加载镜像集合(preload-images.conf): ${PRELOAD_IMAGE_PATTERNS:-<空=全量>}"
 elif [ -z "${PRELOAD_IMAGE_PATTERNS:-}" ]; then
-    # 内置默认最小集合: kubespray 默认部署 + calico 网络插件 + metallb/registry/local-path 附加组件所需镜像
+    # 内置默认最小集合: kubespray 默认部署 + calico 网络插件 + metallb/registry/local-path/lws/nginx 附加组件所需镜像
     # (排除 cilium/flannel/ingress-nginx/dashboard 等未启用组件的镜像)
-    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb kube-vip library_registry local-path-provisioner busybox"
+    # ⚠ 本行是**第 4 份**副本(standalone 直跑本脚本时的兜底默认值), 必须与 cluster.conf /
+    #   cluster.conf.example / tools/offline/trim-offline-files.sh 三份**逐字节一致** ——
+    #   check-modules.sh 第 ⑭ 项断言这**四份**(2026-09-28 起本份已纳入; 本行不在 file 顶部,
+    #   断言脚本会跳过上面那条 ${CUBESTACK_PRELOAD_IMAGE_PATTERNS} 透传行, 取到本行);
+    #   本份漂移会让"备料保留 / 节点预加载"两边不一致
+    #   (典型症状: 装了却没有镜像)。新增镜像 token 时四处都要加。
+    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause local-volume-provisioner node-feature-discovery metallb kube-vip library_registry local-path-provisioner busybox lws_manager library_nginx"
     log "预加载镜像集合(内置默认最小集合): ${PRELOAD_IMAGE_PATTERNS}"
 fi
 export PRELOAD_IMAGE_PATTERNS
@@ -2085,9 +2309,90 @@ export PRELOAD_IMAGE_PATTERNS
 LIMIT_FLAG=""
 [ -n "$LIMIT_GROUP" ] && LIMIT_FLAG="--limit ${LIMIT_GROUP}"
 
+# ============================================================
+# 命令: reset —— 清除目标节点上的**旧集群状态**(转调 kubespray reset.yml)
+# ---------------------------------------------------------------------------
+# 为什么需要它(2026-09-28 实机): 默认全量运行 / (deploy-cluster.sh 的) --fresh 只清**本仓库的
+# 断点状态**, 不清节点上的旧集群。节点上若残留上一代集群(实测: k8s 1.32 + etcd 3.5.16),
+# kubespray 会按**升级**处理, 撞两道**上游硬闸**:
+#   ① etcd 3.5(<3.5.26) → 3.6: roles/etcd/tasks/clean_v2_store.yml:12 直接 fail
+#      ("You need to upgrade etcd to 3.5.26 or later before upgrade to 3.6");
+#   ② kubeadm 跨小版本(如 1.32→1.35)本就不允许跳。
+# ⇒ **覆盖安装 = 先 reset 旧集群, 再全量部署**。原地升级未实现, 设计(含伪代码)见
+#   docs/cluster-upgrade-path.md。
+#
+# ⚠ 会**永久删除**(节点由 inventory 决定): etcd 数据目录 / /etc/kubernetes /
+#   kubelet·containerd 的配置与 cri 容器、Pod(= 该集群的工作负载与 etcd 数据全部丢失)。
+#   故必须显式 `--yes`, 且留 10 秒可中断的倒计时。
+# ============================================================
+cmd_reset() {
+    [ "${RESET_YES:-0}" = "1" ] || {
+        err "reset 会清空目标节点上的旧集群(etcd 数据 / 工作负载 / kubelet 配置全部丢失, 不可恢复)"
+        err "  确认要重装该集群时, 显式加 --yes 重跑:  $0 reset ${CLUSTER_NAME} --yes"
+        err "  原地升级**不走** reset —— 那是未实现的 feature, 设计见 docs/cluster-upgrade-path.md"
+        exit 1
+    }
+    ensure_venv
+    cd "${KUBESPRAY_DIR}"
+
+    local log="/tmp/${CLUSTER_NAME}-reset.log"
+    [ -e "${log}" ] && { rm -f "${log}" 2>/dev/null || sudo rm -f "${log}" 2>/dev/null || true; }
+    start_log_tee "${log}"
+
+    highlight "将要清除集群 [${CLUSTER_NAME}] 的旧状态(目标节点由 inventory 决定${LIMIT_GROUP:+, 限 ${LIMIT_GROUP}}):"
+    echo "    · etcd 数据目录(/var/lib/etcd)+ etcd/kubelet/containerd 服务与配置"
+    echo "    · /etc/kubernetes(证书、kubeconfig、静态 Pod 清单)"
+    echo "    · 全部 CRI 容器与 Pod —— 该集群工作负载一并消失, 不可恢复"
+    local _t=10
+    while [ "${_t}" -gt 0 ]; do
+        printf '\r    ⚠ %d 秒后开始(ctrl-c 可取消)...' "${_t}"
+        sleep 1; _t=$((_t - 1))
+    done
+    printf '\r\033[K'
+
+    local ov="${INVENTORY_DIR}/group_vars/all/offline.yml"
+    local -a _ov=(); [ -f "${ov}" ] && _ov=(-e "@${ov}")
+    log "执行 kubespray reset(日志: ${log})..."
+    run_ansible_playbook "${log}" reset.yml \
+        -i "${INVENTORY_DIR}/hosts.yml" \
+        --become --become-user=root \
+        ${LIMIT_FLAG} \
+        -e reset_confirmation=yes \
+        "${_ov[@]}" \
+        -vv || err "reset 失败, 见 ${log}"
+
+    log "✅ 旧集群状态已清除(etcd 数据 / /etc/kubernetes / cri 容器与 Pod)"
+
+    # ---- 复核: 旧**二进制**是否真被卸掉(覆盖安装成立的前提) ----
+    # ⚠ 关键机制(树内): etcd 的版本探测读的是 `etcd --version` 的输出
+    #   (roles/etcd/tasks/install_host.yml:24 用 regex_search('etcd Version: x.y.z') 算
+    #    etcd_current_version) —— **不是**读数据目录。所以只删数据、留下旧 etcd 二进制,
+    #   上游版本闸(roles/etcd/tasks/clean_v2_store.yml:12)下一次照样会拦。
+    #   reset 角色本就会删 bin_dir 下的 etcd/etcdctl/kubelet/kubeadm/kubectl/helm/calicoctl
+    #   (roles/reset/tasks/main.yml:355-375), 这里只做**验证**(失败不中止, 给手工修法)。
+    local _fm _probe=""
+    _fm="$(first_master_ip 2>/dev/null || true)"
+    if [ -n "${_fm}" ]; then
+        _probe="$(ssh -i "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}" \
+            -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+            "${SSH_USER:-ubuntu}@${_fm}" \
+            "ls -d /usr/local/bin/etcd /usr/local/bin/etcdctl /usr/local/bin/kubeadm /usr/local/bin/kubelet /etc/etcd.env 2>/dev/null || true" 2>/dev/null || true)"
+    fi
+    if [ -n "${_probe}" ]; then
+        warn "首个 master(${_fm})上仍残留旧集群文件 —— 它们会让下一次安装重新走【升级】路径:"
+        echo "${_probe}" | sed 's/^/      /'
+        warn "  手工修法(逐台 master): sudo rm -rf /usr/local/bin/{etcd,etcdctl,kubeadm,kubelet} /etc/etcd.env"
+    else
+        [ -n "${_fm}" ] && log "✅ 已复核: 首个 master 上无残留的 etcd/kubeadm/kubelet 二进制与 /etc/etcd.env"
+    fi
+    echo ""
+    log "ℹ️ 下一步: 全量部署(etcd 会以 ${ETCD_VERSION:-当前钉值} 全新安装) —— 在容器内跑 deploy-cluster.sh 即可"
+}
+
 case "${COMMAND}" in
     init)     cmd_init ;;
     download) cmd_download ;;
+    reset)    cmd_reset ;;
     install)
         # 整个安装过程所有日志(含 ansible): 同时显示终端 + 写入日志文件
         # 每次执行前清理旧日志: 旧文件可能被上次 root/sudo 运行占用导致 tee 写失败(Permission denied),

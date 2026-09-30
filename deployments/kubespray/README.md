@@ -45,3 +45,15 @@
         └── my-prod-cluster/        # 自定义集群离线资源
             ├── images/
             └── files/
+```
+
+> **两种布局下的离线资源根目录**(2026-09-28 起脚本自动判定,判据 = `BASE_DIR` 的上一级是否叫 `deployments`):
+>
+> | 布局 | 脚本位置 | 离线资源根(默认) | 是否按集群名隔离 |
+> |---|---|---|---|
+> | **仓库/容器** | `<root>/deployments/kubespray/` | `<root>/deployments/offline-files/kubespray/` | **否**(与 `cluster.conf` 的 `LOCAL_REPO_DIR`、全仓库其它脚本一致) |
+> | **扁平 standalone** | `<root>/cubestack-offline.sh`(与 `kubespray/` 平铺) | `<root>/offline-files/kubespray/` | 是(`<集群名>/images`、`<集群名>/files`) |
+>
+> 即:在仓库里直接 `./deployments/kubespray/cubestack-offline.sh download <集群>`(不传 `OFFLINE_FILES_DIR`),
+> 镜像 tar 落 `deployments/offline-files/kubespray/images/`、二进制落 `deployments/offline-files/kubespray/` 本身 ——
+> 正是部署流程读取的位置。显式传 `OFFLINE_FILES_DIR` / `CUBESTACK_LOCAL_REPO_DIR` 时以传入值为准(最高优先)。

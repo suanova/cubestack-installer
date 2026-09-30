@@ -1,4 +1,4 @@
-# Inspired by https://github.com/kube-vip/kube-vip/blob/v0.8.0/pkg/kubevip/config_generator.go#L103
+# Inspired by https://github.com/kube-vip/kube-vip/blob/v1.0.3/pkg/kubevip/config_generator.go#L103
 apiVersion: v1
 kind: Pod
 metadata:
@@ -27,7 +27,7 @@ spec:
       value: {{ kube_vip_services_interface | string | to_json }}
 {% endif %}
 {% if kube_vip_cidr %}
-    - name: vip_cidr
+    - name: vip_{{ "subnet" if kube_vip_version is version('0.9.0', '>=') else "cidr" }}
       value: {{ kube_vip_cidr | string | to_json }}
 {% endif %}
 {% if kube_vip_dns_mode %}
@@ -85,6 +85,16 @@ spec:
       value: {{ kube_vip_bgp_peerpass | to_json }}
     - name: bgp_peeras
       value: {{ kube_vip_bgp_peeras | string | to_json }}
+{% set kube_vip_bgp_sourceip_normalized = kube_vip_bgp_sourceip | default('', true) | string | trim %}
+{% if kube_vip_bgp_sourceip_normalized %}
+    - name: bgp_sourceip
+      value: {{ kube_vip_bgp_sourceip_normalized | to_json }}
+{% endif %}
+{% set kube_vip_bgp_sourceif_normalized = kube_vip_bgp_sourceif | default('', true) | string | trim %}
+{% if kube_vip_bgp_sourceif_normalized %}
+    - name: bgp_sourceif
+      value: {{ kube_vip_bgp_sourceif_normalized | to_json }}
+{% endif %}
 {% if kube_vip_bgppeers %}
     - name: bgp_peers
       value: {{ kube_vip_bgppeers | join(',')  | to_json }}
@@ -100,10 +110,20 @@ spec:
     - name: lb_fwdmethod
       value: {{ kube_vip_lb_fwdmethod | string | to_json }}
 {% endif %}
+{% if kube_vip_metrics_enabled %}
+    - name: prometheus_server
+      value: {{ (':' ~ (kube_vip_metrics_port | string)) | to_json }}
+{% endif %}
     image: {{ kube_vip_image_repo }}:{{ kube_vip_image_tag }}
     imagePullPolicy: {{ k8s_image_pull_policy }}
     name: kube-vip
     resources: {}
+{% if kube_vip_metrics_enabled %}
+    ports:
+    - name: metrics
+      containerPort: {{ kube_vip_metrics_port }}
+      protocol: TCP
+{% endif %}
 {% if kube_vip_lb_fwdmethod == "masquerade" %}
     securityContext:
       privileged: true
@@ -113,6 +133,8 @@ spec:
         add:
         - NET_ADMIN
         - NET_RAW
+        drop:
+        - ALL
 {% endif %}
     volumeMounts:
     - mountPath: /etc/kubernetes/admin.conf
@@ -122,6 +144,10 @@ spec:
     - kubernetes
     ip: 127.0.0.1
   hostNetwork: true
+{# Static pods do not support priorityClassName, so set the numeric priority of
+   system-node-critical directly, otherwise kubelet may evict this pod early:
+   https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/#pod-selection-for-kubelet-eviction #}
+  priority: 2000001000
   volumes:
   - hostPath:
       path: /etc/kubernetes/{{kube_vip_admin_conf}}

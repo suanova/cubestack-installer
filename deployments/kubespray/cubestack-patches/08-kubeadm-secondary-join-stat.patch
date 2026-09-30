@@ -1,0 +1,68 @@
+# patch: 08-kubeadm-secondary-join-stat.patch
+# 目标: roles/kubernetes/control-plane/tasks/kubeadm-secondary.yml
+# 加入: 2026-09-28(随 v2.28.0 → v2.32.0 迁移; 原为"树内手工项", 本次升级固化为补丁)
+# 原因: "是否已 join 成功"以 admin.conf 是否存在为准, 不只看 kubeadm 的标记文件(它是 /var/lib/kubelet/config.yaml 的 stat, 而该文件由 kubeadm join 过程写入 —— 标记在、admin.conf 缺 = 上次 join 半途失败): 文件顶部 stat admin.conf, 并把 5 处 gate 改成带 `or not admin_conf_stat.stat.exists`(4 处 join 前置任务 + join 任务自身);丢了则 kubelet config 已存在但 admin.conf 未生成时, Reset cert directory / Create kubeadm ControlPlane config / 两处 discovery kubeconfig 任务全被跳过, 且 join 任务自身也被跳过 —— 次 master 卡在"kubelet 已配好但未 join"。
+# 上游吸收判据: 上游同名文件出现 admin.conf 存在性守卫(stat 或 when: ... is exists), 或上游把"是否已 join"的判据从 kubelet config 换成 admin.conf。
+# 上游化: 建议提 PR(通用幂等健壮性: 次 master 失败重跑场景, 非本环境特有; §3.5 首批为 metallb, 本条为其后候选)。
+# v2.32 冲突处置: 上游把本文件重构了(join 由单 task 改为 block+rescue、新增 "Wait for new control plane nodes to be Ready"、任务顺序重排: "Create kubeadm ControlPlane config" 挪到文件中后部) → 按语义重做到新基线: ① stat 任务紧跟 "Obtain kubeadm certificate key…" 块(与 v2.28 相对位置相同, 早于全部使用者); ② **5 处** gate 全部带守卫: Reset cert directory / Get kubeconfig for join discovery process / Copy discovery kubeconfig / Create kubeadm ControlPlane config / **Joining control plane node to the cluster.(join 任务自身)**; ③ 不动 v2.32 新增的 "Wait for new control plane nodes to be Ready"(它的 gate 是正向 kubeadm_already_run.stat.exists)。
+# v2.32 备注: 第 5 处(join 任务自身)= 2026-09-28 评审裁决(Ruling 19)补上 —— 只改前 4 处时,"Reset cert directory" 会对半 join 节点执行 kubeadm reset,而 join 任务被自己的 gate 跳过 → **重置了却不重新 join**(比不打补丁更糟);补上后语义完整 = "admin.conf 缺 ⇒ 重新 join"。旧改动(38013f3 + 295805c, 本仓库主线)只改了 4 处;另一条开发线 bm-code 的 66583a3 做过这一处但未并入主线,本次按语义补回。正常重跑不受影响: 已 join 成功的节点 admin.conf 在 → 该 gate 为假 → 仍跳过 join。
+# ------------------------------------------------------------
+--- a/roles/kubernetes/control-plane/tasks/kubeadm-secondary.yml
++++ b/roles/kubernetes/control-plane/tasks/kubeadm-secondary.yml
+@@ -29,6 +29,14 @@
+       set_fact:
+         kubeadm_certificate_key: "{{ kubeadm_upload_cert.stdout_lines[-1] | trim }}"
+ 
++- name: Check if admin.conf exists (indicating successful join)
++  stat:
++    path: "{{ kube_config_dir }}/admin.conf"
++    get_attributes: false
++    get_checksum: false
++    get_mime: false
++  register: admin_conf_stat
++
+ - name: Wait for k8s apiserver
+   wait_for:
+     host: "{{ kubeadm_discovery_address | regex_replace('\\]?:\\d+$', '') | regex_replace('^\\[', '') }}"
+@@ -49,7 +57,7 @@
+     PATH: "{{ bin_dir }}:{{ ansible_env.PATH }}"
+   when:
+     - inventory_hostname != first_kube_control_plane
+-    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists
++    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists or not admin_conf_stat.stat.exists
+     - not kube_external_ca_mode
+ 
+ - name: Get kubeconfig for join discovery process
+@@ -59,7 +67,7 @@
+   delegate_to: "{{ groups['kube_control_plane'] | first }}"
+   when:
+     - kubeadm_use_file_discovery
+-    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists
++    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists or not admin_conf_stat.stat.exists
+ 
+ - name: Copy discovery kubeconfig
+   copy:
+@@ -70,7 +78,7 @@
+   when:
+     - inventory_hostname != first_kube_control_plane
+     - kubeadm_use_file_discovery
+-    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists
++    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists or not admin_conf_stat.stat.exists
+ 
+ - name: Create kubeadm ControlPlane config
+   template:
+@@ -81,12 +89,12 @@
+     validate: "{{ kubeadm_config_validate_enabled | ternary(bin_dir + '/kubeadm config validate --config %s', omit) }}"
+   when:
+     - inventory_hostname != first_kube_control_plane
+-    - not kubeadm_already_run.stat.exists
++    - not kubeadm_already_run.stat.exists or not admin_conf_stat.stat.exists
+ 
+ - name: Joining control plane node to the cluster.
+   when:
+     - inventory_hostname != first_kube_control_plane
+-    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists
++    - kubeadm_already_run is not defined or not kubeadm_already_run.stat.exists or not admin_conf_stat.stat.exists
+   environment:
+     PATH: "{{ bin_dir }}:{{ ansible_env.PATH }}"
+   block:

@@ -711,6 +711,28 @@ master_hosts() {
     return 0
 }
 
+# 收集全部 master 的 **IP**(空格分隔; 供逐台 SSH 探测复用)
+#
+# ⚠ 与 master_hosts 的分工(2026-09-28 实机事故, 别再混用):
+#   · master_hosts 给的是**主机名** —— 只可用于"要名字"的场合(如 vip_nodename);
+#   · **凡是要 SSH 的场合必须用本函数(IP)** —— 部署容器里通常没有节点名的 /etc/hosts 解析
+#     (`getent hosts mxgpu-3-28` 实测失败), 拿主机名 SSH 会**静默连不上**, 而调用方常把
+#     "连不上"当成"条件不成立": kube_vip_is_bound 曾因此恒判"VIP 未绑定" ⇒ api_entry_ip()
+#     永远回落首个 master ⇒ 宿主机与全部节点的 k8s-api.cubestack.io 都指向单点 Master,
+#     kube-vip 白装(实机: VIP 10.66.3.240 明明已绑在 mxgpu-3-28, 判定却说"未绑定")。
+#   08/09 两个 kube-vip 模块早就是这么做的(node_ip_by_hostname 转 IP 再 SSH), 这里补齐。
+master_ips() {
+    local line
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        if [ "${NODE_ROLE}" = "master" ] && [ -n "${NODE_IP}" ]; then
+            printf '%s ' "${NODE_IP}"
+        fi
+    done
+    return 0
+}
+
 # 收集全部节点 IP(空格分隔; 供 VIP 冲突判定复用)
 all_node_ips() {
     local line
@@ -728,6 +750,12 @@ all_node_ips() {
 # 硬失败项直接 err+exit 1; 通过则返回 0
 # 用法: kube_vip_validate_config || exit 1   (须已 load_config)
 kube_vip_validate_config() {
+    # 入口来源互斥(external ↔ kube-vip / HAProxy+KA / 非法 IPv4)先行 —— 放在早退**之前**,
+    # 否则 KUBE_VIP_ENABLED≠true 时直接 return 0, external 的几项就永远验不到。
+    api_entry_validate_config || return 1
+
+    # ⚠ 2026-09-28 rebase 取舍: 这里的兜底默认取 main 的 `false`(9832975 已把 kube-vip 默认
+    #   翻成关, 全仓 11 处一起翻); api-ha 分支那版 `:-true` 是翻之前的写法, 不能照搬。
     [ "${KUBE_VIP_ENABLED:-false}" = "true" ] || return 0
 
     # ① 互斥
@@ -772,27 +800,24 @@ kube_vip_validate_config() {
         warn "少于 3 台时无真正的多数派容错(建议 3 台及以上)"
     fi
 
-    # ⑤ 本地代理(kubespray nginx-proxy): 拦住"以为改了开关就生效"的假修复
-    #    kubespray 的 kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支优先,
-    #    只要外部 LB 还在, kubelet 永远走 <域名>:6443 —— 本地代理装了也没人用。
-    #    这不是"少配一个变量", 是两个互斥的拓扑选择, 所以硬失败而不是警告。
-    if bool_is_true "${KUBE_VIP_LOCAL_PROXY:-false}"; then
-        err "KUBE_VIP_LOCAL_PROXY=true 与当前拓扑冲突, 单改开关不会生效(本地代理会装上但没流量):"
-        err "  原因: kubespray 模板中 loadbalancer_apiserver 分支优先于 localhost 分支,"
-        err "        只要 all.yml 里还定义着 loadbalancer_apiserver, kubelet 就始终走域名:6443"
-        err "  二选一:"
-        err "    · 路线1(推荐, 保留域名/VIP 对外入口): 待支持后由脚本显式声明 kubelet 端点"
-        err "    · 路线2(全集群改用本地代理): 摘掉 all.yml 的 loadbalancer_apiserver 块"
-        err "        代价: 对外稳定入口丢失(除非另有外部 LB), kube-vip 的价值也随之消失"
-        err "  当前建议: 保持 KUBE_VIP_LOCAL_PROXY=false, 走 kube-vip 单一路径"
+    # ⑤ 本地代理: 旧开关 KUBE_VIP_LOCAL_PROXY 已并入 API_LOCAL_LB_ENABLED, 本方案起**真正生效**
+    #    (实现路径 = 摘掉 all.yml 的 loadbalancer_apiserver 块, 让上游按 localhost 分支分派,
+    #     见 docs/api-ha/04-decision.md §2 与 sync-kubespray-config.sh 的模式分派)
+    if bool_is_true "${KUBE_VIP_LOCAL_PROXY:-false}" && [ -n "${API_LOCAL_LB_ENABLED:-}" ] \
+       && ! bool_is_true "${API_LOCAL_LB_ENABLED}"; then
+        err "KUBE_VIP_LOCAL_PROXY=true 但 API_LOCAL_LB_ENABLED=false —— 两个开关冲突, 请只留一个"
         return 1
     fi
     return 0
 }
 
-# 读取 inventory 中当前已生效的 API 入口地址(all.yml 的 loadbalancer_apiserver.address)
-# 用途: 让 VIP 在多次运行间保持稳定 —— 一旦写进库存就不再重新推导(否则每次跑都可能漂到别的地址,
-# 导致 kube_vip_address 与 loadbalancer_apiserver.address 失配、证书 SAN 反复重签)。
+# 读取 all.yml 里当前已生效的 API 入口地址(loadbalancer_apiserver.address) —— **只读库存事实, 不回退**。
+# 用途: 让 VIP 在多次运行间保持稳定(复用逻辑在 kube_vip_derive 第 2 步)。
+# ⚠ 语义必须保持**窄**(读不到就输出空串): 另两个消费者把它当"库存里当前生效的入口"用,
+#   一旦它在读不到时伪造出一个值, 这两处安全判定都会 fail-open —— 要回退请下沉到 kube_vip_derive:
+#     · modules/02_k8s/09_kube_vip.sh#kube_vip_cleanup 清理护栏: 入口"非空且非节点 IP"即拒绝清理,
+#       伪造值会让"明明没有入口"的集群永远清不掉 kube-vip(而它给的解法在本地代理模式下也走不通)
+#     · modules/02_k8s/06_k8s_deploy.sh 阶段二切换确认门: _KV_OLD==_KV_VIP 会**静默跳过**红底倒计时
 # 用法: cur="$(kube_vip_current_entry)"   (无库存/读不到时输出空串)
 kube_vip_current_entry() {
     local all_yml="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}/group_vars/all/all.yml"
@@ -851,7 +876,9 @@ kube_vip_derive() {
         for _ip in ${node_ips}; do [ "${_ip}" = "${ip}" ] && return 1; done
         metallb_pool_contains "${ip}" && return 1
         local _host
-        for _host in $(master_hosts); do
+        # ★ IP 而非主机名(同上): 容器解析不了节点名 ⇒ 拿主机名 SSH 恒失败 ⇒ 会把每个候选地址
+        #   都误判成"被占用" ⇒ VIP 自动推导失效(显式 K8S_API_VIP 不受影响)
+        for _host in $(master_ips); do
             ssh -i "${ssh_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
                 -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
                 "${_user}@${_host}" "${probe//__IP__/${ip}}" >/dev/null 2>&1 || return 1
@@ -869,9 +896,15 @@ kube_vip_derive() {
     if [ -n "${seed}" ]; then emit_ip "${seed}" || return 1; return 0; fi
 
     # 2) 库存里已有**可当 VIP 用**的地址 —— 直接复用(保证幂等, 不因重跑而漂移)
-    #    例外: KUBE_VIP_SWITCH_CONFIRMED=1(用户已在倒计时窗口确认切换)时跳过复用, 重新推导
+    #    ⚠ 不再因 KUBE_VIP_SWITCH_CONFIRMED=1 跳过复用: 那会退回第 3 步的逐地址探测, 而
+    #      **当前已绑定的 VIP 在探测口径里恰恰是"被占用"** → 每确认一次就换一个地址(VIP 漂移, 见 R8)。
+    #      "要换地址"的诉求由第 1 步的显式 K8S_API_VIP 承担, 不需要在这里重新推导。
     local cur; cur="$(kube_vip_current_entry)"
-    if [ -n "${cur}" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
+    # 本地代理模式下 all.yml 的 loadbalancer_apiserver 块保持注释 → 回退到 addons.yml 记录值,
+    # 让 VIP 在多次运行间保持稳定(不因重跑漂移)。⚠ **只在这一步回退**:
+    # kube_vip_current_entry 的其它消费者(清理护栏/切换确认门)需要它保持"all.yml 事实"的窄语义。
+    [ -n "${cur}" ] || cur="$(kube_vip_recorded_address)"
+    if [ -n "${cur}" ]; then
         if kube_vip_is_viable_candidate "${cur}"; then
             vlog "沿用已生效的 API 入口地址: ${cur}"
             emit_ip "${cur}" || return 1; return 0
@@ -919,7 +952,9 @@ kube_vip_is_bound() {
     [ -n "${vip}" ] || return 1
     local _user="${SSH_USER:-ubuntu}" ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
     local _host
-    for _host in $(master_hosts); do
+    # ★ 用 master_ips() 而非 master_hosts(): 部署容器解析不了节点名, 拿主机名 SSH 会静默失败
+    #   —— 那时本函数**恒返回 1("VIP 未绑定")**, 哪怕 VIP 明明已绑(2026-09-28 实机, 见 master_ips 注释)
+    for _host in $(master_ips); do
         if ssh -i "${ssh_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_user}@${_host}" \
                "ip route get '${vip}' 2>/dev/null | grep -q 'local ${vip} '" 2>/dev/null; then
@@ -976,8 +1011,9 @@ api_entry_ip() {
 # 输出: 要写入 all.yml 的 loadbalancer_apiserver.address; 同时设置 API_ENTRY_PHASE(0/1/2)
 #
 #   与"集群是不是新建"无关, 只看一件事: **VIP 此刻是否已经真的绑上了**。
-#   原因是 kubespray 的时序: 写 /etc/hosts 的 0090-etchosts.yml 在 **preinstall 角色**里,
-#   而拉起 kube-vip 的 kubernetes/node 角色排在 **etcd 安装之后** —— 两者差一个 etcd 安装的时间。
+#   原因是 kubespray 的时序: 写 /etc/hosts 的任务(历史: preinstall 角色的 0090-etchosts.yml ——
+#   **v2.32 树已删除该任务**, 现由本仓库 modules/02_k8s/03_k8s_hosts.sh 写)与拉起 kube-vip 的
+#   kubernetes/node 角色之间隔着 etcd 安装;收编后 kube-vip 清单更早落盘、但**绑定完成**仍晚于 hosts 写入。
 #   所以无论新建还是存量, 只要 VIP 还没绑, 把入口指向 VIP 就等于指向一个不存在的地址。
 #
 #   VIP 未绑 → 阶段一: 写 master01(既有行为, 零风险); 本轮的唯一产出是让 kube-vip 就位
@@ -1032,6 +1068,99 @@ kube_vip_resolve_target() {
 # 布尔归一化(cluster.conf 里 true/1/yes/on 都算开) —— 与 sync-kubespray-config.sh 的 _bool 同语义
 bool_is_true() { case "${1:-0}" in 1|true|yes|on) return 0;; *) return 1;; esac; }
 
+# ---------------- API 入口: 模式判定与地址解析(见 docs/api-ha/04-decision.md §2) ----------------
+
+# 节点侧本地代理(kubespray nginx-proxy 静态 Pod)是否启用。
+# 兼容别名: 旧开关 KUBE_VIP_LOCAL_PROXY(新方案起并入本开关, 见 cluster.conf 注释)。
+# 用法: api_local_lb_enabled && echo 开
+api_local_lb_enabled() {
+    if [ -n "${API_LOCAL_LB_ENABLED:-}" ]; then
+        bool_is_true "${API_LOCAL_LB_ENABLED}"
+    else
+        bool_is_true "${KUBE_VIP_LOCAL_PROXY:-false}"
+    fi
+}
+
+# 入口模式三选一(优先级: external > vip > node)。纯函数, 只读开关。
+# 用法: mode="$(api_entry_mode)"
+api_entry_mode() {
+    if [ -n "${API_EXTERNAL_ADDR:-}" ]; then printf 'external\n'; return 0; fi
+    if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then printf 'vip\n'; return 0; fi
+    printf 'node\n'; return 0
+}
+
+# 当前生效的 API 入口地址(全部返回值都是 IPv4 字面量, 供 /etc/hosts、kubeconfig 等消费)。
+#   external → API_EXTERNAL_ADDR
+#   vip      → kube_vip_resolve_target(内含两阶段: 未绑=首 master / 已绑=VIP)
+#   node     → 第一个 master IP(无 HA —— 不拦停, 但 api_entry_validate_config 会**显式 warn**)
+# 用法: addr="$(api_entry_addr)" || exit 1
+api_entry_addr() {
+    # ⚠ 2026-09-28 rebase 合并: 原先 vip/node 两条各调 kube_vip_resolve_target / first_master_ip,
+    #   与 api_entry_ip 是**两套并行机制**(它们不认显式 API_ENTRY_IP, 也不做 VIP 可用性体检)。
+    #   现在只留一条: external 走外部入口, 其余一律委托 api_entry_ip。
+    if [ "$(api_entry_mode)" = "external" ]; then
+        emit_ip "${API_EXTERNAL_ADDR}" || return 1
+        return 0
+    fi
+    api_entry_ip
+}
+
+# 入口配置的硬校验(互斥 + 取值合法性 + node 模式的"无 HA"提示)。失败即 err 并 return 1。
+# 用法: api_entry_validate_config || exit 1   (须已 load_config)
+#
+# ⚠ **调用点必须是语句上下文, 不得写成 `x="$(api_entry_validate_config)"`** ——
+#   本函数在 node 模式下会 warn, 而 say/ok/warn 写的是 **stdout**(只有 vlog/err 走 stderr),
+#   被 `$(...)` 捕获就会把提示文字混进返回值(与 vlog 写 stdout 那次部署中断同源, 见本文件顶部注释)。
+#   全仓库调用点(2026-09-28 核查, 两个生产调用点均为语句上下文, 无捕获):
+#     · `kube_vip_validate_config()` 内(紧随本函数定义之后)   `api_entry_validate_config || return 1`
+#     · `tools/k8s/sync-kubespray-config.sh` 顶部              `api_entry_validate_config || exit 1`
+#     · 测试桩 `tools/tests/test-api-entry-mode.sh` **有意**在 `$(...)` 里捕获(为了断言"node 模式确实
+#       打印了提示")—— 那是观察手段, 捕获到的提示**不是**被消费的返回值
+#   ⚠ **可见性**: sync-kubespray-config.sh 的 stdout 在 `06_k8s_deploy.sh` 里被 `>/dev/null 2>&1` 吞掉
+#     (两处调用皆如此), 那条路径**看不到**本提示; 但 `gen-inventory.sh` 调用它时**不重定向**
+#     (06_k8s_deploy.sh 第一步就会跑它), 所以正常全量部署里这条 warn 是**可见**的。
+api_entry_validate_config() {
+    if [ -n "${API_EXTERNAL_ADDR:-}" ]; then
+        if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
+            err "API_EXTERNAL_ADDR=${API_EXTERNAL_ADDR} 与 KUBE_VIP_ENABLED=true 互斥 —— 入口只能有一个来源:"
+            err "  复用环境已有 LB/VIP → 请设 KUBE_VIP_ENABLED=false"
+            err "  由本方案自带 VIP → 请清空 API_EXTERNAL_ADDR"
+            return 1
+        fi
+        if bool_is_true "${HAPROXY_ENABLED:-false}" || bool_is_true "${KEEPALIVED_ENABLED:-false}"; then
+            err "API_EXTERNAL_ADDR 与 HAPROXY_ENABLED/KEEPALIVED_ENABLED 互斥(三者都在提供 API 入口)"
+            return 1
+        fi
+        emit_ip "${API_EXTERNAL_ADDR}" >/dev/null 2>&1 || {
+            err "API_EXTERNAL_ADDR 不是合法 IPv4 字面量: ${API_EXTERNAL_ADDR}"
+            return 1
+        }
+    fi
+    if bool_is_true "${KUBE_VIP_LOCAL_PROXY:-false}" && [ -n "${API_LOCAL_LB_ENABLED:-}" ] \
+       && ! bool_is_true "${API_LOCAL_LB_ENABLED}"; then
+        err "KUBE_VIP_LOCAL_PROXY=true 与 API_LOCAL_LB_ENABLED=false 冲突:"
+        err "  KUBE_VIP_LOCAL_PROXY 已是 API_LOCAL_LB_ENABLED 的兼容别名, 只保留其中一个"
+        return 1
+    fi
+
+    # ⑤ node 模式(既无 kube-vip VIP, 也无 API_EXTERNAL_ADDR) → 外部/管理入口回退第一个 master。
+    #   这**正是本方案要消灭的静默单点**(D5 / §2.2 判定图, docs/api-ha/04-decision.md) ——
+    #   不拦停(无 VIP 是可接受的现场条件), 但绝不允许悄无声息: 否则运维会以为拿到了高可用入口。
+    #   放这里的原因: 本函数是全部部署路径共同的静态入口关(sync / 09_kube_vip / 06_k8s_deploy 都经过);
+    #   只把它放进某一个模块, 别的入口(如单独跑 sync)就漏掉了。
+    #   ⚠ 去重: 同一进程内只提示一次 —— 单次部署会经过本函数 2~4 次(见上方调用点), 刷屏只会让人无视它。
+    #     去重是**进程内**的: 各脚本是独立进程, 因此"可见的那次"不会被隐藏的那次吞掉(06 里 sync 两次重定向,
+    #     gen-inventory 那次不重定向 → 提示仍可见)。
+    if [ "$(api_entry_mode)" = "node" ] && [ "${_API_ENTRY_NODE_WARNED:-0}" != "1" ]; then
+        _API_ENTRY_NODE_WARNED=1
+        local _fm=""; _fm="$(first_master_ip)" || _fm="<第一个 master>"
+        warn "API 入口模式 = node: 外部/管理入口回退到第一个 master(${_fm}) —— **无 HA**"
+        warn "  该 master 宕机 ⇒ kubectl/CI/外部系统失联(节点侧不受影响, 仍走各节点本地代理)"
+        warn "  如需外部入口高可用: 设 KUBE_VIP_ENABLED=true(自带浮动 VIP), 或 API_EXTERNAL_ADDR=<环境已有 LB/VIP>"
+    fi
+    return 0
+}
+
 # all.yml 里"非数值的 API 入口地址"(如 kube-vip 启用后的 VIP 走的是 Jinja 表达式)。
 # 现有的 sed 同步只认 [0-9.]+ 字面量, 这类值不会被误覆盖; 但仍需在写入前确认,
 # 否则一次误改就会把真正生效的表达式抹掉。
@@ -1050,19 +1179,21 @@ nonnumeric_entry() {
 # 再按当前配置重写。用 awk 脚本文件而非内联程序 —— 内联的复杂引号规则经 shell 传递易被破坏。
 # 用法: update_kube_vip_addons_yml "<addons.yml 路径>" "<VIP>"
 #
-# ⚠ **单一写入者契约**: 本函数写入的 kube_vip_enabled **恒为 false**, 与 KUBE_VIP_ENABLED 无关。
-#   含义不是"kube-vip 没启用", 而是"不要让 kubespray 写这个静态 Pod" —— 静态 Pod 由
-#   02_k8s/09_kube_vip.sh 独占。原因是两边的渲染结果**必然不同**: kubespray 对**首台** master
-#   会把 manifest 的 hostPath 渲染成 super-admin.conf
-#   (roles/kubernetes/node/tasks/loadbalancer/kube-vip.yml:26-31 的 set_fact), 而我们的渲染器
-#   恒用 admin.conf → 每次全量运行该文件被改写两次 → kube-vip pod 跟着重启两次。
-#   把 kubespray 侧关掉之后, 它对本集群 kube-vip 的唯一贡献就只剩 "把 VIP 写进证书 SAN"。
-#   详见 docs/kube-vip-api-ha.md 第 18 节。
+# ⚠ **2026-09-28 收编(本函数的语义已反转)**: 写入的 kube_vip_enabled **跟随 KUBE_VIP_ENABLED** ——
+#   静态 Pod 清单改由 **kubespray 自己**在 "Install Kubernetes nodes" 里渲染
+#   (roles/kubernetes/node/tasks/loadbalancer/kube-vip.yml), 我们不再代劳。
+#   历史(2026-09-22 ~ 09-28): 该键曾**恒写 false**("单一写入者契约", 静态 Pod 由 09_kube_vip.sh 独占),
+#   起因是**双写者**并存 —— 上游对**首台** master 把 hostPath 渲染成 super-admin.conf、其余 admin.conf,
+#   而我们的渲染器恒用 admin.conf ⇒ 同一路径被两方轮流改写、每次全量运行清单改两次、Pod 重启两次。
+#   收编后写入者只剩上游一家, 那份分叉本身是**稳定**的 ⇒ 契约不需要, 自持渲染器已删除(见
+#   docs/api-ha/07-kube-vip-upstream-assessment.md)。上游做不到的部分仍由我们兜:
+#   VIP 推导 / 入口与 hosts / 关闭清理 / 验证(模块 09 / 03 / 10 / 08 / 11)。
 update_kube_vip_addons_yml() {
     local f="$1" vip="${2:-}"
     [ -f "${f}" ] || { warn "未找到 ${f}, 跳过 kube-vip 同步"; return 1; }
     grep -q '^# Kube VIP' "${f}" || { warn "${f} 中未找到 '# Kube VIP' 锚点行, 跳过 kube-vip 同步"; return 1; }
 
+    local kv_on; bool_is_true "${KUBE_VIP_ENABLED:-false}" && kv_on=true || kv_on=false
     local tmp; tmp="$(mktemp)"
     awk '
         function is_block_line(s) {
@@ -1078,31 +1209,28 @@ update_kube_vip_addons_yml() {
 
     {
         echo "# Kube VIP"
-        # ⚠ 恒为 false, 且**不跟随 KUBE_VIP_ENABLED** —— 含义是"kubespray 不要插手这个静态 Pod",
-        #   静态 Pod 由 02_k8s/09_kube_vip.sh 独占(单一写入者)。理由见本函数头注释。
-        echo "kube_vip_enabled: false"
-        # kube_vip_address 与上面的开关**无关**: 它只喂 apiserver 证书 SAN
-        # (control-plane/tasks/kubeadm-setup.yml:48 的 sans_kube_vip_address, 只看它是否定义,
+        # 跟随开关键: kubespray 据此决定是否渲染 kube-vip 静态 Pod(node/tasks/main.yml:19-24)
+        echo "kube_vip_enabled: ${kv_on}"
+        # kube_vip_address 与开关**无关**: 它只喂 apiserver 证书 SAN
+        # (control-plane/tasks/kubeadm-setup.yml:49 的 sans_kube_vip_address, 只看它是否定义,
         #  不看 kube_vip_enabled)。**KUBE_VIP_ENABLED=false 时也保留它** → 关掉 kube-vip 后再开回来
         #  不必重签证书(阶段二切换的主要代价之一就是证书 SAN 重签, 能省则省)。
         [ -n "${vip}" ] && echo "kube_vip_address: ${vip}"
-        # 以下键在 kube_vip_enabled: false 下**全部不生效**(kubespray 的 kube-vip 任务整个被跳过),
-        # 保留它们纯粹是逃生口: 万一手工把上面的开关翻成 true, kubespray 渲染出来的仍是这套策略
-        # (ARP + 控制面 + cp_detect + 不开服务 LB), 而不是一份 arp 全关的坏 manifest。
-        echo "kube_vip_arp_enabled: true"
-        echo "kube_vip_controlplane_enabled: true"
-        # apiserver 进程级故障检测: 开启后 kube-vip 探本机 apiserver /healthz, 探失败即把
-        # 自身健康置假 → 不再续租 → 约 5s(租约时长)后 VIP 漂走。这是"节点活着但 apiserver
-        # 死了"这一场景唯一的快速切换手段(关闭时只能等租约自然过期, 与节点宕机同速)。
-        # 默认开(与 kubespray 的 false 不同): 该场景在真实运维中比整机宕机更常见。
+        # 以下键 = 收编前自持渲染器钉死的策略(render-kube-vip-manifest.py:90-116), 现把同样的策略
+        # 喂给上游渲染器, 使上游渲染结果与收编前逐项等价。上游这些键的默认值与本策略**不同**,
+        # 缺一项就会渲染出行为不同的清单, 故必须显式写:
+        echo "kube_vip_arp_enabled: true"          # 上游默认 false; 且 kube_vip_leader_election_enabled 由它派生(不写=选举关闭)
+        echo "kube_vip_controlplane_enabled: true" # 上游默认 false; 不写就没有控制面 VIP
+        # apiserver 进程级故障检测: 开启后 kube-vip 探本机 apiserver /healthz, 探失败即把自身健康置假
+        # → 不再续租 → 约 5s(租约时长)后 VIP 漂走。这是"节点活着但 apiserver 死了"这一场景唯一的
+        # 快速切换手段(关闭时只能等租约自然过期, 与节点宕机同速)。
         echo "kube_vip_cp_detect: $(bool_is_true "${KUBE_VIP_CP_DETECT:-false}" && echo true || echo false)"
-        # 服务 LB 归 MetalLB —— 两者都实现 LoadBalancer 语义, 同时开会让 kube-vip 抢走
-        # MetalLB 的地址分配权(实机已验证的分工, 见 docs/kube-vip-api-ha.md 决策 D1)
+        # 服务 LB 归 MetalLB —— 两者都实现 LoadBalancer 语义, 同时开会让 kube-vip 抢走 MetalLB 的
+        # 地址分配权(实机已验证的分工, 见 docs/kube-vip-api-ha.md 决策 D1)。显式写 false 作护栏。
         echo "kube_vip_services_enabled: false"
-        # 不开控制面负载均衡(决策 D4)。⚠ 不是"收益有限"那么含糊 —— 是 kube_vip_lb_fwdmethod
-        # 的默认值 local 在内核里等于 ip_vs_null_xmit(包原样交回本机栈, 根本不转发),
-        # 开了也只会得到一个"后端登记了但不用"的 IPVS 表; 要真 LB 得换 masquerade, 那又要
-        # privileged + kube-vip-iptables 镜像 + kube-proxy excludeCIDRs 与 VIP 同步。
+        # 不开控制面负载均衡(决策 D4)。⚠ 不是"收益有限"那么含糊 —— kube_vip_lb_fwdmethod 的默认值
+        # local 在内核里等于 ip_vs_null_xmit(包原样交回本机栈, 根本不转发); 要真 LB 得换 masquerade,
+        # 那又要 privileged + kube-vip-iptables 镜像 + kube-proxy excludeCIDRs 与 VIP 同步。
         # 详见 docs/kube-vip-api-ha.md 决策 D4 与 docs/troubleshooting.md 三.11。
         echo "kube_vip_lb_enable: false"
         [ -n "${KUBE_VIP_INTERFACE:-}" ] && echo "kube_vip_interface: ${KUBE_VIP_INTERFACE}"
@@ -1111,16 +1239,16 @@ update_kube_vip_addons_yml() {
     cat "${tmp}" > "${f}"
     rm -f "${tmp}"
 
-    if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
+    if [ "${kv_on}" = "true" ]; then
         [ -n "${vip}" ] || { err "kube-vip 已启用但 VIP 为空 —— 不能写入 kube_vip_address"; return 1; }
     fi
     if [ -n "${vip}" ]; then
         local wrote; wrote="$(awk '/^kube_vip_address:/{print $2; exit}' "${f}")"
         [ "${wrote}" = "${vip}" ] || { err "kube_vip_address 写入校验失败(期望 ${vip}, 实际 ${wrote})"; return 1; }
     fi
-    # 单一写入者契约的写入校验: 这一行必须恒为 false, 否则 kubespray 会回来写 manifest
+    # 收编后的写入校验: 开关值必须与 KUBE_VIP_ENABLED 一致(上游据此渲染/不渲染静态 Pod)
     local _en; _en="$(awk '/^kube_vip_enabled:/{print $2; exit}' "${f}")"
-    [ "${_en}" = "false" ] || { err "kube_vip_enabled 应为 false(静态 Pod 由 09_kube_vip 独占), 实际 '${_en}'"; return 1; }
+    [ "${_en}" = "${kv_on}" ] || { err "kube_vip_enabled 写入校验失败(期望 ${kv_on}, 实际 '${_en}')"; return 1; }
     return 0
 }
 
@@ -1490,14 +1618,55 @@ sync_kubeconfig() {
     fi
     chmod 600 "${HOME}/.kube/config"
     rm -f "${tmp}"
-    # ★ 宿主机 /etc/hosts 收敛 API_DOMAIN(换环境旧 IP 残留会让 getent 命中旧集群 → 误报失败):
-    #   先删该域名所有旧行, 再写当前 API_IP 一行(与 setup-api-expose.sh 逻辑一致, 双保险)。
-    ensure_hosts_entry "${API_IP}" "${API_DOMAIN}"
+    # ★ 宿主机 /etc/hosts 收敛两个受管域名(换环境旧 IP 残留会让 getent 命中旧集群 → 误报失败)。
+    #   ensure_hosts_entry 的语义 = 先删该域名**所有**旧行, 再写当前一行(重复行不留存)。
+    #   · API_DOMAIN → **api_entry_ip()**(显式 API_ENTRY_IP > kube-vip 已绑 ⇒ VIP > 首个 master)。
+    #     ⚠ 不用 API_IP —— 那是"能通 NodePort 的节点 IP"语义(见其定义处注释)。本行原先写的就是
+    #     API_IP, 而下面 setup-api-expose.sh 用 api_entry_ip()(双保险的那一半是对的): 两者不一致时
+    #     以**后写者**为准, 故宿主机曾长期把 k8s-api.cubestack.io 解析到 10.66.3.28(单点)而不是
+    #     已就绪的 VIP 10.66.3.240(2026-09-28 实机)。现两处同源。
+    #   · REGISTRY_DOMAIN → REGISTRY_IP(MetalLB VIP; NodePort 模式为派生出的节点 IP)。
+    #     补在这里的原因: 本函数是宿主机侧 kubectl/helm 消费者的公共入口(gpu_operator/gpu_lws/
+    #     multus/rdma + 接入引导都会走)⇒ 受管域名**每轮安装都收敛一次**, 不必等各自的 addon 模块。
+    local _api_entry
+    _api_entry="$(api_entry_ip 2>/dev/null)" || _api_entry="${API_IP}"
+    ensure_hosts_entry "${_api_entry}" "${API_DOMAIN}"
+    [ -n "${REGISTRY_DOMAIN:-}" ] && [ -n "${REGISTRY_IP:-}" ] && \
+        ensure_hosts_entry "${REGISTRY_IP}" "${REGISTRY_DOMAIN}"
     # 宿主机 DNAT(6443→first master): 让 API_DOMAIN 从宿主机可达(幂等)
     bash "${SCRIPT_DIR}/tools/lb/setup-api-expose.sh" >/dev/null 2>&1 || \
         sudo bash "${SCRIPT_DIR}/tools/lb/setup-api-expose.sh" >/dev/null 2>&1 || true
     # 校验: 经 API_DOMAIN 访问集群
-    KUBECONFIG="${HOME}/.kube/config" timeout 15 kubectl get nodes --no-headers >/dev/null 2>&1
+    if KUBECONFIG="${HOME}/.kube/config" timeout 15 kubectl get nodes --no-headers >/dev/null 2>&1; then
+        return 0
+    fi
+    # ★ 失败时给**可行动**的诊断(2026-09-29 实机, 排查了数小时):
+    #   同网段两套集群共用同一个 API VIP(K8S_API_VIP)时, 两边的 kube-vip 都持有该地址 ⇒
+    #   到 VIP 的流量**随机落到任一集群的 apiserver** ⇒ kubectl 时好时坏地报
+    #   `x509: certificate signed by unknown authority`; 而下面的校验把输出重定向丢了 ⇒
+    #   现场只能看到"admin.conf 下载/同步失败", 完全看不出真因。
+    #   判据(自包含, 不需要本机有集群 pki): 连取几次 VIP 上的服务端证书指纹 —— 出现**多个不同**指纹
+    #   = 该地址被多个 apiserver 共用。
+    local _fps="" _i _fp _uniq=0
+    if command -v openssl >/dev/null 2>&1; then
+        for _i in 1 2 3 4; do
+            _fp="$(timeout 8 bash -c "echo | openssl s_client -connect ${API_DOMAIN}:6443 -servername ${API_DOMAIN} 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null" || true)"
+            [ -n "${_fp}" ] && _fps="${_fps}${_fp}"$'\n'
+            sleep 1
+        done
+        _uniq="$(printf '%s' "${_fps}" | sed '/^$/d' | sort -u | wc -l | tr -d ' ')"
+    fi
+    if [ "${_uniq:-0}" -ge 2 ]; then
+        err "  ${API_DOMAIN}:6443 的服务端证书指纹在 4 次探测中**不一致**(共 ${_uniq} 种)⇒ 该地址被**多个 apiserver 共用**!"
+        err "  最可能: 同网段还有另一套集群, 其 kube-vip 也持有同一个 K8S_API_VIP(或 MetalLB 池重叠)。"
+        err "  处置(二选一): ①给两套集群分配不同的 K8S_API_VIP + METALLB_POOL(cluster.conf), 再重跑;"
+        err "              ②先拆除另一套集群(注意: 覆盖安装只会清 inventory 内的节点, 另一套的节点不在其中)"
+    elif [ "${_uniq:-0}" = "1" ]; then
+        err "  ${API_DOMAIN}:6443 证书指纹稳定 ⇒ 非多集群抢 VIP; 请在 master 本机 kubeconfig 上核对集群健康"
+    else
+        err "  未能从 ${API_DOMAIN}:6443 取到服务端证书(网络/DNS/openssl 缺失?) —— 请手工复核"
+    fi
+    return 1
 }
 
 # 节点类型判断(vm=虚拟机 / bm=裸金属): 仅对含类型信息的行(旧格式 / VM 配置文件)有效

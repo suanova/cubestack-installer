@@ -44,6 +44,11 @@ FIRST_WORKER="${WORKER_IPS[0]:-${API_IP}}"
 # ---------------- kube-vip: API 入口地址(两阶段, 见 docs/kube-vip-api-ha.md 第 7 节) ----------------
 # 静态校验先行(互斥 / MetalLB 池隔离 / 与节点 IP 冲突) —— 配置错就早失败, 不要等到 kubespray 跑一半
 kube_vip_validate_config || exit 1
+# 入口开关的硬校验(external ↔ kube-vip ↔ HAProxy/KA 互斥 + 入口地址取值合法性)。
+# ⚠ 与上一条**有意重复**: kube_vip_validate_config 内部已先调用它(为了覆盖 KUBE_VIP_ENABLED=false
+#   的早退分支), 这里再显式调一次, 是把"入口配置必须自洽"钉成本脚本自己的前置条件 ——
+#   将来任一侧被重构(如 kube-vip 校验改了早退顺序), 本脚本的护栏都还在。
+api_entry_validate_config || exit 1
 
 # 阶段判定: VIP 已绑=阶段二(切入口), 未绑=阶段一(写 master01, 本轮只让 VIP 就位)
 # ★ kube-vip 关闭时**绝不推导 VIP**(2026-09-24 实机修复): kube_vip_derive 会对每台 master
@@ -53,12 +58,15 @@ kube_vip_validate_config || exit 1
 #   关闭态只取**显式配置**的 K8S_API_VIP(不扫描): 它只喂 apiserver 证书 SAN, 留着能让
 #   "以后想重新启用"不必重签证书(见 update_kube_vip_addons_yml 的注释); 没配就留空,
 #   该键自然不出现在 addons.yml 里。
+# ⚠ 2026-09-28 rebase 取舍: 保留 main 这道开关护栏(api-ha 侧是无护栏的裸 kube_vip_derive —— 它基于
+#   翻默认值之前的写法, 不能照搬)。
 if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
     _KV_VIP="$(kube_vip_derive)" || exit 1
 else
     _KV_VIP="${K8S_API_VIP:-}"
 fi
-_KV_OLD_ADDR="$(kube_vip_current_entry)"
+# all.yml 的块被注释时(本地代理模式)读不到入口 → 回退到 VIP 兜底, 免得下面的运维提示出现"入口保持 "空白
+_KV_OLD_ADDR="$(kube_vip_current_entry)"; _KV_OLD_ADDR="${_KV_OLD_ADDR:-${_KV_VIP:-}}"
 
 _KV_NEW_ADDR="$(kube_vip_resolve_target)" || exit 1
 # ★ 2026-09-24 修复: 阶段必须**回读**(api_entry_phase), 不能读 $API_ENTRY_PHASE ——
@@ -74,6 +82,10 @@ API_ENTRY_PHASE="$(api_entry_phase)"
 #     · 本脚本见到该标志才做切换; 未见且入口尚未指向 VIP 则按阶段一(写 master01)—— fail-closed, 绝不自行切换
 #     · 直接手工运行本脚本时若尚未确认, 会明确提示需要什么才能切换
 #   ⚠ 护栏必须在**判定之后**再跑(旧版放在判定之前, 用的是一个还没算出来的阶段)。
+# ⚠ 2026-09-28 rebase 说明: api-ha 分支(728f9a4)曾把这段门标注为"恒不成立的死代码" —— 那个结论
+#   成立于它的基线(阶段读的是子 shell 变量); main 的 9832975 已修成"落盘 + api_entry_phase() 回读",
+#   所以这段门在合并后**是活的**, fail-closed 约定照常生效。api-ha 侧"确认标志无功能效果"的说法同样
+#   只对旧基线成立, 不再适用。
 if [ "${API_ENTRY_PHASE}" = "2" ] && [ "${_KV_OLD_ADDR}" != "${_KV_VIP}" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
     warn "VIP ${_KV_VIP} 已就位, 但尚未获得切换确认 → 本次仍按阶段一处理(入口保持 ${_KV_OLD_ADDR})"
     warn "如需切换: 走 06_k8s_deploy.sh(会给出倒计时确认); 或 export KUBE_VIP_SWITCH_CONFIRMED=1 后重跑本脚本"
@@ -81,11 +93,19 @@ if [ "${API_ENTRY_PHASE}" = "2" ] && [ "${_KV_OLD_ADDR}" != "${_KV_VIP}" ] && [ 
     _KV_NEW_ADDR="$(first_master_ip)" || exit 1     # 降级 = 阶段一: 入口回到第一个 master
 fi
 
-# API 入口地址统一 = 本次运行的判定结果(阶段一=第一个 master / 阶段二=VIP)
-API_ADDR="${_KV_NEW_ADDR}"
-if [ "${API_ENTRY_PHASE:-0}" = "2" ]; then
+# API 入口地址统一 = 本次运行的判定结果(模式见 lib-common.sh#api_entry_mode):
+#   external → API_EXTERNAL_ADDR(环境已有 LB/VIP) / vip → 两阶段判定 / node → 第一个 master
+# ⚠ 2026-09-28 rebase 取舍: vip/node 两条都取**上面已算好的** _KV_NEW_ADDR, 不重算 api_entry_addr ——
+#   重算会绕过上面那道"阶段二未获确认即降级为阶段一"的门(fail-closed), 把 VIP 直接写进
+#   all.yml 与证书 SAN。api-ha 侧原写法(直接重算)在它自己的分支上等价, 合到 main 后不等价。
+if [ "$(api_entry_mode)" = "external" ]; then
+    API_ADDR="$(api_entry_addr)" || exit 1
+    say "节点类型: 外部入口模式 — API 入口=外部 LB(${API_ADDR})"
+elif [ "${API_ENTRY_PHASE:-0}" = "2" ]; then
+    API_ADDR="${_KV_NEW_ADDR}"
     say "节点类型: kube-vip 阶段二 — API 入口=VIP(${API_ADDR})"
 else
+    API_ADDR="${_KV_NEW_ADDR}"
     say "节点类型: API 入口=第一个 master(${API_ADDR})"
 fi
 say "API 域名: ${API_DOMAIN}"
@@ -93,6 +113,78 @@ say "Master IPs: ${MASTER_IPS[*]}"
 say "Worker IPs: ${WORKER_IPS[*]:-<无>}"
 
 # ---------------- 1. 更新 all.yml ----------------
+
+# 按入口模式收敛 all.yml 的 API 入口相关三件事(幂等):
+#   ① loadbalancer_apiserver 块: 本地代理开 → 注释掉; 关 → 取消注释
+#   ② loadbalancer_apiserver_localhost: true/false
+#   ③ loadbalancer_apiserver_type: 仅当非默认(nginx)时写入, 默认时清掉覆盖
+#
+# 为什么"摘掉块"才是这套方案的开关本体(而不是只写 localhost: true):
+#   kubespray 的 kube_apiserver_endpoint(kubespray_defaults/defaults/main/main.yml)
+#   里 `loadbalancer_apiserver is defined` 的分支**优先于** localhost 分支 —— 只要块还在,
+#   kubelet/kube-proxy 就永远走 <域名>:6443, 每节点 nginx-proxy 装了也没人用(假修复)。
+#   注释掉 = 该变量未定义 → worker 走 https://localhost:6443(本机 nginx-proxy 静态 Pod),
+#   master 走 https://127.0.0.1:6443。见 docs/api-ha/04-decision.md D7。
+# 用法: update_api_entry_all_yml "<all.yml 路径>"
+update_api_entry_all_yml() {
+    local yml="$1"
+    if api_local_lb_enabled; then
+        # ① 注释掉 loadbalancer_apiserver 块(带标记, 幂等)
+        awk '
+            /^loadbalancer_apiserver:[[:space:]]*$/ {
+                print "# [api-ha] 本地代理模式: 该块必须保持注释 —— 否则 kubelet 走域名, 本地代理静默失效"
+                print "# " $0; in_b=1; next
+            }
+            in_b && /^[[:space:]]+/ { print "# " $0; next }
+            in_b { in_b=0 }
+            { print }
+        ' "${yml}" > "${yml}.tmp" && mv "${yml}.tmp" "${yml}"
+        # ② localhost: true
+        if grep -q '^loadbalancer_apiserver_localhost:' "${yml}"; then
+            sed -i -E 's/^loadbalancer_apiserver_localhost:.*/loadbalancer_apiserver_localhost: true/' "${yml}"
+        else
+            printf 'loadbalancer_apiserver_localhost: true\n' >> "${yml}"
+        fi
+        # ③ type: 仅非默认时写
+        if [ "${API_LOCAL_LB_TYPE:-nginx}" != "nginx" ]; then
+            if grep -qE '^([[:space:]]*)#?[[:space:]]*loadbalancer_apiserver_type:' "${yml}"; then
+                sed -i -E "s|^([[:space:]]*)#?[[:space:]]*loadbalancer_apiserver_type:.*|\1loadbalancer_apiserver_type: ${API_LOCAL_LB_TYPE}|" "${yml}"
+            else
+                printf 'loadbalancer_apiserver_type: %s\n' "${API_LOCAL_LB_TYPE}" >> "${yml}"
+            fi
+        elif grep -qE '^[[:space:]]*loadbalancer_apiserver_type:' "${yml}"; then
+            # 回到默认(nginx)时清掉历史覆盖: 否则用户从 haproxy 改回默认后, 残留行仍然生效
+            # ("生效的是键的取值, 不是行是否在场" —— 只有注释掉才等于回到 kubespray 默认)
+            sed -i -E 's|^([[:space:]]*)loadbalancer_apiserver_type:.*|\1# loadbalancer_apiserver_type: 已由 sync 脚本注释(取值非默认时才写入)|' "${yml}"
+        fi
+    else
+        # 反向: 取消注释。**只解紧跟 [api-ha] 标记的那一块** —— 不能见到 `# loadbalancer_apiserver:`
+        # 就解: kubespray 的 all.yml 里本来就带一段**示例注释块**(`## External LB example config`
+        # 下的 `# loadbalancer_apiserver:` + `#   address: 1.2.3.4`), 解错就会造出第二个
+        # loadbalancer_apiserver 键 —— 而 kube_vip_current_entry/nonnumeric_entry 只读**首个**
+        # 匹配块 → 读到 1.2.3.4, 它又不是节点 IP/不在地址池 → 会被 kube_vip_derive 当成可用 VIP 接管
+        # (VIP 漂移)。见 tests/test-sync-api-entry.sh 的"示例块"用例。
+        awk '
+            /^# \[api-ha\] 本地代理模式/ { mark=1; next }
+            mark && /^# loadbalancer_apiserver:[[:space:]]*$/ {
+                print "loadbalancer_apiserver:"; in_b=1; mark=0; next
+            }
+            in_b && /^# [[:space:]]/ { print substr($0, 3); next }
+            in_b { in_b=0 }
+            { mark=0; print }
+        ' "${yml}" > "${yml}.tmp" && mv "${yml}.tmp" "${yml}"
+        grep -q '^loadbalancer_apiserver:' "${yml}" \
+            && sed -i -E 's/^loadbalancer_apiserver_localhost:.*/loadbalancer_apiserver_localhost: false/' "${yml}" \
+            || printf 'loadbalancer_apiserver_localhost: false\n' >> "${yml}"
+        # 兜底告警: 关掉本地代理后块仍是注释态(如手工注释、没有我们的标记) → 上游拿不到
+        # loadbalancer_apiserver, worker 会**静默**退回"第一个 master"(不是域名单点). 必须让操作者看见。
+        if ! grep -q '^loadbalancer_apiserver:' "${yml}" && grep -q '^# loadbalancer_apiserver:' "${yml}"; then
+            warn "${yml}: loadbalancer_apiserver 块仍处于注释态(未找到 [api-ha] 标记, 非本脚本所写)"
+            warn "  本地代理已关闭 → 该块须取消注释, 否则 worker 的 kubelet 退回第一个 master; 请手工处理"
+        fi
+    fi
+}
+
 ALL_YML="${INV_DIR}/group_vars/all/all.yml"
 if [ -f "${ALL_YML}" ]; then
     say "更新 ${ALL_YML} ..."
@@ -107,14 +199,23 @@ if [ -f "${ALL_YML}" ]; then
     fi
     unset _prot
 
-    # loadbalancer_apiserver.address → 本次运行的 API 入口(阶段一=第一个 master / 阶段二=VIP)
-    sed -i -E "s/^(\s+address:)\s+[0-9.]+(\s*#.*)?\$/\1 ${API_ADDR}\2/" "${ALL_YML}"
+    if api_local_lb_enabled; then
+        # 本地代理模式: 该块马上要被注释掉 → **不写** address(写进去只会落在注释行里, 徒增误导)
+        say "  本地代理已启用 → 摘掉 loadbalancer_apiserver 块(上游据此改走 localhost:6443)"
+    else
+        # loadbalancer_apiserver.address → 本次运行的 API 入口(阶段一=第一个 master / 阶段二=VIP / external=环境 LB)
+        sed -i -E "s/^(\s+address:)\s+[0-9.]+(\s*#.*)?\$/\1 ${API_ADDR}\2/" "${ALL_YML}"
+    fi
+    # 块注释/恢复 + localhost + type —— 两条路径都要收敛, 保证文件形态与模式一致
+    update_api_entry_all_yml "${ALL_YML}"
 
     # apiserver_loadbalancer_domain_name → 集群 API 域名
     sed -i -E "s/^apiserver_loadbalancer_domain_name:.*/apiserver_loadbalancer_domain_name: \"${API_DOMAIN}\"/" "${ALL_YML}"
 
-    # supplementary_addresses_in_ssl_keys → API 域名 + 所有 master IP(不使用宿主机物理 IP)
-    awk -v domain="${API_DOMAIN}" -v masters="${MASTER_IPS[*]}" '
+    # supplementary_addresses_in_ssl_keys → API 域名 + 所有 master IP + 本次入口地址(不使用宿主机物理 IP)
+    # 追加 entry 的原因: external 模式下入口(环境 LB/VIP)不属于任何 master, 不加就进不了证书 SAN;
+    # vip/node 模式下与 masters 重复也无害(kubeadm 侧 `| unique`)。
+    awk -v domain="${API_DOMAIN}" -v masters="${MASTER_IPS[*]}" -v entry="${API_ADDR}" '
         /^supplementary_addresses_in_ssl_keys:/ { in_sec=1; print; next }
         in_sec && /^[[:space:]]*-/ {
             # 跳过旧的域名/IP 条目(保留 k8s-api.cubestack.io / nova.local / lb.k8s.local 等历史域名)
@@ -122,17 +223,18 @@ if [ -f "${ALL_YML}" ]; then
             next
         }
         in_sec && !/^[[:space:]]*-/ {
-            # 区块结束,输出 API 域名 + masters 条目
+            # 区块结束,输出 API 域名 + masters 条目 + 本次入口地址
             print "  - " domain
             split(masters, arr, " ")
             for (i in arr) print "  - " arr[i]
+            if (entry != "") print "  - " entry
             in_sec=0
             print
             next
         }
         { print }
     ' "${ALL_YML}" > "${ALL_YML}.tmp" && mv "${ALL_YML}.tmp" "${ALL_YML}"
-    ok "已同步 loadbalancer_apiserver / apiserver_loadbalancer_domain_name / supplementary_addresses_in_ssl_keys"
+    ok "已同步 loadbalancer_apiserver(入口模式: $(api_entry_mode), 本地代理: $(api_local_lb_enabled && echo 开 || echo 关)) / apiserver_loadbalancer_domain_name / supplementary_addresses_in_ssl_keys"
 else
     warn "未找到 ${ALL_YML},跳过"
 fi
@@ -162,6 +264,20 @@ if [ -f "${CLUSTER_YML}" ]; then
     # ⚠ 这是 Jinja 表达式而非数值字面量, 因此**不再随主机 IP 变化而"同步"**, 只做幂等修复。
     update_advertise_address_yml "${CLUSTER_YML}" || exit 1
     ok "已同步 kube_apiserver_extra_args.advertise-address → 按节点各写各的(kube_apiserver_address)"
+
+    # kube-vip(ARP 模式)在 ipvs 集群上的**硬前置**: kubespray 的 kube-vip 任务会 fail
+    # (roles/kubernetes/node/tasks/loadbalancer/kube-vip.yml:1-8: "kube-vip require
+    #  kube_proxy_strict_arp = true")。2026-09-28 收编后静态 Pod 由 kubespray 渲染 ⇒ 这道检查
+    # 会真的生效(此前自持渲染器绕过了它)。树默认 false, 故启用 kube-vip 时必须确保它为 true。
+    if bool_is_true "${KUBE_VIP_ENABLED:-false}"; then
+        if grep -q '^kube_proxy_strict_arp:' "${CLUSTER_YML}"; then
+            sed -i -E 's|^kube_proxy_strict_arp:.*|kube_proxy_strict_arp: true|' "${CLUSTER_YML}"
+            ok "已确保 kube_proxy_strict_arp=true(kube-vip ARP 模式在 ipvs 集群上的硬前置)"
+        else
+            err "启用 kube-vip 需要 ${CLUSTER_YML} 里显式 kube_proxy_strict_arp: true(kubespray 树默认 false, 它会硬失败)"
+            exit 1
+        fi
+    fi
 
     # 集群内部网络 CIDR(从 cluster.conf 读取, 不硬编码在 group_vars 中)
     sed -i -E "s|^kube_service_addresses:[[:space:]]*[0-9.]+/[0-9]+|kube_service_addresses: ${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18}|" "${CLUSTER_YML}"
@@ -193,7 +309,27 @@ if [ -f "${CALICO_YML}" ]; then
     sed -i -E "s/^calico_ipip_mode:.*/calico_ipip_mode: 'Always'/" "${CALICO_YML}"
     sed -i -E "s/^calico_vxlan_mode:.*/calico_vxlan_mode: 'Never'/" "${CALICO_YML}"
     sed -i -E "s/^calico_mtu:.*/calico_mtu: 1480/" "${CALICO_YML}"
-    ok "已同步 ${CALICO_YML} → calico+IPIP(backend=bird, ipip_mode=Always, vxlan_mode=Never, mtu=1480)"
+    # calico-node 内存上限: 树默认 500M 在**大核数节点**上不够 —— 实机取证 2026-09-28(全新安装, mxgpu-3-28 等 6 台 / 160 vCPU / 2TB):
+    #   · 现象: calico-node 6/6 CrashLoopBackOff(Last State: OOMKilled/137), 每轮启动约 2s 即被杀。
+    #   · 根因(dmesg OOM 报告 + 调用栈, 决定性): constraint=CONSTRAINT_MEMCG, cgroup 用量
+    #     `memory: usage 488268kB, limit 488280kB`, 分解 **anon 172MB + percpu 218MB**;
+    #     触发分配的是 `bpf_map_alloc_percpu → prealloc_init → htab_map_alloc` —— Felix 建
+    #     **per-CPU 类型 eBPF map**(日志 "XDP acceleration enabled", 节点 bpffs 有 pinned
+    #     /sys/fs/bpf/calico/xdp), 而内核按 **num_possible_cpus** 分配 ⇒ 160 核上单 percpu 一项
+    #     就 218MB。**内存需求随核数放大**, 进程自身 RSS 只有几十 MB —— 别按进程 RSS 判"限额够用"。
+    #   · 后果(为什么必须修): calico 数据面不在 ⇒ Pod→ClusterIP 转发被丢(hostNetwork 的 kube-proxy
+    #     反而正常, 现象像"只有 Pod 出不了网") ⇒ metallb controller `dial tcp 10.233.0.1:443:
+    #     i/o timeout`、CoreDNS/metrics-server/calico-kube-controllers 同源不健康, kubespray 在
+    #     metallb 的 rollout 等待处中断(rollout status 120s 超时)。
+    #   · 验证: 限额临时抬到 2Gi 后 calico 6/6 Running、节点全 Ready、metallb controller+speaker 全绿。
+    #   取 2G: 实测该机型 cgroup 用量约 0.5G, 留 4x 余量; percpu 随核数线性增长, 更大机型仍够。
+    #   幂等: 有该键就改值, 没有就补一行。
+    if grep -q '^calico_node_memory_limit:' "${CALICO_YML}"; then
+        sed -i -E 's|^calico_node_memory_limit:.*|calico_node_memory_limit: 2G|' "${CALICO_YML}"
+    else
+        echo 'calico_node_memory_limit: 2G' >> "${CALICO_YML}"
+    fi
+    ok "已同步 ${CALICO_YML} → calico+IPIP(backend=bird, ipip_mode=Always, vxlan_mode=Never, mtu=1480, node_mem_limit=2G)"
 else
     warn "未找到 ${CALICO_YML}, 跳过 calico 数据面同步"
 fi
@@ -225,6 +361,74 @@ if [ -f "${CILIUM_YML}" ]; then
 else
     warn "未找到 ${CILIUM_YML}, 跳过 cilium 数据面同步"
 fi
+
+# ---------------- 3.2 写入 k8s 基座版本钉子(group_vars/all/k8s-versions.yml) ----------------
+# 为什么必须**落盘**(2026-09-28 评审 Critical): cluster.conf 的"k8s 基座组"(K8S_VERSION / PAUSE /
+#   COREDNS / DNS_NODE_CACHE / METRICS_SERVER / CPA / ETCD / CALICO)是**离线制品的唯一真值来源**
+#   (离线 tar / Harbor 同步 / images.manifest 直接以 ${VAR} 引用), 但 kubespray 消费的是**它自己的
+#   变量名**(kube_version / coredns_version / …)。在此之前全仓**没有任何写入者** → 部署取**树内默认**
+#   (v2.32 树 ansible 实测 kube_version=1.36.4 / coredns=1.14.2 / pod_infra=3.10.2), 与我们钉的
+#   1.35 线离线 tar **不是同一套** → download/validate 阶段**响亮失败**。此处把钉子落盘, 让
+#   "部署实际解析出的版本 == 钉子"(裁决 R26: 钉子即配置源)。
+# 落点选 group_vars/all/: 上面那 8 个变量被 cluster.yml 的 k8s_cluster / kube_control_plane / etcd /
+#   calico_rr 四类 play 共同消费(下载任务 delegate_to 时也复用原主机变量), group_vars/all 是**唯一**
+#   覆盖全部消费点的作用域 —— k8s_cluster 作用域照不到 etcd 与 calico_rr。
+#   LVP/NFD 两项只被 k8s_cluster(addon 镜像 tag)消费, 放同一文件只为**单一真值源**, 无副作用。
+# 形态(**机械对照上游, 别凭记忆**): 上游这些变量一律**不带 v**(v 只由 *_image_tag 与下载 URL
+#   另行拼接, 如 kubelet_download_url = "…/v{{ kube_version }}/…"), 故写入前统一剥掉钉子上的 v,
+#   否则 kubelet 会去下 vv1.35.8。标量一律加引号(3.31.7 这类形态在 YAML 里虽仍是字符串, 但
+#   统一引号可避免将来出现 1.10 这种被解析成 float 的形态)。
+# 谁在管一致性: check-modules.sh ⑯ 有两条断言 —— ① 钉子 == 树内表值(换树即报); ② **本文件写出的
+#   10 个键 == cluster.conf 的钉子**(即"写入者真的写了、且没写错值")。改这里记得同步 ⑯ 的键表。
+#   ★ 10 = 上面列的 k8s 基座组 8 个 + LOCAL_VOLUME_PROVISIONER_VERSION / NFD_VERSION
+#   (2026-09-28 评审 I4: 这两个钉子此前**零断言** —— README 要求与上游同值, 却没人验; 其形态与
+#    metrics_server 同: 消费方是 download.yml 里由 *_version 拼出的 *_image_tag)。
+_vpin_line() {   # <cluster.conf 里的钉子变量名> <kubespray 变量名>
+    local _raw="${!1:-}"
+    if [ -z "${_raw}" ]; then
+        # fail-loud: 缺一个钉子就意味着部署退回树内默认(1.36 线), 与离线 tar 不是一套 —— 宁可在这里
+        # 停住。这里**不能 warn 后跳过写该键**: 那正好重犯本次要修的静默错版缺陷。
+        err "cluster.conf 未声明 ${1} → 无法写出 kubespray 变量 ${2}"
+        err "  这份 cluster.conf 落后于 deployments/config/cluster.conf.example 的\"镜像版本\"节"
+        err "  (缺钉子 = 部署会按树内默认解析版本, 与离线 tar / images.manifest 不是一套)"
+        err "  修法: 从 cluster.conf.example 补齐 ${1} 的声明后重跑本脚本"
+        exit 1
+    fi
+    printf '%s: "%s"\n' "$2" "${_raw#v}"
+}
+K8S_VERSIONS_YML="${INV_DIR}/group_vars/all/k8s-versions.yml"
+say "生成 ${K8S_VERSIONS_YML} (k8s 基座版本钉子 → kubespray 变量名) ..."
+mkdir -p "$(dirname "${K8S_VERSIONS_YML}")"
+# ★ 原子写(修复轮 1, 评审 Important): 必须**先写临时文件, 8 行全部成功后再 mv 覆盖**。
+#   旧写法 `{ ... } > "${K8S_VERSIONS_YML}"` 是**就地截断**生成 —— _vpin_line 中途 exit 1 会留下一个
+#   "存在但残缺"的产物(实测: 缺第 6 个钉子 → 文件只剩 3 行注释 + 前 5 个键; 缺首个钉子 → 只剩 1 个键)。
+#   这比"没有文件"更坏: 缺的键会被
+#   kubespray **静默**退回树内默认 → 正是本次要消灭的混合版本; 而且走 06_k8s_deploy.sh:69 那条
+#   `sync ... || warn` 的兜底路径时, 部署**照常继续**, 没人会看见残缺文件。
+#   临时文件 + mv(同目录 rename, 原子)之后: 拦停时**旧文件逐字节原样保留**(上一版至少是完整的),
+#   仍然"该拦就拦", 只是不再制造半成品。trap 保证任何退出路径都不残留临时文件。
+#   ⚠ 调用方一律是 `bash <本脚本>`(子进程), 故这里不会覆盖调用方的 trap。
+K8S_VERSIONS_TMP="${K8S_VERSIONS_YML}.tmp.$$"
+trap 'rm -f "${K8S_VERSIONS_TMP:-}"' EXIT
+{
+    echo "# Generated by sync-kubespray-config.sh — k8s 基座版本钉子(cluster.conf 基座组 → kubespray 变量名), 请勿手工编辑"
+    echo "# 部署以此为准: 缺了这些键, kubespray 就按**树内默认**解析(与离线 tar 可能不是同一套版本)。"
+    echo "# 与树内表值的一致性由 check-modules.sh ⑯ 断言(换树/换钉子即报), 勿手工改。"
+    _vpin_line K8S_VERSION            kube_version
+    _vpin_line PAUSE_VERSION          pod_infra_version
+    _vpin_line COREDNS_VERSION        coredns_version
+    _vpin_line DNS_NODE_CACHE_VERSION nodelocaldns_version
+    _vpin_line METRICS_SERVER_VERSION metrics_server_version
+    _vpin_line CPA_VERSION            dnsautoscaler_version
+    _vpin_line ETCD_VERSION           etcd_version
+    _vpin_line CALICO_VERSION         calico_version
+    _vpin_line LOCAL_VOLUME_PROVISIONER_VERSION local_volume_provisioner_version
+    _vpin_line NFD_VERSION            node_feature_discovery_version
+} > "${K8S_VERSIONS_TMP}"
+mv -f "${K8S_VERSIONS_TMP}" "${K8S_VERSIONS_YML}"
+trap - EXIT      # 覆盖成功: 临时文件已不存在, 撤掉 trap(后续退出路径无需再清)
+ok "已写入 10 个 k8s 基座版本钉子: kube_version=${K8S_VERSION#v} / coredns=${COREDNS_VERSION#v} / pod_infra=${PAUSE_VERSION#v} / etcd=${ETCD_VERSION#v} / calico=${CALICO_VERSION#v} / metrics=${METRICS_SERVER_VERSION#v} / cpa=${CPA_VERSION#v} / node_cache=${DNS_NODE_CACHE_VERSION#v} / lvp=${LOCAL_VOLUME_PROVISIONER_VERSION#v} / nfd=${NFD_VERSION#v}"
+unset -f _vpin_line 2>/dev/null || true
 
 # ---------------- 4. 更新 addons.yml (MetalLB 地址池) ----------------
 ADDONS_YML="${INV_DIR}/group_vars/k8s_cluster/addons.yml"
@@ -413,18 +617,55 @@ else:
 open(path, 'w').write('\n'.join(out) + '\n')
 PYEOF
     ok "已同步 containerd registry 信任 → ${REGISTRY_DOMAIN:-registry.cubestack.io}:${REGISTRY_PORT:-5000}(镜像 host: ${_MIRROR_HOST})"
+
+    # containerd **配置版本**(默认 3; cluster.conf 可改; 2026-09-28 实机定位):
+    #   沐曦 container-runtime 组件(/metax-runtime-install.sh, DaemonSet metax-container-runtime)只支持
+    #   containerd 配置版本 ≤3; 而 containerd 2.3.x 上游模板写 `version = 4` ⇒ 该组件报
+    #     failed to register runtime: failed to setup docker config: config version 4 is not support
+    #   ⇒ CrashLoopBackOff, 注册不了 metax 运行时(实机证据: 09-24/09-26 成功日志里是
+    #   "containerd config version = 3", 那时节点是 containerd 1.7 线; v2.32 把 containerd 升到 2.3.5
+    #   后模板改发 4 ⇒ 从此必失败)。
+    #   ⚠ 降 3 的**行为等价性已实测**(containerd 2.3.5 上 `containerd config dump` 对比 v4/v3:
+    #     有效配置只差一个 [grpc] 段, 而模板写进去的 16MiB 恰是 containerd 内建默认 ⇒ 无行为差异)。
+    #   ⚠ 没有更"干净"的替代: 厂商工具不认 v4, 也不接受任何跳过参数(实测 --help 被忽略直接执行);
+    #     待沐曦包支持 containerd 2.x 后, 把 cluster.conf 的 CONTAINERD_CONFIG_VERSION 改成 4 即可。
+    #   cluster.conf 语义: CONTAINERD_CONFIG_VERSION = 3(默认)/4; 未设或留空一律按 3 处理(不引入第三种模式:
+    #     "留空=回落树内默认"会让"留空"这个动作在沐曦场景下静默 CrashLoop —— 宁可只有两个显式取值)。
+    case "${CONTAINERD_CONFIG_VERSION:-3}" in
+        3|4)
+            if grep -q '^containerd_config_version:' "${CONTAINERD_YML}"; then
+                sed -i -E "s|^containerd_config_version:.*|containerd_config_version: ${CONTAINERD_CONFIG_VERSION:-3}|" "${CONTAINERD_YML}"
+            else
+                echo "containerd_config_version: ${CONTAINERD_CONFIG_VERSION:-3}" >> "${CONTAINERD_YML}"
+            fi
+            ok "containerd 配置版本 = ${CONTAINERD_CONFIG_VERSION:-3}(来自 CONTAINERD_CONFIG_VERSION; 沐曦 container-runtime 需 ≤3)"
+            ;;
+        *)
+            err "CONTAINERD_CONFIG_VERSION='${CONTAINERD_CONFIG_VERSION}' 非法(只接受 3 或 4; 未设/留空 = 默认 3)"
+            exit 1
+            ;;
+    esac
 else
     warn "未找到 ${CONTAINERD_YML},跳过 containerd registry 配置"
 fi
 
 # ---------------- 7. 生成 registry.yml(供 patch-playbooks/cubestack-registry.yml 读取) ----------------
 REGISTRY_YML="${INV_DIR}/group_vars/all/registry.yml"
+# ★ 原子写(修复轮 2 / 评审 M7): 与上面 3.2 节同款 —— 就地 `> "${REGISTRY_YML}"` 是**先截断再写**,
+#   中途失败(如 err/exit、磁盘满、被 Ctrl-C)会留下"存在但残缺"的 registry.yml, 消费方
+#   (patch-playbooks/cubestack-registry.yml)读到空/缺键 → 按空值渲染 registry 配置, 而部署**照常继续**。
+#   临时文件 + mv(同目录 rename, 原子)之后: 失败时**旧文件逐字节原样保留**, trap 保证不留临时文件。
+#   ⚠ 3.2 节的 trap 已在本节之前 `trap - EXIT` 撤掉, 故这里重新挂一个(互不干扰)。
+REGISTRY_TMP="${REGISTRY_YML}.tmp.$$"
+trap 'rm -f "${REGISTRY_TMP:-}"' EXIT
 {
     echo "# Generated by sync-kubespray-config.sh — 供 patch-playbooks/cubestack-registry.yml 读取, 请勿手工编辑"
     echo "registry_domain: \"${REGISTRY_DOMAIN:-registry.cubestack.io}\""
     echo "registry_ip: \"${REGISTRY_IP:-10.244.2.100}\""
     echo "registry_port: \"${REGISTRY_PORT:-5000}\""
-} > "${REGISTRY_YML}"
+} > "${REGISTRY_TMP}"
+mv -f "${REGISTRY_TMP}" "${REGISTRY_YML}"
+trap - EXIT      # 覆盖成功: 临时文件已不存在, 撤掉 trap(后续退出路径无需再清)
 ok "已生成 ${REGISTRY_YML}: ${REGISTRY_DOMAIN:-registry.cubestack.io} → ${REGISTRY_IP:-10.244.2.100}:${REGISTRY_PORT:-5000}"
 
 # ---------------- 5. 更新 addons.yml (组件启用开关, 数据源: cluster.conf) ----------------

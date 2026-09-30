@@ -87,6 +87,22 @@ _NTOT="$( (SSH "${K}" -n kube-system get pods --no-headers 2>/dev/null | grep -c
 }
 ok "  kube-vip Pod Running: ${_NRUN}/${_NTOT}"
 
+# ---------------- ①b 哨兵: 清单确实按上游语义渲染(收编后的"双写者回归"哨兵) ----------------
+# 上游只对**首台** master 用 super-admin.conf、其余用 admin.conf
+# (roles/kubernetes/node/tasks/loadbalancer/kube-vip.yml:36-45)。收编(2026-09-28)前我们的渲染器
+# 恒用 admin.conf ⇒ 两个写入者轮流改写同一路径 → Pod 反复重启。这里读回首台 master 的 hostPath:
+#   · super-admin.conf = 上游渲染(收编后应有的样子)
+#   · admin.conf       = 与预期不符 —— 要么是收编前部署的旧集群(重跑 k8s_deploy 即换代),
+#                        要么*又*冒出了第二个写入者(见 docs/api-ha/07-kube-vip-upstream-assessment.md)
+# ⚠ 只 warn 不 fail: 两种 hostPath 都能让 kube-vip 正常工作, 真正要防的是"被反复改写"。
+say "  ①b 哨兵: 清单 hostPath(上游语义: 首台=super-admin.conf)..."
+_hp_first="$(_host_ssh "${_MIP[0]}" "sudo grep -m1 'path: /etc/kubernetes/' ${MANIFEST} 2>/dev/null" || true)"
+case "${_hp_first}" in
+    *super-admin.conf*) ok "  首台 master 清单用 super-admin.conf(与上游渲染一致)" ;;
+    *admin.conf*)       warn "  首台 master 清单用 admin.conf —— 与上游渲染预期不符(旧集群未换代, 或又出现第二个写入者)" ;;
+    *)                  warn "  取不到清单 hostPath(未部署/无权限?), 跳过该哨兵" ;;
+esac
+
 # ---------------- ② VIP 恰好绑在一台 master 上(防脑裂) ----------------
 say "  ② 检查 VIP 绑定唯一性(防脑裂)..."
 # ⚠ 用 `ip addr` 判断地址是否**真的绑定在本机网卡**上, 不能用 `ip route get` ——

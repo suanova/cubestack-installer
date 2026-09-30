@@ -10,7 +10,7 @@
 #   · 验证模块不设 TOGGLE, 由 --steps verify_metax_gpu 或 --steps verify(自动纳入)显式执行。
 #   · 复用 tools/k8s/verify-metax-gpu.sh: 列出每节点 GPU capacity/allocatable/label/可调度,
 #     汇总 GPU 识别节点数与总 GPU 数, 提示 gpu.installed=true 但 allocatable 为空的异常。
-#   · 部署时 master 检测到 GPU 会自动解除不可调度(见 04_gpu_operator.sh 第 5 步)。
+#   · 部署时 master 检测到 GPU 会自动解除不可调度(见 06_gpu_operator.sh 第 5 步)。
 # 用法: sudo ./deploy-cluster.sh --steps verify_metax_gpu
 # ============================================================
 set -euo pipefail

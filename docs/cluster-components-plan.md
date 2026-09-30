@@ -12,7 +12,7 @@
 |---|---|---|---|---|---|---|---|---|
 | 1 | Kubernetes(Kubespray部署) | 基于Kubespray完成集群部署,核心资源(StatefulSet/PVC/Service等)正常创建调度,集群基础环境稳定可用 | 0% | 未开始 | - |  |  | `modules/02_k8s/06_k8s_deploy.sh` / `K8S_ENABLED` |
 | 4 | Docker Registry(Harbor) | 搭建可用镜像仓库,实现镜像推送、拉取、目录同步,保障集群业务镜像正常部署 | 0% | 未开始 | - |  |  | `modules/03_addon/05_harbor.sh` / `HARBOR_ENABLED`(集群外私有仓库,唯一方案) |
-| 5 | 沐曦MetaX GPU Operator | 完成GPU驱动部署、硬件识别、集群GPU资源调度,配套MetaX指标采集,保障GPU容器正常启动运行 | 100% | ✅ 已完成(2026-08-23) | - |  | 2026-08-23 | `modules/03_addon/04_gpu_operator.sh` / `GPU_OPERATOR_ENABLED`(详见 `docs/metax-gpu-operator.md`) |
+| 5 | 沐曦MetaX GPU Operator | 完成GPU驱动部署、硬件识别、集群GPU资源调度,配套MetaX指标采集,保障GPU容器正常启动运行 | 100% | ✅ 已完成(2026-08-23) | - |  | 2026-08-23 | `modules/03_addon/06_gpu_operator.sh` / `GPU_OPERATOR_ENABLED`(详见 `docs/metax-gpu-operator.md`) |
 | 6 | Ceph 存储集群 | 完成Ceph底层存储集群部署、集群健康自检、存储池初始化,为上层CSI服务提供稳定存储底座 | 100% | ✅ 已完成(2026-09-06) | - |  | 2026-09-06 | `modules/03_addon/02_ceph.sh` / `CEPH_ENABLED`(Rook v1.20.2 + 自动检测裸盘 + node label) |
 | 7 | Ceph CSI(RBD/RGW/CephFS) | 部署CSI驱动,对接Ceph存储集群,实现三类存储卷正常创建、挂载、读写,集群StorageReady状态正常置位 | 100% | ✅ 已完成(2026-09-06) | - |  | 2026-09-06 | `modules/03_addon/03_ceph_csi.sh` / `CEPH_CSI_ENABLED` |
 | 8 | LWS | 完成LWS组件部署、集群适配与基础校验,保障集群轻量调度与配套服务正常运行 | 100% | ✅ 已完成(2026-08-23) | - |  | 2026-08-23 | `modules/03_addon/05_gpu_lws.sh` / `LWS_ENABLED`(helm 离线 + cert-manager/internal 双证书 + DisaggregatedSet, 详见 `docs/lws.md`) |
@@ -73,7 +73,7 @@
 | 前置 | kubespray 离线部署(网络/inventory/NTP/部署/扩容) | `02_k8s/01~07` | `K8S_ENABLED` / `K8S_SCALE_ENABLED` | ✅ 已实现 |
 | P1-1 | Kubernetes(Kubespray) | `02_k8s/06_k8s_deploy.sh` | `K8S_ENABLED` | ✅ 已实现 |
 | P1-4 | Docker Registry(Harbor) | `01_env/04_harbor.sh`(集群外私有仓库) | `HARBOR_ENABLED` | 🧩 伪代码占位 |
-| P1-5 | 沐曦 MetaX GPU Operator | `03_addon/04_gpu_operator.sh` | `GPU_OPERATOR_ENABLED` | ✅ 已完成(helm 原生安装 + 离线 tar 加载, 9 节点 69 GPU; 见 `docs/metax-gpu-operator.md`) |
+| P1-5 | 沐曦 MetaX GPU Operator | `03_addon/06_gpu_operator.sh` | `GPU_OPERATOR_ENABLED` | ✅ 已完成(helm 原生安装 + 离线 tar 加载, 9 节点 69 GPU; 见 `docs/metax-gpu-operator.md`) |
 | P1-6 | Ceph 存储集群 | `03_addon/02_ceph.sh` | `CEPH_ENABLED` | ✅ 已完成(Rook v1.20.2 离线, 实机验证 HEALTH_OK 15 OSD; 见 `docs/ceph-rook.md`) |
 | P1-7 | Ceph CSI | `03_addon/03_ceph_csi.sh` | `CEPH_CSI_ENABLED` | ✅ 已完成(RBD/cephfs/rgw 三存储卷实测读写) |
 | P1-8 | LWS | `03_addon/07_gpu_lws.sh` | `LWS_ENABLED` | ✅ 已实现(helm 离线 + 双证书 + DisaggregatedSet) |

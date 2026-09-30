@@ -85,26 +85,37 @@ KUBE_VIP_ENABLED="${KUBE_VIP_ENABLED:-false}"           # 默认关: 不部署 k
 #     入口仍指向 VIP 时会**拦停**而不是自毁, 回退顺序见文档 §7.4)。
 #   · ⚠ 开启前先确认网段里**真有空闲地址**可当 VIP: 留空 K8S_API_VIP 时会在 .210~.254 逐个探测,
 #     整段被占用/落在 MetalLB 池内 → 硬失败。(关闭态不会触发这个扫描。)
+#   · 静态 Pod 清单由 **kubespray 自己**渲染(2026-09-28 收编; 见 docs/api-ha/07-kube-vip-upstream-assessment.md):
+#     本开关经 sync 写进 addons.yml 的 kube_vip_enabled, kubespray 在 "Install Kubernetes nodes" 里落盘;
+#     我们的 09_kube_vip 只负责 VIP 推导/变量校验/收敛核验/关闭清理。
+#   · ⚠ 开启时会确保 kube_proxy_strict_arp=true(kubespray 的 kube-vip 任务在 ipvs 集群上硬要求它)。
 K8S_API_VIP="${K8S_API_VIP:-}"                          # 留空=自动推导(各 master 探测 .210 起找空闲地址); 显式值优先
+                                                        # ⚠ 同网段跑**多套集群**时必须各用**不同** VIP:两边 kube-vip 会抢同一地址 ⇒
+                                                        #   客户端到 VIP 的流量随机落到另一套集群 ⇒ TLS 时好时坏
+                                                        #   ("x509: certificate signed by unknown authority", 2026-09-29 实机)。
+                                                        #   同理 METALLB_POOL 也必须各用不同段(见 3.1)。
 KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"            # 留空=kube-vip 自动检测网卡; 多网卡环境显式指定(如 ens5)
 KUBE_VIP_CP_DETECT="${KUBE_VIP_CP_DETECT:-false}"       # apiserver 进程级故障检测(**默认关**, 与 kubespray 一致; ★ 2026-09-24 由默认开改为默认关)
                                                         #   false(仅租约): 节点活着但 apiserver 进程死了 → VIP 不漂移
                                                         #   true(kube-vip 探本机 apiserver /healthz): 探失败即置健康为假
                                                         #     → 不再续租 → 租约到期(约 5s)即漂移, 与节点宕机同一量级
                                                         #   代价: 短时抖动可能触发不必要的 VIP 迁移(HTTP 探针, 非 TCP 连通)
+# API 入口来源: 三选一(external > vip > node), 判定见 lib-common.sh#api_entry_mode
+#   · 只认一个来源: 与 KUBE_VIP_ENABLED / HAPROXY_ENABLED / KEEPALIVED_ENABLED 同时给会**硬失败**
+#   · 三种模式详解 + 兼容矩阵 + 硬校验清单: docs/api-ha/04-decision.md §2
+API_EXTERNAL_ADDR="${API_EXTERNAL_ADDR:-}"              # 环境已有 LB/VIP 地址(与 KUBE_VIP_ENABLED 互斥; 留空=不用)
 # 本地代理(kubespray 原生 nginx-proxy 静态 Pod: 每节点 127.0.0.1:6443 → 全部 master)
-#   · 与 kube-vip 是**叠加**关系: kube-vip 管"全集群/外部统一入口", 本地代理管"每节点就近出口"
-#   · ⚠ **只设 loadbalancer_apiserver_localhost=true 是无效的**(假修复): kubespray 的
-#     kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支优先,
-#     只要外部 LB 定义了, kubelet 永远走 <域名>:6443, 本地代理装了也没人用。
-#     本开关为 true 时脚本会**硬失败**并给出修法(见 sync-kubespray-config.sh)。
-#   · 真正启用需要**二选一**:
-#       路线1(推荐, 保留域名/VIP 对外入口): 显式声明 kubelet 走 localhost
-#       路线2(全集群改用本地代理): 摘掉 all.yml 的 loadbalancer_apiserver 块
+#   · 与上面的"入口来源"**正交**: 本开关管"每节点就近出口", kube-vip/LB 管"外部统一入口"
+#   · 实现方式 = 摘掉 all.yml 的 loadbalancer_apiserver 块, 上游据此改走 localhost 分支
+#     (⚠ 只设 loadbalancer_apiserver_localhost=true 而保留该块 = 假修复: kubespray 的
+#      kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支优先,
+#      kubelet 仍走 <域名>:6443, 本地代理装了也没人用)
 #   · 收益: kubelet 侧故障切换 ~1s(1s 连接超时 + 无健康检查, 靠连接失败即时摘除)
 #     实测(3 master, 2/3 后端为黑洞时): 20/20 请求成功, 19 次 ~4.4ms, 1 次 1.0045s
-#   · 代价: 每节点多一个静态 Pod; 且它只解决"节点→API", 外部入口仍需 kube-vip
-KUBE_VIP_LOCAL_PROXY="${KUBE_VIP_LOCAL_PROXY:-false}"   # 默认关: 保持单一路径, 需要 worker 侧快速切换再开
+#   · 代价: 每节点多一个静态 Pod; 且它只解决"节点→API", 外部入口仍需 kube-vip/LB
+API_LOCAL_LB_ENABLED="${API_LOCAL_LB_ENABLED:-true}"    # 节点侧本地代理(kubespray nginx-proxy 静态 Pod): 每 worker 127.0.0.1:6443 → 全部 master
+API_LOCAL_LB_TYPE="${API_LOCAL_LB_TYPE:-nginx}"         # nginx | haproxy
+KUBE_VIP_LOCAL_PROXY="${KUBE_VIP_LOCAL_PROXY:-false}"   # 兼容别名(新方案起并入 API_LOCAL_LB_ENABLED, 单独用仍然有效)
 LOCAL_PATH_ENABLED="${LOCAL_PATH_ENABLED:-true}"        # local-path-provisioner 默认 StorageClass
 METRICS_SERVER_ENABLED="${METRICS_SERVER_ENABLED:-true}"  # metrics-server(HPA 依赖)
 HELM_ENABLED="${HELM_ENABLED:-true}"                    # Helm(registry 等组件依赖)
@@ -112,6 +123,14 @@ INGRESS_NGINX_ENABLED="${INGRESS_NGINX_ENABLED:-false}" # ingress-nginx(HTTP 入
 DASHBOARD_ENABLED="${DASHBOARD_ENABLED:-false}"         # Kubernetes dashboard
 CERT_MANAGER_ENABLED="${CERT_MANAGER_ENABLED:-false}"   # cert-manager(证书签发; LWS cert-manager 模式依赖)
 GATEWAY_API_ENABLED="${GATEWAY_API_ENABLED:-false}"     # Gateway API CRDs
+LOCAL_VOLUME_PROVISIONER_ENABLED="${LOCAL_VOLUME_PROVISIONER_ENABLED:-false}" # kubespray addon: 本地卷静态供给(2.5.0); 默认关, 需要时置 true
+NFD_ENABLED="${NFD_ENABLED:-false}"                     # kubespray addon: node-feature-discovery(0.19.0); 默认关, 需要时置 true
+CONTAINERD_CONFIG_VERSION="${CONTAINERD_CONFIG_VERSION:-3}"  # containerd 配置版本(写进 inventory, 覆盖树内默认):
+                                                        #   3 = 默认。沐曦 GPU operator 的 container-runtime 组件只支持 ≤3
+                                                        #       (v2.32 把 containerd 升到 2.3.5 后树内默认变 4 ⇒ 该组件 CrashLoop:
+                                                        #        "config version 4 is not support")。
+                                                        #   4 = containerd 2.x 上游默认; **待沐曦包支持 containerd 2.x 后可切**。
+                                                        #   ⚠ 只接受 3 或 4; 未设/留空一律按 3 处理(留空静默回落 4 会让沐曦组件崩, 故不设该模式)。
 
 # ---- 阶段三、集群基础设施 ----
 REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"               # 集群内置 Registry(默认部署; 0=不部署 addon/节点信任, 见 3.2)
@@ -135,10 +154,10 @@ MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多�
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(Device Plugin, 暴露 RDMA 网卡为扩展资源; 见 4.8)
 CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # CubeStack 自研组件(占位; 见 4.6)
 # ---- 4.7 Multus CNI(容器多网卡; 详见 deployments/cubestack-addon/multus/CUBESTACK.md) ----
-# 离线镜像: 联网机 docker save ghcr.io/k8snetworkplumbingwg/multus-cni:snapshot-thick
+# 离线镜像: 联网机 docker save ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick
 #   → deployments/offline-files/multus/multus-cni.tar → 16_multus 模块推送进内置 registry
 MULTUS_SAVE_DIR="${MULTUS_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/multus}"
-MULTUS_IMAGE_TAG="${MULTUS_IMAGE_TAG:-snapshot-thick}"   # 镜像 tag(与离线 tar / vendored manifest 一致)
+MULTUS_IMAGE_TAG="${MULTUS_IMAGE_TAG:-v4.2.2-thick}"     # 镜像 tag(与离线 tar / vendored manifest 一致)
 # 示例 macvlan 网络(模块自动创建的 NetworkAttachmentDefinition 参数; 仿官方 quickstart)
 MULTUS_MASTER_IFACE="${MULTUS_MASTER_IFACE:-eth0}"       # master 参数=宿主机网卡名(需与集群节点实际网卡一致)
 MULTUS_SUBNET="${MULTUS_SUBNET:-192.168.99.0/24}"
@@ -389,8 +408,18 @@ CEPH_CONFIRM_SLEEP="${CEPH_CONFIRM_SLEEP:-60}"
 # 离线文件: ceph 镜像 tar(独立脚本 tools/images/ceph-save-images.sh 下载)
 CEPH_IMAGE_DIR="${CEPH_IMAGE_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray/images}"   # 默认 kubespray/images(与 k8s 镜像同目录, 不再用独立 offline-files/ceph)
 CEPH_ROOK_MANIFEST_DIR="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}"
-# registry 后端存储: local-path(默认)| ceph-block(CEPH 启用后, registry 的 PVC 改走 ceph RBD)
-REGISTRY_STORAGE_CLASS="${REGISTRY_STORAGE_CLASS:-local-path}"
+# registry 后端存储: **默认随 Ceph** —— 启用了 Ceph 底座(CEPH_ENABLED + CEPH_CSI_ENABLED 都为 true)时用
+#   ceph-block(RBD 复制盘:节点挂掉注册表数据不丢);否则用 local-path(单机本地盘)。
+#   ⚠ 为什么不能固定写 local-path: Ceph 模式下 local-path provisioner 是**关的**
+#     (local_path_provisioner_enabled=false, 集群里没有 local-path SC)⇒ 该 SC 名会让 registry PVC
+#     **永远 Pending**(实机 2026-09-29 复盘)。显式赋任意 SC 名可强制覆盖(优先级最高)。
+if [ -z "${REGISTRY_STORAGE_CLASS:-}" ]; then
+    if [ "${CEPH_ENABLED:-false}" = "true" ] && [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
+        REGISTRY_STORAGE_CLASS="ceph-block"
+    else
+        REGISTRY_STORAGE_CLASS="local-path"
+    fi
+fi
 
 # ============================================================
 # 其余配置按阶段组织(顺序即依赖方向):
@@ -520,7 +549,8 @@ KUBE_NETWORK_PLUGIN="${KUBE_NETWORK_PLUGIN:-calico}"
 # ---------------- 2.5 kubespray 附加组件开关(由 sync-addons-config.sh 同步到 addons.yml) ----------------
 # 这些开关决定 kubespray 附加组件是否安装; 组件详细配置(地址池/存储类等)仍保留在 addons.yml
 # 开关见顶部【组件启停开关】: METALLB_ENABLED / LOCAL_PATH_ENABLED / METRICS_SERVER_ENABLED /
-#   HELM_ENABLED / INGRESS_NGINX_ENABLED / DASHBOARD_ENABLED / CERT_MANAGER_ENABLED / GATEWAY_API_ENABLED
+#   HELM_ENABLED / INGRESS_NGINX_ENABLED / DASHBOARD_ENABLED / CERT_MANAGER_ENABLED / GATEWAY_API_ENABLED /
+#   LOCAL_VOLUME_PROVISIONER_ENABLED / NFD_ENABLED
 # (已移除 metallb controller 钉首 master 的 workaround —— IPIP 数据面保证跨节点 webhook 可达, 无需再钉)
 
 # ════════════════════════════════════════════════════════════
@@ -595,25 +625,31 @@ IMAGE_MANIFEST="${IMAGE_MANIFEST:-${REPO_ROOT}/deployments/config/images.manifes
 # ---- 镜像版本(★ 升级入口: 改这里一处, 清单/Harbor/离线 tar/部署自动跟随) ----
 # 这些变量被 images.manifest 以 ${VAR} 引用。⚠ 改完必须重新同步制品, 否则 tar 与期望版本不符。
 # 基座(kubespray; ⚠ 必须与 kubespray 实际解析出的版本一致, 改了要重跑 k8s_deploy)
-K8S_VERSION="${K8S_VERSION:-v1.32.5}"                    # kube-apiserver/controller-manager/scheduler/proxy
-PAUSE_VERSION="${PAUSE_VERSION:-3.10}"
-COREDNS_VERSION="${COREDNS_VERSION:-v1.11.3}"
+K8S_VERSION="${K8S_VERSION:-v1.35.8}"                    # kube-apiserver/controller-manager/scheduler/proxy
+PAUSE_VERSION="${PAUSE_VERSION:-3.10.1}"
+COREDNS_VERSION="${COREDNS_VERSION:-v1.12.4}"
 DNS_NODE_CACHE_VERSION="${DNS_NODE_CACHE_VERSION:-1.25.0}"
-METRICS_SERVER_VERSION="${METRICS_SERVER_VERSION:-v0.7.0}"
-CPA_VERSION="${CPA_VERSION:-v1.8.8}"                     # cluster-proportional-autoscaler
-ETCD_VERSION="${ETCD_VERSION:-v3.5.16}"
-CALICO_VERSION="${CALICO_VERSION:-v3.29.3}"
+METRICS_SERVER_VERSION="${METRICS_SERVER_VERSION:-v0.9.0}"
+CPA_VERSION="${CPA_VERSION:-v1.10.3}"                    # cluster-proportional-autoscaler
+ETCD_VERSION="${ETCD_VERSION:-v3.6.14}"
+CALICO_VERSION="${CALICO_VERSION:-v3.31.7}"
 METALLB_VERSION="${METALLB_VERSION:-v0.13.9}"
-KUBE_VIP_VERSION="${KUBE_VIP_VERSION:-v0.8.9}"           # ⚠ 必须与 kubespray download.yml:285 的
-                                                        #   kube_vip_image_tag 一致, 否则离线集群拉不到镜像
+KUBE_VIP_VERSION="${KUBE_VIP_VERSION:-v1.0.3}"           # ⚠ 必须与 kubespray download.yml:261 的
+                                                        #   kube_vip_version 一致(镜像 tag = "v"+该值,
+                                                        #   见同文件 :263 的 kube_vip_image_tag), 否则离线集群拉不到镜像
                                                         #   → 09_kube_vip 前置自检硬失败("缺少 kube-vip 镜像")
                                                         #   ★ 不会再导致 kubeadm init 失败 —— 静态 Pod 现在
                                                         #     只在集群就绪后由模块落位(见 docs/kube-vip-api-ha.md 第 18 节)
 
 REGISTRY_IMAGE_TAG="${REGISTRY_IMAGE_TAG:-2.8.1}"        # docker.io/library/registry
-LOCAL_PATH_VERSION="${LOCAL_PATH_VERSION:-v0.0.24}"      # rancher/local-path-provisioner
+LOCAL_PATH_VERSION="${LOCAL_PATH_VERSION:-v0.0.37}"      # rancher/local-path-provisioner(与 kubespray 树 download.yml:302 同值; 2026-09-28 随 v2.32 换代从 v0.0.24 更新)
+# kubespray addon 版本(须与上游 kubespray_defaults/defaults/main/download.yml 同值; 开关默认关;
+# 打开开关前需先把这两个镜像登记进 images.manifest 并走离线同步, 否则离线集群拉不到)
+LOCAL_VOLUME_PROVISIONER_VERSION="${LOCAL_VOLUME_PROVISIONER_VERSION:-2.5.0}"
+NFD_VERSION="${NFD_VERSION:-0.19.0}"
 BUSYBOX_TAG="${BUSYBOX_TAG:-latest}"                     # 验证用(registry 存储校验)
 NGINX_TAG="${NGINX_TAG:-1.27}"                           # 验证用(verify 模块测试后端; 见 ensure_registry_nginx)
+API_LB_NGINX_IMAGE_TAG="${API_LB_NGINX_IMAGE_TAG:-1.30.1-alpine}"  # API 本地代理静态 Pod 用; 必须与 kubespray download.yml 的 nginx_image_tag 同值(树内 download.yml:265; 不一致时离线节点拉不到该 tag 的镜像)
 # Ceph CSI 附属组件(随 CEPH_ENABLED/CEPH_CSI_ENABLED)
 CSIADDONS_SIDECAR_VERSION="${CSIADDONS_SIDECAR_VERSION:-v0.14.0}"
 CSI_ATTACHER_VERSION="${CSI_ATTACHER_VERSION:-v4.12.0}"
@@ -725,4 +761,4 @@ LWS_RELEASE_NAME="${LWS_RELEASE_NAME:-lws}"             # Helm release 名
 # 格式: 空格分隔的匹配条目; 含 ".tar" 为精确文件名匹配, 否则为文件名包含匹配(匹配 images/ 下 *.tar 文件名)
 # 留空 = 全量同步 images/ 目录
 # 也可在 inventory/${CLUSTER_NAME}/preload-images.conf 中单独覆盖(standalone 运行 cubestack-offline.sh 时)
-PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb kube-vip library_registry local-path-provisioner busybox lws_manager}"
+PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause local-volume-provisioner node-feature-discovery metallb kube-vip library_registry local-path-provisioner busybox lws_manager library_nginx}"

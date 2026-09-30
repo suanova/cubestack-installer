@@ -43,12 +43,12 @@
       - { name: registry-cm, file: registry-cm.yml, type: cm }
       - { name: registry-rs, file: registry-rs.yml, type: rs }
 
-- name: Registry | Append nginx ingress templates to Registry Templates list when ingress enabled
+- name: Registry | Append ingress templates to Registry Templates list when ALB ingress enabled
   set_fact:
     registry_templates: "{{ registry_templates + [item] }}"
   with_items:
     - [{ name: registry-ing, file: registry-ing.yml, type: ing }]
-  when: ingress_nginx_enabled or ingress_alb_enabled
+  when: ingress_alb_enabled
 
 - name: Registry | Create manifests
   template:
@@ -79,8 +79,8 @@
     - { name: registry-pvc, file: registry-pvc.yml, type: pvc }
   register: registry_manifests
   when:
-    - registry_storage_class != none and registry_storage_class
-    - registry_disk_size != none and registry_disk_size
+    - (registry_storage_class | default('', true) | length) > 0
+    - (registry_disk_size | default('', true) | length) > 0
     - inventory_hostname == groups['kube_control_plane'][0]
 
 - name: Registry | Apply PVC manifests
@@ -93,6 +93,6 @@
     state: "latest"
   with_items: "{{ registry_manifests.results }}"
   when:
-    - registry_storage_class != none and registry_storage_class
-    - registry_disk_size != none and registry_disk_size
+    - (registry_storage_class | default('', true) | length) > 0
+    - (registry_disk_size | default('', true) | length) > 0
     - inventory_hostname == groups['kube_control_plane'][0]

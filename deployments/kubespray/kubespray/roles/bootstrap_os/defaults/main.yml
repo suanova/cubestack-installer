@@ -12,9 +12,21 @@ coreos_locksmithd_disable: false
 # Install epel repo on Centos/RHEL
 epel_enabled: false
 
+## openEuler specific variables
+# Enable metalink for openEuler repos (auto-selects fastest mirror by location)
+openeuler_metalink_enabled: false
+# Override the default baseurl host for openEuler repos.
+# Used as fallback when metalink is unavailable (502/timeout).
+# Default repo.openeuler.org (Hong Kong) is slow from many CI/cloud environments.
+openeuler_repo_baseurl: ""
+
 ## Oracle Linux specific variables
 # Install public repo on Oracle Linux
 use_oracle_public_repo: true
+
+## RHEL specific variables
+# Enable RHEL subscription repos
+rhel_enable_repos: true
 
 ## Ubuntu specific variables
 # Disable unattended-upgrades for Linux kernel and all packages start with linux- on Ubuntu
@@ -37,8 +49,3 @@ override_system_hostname: true
 is_fedora_coreos: false
 
 skip_http_proxy_on_os_packages: false
-
-# If this is true, debug information will be displayed but
-# may contain some private data, so it is recommended to set it to false
-# in the production environment.
-unsafe_show_logs: false

@@ -11,7 +11,7 @@ kubeadm_ignore_preflight_errors:
 
 The Kernel Version Matrixs:
 
-| OS Verion          | Kernel Verion  | Kernel >=4.19      |
+| OS Version         | Kernel Version | Kernel >=4.19      |
 |---                 | ---            | ---                |
 | RHEL 9             | 5.14           | :white_check_mark: |
 | RHEL 8             | 4.18           | :x:                |
@@ -28,7 +28,7 @@ The Kernel Version Matrixs:
 | Debian 11          | 5.10           | :white_check_mark: |
 | Fedora 40          | 6.8            | :white_check_mark: |
 | Fedora 39          | 6.5            | :white_check_mark: |
-| openSUSE Leap 15.5 | 5.14           | :white_check_mark: |
+| openSUSE Leap 16.0 | 6.12           | :white_check_mark: |
 | Amazon Linux 2     | 4.14           | :x:                |
 | openEuler 24.03    | 6.6            | :white_check_mark: |
 | openEuler 22.03    | 5.10           | :white_check_mark: |

@@ -52,6 +52,10 @@ ping <远端podIP>      # ✗ 100% 丢(direct 无封装时)
 
 > ⚠ 若在别处遇到"节点同网段却跨节点不通", 先用 §2.2 的三条命令判定是否同类 fabric, 再决定数据面, 不要直接套本方案。
 
+> **节点侧 API 出口**(与本节的转发 fabric 无关): 各节点 kubelet / kube-proxy 走**本机**
+> nginx-proxy 本地代理(`127.0.0.1:6443`)→ 全部 master, 不再依赖某台具体 master, 见
+> [api-ha/02-kubespray-native-lb.md](api-ha/02-kubespray-native-lb.md)(方案总览 [api-ha/](api-ha/README.md))。
+
 ---
 
 ## 3. 为什么网络方案是 Calico + IPIP

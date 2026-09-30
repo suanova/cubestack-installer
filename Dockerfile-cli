@@ -59,19 +59,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client sshpass rsync iputils-ping iptables dnsutils \
         netcat-openbsd \
         python3 python3-pip python3-venv \
-        libvirt-clients vim gnupg \
+        libvirt-clients vim gnupg software-properties-common \
         iproute2 kmod systemd procps bridge-utils chrony \
         moreutils \
     && rm -rf /var/lib/apt/lists/*
+
+# ---------- Python 3.11(deadsnakes)—— ansible 12.x 在**控制端**硬要求 Python ≥3.11 ----------
+# 树内 requirements.txt 是 ansible==12.3.0(= ansible-core 2.19.x);ubuntu:22.04 自带 python3=3.10
+# → pip 直接拒绝("Ignored the following versions that require a different python version: …
+#   12.3.0 Requires-Python >=3.11" / "No matching distribution found for ansible==12.3.0")。
+# 这里只装一个 python3.11 并让 **ansible 走它**(pip 的 console script 带 3.11 shebang, 落在 /usr/local/bin,
+# 先于 /usr/bin 命中);系统 python3 保持 3.10 不动 ⇒ python3-libvirt 等按 3.10 编译的扩展不受影响。
+# (jammy universe 里那个 python3.11 是 3.11.0~rc1 的 RC 版, 不适合跑生产 ansible, 故走 deadsnakes 的 3.11.16。)
+RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends python3.11 python3.11-venv python3.11-dev \
+    && python3.11 -m ensurepip --upgrade \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3.11 -V
 
 # ---------- kubectl(构建上下文 bin/ 临时拷入, 规避被墙的 dl.k8s.io) ----------
 # bin/ 由 build-cli-context.sh 从 deployments/offline-files/kubespray 临时拷入
 # (与 kubespray 集群二进制同源, 文件名 kubectl-<版本>-amd64)。helm 同理。
 # 注: 用精确文件名明确锁定版本(避免 shell 通配紧邻 '.' 解析的坑)。
-COPY bin/kubectl-1.32.5-amd64 /usr/local/bin/kubectl
+COPY bin/kubectl-1.35.8-amd64 /usr/local/bin/kubectl
 RUN chmod +x /usr/local/bin/kubectl && kubectl version --client 2>/dev/null | head -1
 
-COPY bin/helm-3.16.4-linux-amd64.tar.gz /tmp/helm.tar.gz
+COPY bin/helm-3.22.0-linux-amd64.tar.gz /tmp/helm.tar.gz
 RUN tar xzf /tmp/helm.tar.gz -C /tmp \
     && mv /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/linux-amd64 /tmp/helm.tar.gz \
     && helm version --short
@@ -104,11 +118,12 @@ RUN ARCH=$(dpkg --print-architecture) && \
 # ① 构建机联网时(清华源) pip download 拉 wheel 到 /tmp/pipcache;
 # ② pip install --no-index 全程走本地缓存, 容器内零联网;
 # ③ 复用安装(第二次 --no-index 空跑, 确保幂等/完整), 然后清缓存并校验 ansible。
+# ⚠ 必须用 python3.11(见上一步): 系统 python3=3.10 装不了 ansible 12.3.0。
 COPY deployments/kubespray/kubespray/requirements.txt /tmp/kubespray-requirements.txt
-RUN python3 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    && python3 -m pip download -d /tmp/pipcache -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    && python3 -m pip install --no-index --find-links=/tmp/pipcache -r /tmp/kubespray-requirements.txt \
-    && python3 -m pip install --no-index --find-links=/tmp/pipcache -r /tmp/kubespray-requirements.txt \
+RUN python3.11 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && python3.11 -m pip download -d /tmp/pipcache -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && python3.11 -m pip install --no-index --find-links=/tmp/pipcache -r /tmp/kubespray-requirements.txt \
+    && python3.11 -m pip install --no-index --find-links=/tmp/pipcache -r /tmp/kubespray-requirements.txt \
     && rm -rf /tmp/pipcache /tmp/kubespray-requirements.txt \
     && ansible --version 2>/dev/null | head -1
 

@@ -91,6 +91,8 @@ $(_component_meta_list stub)
   ① 全新集群/覆盖重装: sudo ./deploy-cluster.sh               # 默认 = 覆盖安装: k8s + cluster.conf 中启用的全部组件
                                                             # (目标集群**已存在**时同样是覆盖重装; 支持断点续跑)
   ② 清状态重来:        sudo ./deploy-cluster.sh --fresh        # = ① 且**先清断点状态**(REPEAT:0 的模块强制重跑)
+     · 覆盖安装遇到节点上的**旧集群残留**(跨小版本 / 旧 etcd 二进制)时, k8s_deploy 前置会自动清除它
+       (交互 15s 倒计时可中止; 加 --yes 免交互 —— 无人值守务必显式给)。原地升级未实现, 见 docs/cluster-upgrade-path.md
   ③ 单独装组件:        sudo ./deploy-cluster.sh --steps ceph         # 只装该组件(不动基座; 集群接入自动处理)
   · state 文件 deployments/config/.deploy.state 只记录"本机装到哪一步": 全新容器没有它是正常的(等价①)。
   · ⚠ ①/② 是**重装集群**的路: 节点上已有的旧 K8s 会被 kubeadm reset(既有防线: kubespray 侧检测到残留时
@@ -153,13 +155,16 @@ EOF
 }
 
 # ---------------- 参数解析 ----------------
-FRESH=0; LIST=0; LIST_STEPS=0
+FRESH=0; LIST=0; LIST_STEPS=0; ASSUME_YES=0
 STEPS_ARG=""; SKIP_ARG=""; ENABLE_ARG=""; PHASE_ARG=""; ENABLE_PERSIST_ARG=""
 SCALE_ONLY=0
 ONLY_HOSTS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --fresh|--refresh) FRESH=1; shift ;;
+        # --yes = 覆盖安装时免交互确认(透传给"旧集群残留 → 自动 reset"那一步; 见 k8s_deploy 前置)。
+        #   不给 --yes 时: 交互终端仍有 15s 倒计时; 非交互环境**拒绝自动 reset**(避免无人值守误清集群)。
+        --yes|-y) ASSUME_YES=1; shift ;;
         --list)     LIST=1; shift ;;
         --list-steps) LIST_STEPS=1; shift ;;
         # --with-k8s: 仅 kubespray 基座(k8s + metallb/local-path/registry), 不含任何 operator
@@ -304,6 +309,8 @@ if [ "${LIST_STEPS}" = "1" ]; then print_steps; exit 0; fi
 if [ "${LIST}" = "1" ]; then print_plan; exit 0; fi
 
 [ "${FRESH}" = "1" ] && { clear_state; say "已清除断点续跑状态(--fresh)" ; }
+# --yes 透传给下游(k8s_deploy 前置的"旧集群残留 → 自动 reset"); 见 tools/k8s/reset-old-cluster.sh
+[ "${ASSUME_YES}" = "1" ] && { export CUBESTACK_ASSUME_YES=1; say "已开启免交互确认(--yes): 覆盖安装时旧集群残留将**自动**清除"; }
 
 need_root() { [ "$(id -u)" -eq 0 ] || { err "需要 root 权限,请执行: sudo $0"; exit 1; }; }
 need_root
@@ -319,8 +326,26 @@ notify_base_redeploy
 # ★ 集群接入预检(仅 --steps 精确模式: 单独装组件 / 跑验证):
 #   本地 kubeconfig 可用则直接用; 否则用 cluster.conf NODES 的密码引导(生成密钥 → 注入公钥 →
 #   取 admin.conf 到本地)。全量部署/覆盖安装由各自的基座模块处理接入, 不走这里。
+#   ⚠ 例外 —— **"集群存在之前就该跑"的模块**(PRE_CLUSTER_STEPS): 它们的用途正是"集群还没起来时
+#     先把节点修好"(node_pkgs 修 apt 依赖图, 否则 kubespray 的 bootstrap_os → system_packages 必失败;
+#     其余是建集群本身的前置)。对**全部请求步骤都属于这一类**的情形, 接入改为**尽力而为**: 能接上就接,
+#     接不上只提示不拦停 —— 否则 `--steps node_pkgs` 在一台集群尚未起来的机器上永远跑不动(实机 2026-09-29)。
+#     只要请求里**有任何一个**需要集群的步骤, 仍走原来的硬门(exit 1)。
+PRE_CLUSTER_STEPS="node_pkgs k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp"
 if [ -n "${STEPS_ARG}" ]; then
-    ensure_cluster_access || exit 1
+    _all_pre=1
+    for _s in ${STEPS_ARG//,/ }; do
+        case " ${PRE_CLUSTER_STEPS} " in
+            *" ${_s} "*) ;;
+            *) _all_pre=0 ;;
+        esac
+    done
+    if [ "${_all_pre}" = "1" ]; then
+        say "本次 --steps 只含\"集群存在前\"的节点前置模块 → 集群接入改为尽力而为(失败不拦停)"
+        ensure_cluster_access || warn "  集群暂不可达(这些步骤不依赖集群 API, 继续执行)"
+    else
+        ensure_cluster_access || exit 1
+    fi
 fi
 
 # 启动全量日志

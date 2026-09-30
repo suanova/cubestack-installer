@@ -13,7 +13,7 @@ KUBESPRAYDIR=kubespray
 python3 -m venv $VENVDIR
 source $VENVDIR/bin/activate
 cd $KUBESPRAYDIR
-pip install -U -r requirements.txt
+pip install -r requirements.txt
 ```
 
 In case you have a similar message when installing the requirements:
@@ -30,9 +30,9 @@ If the latest version supported according to pip is 6.7.0 it means you are runni
 
 Based on the table below and the available python version for your ansible host you should choose the appropriate ansible version to use with kubespray.
 
-| Ansible Version | Python Version |
-|-----------------|----------------|
-| >= 2.16.4       | 3.10-3.12      |
+|  Ansible Version  | Python Version |
+|-------------------|----------------|
+| >=2.19.0, <2.20.0 | 3.11-3.13      |
 
 ## Customize Ansible vars
 
@@ -42,13 +42,12 @@ Kubespray expects users to use one of the following variables sources for settin
 |----------------------------------------|------------------------------------------------------------------------------|
 | inventory vars                         |                                                                              |
 |  - **inventory group_vars**            | most used                                                                    |
-|  - inventory host_vars                 | host specifc vars overrides, group_vars is usually more practical            |
+|  - inventory host_vars                 | host specific vars overrides, group_vars is usually more practical           |
 | **extra vars** (always win precedence) | override with ``ansible-playbook -e @foo.yml``                               |
 
-[!IMPORTANT]
-Extra vars are best used to override kubespray internal variables, for instances, roles/vars/.
-Those vars are usually **not expected** (by Kubespray developers) to be modified by end users, and not part of Kubespray
-interface. Thus they can change, disappear, or break stuff unexpectedly.
+> Extra vars are best used to override kubespray internal variables, for instances, roles/vars/. Those vars are usually **not expected** (by Kubespray developers) to be modified by end users, and not part of Kubespray interface. Thus they can change, disappear, or break stuff unexpectedly.
+>
+> `-e key=value` always passes strings. Since Ansible 12 (ansible-core 2.19), conditionals must return booleans. Pass booleans using JSON syntax instead, e.g. `-e '{"drain_nodes": true}'`. See the [Ansible 12 porting guide](https://docs.ansible.com/projects/ansible/latest/porting_guides/porting_guide_12.html#broken-conditionals).
 
 ## Ansible tags
 
@@ -81,7 +80,6 @@ The following tags are defined in playbooks:
 | crio                           | Configuring crio container engine for hosts           |
 | crun                           | Configuring crun runtime                              |
 | csi-driver                     | Configuring csi driver                                |
-| dashboard                      | Installing and configuring the Kubernetes Dashboard   |
 | dns                            | Remove dns entries when resetting                     |
 | docker                         | Configuring docker engine runtime for hosts           |
 | download                       | Fetching container images to a delegate host          |
@@ -118,12 +116,11 @@ The following tags are defined in playbooks:
 | local-path-provisioner         | Configure External provisioner: local-path            |
 | local-volume-provisioner       | Configure External provisioner: local-volume          |
 | macvlan                        | Network plugin macvlan                                |
-| master (DEPRECATED)            | Deprecated - see `control-plane`                      |
 | metallb                        | Installing and configuring metallb                    |
 | metrics_server                 | Configuring metrics_server                            |
 | netchecker                     | Installing netchecker K8s app                         |
 | network                        | Configuring networking plugins for K8s                |
-| mounts                         | Umount kubelet dirs when reseting                     |
+| mounts                         | Umount kubelet dirs when resetting                    |
 | multus                         | Network plugin multus                                 |
 | nginx                          | Configuring LB for kube-apiserver instances           |
 | node                           | Configuring K8s minion (compute) node role            |
@@ -153,13 +150,8 @@ The following tags are defined in playbooks:
 | upgrade                        | Upgrading, f.e. container images/binaries             |
 | upload                         | Distributing images/binaries across hosts             |
 | vsphere-csi-driver             | Configuring csi driver: vsphere                       |
-| weave                          | Network plugin Weave                                  |
 | win_nodes                      | Running windows specific tasks                        |
 | youki                          | Configuring youki runtime                             |
-
-Note: Use the ``bash scripts/gen_tags.sh`` command to generate a list of all
-tags found in the codebase. New tags will be listed with the empty "Used for"
-field.
 
 ## Example commands
 
@@ -167,37 +159,33 @@ Example command to filter and apply only DNS configuration tasks and skip
 everything else related to host OS configuration and downloading images of containers:
 
 ```ShellSession
-ansible-playbook -i inventory/sample/hosts.ini cluster.yml --tags preinstall,facts --skip-tags=download,bootstrap_os
+ansible-playbook -i inventory/sample/inventory.ini cluster.yml --tags preinstall,facts --skip-tags=download,bootstrap_os
 ```
 
 And this play only removes the K8s cluster DNS resolver IP from hosts' /etc/resolv.conf files:
 
 ```ShellSession
-ansible-playbook -i inventory/sample/hosts.ini -e dns_mode='none' cluster.yml --tags resolvconf
+ansible-playbook -i inventory/sample/inventory.ini -e dns_mode='none' cluster.yml --tags resolvconf
 ```
 
 And this prepares all container images locally (at the ansible runner node) without installing
 or upgrading related stuff or trying to upload container to K8s cluster nodes:
 
 ```ShellSession
-ansible-playbook -i inventory/sample/hosts.ini cluster.yml \
-    -e download_run_once=true -e download_localhost=true \
+ansible-playbook -i inventory/sample/inventory.ini cluster.yml \
+    -e '{"download_run_once": true, "download_localhost": true}' \
     --tags download --skip-tags upload,upgrade
 ```
 
 Note: use `--tags` and `--skip-tags` wisely and only if you're 100% sure what you're doing.
 
-## Mitogen
-
-Mitogen support is deprecated, please see [mitogen related docs](/docs/advanced/mitogen.md) for usage and reasons for deprecation.
-
 ## Troubleshooting Ansible issues
 
 Having the wrong version of ansible, ansible collections or python dependencies can cause issue.
-In particular, Kubespray ship custom modules which Ansible needs to find, for which you should specify [ANSIBLE_LIBRAY](https://docs.ansible.com/ansible/latest/dev_guide/developing_locally.html#adding-a-module-or-plugin-outside-of-a-collection)
+In particular, Kubespray ship custom modules which Ansible needs to find, for which you should specify [ANSIBLE_LIBRARY](https://docs.ansible.com/ansible/latest/dev_guide/developing_locally.html#adding-a-module-or-plugin-outside-of-a-collection)
 
 ```ShellSession
-export ANSIBLE_LIBRAY=<kubespray_dir>/library`
+export ANSIBLE_LIBRARY=<kubespray_dir>/library`
 ```
 
 A simple way to ensure you get all the correct version of Ansible is to use
@@ -206,11 +194,11 @@ You will then need to use [bind mounts](https://docs.docker.com/storage/bind-mou
 to access the inventory and SSH key in the container, like this:
 
 ```ShellSession
-git checkout v2.27.0
-docker pull quay.io/kubespray/kubespray:v2.27.0
+git checkout v2.30.0
+docker pull quay.io/kubespray/kubespray:v2.30.0
 docker run --rm -it --mount type=bind,source="$(pwd)"/inventory/sample,dst=/inventory \
   --mount type=bind,source="${HOME}"/.ssh/id_rsa,dst=/root/.ssh/id_rsa \
-  quay.io/kubespray/kubespray:v2.27.0 bash
+  quay.io/kubespray/kubespray:v2.30.0 bash
 # Inside the container you may now run the kubespray playbooks:
 ansible-playbook -i /inventory/inventory.ini --private-key /root/.ssh/id_rsa cluster.yml
 ```

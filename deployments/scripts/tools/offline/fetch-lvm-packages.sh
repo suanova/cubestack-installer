@@ -32,10 +32,18 @@ apt-get update -qq 2>/dev/null || true
 LVM_PACKAGES="lvm2 dmsetup dmeventd thin-provisioning-tools
 libdevmapper1.02.1 libdevmapper-event1.02.1 liblvm2cmd2.03
 libaio1 libudev1 libreadline8 libedit2"
+
+# 除 lvm 家族外, 节点的离线安装集还需要这些(以及它们的**依赖闭包** —— apt-get download 会一并拉取):
+#   sysstat → libsensors5 → libsensors-config
+#   curl    → libcurl4
+# ⚠ 2026-09-29 实机事故: 只补了 sysstat 的主包而**漏了它的依赖**, dpkg -i 把 sysstat 留在
+#   "解包未配置"(iU) ⇒ **apt 依赖图破损** ⇒ node_pkgs 对账硬失败、部署中断(离线节点上 apt 补不回来)。
+#   所以这里必须连依赖一起下载; 补包后记得同步给部署容器与 /data/offline-files 两份副本。
+EXTRA_PACKAGES="sysstat curl libcurl4 libsensors5 libsensors-config"
 TMP_DL="$(mktemp -d)"
-say "  下载: ${LVM_PACKAGES}(apt-get download, 与本地是否已装 lvm2 无关)"
+say "  下载: ${LVM_PACKAGES} ${EXTRA_PACKAGES}(apt-get download, 与本地是否已装无关)"
 _FAIL=0
-for _pkg in ${LVM_PACKAGES}; do
+for _pkg in ${LVM_PACKAGES} ${EXTRA_PACKAGES}; do
     if ! (cd "${TMP_DL}" && apt-get download "${_pkg}" >/dev/null 2>&1); then
         warn "    apt-get download ${_pkg} 失败(可能无此包/源缺该版本), 跳过"
         _FAIL=1
