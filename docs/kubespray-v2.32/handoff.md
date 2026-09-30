@@ -18,7 +18,7 @@
 | 新增接线 | LVP 2.5.0 / NFD 0.19.0 接入上游 addon,**`cluster.conf` 默认 disable**;镜像已登记 + PRELOAD 四处副本一致 |
 | 版本面 | k8s **1.35.8** / calico **3.31.7** / etcd **3.6.14** / coredns 1.12.4 / pause 3.10.1 / cpa 1.10.3 / nodelocaldns 1.25.0 / metrics 0.9.0 / nginx 1.30.1-alpine |
 | 门禁 | check-modules:`⑮`(补丁在位 + **两个离线套件实跑**)`⑯`(钉子 == 表值 == inventory 写入者)全绿;**唯一红 = 既有 ⑪-B**(main 上同样红) |
-| 回退 | tag **`kubespray-2.28.0-cubestack`**(=f0342b7,含树 + 旧补丁层)→ 必须**成对回退**:`git checkout kubespray-2.28.0-cubestack -- deployments/kubespray` |
+| 回退 | tag **`kubespray-2.28.0-cubestack`**(现指 `1f7d231`,含树 + 旧补丁层;2026-09-30 历史合并后由 f0342b7 改指,内容逐字节相同)→ 必须**成对回退**:`git checkout kubespray-2.28.0-cubestack -- deployments/kubespray` |
 
 ## 二、待办(交回本机/联网机/真机环境执行)
 

@@ -64,7 +64,7 @@ DIRS=(
     deployments/cubestack-addon
     # ★ 2026-09-28(评审 I2): 补丁层也整目录同步。它是 kubespray 树的"源码改动的唯一载体"
     #   (换树会丢弃树内手工改动, 只有 .patch 是可复现的), 而本支新增/重放了补丁 —— 漏同步的后果
-    #   是"容器里重跑仍用旧补丁层"(容器内 ⑮ 只会 warn 跳过, 没有护栏)。目录很小(7 个 .patch)。
+    #   是"容器里重跑仍用旧补丁层"(容器内 ⑮ 只会 warn 跳过, 没有护栏)。目录很小(~64K)。
     #   ⚠ 树本体**不在这里**(整拷那条路会删掉容器内的 inventory/ 与 .venv/): 树只能按步骤 5 的
     #     指引在容器内换树, 或重建 CLI 镜像。
     deployments/kubespray/cubestack-patches

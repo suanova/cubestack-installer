@@ -5,11 +5,14 @@
 
 - 基线:纯净上游 **v2.32.0**(2026-09-28 随 `v2.28.0 → v2.32.0` 换树刷新;01–07 原按 v2.28.0 生成,
   换树时逐条按语义重放校验:纯净 v2.32.0 + 全部补丁 == 我们的树**逐字节**)。
+  `09`–`11` 是**换树后**实机部署暴露的问题修复(2026-09-28 同日新增, 见下表末三行);
+  2026-09-30 按同口径**复验全部 10 个**:GitHub tag `v2.32.0` 树 + 全部补丁 == 本树(逐字节),
+  且在**纯净**树上 `--check-retired` 全 `KEEP`(无"上游已吸收"的幻影补丁)。
 - 每个 patch 是"**纯净树 → 我们的树**"的净差;`patch -p1` 前向打 = 重放,**`-R` 反打干净 = 与当前树一致**。
 - 每条改动的"原因 / 上游吸收判据 / 上游化"三项写在 **patch 文件头的注释块**里(本 README 的表格是摘要,
   以 patch 头为准);判据用于升级时跑"这个补丁是否已被上游吸收、可以退休"的检查(设计 §3.5)。
 
-## 补丁清单(7 处)
+## 补丁清单(10 处)
 
 | 补丁 | 目标文件 | 一句话原因(丢了会怎样) | 上游吸收判据 | 上游化 |
 |---|---|---|---|---|
@@ -21,6 +24,10 @@
 | `07-download-yml-k8s-cluster-group.patch` | `roles/kubespray_defaults/defaults/main/download.yml` | `dnsautoscaler` / `metrics_server` 镜像的下载组补 `- k8s_cluster`(原仅 `kube_control_plane`; 闸门见 `roles/download/tasks/main.yml` 的 `group_names \| intersect(download.groups)`);丢了则 worker 不下载这两个镜像, 离线节点上组件起不来 | 上游这两个条目 `groups` 含 `k8s_cluster` | 不提(会改变上游默认下载面: 全部节点都下载; 本环境离线自持所需) |
 | `08-kubeadm-secondary-join-stat.patch` | `roles/kubernetes/control-plane/tasks/kubeadm-secondary.yml` | "是否已 join 成功"以 `admin.conf` 是否存在为准(文件顶部 `stat` + **5 处** gate 加 `or not admin_conf_stat.stat.exists`:4 处 join 前置任务 + **join 任务自身**);丢了则 kubelet config 已存在(上次 join 半途失败)但 admin.conf 未生成时, 前置任务被跳过、join 也被自己的 gate 跳过 → 次 master 卡在"kubelet 已配好但未 join";**补上 join 那处**才能交付"admin.conf 缺 ⇒ 重新 join"(否则前 4 处会先做 `kubeadm reset` 却不重新 join) | 上游该文件出现 `admin.conf` 存在性守卫(stat / `is exists`), 或上游把"是否已 join"的判据从 kubelet config 换成 admin.conf | 建议提 PR(通用幂等健壮性; 非 §3.5 首批) |
 
+| `09-metallb-memberlist-secret.patch` | `roles/kubernetes-apps/metallb/tasks/main.yml` | v2.32 模板只**引用** `memberlist` Secret 而不创建 ⇒ speaker 全部 `CreateContainerConfigError`、池子分不到 VIP;补丁在 apply **之后**幂等创建(位置不能前挪: `metallb-system` 命名空间由那条 apply 创建) | 该目录下出现创建 memberlist Secret 的任务/清单 | **建议提 PR**(上游 v2.32 缺口的通用修复) |
+| `10-registry-conditional-bool.patch` | `roles/kubernetes-apps/registry/tasks/main.yml` | 四条 `when` 的 `X != none and X` 在 ansible-core ≥2.19 **必失败**("Conditionals must have a boolean result")⇒ 设了 `registry_storage_class` 就部署中断在 `k8s_deploy`;改为 `length > 0` 布尔安全写法(语义不变) | 该文件不再出现 `!= none and <变量>` 形态 | **建议提 PR**(v2.32 + ansible 2.19 组合下必现; 上游原样如此, 非我们的定制) |
+| `11-containerd-config-version.patch` | `roles/container-engine/containerd/templates/config.toml.j2` | 上游对 containerd ≥2.3 恒写 `version = 4`,而沐曦 container-runtime 只支持 ≤3 ⇒ `config version 4 is not support` CrashLoop;补丁加 `containerd_config_version` 覆盖分支(默认行为不变, 值由 `sync-kubespray-config.sh` 从 cluster.conf 写入) | 模板出现 `containerd_config_version`(或等价版本覆盖机制) | **不提 PR**(沐曦厂商约束, 非通用需求);待沐曦包支持 containerd 2.x 后删除本补丁 |
+
 ### 已退休(1 处,别再加回来)
 
 `03-kubeadm-fix-apiserver-stat.patch` —— **2026-09-28 随 `v2.28.0 → v2.32.0` 退休**。依据:目标文件
@@ -29,7 +36,8 @@
 (注意:这不是"上游吸收", 是上游删除了整段逻辑)。教训:目标文件消失时 `--check-retired` 只会报 KEEP
 (反打不上 ≠ 上游未吸收), 退休必须人工确认。
 
-> 本目录 7 个补丁 = spec §2.2 表的第 4、5、7(=原手工项)、8、9、10、11 行;**第 6 行(补丁 03)已退休**(见上)。
+> 本目录 10 个补丁 = 换树时固化的 7 个(spec §2.2 表的第 4、5、7(=原手工项)、8、9、10、11 行;
+> **第 6 行(补丁 03)已退休**,见上)+ 换树后实机部署暴露的 3 个(前缀 `09`–`11`,即下表末三行,与 spec §2.2 行号无关)。
 
 ## 不在本目录的 3 处改动(别重复两套)
 
@@ -80,7 +88,8 @@ done
 ```
 
 换树后前向重放的正确性判据:**纯净 v2.32.0 + 按序前向打分 == 我们的树(逐字节)**。
-(2026-09-28 换树后按此口径复验通过,7 个补丁全绿;后续升级脚本 `cubestack-patch-apply.sh` 按同样口径实现 `--check`。)
+(2026-09-28 换树后按此口径复验通过,7 个补丁全绿;2026-09-30 扩到全部 10 个复验仍逐字节 —— 见文首"基线"段;
+后续升级脚本 `cubestack-patch-apply.sh` 按同样口径实现 `--check`。)
 
 ## §3.3 "能下沉就下沉"判定结论
 
@@ -89,6 +98,10 @@ done
 - **05 不能下沉**:角色执行顺序写在 `meta/main.yml` 里,只能在树内改。
 - **01 / 04 不能下沉**(03 已退休):守卫/建目录必须发生在 role 任务的执行点(目标主机、循环内),外部脚本无从插入。
 - **07 保留为补丁**:形式上是 `defaults` 变量,理论上可从 inventory 覆盖,但覆盖路径深且脆弱,不值得。
+- **09 / 10 / 11 不能下沉(换树后新增的三处)**:09 的时序在 role 内部 —— Secret 必须在 metallb apply
+  **之后**创建(`metallb-system` 命名空间由该 apply 建);10 改的是上游任务自身的 `when` 表达式;
+  11 改的是模板**渲染点**(值从 inventory 来, 但读取它的模板在树内)。三者改动点都在 role 任务/模板内部,
+  外部脚本无从插入。
 - **02 是唯一的"可下沉候选"(未实施,记录备考)**:我们的部署模块可在 client role 之后对
   kubeconfig 目录 `chmod 0777`,从而**删掉这个补丁**;本次任务只做"导出",未改模块,记入后续收敛项。
 
