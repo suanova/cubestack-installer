@@ -193,7 +193,10 @@ ensure_kubespray() {
     #    仅当"选定版本 ≠ 仓库树版本"(= 目标是物化树)且本机有该版本目录时才走这条路;
     #    仓库树版本仍走下面的原路径(不改变原来的部署模式)。
     local _tree_tar="${OFFLINE_FILES_DIR:-}/tree.tar.gz"
-    if [ -n "${OFFLINE_FILES_DIR:-}" ] && [ -f "${_tree_tar}" ]; then
+    local _repo_tree_ver; _repo_tree_ver="$(awk '/^version:/{print "v"$2; exit}' "${SCRIPT_DIR}/kubespray/galaxy.yml" 2>/dev/null || true)"
+    # ⚠ 只在"选定版本 ≠ 仓库树版本"时物化: 否则万一仓库树缺失, 会把 tar 解进 **git 跟踪**的
+    #    deployments/kubespray/kubespray/(与 HEAD 可能不一致) —— 那不是本机制该做的事。
+    if [ -n "${OFFLINE_FILES_DIR:-}" ] && [ -f "${_tree_tar}" ] && [ "${KUBESPRAY_VERSION}" != "${_repo_tree_ver}" ]; then
         highlight "从版本目录物化 Kubespray ${KUBESPRAY_VERSION}(离线, 顶层 kubespray/)"
         mkdir -p "$(dirname "${KUBESPRAY_DIR}")"
         tar -xzf "${_tree_tar}" -C "$(dirname "${KUBESPRAY_DIR}")" || err "解树失败: ${_tree_tar}"
