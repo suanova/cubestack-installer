@@ -19,13 +19,16 @@
 #     需要时可 --sub virtual-machine 只拉 VM 镜像, 或 --all 全量(含 VM 镜像)。
 #   · 子目录排除: DEFAULT_EXCLUDE_SUBS(默认 virtual-machine)在默认/全量下载时自动跳过;
 #     显式 --sub <目录> 不受排除限制(按需下载)。
-#   · 需要时可用 --sub <目录> 只拉某子目录;
+#   · 需要时可用 --sub <目录> 只拉某子目录; --sub 支持**嵌套路径**(如 kubespray/v2.32.0)⇒
+#     只下载指定版本的离线件(离线件按版本目录组织, 见 docs/kubespray-versioning/);
 #   · 结果提示: 容器内就绪提示; 宿主机打印容器挂载命令 + 直跑 OFFLINE_FILES_DIR 指引。
 # 用法(容器内已 root, 无需 sudo):
 #   ./fetch-offline-from-minio.sh                                 # 默认: 下载部署必需子目录(排除 virtual-machine)
 #   ./fetch-offline-from-minio.sh --sub virtual-machine           # 按需拉 VM 镜像(仅创建虚拟机时)
 #   ./fetch-offline-from-minio.sh --all                           # 真正全量(含 virtual-machine 等所有子目录)
 #   ./fetch-offline-from-minio.sh --sub kubespray                 # 只拉某子目录(如 kubespray)
+#   ./fetch-offline-from-minio.sh --sub kubespray/v2.32.0         # 二级路径: 只拉**指定版本**(版本目录, 见下)
+#   ./fetch-offline-from-minio.sh --kubespray-version v2.32.0     # 等价糖(版本名 = 上游 tag 全名, 决策 D8)
 #   ./fetch-offline-from-minio.sh --dest /data/offline-files      # 指定下载目录(即 offline-files 根)
 #   sudo ./fetch-offline-from-minio.sh --auto                     # 宿主机: 自动挑空闲 ≥ 门槛的最大磁盘
 #   sudo ./fetch-offline-from-minio.sh --min-free 100             # 磁盘空闲门槛 100GiB
@@ -74,6 +77,7 @@ LIST_ONLY=0
 YES=0
 AUTO=0
 FORCE=0
+KUBESPRAY_VERSION_ARG=""
 MIN_FREE_GB="${MIN_FREE_GB:-50}"     # 磁盘空间门槛(GB): 默认至少 50GiB 空闲, 离线文件会持续增加
 WARN_NEED_GB="${WARN_NEED_GB:-50}"   # 醒目警告建议的总空闲门槛(GB)
 # 默认/全量下载时自动排除的子目录(体积大且非部署必需, 需用时 --sub 单独拉):
@@ -88,10 +92,22 @@ while [ $# -gt 0 ]; do
         --auto) AUTO=1; shift ;;
         --force) FORCE=1; shift ;;
         -y|--yes) YES=1; shift ;;
-        -h|--help) head -30 "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) err "未知参数: $1(可用 --dest/--sub/--min-free/--auto/--force/--list/-y)"; exit 1 ;;
+        --kubespray-version) KUBESPRAY_VERSION_ARG="$2"; shift 2 ;;
+        -h|--help) head -40 "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) err "未知参数: $1(可用 --dest/--sub/--kubespray-version/--min-free/--auto/--force/--all/--list/-y)"; exit 1 ;;
     esac
 done
+# --kubespray-version <V> ≡ --sub kubespray/<V>(只下载该版本的离线件; 版本名 = 上游 tag 全名)
+if [ -n "${KUBESPRAY_VERSION_ARG}" ]; then
+    [ -n "${SUB_ARG}" ] && { err "--kubespray-version 与 --sub 互斥(后者已给 ${SUB_ARG})"; exit 1; }
+    SUB_ARG="kubespray/${KUBESPRAY_VERSION_ARG}"
+fi
+# --sub 允许嵌套路径, 但必须是**桶内相对路径**(拒绝绝对路径 / 上跳, 免得拼出桶外路径)
+if [ -n "${SUB_ARG}" ]; then
+    case "${SUB_ARG}" in
+        /*|*..*) err "--sub 必须是桶内相对路径(不允许以 / 开头或含 ..): ${SUB_ARG}"; exit 1 ;;
+    esac
+fi
 
 # ---------------- 1. mc client 检测 ----------------
 say "检查 mc(MinIO Client) ..."
@@ -193,7 +209,15 @@ echo ""
 
 # --list 模式: 到此结束
 if [ "${LIST_ONLY}" = "1" ]; then
-    echo "  用法示例: sudo ./fetch-offline-from-minio.sh --sub kubespray   # 只拉 kubespray"
+    echo ""
+    echo "  二级(版本目录; 版本名 = 上游 tag 全名):"
+    for _c in $(mc ls "${SRC_ROOT}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##'); do
+        [ -n "${_c}" ] || continue
+        _vs="$(mc ls "${SRC_ROOT}/${_c}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##' | grep -E '^v[0-9]+' | tr '\n' ' ')"
+        [ -n "${_vs}" ] && echo "    ${_c}: ${_vs}"
+    done | head -20
+    echo ""
+    echo "  只下载指定版本: sudo ./fetch-offline-from-minio.sh --kubespray-version v2.32.0"
     exit 0
 fi
 
