@@ -38,6 +38,6 @@ sudo PERFTEST_VERSION=26.04.17 ./deployments/scripts/tools/images/netshoot-rdma-
 
 `deployments/scripts/modules/03_addon/35_netshoot.sh` —— 推入**集群内置 registry** 后起诊断 pod
 (默认命名空间 `default`, pod 名 `cubestack-netshoot`); 节点只从内置 registry 拉取, 不访问公网。
-RDMA 资源(`rdma/hca_shared_devices`)**注册了才申请**, 没注册自动降级为通用网络诊断 pod。
+RDMA 资源(`rdma/ib_shared_devices`)**注册了才申请**, 没注册自动降级为通用网络诊断 pod。
 
 > ⚠ 本目录下的 `*.tar` 已在 `.gitignore` 中忽略(tar 不入库); 只有本 README 受版本控制。

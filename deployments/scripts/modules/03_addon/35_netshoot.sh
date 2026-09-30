@@ -17,7 +17,7 @@
 #     ⚠ 自建 tar 缺失时**回退**用离线包里的原始 netshoot(netshoot.tar): pod 照样能起, 但
 #       **没有 ibv_*/perftest**(会有醒目告警) —— 总比"诊断工具起不来"强。
 #   · ★ RDMA 资源**自动降级**: 只有集群节点真的注册了 ${NETSHOOT_RDMA_RESOURCE}(默认
-#     rdma/hca_shared_devices, 与 10_rdma 的 by-link IB 池一致)才申请该扩展资源;
+#     rdma/ib_shared_devices, 与 10_rdma 的 by-link IB 池一致)才申请该扩展资源;
 #     没注册(未部署 RDMA 插件 / 占位模式 / 无卡)就不申请 —— 同一个诊断 pod 在有卡/无卡集群都能起。
 #     ⚠ 不降级的后果: 无卡集群里 pod 永远 Pending, "诊断工具"自己先挂了。
 #   · 容器启动即打印**设备视图**((/dev/infiniband 授予的 uverbsN) × (sysfs 里全部 mlx5_X → netdev)),
@@ -70,7 +70,7 @@ CM_NAME="${NETSHOOT_POD_NAME:-cubestack-netshoot}-diag"
 SAVE_DIR="${NETSHOOT_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/netshoot}"
 TAG="${NETSHOOT_RDMA_VERSION:-26.04.17}"          # 自建镜像 tag(= perftest 版本, 见构建脚本)
 BASE_TAR="${NETSHOOT_BASE_TAR:-${REPO_ROOT}/deployments/offline-files/os/netshoot.tar}"   # 回退用的原始 netshoot
-RDMA_RES="${NETSHOOT_RDMA_RESOURCE:-${RDMA_IB_RESOURCE:-rdma/hca_shared_devices}}"        # 与 10_rdma by-link 的 IB 池一致
+RDMA_RES="${NETSHOOT_RDMA_RESOURCE:-${RDMA_IB_RESOURCE:-rdma/ib_shared_devices}}"        # 与 10_rdma by-link 的 IB 池一致
 # push 用直连端点(与 10_rdma/gpu_operator 一致): nodeport→master:REGISTRY_NODEPORT / metallb→VIP:5000
 REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-5000}}"
 REG_BASE="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT:-5000}"   # 节点按域名拉取
