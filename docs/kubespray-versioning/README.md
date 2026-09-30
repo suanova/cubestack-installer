@@ -159,6 +159,24 @@ operator **不搞批量搬迁**;凡要"按版本选"的组件,按同一套四条
 - 构建上下文 `build-cli-context.sh`:无 `bin/`、排除 `kubespray/versions/`(物化树不进镜像),
   实测 218M → **87M(纯代码)**。全量构建得到纯净的 code-only 镜像;增量构建继承基础镜像内容。
 
+### ⚠ 增量构建的**层数累积**(2026-09-30 实测, 已加守卫)
+
+`--incremental` 每次都在旧镜像上再叠十几层 ⇒ **层数单调增长**。层数到几百层时, containerd 的
+overlayfs 会把**全部祖先层**拼进 `lowerdir`,挂载选项字符串超过内核 `PAGE_SIZE`(4096 字节)上限 ⇒
+buildkit 报:
+
+```
+mount source: "overlay", ... err: invalid argument
+```
+而且失败点是**任意一个 RUN 步**(实测卡在"装 python3.11"那步, 与 Dockerfile 内容无关):
+实测 `2026-09-24` 镜像 **443 层** → `latest` **590 层**(590 层的 lowerdir ≈4020 字节, 已贴着上限)。
+
+**处置**:
+- `build-cli-context.sh` 现在有**层数守卫**:基础镜像层数 > `INCREMENTAL_MAX_LAYERS`(默认 300)时
+  直接拒绝增量并提示改全量;
+- **定期做一次全量构建**(基础 ubuntu:22.04 只有几层 ⇒ 层数归零):`sudo ./build-cli-context.sh --build`;
+- 看到的报错若是 `invalid argument` + 层数几百, 就是本问题, 不要往 Dockerfile 里找。
+
 ---
 
 ## 9. 校验与实证(截至 2026-09-30)
