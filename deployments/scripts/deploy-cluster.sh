@@ -129,8 +129,9 @@ $(_component_meta_list stub)
   --enable k1,k2        只把模块开关写入 cluster.conf(持久化, 不部署); 下次 --with-cubestack / 默认部署生效
   --phase env|k8s|addon 仅运行指定阶段(可逗号分隔)
   --only HOST           仅处理指定节点(可多次; 支持 hostname 或 group 名)
-  --profile <版本>      使用该版本套装档案(版本面变量以档案为准, 不写回 cluster.conf)
+  --profile <版本>      指定要部署的 kubespray 版本(版本面变量以该版本档案为准, 不写回 cluster.conf)
                         例: --profile v2.32.0; none = 不用档案(全部按 cluster.conf)
+                        **不指定 = 部署最新版本**(max(仓库树, 有档案的版本目录); 本地临时版本须显式选)
                         见 docs/kubespray-versioning/
   --fresh, --refresh    默认流程 + **先清断点状态**(REPEAT:0 的模块强制重跑; 见"三种使用方式"②)
   --list                仅打印集群规划(只读)

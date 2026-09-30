@@ -253,5 +253,41 @@ for _pat in 'deployments/offline-files/kubespray/\*/' 'deployments/kubespray/ver
     fi
 done
 
+echo "== ⑪ 默认版本 = 最新(用户口径); 本地临时版本不进默认; 目录副本回退 =="
+# 带夹具根的探针(OFFLINE_FILES_ROOT 指向夹具, 用于"版本目录自带档案副本"的回退路径)
+_probe_root() { # _probe_root <offline_root> <版本|-> <conf 行...>
+    local root="$1" ver="$2"; shift 2
+    local c; c="$(mktemp)"; _conf "$@" > "${c}"
+    ( set +u
+      export CLUSTER_CONF="${c}" OFFLINE_FILES_ROOT="${root}"
+      export KUBESPRAY_VERSION="" KUBESPRAY_PROFILE="" OFFLINE_FILES_DIR="" LOCAL_REPO_DIR="" KUBESPRAY_BASE_DIR=""
+      [ "${ver}" != "-" ] && export KUBESPRAY_VERSION="${ver}"
+      source "${REPO_ROOT}/deployments/scripts/lib-common.sh" >/dev/null 2>&1
+      load_config >/dev/null 2>&1
+      printf 'KUBESPRAY_VERSION=%s\nK8S_VERSION=%s\n' "${KUBESPRAY_VERSION}" "${K8S_VERSION:-}" )
+    rm -f "${c}"
+}
+# (1) 默认 = max(仓库树版本, 有入库档案的版本) —— 当前 = TREE_VER
+outd="$(_probe "${NODES_CONF}" 'X=1')"
+chk "默认 = 最新版本(${TREE_VER})" "${TREE_VER}" "$(_val "${outd}" KUBESPRAY_VERSION)"
+# (2)(4) 夹具: 一个只有"版本目录自带档案副本"的版本(v9.9.9), 无入库档案
+_troot="$(mktemp -d)"; mkdir -p "${_troot}/kubespray/v9.9.9"
+printf 'LOCAL_ONLY\n' > "${_troot}/kubespray/v9.9.9/LOCAL_ONLY"
+printf 'KUBESPRAY_VERSION=v9.9.9\nK8S_VERSION=v9.9.9\n' > "${_troot}/kubespray/v9.9.9/VERSION.profile"
+out_lo="$(_probe_root "${_troot}" - "${NODES_CONF}" 'X=1')"
+chk "本地临时版本(无入库档案)不进默认" "${TREE_VER}" "$(_val "${out_lo}" KUBESPRAY_VERSION)"
+# (3) 临时加一个更高的**入库档案** → 默认跟随(用完即删; trap 兜底)
+_fake_prof="${REPO_ROOT}/deployments/config/profiles/v9.9.9.profile"
+trap 'rm -f "${_fake_prof}"' EXIT
+printf 'KUBESPRAY_VERSION=v9.9.9\nK8S_VERSION=v9.9.9\n' > "${_fake_prof}"
+out_hi="$(_probe "${NODES_CONF}" 'X=1')"
+chk "默认跟随最新入库档案(v9.9.9)" "v9.9.9" "$(_val "${out_hi}" KUBESPRAY_VERSION)"
+rm -f "${_fake_prof}"; trap - EXIT
+# (4) 显式选"只有目录副本"的版本 → 不硬失败, 且钉子取自副本
+out_cp="$(_probe_root "${_troot}" v9.9.9 "${NODES_CONF}" 'K8S_VERSION="${K8S_VERSION:-v0.0.0}"')"
+chk "目录副本回退: 不硬失败且版本生效" "v9.9.9" "$(_val "${out_cp}" KUBESPRAY_VERSION)"
+chk "目录副本回退: 钉子来自副本" "v9.9.9" "$(_val "${out_cp}" K8S_VERSION)"
+rm -rf "${_troot}"
+
 if [ "${fail}" = "0" ]; then echo "== 全部通过 =="; else echo "== 有失败项 =="; fi
 exit "${fail}"

@@ -56,6 +56,23 @@ bash deployments/kubespray/cubestack-offline.sh paths
 bash deployments/kubespray/cubestack-version-dir.sh materialize v2.28.0
 ```
 
+### 版本选择与默认(2026-09-30 口径)
+
+**不指定任何版本参数时, 默认部署"最新版本"** —— 原部署模式不变(默认仍是完整全量流程, 参数语义不变;
+实测: 默认与 `--profile v2.32.0` 的模块清单**逐字节一致**)。
+
+选版本的优先级(前两者也算"显式", 会影响"档案缺失是否硬失败"):
+
+| 优先级 | 来源 | 说明 |
+|---|---|---|
+| 1 | `KUBESPRAY_VERSION`(env / cluster.conf)或 `deploy-cluster.sh --profile <版本>` | 显式指定 ⇒ 该版本档案缺失时**硬失败**(不静默换版本) |
+| 2 | 被指向的树(`CUBESTACK_BASE_DIR`/仓库树)的 `galaxy.yml` | 只在未显式指定时生效; "你指哪棵树"比"仓库最新"更接近意图 |
+| 3 | **最新版本** = max(仓库树版本, **有入库档案**的版本目录) | 只认有档案的版本:`没有档案 ⇒ 钉子不会被接管`, 拿它做默认会静默错配 |
+
+> ⚠ **本地临时版本(如 v2.28.0)不在默认里** —— 它按 D4 不入库档案, 必须显式 `--profile v2.28.0` /
+> `KUBESPRAY_VERSION=v2.28.0` 才用。显式选它时, 档案取自**版本目录自带的 `VERSION.profile` 副本**
+> (设计 §3.2 的"自包含副本"; 在库版本两份一致, 由 check-modules ⑱ 逐键断言)。
+
 **档案优先级**:选定档案后, 档案里的版本面变量**接管** `cluster.conf` 的同名值 —— 避免"选了 v2.28
 却仍用 v1.35.8 钉子"这种静默错配。要手工钉某一项 → `KUBESPRAY_PROFILE=none`(全部按 cluster.conf,
 等价改造前的行为)。

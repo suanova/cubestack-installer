@@ -422,6 +422,25 @@ kubespray_tree_version() {
     awk '/^version:/{print "v"$2; exit}' "${galaxy}"
 }
 
+# 默认部署版本 = **最新版本** = max(仓库树版本, **有入库档案**的版本目录)
+#   · 只认"有入库档案"的版本: 档案是版本面变量的接管凭证; 没有档案 ⇒ 钉子仍按 cluster.conf,
+#     拿别的版本的资产配本版本的钉子 = 静默错配(设计 §3.2 要防的正是这个)
+#     ⇒ 本地临时版本(有 LOCAL_ONLY / 无档案)不进默认, 必须显式 --profile / KUBESPRAY_VERSION
+#   · 用户口径(2026-09-30): 不指定 --profile 时默认部署最新版本; 原部署模式(默认全量、参数语义)不变
+kubespray_latest_version() {
+    local prof_dir="${REPO_ROOT}/deployments/config/profiles"
+    {
+        kubespray_tree_version
+        if [ -d "${prof_dir}" ]; then
+            local f
+            for f in "${prof_dir}"/*.profile; do
+                [ -f "${f}" ] || continue
+                sed -nE 's/^[[:space:]]*KUBESPRAY_VERSION=([^[:space:]#]+).*/\1/p' "${f}" | head -1
+            done
+        fi
+    } | sed '/^$/d' | sort -V | tail -1
+}
+
 # ---------------- 统一配置加载 ----------------
 # 环境变量优先: 配置文件内使用 ${VAR:-default},已导出的环境变量不会被覆盖
 load_config() {
@@ -440,26 +459,41 @@ load_config() {
     #     (133 处调用点全是裸 load_config, 顶层退出即停住整个脚本)
     #   隐式默认(版本靠树派生)→ 档案缺失只 warn: 换树/首次升级时不该把每个脚本都卡死
     #   none → 不用档案(全部按 cluster.conf, 等价历史行为)
-    _prof_name="${KUBESPRAY_PROFILE:-}"
+    # 有效版本与档案名:
+    #   ① 先捕获"显式性"(必须在下面填默认值**之前**): 明写了 KUBESPRAY_VERSION 或 KUBESPRAY_PROFILE
+    #      ⇒ 档案缺失要**硬失败**(绝不静默退化成"别的版本的钉子")
+    #   ② 有效版本: 显式 KUBESPRAY_VERSION > **最新版本**(用户口径 2026-09-30: 不指定 --profile 时
+    #      默认部署最新版本; 默认仍是完整全量流程, 原部署模式不变)
+    #   ③ 档案名: 显式 KUBESPRAY_PROFILE > 跟随有效版本; 该版本无档案时, 显式选才报错, 隐式默认只告警
     _prof_explicit=0
-    [ -n "${_prof_name}" ] && _prof_explicit=1
+    [ -n "${KUBESPRAY_PROFILE:-}" ] && _prof_explicit=1
     [ -n "${KUBESPRAY_VERSION:-}" ] && _prof_explicit=1
-    if [ -z "${_prof_name}" ]; then
-        _prof_name="${KUBESPRAY_VERSION:-$(kubespray_tree_version)}"
+    if [ -z "${KUBESPRAY_VERSION:-}" ]; then
+        KUBESPRAY_VERSION="$(kubespray_latest_version)"
+        vlog "未指定版本 → 采用最新版本: ${KUBESPRAY_VERSION}(可用 KUBESPRAY_VERSION/--profile 指定)"
     fi
+    _prof_name="${KUBESPRAY_PROFILE:-${KUBESPRAY_VERSION}}"
     if [ -n "${_prof_name}" ] && [ "${_prof_name}" != "none" ]; then
         _prof_file="${REPO_ROOT}/deployments/config/profiles/${_prof_name}.profile"
+        # 回退: 版本目录**自带的** VERSION.profile(设计 §3.2 的"自包含副本")——
+        #   本地临时版本按 D4 **不入库档案**, 但也必须能显式部署(v2.28 本地验证路径);
+        #   在库版本两份应当一致(check-modules ⑱ 逐键断言), 故回退不引入歧义。
+        _prof_dir_copy="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/kubespray/${_prof_name}/VERSION.profile"
         if [ -f "${_prof_file}" ]; then
             # shellcheck disable=SC1090
             source "${_prof_file}"
             vlog "版本档案生效: ${_prof_file}"
+        elif [ -f "${_prof_dir_copy}" ]; then
+            # shellcheck disable=SC1090
+            source "${_prof_dir_copy}"
+            vlog "版本档案生效(版本目录自带副本): ${_prof_dir_copy}"
         elif [ "${_prof_explicit}" = "1" ]; then
-            err "版本档案不存在: ${_prof_file}(KUBESPRAY_PROFILE=${_prof_name}; 用 KUBESPRAY_PROFILE=none 可禁用档案)"
+            err "版本档案不存在: ${_prof_file}(也没有版本目录副本 ${_prof_dir_copy}; KUBESPRAY_PROFILE=${_prof_name}; 用 KUBESPRAY_PROFILE=none 可禁用档案)"
             exit 1
         else
-            warn "未找到版本档案 ${_prof_file}, 按 cluster.conf 继续(当前树版本 ${_prof_name})"
+            warn "未找到版本档案 ${_prof_file}(也没有版本目录副本), 按 cluster.conf 继续(当前版本 ${_prof_name})"
         fi
-        unset _prof_file
+        unset _prof_file _prof_dir_copy
     fi
     KUBESPRAY_PROFILE="${_prof_name}"
     unset _prof_name _prof_explicit
@@ -501,7 +535,7 @@ load_config() {
     #   ⚠ 显式设置的值一律保留(运维脚本/容器挂载按显式值走), 不回写
     OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
     if [ -z "${KUBESPRAY_VERSION:-}" ]; then
-        KUBESPRAY_VERSION="$(kubespray_tree_version)"
+        KUBESPRAY_VERSION="$(kubespray_latest_version)"
     fi
     OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}}"
     if [ -z "${LOCAL_REPO_DIR:-}" ]; then
