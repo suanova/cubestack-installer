@@ -97,13 +97,11 @@ chk "档案接管 K8S_VERSION(期望 ${_prof_val})" "${_prof_val}" "$(_val "${ou
 outn="$(_probe_prof none "${NODES_CONF}" 'K8S_VERSION="${K8S_VERSION:-v9.9.9}"')"
 chk "none 时用 cluster.conf 值" "v9.9.9" "$(_val "${outn}" K8S_VERSION)"
 # ⑥c 选了不存在的档案 → rc!=0(不得静默继续)
-set +e
 ( set +u; c="$(mktemp)"; _conf "${NODES_CONF}" > "${c}"
   export CLUSTER_CONF="${c}" KUBESPRAY_PROFILE=v9.9.9
   source "${REPO_ROOT}/deployments/scripts/lib-common.sh" >/dev/null 2>&1
   load_config ) >/dev/null 2>&1
 rc=$?
-set -e
 chk "缺档案 → 非零退出" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
 
 echo "== ⑦ version-dir: list/verify 对 fixture 版本目录的行为 =="
@@ -114,17 +112,77 @@ printf 'KUBESPRAY_VERSION=v9.9.9\n' > "${_vd}/VERSION.profile"
 vout="$(OFFLINE_FILES_ROOT="${_ro}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.sh" list 2>&1)"
 printf '%s\n' "${vout}" | grep -q 'v9.9.9' && chk "list 找到 fixture 版本" 1 1 || chk "list 找到 fixture 版本" 1 0
 printf '%s\n' "${vout}" | grep -q '本地临时' && chk "list 标注本地临时档位" 1 1 || chk "list 标注本地临时档位" 1 0
-set +e
-OFFLINE_FILES_ROOT="${_ro}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.sh" verify v9.9.9 >/dev/null 2>&1
-rc=$?
-set -e
+rc=0
+OFFLINE_FILES_ROOT="${_ro}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.sh" verify v9.9.9 >/dev/null 2>&1 || rc=$?
 chk "verify 对残缺版本目录 → 非零(缺 tree.tar.gz)" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
-set +e
-OFFLINE_FILES_ROOT="${_ro}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.sh" verify >/dev/null 2>&1
-rc=$?
-set -e
+rc=0
+OFFLINE_FILES_ROOT="${_ro}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.sh" verify >/dev/null 2>&1 || rc=$?
 chk "verify 缺参数 → rc=2" 2 "${rc}"
 rm -rf "${_ro}"
+
+echo "== ⑧ version-dir new: 预验证(补丁不在位必须拒收)+ 档案骨架机械推导 =="
+_src="$(mktemp -d)"; mkdir -p "${_src}/kubespray/roles/kubespray_defaults/defaults/main" \
+                          "${_src}/kubespray/roles/kubespray_defaults/vars/main"
+printf 'version: 9.9.9\n' > "${_src}/kubespray/galaxy.yml"
+# 最小树表(形状与真树一致, 值用 9.9.x 合成):
+cat > "${_src}/kubespray/roles/kubespray_defaults/defaults/main/download.yml" <<'YML'
+nodelocaldns_version: "1.25.0"
+metrics_server_version: v0.9.0
+dnsautoscaler_version: v1.10.3
+nginx_image_tag: 1.30.1-alpine
+local_volume_provisioner_version: 2.5.0
+node_feature_discovery_version: 0.19.0
+coredns_supported_versions:
+  '9.9': v9.9.9
+YML
+cat > "${_src}/kubespray/roles/kubespray_defaults/vars/main/checksums.yml" <<'YML'
+# ⚠ 形状必须与真树一致: <表>: → <arch>: → <版本>: <sha>(版本在 arch 之下)
+kubelet_checksums:
+  amd64:
+    9.9.9: sha256:abc
+calicoctl_binary_checksums:
+  amd64:
+    9.9.9: sha256:abc
+etcd_binary_checksums:
+  amd64:
+    9.9.9: sha256:abc
+YML
+cat > "${_src}/kubespray/roles/kubespray_defaults/vars/main/main.yml" <<'YML'
+pod_infra_supported_versions:
+  '9.9': 9.9.9
+etcd_supported_versions:
+  '9.9': "select('version', '9.9.999', version)"
+YML
+printf '#!/bin/bash\n[ "${1:-}" = "--check" ] && exit 0\nexit 0\n' > "${_src}/cubestack-patch-apply.sh"; chmod +x "${_src}/cubestack-patch-apply.sh"
+_ro2="$(mktemp -d)"
+_vd2=(OFFLINE_FILES_ROOT="${_ro2}")
+env "${_vd2[@]}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.sh" \
+    new v9.9.9 --from-root "${_src}" --local --k8s-version v9.9.9 >/dev/null 2>&1
+_new_rc=$?
+chk "new 成功(rc=0)" 0 "${_new_rc}"
+chk "new 产出 tree.tar.gz" 1 "$([ -f "${_ro2}/kubespray/v9.9.9/tree.tar.gz" ] && echo 1 || echo 0)"
+chk "new 产出配置文件 sha256 边车" 1 "$([ -f "${_ro2}/kubespray/v9.9.9/tree.tar.gz.sha256" ] && echo 1 || echo 0)"
+chk "--local 落 LOCAL_ONLY 标记" 1 "$([ -f "${_ro2}/kubespray/v9.9.9/LOCAL_ONLY" ] && echo 1 || echo 0)"
+chk "档案骨架含推导的 CALICO_VERSION" "9.9.9" \
+    "$(awk -F= '/^CALICO_VERSION=/{print $2; exit}' "${_ro2}/kubespray/v9.9.9/VERSION.profile")"
+chk "档案骨架含 PAUSE(pod_infra 内联表)" "9.9.9" \
+    "$(awk -F= '/^PAUSE_VERSION=/{print $2; exit}' "${_ro2}/kubespray/v9.9.9/VERSION.profile")"
+# 反证 a: k8s 线不在表内 → 拒收(⚠ 目录已存在时也会拒 —— 两者都非零, 都算拒收)
+rc=0
+env "${_vd2[@]}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.sh" \
+    new v9.9.9 --from-root "${_src}" --k8s-version v9.9.8 >/dev/null 2>&1 || rc=$?
+chk "表外 k8s 线 → rc!=0" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+# 反证 b: 补丁不在位 → 拒收且不留目录(换个未占用的版本名, 确保走到补丁校验那一步)
+printf '#!/bin/bash\nexit 1\n' > "${_src}/cubestack-patch-apply.sh"; chmod +x "${_src}/cubestack-patch-apply.sh"
+rc=0
+env "${_vd2[@]}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.sh" \
+    new v9.9.8 --from-root "${_src}" --k8s-version v9.9.9 >/dev/null 2>&1 || rc=$?
+chk "补丁不在位 → rc!=0 且不产物" 1 "$([ "${rc}" -ne 0 ] && [ ! -d "${_ro2}/kubespray/v9.9.8" ] && echo 1 || echo 0)"
+# verify 全绿(用完整夹具再验一次)
+rc=0
+env "${_vd2[@]}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.sh" verify v9.9.9 >/dev/null 2>&1 || rc=$?
+chk "verify 对 new 出来的目录 → rc!=0(images/ 空, 如实报缺)" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+rm -rf "${_src}" "${_ro2}"
 
 if [ "${fail}" = "0" ]; then echo "== 全部通过 =="; else echo "== 有失败项 =="; fi
 exit "${fail}"
