@@ -169,9 +169,9 @@ chk "new 成功(rc=0)" 0 "${_new_rc}"
 chk "new 产出 tree.tar.gz" 1 "$([ -f "${_ro2}/kubespray/v9.9.9/tree.tar.gz" ] && echo 1 || echo 0)"
 chk "new 产出配置文件 sha256 边车" 1 "$([ -f "${_ro2}/kubespray/v9.9.9/tree.tar.gz.sha256" ] && echo 1 || echo 0)"
 chk "--local 落 LOCAL_ONLY 标记" 1 "$([ -f "${_ro2}/kubespray/v9.9.9/LOCAL_ONLY" ] && echo 1 || echo 0)"
-chk "档案骨架含推导的 CALICO_VERSION" "9.9.9" \
+chk "档案骨架含推导的 CALICO_VERSION(v 前缀随 cluster.conf.example 继承)" "v9.9.9" \
     "$(awk -F= '/^CALICO_VERSION=/{print $2; exit}' "${_ro2}/kubespray/v9.9.9/VERSION.profile")"
-chk "档案骨架含 PAUSE(pod_infra 内联表)" "9.9.9" \
+chk "档案骨架含 PAUSE(pod_infra 内联表; 该键无 v 前缀)" "9.9.9" \
     "$(awk -F= '/^PAUSE_VERSION=/{print $2; exit}' "${_ro2}/kubespray/v9.9.9/VERSION.profile")"
 # 反证 a: k8s 线不在表内 → 拒收(⚠ 目录已存在时也会拒 —— 两者都非零, 都算拒收)
 rc=0
