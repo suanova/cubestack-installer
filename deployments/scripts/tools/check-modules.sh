@@ -620,56 +620,16 @@ _ksd_conf_value() {   # <file> <VAR>
     printf '%s' "${v}"
 }
 
-# checksums.yml: 某小节下 <arch> 的**首个**版本键(上游 (…|dict2items)[0].key 的语义)
-_ksd_first_key() {   # <section> <arch>
-    awk -v want="$1" -v arch="$2" '
-        /^[a-zA-Z_]+_checksums:/ { sec=$1; sub(/:$/,"",sec); a=0 }
-        sec==want && /^  [a-z0-9_]+:$/ { a=($1 == arch ":"); next }
-        a && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+:$/ { v=$1; sub(/:$/,"",v); print v; exit }
-    ' "${KSD_CK}"
-}
-
-# checksums.yml: etcd_binary_checksums 里文件顺序首个 < <bound> 的键(bound 从 vars/main/main.yml 现读)
-_ksd_etcd() {   # <major>
-    local bound
-    bound="$(sed -n "/^etcd_supported_versions:/,/^[^[:space:]]/p" "${KSD_VM}" \
-             | grep -F "'$1':" \
-             | sed -n "s/.*select('version', '\([^']*\)',.*/\1/p" | head -1)"
-    [ -n "${bound}" ] || return 0
-    awk -v b="${bound}" '
-        function vlt(x, y,   n, m, i, xa, ya) {
-            n=split(x, X, "."); m=split(y, Y, ".")
-            for (i=1; i<=(n>m?n:m); i++) {
-                xa=(i<=n)?X[i]+0:0; ya=(i<=m)?Y[i]+0:0
-                if (xa<ya) return 1; if (xa>ya) return 0
-            }
-            return 0
-        }
-        /^[a-zA-Z_]+_checksums:/ { sec=$1; sub(/:$/,"",sec); a=0 }
-        sec=="etcd_binary_checksums" && /^  [a-z0-9_]+:$/ { a=($1=="amd64:"); next }
-        a && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+:$/ { v=$1; sub(/:$/,"",v); if (vlt(v,b)) { print v; exit } }
-    ' "${KSD_CK}"
-}
-
-# yml 里的内联查表(coredns_supported_versions / pod_infra_supported_versions)取 <major> 行
-_ksd_inline() {   # <file> <table> <major>
-    sed -n "/^$2:/,/^[^[:space:]]/p" "$1" | grep -F "'$3':" | head -1 \
-        | sed -E "s/^[^:]+:[[:space:]]*//; s/[[:space:]]*#.*//" | tr -d "\"'"
-}
-
-# yml 里的标量版本变量(如 nodelocaldns_version: "1.25.0")
-_ksd_scalar() {   # <file> <var>
-    grep -m1 -E "^$2:" "$1" | sed -E "s/^[^:]+:[[:space:]]*//; s/[[:space:]]*#.*//" | tr -d "\"'"
-}
-
-# kubelet_checksums 成员判定(<ver> → 输出 1/0)
-_ksd_kubelet_has() {   # <ver>
-    awk -v want="$1" '
-        /^kubelet_checksums:/ { s=1; next }
-        /^[a-zA-Z_]+_checksums:/ { s=0 }
-        s && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+:$/ { v=$1; sub(/:$/,"",v); if (v==want) { print "1"; exit } }
-    ' "${KSD_CK}"
-}
+# 树内版本表解析(2026-09-30 起下沉到共享库): 口径与 cubestack-version-dir.sh 的档案骨架推导
+# 共用一份, 避免"两处各写一套"必漂移(⑯-C 的教训)。库函数显式收文件路径; 下列薄包装保持
+# 本脚本既有调用点(KSD_CK/KSD_DL/KSD_VM)不变。
+# shellcheck source=../../kubespray/lib-kubespray-tables.sh
+source "${REPO_ROOT}/deployments/kubespray/lib-kubespray-tables.sh"
+_ksd_first_key()    { kb_tables_first_key "${KSD_CK}" "$@"; }
+_ksd_etcd()         { kb_tables_etcd "${KSD_CK}" "${KSD_VM}" "$@"; }
+_ksd_inline()       { kb_tables_inline "$@"; }
+_ksd_scalar()       { kb_tables_scalar "$@"; }
+_ksd_kubelet_has()  { kb_tables_kubelet_has "${KSD_CK}" "$@"; }
 
 KSD_BAD=0
 # ⑯-C 的键映射: <cluster.conf 钉子变量>:<kubespray 变量>。
