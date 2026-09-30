@@ -129,6 +129,9 @@ $(_component_meta_list stub)
   --enable k1,k2        只把模块开关写入 cluster.conf(持久化, 不部署); 下次 --with-cubestack / 默认部署生效
   --phase env|k8s|addon 仅运行指定阶段(可逗号分隔)
   --only HOST           仅处理指定节点(可多次; 支持 hostname 或 group 名)
+  --profile <版本>      使用该版本套装档案(版本面变量以档案为准, 不写回 cluster.conf)
+                        例: --profile v2.32.0; none = 不用档案(全部按 cluster.conf)
+                        见 docs/kubespray-versioning/
   --fresh, --refresh    默认流程 + **先清断点状态**(REPEAT:0 的模块强制重跑; 见"三种使用方式"②)
   --list                仅打印集群规划(只读)
   --list-steps          列出全部模块
@@ -180,11 +183,20 @@ while [ $# -gt 0 ]; do
         --enable)   ENABLE_PERSIST_ARG="${ENABLE_PERSIST_ARG},${2:?--enable 需要模块列表, 逗号分隔}"; shift 2 ;;
         --phase)    PHASE_ARG="${2:?--phase 需要阶段名 env|k8s|addon}"; shift 2 ;;
         --only)     ONLY_HOSTS="${ONLY_HOSTS},${2:?--only 需要节点名}"; shift 2 ;;
+        # --profile = 本次使用该版本套装档案(版本面变量以档案为准; 不写回 cluster.conf)。
+        #   须在 load_config 之前 export —— load_config 读的是环境变量
+        #   (none = 禁用档案, 全部按 cluster.conf)
+        --profile)  PROFILE_ARG="${2:?--profile 需要版本名(如 v2.32.0; none=禁用档案)}"; shift 2 ;;
         --help|-h)  usage ;;
         *)          err "未知参数: $1(用 --help 查看)"; exit 1 ;;
     esac
 done
 ONLY_HOSTS="${ONLY_HOSTS#,}"
+# --profile: 在 load_config 之前 export(load_config 以环境变量优先读 KUBESPRAY_PROFILE)
+if [ -n "${PROFILE_ARG:-}" ]; then
+    export KUBESPRAY_PROFILE="${PROFILE_ARG}"
+    vlog "  --profile ${PROFILE_ARG} → KUBESPRAY_PROFILE(本机 cluster.conf 不变)"
+fi
 # 展开 --only 中的 group 名: NODE_GROUP_<name> 定义在 cluster.conf 中
 if [ -n "${ONLY_HOSTS}" ]; then
     _resolved=""

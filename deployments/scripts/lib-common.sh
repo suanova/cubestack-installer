@@ -434,6 +434,38 @@ load_config() {
         warn "未找到配置文件 ${CLUSTER_CONF},使用内置默认值"
         warn "建议: cp ${REPO_ROOT}/deployments/config/cluster.conf.example ${CLUSTER_CONF}"
     fi
+    # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
+    # (档案 > cluster.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
+    #  会静默变成"v2.28 的资产 + v1.35.8 的钉子")
+    #   显式选择(明写了 KUBESPRAY_PROFILE, 或明写了 KUBESPRAY_VERSION)且档案缺失 → 硬失败:
+    #     绝不静默退化成"别的版本的钉子"。err() 只打印不退出, 故这里显式 exit 1
+    #     (133 处调用点全是裸 load_config, 顶层退出即停住整个脚本)
+    #   隐式默认(版本靠树派生)→ 档案缺失只 warn: 换树/首次升级时不该把每个脚本都卡死
+    #   none → 不用档案(全部按 cluster.conf, 等价历史行为)
+    _prof_name="${KUBESPRAY_PROFILE:-}"
+    _prof_explicit=0
+    [ -n "${_prof_name}" ] && _prof_explicit=1
+    [ -n "${KUBESPRAY_VERSION:-}" ] && _prof_explicit=1
+    if [ -z "${_prof_name}" ]; then
+        _prof_name="${KUBESPRAY_VERSION:-$(kubespray_tree_version)}"
+    fi
+    if [ -n "${_prof_name}" ] && [ "${_prof_name}" != "none" ]; then
+        _prof_file="${REPO_ROOT}/deployments/config/profiles/${_prof_name}.profile"
+        if [ -f "${_prof_file}" ]; then
+            # shellcheck disable=SC1090
+            source "${_prof_file}"
+            vlog "版本档案生效: ${_prof_file}"
+        elif [ "${_prof_explicit}" = "1" ]; then
+            err "版本档案不存在: ${_prof_file}(KUBESPRAY_PROFILE=${_prof_name}; 用 KUBESPRAY_PROFILE=none 可禁用档案)"
+            exit 1
+        else
+            warn "未找到版本档案 ${_prof_file}, 按 cluster.conf 继续(当前树版本 ${_prof_name})"
+        fi
+        unset _prof_file
+    fi
+    KUBESPRAY_PROFILE="${_prof_name}"
+    unset _prof_name _prof_explicit
+
     # 宿主机物理 IP 自动检测(不 hardcode): 仅当未显式设置或仍是占位符时覆盖
     if [ -z "${HOST_PHYS_IP:-}" ] || [ "${HOST_PHYS_IP}" = "CHANGE_ME" ]; then
         HOST_PHYS_IP="$(detect_host_ip)"
