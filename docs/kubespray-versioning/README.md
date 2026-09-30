@@ -156,6 +156,13 @@ operator **不搞批量搬迁**;凡要"按版本选"的组件,按同一套四条
   (源文件 `deployments/scripts/tools/docker/cli-toolchain-from-offline.sh`)在**登录 shell**启动时
   幂等地把 `<挂载>/kubespray/<版本>/` 下的 kubectl/skopeo/helm 挂到 PATH。
   ⇒ 部署流程用 `bash -lc`(既有文档口径);非登录 shell 需显式 `bash -lc` 或 `source /etc/profile`。
+- ⚠ **唯一例外:`mc` 必须打进镜像**。它是**引导工具** —— 容器正是靠它去 MinIO 拉离线文件,
+  那份文件还没下来之前没有任何可挂载的东西能提供 mc(先有鸡还是先有蛋)。取法由
+  `build-cli-context.sh` 决定:**`offline-files/os/mc-*` 离线件(首选)→ 官方新地址联网下载(兜底)
+  → 宿主机 mc(再兜底)→ 报错**。
+  ⚠ **官方下载路径会烂**:老路径 `https://dl.min.io/client/mc/release/linux-amd64/mc` 已 **410 Gone**,
+  新路径带 `/aistor/` 前缀(`https://dl.min.io/aistor/mc/release/linux-<arch>/mc`, 2026-09-30 实测 200)
+  —— 这正是"首选离线件"的理由;升级 mc 的完整步骤见 `offline-files/os/README.md`。
 - 构建上下文 `build-cli-context.sh`:无 `bin/`、排除 `kubespray/versions/`(物化树不进镜像),
   实测 218M → **87M(纯代码)**。全量构建得到纯净的 code-only 镜像;增量构建继承基础镜像内容。
 
