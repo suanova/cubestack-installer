@@ -14,7 +14,7 @@
     -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
     -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
     -v $HOME/.ssh:/root/.ssh \
-    harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+    harbor.isuanova.com/suanova/cubestack-installer-cli:latest
   ```
   进容器后 `cd /opt/cubestack-installer && ./deployments/scripts/deploy-cluster.sh`;完整说明见根 `README.md` §十四「容器化部署(Docker)」。
 

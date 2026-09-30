@@ -434,7 +434,7 @@ else
     echo "       -v ${DST_ROOT}:/opt/cubestack-installer/deployments/offline-files \\"
     echo "       -v \$PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \\"
     echo "       -v \$HOME/.ssh:/root/.ssh \\"
-    echo "       harbor.isuanova.com/cubestack/cubestack-installer-cli:latest"
+    echo "       harbor.isuanova.com/suanova/cubestack-installer-cli:latest"
     echo ""
     echo "  ② 宿主机直跑(非容器, 让部署脚本指向大磁盘离线文件):"
     echo "     export OFFLINE_FILES_DIR=${DST_ROOT}"

@@ -12,7 +12,7 @@
 #   · 新增了系统 package / 工具               → 先重建 base(--base), 再做代码层。
 # =====================================================================
 
-ARG CLI_BASE_TAG=harbor.isuanova.com/cubestack/cubestack-installer-cli-base:latest
+ARG CLI_BASE_TAG=harbor.isuanova.com/suanova/cubestack-installer-cli-base:latest
 FROM ${CLI_BASE_TAG}
 
 # 运行期工具链钩子(登录 shell 把挂载版本目录里的 kubectl/helm/skopeo 补到 PATH)

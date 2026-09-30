@@ -34,7 +34,7 @@
 #   --build / --incremental 都只做**代码层**(FROM base + copy deployments)⇒ 快, 且**层数不累积**。
 #       sudo ./build-cli-context.sh --output /tmp/cli-ctx
 # 构建(手动): 生成后执行
-#       sudo docker build -f Dockerfile-cli -t harbor.isuanova.com/cubestack/cubestack-installer-cli:latest deployments/cli-context/
+#       sudo docker build -f Dockerfile-cli -t harbor.isuanova.com/suanova/cubestack-installer-cli:latest deployments/cli-context/
 # 说明: cli-context/ 为生成目录(gitignore), 每次构建前重新生成即可保证与源码一致。
 # ============================================================
 set -euo pipefail
@@ -43,10 +43,10 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 
 OUT="${REPO_ROOT}/deployments/cli-context"
-IMAGE="harbor.isuanova.com/cubestack/cubestack-installer-cli:latest"
+IMAGE="harbor.isuanova.com/suanova/cubestack-installer-cli:latest"
 BASE_IMAGE="ubuntu:22.04"
 # 两层结构(2026-09-30): base = 系统+工具链层(极少变), 代码层 FROM 它 ⇒ 层数不累积
-CLI_BASE_TAG="harbor.isuanova.com/cubestack/cubestack-installer-cli-base:latest"
+CLI_BASE_TAG="harbor.isuanova.com/suanova/cubestack-installer-cli-base:latest"
 CLI_BASE_DOCKERFILE="${REPO_ROOT}/Dockerfile-cli-base"
 INC_BASE_IMAGE="${CLI_BASE_TAG}"
 OS_TAR="${REPO_ROOT}/deployments/offline-files/os/ubuntu-22.04.tar"
