@@ -11,6 +11,8 @@
 #       ② **不打任何离线文件**(2026-09-30 起): kubectl/helm/skopeo 由容器**运行期**从挂载的
 #       版本目录挂到 PATH(见 deployments/scripts/tools/docker/cli-toolchain-from-offline.sh),
 #       镜像只含 deployments/ 代码 ⇒ 构建上下文与离线件体积彻底解耦。
+#       ⚠ 唯一例外: **mc**(拉离线文件的引导工具, 不能被挂载提供; 上游 URL 已 410 Gone)
+#         —— 从 offline-files/os/mc-* 拷入上下文 bin/mc。
 # 不复制: 离线大文件(images/镜像 tar/节点侧二进制/VM 镜像/OS 镜像)、运行时凭据文件
 #         (cluster.conf / hosts.yml / inventory.ini / artifacts)。
 # 基础镜像: 默认 ubuntu:22.04 完整重建; 本地缺失时自动从
@@ -95,6 +97,44 @@ rsync -a --exclude '.git' "${REPO_ROOT}/skills" "${OUT}/"
 # 镜像只含 deployments/ 代码(用户口径 2026-09-30); 容器内 /etc/profile.d/50-cubestack-tools.sh
 # 在**登录 shell**里把 kubectl/helm/skopeo 从挂载的版本目录挂到 PATH。故此处不再有 bin/ 段落。
 say "跳过 CLI 二进制打包 —— kubectl/helm/skopeo 运行期从挂载的版本目录挂载(bash -lc 生效)"
+# ⚠ 唯一例外: mc(MinIO Client)—— 容器要用它拉离线文件(先有鸡还是先有蛋), 且上游下载 URL
+#   已 410 Gone(2026-09-30 实测)⇒ 从**离线件**拷入构建上下文 bin/mc(缺失时回退宿主机 mc)。
+_mc_src=""
+MC_ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+case "${MC_ARCH}" in amd64|arm64) : ;; *) MC_ARCH="amd64" ;; esac
+for _c in "${REPO_ROOT}/deployments/offline-files/os"/mc-*; do
+    [ -f "${_c}" ] && { _mc_src="${_c}"; break; }
+done
+if [ -z "${_mc_src}" ]; then
+    # 回退 ①: 官方地址联网下载(⚠ 路径会变: 2026-09-30 实测老路径 /client/ 已 410 Gone,
+    #   新路径带 /aistor/ 前缀; 故首选离线件, 这条路只是兜底)
+    _mc_url="https://dl.min.io/aistor/mc/release/linux-${MC_ARCH}/mc"
+    warn "离线件里没有 mc(offline-files/os/mc-*), 尝试联网下载: ${_mc_url}"
+    if wget -q -O "${OUT}/bin/mc" "${_mc_url}" 2>/dev/null && [ -s "${OUT}/bin/mc" ]; then
+        chmod +x "${OUT}/bin/mc"
+        if "${OUT}/bin/mc" --version >/dev/null 2>&1; then
+            _mc_src="${_mc_url}"
+            warn "  已下载并验版本 ✓ —— 建议沉淀成离线件(offline-files/os/mc-<版本>-linux-amd64)后再发布镜像"
+        else
+            rm -f "${OUT}/bin/mc"; _mc_src=""
+        fi
+    fi
+fi
+if [ -z "${_mc_src}" ] && command -v mc >/dev/null 2>&1; then
+    _mc_src="$(command -v mc)"
+    warn "联网下载也失败, 回退用宿主机的 ${_mc_src} —— 建议沉淀成离线件后再发布镜像"
+fi
+if [ -n "${_mc_src}" ] && [ -f "${_mc_src}" ]; then
+    mkdir -p "${OUT}/bin"
+    cp "${_mc_src}" "${OUT}/bin/mc"
+    ok "  mc ← ${_mc_src#${REPO_ROOT}/}"
+elif [ -n "${_mc_src}" ]; then
+    ok "  mc ← ${_mc_src}(联网下载)"
+else
+    err "找不到 mc: 离线件 offline-files/os/mc-* 缺失且宿主机没有 mc —— 全量构建会在 COPY bin/mc 处失败"
+    err "  → 备料: 在任何有 mc 的机器上 cp /usr/bin/mc deployments/offline-files/os/mc-<版本>-linux-amd64"
+    exit 1
+fi
 
 echo ""
 ok "构建上下文就绪: ${OUT}  ($(du -sh "${OUT}" 2>/dev/null | awk '{print $1}'))"

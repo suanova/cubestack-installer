@@ -4,7 +4,9 @@
 # · 用途: 将运行 kubespray 和离线部署所需的全部工具链与源码打入镜像:
 #   · kubespray 源码(deployments/kubespray/kubespray)+ 部署脚本 + 附加组件
 #   · 工具: ansible / helm / skopeo / mc(MinIO Client)/ kubectl / sshpass / virsh ...
-#   · 工具链 binary(helm / kubectl / skopeo / mc)优先走国内镜像源/离线文件拷贝,
+#   · 工具链 binary: **kubectl / helm / skopeo 不打进镜像**(容器运行期从挂载的版本目录挂到
+#     PATH, 见 /etc/profile.d/50-cubestack-tools.sh); **mc 例外必须打进**(它是拉离线文件的
+#     引导工具, 不能等着被挂载提供, 且上游下载 URL 已 410)—— 由构建上下文 bin/mc 拷入。
 #     不打包离线的镜像 tar(20G+), cli 镜像体积可控、无密钥泄漏。
 # ---------------------------------------------------------------------
 # ★ 两种构建方式(同一份源码, 两个 Dockerfile):
@@ -87,18 +89,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends software-proper
 COPY deployments/scripts/tools/docker/cli-toolchain-from-offline.sh /etc/profile.d/50-cubestack-tools.sh
 RUN chmod 0644 /etc/profile.d/50-cubestack-tools.sh
 
-# ---------- mc(MinIO Client, 下载离线文件; 走 MinIO 官方二进制直下) ----------
-# 注: 之前华为云镜像 URL 返回 HTML 页面、官方 apt 仓库 key.gpg 亦不稳定,
-# 改为从 dl.min.io 官方 release 直下二进制(按架构选择)。
-RUN ARCH=$(dpkg --print-architecture) && \
-    case "${ARCH}" in \
-        amd64) MC_ARCH="amd64" ;; \
-        arm64) MC_ARCH="arm64" ;; \
-        *) echo "Unsupported architecture: ${ARCH}" && exit 1 ;; \
-    esac && \
-    wget -q https://dl.min.io/client/mc/release/linux-${MC_ARCH}/mc -O /usr/local/bin/mc && \
-    chmod +x /usr/local/bin/mc && \
-    mc --version
+# ---------- mc(MinIO Client) ----------
+# ⚠ mc 是**唯一必须打进镜像**的工具: 容器正是靠它去 MinIO **拉**离线文件 —— 不能像
+#   kubectl/helm/skopeo 那样"运行期从挂载的版本目录取"(先有鸡还是先有蛋)。
+# ⚠ 官方下载路径**会变**: 老路径 https://dl.min.io/client/mc/release/linux-amd64/mc 已 410 Gone,
+#   新路径 https://dl.min.io/aistor/mc/release/linux-<arch>/mc(2026-09-30 实测 200)。
+#   故本镜像**不依赖构建期联网**: 由下面的 COPY bin/mc 提供(构建工具按
+#   离线件 → 新地址下载 → 宿主机 的顺序取值, 首选离线件)。官方 apt 仓库历史上亦不稳定。
+#   ⇒ 由 build-cli-context.sh 从**离线件** offline-files/os/mc-* 拷入构建上下文 bin/mc
+#     (缺失时回退宿主机 command -v mc); 升级 mc 只需换那个离线件再重建。
+COPY bin/mc /usr/local/bin/mc
+RUN chmod +x /usr/local/bin/mc && mc --version
 
 # ---------- kubectl 备选(如 offline 目录缺失, 走华为云; 默认不启用) ----------
 #RUN curl -fsSL "https://mirrors.huaweicloud.com/k8s/release/v1.32.5/bin/linux/amd64/kubectl" \
