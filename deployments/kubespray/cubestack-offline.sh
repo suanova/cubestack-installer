@@ -8,7 +8,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   旧判据会让它在物化后静默走错目录; 见 docs/kubespray-versioning/design.md §5.3):
 #   CUBESTACK_BASE_DIR  运行根(默认 = 脚本目录; 物化版本时 = deployments/kubespray/versions/<版本>)
 #   CUBESTACK_LAYOUT    布局: repo(默认, 离线件在 <仓库>/deployments/offline-files)/ flat(standalone)
-BASE_DIR="${CUBESTACK_BASE_DIR:-${SCRIPT_DIR}}"
+# 运行根: ① 显式 CUBESTACK_BASE_DIR(模块传入)  ② 选定版本 != 仓库树版本 ⇒ 物化版本根
+#   versions/<版本>/(默认位置见 cubestack-version-dir.sh materialize)  ③ 否则仓库根(现状)
+#   ⚠ 没有这条映射时, KUBESPRAY_VERSION=v2.28.0 仍会指向仓库树(v2.32)—— 树与资产错配且不报错。
+if [ -n "${CUBESTACK_BASE_DIR:-}" ]; then
+    BASE_DIR="${CUBESTACK_BASE_DIR}"
+else
+    _repo_tree_ver="$(awk '/^version:/{print "v"$2; exit}' "${SCRIPT_DIR}/kubespray/galaxy.yml" 2>/dev/null || true)"
+    if [ -n "${KUBESPRAY_VERSION:-}" ] && [ -n "${_repo_tree_ver}" ] && [ "${KUBESPRAY_VERSION}" != "${_repo_tree_ver}" ]; then
+        BASE_DIR="${SCRIPT_DIR}/versions/${KUBESPRAY_VERSION}"
+    else
+        BASE_DIR="${SCRIPT_DIR}"
+    fi
+    unset _repo_tree_ver
+fi
 KUBESPRAY_DIR="${CUBESTACK_KUBESPRAY_DIR:-${BASE_DIR}/kubespray}"
 OFFLINE_LAYOUT="${CUBESTACK_LAYOUT:-repo}"
 # 离线件真根: repo 布局从**脚本位置**推(脚本始终在 <仓库>/deployments/kubespray/, 与运行根无关),

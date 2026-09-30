@@ -90,7 +90,7 @@ cmd_materialize() {
     d="$(vd_dir kubespray "${v}")"; dst="${VERSIONS_DIR}/${v}"
     [ -f "${d}/tree.tar.gz" ] || { bad "缺 ${d}/tree.tar.gz(无法物化)"; return 1; }
     want="$(sha256sum "${d}/tree.tar.gz" | awk '{print $1}')"
-    if [ -d "${dst}/kubespray" ] && [ -f "${dst}/.tree.sha256" ] && [ "$(cat "${dst}/.tree.sha256")" = "${want}" ]; then
+    if [ -f "${dst}/kubespray/cluster.yml" ] && [ -f "${dst}/.tree.sha256" ] && [ "$(cat "${dst}/.tree.sha256")" = "${want}" ]; then
         ok "已物化且指纹一致(跳过): ${dst}"
         return 0
     fi
@@ -99,6 +99,43 @@ cmd_materialize() {
     tar -xzf "${d}/tree.tar.gz" -C "${dst}" || { bad "解包失败"; return 1; }
     printf '%s\n' "${want}" > "${dst}/.tree.sha256"
     ok "已物化: ${dst}/kubespray(版本 ${v}; .venv 由首次运行时按需重建)"
+}
+
+# 打包树: 以 **kubespray/ 为顶层目录**(与物化目标 versions/<版本>/kubespray 同形;
+#   ⚠ 曾用 `-C 树 .`(内容平铺)⇒ 解出来没有 kubespray/ 层, materialize 幂等判定与
+#   模块的 BASE_DIR/kubespray 推导全对不上 —— 两个版本的 tar 必须同形, 故统一到本函数)
+_pack_tree() {   # <部署根(含 kubespray/)> <版本目录>
+    local from_root="$1" d="$2"
+    [ -d "${from_root}/kubespray" ] || { bad "缺 ${from_root}/kubespray"; return 1; }
+    say "打包树 → ${d}/tree.tar.gz(顶层 kubespray/; 排除 .venv 与 inventory/local)"
+    tar -czf "${d}/tree.tar.gz" -C "${from_root}" \
+        --exclude='kubespray/.venv' --exclude='kubespray/inventory/local' kubespray \
+        || { bad "打包失败"; return 1; }
+    ( cd "${d}" && sha256sum tree.tar.gz > tree.tar.gz.sha256 )
+    ok "树已打包(顶层 kubespray/)"
+}
+
+# ── repack: 为已存在的版本目录**重打**树 tar(打包格式变更 / 树内容更新时用) ──
+cmd_repack() {   # repack <版本> --from-root DIR
+    local v="${1:-}"; [ -n "${v}" ] || { bad "用法: $0 repack <版本> --from-root <部署根>"; return 2; }
+    shift || true
+    local from_root=""
+    while [ $# -gt 0 ]; do case "$1" in
+        --from-root) from_root="${2:?}"; shift 2 ;;
+        *) bad "未知参数: $1"; return 2 ;;
+    esac; done
+    [ -n "${from_root}" ] || { bad "缺 --from-root"; return 2; }
+    local d; d="$(vd_dir kubespray "${v}")"
+    [ -d "${d}" ] || { bad "版本目录不存在: ${d}"; return 1; }
+    local gal_ver; gal_ver="$(awk '/^version:/{print $2; exit}' "${from_root}/kubespray/galaxy.yml")"
+    [ "v${gal_ver}" = "${v}" ] || { bad "galaxy.yml 版本 v${gal_ver} ≠ 目录名 ${v}"; return 1; }
+    if [ -x "${from_root}/cubestack-patch-apply.sh" ]; then
+        bash "${from_root}/cubestack-patch-apply.sh" --check || { bad "补丁不在位 → 拒收"; return 1; }
+    else
+        bad "缺 cubestack-patch-apply.sh → 拒收"; return 1
+    fi
+    _pack_tree "${from_root}" "${d}" || return 1
+    warn "指纹已变 ⇒ 若该版本已物化, 重跑 materialize 会重新解树;若在 MinIO 上需重新上传"
 }
 
 # ── new: 造版本目录(预验证补丁在位 → 打包树 → 机械推导档案骨架) ──
@@ -131,9 +168,10 @@ _derive_profile() {   # <树根> <版本> <k8s_version>
     }
     local calico etcd coredns pause ndc metrics cpa nginx lvp nfd
     calico="$(kb_tables_first_key "${ck}" calicoctl_binary_checksums amd64)"
-    etcd="$(kb_tables_etcd "${ck}" "${vm}" "${major}")"
-    coredns="$(kb_tables_inline "${dl}" coredns_supported_versions "${major}")"
-    pause="$(kb_tables_inline "${vm}" pod_infra_supported_versions "${major}")"
+    # 这三项跨版本形态会漂移(表位置/字面量 vs Jinja/条件表达式)⇒ 走布局容忍层(见库头)
+    etcd="$(kb_tables_version_for "${tree}" etcd_supported_versions "${major}")"
+    coredns="$(kb_tables_version_for "${tree}" coredns_supported_versions "${major}")"
+    pause="$(kb_tables_version_for "${tree}" pod_infra_supported_versions "${major}")"
     ndc="$(kb_tables_scalar "${dl}" nodelocaldns_version)"
     metrics="$(kb_tables_scalar "${dl}" metrics_server_version)"
     cpa="$(kb_tables_scalar "${dl}" dnsautoscaler_version)"
@@ -207,10 +245,7 @@ cmd_new() {   # new <标签> --from-root DIR [--local] [--assets-from DIR] [--k8
         warn "表内可选项: $(kb_tables_kubelet_list "${tree}/roles/kubespray_defaults/vars/main/checksums.yml" | tr '\n' ' ')"; return 2; }
 
     mkdir -p "${d}"
-    say "打包树 → ${d}/tree.tar.gz(排除 .venv 与 inventory/local)"
-    tar -czf "${d}/tree.tar.gz" -C "${tree}" --exclude='./.venv' --exclude='./inventory/local' . \
-        || { bad "打包失败"; return 1; }
-    ( cd "${d}" && sha256sum tree.tar.gz > tree.tar.gz.sha256 )
+    _pack_tree "${from_root}" "${d}" || return 1
 
     say "机械推导档案骨架 → ${d}/VERSION.profile"
     _derive_profile "${tree}" "${v}" "${k8s}" > "${d}/VERSION.profile" || { bad "档案骨架推导失败"; rm -rf "${d}"; return 1; }
@@ -233,8 +268,9 @@ main() {
         verify)      shift; cmd_verify "$@" ;;
         materialize) shift; cmd_materialize "$@" ;;
         new)         shift; cmd_new "$@" ;;
+        repack)      shift; cmd_repack "$@" ;;
         -h|--help|"") sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
-        *)           bad "未知子命令: ${sub}(可用 list / verify / materialize / new)"; exit 2 ;;
+        *)           bad "未知子命令: ${sub}(可用 list / verify / materialize / new / repack)"; exit 2 ;;
     esac
 }
 main "$@"

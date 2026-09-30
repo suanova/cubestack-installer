@@ -79,6 +79,20 @@ chk "版本从树 galaxy.yml 派生(物化树场景)" "v9.9.9" \
     "$(printf '%s\n' "$(_val "${out3}" OFFLINE_FILES_DIR)" | sed 's#.*/kubespray/##')"
 chk "OFFLINE_FILES_ROOT 仍指向仓库 offline-files" \
     "${REPO_ROOT}/deployments/offline-files" "$(_val "${out3}" OFFLINE_FILES_ROOT)"
+# ⑤b 版本 → 物化树映射(不依赖目录存在, CI 可跑; 曾漏: KUBESPRAY_VERSION=v2.28.0 仍指向仓库树 v2.32)
+_offline_paths_ver() { # _offline_paths_ver <版本>
+    ( set +u; export CLUSTER_CONF=/nonexistent KUBESPRAY_VERSION="$1" \
+        OFFLINE_FILES_ROOT="" OFFLINE_FILES_DIR="" LOCAL_REPO_DIR="" CUBESTACK_BASE_DIR=""
+      bash "${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh" paths 2>/dev/null )
+}
+out4="$(_offline_paths_ver v9.9.9)"
+chk "非仓库版本 → 运行根取 versions/<版本>" \
+    "${REPO_ROOT}/deployments/kubespray/versions/v9.9.9" "$(_val "${out4}" BASE_DIR)"
+chk "非仓库版本 → 树在物化版本根下" \
+    "${REPO_ROOT}/deployments/kubespray/versions/v9.9.9/kubespray" "$(_val "${out4}" KUBESPRAY_DIR)"
+out5="$(_offline_paths_ver "${TREE_VER}")"
+chk "仓库树版本 → 仍用仓库根(行为不变)" \
+    "${REPO_ROOT}/deployments/kubespray" "$(_val "${out5}" BASE_DIR)"
 rm -rf "${_fix}"
 
 echo "== ⑥ 档案: 选定档案接管版本面; none = 不用档案; 缺档案 = 响亮失败 =="
