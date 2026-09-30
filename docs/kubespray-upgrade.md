@@ -123,7 +123,7 @@ bash deployments/scripts/tools/check-modules.sh
 | 旧 → 新 tag | `2.28.0` → **`2.32.0`** |
 | 备份 tag | `kubespray-2.28.0-cubestack`(打在仓库内,指向换树前的提交);旧树 git tree 对象 `78c9e24419c7a1cb5ca34e3974ccceeca09673b4` |
 | 执行命令 | `K8S_VERSION=v1.35.8 bash cubestack-kubespray-upgrade.sh v2.32.0 --tree-src /tmp/kubespray-2.32` |
-| 提交 | `d1352de`(换树 + 补丁 6 重放 / 1 退休 / 1 新增)+ `88e8100`(恢复 `patch-playbooks/` 并加进保留集)+ `e45afe0`(补丁 08 补第 5 处 gate)+ `20df940`(树 diff 过滤加 `patch-playbooks`) |
+| 提交 | `15be89b`(换树 + 补丁 6 重放 / 1 退休 / 1 新增)+ `0947ece`(恢复 `patch-playbooks/` 并加进保留集 + 补丁 08 补第 5 处 gate + 树 diff 过滤加 `patch-playbooks`);⚠ 2026-09-30 分支历史按阶段合并(73→13), 原 4 个 SHA(`d1352de`/`88e8100`/`e45afe0`/`20df940`)折入这两个提交 |
 | 结果 | `EXIT=1`,`[7/8]` 停在 CONFLICT **1 处**(补丁 03)→ 人工处置(退休)后 `--check` **rc=0** |
 | 树 diff | `diff -rq --no-dereference --exclude=.git kubespray /tmp/kubespray-2.32` = **16 行,全部有意**:7 个补丁目标文件 `differ` + 6 个被剔除的顶层点文件 + `inventory/local/group_vars`(我们的真实目录 vs 上游符号链接)+ `patch-playbooks/`(我们自持,上游不带)+ `.venv/`(ansible 运行环境);无 `inventory/sample/**` 差异(= 已随新树刷新);无 `*.orig`/`*.rej` 残留 |
 
@@ -249,7 +249,7 @@ bash deployments/scripts/tools/check-modules.sh
    (01–07,**含 03、无 08**)",所以回退要连补丁层一起:
 
    ```bash
-   git checkout kubespray-2.28.0-cubestack -- deployments/kubespray   # 树 + cubestack-patches/ 一起回到换树前(f0342b7)
+   git checkout kubespray-2.28.0-cubestack -- deployments/kubespray   # 树 + cubestack-patches/ 一起回到换树前(tag 现指 1f7d231; 旧 f0342b7 见 2026-09-30 历史合并说明, 内容逐字节相同)
    ```
    只回退 `deployments/kubespray/kubespray`(树)而留着**现行**补丁层会**对不上**:现行层少了 v2.28 树需要的 03,又多了按 v2.32 基线写的 08
    (对旧树的 dry-run 会 `Hunk #5 FAILED`)。回退后还有两步**不在 checkout 范围内**,要手工做:
@@ -260,7 +260,7 @@ bash deployments/scripts/tools/check-modules.sh
    ② 自检 `cubestack-patch-apply.sh --check`(rc=0)与 `check-modules.sh`(⑮ 绿)。
    演练/无 git 环境没有 tag 可依,只能靠 §2 记录的**旧树内容指纹** + 源树副本(补丁层同理)。
 2. **补丁层整层不应用** —— 换树后跳过 `--apply`(或在 `--apply` 前把 `cubestack-patches/*.patch` 移走)。
-   代价:树仍是**能跑的上游 v2.32**,但**缺我们的修复**(metallb 竞态 / registry 顺序 / 离线备料建目录 / SAN 与 join 守卫 …… 共 7 处)→ 裸金属新集群首装成功率下降。
+   代价:树仍是**能跑的上游 v2.32**,但**缺我们的修复**(metallb 竞态 / registry 顺序 / 离线备料建目录 / SAN 与 join 守卫 …… 共 10 处, 以 `cubestack-patches/README.md` 清单为准)→ 裸金属新集群首装成功率下降。
    ⚠ 此状态下 `cubestack-patch-apply.sh --check` 必然报 `MISSING`(rc=1), `check-modules.sh` ⑮ 会红 —— **这是预期信号,不是故障**;要恢复只需把 `.patch` 放回并 `--apply`。
 3. ⚠ **k8s 版本变量不能单独回退到 1.32**。v2.32 的 `kubelet_checksums` 表范围是 **1.34.0–1.36.4**,表里**没有 1.32.x**:
    把 `cluster.conf` / `.example` 的 `K8S_VERSION` 单独改回 `v1.32.5` 会让升级入口停在 [4/8] 版本门(rc=2), 后续部署也会因"表里无此版本"而出问题。

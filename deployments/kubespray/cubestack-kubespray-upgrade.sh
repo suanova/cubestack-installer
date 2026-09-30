@@ -409,7 +409,7 @@ cat <<EOF
   3) 离线缺口(SOP 8): images.manifest 新镜像 / offline-files 备料(k8s_deploy 前必须补齐)
   4) 回归(SOP 8): 静态检查 + 补丁 --check + 树 diff + 实机
      - 树 diff:  diff -rq --no-dereference ${TREE} ${TREE_SRC}     # --no-dereference: 树内相对符号链接(指向 inventory/)不跟着展开
-       (预期只剩: 7 个补丁目标文件 + 保留的 inventory/local + 剔除的顶层点文件)
+       (预期只剩: ${N_PATCH} 个补丁的目标文件(清单见 cubestack-patches/README.md)+ 保留的 inventory/local + 剔除的顶层点文件)
   5) 记录(SOP 9): 在 docs/kubespray-upgrade.md 追加一条(旧→新 tag、k8s/插件版本变化、
      冲突与处置、踩的坑、新增的可上游化补丁)
   6) 换树结果**落盘**(仅当树在 git 仓库内): git add -A <部署根> && git commit —— 否则下一次
