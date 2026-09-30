@@ -75,5 +75,36 @@ chk "OFFLINE_FILES_ROOT 仍指向仓库 offline-files" \
     "${REPO_ROOT}/deployments/offline-files" "$(_val "${out3}" OFFLINE_FILES_ROOT)"
 rm -rf "${_fix}"
 
+echo "== ⑥ 档案: 选定档案接管版本面; none = 不用档案; 缺档案 = 响亮失败 =="
+_probe_prof() { # _probe_prof <档案名> <额外 conf 行...>
+    local p="$1"; shift
+    local c; c="$(mktemp)"
+    _conf "$@" > "${c}"
+    ( set +u
+      export CLUSTER_CONF="${c}" KUBESPRAY_PROFILE="${p}"
+      export OFFLINE_FILES_ROOT="" KUBESPRAY_VERSION="" OFFLINE_FILES_DIR="" LOCAL_REPO_DIR=""
+      source "${REPO_ROOT}/deployments/scripts/lib-common.sh" >/dev/null 2>&1
+      load_config >/dev/null 2>&1
+      printf 'KUBESPRAY_PROFILE=%s\nK8S_VERSION=%s\n' "${KUBESPRAY_PROFILE}" "${K8S_VERSION:-}" )
+    rm -f "${c}"
+}
+# ⑥a 选了在库档案 → 其 K8S_VERSION 生效(cluster.conf 里同名变量的默认不得覆盖)
+_prof_val="$(awk -F= '/^K8S_VERSION=/{sub(/^[^=]*=/,""); print; exit}' \
+    "${REPO_ROOT}/deployments/config/profiles/v2.32.0.profile")"
+outp="$(_probe_prof v2.32.0 "${NODES_CONF}" 'K8S_VERSION="${K8S_VERSION:-v9.9.9}"')"
+chk "档案接管 K8S_VERSION(期望 ${_prof_val})" "${_prof_val}" "$(_val "${outp}" K8S_VERSION)"
+# ⑥b KUBESPRAY_PROFILE=none → 完全按 cluster.conf
+outn="$(_probe_prof none "${NODES_CONF}" 'K8S_VERSION="${K8S_VERSION:-v9.9.9}"')"
+chk "none 时用 cluster.conf 值" "v9.9.9" "$(_val "${outn}" K8S_VERSION)"
+# ⑥c 选了不存在的档案 → rc!=0(不得静默继续)
+set +e
+( set +u; c="$(mktemp)"; _conf "${NODES_CONF}" > "${c}"
+  export CLUSTER_CONF="${c}" KUBESPRAY_PROFILE=v9.9.9
+  source "${REPO_ROOT}/deployments/scripts/lib-common.sh" >/dev/null 2>&1
+  load_config ) >/dev/null 2>&1
+rc=$?
+set -e
+chk "缺档案 → 非零退出" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+
 if [ "${fail}" = "0" ]; then echo "== 全部通过 =="; else echo "== 有失败项 =="; fi
 exit "${fail}"
