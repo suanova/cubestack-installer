@@ -486,13 +486,21 @@ HARBOR_STORAGE_CLASS="${HARBOR_STORAGE_CLASS:-local-path}"  # 预留: 数据持�
 # 注意: ${CLUSTER_NAME} 由 lib-common.sh 自动解析(环境变量或默认 cubestack-cluster)
 KUBESPRAY_INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}"
 KUBESPRAY_DIR="${KUBESPRAY_DIR:-${REPO_ROOT}/deployments/kubespray/kubespray}"
-# 离线资源缓存根目录(二进制/镜像); 各组件离线子目录: kubespray / metax-gpu / lws 等
-# ⚠ 默认留空: 部署脚本经 lib-common 自动解析为 offline-files/kubespray(内层),
-#   fetch-offline-from-minio.sh 默认下载到 offline-files 总根(offline-files/{kubespray,lws,metax-gpu,os});
-#   两处解耦, 不需要在此显式设置 OFFLINE_FILES_DIR(显式设置会同时改变 fetch 目标)。
+# 离线文件**真根**(所有组件目录的共同父目录; 组件内再按版本分层, 见 KUBESPRAY_VERSION)
+#   offline-files/
+#   ├── kubespray/<版本>/   ← KUBESPRAY_VERSION 决定的 k8s 资产目录(二进制 + images/ + packages/)
+#   ├── metax-gpu/  ceph/  lws/ …(组件级规范, 按需迁移, 见 docs/kubespray-versioning/)
+#   ⚠ 留空即由 lib-common 派生; 显式设置会同时改变各消费者路径(运维/容器挂载用)
+OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-}"
+# kubespray 版本(单一开关, 目录名 = 上游 tag 全名, 如 v2.32.0)
+#   默认留空 = 仓库当前树版本(deployments/kubespray/kubespray/galaxy.yml 机械派生)
+KUBESPRAY_VERSION="${KUBESPRAY_VERSION:-}"
+# 版本套装档案(该版本的成套版本钉子; none = 不用档案, 全部按本文件)
+KUBESPRAY_PROFILE="${KUBESPRAY_PROFILE:-}"
+# k8s 资产目录 / 交给 kubespray 的 local_release_dir(留空 = lib-common 按上面两项派生;
+#   ⚠ 必须恰好是"裸二进制 + images/ + packages/"的那一层)
 OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-}"
-# kubespray 离线仓库(镜像 tar + 二进制; 已从 repository/<cluster> 迁到 offline-files/kubespray)
-LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files}/kubespray}"
+LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-}"
 # (UPDATE_ETC_HOSTS 开关已移至顶部【组件启停开关】)
 
 # ---------------- 2.1b 离线文件下载(MinIO, 可选) ----------------

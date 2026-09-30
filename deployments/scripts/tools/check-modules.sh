@@ -552,7 +552,8 @@ fi
 #   在 sync 新增"10 个版本钉子"要求后静默变红(用例 ⑤ 断言退出码)而无人发现。这四类回归
 #   (补丁层 / 收编映射 / 入口模式 / 本地代理)现在每轮 check-modules 都会跑到。
 for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
-           test-api-entry-mode.sh test-api-local-lb.sh test-sync-api-entry.sh; do
+           test-api-entry-mode.sh test-api-local-lb.sh test-sync-api-entry.sh \
+           test-kubespray-version-select.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
     if [ ! -f "${_tp}" ]; then
         ck_fail "⑮ 离线套件缺失: ${_tp#${REPO_ROOT}/}(⑮ 的回归证据没了)"

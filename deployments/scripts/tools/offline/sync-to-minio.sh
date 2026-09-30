@@ -33,7 +33,8 @@ OFFLINE_FILES_DIR_RAW="${OFFLINE_FILES_DIR:-}"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 # 判定"用户显式 OFFLINE_FILES_DIR"(同上 fetch-offline-from-minio.sh):
-#   lib-common 会把未设置时的默认导出为 .../offline-files/kubespray(部署脚本专用内层语义),
+#   lib-common 会把未设置时的默认导出为 .../offline-files/kubespray/<版本>(部署脚本专用内层语义;
+#   2026-09-30 起带版本层, 见 docs/kubespray-versioning/design.md),
 #   sync 的源是 offline-files 总根(kubespray/lws/metax-gpu/os/virtual-machine 全部子目录),
 #   不能误用该内层默认 → 仅在用户显式设置时采用, 否则回退 offline-files 总根。
 OFFLINE_FILES_DIR_EXPLICIT=""
@@ -41,7 +42,9 @@ if [ -n "${OFFLINE_FILES_DIR_RAW:-}" ]; then
     OFFLINE_FILES_DIR_EXPLICIT="${OFFLINE_FILES_DIR_RAW}"
 elif [ -n "${OFFLINE_FILES_DIR:-}" ]; then
     case "${OFFLINE_FILES_DIR}" in
-        */offline-files/kubespray) OFFLINE_FILES_DIR_EXPLICIT="" ;;  # lib-common 默认内层, 忽略
+        # ⚠ 两种形态都要认: 无版本层的旧默认 + 带版本层的现默认(漏了后者会让 LOCAL_SRC 退化成
+        #   单个版本目录 → 只同步 kubespray 一个组件, 其余组件静默不同步)
+        */offline-files/kubespray|*/offline-files/kubespray/*) OFFLINE_FILES_DIR_EXPLICIT="" ;;
         *) OFFLINE_FILES_DIR_EXPLICIT="${OFFLINE_FILES_DIR}" ;;      # 用户显式根
     esac
 fi
