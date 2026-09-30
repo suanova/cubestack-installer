@@ -884,9 +884,9 @@ if [ -d "${VD_PROFILES_DIR}" ]; then
                 fi
             }
             _vd_cmp CALICO_VERSION        "$(kb_tables_first_key "${_pck}" calicoctl_binary_checksums amd64)" "calicoctl_binary_checksums 首键"
-            _vd_cmp ETCD_VERSION          "$(kb_tables_etcd "${_pck}" "${_pvm}" "${_pmajor}")" "etcd_supported_versions['${_pmajor}']"
-            _vd_cmp COREDNS_VERSION       "$(kb_tables_inline "${_pdl}" coredns_supported_versions "${_pmajor}")" "coredns_supported_versions['${_pmajor}']"
-            _vd_cmp PAUSE_VERSION         "$(kb_tables_inline "${_pvm}" pod_infra_supported_versions "${_pmajor}")" "pod_infra_supported_versions['${_pmajor}']"
+            _vd_cmp ETCD_VERSION          "$(kb_tables_version_for "${_ptree}" etcd_supported_versions "${_pmajor}")" "etcd_supported_versions['${_pmajor}'](跨版本形态由库容忍)"
+            _vd_cmp COREDNS_VERSION       "$(kb_tables_version_for "${_ptree}" coredns_supported_versions "${_pmajor}")" "coredns_supported_versions['${_pmajor}']"
+            _vd_cmp PAUSE_VERSION         "$(kb_tables_version_for "${_ptree}" pod_infra_supported_versions "${_pmajor}")" "pod_infra_supported_versions['${_pmajor}']"
             _vd_cmp DNS_NODE_CACHE_VERSION "$(kb_tables_scalar "${_pdl}" nodelocaldns_version)" "nodelocaldns_version"
             _vd_cmp METRICS_SERVER_VERSION "$(kb_tables_scalar "${_pdl}" metrics_server_version)" "metrics_server_version"
             _vd_cmp CPA_VERSION           "$(kb_tables_scalar "${_pdl}" dnsautoscaler_version)" "dnsautoscaler_version"
