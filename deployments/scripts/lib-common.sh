@@ -416,6 +416,14 @@ ensure_registry_nginx() {
     return 1
 }
 
+# 仓库当前 kubespray 树版本(带 v 前缀; 取不到输出空) —— 供 KUBESPRAY_VERSION 默认值机械派生
+# (不写死版本号: 换树后自动跟随; 见 docs/kubespray-versioning/design.md §4.1)
+kubespray_tree_version() {
+    local galaxy="${REPO_ROOT}/deployments/kubespray/kubespray/galaxy.yml"
+    [ -f "${galaxy}" ] || return 0
+    awk '/^version:/{print "v"$2; exit}' "${galaxy}"
+}
+
 # ---------------- 统一配置加载 ----------------
 # 环境变量优先: 配置文件内使用 ${VAR:-default},已导出的环境变量不会被覆盖
 load_config() {
@@ -452,16 +460,31 @@ load_config() {
     API_IP="${API_IP:-${APISERVER_ADDRESS:-}}"
     API_DOMAIN="${API_DOMAIN:-${APISERVER_DOMAIN:-k8s-api.cubestack.io}}"
     export API_IP API_DOMAIN
-    # 全局派生变量(续): 离线文件路径
-    #   OFFLINE_FILES_DIR  离线文件根目录(二进制/镜像/离线包), 全局唯一可切换点
-    #                      默认 ${REPO_ROOT}/deployments/offline-files/kubespray
-    #   LOCAL_REPO_DIR     当前集群离线资源目录 = ${OFFLINE_FILES_DIR}/${CLUSTER_NAME}
-    #                      (若显式设置了 LOCAL_REPO_DIR, 保留不覆盖; 否则统一收敛到 OFFLINE_FILES_DIR)
-    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}"
-    if [ -z "${LOCAL_REPO_DIR:-}" ]; then
-        LOCAL_REPO_DIR="${OFFLINE_FILES_DIR}/${CLUSTER_NAME:-cubestack-cluster}"
+    # 全局派生变量(续): 离线文件路径 —— 2026-09-30 起按**版本目录**组织
+    # (设计: docs/kubespray-versioning/design.md §4; 目录名 = 上游 tag 全名, 决策 D8)
+    #   OFFLINE_FILES_ROOT  offline-files **真根**(各组件目录的共同父目录)
+    #   KUBESPRAY_VERSION   kubespray 版本开关(单一入口); 默认 = 仓库当前树版本(galaxy.yml 派生)
+    #   OFFLINE_FILES_DIR   k8s **资产目录** = <root>/kubespray/<版本>(裸二进制 + images/ + packages/)
+    #   LOCAL_REPO_DIR      = OFFLINE_FILES_DIR —— 交给 kubespray 当 local_release_dir,
+    #                       ⚠ 必须恰好是"裸二进制 + images/ + packages/"的那一层(树内 dest 全按扁平名读)
+    #   KUBESPRAY_BASE_DIR  运行根(交给 cubestack-offline.sh 当 BASE_DIR)
+    #   ⚠ 显式设置的值一律保留(运维脚本/容器挂载按显式值走), 不回写
+    OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
+    if [ -z "${KUBESPRAY_VERSION:-}" ]; then
+        KUBESPRAY_VERSION="$(kubespray_tree_version)"
     fi
-    export OFFLINE_FILES_DIR LOCAL_REPO_DIR
+    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}}"
+    if [ -z "${LOCAL_REPO_DIR:-}" ]; then
+        LOCAL_REPO_DIR="${OFFLINE_FILES_DIR}"
+    fi
+    if [ -z "${KUBESPRAY_BASE_DIR:-}" ]; then
+        if [ "${KUBESPRAY_VERSION}" = "$(kubespray_tree_version)" ]; then
+            KUBESPRAY_BASE_DIR="${REPO_ROOT}/deployments/kubespray"
+        else
+            KUBESPRAY_BASE_DIR="${REPO_ROOT}/deployments/kubespray/versions/${KUBESPRAY_VERSION}"
+        fi
+    fi
+    export OFFLINE_FILES_ROOT KUBESPRAY_VERSION OFFLINE_FILES_DIR LOCAL_REPO_DIR KUBESPRAY_BASE_DIR
     # 全局派生变量(续): REGISTRY_IP 留空时从 METALLB_POOL 自动取池内首地址作为 LoadBalancer VIP
     # (cluster.conf 约定 "留空 = 自动派生", 与 sync-kubespray-config.sh 写入 addons.yml 的规则一致;
     #  centralized 于此, 让 deploy-registry.sh / setup-registry-expose.sh 等所有消费者拿到同一值)

@@ -777,6 +777,11 @@ rm -rf "${_ro3}"
 - [ ] **Step 3: 实现三处改动**
 
 - `sync-to-minio.sh`:
+  - 🔴 **必带回归护栏**:Task 1 改 `OFFLINE_FILES_DIR` 语义时,`:44` 的字面哨兵
+    `*/offline-files/kubespray` 失配(内层默认现在带版本层)⇒ `LOCAL_SRC` 会退化成版本目录、
+    只同步 kubespray 一个组件。已在 Task 1 顺手修成 `*/offline-files/kubespray|*/offline-files/kubespray/*`,
+    **本任务必须加断言把这个哨兵行为固定下来**(`--plan-versions` 的源目录须 = offline-files 总根,
+    且 OFFLINE_FILES_DIR 显式指向别处时仍尊重显式值);
   - `--plan-versions`(只读子命令:扫 `<root>/<组件>/<版本>/LOCAL_ONLY`,打印"将跳过/将上传"清单,不碰 mc);
   - 实际 mirror 前,若有 `LOCAL_ONLY` 版本 → 用 `--exclude` 逐个排除(`mc mirror` 支持
     `--exclude 'kubespray/v9.9.9/*'`)并打印;
