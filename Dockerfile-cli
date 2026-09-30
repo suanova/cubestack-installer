@@ -9,15 +9,14 @@
 #
 # ★ 构建方式(统一入口; 会先自动准备 base: 本地有就用, 没有就拉 Harbor, 再没有就提示 --base):
 #     sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build     # 生成上下文 + 构建代码层
-#     sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build --incremental   # 等价(兼容旧习惯, 见下)
+#     sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build --incremental   # 别名(等价)
 #     sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base      # 仅在系统/工具/依赖变化时重建 base
 # ---------------------------------------------------------------------
 # 镜像内容契约(用户口径): **只含 deployments/ 代码**
 #   · kubespray 源码(deployments/kubespray/kubespray)+ 全部部署脚本 + cubestack-addon + skills
-#   · ansible(继承自 base); mc(继承自 base, 唯一必须内置的工具)
-#   · kubectl / helm / skopeo: **不打进镜像** —— 容器运行期由
-#     /etc/profile.d/50-cubestack-tools.sh(本层 COPY)从挂载的版本目录补到 PATH
-#     ⇒ 容器内请用 `bash -lc`(登录 shell);离线镜像 tar(20G+)不进镜像, 体积可控、无密钥泄漏。
+#   · 工具链(ansible / mc / kubectl / helm / skopeo / yq)与系统包**全部继承自 base**(不打进本层)
+#   · 运行期钩子 /etc/profile.d/50-cubestack-tools.sh 仍会 COPY(挂载目录里有**别的版本**时可补/覆盖)
+#   · 离线镜像 tar(20G+)不进镜像, 体积可控、无密钥泄漏
 # ---------------------------------------------------------------------
 # 运行(推荐, 挂载离线文件/配置/SSH 密钥):
 #   docker run --rm -it --network host \
@@ -48,15 +47,8 @@ RUN rm -rf ${REPO_ROOT}/deployments ${REPO_ROOT}/skills 2>/dev/null || true
 COPY deployments ${REPO_ROOT}/deployments
 COPY skills ${REPO_ROOT}/skills
 
-# ---------- 依赖对齐(按**最新** requirements.txt; 依赖没变时是幂等空跑) ----------
-# ⚠ 必须用 python3.11(2026-09-30 实测): 用系统 python3(3.10)会报
-#   `No module named pip.__main__; 'pip' is a package and cannot be directly executed` 而中断构建;
-#   且运行期 cubestack-offline.sh 的 ensure_venv 明确优先挑 ≥3.11 的解释器(ansible 12 要求),
-#   ansible 装在 3.11 才是"运行时真正会用到的那份"(容器里 /usr/local/bin/ansible)。
-COPY deployments/kubespray/kubespray/requirements.txt /tmp/kubespray-requirements.txt
-RUN python3.11 -m pip install -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    && rm -f /tmp/kubespray-requirements.txt \
-    && ansible --version 2>/dev/null | head -1
+# ⚠ 本层**只放部署代码**(用户口径 2026-09-30): 系统工具/package/ansible 依赖全在 base 层;
+#   requirements.txt 变了(新增 python 依赖)请**重建 base**: --base。
 
 # 校验关键路径就位
 RUN test -f ${REPO_ROOT}/deployments/scripts/deploy-cluster.sh \

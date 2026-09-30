@@ -65,7 +65,7 @@ K8S_VERSION=v1.35.8 bash deployments/kubespray/cubestack-kubespray-upgrade.sh v2
    · **CLI 镜像**:`python3 -m pip install -r requirements.txt` 直接失败
      (`Ignored … 12.3.0 Requires-Python >=3.11` / `No matching distribution found`);
      修法是镜像里装 `python3.11`(deadsnakes;jammy universe 那个是 3.11.0~rc1 的 RC 版)并让 ansible 走它,
-     见 `Dockerfile-cli` / `Dockerfile-cli-incremental` 的 "Python 3.11(deadsnakes)" 段。
+     见 `Dockerfile-cli-base` 的 "Python 3.11(deadsnakes)" 段(2026-09-30 起 python3.11/ansible 都在 base 层)。
    · **裸机路径**:`ensure_venv` 已改为**优先挑 `python3.12`/`python3.11`**(挑不到才回退 `python3`),
      宿主需先装一个 ≥3.11 的解释器;`.venv_wheels/` 缓存也要用 3.11 重出(cp311 的 cryptography/bcrypt)。
    ⇒ 升级前先跑 `grep -m1 '^ansible==' <新树>/requirements.txt` 并核对它的 `Requires-Python`。

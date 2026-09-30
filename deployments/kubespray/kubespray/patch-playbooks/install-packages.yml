@@ -1,6 +1,10 @@
 ---
 # ============================================================
-# 离线安装 worker 节点系统包(lvm2 等, 供 Ceph/Rook OSD 使用)
+# 离线安装**全部 k8s 节点**(worker + control-plane)的系统包(lvm2/curl/rsync/iptables 等)
+# ⚠ 2026-09-30 根因修复: 原为 `hosts: kube_node`(**只 worker**)⇒ **master 从未拿到这批离线包**,
+#   而 master 上 base 镜像没自带 curl ⇒ 依赖 curl 的检查/脚本全挂(实测: master01 缺 curl,
+#   而 lvm2/rsync/iptables/ca-certificates 都在 —— 别处装过, curl 只在这条 play 里发)。
+#   注意 master 在本项目里**也可能是 Ceph 存储节点**(CEPH_NODE_ROLE 默认 master)⇒ lvm 家族同样需要。
 # 将 offline-files 中的 .deb 包复制到目标节点并安装
 # 包来源: offline-files/kubespray/<集群>/*.deb(仓库根目录) + packages/ 子目录,
 #         集群名取自当前 inventory(inventory_dir | basename), 无硬编码
@@ -13,8 +17,8 @@
 # 用法(手动):
 #   ansible-playbook -i <inventory> install-packages.yml
 # ============================================================
-- name: Install required packages on worker nodes
-  hosts: kube_node
+- name: Install required packages on all cluster nodes (workers + control plane)
+  hosts: kube_node:kube_control_plane
   gather_facts: false
   vars:
     # 必需包(唯一来源): 末尾断言按此校验; 上面的"资产预检"也按此检查 .deb 是否随离线件提供。
