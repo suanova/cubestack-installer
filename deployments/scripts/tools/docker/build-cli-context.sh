@@ -50,7 +50,9 @@ OUT="${REPO_ROOT}/deployments/cli-context"
 IMAGE="harbor.isuanova.com/suanova/cubestack-installer-cli:latest"
 BASE_IMAGE="ubuntu:22.04"
 # 两层结构(2026-09-30): base = 系统+工具链层(极少变), 代码层 FROM 它 ⇒ 层数不累积
-CLI_BASE_TAG="harbor.isuanova.com/suanova/cubestack-installer-cli-base:latest"
+# ⚠ 命名空间**有意不同**(用户口径 2026-09-30): base 在 cubestack 项目, 代码层镜像在 suanova 项目
+#   —— 两个项目各自的推送权限不同, 不要"顺手统一"改成一个。
+CLI_BASE_TAG="harbor.isuanova.com/cubestack/cubestack-installer-cli-base:latest"
 CLI_BASE_DOCKERFILE="${REPO_ROOT}/Dockerfile-cli-base"
 INC_BASE_IMAGE="${CLI_BASE_TAG}"
 OS_TAR="${REPO_ROOT}/deployments/offline-files/os/ubuntu-22.04.tar"

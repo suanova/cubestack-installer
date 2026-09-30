@@ -34,7 +34,7 @@
 # =====================================================================
 
 # base 镜像(系统+工具链层): 默认走 Harbor; 本地/离线场景由 build-cli-context.sh 传 --build-arg 覆盖
-ARG CLI_BASE_TAG=harbor.isuanova.com/suanova/cubestack-installer-cli-base:latest
+ARG CLI_BASE_TAG=harbor.isuanova.com/cubestack/cubestack-installer-cli-base:latest
 FROM ${CLI_BASE_TAG}
 
 # ---------- 运行期工具链钩子(登录 shell 把挂载版本目录里的 kubectl/helm/skopeo 补到 PATH) ----------
