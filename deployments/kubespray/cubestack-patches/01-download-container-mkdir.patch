@@ -1,0 +1,25 @@
+# patch: 01-download-container-mkdir.patch
+# 目标: roles/download/tasks/download_container.yml
+# 加入: 2026-09-28(随 v2.28.0 → v2.32.0 迁移)
+# 原因: download_force_cache(离线备料)上传镜像前先建目标目录(role 在本地缓存镜像 + synchronize 上传到节点);丢了则目标父目录不存在时 synchronize 上传失败, 离线备料中断。
+# 上游吸收判据: 上游 roles/download/tasks/download_container.yml 在上传任务前自建目标目录, 或上传任务本身容忍目标目录缺失。
+# 上游化: 建议提 PR(通用离线备料健壮性缺陷, 非本环境特有; §3.5 首批为 metallb, 本条为其后候选)。
+# ------------------------------------------------------------
+--- a/roles/download/tasks/download_container.yml
++++ b/roles/download/tasks/download_container.yml
+@@ -93,6 +93,15 @@
+         - not download_localhost
+         - download_delegate == inventory_hostname
+ 
++    - name: Download_container | Create dest directory for image upload
++      file:
++        path: "{{ image_path_final | dirname }}"
++        state: directory
++        recurse: true
++      when:
++        - pull_required
++        - download_force_cache
++
+     - name: Download_container | Upload image to node if it is cached
+       ansible.posix.synchronize:
+         src: "{{ image_path_cached }}"

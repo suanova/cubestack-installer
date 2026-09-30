@@ -1,0 +1,37 @@
+# patch: 05-apps-meta-registry-order.patch
+# 目标: roles/kubernetes-apps/meta/main.yml
+# 加入: 2026-09-28(随 v2.28.0 → v2.32.0 迁移)
+# 原因: kubernetes-apps/registry role 的执行顺序调整(由 metallb 之前挪到 metallb 之后)—— registry 的 LB VIP 依赖 metallb 先就位(registry_service_type=LoadBalancer 时);丢了则 registry 早于 metallb 安装, 其 Service 的 LoadBalancer VIP 无分配者、一直 pending。
+# 上游吸收判据: 上游 roles/kubernetes-apps/meta/main.yml 中 kubernetes-apps/registry 已排在 kubernetes-apps/metallb 之后。
+# 上游化: 不提(本环境特有: 依赖我们把 registry 以 LoadBalancer 暴露; 上游 registry_service_type 默认 ClusterIP, 无此依赖)。
+# ------------------------------------------------------------
+--- a/roles/kubernetes-apps/meta/main.yml
++++ b/roles/kubernetes-apps/meta/main.yml
+@@ -10,13 +10,6 @@
+     tags:
+       - helm
+ 
+-  - role: kubernetes-apps/registry
+-    when:
+-      - registry_enabled
+-      - inventory_hostname == groups['kube_control_plane'][0]
+-    tags:
+-      - registry
+-
+   - role: kubernetes-apps/metrics_server
+     when:
+       - metrics_server_enabled
+@@ -111,6 +104,13 @@
+     tags:
+       - metallb
+ 
++  - role: kubernetes-apps/registry
++    when:
++      - registry_enabled
++      - inventory_hostname == groups['kube_control_plane'][0]
++    tags:
++      - registry
++
+   - role: kubernetes-apps/argocd
+     when:
+       - argocd_enabled

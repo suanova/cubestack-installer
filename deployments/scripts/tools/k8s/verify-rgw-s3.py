@@ -7,6 +7,8 @@ verify-rgw-s3.py — RGW/S3 真实数据读写验证(SigV4, 纯标准库, 无 aw
     python3 /tmp/verify-rgw-s3.py
 流程: PUT bucket → PUT object → GET object(校验内容) → DELETE object/bucket
 输出: 成功打印 S3-PUT-GET-OK; 失败抛异常/非 2xx 退出码 1
+环境变量: AK/SK(不给则自动建临时用户, 需能连到 rook-ceph-tools) / ENDPOINT(可省 http://) /
+          REGION / RGW_UID / RGW_ZONE(默认 s3-store) / ROOK_NAMESPACE
 """
 import os
 import sys
@@ -20,10 +22,37 @@ import urllib.error
 AK = os.environ.get("AK", "")
 SK = os.environ.get("SK", "")
 UID = os.environ.get("RGW_UID", "verify-user")
+# RGW 的 zone 名: Rook 按 CephObjectStore 名字建 realm/zonegroup/zone(本平台默认 s3-store);
+# ⚠ 集群里通常**同时存在一个 `default` zone**, 而 RGW 服务的是 `s3-store` —— 建临时用户时
+# 不指定 zone 会落到 default, 该 key 对 RGW 不可见 ⇒ PUT 报 `InvalidAccessKeyId`
+# (2026-09-29 实机取证; 平台的 rgw-get-user-key.sh 一直是显式带 --rgw-zone=s3-store 的)。
+RGW_ZONE = os.environ.get("RGW_ZONE", "s3-store")
 ENDPOINT = os.environ.get("ENDPOINT", "http://rook-ceph-rgw-s3-store.rook-ceph.svc:80")
+if ENDPOINT and not ENDPOINT.startswith(("http://", "https://")):
+    # 只给 host[:port] 时补 scheme —— 否则 urlparse().netloc 为空、urllib 也认不出 url 类型,
+    # 报的错与"端点不通"无法区分(2026-09-29 实机: 用户写 ENDPOINT=10.66.3.29:80 踩到)
+    ENDPOINT = "http://" + ENDPOINT
 REGION = os.environ.get("REGION", "us-east-1")
 SERVICE = "s3"
 HOST = urllib.request.urlparse(ENDPOINT).netloc
+
+
+def _radosgw_admin(args):
+    """跑一次 radosgw-admin 并返回 stdout。
+
+    radosgw-admin **只存在于 rook-ceph-tools 容器里** —— 在宿主机或部署容器里直接调用会
+    报 Permission denied / FileNotFoundError(2026-09-29 实机踩到两次)。故:
+      本机有该命令(即在 toolbox 内) → 直接跑;
+      否则 → 经 kubectl exec 进 toolbox 跑(容器/宿主机都有 kubectl + kubeconfig)。
+    """
+    import subprocess
+    import shutil
+    if shutil.which("radosgw-admin"):
+        return subprocess.check_output(["radosgw-admin"] + args, stderr=subprocess.DEVNULL)
+    ns = os.environ.get("ROOK_NAMESPACE", "rook-ceph")
+    return subprocess.check_output(
+        ["kubectl", "-n", ns, "exec", "deploy/rook-ceph-tools", "--", "radosgw-admin"] + args,
+        stderr=subprocess.DEVNULL)
 
 
 def ensure_creds():
@@ -31,10 +60,8 @@ def ensure_creds():
     global AK, SK
     if AK and SK:
         return
-    import subprocess
-    out = subprocess.check_output(
-        ["radosgw-admin", "user", "create", "--uid", UID, "--display-name", "verify"],
-        stderr=subprocess.DEVNULL)
+    out = _radosgw_admin(["user", "create", "--uid", UID, "--display-name", "verify",
+                          "--rgw-zone", RGW_ZONE])
     d = json.loads(out)
     AK = d["keys"][0]["access_key"]
     SK = d["keys"][0]["secret_key"]
@@ -43,9 +70,10 @@ def ensure_creds():
 def cleanup_user():
     if not AK or not SK:
         return
-    import subprocess
-    subprocess.run(["radosgw-admin", "user", "rm", "--uid", UID],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        _radosgw_admin(["user", "rm", "--uid", UID, "--rgw-zone", RGW_ZONE])
+    except Exception:
+        pass
 
 BUCKET = "verify-rgw-%d" % int(time.time())
 OBJ = "hello.txt"
@@ -116,7 +144,11 @@ def main():
         sys.exit(0)
     ensure_creds()
     if not AK or not SK:
-        print("缺少 AK/SK 且无法创建用户(RGW_UID/radosgw-admin)", file=sys.stderr)
+        print("缺少 AK/SK 且无法创建临时用户。三种取凭据的办法:", file=sys.stderr)
+        print("  ① 直接用平台预置用户(推荐): kubectl -n rook-ceph get secret \\", file=sys.stderr)
+        print("       rook-ceph-object-user-s3-store-rgw-model-admin -o go-template='{{index .data \"AccessKey\"}}' | base64 -d", file=sys.stderr)
+        print("  ② 临时用户(本工具会自动建/删): 需能连到 rook-ceph-tools(本机没有 radosgw-admin 时经 kubectl exec)", file=sys.stderr)
+        print("  ③ 手工指定: AK=<access_key> SK=<secret_key> ENDPOINT=http://<rgw-host:port> python3 %s" % sys.argv[0], file=sys.stderr)
         sys.exit(1)
     try:
         _run_verify()

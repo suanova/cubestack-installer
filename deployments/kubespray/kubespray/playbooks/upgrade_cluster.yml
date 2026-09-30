@@ -3,12 +3,12 @@
   import_playbook: boilerplate.yml
 
 - name: Gather facts
-  import_playbook: facts.yml
+  import_playbook: internal_facts.yml
 
 - name: Download images to ansible host cache via first kube_control_plane node
   hosts: kube_control_plane[0]
   gather_facts: false
-  any_errors_fatal: "{{ any_errors_fatal | default(true) }}"
+  any_errors_fatal: "{{ kubespray_any_errors_fatal | default(true) }}"
   environment: "{{ proxy_disable_env }}"
   roles:
     - { role: kubespray_defaults, when: "not skip_downloads and download_run_once and not download_localhost"}
@@ -18,7 +18,7 @@
 - name: Prepare nodes for upgrade
   hosts: k8s_cluster:etcd:calico_rr
   gather_facts: false
-  any_errors_fatal: "{{ any_errors_fatal | default(true) }}"
+  any_errors_fatal: "{{ kubespray_any_errors_fatal | default(true) }}"
   environment: "{{ proxy_disable_env }}"
   roles:
     - { role: kubespray_defaults }
@@ -28,7 +28,7 @@
 - name: Upgrade container engine on non-cluster nodes
   hosts: etcd:calico_rr:!k8s_cluster
   gather_facts: false
-  any_errors_fatal: "{{ any_errors_fatal | default(true) }}"
+  any_errors_fatal: "{{ kubespray_any_errors_fatal | default(true) }}"
   environment: "{{ proxy_disable_env }}"
   serial: "{{ serial | default('20%') }}"
   roles:
@@ -44,7 +44,7 @@
 - name: Handle upgrades to control plane components first to maintain backwards compat.
   gather_facts: false
   hosts: kube_control_plane
-  any_errors_fatal: "{{ any_errors_fatal | default(true) }}"
+  any_errors_fatal: "{{ kubespray_any_errors_fatal | default(true) }}"
   environment: "{{ proxy_disable_env }}"
   serial: 1
   roles:
@@ -55,7 +55,7 @@
     - { role: kubernetes-apps/kubelet-csr-approver, tags: kubelet-csr-approver }
     - { role: container-engine, tags: "container-engine", when: deploy_container_engine }
     - { role: kubernetes/node, tags: node }
-    - { role: kubernetes/control-plane, tags: master, upgrade_cluster_setup: true }
+    - { role: kubernetes/control-plane, tags: control-plane, upgrade_cluster_setup: true }
     - { role: kubernetes/client, tags: client }
     - { role: kubernetes/node-label, tags: node-label }
     - { role: kubernetes/node-taint, tags: node-taint }
@@ -66,20 +66,19 @@
 - name: Upgrade calico and external cloud provider on all control plane nodes, calico-rrs, and nodes
   hosts: kube_control_plane:calico_rr:kube_node
   gather_facts: false
-  any_errors_fatal: "{{ any_errors_fatal | default(true) }}"
+  any_errors_fatal: "{{ kubespray_any_errors_fatal | default(true) }}"
   serial: "{{ serial | default('20%') }}"
   environment: "{{ proxy_disable_env }}"
   roles:
     - { role: kubespray_defaults }
     - { role: kubernetes-apps/external_cloud_controller, tags: external-cloud-controller }
     - { role: network_plugin, tags: network }
-    - { role: kubernetes-apps/network_plugin, tags: network }
     - { role: kubernetes-apps/policy_controller, tags: policy-controller }
 
 - name: Finally handle worker upgrades, based on given batch size
   hosts: kube_node:calico_rr:!kube_control_plane
   gather_facts: false
-  any_errors_fatal: "{{ any_errors_fatal | default(true) }}"
+  any_errors_fatal: "{{ kubespray_any_errors_fatal | default(true) }}"
   environment: "{{ proxy_disable_env }}"
   serial: "{{ serial | default('20%') }}"
   roles:
@@ -101,12 +100,12 @@
   environment: "{{ proxy_disable_env }}"
   roles:
     - { role: kubespray_defaults }
-    - { role: win_nodes/kubernetes_patch, tags: ["master", "win_nodes"] }
+    - { role: win_nodes/kubernetes_patch, tags: ["control-plane", "win_nodes"] }
 
 - name: Install Calico Route Reflector
   hosts: calico_rr
   gather_facts: false
-  any_errors_fatal: "{{ any_errors_fatal | default(true) }}"
+  any_errors_fatal: "{{ kubespray_any_errors_fatal | default(true) }}"
   environment: "{{ proxy_disable_env }}"
   roles:
     - { role: kubespray_defaults }
@@ -115,7 +114,7 @@
 - name: Install Kubernetes apps
   hosts: kube_control_plane
   gather_facts: false
-  any_errors_fatal: "{{ any_errors_fatal | default(true) }}"
+  any_errors_fatal: "{{ kubespray_any_errors_fatal | default(true) }}"
   environment: "{{ proxy_disable_env }}"
   roles:
     - { role: kubespray_defaults }
@@ -126,7 +125,7 @@
 - name: Apply resolv.conf changes now that cluster DNS is up
   hosts: k8s_cluster
   gather_facts: false
-  any_errors_fatal: "{{ any_errors_fatal | default(true) }}"
+  any_errors_fatal: "{{ kubespray_any_errors_fatal | default(true) }}"
   environment: "{{ proxy_disable_env }}"
   roles:
     - { role: kubespray_defaults }

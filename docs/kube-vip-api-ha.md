@@ -6,6 +6,12 @@
 > 开关: `KUBE_VIP_ENABLED`(**默认 false**, 2026-09-24 由默认开改为默认关)· 配置项 `K8S_API_VIP` / `KUBE_VIP_INTERFACE` / `KUBE_VIP_CP_DETECT`(**默认 false**, 2026-09-24 由默认开改为默认关) / `KUBE_VIP_LOCAL_PROXY`
 > 上游资产: kubespray 原生支持(`deployments/kubespray/kubespray/`), 无需自研
 >
+> 🔁 **2026-09-28 收编(读第 18 节前必看)**: 静态 Pod 清单的**写入权已完整交还 kubespray** ——
+> `addons.yml` 的 `kube_vip_enabled` 改为**跟随 `KUBE_VIP_ENABLED`**,自持渲染器与其测试已删除,
+> 模块只留 VIP 推导 / 变量校验 / 收敛核验 / 关闭清理。**第 18 节立的"单一写入者契约"随之废止
+> (撤回的理由与技术债边界见第 19 节)**;评估全文与对 `docs/api-ha/` 规划的逐条满足性对照见
+> [`api-ha/07-kube-vip-upstream-assessment.md`](api-ha/07-kube-vip-upstream-assessment.md)。
+>
 > **❗ 实施过程中对本文档的 4 处修正**(详见第 14 节, 读下文时以此为准):
 > 1. kube_vip_* 变量写入 **`addons.yml`**, 不是 `k8s-cluster.yml`(那里没这个块, `addons.yml` 有 kubespray 自带模板)
 > 2. 两阶段**对新建集群同样必需** —— `/etc/hosts` 写在 preinstall 角色, kube-vip 在 etcd 之后, 差约 10 分钟
@@ -30,6 +36,10 @@ manifest、不需要 DaemonSet、不需要自研静态 Pod。
 | ① | **kubespray 原生默认本来是 nginx-proxy 真高可用,被本项目脚本的"定义 `loadbalancer_apiserver`"动作翻转关闭了**(提交 `2ee7738`,目标正确但副作用丢了 HA) | 这是本方案要修的真问题,不是优化。且说明损失是**自致的**,非上游缺失 |
 | ② | `advertise-address` 被统一写成第一个 master IP,导致集群内 `kubernetes` Service 也单点 | 独立于 kube-vip 的第二处单点,建议一并修 |
 | ③ | kubespray 上游对 kube-vip **零 CI 覆盖** + bootstrap 时序链有一处无法靠读代码确认 | 决定了实施顺序:**先证伪,再铺开** |
+
+> 🔁 **2026-09-28 收编不改变上表三条结论,只改变"谁写那份静态 Pod 清单"**(第 19 节)。
+> 本文正文按时间顺序累积(第 14~17 节是实施与实机记录,第 18 节是单一写入者改造,
+> **第 19 节是收编**);凡是与收编冲突的段落,已就地标注或由第 19 节覆盖。
 
 ---
 
@@ -85,7 +95,8 @@ loadbalancer_apiserver:
 apiserver_loadbalancer_domain_name: "k8s-api.cubestack.io"
 ```
 
-加上 `0090-etchosts.yml:31` 把域名写成 `{{ loadbalancer_apiserver.address }} {{ 域名 }}`
+加上 hosts 写入(历史实现是 kubespray 的 `0090-etchosts.yml:31`;**v2.32 树里该任务已不存在**,
+现由本仓库 `modules/02_k8s/03_k8s_hosts.sh:25-27` 写)把域名写成 `{{ 入口地址 }} {{ 域名 }}`
 → **全集群节点的 `/etc/hosts` 都把 `k8s-api.cubestack.io` 解析到 master01**。
 
 所有非 master 节点(以及 `controlPlaneEndpoint`)的 API 入口因此只有一个地址。
@@ -111,6 +122,19 @@ nginx-proxy 确实是零成本高可用,但它**不能替代** kube-vip:
 各 master(第二条独立通路),nginx-proxy 是最廉价的手段。本方案**不采用**,理由是
 与本次"统一入口"的目标冲突,且会与 `loadbalancer_apiserver` 的定义互斥。
 记录在此以备将来评估。
+
+> **2026-09-28 更新: 本节那个"值得保留的叠加选项"已经落地。** 节点侧 kubespray 原生
+> nginx-proxy 本地代理(`API_LOCAL_LB_ENABLED`, 默认 **true**) + 入口侧 kube-vip VIP 的
+> 组合已实施: 由 `sync-kubespray-config.sh` 作 `all.yml` 的**唯一写入者**, 按入口模式
+> **摘除/保留** `loadbalancer_apiserver` 块 —— 上面第 3 点的"互斥"因此由脚本保证,
+> 而不再是"二者只能要一个"。方案与实施细节见 [api-ha/](api-ha/README.md)
+> (机制 [02](api-ha/02-kubespray-native-lb.md)、决策 [04](api-ha/04-decision.md))。
+>
+> **由此 §7 两阶段切换的风险面缩小到"外部/管理客户端"**: 节点侧(kubelet / kube-proxy)
+> 已改走本机 `127.0.0.1:6443` 的本地代理, 不再依赖 VIP 是否已绑/已切; §2.4 中
+> "worker 侧故障切换慢一个数量级"的退步也一并消失(回到本地代理的 ~1s)。
+> 本文 §2.3"本方案不采用"、§16.3"仍不启用本地代理"、§16.5"镜像不在 `images.manifest` 里"
+> 三处旧结论, 均以本次实施为准(后两处已就地标注)。
 
 ### 2.4 一个必须承认的退步: worker 侧故障切换会比原来**慢**
 
@@ -226,7 +250,7 @@ KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"      # 留空=kube-vip 自动检测
 
 - `kubeadm-setup.yml:92` — `kubeadm_config_api_fqdn` = `apiserver_loadbalancer_domain_name`
   → `controlPlaneEndpoint` 就是该域名
-- `0090-etchosts.yml:31` — 域名解析指向 `loadbalancer_apiserver.address`
+- hosts 写入(现:本仓库 `modules/02_k8s/03_k8s_hosts.sh`;v2.32 树已无 `0090-etchosts.yml`)—— 域名解析指向入口地址
 
 所以**切换 VIP 不需要改任何 kubeconfig 内容**,只改域名解析指向。证书 SAN 同样免费获得:
 
@@ -431,7 +455,7 @@ kube_apiserver_extra_args:
 
 | 项 | 内容 |
 |---|---|
-| 镜像 | `ghcr.io/kube-vip/kube-vip:v0.8.9`(kubespray `download.yml:284-285`) |
+| 镜像 | `ghcr.io/kube-vip/kube-vip:v1.0.3`(kubespray `download.yml:261-263`; tag = `v` + `kube_vip_version`) |
 | 登记 | `deployments/config/images.manifest` 新增条目 → CI 同步至 Harbor `mirrors` |
 | tar | `deployments/offline-files/kubespray/` |
 | **预加载** | ⚠ 必须进 `PRELOAD_IMAGE_PATTERNS`(默认集合已含 `kube-vip`),否则预加载会把它裁掉 → `09_kube_vip` 的前置自检以"以下 master 上缺少 kube-vip 镜像"**硬失败**。失败模式是响亮的,不是静默降级 |
@@ -512,7 +536,7 @@ worker 角色),masters 只能通过全量 `k8s_deploy` 加入,而全量运行会
 | # | 风险 | 严重度 | 处置 |
 |---|------|--------|------|
 | R1 | kubespray 上游对 kube-vip **零 CI 覆盖**(`grep -rn "kube_vip\|kube-vip" test-infra/ tests/` → 零命中) | 高 | 实机验证不可省略;第 12 节第 0 步先证伪 |
-| ~~R2~~ | ~~**bootstrap 时序链未经证实**: `kube-vip.manifest.j2:126-127` 的 hostPath **没有 `type: FileOrCreate`**,而首控制面节点在 `kubeadm init` 之前 `/etc/kubernetes/super-admin.conf` **不存在**(kubespray 对首个 CP 恰好选中该路径,见 `kube-vip.yml:26-31`)。整条链依赖 kube-vip 在拿不到 kubeconfig 时仍抢到 VIP~~ **→ 已消除(2026-09-22)** | ~~高~~ 无 | 单一写入者改造关掉了 kubespray 那次写入(见第 18 节): 不再有任何东西在 `kubeadm init` **之前**写 manifest,也就不再有任何东西在 init 之前需要 VIP。原描述保留以便对照 —— hostPath 确实没有 `FileOrCreate`,但该路径已不再被走到 |
+| ~~R2~~ | ~~**bootstrap 时序链未经证实**: `kube-vip.manifest.j2:126-127` 的 hostPath **没有 `type: FileOrCreate`**,而首控制面节点在 `kubeadm init` 之前 `/etc/kubernetes/super-admin.conf` **不存在**(kubespray 对首个 CP 恰好选中该路径,见 `kube-vip.yml:26-31`)。整条链依赖 kube-vip 在拿不到 kubeconfig 时仍抢到 VIP~~ **→ 已消除(2026-09-22)** | ~~高~~ 无 | 单一写入者改造关掉了 kubespray 那次写入(见第 18 节): 不再有任何东西在 `kubeadm init` **之前**写 manifest,也就不再有任何东西在 init 之前需要 VIP。原描述保留以便对照 —— hostPath 确实没有 `FileOrCreate`,但该路径已不再被走到。**⚠ 2026-09-28 收编后这条"已消除"重新失效** —— 上游又开始在 `kubeadm init` 之前写 manifest,该链重新被走到;暴露面与实测边界见 [第 19.6 节](#196-一条被收编重新打开的风险原-r2) |
 | R3 | 切换瞬间全节点 apiserver 重启 + 证书重签 | 中 | 两阶段(第 7 节)把风险隔离在阶段二,且有倒计时确认窗口 |
 | R4 | kube-vip 自动检测选错网卡(多网卡节点) | 中 | 提供 `KUBE_VIP_INTERFACE` 显式覆盖;verify ④ 把它变成可检测问题 |
 | R5 | ARP 模式的网络前提(交换机 ARP/ICMP 策略、DHCP snooping、DHCP 保留段) | 中 | `cluster.conf` 3.1 节已为 MetalLB 写明同类要求,可直接复用;VIP 必须排除在 DHCP 池外 |
@@ -571,7 +595,7 @@ worker 角色),masters 只能通过全量 `k8s_deploy` 加入,而全量运行会
 | # | 原设计 | 实际实现 | 依据 |
 |---|--------|----------|------|
 | 1 | kube_vip_* 写 `k8s-cluster.yml` | 写 **`addons.yml`** | `addons.yml:209` 有 kubespray 自带的 `# Kube VIP` 模板; `k8s-cluster.yml` 里没有 |
-| 2 | 两阶段是"存量集群"的事 | **新建集群同样必需** | `0090-etchosts.yml` 在 preinstall 角色里, 而 kube-vip 在 `kubernetes/node`(etcd 之后)—— 差约一个 etcd 安装的时间。原设计假设"同一轮 run 内 VIP 先绑"不成立 |
+| 2 | 两阶段是"存量集群"的事 | ~~新建集群同样必需~~ → **2026-09-28 更正: 存量仍必需,全新集群在本地代理模式下不再需要人工确认** | 依据已变: hosts 行由本仓库 `03_k8s_hosts.sh` 写(上游 preinstall 的 `0090-etchosts.yml` 在 v2.32 树已不存在),而节点侧改走各节点本地代理后**不再依赖 hosts 行** ⇒ 只有外部/管理客户端受影响,部署期间无人使用 ⇒ `06_k8s_deploy` 的确认门只在"入口原本指向别处"时才触发。存量集群切换 VIP 仍是两阶段(见 §7) |
 | 3 | `advertise-address` 改 Jinja 表达式 | 同左, 但加了**整行字符串断言** | 写回具体 IP 会静默抵消修复; 用 `grep -qF` 断言整行, 已是目标值则完全不动 |
 | 4 | 倒计时确认放 sync 脚本 | 移到 **`06_k8s_deploy.sh`** | `06_k8s_deploy.sh:70` 把 sync 的 stdout 重定向到 `/dev/null` —— 放 sync 里用户看不见提示, 还会白等 30 秒 |
 
@@ -712,7 +736,7 @@ kubespray 的 `kube_apiserver_endpoint`(`kubespray_defaults/defaults/main/main.y
 
 **测法**:在 worker 165 上用 kubespray 同款 nginx 配置(`least_conn` + `proxy_connect_timeout 1s`)
 起一个本地代理,upstream 里放入**黑洞地址**模拟已死的 apiserver,完全不触碰集群节点。
-镜像用的是节点上现成的 `docker.io/library/nginx:1.27.4-alpine`。
+镜像用的是节点上现成的 `docker.io/library/nginx:1.30.1-alpine`。
 
 | 场景 | 结果 |
 |---|---|
@@ -742,6 +766,12 @@ kubespray 的 `kube_apiserver_endpoint`(`kubespray_defaults/defaults/main/main.y
   能提前把死后端踢出。
 
 ### 16.3 为什么本项目仍不启用本地代理
+
+> ⚠ **2026-09-28 更新: 本节的"暂不启用"结论已被推翻。** 方案演进为"节点侧本地代理 +
+> 入口侧 VIP"的组合并已落地(`API_LOCAL_LB_ENABLED` 默认 true), 见
+> [api-ha/](api-ha/README.md)。下表的对比数据与 16.1 的 if 链分析仍然有效 ——
+> 它们正是本次实施的技术依据(消解互斥的办法: 由 `sync-kubespray-config.sh` 按模式
+> 摘除/保留 `loadbalancer_apiserver` 块)。
 
 | | 本地代理(kubespray nginx-proxy) | kube-vip VIP |
 |---|---|---|
@@ -787,6 +817,12 @@ kubelet → https://k8s-api.cubestack.io:6443 → /etc/hosts → loadbalancer_ap
   (`roles/kubespray_defaults/defaults/main/download.yml` 的 `nginx_image_repo`),
   随 kubespray 离线包分发,由 `resolve_preload_image_files()` 负责加载。
   **若将来启用本地代理,需确认该镜像已在离线预加载集合内**,否则 nginx-proxy 起不来。
+- ⚠ **2026-09-28 更新(启用本地代理之后)**: 该镜像**已显式登记**进
+  `deployments/config/images.manifest`(`k8s-base  docker.io/library/nginx:${API_LB_NGINX_IMAGE_TAG}`,
+  默认 `1.30.1-alpine`,须与上游 `nginx_image_tag` 同值),并加入 `PRELOAD_IMAGE_PATTERNS`
+  (`library_nginx`)—— 上面那句"需确认已在离线预加载集合内"由此闭环。
+  细节(含"为什么不能给它加第 3 列短名")见
+  [offline-files/kubespray/README.md](../deployments/offline-files/kubespray/README.md) 的 nginx 一节。
 - **客户端证书**:本地代理是纯 TCP 转发(`stream` 模块),**不终止 TLS**,所以证书 SAN 不受影响。
 
 ---
@@ -800,17 +836,28 @@ kubelet → https://k8s-api.cubestack.io:6443 → /etc/hosts → loadbalancer_ap
 取而代之是**四项前置自检**(集群可达 / 各 master 有镜像 / 模板与渲染器存在 / python3 可用),
 任一不满足即明确报错并给出修法。
 
-- **渲染**:不手抄 manifest,直接渲染 kubespray 原版
-  `roles/kubernetes/node/templates/manifests/kube-vip.manifest.j2`。
-  由 `tools/k8s/render-kube-vip-manifest.py`(python3 + jinja2)完成。
-  ⚠ 2026-09-22 用**真正的 ansible `template` 模块**重新核对了这里"逐字节一致"的说法,结论要加限定:
-  **非首台 CP 逐字节一致;首台 CP 差一行** —— kubespray 对首台 CP 会把 hostPath 渲染成
-  `super-admin.conf`(`loadbalancer/kube-vip.yml:26-31` 的 set_fact),而我们的渲染器恒用
-  `admin.conf`。复现方法见第 18.3 节。**这一行之差就是"两个写入者"问题的全部内容。**
+> ⚠ 上面这段是 2026-09-22 的当时状态,后来变过两次:
+> ① **2026-09-22 晚**补上了 `REQUIRES: k8s_deploy`(定序必须,见 18.5;`--steps` 的顾虑已被证明不成立);
+> ② **2026-09-28 收编**后前置自检由**四项降为两项**(集群可达 / 各 master 有 kube-vip 镜像)——
+> "模板与渲染器存在"与"python3 可用"随自持渲染器一起消失(渲染已归上游)。
+
+- **渲染**:**2026-09-28 收编后不再由我们完成** —— 静态 Pod 由 kubespray 自己在
+  `Install Kubernetes nodes`(`playbooks/cluster.yml:25-32`,kubeadm init 之前)按 `addons.yml` 的
+  `kube_vip_*` 渲染同一份 `roles/kubernetes/node/templates/manifests/kube-vip.manifest.j2`;
+  我们只负责写变量(`lib-common.sh#update_kube_vip_addons_yml`)、推导 VIP、收敛核验与关闭清理。
+  去掉了自持渲染器(`tools/k8s/render-kube-vip-manifest.py`,已删除)与"恒 false 的单一写入者契约"。
+  ⚠ 2026-09-22 用**真正的 ansible `template` 模块**核对的结论仍然有效(**非首台 CP 逐字节一致;
+  首台 CP 差一行** —— kubespray 对首台 CP 把 hostPath 渲染成 `super-admin.conf`,`loadbalancer/kube-vip.yml:36-45`),
+  但它**只在"两个写入者"并存时有害**: 写入者只剩上游一家后, 这份分叉是**稳定**的(同一节点每次渲染同值)。
+  收编的完整评估与满足性对照见 [`api-ha/07-kube-vip-upstream-assessment.md`](api-ha/07-kube-vip-upstream-assessment.md)。
 - **等幂等**:目标状态 =「各 master 都有正确的 manifest + VIP 恰好绑一台」。
   按 manifest 的 sha256 与节点现状比对,一致则跳过(实测两次连跑全部跳过)。
+  ⚠ **收编后目标状态不变,但幂等的责任方变了**: "清单不变 ⇒ 不重写"由**上游渲染器**保证,
+  我们只做**读回核验**(收编前是我们比对后决定写不写)。
 - **脑裂守卫**:逐台按各自 hostname 渲染,并在渲染后**立即断言** `vip_nodename` 与
   `address` 正确,不符则中止 —— 见 17.2。
+  ⚠ **收编后由"渲染后断言"改成"读回哨兵"**: `vip_nodename` 由上游按 `inventory_hostname` 渲染,
+  本模块在收敛后**逐台读回清单核对**,不符则中止。
 
 ### 17.2 ⚠ 脑裂事故与根因(必读)
 
@@ -876,6 +923,10 @@ kube-vip 退出时会**主动释放租约**(而非等租约自然过期),故切�
 ---
 
 ## 18. 单一写入者与双向收敛(2026-09-22)
+
+> ⚠ **本节已部分废止(2026-09-28 收编)** —— 18.1(契约)与 18.3(双写者问题的"关上游"解法)已反转,
+> 见第 19 节。**仍然有效**的是双向收敛与调度部分:18.2(开关开=安装/修复,开关关=清理)、
+> 18.4(关开关不清理的根因)、18.5(模块定序的 REQUIRES)、18.7 里关闭态控制流那批验证。
 
 这一节的起点是三个各自独立、但根因相邻的问题。它们都属于同一类:**"看起来收敛了,其实没有"**。
 
@@ -1051,3 +1102,107 @@ run_module "${key}" || { FAILED=1; break; }
 - 再次开启后 VIP 回来、且**不触发证书重签**(依赖 SAN 保留的判断)
 - 全量运行后 master01 的 manifest hash **全程不变** —— 这是"两个写入者已消除"的直接断言,
   需要先按 18.3 复现出"改前会变两次",再验改后不变
+
+---
+
+## 19. 收编:静态 Pod 写入权交还上游(2026-09-28)
+
+> 本节接着第 18 节。**18.1 立的"单一写入者契约"已废止**,18.3 的"把上游那侧关掉"这个解法同样废止;
+> 18.2 / 18.4 / 18.5 与两阶段流程继续有效。评估全文(含对 `docs/api-ha/` 规划的逐条满足性对照)
+> 见 [`api-ha/07-kube-vip-upstream-assessment.md`](api-ha/07-kube-vip-upstream-assessment.md)。
+
+### 19.1 反转了什么
+
+| 环节 | 第 18 节(2026-09-22 ~ 09-28) | 第 19 节(2026-09-28 起) |
+|---|---|---|
+| 谁写 `/etc/kubernetes/manifests/kube-vip.yml` | `09_kube_vip.sh`(自持渲染器) | **kubespray** —— 在 `Install Kubernetes nodes`(kubeadm init 之前)按 `addons.yml` 渲染 |
+| `addons.yml` 的 `kube_vip_enabled` | **恒 false**(契约,与开关无关) | **跟随 `KUBE_VIP_ENABLED`**,写入后回读校验 |
+| `addons.yml` 的其余 `kube_vip_*` | 写了也不生效(纯逃生口) | **就是生效的那份策略** —— 渲染器原先钉死的值逐项搬进来,力求渲染结果与收编前逐项等价 |
+| 自持渲染器 + 其离线测试 | `render-kube-vip-manifest.py`(128 行)+ `test-render-kube-vip.sh`(31 行) | **已删除**(连同模块内渲染/分发/写入段,合计约 430 行) |
+
+### 19.2 为什么可以撤(18.3 的推论多走了一步)
+
+18.3 的实测依然有效 —— **非首台 CP 逐字节一致,首台 CP 只差 `kube_vip_admin_conf` 那一行**。
+但当时由它推出"这份分叉必须消除",**多走了一步**:
+
+`kube_vip_admin_conf` 按 `inventory_hostname == kube_control_plane[0]` 判定
+(`loadbalancer/kube-vip.yml:36-45`),**同一节点每次渲染结果相同** ⇒ 上游那份分叉本身是**稳定**的。
+当年的"每轮白重启两次"来自**两个写入者轮流改写同一路径**,不是来自分叉。
+写入者只剩一家之后,同一路径每轮渲染出同样的字节 ⇒ 静态 Pod 不重启。
+
+### 19.3 配套改动(与收编同一批)
+
+| 文件 | 改动 |
+|---|---|
+| `lib-common.sh#update_kube_vip_addons_yml` | **语义反转**:`kube_vip_enabled` 跟随 `KUBE_VIP_ENABLED`;`kube_vip_address` 关闭时仍保留(喂 SAN,理由同 18.2) |
+| `modules/02_k8s/09_kube_vip.sh` | 瘦身:删渲染 / 分发 / 写入,只留 推导 VIP → 校验变量 → 等就位并核验(清单在场 / `vip_nodename` 读回 / 唯一性 / healthz)→ 关闭清理 |
+| `modules/02_k8s/08_verify_kube_vip.sh` | 新增 **①b 哨兵**:首台 master 的清单 hostPath 应为 `super-admin.conf`、其余 `admin.conf` —— "双写者回归"的廉价探针(与收编前的期望**正好相反**) |
+| `tools/k8s/sync-kubespray-config.sh` | 新增 **`kube_proxy_strict_arp: true` 前置**:上游 kube-vip 任务在 ipvs 集群上硬要求它;自持渲染器时期这道检查被绕过,收编后它会**真的生效** |
+| `tools/check-modules.sh` | ⑪-A 由"恒 false"反向为"必须跟随开关";⑪-C 去掉渲染器那处;⑮ 挂上五个离线套件 |
+| `tools/tests/test-update-kube-vip-addons.sh` | 新增:映射表 + 幂等 |
+| ~~`tools/k8s/render-kube-vip-manifest.py`~~ · ~~`tools/tests/test-render-kube-vip.sh`~~ | 删除 |
+
+### 19.4 实机状态(2026-09-28)
+
+【实机】已生效:集群上 `/etc/kubernetes/manifests/kube-vip.yml` **在场且由上游渲染**,
+`mxgpu-3-28` 上 kube-vip 容器 Running,**VIP `10.66.3.240` 已实际绑在节点网卡上**。
+（⚠ 该机所在网段当时还有**另一套集群**也持有同一个 VIP —— 见 19.5 ②，别把这条读成"独占干净"。）
+
+**仍未验 —— 第一条就是"撤契约"的正当性证据**:
+
+- **幂等**:连跑**两次**同开关部署 → kube-vip Pod 的 `RESTARTS` **不增长**、清单 sha256 不变。
+  这正是当年立契约要防的那件事(18.7 最后一条的同一断言,只是换了主体)
+- **关闭态**:`KUBE_VIP_ENABLED=false` 重跑 → 清单被删、VIP 从所有 master 网卡释放、入口仍指 VIP 时拦停
+- **换代一次性抖动**:既有集群的清单会换代一次(首台 master 由 `admin.conf` 变 `super-admin.conf`)⇒
+  Pod 重启一次 —— 属**预期**,不是回归
+
+### 19.5 收编同日暴露并修掉的两处缺陷
+
+**① `kube_vip_is_bound()` 恒判"未绑定" ⇒ kube-vip 装了白装(2026-09-28 实机取证)**
+
+函数体是 `for _host in $(master_hosts)` —— `master_hosts` 给的是**主机名**,而部署容器解析不了节点名
+(`getent hosts mxgpu-3-28` 实机失败)⇒ `ssh ubuntu@mxgpu-3-28` 静默失败 ⇒ 循环永不命中 ⇒ **恒返回 1**。
+后果不止一条:
+
+- `api_entry_ip()` 永远走"未绑定 ⇒ 回落首个 master"分支 —— 域名解析**永远切不到 VIP**
+  (实机:VIP 明明已绑,`/etc/hosts` 里的 `k8s-api.cubestack.io` 却仍是 10.66.3.28)
+- `_kube_vip_candidate_free()`(VIP 自动推导的候选探测)同一 bug ⇒ **自动推导路径也全废**
+  —— 显式 `K8S_API_VIP` 不受影响,这正是它此前没被发现的原因
+
+修法:新增 `master_ips()`(与 `master_hosts` 并列,注释写明"要 SSH 必须用 IP"),两处调用点改用它。
+同仓 08/09 两个模块**早就**用 `node_ip_by_hostname` 转 IP 再 SSH 并写了警告注释,`lib-common.sh` 这两处是漏网。
+**实机复核**:容器内 `kube_vip_is_bound 10.66.3.240` → 是;`api_entry_ip()` 三分支
+(VIP 已绑 → VIP / 开关关 → 首个 master / 显式值优先)全部符合预期。
+
+**② 两套集群共用同一个 `K8S_API_VIP` ⇒ kubectl 时好时坏(2026-09-29 00:1x 实机取证)**
+
+同网段两套集群都持有 `10.66.3.240` 时,到 `VIP:6443` 的流量**随机落到任一套的 apiserver** ⇒
+`kubectl` 间歇报 `x509: certificate signed by unknown authority`(连跑三次:成功 / 失败 / 失败)。
+**不是代码缺陷,是部署编排事故** —— 但浮 VIP 方案天然有这个坑,故登记为长期注意事项。
+
+修法(已落,实机验证):`lib-common.sh#sync_kubeconfig` 的末校验改为失败时**连取 4 次 VIP 上的
+服务端证书指纹** —— 出现多个不同指纹即判"该地址被多个 apiserver 共用",打印两条处置
+(① 两套集群分配不同的 `K8S_API_VIP` + `METALLB_POOL`;② 先拆除另一套)后中止;
+`cluster.conf.example` 的 `K8S_API_VIP` 注释补了同款警告。
+⚠ **改 VIP 后必须重装集群** —— 证书 SAN 在 `kubeadm init` 时固化。
+
+### 19.6 一条被收编重新打开的风险(原 R2)
+
+第 11 节 R2(bootstrap 时序链)在 18.3 里被判"已消除",依据是"没有东西在 `kubeadm init` 之前写 manifest"。
+**收编把这个前提又拆了** —— 上游重新在 init 之前写 manifest,该链重新被走到。
+
+暴露面受两阶段约束,比 2026-09-22 之前小:
+
+- 阶段一(入口仍是 master01)下**没有人需要 VIP**,该链即使"抢不到 VIP"也无害 ——
+  实测中全新安装的 `k8s_deploy` 就是这样跑过去的
+- 只有"**入口已指向 VIP,却要把集群重新 init**"(重装 / 换集群)时才会踩到:首台 master 的 manifest
+  指向尚未存在的 `super-admin.conf`、静态 Pod 起不来 ⇒ 在 init 完成、该文件出现之前,**VIP 上没有人应答**
+
+**未实测**,与 19.4 的关闭态验收同一批登记。
+
+### 19.7 不变的部分(边界)
+
+- **D1 / D4 不变**:`kube_vip_services_enabled: false`(LB 归 MetalLB)、`kube_vip_lb_enable: false`
+- **两阶段流程不变**;节点侧走本地代理后,只有**外部 / 管理客户端**依赖 VIP
+- **VIP 推导 / 入口与 hosts / 关闭清理 / 验证** 仍是我们的事(模块 09 / 03 / 10 / 08 / 11)
+- 19.4 第一条验完之前,契约是"**已撤,但撤销的正当性尚未实测**"的状态 —— 别把本节读成"已经证完"

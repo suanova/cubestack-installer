@@ -14,7 +14,6 @@
     - bootstrap_os
     - apps
     - network
-    - master    # master tag is deprecated and replaced by control-plane
     - control-plane
     - node
   with_items:
@@ -38,7 +37,6 @@
     - bootstrap_os
     - apps
     - network
-    - master    # master tag is deprecated and replaced by control-plane
     - control-plane
     - node
   with_items:
@@ -77,13 +75,12 @@
     - "/etc/cni/net.d"
     - "/opt/cni/bin"
   when:
-    - kube_network_plugin in ["calico", "weave", "flannel", "cilium", "kube-ovn", "kube-router", "macvlan"]
+    - kube_network_plugin in ["calico", "flannel", "cilium", "kube-ovn", "kube-router", "macvlan"]
     - ('k8s_cluster' in group_names)
   tags:
     - network
     - cilium
     - calico
-    - weave
     - kube-ovn
     - kube-router
     - bootstrap_os
@@ -106,7 +103,7 @@
 
 - name: Create local volume provisioner directories
   file:
-    path: "{{ local_volume_provisioner_storage_classes[item].host_dir }}"
+    path: "{{ local_volume_provisioner_storage_classes[item].hostDir }}"
     state: directory
     owner: root
     group: root
@@ -116,4 +113,4 @@
     - ('k8s_cluster' in group_names)
     - local_volume_provisioner_enabled
   tags:
-    - persistent_volumes
+    - external-provisioner

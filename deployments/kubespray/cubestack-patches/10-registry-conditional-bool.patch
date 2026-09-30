@@ -1,0 +1,39 @@
+# patch: 10-registry-conditional-bool.patch
+# 目标: roles/kubernetes-apps/registry/tasks/main.yml
+# 加入: 2026-09-28(实机: 部署中断在 "Registry | Create PVC manifests")
+# 原因: 四条 `when` 里的 `X != none and X` 形态在 ansible-core >= 2.19 下**必失败**:
+#       "Conditional result (True) was derived from value of type 'str' ... Conditionals
+#        must have a boolean result"(2.19 起条件必须产生布尔, 字符串不再当 truthy 用)。
+#       集群 registry_storage_class="ceph-block"(非空字符串)⇒ 条件取到 str ⇒ 部署中断在
+#       k8s_deploy(2026-09-28 22:36 实机中断点)。改成布尔安全写法:
+#         (registry_storage_class | default('', true) | length) > 0
+#       语义保持不变: 未设/空/none ⇒ 跳过; 非空 ⇒ 建 PVC。disk_size 同理。
+#       ⚠ 纯净上游 v2.32.0 原样如此(本补丁是上游 bug 的修复, 不是我们的定制)。
+# 上游吸收判据: registry/tasks/main.yml 中不再出现 `!= none and <变量>` 形态
+#       (改为 is not none / length 判空 / | bool 等布尔安全写法)
+# 上游化: 建议提 PR(kubespray v2.32 + ansible 2.19 组合下, 只要设了 registry_storage_class 必现)
+# ------------------------------------------------------------
+diff --git a/roles/kubernetes-apps/registry/tasks/main.yml b/roles/kubernetes-apps/registry/tasks/main.yml
+index 6ac8abe..547207f 100644
+--- a/roles/kubernetes-apps/registry/tasks/main.yml
++++ b/roles/kubernetes-apps/registry/tasks/main.yml
+@@ -79,8 +79,8 @@
+     - { name: registry-pvc, file: registry-pvc.yml, type: pvc }
+   register: registry_manifests
+   when:
+-    - registry_storage_class != none and registry_storage_class
+-    - registry_disk_size != none and registry_disk_size
++    - (registry_storage_class | default('', true) | length) > 0
++    - (registry_disk_size | default('', true) | length) > 0
+     - inventory_hostname == groups['kube_control_plane'][0]
+ 
+ - name: Registry | Apply PVC manifests
+@@ -93,6 +93,6 @@
+     state: "latest"
+   with_items: "{{ registry_manifests.results }}"
+   when:
+-    - registry_storage_class != none and registry_storage_class
+-    - registry_disk_size != none and registry_disk_size
++    - (registry_storage_class | default('', true) | length) > 0
++    - (registry_disk_size | default('', true) | length) > 0
+     - inventory_hostname == groups['kube_control_plane'][0]

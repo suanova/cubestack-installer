@@ -3,7 +3,7 @@
 - name: Confirm node upgrade
   pause:
     echo: true
-    prompt: "Ready to upgrade node? (Press Enter to continue or Ctrl+C for other options)"
+    prompt: "Ready to cordon and upgrade node {{ kube_override_hostname | default(inventory_hostname) }}? (Press Enter to continue or Ctrl+C for other options)"
   when:
     - upgrade_node_confirm
 
@@ -31,14 +31,14 @@
   command: >
     {{ kubectl }} get node {{ kube_override_hostname | default(inventory_hostname) }}
     -o jsonpath='{ .spec.unschedulable }'
-  register: kubectl_node_schedulable
+  register: kubectl_node_unschedulable
   delegate_to: "{{ groups['kube_control_plane'][0] }}"
   failed_when: false
   changed_when: false
 
 - name: Set if node needs cordoning
   set_fact:
-    needs_cordoning: "{{ (kubectl_node_ready.stdout == 'True' and not kubectl_node_schedulable.stdout) or upgrade_node_always_cordon }}"
+    needs_cordoning: "{{ (kubectl_node_ready.stdout == 'True' and not kubectl_node_unschedulable.stdout) or upgrade_node_always_cordon }}"
 
 - name: Node draining
   delegate_to: "{{ groups['kube_control_plane'][0] }}"
@@ -59,6 +59,8 @@
         --timeout {{ drain_timeout }}
         --delete-emptydir-data {{ kube_override_hostname | default(inventory_hostname) }}
         {% if drain_pod_selector %}--pod-selector '{{ drain_pod_selector }}'{% endif %}
+      async: "{{ (drain_timeout | regex_replace('s$', '') | int) + 120 }}"
+      poll: 15
       when: drain_nodes
       register: result
       failed_when:
@@ -82,6 +84,8 @@
         --delete-emptydir-data {{ kube_override_hostname | default(inventory_hostname) }}
         {% if drain_pod_selector %}--pod-selector '{{ drain_pod_selector }}'{% endif %}
         --disable-eviction
+      async: "{{ (drain_fallback_timeout | regex_replace('s$', '') | int) + 120 }}"
+      poll: 15
       register: drain_fallback_result
       until: drain_fallback_result.rc == 0
       retries: "{{ drain_fallback_retries }}"

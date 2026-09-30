@@ -58,6 +58,14 @@ CEPH_POOL_REPLICAS="${CEPH_POOL_REPLICAS:-3}"
 CEPH_POOL_MIN_SIZE="${CEPH_POOL_MIN_SIZE:-2}"
 CEPHFS_ENABLED="${CEPHFS_ENABLED:-false}"
 CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-false}"
+# 存储节点标签(与 02_ceph 模块同源: CEPH_NODE_LABEL, 默认 ceph-storage=rook-ceph)。
+# 用途: MDS / RGW 的 placement 里要写 nodeAffinity —— 它们是**存储守护进程**, 必须和
+# mon/osd/mgr 一样只在存储节点(默认 master)上跑; 见下方 _ceph_yaml_file 的占位符替换。
+_CEPH_STORAGE_LABEL="${CEPH_NODE_LABEL:-ceph-storage=rook-ceph}"
+_CEPH_SL_KEY="${_CEPH_STORAGE_LABEL%%=*}"
+_CEPH_SL_VAL="${_CEPH_STORAGE_LABEL#*=}"
+[ -n "${_CEPH_SL_KEY}" ] && [ -n "${_CEPH_SL_VAL}" ] && [ "${_CEPH_SL_KEY}" != "${_CEPH_SL_VAL}" ] \
+    || { err "CEPH_NODE_LABEL 格式非法: '${_CEPH_STORAGE_LABEL}'(应为 <key>=<value>)"; exit 1; }
 # ★ CEPH_MODE=external(由 load_config 归一化; 兼容旧 CEPH_MONITORS 自动迁移):
 #   不创建集群内 CephCluster, 经 ceph-csi-operator 的 CephConnection 接入外部已有 Ceph。
 #   连接参数统一用 CEPH_MONITORS / CEPH_POOL / CEPH_USER / CEPH_KEYRING(见 lib-common load_config)。
@@ -97,7 +105,8 @@ else
 fi
 
 # ★ 存储供给层 YAML 从 rook/{rbd,cephfs,rgw}/ 目录文件读取(§7 资源设计, 单一事实来源),
-#   经 sed 替换模板变量 __NAMESPACE__/__REPLICAS__/__MIN_SIZE__ 后 apply。
+#   经 sed 替换模板变量 __NAMESPACE__/__REPLICAS__/__MIN_SIZE__/__STORAGE_LABEL_*__ 后 apply。
+#   __STORAGE_LABEL_KEY__ / __STORAGE_LABEL_VALUE__: MDS/RGW 的 nodeAffinity(钉在存储节点, 2026-09-29)。
 #   文件由 tools/k8s/rook-fetch-manifests.sh 同源维护(见 cubestack-addon/rook/CUBESTACK-storage.md)。
 _ceph_yaml_file() {   # <subdir/file.yaml> [<file2.yaml>...] → 各文件变量替换后按序拼接(--- 分隔), 失败返回 1
     local base="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}" f out=""
@@ -105,7 +114,9 @@ _ceph_yaml_file() {   # <subdir/file.yaml> [<file2.yaml>...] → 各文件变量
         [ -f "${base}/${f}" ] || { err "存储供给层 YAML 缺失: ${base}/${f}(检查 cubestack-addon/rook/ 目录)"; return 1; }
         out="${out}$(sed -e "s|__NAMESPACE__|${CEPH_NAMESPACE}|g" \
             -e "s|__REPLICAS__|${CEPH_POOL_REPLICAS}|g" \
-            -e "s|__MIN_SIZE__|${CEPH_POOL_MIN_SIZE}|g" "${base}/${f}")"$'\n---\n'
+            -e "s|__MIN_SIZE__|${CEPH_POOL_MIN_SIZE}|g" \
+            -e "s|__STORAGE_LABEL_KEY__|${_CEPH_SL_KEY}|g" \
+            -e "s|__STORAGE_LABEL_VALUE__|${_CEPH_SL_VAL}|g" "${base}/${f}")"$'\n---\n'
     done
     printf '%s' "${out}"
 }
@@ -1037,7 +1048,7 @@ apply_remote "${_CEPH_RBD_YAML}" "ceph-rbd" \
     || { err "  创建 rbd-pool/StorageClass 失败"; exit 1; }
 fi
 
-# 可选项: CephFS(metadata/data 池 + MDS + cephfs/cephfs-models SC) —— 仅集群内模式(外部 Ceph 由外部集群提供 CephFS)
+# 可选项: CephFS(metadata/data 池 + MDS + cephfs-ephemeral/cephfs-durable SC) —— 仅集群内模式(外部 Ceph 由外部集群提供 CephFS)
 if [ "${_CEPH_EXTERNAL}" = "0" ] && [ "${CEPHFS_ENABLED}" = "true" ]; then
     say "[3/4] 创建 CephFilesystem + cephfs StorageClass..."
     apply_remote "$(_ceph_yaml_file cephfs/01-cephfilesystem.yaml cephfs/02-storageclass-cephfs.yaml)" "cephfs" \

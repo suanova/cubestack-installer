@@ -27,8 +27,8 @@
 - name: Stop if supported Calico versions
   assert:
     that:
-      - "calico_version in calico_crds_archive_checksums.no_arch.keys()"
-    msg: "Calico version not supported {{ calico_version }} not in {{ calico_crds_archive_checksums.no_arch.keys() }}"
+      - "calico_version in calico_crds_checksums.no_arch.keys()"
+    msg: "Calico version not supported {{ calico_version }} not in {{ calico_crds_checksums.no_arch.keys() }}"
   run_once: true
   delegate_to: "{{ groups['kube_control_plane'][0] }}"
 
@@ -61,6 +61,7 @@
         executable: /bin/bash
       register: calico_version_on_server
       changed_when: false
+      check_mode: false
 
     - name: Assert that current calico version is enough for upgrade
       assert:
@@ -155,7 +156,7 @@
   when:
     - ipv4_stack | bool
     - calico is defined
-    - calico.rc == 0 and calico.stdout
+    - calico.rc == 0 and calico.stdout != ''
   run_once: true
   delegate_to: "{{ groups['kube_control_plane'][0] }}"
 
@@ -185,21 +186,21 @@
 
 - name: "Set calico_pool_ipv6_conf"
   set_fact:
-    calico_pool_conf: '{{ calico_ipv6.stdout | from_json }}'
+    calico_pool_ipv6_conf: '{{ calico_ipv6.stdout | from_json }}'
   when:
     - ipv6_stack | bool
-    - alico_ipv6 is defined
-    - calico_ipv6.rc == 0 and calico_ipv6.stdout
+    - calico_ipv6 is defined
+    - calico_ipv6.rc == 0 and calico_ipv6.stdout != ''
   run_once: true
   delegate_to: "{{ groups['kube_control_plane'][0] }}"
 
 - name: "Check if ipv6 inventory match current cluster configuration"
   assert:
     that:
-      - calico_pool_conf.spec.blockSize | int == calico_pool_blocksize_ipv6 | int
-      - calico_pool_conf.spec.cidr == (calico_pool_cidr_ipv6 | default(kube_pods_subnet_ipv6))
-      - not calico_pool_conf.spec.ipipMode is defined or calico_pool_conf.spec.ipipMode == calico_ipip_mode_ipv6
-      - not calico_pool_conf.spec.vxlanMode is defined or calico_pool_conf.spec.vxlanMode == calico_vxlan_mode_ipv6
+      - calico_pool_ipv6_conf.spec.blockSize | int == calico_pool_blocksize_ipv6 | int
+      - calico_pool_ipv6_conf.spec.cidr == (calico_pool_cidr_ipv6 | default(kube_pods_subnet_ipv6))
+      - not calico_pool_ipv6_conf.spec.ipipMode is defined or calico_pool_ipv6_conf.spec.ipipMode == calico_ipip_mode_ipv6
+      - not calico_pool_ipv6_conf.spec.vxlanMode is defined or calico_pool_ipv6_conf.spec.vxlanMode == calico_vxlan_mode_ipv6
     msg: "Your ipv6 inventory doesn't match the current cluster configuration"
   when:
     - ipv6_stack | bool

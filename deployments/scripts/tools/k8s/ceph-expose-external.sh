@@ -40,7 +40,11 @@ CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
 EXPORT_CONF="${CEPH_EXTERNAL_CONF:-${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf}"
 ROOK_DIR="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}"
 # ---- 外部专用资源/用户(2026-09-07 完整预定义; 对齐"外部 ceph-csi-operator 连接所需全部信息") ----
-EXT_USER="${CEPH_EXTERNAL_USER:-cubestack-ext-rbd}"                 # 外部 RBD 专用用户
+EXT_USER="${CEPH_EXTERNAL_USER:-cubestack-ext-rbd}"
+# MDS placement 用的存储节点标签(与 02_ceph / lib-common 同源; 外部 FS 的 MDS 也要钉在存储节点)
+_CEPH_STORAGE_LABEL="${CEPH_NODE_LABEL:-ceph-storage=rook-ceph}"
+_SL_KEY="${_CEPH_STORAGE_LABEL%%=*}"
+_SL_VAL="${_CEPH_STORAGE_LABEL#*=}"                 # 外部 RBD 专用用户
 EXT_RBD_POOL="${CEPH_EXTERNAL_RBD_POOL:-cubestack-ext-rbd-pool}"    # 外部专用 RBD pool(独立于集群内 rbd-pool)
 EXT_RBD_PG="${CEPH_EXTERNAL_RBD_PG:-32}"                            # 外部 RBD pool PG 数
 EXT_CEPHFS_ENABLED="${CEPH_EXTERNAL_CEPHFS:-${CEPHFS_ENABLED:-false}}"  # 外部 CephFS(随集群 CEPHFS_ENABLED)
@@ -456,6 +460,8 @@ apply_main() {
             -e "s|__FS_DATA_POOL__|${EXT_FS_DATA}|g" \
             -e "s|__REPLICAS__|${CEPH_POOL_REPLICAS:-3}|g" \
             -e "s|__MIN_SIZE__|${CEPH_POOL_MIN_SIZE:-2}|g" \
+            -e "s|__STORAGE_LABEL_KEY__|${_SL_KEY}|g" \
+            -e "s|__STORAGE_LABEL_VALUE__|${_SL_VAL}|g" \
             "${ROOK_DIR}/external/03-cephfilesystem-external.yaml")" \
             || { warn "  CephFilesystem CR 模板缺失: ${ROOK_DIR}/external/03-cephfilesystem-external.yaml"; unset _fp _fp_pool _fp_pg; return 0; }
         printf '%s' "${_FS_CR}" | ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \

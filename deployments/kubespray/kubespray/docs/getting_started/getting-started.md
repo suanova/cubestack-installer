@@ -15,16 +15,15 @@ and [details on the inventory structure expected by Kubespray](/docs/ansible/inv
 <your-favorite-editor> inventory/mycluster/inventory.ini
 
 # Review and change parameters under ``inventory/mycluster/group_vars``
-<your-favorite-editor> inventory/mycluster/group_vars/all.yml # for every node, including etcd
-<your-favorite-editor> inventory/mycluster/group_vars/k8s_cluster.yml # for every node in the cluster (not etcd when it's separate)
+<your-favorite-editor> inventory/mycluster/group_vars/all/all.yml # for every node, including etcd
+<your-favorite-editor> inventory/mycluster/group_vars/k8s_cluster/k8s-cluster.yml # for every node in the cluster (not etcd when it's separate)
 <your-favorite-editor> inventory/mycluster/group_vars/kube_control_plane.yml # for the control plane
-<your-favorite-editor> inventory/myclsuter/group_vars/kube_node.yml # for worker nodes
 ```
 
 ## Installing the cluster
 
 ```ShellSession
-ansible-playbook -i inventory/mycluster/ cluster.yml -b -v \
+ansible-playbook -i inventory/mycluster/inventory.ini cluster.yml -b -v \
   --private-key=~/.ssh/private_key
 ```
 
@@ -36,7 +35,7 @@ You may want to add worker, control plane or etcd nodes to your existing cluster
 - Run the ansible-playbook command, substituting `cluster.yml` for `scale.yml`:
 
 ```ShellSession
-ansible-playbook -i inventory/mycluster/hosts.yml scale.yml -b -v \
+ansible-playbook -i inventory/mycluster/inventory.ini scale.yml -b -v \
   --private-key=~/.ssh/private_key
 ```
 
@@ -54,17 +53,14 @@ is not working, you can remove the node and install it again.
 Use `--extra-vars "node=<nodename>,<nodename2>"` to select the node(s) you want to delete.
 
 ```ShellSession
-ansible-playbook -i inventory/mycluster/hosts.yml remove-node.yml -b -v \
+ansible-playbook -i inventory/mycluster/inventory.ini remove-node.yml -b -v \
 --private-key=~/.ssh/private_key \
 --extra-vars "node=nodename,nodename2"
 ```
 
 > Note: The playbook does not currently support the removal of the first control plane or etcd node. These nodes are essential for maintaining cluster operations and must remain intact.
 
-If a node is completely unreachable by ssh, add `--extra-vars reset_nodes=false`
-to skip the node reset step. If one node is unavailable, but others you wish
-to remove are able to connect via SSH, you could set `reset_nodes=false` as a host
-var in inventory.
+If a node is completely unreachable by ssh, add `--extra-vars '{"reset_nodes": false}'` to skip the node reset step. If one node is unavailable, but others you wish to remove are able to connect via SSH, you could set `reset_nodes=False` as a host var in inventory.
 
 ## Connecting to Kubernetes
 
@@ -83,37 +79,11 @@ authentication. One can get a kubeconfig from kube_control_plane hosts
 For more information on kubeconfig and accessing a Kubernetes cluster, refer to
 the Kubernetes [documentation](https://kubernetes.io/docs/tasks/access-application-cluster/configure-access-multiple-clusters/).
 
-## Accessing Kubernetes Dashboard
-
-Supported version is kubernetes-dashboard v2.0.x :
-
-- Login option : token/kubeconfig by default
-- Deployed by default in "kube-system" namespace, can be overridden with `dashboard_namespace: kubernetes-dashboard` in inventory,
-- Only serves over https
-
-Access is described in [dashboard docs](https://github.com/kubernetes/dashboard/tree/master/docs/user/accessing-dashboard). With kubespray's default deployment in kube-system namespace, instead of kubernetes-dashboard :
-
-- Proxy URL is <http://localhost:8001/api/v1/namespaces/kube-system/services/https:kubernetes-dashboard:/proxy/#/login>
-- kubectl commands must be run with "-n kube-system"
-
-Accessing through Ingress is highly recommended. For proxy access, please note that proxy must listen to [localhost](https://github.com/kubernetes/dashboard/issues/692#issuecomment-220492484) (`proxy  --address="x.x.x.x"` will not work)
-
-For token authentication, guide to create Service Account is provided in [dashboard sample user](https://github.com/kubernetes/dashboard/blob/master/docs/user/access-control/creating-sample-user.md) doc. Still take care of default namespace.
-
-Access can also by achieved via ssh tunnel on a control plane :
-
-```bash
-# localhost:8081 will be sent to control-plane-1's own localhost:8081
-ssh -L8001:localhost:8001 user@control-plane-1
-sudo -i
-kubectl proxy
-```
-
 ## Accessing Kubernetes API
 
 The main client of Kubernetes is `kubectl`. It is installed on each kube_control_plane
 host and can optionally be configured on your ansible host by setting
-`kubectl_localhost: true` and `kubeconfig_localhost: true` in the configuration:
+`kubectl_localhost: true` and `kubeconfig_localhost: true` in `inventory/mycluster/group_vars/k8s_cluster/k8s-cluster.yml`:
 
 - If `kubectl_localhost` enabled, `kubectl` will download onto `/usr/local/bin/` and setup with bash completion. A helper script `inventory/mycluster/artifacts/kubectl.sh` also created for setup with below `admin.conf`.
 - If `kubeconfig_localhost` enabled `admin.conf` will appear in the `inventory/mycluster/artifacts/` directory after deployment.

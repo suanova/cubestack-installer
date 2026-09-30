@@ -12,7 +12,6 @@ To install development dependencies you can set up a python virtual env with the
 virtualenv venv
 source venv/bin/activate
 pip install -r tests/requirements.txt
-ansible-galaxy install -r tests/requirements.yml
 ```
 
 #### Linting
@@ -26,7 +25,7 @@ pre-commit run -a  # To run pre-commit hook on all files in the repository, even
 
 #### Molecule
 
-[molecule](https://github.com/ansible-community/molecule) is designed to help the development and testing of Ansible roles. In Kubespray you can run it all for all roles with `./tests/scripts/molecule_run.sh` or for a specific role (that you are working with) with `molecule test` from the role directory (`cd roles/my-role`).
+[molecule](https://github.com/ansible-community/molecule) is designed to help the development and testing of Ansible roles. In Kubespray you can run it all for all roles with `find roles -name molecule -type d -execdir molecule test --all -- -e @$PWD/tests/common_vars.yml \;` or for a specific role (that you are working with) with `molecule test` from the role directory (`cd roles/my-role`).
 
 When developing or debugging a role it can be useful to run `molecule create` and `molecule converge` separately. Then you can use `molecule login` to SSH into the test environment.
 
@@ -40,7 +39,7 @@ Vagrant with VirtualBox or libvirt driver helps you to quickly spin test cluster
 2. The [repo owners](OWNERS) will respond to your issue promptly.
 3. Fork the desired repo, develop and test your code changes.
 4. Install [pre-commit](https://pre-commit.com) and install it in your development repo.
-5. Addess any pre-commit validation failures.
+5. Address any pre-commit validation failures.
 6. Sign the CNCF CLA (<https://git.k8s.io/community/CLA.md#the-contributor-license-agreement>)
 7. Submit a pull request.
 8. Work with the reviewers on their suggestions.

@@ -22,7 +22,8 @@ local_release_dir: "/tmp/releases"
 # Random shifts for retrying failed ops like pushing/downloading
 retry_stagger: 5
 
-# This is the user that owns tha cluster installation.
+# This is the user that owns the cluster installation.
+# Note: cilium needs to set kube_owner to root https://kubespray.io/#/docs/CNI/cilium?id=unprivileged-agent-configuration
 kube_owner: kube
 
 # This is the group that the cert creation scripts chgrp the
@@ -52,6 +53,21 @@ credentials_dir: "{{ inventory_dir }}/credentials"
 # kube_oidc_groups_claim: groups
 # kube_oidc_groups_prefix: 'oidc:'
 
+## Structured AuthenticationConfiguration https://kubernetes.io/docs/reference/access-authn-authz/authentication/#using-authentication-configuration
+## Note: --authentication-config and --oidc-* flags are mutually exclusive
+# kube_apiserver_use_authentication_config_file: false
+# kube_apiserver_authentication_config_jwt:
+#   - issuer:
+#       url: https://issuer.example.com
+#       audiences:
+#       - my-audience
+#     claimMappings:
+#       username:
+#         expression: 'claims.sub'
+# kube_apiserver_authentication_config_anonymous:
+#   enabled: "{{ kube_api_anonymous_auth }}"
+#   conditions: []
+
 ## Variables to control webhook authn/authz
 # kube_webhook_token_auth: false
 # kube_webhook_token_auth_url: https://...
@@ -62,7 +78,7 @@ credentials_dir: "{{ inventory_dir }}/credentials"
 # kube_webhook_authorization_url: https://...
 # kube_webhook_authorization_url_skip_tls_verify: false
 
-# Choose network plugin (cilium, calico, kube-ovn, weave or flannel. Use cni for generic cni plugin)
+# Choose network plugin (cilium, calico, kube-ovn or flannel. Use cni for generic cni plugin)
 # Can also be set to 'cloud', which lets the cloud provider setup appropriate routing
 kube_network_plugin: calico
 
@@ -277,7 +293,6 @@ default_kubelet_config_dir: "{{ kube_config_dir }}/dynamic_kubelet_dir"
 ## Eviction Thresholds to avoid system OOMs
 # https://kubernetes.io/docs/tasks/administer-cluster/reserve-compute-resources/#eviction-thresholds
 # eviction_hard: {}
-# eviction_hard_control_plane: {}
 
 # An alternative flexvolume plugin directory
 # kubelet_flexvolumes_plugins_dir: /usr/libexec/kubernetes/kubelet-plugins/volume/exec
@@ -346,7 +361,7 @@ event_ttl_duration: "1h0m0s"
 ## Automatically renew K8S control plane certificates on first Monday of each month
 auto_renew_certificates: false
 # First Monday of each month
-# auto_renew_certificates_systemd_calendar: "Mon *-*-1,2,3,4,5,6,7 03:{{ groups['kube_control_plane'].index(inventory_hostname) }}0:00"
+# auto_renew_certificates_systemd_calendar: "Mon *-*-1,2,3,4,5,6,7 03:00:00"
 
 kubeadm_patches_dir: "{{ kube_config_dir }}/patches"
 kubeadm_patches: []

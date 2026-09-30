@@ -17,6 +17,19 @@
   hosts: kube_node
   gather_facts: false
   vars:
+    # 必需包(唯一来源): 末尾断言按此校验; 上面的"资产预检"也按此检查 .deb 是否随离线件提供。
+    required_packages:
+      - iputils-ping
+      - rsync
+      - iptables
+      - curl
+      - ca-certificates
+      - lvm2
+      - dmsetup
+      - dmeventd
+      - libdevmapper1.02.1
+      - libdevmapper-event1.02.1
+      - thin-provisioning-tools
     # ★ 离线目录解析: 优先用 offline.yml 注入的 download_cache_dir(= LOCAL_REPO_DIR, 由
     #   cubestack-offline.sh 生成且 -e @offline.yml 全局可用), 保证与离线文件实际位置一致;
     #   容器/standalone 下 playbook_dir 相对路径会算到 deployments/kubespray/offline-files(不存在)。
@@ -41,6 +54,25 @@
       delegate_to: localhost
       register: deb_files
 
+    - name: "Find whitelisted .deb in packages/repair (仅白名单包)"
+      # ★ 2026-09-29 根因修复: 部分**必需包**的 .deb 不在 packages/ 顶层, 而在 packages/repair/
+      #   (node 包对账工具用的修复集)。Ansible 的 find 模块**默认 recurse: no** ⇒ 顶层那次扫描
+      #   看不到它们 ⇒ curl 从未被安装 ⇒ 下方 required_packages 断言在"镜像自带 curl"的机器上
+      #   侥幸通过, 在**精简 VM 镜像**(无 curl)上必然失败(实机 2026-09-29: 三台 worker 全挂 item=curl)。
+      #   ⚠ 不能图省事给上面那次 find 开 recurse: yes —— repair/ 里还有 systemd/libudev1/udev 家族,
+      #     盲目安装会重演 2026-09-28 的"离线包顶版 → apt 依赖图破损"事故。故只按**白名单**取。
+      #   新增必需包时: 把 .deb 放进 packages/(首选), 或在此处加一条 patterns 并同步 required_packages。
+      find:
+        paths:
+          - "{{ offline_dir }}/packages/repair"
+        patterns:
+          - "curl_*.deb"
+          - "libcurl4_*.deb"
+        file_type: file
+      delegate_to: localhost
+      register: deb_files_repair
+      failed_when: false
+
     - name: Copy offline .deb packages to target
       # ★ 不能 delegate_to: localhost —— 那样 src/dest 都解析为控制器路径, 只会把 .deb 原地复制到
       #   控制器 /tmp/packages, 节点永远收不到(此前 dpkg 报 cannot access archive)。
@@ -48,8 +80,8 @@
       copy:
         src: "{{ item.path }}"
         dest: /tmp/packages/
-      loop: "{{ deb_files.files }}"
-      when: deb_files.files | length > 0
+      loop: "{{ (deb_files.files | default([])) + (deb_files_repair.files | default([])) }}"
+      when: ((deb_files.files | default([])) | length) + ((deb_files_repair.files | default([])) | length) > 0
 
     - name: Install packages from local files (逐包安装, 单包失败不阻断)
       # ★ 逐个 dpkg -i + ignore_errors: 任何单个包失败(如 skopeo 缺 golang-github-containers-common /
@@ -86,28 +118,91 @@
         if [ "${n_rbd:-0}" -gt 0 ]; then
           echo "[install-packages] ⚠ 本节点存在 ${n_rbd} 个内核 rbd 映射 —— 若其后端已不可达, 任何设备扫描都会卡死; 见 docs/troubleshooting.md"
         fi
+        # ★ 2026-09-29(用户要求: 装之前先修 apt)—— **离线安全版**:
+        #   `apt --fix-broken install` / `apt-get -f install` 在纯离线节点上会去抓缺失的包并失败
+        #   (实机: `E: Unable to fetch some archives`), 所以这里只做**不需要网络**的两步:
+        #     ① `dpkg --configure -a`        —— 把"解包未配置"(iU)的包配上(依赖已在场时才可能成功)
+        #     ② `apt-get -f install --no-download` —— 只用 /var/cache/apt/archives 里已有的包补依赖
+        #   两步都 best-effort 不阻断; 真正"缺依赖且离线补不到"的可选包由下方回滚逻辑兜底。
+        dpkg --configure -a >/dev/null 2>&1 || true
+        apt-get -f install --no-download -y >/dev/null 2>&1 || true
+        dpkg --configure -a >/dev/null 2>&1 || true
         failed=""
         skipped=""
+        attempted=""
         for deb in /tmp/packages/*.deb; do
           [ -e "${deb}" ] || continue
           pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"
           newver="$(dpkg-deb -f "${deb}" Version 2>/dev/null)"
           curstat="$(dpkg-query -W -f='${db:Status-Abbrev}|${Version}' "${pkg}" 2>/dev/null || true)"
-          if [ -n "${pkg}" ] && [ -n "${newver}" ] && [ "${curstat}" = "ii |${newver}" ]; then
+          # ★ 2026-09-28 事故修复(实机): 判据原为"**已装且版本相同**才跳过" ⇒ 版本不同的离线包
+          #   会被覆盖安装 —— 本仓库的 libudev1_…3.22 就这么把节点的 libudev1(3.12)升了级,
+          #   而节点的 udev 仍是 3.12 且**严格依赖 `libudev1 (= 3.12)`** ⇒ dpkg 依赖被打破,
+          #   该节点上**任何 apt 操作都失败**(E: Unmet dependencies)⇒ 下次部署在 bootstrap_os →
+          #   system_packages 的 "Manage packages" 上死掉(且报错只提 udev, 根因在几轮之前)。
+          #   现改为与 tools/node/install-worker-packages.sh 同一条经过验证的规则:
+          #   **远端已装同名包(任意版本) ⇒ 一律跳过**(宁缺毋滥, 绝不拿离线包去动节点已装的系统包);
+          #   需要"升级"时走 apt, 不走这套离线 .deb。必需包**是否在场**由下方 Verify required packages 校验。
+          if [ -n "${pkg}" ] && [ -n "${newver}" ] && [ "${curstat#ii }" != "${curstat}" ]; then
             skipped="${skipped} ${pkg}"
             continue
           fi
-          if ! dpkg -i "${deb}" >/dev/null 2>&1; then
-            failed="${failed} $(basename "${deb}")"
+          attempted="${attempted} ${deb}"
+          dpkg -i "${deb}" >/dev/null 2>&1 || true
+        done
+        # ★ 2026-09-29 根因修复(第二层): 逐个 dpkg -i 时, **依赖包排在后面就必然先失败** ——
+        #   curl 依赖 libcurl4, 而字典序 `curl_*` 在 `libcurl4_*` 之前 ⇒ curl 首轮必失败、
+        #   libcurl4 紧随其后装上, 结果 curl 始终缺失(在自带 curl 的镜像上被掩盖)。
+        #   这里把首轮**没装上**的包**成组再装一次**: 同一次 dpkg -i 调用内 dpkg 会自行排序,
+        #   满足批内依赖。
+        retry=""
+        for deb in ${attempted}; do
+          pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"
+          dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null | grep -q '^ii' || retry="${retry} ${deb}"
+        done
+        if [ -n "${retry}" ]; then
+          # shellcheck disable=SC2086
+          dpkg -i ${retry} >/dev/null 2>&1 || true
+        fi
+        # ★ 2026-09-29 根因修复(第三层; 实机: 精简 VM 上 sysstat 卡在 `iU` ⇒ apt 依赖图破损 ⇒
+        #   node_pkgs 对账硬失败、整个部署中断):
+        #   可选包的**依赖没随离线件提供**时, dpkg -i 会把它留在"解包未配置"(iU) —— 这不止是该包
+        #   不可用, 还会**弄坏 apt 依赖图**(之后任何 apt 操作都报 Unmet dependencies), 而离线节点上
+        #   apt 补不回来(要联网抓包) ⇒ **回滚**: 把尝试过却没配起来的包 purge 掉, 恢复 apt 健康,
+        #   并明确打印"缺哪个依赖 → 应补哪个 deb 进 packages/"。最终成功与否一律按**实际安装状态**
+        #   (dpkg-query 的 `ii`)判定, 不看 dpkg 退出码。
+        rolled=""
+        for deb in ${attempted}; do
+          pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"
+          [ -n "${pkg}" ] || continue
+          st="$(dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null || true)"
+          case "${st}" in
+            ii*) continue ;;                                            # 装好
+            "")  failed="${failed} $(basename "${deb}")"; continue ;;    # 根本没落进 dpkg
+          esac
+          miss=""
+          for d in $(dpkg-deb -f "${deb}" Depends 2>/dev/null | tr ',' '\n' \
+                     | sed 's/([^)]*)//g; s/|.*//g; s/[[:space:]]//g'); do
+            [ -n "${d}" ] || continue
+            dpkg-query -W -f='${db:Status-Abbrev}' "${d}" 2>/dev/null | grep -q '^ii' || miss="${miss} ${d}"
+          done
+          if dpkg --purge "${pkg}" >/dev/null 2>&1; then
+            rolled="${rolled} ${pkg}(缺:${miss:-未知})"
+          else
+            failed="${failed} ${pkg}(回滚失败)"
           fi
         done
         if [ -n "${ir_backup}" ] && [ -f "${ir_backup}" ]; then
           cp -a "${ir_backup}" "${ir_conf}"; rm -f "${ir_backup}"
         fi
         rm -rf /tmp/packages
-        [ -n "${skipped}" ] && echo "[install-packages] 已装同版本, 跳过:${skipped}"
+        [ -n "${skipped}" ] && echo "[install-packages] 已装(任意版本) ⇒ 跳过(不改动节点已装系统包):${skipped}"
+        if [ -n "${rolled}" ]; then
+          echo "⚠ 以下可选包因**依赖未随离线件提供**装不全, 已回滚(purge)以保住 apt 依赖图健康:${rolled}"
+          echo "   ↳ 修法: 把这些依赖的 .deb 也放进 packages/(或在联网机把它们加进 tools/offline/fetch-lvm-packages.sh 的清单后重跑)"
+        fi
         if [ -n "${failed}" ]; then
-          echo "⚠ 以下包安装失败(通常为可选工具缺依赖, 不影响 ceph):${failed}"
+          echo "⚠ 以下包安装失败且未能回滚(请人工确认, 会影响 apt 依赖图):${failed}"
         fi
       become: true
       ignore_errors: true
@@ -116,8 +211,10 @@
     - name: Derive expected package names from shipped .deb files
       # deb 文件名 <name>_<version>_<arch>.deb → 包名(如 lvm2_2.03.11-2.1ubuntu2_amd64.deb → lvm2)
       set_fact:
-        expected_packages: "{{ deb_files.files | map(attribute='path') | map('basename') | map('regex_replace', '_.*', '') | unique | list }}"
-      when: deb_files.files | length > 0
+        expected_packages: >-
+          {{ ((deb_files.files | default([])) + (deb_files_repair.files | default([])))
+             | map(attribute='path') | map('basename') | map('regex_replace', '_.*', '') | unique | list }}
+      when: ((deb_files.files | default([])) | length) + ((deb_files_repair.files | default([])) | length) > 0
 
     - name: Warn when lvm2 offline package is not shipped
       debug:
@@ -128,6 +225,21 @@
       when:
         - deb_files.files | length > 0
         - "'lvm2' not in expected_packages"
+
+    - name: "Precheck: 必需包必须随离线件提供 .deb(缺失则立刻停, 不等节点断言)"
+      # ★ 2026-09-29 加: 这条把"离线件缺包"从**节点上的断言失败**(在 3 台机器上刷屏、看不出该补什么)
+      #   提前成**起点处的明确报错**。本文件历史上就吃过一次: required_packages 里有 curl,
+      #   而 curl 的 .deb 只在 packages/repair/(find 不递归扫不到) ⇒ 精简 VM 上必失败。
+      assert:
+        that:
+          - item in (expected_packages | default([]))
+        fail_msg: >-
+          ❌ 必需包 {{ item }} 没有对应的 .deb 随离线件提供(它会缺席节点, 并让本 play 末尾的断言失败)。
+          修法: 把 {{ item }} 的 .deb 放进 {{ offline_dir }}/packages/;若该 deb 在 repair/ 里,
+          就把它加进上面 "packages/repair 白名单" 任务的 patterns。
+        success_msg: "必需包 {{ item }} 的 .deb 已随离线件提供"
+      loop: "{{ required_packages }}"
+      when: ((deb_files.files | default([])) | length) + ((deb_files_repair.files | default([])) | length) > 0
 
     - name: Verify required packages
       package_facts:
@@ -141,17 +253,4 @@
         fail_msg: "Required package missing on {{ inventory_hostname }}: {{ item }}"
         success_msg: "All required packages installed on {{ inventory_hostname }}"
       loop: "{{ required_packages }}"
-      vars:
-        required_packages:
-          - iputils-ping
-          - rsync
-          - iptables
-          - curl
-          - ca-certificates
-          - lvm2
-          - dmsetup
-          - dmeventd
-          - libdevmapper1.02.1
-          - libdevmapper-event1.02.1
-          - thin-provisioning-tools
-      when: deb_files.files | length > 0
+      when: ((deb_files.files | default([])) | length) + ((deb_files_repair.files | default([])) | length) > 0
