@@ -17,7 +17,7 @@
 #         (cluster.conf / hosts.yml / inventory.ini / artifacts)。
 # 基础镜像: 默认 ubuntu:22.04 完整重建; 本地缺失时自动从
 #           deployments/offline-files/os/ubuntu-22.04.tar docker load(离线可构建)。
-# 增量构建(--incremental): 基础 = Harbor 旧 CLI 镜像, 只补装缺失 package + 更新 deployments, 秒级。
+# 增量构建(--incremental): 与 --build 同为**代码层**构建(都 FROM base), 区别只是跳过依赖对齐。
 #   ⚠ **层数累积(2026-09-30 实测)**:增量每次在旧镜像上再叠十几层 ⇒ 层数单调增长;几百层时
 #     containerd overlayfs 的 lowerdir(全部祖先层)超过内核 PAGE_SIZE 上限(4096 字节)⇒ buildkit 报
 #     `mount source: overlay ... invalid argument`(实测 443 → 590 层, 第 5 步即挂不上, 与 Dockerfile 无关)。
@@ -28,6 +28,10 @@
 #       sudo ./build-cli-context.sh --build --push    # 全量构建并推送 Harbor
 #       sudo ./build-cli-context.sh --build --incremental   # 增量构建(基础 Harbor latest)
 #       sudo ./build-cli-context.sh --build --incremental --push   # 增量构建并推送
+#       sudo ./build-cli-context.sh --base            # **只在系统/工具/依赖变化时**重建 base 层
+#       sudo ./build-cli-context.sh --base --push     # 重建并推送 base 层
+# ★ 两层结构(2026-09-30): base(Dockerfile-cli-base: 系统+工具链+ansible+mc)极少变;
+#   --build / --incremental 都只做**代码层**(FROM base + copy deployments)⇒ 快, 且**层数不累积**。
 #       sudo ./build-cli-context.sh --output /tmp/cli-ctx
 # 构建(手动): 生成后执行
 #       sudo docker build -f Dockerfile-cli -t harbor.isuanova.com/cubestack/cubestack-installer-cli:latest deployments/cli-context/
@@ -41,9 +45,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 OUT="${REPO_ROOT}/deployments/cli-context"
 IMAGE="harbor.isuanova.com/cubestack/cubestack-installer-cli:latest"
 BASE_IMAGE="ubuntu:22.04"
-INC_BASE_IMAGE="harbor.isuanova.com/cubestack/cubestack-installer-cli:latest"
+# 两层结构(2026-09-30): base = 系统+工具链层(极少变), 代码层 FROM 它 ⇒ 层数不累积
+CLI_BASE_TAG="harbor.isuanova.com/cubestack/cubestack-installer-cli-base:latest"
+CLI_BASE_DOCKERFILE="${REPO_ROOT}/Dockerfile-cli-base"
+INC_BASE_IMAGE="${CLI_BASE_TAG}"
 OS_TAR="${REPO_ROOT}/deployments/offline-files/os/ubuntu-22.04.tar"
 DO_BUILD=0
+DO_BASE=0
 DO_PUSH=0
 INCREMENTAL=0
 while [ $# -gt 0 ]; do
@@ -52,8 +60,9 @@ while [ $# -gt 0 ]; do
         --build)  DO_BUILD=1; shift ;;
         --push)   DO_BUILD=1; DO_PUSH=1; shift ;;
         --incremental) DO_BUILD=1; INCREMENTAL=1; shift ;;
+        --base)   DO_BASE=1; DO_BUILD=1; shift ;;
         -h|--help) head -20 "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) err "未知参数: $1(可用 --output/--build/--push/--incremental)"; exit 1 ;;
+        *) err "未知参数: $1(可用 --output/--build/--push/--incremental/--base)"; exit 1 ;;
     esac
 done
 
@@ -66,6 +75,7 @@ mkdir -p "${OUT}/deployments"
 # 后面 docker build 用 -f "${OUT}/<Dockerfile>", 保证构建与最新 Dockerfile 一致。
 # .dockerignore 同理; 根目录缺失时(如只拷出 deployments)回退用上下文内默认。
 cp "${REPO_ROOT}/Dockerfile-cli" "${OUT}/Dockerfile-cli"
+[ -f "${CLI_BASE_DOCKERFILE}" ] && cp "${CLI_BASE_DOCKERFILE}" "${OUT}/Dockerfile-cli-base"
 [ -f "${REPO_ROOT}/Dockerfile-cli-incremental" ] && cp "${REPO_ROOT}/Dockerfile-cli-incremental" "${OUT}/Dockerfile-cli-incremental"
 [ -f "${REPO_ROOT}/.dockerignore" ] && cp "${REPO_ROOT}/.dockerignore" "${OUT}/.dockerignore" \
     || touch "${OUT}/.dockerignore"
@@ -140,32 +150,8 @@ echo ""
 ok "构建上下文就绪: ${OUT}  ($(du -sh "${OUT}" 2>/dev/null | awk '{print $1}'))"
 
 if [ "${DO_BUILD}" = "1" ]; then
-    if [ "${INCREMENTAL}" = "1" ]; then
-        # ---- 增量构建: 基础 = Harbor 旧 CLI 镜像, 只补装缺失包 + 更新 deployments ----
-        if ! docker image inspect "${INC_BASE_IMAGE}" >/dev/null 2>&1; then
-            say "本地无 ${INC_BASE_IMAGE}, 尝试从 Harbor 拉取 ..."
-            docker pull "${INC_BASE_IMAGE}" 2>/dev/null || {
-                err "增量构建需要基础镜像 ${INC_BASE_IMAGE}(本地或 Harbor); 首次构建请用全量 --build 或 docker pull"; exit 1; }
-        fi
-        say "增量构建(基础 ${INC_BASE_IMAGE}: 补装缺失包 + 更新 deployments) ..."
-        # ---- 层数守卫(2026-09-30 实测血泪) ----
-        #   增量构建每次都在旧镜像上再叠十几层 ⇒ 层数**单调累积**;层数到几百层时,
-        #   containerd overlayfs 会把**全部祖先层**拼成 lowerdir,挂载选项字符串超过内核
-        #   PAGE_SIZE(4096 字节)上限 ⇒ buildkit 报 "mount source: overlay ... invalid argument"
-        #   (实测: 2026-09-24 镜像 443 层 → latest 590 层, 第 5 步就挂不上; 与 Dockerfile 内容无关)。
-        #   ⇒ 超阈值直接拒绝增量, 让操作者做一次**全量构建**(基础 ubuntu:22.04, 层数归零)。
-        _blayers="$(docker history --no-trunc "${INC_BASE_IMAGE}" 2>/dev/null | tail -n +2 | wc -l)"
-        if [ -n "${_blayers}" ] && [ "${_blayers}" -gt "${INCREMENTAL_MAX_LAYERS:-300}" ]; then
-            err "基础镜像层数 ${_blayers} 已超阈值 ${INCREMENTAL_MAX_LAYERS:-300} —— 继续增量会撞内核 overlay 挂载上限"
-            err "  → 改做一次全量构建(层数归零): sudo $0 --build"
-            err "  → 原因与阈值说明见本脚本头部「层数累积」段"
-            exit 1
-        fi
-        say "基础镜像层数 ${_blayers}(阈值 ${INCREMENTAL_MAX_LAYERS:-300}; 超了就改全量构建)"
-        docker build -f "${OUT}/Dockerfile-cli-incremental" -t "${IMAGE}" "${OUT}" \
-            || { err "增量构建失败"; exit 1; }
-    else
-        # ---- 全量构建: 基础 ubuntu:22.04, 本地缺失时从离线 OS 镜像 tar docker load(离线可构建) ----
+    if [ "${DO_BASE}" = "1" ]; then
+        # ---- 只重建 base 层(系统+工具链): 新增 package/工具/依赖版本变化时才需要 ----
         if ! docker image inspect "${BASE_IMAGE}" >/dev/null 2>&1; then
             if [ -f "${OS_TAR}" ]; then
                 say "本地无 ${BASE_IMAGE}, 从离线文件 docker load ..."
@@ -175,10 +161,32 @@ if [ "${DO_BUILD}" = "1" ]; then
                 exit 1
             fi
         fi
-        say "构建镜像(基于 ${BASE_IMAGE}) ..."
-        docker build -f "${OUT}/Dockerfile-cli" -t "${IMAGE}" "${OUT}" \
-            || { err "构建失败"; exit 1; }
+        [ -f "${OUT}/Dockerfile-cli-base" ] || { err "上下文缺 Dockerfile-cli-base(仓库里没有 ${CLI_BASE_DOCKERFILE}?)"; exit 1; }
+        say "构建 base 层(系统+工具链; 需要联网 apt/pip) → ${CLI_BASE_TAG} ..."
+        docker build -f "${OUT}/Dockerfile-cli-base" -t "${CLI_BASE_TAG}" "${OUT}" \
+            || { err "base 构建失败"; exit 1; }
+        _base_layers="$(docker history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l)"
+        ok "base 层完成: ${CLI_BASE_TAG}(${_base_layers} 层)"
     fi
+
+    # ---- 代码层构建(两种 Dockerfile 都 FROM base): 只 copy deployments 代码, 层数不累积 ----
+    if ! docker image inspect "${CLI_BASE_TAG}" >/dev/null 2>&1; then
+        say "本地无 base 镜像 ${CLI_BASE_TAG}, 尝试从 Harbor 拉取 ..."
+        docker pull "${CLI_BASE_TAG}" 2>/dev/null || {
+            err "缺 base 镜像 ${CLI_BASE_TAG}(本地与 Harbor 都没有)"
+            err "  → 首次/系统或工具变化时先建 base: sudo $0 --base     (需要联网 apt/pip)"
+            exit 1; }
+    fi
+    _df="Dockerfile-cli"; [ "${INCREMENTAL}" = "1" ] && _df="Dockerfile-cli-incremental"
+    # 层数信息(base 是固定的, 代码层每次只加 1~2 层; 这里给个可观察的数字)
+    _base_layers="$(docker history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l)"
+    _cur_layers="$(docker history --no-trunc "${IMAGE}" 2>/dev/null | tail -n +2 | wc -l)"
+    say "代码层构建(${_df} ← base ${CLI_BASE_TAG}(base ${_base_layers} 层 / 当前 latest ${_cur_layers:-0} 层)) ..."
+    if [ "${INCREMENTAL}" = "1" ]; then
+        say "  说明: --incremental 只 copy 代码(不跑依赖对齐); 依赖变化请用 --build"
+    fi
+    docker build -f "${OUT}/${_df}" --build-arg "CLI_BASE_TAG=${CLI_BASE_TAG}" -t "${IMAGE}" "${OUT}" \
+        || { err "代码层构建失败"; exit 1; }
     ok "构建完成: ${IMAGE}"
     if [ "${DO_PUSH}" = "1" ]; then
         say "推送到 Harbor ..."

@@ -20,10 +20,16 @@ _cs_dir="${OFFLINE_FILES_DIR:-${_cs_repo}/deployments/offline-files/kubespray/${
 
 if [ -d "${_cs_dir}" ]; then
     # ① 静态二进制: kubectl / skopeo(版本目录里是 <名>-<版本>-amd64 形态)
+    #   ⚠ **拷贝 + chmod**, 不用软链: 离线件里这些文件的权限位不统一(实测 kubectl=644 而
+    #     skopeo=755), 软链到一个非可执行文件在容器里仍然不可执行;而且挂载常是只读的(:ro),
+    #     改不了源文件权限。拷贝到镜像层 /usr/local/bin 并 chmod 对两种情况都成立。
     for _cs_b in kubectl skopeo; do
         command -v "${_cs_b}" >/dev/null 2>&1 && continue
         _cs_f="$(ls "${_cs_dir}/${_cs_b}"-* 2>/dev/null | head -1)"
-        [ -n "${_cs_f}" ] && [ -x "${_cs_f}" ] && ln -sf "${_cs_f}" "/usr/local/bin/${_cs_b}" 2>/dev/null
+        [ -n "${_cs_f}" ] || continue
+        if cp -f "${_cs_f}" "/usr/local/bin/${_cs_b}" 2>/dev/null; then
+            chmod +x "/usr/local/bin/${_cs_b}" 2>/dev/null || true
+        fi
     done
     # ② helm: 压缩包形态, 解一次放 /opt/cubestack-tools(镜像层可写即可)
     if ! command -v helm >/dev/null 2>&1; then
