@@ -125,10 +125,14 @@ COPY deployments ${REPO_ROOT}/deployments
 COPY skills ${REPO_ROOT}/skills
 
 # 预装 kubespray Python 依赖(随 requirements.txt 精确锁定; 让运行时 ensure_venv
-# 用 --system-site-packages 直接继承, 完全离线, 不再新建空 venv 联网 pip install)。
-# 镜像已含以上全量构建的 ansible, 此处幂等补装 + 确保版本对齐。
+# 用 --system-site-packages 直接继承, 不再新建空 venv 联网 pip install)。
+# 镜像已含上面全量构建的 ansible, 此处按**新拷入的** requirements.txt 幂等补装 + 对齐版本。
+# ⚠ 必须用 python3.11(2026-09-30 实测): 用系统 python3(3.10)会报
+#   `No module named pip.__main__; 'pip' is a package and cannot be directly executed` 而中断全量构建;
+#   且运行期 cubestack-offline.sh 的 ensure_venv 明确优先挑 ≥3.11 的解释器(ansible 12 要求),
+#   ansible 装在 3.11 才是"运行时真正会用到的那份"(容器里 /usr/local/bin/ansible)。
 COPY deployments/kubespray/kubespray/requirements.txt /tmp/kubespray-requirements.txt
-RUN python3 -m pip install -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
+RUN python3.11 -m pip install -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
     && rm -f /tmp/kubespray-requirements.txt \
     && ansible --version 2>/dev/null | head -1
 
