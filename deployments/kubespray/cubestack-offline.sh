@@ -4,48 +4,32 @@ set -euo pipefail
 # 自动检测: 脚本所在目录 = deployments/kubespray/
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 离线资源根目录: 优先级:
-#   1. CUBESTACK_BASE_DIR 环境变量(由 deploy-cluster.sh 10_k8s_deploy 模块通过 env 传入)
-#   2. 脚本所在目录(本项目结构: SCRIPT_DIR = deployments/kubespray/)
-#   3. 回退 /opt/cubestack-installer(standalone 模式)
+# 运行根与布局(2026-09-30 起**不再靠父目录名判定** —— 物化版本树的父目录名不叫 deployments,
+#   旧判据会让它在物化后静默走错目录; 见 docs/kubespray-versioning/design.md §5.3):
+#   CUBESTACK_BASE_DIR  运行根(默认 = 脚本目录; 物化版本时 = deployments/kubespray/versions/<版本>)
+#   CUBESTACK_LAYOUT    布局: repo(默认, 离线件在 <仓库>/deployments/offline-files)/ flat(standalone)
 BASE_DIR="${CUBESTACK_BASE_DIR:-${SCRIPT_DIR}}"
-KUBESPRAY_DIR="${BASE_DIR}/kubespray"
-# 离线文件根目录(全局切换变量): 二进制/镜像/离线包统一存放位置
-# 优先级: OFFLINE_FILES_DIR 环境变量 > 默认(按部署布局自动判定):
-#   ① 仓库/容器布局 —— 脚本位于 <root>/deployments/kubespray/:
-#        <root>/deployments/offline-files/kubespray
-#      · 与全仓库其它脚本(lib-common.sh / install-worker-packages.sh / ceph-sync-images.sh)同一默认值;
-#      · 与 cluster.conf 的 LOCAL_REPO_DIR 约定一致 —— 仓库布局**不按集群名加子目录**;
-#      · 也与本脚本生成的 install-packages.yml 里 ../../offline-files/kubespray 一致。
-#   ② 扁平 standalone 布局 —— 脚本与 kubespray/、inventory/ 平铺同一层(如 /opt/cubestack-installer/):
-#        ${BASE_DIR}/offline-files/kubespray(按集群名隔离, 见 deployments/kubespray/README.md)
-# 注(2026-09-28 改): 此前两种布局都按 ② 推导 ⇒ 在仓库里直跑会把离线件下到
-#   deployments/kubespray/offline-files/…, 而部署流程读的是 deployments/offline-files/…,
-#   两者不是同一个目录 → 下载"成功"但部署时静默找不到镜像/二进制。现按布局区分。
-if [ "$(basename "$(dirname "${BASE_DIR}")")" = "deployments" ]; then
-    OFFLINE_LAYOUT="repo"
-    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-$(dirname "${BASE_DIR}")/offline-files/kubespray}"
+KUBESPRAY_DIR="${CUBESTACK_KUBESPRAY_DIR:-${BASE_DIR}/kubespray}"
+OFFLINE_LAYOUT="${CUBESTACK_LAYOUT:-repo}"
+# 离线件真根: repo 布局从**脚本位置**推(脚本始终在 <仓库>/deployments/kubespray/, 与运行根无关),
+# 不随 BASE_DIR 漂移 —— 这是"物化树不搬离线件"的落点。
+if [ "${OFFLINE_LAYOUT}" = "flat" ]; then
+    OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${BASE_DIR}/offline-files}"
 else
-    OFFLINE_LAYOUT="flat"
-    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${BASE_DIR}/offline-files/kubespray}"
+    # SCRIPT_DIR = <仓库>/deployments/kubespray ⇒ 上一级就是 deployments/, 再加 offline-files(只退一层!)
+    OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-$(dirname "${SCRIPT_DIR}")/offline-files}"
 fi
+# kubespray 版本(单一开关; 目录名 = 上游 tag 全名, 决策 D8)。
+#   派生源 = **实际要用的那棵树**的 galaxy.yml(CUBESTACK_KUBESPRAY_DIR 优先) —— 不是脚本目录:
+#   物化版本(versions/<V>)时脚本仍在仓库里, 按脚本目录派生会取到"仓库当前树版本"⇒ 资产与树错配。
+KUBESPRAY_VERSION="${KUBESPRAY_VERSION:-$(awk '/^version:/{print "v"$2; exit}' "${KUBESPRAY_DIR}/galaxy.yml" 2>/dev/null || true)}"
+OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}}"
 LOCAL_REPO_BASE="${OFFLINE_FILES_DIR}"
-
-# 离线资源目录(LOCAL_REPO_DIR)的默认值 —— 是否按集群名隔离由布局决定:
-#   仓库布局: ${OFFLINE_FILES_DIR}(= <root>/deployments/offline-files/kubespray, 同 cluster.conf)
-#   扁平布局: ${OFFLINE_FILES_DIR}/${CLUSTER_NAME}(历史布局)
-# 环境变量 CUBESTACK_LOCAL_REPO_DIR 优先级最高 —— 部署流程 06_k8s_deploy 就靠它传入。
-default_local_repo_dir() {
-    if [ "${OFFLINE_LAYOUT}" = "flat" ]; then
-        printf '%s/%s\n' "${OFFLINE_FILES_DIR}" "${CLUSTER_NAME}"
-    else
-        printf '%s\n' "${OFFLINE_FILES_DIR}"
-    fi
-}
+# 资产目录默认值(兼容旧调用名): 一律收敛到**版本目录**(不再按集群名隔离)
+default_local_repo_dir() { printf '%s\n' "${OFFLINE_FILES_DIR}"; }
 INVENTORY_BASE="${BASE_DIR}/inventory"
 REMOTE_USER="${CUBESTACK_REMOTE_USER:-ubuntu}"
 CONTAINER_RUNTIME="containerd"
-KUBESPRAY_VERSION="v2.28.0"
 KUBESPRAY_REPO="https://github.com/kubernetes-sigs/kubespray.git"
 
 RED='\033[0;31m'
@@ -106,6 +90,7 @@ usage() {
     echo "  reset      [名称] --yes     清除目标节点上的旧集群状态（覆盖安装的前置步骤; 见下）"
     echo "  scale      [名称] [选项]    扩容集群 — 添加新节点到已有集群"
     echo "  check      [名称]           预检资源与连通性"
+    echo "  paths      [名称]           只读: 打印全部路径推导(版本/资产目录/树/inventory; 排障用)"
     echo "  # upgrade  [名称] [选项]    (未实现) 原地升级到新版本 —— 设计见 docs/cluster-upgrade-path.md"
     echo ""
     echo "选项:"
@@ -2389,8 +2374,16 @@ cmd_reset() {
     log "ℹ️ 下一步: 全量部署(etcd 会以 ${ETCD_VERSION:-当前钉值} 全新安装) —— 在容器内跑 deploy-cluster.sh 即可"
 }
 
+# 只读自检: 打印全部路径推导(排障 + 版本目录回归套件用; 不联网/不碰集群/不需 root)
+cmd_paths() {
+    printf 'BASE_DIR=%s\nKUBESPRAY_DIR=%s\nOFFLINE_LAYOUT=%s\nOFFLINE_FILES_ROOT=%s\nOFFLINE_FILES_DIR=%s\nLOCAL_REPO_DIR=%s\nINVENTORY_DIR=%s\n' \
+        "${BASE_DIR}" "${KUBESPRAY_DIR}" "${OFFLINE_LAYOUT}" "${OFFLINE_FILES_ROOT}" \
+        "${OFFLINE_FILES_DIR}" "${LOCAL_REPO_DIR}" "${INVENTORY_DIR}"
+}
+
 case "${COMMAND}" in
     init)     cmd_init ;;
+    paths)    cmd_paths ;;
     download) cmd_download ;;
     reset)    cmd_reset ;;
     install)

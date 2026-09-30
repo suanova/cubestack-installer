@@ -57,5 +57,23 @@ echo "== ④ 显式 OFFLINE_FILES_DIR 最高优先(运维/容器挂载场景) ==
 out2="$(OFFLINE_FILES_DIR=/mnt/big/offline-files/kubespray/vX _probe "${NODES_CONF}" 'X=1')"
 chk "显式值不被覆盖" "/mnt/big/offline-files/kubespray/vX" "$(_val "${out2}" OFFLINE_FILES_DIR)"
 
+echo "== ⑤ cubestack-offline.sh paths: 版本根 → 资产目录/树 推导正确(不靠目录名判定) =="
+_offline_paths() { # _offline_paths <BASE_DIR>
+    ( set +u; export CUBESTACK_BASE_DIR="$1" CLUSTER_CONF=/nonexistent \
+        KUBESPRAY_VERSION="" OFFLINE_FILES_ROOT="" OFFLINE_FILES_DIR="" LOCAL_REPO_DIR=""
+      bash "${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh" paths 2>/dev/null )
+}
+_fix="$(mktemp -d)"; mkdir -p "${_fix}/kubespray" "${_fix}/inventory"
+# 物化树要能派生版本: 放一份 galaxy.yml 模拟 versions/<V>/kubespray 的树版本
+printf 'version: 9.9.9\n' > "${_fix}/kubespray/galaxy.yml"
+out3="$(_offline_paths "${_fix}")"
+chk "BASE_DIR=版本根 → KUBESPRAY_DIR 在其下" "${_fix}/kubespray" "$(_val "${out3}" KUBESPRAY_DIR)"
+chk "OFFLINE_LAYOUT=repo(不再看父目录名)" "repo" "$(_val "${out3}" OFFLINE_LAYOUT)"
+chk "版本从树 galaxy.yml 派生(物化树场景)" "v9.9.9" \
+    "$(printf '%s\n' "$(_val "${out3}" OFFLINE_FILES_DIR)" | sed 's#.*/kubespray/##')"
+chk "OFFLINE_FILES_ROOT 仍指向仓库 offline-files" \
+    "${REPO_ROOT}/deployments/offline-files" "$(_val "${out3}" OFFLINE_FILES_ROOT)"
+rm -rf "${_fix}"
+
 if [ "${fail}" = "0" ]; then echo "== 全部通过 =="; else echo "== 有失败项 =="; fi
 exit "${fail}"
