@@ -180,3 +180,9 @@ metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/gpu-scheduler:${METAX_VERSION}-amd64
 metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/driver-image:${METAX_DRIVER_VERSION}
 # maca: METAX_MACA_IMAGE 本身已含 "仓库名:tag"(maca:3.8.1.2-ubuntu22.04-amd64), 故整体拼接
 metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/${METAX_MACA_IMAGE}
+
+# --- CubeStack 平台组件镜像(CR 组件目录用; 经本 CI 同步到 mirrors/) ---
+# EnvoyGateway CR 的 rateLimitDeployment 配置镜像(非默认拉起, 配 RateLimitPolicy 时用);
+# tag 8fe6ea42 为上游固定 commit tag —— 部署网络到 docker.io 不通, 由此 CI 通道同步到
+# Harbor mirrors 后再 harbor-save 成离线 tar(消费方: 25_cubestack_operator.sh [4b/6])。
+docker.io/envoyproxy/ratelimit:8fe6ea42
