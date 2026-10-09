@@ -340,16 +340,21 @@ esac
 #   docs/troubleshooting.md): 会提前闭合外层引号, 载荷被拆散后远端拿到残缺脚本 ⇒ 输出空。
 #   本条注释自己就踩过: 注释里写了带双引号的报错样例, 结果探针永远返回空。载荷保持零引号。
 _HZ="$(_ssh "${_HOLDERS[0]}" "
+_probe_tool=0
 if command -v kubectl >/dev/null 2>&1; then
+  _probe_tool=1
   sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --server=https://${VIP}:6443 --insecure-skip-tls-verify=true --request-timeout=8s get --raw /healthz </dev/null 2>/dev/null && exit 0
 fi
 if command -v wget >/dev/null 2>&1; then
+  _probe_tool=1
   wget -q --no-check-certificate --timeout=8 -O - https://${VIP}:6443/healthz 2>/dev/null && exit 0
 fi
 if command -v curl >/dev/null 2>&1; then
+  _probe_tool=1
   curl -sk --max-time 8 https://${VIP}:6443/healthz 2>/dev/null && exit 0
 fi
-echo __NO_PROBE_TOOL__
+[ \${_probe_tool} -ne 0 ] || echo __NO_PROBE_TOOL__
+exit 1
 " || true)"
 case "${_HZ}" in
     ok) ok "经 VIP 访问 API 正常(https://${VIP}:6443/healthz)" ;;

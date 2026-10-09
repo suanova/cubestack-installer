@@ -280,6 +280,8 @@ for _img in "${SRC_IMAGES[@]}"; do
     }
     TARGET_REFS+=("${_dst_ref}")
 done
+# 保存 operator 摘要, 避免组件循环覆盖 _d_dst。
+_OPERATOR_DIGEST="${_d_dst}"
 
 # ---------------- [4b/6] CR 平台组件镜像推送(仅 CR_ENABLED=true) ----------------
 # 组件镜像集 = OFFLINE_DIR 下**全部离线 tar**(人工维护口径; 2026-10-08 起与 operator 镜像内
@@ -364,8 +366,8 @@ _SET_ARGS=(
 )
 # 滚动 tag 的"节点缓存冻结"防护: 把镜像 digest 写进 podAnnotations —— digest 变了模板就变,
 # helm 才会滚动新 pod; 否则 Deployment spec 原封不动, 新镜像永远不会被拉起来(见文件头说明)。
-if [ "${PIN_DIGEST}" = "true" ] && [ -n "${_d_dst}" ]; then
-    _SET_ARGS+=( --set "podAnnotations.cubestack\\.io/image-digest=${_d_dst}" )
+if [ "${PIN_DIGEST}" = "true" ] && [[ "${_OPERATOR_DIGEST}" =~ ^sha256:[[:xdigit:]]{64}$ ]]; then
+    _SET_ARGS+=( --set "podAnnotations.cubestack\\.io/image-digest=${_OPERATOR_DIGEST}" )
 fi
 
 # 渲染自检: 覆盖后的镜像必须**全部**落在集群 registry 下 —— chart 以后新增第 2 个镜像时,

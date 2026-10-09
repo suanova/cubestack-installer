@@ -41,8 +41,7 @@ installer/workspace
 #   从版本目录拷进 bin/ 再 COPY, 不依赖构建上下文里的 offline-files)。⚠ 漏了这行的后果:
 #   整仓上下文 docker build 会把 4.5GB 离线件打进镜像/拖慢构建。
 deployments/offline-files/kubespray/*/
-# 物化版本树(运行期由 cubestack-version-dir.sh materialize 生成; 不进镜像)
-deployments/kubespray/versions
+# 物化版本树是部署代码, 随 CLI 代码层分发。
 # 兼容期: 扁平层仍在(旧 CLI 镜像用), 逐条排除与改造前一致
 deployments/offline-files/kubespray/images
 deployments/offline-files/kubespray/packages

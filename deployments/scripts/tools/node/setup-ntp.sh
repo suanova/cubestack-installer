@@ -217,8 +217,16 @@ EOF
     chmod +x "${mscript_tmp}"
     # 上传: ① chrony 配置 ② 远程脚本(必须先于执行; 2026-10-07 教训: 曾漏掉这两个 scp,
     #   节点跑的是上次失败的残留脚本 ⇒ MISSING-CONF)
-    node_scp "${mconf_tmp}" "${m_ip}" "${m_user}" "${m_pw}" "/tmp/cubestack-chrony.conf" >/dev/null 2>&1 || true
-    node_scp "${mscript_tmp}" "${m_ip}" "${m_user}" "${m_pw}" "/tmp/cubestack-chrony-master.sh" >/dev/null 2>&1 || true
+    if ! node_scp "${mconf_tmp}" "${m_ip}" "${m_user}" "${m_pw}" "/tmp/cubestack-chrony.conf" >/dev/null 2>&1; then
+        err "上传 cubestack-chrony.conf 到 ${m_ip} 失败, 停止 NTP 配置"
+        rm -f "${mconf_tmp}" "${mscript_tmp}"
+        exit 1
+    fi
+    if ! node_scp "${mscript_tmp}" "${m_ip}" "${m_user}" "${m_pw}" "/tmp/cubestack-chrony-master.sh" >/dev/null 2>&1; then
+        err "上传 cubestack-chrony-master.sh 到 ${m_ip} 失败, 停止 NTP 配置"
+        rm -f "${mconf_tmp}" "${mscript_tmp}"
+        exit 1
+    fi
     # 推离线 deb 到节点(有则推; scp 失败不致命 —— 远程脚本有在线兜底与硬失败)
     if [ "${has_deb}" = "1" ]; then
         node_cmd "${m_ip}" "${m_user}" "${m_pw}" "rm -rf /tmp/cubestack-ntp-debs && mkdir -p /tmp/cubestack-ntp-debs" >/dev/null 2>&1 || true
