@@ -72,8 +72,11 @@ image_manifest_load || exit 1
 
 HARBOR_HOST="${HARBOR_MIRROR_REGISTRY:-harbor.isuanova.com}"
 HARBOR_PROJ="${HARBOR_MIRROR_PROJECT:-mirrors}"
-HARBOR_USER="${HARBOR_MIRROR_USER:-}"
-HARBOR_PASSWORD="${HARBOR_MIRROR_PASSWORD:-}"
+# ★ 2026-10-08 修复(实机踩到): 私有项目(suanova-private, 如 cubestack-operator 本体的 --group
+#   保存)需要凭据, 但 HARBOR_MIRROR_* 常为空(mirrors 公开只读) ⇒ 报"匿名 unauthorized"。
+#   回退复用 CUBESTACK_OPERATOR_HARBOR_*(同一台 Harbor 的账号, 须可拉 suanova 与 suanova-private)。
+HARBOR_USER="${HARBOR_MIRROR_USER:-${CUBESTACK_OPERATOR_HARBOR_USER:-}}"
+HARBOR_PASSWORD="${HARBOR_MIRROR_PASSWORD:-${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}}"
 HARBOR_INSECURE="${HARBOR_MIRROR_INSECURE:-false}"
 # cluster.conf 的 HARBOR_MIRROR_ENABLED=false 等价 --from-upstream(命令行优先)
 if [ "${HARBOR_MIRROR_ENABLED:-true}" != "true" ]; then
@@ -99,7 +102,15 @@ trap 'rm -f "${LIST_FILE}"' EXIT
 while IFS=$'\t' read -r g r n; do
     _group_selected "${g}" || continue
     if [ "${FROM_HARBOR}" = "1" ]; then
-        src="$(image_mirror_ref "${r}")" || { warn "ref 非法, 跳过: ${r}"; continue; }
+        # ★ "上游就是本台 Harbor"的组(metax-gpu / cubestack-operator): harbor-sync-images.sh
+        #   按设计**不**把它们复制进 mirrors/(同台复制只多占存储), 所以 mirrors/<路径> 压根不存在
+        #   —— 这里必须回到**原始 ref** 拉取(它本来就在本台 Harbor 上; 私有项目靠凭据)。
+        #   判据与同步侧同源(注册域 == HARBOR_HOST), 不是硬编码名单。
+        if [ "${r%%/*}" = "${HARBOR_HOST}" ]; then
+            src="${r}"
+        else
+            src="$(image_mirror_ref "${r}")" || { warn "ref 非法, 跳过: ${r}"; continue; }
+        fi
     else
         src="${r}"
     fi

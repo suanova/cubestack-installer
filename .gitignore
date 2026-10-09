@@ -115,3 +115,9 @@ cluster.conf.backup
 
 # 物化版本树(由 cubestack-version-dir.sh materialize 生成; 见 docs/kubespray-versioning/)
 deployments/kubespray/versions/
+
+# cubestack-operator 滚动 chart(1.0.0-latest): **暂不入 git**(用户口径 2026-10-08)——
+#   分发通路 = 构建上下文进 CLI 镜像(Dockerfile-cli 的 COPY deployments)+ 部署机本地保留;
+#   ⚠ check-modules ⑩ 对此有 gitignore 豁免(降级 WARN), 干净 checkout 缺它属预期。
+deployments/cubestack-addon/cubestack-operator/*.tgz
+deployments/cubestack-addon/cubestack-operator/*.tgz.digest

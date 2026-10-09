@@ -265,9 +265,9 @@ echo "== ⑫ 节点系统包链路(2026-09-30 事故的防回归) =="
 _PLAY="${REPO_ROOT}/deployments/kubespray/kubespray/patch-playbooks/install-packages.yml"
 chk "play 覆盖 master(hosts 含 kube_control_plane)" "有" "$(grep -q 'hosts: kube_node:kube_control_plane' "${_PLAY}" && echo 有 || echo 无)"
 chk "play 的 required_packages 含 curl" "有" "$(grep -qE '^\s+- curl$' "${_PLAY}" && echo 有 || echo 无)"
-# ⚠ 必须钉**当前版本目录**(用 v*/ 通配会命中别的版本目录 ⇒ 假绿; 本断言自己踩过一次)
-# ⚠ 通配符不能放进双引号(会变字面量 ⇒ 恒报无); 也不能用 v*/ 通配(会命中别的版本 ⇒ 假绿)
-chk "curl 的 .deb 在当前版本的主包集里(不是只在 repair/)" "有" "$(ls ${REPO_ROOT}/deployments/offline-files/kubespray/${TREE_VER}/packages/curl_*.deb >/dev/null 2>&1 && echo 有 || echo 无)"
+# ⚠ 2026-10-08: 节点 .deb 统一收敛到 offline-files/os/packages(版本无关 OS 层);
+#   原断言钉的是 <版本目录>/packages/(旧布局), repair/ 已并入主目录 —— 此处改钉新位置。
+chk "curl 的 .deb 在 os/packages 主包集里(repair 已并入, 不再按版本目录)" "有" "$(ls ${REPO_ROOT}/deployments/offline-files/os/packages/curl_*.deb >/dev/null 2>&1 && echo 有 || echo 无)"
 
 echo "== ⑪ 默认版本 = 最新(用户口径); 本地临时版本不进默认; 目录副本回退 =="
 # 带夹具根的探针(OFFLINE_FILES_ROOT 指向夹具, 用于"版本目录自带档案副本"的回退路径)

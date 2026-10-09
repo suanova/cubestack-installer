@@ -12,7 +12,7 @@
 - 每条改动的"原因 / 上游吸收判据 / 上游化"三项写在 **patch 文件头的注释块**里(本 README 的表格是摘要,
   以 patch 头为准);判据用于升级时跑"这个补丁是否已被上游吸收、可以退休"的检查(设计 §3.5)。
 
-## 补丁清单(10 处)
+## 补丁清单(12 处)
 
 | 补丁 | 目标文件 | 一句话原因(丢了会怎样) | 上游吸收判据 | 上游化 |
 |---|---|---|---|---|
@@ -27,6 +27,7 @@
 | `09-metallb-memberlist-secret.patch` | `roles/kubernetes-apps/metallb/tasks/main.yml` | v2.32 模板只**引用** `memberlist` Secret 而不创建 ⇒ speaker 全部 `CreateContainerConfigError`、池子分不到 VIP;补丁在 apply **之后**幂等创建(位置不能前挪: `metallb-system` 命名空间由那条 apply 创建) | 该目录下出现创建 memberlist Secret 的任务/清单 | **建议提 PR**(上游 v2.32 缺口的通用修复) |
 | `10-registry-conditional-bool.patch` | `roles/kubernetes-apps/registry/tasks/main.yml` | 四条 `when` 的 `X != none and X` 在 ansible-core ≥2.19 **必失败**("Conditionals must have a boolean result")⇒ 设了 `registry_storage_class` 就部署中断在 `k8s_deploy`;改为 `length > 0` 布尔安全写法(语义不变) | 该文件不再出现 `!= none and <变量>` 形态 | **建议提 PR**(v2.32 + ansible 2.19 组合下必现; 上游原样如此, 非我们的定制) |
 | `11-containerd-config-version.patch` | `roles/container-engine/containerd/templates/config.toml.j2` | 上游对 containerd ≥2.3 恒写 `version = 4`,而沐曦 container-runtime 只支持 ≤3 ⇒ `config version 4 is not support` CrashLoop;补丁加 `containerd_config_version` 覆盖分支(默认行为不变, 值由 `sync-kubespray-config.sh` 从 cluster.conf 写入) | 模板出现 `containerd_config_version`(或等价版本覆盖机制) | **不提 PR**(沐曦厂商约束, 非通用需求);待沐曦包支持 containerd 2.x 后删除本补丁 |
+| `12-coredns-forward-resolvconf.patch` | `roles/kubernetes-apps/ansible/templates/coredns-config.yml.j2` | coredns 的 forward 不再直指 `upstream_dns_servers`(本仓库该变量是"防回环哨兵"如 127.0.0.1 ⇒ 直指会渲染成 forward pod 自身 127.0.0.1:53 ⇒ loop 插件 FATAL 自杀, 实机 18+ 次 CrashLoop);恒用 `/etc/resolv.conf`(经 resolved→nodelocaldns 链, 两处消费解耦) | 该模板不再用 upstream_dns_servers 渲染 forward | 不提 PR(环境特化) |
 
 ### 已退休(1 处,别再加回来)
 
@@ -36,7 +37,7 @@
 (注意:这不是"上游吸收", 是上游删除了整段逻辑)。教训:目标文件消失时 `--check-retired` 只会报 KEEP
 (反打不上 ≠ 上游未吸收), 退休必须人工确认。
 
-> 本目录 10 个补丁 = 换树时固化的 7 个(spec §2.2 表的第 4、5、7(=原手工项)、8、9、10、11 行;
+> 本目录 12 个补丁 = 换树时固化的 7 个(spec §2.2 表的第 4、5、7(=原手工项)、8、9、10、11 行;
 > **第 6 行(补丁 03)已退休**,见上)+ 换树后实机部署暴露的 3 个(前缀 `09`–`11`,即下表末三行,与 spec §2.2 行号无关)。
 
 ## 不在本目录的 3 处改动(别重复两套)
