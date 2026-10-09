@@ -219,7 +219,17 @@ if [ -f "${ALL_YML}" ]; then
     # ⚠ 将来接入真实 DNS: cluster.conf 设 UPSTREAM_DNS_SERVERS="ip1 ip2"(空格分隔)后重跑本工具。
     _UDNS_VAL="${UPSTREAM_DNS_SERVERS:-127.0.0.1}"
     if grep -qE '^upstream_dns_servers:' "${ALL_YML}" 2>/dev/null; then
-        sed -i -E "s|^upstream_dns_servers:.*|upstream_dns_servers: [${_UDNS_VAL// /, }]|" "${ALL_YML}"
+        # 删除整个旧值(含缩进或不缩进的 block list), 保留相邻顶层配置。
+        awk -v value="${_UDNS_VAL// /, }" '
+            /^upstream_dns_servers:/ {
+                print "upstream_dns_servers: [" value "]"
+                in_value=1; next
+            }
+            in_value && /^[[:space:]]*(#|$)/ { print; next }
+            in_value && (/^[[:space:]]/ || /^-([[:space:]]|$)/) { next }
+            { in_value=0; print }
+        ' "${ALL_YML}" > "${ALL_YML}.tmp"
+        mv "${ALL_YML}.tmp" "${ALL_YML}"
         say "  all.yml upstream_dns_servers → [${_UDNS_VAL// /, }](防 nodelocaldns↔resolved 回环)"
     else
         printf '\n# nodelocaldns 外部上游(本环境无外部 DNS → 127.0.0.1 防回环; 见 sync-kubespray-config.sh)\nupstream_dns_servers: [%s]\n' "${_UDNS_VAL// /, }" >> "${ALL_YML}"

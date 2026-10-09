@@ -157,7 +157,7 @@ docker exec "${CONTAINER}" bash -c '
   echo "  LWS 默认关: $(grep -c "LWS_ENABLED:-false" '"${CT}"/deployments/config/cluster.conf.example' || true) 处(期望 ≥1)"
   echo "  install-packages offline_dir:"; grep -c "offline_dir" '"${CT}"/deployments/kubespray/kubespray/patch-playbooks/install-packages.yml' || true
   echo "  rook manifests:"; ls '"${CT}"/deployments/cubestack-addon/rook/'*.yaml 2>/dev/null | wc -l
-  echo "  lvm 离线包(版本目录):"; ls '"${CT}/deployments/offline-files/kubespray/${_KV}/packages/lvm2_"'*.deb 2>/dev/null | wc -l
+  echo "  lvm 离线包(os/packages):"; ls '"${CT}/deployments/offline-files/os/packages/lvm2_"'*.deb 2>/dev/null | wc -l
   echo "  METALLB_POOL(注意是否与节点同网段):"; grep -E "^METALLB_POOL=" '"${CT_CONF}"' | head -1
 '
 
