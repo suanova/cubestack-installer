@@ -199,4 +199,4 @@ cubestack-operator  ${CUBESTACK_OPERATOR_HARBOR_HOST}/suanova-private/cubestack-
 #     通道同步到 Harbor mirrors 后再 harbor-save 成离线 tar(见 offline-files/cubestack-operator/README.md)。
 #   · 其余平台组件镜像(envoy/prometheus 栈/perses/bmc/cubepilot/cnpg/opstree 等)的完整清单与
 #     维护方法见 offline-files/cubestack-operator/README.md; 如需经本 CI 同步, 按同格式逐条登记。
-docker.io/envoyproxy/ratelimit:8fe6ea42
+cubestack-operator  docker.io/envoyproxy/ratelimit:8fe6ea42
