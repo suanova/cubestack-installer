@@ -1859,13 +1859,17 @@ reset_kubernetes_if_needed() {
     local scope="${1:-all}"
 
     # 解析节点清单(host+user+key) 从 hosts.yml 获取
+    # ⚠ 枚举顺序 = **worker 在前, master 在后**(2026-10-09 修): 旧集群的存储后端(ceph mon/osd)
+    #   住在 master 上 —— 先清 master 会把 worker 尚未卸载的 CSI-RBD 卷**后端先杀死**, 之后
+    #   worker 的 umount 卡死在"日志回写死设备"(内核 D 状态不可杀, 部署无限挂; worker12 两度复现)。
+    #   worker 的残留挂载必须在旧存储仍存活时先卸干净。
     local nodes_str
     nodes_str=$(ansible-inventory -i "${INVENTORY_DIR}/hosts.yml" --list 2>/dev/null | python3 -c '
 import sys, json
 inv = json.load(sys.stdin)
 meta = inv.get("_meta", {}).get("hostvars", {})
 seen = set()
-for g in ["kube_control_plane", "kube_node"]:
+for g in ["kube_node", "kube_control_plane"]:
     for h in inv.get(g, {}).get("hosts", []):
         if h in seen or h not in meta:
             continue
@@ -2024,15 +2028,39 @@ print("%s|%s|%s" % (
 
     # 执行清理: 先让出 10250(第三方发行版 stop+disable) → 再 kubeadm reset -f + IPVS 清理 + 删残留
     log "清理节点上的旧 Kubernetes 状态(第三方发行版 stop+disable + kubeadm reset -f + IPVS 清理)..."
+    log "  (顺序: worker 先于 master —— 旧集群存储后端在 master 上, 须让 worker 先卸掉残留挂载)"
     local reset_ok=0 reset_fail=0
     for line in "${reset_targets[@]}"; do
         IFS='|' read -r node host user key <<< "${line}"
         [ -z "${node}" ] && continue
         log "  → [${node}](${host}) 清理中..."
         local cleanup_out="" cleanup_rc=0
+        # ⚠ 远端载荷加**总超时**(2026-10-09): 清理一旦卡死(如死挂载的 umount)当前是**无限挂**;
+        #   `timeout` 管住"壳"(bash 可被 TERM/KILL 杀) —— 即便内层 D 状态进程不可杀, 也能让本步
+        #   以明确失败(rc=124)收场、走下面的失败分支, 而不是把整个部署永久挂起。
         cleanup_out=$(ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
             "${user}@${host}" \
-            "sudo bash -c '
+            "sudo timeout -k 15 240 bash -c '
+                # ── ⓪ 预备 + 强制脱挂(2026-10-09 实机根因落地; 用户口径: 免人工重启, 自动强制清干净):
+                #   ① disable --now 旧 kubelet: 关掉 10250, 并**杜绝清理途中旧 CSI 再把卷挂回来**
+                #      (复活的旧集群会自愈重挂 —— 实测: 全量重启后旧 kubelet/CSI 复活并重挂 RBD)。
+                #   ② /var/lib/kubelet 下一切残留挂载(含旧集群 CSI-RBD/ceph 卷)一律**后台惰性卸载**:
+                #      死后端下正规 umount 会卡死在\"日志回写死设备\"(内核 D 状态不可杀, 部署无限挂 ——
+                #      worker12 两度实机事故)。惰性卸载只做命名空间脱开(纯内核操作, 不碰文件系统),
+                #      因此**永不在本进程阻塞**; 后台进程即便 D 态也只是惰性残留(免重启场景的代价, 无害)。
+                #      脱净后 kubeadm reset 见不到挂载 ⇒ 从根上消除卡死路径。
+                systemctl disable --now kubelet 2>/dev/null || true
+                for _m in \$(findmnt -Rrn -o TARGET /var/lib/kubelet 2>/dev/null | tac); do
+                    [ -n \"\${_m}\" ] || continue
+                    [ \"\${_m}\" = \"/var/lib/kubelet\" ] && continue
+                    setsid umount -l \"\${_m}\" >/dev/null 2>&1 &
+                done
+                # 轮询确认脱净(纯内核操作, 正常亚秒; 上限 ~10s)
+                for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                    findmnt -Rrn -o TARGET /var/lib/kubelet 2>/dev/null | grep -vx \"/var/lib/kubelet\" | grep -q . || break
+                    sleep 0.5
+                done
+
                 # ── ① 第三方 K8s 发行版(RKE2/k3s/microK8s): 先把 10250 让出来 ────────
                 # 它们的内嵌 kubelet 由各自的 agent 单元托管, 不叫 kubelet.service:
                 #   · kubeadm reset -f       → 对它们是完全的空操作
@@ -2095,7 +2123,11 @@ print("%s|%s|%s" % (
             reset_ok=$((reset_ok + 1))
         else
             reset_fail=$((reset_fail + 1))
-            warn "  ${node}: 清理后 kubelet API 端口(10250)仍未让出(ssh rc=${cleanup_rc}):"
+            if [ "${cleanup_rc}" = "124" ]; then
+                warn "  ${node}: 远端清理**超时**(240s) —— 该步已强制脱挂, 仍超时请排查(见下方输出)后重跑"
+            else
+                warn "  ${node}: 清理后 kubelet API 端口(10250)仍未让出(ssh rc=${cleanup_rc}):"
+            fi
             if [ -n "${cleanup_out}" ]; then printf '%s\n' "${cleanup_out}" | sed 's/^/      /'; fi
         fi
     done
