@@ -150,21 +150,24 @@ operator **不搞批量搬迁**;凡要"按版本选"的组件,按同一套四条
 
 ## 8. CLI 镜像契约变更(2026-09-30)
 
-**镜像只含 `deployments/` 代码**(用户口径):不再把 kubectl/helm/skopeo 等离线二进制打进镜像。
+**契约(最终口径)**:CLI 镜像 = **base 层**(系统 + ansible + 工具链 kubectl/helm/skopeo/yq/mc,
+取自离线版本目录、文件名固定)+ **代码层**(`deployments/` + `skills`, `FROM` base)。
+"工具链必须打进 base"的原因(实测事故: 非登录 shell 也要有)见下面「两层镜像结构」。
 
-- 工具链改由容器**运行期**从挂载的版本目录挂载:镜像内 `/etc/profile.d/50-cubestack-tools.sh`
-  (源文件 `deployments/scripts/tools/docker/cli-toolchain-from-offline.sh`)在**登录 shell**启动时
-  幂等地把 `<挂载>/kubespray/<版本>/` 下的 kubectl/skopeo/helm 挂到 PATH。
-  ⇒ 部署流程用 `bash -lc`(既有文档口径);非登录 shell 需显式 `bash -lc` 或 `source /etc/profile`。
-- ⚠ **唯一例外:`mc` 必须打进镜像**。它是**引导工具** —— 容器正是靠它去 MinIO 拉离线文件,
+- 运行期钩子(`/etc/profile.d/50-cubestack-tools.sh`, 源文件
+  `deployments/scripts/tools/docker/cli-toolchain-from-offline.sh`)**退居"缺才补"兜底**:
+  工具已在 PATH 即跳过、不覆盖;只在工具缺失时(如旧 base)从挂载的版本目录补齐。
+  部署流程仍用 `bash -lc`(既有文档口径; 工具已在 base, 不再强依赖登录 shell)。
+- ⚠ **`mc` 特别之处:必须打进镜像、不能被挂载提供**。它是**引导工具** —— 容器正是靠它去 MinIO 拉离线文件,
   那份文件还没下来之前没有任何可挂载的东西能提供 mc(先有鸡还是先有蛋)。取法由
   `build-cli-context.sh` 决定:**`offline-files/os/mc-*` 离线件(首选)→ 官方新地址联网下载(兜底)
   → 宿主机 mc(再兜底)→ 报错**。
   ⚠ **官方下载路径会烂**:老路径 `https://dl.min.io/client/mc/release/linux-amd64/mc` 已 **410 Gone**,
   新路径带 `/aistor/` 前缀(`https://dl.min.io/aistor/mc/release/linux-<arch>/mc`, 2026-09-30 实测 200)
   —— 这正是"首选离线件"的理由;升级 mc 的完整步骤见 `offline-files/os/README.md`。
-- 构建上下文 `build-cli-context.sh`:无 `bin/`、排除 `kubespray/versions/`(物化树不进镜像),
-  实测 218M → **87M(纯代码)**。全量构建得到纯净的 code-only 镜像;增量构建继承基础镜像内容。
+- 构建上下文 `build-cli-context.sh`:排除 `kubespray/versions/`(物化树不进镜像);工具链**仅在
+  `--base` 时** staged 进 `bin/`(供 base 层 `COPY`, 含 mc 的离线件回退链)—— 代码层构建跳过
+  staging, 无工具的机器也能重建代码层。代码部分实测 ~87M。
 
 ### 两层镜像结构(2026-09-30, 用户口径; 根治层数累积)
 
@@ -176,7 +179,8 @@ operator **不搞批量搬迁**;凡要"按版本选"的组件,按同一套四条
 > ⚠ **工具链必须打进 base**(2026-09-30 用户口径 + 实测事故):早期版本把 kubectl/helm/skopeo 交给
 > "运行期钩子从挂载目录补",但钩子**只在登录 shell 生效** ⇒ `docker exec … bash` 或脚本里的
 > 非登录 shell 拿不到工具(`kubectl: command not found`)。现在 base 直接内置(非登录 shell 也有),
-> 钩子保留作"挂载目录里有别的版本时覆盖"的兜底。
+> 钩子退居**"缺才补"**的兜底(从挂载的版本目录补齐; 工具已在 PATH 即跳过、**不覆盖** base 内置版本
+> ——实际角色 = 兼容未内置工具的旧 base)。
 
 ```bash
 sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base       # 仅系统/工具/依赖变化时

@@ -75,10 +75,8 @@ COPY bin/kubectl /usr/local/bin/kubectl
 RUN chmod +x /usr/local/bin/kubectl && kubectl version --client 2>/dev/null | head -1
 
 COPY bin/helm-archive.tar.gz /tmp/helm.tar.gz
-RUN HELM_ARCH="$(dpkg --print-architecture)" \
-    && tar xzf /tmp/helm.tar.gz -C /tmp \
-    && mv "/tmp/linux-${HELM_ARCH}/helm" /usr/local/bin/helm \
-    && rm -rf "/tmp/linux-${HELM_ARCH}" /tmp/helm.tar.gz \
+RUN tar xzf /tmp/helm.tar.gz -C /tmp \
+    && mv /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/linux-amd64 /tmp/helm.tar.gz \
     && helm version --short
 
 COPY bin/skopeo /usr/local/bin/skopeo

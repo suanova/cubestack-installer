@@ -250,9 +250,8 @@ chk "构建工具会把 mc 拷进上下文(离线件/宿主机)" "有" "$(grep -
 chk "存在 base 层 Dockerfile" "有" "$([ -f "${REPO_ROOT}/Dockerfile-cli-base" ] && echo 有 || echo 无)"
 chk "Dockerfile-cli FROM base 层(而非上一版 latest)" "有" "$(grep -q '^FROM ${CLI_BASE_TAG}' "${REPO_ROOT}/Dockerfile-cli" && echo 有 || echo 无)"
 chk "incremental Dockerfile 已并入(不该还在)" "无" "$([ -f "${REPO_ROOT}/Dockerfile-cli-incremental" ] && echo 有 || echo 无)"
-# .dockerignore 排除离线资产, 保留代码层需要的物化版本树。
-chk "物化版本树不被 .dockerignore 排除" "无" "$(grep -qE '^deployments/kubespray/versions/?$' "${REPO_ROOT}/.dockerignore" && echo 有 || echo 无)"
-for _pat in 'deployments/offline-files/kubespray/\*/'; do
+# .dockerignore 必须挡住版本目录整层与物化树(否则整仓上下文构建会把 GB 级离线件打进镜像)
+for _pat in 'deployments/offline-files/kubespray/\*/' 'deployments/kubespray/versions'; do
     if grep -qE "^${_pat}" "${REPO_ROOT}/.dockerignore"; then
         chk ".dockerignore 含 ${_pat}" "有" "有"
     else
@@ -268,10 +267,13 @@ chk "play 覆盖 master(hosts 含 kube_control_plane)" "有" "$(grep -q 'hosts: 
 chk "play 的 required_packages 含 curl" "有" "$(grep -qE '^\s+- curl$' "${_PLAY}" && echo 有 || echo 无)"
 # ⚠ 2026-10-08: 节点 .deb 统一收敛到 offline-files/os/packages(版本无关 OS 层);
 #   原断言钉的是 <版本目录>/packages/(旧布局), repair/ 已并入主目录 —— 此处改钉新位置。
-if [ -d "${REPO_ROOT}/deployments/offline-files/os/packages" ]; then
-    chk "curl 的 .deb 在 os/packages 主包集里(repair 已并入, 不再按版本目录)" "有" "$(ls "${REPO_ROOT}/deployments/offline-files/os/packages/"curl_*.deb >/dev/null 2>&1 && echo 有 || echo 无)"
+# ⚠ 这些 .deb 属 gitignored 离线件: 干净 checkout/CI/未备料机**主包集为空**, 无从断言 ⇒ 跳过
+#   (与 check-modules ⑱ "无在场版本目录(纯 checkout/未备料)⇒ 跳过" 同口径; 备料机上仍必查 ——
+#   2026-10-09 CI 首跑踩: 无条件断言在 runner 上恒红)。
+if ls ${REPO_ROOT}/deployments/offline-files/os/packages/*.deb >/dev/null 2>&1; then
+    chk "curl 的 .deb 在 os/packages 主包集里(repair 已并入, 不再按版本目录)" "有" "$(ls ${REPO_ROOT}/deployments/offline-files/os/packages/curl_*.deb >/dev/null 2>&1 && echo 有 || echo 无)"
 else
-    echo "  SKIP curl .deb: os/packages 未备料"
+    echo "  skip curl .deb 主包集断言(os/packages 未备料 —— 纯 checkout/CI 属正常)"
 fi
 
 echo "== ⑪ 默认版本 = 最新(用户口径); 本地临时版本不进默认; 目录副本回退 =="

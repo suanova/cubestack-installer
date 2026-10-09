@@ -64,16 +64,14 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --output) OUT="$2"; shift 2 ;;
         --build)  DO_BUILD=1; shift ;;
-        --push)   DO_PUSH=1; shift ;;
+        --push)   DO_BUILD=1; DO_PUSH=1; shift ;;
         --incremental) DO_BUILD=1; INCREMENTAL=1; shift ;;
-        --base)   DO_BASE=1; shift ;;
+        --base)   DO_BASE=1; DO_BUILD=1; shift ;;
         --engine) ENGINE_ARG="${2:?--engine 需要 docker 或 podman}"; shift 2 ;;
         -h|--help) head -20 "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) err "未知参数: $1(可用 --output/--build/--push/--incremental/--base/--engine)"; exit 1 ;;
     esac
 done
-# --push 单独使用时保留构建代码层的历史行为; --base 不隐式构建代码层。
-if [ "${DO_PUSH}" = "1" ] && [ "${DO_BASE}" = "0" ]; then DO_BUILD=1; fi
 
 # ---------- 容器引擎: docker / podman 皆可(2026-09-30) ----------
 # 优先级: --engine > CONTAINER_ENGINE 环境变量 > 自动探测(docker 优先, 没有则 podman)。
@@ -112,9 +110,11 @@ say "同步整个 deployments/(排除 offline-files 大文件与运行时凭据)
 #   external-ceph* 用通配, 覆盖生成器以后新增的同族文件。
 # ⚠ 注释只能写在命令**之前**: 续行符(\)之后的 `#` 不是注释, 会被当成 rsync 参数(踩过, 报
 #   "syntax or usage error ... [Receiver]")。
+# ⚠ 排除物化版本树(设计 D1/§5.2: 物化树是运行期产物, 不进镜像; 部署机靠挂载资产自动物化) —— 勿删。
 rsync -a \
     --exclude 'offline-files' \
     --exclude 'cli-context' \
+    --exclude 'kubespray/versions' \
     --exclude '.git' --exclude '.venv' --exclude 'venv' --exclude '.ansible' --exclude '.cache' \
     --exclude 'config/cluster.conf' --exclude 'config/cluster.conf.bak' --exclude 'config/cluster.conf.bak.*' \
     --exclude 'config/external-ceph*' --exclude 'config/minio.conf' \
@@ -130,91 +130,97 @@ rsync -a --exclude '.git' "${REPO_ROOT}/skills" "${OUT}/"
 # 来源优先级: 离线**版本目录** offline-files/kubespray/<版本>/(首选) → 宿主机 command -v(兜底)。
 # 文件名统一成**固定名**(bin/kubectl / bin/skopeo / bin/yq / bin/helm-archive.tar.gz / bin/mc),
 # 这样 Dockerfile 里不出现版本号 ⇒ 升级工具只换离线件+重建 base, 不用改 Dockerfile。
+# ⚠ staging 只在 --base(要构建 base 层)时执行(2026-10-09 修): bin/ 只被 Dockerfile-cli-base
+#   COPY; 代码层构建(--build, FROM 既有 base)不需要它。旧实现无条件 staging ⇒ 构建机缺工具/缺
+#   离线 helm 包时直接 exit 1, 把本不需要任何工具的代码层构建也挡死(假失败)。
 if [ "${DO_BASE}" = "1" ]; then
-load_config
-_KV_DIR="${OFFLINE_FILES_DIR%/}/"
-mkdir -p "${OUT}/bin"
-_tool_one() {   # <固定名> <源前缀或命令行名> [--from-host]
-    local out="$1" pat="$2" src=""
-    if [ -n "${_KV_DIR}" ]; then
-        src="$(ls "${_KV_DIR}"${pat}-* 2>/dev/null | head -1 || true)"
-    fi
-    if [ -z "${src}" ] && command -v "${pat}" >/dev/null 2>&1; then src="$(command -v "${pat}")"; fi
-    if [ -n "${src}" ] && [ -f "${src}" ]; then
-        cp "${src}" "${OUT}/bin/${out}"
-        ok "  ${out} ← ${src#${REPO_ROOT}/}"
-    else
-        err "找不到 ${pat}(离线版本目录与宿主机都没有)—— base 构建会在 COPY bin/${out} 处失败"
-        return 1
-    fi
-}
-say "拷贝工具链到 bin/(固定名; 版本取自 ${_KV_DIR:-宿主机}) ..."
-_tool_one kubectl kubectl || exit 1
-_tool_one skopeo  skopeo  || exit 1
-_tool_one yq      yq      || exit 1
-# helm: 压缩包形态(Dockerfile 里解包), 固定名 helm-archive.tar.gz
-_helm_src=""
-[ -n "${_KV_DIR}" ] && _helm_src="$(ls "${_KV_DIR}"helm-*.tar.gz 2>/dev/null | head -1 || true)"
-if [ -n "${_helm_src}" ]; then
-    cp "${_helm_src}" "${OUT}/bin/helm-archive.tar.gz"
-    ok "  helm-archive.tar.gz ← ${_helm_src#${REPO_ROOT}/}"
-else
-    err "找不到 helm-*.tar.gz(离线版本目录里没有; 联网下载留待补) —— base 构建会在 COPY bin/helm-archive.tar.gz 处失败"
-    exit 1
-fi
-# mc(MinIO Client)—— **唯一必须内置的引导工具**:
-#   容器正是靠它去 MinIO **拉**离线文件(不能被挂载提供, 先有鸡还是先有蛋); 上游下载路径会变
-#   (老 /client/ 已 410 Gone, 新 /aistor/ 2026-09-30 实测 200)⇒ 首选离线件, 联网只兜底。
-_mc_src=""
-MC_ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
-case "${MC_ARCH}" in
-    amd64|x86_64) MC_ARCH=amd64; _MC_MACHINE=3e00 ;;
-    arm64|aarch64) MC_ARCH=arm64; _MC_MACHINE=b700 ;;
-    *) err "不支持的 mc 架构: ${MC_ARCH}"; exit 1 ;;
-esac
-for _c in "${OFFLINE_FILES_ROOT}/os"/mc-*-linux-"${MC_ARCH}"; do
-    [ -f "${_c}" ] && { _mc_src="${_c}"; break; }
-done
-if [ -z "${_mc_src}" ]; then
-    _mc_url="https://dl.min.io/aistor/mc/release/linux-${MC_ARCH}/mc"
-    warn "离线件里没有 mc(offline-files/os/mc-*), 尝试联网下载: ${_mc_url}"
-    if wget -q -O "${OUT}/bin/mc" "${_mc_url}" 2>/dev/null && [ -s "${OUT}/bin/mc" ]; then
-        chmod +x "${OUT}/bin/mc"
-        if "${OUT}/bin/mc" --version >/dev/null 2>&1; then
-            _mc_src="${_mc_url}"
-            warn "  已下载并验版本 ✓ —— 建议沉淀成离线件(offline-files/os/mc-<版本>-linux-${MC_ARCH})"
+    # ⚠ `|| true`: 无版本目录时 `ls` 退出 2, 经 pipefail 会**静默杀死脚本**(到不了下面的兜底/报错);
+    _KV_DIR="$(ls -d "${REPO_ROOT}/deployments/offline-files/kubespray"/v*/ 2>/dev/null | sort -V | tail -1 || true)"
+    mkdir -p "${OUT}/bin"
+    _tool_one() {   # <固定名> <源前缀或命令行名> [--from-host]
+        local out="$1" pat="$2" src=""
+        if [ -n "${_KV_DIR}" ]; then
+            src="$(ls "${_KV_DIR}"${pat}-* 2>/dev/null | head -1 || true)"
+        fi
+        if [ -z "${src}" ] && command -v "${pat}" >/dev/null 2>&1; then src="$(command -v "${pat}")"; fi
+        if [ -n "${src}" ] && [ -f "${src}" ]; then
+            cp "${src}" "${OUT}/bin/${out}"
+            ok "  ${out} ← ${src#${REPO_ROOT}/}"
         else
-            rm -f "${OUT}/bin/mc"; _mc_src=""
+            err "找不到 ${pat}(离线版本目录与宿主机都没有)—— base 构建会在 COPY bin/${out} 处失败"
+            return 1
+        fi
+    }
+    say "拷贝工具链到 bin/(固定名; 版本取自 ${_KV_DIR:-宿主机}) ..."
+    _tool_one kubectl kubectl || exit 1
+    _tool_one skopeo  skopeo  || exit 1
+    _tool_one yq      yq      || exit 1
+    # helm: 压缩包形态(Dockerfile 里解包), 固定名 helm-archive.tar.gz
+    _helm_src=""
+    [ -n "${_KV_DIR}" ] && _helm_src="$(ls "${_KV_DIR}"helm-*.tar.gz 2>/dev/null | head -1 || true)"
+    if [ -n "${_helm_src}" ]; then
+        cp "${_helm_src}" "${OUT}/bin/helm-archive.tar.gz"
+        ok "  helm-archive.tar.gz ← ${_helm_src#${REPO_ROOT}/}"
+    else
+        err "找不到 helm-*.tar.gz(离线版本目录里没有; 联网下载留待补) —— base 构建会在 COPY bin/helm-archive.tar.gz 处失败"
+        exit 1
+    fi
+    # mc(MinIO Client)—— **唯一必须内置的引导工具**:
+    #   容器正是靠它去 MinIO **拉**离线文件(不能被挂载提供, 先有鸡还是先有蛋); 上游下载路径会变
+    #   (老 /client/ 已 410 Gone, 新 /aistor/ 2026-09-30 实测 200)⇒ 首选离线件, 联网只兜底。
+    _mc_src=""
+    MC_ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+    case "${MC_ARCH}" in amd64|arm64) : ;; *) MC_ARCH="amd64" ;; esac
+    _MC_MACHINE=3e00   # ELF e_machine(仅供下方防错件校验): 3e00=x86-64, b700=aarch64
+    [ "${MC_ARCH}" = "arm64" ] && _MC_MACHINE=b700
+    # ⚠ 不做"按架构选件"(用户口径 2026-10-09: 本仓库不支持 arm64) —— 仍取 mc-* 首个;
+    #   但下面的 ELF 校验保证"装进镜像的 mc 必须与构建机架构一致"(防错架构件静默入镜像)。
+    for _c in "${REPO_ROOT}/deployments/offline-files/os"/mc-*; do
+        [ -f "${_c}" ] && { _mc_src="${_c}"; break; }
+    done
+    if [ -z "${_mc_src}" ]; then
+        _mc_url="https://dl.min.io/aistor/mc/release/linux-${MC_ARCH}/mc"
+        warn "离线件里没有 mc(offline-files/os/mc-*), 尝试联网下载: ${_mc_url}"
+        if wget -q -O "${OUT}/bin/mc" "${_mc_url}" 2>/dev/null && [ -s "${OUT}/bin/mc" ]; then
+            chmod +x "${OUT}/bin/mc"
+            if "${OUT}/bin/mc" --version >/dev/null 2>&1; then
+                _mc_src="${_mc_url}"
+                warn "  已下载并验版本 ✓ —— 建议沉淀成离线件(offline-files/os/mc-<版本>-linux-${MC_ARCH})"
+            else
+                rm -f "${OUT}/bin/mc"; _mc_src=""
+            fi
         fi
     fi
-fi
-if [ -z "${_mc_src}" ] && command -v mc >/dev/null 2>&1; then
-    _mc_src="$(command -v mc)"
-    warn "联网下载也失败, 回退用宿主机的 ${_mc_src} —— 建议沉淀成离线件"
-fi
-if [ -n "${_mc_src}" ] && [ -f "${_mc_src}" ]; then
-    cp "${_mc_src}" "${OUT}/bin/mc"
-    ok "  mc ← ${_mc_src#${REPO_ROOT}/}"
-elif [ -n "${_mc_src}" ]; then
-    ok "  mc ← ${_mc_src}(联网下载)"
-else
-    err "找不到 mc: 离线件 offline-files/os/mc-* 缺失且联网/宿主机都没有 —— base 构建会在 COPY bin/mc 处失败"
-    err "  → 备料: 联网机 wget https://dl.min.io/aistor/mc/release/linux-${MC_ARCH}/mc -O .../os/mc-<版本>-linux-${MC_ARCH}"
-    exit 1
-fi
+    if [ -z "${_mc_src}" ] && command -v mc >/dev/null 2>&1; then
+        _mc_src="$(command -v mc)"
+        warn "联网下载也失败, 回退用宿主机的 ${_mc_src} —— 建议沉淀成离线件"
+    fi
+    if [ -n "${_mc_src}" ] && [ -f "${_mc_src}" ]; then
+        cp "${_mc_src}" "${OUT}/bin/mc"
+        ok "  mc ← ${_mc_src#${REPO_ROOT}/}"
+    elif [ -n "${_mc_src}" ]; then
+        ok "  mc ← ${_mc_src}(联网下载)"
+    else
+        err "找不到 mc: 离线件 offline-files/os/mc-* 缺失且联网/宿主机都没有 —— base 构建会在 COPY bin/mc 处失败"
+        err "  → 备料: 联网机 wget https://dl.min.io/aistor/mc/release/linux-${MC_ARCH}/mc -O .../os/mc-<版本>-linux-${MC_ARCH}"
+        exit 1
+    fi
 
-# 核验 ELF 架构, 防止文件名正确但内容来自另一架构(离线/下载/宿主机来源均检查)。
-if [ "$(od -An -tx1 -N4 "${OUT}/bin/mc" | tr -d ' \n')" != "7f454c46" ] \
-    || [ "$(od -An -tx1 -j18 -N2 "${OUT}/bin/mc" | tr -d ' \n')" != "${_MC_MACHINE}" ]; then
-    err "mc 二进制架构与 ${MC_ARCH} 不符: ${_mc_src}"
-    exit 1
+    # 核验 ELF 架构, 防止文件名正确但内容来自另一架构(离线/下载/宿主机来源均检查)。
+    # (保留此项; 与上面的"不按架构选件"是两回事: 这不是支持 arm64, 是拒绝错件静默入镜像。)
+    if [ "$(od -An -tx1 -N4 "${OUT}/bin/mc" | tr -d ' \n')" != "7f454c46" ] \
+        || [ "$(od -An -tx1 -j18 -N2 "${OUT}/bin/mc" | tr -d ' \n')" != "${_MC_MACHINE}" ]; then
+        err "mc 二进制架构与 ${MC_ARCH} 不符: ${_mc_src}"
+        exit 1
+    fi
+else
+    say "跳过 CLI 工具链 staging(bin/ 仅 base 层构建的输入; 本次未请求 --base)"
 fi
-fi # DO_BASE: 代码层构建无需离线工具
 
 echo ""
 ok "构建上下文就绪: ${OUT}  ($(du -sh "${OUT}" 2>/dev/null | awk '{print $1}'))"
 
-if [ "${DO_BUILD}" = "1" ] || [ "${DO_BASE}" = "1" ]; then
+if [ "${DO_BUILD}" = "1" ]; then
     if [ "${DO_BASE}" = "1" ]; then
         # ---- 只重建 base 层(系统+工具链): 新增 package/工具/依赖版本变化时才需要 ----
         if ! ${ENGINE} image inspect "${BASE_IMAGE}" >/dev/null 2>&1; then
@@ -234,7 +240,6 @@ if [ "${DO_BUILD}" = "1" ] || [ "${DO_BASE}" = "1" ]; then
         ok "base 层完成: ${CLI_BASE_TAG}(${_base_layers} 层)"
     fi
 
-    if [ "${DO_BUILD}" = "1" ]; then
     # ---- 代码层构建(两种 Dockerfile 都 FROM base): 只 copy deployments 代码, 层数不累积 ----
     if ! ${ENGINE} image inspect "${CLI_BASE_TAG}" >/dev/null 2>&1; then
         say "本地无 base 镜像 ${CLI_BASE_TAG}, 尝试从 Harbor 拉取 ..."
@@ -254,7 +259,6 @@ if [ "${DO_BUILD}" = "1" ] || [ "${DO_BASE}" = "1" ]; then
     ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f "${OUT}/${_df}" --build-arg "CLI_BASE_TAG=${CLI_BASE_TAG}" -t "${IMAGE}" "${OUT}" \
         || { err "代码层构建失败"; exit 1; }
     ok "构建完成: ${IMAGE}"
-    fi
     if [ "${DO_PUSH}" = "1" ]; then
         say "推送到 Harbor ..."
         _push_images=()

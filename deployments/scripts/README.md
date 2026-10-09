@@ -19,10 +19,10 @@
 > ⭐ **推荐方式**:宿主机只需 **Docker**,离线文件/配置/密钥都在容器外管理(挂载),换环境/多集群复用同一套 offline-files。
 
 ```bash
-# ① 拉取 CLI 镜像(内置 kubespray 源码 + 全部部署脚本 + ansible/mc/sshpass/virsh 等;
-#    ⚠ 2026-09-30 起 kubectl/helm/skopeo **不再打进镜像** —— 镜像只含 deployments/ 代码,
-#    这三件由容器运行期从挂载的版本目录挂到 PATH(见 docs/kubespray-versioning/README.md §8),
-#    故容器内请用 bash -lc(登录 shell)执行部署命令)
+# ① 拉取 CLI 镜像(内置 kubespray 源码 + 全部部署脚本 + ansible/sshpass/virsh + 工具链
+#    kubectl/helm/skopeo/yq/mc —— 2026-09-30 最终口径: 工具链**打进 base 层**(非登录 shell 也有);
+#    运行期钩子只在工具缺失时从挂载的版本目录补齐、不覆盖(见 docs/kubespray-versioning/README.md §8);
+#    部署流程仍用 bash -lc(既有口径))
 docker pull harbor.isuanova.com/suanova/cubestack-installer-cli:latest
 
 # ② 宿主机准备大磁盘离线目录(离线文件较大, 建议 ≥50GiB 空闲; 多集群可共用同一份)
