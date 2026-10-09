@@ -489,8 +489,9 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - **本地临时版本**:打 `LOCAL_ONLY`(上传工具自动跳过;`--prune` 需显式 `--force-full-prune`)。
 - **新增/迁移"按版本选"的组件**四条一起改:① 资产目录 ② 版本开关变量 ③ `images.manifest` 落点
   ④ `trim-offline-files.sh` 只清选定版本(`--version`)。
-- **CLI 镜像只含 `deployments/` 代码**:kubectl/helm/skopeo 由容器运行期从挂载的版本目录挂 PATH
-  (`deployments/scripts/tools/docker/cli-toolchain-from-offline.sh`)⇒ 容器内用 `bash -lc`。
+- **CLI 镜像 = base(工具链 kubectl/helm/skopeo/yq, 取自离线版本目录)+ 代码层(`deployments/`)**;
+  运行期钩子(`deployments/scripts/tools/docker/cli-toolchain-from-offline.sh`)只做"缺才补"兜底
+  (工具已在即跳过、不覆盖)⇒ 部署流程仍用 `bash -lc`(既有口径; 钩子只在登录 shell 生效)。
 
 ## 审查清单(写完脚本后自检)
 
