@@ -244,11 +244,29 @@ while IFS= read -r -d '' f; do
     if [ "${hit}" = "1" ]; then
         CHART_OKN=$((CHART_OKN + 1))
     else
+        # gitignore 豁免(2026-10-08): 该组件 chart 若被 .gitignore **显式声明不入 git**
+        # (如 cubestack-operator 滚动 chart —— 分发通路 = CLI 镜像 + 部署机本地), 干净
+        # checkout 缺它属预期 ⇒ 降级 WARN(否则 GitHub CI 的干净克隆必红)。
+        _gi=0
+        while IFS= read -r c; do
+            [ -z "${c}" ] && continue
+            # ADDON_DIR = <repo>/deployments/cubestack-addon ⇒ 上溯 2 级 = 仓库根
+            if git -C "${ADDON_DIR}/../.." check-ignore -q "${ADDON_DIR}/${c}/x.tgz" 2>/dev/null \
+               || git -C "${ADDON_DIR}/../.." check-ignore -q "${ADDON_DIR}/${c}" 2>/dev/null; then
+                _gi=1; break
+            fi
+        done <<< "${cands}"
+        if [ "${_gi}" = "1" ]; then
+            warn "  ${rel}: vendored chart 按仓库策略**不入 git**(gitignore 豁免; 本地/CLI 镜像分发)"
+            warn "     → 干净 checkout 缺它属预期; 部署机上请确保本地副本在位(或从 CLI 镜像取)"
+            CHART_WARN=$((CHART_WARN + 1))
+        else
         ck_fail "${rel}: 引用了 cubestack-addon/ 却**找不到 vendored chart**(.tgz 或 Chart.yaml)"
         ck_fail "      → 模块安装时恒用本地副本, 缺了它私服/上游一抖动就装不上(回退代码会空转)"
         ck_fail "      → 修法: 把 chart 放进 deployments/cubestack-addon/<组件>/ 并提交,"
         ck_fail "             tgz 形式请一并提交 <tgz>.digest 边车(供 helm_chart_ensure 比对刷新)"
         CHART_FAIL=$((CHART_FAIL + 1))
+        fi
     fi
 done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${CHART_FAIL}" = "0" ] && ok "安装 chart 的模块均有 vendored 离线副本(${CHART_OKN} 个模块通过)"

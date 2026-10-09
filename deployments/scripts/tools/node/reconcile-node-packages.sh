@@ -15,6 +15,8 @@
 #     我们只负责把离线 .deb 放到它能看见的地方(`Dir::Cache::archives`, 且 `--no-download` 全程离线)。
 #   · **不引入新问题**: ① 先跑 `apt-get -s -f install` 打印计划再执行; ② 只碰"我们带的包";
 #     ③ 收尾 `apt-get check` 复核依赖图, 不健康即非零退出(把问题挡在 6 分钟的 kubespray 之前)。
+#   · **chrony/timesyncd 互斥护栏**(2026-10-07 事故): 节点已有 chrony(VM 黄金镜像)时跳过
+#     systemd-timesyncd —— 二者 apt 互斥, 对账装 timesyncd 会把权威 NTP 服务端摘掉 ⇒ 05_k8s_ntp 失败。
 #
 # 用法: reconcile-node-packages.sh [--ip <IP>]... [--dry-run] [--user <u>]
 #       不给 --ip = 对 cluster.conf NODES 里全部节点执行。
@@ -50,9 +52,10 @@ if [ "${#IPS[@]}" -eq 0 ]; then
 fi
 [ "${#IPS[@]}" -gt 0 ] || { err "没有目标节点(cluster.conf NODES 为空?)"; exit 1; }
 
-# 离线 .deb 来源: packages/ 与 packages/repair/(后者专放"修复用"的配对版本)
-DEB_DIRS=("${OFFLINE_FILES_DIR}/packages"
-          "${OFFLINE_FILES_DIR}/packages/repair")
+# 离线 .deb 来源: offline-files/os/packages(版本无关 OS 层; 2026-10-08 起节点 .deb 统一收敛于此,
+# 原 <版本目录>/packages 与 packages/repair 已并入 —— 同名同版本去重; 版本目录不再放 .deb)
+# ⚠ 只扫该目录**顶层** *.deb: chrony 等"专用安装集"放子目录(如 os/packages/chrony/), 不做对账。
+DEB_DIRS=("${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages")
 DEBS=()
 for d in "${DEB_DIRS[@]}"; do
     [ -d "${d}" ] || continue
@@ -128,6 +131,15 @@ for deb in "${D}"/*.deb; do
     [ -e "${deb}" ] || continue
     pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"; ver="$(dpkg-deb -f "${deb}" Version 2>/dev/null)"
     [ -n "${pkg}" ] && [ -n "${ver}" ] || continue
+    # ★ 2026-10-07 修复(权威 chrony 被摘除事故根因): systemd-timesyncd 与 chrony **互斥**
+    #   (apt 自动摘除对方)。VM 黄金镜像装的是 chrony(create-vm-template.sh 装 chrony 时即卸
+    #   timesyncd), 对账若把 timesyncd 装回去 ⇒ 首 master 权威 NTP 服务端消失 ⇒ 05_k8s_ntp
+    #   必失败(离线环境 apt 又装不回来)。有 chrony 的节点跳过 timesyncd; 裸金属(无 chrony)
+    #   仍正常装 timesyncd 作客户端。
+    if [ "${pkg}" = "systemd-timesyncd" ] && dpkg-query -W -f='${Status}' chrony 2>/dev/null | grep -q "install ok installed"; then
+        printf '         skip %s(节点已装 chrony, 二者互斥; 保持 VM 镜像口径)\n' "${pkg}"
+        continue
+    fi
     cur="$(dpkg-query -W -f='${Version}' "${pkg}" 2>/dev/null || true)"
     if [ "${cur}" = "${ver}" ]; then printf '         ok   %s=%s\n' "${pkg}" "${ver}"; continue; fi
     if [ "${DRY}" = "1" ]; then printf '         计划 %s: %s → %s\n' "${pkg}" "${cur:-未装}" "${ver}"; continue; fi

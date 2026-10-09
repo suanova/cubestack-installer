@@ -7,6 +7,7 @@
 | `ubuntu-22.04.tar` | CLI 镜像全量构建的**基础镜像**(`docker load` 后 `docker build`) | `tools/docker/build-cli-context.sh --build` |
 | `netshoot.tar` | 网络排障临时 Pod 的镜像(手动 `ctr` 导入节点) | 排查时人工使用 |
 | `mc-<版本>-linux-amd64` | MinIO Client 静态二进制 —— **镜像里唯一必须内置的工具** | `build-cli-context.sh` 拷进构建上下文 `bin/mc` |
+| `packages/` | **节点 OS 层 deb**(版本无关; 2026-10-08 起 kubespray/<版本>/packages 与 repair 全部并入)。**顶层=对账集**(全线节点逐个装), `chrony/` 子目录=专用安装集(仅 NTP 模块用, 不对账) | `reconcile-node-packages.sh` / `install-packages.yml` / `setup-ntp.sh` 等(详见 `packages/README.md`) |
 
 ## mc 为什么必须打进 CLI 镜像(例外说明)
 

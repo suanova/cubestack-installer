@@ -344,6 +344,14 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   但仓库里压根没有那份文件 —— 私服一抖动回退就是空转。回退只有在本地确实有一份时才有意义。
 - **强制校验**:`tools/check-modules.sh` 第 ⑩ 项。行首是 helm 安装命令的模块,其引用的
   `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`,否则报错。
+- **边车 `.digest` 写什么值(实测, 2026-09-30)**:写 `helm pull` 输出里的 `Digest:` 那一行。
+  经典 helm repo 的它 = tgz 文件 sha256(**可以** `sha256sum` 核验); **OCI chart 的它是 manifest 摘要,
+  不是文件 sha256** —— 实测 `cubestack-operator-chart-1.0.0-latest.tgz`:helm 报 `sha256:06f0318d…`,
+  而文件 sha256 是 `sha256:c8e94925…`。自己算出来的值永远比不相等 ⇒ 每次部署都误判"远端有更新"
+  并覆盖仓库文件(告警刷屏 + 工作区反复变脏)。**只能从 pull 输出取**。
+- **参考实现**:`modules/03_addon/25_cubestack_operator.sh` —— 全仓库第一个真正调用
+  `helm_chart_ensure` 的模块(私有 OCI chart + `helm registry login --password-stdin` 凭据 +
+  动态渲染提取镜像 + 渲染自检)。
 
 ## 断点续跑(REPEAT 语义, 重要)
 
@@ -449,9 +457,12 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   harbor-save-images.sh          # Harbor → offline-files/<group>/*.tar(联网机)
   check-image-manifest.sh        # 静态校验; --kubespray 交叉核对; --harbor 漂移报告
   ```
-- **默认不镜像"上游就是本台 Harbor"的组**(metax-gpu 11): 它们本就在本台 Harbor 上,
-  部署模块直接从 `metax/` 项目拉, 再镜像只多占 8.4 GB 且升级要重跑。
+- **默认不镜像"上游就是本台 Harbor"的组**(metax-gpu 11 / cubestack-operator 1): 它们本就在本台 Harbor 上,
+  部署模块直接从原项目拉(metax 项目 / suanova-private), 再镜像只多占存储且升级要重跑。
   判据是**推导**的(注册域 == HARBOR_MIRROR_REGISTRY), 不是硬编码名单; 要副本用 `--include-same-harbor`。
+  ⚠ **取离线 tar 时对这些组要回到原始 ref**:`harbor-save-images.sh` 已内建同源分支
+  (2026-09-30 修, 此前会去拉**根本不存在的** `mirrors/<路径>` 而失败)—— 私有项目(如 suanova-private)
+  需在该工具里配好凭据(`HARBOR_MIRROR_USER/PASSWORD` 即可)。
 - **CI**: `.github/workflows/sync-images-to-harbor.yml`(push 清单 / 手动 / 每周定时);
   凭据走 GitHub **Secrets**(`HARBOR_MIRROR_USER` / `HARBOR_MIRROR_PASSWORD`, 密码必须放 Secret)。
   ⚠ 设密钥: `gh secret set NAME`(**省略 `--body`** 才读 stdin); `--body -` 会把字面量 `-` 存进去。

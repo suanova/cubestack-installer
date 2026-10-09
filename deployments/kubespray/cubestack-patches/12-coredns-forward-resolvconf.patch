@@ -1,0 +1,29 @@
+# patch: 12-coredns-forward-resolvconf.patch
+# 目标: roles/kubernetes-apps/ansible/templates/coredns-config.yml.j2
+# 加入: 2026-10-08(实机: 10.244.1.31 集群 coredns 18+ 次 CrashLoopBackOff)
+# 原因: 上游用 `upstream_dns_servers` 渲染 coredns 的 forward 目标(非空则直指)。
+#       本仓库环境**无外部 DNS**, 该变量被拿来做"防 nodelocaldns↔systemd-resolved 回环"的
+#       哨兵(如 127.0.0.1)⇒ 直指渲染后 coredns 的 forward = pod 内 127.0.0.1:53 = **自己**
+#       ⇒ loop 插件探测发作 FATAL 自杀(`Loop (127.0.0.1:xxxxx -> :53)`, 源码见
+#       plugin/loop/loop.go: state.RemoteAddr() 即收到探测的来源地址)。
+#       修复: coredns 的 forward 恒用 `/etc/resolv.conf`(dnsPolicy=Default ⇒ 节点 resolv;
+#       经 systemd-resolved → nodelocaldns 链, nodelocaldns 的上游另行由该变量控制 ——
+#       两处消费解耦)。对外部域名的可用性与"无上游"环境语义一致(失败), 不回环。
+# 上游吸收判据: 该模板不再用 upstream_dns_servers 渲染 coredns forward(或上游提供等价的
+#       "forward 目标不得自指"防护机制)
+# 上游化: 不提 PR(环境特化: 本仓库把 upstream_dns_servers 用作回环哨兵, 非真实 DNS 地址;
+#       上游默认语义"直指上游 DNS"对有真实 DNS 的环境是对的)
+# ------------------------------------------------------------
+diff --git a/roles/kubernetes-apps/ansible/templates/coredns-config.yml.j2 b/roles/kubernetes-apps/ansible/templates/coredns-config.yml.j2
+index 7671c0c..ec9e467 100644
+--- a/roles/kubernetes-apps/ansible/templates/coredns-config.yml.j2
++++ b/roles/kubernetes-apps/ansible/templates/coredns-config.yml.j2
+@@ -68,7 +68,7 @@ data:
+ {% endif %}
+         }
+         prometheus :9153
+-        forward . {{ upstream_dns_servers | join(' ') if upstream_dns_servers | length > 0 else '/etc/resolv.conf' }} {
++        forward . /etc/resolv.conf {
+           prefer_udp
+           max_concurrent 1000
+ {% if dns_upstream_forward_extra_opts is defined %}
