@@ -47,6 +47,116 @@ delete_cluster() {
     # 幂等: 无集群直接成功
     _exists="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
     [ -z "${_exists}" ] && { ok "  无现有 CephCluster, 跳过"; return 0; }
+
+    # ── ⓪ 停用 Ceph 卷"消费者"(2026-10-10 用户口径: 确保无活动 PVC 被占用后再动集群)──────
+    #   目的: ① 消灭在飞 IO(防写死死设备/内核毒化) ② 让 CSI 自然 NodeUnpublish→Unstage
+    #         (节点内核 rbd unmap) ③ 防"删了 PVC/集群, 控制器又重建 Pod 重新挂卷"的竞态。
+    #   只停**消费者**(scale 0 / 删 Pod / 删 CR 级联), **不删 PVC 对象**(registry-pvc 等
+    #   保护逻辑不变 —— 内核 unmap 只需 Pod 消失, 与 PVC 对象在不在无关)。
+    #   顺序: 先停顶层 operator + registry(否则 StatefulSet 的 replicas 会被 operator 调回,
+    #   "杀了又复活"), 再泛化扫"仍挂 ceph PVC 的 Pod"取其顶层控制器收敛; 有界 ≤120s,
+    #   不等则响亮列名告警(不阻塞后续)。
+    say "  ⓪ 停用持有 ceph 卷的工作负载(消灭在飞 IO; PVC 对象保留)..."
+    _RBD_OP_NS="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
+    _RBD_OP_REL="${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"
+    SSH "${K} -n ${_RBD_OP_NS} scale deploy ${_RBD_OP_REL} --replicas=0 >/dev/null 2>&1" || true
+    SSH "${K} -n kube-system scale deploy registry --replicas=0 >/dev/null 2>&1" || true
+    _vj="$(mktemp)"; _pj="$(mktemp)"; _rj="$(mktemp)"; _sj="$(mktemp)"
+    _sweep_done=0
+    for _wi in $(seq 1 12); do
+        SSH "${K} get pvc -A -o json 2>/dev/null" > "${_vj}" || true
+        SSH "${K} get pods -A -o json 2>/dev/null" > "${_pj}" || true
+        SSH "${K} get rs -A -o json 2>/dev/null" > "${_rj}" || true
+        SSH "${K} get sts -A -o json 2>/dev/null" > "${_sj}" || true
+        _acts="$(python3 - "${_vj}" "${_pj}" "${_rj}" "${_sj}" <<'PYEOF'
+import json, sys
+def load(p):
+    try:
+        return json.load(open(p))
+    except Exception:
+        return {"items": []}
+ceph = set()
+for p in load(sys.argv[1]).get("items", []):
+    sc = ((p.get("spec") or {}).get("storageClassName") or "")
+    if "ceph" in sc and (p.get("status") or {}).get("phase") == "Bound":
+        ceph.add((p["metadata"]["namespace"], p["metadata"]["name"]))
+if not ceph:
+    sys.exit(0)
+rs = {(r["metadata"]["namespace"], r["metadata"]["name"]): r for r in load(sys.argv[3]).get("items", [])}
+sts = {(s["metadata"]["namespace"], s["metadata"]["name"]): s for s in load(sys.argv[4]).get("items", [])}
+for pod in load(sys.argv[2]).get("items", []):
+    md = pod["metadata"]; ns = md["namespace"]; name = md["name"]
+    if (pod.get("status") or {}).get("phase") in ("Succeeded", "Failed"):
+        continue
+    hit = False
+    for v in ((pod.get("spec") or {}).get("volumes") or []):
+        cn = (v.get("persistentVolumeClaim") or {}).get("claimName")
+        if cn and (ns, cn) in ceph:
+            hit = True; break
+    if not hit:
+        continue
+    refs = md.get("ownerReferences") or []
+    if not refs:
+        print("delpod\t%s\t%s\t" % (ns, name)); continue
+    k = refs[0]["kind"]; n = refs[0]["name"]
+    if k == "ReplicaSet":
+        rr = (rs.get((ns, n), {}).get("metadata", {}).get("ownerReferences") or [])
+        if rr:
+            print("scale\t%s\t%s\t%s" % (ns, rr[0]["kind"], rr[0]["name"]))
+        else:
+            print("delpod\t%s\t%s\t" % (ns, name))
+    elif k == "StatefulSet":
+        sr = (sts.get((ns, n), {}).get("metadata", {}).get("ownerReferences") or [])
+        if sr and sr[0]["kind"] not in ("Deployment", "StatefulSet", "ReplicaSet"):
+            print("delcr\t%s\t%s\t%s" % (ns, sr[0]["kind"].lower(), sr[0]["name"]))
+        else:
+            print("scale\t%s\t%s\t%s" % (ns, k, n))
+    elif k == "Deployment":
+        print("scale\t%s\t%s\t%s" % (ns, k, n))
+    else:
+        print("delpod\t%s\t%s\t" % (ns, name))
+PYEOF
+)"
+        [ -z "${_acts}" ] && { _sweep_done=1; break; }
+        while IFS=$'\t' read -r _act _a1 _a2 _a3; do
+            [ -n "${_act}" ] || continue
+            case "${_act}" in
+                scale)  say "     停用 ${_a1}/${_a2} ${_a3}(replicas=0)"; SSH "${K} -n ${_a1} scale ${_a2,,} ${_a3} --replicas=0 >/dev/null 2>&1" || true ;;
+                delpod) say "     删除 Pod ${_a1}/${_a2}(优雅退出, ≤20s)"; SSH "${K} -n ${_a1} delete pod ${_a2} --grace-period=20 >/dev/null 2>&1" || true ;;
+                delcr)  say "     删除 CR ${_a2}/${_a3}(级联收掉其组件)"; SSH "${K} -n ${_a1} delete ${_a2} ${_a3} --wait=false >/dev/null 2>&1" || true ;;
+            esac
+        done <<< "${_acts}"
+        sleep 10
+    done
+    if [ "${_sweep_done}" = "1" ]; then
+        ok "  消费者已全部停用(无 Pod 再引用 ceph PVC)"
+    else
+        _left_pods="$(python3 - "${_vj}" "${_pj}" <<'PYEOF' 2>/dev/null || true
+import json, sys
+def load(p):
+    try:
+        return json.load(open(p))
+    except Exception:
+        return {"items": []}
+ceph = set()
+for p in load(sys.argv[1]).get("items", []):
+    sc = ((p.get("spec") or {}).get("storageClassName") or "")
+    if "ceph" in sc and (p.get("status") or {}).get("phase") == "Bound":
+        ceph.add((p["metadata"]["namespace"], p["metadata"]["name"]))
+out = []
+for pod in load(sys.argv[2]).get("items", []):
+    md = pod["metadata"]; ns = md["namespace"]
+    for v in ((pod.get("spec") or {}).get("volumes") or []):
+        cn = (v.get("persistentVolumeClaim") or {}).get("claimName")
+        if cn and (ns, cn) in ceph:
+            out.append("%s/%s" % (ns, md["name"])); break
+print(" ".join(out[:8]))
+PYEOF
+)"
+        warn "  仍有 Pod 引用 ceph PVC(120s 未收敛): ${_left_pods:-?} —— 继续(k8s 重置/资源删除会终结它们)"
+    fi
+    rm -f "${_vj}" "${_pj}" "${_rj}" "${_sj}"
+
     # ★ 2026-09-05 事故预防: 删除集群前先清 ceph-block PVC 并删 rbd nodeplugin DaemonSet。
     #   若直接删 CephCluster, nodeplugin 随之被删 → 节点上内核 rbd 映射无人 unmap →
     #   [rbd0-tasks] 内核线程持锁残留 → sysfs remove 被拒(EACCES) → libceph cephx -13
@@ -166,25 +276,46 @@ for dev in __DISKS__; do
         _BSTORE_FAIL=1
     fi
 done
-# 5) 清理 Rook/Ceph 数据目录 + 残留 rbd 设备
+# 5) 清理 Rook/Ceph 数据目录 + 残留 rbd 设备(+ 2026-10-10: ceph/rook udev 规则)
 rm -rf /var/lib/rook /var/lib/ceph /etc/ceph /run/ceph 2>/dev/null || true
 rm -f /dev/rbd* 2>/dev/null || true
+rm -f /etc/udev/rules.d/*ceph* /etc/udev/rules.d/*rook* 2>/dev/null || true
+udevadm control --reload-rules >/dev/null 2>&1 || true
 udevadm settle 2>/dev/null || true
-# 6) ★ 内核 rbd 映射残留检测(2026-09-05 事故预防): 即使磁盘清空, 内核 rbd 映射
-#    ([rbd0-tasks] 线程持锁)仍在时, sysfs remove 会被 EACCES 拒绝, 且 libceph 持续
-#    cephx -13 刷屏, 只能重启节点清除。此处检测并明确提示, 不再静默继续。
-echo "--- 内核 rbd 映射检测 ---"
+# 6) ★ 内核 rbd 映射残留: **完整阶梯**(2026-10-10 定稿; 对齐官方"unmap→模块卸载→才谈重启"):
+#    a) 逐映射**后台** sysfs remove + 有界复核(惰性, 本进程永不阻塞; 成功会让 b 可行)
+#    b) `modprobe -r rbd` + `modprobe -r libceph` —— **模块级卸载**, unmap 成功后它能把
+#       客户端会话/内核态一次性清光(根治 -13 刷屏), 这是官方推荐的"比逐条 unmap 更彻底"的手段
+#    c) 仍残留(sysfs 被拒 + rmmod EBUSY = 内核持锁, 物理所限) → 响亮告警 + **硬复位**指引
+echo "--- 内核 rbd 映射清理(阶梯: sysfs → 模块卸载 → 告警)---"
 RBD_N=0
 for d in /sys/bus/rbd/devices/*; do
     [ -d "$d" ] || continue
     RBD_N=$((RBD_N+1))
-    echo "残留 rbd 映射: $(cat $d/name 2>/dev/null) (pool=$(cat $d/pool 2>/dev/null))"
+    _rid="$(basename "$d")"; _rid="${_rid#rbd}"
+    echo "残留 rbd 映射: $(cat $d/name 2>/dev/null) (pool=$(cat $d/pool 2>/dev/null), id=${_rid})"
+    setsid bash -c "echo ${_rid} > /sys/bus/rbd/remove_single_major 2>/dev/null || echo ${_rid} > /sys/bus/rbd/remove 2>/dev/null" >/dev/null 2>&1 &
 done
 if [ "$RBD_N" -gt 0 ]; then
-    echo "!! 检测到 $RBD_N 个内核 rbd 映射残留: sysfs remove 被持锁拒绝, 必须重启本节点清除"
-    echo "!! (否则 libceph 持续 cephx 认证失败刷屏; 重启后重跑本清理即可)"
+    for _wi in 1 2 3 4 5 6 7 8 9 10; do
+        ls /sys/bus/rbd/devices/* >/dev/null 2>&1 || break
+        sleep 1
+    done
+fi
+modprobe -r rbd 2>/dev/null || true
+modprobe -r libceph 2>/dev/null || true
+RBD_N=0
+for d in /sys/bus/rbd/devices/*; do
+    [ -d "$d" ] || continue
+    RBD_N=$((RBD_N+1))
+done
+if [ "$RBD_N" -gt 0 ]; then
+    echo "!! 仍残留 ${RBD_N} 个内核 rbd 映射(sysfs remove 被拒时模块卸载也 EBUSY —— 内核持锁)"
+    echo "!! 处置: **硬复位**该节点后重跑本清理(⚠ 优雅重启会卡在 sync; 用 sysrq-b / reboot -f / virsh reset)"
+    echo "!! (残映射无碍新集群数据面, 仅致 libceph -13 日志刷屏; 可继续部署, 择机清零)"
     exit 9
 fi
+echo "--- 内核 rbd 映射已清空(阶梯完成)---"
 echo "--- 验证目标盘 FSTYPE/挂载(应全空) ---"
 for dev in __DISKS__; do
     [ -b "$dev" ] || continue
