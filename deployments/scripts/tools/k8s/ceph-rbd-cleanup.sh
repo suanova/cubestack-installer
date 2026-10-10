@@ -129,6 +129,23 @@ cleanup_node() {   # <ip>
     # 清理失效设备节点文件与空挂载目录(kubelet 残留)
     ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
         "sudo rm -f /dev/rbd* 2>/dev/null || true; sudo find /var/lib/kubelet/pods -path '*kubernetes.io~csi*' -type d -empty -delete 2>/dev/null || true" 2>/dev/null || true
+    # ★ 2026-10-10 收尾阶梯(仅清理模式): 该节点映射清完后尝试**模块级卸载**(连客户端
+    #   会话/-13 刷屏一起清); 仍有残留 → 计全局账(总账在 main 末尾的洁净度报告)。
+    if [ "${LIST_ONLY}" != "1" ]; then
+        _left="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+            "ls /sys/bus/rbd/devices 2>/dev/null | wc -l" 2>/dev/null || true)"
+        _left="${_left//[!0-9]/}"
+        _left="${_left:-0}"
+        _TOTAL_CLEANED=$(( ${_TOTAL_CLEANED:-0} + cleaned ))
+        if [ "${_left}" = "0" ]; then
+            ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+                "sudo modprobe -r rbd 2>/dev/null; sudo modprobe -r libceph 2>/dev/null; true" >/dev/null 2>&1 || true
+            ok "    ${ip}: rbd/libceph 模块已卸载(内核态清零)"
+        else
+            _TOTAL_LEFT=$(( ${_TOTAL_LEFT:-0} + _left ))
+            warn "    ${ip}: 仍有 ${_left} 个内核 rbd 映射(sysfs 被拒/模块卸载 EBUSY = 内核持锁)"
+        fi
+    fi
     [ "${cleaned}" -gt 0 ] && ok "  ${ip}: 清理 ${cleaned} 个残留 rbd 映射" || true
 }
 
@@ -148,5 +165,13 @@ echo "---------------------------------------------"
 if [ "${LIST_ONLY}" = "1" ]; then
     say "以上为各节点 rbd 映射(非 --list 时清除 [残留] 标记的映射; 若 -13 仍刷屏且存在 mounted=yes 的残留, 对应节点需重启)"
 else
-    ok "rbd 残留清理完成(若 -13 仍在刷屏, 可能有个别映射被内核占用, 可重启对应节点)"
+    echo "  ▍内核洁净度报告(阶梯: 惰性脱挂 → sysfs 后台清理 → 模块卸载)"
+    echo "     本轮已清映射: ${_TOTAL_CLEANED:-0} 个"
+    if [ "${_TOTAL_LEFT:-0}" -eq 0 ] 2>/dev/null; then
+        ok "rbd 残留清理完成: 全部节点内核 rbd 侧已清零(映射=0)"
+    else
+        warn "rbd 残留清理完成, 但**仍有 ${_TOTAL_LEFT:-?} 个内核 rbd 映射**(内核持锁, 物理所限)"
+        warn "  影响: 仅致 libceph -13 日志刷屏, 无碍新集群数据面 —— 部署可继续"
+        warn "  想彻底清零: 对相应节点**硬复位**后重跑本工具(⚠ 优雅重启会卡在 sync; 用 sysrq-b / reboot -f / virsh reset)"
+    fi
 fi

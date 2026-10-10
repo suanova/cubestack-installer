@@ -904,6 +904,23 @@ rm -f "${LOCAL_CR}"
     fi
 fi   # _CEPH_SKIP_CLUSTER=1 → 跳过集群内 CephCluster 创建
 
+# ---------------- 7.9) 恢复被"覆盖预检"停用的 Ceph 卷消费者(2026-10-10) ----------------
+# 覆盖安装时, ceph-cleanup.sh --delete-cluster 的 ⓪ 步会 scale 0 registry 与 cubestack-operator
+# (消灭在飞 IO / 防重建竞态)。此处**幂等恢复**(存在才动, 设定 replicas=1):
+#   · --fresh 路径: 旧集群已整簇重建, 新 registry 由 k8s_deploy 拉起(恢复 = no-op);
+#   · --steps ceph(K8s 保留): 把停掉的消费者拉回, 避免"停了不恢复"。
+# ⚠ 仅当 deployment 当前存在时操作; 若其副本数原非 1, 请按需手工调整。
+_RB_OP_NS="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
+_RB_OP_REL="${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"
+if SSH "${K} -n ${_RB_OP_NS} get deploy ${_RB_OP_REL} --no-headers 2>/dev/null | grep -q ."; then
+    SSH "${K} -n ${_RB_OP_NS} scale deploy ${_RB_OP_REL} --replicas=1 >/dev/null 2>&1" \
+        && say "  已恢复 cubestack-operator replicas=1(此前被覆盖预检停用)" || true
+fi
+if SSH "${K} -n kube-system get deploy registry --no-headers 2>/dev/null | grep -q ."; then
+    SSH "${K} -n kube-system scale deploy registry --replicas=1 >/dev/null 2>&1" \
+        && say "  已恢复 registry replicas=1(此前被覆盖预检停用)" || true
+fi
+
 # ---------------- 8) 汇总 ----------------
 echo "---------------------------------------------"
 ok "Ceph 存储集群部署完成(Rook ${ROOK_VERSION:-v1.20.2} / Ceph ${CEPH_VERSION})"
