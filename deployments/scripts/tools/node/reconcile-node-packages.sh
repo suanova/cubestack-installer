@@ -77,6 +77,28 @@ D=/tmp/cubestack-debs
 [ "${1:-}" = "--dry-run" ] && DRY=1 || DRY=0
 APT=( -o "Dir::Cache::archives=${D}" --no-download -y
       -o "Dpkg::Options::=--force-confdef" -o "Dpkg::Options::=--force-confold" )
+
+# ---- ⓪ apt 锁仲裁(2026-10-10 实测事故): 节点重启后 apt-daily 定时器触发 unattended-upgrades,
+#   它持着 dpkg 锁做下载(离线节点必然失败重试)⇒ 本工具一切 apt 操作撞锁, [4/4] 报"仍不健康"
+#   被误判成"依赖图破损"(实为"忙")。处置: 停 **并 disable** unattended-upgrades 与 apt 定时器
+#   (离线部署目标上自动更新无意义, 且每次重启后必然复发; 要恢复: systemctl enable --now <单元>),
+#   再**有界等待** dpkg 锁释放; 仍被占则响亮报错并点名持有者 —— 不再把"忙"当"坏"。
+systemctl stop unattended-upgrades 2>/dev/null || true
+systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+systemctl disable unattended-upgrades apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+if command -v fuser >/dev/null 2>&1; then
+    _lock_free=0
+    for _li in $(seq 1 24); do
+        fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || { _lock_free=1; break; }
+        sleep 5
+    done
+    if [ "${_lock_free}" != "1" ]; then
+        echo "         ❌ dpkg 锁被占用 >120s(已停 unattended-upgrades/apt 定时器):"
+        fuser -v /var/lib/dpkg/lock-frontend 2>&1 | sed -n '2,3p' | tr -s ' ' | sed 's/^/            /'
+        echo "           处置: 人工确认持有者(ps -ef)后重跑本工具"
+        exit 1
+    fi
+fi
 echo "   [1/4] 当前 apt 依赖图:"
 if apt-get check >/dev/null 2>&1; then echo "         健康"; else echo "         **破损**(下面用离线包修)"; fi
 

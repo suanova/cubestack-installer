@@ -97,23 +97,33 @@ cleanup_node() {   # <ip>
         fi
         # 卸载挂载点(仅当 kubelet 挂载引用且设备被占用; 残留挂载点安全卸载)
         if [ "${mounted}" = "yes" ]; then
-            ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
-                "sudo umount /dev/rbd${id} 2>/dev/null || true; for m in \$(mount | grep -E '[[:space:]]/dev/rbd${id}[[:space:]]' | awk '{print \$3}'); do sudo umount \"\$m\" 2>/dev/null || true; done; echo 卸载完成" 2>/dev/null || true
-            warn "    ${name}(id=${id}): 已卸载挂载点"
+            # ⚠ 卸载改**惰性(setsid umount -l)且后台化、不等待**(2026-10-10): 后端已死时正规
+            #   umount 会卡在"日志回写死设备"(永久 D 态不可杀) —— 与 k8s 清理处同一事故类。
+            #   惰性脱挂只做命名空间脱开, 后台进程即便 D 也只是惰性残留; 本步随之立即返回。
+            timeout 30 ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+                "sudo bash -c 'mount | grep /dev/rbd${id} | while read -r _d _on m _rest; do setsid umount -l \"\$m\" >/dev/null 2>&1 & done' ; echo 卸载已发起（惰性后台, 不等待）" 2>/dev/null || true
+            warn "    ${name}(id=${id}): 已发起惰性卸载(后台)"
         fi
         # unmap(经 sysfs, 设备节点缺失也有效)
         # 两套 sysfs remove 接口均接收设备 ID(rbd0 → 0); 按序尝试。
         #   设备目录已不存在 = 映射本来就没有 → 幂等视为成功。
-        if ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+        # ⚠ 改为**后台不等待 + 有界复核**(2026-10-10 实机): 后端已死时 sysfs remove 的**写调用
+        #   本身会永久 D 态**(worker .41 实测, 不可杀) —— 同步等待 = 部署无限挂。后台执行后
+        #   有界复核(≤10s): 设备目录消失=成功; 超时=告警放行(残映射仅造成 -13 日志刷屏,
+        #   不影响新集群; 择机重启清零)。
+        if timeout 30 ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
             "sudo bash -c '
                 [ -d /sys/bus/rbd/devices/${id} ] || exit 0
-                echo ${id} > /sys/bus/rbd/remove_single_major 2>/dev/null && exit 0
-                echo ${id} > /sys/bus/rbd/remove 2>/dev/null && exit 0
+                setsid bash -c \"echo ${id} > /sys/bus/rbd/remove_single_major 2>/dev/null || echo ${id} > /sys/bus/rbd/remove 2>/dev/null\" >/dev/null 2>&1 &
+                for _i in 1 2 3 4 5 6 7 8 9 10; do
+                    [ -d /sys/bus/rbd/devices/${id} ] || exit 0
+                    sleep 1
+                done
                 exit 1' 2>/dev/null" ; then
             ok "    ${name}(id=${id}): 已 unmap"
             cleaned=$((cleaned+1))
         else
-            warn "    ${name}(id=${id}): unmap 失败(两套 sysfs 接口均未成功; EBUSY=内核仍持有引用 → 需重启节点清除)"
+            warn "    ${name}(id=${id}): unmap 未完成(后端已死时 sysfs 写会阻塞; 已后台化不再等待 —— 残映射无碍新集群, 择机重启清零)"
         fi
     done <<< "${maps}"
     # 清理失效设备节点文件与空挂载目录(kubelet 残留)
