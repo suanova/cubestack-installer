@@ -1499,7 +1499,11 @@ bluestore_wipe_dev() {   # <盘> → 0=已擦净(校验通过); 非 0=仍有 blu
     # ② 签名/分区表 + 候选偏移 dd(始终执行: zap 只管 label 位置, 不管 offset 0 的
     #    "bluestore block device" 魔法/GPT; 也是镜像不可得时的唯一手段)
     wipefs -a -f "$d" >/dev/null 2>&1 || true
-    sgdisk --zap-all "$d" >/dev/null 2>&1 || true
+    # ⚠ **禁用 `sgdisk --zap-all`**(2026-10-10 实机根因): 它退出时做**全局 `sync()`** ——
+    #   内核若残留死 IO(历史事故的 D 状态写), sync 会遍历全部超级块、**永久挂死**(实测 5h50m,
+    #   不可杀, 部署无限 pending)。GPT 头/备份表 + bluestore 标签区已由下方 dd 候选偏移覆盖
+    #   (offset 0 与贴尾各 64MiB), 分区表重读由末尾 `partprobe`(BLKRRPART ioctl, **设备本地**)
+    #   完成 —— 全程只碰目标盘, 不做任何全局 sync。**别把它加回来。**
     for o in $(_bstore_offsets "$d"); do
         dd if=/dev/zero of="$d" bs=1M seek="$o" count=64 conv=fsync status=none >/dev/null 2>&1 || true
     done
@@ -1514,6 +1518,13 @@ bluestore_wipe_dev() {   # <盘> → 0=已擦净(校验通过); 非 0=仍有 blu
     done
     return "$r"
 }
+# 毒化预检(有界 ≤10s, 只告警不阻断; 脚本顶层、每节点一次): 内核若残留死 IO, 全局 sync 会被
+# 拖住 —— 检出即给"择机重启清毒"指引(本库其余步骤已全部设备本地化, 不受其影响)。
+sync & _sp=$!
+_sp_ok=0
+for _si in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$_sp" 2>/dev/null || { _sp_ok=1; break; }; sleep 1; done
+[ "${_sp_ok}" = "1" ] || echo "    ⚠ 该节点内核存在残留死 IO(全局 sync 被拖住>10s; 历史事故产物): 本步已全部设备本地化、不受影响; 建议择机重启清毒"
+unset _sp _sp_ok _si
 WIPELIB
 }
 

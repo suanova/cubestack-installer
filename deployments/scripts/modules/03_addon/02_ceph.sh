@@ -603,7 +603,7 @@ else
                     [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
                 done
                 [ -n "${_ip}" ] || continue
-                bash "${TOOLS_K8S}/ceph-cleanup.sh" --wipe-node "${_ip}" --disks "${NODE_DISKS[${_hn}]}" \
+                timeout 900 bash "${TOOLS_K8S}/ceph-cleanup.sh" --wipe-node "${_ip}" --disks "${NODE_DISKS[${_hn}]}" \
                     || warn "    ${_hn}: 标准清除未全部成功(见上方输出); 继续走下面的签名擦除兜底"
             done
             # 7a-② 逐盘彻底擦除兜底(★ 2026-09-24 事故修复: 这里原来手写 dd 只擦
@@ -626,7 +626,7 @@ else
                 for _d in ${NODE_DISKS[${_hn}]//,/ }; do
                     say "  wipe ${_hn} ${_d}(官方 zap-device 清 label 副本 + 头/分区表/尾, 逐处校验)..."
                     node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo bash -s -- ${_d}" \
-                        <<< "$(bluestore_wipe_remote_lib; printf '\nbluestore_wipe_dev "$1" || exit 1\n')" \
+                        <<< "$(bluestore_wipe_remote_lib; printf '\ntimeout -k 10 600 bash -c "$(declare -f bluestore_wipe_dev); bluestore_wipe_dev $1 || exit 1" _ "$1" || exit 1\n')" \
                         && ok "    ${_hn} ${_d} 已彻底清空(无 bluestore label 残留)" \
                         || { warn "    ${_hn} ${_d} 清盘未通过校验(上方已打印残留偏移)"; _WIPE_FAIL="${_WIPE_FAIL} ${_hn}:${_d}"; }
                 done

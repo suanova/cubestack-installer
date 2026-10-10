@@ -657,17 +657,18 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         if [ -n "${_CEPH_EXIST}" ] && [ "${_RUN_CEPH}" = "1" ] \
             && [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ] \
             && [ "${_CEPH_STATE}" != "done" ]; then
-            say "清理已有 Ceph(cleanupPolicy yes-really-destroy-data → 删 cephblockpool/cephcluster)..."
-            ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_FM_IP}" \
-                "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph patch cephcluster rook-ceph --type merge -p '{\"spec\":{\"cleanupPolicy\":{\"confirmation\":\"yes-really-destroy-data\"}}}' >/dev/null 2>&1; sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph delete cephblockpool rbd-pool --wait=false >/dev/null 2>&1; sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph delete cephcluster rook-ceph --wait=false >/dev/null 2>&1; true"
-            say "等待旧 Ceph 清理完成(最长 300s)..."
-            _CEPH_GONE=0
-            for _i in $(seq 1 60); do
-                _still="$(ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER:-ubuntu}@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster --no-headers 2>/dev/null" 2>/dev/null || true)"
-                [ -z "${_still}" ] && { _CEPH_GONE=1; break; }
-                sleep 5
-            done
-            [ "${_CEPH_GONE}" = "1" ] && ok "旧 Ceph 已清理, 可重新部署" || warn "旧 Ceph 未完全清理(重装前请手工确认 cephcluster 已删除)"
+            # ★ 2026-10-10 修复(顺序按官方推荐; 用户口径): 旧实现此处是**内联三连删**(patch
+            #   cleanupPolicy → delete cephblockpool → delete cephcluster), 缺"先把 Bound 的
+            #   ceph PVC 删掉触发 CSI 正常 unmap、再删 rbd nodeplugin 让节点内核 rbd unmap"
+            #   这两个前置 —— 正是 ceph-cleanup.sh 里记录的 09-05 事故路径(直接删集群 →
+            #   节点上内核 rbd 映射无人 unmap → 持锁残留 / 把在飞 IO 写死在死设备上, **只能重启**;
+            #   10-09 覆盖安装挂死事故的起点). 现改调 ceph-cleanup.sh --delete-cluster
+            #   (同一套官方安全序: PVC → nodeplugin → pool/cluster; 含 registry-pvc 保护与
+            #   300s 等待; Rook 擦盘兜底仍由模块 7a 物理清盘承担).
+            say "清理已有 Ceph(官方安全序: 删 ceph PVC → CSI 正常 unmap → 删 rbd nodeplugin → 删 pool/cluster)..."
+            bash "${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-cleanup.sh" --delete-cluster \
+                || warn "旧 Ceph 删除失败/超时(继续; 模块 7a 将物理清盘兜底)"
+            ok "旧 Ceph 资源清理流程完成(物理清盘见模块 7a)"
         fi
         unset _CEPH_EXIST _FM_IP _CEPH_SSH_KEY _CEPH_GONE _CEPH_STATE
         unset _ceph_cs _CEPH_CONFIRM_HOSTS _CEPH_CONFIRM_DISKS _CEPH_CONFIRM_TSV _CEPH_CONFIRM_DETECT_FAIL _h _ip _line _l _ds _hn _g _grp _norm _h2 _d
