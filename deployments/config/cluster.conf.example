@@ -57,6 +57,31 @@ METALLB_POOL="10.66.1.131-10.66.1.132"   # ⚠ 必须排除已被其他集群/�
 # 各服务仍可单独覆盖: REGISTRY_SERVICE_TYPE(见阶段三 3.2); ingress-nginx 在 kubespray addons.yml。
 SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-nodePort}"
 
+# ╔════════════════════════════════════════════════════════════════════════╗
+# ║ ★ 高频 / 必改变量区(2026-10-08 前置: 改动最频繁/部署前须核对的项从各分组上移) ║
+# ╠════════════════════════════════════════════════════════════════════════╣
+# ║ ④ Harbor 凭据    私有项目(chart/镜像)拉取; 留空=匿名                     ║
+# ║ ⑤ CUBESTACK_OPERATOR_*  平台 Operator: 滚动 chart/镜像 tag、CR 开关、凭据 ║
+# ║ ⑥ 版本基线       KUBESPRAY_VERSION / K8S_VERSION(升级时改; 建议走 profile)║
+# ╚════════════════════════════════════════════════════════════════════════╝
+#
+# ---- ④ Harbor 凭据(部署前核对; 私有化环境必填) ----
+#   (原 3.2 / 4.6b 分组处的同定义已上移本区, 原位置留指针; mirrors 项目公开只读时可留空)
+HARBOR_MIRROR_USER="${HARBOR_MIRROR_USER:-}"                  # (可选)留空=匿名拉取(该项目公开只读)
+HARBOR_MIRROR_PASSWORD="${HARBOR_MIRROR_PASSWORD:-}"          # Harbor 密码/token(本文件已 gitignore, 勿提交)
+CUBESTACK_OPERATOR_HARBOR_USER="${CUBESTACK_OPERATOR_HARBOR_USER:-}"
+CUBESTACK_OPERATOR_HARBOR_PASSWORD="${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}"
+
+# ---- ⑤ CUBESTACK_OPERATOR(平台 Operator; 滚动 tag 频繁更新) ----
+CUBESTACK_OPERATOR_CHART_VERSION="${CUBESTACK_OPERATOR_CHART_VERSION:-1.0.0-latest}"  # 滚动版本(与镜像 :latest 配套)
+CUBESTACK_OPERATOR_IMAGE_TAG="${CUBESTACK_OPERATOR_IMAGE_TAG:-latest}"            # 镜像 tag(chart 默认用 appVersion=latest)
+CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED="${CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED:-true}"
+CUBESTACK_OPERATOR_CHART_SYNC="${CUBESTACK_OPERATOR_CHART_SYNC:-auto}"
+
+# ---- ⑥ 版本基线(升级时改) ----
+KUBESPRAY_VERSION="${KUBESPRAY_VERSION:-}"
+K8S_VERSION="${K8S_VERSION:-v1.35.8}"                    # kube-apiserver/controller-manager/scheduler/proxy
+
 # ---- 阶段一、宿主机环境 ----
 # ⚠ API 入口高可用二选一(由代码强制互斥, 同时开启会硬失败):
 #     kube-vip  : 不占额外机器, VIP 跑在各 master 上(默认**关**, 需显式 KUBE_VIP_ENABLED=true)
@@ -152,7 +177,8 @@ KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # 虚拟机能力(P2; �
 LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(P3; 见 4.5)
 MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多网卡(附加接口经 NAD CRD 定义; 见 4.7)
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(Device Plugin, 暴露 RDMA 网卡为扩展资源; 见 4.8)
-CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-false}"  # CubeStack 自研组件(占位; 见 4.6)
+CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-true}"  # CubeStack 自研组件(占位; 默认启用; 见 4.6)
+CUBESTACK_OPERATOR_ENABLED="${CUBESTACK_OPERATOR_ENABLED:-true}"  # CubeStack 平台 Operator(默认启用; 本地 chart + 镜像入内置 registry; 见 4.6b)
 # ---- 4.7 Multus CNI(容器多网卡; 详见 deployments/cubestack-addon/multus/CUBESTACK.md) ----
 # 离线镜像: 联网机 docker save ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick
 #   → deployments/offline-files/multus/multus-cni.tar → 16_multus 模块推送进内置 registry
@@ -174,8 +200,8 @@ RDMA_IMAGE_TAG="${RDMA_IMAGE_TAG:-v1.5.4}"              # ⚠ 官方源在 ghcr.
 RDMA_RESOURCE_PREFIX="${RDMA_RESOURCE_PREFIX:-nvidia.com}"  # 扩展资源前缀(pool 模式用; by-link 模式的前缀写在下面两个资源名里)
 RDMA_RESOURCE_NAME="${RDMA_RESOURCE_NAME:-mlx5_0}"      # 扩展资源名(pool 模式; 与 RDMA_IF_NAMES 对应的网卡; pod 申请 nvidia.com/mlx5_0)。by-link / per-hca 模式忽略此值
 RDMA_HCA_MODE="${RDMA_HCA_MODE:-by-link}"                  # 资源模式: by-link=按链路类型分成 IB / RoCE **两个资源池**(**本文件默认**, 资源名与真实 GPU 集群一致, 同一份 Pod 清单两边通用, 见下两行); per-hca=每块 HCA 独立扩展资源(pod 按资源名选卡, 如 nvidia.com/mlx5_0 / mlx5_1...); pool=全部 HCA 聚合为单个扩展资源(兼容旧部署; 也是模块代码的**内建回退值**)。⚠ by-link / per-hca 下检测到 0 块 HCA 会报错退出 —— 除非下方 RDMA_PLACEHOLDER_HCAS 非空(本文件默认非空, 见其说明)
-RDMA_IB_RESOURCE="${RDMA_IB_RESOURCE:-rdma/hca_shared_devices}"          # by-link: InfiniBand 池资源名(必须 <前缀>/<名字>)。默认值 = 真实集群 kubectl -n kube-system get cm rdma-devices 里的 resourceName(对应插件侧 --rdma-ib-resource); ⚠ 名字写错是**静默**故障: pod 申请的资源名在本集群不存在 → 永远 Pending
-RDMA_ROCE_RESOURCE="${RDMA_ROCE_RESOURCE:-rdma/roce_hca_shared_devices}"  # by-link: RoCE 池资源名(同上, 对应 --rdma-roce-resource)
+RDMA_IB_RESOURCE="${RDMA_IB_RESOURCE:-rdma/ib_shared_devices}"          # by-link: InfiniBand 池资源名(必须 <前缀>/<名字>)。默认值 = 真实集群 kubectl -n kube-system get cm rdma-devices 里的 resourceName(对应插件侧 --rdma-ib-resource); ⚠ 名字写错是**静默**故障: pod 申请的资源名在本集群不存在 → 永远 Pending
+RDMA_ROCE_RESOURCE="${RDMA_ROCE_RESOURCE:-rdma/roce_shared_devices}"  # by-link: RoCE 池资源名(同上, 对应 --rdma-roce-resource)
 RDMA_HCA_MAX="${RDMA_HCA_MAX:-100}"                     # 每资源最大共享 Pod 数(rdmaHcaMax; by-link 模式下每个池各一份配额, per-hca 模式下每块卡各一份)
 RDMA_IF_NAMES="${RDMA_IF_NAMES:-}"                       # 宿主机 RDMA 网卡名(逗号分隔, selectors.ifNames); ⚠ 留空 = 模块自动扫描所有节点 /sys/class/infiniband/*/device/net/ 收集真实设备名+网卡名(兼容 IB=ibsX / RoCE=ens*/manage0 混合), 显式设置则按此精确过滤
 RDMA_ACTIVE_ONLY="${RDMA_ACTIVE_ONLY:-true}"             # 自动检测时只收录链路状态 ACTIVE 的 HCA(读 /sys/class/infiniband/*/ports/*/state); DOWN/DISABLED 卡(DISABLED)不建资源不暴露; false=全部暴露。仅作用自动检测(RDMA_IF_NAMES 为空时), 显式 RDMA_IF_NAMES 时忽略本项
@@ -200,7 +226,7 @@ NETSHOOT_RDMA_VERSION="${NETSHOOT_RDMA_VERSION:-26.04.17}"   # 自建镜像 tag(
 #   约定 <perftest 版本>-r<N>(如 26.04.17-r2 = 含 iproute2-rdma 的那版):
 #     构建: sudo IMAGE_TAG=26.04.17-r2 <repo>/deployments/scripts/tools/images/netshoot-rdma-build.sh --force
 #     然后本行改成该 tag, 重跑 --steps netshoot
-# pod 申请的 RDMA 扩展资源: 留空 = 跟随 RDMA_IB_RESOURCE(by-link 的 IB 池, 默认 rdma/hca_shared_devices);
+# pod 申请的 RDMA 扩展资源: 留空 = 跟随 RDMA_IB_RESOURCE(by-link 的 IB 池, 默认 rdma/ib_shared_devices);
 #   ⚠ 集群节点没注册该资源时模块**自动不申请**(pod 仍可起, 只做通用网络诊断)
 NETSHOOT_RDMA_RESOURCE="${NETSHOOT_RDMA_RESOURCE:-}"
 NETSHOOT_BASE_TAR="${NETSHOOT_BASE_TAR:-${REPO_ROOT}/deployments/offline-files/os/netshoot.tar}"   # 回退用的原始 netshoot tar
@@ -486,13 +512,21 @@ HARBOR_STORAGE_CLASS="${HARBOR_STORAGE_CLASS:-local-path}"  # 预留: 数据持�
 # 注意: ${CLUSTER_NAME} 由 lib-common.sh 自动解析(环境变量或默认 cubestack-cluster)
 KUBESPRAY_INV_DIR="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}"
 KUBESPRAY_DIR="${KUBESPRAY_DIR:-${REPO_ROOT}/deployments/kubespray/kubespray}"
-# 离线资源缓存根目录(二进制/镜像); 各组件离线子目录: kubespray / metax-gpu / lws 等
-# ⚠ 默认留空: 部署脚本经 lib-common 自动解析为 offline-files/kubespray(内层),
-#   fetch-offline-from-minio.sh 默认下载到 offline-files 总根(offline-files/{kubespray,lws,metax-gpu,os});
-#   两处解耦, 不需要在此显式设置 OFFLINE_FILES_DIR(显式设置会同时改变 fetch 目标)。
+# 离线文件**真根**(所有组件目录的共同父目录; 组件内再按版本分层, 见 KUBESPRAY_VERSION)
+#   offline-files/
+#   ├── kubespray/<版本>/   ← KUBESPRAY_VERSION 决定的 k8s 资产目录(二进制 + images/ + packages/)
+#   ├── metax-gpu/  ceph/  lws/ …(组件级规范, 按需迁移, 见 docs/kubespray-versioning/)
+#   ⚠ 留空即由 lib-common 派生; 显式设置会同时改变各消费者路径(运维/容器挂载用)
+OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-}"
+# kubespray 版本(单一开关, 目录名 = 上游 tag 全名, 如 v2.32.0)
+#   默认留空 = 仓库当前树版本(deployments/kubespray/kubespray/galaxy.yml 机械派生)
+# → KUBESPRAY_VERSION 已上移至顶部【高频/必改变量区】(2026-10-08)
+# 版本套装档案(该版本的成套版本钉子; none = 不用档案, 全部按本文件)
+KUBESPRAY_PROFILE="${KUBESPRAY_PROFILE:-}"
+# k8s 资产目录 / 交给 kubespray 的 local_release_dir(留空 = lib-common 按上面两项派生;
+#   ⚠ 必须恰好是"裸二进制 + images/ + packages/"的那一层)
 OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-}"
-# kubespray 离线仓库(镜像 tar + 二进制; 已从 repository/<cluster> 迁到 offline-files/kubespray)
-LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files}/kubespray}"
+LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-}"
 # (UPDATE_ETC_HOSTS 开关已移至顶部【组件启停开关】)
 
 # ---------------- 2.1b 离线文件下载(MinIO, 可选) ----------------
@@ -535,6 +569,12 @@ NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"        # 节点-权威(首 master
 KUBE_SERVICE_ADDRESSES="${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18}"
 KUBE_PODS_SUBNET="${KUBE_PODS_SUBNET:-10.233.64.0/18}"
 NODELOCAL_DNS_IP="${NODELOCAL_DNS_IP:-169.254.25.10}"
+# nodelocaldns 的**外部上游 DNS**(写入 kubespray 的 upstream_dns_servers; 空格分隔多个)。
+# 本环境无外部 DNS(节点到公共/网关的 UDP 53 均不可达, 实机探测 2026-10-08)⇒ 默认 127.0.0.1:
+# 外部域名查询维持失败(与"无上游"语义一致)且**防回环** —— 变量为空时 kubespray 渲染
+# `forward . /etc/resolv.conf` 会形成 nodelocaldns↔systemd-resolved 回环, coredns FATAL 自杀。
+# ⚠ 接入真实 DNS 时改成实际地址(如 "10.66.2.1 223.5.5.5")再重跑 sync-kubespray-config.sh。
+UPSTREAM_DNS_SERVERS="${UPSTREAM_DNS_SERVERS:-127.0.0.1}"
 
 # ---------------- 2.4 CNI 网络插件(calico + IPIP, 唯一方案) ----------------
 # 本集群网络是 proxy-ARP / 按 IP 转发的虚拟化 fabric(非真实 L2): 只转发节点 IP,
@@ -617,15 +657,15 @@ HARBOR_MIRROR_PROJECT="${HARBOR_MIRROR_PROJECT:-mirrors}"     # 镜像专用项�
 # 路径规则(见 images.manifest 头部): mirrors/<上游注册域>/<仓库路径>:<tag>
 #   例 registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
 #      → harbor.isuanova.com/mirrors/registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
-HARBOR_MIRROR_USER="${HARBOR_MIRROR_USER:-}"                  # (可选)留空=匿名拉取(该项目公开只读)
-HARBOR_MIRROR_PASSWORD="${HARBOR_MIRROR_PASSWORD:-}"          # Harbor 密码/token(本文件已 gitignore, 勿提交)
+# → HARBOR_MIRROR_USER 已上移至顶部【高频/必改变量区】(2026-10-08)
+# → HARBOR_MIRROR_PASSWORD 已上移至顶部【高频/必改变量区】(2026-10-08)
 HARBOR_MIRROR_INSECURE="${HARBOR_MIRROR_INSECURE:-false}"     # true=跳过 TLS 校验(自签证书时用)
 IMAGE_MANIFEST="${IMAGE_MANIFEST:-${REPO_ROOT}/deployments/config/images.manifest}"   # 镜像清单路径
 
 # ---- 镜像版本(★ 升级入口: 改这里一处, 清单/Harbor/离线 tar/部署自动跟随) ----
 # 这些变量被 images.manifest 以 ${VAR} 引用。⚠ 改完必须重新同步制品, 否则 tar 与期望版本不符。
 # 基座(kubespray; ⚠ 必须与 kubespray 实际解析出的版本一致, 改了要重跑 k8s_deploy)
-K8S_VERSION="${K8S_VERSION:-v1.35.8}"                    # kube-apiserver/controller-manager/scheduler/proxy
+# → K8S_VERSION 已上移至顶部【高频/必改变量区】(2026-10-08)
 PAUSE_VERSION="${PAUSE_VERSION:-3.10.1}"
 COREDNS_VERSION="${COREDNS_VERSION:-v1.12.4}"
 DNS_NODE_CACHE_VERSION="${DNS_NODE_CACHE_VERSION:-1.25.0}"
@@ -751,6 +791,52 @@ LWS_RELEASE_NAME="${LWS_RELEASE_NAME:-lws}"             # Helm release 名
 # ---------------- 4.6 自研模块(CubeStack 平台组件) ----------------
 # 03_addon/ 下 01~19 为第三方中间件预留, 20 起为 CubeStack 自研模块
 # 开关见顶部【组件启停开关】: CUBESTACK_APPS_ENABLED
+
+# ---------------- 4.6b CubeStack 平台 Operator(自研; 详见 docs/cubestack-operator.md) ----------------
+# 开关见顶部【组件启停开关】: CUBESTACK_OPERATOR_ENABLED(**默认 true=启用**, 2026-10-08 起)
+#   部署: 全量部署自动带上; 单独跑用 --steps cubestack_operator, 端到端验证用 --steps verify_cubestack_operator
+#   CR 平台组件: CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED=true 时组件镜像自动推入集群 registry(离线可部署)
+# 做什么: 部署 CubeStack 平台 Operator(一个 CR 描述整个平台, operator 按组件目录把各组件渲染并 apply)。
+#   本模块只管 **operator 自身**: 本地 vendored chart + 镜像推入集群内置 registry。
+#   平台实例(CubeStackCluster CR, 会下发 lws/envoy-gateway/prometheus/portal 等)默认**不开**,
+#   见 CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED。
+# 图表来源: OCI(harbor.isuanova.com/suanova-private, **私有项目**, 需凭据);
+#   离线副本恒用 deployments/cubestack-addon/cubestack-operator/ 下那份(随 git 分发), 见 scripts-development-spec §2.4。
+CUBESTACK_OPERATOR_NAMESPACE="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"   # 部署命名空间(operator 约定单例于此)
+CUBESTACK_OPERATOR_RELEASE="${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"     # Helm release 名
+CUBESTACK_OPERATOR_CHART_REF="${CUBESTACK_OPERATOR_CHART_REF:-oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart}"
+# → CUBESTACK_OPERATOR_CHART_VERSION 已上移至顶部【高频/必改变量区】(2026-10-08)
+# 同步模式(需求: 离线/在线自动切换):
+#   auto(默认) = 探测 Harbor 可达 → online(拉远端比 digest, 有更新才覆盖本地副本), 不可达 → offline(纯本地)
+#   online     = 强制尝试在线刷新(Harbor 不通时降级回退本地副本, 不中断部署)
+#   offline    = 完全不联网(离线机; 也不发起任何探测请求)
+# → CUBESTACK_OPERATOR_CHART_SYNC 已上移至顶部【高频/必改变量区】(2026-10-08)
+# → CUBESTACK_OPERATOR_IMAGE_TAG 已上移至顶部【高频/必改变量区】(2026-10-08)
+# 镜像源优先级(部署时把镜像推进集群内置 registry 的取源方式):
+#   auto(默认) = 在线优先 Harbor(取最新) → 离线 tar → 本地 docker daemon
+#   harbor|tar|docker = 只用指定源(离线机可显式 tar, 避免任何联网尝试)
+CUBESTACK_OPERATOR_IMAGE_SOURCE="${CUBESTACK_OPERATOR_IMAGE_SOURCE:-auto}"
+# 镜像拉取策略: 镜像 tag 恒为滚动 :latest, 节点缓存过就不会重新解析 → 默认 Always 跟随滚动构建。
+#   想复用节点缓存(或已把镜像预置到节点)改 IfNotPresent(此时升级需手工删 pod 才会换镜像)。
+CUBESTACK_OPERATOR_IMAGE_PULL_POLICY="${CUBESTACK_OPERATOR_IMAGE_PULL_POLICY:-Always}"
+# 把推送后的镜像 digest 写进 podAnnotations(cubestack.io/image-digest): digest 变了才触发滚动,
+#   否则 Deployment spec 不变 → 新镜像永远不会被拉起来(滚动 tag 的经典坑)。默认开, 极少需要关。
+CUBESTACK_OPERATOR_PIN_IMAGE_DIGEST="${CUBESTACK_OPERATOR_PIN_IMAGE_DIGEST:-true}"
+# 离线 tar 目录(联网机用 tools/images/harbor-save-images.sh --group cubestack-operator 生成)
+CUBESTACK_OPERATOR_OFFLINE_DIR="${CUBESTACK_OPERATOR_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/cubestack-operator}"
+# 私有项目 suanova-private 的凭据(仅"在线刷新 chart / 在线拉镜像"需要; 留空则复用 HARBOR_MIRROR_USER/PASSWORD;
+#   两者都空时: 依赖既有 helm 登录态(skopeo 用匿名) —— 部署路径(本地 chart + 集群 registry)本就不需要凭据)。
+#   ⚠ 本文件已 gitignore, 勿提交真实凭据; 2FA 账号请用「用户配置 → CLI Secret」而非登录密码。
+CUBESTACK_OPERATOR_HARBOR_HOST="${CUBESTACK_OPERATOR_HARBOR_HOST:-harbor.isuanova.com}"
+# → CUBESTACK_OPERATOR_HARBOR_USER 已上移至顶部【高频/必改变量区】(2026-10-08)
+# → CUBESTACK_OPERATOR_HARBOR_PASSWORD 已上移至顶部【高频/必改变量区】(2026-10-08)
+# 平台实例 CR(clusterCR.enabled): 默认 false=只装 operator。
+#   true 会让 chart 一并下发 CubeStackCluster(默认 spec 里 lws/envoy-gateway/prometheus/perses/
+#   cuberouter/cubepilot/portal/observability/modelBundles 都是开的) —— 那些是**平台组件镜像**,
+#   不在本模块的离线范围内(离线集群需另行备齐, 见 docs/cubestack-operator.md §离线边界)。
+#   需要自定义 spec 时用 CUBESTACK_OPERATOR_CR_VALUES_FILE 给一份 values 文件(-f)。
+# → CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED 已上移至顶部【高频/必改变量区】(2026-10-08)
+CUBESTACK_OPERATOR_CR_VALUES_FILE="${CUBESTACK_OPERATOR_CR_VALUES_FILE:-}"
 
 # ════════════════════════════════════════════════════════════
 # 阶段五、离线镜像预加载                         依赖: 2.1 离线目录

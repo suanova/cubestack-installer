@@ -1,0 +1,114 @@
+# =====================================================================
+# Dockerfile-cli-base — CubeStack CLI 容器的**基础层**(系统 + 工具链, 极少变)
+# ---------------------------------------------------------------------
+# 设计(2026-09-30, 用户口径): **镜像分两层**
+#   ① 本文件 = base 镜像: ubuntu:22.04 + apt 系统工具 + python3.11 + ansible(requirements.txt)
+#      + mc。**只在"新增 package / 工具 或 依赖版本变化"时重建**(构建慢, 需要联网装 apt/pip)。
+#   ② Dockerfile-cli(代码层): `FROM <base>` + **只 copy deployments/skills 代码** —— 日常
+#      "改了部署脚本要出新镜像"走这一层, 秒级~分钟级, 且**层数不累积**(每次都基于同一个 base,
+#      而不是叠在上一版镜像上)。
+#
+# ★ 为什么必须分层: 旧的"增量构建 = FROM 上一版 latest"会让层数**单调累积**(实测 443 → 590 层),
+#   而 containerd overlayfs 把全部祖先层拼进 lowerdir, 选项字符串超过内核 PAGE_SIZE(4096B)
+#   ⇒ buildkit 在任意 RUN 步报 `mount source: "overlay" ... invalid argument`。
+#   分层后: base 层数固定, 代码层每次只加 1~2 层 ⇒ 该问题从结构上消失。
+#
+# 构建/推送:
+#   sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base            # 生成上下文 + 构建 base
+#   sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base --push     # 并推送到 Harbor
+# 依赖: 构建机联网(apt 清华源 + PyPI 清华源); 基础 ubuntu:22.04 本地缺失时自动 docker load 离线 tar。
+# =====================================================================
+
+# 基础镜像: ubuntu:22.04(离线构建由 build-cli-context.sh --base 自动 docker load)
+ARG BASE_IMAGE=ubuntu:22.04
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    REPO_ROOT=/opt/cubestack-installer \
+    PIP_NO_CACHE_DIR=1 \
+    LANG=C.UTF-8 \
+    TZ=Asia/Shanghai
+
+# ---------- 默认时区: GMT+8(Asia/Shanghai) ----------
+# ubuntu 基础镜像带 tzdata(/usr/share/zoneinfo), 设置容器内时区为东八区,
+# 使日志时间戳/date 输出与国内一致(installer 部署/日志/脚本执行均按 GMT+8)。
+RUN ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone
+
+# ---------- apt 源走清华镜像(国内加速) ----------
+RUN sed -i 's@//archive.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g; s@//security.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g; s@//ports.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list
+
+# ---------- 系统工具链(apt 已走清华镜像) ----------
+# 含 01_vm_network 依赖: iproute2(ip)/kmod(modprobe)/systemd(systemctl)/procps(sysctl)
+# 及 NTP 权威源(chrony): 容器内充当权威时间源时使用
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget git unzip jq \
+        openssh-client sshpass rsync iputils-ping iptables dnsutils \
+        netcat-openbsd patch \
+        python3 python3-pip python3-venv \
+        libvirt-clients vim gnupg software-properties-common \
+        iproute2 kmod systemd procps bridge-utils chrony \
+        moreutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------- Python 3.11(deadsnakes)—— ansible 12.x 在**控制端**硬要求 Python ≥3.11 ----------
+# 树内 requirements.txt 是 ansible==12.3.0(= ansible-core 2.19.x);ubuntu:22.04 自带 python3=3.10
+# → pip 直接拒绝("Ignored the following versions that require a different python version: …
+#   12.3.0 Requires-Python >=3.11" / "No matching distribution found for ansible==12.3.0")。
+# 这里只装一个 python3.11 并让 **ansible 走它**(pip 的 console script 带 3.11 shebang, 落在 /usr/local/bin,
+# 先于 /usr/bin 命中);系统 python3 保持 3.10 不动 ⇒ python3-libvirt 等按 3.10 编译的扩展不受影响。
+# (jammy universe 里那个 python3.11 是 3.11.0~rc1 的 RC 版, 不适合跑生产 ansible, 故走 deadsnakes 的 3.11.16。)
+RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends python3.11 python3.11-venv python3.11-dev \
+    && python3.11 -m ensurepip --upgrade \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3.11 -V
+
+# ---------- CLI 工具链(kubectl / helm / skopeo / yq)---------- 
+# ⚠ 2026-09-30 用户口径修订: **常用且版本固定的工具全部打进 base 镜像**(不再靠运行期挂载补)——
+#   实测事故: 运行期钩子只在**登录 shell** 生效, `docker exec … bash` / 脚本里的非登录 shell
+#   拿不到工具 ⇒ `kubectl: command not found`(部署流程里也有这种调用面)。
+#   工具版本随 kubespray 版本目录(cluster.conf 钉子)走: 升级改版本 → 重建 base 即可。
+#   取值: build-cli-context.sh 从 <版本目录> 拷进构建上下文 bin/(离线件优先, 缺失才回退联网/宿主机)。
+COPY bin/kubectl /usr/local/bin/kubectl
+RUN chmod +x /usr/local/bin/kubectl && kubectl version --client 2>/dev/null | head -1
+
+COPY bin/helm-archive.tar.gz /tmp/helm.tar.gz
+RUN tar xzf /tmp/helm.tar.gz -C /tmp \
+    && mv /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/linux-amd64 /tmp/helm.tar.gz \
+    && helm version --short
+
+COPY bin/skopeo /usr/local/bin/skopeo
+RUN chmod +x /usr/local/bin/skopeo && skopeo --version
+
+COPY bin/yq /usr/local/bin/yq
+RUN chmod +x /usr/local/bin/yq && yq --version
+
+# ---------- mc(MinIO Client, 拉离线文件的**引导工具**) ----------
+# ⚠ mc 是**唯一必须打进镜像**的工具: 容器正是靠它去 MinIO **拉**离线文件 —— 不能像
+#   kubectl/helm/skopeo 那样"运行期从挂载的版本目录取"(先有鸡还是先有蛋)。
+# ⚠ 官方下载路径**会变**: 老路径 https://dl.min.io/client/mc/release/linux-amd64/mc 已 410 Gone,
+#   新路径 https://dl.min.io/aistor/mc/release/linux-<arch>/mc(2026-09-30 实测 200)。
+#   ⇒ 由 build-cli-context.sh 从**离线件** offline-files/os/mc-* 拷入构建上下文 bin/mc
+#     (缺失时回退联网下载/宿主机 mc); 升级 mc 只需换那个离线件再重建 base。
+COPY bin/mc /usr/local/bin/mc
+RUN chmod +x /usr/local/bin/mc && mc --version
+
+# ---------- kubespray Python 依赖(ansible 等; 构建时下载 wheel 缓存, 运行时离线安装) ----------
+# ① 构建机联网时(清华源) pip download 拉 wheel 到 /tmp/pipcache;
+# ② pip install --no-index 全程走本地缓存, 容器内零联网;
+# ③ 复用安装(第二次 --no-index 空跑, 确保幂等/完整), 然后清缓存并校验 ansible。
+# ⚠ 必须用 python3.11(见上一步): 系统 python3=3.10 装不了 ansible 12.3.0。
+# ⚠ requirements.txt 来自构建上下文(deployments/kubespray/kubespray/requirements.txt); 代码层
+#   构建时会按**最新**的 requirements.txt 再对齐一次(依赖变化时不用重建 base)。
+COPY deployments/kubespray/kubespray/requirements.txt /tmp/kubespray-requirements.txt
+RUN python3.11 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && python3.11 -m pip download -d /tmp/pipcache -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && python3.11 -m pip install --no-index --find-links=/tmp/pipcache -r /tmp/kubespray-requirements.txt \
+    && python3.11 -m pip install --no-index --find-links=/tmp/pipcache -r /tmp/kubespray-requirements.txt \
+    && rm -rf /tmp/pipcache /tmp/kubespray-requirements.txt \
+    && ansible --version 2>/dev/null | head -1
+
+WORKDIR ${REPO_ROOT}
+CMD ["/bin/bash"]

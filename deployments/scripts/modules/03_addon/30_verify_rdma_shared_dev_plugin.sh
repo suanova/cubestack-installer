@@ -23,7 +23,7 @@
 #   · 资源注册: 插件经 /var/lib/kubelet/device-plugins 把资源注册进 kubelet → 节点
 #     allocatable 出现扩展资源。无 HCA 节点不注册(自然)。
 #   · **资源名动态解析**: 不依赖 RDMA_RESOURCE_NAME 单一资源(by-link 每类链路一个资源, 默认
-#     rdma/hca_shared_devices + rdma/roce_hca_shared_devices; pool 模式是单资源, per-hca
+#     rdma/ib_shared_devices + rdma/roce_shared_devices; pool 模式是单资源, per-hca
 #     模式每块 HCA 一个资源名如 mlx5_0/mlx5_1...)。本模块从 ConfigMap 的 config.json 解析
 #     configList 全部条目, 逐个资源逐个节点检查 allocatable。
 #   · **离线可用(硬要求)**: ④ 的测试 pod 镜像**不碰 docker.io、也不依赖节点 containerd 预载** ——

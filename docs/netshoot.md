@@ -58,12 +58,12 @@ ib_write_bw -d mlx5_0 -a                 # 带宽实测(对端要同步起 ib_wr
 
 ## 3. RDMA 资源自动降级(为什么 pod 在无卡集群也能起)
 
-模块部署前会查节点 `allocatable` 里有没有 `rdma/hca_shared_devices`(即 `10_rdma` 的 by-link IB 池;
+模块部署前会查节点 `allocatable` 里有没有 `rdma/ib_shared_devices`(即 `10_rdma` 的 by-link IB 池;
 可用 `NETSHOOT_RDMA_RESOURCE` 改):
 
 | 集群状态 | 模块行为 |
 |---|---|
-| 已注册该资源 | pod 申请 `limits: rdma/hca_shared_devices: 1` → 调度到有卡节点, 容器里能看到 `/dev/infiniband/uverbsN` |
+| 已注册该资源 | pod 申请 `limits: rdma/ib_shared_devices: 1` → 调度到有卡节点, 容器里能看到 `/dev/infiniband/uverbsN` |
 | 未注册(未装 RDMA 插件 / 占位模式 / 无卡) | **不申请**, pod 照常起, 只做通用网络诊断(日志里写明原因) |
 
 > 不降级的后果很直接: 无卡集群里 pod 永远 `Pending` —— "诊断工具"自己先挂了。

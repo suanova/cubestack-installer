@@ -4,48 +4,65 @@ set -euo pipefail
 # 自动检测: 脚本所在目录 = deployments/kubespray/
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 离线资源根目录: 优先级:
-#   1. CUBESTACK_BASE_DIR 环境变量(由 deploy-cluster.sh 10_k8s_deploy 模块通过 env 传入)
-#   2. 脚本所在目录(本项目结构: SCRIPT_DIR = deployments/kubespray/)
-#   3. 回退 /opt/cubestack-installer(standalone 模式)
-BASE_DIR="${CUBESTACK_BASE_DIR:-${SCRIPT_DIR}}"
-KUBESPRAY_DIR="${BASE_DIR}/kubespray"
-# 离线文件根目录(全局切换变量): 二进制/镜像/离线包统一存放位置
-# 优先级: OFFLINE_FILES_DIR 环境变量 > 默认(按部署布局自动判定):
-#   ① 仓库/容器布局 —— 脚本位于 <root>/deployments/kubespray/:
-#        <root>/deployments/offline-files/kubespray
-#      · 与全仓库其它脚本(lib-common.sh / install-worker-packages.sh / ceph-sync-images.sh)同一默认值;
-#      · 与 cluster.conf 的 LOCAL_REPO_DIR 约定一致 —— 仓库布局**不按集群名加子目录**;
-#      · 也与本脚本生成的 install-packages.yml 里 ../../offline-files/kubespray 一致。
-#   ② 扁平 standalone 布局 —— 脚本与 kubespray/、inventory/ 平铺同一层(如 /opt/cubestack-installer/):
-#        ${BASE_DIR}/offline-files/kubespray(按集群名隔离, 见 deployments/kubespray/README.md)
-# 注(2026-09-28 改): 此前两种布局都按 ② 推导 ⇒ 在仓库里直跑会把离线件下到
-#   deployments/kubespray/offline-files/…, 而部署流程读的是 deployments/offline-files/…,
-#   两者不是同一个目录 → 下载"成功"但部署时静默找不到镜像/二进制。现按布局区分。
-if [ "$(basename "$(dirname "${BASE_DIR}")")" = "deployments" ]; then
-    OFFLINE_LAYOUT="repo"
-    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-$(dirname "${BASE_DIR}")/offline-files/kubespray}"
+# 运行根与布局(2026-09-30 起**不再靠父目录名判定** —— 物化版本树的父目录名不叫 deployments,
+#   旧判据会让它在物化后静默走错目录; 见 docs/kubespray-versioning/design.md §5.3):
+#   CUBESTACK_BASE_DIR  运行根(默认 = 脚本目录; 物化版本时 = deployments/kubespray/versions/<版本>)
+#   CUBESTACK_LAYOUT    布局: repo(默认, 离线件在 <仓库>/deployments/offline-files)/ flat(standalone)
+# 运行根: ① 显式 CUBESTACK_BASE_DIR(模块传入)  ② 选定版本 != 仓库树版本 ⇒ 物化版本根
+#   versions/<版本>/(默认位置见 cubestack-version-dir.sh materialize)  ③ 否则仓库根(现状)
+#   ⚠ 没有这条映射时, KUBESPRAY_VERSION=v2.28.0 仍会指向仓库树(v2.32)—— 树与资产错配且不报错。
+if [ -n "${CUBESTACK_BASE_DIR:-}" ]; then
+    BASE_DIR="${CUBESTACK_BASE_DIR}"
 else
-    OFFLINE_LAYOUT="flat"
-    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${BASE_DIR}/offline-files/kubespray}"
-fi
-LOCAL_REPO_BASE="${OFFLINE_FILES_DIR}"
-
-# 离线资源目录(LOCAL_REPO_DIR)的默认值 —— 是否按集群名隔离由布局决定:
-#   仓库布局: ${OFFLINE_FILES_DIR}(= <root>/deployments/offline-files/kubespray, 同 cluster.conf)
-#   扁平布局: ${OFFLINE_FILES_DIR}/${CLUSTER_NAME}(历史布局)
-# 环境变量 CUBESTACK_LOCAL_REPO_DIR 优先级最高 —— 部署流程 06_k8s_deploy 就靠它传入。
-default_local_repo_dir() {
-    if [ "${OFFLINE_LAYOUT}" = "flat" ]; then
-        printf '%s/%s\n' "${OFFLINE_FILES_DIR}" "${CLUSTER_NAME}"
+    _repo_tree_ver="$(awk '/^version:/{print "v"$2; exit}' "${SCRIPT_DIR}/kubespray/galaxy.yml" 2>/dev/null || true)"
+    if [ -n "${KUBESPRAY_VERSION:-}" ] && [ -n "${_repo_tree_ver}" ] && [ "${KUBESPRAY_VERSION}" != "${_repo_tree_ver}" ]; then
+        BASE_DIR="${SCRIPT_DIR}/versions/${KUBESPRAY_VERSION}"
     else
-        printf '%s\n' "${OFFLINE_FILES_DIR}"
+        BASE_DIR="${SCRIPT_DIR}"
     fi
-}
+    unset _repo_tree_ver
+fi
+KUBESPRAY_DIR="${CUBESTACK_KUBESPRAY_DIR:-${BASE_DIR}/kubespray}"
+OFFLINE_LAYOUT="${CUBESTACK_LAYOUT:-repo}"
+# 离线件真根: repo 布局从**脚本位置**推(脚本始终在 <仓库>/deployments/kubespray/, 与运行根无关),
+# 不随 BASE_DIR 漂移 —— 这是"物化树不搬离线件"的落点。
+if [ "${OFFLINE_LAYOUT}" = "flat" ]; then
+    OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${BASE_DIR}/offline-files}"
+else
+    # SCRIPT_DIR = <仓库>/deployments/kubespray ⇒ 上一级就是 deployments/, 再加 offline-files(只退一层!)
+    OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-$(dirname "${SCRIPT_DIR}")/offline-files}"
+fi
+# kubespray 版本(单一开关; 目录名 = 上游 tag 全名, 决策 D8)。
+#   派生源 = **实际要用的那棵树**的 galaxy.yml(CUBESTACK_KUBESPRAY_DIR 优先) —— 不是脚本目录:
+#   物化版本(versions/<V>)时脚本仍在仓库里, 按脚本目录派生会取到"仓库当前树版本"⇒ 资产与树错配。
+#   默认 = **最新版本** = max(仓库树版本, 有入库档案的版本目录)—— 与 lib-common 的
+#   kubespray_latest_version() 同口径(本脚本不 source lib-common, 故内联一份; 改动要同步两处)。
+if [ -z "${KUBESPRAY_VERSION:-}" ]; then
+    # ① 被指向的树在 → **以那棵树为准**(物化版本根/仓库树都适用; "你指哪棵树"比"仓库最新"更接近意图)
+    _tree_ver="$(awk '/^version:/{print "v"$2; exit}' "${KUBESPRAY_DIR}/galaxy.yml" 2>/dev/null || true)"
+    if [ -n "${_tree_ver}" ]; then
+        KUBESPRAY_VERSION="${_tree_ver}"
+    else
+        # ② 树不在 → 最新版本 = max(仓库树版本, 有入库档案的版本目录)
+        #    (与 lib-common 的 kubespray_latest_version() 同口径; 本脚本不 source lib-common, 内联一份)
+        _rt_ver="$(awk '/^version:/{print "v"$2; exit}' "${SCRIPT_DIR}/kubespray/galaxy.yml" 2>/dev/null || true)"
+        KUBESPRAY_VERSION="$( { printf '%s\n' "${_rt_ver}"
+            for _pf in "${SCRIPT_DIR}"/../config/profiles/*.profile; do
+                [ -f "${_pf}" ] || continue
+                sed -nE 's/^[[:space:]]*KUBESPRAY_VERSION=([^[:space:]#]+).*/\1/p' "${_pf}" | head -1
+            done; } | sed '/^$/d' | sort -V | tail -1 )"
+        unset _rt_ver _pf
+    fi
+    unset _tree_ver
+fi
+KUBESPRAY_VERSION="${KUBESPRAY_VERSION:-$(awk '/^version:/{print "v"$2; exit}' "${KUBESPRAY_DIR}/galaxy.yml" 2>/dev/null || true)}"
+OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}}"
+LOCAL_REPO_BASE="${OFFLINE_FILES_DIR}"
+# 资产目录默认值(兼容旧调用名): 一律收敛到**版本目录**(不再按集群名隔离)
+default_local_repo_dir() { printf '%s\n' "${OFFLINE_FILES_DIR}"; }
 INVENTORY_BASE="${BASE_DIR}/inventory"
 REMOTE_USER="${CUBESTACK_REMOTE_USER:-ubuntu}"
 CONTAINER_RUNTIME="containerd"
-KUBESPRAY_VERSION="v2.28.0"
 KUBESPRAY_REPO="https://github.com/kubernetes-sigs/kubespray.git"
 
 RED='\033[0;31m'
@@ -61,6 +78,50 @@ log()       { local m="[INFO] $*";  echo -e "${GREEN}${m}${NC}"; _log_file "${m}
 warn()      { local m="[WARN] $*";  echo -e "${YELLOW}${m}${NC}"; _log_file "${m}"; }
 err()       { local m="[ERROR] $*"; echo -e "${RED}${m}${NC}" >&2; _log_file "${m}"; exit 1; }
 highlight() { local m=">>> $*";     echo -e "${CYAN}${m}${NC}"; _log_file "${m}"; }
+
+# 写文件: 内嵌内容为权威 —— 缺失则生成; 存在但内容不同则覆盖(2026-10-08)。
+# 背景: 旧的"仅缺失才生成"模式在内容演进后**永不更新**(实机: 老树 install-packages.yml 缺
+#   os/packages 新路径修复, 靠人肉 docker cp 补; 树文件丢失走兜底重建时还会生成旧内容)。
+_write_if_changed() {
+    local target="$1" tmp
+    tmp="$(mktemp)"
+    cat > "${tmp}"
+    if [ ! -f "${target}" ]; then
+        mkdir -p "$(dirname "${target}")" 2>/dev/null || true
+        cp "${tmp}" "${target}"
+        log "生成 ${target}(内嵌内容)"
+    elif ! cmp -s "${tmp}" "${target}"; then
+        cp "${tmp}" "${target}"
+        log "更新 ${target}(内嵌内容已演进, 旧版文件被刷新)"
+    fi
+    rm -f "${tmp}"
+}
+
+# 补丁层自动保障(2026-10-08): 树以"纯净上游 + cubestack-patches/"为准 —— 任何来源的树
+#   (CLI 镜像自带 / 版本目录物化 / 联网克隆 / 存量老环境)就绪后, 验证补丁全部在位,
+#   缺失/漂移即**自动按序重放**(工具幂等: APPLY/SKIP/CONFLICT)。
+# 为什么必须自动: 存量树缺补丁的故障是**静默的** —— 实机 2026-10-08: 树缺
+#   12-coredns-forward-resolvconf ⇒ coredns forward 渲染成 pod 自身 ⇒ loop 自杀 18+ 次、
+#   cluster DNS 全断; 过去靠人肉 docker cp 补, 遗忘必复发。CONFLICT 即 err(不带伤继续)。
+_ensure_patches_applied() {
+    local tool="${SCRIPT_DIR}/cubestack-patch-apply.sh"
+    local n
+    [ -f "${tool}" ] || { warn "未找到补丁工具 ${tool}, 跳过补丁层保障"; return 0; }
+    # ⚠ CLI 镜像曾未内置 `patch`(2026-10-08 实测)⇒ 检查恒 MISSING、apply 必炸 —— 先防呆,
+    #   工具不备时**降级跳过**(不 err 中断部署);镜像/Dockerfile-cli-base 已补装 GNU patch。
+    command -v patch >/dev/null 2>&1 || {
+        warn "容器内无 patch 命令 → 跳过补丁层自动保障(修法: 重建 CLI 镜像[已含 patch], 或 docker cp /usr/bin/patch 进容器)"
+        return 0
+    }
+    n="$(ls "${SCRIPT_DIR}/cubestack-patches"/*.patch 2>/dev/null | wc -l)"
+    if bash "${tool}" --root "${KUBESPRAY_DIR}" --check >/dev/null 2>&1; then
+        log "✅ 补丁层已全部在位(${n} 个)"
+    else
+        highlight "补丁层缺失/漂移 → 自动重放 ${n} 个补丁(幂等)..."
+        bash "${tool}" --root "${KUBESPRAY_DIR}" --apply 2>&1 | sed 's/^/    /' \
+            || err "补丁重放存在 CONFLICT(树被外部改动?), 请人工处理后再部署"
+    fi
+}
 
 # 启动日志: 设置 LOG_FILE, 后续 log/warn/err/highlight 及 ansible 日志都写入该文件
 # 同时输出到终端 + 写文件, 不使用 exec > >(tee)(会导致 Python subprocess 调用死锁)
@@ -106,6 +167,7 @@ usage() {
     echo "  reset      [名称] --yes     清除目标节点上的旧集群状态（覆盖安装的前置步骤; 见下）"
     echo "  scale      [名称] [选项]    扩容集群 — 添加新节点到已有集群"
     echo "  check      [名称]           预检资源与连通性"
+    echo "  paths      [名称]           只读: 打印全部路径推导(版本/资产目录/树/inventory; 排障用)"
     echo "  # upgrade  [名称] [选项]    (未实现) 原地升级到新版本 —— 设计见 docs/cluster-upgrade-path.md"
     echo ""
     echo "选项:"
@@ -169,11 +231,29 @@ get_save_cmd() {
 ensure_kubespray() {
     if [ -d "${KUBESPRAY_DIR}/.git" ] || [ -f "${KUBESPRAY_DIR}/cluster.yml" ]; then
         log "✅ Kubespray 源码已就绪: ${KUBESPRAY_DIR}"
-    else
-        highlight "正在克隆 Kubespray ${KUBESPRAY_VERSION}..."
-        git clone --depth 1 --branch "${KUBESPRAY_VERSION}" "${KUBESPRAY_REPO}" "${KUBESPRAY_DIR}" || err "Git clone 失败，请检查网络或版本号"
-        log "✅ Kubespray 源码克隆完成"
+        _ensure_patches_applied
+        return 0
     fi
+    # ① 版本目录自带**预打补丁的树 tar** → 优先物化(离线、含补丁层、可验指纹; 2026-09-30 起)
+    #    仅当"选定版本 ≠ 仓库树版本"(= 目标是物化树)且本机有该版本目录时才走这条路;
+    #    仓库树版本仍走下面的原路径(不改变原来的部署模式)。
+    local _tree_tar="${OFFLINE_FILES_DIR:-}/tree.tar.gz"
+    local _repo_tree_ver; _repo_tree_ver="$(awk '/^version:/{print "v"$2; exit}' "${SCRIPT_DIR}/kubespray/galaxy.yml" 2>/dev/null || true)"
+    # ⚠ 只在"选定版本 ≠ 仓库树版本"时物化: 否则万一仓库树缺失, 会把 tar 解进 **git 跟踪**的
+    #    deployments/kubespray/kubespray/(与 HEAD 可能不一致) —— 那不是本机制该做的事。
+    if [ -n "${OFFLINE_FILES_DIR:-}" ] && [ -f "${_tree_tar}" ] && [ "${KUBESPRAY_VERSION}" != "${_repo_tree_ver}" ]; then
+        highlight "从版本目录物化 Kubespray ${KUBESPRAY_VERSION}(离线, 顶层 kubespray/)"
+        mkdir -p "$(dirname "${KUBESPRAY_DIR}")"
+        tar -xzf "${_tree_tar}" -C "$(dirname "${KUBESPRAY_DIR}")" || err "解树失败: ${_tree_tar}"
+        log "✅ 已物化: ${KUBESPRAY_DIR}(版本 ${KUBESPRAY_VERSION}; .venv 由 ensure_venv 按需重建)"
+        _ensure_patches_applied
+        return 0
+    fi
+    # ② 原路径: 联网 clone(行为不变)
+    highlight "正在克隆 Kubespray ${KUBESPRAY_VERSION}..."
+    git clone --depth 1 --branch "${KUBESPRAY_VERSION}" "${KUBESPRAY_REPO}" "${KUBESPRAY_DIR}" || err "Git clone 失败，请检查网络或版本号"
+    log "✅ Kubespray 源码克隆完成"
+    _ensure_patches_applied
 }
 
 # .venv 是否**真的可用**: 目录在 ≠ 环境能用(2026-09-28 实机事故)
@@ -801,10 +881,9 @@ fix_artifacts_perms() {
 #       保证镜像同步逻辑在升级后依然生效(插入标记取自各版本稳定的 play 名称)
 ensure_preload_play() {
     local preload_file="${KUBESPRAY_DIR}/patch-playbooks/cubestack-preload.yml"
-    if [ ! -f "${preload_file}" ]; then
-        log "重新生成 ${preload_file}(kubespray 升级后恢复)..."
-        mkdir -p "$(dirname "${preload_file}")" 2>/dev/null || true
-        cat > "${preload_file}" << 'PRELOAD_EOF' 2>/dev/null || true
+# 生成 PRELOAD_EOF 内嵌内容(权威源; 由 _write_if_changed 决定是否落盘)
+_gen_preload_play() {
+    cat << 'PRELOAD_EOF'
 ---
 # ═══════════════════════════════════════════════════════════════════════════
 # cubestack-installer: 离线镜像预加载 play(cluster.yml / scale.yml 共用)
@@ -902,8 +981,11 @@ ensure_preload_play() {
       changed_when: false
       when: preload_image_files | length > 0
 PRELOAD_EOF
+}
+
+    # 2026-10-08: 内嵌内容为权威 —— 缺失生成, 漂移即刷新(旧版不更新曾致实机缺口)
+    _write_if_changed "${preload_file}" < <(_gen_preload_play)
         [ -f "${preload_file}" ] || { warn "无法生成 ${preload_file}, 跳过预加载 play 挂载"; return 0; }
-    fi
 
     local py name
     for py in "${KUBESPRAY_DIR}/playbooks/cluster.yml" "${KUBESPRAY_DIR}/playbooks/scale.yml"; do
@@ -1003,7 +1085,7 @@ PYEOF
 }
 
 # 将"离线安装系统包(lvm2 等)"play 注入 cluster.yml/scale.yml(幂等, 与 ensure_registry_play 同机制)
-# 作用: 在 k8s 部署阶段把 offline-files/kubespray/packages 的 .deb(lvm2 全家桶等)自动
+# 作用: 在 k8s 部署阶段把 offline-files/os/packages 的 .deb(lvm2 全家桶等)自动
 #       安装到全部 kube_node —— 供后续 ceph/Rook OSD 使用(重启后逻辑卷激活依赖 lvm)。
 #       包来源与 lvm2 离线准备见 patch-playbooks/install-packages.yml 头部注释。
 # 将"单节点集群控制面污点收敛"play 注入 cluster.yml/scale.yml(幂等, 与 ensure_cni_restart_play 同机制)
@@ -1079,33 +1161,54 @@ PYEOF
 ensure_packages_play() {
     local py name packages_file="${KUBESPRAY_DIR}/patch-playbooks/install-packages.yml"
     # kubespray 升级/重新 clone 会丢失 patch-playbooks → 从内置内容重新生成(与 ensure_preload_play 同机制)
-    if [ ! -f "${packages_file}" ]; then
-        log "重新生成 ${packages_file}(kubespray 升级后恢复)..."
-        mkdir -p "$(dirname "${packages_file}")" 2>/dev/null || true
-        cat > "${packages_file}" << 'PKG_EOF' 2>/dev/null || true
+# 生成 PKG_EOF 内嵌内容(权威源; 由 _write_if_changed 决定是否落盘)
+_gen_install_packages_play() {
+    cat << 'PKG_EOF'
 ---
 # ============================================================
-# 离线安装 worker 节点系统包(lvm2 等, 供 Ceph/Rook OSD 使用)
+# 离线安装**全部 k8s 节点**(worker + control-plane)的系统包(lvm2/curl/rsync/iptables 等)
+# ⚠ 2026-09-30 根因修复: 原为 `hosts: kube_node`(**只 worker**)⇒ **master 从未拿到这批离线包**,
+#   而 master 上 base 镜像没自带 curl ⇒ 依赖 curl 的检查/脚本全挂(实测: master01 缺 curl,
+#   而 lvm2/rsync/iptables/ca-certificates 都在 —— 别处装过, curl 只在这条 play 里发)。
+#   注意 master 在本项目里**也可能是 Ceph 存储节点**(CEPH_NODE_ROLE 默认 master)⇒ lvm 家族同样需要。
 # 将 offline-files 中的 .deb 包复制到目标节点并安装
-# 包来源: offline-files/kubespray/<集群>/*.deb(仓库根目录) + packages/ 子目录,
-#         集群名取自当前 inventory(inventory_dir | basename), 无硬编码
+# 包来源: offline-files/os/packages/*.deb(**版本无关 OS 层**, 2026-10-08 起节点 .deb 统一收敛
+#         到此目录; 原 <版本目录>/packages 与 packages/repair 已并入 —— 同名同版本去重)
 # 路径说明: playbook 位于 kubespray/patch-playbooks/,
-#           ../../offline-files/kubespray = deployments/offline-files/kubespray
+#           {{ offline_dir }}/../../os/packages = deployments/offline-files/os/packages
 # 挂载: 由 cubestack-offline.sh ensure_packages_play 自动注入 cluster.yml/scale.yml
 #       (k8s 部署阶段自动安装; kubespray 升级后自动重新挂载)。
 # lvm2: 离线包由联网机 tools/offline/fetch-lvm-packages.sh 生成到共享 packages/ 目录;
 #       未包含 lvm2 .deb 时仅告警不失败(其余包照常安装), 避免 packages/ 内容变化误失败。
+# 用法(手动):
+#   ansible-playbook -i <inventory> install-packages.yml
 # ============================================================
-- name: Install required packages on worker nodes
-  hosts: kube_node
+- name: Install required packages on all cluster nodes (workers + control plane)
+  hosts: kube_node:kube_control_plane
   gather_facts: false
   vars:
-    repo_base: "{{ playbook_dir }}/../../offline-files/kubespray/{{ inventory_dir | basename }}"
-    repo_base_shared: "{{ playbook_dir }}/../../offline-files/kubespray"
+    # 必需包(唯一来源): 末尾断言按此校验; 上面的"资产预检"也按此检查 .deb 是否随离线件提供。
+    required_packages:
+      - iputils-ping
+      - rsync
+      - iptables
+      - curl
+      - ca-certificates
+      - lvm2
+      - dmsetup
+      - dmeventd
+      - libdevmapper1.02.1
+      - libdevmapper-event1.02.1
+      - thin-provisioning-tools
+    # ★ 离线目录解析: 优先用 offline.yml 注入的 download_cache_dir(= LOCAL_REPO_DIR, 由
+    #   cubestack-offline.sh 生成且 -e @offline.yml 全局可用), 保证与离线文件实际位置一致;
+    #   容器/standalone 下 playbook_dir 相对路径会算到 deployments/kubespray/offline-files(不存在)。
+    #   回退: 相对路径(inventory_dir | basename, 无硬编码)。
+    offline_dir: "{{ download_cache_dir | default(playbook_dir + '/../../offline-files/kubespray') }}"
+    # ★ 2026-10-08: 节点 .deb 统一收敛到 offline-files/os/packages(版本无关 OS 层, 见该目录 README);
+    #   原 <版本目录>/packages 与 packages/repair 已并入(同名同版本去重), repair 白名单 find 一并取消。
     packages_dirs:
-      - "{{ repo_base }}"
-      - "{{ repo_base }}/packages"
-      - "{{ repo_base_shared }}/packages"
+      - "{{ offline_dir }}/../../os/packages"
 
   tasks:
     - name: Ensure /tmp/packages directory exists on target
@@ -1113,7 +1216,7 @@ ensure_packages_play() {
         path: /tmp/packages
         state: directory
 
-    - name: Find offline .deb packages (仓库根目录 + packages/ + 共享 packages/)
+    - name: Find offline .deb packages (os/packages)
       find:
         paths: "{{ packages_dirs }}"
         patterns: "*.deb"
@@ -1128,44 +1231,166 @@ ensure_packages_play() {
       copy:
         src: "{{ item.path }}"
         dest: /tmp/packages/
-      loop: "{{ deb_files.files }}"
-      when: deb_files.files | length > 0
+      loop: "{{ deb_files.files | default([]) }}"
+      when: (deb_files.files | default([])) | length > 0
 
     - name: Install packages from local files (逐包安装, 单包失败不阻断)
       # ★ 逐个 dpkg -i + ignore_errors: 任何单个包失败(如 skopeo 缺 golang-github-containers-common /
       #   libgpgme11, sysstat 缺 libsensors5)都只记失败、不中断整个 k8s 部署 —— 需要与否由下方
       #   "Verify required packages" 按必需包校验(仅 base 工具 + lvm 家族, 非全部 .deb)。
+      # ★ 2026-09-24 事故修复(实机: ansible 任务"有时候卡在这里很长时间", 实测卡 38 分钟以上):
+      #   链式根因 —— dpkg -i dmsetup/lvm2 → initramfs-tools.postinst → `update-initramfs -u`
+      #   → mkinitramfs → hooks/mdadm → `mdadm --examine --scan`(遍历**所有**块设备)
+      #   → 读到**上一代集群遗留、后端已不可达的 /dev/rbd0** → 进程进 D 状态(不可中断), 永不返回;
+      #   同一节点上还有 ext4 挂在那块 rbd 上, 其 jbd2 线程也一并卡死(实测 [registry] 内核线程
+      #   D 态 1h37m)。8 台里只有 2 台(3-33/3-36)有该残留 → 于是表现为"有时候"卡住。
+      #   两层修复:
+      #     ① **安装期间禁用 initramfs 重建**(update_initramfs=no, 装完恢复): 我们发的包
+      #        (lvm2/dmsetup 家族)在这些节点上**不需要**重建 initrd(内核没变、root 不在 LVM 上),
+      #        而重建会把 initramfs 的所有 hooks 跑一遍(pvscan/vgscan/mdadm 都会扫设备)——
+      #        只要有 hang 住的块设备就必卡。禁用后这条链根本不会被触发。
+      #     ② **已安装且版本相同 → 跳过**: 之前每次部署都对同一批 .deb 重跑 dpkg -i,
+      #        不仅重复触发 postinst/触发器链, 也在无谓地消耗时间。
       shell: |
         set -u
+        ir_conf=/etc/initramfs-tools/update-initramfs.conf
+        ir_backup=""
+        if [ -f "${ir_conf}" ] && ! grep -qE '^[[:space:]]*update_initramfs[[:space:]]*=[[:space:]]*no' "${ir_conf}"; then
+          ir_backup="$(mktemp)"
+          cp -a "${ir_conf}" "${ir_backup}"
+          if grep -qE '^[[:space:]]*update_initramfs=' "${ir_conf}"; then
+            sed -i -E 's|^[[:space:]]*update_initramfs=.*|update_initramfs=no|' "${ir_conf}"
+          else
+            echo 'update_initramfs=no' >> "${ir_conf}"
+          fi
+          echo "[install-packages] 本次安装期间已禁用 initramfs 重建(避免 mdadm/lvm hooks 扫描块设备而卡死)"
+        fi
+        n_rbd="$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ')"
+        if [ "${n_rbd:-0}" -gt 0 ]; then
+          echo "[install-packages] ⚠ 本节点存在 ${n_rbd} 个内核 rbd 映射 —— 若其后端已不可达, 任何设备扫描都会卡死; 见 docs/troubleshooting.md"
+        fi
+        # ★ 2026-09-29(用户要求: 装之前先修 apt)—— **离线安全版**:
+        #   `apt --fix-broken install` / `apt-get -f install` 在纯离线节点上会去抓缺失的包并失败
+        #   (实机: `E: Unable to fetch some archives`), 所以这里只做**不需要网络**的两步:
+        #     ① `dpkg --configure -a`        —— 把"解包未配置"(iU)的包配上(依赖已在场时才可能成功)
+        #     ② `apt-get -f install --no-download` —— 只用 /var/cache/apt/archives 里已有的包补依赖
+        #   两步都 best-effort 不阻断; 真正"缺依赖且离线补不到"的可选包由下方回滚逻辑兜底。
+        dpkg --configure -a >/dev/null 2>&1 || true
+        apt-get -f install --no-download -y >/dev/null 2>&1 || true
+        dpkg --configure -a >/dev/null 2>&1 || true
         failed=""
+        skipped=""
+        attempted=""
         for deb in /tmp/packages/*.deb; do
           [ -e "${deb}" ] || continue
-          if ! dpkg -i "${deb}" >/dev/null 2>&1; then
-            failed="${failed} $(basename "${deb}")"
+          pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"
+          newver="$(dpkg-deb -f "${deb}" Version 2>/dev/null)"
+          curstat="$(dpkg-query -W -f='${db:Status-Abbrev}|${Version}' "${pkg}" 2>/dev/null || true)"
+          # ★ 2026-09-28 事故修复(实机): 判据原为"**已装且版本相同**才跳过" ⇒ 版本不同的离线包
+          #   会被覆盖安装 —— 本仓库的 libudev1_…3.22 就这么把节点的 libudev1(3.12)升了级,
+          #   而节点的 udev 仍是 3.12 且**严格依赖 `libudev1 (= 3.12)`** ⇒ dpkg 依赖被打破,
+          #   该节点上**任何 apt 操作都失败**(E: Unmet dependencies)⇒ 下次部署在 bootstrap_os →
+          #   system_packages 的 "Manage packages" 上死掉(且报错只提 udev, 根因在几轮之前)。
+          #   现改为与 tools/node/install-worker-packages.sh 同一条经过验证的规则:
+          #   **远端已装同名包(任意版本) ⇒ 一律跳过**(宁缺毋滥, 绝不拿离线包去动节点已装的系统包);
+          #   需要"升级"时走 apt, 不走这套离线 .deb。必需包**是否在场**由下方 Verify required packages 校验。
+          if [ -n "${pkg}" ] && [ -n "${newver}" ] && [ "${curstat#ii }" != "${curstat}" ]; then
+            skipped="${skipped} ${pkg}"
+            continue
+          fi
+          attempted="${attempted} ${deb}"
+          dpkg -i "${deb}" >/dev/null 2>&1 || true
+        done
+        # ★ 2026-09-29 根因修复(第二层): 逐个 dpkg -i 时, **依赖包排在后面就必然先失败** ——
+        #   curl 依赖 libcurl4, 而字典序 `curl_*` 在 `libcurl4_*` 之前 ⇒ curl 首轮必失败、
+        #   libcurl4 紧随其后装上, 结果 curl 始终缺失(在自带 curl 的镜像上被掩盖)。
+        #   这里把首轮**没装上**的包**成组再装一次**: 同一次 dpkg -i 调用内 dpkg 会自行排序,
+        #   满足批内依赖。
+        retry=""
+        for deb in ${attempted}; do
+          pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"
+          dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null | grep -q '^ii' || retry="${retry} ${deb}"
+        done
+        if [ -n "${retry}" ]; then
+          # shellcheck disable=SC2086
+          dpkg -i ${retry} >/dev/null 2>&1 || true
+        fi
+        # ★ 2026-09-29 根因修复(第三层; 实机: 精简 VM 上 sysstat 卡在 `iU` ⇒ apt 依赖图破损 ⇒
+        #   node_pkgs 对账硬失败、整个部署中断):
+        #   可选包的**依赖没随离线件提供**时, dpkg -i 会把它留在"解包未配置"(iU) —— 这不止是该包
+        #   不可用, 还会**弄坏 apt 依赖图**(之后任何 apt 操作都报 Unmet dependencies), 而离线节点上
+        #   apt 补不回来(要联网抓包) ⇒ **回滚**: 把尝试过却没配起来的包 purge 掉, 恢复 apt 健康,
+        #   并明确打印"缺哪个依赖 → 应补哪个 deb 进 packages/"。最终成功与否一律按**实际安装状态**
+        #   (dpkg-query 的 `ii`)判定, 不看 dpkg 退出码。
+        rolled=""
+        for deb in ${attempted}; do
+          pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"
+          [ -n "${pkg}" ] || continue
+          st="$(dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null || true)"
+          case "${st}" in
+            ii*) continue ;;                                            # 装好
+            "")  failed="${failed} $(basename "${deb}")"; continue ;;    # 根本没落进 dpkg
+          esac
+          miss=""
+          for d in $(dpkg-deb -f "${deb}" Depends 2>/dev/null | tr ',' '\n' \
+                     | sed 's/([^)]*)//g; s/|.*//g; s/[[:space:]]//g'); do
+            [ -n "${d}" ] || continue
+            dpkg-query -W -f='${db:Status-Abbrev}' "${d}" 2>/dev/null | grep -q '^ii' || miss="${miss} ${d}"
+          done
+          if dpkg --purge "${pkg}" >/dev/null 2>&1; then
+            rolled="${rolled} ${pkg}(缺:${miss:-未知})"
+          else
+            failed="${failed} ${pkg}(回滚失败)"
           fi
         done
+        if [ -n "${ir_backup}" ] && [ -f "${ir_backup}" ]; then
+          cp -a "${ir_backup}" "${ir_conf}"; rm -f "${ir_backup}"
+        fi
         rm -rf /tmp/packages
+        [ -n "${skipped}" ] && echo "[install-packages] 已装(任意版本) ⇒ 跳过(不改动节点已装系统包):${skipped}"
+        if [ -n "${rolled}" ]; then
+          echo "⚠ 以下可选包因**依赖未随离线件提供**装不全, 已回滚(purge)以保住 apt 依赖图健康:${rolled}"
+          echo "   ↳ 修法: 把这些依赖的 .deb 也放进 packages/(或在联网机把它们加进 tools/offline/fetch-lvm-packages.sh 的清单后重跑)"
+        fi
         if [ -n "${failed}" ]; then
-          echo "⚠ 以下包安装失败(通常为可选工具缺依赖, 不影响 ceph):${failed}"
+          echo "⚠ 以下包安装失败且未能回滚(请人工确认, 会影响 apt 依赖图):${failed}"
         fi
       become: true
       ignore_errors: true
       when: deb_files.files | length > 0
 
     - name: Derive expected package names from shipped .deb files
+      # deb 文件名 <name>_<version>_<arch>.deb → 包名(如 lvm2_2.03.11-2.1ubuntu2_amd64.deb → lvm2)
       set_fact:
-        expected_packages: "{{ deb_files.files | map(attribute='path') | map('basename') | map('regex_replace', '_.*', '') | unique | list }}"
-      when: deb_files.files | length > 0
+        expected_packages: >-
+          {{ (deb_files.files | default([]))
+             | map(attribute='path') | map('basename') | map('regex_replace', '_.*', '') | unique | list }}
+      when: (deb_files.files | default([])) | length > 0
 
     - name: Warn when lvm2 offline package is not shipped
       debug:
         msg: >-
-          ⚠ packages/ 未包含 lvm2 离线包 —— 存储节点无法离线安装 lvm2
+          ⚠ os/packages 未包含 lvm2 离线包 —— 存储节点无法离线安装 lvm2
           (Rook OSD 重启后需 lvm 激活逻辑卷)。请先在联网机执行
-          tools/offline/fetch-lvm-packages.sh 并把 .deb 放到共享 packages/ 目录。
+          tools/offline/fetch-lvm-packages.sh 并把 .deb 放到 os/packages 目录。
       when:
         - deb_files.files | length > 0
         - "'lvm2' not in expected_packages"
+
+    - name: "Precheck: 必需包必须随离线件提供 .deb(缺失则立刻停, 不等节点断言)"
+      # ★ 2026-09-29 加: 这条把"离线件缺包"从**节点上的断言失败**(在 3 台机器上刷屏、看不出该补什么)
+      #   提前成**起点处的明确报错**。本文件历史上就吃过一次: required_packages 里有 curl,
+      #   而 curl 的 .deb 只在 packages/repair/(find 不递归扫不到) ⇒ 精简 VM 上必失败。
+      #   (2026-10-08 repair/ 并入 os/packages 后此坑自动消失, 断言保留作一般防护)
+      assert:
+        that:
+          - item in (expected_packages | default([]))
+        fail_msg: >-
+          ❌ 必需包 {{ item }} 没有对应的 .deb 随离线件提供(它会缺席节点, 并让本 play 末尾的断言失败)。
+          修法: 把 {{ item }} 的 .deb 放进 offline-files/os/packages/(联网机下载后同步该目录)。
+        success_msg: "必需包 {{ item }} 的 .deb 已随离线件提供"
+      loop: "{{ required_packages }}"
+      when: (deb_files.files | default([])) | length > 0
 
     - name: Verify required packages
       package_facts:
@@ -1179,22 +1404,12 @@ ensure_packages_play() {
         fail_msg: "Required package missing on {{ inventory_hostname }}: {{ item }}"
         success_msg: "All required packages installed on {{ inventory_hostname }}"
       loop: "{{ required_packages }}"
-      vars:
-        required_packages:
-          - iputils-ping
-          - rsync
-          - iptables
-          - curl
-          - ca-certificates
-          - lvm2
-          - dmsetup
-          - dmeventd
-          - libdevmapper1.02.1
-          - libdevmapper-event1.02.1
-          - thin-provisioning-tools
-      when: deb_files.files | length > 0
+      when: (deb_files.files | default([])) | length > 0
 PKG_EOF
-    fi
+}
+
+    # 2026-10-08: 内嵌内容为权威 —— 缺失生成, 漂移即刷新(旧版不更新曾致实机缺口)
+    _write_if_changed "${packages_file}" < <(_gen_install_packages_play)
     for py in "${KUBESPRAY_DIR}/playbooks/cluster.yml" "${KUBESPRAY_DIR}/playbooks/scale.yml"; do
         [ -f "${py}" ] || continue
         name="$(basename "${py}")"
@@ -1215,7 +1430,7 @@ if not marker or marker not in src:
     sys.exit(0)
 block = (
     "# ──────────────────────────────────────────────────────────────────────\n"
-    "# 离线安装系统包(lvm2 全家桶等): 把 offline-files/kubespray/packages 的 .deb\n"
+    "# 离线安装系统包(lvm2 全家桶等): 把 offline-files/os/packages 的 .deb\n"
     "# 装到全部 kube_node, 供后续 ceph/Rook OSD 使用(重启后逻辑卷激活依赖 lvm)。\n"
     "# 本 import 由入口脚本 ensure_packages_play 自动维护(kubespray 升级后重新挂载)\n"
     "# ──────────────────────────────────────────────────────────────────────\n"
@@ -1239,10 +1454,9 @@ PYEOF
 #       NotReady(表现为 apiserver 访问其他节点 pod 超时 → admission webhook 失败)。
 ensure_cni_restart_play() {
     local restart_file="${KUBESPRAY_DIR}/patch-playbooks/cubestack-cni-restart.yml"
-    if [ ! -f "${restart_file}" ]; then
-        log "重新生成 ${restart_file}(kubespray 升级后恢复)..."
-        mkdir -p "$(dirname "${restart_file}")" 2>/dev/null || true
-        cat > "${restart_file}" << 'CNI_EOF' 2>/dev/null || true
+# 生成 CNI_EOF 内嵌内容(权威源; 由 _write_if_changed 决定是否落盘)
+_gen_cni_restart_play() {
+    cat << 'CNI_EOF'
 ---
 # ═══════════════════════════════════════════════════════════════════════════
 # cubestack-installer: 重启 containerd + kubelet, 确保 CNI 插件初始化
@@ -1331,8 +1545,11 @@ ensure_cni_restart_play() {
       register: cni_apiserver_wait
       changed_when: false
 CNI_EOF
+}
+
+    # 2026-10-08: 内嵌内容为权威 —— 缺失生成, 漂移即刷新(旧版不更新曾致实机缺口)
+    _write_if_changed "${restart_file}" < <(_gen_cni_restart_play)
         [ -f "${restart_file}" ] || { warn "无法生成 ${restart_file}, 跳过 CNI 重启 play 挂载"; return 0; }
-    fi
 
     local py name
     for py in "${KUBESPRAY_DIR}/playbooks/cluster.yml" "${KUBESPRAY_DIR}/playbooks/scale.yml"; do
@@ -1642,13 +1859,17 @@ reset_kubernetes_if_needed() {
     local scope="${1:-all}"
 
     # 解析节点清单(host+user+key) 从 hosts.yml 获取
+    # ⚠ 枚举顺序 = **worker 在前, master 在后**(2026-10-09 修): 旧集群的存储后端(ceph mon/osd)
+    #   住在 master 上 —— 先清 master 会把 worker 尚未卸载的 CSI-RBD 卷**后端先杀死**, 之后
+    #   worker 的 umount 卡死在"日志回写死设备"(内核 D 状态不可杀, 部署无限挂; worker12 两度复现)。
+    #   worker 的残留挂载必须在旧存储仍存活时先卸干净。
     local nodes_str
     nodes_str=$(ansible-inventory -i "${INVENTORY_DIR}/hosts.yml" --list 2>/dev/null | python3 -c '
 import sys, json
 inv = json.load(sys.stdin)
 meta = inv.get("_meta", {}).get("hostvars", {})
 seen = set()
-for g in ["kube_control_plane", "kube_node"]:
+for g in ["kube_node", "kube_control_plane"]:
     for h in inv.get(g, {}).get("hosts", []):
         if h in seen or h not in meta:
             continue
@@ -1807,15 +2028,39 @@ print("%s|%s|%s" % (
 
     # 执行清理: 先让出 10250(第三方发行版 stop+disable) → 再 kubeadm reset -f + IPVS 清理 + 删残留
     log "清理节点上的旧 Kubernetes 状态(第三方发行版 stop+disable + kubeadm reset -f + IPVS 清理)..."
+    log "  (顺序: worker 先于 master —— 旧集群存储后端在 master 上, 须让 worker 先卸掉残留挂载)"
     local reset_ok=0 reset_fail=0
     for line in "${reset_targets[@]}"; do
         IFS='|' read -r node host user key <<< "${line}"
         [ -z "${node}" ] && continue
         log "  → [${node}](${host}) 清理中..."
         local cleanup_out="" cleanup_rc=0
+        # ⚠ 远端载荷加**总超时**(2026-10-09): 清理一旦卡死(如死挂载的 umount)当前是**无限挂**;
+        #   `timeout` 管住"壳"(bash 可被 TERM/KILL 杀) —— 即便内层 D 状态进程不可杀, 也能让本步
+        #   以明确失败(rc=124)收场、走下面的失败分支, 而不是把整个部署永久挂起。
         cleanup_out=$(ssh -i "${key}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
             "${user}@${host}" \
-            "sudo bash -c '
+            "sudo timeout -k 15 240 bash -c '
+                # ── ⓪ 预备 + 强制脱挂(2026-10-09 实机根因落地; 用户口径: 免人工重启, 自动强制清干净):
+                #   ① disable --now 旧 kubelet: 关掉 10250, 并**杜绝清理途中旧 CSI 再把卷挂回来**
+                #      (复活的旧集群会自愈重挂 —— 实测: 全量重启后旧 kubelet/CSI 复活并重挂 RBD)。
+                #   ② /var/lib/kubelet 下一切残留挂载(含旧集群 CSI-RBD/ceph 卷)一律**后台惰性卸载**:
+                #      死后端下正规 umount 会卡死在\"日志回写死设备\"(内核 D 状态不可杀, 部署无限挂 ——
+                #      worker12 两度实机事故)。惰性卸载只做命名空间脱开(纯内核操作, 不碰文件系统),
+                #      因此**永不在本进程阻塞**; 后台进程即便 D 态也只是惰性残留(免重启场景的代价, 无害)。
+                #      脱净后 kubeadm reset 见不到挂载 ⇒ 从根上消除卡死路径。
+                systemctl disable --now kubelet 2>/dev/null || true
+                for _m in \$(findmnt -Rrn -o TARGET /var/lib/kubelet 2>/dev/null | tac); do
+                    [ -n \"\${_m}\" ] || continue
+                    [ \"\${_m}\" = \"/var/lib/kubelet\" ] && continue
+                    setsid umount -l \"\${_m}\" >/dev/null 2>&1 &
+                done
+                # 轮询确认脱净(纯内核操作, 正常亚秒; 上限 ~10s)
+                for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                    findmnt -Rrn -o TARGET /var/lib/kubelet 2>/dev/null | grep -vx \"/var/lib/kubelet\" | grep -q . || break
+                    sleep 0.5
+                done
+
                 # ── ① 第三方 K8s 发行版(RKE2/k3s/microK8s): 先把 10250 让出来 ────────
                 # 它们的内嵌 kubelet 由各自的 agent 单元托管, 不叫 kubelet.service:
                 #   · kubeadm reset -f       → 对它们是完全的空操作
@@ -1878,7 +2123,11 @@ print("%s|%s|%s" % (
             reset_ok=$((reset_ok + 1))
         else
             reset_fail=$((reset_fail + 1))
-            warn "  ${node}: 清理后 kubelet API 端口(10250)仍未让出(ssh rc=${cleanup_rc}):"
+            if [ "${cleanup_rc}" = "124" ]; then
+                warn "  ${node}: 远端清理**超时**(240s) —— 该步已强制脱挂, 仍超时请排查(见下方输出)后重跑"
+            else
+                warn "  ${node}: 清理后 kubelet API 端口(10250)仍未让出(ssh rc=${cleanup_rc}):"
+            fi
             if [ -n "${cleanup_out}" ]; then printf '%s\n' "${cleanup_out}" | sed 's/^/      /'; fi
         fi
     done
@@ -2389,8 +2638,16 @@ cmd_reset() {
     log "ℹ️ 下一步: 全量部署(etcd 会以 ${ETCD_VERSION:-当前钉值} 全新安装) —— 在容器内跑 deploy-cluster.sh 即可"
 }
 
+# 只读自检: 打印全部路径推导(排障 + 版本目录回归套件用; 不联网/不碰集群/不需 root)
+cmd_paths() {
+    printf 'KUBESPRAY_VERSION=%s\nBASE_DIR=%s\nKUBESPRAY_DIR=%s\nOFFLINE_LAYOUT=%s\nOFFLINE_FILES_ROOT=%s\nOFFLINE_FILES_DIR=%s\nLOCAL_REPO_DIR=%s\nINVENTORY_DIR=%s\n' \
+        "${KUBESPRAY_VERSION}" "${BASE_DIR}" "${KUBESPRAY_DIR}" "${OFFLINE_LAYOUT}" "${OFFLINE_FILES_ROOT}" \
+        "${OFFLINE_FILES_DIR}" "${LOCAL_REPO_DIR}" "${INVENTORY_DIR}"
+}
+
 case "${COMMAND}" in
     init)     cmd_init ;;
+    paths)    cmd_paths ;;
     download) cmd_download ;;
     reset)    cmd_reset ;;
     install)

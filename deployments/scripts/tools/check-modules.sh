@@ -30,9 +30,14 @@
 #      A 只证"钉子自洽"(== 表值), C 才证"部署真会用钉子"; 缺 C 时删掉写入节/改错值照样全绿。
 #   ⑰ 凭据卫生: 含密钥的"生成物"(external-ceph 导出 / minio.conf / cluster.conf)必须**未被 git 跟踪**
 #      且被 .gitignore 覆盖 —— ⚠ 忽略规则对**已跟踪**文件无效, "看着封堵了"≠"封堵了"
+#   ⑱ 版本目录 ↔ 档案闭合: 入库档案逐版本 ↔ 其树表值; 在场版本目录的 VERSION.profile ↔ 入库档案、
+#      tree.tar.gz 指纹、关键二进制与 K8S_VERSION 匹配、LOCAL_ONLY 语义自洽(无目录则跳过)
+#      (设计 docs/kubespray-versioning/design.md; 反证见 tools/tests/test-kubespray-version-select.sh 同类夹具)
 # 用法: bash check-modules.sh           # 校验全部模块(只读, 无需 root)
 #       bash check-modules.sh --quiet   # 只输出违规项
 # 退出码: 0=全部通过; 1=存在违规(列出清单)
+# CI: .github/workflows/ci-validate.yml 在每次 PR / 推送 main 时跑本脚本(全 17 项);
+#     同一条命令本地可复现 —— 见 docs/scripts-development-spec.md §7。
 # ============================================================
 set -u
 
@@ -53,7 +58,7 @@ ck_fail() { bad "$*"; FAIL=1; }
 say "==== 模块静态校验(${MODULES_DIR}) ===="
 
 # ---------- ① bash -n 语法 ----------
-say "[1/17] bash -n 语法检查 ..."
+say "[1/18] bash -n 语法检查 ..."
 SYNTAX_FAIL=0
 while IFS= read -r -d '' f; do
     bash -n "$f" 2>/dev/null || { bad "语法错误: ${f#$MODULES_DIR/}"; SYNTAX_FAIL=1; FAIL=1; }
@@ -65,7 +70,7 @@ meta() { sed -nE "s/^#[[:space:]]*${2}:[[:space:]]*(.*)$/\1/p" "$1" | head -1; }
 phase_dir() { case "$(basename "$(dirname "$1")")" in
     01_env) echo "env";; 02_k8s) echo "k8s";; 03_addon) echo "addon";; *) echo "?";; esac; }
 
-say "[2/17] 头部元数据齐全性 ..."
+say "[2/18] 头部元数据齐全性 ..."
 declare -A KEYS=()
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -83,10 +88,10 @@ while IFS= read -r -d '' f; do
 done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] && ok "元数据齐全"
 
-say "[3/17] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
+say "[3/18] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
 [ "${FAIL}" = "0" ] || true
 
-say "[4/17] PHASE 合法性 + 目录一致性 ..."
+say "[4/18] PHASE 合法性 + 目录一致性 ..."
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
     ph="$(meta "$f" PHASE)"
@@ -96,7 +101,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] || true
 
 # ---------- ⑤ REQUIRES 引用 + 全量拓扑 ----------
-say "[5/17] REQUIRES 引用存在性 + 全量无环 ..."
+say "[5/18] REQUIRES 引用存在性 + 全量无环 ..."
 REQ_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -136,7 +141,7 @@ else
 fi
 
 # ---------- ⑥ init_remote_kubectl 使用检查 ----------
-say "[6/17] 远端 kubectl 初始化(K/SSH)调用检查 ..."
+say "[6/18] 远端 kubectl 初始化(K/SSH)调用检查 ..."
 INIT_MISS=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -150,7 +155,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${INIT_MISS}" = "0" ] && ok "使用 K/SSH 的模块均已调用 init_remote_kubectl"
 
 # ---------- ⑦ TOGGLE 与 cluster.conf.example 一致性 ----------
-say "[7/17] TOGGLE 变量在 cluster.conf.example 声明 ..."
+say "[7/18] TOGGLE 变量在 cluster.conf.example 声明 ..."
 if [ -f "${CONF_EXAMPLE}" ]; then
     TOG_MISS=0
     while IFS= read -r -d '' f; do
@@ -167,7 +172,7 @@ else
 fi
 
 # ---------- ⑧ 文件序号与目录 ----------
-say "[8/17] 文件名序号规范(NN_ 前缀) ..."
+say "[8/18] 文件名序号规范(NN_ 前缀) ..."
 NUM_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -186,7 +191,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 #   cubestack-patch-apply.sh / cubestack-kubespray-upgrade.sh)—— 它们既不是模块也不在 scripts/ 下,
 #   于是本支新增的两个脚本从未被 bash -n 过(写错一行要到实机升级时才发现)。
 #   只取**顶格一层**: vendored 树与 cubestack-patches/ 里的 .sh 属上游/数据文件, 不归本项管。
-say "[9/17] tools/ + kubespray 入口脚本语法检查 ..."
+say "[9/18] tools/ + kubespray 入口脚本语法检查 ..."
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 KSD_SH_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/kubespray"
 SH_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
@@ -206,7 +211,7 @@ unset SH_ROOT 2>/dev/null || true
 # 为什么要有这一条: 曾有模块**写了**"私服拉取失败就回退本地 chart",
 # 但仓库里压根没有那份文件 —— 私服一抖动, 回退就是空转, 回退代码形同虚设。
 # 光靠文档挡不住这种缺失(写的时候都以为回退能兜住), 所以放进静态校验。
-say "[10/17] helm chart 离线副本检查 ..."
+say "[10/18] helm chart 离线副本检查 ..."
 ADDON_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/cubestack-addon"
 CHART_FAIL=0; CHART_WARN=0; CHART_OKN=0
 # 判据: **行首就是 helm 命令** —— 只排除注释不够, 变量/err 字符串里提到
@@ -239,17 +244,35 @@ while IFS= read -r -d '' f; do
     if [ "${hit}" = "1" ]; then
         CHART_OKN=$((CHART_OKN + 1))
     else
+        # gitignore 豁免(2026-10-08): 该组件 chart 若被 .gitignore **显式声明不入 git**
+        # (如 cubestack-operator 滚动 chart —— 分发通路 = CLI 镜像 + 部署机本地), 干净
+        # checkout 缺它属预期 ⇒ 降级 WARN(否则 GitHub CI 的干净克隆必红)。
+        _gi=0
+        while IFS= read -r c; do
+            [ -z "${c}" ] && continue
+            # ADDON_DIR = <repo>/deployments/cubestack-addon ⇒ 上溯 2 级 = 仓库根
+            if git -C "${ADDON_DIR}/../.." check-ignore -q "${ADDON_DIR}/${c}/x.tgz" 2>/dev/null \
+               || git -C "${ADDON_DIR}/../.." check-ignore -q "${ADDON_DIR}/${c}" 2>/dev/null; then
+                _gi=1; break
+            fi
+        done <<< "${cands}"
+        if [ "${_gi}" = "1" ]; then
+            warn "  ${rel}: vendored chart 按仓库策略**不入 git**(gitignore 豁免; 本地/CLI 镜像分发)"
+            warn "     → 干净 checkout 缺它属预期; 部署机上请确保本地副本在位(或从 CLI 镜像取)"
+            CHART_WARN=$((CHART_WARN + 1))
+        else
         ck_fail "${rel}: 引用了 cubestack-addon/ 却**找不到 vendored chart**(.tgz 或 Chart.yaml)"
         ck_fail "      → 模块安装时恒用本地副本, 缺了它私服/上游一抖动就装不上(回退代码会空转)"
         ck_fail "      → 修法: 把 chart 放进 deployments/cubestack-addon/<组件>/ 并提交,"
         ck_fail "             tgz 形式请一并提交 <tgz>.digest 边车(供 helm_chart_ensure 比对刷新)"
         CHART_FAIL=$((CHART_FAIL + 1))
+        fi
     fi
 done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${CHART_FAIL}" = "0" ] && ok "安装 chart 的模块均有 vendored 离线副本(${CHART_OKN} 个模块通过)"
 
 # ---------- ⑪ kube-vip 控制平面 VIP(与 kubespray inventory 的一致性) ----------
-say "[11/17] kube-vip 控制平面 VIP 配置检查 ..."
+say "[11/18] kube-vip 控制平面 VIP 配置检查 ..."
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 KV_ADDONS="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/k8s_cluster/addons.yml"
 KV_ALL_YML="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/all/all.yml"
@@ -389,7 +412,7 @@ fi
 # 判错一类盘就是毁一块业务盘。它们的判定分支(整盘 LVM PV、未激活 VG、混合盘、nbd…)
 # 在普通 fixture 里造不出来、在真机上又不敢试 —— 所以用 stub ssh + lsblk fixture 驱动真实
 # 脚本, 把"选哪些盘 / 拒哪些盘 / 远端载荷"全断言一遍。用例已做过变异验证(故意改坏判定会红)。
-say "[12/17] ceph 磁盘链路回归测试(离线 stub) ..."
+say "[12/18] ceph 磁盘链路回归测试(离线 stub) ..."
 CEPH_TEST_SH="${SCRIPT_DIR}/tests/ceph-disk-tests.sh"
 if [ -f "${CEPH_TEST_SH}" ]; then
     if CEPH_TEST_OUT="$(bash "${CEPH_TEST_SH}" 2>&1)"; then
@@ -416,7 +439,7 @@ fi
 #     localhost ≠ true ⇒ 属"尚未同步到本地代理语义"(纯 checkout / 开发机的常态) —— 只提示跳过
 #   为什么不用配置开关当门: 本地工作副本还没跑过 sync, all.yml 仍是旧形态, 用开关当门会在
 #   干净仓库上必然误报(⑪ 已因同一根因提示着, 再加一条只是噪音)。开关值仅在诊断信息里出现。
-say "[13/17] API 入口: 本地代理语义与 all.yml 一致性 ..."
+say "[13/18] API 入口: 本地代理语义与 all.yml 一致性 ..."
 API_HA_BAD=0
 if [ ! -f "${KV_ALL_YML}" ]; then
     warn "  未找到 ${KV_ALL_YML}, 跳过 ⑬(未生成 inventory?)"
@@ -454,7 +477,7 @@ fi
 # 比较的是**模式串本身**(各处变量名可能不同), 不是整行; 引号/行尾注释等写法差异先归一化掉。
 # 注: 第 ④ 份曾长期陈旧(缺 lws_manager / library_nginx), 2026-09-28 Task 7 已补齐并与前三分逐字节相同,
 #     故自本轮起纳入断言(此前注释写的"有意不纳入"已过期)。
-say "[14/17] PRELOAD_IMAGE_PATTERNS 四处副本一致性 ..."
+say "[14/18] PRELOAD_IMAGE_PATTERNS 四处副本一致性 ..."
 
 # 取某个文件里 PRELOAD_IMAGE_PATTERNS 的**模式串本身**(取不到时输出空串, 由调用方判存在性)。
 # 兼容三种写法: PRELOAD_IMAGE_PATTERNS="${VAR:-<串>}"(本仓库四处均如此) / "<串>" / <串>
@@ -526,7 +549,7 @@ unset _i _j _p _n _v _ref _drift
 # 为什么必须有这一条: 换树/手工覆盖树之后, 补丁若没重放, 部署**照样能跑**但缺我们的修复
 #   (metallb CRD 竞态 / registry 顺序 / 离线备料建目录 / SAN 与 join 守卫…), 属静默降级。
 # 见 docs/kubespray-upgrade.md(升级 SOP 与历次记录)。
-say "[15/17] kubespray 补丁在位 + 离线套件 ..."
+say "[15/18] kubespray 补丁在位 + 离线套件 ..."
 if [ -x "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" ]; then
     if _out="$(bash "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" --check 2>&1)"; then
         ok "  ⑮ kubespray 补丁全部在位"
@@ -537,16 +560,21 @@ else
     warn "  跳过 ⑮(未找到 cubestack-patch-apply.sh)"
 fi
 # ★ 2026-09-28(评审 I6): 离线回归套件此前**无人调度** —— 写了就当"有测试", 但全仓没有任何入口
-#   会跑它们(本仓库没有 CI)→ 回归等于不存在。挂在这里正合适: ⑮ 本就是"补丁层可用的证据", 而这些
+#   会跑它们(当时本仓库还没有 CI)→ 回归等于不存在。挂在这里正合适: ⑮ 本就是"补丁层可用的证据", 而这些
 #   套件正是它的回归(test-kubespray-patches 覆盖重放器三态/退休判定;
 #   test-update-kube-vip-addons 覆盖 2026-09-28 收编后的开关↔addons.yml 映射与幂等)。
+# ★ 2026-09-30: CI 已落地(.github/workflows/ci-validate.yml)⇒ 本项全 17 项现在每次 PR 都跑,
+#   这些套件不再依赖"人记得跑"。⚠ 套件本身必须**入库**: test-update-kube-vip-addons.sh 曾被
+#   .gitignore 的"整个 tests/ 目录忽略"规则吞掉(从未提交)而 ⑮ 对缺失是硬失败 —— 上 CI 才发现;
+#   现规则只放行 test-*.sh, 新增套件若发现"本地绿、CI 红", 先查 git ls-files 里有没有它。
 #   两者都只用仓库内 fixture, 不联网、不碰集群, 秒级完成。
 #   ⚠ 任一失败即 ck_fail(与 ⑮ 主判据同口径): 套件跑不起来 = 没有证据, 不能算通过。
 # ★ 2026-09-28: 把 api-ha 线写的三个套件也挂进来 —— 它们此前**从来没被调度过** ⇒ test-sync-api-entry
 #   在 sync 新增"10 个版本钉子"要求后静默变红(用例 ⑤ 断言退出码)而无人发现。这四类回归
 #   (补丁层 / 收编映射 / 入口模式 / 本地代理)现在每轮 check-modules 都会跑到。
 for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
-           test-api-entry-mode.sh test-api-local-lb.sh test-sync-api-entry.sh; do
+           test-api-entry-mode.sh test-api-local-lb.sh test-sync-api-entry.sh \
+           test-kubespray-version-select.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
     if [ ! -f "${_tp}" ]; then
         ck_fail "⑮ 离线套件缺失: ${_tp#${REPO_ROOT}/}(⑮ 的回归证据没了)"
@@ -591,7 +619,7 @@ unset _t _tp _tout 2>/dev/null || true
 #   响亮失败(与 images.manifest:49 的"必须与 kubespray 实际解析出的版本一致"自相矛盾)。
 #   写入者已落地 = tools/k8s/sync-kubespray-config.sh 3.2 节(group_vars/all/k8s-versions.yml),
 #   C 断言其产物与钉子逐键一致 —— 删掉写入节 / 手工改错值 / 换了 conf 忘跑 sync 都会被点名。
-say "[16/17] k8s 基座钉子闭环(A 树内表值 / B 无模块开关 / C inventory 写入者) ..."
+say "[16/18] k8s 基座钉子闭环(A 树内表值 / B 无模块开关 / C inventory 写入者) ..."
 
 KSD_ROLE="${REPO_ROOT}/deployments/kubespray/kubespray/roles/kubespray_defaults"
 KSD_DL="${KSD_ROLE}/defaults/main/download.yml"
@@ -613,56 +641,16 @@ _ksd_conf_value() {   # <file> <VAR>
     printf '%s' "${v}"
 }
 
-# checksums.yml: 某小节下 <arch> 的**首个**版本键(上游 (…|dict2items)[0].key 的语义)
-_ksd_first_key() {   # <section> <arch>
-    awk -v want="$1" -v arch="$2" '
-        /^[a-zA-Z_]+_checksums:/ { sec=$1; sub(/:$/,"",sec); a=0 }
-        sec==want && /^  [a-z0-9_]+:$/ { a=($1 == arch ":"); next }
-        a && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+:$/ { v=$1; sub(/:$/,"",v); print v; exit }
-    ' "${KSD_CK}"
-}
-
-# checksums.yml: etcd_binary_checksums 里文件顺序首个 < <bound> 的键(bound 从 vars/main/main.yml 现读)
-_ksd_etcd() {   # <major>
-    local bound
-    bound="$(sed -n "/^etcd_supported_versions:/,/^[^[:space:]]/p" "${KSD_VM}" \
-             | grep -F "'$1':" \
-             | sed -n "s/.*select('version', '\([^']*\)',.*/\1/p" | head -1)"
-    [ -n "${bound}" ] || return 0
-    awk -v b="${bound}" '
-        function vlt(x, y,   n, m, i, xa, ya) {
-            n=split(x, X, "."); m=split(y, Y, ".")
-            for (i=1; i<=(n>m?n:m); i++) {
-                xa=(i<=n)?X[i]+0:0; ya=(i<=m)?Y[i]+0:0
-                if (xa<ya) return 1; if (xa>ya) return 0
-            }
-            return 0
-        }
-        /^[a-zA-Z_]+_checksums:/ { sec=$1; sub(/:$/,"",sec); a=0 }
-        sec=="etcd_binary_checksums" && /^  [a-z0-9_]+:$/ { a=($1=="amd64:"); next }
-        a && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+:$/ { v=$1; sub(/:$/,"",v); if (vlt(v,b)) { print v; exit } }
-    ' "${KSD_CK}"
-}
-
-# yml 里的内联查表(coredns_supported_versions / pod_infra_supported_versions)取 <major> 行
-_ksd_inline() {   # <file> <table> <major>
-    sed -n "/^$2:/,/^[^[:space:]]/p" "$1" | grep -F "'$3':" | head -1 \
-        | sed -E "s/^[^:]+:[[:space:]]*//; s/[[:space:]]*#.*//" | tr -d "\"'"
-}
-
-# yml 里的标量版本变量(如 nodelocaldns_version: "1.25.0")
-_ksd_scalar() {   # <file> <var>
-    grep -m1 -E "^$2:" "$1" | sed -E "s/^[^:]+:[[:space:]]*//; s/[[:space:]]*#.*//" | tr -d "\"'"
-}
-
-# kubelet_checksums 成员判定(<ver> → 输出 1/0)
-_ksd_kubelet_has() {   # <ver>
-    awk -v want="$1" '
-        /^kubelet_checksums:/ { s=1; next }
-        /^[a-zA-Z_]+_checksums:/ { s=0 }
-        s && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+:$/ { v=$1; sub(/:$/,"",v); if (v==want) { print "1"; exit } }
-    ' "${KSD_CK}"
-}
+# 树内版本表解析(2026-09-30 起下沉到共享库): 口径与 cubestack-version-dir.sh 的档案骨架推导
+# 共用一份, 避免"两处各写一套"必漂移(⑯-C 的教训)。库函数显式收文件路径; 下列薄包装保持
+# 本脚本既有调用点(KSD_CK/KSD_DL/KSD_VM)不变。
+# shellcheck source=../../kubespray/lib-kubespray-tables.sh
+source "${REPO_ROOT}/deployments/kubespray/lib-kubespray-tables.sh"
+_ksd_first_key()    { kb_tables_first_key "${KSD_CK}" "$@"; }
+_ksd_etcd()         { kb_tables_etcd "${KSD_CK}" "${KSD_VM}" "$@"; }
+_ksd_inline()       { kb_tables_inline "$@"; }
+_ksd_scalar()       { kb_tables_scalar "$@"; }
+_ksd_kubelet_has()  { kb_tables_kubelet_has "${KSD_CK}" "$@"; }
 
 KSD_BAD=0
 # ⑯-C 的键映射: <cluster.conf 钉子变量>:<kubespray 变量>。
@@ -825,7 +813,7 @@ unset _cn _cf _k8s _k8s_bare _major _want_calico _want_etcd _want_coredns _want_
 # 写成真值后被**误提交并持续跟踪**, 而 .gitignore 里早就列了它 —— ⚠ **忽略规则对已跟踪文件无效**,
 # 于是"看着封堵了、其实一直在库里", 还被烧进 CLI 镜像。
 # 本项把这条关系变成**可执行断言**: 这些路径 ① 必须被 .gitignore 覆盖 ② 且不得出现在 git 索引里。
-say "[17/17] 凭据卫生(含密钥的生成物不得被 git 跟踪) ..."
+say "[17/18] 凭据卫生(含密钥的生成物不得被 git 跟踪) ..."
 _GIT=(git -C "${REPO_ROOT}")
 _SECRET_PATHS=(
     deployments/config/external-ceph-self-define-access.conf   # 生成器写出三个真 keyring
@@ -847,6 +835,153 @@ for _p in "${_SECRET_PATHS[@]}"; do
     fi
 done
 unset _GIT _SECRET_PATHS _p 2>/dev/null || true
+
+# ---------- ⑱ 版本目录 ↔ 档案闭合(2026-09-30 起) ----------
+# 为什么必须有: 版本目录是"离线可复现"的载体(设计 docs/kubespray-versioning/design.md)——
+#   ① 入库档案(profiles/<版本>.profile)的版本面值必须 == **该版本树**的表值;
+#   ② 在场版本目录的 VERSION.profile 必须与入库档案一致(有入库档案时);
+#   ③ 目录里的关键二进制必须与其 K8S_VERSION 匹配(kubeadm/kubelet/kubectl-<ver>-amd64);
+#   ④ tree.tar.gz 指纹(有边车时)必须对得上;
+#   ⑤ LOCAL_ONLY(本地临时版本)与"有入库档案"不应同时出现(自相矛盾)。
+# ⚠ 无任何版本目录时**跳过**(CI/纯 checkout 的常态), 不误报。
+# 环境变量 OFFLINE_FILES_ROOT 可指向 fixture, 便于反证(见 tools/tests/…)。
+say "[18/18] 版本目录 ↔ 档案闭合 ..."
+VD_BAD=0
+VD_WARN=0
+VD_PROFILES_DIR="${REPO_ROOT}/deployments/config/profiles"
+VD_OFFLINE_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
+VD_TREE_VER="$(awk '/^version:/{print "v"$2; exit}' "${REPO_ROOT}/deployments/kubespray/kubespray/galaxy.yml" 2>/dev/null)"
+_vd_profile_keys=(KUBESPRAY_VERSION K8S_VERSION PAUSE_VERSION COREDNS_VERSION DNS_NODE_CACHE_VERSION \
+                  ETCD_VERSION CALICO_VERSION METRICS_SERVER_VERSION CPA_VERSION \
+                  API_LB_NGINX_IMAGE_TAG LOCAL_VOLUME_PROVISIONER_VERSION NFD_VERSION)
+
+# 取某版本对应的树目录(仓库树 / 物化树 / tar 解到临时目录); 取不到输出空
+_vd_tree_for() {   # <版本>
+    local v="$1" d
+    [ -n "${VD_TREE_VER}" ] && [ "${v}" = "${VD_TREE_VER}" ] && { printf '%s\n' "${REPO_ROOT}/deployments/kubespray/kubespray"; return; }
+    d="${REPO_ROOT}/deployments/kubespray/versions/${v}/kubespray"
+    [ -d "${d}" ] && { printf '%s\n' "${d}"; return; }
+    d="${VD_OFFLINE_ROOT}/kubespray/${v}/tree.tar.gz"
+    [ -f "${d}" ] || return 0
+    local tmp; tmp="$(mktemp -d)"
+    tar -xzf "${d}" -C "${tmp}" >/dev/null 2>&1 || { rm -rf "${tmp}"; return 0; }
+    printf '%s\n' "${tmp}"
+}
+
+# ① 入库档案逐版本 ↔ 其树表值
+if [ -d "${VD_PROFILES_DIR}" ]; then
+    for _pf in "${VD_PROFILES_DIR}"/*.profile; do
+        [ -f "${_pf}" ] || continue
+        _pv="$(_ksd_conf_value "${_pf}" KUBESPRAY_VERSION)"
+        [ -n "${_pv}" ] || { ck_fail "⑱ $(basename "${_pf}"): 未声明 KUBESPRAY_VERSION"; VD_BAD=1; continue; }
+        _ptree="$(_vd_tree_for "${_pv}")"
+        if [ -z "${_ptree}" ]; then
+            warn "  ⑱ 档案 ${_pv}: 无对应树(既非仓库树, 也无 versions/${_pv}/ 或离线 tree.tar.gz)⇒ 跳过逐值校验"
+            continue
+        fi
+        _pck="${_ptree}/roles/kubespray_defaults/vars/main/checksums.yml"
+        _pdl="${_ptree}/roles/kubespray_defaults/defaults/main/download.yml"
+        _pvm="${_ptree}/roles/kubespray_defaults/vars/main/main.yml"
+        _pk8s="$(_ksd_conf_value "${_pf}" K8S_VERSION)"
+        if [ -z "${_pk8s}" ]; then
+            ck_fail "⑱ $(basename "${_pf}"): 未声明 K8S_VERSION"; VD_BAD=1
+        elif [ "$(kb_tables_kubelet_has "${_pck}" "${_pk8s#v}")" != "1" ]; then
+            ck_fail "⑱ ${_pv}: K8S_VERSION=${_pk8s} 不在该版本树 kubelet_checksums 表内" \
+                "      → 表内可选项: $(kb_tables_kubelet_list "${_pck}" | tr '\n' ' ')"
+            VD_BAD=1
+        else
+            _pmajor="${_pk8s#v}"; _pmajor="${_pmajor%.*}"
+            _vd_cmp() {   # <键> <上游期望> <出处>
+                local got; got="$(_ksd_conf_value "${_pf}" "$1")"
+                if [ -z "${got}" ]; then ck_fail "⑱ ${_pv}: 档案缺 $1"; VD_BAD=1; return 0; fi
+                if [ "${got#v}" = "$2" ]; then
+                    say "  ⑱ ${_pv}: $1=${got} == 树表 $2"
+                else
+                    ck_fail "⑱ ${_pv}: $1='${got}' ≠ 该版本树表值 '$2'($3)"
+                    VD_BAD=1
+                fi
+            }
+            _vd_cmp CALICO_VERSION        "$(kb_tables_first_key "${_pck}" calicoctl_binary_checksums amd64)" "calicoctl_binary_checksums 首键"
+            _vd_cmp ETCD_VERSION          "$(kb_tables_version_for "${_ptree}" etcd_supported_versions "${_pmajor}")" "etcd_supported_versions['${_pmajor}'](跨版本形态由库容忍)"
+            _vd_cmp COREDNS_VERSION       "$(kb_tables_version_for "${_ptree}" coredns_supported_versions "${_pmajor}")" "coredns_supported_versions['${_pmajor}']"
+            _vd_cmp PAUSE_VERSION         "$(kb_tables_version_for "${_ptree}" pod_infra_supported_versions "${_pmajor}")" "pod_infra_supported_versions['${_pmajor}']"
+            _vd_cmp DNS_NODE_CACHE_VERSION "$(kb_tables_scalar "${_pdl}" nodelocaldns_version)" "nodelocaldns_version"
+            _vd_cmp METRICS_SERVER_VERSION "$(kb_tables_scalar "${_pdl}" metrics_server_version)" "metrics_server_version"
+            _vd_cmp CPA_VERSION           "$(kb_tables_scalar "${_pdl}" dnsautoscaler_version)" "dnsautoscaler_version"
+            _vd_cmp API_LB_NGINX_IMAGE_TAG "$(kb_tables_scalar "${_pdl}" nginx_image_tag)" "nginx_image_tag"
+            _vd_cmp LOCAL_VOLUME_PROVISIONER_VERSION "$(kb_tables_scalar "${_pdl}" local_volume_provisioner_version)" "local_volume_provisioner_version"
+            _vd_cmp NFD_VERSION           "$(kb_tables_scalar "${_pdl}" node_feature_discovery_version)" "node_feature_discovery_version"
+            ok "  ⑱ 档案 ${_pv} 与树表值逐项对齐"
+        fi
+    done
+fi
+
+# ②/③/④/⑤ 在场版本目录自检
+VD_DIRS=()
+shopt -s nullglob
+for _d in "${VD_OFFLINE_ROOT}"/kubespray/*/; do
+    [ -d "${_d}" ] || continue
+    { [ -f "${_d}/tree.tar.gz" ] || [ -f "${_d}/VERSION.profile" ] || [ -f "${_d}/LOCAL_ONLY" ]; } || continue
+    VD_DIRS+=("${_d%/}")
+done
+shopt -u nullglob
+if [ "${#VD_DIRS[@]}" -eq 0 ]; then
+    say "  ⑱ 无在场版本目录(纯 checkout/未备料)⇒ 跳过 ②–⑤"
+else
+    for _d in "${VD_DIRS[@]}"; do
+        _v="$(basename "${_d}")"
+        # ⑤ LOCAL_ONLY 与入库档案不应并存(自相矛盾: 版本既是"本地临时"又"入库了")
+        if [ -f "${_d}/LOCAL_ONLY" ] && [ -f "${VD_PROFILES_DIR}/${_v}.profile" ]; then
+            ck_fail "⑱ ${_v}: 既有 LOCAL_ONLY 又有入库档案 profiles/${_v}.profile —— 二者语义互斥" \
+                "      → 本地临时版本不入库: 删掉 LOCAL_ONLY 或删掉入库档案(设计 §3.3)"
+            VD_BAD=1
+        fi
+        # ④ tar 指纹
+        if [ -f "${_d}/tree.tar.gz" ] && [ -f "${_d}/tree.tar.gz.sha256" ]; then
+            ( cd "${_d}" && sha256sum -c --quiet tree.tar.gz.sha256 ) \
+                || { ck_fail "⑱ ${_v}: tree.tar.gz 指纹不符"; VD_BAD=1; }
+        fi
+        # ② VERSION.profile ↔ 入库档案
+        if [ -f "${_d}/VERSION.profile" ] && [ -f "${VD_PROFILES_DIR}/${_v}.profile" ]; then
+            for _k in "${_vd_profile_keys[@]}"; do
+                _a="$(_ksd_conf_value "${_d}/VERSION.profile" "${_k}")"
+                _b="$(_ksd_conf_value "${VD_PROFILES_DIR}/${_v}.profile" "${_k}")"
+                [ "${_a#v}" = "${_b#v}" ] || { ck_fail "⑱ ${_v}: VERSION.profile 的 ${_k}='${_a}' ≠ 入库档案 '${_b}'"; VD_BAD=1; }
+            done
+        fi
+        # ③ 关键二进制与 K8S_VERSION 匹配
+        _k8s="$(_ksd_conf_value "${_d}/VERSION.profile" K8S_VERSION 2>/dev/null || true)"
+        if [ -n "${_k8s}" ]; then
+            for _b in kubeadm kubelet kubectl; do
+                if [ ! -e "${_d}/${_b}-${_k8s#v}-amd64" ]; then
+                    if [ -f "${_d}/LOCAL_ONLY" ]; then
+                        warn "  ⑱ ${_v}(本地临时): 缺 ${_b}-${_k8s#v}-amd64(不阻断, 但该版本不可完整部署)"; VD_WARN=$((VD_WARN+1))
+                    else
+                        ck_fail "⑱ ${_v}: 缺关键二进制 ${_b}-${_k8s#v}-amd64" \
+                            "      → 该版本无法离线部署; 补齐或用 sync/fetch 重新备料"
+                        VD_BAD=1
+                    fi
+                fi
+            done
+        fi
+        # 镜像: 在库版本必须有 images/*.tar, 本地临时只告警
+        if [ -z "$(find "${_d}/images" -maxdepth 1 -name '*.tar' -print -quit 2>/dev/null)" ]; then
+            if [ -f "${_d}/LOCAL_ONLY" ]; then
+                warn "  ⑱ ${_v}(本地临时): images/ 为空(不阻断)"; VD_WARN=$((VD_WARN+1))
+            else
+                ck_fail "⑱ ${_v}: images/ 为空(在库版本的节点预加载镜像缺失)"; VD_BAD=1
+            fi
+        fi
+    done
+    if [ "${VD_BAD}" = "0" ]; then
+        if [ "${VD_WARN}" = "0" ]; then
+            ok "  ⑱ ${#VD_DIRS[@]} 个在场版本目录自检通过(指纹/档案一致/二进制齐套/LOCAL_ONLY 自洽)"
+        else
+            ok "  ⑱ ${#VD_DIRS[@]} 个在场版本目录自检通过(无硬性问题; ${VD_WARN} 项本地临时版本的缺口见上方 ⚠)"
+        fi
+    fi
+fi
+unset VD_BAD VD_WARN VD_PROFILES_DIR VD_TREE_VER _vd_profile_keys _pf _pv _ptree _pck _pdl _pvm _pk8s _pmajor _d _v _k _a _b _k8s _b 2>/dev/null || true
 
 echo "---------------------------------------------"
 if [ "${FAIL}" = "0" ]; then

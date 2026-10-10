@@ -1,9 +1,9 @@
 #!/bin/bash
 # ============================================================
-# fetch-lvm-packages.sh — 离线下载 lvm2 及依赖 .deb 到 offline-files/kubespray/packages
+# fetch-lvm-packages.sh — 离线下载 lvm2 及依赖 .deb 到 offline-files/os/packages
 # 用途: Ceph/Rook OSD 需要 lvm2(节点重启后逻辑卷重新激活); 离线集群需预置 .deb 包。
 #       在联网(或内网 apt 源可达)的 Ubuntu 22.04 机器上执行, 自动 apt-get download
-#       lvm2 + 依赖, 输出到 deployments/offline-files/kubespray/packages。
+#       lvm2 + 依赖, 输出到 deployments/offline-files/os/packages(版本无关 OS 层)。
 # ⚠ 执行顺序(必须): 本脚本生成 lvm2 离线包 **之后**, 才能部署 ceph 集群 ——
 #       modules/03_addon/02_ceph.sh 部署前预检"packages/ 含 lvm2_*.deb 或节点已在线装 lvm",
 #       均不满足则硬失败。请先在联网机执行本脚本, 再把 packages/ 目录同步到部署机。
@@ -20,8 +20,8 @@ load_config
 
 [ "$(id -u)" -eq 0 ] || { err "需要 root(apt-get download), 请 sudo 执行"; exit 1; }
 
-# 目标目录: offline-files/kubespray/packages(与 install-packages.yml / install-worker-packages.sh 兼容)
-PKG_DIR="${PKG_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray/packages}"
+# 目标目录: offline-files/os/packages(与 install-packages.yml / install-worker-packages.sh 兼容)
+PKG_DIR="${PKG_DIR:-${REPO_ROOT}/deployments/offline-files/os/packages}"
 mkdir -p "${PKG_DIR}"
 
 say "下载 lvm2 及依赖 .deb → ${PKG_DIR}(需要联网或内网 apt 源) ..."

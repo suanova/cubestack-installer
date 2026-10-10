@@ -108,14 +108,14 @@ cd installer && uv run cubestack-installer-installer
 
 根目录 Dockerfile 采用多阶段构建:第一阶段使用 Node 构建前端产物,第二阶段使用 uv 安装后端全部依赖并将前端产物纳入镜像,最终生成自包含镜像。该镜像与 docker 完全兼容。
 
-镜像名:harbor.isuanova.com/cubestack/cubestack-installer:latest
+镜像名:harbor.isuanova.com/suanova/cubestack-installer:latest
 
 ```bash
 make image                 # 构建并启动容器
 make image-push            # 推送镜像至 Harbor(需预先执行 podman login)
 
-podman build --format docker -t harbor.isuanova.com/cubestack/cubestack-installer:latest .
-podman run -d -p 8000:8000 -v csi-data:/app/data --name cubestack-installer harbor.isuanova.com/cubestack/cubestack-installer:latest
+podman build --format docker -t harbor.isuanova.com/suanova/cubestack-installer:latest .
+podman run -d -p 8000:8000 -v csi-data:/app/data --name cubestack-installer harbor.isuanova.com/suanova/cubestack-installer:latest
 podman logs -f cubestack-installer
 ```
 
@@ -401,7 +401,7 @@ deployments/
 
 不想在宿主机装工具链时,可直接用 **CLI 容器**离线部署。镜像内置 kubespray 源码 + 全部部署脚本 + 工具链(ansible/helm/skopeo/mc/kubectl/sshpass/virsh),**不含离线镜像 tar 与二进制**(体积大, 由挂载目录共享)。
 
-镜像名:`harbor.isuanova.com/cubestack/cubestack-installer-cli:latest`。
+镜像名:`harbor.isuanova.com/suanova/cubestack-installer-cli:latest`。
 
 构建(独立上下文, 全量同步 deployments 源码/脚本/模板——除 offline-files 离线大文件外全部进镜像;
 基础镜像 `ubuntu:22.04`, 本地缺失时脚本自动从 `deployments/offline-files/os/ubuntu-22.04.tar` `docker load`, 离线可构建):
@@ -452,7 +452,7 @@ sudo docker run --rm -it --network host \
   -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
   -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
   -v $HOME/.ssh:/root/.ssh \
-  harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+  harbor.isuanova.com/suanova/cubestack-installer-cli:latest
 # 进容器后(容器内已是 root, 无需 sudo):
 cd /opt/cubestack-installer
 ./deployments/scripts/deploy-cluster.sh                    # 默认 = --with-cubestack(全量)
@@ -464,7 +464,7 @@ cd /opt/cubestack-installer
 sudo docker run -itd --name cli --network host \
   -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
   -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
-  harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+  harbor.isuanova.com/suanova/cubestack-installer-cli:latest
 sudo docker exec -it cli bash
 ```
 

@@ -37,6 +37,13 @@ installer/workspace
 # 注意: 下面的归档/镜像规则须先列 helm 白名单(helm tarball 是唯一要打进的
 # 压缩包), 其余 *.tar.gz / *.tgz / *.tar / *.tar.xz 全部排除。
 # 保留 helm tarball 作为唯一打进镜像的压缩包;
+# 版本目录整层排除(2026-09-30 起离线件在 kubespray/<版本>/ 下; 二进制由 build-cli-context.sh
+#   从版本目录拷进 bin/ 再 COPY, 不依赖构建上下文里的 offline-files)。⚠ 漏了这行的后果:
+#   整仓上下文 docker build 会把 4.5GB 离线件打进镜像/拖慢构建。
+deployments/offline-files/kubespray/*/
+# 物化版本树(运行期由 cubestack-version-dir.sh materialize 生成; 不进镜像)
+deployments/kubespray/versions
+# 兼容期: 扁平层仍在(旧 CLI 镜像用), 逐条排除与改造前一致
 deployments/offline-files/kubespray/images
 deployments/offline-files/kubespray/packages
 deployments/offline-files/kubespray/cilium-chart

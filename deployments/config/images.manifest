@@ -180,3 +180,23 @@ metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/gpu-scheduler:${METAX_VERSION}-amd64
 metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/driver-image:${METAX_DRIVER_VERSION}
 # maca: METAX_MACA_IMAGE 本身已含 "仓库名:tag"(maca:3.8.1.2-ubuntu22.04-amd64), 故整体拼接
 metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/${METAX_MACA_IMAGE}
+
+# ------------------------------------------------------------
+# [group: cubestack-operator] CubeStack 平台 Operator(自研; 见 cluster.conf 4.6b / docs/cubestack-operator.md)
+#   目录: deployments/offline-files/cubestack-operator/
+#   ⚠ **本组默认不镜像到 mirrors/**: 上游就是本台 Harbor 的 suanova-private 项目(私有),
+#     与 metax-gpu 同一处理 —— 同步工具按"注册域 == HARBOR_MIRROR_REGISTRY"自动跳过;
+#     取离线 tar 时 harbor-save-images.sh 对同源组**直接用原始 ref** 拉取(不拼 mirrors/, 那不存在的副本)。
+#   ⚠ tag 是滚动的 ${CUBESTACK_OPERATOR_IMAGE_TAG}(默认 latest), 与 chart(1.0.0-latest)配套;
+#     离线 tar 会随上游滚动构建失效 —— 重新部署前重跑一次 save 工具(见 README)。
+#   清单来源 = chart 渲染结果(templates/manager.yaml 的 .Values.image); 镜像 ref 的
+#   注册域/路径变更时, 25_cubestack_operator.sh 的渲染自检会拦住(它不读本行, 只做登记)。
+# ------------------------------------------------------------
+cubestack-operator  ${CUBESTACK_OPERATOR_HARBOR_HOST}/suanova-private/cubestack-operator:${CUBESTACK_OPERATOR_IMAGE_TAG}
+# --- 平台组件镜像(CR 组件目录用; 2026-10-08 起经 CI 同步到 mirrors/) ---
+#   · ratelimit 是 EnvoyGateway CR 的 rateLimitDeployment 配置镜像(非默认拉起, 配 RateLimitPolicy
+#     时用); tag 8fe6ea42 是上游固定 commit tag —— 本部署网络到 docker.io 不通, 必须经本 CI
+#     通道同步到 Harbor mirrors 后再 harbor-save 成离线 tar(见 offline-files/cubestack-operator/README.md)。
+#   · 其余平台组件镜像(envoy/prometheus 栈/perses/bmc/cubepilot/cnpg/opstree 等)的完整清单与
+#     维护方法见 offline-files/cubestack-operator/README.md; 如需经本 CI 同步, 按同格式逐条登记。
+cubestack-operator  docker.io/envoyproxy/ratelimit:8fe6ea42

@@ -378,13 +378,11 @@ ensure_registry_nginx() {
     # find_offline_tar 是 endswith 语义, 版本化 tag(nginx:1.31.4)不命中, 下方按内容兜底。
     _t="$(find_offline_tar "nginx:latest" "nginx*.tar" \
             "${REPO_ROOT}/deployments/offline-files/nginx" \
-            "${LOCAL_REPO_DIR}/images" \
-            "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME:-cubestack-cluster}/images")" || _t=""
+            "${LOCAL_REPO_DIR}/images")" || _t=""
     if [ -z "${_t}" ]; then
         # 兜底: 版本化 tag(如 nginx:1.31.4)按内容匹配(含 "nginx:" 即接受)
         for _d in "${REPO_ROOT}/deployments/offline-files/nginx" \
-                  "${LOCAL_REPO_DIR}/images" \
-                  "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME:-cubestack-cluster}/images"; do
+                  "${LOCAL_REPO_DIR}/images"; do
             [ -d "${_d}" ] || continue
             for _f in "${_d}"/nginx*.tar; do
                 [ -f "${_f}" ] || continue
@@ -416,6 +414,33 @@ ensure_registry_nginx() {
     return 1
 }
 
+# 仓库当前 kubespray 树版本(带 v 前缀; 取不到输出空) —— 供 KUBESPRAY_VERSION 默认值机械派生
+# (不写死版本号: 换树后自动跟随; 见 docs/kubespray-versioning/design.md §4.1)
+kubespray_tree_version() {
+    local galaxy="${REPO_ROOT}/deployments/kubespray/kubespray/galaxy.yml"
+    [ -f "${galaxy}" ] || return 0
+    awk '/^version:/{print "v"$2; exit}' "${galaxy}"
+}
+
+# 默认部署版本 = **最新版本** = max(仓库树版本, **有入库档案**的版本目录)
+#   · 只认"有入库档案"的版本: 档案是版本面变量的接管凭证; 没有档案 ⇒ 钉子仍按 cluster.conf,
+#     拿别的版本的资产配本版本的钉子 = 静默错配(设计 §3.2 要防的正是这个)
+#     ⇒ 本地临时版本(有 LOCAL_ONLY / 无档案)不进默认, 必须显式 --profile / KUBESPRAY_VERSION
+#   · 用户口径(2026-09-30): 不指定 --profile 时默认部署最新版本; 原部署模式(默认全量、参数语义)不变
+kubespray_latest_version() {
+    local prof_dir="${REPO_ROOT}/deployments/config/profiles"
+    {
+        kubespray_tree_version
+        if [ -d "${prof_dir}" ]; then
+            local f
+            for f in "${prof_dir}"/*.profile; do
+                [ -f "${f}" ] || continue
+                sed -nE 's/^[[:space:]]*KUBESPRAY_VERSION=([^[:space:]#]+).*/\1/p' "${f}" | head -1
+            done
+        fi
+    } | sed '/^$/d' | sort -V | tail -1
+}
+
 # ---------------- 统一配置加载 ----------------
 # 环境变量优先: 配置文件内使用 ${VAR:-default},已导出的环境变量不会被覆盖
 load_config() {
@@ -426,6 +451,53 @@ load_config() {
         warn "未找到配置文件 ${CLUSTER_CONF},使用内置默认值"
         warn "建议: cp ${REPO_ROOT}/deployments/config/cluster.conf.example ${CLUSTER_CONF}"
     fi
+    # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
+    # (档案 > cluster.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
+    #  会静默变成"v2.28 的资产 + v1.35.8 的钉子")
+    #   显式选择(明写了 KUBESPRAY_PROFILE, 或明写了 KUBESPRAY_VERSION)且档案缺失 → 硬失败:
+    #     绝不静默退化成"别的版本的钉子"。err() 只打印不退出, 故这里显式 exit 1
+    #     (133 处调用点全是裸 load_config, 顶层退出即停住整个脚本)
+    #   隐式默认(版本靠树派生)→ 档案缺失只 warn: 换树/首次升级时不该把每个脚本都卡死
+    #   none → 不用档案(全部按 cluster.conf, 等价历史行为)
+    # 有效版本与档案名:
+    #   ① 先捕获"显式性"(必须在下面填默认值**之前**): 明写了 KUBESPRAY_VERSION 或 KUBESPRAY_PROFILE
+    #      ⇒ 档案缺失要**硬失败**(绝不静默退化成"别的版本的钉子")
+    #   ② 有效版本: 显式 KUBESPRAY_VERSION > **最新版本**(用户口径 2026-09-30: 不指定 --profile 时
+    #      默认部署最新版本; 默认仍是完整全量流程, 原部署模式不变)
+    #   ③ 档案名: 显式 KUBESPRAY_PROFILE > 跟随有效版本; 该版本无档案时, 显式选才报错, 隐式默认只告警
+    _prof_explicit=0
+    [ -n "${KUBESPRAY_PROFILE:-}" ] && _prof_explicit=1
+    [ -n "${KUBESPRAY_VERSION:-}" ] && _prof_explicit=1
+    if [ -z "${KUBESPRAY_VERSION:-}" ]; then
+        KUBESPRAY_VERSION="$(kubespray_latest_version)"
+        vlog "未指定版本 → 采用最新版本: ${KUBESPRAY_VERSION}(可用 KUBESPRAY_VERSION/--profile 指定)"
+    fi
+    _prof_name="${KUBESPRAY_PROFILE:-${KUBESPRAY_VERSION}}"
+    if [ -n "${_prof_name}" ] && [ "${_prof_name}" != "none" ]; then
+        _prof_file="${REPO_ROOT}/deployments/config/profiles/${_prof_name}.profile"
+        # 回退: 版本目录**自带的** VERSION.profile(设计 §3.2 的"自包含副本")——
+        #   本地临时版本按 D4 **不入库档案**, 但也必须能显式部署(v2.28 本地验证路径);
+        #   在库版本两份应当一致(check-modules ⑱ 逐键断言), 故回退不引入歧义。
+        _prof_dir_copy="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/kubespray/${_prof_name}/VERSION.profile"
+        if [ -f "${_prof_file}" ]; then
+            # shellcheck disable=SC1090
+            source "${_prof_file}"
+            vlog "版本档案生效: ${_prof_file}"
+        elif [ -f "${_prof_dir_copy}" ]; then
+            # shellcheck disable=SC1090
+            source "${_prof_dir_copy}"
+            vlog "版本档案生效(版本目录自带副本): ${_prof_dir_copy}"
+        elif [ "${_prof_explicit}" = "1" ]; then
+            err "版本档案不存在: ${_prof_file}(也没有版本目录副本 ${_prof_dir_copy}; KUBESPRAY_PROFILE=${_prof_name}; 用 KUBESPRAY_PROFILE=none 可禁用档案)"
+            exit 1
+        else
+            warn "未找到版本档案 ${_prof_file}(也没有版本目录副本), 按 cluster.conf 继续(当前版本 ${_prof_name})"
+        fi
+        unset _prof_file _prof_dir_copy
+    fi
+    KUBESPRAY_PROFILE="${_prof_name}"
+    unset _prof_name _prof_explicit
+
     # 宿主机物理 IP 自动检测(不 hardcode): 仅当未显式设置或仍是占位符时覆盖
     if [ -z "${HOST_PHYS_IP:-}" ] || [ "${HOST_PHYS_IP}" = "CHANGE_ME" ]; then
         HOST_PHYS_IP="$(detect_host_ip)"
@@ -452,16 +524,31 @@ load_config() {
     API_IP="${API_IP:-${APISERVER_ADDRESS:-}}"
     API_DOMAIN="${API_DOMAIN:-${APISERVER_DOMAIN:-k8s-api.cubestack.io}}"
     export API_IP API_DOMAIN
-    # 全局派生变量(续): 离线文件路径
-    #   OFFLINE_FILES_DIR  离线文件根目录(二进制/镜像/离线包), 全局唯一可切换点
-    #                      默认 ${REPO_ROOT}/deployments/offline-files/kubespray
-    #   LOCAL_REPO_DIR     当前集群离线资源目录 = ${OFFLINE_FILES_DIR}/${CLUSTER_NAME}
-    #                      (若显式设置了 LOCAL_REPO_DIR, 保留不覆盖; 否则统一收敛到 OFFLINE_FILES_DIR)
-    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}"
-    if [ -z "${LOCAL_REPO_DIR:-}" ]; then
-        LOCAL_REPO_DIR="${OFFLINE_FILES_DIR}/${CLUSTER_NAME:-cubestack-cluster}"
+    # 全局派生变量(续): 离线文件路径 —— 2026-09-30 起按**版本目录**组织
+    # (设计: docs/kubespray-versioning/design.md §4; 目录名 = 上游 tag 全名, 决策 D8)
+    #   OFFLINE_FILES_ROOT  offline-files **真根**(各组件目录的共同父目录)
+    #   KUBESPRAY_VERSION   kubespray 版本开关(单一入口); 默认 = 仓库当前树版本(galaxy.yml 派生)
+    #   OFFLINE_FILES_DIR   k8s **资产目录** = <root>/kubespray/<版本>(裸二进制 + images/ + packages/)
+    #   LOCAL_REPO_DIR      = OFFLINE_FILES_DIR —— 交给 kubespray 当 local_release_dir,
+    #                       ⚠ 必须恰好是"裸二进制 + images/ + packages/"的那一层(树内 dest 全按扁平名读)
+    #   KUBESPRAY_BASE_DIR  运行根(交给 cubestack-offline.sh 当 BASE_DIR)
+    #   ⚠ 显式设置的值一律保留(运维脚本/容器挂载按显式值走), 不回写
+    OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
+    if [ -z "${KUBESPRAY_VERSION:-}" ]; then
+        KUBESPRAY_VERSION="$(kubespray_latest_version)"
     fi
-    export OFFLINE_FILES_DIR LOCAL_REPO_DIR
+    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}}"
+    if [ -z "${LOCAL_REPO_DIR:-}" ]; then
+        LOCAL_REPO_DIR="${OFFLINE_FILES_DIR}"
+    fi
+    if [ -z "${KUBESPRAY_BASE_DIR:-}" ]; then
+        if [ "${KUBESPRAY_VERSION}" = "$(kubespray_tree_version)" ]; then
+            KUBESPRAY_BASE_DIR="${REPO_ROOT}/deployments/kubespray"
+        else
+            KUBESPRAY_BASE_DIR="${REPO_ROOT}/deployments/kubespray/versions/${KUBESPRAY_VERSION}"
+        fi
+    fi
+    export OFFLINE_FILES_ROOT KUBESPRAY_VERSION OFFLINE_FILES_DIR LOCAL_REPO_DIR KUBESPRAY_BASE_DIR
     # 全局派生变量(续): REGISTRY_IP 留空时从 METALLB_POOL 自动取池内首地址作为 LoadBalancer VIP
     # (cluster.conf 约定 "留空 = 自动派生", 与 sync-kubespray-config.sh 写入 addons.yml 的规则一致;
     #  centralized 于此, 让 deploy-registry.sh / setup-registry-expose.sh 等所有消费者拿到同一值)
@@ -1412,7 +1499,11 @@ bluestore_wipe_dev() {   # <盘> → 0=已擦净(校验通过); 非 0=仍有 blu
     # ② 签名/分区表 + 候选偏移 dd(始终执行: zap 只管 label 位置, 不管 offset 0 的
     #    "bluestore block device" 魔法/GPT; 也是镜像不可得时的唯一手段)
     wipefs -a -f "$d" >/dev/null 2>&1 || true
-    sgdisk --zap-all "$d" >/dev/null 2>&1 || true
+    # ⚠ **禁用 `sgdisk --zap-all`**(2026-10-10 实机根因): 它退出时做**全局 `sync()`** ——
+    #   内核若残留死 IO(历史事故的 D 状态写), sync 会遍历全部超级块、**永久挂死**(实测 5h50m,
+    #   不可杀, 部署无限 pending)。GPT 头/备份表 + bluestore 标签区已由下方 dd 候选偏移覆盖
+    #   (offset 0 与贴尾各 64MiB), 分区表重读由末尾 `partprobe`(BLKRRPART ioctl, **设备本地**)
+    #   完成 —— 全程只碰目标盘, 不做任何全局 sync。**别把它加回来。**
     for o in $(_bstore_offsets "$d"); do
         dd if=/dev/zero of="$d" bs=1M seek="$o" count=64 conv=fsync status=none >/dev/null 2>&1 || true
     done
@@ -1427,6 +1518,13 @@ bluestore_wipe_dev() {   # <盘> → 0=已擦净(校验通过); 非 0=仍有 blu
     done
     return "$r"
 }
+# 毒化预检(有界 ≤10s, 只告警不阻断; 脚本顶层、每节点一次): 内核若残留死 IO, 全局 sync 会被
+# 拖住 —— 检出即给"择机重启清毒"指引(本库其余步骤已全部设备本地化, 不受其影响)。
+sync & _sp=$!
+_sp_ok=0
+for _si in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$_sp" 2>/dev/null || { _sp_ok=1; break; }; sleep 1; done
+[ "${_sp_ok}" = "1" ] || echo "    ⚠ 该节点内核存在残留死 IO(全局 sync 被拖住>10s; 历史事故产物): 本步已全部设备本地化、不受影响; 建议择机重启清毒"
+unset _sp _sp_ok _si
 WIPELIB
 }
 

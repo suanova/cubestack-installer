@@ -16,8 +16,8 @@
 #     (resourcePrefix/resourceName, 如 nvidia.com/mlx5_0), 让 Pod 经 resources.limits 申请;
 #     rdmaHcaMax=每资源最大共享 Pod 数(如 100 表示允许 100 个 Pod 共享这块网卡)。
 #   · 资源模式(RDMA_HCA_MODE): by-link=按链路类型分成 IB / RoCE **两个资源池**(资源名
-#     RDMA_IB_RESOURCE / RDMA_ROCE_RESOURCE, 默认 rdma/hca_shared_devices 与
-#     rdma/roce_hca_shared_devices —— 与真实 GPU 集群 cm rdma-devices 命名一致, 同一份 Pod 清单
+#     RDMA_IB_RESOURCE / RDMA_ROCE_RESOURCE, 默认 rdma/ib_shared_devices 与
+#     rdma/roce_shared_devices —— 与真实 GPU 集群 cm rdma-devices 命名一致, 同一份 Pod 清单
 #     两边通用) —— cluster.conf.example 默认值(推荐);
 #     per-hca=每块 HCA 独立扩展资源(资源名=节点实际 RDMA 设备名, 如 nvidia.com/mlx5_0/1/2...),
 #     Pod 按资源名精确选择用哪块卡;
@@ -91,8 +91,8 @@ HCA_MODE="${RDMA_HCA_MODE:-pool}"
 # by-link 模式的两个池资源(值必须写成 <前缀>/<名字>; 前缀默认 rdma —— 与真实集群的插件注册名一致)。
 # ⚠ 名字不一致的后果是**静默的**: pod 申请的资源名在这台集群上根本不存在 → 永远 Pending。
 #   真实集群对应物: kubectl -n kube-system get cm rdma-devices -o yaml 里各条目的 resourceName。
-IB_RESOURCE="${RDMA_IB_RESOURCE:-rdma/hca_shared_devices}"
-ROCE_RESOURCE="${RDMA_ROCE_RESOURCE:-rdma/roce_hca_shared_devices}"
+IB_RESOURCE="${RDMA_IB_RESOURCE:-rdma/ib_shared_devices}"
+ROCE_RESOURCE="${RDMA_ROCE_RESOURCE:-rdma/roce_shared_devices}"
 IB_PREFIX="${IB_RESOURCE%%/*}"; IB_NAME="${IB_RESOURCE##*/}"
 ROCE_PREFIX="${ROCE_RESOURCE%%/*}"; ROCE_NAME="${ROCE_RESOURCE##*/}"
 if [ "${HCA_MODE}" = "by-link" ]; then
@@ -100,8 +100,8 @@ if [ "${HCA_MODE}" = "by-link" ]; then
         _rn="${_rv%%=*}"; _rv="${_rv#*=}"
         case "${_rv}" in
             */*) [ -n "${_rv%%/*}" ] && [ -n "${_rv##*/}" ] \
-                     || { err "${_rn} 前缀或名字为空: '${_rv}'(应为 <前缀>/<名字>, 如 rdma/hca_shared_devices)"; exit 1; } ;;
-            *)   err "${_rn} 必须写成 <前缀>/<名字>(如 rdma/hca_shared_devices), 当前为 '${_rv}'"; exit 1 ;;
+                     || { err "${_rn} 前缀或名字为空: '${_rv}'(应为 <前缀>/<名字>, 如 rdma/ib_shared_devices)"; exit 1; } ;;
+            *)   err "${_rn} 必须写成 <前缀>/<名字>(如 rdma/ib_shared_devices), 当前为 '${_rv}'"; exit 1 ;;
         esac
     done
     [ "${IB_RESOURCE}" != "${ROCE_RESOURCE}" ] \

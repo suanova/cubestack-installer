@@ -8,21 +8,37 @@
 # 原则: ① 全量同步 deployments/(仅排除 offline-files 大文件与运行时凭据), 保证除离线
 #       **大文件**外, 所有部署代码/脚本/配置模板(kubespray 源码 / inventory group_vars /
 #       cubestack-addon / config 模板 / skills 等)都打进容器, 避免漏文件;
-#       ② 3 个轻量 CLI 二进制(kubectl/helm/skopeo)临时拷入 cli-context/bin/, 文件名从
-#       Dockerfile-cli 的 COPY 行自动提取, 版本升级无需改本脚本。
+#       ② **不打任何离线文件**(2026-09-30 起): kubectl/helm/skopeo 由容器**运行期**从挂载的
+#       版本目录挂到 PATH(见 deployments/scripts/tools/docker/cli-toolchain-from-offline.sh),
+#       镜像只含 deployments/ 代码 ⇒ 构建上下文与离线件体积彻底解耦。
+#       ⚠ 唯一例外: **mc**(拉离线文件的引导工具, 不能被挂载提供; 上游 URL 已 410 Gone)
+#         —— 从 offline-files/os/mc-* 拷入上下文 bin/mc。
 # 不复制: 离线大文件(images/镜像 tar/节点侧二进制/VM 镜像/OS 镜像)、运行时凭据文件
 #         (cluster.conf / hosts.yml / inventory.ini / artifacts)。
 # 基础镜像: 默认 ubuntu:22.04 完整重建; 本地缺失时自动从
 #           deployments/offline-files/os/ubuntu-22.04.tar docker load(离线可构建)。
-# 增量构建(--incremental): 基础 = Harbor 旧 CLI 镜像, 只补装缺失 package + 更新 deployments, 秒级。
+# 增量构建(--incremental): 与 --build 同为**代码层**构建(都 FROM base), 区别只是跳过依赖对齐。
+#   ⚠ **层数累积(2026-09-30 实测)**:增量每次在旧镜像上再叠十几层 ⇒ 层数单调增长;几百层时
+#     containerd overlayfs 的 lowerdir(全部祖先层)超过内核 PAGE_SIZE 上限(4096 字节)⇒ buildkit 报
+#     `mount source: overlay ... invalid argument`(实测 443 → 590 层, 第 5 步即挂不上, 与 Dockerfile 无关)。
+#     ⇒ 有**层数守卫**(默认阈值 INCREMENTAL_MAX_LAYERS=300, 超了直接拒绝并提示改全量);
+#     定期做一次**全量构建**即可把层数归零(基础 ubuntu:22.04 只有几层)。
 # 用法: sudo ./build-cli-context.sh                  # 生成 deployments/cli-context/
 #       sudo ./build-cli-context.sh --build           # 全量构建(基础 ubuntu:22.04)
 #       sudo ./build-cli-context.sh --build --push    # 全量构建并推送 Harbor
-#       sudo ./build-cli-context.sh --build --incremental   # 增量构建(基础 Harbor latest)
-#       sudo ./build-cli-context.sh --build --incremental --push   # 增量构建并推送
+#       sudo ./build-cli-context.sh --build --incremental   # 同 --build(历史别名; 工具/依赖在 base)
+#       sudo ./build-cli-context.sh --build --incremental --push   # 同上并推送
+#       sudo ./build-cli-context.sh --base            # **只在系统/工具/依赖变化时**重建 base 层
+#       sudo ./build-cli-context.sh --base --push     # 重建并推送 base 层
+#       sudo ./build-cli-context.sh --build --engine podman    # 用 podman 构建(docker/podman 都支持)
+# 容器引擎: 默认自动探测(docker 优先, 无 docker 用 podman);可用 --engine docker|podman 或
+#   CONTAINER_ENGINE 环境变量指定。podman 构建统一 `--format docker`(清单格式与 Makefile 一致)。
+# ★ 两层结构(2026-09-30): base(Dockerfile-cli-base: 系统+工具链+ansible+mc)极少变;
+#   --build / --incremental 都只做**代码层**(FROM base + copy deployments)⇒ 快, 且**层数不累积**。
 #       sudo ./build-cli-context.sh --output /tmp/cli-ctx
-# 构建(手动): 生成后执行
-#       sudo docker build -f Dockerfile-cli -t harbor.isuanova.com/cubestack/cubestack-installer-cli:latest deployments/cli-context/
+# 构建(手动): 生成后执行(引擎按需替换 docker / podman; podman 要加 --format docker)
+#       sudo docker build -f Dockerfile-cli -t harbor.isuanova.com/suanova/cubestack-installer-cli:latest deployments/cli-context/
+#       sudo podman build --format docker -f Dockerfile-cli -t harbor.isuanova.com/suanova/cubestack-installer-cli:latest deployments/cli-context/
 # 说明: cli-context/ 为生成目录(gitignore), 每次构建前重新生成即可保证与源码一致。
 # ============================================================
 set -euo pipefail
@@ -31,11 +47,17 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 
 OUT="${REPO_ROOT}/deployments/cli-context"
-IMAGE="harbor.isuanova.com/cubestack/cubestack-installer-cli:latest"
+IMAGE="harbor.isuanova.com/suanova/cubestack-installer-cli:latest"
 BASE_IMAGE="ubuntu:22.04"
-INC_BASE_IMAGE="harbor.isuanova.com/cubestack/cubestack-installer-cli:latest"
+# 两层结构(2026-09-30): base = 系统+工具链层(极少变), 代码层 FROM 它 ⇒ 层数不累积
+# ⚠ 命名空间**有意不同**(用户口径 2026-09-30): base 在 cubestack 项目, 代码层镜像在 suanova 项目
+#   —— 两个项目各自的推送权限不同, 不要"顺手统一"改成一个。
+CLI_BASE_TAG="harbor.isuanova.com/cubestack/cubestack-installer-cli-base:latest"
+CLI_BASE_DOCKERFILE="${REPO_ROOT}/Dockerfile-cli-base"
+INC_BASE_IMAGE="${CLI_BASE_TAG}"
 OS_TAR="${REPO_ROOT}/deployments/offline-files/os/ubuntu-22.04.tar"
 DO_BUILD=0
+DO_BASE=0
 DO_PUSH=0
 INCREMENTAL=0
 while [ $# -gt 0 ]; do
@@ -44,24 +66,41 @@ while [ $# -gt 0 ]; do
         --build)  DO_BUILD=1; shift ;;
         --push)   DO_BUILD=1; DO_PUSH=1; shift ;;
         --incremental) DO_BUILD=1; INCREMENTAL=1; shift ;;
+        --base)   DO_BASE=1; DO_BUILD=1; shift ;;
+        --engine) ENGINE_ARG="${2:?--engine 需要 docker 或 podman}"; shift 2 ;;
         -h|--help) head -20 "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) err "未知参数: $1(可用 --output/--build/--push/--incremental)"; exit 1 ;;
+        *) err "未知参数: $1(可用 --output/--build/--push/--incremental/--base/--engine)"; exit 1 ;;
     esac
 done
 
+# ---------- 容器引擎: docker / podman 皆可(2026-09-30) ----------
+# 优先级: --engine > CONTAINER_ENGINE 环境变量 > 自动探测(docker 优先, 没有则 podman)。
+# podman 构建统一加 `--format docker`(manifest 用 docker v2s2; 与 Makefile 的 installer 镜像一致,
+#   对 Harbor/k8s 拉取的兼容性最好)。
+ENGINE="${ENGINE_ARG:-${CONTAINER_ENGINE:-}}"
+if [ -z "${ENGINE}" ]; then
+    if command -v docker >/dev/null 2>&1; then ENGINE=docker
+    elif command -v podman >/dev/null 2>&1; then ENGINE=podman
+    else err "没有可用的容器引擎(docker / podman 都找不到); 装一个或用 --engine 指定"; exit 1; fi
+fi
+command -v "${ENGINE}" >/dev/null 2>&1 || { err "--engine ${ENGINE} 不可用(命令不存在)"; exit 1; }
+ENGINE_FMT_ARGS=()
+[ "${ENGINE}" = "podman" ] && ENGINE_FMT_ARGS=(--format docker)
+
 say "生成 CLI 镜像构建上下文 → ${OUT}"
 rm -rf "${OUT}"
-mkdir -p "${OUT}/deployments" "${OUT}/bin"
+mkdir -p "${OUT}/deployments"
 
-# ---------------- 同步 Dockerfile-cli / Dockerfile-cli-incremental / .dockerignore(构建上下文 = 仓库根 Dockerfile) ----------------
+# ---------------- 同步 Dockerfile-cli(-base)/ .dockerignore(构建上下文 = 仓库根 Dockerfile) ----------------
 # 构建统一以仓库根的 Dockerfile 为唯一事实来源: 先拷进上下文(便于 --output 独立上下文/离线),
 # 后面 docker build 用 -f "${OUT}/<Dockerfile>", 保证构建与最新 Dockerfile 一致。
 # .dockerignore 同理; 根目录缺失时(如只拷出 deployments)回退用上下文内默认。
 cp "${REPO_ROOT}/Dockerfile-cli" "${OUT}/Dockerfile-cli"
-[ -f "${REPO_ROOT}/Dockerfile-cli-incremental" ] && cp "${REPO_ROOT}/Dockerfile-cli-incremental" "${OUT}/Dockerfile-cli-incremental"
+[ -f "${CLI_BASE_DOCKERFILE}" ] && cp "${CLI_BASE_DOCKERFILE}" "${OUT}/Dockerfile-cli-base"
+# 代码层只有一个 Dockerfile(--incremental 已并入, 2026-09-30); base 层单独同步(见上)
 [ -f "${REPO_ROOT}/.dockerignore" ] && cp "${REPO_ROOT}/.dockerignore" "${OUT}/.dockerignore" \
     || touch "${OUT}/.dockerignore"
-ok "已同步 Dockerfile-cli(-incremental) / .dockerignore → ${OUT}"
+ok "已同步 Dockerfile-cli / Dockerfile-cli-base / .dockerignore → ${OUT}"
 
 # ---------------- 部署代码/配置模板(全量同步, 仅排除离线大文件与运行时凭据) ----------------
 say "同步整个 deployments/(排除 offline-files 大文件与运行时凭据) ..."
@@ -71,9 +110,11 @@ say "同步整个 deployments/(排除 offline-files 大文件与运行时凭据)
 #   external-ceph* 用通配, 覆盖生成器以后新增的同族文件。
 # ⚠ 注释只能写在命令**之前**: 续行符(\)之后的 `#` 不是注释, 会被当成 rsync 参数(踩过, 报
 #   "syntax or usage error ... [Receiver]")。
+# ⚠ 排除物化版本树(设计 D1/§5.2: 物化树是运行期产物, 不进镜像; 部署机靠挂载资产自动物化) —— 勿删。
 rsync -a \
     --exclude 'offline-files' \
     --exclude 'cli-context' \
+    --exclude 'kubespray/versions' \
     --exclude '.git' --exclude '.venv' --exclude 'venv' --exclude '.ansible' --exclude '.cache' \
     --exclude 'config/cluster.conf' --exclude 'config/cluster.conf.bak' --exclude 'config/cluster.conf.bak.*' \
     --exclude 'config/external-ceph*' --exclude 'config/minio.conf' \
@@ -84,64 +125,155 @@ rsync -a \
 say "同步 skills ..."
 rsync -a --exclude '.git' "${REPO_ROOT}/skills" "${OUT}/"
 
-# ---------------- 轻量 CLI 二进制(临时拷入 cli-context/bin/, 文件名从 Dockerfile-cli COPY 行自动提取) ----------------
-# 保证与镜像 COPY 内容一致: kubectl-<ver>-amd64 / helm-<ver>-linux-amd64.tar.gz / skopeo-<ver>-amd64 / mc
-say "拷贝 CLI 二进制到 bin/(kubectl/helm/skopeo, 文件名取自 Dockerfile-cli COPY 行) ..."
-mapfile -t CLI_FILES < <(grep -oP 'COPY bin/\K[^ ]+' \
-    "${REPO_ROOT}/Dockerfile-cli" 2>/dev/null | sort -u || true)
-if [ "${#CLI_FILES[@]}" -eq 0 ]; then
-    CLI_FILES=(kubectl-1.35.8-amd64 helm-3.22.0-linux-amd64.tar.gz skopeo-1.16.1-amd64)
-fi
-for f in "${CLI_FILES[@]}"; do
-    [ -n "${f}" ] || continue
-    if [ -f "${REPO_ROOT}/deployments/offline-files/kubespray/${f}" ]; then
-        cp "${REPO_ROOT}/deployments/offline-files/kubespray/${f}" "${OUT}/bin/"
-        ok "  ${f}"
+# ---------------- CLI 工具链: 拷进构建上下文 bin/(base 层用) ----------------
+# 用户口径(2026-09-30): **常用且版本固定的工具全部打进 base 镜像**(不再靠运行期挂载补)。
+# 来源优先级: 离线**版本目录** offline-files/kubespray/<版本>/(首选) → 宿主机 command -v(兜底)。
+# 文件名统一成**固定名**(bin/kubectl / bin/skopeo / bin/yq / bin/helm-archive.tar.gz / bin/mc),
+# 这样 Dockerfile 里不出现版本号 ⇒ 升级工具只换离线件+重建 base, 不用改 Dockerfile。
+# ⚠ staging 只在 --base(要构建 base 层)时执行(2026-10-09 修): bin/ 只被 Dockerfile-cli-base
+#   COPY; 代码层构建(--build, FROM 既有 base)不需要它。旧实现无条件 staging ⇒ 构建机缺工具/缺
+#   离线 helm 包时直接 exit 1, 把本不需要任何工具的代码层构建也挡死(假失败)。
+if [ "${DO_BASE}" = "1" ]; then
+    # ⚠ `|| true`: 无版本目录时 `ls` 退出 2, 经 pipefail 会**静默杀死脚本**(到不了下面的兜底/报错);
+    _KV_DIR="$(ls -d "${REPO_ROOT}/deployments/offline-files/kubespray"/v*/ 2>/dev/null | sort -V | tail -1 || true)"
+    mkdir -p "${OUT}/bin"
+    _tool_one() {   # <固定名> <源前缀或命令行名> [--from-host]
+        local out="$1" pat="$2" src=""
+        if [ -n "${_KV_DIR}" ]; then
+            src="$(ls "${_KV_DIR}"${pat}-* 2>/dev/null | head -1 || true)"
+        fi
+        if [ -z "${src}" ] && command -v "${pat}" >/dev/null 2>&1; then src="$(command -v "${pat}")"; fi
+        if [ -n "${src}" ] && [ -f "${src}" ]; then
+            cp "${src}" "${OUT}/bin/${out}"
+            ok "  ${out} ← ${src#${REPO_ROOT}/}"
+        else
+            err "找不到 ${pat}(离线版本目录与宿主机都没有)—— base 构建会在 COPY bin/${out} 处失败"
+            return 1
+        fi
+    }
+    say "拷贝工具链到 bin/(固定名; 版本取自 ${_KV_DIR:-宿主机}) ..."
+    _tool_one kubectl kubectl || exit 1
+    _tool_one skopeo  skopeo  || exit 1
+    _tool_one yq      yq      || exit 1
+    # helm: 压缩包形态(Dockerfile 里解包), 固定名 helm-archive.tar.gz
+    _helm_src=""
+    [ -n "${_KV_DIR}" ] && _helm_src="$(ls "${_KV_DIR}"helm-*.tar.gz 2>/dev/null | head -1 || true)"
+    if [ -n "${_helm_src}" ]; then
+        cp "${_helm_src}" "${OUT}/bin/helm-archive.tar.gz"
+        ok "  helm-archive.tar.gz ← ${_helm_src#${REPO_ROOT}/}"
     else
-        warn "缺失 ${f}(可先运行 tools/offline/fetch-offline-from-minio.sh 下载)"
+        err "找不到 helm-*.tar.gz(离线版本目录里没有; 联网下载留待补) —— base 构建会在 COPY bin/helm-archive.tar.gz 处失败"
+        exit 1
     fi
-done
+    # mc(MinIO Client)—— **唯一必须内置的引导工具**:
+    #   容器正是靠它去 MinIO **拉**离线文件(不能被挂载提供, 先有鸡还是先有蛋); 上游下载路径会变
+    #   (老 /client/ 已 410 Gone, 新 /aistor/ 2026-09-30 实测 200)⇒ 首选离线件, 联网只兜底。
+    _mc_src=""
+    MC_ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+    case "${MC_ARCH}" in amd64|arm64) : ;; *) MC_ARCH="amd64" ;; esac
+    _MC_MACHINE=3e00   # ELF e_machine(仅供下方防错件校验): 3e00=x86-64, b700=aarch64
+    [ "${MC_ARCH}" = "arm64" ] && _MC_MACHINE=b700
+    # ⚠ 不做"按架构选件"(用户口径 2026-10-09: 本仓库不支持 arm64) —— 仍取 mc-* 首个;
+    #   但下面的 ELF 校验保证"装进镜像的 mc 必须与构建机架构一致"(防错架构件静默入镜像)。
+    for _c in "${REPO_ROOT}/deployments/offline-files/os"/mc-*; do
+        [ -f "${_c}" ] && { _mc_src="${_c}"; break; }
+    done
+    if [ -z "${_mc_src}" ]; then
+        _mc_url="https://dl.min.io/aistor/mc/release/linux-${MC_ARCH}/mc"
+        warn "离线件里没有 mc(offline-files/os/mc-*), 尝试联网下载: ${_mc_url}"
+        if wget -q -O "${OUT}/bin/mc" "${_mc_url}" 2>/dev/null && [ -s "${OUT}/bin/mc" ]; then
+            chmod +x "${OUT}/bin/mc"
+            if "${OUT}/bin/mc" --version >/dev/null 2>&1; then
+                _mc_src="${_mc_url}"
+                warn "  已下载并验版本 ✓ —— 建议沉淀成离线件(offline-files/os/mc-<版本>-linux-${MC_ARCH})"
+            else
+                rm -f "${OUT}/bin/mc"; _mc_src=""
+            fi
+        fi
+    fi
+    if [ -z "${_mc_src}" ] && command -v mc >/dev/null 2>&1; then
+        _mc_src="$(command -v mc)"
+        warn "联网下载也失败, 回退用宿主机的 ${_mc_src} —— 建议沉淀成离线件"
+    fi
+    if [ -n "${_mc_src}" ] && [ -f "${_mc_src}" ]; then
+        cp "${_mc_src}" "${OUT}/bin/mc"
+        ok "  mc ← ${_mc_src#${REPO_ROOT}/}"
+    elif [ -n "${_mc_src}" ]; then
+        ok "  mc ← ${_mc_src}(联网下载)"
+    else
+        err "找不到 mc: 离线件 offline-files/os/mc-* 缺失且联网/宿主机都没有 —— base 构建会在 COPY bin/mc 处失败"
+        err "  → 备料: 联网机 wget https://dl.min.io/aistor/mc/release/linux-${MC_ARCH}/mc -O .../os/mc-<版本>-linux-${MC_ARCH}"
+        exit 1
+    fi
+
+    # 核验 ELF 架构, 防止文件名正确但内容来自另一架构(离线/下载/宿主机来源均检查)。
+    # (保留此项; 与上面的"不按架构选件"是两回事: 这不是支持 arm64, 是拒绝错件静默入镜像。)
+    if [ "$(od -An -tx1 -N4 "${OUT}/bin/mc" | tr -d ' \n')" != "7f454c46" ] \
+        || [ "$(od -An -tx1 -j18 -N2 "${OUT}/bin/mc" | tr -d ' \n')" != "${_MC_MACHINE}" ]; then
+        err "mc 二进制架构与 ${MC_ARCH} 不符: ${_mc_src}"
+        exit 1
+    fi
+else
+    say "跳过 CLI 工具链 staging(bin/ 仅 base 层构建的输入; 本次未请求 --base)"
+fi
 
 echo ""
 ok "构建上下文就绪: ${OUT}  ($(du -sh "${OUT}" 2>/dev/null | awk '{print $1}'))"
 
 if [ "${DO_BUILD}" = "1" ]; then
-    if [ "${INCREMENTAL}" = "1" ]; then
-        # ---- 增量构建: 基础 = Harbor 旧 CLI 镜像, 只补装缺失包 + 更新 deployments ----
-        if ! docker image inspect "${INC_BASE_IMAGE}" >/dev/null 2>&1; then
-            say "本地无 ${INC_BASE_IMAGE}, 尝试从 Harbor 拉取 ..."
-            docker pull "${INC_BASE_IMAGE}" 2>/dev/null || {
-                err "增量构建需要基础镜像 ${INC_BASE_IMAGE}(本地或 Harbor); 首次构建请用全量 --build 或 docker pull"; exit 1; }
-        fi
-        say "增量构建(基础 ${INC_BASE_IMAGE}: 补装缺失包 + 更新 deployments) ..."
-        docker build -f "${OUT}/Dockerfile-cli-incremental" -t "${IMAGE}" "${OUT}" \
-            || { err "增量构建失败"; exit 1; }
-    else
-        # ---- 全量构建: 基础 ubuntu:22.04, 本地缺失时从离线 OS 镜像 tar docker load(离线可构建) ----
-        if ! docker image inspect "${BASE_IMAGE}" >/dev/null 2>&1; then
+    if [ "${DO_BASE}" = "1" ]; then
+        # ---- 只重建 base 层(系统+工具链): 新增 package/工具/依赖版本变化时才需要 ----
+        if ! ${ENGINE} image inspect "${BASE_IMAGE}" >/dev/null 2>&1; then
             if [ -f "${OS_TAR}" ]; then
-                say "本地无 ${BASE_IMAGE}, 从离线文件 docker load ..."
-                docker load -i "${OS_TAR}"
+                say "本地无 ${BASE_IMAGE}, 从离线文件 ${ENGINE} load ..."
+                ${ENGINE} load -i "${OS_TAR}"
             else
-                err "基础镜像 ${BASE_IMAGE} 缺失且离线文件不存在(${OS_TAR}); 先运行 fetch-offline-from-minio.sh 或 docker pull ${BASE_IMAGE}"
+                err "基础镜像 ${BASE_IMAGE} 缺失且离线文件不存在(${OS_TAR}); 先运行 fetch-offline-from-minio.sh 或 ${ENGINE} pull ${BASE_IMAGE}"
                 exit 1
             fi
         fi
-        say "构建镜像(基于 ${BASE_IMAGE}) ..."
-        docker build -f "${OUT}/Dockerfile-cli" -t "${IMAGE}" "${OUT}" \
-            || { err "构建失败"; exit 1; }
+        [ -f "${OUT}/Dockerfile-cli-base" ] || { err "上下文缺 Dockerfile-cli-base(仓库里没有 ${CLI_BASE_DOCKERFILE}?)"; exit 1; }
+        say "构建 base 层(系统+工具链; 需要联网 apt/pip) → ${CLI_BASE_TAG} ..."
+        ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f "${OUT}/Dockerfile-cli-base" -t "${CLI_BASE_TAG}" "${OUT}" \
+            || { err "base 构建失败"; exit 1; }
+        _base_layers="$(${ENGINE} history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l)"
+        ok "base 层完成: ${CLI_BASE_TAG}(${_base_layers} 层)"
     fi
+
+    # ---- 代码层构建(两种 Dockerfile 都 FROM base): 只 copy deployments 代码, 层数不累积 ----
+    if ! ${ENGINE} image inspect "${CLI_BASE_TAG}" >/dev/null 2>&1; then
+        say "本地无 base 镜像 ${CLI_BASE_TAG}, 尝试从 Harbor 拉取 ..."
+        ${ENGINE} pull "${CLI_BASE_TAG}" 2>/dev/null || {
+            err "缺 base 镜像 ${CLI_BASE_TAG}(本地与 Harbor 都没有)"
+            err "  → 首次/系统或工具变化时先建 base: sudo $0 --base     (需要联网 apt/pip)"
+            exit 1; }
+    fi
+    # 代码层只有一个 Dockerfile(2026-09-30): 工具/依赖都在 base, 本层只 copy deployments+skills。
+    # --incremental 保留为**别名**(历史用法兼容), 行为与 --build 相同。
+    _df="Dockerfile-cli"
+    # 层数信息(base 是固定的, 代码层每次只加 1~2 层; 这里给个可观察的数字)
+    _base_layers="$(${ENGINE} history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l)"
+    _cur_layers="$(${ENGINE} history --no-trunc "${IMAGE}" 2>/dev/null | tail -n +2 | wc -l)"
+    say "代码层构建(${_df} ← base ${CLI_BASE_TAG}(base ${_base_layers} 层 / 当前 latest ${_cur_layers:-0} 层)) ..."
+    [ "${INCREMENTAL}" = "1" ] && say "  说明: --incremental 现与 --build 等价(工具/依赖都在 base; 变更依赖请 --base)"
+    ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f "${OUT}/${_df}" --build-arg "CLI_BASE_TAG=${CLI_BASE_TAG}" -t "${IMAGE}" "${OUT}" \
+        || { err "代码层构建失败"; exit 1; }
     ok "构建完成: ${IMAGE}"
     if [ "${DO_PUSH}" = "1" ]; then
         say "推送到 Harbor ..."
-        docker push "${IMAGE}" || { err "推送失败(需先 docker login)"; exit 1; }
-        ok "已推送: ${IMAGE}"
+        _push_images=()
+        [ "${DO_BASE}" = "1" ] && _push_images+=("${CLI_BASE_TAG}")
+        [ "${DO_BUILD}" = "1" ] && _push_images+=("${IMAGE}")
+        for _push_image in "${_push_images[@]}"; do
+            ${ENGINE} push "${_push_image}" || { err "推送失败(需先 ${ENGINE} login ${_push_image%%/*})"; exit 1; }
+            ok "已推送: ${_push_image}"
+        done
     fi
 else
     echo "  构建镜像(全量, 基础 ubuntu:22.04):"
-    echo "    sudo docker build -f Dockerfile-cli -t ${IMAGE} ${OUT}"
+    echo "    sudo ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f Dockerfile-cli -t ${IMAGE} ${OUT}"
     echo "  构建镜像(增量, 基础 Harbor latest):"
-    echo "    sudo docker build -f Dockerfile-cli-incremental -t ${IMAGE} ${OUT}"
+    echo "    sudo ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f Dockerfile-cli -t ${IMAGE} ${OUT}   # --incremental 同此(已并入)"
     echo "  推送:"
-    echo "    sudo docker push ${IMAGE}"
+    echo "    sudo ${ENGINE} push ${IMAGE}"
 fi

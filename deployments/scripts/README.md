@@ -19,8 +19,11 @@
 > ⭐ **推荐方式**:宿主机只需 **Docker**,离线文件/配置/密钥都在容器外管理(挂载),换环境/多集群复用同一套 offline-files。
 
 ```bash
-# ① 拉取 CLI 镜像(内置 kubespray 源码 + 全部部署脚本 + 工具链: ansible/helm/skopeo/mc/kubectl/sshpass/virsh)
-docker pull harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+# ① 拉取 CLI 镜像(内置 kubespray 源码 + 全部部署脚本 + ansible/sshpass/virsh + 工具链
+#    kubectl/helm/skopeo/yq/mc —— 2026-09-30 最终口径: 工具链**打进 base 层**(非登录 shell 也有);
+#    运行期钩子只在工具缺失时从挂载的版本目录补齐、不覆盖(见 docs/kubespray-versioning/README.md §8);
+#    部署流程仍用 bash -lc(既有口径))
+docker pull harbor.isuanova.com/suanova/cubestack-installer-cli:latest
 
 # ② 宿主机准备大磁盘离线目录(离线文件较大, 建议 ≥50GiB 空闲; 多集群可共用同一份)
 mkdir -p /data/offline-files
@@ -28,7 +31,7 @@ mkdir -p /data/offline-files
 # ③ 启动容器(后台 + network host): 把离线目录/配置/SSH 密钥挂进容器
 sudo docker run -itd --name cubestack-install --network=host \
   -v /data/offline-files:/opt/cubestack-installer/deployments/offline-files \
-  harbor.isuanova.com/cubestack/cubestack-installer-cli:latest bash
+  harbor.isuanova.com/suanova/cubestack-installer-cli:latest bash
 
 # ④ 进入容器(容器内已是 root, 无需 sudo)
 sudo docker exec -it cubestack-install bash
@@ -110,6 +113,8 @@ deployments/scripts/
 │       └── 2x_verify_*.sh     #    端到端验证(verify_metallb / verify_registry_storage / verify_metax_gpu
 │                              #    / verify_lws / verify_ceph; --steps verify 全跑)
 ├── tools/                     # ★ 工具脚本(模块的底层实现, 按领域分目录)
+│   ├── check-modules.sh       #   静态校验(全 17 项) — 开发期 + CI, 本地可一条命令复现
+│   ├── check-manifests.sh     #   静态校验: 仓库自有 YAML 清单能否解析
 │   ├── vm/                    #   虚拟机: create-libvirt-vm.sh / create-vm-template.sh / register-vm.sh
 │   ├── net/                   #   网络: setup-vm-network.sh / verify-vm-network.sh / teardown-vm-network.sh / setup-libvirt-nat.sh
 │   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / install-worker-packages.sh / prepare-workers.sh

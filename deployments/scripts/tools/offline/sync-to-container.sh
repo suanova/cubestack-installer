@@ -26,6 +26,8 @@ CONTAINER="${CONTAINER:-cubestack-install}"
 # 仓库根 = 本脚本 ../../../../..(deployments/scripts/tools/offline/ → 仓库根)
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 CT="/opt/cubestack-installer"
+# 版本目录名(全 tag): 容器内路径检查用。本脚本不 load_config ⇒ 从仓库树 galaxy.yml 派生
+_KV="$(awk '/^version:/{print "v"$2; exit}' "${REPO}/deployments/kubespray/kubespray/galaxy.yml" 2>/dev/null || true)"
 LOCAL_CONF="${REPO}/deployments/config/cluster.conf"
 CT_CONF="${CT}/deployments/config/cluster.conf"
 
@@ -155,7 +157,7 @@ docker exec "${CONTAINER}" bash -c '
   echo "  LWS 默认关: $(grep -c "LWS_ENABLED:-false" '"${CT}"/deployments/config/cluster.conf.example' || true) 处(期望 ≥1)"
   echo "  install-packages offline_dir:"; grep -c "offline_dir" '"${CT}"/deployments/kubespray/kubespray/patch-playbooks/install-packages.yml' || true
   echo "  rook manifests:"; ls '"${CT}"/deployments/cubestack-addon/rook/'*.yaml 2>/dev/null | wc -l
-  echo "  lvm 离线包:"; ls '"${CT}"/deployments/offline-files/kubespray/packages/lvm2_'*.deb 2>/dev/null | wc -l
+  echo "  lvm 离线包(os/packages):"; ls '"${CT}/deployments/offline-files/os/packages/lvm2_"'*.deb 2>/dev/null | wc -l
   echo "  METALLB_POOL(注意是否与节点同网段):"; grep -E "^METALLB_POOL=" '"${CT_CONF}"' | head -1
 '
 

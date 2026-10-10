@@ -331,9 +331,41 @@ case "${#_HOLDERS[@]}" in
 esac
 
 # ---- 经 VIP 的端到端可达性(从持有者本机验证, 避免部署机路由问题) ----
-_HZ="$(_ssh "${_HOLDERS[0]}" "curl -sk --max-time 8 https://${VIP}:6443/healthz" || true)"
-[ "${_HZ}" = "ok" ] && ok "经 VIP 访问 API 正常(https://${VIP}:6443/healthz)" \
-    || { err "VIP 已绑定但 API 不可达(healthz 返回 '${_HZ}')"; exit 1; }
+# ⚠ 探针必须**多工具兜底**(2026-09-30 实测): 原实现只用 curl, 而节点镜像可能没装 curl
+#   (实测 master01 上 curl 缺, kubectl/wget/openssl/python3 都在)⇒ 拿到空串 ⇒ 被误判成
+#   「VIP 已绑定但 API 不可达」而中断部署(集群其实完全正常: VIP 通、healthz=ok)。
+#   按「节点上必然存在」排序: kubectl(kubespray 必装; **必须带 kubeconfig + sudo**, 否则会
+#   交互式问用户名, 输出被污染) → wget → curl;三者都无 → 如实报「无探针工具」, 不伪装成网络故障。
+# ⚠ 内嵌载荷里**禁止 ASCII 引号(单/双, 含注释)** —— 仓库既有约定(见 .claude/skills 与
+#   docs/troubleshooting.md): 会提前闭合外层引号, 载荷被拆散后远端拿到残缺脚本 ⇒ 输出空。
+#   本条注释自己就踩过: 注释里写了带双引号的报错样例, 结果探针永远返回空。载荷保持零引号。
+_HZ="$(_ssh "${_HOLDERS[0]}" "
+_probe_tool=0
+if command -v kubectl >/dev/null 2>&1; then
+  _probe_tool=1
+  sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --server=https://${VIP}:6443 --insecure-skip-tls-verify=true --request-timeout=8s get --raw /healthz </dev/null 2>/dev/null && exit 0
+fi
+if command -v wget >/dev/null 2>&1; then
+  _probe_tool=1
+  wget -q --no-check-certificate --timeout=8 -O - https://${VIP}:6443/healthz 2>/dev/null && exit 0
+fi
+if command -v curl >/dev/null 2>&1; then
+  _probe_tool=1
+  curl -sk --max-time 8 https://${VIP}:6443/healthz 2>/dev/null && exit 0
+fi
+[ \${_probe_tool} -ne 0 ] || echo __NO_PROBE_TOOL__
+exit 1
+" || true)"
+case "${_HZ}" in
+    ok) ok "经 VIP 访问 API 正常(https://${VIP}:6443/healthz)" ;;
+    __NO_PROBE_TOOL__)
+        err "无法验证: ${_HOLDERS[0]} 上 kubectl/wget/curl **都没有** —— 不是网络故障, 是节点缺探针工具"
+        err "  → 复核(从部署机直连 VIP): curl -sk https://${VIP}:6443/healthz"
+        exit 1 ;;
+    *)  err "VIP 已绑定但 API 不可达(healthz 返回 '${_HZ}')"
+        err "  → 复核(从部署机直连 VIP): curl -sk https://${VIP}:6443/healthz; 再看 kube-vip pod 日志"
+        exit 1 ;;
+esac
 
 say ""
 say "ℹ️ 后续(切换入口到 VIP)需另行确认: 见 docs/kube-vip-api-ha.md 第 7 节两阶段流程"

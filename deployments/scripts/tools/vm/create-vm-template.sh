@@ -34,6 +34,9 @@ virt-customize -a "$BASE_IMG" --memsize 4096 \
   `# 这些包只在制作黄金镜像时安装一次, 固化进基础镜像; 之后 create-libvirt-vm.sh 创建` \
   `# 虚拟机不再安装任何组件(离线环境无法 apt), 仅校验已内置。新增依赖请在此处添加。` \
   --run-command 'apt-get install -y -qq --no-install-recommends iputils-ping rsync iptables curl ca-certificates' \
+    `# ⚠ 构建期硬校验(2026-09-30): 上面那行在**无网/源不可达**时会失败而**不留痕** —— 实测出过` \
+    `#   待部署才发现 master 上没有 curl 的事故。逐包点检, 缺任一即让模板构建失败。` \
+  --run-command 'for p in iputils-ping rsync iptables curl ca-certificates; do dpkg -s "$p" >/dev/null 2>&1 || { echo "模板缺包: $p"; exit 1; }; done' \
   \
   `# ===== 🆕 4. 时区 + NTP 时间同步 =====` \
   --run-command 'ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime' \
