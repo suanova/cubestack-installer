@@ -121,6 +121,80 @@ is_state_completed() {
     return 0
 }
 
+# ---------------- 优雅覆盖: 安装登记(写集群内 ConfigMap) ----------------
+# 设计: docs/graceful-overwrite/design.md(方案 A)。--fresh 等覆盖场景由 cluster-teardown.sh
+# 读这份登记 → 按**首装序**反序调用各模块卸载段(模块头部 `# UNINSTALL: 1`)。
+# 写失败**绝不阻断部署**(warn 即可; 覆盖时自会走探测降级路径)。
+# 用法: record_installed_component <key>   (模块在安装成功点调用; 需已 init_remote_kubectl)
+RECORD_CM_NS="kube-system"
+RECORD_CM_NAME="cubestack-install-record"
+
+# 纯函数: stdin=当前 record JSON(可空/可坏) → stdout=合并后的新 record JSON
+#   · 新组件: seq = 现存 max+1(首装序 —— 反序卸载的排序键);
+#   · 已存在: seq 保留(REPEAT:1 模块重跑不改变首装序), 只更新 lastSeenAt/status。
+_record_merge_json() {
+    local key="$1" status="${2:-done}"
+    KEY="${key}" STATUS="${status}" CLUSTER_NAME="${CLUSTER_NAME:-unknown}" python3 -c '
+import json, os, sys
+from datetime import datetime, timezone
+key = os.environ["KEY"]
+try:
+    rec = json.load(sys.stdin)
+    if not isinstance(rec.get("components"), list):
+        rec = {"schema": 1, "components": []}
+except Exception:
+    rec = {"schema": 1, "components": []}
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+hit = None
+for c in rec["components"]:
+    if isinstance(c, dict) and c.get("key") == key:
+        hit = c; break
+if hit is None:
+    seqs = [c.get("seq", 0) for c in rec["components"] if isinstance(c, dict)]
+    hit = {"key": key, "seq": (max(seqs) if seqs else 0) + 1, "firstInstalledAt": now}
+    rec["components"].append(hit)
+hit["lastSeenAt"] = now
+hit["status"] = os.environ["STATUS"]
+rec["schema"] = rec.get("schema", 1)
+rec.setdefault("cluster", os.environ.get("CLUSTER_NAME", "unknown"))
+print(json.dumps(rec, ensure_ascii=False))
+'
+}
+
+# record JSON → 完整 ConfigMap JSON(apply 用)
+_record_cm_json() {
+    CM_NAME="${RECORD_CM_NAME}" CM_NS="${RECORD_CM_NS}" python3 -c '
+import json, os, sys
+rec = json.load(sys.stdin)
+cm = {"apiVersion": "v1", "kind": "ConfigMap",
+      "metadata": {"name": os.environ["CM_NAME"], "namespace": os.environ["CM_NS"],
+                   "labels": {"app.kubernetes.io/managed-by": "cubestack-installer"}},
+      "data": {"record.json": json.dumps(rec, ensure_ascii=False)}}
+print(json.dumps(cm, ensure_ascii=False))
+'
+}
+
+record_installed_component() {   # <key>
+    local key="$1" cur merged
+    [ -n "${key}" ] || return 0
+    if [ "${_INIT_REMOTE_KUBECTL:-0}" != "1" ]; then
+        warn "登记跳过(远端 kubectl 未初始化): ${key}"
+        return 0
+    fi
+    # 读现有登记(CM 不存在/读失败 → 空登记起步)
+    cur="$( (SSH "${K} -n ${RECORD_CM_NS} get cm ${RECORD_CM_NAME} -o json 2>/dev/null") || true)"
+    if [ -n "${cur}" ]; then
+        cur="$(printf '%s' "${cur}" | python3 -c 'import json,sys
+try: print(json.loads(sys.stdin.read()).get("data",{}).get("record.json") or "{}")
+except Exception: print("{}")')"
+    fi
+    merged="$(printf '%s' "${cur:-{\}}" | _record_merge_json "${key}" done)" \
+        || { warn "登记合并失败: ${key}(不影响部署)"; return 0; }
+    printf '%s' "${merged}" | _record_cm_json | SSH "${K} apply -f -" >/dev/null 2>&1 \
+        || warn "登记写入失败: ${key}(不影响部署; 覆盖时将走探测降级路径)"
+    return 0
+}
+
 # ---------------- 输出函数(同时写入日志文件) ----------------
 # 日志文件路径: 设置 LOG_FILE 后, 所有输出同时写入该文件
 # 用法: export LOG_FILE=/tmp/deploy.log; sudo ./deploy-cluster.sh ...
