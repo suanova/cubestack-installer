@@ -389,6 +389,9 @@ if [ "$(get_state k8s_deploy)" != "done" ]; then
         _te_args=()
         [ "${ASSUME_YES}" = "1" ] && _te_args=(--yes)
         say "检测到集群已存在且本次将覆盖重装 → 先执行「优雅覆盖」: 按安装登记反序卸载已装组件"
+        say "  (设计顺序: 优雅卸载先于下方 Ceph 确认倒计时执行)"
+        # 计划感知(I1): 引擎据此跳过"非本次计划"的拆除(尤其不含 ceph 时保留 Ceph 集群/OSD 数据)
+        export CUBESTACK_TEARDOWN_PLAN_STEPS="${RUN_STEPS[*]:-}"
         bash "${SCRIPT_DIR}/tools/k8s/cluster-teardown.sh" --uninstall "${_te_args[@]}" \
             || warn "优雅卸载未完成(继续; ceph 安全序与 k8s 覆盖流程兜底)"
         export CUBESTACK_TEARDOWN_DONE=1

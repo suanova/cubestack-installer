@@ -141,6 +141,10 @@ fi
   场景 = 新容器（挂点 A 时还没有 SSH 密钥、探测不到集群）→ 此刻密钥已由前序模块
   （vm_sshkey/k8s_passwordless）装好 → 条件 `!CUBESTACK_TEARDOWN_DONE && cluster_exists` →
   跑同一引擎（含 ceph 压轴）。覆盖"新容器默认全量"路径。
+- **引擎执行前策略（计划感知门）**：两个挂点向引擎导出本次执行计划（`CUBESTACK_TEARDOWN_PLAN_STEPS`）；
+  引擎对**计划不含 `ceph`** 的覆盖跳过其卸载并**响亮说明**（保留 Ceph 集群/OSD 数据 —— 与覆盖预检的
+  `_RUN_CEPH` 闸**同源语义**）；计划外的其他组件仍走优雅停机（其资源随 K8s 覆盖消亡，引擎打印一行
+  信息）；手工调用引擎（无计划上下文）行为不变。
 - **非覆盖路径零改动**：无 k8s_deploy / 已 done / --with-scale / --steps 精确模式不含
   k8s_deploy → 不触发。
 - `deploy-cluster.sh` 帮助文本"三种使用方式②"补充新行为说明。
