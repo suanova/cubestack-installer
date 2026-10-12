@@ -41,21 +41,11 @@ node_cmd() {   # <ip> <user> <cmd...>
         "${user}@${ip}" "$@"
 }
 
-# ---------------- ① 删除现有 CephCluster(Rook 擦盘) ----------------
-delete_cluster() {
-    say "删除现有 CephCluster(cleanupPolicy yes-really-destroy-data, Rook 擦盘)..."
-    # 幂等: 无集群直接成功
-    _exists="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
-    [ -z "${_exists}" ] && { ok "  无现有 CephCluster, 跳过"; return 0; }
-
-    # ── ⓪ 停用 Ceph 卷"消费者"(2026-10-10 用户口径: 确保无活动 PVC 被占用后再动集群)──────
-    #   目的: ① 消灭在飞 IO(防写死死设备/内核毒化) ② 让 CSI 自然 NodeUnpublish→Unstage
-    #         (节点内核 rbd unmap) ③ 防"删了 PVC/集群, 控制器又重建 Pod 重新挂卷"的竞态。
-    #   只停**消费者**(scale 0 / 删 Pod / 删 CR 级联), **不删 PVC 对象**(registry-pvc 等
-    #   保护逻辑不变 —— 内核 unmap 只需 Pod 消失, 与 PVC 对象在不在无关)。
-    #   顺序: 先停顶层 operator + registry(否则 StatefulSet 的 replicas 会被 operator 调回,
-    #   "杀了又复活"), 再泛化扫"仍挂 ceph PVC 的 Pod"取其顶层控制器收敛; 有界 ≤120s,
-    #   不等则响亮列名告警(不阻塞后续)。
+# ---------------- ⓪① ② 停消费者 + 触发 unmap(可独立调用; --delete-cluster 的先导步) ----------------
+# 目的(2026-10-10 用户口径): ① 消灭在飞 IO(防写死死设备/内核毒化) ② 让 CSI 自然
+# NodeUnpublish→Unstage(节点内核 rbd unmap) ③ 防"删了 PVC/集群, 控制器又重建 Pod"的竞态。
+# 只停**消费者**并删 Bound 的 ceph PVC(触发 unmap), 不删 registry-pvc; 不销毁集群/数据。
+stop_consumers() {
     say "  ⓪ 停用持有 ceph 卷的工作负载(消灭在飞 IO; PVC 对象保留)..."
     _RBD_OP_NS="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
     _RBD_OP_REL="${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"
@@ -206,6 +196,16 @@ except Exception:
     say "  ② 删除 rbd csi nodeplugin DaemonSet(各节点执行内核 rbd unmap)..."
     SSH "${K} -n ${CEPH_NAMESPACE} delete ds rook-ceph.rbd.csi.ceph.com-nodeplugin --wait=false >/dev/null 2>&1" || true
     sleep 5
+}
+
+# ---------------- ① 删除现有 CephCluster(Rook 擦盘) ----------------
+delete_cluster() {
+    say "删除现有 CephCluster(cleanupPolicy yes-really-destroy-data, Rook 擦盘)..."
+    # 幂等: 无集群直接成功
+    _exists="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+    [ -z "${_exists}" ] && { ok "  无现有 CephCluster, 跳过"; return 0; }
+
+    stop_consumers
     SSH "${K} -n ${CEPH_NAMESPACE} patch cephcluster rook-ceph --type merge \
         -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}' >/dev/null 2>&1" || true
     SSH "${K} -n ${CEPH_NAMESPACE} delete cephblockpool --all --wait=false >/dev/null 2>&1" || true
@@ -520,6 +520,7 @@ usage() {
 用法:
   ceph-cleanup.sh --list                               # 只列出清理计划(只读, 不动盘)
   ceph-cleanup.sh --delete-cluster                     # 仅删除 CephCluster CR(等 Rook 擦盘, 最长 300s)
+  ceph-cleanup.sh --stop-consumers                     # 只停消费者 + 触发 unmap(不删集群/不擦盘)
   ceph-cleanup.sh --wipe-disks                         # 只清理判为 Ceph 占用的盘(不删集群)
   ceph-cleanup.sh --all                                # 全流程: 删集群(若在) + 清理判为 Ceph 占用的盘
   ceph-cleanup.sh --wipe-node <ip> --disks "/dev/vdb,/dev/vdc" [--force]
@@ -533,6 +534,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --list)           ACTION=list; shift ;;
         --delete-cluster) ACTION=delete-cluster; shift ;;
+        --stop-consumers) ACTION=stop-consumers; shift ;;
         --wipe-disks)     ACTION=wipe-disks; shift ;;
         --all)            ACTION=all; shift ;;
         --wipe-node)      ACTION=wipe-node; WIPE_IP="${2:-}"; shift 2 ;;
@@ -546,6 +548,7 @@ done
 case "${ACTION}" in
     list)           list_plan ;;
     delete-cluster) delete_cluster ;;
+    stop-consumers) stop_consumers ;;
     wipe-disks)     wipe_ceph_disks_all_nodes ;;
     all)            cleanup_all ;;
     wipe-node)
