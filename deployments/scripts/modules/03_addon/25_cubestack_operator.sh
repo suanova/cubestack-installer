@@ -8,6 +8,7 @@
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: CUBESTACK_OPERATOR_ENABLED
+# UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   · 离线 / 在线(需求 1): CUBESTACK_OPERATOR_CHART_SYNC=auto(默认) —— 探测 Harbor 可达则
@@ -39,6 +40,58 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 卸载分支(优雅覆盖): ① 删平台实例 CR(clusterCR) → operator 级联优雅收掉 9 个平台组件
+#   (含 ceph PVC 消费者, 等在飞 IO 收敛) ② helm uninstall operator(尽力; 需宿主机 kubeconfig)
+#   ③ 命名空间/CRD 残留清理。⚠ 位于 TOGGLE 检查之前。
+if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+    init_remote_kubectl || exit 1
+    _ns="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
+    _rel="${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"
+    _have=0
+    SSH "${K} -n ${_ns} get deploy ${_rel} --no-headers >/dev/null 2>&1" && _have=1
+    SSH "${K} -n ${_ns} get csc --no-headers >/dev/null 2>&1" && _have=1
+    SSH "${K} get ns ${_ns} >/dev/null 2>&1" && _have=1
+    if [ "${_have}" = "0" ]; then
+        say "  cubestack-operator 不存在, 跳过"
+        exit 0
+    fi
+    # ① 删平台实例 CR(级联收组件: 先 CR 后 operator —— CR 的 finalizer 需要 operator 活着处理)
+    _crs="$( (SSH "${K} -n ${_ns} get csc -o name 2>/dev/null") || true)"
+    if [ -n "${_crs}" ]; then
+        say "  ① 删除平台实例 CR(级联收组件)..."
+        while IFS= read -r _cr; do
+            [ -n "${_cr}" ] && SSH "${K} -n ${_ns} delete "${_cr}" --wait=false >/dev/null 2>&1" || true
+        done <<< "${_crs}"
+        # 有界等待组件收敛(≤120s; 不收敛告警继续, 不阻塞)
+        for _wi in $(seq 1 12); do
+            _nleft=0
+            while IFS= read -r _pl; do
+                [ -n "${_pl}" ] || continue
+                case "${_pl}" in *" Running "*|*" Completed "*) ;; *) _nleft=$((_nleft+1)) ;; esac
+            done <<< "$( (SSH "${K} -n ${_ns} get pods --no-headers 2>/dev/null") || true )"
+            [ "${_nleft}" = "0" ] && break
+            sleep 10
+        done
+        [ "${_nleft}" = "0" ] || warn "  平台组件未在 120s 内全部退出(${_nleft} 个仍在) —— 继续"
+    fi
+    # ② helm uninstall operator(尽力)
+    if command -v helm >/dev/null 2>&1 && sync_kubeconfig >/dev/null 2>&1; then
+        say "  ② helm uninstall ${_rel}(ns=${_ns})..."
+        helm uninstall "${_rel}" -n "${_ns}" --wait --timeout 180s >/dev/null 2>&1 \
+            || warn "  helm uninstall 未完成(残留由命名空间清理兜底)"
+    else
+        warn "  helm 不可用 / kubeconfig 同步失败 → 跳过 helm uninstall"
+    fi
+    # ③ 命名空间 / CRD 残留清理(幂等; CRD 随 K8s 覆盖也会消亡, 这里完整卸载顺手清)
+    SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
+    SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+    for _crd in $( (SSH "${K} get crd -o name 2>/dev/null") | grep -i cubestack || true); do
+        SSH "${K} delete ${_crd} --ignore-not-found >/dev/null 2>&1" || true
+    done
+    ok "  cubestack-operator 已卸载(CR 级联 + helm uninstall + 残留清理)"
+    exit 0
+fi
 
 # ---- 开关 ----
 [ "${CUBESTACK_OPERATOR_ENABLED:-false}" = "true" ] || { say "CUBESTACK_OPERATOR_ENABLED=false, 跳过 CubeStack Operator 部署"; exit 0; }
@@ -416,3 +469,6 @@ echo "  集群 registry: ${REG_BASE}(镜像已推入; 节点从这里拉, 不访
 echo "  平台实例 CR:  clusterCR.enabled=${CR_ENABLED}(改 cluster.conf CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED)"
 echo "  端到端验证:   sudo ./deploy-cluster.sh --steps verify_cubestack_operator"
 echo "  状态查看:     kubectl get csc -n ${NS}"
+
+# 优雅覆盖登记(仅安装路径到达此处; 本模块 REPEAT:1, 重跑只更新 lastSeenAt, seq 保持首装序)
+record_installed_component "cubestack_operator"
