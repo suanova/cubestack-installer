@@ -228,6 +228,9 @@ PY
         done <<< "${_order}"
         echo ""
         say "优雅卸载完成: 成功 ${_n_ok} 个, 失败/跳过 ${_n_fail} 个"
-        [ "${_n_fail}" -gt 0 ] && warn "有组件未完全卸净 —— 后续 ceph 安全序(⓪ 泛化扫描)与 kubeadm reset 将兜底"
+        if [ "${_n_fail}" -gt 0 ]; then
+            warn "有组件未完全卸净 —— 后续 ceph 安全序(⓪ 泛化扫描)与 kubeadm reset 将兜底"
+        fi
+        exit 0
         ;;
 esac
