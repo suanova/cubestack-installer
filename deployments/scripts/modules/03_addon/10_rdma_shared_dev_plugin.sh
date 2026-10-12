@@ -9,6 +9,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: RDMA_ENABLED
+# UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写状态, 重跑跳过; --fresh 清状态后重装。
@@ -56,6 +57,18 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 卸载分支(优雅覆盖): 删 DaemonSet + ConfigMap(即模块末尾打印的两条清理命令)。
+# ⚠ 位于 TOGGLE 检查之前。
+if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+    init_remote_kubectl || exit 1
+    _ns="${RDMA_NAMESPACE:-kube-system}"
+    say "  rdma: 删除 ds/rdma-shared-dp-ds + cm/rdma-devices(ns=${_ns})..."
+    SSH "${K} -n ${_ns} delete ds rdma-shared-dp-ds --ignore-not-found=true >/dev/null 2>&1 || true"
+    SSH "${K} -n ${_ns} delete cm rdma-devices --ignore-not-found=true >/dev/null 2>&1 || true"
+    ok "  RDMA 共享设备插件已卸载"
+    exit 0
+fi
 
 # ---- 开关 ----
 [ "${RDMA_ENABLED:-false}" = "true" ] || { say "RDMA_ENABLED=false, 跳过 RDMA 共享设备插件"; exit 0; }
@@ -571,3 +584,6 @@ else
 fi
 echo "  配合 Multus(数据面隔离): pod 注解 k8s.v1.cni.cncf.io/networks: <macvlan-NAD> 再挂数据网络"
 echo "  清理:   kubectl -n ${NS} delete ds ${DS_NAME}; kubectl -n ${NS} delete cm ${CM_NAME}"
+
+# 优雅覆盖登记
+record_installed_component "rdma_shared_dev_plugin"
