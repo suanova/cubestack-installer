@@ -301,6 +301,32 @@ reg_has_tag() {
 # 扫描全部 *.tar 按内容兜底(兼容改名/异常命名)。读不出内容时**信任 glob 不否决**,
 # 仅明确不匹配才跳过并告警。用法: find_offline_tar <ref后缀> <文件名glob> <dir...>
 #   ref 后缀带前导 /(如 /gateway:v1.9.1), 防 /foo/gateway:v1.9.1 误匹配
+# 镜像 digest(规范化比对用): 多架构 index → 取 amd64/linux 条目 digest; 单架构清单 → 清单字节 sha256。
+# ⚠ skopeo **不支持 --override-arch**(CLI 镜像 1.16.1 实测): index 上 {{.Digest}} 是 index 自身摘要,
+#   与"推过去的单架构镜像"不可比 —— 故自解析 --raw。取不到输出空(调用方保守: 不相等即走推送)。
+# 用法: d="$(image_digest_raw docker://ref)"   或   d="$(image_digest_raw docker-archive:/path.tar)"
+image_digest_raw() {   # <docker://ref | docker-archive:path>
+    local ref="$1" raw=""
+    raw="$(skopeo inspect --raw --tls-verify=false "${ref}" 2>/dev/null || true)"
+    [ -n "${raw}" ] || return 0
+    printf '%s' "${raw}" | python3 -c '
+import hashlib, json, sys
+raw = sys.stdin.buffer.read()
+try:
+    d = json.loads(raw)
+except Exception:
+    sys.exit(0)
+ms = d.get("manifests")
+if isinstance(ms, list):                 # 多架构 index → amd64/linux 条目
+    for m in ms:
+        p = m.get("platform") or {}
+        if p.get("architecture") == "amd64" and p.get("os") == "linux":
+            print(m.get("digest", "")); break
+else:                                     # 单架构清单 → 字节 sha256 = 它自己的 digest
+    print("sha256:" + hashlib.sha256(raw).hexdigest())
+' 2>/dev/null || true
+}
+
 find_offline_tar() {
     local suffix="$1" glob="$2"; shift 2
     local d t src
