@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: NETSHOOT_ENABLED
+# UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   · 定位: 集群里**常驻一台"网络工具箱"** —— kubectl exec 进去就能用 tcpdump / ip / ss / ethtool /
@@ -38,6 +39,20 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 卸载分支(优雅覆盖): 删 Pod + ConfigMap(与"开关=false 清理路径"同款语义)。
+# ⚠ 位于 TOGGLE 检查之前: 本次关掉 NETSHOOT_ENABLED 时, 集群里旧 pod 也要能清。
+if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+    init_remote_kubectl || exit 1
+    _ns="${NETSHOOT_NAMESPACE:-default}"
+    _pod="${NETSHOOT_POD_NAME:-cubestack-netshoot}"
+    _cm="${NETSHOOT_POD_NAME:-cubestack-netshoot}-diag"
+    say "  netshoot: 删除 pod/${_pod} + cm/${_cm}(ns=${_ns})..."
+    SSH "${K} -n ${_ns} delete pod ${_pod} --ignore-not-found=true --wait=false >/dev/null 2>&1 || true"
+    SSH "${K} -n ${_ns} delete cm ${_cm} --ignore-not-found=true >/dev/null 2>&1 || true"
+    ok "  netshoot 已清理"
+    exit 0
+fi
 
 # ---- 开关(默认 false = **不创建**)----
 # 开(true): 创建/更新诊断 pod; 关(默认): 不创建, 且**确保不存在**(顺带清理历史遗留 pod/CM, 幂等)。
@@ -337,3 +352,6 @@ echo "  重跑视图:    kubectl -n ${NS} exec ${POD} -- sh /diag/diag.sh"
 echo "  常用:        tcpdump -i any -nn | ip addr | ss -tunap | ethtool -S eth0 | mtr <host>"
 [ "${USING_RDMA_IMG}" = "1" ] && echo "  RDMA 实测:   ibv_devinfo; ib_write_bw -d mlx5_0(对端需同步起 ib_write_bw 服务端)"
 echo "  删除:        kubectl -n ${NS} delete pod ${POD} configmap ${CM_NAME}"
+
+# 优雅覆盖登记(仅 ON 路径到达此处; OFF 路径此前已 exit)
+record_installed_component "netshoot"
