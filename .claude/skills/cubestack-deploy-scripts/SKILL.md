@@ -7,7 +7,7 @@ description: CubeStack 部署脚本开发规范技能。当需要编写、修改
 
 本技能指导在 **CubeStackInstaller 仓库** 的 `deployments/scripts/` 下编写、修改、新增部署脚本。遵循本规范可保证:**模块化、可插拔、单一配置源、修改一个模块不影响其他模块、无需重写全部脚本**。
 
-> ⭐ **新增部署模块的专项流程技能: `skills/cubestack-add-module/SKILL.md`**(6 步流程 + 历史事故警示 + 测试用例)。本技能 = 通用规范速查,两者配合使用,内容已同步(2026-09-04 架构重构)。
+> ⭐ **新增部署模块的专项流程技能: `skills/cubestack-add-module/SKILL.md`**(8 步流程 + 历史事故警示 + 测试用例)。本技能 = 通用规范速查,两者配合使用,内容已同步(2026-09-04 架构重构)。
 
 ## 何时使用本技能
 
@@ -80,6 +80,7 @@ deployments/scripts/
 # REPEAT: 0                   # 1=可重复执行(不写断点状态)
 # TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量名, true/1/yes/on 时自动启用
 # REQUIRES: k8s_deploy        # (可选) 依赖模块 key 列表(执行前须已完成); 框架自动拓扑排序
+# UNINSTALL: 1                # (可选) 声明该模块可被 cluster-teardown 反序优雅卸载
 # 说明: <详细说明, 可选>
 # ============================================================
 set -euo pipefail
@@ -91,7 +92,7 @@ load_config
 
 注意:模块在 `modules/<阶段>/` 二级目录,`lib-common.sh` 相对路径是 `../../lib-common.sh`(不是 `../lib-common.sh`)。
 
-## 新增模块标准流程(6 步)
+## 新增模块标准流程(8 步)
 
 > ⭐ **新增部署模块的专项可执行流程见 `skills/cubestack-add-module/SKILL.md`**(含历史事故警示与测试用例),本表为速览。
 
@@ -101,6 +102,8 @@ load_config
 4. **实现逻辑**: 复用 `tools/` 工具脚本(`bash "${SCRIPT_DIR}/tools/<领域>/xxx.sh"`)或写新逻辑
 5. **加开关**(可选): 在 `config/cluster.conf.example` 加 `XXX_ENABLED` 变量, TOGGLE 指向它
 6. **完成**: 无需修改 `deploy-cluster.sh` / `lib-module.sh` / 任何注册表(operator 自动派生)
+7. **登记(装进集群的组件)**: 安装成功点调用 `record_installed_component "<key>"`(优雅覆盖登记; 写失败仅告警, 不影响部署)
+8. **声明可卸载(可卸载的组件)**: 头部声明 `# UNINSTALL: 1` + 实现 `CUBESTACK_MODULE_ACTION=uninstall` 卸载分支(**必须在 TOGGLE 检查之前**; 幂等/有界/告警不中止; check-modules ⑲ 校验)
 
 验证: `bash deployments/scripts/tools/check-modules.sh`(静态校验, 必须 exit 0);
 `bash deployments/scripts/tools/check-manifests.sh`(改了/新增了 YAML 清单时);

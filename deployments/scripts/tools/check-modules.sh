@@ -988,7 +988,7 @@ unset VD_BAD VD_WARN VD_PROFILES_DIR VD_TREE_VER _vd_profile_keys _pf _pv _ptree
 
 # ---------- ⑲ 优雅覆盖: UNINSTALL 元数据 ↔ 卸载分支位置(docs/graceful-overwrite/design.md) ----------
 # 约定: 模块头部声明 `# UNINSTALL: 1` 即参与 cluster-teardown.sh 反序卸载; 必须:
-#   ① 存在 CUBESTACK_MODULE_ACTION 卸载分支(含 exit 0);
+#   ① 存在 CUBESTACK_MODULE_ACTION:-install 卸载分支(字面匹配, 含 exit 0);
 #   ② 分支行号 < 模块内 TOGGLE 变量首次被条件判断的行号 —— 模块被关掉(TOGGLE=false)但集群里
 #      装着旧版时, 卸载必须仍然可达(否则永远卸不掉)。
 say "[19/19] UNINSTALL 元数据 ↔ 卸载分支位置 ..."
@@ -996,8 +996,8 @@ UN_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
     [ "$(meta "$f" UNINSTALL)" = "1" ] || continue
-    _ml="$(grep -n 'CUBESTACK_MODULE_ACTION' "$f" 2>/dev/null | head -1 | cut -d: -f1)"
-    if [ -z "${_ml}" ]; then ck_fail "⑲ ${rel}: 声明 UNINSTALL 但无 CUBESTACK_MODULE_ACTION 卸载分支"; UN_FAIL=1; continue; fi
+    _ml="$(grep -nF 'CUBESTACK_MODULE_ACTION:-install' "$f" 2>/dev/null | head -1 | cut -d: -f1)"
+    if [ -z "${_ml}" ]; then ck_fail "⑲ ${rel}: 声明 UNINSTALL 但无 CUBESTACK_MODULE_ACTION:-install 卸载分支"; UN_FAIL=1; continue; fi
     if ! grep -q 'exit 0' "$f"; then ck_fail "⑲ ${rel}: 卸载分支缺 exit 0"; UN_FAIL=1; fi
     _tgv="$(meta "$f" TOGGLE)"
     if [ -n "${_tgv}" ]; then

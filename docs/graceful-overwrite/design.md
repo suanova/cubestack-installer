@@ -131,7 +131,7 @@ fi
 
 ### 3.4 deploy-cluster.sh 接线（两个挂点）
 
-- **触发判定** `_OVERWRITE_PENDING` = `RUN_STEPS` 含 `k8s_deploy` 且其实状态非 `done`
+- **触发判定** `_OVERWRITE_PENDING` = `RUN_STEPS` 含 `k8s_deploy` 且实际状态非 `done`
   （--fresh 清状态后天然成立；新容器无状态文件也成立；断点续跑已完成则不触发）。
 - **挂点 A**（`print_plan` 之后、ceph 预检块之前）：密钥已在（同容器重跑场景）→ 条件
   `_OVERWRITE_PENDING && cluster_exists` → 调引擎 `--uninstall`（`CUBESTACK_ASSUME_YES=1` 时
@@ -165,6 +165,8 @@ fi
 - **真机验证**（下轮实机覆盖时执行）：
   ① 同容器 `--fresh`：观察登记表 → 拆序卸载日志 → ceph 安全序 → K8s 覆盖全链；
   ② 新容器默认全量：验证挂点 B；③ 无登记存量集群：验证降级路径与幂等跳过。
+- **实现注记**：引擎执行环（run_component/mark_uninstalled/收尾汇总）由夹具模式短路，未纳入离线测试
+  —— 由真机三段验证覆盖。
 
 ## 4. 边界与失败处理（明说）
 
