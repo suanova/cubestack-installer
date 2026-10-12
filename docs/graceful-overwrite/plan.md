@@ -193,7 +193,7 @@ record_installed_component() {   # <key>
         return 0
     fi
     # 读现有登记(CM 不存在/读失败 → 空登记起步)
-    cur="$( (SSH "${K} -n ${RECORD_CM_NS} get cm ${RECORD_CM_NAME} -o json 2>/dev/null) || true)"
+    cur="$( (SSH "${K} -n ${RECORD_CM_NS} get cm ${RECORD_CM_NAME} -o json 2>/dev/null") || true)"
     if [ -n "${cur}" ]; then
         cur="$(printf '%s' "${cur}" | python3 -c 'import json,sys
 try: print(json.loads(sys.stdin.read()).get("data",{}).get("record.json") or "{}")
@@ -704,7 +704,7 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
         exit 0
     fi
     # ① 删平台实例 CR(级联收组件: 先 CR 后 operator —— CR 的 finalizer 需要 operator 活着处理)
-    _crs="$( (SSH "${K} -n ${_ns} get csc -o name 2>/dev/null) || true)"
+    _crs="$( (SSH "${K} -n ${_ns} get csc -o name 2>/dev/null") || true)"
     if [ -n "${_crs}" ]; then
         say "  ① 删除平台实例 CR(级联收组件)..."
         while IFS= read -r _cr; do
@@ -716,7 +716,7 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
             while IFS= read -r _pl; do
                 [ -n "${_pl}" ] || continue
                 case "${_pl}" in *" Running "*|*" Completed "*) ;; *) _nleft=$((_nleft+1)) ;; esac
-            done <<< "$( (SSH "${K} -n ${_ns} get pods --no-headers 2>/dev/null) || true )"
+            done <<< "$( (SSH "${K} -n ${_ns} get pods --no-headers 2>/dev/null") || true )"
             [ "${_nleft}" = "0" ] && break
             sleep 10
         done
@@ -733,7 +733,7 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     # ③ 命名空间 / CRD 残留清理(幂等; CRD 随 K8s 覆盖也会消亡, 这里完整卸载顺手清)
     SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1 || true
     SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1 || true
-    for _crd in $( (SSH "${K} get crd -o name 2>/dev/null) || true | grep -i cubestack || true); do
+    for _crd in $( (SSH "${K} get crd -o name 2>/dev/null") | grep -i cubestack || true); do
         SSH "${K} delete ${_crd} --ignore-not-found >/dev/null 2>&1 || true
     done
     ok "  cubestack-operator 已卸载(CR 级联 + helm uninstall + 残留清理)"
@@ -796,7 +796,7 @@ git commit -m "feat(graceful-overwrite): cubestack_operator 卸载段(clusterCR 
 if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     init_remote_kubectl || exit 1
     _cns="${CEPH_NAMESPACE:-rook-ceph}"
-    _cc="$( (SSH "${K} -n ${_cns} get cephcluster --no-headers 2>/dev/null) || true)"
+    _cc="$( (SSH "${K} -n ${_cns} get cephcluster --no-headers 2>/dev/null") || true)"
     if [ -z "${_cc}" ]; then
         say "  ceph: 集群内无 CephCluster(未装/internal 已删/external 模式), 跳过"
         exit 0
@@ -921,7 +921,7 @@ read_inventory() {
     fi
     init_remote_kubectl >/dev/null 2>&1 || { printf '{"schema":1,"components":[]}'; return 0; }
     local j
-    j="$( (SSH "${K} -n ${CM_NS} get cm ${CM_NAME} -o json 2>/dev/null) || true)"
+    j="$( (SSH "${K} -n ${CM_NS} get cm ${CM_NAME} -o json 2>/dev/null") || true)"
     if [ -z "${j}" ]; then printf '{"schema":1,"components":[]}'; return 0; fi
     printf '%s' "${j}" | python3 -c '
 import json, sys
@@ -1001,7 +1001,7 @@ mark_uninstalled() {   # <key>
     [ -n "${TEST_INV}" ] && return 0
     [ -n "${K:-}" ] || return 0
     local key="$1" j new
-    j="$( (SSH "${K} -n ${CM_NS} get cm ${CM_NAME} -o json 2>/dev/null) || true)"
+    j="$( (SSH "${K} -n ${CM_NS} get cm ${CM_NAME} -o json 2>/dev/null") || true)"
     [ -n "${j}" ] || return 0
     new="$(printf '%s' "${j}" | KEY="${key}" python3 -c '
 import json, os, sys
