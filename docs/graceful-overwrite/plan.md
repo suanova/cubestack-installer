@@ -253,7 +253,7 @@ git commit -m "fix(ceph): 覆盖清理消费者扫描 —— 裸 RS 删本体(�
 stop_consumers() {
     # ⚠ 原 delete_cluster 内 ⓪/①/② 三段原样搬入(含注释), 逐行保留:
     say "  ⓪ 停用持有 ceph 卷的工作负载(消灭在飞 IO; PVC 对象保留)..."
-    ...(原第 59~164 行、166~208 行内容原样)...
+    # ⚠ 此处 原第 59~164 行、166~208 行内容原样(逐行不改; 本块为搬移示意)
     sleep 5
 }
 ```
@@ -267,8 +267,8 @@ delete_cluster() {
     [ -z "${_exists}" ] && { ok "  无现有 CephCluster, 跳过"; return 0; }
     stop_consumers
     SSH "${K} -n ${CEPH_NAMESPACE} patch cephcluster rook-ceph --type merge \
-        -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}' >/dev/null 2>&1 || true
-    ...(原 211~224 行: delete pool/cluster + 300s 等待, 原样保留)...
+        -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}' >/dev/null 2>&1" || true
+    # ⚠ 此处 原 211~224 行: delete pool/cluster + 300s 等待, 原样保留(逐行不改; 本块为搬移示意)
 }
 ```
 
@@ -285,7 +285,10 @@ usage 的 `cat <<'USAGE'` 中加一行：
 参数解析 `case` 中加 `--stop-consumers)   ACTION=stop-consumers; shift ;;`；main 的 `case "${ACTION}" in` 中加：
 
 ```bash
+case "${ACTION}" in
+    # ...(其余 arm 不变)
     stop-consumers) stop_consumers ;;
+esac
 ```
 
 - [ ] **Step 3: 验证**
@@ -442,14 +445,14 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     _manifest="${REPO_ROOT}/deployments/cubestack-addon/multus/multus-daemonset-thick.yml"
     if [ -f "${_manifest}" ]; then
         say "  multus: 删除 DaemonSet/CRD/RBAC(delete -f vendored manifest)..."
-        SSH "${K} delete --ignore-not-found -f - < "${_manifest}" >/dev/null 2>&1 || true
+        SSH "${K} delete --ignore-not-found -f -" < "${_manifest}" >/dev/null 2>&1 || true
     else
         warn "  multus: 未找到 manifest ${_manifest}, 退化为只删 DS/CRD"
         SSH "${K} -n kube-system delete ds kube-multus-ds --ignore-not-found=true >/dev/null 2>&1 || true"
         SSH "${K} delete crd network-attachment-definitions.k8s.cni.cncf.io --ignore-not-found=true >/dev/null 2>&1 || true"
     fi
     say "  删除示例 NAD ${_nad_ns}/${MULTUS_NAD_NAME:-multus-nad}..."
-    SSH "${K} -n ${_nad_ns} delete network-attachment-definitions "${MULTUS_NAD_NAME:-multus-nad}" --ignore-not-found=true >/dev/null 2>&1 || true
+    SSH "${K} -n ${_nad_ns} delete network-attachment-definitions "${MULTUS_NAD_NAME:-multus-nad}" --ignore-not-found=true >/dev/null 2>&1 || true"
     ok "  multus 已卸载(ds/CRD/RBAC/示例 NAD)"
     exit 0
 fi
@@ -530,8 +533,8 @@ git commit -m "feat(graceful-overwrite): netshoot/multus/rdma 安装登记 + 卸
 _metax_cleanup_residual() {
     local _mns="${METAX_NAMESPACE:-metax-operator}" _mrel="${METAX_RELEASE_NAME:-metax-gpu-operator}"
     say "  清理残留(CR / CRD / ${_mns} 命名空间 / default 旧资源)..."
-    SSH "${K} delete clusteroperator -n ${_mns} cluster-operator --ignore-not-found >/dev/null 2>&1 || true
-    ...(原 377-390 行逐行原样, 其中 ${METAX_NAMESPACE}/${METAX_RELEASE_NAME} 的引用保持不变)...
+    SSH "${K} delete clusteroperator -n ${_mns} cluster-operator --ignore-not-found >/dev/null 2>&1" || true
+    # ⚠ 此处 原 377-390 行逐行原样, 其中 ${METAX_NAMESPACE}/${METAX_RELEASE_NAME} 的引用保持不变(逐行不改; 本块为搬移示意)
 }
 ```
 
@@ -551,9 +554,9 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     _mns="${METAX_NAMESPACE:-metax-operator}"
     _mrel="${METAX_RELEASE_NAME:-metax-gpu-operator}"
     _have=0
-    SSH "${K} -n ${_mns} get deploy ${_mrel}-metax-operator --no-headers >/dev/null 2>&1 && _have=1
-    SSH "${K} get ns ${_mns} >/dev/null 2>&1 && _have=1
-    SSH "${K} get crd clusteroperators.gpu.metax-tech.com >/dev/null 2>&1 && _have=1
+    SSH "${K} -n ${_mns} get deploy ${_mrel}-metax-operator --no-headers >/dev/null 2>&1" && _have=1
+    SSH "${K} get ns ${_mns} >/dev/null 2>&1" && _have=1
+    SSH "${K} get crd clusteroperators.gpu.metax-tech.com >/dev/null 2>&1" && _have=1
     if [ "${_have}" = "0" ]; then
         say "  metax GPU operator 不存在, 跳过"
         exit 0
@@ -622,8 +625,8 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     _lns="${LWS_NAMESPACE:-lws-system}"
     _lrel="${LWS_RELEASE_NAME:-lws}"
     _have=0
-    SSH "${K} get ns ${_lns} >/dev/null 2>&1 && _have=1
-    SSH "${K} get crd leaderworkersets.leaderworkerset.x-k8s.io >/dev/null 2>&1 && _have=1
+    SSH "${K} get ns ${_lns} >/dev/null 2>&1" && _have=1
+    SSH "${K} get crd leaderworkersets.leaderworkerset.x-k8s.io >/dev/null 2>&1" && _have=1
     if [ "${_have}" = "0" ]; then
         say "  LWS 不存在, 跳过"
         exit 0
@@ -633,11 +636,11 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
             || say "  无 helm release 或 uninstall 未完成(bundle 安装属正常), 继续清理"
     fi
     say "  清理 webhook / 命名空间 / CRD..."
-    SSH "${K} delete validatingwebhookconfiguration lws-validating-webhook-configuration --ignore-not-found >/dev/null 2>&1 || true
-    SSH "${K} delete mutatingwebhookconfiguration lws-mutating-webhook-configuration --ignore-not-found >/dev/null 2>&1 || true
-    SSH "${K} patch ns ${_lns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1 || true
-    SSH "${K} delete ns ${_lns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1 || true
-    SSH "${K} delete crd leaderworkersets.leaderworkerset.x-k8s.io disaggregatedsets.disaggregatedset.x-k8s.io --ignore-not-found >/dev/null 2>&1 || true
+    SSH "${K} delete validatingwebhookconfiguration lws-validating-webhook-configuration --ignore-not-found >/dev/null 2>&1" || true
+    SSH "${K} delete mutatingwebhookconfiguration lws-mutating-webhook-configuration --ignore-not-found >/dev/null 2>&1" || true
+    SSH "${K} patch ns ${_lns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
+    SSH "${K} delete ns ${_lns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "${K} delete crd leaderworkersets.leaderworkerset.x-k8s.io disaggregatedsets.disaggregatedset.x-k8s.io --ignore-not-found >/dev/null 2>&1" || true
     ok "  LWS 已卸载(ns/webhook/CRD)"
     exit 0
 fi
@@ -696,9 +699,9 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     _ns="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
     _rel="${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"
     _have=0
-    SSH "${K} -n ${_ns} get deploy ${_rel} --no-headers >/dev/null 2>&1 && _have=1
-    SSH "${K} -n ${_ns} get csc --no-headers >/dev/null 2>&1 && _have=1
-    SSH "${K} get ns ${_ns} >/dev/null 2>&1 && _have=1
+    SSH "${K} -n ${_ns} get deploy ${_rel} --no-headers >/dev/null 2>&1" && _have=1
+    SSH "${K} -n ${_ns} get csc --no-headers >/dev/null 2>&1" && _have=1
+    SSH "${K} get ns ${_ns} >/dev/null 2>&1" && _have=1
     if [ "${_have}" = "0" ]; then
         say "  cubestack-operator 不存在, 跳过"
         exit 0
@@ -708,7 +711,7 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     if [ -n "${_crs}" ]; then
         say "  ① 删除平台实例 CR(级联收组件)..."
         while IFS= read -r _cr; do
-            [ -n "${_cr}" ] && SSH "${K} -n ${_ns} delete "${_cr}" --wait=false >/dev/null 2>&1 || true
+            [ -n "${_cr}" ] && SSH "${K} -n ${_ns} delete "${_cr}" --wait=false >/dev/null 2>&1" || true
         done <<< "${_crs}"
         # 有界等待组件收敛(≤120s; 不收敛告警继续, 不阻塞)
         for _wi in $(seq 1 12); do
@@ -731,10 +734,10 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
         warn "  helm 不可用 / kubeconfig 同步失败 → 跳过 helm uninstall"
     fi
     # ③ 命名空间 / CRD 残留清理(幂等; CRD 随 K8s 覆盖也会消亡, 这里完整卸载顺手清)
-    SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1 || true
-    SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1 || true
+    SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
+    SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
     for _crd in $( (SSH "${K} get crd -o name 2>/dev/null") | grep -i cubestack || true); do
-        SSH "${K} delete ${_crd} --ignore-not-found >/dev/null 2>&1 || true
+        SSH "${K} delete ${_crd} --ignore-not-found >/dev/null 2>&1" || true
     done
     ok "  cubestack-operator 已卸载(CR 级联 + helm uninstall + 残留清理)"
     exit 0
@@ -1090,7 +1093,7 @@ PY
             fi
         fi
         init_remote_kubectl || { err "集群不可达(SSH 初始化失败), 无法执行卸载"; exit 1; }
-        SSH "${K} get ns ${CM_NS} >/dev/null 2>&1 || { err "集群不可达(远端 kubectl 探测失败), 无法执行卸载"; exit 1; }
+        SSH "${K} get ns ${CM_NS} >/dev/null 2>&1" || { err "集群不可达(远端 kubectl 探测失败), 无法执行卸载"; exit 1; }
         _n_ok=0; _n_fail=0
         while IFS=$'\t' read -r _key _src _rel; do
             [ -n "${_key}" ] || continue
