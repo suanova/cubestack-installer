@@ -1379,18 +1379,21 @@ Expected: 全部 19 项通过。
 
 反证（确认 ⑲ 真在生效）：
 ```bash
-# 临时把 25 模块的卸载分支挪到 TOGGLE 判断之后 → 必须报 ⑲ 违规
-cp deployments/scripts/modules/03_addon/25_cubestack_operator.sh /tmp/25.bak
-python3 - <<'EOF'
-p="deployments/scripts/modules/03_addon/25_cubestack_operator.sh"
-s=open(p).read()
-# 把卸载分支整段(从注释行到 exit 0/fi)移到 TOGGLE 行之后: 用简单方式模拟违规 —— 直接在文件头删掉 CUBESTACK_MODULE_ACTION 标记
-s2=s.replace("CUBESTACK_MODULE_ACTION=uninstall","CUBESTACK_MODULE_ACTION=UNUSEDX",1)
-open(p,"w").write(s2)
-EOF
-bash deployments/scripts/tools/check-modules.sh --quiet; RC=$?
-mv /tmp/25.bak deployments/scripts/modules/03_addon/25_cubestack_operator.sh
-echo "反证退出码=${RC}(期望非 0, 且输出含 ⑲ 违规)"
+# 反证(证明 ⑲ 真会红; 三臂各验一次; 每臂用 git restore 还原, 不要用 /tmp 备份):
+# 臂A(缺分支): 把 25 模块里的 CUBESTACK_MODULE_ACTION 子串替换掉
+#   ⚠ 只加后缀改名无效 —— 检查用子串 grep, 后缀会保留子串; 必须去掉子串本身
+sed -i 's/CUBESTACK_MODULE_ACTION/ACTION_XMARK/g' deployments/scripts/modules/03_addon/25_cubestack_operator.sh
+bash deployments/scripts/tools/check-modules.sh --quiet; RC_A=$?   # 期望非 0 且含 "声明 UNINSTALL 但无 CUBESTACK_MODULE_ACTION 卸载分支"
+git restore deployments/scripts/modules/03_addon/25_cubestack_operator.sh
+# 臂B(次序): 在 25 模块卸载分支行之前插入一行 TOGGLE 判断(bash -n 仍过)
+sed -i '/CUBESTACK_MODULE_ACTION:-install/ i [ "${CUBESTACK_OPERATOR_ENABLED:-false}" = "true" ] || true' deployments/scripts/modules/03_addon/25_cubestack_operator.sh
+bash deployments/scripts/tools/check-modules.sh --quiet; RC_B=$?   # 期望非 0 且含 "必须在 TOGGLE 判断(行 ...)之前"
+git restore deployments/scripts/modules/03_addon/25_cubestack_operator.sh
+# 臂C(夹具接线, 防"写了没人跑"): 临时改夹具断言
+sed -i 's/chk "④ 退出码 0" "0"/chk "④ 退出码 0" "9"/' deployments/scripts/tools/tests/test-cluster-teardown.sh
+bash deployments/scripts/tools/check-modules.sh --quiet; RC_C=$?   # 期望非 0 且含 "夹具测试失败"
+git restore deployments/scripts/tools/tests/test-cluster-teardown.sh
+echo "反证退出码: A=${RC_A} B=${RC_B} C=${RC_C}(均期望非 0); 还原后 git status 应 clean"
 ```
 Expected: 反证运行输出 ⑲ 违规、退出码非 0；还原后 `check-modules.sh --quiet` 再次全绿。
 
