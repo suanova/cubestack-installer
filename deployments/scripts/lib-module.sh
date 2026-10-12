@@ -661,6 +661,40 @@ print_undeployed_summary() {
     return 0
 }
 
+# ---------------- 收尾健康巡检: 未成功运行的 Pod(仅告警, 不阻断) ----------------
+# 2026-10-12(用户要求): 部署结束后醒目列出"没有成功运行"的 Pod(集群可达时) —— **仅 warning**。
+# 动机: coredns CrashLoopBackOff / ImagePullBackOff 等此前只在日志深处或事后才被发现;
+#   收尾一眼可见(实例: 2026-10-12 容器 d 集群 coredns loop 崩溃 19 分钟无人察觉)。
+# 判定: 全部命名空间; STATUS 非 Running/Completed/Succeeded, 或 Running 但 READY 未满 → 列出。
+# 可达性: 复用 cluster_exists 探测(无密钥/不可达 → 静默跳过, 不产生误导输出)。
+warn_unhealthy_pods() {
+    cluster_exists || return 0
+    local fm key out bad _n
+    fm="$(first_master_ip 2>/dev/null)" || return 0
+    key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    # ⚠ -n: 不让 ssh 读 stdin(与 cluster_exists 同款防护)
+    out="$(ssh -n -i "${key}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${fm}" \
+        "sudo -n kubectl --kubeconfig=/etc/kubernetes/admin.conf get pods -A --no-headers 2>/dev/null" \
+        2>/dev/null || true)"
+    [ -n "${out}" ] || return 0
+    # awk 本地过滤(captured 输出): 未 Running / 未 Completed / Running 但 READY 未满
+    bad="$(printf '%s\n' "${out}" | awk '
+        {
+            notfull = 0
+            if (split($3, a, "/") == 2 && a[1] != a[2]) notfull = 1
+            if (($4 != "Running" && $4 != "Completed" && $4 != "Succeeded") || ($4 == "Running" && notfull))
+                printf "    %s/%s  %s (READY %s)\n", $1, $2, $4, $3
+        }' || true)"
+    [ -n "${bad}" ] || { say "收尾巡检: 全部 Pod 已成功运行"; return 0; }
+    _n="$(printf '%s\n' "${bad}" | wc -l)"
+    warn "收尾巡检: 检测到未成功运行的 Pod(仅告警, 不阻断; 共 ${_n} 个):"
+    printf '%s\n' "${bad}" | head -15
+    [ "${_n}" -gt 15 ] && warn "  ...(仅列前 15 个)"
+    warn "  排查: kubectl -n <ns> describe pod <name> | kubectl -n <ns> logs <name>; 组件级: --steps verify_<组件>"
+    return 0
+}
+
 print_plan() {
     say "==== 集群规划(配置: ${CLUSTER_CONF}) ===="
     echo "  网络模式: ${NET_MODE:-bridge}   虚拟机网段: ${VM_SUBNET:-10.244.0.0/16}   物理Worker: ${PHYS_WORKER_NET:-10.66.1.0/24}"
