@@ -179,6 +179,7 @@ MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多�
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(Device Plugin, 暴露 RDMA 网卡为扩展资源; 见 4.8)
 CUBESTACK_APPS_ENABLED="${CUBESTACK_APPS_ENABLED:-true}"  # CubeStack 自研组件(占位; 默认启用; 见 4.6)
 CUBESTACK_OPERATOR_ENABLED="${CUBESTACK_OPERATOR_ENABLED:-true}"  # CubeStack 平台 Operator(默认启用; 本地 chart + 镜像入内置 registry; 见 4.6b)
+DEV_LAB_ENABLED="${DEV_LAB_ENABLED:-true}"              # 开发镜像(jupyter/ssh 系列)随部署推入集群 registry(默认启用; 见 4.9; --skip dev_lab 可跳过)
 # ---- 4.7 Multus CNI(容器多网卡; 详见 deployments/cubestack-addon/multus/CUBESTACK.md) ----
 # 离线镜像: 联网机 docker save ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick
 #   → deployments/offline-files/multus/multus-cni.tar → 16_multus 模块推送进内置 registry
@@ -197,6 +198,8 @@ MULTUS_NAD_NAME="${MULTUS_NAD_NAME:-multus-nad}"         # 示例 NAD 名(pod �
 #   ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:${RDMA_IMAGE_TAG} → offline-files/rdma/ → 10_rdma_shared_dev_plugin 模块推送进内置 registry
 RDMA_SAVE_DIR="${RDMA_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/rdma}"
 RDMA_IMAGE_TAG="${RDMA_IMAGE_TAG:-v1.5.4}"              # ⚠ 官方源在 ghcr.io/mellanox(非 Docker Hub); 1.4.0 无 v 前缀(ghcr 上 v1.4.0 404), v1.5.1+ 带 v; 默认 v1.5.4 最新(修复 RoCE 口 issm 硬检查); 部署模块按 tar 内实际 tag 自适应
+DEV_LAB_SAVE_DIR="${DEV_LAB_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/dev-lab}"
+DEV_LAB_IMAGE_TAG="${DEV_LAB_IMAGE_TAG:-latest}"       # ⚠ 开发镜像统一 tag(jupyter-*/ssh-*; 上游滚动构建, 模块按 digest 比对幂等)
 RDMA_RESOURCE_PREFIX="${RDMA_RESOURCE_PREFIX:-nvidia.com}"  # 扩展资源前缀(pool 模式用; by-link 模式的前缀写在下面两个资源名里)
 RDMA_RESOURCE_NAME="${RDMA_RESOURCE_NAME:-mlx5_0}"      # 扩展资源名(pool 模式; 与 RDMA_IF_NAMES 对应的网卡; pod 申请 nvidia.com/mlx5_0)。by-link / per-hca 模式忽略此值
 RDMA_HCA_MODE="${RDMA_HCA_MODE:-by-link}"                  # 资源模式: by-link=按链路类型分成 IB / RoCE **两个资源池**(**本文件默认**, 资源名与真实 GPU 集群一致, 同一份 Pod 清单两边通用, 见下两行); per-hca=每块 HCA 独立扩展资源(pod 按资源名选卡, 如 nvidia.com/mlx5_0 / mlx5_1...); pool=全部 HCA 聚合为单个扩展资源(兼容旧部署; 也是模块代码的**内建回退值**)。⚠ by-link / per-hca 下检测到 0 块 HCA 会报错退出 —— 除非下方 RDMA_PLACEHOLDER_HCAS 非空(本文件默认非空, 见其说明)

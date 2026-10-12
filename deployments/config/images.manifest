@@ -200,3 +200,19 @@ cubestack-operator  ${CUBESTACK_OPERATOR_HARBOR_HOST}/suanova-private/cubestack-
 #   · 其余平台组件镜像(envoy/prometheus 栈/perses/bmc/cubepilot/cnpg/opstree 等)的完整清单与
 #     维护方法见 offline-files/cubestack-operator/README.md; 如需经本 CI 同步, 按同格式逐条登记。
 cubestack-operator  docker.io/envoyproxy/ratelimit:8fe6ea42
+
+# ------------------------------------------------------------
+# [group: dev-lab] 开发镜像(jupyter / ssh 系列, 供开发环境/容器终端使用)
+#   目录: deployments/offline-files/dev-lab/
+#   ⚠ **本组默认不镜像到 mirrors/**: 上游就是本台 Harbor 的 suanova 项目 ——
+#     harbor-save 对同源组直接用原始 ref 拉取(不拼 mirrors/, 那不存在的副本);
+#     部署模块把它们推入集群内置 registry 的 <REG>/suanova/<name>(自研映射, 与 cubestack-operator 同款)。
+#   ⚠ tag 由 `DEV_LAB_IMAGE_TAG` 统一控制(默认 latest, 上游滚动构建);
+#     离线 tar 会随上游滚动失效 —— 重新部署前重跑 save 工具(见 README)。
+# ------------------------------------------------------------
+dev-lab  harbor.isuanova.com/suanova/jupyter-minimal:${DEV_LAB_IMAGE_TAG}
+dev-lab  harbor.isuanova.com/suanova/jupyter-maca-pytorch:${DEV_LAB_IMAGE_TAG}
+dev-lab  harbor.isuanova.com/suanova/jupyter-cuda-pytorch:${DEV_LAB_IMAGE_TAG}
+dev-lab  harbor.isuanova.com/suanova/ssh-ubuntu22.04:${DEV_LAB_IMAGE_TAG}
+dev-lab  harbor.isuanova.com/suanova/ssh-maca-pytorch:${DEV_LAB_IMAGE_TAG}
+dev-lab  harbor.isuanova.com/suanova/ssh-cuda-pytorch:${DEV_LAB_IMAGE_TAG}
