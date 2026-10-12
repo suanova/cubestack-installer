@@ -75,4 +75,30 @@ chk "② 合并后 metallb seq 保持" "1" \
 chk "② 合并后 ceph seq=2" "2" \
     "$(jget "$(cat "${TMP}/apply2.json")" 'next(c["seq"] for c in json.loads(d["data"]["record.json"])["components"] if c["key"]=="ceph")')"
 
+echo "== ③ 引擎拆序(夹具登记; 离线) =="
+INV="${TMP}/inv.json"
+cat > "${INV}" <<'EOF'
+{"schema":1,"components":[
+ {"key":"metallb","seq":1,"status":"done"},
+ {"key":"ceph","seq":3,"status":"done"},
+ {"key":"cubestack_operator","seq":9,"status":"done"}
+]}
+EOF
+ORDER="$(CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_TEARDOWN_TEST_INVENTORY="${INV}" bash "${ENGINE}" --list --raw 2>/dev/null)"
+chk "③ ceph 压轴(最后一行)" "ceph" "$(printf '%s\n' "${ORDER}" | tail -1 | cut -f1)"
+chk "③ 登记 seq 降序生效(operator 在 ceph 前)" "cubestack_operator" "$(printf '%s\n' "${ORDER}" | sed -n '1p' | cut -f1)"
+chk "③ metallb 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'metallb')"
+chk "③ ceph_csi 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'ceph_csi')"
+chk "③ 探测降级组(netshoot)在登记组之后" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
+  { n++; if ($1=="cubestack_operator") a=n; if ($1=="netshoot") b=n }
+  END { print (a>0 && b>0 && b>a) ? 1 : 0 }')"
+chk "③ netshoot 来源=probe" "probe" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '$1=="netshoot"{print $2}')"
+
+echo "== ④ 引擎离线 dry-run(--uninstall + 夹具 → 只打印不执行) =="
+OUT4="$(CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_TEARDOWN_TEST_INVENTORY="${INV}" bash "${ENGINE}" --uninstall 2>&1)"
+RC4=$?
+chk "④ 退出码 0" "0" "${RC4}"
+chk "④ 提示测试钩子" "1" "$(printf '%s' "${OUT4}" | grep -c '测试钩子生效' || true)"
+chk "④ 未实际执行组件(无 ▶ 卸载 行)" "0" "$(printf '%s' "${OUT4}" | grep -c '▶ 卸载' || true)"
+
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }
