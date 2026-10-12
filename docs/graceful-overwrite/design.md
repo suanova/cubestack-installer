@@ -95,12 +95,13 @@ fi
 | multus | 删 vendored manifest 资源（DS/CRD/RBAC）+ 本模块创建的示例 NAD | |
 | rdma_shared_dev_plugin | 删 DS + ConfigMap | RDMA_NAMESPACE 可配 |
 | netshoot | 删 Pod + CM | |
-| ceph（含 ceph_csi） | 调 `ceph-cleanup.sh`：⓪ 停消费者 → `CEPH_PRE_CLEANUP_EXISTING=true`（默认）→ 完整官方安全序删集群（PVC unmap→nodeplugin→pool/cluster 销毁）；**false → 只停消费者+unmap、保留数据**（恢复/认领路径不被破坏） | ceph 模块的卸载段是唯一真实动作方；ceph_csi 不设卸载段（SC 等对象随覆盖消亡），仅登记 |
+| ceph（含 ceph_csi） | 调 `ceph-cleanup.sh`：`CEPH_PRE_CLEANUP_EXISTING=true`（默认）→ **完整安全序: 停消费者 → 删 Bound ceph PVC(触发 unmap) → 删 nodeplugin → 销毁集群与磁盘数据**；`false`（恢复/认领路径）→ **保留模式(--keep-pvcs): 只停消费者; PVC、nodeplugin、集群、OSD 与卷数据全部保留** | ceph 模块的卸载段是唯一真实动作方；ceph_csi 不设卸载段（SC 等对象随覆盖消亡），仅登记 |
 | k8s_registry | 只优雅停机（scale registry=0；registry-pvc 受保护不动；kubespray 重装自动恢复） | |
 | metallb / local_path | 无动作（kubespray 资产，随 K8s 覆盖消亡；登记仅作信息） | |
 
 - ceph-cleanup.sh 配套改造：把 delete_cluster 里的 ⓪ 停消费者块**提取为独立函数/动作**
-  （`--stop-consumers`），使"仅停止+unmap、不销毁"（PRE_CLEANUP=false 路径）可独立调用；
+  （`--stop-consumers [--keep-pvcs]`），使"仅停止、不销毁"（默认含 unmap；PRE_CLEANUP=false 路径走
+  `--keep-pvcs` 保留模式，不删 PVC/不 unmap）可独立调用；
   现有 `--delete-cluster` 行为不变。工作区中未提交的 delrs/delcr 修复（裸 RS/CR 直管 Pod
   的处理）保留并作为其一部分。
 
@@ -168,7 +169,7 @@ fi
 ## 4. 边界与失败处理（明说）
 
 - 卸载失败/超时 → 告警不中止，后续 ceph ⓪（泛化消费者扫描）与 kubeadm reset 兜底。
-- `CEPH_PRE_CLEANUP_EXISTING=false`（恢复/认领路径）→ ceph 只停消费者+unmap，**不销毁数据**。
+- `CEPH_PRE_CLEANUP_EXISTING=false`（恢复/认领路径）→ **保留模式(--keep-pvcs)**: 只停消费者；PVC、nodeplugin、集群、OSD 与卷数据全部保留（**不销毁数据**）。
 - 中途 Ctrl-C：CM 里组件 status 记录进行到哪，重跑幂等继续。
 - verify_* 模块、ceph_backup 不登记不卸载（无集群资产/运维工具）。
 - 用户手工装的第三方负载不在登记内（ceph 消费者兜底仍在）。
