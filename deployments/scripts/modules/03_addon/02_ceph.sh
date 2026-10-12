@@ -54,7 +54,7 @@ load_config
 # CEPH_MODE, 防"旧集群是内部 ceph、新配置切成 external"时漏清理)。
 #   · 无 CephCluster → 不动(外部 ceph 的数据非本安装器资产, 绝不触碰);
 #   · 有 + CEPH_PRE_CLEANUP_EXISTING=true(默认) → 完整官方安全序(停消费者→unmap→销毁);
-#   · 有 + false(恢复/认领路径) → 只停消费者+unmap, **保留数据**。
+#   · 有 + false(恢复/认领路径) → 保留模式(--keep-pvcs): 只停消费者, 不删 PVC/不 unmap, **保留数据**。
 # ⚠ 位于 TOGGLE 检查之前; ceph-cleanup.sh 自带 load_config/init。
 if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     init_remote_kubectl || exit 1
@@ -69,8 +69,8 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
         bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --delete-cluster \
             || warn "  ceph 卸载未完全收敛(擦盘兜底交给重装路径 7a)"
     else
-        say "  ceph: CEPH_PRE_CLEANUP_EXISTING=false → 只停消费者+unmap, 保留数据(恢复/认领路径)"
-        bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --stop-consumers \
+        say "  ceph: CEPH_PRE_CLEANUP_EXISTING=false → 保留模式: 只停消费者, 不删 PVC/不 unmap(PVC 与集群数据全部保留; 恢复/认领路径)"
+        bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --stop-consumers --keep-pvcs \
             || warn "  ceph 停消费者未完全收敛(继续)"
     fi
     exit 0

@@ -75,8 +75,8 @@ bash deployments/scripts/tools/k8s/cluster-teardown.sh --uninstall --yes   # 免
 ceph 模块的卸载段做**活态判定**(看集群内有无 CephCluster, 不看本次配置的 `CEPH_MODE` —— 防
 "旧集群是内部 ceph、新配置切成 external"时漏清理), 实际动作委托 `tools/k8s/ceph-cleanup.sh`:
 
-- `CEPH_PRE_CLEANUP_EXISTING=true`(默认): 完整官方安全序(停消费者 → PVC unmap → 删集群, OSD 数据销毁);
-- `CEPH_PRE_CLEANUP_EXISTING=false`(恢复/认领路径): 只停消费者 + unmap, **保留数据**;
+- `CEPH_PRE_CLEANUP_EXISTING=true`(默认): 完整安全序: 停消费者 → 删 Bound ceph PVC(触发 unmap) → 删 nodeplugin → 销毁集群与磁盘数据;
+- `CEPH_PRE_CLEANUP_EXISTING=false`(恢复/认领路径): 保留模式(`--keep-pvcs`): 只停消费者; PVC、nodeplugin、集群、OSD 与卷数据全部保留;
 - **external 模式**(集群内无 CephCluster): **不动** —— 外部 ceph 数据非本安装器资产, 绝不触碰。
 
 `ceph_csi` 不设卸载段(StorageClass 等对象随 K8s 覆盖消亡), 仅登记(信息用途)。
