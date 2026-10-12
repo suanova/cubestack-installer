@@ -96,6 +96,7 @@ modules/<NN_phase>/<NN>_<category>_<action>.sh
 # REPEAT: 0                   # 1=可重复执行(每次执行且不写断点状态)
 # TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量名, 值为 true/1 时自动启用
 # REQUIRES: k8s_passwordless  # (可选) 依赖模块 key 列表(空格分隔), 执行前须已完成; 框架自动拓扑排序
+# UNINSTALL: 1                # (可选) 声明该模块可被 cluster-teardown 反序优雅卸载
 # 说明: <详细说明, 可选>
 # ============================================================
 set -euo pipefail
@@ -118,6 +119,8 @@ load_config
 | `REQUIRES` | 否 | 依赖模块 key 列表(空格分隔);执行前须已完成。框架按 REQUIRES 做稳定拓扑排序(无依赖模块保持文件顺序),循环依赖/引用未知模块会报错。`--steps` 精确模式还会自动把依赖加入执行列表 |
 
 > ★ **远端 kubectl 统一初始化(2026-09-04 架构重构,强制)**:需要 SSH 到 master 执行 kubectl 的模块,在 `load_config` 之后**必须**调用 `init_remote_kubectl || exit 1`(lib-common.sh 幂等函数,提供 FIRST_MASTER/SSH_KEY/SSH()/K/SSH_CMD)。**禁止**在模块内手抄 `FIRST_MASTER=.../SSH() {...}/K="sudo kubectl..."` 初始化块 —— 历史事故: 新模块少复制一行 → set -u 下 `K: unbound variable`, 部署成功后崩溃。
+
+> ★ **UNINSTALL 元数据(优雅覆盖,可选)**:声明 `# UNINSTALL: 1` 的模块必须实现 `CUBESTACK_MODULE_ACTION=uninstall` 卸载分支,且**位于 TOGGLE 跳过检查之前**(check-modules ⑲ 静态校验);卸载段要求见 `docs/graceful-overwrite/design.md` §3.2。
 
 ### 2.3 模块体内规范
 
@@ -228,7 +231,7 @@ load_config
 
 ---
 
-## 4. 新增模块的标准流程(6 步)
+## 4. 新增模块的标准流程(8 步)
 
 以新增"某某组件安装"为例:
 
@@ -240,6 +243,8 @@ load_config
    - 拉容器镜像 → 必须登记 `config/images.manifest` + 建 `deployments/offline-files/<group>/`(含 README,§2.5)。
 5. **加开关**(可选):在 `cluster.conf.example` 加 `XXX_ENABLED` 变量,TOGGLE 指向它。
 6. **完成**:**无需改任何注册表** —— operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)即 operator),新增 operator 写 TOGGLE 即自动进入 `--steps`/`--enable` 调度。
+7. **登记(装进集群的组件)**:在安装成功点调用 `record_installed_component "<key>"` 登记(优雅覆盖用;写失败仅告警,不影响部署)。
+8. **声明可卸载(可卸载的组件)**:头部声明 `# UNINSTALL: 1` + 实现卸载分支(`CUBESTACK_MODULE_ACTION=uninstall`,位于 TOGGLE 检查之前;幂等/有界/告警不中止),供 cluster-teardown 反序优雅卸载 —— 设计见 docs/graceful-overwrite/design.md。
 
 > 验证:`bash deployments/scripts/tools/check-modules.sh`(静态校验, 必须 exit 0);
 > `sudo ./deploy-cluster.sh --list-steps` 应出现新模块(带 `依赖:xxx` 标注);
