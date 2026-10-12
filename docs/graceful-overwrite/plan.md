@@ -893,7 +893,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 source "${SCRIPT_DIR}/../../lib-common.sh"
 # shellcheck source=lib-module.sh
-source "${SCRIPT_DIR}/../../lib-module.sh"
+# ★ lib-common 被 source 时会以自身目录覆盖 SCRIPT_DIR, 故此处内联定位(与 deploy-cluster.sh 同款)
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-module.sh"
 load_config
 discover_modules   # MODULE_KEY/MODULE_SCRIPT(文件序)供候选枚举
 
