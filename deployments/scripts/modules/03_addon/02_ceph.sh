@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED
+# UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_passwordless k8s_workerbm k8s_ntp
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态; --fresh 清状态重装。
@@ -48,6 +49,32 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 卸载分支(优雅覆盖): **活态判定** —— 集群内有无 CephCluster 决定动作(不看本次配置的
+# CEPH_MODE, 防"旧集群是内部 ceph、新配置切成 external"时漏清理)。
+#   · 无 CephCluster → 不动(外部 ceph 的数据非本安装器资产, 绝不触碰);
+#   · 有 + CEPH_PRE_CLEANUP_EXISTING=true(默认) → 完整官方安全序(停消费者→unmap→销毁);
+#   · 有 + false(恢复/认领路径) → 只停消费者+unmap, **保留数据**。
+# ⚠ 位于 TOGGLE 检查之前; ceph-cleanup.sh 自带 load_config/init。
+if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+    init_remote_kubectl || exit 1
+    _cns="${CEPH_NAMESPACE:-rook-ceph}"
+    _cc="$( (SSH "${K} -n ${_cns} get cephcluster --no-headers 2>/dev/null") || true)"
+    if [ -z "${_cc}" ]; then
+        say "  ceph: 集群内无 CephCluster(未装/internal 已删/external 模式), 跳过"
+        exit 0
+    fi
+    if [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ]; then
+        say "  ceph: 完整安全序卸载(停消费者→unmap→删集群; OSD 数据销毁)"
+        bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --delete-cluster \
+            || warn "  ceph 卸载未完全收敛(擦盘兜底交给重装路径 7a)"
+    else
+        say "  ceph: CEPH_PRE_CLEANUP_EXISTING=false → 只停消费者+unmap, 保留数据(恢复/认领路径)"
+        bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --stop-consumers \
+            || warn "  ceph 停消费者未完全收敛(继续)"
+    fi
+    exit 0
+fi
 
 # ---- 开关 ----
 # ★ TOGGLE = CEPH_ENABLED CEPH_CSI_ENABLED(任一 true 即调度本模块):
@@ -940,3 +967,6 @@ echo "  下一步:      CEPH_CSI_ENABLED=true 部署模块 ceph_csi(创建 rbd-p
 echo "  registry 后端: REGISTRY_STORAGE_CLASS=ceph-block 时 registry PVC 走 ceph RBD(替代 local-path)"
 echo "  使用文档:    docs/ceph-rook.md"
 echo "  卸载:        先删 CephCluster(cleanupPolicy yes-really-destroy-data), 见 docs/ceph-rook.md §卸载"
+
+# 优雅覆盖登记(到达此处=集群内 ceph 体系部署/`external 接入)成功)
+record_installed_component "ceph"
