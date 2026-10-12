@@ -429,6 +429,7 @@ run_module() {
     #   到这里密钥已装好、集群可探测 —— 新容器对着已有集群的场景在这里把"会发生什么"打出来。
     #   ⚠ 只提示**不拦停**(默认全量运行 = 覆盖安装, 见 notify_base_redeploy 注释)。
     [ "${key}" = "k8s_deploy" ] && notify_base_redeploy
+    [ "${key}" = "k8s_deploy" ] && teardown_before_overwrite
     say "[${key}] ${MODULE_DESC[$idx]:-${MODULE_SCRIPT[$idx]}} ..."
     say "  执行: ${script}"
     if bash "${script}"; then
@@ -514,6 +515,23 @@ notify_base_redeploy() {
     warn "检测到集群已存在 → 本次为「覆盖安装」(默认语义): k8s_deploy 会重跑 kubespray"
     warn "  节点上已有的旧 K8s 状态会被 kubeadm reset —— 该步骤自带 60s 醒目倒计时, 期间 Ctrl-C 可中止"
     warn "  只想装某个组件、不动集群: sudo $0 --steps <组件>(如 --steps ceph; 计划里不含基座)"
+}
+
+# ---------------- 优雅覆盖挂点 B(执行 k8s_deploy 之前) ----------------
+# 与 notify_base_redeploy 同位的**动作版**: 新容器场景挂点 A(deploy-cluster.sh 预检)因还没有
+# SSH 密钥探测不到集群 → 到这里(vm_sshkey/k8s_passwordless 已跑完)密钥就绪, 补齐"优雅覆盖":
+# 按安装登记反序卸载已装组件(含 ceph 压轴)。CUBESTACK_TEARDOWN_DONE 防与挂点 A 双跑。
+# 恒返回 0(不拦停); 失败仅警告 —— 后续 ceph 安全序与 kubeadm reset 兜底。
+teardown_before_overwrite() {
+    [ "${CUBESTACK_TEARDOWN_DONE:-0}" = "1" ] && return 0
+    [ "$(get_state k8s_deploy)" = "done" ] && return 0   # 断点续跑完成 → 不会执行 → 不涉及(冗余防御)
+    local _te="${SCRIPT_DIR}/tools/k8s/cluster-teardown.sh"
+    [ -f "${_te}" ] || return 0
+    cluster_exists || return 0
+    warn "检测到集群已存在 → 先执行「优雅覆盖」: 按安装登记反序卸载已装组件(设计 docs/graceful-overwrite/)"
+    bash "${_te}" --uninstall || warn "优雅卸载未完成(继续; ceph 安全序与 k8s 覆盖流程兜底)"
+    export CUBESTACK_TEARDOWN_DONE=1
+    return 0
 }
 
 # 计划阶段提示(--list/--list-steps 只读路径用): 只提示, 不探测集群
