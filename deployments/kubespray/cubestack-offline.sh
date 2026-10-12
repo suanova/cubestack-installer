@@ -2315,6 +2315,46 @@ cmd_scale() {
         log "检测到 hosts.yml 中 ${scale_group} 组, 自动 --limit ${scale_group}(仅扩容新增节点)"
     fi
 
+    # ★ 2026-10-12(需求①): 扩容目标含"控制平面/etcd 成员"→ 主 playbook 切**全量 cluster.yml**。
+    #   上游 docs/operations/nodes.md 明确: 加 control plane 节点**不能用 scale.yml**(用 cluster.yml,
+    #   且新 CP 必须追加到 kube_control_plane 组末尾 —— gen-inventory 按 NODES 顺序写入即满足)。
+    #   纯 worker 扩容保持原 scale.yml --limit 行为不变; 角色判定从 hosts.yml 组归属解析。
+    local SCALE_PLAYBOOK="scale.yml"
+    if [ -n "${LIMIT_GROUP}" ]; then
+        _pb_rc=0
+        python3 - "${INVENTORY_DIR}/hosts.yml" "${LIMIT_GROUP}" <<'PYEOF' || _pb_rc=$?
+import sys, yaml
+try:
+    hosts = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    sys.exit(2)
+def members(name, seen=None):
+    seen = set() if seen is None else seen
+    if name in seen:
+        return set()
+    seen.add(name)
+    blk = hosts.get(name) or {}
+    out = set((blk.get("hosts") or {}).keys())
+    for child in (blk.get("children") or {}):
+        out |= members(child, seen)
+    return out
+cp = members("kube_control_plane") | members("etcd")
+sys.exit(0 if (members(sys.argv[2]) & cp) else 1)
+PYEOF
+        case "${_pb_rc}" in
+            0)
+                SCALE_PLAYBOOK="cluster.yml"
+                warn "扩容目标含控制平面/etcd 成员 → 主 playbook 切换为**全量 cluster.yml**(官方要求: 加 CP 不能用 scale.yml; 收敛式幂等, 不加 --limit)"
+                LIMIT_GROUP=""; LIMIT_FLAG=""
+                ;;
+            1) : ;;   # 纯 worker 目标: 保持 scale.yml --limit(既有行为不变)
+            *)
+                warn "扩容目标角色判定失败(rc=${_pb_rc}; python3/yaml 不可用?) → 按 scale.yml 继续; 若本次含控制平面节点, 请中止并人工以 cluster.yml 扩容"
+                ;;
+        esac
+        unset _pb_rc
+    fi
+
     if [ -n "$LIMIT_GROUP" ]; then
         log "  ▶ 限定目标组: ${LIMIT_GROUP}"
 
@@ -2338,17 +2378,21 @@ cmd_scale() {
     # 解决方案: 先跑一次 scale.yml 的前半段(仅安装 containerd + 下载镜像),
     # 然后生成镜像清单 inventory/preload-images.lst, 由 scale.yml 内置的
     # 预加载 play 在 containerd 装完后完成同步+加载
-    log "预安装 containerd 到新节点(为镜像预加载做准备)..."
-    cd "${KUBESPRAY_DIR}"
-    run_ansible_playbook "/tmp/${CLUSTER_NAME}-prescale.log" scale.yml \
-        -i "${INVENTORY_DIR}/hosts.yml" \
-        --become --become-user=root \
-        ${LIMIT_FLAG} \
-        -e @${OFFLINE_VARS} \
-        --skip-tags system-packages,kube-proxy \
-        --tags container-engine,download \
-        -v 2>&1 || warn "containerd 预安装部分节点可能失败(首次 scale 可忽略)"
-    log "✅ containerd 预安装完成"
+    if [ "${SCALE_PLAYBOOK}" = "scale.yml" ]; then
+        log "预安装 containerd 到新节点(为镜像预加载做准备)..."
+        cd "${KUBESPRAY_DIR}"
+        run_ansible_playbook "/tmp/${CLUSTER_NAME}-prescale.log" scale.yml \
+            -i "${INVENTORY_DIR}/hosts.yml" \
+            --become --become-user=root \
+            ${LIMIT_FLAG} \
+            -e @${OFFLINE_VARS} \
+            --skip-tags system-packages,kube-proxy \
+            --tags container-engine,download \
+            -v 2>&1 || warn "containerd 预安装部分节点可能失败(首次 scale 可忽略)"
+        log "✅ containerd 预安装完成"
+    else
+        log "cluster.yml 全量路径: 跳过 scale.yml 专用 prescale(cluster.yml 自带 container-engine/预载 play, 新节点 containerd 由其安装)"
+    fi
 
     # 生成镜像文件清单(inventory/preload-images.lst), 供 scale.yml 内置预加载 play 使用
     # (实际同步+加载由 scale.yml 完成, 入口脚本不再重复预加载)
@@ -2369,11 +2413,11 @@ cmd_scale() {
     # 确保 scale.yml 已挂载单节点控制面收敛 play(扩容后 master 可能被 kubeadm 重新打回污点)
     ensure_single_node_play
 
-    log "执行 Kubespray 扩容 (scale.yml)..."
+    log "执行 Kubespray 扩容 (${SCALE_PLAYBOOK})..."
     log "ansible 日志: 同时显示终端 + 写入 /tmp/${CLUSTER_NAME}-scale.log"
     [ "${ANSIBLE_LOG_TERMINAL:-1}" != "1" ] && log "ansible 日志: 仅写入文件(ANSIBLE_LOG_TERMINAL=0, 终端不显示)"
     cd "${KUBESPRAY_DIR}"
-    run_ansible_playbook "/tmp/${CLUSTER_NAME}-scale.log" scale.yml \
+    run_ansible_playbook "/tmp/${CLUSTER_NAME}-scale.log" "${SCALE_PLAYBOOK}" \
         -i "${INVENTORY_DIR}/hosts.yml" \
         --become --become-user=root \
         ${LIMIT_FLAG} \

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # MODULE: k8s_scale
-# DESC: 扩容 kubespray 集群(添加新 worker 节点, 可重复执行; 先登录首个 master 核对实际集群)
+# DESC: 扩容 kubespray 集群(添加新 worker / 控制平面节点, 可重复执行; 先登录首个 master 核对实际集群)
 # PHASE: k8s
 # DEFAULT: 0
 # REPEAT: 1
@@ -11,9 +11,11 @@
 #   虚拟机创建由 tools/vm/create-vms.sh 独立执行(不经过主程序): 先在 tools/vm/vm-nodes.conf
 #   添加新节点并单独执行 sudo ./deployments/scripts/tools/vm/create-vms.sh, 再执行本模块扩容。
 #   本模块只做集群侧准备(全部幂等):
-#     登录首个 master 核对实际集群节点 → diff 出未加入集群的 worker(新节点)
+#     登录首个 master 核对实际集群节点 → diff 出未加入集群的节点(worker 与控制平面 master 均纳入)
 #     → 仅对新节点: SSH 免密 / worker 离线装包 / NTP 时间同步 / /etc/hosts + registry certs.d
-#     → 重生成 inventory(新节点进 new_node 组) → kubespray 离线扩容(--limit new_node)
+#     → 重生成 inventory(新节点进 new_node 组) → kubespray 离线扩容
+#       (纯 worker: scale.yml --limit new_node; 含 master: 封装层自动切**全量 cluster.yml** ——
+#        上游 docs/operations/nodes.md 明确: 加 control plane 不能用 scale.yml)
 #
 # 场景二: 新节点环境已存在(VM 已运行 / 裸金属已就绪)
 #   环境准备步骤幂等快速通过, 直接进入 inventory 重生成 + 扩容
@@ -29,8 +31,9 @@
 #   · 本模块不依赖 k8s_deploy 模块(自包含校验集群存在), 防止 --steps 闭包误拉 k8s_deploy 重装集群
 #
 # 自动检测新节点(无 --only 时):
-#   查询运行中集群的节点列表(name + InternalIP + ExternalIP) → 与 cluster.conf 中 worker
-#   对比 → 不在集群中的 worker 自动识别为新增节点 → 放入 new_node 组
+#   查询运行中集群的节点列表(name + InternalIP + ExternalIP) → 与 cluster.conf 全角色节点
+#   对比 → 不在集群中的 worker / master 均识别为新增节点 → 放入 new_node 组
+#   (⚠ 加入 master 会变更 etcd 成员数: 加入后仅 2 台时红字提示 quorum 风险, 不阻断)
 # ============================================================
 set -euo pipefail
 
@@ -44,39 +47,63 @@ OFFLINE_SCRIPT="${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
 # ── 登录首个 master, 查询运行中集群的节点(名称 + InternalIP + ExternalIP) ──
 # 返回: 每行 "hostname|ip|external_ip"; 失败(集群不可达)→ 非 0
 # ★ 安全边界: 扩容前必须确认集群真实状态; 集群不可达时宁可不扩, 绝不盲扩
-_query_cluster_nodes() {
-    local m_ip="" m_user="ubuntu" m_pw=""
+# ── 首个 master 连接信息(stdout: "user ip pw"; 无 master/无 IP → 非 0) ──
+_first_master_conn() {
+    local line
     for line in "${NODES[@]:-}"; do
         [ -z "${line}" ] && continue
         node_parse "${line}"
-        if [ "${NODE_ROLE}" = "master" ]; then
-            m_ip="${NODE_IP}"; m_user="${NODE_USER}"; m_pw="${NODE_PW}"
-            break
-        fi
+        [ "${NODE_ROLE}" = "master" ] || continue
+        [ -n "${NODE_IP}" ] || continue
+        printf '%s %s %s' "${NODE_USER:-ubuntu}" "${NODE_IP}" "${NODE_PW:-}"
+        return 0
     done
-    [ -z "${m_ip}" ] && { warn "cluster.conf 中无 master 节点, 无法核对集群" >&2; return 1; }
+    return 1
+}
 
-    local ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-    local out=""
+# ── 在首个 master 上执行远端命令(密钥优先, 失败回退 sshpass 密码; 只读探测共用) ──
+# 用法: _master_kubectl <user> <ip> <pw> "<remote-cmd>" → stdout(失败=空)
+_master_kubectl() {
+    local m_user="$1" m_ip="$2" m_pw="$3" m_cmd="$4" ssh_key out=""
+    ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
     # 密钥优先(BatchMode), 失败回退 sshpass 密码
     if [ -f "${ssh_key}" ]; then
         out=$(ssh -i "${ssh_key}" \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
-            "${m_user}@${m_ip}" \
-            "sudo kubectl get nodes --no-headers -o wide 2>/dev/null | awk '{print \$1\"|\"\$6\"|\"\$7}'" 2>/dev/null || true)
+            "${m_user}@${m_ip}" "${m_cmd}" 2>/dev/null || true)
     fi
     if [ -z "${out}" ] && [ -n "${m_pw}" ] && command -v sshpass >/dev/null 2>&1; then
         out=$(env SSHPASS="${m_pw}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             -o ConnectTimeout=10 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-            "${m_user}@${m_ip}" \
-            "sudo kubectl get nodes --no-headers -o wide 2>/dev/null | awk '{print \$1\"|\"\$6\"|\"\$7}'" 2>/dev/null || true)
+            "${m_user}@${m_ip}" "${m_cmd}" 2>/dev/null || true)
     fi
+    printf '%s' "${out}"
+}
+
+# ── 登录首个 master, 查询运行中集群的节点(名称 + InternalIP + ExternalIP) ──
+# 返回: 每行 "hostname|ip|external_ip"; 失败(集群不可达)→ 非 0
+# ★ 安全边界: 扩容前必须确认集群真实状态; 集群不可达时宁可不扩, 绝不盲扩
+_query_cluster_nodes() {
+    local _c m_user m_ip m_pw out=""
+    _c="$(_first_master_conn)" || { warn "cluster.conf 中无 master 节点(或 IP 为空), 无法核对集群" >&2; return 1; }
+    read -r m_user m_ip m_pw <<< "${_c}"
+    out="$(_master_kubectl "${m_user}" "${m_ip}" "${m_pw}" \
+        "sudo kubectl get nodes --no-headers -o wide 2>/dev/null | awk '{print \$1\"|\"\$6\"|\"\$7}'")"
     [ -z "${out}" ] && { warn "无法获取集群节点列表(API Server 不可达或免密未配: ${m_user}@${m_ip})" >&2; return 1; }
     echo "${out}"
 }
 
-# ── 自动检测新节点: 登录首个 master 核对集群, 对比 cluster.conf 找出未加入的 worker ──
-# 返回: 逗号分隔的新节点 hostname 列表
+# ── 活态探测: 集群内是否有 rook-ceph(供 ceph 镜像预载判定; 与 conf 开关做 OR) ──
+_cluster_has_rook_ceph() {
+    local _c m_user m_ip m_pw
+    _c="$(_first_master_conn)" || return 1
+    read -r m_user m_ip m_pw <<< "${_c}"
+    _master_kubectl "${m_user}" "${m_ip}" "${m_pw}" \
+        "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf get ns rook-ceph --no-headers 2>/dev/null"
+}
+
+# ── 自动检测新节点: 登录首个 master 核对集群, 对比 cluster.conf 找出未加入的节点(worker+master) ──
+# 返回: 逗号分隔的新节点 hostname 列表(master 在前)
 _auto_detect_new_nodes() {
     local cluster_out
     cluster_out="$(_query_cluster_nodes)" || {
@@ -98,16 +125,18 @@ _auto_detect_new_nodes() {
 
     # ★ 配置校验: cluster.conf 的 master 必须能命中运行中集群(配置与真实集群脱节 → 中止)
     #   (至少一个 master 命中即可; 多 master 配置中个别 master 未部署时 warn 提示)
-    local master_hit=0 master_miss=""
+    local master_hit=0 master_miss="" master_new="" master_total=0
     for line in "${NODES[@]:-}"; do
         [ -z "${line}" ] && continue
         node_parse "${line}"
         [ "${NODE_ROLE}" = "master" ] || continue
+        master_total=$((master_total + 1))
         if echo "${cluster_names}" | grep -qwF "${NODE_HOSTNAME}" \
             || { [ -n "${NODE_IP}" ] && echo "${cluster_ips}" | grep -qwF "${NODE_IP}"; }; then
             master_hit=1
         else
             master_miss="${master_miss} ${NODE_HOSTNAME}(${NODE_IP})"
+            master_new="${master_new},${NODE_HOSTNAME}"
         fi
     done
     if [ "${master_hit}" != "1" ]; then
@@ -117,7 +146,13 @@ _auto_detect_new_nodes() {
         err "  请核对 cluster.conf 的 NODES(尤其 master IP)后再扩容"
         return 1
     fi
-    [ -n "${master_miss}" ] && warn "cluster.conf 中以下 master 不在集群(未部署/IP 变更? 本次不处理):${master_miss}" >&2
+    if [ -n "${master_miss}" ]; then
+        warn "cluster.conf 中以下 master 不在集群(将按官方路径加入: 封装层切 cluster.yml):${master_miss}" >&2
+        # ★ 2026-10-12(需求①): etcd/控制平面成员数变化风险提示(不阻断)
+        if [ "${master_total}" -le 2 ]; then
+            warn "⚠ 加入后控制平面/etcd 成员共 ${master_total} 台: 2 成员时任意一台宕机即失去 quorum —— 生产建议一步凑到 3 台(测试集群可继续)" >&2
+        fi
+    fi
 
     # 对比: cluster.conf 中 worker 的 hostname/IP 不在集群中的 → 新节点
     local new_hosts=""
@@ -136,7 +171,9 @@ _auto_detect_new_nodes() {
         say "  检测到新节点: ${NODE_HOSTNAME} (${NODE_IP})" >&2
     done
     # 仅输出结果到 stdout(被 $() 捕获), 诊断信息已重定向到 stderr
-    echo "${new_hosts#,}"
+    # 输出 = 缺失 master + 新 worker(纯 hostname, 逗号分隔; master 在前)
+    _all="${master_new}${new_hosts}"
+    echo "${_all#,}"
 }
 
 # ── 收集本次 scale 的目标节点 ──
@@ -193,12 +230,28 @@ else
     esac
 
     if [ -z "${NEW_NODE_HOSTS}" ]; then
-        ok "未检测到新节点 — 所有 worker 已在集群中, 无需扩容"
+        ok "未检测到新节点 — cluster.conf 全部节点均已在集群中, 无需扩容"
         exit 0
     fi
     SELECTED_NODES=$(echo "${NEW_NODE_HOSTS}" | tr ',' '\n' | grep -c . || echo 0)
     say "检测到 ${SELECTED_NODES} 个新节点: ${NEW_NODE_HOSTS}"
 fi
+
+# ★ 2026-10-12(需求①): 目标含控制平面节点 → 加入走官方 cluster.yml(封装层自动切 playbook;
+#   上游 docs/operations/nodes.md 明确: 加 control plane 不能用 scale.yml)。--only 与自动检测两路共用。
+_scale_cp_list=""
+for _nc in "${NODES[@]:-}"; do
+    [ -z "${_nc}" ] && continue
+    node_parse "${_nc}"
+    [ "${NODE_ROLE}" = "master" ] || continue
+    case ",${NEW_NODE_HOSTS}," in *",${NODE_HOSTNAME},"*) _scale_cp_list="${_scale_cp_list:+${_scale_cp_list},}${NODE_HOSTNAME}" ;; esac
+done
+unset _nc
+if [ -n "${_scale_cp_list}" ]; then
+    say "含控制平面节点(${_scale_cp_list}): 加入走官方路径 —— 封装层将切全量 cluster.yml(收敛式, 不用 scale.yml)"
+    warn "⚠ 加入控制平面会变更 etcd 成员数; 若成员总数为 2, 任意一台宕机即失去 quorum —— 生产建议一步凑到 3 台"
+fi
+unset _scale_cp_list
 
 # ── 1. 环境准备: 仅对【新节点】执行(SSH 免密 + worker 离线装包 + NTP 时间同步) ──
 # ★ 通过 ONLY_HOSTS 限定子模块只处理新节点 —— 扩容绝不重复向已有节点上传/装包
@@ -306,12 +359,30 @@ ok "inventory 已更新"
 
 # ── 3. kubespray 扩容(镜像预加载/scale.yml/兜底预加载/RBAC 修复/CNI 重启) ──
 say "[3/3] 执行 kubespray 扩容 (via cubestack-offline.sh scale) ..."
+
+# ★ 2026-10-12(需求②): ceph 镜像随扩容预载到新节点 —— cubestack-offline 的预载清单仅当
+#   CEPH_ENABLED=true 才并入 ceph tar(rook/cephcsi 等), 而扩容路径此前从不传该变量
+#   → 新节点 ceph CSI nodeplugin ImagePullBackOff(2026-10-12 容器 d 实case)。
+#   取值 = conf 开关 OR 集群活态(rook-ceph 命名空间在即算 —— 覆盖 conf 关但集群跑着 ceph)。
+_CEPH_PRELOAD="false"
+if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
+    _CEPH_PRELOAD="true"
+elif [ -n "$(_cluster_has_rook_ceph)" ]; then
+    _CEPH_PRELOAD="true"
+    say "活态检测: 集群内 rook-ceph 在(conf 未开)→ ceph 镜像仍随本次扩容预载"
+fi
+if [ "${_CEPH_PRELOAD}" = "true" ]; then
+    say "ceph 镜像预载: 源 ${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}(新节点 containerd 就位后自动同步 + ctr import)"
+fi
 OFFLINE_ENV=(
     "CUBESTACK_KUBESPRAY_DIR=${KUBESPRAY_DIR}"
     "CUBESTACK_INVENTORY_DIR=${KUBESPRAY_INV_DIR}"
     "CUBESTACK_BASE_DIR=${KUBESPRAY_BASE_DIR:-${REPO_ROOT}/deployments/kubespray}"
     "OFFLINE_FILES_DIR=${OFFLINE_FILES_DIR}"
     "CUBESTACK_LOCAL_REPO_DIR=${LOCAL_REPO_DIR}"
+    "CEPH_ENABLED=${_CEPH_PRELOAD}"
+    "CEPH_CSI_ENABLED=${_CEPH_PRELOAD}"
+    "CEPH_IMAGE_DIR=${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}"
 )
 [ -n "${PRELOAD_IMAGE_PATTERNS+x}" ] && \
     OFFLINE_ENV+=("CUBESTACK_PRELOAD_IMAGE_PATTERNS=${PRELOAD_IMAGE_PATTERNS}")
