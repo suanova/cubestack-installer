@@ -10,6 +10,8 @@
   - `harbor.isuanova.com/suanova/ssh-maca-pytorch:latest`
   - `harbor.isuanova.com/suanova/ssh-cuda-pytorch:latest`
 - tar 名: 按**上游 ref** 自动派生(如 `harbor.isuanova.com_suanova_jupyter-minimal_latest.tar`)
+- ★ **大件就地 gzip 省盘**(2026-10-12 用户口径): `gzip <tar>` → 同名 `.tar.gz`(源 tar 由 gzip 自动删除);
+  部署模块与 `find_offline_tar` **自动识别 .tar / .tar.gz**(压缩中的半成品会被跳过, 压完立即可用)
 - ⚠ **上游即本台 Harbor(不是公共 registry)**: `harbor-save-images.sh` 对同源组**直接用原始 ref**
   拉取(不拼 `mirrors/`); 需要在能连 Harbor 的机器上执行(容器 CLI 自带 skopeo 与凭据)
 - ⚠ tag 是滚动的 `latest`: 离线 tar 会随上游滚动构建失效 —— **重新部署前重跑一次 save 工具**

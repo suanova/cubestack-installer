@@ -67,6 +67,7 @@ PY
 }
 
 # 读 docker-save tar 的源镜像名(manifest.json RepoTags[0]); 无则输出空
+# ★ 2026-10-12: .tar / .tar.gz 均可 —— python tarfile "r" 模式自动识别压缩
 # 用法: tar_first_image_tag <tar文件> → 源镜像 ref(如 cr.metax-tech.com/cloud/gpu-label:0.15.3)
 # 供 tar 离线加载模式推导目标 repo/tag(与 docker save 生成的 tar 兼容)
 tar_first_image_tag() {
@@ -346,8 +347,25 @@ find_offline_tar() {
                 *) warn "  $(basename "${t}") 内容为 ${src}, 非 ${suffix}, 跳过" >&2 ;;
             esac
         done
-        # 兜底: 无 glob 命中时扫描全部 *.tar 按内容匹配
-        for t in "${d}"/*.tar; do
+        # ★ 2026-10-12: 调用方 glob 保持 *.tar, 此处自动再匹配 .gz 形式(如 *.tar.gz)——
+        #   用户可能把离线 tar 就地 gzip 压缩省盘; python tarfile 自动识别压缩(见 tar_first_image_tag)。
+        #   ⚠ 与 plain-tar 快路径不同: .gz **不做"内容读不出也接受"兜底** —— 压缩中是半成品
+        #   (tar 截断 → 读不出 → 若兜底接受会把在压的其它镜像误当成目标, 2026-10-12 实测踩到);
+        #   读不出即跳过(未压完/损坏), 压完自然可匹配。
+        for t in "${d}"/${glob}.gz; do
+            [ -f "${t}" ] || continue
+            src="$(tar_first_image_tag "${t}")"
+            if [ -z "${src}" ]; then
+                warn "  $(basename "${t}") 内容不可读(压缩中/损坏?), 跳过" >&2
+                continue
+            fi
+            case "${src}" in
+                *"${suffix}") echo "${t}"; return 0 ;;
+                *) warn "  $(basename "${t}") 内容为 ${src}, 非 ${suffix}, 跳过" >&2 ;;
+            esac
+        done
+        # 兜底: 无 glob 命中时扫描全部 *.tar / *.tar.gz 按内容匹配
+        for t in "${d}"/*.tar "${d}"/*.tar.gz; do
             [ -f "${t}" ] || continue
             case "$(tar_first_image_tag "${t}")" in
                 *"${suffix}") echo "${t}"; return 0 ;;
