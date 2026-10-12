@@ -447,6 +447,20 @@ else
     ck_fail "缺少 tests/test-scale-new-nodes-purity.sh(本回归必须接线, 防'写了没人跑')"
 fi
 
+# 2026-10-12: 收尾巡检过滤器回归(warn_unhealthy_pods 的 awk 判定, 真实提取)
+_PODHEALTH_SH="${SCRIPT_DIR}/tests/test-pod-health-scan.sh"
+if [ -f "${_PODHEALTH_SH}" ]; then
+    if _PODHEALTH_OUT="$(bash "${_PODHEALTH_SH}" 2>&1)"; then
+        ok "  收尾巡检过滤器回归通过"
+    else
+        printf '%s\n' "${_PODHEALTH_OUT}" | sed 's/^/    /'
+        ck_fail "收尾巡检过滤器回归未通过(详见上方失败项)"
+    fi
+    unset _PODHEALTH_OUT
+else
+    ck_fail "缺少 tests/test-pod-health-scan.sh(本回归必须接线)"
+fi
+
 # ---------- ⑬ API 入口: 本地代理语义与 all.yml 的自洽 ----------
 # 背景: kubespray 的 kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支
 #   **优先于** localhost 分支 —— 只要 all.yml 里还有**未注释**的 loadbalancer_apiserver 块,
