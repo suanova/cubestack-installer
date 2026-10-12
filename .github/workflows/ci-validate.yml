@@ -4,7 +4,7 @@ name: Validate scripts & manifests
 # PR / 推送到 main 的基础验证 —— 无集群、无密钥、不联网(仅 manifests job 装一个 PyYAML)。
 #
 #   job scripts    ① 全仓 shell 语法(`bash -n`, 按 git 清单逐个过)
-#                  ② check-modules.sh 全 17 项(模块元数据/依赖拓扑/helm 离线副本/
+#                  ② check-modules.sh 全 19 项(模块元数据/依赖拓扑/helm 离线副本/
 #                     kubespray 补丁在位/5 个离线回归套件/版本钉子闭环/凭据卫生)
 #                  ③ images.manifest ↔ kubespray 交叉校验
 #   job manifests  ④ 仓库自有 YAML 清单解析(check-manifests.sh)
@@ -36,7 +36,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── ① 部署脚本与模块: 语法 + 17 项静态校验 + 镜像清单 ──
+  # ── ① 部署脚本与模块: 语法 + 19 项静态校验 + 镜像清单 ──
   scripts:
     name: 脚本与模块静态校验
     runs-on: ubuntu-latest
@@ -70,12 +70,12 @@ jobs:
             exit 1
           fi
 
-      - name: 模块静态校验(check-modules.sh 全 17 项)
+      - name: 模块静态校验(check-modules.sh 全 19 项)
         run: |
           set -uo pipefail
           log="${RUNNER_TEMP}/check-modules.log"
           if bash deployments/scripts/tools/check-modules.sh 2>&1 | tee "${log}"; then
-            echo "check-modules.sh 全 17 项通过(模块元数据 / 依赖拓扑 / helm 离线副本 / kubespray 补丁在位 / 离线回归套件 / 版本钉子闭环 / 凭据卫生)" >> "$GITHUB_STEP_SUMMARY"
+            echo "check-modules.sh 全 19 项通过(模块元数据 / 依赖拓扑 / helm 离线副本 / kubespray 补丁在位 / 离线回归套件 / 版本钉子闭环 / 凭据卫生)" >> "$GITHUB_STEP_SUMMARY"
           else
             {
               echo "## 模块静态校验未通过"

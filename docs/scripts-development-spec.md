@@ -386,9 +386,10 @@ sudo ./deploy-cluster.sh --list-steps | --list | --fresh
 
 | 脚本 | 管什么 |
 |---|---|
-| `deployments/scripts/tools/check-modules.sh` | 全 17 项:模块元数据 / `REQUIRES` 拓扑 / `bash -n` / TOGGLE 声明 / helm 离线副本 / kubespray 补丁在位 / 离线回归套件 / 版本钉子闭环 / 凭据卫生 |
+| `deployments/scripts/tools/check-modules.sh` | 全 19 项:模块元数据 / `REQUIRES` 拓扑 / `bash -n` / TOGGLE 声明 / helm 离线副本 / kubespray 补丁在位 / 离线回归套件 / 版本钉子闭环 / 凭据卫生 |
 | `deployments/scripts/tools/check-manifests.sh` | 仓库自有 YAML 能否解析(排除 vendored 上游树 / chart 的 Go 模板 / INI 格式 inventory) |
 | `deployments/scripts/tools/images/check-image-manifest.sh --kubespray` | `images.manifest` ↔ kubespray 预加载清单交叉核对 |
+| 优雅覆盖/UNINSTALL | 见 [`docs/graceful-overwrite/`](../graceful-overwrite/)(design / README):安装登记(`record_installed_component`)+ 反序优雅卸载(cluster-teardown.sh);check-modules ⑲ 静态校验 |
 
 一条命令本地复现 CI 全口径(失败即 `exit 1`):
 

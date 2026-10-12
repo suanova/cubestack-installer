@@ -46,8 +46,8 @@ _metax_cleanup_residual() {
     say "  清理残留(CR / CRD / ${_mns} 命名空间 / default 旧资源)..."
     SSH "${K} delete clusteroperator -n ${_mns} cluster-operator --ignore-not-found >/dev/null 2>&1" || true
     SSH "${K} delete crd clusteroperators.gpu.metax-tech.com --ignore-not-found >/dev/null 2>&1" || true
-    SSH "${K} patch ns ${METAX_NAMESPACE} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
-    SSH "${K} delete ns ${METAX_NAMESPACE} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "${K} patch ns ${_mns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
+    SSH "${K} delete ns ${_mns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
     # 清理集群级残留(ClusterRole/RoleBinding 无命名空间资源; 无 Helm 标签时 helm 无法接管 → 必须删掉)
     for _cr in $(SSH "${K} get clusterrole -o name 2>/dev/null" | grep -i 'metax' || true); do
         SSH "${K} delete ${_cr} --ignore-not-found >/dev/null 2>&1" || true
@@ -55,7 +55,7 @@ _metax_cleanup_residual() {
     for _crb in $(SSH "${K} get clusterrolebinding -o name 2>/dev/null" | grep -i 'metax' || true); do
         SSH "${K} delete ${_crb} --ignore-not-found >/dev/null 2>&1" || true
     done
-    for _res in "deployment ${METAX_RELEASE_NAME}-metax-operator" "job metax-pre-delete" \
+    for _res in "deployment ${_mrel}-metax-operator" "job metax-pre-delete" \
                 "service controller-manager-metrics-service" "service upgrade-webhook-service" \
                 "serviceaccount metax-operator" "serviceaccount metax-gpu-scheduler" \
                 "serviceaccount metax-maca" "serviceaccount metax-pre-delete" \

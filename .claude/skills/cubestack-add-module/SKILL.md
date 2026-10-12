@@ -21,7 +21,7 @@ description: CubeStackInstaller 新增部署模块的端到端标准流程技能
 | 私服抖动时组件装不上,"回退本地 chart" 空转 | 回退代码**写了**,但仓库里压根没有那份离线 chart —— 从没被提交过 | **规则 7: chart 离线副本必须 vendored 进 `cubestack-addon/<组件>/` 并随 git 分发** |
 | 文档/脚本里写着 `offline-files/<组>/`,机器上目录却不存在(清单里登记了 group, 却没人建目录) | 新模块只"登记/写路径",没人负责首次建目录、放 README、把镜像列进清单 | **规则 8: 镜像登记 `images.manifest` + 首建 `offline-files/<group>/`(带 README)** |
 
-## 新增模块 6 步标准流程
+## 新增模块 8 步标准流程
 
 ### 步骤 0:确认模块归属与序号
 
@@ -48,6 +48,7 @@ modules/03_addon/  阶段 addon (附加组件; 01~19 中间件, 20 起自研, 2x
 # REPEAT: 0                     # 0=断点续跑(装完写状态, 重跑跳过); 1=每次执行(幂等检查/verify)
 # TOGGLE: <VAR>                 # (可选) cluster.conf 变量名, true/1/yes/on 时自动启用
 # REQUIRES: <key1> [key2...]    # (可选) 依赖模块: 执行前须已完成的模块 key 列表
+# UNINSTALL: 1                  # (可选) 声明该模块可被 cluster-teardown 反序优雅卸载
 # ============================================================
 set -euo pipefail
 
@@ -190,6 +191,30 @@ sudo docker exec cubestack-install bash -lc 'bash /opt/cubestack-installer/deplo
 
 ⚠ 目录同步用 `modules/.`(尾部斜杠 = 复制内容),**不要** `docker cp modules/` 不带斜杠复制整个目录 —— 会生成 `modules/modules/` 嵌套副本导致模块重复发现。
 
+### 步骤 7:安装成功点登记(装进集群的组件)
+
+模块在**安装/校验成功的收尾处**调用 `record_installed_component "<key>"`(`lib-common.sh`, 优雅覆盖登记):
+
+- 写入集群内 ConfigMap `cubestack-install-record`(kube-system),是优雅覆盖时**按首装序反序优雅卸载**的依据(cluster-teardown.sh 读取);重跑不改变首装序(seq 保留)。
+- 只登记**真正装进集群**的组件(verify_* / ceph_backup 等无集群资产的运维工具不登记;模块自我跳过 TOGGLE=false 时不登记)。
+- **写失败仅告警, 绝不影响部署**(登记是增强, 不是依赖)。
+
+### 步骤 8:声明可卸载(可卸载的组件, 可选)
+
+可被优雅覆盖**反序卸载**的组件:头部声明 `# UNINSTALL: 1`,并在模块内实现卸载分支:
+
+```bash
+# 卸载分支(优雅覆盖): 由 cluster-teardown.sh 以 CUBESTACK_MODULE_ACTION=uninstall 调用
+if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+    init_remote_kubectl || exit 1
+    _uninstall_component   # 存在性检查 → 优雅停 → 卸载 → 残留清理; 幂等/有界/告警不中止
+    exit 0
+fi
+```
+
+- 分支**必须在 TOGGLE 跳过检查之前** —— 模块被关掉(GPU_OPERATOR_ENABLED=false 等)、但集群里还装着旧版时,也必须要能卸;卸载段自带所需变量派生与 `init_remote_kubectl`,不依赖安装路径的变量块。
+- `check-modules.sh` ⑲ 静态校验声明与分支位置(声明 `# UNINSTALL: 1` 必须含 `CUBESTACK_MODULE_ACTION:-install` 分支且行号在 TOGGLE 判断之前);卸载段要求与各组件卸载动作见 `docs/graceful-overwrite/design.md` §3.2。
+
 ## 修改既有模块的约束
 
 - 模块之间不互相 source;公共逻辑下沉 lib-common.sh 或 tools/
@@ -212,13 +237,15 @@ sudo docker exec cubestack-install bash -lc 'bash /opt/cubestack-installer/deplo
 - [ ] **(拉镜像的模块)`deployments/offline-files/<group>/README.md` 已建并 `git add`(空目录/无 README 的目录提交后会消失;tar 不入库)**
 - [ ] `bash deployments/scripts/tools/images/check-image-manifest.sh` 通过(改过清单时)
 - [ ] `bash deployments/scripts/tools/check-modules.sh` exit 0(第 ⑩ 项会拦住缺失的离线副本)
+- [ ] **(装进集群的组件)安装成功点已调用 `record_installed_component "<key>"`(写失败仅告警, 不影响部署)**
+- [ ] **(可卸载组件)头部 `# UNINSTALL: 1` + `CUBESTACK_MODULE_ACTION=uninstall` 分支在 TOGGLE 检查之前(check-modules ⑲ 校验)**
 - [ ] `--list-steps` 出现新模块;`--steps <key>` 调度正确(不带出多余 operator)
 - [ ] 部署容器已同步(如适用)且容器内 check-modules 通过
 
 ## 测试用例(验证本技能自身是否有效)
 
 以下提示词可用来验证本技能:
-1. "我要给 cubestack-installer 新增一个 XX 组件部署模块,帮我做" → 应引导走 6 步流程而非直接写代码
+1. "我要给 cubestack-installer 新增一个 XX 组件部署模块,帮我做" → 应引导走 8 步流程而非直接写代码
 2. "把 modules/03_addon/11_keycloak.sh 的占位实现改成真实逻辑" → 应替换 init 块为 init_remote_kubectl
 3. "为什么我的新模块报 K: unbound variable" → 应指向 init_remote_kubectl 规则
 4. "检查我新写的模块是否合规" → 应运行 check-modules.sh 并逐项核对清单
