@@ -347,28 +347,24 @@ find_offline_tar() {
                 *) warn "  $(basename "${t}") 内容为 ${src}, 非 ${suffix}, 跳过" >&2 ;;
             esac
         done
-        # ★ 2026-10-12: 调用方 glob 保持 *.tar, 此处自动再匹配 .gz 形式(如 *.tar.gz)——
-        #   用户可能把离线 tar 就地 gzip 压缩省盘; python tarfile 自动识别压缩(见 tar_first_image_tag)。
-        #   ⚠ 与 plain-tar 快路径不同: .gz **不做"内容读不出也接受"兜底** —— 压缩中是半成品
-        #   (tar 截断 → 读不出 → 若兜底接受会把在压的其它镜像误当成目标, 2026-10-12 实测踩到);
-        #   读不出即跳过(未压完/损坏), 压完自然可匹配。
-        for t in "${d}"/${glob}.gz; do
-            [ -f "${t}" ] || continue
-            src="$(tar_first_image_tag "${t}")"
-            if [ -z "${src}" ]; then
-                warn "  $(basename "${t}") 内容不可读(压缩中/损坏?), 跳过" >&2
-                continue
-            fi
-            case "${src}" in
-                *"${suffix}") echo "${t}"; return 0 ;;
-                *) warn "  $(basename "${t}") 内容为 ${src}, 非 ${suffix}, 跳过" >&2 ;;
-            esac
-        done
-        # 兜底: 无 glob 命中时扫描全部 *.tar / *.tar.gz 按内容匹配
-        for t in "${d}"/*.tar "${d}"/*.tar.gz; do
+        # 兜底: 无 glob 命中时扫描全部 *.tar 按内容匹配
+        for t in "${d}"/*.tar; do
             [ -f "${t}" ] || continue
             case "$(tar_first_image_tag "${t}")" in
                 *"${suffix}") echo "${t}"; return 0 ;;
+            esac
+        done
+        # ★ 2026-10-12: .tar.gz 支持(大件就地 gzip 省盘)—— **文件名匹配, 不做内容检查**:
+        #   · gzip 不可反向寻址, 而 docker-archive 的 manifest.json 在**归档末尾**
+        #     ⇒ 任何内容检查 = 整卷解压(11G 级 ~90s/次, 逐镜像调用不可承受; 实测);
+        #   · tar 文件名是权威(上游 ref 的 /,: → _; 同 25_cubestack_operator 的实践),
+        #     内容校验由生产侧(harbor-save)与 plain .tar 路径(可随机寻址, 毫秒级)承担。
+        #   文件名形如 <域>_<路径(段内 _)>_<tag>.tar.gz —— 归一化 suffix 后做尾部匹配。
+        _ns="$(printf '%s' "${suffix}" | tr '/:' '__')"
+        for t in "${d}"/*.tar.gz; do
+            [ -f "${t}" ] || continue
+            case "$(basename "${t}")" in
+                *"_${_ns}.tar.gz") echo "${t}"; return 0 ;;
             esac
         done
     done
