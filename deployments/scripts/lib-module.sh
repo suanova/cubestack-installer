@@ -529,6 +529,9 @@ teardown_before_overwrite() {
     [ -f "${_te}" ] || return 0
     cluster_exists || return 0
     warn "检测到集群已存在 → 先执行「优雅覆盖」: 按安装登记反序卸载已装组件(设计 docs/graceful-overwrite/)"
+    # 计划感知(I1): 本函数在 deploy-cluster 进程内执行, RUN_STEPS 为全局; 引擎据此跳过
+    # "非本次计划"的拆除(尤其不含 ceph 时保留 Ceph 集群/OSD 数据; 与覆盖预检 _RUN_CEPH 同源)
+    export CUBESTACK_TEARDOWN_PLAN_STEPS="${RUN_STEPS[*]:-}"
     bash "${_te}" --uninstall || warn "优雅卸载未完成(继续; ceph 安全序与 k8s 覆盖流程兜底)"
     export CUBESTACK_TEARDOWN_DONE=1
     return 0

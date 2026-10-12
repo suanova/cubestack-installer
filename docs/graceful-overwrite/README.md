@@ -50,6 +50,9 @@ multus / rdma_shared_dev_plugin / cubestack_operator / netshoot)∪ 登记中的
 - **挂点 B**(`deployments/scripts/lib-module.sh`, 执行 `k8s_deploy` 之前、与覆盖提示同位):
   **新容器场景**(挂点 A 时还没有 SSH 密钥、探测不到集群)兜底 —— 此刻接入引导
   (vm_sshkey/k8s_passwordless)已跑完、密钥就绪。`CUBESTACK_TEARDOWN_DONE` 防与挂点 A 双跑。
+- **计划感知(拆除范围对齐本次计划)**: 引擎按挂点导出的执行计划拆除 —— **计划不含 `ceph` 时跳过
+  Ceph 卸载并响亮说明**(保留 Ceph 集群/OSD 数据; 与覆盖预检 `_RUN_CEPH` 闸同源); 计划外的其他
+  组件仍会优雅停机(其资源随 K8s 覆盖消亡、不会自动重装, 引擎打印一行信息)。
 - **非交互且无 `--yes`**: 引擎**跳过卸载并醒目警告**(节点旧集群 reset 前置会再次要求
   `--yes`, 闸门一致)。
 

@@ -4,6 +4,9 @@
 # 设计: docs/graceful-overwrite/design.md(方案 A: 模块自持卸载段)
 #   · 候选 = 声明 `# UNINSTALL: 1` 的模块 ∪ 登记(ConfigMap cubestack-install-record)中的组件;
 #   · 拆序 = 登记 seq 降序 → 未登记者按模块文件序反排插后 → ceph 强制压轴(安全不变量);
+#   · 计划感知: 覆盖挂点 A/B 导出 CUBESTACK_TEARDOWN_PLAN_STEPS(本次执行计划 = RUN_STEPS);
+#     计划**不含 ceph** 时跳过其卸载并响亮说明(保留 Ceph 集群/OSD 数据 —— 与覆盖预检
+#     _RUN_CEPH 闸同源语义); 空 = 手工调用(无计划上下文) → 行为不变(全量拆除);
 #   · 逐组件以 CUBESTACK_MODULE_ACTION=uninstall 调用其模块脚本(模块内存在性检查, 幂等);
 #   · 失败/超时 → 告警不中止(后续 ceph 安全序与 kubeadm reset 兜底); 收尾汇总。
 # 用法:
@@ -207,6 +210,28 @@ PY
         if [ -n "${TEST_INV}" ]; then
             warn "  测试钩子生效(CUBESTACK_TEARDOWN_TEST_INVENTORY): 仅打印, 不实际执行"
             exit 0
+        fi
+        # ★ 计划感知门(I1; 挂点 A/B 导出 CUBESTACK_TEARDOWN_PLAN_STEPS, 空 = 手工调用 → 行为不变):
+        #   引擎拆除默认不看本次计划; 覆盖场景下计划不含 ceph 时必须跳过其销毁 —— 否则
+        #   `--skip ceph`/`--with-k8s` 等计划会误删计划外 Ceph 数据(违背覆盖预检 _RUN_CEPH 语义)。
+        if [ -n "${CUBESTACK_TEARDOWN_PLAN_STEPS:-}" ]; then
+            _plan_ceph=0
+            case " ${CUBESTACK_TEARDOWN_PLAN_STEPS//,/ } " in *" ceph "*) _plan_ceph=1 ;; esac
+            if [ "${_plan_ceph}" = "0" ]; then
+                _order="$(printf '%s\n' "${_order}" | awk -F'\t' '$1 != "ceph"')"
+                warn "本次计划不含 ceph → 跳过 Ceph 卸载(保留 Ceph 集群/OSD 数据; 与覆盖预检 _RUN_CEPH 语义一致)。如需销毁旧 Ceph: 把 ceph 纳入计划, 或手工 ceph-cleanup.sh --delete-cluster"
+            fi
+            # 计划外的其他组件: 仍优雅停机(资源随 K8s 覆盖消亡, 不会自动重装) —— 仅一行信息
+            _plan_str=" ${CUBESTACK_TEARDOWN_PLAN_STEPS//,/ } "
+            _notin=""
+            while IFS=$'\t' read -r _pk _ps _pr; do
+                [ -n "${_pk}" ] || continue
+                case "${_plan_str}" in
+                    *" ${_pk} "*) ;;
+                    *) _notin="${_notin:+${_notin} }${_pk}" ;;
+                esac
+            done <<< "${_order}"
+            [ -n "${_notin}" ] && say "  (以下组件非本次计划内: 优雅停机后其资源随 K8s 覆盖消亡, 不会自动重装: ${_notin})"
         fi
         if [ "${ASSUME_YES}" != "1" ]; then
             if [ -t 0 ]; then
