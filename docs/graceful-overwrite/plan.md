@@ -1102,7 +1102,10 @@ PY
         done <<< "${_order}"
         echo ""
         say "优雅卸载完成: 成功 ${_n_ok} 个, 失败/跳过 ${_n_fail} 个"
-        [ "${_n_fail}" -gt 0 ] && warn "有组件未完全卸净 —— 后续 ceph 安全序(⓪ 泛化扫描)与 kubeadm reset 将兜底"
+        if [ "${_n_fail}" -gt 0 ]; then
+            warn "有组件未完全卸净 —— 后续 ceph 安全序(⓪ 泛化扫描)与 kubeadm reset 将兜底"
+        fi
+        exit 0
         ;;
 esac
 ```
@@ -1119,13 +1122,18 @@ INV="${TMP}/inv.json"
 cat > "${INV}" <<'EOF'
 {"schema":1,"components":[
  {"key":"metallb","seq":1,"status":"done"},
+ {"key":"k8s_registry","seq":2,"status":"done"},
  {"key":"ceph","seq":3,"status":"done"},
+ {"key":"multus","seq":5,"status":"done"},
  {"key":"cubestack_operator","seq":9,"status":"done"}
 ]}
 EOF
 ORDER="$(CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_TEARDOWN_TEST_INVENTORY="${INV}" bash "${ENGINE}" --list --raw 2>/dev/null)"
 chk "③ ceph 压轴(最后一行)" "ceph" "$(printf '%s\n' "${ORDER}" | tail -1 | cut -f1)"
 chk "③ 登记 seq 降序生效(operator 在 ceph 前)" "cubestack_operator" "$(printf '%s\n' "${ORDER}" | sed -n '1p' | cut -f1)"
+chk "③ 登记 seq 降序判别(multus seq5 先于 registry seq2)" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
+  { n++; if ($1=="multus") a=n; if ($1=="k8s_registry") b=n }
+  END { print (a>0 && b>0 && a<b) ? 1 : 0 }')"
 chk "③ metallb 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'metallb')"
 chk "③ ceph_csi 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'ceph_csi')"
 chk "③ 探测降级组(netshoot)在登记组之后" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
