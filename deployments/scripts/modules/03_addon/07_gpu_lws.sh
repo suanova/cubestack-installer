@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: LWS_ENABLED
+# UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态, 重跑自动跳过; --fresh 清状态重装。
@@ -41,6 +42,34 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 卸载分支(优雅覆盖): helm uninstall(helm 安装时; bundle 安装无 release, 属正常) +
+# webhook/命名空间/CRD 清理(与安装路径开头的"清理上次残留"同款, 幂等)。
+# ⚠ 位于 TOGGLE 检查之前。
+if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+    init_remote_kubectl || exit 1
+    _lns="${LWS_NAMESPACE:-lws-system}"
+    _lrel="${LWS_RELEASE_NAME:-lws}"
+    _have=0
+    SSH "${K} get ns ${_lns} >/dev/null 2>&1" && _have=1
+    SSH "${K} get crd leaderworkersets.leaderworkerset.x-k8s.io >/dev/null 2>&1" && _have=1
+    if [ "${_have}" = "0" ]; then
+        say "  LWS 不存在, 跳过"
+        exit 0
+    fi
+    if command -v helm >/dev/null 2>&1 && sync_kubeconfig >/dev/null 2>&1; then
+        helm uninstall "${_lrel}" -n "${_lns}" --wait --timeout 180s >/dev/null 2>&1 \
+            || say "  无 helm release 或 uninstall 未完成(bundle 安装属正常), 继续清理"
+    fi
+    say "  清理 webhook / 命名空间 / CRD..."
+    SSH "${K} delete validatingwebhookconfiguration lws-validating-webhook-configuration --ignore-not-found >/dev/null 2>&1" || true
+    SSH "${K} delete mutatingwebhookconfiguration lws-mutating-webhook-configuration --ignore-not-found >/dev/null 2>&1" || true
+    SSH "${K} patch ns ${_lns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
+    SSH "${K} delete ns ${_lns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "${K} delete crd leaderworkersets.leaderworkerset.x-k8s.io disaggregatedsets.disaggregatedset.x-k8s.io --ignore-not-found >/dev/null 2>&1" || true
+    ok "  LWS 已卸载(ns/webhook/CRD)"
+    exit 0
+fi
 
 # ---- 开关 ----
 [ "${LWS_ENABLED:-false}" = "true" ] || { say "LWS_ENABLED=false, 跳过 LeaderWorkerSet"; exit 0; }
@@ -328,3 +357,6 @@ echo "  CRD:         leaderworkersets.leaderworkerset.x-k8s.io / disaggregatedse
 echo "  DisaggregatedSet: enableDisaggregatedSet=${LWS_DISAGGREGATEDSET_ENABLED:-true}(直接创建该 CR 即可, 解耦推理)"
 echo "  端到端验证:  sudo ./deploy-cluster.sh --steps verify_lws"
 echo "  卸载:        helm uninstall ${LWS_RELEASE_NAME} -n ${LWS_NAMESPACE}; 删 CRD"
+
+# 优雅覆盖登记
+record_installed_component "gpu_lws"
