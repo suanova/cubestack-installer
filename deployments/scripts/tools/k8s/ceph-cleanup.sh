@@ -104,7 +104,8 @@ for pod in load(sys.argv[2]).get("items", []):
         if rr:
             print("scale\t%s\t%s\t%s" % (ns, rr[0]["kind"], rr[0]["name"]))
         else:
-            print("delpod\t%s\t%s\t" % (ns, name))
+            # 无主的裸 RS(pod 由它直接管) → 删 RS 本体(只删 Pod 会被它重建)
+            print("delrs\t%s\t%s\t" % (ns, n))
     elif k == "StatefulSet":
         sr = (sts.get((ns, n), {}).get("metadata", {}).get("ownerReferences") or [])
         if sr and sr[0]["kind"] not in ("Deployment", "StatefulSet", "ReplicaSet"):
@@ -113,8 +114,12 @@ for pod in load(sys.argv[2]).get("items", []):
             print("scale\t%s\t%s\t%s" % (ns, k, n))
     elif k == "Deployment":
         print("scale\t%s\t%s\t%s" % (ns, k, n))
-    else:
+    elif k in ("DaemonSet", "Job", "ReplicationController"):
         print("delpod\t%s\t%s\t" % (ns, name))
+    else:
+        # 自定义 CR 直管 Pod(实测: CNPG 的 pod owner 就是 Cluster CR) → 删 CR 本体,
+        # 由其 operator 级联收掉组件(只删 Pod 会被 operator 重建)
+        print("delcr\t%s\t%s\t%s" % (ns, k.lower(), n))
 PYEOF
 )"
         [ -z "${_acts}" ] && { _sweep_done=1; break; }
@@ -123,6 +128,7 @@ PYEOF
             case "${_act}" in
                 scale)  say "     停用 ${_a1}/${_a2} ${_a3}(replicas=0)"; SSH "${K} -n ${_a1} scale ${_a2,,} ${_a3} --replicas=0 >/dev/null 2>&1" || true ;;
                 delpod) say "     删除 Pod ${_a1}/${_a2}(优雅退出, ≤20s)"; SSH "${K} -n ${_a1} delete pod ${_a2} --grace-period=20 >/dev/null 2>&1" || true ;;
+                delrs)  say "     删除裸 ReplicaSet ${_a1}/${_a2}(无 Deployment 管理, 删 Pod 会被其重建)"; SSH "${K} -n ${_a1} delete rs ${_a2} --wait=false >/dev/null 2>&1" || true ;;
                 delcr)  say "     删除 CR ${_a2}/${_a3}(级联收掉其组件)"; SSH "${K} -n ${_a1} delete ${_a2} ${_a3} --wait=false >/dev/null 2>&1" || true ;;
             esac
         done <<< "${_acts}"
