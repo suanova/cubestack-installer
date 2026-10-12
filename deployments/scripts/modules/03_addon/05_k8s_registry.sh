@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: REGISTRY_ENABLED
+# UNINSTALL: 1
 # REQUIRES: k8s_deploy local_path metallb
 # 说明:
 #   · 集群内 registry(kubespray addon), **默认部署**(REGISTRY_ENABLED 默认 1/true)
@@ -29,6 +30,20 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 卸载分支(优雅覆盖): registry 是 ceph PVC 消费者之一 —— K8s 覆盖前先优雅停机
+# (scale 0; registry-pvc 受保护不动, kubespray 重装自动拉起新 registry)。
+# ⚠ 位于 TOGGLE 检查之前: 本次配置关掉 REGISTRY_ENABLED 时, 旧集群里的 registry 也要能停。
+if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+    init_remote_kubectl || exit 1
+    if SSH "${K} -n kube-system get deploy registry --no-headers 2>/dev/null | grep -q ."; then
+        say "  registry: 优雅停机(scale 0; registry-pvc 保留, 不删声明)"
+        SSH "${K} -n kube-system scale deploy registry --replicas=0 >/dev/null 2>&1 || true"
+    else
+        say "  registry: 不存在, 跳过"
+    fi
+    exit 0
+fi
 
 # 开关: 默认不部署, REGISTRY_ENABLED=1/true 或 --steps/--enable 显式启用
 if [ "${REGISTRY_ENABLED:-0}" != "1" ] && [ "${REGISTRY_ENABLED:-false}" != "true" ]; then
@@ -99,3 +114,6 @@ else
 fi
 
 ok "内置 registry 配置完成"
+
+# 优雅覆盖登记(registry 就绪才登记)
+record_installed_component "k8s_registry"

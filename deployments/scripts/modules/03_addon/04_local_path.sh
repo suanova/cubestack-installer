@@ -44,3 +44,6 @@ if ! grep '^local-path ' <<<"${SC}" | grep -q 'default'; then
     warn "local-path SC 存在但非默认(default); 若 registry 的 PVC 显式指定 storageClass=local-path 则无碍, 否则请设为默认"
 fi
 ok "local-path StorageClass 就绪: $(grep '^local-path ' <<<"${SC}" | awk '{print $1, $2}')"
+
+# 优雅覆盖登记(同 01_metallb; local_path 为 kubespray 资产, 无独立卸载动作)
+record_installed_component "local_path"
