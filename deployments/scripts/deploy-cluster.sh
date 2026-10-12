@@ -93,6 +93,11 @@ $(_component_meta_list stub)
   ② 清状态重来:        sudo ./deploy-cluster.sh --fresh        # = ① 且**先清断点状态**(REPEAT:0 的模块强制重跑)
      · 覆盖安装遇到节点上的**旧集群残留**(跨小版本 / 旧 etcd 二进制)时, k8s_deploy 前置会自动清除它
        (交互 15s 倒计时可中止; 加 --yes 免交互 —— 无人值守务必显式给)。原地升级未实现, 见 docs/cluster-upgrade-path.md
+     · **优雅覆盖**(2026-10-11): K8s 覆盖实际将执行且集群可达时, 会先读集群内安装登记
+       (ConfigMap cubestack-install-record)按首装序**反序优雅卸载**已装组件(先停消费者/CR 级联/
+       helm uninstall, 再动 Ceph, 最后 K8s 覆盖) —— 非暴力重置。倒计时 TEARDOWN_CONFIRM_SLEEP
+       (默认 30s)可 Ctrl-C; --yes 免交互。手动查看: tools/k8s/cluster-teardown.sh --list
+       设计: docs/graceful-overwrite/design.md
   ③ 单独装组件:        sudo ./deploy-cluster.sh --steps ceph         # 只装该组件(不动基座; 集群接入自动处理)
   · state 文件 deployments/config/.deploy.state 只记录"本机装到哪一步": 全新容器没有它是正常的(等价①)。
   · ⚠ ①/② 是**重装集群**的路: 节点上已有的旧 K8s 会被 kubeadm reset(既有防线: kubespray 侧检测到残留时
@@ -368,6 +373,28 @@ export LOG_FILE
 say "完整部署日志: ${LOG_FILE}"
 
 print_plan
+
+# ★ 优雅覆盖(2026-10-11 用户口径, 设计 docs/graceful-overwrite/): K8s 覆盖**实际将发生**时
+#   (RUN_STEPS 含 k8s_deploy 且其实状态非 done —— --fresh 清状态后天然成立), 且集群可达时:
+#   先读安装登记 → 按首装序反序优雅卸载已装组件(卸载段在各自模块内), 之后 ceph 预检块
+#   自然看到"无 CephCluster"(其删除分支空转)。⚠ 新容器此刻可能还没有 SSH 密钥 →
+#   cluster_exists 判不出集群 → 由挂点 B(执行 k8s_deploy 前, lib-module.sh)兜底。
+if [ "$(get_state k8s_deploy)" != "done" ]; then
+    _OVERWRITE_PENDING=0
+    for _ok_k in "${RUN_STEPS[@]:-}"; do
+        [ "${_ok_k}" = "k8s_deploy" ] && _OVERWRITE_PENDING=1
+    done
+    unset _ok_k
+    if [ "${_OVERWRITE_PENDING}" = "1" ] && cluster_exists; then
+        _te_args=()
+        [ "${ASSUME_YES}" = "1" ] && _te_args=(--yes)
+        say "检测到集群已存在且本次将覆盖重装 → 先执行「优雅覆盖」: 按安装登记反序卸载已装组件"
+        bash "${SCRIPT_DIR}/tools/k8s/cluster-teardown.sh" --uninstall "${_te_args[@]}" \
+            || warn "优雅卸载未完成(继续; ceph 安全序与 k8s 覆盖流程兜底)"
+        export CUBESTACK_TEARDOWN_DONE=1
+    fi
+    unset _OVERWRITE_PENDING
+fi
 
 # ⚠ Ceph 部署前强制确认(倒计时, 防覆盖磁盘 double-check 的兜底):
 #   print_plan 的红底提醒无倒计时(纯提示); 02_ceph 模块内部的倒计时在 k8s 部署之后,
