@@ -16,6 +16,7 @@
 #       harbor.isuanova.com/suanova/ssh-maca-pytorch:${DEV_LAB_IMAGE_TAG}
 #       harbor.isuanova.com/suanova/ssh-cuda-pytorch:${DEV_LAB_IMAGE_TAG}
 #   · 离线 tar: deployments/offline-files/dev-lab/(联网机: harbor-save-images.sh --group dev-lab);
+#     .tar 与 .tar.gz 均可(大件可就地 gzip 省盘; find_offline_tar 自动识别, 压缩中半成品跳过);
 #     缺某个 tar → 该镜像 warn 跳过(不阻断部署), 结尾汇总(🅰 诚实: 不伪装成功)。
 #   · 目标 ref: <集群 registry>/suanova/<name>:<tag>(去 Harbor 注册域保 suanova/ 路径,
 #     与 25_cubestack_operator 的自研镜像映射同款)。
