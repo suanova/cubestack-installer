@@ -429,6 +429,24 @@ else
     warn "  跳过(未找到 ${CEPH_TEST_SH})"
 fi
 
+# ---------- ⑫b k8s_scale 新节点列表纯度回归(2026-10-12 容器 d 事故) ----------
+# 事故: master 缺失警告(warn→stdout)被 `NEW_NODE_HOSTS=$(...)` 捕获 → 随 SCALE_NODES 进
+#   gen-inventory → 逐 token 写成 hosts.yml 的 new_node.hosts → kubespray "Inventory 解析失败"
+#   (根因同 2026-09-22 vlog 写 stdout 事故)。夹具从模块**提取函数体**执行, 断言捕获输出为
+#   纯 hostname(诊断文本只许走 stderr); 已做变异验证(去掉 >&2 即红)。见 tests/ 同名夹具。
+_SCALE_PURITY_SH="${SCRIPT_DIR}/tests/test-scale-new-nodes-purity.sh"
+if [ -f "${_SCALE_PURITY_SH}" ]; then
+    if _SCALE_PURITY_OUT="$(bash "${_SCALE_PURITY_SH}" 2>&1)"; then
+        ok "  k8s_scale 新节点列表纯度回归通过"
+    else
+        printf '%s\n' "${_SCALE_PURITY_OUT}" | sed 's/^/    /'
+        ck_fail "k8s_scale 新节点列表纯度回归未通过(详见上方失败项)"
+    fi
+    unset _SCALE_PURITY_OUT
+else
+    ck_fail "缺少 tests/test-scale-new-nodes-purity.sh(本回归必须接线, 防'写了没人跑')"
+fi
+
 # ---------- ⑬ API 入口: 本地代理语义与 all.yml 的自洽 ----------
 # 背景: kubespray 的 kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支
 #   **优先于** localhost 分支 —— 只要 all.yml 里还有**未注释**的 loadbalancer_apiserver 块,

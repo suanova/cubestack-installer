@@ -117,7 +117,7 @@ _auto_detect_new_nodes() {
         err "  请核对 cluster.conf 的 NODES(尤其 master IP)后再扩容"
         return 1
     fi
-    [ -n "${master_miss}" ] && warn "cluster.conf 中以下 master 不在集群(未部署/IP 变更? 本次不处理):${master_miss}"
+    [ -n "${master_miss}" ] && warn "cluster.conf 中以下 master 不在集群(未部署/IP 变更? 本次不处理):${master_miss}" >&2
 
     # 对比: cluster.conf 中 worker 的 hostname/IP 不在集群中的 → 新节点
     local new_hosts=""
@@ -179,6 +179,18 @@ else
     # 自动检测模式: 登录首个 master 核对集群, 找出未加入的 worker
     say "自动检测新节点(登录首个 master 核对集群, 对比 cluster.conf 与运行中集群节点)..."
     NEW_NODE_HOSTS=$(_auto_detect_new_nodes) || { err "自动检测失败"; exit 1; }
+
+    # ★ 2026-10-12(容器 d 事故根因的纵深防御): 捕获值必须是**纯 hostname 列表**(逗号分隔)。
+    #   `_auto_detect_new_nodes` 内任何诊断文本若漏走 stderr 都会随 SCALE_NODES 进 gen-inventory
+    #   → 按空白切词逐 token 写进 hosts.yml 的 new_node.hosts(master 缺失警告曾整行变 8 个"主机")
+    #   → kubespray "Inventory 解析失败"。此处硬校验: 含空白/换行/非 hostname 字符 → 响亮中止,
+    #   绝不让垃圾进 inventory(同类根因见 2026-09-22 vlog 写 stdout 事故)。
+    case "${NEW_NODE_HOSTS}" in
+        *[[:space:]]*|*[!a-zA-Z0-9._,:-]*)
+            err "新节点列表被非 hostname 内容污染(疑似诊断输出混进了 stdout): [${NEW_NODE_HOSTS}]"
+            err "  已拒绝写入 inventory; 请上报此输出以便定位污染源"
+            exit 1 ;;
+    esac
 
     if [ -z "${NEW_NODE_HOSTS}" ]; then
         ok "未检测到新节点 — 所有 worker 已在集群中, 无需扩容"
