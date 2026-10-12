@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: GPU_OPERATOR_ENABLED
+# UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态, 重跑部署自动跳过(不重复重装); --fresh 清状态后重装。
@@ -37,6 +38,59 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 清理 metax operator 残留(CR / CRD / 命名空间 / default 旧资源 / 集群级 RBAC)。
+# 安装路径(重装前清场)与卸载段(cluster-teardown)共用同一序列, 幂等。
+_metax_cleanup_residual() {
+    local _mns="${METAX_NAMESPACE:-metax-operator}" _mrel="${METAX_RELEASE_NAME:-metax-gpu-operator}"
+    say "  清理残留(CR / CRD / ${_mns} 命名空间 / default 旧资源)..."
+    SSH "${K} delete clusteroperator -n ${_mns} cluster-operator --ignore-not-found >/dev/null 2>&1" || true
+    SSH "${K} delete crd clusteroperators.gpu.metax-tech.com --ignore-not-found >/dev/null 2>&1" || true
+    SSH "${K} patch ns ${METAX_NAMESPACE} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
+    SSH "${K} delete ns ${METAX_NAMESPACE} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+    # 清理集群级残留(ClusterRole/RoleBinding 无命名空间资源; 无 Helm 标签时 helm 无法接管 → 必须删掉)
+    for _cr in $(SSH "${K} get clusterrole -o name 2>/dev/null" | grep -i 'metax' || true); do
+        SSH "${K} delete ${_cr} --ignore-not-found >/dev/null 2>&1" || true
+    done
+    for _crb in $(SSH "${K} get clusterrolebinding -o name 2>/dev/null" | grep -i 'metax' || true); do
+        SSH "${K} delete ${_crb} --ignore-not-found >/dev/null 2>&1" || true
+    done
+    for _res in "deployment ${METAX_RELEASE_NAME}-metax-operator" "job metax-pre-delete" \
+                "service controller-manager-metrics-service" "service upgrade-webhook-service" \
+                "serviceaccount metax-operator" "serviceaccount metax-gpu-scheduler" \
+                "serviceaccount metax-maca" "serviceaccount metax-pre-delete" \
+                "configmap metax-pre-delete-configmap"; do
+        SSH "${K} delete ${_res} -n default --ignore-not-found >/dev/null 2>&1" || true
+    done
+    SSH "${K} delete clusterrolebinding metax-operator-rolebinding metax-gpu-scheduler --ignore-not-found >/dev/null 2>&1" || true
+    sleep 3
+}
+
+# 卸载分支(优雅覆盖): 存在性检查 → helm uninstall(尽力) → 残留清理序列(与安装前清场同款)。
+# ⚠ 位于 TOGGLE 检查之前: GPU_OPERATOR_ENABLED=false 时旧 operator 也要能卸。
+if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+    init_remote_kubectl || exit 1
+    _mns="${METAX_NAMESPACE:-metax-operator}"
+    _mrel="${METAX_RELEASE_NAME:-metax-gpu-operator}"
+    _have=0
+    SSH "${K} -n ${_mns} get deploy ${_mrel}-metax-operator --no-headers >/dev/null 2>&1" && _have=1
+    SSH "${K} get ns ${_mns} >/dev/null 2>&1" && _have=1
+    SSH "${K} get crd clusteroperators.gpu.metax-tech.com >/dev/null 2>&1" && _have=1
+    if [ "${_have}" = "0" ]; then
+        say "  metax GPU operator 不存在, 跳过"
+        exit 0
+    fi
+    if command -v helm >/dev/null 2>&1 && sync_kubeconfig >/dev/null 2>&1; then
+        say "  metax: helm uninstall ${_mrel}(ns=${_mns})..."
+        helm uninstall "${_mrel}" -n "${_mns}" --wait --timeout 180s >/dev/null 2>&1 \
+            || warn "  helm uninstall 未完成(残留由清理序列兜底)"
+    else
+        warn "  helm 不可用 / kubeconfig 同步失败 → 跳过 helm uninstall, 直接残留清理"
+    fi
+    _metax_cleanup_residual
+    ok "  metax GPU operator 已卸载"
+    exit 0
+fi
 
 # ---------------- 镜像列表模式(METAX_LIST_IMAGES=true 仅打印离线 save 清单, 不部署) ----------------
 # 离线 tar 方式需在联网机器 pull+save 到 METAX_OFFLINE_DIR, 本模式打印所需镜像与保存命令。
@@ -372,28 +426,7 @@ except Exception: pass' || true)"
 
 # ---------------- 4. helm 原生安装(取代 kubectl apply) ----------------
 say "[4/5] helm 安装 ${METAX_RELEASE_NAME} → ${METAX_NAMESPACE}(registry=${METAX_REGISTRY}, k8s=${K8S_VERSION}) ..."
-# 先清理上次部署的残留(CR/CRD/命名空间/default 旧资源), 避免 operator 状态/CRD 冲突导致异常
-say "  清理上次残留(CR / CRD / ${METAX_NAMESPACE} 命名空间 / default 旧资源)..."
-SSH "${K} delete clusteroperator -n ${METAX_NAMESPACE} cluster-operator --ignore-not-found >/dev/null 2>&1" || true
-SSH "${K} delete crd clusteroperators.gpu.metax-tech.com --ignore-not-found >/dev/null 2>&1" || true
-SSH "${K} patch ns ${METAX_NAMESPACE} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
-SSH "${K} delete ns ${METAX_NAMESPACE} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
-# 清理集群级残留(ClusterRole/RoleBinding 无命名空间资源; 无 Helm 标签时 helm 无法接管 → 必须删掉)
-for _cr in $(SSH "${K} get clusterrole -o name 2>/dev/null" | grep -i 'metax' || true); do
-    SSH "${K} delete ${_cr} --ignore-not-found >/dev/null 2>&1" || true
-done
-for _crb in $(SSH "${K} get clusterrolebinding -o name 2>/dev/null" | grep -i 'metax' || true); do
-    SSH "${K} delete ${_crb} --ignore-not-found >/dev/null 2>&1" || true
-done
-for _res in "deployment ${METAX_RELEASE_NAME}-metax-operator" "job metax-pre-delete" \
-            "service controller-manager-metrics-service" "service upgrade-webhook-service" \
-            "serviceaccount metax-operator" "serviceaccount metax-gpu-scheduler" \
-            "serviceaccount metax-maca" "serviceaccount metax-pre-delete" \
-            "configmap metax-pre-delete-configmap"; do
-    SSH "${K} delete ${_res} -n default --ignore-not-found >/dev/null 2>&1" || true
-done
-SSH "${K} delete clusterrolebinding metax-operator-rolebinding metax-gpu-scheduler --ignore-not-found >/dev/null 2>&1" || true
-sleep 3
+_metax_cleanup_residual
 # 说明: 使用修复过的 chart(已补 deployment namespace + openshift.deploy=false);
 # helm 自动安装 crds/ 目录的 CRD、自动把资源放进 release 命名空间(不再需要手工 CRD/kubectl apply)。
 # 注: dataExporter(mx-exporter 指标导出, 原 MX_EXPORTER_ENABLED 开关)已随可观测性栈整体移除
@@ -541,3 +574,6 @@ echo "  资源查看:    kubectl get pods,ds -n ${METAX_NAMESPACE}"
 echo "  说明:       当前集群无 GPU 节点, 已跳过 driver/maca/device/scheduler 等 GPU 组件等待;"
 echo "              后续插入 GPU 卡并确保驱动就绪后, 用 --steps verify_metax_gpu 复查节点是否发现 GPU 资源"
 fi
+
+# 优雅覆盖登记(仅安装路径到达此处)
+record_installed_component "gpu_operator"
