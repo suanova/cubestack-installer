@@ -33,10 +33,13 @@
 #   ⑱ 版本目录 ↔ 档案闭合: 入库档案逐版本 ↔ 其树表值; 在场版本目录的 VERSION.profile ↔ 入库档案、
 #      tree.tar.gz 指纹、关键二进制与 K8S_VERSION 匹配、LOCAL_ONLY 语义自洽(无目录则跳过)
 #      (设计 docs/kubespray-versioning/design.md; 反证见 tools/tests/test-kubespray-version-select.sh 同类夹具)
+#   ⑲ 优雅覆盖: 声明 `# UNINSTALL: 1` 的模块必须含 CUBESTACK_MODULE_ACTION 卸载分支, 且分支
+#      位于 TOGGLE 判断之前(开关关闭时也要能卸载旧组件); 并跑 tools/tests/test-cluster-teardown.sh
+#      (设计 docs/graceful-overwrite/design.md)
 # 用法: bash check-modules.sh           # 校验全部模块(只读, 无需 root)
 #       bash check-modules.sh --quiet   # 只输出违规项
 # 退出码: 0=全部通过; 1=存在违规(列出清单)
-# CI: .github/workflows/ci-validate.yml 在每次 PR / 推送 main 时跑本脚本(全 17 项);
+# CI: .github/workflows/ci-validate.yml 在每次 PR / 推送 main 时跑本脚本(全 19 项);
 #     同一条命令本地可复现 —— 见 docs/scripts-development-spec.md §7。
 # ============================================================
 set -u
@@ -58,7 +61,7 @@ ck_fail() { bad "$*"; FAIL=1; }
 say "==== 模块静态校验(${MODULES_DIR}) ===="
 
 # ---------- ① bash -n 语法 ----------
-say "[1/18] bash -n 语法检查 ..."
+say "[1/19] bash -n 语法检查 ..."
 SYNTAX_FAIL=0
 while IFS= read -r -d '' f; do
     bash -n "$f" 2>/dev/null || { bad "语法错误: ${f#$MODULES_DIR/}"; SYNTAX_FAIL=1; FAIL=1; }
@@ -70,7 +73,7 @@ meta() { sed -nE "s/^#[[:space:]]*${2}:[[:space:]]*(.*)$/\1/p" "$1" | head -1; }
 phase_dir() { case "$(basename "$(dirname "$1")")" in
     01_env) echo "env";; 02_k8s) echo "k8s";; 03_addon) echo "addon";; *) echo "?";; esac; }
 
-say "[2/18] 头部元数据齐全性 ..."
+say "[2/19] 头部元数据齐全性 ..."
 declare -A KEYS=()
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -88,10 +91,10 @@ while IFS= read -r -d '' f; do
 done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] && ok "元数据齐全"
 
-say "[3/18] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
+say "[3/19] MODULE key 唯一性 ..."   # 已在上面检查, 这里输出结果
 [ "${FAIL}" = "0" ] || true
 
-say "[4/18] PHASE 合法性 + 目录一致性 ..."
+say "[4/19] PHASE 合法性 + 目录一致性 ..."
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
     ph="$(meta "$f" PHASE)"
@@ -101,7 +104,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${FAIL}" = "0" ] || true
 
 # ---------- ⑤ REQUIRES 引用 + 全量拓扑 ----------
-say "[5/18] REQUIRES 引用存在性 + 全量无环 ..."
+say "[5/19] REQUIRES 引用存在性 + 全量无环 ..."
 REQ_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -141,7 +144,7 @@ else
 fi
 
 # ---------- ⑥ init_remote_kubectl 使用检查 ----------
-say "[6/18] 远端 kubectl 初始化(K/SSH)调用检查 ..."
+say "[6/19] 远端 kubectl 初始化(K/SSH)调用检查 ..."
 INIT_MISS=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -155,7 +158,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${INIT_MISS}" = "0" ] && ok "使用 K/SSH 的模块均已调用 init_remote_kubectl"
 
 # ---------- ⑦ TOGGLE 与 cluster.conf.example 一致性 ----------
-say "[7/18] TOGGLE 变量在 cluster.conf.example 声明 ..."
+say "[7/19] TOGGLE 变量在 cluster.conf.example 声明 ..."
 if [ -f "${CONF_EXAMPLE}" ]; then
     TOG_MISS=0
     while IFS= read -r -d '' f; do
@@ -172,7 +175,7 @@ else
 fi
 
 # ---------- ⑧ 文件序号与目录 ----------
-say "[8/18] 文件名序号规范(NN_ 前缀) ..."
+say "[8/19] 文件名序号规范(NN_ 前缀) ..."
 NUM_FAIL=0
 while IFS= read -r -d '' f; do
     rel="${f#$MODULES_DIR/}"
@@ -191,7 +194,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 #   cubestack-patch-apply.sh / cubestack-kubespray-upgrade.sh)—— 它们既不是模块也不在 scripts/ 下,
 #   于是本支新增的两个脚本从未被 bash -n 过(写错一行要到实机升级时才发现)。
 #   只取**顶格一层**: vendored 树与 cubestack-patches/ 里的 .sh 属上游/数据文件, 不归本项管。
-say "[9/18] tools/ + kubespray 入口脚本语法检查 ..."
+say "[9/19] tools/ + kubespray 入口脚本语法检查 ..."
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 KSD_SH_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/kubespray"
 SH_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
@@ -211,7 +214,7 @@ unset SH_ROOT 2>/dev/null || true
 # 为什么要有这一条: 曾有模块**写了**"私服拉取失败就回退本地 chart",
 # 但仓库里压根没有那份文件 —— 私服一抖动, 回退就是空转, 回退代码形同虚设。
 # 光靠文档挡不住这种缺失(写的时候都以为回退能兜住), 所以放进静态校验。
-say "[10/18] helm chart 离线副本检查 ..."
+say "[10/19] helm chart 离线副本检查 ..."
 ADDON_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/cubestack-addon"
 CHART_FAIL=0; CHART_WARN=0; CHART_OKN=0
 # 判据: **行首就是 helm 命令** —— 只排除注释不够, 变量/err 字符串里提到
@@ -272,7 +275,7 @@ done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${CHART_FAIL}" = "0" ] && ok "安装 chart 的模块均有 vendored 离线副本(${CHART_OKN} 个模块通过)"
 
 # ---------- ⑪ kube-vip 控制平面 VIP(与 kubespray inventory 的一致性) ----------
-say "[11/18] kube-vip 控制平面 VIP 配置检查 ..."
+say "[11/19] kube-vip 控制平面 VIP 配置检查 ..."
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 KV_ADDONS="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/k8s_cluster/addons.yml"
 KV_ALL_YML="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/all/all.yml"
@@ -412,7 +415,7 @@ fi
 # 判错一类盘就是毁一块业务盘。它们的判定分支(整盘 LVM PV、未激活 VG、混合盘、nbd…)
 # 在普通 fixture 里造不出来、在真机上又不敢试 —— 所以用 stub ssh + lsblk fixture 驱动真实
 # 脚本, 把"选哪些盘 / 拒哪些盘 / 远端载荷"全断言一遍。用例已做过变异验证(故意改坏判定会红)。
-say "[12/18] ceph 磁盘链路回归测试(离线 stub) ..."
+say "[12/19] ceph 磁盘链路回归测试(离线 stub) ..."
 CEPH_TEST_SH="${SCRIPT_DIR}/tests/ceph-disk-tests.sh"
 if [ -f "${CEPH_TEST_SH}" ]; then
     if CEPH_TEST_OUT="$(bash "${CEPH_TEST_SH}" 2>&1)"; then
@@ -439,7 +442,7 @@ fi
 #     localhost ≠ true ⇒ 属"尚未同步到本地代理语义"(纯 checkout / 开发机的常态) —— 只提示跳过
 #   为什么不用配置开关当门: 本地工作副本还没跑过 sync, all.yml 仍是旧形态, 用开关当门会在
 #   干净仓库上必然误报(⑪ 已因同一根因提示着, 再加一条只是噪音)。开关值仅在诊断信息里出现。
-say "[13/18] API 入口: 本地代理语义与 all.yml 一致性 ..."
+say "[13/19] API 入口: 本地代理语义与 all.yml 一致性 ..."
 API_HA_BAD=0
 if [ ! -f "${KV_ALL_YML}" ]; then
     warn "  未找到 ${KV_ALL_YML}, 跳过 ⑬(未生成 inventory?)"
@@ -477,7 +480,7 @@ fi
 # 比较的是**模式串本身**(各处变量名可能不同), 不是整行; 引号/行尾注释等写法差异先归一化掉。
 # 注: 第 ④ 份曾长期陈旧(缺 lws_manager / library_nginx), 2026-09-28 Task 7 已补齐并与前三分逐字节相同,
 #     故自本轮起纳入断言(此前注释写的"有意不纳入"已过期)。
-say "[14/18] PRELOAD_IMAGE_PATTERNS 四处副本一致性 ..."
+say "[14/19] PRELOAD_IMAGE_PATTERNS 四处副本一致性 ..."
 
 # 取某个文件里 PRELOAD_IMAGE_PATTERNS 的**模式串本身**(取不到时输出空串, 由调用方判存在性)。
 # 兼容三种写法: PRELOAD_IMAGE_PATTERNS="${VAR:-<串>}"(本仓库四处均如此) / "<串>" / <串>
@@ -549,7 +552,7 @@ unset _i _j _p _n _v _ref _drift
 # 为什么必须有这一条: 换树/手工覆盖树之后, 补丁若没重放, 部署**照样能跑**但缺我们的修复
 #   (metallb CRD 竞态 / registry 顺序 / 离线备料建目录 / SAN 与 join 守卫…), 属静默降级。
 # 见 docs/kubespray-upgrade.md(升级 SOP 与历次记录)。
-say "[15/18] kubespray 补丁在位 + 离线套件 ..."
+say "[15/19] kubespray 补丁在位 + 离线套件 ..."
 if [ -x "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" ]; then
     if _out="$(bash "${REPO_ROOT}/deployments/kubespray/cubestack-patch-apply.sh" --check 2>&1)"; then
         ok "  ⑮ kubespray 补丁全部在位"
@@ -563,7 +566,7 @@ fi
 #   会跑它们(当时本仓库还没有 CI)→ 回归等于不存在。挂在这里正合适: ⑮ 本就是"补丁层可用的证据", 而这些
 #   套件正是它的回归(test-kubespray-patches 覆盖重放器三态/退休判定;
 #   test-update-kube-vip-addons 覆盖 2026-09-28 收编后的开关↔addons.yml 映射与幂等)。
-# ★ 2026-09-30: CI 已落地(.github/workflows/ci-validate.yml)⇒ 本项全 17 项现在每次 PR 都跑,
+# ★ 2026-09-30: CI 已落地(.github/workflows/ci-validate.yml)⇒ 本项全 19 项现在每次 PR 都跑,
 #   这些套件不再依赖"人记得跑"。⚠ 套件本身必须**入库**: test-update-kube-vip-addons.sh 曾被
 #   .gitignore 的"整个 tests/ 目录忽略"规则吞掉(从未提交)而 ⑮ 对缺失是硬失败 —— 上 CI 才发现;
 #   现规则只放行 test-*.sh, 新增套件若发现"本地绿、CI 红", 先查 git ls-files 里有没有它。
@@ -619,7 +622,7 @@ unset _t _tp _tout 2>/dev/null || true
 #   响亮失败(与 images.manifest:49 的"必须与 kubespray 实际解析出的版本一致"自相矛盾)。
 #   写入者已落地 = tools/k8s/sync-kubespray-config.sh 3.2 节(group_vars/all/k8s-versions.yml),
 #   C 断言其产物与钉子逐键一致 —— 删掉写入节 / 手工改错值 / 换了 conf 忘跑 sync 都会被点名。
-say "[16/18] k8s 基座钉子闭环(A 树内表值 / B 无模块开关 / C inventory 写入者) ..."
+say "[16/19] k8s 基座钉子闭环(A 树内表值 / B 无模块开关 / C inventory 写入者) ..."
 
 KSD_ROLE="${REPO_ROOT}/deployments/kubespray/kubespray/roles/kubespray_defaults"
 KSD_DL="${KSD_ROLE}/defaults/main/download.yml"
@@ -813,7 +816,7 @@ unset _cn _cf _k8s _k8s_bare _major _want_calico _want_etcd _want_coredns _want_
 # 写成真值后被**误提交并持续跟踪**, 而 .gitignore 里早就列了它 —— ⚠ **忽略规则对已跟踪文件无效**,
 # 于是"看着封堵了、其实一直在库里", 还被烧进 CLI 镜像。
 # 本项把这条关系变成**可执行断言**: 这些路径 ① 必须被 .gitignore 覆盖 ② 且不得出现在 git 索引里。
-say "[17/18] 凭据卫生(含密钥的生成物不得被 git 跟踪) ..."
+say "[17/19] 凭据卫生(含密钥的生成物不得被 git 跟踪) ..."
 _GIT=(git -C "${REPO_ROOT}")
 _SECRET_PATHS=(
     deployments/config/external-ceph-self-define-access.conf   # 生成器写出三个真 keyring
@@ -845,7 +848,7 @@ unset _GIT _SECRET_PATHS _p 2>/dev/null || true
 #   ⑤ LOCAL_ONLY(本地临时版本)与"有入库档案"不应同时出现(自相矛盾)。
 # ⚠ 无任何版本目录时**跳过**(CI/纯 checkout 的常态), 不误报。
 # 环境变量 OFFLINE_FILES_ROOT 可指向 fixture, 便于反证(见 tools/tests/…)。
-say "[18/18] 版本目录 ↔ 档案闭合 ..."
+say "[18/19] 版本目录 ↔ 档案闭合 ..."
 VD_BAD=0
 VD_WARN=0
 VD_PROFILES_DIR="${REPO_ROOT}/deployments/config/profiles"
@@ -982,6 +985,36 @@ else
     fi
 fi
 unset VD_BAD VD_WARN VD_PROFILES_DIR VD_TREE_VER _vd_profile_keys _pf _pv _ptree _pck _pdl _pvm _pk8s _pmajor _d _v _k _a _b _k8s _b 2>/dev/null || true
+
+# ---------- ⑲ 优雅覆盖: UNINSTALL 元数据 ↔ 卸载分支位置(docs/graceful-overwrite/design.md) ----------
+# 约定: 模块头部声明 `# UNINSTALL: 1` 即参与 cluster-teardown.sh 反序卸载; 必须:
+#   ① 存在 CUBESTACK_MODULE_ACTION 卸载分支(含 exit 0);
+#   ② 分支行号 < 模块内 TOGGLE 变量首次被条件判断的行号 —— 模块被关掉(TOGGLE=false)但集群里
+#      装着旧版时, 卸载必须仍然可达(否则永远卸不掉)。
+say "[19/19] UNINSTALL 元数据 ↔ 卸载分支位置 ..."
+UN_FAIL=0
+while IFS= read -r -d '' f; do
+    rel="${f#$MODULES_DIR/}"
+    [ "$(meta "$f" UNINSTALL)" = "1" ] || continue
+    _ml="$(grep -n 'CUBESTACK_MODULE_ACTION' "$f" 2>/dev/null | head -1 | cut -d: -f1)"
+    if [ -z "${_ml}" ]; then ck_fail "⑲ ${rel}: 声明 UNINSTALL 但无 CUBESTACK_MODULE_ACTION 卸载分支"; UN_FAIL=1; continue; fi
+    if ! grep -q 'exit 0' "$f"; then ck_fail "⑲ ${rel}: 卸载分支缺 exit 0"; UN_FAIL=1; fi
+    _tgv="$(meta "$f" TOGGLE)"
+    if [ -n "${_tgv}" ]; then
+        _tv_re="$(printf '%s' "${_tgv}" | tr ' ' '|')"
+        _tl="$(grep -nE "^[[:space:]]*(if|\[)[^#]*\\\$\{(${_tv_re})" "$f" 2>/dev/null | head -1 | cut -d: -f1)"
+        if [ -n "${_tl}" ] && [ "${_ml}" -ge "${_tl}" ]; then
+            ck_fail "⑲ ${rel}: 卸载分支(行 ${_ml})必须在 TOGGLE 判断(行 ${_tl})之前 —— 开关关闭时也要能卸载"
+            UN_FAIL=1
+        fi
+    fi
+done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
+# 夹具测试接线(防"写了没人跑"): 优雅覆盖链路夹具(登记合并/拆序/离线 dry-run)
+if ! bash "${SCRIPT_DIR}/tests/test-cluster-teardown.sh" >/dev/null 2>&1; then
+    ck_fail "⑲ 夹具测试失败: tools/tests/test-cluster-teardown.sh(单独运行查看详情)"
+    UN_FAIL=1
+fi
+[ "${UN_FAIL}" = "0" ] && ok "UNINSTALL 声明与分支位置合规 + 夹具通过"
 
 echo "---------------------------------------------"
 if [ "${FAIL}" = "0" ]; then
