@@ -138,9 +138,12 @@ cleanup_node() {   # <ip>
         _left="${_left:-0}"
         _TOTAL_CLEANED=$(( ${_TOTAL_CLEANED:-0} + cleaned ))
         if [ "${_left}" = "0" ]; then
-            ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
-                "sudo modprobe -r rbd 2>/dev/null; sudo modprobe -r libceph 2>/dev/null; true" >/dev/null 2>&1 || true
-            ok "    ${ip}: rbd/libceph 模块已卸载(内核态清零)"
+            if ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+                "sudo modprobe -r rbd 2>/dev/null; sudo modprobe -r libceph 2>/dev/null; ! lsmod | grep -qE '^(rbd|libceph) '" >/dev/null 2>&1; then
+                ok "    ${ip}: rbd/libceph 模块已卸载(内核态清零)"
+            else
+                warn "    ${ip}: 映射已清零, 但 rbd/libceph 模块仍加载(EBUSY)"
+            fi
         else
             _TOTAL_LEFT=$(( ${_TOTAL_LEFT:-0} + _left ))
             warn "    ${ip}: 仍有 ${_left} 个内核 rbd 映射(sysfs 被拒/模块卸载 EBUSY = 内核持锁)"
