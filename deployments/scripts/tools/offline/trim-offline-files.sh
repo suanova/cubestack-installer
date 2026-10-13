@@ -11,15 +11,19 @@
 # ⚠ 删除前请先备份 offline-files; 未来启用新 addon/切换架构/版本时需重新下载或从 MinIO 恢复。
 #
 # 清理范围(可 DRY_RUN 预览):
-#   ① kubespray/images 下未匹配 PRELOAD_IMAGE_PATTERNS 的镜像 tar
-#   ② kubespray 根下非本部署运行时的二进制/工具(白名单外的)
+#   ① **选定版本目录**下 images/ 未匹配 PRELOAD_IMAGE_PATTERNS 的镜像 tar
+#   ② **选定版本目录**根下非本部署运行时的二进制/工具(白名单外的)
 #   ③ metax-gpu 下非当前架构/版本/组件 的镜像 tar
 #      保留: 当前 METAX_VERSION amd64 核心组件 + METAX_MACA_IMAGE + METAX_DRIVER_VERSION 对应 tar
 #      删除: 非 amd64(arm64) / 非当前版本(maca/driver 旧版) / 非本部署组件(operator-bundle/catalog)
+#
+# ⚠ 多版本语义(2026-09-30): 离线件按**版本目录**组织(offline-files/kubespray/<版本>/), 本脚本
+#   **只动选定版本**; 同组件的其它版本目录会在启动时点名声明"不触碰"(防误删别的版本)。
 # 用法:
-#   sudo ./trim-offline-files.sh              # 实际清理(打印删除项)
-#   sudo ./trim-offline-files.sh --dry-run    # 仅预览将删除的文件(不删除)
-# 数据源: cluster.conf (PRELOAD_IMAGE_PATTERNS / METAX_* / OFFLINE_FILES_DIR)
+#   sudo ./trim-offline-files.sh                       # 清理 KUBESPRAY_VERSION 对应的版本目录
+#   ./trim-offline-files.sh --dry-run                  # 仅预览(只读, **不需要 root**)
+#   sudo ./trim-offline-files.sh --version v2.28.0     # 指定要清理的版本目录
+# 数据源: cluster.conf (PRELOAD_IMAGE_PATTERNS / METAX_* / KUBESPRAY_VERSION / OFFLINE_FILES_ROOT)
 # ============================================================
 set -euo pipefail
 
@@ -28,13 +32,36 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
 DRY_RUN=0
-[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
-[ "$(id -u)" -eq 0 ] || { err "需要 root 权限: sudo $0"; exit 1; }
+VER_ARG=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) DRY_RUN=1; shift ;;
+        --version) VER_ARG="${2:?--version 需要版本名(如 v2.32.0; 版本名 = 上游 tag 全名)}"; shift 2 ;;
+        -h|--help) head -22 "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) err "未知参数: $1(可用 --dry-run / --version <版本>)"; exit 1 ;;
+    esac
+done
+# --dry-run 是只读计划 ⇒ 不要求 root; 真删才要 root(2026-09-30 放宽: 只读操作不该要特权)
+[ "${DRY_RUN}" = "1" ] || [ "$(id -u)" -eq 0 ] || { err "需要 root 权限(真删): sudo $0; 只看计划用 --dry-run"; exit 1; }
 
-OFFLINE_ROOT="${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files}"
-KUBE_DIR="${OFFLINE_ROOT}/kubespray"
+# 离线件**真根** + **选定版本目录**(2026-09-30 起离线件按版本目录组织; 见 docs/kubespray-versioning/design.md)
+# ⚠ 修前此处有两个 bug: ① 用 OFFLINE_FILES_DIR(内层语义)又拼 /kubespray ⇒ …/kubespray/kubespray 必然不存在;
+#   ② 隐含"每目录单版本"假设 ⇒ 多版本共存时会把**别的版本**的 tar/二进制删掉。
+OFFLINE_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
+VER="${VER_ARG:-${KUBESPRAY_VERSION:-}}"
+[ -n "${VER}" ] || { err "未知版本: 用 --version <版本>, 或让 KUBESPRAY_VERSION 可派生"; exit 1; }
+KUBE_DIR="${OFFLINE_ROOT}/kubespray/${VER}"
 METAX_DIR="${OFFLINE_ROOT}/metax-gpu"
-[ -d "${KUBE_DIR}" ] || { err "未找到 ${KUBE_DIR}"; exit 1; }
+[ -d "${KUBE_DIR}" ] || { err "未找到版本目录 ${KUBE_DIR}(用 ls ${OFFLINE_ROOT}/kubespray/ 看在场的版本)"; exit 1; }
+say "清理范围(只动选定版本): ${KUBE_DIR}"
+# 多版本保护: 同组件的其它版本目录本次**不触碰**(显式声明, 免得看日志的人以为被删了)
+_others="$(ls -1 "${OFFLINE_ROOT}/kubespray" 2>/dev/null | grep -vx "${VER}" | tr '\n' ' ')"
+[ -n "${_others}" ] && say "  同组件其它版本本次不触碰: ${_others}"
+# metax 仍是扁平假设(operator 迁移未做, 设计 D7): 出现版本子目录就跳过 metax 清理, 不误删
+if [ -d "${METAX_DIR}" ] && [ -n "$(find "${METAX_DIR}" -maxdepth 1 -mindepth 1 -type d -name 'v*' -print -quit 2>/dev/null)" ]; then
+    warn "metax-gpu/ 下出现版本目录, 但本条 metax 逻辑仍是扁平假设 ⇒ 本次跳过 metax 清理(operator 迁移待做)"
+    METAX_DIR=""
+fi
 
 # ---------------- ① 冗余镜像: 未匹配 PRELOAD_IMAGE_PATTERNS ----------------
 # PRELOAD_IMAGE_PATTERNS: 空格分隔; 含 ".tar" 为精确文件名匹配, 否则为文件名包含匹配

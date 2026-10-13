@@ -209,6 +209,33 @@ if [ -f "${ALL_YML}" ]; then
     # 块注释/恢复 + localhost + type —— 两条路径都要收敛, 保证文件形态与模式一致
     update_api_entry_all_yml "${ALL_YML}"
 
+    # —— upstream_dns_servers(2026-10-08 实机事故修复, 幂等)——
+    # 本环境**无外部 DNS**(节点到 1.1.1.1/网关/公共的 53 探测均超时); kubespray 该变量为空时
+    # nodelocaldns 渲染 `forward . /etc/resolv.conf` ⇒ 链条
+    #   nodelocaldns → 节点 resolv(stub 127.0.0.53) → systemd-resolved → 169.254.25.10(nodelocaldns 自己)
+    # 回环, coredns 的 loop 插件探测到后 FATAL 自杀(kube-system coredns CrashLoopBackOff)。
+    # 收敛为 127.0.0.1(节点 loopback 无 53 监听): 外部域名查询维持"失败"(与"无上游"环境语义一致),
+    # **不再回环**; cluster 域解析不受影响(pod → coredns 权威; 节点侧 → nodelocaldns → kube-dns)。
+    # ⚠ 将来接入真实 DNS: cluster.conf 设 UPSTREAM_DNS_SERVERS="ip1 ip2"(空格分隔)后重跑本工具。
+    _UDNS_VAL="${UPSTREAM_DNS_SERVERS:-127.0.0.1}"
+    if grep -qE '^upstream_dns_servers:' "${ALL_YML}" 2>/dev/null; then
+        # 删除整个旧值(含缩进或不缩进的 block list), 保留相邻顶层配置。
+        awk -v value="${_UDNS_VAL// /, }" '
+            /^upstream_dns_servers:/ {
+                print "upstream_dns_servers: [" value "]"
+                in_value=1; next
+            }
+            in_value && /^[[:space:]]*(#|$)/ { print; next }
+            in_value && (/^[[:space:]]/ || /^-([[:space:]]|$)/) { next }
+            { in_value=0; print }
+        ' "${ALL_YML}" > "${ALL_YML}.tmp"
+        mv "${ALL_YML}.tmp" "${ALL_YML}"
+        say "  all.yml upstream_dns_servers → [${_UDNS_VAL// /, }](防 nodelocaldns↔resolved 回环)"
+    else
+        printf '\n# nodelocaldns 外部上游(本环境无外部 DNS → 127.0.0.1 防回环; 见 sync-kubespray-config.sh)\nupstream_dns_servers: [%s]\n' "${_UDNS_VAL// /, }" >> "${ALL_YML}"
+        say "  all.yml 已写入 upstream_dns_servers: [${_UDNS_VAL// /, }](防 nodelocaldns↔resolved 回环)"
+    fi
+
     # apiserver_loadbalancer_domain_name → 集群 API 域名
     sed -i -E "s/^apiserver_loadbalancer_domain_name:.*/apiserver_loadbalancer_domain_name: \"${API_DOMAIN}\"/" "${ALL_YML}"
 

@@ -262,7 +262,7 @@ clusterCIDR: 10.233.64.0/18
 |---|---|---|
 | Metax 推理（prefill/decode/hicache/mooncake） | `hostNetwork: true` | 直接用节点 IP + 主机端口，**完全绕过 CNI 与 kube-proxy** |
 | Ceph mon/osd/mgr | `hostNetwork: true` | mon 在 .28/.29/.31，直接监听节点 IP:6789/3300 |
-| RDMA | 设备插件 | 每节点 `rdma/hca_shared_devices: 100` + `rdma/roce_hca_shared_devices: 100` |
+| RDMA | 设备插件 | 计划资源名：每节点 `rdma/ib_shared_devices: 100` + `rdma/roce_shared_devices: 100`；尚需重跑 `rdma_shared_dev_plugin` 并核验节点 allocatable，未确认为当前部署状态 |
 | GPU | 设备插件 | 每节点 `metax-tech.com/gpu: 8` |
 
 ---

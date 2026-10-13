@@ -8,6 +8,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: MULTUS_ENABLED
+# UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写状态, 重跑跳过; --fresh 清状态后重装。
@@ -33,6 +34,26 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 卸载分支(优雅覆盖): 删 vendored manifest 全部资源(DS/CRD/RBAC/SA, delete -f 镜像 apply 语义)
+# + 本模块创建的示例 NAD。⚠ 位于 TOGGLE 检查之前。
+if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+    init_remote_kubectl || exit 1
+    _nad_ns="${NAD_NAMESPACE:-kube-system}"
+    _manifest="${REPO_ROOT}/deployments/cubestack-addon/multus/multus-daemonset-thick.yml"
+    if [ -f "${_manifest}" ]; then
+        say "  multus: 删除 DaemonSet/CRD/RBAC(delete -f vendored manifest)..."
+        SSH "${K} delete --ignore-not-found -f -" < "${_manifest}" >/dev/null 2>&1 || true
+    else
+        warn "  multus: 未找到 manifest ${_manifest}, 退化为只删 DS/CRD"
+        SSH "${K} -n kube-system delete ds kube-multus-ds --ignore-not-found=true >/dev/null 2>&1 || true"
+        SSH "${K} delete crd network-attachment-definitions.k8s.cni.cncf.io --ignore-not-found=true >/dev/null 2>&1 || true"
+    fi
+    say "  删除示例 NAD ${_nad_ns}/${MULTUS_NAD_NAME:-multus-nad}..."
+    SSH "${K} -n ${_nad_ns} delete network-attachment-definitions "${MULTUS_NAD_NAME:-multus-nad}" --ignore-not-found=true >/dev/null 2>&1 || true"
+    ok "  multus 已卸载(ds/CRD/RBAC/示例 NAD)"
+    exit 0
+fi
 
 # ---- 开关 ----
 [ "${MULTUS_ENABLED:-false}" = "true" ] || { say "MULTUS_ENABLED=false, 跳过 Multus CNI 部署"; exit 0; }
@@ -185,3 +206,6 @@ echo "  示例网络: kubectl -n ${NAD_NAMESPACE:-kube-system} get network-attac
 echo "  使用(给 pod 挂网卡): 在 pod 加注解 k8s.v1.cni.cncf.io/networks: ${NAD_NAME}"
 echo "  卸载的声明:  kubectl -n kube-system delete ds kube-multus-ds; kubectl delete crd network-attachment-definitions.k8s.cni.cncf.io"
 unset _ds _ds_ready
+
+# 优雅覆盖登记
+record_installed_component "multus"

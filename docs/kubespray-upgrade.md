@@ -65,7 +65,7 @@ K8S_VERSION=v1.35.8 bash deployments/kubespray/cubestack-kubespray-upgrade.sh v2
    · **CLI 镜像**:`python3 -m pip install -r requirements.txt` 直接失败
      (`Ignored … 12.3.0 Requires-Python >=3.11` / `No matching distribution found`);
      修法是镜像里装 `python3.11`(deadsnakes;jammy universe 那个是 3.11.0~rc1 的 RC 版)并让 ansible 走它,
-     见 `Dockerfile-cli` / `Dockerfile-cli-incremental` 的 "Python 3.11(deadsnakes)" 段。
+     见 `Dockerfile-cli-base` 的 "Python 3.11(deadsnakes)" 段(2026-09-30 起 python3.11/ansible 都在 base 层)。
    · **裸机路径**:`ensure_venv` 已改为**优先挑 `python3.12`/`python3.11`**(挑不到才回退 `python3`),
      宿主需先装一个 ≥3.11 的解释器;`.venv_wheels/` 缓存也要用 3.11 重出(cp311 的 cryptography/bcrypt)。
    ⇒ 升级前先跑 `grep -m1 '^ansible==' <新树>/requirements.txt` 并核对它的 `Requires-Python`。
@@ -240,6 +240,24 @@ bash deployments/scripts/tools/check-modules.sh
 **演练也顺带证明**(真树零变化的证据):演练 tag 只出现在 `/tmp` 自建仓库里;真仓库 `git tag -l 'kubespray-*'` 在演练期间为空;真树内容指纹与基线逐字节相同。
 
 ---
+
+## 4.5 与"版本目录"的关系(2026-09-30 起)
+
+**两条路线互不依赖**, 不要混用:
+
+| | 全新部署(选版本) | 升级(换版本) |
+|---|---|---|
+| 入口 | `deploy-cluster.sh --profile <版本>` / `KUBESPRAY_VERSION` | `cubestack-kubespray-upgrade.sh <tag>`(本 SOP) |
+| 动什么 | 只读: 档案 → 版本目录(资产) → 树(仓库树或物化树) | **原地换仓库树** + 重放补丁层 |
+| 前提 | 该版本的**版本目录**在场(树 tar + 资产 + 档案) | 目标 tag 的纯净树(联网或 `--tree-src`) |
+
+- 已装 v2.28 的集群要上 v2.32 → 走**升级路线**(换仓库树), 不是"再选一次版本"。升级后集群处于
+  仓库树版本, 后续部署沿用该版本档案。
+- `versions/<版本>/`(物化树)与版本目录**不参与升级**: 升级的风险在在跑的集群与补丁重放,
+  不在资产获取 —— 让两者耦合只会叠加失败面。
+- 版本目录机制**不改本 SOP 的任何一步**; 换树后若要刷新该版本的 `tree.tar.gz`, 用
+  `cubestack-version-dir.sh repack <版本> --from-root <部署根>`(打包格式变更/补丁更新时)。
+- 版本目录的产出/选版/下载/校验: 见 [`kubespray-versioning/README.md`](kubespray-versioning/README.md)。
 
 ## 5. 回退
 

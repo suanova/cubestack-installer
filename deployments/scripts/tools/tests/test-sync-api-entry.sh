@@ -214,4 +214,24 @@ chk "已确认切换 → 仍复用记录值(addons.yml)" "10.0.0.211" "$(libfn "
 chk "第 1 步显式 K8S_API_VIP 仍优先(守卫未动)" "10.0.0.99" "$(libfn "${D5}" "${C8}" 'kube_vip_derive' | tail -1)"
 chk "返回码 0(未落到第 3 步探测)" "0" "$(libfn "${D5}" "${C7}" 'kube_vip_derive >/dev/null 2>&1; echo $?')"
 
+echo "== ⑨ upstream_dns_servers 完整替换与幂等 =="
+for dns_form in absent inline indented unindented; do
+    D6="${TMP}/dns-${dns_form}"; mk_inv "${D6}"
+    C9="${TMP}/dns-conf"; mk_conf "${C9}" true 'UPSTREAM_DNS_SERVERS="192.0.2.53 192.0.2.54"'
+    A6="${D6}/group_vars/all/all.yml"
+    case "${dns_form}" in
+        inline) printf '\nupstream_dns_servers: [198.51.100.53]\n' >> "${A6}" ;;
+        indented) printf '\nupstream_dns_servers:\n  - 198.51.100.53\n  # old upstream\n  - 198.51.100.54\n' >> "${A6}" ;;
+        unindented) printf '\nupstream_dns_servers:\n- 198.51.100.53\n- 198.51.100.54\n' >> "${A6}" ;;
+    esac
+    printf 'dns_neighbor:\n  - preserve-me\n' >> "${A6}"
+    chk "${dns_form}: 同步成功" "0" "$(run_sync "${D6}" "${C9}"; echo $?)"
+    chk "${dns_form}: 新列表只有一份" "1" "$(cnt '^upstream_dns_servers: \[192.0.2.53, 192.0.2.54\]$' "${A6}")"
+    chk "${dns_form}: 旧条目全部删除" "0" "$(cnt '198.51.100' "${A6}")"
+    chk "${dns_form}: 相邻列表保留" "1" "$(cnt '^  - preserve-me$' "${A6}")"
+    DNS_MD5="$(md5sum < "${A6}")"
+    chk "${dns_form}: 重跑成功" "0" "$(run_sync "${D6}" "${C9}"; echo $?)"
+    chk "${dns_form}: 重跑内容不变" "${DNS_MD5}" "$(md5sum < "${A6}")"
+done
+
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }

@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED
+# UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_passwordless k8s_workerbm k8s_ntp
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态; --fresh 清状态重装。
@@ -31,7 +32,7 @@
 #     (空闲 / 上次 Ceph 占用 / 在用 / 混合)+ 判定证据", **sleep CEPH_CONFIRM_SLEEP(默认 60)s**
 #     供人工 double-check; 核对无误自动继续。CI 可 CEPH_CONFIRM_SLEEP=0 跳过。
 #   · 节点准备: 每台存储节点加载并持久化 rbd 内核模块; 确保 lvm2
-#     (离线 .deb 由 tools/offline/fetch-lvm-packages.sh 放到 offline-files/kubespray/packages,
+#     (离线 .deb 由 tools/offline/fetch-lvm-packages.sh 放到 offline-files/os/packages,
 #     本模块部署前预检"离线包就绪 或 节点已在线装 lvm", 缺失硬失败; 部署时自动从该目录安装)。
 #   · 离线镜像(需求 5): tools/images/ceph-save-images.sh(联网机下载到 offline-files/kubespray/images,
 #     与 kubespray 镜像同目录) → k8s 阶段由 cluster.yml 内置预加载 play 统一同步到节点并 ctr import。
@@ -48,6 +49,32 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 卸载分支(优雅覆盖): **活态判定** —— 集群内有无 CephCluster 决定动作(不看本次配置的
+# CEPH_MODE, 防"旧集群是内部 ceph、新配置切成 external"时漏清理)。
+#   · 无 CephCluster → 不动(外部 ceph 的数据非本安装器资产, 绝不触碰);
+#   · 有 + CEPH_PRE_CLEANUP_EXISTING=true(默认) → 完整官方安全序(停消费者→unmap→销毁);
+#   · 有 + false(恢复/认领路径) → 保留模式(--keep-pvcs): 只停消费者, 不删 PVC/不 unmap, **保留数据**。
+# ⚠ 位于 TOGGLE 检查之前; ceph-cleanup.sh 自带 load_config/init。
+if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+    init_remote_kubectl || exit 1
+    _cns="${CEPH_NAMESPACE:-rook-ceph}"
+    _cc="$( (SSH "${K} -n ${_cns} get cephcluster --no-headers 2>/dev/null") || true)"
+    if [ -z "${_cc}" ]; then
+        say "  ceph: 集群内无 CephCluster(未装/internal 已删/external 模式), 跳过"
+        exit 0
+    fi
+    if [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ]; then
+        say "  ceph: 完整安全序卸载(停消费者→unmap→删集群; OSD 数据销毁)"
+        bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --delete-cluster \
+            || warn "  ceph 卸载未完全收敛(擦盘兜底交给重装路径 7a)"
+    else
+        say "  ceph: CEPH_PRE_CLEANUP_EXISTING=false → 保留模式: 只停消费者, 不删 PVC/不 unmap(PVC 与集群数据全部保留; 恢复/认领路径)"
+        bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --stop-consumers --keep-pvcs \
+            || warn "  ceph 停消费者未完全收敛(继续)"
+    fi
+    exit 0
+fi
 
 # ---- 开关 ----
 # ★ TOGGLE = CEPH_ENABLED CEPH_CSI_ENABLED(任一 true 即调度本模块):
@@ -156,12 +183,12 @@ fi
 }
 
 # 前置: lvm2 离线包就绪(需求: 先准备 lvm 离线包, 再在部署 ceph 前安装)。
-#   离线包来源: offline-files/kubespray/packages(lvm2_*.deb + 依赖), 由联网机
+#   离线包来源: offline-files/os/packages(lvm2_*.deb + 依赖, 版本无关 OS 层), 由联网机
 #   tools/offline/fetch-lvm-packages.sh 生成。存储节点缺 lvm 且无离线包 → 硬失败,
 #   避免"看起来部署成功、OSD 因无 lvm 无法激活"的隐性失败(比 warn 更早暴露)。
 _LVM_DEB_PRESENT=0
-for _p in "${REPO_ROOT}"/deployments/offline-files/kubespray/packages/lvm2_*.deb \
-          "${REPO_ROOT}"/deployments/offline-files/kubespray/packages/lvm2_*.rpm; do
+for _p in "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"/os/packages/lvm2_*.deb \
+          "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"/os/packages/lvm2_*.rpm; do
     [ -f "${_p}" ] && _LVM_DEB_PRESENT=1
 done
 if [ "${_LVM_DEB_PRESENT}" = "0" ]; then
@@ -180,7 +207,7 @@ if [ "${_LVM_DEB_PRESENT}" = "0" ]; then
     if [ "${_ALL_HAS_LVM}" = "0" ]; then
         err "lvm2 离线包未就绪且存储节点未安装 lvm —— 无法离线部署 Rook OSD(重启后逻辑卷需 lvm 激活)"
         err "  请先在**联网机**执行: sudo ./deployments/scripts/tools/offline/fetch-lvm-packages.sh"
-        err "  生成 lvm2_*.deb → ${REPO_ROOT}/deployments/offline-files/kubespray/packages/, 再重跑本模块"
+        err "  生成 lvm2_*.deb → ${REPO_ROOT}/deployments/offline-files/os/packages/, 再重跑本模块"
         exit 1
     fi
     warn "  lvm2 离线包未就绪, 但存储节点已在线安装 lvm, 继续(重启后逻辑卷激活依赖已满足)"
@@ -373,10 +400,10 @@ for _hn in "${CEPH_NODE_HOSTS[@]}"; do
     # 4a. rbd 内核模块(立即加载 + 持久化)
     node_ssh "${_ip}" "${_user}" "sudo modprobe rbd 2>/dev/null; grep -q '^rbd' /etc/modules-load.d/rbd.conf 2>/dev/null || echo 'rbd' | sudo tee /etc/modules-load.d/rbd.conf >/dev/null" \
         && ok "    rbd 内核模块就绪" || warn "    rbd 模块加载失败(VM 内核需支持, 检查 modprobe rbd)"
-    # 4b. lvm2: 检测缺失 → 从离线 packages 安装(install-worker-packages.sh 含 offline-files/kubespray/packages)
+    # 4b. lvm2: 检测缺失 → 从离线 packages 安装(install-worker-packages.sh 含 offline-files/os/packages)
     if ! node_ssh "${_ip}" "${_user}" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1; then
         say "    lvm2 缺失, 从离线 .deb 安装(packages 目录, 由 fetch-lvm-packages.sh 生成)..."
-        if [ -d "${REPO_ROOT}/deployments/offline-files/kubespray/packages" ] && \
+        if [ -d "${REPO_ROOT}/deployments/offline-files/os/packages" ] && \
             bash "${SCRIPT_DIR}/tools/node/install-worker-packages.sh" "${_ip}" "${_user}" >/dev/null 2>&1; then
             node_ssh "${_ip}" "${_user}" "command -v lvm >/dev/null 2>&1" >/dev/null 2>&1 \
                 && ok "    lvm2 已安装(离线包)" || err "    packages 无 lvm2 或安装失败 —— lvm2 离线包未就绪且节点无 lvm, 部署 OSD 必失败"
@@ -603,7 +630,7 @@ else
                     [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
                 done
                 [ -n "${_ip}" ] || continue
-                bash "${TOOLS_K8S}/ceph-cleanup.sh" --wipe-node "${_ip}" --disks "${NODE_DISKS[${_hn}]}" \
+                timeout 900 bash "${TOOLS_K8S}/ceph-cleanup.sh" --wipe-node "${_ip}" --disks "${NODE_DISKS[${_hn}]}" \
                     || warn "    ${_hn}: 标准清除未全部成功(见上方输出); 继续走下面的签名擦除兜底"
             done
             # 7a-② 逐盘彻底擦除兜底(★ 2026-09-24 事故修复: 这里原来手写 dd 只擦
@@ -626,7 +653,7 @@ else
                 for _d in ${NODE_DISKS[${_hn}]//,/ }; do
                     say "  wipe ${_hn} ${_d}(官方 zap-device 清 label 副本 + 头/分区表/尾, 逐处校验)..."
                     node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo bash -s -- ${_d}" \
-                        <<< "$(bluestore_wipe_remote_lib; printf '\nbluestore_wipe_dev "$1" || exit 1\n')" \
+                        <<< "$(bluestore_wipe_remote_lib; printf '\ntimeout -k 10 600 bash -c "$(declare -f bluestore_wipe_dev); bluestore_wipe_dev $1 || exit 1" _ "$1" || exit 1\n')" \
                         && ok "    ${_hn} ${_d} 已彻底清空(无 bluestore label 残留)" \
                         || { warn "    ${_hn} ${_d} 清盘未通过校验(上方已打印残留偏移)"; _WIPE_FAIL="${_WIPE_FAIL} ${_hn}:${_d}"; }
                 done
@@ -904,6 +931,23 @@ rm -f "${LOCAL_CR}"
     fi
 fi   # _CEPH_SKIP_CLUSTER=1 → 跳过集群内 CephCluster 创建
 
+# ---------------- 7.9) 恢复被"覆盖预检/优雅卸载"停用的 Ceph 卷消费者(2026-10-10; 2026-10-13 修订) ----------------
+# 覆盖安装时, ceph-cleanup.sh ⓪ 步与 05_k8s_registry 卸载分支会 scale 0 registry 与
+# cubestack-operator(消灭在飞 IO / 防重建竞态)。停机方在 scale 0 前用注解
+# cubestack.io/pre-stop-replicas 记下原副本数(stop_mark_replicas, 见 lib-common.sh),
+# 此处**只恢复带注解的对象**到记录值, 恢复后清除注解:
+#   · --fresh 路径: 旧集群已整簇重建, 新 registry 由 k8s_deploy 拉起(恢复 = no-op);
+#   · --steps ceph(K8s 保留): 把停掉的消费者拉回, 避免"停了不恢复"。
+# ⚠ 2026-10-13(CodeRabbit 评审修复): 旧实现"对象存在即 replicas=1"会在**任何** ceph 模块
+#   成功时执行 —— 普通 --steps ceph(本轮从未停机)也会把运维手动调整的副本数静默压回 1,
+#   且停机前副本数非 1 时恢复丢失原值。标记驱动后: 无注解 = 从未被本工具停机 → 一律不动。
+# ⚠ registry 是 kubespray 建的**裸 ReplicaSet**(`rs/registry`; 2026-10-13 实机验证: `deploy
+#   registry` 不存在 —— 旧代码的停机/恢复对 registry 全部静默空转), 故与停机侧对称走 rs。
+# ⚠ 失败路径兜底(2026-10-13 CodeRabbit): 本模块若在 7.9 之前 exit 1(如集群 900s 未 Ready),
+#   或整轮部署异常退出, 由 deploy-cluster.sh 的 EXIT 钩子调用**同一函数**
+#   stop_restore_known_consumers 恢复 —— 消费者不会因一次失败停在 0。
+stop_restore_known_consumers
+
 # ---------------- 8) 汇总 ----------------
 echo "---------------------------------------------"
 ok "Ceph 存储集群部署完成(Rook ${ROOK_VERSION:-v1.20.2} / Ceph ${CEPH_VERSION})"
@@ -923,3 +967,6 @@ echo "  下一步:      CEPH_CSI_ENABLED=true 部署模块 ceph_csi(创建 rbd-p
 echo "  registry 后端: REGISTRY_STORAGE_CLASS=ceph-block 时 registry PVC 走 ceph RBD(替代 local-path)"
 echo "  使用文档:    docs/ceph-rook.md"
 echo "  卸载:        先删 CephCluster(cleanupPolicy yes-really-destroy-data), 见 docs/ceph-rook.md §卸载"
+
+# 优雅覆盖登记(到达此处=集群内 ceph 体系部署/`external 接入)成功)
+record_installed_component "ceph"

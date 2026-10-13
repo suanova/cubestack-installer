@@ -1102,3 +1102,5 @@ ok "Ceph CSI 供给层完成(StorageClass: ceph-block)"
 echo "  使用: PVC storageClassName=ceph-block(块, 可多挂); 详见 docs/ceph-rook.md §9"
 echo "  卸载: kubectl delete sc ceph-block; kubectl -n ${CEPH_NAMESPACE} delete cephblockpool rbd-pool"
 
+# 优雅覆盖登记(仅登记; SC 等对象随 K8s 覆盖消亡, 无独立卸载动作 —— 设计 §3.2)
+record_installed_component "ceph_csi"

@@ -1,7 +1,17 @@
-# offline-files/kubespray/
+# offline-files/kubespray/v2.32.0/ —— kubespray **v2.32.0 版本目录**
 
-kubespray 基座的**离线资产**(二进制 / 系统包 / 节点预加载镜像)。清单在
-`deployments/config/images.manifest` 的 `[group: k8s-base]`,本目录的 `images/` 是其落点。
+kubespray 基座的**离线资产**(二进制 / 系统包 / 节点预加载镜像 / 预打补丁的树 tar),**按版本自包含**。
+清单在 `deployments/config/images.manifest` 的 `[group: k8s-base]`,本目录的 `images/` 是其落点。
+
+> **版本目录机制**(2026-09-30 起,见 [`docs/kubespray-versioning/`](../../../docs/kubespray-versioning/)):
+> 一个版本 = 一个目录,目录名 = 上游 tag 全名;目录内还有:
+> | 文件 | 用途 |
+> |---|---|
+> | `tree.tar.gz`(+ `.sha256`) | 该版本**预打补丁的整树**(顶层 `kubespray/`;不含 `.venv` 与 `inventory/local`)—— 由 `cubestack-version-dir.sh materialize` 解到 `deployments/kubespray/versions/v2.32.0/` |
+> | `VERSION.profile` | 该版本**版本钉子**的副本(入库正本在 `deployments/config/profiles/v2.32.0.profile`;由 check-modules ⑱ 逐键断言二者一致) |
+>
+> 切换版本用 `KUBESPRAY_VERSION`(或 `deploy-cluster.sh --profile v2.32.0`);只下载本版本用
+> `fetch-offline-from-minio.sh --kubespray-version v2.32.0`。
 
 ## 本目录的部分资产
 
@@ -13,18 +23,22 @@ kubespray 基座的**离线资产**(二进制 / 系统包 / 节点预加载镜�
 | `calico-*-kdd-crds.yaml` / `gateway-api-*-install.yaml` | kubespray 下载的 CRD/清单文件(`local_release_dir` 直读 basename) |
 | `packages/` · `*.deb` | 离线系统包(lvm2、rsync 等) |
 
-**当前版本(2026-09-28 随 kubespray v2.32 换代,1.32 线 → 1.35 线)**:`kubelet/kubectl/kubeadm 1.35.8`、
+**本版本(随 kubespray v2.32 换代,1.32 线 → 1.35 线)**:`kubelet/kubectl/kubeadm 1.35.8`、
 `etcd 3.6.14`、`cni-plugins 1.9.1`、`calicoctl 3.31.7`、`containerd 2.3.5`、`crictl 1.35.0`、`runc 1.4.3`、
 `helm 3.22.0`、`nerdctl 2.3.5`;镜像侧 K8s 1.35.8 / calico 3.31.7 / coredns 1.12.4 / pause 3.10.1 /
 metrics-server 0.9.0 / local-path v0.0.37 / nginx 1.30.1-alpine / kube-vip v1.0.3 / metallb 0.13.9。
 逐件校验:`sha256` 对 kubespray 树 `checksums.yml`(二进制)、层解压内容对 `config.diff_ids`(镜像)。
-被换下的 1.32 线旧件(含 `3.29.3.tar.gz`、`nginx_1.27.tar`、与 `offline-files/os/` 重复的 `ubuntu_22.04.tar`)
-移到了 `/data/offline-superseded-20260928/`。
+
+**1.32 线旧件去哪了**(多处保留, 便于回退与本地临时版本):
+`/data/offline-superseded-20260928/`(原始归档)、`/data/offline-superseded-20260930/`(本地重排时移出的 32 件)、
+MinIO 的 `offline-files/kubespray/_superseded-20260930/`(远端副本)。其中一套已用于产出
+**本地临时版本 `kubespray/v2.28.0/`**(本地验证用, 不入 git/不上 MinIO)。
 
 ## 取镜像
 
 ```bash
 # 从 Harbor 统一镜像源拉(先由 CI `.github/workflows/sync-images-to-harbor.yml` 同步到 mirrors/**)
+#   落点 = 本目录 images/(2026-09-30 起 lib-image-manifest.sh 的 k8s-base/ceph 落点跟随版本目录)
 sudo ./deployments/scripts/tools/images/harbor-save-images.sh --group k8s-base
 
 # 只看会拉什么、落到哪(不下载)
@@ -137,7 +151,10 @@ sudo ./deployments/scripts/tools/images/harbor-save-images         --group k8s-b
 ## 谁消费
 
 `deployments/kubespray/cubestack-offline.sh` 的 `resolve_preload_image_files()` 按
-`PRELOAD_IMAGE_PATTERNS` 过滤本目录 `images/*.tar`,生成 `preload-images.lst`,
-再由 `patch-playbooks/cubestack-preload.yml` 同步到各节点。
+`PRELOAD_IMAGE_PATTERNS` 过滤 **`LOCAL_REPO_DIR/images/`**(= `${OFFLINE_FILES_DIR}` = 本版本目录)
+下的 `*.tar`,生成 `preload-images.lst`,再由 `patch-playbooks/cubestack-preload.yml` 同步到各节点。
+`LOCAL_REPO_DIR` 由 `KUBESPRAY_VERSION` 派生(见 `cubestack-offline.sh paths`)—— 换版本即换这一层。
 
-> ⚠ 本目录下的 `*.tar` 已在 `.gitignore` 中忽略(tar 不入库);只有本 README 受版本控制。
+> ⚠ 本目录下的 `*.tar` / 二进制已在 `.gitignore` 中忽略(只有本 README 受版本控制)。
+> 忽略规则是**逐层**的(`offline-files/*/*/` 与 `offline-files/*/*/README.md` 两行缺一不可 ——
+> 少了"放行二级目录本身"那行, 本 README 会静默从 git 消失; 见仓库根 `.gitignore` 注释)。

@@ -429,6 +429,7 @@ run_module() {
     #   到这里密钥已装好、集群可探测 —— 新容器对着已有集群的场景在这里把"会发生什么"打出来。
     #   ⚠ 只提示**不拦停**(默认全量运行 = 覆盖安装, 见 notify_base_redeploy 注释)。
     [ "${key}" = "k8s_deploy" ] && notify_base_redeploy
+    [ "${key}" = "k8s_deploy" ] && teardown_before_overwrite
     say "[${key}] ${MODULE_DESC[$idx]:-${MODULE_SCRIPT[$idx]}} ..."
     say "  执行: ${script}"
     if bash "${script}"; then
@@ -514,6 +515,26 @@ notify_base_redeploy() {
     warn "检测到集群已存在 → 本次为「覆盖安装」(默认语义): k8s_deploy 会重跑 kubespray"
     warn "  节点上已有的旧 K8s 状态会被 kubeadm reset —— 该步骤自带 60s 醒目倒计时, 期间 Ctrl-C 可中止"
     warn "  只想装某个组件、不动集群: sudo $0 --steps <组件>(如 --steps ceph; 计划里不含基座)"
+}
+
+# ---------------- 优雅覆盖挂点 B(执行 k8s_deploy 之前) ----------------
+# 与 notify_base_redeploy 同位的**动作版**: 新容器场景挂点 A(deploy-cluster.sh 预检)因还没有
+# SSH 密钥探测不到集群 → 到这里(vm_sshkey/k8s_passwordless 已跑完)密钥就绪, 补齐"优雅覆盖":
+# 按安装登记反序卸载已装组件(含 ceph 压轴)。CUBESTACK_TEARDOWN_DONE 防与挂点 A 双跑。
+# 恒返回 0(不拦停); 失败仅警告 —— 后续 ceph 安全序与 kubeadm reset 兜底。
+teardown_before_overwrite() {
+    [ "${CUBESTACK_TEARDOWN_DONE:-0}" = "1" ] && return 0
+    [ "$(get_state k8s_deploy)" = "done" ] && return 0   # 断点续跑完成 → 不会执行 → 不涉及(冗余防御)
+    local _te="${SCRIPT_DIR}/tools/k8s/cluster-teardown.sh"
+    [ -f "${_te}" ] || return 0
+    cluster_exists || return 0
+    warn "检测到集群已存在 → 先执行「优雅覆盖」: 按安装登记反序卸载已装组件(设计 docs/graceful-overwrite/)"
+    # 计划感知(I1): 本函数在 deploy-cluster 进程内执行, RUN_STEPS 为全局; 引擎据此跳过
+    # "非本次计划"的拆除(尤其不含 ceph 时保留 Ceph 集群/OSD 数据; 与覆盖预检 _RUN_CEPH 同源)
+    export CUBESTACK_TEARDOWN_PLAN_STEPS="${RUN_STEPS[*]:-}"
+    bash "${_te}" --uninstall || warn "优雅卸载未完成(继续; ceph 安全序与 k8s 覆盖流程兜底)"
+    export CUBESTACK_TEARDOWN_DONE=1
+    return 0
 }
 
 # 计划阶段提示(--list/--list-steps 只读路径用): 只提示, 不探测集群
@@ -637,6 +658,40 @@ print_undeployed_summary() {
     fi
     [ -n "${_idle}" ] && echo "  ⚠ 开关已开但本次未调度(如 --steps 精确模式/--skip/阶段过滤): ${_idle}"
     [ -n "${_stub}" ] && echo "  ○ 规划中未实现(伪代码占位, 打开开关也只有伪代码流程): ${_stub}"
+    return 0
+}
+
+# ---------------- 收尾健康巡检: 未成功运行的 Pod(仅告警, 不阻断) ----------------
+# 2026-10-12(用户要求): 部署结束后醒目列出"没有成功运行"的 Pod(集群可达时) —— **仅 warning**。
+# 动机: coredns CrashLoopBackOff / ImagePullBackOff 等此前只在日志深处或事后才被发现;
+#   收尾一眼可见(实例: 2026-10-12 容器 d 集群 coredns loop 崩溃 19 分钟无人察觉)。
+# 判定: 全部命名空间; STATUS 非 Running/Completed/Succeeded, 或 Running 但 READY 未满 → 列出。
+# 可达性: 复用 cluster_exists 探测(无密钥/不可达 → 静默跳过, 不产生误导输出)。
+warn_unhealthy_pods() {
+    cluster_exists || return 0
+    local fm key out bad _n
+    fm="$(first_master_ip 2>/dev/null)" || return 0
+    key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    # ⚠ -n: 不让 ssh 读 stdin(与 cluster_exists 同款防护)
+    out="$(ssh -n -i "${key}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${fm}" \
+        "sudo -n kubectl --kubeconfig=/etc/kubernetes/admin.conf get pods -A --no-headers 2>/dev/null" \
+        2>/dev/null || true)"
+    [ -n "${out}" ] || return 0
+    # awk 本地过滤(captured 输出): 未 Running / 未 Completed / Running 但 READY 未满
+    bad="$(printf '%s\n' "${out}" | awk '
+        {
+            notfull = 0
+            if (split($3, a, "/") == 2 && a[1] != a[2]) notfull = 1
+            if (($4 != "Running" && $4 != "Completed" && $4 != "Succeeded") || ($4 == "Running" && notfull))
+                printf "    %s/%s  %s (READY %s)\n", $1, $2, $4, $3
+        }' || true)"
+    [ -n "${bad}" ] || { say "收尾巡检: 全部 Pod 已成功运行"; return 0; }
+    _n="$(printf '%s\n' "${bad}" | wc -l)"
+    warn "收尾巡检: 检测到未成功运行的 Pod(仅告警, 不阻断; 共 ${_n} 个):"
+    printf '%s\n' "${bad}" | head -15
+    [ "${_n}" -gt 15 ] && warn "  ...(仅列前 15 个)"
+    warn "  排查: kubectl -n <ns> describe pod <name> | kubectl -n <ns> logs <name>; 组件级: --steps verify_<组件>"
     return 0
 }
 

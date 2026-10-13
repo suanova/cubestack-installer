@@ -135,7 +135,7 @@ classify_node() {   # <hostname> <ip> <user> <pw>
     # 取不到 → 空串, 分类器只会"少一条证据", 绝不因此判 ceph。
     probed="$(node_run "${user}" "${ip}" "${pw}" "${LABEL_PROBE_CMD}")"
     if [[ "${probed}" == *"__CEPH_LABEL_PROBE_UNAVAILABLE__"* ]]; then
-        warn "  ${hn}: BlueStore label 副本探针不可用(sudo -n 失败) → 缺少 label 副本佐证"
+        warn "  ${hn}: BlueStore label 副本探针不可用(sudo -n 失败) → 缺少 label 副本佐证" >&2
         probed="${probed//__CEPH_LABEL_PROBE_UNAVAILABLE__/}"
     fi
     printf '%s' "${json}" | python3 "${CLASSIFY_PY}" "${CEPH_DETECT_EXCLUDE}" "${pvs}" "${lvs}" "${probed}" \
@@ -159,6 +159,23 @@ for entry in "${NODE_SELECT[@]}"; do
     hn="${entry%%|*}"; rest="${entry#*|}"; ip="${rest%%|*}"
     rest="${rest#*|}"; user="${rest%%|*}"; pw="${rest#*|}"
     TSV="$(classify_node "${hn}" "${ip}" "${user}" "${pw}")" || continue
+    # ★ 2026-10-12(同类防御, 事故见 07_k8s_scale.sh): 分类结果必须是**纯 TSV**(每行含制表符);
+    #   任何非 TSV 行 = 诊断文本混进了 stdout(warn 漏 >&2 类) → 拒绝解析该节点并响亮说明,
+    #   绝不让警告文字被当成分类行消费(下游按 \t 拆列, 非 TSV 行会静默产出垃圾判定)。
+    #   ⚠ 判定用 bash case 模式(纯内建), 不用 grep —— 对制表符模式 grep 行为随实现漂移(仿真逮住过哑弹)。
+    if [ -n "${TSV}" ]; then
+        _bad_tsv=""
+        while IFS= read -r _ln; do
+            case "${_ln}" in
+                *$'\t'*) : ;;                       # 含制表符 → TSV 行
+                *) _bad_tsv="${_ln}"; break ;;      # 无制表符 → 污染行
+            esac
+        done <<< "${TSV}"
+        if [ -n "${_bad_tsv}" ]; then
+            err "  ${hn}: 分类输出疑似被 stdout 污染(含非 TSV 行), 已拒绝解析该节点: ${_bad_tsv}"
+            continue
+        fi
+    fi
 
     if [ "${MACHINE}" = "1" ]; then
         if [ "${CLASSIFY}" = "1" ]; then

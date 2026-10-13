@@ -9,6 +9,18 @@
 - 每条必须写明: **症状 / 根因 / 解法(根治) / 验证 / 相关命令**
 - 按问题类别分组: 网络(CNI) / 时间同步 / 集群组件 / 离线部署 / 其它
 
+### 清理后副本数变化、CSC finalizer 未处理或 RBD 洁净度误报
+
+**症状**: Ceph 覆盖安装将原为 0 或多个副本的 operator / registry 改成 1; 清理失败后消费者保持停用; 平台 CR 仍在就强制删除命名空间; SSH 无结果却报告 RBD 全部清零。
+
+**根因**: 旧恢复块无条件设 `replicas=1`, 未保存停用前状态; Operator 卸载用 Pod phase 作为 CR 删除守卫; RBD 汇总把空查询结果默认成 0。
+
+**解法**: 停机前给对象打注解 `cubestack.io/pre-stop-replicas` 记录原副本数(仅首次, 重复停机不覆盖); 成功路径(ceph 模块 7.9)与异常退出兜底(deploy-cluster.sh EXIT 钩子, 仅非 0 退出且计划含 ceph/k8s_deploy)都**只恢复带注解对象**并清除注解; registry 以裸 ReplicaSet(`rs/registry`)为准。Operator 卸载先等 `csc` 消失(120s 有界), 未消失或查询失败**保留 operator**(finalizer 需要它活着执行)并跳过 helm uninstall、namespace finalizer patch / 强制删除及 CRD 清理(非 0 退出)。RBD 空 / 失败 / 非数字查询计为未知, 仅明确 0 允许报告清零。
+
+**验证边界**: `test-cluster-teardown.sh` ⑤~⑧ 节用假 SSH / 裸 ssh 桩覆盖: 标记登记(含原副本非 1)/重复停机不覆盖/按值恢复/无标记不动、扫荡保留已停机裸 RS、operator CR 终结门(成功/残留两路径)、部署 EXIT 钩子接线、RBD 未知/残留报告三态。未连接真实 Kubernetes / Ceph, 不代表实际卷卸载或 CR finalizer 已端到端验证。
+
+**相关命令**: `bash deployments/scripts/tools/tests/test-cluster-teardown.sh`; `bash deployments/scripts/tools/check-modules.sh`; 集群侧核对 `kubectl get csc -n <operator-namespace>`、`kubectl get rs registry -n kube-system -o jsonpath='{.spec.replicas}'` 及对应对象的 `cubestack.io/pre-stop-replicas` 注解。
+
 ---
 
 ## 一、网络 / CNI
@@ -547,29 +559,29 @@ kubectl -n kube-system get cm rdma-devices -o go-template='{{index .data "config
 
 ---
 
-### 9. RDMA 资源名与真实 GPU 集群不一致 → Pod 申请 `rdma/hca_shared_devices` 永久 Pending
+### 9. RDMA 资源名与真实 GPU 集群不一致 → Pod 申请 `rdma/ib_shared_devices` 永久 Pending
 
 **症状**
 同一份 Pod 清单在真实 GPU 集群能跑, 在本安装器部署的集群上 Pending:
-`0/N nodes are available: ... Insufficient rdma/hca_shared_devices`。集群本身"部署成功"。
+`0/N nodes are available: ... Insufficient rdma/ib_shared_devices`。集群本身"部署成功"。
 
 **根因**
 两端资源名不同源: 真实集群的插件由 metax 侧以 `--rdma-ib-resource` / `--rdma-roce-resource`
-配置(实测 `cm rdma-devices` 里为 `hca_shared_devices` / `roce_hca_shared_devices`, 前缀 `rdma`),
+配置(实测 `cm rdma-devices` 里为 `ib_shared_devices` / `roce_shared_devices`, 前缀 `rdma`),
 而本安装器默认走 per-hca(`nvidia.com/<设备名>`)/ pool(`nvidia.com/mlx5_0`)—— 名字对不上时
 Pod 申请的资源名在集群里**根本不存在**, 且报错只出现在 Pod 事件里, 部署日志一片绿。
 
 **解法(根治)**
 `RDMA_HCA_MODE=by-link`(**cluster.conf.example 默认值**, 2026-09-21 起): 按链路类型分成两池,
-资源名取 `RDMA_IB_RESOURCE`(默认 `rdma/hca_shared_devices`)/ `RDMA_ROCE_RESOURCE`
-(默认 `rdma/roce_hca_shared_devices`), 与真实集群对齐; 名字可在 cluster.conf 改(插件侧对应
+资源名取 `RDMA_IB_RESOURCE`(默认 `rdma/ib_shared_devices`)/ `RDMA_ROCE_RESOURCE`
+(默认 `rdma/roce_shared_devices`), 与真实集群对齐; 名字可在 cluster.conf 改(插件侧对应
 `--rdma-ib-resource` / `--rdma-roce-resource`)。
 ⚠ 显式 `RDMA_IF_NAMES` 且未写类型时无法判定链路类型 → 归 RoCE 池并告警, 要精确分类写
 `<设备名>:<网卡名>:<类型>`(32=IB / 1=RoCE); 某类型无卡则不生成该池条目。
 
 **验证**
-本地打桩自检 ①: 2 IB + 1 RoCE → 恰好两条 `rdma/hca_shared_devices`(ifNames 2 张 IB 卡)+
-`rdma/roce_hca_shared_devices`(1 张 RoCE 卡); ④ 占位模式两池 + `rdma-placeholder=true` 标注不变。
+本地打桩自检 ①: 2 IB + 1 RoCE → 恰好两条 `rdma/ib_shared_devices`(ifNames 2 张 IB 卡)+
+`rdma/roce_shared_devices`(1 张 RoCE 卡); ④ 占位模式两池 + `rdma-placeholder=true` 标注不变。
 
 **相关命令**
 ```bash

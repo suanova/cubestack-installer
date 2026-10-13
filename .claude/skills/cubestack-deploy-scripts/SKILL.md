@@ -7,7 +7,7 @@ description: CubeStack 部署脚本开发规范技能。当需要编写、修改
 
 本技能指导在 **CubeStackInstaller 仓库** 的 `deployments/scripts/` 下编写、修改、新增部署脚本。遵循本规范可保证:**模块化、可插拔、单一配置源、修改一个模块不影响其他模块、无需重写全部脚本**。
 
-> ⭐ **新增部署模块的专项流程技能: `skills/cubestack-add-module/SKILL.md`**(6 步流程 + 历史事故警示 + 测试用例)。本技能 = 通用规范速查,两者配合使用,内容已同步(2026-09-04 架构重构)。
+> ⭐ **新增部署模块的专项流程技能: `skills/cubestack-add-module/SKILL.md`**(8 步流程 + 历史事故警示 + 测试用例)。本技能 = 通用规范速查,两者配合使用,内容已同步(2026-09-04 架构重构)。
 
 ## 何时使用本技能
 
@@ -80,6 +80,7 @@ deployments/scripts/
 # REPEAT: 0                   # 1=可重复执行(不写断点状态)
 # TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量名, true/1/yes/on 时自动启用
 # REQUIRES: k8s_deploy        # (可选) 依赖模块 key 列表(执行前须已完成); 框架自动拓扑排序
+# UNINSTALL: 1                # (可选) 声明该模块可被 cluster-teardown 反序优雅卸载
 # 说明: <详细说明, 可选>
 # ============================================================
 set -euo pipefail
@@ -91,7 +92,7 @@ load_config
 
 注意:模块在 `modules/<阶段>/` 二级目录,`lib-common.sh` 相对路径是 `../../lib-common.sh`(不是 `../lib-common.sh`)。
 
-## 新增模块标准流程(6 步)
+## 新增模块标准流程(8 步)
 
 > ⭐ **新增部署模块的专项可执行流程见 `skills/cubestack-add-module/SKILL.md`**(含历史事故警示与测试用例),本表为速览。
 
@@ -101,10 +102,16 @@ load_config
 4. **实现逻辑**: 复用 `tools/` 工具脚本(`bash "${SCRIPT_DIR}/tools/<领域>/xxx.sh"`)或写新逻辑
 5. **加开关**(可选): 在 `config/cluster.conf.example` 加 `XXX_ENABLED` 变量, TOGGLE 指向它
 6. **完成**: 无需修改 `deploy-cluster.sh` / `lib-module.sh` / 任何注册表(operator 自动派生)
+7. **登记(装进集群的组件)**: 安装成功点调用 `record_installed_component "<key>"`(优雅覆盖登记; 写失败仅告警, 不影响部署)
+8. **声明可卸载(可卸载的组件)**: 头部声明 `# UNINSTALL: 1` + 实现 `CUBESTACK_MODULE_ACTION=uninstall` 卸载分支(**必须在 TOGGLE 检查之前**; 幂等/有界/告警不中止; check-modules ⑲ 校验)
 
 验证: `bash deployments/scripts/tools/check-modules.sh`(静态校验, 必须 exit 0);
+`bash deployments/scripts/tools/check-manifests.sh`(改了/新增了 YAML 清单时);
 `sudo ./deploy-cluster.sh --list-steps` 应出现新模块(带 `依赖:xxx` 标注);
 `sudo ./deploy-cluster.sh --steps <key>` 可单独执行(--steps 精确模式, 只跑指定模块+依赖)。
+
+> ⭐ 这两支校验脚本在**每次 PR** 上由 GitHub Actions 自动跑(`.github/workflows/ci-validate.yml`)
+> —— 本地不跑就等于让 CI 替你发现, 详见 `docs/scripts-development-spec.md` §7。
 
 > ⚠ **新增模块/功能后必须同步更新 `deploy-cluster.sh` 的 help(usage)**: 在"阶段目录与模块"列表与"示例"中补充新模块/命令(如 verify 模块加 `--steps verify_<组件>` 示例)。
 > 原则:**每次增加新功能,及时更新 help**(以及必要的 README/文档),保证 `--help` 始终与代码一致,避免文档与实现脱节。
@@ -340,6 +347,14 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   但仓库里压根没有那份文件 —— 私服一抖动回退就是空转。回退只有在本地确实有一份时才有意义。
 - **强制校验**:`tools/check-modules.sh` 第 ⑩ 项。行首是 helm 安装命令的模块,其引用的
   `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`,否则报错。
+- **边车 `.digest` 写什么值(实测, 2026-09-30)**:写 `helm pull` 输出里的 `Digest:` 那一行。
+  经典 helm repo 的它 = tgz 文件 sha256(**可以** `sha256sum` 核验); **OCI chart 的它是 manifest 摘要,
+  不是文件 sha256** —— 实测 `cubestack-operator-chart-1.0.0-latest.tgz`:helm 报 `sha256:06f0318d…`,
+  而文件 sha256 是 `sha256:c8e94925…`。自己算出来的值永远比不相等 ⇒ 每次部署都误判"远端有更新"
+  并覆盖仓库文件(告警刷屏 + 工作区反复变脏)。**只能从 pull 输出取**。
+- **参考实现**:`modules/03_addon/25_cubestack_operator.sh` —— 全仓库第一个真正调用
+  `helm_chart_ensure` 的模块(私有 OCI chart + `helm registry login --password-stdin` 凭据 +
+  动态渲染提取镜像 + 渲染自检)。
 
 ## 断点续跑(REPEAT 语义, 重要)
 
@@ -418,6 +433,9 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   清理走 `tools/k8s/ceph-cleanup.sh --list`(只读计划)/`--wipe-disks`/`--all`, 显式 `--wipe-node` 默认拒清 `inuse`/`mixed` 盘。
   部署前**红底按四类分组 + 判定证据列出节点与盘, sleep CEPH_CONFIRM_SLEEP(60s)** double-check; CI 可 `CEPH_CONFIRM_SLEEP=0`。
 - **镜像同步**: `tools/images/ceph-sync-images.sh`(复制 tar 到全部节点 + `ctr -n k8s.io images import --no-unpack`)。
+- **清理恢复状态**: 停机方(ceph-cleanup.sh ⓪ / 05_k8s_registry 卸载分支)在 scale 0 前给对象打注解 `cubestack.io/pre-stop-replicas=原副本数`(stop_mark_replicas, 仅首次不覆盖); 恢复方(02_ceph.sh 7.9 成功路径 + deploy-cluster.sh 异常退出 EXIT 钩子, 共用 stop_restore_known_consumers)**只恢复带注解的对象**并清除注解, 无注解=从未停机一律不动。⚠ registry 是 kubespray 建的**裸 ReplicaSet**(`rs/registry`, 非 Deployment), operator 是 Deployment。
+- **Operator 卸载守卫**: 删除平台实例后, 保留 operator 等待 `csc` 删除(120s 有界); CR 仍在或查询失败时报告未完成, 跳过 helm uninstall、namespace finalizer patch / 强制删除及 CRD 清理。Pod Running / Completed 不能证明 finalizer 已完成。
+- **RBD 汇总**: 仅成功查询返回明确 0 才确认映射清零; 空结果、SSH 失败或非数字结果均记为节点洁净度未知。离线回归: `bash deployments/scripts/tools/tests/test-cluster-teardown.sh`(⑤~⑧ 节; 真实集群仍需单独验证)。
 - **VM 测试盘**: `vm-nodes.conf` 的 `VM_DATA_DISKS=3/VM_DATA_DISK_SIZE=200` → 每台 VM 附加 3×200GB 裸盘(Guest `/dev/vdb~`),
   由 `tools/vm/create-vms.sh` 创建时自动附加。
 - **部署顺序(03_addon 已重排)**: `01_metallb → 02_ceph → 03_ceph_csi → 04_local_path → 05_k8s_registry → …`;
@@ -445,9 +463,12 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   harbor-save-images.sh          # Harbor → offline-files/<group>/*.tar(联网机)
   check-image-manifest.sh        # 静态校验; --kubespray 交叉核对; --harbor 漂移报告
   ```
-- **默认不镜像"上游就是本台 Harbor"的组**(metax-gpu 11): 它们本就在本台 Harbor 上,
-  部署模块直接从 `metax/` 项目拉, 再镜像只多占 8.4 GB 且升级要重跑。
+- **默认不镜像"上游就是本台 Harbor"的组**(metax-gpu 11 / cubestack-operator 1): 它们本就在本台 Harbor 上,
+  部署模块直接从原项目拉(metax 项目 / suanova-private), 再镜像只多占存储且升级要重跑。
   判据是**推导**的(注册域 == HARBOR_MIRROR_REGISTRY), 不是硬编码名单; 要副本用 `--include-same-harbor`。
+  ⚠ **取离线 tar 时对这些组要回到原始 ref**:`harbor-save-images.sh` 已内建同源分支
+  (2026-09-30 修, 此前会去拉**根本不存在的** `mirrors/<路径>` 而失败)—— 私有项目(如 suanova-private)
+  需在该工具里配好凭据(`HARBOR_MIRROR_USER/PASSWORD` 即可)。
 - **CI**: `.github/workflows/sync-images-to-harbor.yml`(push 清单 / 手动 / 每周定时);
   凭据走 GitHub **Secrets**(`HARBOR_MIRROR_USER` / `HARBOR_MIRROR_PASSWORD`, 密码必须放 Secret)。
   ⚠ 设密钥: `gh secret set NAME`(**省略 `--body`** 才读 stdin); `--body -` 会把字面量 `-` 存进去。
@@ -460,6 +481,24 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   Harbor **项目**必须预建(仓库才自动建), 建项目需登录。
 - ⚠ **加镜像时别忘了同步 `tools/offline/trim-offline-files.sh` 的 `PRELOAD_IMAGE_PATTERNS`**
   (k8s-base 组), 否则备料后被 trim 静默删掉 —— 用 `check-image-manifest.sh --kubespray` 兜底。
+## 版本目录(离线资产按版本组织,2026-09-30 起)
+
+离线件按 **`offline-files/<组件>/<版本>/`** 组织(版本名 = 上游 tag 全名);kubespray 另有版本档案
+与物化树。**完整规程见 [`docs/kubespray-versioning/README.md`](docs/kubespray-versioning/README.md)**,
+要点速查:
+
+- **选版本**:`KUBESPRAY_VERSION`(或 `deploy-cluster.sh --profile <版本>`);档案接管版本面变量,
+  `KUBESPRAY_PROFILE=none` 退回"全按 cluster.conf"。
+- **路径一律经变量**:`OFFLINE_FILES_ROOT`(真根)/ `OFFLINE_FILES_DIR`(= `<root>/kubespray/<版本>`,
+  即 `LOCAL_REPO_DIR`)。**禁止**再写字面量 `offline-files/kubespray/<文件>`;
+  自派生版本的写法见 `lib-image-manifest.sh` 的 `_kubespray_version()`(不 source lib-common 的脚本用)。
+- **本地临时版本**:打 `LOCAL_ONLY`(上传工具自动跳过;`--prune` 需显式 `--force-full-prune`)。
+- **新增/迁移"按版本选"的组件**四条一起改:① 资产目录 ② 版本开关变量 ③ `images.manifest` 落点
+  ④ `trim-offline-files.sh` 只清选定版本(`--version`)。
+- **CLI 镜像 = base(工具链 kubectl/helm/skopeo/yq, 取自离线版本目录)+ 代码层(`deployments/`)**;
+  运行期钩子(`deployments/scripts/tools/docker/cli-toolchain-from-offline.sh`)只做"缺才补"兜底
+  (工具已在即跳过、不覆盖)⇒ 部署流程仍用 `bash -lc`(既有口径; 钩子只在登录 shell 生效)。
+
 ## 审查清单(写完脚本后自检)
 
 - [ ] 文件名符合 `NN_category_action.sh`,序号不冲突
@@ -474,5 +513,9 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - [ ] **(装 chart 的模块)走 `helm_chart_ensure` 恒用本地副本;缺副本时 `err` 退出并给获取方法**
 - [ ] **(改含内嵌远端脚本的文件)注释里没有 ASCII 双引号**(用全角 `“ ”`); 改完用 stub `ssh` 数参数个数, 确认载荷没被拆散
 - [ ] `bash deployments/scripts/tools/check-modules.sh` exit 0(含第 ⑩ 项离线副本检查)
+- [ ] 新增/改动了 YAML 清单时 `bash deployments/scripts/tools/check-manifests.sh` exit 0
+- [ ] 涉及离线资产时:路径经 `OFFLINE_FILES_DIR`/版本变量(无新增字面量),`check-modules.sh` ⑱ 绿
+- [ ] 新增了"按版本选"的组件时:按手册 §5 四条一起改(资产目录/版本开关/manifest 落点/trim --version)
+- [ ] 新增回归套件时已**入库**(`git ls-files` 能看到; 目录被 .gitignore 忽略过 —— 见 §7)
 - [ ] `deploy-cluster.sh --list-steps` 能看到新模块
 - [ ] 不影响其他模块(未改他人元数据/文件名)

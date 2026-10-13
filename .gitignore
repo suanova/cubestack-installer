@@ -57,28 +57,41 @@ deployments/kubespray/inventory/*/artifacts/
 deployments/kubespray/inventory/cubestack-cluster/hosts.yml
 deployments/kubespray/inventory/cubestack-cluster/inventory.ini
 # 磁盘链路回归测试的夹具(含**生产集群标识**: IP 10.66.3.28/29/31、主机名 mxgpu-3-*、真实 Ceph fsid
-# 与生产节点 lsblk 布局)。测试脚本与夹具是一套、缺夹具跑不起来, 故整个目录暂不入库;
-# ★ 待脱敏(IP/主机名/fsid 换成中性值并重跑 41 项断言)后**删掉本行**再提交。
-# ⚠ 注意: `check-modules.sh` 第 ⑫ 项在此目录缺席时会打印"跳过(未找到)" —— 这是设计好的降级, 不是错误。
-deployments/scripts/tools/tests/
+# 与生产节点 lsblk 布局)。夹具与 ceph-disk-tests.sh 是一套、缺夹具跑不起来, 故夹具数据与本套件不入库;
+# ★ 待脱敏(IP/主机名/fsid 换成中性值并重跑 41 项断言)后**删掉 ① ② 两行**再提交。
+# 但"整个目录忽略"会连累**不依赖夹具**的单元测试脚本 —— 2026-09-30 实测: test-update-kube-vip-addons.sh
+# 因此从未被提交, 而 check-modules.sh ⑮ 对缺失套件是硬失败 ⇒ 一上 CI 就红。故收窄成两行:
+#   ① 忽略目录下全部内容(夹具子目录也随目录一起被忽略)
+#   ② 只放行**自包含、零夹具**的 test-*.sh 单元测试(CI 会实跑, 见 .github/workflows/ci-validate.yml)
+# ⚠ ② 放行的脚本必须保持"零夹具、零生产标识" —— 要用夹具的套件请沿用 ceph-disk-tests.sh 这种
+#    非 test- 前缀命名(继续被忽略), 免得把生产标识带进库里。
+# ⚠ 注意: `check-modules.sh` 第 ⑫ 项在 ceph-disk-tests.sh 缺席时会打印"跳过(未找到)" —— 这是设计好的降级。
+deployments/scripts/tools/tests/*
+!deployments/scripts/tools/tests/test-*.sh
 
 # 虚拟机基础镜像/磁盘(大文件,勿提交)
 deployments/virtual-machine/
 
 # 离线文件(镜像 tar / 二进制 / .deb / 资源包, 大文件不入库; 路径由 OFFLINE_FILES_DIR 等变量切换)
-#   ⚠ 这里分四行写而不是直接忽略整个目录: 需要放行**各组件子目录下的 README.md**
+#   ⚠ 这里逐层写而不是直接忽略整个目录: 需要放行**各层目录下的 README.md**
 #     (说明该目录放什么、怎么备料), 其余内容(镜像 tar / 二进制 / .deb)仍全部忽略。
 #     顺序要紧(git 后匹配者优先):
 #       ① 忽略 offline-files 下所有内容
 #       ② 放行一级子目录本身(否则 git 不往里走, 后面的 ! 无从生效)
-#       ③ 重新忽略二级内容(把 ② 放行进来的 tar/二进制挡回去; 三级及以下随目录一起被忽略)
-#       ④ 只把二级的 README.md 放行
+#       ③ 重新忽略二级内容(把 ② 放行进来的 tar/二进制挡回去)
+#       ④ 放行二级子目录本身 —— 版本目录(如 kubespray/v2.32.0/, 见 docs/kubespray-versioning/)
+#       ⑤ 重新忽略三级内容(版本目录里的 tar/二进制/子目录)
+#       ⑥ 只把二级与三级的 README.md 放行
 #     若改回单行 `deployments/offline-files/`, README 会进不了 git;
-#     若只写 ①②, 离线 tar 会被误纳入版本控制(2026-09-18 踩过)。
+#     若只写 ①②, 离线 tar 会被误纳入版本控制(2026-09-18 踩过);
+#     少写 ④ 则三级 README 放行规则失效 —— 版本目录里的 README 会**静默从库里消失**(2026-09-30 实测)。
 deployments/offline-files/*
 !deployments/offline-files/*/
 deployments/offline-files/*/*
+!deployments/offline-files/*/*/
+deployments/offline-files/*/*/*
 !deployments/offline-files/*/README.md
+!deployments/offline-files/*/*/README.md
 deployments/kubespray/kubespray/.git
 deployments/kubespray/kubespray/.gitattributes
 deployments/kubespray/kubespray/.github
@@ -99,3 +112,12 @@ cluster.conf.backup
 .claude/settings.local.json
 # Claude Code 官方文档转储(排查本机 TUI 问题时整站抓的 ~450KB; 非本仓库内容, 不入库)
 /settings-reference.md
+
+# 物化版本树(由 cubestack-version-dir.sh materialize 生成; 见 docs/kubespray-versioning/)
+deployments/kubespray/versions/
+
+# cubestack-operator 滚动 chart(1.0.0-latest): **暂不入 git**(用户口径 2026-10-08)——
+#   分发通路 = 构建上下文进 CLI 镜像(Dockerfile-cli 的 COPY deployments)+ 部署机本地保留;
+#   ⚠ check-modules ⑩ 对此有 gitignore 豁免(降级 WARN), 干净 checkout 缺它属预期。
+deployments/cubestack-addon/cubestack-operator/*.tgz
+deployments/cubestack-addon/cubestack-operator/*.tgz.digest

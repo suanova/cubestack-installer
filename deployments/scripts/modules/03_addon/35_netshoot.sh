@@ -6,6 +6,7 @@
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: NETSHOOT_ENABLED
+# UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   · 定位: 集群里**常驻一台"网络工具箱"** —— kubectl exec 进去就能用 tcpdump / ip / ss / ethtool /
@@ -17,7 +18,7 @@
 #     ⚠ 自建 tar 缺失时**回退**用离线包里的原始 netshoot(netshoot.tar): pod 照样能起, 但
 #       **没有 ibv_*/perftest**(会有醒目告警) —— 总比"诊断工具起不来"强。
 #   · ★ RDMA 资源**自动降级**: 只有集群节点真的注册了 ${NETSHOOT_RDMA_RESOURCE}(默认
-#     rdma/hca_shared_devices, 与 10_rdma 的 by-link IB 池一致)才申请该扩展资源;
+#     rdma/ib_shared_devices, 与 10_rdma 的 by-link IB 池一致)才申请该扩展资源;
 #     没注册(未部署 RDMA 插件 / 占位模式 / 无卡)就不申请 —— 同一个诊断 pod 在有卡/无卡集群都能起。
 #     ⚠ 不降级的后果: 无卡集群里 pod 永远 Pending, "诊断工具"自己先挂了。
 #   · 容器启动即打印**设备视图**((/dev/infiniband 授予的 uverbsN) × (sysfs 里全部 mlx5_X → netdev)),
@@ -38,6 +39,20 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 卸载分支(优雅覆盖): 删 Pod + ConfigMap(与"开关=false 清理路径"同款语义)。
+# ⚠ 位于 TOGGLE 检查之前: 本次关掉 NETSHOOT_ENABLED 时, 集群里旧 pod 也要能清。
+if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+    init_remote_kubectl || exit 1
+    _ns="${NETSHOOT_NAMESPACE:-default}"
+    _pod="${NETSHOOT_POD_NAME:-cubestack-netshoot}"
+    _cm="${NETSHOOT_POD_NAME:-cubestack-netshoot}-diag"
+    say "  netshoot: 删除 pod/${_pod} + cm/${_cm}(ns=${_ns})..."
+    SSH "${K} -n ${_ns} delete pod ${_pod} --ignore-not-found=true --wait=false >/dev/null 2>&1 || true"
+    SSH "${K} -n ${_ns} delete cm ${_cm} --ignore-not-found=true >/dev/null 2>&1 || true"
+    ok "  netshoot 已清理"
+    exit 0
+fi
 
 # ---- 开关(默认 false = **不创建**)----
 # 开(true): 创建/更新诊断 pod; 关(默认): 不创建, 且**确保不存在**(顺带清理历史遗留 pod/CM, 幂等)。
@@ -70,7 +85,7 @@ CM_NAME="${NETSHOOT_POD_NAME:-cubestack-netshoot}-diag"
 SAVE_DIR="${NETSHOOT_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/netshoot}"
 TAG="${NETSHOOT_RDMA_VERSION:-26.04.17}"          # 自建镜像 tag(= perftest 版本, 见构建脚本)
 BASE_TAR="${NETSHOOT_BASE_TAR:-${REPO_ROOT}/deployments/offline-files/os/netshoot.tar}"   # 回退用的原始 netshoot
-RDMA_RES="${NETSHOOT_RDMA_RESOURCE:-${RDMA_IB_RESOURCE:-rdma/hca_shared_devices}}"        # 与 10_rdma by-link 的 IB 池一致
+RDMA_RES="${NETSHOOT_RDMA_RESOURCE:-${RDMA_IB_RESOURCE:-rdma/ib_shared_devices}}"        # 与 10_rdma by-link 的 IB 池一致
 # push 用直连端点(与 10_rdma/gpu_operator 一致): nodeport→master:REGISTRY_NODEPORT / metallb→VIP:5000
 REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-5000}}"
 REG_BASE="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT:-5000}"   # 节点按域名拉取
@@ -337,3 +352,6 @@ echo "  重跑视图:    kubectl -n ${NS} exec ${POD} -- sh /diag/diag.sh"
 echo "  常用:        tcpdump -i any -nn | ip addr | ss -tunap | ethtool -S eth0 | mtr <host>"
 [ "${USING_RDMA_IMG}" = "1" ] && echo "  RDMA 实测:   ibv_devinfo; ib_write_bw -d mlx5_0(对端需同步起 ib_write_bw 服务端)"
 echo "  删除:        kubectl -n ${NS} delete pod ${POD} configmap ${CM_NAME}"
+
+# 优雅覆盖登记(仅 ON 路径到达此处; OFF 路径此前已 exit)
+record_installed_component "netshoot"

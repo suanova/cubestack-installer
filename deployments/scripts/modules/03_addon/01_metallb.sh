@@ -66,3 +66,6 @@ if ! SSH "${K} -n metallb-system get l2advertisements -o name 2>/dev/null | grep
     exit 1
 fi
 ok "MetalLB 就绪: controller/speaker Running, IPAddressPool/L2Advertisement 存在"
+
+# 优雅覆盖登记(安装/校验成功才登记; --fresh 覆盖时按登记反序卸载, 见 docs/graceful-overwrite/)
+record_installed_component "metallb"
