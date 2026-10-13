@@ -1046,6 +1046,10 @@ if ! bash "${SCRIPT_DIR}/tests/test-cluster-teardown.sh" >/dev/null 2>&1; then
     ck_fail "⑲ 夹具测试失败: tools/tests/test-cluster-teardown.sh(单独运行查看详情)"
     UN_FAIL=1
 fi
+if ! bash "${SCRIPT_DIR}/tests/test-cleanup-restoration.sh" >/dev/null 2>&1; then
+    ck_fail "⑲ 清理恢复测试失败: tools/tests/test-cleanup-restoration.sh(单独运行查看详情)"
+    UN_FAIL=1
+fi
 [ "${UN_FAIL}" = "0" ] && ok "UNINSTALL 声明与分支位置合规 + 夹具通过"
 
 echo "---------------------------------------------"

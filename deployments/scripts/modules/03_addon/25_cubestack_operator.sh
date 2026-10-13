@@ -63,17 +63,13 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
         while IFS= read -r _cr; do
             [ -n "${_cr}" ] && SSH "${K} -n ${_ns} delete "${_cr}" --wait=false >/dev/null 2>&1" || true
         done <<< "${_crs}"
-        # 有界等待组件收敛(≤120s; 不收敛告警继续, 不阻塞)
-        for _wi in $(seq 1 12); do
-            _nleft=0
-            while IFS= read -r _pl; do
-                [ -n "${_pl}" ] || continue
-                case "${_pl}" in *" Running "*|*" Completed "*) ;; *) _nleft=$((_nleft+1)) ;; esac
-            done <<< "$( (SSH "${K} -n ${_ns} get pods --no-headers 2>/dev/null") || true )"
-            [ "${_nleft}" = "0" ] && break
-            sleep 10
-        done
-        [ "${_nleft}" = "0" ] || warn "  平台组件未在 120s 内全部退出(${_nleft} 个仍在) —— 继续"
+    fi
+    # CR finalizers need the operator alive; Pod phase cannot prove deletion.
+    SSH "${K} -n ${_ns} wait --for=delete csc --all --timeout=120s --request-timeout=10s >/dev/null 2>&1" || true
+    # Confirm the entire collection is empty, including CRs created during the wait.
+    if ! _crs="$(SSH "${K} -n ${_ns} get csc -o name --request-timeout=10s 2>/dev/null")" || [ -n "${_crs}" ]; then
+        warn "  平台实例 CR 清理未完成 / 无法确认; 保留 operator, 跳过命名空间 finalizer patch、强制删除及 CRD 清理"
+        exit 1
     fi
     # ② helm uninstall operator(尽力)
     if command -v helm >/dev/null 2>&1 && sync_kubeconfig >/dev/null 2>&1; then

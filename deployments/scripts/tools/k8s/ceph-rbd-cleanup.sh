@@ -68,14 +68,17 @@ keep_vol() {   # <imageName> → 0=保留
 list_maps() {   # <ip>
     local ip="$1"
     ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
-        "for d in /sys/bus/rbd/devices/*; do [ -e \"\$d\" ] || continue; echo \"\$(basename \$d) \$(cat \$d/name 2>/dev/null) \$(cat \$d/pool 2>/dev/null)\"; done" 2>/dev/null || true
+        "for d in /sys/bus/rbd/devices/*; do [ -e \"\$d\" ] || continue; echo \"\$(basename \$d) \$(cat \$d/name 2>/dev/null) \$(cat \$d/pool 2>/dev/null)\"; done" 2>/dev/null
 }
 
 # 清理单个节点
 cleanup_node() {   # <ip>
-    local ip="$1" maps line id name pool cleaned=0 mounted
-    maps="$(list_maps "${ip}")"
-    [ -n "${maps}" ] || { ok "  ${ip}: 无 rbd 映射"; return 0; }
+    local ip="$1" maps line id name pool cleaned=0 mounted _left
+    if ! maps="$(list_maps "${ip}")"; then
+        _TOTAL_UNKNOWN=$(( ${_TOTAL_UNKNOWN:-0} + 1 ))
+        warn "  ${ip}: 无法查询 rbd 映射, 洁净度未知"
+        return 0
+    fi
     echo "  ${ip}:"
     while IFS= read -r line; do
         [ -z "${line}" ] && continue
@@ -127,16 +130,22 @@ cleanup_node() {   # <ip>
         fi
     done <<< "${maps}"
     # 清理失效设备节点文件与空挂载目录(kubelet 残留)
-    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
-        "sudo rm -f /dev/rbd* 2>/dev/null || true; sudo find /var/lib/kubelet/pods -path '*kubernetes.io~csi*' -type d -empty -delete 2>/dev/null || true" 2>/dev/null || true
+    if [ -n "${maps}" ]; then
+        ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+            "sudo rm -f /dev/rbd* 2>/dev/null || true; sudo find /var/lib/kubelet/pods -path '*kubernetes.io~csi*' -type d -empty -delete 2>/dev/null || true" 2>/dev/null || true
+    fi
     # ★ 2026-10-10 收尾阶梯(仅清理模式): 该节点映射清完后尝试**模块级卸载**(连客户端
     #   会话/-13 刷屏一起清); 仍有残留 → 计全局账(总账在 main 末尾的洁净度报告)。
     if [ "${LIST_ONLY}" != "1" ]; then
-        _left="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
-            "ls /sys/bus/rbd/devices 2>/dev/null | wc -l" 2>/dev/null || true)"
-        _left="${_left//[!0-9]/}"
-        _left="${_left:-0}"
         _TOTAL_CLEANED=$(( ${_TOTAL_CLEANED:-0} + cleaned ))
+        if ! _left="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+            "if [ ! -d /sys/bus/rbd/devices ]; then echo 0; else bash -o pipefail -c 'ls /sys/bus/rbd/devices | wc -l'; fi" 2>/dev/null)" \
+            || ! [[ "${_left}" =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]]; then
+            _TOTAL_UNKNOWN=$(( ${_TOTAL_UNKNOWN:-0} + 1 ))
+            warn "    ${ip}: rbd 剩余映射查询失败或为空, 洁净度未知"
+            return 0
+        fi
+        _left="${_left//[[:space:]]/}"
         if [ "${_left}" = "0" ]; then
             if ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
                 "sudo modprobe -r rbd 2>/dev/null; sudo modprobe -r libceph 2>/dev/null; ! lsmod | grep -qE '^(rbd|libceph) '" >/dev/null 2>&1; then
@@ -170,7 +179,9 @@ if [ "${LIST_ONLY}" = "1" ]; then
 else
     echo "  ▍内核洁净度报告(阶梯: 惰性脱挂 → sysfs 后台清理 → 模块卸载)"
     echo "     本轮已清映射: ${_TOTAL_CLEANED:-0} 个"
-    if [ "${_TOTAL_LEFT:-0}" -eq 0 ] 2>/dev/null; then
+    if [ "${_TOTAL_UNKNOWN:-0}" -gt 0 ]; then
+        warn "rbd 清理后有 ${_TOTAL_UNKNOWN} 个节点洁净度未知, 已确认残留 ${_TOTAL_LEFT:-0} 个映射; 未确认全部清零"
+    elif [ "${_TOTAL_LEFT:-0}" -eq 0 ] 2>/dev/null; then
         ok "rbd 残留清理完成: 全部节点内核 rbd 侧已清零(映射=0)"
     else
         warn "rbd 残留清理完成, 但**仍有 ${_TOTAL_LEFT:-?} 个内核 rbd 映射**(内核持锁, 物理所限)"
