@@ -156,6 +156,19 @@ CONTAINERD_CONFIG_VERSION="${CONTAINERD_CONFIG_VERSION:-3}"  # containerd 配置
                                                         #        "config version 4 is not support")。
                                                         #   4 = containerd 2.x 上游默认; **待沐曦包支持 containerd 2.x 后可切**。
                                                         #   ⚠ 只接受 3 或 4; 未设/留空一律按 3 处理(留空静默回落 4 会让沐曦组件崩, 故不设该模式)。
+# 设备属主(非 root 容器访问 MetaX GPU 的**节点前置**, 2026-10-13 实机根因闭环):
+#   containerd device_ownership_from_security_context(默认 false)→ true 后, 容器创建时按
+#   runAsUser/runAsGroup 对设备节点 chown。**不设的后果**: 设备插件注入的 /dev/mxcd 属主=root
+#   (root:root 0600) ⇒ runAsUser:1000 的环境 open() EACCES、torch.cuda.is_available()=False;
+#   而 mx-smi exit 0、device_count() 返回请求值 —— **一切表面检查正常, status/events 无提示**。
+#   · 渲染路径: sync-kubespray-config.sh 写入 containerd_extra_runtime_args(kubespray v2.32 原生
+#     变量, 注入 [plugins."io.containerd.cri.v1.runtime"] 段)⇒ 重装/新节点天然带上;
+#   · 存量节点: gpu_operator 模块每轮调用 tools/node/ensure-containerd-device-ownership.sh
+#     即时落地(幂等, 键变化才重启 containerd);
+#   · ⚠ 生效时机: 属主在容器创建时写入 —— 已有容器保持旧属主, 需**重建工作负载**才生效;
+#   · ⚠ 厂商安装器(mx-ctk-installer)可能重写 config.toml —— 每次部署会重跑工具兜底。
+#   · 范围说明: 本开关影响 CRI 设备注入路径(厂商 hook 自带设备注入不受影响); NVIDIA 未实测, 不做假设。
+CONTAINERD_DEVICE_OWNERSHIP="${CONTAINERD_DEVICE_OWNERSHIP:-true}"
 
 # ---- 阶段三、集群基础设施 ----
 REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"               # 集群内置 Registry(默认部署; 0=不部署 addon/节点信任, 见 3.2)
@@ -829,6 +842,14 @@ CUBESTACK_OPERATOR_CHART_REF="${CUBESTACK_OPERATOR_CHART_REF:-oci://harbor.isuan
 #   online     = 强制尝试在线刷新(Harbor 不通时降级回退本地副本, 不中断部署)
 #   offline    = 完全不联网(离线机; 也不发起任何探测请求)
 # → CUBESTACK_OPERATOR_CHART_SYNC 已上移至顶部【高频/必改变量区】(2026-10-08)
+# ★ 部署模式切换(2026-10-13 用户口径; 与 CHART_SYNC 正交 —— 后者只管 chart 副本刷新):
+#   true  = **在线部署**: 镜像**按 chart 定义**(harbor.isuanova.com/**, 不覆盖不搬运)直接拉取,
+#           operator 与 CR 组件都恒 pullPolicy=Always(滚动 :latest 永远跟随最新); 私有镜像经
+#           harbor-credentials secret(用 HARBOR_MIRROR_USER/PASSWORD 或 CUBESTACK_OPERATOR_HARBOR_*
+#           凭据自动创建)认证; 不推集群 registry、不注入镜像前缀。
+#   false = **离线部署**(默认): 离线 tar → 推入集群内置 registry → 节点只从内置 registry 拉
+#           (不访问 Harbor/公网); CR 注入 registry 前缀 + digest 钉注。
+ONLINE_DEPLOY_CUBESTACK_OPERATOR="${ONLINE_DEPLOY_CUBESTACK_OPERATOR:-false}"
 # → CUBESTACK_OPERATOR_IMAGE_TAG 已上移至顶部【高频/必改变量区】(2026-10-08)
 # 镜像源优先级(部署时把镜像推进集群内置 registry 的取源方式):
 #   auto(默认) = 在线优先 Harbor(取最新) → 离线 tar → 本地 docker daemon

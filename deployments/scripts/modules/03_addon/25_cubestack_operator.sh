@@ -14,7 +14,14 @@
 #   · 离线 / 在线(需求 1): CUBESTACK_OPERATOR_CHART_SYNC=auto(默认) —— 探测 Harbor 可达则
 #     online(拉远端 → 取 Digest 与 <tgz>.digest 边车比对 → 变了覆盖本地副本, 未变仓库保持干净),
 #     否则 offline(纯本地, 不发起任何联网动作); 也可显式写 online|offline 强制。
-#   · chart 来源(需求 2): oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart,
+#   · 部署模式切换(2026-10-13 用户口径): ONLINE_DEPLOY_CUBESTACK_OPERATOR(true/false, 默认 false):
+#       true  = **在线部署**: 镜像**按 chart 定义**(harbor.isuanova.com/**, 不覆盖不搬运)直接
+#               拉取, 恒 pullPolicy=Always(operator 与 CR 组件都恒拉最新), 经 harbor-credentials
+#               secret 认证(无凭据时清空 imagePullSecrets 防"引用不存在的 secret 即 ImagePullBackOff");
+#               不推集群 registry、不注入 registry 前缀 —— 适用可达 Harbor 的联网集群。
+#       false = **离线部署**(默认): 离线 tar → 推入集群内置 registry → 节点只从 registry 拉
+#               (不访问 Harbor/公网); CR 注入 registry 前缀 + 清 imagePullSecrets + digest 钉注。
+#  · chart 来源(需求 2): oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart,
 #     离线副本 = deployments/cubestack-addon/cubestack-operator/<chart>-<版本>.tgz(+ .digest 边车),
 #     随 git 分发。安装**恒用这份本地副本** —— 线上拉到的东西不直接装(见 scripts-development-spec §2.4)。
 #   · 镜像清单(需求 4): **从 chart 渲染结果动态提取**(不写死清单); 逐个推入集群内置 registry。
@@ -31,7 +38,7 @@
 #     (cubestack.io/image-digest), digest 变了 pod 模板就变 → 自动滚动; ② pullPolicy 默认
 #     **Always**(与 README 对滚动构建的建议一致), 保证新 pod 真的去 registry 重新解析 tag。
 #     要跟随滚动构建: 保持默认; 要钉住节点缓存: CUBESTACK_OPERATOR_IMAGE_PULL_POLICY=IfNotPresent。
-# 数据源: cluster.conf (CUBESTACK_OPERATOR_* / REGISTRY_* / HARBOR_MIRROR_* / NODES / SSH_KEY_NAME)
+# 数据源: cluster.conf (CUBESTACK_OPERATOR_* / ONLINE_DEPLOY_CUBESTACK_OPERATOR / REGISTRY_* / HARBOR_MIRROR_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps cubestack_operator
 # 验证:   sudo ./deploy-cluster.sh --steps verify_cubestack_operator
 # ============================================================
@@ -136,6 +143,7 @@ CHART_TGZ="${CHART_DIR}/${CHART_NAME}-${CHART_VER}.tgz"
 SYNC_MODE="${CUBESTACK_OPERATOR_CHART_SYNC:-auto}"
 IMG_TAG="${CUBESTACK_OPERATOR_IMAGE_TAG:-latest}"
 IMG_SRC_MODE="${CUBESTACK_OPERATOR_IMAGE_SOURCE:-auto}"
+ONLINE_DEPLOY="${ONLINE_DEPLOY_CUBESTACK_OPERATOR:-false}"   # 部署模式: true=在线(按 chart 定义恒拉); false=离线(tar→集群 registry)
 IMG_PULL_POLICY="${CUBESTACK_OPERATOR_IMAGE_PULL_POLICY:-Always}"
 PIN_DIGEST="${CUBESTACK_OPERATOR_PIN_IMAGE_DIGEST:-true}"
 OFFLINE_DIR="${CUBESTACK_OPERATOR_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/cubestack-operator}"
@@ -252,19 +260,32 @@ say "[3/6] 渲染 chart 提取镜像清单(helm template, 不写死清单)..."
 EXTRA_CR_VALUES_ARG=()
 if [ "${CR_ENABLED}" = "true" ]; then
     _CR_VALUES=( --set "clusterCR.enabled=true" )
-    # ★ 2026-10-08 平台组件离线链路: CR 全局镜像源注入 → **集群内置 registry**(离线可用性的关键)。
-    #   自研组件走 imageRegistry(平铺布局), 第三方走 externalImageRegistryPrefix(原样前置);
-    #   与 [4b/6] 的推送目标映射一一对应(镜像由本模块预先推入)。
-    #   · imagePullSecrets 置空 —— 集群 registry 匿名可拉; 保留渲染默认(harbor-credentials)而
-    #     Secret 不存在时, 所有组件会 ImagePullBackOff(k8s: 引用不存在的 pull secret 直接失败)。
+    if [ "${ONLINE_DEPLOY}" = "true" ]; then
+        # 在线部署: 镜像源**保留 chart 定义**(harbor.isuanova.com/suanova + /mirrors, 不覆盖不搬运),
+        # 恒 Always 跟踪滚动 :latest; imagePullSecrets 保留 chart 默认(harbor-credentials, 由本模块
+        # 用配置的凭据创建); 无凭据则清空 —— 引用不存在的 secret 会让组件直接 ImagePullBackOff。
+        _CR_VALUES+=( --set "clusterCR.spec.global.imagePullPolicy=Always" )
+        if [ -z "${HARBOR_USER}" ] || [ -z "${HARBOR_PASSWORD}" ]; then
+            warn "  在线部署但未配置 Harbor 凭据(HARBOR_MIRROR_USER/PASSWORD 或 CUBESTACK_OPERATOR_HARBOR_*): 清空 imagePullSecrets(仅匿名可拉的镜像可用)"
+            _CR_VALUES+=( --set-json "clusterCR.spec.global.imagePullSecrets=[]" )
+        fi
+    else
+        # ★ 2026-10-08 平台组件离线链路: CR 全局镜像源注入 → **集群内置 registry**(离线可用性的关键)。
+        #   自研组件走 imageRegistry(平铺布局), 第三方走 externalImageRegistryPrefix(原样前置);
+        #   与 [4b/6] 的推送目标映射一一对应(镜像由本模块预先推入)。
+        #   · imagePullSecrets 置空 —— 集群 registry 匿名可拉; 保留渲染默认(harbor-credentials)而
+        #     Secret 不存在时, 所有组件会 ImagePullBackOff(k8s: 引用不存在的 pull secret 直接失败)。
+        _CR_VALUES+=(
+            --set "clusterCR.spec.global.imageRegistry=${REG_BASE}/suanova"
+            --set "clusterCR.spec.global.externalImageRegistryPrefix=${REG_BASE}/mirrors"
+            --set-json "clusterCR.spec.global.imagePullSecrets=[]"
+        )
+    fi
+    # 默认裁剪(两模式共用; 离线开箱可部署; 要开用 CUBESTACK_OPERATOR_CR_VALUES_FILE 覆盖, 见 docs):
+    #   ① 模型 bundles 清空 + modelBundles 关 —— chart 默认下发 7 个 bundle(推理 Pod/GPU 需求),
+    #      非"平台服务"必需; ② bmc 关 —— 需管理员先建 cubestack-bmc-credentials Secret,
+    #      缺失会 Degraded(operator 只读该 Secret, 从不创建)。
     _CR_VALUES+=(
-        --set "clusterCR.spec.global.imageRegistry=${REG_BASE}/suanova"
-        --set "clusterCR.spec.global.externalImageRegistryPrefix=${REG_BASE}/mirrors"
-        --set-json "clusterCR.spec.global.imagePullSecrets=[]"
-        # 默认裁剪(离线开箱可部署; 要开用 CUBESTACK_OPERATOR_CR_VALUES_FILE 覆盖, 见 docs):
-        #   ① 模型 bundles 清空 + modelBundles 关 —— chart 默认下发 7 个 bundle(推理 Pod/GPU 需求),
-        #      非"平台服务"必需; ② bmc 关 —— 需管理员先建 cubestack-bmc-credentials Secret,
-        #      缺失会 Degraded(operator 只读该 Secret, 从不创建)。
         --set-json "clusterCR.spec.bundles=[]"
         --set "clusterCR.spec.components.modelBundles.enabled=false"
         --set "clusterCR.spec.components.exporters.bmc.enabled=false"
@@ -284,6 +305,13 @@ done < <( _render_images "${EXTRA_CR_VALUES_ARG[@]}" "${_EXTRA_VALUES[@]}" )
     || { err "chart 未渲染出任何镜像(helm template 失败? 手工确认: helm template ${RELEASE} ${CHART_TGZ} -n ${NS})"; exit 1; }
 say "  chart 需要 ${#SRC_IMAGES[@]} 个镜像:"
 for _img in "${SRC_IMAGES[@]}"; do say "    ${_img}"; done
+
+if [ "${ONLINE_DEPLOY}" = "true" ]; then
+    # 在线部署: 不推集群 registry —— 镜像按 chart 定义从 ${HARBOR_HOST} 直接拉([6/6] 不覆盖
+    # image.repository)。[3/6] 的渲染清单仍保留(信息 + chart 完整性自检)。
+    say "[4/6]+[4b/6] 在线部署: 跳过镜像推送/搬运 —— 镜像按 chart 定义从 ${HARBOR_HOST} 拉取(pullPolicy=Always)"
+else
+# (以下整块为离线部署路径; 为控制 diff 未整体缩进)
 
 # ---------------- [4/6] 推送镜像 → 集群内置 registry ----------------
 # 目标 ref = 去注册域、保仓库路径(与 multus/lws 一致, 避免与其它组件撞名):
@@ -414,6 +442,8 @@ if [ "${CR_ENABLED}" = "true" ]; then
     ok "  组件镜像就绪: 新推 ${_n_push} 个, digest 相同跳过 ${_n_skip} 个"
 fi
 
+fi   # 结束 ONLINE_DEPLOY!=true 的离线推送块([4/6]+[4b/6])
+
 # ---------------- [5/6] CRD 预应用(helm 的 crds/ 只在"CRD 不存在"时装) ----------------
 # README 明确: 已装过 operator 的集群升级前必须先 apply 新 CRD, 否则旧 CRD 会剪掉新字段。
 # 幂等无副作用(SSA), 故每次部署都跑 —— 不依赖 helm 的"仅首次安装"语义。
@@ -434,43 +464,97 @@ else
     warn "  chart 内未找到 crds/ 目录(跳过; 若 operator 依赖 CRD 请检查 chart 结构)"
 fi
 
-# ---------------- [6/6] helm upgrade --install(本地 chart + 集群 registry 镜像) ----------------
-say "[6/6] helm upgrade --install(本地 chart; 镜像走集群 registry)..."
-IMG_REPO_OVERRIDE="${TARGET_REFS[0]%:*}"     # <REG_BASE>/suanova-private/cubestack-operator
-IMG_TAG_OVERRIDE="${TARGET_REFS[0]##*:}"
-_SET_ARGS=(
-    --set "image.repository=${IMG_REPO_OVERRIDE}"
-    --set "image.tag=${IMG_TAG_OVERRIDE}"
-    --set "image.pullPolicy=${IMG_PULL_POLICY}"
-)
-# 滚动 tag 的"节点缓存冻结"防护: 把镜像 digest 写进 podAnnotations —— digest 变了模板就变,
-# helm 才会滚动新 pod; 否则 Deployment spec 原封不动, 新镜像永远不会被拉起来(见文件头说明)。
-if [ "${PIN_DIGEST}" = "true" ] && [[ "${_OPERATOR_DIGEST}" =~ ^sha256:[[:xdigit:]]{64}$ ]]; then
-    _SET_ARGS+=( --set "podAnnotations.cubestack\\.io/image-digest=${_OPERATOR_DIGEST}" )
+# ---------------- [6/6] helm upgrade --install(本地 chart; 在线=按 chart 定义拉 Harbor / 离线=集群 registry) ----------------
+if [ "${ONLINE_DEPLOY}" = "true" ]; then
+    say "[6/6] helm upgrade --install(本地 chart; **在线模式**: 镜像按 chart 定义从 ${HARBOR_HOST} 拉, pullPolicy=Always)..."
+    _SET_ARGS=( --set "image.pullPolicy=Always" )
+    if [ -n "${HARBOR_USER}" ] && [ -n "${HARBOR_PASSWORD}" ]; then
+        _SET_ARGS+=( --set "imagePullSecrets[0].name=harbor-credentials" )
+        # harbor-credentials: 节点向 Harbor 拉私有镜像(cubestack-operator 在 suanova-private 项目)。
+        # apply + stringData: 密码经 stdin 传递(不进 argv; 与模块内 auth 文件同一考虑); 幂等可重放。
+        # ⚠ NS 需先存在(helm --create-namespace 在下面才执行)。
+        SSH "${K} get ns ${NS} >/dev/null 2>&1 || ${K} create namespace ${NS} >/dev/null 2>&1" || true
+        _b64="$(printf '%s:%s' "${HARBOR_USER}" "${HARBOR_PASSWORD}" | base64 -w0 2>/dev/null \
+                || printf '%s:%s' "${HARBOR_USER}" "${HARBOR_PASSWORD}" | base64)"
+        if SSH "${K} -n ${NS} apply -f - >/dev/null 2>&1" <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: harbor-credentials
+  namespace: ${NS}
+type: kubernetes.io/dockerconfigjson
+stringData:
+  .dockerconfigjson: '{"auths":{"${HARBOR_HOST}":{"auth":"${_b64}"}}}'
+EOF
+        then
+            ok "  harbor-credentials 已同步(节点向 ${HARBOR_HOST} 拉私有镜像)"
+        else
+            warn "  harbor-credentials 创建失败(节点拉私有镜像会 401; 检查 kubectl/命名空间)"
+        fi
+        unset _b64
+    else
+        warn "  无 Harbor 凭据: 未创建 harbor-credentials 且未设 imagePullSecrets(仅匿名可拉镜像可用)"
+    fi
+    IMG_REPO_OVERRIDE="(chart 定义: ${HARBOR_HOST}/**)"
+    IMG_TAG_OVERRIDE="${IMG_TAG}"
+else
+    say "[6/6] helm upgrade --install(本地 chart; 镜像走集群 registry)..."
+    IMG_REPO_OVERRIDE="${TARGET_REFS[0]%:*}"     # <REG_BASE>/suanova-private/cubestack-operator
+    IMG_TAG_OVERRIDE="${TARGET_REFS[0]##*:}"
+    _SET_ARGS=(
+        --set "image.repository=${IMG_REPO_OVERRIDE}"
+        --set "image.tag=${IMG_TAG_OVERRIDE}"
+        --set "image.pullPolicy=${IMG_PULL_POLICY}"
+    )
+    # 滚动 tag 的"节点缓存冻结"防护: 把镜像 digest 写进 podAnnotations —— digest 变了模板就变,
+    # helm 才会滚动新 pod; 否则 Deployment spec 原封不动, 新镜像永远不会被拉起来(见文件头说明)。
+    # (仅离线模式: 在线模式 pullPolicy=Always 恒拉, 不需要 digest 钉注。)
+    if [ "${PIN_DIGEST}" = "true" ] && [[ "${_OPERATOR_DIGEST:-}" =~ ^sha256:[[:xdigit:]]{64}$ ]]; then
+        _SET_ARGS+=( --set "podAnnotations.cubestack\\.io/image-digest=${_OPERATOR_DIGEST}" )
+    fi
 fi
 
-# 渲染自检: 覆盖后的镜像必须**全部**落在集群 registry 下 —— chart 以后新增第 2 个镜像时,
-# 这里会响亮失败(而不是静默从 Harbor 拉, 让离线集群 ImagePullBackOff)。
+# 渲染自检: 离线模式要求覆盖后的镜像**全部**落在集群 registry 下(否则离线集群 ImagePullBackOff);
+# 在线模式则要求**全部**来自 chart 定义域(Harbor) —— chart 以后新增第 2 个镜像时都会响亮失败。
 FINAL_IMAGES=()
 while IFS= read -r _line; do
     [ -n "${_line}" ] && FINAL_IMAGES+=("${_line}")
 done < <( _render_images "${_SET_ARGS[@]}" "${EXTRA_CR_VALUES_ARG[@]}" "${_EXTRA_VALUES[@]}" )
 for _img in "${FINAL_IMAGES[@]}"; do
-    case "${_img}" in
-        "${REG_BASE}/"*) : ;;
-        *) err "渲染后仍有镜像不在集群 registry 下: ${_img}"
-           err "  → chart 可能新增了镜像; 请在本模块补 --set 覆盖(并登记 images.manifest)"
-           exit 1 ;;
-    esac
+    if [ "${ONLINE_DEPLOY}" = "true" ]; then
+        case "${_img}" in
+            "${HARBOR_HOST}/"*) : ;;
+            *) err "渲染出非 Harbor 镜像: ${_img}(在线模式要求全部按 chart 定义从 ${HARBOR_HOST} 拉)"
+               err "  → chart 变更? 确认镜像来源后再调整本模块"
+               exit 1 ;;
+        esac
+    else
+        case "${_img}" in
+            "${REG_BASE}/"*) : ;;
+            *) err "渲染后仍有镜像不在集群 registry 下: ${_img}"
+               err "  → chart 可能新增了镜像; 请在本模块补 --set 覆盖(并登记 images.manifest)"
+               exit 1 ;;
+        esac
+    fi
 done
-ok "  渲染自检通过: ${#FINAL_IMAGES[@]} 个镜像全部指向 ${REG_BASE}"
+if [ "${ONLINE_DEPLOY}" = "true" ]; then
+    ok "  渲染自检通过: ${#FINAL_IMAGES[@]} 个镜像全部指向 ${HARBOR_HOST}(chart 定义)"
+else
+    ok "  渲染自检通过: ${#FINAL_IMAGES[@]} 个镜像全部指向 ${REG_BASE}"
+fi
 
 if [ "${CR_ENABLED}" = "true" ]; then
-    say "  clusterCR.enabled=true: 平台组件镜像已由 [4b/6] 推入集群 registry, 且 CR 全局镜像源"
-    say "    已注入 ${REG_BASE}(自研→/suanova, 第三方→/mirrors)—— 节点不访问 Harbor。"
-    say "    默认裁剪: 模型 bundles 清空 + modelBundles/bmc 关闭(开启方法见 docs/cubestack-operator.md)。"
-    [ -f "${OFFLINE_DIR}/docker.io_envoyproxy_ratelimit_8fe6ea42.tar" ] \
-        || warn "    已知缺口: docker.io/envoyproxy/ratelimit:8fe6ea42 未备料(本网络到 docker.io 不通) —— 默认不拉起(仅配 RateLimitPolicy 时用); 补料: 在可访问 docker.io 的机器 pull 后放入 ${OFFLINE_DIR}/"
+    if [ "${ONLINE_DEPLOY}" = "true" ]; then
+        say "  clusterCR.enabled=true(**在线模式**): 组件镜像按 chart 定义(global.imageRegistry="
+        say "    ${HARBOR_HOST}/suanova)恒拉(pullPolicy=Always); harbor-credentials 已同步供节点认证。"
+        say "    默认裁剪: 模型 bundles 清空 + modelBundles/bmc 关闭(开启方法见 docs/cubestack-operator.md)。"
+    else
+        say "  clusterCR.enabled=true: 平台组件镜像已由 [4b/6] 推入集群 registry, 且 CR 全局镜像源"
+        say "    已注入 ${REG_BASE}(自研→/suanova, 第三方→/mirrors)—— 节点不访问 Harbor。"
+        say "    默认裁剪: 模型 bundles 清空 + modelBundles/bmc 关闭(开启方法见 docs/cubestack-operator.md)。"
+        [ -f "${OFFLINE_DIR}/docker.io_envoyproxy_ratelimit_8fe6ea42.tar" ] \
+            || warn "    已知缺口: docker.io/envoyproxy/ratelimit:8fe6ea42 未备料(本网络到 docker.io 不通) —— 默认不拉起(仅配 RateLimitPolicy 时用); 补料: 在可访问 docker.io 的机器 pull 后放入 ${OFFLINE_DIR}/"
+    fi
 fi
 
 helm upgrade --install "${RELEASE}" "${CHART_TGZ}" \
@@ -478,6 +562,34 @@ helm upgrade --install "${RELEASE}" "${CHART_TGZ}" \
     "${_SET_ARGS[@]}" "${EXTRA_CR_VALUES_ARG[@]}" "${_EXTRA_VALUES[@]}" \
     --wait --timeout 300s \
     || warn "  helm 安装/等待超时(资源可能已创建, 继续等待 Deployment; 排查: helm status ${RELEASE} -n ${NS})"
+
+# ---------------- CR 取值断言 + 纠偏(2026-10-13 实机教训) ----------------
+# helm 的三路合并对 **CR 对象的更新不可靠**(实测: 在线模式跑过一轮后, 切回离线模式重跑——
+# helm release/manifest 都已是离线值, 但活体 CR 的 spec.global 仍残留 harbor 取值, 组件持续
+# 按旧值拉镜像 ImagePullBackOff)。⇒ 部署后显式校验并按模式纠正(merge patch, 幂等)。
+if [ "${CR_ENABLED}" = "true" ]; then
+    _cr_name="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].metadata.name}' 2>/dev/null" || true) )"
+    _cr_reg="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imageRegistry}' 2>/dev/null" || true) )"
+    if [ "${ONLINE_DEPLOY}" = "true" ]; then
+        _want_reg="${HARBOR_HOST}/suanova"; _want_pref="${HARBOR_HOST}/mirrors"; _want_pol="Always"
+        if [ -n "${HARBOR_USER}" ] && [ -n "${HARBOR_PASSWORD}" ]; then
+            _want_secs='[{"name":"harbor-credentials"}]'
+        else
+            _want_secs='[]'
+        fi
+    else
+        _want_reg="${REG_BASE}/suanova"; _want_pref="${REG_BASE}/mirrors"; _want_pol="IfNotPresent"; _want_secs='[]'
+    fi
+    if [ -n "${_cr_name}" ] && { [ "${_cr_reg}" != "${_want_reg}" ] || [ "$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullPolicy}' 2>/dev/null" || true) )" != "${_want_pol}" ]; }; then
+        warn "  CR 取值漂移(当前 imageRegistry=${_cr_reg:-<空>}), kubectl patch 纠正为 ${_want_reg} ..."
+        SSH "${K} -n ${NS} patch csc ${_cr_name} --type=merge -p '{\"spec\":{\"global\":{\"imageRegistry\":\"${_want_reg}\",\"externalImageRegistryPrefix\":\"${_want_pref}\",\"imagePullSecrets\":${_want_secs},\"imagePullPolicy\":\"${_want_pol}\"}}}' >/dev/null 2>&1" \
+            && ok "  CR 已纠偏(operator 将按新值滚动组件)" \
+            || warn "  CR 纠偏失败(手工: kubectl -n ${NS} get csc -o yaml)"
+    else
+        ok "  CR 取值与部署模式一致(${_want_reg})"
+    fi
+    unset _cr_name _cr_reg _want_reg _want_pref _want_pol _want_secs
+fi
 
 # 等 operator 就绪(名字 = release 名; 用户改了 release 名时回退 <release>-cubestack-operator)
 SSH "${K} -n ${NS} rollout status deployment/${RELEASE} --timeout=180s" >/dev/null 2>&1 \
@@ -490,8 +602,14 @@ echo "---------------------------------------------"
 ok "CubeStack Operator 部署完成"
 echo "  release:      ${RELEASE}(namespace ${NS})"
 echo "  chart:        $(basename "${CHART_TGZ}")(sync=${SYNC_MODE}→${_MODE})"
-echo "  镜像:         ${IMG_REPO_OVERRIDE}:${IMG_TAG_OVERRIDE}(pullPolicy=${IMG_PULL_POLICY})"
-echo "  集群 registry: ${REG_BASE}(镜像已推入; 节点从这里拉, 不访问 Harbor)"
+if [ "${ONLINE_DEPLOY}" = "true" ]; then
+    echo "  部署模式:     在线(ONLINE_DEPLOY_CUBESTACK_OPERATOR=true)"
+    echo "  镜像:         ${IMG_REPO_OVERRIDE}(pullPolicy=Always —— 恒拉最新; 节点直连 ${HARBOR_HOST})"
+else
+    echo "  部署模式:     离线(ONLINE_DEPLOY_CUBESTACK_OPERATOR=false; 默认)"
+    echo "  镜像:         ${IMG_REPO_OVERRIDE}:${IMG_TAG_OVERRIDE}(pullPolicy=${IMG_PULL_POLICY})"
+    echo "  集群 registry: ${REG_BASE}(镜像已推入; 节点从这里拉, 不访问 Harbor)"
+fi
 echo "  平台实例 CR:  clusterCR.enabled=${CR_ENABLED}(改 cluster.conf CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED)"
 echo "  端到端验证:   sudo ./deploy-cluster.sh --steps verify_cubestack_operator"
 echo "  状态查看:     kubectl get csc -n ${NS}"
