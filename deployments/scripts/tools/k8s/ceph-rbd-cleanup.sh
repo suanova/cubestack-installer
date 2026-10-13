@@ -65,16 +65,25 @@ keep_vol() {   # <imageName> → 0=保留
 }
 
 # 列出某节点全部 rbd 映射: "id name pool"(逐行)
+# ⚠ 返回码**透传**(不吞, 2026-10-13 CodeRabbit): 调用侧据此区分"查询失败(rc≠0, 状态未知)"
+#   与"无映射(rc 0 且空输出)"—— 不可达节点绝不能被当成"干净"。
 list_maps() {   # <ip>
     local ip="$1"
     ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
-        "for d in /sys/bus/rbd/devices/*; do [ -e \"\$d\" ] || continue; echo \"\$(basename \$d) \$(cat \$d/name 2>/dev/null) \$(cat \$d/pool 2>/dev/null)\"; done" 2>/dev/null || true
+        "for d in /sys/bus/rbd/devices/*; do [ -e \"\$d\" ] || continue; echo \"\$(basename \$d) \$(cat \$d/name 2>/dev/null) \$(cat \$d/pool 2>/dev/null)\"; done" 2>/dev/null
 }
 
 # 清理单个节点
 cleanup_node() {   # <ip>
-    local ip="$1" maps line id name pool cleaned=0 mounted
-    maps="$(list_maps "${ip}")"
+    local ip="$1" maps line id name pool cleaned=0 mounted _left
+    # ★ 2026-10-13(CodeRabbit): 查询失败 ≠ 无映射 —— 不可达节点报"状态未知"并计入总账,
+    #   不得落入下方"无 rbd 映射"早退(那会让总报告对未知节点假清零)。
+    if ! maps="$(list_maps "${ip}")"; then
+        warn "  ${ip}: rbd 映射查询失败(SSH 不可达?) —— 状态未知, 跳过"
+        _TOTAL_UNKNOWN=$(( ${_TOTAL_UNKNOWN:-0} + 1 ))
+        _UNKNOWN_NODES="${_UNKNOWN_NODES:+${_UNKNOWN_NODES} }${ip}"
+        return 0
+    fi
     [ -n "${maps}" ] || { ok "  ${ip}: 无 rbd 映射"; return 0; }
     echo "  ${ip}:"
     while IFS= read -r line; do
@@ -97,28 +106,72 @@ cleanup_node() {   # <ip>
         fi
         # 卸载挂载点(仅当 kubelet 挂载引用且设备被占用; 残留挂载点安全卸载)
         if [ "${mounted}" = "yes" ]; then
-            ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
-                "sudo umount /dev/rbd${id} 2>/dev/null || true; for m in \$(mount | grep -E '[[:space:]]/dev/rbd${id}[[:space:]]' | awk '{print \$3}'); do sudo umount \"\$m\" 2>/dev/null || true; done; echo 卸载完成" 2>/dev/null || true
-            warn "    ${name}(id=${id}): 已卸载挂载点"
+            # ⚠ 卸载改**惰性(setsid umount -l)且后台化、不等待**(2026-10-10): 后端已死时正规
+            #   umount 会卡在"日志回写死设备"(永久 D 态不可杀) —— 与 k8s 清理处同一事故类。
+            #   惰性脱挂只做命名空间脱开, 后台进程即便 D 也只是惰性残留; 本步随之立即返回。
+            timeout 30 ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+                "sudo bash -c 'mount | grep /dev/rbd${id} | while read -r _d _on m _rest; do setsid umount -l \"\$m\" >/dev/null 2>&1 & done' ; echo 卸载已发起（惰性后台, 不等待）" 2>/dev/null || true
+            warn "    ${name}(id=${id}): 已发起惰性卸载(后台)"
         fi
         # unmap(经 sysfs, 设备节点缺失也有效)
         # 两套 sysfs remove 接口均接收设备 ID(rbd0 → 0); 按序尝试。
         #   设备目录已不存在 = 映射本来就没有 → 幂等视为成功。
-        if ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+        # ⚠ 改为**后台不等待 + 有界复核**(2026-10-10 实机): 后端已死时 sysfs remove 的**写调用
+        #   本身会永久 D 态**(worker .41 实测, 不可杀) —— 同步等待 = 部署无限挂。后台执行后
+        #   有界复核(≤10s): 设备目录消失=成功; 超时=告警放行(残映射仅造成 -13 日志刷屏,
+        #   不影响新集群; 择机重启清零)。
+        if timeout 30 ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
             "sudo bash -c '
                 [ -d /sys/bus/rbd/devices/${id} ] || exit 0
-                echo ${id} > /sys/bus/rbd/remove_single_major 2>/dev/null && exit 0
-                echo ${id} > /sys/bus/rbd/remove 2>/dev/null && exit 0
+                setsid bash -c \"echo ${id} > /sys/bus/rbd/remove_single_major 2>/dev/null || echo ${id} > /sys/bus/rbd/remove 2>/dev/null\" >/dev/null 2>&1 &
+                for _i in 1 2 3 4 5 6 7 8 9 10; do
+                    [ -d /sys/bus/rbd/devices/${id} ] || exit 0
+                    sleep 1
+                done
                 exit 1' 2>/dev/null" ; then
             ok "    ${name}(id=${id}): 已 unmap"
             cleaned=$((cleaned+1))
         else
-            warn "    ${name}(id=${id}): unmap 失败(两套 sysfs 接口均未成功; EBUSY=内核仍持有引用 → 需重启节点清除)"
+            warn "    ${name}(id=${id}): unmap 未完成(后端已死时 sysfs 写会阻塞; 已后台化不再等待 —— 残映射无碍新集群, 择机重启清零)"
         fi
     done <<< "${maps}"
     # 清理失效设备节点文件与空挂载目录(kubelet 残留)
-    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
-        "sudo rm -f /dev/rbd* 2>/dev/null || true; sudo find /var/lib/kubelet/pods -path '*kubernetes.io~csi*' -type d -empty -delete 2>/dev/null || true" 2>/dev/null || true
+    if [ -n "${maps}" ]; then
+        ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+            "sudo rm -f /dev/rbd* 2>/dev/null || true; sudo find /var/lib/kubelet/pods -path '*kubernetes.io~csi*' -type d -empty -delete 2>/dev/null || true" 2>/dev/null || true
+    fi
+    # ★ 2026-10-10 收尾阶梯(仅清理模式): 该节点映射清完后尝试**模块级卸载**(连客户端
+    #   会话/-13 刷屏一起清); 仍有残留 → 计全局账(总账在 main 末尾的洁净度报告)。
+    if [ "${LIST_ONLY}" != "1" ]; then
+        # ★ 2026-10-13(CodeRabbit): 空输出 = SSH 失败/查询异常 → **状态未知**, 不得归 0 ——
+        #   旧行为把失败归 0 → 该节点被误报"内核态清零"且不计入 _TOTAL_LEFT → 总报告假"全部
+        #   清零"。只有**真实读到的 0** 才走模块卸载; 未知单独计数, 报告里明示(不并入 LEFT:
+        #   LEFT>0 会触发"硬复位"建议, 对未知节点是错误指引)。
+        if _left="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+            "ls /sys/bus/rbd/devices 2>/dev/null | wc -l" 2>/dev/null)"; then
+            _left="${_left//[!0-9]/}"
+        else
+            _left=""
+        fi
+        _TOTAL_CLEANED=$(( ${_TOTAL_CLEANED:-0} + cleaned ))
+        if [ -z "${_left}" ]; then
+            _TOTAL_UNKNOWN=$(( ${_TOTAL_UNKNOWN:-0} + 1 ))
+            _UNKNOWN_NODES="${_UNKNOWN_NODES:+${_UNKNOWN_NODES} }${ip}"
+            warn "    ${ip}: 内核 rbd 映射数查询失败(SSH 不可达?) —— 状态未知(未计入清零)"
+        elif [ "${_left}" = "0" ]; then
+            # ★ 采纳远端建议(用户网页提交 96bc395): 模块卸载后**回来验证**是否真的卸载 ——
+            #   旧写法无论结果都报"已卸载"; EBUSY(仍有引用)时给出如实告警。
+            if ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+                "sudo modprobe -r rbd 2>/dev/null; sudo modprobe -r libceph 2>/dev/null; ! lsmod | grep -qE '^(rbd|libceph) '" >/dev/null 2>&1; then
+                ok "    ${ip}: rbd/libceph 模块已卸载(内核态清零)"
+            else
+                warn "    ${ip}: 映射已清零, 但 rbd/libceph 模块仍加载(EBUSY)"
+            fi
+        else
+            _TOTAL_LEFT=$(( ${_TOTAL_LEFT:-0} + _left ))
+            warn "    ${ip}: 仍有 ${_left} 个内核 rbd 映射(sysfs 被拒/模块卸载 EBUSY = 内核持锁)"
+        fi
+    fi
     [ "${cleaned}" -gt 0 ] && ok "  ${ip}: 清理 ${cleaned} 个残留 rbd 映射" || true
 }
 
@@ -138,5 +191,21 @@ echo "---------------------------------------------"
 if [ "${LIST_ONLY}" = "1" ]; then
     say "以上为各节点 rbd 映射(非 --list 时清除 [残留] 标记的映射; 若 -13 仍刷屏且存在 mounted=yes 的残留, 对应节点需重启)"
 else
-    ok "rbd 残留清理完成(若 -13 仍在刷屏, 可能有个别映射被内核占用, 可重启对应节点)"
+    echo "  ▍内核洁净度报告(阶梯: 惰性脱挂 → sysfs 后台清理 → 模块卸载)"
+    echo "     本轮已清映射: ${_TOTAL_CLEANED:-0} 个"
+    # ★ 2026-10-13(CodeRabbit): "清零"结论仅当 **LEFT=0 且无未知节点** 时才成立 ——
+    #   查询失败的节点状态未知, 不能并入"全部节点已清零"。
+    if [ "${_TOTAL_LEFT:-0}" -eq 0 ] 2>/dev/null && [ "${_TOTAL_UNKNOWN:-0}" -eq 0 ]; then
+        ok "rbd 残留清理完成: 全部节点内核 rbd 侧已清零(映射=0)"
+    else
+        if [ "${_TOTAL_LEFT:-0}" -ne 0 ] 2>/dev/null; then
+            warn "rbd 残留清理完成, 但**仍有 ${_TOTAL_LEFT:-?} 个内核 rbd 映射**(内核持锁, 物理所限)"
+            warn "  影响: 仅致 libceph -13 日志刷屏, 无碍新集群数据面 —— 部署可继续"
+            warn "  想彻底清零: 对相应节点**硬复位**后重跑本工具(⚠ 优雅重启会卡在 sync; 用 sysrq-b / reboot -f / virsh reset)"
+        fi
+        if [ "${_TOTAL_UNKNOWN:-0}" -ne 0 ] 2>/dev/null; then
+            warn "另有 ${_TOTAL_UNKNOWN} 个节点内核 rbd 状态**未知**(查询失败, 多为 SSH 不可达): ${_UNKNOWN_NODES:-?}"
+            warn "  —— 未计入清零; 节点恢复可达后重跑本工具确认"
+        fi
+    fi
 fi

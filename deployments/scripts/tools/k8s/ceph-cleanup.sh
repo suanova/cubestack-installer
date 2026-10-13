@@ -41,26 +41,148 @@ node_cmd() {   # <ip> <user> <cmd...>
         "${user}@${ip}" "$@"
 }
 
-# ---------------- ① 删除现有 CephCluster(Rook 擦盘) ----------------
-delete_cluster() {
-    say "删除现有 CephCluster(cleanupPolicy yes-really-destroy-data, Rook 擦盘)..."
-    # 幂等: 无集群直接成功
-    _exists="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
-    [ -z "${_exists}" ] && { ok "  无现有 CephCluster, 跳过"; return 0; }
+# ---------------- ⓪① ② 停消费者 + 触发 unmap(可独立调用; --delete-cluster 的先导步) ----------------
+# 目的(2026-10-10 用户口径): ① 消灭在飞 IO(防写死死设备/内核毒化) ② 让 CSI 自然
+# NodeUnpublish→Unstage(节点内核 rbd unmap) ③ 防"删了 PVC/集群, 控制器又重建 Pod"的竞态。
+# 只停**消费者**; 默认并删 Bound 的 ceph PVC(触发 unmap, 不删 registry-pvc); --keep-pvcs 保留模式仅停消费者(集群保留时无需 unmap, 应用卷数据不受影响)。
+stop_consumers() {
+    say "  ⓪ 停用持有 ceph 卷的工作负载(消灭在飞 IO; PVC 对象保留)..."
+    _RBD_OP_NS="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
+    _RBD_OP_REL="${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"
+    # ★ 2026-10-13: scale 0 前登记原副本数(注解; 仅首次, 重复停机不覆盖) —— 02_ceph.sh 7.9
+    #   只恢复带注解的对象(CodeRabbit 评审: 旧实现"存在即 replicas=1"会把手动扩容静默压回 1,
+    #   且停机前副本数非 1 时恢复丢原值)。
+    #   ⚠ registry 是 kubespray 建的**裸 ReplicaSet**(非 Deployment; 2026-10-13 实机验证)——
+    #   旧代码 `scale deploy registry` 从未命中, 实际停机全靠下方扫荡的 delrs(整删 RS, 不可恢复);
+    #   现改为 scale rs(对象保留), 由 7.9 标记驱动恢复。
+    stop_mark_replicas deploy "${_RBD_OP_NS}" "${_RBD_OP_REL}"
+    stop_mark_replicas rs kube-system registry
+    SSH "${K} -n ${_RBD_OP_NS} scale deploy ${_RBD_OP_REL} --replicas=0 >/dev/null 2>&1" || true
+    SSH "${K} -n kube-system scale rs registry --replicas=0 >/dev/null 2>&1" || true
+    _vj="$(mktemp)"; _pj="$(mktemp)"; _rj="$(mktemp)"; _sj="$(mktemp)"
+    _sweep_done=0
+    for _wi in $(seq 1 12); do
+        SSH "${K} get pvc -A -o json 2>/dev/null" > "${_vj}" || true
+        SSH "${K} get pods -A -o json 2>/dev/null" > "${_pj}" || true
+        SSH "${K} get rs -A -o json 2>/dev/null" > "${_rj}" || true
+        SSH "${K} get sts -A -o json 2>/dev/null" > "${_sj}" || true
+        _acts="$(python3 - "${_vj}" "${_pj}" "${_rj}" "${_sj}" <<'PYEOF'
+import json, sys
+def load(p):
+    try:
+        return json.load(open(p))
+    except Exception:
+        return {"items": []}
+ceph = set()
+for p in load(sys.argv[1]).get("items", []):
+    sc = ((p.get("spec") or {}).get("storageClassName") or "")
+    if "ceph" in sc and (p.get("status") or {}).get("phase") == "Bound":
+        ceph.add((p["metadata"]["namespace"], p["metadata"]["name"]))
+if not ceph:
+    sys.exit(0)
+rs = {(r["metadata"]["namespace"], r["metadata"]["name"]): r for r in load(sys.argv[3]).get("items", [])}
+sts = {(s["metadata"]["namespace"], s["metadata"]["name"]): s for s in load(sys.argv[4]).get("items", [])}
+for pod in load(sys.argv[2]).get("items", []):
+    md = pod["metadata"]; ns = md["namespace"]; name = md["name"]
+    if (pod.get("status") or {}).get("phase") in ("Succeeded", "Failed"):
+        continue
+    hit = False
+    for v in ((pod.get("spec") or {}).get("volumes") or []):
+        cn = (v.get("persistentVolumeClaim") or {}).get("claimName")
+        if cn and (ns, cn) in ceph:
+            hit = True; break
+    if not hit:
+        continue
+    refs = md.get("ownerReferences") or []
+    if not refs:
+        print("delpod\t%s\t%s\t" % (ns, name)); continue
+    k = refs[0]["kind"]; n = refs[0]["name"]
+    if k == "ReplicaSet":
+        _rsob = rs.get((ns, n), {})
+        rr = (_rsob.get("metadata", {}).get("ownerReferences") or [])
+        if rr:
+            print("scale\t%s\t%s\t%s" % (ns, rr[0]["kind"], rr[0]["name"]))
+        elif ((_rsob.get("spec") or {}).get("replicas", 1) == 0):
+            # ★ 2026-10-13: 裸 RS 已 scale 0(如本函数刚优雅停机的 registry RS, pod 尚在
+            #   优雅终结) → 保留本体。0 副本不会再重建 Pod(删本体的目的仅在于此), 而
+            #   02_ceph.sh 7.9 的标记驱动恢复需要对象活着 —— 误删后 --steps ceph 路径
+            #   下 registry 再也拉不回来(这曾是真实现状: deploy 空转 + 扫荡 delrs 整删)。
+            pass
+        else:
+            # 无主的裸 RS(pod 由它直接管) → 删 RS 本体(只删 Pod 会被它重建)
+            print("delrs\t%s\t%s\t" % (ns, n))
+    elif k == "StatefulSet":
+        sr = (sts.get((ns, n), {}).get("metadata", {}).get("ownerReferences") or [])
+        if sr and sr[0]["kind"] not in ("Deployment", "StatefulSet", "ReplicaSet"):
+            print("delcr\t%s\t%s\t%s" % (ns, sr[0]["kind"].lower(), sr[0]["name"]))
+        else:
+            print("scale\t%s\t%s\t%s" % (ns, k, n))
+    elif k == "Deployment":
+        print("scale\t%s\t%s\t%s" % (ns, k, n))
+    elif k in ("DaemonSet", "Job", "ReplicationController"):
+        print("delpod\t%s\t%s\t" % (ns, name))
+    else:
+        # 自定义 CR 直管 Pod(实测: CNPG 的 pod owner 就是 Cluster CR) → 删 CR 本体,
+        # 由其 operator 级联收掉组件(只删 Pod 会被 operator 重建)
+        print("delcr\t%s\t%s\t%s" % (ns, k.lower(), n))
+PYEOF
+)"
+        [ -z "${_acts}" ] && { _sweep_done=1; break; }
+        while IFS=$'\t' read -r _act _a1 _a2 _a3; do
+            [ -n "${_act}" ] || continue
+            case "${_act}" in
+                scale)  say "     停用 ${_a1}/${_a2} ${_a3}(replicas=0)"; SSH "${K} -n ${_a1} scale ${_a2,,} ${_a3} --replicas=0 >/dev/null 2>&1" || true ;;
+                delpod) say "     删除 Pod ${_a1}/${_a2}(优雅退出, ≤20s)"; SSH "${K} -n ${_a1} delete pod ${_a2} --grace-period=20 >/dev/null 2>&1" || true ;;
+                delrs)  say "     删除裸 ReplicaSet ${_a1}/${_a2}(无 Deployment 管理, 删 Pod 会被其重建)"; SSH "${K} -n ${_a1} delete rs ${_a2} --wait=false >/dev/null 2>&1" || true ;;
+                delcr)  say "     删除 CR ${_a2}/${_a3}(级联收掉其组件)"; SSH "${K} -n ${_a1} delete ${_a2} ${_a3} --wait=false >/dev/null 2>&1" || true ;;
+            esac
+        done <<< "${_acts}"
+        sleep 10
+    done
+    if [ "${_sweep_done}" = "1" ]; then
+        ok "  消费者已全部停用(无 Pod 再引用 ceph PVC)"
+    else
+        _left_pods="$(python3 - "${_vj}" "${_pj}" <<'PYEOF' 2>/dev/null || true
+import json, sys
+def load(p):
+    try:
+        return json.load(open(p))
+    except Exception:
+        return {"items": []}
+ceph = set()
+for p in load(sys.argv[1]).get("items", []):
+    sc = ((p.get("spec") or {}).get("storageClassName") or "")
+    if "ceph" in sc and (p.get("status") or {}).get("phase") == "Bound":
+        ceph.add((p["metadata"]["namespace"], p["metadata"]["name"]))
+out = []
+for pod in load(sys.argv[2]).get("items", []):
+    md = pod["metadata"]; ns = md["namespace"]
+    for v in ((pod.get("spec") or {}).get("volumes") or []):
+        cn = (v.get("persistentVolumeClaim") or {}).get("claimName")
+        if cn and (ns, cn) in ceph:
+            out.append("%s/%s" % (ns, md["name"])); break
+print(" ".join(out[:8]))
+PYEOF
+)"
+        warn "  仍有 Pod 引用 ceph PVC(120s 未收敛): ${_left_pods:-?} —— 继续(k8s 重置/资源删除会终结它们)"
+    fi
+    rm -f "${_vj}" "${_pj}" "${_rj}" "${_sj}"
+
     # ★ 2026-09-05 事故预防: 删除集群前先清 ceph-block PVC 并删 rbd nodeplugin DaemonSet。
     #   若直接删 CephCluster, nodeplugin 随之被删 → 节点上内核 rbd 映射无人 unmap →
     #   [rbd0-tasks] 内核线程持锁残留 → sysfs remove 被拒(EACCES) → libceph cephx -13
     #   刷屏, 只能重启节点。正确顺序: 先让 CSI 正常 unmap 卷, 再删集群。
-    say "  ① 删除使用 ceph-block 的 PVC(触发 CSI unmap)..."
-    # ★ 2026-09-24 修复: 只删 **Bound** 的 ceph PVC, 且永不删 kube-system/registry-pvc。
-    #   本步目的是"删掉有后端卷的 PVC, 逼 CSI 先 unmap"; 而**没有后端卷的 PVC(Pending)删掉
-    #   只是丢声明, 一个卷也 unmap 不到** —— registry-pvc 恰是这一种: 它由 kubespray 在 k8s
-    #   阶段创建(roles/kubernetes-apps/registry), 之后没有任何 addon 模块会重建它。
-    #   删了它 → 模块 05_k8s_registry 一直等 "registry-pvc Bound"(等一个不存在的对象)
-    #   → 600s 超时 → 整轮部署在 ceph 修好之后**又**挂在 registry 上。
-    #   已 Bound 的 registry-pvc 同样保护: 删了 registry 就失去存储声明(镜像数据本就随
-    #   OSD 清盘没了, 要重建 registry 请人工删声明 + 重跑 k8s 阶段)。
-    SSH "${K} get pvc -A -o json 2>/dev/null" | python3 -c '
+    if [ "${KEEP_PVCS}" != "1" ]; then
+        say "  ① 删除使用 ceph-block 的 PVC(触发 CSI unmap)..."
+        # ★ 2026-09-24 修复: 只删 **Bound** 的 ceph PVC, 且永不删 kube-system/registry-pvc。
+        #   本步目的是"删掉有后端卷的 PVC, 逼 CSI 先 unmap"; 而**没有后端卷的 PVC(Pending)删掉
+        #   只是丢声明, 一个卷也 unmap 不到** —— registry-pvc 恰是这一种: 它由 kubespray 在 k8s
+        #   阶段创建(roles/kubernetes-apps/registry), 之后没有任何 addon 模块会重建它。
+        #   删了它 → 模块 05_k8s_registry 一直等 "registry-pvc Bound"(等一个不存在的对象)
+        #   → 600s 超时 → 整轮部署在 ceph 修好之后**又**挂在 registry 上。
+        #   已 Bound 的 registry-pvc 同样保护: 删了 registry 就失去存储声明(镜像数据本就随
+        #   OSD 清盘没了, 要重建 registry 请人工删声明 + 重跑 k8s 阶段)。
+        SSH "${K} get pvc -A -o json 2>/dev/null" | python3 -c '
 import sys, json
 PROTECT = {("kube-system", "registry-pvc")}      # kubespray 建的 registry 声明: 删了不会自愈
 try:
@@ -80,16 +202,29 @@ try:
 except Exception:
     pass
 ' | while read -r _act _pvc _why; do
-        [ -n "${_pvc:-}" ] || continue
-        case "${_act}" in
-            DEL)  say "     删除 PVC ${_pvc}(数据将销毁)..."
-                  SSH "${K} -n ${_pvc%/*} delete pvc ${_pvc#*/} --wait=false >/dev/null 2>&1" || true ;;
-            KEEP) say "     保留 PVC ${_pvc} ${_why:-}" ;;
-        esac
-    done
-    say "  ② 删除 rbd csi nodeplugin DaemonSet(各节点执行内核 rbd unmap)..."
-    SSH "${K} -n ${CEPH_NAMESPACE} delete ds rook-ceph.rbd.csi.ceph.com-nodeplugin --wait=false >/dev/null 2>&1" || true
-    sleep 5
+            [ -n "${_pvc:-}" ] || continue
+            case "${_act}" in
+                DEL)  say "     删除 PVC ${_pvc}(数据将销毁)..."
+                      SSH "${K} -n ${_pvc%/*} delete pvc ${_pvc#*/} --wait=false >/dev/null 2>&1" || true ;;
+                KEEP) say "     保留 PVC ${_pvc} ${_why:-}" ;;
+            esac
+        done
+        say "  ② 删除 rbd csi nodeplugin DaemonSet(各节点执行内核 rbd unmap)..."
+        SSH "${K} -n ${CEPH_NAMESPACE} delete ds rook-ceph.rbd.csi.ceph.com-nodeplugin --wait=false >/dev/null 2>&1" || true
+        sleep 5
+    else
+        say "  保留模式(--keep-pvcs): 跳过 Bound PVC 删除与 nodeplugin 删除(集群保留, 无需 unmap; 应用卷数据不受影响)"
+    fi
+}
+
+# ---------------- ① 删除现有 CephCluster(Rook 擦盘) ----------------
+delete_cluster() {
+    say "删除现有 CephCluster(cleanupPolicy yes-really-destroy-data, Rook 擦盘)..."
+    # 幂等: 无集群直接成功
+    _exists="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+    [ -z "${_exists}" ] && { ok "  无现有 CephCluster, 跳过"; return 0; }
+
+    stop_consumers
     SSH "${K} -n ${CEPH_NAMESPACE} patch cephcluster rook-ceph --type merge \
         -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}' >/dev/null 2>&1" || true
     SSH "${K} -n ${CEPH_NAMESPACE} delete cephblockpool --all --wait=false >/dev/null 2>&1" || true
@@ -166,25 +301,46 @@ for dev in __DISKS__; do
         _BSTORE_FAIL=1
     fi
 done
-# 5) 清理 Rook/Ceph 数据目录 + 残留 rbd 设备
+# 5) 清理 Rook/Ceph 数据目录 + 残留 rbd 设备(+ 2026-10-10: ceph/rook udev 规则)
 rm -rf /var/lib/rook /var/lib/ceph /etc/ceph /run/ceph 2>/dev/null || true
 rm -f /dev/rbd* 2>/dev/null || true
+rm -f /etc/udev/rules.d/*ceph* /etc/udev/rules.d/*rook* 2>/dev/null || true
+udevadm control --reload-rules >/dev/null 2>&1 || true
 udevadm settle 2>/dev/null || true
-# 6) ★ 内核 rbd 映射残留检测(2026-09-05 事故预防): 即使磁盘清空, 内核 rbd 映射
-#    ([rbd0-tasks] 线程持锁)仍在时, sysfs remove 会被 EACCES 拒绝, 且 libceph 持续
-#    cephx -13 刷屏, 只能重启节点清除。此处检测并明确提示, 不再静默继续。
-echo "--- 内核 rbd 映射检测 ---"
+# 6) ★ 内核 rbd 映射残留: **完整阶梯**(2026-10-10 定稿; 对齐官方"unmap→模块卸载→才谈重启"):
+#    a) 逐映射**后台** sysfs remove + 有界复核(惰性, 本进程永不阻塞; 成功会让 b 可行)
+#    b) `modprobe -r rbd` + `modprobe -r libceph` —— **模块级卸载**, unmap 成功后它能把
+#       客户端会话/内核态一次性清光(根治 -13 刷屏), 这是官方推荐的"比逐条 unmap 更彻底"的手段
+#    c) 仍残留(sysfs 被拒 + rmmod EBUSY = 内核持锁, 物理所限) → 响亮告警 + **硬复位**指引
+echo "--- 内核 rbd 映射清理(阶梯: sysfs → 模块卸载 → 告警)---"
 RBD_N=0
 for d in /sys/bus/rbd/devices/*; do
     [ -d "$d" ] || continue
     RBD_N=$((RBD_N+1))
-    echo "残留 rbd 映射: $(cat $d/name 2>/dev/null) (pool=$(cat $d/pool 2>/dev/null))"
+    _rid="$(basename "$d")"; _rid="${_rid#rbd}"
+    echo "残留 rbd 映射: $(cat $d/name 2>/dev/null) (pool=$(cat $d/pool 2>/dev/null), id=${_rid})"
+    setsid bash -c "echo ${_rid} > /sys/bus/rbd/remove_single_major 2>/dev/null || echo ${_rid} > /sys/bus/rbd/remove 2>/dev/null" >/dev/null 2>&1 &
 done
 if [ "$RBD_N" -gt 0 ]; then
-    echo "!! 检测到 $RBD_N 个内核 rbd 映射残留: sysfs remove 被持锁拒绝, 必须重启本节点清除"
-    echo "!! (否则 libceph 持续 cephx 认证失败刷屏; 重启后重跑本清理即可)"
+    for _wi in 1 2 3 4 5 6 7 8 9 10; do
+        ls /sys/bus/rbd/devices/* >/dev/null 2>&1 || break
+        sleep 1
+    done
+fi
+modprobe -r rbd 2>/dev/null || true
+modprobe -r libceph 2>/dev/null || true
+RBD_N=0
+for d in /sys/bus/rbd/devices/*; do
+    [ -d "$d" ] || continue
+    RBD_N=$((RBD_N+1))
+done
+if [ "$RBD_N" -gt 0 ]; then
+    echo "!! 仍残留 ${RBD_N} 个内核 rbd 映射(sysfs remove 被拒时模块卸载也 EBUSY —— 内核持锁)"
+    echo "!! 处置: **硬复位**该节点后重跑本清理(⚠ 优雅重启会卡在 sync; 用 sysrq-b / reboot -f / virsh reset)"
+    echo "!! (残映射无碍新集群数据面, 仅致 libceph -13 日志刷屏; 可继续部署, 择机清零)"
     exit 9
 fi
+echo "--- 内核 rbd 映射已清空(阶梯完成)---"
 echo "--- 验证目标盘 FSTYPE/挂载(应全空) ---"
 for dev in __DISKS__; do
     [ -b "$dev" ] || continue
@@ -378,11 +534,13 @@ ACTION=""
 WIPE_IP=""
 WIPE_DISKS=""
 FORCE=0
+KEEP_PVCS=0
 usage() {
     cat <<'USAGE'
 用法:
   ceph-cleanup.sh --list                               # 只列出清理计划(只读, 不动盘)
   ceph-cleanup.sh --delete-cluster                     # 仅删除 CephCluster CR(等 Rook 擦盘, 最长 300s)
+  ceph-cleanup.sh --stop-consumers [--keep-pvcs]       # 只停消费者; --keep-pvcs=保留全部 PVC/nodeplugin(集群保留时用)
   ceph-cleanup.sh --wipe-disks                         # 只清理判为 Ceph 占用的盘(不删集群)
   ceph-cleanup.sh --all                                # 全流程: 删集群(若在) + 清理判为 Ceph 占用的盘
   ceph-cleanup.sh --wipe-node <ip> --disks "/dev/vdb,/dev/vdc" [--force]
@@ -396,11 +554,13 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --list)           ACTION=list; shift ;;
         --delete-cluster) ACTION=delete-cluster; shift ;;
+        --stop-consumers) ACTION=stop-consumers; shift ;;
         --wipe-disks)     ACTION=wipe-disks; shift ;;
         --all)            ACTION=all; shift ;;
         --wipe-node)      ACTION=wipe-node; WIPE_IP="${2:-}"; shift 2 ;;
         --disks)          WIPE_DISKS="${2:-}"; shift 2 ;;
         --force)          FORCE=1; shift ;;
+        --keep-pvcs)      KEEP_PVCS=1; shift ;;
         -h|--help)        usage; exit 0 ;;
         *) err "未知参数: $1"; usage; exit 1 ;;
     esac
@@ -408,9 +568,12 @@ done
 
 case "${ACTION}" in
     list)           list_plan ;;
-    delete-cluster) delete_cluster ;;
+    # ★ 删集群/全流程路径强制默认行为(KEEP_PVCS=0): 保留模式仅 --stop-consumers 有意义
+    #   (集群保留时无需 unmap; 删集群路径必须先 unmap, 否则回到 09-05 事故路径)
+    delete-cluster) KEEP_PVCS=0; delete_cluster ;;
+    stop-consumers) stop_consumers ;;
     wipe-disks)     wipe_ceph_disks_all_nodes ;;
-    all)            cleanup_all ;;
+    all)            KEEP_PVCS=0; cleanup_all ;;
     wipe-node)
         [ -n "${WIPE_IP}" ] && [ -n "${WIPE_DISKS}" ] \
             || { err "用法: $0 --wipe-node <ip> --disks \"/dev/vdb,/dev/vdc\" [--force]"; exit 1; }

@@ -38,6 +38,8 @@ HARBOR_USER_CLI="${HARBOR_MIRROR_USER:-}"; HARBOR_PASS_CLI="${HARBOR_MIRROR_PASS
 while [ $# -gt 0 ]; do
     case "$1" in
         --kubespray) DO_KUBESPRAY=1 ;;
+        # 逐版本核对: k8s-base/ceph 的落点是 <offline-files>/kubespray/<版本>/images(见下 §④)
+        --kubespray-version) export KUBESPRAY_VERSION="${2:?--kubespray-version 需要版本名, 如 v2.32.0}"; shift ;;
         --harbor)    DO_HARBOR=1 ;;
         --harbor-user) HARBOR_USER_CLI="${2:?}"; shift ;;
         --harbor-pass) HARBOR_PASS_CLI="${2:?}"; shift ;;

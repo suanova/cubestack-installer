@@ -67,6 +67,7 @@ PY
 }
 
 # 读 docker-save tar 的源镜像名(manifest.json RepoTags[0]); 无则输出空
+# ★ 2026-10-12: .tar / .tar.gz 均可 —— python tarfile "r" 模式自动识别压缩
 # 用法: tar_first_image_tag <tar文件> → 源镜像 ref(如 cr.metax-tech.com/cloud/gpu-label:0.15.3)
 # 供 tar 离线加载模式推导目标 repo/tag(与 docker save 生成的 tar 兼容)
 tar_first_image_tag() {
@@ -118,6 +119,80 @@ is_state_completed() {
     for p in "${phases[@]}"; do
         [ "$(get_state "$p")" = "done" ] || return 1
     done
+    return 0
+}
+
+# ---------------- 优雅覆盖: 安装登记(写集群内 ConfigMap) ----------------
+# 设计: docs/graceful-overwrite/design.md(方案 A)。--fresh 等覆盖场景由 cluster-teardown.sh
+# 读这份登记 → 按**首装序**反序调用各模块卸载段(模块头部 `# UNINSTALL: 1`)。
+# 写失败**绝不阻断部署**(warn 即可; 覆盖时自会走探测降级路径)。
+# 用法: record_installed_component <key>   (模块在安装成功点调用; 需已 init_remote_kubectl)
+RECORD_CM_NS="kube-system"
+RECORD_CM_NAME="cubestack-install-record"
+
+# 纯函数: stdin=当前 record JSON(可空/可坏) → stdout=合并后的新 record JSON
+#   · 新组件: seq = 现存 max+1(首装序 —— 反序卸载的排序键);
+#   · 已存在: seq 保留(REPEAT:1 模块重跑不改变首装序), 只更新 lastSeenAt/status。
+_record_merge_json() {
+    local key="$1" status="${2:-done}"
+    KEY="${key}" STATUS="${status}" CLUSTER_NAME="${CLUSTER_NAME:-unknown}" python3 -c '
+import json, os, sys
+from datetime import datetime, timezone
+key = os.environ["KEY"]
+try:
+    rec = json.load(sys.stdin)
+    if not isinstance(rec.get("components"), list):
+        rec = {"schema": 1, "components": []}
+except Exception:
+    rec = {"schema": 1, "components": []}
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+hit = None
+for c in rec["components"]:
+    if isinstance(c, dict) and c.get("key") == key:
+        hit = c; break
+if hit is None:
+    seqs = [c.get("seq", 0) for c in rec["components"] if isinstance(c, dict)]
+    hit = {"key": key, "seq": (max(seqs) if seqs else 0) + 1, "firstInstalledAt": now}
+    rec["components"].append(hit)
+hit["lastSeenAt"] = now
+hit["status"] = os.environ["STATUS"]
+rec["schema"] = rec.get("schema", 1)
+rec.setdefault("cluster", os.environ.get("CLUSTER_NAME", "unknown"))
+print(json.dumps(rec, ensure_ascii=False))
+'
+}
+
+# record JSON → 完整 ConfigMap JSON(apply 用)
+_record_cm_json() {
+    CM_NAME="${RECORD_CM_NAME}" CM_NS="${RECORD_CM_NS}" python3 -c '
+import json, os, sys
+rec = json.load(sys.stdin)
+cm = {"apiVersion": "v1", "kind": "ConfigMap",
+      "metadata": {"name": os.environ["CM_NAME"], "namespace": os.environ["CM_NS"],
+                   "labels": {"app.kubernetes.io/managed-by": "cubestack-installer"}},
+      "data": {"record.json": json.dumps(rec, ensure_ascii=False)}}
+print(json.dumps(cm, ensure_ascii=False))
+'
+}
+
+record_installed_component() {   # <key>
+    local key="$1" cur merged
+    [ -n "${key}" ] || return 0
+    if [ "${_INIT_REMOTE_KUBECTL:-0}" != "1" ]; then
+        warn "登记跳过(远端 kubectl 未初始化): ${key}"
+        return 0
+    fi
+    # 读现有登记(CM 不存在/读失败 → 空登记起步)
+    cur="$( (SSH "${K} -n ${RECORD_CM_NS} get cm ${RECORD_CM_NAME} -o json 2>/dev/null") || true)"
+    if [ -n "${cur}" ]; then
+        cur="$(printf '%s' "${cur}" | python3 -c 'import json,sys
+try: print(json.loads(sys.stdin.read()).get("data",{}).get("record.json") or "{}")
+except Exception: print("{}")')"
+    fi
+    merged="$(printf '%s' "${cur:-{\}}" | _record_merge_json "${key}" done)" \
+        || { warn "登记合并失败: ${key}(不影响部署)"; return 0; }
+    printf '%s' "${merged}" | _record_cm_json | SSH "${K} apply -f -" >/dev/null 2>&1 \
+        || warn "登记写入失败: ${key}(不影响部署; 覆盖时将走探测降级路径)"
     return 0
 }
 
@@ -227,6 +302,32 @@ reg_has_tag() {
 # 扫描全部 *.tar 按内容兜底(兼容改名/异常命名)。读不出内容时**信任 glob 不否决**,
 # 仅明确不匹配才跳过并告警。用法: find_offline_tar <ref后缀> <文件名glob> <dir...>
 #   ref 后缀带前导 /(如 /gateway:v1.9.1), 防 /foo/gateway:v1.9.1 误匹配
+# 镜像 digest(规范化比对用): 多架构 index → 取 amd64/linux 条目 digest; 单架构清单 → 清单字节 sha256。
+# ⚠ skopeo **不支持 --override-arch**(CLI 镜像 1.16.1 实测): index 上 {{.Digest}} 是 index 自身摘要,
+#   与"推过去的单架构镜像"不可比 —— 故自解析 --raw。取不到输出空(调用方保守: 不相等即走推送)。
+# 用法: d="$(image_digest_raw docker://ref)"   或   d="$(image_digest_raw docker-archive:/path.tar)"
+image_digest_raw() {   # <docker://ref | docker-archive:path>
+    local ref="$1" raw=""
+    raw="$(skopeo inspect --raw --tls-verify=false "${ref}" 2>/dev/null || true)"
+    [ -n "${raw}" ] || return 0
+    printf '%s' "${raw}" | python3 -c '
+import hashlib, json, sys
+raw = sys.stdin.buffer.read()
+try:
+    d = json.loads(raw)
+except Exception:
+    sys.exit(0)
+ms = d.get("manifests")
+if isinstance(ms, list):                 # 多架构 index → amd64/linux 条目
+    for m in ms:
+        p = m.get("platform") or {}
+        if p.get("architecture") == "amd64" and p.get("os") == "linux":
+            print(m.get("digest", "")); break
+else:                                     # 单架构清单 → 字节 sha256 = 它自己的 digest
+    print("sha256:" + hashlib.sha256(raw).hexdigest())
+' 2>/dev/null || true
+}
+
 find_offline_tar() {
     local suffix="$1" glob="$2"; shift 2
     local d t src
@@ -251,6 +352,19 @@ find_offline_tar() {
             [ -f "${t}" ] || continue
             case "$(tar_first_image_tag "${t}")" in
                 *"${suffix}") echo "${t}"; return 0 ;;
+            esac
+        done
+        # ★ 2026-10-12: .tar.gz 支持(大件就地 gzip 省盘)—— **文件名匹配, 不做内容检查**:
+        #   · gzip 不可反向寻址, 而 docker-archive 的 manifest.json 在**归档末尾**
+        #     ⇒ 任何内容检查 = 整卷解压(11G 级 ~90s/次, 逐镜像调用不可承受; 实测);
+        #   · tar 文件名是权威(上游 ref 的 /,: → _; 同 25_cubestack_operator 的实践),
+        #     内容校验由生产侧(harbor-save)与 plain .tar 路径(可随机寻址, 毫秒级)承担。
+        #   文件名形如 <域>_<路径(段内 _)>_<tag>.tar.gz —— 归一化 suffix 后做尾部匹配。
+        _ns="$(printf '%s' "${suffix}" | tr '/:' '__')"
+        for t in "${d}"/*.tar.gz; do
+            [ -f "${t}" ] || continue
+            case "$(basename "${t}")" in
+                *"_${_ns}.tar.gz") echo "${t}"; return 0 ;;
             esac
         done
     done
@@ -378,13 +492,11 @@ ensure_registry_nginx() {
     # find_offline_tar 是 endswith 语义, 版本化 tag(nginx:1.31.4)不命中, 下方按内容兜底。
     _t="$(find_offline_tar "nginx:latest" "nginx*.tar" \
             "${REPO_ROOT}/deployments/offline-files/nginx" \
-            "${LOCAL_REPO_DIR}/images" \
-            "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME:-cubestack-cluster}/images")" || _t=""
+            "${LOCAL_REPO_DIR}/images")" || _t=""
     if [ -z "${_t}" ]; then
         # 兜底: 版本化 tag(如 nginx:1.31.4)按内容匹配(含 "nginx:" 即接受)
         for _d in "${REPO_ROOT}/deployments/offline-files/nginx" \
-                  "${LOCAL_REPO_DIR}/images" \
-                  "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/${CLUSTER_NAME:-cubestack-cluster}/images"; do
+                  "${LOCAL_REPO_DIR}/images"; do
             [ -d "${_d}" ] || continue
             for _f in "${_d}"/nginx*.tar; do
                 [ -f "${_f}" ] || continue
@@ -416,6 +528,33 @@ ensure_registry_nginx() {
     return 1
 }
 
+# 仓库当前 kubespray 树版本(带 v 前缀; 取不到输出空) —— 供 KUBESPRAY_VERSION 默认值机械派生
+# (不写死版本号: 换树后自动跟随; 见 docs/kubespray-versioning/design.md §4.1)
+kubespray_tree_version() {
+    local galaxy="${REPO_ROOT}/deployments/kubespray/kubespray/galaxy.yml"
+    [ -f "${galaxy}" ] || return 0
+    awk '/^version:/{print "v"$2; exit}' "${galaxy}"
+}
+
+# 默认部署版本 = **最新版本** = max(仓库树版本, **有入库档案**的版本目录)
+#   · 只认"有入库档案"的版本: 档案是版本面变量的接管凭证; 没有档案 ⇒ 钉子仍按 cluster.conf,
+#     拿别的版本的资产配本版本的钉子 = 静默错配(设计 §3.2 要防的正是这个)
+#     ⇒ 本地临时版本(有 LOCAL_ONLY / 无档案)不进默认, 必须显式 --profile / KUBESPRAY_VERSION
+#   · 用户口径(2026-09-30): 不指定 --profile 时默认部署最新版本; 原部署模式(默认全量、参数语义)不变
+kubespray_latest_version() {
+    local prof_dir="${REPO_ROOT}/deployments/config/profiles"
+    {
+        kubespray_tree_version
+        if [ -d "${prof_dir}" ]; then
+            local f
+            for f in "${prof_dir}"/*.profile; do
+                [ -f "${f}" ] || continue
+                sed -nE 's/^[[:space:]]*KUBESPRAY_VERSION=([^[:space:]#]+).*/\1/p' "${f}" | head -1
+            done
+        fi
+    } | sed '/^$/d' | sort -V | tail -1
+}
+
 # ---------------- 统一配置加载 ----------------
 # 环境变量优先: 配置文件内使用 ${VAR:-default},已导出的环境变量不会被覆盖
 load_config() {
@@ -426,6 +565,53 @@ load_config() {
         warn "未找到配置文件 ${CLUSTER_CONF},使用内置默认值"
         warn "建议: cp ${REPO_ROOT}/deployments/config/cluster.conf.example ${CLUSTER_CONF}"
     fi
+    # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
+    # (档案 > cluster.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
+    #  会静默变成"v2.28 的资产 + v1.35.8 的钉子")
+    #   显式选择(明写了 KUBESPRAY_PROFILE, 或明写了 KUBESPRAY_VERSION)且档案缺失 → 硬失败:
+    #     绝不静默退化成"别的版本的钉子"。err() 只打印不退出, 故这里显式 exit 1
+    #     (133 处调用点全是裸 load_config, 顶层退出即停住整个脚本)
+    #   隐式默认(版本靠树派生)→ 档案缺失只 warn: 换树/首次升级时不该把每个脚本都卡死
+    #   none → 不用档案(全部按 cluster.conf, 等价历史行为)
+    # 有效版本与档案名:
+    #   ① 先捕获"显式性"(必须在下面填默认值**之前**): 明写了 KUBESPRAY_VERSION 或 KUBESPRAY_PROFILE
+    #      ⇒ 档案缺失要**硬失败**(绝不静默退化成"别的版本的钉子")
+    #   ② 有效版本: 显式 KUBESPRAY_VERSION > **最新版本**(用户口径 2026-09-30: 不指定 --profile 时
+    #      默认部署最新版本; 默认仍是完整全量流程, 原部署模式不变)
+    #   ③ 档案名: 显式 KUBESPRAY_PROFILE > 跟随有效版本; 该版本无档案时, 显式选才报错, 隐式默认只告警
+    _prof_explicit=0
+    [ -n "${KUBESPRAY_PROFILE:-}" ] && _prof_explicit=1
+    [ -n "${KUBESPRAY_VERSION:-}" ] && _prof_explicit=1
+    if [ -z "${KUBESPRAY_VERSION:-}" ]; then
+        KUBESPRAY_VERSION="$(kubespray_latest_version)"
+        vlog "未指定版本 → 采用最新版本: ${KUBESPRAY_VERSION}(可用 KUBESPRAY_VERSION/--profile 指定)"
+    fi
+    _prof_name="${KUBESPRAY_PROFILE:-${KUBESPRAY_VERSION}}"
+    if [ -n "${_prof_name}" ] && [ "${_prof_name}" != "none" ]; then
+        _prof_file="${REPO_ROOT}/deployments/config/profiles/${_prof_name}.profile"
+        # 回退: 版本目录**自带的** VERSION.profile(设计 §3.2 的"自包含副本")——
+        #   本地临时版本按 D4 **不入库档案**, 但也必须能显式部署(v2.28 本地验证路径);
+        #   在库版本两份应当一致(check-modules ⑱ 逐键断言), 故回退不引入歧义。
+        _prof_dir_copy="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/kubespray/${_prof_name}/VERSION.profile"
+        if [ -f "${_prof_file}" ]; then
+            # shellcheck disable=SC1090
+            source "${_prof_file}"
+            vlog "版本档案生效: ${_prof_file}"
+        elif [ -f "${_prof_dir_copy}" ]; then
+            # shellcheck disable=SC1090
+            source "${_prof_dir_copy}"
+            vlog "版本档案生效(版本目录自带副本): ${_prof_dir_copy}"
+        elif [ "${_prof_explicit}" = "1" ]; then
+            err "版本档案不存在: ${_prof_file}(也没有版本目录副本 ${_prof_dir_copy}; KUBESPRAY_PROFILE=${_prof_name}; 用 KUBESPRAY_PROFILE=none 可禁用档案)"
+            exit 1
+        else
+            warn "未找到版本档案 ${_prof_file}(也没有版本目录副本), 按 cluster.conf 继续(当前版本 ${_prof_name})"
+        fi
+        unset _prof_file _prof_dir_copy
+    fi
+    KUBESPRAY_PROFILE="${_prof_name}"
+    unset _prof_name _prof_explicit
+
     # 宿主机物理 IP 自动检测(不 hardcode): 仅当未显式设置或仍是占位符时覆盖
     if [ -z "${HOST_PHYS_IP:-}" ] || [ "${HOST_PHYS_IP}" = "CHANGE_ME" ]; then
         HOST_PHYS_IP="$(detect_host_ip)"
@@ -452,16 +638,31 @@ load_config() {
     API_IP="${API_IP:-${APISERVER_ADDRESS:-}}"
     API_DOMAIN="${API_DOMAIN:-${APISERVER_DOMAIN:-k8s-api.cubestack.io}}"
     export API_IP API_DOMAIN
-    # 全局派生变量(续): 离线文件路径
-    #   OFFLINE_FILES_DIR  离线文件根目录(二进制/镜像/离线包), 全局唯一可切换点
-    #                      默认 ${REPO_ROOT}/deployments/offline-files/kubespray
-    #   LOCAL_REPO_DIR     当前集群离线资源目录 = ${OFFLINE_FILES_DIR}/${CLUSTER_NAME}
-    #                      (若显式设置了 LOCAL_REPO_DIR, 保留不覆盖; 否则统一收敛到 OFFLINE_FILES_DIR)
-    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}"
-    if [ -z "${LOCAL_REPO_DIR:-}" ]; then
-        LOCAL_REPO_DIR="${OFFLINE_FILES_DIR}/${CLUSTER_NAME:-cubestack-cluster}"
+    # 全局派生变量(续): 离线文件路径 —— 2026-09-30 起按**版本目录**组织
+    # (设计: docs/kubespray-versioning/design.md §4; 目录名 = 上游 tag 全名, 决策 D8)
+    #   OFFLINE_FILES_ROOT  offline-files **真根**(各组件目录的共同父目录)
+    #   KUBESPRAY_VERSION   kubespray 版本开关(单一入口); 默认 = 仓库当前树版本(galaxy.yml 派生)
+    #   OFFLINE_FILES_DIR   k8s **资产目录** = <root>/kubespray/<版本>(裸二进制 + images/ + packages/)
+    #   LOCAL_REPO_DIR      = OFFLINE_FILES_DIR —— 交给 kubespray 当 local_release_dir,
+    #                       ⚠ 必须恰好是"裸二进制 + images/ + packages/"的那一层(树内 dest 全按扁平名读)
+    #   KUBESPRAY_BASE_DIR  运行根(交给 cubestack-offline.sh 当 BASE_DIR)
+    #   ⚠ 显式设置的值一律保留(运维脚本/容器挂载按显式值走), 不回写
+    OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
+    if [ -z "${KUBESPRAY_VERSION:-}" ]; then
+        KUBESPRAY_VERSION="$(kubespray_latest_version)"
     fi
-    export OFFLINE_FILES_DIR LOCAL_REPO_DIR
+    OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}}"
+    if [ -z "${LOCAL_REPO_DIR:-}" ]; then
+        LOCAL_REPO_DIR="${OFFLINE_FILES_DIR}"
+    fi
+    if [ -z "${KUBESPRAY_BASE_DIR:-}" ]; then
+        if [ "${KUBESPRAY_VERSION}" = "$(kubespray_tree_version)" ]; then
+            KUBESPRAY_BASE_DIR="${REPO_ROOT}/deployments/kubespray"
+        else
+            KUBESPRAY_BASE_DIR="${REPO_ROOT}/deployments/kubespray/versions/${KUBESPRAY_VERSION}"
+        fi
+    fi
+    export OFFLINE_FILES_ROOT KUBESPRAY_VERSION OFFLINE_FILES_DIR LOCAL_REPO_DIR KUBESPRAY_BASE_DIR
     # 全局派生变量(续): REGISTRY_IP 留空时从 METALLB_POOL 自动取池内首地址作为 LoadBalancer VIP
     # (cluster.conf 约定 "留空 = 自动派生", 与 sync-kubespray-config.sh 写入 addons.yml 的规则一致;
     #  centralized 于此, 让 deploy-registry.sh / setup-registry-expose.sh 等所有消费者拿到同一值)
@@ -1412,7 +1613,11 @@ bluestore_wipe_dev() {   # <盘> → 0=已擦净(校验通过); 非 0=仍有 blu
     # ② 签名/分区表 + 候选偏移 dd(始终执行: zap 只管 label 位置, 不管 offset 0 的
     #    "bluestore block device" 魔法/GPT; 也是镜像不可得时的唯一手段)
     wipefs -a -f "$d" >/dev/null 2>&1 || true
-    sgdisk --zap-all "$d" >/dev/null 2>&1 || true
+    # ⚠ **禁用 `sgdisk --zap-all`**(2026-10-10 实机根因): 它退出时做**全局 `sync()`** ——
+    #   内核若残留死 IO(历史事故的 D 状态写), sync 会遍历全部超级块、**永久挂死**(实测 5h50m,
+    #   不可杀, 部署无限 pending)。GPT 头/备份表 + bluestore 标签区已由下方 dd 候选偏移覆盖
+    #   (offset 0 与贴尾各 64MiB), 分区表重读由末尾 `partprobe`(BLKRRPART ioctl, **设备本地**)
+    #   完成 —— 全程只碰目标盘, 不做任何全局 sync。**别把它加回来。**
     for o in $(_bstore_offsets "$d"); do
         dd if=/dev/zero of="$d" bs=1M seek="$o" count=64 conv=fsync status=none >/dev/null 2>&1 || true
     done
@@ -1427,6 +1632,13 @@ bluestore_wipe_dev() {   # <盘> → 0=已擦净(校验通过); 非 0=仍有 blu
     done
     return "$r"
 }
+# 毒化预检(有界 ≤10s, 只告警不阻断; 脚本顶层、每节点一次): 内核若残留死 IO, 全局 sync 会被
+# 拖住 —— 检出即给"择机重启清毒"指引(本库其余步骤已全部设备本地化, 不受其影响)。
+sync & _sp=$!
+_sp_ok=0
+for _si in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$_sp" 2>/dev/null || { _sp_ok=1; break; }; sleep 1; done
+[ "${_sp_ok}" = "1" ] || echo "    ⚠ 该节点内核存在残留死 IO(全局 sync 被拖住>10s; 历史事故产物): 本步已全部设备本地化、不受影响; 建议择机重启清毒"
+unset _sp _sp_ok _si
 WIPELIB
 }
 
@@ -1846,6 +2058,56 @@ init_remote_kubectl() {
     SSH_CMD="ssh -i ${SSH_KEY} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 ${SSH_USER:-ubuntu}@${FIRST_MASTER}"
     K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
     _INIT_REMOTE_KUBECTL=1
+    return 0
+}
+
+# ---------------- 停消费者前的副本数登记 / 恢复(2026-10-13, CodeRabbit 评审修订) ----------------
+# 背景: 覆盖预检/优雅卸载会 scale 0 Ceph 卷消费者(registry / cubestack-operator, 消灭在飞
+#   IO), 02_ceph.sh 7.9 事后恢复; 整轮**异常退出**(失败/Ctrl-C)时由 deploy-cluster.sh 的
+#   EXIT 钩子兜底(调用 stop_restore_known_consumers)。旧实现"对象存在即 replicas=1"有两个缺陷:
+#   ① 任何一次 ceph 模块成功都会执行(即使本轮从未停机) → 把运维手动调整的副本数静默压回 1;
+#   ② 停机前副本数若非 1, 恢复时原值丢失。
+# 现行契约: **停机方**在 scale 0 前调 stop_mark_replicas 把原副本数写进注解(仅首次; 重复
+#   停机不覆盖, 否则第二次时当前已是 0, 会把恢复目标错记成 0); **恢复方**只恢复带注解的
+#   对象到记录值并清除注解; 无注解 = 从未被本工具停机 → 一律不动。
+# ⚠ 注解键 cubestack.io/pre-stop-replicas 只在本节两函数中出现(单一事实来源), 禁止别处手写。
+# ⚠ kind 必须与真实对象一致: registry 是 kubespray 建的**裸 ReplicaSet**(2026-10-13 实机
+#   验证: `kubectl -n kube-system get rs registry` 存在, `deploy registry` 不存在 —— 曾致
+#   停机/恢复对 registry 全部静默空转), operator 是 helm 装的 Deployment。
+# 用法: stop_mark_replicas <deploy|rs> <ns> <name>
+#       stop_restore_replicas <deploy|rs> <ns> <name>
+stop_mark_replicas() {   # scale 0 前调用; 已登记则保留原值
+    local _kind="$1" _ns="$2" _name="$3" _cur _have
+    _cur="$( (SSH "${K} -n ${_ns} get ${_kind} ${_name} -o go-template='{{.spec.replicas}}' 2>/dev/null" || true) )"
+    [ -n "${_cur}" ] || return 0     # 对象不存在(scale 会空转)
+    _have="$( (SSH "${K} -n ${_ns} get ${_kind} ${_name} -o go-template='{{index .metadata.annotations \"cubestack.io/pre-stop-replicas\"}}' 2>/dev/null" || true) )"
+    case "${_have}" in
+        ''|*[!0-9]*) ;;              # 未登记(含 kubectl 缺失键输出 <no value>/异常值)
+        *)           return 0 ;;     # 已登记 → 保留原值
+    esac
+    SSH "${K} -n ${_ns} annotate ${_kind} ${_name} cubestack.io/pre-stop-replicas=${_cur} >/dev/null 2>&1" \
+        && say "     已登记 ${_ns}/${_name} 原副本数=${_cur}(停机前记录, 恢复用)" || true
+    return 0
+}
+
+stop_restore_replicas() {   # 只恢复带登记注解的对象, 恢复后清除注解
+    local _kind="$1" _ns="$2" _name="$3" _n
+    _n="$( (SSH "${K} -n ${_ns} get ${_kind} ${_name} -o go-template='{{index .metadata.annotations \"cubestack.io/pre-stop-replicas\"}}' 2>/dev/null" || true) )"
+    case "${_n}" in ''|*[!0-9]*) return 0 ;; esac   # 无注解/对象不存在 → 从未停机, 不动
+    if SSH "${K} -n ${_ns} scale ${_kind} ${_name} --replicas=${_n} >/dev/null 2>&1"; then
+        SSH "${K} -n ${_ns} annotate ${_kind} ${_name} cubestack.io/pre-stop-replicas- >/dev/null 2>&1 || true"
+        say "  已恢复 ${_ns}/${_name} replicas=${_n}(此前被覆盖停机)"
+    fi
+    return 0
+}
+
+# 已知 Ceph 卷消费者(operator deploy + registry rs)的**整组恢复** —— 消费者清单只此一份:
+#   02_ceph.sh 7.9(成功路径) 与 deploy-cluster.sh 异常退出 EXIT 钩子(失败/Ctrl-C 兜底)共用。
+# 依据标记契约, 无标记对象自动跳过(如成功路径上 7.9 已恢复并清标, 钩子再跑即 no-op)。
+stop_restore_known_consumers() {
+    stop_restore_replicas deploy "${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}" \
+                                "${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}" || true
+    stop_restore_replicas rs kube-system registry || true
     return 0
 }
 

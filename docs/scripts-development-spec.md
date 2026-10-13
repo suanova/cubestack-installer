@@ -96,6 +96,7 @@ modules/<NN_phase>/<NN>_<category>_<action>.sh
 # REPEAT: 0                   # 1=可重复执行(每次执行且不写断点状态)
 # TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量名, 值为 true/1 时自动启用
 # REQUIRES: k8s_passwordless  # (可选) 依赖模块 key 列表(空格分隔), 执行前须已完成; 框架自动拓扑排序
+# UNINSTALL: 1                # (可选) 声明该模块可被 cluster-teardown 反序优雅卸载
 # 说明: <详细说明, 可选>
 # ============================================================
 set -euo pipefail
@@ -118,6 +119,8 @@ load_config
 | `REQUIRES` | 否 | 依赖模块 key 列表(空格分隔);执行前须已完成。框架按 REQUIRES 做稳定拓扑排序(无依赖模块保持文件顺序),循环依赖/引用未知模块会报错。`--steps` 精确模式还会自动把依赖加入执行列表 |
 
 > ★ **远端 kubectl 统一初始化(2026-09-04 架构重构,强制)**:需要 SSH 到 master 执行 kubectl 的模块,在 `load_config` 之后**必须**调用 `init_remote_kubectl || exit 1`(lib-common.sh 幂等函数,提供 FIRST_MASTER/SSH_KEY/SSH()/K/SSH_CMD)。**禁止**在模块内手抄 `FIRST_MASTER=.../SSH() {...}/K="sudo kubectl..."` 初始化块 —— 历史事故: 新模块少复制一行 → set -u 下 `K: unbound variable`, 部署成功后崩溃。
+
+> ★ **UNINSTALL 元数据(优雅覆盖,可选)**:声明 `# UNINSTALL: 1` 的模块必须实现 `CUBESTACK_MODULE_ACTION=uninstall` 卸载分支,且**位于 TOGGLE 跳过检查之前**(check-modules ⑲ 静态校验);卸载段要求见 `docs/graceful-overwrite/design.md` §3.2。
 
 ### 2.3 模块体内规范
 
@@ -228,7 +231,7 @@ load_config
 
 ---
 
-## 4. 新增模块的标准流程(6 步)
+## 4. 新增模块的标准流程(8 步)
 
 以新增"某某组件安装"为例:
 
@@ -240,6 +243,8 @@ load_config
    - 拉容器镜像 → 必须登记 `config/images.manifest` + 建 `deployments/offline-files/<group>/`(含 README,§2.5)。
 5. **加开关**(可选):在 `cluster.conf.example` 加 `XXX_ENABLED` 变量,TOGGLE 指向它。
 6. **完成**:**无需改任何注册表** —— operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)即 operator),新增 operator 写 TOGGLE 即自动进入 `--steps`/`--enable` 调度。
+7. **登记(装进集群的组件)**:在安装成功点调用 `record_installed_component "<key>"` 登记(优雅覆盖用;写失败仅告警,不影响部署)。
+8. **声明可卸载(可卸载的组件)**:头部声明 `# UNINSTALL: 1` + 实现卸载分支(`CUBESTACK_MODULE_ACTION=uninstall`,位于 TOGGLE 检查之前;幂等/有界/告警不中止),供 cluster-teardown 反序优雅卸载 —— 设计见 docs/graceful-overwrite/design.md。
 
 > 验证:`bash deployments/scripts/tools/check-modules.sh`(静态校验, 必须 exit 0);
 > `sudo ./deploy-cluster.sh --list-steps` 应出现新模块(带 `依赖:xxx` 标注);
@@ -361,7 +366,50 @@ sudo ./deploy-cluster.sh --list-steps | --list | --fresh
 
 ---
 
-## 7. 常见问题
+## 6.6 版本目录规范(2026-09-30 起)
+
+离线资产按 **`offline-files/<组件>/<版本>/`** 组织(版本名 = 上游 tag 全名);kubespray 基座另有
+版本档案(`config/profiles/<版本>.profile`)与物化树(`deployments/kubespray/versions/<版本>/`,
+运行期产物、不进 git/镜像/MinIO)。
+
+- 完整机制与操作规程:**[`docs/kubespray-versioning/README.md`](../kubespray-versioning/README.md)**
+  (产出新版本 / 选版部署 / 只下载指定版本 / operator 接入规范);
+- 设计决策:D1–D8 见 [`design.md`](../kubespray-versioning/design.md);
+- 静态校验:`check-modules.sh` ⑱(逐版本档案 ↔ 树表值、版本目录自检);
+- **新增/迁移一个"按版本选"的组件时, 四条一起改**(资产目录 / 版本开关 / `images.manifest` 落点 /
+  trim 的 `--version`), 详见上述手册 §5。
+
+## 7. 静态校验与 CI(提交前必过)
+
+三支**开发期 + CI 两用**的校验脚本(只读、不联网、无需 root);PR 由 GitHub Actions 自动跑
+(`.github/workflows/ci-validate.yml`,触发于 `pull_request` 与 `push: main`):
+
+| 脚本 | 管什么 |
+|---|---|
+| `deployments/scripts/tools/check-modules.sh` | 全 19 项:模块元数据 / `REQUIRES` 拓扑 / `bash -n` / TOGGLE 声明 / helm 离线副本 / kubespray 补丁在位 / 离线回归套件 / 版本钉子闭环 / 凭据卫生 |
+| `deployments/scripts/tools/check-manifests.sh` | 仓库自有 YAML 能否解析(排除 vendored 上游树 / chart 的 Go 模板 / INI 格式 inventory) |
+| `deployments/scripts/tools/images/check-image-manifest.sh --kubespray` | `images.manifest` ↔ kubespray 预加载清单交叉核对 |
+| 优雅覆盖/UNINSTALL | 见 [`docs/graceful-overwrite/`](../graceful-overwrite/)(design / README):安装登记(`record_installed_component`)+ 反序优雅卸载(cluster-teardown.sh);check-modules ⑲ 静态校验 |
+
+一条命令本地复现 CI 全口径(失败即 `exit 1`):
+
+```bash
+bash deployments/scripts/tools/check-modules.sh \
+  && bash deployments/scripts/tools/check-manifests.sh \
+  && bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray
+```
+
+CI 只做**静态**验证(语法 / 元数据 / 依赖 / 清单 / 补丁在位);集群侧的真实功能验证仍是各模块的
+`verify_*` 与 `tools/k8s/verify-*.sh`(需真集群),**不在 CI 范围内**。
+
+**离线回归套件**:`tools/tests/test-*.sh`(补丁层重放器 / 收编映射 / API 入口模式 / 本地代理)
+由 `check-modules.sh` 第 ⑮ 项实跑 ⇒ 每次 PR 都会跑到。新增回归套件请放进该目录,并**保持零夹具、
+零生产标识** —— 仓库根 `.gitignore` 只放行 `test-*.sh`,夹具(含生产集群标识)仍不入库,
+要用夹具的套件请沿用 `ceph-disk-tests.sh` 那种非 `test-` 前缀命名。
+
+---
+
+## 8. 常见问题
 
 - **新增模块没出现在 `--list-steps`**:检查文件名是否匹配 `[0-9][0-9]_*.sh` 且元数据头格式正确。
 - **旧命令失效**:检查模块 key 是否被 `MODULE_ALIAS` 覆盖;旧名(`net/vm/k8s/...`)应仍可用。

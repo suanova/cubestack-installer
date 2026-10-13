@@ -93,6 +93,11 @@ $(_component_meta_list stub)
   ② 清状态重来:        sudo ./deploy-cluster.sh --fresh        # = ① 且**先清断点状态**(REPEAT:0 的模块强制重跑)
      · 覆盖安装遇到节点上的**旧集群残留**(跨小版本 / 旧 etcd 二进制)时, k8s_deploy 前置会自动清除它
        (交互 15s 倒计时可中止; 加 --yes 免交互 —— 无人值守务必显式给)。原地升级未实现, 见 docs/cluster-upgrade-path.md
+     · **优雅覆盖**(2026-10-11): K8s 覆盖实际将执行且集群可达时, 会先读集群内安装登记
+       (ConfigMap cubestack-install-record)按首装序**反序优雅卸载**已装组件(先停消费者/CR 级联/
+       helm uninstall, 再动 Ceph, 最后 K8s 覆盖) —— 非暴力重置。倒计时 TEARDOWN_CONFIRM_SLEEP
+       (默认 30s)可 Ctrl-C; --yes 免交互。手动查看: tools/k8s/cluster-teardown.sh --list
+       设计: docs/graceful-overwrite/design.md
   ③ 单独装组件:        sudo ./deploy-cluster.sh --steps ceph         # 只装该组件(不动基座; 集群接入自动处理)
   · state 文件 deployments/config/.deploy.state 只记录"本机装到哪一步": 全新容器没有它是正常的(等价①)。
   · ⚠ ①/② 是**重装集群**的路: 节点上已有的旧 K8s 会被 kubeadm reset(既有防线: kubespray 侧检测到残留时
@@ -129,6 +134,10 @@ $(_component_meta_list stub)
   --enable k1,k2        只把模块开关写入 cluster.conf(持久化, 不部署); 下次 --with-cubestack / 默认部署生效
   --phase env|k8s|addon 仅运行指定阶段(可逗号分隔)
   --only HOST           仅处理指定节点(可多次; 支持 hostname 或 group 名)
+  --profile <版本>      指定要部署的 kubespray 版本(版本面变量以该版本档案为准, 不写回 cluster.conf)
+                        例: --profile v2.32.0; none = 不用档案(全部按 cluster.conf)
+                        **不指定 = 部署最新版本**(max(仓库树, 有档案的版本目录); 本地临时版本须显式选)
+                        见 docs/kubespray-versioning/
   --fresh, --refresh    默认流程 + **先清断点状态**(REPEAT:0 的模块强制重跑; 见"三种使用方式"②)
   --list                仅打印集群规划(只读)
   --list-steps          列出全部模块
@@ -180,11 +189,20 @@ while [ $# -gt 0 ]; do
         --enable)   ENABLE_PERSIST_ARG="${ENABLE_PERSIST_ARG},${2:?--enable 需要模块列表, 逗号分隔}"; shift 2 ;;
         --phase)    PHASE_ARG="${2:?--phase 需要阶段名 env|k8s|addon}"; shift 2 ;;
         --only)     ONLY_HOSTS="${ONLY_HOSTS},${2:?--only 需要节点名}"; shift 2 ;;
+        # --profile = 本次使用该版本套装档案(版本面变量以档案为准; 不写回 cluster.conf)。
+        #   须在 load_config 之前 export —— load_config 读的是环境变量
+        #   (none = 禁用档案, 全部按 cluster.conf)
+        --profile)  PROFILE_ARG="${2:?--profile 需要版本名(如 v2.32.0; none=禁用档案)}"; shift 2 ;;
         --help|-h)  usage ;;
         *)          err "未知参数: $1(用 --help 查看)"; exit 1 ;;
     esac
 done
 ONLY_HOSTS="${ONLY_HOSTS#,}"
+# --profile: 在 load_config 之前 export(load_config 以环境变量优先读 KUBESPRAY_PROFILE)
+if [ -n "${PROFILE_ARG:-}" ]; then
+    export KUBESPRAY_PROFILE="${PROFILE_ARG}"
+    vlog "  --profile ${PROFILE_ARG} → KUBESPRAY_PROFILE(本机 cluster.conf 不变)"
+fi
 # 展开 --only 中的 group 名: NODE_GROUP_<name> 定义在 cluster.conf 中
 if [ -n "${ONLY_HOSTS}" ]; then
     _resolved=""
@@ -323,6 +341,39 @@ need_root
 #   cluster_exists 判不出集群; 而 vm_sshkey/k8s_passwordless 恰好排在 k8s_deploy 之前, 到那时才可探测。
 notify_base_redeploy
 
+# ★ Ceph 消费者异常退出兜底(2026-10-13, CodeRabbit): 覆盖预检/优雅卸载把 registry(kubespray
+#   裸 RS)与 cubestack-operator 停机(scale 0 + 标注原副本数)后, 若整轮部署**异常退出**
+#   (模块失败/超时/Ctrl-C), 成功路径的 02_ceph.sh 7.9 不会执行 → 消费者会停在 0。
+#   此处按停机标记契约恢复(见 lib-common.sh stop_restore_known_consumers): 只恢复带
+#   cubestack.io/pre-stop-replicas 标注的对象; 无标记 = 无事可做(静默 no-op —— 成功路径
+#   7.9 已恢复并清标, 钩子天然跳过, **不改成功路径行为**)。
+#   停机只可能由"本次计划含 ceph"(预检 stop_consumers / ceph 模块自清理)或"含 k8s_deploy"
+#   (优雅覆盖链: ceph 卸载 / 05 registry 卸载分支)的运行造成 → 仅这两种计划挂钩子,
+#   组件 --steps(如 verify_*)运行不触碰停机标记。集群不可达(早段失败/首装)时静默跳过。
+_restore_marked_consumers_on_fail() {   # EXIT 钩子: 仅非 0 退出(含 Ctrl-C)执行
+    local _rc="$?"
+    [ "${_rc}" = "0" ] && return 0
+    init_remote_kubectl >/dev/null 2>&1 || return 0
+    say "  异常退出(rc=${_rc}) → 恢复本次停机登记的 Ceph 消费者(无标记=无操作)..."
+    stop_restore_known_consumers || true
+    return 0
+}
+_has_ceph_step=0; _has_k8s_step=0
+for _hc_k in "${RUN_STEPS[@]:-}"; do
+    [ "${_hc_k}" = "ceph" ] && _has_ceph_step=1
+    [ "${_hc_k}" = "k8s_deploy" ] && _has_k8s_step=1
+done
+unset _hc_k
+if [ "${_has_ceph_step}" = "1" ] || [ "${_has_k8s_step}" = "1" ]; then
+    trap '_restore_marked_consumers_on_fail' EXIT
+    # ⚠ 必须同时转发 INT/TERM: bash 被 SIGINT/SIGTERM **杀死时不执行 EXIT trap**(2026-10-13
+    #   独立实测), 否则 Ctrl-C / kill 会绕过兜底; 转发成 exit → EXIT trap 可靠执行
+    #   (实测 Ctrl-C 语义 rc=130, kill 语义 rc=143)。
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+fi
+unset _has_ceph_step _has_k8s_step
+
 # ★ 集群接入预检(仅 --steps 精确模式: 单独装组件 / 跑验证):
 #   本地 kubeconfig 可用则直接用; 否则用 cluster.conf NODES 的密码引导(生成密钥 → 注入公钥 →
 #   取 admin.conf 到本地)。全量部署/覆盖安装由各自的基座模块处理接入, 不走这里。
@@ -355,6 +406,31 @@ export LOG_FILE
 say "完整部署日志: ${LOG_FILE}"
 
 print_plan
+
+# ★ 优雅覆盖(2026-10-11 用户口径, 设计 docs/graceful-overwrite/): K8s 覆盖**实际将发生**时
+#   (RUN_STEPS 含 k8s_deploy 且实际状态非 done —— --fresh 清状态后天然成立), 且集群可达时:
+#   先读安装登记 → 按首装序反序优雅卸载已装组件(卸载段在各自模块内), 之后 ceph 预检块
+#   自然看到"无 CephCluster"(其删除分支空转)。⚠ 新容器此刻可能还没有 SSH 密钥 →
+#   cluster_exists 判不出集群 → 由挂点 B(执行 k8s_deploy 前, lib-module.sh)兜底。
+if [ "$(get_state k8s_deploy)" != "done" ]; then
+    _OVERWRITE_PENDING=0
+    for _ok_k in "${RUN_STEPS[@]:-}"; do
+        [ "${_ok_k}" = "k8s_deploy" ] && _OVERWRITE_PENDING=1
+    done
+    unset _ok_k
+    if [ "${_OVERWRITE_PENDING}" = "1" ] && cluster_exists; then
+        _te_args=()
+        [ "${ASSUME_YES}" = "1" ] && _te_args=(--yes)
+        say "检测到集群已存在且本次将覆盖重装 → 先执行「优雅覆盖」: 按安装登记反序卸载已装组件"
+        say "  (设计顺序: 优雅卸载先于下方 Ceph 确认倒计时执行)"
+        # 计划感知(I1): 引擎据此跳过"非本次计划"的拆除(尤其不含 ceph 时保留 Ceph 集群/OSD 数据)
+        export CUBESTACK_TEARDOWN_PLAN_STEPS="${RUN_STEPS[*]:-}"
+        bash "${SCRIPT_DIR}/tools/k8s/cluster-teardown.sh" --uninstall "${_te_args[@]}" \
+            || warn "优雅卸载未完成(继续; ceph 安全序与 k8s 覆盖流程兜底)"
+        export CUBESTACK_TEARDOWN_DONE=1
+    fi
+    unset _OVERWRITE_PENDING
+fi
 
 # ⚠ Ceph 部署前强制确认(倒计时, 防覆盖磁盘 double-check 的兜底):
 #   print_plan 的红底提醒无倒计时(纯提示); 02_ceph 模块内部的倒计时在 k8s 部署之后,
@@ -644,17 +720,18 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         if [ -n "${_CEPH_EXIST}" ] && [ "${_RUN_CEPH}" = "1" ] \
             && [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ] \
             && [ "${_CEPH_STATE}" != "done" ]; then
-            say "清理已有 Ceph(cleanupPolicy yes-really-destroy-data → 删 cephblockpool/cephcluster)..."
-            ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${_FM_IP}" \
-                "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph patch cephcluster rook-ceph --type merge -p '{\"spec\":{\"cleanupPolicy\":{\"confirmation\":\"yes-really-destroy-data\"}}}' >/dev/null 2>&1; sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph delete cephblockpool rbd-pool --wait=false >/dev/null 2>&1; sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph delete cephcluster rook-ceph --wait=false >/dev/null 2>&1; true"
-            say "等待旧 Ceph 清理完成(最长 300s)..."
-            _CEPH_GONE=0
-            for _i in $(seq 1 60); do
-                _still="$(ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER:-ubuntu}@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster --no-headers 2>/dev/null" 2>/dev/null || true)"
-                [ -z "${_still}" ] && { _CEPH_GONE=1; break; }
-                sleep 5
-            done
-            [ "${_CEPH_GONE}" = "1" ] && ok "旧 Ceph 已清理, 可重新部署" || warn "旧 Ceph 未完全清理(重装前请手工确认 cephcluster 已删除)"
+            # ★ 2026-10-10 修复(顺序按官方推荐; 用户口径): 旧实现此处是**内联三连删**(patch
+            #   cleanupPolicy → delete cephblockpool → delete cephcluster), 缺"先把 Bound 的
+            #   ceph PVC 删掉触发 CSI 正常 unmap、再删 rbd nodeplugin 让节点内核 rbd unmap"
+            #   这两个前置 —— 正是 ceph-cleanup.sh 里记录的 09-05 事故路径(直接删集群 →
+            #   节点上内核 rbd 映射无人 unmap → 持锁残留 / 把在飞 IO 写死在死设备上, **只能重启**;
+            #   10-09 覆盖安装挂死事故的起点). 现改调 ceph-cleanup.sh --delete-cluster
+            #   (同一套官方安全序: PVC → nodeplugin → pool/cluster; 含 registry-pvc 保护与
+            #   300s 等待; Rook 擦盘兜底仍由模块 7a 物理清盘承担).
+            say "清理已有 Ceph(官方安全序: 删 ceph PVC → CSI 正常 unmap → 删 rbd nodeplugin → 删 pool/cluster)..."
+            bash "${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-cleanup.sh" --delete-cluster \
+                || warn "旧 Ceph 删除失败/超时(继续; 模块 7a 将物理清盘兜底)"
+            ok "旧 Ceph 资源清理流程完成(物理清盘见模块 7a)"
         fi
         unset _CEPH_EXIST _FM_IP _CEPH_SSH_KEY _CEPH_GONE _CEPH_STATE
         unset _ceph_cs _CEPH_CONFIRM_HOSTS _CEPH_CONFIRM_DISKS _CEPH_CONFIRM_TSV _CEPH_CONFIRM_DETECT_FAIL _h _ip _line _l _ds _hn _g _grp _norm _h2 _d
@@ -673,6 +750,7 @@ done
 # ---------------- 汇总 ----------------
 echo "============================================="
 if [ "${FAILED}" = "1" ]; then
+    warn_unhealthy_pods   # 2026-10-12: 失败也巡检一眼(仅告警; 不可达静默跳过)
     err "部署中断: 模块 ${key} 失败(可用 --skip ${key} 跳过或修复后重跑, --fresh 清状态重跑)"
     exit 1
 fi
@@ -733,6 +811,8 @@ if [ "${CEPH_MODE:-internal}" != "external" ] && [ "${CEPH_ENABLED:-false}" = "t
         echo "              全自动官方导入(STATE=Connected 健康上报 + 对象存储 S3 接入)"
     fi
 fi
+# ★ 2026-10-12(用户要求): 收尾健康巡检 —— 未成功运行的 Pod 仅告警(集群可达时; 不可达静默跳过)
+warn_unhealthy_pods
 # ★ 收尾再汇总一次"本次未部署的组件"(与计划开始时同一函数, 见 lib-module.sh):
 #   防"部署全绿结束、但某组件资源根本不存在"被漏看 —— TOGGLE 关闭的模块全流程 0 行输出
 #   (2026-09-17 实例: 某组件 TOGGLE=false → 模块不进计划, 事后才发现)。

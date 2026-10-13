@@ -29,7 +29,7 @@ stop: ## 停止所有服务
 	-pkill -f 'uvicorn app.main:app'
 	-pkill -f vite
 
-IMAGE := harbor.isuanova.com/cubestack/cubestack-installer:latest
+IMAGE := harbor.isuanova.com/suanova/cubestack-installer:latest
 
 image: ## 构建并运行单镜像(podman,含全部依赖)
 	podman build --format docker -t $(IMAGE) .
