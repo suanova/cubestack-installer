@@ -95,8 +95,8 @@ fi
 | multus | 删 vendored manifest 资源（DS/CRD/RBAC）+ 本模块创建的示例 NAD | |
 | rdma_shared_dev_plugin | 删 DS + ConfigMap | RDMA_NAMESPACE 可配 |
 | netshoot | 删 Pod + CM | |
-| ceph（含 ceph_csi） | 调 `ceph-cleanup.sh`：`CEPH_PRE_CLEANUP_EXISTING=true`（默认）→ **完整安全序: 停消费者 → 删 Bound ceph PVC(触发 unmap) → 删 nodeplugin → 销毁集群与磁盘数据**；`false`（恢复/认领路径）→ **保留模式(--keep-pvcs): 只停消费者; PVC、nodeplugin、集群、OSD 与卷数据全部保留** | ceph 模块的卸载段是唯一真实动作方；ceph_csi 不设卸载段（SC 等对象随覆盖消亡），仅登记 |
-| k8s_registry | 只优雅停机（scale registry=0；registry-pvc 受保护不动；kubespray 重装自动恢复） | |
+| ceph（含 ceph_csi） | 调 `ceph-cleanup.sh`：`CEPH_PRE_CLEANUP_EXISTING=true`（默认）→ **完整安全序: 停消费者 → 删 Bound ceph PVC(触发 unmap) → 删 nodeplugin → 销毁集群与磁盘数据**；`false`（恢复/认领路径）→ **保留模式(--keep-pvcs): 只停消费者; PVC、nodeplugin、集群、OSD 与卷数据全部保留** | ceph 模块的卸载段是唯一真实动作方；ceph_csi 不设卸载段（SC 等对象随覆盖消亡），仅登记。⓪ 停消费者对 registry(`rs/registry`) / cubestack-operator 停机前登记原副本数(注解 `cubestack.io/pre-stop-replicas`), 02_ceph.sh 7.9 按登记值恢复(2026-10-13, CodeRabbit: 仅恢复被本工具停过且带标记的对象) |
+| k8s_registry | 只优雅停机（对 **`rs/registry`(kubespray 建的裸 ReplicaSet, 非 Deployment)** scale 0；停机前以注解 `cubestack.io/pre-stop-replicas` 登记原副本数；registry-pvc 受保护不动；K8s 重装由 kubespray apply 自带恢复，K8s 保留路径由 02_ceph.sh 7.9 按登记值恢复） | ⚠ 2026-10-13 修订: 旧代码操作 `deploy registry` 从未命中(实机即 RS), 停机/恢复全部静默空转 |
 | metallb / local_path | 无动作（kubespray 资产，随 K8s 覆盖消亡；登记仅作信息） | |
 
 - ceph-cleanup.sh 配套改造：把 delete_cluster 里的 ⓪ 停消费者块**提取为独立函数/动作**

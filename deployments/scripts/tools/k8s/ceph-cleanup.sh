@@ -53,8 +53,16 @@ stop_consumers() {
     say "  ⓪ 停用持有 ceph 卷的工作负载(消灭在飞 IO; PVC 对象保留)..."
     _RBD_OP_NS="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
     _RBD_OP_REL="${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"
-    ceph_consumers_stop_deployment "${_RBD_OP_NS}" "${_RBD_OP_REL}"
-    ceph_consumers_stop_deployment kube-system registry
+    # ★ 2026-10-13: scale 0 前登记原副本数(注解; 仅首次, 重复停机不覆盖) —— 02_ceph.sh 7.9
+    #   只恢复带注解的对象(CodeRabbit 评审: 旧实现"存在即 replicas=1"会把手动扩容静默压回 1,
+    #   且停机前副本数非 1 时恢复丢原值)。
+    #   ⚠ registry 是 kubespray 建的**裸 ReplicaSet**(非 Deployment; 2026-10-13 实机验证)——
+    #   旧代码 `scale deploy registry` 从未命中, 实际停机全靠下方扫荡的 delrs(整删 RS, 不可恢复);
+    #   现改为 scale rs(对象保留), 由 7.9 标记驱动恢复。
+    stop_mark_replicas deploy "${_RBD_OP_NS}" "${_RBD_OP_REL}"
+    stop_mark_replicas rs kube-system registry
+    SSH "${K} -n ${_RBD_OP_NS} scale deploy ${_RBD_OP_REL} --replicas=0 >/dev/null 2>&1" || true
+    SSH "${K} -n kube-system scale rs registry --replicas=0 >/dev/null 2>&1" || true
     _vj="$(mktemp)"; _pj="$(mktemp)"; _rj="$(mktemp)"; _sj="$(mktemp)"
     _sweep_done=0
     for _wi in $(seq 1 12); do
@@ -94,9 +102,16 @@ for pod in load(sys.argv[2]).get("items", []):
         print("delpod\t%s\t%s\t" % (ns, name)); continue
     k = refs[0]["kind"]; n = refs[0]["name"]
     if k == "ReplicaSet":
-        rr = (rs.get((ns, n), {}).get("metadata", {}).get("ownerReferences") or [])
+        _rsob = rs.get((ns, n), {})
+        rr = (_rsob.get("metadata", {}).get("ownerReferences") or [])
         if rr:
             print("scale\t%s\t%s\t%s" % (ns, rr[0]["kind"], rr[0]["name"]))
+        elif ((_rsob.get("spec") or {}).get("replicas", 1) == 0):
+            # ★ 2026-10-13: 裸 RS 已 scale 0(如本函数刚优雅停机的 registry RS, pod 尚在
+            #   优雅终结) → 保留本体。0 副本不会再重建 Pod(删本体的目的仅在于此), 而
+            #   02_ceph.sh 7.9 的标记驱动恢复需要对象活着 —— 误删后 --steps ceph 路径
+            #   下 registry 再也拉不回来(这曾是真实现状: deploy 空转 + 扫荡 delrs 整删)。
+            pass
         else:
             # 无主的裸 RS(pod 由它直接管) → 删 RS 本体(只删 Pod 会被它重建)
             print("delrs\t%s\t%s\t" % (ns, n))
