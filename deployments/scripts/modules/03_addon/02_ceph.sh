@@ -938,16 +938,21 @@ rm -f "${LOCAL_CR}"
     fi
 fi   # _CEPH_SKIP_CLUSTER=1 → 跳过集群内 CephCluster 创建
 
-# ---------------- 7.9) 恢复被"覆盖预检"停用的 Ceph 卷消费者(2026-10-10) ----------------
-# 覆盖安装时, ceph-cleanup.sh --delete-cluster 的 ⓪ 步会 scale 0 registry 与 cubestack-operator
-# (消灭在飞 IO / 防重建竞态)。仅恢复本轮记录的原始副本数, 成功后移除对应 marker:
+# ---------------- 7.9) 恢复被"覆盖预检/优雅卸载"停用的 Ceph 卷消费者(2026-10-10; 2026-10-13 修订) ----------------
+# 覆盖安装时, ceph-cleanup.sh ⓪ 步与 05_k8s_registry 卸载分支会 scale 0 registry 与
+# cubestack-operator(消灭在飞 IO / 防重建竞态)。停机方在 scale 0 前用注解
+# cubestack.io/pre-stop-replicas 记下原副本数(stop_mark_replicas, 见 lib-common.sh),
+# 此处**只恢复带注解的对象**到记录值, 恢复后清除注解:
 #   · --fresh 路径: 旧集群已整簇重建, 新 registry 由 k8s_deploy 拉起(恢复 = no-op);
 #   · --steps ceph(K8s 保留): 把停掉的消费者拉回, 避免"停了不恢复"。
-if [ -f "${CEPH_CONSUMER_STATE_FILE:-}" ]; then
-    ceph_consumers_restore_deployment "${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}" \
-        "${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"
-    ceph_consumers_restore_deployment kube-system registry
-fi
+# ⚠ 2026-10-13(CodeRabbit 评审修复): 旧实现"对象存在即 replicas=1"会在**任何** ceph 模块
+#   成功时执行 —— 普通 --steps ceph(本轮从未停机)也会把运维手动调整的副本数静默压回 1,
+#   且停机前副本数非 1 时恢复丢失原值。标记驱动后: 无注解 = 从未被本工具停机 → 一律不动。
+# ⚠ registry 是 kubespray 建的**裸 ReplicaSet**(`rs/registry`; 2026-10-13 实机验证: `deploy
+#   registry` 不存在 —— 旧代码的停机/恢复对 registry 全部静默空转), 故与停机侧对称走 rs。
+stop_restore_replicas deploy "${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}" \
+                            "${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"
+stop_restore_replicas rs kube-system registry
 
 # ---------------- 8) 汇总 ----------------
 echo "---------------------------------------------"

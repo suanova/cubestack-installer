@@ -2061,6 +2061,45 @@ init_remote_kubectl() {
     return 0
 }
 
+# ---------------- 停消费者前的副本数登记 / 恢复(2026-10-13, CodeRabbit 评审修订) ----------------
+# 背景: 覆盖预检/优雅卸载会 scale 0 Ceph 卷消费者(registry / cubestack-operator, 消灭在飞
+#   IO), 02_ceph.sh 7.9 事后恢复。旧实现"对象存在即 replicas=1"有两个缺陷:
+#   ① 任何一次 ceph 模块成功都会执行(即使本轮从未停机) → 把运维手动调整的副本数静默压回 1;
+#   ② 停机前副本数若非 1, 恢复时原值丢失。
+# 现行契约: **停机方**在 scale 0 前调 stop_mark_replicas 把原副本数写进注解(仅首次; 重复
+#   停机不覆盖, 否则第二次时当前已是 0, 会把恢复目标错记成 0); **恢复方**只恢复带注解的
+#   对象到记录值并清除注解; 无注解 = 从未被本工具停机 → 一律不动。
+# ⚠ 注解键 cubestack.io/pre-stop-replicas 只在本节两函数中出现(单一事实来源), 禁止别处手写。
+# ⚠ kind 必须与真实对象一致: registry 是 kubespray 建的**裸 ReplicaSet**(2026-10-13 实机
+#   验证: `kubectl -n kube-system get rs registry` 存在, `deploy registry` 不存在 —— 曾致
+#   停机/恢复对 registry 全部静默空转), operator 是 helm 装的 Deployment。
+# 用法: stop_mark_replicas <deploy|rs> <ns> <name>
+#       stop_restore_replicas <deploy|rs> <ns> <name>
+stop_mark_replicas() {   # scale 0 前调用; 已登记则保留原值
+    local _kind="$1" _ns="$2" _name="$3" _cur _have
+    _cur="$( (SSH "${K} -n ${_ns} get ${_kind} ${_name} -o go-template='{{.spec.replicas}}' 2>/dev/null" || true) )"
+    [ -n "${_cur}" ] || return 0     # 对象不存在(scale 会空转)
+    _have="$( (SSH "${K} -n ${_ns} get ${_kind} ${_name} -o go-template='{{index .metadata.annotations \"cubestack.io/pre-stop-replicas\"}}' 2>/dev/null" || true) )"
+    case "${_have}" in
+        ''|*[!0-9]*) ;;              # 未登记(含 kubectl 缺失键输出 <no value>/异常值)
+        *)           return 0 ;;     # 已登记 → 保留原值
+    esac
+    SSH "${K} -n ${_ns} annotate ${_kind} ${_name} cubestack.io/pre-stop-replicas=${_cur} >/dev/null 2>&1" \
+        && say "     已登记 ${_ns}/${_name} 原副本数=${_cur}(停机前记录, 恢复用)" || true
+    return 0
+}
+
+stop_restore_replicas() {   # 只恢复带登记注解的对象, 恢复后清除注解
+    local _kind="$1" _ns="$2" _name="$3" _n
+    _n="$( (SSH "${K} -n ${_ns} get ${_kind} ${_name} -o go-template='{{index .metadata.annotations \"cubestack.io/pre-stop-replicas\"}}' 2>/dev/null" || true) )"
+    case "${_n}" in ''|*[!0-9]*) return 0 ;; esac   # 无注解/对象不存在 → 从未停机, 不动
+    if SSH "${K} -n ${_ns} scale ${_kind} ${_name} --replicas=${_n} >/dev/null 2>&1"; then
+        SSH "${K} -n ${_ns} annotate ${_kind} ${_name} cubestack.io/pre-stop-replicas- >/dev/null 2>&1 || true"
+        say "  已恢复 ${_ns}/${_name} replicas=${_n}(此前被覆盖停机)"
+    fi
+    return 0
+}
+
 # 返回第一个节点 IP(NODES 顺序首位; NodePort 暴露模式的访问入口)
 # 用法: NODE_IP="$(first_node_ip)" || { err "未找到节点"; exit 1; }
 first_node_ip() {
