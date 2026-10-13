@@ -231,14 +231,15 @@ chk "⑥a 成功路径退出 0" "0" "${_rcA}"
 chk "⑥a 删除 CR" "1" "$(grep -c 'delete clusterstackcluster.cubestack.io/cluster' "${DLOG}")"
 chk "⑥a ns finalizer 清除 + 强制删 ns 已执行" "2" "$(grep -cE 'finalizers|delete ns ' "${DLOG}")"
 chk "⑥a CRD 清理已执行" "1" "$(grep -c 'delete customresourcedefinition' "${DLOG}")"
-# ⑥b 残留路径: CR 始终不消失 → 跳过三项破坏性清理 + 非 0 退出
+# ⑥b 残留路径: CR 始终不消失 → 提前退出(保留 operator, 不 helm uninstall)+ 跳过破坏性清理
 : > "${DLOG}"
-CUBESTACK_MODULE_ACTION=uninstall FAKE_LOG="${DLOG}" FAKE_DEPLOY_REPLICAS="${DREP}" \
+_out6b="$(CUBESTACK_MODULE_ACTION=uninstall FAKE_LOG="${DLOG}" FAKE_DEPLOY_REPLICAS="${DREP}" \
   FAKE_CSC_LIST="${TMP}/csc_list" FAKE_CSC_NOW="${TMP}/csc_list" FAKE_CRD_LIST="${TMP}/crd_list" \
   PATH="${CSHIM}:${PATH}" CUBESTACK_OPERATOR_CR_WAIT_SECONDS=10 \
-    libfn "source \"${MOD25}\"" >/dev/null 2>&1
+    libfn "source \"${MOD25}\"" 2>&1)"
 _rcB=$?
 chk "⑥b CR 残留 → 非 0 退出(引擎不标 uninstalled)" "1" "${_rcB}"
+chk "⑥b 保留 operator(提前退出, 声明跳过 helm uninstall)" "1" "$(printf '%s' "${_out6b}" | grep -c '跳过 helm uninstall' || true)"
 chk "⑥b 跳过 ns finalizer 清除" "0" "$(grep -c 'finalizers' "${DLOG}")"
 chk "⑥b 跳过强制删 ns" "0" "$(grep -cE 'delete ns ' "${DLOG}")"
 chk "⑥b 跳过 CRD 清理" "0" "$(grep -c 'delete customresourcedefinition' "${DLOG}")"
@@ -246,6 +247,9 @@ chk "⑥b 跳过 CRD 清理" "0" "$(grep -c 'delete customresourcedefinition' "$
 chk "⑥c 旧 Pod 计数判据已移除(_nleft)" "0" "$(grep -c '_nleft' "${MOD25}")"
 chk "⑥c CR 等待门先于 helm uninstall(源码序; 先杀 operator 必卡死 finalizer)" "1" "$(awk '
   /等待 CR 终结/ { w=NR } /helm uninstall .*--timeout/ { h=NR } END { print (w>0 && h>0 && w<h) ? 1 : 0 }' "${MOD25}")"
+chk "⑥c CR 残留门先于 helm uninstall(源码序; 残留=保留 operator)" "1" "$(awk '
+  /CR_STUCK/ && /then/ { g=NR } /helm uninstall .*--timeout/ { h=NR }
+  END { print (g>0 && h>0 && g<h) ? 1 : 0 }' "${MOD25}")"
 chk "⑥c CR 等待门钩子在位" "1" "$(grep -c 'CUBESTACK_OPERATOR_CR_WAIT_SECONDS' "${MOD25}" | awk '{print ($1>=2)?1:0}')"
 
 echo "== ⑦ deploy-cluster 异常退出兜底(2026-10-13 CodeRabbit; 消费者不停在 0) =="

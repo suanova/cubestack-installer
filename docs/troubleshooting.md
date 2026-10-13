@@ -15,11 +15,11 @@
 
 **根因**: 旧恢复块无条件设 `replicas=1`, 未保存停用前状态; Operator 卸载用 Pod phase 作为 CR 删除守卫; RBD 汇总把空查询结果默认成 0。
 
-**解法**: 用本轮共享 TSV marker 保存成功停用的 Deployment 原副本数, 成功恢复后移除 marker, 失败时恢复记录的消费者并删除状态文件。卸载先等 `csc` 消失(120s), 未消失或查询失败保留 operator、namespace 与 CRD。RBD 空 / 失败 / 非数字查询计为未知, 仅明确 0 允许报告清零。
+**解法**: 停机前给对象打注解 `cubestack.io/pre-stop-replicas` 记录原副本数(仅首次, 重复停机不覆盖); 成功路径(ceph 模块 7.9)与异常退出兜底(deploy-cluster.sh EXIT 钩子, 仅非 0 退出且计划含 ceph/k8s_deploy)都**只恢复带注解对象**并清除注解; registry 以裸 ReplicaSet(`rs/registry`)为准。Operator 卸载先等 `csc` 消失(120s 有界), 未消失或查询失败**保留 operator**(finalizer 需要它活着执行)并跳过 helm uninstall、namespace finalizer patch / 强制删除及 CRD 清理(非 0 退出)。RBD 空 / 失败 / 非数字查询计为未知, 仅明确 0 允许报告清零。
 
-**验证边界**: `test-cleanup-restoration.sh` 用隔离脚本副本及 kubectl / SSH 桩覆盖原副本为 0/3/4、重复停用、scale 失败、清理超时、部署 EXIT 恢复、成功路径、CSC 残留/查询失败和 RBD 空/失败/无效/0/非零结果。未连接真实 Kubernetes / Ceph, 不代表实际卷卸载或 CR finalizer 已端到端验证。
+**验证边界**: `test-cluster-teardown.sh` ⑤~⑧ 节用假 SSH / 裸 ssh 桩覆盖: 标记登记(含原副本非 1)/重复停机不覆盖/按值恢复/无标记不动、扫荡保留已停机裸 RS、operator CR 终结门(成功/残留两路径)、部署 EXIT 钩子接线、RBD 未知/残留报告三态。未连接真实 Kubernetes / Ceph, 不代表实际卷卸载或 CR finalizer 已端到端验证。
 
-**相关命令**: `bash deployments/scripts/tools/tests/test-cleanup-restoration.sh`; `bash deployments/scripts/tools/check-modules.sh`; 集群侧核对 `kubectl get csc -n <operator-namespace>` 及 `kubectl get deploy -n <namespace> <name> -o jsonpath='{.spec.replicas}'`。
+**相关命令**: `bash deployments/scripts/tools/tests/test-cluster-teardown.sh`; `bash deployments/scripts/tools/check-modules.sh`; 集群侧核对 `kubectl get csc -n <operator-namespace>`、`kubectl get rs registry -n kube-system -o jsonpath='{.spec.replicas}'` 及对应对象的 `cubestack.io/pre-stop-replicas` 注解。
 
 ---
 
