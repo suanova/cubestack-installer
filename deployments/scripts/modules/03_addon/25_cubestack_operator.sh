@@ -57,19 +57,33 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
         exit 0
     fi
     # ① 删平台实例 CR(级联收组件: 先 CR 后 operator —— CR 的 finalizer 需要 operator 活着处理)
+    # 收敛等待上界(秒); env 可调, 主要供夹具测试(CUBESTACK_OPERATOR_CR_WAIT_SECONDS=10)
+    _CR_WAIT_SECONDS="${CUBESTACK_OPERATOR_CR_WAIT_SECONDS:-120}"
+    _CR_WAIT_TRIES=$(( _CR_WAIT_SECONDS / 10 )); [ "${_CR_WAIT_TRIES}" -ge 1 ] || _CR_WAIT_TRIES=1
+    _CR_STUCK=0
     _crs="$( (SSH "${K} -n ${_ns} get csc -o name 2>/dev/null") || true)"
     if [ -n "${_crs}" ]; then
         say "  ① 删除平台实例 CR(级联收组件)..."
         while IFS= read -r _cr; do
             [ -n "${_cr}" ] && SSH "${K} -n ${_ns} delete "${_cr}" --wait=false >/dev/null 2>&1" || true
         done <<< "${_crs}"
-    fi
-    # CR finalizers need the operator alive; Pod phase cannot prove deletion.
-    SSH "${K} -n ${_ns} wait --for=delete csc --all --timeout=120s --request-timeout=10s >/dev/null 2>&1" || true
-    # Confirm the entire collection is empty, including CRs created during the wait.
-    if ! _crs="$(SSH "${K} -n ${_ns} get csc -o name --request-timeout=10s 2>/dev/null")" || [ -n "${_crs}" ]; then
-        warn "  平台实例 CR 清理未完成 / 无法确认; 保留 operator, 跳过命名空间 finalizer patch、强制删除及 CRD 清理"
-        exit 1
+        # ★ 收敛判据 = **csc CR 本体消失**(finalizer 完成的契约信号; 2026-10-13 CodeRabbit)。
+        #   旧判据是"Pod 计数"(Running/Completed 视为已收敛) —— 但 delete --wait=false 立即返回,
+        #   级联尚未开始时组件 Pod 全是 Running → 首轮检查即"收敛"放行, 等待形同虚设; 且
+        #   Running 本就不代表级联完成。等 CR 消失 = operator 把组件(含在飞 IO)全部收干净。
+        #   ⚠ 必须在 ② helm uninstall **之前**等: finalizer 靠 operator 执行, 先杀 operator
+        #   会把 CR 永久卡在 Terminating(后续 ③ 再强删 ns 就走到"孤儿对象"路径)。
+        say "  ① 等待 CR 终结(finalizer 级联完成; ≤$(( _CR_WAIT_SECONDS ))s)..."
+        _CR_LEFT=1
+        for _wi in $(seq 1 "${_CR_WAIT_TRIES}"); do
+            _crs_now="$( (SSH "${K} -n ${_ns} get csc --no-headers 2>/dev/null") || true)"
+            if [ -z "${_crs_now}" ]; then _CR_LEFT=0; break; fi
+            [ "${_wi}" -lt "${_CR_WAIT_TRIES}" ] && sleep 10 || true
+        done
+        if [ "${_CR_LEFT}" = "1" ]; then
+            _CR_STUCK=1
+            warn "  平台实例 CR 未在 $(( _CR_WAIT_SECONDS ))s 内终结完成(级联未收敛)"
+        fi
     fi
     # ② helm uninstall operator(尽力)
     if command -v helm >/dev/null 2>&1 && sync_kubeconfig >/dev/null 2>&1; then
@@ -80,6 +94,19 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
         warn "  helm 不可用 / kubeconfig 同步失败 → 跳过 helm uninstall"
     fi
     # ③ 命名空间 / CRD 残留清理(幂等; CRD 随 K8s 覆盖也会消亡, 这里完整卸载顺手清)
+    # ★ 2026-10-13(CodeRabbit): **仅当 CR 已全部终结**才做破坏性清理 —— 清 ns finalizer +
+    #   强制删 ns 会把仍带 finalizer 的对象(CR/组件)孤儿化, 重装 --create-namespace 后可能
+    #   复活(K8s 官方文档明确警告 force-finalize 的孤儿风险); CRD 删除同理会把残留 CR
+    #   链式卡死在 Terminating(重装的 [5/6] CRD apply 也会撞上 Terminating CRD)。
+    #   残留场景: 响亮告警 + 跳过三项清理 + **非 0 退出** —— 引擎(run_component)据此不把本
+    #   组件标 uninstalled(登记保持诚实), 且整个优雅覆盖链对此容忍(告警继续)。
+    #   兜底去向: 重装链的 operator 回来后继续终结残留 CR; 或人工按下列指引排查。
+    if [ "${_CR_STUCK}" = "1" ]; then
+        warn "  跳过 ns finalizer 清除 / 强制删 ns / CRD 清理(CR 残留, 防孤儿对象复活)"
+        warn "  排查: kubectl -n ${_ns} get csc -o yaml(看 finalizer 卡点) / kubectl -n ${_ns} get pods"
+        warn "  cubestack-operator 卸载未完全收敛(helm uninstall 已尽力; 残留 CR 由重装后的 operator 继续终结)"
+        exit 1
+    fi
     SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
     SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
     for _crd in $( (SSH "${K} get crd -o name 2>/dev/null") | grep -i cubestack || true); do
