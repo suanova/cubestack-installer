@@ -9,6 +9,18 @@
 - 每条必须写明: **症状 / 根因 / 解法(根治) / 验证 / 相关命令**
 - 按问题类别分组: 网络(CNI) / 时间同步 / 集群组件 / 离线部署 / 其它
 
+### 清理后副本数变化、CSC finalizer 未处理或 RBD 洁净度误报
+
+**症状**: Ceph 覆盖安装将原为 0 或多个副本的 operator / registry 改成 1; 清理失败后消费者保持停用; 平台 CR 仍在就强制删除命名空间; SSH 无结果却报告 RBD 全部清零。
+
+**根因**: 旧恢复块无条件设 `replicas=1`, 未保存停用前状态; Operator 卸载用 Pod phase 作为 CR 删除守卫; RBD 汇总把空查询结果默认成 0。
+
+**解法**: 用本轮共享 TSV marker 保存成功停用的 Deployment 原副本数, 成功恢复后移除 marker, 失败时恢复记录的消费者并删除状态文件。卸载先等 `csc` 消失(120s), 未消失或查询失败保留 operator、namespace 与 CRD。RBD 空 / 失败 / 非数字查询计为未知, 仅明确 0 允许报告清零。
+
+**验证边界**: `test-cleanup-restoration.sh` 用隔离脚本副本及 kubectl / SSH 桩覆盖原副本为 0/3/4、重复停用、scale 失败、清理超时、部署 EXIT 恢复、成功路径、CSC 残留/查询失败和 RBD 空/失败/无效/0/非零结果。未连接真实 Kubernetes / Ceph, 不代表实际卷卸载或 CR finalizer 已端到端验证。
+
+**相关命令**: `bash deployments/scripts/tools/tests/test-cleanup-restoration.sh`; `bash deployments/scripts/tools/check-modules.sh`; 集群侧核对 `kubectl get csc -n <operator-namespace>` 及 `kubectl get deploy -n <namespace> <name> -o jsonpath='{.spec.replicas}'`。
+
 ---
 
 ## 一、网络 / CNI
