@@ -28,7 +28,12 @@
 #     (CR/CRD/命名空间/default 旧资源) → 等 operator DS/Pods 就绪 → 验证 metax-tech.com/gpu allocatable。
 #   · master 节点: 用 mx-smi 在宿主机检测 GPU 卡; 检测到 GPU 的 master 自动移除 control-plane 污点并
 #     uncordon(使其可调度, 供 PD 分离等 pod 使用); 无 GPU 的 master 保持默认不可调度。
-#   · 验证: tools/k8s/verify-metax-gpu.sh 或 --steps verify_metax_gpu(列各节点 GPU 清单/汇总)。
+#   · 设备属主前置(2026-10-13): 检测到 GPU 节点后调用 tools/node/ensure-containerd-device-ownership.sh,
+#     确保 containerd device_ownership_from_security_context=true(非 root 容器打不开 /dev/mxcd 的
+#     根因: 设备属主 root ⇒ EACCES, 而 mx-smi/device_count 表面全正常; 幂等, 键变化才重启 containerd;
+#     开关 CONTAINERD_DEVICE_OWNERSHIP 默认 true)。已运行容器需重建才生效 —— 详见该工具头注释。
+#   · 验证: tools/k8s/verify-metax-gpu.sh 或 --steps verify_metax_gpu(节点清单/汇总 + **非 root
+#     权限探针**: runAsUser:1000 真实 open 设备 + torch.cuda.is_available(), 不通过即 exit 1)。
 #   · 参考: Kubernetes 沐曦GPU Operator部署文档(metax-gpu-k8s 0.15.3, MXMACA 3.7.0.7)
 # 数据源: cluster.conf (GPU_OPERATOR_ENABLED / METAX_* / REGISTRY_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --enable gpu_operator  或  GPU_OPERATOR_ENABLED=true
@@ -236,6 +241,20 @@ if [ "${HAS_GPU_NODE}" = "1" ]; then
     ok "检测到 GPU 节点(共 ${GPU_BOARD_COUNT} 张卡), 保持完整等待流程(全部组件 DS Ready + allocatable 验证)"
 else
     warn "集群未检测到 GPU 节点(纯 CPU): 采用快速路径, 仅等 operator + gpu-label Ready 即完成"
+fi
+
+# ---------------- 0.5 节点运行时前置: 设备属主(非 root 访问 GPU 必需) ----------------
+# 2026-10-13 实机根因: 设备插件注入的 /dev/mxcd 属主 = root(root:root 0600) ⇒ runAsUser:1000
+# 的环境 open() EACCES、torch.cuda.is_available()=False —— 而 mx-smi/device_count 等表面检查
+# 全部"正常"(详见 tools/node/ensure-containerd-device-ownership.sh 头注释)。
+# 修复 = 节点 containerd device_ownership_from_security_context=true(按容器 runAsUser chown)。
+# 仅对有 GPU 的节点执行(mx-smi 过滤在工具内部); 幂等; 仅在键变化时重启 containerd。
+# ⚠ 厂商安装器(mx-ctk-installer)可能重写 config.toml —— 每次部署重跑本步兜底。
+if [ "${HAS_GPU_NODE}" = "1" ]; then
+    bash "${SCRIPT_DIR}/tools/node/ensure-containerd-device-ownership.sh" \
+        || warn "  设备属主前置有失败节点(见上方清单) —— 非 root GPU 容器可能仍 EACCES; 可在节点上单独重跑本工具"
+else
+    say "  无 GPU 节点, 跳过设备属主前置(集群不跑 Metax 工作负载)"
 fi
 
 # ---------------- 1. 确认资源(修复后的 chart + 镜像加载源) ----------------

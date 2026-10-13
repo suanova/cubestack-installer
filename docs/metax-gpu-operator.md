@@ -11,6 +11,37 @@
 - 节点: 已装沐曦内核驱动(`lsmod | grep metax`), 用 `METAX_DRIVER_DEPLOY_POLICY=PreferHost`(宿主机驱动)。
 - master 节点也有 GPU: 部署时用 `mx-smi` 检测, 检测到 GPU 的 master 自动移除 control-plane 污点并 uncordon。
 
+### 0.1 节点前置: 容器设备属主(非 root 访问 GPU 必需, 2026-10-13 实机闭环)
+
+**症状(极隐蔽)**: 非 root 环境(runAsUser: 1000)打不开 GPU —— `open('/dev/mxcd')` 得 EACCES、
+`torch.cuda.is_available()` 为 False, 而**一切表面检查都正常**: `mx-smi` exit 0 打印设备表(只读
+sysfs, 不开 /dev 节点), `torch.cuda.device_count()` 返回请求值(报的是 vendor 配置的可见集, 不是
+成功的 open), 容器照 Running、GPU 资源照申请 —— **没有任何 status/event 会提示**。
+
+**根因与修复**: 设备插件把 `/dev/mxcd` 注入容器时属主 = root(`crw------- root root`)。节点
+containerd 置以下键后, 容器创建时按容器 runAsUser/runAsGroup 对设备节点 chown(实测:
+`crw------- ubuntu ubuntu`, open 得 fd, `torch.cuda.is_available()` True; 对 mx-container-runtime
+同样有效):
+
+```toml
+[plugins."io.containerd.cri.v1.runtime"]     # containerd 2.x; 1.x 段落为 io.containerd.grpc.v1.cri
+  device_ownership_from_security_context = true
+```
+
+- **本仓库自动落地**: ① 声明式 —— `sync-kubespray-config.sh` 写 `containerd_extra_runtime_args`
+  (kubespray v2.32 原生变量, 官方默认注释的第一个示例就是本键)⇒ 重装/新节点天然带上;
+  ② 存量节点 —— `gpu_operator` 模块每轮调用
+  `tools/node/ensure-containerd-device-ownership.sh` 即时落地(幂等; 仅在键变化时重启 containerd)。
+  开关: `cluster.conf` 的 `CONTAINERD_DEVICE_OWNERSHIP`(默认 true)。
+- **生效时机**: 属主在**容器创建时**写入 —— 已有容器保持旧属主, **需重建工作负载**
+  (kubectl rollout restart / 重删 Pod)才生效。
+- **厂商工具不会告诉你**: mx-smi / device_count 无法区分"有设备"与"打得开设备"; 唯一判据 =
+  非 root 真实 open(见 §5 权限探针 —— 它在无此键的节点上会**失败**, 这是刻意的)。
+- ⚠ **mx-ctk-installer 可能重写 config.toml**(实机见 config.toml mtime 被守护进程改写) —— 每次
+  部署会重跑上述工具兜底; 怀疑被改时手工重跑即可。
+- ⚠ 范围: 本键作用于 CRI 设备注入路径; NVIDIA(nvidia-container-toolkit 自带 hook 注入、可能
+  自行设置属主)未实测, 不做行为假设。
+
 ---
 
 ## 1. 提前下载的文件(部署前准备好)
@@ -66,7 +97,8 @@ deployments/
     ├── modules/03_addon/23_verify_metax_gpu.sh   # 验证模块(--steps verify 自动纳入)
     └── tools/images/metax-save-images.sh         # 保存镜像 → tar
     └── tools/images/metax-load-images.sh         # 加载 tar → 集群 registry(手动)
-    └── tools/k8s/verify-metax-gpu.sh             # 节点 GPU 识别验证脚本
+    └── tools/k8s/verify-metax-gpu.sh             # 节点 GPU 识别验证脚本(含非 root 权限探针)
+    └── tools/node/ensure-containerd-device-ownership.sh  # 设备属主前置(非 root GPU 必需; 幂等)
 ```
 
 ---
@@ -152,6 +184,13 @@ GPU 识别节点数: 9  总 GPU(allocatable): 69
 
 GPU 任务测试(参考沐曦官方文档 §5, 需 maca 镜像就绪): 建 gpu-task.yaml 申请 `metax-tech.com/gpu: 1`。
 
+> **权限探针(自动, §0.1 的判据)**: `verify-metax-gpu.sh` 在存在 GPU 节点时会起一个
+> `runAsUser:1000 + metax-tech.com/gpu:1` 的探测 Pod, 断言"**非 root 真实 open 设备**
+> (`open('/dev/mxcd')` + `torch.cuda.is_available()`)"。**无 §0.1 前置键的节点上它会失败 ——
+> 这是刻意的**: mx-smi exit 0 / device_count() 这类"表面正常"的检查在那种节点上会静默通过,
+> 只有真实 open 能把"分配到了却打不开"区分出来。镜像默认用 dev_lab 的 jupyter-maca-pytorch
+> (集群 registry, 离线可用; `METAX_PERM_PROBE_IMAGE` 可覆盖)。
+
 ---
 
 ## 6. 已知问题与修复(已验证)
@@ -182,5 +221,8 @@ METAX_LIST_IMAGES=true bash deployments/scripts/modules/03_addon/06_gpu_operator
 # 部署 / 验证
 sudo ./deploy-cluster.sh --steps gpu_operator
 sudo ./deploy-cluster.sh --steps verify_metax_gpu
+# 设备属主前置(§0.1; 对 GPU 节点幂等执行, 键变化才重启 containerd; 改后需重建工作负载生效)
+sudo ./deployments/scripts/tools/node/ensure-containerd-device-ownership.sh
+sudo ./deployments/scripts/tools/node/ensure-containerd-device-ownership.sh 10.66.3.13 10.66.3.48
 # 卸载: 删 metax-operator 命名空间 + CRD 后重跑模块
 ```

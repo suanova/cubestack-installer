@@ -47,6 +47,22 @@ cuberouter/cubepilot/portal/observability…)的**离线镜像链路已由本模
 全局镜像源(imageRegistry / externalImageRegistryPrefix)注入为集群 registry —— 节点不访问 Harbor。
 默认裁剪(可经 `CUBESTACK_OPERATOR_CR_VALUES_FILE` 覆盖): 模型 bundles 清空 + modelBundles/bmc 关闭。
 
+### 1.1 部署模式切换: 在线 / 离线(2026-10-13)
+
+上面流程图 = **离线模式**(默认)。`cluster.conf` 的 **`ONLINE_DEPLOY_CUBESTACK_OPERATOR`**(默认
+`false`)决定镜像**从哪来、怎么拉**; 与 `CUBESTACK_OPERATOR_CHART_SYNC`(只管 chart 副本刷新)正交:
+
+| | `false` 离线部署(**默认**) | `true` 在线部署 |
+|---|---|---|
+| 镜像引用 | 覆盖为集群内置 registry(`--set image.repository=<REG>/suanova-private/…`; CR 注入 `<REG>/suanova` + `<REG>/mirrors` 前缀) | **chart 定义原样**(harbor.isuanova.com/…, 不覆盖不搬运) |
+| 镜像来源 | 离线 tar → `skopeo` 推入集群 registry([4/6]+[4b/6]); 节点只拉内置 registry | 节点**直连 Harbor** 拉取 |
+| 拉取策略 | chart 默认 Always + **digest 钉注**(podAnnotations, 保证滚动触发) | **恒 Always** —— operator 经 `--set image.pullPolicy=Always`, CR 组件经 `global.imagePullPolicy=Always`(滚动 :latest 每次恒取最新) |
+| 认证 | 集群 registry 匿名可拉 → 清空 imagePullSecrets | `harbor-credentials` secret(用 `HARBOR_MIRROR_USER/PASSWORD` 或 `CUBESTACK_OPERATOR_HARBOR_*` 凭据自动幂等创建, 密码经 stdin 不进 argv; 无凭据则清空并告警) |
+| 适用 | 离线/隔离集群 | 可达 Harbor 的联网集群 |
+
+渲染自检同步分叉: 离线要求"全部镜像落在集群 registry"、在线要求"全部镜像来自 Harbor 定义域" ——
+chart 引入越界镜像时两种模式都会响亮失败, 不会静默把离线集群带成 ImagePullBackOff。
+
 ---
 
 ## 2. chart 分析(实测结论, 不是推测)
