@@ -407,15 +407,6 @@ say "完整部署日志: ${LOG_FILE}"
 
 print_plan
 
-# Per-run Ceph consumer markers span teardown, preflight cleanup and module deployment.
-source "${SCRIPT_DIR}/tools/k8s/ceph-consumer-state.sh"
-CEPH_CONSUMER_STATE_FILE="$(mktemp)"
-export CEPH_CONSUMER_STATE_FILE
-_CEPH_CONSUMER_STATE_OWNED=1
-trap 'ceph_consumers_finish "$?"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
 # ★ 优雅覆盖(2026-10-11 用户口径, 设计 docs/graceful-overwrite/): K8s 覆盖**实际将发生**时
 #   (RUN_STEPS 含 k8s_deploy 且实际状态非 done —— --fresh 清状态后天然成立), 且集群可达时:
 #   先读安装登记 → 按首装序反序优雅卸载已装组件(卸载段在各自模块内), 之后 ceph 预检块

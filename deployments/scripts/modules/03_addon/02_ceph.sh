@@ -90,13 +90,6 @@ fi
 
 init_remote_kubectl || exit 1
 
-source "${SCRIPT_DIR}/tools/k8s/ceph-consumer-state.sh"
-ceph_consumers_init
-export CEPH_CONSUMER_STATE_FILE
-trap 'ceph_consumers_finish "$?"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
 # ★ 逐节点 SSH 公共函数(替代历史 4 处重复 NSSH() 定义): node_ssh <ip> <user> <cmd...>
 #   user 传 NODE_USER 或 ${SSH_USER:-ubuntu} 均可; 不依赖任何外层函数定义。
 node_ssh() {

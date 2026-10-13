@@ -85,6 +85,18 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
             warn "  平台实例 CR 未在 $(( _CR_WAIT_SECONDS ))s 内终结完成(级联未收敛)"
         fi
     fi
+    # ★ 2026-10-13(CodeRabbit): **CR 残留 → 保留 operator**(finalizer 需要它活着执行), 提前
+    #   告警 + 跳过全部后续破坏性步骤(helm uninstall / ns finalizer 清除 / 强制删 ns / CRD
+    #   清理)并**非 0 退出** —— 引擎(run_component)据此不把本组件标 uninstalled(登记保持
+    #   诚实), 优雅覆盖链对此容忍(告警继续)。kill 掉 operator 会把残留 CR 永久卡在
+    #   Terminating; 保留它, 级联终结还有机会自行完成(重装链的 operator 亦会接管)。
+    #   (采纳远端 CodeRabbit 平行修复的取向: 此判定必须先于 helm uninstall)
+    if [ "${_CR_STUCK}" = "1" ]; then
+        warn "  跳过 helm uninstall / ns finalizer 清除 / 强制删 ns / CRD 清理(CR 残留, 防孤儿对象复活)"
+        warn "  排查: kubectl -n ${_ns} get csc -o yaml(看 finalizer 卡点) / kubectl -n ${_ns} get pods"
+        warn "  cubestack-operator 卸载未完全收敛(operator 保留运行, 继续处理残留 CR)"
+        exit 1
+    fi
     # ② helm uninstall operator(尽力)
     if command -v helm >/dev/null 2>&1 && sync_kubeconfig >/dev/null 2>&1; then
         say "  ② helm uninstall ${_rel}(ns=${_ns})..."
@@ -94,19 +106,10 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
         warn "  helm 不可用 / kubeconfig 同步失败 → 跳过 helm uninstall"
     fi
     # ③ 命名空间 / CRD 残留清理(幂等; CRD 随 K8s 覆盖也会消亡, 这里完整卸载顺手清)
-    # ★ 2026-10-13(CodeRabbit): **仅当 CR 已全部终结**才做破坏性清理 —— 清 ns finalizer +
-    #   强制删 ns 会把仍带 finalizer 的对象(CR/组件)孤儿化, 重装 --create-namespace 后可能
-    #   复活(K8s 官方文档明确警告 force-finalize 的孤儿风险); CRD 删除同理会把残留 CR
-    #   链式卡死在 Terminating(重装的 [5/6] CRD apply 也会撞上 Terminating CRD)。
-    #   残留场景: 响亮告警 + 跳过三项清理 + **非 0 退出** —— 引擎(run_component)据此不把本
-    #   组件标 uninstalled(登记保持诚实), 且整个优雅覆盖链对此容忍(告警继续)。
-    #   兜底去向: 重装链的 operator 回来后继续终结残留 CR; 或人工按下列指引排查。
-    if [ "${_CR_STUCK}" = "1" ]; then
-        warn "  跳过 ns finalizer 清除 / 强制删 ns / CRD 清理(CR 残留, 防孤儿对象复活)"
-        warn "  排查: kubectl -n ${_ns} get csc -o yaml(看 finalizer 卡点) / kubectl -n ${_ns} get pods"
-        warn "  cubestack-operator 卸载未完全收敛(helm uninstall 已尽力; 残留 CR 由重装后的 operator 继续终结)"
-        exit 1
-    fi
+    # ★ 破坏性清理的前提是 **CR 已全部终结** —— 未终结场景已在 ② 之前提前告警 exit 1(保留
+    #   operator); 能走到此处 = CR 干净。语义(2026-10-13 CodeRabbit): 清 ns finalizer +
+    #   强制删 ns 会把仍带 finalizer 的对象孤儿化(重装 --create-namespace 后可能复活);
+    #   CRD 删除同理会把残留 CR 链式卡死(重装的 [5/6] CRD apply 也会撞上 Terminating CRD)。
     SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
     SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
     for _crd in $( (SSH "${K} get crd -o name 2>/dev/null") | grep -i cubestack || true); do

@@ -33,10 +33,6 @@ load_config
 init_remote_kubectl || { err "init_remote_kubectl 失败(cluster.conf NODES 无 master?)"; exit 1; }
 
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
-source "${SCRIPT_DIR}/tools/k8s/ceph-consumer-state.sh"
-trap 'ceph_consumers_finish "$?"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 # ---------------- 工具: 节点 SSH ----------------
 node_cmd() {   # <ip> <user> <cmd...>
@@ -135,12 +131,7 @@ PYEOF
         while IFS=$'\t' read -r _act _a1 _a2 _a3; do
             [ -n "${_act}" ] || continue
             case "${_act}" in
-                scale)  say "     停用 ${_a1}/${_a2} ${_a3}(replicas=0)"
-                        if [ "${_a2}" = "Deployment" ]; then
-                            ceph_consumers_stop_deployment "${_a1}" "${_a3}"
-                        else
-                            SSH "${K} -n ${_a1} scale ${_a2,,} ${_a3} --replicas=0 >/dev/null 2>&1" || true
-                        fi ;;
+                scale)  say "     停用 ${_a1}/${_a2} ${_a3}(replicas=0)"; SSH "${K} -n ${_a1} scale ${_a2,,} ${_a3} --replicas=0 >/dev/null 2>&1" || true ;;
                 delpod) say "     删除 Pod ${_a1}/${_a2}(优雅退出, ≤20s)"; SSH "${K} -n ${_a1} delete pod ${_a2} --grace-period=20 >/dev/null 2>&1" || true ;;
                 delrs)  say "     删除裸 ReplicaSet ${_a1}/${_a2}(无 Deployment 管理, 删 Pod 会被其重建)"; SSH "${K} -n ${_a1} delete rs ${_a2} --wait=false >/dev/null 2>&1" || true ;;
                 delcr)  say "     删除 CR ${_a2}/${_a3}(级联收掉其组件)"; SSH "${K} -n ${_a1} delete ${_a2} ${_a3} --wait=false >/dev/null 2>&1" || true ;;

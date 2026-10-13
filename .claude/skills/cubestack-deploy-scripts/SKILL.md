@@ -433,9 +433,9 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   清理走 `tools/k8s/ceph-cleanup.sh --list`(只读计划)/`--wipe-disks`/`--all`, 显式 `--wipe-node` 默认拒清 `inuse`/`mixed` 盘。
   部署前**红底按四类分组 + 判定证据列出节点与盘, sleep CEPH_CONFIRM_SLEEP(60s)** double-check; CI 可 `CEPH_CONFIRM_SLEEP=0`。
 - **镜像同步**: `tools/images/ceph-sync-images.sh`(复制 tar 到全部节点 + `ctr -n k8s.io images import --no-unpack`)。
-- **清理恢复状态**: `ceph-consumer-state.sh` 用本轮 `CEPH_CONSUMER_STATE_FILE` 保存成功 scale 0 的 Deployment 原副本数(含 0), 不执行状态文件内容。清理失败 / 部署失败只恢复已记录消费者并删除状态; 成功部署只恢复已记录的 operator / registry, 其它消费者保持原有停用行为。
+- **清理恢复状态**: 停机方(ceph-cleanup.sh ⓪ / 05_k8s_registry 卸载分支)在 scale 0 前给对象打注解 `cubestack.io/pre-stop-replicas=原副本数`(stop_mark_replicas, 仅首次不覆盖); 恢复方(02_ceph.sh 7.9 成功路径 + deploy-cluster.sh 异常退出 EXIT 钩子, 共用 stop_restore_known_consumers)**只恢复带注解的对象**并清除注解, 无注解=从未停机一律不动。⚠ registry 是 kubespray 建的**裸 ReplicaSet**(`rs/registry`, 非 Deployment), operator 是 Deployment。
 - **Operator 卸载守卫**: 删除平台实例后, 保留 operator 等待 `csc` 删除(120s 有界); CR 仍在或查询失败时报告未完成, 跳过 helm uninstall、namespace finalizer patch / 强制删除及 CRD 清理。Pod Running / Completed 不能证明 finalizer 已完成。
-- **RBD 汇总**: 仅成功查询返回明确 0 才确认映射清零; 空结果、SSH 失败或非数字结果均记为节点洁净度未知。离线回归: `bash deployments/scripts/tools/tests/test-cleanup-restoration.sh`(真实集群仍需单独验证)。
+- **RBD 汇总**: 仅成功查询返回明确 0 才确认映射清零; 空结果、SSH 失败或非数字结果均记为节点洁净度未知。离线回归: `bash deployments/scripts/tools/tests/test-cluster-teardown.sh`(⑤~⑧ 节; 真实集群仍需单独验证)。
 - **VM 测试盘**: `vm-nodes.conf` 的 `VM_DATA_DISKS=3/VM_DATA_DISK_SIZE=200` → 每台 VM 附加 3×200GB 裸盘(Guest `/dev/vdb~`),
   由 `tools/vm/create-vms.sh` 创建时自动附加。
 - **部署顺序(03_addon 已重排)**: `01_metallb → 02_ceph → 03_ceph_csi → 04_local_path → 05_k8s_registry → …`;

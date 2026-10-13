@@ -89,7 +89,7 @@ fi
 
 | 组件 | 卸载动作 | 备注 |
 |---|---|---|
-| cubestack_operator | 删 clusterCR（operator 级联优雅收掉 9 个平台组件）→ **有界等待 csc CR 本体终结（finalizer 完成的契约信号；非 Pod 计数）** → `helm uninstall` operator → 清残留 CRD/命名空间 | 先 CR 后 operator：CR 的 finalizer 需要 operator 活着处理。⚠ 2026-10-13(CodeRabbit): 等待门原先用 Pod 计数(Running 视为已收敛→首轮即放行, 等于没等); CR 未终结则**跳过** ns finalizer 清除/强制删 ns/CRD 清理(防 force-finalize 孤儿对象在重装后复活)并**非 0 退出**(引擎不标 uninstalled) |
+| cubestack_operator | 删 clusterCR（operator 级联优雅收掉 9 个平台组件）→ **有界等待 csc CR 本体终结（finalizer 完成的契约信号；非 Pod 计数）** → `helm uninstall` operator → 清残留 CRD/命名空间 | 先 CR 后 operator：CR 的 finalizer 需要 operator 活着处理。⚠ 2026-10-13(CodeRabbit): 等待门原先用 Pod 计数(Running 视为已收敛→首轮即放行, 等于没等); CR 未终结则**保留 operator(不 helm uninstall)** + **跳过** ns finalizer 清除/强制删 ns/CRD 清理(防 force-finalize 孤儿对象在重装后复活)并**非 0 退出**(引擎不标 uninstalled) |
 | gpu_operator (metax) | 复用现有"清理残留"序列（提为函数，安装/卸载共用）：删 clusteroperator CR → helm uninstall → 删 CRD/ClusterRole/ns/default 旧资源 | 现安装路径 376-390 行就是这套 |
 | gpu_lws | bundle 模式：删 webhook + ns（现有清理段）+ CRD；helm 模式：helm uninstall | LWS_NAMESPACE 可配 |
 | multus | 删 vendored manifest 资源（DS/CRD/RBAC）+ 本模块创建的示例 NAD | |
