@@ -65,6 +65,8 @@ keep_vol() {   # <imageName> → 0=保留
 }
 
 # 列出某节点全部 rbd 映射: "id name pool"(逐行)
+# ⚠ 返回码**透传**(不吞, 2026-10-13 CodeRabbit): 调用侧据此区分"查询失败(rc≠0, 状态未知)"
+#   与"无映射(rc 0 且空输出)"—— 不可达节点绝不能被当成"干净"。
 list_maps() {   # <ip>
     local ip="$1"
     ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
@@ -74,11 +76,15 @@ list_maps() {   # <ip>
 # 清理单个节点
 cleanup_node() {   # <ip>
     local ip="$1" maps line id name pool cleaned=0 mounted _left
+    # ★ 2026-10-13(CodeRabbit): 查询失败 ≠ 无映射 —— 不可达节点报"状态未知"并计入总账,
+    #   不得落入下方"无 rbd 映射"早退(那会让总报告对未知节点假清零)。
     if ! maps="$(list_maps "${ip}")"; then
+        warn "  ${ip}: rbd 映射查询失败(SSH 不可达?) —— 状态未知, 跳过"
         _TOTAL_UNKNOWN=$(( ${_TOTAL_UNKNOWN:-0} + 1 ))
-        warn "  ${ip}: 无法查询 rbd 映射, 洁净度未知"
+        _UNKNOWN_NODES="${_UNKNOWN_NODES:+${_UNKNOWN_NODES} }${ip}"
         return 0
     fi
+    [ -n "${maps}" ] || { ok "  ${ip}: 无 rbd 映射"; return 0; }
     echo "  ${ip}:"
     while IFS= read -r line; do
         [ -z "${line}" ] && continue
@@ -137,16 +143,24 @@ cleanup_node() {   # <ip>
     # ★ 2026-10-10 收尾阶梯(仅清理模式): 该节点映射清完后尝试**模块级卸载**(连客户端
     #   会话/-13 刷屏一起清); 仍有残留 → 计全局账(总账在 main 末尾的洁净度报告)。
     if [ "${LIST_ONLY}" != "1" ]; then
-        _TOTAL_CLEANED=$(( ${_TOTAL_CLEANED:-0} + cleaned ))
-        if ! _left="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
-            "if [ ! -d /sys/bus/rbd/devices ]; then echo 0; else bash -o pipefail -c 'ls /sys/bus/rbd/devices | wc -l'; fi" 2>/dev/null)" \
-            || ! [[ "${_left}" =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]]; then
-            _TOTAL_UNKNOWN=$(( ${_TOTAL_UNKNOWN:-0} + 1 ))
-            warn "    ${ip}: rbd 剩余映射查询失败或为空, 洁净度未知"
-            return 0
+        # ★ 2026-10-13(CodeRabbit): 空输出 = SSH 失败/查询异常 → **状态未知**, 不得归 0 ——
+        #   旧行为把失败归 0 → 该节点被误报"内核态清零"且不计入 _TOTAL_LEFT → 总报告假"全部
+        #   清零"。只有**真实读到的 0** 才走模块卸载; 未知单独计数, 报告里明示(不并入 LEFT:
+        #   LEFT>0 会触发"硬复位"建议, 对未知节点是错误指引)。
+        if _left="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+            "ls /sys/bus/rbd/devices 2>/dev/null | wc -l" 2>/dev/null)"; then
+            _left="${_left//[!0-9]/}"
+        else
+            _left=""
         fi
-        _left="${_left//[[:space:]]/}"
-        if [ "${_left}" = "0" ]; then
+        _TOTAL_CLEANED=$(( ${_TOTAL_CLEANED:-0} + cleaned ))
+        if [ -z "${_left}" ]; then
+            _TOTAL_UNKNOWN=$(( ${_TOTAL_UNKNOWN:-0} + 1 ))
+            _UNKNOWN_NODES="${_UNKNOWN_NODES:+${_UNKNOWN_NODES} }${ip}"
+            warn "    ${ip}: 内核 rbd 映射数查询失败(SSH 不可达?) —— 状态未知(未计入清零)"
+        elif [ "${_left}" = "0" ]; then
+            # ★ 采纳远端建议(用户网页提交 96bc395): 模块卸载后**回来验证**是否真的卸载 ——
+            #   旧写法无论结果都报"已卸载"; EBUSY(仍有引用)时给出如实告警。
             if ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
                 "sudo modprobe -r rbd 2>/dev/null; sudo modprobe -r libceph 2>/dev/null; ! lsmod | grep -qE '^(rbd|libceph) '" >/dev/null 2>&1; then
                 ok "    ${ip}: rbd/libceph 模块已卸载(内核态清零)"
@@ -179,13 +193,19 @@ if [ "${LIST_ONLY}" = "1" ]; then
 else
     echo "  ▍内核洁净度报告(阶梯: 惰性脱挂 → sysfs 后台清理 → 模块卸载)"
     echo "     本轮已清映射: ${_TOTAL_CLEANED:-0} 个"
-    if [ "${_TOTAL_UNKNOWN:-0}" -gt 0 ]; then
-        warn "rbd 清理后有 ${_TOTAL_UNKNOWN} 个节点洁净度未知, 已确认残留 ${_TOTAL_LEFT:-0} 个映射; 未确认全部清零"
-    elif [ "${_TOTAL_LEFT:-0}" -eq 0 ] 2>/dev/null; then
+    # ★ 2026-10-13(CodeRabbit): "清零"结论仅当 **LEFT=0 且无未知节点** 时才成立 ——
+    #   查询失败的节点状态未知, 不能并入"全部节点已清零"。
+    if [ "${_TOTAL_LEFT:-0}" -eq 0 ] 2>/dev/null && [ "${_TOTAL_UNKNOWN:-0}" -eq 0 ]; then
         ok "rbd 残留清理完成: 全部节点内核 rbd 侧已清零(映射=0)"
     else
-        warn "rbd 残留清理完成, 但**仍有 ${_TOTAL_LEFT:-?} 个内核 rbd 映射**(内核持锁, 物理所限)"
-        warn "  影响: 仅致 libceph -13 日志刷屏, 无碍新集群数据面 —— 部署可继续"
-        warn "  想彻底清零: 对相应节点**硬复位**后重跑本工具(⚠ 优雅重启会卡在 sync; 用 sysrq-b / reboot -f / virsh reset)"
+        if [ "${_TOTAL_LEFT:-0}" -ne 0 ] 2>/dev/null; then
+            warn "rbd 残留清理完成, 但**仍有 ${_TOTAL_LEFT:-?} 个内核 rbd 映射**(内核持锁, 物理所限)"
+            warn "  影响: 仅致 libceph -13 日志刷屏, 无碍新集群数据面 —— 部署可继续"
+            warn "  想彻底清零: 对相应节点**硬复位**后重跑本工具(⚠ 优雅重启会卡在 sync; 用 sysrq-b / reboot -f / virsh reset)"
+        fi
+        if [ "${_TOTAL_UNKNOWN:-0}" -ne 0 ] 2>/dev/null; then
+            warn "另有 ${_TOTAL_UNKNOWN} 个节点内核 rbd 状态**未知**(查询失败, 多为 SSH 不可达): ${_UNKNOWN_NODES:-?}"
+            warn "  —— 未计入清零; 节点恢复可达后重跑本工具确认"
+        fi
     fi
 fi
