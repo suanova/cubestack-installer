@@ -2,6 +2,7 @@
 # 桩式测试: 优雅覆盖链路 —— ① 登记合并(纯函数) ② 登记写回(假 SSH) ③ 引擎拆序/降级/离线 dry-run(Task 9 扩展)
 #   ④ 引擎 --uninstall 离线 dry-run ⑤ 消费者停机↔恢复契约(注解标记驱动, 2026-10-13 CodeRabbit 修订)
 #   ⑥ cubestack_operator 卸载 CR 终结门(源模块直跑 + 假 SSH/helm shim; 2026-10-13 CodeRabbit 修订)
+#   ⑦ deploy-cluster 异常退出兜底接线(静态围栏; 2026-10-13 CodeRabbit 修订)
 # 隔离手段(与 test-sync-api-entry.sh 同风格):
 #   ① CLUSTER_CONF 指向临时配置(load_config 只读它, 不碰真 cluster.conf)
 #   ② init_remote_kubectl 之后用假 SSH 覆盖(记录调用; get cm → $FAKE_CM; apply -f - → 存 $FAKE_APPLY)
@@ -196,6 +197,12 @@ A5_0="$(python3 "${SWEEPPY}" "${TMP}/f_pvc.json" "${TMP}/f_pods.json" "${TMP}/f_
 A5_1="$(python3 "${SWEEPPY}" "${TMP}/f_pvc.json" "${TMP}/f_pods.json" "${TMP}/f_rs1.json" "${TMP}/f_sts.json" 2>/dev/null)"
 chk "⑤m 扫荡: 已停机裸 RS → 保留不动" "" "${A5_0}"
 chk "⑤n 扫荡: 运行中裸 RS → delrs(原语义不变)" "$(printf 'delrs\tkube-system\tregistry\t')" "${A5_1}"
+# ⑤o 消费者清单单一来源: stop_restore_known_consumers(7.9 与 deploy-cluster 失败兜底共用)整组恢复
+printf '1' > "${DREP}"; printf '3' > "${DANNO}"; : > "${DLOG}"
+FAKE_DEPLOY_REPLICAS="${DREP}" FAKE_DEPLOY_ANNO="${DANNO}" FAKE_LOG="${DLOG}" \
+    libfn 'stop_restore_known_consumers' >/dev/null
+chk "⑤o 整组恢复: operator 按标记恢复(=3)" "1" "$(grep -c 'scale deploy cubestack-operator --replicas=3' "${DLOG}")"
+chk "⑤o 整组恢复: registry 无标记自动跳过" "0" "$(grep -c 'scale rs registry' "${DLOG}")"
 
 echo "== ⑥ cubestack_operator 卸载: CR 终结门(2026-10-13 CodeRabbit; 不收敛跳过 ns 强制清理) =="
 # 源模块直跑(假 SSH): 等 CR 终结门(非 Pod 计数); CR 残留则跳过 ns finalizer 清除/强制删 ns/
@@ -240,5 +247,20 @@ chk "⑥c 旧 Pod 计数判据已移除(_nleft)" "0" "$(grep -c '_nleft' "${MOD2
 chk "⑥c CR 等待门先于 helm uninstall(源码序; 先杀 operator 必卡死 finalizer)" "1" "$(awk '
   /等待 CR 终结/ { w=NR } /helm uninstall .*--timeout/ { h=NR } END { print (w>0 && h>0 && w<h) ? 1 : 0 }' "${MOD25}")"
 chk "⑥c CR 等待门钩子在位" "1" "$(grep -c 'CUBESTACK_OPERATOR_CR_WAIT_SECONDS' "${MOD25}" | awk '{print ($1>=2)?1:0}')"
+
+echo "== ⑦ deploy-cluster 异常退出兜底(2026-10-13 CodeRabbit; 消费者不停在 0) =="
+# 失败/中断路径: EXIT 钩子(仅非 0 退出 + 计划含 ceph/k8s_deploy)按停机标记契约整组恢复;
+# 成功路径不改行为(7.9 已恢复清标 → 钩子 no-op)。
+DC="${REPO_ROOT}/deployments/scripts/deploy-cluster.sh"
+MODCEPH="${REPO_ROOT}/deployments/scripts/modules/03_addon/02_ceph.sh"
+chk "⑦a EXIT 钩子已接线(定义+trap 共 2 处)" "2" "$(grep -c '_restore_marked_consumers_on_fail' "${DC}")"
+chk "⑦b 计划门: 仅 ceph/k8s_deploy 计划挂钩子" "5" "$(grep -cE '_has_ceph_step|_has_k8s_step' "${DC}")"
+chk "⑦c 仅非 0 退出执行(成功路径零改动)" "1" "$(grep -cF '[ "${_rc}" = "0" ] && return 0' "${DC}")"
+chk "⑦d 挂点晚于只读退出(--list/--list-steps 不挂钩)" "1" "$(awk '
+  /LIST_STEPS}/ { a=NR } /trap .*_restore_marked_consumers_on_fail/ { b=NR }
+  END { print (a>0 && b>0 && a<b) ? 1 : 0 }' "${DC}")"
+chk "⑦e 成功路径 7.9 与兜底共用同一函数(注释+调用)" "2" "$(grep -c 'stop_restore_known_consumers' "${MODCEPH}")"
+chk "⑦f lib-common 提供共享恢复函数" "1" "$(grep -c '^stop_restore_known_consumers() {' "${REPO_ROOT}/deployments/scripts/lib-common.sh")"
+chk "⑦g INT/TERM 转发接线(EXIT trap 在 Ctrl-C/kill 下可靠)" "2" "$(grep -cE "trap 'exit 1(30|43)' (INT|TERM)" "${DC}")"
 
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }

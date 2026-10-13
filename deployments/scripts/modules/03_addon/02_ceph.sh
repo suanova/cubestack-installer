@@ -950,9 +950,10 @@ fi   # _CEPH_SKIP_CLUSTER=1 → 跳过集群内 CephCluster 创建
 #   且停机前副本数非 1 时恢复丢失原值。标记驱动后: 无注解 = 从未被本工具停机 → 一律不动。
 # ⚠ registry 是 kubespray 建的**裸 ReplicaSet**(`rs/registry`; 2026-10-13 实机验证: `deploy
 #   registry` 不存在 —— 旧代码的停机/恢复对 registry 全部静默空转), 故与停机侧对称走 rs。
-stop_restore_replicas deploy "${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}" \
-                            "${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"
-stop_restore_replicas rs kube-system registry
+# ⚠ 失败路径兜底(2026-10-13 CodeRabbit): 本模块若在 7.9 之前 exit 1(如集群 900s 未 Ready),
+#   或整轮部署异常退出, 由 deploy-cluster.sh 的 EXIT 钩子调用**同一函数**
+#   stop_restore_known_consumers 恢复 —— 消费者不会因一次失败停在 0。
+stop_restore_known_consumers
 
 # ---------------- 8) 汇总 ----------------
 echo "---------------------------------------------"

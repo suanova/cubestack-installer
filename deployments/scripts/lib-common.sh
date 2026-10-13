@@ -2063,7 +2063,8 @@ init_remote_kubectl() {
 
 # ---------------- 停消费者前的副本数登记 / 恢复(2026-10-13, CodeRabbit 评审修订) ----------------
 # 背景: 覆盖预检/优雅卸载会 scale 0 Ceph 卷消费者(registry / cubestack-operator, 消灭在飞
-#   IO), 02_ceph.sh 7.9 事后恢复。旧实现"对象存在即 replicas=1"有两个缺陷:
+#   IO), 02_ceph.sh 7.9 事后恢复; 整轮**异常退出**(失败/Ctrl-C)时由 deploy-cluster.sh 的
+#   EXIT 钩子兜底(调用 stop_restore_known_consumers)。旧实现"对象存在即 replicas=1"有两个缺陷:
 #   ① 任何一次 ceph 模块成功都会执行(即使本轮从未停机) → 把运维手动调整的副本数静默压回 1;
 #   ② 停机前副本数若非 1, 恢复时原值丢失。
 # 现行契约: **停机方**在 scale 0 前调 stop_mark_replicas 把原副本数写进注解(仅首次; 重复
@@ -2097,6 +2098,16 @@ stop_restore_replicas() {   # 只恢复带登记注解的对象, 恢复后清除
         SSH "${K} -n ${_ns} annotate ${_kind} ${_name} cubestack.io/pre-stop-replicas- >/dev/null 2>&1 || true"
         say "  已恢复 ${_ns}/${_name} replicas=${_n}(此前被覆盖停机)"
     fi
+    return 0
+}
+
+# 已知 Ceph 卷消费者(operator deploy + registry rs)的**整组恢复** —— 消费者清单只此一份:
+#   02_ceph.sh 7.9(成功路径) 与 deploy-cluster.sh 异常退出 EXIT 钩子(失败/Ctrl-C 兜底)共用。
+# 依据标记契约, 无标记对象自动跳过(如成功路径上 7.9 已恢复并清标, 钩子再跑即 no-op)。
+stop_restore_known_consumers() {
+    stop_restore_replicas deploy "${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}" \
+                                "${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}" || true
+    stop_restore_replicas rs kube-system registry || true
     return 0
 }
 

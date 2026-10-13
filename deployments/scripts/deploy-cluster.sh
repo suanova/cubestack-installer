@@ -341,6 +341,39 @@ need_root
 #   cluster_exists 判不出集群; 而 vm_sshkey/k8s_passwordless 恰好排在 k8s_deploy 之前, 到那时才可探测。
 notify_base_redeploy
 
+# ★ Ceph 消费者异常退出兜底(2026-10-13, CodeRabbit): 覆盖预检/优雅卸载把 registry(kubespray
+#   裸 RS)与 cubestack-operator 停机(scale 0 + 标注原副本数)后, 若整轮部署**异常退出**
+#   (模块失败/超时/Ctrl-C), 成功路径的 02_ceph.sh 7.9 不会执行 → 消费者会停在 0。
+#   此处按停机标记契约恢复(见 lib-common.sh stop_restore_known_consumers): 只恢复带
+#   cubestack.io/pre-stop-replicas 标注的对象; 无标记 = 无事可做(静默 no-op —— 成功路径
+#   7.9 已恢复并清标, 钩子天然跳过, **不改成功路径行为**)。
+#   停机只可能由"本次计划含 ceph"(预检 stop_consumers / ceph 模块自清理)或"含 k8s_deploy"
+#   (优雅覆盖链: ceph 卸载 / 05 registry 卸载分支)的运行造成 → 仅这两种计划挂钩子,
+#   组件 --steps(如 verify_*)运行不触碰停机标记。集群不可达(早段失败/首装)时静默跳过。
+_restore_marked_consumers_on_fail() {   # EXIT 钩子: 仅非 0 退出(含 Ctrl-C)执行
+    local _rc="$?"
+    [ "${_rc}" = "0" ] && return 0
+    init_remote_kubectl >/dev/null 2>&1 || return 0
+    say "  异常退出(rc=${_rc}) → 恢复本次停机登记的 Ceph 消费者(无标记=无操作)..."
+    stop_restore_known_consumers || true
+    return 0
+}
+_has_ceph_step=0; _has_k8s_step=0
+for _hc_k in "${RUN_STEPS[@]:-}"; do
+    [ "${_hc_k}" = "ceph" ] && _has_ceph_step=1
+    [ "${_hc_k}" = "k8s_deploy" ] && _has_k8s_step=1
+done
+unset _hc_k
+if [ "${_has_ceph_step}" = "1" ] || [ "${_has_k8s_step}" = "1" ]; then
+    trap '_restore_marked_consumers_on_fail' EXIT
+    # ⚠ 必须同时转发 INT/TERM: bash 被 SIGINT/SIGTERM **杀死时不执行 EXIT trap**(2026-10-13
+    #   独立实测), 否则 Ctrl-C / kill 会绕过兜底; 转发成 exit → EXIT trap 可靠执行
+    #   (实测 Ctrl-C 语义 rc=130, kill 语义 rc=143)。
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+fi
+unset _has_ceph_step _has_k8s_step
+
 # ★ 集群接入预检(仅 --steps 精确模式: 单独装组件 / 跑验证):
 #   本地 kubeconfig 可用则直接用; 否则用 cluster.conf NODES 的密码引导(生成密钥 → 注入公钥 →
 #   取 admin.conf 到本地)。全量部署/覆盖安装由各自的基座模块处理接入, 不走这里。
