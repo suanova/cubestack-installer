@@ -104,6 +104,12 @@ fi
   `--keep-pvcs` 保留模式，不删 PVC/不 unmap）可独立调用；
   现有 `--delete-cluster` 行为不变。工作区中未提交的 delrs/delcr 修复（裸 RS/CR 直管 Pod
   的处理）保留并作为其一部分。
+- **异常退出兜底**（2026-10-13, CodeRabbit）：停机(scale 0 + 标注原副本数)后若整轮部署**异常退出**
+  （模块失败/超时/Ctrl-C，7.9 不会执行），由 `deploy-cluster.sh` 的 **EXIT 钩子**（仅非 0 退出，
+  且仅计划含 ceph/k8s_deploy 时挂；INT/TERM 转发保证 Ctrl-C/kill 下 EXIT trap 可靠执行）按停机
+  标记契约整组恢复 —— 与 02_ceph.sh 7.9 共用 `lib-common.stop_restore_known_consumers`
+  （消费者清单单一来源）；成功路径 7.9 已恢复清标 → 钩子天然 no-op，成功行为零改动。
+  停机标记随恢复清除；恢复本身失败（SSH 不可达）则标记留存，下次成功运行或下次失败退出重试。
 
 ### 3.3 编排引擎（新工具 `tools/k8s/cluster-teardown.sh`）
 
