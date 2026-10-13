@@ -263,4 +263,57 @@ chk "⑦e 成功路径 7.9 与兜底共用同一函数(注释+调用)" "2" "$(gr
 chk "⑦f lib-common 提供共享恢复函数" "1" "$(grep -c '^stop_restore_known_consumers() {' "${REPO_ROOT}/deployments/scripts/lib-common.sh")"
 chk "⑦g INT/TERM 转发接线(EXIT trap 在 Ctrl-C/kill 下可靠)" "2" "$(grep -cE "trap 'exit 1(30|43)' (INT|TERM)" "${DC}")"
 
+echo "== ⑧ ceph-rbd-cleanup 洁净度报告: 查询失败≠清零(2026-10-13 CodeRabbit) =="
+# 裸 ssh shim(脚本节点操作用裸 ssh)三态: .1 有映射但**收尾查询失败**; .2 全程不可达;
+# .11 正常无映射。断言: 失败节点报"状态未知"、不出现"全部清零"/误导性"内核态清零"、
+# .2 不被误报"无 rbd 映射"、未知节点计入总账清单。
+RBDTOOL="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-rbd-cleanup.sh"
+R8="${TMP}/shim_rbd"; mkdir -p "${R8}"
+cat > "${R8}/ssh" <<'EOF'
+#!/bin/bash
+_args="$*"
+# ⚠ 最长前缀优先: *@10.0.0.1* 会前缀撞上 @10.0.0.11(夹具经典坑, 实测踩过), .11 必须最先判
+case "${_args}" in
+    *@10.0.0.11*) _ip=10.0.0.11 ;;
+    *@10.0.0.2*)  _ip=10.0.0.2 ;;
+    *@10.0.0.1*)  _ip=10.0.0.1 ;;
+    *)            _ip="" ;;
+esac
+case "${_args}" in
+    *"test -f /etc/kubernetes/admin.conf"*) exit 255 ;;
+esac
+[ "${_ip}" = "10.0.0.2" ] && exit 255          # .2 模拟全程不可达
+case "${_args}" in
+    *"for d in /sys/bus/rbd/devices"*)         # list_maps: .1 有一个可清映射
+        [ "${_ip}" = "10.0.0.1" ] && printf '0 testimg rbd\n'
+        exit 0 ;;
+    *"wc -l"*)                                 # 收尾查询: .1 由 SHIM_LEFT1 控制(fail=SSH失败)
+        if [ "${_ip}" = "10.0.0.1" ]; then
+            case "${SHIM_LEFT1:-fail}" in
+                fail) exit 255 ;;
+                *) printf '%s\n' "${SHIM_LEFT1}"; exit 0 ;;
+            esac
+        fi
+        printf '0\n'; exit 0 ;;
+    *"mount | grep"*) printf 'no\n'; exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "${R8}/ssh"
+_run_rbd() {   # <SHIM_LEFT1> → stdout
+    SHIM_LEFT1="$1" CLUSTER_CONF="${TMP}/cluster.conf" KUBECONFIG="/nonexistent/nope" \
+        PATH="${R8}:${PATH}" bash "${RBDTOOL}" 2>&1
+}
+OUT8="$(_run_rbd fail)"
+chk "⑧a 有未知节点时不再宣称'全部清零'" "0" "$(printf '%s' "${OUT8}" | grep -c '全部节点内核 rbd 侧已清零' || true)"
+chk "⑧b 收尾查询失败(.1)+全程不可达(.2)各报'状态未知'" "2" "$(printf '%s' "${OUT8}" | grep -c '状态未知' || true)"
+chk "⑧c .2 不被误报'无 rbd 映射'" "0" "$(printf '%s' "${OUT8}" | grep -c '10.0.0.2: 无 rbd 映射' || true)"
+chk "⑧d 真无映射节点(.11)正常报'无 rbd 映射'" "1" "$(printf '%s' "${OUT8}" | grep -c '10.0.0.11: 无 rbd 映射' || true)"
+chk "⑧e 未知节点不触发模块卸载(无误导性'内核态清零')" "0" "$(printf '%s' "${OUT8}" | grep -c 'rbd/libceph 模块已卸载' || true)"
+chk "⑧f 总账明示未知数量与节点清单" "1" "$(printf '%s' "${OUT8}" | grep -c '另有 2 个节点内核 rbd 状态' || true)"
+chk "⑧f 清单含 .1 与 .2" "1" "$(printf '%s' "${OUT8}" | grep -c '10.0.0.1 10.0.0.2' || true)"
+OUT8B="$(_run_rbd 2)"
+chk "⑧g 真实残留=2 走'仍有 N 个'分支(不误给硬复位外的结论)" "1" "$(printf '%s' "${OUT8B}" | grep -cF '仍有 2 个内核 rbd 映射**' || true)"
+chk "⑧g 非零残留节点不做模块卸载" "0" "$(printf '%s' "${OUT8B}" | grep -c 'rbd/libceph 模块已卸载' || true)"
+
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }
