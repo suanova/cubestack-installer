@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # MODULE: dev_lab
-# DESC: 开发镜像(jupyter/ssh 系列)离线 tar → 集群内置 registry(默认启用; 每次部署默认加载, digest 幂等)
+# DESC: 开发镜像(jupyter/ssh 系列)离线 tar → 集群内置 registry(**排在全部部署模块末位**; 默认 push, digest 幂等)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
@@ -22,8 +22,11 @@
 #     与 25_cubestack_operator 的自研镜像映射同款)。
 #   · 幂等: 目标 digest == 源 digest → 跳过 —— tag 是滚动的 latest, **必须比 digest**,
 #     不能只看 tag 存在(与 25 模块同款教训)。
-#   · 默认启用: DEV_LAB_ENABLED 默认 true(见 cluster.conf.example)⇒ 每次默认部署自动加载;
-#     跳过: --skip dev_lab 或 DEV_LAB_ENABLED=false; 单跑: --steps dev_lab。
+#   · 默认启用 = 默认 push: DEV_LAB_ENABLED 默认 true(见 cluster.conf.example 顶部开关区)
+#     ⇒ 每次默认部署自动把 tar 推入集群 registry; 跳过: --skip dev_lab 或 DEV_LAB_ENABLED=false。
+#   · 顺序(2026-10-13 用户口径): 模块文件排在 03_addon **末位 36**(全部 operator/组件/验证之后)
+#     —— 开发镜像无任何依赖(全仓无消费者, 已核对)⇒ ≈45G 的大推送不占用关键链路时间,
+#     前面的组件/验证先完成先验收; 覆盖安装"反序卸载"时 dev_lab 无卸载动作, 顺序变化无副作用。
 # 数据源: cluster.conf (DEV_LAB_* / REGISTRY_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps dev_lab
 # ============================================================

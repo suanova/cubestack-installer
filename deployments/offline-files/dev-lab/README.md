@@ -25,8 +25,11 @@
   sudo ./deployments/scripts/tools/images/harbor-save-images.sh --group dev-lab
   ```
 
-- 谁消费: `modules/03_addon/08_dev_lab.sh` —— 每次默认部署自动把 tar 推入**集群内置 registry**
+- 谁消费: `modules/03_addon/36_dev_lab.sh` —— 每次默认部署自动把 tar 推入**集群内置 registry**
   的 `<REG>/suanova/<name>:<tag>`(节点从此拉取, 不访问 Harbor); 缺 tar 的镜像该次 warn 跳过
+- ★ **模块排在全部部署模块末位**(2026-10-13 用户口径): 开发镜像无任何依赖(全仓无消费者)
+  ⇒ ≈45G 的大推送放在 operator/验证等关键链路**之后**, 不拖慢主流程; 开关 `DEV_LAB_ENABLED`
+  默认 `true`(即默认 push), 跳过用 `--skip dev_lab` 或置 false
 - 升级/刷新: 上游滚动构建后重跑 save(覆盖 tar) → 下次部署模块按 digest 自动重推
 
 > ⚠ 本目录下的 `*.tar` 已在 `.gitignore` 中忽略(tar 不入库); 只有本 README 受版本控制。
