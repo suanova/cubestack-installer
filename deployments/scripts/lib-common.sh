@@ -858,8 +858,8 @@ cidr_contains() {
 }
 
 # ---------------- kube-vip: API Server VIP 推导与校验 ----------------
-# 详见 docs/kube-vip-api-ha.md。三个关键约束(任一违反都是确定性故障, 故为硬失败):
-#   ① 与 HAPROXY_ENABLED / KEEPALIVED_ENABLED 互斥 —— 三者都在争 loadbalancer_apiserver.address 的解释权
+# 详见 docs/kube-vip-api-ha.md。关键约束(任一违反都是确定性故障, 故为硬失败):
+#   (原 ① HAPROXY_ENABLED/KEEPALIVED_ENABLED 互斥已随该方案整块移除, 2026-10-14)
 #   ② VIP 不得落在 METALLB_POOL 内 —— 否则 MetalLB 可能把同一个 IP 分配给某个 Service, 抢走控制平面入口
 #   ③ VIP 不得等于任一节点 IP —— 会与真实网卡地址冲突(ARP 打架)
 
@@ -958,15 +958,6 @@ kube_vip_validate_config() {
     # ⚠ 2026-09-28 rebase 取舍: 这里的兜底默认取 main 的 `false`(9832975 已把 kube-vip 默认
     #   翻成关, 全仓 11 处一起翻); api-ha 分支那版 `:-true` 是翻之前的写法, 不能照搬。
     [ "${KUBE_VIP_ENABLED:-false}" = "true" ] || return 0
-
-    # ① 互斥
-    if [ "${HAPROXY_ENABLED:-false}" = "true" ] || [ "${KEEPALIVED_ENABLED:-false}" = "true" ]; then
-        err "KUBE_VIP_ENABLED=true 与 HAPROXY_ENABLED/KEEPALIVED_ENABLED 互斥, 二者都在争 API 入口:"
-        err "  kube-vip  : KUBE_VIP_ENABLED=true"
-        err "  HAProxy+KA: HAPROXY_ENABLED=${HAPROXY_ENABLED:-false} KEEPALIVED_ENABLED=${KEEPALIVED_ENABLED:-false}"
-        err "二者只能留一个(推荐保留 kube-vip, 见 docs/kube-vip-api-ha.md)"
-        return 1
-    fi
 
     local vip="${K8S_API_VIP:-}"
 
@@ -1328,10 +1319,6 @@ api_entry_validate_config() {
             err "  由本方案自带 VIP → 请清空 API_EXTERNAL_ADDR"
             return 1
         fi
-        if bool_is_true "${HAPROXY_ENABLED:-false}" || bool_is_true "${KEEPALIVED_ENABLED:-false}"; then
-            err "API_EXTERNAL_ADDR 与 HAPROXY_ENABLED/KEEPALIVED_ENABLED 互斥(三者都在提供 API 入口)"
-            return 1
-        fi
         emit_ip "${API_EXTERNAL_ADDR}" >/dev/null 2>&1 || {
             err "API_EXTERNAL_ADDR 不是合法 IPv4 字面量: ${API_EXTERNAL_ADDR}"
             return 1
@@ -1634,12 +1621,112 @@ bluestore_wipe_dev() {   # <盘> → 0=已擦净(校验通过); 非 0=仍有 blu
 }
 # 毒化预检(有界 ≤10s, 只告警不阻断; 脚本顶层、每节点一次): 内核若残留死 IO, 全局 sync 会被
 # 拖住 —— 检出即给"择机重启清毒"指引(本库其余步骤已全部设备本地化, 不受其影响)。
-sync & _sp=$!
+# ⚠ 2026-10-14 实机(卡 15h): 后台 sync 必须**重定向 fd** —— 死 IO 下 sync 永不退出(D 态,
+#   TERM/KILL 皆无效), 若它继承着 SSH 的 stdout/stderr 管道, ssh 会一直等管道关闭 ⇒
+#   `node_ssh ... bash -s` **永不返回**, 整个部署无限挂起(判据: 本函数已打完"本步已全部设备
+#   本地化"的告警、后续却再无输出)。重定向后 sync 卡死只留在节点上, 不再攥住会话。
+sync >/dev/null 2>&1 & _sp=$!
 _sp_ok=0
 for _si in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$_sp" 2>/dev/null || { _sp_ok=1; break; }; sleep 1; done
 [ "${_sp_ok}" = "1" ] || echo "    ⚠ 该节点内核存在残留死 IO(全局 sync 被拖住>10s; 历史事故产物): 本步已全部设备本地化、不受影响; 建议择机重启清毒"
 unset _sp _sp_ok _si
 WIPELIB
+}
+
+# ---------------- 离线 deb 安装原语(共享; 2026-10-14 三轮实机事故重构, P0) ----------------
+# 背景: "离线装 deb" 多处各写一份, 口径漂移 ⇒ 同类坑换文件复发(10-07 timesyncd 互斥守卫只进
+#   reconcile; 10-14 chrony 直装只进 setup-ntp)。本区收口为**单一实现**, 三条硬口径:
+#   ① 走 **dpkg 直装**: apt 对任何操作先做全局依赖检查, 节点"预先破损态"(半装包/版本错位)下
+#      直接拒绝 —— 连纯本地事务也拒(10-14 实机: 节点三处破损, chrony 永远装不上);
+#   ② **已装即跳(任何版本)**: 只补缺、不升级 —— 把较旧系统库升级会打断既有版本钉
+#      (10-14 实机: 闭包的 libtinfo6 .3 打断本机 libncurses6=.2 ⇒ 新全局缺口);
+#   ③ **互斥提供者声明表**: time-daemon 系(chrony/timesyncd/openntpd/ntp)只允许一个提供者,
+#      装载前按表预卸(10-14 实机: dpkg 报 conflicting packages 拒装 chrony)。
+#   ④ 批量 dpkg -i 一包失败**逐包隔离重试**(不连坐); ⑤ 输出全程保留(禁止 >/dev/null 吞)。
+# ⚠ 禁令(10-14 实机血证): **禁止**在破损态节点上自动跑 `apt-get --fix-broken install` ——
+#   它"修复"的手段是移除/改版(曾击穿 .203 的 sshd), 且离线时拿不到缺件 = 纯风险零收益。
+# 互斥表(单一事实来源; 远程双胞胎 _pkg_conflict_providers 见 deb_install_remote_lib,
+#   ⚠ 两处必须同步 —— tools/tests/test-deb-install-lib.sh 会断言两侧一致)
+pkg_conflict_providers() {   # <包名> → 输出其互斥提供者(空格分隔; 无 → 空)
+    case "$1" in
+        chrony|systemd-timesyncd|openntpd|ntp)
+            echo "chrony openntpd ntp systemd-timesyncd" | tr ' ' '\n' | grep -vx "$1" | tr '\n' ' ' ;;
+        *) : ;;
+    esac
+}
+
+# 节点侧安装原语(文本经 SSH stdin 送往节点; 与 bluestore_wipe_remote_lib 同机制)。
+# 用法: { deb_install_remote_lib; printf '\ninstall_debs_offline %s %s\n' "<deb目录>" "<关注包...>"; } | ssh <节点> "sudo bash -s"
+#   install_debs_offline <deb目录> [关注包...]: 预卸互斥 → 已装即跳过 → 批量 dpkg → 失败逐包隔离;
+#   返回值恒 0, 由调用方按"关注包命令/状态"断言(如 command -v chronyd 或 assert_pkgs_ready)。
+deb_install_remote_lib() {
+    cat <<'DEBLIB'
+# 互斥提供者表(⚠ 与 lib-common::pkg_conflict_providers 同步; 夹具断言两侧一致)
+_pkg_conflict_providers() {
+    case "$1" in
+        chrony|systemd-timesyncd|openntpd|ntp)
+            echo "chrony openntpd ntp systemd-timesyncd" | tr ' ' '\n' | grep -vx "$1" | tr '\n' ' ' ;;
+        *) : ;;
+    esac
+}
+
+# 安装一批离线 deb: 只补缺失、预卸互斥、失败逐包隔离、输出全程保留。
+# 用法: install_debs_offline <deb目录> [关注包...]
+install_debs_offline() {
+    local d="$1"; shift
+    local want="$*"
+    local dlog=/tmp/cubestack-deb-install.log p c f pk list="" n_skip=0
+    : >"${dlog}"
+    # ① 预卸互斥提供者(对每个"关注包": 其提供者已装且不在同名关注列表 → 卸)
+    for p in ${want}; do
+        for c in $(_pkg_conflict_providers "${p}"); do
+            case " ${want} " in *" ${c} "*) continue ;; esac
+            if dpkg-query -W -f='${Status}' "${c}" 2>/dev/null | grep -q "install ok installed"; then
+                echo "  [deb-install] 预卸互斥包 ${c}(与待装 ${p} 冲突, dpkg 级直卸)"
+                dpkg --purge "${c}" >>"${dlog}" 2>&1 || true
+            fi
+        done
+    done
+    # ② 过滤: 已装即跳(任何版本); 只补缺, 不升级(防打断既有版本钉)
+    for f in "${d}"/*.deb; do
+        [ -f "${f}" ] || continue
+        pk="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
+        [ -n "${pk}" ] || continue
+        if [ -n "$(dpkg-query -W -f='${Status}' "${pk}" 2>/dev/null | grep -o 'install ok installed' || true)" ]; then
+            n_skip=$((n_skip + 1)); continue
+        fi
+        list="${list} ${f}"
+    done
+    if [ -z "${list}" ]; then
+        echo "  [deb-install] 全部已装(跳过 ${n_skip} 个), 无需安装"
+        return 0
+    fi
+    # ③ 批量 dpkg -i; 失败 → 逐包隔离(一个坏包不连坐好包)
+    # shellcheck disable=SC2086
+    if dpkg -i ${list} >>"${dlog}" 2>&1; then
+        echo "  [deb-install] dpkg 直装成功(跳过已装 ${n_skip}; 安装 $(echo ${list} | wc -w) 个)"
+        return 0
+    fi
+    echo "  [deb-install] 批量安装部分失败, 逐包隔离重试(明细: ${dlog}):"
+    local ok_n=0 fail_n=0
+    for f in ${list}; do
+        if dpkg -i "${f}" >>"${dlog}" 2>&1; then ok_n=$((ok_n + 1)); else fail_n=$((fail_n + 1)); fi
+    done
+    echo "  [deb-install] 隔离结果: 成功 ${ok_n} / 失败 ${fail_n}"
+    [ "${fail_n}" -gt 0 ] && tail -8 "${dlog}" | sed 's/^/      /'
+    return 0
+}
+
+# 断言关注包全部处于已装态(install_debs_offline 之后调用; 任一缺失 → 非 0)
+assert_pkgs_ready() {
+    local p
+    for p in "$@"; do
+        dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "install ok installed" \
+            || { echo "PKG-MISSING:${p}"; return 1; }
+    done
+    return 0
+}
+DEBLIB
 }
 
 # ---------------- 共用 MetalLB VIP 的约定(多服务共用一个 IP、不同端口) ----------------
