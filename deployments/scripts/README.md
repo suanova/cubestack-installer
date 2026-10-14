@@ -80,9 +80,7 @@ deployments/scripts/
 │   │   ├── 01_vm_network.sh   #     VM 宿主网络(bridge/nat; 默认关, 由 tools/vm/create-vms.sh 创建 VM 时自动执行)
 │   │   ├── 02_vm_sshkey.sh    #     生成 SSH 密钥
 │   │   ├── 03_vm_create.sh    #     创建虚拟机(默认关, 由 tools/vm/create-vms.sh 独立执行)
-│   │   ├── 04_harbor.sh       #     Harbor 镜像仓库(集群外私有仓库, 部署前就绪)
-│   │   ├── 05_lb_haproxy.sh   #     HAProxy API 四层负载均衡(集群部署前准备)
-│   │   └── 06_lb_keepalived.sh#     Keepalived API VIP 高可用(集群部署前准备)
+│   │   └── 04_harbor.sh       #     Harbor 镜像仓库(集群外私有仓库, 部署前就绪)
 │   ├── 02_k8s/                #   阶段二: 离线部署 kubespray(不依赖 VM/裸金属)
 │   │   ├── 01_k8s_passwordless.sh  # SSH 免密
 │   │   ├── 02_k8s_workerbm.sh      # worker 节点离线装包(全部 worker)

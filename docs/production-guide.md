@@ -138,9 +138,9 @@ API_EXTERNAL_ADDR 非空 ───────────────→ extern
 | `vip` | `KUBE_VIP_ENABLED=true`(±`K8S_API_VIP`) | kube-vip 浮动 VIP | 本地代理仍生效 |
 | `node` | 都不设(默认) | **第一台 master(单点)** | 本地代理仍生效 |
 
-> ⚠ **互斥是硬失败,不是警告**:`API_EXTERNAL_ADDR` 与 `KUBE_VIP_ENABLED=true` 同时给、
-> 或 `KUBE_VIP_ENABLED=true` 与 `HAPROXY_ENABLED`/`KEEPALIVED_ENABLED` 同时给,部署会**在入口校验处直接停住**。
-> 理由:三者都在争"入口地址"的解释权,同时开是确定性配置冲突。
+> ⚠ **互斥是硬失败,不是警告**:`API_EXTERNAL_ADDR` 与 `KUBE_VIP_ENABLED=true` 同时给,
+> 部署会**在入口校验处直接停住**。理由:两者都在争"入口地址"的解释权,同时开是确定性配置冲突。
+> (原 HAProxy+Keepalived 第三方案 已于 2026-10-14 整块移除, 不再参与互斥校验。)
 
 #### 入口地址如何被全网感知(域名 + `/etc/hosts`)
 

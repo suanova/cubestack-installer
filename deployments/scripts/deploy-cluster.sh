@@ -12,7 +12,7 @@
 #   03_addon/  阶段三: 附加组件(集群部署后: GPU/LWS/Harbor/Ceph/P2/P3)
 #
 # 模块(stages):
-#   env 阶段:  vm_network vm_sshkey vm_create harbor lb_haproxy lb_keepalived
+#   env 阶段:  vm_network vm_sshkey vm_create harbor
 #   k8s 阶段:  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp
 #              k8s_deploy(默认关) k8s_scale(默认关)
 #   addon 阶段: gpu_operator gpu_lws k8s_registry ceph ceph_csi ceph_backup
@@ -61,7 +61,7 @@ usage() {
    仅基座用 --with-k8s, 单个立即部署用 --steps。虚拟机创建由 tools/vm/create-vms.sh 独立执行。
 
 阶段目录与模块(自动发现):
-  01_env  vm_network vm_sshkey vm_create harbor lb_haproxy lb_keepalived
+  01_env  vm_network vm_sshkey vm_create harbor
           (默认执行 vm_sshkey; vm_network 默认关 — 宿主网络初始化改由 tools/vm/create-vms.sh 创建 VM 时自动执行; vm_create 默认关 — 虚拟机创建由 tools/vm/create-vms.sh 独立执行)
   02_k8s  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp           (默认执行)
           k8s_deploy(默认关, --with-k8s)  k8s_scale(默认关, --with-scale)
@@ -124,7 +124,7 @@ $(_component_meta_list stub)
   --with-k8s            仅部署 kubespray 基座: k8s_deploy + kubespray 内置 addon(metallb/local-path/registry)
                         不含任何 operator(= --enable k8s, 并跳过全部 operator)
   --with-cubestack      全量部署: = 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主)
-                        (如设 GPU_OPERATOR_ENABLED=true 即部署 gpu_operator; lb_haproxy/lb_keepalived 默认 false)
+                        (如设 GPU_OPERATOR_ENABLED=true 即部署 gpu_operator)
   --with-scale          仅执行 k8s_scale 扩容模块(不连带 operator/已部署组件): 登录首个 master 核对
                         实际集群节点 → 自动 diff 新节点(新节点先写入 cluster.conf)→ 仅对新节点
                         环境准备/装包/NTP/registry → 更新 inventory(new_node 组)→ cubestack-offline scale
@@ -177,11 +177,10 @@ while [ $# -gt 0 ]; do
         --list)     LIST=1; shift ;;
         --list-steps) LIST_STEPS=1; shift ;;
         # --with-k8s: 仅 kubespray 基座(k8s + metallb/local-path/registry), 不含任何 operator
-        --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; SKIP_ARG="${SKIP_ARG},gpu_operator,gpu_lws,lb_haproxy,lb_keepalived,ceph,ceph_csi,keycloak,kueue,kubevirt,lustre_csi,cubestack_apps"; shift ;;
+        --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; SKIP_ARG="${SKIP_ARG},gpu_operator,gpu_lws,ceph,ceph_csi,keycloak,kueue,kubevirt,lustre_csi,cubestack_apps"; shift ;;
         # --with-scale: 仅扩容模块(k8s_scale), 不连带 operator/外层重复模块 —— 见下方 SCALE_ONLY 过滤
         --with-scale) ENABLE_ARG="${ENABLE_ARG},scale"; SCALE_ONLY=1; shift ;;
         # --with-cubestack = 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主, 不强制启用)
-        #   lb_haproxy/lb_keepalived 默认 false, 需要时在 cluster.conf 设 true 或 --enable
         --with-cubestack) ENABLE_ARG="${ENABLE_ARG},k8s"; shift ;;
         --steps)    STEPS_ARG="${2:?--steps 需要模块列表, 逗号分隔}"; shift 2 ;;
         --skip)     SKIP_ARG="${2:?--skip 需要模块列表, 逗号分隔}"; shift 2 ;;

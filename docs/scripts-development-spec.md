@@ -223,8 +223,6 @@ load_config
 | `K8S_SCALE_ENABLED` | `false` | `k8s_scale` 模块 | 扩容 |
 | `GPU_OPERATOR_ENABLED` | `false` | `gpu_operator` 模块 | 沐曦 GPU Operator |
 | `LWS_ENABLED` | `false` | `gpu_lws` 模块 | LeaderWorkerSet |
-| `HAPROXY_ENABLED` | `false` | `lb_haproxy` 模块 | API 四层负载均衡(部署前准备) |
-| `KEEPALIVED_ENABLED` | `false` | `lb_keepalived` 模块 | API VIP 高可用(部署前准备) |
 
 > 镜像仓库双定位:集群外 = Harbor(`HARBOR_ENABLED`,唯一方案);集群内 = kubespray registry addon(`REGISTRY_ENABLED`,默认不部署)。
 > addons.yml 的组件开关由 `sync-addons-config.sh` 从上述变量生成(幂等),其余组件配置(地址池/存储类等)保留在 addons.yml 手工维护。
