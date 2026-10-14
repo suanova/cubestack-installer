@@ -216,3 +216,27 @@ dev-lab  harbor.isuanova.com/suanova/jupyter-cuda-pytorch:${DEV_LAB_IMAGE_TAG}
 dev-lab  harbor.isuanova.com/suanova/ssh-ubuntu22.04:${DEV_LAB_IMAGE_TAG}
 dev-lab  harbor.isuanova.com/suanova/ssh-maca-pytorch:${DEV_LAB_IMAGE_TAG}
 dev-lab  harbor.isuanova.com/suanova/ssh-cuda-pytorch:${DEV_LAB_IMAGE_TAG}
+
+# ------------------------------------------------------------
+# [group: nvidia-gpu-operator] NVIDIA GPU Operator(v26.7.2; chart 渲染提取口径)
+#   目录: deployments/offline-files/nvidia-gpu-operator/(tar 由 tools/images/nvidia-save-images.sh 生成)
+#   ⚠ 版本口径: 组件 tag 与 chart 版本(NVIDIA_GPU_OPERATOR_VERSION)耦合, 升级 chart 时同步核改;
+#     gpu-operator 本体用 ${NVIDIA_GPU_OPERATOR_VERSION}; 驱动用"分支-内核"参数化(预编译模式)。
+#   ⚠ 驱动: nvcr.io/nvidia/driver:${NVIDIA_GPU_DRIVER_BRANCH}-${NVIDIA_GPU_DRIVER_PRECOMPILED_KERNEL}-ubuntu22.04
+#     —— 内核必须恰在 NGC 预编译覆盖列表(module 有门禁); 多内核环境照格式手工补行。
+#   ⚠ NFD 不在此组: registry.k8s.io/nfd/node-feature-discovery 已登记于 k8s-base 组(同 ref, 避免重复);
+#     operator 自带的 NFD 镜像 tar 仍由 nvidia-save-images.sh 收进本组目录(部署模块按需推送)。
+#   ⚠ 后 4 条为沙箱/vGPU 边缘组件(全局开关默认关, 模块保守备料防启用时缺料); 默认部署不会被拉起。
+# ------------------------------------------------------------
+nvidia-gpu-operator  nvcr.io/nvidia/gpu-operator:${NVIDIA_GPU_OPERATOR_VERSION}
+nvidia-gpu-operator  nvcr.io/nvidia/k8s/container-toolkit:v1.20.1
+nvidia-gpu-operator  nvcr.io/nvidia/k8s-device-plugin:v0.20.1
+nvidia-gpu-operator  nvcr.io/nvidia/k8s/dcgm-exporter:4.6.1-4.8.4-distroless
+nvidia-gpu-operator  nvcr.io/nvidia/cloud-native/k8s-mig-manager:v0.15.1
+nvidia-gpu-operator  nvcr.io/nvidia/cloud-native/k8s-driver-manager:v0.12.1
+nvidia-gpu-operator  nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0-ubuntu22.04
+nvidia-gpu-operator  nvcr.io/nvidia/driver:${NVIDIA_GPU_DRIVER_BRANCH}-${NVIDIA_GPU_DRIVER_PRECOMPILED_KERNEL}-ubuntu22.04
+nvidia-gpu-operator  nvcr.io/nvidia/cloud-native/k8s-cc-manager:v0.4.4
+nvidia-gpu-operator  nvcr.io/nvidia/cloud-native/nvidia-sandbox-device-plugin:v0.0.5
+nvidia-gpu-operator  nvcr.io/nvidia/cloud-native/vgpu-device-manager:v0.5.1
+nvidia-gpu-operator  nvcr.io/nvidia/kubevirt-gpu-device-plugin:v1.6.0

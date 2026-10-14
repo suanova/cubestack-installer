@@ -10,13 +10,15 @@
 #   · 单节点集群(仅 1 个 master + 0 个 worker): 无跨节点时间同步需求, **跳过 NTP**。
 #   · 显式 NTP_SERVER 仍可覆盖(用户指定权威时间源, 如公司内 NTP)。
 #   · 应用时对偏差 >1s 的节点一次性 date -s @权威epoch 硬对齐(即使 NTP 传输失败也保证部署时刻一致)
+#   · 节点→权威 IP 可达性预检(2026-10-14 扩容事故新增): ping 不通即硬失败并给出明确诊断 ——
+#     节点与权威不在可达网段时, 硬对齐/重对齐都不可能真正兜住, 早失败早定位(禁 ICMP 环境可 NTP_REACH_CHECK=0)
 #   · 校验: 各节点与权威(第一个 master)偏差 ≤ NTP_MAX_OFFSET_MS, 超限退出码 1 → 部署在 kubespray 前中止
 # 用法:
 #   sudo ./setup-ntp.sh            # apply: 首master chrony服务端 + 各节点配置 + 硬对齐 + 校验(幂等)
 #   sudo ./setup-ntp.sh --check    # 仅校验当前时钟偏差(零写入)
 #   sudo ./setup-ntp.sh --delete   # 关闭节点时间同步服务(幂等)
 # 兼容: ONLY_HOSTS(部署框架 / modules/02_k8s/05_k8s_ntp.sh / scale 传入, 只处理指定节点)
-# 数据源: config/cluster.conf (NTP_ENABLED/NTP_SERVER/NTP_UPSTREAM/NTP_ALLOW/NTP_MAX_OFFSET_MS/NODES)
+# 数据源: config/cluster.conf (NTP_ENABLED/NTP_SERVER/NTP_UPSTREAM/NTP_ALLOW/NTP_MAX_OFFSET_MS/NTP_REACH_CHECK/NODES)
 # ============================================================
 set -euo pipefail
 
@@ -67,6 +69,9 @@ fi
 # 权威时间源 = 显式 NTP_SERVER, 否则第一个 master(不再用宿主机 HOST_PHYS_IP)
 NTP_AUTHORITY="${NTP_SERVER:-${FIRST_MASTER_IP}}"
 NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"
+# ★ 2026-10-14: 节点→权威 IP 可达性预检开关(默认开)。仅"环境禁节点间 ICMP 但 NTP(UDP123) 可达"
+#   这类特殊口径才置 0(先人工确认再关); 关闭后回到旧行为(靠硬对齐兜底 + 偏差校验收尾)。
+NTP_REACH_CHECK="${NTP_REACH_CHECK:-1}"
 
 say "NTP 时间同步(权威=${NTP_AUTHORITY}${NTP_SERVER:+[NTP_SERVER]}${NTP_SERVER:+[首master]}, 动作=${ACTION}, 阈值=${NTP_MAX_OFFSET_MS}ms) ..."
 
@@ -92,6 +97,19 @@ node_scp() {
     [ -n "${pw}" ] || return 1
     SSHPASS="${pw}" sshpass -e scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=8 "$l" "${u}@${ip}:${r}"
+}
+
+# 节点→权威 IP 通路探测(<ip> <user> <pw>)。
+# 返回码: 0=可达 / 1=SSH 通但 ping 权威不通 / 2=SSH 不通(节点本身连不上)。
+# ★ 2026-10-14 扩容事故(worker13, VM 网络接入缺陷): 节点与权威完全无 IP 通路时, 旧行为是
+#   反复"硬对齐 + 复测仍偏差超限"(6.5s→2.5s)的误导链, 完全掩盖真实故障。预检把它变成一条明确诊断。
+# 口径: ping 有应答即算可达 —— 本平台 proxy-ARP fabric 上健康节点间 ICMP 实测可通(见 docs/troubleshooting.md §一.3);
+#   若环境确属"仅禁 ICMP 而不禁 NTP", 置 NTP_REACH_CHECK=0 关闭本预检后重跑。
+authority_reachable_from() {
+    [ "${NTP_REACH_CHECK}" = "1" ] || return 0
+    local ip="$1" u="$2" pw="$3"
+    node_cmd "${ip}" "${u}" "${pw}" "true" >/dev/null 2>&1 || return 2
+    node_cmd "${ip}" "${u}" "${pw}" "ping -n -c 2 -W 2 ${NTP_AUTHORITY} >/dev/null 2>&1" >/dev/null 2>&1
 }
 
 # ---------- 解析节点列表(ip:user:pw:hostname) ----------
@@ -398,6 +416,19 @@ verify_clocks() {
         local ip rest u pw hn
         ip="${e%%:*}"; rest="${e#*:}"; u="${rest%%:*}"; rest="${rest#*:}"; pw="${rest%%:*}"; rest="${rest#*:}"; hn="${rest%%:*}"
         node_matches "${hn}" || continue
+        # ★ 2026-10-14: 节点→权威 IP 通路预检(与 apply 同一口径)。--check 模式由此获得明确诊断,
+        #   不再把"无 IP 通路"呈现为"无法读取时钟"/"偏差超限"这类指向错误方向的报错。
+        local _rr=0
+        authority_reachable_from "${ip}" "${u}" "${pw}" || _rr=$?
+        if [ "${_rr}" -ne 0 ]; then
+            if [ "${_rr}" -eq 2 ]; then
+                err "  ${hn}(${ip}) SSH 不可达 —— 检查密钥/密码/节点状态"
+            else
+                err "  ${hn}(${ip}) 与 NTP 权威 ${NTP_AUTHORITY} 无 IP 通路(ping 不通) —— 检查该节点虚拟网络接入(与正常节点对比; 见 setup-ntp.sh 2026-10-14 注释)"
+            fi
+            FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
+            continue
+        fi
         off="$(clock_offset "${ip}" "${u}" "${pw}")"
         if [ "${off}" -eq -1 ]; then
             warn "  ${hn}(${ip}) 无法读取时钟(SSH/sudo 失败?)"
@@ -409,17 +440,33 @@ verify_clocks() {
                 warn "  ${hn}(${ip}) 偏差 ${off}ms ✗(>${NTP_MAX_OFFSET_MS}ms), 自动重对齐并复测 ..."
                 # ★ 2026-09-08 修复: 重对齐基准必须用**权威时钟**(与 apply 主流程一致)——
                 #   旧实现取部署机(installer)时钟, 与权威偏差可能数百 ms, 会把节点设到错误基准
-                local hms
+                local hms _hb _ha _aut
+                # ★ 2026-10-14 修复(扩容实机: 新 VM 偏 6.5s; 重对齐后复测仍 2493ms 失败):
+                #   ① 硬对齐基准 = **采集时刻**的权威 epoch, scp+脚本启动延迟未补偿 ⇒ 落点必然
+                #      偏迟数百 ms~数秒。改为**中点半程补偿**(同 clock_offset 口径; 权威不可达时
+                #      退回控制器时钟, 不做补偿)。
+                _hb="$(date +%s%3N)"
                 if [ -n "${NTP_SERVER:-}" ]; then
-                    hms="$(node_cmd "${NTP_SERVER}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || date +%s%3N)"
+                    _aut="$(node_cmd "${NTP_SERVER}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
                 else
-                    hms="$(node_cmd "${FIRST_MASTER_IP}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || date +%s%3N)"
+                    _aut="$(node_cmd "${FIRST_MASTER_IP}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
                 fi
+                _ha="$(date +%s%3N)"
+                if [ -n "${_aut}" ]; then hms=$(( _aut + (_ha - _hb) / 2 )); else hms="$(date +%s%3N)"; fi
                 if node_scp "${NODE_SCRIPT}" "${ip}" "${u}" "${pw}" "${REMOTE_SCRIPT}" \
                     && node_cmd "${ip}" "${u}" "${pw}" "bash ${REMOTE_SCRIPT} apply ${hms}" >/dev/null 2>&1; then
-                    sleep 1
-                    off="$(clock_offset "${ip}" "${u}" "${pw}")"
+                    #   ② 旧实现复测只等 1s: chrony 客户端首个 iburst 样本还没到, 尚未自我纠正。
+                    #      改为**有界收敛等待**(每 5s 复测, ≤6 次): 正常节点一两个 NTP 样本内步进到
+                    #      ms 级直接通过; 真故障节点仍在 ~40s 内有界失败。
+                    off=-1
+                    for _t in 1 2 3 4 5 6; do
+                        sleep 5
+                        off="$(clock_offset "${ip}" "${u}" "${pw}")"
+                        if [ "${off}" -ne -1 ] && [ "${off}" -le "${NTP_MAX_OFFSET_MS}" ]; then break; fi
+                    done
+                    unset _t
                 fi
+                unset _hb _ha _aut
                 if [ "${off}" -eq -1 ] || [ "${off}" -gt "${NTP_MAX_OFFSET_MS}" ]; then
                     warn "  ${hn}(${ip}) 复测仍偏差 ${off}ms ✗(>${NTP_MAX_OFFSET_MS}ms)"
                     FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
@@ -479,6 +526,7 @@ case "${ACTION}" in
     apply)
         master_chrony_setup
         say "下发并执行节点时间同步(chrony/timesyncd + 一次性硬对齐, 权威=${NTP_AUTHORITY}) ..."
+        REACH_FAIL=""
         for e in "${NODE_ENTRIES[@]:-}"; do
             ip="${e%%:*}"; rest="${e#*:}"; u="${rest%%:*}"; rest="${rest#*:}"; pw="${rest%%:*}"; rest="${rest#*:}"; hn="${rest%%:*}"
             node_matches "${hn}" || continue
@@ -488,13 +536,36 @@ case "${ACTION}" in
                 ok "  ${hn}(${ip}) 为 NTP 权威(首 master), 跳过自我同步"
                 continue
             fi
+            # ★ 2026-10-14 扩容事故(worker13): 节点↔权威无 IP 通路时, 同步/硬对齐都不可能建立,
+            #   旧流程还会拖进 verify 的"重对齐+复测"表演。此处提前点名, 跳过该节点的同步尝试,
+            #   循环后统一硬失败(不再浪费 40s 收敛等待)。
+            _rr=0
+            authority_reachable_from "${ip}" "${u}" "${pw}" || _rr=$?
+            if [ "${_rr}" -ne 0 ]; then
+                if [ "${_rr}" -eq 2 ]; then
+                    err "  ${hn}(${ip}) SSH 不可达 —— 检查密钥/密码/节点状态后重跑"
+                else
+                    err "  ${hn}(${ip}) 与 NTP 权威 ${NTP_AUTHORITY} 无 IP 通路(ping 不通) —— 时间同步不可能建立, 该节点接入集群后同样不可用"
+                    err "    典型原因: 该 VM 的网络接入与集群其余节点不同段/被隔离(2026-10-14 扩容实机案例);"
+                    err "    排查: 在该节点手工 ping ${NTP_AUTHORITY}(并反向 ping), 与正常节点的虚拟网络配置对比;"
+                    err "    若环境仅禁 ICMP 而 NTP(UDP123) 可达: 置 NTP_REACH_CHECK=0 关闭本预检"
+                fi
+                REACH_FAIL="${REACH_FAIL}${hn} "
+                continue
+            fi
             # 一次性硬对齐基准: 权威时钟 epoch。显式 NTP_SERVER 时用其 epoch;
             # 否则用首 master 的 epoch(权威), 不再用宿主机(installer)时钟。
+            # ★ 2026-10-14: 采样加**中点半程补偿**(消除 SSH RTT 偏迟; scp+脚本启动的小段残余
+            #   延迟由 verify_clocks 的收敛等待窗口吸收)。
+            _hb="$(date +%s%3N)"
             if [ -n "${NTP_SERVER:-}" ]; then
-                HOST_MS="$(node_cmd "${NTP_SERVER}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || date +%s%3N)"
+                _aut="$(node_cmd "${NTP_SERVER}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
             else
-                HOST_MS="$(node_cmd "${FIRST_MASTER_IP}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || date +%s%3N)"
+                _aut="$(node_cmd "${FIRST_MASTER_IP}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
             fi
+            _ha="$(date +%s%3N)"
+            if [ -n "${_aut}" ]; then HOST_MS=$(( _aut + (_ha - _hb) / 2 )); else HOST_MS="$(date +%s%3N)"; fi
+            unset _hb _ha _aut
             if node_scp "${NODE_SCRIPT}" "${ip}" "${u}" "${pw}" "${REMOTE_SCRIPT}"; then
                 node_cmd "${ip}" "${u}" "${pw}" "bash ${REMOTE_SCRIPT} apply ${HOST_MS}" >/dev/null 2>&1 \
                     && ok "  ${hn}(${ip}) 时间已同步" || warn "  ${hn}(${ip}) 配置失败(检查密钥/密码)"
@@ -502,6 +573,11 @@ case "${ACTION}" in
                 warn "  ${hn}(${ip}) 无法上传脚本(检查密钥/密码)"
             fi
         done
+        if [ -n "${REACH_FAIL}" ]; then
+            err "存在无法与权威建立通路的节点: ${REACH_FAIL}(原因见上); 网络修复前时间同步不可能成功, 已提前终止"
+            rm -f "${NODE_SCRIPT}"
+            exit 1
+        fi
         echo "---------------------------------------------"
         AUTO_SYNC_ON_FAIL=1 verify_clocks || exit $?
         rm -f "${NODE_SCRIPT}"
