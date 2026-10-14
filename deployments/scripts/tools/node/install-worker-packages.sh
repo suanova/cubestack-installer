@@ -122,6 +122,19 @@ declare -A NEED_SET
 for f in "${DEBS[@]}"; do
     pkg="$(deb_pkg_name "$f")"
     [ -n "${pkg}" ] || { warn "无法解析 deb 包名: $(basename "$f"), 跳过"; continue; }
+    # ★ 2026-10-14 重构(P0): 互斥提供者判定改为共享表(lib-common::pkg_conflict_providers,
+    #   与节点侧 _pkg_conflict_providers 同步; 夹具断言两处一致)—— 不再手写单个包名。
+    #   语义: 本工具只"补缺"; 若待装包的互斥提供者任一已装 → 跳过(保持节点既有口径 ——
+    #   如 VM 黄金镜像带 chrony 时跳过 timesyncd)。实机血证: 10-14 直接装 timesyncd
+    #   撞 dpkg "conflicts with time-daemon" 整批中止。
+    _cp_conflict=0
+    for _cp in $(pkg_conflict_providers "${pkg}"); do
+        [ -n "${REMOTE_VER[${_cp}]:-}" ] && { _cp_conflict=1; break; }
+    done
+    if [ "${_cp_conflict}" = "1" ]; then
+        warn "  [${pkg}] 节点已装互斥提供者(time-daemon 系只允许一个), 跳过(保持既有口径)"
+        continue
+    fi
     if [ -n "${REMOTE_VER[${pkg}]:-}" ]; then
         vlog "  [${pkg}] 已装 ${REMOTE_VER[${pkg}]}(离线包不重复装), 跳过"
         continue

@@ -609,7 +609,7 @@ fi
 #   (补丁层 / 收编映射 / 入口模式 / 本地代理)现在每轮 check-modules 都会跑到。
 for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-api-entry-mode.sh test-api-local-lb.sh test-sync-api-entry.sh \
-           test-kubespray-version-select.sh; do
+           test-kubespray-version-select.sh test-deb-install-lib.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
     if [ ! -f "${_tp}" ]; then
         ck_fail "⑮ 离线套件缺失: ${_tp#${REPO_ROOT}/}(⑮ 的回归证据没了)"

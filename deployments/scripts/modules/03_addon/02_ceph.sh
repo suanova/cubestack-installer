@@ -99,6 +99,20 @@ node_ssh() {
         "${_nuser}@${_nip}" "$@"
 }
 
+# nbd 残留清理(共享: [3/8] 首防线 + [7/8] 自愈重放; 2026-10-14 实机根因)。
+# 机制: ceph-volume inventory 会枚举**整机 /sys/block** 建 udev 数据; 节点上"已加载但零会话"的
+#   nbd0..15 取不到 udev 数据 ⇒ 整个 ceph-volume 调用崩溃 ⇒ rook 判**全部盘**"无法确认可用"
+#   ⇒ 0 OSD、HEALTH_WARN 永不 OK(实机: 10.66.3.214 集群)。卸载后同一套盘点立刻成功。
+# ⚠ 黑名单只挡别名自动加载, **挡不住显式 modprobe**(实机: 清理后 nbd 在一小时后又被载入)——
+#   故 [7/8] 自愈时必须**重放本清理**再重建 prepare。
+# 安全口径: 仅当 nbd 零引用(/sys/module/nbd/refcnt=0, 无活跃会话)才卸载 + 持久黑名单;
+#   有引用/refcnt 不可读 → 只告警不动(防误伤真实 nbd 用户)。
+# 输出: CLEARED / IN-USE / ABSENT / ?(未知)
+_ceph_nbd_clear_one() {  # <ip> <user>
+    ( (node_ssh "$1" "$2" \
+        "if lsmod | grep -q '^nbd '; then if [ \"\$(cat /sys/module/nbd/refcnt 2>/dev/null)\" = '0' ]; then sudo modprobe -r nbd 2>/dev/null; echo 'blacklist nbd' | sudo tee /etc/modprobe.d/blacklist-nbd.conf >/dev/null; echo CLEARED; else echo IN-USE; fi; else echo ABSENT; fi" 2>/dev/null || true) )
+}
+
 # ---------------- 派生变量(全部来自 cluster.conf) ----------------
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
 CEPH_VERSION="${CEPH_VERSION:-v20.2.2}"
@@ -400,6 +414,12 @@ for _hn in "${CEPH_NODE_HOSTS[@]}"; do
     # 4a. rbd 内核模块(立即加载 + 持久化)
     node_ssh "${_ip}" "${_user}" "sudo modprobe rbd 2>/dev/null; grep -q '^rbd' /etc/modules-load.d/rbd.conf 2>/dev/null || echo 'rbd' | sudo tee /etc/modules-load.d/rbd.conf >/dev/null" \
         && ok "    rbd 内核模块就绪" || warn "    rbd 模块加载失败(VM 内核需支持, 检查 modprobe rbd)"
+    # 4a-bis. nbd 残留清理(首防线; 机制/安全口径见 _ceph_nbd_clear_one 注释)。[7/8] 自愈会重放。
+    case "$(_ceph_nbd_clear_one "${_ip}" "${_user}")" in
+        CLEARED) ok "    nbd 残留已清理并持久黑名单(ceph-volume inventory 崩溃根因, 实机 2026-10-14)" ;;
+        IN-USE)  warn "    nbd 模块有活跃引用(未动) —— 若有真实 nbd 用户属预期; 若后续 OSD 为 0 请人工核查" ;;
+        *)       : ;;
+    esac
     # 4b. lvm2: 检测缺失 → 从离线 packages 安装(install-worker-packages.sh 含 offline-files/os/packages)
     if ! node_ssh "${_ip}" "${_user}" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1; then
         say "    lvm2 缺失, 从离线 .deb 安装(packages 目录, 由 fetch-lvm-packages.sh 生成)..."
@@ -652,8 +672,13 @@ else
                 [ -n "${_ip}" ] || continue
                 for _d in ${NODE_DISKS[${_hn}]//,/ }; do
                     say "  wipe ${_hn} ${_d}(官方 zap-device 清 label 副本 + 头/分区表/尾, 逐处校验)..."
+                    # ⚠ 2026-10-13 实机修复: 内层 `bash -c` 是**独立子壳** —— 外层 `bash -s` 里
+                    #   remote_lib 定义的函数/变量不会自动继承。原来只 declare 了 bluestore_wipe_dev,
+                    #   导致子壳里 `_bstore_offsets: command not found`(候选偏移 dd 整段静默跳过)、
+                    #   `_BSTORE_IMG` 为空(官方 zap 也被跳过)—— ② 只剩 wipefs+校验在跑。现补全:
+                    #   函数一并 declare(远端展开)、镜像 ref 以环境前缀随调用注入(值无引号/空格, 安全)。
                     node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo bash -s -- ${_d}" \
-                        <<< "$(bluestore_wipe_remote_lib; printf '\ntimeout -k 10 600 bash -c "$(declare -f bluestore_wipe_dev); bluestore_wipe_dev $1 || exit 1" _ "$1" || exit 1\n')" \
+                        <<< "$(bluestore_wipe_remote_lib; printf '\ntimeout -k 10 600 bash -c "$(declare -f _bstore_offsets bluestore_wipe_dev); _BSTORE_IMG="${_BSTORE_IMG}" bluestore_wipe_dev $1 || exit 1" _ "$1" || exit 1\n')" \
                         && ok "    ${_hn} ${_d} 已彻底清空(无 bluestore label 残留)" \
                         || { warn "    ${_hn} ${_d} 清盘未通过校验(上方已打印残留偏移)"; _WIPE_FAIL="${_WIPE_FAIL} ${_hn}:${_d}"; }
                 done
@@ -818,6 +843,7 @@ rm -f "${LOCAL_CR}"
     say "[7/8] 等待 Ceph 集群就绪(最长 900s, ceph -s HEALTH_OK)..."
     CLUSTER_OK=0
     _CEPH_TUNED=0   # 阈值预调优标记(第一次 phase=Ready 时设, 避免 clock skew 卡等待)
+    _CEPH_OSD_RETRIED=0   # 0-OSD 自愈一次性标记(见下方 2026-10-14 修复)
     for i in $(seq 1 90); do
         _ph="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
         if [ "${_ph}" = "Ready" ]; then
@@ -855,6 +881,41 @@ rm -f "${LOCAL_CR}"
                 _osd="$(printf '%s\n' "${_CEPH_SUM}" | grep -E '^\s+osd:' | sed 's/^\s*//' || true)"
                 _pgs="$(printf '%s\n' "${_CEPH_SUM}" | grep -E '^\s+pgs:' | sed 's/^\s*//' || true)"
                 say "  [${i}/90] phase=${_ph} health=${_hl:-unknown}; ${_mon:-mon:?} ${_osd:-osd:?} ${_pgs:-pgs:?}(继续等待)"
+                # ★ 2026-10-14 自愈(实机 0-OSD 事故): phase=Ready 但 OSD 恒为 0 —— osd-prepare
+                #   是**一次性 Job**, 盘点被跳过(如 ceph-volume inventory 因 nbd 残留崩溃)时它
+                #   已 Completed, 单纯等待永远不会出现 OSD。此处**一次性**重触发: 删除已完成的
+                #   osd-prepare Job(按名字 grep, 不依赖 label), operator 会自动重建并重跑盘点
+                #   (前提条件已由 [3/8] 的 nbd 清理等修复)。只做一次, 不与 operator 循环对抗。
+                if [ "${_CEPH_OSD_RETRIED}" = "0" ] && [ "${i}" -ge 6 ] \
+                    && printf '%s' "${_osd}" | grep -q 'osd: 0 osds:'; then
+                    warn "  phase=Ready 但 OSD 恒为 0(>60s): 自愈重放(清 nbd 残留 → 删 prepare Job → 重启 operator)..."
+                    # 完整配方(2026-10-14 实机验证三步, 缺一不可):
+                    #   ① nbd 残留可能被**显式 modprobe**重新载入(黑名单只挡别名自动加载), 自愈需重放清理;
+                    #   ② 删除已完成的 osd-prepare Job(按名字 grep, 不依赖 label);
+                    #   ③ **重启 operator 强制重建** —— 实机: 仅删 Job 时 operator 不会自动重建, 必须踢一步。
+                    _nbd_cleared=0
+                    for _hn2 in "${CEPH_NODE_HOSTS[@]}"; do
+                        _ip2=""; _user2="${SSH_USER:-ubuntu}"
+                        for line in "${NODES[@]:-}"; do
+                            [ -z "${line}" ] && continue
+                            node_parse "${line}"
+                            [ "${NODE_HOSTNAME}" = "${_hn2}" ] && { _ip2="${NODE_IP}"; _user2="${NODE_USER}"; break; }
+                        done
+                        [ -n "${_ip2}" ] || continue
+                        case "$(_ceph_nbd_clear_one "${_ip2}" "${_user2}")" in
+                            CLEARED) warn "    ${_hn2}: nbd 残留已重放清理"; _nbd_cleared=$((_nbd_cleared + 1)) ;;
+                            IN-USE)  warn "    ${_hn2}: nbd 有活跃引用(未动, 需人工核查)" ;;
+                            *) : ;;
+                        esac
+                    done
+                    for _pj in $( (SSH "${K} -n ${CEPH_NAMESPACE} get jobs -o name 2>/dev/null" || true) | grep osd-prepare || true); do
+                        SSH "${K} -n ${CEPH_NAMESPACE} delete ${_pj} --ignore-not-found >/dev/null 2>&1" || true
+                    done
+                    SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-operator >/dev/null 2>&1" || true
+                    warn "    自愈重放完成(nbd 清理 ${_nbd_cleared} 台); operator 重建 prepare 后应出现 OSD"
+                    unset _hn2 _ip2 _user2 _pj _nbd_cleared
+                    _CEPH_OSD_RETRIED=1
+                fi
             fi
         elif [ "${i}" -eq 1 ] || [ $((i % 6)) -eq 0 ]; then
             say "  [${i}/90] phase=${_ph:-未知}(尚未 Ready, 继续等待)..."
