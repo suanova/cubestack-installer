@@ -60,17 +60,28 @@ SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-nodePort}"
 # ╔════════════════════════════════════════════════════════════════════════╗
 # ║ ★ 高频 / 必改变量区(2026-10-08 前置: 改动最频繁/部署前须核对的项从各分组上移) ║
 # ╠════════════════════════════════════════════════════════════════════════╣
+# ║ ⓪ 在线安装        在线部署 Operator: 开关 + 其 Harbor 凭据(在线=从 Harbor 恒拉)  ║
 # ║ ④ Harbor 凭据    私有项目(chart/镜像)拉取; 留空=匿名                     ║
 # ║ ⑤ CUBESTACK_OPERATOR_*  平台 Operator: 滚动 chart/镜像 tag、CR 开关、凭据 ║
 # ║ ⑥ 版本基线       KUBESPRAY_VERSION / K8S_VERSION(升级时改; 建议走 profile)║
 # ╚════════════════════════════════════════════════════════════════════════╝
 #
+# ---- ⓪ 在线安装(平台 Operator; 2026-10-14 与 Harbor 凭据合并成组) ----
+#   ⚠ 在线安装(Harbor 可达集群)必须配置下面的 Harbor 用户名/密码 —— 模块会用它自动创建
+#     harbor-credentials secret 供节点认证拉取私有镜像。
+#   ONLINE_DEPLOY_CUBESTACK_OPERATOR=true = 在线部署: 镜像按 chart 定义(harbor.isuanova.com/**,
+#     不覆盖不搬运)直接拉取, operator 与 CR 组件恒 pullPolicy=Always(滚动 :latest 恒跟随最新);
+#     不推集群 registry、不注入镜像前缀; 节点必须能访问 Harbor。
+#   false(默认) = 离线部署: 离线 tar → 集群内置 registry → 节点只从内置 registry 拉(不访问 Harbor/公网)。
+CUBESTACK_OPERATOR_HARBOR_USER="${CUBESTACK_OPERATOR_HARBOR_USER:-clquan}"
+CUBESTACK_OPERATOR_HARBOR_PASSWORD="${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-EErMChQa123}"
+ONLINE_DEPLOY_CUBESTACK_OPERATOR="${ONLINE_DEPLOY_CUBESTACK_OPERATOR:-false}"
+#
 # ---- ④ Harbor 凭据(部署前核对; 私有化环境必填) ----
 #   (原 3.2 / 4.6b 分组处的同定义已上移本区, 原位置留指针; mirrors 项目公开只读时可留空)
 HARBOR_MIRROR_USER="${HARBOR_MIRROR_USER:-}"                  # (可选)留空=匿名拉取(该项目公开只读)
 HARBOR_MIRROR_PASSWORD="${HARBOR_MIRROR_PASSWORD:-}"          # Harbor 密码/token(本文件已 gitignore, 勿提交)
-CUBESTACK_OPERATOR_HARBOR_USER="${CUBESTACK_OPERATOR_HARBOR_USER:-}"
-CUBESTACK_OPERATOR_HARBOR_PASSWORD="${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}"
+# → CUBESTACK_OPERATOR_HARBOR_USER / CUBESTACK_OPERATOR_HARBOR_PASSWORD 已与在线安装开关合并, 见上方 ⓪ 组
 
 # ---- ⑤ CUBESTACK_OPERATOR(平台 Operator; 滚动 tag 频繁更新) ----
 CUBESTACK_OPERATOR_CHART_VERSION="${CUBESTACK_OPERATOR_CHART_VERSION:-1.0.0-latest}"  # 滚动版本(与镜像 :latest 配套)
@@ -83,13 +94,9 @@ KUBESPRAY_VERSION="${KUBESPRAY_VERSION:-}"
 K8S_VERSION="${K8S_VERSION:-v1.35.8}"                    # kube-apiserver/controller-manager/scheduler/proxy
 
 # ---- 阶段一、宿主机环境 ----
-# ⚠ API 入口高可用二选一(由代码强制互斥, 同时开启会硬失败):
-#     kube-vip  : 不占额外机器, VIP 跑在各 master 上(默认**关**, 需显式 KUBE_VIP_ENABLED=true)
-#     HAProxy+Keepalived: 需要 2 台专职 LB 机器才成立, 且现有实现是单机 VIP 非真 HA(见 docs/kube-vip-api-ha.md)
-HAPROXY_ENABLED="${HAPROXY_ENABLED:-false}"             # API 四层负载均衡(modules/01_env/05_lb_haproxy.sh; 默认 master 直连, 需要时开)
-                                                        #   ⚠ 在 HAProxy 所在服务器上执行本模块(持久化机器), 非临时 installer 服务器(装完即删)
-KEEPALIVED_ENABLED="${KEEPALIVED_ENABLED:-false}"       # API VIP 高可用(modules/01_env/06_lb_keepalived.sh)
-                                                        #   ⚠ 当前实现 state/priority/virtual_router_id 均写死 = 单机 VIP, 多机同时跑会双主脑裂
+# ⚠ API 入口高可用: kube-vip —— 不占额外机器, VIP 跑在各 master 上(默认**关**, 需显式 KUBE_VIP_ENABLED=true;
+#   详见 docs/kube-vip-api-ha.md)。
+#   (原 HAProxy+Keepalived 方案已于 2026-10-14 整块移除 —— 采用该方案可能性不大; 决策历史见上述文档)
 HARBOR_ENABLED="${HARBOR_ENABLED:-false}"               # Harbor 外部镜像仓库(预留, 见 1.7)
 
 # ---- 阶段二、kubespray 基座 ----
@@ -99,7 +106,6 @@ K8S_ENABLED="${K8S_ENABLED:-false}"                     # 部署 kubespray 基�
 K8S_SCALE_ENABLED="${K8S_SCALE_ENABLED:-false}"         # 扩容模块(modules/02_k8s/07_k8s_scale.sh, = --with-scale)
 METALLB_ENABLED="${METALLB_ENABLED:-true}"              # MetalLB 负载均衡(依赖 3.1 地址池; 需 strict_arp)
 # API Server VIP 高可用(kubespray 原生 kube-vip 静态 Pod, 见 docs/kube-vip-api-ha.md)
-#   · 与 HAPROXY_ENABLED / KEEPALIVED_ENABLED 互斥(同时开启硬失败), 详见阶段一注释
 #   · VIP 不在 MetalLB 地址池内(否则会与 LoadBalancer 抢地址, 硬失败)
 #   · 存量集群首次切换入口需显式确认(倒计时窗口), 详见文档第 7 节两阶段流程
 KUBE_VIP_ENABLED="${KUBE_VIP_ENABLED:-false}"           # 默认关: 不部署 kube-vip, API 入口=首个 master(见下)
@@ -126,7 +132,7 @@ KUBE_VIP_CP_DETECT="${KUBE_VIP_CP_DETECT:-false}"       # apiserver 进程级故
                                                         #     → 不再续租 → 租约到期(约 5s)即漂移, 与节点宕机同一量级
                                                         #   代价: 短时抖动可能触发不必要的 VIP 迁移(HTTP 探针, 非 TCP 连通)
 # API 入口来源: 三选一(external > vip > node), 判定见 lib-common.sh#api_entry_mode
-#   · 只认一个来源: 与 KUBE_VIP_ENABLED / HAPROXY_ENABLED / KEEPALIVED_ENABLED 同时给会**硬失败**
+#   · 只认一个来源: KUBE_VIP_ENABLED 与 API_EXTERNAL_ADDR 同时给会**硬失败**
 #   · 三种模式详解 + 兼容矩阵 + 硬校验清单: docs/api-ha/04-decision.md §2
 API_EXTERNAL_ADDR="${API_EXTERNAL_ADDR:-}"              # 环境已有 LB/VIP 地址(与 KUBE_VIP_ENABLED 互斥; 留空=不用)
 # 本地代理(kubespray 原生 nginx-proxy 静态 Pod: 每节点 127.0.0.1:6443 → 全部 master)
@@ -499,10 +505,9 @@ NODE_GROUP_new_node="cubestack-k8s-worker02"
 # 可定义多组, 逗号分隔:
 # NODE_GROUP_gpu_nodes="cubestack-k8s-worker03,cubestack-k8s-worker04"
 
-# ---------------- 1.6 API 负载均衡 / 高可用(依赖: 1.4 节点; 默认关) ----------------
-# API 入口高可用: HAPROXY=四层 LB(默认 master 直连, 需要时开启); KEEPALIVED=VIP(留空取 API 地址)
-# 开关见顶部【组件启停开关】: HAPROXY_ENABLED / KEEPALIVED_ENABLED
-KEEPALIVED_VIP="${KEEPALIVED_VIP:-}"                    # Keepalived VIP(留空=取 APISERVER_ADDRESS)
+# ---------------- 1.6 API 统一入口(域名/地址; 依赖: 1.4 节点) ----------------
+# (原 HAProxy+Keepalived 负载均衡/VIP 方案已于 2026-10-14 整块移除 —— 采用可能性不大;
+#  API 入口高可用改用 kube-vip, 开关在顶部 KUBE_VIP_ENABLED; 决策历史见 docs/kube-vip-api-ha.md)
 # K8s API 统一入口域名(跨网段统一访问, 需本地 /etc/hosts 解析): 会写入 kubespray
 # apiserver_loadbalancer_domain_name + 证书 SAN, 并同步到各节点 /etc/hosts / 宿主机 ~/.kube/config。
 # 留空=默认 k8s-api.cubestack.io; 显式设置则用该域名(如保留 k8s-api.nova.local 老域名)。
@@ -842,14 +847,8 @@ CUBESTACK_OPERATOR_CHART_REF="${CUBESTACK_OPERATOR_CHART_REF:-oci://harbor.isuan
 #   online     = 强制尝试在线刷新(Harbor 不通时降级回退本地副本, 不中断部署)
 #   offline    = 完全不联网(离线机; 也不发起任何探测请求)
 # → CUBESTACK_OPERATOR_CHART_SYNC 已上移至顶部【高频/必改变量区】(2026-10-08)
-# ★ 部署模式切换(2026-10-13 用户口径; 与 CHART_SYNC 正交 —— 后者只管 chart 副本刷新):
-#   true  = **在线部署**: 镜像**按 chart 定义**(harbor.isuanova.com/**, 不覆盖不搬运)直接拉取,
-#           operator 与 CR 组件都恒 pullPolicy=Always(滚动 :latest 永远跟随最新); 私有镜像经
-#           harbor-credentials secret(用 HARBOR_MIRROR_USER/PASSWORD 或 CUBESTACK_OPERATOR_HARBOR_*
-#           凭据自动创建)认证; 不推集群 registry、不注入镜像前缀。
-#   false = **离线部署**(默认): 离线 tar → 推入集群内置 registry → 节点只从内置 registry 拉
-#           (不访问 Harbor/公网); CR 注入 registry 前缀 + digest 钉注。
-ONLINE_DEPLOY_CUBESTACK_OPERATOR="${ONLINE_DEPLOY_CUBESTACK_OPERATOR:-false}"
+# → ONLINE_DEPLOY_CUBESTACK_OPERATOR 已上移至顶部【高频/必改变量区】(2026-10-14;
+#   与 CUBESTACK_OPERATOR_HARBOR_USER/PASSWORD 同组 —— 在线安装从 Harbor 恒拉镜像, 需要凭据)
 # → CUBESTACK_OPERATOR_IMAGE_TAG 已上移至顶部【高频/必改变量区】(2026-10-08)
 # 镜像源优先级(部署时把镜像推进集群内置 registry 的取源方式):
 #   auto(默认) = 在线优先 Harbor(取最新) → 离线 tar → 本地 docker daemon

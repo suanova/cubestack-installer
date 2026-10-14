@@ -32,7 +32,7 @@ chk "node 取首 master" "10.0.0.1" "$(_run 'NODES=("master,m1,10.0.0.1,ubuntu,p
 
 echo "== api_entry_validate_config 互斥 =="
 chk "external + kube-vip → 失败" "1" "$(_run 'API_EXTERNAL_ADDR=10.0.0.9 ; KUBE_VIP_ENABLED=true' 'api_entry_validate_config; echo $?')"
-chk "external + haproxy → 失败" "1" "$(_run 'API_EXTERNAL_ADDR=10.0.0.9 ; KUBE_VIP_ENABLED=false ; HAPROXY_ENABLED=true' 'api_entry_validate_config; echo $?')"
+# (原 "external + haproxy → 失败" 用例随 HAProxy+Keepalived 方案移除, 2026-10-14)
 chk "external 单独 → 通过" "0" "$(_run 'API_EXTERNAL_ADDR=10.0.0.9 ; KUBE_VIP_ENABLED=false' 'api_entry_validate_config; echo $?')"
 chk "非法 IP → 失败" "1" "$(_run 'API_EXTERNAL_ADDR=not-an-ip ; KUBE_VIP_ENABLED=false' 'api_entry_validate_config; echo $?')"
 
