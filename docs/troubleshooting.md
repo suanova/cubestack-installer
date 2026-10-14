@@ -141,6 +141,12 @@ ssh <节点> 'timeout 6 tcpdump -ni manage0 "udp port 8472" &'
 echo x | nc -u <节点IP> 8472
 ```
 
+- **该 fabric 第二形态: MetalLB VIP 的跨段投递也会时通时断(2026-10-14 实机)**: 部署机 → `10.66.3.221:5000`
+  (registry VIP)死(连 ICMP 都回不可达), 而同 registry 的 NodePort(`<master>:30492`)与集群内节点侧 VIP
+  均正常 —— 同一天曾正常工作半小时后变死。**缓解已落**: `08_nvidia_gpu_operator.sh` 的 registry 端点
+  **自适应降级**(VIP 探测不通 → 查 svc 实际 nodePort → 推送/预检全程走它); 其余模块同类需求可照搬
+  (更好归宿 = 下沉 lib-common 的 REGISTRY_DIRECT 派生, 待排)。
+
 ---
 
 ## 二、时间同步
@@ -179,6 +185,59 @@ sudo ss -ulnp | grep ':123 '
 chronyc sources; chronyc tracking
 # 强制重启权威 chrony(手工抢救)
 sudo systemctl restart chrony; sleep 2; chronyc tracking | head -4
+```
+
+### 2. 【2026-10-14 事故】扩容节点 k8s_ntp "偏差超限"(6530ms→重对齐 2493ms)实为 VM 网络接入缺陷: 该节点与权威无 IP 通路
+
+**症状**
+- `--with-scale` 扩容新节点(worker13)跑到 k8s_ntp: 首次"时间已同步"→ 校验偏差 6530ms → 自动重对齐复测仍
+  2493ms → 模块失败, 报"时钟偏差超限"。
+- 该节点(10.66.3.222)上 `timedatectl timesync-status` = `System clock synchronized: no`, 日志反复
+  `Timed out waiting for reply from <权威>`(Packet count 0); 权威 `chronyc clients` 里**从来没有它**。
+
+**根因(证据链, 2026-10-14 现场实测)**
+1. **该 VM 与集群节点二层转发不可用**(平台网络接入缺陷): worker13 → `.213/.214/.215/.216/.203` ping 全 100%
+   丢包(双向); 清 ARP 缓存后它对权威的广播 ARP **应答时有时无**(代理 MAC `00:01:00:01:00:01` / 真实 MAC /
+   无应答), 权威侧 tcpdump **完全看不到它的帧**; 而它 → 网关/.211/互联网/部署机全通。
+2. **对照组**: 同批创建、同样无 chrony 走 timesyncd 的 .216(原名 clq-cubestack-node-1)"Initial
+   synchronization to 10.66.3.214" 正常 → 不是 timesyncd/NTP 配置问题, 唯独 worker13 这台接入异常。
+3. **代码放大**: `setup-ntp.sh` 当时没有"节点→权威"可达性预检(只有 installer→权威 的 SSH 预检, 那条经
+   路由总是通的), 于是一路走"硬对齐兜底 + 复测"——旧版硬对齐基准未补偿链路延迟、复测只等 1s,
+   把"网络黑洞"呈现成"偏差 6530→2493ms"的误导链。
+   ⚠ 平台知识见 §一.3: 该网络是 proxy-ARP/按 IP 转发的 fabric(所有 IP 可能解析到 `00:01:00:01:00:01`),
+   健康节点间 ICMP/NTP 实测可通 —— **单节点全部邻居不可达 + ARP 应答时有时无 = 该 VM 接入/转发状态异常**,
+   不是 fabric 常规行为。
+
+**解法(根治)**
+- **环境侧(主修, 用户当日已完成)**: 在虚拟化平台把该 VM 的网卡改接到与正常节点相同的虚拟网络/端口组
+  (本次实机即扩容 VM 创建时接错网络), 并改址 **10.66.3.204**(原 .222)。判据: 该节点 `ping <权威>`
+  与反向 ping 均稳定通 —— 实机重挂后 timesyncd 首次即同步成功(见"验证")。
+- **代码侧(已落, 2026-10-14)**: `setup-ntp.sh` 新增**节点→权威 IP 通路预检**(`authority_reachable_from`,
+  apply 与 `--check` 两条路径共用): SSH 不通 → "SSH 不可达"; SSH 通但 ping 权威不通 → 明确报"无 IP 通路,
+  检查该 VM 虚拟网络接入"并**提前终止**(不再进入重对齐/收敛等待); 特殊口径(仅禁 ICMP)可
+  `NTP_REACH_CHECK=0` 关闭。另含硬对齐基准中点半程补偿 + 复测改有界收敛等待(≤6×5s)。
+- **配置侧**: 排查中发现 `METALLB_POOL` 曾与节点 IP 重叠(.222 既在池内又是 worker13 节点 IP) —— 池必须
+  排除 `NODES` 中所有节点 IP(.221 已被集群侧 LB 占用可作反例佐证)。
+
+**验证(2026-10-14 当日更新)**
+- 代码侧(已实测): 修复版 `setup-ntp.sh --check` 在容器 d 对全部 6 节点跑通 —— 正常节点零误报;
+  探针判别性经黑洞对照验证(同节点 ping `.99`/旧 `.222` FAIL vs `.204`/`.214` OK ——
+  该 fabric 上 ICMP 可真实判别黑洞, 代理 ARP 应答不影响)。
+- 环境侧(用户已完成): worker13 的 VM 重挂正确网络并改址 10.66.3.204(原 .222)后,
+  `timesyncd` **首次即同步成功**("Initial synchronization to 10.66.3.214", 对比之前全程 timeout),
+  同一时刻 `--check` 偏差 164ms ✓ —— 根因确证 + 修复实证。
+- 端到端: 重跑 `--with-scale`(k8s_scale)把 worker13 接入集群 —— 待用户执行后补。
+
+**相关命令**
+```bash
+# 单节点与集群连通性判据(节点上执行)
+ping -c2 <权威IP>; ping -c2 <任一正常节点IP>; ip neigh show
+# 权威侧看客户端是否真的来过(NTP 层面)
+chronyc clients
+# 节点时间服务状态(无 chrony 的 timesyncd 节点)
+timedatectl timesync-status; journalctl -u systemd-timesyncd --no-pager | tail
+# 两侧抓包判定帧是否互通
+sudo tcpdump -nei <网卡> '(arp or icmp) and host <对端IP>'
 ```
 
 ---

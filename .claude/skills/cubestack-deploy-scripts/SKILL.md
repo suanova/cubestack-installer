@@ -394,6 +394,11 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   实测跨节点 webhook/metallb 全通且 **pin workaround 可关**。
 - VXLAN 在该 fabric 需换端口: `CALICO_DATA_PATH=vxlan` + `CALICO_VXLAN_PORT=8472`。
 - **calico_network_backend 必须与数据面一致**(direct/ipip→bird, vxlan→vxlan), 漏配会无数据面。
+- **单节点与集群其余节点全不通(扩容新建 VM)**: fabric 上个别 VM 的接入/转发状态异常(2026-10-14 worker13
+  实机)—— 症状=双向 ICMP/NTP 全死、ARP 应答时有时无(代理 MAC 与真实 MAC 交错); 判据=该机 ping 网关/.211
+  通而 ping 集群节点全失败, 且权威 `chronyc clients` 从来看不到它。解法=平台侧把该 VM 网卡改接与正常节点
+  相同的网络(修复判据: 双向 ping 稳定通)。部署侧 `setup-ntp.sh` 已有节点→权威通路预检(NTP_REACH_CHECK)
+  在同步前点名。详见 `docs/troubleshooting.md` 二.2。
 
 ## MetaX GPU Operator 部署速查(沐曦)
 
@@ -414,6 +419,29 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   sudo ./deployments/scripts/tools/images/metax-save-images.sh   # 保存镜像 → 离线 tar
   sudo ./deployments/scripts/tools/images/metax-load-images.sh   # 加载 tar → 集群 registry(手动)
   METAX_LIST_IMAGES=true bash modules/03_addon/04_gpu_operator.sh   # 打印所需镜像 pull/save 命令
+  ```
+
+## NVIDIA GPU Operator 部署速查(英伟达; 2026-10-14 新增)
+
+> 完整文档 `docs/nvidia-gpu-operator.md`; 设计记录 `docs/superpowers/specs/2026-10-14-nvidia-gpu-operator-design.md`。
+
+- **双模式**: `ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR`(默认 false=离线: 镜像集推入集群内置 registry 的
+  `mirrors/nvcr.io/**`; true=在线按 chart 定义直拉, 或 `NVIDIA_GPU_OPERATOR_ONLINE_IMAGE_BASE` 切 Harbor 前缀)。
+- **驱动策略 = 预编译驱动容器**(`usePrecompiled` + 分支号): 实际镜像 `driver:<分支>-<内核>-ubuntu22.04`
+  由 operator 依 **NFD 内核标签**在运行期组合 —— 有卡节点内核必须恰在 NGC 覆盖列表(模块有内核门禁);
+  v26.7.2 标注 tech-preview(仅 ubuntu22.04); 退路=自制带包驱动镜像(文档已述)。
+- **镜像集唯一来源** `tools/images/nvidia-chart-images.sh`(渲染提取 + enabled 过滤 + 完整性绊线;
+  模块与备料工具共用, 安装与提取同参 → 零漂移); 备料 `tools/images/nvidia-save-images.sh`
+  (skopeo 直拉免 root; 内置 NGC 内核覆盖预检)。
+- **实施期踩坑(重要)**: NVIDIA chart 的组件镜像以 (repository,image,version) **三元组落在 ClusterPolicy CR**,
+  由 operator 运行期组合 —— 只用 `grep image:` 抓完整 ref 会漏; v26 起 **GFD 已并入 device-plugin 镜像**。
+- **常用命令**:
+  ```bash
+  sudo ./deploy-cluster.sh --enable nvidia_gpu_operator       # 写入开关(下次全量生效)
+  sudo ./deploy-cluster.sh --steps nvidia_gpu_operator        # 立即部署
+  sudo ./deploy-cluster.sh --steps verify_nvidia_gpu          # 端到端验证(无卡=组件级边界)
+  NVIDIA_LIST_IMAGES=true bash modules/03_addon/08_nvidia_gpu_operator.sh   # 打印备料清单(不部署)
+  sudo ./deployments/scripts/tools/images/nvidia-save-images.sh [--list]    # 联网机备料
   ```
 
 ## Ceph / Rook 部署速查(Rook v1.20.2 + Ceph v20.2.2, 详见 docs/ceph-rook.md)

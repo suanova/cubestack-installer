@@ -76,6 +76,10 @@ SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-nodePort}"
 CUBESTACK_OPERATOR_HARBOR_USER="${CUBESTACK_OPERATOR_HARBOR_USER:-clquan}"
 CUBESTACK_OPERATOR_HARBOR_PASSWORD="${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-EErMChQa123}"
 ONLINE_DEPLOY_CUBESTACK_OPERATOR="${ONLINE_DEPLOY_CUBESTACK_OPERATOR:-false}"
+#   ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR=true = NVIDIA GPU Operator 走在线(镜像按 chart 定义, 或经
+#     NVIDIA_GPU_OPERATOR_ONLINE_IMAGE_BASE 指定的镜像前缀直拉, 不推集群 registry);
+#     false(默认) = 离线(离线 tar → 集群内置 registry, 节点不访问外网)。见 4.7。
+ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR="${ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR:-false}"
 #
 # ---- ④ Harbor 凭据(部署前核对; 私有化环境必填) ----
 #   (原 3.2 / 4.6b 分组处的同定义已上移本区, 原位置留指针; mirrors 项目公开只读时可留空)
@@ -181,6 +185,7 @@ REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"               # 集群内置 Registry(
 
 # ---- 阶段四、附加组件(operator) ----
 GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 沐曦 GPU Operator(默认启用; 见 4.1)
+NVIDIA_GPU_OPERATOR_ENABLED="${NVIDIA_GPU_OPERATOR_ENABLED:-false}"  # NVIDIA GPU Operator(默认关; --enable nvidia_gpu_operator; 见 4.7)
 LWS_ENABLED="${LWS_ENABLED:-false}"                     # LeaderWorkerSet(LLM 工作负载调度; 默认**关**; 见 4.2)
                                                         #   开启: --enable lws 预启用 / --steps gpu_lws 立即部署 / 置 true 后全量
 LWS_DISAGGREGATEDSET_ENABLED="${LWS_DISAGGREGATEDSET_ENABLED:-true}"  # LWS DisaggregatedSet(解耦推理; 见 4.2)
@@ -580,6 +585,8 @@ MINIO_REMOTE_DIR="${MINIO_REMOTE_DIR:-offline-files}"  # 桶内目录(留空=syn
 #   · 显式 NTP_SERVER 可覆盖(用户指定权威时间源, 如公司内 NTP)。
 #   · 应用时对偏差>1s 的节点一次性 date -s @权威epoch 硬对齐。
 #   · 校验门禁: 校验后各节点与权威(首 master)偏差 ≤ NTP_MAX_OFFSET_MS, 超限本步失败 → 中止部署(在 kubespray 前)。
+#   · 节点→权威 IP 通路预检(2026-10-14 起): 节点 ping 不通权威即明确报错终止 —— 扩容/新建 VM 网络接入
+#     错误(与权威不同段/被隔离)会被立即点名, 而不是表现为反复"偏差超限"(实机案例见 docs/troubleshooting.md 二.2)。
 #   · NTP_ALLOW 独立于虚拟/裸金属网络: chrony server 放行子网, 默认空=只允许本机(如多子网节点需
 #     填集群节点所在网段, 如 "10.66.1.0/24")。
 # 开关见顶部【组件启停开关】: NTP_ENABLED(默认 1=启用)
@@ -587,6 +594,7 @@ NTP_SERVER="${NTP_SERVER:-}"                          # 权威时间源 IP; 留�
 NTP_UPSTREAM="${NTP_UPSTREAM:-}"                      # 权威(首 master)的公网上游(如 "pool ntp.aliyun.com iburst"); 留空=离线用本机时钟
 NTP_ALLOW="${NTP_ALLOW:-}"                            # chrony server allow 子网(默认空=仅本机; 多子网填 "10.66.1.0/24" 等)
 NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"        # 节点-权威(首 master)最大时钟偏差(毫秒); 超限本步失败 → 中止部署
+NTP_REACH_CHECK="${NTP_REACH_CHECK:-1}"               # 节点→权威 IP 通路预检(1=开): ping 不通直接明确报错(不再伪装成"偏差超限"); 仅禁 ICMP 环境置 0
 
 # ---------------- 2.3 集群内部网络 CIDR(由脚本同步到 kubespray group_vars, 不硬编码) ----------------
 KUBE_SERVICE_ADDRESSES="${KUBE_SERVICE_ADDRESSES:-10.233.0.0/18}"
@@ -875,6 +883,32 @@ CUBESTACK_OPERATOR_HARBOR_HOST="${CUBESTACK_OPERATOR_HARBOR_HOST:-harbor.isuanov
 #   需要自定义 spec 时用 CUBESTACK_OPERATOR_CR_VALUES_FILE 给一份 values 文件(-f)。
 # → CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED 已上移至顶部【高频/必改变量区】(2026-10-08)
 CUBESTACK_OPERATOR_CR_VALUES_FILE="${CUBESTACK_OPERATOR_CR_VALUES_FILE:-}"
+
+# ---------------- 4.7 NVIDIA GPU Operator(英伟达; 依赖: Registry; 2026-10-14 新增) ----------------
+# 开关见顶部【组件启停开关】: NVIDIA_GPU_OPERATOR_ENABLED(默认 false=关; --enable nvidia_gpu_operator
+#   或 --steps nvidia_gpu_operator 开启); 端到端验证 --steps verify_nvidia_gpu。
+# 做什么: 部署英伟达官方 GPU Operator(vendored chart 恒用; 完整文档 docs/nvidia-gpu-operator.md),
+#   统一管理 驱动(预编译容器)/容器工具链/设备插件/DCGM 导出器/GFD/MIG 管理 等全部 GPU 组件;
+#   集群未布 NFD 时由 operator 自带 NFD(NFD_ENABLED=true 时自动让位)。
+# 驱动策略: **预编译驱动容器**(usePrecompiled, 免内核包下载 —— air-gap 官方推荐路径)。
+#   实际驱动镜像 = driver:<分支>-<内核>-ubuntu22.04, 由 operator 依 NFD 内核标签在运行期组合:
+#   · 有卡节点内核必须恰在 NGC 预编译覆盖列表 —— 模块对内核白名单做门禁(不覆盖即 fail-fast);
+#   · v26.7.2 标注 tech-preview(仅 ubuntu22.04 x86_64); 不支持 vGPU/GDS;
+#   · 内核不在覆盖表/需定制时的退路(自制带包驱动镜像)见 docs/nvidia-gpu-operator.md。
+# 离线/在线: ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR 见顶部 ⓪ 组(默认 false=离线: 镜像推入集群内置
+#   registry 的 mirrors/nvcr.io/**; 离线 tar 由 tools/images/nvidia-save-images.sh 在联网机生成,
+#   目录 deployments/offline-files/nvidia-gpu-operator/ 见其 README)。
+NVIDIA_GPU_OPERATOR_VERSION="${NVIDIA_GPU_OPERATOR_VERSION:-v26.7.2}"     # operator chart 版本(★ 升级只改这里)
+NVIDIA_GPU_DRIVER_BRANCH="${NVIDIA_GPU_DRIVER_BRANCH:-595}"               # 驱动**分支号**(预编译模式用分支, 非完整版本)
+NVIDIA_GPU_DRIVER_PRECOMPILED_KERNELS="${NVIDIA_GPU_DRIVER_PRECOMPILED_KERNELS:-5.15.0-186-generic}"
+#   ↑ 有卡节点内核白名单(逗号分隔可多个); 默认与金标镜像内核一致; 变更内核前先核实 NGC 覆盖
+NVIDIA_GPU_DRIVER_PRECOMPILED_KERNEL="${NVIDIA_GPU_DRIVER_PRECOMPILED_KERNEL:-${NVIDIA_GPU_DRIVER_PRECOMPILED_KERNELS%%,*}}"
+#   ↑ 镜像清单登记用单内核(默认取白名单首项); 多内核环境在 images.manifest 手工补行
+NVIDIA_GPU_OPERATOR_NAMESPACE="${NVIDIA_GPU_OPERATOR_NAMESPACE:-gpu-operator}"
+NVIDIA_GPU_OPERATOR_CHART_SYNC="${NVIDIA_GPU_OPERATOR_CHART_SYNC:-auto}"  # auto(探测 nvcr.io)|online|offline
+NVIDIA_GPU_OPERATOR_ONLINE_IMAGE_BASE="${NVIDIA_GPU_OPERATOR_ONLINE_IMAGE_BASE:-}"
+#   ↑ 仅在线模式: 留空=按 chart 定义(nvcr.io)拉; 集群只可达 Harbor 镜像时填 "<Harbor>/mirrors"
+NVIDIA_GPU_OPERATOR_OFFLINE_DIR="${NVIDIA_GPU_OPERATOR_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/nvidia-gpu-operator}"
 
 # ════════════════════════════════════════════════════════════
 # 阶段五、离线镜像预加载                         依赖: 2.1 离线目录
