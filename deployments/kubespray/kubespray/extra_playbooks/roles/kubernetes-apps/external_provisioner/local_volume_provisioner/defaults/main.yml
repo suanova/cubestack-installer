@@ -1,0 +1,10 @@
+---
+local_volume_provisioner_namespace: "kube-system"
+# List of node labels to be copied to the PVs created by the provisioner
+local_volume_provisioner_nodelabels: []
+#   - kubernetes.io/hostname
+#   - topology.kubernetes.io/region
+#   - topology.kubernetes.io/zone
+local_volume_provisioner_tolerations: []
+local_volume_provisioner_use_node_name_only: false
+local_volume_provisioner_log_level: 2

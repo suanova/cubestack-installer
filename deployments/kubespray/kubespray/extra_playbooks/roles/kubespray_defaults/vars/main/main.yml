@@ -1,0 +1,83 @@
+---
+# Internal version manipulation tooling
+
+# Get kubernetes major version (i.e. 1.17.4 => 1.17)
+kube_major_version: "{{ (kube_version | split('.'))[:-1] | join('.') }}"
+kube_next: "{{ ((kube_version | split('.'))[1] | int) + 1 }}"
+kube_major_next_version: "1.{{ kube_next }}"
+
+pod_infra_supported_versions:
+  '1.36': '3.10.2'
+  '1.35': '3.10.1'
+  '1.34': '3.10.1'
+
+etcd_supported_versions:
+  '1.36': "{{ (etcd_binary_checksums['amd64'].keys() | select('version', '3.7', '<'))[0] }}"
+  '1.35': "{{ (etcd_binary_checksums['amd64'].keys() | select('version', '3.7', '<'))[0] }}"
+  '1.34': "{{ (etcd_binary_checksums['amd64'].keys() | select('version', '3.6', '<'))[0] }}"
+
+# Kubespray constants
+
+kube_proxy_deployed: "{{ 'addon/kube-proxy' not in kubeadm_init_phases_skip }}"
+
+# Sysctl floors: only applied when the node's current value is lower than
+# the desired one, so pre-tuned images and newer kernels are not regressed.
+# Values are aligned with OpenShift Node Tuning Operator and kops, and
+# are outside the kubelet protect-kernel-defaults validation list.
+sysctl_minimum_values:
+  fs.inotify.max_user_instances: 8192
+  fs.inotify.max_user_watches: 65536
+  kernel.pid_max: 4194304
+  fs.aio-max-nr: 1048576
+  vm.max_map_count: 262144
+  net.netfilter.nf_conntrack_max: 1048576
+  net.core.somaxconn: 32768
+  net.core.netdev_max_backlog: 16384
+  fs.file-max: 2097152
+  net.ipv4.neigh.default.gc_thresh1: 8192
+  net.ipv4.neigh.default.gc_thresh2: 32768
+  net.ipv4.neigh.default.gc_thresh3: 65536
+  net.ipv6.neigh.default.gc_thresh1: 8192
+  net.ipv6.neigh.default.gc_thresh2: 32768
+  net.ipv6.neigh.default.gc_thresh3: 65536
+
+# The lowest version allowed to upgrade from (same as calico_version in the previous branch)
+calico_min_version_required: "3.27.0"
+
+containerd_min_version_required: "1.3.7"
+
+# mixed kube_service_addresses/kube_service_addresses_ipv6 for a variety of network stacks(dualstack, ipv6only, ipv4only)
+kube_service_subnets: >-
+  {%- if ipv4_stack and ipv6_stack -%}
+  {{ kube_service_addresses }},{{ kube_service_addresses_ipv6 }}
+  {%- elif ipv4_stack -%}
+  {{ kube_service_addresses }}
+  {%- else -%}
+  {{ kube_service_addresses_ipv6 }}
+  {%- endif -%}
+
+# mixed kube_pods_subnet/kube_pods_subnet_ipv6 for a variety of network stacks(dualstack, ipv6only, ipv4only)
+kube_pods_subnets: >-
+  {%- if ipv4_stack and ipv6_stack -%}
+  {{ kube_pods_subnet }},{{ kube_pods_subnet_ipv6 }}
+  {%- elif ipv4_stack -%}
+  {{ kube_pods_subnet }}
+  {%- else -%}
+  {{ kube_pods_subnet_ipv6 }}
+  {%- endif -%}
+
+local_volume_provisioner_storage_classes_default:
+  - key: "{{ local_volume_provisioner_storage_class }}"
+    value:
+      hostDir: "{{ local_volume_provisioner_base_dir }}"
+      mountDir: "{{ local_volume_provisioner_mount_dir }}"
+      volumeMode: Filesystem
+      fsType: ext4
+
+ssl_ca_dirs_per_os_family:
+  Debian: &usr_share
+    - /usr/share/ca-certificates
+  Flatcar: *usr_share
+  RedHat:
+    - /etc/pki/tls
+    - /etc/pki/ca-trust

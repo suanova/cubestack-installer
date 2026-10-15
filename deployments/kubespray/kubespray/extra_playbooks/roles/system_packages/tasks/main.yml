@@ -1,0 +1,67 @@
+---
+- name: Gather OS information
+  setup:
+    gather_subset:
+      - distribution
+      - pkg_mgr
+
+- name: Normalize openSUSE MicroOS legacy OS family fact
+  set_fact:
+    ansible_os_family: Suse
+  when: ansible_facts['distribution'] == "openSUSE MicroOS"
+
+- name: Update package management cache (zypper) - SUSE
+  command: zypper -n --gpg-auto-import-keys ref
+  register: make_cache_output
+  until: make_cache_output is succeeded
+  retries: 4
+  delay: "{{ retry_stagger | random + 3 }}"
+  when:
+    - ansible_pkg_mgr == 'zypper'
+  tags: bootstrap_os
+
+- name: Remove legacy docker repo file
+  file:
+    path: "{{ yum_repo_dir }}/docker.repo"
+    state: absent
+  when:
+    - ansible_os_family == "RedHat"
+    - not is_fedora_coreos
+
+- name: Install epel-release on RHEL derivatives
+  package:
+    name: epel-release
+    state: present
+  when:
+    - ansible_os_family == "RedHat"
+    - not is_fedora_coreos
+    - epel_enabled | bool
+  tags:
+    - bootstrap_os
+
+- name: Manage packages
+  package:
+    name: "{{ item.packages }}"
+    state: "{{ item.state }}"
+    update_cache: "{{ true if ansible_pkg_mgr in ['zypper', 'apt', 'dnf'] else omit }}"
+    cache_valid_time: "{{ 86400 if ansible_pkg_mgr == 'apt' else omit }}" # 24h
+  register: pkgs_task_result
+  until: pkgs_task_result is succeeded
+  retries: "{{ pkg_install_retries }}"
+  delay: "{{ retry_stagger | random + 3 }}"
+  when:
+    - ansible_os_family != "Flatcar"
+    - not is_fedora_coreos
+    - item.packages != []
+  loop:
+    - packages: "{{ pkgs_to_remove | dict2items | selectattr('value', 'ansible.builtin.all') | map(attribute='key') }}"
+      state: "absent"
+      action_label: "remove"
+    - packages: "{{ pkgs | dict2items | selectattr('value', 'ansible.builtin.all') | map(attribute='key') }}"
+      state: "present"
+      action_label: "install"
+  loop_control:
+    label: "{{ item.action_label }}"
+  tags:
+    - bootstrap_os
+  timeout: "{{ pkg_install_timeout }}"
