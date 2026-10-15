@@ -10,8 +10,8 @@ helm_enabled: true
 # 如需启用集群内 registry: REGISTRY_ENABLED=1(见 cluster.conf), 本行由 sync-addons-config.sh 自动覆盖
 registry_enabled: true
 # registry_namespace: kube-system
-registry_storage_class: "ceph-block"
-# registry_disk_size: "10Gi"
+registry_storage_class: "local-path"
+registry_disk_size: "200Gi"
 # registry_htpasswd: ""
 # 通过 MetalLB 对外暴露 registry(LoadBalancer 类型), 分配 METALLB_POOL 中的 VIP
 # 也可改为 NodePort(registry_service_nodeport)或 ClusterIP 仅供集群内部使用
@@ -32,7 +32,7 @@ metrics_server_enabled: true
 # metrics_server_replicas: 1
 
 # Rancher Local Path Provisioner (默认不启动; 需本地 PVC 持久化时 LOCAL_PATH_ENABLED=true)
-local_path_provisioner_enabled: false
+local_path_provisioner_enabled: true
 # local_path_provisioner_namespace: "local-path-storage"
 # local_path_provisioner_storage_class: "local-path"
 # local_path_provisioner_reclaim_policy: Delete
@@ -187,7 +187,7 @@ metallb_config:
       #   部署时由 sync-kubespray-config.sh 从 METALLB_POOL 覆盖 —— 曾因模板残留旧环境
       #   池(10.66.1.130-139)被新集群继承, 分到其他集群已占用的 VIP 导致镜像拉取失败。
       ip_range:
-        - 10.66.1.131-10.66.1.132
+        - 10.244.1.200-10.244.1.209
       auto_assign: true
   layer2:
     - primary
@@ -206,21 +206,6 @@ argocd_enabled: false
 
 # The plugin manager for kubectl
 
-# Kube VIP
-kube_vip_enabled: false
-# kube_vip_arp_enabled: true
-# kube_vip_controlplane_enabled: true
-# kube_vip_address: 192.168.56.120
-# loadbalancer_apiserver:
-#   address: "{{ kube_vip_address }}"
-#   port: 6443
-# kube_vip_interface: eth0
-# kube_vip_services_enabled: false
-# kube_vip_dns_mode: first
-# kube_vip_cp_detect: false
-# kube_vip_leasename: plndr-cp-lock
-# kube_vip_enable_node_labeling: false
-# kube_vip_lb_fwdmethod: local
 
 # Node Feature Discovery
 node_feature_discovery_enabled: false
@@ -230,3 +215,11 @@ node_feature_discovery_enabled: false
 # node_feature_discovery_worker_sa_create: false
 # node_feature_discovery_master_config:
 #   extraLabelNs: ["nvidia.com"]
+# Kube VIP
+kube_vip_enabled: false
+kube_vip_arp_enabled: true
+kube_vip_controlplane_enabled: true
+kube_vip_cp_detect: false
+kube_vip_services_enabled: false
+kube_vip_lb_enable: false
+

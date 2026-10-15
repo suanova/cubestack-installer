@@ -136,3 +136,7 @@ containerd_registries_mirrors:
       - host: "http://10.244.1.11:31148"
         capabilities: ["pull", "resolve"]
         skip_verify: true
+
+containerd_extra_runtime_args:
+  device_ownership_from_security_context: true
+containerd_config_version: 3

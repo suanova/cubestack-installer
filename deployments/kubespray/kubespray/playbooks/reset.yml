@@ -8,6 +8,13 @@
 - name: Reset cluster
   hosts: etcd:k8s_cluster:calico_rr
   gather_facts: false
+  # Cubestack 补丁 13(cubestack-patches/13-skip-calico-checks-on-reset.patch):
+  # reset = 拆除动作 —— preinstall 的 calico 检查会在**活集群**上做"inventory vs 现网配置"
+  # 一致性断言(覆盖安装典型: 旧集群 VXLAN/IPIP=Never vs 新配置 IPIP=Always)⇒ reset 被误报中断。
+  # 本 play 内整体跳过该检查; 安装(cluster.yml/scale.yml)/升级(upgrade_cluster.yml)路径
+  # **不受影响** —— 那里的一致性检查仍有价值(防配置漂移)。
+  vars:
+    cubestack_skip_calico_checks: true
   pre_tasks:
     - name: Reset Confirmation
       pause:

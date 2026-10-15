@@ -1,0 +1,39 @@
+# patch: 13-skip-calico-checks-on-reset.patch
+# 目标: playbooks/reset.yml + roles/kubernetes/preinstall/tasks/main.yml
+# 加入: 2026-10-15
+# 原因: 覆盖安装先 reset 旧集群: reset.yml 会带 tags:resolvconf 引入 kubernetes/preinstall,
+#       其 "Run calico checks" 在活集群上执行 "Check if inventory match current cluster configuration"
+#       (读现网 IPPool 与 inventory 比对) —— 旧集群网络模式与新配置不同(实机: 旧 VXLAN/IPIP=Never,
+#       新 IPIP=Always)时断言必失败, reset 整体中断, 覆盖安装无法继续。
+#       修复: reset play 置 cubestack_skip_calico_checks=true, calico 检查整体跳过;
+#       安装(cluster.yml/scale.yml)与升级(upgrade_cluster.yml)路径**不带该变量** → 检查保留。
+# 上游吸收判据: reset.yml 的 preinstall 调用不再触发 calico 一致性检查(或该检查自带"仅安装期"守卫/
+#       能感知 reset 场景), 即上游认为"reset 不应被活集群配置断言拦停"。
+# 上游化: 建议提 PR(reset 不应被"旧集群 ≠ 新 inventory"拦停属通用健壮性; 变量名需按上游口径调整)
+# ------------------------------------------------------------
+--- a/playbooks/reset.yml
++++ b/playbooks/reset.yml
+@@ -8,6 +8,13 @@
+ - name: Reset cluster
+   hosts: etcd:k8s_cluster:calico_rr
+   gather_facts: false
++  # Cubestack 补丁 13(cubestack-patches/13-skip-calico-checks-on-reset.patch):
++  # reset = 拆除动作 —— preinstall 的 calico 检查会在**活集群**上做"inventory vs 现网配置"
++  # 一致性断言(覆盖安装典型: 旧集群 VXLAN/IPIP=Never vs 新配置 IPIP=Always)⇒ reset 被误报中断。
++  # 本 play 内整体跳过该检查; 安装(cluster.yml/scale.yml)/升级(upgrade_cluster.yml)路径
++  # **不受影响** —— 那里的一致性检查仍有价值(防配置漂移)。
++  vars:
++    cubestack_skip_calico_checks: true
+   pre_tasks:
+     - name: Reset Confirmation
+       pause:
+--- a/roles/kubernetes/preinstall/tasks/main.yml
++++ b/roles/kubernetes/preinstall/tasks/main.yml
+@@ -123,3 +123,7 @@
+   when:
+     - kube_network_plugin == 'calico'
+     - not ignore_assert_errors
++    # Cubestack 补丁 13: 仅安装/升级路径保留本检查 —— reset 是拆除动作, 活集群配置与
++    # inventory 不一致(如旧 VXLAN vs 新 IPIP)属**预期**, 不该拦停 reset(见 playbooks/reset.yml
++    # 的 Reset cluster play, 它在 play 级置 cubestack_skip_calico_checks=true)。
++    - not (cubestack_skip_calico_checks | default(false) | bool)
