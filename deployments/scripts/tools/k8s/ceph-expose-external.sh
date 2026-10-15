@@ -129,7 +129,7 @@ _ceph_exec() {
 _apply_yaml() {
     local content="$1" name="$2"
     printf '%s' "${content}" | ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "cat > /tmp/${name}.yaml && ${K} apply -f /tmp/${name}.yaml" \
+        "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}" "cat > /tmp/${name}.yaml && ${K} apply -f /tmp/${name}.yaml" \
         && SSH "rm -f /tmp/${name}.yaml" >/dev/null 2>&1 || true
 }
 _svc_np()  { ( SSH "${K} -n ${CEPH_NAMESPACE} get svc "$1" -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true ); }
@@ -465,7 +465,7 @@ apply_main() {
             "${ROOK_DIR}/external/03-cephfilesystem-external.yaml")" \
             || { warn "  CephFilesystem CR 模板缺失: ${ROOK_DIR}/external/03-cephfilesystem-external.yaml"; unset _fp _fp_pool _fp_pg; return 0; }
         printf '%s' "${_FS_CR}" | ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "cat > /tmp/ceph-ext-fs.yaml && ${K} apply -f /tmp/ceph-ext-fs.yaml" \
+            "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}" "cat > /tmp/ceph-ext-fs.yaml && ${K} apply -f /tmp/ceph-ext-fs.yaml" \
             && ok "  CephFilesystem CR ${EXT_FS} 已 apply(Rook 部署 MDS)" \
             || warn "  CephFilesystem CR apply 失败"
         # 等 MDS 拉起(fs active; 最长 300s)—— 消费方 CephFS SC 要等 fs 在线

@@ -222,7 +222,7 @@ for _line in "${NODES[@]:-}"; do
     node_parse "${_line}"
     [ -n "${NODE_IP:-}" ] || continue
     _info="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${SSH_USER:-ubuntu}@${NODE_IP}" \
+        "$(ssh_user_for_ip "${NODE_IP}")@${NODE_IP}" \
         "ng=\$(grep -l 0x10de /sys/bus/pci/devices/*/vendor 2>/dev/null | wc -l); k=\$(uname -r); . /etc/os-release 2>/dev/null; echo \"\$ng \$k \$VERSION_ID\"" 2>/dev/null || echo "0 unknown unknown")"
     _ngpu="${_info%% *}"; _rest="${_info#* }"; _kern="${_rest%% *}"; _osid="${_rest#* }"
     _ngpu="$(printf '%s' "${_ngpu:-0}" | tr -d '[:space:]' | grep -E '^[0-9]+$' || echo 0)"

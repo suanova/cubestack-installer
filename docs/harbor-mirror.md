@@ -225,10 +225,10 @@ cluster.conf  ──(唯一版本真相)──▶  images.manifest ${VAR}  ─�
    └──────────────── 改这里一处, 下游全部自动跟随 ◀────────────────────┘
 ```
 
-- 版本**只声明在 `cluster.conf`**(`CEPH_VERSION`、`LWS_CHART_VERSION`、`K8S_VERSION` …);
+- 版本**只声明在 `cluster.defaults.conf`**(2026-10-15 下沉; `CEPH_VERSION`、`METAX_VERSION`、`K8S_VERSION` …);
 - `images.manifest` 用 `${VAR}` 引用, 不重复写死版本;
 - 三个工具与 CI 都从清单读 —— 所以**改一处, 全链跟随**;
-- 新增的版本变量集中在 `cluster.conf.example` 的 **3.3 节「镜像版本(★ 升级入口)」**。
+- 新增的版本变量集中在 `cluster.defaults.conf` 的 **「镜像版本钉子」节(★ 升级入口)**(随仓库分发, 自动加载)。
 
 ### 升级某个组件(以 ceph 为例)
 
@@ -289,7 +289,7 @@ sudo ./deploy-cluster.sh --steps verify_ceph
 | Run | 模式 | 结果 |
 |---|---|---|
 | `35318517294` | push | ❌ 卡在 Harbor 登录 —— 密钥值错误(见下"踩坑") |
-| `35318757075` | 手动 `groups=lws,multus` | ✅ 4m16s, 2 个镜像真实落库 |
+| `35318757075` | 手动 `groups=multus` | ✅ 4m16s, 2 个镜像真实落库 |
 | `35319233170` | push(全量) | ✅ 43 min,**新同步 43 个 / digest 未变跳过 4 个 / 失败 0**, 另 16 个同台复制按预期跳过 |
 | `35323314387` | push | ✅ 5m45s,**跳过 46 / 新同步 1** —— 仍是 pause:3.10 被重传 |
 | `35324836924` | push(`--preserve-digests`) | ✅ 仍有 1 次重传(= 用新旗标重新落地的那一次, **属预期**) |

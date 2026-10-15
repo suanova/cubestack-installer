@@ -79,7 +79,7 @@ for _line in "${NODES[@]:-}"; do
     node_parse "${_line}"
     [ -n "${NODE_IP:-}" ] || continue
     _n="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${SSH_USER:-ubuntu}@${NODE_IP}" 'grep -l 0x10de /sys/bus/pci/devices/*/vendor 2>/dev/null | wc -l' 2>/dev/null || echo 0)"
+        "$(ssh_user_for_ip "${NODE_IP}")@${NODE_IP}" 'grep -l 0x10de /sys/bus/pci/devices/*/vendor 2>/dev/null | wc -l' 2>/dev/null || echo 0)"
     _n="$(printf '%s' "${_n:-0}" | tr -d '[:space:]' | grep -E '^[0-9]+$' || echo 0)"
     [ "${_n}" -gt 0 ] 2>/dev/null && GPU_HOSTS+=("${NODE_HOSTNAME}")
 done

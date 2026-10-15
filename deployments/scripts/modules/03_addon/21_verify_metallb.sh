@@ -205,7 +205,7 @@ spec:
 YAML
     # scp 方式提交(避免 heredoc→SSH stdin 管道挂起): 本地写文件 → scp → apply → 清理
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${LOCAL_YAML}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/${TEST_NAME}.yaml" \
+        "${LOCAL_YAML}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/${TEST_NAME}.yaml" \
         && SSH "${K} apply -f /tmp/${TEST_NAME}.yaml" \
         && SSH "rm -f /tmp/${TEST_NAME}.yaml"
     rm -f "${LOCAL_YAML}"

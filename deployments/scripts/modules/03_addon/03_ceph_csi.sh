@@ -140,7 +140,7 @@ done
 apply_remote() {   # <本地YAML内容> <临时文件名> → 远端 kubectl apply
     local content="$1" name="$2"
     printf '%s' "${content}" | ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "cat > /tmp/${name}.yaml && ${K} apply -f /tmp/${name}.yaml"
+        "${FIRST_MASTER_USER}@${FIRST_MASTER}" "cat > /tmp/${name}.yaml && ${K} apply -f /tmp/${name}.yaml"
 }
 
 # ★ 2026-09-11(官方导入路径补防线, 与手填路径 827-857 同款逻辑):

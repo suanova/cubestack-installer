@@ -253,7 +253,9 @@ fi
 # (新5字段格式: role,hostname,ip,ssh_user,ssh_password; 密码 "-"=用默认; 复用 register_node_to_conf, 幂等)
 auto_register_vm() {
     [ "${AUTO_REGISTER_CLUSTER:-0}" != "1" ] && return 0
-    register_node_to_conf master "${VM_NAME}" "${VM_IP}" ubuntu -
+    # 注册用户写 "-" = 跟随全局 SSH_USER(root|ubuntu 单一旋钮; VM 模板预埋 root+ubuntu 双用户)——
+    # 永远跟随, 之后切换 SSH_USER 无需重注册; 2026-10-15 前写死 ubuntu, 会把 root 部署拉回 ubuntu。
+    register_node_to_conf master "${VM_NAME}" "${VM_IP}" - -
 }
 
 virt-install \

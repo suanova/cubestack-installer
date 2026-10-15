@@ -399,7 +399,7 @@ verify_clocks() {
     #   sshd 一旦不可达, clock_offset 里"权威 epoch"读取全空 ⇒ **每个节点都被误报
     #   "无法读取时钟(SSH/sudo 失败?)"**(真实故障在权威身上, 报错却指向全部节点 ⇒ 排查方向全错)。
     #   先定向探测权威可达性: 不可达 → 一条明确的权威级错误 + 退出(不再逐节点空转误报)。
-    local _AUTH_USER="ubuntu" _AUTH_PW="" _e _aip _arest
+    local _AUTH_USER="${SSH_USER:-ubuntu}" _AUTH_PW="" _e _aip _arest
     for _e in "${NODE_ENTRIES[@]:-}"; do
         _aip="${_e%%:*}"; [ "${_aip}" = "${NTP_AUTHORITY}" ] || continue
         _arest="${_e#*:}"; _AUTH_USER="${_arest%%:*}"; _arest="${_arest#*:}"; _AUTH_PW="${_arest%%:*}"

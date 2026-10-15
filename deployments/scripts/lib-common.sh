@@ -22,6 +22,13 @@ export REAL_HOME REAL_USER
 CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/deployments/config/cluster.conf}"
 export CLUSTER_CONF
 
+# 高级/默认值层配置(2026-10-15 拆分, 唯一配置源的**默认值半边**):
+#   cluster.conf         = 必改项 + 组件启停开关 + 高频变量(用户日常编辑; gitignored)
+#   cluster.defaults.conf = 高级/自定义变量(随仓库分发; 全部 ${VAR:-default} 自默认写法)
+# 加载顺序(**cluster.conf 先, defaults 后**)⇒ 优先级: 环境变量 > cluster.conf > cluster.defaults.conf。
+CLUSTER_DEFAULTS_CONF="${CLUSTER_DEFAULTS_CONF:-${REPO_ROOT}/deployments/config/cluster.defaults.conf}"
+export CLUSTER_DEFAULTS_CONF
+
 # ---------------- 集群名(固定默认, 单集群) ----------------
 # 默认集群名 cubestack-cluster, 用于 inventory/offline-files 目录与日志命名; 环境变量可覆盖
 CLUSTER_NAME="${CLUSTER_NAME:-cubestack-cluster}"
@@ -230,7 +237,7 @@ emit_ip() {
 # ---------------- skopeo 运行时最小 trust policy(/etc/containers/policy.json) ----------------
 # 本机(尤其 CLI 容器内)无容器运行时 daemon 配置目录时, skopeo copy/inspect 会因读不到
 # policy.json 而 fatal: "Error loading trust policy: open /etc/containers/policy.json: no such file or directory"。
-# 所有用 skopeo 的模块(tar 镜像推送: gpu_operator/lws/ceph/... )source 本库后即自动就绪。
+# 所有用 skopeo 的模块(tar 镜像推送: gpu_operator/ceph/... )source 本库后即自动就绪。
 # 幂等: 已存在则不覆盖。insecureAcceptAnything 与本仓库离线内网 registry(--tls-verify=false)语义一致。
 ensure_skopeo_policy() {
     [ -f "/etc/containers/policy.json" ] && return 0
@@ -253,8 +260,8 @@ POLICY_EOF
 ensure_skopeo_policy
 
 # ---------------- 共享 skopeo 推送助手(tar → 集群内置 registry) ----------------
-# gpu_operator / lws / metax-load 曾各自复制同一份 _push_skopeo/_reg_has_tag;
-# 集中到本库供新代码复用, 已有 metax/gpu/lws 维持原状避免回归。
+# gpu_operator / metax-load 曾各自复制同一份 _push_skopeo/_reg_has_tag;
+# 集中到本库供新代码复用, 已有 metax/gpu 维持原状避免回归。
 # 全部为**新符号**, 不改任何现有调用方。
 
 # 前置检查: 缺失 skopeo 时给明确指引(而非 3 次重试后误报"未找到镜像")
@@ -454,7 +461,7 @@ helm_chart_ensure() {
 }
 
 # ---------------- 共享 nginx 校验镜像助手(verify 模块测试后端共用) ----------------
-# verify_metallb / verify_lws / verify_ceph 等的测试后端
+# verify_metallb / verify_ceph 等的测试后端
 # 统一用 **nginx**(测试 HTTP 后端, 静态页/JSON mock 皆可), 曾用 busybox httpd(依赖节点
 # containerd 预加载, 漏预加载即 Pending)。统一收敛到本助手:
 # 幂等确保 nginx 已推送进集群内置 registry, echo 出 **K8s 可见镜像 ref**(调用方在 $(...) 捕获,
@@ -565,8 +572,25 @@ load_config() {
         warn "未找到配置文件 ${CLUSTER_CONF},使用内置默认值"
         warn "建议: cp ${REPO_ROOT}/deployments/config/cluster.conf.example ${CLUSTER_CONF}"
     fi
+    # 高级/默认值层(2026-10-15): **必须在 cluster.conf 之后**(见文件头 CLUSTER_DEFAULTS_CONF 注释
+    # 的优先级: 环境变量 > cluster.conf > defaults)。全文件 ${VAR:-default} 自默认写法,
+    # 只补未定义变量 ⇒ 用户在 cluster.conf 写的同名覆盖项天然生效。
+    if [ -f "${CLUSTER_DEFAULTS_CONF}" ]; then
+        # shellcheck disable=SC1090
+        source "${CLUSTER_DEFAULTS_CONF}"
+    else
+        warn "未找到高级默认值层 ${CLUSTER_DEFAULTS_CONF}(部分高级变量将回退内置兜底; 该文件应随仓库分发)"
+    fi
+    # 节点 SSH 用户(2026-10-15): 全局安装用户单一旋钮(root|ubuntu, 默认 ubuntu)——
+    # 决定免密注入 / 即席 SSH / kubespray ansible_user 的口径。
+    #   · NODES 每行第4字段写 "-"(或留空) → 跟随本值(node_parse 归一);
+    #   · 显式写用户名 → 该节点覆盖(进阶场景; 与全局不一致时 deploy-cluster.sh 会点名告警)。
+    # ⚠ sudo 默认清掉未列入 env_keep 的环境变量: 想用环境变量传参要写 `sudo SSH_USER=root ./deploy-cluster.sh`
+    #   (赋值放在 sudo **之后**)或直接写进 cluster.conf(推荐)。
+    SSH_USER="${SSH_USER:-ubuntu}"
+    export SSH_USER
     # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
-    # (档案 > cluster.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
+    # (档案 > cluster.conf > cluster.defaults.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
     #  会静默变成"v2.28 的资产 + v1.35.8 的钉子")
     #   显式选择(明写了 KUBESPRAY_PROFILE, 或明写了 KUBESPRAY_VERSION)且档案缺失 → 硬失败:
     #     绝不静默退化成"别的版本的钉子"。err() 只打印不退出, 故这里显式 exit 1
@@ -1051,7 +1075,6 @@ kube_vip_derive() {
     local node_ips; node_ips="$(all_node_ips)"
     local m1; m1="$(first_master_ip)" || { err "无 master 节点, 无法推导 VIP"; return 1; }
     local base="${m1%.*}" ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-    local _user="${SSH_USER:-ubuntu}"
 
     # 探测器(在目标机上执行): 0 = 该地址空闲
     #   -c1 -W1   : ICMP 一次, 最多等 1s
@@ -1067,13 +1090,14 @@ kube_vip_derive() {
         local ip="$1" _ip
         for _ip in ${node_ips}; do [ "${_ip}" = "${ip}" ] && return 1; done
         metallb_pool_contains "${ip}" && return 1
-        local _host
+        local _host _u
         # ★ IP 而非主机名(同上): 容器解析不了节点名 ⇒ 拿主机名 SSH 恒失败 ⇒ 会把每个候选地址
         #   都误判成"被占用" ⇒ VIP 自动推导失效(显式 K8S_API_VIP 不受影响)
         for _host in $(master_ips); do
+            _u="$(ssh_user_for_ip "${_host}")"
             ssh -i "${ssh_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
                 -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-                "${_user}@${_host}" "${probe//__IP__/${ip}}" >/dev/null 2>&1 || return 1
+                "${_u}@${_host}" "${probe//__IP__/${ip}}" >/dev/null 2>&1 || return 1
         done
         return 0
     }
@@ -1127,7 +1151,8 @@ kube_vip_derive() {
 # 用法: if is_cluster_live; then ... fi     (探测失败一律视为"未运行")
 is_cluster_live() {
     local m1; m1="$(first_master_ip)" || return 1
-    local _user="${SSH_USER:-ubuntu}" ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    local ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    local _user; _user="$(ssh_user_for_ip "${m1}")"
     ssh -i "${ssh_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_user}@${m1}" \
         "command -v kubectl >/dev/null 2>&1 && sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes -o name 2>/dev/null | head -1" \
@@ -1142,11 +1167,12 @@ is_cluster_live() {
 kube_vip_is_bound() {
     local vip="${1:-}"
     [ -n "${vip}" ] || return 1
-    local _user="${SSH_USER:-ubuntu}" ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-    local _host
+    local ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    local _host _user
     # ★ 用 master_ips() 而非 master_hosts(): 部署容器解析不了节点名, 拿主机名 SSH 会静默失败
     #   —— 那时本函数**恒返回 1("VIP 未绑定")**, 哪怕 VIP 明明已绑(2026-09-28 实机, 见 master_ips 注释)
     for _host in $(master_ips); do
+        _user="$(ssh_user_for_ip "${_host}")"
         if ssh -i "${ssh_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_user}@${_host}" \
                "ip route get '${vip}' 2>/dev/null | grep -q 'local ${vip} '" 2>/dev/null; then
@@ -1489,6 +1515,11 @@ node_parse() {
         NODE_USER="${_f8}"; NODE_PW="${_f9}"; NODE_TYPE="${_f10:-}"
     else
         NODE_USER="${f4}"; NODE_PW="${f5}"
+    fi
+    # ssh_user 为 "-"/空 → 跟随全局 SSH_USER(root|ubuntu 单一旋钮; 见 load_config 注释)。
+    # 显式写了用户名 = 该节点覆盖(逐行覆盖优先)。
+    if [ -z "${NODE_USER}" ] || [ "${NODE_USER}" = "-" ]; then
+        NODE_USER="${SSH_USER:-ubuntu}"
     fi
     # 密码归一: 显式密码优先; "-"/空 → 默认密码(全节点默认一致)
     if [ -z "${NODE_PW}" ] || [ "${NODE_PW}" = "-" ]; then
@@ -1875,7 +1906,7 @@ ensure_hosts_block() {
 #      直连 master IP, 证书 SAN 常不含该 IP → 宿主机 kubectl 会 TLS x509 校验失败;
 #   ② 调用 tools/lb/setup-api-expose.sh 幂等配置宿主机 6443→first master 的 DNAT
 #      (PREROUTING + OUTPUT), 让 API_DOMAIN 从宿主机可访问。
-# 所有连 API 的模块(gpu_operator/gpu_lws/ceph_*/...)统一复用本函数, 不各自复制。
+# 所有连 API 的模块(gpu_operator/ceph_*/...)统一复用本函数, 不各自复制。
 # 用法: sync_kubeconfig → 退出码 0=宿主机可访问集群
 sync_kubeconfig() {
     local tmp newctx
@@ -1885,8 +1916,9 @@ sync_kubeconfig() {
     # admin.conf 属 root(600), scp 会 Permission denied → 用 ssh + sudo cat 读取
     # BatchMode=yes: 密钥失败立即返回(不读 tty 密码提示; 交互终端下读 tty 会 SIGTTIN
     #   永久卡死, 见 ceph-detect-disks.sh 2026-09-09 注释)
+    local _fm_user; _fm_user="$(ssh_user_for_ip "${fm}")"
     ssh -i "${SSH_KEY:-${HOME}/.ssh/cubestack_k8s}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${SSH_USER:-ubuntu}@${fm}" "sudo cat /etc/kubernetes/admin.conf" > "${tmp}" 2>/dev/null \
+        "${_fm_user}@${fm}" "sudo cat /etc/kubernetes/admin.conf" > "${tmp}" 2>/dev/null \
         || { rm -f "${tmp}"; return 1; }
     [ -s "${tmp}" ] || { rm -f "${tmp}"; return 1; }
     # ★ server 改写为证书 SAN 内的 API_DOMAIN(直连 master IP 不在 SAN → TLS 校验失败)
@@ -1906,7 +1938,7 @@ sync_kubeconfig() {
     [ -n "${newctx}" ] && KUBECONFIG="${HOME}/.kube/config" kubectl config use-context "${newctx}" >/dev/null 2>&1 || true
     # ★ 强制收敛: 合并可能保留旧集群残留(如 lb.k8s.local / 直连 master IP, 不在证书 SAN → TLS 失败)。
     #   只把当前 context 对应 cluster 的 server 改写为 SAN 内 API_DOMAIN(保留证书校验), 不动其它集群。
-    #   注意: K/_ctx/_cl 必须 local —— 各 addon 模块(gpu_operator/lws/ceph_*)顶层也有同名
+    #   注意: K/_ctx/_cl 必须 local —— 各 addon 模块(gpu_operator/ceph_*)顶层也有同名
     #   全局 K(远端 kubectl), 若此处用全局并 unset 会把调用方的 K 冲掉 → set -u 报 unbound。
     local K _ctx _cl
     K="KUBECONFIG=${HOME}/.kube/config kubectl"
@@ -1925,8 +1957,8 @@ sync_kubeconfig() {
     #     以**后写者**为准, 故宿主机曾长期把 k8s-api.cubestack.io 解析到 10.66.3.28(单点)而不是
     #     已就绪的 VIP 10.66.3.240(2026-09-28 实机)。现两处同源。
     #   · REGISTRY_DOMAIN → REGISTRY_IP(MetalLB VIP; NodePort 模式为派生出的节点 IP)。
-    #     补在这里的原因: 本函数是宿主机侧 kubectl/helm 消费者的公共入口(gpu_operator/gpu_lws/
-    #     multus/rdma + 接入引导都会走)⇒ 受管域名**每轮安装都收敛一次**, 不必等各自的 addon 模块。
+    #     补在这里的原因: 本函数是宿主机侧 kubectl/helm 消费者的公共入口(gpu_operator/
+    #     multus/rdma/ceph + 接入引导都会走)⇒ 受管域名**每轮安装都收敛一次**, 不必等各自的 addon 模块。
     local _api_entry
     _api_entry="$(api_entry_ip 2>/dev/null)" || _api_entry="${API_IP}"
     ensure_hosts_entry "${_api_entry}" "${API_DOMAIN}"
@@ -2128,6 +2160,47 @@ first_master_ip() {
     return 1
 }
 
+# 按 IP 解析该节点在 NODES 中的登录用户(逐行覆盖优先; "-" 已由 node_parse 归一为全局 SSH_USER)。
+# 未命中(非 NODES 节点/池外地址) → 回退全局 SSH_USER。
+# ★ node_parse 会写 NODE_* 全局量 —— 查找循环放在**命令替换子shell**内, 不污染调用方 shell。
+# 用法: u="$(ssh_user_for_ip 10.0.0.1)"
+ssh_user_for_ip() {
+    local _ip="$1" _hit
+    _hit="$(
+        local _l
+        for _l in "${NODES[@]:-}"; do
+            [ -z "${_l}" ] && continue
+            node_parse "${_l}"
+            [ "${NODE_IP}" = "${_ip}" ] && { printf '%s' "${NODE_USER}"; break; }
+        done
+    )"
+    printf '%s\n' "${_hit:-${SSH_USER:-ubuntu}}"
+}
+
+# 一致性点名: NODES 逐行显式 ssh_user 与全局 SSH_USER 不一致时告警(一处点名, 不刷屏)。
+# 语义(2026-10-15): SSH_USER = 全局默认; NODES 第4字段显式值 = **该节点**覆盖。
+# 逐行覆盖要真正生效, 要求访问该节点的各通道都按 NODES 解析用户(本仓库即席 SSH 已统一走
+# ssh_user_for_ip/init_remote_kubectl); 但混用仍是进阶场景, 不一致时点名提醒而不是静默。
+# 恒返回 0(不拦停); 由 deploy-cluster.sh 启动预检调用一次。
+warn_ssh_user_mismatch() {
+    local _list
+    _list="$(
+        local _l _out=""
+        for _l in "${NODES[@]:-}"; do
+            [ -z "${_l}" ] && continue
+            node_parse "${_l}"
+            [ -n "${NODE_HOSTNAME}" ] || continue
+            [ "${NODE_USER}" = "${SSH_USER:-ubuntu}" ] && continue
+            _out+="${_out:+, }${NODE_HOSTNAME}(${NODE_USER})"
+        done
+        printf '%s' "${_out}"
+    )"
+    [ -n "${_list}" ] || return 0
+    warn "SSH 用户不一致: 全局 SSH_USER=${SSH_USER:-ubuntu}, 但 NODES 显式覆盖: ${_list}"
+    warn "  逐行覆盖仅对该节点生效(其余节点仍用全局 SSH_USER); 通常建议 NODES 第4字段写 \"-\" 跟随全局"
+    return 0
+}
+
 # ---------------- 远端 kubectl 统一初始化(幂等) ----------------
 # ★ 所有需要 SSH 到 master 执行 kubectl 的模块/脚本**必须**调用本函数获取:
 #   FIRST_MASTER / SSH_KEY / SSH() 函数 / K(远端 kubectl 简写)。
@@ -2139,10 +2212,13 @@ init_remote_kubectl() {
     [ "${_INIT_REMOTE_KUBECTL:-0}" = "1" ] && return 0   # 幂等: 同一进程只初始化一次
     FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点(cluster.conf NODES 无 role=master)"; return 1; }
     SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    # 登录用户按**首个 master 在 NODES 里的解析值**(逐行覆盖优先, 见 ssh_user_for_ip);
+    # 未命中/未配置 → 全局 SSH_USER(root|ubuntu 单一旋钮)。
+    FIRST_MASTER_USER="$(ssh_user_for_ip "${FIRST_MASTER}")"
     SSH() { ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-               "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-    # 字符串式(伪代码/单行命令场景, 如 addon_stub 步骤数组): ssh ... ${SSH_USER:-ubuntu}@${FIRST_MASTER}
-    SSH_CMD="ssh -i ${SSH_KEY} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 ${SSH_USER:-ubuntu}@${FIRST_MASTER}"
+               "${FIRST_MASTER_USER}@${FIRST_MASTER}" "$@"; }
+    # 字符串式(伪代码/单行命令场景, 如 addon_stub 步骤数组): ssh ... ${FIRST_MASTER_USER}@${FIRST_MASTER}
+    SSH_CMD="ssh -i ${SSH_KEY} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 ${FIRST_MASTER_USER}@${FIRST_MASTER}"
     K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
     _INIT_REMOTE_KUBECTL=1
     return 0

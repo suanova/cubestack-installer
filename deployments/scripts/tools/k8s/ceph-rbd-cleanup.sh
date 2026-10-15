@@ -69,7 +69,7 @@ keep_vol() {   # <imageName> → 0=保留
 #   与"无映射(rc 0 且空输出)"—— 不可达节点绝不能被当成"干净"。
 list_maps() {   # <ip>
     local ip="$1"
-    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${ip}")@${ip}" \
         "for d in /sys/bus/rbd/devices/*; do [ -e \"\$d\" ] || continue; echo \"\$(basename \$d) \$(cat \$d/name 2>/dev/null) \$(cat \$d/pool 2>/dev/null)\"; done" 2>/dev/null
 }
 
@@ -98,7 +98,7 @@ cleanup_node() {   # <ip>
         # 该映射是否有有效挂载(kubelet 引用)
         # ★ 2026-09-24: 原来这条 ssh 被**写了两遍**(先判断、再把同一条命令塞进 `mounted="$(...)"`,
         #   且赋值处在 `A && B` 的末位 —— B 失败时 set -e 会直接结束脚本)。合并成一次取值 + `|| true`。
-        mounted="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+        mounted="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${ip}")@${ip}" \
             "mount | grep -qE '[[:space:]]/dev/rbd${id}[[:space:]]' && echo yes || echo no" 2>/dev/null || true)"
         if [ "${LIST_ONLY}" = "1" ]; then
             echo "    [残留] ${name}(id=${id}, pool=${pool}, mounted=${mounted:-?})"
@@ -109,7 +109,7 @@ cleanup_node() {   # <ip>
             # ⚠ 卸载改**惰性(setsid umount -l)且后台化、不等待**(2026-10-10): 后端已死时正规
             #   umount 会卡在"日志回写死设备"(永久 D 态不可杀) —— 与 k8s 清理处同一事故类。
             #   惰性脱挂只做命名空间脱开, 后台进程即便 D 也只是惰性残留; 本步随之立即返回。
-            timeout 30 ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+            timeout 30 ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${ip}")@${ip}" \
                 "sudo bash -c 'mount | grep /dev/rbd${id} | while read -r _d _on m _rest; do setsid umount -l \"\$m\" >/dev/null 2>&1 & done' ; echo 卸载已发起（惰性后台, 不等待）" 2>/dev/null || true
             warn "    ${name}(id=${id}): 已发起惰性卸载(后台)"
         fi
@@ -120,7 +120,7 @@ cleanup_node() {   # <ip>
         #   本身会永久 D 态**(worker .41 实测, 不可杀) —— 同步等待 = 部署无限挂。后台执行后
         #   有界复核(≤10s): 设备目录消失=成功; 超时=告警放行(残映射仅造成 -13 日志刷屏,
         #   不影响新集群; 择机重启清零)。
-        if timeout 30 ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+        if timeout 30 ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${ip}")@${ip}" \
             "sudo bash -c '
                 [ -d /sys/bus/rbd/devices/${id} ] || exit 0
                 setsid bash -c \"echo ${id} > /sys/bus/rbd/remove_single_major 2>/dev/null || echo ${id} > /sys/bus/rbd/remove 2>/dev/null\" >/dev/null 2>&1 &
@@ -137,7 +137,7 @@ cleanup_node() {   # <ip>
     done <<< "${maps}"
     # 清理失效设备节点文件与空挂载目录(kubelet 残留)
     if [ -n "${maps}" ]; then
-        ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+        ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${ip}")@${ip}" \
             "sudo rm -f /dev/rbd* 2>/dev/null || true; sudo find /var/lib/kubelet/pods -path '*kubernetes.io~csi*' -type d -empty -delete 2>/dev/null || true" 2>/dev/null || true
     fi
     # ★ 2026-10-10 收尾阶梯(仅清理模式): 该节点映射清完后尝试**模块级卸载**(连客户端
@@ -147,7 +147,7 @@ cleanup_node() {   # <ip>
         #   旧行为把失败归 0 → 该节点被误报"内核态清零"且不计入 _TOTAL_LEFT → 总报告假"全部
         #   清零"。只有**真实读到的 0** 才走模块卸载; 未知单独计数, 报告里明示(不并入 LEFT:
         #   LEFT>0 会触发"硬复位"建议, 对未知节点是错误指引)。
-        if _left="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+        if _left="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${ip}")@${ip}" \
             "ls /sys/bus/rbd/devices 2>/dev/null | wc -l" 2>/dev/null)"; then
             _left="${_left//[!0-9]/}"
         else
@@ -161,7 +161,7 @@ cleanup_node() {   # <ip>
         elif [ "${_left}" = "0" ]; then
             # ★ 采纳远端建议(用户网页提交 96bc395): 模块卸载后**回来验证**是否真的卸载 ——
             #   旧写法无论结果都报"已卸载"; EBUSY(仍有引用)时给出如实告警。
-            if ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${ip}" \
+            if ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${ip}")@${ip}" \
                 "sudo modprobe -r rbd 2>/dev/null; sudo modprobe -r libceph 2>/dev/null; ! lsmod | grep -qE '^(rbd|libceph) '" >/dev/null 2>&1; then
                 ok "    ${ip}: rbd/libceph 模块已卸载(内核态清零)"
             else

@@ -47,6 +47,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODULES_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)/modules"
 CONF_EXAMPLE="$(cd "${SCRIPT_DIR}/../.." && pwd)/config/cluster.conf.example"
+CONF_DEFAULTS="$(cd "${SCRIPT_DIR}/../.." && pwd)/config/cluster.defaults.conf"   # 高级/默认值层(2026-10-15 拆分)
 
 QUIET=0
 [ "${1:-}" = "--quiet" ] && QUIET=1
@@ -157,8 +158,13 @@ while IFS= read -r -d '' f; do
 done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${INIT_MISS}" = "0" ] && ok "使用 K/SSH 的模块均已调用 init_remote_kubectl"
 
-# ---------- ⑦ TOGGLE 与 cluster.conf.example 一致性 ----------
-say "[7/19] TOGGLE 变量在 cluster.conf.example 声明 ..."
+# ---------- ⑦ TOGGLE 默认值声明(模板两文件之一) + 配置双层不重叠(2026-10-15) ----------
+# ⑦-a(原有, 2026-10-15 放宽): 模块 TOGGLE 变量必须在 cluster.conf.example(主文件)或
+#   cluster.defaults.conf(高级层)声明 —— 两文件都是随仓库分发的默认值来源; 防漏配。
+# ⑦-b(新增): cluster.conf.example 与 cluster.defaults.conf **不得声明同名变量** —— 配置拆分后
+#   每个变量只许有一个声明处(两处同声明 = 双份维护, 迟早漂移; 覆盖机制本就是
+#   "在 cluster.conf 写同名项", 无需在 defaults 里预置)。
+say "[7/19] TOGGLE 变量默认值声明(模板两文件之一) + 配置双层不重叠 ..."
 if [ -f "${CONF_EXAMPLE}" ]; then
     TOG_MISS=0
     while IFS= read -r -d '' f; do
@@ -166,12 +172,51 @@ if [ -f "${CONF_EXAMPLE}" ]; then
         [ -n "${tgl}" ] || continue
         # TOGGLE 支持空格分隔多变量(OR, 如 ceph: CEPH_ENABLED CEPH_CSI_ENABLED) → 逐个校验
         for tv in ${tgl}; do
-            grep -qE "${tv}=" "${CONF_EXAMPLE}" || { ck_fail "$(basename "$f"): TOGGLE=${tv} 未在 cluster.conf.example 中声明默认值"; TOG_MISS=1; }
+            # 声明处 = cluster.conf.example(主文件) **或** cluster.defaults.conf(高级层)任一即可 ——
+            #   2026-10-15 起子开关/细节开关陆续下沉 defaults; ⑦-b 保证两文件不重复声明。
+            if ! grep -qE "${tv}=" "${CONF_EXAMPLE}" 2>/dev/null \
+               && ! { [ -f "${CONF_DEFAULTS}" ] && grep -qE "${tv}=" "${CONF_DEFAULTS}" 2>/dev/null; }; then
+                ck_fail "$(basename "$f"): TOGGLE=${tv} 未在 cluster.conf.example / cluster.defaults.conf 中声明默认值"; TOG_MISS=1
+            fi
         done
     done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
-    [ "${TOG_MISS}" = "0" ] && ok "全部 TOGGLE 变量均有 cluster.conf.example 默认值"
+    [ "${TOG_MISS}" = "0" ] && ok "全部 TOGGLE 变量均有默认值声明(cluster.conf.example 或 cluster.defaults.conf)"
 else
     warn "  未找到 ${CONF_EXAMPLE}, 跳过 TOGGLE 一致性检查"
+fi
+# ⑦-c(新增 2026-10-15): **单文件内不得重复赋值同名变量** —— bash 最后赋值生效, 单文件重复声明
+#   会让"默认值静默漂移"(历史事故: cluster.conf.example 底部示例块重复声明 CEPH_MODE ⇒ 默认配置
+#   静默变 external, 见 docs/troubleshooting.md); 且两处维护必漂移。模板两份硬失败; 真配置只告警。
+for _cf in "${CONF_EXAMPLE}" "${CONF_DEFAULTS}"; do
+    [ -f "${_cf}" ] || continue
+    _dups="$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "${_cf}" | tr -d '=' | sort | uniq -d | tr '\n' ' ')"
+    if [ -n "${_dups// /}" ]; then
+        ck_fail "⑦ $(basename "${_cf}") 单文件内重复赋值: ${_dups}" \
+            "      → 同名变量只许声明一次(bash 最后赋值生效; 重复=默认值静默漂移, 只保留一处)"
+    fi
+done
+[ -n "$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "${CONF_EXAMPLE}" | sort | uniq -d)" ] || \
+    ok "配置模板单文件内无重复赋值(⑦-c)"
+# ⚠ 此处不能用 KV_CONF(它在后段 ⑫ 才定义; set -u 下提前引用会 unbound 崩) —— 路径直算
+_lconf="$(dirname "${CONF_EXAMPLE}")/cluster.conf"
+if [ -f "${_lconf}" ]; then
+    _dups="$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "${_lconf}" | tr -d '=' | sort | uniq -d | tr '\n' ' ')"
+    [ -n "${_dups// /}" ] && warn "  ⑦ cluster.conf 单文件内重复赋值(仅告警): ${_dups}"
+fi
+unset _lconf
+if [ -f "${CONF_EXAMPLE}" ] && [ -f "${CONF_DEFAULTS}" ]; then
+    _dup="$(comm -12 \
+        <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "${CONF_EXAMPLE}" | tr -d '=' | sort -u) \
+        <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "${CONF_DEFAULTS}" | tr -d '=' | sort -u) | tr '\n' ' ')"
+    if [ -n "${_dup// /}" ]; then
+        ck_fail "⑦ 配置双层同名声明(cluster.conf.example ∩ cluster.defaults.conf): ${_dup}" \
+            "      → 每个变量只许有一个声明处; 覆盖请在 cluster.conf 写同名项(勿改 defaults 语义)"
+    else
+        ok "配置双层无同名声明(cluster.conf.example 与 cluster.defaults.conf 变量集互斥)"
+    fi
+    unset _dup
+else
+    warn "  未找到 ${CONF_DEFAULTS}, 跳过配置双层不重叠检查(该文件应随仓库分发)"
 fi
 
 # ---------- ⑧ 文件序号与目录 ----------
@@ -281,15 +326,21 @@ KV_ADDONS="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_
 KV_ALL_YML="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/all/all.yml"
 KV_CONF="${REPO_ROOT}/deployments/config/cluster.conf"
 [ -f "${KV_CONF}" ] || KV_CONF="${CONF_EXAMPLE}"
-# 在**子 shell 内**求值 cluster.conf, 只回传需要的五个值。理由:
+# 在**子 shell 内**求值 cluster.conf(含高级默认值层, 2026-10-15), 只回传需要的五个值。理由:
 #   ① cluster.conf 依赖 REPO_ROOT 等多个变量, 在当前 set -u 下直接 source 会中断;
 #      子 shell 里 set +u 给它宽松环境, 且不污染本脚本状态(本脚本有 FAIL 等同名变量)
 #   ② 用 shell 自己解析(而非正则抠字符串), 才能正确处理 "${VAR:-default}" / 字面量 / 注释
+#   ③ 与 load_config 同序: 主文件先、defaults 后(优先级 环境变量 > cluster.conf > defaults);
+#      KV_CONF 回退到 example 时 defaults 亦然 —— 与部署侧看到的"有效值"完全一致
+KV_DEFAULTS="${REPO_ROOT}/deployments/config/cluster.defaults.conf"
+[ -f "${KV_DEFAULTS}" ] || KV_DEFAULTS="${CONF_DEFAULTS}"
 KV_SNAPSHOT="$(
     set +u
     REPO_ROOT="${REPO_ROOT}" SCRIPT_DIR="${SCRIPT_DIR}" CONF_EXAMPLE="${CONF_EXAMPLE}"
     # shellcheck disable=SC1090
     . "${KV_CONF}" >/dev/null 2>&1 || true
+    # shellcheck disable=SC1090
+    [ -f "${KV_DEFAULTS}" ] && . "${KV_DEFAULTS}" >/dev/null 2>&1 || true
     printf '%s\n%s\n%s\n%s\n%s\n' \
         "${KUBE_VIP_ENABLED:-false}" "${K8S_API_VIP:-}" "${METALLB_POOL:-}" \
         "${API_LOCAL_LB_ENABLED:-}" "${KUBE_VIP_LOCAL_PROXY:-false}"
@@ -353,13 +404,14 @@ fi
 #   这里只断言"各处彼此一致", **不写死具体值** —— 将来再翻转也不会误报。
 _cpd="$(grep -rhoE 'KUBE_VIP_CP_DETECT:-[a-z]+' \
         "${CONF_EXAMPLE}" \
+        "${CONF_DEFAULTS}" \
         "${REPO_ROOT}/deployments/scripts/modules/02_k8s/09_kube_vip.sh" \
         "${REPO_ROOT}/deployments/scripts/lib-common.sh" 2>/dev/null | sed 's/.*:-//' | sort -u)"
 if [ -n "${_cpd}" ] && [ "$(printf '%s\n' "${_cpd}" | grep -c .)" = "1" ]; then
     ok "KUBE_VIP_CP_DETECT 各处兜底默认一致(${_cpd})"
 else
     ck_fail "KUBE_VIP_CP_DETECT 兜底默认不一致: [${_cpd:-未取到}]" \
-        "      → 改默认须同时改: cluster.conf.example / 02_k8s/09_kube_vip.sh / lib-common.sh"
+        "      → 改默认须同时改: cluster.defaults.conf(2026-10-15 起声明于此) / 02_k8s/09_kube_vip.sh / lib-common.sh"
 fi
 
 # ⑪-B 开关**开启**时才有意义的取值自洽(关闭态那些值会连同 VIP 一起经清理路径收敛掉)
@@ -510,7 +562,7 @@ fi
 # 为什么必须有这一条: 既有 CI 只覆盖「trim ↔ images.manifest」一对(check-image-manifest.sh ⑤),
 #   漂移若只发生在 ①/②, CI 照样通过 → 联网机备料后镜像**仍被静默 trim 掉**(装了却没有镜像)。
 # 比较的是**模式串本身**(各处变量名可能不同), 不是整行; 引号/行尾注释等写法差异先归一化掉。
-# 注: 第 ④ 份曾长期陈旧(缺 lws_manager / library_nginx), 2026-09-28 Task 7 已补齐并与前三分逐字节相同,
+# 注: 第 ④ 份曾长期陈旧(缺 library_nginx 等条目), 2026-09-28 Task 7 已补齐并与前三分逐字节相同,
 #     故自本轮起纳入断言(此前注释写的"有意不纳入"已过期)。
 say "[14/19] PRELOAD_IMAGE_PATTERNS 四处副本一致性 ..."
 
@@ -536,16 +588,22 @@ _preload_patterns() {
 PRELOAD_BAD=0; PRELOAD_N=0
 PRELOAD_PATHS=(
     "${REPO_ROOT}/deployments/config/cluster.conf"
-    "${CONF_EXAMPLE}"
+    "${CONF_DEFAULTS}"
     "${REPO_ROOT}/deployments/scripts/tools/offline/trim-offline-files.sh"
     "${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
 )
-PRELOAD_NAMES=( cluster.conf cluster.conf.example trim-offline-files.sh cubestack-offline.sh )
+PRELOAD_NAMES=( cluster.conf cluster.defaults.conf trim-offline-files.sh cubestack-offline.sh )
 PRELOAD_VALS=(); PRELOAD_SEEN=()
 for _i in "${!PRELOAD_PATHS[@]}"; do
     _p="${PRELOAD_PATHS[$_i]}"; _n="${PRELOAD_NAMES[$_i]}"
     if [ ! -f "${_p}" ]; then
         warn "  未找到 ${_p}(跳过该副本; cluster.conf 不入库, CI 上属正常)"
+        continue
+    fi
+    # cluster.conf **未声明**该键(2026-10-15 PRELOAD 下沉 cluster.defaults.conf 后属正常) → 跳过;
+    #   ⚠ 只对这一份可选副本放宽 —— 另三份(defaults/trim/offline)缺声明仍是硬失败(真回归)。
+    if [ "${_n}" = "cluster.conf" ] && ! grep -qE '^[[:space:]]*PRELOAD_IMAGE_PATTERNS=' "${_p}" 2>/dev/null; then
+        say "  cluster.conf: 未声明 PRELOAD_IMAGE_PATTERNS(已下沉 cluster.defaults.conf), 跳过该副本"
         continue
     fi
     _v="$(_preload_patterns "${_p}")"
@@ -609,7 +667,8 @@ fi
 #   (补丁层 / 收编映射 / 入口模式 / 本地代理)现在每轮 check-modules 都会跑到。
 for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-api-entry-mode.sh test-api-local-lb.sh test-sync-api-entry.sh \
-           test-kubespray-version-select.sh test-deb-install-lib.sh; do
+           test-kubespray-version-select.sh test-deb-install-lib.sh \
+           test-ssh-user.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
     if [ ! -f "${_tp}" ]; then
         ck_fail "⑮ 离线套件缺失: ${_tp#${REPO_ROOT}/}(⑮ 的回归证据没了)"
@@ -714,9 +773,12 @@ fi
 if [ ! -f "${KSD_DL}" ] || [ ! -f "${KSD_CK}" ] || [ ! -f "${KSD_VM}" ]; then
     warn "  跳过 ⑯(未找到 vendored 版本表 ${KSD_ROLE#${REPO_ROOT}/})"
 else
-    # 钉子来源文件: cluster.conf(在盘上才查; 它不入库) + cluster.conf.example(纯 checkout 上唯一在场的那份)
-    KSD_CONFS=("${CONF_EXAMPLE}")
-    [ -f "${KV_CONF}" ] && [ "${KV_CONF}" != "${CONF_EXAMPLE}" ] && KSD_CONFS=("${KV_CONF}" "${CONF_EXAMPLE}")
+    # 钉子来源文件(2026-10-15 版本变量下沉后): cluster.defaults.conf(入库, **必查**) +
+    #   cluster.conf(**仅当它自己声明了 K8S_VERSION 时**才查 —— 正常不再声明; 用户覆盖/手工钉钉子时声明)
+    KSD_CONFS=("${CONF_DEFAULTS}")
+    if [ -f "${KV_CONF}" ] && [ "${KV_CONF}" != "${CONF_DEFAULTS}" ] && grep -qE '^K8S_VERSION=' "${KV_CONF}" 2>/dev/null; then
+        KSD_CONFS=("${KV_CONF}" "${CONF_DEFAULTS}")
+    fi
 
     for _cf in "${KSD_CONFS[@]}"; do
         _cn="$(basename "${_cf}")"

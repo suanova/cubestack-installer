@@ -38,7 +38,7 @@ done
 
 say "从 ${FIRST_MASTER}(${FIRST_MASTER_IP}) 获取集群 CA ..."
 CA_FILE="/tmp/cubestack-ca.crt"
-ssh ${SSH_OPTS} "${FIRST_MASTER_USER:-ubuntu}@${FIRST_MASTER_IP}" "sudo cat /etc/kubernetes/ssl/ca.crt" > "${CA_FILE}" 2>/dev/null
+ssh ${SSH_OPTS} "${FIRST_MASTER_USER:-${SSH_USER:-ubuntu}}@${FIRST_MASTER_IP}" "sudo cat /etc/kubernetes/ssl/ca.crt" > "${CA_FILE}" 2>/dev/null
 [ -s "${CA_FILE}" ] || { err "获取 CA 失败"; exit 1; }
 ok "CA 已获取 ($(wc -c < "${CA_FILE}") 字节)"
 

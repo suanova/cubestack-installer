@@ -46,7 +46,7 @@
 # 旧 key 别名(向后兼容, 旧用法 --steps vm,k8s 等仍然有效):
 #   net→vm_network ssh_key→vm_sshkey vm→vm_create ssh_passwordless→k8s_passwordless
 #   worker_bm→k8s_workerbm hosts→k8s_hosts inventory→k8s_inventory ntp→k8s_ntp
-#   k8s→k8s_deploy scale→k8s_scale lws→gpu_lws
+#   k8s→k8s_deploy scale→k8s_scale
 # ============================================================
 
 MODULES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/modules"
@@ -64,7 +64,6 @@ declare -A MODULE_ALIAS=(
     [k8s]=k8s_deploy
     [scale]=k8s_scale
     [gpu_operator]=gpu_operator
-    [lws]=gpu_lws
 )
 
 # 归一化模块 key(旧别名 → 新 key; 未知 key 原样返回)
@@ -75,7 +74,7 @@ normalize_key() {
 
 # ---------------- operator 模块(显式调度用, 自动派生) ----------------
 # --steps 显式命名了任一 operator 时, 只部署被指定的 operator(+基座 env/k8s/metallb/local_path/k8s_registry),
-# 剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps lws 时不部署 gpu_operator);
+# 剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps ceph 时不部署 gpu_operator);
 # 未命名任何 operator(纯默认 / --with-k8s / --with-cubestack)时, 全部默认启用的 operator 照常部署。
 # (--enable 只写 cluster.conf, 不经过本处; 见 deploy-cluster.sh)
 #
@@ -274,7 +273,7 @@ resolve_run_steps() {
     done
 
     # ★ operator 显式调度: --steps 显式命名了 operator 时, 只保留被指定的 operator(+基座),
-    #   剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps lws 时不部署 gpu_operator)。
+    #   剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps ceph 时不部署 gpu_operator)。
     #   未命名任何 operator(纯默认 / --with-k8s / --with-cubestack)时保持原行为: 全部默认启用的 operator 照常部署。
     declare -A _op_keep=()
     for s in ${enable_arg//,/ }; do
@@ -459,7 +458,7 @@ print_steps() {
     echo "---------------------------------------------"
     echo "  --steps k1,k2  只运行指定模块    --skip k1,k2  跳过模块"
     echo "  --phase env|k8s|addon  仅运行指定阶段"
-    echo "  --enable k     启用默认关闭模块(如 gpu_operator/lws)   --with-k8s = --enable k8s"
+    echo "  --enable k     启用默认关闭模块(如 ceph/nvidia_gpu_operator)  --with-k8s = --enable k8s"
     echo "  --steps verify 默认执行全部 verify_* 验证模块(新增 verify step 后自动纳入):"
     echo "                 $(_verify_meta_list)"
     echo "  --list-steps   查看本列表"
@@ -498,7 +497,7 @@ cluster_exists() {
     [ -f "${key}" ] || return 1     # 无密钥 → 连不上(新容器初始态), 交给接入引导, 不算"已存在"
     # ⚠ -n: 不让 ssh 读 stdin —— 否则会把调用方的 stdin(如 `bash -s < script`、管道)吃掉。
     ssh -n -i "${key}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${fm}" \
+        -o ConnectTimeout=8 "$(ssh_user_for_ip "${fm}")@${fm}" \
         "sudo -n kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes -o name >/dev/null 2>&1" \
         >/dev/null 2>&1
 }
@@ -674,7 +673,7 @@ warn_unhealthy_pods() {
     key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
     # ⚠ -n: 不让 ssh 读 stdin(与 cluster_exists 同款防护)
     out="$(ssh -n -i "${key}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${fm}" \
+        -o ConnectTimeout=8 "$(ssh_user_for_ip "${fm}")@${fm}" \
         "sudo -n kubectl --kubeconfig=/etc/kubernetes/admin.conf get pods -A --no-headers 2>/dev/null" \
         2>/dev/null || true)"
     [ -n "${out}" ] || return 0

@@ -58,7 +58,6 @@
 | P1-4 | Harbor 镜像仓库(**集群外私有仓库**, 环境准备阶段于宿主机就绪) | `HARBOR_ENABLED` | `01_env/04_harbor.sh` |
 | P1-5 | 沐曦 MetaX GPU Operator | `GPU_OPERATOR_ENABLED` | `03_addon/01_gpu_operator.sh` |
 | P1-6/7 | Ceph 存储集群 + Ceph CSI(RBD/RGW/CephFS) | `CEPH_ENABLED` / `CEPH_CSI_ENABLED` | `03_addon/06_ceph.sh` / `07_ceph_csi.sh` |
-| P1-8 | LeaderWorkerSet(LWS) | `LWS_ENABLED` | `03_addon/02_gpu_lws.sh` |
 | P2-1 | Keycloak 统一认证 | `KEYCLOAK_ENABLED` | `03_addon/09_keycloak.sh` |
 | P2-2 | Kueue 队列治理(DEV-29) | `KUEUE_ENABLED` | `03_addon/10_kueue.sh` |
 | P2-3 | KubeVirt 虚拟机能力(DEV-35) | `KUBEVIRT_ENABLED` | `03_addon/11_kubevirt.sh` |
@@ -84,7 +83,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ 部署机(宿主机 / 管理机)                                          │
-│  · config/cluster.conf = 唯一配置源                              │
+│  · config/cluster.conf + cluster.defaults.conf = 配置双层结构    │
 │  · deployments/scripts = 部署脚本 + modules(三阶段模块)          │
 │  · deployments/kubespray = kubespray 源码 + inventory + 离线资源 │
 └──────────────┬──────────────────────────────────────────────────┘
@@ -104,9 +103,9 @@
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**数据流**:`cluster.conf`(唯一数据源) → 脚本解析/校验 → 生成 `hosts.yml` + `group_vars`(IP/组件开关) → kubespray 离线安装 → 附加组件模块逐个启用。
+**数据流**:`cluster.conf`(必改/开关/高频) + `cluster.defaults.conf`(高级默认值层, 自动加载) → 脚本解析/校验 → 生成 `hosts.yml` + `group_vars`(IP/组件开关) → kubespray 离线安装 → 附加组件模块逐个启用。
 
-**配置优先级**:环境变量 > `config/cluster.conf` > 内置兜底默认。
+**配置优先级**:环境变量 > `config/cluster.conf` > `config/cluster.defaults.conf`(内置兜底默认)。
 
 ---
 
@@ -115,7 +114,8 @@
 ```
 deployments/
 ├── config/
-│   ├── cluster.conf.example      # 配置模板(提交仓库, 含全部变量与注释)
+│   ├── cluster.conf.example      # 主配置模板(提交仓库: 必改项 + 组件开关 + 高频变量)
+│   ├── cluster.defaults.conf     # 高级/默认值层(提交仓库, 自动加载; 一般不需要改)
 │   └── cluster.conf.backup       # 示例环境备份(全裸金属 GPU 集群)
 │   └── cluster.conf              # 【运行时】真实配置(含密码, gitignore; cp example 生成)
 ├── kubespray/
@@ -187,7 +187,7 @@ sudo bash deployments/scripts/modules/03_addon/05_harbor.sh
 sudo ./deployments/scripts/deploy-cluster.sh --with-scale
 ```
 
-**组件开关**(`cluster.conf` 中 `true/false`):`K8S_ENABLED` / `K8S_SCALE_ENABLED` / `HARBOR_ENABLED` / `CEPH_ENABLED` / `CEPH_CSI_ENABLED` / `GPU_OPERATOR_ENABLED` / `LWS_ENABLED` / `KEYCLOAK_ENABLED` / `KUEUE_ENABLED` / `KUBEVIRT_ENABLED` / `LUSTRE_CSI_ENABLED` / `LOCAL_PATH_ENABLED`(默认 false) / `REGISTRY_ENABLED`(默认 0) 等。
+**组件开关**(`cluster.conf` 中 `true/false`):`K8S_ENABLED` / `K8S_SCALE_ENABLED` / `HARBOR_ENABLED` / `CEPH_ENABLED` / `CEPH_CSI_ENABLED` / `GPU_OPERATOR_ENABLED` / `KEYCLOAK_ENABLED` / `KUEUE_ENABLED` / `KUBEVIRT_ENABLED` / `LUSTRE_CSI_ENABLED` / `LOCAL_PATH_ENABLED`(默认 false) / `REGISTRY_ENABLED`(默认 0) 等。
 
 ---
 

@@ -121,7 +121,7 @@ spec:
         claimName: ${TEST_PVC}
 YAML
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${LOCAL_YAML}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/${TEST_POD}.yaml" \
+        "${LOCAL_YAML}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/${TEST_POD}.yaml" \
         && SSH "${K} apply -f /tmp/${TEST_POD}.yaml" \
         && SSH "rm -f /tmp/${TEST_POD}.yaml"
     rm -f "${LOCAL_YAML}"
@@ -217,7 +217,7 @@ spec:
         claimName: verify-cephfs-pvc
 YAML
         scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-            "${LOCAL_FS}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/verify-cephfs.yaml" \
+            "${LOCAL_FS}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/verify-cephfs.yaml" \
             && SSH "${K} apply -f /tmp/verify-cephfs.yaml" \
             && SSH "rm -f /tmp/verify-cephfs.yaml"
         rm -f "${LOCAL_FS}"

@@ -34,7 +34,6 @@ init_remote_kubectl || exit 1
 MANIFEST="/etc/kubernetes/manifests/kube-vip.yml"
 DRILL="${VERIFY_KUBE_VIP_DRILL:-true}"
 SSH_KEY_PATH="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH_USER_NAME="${SSH_USER:-ubuntu}"
 
 # ---- 门禁: 以实际部署为准(静态 Pod 是否落盘), 不看配置开关 ----
 # ⚠ _host_ssh 一律传 **IP**, 不传主机名: 部署容器里通常没有节点名的 /etc/hosts 解析,
@@ -42,7 +41,7 @@ SSH_USER_NAME="${SSH_USER:-ubuntu}"
 _host_ssh() {   # _host_ssh <ip> <command...>
     local h="$1"; shift
     ssh -i "${SSH_KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER_NAME}@${h}" "$@" 2>/dev/null
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${h}")@${h}" "$@" 2>/dev/null
 }
 
 _MHOST=($(master_hosts))
