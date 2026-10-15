@@ -383,6 +383,9 @@ OFFLINE_ENV=(
     "CEPH_ENABLED=${_CEPH_PRELOAD}"
     "CEPH_CSI_ENABLED=${_CEPH_PRELOAD}"
     "CEPH_IMAGE_DIR=${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}"
+    # 节点 SSH 用户透传(root|ubuntu 单一旋钮; 与 06_k8s_deploy 同口径 —— 修包装器里
+    # ansible ping -u 的写死默认)
+    "CUBESTACK_REMOTE_USER=${SSH_USER}"
 )
 [ -n "${PRELOAD_IMAGE_PATTERNS+x}" ] && \
     OFFLINE_ENV+=("CUBESTACK_PRELOAD_IMAGE_PATTERNS=${PRELOAD_IMAGE_PATTERNS}")

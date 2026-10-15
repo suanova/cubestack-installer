@@ -145,10 +145,15 @@ cmd_repack() {   # repack <版本> --from-root DIR
 #   其余 10 项全部从树内表机械取值(禁手抄)。
 # v 前缀风格继承: 镜像 ref 直接把变量当 tag(registry.k8s.io/kube-apiserver:${K8S_VERSION}),
 #   而真实 tag 是 v1.35.8 ⇒ **v 是值的一部分**(少了就拉不到镜像)。树内表值多数不带 v,
-#   故按 cluster.conf.example 的同名声明继承写法(它是这些钉子的单一事实源)。
+#   故按仓库里的同名声明继承写法。事实源(2026-10-15 版本变量下沉后): cluster.defaults.conf;
+#   兼容回退 cluster.conf(用户覆盖) / cluster.conf.example(旧版式)。
 _style_prefix() {   # <键> → 输出 "v" 或 ""
-    local line v
-    line="$(grep -m1 -E "^$1=" "${REPO_ROOT}/deployments/config/cluster.conf.example" 2>/dev/null)"
+    local line="" f v
+    for f in         "${REPO_ROOT}/deployments/config/cluster.defaults.conf"         "${REPO_ROOT}/deployments/config/cluster.conf"         "${REPO_ROOT}/deployments/config/cluster.conf.example"; do
+        [ -f "${f}" ] || continue
+        line="$(grep -m1 -E "^$1=" "${f}" 2>/dev/null)"
+        [ -n "${line}" ] && break
+    done
     [ -n "${line}" ] || return 0
     v="${line#*=}"
     case "${v}" in *'${'*:-v*) printf 'v' ;; esac
@@ -186,7 +191,7 @@ _derive_profile() {   # <树根> <版本> <k8s_version>
 # 版本套装档案: kubespray ${ver}(本文件由 cubestack-version-dir.sh new 从树内表值机械推导)
 #
 # 规则(见 docs/kubespray-versioning/design.md §3.2):
-#   · 选定档案后, 本文件的版本面变量**接管** cluster.conf 的同名变量(档案 > cluster.conf);
+#   · 选定档案后, 本文件的版本面变量**接管** cluster.conf / cluster.defaults.conf 的同名变量(档案 > 两者);
 #   · 要手工钉某一项 → KUBESPRAY_PROFILE=none;
 #   · 字段真值由 check-modules.sh ⑯ 对照该版本树表值逐项断言。
 #   · K8S_VERSION=${k8s} 为**人工选定**的线(kubelet_checksums 表内; 表内全集见 ⑯ 输出), 其余为推导值。

@@ -91,7 +91,7 @@ fi
 init_remote_kubectl || exit 1
 
 # ★ 逐节点 SSH 公共函数(替代历史 4 处重复 NSSH() 定义): node_ssh <ip> <user> <cmd...>
-#   user 传 NODE_USER 或 ${SSH_USER:-ubuntu} 均可; 不依赖任何外层函数定义。
+#   user 传 NODE_USER / "$(ssh_user_for_ip <ip>)" 均可; 不依赖任何外层函数定义。
 node_ssh() {
     local _nip="$1" _nuser="$2"
     shift 2
@@ -216,7 +216,7 @@ if [ "${_LVM_DEB_PRESENT}" = "0" ]; then
             [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
         done
         [ -n "${_ip}" ] || continue
-        node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1 || _ALL_HAS_LVM=0
+        node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1 || _ALL_HAS_LVM=0
     done
     if [ "${_ALL_HAS_LVM}" = "0" ]; then
         err "lvm2 离线包未就绪且存储节点未安装 lvm —— 无法离线部署 Rook OSD(重启后逻辑卷需 lvm 激活)"
@@ -480,13 +480,14 @@ fi
 # ---------------- 6) 部署 Rook operator(crds → common → csi-operator → operator) ----------------
 say "[5/8] 部署 Rook operator(manifest: ${CEPH_ROOK_MANIFEST_DIR})..."
 REMOTE_DIR="/tmp/rook-manifests"
-# ★ 先建目录并立即 chown 给 SSH 用户: 此前 sudo mkdir 后目录属 root, scp(ubuntu)写不进去,
+# ★ 先建目录并立即 chown 给 SSH 用户: 此前 sudo mkdir 后目录属 root, 非 root 用户 scp 写不进去,
 #   5 个 manifest 全没拷过去 → apply crds.yaml 报 path does not exist(错误被 || true 吞掉)。
-SSH "sudo rm -rf ${REMOTE_DIR} && sudo mkdir -p ${REMOTE_DIR} && sudo chown ${SSH_USER:-ubuntu}:${SSH_USER:-ubuntu} ${REMOTE_DIR}" >/dev/null 2>&1
+#   ⚠ chown/scp 用**首个 master 的登录用户**(FIRST_MASTER_USER): root 部署=root, ubuntu 部署=ubuntu
+SSH "sudo rm -rf ${REMOTE_DIR} && sudo mkdir -p ${REMOTE_DIR} && sudo chown ${FIRST_MASTER_USER}:${FIRST_MASTER_USER} ${REMOTE_DIR}" >/dev/null 2>&1
 for f in crds.yaml common.yaml csi-operator.yaml operator.yaml toolbox.yaml; do
     [ -f "${CEPH_ROOK_MANIFEST_DIR}/${f}" ] || { warn "  缺 manifest: ${f}(重跑 rook-fetch-manifests.sh)"; continue; }
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-        "${CEPH_ROOK_MANIFEST_DIR}/${f}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${REMOTE_DIR}/${f}" \
+        "${CEPH_ROOK_MANIFEST_DIR}/${f}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:${REMOTE_DIR}/${f}" \
         || { err "  scp ${f} 到 master 失败(检查 SSH 密钥/节点连通)"; exit 1; }
 done
 SSH "sudo chown -R \$(id -un) ${REMOTE_DIR}" >/dev/null 2>&1 || true
@@ -501,8 +502,8 @@ done
 #   csi-operator 调和 CSI 驱动(集群内 CephCluster 或外部 Ceph 都需要)。
 #   已存在 ceph-csi-operator 且 CSI 驱动(csi-rbdplugin DS)已就绪 → 跳过(不需要重复安装);
 #   未就绪 → 安装(需要)。用 ssh 直连规避 "函数 + $(函数 \"串\")" 嵌套解析异常。
-_CSI_OP="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get deploy ceph-csi-operator --no-headers 2>/dev/null")" || true
-_CSI_DS="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get ds rook-ceph.rbd.csi.ceph.com-nodeplugin --no-headers 2>/dev/null")" || true
+_CSI_OP="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${FIRST_MASTER_USER}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get deploy ceph-csi-operator --no-headers 2>/dev/null")" || true
+_CSI_DS="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${FIRST_MASTER_USER}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get ds rook-ceph.rbd.csi.ceph.com-nodeplugin --no-headers 2>/dev/null")" || true
 if [ -n "${_CSI_OP}" ] && [ -n "${_CSI_DS}" ]; then
     say "  ceph-csi-operator + CSI 驱动已存在, 跳过安装 csi-operator.yaml(不需要重复安装)"
 else
@@ -677,13 +678,13 @@ else
                     #   导致子壳里 `_bstore_offsets: command not found`(候选偏移 dd 整段静默跳过)、
                     #   `_BSTORE_IMG` 为空(官方 zap 也被跳过)—— ② 只剩 wipefs+校验在跑。现补全:
                     #   函数一并 declare(远端展开)、镜像 ref 以环境前缀随调用注入(值无引号/空格, 安全)。
-                    node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo bash -s -- ${_d}" \
+                    node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "sudo bash -s -- ${_d}" \
                         <<< "$(bluestore_wipe_remote_lib; printf '\ntimeout -k 10 600 bash -c "$(declare -f _bstore_offsets bluestore_wipe_dev); _BSTORE_IMG="${_BSTORE_IMG}" bluestore_wipe_dev $1 || exit 1" _ "$1" || exit 1\n')" \
                         && ok "    ${_hn} ${_d} 已彻底清空(无 bluestore label 残留)" \
                         || { warn "    ${_hn} ${_d} 清盘未通过校验(上方已打印残留偏移)"; _WIPE_FAIL="${_WIPE_FAIL} ${_hn}:${_d}"; }
                 done
                 # 遗留 rbd 设备: 曾导致 osd-prepare 的 show-label 扫到挂起 IO(AIO 读 D 状态) → prepare 永久卡死
-                node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "ls /dev/rbd* >/dev/null 2>&1 && { sudo rm -f /dev/rbd* && echo '  残留 rbd 设备节点已删(/dev/rbd*)'; } || true" \
+                node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "ls /dev/rbd* >/dev/null 2>&1 && { sudo rm -f /dev/rbd* && echo '  残留 rbd 设备节点已删(/dev/rbd*)'; } || true" \
                     | grep -v '^$' || true
             done
         fi
@@ -703,11 +704,11 @@ else
             [ -n "${_ip}" ] || continue
             if [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
                 say "  清理 ${_hn} /var/lib/rook 残留(mon-* + rook-ceph/osd 元数据 + config/keyring)..."
-                node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-* /var/lib/rook/rook-ceph 2>/dev/null; true" \
+                node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "sudo rm -rf /var/lib/rook/mon-* /var/lib/rook/rook-ceph 2>/dev/null; true" \
                     && ok "    ${_hn} /var/lib/rook 已清空" || warn "    ${_hn} /var/lib/rook 清理失败"
             else
                 say "  清理 ${_hn} 残留 mon store(/var/lib/rook/mon-*, 全新 mon 状态; osd 元数据保留辅助认领)..."
-                node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-*" || warn "    ${_hn} mon store 清理失败(节点全新无残留可忽略)"
+                node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "sudo rm -rf /var/lib/rook/mon-*" || warn "    ${_hn} mon store 清理失败(节点全新无残留可忽略)"
             fi
         done
     fi
@@ -793,7 +794,7 @@ else
     done
 } > "${LOCAL_CR}"
 scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-    "${LOCAL_CR}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/cephcluster.yaml" >/dev/null 2>&1
+    "${LOCAL_CR}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/cephcluster.yaml" >/dev/null 2>&1
 SSH "${K} apply -f /tmp/cephcluster.yaml" || { rm -f "${LOCAL_CR}"; err "应用 CephCluster CR 失败(检查 /tmp/cephcluster.yaml 与 rook operator 日志)"; exit 1; }
 rm -f "${LOCAL_CR}"
 
@@ -973,7 +974,7 @@ rm -f "${LOCAL_CR}"
             [ "${NODE_HOSTNAME}" = "${_hn3}" ] && { _ip3="${NODE_IP}"; break; }
         done
         [ -n "${_ip3}" ] || continue
-        node_ssh "${_ip3}" "${SSH_USER:-ubuntu}" "sudo chronyc makestep >/dev/null 2>&1 || true; sudo chronyc -a makestep >/dev/null 2>&1 || true" || true
+        node_ssh "${_ip3}" "$(ssh_user_for_ip "${_ip3}")" "sudo chronyc makestep >/dev/null 2>&1 || true; sudo chronyc -a makestep >/dev/null 2>&1 || true" || true
     done
     # 重启 mon deployments 触发 timecheck 重新采样(Rook 会重建, quorum 短暂重建, 不影响存储)
     SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-mon-a deploy/rook-ceph-mon-b deploy/rook-ceph-mon-c >/dev/null 2>&1" || true

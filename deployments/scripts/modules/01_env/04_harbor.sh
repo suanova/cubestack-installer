@@ -13,7 +13,8 @@
 #     modules/03_addon/03_k8s_registry.sh, REGISTRY_ENABLED 默认 1)
 #   · Harbor 默认关闭(HARBOR_ENABLED=false), 未来需要外部 push 场景时在此实现
 #   · 接入方法: 将下方 STEPS 伪代码替换为真实命令, 或 ADDON_STUB_EXEC=1 试执行
-# 数据源: cluster.conf (HARBOR_ENABLED / HARBOR_DOMAIN / HARBOR_IP / HARBOR_STORAGE_CLASS)
+# 数据源: cluster.conf (HARBOR_ENABLED) + cluster.defaults.conf (HARBOR_DOMAIN)
+#   (原 HARBOR_IP / HARBOR_STORAGE_CLASS 为死变量, 2026-10-15 审计删除)
 # ============================================================
 set -euo pipefail
 

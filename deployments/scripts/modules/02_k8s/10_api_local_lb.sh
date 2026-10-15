@@ -45,8 +45,9 @@ SSH_USER_NAME="${SSH_USER:-ubuntu}"
 
 _hssh() {  # _hssh <ip> <cmd...>
     local h="$1"; shift
+    # 登录用户按目标节点在 NODES 的解析值(逐行覆盖优先; 见 lib-common ssh_user_for_ip)
     ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER_NAME}@${h}" "$@"
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${h}")@${h}" "$@"
 }
 
 _workers() {  # 输出所有 worker IP(每行一个)

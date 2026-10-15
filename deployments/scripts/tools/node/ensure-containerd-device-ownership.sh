@@ -53,14 +53,10 @@ SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 SSH_BASE_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8)
 
 # 按 IP 找 NODES 里的 user/pw(node_parse 归一化); 找不到用全局默认
+# 按 IP 找 NODES 里的 user(node_parse 归一化; "-" → 全局 SSH_USER); 找不到用全局默认
+# 2026-10-15: 收编到 lib-common 的 ssh_user_for_ip(单一实现, 勿再各自内联)
 _node_user_of() {  # <ip>
-    local _l
-    for _l in "${NODES[@]:-}"; do
-        [ -z "${_l}" ] && continue
-        node_parse "${_l}"
-        [ "${NODE_IP}" = "$1" ] && { echo "${NODE_USER:-ubuntu}"; return 0; }
-    done
-    echo "${SSH_USER:-ubuntu}"
+    ssh_user_for_ip "$1"
 }
 _node_pw_of() {    # <ip>
     local _l

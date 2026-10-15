@@ -39,7 +39,7 @@ done
 _ssh_p() {  # _ssh_p <ip> <cmd>   —— 只读探测
     ssh -i "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}" \
         -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${SSH_USER:-ubuntu}@${1}" "$2" 2>/dev/null
+        "$(ssh_user_for_ip "${1}")@${1}" "$2" 2>/dev/null
 }
 
 FM_IP="$(first_master_ip 2>/dev/null || true)"

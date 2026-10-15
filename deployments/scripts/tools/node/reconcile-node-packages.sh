@@ -29,7 +29,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-DRY=0; USER="${SSH_USER:-ubuntu}"; IPS=()
+# USER 留空 = 按节点逐个解析(ssh_user_for_ip: NODES 逐行覆盖 → 全局 SSH_USER), --user 显式覆盖全部
+DRY=0; USER=""; IPS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --ip) IPS+=("${2:?--ip 需要地址}"); shift 2 ;;
@@ -182,19 +183,20 @@ REMOTE_EOF
 FAIL=0
 for ip in "${IPS[@]}"; do
     say "── ${ip} ──"
-    if ! ssh "${SSH_OPTS[@]}" "${USER}@${ip}" "rm -rf /tmp/cubestack-debs && mkdir -p /tmp/cubestack-debs" 2>/dev/null; then
+    _u="${USER:-$(ssh_user_for_ip "${ip}")}"
+    if ! ssh "${SSH_OPTS[@]}" "${_u}@${ip}" "rm -rf /tmp/cubestack-debs && mkdir -p /tmp/cubestack-debs" 2>/dev/null; then
         warn "  SSH 不可达, 跳过"; FAIL=1; continue
     fi
-    if ! scp -q "${SSH_OPTS[@]}" "${DEBS[@]}" "${REMOTE}" "${USER}@${ip}:/tmp/cubestack-debs/" 2>/dev/null; then
+    if ! scp -q "${SSH_OPTS[@]}" "${DEBS[@]}" "${REMOTE}" "${_u}@${ip}:/tmp/cubestack-debs/" 2>/dev/null; then
         warn "  分发离线包失败, 跳过"; FAIL=1; continue
     fi
     _args=""; [ "${DRY}" = "1" ] && _args="--dry-run"
-    if ssh "${SSH_OPTS[@]}" "${USER}@${ip}" "sudo bash /tmp/cubestack-debs/$(basename "${REMOTE}") ${_args}" 2>&1; then
+    if ssh "${SSH_OPTS[@]}" "${_u}@${ip}" "sudo bash /tmp/cubestack-debs/$(basename "${REMOTE}") ${_args}" 2>&1; then
         ok "  ${ip}: 对账完成, apt 依赖图健康"
     else
         FAIL=1
     fi
-    ssh "${SSH_OPTS[@]}" "${USER}@${ip}" "rm -rf /tmp/cubestack-debs" >/dev/null 2>&1 || true
+    ssh "${SSH_OPTS[@]}" "${_u}@${ip}" "rm -rf /tmp/cubestack-debs" >/dev/null 2>&1 || true
 done
 
 [ "${FAIL}" = "0" ] || { err "有节点 apt 依赖图仍不健康(见上; 未修复前 kubespray 的 system_packages 必失败)"; exit 1; }

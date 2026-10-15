@@ -74,7 +74,7 @@ SSH_KEY_PATH="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 #   用主机名会静默连不上(stderr 被丢弃时极难排查)。主机名只用于 vip_nodename。
 _ssh() {   # _ssh <ip> <cmd>
     ssh -i "${SSH_KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${1}" "$2" 2>/dev/null
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${1}")@${1}" "$2" 2>/dev/null
 }
 
 # 并行数组: _MHOST[i] = 主机名(vip_nodename), _MIP[i] = IP(SSH 目标)

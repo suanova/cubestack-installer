@@ -139,15 +139,16 @@ unset _ADDONS_YML
 if [ -n "${METALLB_POOL:-}" ] && [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "metallb" ]; then
     _FM_IP="$(first_master_ip 2>/dev/null || true)"
     if [ -n "${_FM_IP}" ]; then
+        _FM_USER="$(ssh_user_for_ip "${_FM_IP}")"
         _cur_pool="$(ssh -i "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}" \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
-            "${SSH_USER:-ubuntu}@${_FM_IP}" \
+            "${_FM_USER}@${_FM_IP}" \
             "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n metallb-system get ipaddresspool -o jsonpath='{.items[0].spec.addresses[0]}' 2>/dev/null" 2>/dev/null || true)"
         if [ -n "${_cur_pool}" ] && [ "${_cur_pool}" != "${METALLB_POOL}" ]; then
             warn "集群 MetalLB 池=${_cur_pool} 与 cluster.conf METALLB_POOL=${METALLB_POOL} 不一致, 重新应用池 CR..."
             ssh -i "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}" \
                 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
-                "${SSH_USER:-ubuntu}@${_FM_IP}" \
+                "${_FM_USER}@${_FM_IP}" \
                 "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n metallb-system patch ipaddresspool primary --type=merge -p '{\"spec\":{\"addresses\":[\"${METALLB_POOL}\"]}}' 2>/dev/null" >/dev/null 2>&1 \
                 && ok "已重新应用 MetalLB 池 → ${METALLB_POOL}" \
                 || warn "重新应用池失败(请手动: kubectl -n metallb-system patch ipaddresspool primary --type=merge -p '{\"spec\":{\"addresses\":[\"${METALLB_POOL}\"]}}')"
@@ -156,7 +157,7 @@ if [ -n "${METALLB_POOL:-}" ] && [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "metallb
         fi
         unset _cur_pool
     fi
-    unset _FM_IP
+    unset _FM_IP _FM_USER
 fi
 
 # ⚠ 覆盖安装前置: 检测节点上的**旧集群残留**(跨小版本 / 旧二进制)并(经确认后)自动清除。
@@ -193,6 +194,9 @@ OFFLINE_ENV=(
     "CUBESTACK_LOCAL_REPO_DIR=${LOCAL_REPO_DIR}"
     "CEPH_ENABLED=${_CEPH_SYSTEM_ON}"
     "CEPH_IMAGE_DIR=${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}"
+    # 节点 SSH 用户透传(root|ubuntu 单一旋钮): 修 cubestack-offline.sh 里 ansible ping -u 的
+    # 写死默认(ubuntu) —— 否则 SSH_USER=root 的集群在该连通性检查处必然失败(2026-10-15)。
+    "CUBESTACK_REMOTE_USER=${SSH_USER}"
 )
 unset _CEPH_SYSTEM_ON
 [ -n "${PRELOAD_IMAGE_PATTERNS+x}" ] && \

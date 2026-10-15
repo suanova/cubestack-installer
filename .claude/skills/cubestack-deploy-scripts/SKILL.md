@@ -37,6 +37,7 @@ description: CubeStack 部署脚本开发规范技能。当需要编写、修改
 | 文件 | 用途 |
 |---|---|
 | `config/cluster.conf.example` | 唯一配置源模板(所有变量在此声明, 含组件开关) |
+| `config/cluster.defaults.conf` | 高级/默认值层(组件深度参数/离线路径/…; 随仓库分发, load_config 自动加载) |
 | `deployments/scripts/lib-common.sh` | 公共库(配置加载/工具函数, 所有脚本 source) |
 | `deployments/scripts/lib-module.sh` | 模块框架(自动发现/元数据解析/调度/旧名别名) |
 | `deployments/scripts/deploy-cluster.sh` | 统一入口(薄壳: 参数解析 + 调度) |
@@ -100,7 +101,7 @@ load_config
 2. **写元数据头**: 按上面模板填写 MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE, 需要依赖顺序时加 `REQUIRES`(引用必须存在、不可成环)
 3. **统一远端初始化**: 需要 SSH 到 master 执行 kubectl 的模块**必须**调用 `init_remote_kubectl || exit 1`(幂等, 提供 FIRST_MASTER/SSH_KEY/SSH()/K/SSH_CMD)。**禁止**在模块内手抄 `FIRST_MASTER=.../SSH() {...}/K="sudo kubectl..."` 初始化块 —— 曾致 `K: unbound variable` 部署成功后崩溃
 4. **实现逻辑**: 复用 `tools/` 工具脚本(`bash "${SCRIPT_DIR}/tools/<领域>/xxx.sh"`)或写新逻辑
-5. **加开关**(可选): 在 `config/cluster.conf.example` 加 `XXX_ENABLED` 变量, TOGGLE 指向它
+5. **加开关**(可选): 在 `config/cluster.conf.example`(**常用组件开关**)或 `config/cluster.defaults.conf`(**子开关/细节开关**)加 `XXX_ENABLED` 变量, TOGGLE 指向它(⑦ 校验两文件之一)
 6. **完成**: 无需修改 `deploy-cluster.sh` / `lib-module.sh` / 任何注册表(operator 自动派生)
 7. **登记(装进集群的组件)**: 安装成功点调用 `record_installed_component "<key>"`(优雅覆盖登记; 写失败仅告警, 不影响部署)
 8. **声明可卸载(可卸载的组件)**: 头部声明 `# UNINSTALL: 1` + 实现 `CUBESTACK_MODULE_ACTION=uninstall` 卸载分支(**必须在 TOGGLE 检查之前**; 幂等/有界/告警不中止; check-modules ⑲ 校验)
@@ -186,7 +187,11 @@ trap '清理测试资源' EXIT
 
 ## cluster.conf 组件开关(单一配置源)
 
-- `config/cluster.conf` 是**唯一**配置入口,所有脚本只从它读取(环境变量可覆盖)
+- 配置分**两层(2026-10-15 拆分)**:
+  - `config/cluster.conf`(模板 `cluster.conf.example`; 真实配置 gitignored)= **必改项 + 组件启停开关 + 高频变量**;
+  - `config/cluster.defaults.conf`(随仓库分发; 一般不改)= **高级/默认值层**(组件深度参数/离线路径/NTP/CIDR/镜像源/Ceph 全套…)。
+  - `load_config` 主文件先、defaults 后(全 `${VAR:-default}` 自默认)⇒ 要覆盖高级项**在 cluster.conf 写同名变量**即可;每个变量只许有一个声明处(check-modules ⑦-b 断言两文件变量集互斥)。
+  - ⚠ 新增/移动变量时务必同步 `deployments/scripts/tools/offline/sync-to-container.sh` 的 FILES(两个 conf 都要进容器)。
 - 变量写法一律 `VAR="${VAR:-default}"`
 - **`cluster.conf` 为主, 职责三分**(所有 operator 统一遵守):
   - **全量部署**: `--with-cubestack`/默认 = 基座 + cluster.conf 中已启用的**全部** operator; `--with-k8s` = 仅基座(跳过全部 operator)。
@@ -194,8 +199,7 @@ trap '清理测试资源' EXIT
   - **立即部署单个**: `--steps X` = 部署被指定的 X(自动带基座, 只部署被指定的 operator); `--steps verify` = 只跑验证模块。
   - **排除**: `--skip X` = 全量部署时剔除。
   - 新增 operator **无需改任何列表**: operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)= operator), 写 TOGGLE 即自动进入 --steps/--enable 调度。
-  - lb_haproxy/lb_keepalived(API-HA)默认 false, 需要时用 `--enable` 预启用 或 `--steps` 立即部署。
-- 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认false,已实现:默认官方 manifests.yaml bundle + kubectl apply --server-side; helm chart 保留于 lws/charts 供 cert-manager 用; 见 `docs/lws.md`)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
+- 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`
 - 新增配置项流程: ① cluster.conf.example 加带注释默认声明 → ② 脚本引用 → ③ 如需同步 kubespray group_vars, 在 `tools/k8s/sync-kubespray-config.sh` / `tools/k8s/sync-addons-config.sh` 加同步逻辑
 
 ## 模块体内规范
@@ -293,10 +297,20 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 ## NODES 节点格式(5字段, 不区分虚拟机/裸金属)
 
 - **cluster.conf NODES(5字段)**: `role,hostname,ip,ssh_user,ssh_password`
+  - `ssh_user` 为 `-`(或空) → **跟随全局 `SSH_USER`**(cluster.conf, `root|ubuntu`, 默认 ubuntu;
+    2026-10-15 起的"安装用户单一旋钮"): 免密注入 / 即席 SSH / kubespray `ansible_user` 全跟随;
+    显式写用户名 → 该节点覆盖(与全局不一致时 `deploy-cluster.sh` 启动点名告警)。
   - `ssh_password` 为 `-` → 用默认密码 `SSH_DEFAULT_PASSWORD`(全节点默认一致);
     显式密码 → 该节点独立密码(**支持裸金属不同密码场景**)。
   - 解析统一走 `lib-common.sh` 的 `node_parse`(输出 NODE_ROLE/NODE_HOSTNAME/NODE_IP/NODE_USER/NODE_PW 等全局变量),
     旧 10 字段格式(含 mac/mem/cpu/disk/node_type)向后兼容。
+  - **按 IP 查节点用户**一律用 `ssh_user_for_ip <ip>`(lib-common; 未命中回退全局 `SSH_USER`);
+    勿再手抄 NODES 遍历, 也勿在新代码写 `"${SSH_USER:-ubuntu}@<节点>"`(会绕过逐行覆盖)。
+  - ⚠ 环境变量传参的**赋值位置**: `sudo SSH_USER=root ./deploy-cluster.sh` 有效(赋值在 sudo 之后,
+    sudo 视作对命令的环境赋值); `SSH_USER=root sudo ./deploy-cluster.sh` **无效**(赋值在 sudo 之前,
+    会被 sudo 的环境重置清掉)。长期配置推荐直接写 cluster.conf。
+  - ⚠ root 安装假设节点装有 sudo(root 执行 sudo 免密): `k8s_passwordless` 模块对 root 节点做
+    sudo 存在性预检, 缺失时明确报错并给指引(远端命令大量经 sudo 提权, 不是可选项)。
 - **虚拟机创建独立执行, 主程序不判断节点类型**:
   - 需要创建虚拟机的节点在 `tools/vm/vm-nodes.conf`(10字段)定义;
     **`sudo ./deployments/scripts/tools/vm/create-vms.sh` 单独执行**(创建/启动 + 自动注入 5 字段到 NODES);
@@ -330,7 +344,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
 - **放哪**:`deployments/cubestack-addon/<组件>/`(一个 chart 一个子目录)。`.gitignore` 只挡
-  `offline-files/*`,不挡 `cubestack-addon/`,所以 `.tgz` 直接 `git add` 即可(如 lws / rook 的 chart 已在库里)。
+  `offline-files/*`,不挡 `cubestack-addon/`,所以 `.tgz` 直接 `git add` 即可(如 rook 的 chart 已在库里)。
 - **什么形态**:小 chart 放 `.tgz` + **同时提交 `<tgz>.digest` 边车**;大 chart(带几十个子 chart)
   放解包源码目录(含 `Chart.yaml`)。
 - **怎么装**:走共享助手,**不要手抄 pull/回退逻辑**:
@@ -341,7 +355,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   语义:online 拉远端 → 比 `Digest:` 与边车 → **未变继续用本地**(仓库保持干净)、有更新才覆盖本地
   并提示 commit、拉取失败降级回退本地;offline 完全不联网;最后判一次本地副本在不在,不在就 `err`。
 - **怎么刷新**:目前**没有**脚本化刷新工具 —— 手工 `helm pull` 覆盖 vendored 副本
-  (示例见 `deployments/cubestack-addon/lws/CUBESTACK.md` 的"升级到新版本"),`.tgz` 形态要一并更新
+  (手工 `helm pull` 覆盖 vendored 副本 —— 若为 `.tgz` 形态, 记得同步更新 `<tgz>.digest` 边车),`.tgz` 形态要一并更新
   `<tgz>.digest` 边车。跑完**必须 commit** —— 不提交等于没刷新。
 - **为什么是"恒用本地"而不是"线上优先"**:曾有模块写了"拉取失败回退本地 chart",
   但仓库里压根没有那份文件 —— 私服一抖动回退就是空转。回退只有在本地确实有一份时才有意义。
@@ -478,7 +492,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 ## Harbor 统一镜像源(镜像清单 / 同步 / 备料, 详见 docs/harbor-mirror.md)
 
 - **唯一数据源**: `deployments/config/images.manifest`, 格式 `<group> <上游ref> [tar文件名覆盖]`;
-  ref 用 `${VAR}` 引用 **cluster.conf** 的版本变量(CI 上回退 cluster.conf.example 默认值)
+  ref 用 `${VAR}` 引用 **cluster.defaults.conf** 的版本变量(CI 上回退 defaults/example 默认值)
   ⇒ **升级只改 cluster.conf §3.3 一处**, 全链跟随。
 - **group → 目录**: 默认 `offline-files/<group>/`; 例外 `k8s-base`/`ceph` → `offline-files/kubespray/images/`
   (节点预加载走 kubespray)。

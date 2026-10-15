@@ -14,7 +14,7 @@ load_config
 FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
 SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
+           "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}" "$@"; }
 K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 
 say "验证集群节点 GPU 识别情况(metax-tech.com/gpu, 入口=${FIRST_MASTER})..."

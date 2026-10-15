@@ -125,6 +125,18 @@ rsync -a \
 say "同步 skills ..."
 rsync -a --exclude '.git' "${REPO_ROOT}/skills" "${OUT}/"
 
+# ---------------- 配置模板就位校验(2026-10-15 用户口径: 必须进镜像) ----------------
+# CLI 镜像必须含两个配置模板:
+#   cluster.conf.example  主文件模板(必改项+开关+凭据; 容器内 cp example→conf 的源头)
+#   cluster.defaults.conf 高级/默认值层(load_config 无条件加载)
+# 缺失后果是**静默**的: 容器内高级变量全部退化成内置兜底(离线路径/镜像源/Ceph 参数等大面积错值)。
+# 故在生成上下文时就硬失败(rsync 排除项只挡真实凭据 config/cluster.conf* / external-ceph* / minio.conf)。
+for _cf in cluster.conf.example cluster.defaults.conf; do
+    [ -f "${OUT}/deployments/config/${_cf}" ] \
+        || { err "构建上下文缺配置模板: deployments/config/${_cf}(检查 rsync 排除项)"; exit 1; }
+    ok "  配置模板就位: deployments/config/${_cf}"
+done
+
 # ---------------- CLI 工具链: 拷进构建上下文 bin/(base 层用) ----------------
 # 用户口径(2026-09-30): **常用且版本固定的工具全部打进 base 镜像**(不再靠运行期挂载补)。
 # 来源优先级: 离线**版本目录** offline-files/kubespray/<版本>/(首选) → 宿主机 command -v(兜底)。

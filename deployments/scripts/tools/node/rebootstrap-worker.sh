@@ -33,7 +33,7 @@ done
 
 say "从 ${FIRST_MASTER}(${FIRST_MASTER_IP}) 获取 kubeadm join 命令 ..."
 JOIN_CMD=""
-ssh ${SSH_OPTS} -o BatchMode=yes "${FIRST_MASTER_USER:-ubuntu}@${FIRST_MASTER_IP}" \
+ssh ${SSH_OPTS} -o BatchMode=yes "${FIRST_MASTER_USER:-${SSH_USER:-ubuntu}}@${FIRST_MASTER_IP}" \
     "sudo kubeadm token create --print-join-command 2>/dev/null" > /tmp/cubestack-join-cmd.txt 2>/dev/null || { err "生成 join token 失败"; exit 1; }
 JOIN_CMD="$(cat /tmp/cubestack-join-cmd.txt)"
 rm -f /tmp/cubestack-join-cmd.txt

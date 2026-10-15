@@ -116,9 +116,9 @@ if [ "${REGISTRY_ON}" = "1" ]; then
         REMOTE_TAR="/tmp/busybox-${TEST_TAG}.tar"
         # ★ 2026-09-14 防御: 部署机兼 master(自 scp)时源 tar 可能属 root(0600, 如离线下载经 sudo 生成),
         #   ssh 以 ${SSH_USER} 读源会 EACCES → 先预检可读性给出明确指引(而非 scp 裸报错)。
-        [ -r "${TAR}" ] || { err "离线 tar 不可读(属主/权限): ${TAR}(若由 sudo 下载, 请 chmod 644 或 chown ${SSH_USER:-ubuntu})"; exit 1; }
+        [ -r "${TAR}" ] || { err "离线 tar 不可读(属主/权限): ${TAR}(若由 sudo 下载, 请 chmod 644 或 chown ${FIRST_MASTER_USER})"; exit 1; }
         scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-            "${TAR}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${REMOTE_TAR}" \
+            "${TAR}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:${REMOTE_TAR}" \
             || { err "scp busybox.tar 到 ${FIRST_MASTER} 失败"; exit 1; }
         SSH "sudo ctr -n k8s.io images import ${REMOTE_TAR} && sudo ctr -n k8s.io images tag docker.io/library/busybox:latest ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/${PUSH_NS}/busybox:${TEST_TAG} && sudo ctr -n k8s.io images push --plain-http ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/${PUSH_NS}/busybox:${TEST_TAG}" \
             || { err "节点 ctr push 失败(检查: 节点 containerd certs.d 是否信任 registry.cubestack.io / /etc/hosts 是否有 registry.cubestack.io)"; exit 1; }
@@ -199,7 +199,7 @@ spec:
       claimName: ${PVC_NAME}
 YAML
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${YAML}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/${TEST_NS}-resources.yaml" \
+        "${YAML}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/${TEST_NS}-resources.yaml" \
         && SSH "${K} apply -f /tmp/${TEST_NS}-resources.yaml" \
         && SSH "rm -f /tmp/${TEST_NS}-resources.yaml"
     rm -f "${YAML}"
@@ -252,7 +252,7 @@ spec:
       claimName: ${PVC_NAME}
 POD2YAML
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${POD2_YAML}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/${TEST_NS}-pod2.yaml" \
+        "${POD2_YAML}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/${TEST_NS}-pod2.yaml" \
         && SSH "${K} apply -f /tmp/${TEST_NS}-pod2.yaml" \
         && SSH "rm -f /tmp/${TEST_NS}-pod2.yaml"
     rm -f "${POD2_YAML}"
@@ -278,7 +278,7 @@ POD2YAML
     [ -n "${POD2_NODE}" ] && [ -n "${PV_PATH}" ] && [ -n "${PV_NODE_IP}" ] \
         || { err "未能定位 PV 所在节点(node=${POD2_NODE:-?}, ip=${PV_NODE_IP:-?}, path=${PV_PATH:-?}); 检查 kubectl get pv 输出(spec.hostPath.path) 与 cluster.conf NODES"; exit 1; }
     DISK_MARKER="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${SSH_USER:-ubuntu}@${PV_NODE_IP}" "sudo cat ${PV_PATH}/marker.txt 2>/dev/null" 2>/dev/null || true)"
+        "$(ssh_user_for_ip "${PV_NODE_IP}")@${PV_NODE_IP}" "sudo cat ${PV_PATH}/marker.txt 2>/dev/null" 2>/dev/null || true)"
     echo "    node=${POD2_NODE}(${PV_NODE_IP})  path=${PV_PATH}  →  ${DISK_MARKER}"
     [ "${DISK_MARKER}" = "${TEST_MARKER}" ] \
         || { err "宿主机落盘内容(${DISK_MARKER:-<空>})不一致 —— 数据未真正持久化"; exit 1; }

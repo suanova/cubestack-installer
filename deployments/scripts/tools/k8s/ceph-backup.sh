@@ -56,7 +56,7 @@ cmd_save() {
     say "备份 Ceph 恢复信息 → ${FIRST_MASTER}:${BACKUP_DIR}/ (时间戳 ${ts}, 保留 ${RETENTION} 份)..."
     SSH "sudo mkdir -p ${BACKUP_DIR}/current ${BACKUP_DIR}/${ts} && sudo chown -R \$(id -un) ${BACKUP_DIR}" >/dev/null 2>&1
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-        "${cr}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/cephcluster-backup.yaml" \
+        "${cr}" "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/cephcluster-backup.yaml" \
         || { err "scp 备份 CR 失败"; exit 1; }
     # current/ 与历史版本都保留(防覆盖); 历史版本由轮转清理
     SSH "cp ${BACKUP_DIR}/${ts}/cephcluster-backup.yaml ${BACKUP_DIR}/current/cephcluster-backup.yaml && \
@@ -72,7 +72,7 @@ cmd_save() {
         _SECRET_FILE="/tmp/rook-ceph-mon-${ts}.yaml"
         printf '%s\n' "${_SECRET_YAML}" > "${_SECRET_FILE}"
         scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-            "${_SECRET_FILE}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/rook-ceph-mon-secret.yaml" \
+            "${_SECRET_FILE}" "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/rook-ceph-mon-secret.yaml" \
             && SSH "cp ${BACKUP_DIR}/${ts}/rook-ceph-mon-secret.yaml ${BACKUP_DIR}/current/rook-ceph-mon-secret.yaml" \
             && ok "  已备份 rook-ceph-mon secret(认领旧 OSD 数据的凭据, 整 ns 重建后可 restore-secret 恢复)" \
             || warn "  rook-ceph-mon secret 备份失败(整 ns 重建后将无法自动认领旧数据)"
@@ -82,7 +82,7 @@ cmd_save() {
     fi
     if [ -n "${meta}" ] && [ -s "${meta}" ]; then
         scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-            "${meta}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/node-disks.txt" 2>/dev/null || true
+            "${meta}" "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/node-disks.txt" 2>/dev/null || true
     fi
     # ★ mon store 备份(2026-09-07 新增, 认领恢复的最后一块拼图):
     #   Rook 认领旧 OSD 数据仅靠 secret(fsid)不够 —— OSD 本地 bluestore 里缓存的 osdmap epoch
@@ -113,7 +113,7 @@ cmd_save() {
                 && scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
                     "${NODE_USER:-ubuntu}@${NODE_IP}:/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" "/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" \
                 && scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-                    "/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/monstore-${NODE_HOSTNAME}.tar.gz" \
+                    "/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}:${BACKUP_DIR}/${ts}/monstore-${NODE_HOSTNAME}.tar.gz" \
                 && SSH "cp ${BACKUP_DIR}/${ts}/monstore-${NODE_HOSTNAME}.tar.gz ${BACKUP_DIR}/current/monstore-${NODE_HOSTNAME}.tar.gz"; then
                 _OK=1; break
             fi
@@ -164,7 +164,7 @@ cmd_restore_secret() {
     # 拉回本地 → kubectl apply 恢复(secret 的 data 是 base64, 直接 apply 即可)
     _TMP="/tmp/rook-ceph-mon-restore.yaml"
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-        "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${_SRC}" "${_TMP}" || { err "拉取备份 secret 失败"; return 1; }
+        "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}:${_SRC}" "${_TMP}" || { err "拉取备份 secret 失败"; return 1; }
     if SSH "kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f -" < "${_TMP}" 2>/dev/null; then
         _FSID="$( (SSH "${K} -n ${CEPH_NAMESPACE} get secret rook-ceph-mon -o jsonpath='{.data.fsid}' 2>/dev/null" || true) | base64 -d 2>/dev/null )"
         ok "  rook-ceph-mon secret 已恢复(fsid=${_FSID:-?}); Rook 将凭它认领旧 OSD 数据"
@@ -230,7 +230,7 @@ cmd_restore_monstore() {
         fi
         # 拉回本地 → 分发到节点解包到 /var/lib/rook/(保留 mon-* 目录名)
         scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-            "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${_TAR}" "/tmp/monstore-${NODE_HOSTNAME}.tar.gz" \
+            "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}:${_TAR}" "/tmp/monstore-${NODE_HOSTNAME}.tar.gz" \
             || { warn "  ${NODE_HOSTNAME}: 拉取 mon store 备份失败"; continue; }
         # 先清旧 mon-*(避免新旧混用), 再解包到 /var/lib/rook
         if ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${NODE_USER:-ubuntu}@${NODE_IP}" \
@@ -297,7 +297,7 @@ if \${K} -n rook-ceph get cephcluster rook-ceph -o yaml > "\${BACKUP_DIR}/\${TS}
 fi
 EOF
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-        /tmp/ceph-backup-refresh.sh "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/ceph-backup-refresh.sh"
+        /tmp/ceph-backup-refresh.sh "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}:/tmp/ceph-backup-refresh.sh"
     SSH "sudo mkdir -p ${BACKUP_DIR}/scripts && sudo cp /tmp/ceph-backup-refresh.sh ${BACKUP_DIR}/scripts/refresh.sh && sudo chmod +x ${BACKUP_DIR}/scripts/refresh.sh && \
          sudo tee /etc/systemd/system/ceph-backup-refresh.service >/dev/null <<'EOS'
 [Unit]

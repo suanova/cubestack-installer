@@ -117,4 +117,4 @@ K8S_API_VIP="${K8S_API_VIP:-}"                         # 空=自动推导
 
 - [../kube-vip-api-ha.md](../kube-vip-api-ha.md) — kube-vip 的**实现细节**（两阶段、脑裂事故、决策 D1-D7、**§19 收编**）。本组文档是入口高可用的**总体方案**，两者互补。
 - [../cluster-architecture.md](../cluster-architecture.md) — 集群网络与存储总览
-- [../troubleshooting.md](../troubleshooting.md) — 三.10 / 三.11 记录了 kube-vip LB 模式的静默失效
+- [../troubleshooting.md](../troubleshooting.md) — 三.9 / 三.10 记录了 kube-vip LB 模式的静默失效

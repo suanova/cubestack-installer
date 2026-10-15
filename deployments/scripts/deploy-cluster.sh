@@ -9,15 +9,15 @@
 # 阶段目录(按部署环境准备的阶段组织):
 #   01_env/    阶段一: 环境准备(VM/SSH/本地registry/HAProxy/Keepalived — 部署 kubespray 之前)
 #   02_k8s/    阶段二: 离线部署 kubespray(不依赖 VM/裸金属)
-#   03_addon/  阶段三: 附加组件(集群部署后: GPU/LWS/Harbor/Ceph/P2/P3)
+#   03_addon/  阶段三: 附加组件(集群部署后: GPU/Harbor/Ceph/P2/P3)
 #
 # 模块(stages):
 #   env 阶段:  vm_network vm_sshkey vm_create harbor
 #   k8s 阶段:  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp
 #              k8s_deploy(默认关) k8s_scale(默认关)
-#   addon 阶段: gpu_operator gpu_lws k8s_registry ceph ceph_csi ceph_backup
+#   addon 阶段: gpu_operator k8s_registry ceph ceph_csi ceph_backup
 #              keycloak kueue kubevirt lustre_csi   (01~19 中间件, 默认关)
-#              cubestack_apps(20 起自研模块占位, 默认关)
+#              20 起为自研模块(cubestack_operator 25_…, 见 4.6b)
 #   验证:      verify_<组件>(自动发现; --steps verify 不指定 operator 默认执行全部 verify_*)
 #   运维:      ceph_backup(Ceph 备份/恢复, 默认关, --steps ceph_backup 单独执行)
 #
@@ -30,14 +30,14 @@
 #   sudo ./deploy-cluster.sh --with-cubestack               # 全量: 基座 + cluster.conf 中已启用的 operator
 #   sudo ./deploy-cluster.sh --steps vm_create,k8s_deploy   # 只跑指定模块
 #   sudo ./deploy-cluster.sh --skip k8s_hosts --with-cubestack   # 跳过某模块的全量部署
-#   sudo ./deploy-cluster.sh --enable gpu_operator,lws      # 只把开关写入 cluster.conf 预启用(不部署)
+#   sudo ./deploy-cluster.sh --enable gpu_operator,ceph     # 只把开关写入 cluster.conf 预启用(不部署)
 # #   sudo ./deploy-cluster.sh --phase k8s                    # 仅运行 k8s 阶段
 #   sudo ./deploy-cluster.sh --only <host> --with-k8s       # 仅处理指定节点
 #   sudo ./deploy-cluster.sh --with-scale                   # 扩容(仅 k8s_scale; 先登录 master 核对后 diff 新节点, 填入 cluster.conf)
 #   sudo ./deploy-cluster.sh --list / --list-steps / --fresh
-# 数据源: config/cluster.conf
+# 数据源: config/cluster.conf(必改项+开关+高频) + config/cluster.defaults.conf(高级/默认值层, 自动加载)
 #
-# 兼容: 旧模块名(net/ssh_key/vm/ssh_passwordless/worker_bm/hosts/inventory/ntp/k8s/scale/lws)自动映射到新名
+# 兼容: 旧模块名(net/ssh_key/vm/ssh_passwordless/worker_bm/hosts/inventory/ntp/k8s/scale)自动映射到新名
 # ============================================================
 set -euo pipefail
 
@@ -67,7 +67,7 @@ usage() {
           k8s_deploy(默认关, --with-k8s)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           local_path(可选) k8s_registry 组件(全部可单独部署的组件见下方"组件单独部署"清单)
-          自研: cubestack_apps(占位)
+          自研: cubestack_operator(平台 Operator, 见 4.6b)
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
@@ -113,8 +113,10 @@ $(_component_meta_list stub)
       harbor-sync-images.sh      上游 → Harbor(CI/联网机; 项目不存在自动创建)
       harbor-save-images.sh      Harbor → offline-files/<group>/*.tar(联网机)
       check-image-manifest.sh    清单静态校验(+ --kubespray 交叉核对 / --harbor 漂移报告)
-    升级组件版本只改 cluster.conf §3.3「镜像版本」一处, 全链自动跟随。详见 docs/harbor-mirror.md。
+    升级组件版本只改 cluster.defaults.conf 的「镜像版本」节一处, 全链自动跟随。详见 docs/harbor-mirror.md。
   · cluster.conf 的 NODES(5字段: role,hostname,ip,ssh_user,ssh_password)不区分虚拟机/裸金属;
+    ssh_user 写 "-" = 跟随全局 SSH_USER(cluster.conf, root|ubuntu, 默认 ubuntu —— 切换安装用户
+    只改 SSH_USER 一处); 显式写用户名 = 该节点覆盖(与全局不一致时部署启动会点名告警)。
     主程序不判断节点类型 — 需要创建虚拟机的节点在 tools/vm/vm-nodes.conf(10字段)定义,
     由 sudo ./deployments/scripts/tools/vm/create-vms.sh 独立执行(创建后自动注入 NODES)。
   · --only/--skip 均支持; 宿主网络初始化(vm_network)默认不再执行, 改由创建虚拟机时
@@ -147,7 +149,7 @@ $(_component_meta_list stub)
   sudo ./deploy-cluster.sh                          # 默认 = --with-cubestack(全量部署)
   sudo ./deploy-cluster.sh --with-k8s              # 仅部署 kubespray 基座(k8s+metallb+local-path+registry)
   sudo ./deploy-cluster.sh --skip gpu_operator --fresh   # 覆盖安装但排除 gpu_operator(--fresh 清状态)
-  sudo ./deploy-cluster.sh --enable lws             # 只把 LWS_ENABLED=true 写入 cluster.conf(不部署)
+  sudo ./deploy-cluster.sh --enable ceph            # 只把 CEPH_ENABLED=true 写入 cluster.conf(不部署)
   sudo ./deploy-cluster.sh --steps ceph            # 单独装/重跑 Ceph(不动基座; 接入自动处理)
   sudo ./deploy-cluster.sh --steps ceph --fresh     # 同上, 且清断点状态(REPEAT:0 模块重跑用)
   sudo ./deploy-cluster.sh --steps verify_ceph      # 只验证 Ceph(operator/CSI + ceph -s + RBD 块 I/O)
@@ -177,7 +179,7 @@ while [ $# -gt 0 ]; do
         --list)     LIST=1; shift ;;
         --list-steps) LIST_STEPS=1; shift ;;
         # --with-k8s: 仅 kubespray 基座(k8s + metallb/local-path/registry), 不含任何 operator
-        --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; SKIP_ARG="${SKIP_ARG},gpu_operator,gpu_lws,ceph,ceph_csi,keycloak,kueue,kubevirt,lustre_csi,cubestack_apps"; shift ;;
+        --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; SKIP_ARG="${SKIP_ARG},gpu_operator,ceph,ceph_csi,keycloak,kueue,kubevirt,lustre_csi"; shift ;;
         # --with-scale: 仅扩容模块(k8s_scale), 不连带 operator/外层重复模块 —— 见下方 SCALE_ONLY 过滤
         --with-scale) ENABLE_ARG="${ENABLE_ARG},scale"; SCALE_ONLY=1; shift ;;
         # --with-cubestack = 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主, 不强制启用)
@@ -224,6 +226,10 @@ load_config
 
 # 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 见 tools/offline/fetch-offline-files.sh)
 check_offline_files
+
+# SSH 用户一致性点名(2026-10-15): NODES 逐行显式 ssh_user 与全局 SSH_USER(root|ubuntu 单一
+# 旋钮)不一致时告警 —— 只在本统一入口打一次, 模块进程不再各自刷屏。
+warn_ssh_user_mismatch
 
 # --enable k1,k2 = 只把模块开关写入 cluster.conf(持久化), 不立即部署。
 # 下次 --with-cubestack / 默认部署时按 cluster.conf 生效; 立即部署单个 operator 用 --steps k1,k2。
@@ -659,7 +665,7 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         _FM_IP="$(first_master_ip 2>/dev/null || true)"
         _CEPH_SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
         if [ -n "${_FM_IP}" ] && [ -f "${_CEPH_SSH_KEY}" ]; then
-            _CEPH_EXIST="$(ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER:-ubuntu}@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster --no-headers 2>/dev/null" 2>/dev/null || true)"
+            _CEPH_EXIST="$(ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "$(ssh_user_for_ip "${_FM_IP}")@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster --no-headers 2>/dev/null" 2>/dev/null || true)"
         fi
         if [ -n "${_CEPH_EXIST}" ]; then
             _CEPH_STATE="$(get_state "ceph")"
@@ -783,7 +789,7 @@ else
     echo "               · 改池后需重跑 tools/k8s/sync-kubespray-config.sh 并重新 apply 池 CR 再验证"
     echo "               · 测试环境无空闲地址时可用 nodeport(SERVICE_EXPOSE_MODE=nodeport)"
 fi
-echo "  下一步: 扩容用 --with-scale; 立即部署单个用 --steps gpu_operator,lws(...)(自动带基座); 预启用写入配置用 --enable ...(下次全量生效); 验证用 --steps verify"
+echo "  下一步: 扩容用 --with-scale; 立即部署单个用 --steps gpu_operator,ceph(...)(自动带基座); 预启用写入配置用 --enable ...(下次全量生效); 验证用 --steps verify"
 
 # ★ 外部 Ceph 接入信息(用户要求: 放安装末尾总结; 仅集群内 Ceph 且本次执行过暴露时提示)
 #   03_ceph_csi 已打印/导出, 此处收敛到"文件路径 + 单行入口", 不再重复打印含 key 的全文。

@@ -228,7 +228,7 @@ for _line in "${NODES[@]:-}"; do
     node_parse "${_line}"
     [ -n "${NODE_IP}" ] || continue
     _ngpu="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${SSH_USER:-ubuntu}@${NODE_IP}" "sudo mx-smi 2>/dev/null | grep 'Attached GPUs' | awk '{print \$NF}'" 2>/dev/null || echo 0)"
+        "$(ssh_user_for_ip "${NODE_IP}")@${NODE_IP}" "sudo mx-smi 2>/dev/null | grep 'Attached GPUs' | awk '{print \$NF}'" 2>/dev/null || echo 0)"
     _ngpu="$(echo "${_ngpu:-0}" | tr -d '[:space:]' | grep -E '^[0-9]+$' || echo 0)"
     if [ "${_ngpu}" -gt 0 ] 2>/dev/null; then
         HAS_GPU_NODE="1"; GPU_BOARD_COUNT="$((GPU_BOARD_COUNT + _ngpu))"
@@ -495,7 +495,7 @@ for _line in "${NODES[@]:-}"; do
     node_parse "${_line}"
     [ "${NODE_ROLE}" = "master" ] && [ -n "${NODE_IP}" ] || continue
     _GPUCNT="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${SSH_USER:-ubuntu}@${NODE_IP}" "sudo mx-smi 2>/dev/null | grep 'Attached GPUs' | awk '{print \$NF}'" 2>/dev/null || echo 0)"
+        "$(ssh_user_for_ip "${NODE_IP}")@${NODE_IP}" "sudo mx-smi 2>/dev/null | grep 'Attached GPUs' | awk '{print \$NF}'" 2>/dev/null || echo 0)"
     _GPUCNT="$(echo "${_GPUCNT:-0}" | tr -d '[:space:]')"
     if [ "${_GPUCNT:-0}" -gt 0 ] 2>/dev/null; then
         SSH "${K} taint nodes ${NODE_HOSTNAME} node-role.kubernetes.io/control-plane- >/dev/null 2>&1" || true

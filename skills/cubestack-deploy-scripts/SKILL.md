@@ -37,6 +37,7 @@ description: CubeStack 部署脚本开发规范技能。当需要编写、修改
 | 文件 | 用途 |
 |---|---|
 | `config/cluster.conf.example` | 唯一配置源模板(所有变量在此声明, 含组件开关) |
+| `config/cluster.defaults.conf` | 高级/默认值层(组件深度参数/离线路径/…; 随仓库分发, load_config 自动加载) |
 | `deployments/scripts/lib-common.sh` | 公共库(配置加载/工具函数, 所有脚本 source) |
 | `deployments/scripts/lib-module.sh` | 模块框架(自动发现/元数据解析/调度/旧名别名) |
 | `deployments/scripts/deploy-cluster.sh` | 统一入口(薄壳: 参数解析 + 调度) |
@@ -99,7 +100,7 @@ load_config
 2. **写元数据头**: 按上面模板填写 MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE, 需要依赖顺序时加 `REQUIRES`(引用必须存在、不可成环)
 3. **统一远端初始化**: 需要 SSH 到 master 执行 kubectl 的模块**必须**调用 `init_remote_kubectl || exit 1`(幂等, 提供 FIRST_MASTER/SSH_KEY/SSH()/K/SSH_CMD)。**禁止**在模块内手抄 `FIRST_MASTER=.../SSH() {...}/K="sudo kubectl..."` 初始化块 —— 曾致 `K: unbound variable` 部署成功后崩溃
 4. **实现逻辑**: 复用 `tools/` 工具脚本(`bash "${SCRIPT_DIR}/tools/<领域>/xxx.sh"`)或写新逻辑
-5. **加开关**(可选): 在 `config/cluster.conf.example` 加 `XXX_ENABLED` 变量, TOGGLE 指向它
+5. **加开关**(可选): 在 `config/cluster.conf.example`(**常用组件开关**)或 `config/cluster.defaults.conf`(**子开关/细节开关**)加 `XXX_ENABLED` 变量, TOGGLE 指向它(⑦ 校验两文件之一)
 6. **完成**: 无需修改 `deploy-cluster.sh` / `lib-module.sh` / 任何注册表(operator 自动派生)
 
 验证: `bash deployments/scripts/tools/check-modules.sh`(静态校验, 必须 exit 0);
@@ -173,7 +174,11 @@ trap '清理测试资源' EXIT
 
 ## cluster.conf 组件开关(单一配置源)
 
-- `config/cluster.conf` 是**唯一**配置入口,所有脚本只从它读取(环境变量可覆盖)
+- 配置分**两层(2026-10-15 拆分)**:
+  - `config/cluster.conf`(模板 `cluster.conf.example`; 真实配置 gitignored)= **必改项 + 组件启停开关 + 高频变量**;
+  - `config/cluster.defaults.conf`(随仓库分发; 一般不改)= **高级/默认值层**(组件深度参数/离线路径/NTP/CIDR/镜像源/Ceph 全套…)。
+  - `load_config` 主文件先、defaults 后(全 `${VAR:-default}` 自默认)⇒ 要覆盖高级项**在 cluster.conf 写同名变量**即可;每个变量只许有一个声明处(check-modules ⑦-b 断言两文件变量集互斥)。
+  - ⚠ 新增/移动变量时务必同步 `deployments/scripts/tools/offline/sync-to-container.sh` 的 FILES(两个 conf 都要进容器)。
 - 变量写法一律 `VAR="${VAR:-default}"`
 - **`cluster.conf` 为主, 职责三分**(所有 operator 统一遵守):
   - **全量部署**: `--with-cubestack`/默认 = 基座 + cluster.conf 中已启用的**全部** operator; `--with-k8s` = 仅基座(跳过全部 operator)。
@@ -181,8 +186,7 @@ trap '清理测试资源' EXIT
   - **立即部署单个**: `--steps X` = 部署被指定的 X(自动带基座, 只部署被指定的 operator); `--steps verify` = 只跑验证模块。
   - **排除**: `--skip X` = 全量部署时剔除。
   - 新增 operator **无需改任何列表**: operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)= operator), 写 TOGGLE 即自动进入 --steps/--enable 调度。
-  - lb_haproxy/lb_keepalived(API-HA)默认 false, 需要时用 `--enable` 预启用 或 `--steps` 立即部署。
-- 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认true,已实现:默认官方 manifests.yaml bundle + kubectl apply --server-side; helm chart 保留于 lws/charts 供 cert-manager 用; 见 `docs/lws.md`)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`PROMETHEUS_ENABLED`、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`ENVOY_GATEWAY_ENABLED`(**默认 false, 需显式启用**)、`ENVOY_AI_GATEWAY_ENABLED`(**默认 false, 依赖 EG**)、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
+- 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`PROMETHEUS_ENABLED`、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`ENVOY_GATEWAY_ENABLED`(**默认 false, 需显式启用**)、`ENVOY_AI_GATEWAY_ENABLED`(**默认 false, 依赖 EG**)、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`
 - 新增配置项流程: ① cluster.conf.example 加带注释默认声明 → ② 脚本引用 → ③ 如需同步 kubespray group_vars, 在 `tools/k8s/sync-kubespray-config.sh` / `tools/k8s/sync-addons-config.sh` 加同步逻辑
 
 ## 模块体内规范
