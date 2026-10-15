@@ -88,13 +88,13 @@ XXX_IP="${XXX_IP:-10.66.1.140}"         # 需要的外部 IP/端口从配置读,
 - 数据源全部从 `cluster.conf` 读(`load_config`)。
 
 ### 2.6 安装方式选择(bundle vs helm)
-- **默认用官方 manifests bundle + `kubectl apply --server-side`**(参照 LWS: `deployments/cubestack-addon/lws/manifests.yaml`,
+- **默认用官方 manifests bundle + `kubectl apply --server-side`**(参照官方大 CRD 组件的做法: vendored 单文件 bundle, 如 `deployments/cubestack-addon/rook/*.yaml`,
   单文件含 namespace/CRD/RBAC/controller/webhook; 离线 vendoring 到 `deployments/cubestack-addon/<op>/`; 镜像用 sed 改到内置 registry)。
 - **CRD 超大时不用 helm**: CRD 的 `openAPIV3Schema` 会塞进 helm release Secret, 超 1MiB 报 `Secret is invalid: data: Too long`。
-  (LWS 的 leaderworkersets ~1.3MB / disaggregatedsets ~1.5MB 即此因, 官方因此弃 helm 推 bundle。)
+  (官方大 CRD 组件即此因, 官方因此弃 helm 推 bundle。)
 - **helm 仅保留给需要 values 定制 / cert-manager 等 bundle 覆盖不了的模式**: chart 放 `deployments/cubestack-addon/<op>/charts/`,
   模块内用 `XXX_INSTALL_MODE`(默认 bundle)切, 并把 CRD 放 `charts/.helmignore` 排除 + kubectl 逐文件 apply。
-- 模块内双模式写法参考 `modules/03_addon/05_gpu_lws.sh`(LWS_INSTALL_MODE / LWS_MANIFEST / LWS_CHART_DIR)。
+- 模块内双模式写法参考 `modules/03_addon/02_ceph.sh`(bundle/manifest 与 helm 两条路)。
 
 ---
 

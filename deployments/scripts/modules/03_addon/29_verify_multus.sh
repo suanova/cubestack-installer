@@ -14,7 +14,7 @@
 # 说明:
 #   · **验证模块不设 TOGGLE**(否则 MULTUS_ENABLED=true 时会被安装流程自动启用);
 #     保持 DEFAULT:0, 仅由 --steps verify_multus 在安装后单个执行。
-#   · **门禁看实际部署, 不看配置开关**(仿 verify_lws): 只要 kube-multus-ds 实际在跑
+#   · **门禁看实际部署, 不看配置开关**(仿 verify_metallb): 只要 kube-multus-ds 实际在跑
 #     就验证(无论 MULTUS_ENABLED true/false, 例如 --steps multus 单独部署过);
 #     仅当"DaemonSet 不在 且 MULTUS_ENABLED≠true"才跳过。
 #   · 验证依赖 macvlan 示例 NAD(模块 09_multus 默认创建); 若被删/改名, 用集群真实

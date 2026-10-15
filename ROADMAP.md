@@ -28,10 +28,9 @@
 - [ ] #2 Epic: 基座稳定性加固
 - [ ] #6 Epic: 离线资源管理
 - [ ] #11 GitLab 侧 gp 适配 + roadmap 落地
-- [ ] #12 Feature: 组件覆盖(GPU/LWS/存储)
+- [ ] #12 Feature: 组件覆盖(GPU/存储)
 - [ ] #13 Epic: 计算组件
 - [ ] #14 GPU Operator 镜像全量同步与 registry 可靠性
-- [ ] #15 LWS 部署链路验证
 - [ ] #16 Epic: 存储
 - [ ] #17 Ceph 存储 + CSI 验证
 - [ ] #19 Feature: 工具链与质量

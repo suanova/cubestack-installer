@@ -14,7 +14,7 @@
    无人知晓。
 2. **顺序颠倒的拆除**：kubeadm reset 直接推平一切；Ceph 由部署预检块调 `ceph-cleanup.sh
    --delete-cluster`（含 2026-10-10 新增的 ⓪ 停卷消费者 + 官方安全序），但**其他 operator
-   （cubestack-operator/metax GPU/LWS/multus/rdma…）没人先停**——它们持有的资源、在飞 IO、
+   （cubestack-operator/metax GPU/multus/rdma…）没人先停**——它们持有的资源、在飞 IO、
    级联控制器，正是 10-09 挂死事故的同类风险面。
 3. 2026-10-10 事故链的教训已经证明：覆盖安装必须"先停消费者 → 再动 ceph → 再动 K8s"，
    而这个顺序目前只对 ceph PVC 的消费者**部分**实现（⓪ 泛化扫描兜底），且发生在 ceph 删除时刻，
@@ -65,7 +65,7 @@
   - 幂等；**任何失败仅 warn，绝不阻断安装**（登记是增强，不是依赖）。`K` 未初始化时直接跳过。
 - **调用点**：各模块在**安装成功点**显式调用（不用框架自动钩子——模块自我跳过 TOGGLE=false /
   ceph 存储节点不足等情形不落登记，语义精确）。约 10 处：`01_metallb`、`04_local_path`、
-  `05_k8s_registry`、`02_ceph`、`03_ceph_csi`、`06_gpu_operator`、`07_gpu_lws`、`09_multus`、
+  `05_k8s_registry`、`02_ceph`、`03_ceph_csi`、`06_gpu_operator`、`09_multus`、
   `10_rdma_shared_dev_plugin`、`25_cubestack_operator`、`35_netshoot`。
 - 登记内容 = "operator"广义集（本安装器部署进集群的全部组件，含 kubespray addon 类基座）。
   用户手工 kubectl 部署的第三方负载不在登记内（ceph 消费者兜底仍由 ceph-cleanup ⓪ 泛化扫描覆盖）。
@@ -91,7 +91,6 @@ fi
 |---|---|---|
 | cubestack_operator | 删 clusterCR（operator 级联优雅收掉 9 个平台组件）→ **有界等待 csc CR 本体终结（finalizer 完成的契约信号；非 Pod 计数）** → `helm uninstall` operator → 清残留 CRD/命名空间 | 先 CR 后 operator：CR 的 finalizer 需要 operator 活着处理。⚠ 2026-10-13(CodeRabbit): 等待门原先用 Pod 计数(Running 视为已收敛→首轮即放行, 等于没等); CR 未终结则**保留 operator(不 helm uninstall)** + **跳过** ns finalizer 清除/强制删 ns/CRD 清理(防 force-finalize 孤儿对象在重装后复活)并**非 0 退出**(引擎不标 uninstalled) |
 | gpu_operator (metax) | 复用现有"清理残留"序列（提为函数，安装/卸载共用）：删 clusteroperator CR → helm uninstall → 删 CRD/ClusterRole/ns/default 旧资源 | 现安装路径 376-390 行就是这套 |
-| gpu_lws | bundle 模式：删 webhook + ns（现有清理段）+ CRD；helm 模式：helm uninstall | LWS_NAMESPACE 可配 |
 | multus | 删 vendored manifest 资源（DS/CRD/RBAC）+ 本模块创建的示例 NAD | |
 | rdma_shared_dev_plugin | 删 DS + ConfigMap | RDMA_NAMESPACE 可配 |
 | netshoot | 删 Pod + CM | |

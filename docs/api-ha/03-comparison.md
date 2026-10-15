@@ -1,5 +1,8 @@
 # 03 · 三方案对比与业界最佳实践
 
+> ⚠ **2026-10-14 变更**: 本文档涉及的 HAProxy/Keepalived 方案(`lb_haproxy`/`lb_keepalived` 模块与开关)
+> 已**整块移除**; 文中相关对比/规则/步骤均为**历史记录**, 当前 API 入口高可用唯一方案 = kube-vip。
+
 > 对比对象：① kubespray 原生每节点本地代理 ② kube-vip VIP ③ HAProxy + Keepalived
 > 评估基准：[01 文档](01-current-state.md) 的现状 + 四档验收标准（节点自愈 / 运维与 CI / 外部系统 / Pod）
 

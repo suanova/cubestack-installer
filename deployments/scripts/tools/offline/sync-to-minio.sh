@@ -2,7 +2,7 @@
 # ============================================================
 # sync-to-minio.sh — 本地 offline-files 全量镜像同步到 MinIO(结构一致)
 # ------------------------------------------------------------
-# 用途: 把本机 offline-files(kubespray/lws/metax-gpu/os/virtual-machine ...)
+# 用途: 把本机 offline-files(kubespray/metax-gpu/os/virtual-machine ...)
 #       **所有子目录**整体镜像到 MinIO 的 <桶>/offline-files/ 下, 远端目录结构与本地
 #       完全一致; 供其他部署机 fetch-offline-from-minio.sh 拉取(下载侧逻辑不变)。
 # 命令(等价):
@@ -33,7 +33,7 @@ OFFLINE_FILES_ROOT_RAW="${OFFLINE_FILES_ROOT:-}"
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
-# 判定同步源(sync 的源是 **offline-files 总根** —— kubespray/lws/metax-gpu/os… 全部组件):
+# 判定同步源(sync 的源是 **offline-files 总根** —— kubespray/metax-gpu/os… 全部组件):
 #   ① 用户在**环境里**显式设了 OFFLINE_FILES_DIR(旧语义) → 用它(兼容老用法)
 #   ② 否则用 OFFLINE_FILES_ROOT(显式设的, 或 lib-common 派生的真根)
 # ⚠ 2026-09-30 修: 此前用"路径形状哨兵"猜(*/offline-files/kubespray)来判断"是不是 lib-common

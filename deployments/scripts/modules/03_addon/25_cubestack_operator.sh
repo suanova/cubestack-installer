@@ -153,7 +153,7 @@ HARBOR_HOST="${CUBESTACK_OPERATOR_HARBOR_HOST:-${HARBOR_MIRROR_REGISTRY:-harbor.
 # 私有项目凭据: 未单独配置时复用镜像源凭据(HARBOR_MIRROR_USER/PASSWORD, 同一台 Harbor)
 HARBOR_USER="${CUBESTACK_OPERATOR_HARBOR_USER:-${HARBOR_MIRROR_USER:-}}"
 HARBOR_PASSWORD="${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-${HARBOR_MIRROR_PASSWORD:-}}"
-# 集群内置 registry 双端点(与 gpu_operator/gpu_lws 同款):
+# 集群内置 registry 双端点(与 gpu_operator 同款):
 #   REG_BASE   = 节点可解析的域名端点(K8s 按此拉取)   REG_DIRECT = 推送用直连端点(无 DNS 依赖)
 REG_BASE="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT:-5000}"
 REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-5000}}"
@@ -314,7 +314,7 @@ else
 # (以下整块为离线部署路径; 为控制 diff 未整体缩进)
 
 # ---------------- [4/6] 推送镜像 → 集群内置 registry ----------------
-# 目标 ref = 去注册域、保仓库路径(与 multus/lws 一致, 避免与其它组件撞名):
+# 目标 ref = 去注册域、保仓库路径(与 multus 一致, 避免与其它组件撞名):
 #   harbor.isuanova.com/suanova-private/cubestack-operator:latest
 #     → <REG_BASE>/suanova-private/cubestack-operator:latest
 say "[4/6] 推送镜像 → ${REG_BASE}/**(节点只从这个 registry 拉, 不访问 Harbor)..."
