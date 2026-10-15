@@ -463,37 +463,7 @@ kubectl -n metax-operator logs -l app=metax-driver --tail=20
 grep METAX_DRIVER_DEPLOY_POLICY config/cluster.conf
 ```
 
----
-
-### 4. LeaderWorkerSet (LWS) 部署故障速查
-
-**症状/排查对照**
-
-| 症状 | 根因 | 解法(根治) |
-|---|---|---|
-| controller CrashLoop, 日志 `cert dir /tmp/k8s-webhook-server/serving-certs` 不存在 | internal 模式未传 `--webhook-cert-dir` 或 chart 未挂 cert 卷 | chart 的 deployment 模板传 `--webhook-cert-dir` 并挂载 Secret 卷(见 `deployments/cubestack-addon/lws/charts/templates/deployment.yaml`) |
-| webhook 证书 x509 错误(cert-manager 模式) | 集群未装 cert-manager, Certificate 未生成 Secret | 改用 `LWS_CERT_MODE=internal`(离线友好)或先装 cert-manager |
-| webhook `context deadline exceeded` | 跨节点 fabric 数据面(与 §一.1 通用) | 确认 Calico IPIP 数据面可用(默认已根治, 见 `cluster-architecture.md` §3) |
-| 测试 LeaderWorkerSet 一直 Pending | busybox 镜像未预加载 / 节点资源不足 | 确认 `PRELOAD_IMAGE_PATTERNS` 含 busybox 与 `lws_manager`; `kubectl describe pod` 看事件 |
-| 部署后 `--steps verify_lws` 报 leader/worker 识别失败 | v0.10 用 `leaderworkerset.sigs.k8s.io/worker-index` 标签(=0 为 leader, >0 为 worker; 旧 `lws.io/role` 已废弃) | `kubectl -n lws-system logs deploy/lws-controller-manager`; 检查 webhook 配置与证书; 用 `tools/k8s/verify-lws.sh` 复跑 |
-
-**验证**
-```bash
-sudo ./deploy-cluster.sh --steps verify_lws
-kubectl -n lws-system get pods
-kubectl get crd leaderworkersets.leaderworkerset.x-k8s.io disaggregatedsets.disaggregatedset.x-k8s.io
-```
-
-**相关命令**
-```bash
-kubectl -n lws-system logs deploy/lws-controller-manager --tail=30
-kubectl -n lws-system get secret lws-webhook-server-cert   # internal 模式应为存在
-kubectl get validatingwebhookconfiguration lws-validating-webhook-configuration -o yaml
-```
-
----
-
-### 5. Ceph / Rook 部署故障速查
+### 4. Ceph / Rook 部署故障速查
 
 > 设计与离线流程见 `docs/ceph-rook.md`。
 
@@ -535,7 +505,7 @@ kubectl -n rook-ceph get cephcluster,cephblockpool; kubectl get sc ceph-block
 
 ---
 
-### 6. 新增配置项后, 宿主机 `check-modules.sh` 通过、容器内报 `TOGGLE 未声明`
+### 5. 新增配置项后, 宿主机 `check-modules.sh` 通过、容器内报 `TOGGLE 未声明`
 
 **症状:** 加了一个带 `TOGGLE` 的新模块, 宿主机 `bash deployments/scripts/tools/check-modules.sh` 全绿,
 同步进部署容器后容器内校验报 `TOGGLE=XXX 未在 cluster.conf.example 中声明默认值`。
@@ -551,7 +521,7 @@ kubectl -n rook-ceph get cephcluster,cephblockpool; kubectl get sc ceph-block
 docker cp deployments/config/cluster.conf.example <容器>:/opt/cubestack-installer/deployments/config/
 ```
 
-### 7. 大 ConfigMap 用客户端 apply 报 `metadata.annotations: Too long: may not be more than 262144 bytes`
+### 6. 大 ConfigMap 用客户端 apply 报 `metadata.annotations: Too long: may not be more than 262144 bytes`
 
 **症状:** 批量导入一堆配置(实测: 11 个 Grafana 看板 JSON 中**只有 460KB 的那一个**失败, 其余 10 个正常),
 `kubectl get cm -l <label>` 少一个, 但组件侧只表现为"少了那一条", 没有任何报错。
@@ -575,7 +545,7 @@ kubectl create configmap <名> -n <ns> --from-file=<文件> --dry-run=client -o 
 2. **模块里管道 apply 时别把 stderr 全 `2>/dev/null` 吞掉** —— 上面这条错误信息就这么被吞过,
    只剩一句"导入失败", 排查时得手工重放才知道是注解超限。
 
-### 8. RDMA 共享设备插件: pool 模式 selectors.ifNames 只剩第一块网卡(其余卡静默不匹配)
+### 7. RDMA 共享设备插件: pool 模式 selectors.ifNames 只剩第一块网卡(其余卡静默不匹配)
 
 **症状**
 `RDMA_HCA_MODE=pool` + 自动检测时, 日志里检测到 N 块 RDMA 网卡, 但生成的 ConfigMap 里
@@ -618,7 +588,7 @@ kubectl -n kube-system get cm rdma-devices -o go-template='{{index .data "config
 
 ---
 
-### 9. RDMA 资源名与真实 GPU 集群不一致 → Pod 申请 `rdma/ib_shared_devices` 永久 Pending
+### 8. RDMA 资源名与真实 GPU 集群不一致 → Pod 申请 `rdma/ib_shared_devices` 永久 Pending
 
 **症状**
 同一份 Pod 清单在真实 GPU 集群能跑, 在本安装器部署的集群上 Pending:
@@ -650,7 +620,7 @@ kubectl describe node <节点> | grep -A5 rdma/             # 节点上真正注
 
 ---
 
-### 10. kube-vip 控制面负载均衡(`lb_enable`):`lb_fwdmethod: local` 是**静默零效果**,且 ipvs 模式集群上还有一道 kube-proxy 关卡
+### 9. kube-vip 控制面负载均衡(`lb_enable`):`lb_fwdmethod: local` 是**静默零效果**,且 ipvs 模式集群上还有一道 kube-proxy 关卡
 
 **症状**
 给 kube-vip 的 manifest 加 `lb_enable: true`(其余不动)后**没有任何报错**,日志还会打
@@ -756,18 +726,18 @@ kubectl -n kube-system rollout restart daemonset/kube-proxy
 
 ---
 
-### 11. kube-vip 的几处"以为收敛了其实没有":关开关不清理 / 每轮白重启两次 / 全新集群部署中断 / 关闭态仍扫 VIP / 两套集群抢同一 VIP
+### 10. kube-vip 的几处"以为收敛了其实没有":关开关不清理 / 每轮白重启两次 / 全新集群部署中断 / 关闭态仍扫 VIP / 两套集群抢同一 VIP
 
 前三个问题的根因相邻(都是"目标状态与实际状态不一致,但没有任何东西去发现它"),
-于 2026-09-22 一并修复;11.4 / 11.5 是后来追加的两条。设计说明见 `docs/kube-vip-api-ha.md` 第 18 节。
+于 2026-09-22 一并修复;10.4 / 10.5 是后来追加的两条。设计说明见 `docs/kube-vip-api-ha.md` 第 18 节。
 
-> 🔁 **2026-09-28 收编**: **11.2 的"解法"已反转** —— 静态 Pod 清单改由 **kubespray 自己**渲染
+> 🔁 **2026-09-28 收编**: **10.2 的"解法"已反转** —— 静态 Pod 清单改由 **kubespray 自己**渲染
 > (`addons.yml` 的 `kube_vip_enabled` **跟随** `KUBE_VIP_ENABLED`),自持渲染器已删除。
 > 也就是说: 双写者问题依旧消除,但消除的方向从"关掉上游"改成"**关掉我们自己**"。
-> 11.1 / 11.3 / 11.4 的结论**不受影响**(开关语义、清理路径、定序、VIP 推导都还在)。
+> 10.1 / 10.3 / 10.4 的结论**不受影响**(开关语义、清理路径、定序、VIP 推导都还在)。
 > 详见 `docs/api-ha/07-kube-vip-upstream-assessment.md` 与 `docs/kube-vip-api-ha.md` §19。
 
-#### 11.1 `KUBE_VIP_ENABLED=false` 重跑后,manifest 还在、VIP 还被持有
+#### 10.1 `KUBE_VIP_ENABLED=false` 重跑后,manifest 还在、VIP 还被持有
 
 **症状**
 把开关改成 `false` 重跑,日志只有一行 `跳过 kube-vip(配置 KUBE_VIP_ENABLED=true 可启用)`,
@@ -808,7 +778,7 @@ done
 > ⚠ **阶段二下不能直接关**:API 入口已经指向 VIP 时删 kube-vip = 全集群 API 立刻失联。
 > 模块会**硬拦停**并给出两步走法(先把入口退回 master01 → 再关开关清理)。
 
-#### 11.2 每次全量运行,master01 上的 kube-vip 都会重启两次
+#### 10.2 每次全量运行,master01 上的 kube-vip 都会重启两次
 
 **症状**
 每跑一次全量部署,`crictl ps` 里 master01 的 kube-vip 容器 `started-at` 都会变
@@ -864,7 +834,7 @@ ssh <master01> "sudo sha256sum /etc/kubernetes/manifests/kube-vip.yml"
 > 证书 SAN(`kubeadm-setup.yml:48` 的 `sans_kube_vip_address` 只看它是否定义)。删掉它会导致
 > 下次开回来时证书重签。
 
-#### 11.3 全新集群部署在 `k8s_deploy` **之前**就中断了
+#### 10.3 全新集群部署在 `k8s_deploy` **之前**就中断了
 
 **症状**
 全新环境跑全量部署,日志走到 `k8s_ntp` 之后、`k8s_deploy` 之前就报:
@@ -906,7 +876,7 @@ sudo ./deploy-cluster.sh --steps kube_vip --list | grep 本次执行模块
 
 ---
 
-#### 11.4 `KUBE_VIP_ENABLED=false` 仍去推导 VIP → 部署中断在 `k8s_inventory`(第 4 个"以为收敛了其实没有")
+#### 10.4 `KUBE_VIP_ENABLED=false` 仍去推导 VIP → 部署中断在 `k8s_inventory`(第 4 个"以为收敛了其实没有")
 
 **症状**
 把 `KUBE_VIP_ENABLED` 置 `false` 后重跑,**依然**出现:
@@ -959,7 +929,7 @@ KUBESPRAY_INV_DIR=<inventory 副本> CLUSTER_CONF=<conf 副本> \
 ```
 
 
-#### 11.5 `kubectl` 时好时坏地报 `x509: certificate signed by unknown authority` —— 两套集群抢同一个 API VIP(2026-09-29 实机)
+#### 10.5 `kubectl` 时好时坏地报 `x509: certificate signed by unknown authority` —— 两套集群抢同一个 API VIP(2026-09-29 实机)
 
 **症状**
 同一条 `kubectl` 命令连跑三次: **成功 / 失败 / 失败**; 失败时报
@@ -989,7 +959,7 @@ KUBESPRAY_INV_DIR=<inventory 副本> CLUSTER_CONF=<conf 副本> \
 "该地址被多个 apiserver 共用"并打印上面两条处置; 指纹稳定则提示"非多集群抢 VIP, 去 master 上核对集群健康"。
 `cluster.conf.example` 的 `K8S_API_VIP` 与 `METALLB_POOL` 注释都补了同款警告。
 
-### 12. 【2026-09-23 事故】部署跑 22 分钟后 `kubeadm join` 报 `[ERROR Port-10250]: Port 10250 is in use` —— 节点上的 RKE2 agent 占着端口, 而部署前清理对它"免疫"
+### 11. 【2026-09-23 事故】部署跑 22 分钟后 `kubeadm join` 报 `[ERROR Port-10250]: Port 10250 is in use` —— 节点上的 RKE2 agent 占着端口, 而部署前清理对它"免疫"
 
 **症状**
 
@@ -1174,7 +1144,7 @@ curl -u u:p "$API/api/v2.0/projects/<project>/repositories/${enc_repo}/artifacts
 #### 3.4 离线 tar 的 `RepoTags` 为空 → 模块识别不出 tar 内容
 
 **症状:** 用 skopeo 生成的 tar, `tar -xOf x.tar manifest.json` 看到 `"RepoTags": []`;
-`lib-common.sh` 的 `tar_first_image_tag` 返回空 → 依赖内容匹配的逻辑(lws/multus/rdma 的 tar 识别、
+`lib-common.sh` 的 `tar_first_image_tag` 返回空 → 依赖内容匹配的逻辑(multus/rdma 的 tar 识别、
 `ensure_registry_nginx`)全部失效。
 **根因:** `skopeo copy ... docker-archive:<file>` **末尾不带 `:<ref>` 时 skopeo 不写 RepoTags**
 (docker save 会写, 所以老的 tar 都正常)。
@@ -1248,3 +1218,49 @@ skopeo inspect --format '{{.Digest}}' docker://harbor.isuanova.com/mirrors/regis
 > 读到的是**加旗标之前落地的旧制品**, 然后才用新旗标重传。必须看**再下一轮**是否变成
 > `digest 未变, 跳过`。本项目第一轮据此把已生效的修复误判为"无效"并写进了文档, 第二轮才纠正。
 
+
+### 4. 【2026-10-15】覆盖安装 reset 被 Calico 一致性检查拦停: 旧集群网络模式 ≠ 新配置(断言 "Your inventory doesn't match the current cluster configuration")
+
+**症状:** 覆盖安装(先 `reset` 旧集群再全量部署)时, `ansible-playbook reset.yml` 在 preinstall 阶段中断:
+
+```
+TASK [kubernetes/preinstall : Run calico checks] ***
+fatal: [master01]: FAILED! => {"assertion": "not calico_pool_conf.spec.ipipMode is defined or calico_pool_conf.spec.ipipMode == calico_ipip_mode", ...
+  "msg": "Your inventory doesn't match the current cluster configuration"}
+```
+
+**根因:** `playbooks/reset.yml` 的 "Reset cluster" play 带 `tags:resolvconf` 引入 `kubernetes/preinstall`
+(为了还原 resolv.conf)—— 于是 preinstall 的 "Run calico checks" 也执行了。该检查**读活集群**
+(`calicoctl get ipPool`, 现网配置)与 **inventory**(新配置)逐项比对;而覆盖安装的典型场景正是
+"旧集群网络模式与新配置不同":实机 2026-10-15 为**旧集群 VXLAN(`vxlanMode=Always`/`ipipMode=Never`)
+vs 新配置 IPIP(`ipipMode=Always`/`vxlanMode=Never`)⇒ 断言必失败。
+该检查语义上只服务于**安装/升级**(防配置漂移),对"即将拆除"的 reset 场景没有意义 —— 却把整个
+reset(以及后续覆盖安装)拦死。
+
+**解法(根治):** 补丁 `deployments/kubespray/cubestack-patches/13-skip-calico-checks-on-reset.patch`
+(两文件):
+- `playbooks/reset.yml`: "Reset cluster" play 级 `vars: { cubestack_skip_calico_checks: true }`;
+- `roles/kubernetes/preinstall/tasks/main.yml`: "Run calico checks" 的 `when` 增加
+  `not (cubestack_skip_calico_checks | default(false) | bool)`。
+⇒ **reset 路径整体跳过该检查; cluster.yml / scale.yml / upgrade_cluster.yml 不带该变量, 检查原样保留**。
+补丁层由部署入口自动保障(install/scale 走 `ensure_kubespray`; reset 走 `cmd_reset` 的同款
+`_ensure_patches_applied`, 2026-10-15 一并补上 —— reset 直接消费树内 playbook, 存量树缺补丁会再次
+中断):缺位自动重放, 无需手工改树。
+
+**⚠ workaround 同步移除:** 临时方案(在 "Run calico checks" 的 `when` 里加 `- false`)是**全局**
+跳过(安装期也丢检查),整改后必须删掉 —— 否则树被外部改动, 补丁层的 `--check` 会报 MISSING、
+`--apply` 可能 CONFLICT。
+
+**验证:**
+```bash
+# ① 补丁在位(含 13):
+bash deployments/kubespray/cubestack-patch-apply.sh --check     # 全静默 rc=0
+# ② 树内两文件的语义(重置才跳过, 安装不跳过):
+grep -n "cubestack_skip_calico_checks" deployments/kubespray/kubespray/playbooks/reset.yml
+# ③ 端到端(实机): 覆盖安装跑 reset, 应不再出现 "Your inventory doesn't match the current cluster configuration"
+```
+**已验证边界(如实标注):** ① 机理已由实机验证 —— 用户 2026-10-15 在"Run calico checks"上临时加
+`- false` 后 reset/覆盖安装**能继续跑通**(即"重置场景跳过该检查"确为有效解法);② 补丁 13 是本仓库
+对同一机理的**正式实现**(范围收窄为 reset 路径),静态层验证已过(`--check` 全在位 / 纯净树前向重放
+逐字节一致 / YAML 合法);③ 补丁版的**端到端实机复验**尚待下一轮覆盖安装 —— 跑通后请回来把本行
+更新为"已实机验证"。

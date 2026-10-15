@@ -61,7 +61,12 @@ LOCAL_REPO_BASE="${OFFLINE_FILES_DIR}"
 # 资产目录默认值(兼容旧调用名): 一律收敛到**版本目录**(不再按集群名隔离)
 default_local_repo_dir() { printf '%s\n' "${OFFLINE_FILES_DIR}"; }
 INVENTORY_BASE="${BASE_DIR}/inventory"
-REMOTE_USER="${CUBESTACK_REMOTE_USER:-ubuntu}"
+# 节点 SSH 登录用户(root|ubuntu 单一旋钮; 2026-10-15):
+#   ① 显式 CUBESTACK_REMOTE_USER(deploy-cluster.sh 透传 cluster.conf 的 SSH_USER) 优先;
+#   ② 未显式给值 → 从 inventory hosts.yml 首条 ansible_user 派生(与 gen-inventory.sh 同源,
+#      standalone 直跑本脚本时也能跟随 cluster.conf 的 SSH_USER/NODES 逐行覆盖);
+#   ③ 都拿不到 → ubuntu(历史默认)。解析见文件尾 resolve_remote_user()(需 INVENTORY_DIR 就绪)。
+REMOTE_USER="${CUBESTACK_REMOTE_USER:-}"
 CONTAINER_RUNTIME="containerd"
 KUBESPRAY_REPO="https://github.com/kubernetes-sigs/kubespray.git"
 
@@ -1708,8 +1713,12 @@ update_loadbalancer_all_yml() {
     if [ -z "${_local_lb}" ]; then
         local _conf="${REPO_ROOT:-}/deployments/config/cluster.conf"
         [ -f "${_conf}" ] || _conf="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/deployments/config/cluster.conf"
+        # 高级默认值层(2026-10-15 拆分): 与 load_config 同序 —— 主文件先、defaults 后
+        local _cdefaults="${REPO_ROOT:-}/deployments/config/cluster.defaults.conf"
+        [ -f "${_cdefaults}" ] || _cdefaults="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/deployments/config/cluster.defaults.conf"
         if [ -f "${_conf}" ]; then
             _local_lb="$( ( set +u; . "${_conf}" >/dev/null 2>&1 || true
+                            [ -f "${_cdefaults}" ] && . "${_cdefaults}" >/dev/null 2>&1 || true
                             printf '%s' "${API_LOCAL_LB_ENABLED:-${KUBE_VIP_LOCAL_PROXY:-false}}" ) )"
         else
             _local_lb="false"
@@ -2565,6 +2574,17 @@ LOCAL_REPO_DIR="$(default_local_repo_dir)"
 # ── 环境变量覆盖(让调用方如 deploy-cluster.sh 可传入项目路径) ──
 KUBESPRAY_DIR="${CUBESTACK_KUBESPRAY_DIR:-${KUBESPRAY_DIR}}"
 INVENTORY_DIR="${CUBESTACK_INVENTORY_DIR:-${INVENTORY_DIR}}"
+
+# 解析节点 SSH 用户(见文件头 REMOTE_USER 注释): 未显式给值 → 读 hosts.yml 首条 ansible_user。
+# ⚠ 只能在这里(INVENTORY_DIR 就绪后)调用; 之后 ansible_user 渲染与 ansible ping -u 都用它。
+resolve_remote_user() {
+    [ -n "${REMOTE_USER}" ] && return 0
+    REMOTE_USER="$(sed -nE 's/^[[:space:]]*ansible_user:[[:space:]]*"?([^"[:space:]]+)"?.*$/\1/p' \
+        "${INVENTORY_DIR}/hosts.yml" 2>/dev/null | head -1 || true)"
+    REMOTE_USER="${REMOTE_USER:-ubuntu}"
+    return 0
+}
+resolve_remote_user
 # OFFLINE_FILES_DIR 可整体切换离线文件根目录(全局变量); LOCAL_REPO_DIR 仍可单独覆盖(最高优先)
 # 默认值由 default_local_repo_dir() 按布局给出 —— 仓库布局不加集群名子目录(见文件头 §离线文件根目录)
 OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${LOCAL_REPO_BASE}}"
@@ -2585,7 +2605,7 @@ elif [ -f "${PRELOAD_CONF}" ]; then
     source "${PRELOAD_CONF}"
     log "预加载镜像集合(preload-images.conf): ${PRELOAD_IMAGE_PATTERNS:-<空=全量>}"
 elif [ -z "${PRELOAD_IMAGE_PATTERNS:-}" ]; then
-    # 内置默认最小集合: kubespray 默认部署 + calico 网络插件 + metallb/registry/local-path/lws/nginx 附加组件所需镜像
+    # 内置默认最小集合: kubespray 默认部署 + calico 网络插件 + metallb/registry/local-path/nginx 附加组件所需镜像
     # (排除 cilium/flannel/ingress-nginx/dashboard 等未启用组件的镜像)
     # ⚠ 本行是**第 4 份**副本(standalone 直跑本脚本时的兜底默认值), 必须与 cluster.conf /
     #   cluster.conf.example / tools/offline/trim-offline-files.sh 三份**逐字节一致** ——
@@ -2593,7 +2613,7 @@ elif [ -z "${PRELOAD_IMAGE_PATTERNS:-}" ]; then
     #   断言脚本会跳过上面那条 ${CUBESTACK_PRELOAD_IMAGE_PATTERNS} 透传行, 取到本行);
     #   本份漂移会让"备料保留 / 节点预加载"两边不一致
     #   (典型症状: 装了却没有镜像)。新增镜像 token 时四处都要加。
-    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause local-volume-provisioner node-feature-discovery metallb kube-vip library_registry local-path-provisioner busybox lws_manager library_nginx"
+    PRELOAD_IMAGE_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause local-volume-provisioner node-feature-discovery metallb kube-vip library_registry local-path-provisioner busybox library_nginx"
     log "预加载镜像集合(内置默认最小集合): ${PRELOAD_IMAGE_PATTERNS}"
 fi
 export PRELOAD_IMAGE_PATTERNS
@@ -2626,6 +2646,11 @@ cmd_reset() {
         exit 1
     }
     ensure_venv
+    # 补丁层保障(2026-10-15): reset 直接消费树内 playbook —— 补丁 13 正是 reset 路径的修复
+    # (reset 被 calico 一致性检查拦停, 见 cubestack-patches/13-skip-calico-checks-on-reset.patch),
+    # 存量/外来树缺补丁会让 reset 再次中断。与 install/scale 的 ensure_kubespray 同口径"先验后用"
+    # (幂等: 全在位时仅 log 一行)。⚠ reset 不重建树, 故不用 ensure_kubespray(clone/物化)。
+    _ensure_patches_applied
     cd "${KUBESPRAY_DIR}"
 
     local log="/tmp/${CLUSTER_NAME}-reset.log"

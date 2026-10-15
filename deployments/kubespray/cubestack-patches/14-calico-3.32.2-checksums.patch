@@ -1,0 +1,41 @@
+# patch: 14-calico-3.32.2-checksums.patch
+# 目标: roles/kubespray_defaults/vars/main/checksums.yml
+# 加入: 2026-10-15
+# 原因: 升级 calico 3.31.7 → v3.32.2(离线资产随集群 conf/档案的 CALICO_VERSION 钉值): 树内校验表封顶
+#       3.31.7 ⇒ calico_version=3.32.2 时 calicoctl 二进制与 kdd-crds 的 sha256 查表缺失,
+#       下载环节渲染 calicoctl_binary_checksum 直接未定义而中断(且 check.yml 的 "supported Calico
+#       versions" 断言按 crds 键判定 -> 也会拦)。补三行(amd64/arm64 calicoctl + crds), **插在各表首**
+#       —— 保持上游 "dict2items[0]=默认版本=最新" 语义, 使 pin 与树表首键继续一致(check-modules ⑯/⑱ 免改)。
+#       sha256 实测来源: GitHub release 资产 calicoctl-linux-{amd64,arm64} 与 raw manifests/crds.yaml @v3.32.2
+#       (口径复验: 同法下载 v3.31.7 的 crds.yaml, sha256 与树内原表值逐字节一致)。
+#       ⚠ v3.33.0 不可用(上游单镜像改造, calico/cni 与 kube-controllers 停发), 升级路径见 docs/ceph-rook 无关;
+#       仅 3.32 线安全(2026-10-15 实测 quay v3.32.2 三件套均在)。
+# 上游吸收判据: calicoctl_binary_checksums 与 calico_crds_checksums 出现 >=3.32.2 条目(换树自带新版表即退休)
+# 上游化: 不提 PR(升级到上游尚未支持的版本属本地版本钉; 换树时由 --check-retired 判定退休)
+# ------------------------------------------------------------
+--- a/roles/kubespray_defaults/vars/main/checksums.yml
++++ b/roles/kubespray_defaults/vars/main/checksums.yml
+@@ -539,6 +539,7 @@
+     1.6.0: sha256:d8d4bd74247407c8c73de057bc00adac28bb1ed2d2ee60a9dda278e3b398bcc2
+ calicoctl_binary_checksums:
+   arm64:
++    3.32.2: sha256:9235f55386cfd96e2f55393e997efec7768049cf2379a8dffa07e724890a4691
+     3.31.7: sha256:d7adff41398cb77b97451bf238022376382725ff231228f78b3ebc35d9fb9fda
+     3.31.6: sha256:3d4908f9ea98f1d9cc122ff1408f0932e2546b47eb1f9bb3acdfaa4f504ec963
+     3.31.5: sha256:8d9dbdba4a41e490238f01223a768df1858cc19e563562b314489657d1eb5eef
+@@ -564,6 +565,7 @@
+     3.29.1: sha256:6f662d316a267854dc5487242ca7ec8ca70c35b52bed258aafb76c2d113643c2
+     3.29.0: sha256:ab23afb283fcdffcf0e1156cdced68d05b6c2b70fd4ea2cbc3189d0ecd43bdfd
+   amd64:
++    3.32.2: sha256:fd2ebfc94e63ed34e924cbb8dcdcf3ffc8b264098e58d87069abd46ada2e103a
+     3.31.7: sha256:1b91928adc39861ba5e04d8d15c4ce489731269b07a8e7444c0fdf677f041113
+     3.31.6: sha256:45feb54e37713741b095afdc84a354238284b9060b7efd29c5ccb8f5c248f02f
+     3.31.5: sha256:d1dd3a3fb2f5640987eab589dc1dcb03c47c11b32bc19a65c45c39421cd887d2
+@@ -706,6 +708,7 @@
+     0.16.0: sha256:da98675f961833d4ffd68b1046d907b228a7d394ded2abd70a50b20eaca171c4
+ calico_crds_checksums:
+   no_arch:
++    3.32.2: sha256:3f62456ede5360c773e007011992c0081b8b6c442f7c9ce66a9f51a2f5d9dbcd
+     3.31.7: sha256:1d6d5e523f92ee1e8227a48c016229c668f94035431b82f19139affeb45dbeff
+     3.31.6: sha256:1d6d5e523f92ee1e8227a48c016229c668f94035431b82f19139affeb45dbeff
+     3.31.5: sha256:1d6d5e523f92ee1e8227a48c016229c668f94035431b82f19139affeb45dbeff

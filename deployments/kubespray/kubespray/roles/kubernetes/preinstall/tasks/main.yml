@@ -123,3 +123,7 @@
   when:
     - kube_network_plugin == 'calico'
     - not ignore_assert_errors
+    # Cubestack 补丁 13: 仅安装/升级路径保留本检查 —— reset 是拆除动作, 活集群配置与
+    # inventory 不一致(如旧 VXLAN vs 新 IPIP)属**预期**, 不该拦停 reset(见 playbooks/reset.yml
+    # 的 Reset cluster play, 它在 play 级置 cubestack_skip_calico_checks=true)。
+    - not (cubestack_skip_calico_checks | default(false) | bool)
