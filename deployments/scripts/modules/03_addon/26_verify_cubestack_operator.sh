@@ -34,7 +34,7 @@ NS="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
 RELEASE="${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"
 
 # 门禁: 以**实际部署**为准(Deployment 是否存在), 而非 CUBESTACK_OPERATOR_ENABLED 配置开关
-# (2026-10-08 对齐 24_verify_lws 惯例; 旧实现只查开关 ⇒ --steps cubestack_operator 单次部署后
+# (2026-08-08 起对齐各 verify 模块惯例; 旧实现只查开关 ⇒ --steps cubestack_operator 单次部署后
 #  开关仍为 false, 显式 --steps verify_cubestack_operator 会被误跳过 —— 实机踩到):
 #   · 已部署 → 验证; · 未部署 且 未启用 → 跳过(避免 --steps verify 全量时对未装组件报错);
 #   · 未部署 但 已启用 → 继续, 由 [1/5] 给出"未就绪, 先部署"的可执行报错。

@@ -23,7 +23,6 @@
 | 接入**外部已有** Ceph 集群 | `CEPH_MODE=external` + `external-ceph.env` | `internal` | §3.5 |
 | RDMA 共享设备插件(IB/RoCE) | `RDMA_ENABLED` | **开** | §4 |
 | 沐曦(MetaX)GPU Operator | `GPU_OPERATOR_ENABLED` | **开** | §5 |
-| GPU 上层的 LLM 工作负载调度 | `LWS_ENABLED`(默认关) | 关 | §5.5 |
 
 ### 0.2 本指南覆盖的 5 个"怎么配"
 
@@ -69,7 +68,7 @@ kubectl get nodes                                # 容器内已配好集群访�
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  业务/平台应用        GPU 推理 · LLM 调度(LWS/Kueue) · 自研模块(20_cubestack_apps) │
+│  业务/平台应用        GPU 推理 · 队列调度(Kueue) · 自研模块(cubestack_operator)      │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  Operator / Addon     沐曦 GPU Operator · Rook-Ceph(CSI) · MetalLB ·       │
 │                       Multus · RDMA Device Plugin · registry · netshoot   │
@@ -85,7 +84,7 @@ kubectl get nodes                                # 容器内已配好集群访�
 
 | 段 | 模块 | 说明 |
 |---|---|---|
-| `env` | `vm_network` · `vm_sshkey` · `vm_create` · `harbor` · `lb_haproxy` · `lb_keepalived` | 宿主机与外部 LB 的**前置准备**(虚拟机场景才需要;裸金属一般只用到 SSH 密钥) |
+| `env` | `vm_network` · `vm_sshkey` · `vm_create` · `harbor` | 宿主机与外部 LB 的**前置准备**(虚拟机场景才需要;裸金属一般只用到 SSH 密钥) |
 | `k8s` | `k8s_passwordless` → `k8s_workerbm` → `k8s_hosts` → `k8s_inventory` → `k8s_ntp` → **`k8s_deploy`** → `kube_vip` → `api_local_lb` → `k8s_scale` + 两个 verify | 集群基座与 API 入口 |
 | `addon` | `metallb` → `ceph` → `ceph_csi` → `local_path` → `registry` → `gpu_operator` → `rdma_shared_dev_plugin` → … + 各 verify | 集群能力与 operator |
 
@@ -309,7 +308,7 @@ KUBE_VIP_CP_DETECT="${KUBE_VIP_CP_DETECT:-false}"  # apiserver 进程级故障�
 **启用步骤**:
 
 ```bash
-# 1) cluster.conf 里置 KUBE_VIP_ENABLED=true(以及可选 K8S_API_VIP / KUBE_VIP_INTERFACE)
+# 1) cluster.conf 里置 KUBE_VIP_ENABLED=true(可选 K8S_API_VIP 也在主文件; KUBE_VIP_INTERFACE 见 cluster.defaults.conf)
 # 2) 先把 VIP 落地(绑定 + 静态 Pod),再切入口 —— 存量集群见 §2.4 两阶段
 ./deployments/scripts/deploy-cluster.sh --steps kube_vip
 
@@ -905,16 +904,11 @@ kubectl -n metax-operator get ds -o custom-columns=NAME:.metadata.name,SEL:.spec
 
 > ⚠ **"DaemonSet Ready" ≠ "扩展资源已注册"**:设备插件启动 → ListAndWatch → kubelet 刷新 node status 有**秒级~几十秒**时延;刚部署完立刻查 allocatable 可能误报"没有 GPU"(模块已内置最长 300s 等待)。
 
-### 5.6 与 LWS / Kueue 的关系
+### 5.6 与 Kueue 的关系
 
 | 组件 | 开关 | 默认 | 关系 |
 |---|---|---|---|
-| **LWS**(LeaderWorkerSet) | `LWS_ENABLED` | **关** | LLM 推理/训练的**组调度**(Leader/Worker 组)+ Prefill/Decode 解耦(`LWS_DISAGGREGATEDSET_ENABLED`)。**与 GPU 无硬依赖**(它的端到端验证用的是 busybox/nginx),要跑 vLLM 多卡/PD 分离时再开 |
 | **Kueue** | `KUEUE_ENABLED` | **关** | 队列/配额治理。⚠ 当前是**规划占位模块**(伪代码),开了也不产生实际效果 |
-
-```bash
-sudo ./deploy-cluster.sh --steps gpu_lws     # 部署 LWS(默认 bundle 模式,离线友好)
-```
 
 ### 5.7 常见坑(精选)
 
@@ -928,7 +922,7 @@ sudo ./deploy-cluster.sh --steps gpu_lws     # 部署 LWS(默认 bundle 模式,�
 | 6 | driver CrashLoop `could not unload metax` | 驱动策略被改成 `PreferCloud` → 改回 `PreferHost` 并重跑部署 |
 | 7 | 改完配置不生效 | 模块 `REPEAT:0`(装成功即跳过),重装要 `--fresh` |
 
-> 深挖:`docs/metax-gpu-operator.md`、`docs/troubleshooting.md` §3(GPU 实测事故)、`docs/lws.md`。
+> 深挖:`docs/metax-gpu-operator.md`、`docs/troubleshooting.md` §3(GPU 实测事故)。
 
 ---
 
@@ -949,7 +943,7 @@ sudo ./deploy-cluster.sh --steps gpu_lws     # 部署 LWS(默认 bundle 模式,�
 | `CEPHFS_ENABLED` / `CEPH_RGW_ENABLED` | `true` / `true` | 文件存储 + S3 |
 | `RDMA_ENABLED` / `RDMA_HCA_MODE` | `true` / `by-link` | RDMA 共享设备插件 |
 | `GPU_OPERATOR_ENABLED` / `CONTAINERD_CONFIG_VERSION` | `true` / `3` | 沐曦 GPU operator |
-| `NFD_ENABLED` / `LWS_ENABLED` | `false` / `false` | 未启用的可选能力 |
+| `NFD_ENABLED` | `false` | 未启用的可选能力 |
 
 ### 6.2 一页验证命令(交付/验收时照跑)
 
@@ -994,7 +988,6 @@ kubectl get sc && kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
 | kube-vip 实现细节与事故 | `docs/kube-vip-api-ha.md` |
 | Ceph 全量(架构/参数/内外接入/排障) | `docs/ceph-rook.md` · `docs/ceph-backup-restore.md` |
 | GPU operator | `docs/metax-gpu-operator.md` |
-| LWS | `docs/lws.md` |
 | RDMA 组件设计 | `deployments/cubestack-addon/rdma/CUBESTACK.md` |
 | 排障手册(实测事故全集) | `docs/troubleshooting.md` |
 | 镜像/Harbor 与离线资产 | `docs/harbor-mirror.md` · `deployments/offline-files/*/README.md` |

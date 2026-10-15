@@ -7,7 +7,8 @@ CubeStack 平台 Operator **及其平台组件**的离线资产(2026-10-08 起�
 | 内容 | 说明 |
 |---|---|
 | `harbor.isuanova.com_suanova-private_cubestack-operator_latest.tar` | **operator 本体**(滚动 tag, 与 chart 配套; 由 `harbor-save-images.sh --group cubestack-operator` 生成) |
-| 平台组件镜像 tar(**顶层扁平**, 42 项) | envoy 网关 5 / prometheus 栈 10(含 grafana/ksm/node-exporter/alertmanager/operator 家族)/ perses 1 / BMC exporter 2 + digest 边车 / cubepilot 4 + digest 边车。**2026-10-08 从已并入的旧目录**(envoy/ prometheus/ perses/ bmc/ cubepilot/)收敛 —— 它们对应 chart CR 默认启用的组件(envoyGateway/prometheus(+grafana)/perses/exporters.bmc/cubepilot) |
+| 平台组件镜像 tar(**顶层扁平**) | envoy 网关 5 / prometheus 栈 10(含 grafana/ksm/node-exporter/alertmanager/operator 家族)/ perses 1 / BMC exporter 2 + digest 边车 / cubepilot 4 + digest 边车。**2026-10-08 从已并入的旧目录**(envoy/ prometheus/ perses/ bmc/ cubepilot/)收敛 —— 它们对应 chart CR 默认启用的组件(envoyGateway/prometheus(+grafana)/perses/exporters.bmc/cubepilot) |
+| `registry.k8s.io_lws_lws_v0.10.0.tar` | **LWS 控制器镜像**(平台组件 `lws` 用)。⚠ 2026-10-15: 独立的 LWS 部署模块(07_gpu_lws/verify_lws/lws-save-images)已整体下线删码; 本 tar 是**唯一保留**的 LWS 资产 —— 平台 operator 的 CubeStackCluster CR 仍可下发 `lws` 组件(见 docs/cubestack-operator.md), 由本模块统一推送(与旧 `offline-files/lws/` 的 tar 逐字节同份, 已去重) |
 | `observability/`(**子目录**) | 非镜像资产: `helm/cubestack-bmc-exporter-chart/`(BMC exporter chart tgz+digest)/ `dashboards/grafana/` / `recording-rules/` / `MANIFEST.txt` |
 
 ⚠ **镜像 tar 必须在顶层扁平**: 消费方(见下)用 `find_offline_tar` 按文件名 glob 扫描**顶层** `*.tar`, 子目录不会被找到。

@@ -33,7 +33,7 @@
 
 ### 1.2 非目标(明确不做,避免误判)
 
-- **不做** operator 目录的批量迁移(ceph/metax/lws 等仍保持现状,规范先行)。
+- **不做** operator 目录的批量迁移(ceph/metax/nvidia 等仍保持现状,规范先行)。
 - **不做**"用版本目录执行升级"(升级不读版本目录;见 §8)。
 - **不做** v2.28 的发布级支持:v2.28 只是本地临时版本,用于证机制(不写档案入库、不上 MinIO、不进文档的"支持版本"表)。
 - **不做** 集群重装:v2.28 不用于真装一次集群(D5)。
@@ -151,7 +151,7 @@ PAUSE_VERSION=3.10.1  DNS_NODE_CACHE_VERSION=1.25.0  METRICS_SERVER_VERSION=v0.9
 CPA_VERSION=v1.10.3   API_LB_NGINX_IMAGE_TAG=1.30.1-alpine
 LOCAL_VOLUME_PROVISIONER_VERSION=2.5.0  NFD_VERSION=0.19.0
 # 该版本配套的 operator 版本(套装级;未列出的组件仍取 cluster.conf 的值)
-KUBE_VIP_VERSION=…  METALLB_VERSION=…  CEPH_VERSION=…  METAX_VERSION=…  LWS_IMAGE_TAG=…
+KUBE_VIP_VERSION=…  METALLB_VERSION=…  CEPH_VERSION=…  METAX_VERSION=…  NVIDIA_GPU_OPERATOR_VERSION=…
 ```
 
 - 选用:`cluster.conf` 的 `KUBESPRAY_PROFILE="v2.32.0"`(默认 = 仓库当前树版本)或 CLI

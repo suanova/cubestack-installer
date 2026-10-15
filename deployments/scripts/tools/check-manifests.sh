@@ -4,12 +4,12 @@
 # 目的: YAML 的低级错误(缩进 / Tab / 引号未闭合 / 块标量写坏)只在**部署那一刻**才炸 ——
 #   那时人已在集群前、前置模块都跑完了。本脚本把这类错误提前到提交前: 逐个文件解析一遍,
 #   失败即列出 `文件:行:列` 与原因。
-# 校验范围 = **仓库自有、git 跟踪**的 *.yaml/*.yml(rook/multus/lws 清单、自研 inventory、
+# 校验范围 = **仓库自有、git 跟踪**的 *.yaml/*.yml(rook/multus 清单、自研 inventory、
 #   .github/workflows、docker-compose.yml 等)。
 # 排除三类(**都是"看着像 YAML 但确实不是普通 YAML"**, 判据即下面 python 里的 SKIP_* 三行;
 #   2026-09-30 逐类反证过, 不是图省事):
 #   ① deployments/kubespray/kubespray/  vendored 上游源码树(内含 Jinja / ansible 模板)
-#   ② 路径含 /charts/ 或 /templates/     helm chart 的 Go 模板(实测 rook/metax/lws 三份
+#   ② 路径含 /charts/ 或 /templates/     helm chart 的 Go 模板(实测 rook/metax 两份
 #      deployment 模板都解析失败 —— {{ }} 不是 YAML)⇒ 这类文件只能靠 helm template 验
 #   ③ download-hosts.yml                扩展名是 .yml, 内容却是 **INI 格式** ansible
 #      inventory(上游 contrib/offline 的约定), 故无法用 YAML 解析器校验

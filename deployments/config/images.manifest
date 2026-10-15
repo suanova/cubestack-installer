@@ -152,12 +152,6 @@ rdma  ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:${RDMA_IMAGE_TAG}
 netshoot  docker.io/nicolaka/netshoot:latest
 
 # ------------------------------------------------------------
-# [group: lws] LeaderWorkerSet(多机推理编排)
-#   目录: deployments/offline-files/lws/
-# ------------------------------------------------------------
-lws  registry.k8s.io/lws/lws:${LWS_IMAGE_TAG}
-
-# ------------------------------------------------------------
 # [group: metax-gpu] 沐曦 GPU Operator
 #   目录: deployments/offline-files/metax-gpu/
 #   ⚠ **本组默认不镜像到 mirrors/**: 沐曦不发布到公共 registry, 上游就是本台 Harbor 的
