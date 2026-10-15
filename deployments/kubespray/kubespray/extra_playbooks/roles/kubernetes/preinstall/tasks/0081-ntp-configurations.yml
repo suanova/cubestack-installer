@@ -1,0 +1,104 @@
+---
+
+- name: Disable systemd-timesyncd
+  service:
+    name: systemd-timesyncd.service
+    enabled: false
+    state: stopped
+  failed_when: false
+
+- name: Set fact NTP settings
+  set_fact:
+    # noqa: jinja[spacing]
+    ntp_config_file: >-
+      {% if ntp_package == "ntp" -%}
+      /etc/ntp.conf
+      {%- elif ntp_package == "ntpsec" -%}
+      /etc/ntpsec/ntp.conf
+      {%- elif ansible_facts['os_family'] in ['RedHat', 'Suse'] -%}
+      /etc/chrony.conf
+      {%- else -%}
+      /etc/chrony/chrony.conf
+      {%- endif -%}
+    # noqa: jinja[spacing]
+    ntp_service_name: >-
+      {% if ntp_package == "chrony" -%}
+      chronyd
+      {%- elif ansible_facts['os_family'] in ["Flatcar", "RedHat", "Suse"] -%}
+      ntpd
+      {%- else -%}
+      ntp
+      {%- endif %}
+
+- name: Generate NTP configuration file.
+  template:
+    src: "{{ ntp_config_file | basename }}.j2"
+    dest: "{{ ntp_config_file }}"
+    mode: "0644"
+  notify: Preinstall | restart ntp
+  when:
+    - ntp_manage_config
+
+- name: Stop the NTP Deamon For Sync Immediately   # `ntpd -gq`,`chronyd -q` requires the ntp daemon stop
+  service:
+    name: "{{ ntp_service_name }}"
+    state: stopped
+  when:
+    - ntp_force_sync_immediately
+
+- name: Force Sync NTP Immediately
+  # noqa: jinja[spacing]
+  command: >-
+      timeout -k 60s 60s
+      {% if ntp_package == "chrony" -%}
+      chronyd -q
+      {%- else -%}
+      ntpd -gq
+      {%- endif -%}
+  when:
+    - ntp_force_sync_immediately
+
+- name: Ensure NTP service is started and enabled
+  service:
+    name: "{{ ntp_service_name }}"
+    state: started
+    enabled: true
+
+- name: Configure NTP timezone
+  when: ntp_timezone != ""
+  block:
+    - name: Ensure tzdata package
+      package:
+        name:
+          - tzdata
+        state: present
+      when:
+        - not is_fedora_coreos
+        - ansible_facts['os_family'] != "Flatcar"
+
+    - name: Gather selinux facts
+      ansible.builtin.setup:
+        gather_subset: selinux
+      when:
+        - ansible_facts['os_family'] == "RedHat"
+
+    - name: Put SELinux in permissive mode, logging actions that would be blocked.
+      ansible.posix.selinux:
+        policy: targeted
+        state: permissive
+      when:
+        - ansible_facts['os_family'] == "RedHat"
+        - ansible_facts.selinux.status == 'enabled'
+        - ansible_facts.selinux.mode == 'enforcing'
+
+    - name: Set ntp_timezone
+      community.general.timezone:
+        name: "{{ ntp_timezone }}"
+
+    - name: Re-enable SELinux
+      ansible.posix.selinux:
+        policy: targeted
+        state: "{{ preinstall_selinux_state }}"
+      when:
+        - ansible_facts['os_family'] == "RedHat"
+        - ansible_facts.selinux.status == 'enabled'

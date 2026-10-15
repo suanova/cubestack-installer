@@ -1,0 +1,177 @@
+---
+- name: Kubernetes Apps | Check cluster settings for MetalLB
+  fail:
+    msg: "MetalLB require kube_proxy_strict_arp = true, see https://github.com/danderson/metallb/issues/153#issuecomment-518651132"
+  when:
+    - kube_proxy_mode == 'ipvs' and not kube_proxy_strict_arp
+    - not kube_proxy_remove
+
+- name: Kubernetes Apps | Check that the deprecated 'matallb_auto_assign' variable is not used anymore
+  fail:
+    msg: "'matallb_auto_assign' configuration variable is deprecated, please use 'metallb_auto_assign' instead"
+  when:
+    - matallb_auto_assign is defined
+
+- name: Kubernetes Apps | Lay Down MetalLB
+  become: true
+  template:
+    src: "metallb.yaml.j2"
+    dest: "{{ kube_config_dir }}/metallb.yaml"
+    mode: "0644"
+  register: metallb_rendering
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+
+- name: Kubernetes Apps | Install and configure MetalLB
+  kube:
+    name: "MetalLB"
+    kubectl: "{{ bin_dir }}/kubectl"
+    filename: "{{ kube_config_dir }}/metallb.yaml"
+    state: "{{ metallb_rendering.changed | ternary('latest', 'present') }}"
+    wait: true
+  become: true
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+
+- name: MetalLB | Ensure memberlist secret exists (上游 v2.32 模板只引用不创建)
+  # ★ 2026-09-28 实测(全新安装): kubespray v2.32 的 metallb.yaml.j2 **只引用** memberlist 这个 Secret
+  #   (speaker 的 METALLB_ML_SECRET_KEY env + 卷挂载), 而模板与角色任务**都没有创建它** ⇒
+  #   speaker 全部 `CreateContainerConfigError: secret "memberlist" not found`
+  #   ⇒ metallb 的 L2/L3 通告永远起不来(池子建了也分不到 VIP)。
+  # ★ 位置(2026-09-28 二次实机被咬, 别再往前挪): 必须排在 "Install and configure MetalLB" **之后**
+  #   —— `metallb-system` 命名空间正是那条 apply 创建的(清单首个对象就是 Namespace)。
+  #   插在 apply 之前时: 上一轮能过只是侥幸(命名空间已被更早的一轮建过), **全新集群必失败**:
+  #   `error: failed to create secret namespaces "metallb-system" not found`(22:11 中断点)。
+  #   排在 apply 之后: speaker Pod 可能先报几秒 CreateContainerConfigError, 拿到 Secret 后自愈, 无需干预。
+  #   幂等: 已存在则不动; 不存在则用随机 key 创建(与 metallb 官方 manifest 的做法一致)。
+  shell: |
+    set -e
+    if ! {{ bin_dir }}/kubectl -n {{ metallb_namespace }} get secret memberlist >/dev/null 2>&1; then
+      {{ bin_dir }}/kubectl -n {{ metallb_namespace }} create secret generic memberlist \
+        --from-literal=secretkey="$(openssl rand -base64 128)"
+    fi
+  changed_when: false
+  become: true
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+
+- name: Kubernetes Apps | Wait for MetalLB controller to be running
+  command: "{{ bin_dir }}/kubectl rollout status -n {{ metallb_namespace }} deployment -l app=metallb,component=controller --timeout=2m"
+  become: true
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+
+# ── 根因修复(裸金属 metallb 部署竞态): ──────────────────────────────────
+# metallb.yaml 一次性 apply CRD + controller, controller 可能早于 CRD 在
+# apiserver 注册前启动, informer 报 "no matches for kind IPAddressPool" 且不自动恢复
+# → 池子 CR 即使创建也无法被 controller 处理 → LB 永远分不到 VIP。
+# 修复: 等 CRD Established 后重启 controller, 保证 informer 在 CRD 之后连接。
+# ──────────────────────────────────────────────────────────────────────
+- name: MetalLB | Wait for IPAddressPool CRD to be established
+  command: "{{ bin_dir }}/kubectl wait --for=condition=Established crd/ipaddresspools.metallb.io --timeout=60s"
+  register: metallb_crd_wait
+  until: metallb_crd_wait is succeeded
+  retries: 6
+  delay: 5
+  changed_when: false
+  become: true
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+
+- name: MetalLB | Restart controller so informers start after CRDs established
+  command: "{{ bin_dir }}/kubectl -n {{ metallb_namespace }} rollout restart deployment -l app=metallb,component=controller"
+  changed_when: false
+  become: true
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+
+- name: MetalLB | Wait for controller rollout after restart
+  command: "{{ bin_dir }}/kubectl rollout status -n {{ metallb_namespace }} deployment -l app=metallb,component=controller --timeout=2m"
+  become: true
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+
+- name: MetalLB | Address pools
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+    - metallb_config.address_pools is defined
+  block:
+    - name: MetalLB | Layout address pools template
+      ansible.builtin.template:
+        src: pools.yaml.j2
+        dest: "{{ kube_config_dir }}/pools.yaml"
+        mode: "0644"
+      register: pools_rendering
+
+    - name: MetalLB | Create address pools configuration
+      kube:
+        name: "MetalLB"
+        kubectl: "{{ bin_dir }}/kubectl"
+        filename: "{{ kube_config_dir }}/pools.yaml"
+        state: "{{ pools_rendering.changed | ternary('latest', 'present') }}"
+      register: metallb_pools_result
+      # 新集群刚拉起时 apiserver→webhook-service 的 ClusterIP 路由(calico/kube-proxy)
+      # 可能尚未收敛, 且 controller 的 webhook(9443)启动晚于 metrics 就绪探针,
+      # 首次 apply 会因 webhook 调用超时而失败(池未持久化); 重试吸收该瞬时窗口。
+      # 见 cubestack-installer 对裸金属环境 metallb 超时问题的修复。
+      until: metallb_pools_result is succeeded
+      retries: "{{ metallb_apply_retries | default(10) }}"
+      delay: "{{ metallb_apply_retry_delay | default(5) }}"
+      become: true
+
+- name: MetalLB | Layer2
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+    - metallb_config.layer2 is defined
+  block:
+    - name: MetalLB | Layout layer2 template
+      ansible.builtin.template:
+        src: layer2.yaml.j2
+        dest: "{{ kube_config_dir }}/layer2.yaml"
+        mode: "0644"
+      register: layer2_rendering
+
+    - name: MetalLB | Create layer2 configuration
+      kube:
+        name: "MetalLB"
+        kubectl: "{{ bin_dir }}/kubectl"
+        filename: "{{ kube_config_dir }}/layer2.yaml"
+        state: "{{ layer2_rendering.changed | ternary('latest', 'present') }}"
+      register: metallb_layer2_result
+      until: metallb_layer2_result is succeeded
+      retries: "{{ metallb_apply_retries | default(10) }}"
+      delay: "{{ metallb_apply_retry_delay | default(5) }}"
+      become: true
+
+- name: MetalLB | Layer3
+  when:
+    - inventory_hostname == groups['kube_control_plane'][0]
+    - metallb_config.layer3 is defined
+  block:
+    - name: MetalLB | Layout layer3 template
+      ansible.builtin.template:
+        src: layer3.yaml.j2
+        dest: "{{ kube_config_dir }}/layer3.yaml"
+        mode: "0644"
+      register: layer3_rendering
+
+    - name: MetalLB | Create layer3 configuration
+      kube:
+        name: "MetalLB"
+        kubectl: "{{ bin_dir }}/kubectl"
+        filename: "{{ kube_config_dir }}/layer3.yaml"
+        state: "{{ layer3_rendering.changed | ternary('latest', 'present') }}"
+      register: metallb_layer3_result
+      until: metallb_layer3_result is succeeded
+      retries: "{{ metallb_apply_retries | default(10) }}"
+      delay: "{{ metallb_apply_retry_delay | default(5) }}"
+      become: true
+
+
+- name: Kubernetes Apps | Delete MetalLB ConfigMap
+  kube:
+    name: config
+    kubectl: "{{ bin_dir }}/kubectl"
+    resource: ConfigMap
+    namespace: "{{ metallb_namespace }}"
+    state: absent
