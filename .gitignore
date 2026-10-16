@@ -123,3 +123,6 @@ deployments/kubespray/versions/
 #   ⚠ check-modules ⑩ 对此有 gitignore 豁免(降级 WARN), 干净 checkout 缺它属预期。
 deployments/cubestack-addon/cubestack-operator/*.tgz
 deployments/cubestack-addon/cubestack-operator/*.tgz.digest
+
+# 本地凭据禁词表(check-secrets.sh 用; 严禁入库)
+deployments/config/secret-blocklist.txt

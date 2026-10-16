@@ -888,8 +888,8 @@ allowVolumeExpansion: true
 volumeBindingMode: WaitForFirstConsumer"
 
     if [ -n "${EXT_CEPHFS_ENABLED}" ]; then
-        _CEPHFS_PROVISIONER_SECRET="rook-csi-cephfs-provisioner"
-        _CEPHFS_NODE_SECRET="rook-csi-cephfs-node"
+        _CEPHFS_PROVISIONER_SECRET="rook-csi-cephfs-provisioner"  # secret-scan: allow(k8s Secret 资源名, 非凭据)
+        _CEPHFS_NODE_SECRET="rook-csi-cephfs-node"  # secret-scan: allow(k8s Secret 资源名, 非凭据)
         # external CephFS 必要字段(来自 external-ceph-self-define-access.conf 导入): CEPHFS_FS / CEPHFS_DATA_POOL 必填
         # CephConnection clusterID=ceph-connection; fsName/pool 指向外部集群已存在的 fs/data pool
         _CEPHFS_FS="${CEPHFS_FS:?external CephFS 需要 CEPHFS_FS(外部集群 fs 名, 如 cubestack-ext-fs)}"

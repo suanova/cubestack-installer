@@ -34,7 +34,7 @@
 #     开关 CONTAINERD_DEVICE_OWNERSHIP 默认 true)。已运行容器需重建才生效 —— 详见该工具头注释。
 #   · 验证: tools/k8s/verify-metax-gpu.sh 或 --steps verify_metax_gpu(节点清单/汇总 + **非 root
 #     权限探针**: runAsUser:1000 真实 open 设备 + torch.cuda.is_available(), 不通过即 exit 1)。
-#   · 参考: Kubernetes 沐曦GPU Operator部署文档(metax-gpu-k8s 0.15.3, MXMACA 3.7.0.7)
+#   · 参考: Kubernetes 沐曦GPU Operator部署文档(metax-gpu-k8s 0.15.3, MXMACA 3.7.0.7)  # secret-scan: allow(MXMACA 版本号)
 # 数据源: cluster.conf (GPU_OPERATOR_ENABLED / METAX_* / REGISTRY_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --enable gpu_operator  或  GPU_OPERATOR_ENABLED=true
 # ============================================================

@@ -1,0 +1,8 @@
+#!/bin/bash
+# ============================================================
+# pre-commit —— 凭据/公网地址卫生门禁(2026-10-16 事故后启用; 硬性规则)
+#   启用(每人一次): git config core.hooksPath .githooks
+#   绕过(**不推荐**, 仅限误报且已确认): git commit --no-verify
+# 事故背景: 2026-08 曾把 MinIO 密码/节点 SSH 密码明文入库; 2026-10-16 全历史清洗+强推。
+# ============================================================
+exec bash "$(git rev-parse --show-toplevel)/deployments/scripts/tools/check-secrets.sh" --staged
