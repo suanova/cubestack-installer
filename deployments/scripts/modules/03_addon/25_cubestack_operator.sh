@@ -26,7 +26,10 @@
 #     随 git 分发。安装**恒用这份本地副本** —— 线上拉到的东西不直接装(见 scripts-development-spec §2.4)。
 #   · 镜像清单(需求 4): **从 chart 渲染结果动态提取**(不写死清单); 逐个推入集群内置 registry。
 #     离线 tar 目录 = deployments/offline-files/cubestack-operator/(联网机用
-#     tools/images/harbor-save-images.sh --group cubestack-operator 生成)。
+#     tools/images/harbor-save-images.sh --group cubestack-operator 生成**本体**)。
+#   ★ 2026-10-16 起平台组件 tar 按组件分子目录(offline-files/cubestack-operator/<组件>/,
+#     组件名 = CR spec.components; 顶层 = operator 本体/历史平铺); 单独更新某组件时可用
+#     CUBESTACK_OPERATOR_COMPONENTS="<组件>" 只推它的镜像(见 [4b/6] 与目录 README)。
 #   · 镜像拉取(需求 5): 节点**只从集群内置 registry 拉取**(--set image.repository=
 #     <REGISTRY_DOMAIN>:<port>/suanova-private/cubestack-operator), 部署时节点不访问 Harbor。
 #   · REPEAT:1(每次执行, 不是断点续跑): chart 是 1.0.0-latest 滚动版、镜像 tag=latest,
@@ -391,8 +394,13 @@ done
 _OPERATOR_DIGEST="${_d_dst}"
 
 # ---------------- [4b/6] CR 平台组件镜像推送(仅 CR_ENABLED=true) ----------------
-# 组件镜像集 = OFFLINE_DIR 下**全部离线 tar**(人工维护口径; 2026-10-08 起与 operator 镜像内
+# 组件镜像集 = OFFLINE_DIR 下全部离线 tar(人工维护口径; 2026-10-08 起与 operator 镜像内
 # assets/charts 的渲染对账而来, 清单与维护方法见 offline-files/cubestack-operator/README.md)。
+# ★ 2026-10-16 目录分类: 组件 tar 按平台组件分子目录(offline-files/cubestack-operator/<组件>/,
+#   组件名 = CR spec.components 的键: lws / envoy-gateway / controller-manager / prometheus /
+#   perses / cuberouter / bmc / cubepilot / portal); **顶层** = operator 本体与历史平铺(兼容)。
+#   过滤: CUBESTACK_OPERATOR_COMPONENTS="cubepilot,prometheus" → 只推列出的组件子目录
+#   (更新某个 operator 后单独推送其镜像的入口; 组件名不存在会 err 并列出可用目录)。
 # 目标映射(与 [3/6] 的 CR 两条前缀注入一一对应):
 #   自研 harbor.isuanova.com/suanova/<name>:tag  → <REG>/suanova/<name>:tag (imageRegistry)
 #   第三方 <上游ref>(docker.io/quay.io/ghcr.io…) → <REG>/mirrors/<上游ref> (externalImageRegistryPrefix)
@@ -400,7 +408,28 @@ _OPERATOR_DIGEST="${_d_dst}"
 if [ "${CR_ENABLED}" = "true" ]; then
     say "[4b/6] 推送平台组件镜像(CR 用; 源=离线 tar, 幂等 digest 比对)..."
     _n_push=0; _n_skip=0
-    for _tarfile in "${OFFLINE_DIR}"/*.tar; do
+    _cand_tars=()
+    if [ -n "${CUBESTACK_OPERATOR_COMPONENTS:-}" ]; then
+        for _c in ${CUBESTACK_OPERATOR_COMPONENTS//,/ }; do
+            [ -n "${_c}" ] || continue
+            [ -d "${OFFLINE_DIR}/${_c}" ] || {
+                err "CUBESTACK_OPERATOR_COMPONENTS 指定了不存在的组件: ${_c}"
+                err "  可用组件(子目录): $(cd "${OFFLINE_DIR}" 2>/dev/null && ls -d */ 2>/dev/null | tr -d '/' | tr '\n' ' ')"
+                exit 1
+            }
+            for _t in "${OFFLINE_DIR}/${_c}"/*.tar; do [ -f "${_t}" ] && _cand_tars+=("${_t}"); done
+        done
+        [ "${#_cand_tars[@]}" -gt 0 ] || { err "组件 ${CUBESTACK_OPERATOR_COMPONENTS} 子目录下没有 *.tar"; exit 1; }
+    else
+        for _t in "${OFFLINE_DIR}"/*.tar; do [ -f "${_t}" ] && _cand_tars+=("${_t}"); done
+        for _d in "${OFFLINE_DIR}"/*/; do
+            [ -d "${_d}" ] || continue
+            case "$(basename "${_d}")" in _legacy-readmes) continue ;; esac   # 历史资料, 无镜像
+            for _t in "${_d}"*.tar; do [ -f "${_t}" ] && _cand_tars+=("${_t}"); done
+        done
+        [ "${#_cand_tars[@]}" -gt 0 ] || warn "  ⚠ 未找到任何组件 tar(检查 ${OFFLINE_DIR}/<组件>/ 与顶层 *.tar)"
+    fi
+    for _tarfile in ${_cand_tars[@]+"${_cand_tars[@]}"}; do
         [ -f "${_tarfile}" ] || continue
         _tra="$(tar -xOf "${_tarfile}" manifest.json 2>/dev/null \
             | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["RepoTags"][0])' 2>/dev/null || true)"
