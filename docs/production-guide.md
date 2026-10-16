@@ -13,7 +13,7 @@
 
 | 能力 | 开关(`cluster.conf`) | 默认 | 详见 |
 |---|---|---|---|
-| 集群基座(CNI/etcd/apiserver/控制面) | `K8S_ENABLED` | 关(需显式开) | §1.1 |
+| 集群基座(CNI/etcd/apiserver/控制面) | 恒定部署(全量路径自带, 无开关) | — | §1.1 |
 | 控制面高可用 · 节点侧本地代理 | `API_LOCAL_LB_ENABLED` | **开** | §1.2 |
 | 控制面高可用 · 外部浮动 VIP | `KUBE_VIP_ENABLED` + `K8S_API_VIP` | **关**(需显式开) | §1.2 / §2.3 |
 | 对外负载均衡(LB Service) | `METALLB_ENABLED` + `METALLB_POOL` | 开 | §2.1 |
@@ -91,7 +91,9 @@ kubectl get nodes                                # 容器内已配好集群访�
 **两个易错点**(【代码】有护栏,但要知道):
 
 - **`k8s_deploy` 是基座**:其余 `k8s`/`addon` 模块几乎都 `REQUIRES: k8s_deploy`。单独跑 `--steps` 时,基座若没跑过会被自动剔除并报错。
-- **`K8S_ENABLED` 默认是关的**:不做 `--with-k8s` / 不开这个开关,集群不会被创建;而 addon 模块会因为"集群不存在"失败。
+- **`k8s_deploy`(基座)恒随全量部署,无开关**:默认 / `--with-k8s` / `--with-cubestack` 都包含它;
+  原 `K8S_ENABLED` 已于 2026-10-16 移除(它实际不控制任何调度路径; 旧 cluster.conf 残留该行无副作用)。
+  要全量但不重装基座:`--skip k8s_deploy`(其余模块是否适配既有集群需自行确认)。
 
 ### 1.2 控制面高可用方案(三层,互补而非二选一)
 

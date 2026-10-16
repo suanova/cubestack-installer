@@ -3,14 +3,16 @@
 # MODULE: k8s_deploy
 # DESC: 部署 kubespray 集群(离线)
 # PHASE: k8s
-# DEFAULT: 0
+# DEFAULT: 1
 # REPEAT: 0
-# TOGGLE: K8S_ENABLED
 # REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs
 #   · node_pkgs(12_node_pkgs.sh): 节点系统包对账 —— 必须在 kubespray 之前(它的 bootstrap_os →
 #     system_packages 遇到 apt 依赖图破损会直接失败; 实测 2026-09-28 libudev1/udev 配对被打断)。
 #     ⚠ 序号 12 > 06 排不到前面 ⇒ 靠这行 REQUIRES 定序(与 kube_vip 当年同一手法)。
 # 说明: 调用 cubestack-offline.sh install; 透传 cluster.conf 中 PRELOAD_IMAGE_PATTERNS
+#   · 基座恒随全量部署(默认 / --with-k8s / --with-cubestack 都包含), 故 DEFAULT:1、无 TOGGLE ——
+#     原 K8S_ENABLED 开关已于 2026-10-16 移除(它不控制任何调度路径: 全量路径本就强制带上基座,
+#     --steps 单组件模式本就剔除基座); 旧 cluster.conf 里残留 K8S_ENABLED 行无副作用。
 # ============================================================
 set -euo pipefail
 

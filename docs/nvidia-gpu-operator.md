@@ -92,7 +92,7 @@ vendored 副本; 离线机自动纯本地。升级手册见 chart 目录 `CUBEST
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `NVIDIA_GPU_OPERATOR_ENABLED` | false | 总开关(--enable / --steps / true) |
-| `ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR` | false | 在线/离线部署模式(顶部 ⓪ 组) |
+| `ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR` | false | 在线/离线部署模式(2026-10-16 起在 cluster.conf 主文件"附加组件开关"区) |
 | `NVIDIA_GPU_OPERATOR_VERSION` | v26.7.2 | chart 版本(★ 升级只改这里) |
 | `NVIDIA_GPU_DRIVER_BRANCH` | 595 | 驱动**分支号**(预编译模式) |
 | `NVIDIA_GPU_DRIVER_PRECOMPILED_KERNELS` | 5.15.0-186-generic | 有卡节点内核白名单(逗号分隔) |

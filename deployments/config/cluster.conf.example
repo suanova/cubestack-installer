@@ -68,7 +68,8 @@ CUBESTACK_OPERATOR_HARBOR_USER="${CUBESTACK_OPERATOR_HARBOR_USER:-}"
 CUBESTACK_OPERATOR_HARBOR_PASSWORD="${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}"
 CUBESTACK_OPERATOR_ENABLED="${CUBESTACK_OPERATOR_ENABLED:-true}"  # 默认启用; 本地 chart + 镜像入内置 registry
 CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED="${CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED:-true}"  # 打开会一并下发平台组件镜像(离线需另行备齐)
-# → 部署模式开关(ONLINE_DEPLOY_CUBESTACK_OPERATOR / ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR) → defaults【在线部署开关】节
+ONLINE_DEPLOY_CUBESTACK_OPERATOR="${ONLINE_DEPLOY_CUBESTACK_OPERATOR:-false}"  # 平台 Operator 镜像来源: false=离线(tar→内置 registry; 默认) / true=在线(按 chart 定义从 Harbor 直拉)
+# (NVIDIA 的 ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR 在下方"附加组件开关"区; 两者均于 2026-10-16 挪入主文件)
 # → 滚动 chart/镜像 tag(CHART_VERSION / IMAGE_TAG)与同步模式(CHART_SYNC) → defaults §4.6b
 
 # ---- Harbor(集群外仓库; HARBOR_ENABLED 为预留模块开关, HARBOR_MIRROR_* 为镜像源凭据) ----
@@ -76,9 +77,10 @@ HARBOR_ENABLED="${HARBOR_ENABLED:-false}"               # Harbor 外部镜像仓
 HARBOR_MIRROR_USER="${HARBOR_MIRROR_USER:-}"                  # Harbor mirrors 项目(公开只读可留空=匿名)
 HARBOR_MIRROR_PASSWORD="${HARBOR_MIRROR_PASSWORD:-}"          # Harbor 密码/token
 
-# ---- kubespray 基座开关(阶段二) ----
-K8S_ENABLED="${K8S_ENABLED:-false}"                     # 部署 kubespray 基座(modules/02_k8s/06_k8s_deploy.sh, = --with-k8s)
-K8S_SCALE_ENABLED="${K8S_SCALE_ENABLED:-false}"         # 扩容模块(modules/02_k8s/07_k8s_scale.sh, = --with-scale)
+# ---- kubespray 基座/扩容(阶段二) ----
+# 注: k8s 基座/扩容均**无 cluster.conf 开关** ——
+#     基座 k8s_deploy 恒随全量部署; 扩容 k8s_scale 仅经命令行触发(--with-scale / --steps k8s_scale)。
+#     原 K8S_ENABLED / K8S_SCALE_ENABLED 已于 2026-10-16 移除(旧配置残留该行无副作用)。
 NTP_ENABLED="${NTP_ENABLED:-1}"                         # 节点时间同步(0=跳过, 不推荐; 见 defaults §2.2)
 # 本地代理(kubespray nginx-proxy 静态 Pod: 每节点 127.0.0.1:6443 → 全部 master; 与"外部入口"正交):
 #   摘掉 all.yml 的 loadbalancer_apiserver 块实现节点就近出口; kubelet 侧故障切换 ~1s。
@@ -102,6 +104,7 @@ REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"               # 集群内置 Registry(
 # ---- 附加组件开关(阶段四; 参数见 defaults §4.x) ----
 GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 沐曦 GPU Operator(默认启用; 见 4.1)
 NVIDIA_GPU_OPERATOR_ENABLED="${NVIDIA_GPU_OPERATOR_ENABLED:-false}"  # NVIDIA GPU Operator(默认关; --enable nvidia_gpu_operator; 见 4.7b)
+ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR="${ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR:-false}"  # NVIDIA 部署模式: false=离线(tar→内置 registry; 默认) / true=在线(chart 直拉; 只可达 Harbor 时配 NVIDIA_GPU_OPERATOR_ONLINE_IMAGE_BASE, 见 4.7b)
 KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # 统一认证(占位; 见 4.4)
 KUEUE_ENABLED="${KUEUE_ENABLED:-false}"                 # 队列治理(占位; 见 4.4)
 KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # 虚拟机能力(占位; 见 4.4)
@@ -117,7 +120,7 @@ DEV_LAB_ENABLED="${DEV_LAB_ENABLED:-true}"              # 开发镜像随部署�
 
 # ════════════════════════════════════════════════════════════
 # 其余全部在 **cluster.defaults.conf**(load_config 自动加载; 覆盖时在本文件写同名变量):
-#   ★ 版本基线/镜像钉子/PRELOAD | 在线部署开关 | API 入口细节
+#   ★ 版本基线/镜像钉子/PRELOAD | API 入口细节
 #   §1 宿主机/SSH/API 域名/Harbor | §2 离线路径+MinIO/NTP/CIDR/CNI/containerd/hosts
 #   §3 MetalLB/Registry/镜像源 | §4 沐曦/Ceph/平台 Operator/Multus/NVIDIA/RDMA/netshoot/dev-lab
 # 加载优先级: 环境变量 > cluster.conf > cluster.defaults.conf

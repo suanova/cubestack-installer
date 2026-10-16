@@ -187,7 +187,7 @@ sudo bash deployments/scripts/modules/03_addon/05_harbor.sh
 sudo ./deployments/scripts/deploy-cluster.sh --with-scale
 ```
 
-**组件开关**(`cluster.conf` 中 `true/false`):`K8S_ENABLED` / `K8S_SCALE_ENABLED` / `HARBOR_ENABLED` / `CEPH_ENABLED` / `CEPH_CSI_ENABLED` / `GPU_OPERATOR_ENABLED` / `KEYCLOAK_ENABLED` / `KUEUE_ENABLED` / `KUBEVIRT_ENABLED` / `LUSTRE_CSI_ENABLED` / `LOCAL_PATH_ENABLED`(默认 false) / `REGISTRY_ENABLED`(默认 0) 等。
+**组件开关**(`cluster.conf` 中 `true/false`):`HARBOR_ENABLED` / `CEPH_ENABLED` / `CEPH_CSI_ENABLED` / `GPU_OPERATOR_ENABLED` / `KEYCLOAK_ENABLED` / `KUEUE_ENABLED` / `KUBEVIRT_ENABLED` / `LUSTRE_CSI_ENABLED` / `LOCAL_PATH_ENABLED`(默认 false) / `REGISTRY_ENABLED`(默认 0) 等(K8s 基座 `k8s_deploy` 恒随全量部署、扩容 `k8s_scale` 仅命令行触发, 均无开关)。
 
 ---
 
