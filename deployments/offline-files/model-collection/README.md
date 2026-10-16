@@ -11,13 +11,18 @@
 | | `…:0.5.13-…-amd64-qwen21-dev`(dev 变体) | 20.25 GiB |
 | | `…:0.5.12-maca.ai3.8.2.7-torch2.10-py312-ubuntu22.04-amd64-h3-patch` | 22.38 GiB |
 | `vllm/` | `harbor.isuanova.com/suanova/vllm-metax:0.27.0-maca.ai3.8.2.302-torch2.10-py312-ubuntu22.04-amd64` | 10.97 GiB |
-| | `…:0.25.0-maca.ai3.8.2.108-torch2.10-py310-ubuntu22.04-amd64` | 10.87 GiB |
+| | ~~`…:0.25.0-maca.ai3.8.2.108-torch2.10-py310-ubuntu22.04-amd64`~~ **[已失效 2026-10-16]** | — |
+| | ↑ Harbor 已无此 tag(suanova 项目仅存 py312 变体); 仓库引用的 **py310 变体实际在下一行的 `yangle/` 项目**, 已收录 | |
 | | `harbor.isuanova.com/yangle/vllm-metax:0.25.0-maca.ai3.8.2.108-torch2.10-py310-ubuntu22.04-amd64`(跨项目 ref, 仓库亦引用) | ≈10.9 GiB |
 
 - **清单(单一事实源)**: 本目录 `image-list.tsv`(subdir/file/pull_ref/save_ref; 拉取与推送同源)。
 - **tar 命名**: 按上游 ref 派生(`/`、`:` → `_`);**大件压缩存储 `.tar.gz`**(pigz 流式压缩,
   工具与模块均支持 .tar / .tar.gz 双读)。
 - 单件更新可经 Harbor→MinIO 保鲜管道(见下)增量进行, 无需全量重拉。
+- ⚠ **备料踩坑(2026-10-16 实机)**: `docker save <ref> | pigz > x.tar.gz` 的**裸管道**会把 docker save
+  的中途失败**掩蔽**成成功(pigz 退出码为 0)⇒ 产出 1.5KB 空壳档(manifest 列 14 层、实体仅 1 个 config blob)。
+  **必须**: `docker save -o <file>`(退出码不被掩蔽)+ **层完整性硬校验**(manifest.Layers ⊆ 档内 blobs)
+  + `pigz -c` 二次压缩。
 
 ## 消费方
 
