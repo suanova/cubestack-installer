@@ -2134,7 +2134,7 @@ check_offline_files() {
         echo -e "\033[41m\033[97m ⚠⚠⚠  离线文件缺失: ${OFFLINE_FILES_DIR:-<未配置>} 为空或不存在  ⚠⚠⚠\033[0m"
         echo -e "\033[41m\033[97m  离线安装需要 binary 与镜像, 请先准备离线文件:                     \033[0m"
         echo -e "\033[41m\033[97m   ① 内网/联网机从 MinIO 下载:                                    \033[0m"
-        echo -e "\033[41m\033[97m      sudo ./deployments/scripts/tools/offline/fetch-offline-files.sh\033[0m"
+        echo -e "\033[41m\033[97m      sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh\033[0m"
         echo -e "\033[41m\033[97m   ② 或手工拷贝离线文件到 ${OFFLINE_FILES_DIR:-deployments/offline-files}/   \033[0m"
         echo -e "\033[41m\033[97m   ③ kubespray 离线资源位于 ${LOCAL_REPO_DIR:-offline-files/kubespray}/    \033[0m"
         echo -e "\033[41m\033[97m      (镜像 images/ + 二进制 + packages/ 系统包)                    \033[0m"

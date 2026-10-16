@@ -228,7 +228,7 @@ export ONLY_HOSTS
 # ---------------- 配置加载 + 模块解析 ----------------
 load_config
 
-# 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 见 tools/offline/fetch-offline-files.sh)
+# 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 见 tools/offline/fetch-offline-from-minio.sh --help 全部子目录)
 check_offline_files
 
 # SSH 用户一致性点名(2026-10-15): NODES 逐行显式 ssh_user 与全局 SSH_USER(root|ubuntu 单一

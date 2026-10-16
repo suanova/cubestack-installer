@@ -83,6 +83,8 @@ CubeStack 平台 Operator **及其平台组件**的离线资产(2026-10-08 起�
   ❗不走 GitHub 托管 runner: MinIO 无 TLS, 公网明文不可接受; 内网执行零公网传输。
 - MinIO 目标: `<桶>/offline-files/cubestack-operator/`(结构与本目录一致, fetch 侧零改动);
   凭据只进 600 的 env 文件或环境变量, 不进仓库/argv/日志。
+- **部署机取回**: `tools/offline/fetch-offline-from-minio.sh --sub cubestack-operator/<组件>`
+  (刷新单组件; 下钻列表 `--list --sub cubestack-operator`; `--help` 打印全部可用子目录)。
 
 ## 版本真相 / 目录变量
 
