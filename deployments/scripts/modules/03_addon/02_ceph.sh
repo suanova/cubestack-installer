@@ -793,9 +793,11 @@ else
         done
     done
 } > "${LOCAL_CR}"
+SSH "sudo rm -f /tmp/cephcluster.yaml" >/dev/null 2>&1 || true   # 清陈旧目标(fs.protected_regular: 他人遗留文件会让 scp 被拒)
 scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
     "${LOCAL_CR}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/cephcluster.yaml" >/dev/null 2>&1
 SSH "${K} apply -f /tmp/cephcluster.yaml" || { rm -f "${LOCAL_CR}"; err "应用 CephCluster CR 失败(检查 /tmp/cephcluster.yaml 与 rook operator 日志)"; exit 1; }
+SSH "rm -f /tmp/cephcluster.yaml" >/dev/null 2>&1 || true   # 用完即删(2026-10-16): 不留固定名残留(失败路径保留供诊断, 下次预清兜底)
 rm -f "${LOCAL_CR}"
 
     # toolbox(ceph CLI; 供 [7/8] 就绪检查与调优使用)

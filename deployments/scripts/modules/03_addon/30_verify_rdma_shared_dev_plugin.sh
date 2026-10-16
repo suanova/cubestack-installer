@@ -203,6 +203,9 @@ spec:
         ${_RES_PICK}: 1
 YAML
     # 提交走 scp + apply(不用 heredoc→SSH stdin 管道: 历史上会挂起, 同 21_verify_metallb)
+    # ★ 清陈旧目标(2026-10-15 实机, 同 setup-ntp.sh 口径): 覆盖他人遗留的同名 /tmp 文件会被 fs.protected_regular 拒(root 也不例外)
+    ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "${FIRST_MASTER_USER}@${FIRST_MASTER}" "sudo rm -f /tmp/${TEST_POD}.yaml" >/dev/null 2>&1 || true
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 -q \
         "${LOCAL_YAML}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/${TEST_POD}.yaml" \
         || { rm -f "${LOCAL_YAML}"; err "测试 pod YAML 投递失败(scp → ${FIRST_MASTER})"; exit 1; }

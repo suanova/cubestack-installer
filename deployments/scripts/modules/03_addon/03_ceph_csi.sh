@@ -139,8 +139,15 @@ done
 
 apply_remote() {   # <本地YAML内容> <临时文件名> → 远端 kubectl apply
     local content="$1" name="$2"
+    # ★ 先清陈旧目标再写(2026-10-16 实机): 节点 /tmp 是 1777 sticky + fs.protected_regular=2,
+    #   "以 O_CREAT 打开**非本人**遗留的同名文件"会被内核拒为 Permission denied(**root 也不例外**:
+    #   值 2 = 对 root/CAP_DAC_OVERRIDE 同样生效)。SSH_USER 切换(ubuntu↔root)后,
+    #   旧身份遗留的 /tmp/<name>.yaml 会让本步必然失败(实机: ceph_csi [2/4] 建 rbd-pool 中止)。
+    #   sudo rm -f 在新旧两种身份下都能清(与 02_ceph.sh / ceph-backup.sh 同一预清口径)。
+    #   ★ 用完即删(2026-10-16): apply 成功后删除该文件 —— 节点 /tmp 不留固定名残留,
+    #   root↔ubuntu 任意方向切换部署都无需依赖"下一次的预清"。
     printf '%s' "${content}" | ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        "${FIRST_MASTER_USER}@${FIRST_MASTER}" "cat > /tmp/${name}.yaml && ${K} apply -f /tmp/${name}.yaml"
+        "${FIRST_MASTER_USER}@${FIRST_MASTER}" "sudo rm -f /tmp/${name}.yaml; cat > /tmp/${name}.yaml && ${K} apply -f /tmp/${name}.yaml && rm -f /tmp/${name}.yaml"
 }
 
 # ★ 2026-09-11(官方导入路径补防线, 与手填路径 827-857 同款逻辑):

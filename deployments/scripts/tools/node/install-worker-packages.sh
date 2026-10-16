@@ -230,7 +230,8 @@ fi
 rm -f "${REMOTE_FIX}"
 
 # ── 复制待装包到目标节点 ──
-${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" "mkdir -p /tmp/packages" 2>/dev/null || true
+# 重建目标目录(先清: /tmp 陈旧文件属主非本次用户时 scp/rsync 会被 fs.protected_regular 拒, root 也不例外)
+${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" "sudo rm -rf /tmp/packages && mkdir -p /tmp/packages" 2>/dev/null || true
 say "复制 ${#NEED_DEBS[@]} 个离线包到 ${IP}:/tmp/packages/ ..."
 for f in "${NEED_DEBS[@]}"; do
     vlog "  复制: $(basename "$f")"

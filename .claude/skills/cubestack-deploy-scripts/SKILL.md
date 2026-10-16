@@ -74,12 +74,12 @@ deployments/scripts/
 ```bash
 #!/bin/bash
 # ============================================================
-# MODULE: k8s_deploy          # 模块 key(缺省=文件名去掉 NN_ 前缀)
-# DESC: 部署 kubespray 集群   # 一句话描述
-# PHASE: k8s                  # 阶段: env | k8s | addon
+# MODULE: ceph                # 模块 key(缺省=文件名去掉 NN_ 前缀)
+# DESC: 部署 Rook-Ceph 存储集群 # 一句话描述
+# PHASE: addon                # 阶段: env | k8s | addon
 # DEFAULT: 0                  # 1=默认启用; 0=需 --enable / TOGGLE / --steps
 # REPEAT: 0                   # 1=可重复执行(不写断点状态)
-# TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量名, true/1/yes/on 时自动启用
+# TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED   # (可选) cluster.conf 变量名, true/1/yes/on 时自动启用(空格分隔=OR)
 # REQUIRES: k8s_deploy        # (可选) 依赖模块 key 列表(执行前须已完成); 框架自动拓扑排序
 # UNINSTALL: 1                # (可选) 声明该模块可被 cluster-teardown 反序优雅卸载
 # 说明: <详细说明, 可选>
@@ -199,7 +199,7 @@ trap '清理测试资源' EXIT
   - **立即部署单个**: `--steps X` = 部署被指定的 X(自动带基座, 只部署被指定的 operator); `--steps verify` = 只跑验证模块。
   - **排除**: `--skip X` = 全量部署时剔除。
   - 新增 operator **无需改任何列表**: operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)= operator), 写 TOGGLE 即自动进入 --steps/--enable 调度。
-- 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`
+- 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`
 - 新增配置项流程: ① cluster.conf.example 加带注释默认声明 → ② 脚本引用 → ③ 如需同步 kubespray group_vars, 在 `tools/k8s/sync-kubespray-config.sh` / `tools/k8s/sync-addons-config.sh` 加同步逻辑
 
 ## 模块体内规范
@@ -311,6 +311,18 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
     会被 sudo 的环境重置清掉)。长期配置推荐直接写 cluster.conf。
   - ⚠ root 安装假设节点装有 sudo(root 执行 sudo 免密): `k8s_passwordless` 模块对 root 节点做
     sudo 存在性预检, 缺失时明确报错并给指引(远端命令大量经 sudo 提权, 不是可选项)。
+  - ⚠ **向节点上传"固定 /tmp 名"文件前必须先清陈旧目标**(`ssh <user>@<ip> "sudo rm -f '<path>'"`,
+    目录用 `rm -rf && mkdir -p`): 节点 /tmp 是 sticky+world-writable 且 `fs.protected_regular=2`,
+    覆盖"历史运行的另一用户"遗留的同名文件会被内核拒为 `scp: Permission denied`(远端 `cat > /tmp/<名>`
+    重定向形态同样命中)—— **root 也不例外**, 报错里的"检查密钥/密码"是误导
+    (2026-10-15 实机; 2026-10-16 实机补: ceph_csi 因此中断, 详见 `docs/troubleshooting.md` §四.5)。
+    已落地点: setup-ntp.sh / sync-ca.sh / rebootstrap-worker.sh / install-worker-packages.sh /
+    reconcile-node-packages.sh / 02_ceph.sh / deploy-registry.sh / verify_metallb|verify_ceph|verify_rdma;
+    **2026-10-16 补齐"远端重定向"形态**(`ssh … "sudo rm -f …; cat > /tmp/<名>.yaml && kubectl apply …"`):
+    03_ceph_csi.sh(apply_remote)/ ceph-expose-external.sh(_apply_yaml + CephFilesystem 段)。
+    新增脚本请沿用同一口径: **写前预清 + 用完即删**(写前 `sudo rm -f '<path>'`; 用完在远端同命令
+    追加 `&& rm -f` 或单独 `node_cmd … "rm -f '<path>'" || true`; ⚠ chmod 不是通解 ——
+    protected_regular 看"属主+写位", 666 反而必然被拦)。
 - **虚拟机创建独立执行, 主程序不判断节点类型**:
   - 需要创建虚拟机的节点在 `tools/vm/vm-nodes.conf`(10字段)定义;
     **`sudo ./deployments/scripts/tools/vm/create-vms.sh` 单独执行**(创建/启动 + 自动注入 5 字段到 NODES);
@@ -413,6 +425,26 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   通而 ping 集群节点全失败, 且权威 `chronyc clients` 从来看不到它。解法=平台侧把该 VM 网卡改接与正常节点
   相同的网络(修复判据: 双向 ping 稳定通)。部署侧 `setup-ntp.sh` 已有节点→权威通路预检(NTP_REACH_CHECK)
   在同步前点名。详见 `docs/troubleshooting.md` 二.2。
+
+## Calico RBAC × 版本升级速查(403 陷阱, 2026-10-15 事故)
+
+- **升级 calico(或换 kubespray 树)时必须重比 RBAC**: kubespray 的 calico ClusterRole 模板
+  (`roles/network_plugin/calico/templates/calico-cr.yml.j2` + `roles/kubernetes-apps/policy_controller/calico/templates/calico-kube-cr.yml.j2`)
+  是**按旧版 calico 写死**的 —— 新版 calico 自带清单里新增的规则不会自动进来。比对口径: 从
+  `offline-files/calico/release-<v>.tgz` 取 `manifests/calico.yaml`, 按 **(apiGroup, resource) 归并
+  verbs** 后与模板逐条 diff(排除 `projectcalico.org` 别名与 `crd.projectcalico.org` 通配的假差)。
+  已有实现: 补丁 `cubestack-patches/15-calico-3.32.2-rbac.patch`(3.32.2 的缺口)。
+- **判据(致命性)**: calico 的 felix/控制器把 **403 判为 datastore 故障**(一直重试 + readiness 恒 503),
+  **404 才是"CRD 不存在, 正常跳过"** ⇒ 缺读权限的后果**不是"少读一个资源"**, 而是:
+  `calico-node` **全节点 0/1** → calico 规则链不完整 → **一切非 hostNetwork pod 访问 ClusterIP 全断**
+  (实机连锁: local-path-provisioner CrashLoop → registry-pvc 永不 Bound → `k8s_registry` 600s 超时 →
+  部署中断)。症状与根因相隔极远, 排查先跑:
+  `kubectl -n kube-system logs -l k8s-app=calico-node -c calico-node | grep -oE "cannot list resource \"[a-z]+\" in API group \"[^\"]+\"" | sort | uniq -c`
+- **RBAC 子资源独立授权**: `update` 主资源**不**覆盖 `/status`(如
+  `kubecontrollersconfigurations/status`)—— 模板里"# update status"注释骗过了一轮排查。
+- **含 kubevirt 集成的环境**还要 `kubevirt.io` 读权限(calico 3.32 的 calico-node/kube-controllers/
+  cni-plugin 各一组; 无 kubevirt 时该 watch 404 无害, 装过 kubevirt 才会 403)。
+- 详见 `docs/troubleshooting.md` §一.4(含实机验证命令与未跟齐项清单)。
 
 ## MetaX GPU Operator 部署速查(沐曦)
 

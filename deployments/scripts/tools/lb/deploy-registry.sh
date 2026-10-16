@@ -51,8 +51,17 @@ node_cmd() {
 }
 
 # 复制本地脚本到节点(<local> <ip> <user> <pw> <remote_path>)
+# ★ 上传前先清陈旧目标(2026-10-15 root 安装实机根因, 同 setup-ntp.sh 口径): 目标是**固定 /tmp 名** ——
+#   若文件由"其他用户"的历史运行遗留(实机: ubuntu 运行留下 ubuntu:ubuntu 的 /tmp/cubestack-registry-node.sh),
+#   新用户的 scp(O_CREAT|O_TRUNC 打开既有文件)会被 sticky /tmp 的 fs.protected_regular=2 拒为
+#   "Permission denied"(实测 root 也不例外: ①拒 ②新路径过 ③先删再传过)。删除后 scp 新建的文件属主=本次用户。
 node_scp() {
     local l="$1" ip="$2" u="$3" pw="$4" r="$5"
+    if [[ "${r}" == */ ]]; then
+        node_cmd "${ip}" "${u}" "${pw}" "rm -rf '${r}' && mkdir -p '${r}'" >/dev/null 2>&1 || true
+    else
+        node_cmd "${ip}" "${u}" "${pw}" "rm -f '${r}'" >/dev/null 2>&1 || true
+    fi
     if scp "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=8 "$l" "${u}@${ip}:${r}" 2>/dev/null; then return 0; fi
     [ -n "${pw}" ] || return 1
     SSHPASS="${pw}" sshpass -e scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -207,6 +216,7 @@ for e in "${NODE_ENTRIES[@]}"; do
     else
         warn "  ${hn}(${ip}): 无法上传配置脚本(检查密钥/密码)"
     fi
+    node_cmd "${ip}" "${u}" "${pw}" "rm -f ${REMOTE_SCRIPT}" >/dev/null 2>&1 || true   # 用完即删(2026-10-16)
 done
 rm -f "${NODE_SCRIPT}"
 

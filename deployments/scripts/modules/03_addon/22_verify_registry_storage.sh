@@ -117,6 +117,7 @@ if [ "${REGISTRY_ON}" = "1" ]; then
         # ★ 2026-09-14 防御: 部署机兼 master(自 scp)时源 tar 可能属 root(0600, 如离线下载经 sudo 生成),
         #   ssh 以 ${SSH_USER} 读源会 EACCES → 先预检可读性给出明确指引(而非 scp 裸报错)。
         [ -r "${TAR}" ] || { err "离线 tar 不可读(属主/权限): ${TAR}(若由 sudo 下载, 请 chmod 644 或 chown ${FIRST_MASTER_USER})"; exit 1; }
+        SSH "sudo rm -f ${REMOTE_TAR}" >/dev/null 2>&1 || true   # 清陈旧目标(fs.protected_regular, 2026-10-16)
         scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
             "${TAR}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:${REMOTE_TAR}" \
             || { err "scp busybox.tar 到 ${FIRST_MASTER} 失败"; exit 1; }
@@ -198,6 +199,7 @@ spec:
     persistentVolumeClaim:
       claimName: ${PVC_NAME}
 YAML
+    SSH "sudo rm -f /tmp/${TEST_NS}-resources.yaml" >/dev/null 2>&1 || true   # 清陈旧目标(fs.protected_regular, 2026-10-16)
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
         "${YAML}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/${TEST_NS}-resources.yaml" \
         && SSH "${K} apply -f /tmp/${TEST_NS}-resources.yaml" \
@@ -251,6 +253,7 @@ spec:
     persistentVolumeClaim:
       claimName: ${PVC_NAME}
 POD2YAML
+    SSH "sudo rm -f /tmp/${TEST_NS}-pod2.yaml" >/dev/null 2>&1 || true   # 清陈旧目标(fs.protected_regular, 2026-10-16)
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
         "${POD2_YAML}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/${TEST_NS}-pod2.yaml" \
         && SSH "${K} apply -f /tmp/${TEST_NS}-pod2.yaml" \
