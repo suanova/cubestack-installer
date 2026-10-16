@@ -1,0 +1,151 @@
+# patch: 15-calico-3.32.2-rbac.patch
+# 目标: roles/network_plugin/calico/templates/calico-cr.yml.j2
+#       roles/kubernetes-apps/policy_controller/calico/templates/calico-kube-cr.yml.j2
+# 加入: 2026-10-15
+# 原因: calico 3.31.7 → v3.32.2 升级(同批补丁 14)时, 上游 3.32.2 清单在其自带 ClusterRole 里
+#       新增了若干规则, 而 kubespray v2.32.0 的模板停留在旧版。缺这些规则时被 watch/读取的资源
+#       返回的是 403(而非 404), 而 **calico 的 felix 把 403 判为 datastore 连接故障**
+#       (404 才是"CRD 不存在, 正常跳过")⇒ 后果不是"少读一个资源", 而是组件整体不可用:
+#       · calico-node(缺 policy.networking.k8s.io/clusternetworkpolicies +
+#         kubevirt.io/virtualmachineinstancemigrations): felix 初始 resync 永不完成 →
+#         calico-node **全节点 0/1**(readiness 503, bird 侧正常) → **pod 访问 ClusterIP 全断**
+#         (2026-10-15 实机: local-path-provisioner / calico-kube-controllers / coredns 等所有
+#          非 hostNetwork pod 访问 https://10.233.0.1:443 报 i/o timeout; 连锁后果:
+#          registry-pvc 永不 Bound → registry pod Pending → k8s_registry 模块 600s 超时 → 部署中断)
+#       · calico-kube-controllers(缺 crd.projectcalico.org/kubecontrollersconfigurations/status、
+#         apps/daemonsets+deployments、apiextensions.k8s.io/customresourcedefinitions、
+#         apiregistration.k8s.io/apiservices、crd.projectcalico.org/{networkpolicies,
+#         stagednetworkpolicies, stagedglobalnetworkpolicies, globalnetworkpolicies}):
+#         RBAC 子资源独立授权(主资源规则不覆盖 /status); 缺读权限时 policy-name-migrator 每 5s
+#         重试并刷 forbidden(实机逐条暴露: /status → daemonsets → 策略列表 → CRD 列表)
+#       · kubevirt.io 读权限(calico-node / calico-kube-controllers / calico-cni-plugin):
+#         kubevirt 环境同类 403(本集群未装 kubevirt, 属"防同类再现"的上游逐字对齐)
+#       规则文本与 3.32.2 官方 release 包 manifests/calico.yaml 逐字一致
+#       (对比口径: 按 (apiGroup, resource) 归并 verbs 后逐条 diff, 排除 projectcalico.org 别名与
+#        crd.projectcalico.org 通配造成的假差; 归档说明见 deployments/offline-files/calico/README.md,
+#        事故与验证记录见 docs/troubleshooting.md §一.4)。
+#       ⚠ 与上游的两处**有意偏离**(最小权限, 已在模板注释标明): apiextensions/CRD 与
+#       apiregistration/apiservices 上游含 create/delete, 本补丁只授读; 其余与上游同牌。
+# 上游吸收判据: kubespray 的 calico 模板出现 clusternetworkpolicies / virtualmachineinstancemigrations /
+#       kubecontrollersconfigurations/status 规则(或 kubespray 改为直接渲染 calico 官方清单)
+# 上游化: 建议提 PR(模板应与所 pin 的 calico 版本自带的 RBAC 对齐; v2.32.0 按旧版 calico 写死)
+# ------------------------------------------------------------
+--- a/roles/network_plugin/calico/templates/calico-cr.yml.j2
++++ b/roles/network_plugin/calico/templates/calico-cr.yml.j2
+@@ -36,6 +36,14 @@
+       - create
+       - update
+       - delete
++  # The CNI plugin reads KubeVirt resources for IPAM of KubeVirt workloads.
++  # cubestack: 上游 calico 3.32.2 逐字对齐; 见 cubestack-patches/15-calico-3.32.2-rbac.patch
++  - apiGroups: ["kubevirt.io"]
++    resources:
++      - virtualmachineinstances
++      - virtualmachines
++    verbs:
++      - get
+ ---
+ kind: ClusterRole
+ apiVersion: rbac.authorization.k8s.io/v1
+@@ -94,6 +102,16 @@
+     verbs:
+       - watch
+       - list
++  # Watch for changes to Kubernetes ClusterNetworkPolicies.
++  # cubestack: calico >= 3.32 的 felix 固定 watch 该 CRD(随 calico 清单一起安装), 缺此规则
++  #   resync 永不完成 → calico-node 全节点 0/1 → pod 访问 ClusterIP 全断(2026-10-15 实机断网根因);
++  #   见 cubestack-patches/15-calico-3.32.2-rbac.patch
++  - apiGroups: ["policy.networking.k8s.io"]
++    resources:
++      - clusternetworkpolicies
++    verbs:
++      - watch
++      - list
+   # Used by Calico for policy information.
+   - apiGroups: [""]
+     resources:
+@@ -207,6 +225,17 @@
+     verbs:
+       - get
+ {% endif %}
++  # For monitoring KubeVirt live migration.
++  # cubestack: 上游 calico 3.32.2 calico-node ClusterRole 自带(逐字对齐); 缺它 kubevirt 环境
++  #   该 watch 恒 403 → felix 同样 resync 不完成(felix 对 403 判"datastore 故障", 对 404 则正常跳过);
++  #   见 cubestack-patches/15-calico-3.32.2-rbac.patch
++  - apiGroups: ["kubevirt.io"]
++    resources:
++      - virtualmachineinstancemigrations
++    verbs:
++      - get
++      - list
++      - watch
+   # Used for creating service account tokens to be used by the CNI plugin
+   - apiGroups: [""]
+     resources:
+--- a/roles/kubernetes-apps/policy_controller/calico/templates/calico-kube-cr.yml.j2
++++ b/roles/kubernetes-apps/policy_controller/calico/templates/calico-kube-cr.yml.j2
+@@ -115,6 +115,64 @@
+       - update
+       # watch for changes
+       - watch
++  # Status subresource authorization is independent of the parent resource
++  # (上面的 update 不覆盖 kubecontrollersconfigurations/status)。缺此规则控制器每次回写状态
++  # 恒 403(实机 2026-10-15 持续报错) —— cubestack: 见 cubestack-patches/15-calico-3.32.2-rbac.patch
++  - apiGroups: ["crd.projectcalico.org"]
++    resources:
++      - kubecontrollersconfigurations/status
++    verbs:
++      - get
++      - update
++  # KubeVirt VM/VMI informers for IPAM garbage collection of KubeVirt workloads.
++  # cubestack: 上游 calico 3.32.2 逐字对齐; 见 cubestack-patches/15-calico-3.32.2-rbac.patch
++  - apiGroups: ["kubevirt.io"]
++    resources:
++      - virtualmachines
++      - virtualmachineinstances
++    verbs:
++      - get
++      - list
++      - watch
++  # kube-controllers 的 policy-name-migrator / CRD 处理需要读取的集群级资源
++  # (上游 3.32.2 同位规则, 其中 apiservices/CRD 的 create/delete 上游亦有, 此处只取读权限 —— 最小够用;
++  #  缺这些读权限时迁移器每 5s 重试并在日志刷 forbidden, 2026-10-15 实机逐条暴露)
++  - apiGroups: ["apps"]
++    resources:
++      - daemonsets
++      - deployments
++    verbs:
++      - get
++      - list
++      - watch
++  - apiGroups: ["apiextensions.k8s.io"]
++    resources:
++      - customresourcedefinitions
++    verbs:
++      - get
++      - list
++      - watch
++  - apiGroups: ["apiregistration.k8s.io"]
++    resources:
++      - apiservices
++    verbs:
++      - get
++      - list
++      - watch
++  # 策略改名迁移(存量集群升级路径); 上游同牌动词为 create/delete/get/list/update/watch, 逐字保留
++  - apiGroups: ["crd.projectcalico.org"]
++    resources:
++      - networkpolicies
++      - stagednetworkpolicies
++      - stagedglobalnetworkpolicies
++      - globalnetworkpolicies
++    verbs:
++      - create
++      - delete
++      - get
++      - list
++      - update
++      - watch
+   # Services are monitored for service LoadBalancer IP allocation
+   - apiGroups: [""]
+     resources:
