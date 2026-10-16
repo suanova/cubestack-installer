@@ -344,7 +344,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
     -v $HOME/.ssh:/root/.ssh cubestack-cli
   # 容器内: cd /opt/cubestack-installer && sudo ./deployments/scripts/deploy-cluster.sh
   ```
-- **离线文件下载**: `tools/offline/fetch-offline-files.sh` 用 mc 从 MinIO 同步到 `OFFLINE_FILES_DIR`
+- **离线文件下载**: `tools/offline/fetch-offline-from-minio.sh` 用 mc 从 MinIO 同步到 `OFFLINE_FILES_DIR`(--sub 支持嵌套/多值, 可细化到 `cubestack-operator/<组件>`; `--help` 打印全部可用子目录; 旧名 fetch-offline-files.sh 为兼容薄壳)
   (默认 `deployments/offline-files`); 配置 `MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY/BUCKET/REMOTE_DIR`。
 - **离线文件缺失检查**: `lib-common.sh` 的 `check_offline_files`(deploy-cluster.sh 启动时调用), 缺失时输出
   **红底醒目提示**并给出准备指引(不阻断)。部署前务必保证 `${LOCAL_REPO_DIR}` 下有
