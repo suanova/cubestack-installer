@@ -351,7 +351,7 @@ cp config/cluster.conf.example config/cluster.conf
 vim config/cluster.conf          # 修改 NODES 里的 IP 等信息
 
 # 离线文件缺失时,先从 MinIO 拉取(需先配置 mc alias 指向 MinIO)
-mc alias set minio http://minio-host:9000 admin CHANGE_ME    # CHANGE_ME 替换为真实 MinIO SecretKey
+mc alias set minio http://<minio-host>:9000 admin CHANGE_ME    # CHANGE_ME 替换为真实 MinIO SecretKey
 ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh            # 默认下载部署必需子目录(排除 virtual-machine)
 ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub virtual-machine   # 仅创建虚拟机时按需拉 VM 镜像
 ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --all      # 真正全量(含 virtual-machine)

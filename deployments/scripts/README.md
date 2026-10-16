@@ -37,7 +37,7 @@ sudo docker run -itd --name cubestack-install --network=host \
 sudo docker exec -it cubestack-install bash
 
 # ⑤ 从 MinIO 拉取离线文件(默认下载部署必需子目录, 排除 virtual-machine; 已挂载即落盘宿主机)
-mc alias set minio http://minio-host:9000 admin CHANGE_ME    # 换真实 MinIO 地址/凭证
+mc alias set minio http://<minio-host>:9000 admin CHANGE_ME    # 换真实 MinIO 地址/凭证
 ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh   # 默认: kubespray/metax-gpu/os/ceph(排除 VM 镜像)
 
 # ⑥ 首次: 从模板生成真实配置(cluster.conf 是唯一数据源, 所有 IP 不硬编码)
