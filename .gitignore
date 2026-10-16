@@ -92,6 +92,8 @@ deployments/offline-files/*/*
 deployments/offline-files/*/*/*
 !deployments/offline-files/*/README.md
 !deployments/offline-files/*/*/README.md
+# 平台镜像清单(单一事实源; 2026-10-16 起 CI/本地/服务器共用)
+!deployments/offline-files/*/image-list.tsv
 deployments/kubespray/kubespray/.git
 deployments/kubespray/kubespray/.gitattributes
 deployments/kubespray/kubespray/.github

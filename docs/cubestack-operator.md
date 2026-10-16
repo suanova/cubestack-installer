@@ -43,8 +43,9 @@ helm chart 安装, 也就是本模块做的事。
 
 **范围更新(2026-10-08)**: `clusterCR.enabled=true` 时, 平台组件(lws/envoy-gateway/prometheus/perses/
 cuberouter/cubepilot/portal/observability…)的**离线镜像链路已由本模块承接**(见 §3.4b):
-模块把 `offline-files/cubestack-operator/` 的全部组件 tar 推入集群内置 registry, 并把 CR 的
-全局镜像源(imageRegistry / externalImageRegistryPrefix)注入为集群 registry —— 节点不访问 Harbor。
+模块把 `offline-files/cubestack-operator/`(2026-10-16 起平台组件按**组件子目录**分类)的各组件
+tar 推入集群内置 registry, 并把 CR 的全局镜像源(imageRegistry / externalImageRegistryPrefix)
+注入为集群 registry —— 节点不访问 Harbor。
 默认裁剪(可经 `CUBESTACK_OPERATOR_CR_VALUES_FILE` 覆盖): 模型 bundles 清空 + modelBundles/bmc 关闭。
 
 ### 1.1 部署模式切换: 在线 / 离线(2026-10-13)
@@ -155,8 +156,8 @@ helm template <release> <本地tgz> -n <ns> | sed -n 's/^[[:space:]]*image:[[:sp
 镜像搬运路径(离线机):
 
 ```
-Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator──▶
-  deployments/offline-files/cubestack-operator/<上游ref>.tar ──模块──▶ 集群内置 registry
+Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator──▶ 顶层 <上游ref>.tar(本体)
+上游/Harbor(各平台组件)   ──手工 save──▶ <组件>/<上游ref>.tar(平台组件) ──模块──▶ 集群内置 registry
 ```
 
 - 登记: `deployments/config/images.manifest` 的 `cubestack-operator` 组(tag 写
@@ -168,8 +169,9 @@ Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator�
 
 ### 3.4b 平台组件镜像推送 + CR 全局注入(2026-10-08 实机落地, CR 模式)
 
-`clusterCR.enabled=true` 时, [4b/6] 把 `offline-files/cubestack-operator/` 下**全部 tar** 推入集群
-registry(幂等 digest 比对), 目标路径与 [3/6] 注入的两条前缀**一一对应**:
+`clusterCR.enabled=true` 且**离线模式**时, [4b/6] 把 `offline-files/cubestack-operator/` 下
+**顶层 + 各组件子目录**的 tar 推入集群 registry(幂等 digest 比对; 子目录 = 平台组件名, 结构表与
+"更新单个 operator"流程见目录 README), 目标路径与 [3/6] 注入的两条前缀**一一对应**:
 
 | tar 内镜像 | registry 目标路径 | CR 侧字段 |
 |---|---|---|
@@ -178,8 +180,11 @@ registry(幂等 digest 比对), 目标路径与 [3/6] 注入的两条前缀**一
 
 - **目标 ref 以 tar 文件名为权威**(文件名 = 上游 ref 的 `/`/`:` → `_`), tar 内 RepoTags 仅作尾部校验
   —— 早期 tar 的 RepoTags 可能是短式(缺 docker.io 域), 按它推会与节点拉取路径不一致(实机 not found)。
-- 组件镜像集与 operator 镜像内 `assets/charts` 的**渲染对账**而来(36 个 tar): 见
-  `offline-files/cubestack-operator/README.md`(含清单来源与维护方法)。
+- 组件镜像集与 operator 镜像内 `assets/charts` 的**渲染对账**而来(37 个 tar, 2026-10-16 起按平台
+  组件分入子目录): 见 `offline-files/cubestack-operator/README.md`(结构表 / 维护方法 / 单独推送流程)。
+- **单独推送**(更新某一个 operator 后只灌它的镜像): `CUBESTACK_OPERATOR_COMPONENTS="<组件名>"`
+  环境变量, 如 `sudo CUBESTACK_OPERATOR_COMPONENTS="cubepilot" ./deploy-cluster.sh --steps cubestack_operator`
+  (组件名不存在会报错并列出可用子目录)。
 - **默认裁剪**(`CUBESTACK_OPERATOR_CR_VALUES_FILE` 可覆盖): `spec.bundles=[]` + modelBundles 关
   (模型推理 Pod/GPU 需求, 非平台服务必需)+ bmc 关(需管理员先建 `cubestack-bmc-credentials` Secret)。
 - **imagePullSecrets 注入为空**: 集群 registry 匿名可拉; 留默认值(harbor-credentials)而 Secret

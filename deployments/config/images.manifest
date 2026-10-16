@@ -191,9 +191,21 @@ cubestack-operator  ${CUBESTACK_OPERATOR_HARBOR_HOST}/suanova-private/cubestack-
 #   · ratelimit 是 EnvoyGateway CR 的 rateLimitDeployment 配置镜像(非默认拉起, 配 RateLimitPolicy
 #     时用); tag 8fe6ea42 是上游固定 commit tag —— 本部署网络到 docker.io 不通, 必须经本 CI
 #     通道同步到 Harbor mirrors 后再 harbor-save 成离线 tar(见 offline-files/cubestack-operator/README.md)。
+#     ⚠ 2026-10-16 起组件 tar 按组件分子目录, 本行 save 产出在**顶层** —— 请归位到 envoy-gateway/ 再推送。
 #   · 其余平台组件镜像(envoy/prometheus 栈/perses/bmc/cubepilot/cnpg/opstree 等)的完整清单与
 #     维护方法见 offline-files/cubestack-operator/README.md; 如需经本 CI 同步, 按同格式逐条登记。
 cubestack-operator  docker.io/envoyproxy/ratelimit:8fe6ea42
+
+# ------------------------------------------------------------
+# [group: cubestack-platform] 平台组件镜像(2026-10-16 补登记)
+#   用途: 只把上游复刻到 Harbor mirrors/**, 供"平台镜像保鲜管道"经 mirrors 拉取离线 tar
+#   (tools/images/cubestack-platform-save-images.sh + offline-files/cubestack-operator/image-list.tsv)。
+#   ⚠ 三者此前在 mirrors/ 缺席: envoy:v1.9.1 无镜像可拉(本网络 docker.io 不通, 唯一通道=本 CI)、
+#     thanos / redis-exporter 从未同步。本仓库 push 后由本工作流补齐。
+#   本组**不供** harbor-save-images --group 使用(离线 tar 落盘由保鲜管道负责)。
+cubestack-platform  docker.io/envoyproxy/envoy:v1.9.1
+cubestack-platform  quay.io/thanos/thanos:v0.42.4
+cubestack-platform  quay.io/opstree/redis-exporter:v1.44.0
 
 # ------------------------------------------------------------
 # [group: dev-lab] 开发镜像(jupyter / ssh 系列, 供开发环境/容器终端使用)
