@@ -109,7 +109,7 @@ cmd_save() {
         _OK=0
         for _try in 1 2 3; do
             if ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${NODE_USER:-ubuntu}@${NODE_IP}" \
-                "sudo bash -c 'cd /var/lib/rook && tar czf /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz mon-* 2>/dev/null' && sudo chown \$(id -un) /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" \
+                "sudo rm -f /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz; sudo bash -c 'cd /var/lib/rook && tar czf /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz mon-* 2>/dev/null' && sudo chown \$(id -un) /tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" \
                 && scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
                     "${NODE_USER:-ubuntu}@${NODE_IP}:/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" "/tmp/rook-monstore-${NODE_HOSTNAME}.tar.gz" \
                 && scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
@@ -296,6 +296,7 @@ if \${K} -n rook-ceph get cephcluster rook-ceph -o yaml > "\${BACKUP_DIR}/\${TS}
     ls -1d "\${BACKUP_DIR}"/[0-9]*_* 2>/dev/null | sort -r | tail -n +$((RETENTION+1)) | xargs -r sudo rm -rf
 fi
 EOF
+    SSH "sudo rm -f /tmp/ceph-backup-refresh.sh" >/dev/null 2>&1 || true   # 清陈旧目标(fs.protected_regular)
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
         /tmp/ceph-backup-refresh.sh "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}:/tmp/ceph-backup-refresh.sh"
     SSH "sudo mkdir -p ${BACKUP_DIR}/scripts && sudo cp /tmp/ceph-backup-refresh.sh ${BACKUP_DIR}/scripts/refresh.sh && sudo chmod +x ${BACKUP_DIR}/scripts/refresh.sh && \
@@ -319,6 +320,7 @@ WantedBy=timers.target
 EOS
          sudo systemctl daemon-reload && sudo systemctl enable --now ceph-backup-refresh.timer && \
          systemctl list-timers ceph-backup-refresh.timer --no-pager | head -2"
+    SSH "sudo rm -f /tmp/ceph-backup-refresh.sh" >/dev/null 2>&1 || true   # 用完即删(2026-10-16; 节点侧副本, 防跨用户遗留)
     rm -f /tmp/ceph-backup-refresh.sh
     ok "systemd timer 已安装(master=${FIRST_MASTER}, 每小时刷新 ${BACKUP_DIR}/current/, 防整点齐刷延迟 5min)"
 }

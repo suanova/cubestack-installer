@@ -73,7 +73,7 @@ for line in "${NODES[@]:-}"; do
     say "── [${NODE_HOSTNAME}](${NODE_IP}) 同步镜像 tar + ctr import ──"
     # 1. 目标目录就绪(节点用户可写, 用于写 .done 标记)
     ssh "${SSH_OPTS[@]}" "${NODE_USER}@${NODE_IP}" \
-        "sudo mkdir -p /tmp/ceph-images && sudo chown ${NODE_USER} /tmp/ceph-images" 2>/dev/null || true
+        "sudo rm -rf /tmp/ceph-images && sudo mkdir -p /tmp/ceph-images && sudo chown ${NODE_USER} /tmp/ceph-images" 2>/dev/null || true
     # 2. 逐 tar: 已同步+已导入(同名同大小 + .done) → 跳过; 否则复制
     _COPY_FAIL=0
     for t in "${TARS[@]}"; do

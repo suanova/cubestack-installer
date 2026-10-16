@@ -91,8 +91,18 @@ node_cmd() {
 }
 
 # 复制本地脚本到节点(<local> <ip> <user> <pw> <remote_path>)
+# ★ 上传前先清陈旧目标(2026-10-15 root 安装实机根因): 目标是**固定 /tmp 名** —— 若文件由
+#   "其他用户"的历史运行遗留(实机: 昨天 ubuntu 运行留下 ubuntu:ubuntu 的文件), 今天新用户的
+#   scp(O_CREAT|O_TRUNC 打开既有文件)会被 sticky /tmp 的 fs.protected_regular=2 拒为
+#   "Permission denied"(实测 root 也不例外: ①拒 ②新路径过 ③先删再传过)。删除后 scp 新建
+#   的文件属主=本次用户, 后续运行同类安全。
 node_scp() {
     local l="$1" ip="$2" u="$3" pw="$4" r="$5"
+    if [[ "${r}" == */ ]]; then
+        node_cmd "${ip}" "${u}" "${pw}" "rm -rf '${r}' && mkdir -p '${r}'" >/dev/null 2>&1 || true
+    else
+        node_cmd "${ip}" "${u}" "${pw}" "rm -f '${r}'" >/dev/null 2>&1 || true
+    fi
     if scp "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=8 "$l" "${u}@${ip}:${r}" 2>/dev/null; then return 0; fi
     [ -n "${pw}" ] || return 1
     SSHPASS="${pw}" sshpass -e scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -466,6 +476,7 @@ verify_clocks() {
                     done
                     unset _t
                 fi
+                node_cmd "${ip}" "${u}" "${pw}" "rm -f ${REMOTE_SCRIPT}" >/dev/null 2>&1 || true   # 用完即删(2026-10-16)
                 unset _hb _ha _aut
                 if [ "${off}" -eq -1 ] || [ "${off}" -gt "${NTP_MAX_OFFSET_MS}" ]; then
                     warn "  ${hn}(${ip}) 复测仍偏差 ${off}ms ✗(>${NTP_MAX_OFFSET_MS}ms)"
@@ -521,6 +532,7 @@ case "${ACTION}" in
             else
                 warn "  ${hn}(${ip}) 关闭失败(检查密钥/密码/连通性)"
             fi
+            node_cmd "${ip}" "${u}" "${pw}" "rm -f ${REMOTE_SCRIPT}" >/dev/null 2>&1 || true   # 用完即删(2026-10-16)
         done
         ;;
     apply)
@@ -572,6 +584,7 @@ case "${ACTION}" in
             else
                 warn "  ${hn}(${ip}) 无法上传脚本(检查密钥/密码)"
             fi
+            node_cmd "${ip}" "${u}" "${pw}" "rm -f ${REMOTE_SCRIPT}" >/dev/null 2>&1 || true   # 用完即删(2026-10-16)
         done
         if [ -n "${REACH_FAIL}" ]; then
             err "存在无法与权威建立通路的节点: ${REACH_FAIL}(原因见上); 网络修复前时间同步不可能成功, 已提前终止"

@@ -147,6 +147,66 @@ echo x | nc -u <节点IP> 8472
   **自适应降级**(VIP 探测不通 → 查 svc 实际 nodePort → 推送/预检全程走它); 其余模块同类需求可照搬
   (更好归宿 = 下沉 lib-common 的 REGISTRY_DIRECT 派生, 待排)。
 
+### 4. 【2026-10-15 事故】calico-node 全节点 0/1 ⇒ 一切非 hostNetwork pod 访问 ClusterIP 全断 —— calico 3.32.2 自带 RBAC 新规则漏在 kubespray 模板外(403 被 felix 判为 datastore 故障)
+
+**症状(三个层面, 表面故障离根因很远):**
+1. `kubectl -n kube-system get pod -l k8s-app=calico-node` —— **全节点 0/1 Running**(bird 侧正常;
+   readiness 503, felix 日志 `Reporter is not ready ... name="CalculationGraph"/"InternalDataplaneMainLoop"`);
+2. **一切非 hostNetwork 的 pod 访问 ClusterIP 全断**: `https://10.233.0.1:443` → `dial tcp ... i/o timeout`
+   (实机: `local-path-provisioner` CrashLoop、`calico-kube-controllers`/`coredns`/`metrics-server` 反复重启);
+3. 连锁到部署面: `registry-pvc` 永不 Bound → registry pod Pending → **`k8s_registry` 模块 600s 超时、
+   整个部署中断**(本次就这么断的)。
+
+**根因:** calico 3.31.7→**v3.32.2** 升级(补丁 14 同批)后, felix **固定 watch** 的两个资源在
+kubespray v2.32.0 的 `calico-node` ClusterRole 模板里**没有授权**:
+`policy.networking.k8s.io/clusternetworkpolicies`(calico 3.32 随清单安装的 CNP CRD)与
+`kubevirt.io/virtualmachineinstancemigrations` —— 实机 felix 日志各 `cannot list resource ... forbidden`
+685 次。关键机理: **felix 把 403 判为"datastore 连接故障"**(持续重试 + readiness 恒 503),
+而 **404("CRD 不存在")才是正常跳过** ⇒ 缺 RBAC 不是"少读一个资源", 而是 **felix 永不 Ready ⇒
+calico-node 全节点 0/1 ⇒ calico 数据面(策略/规则链)不完整 ⇒ pod 出不了 ClusterIP**。
+上游 calico v3.32.2 官方 `manifests/calico.yaml` **自带**这两条规则(kubespray 模板停留在旧版 calico
+的规则集; 规则文本可直接对照 `deployments/offline-files/calico/release-v3.32.2.tgz` 内的清单)。
+同类(实机逐个暴露): `calico-kube-controllers` 的 policy-name-migrator 缺 `apps/daemonsets`、
+策略资源列表、`apiextensions/customresourcedefinitions` 等读权限时**每 5s 刷 forbidden**;
+`kubecontrollersconfigurations/status` 是**子资源独立授权**——主资源规则(含 update)不覆盖它。
+
+**解法(根治):** 补丁 **`deployments/kubespray/cubestack-patches/15-calico-3.32.2-rbac.patch`**
+(安装/升级由补丁层自动重放; 比对口径 = 按 `(apiGroup, resource)` 归并 verbs 后与上游逐条 diff,
+排除 `projectcalico.org` 别名与 `crd.projectcalico.org` 通配的假差):
+- `calico-node`: +`policy.networking.k8s.io/clusternetworkpolicies`(watch/list)、
+  +`kubevirt.io/virtualmachineinstancemigrations`(get/list/watch);
+- `calico-kube-controllers`: +`kubecontrollersconfigurations/status`(get/update)、
+  +`apps/{daemonsets,deployments}` 读、+`apiextensions/customresourcedefinitions` 读、
+  +`apiregistration/apiservices` 读、+`crd.projectcalico.org` 四个策略资源(**上游同牌动词**);
+- `calico-cni-plugin` + `calico-kube-controllers`: kubevirt VM/VMI 读权限(上游对齐)。
+
+**验证(2026-10-15 实机, 通过):**
+```bash
+# ① 因果验证: 给 calico-node ClusterRole 补两条(等价 patch 15 的 calico-node 部分)后 ~75s:
+kubectl -n kube-system get pod -l k8s-app=calico-node   # 全节点 0/1 → 全节点 1/1; felix forbidden=0
+# ② 连锁恢复: local-path-provisioner 1/1 → registry-pvc Bound(pvc-50daa5ea…) → registry pod 1/1 Running
+# ③ 补丁层: bash deployments/kubespray/cubestack-patch-apply.sh --check   # rc=0(含 15; 容器内同绿)
+# ④ 端到端: 容器内重跑被中断的模块: ./deployments/scripts/deploy-cluster.sh --steps k8s_registry(通过)
+```
+**⚠ 已验证边界(如实标注):**
+- calico-node 两条 = **实机因果闭环**(补上即全节点 Ready、数据面恢复);
+- kube-controllers 的 `/status`、`daemonsets`、策略读、CRD 读 = 实机逐条验证(403 消失, 日志转静);
+  其中**策略资源的写动词**(改名迁移)按上游保留, 本集群为全新(无存量策略)未触发;
+- kubevirt 三条 = 上游逐字对齐(本集群未装 kubevirt, 属"防同类再现");
+- 与上游仍有**未跟齐项**(本次未纳入, 未观察到故障; 换版时按同法重比): `calico-node` 的
+  `ipamconfigurations`; `calico-kube-controllers` 的 `migration.projectcalico.org/datastoremigrations`
+  (仅 datastore 迁移用)与 `projectcalico.org` 别名组(etcd datastore 用);
+- 本补丁**不改运行中集群** —— 存量集群需按①手动补齐(或重跑 cluster.yml 让模板渲染)。
+
+**相关命令:**
+```bash
+# 判定 calico-node 0/1 是否属"felix 数据面未就绪":
+kubectl -n kube-system logs -l k8s-app=calico-node -c calico-node | \
+  grep -oE "cannot list resource \"[a-z]+\" in API group \"[^\"]+\"" | sort | uniq -c
+# 取上游自带 RBAC 对照:
+tar -xzf deployments/offline-files/calico/release-v3.32.2.tgz -C /tmp release-v3.32.2/manifests/calico.yaml
+```
+
 ---
 
 ## 二、时间同步
@@ -1264,3 +1324,86 @@ grep -n "cubestack_skip_calico_checks" deployments/kubespray/kubespray/playbooks
 对同一机理的**正式实现**(范围收窄为 reset 路径),静态层验证已过(`--check` 全在位 / 纯净树前向重放
 逐字节一致 / YAML 合法);③ 补丁版的**端到端实机复验**尚待下一轮覆盖安装 —— 跑通后请回来把本行
 更新为"已实机验证"。
+
+### 5. 【2026-10-15; 2026-10-16 补"远端重定向"变体】节点脚本 scp / `cat > /tmp` 报 Permission denied: 固定 /tmp 名撞上 sticky /tmp 的 `fs.protected_regular=2`(遗留他人属主文件, **root 也不例外**)
+
+**症状:** root 安装(SSH_USER=root)时, 各模块向节点上传**固定 /tmp 名**脚本失败 —— 同一 run 中
+**部分节点失败、其余成功**是本故障的指纹, 报错文案极具误导性(实测凭证/sudo 完全正常):
+
+```
+scp: /tmp/cubestack-registry-node.sh: Permission denied
+⚠    cubestack-k8s-master11(10.66.3.214): 无法上传配置脚本(检查密钥/密码)   ← deploy-registry.sh
+⚠    cubestack-k8s-master12(10.66.3.216): 无法上传脚本(检查密钥/密码)       ← setup-ntp.sh(同类)
+```
+
+**变体(2026-10-16, 远端重定向形态, 实机命中):** 报错不在 scp 客户端, 而在**远端 bash 的重定向** ——
+同一内核保护对 `cat > /tmp/<固定名>.yaml`(O_CREAT|O_TRUNC 打开既有他人文件)同样生效:
+
+```
+bash: line 1: /tmp/ceph-rbd.yaml: Permission denied          ← 03_ceph_csi.sh [2/4] 建 rbd-pool(2026-10-16)
+【错误】  创建 rbd-pool/StorageClass 失败 → 模块 ceph_csi 退出 1 → 整次部署中断
+```
+
+**根因:** ① 上传目标是**固定 /tmp 文件名**;② 节点 /tmp 是 sticky + world-writable, 且实机
+`fs.protected_regular=2`(sysctl 实测)—— 打开**属主非本人**的既有文件会被内核拒为 EACCES;
+③ 文件是**历史运行的另一用户**遗留(实机: 昨天 ubuntu 部署留下 `ubuntu:ubuntu` 的
+`/tmp/cubestack-registry-node.sh`), 而本次部署用户是 root ⇒ 新用户的 scp(= open(O_CREAT|O_TRUNC))
+覆盖既有他人文件 → `Permission denied`。**root 不受豁免**(2026-10-15 实机三态实测:
+①覆盖既有他人文件=拒 ②新路径=过 ③先删再传=过)。无遗留文件的节点(实机 worker13, 重建后 /tmp 干净)
+走"新建路径" ⇒ 成功 —— 这就是"部分节点失败"的原因, 与密钥/密码/连通性无关。
+
+**解法(根治):** 上传固定 /tmp 名前**先清陈旧目标**(`ssh <user>@<ip> "sudo rm -f '<path>'"`,
+目录则 `rm -rf && mkdir -p`), 使 scp 恒为"新建文件"; 新建成功后的属主=本次用户, 后续运行同类安全。
+已落地: `setup-ntp.sh`(node_scp)/ `sync-ca.sh` / `rebootstrap-worker.sh` / `install-worker-packages.sh`
+(重建 `/tmp/packages`)/ `reconcile-node-packages.sh`(重建 `/tmp/cubestack-debs`)/ `02_ceph.sh` /
+`27_verify_ceph.sh`; 2026-10-15 补齐: **`deploy-registry.sh`**(node_scp, 本次实机故障点)+
+`21_verify_metallb.sh` / `27_verify_ceph.sh`(固定名 `/tmp/verify-lb.yaml`、`/tmp/verify-ceph-pod.yaml`)+
+`30_verify_rdma_shared_dev_plugin.sh`(`/tmp/verify-rdma-pod.yaml`)。
+
+**✅ 同类"远端重定向"点已补齐(2026-10-16 实机命中并修复):** 上述三处 ——
+`modules/03_addon/03_ceph_csi.sh::apply_remote` / `tools/k8s/ceph-expose-external.sh::_apply_yaml` /
+同文件 CephFilesystem 段(`/tmp/ceph-ext-fs.yaml`)—— 统一改为**同一条远端命令内先清后写**:
+`ssh … "sudo rm -f /tmp/<name>.yaml; cat > /tmp/<name>.yaml && ${K} apply -f …"`(一次 ssh 往返;
+`sudo rm -f` 在新旧两种身份下都能清, 不引入第二次连接)。命中链条(实机): 10-14 ubuntu 时代遗留
+`/tmp/{ceph-rbd,cephfs,cephfs-svgroups,rgw,rgw-users,ceph-ext-fs}.yaml`(属主 ubuntu:ubuntu),
+10-15 起部署用户切 root(容器 cluster.conf `SSH_USER=root`)⇒ ceph_csi [2/4] 以 root 打开他人文件被拒。
+最小复现: `sh -c "cat > /tmp/ceph-rbd.yaml </dev/null"`(root)→ `Permission denied`。
+
+**★ 双腿口径(2026-10-16 起全链路, 支持 root↔ubuntu **任意方向**切换部署):** **写前预清 + 用完即删**。
+⚠ **改权限(chmod)不是通解**: 拦截与"文件属主 + 文件对 group/other 的写位"共同相关 —— 实测 664 的
+他人文件 root 也被拒; 而改成 666 只会**必然触发**保护。唯一通用解 = **删除后重建**: 写前
+`sudo rm -f`, 用完 `rm -f`(删除可由 sudo/属主完成; 重建后属主=本次用户)。
+**"用完即删"落地(2026-10-16):** `03_ceph_csi.sh`(apply 后删 yaml)/ `ceph-expose-external.sh`
+(CephFilesystem 段; `_apply_yaml` 原本即删)/ `02_ceph.sh`(cephcluster.yaml)/ `ceph-backup.sh`
+(节点侧 refresh.sh 副本 + monstore tar 取回后删)/ `sync-ca.sh`(脚本 + CA 临时件)/
+`setup-ntp.sh`(节点脚本三处执行点)/ `deploy-registry.sh`(节点脚本)。原本就"预清+后删"齐备的:
+`install-worker-packages.sh` / `reconcile-node-packages.sh` / verify 系列(21/22/27/30; 22 的预清本次补齐)。
+**例外(有意保留):** `ceph-sync-images.sh` 的 `/tmp/ceph-images/`(镜像 tar + `.done` 断点复用;
+每次运行 `sudo rm -rf && chown` 重建, 跨用户安全); rook-ceph-tools **pod 内** `/tmp`(随 pod 生命周期)。
+
+**验证(2026-10-15 实机, 已通过):**
+```bash
+# ① 复现(容器内, 对仍有 ubuntu 遗留文件的节点): 覆盖既有文件拒 / 新路径过
+scp /tmp/t root@10.66.3.216:/tmp/cubestack-registry-node.sh   # → scp: Permission denied(rc=1)
+scp /tmp/t root@10.66.3.216:/tmp/brand-new-path.txt           # → rc=0(证明密钥/通路/权限正常)
+# ② 修复后端到端(容器内跑修复版工具): [2/4] 6/6 节点成功(修复前 5/6 失败)
+bash /opt/cubestack-installer/deployments/scripts/tools/lb/deploy-registry.sh
+#   ✅ 6 台节点 "certs.d 已就绪"; master11 的 /tmp/cubestack-registry-node.sh 变 root:root(新时间戳)
+# ③ 2026-10-16 远端重定向修复后复验(容器内): ./deploy-cluster.sh --steps ceph_csi
+#   → [2/4] CephBlockPool rbd-pool + 3×SC ✅ / [3/4] CephFS ✅ / [4/4] 校验 ✅ / 模块完成 EXIT=0;
+#   全日志无 Permission denied; 节点 /tmp/*.yaml 属主全部变 root:root(复跑新时间戳)
+# ④ 2026-10-16 "用完即删"复验(同上再重跑一次): EXIT=0;
+#   节点 `ls /tmp/ceph*.yaml` → **全部消失**(预清+后删双保险生效, 不再有任何 ceph 临时件残留)
+```
+**⚠ 边界(防误归因):** 本条只解决**节点脚本上传**。若 `k8s_registry` 模块仍以
+`registry 未在 600s 内就绪 —— 后端 local-path`(PVC 未 Bound)失败, 那是**另一个**故障 ——
+2026-10-15 实机链条: `local-path-provisioner` CrashLoop(其日志: 访问
+`https://10.233.0.1:443` **i/o timeout**)→ PVC 永不 Bound → registry pod Pending;
+叠加背景: calico-node **全节点 0/1**(felix 未就绪)与 apiserver 多次重启 —— 与 scp 无关。
+
+**相关命令:**
+```bash
+grep -rn "fs.protected_regular" deployments/scripts/   # 已落地的"预清陈旧目标"点
+sysctl fs.protected_regular                            # 节点内核口径(2=对 O_CREAT 打开既有文件也生效)
+ssh <user>@<ip> "ls -la /tmp/cubestack-*.sh"           # 查遗留文件属主(与本次用户不一致即命中条件)
+```

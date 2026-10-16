@@ -120,6 +120,9 @@ spec:
       persistentVolumeClaim:
         claimName: ${TEST_PVC}
 YAML
+    # ★ 清陈旧目标(2026-10-15 实机, 同下方 cephfs 口径): 覆盖他人遗留的同名 /tmp 文件会被 fs.protected_regular 拒(root 也不例外)
+    ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "${FIRST_MASTER_USER}@${FIRST_MASTER}" "sudo rm -f /tmp/${TEST_POD}.yaml" >/dev/null 2>&1 || true
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
         "${LOCAL_YAML}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/${TEST_POD}.yaml" \
         && SSH "${K} apply -f /tmp/${TEST_POD}.yaml" \
@@ -216,6 +219,8 @@ spec:
       persistentVolumeClaim:
         claimName: verify-cephfs-pvc
 YAML
+        ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+            "${FIRST_MASTER_USER}@${FIRST_MASTER}" "sudo rm -f /tmp/verify-cephfs.yaml" >/dev/null 2>&1 || true   # 清陈旧目标(fs.protected_regular)
         scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
             "${LOCAL_FS}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/verify-cephfs.yaml" \
             && SSH "${K} apply -f /tmp/verify-cephfs.yaml" \
