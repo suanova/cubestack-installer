@@ -15,7 +15,9 @@
 #       harbor.isuanova.com/suanova/ssh-ubuntu22.04:${DEV_LAB_IMAGE_TAG}
 #       harbor.isuanova.com/suanova/ssh-maca-pytorch:${DEV_LAB_IMAGE_TAG}
 #       harbor.isuanova.com/suanova/ssh-cuda-pytorch:${DEV_LAB_IMAGE_TAG}
-#   · 离线 tar: deployments/offline-files/dev-lab/(联网机: harbor-save-images.sh --group dev-lab);
+#   · 离线 tar: deployments/offline-files/dev-lab/{jupyter,ssh}/(2026-10-16 起按家族分子目录,
+#     顶层平铺兼容双读; 联网机: harbor-save-images.sh --group dev-lab; Harbor→MinIO 保鲜管道
+#     按 offline-files/dev-lab/image-list.tsv 增量维护);
 #     .tar 与 .tar.gz 均可(大件可就地 gzip 省盘; plain 内容校验 / .gz 文件名匹配, 见 README);
 #     缺某个 tar → 该镜像 warn 跳过(不阻断部署), 结尾汇总(🅰 诚实: 不伪装成功)。
 #   · 目标 ref: <集群 registry>/suanova/<name>:<tag>(去 Harbor 注册域保 suanova/ 路径,
@@ -71,7 +73,13 @@ wait_registry_ready "http://${REG_DIRECT}/v2/" 30 \
 
 _n_push=0; _n_skip=0; _n_miss=0; _n_fail=0
 for _img in "${IMAGES[@]}"; do
-    _tar="$(find_offline_tar "${_img}:${TAG}" "*.tar" "${SAVE_DIR}" 2>/dev/null || true)"
+    # 目录分类(2026-10-16): jupyter/ 与 ssh/ 子目录优先, 兼容顶层平铺(迁移期双读)
+    case "${_img}" in
+        jupyter-*) _sd="${SAVE_DIR}/jupyter" ;;
+        ssh-*)     _sd="${SAVE_DIR}/ssh" ;;
+        *)         _sd="${SAVE_DIR}" ;;
+    esac
+    _tar="$(find_offline_tar "${_img}:${TAG}" "*.tar" "${_sd}" "${SAVE_DIR}" 2>/dev/null || true)"
     if [ -z "${_tar}" ]; then
         warn "  缺离线 tar: ${_img}:${TAG}(跳过; 生成: sudo tools/images/harbor-save-images.sh --group dev-lab)"
         _n_miss=$((_n_miss + 1)); continue

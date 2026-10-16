@@ -93,7 +93,9 @@ _print_help() {
     echo ""
     echo "════ 可用子目录(offline-files/ 下; 实时: --list / 下钻: --list --sub <路径>)════"
     echo "  kubespray/               kubespray 离线仓(版本子目录 vX.Y.Z; --sub kubespray/v2.32.0)"
-    echo "  ceph/  metax-gpu/  nvidia-gpu-operator/  multus/  rdma/  netshoot/  dev-lab/  os/"
+    echo "  ceph/  metax-gpu/  nvidia-gpu-operator/  multus/  rdma/  netshoot/  os/"
+    echo "  dev-lab/                 开发镜像: jupyter/ 与 ssh/(子目录; 大件 .tar.gz)"
+    echo "  model-collection/        模型推理镜像: sglang/ 与 vllm/(≈95G, .tar.gz; 来源 suanova/model-collection)"
     echo "  virtual-machine/         虚拟机镜像(大; 默认排除, --sub virtual-machine 单独拉)"
     echo "  cubestack-operator/      CubeStack 平台镜像(顶层 <上游ref>.tar = operator 本体)"
     local _rd _list
@@ -215,7 +217,7 @@ if [ "${mc_alias_ready}" != "1" ]; then
         err "无可用 mc alias(--yes 模式不交互), 请先在 config/minio.conf 填 MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY 或配置 mc alias"; exit 1
     fi
     warn "未检测到可用的 MinIO 配置, 请交互录入(或先在 config/minio.conf 配置 MINIO_* 变量):"
-    read -r -p "  MinIO 服务地址 (如 http://192.168.16.6:9000): " _ept
+    read -r -p "  MinIO 服务地址 (如 http://<minio-host>:9000): " _ept
     read -r -p "  AccessKey: " _ak
     read -r -s -p "  SecretKey: " _sk; echo ""
     [ -n "${_ept}" ] || { err "未输入 MinIO 地址"; exit 1; }

@@ -67,7 +67,7 @@ usage() {
           k8s_deploy(基座, 恒随全量部署)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           local_path(可选) k8s_registry 组件(全部可单独部署的组件见下方"组件单独部署"清单)
-          自研: cubestack_operator(平台 Operator, 见 4.6b)
+          自研: cubestack_operator(平台 Operator, 见 4.6b); model_images(模型推理镜像 sglang/vllm-metax, 排最后; 见 offline-files/model-collection/README.md)
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)

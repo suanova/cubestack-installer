@@ -76,9 +76,13 @@ elif [ -f "${HOME}/.docker/config.json" ]; then
 fi
 
 # ---------- 远端摘要: sha256(skopeo --raw) == docker pull 的 Digest ----------
-_ref_digest() {   # <ref> → "sha256:..." ; 失败返回非 0
-    local raw
-    raw="$(skopeo inspect --raw --tls-verify="${TLS_VERIFY}" ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} "docker://$1" 2>/dev/null)" || return 1
+_ref_digest() {   # <ref> → "sha256:..."; 3 次重试(连续逐查多镜像时偶发网络抖动, 2026-10-16 实测)
+    local raw="" _i
+    for _i in 1 2 3; do
+        raw="$(skopeo inspect --raw --tls-verify="${TLS_VERIFY}" ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} "docker://$1" 2>/dev/null)"             && [ -n "${raw}" ] && break
+        sleep 2
+    done
+    [ -n "${raw}" ] || return 1
     printf '%s' "${raw}" | sha256sum | awk '{print "sha256:"$1}'
 }
 
@@ -96,7 +100,7 @@ if [ "${LIST_CHECK}" = "1" ]; then
     ok_n=0; bad_n=0
     while IFS='|' read -r sub file pull save; do
         rel="$([ "${sub}" = "." ] && echo "${file}" || echo "${sub}/${file}")"
-        if [ -f "${OUT}/${rel}" ]; then ok_n=$((ok_n+1)); else warn "清单行缺文件: ${rel}"; bad_n=$((bad_n+1)); fi
+        if [ -f "${OUT}/${rel}" ] || [ -f "${OUT}/${rel}.gz" ]; then ok_n=$((ok_n+1)); else warn "清单行缺文件: ${rel}(或 .gz)"; bad_n=$((bad_n+1)); fi
     done < <(_rows)
     # 反向: 目录里存在但清单没有的 *.tar(排除隐藏目录)
     while IFS= read -r f; do
@@ -123,7 +127,7 @@ while IFS='|' read -r sub file pull save; do
     tarpath="${outdir}/${file}"; digfile="${tarpath}.digest"
     d_new="$(_ref_digest "${pull}")" || { err "[${sub}/${file}] 远端摘要获取失败(pull=${pull})"; n_fail=$((n_fail+1)); continue; }
     d_old="$(cat "${digfile}" 2>/dev/null || true)"
-    if [ "${SEAL_MISSING}" = "1" ] && [ -z "${d_old}" ] && [ -f "${tarpath}" ]; then
+    if [ "${SEAL_MISSING}" = "1" ] && [ -z "${d_old}" ] && { [ -f "${tarpath}" ] || [ -f "${tarpath}.gz" ]; }; then
         # 一次性迁移: tar 已在(人工核对与远端一致), 只补边车, 不重拉
         if [ "${DRY}" = "1" ]; then
             say "  [dry-run] 将补写边车: ${sub}/${file}"
@@ -145,6 +149,11 @@ while IFS='|' read -r sub file pull save; do
            --override-os linux --override-arch amd64 \
            "docker://${pull}" "docker-archive:${_tmp}:${save}" 2>/dev/null; then
         mv -f "${_tmp}" "${tarpath}"
+        # 迁移期: 旧 .gz 存档(及边车)被普通 .tar 取代 —— 移除防双份/歧义
+        if [ -f "${tarpath}.gz" ]; then
+            rm -f "${tarpath}.gz" "${tarpath}.gz.digest"
+            warn "  已移除旧 .gz 存档(被本次 .tar 取代): $(basename "${tarpath}").gz"
+        fi
         printf '%s' "${d_new}" > "${digfile}"
         ok "  已更新: ${sub}/${file}(→ ${d_new:0:19}…)"; n_ok=$((n_ok+1))
     else
