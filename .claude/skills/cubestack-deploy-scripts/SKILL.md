@@ -32,6 +32,27 @@ description: CubeStack 部署脚本开发规范技能。当需要编写、修改
 > 否则文档会留下一个看似解决、实则解决不了的方案,误导后续排查。
 > 验证闭环:问题复现 → 修复 → **端到端验证通过(能跑通完整功能)** → 才更新文档。
 
+## 🔒 凭据 / 公网地址卫生(硬性红线; 2026-10-16 全历史清洗事故后新增)
+
+**背景事故**: 2026-08 曾把 MinIO 密码 / 节点 SSH 密码**明文提交入库**(installer 旧应用 +
+cluster.conf 内容); 2026-10-16 用 git-filter-repo 全历史清除 + 全分支强推(所有 SHA 变更)。
+**铁律: 真实凭据或公网 IP 一旦进过 git, 即视为已泄露 —— 必须轮换, 不能只删链接/重写历史。**
+
+规则(违反 = 拒绝合入; 已合入的 = 回滚 + 轮换凭据)
+1. **凭据类文件永不入库**: `cluster.conf` / `minio.conf` / `*.bak*` / `external-ceph*` / `*.env`
+   (模板 `*.env.example` 除外) —— 真实值只进 gitignored 配置、600 权限 env 文件、CI Secrets、
+   或运行时环境变量; 参考实现: `cubestack-platform-sync.sh` 的 `--print-systemd`(凭据仅进
+   `/etc/cubestack-platform-sync.env`, 600)。
+2. **示例一律占位符**: 密码用 `CHANGE_ME` / `${VAR}` / `<占位>`; 地址用 `<minio-host>` 等占位;
+   **禁止真实公网 IP 出现在任何文件**(内网地址同样建议占位, 至少避开 MinIO/Harbor 实地址)。
+3. **门禁(自动, 已落地)**: 每台 clone 先执行一次 `git config core.hooksPath .githooks`
+   → `.githooks/pre-commit` 提交前自动跑 `deployments/scripts/tools/check-secrets.sh --staged`;
+   CI(`ci-validate.yml`)对全仓跟踪文件跑同一检查; 误报用行尾 `# secret-scan: allow(原因)` 豁免。
+4. **本地禁词表**: `deployments/config/secret-blocklist.txt`(**gitignored**)登记真实密文/敏感地址,
+   供检查器(含 `--history` 历史巡检)逐字比对 —— **密文绝不写进任何入库文件(包括检查器源码)**。
+5. 新增脚本/文档**提交前**跑一把: `bash deployments/scripts/tools/check-secrets.sh`;
+   怀疑历史遗留: `--history`(需本地禁词表)。
+
 ## 关键文件位置(先读再改)
 
 | 文件 | 用途 |

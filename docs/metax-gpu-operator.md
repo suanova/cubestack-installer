@@ -2,7 +2,7 @@
 
 > 记录**沐曦(MetaX)GPU Operator**的离线部署方案: 需要提前下载哪些文件、如何配置 `cluster.conf`、目录布局、部署流程与验证。
 > 已在本集群(9 节点, 3 master + 6 worker, 共 **69 张 MXC500**)端到端验证通过。
-> 版本说明: 本文以 `metax-gpu-k8s 0.15.3`、`MXMACA 3.8.1.2`、驱动 `3.8.1.6` 为例; 升级改 `cluster.conf` 的 `METAX_VERSION` / `METAX_MACA_IMAGE` / `METAX_DRIVER_VERSION` 即可, 逻辑通用。
+> 版本说明: 本文以 `metax-gpu-k8s 0.15.3`、`MXMACA 3.8.1.2`、驱动 `3.8.1.6` 为例; 升级改 `cluster.conf` 的 `METAX_VERSION` / `METAX_MACA_IMAGE` / `METAX_DRIVER_VERSION` 即可, 逻辑通用。  <!-- secret-scan: allow(驱动/软件版本号) -->
 
 ## 0. 架构前提(必读)
 
@@ -149,7 +149,7 @@ sudo ./deploy-cluster.sh --with-cubestack   # 全量: 基座 + cluster.conf 中�
 3. **加载镜像 → 集群 registry**:
    - `tar`(默认): 从 `METAX_OFFLINE_DIR` 逐 tar `skopeo docker-archive → registry.cubestack.io:5000/metax/...`;
      **只推当前 operator 需要的版本**(maca 只推 `METAX_MACA_IMAGE`、driver 只推 `METAX_DRIVER_VERSION`,
-     核心组件只推本机架构的 `METAX_VERSION`; 其他版本如 maca 3.8.0.11/3.8.1.2、driver 3.2.1.12、
+     核心组件只推本机架构的 `METAX_VERSION`; 其他版本如 maca 3.8.0.11/3.8.1.2、driver 3.2.1.12、  <!-- secret-scan: allow(驱动/软件版本号) -->
      operator-bundle/catalog 均跳过);
      核心组件去架构后缀(`0.15.3-amd64 → 0.15.3`), 跳过非本机架构; maca/driver 原样。
    - `run`: `.run ctr load` + 逐组件 `ctr tag + push --plain-http`(规避 .run 自带 push 的 flag 顺序 bug)。
