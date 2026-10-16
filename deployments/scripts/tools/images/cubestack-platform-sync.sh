@@ -166,8 +166,12 @@ for COL in ${COLLECTIONS}; do
     [ "${DRY}" = "1" ] && SAVE_ARGS+=(--dry-run)
     SAVE_RC=0
     bash "${_self}/cubestack-platform-save-images.sh" "${SAVE_ARGS[@]}" || SAVE_RC=1
-    # README 保鲜(仓库里有就带上)
-    [ -f "${REPO_SUB}/README.md" ] && cp -f "${REPO_SUB}/README.md" "${STATE_SUB}/README.md"
+    # README 保鲜(仓库里有就带上; ⚠ state-dir 即仓库目录时 源=目标, 必须跳过 —— cp 同文件会报错,
+    #   set -e 下直接终止整轮同步(2026-10-16 实机踩到: 上传一步都没执行))
+    _rm_src="${REPO_SUB}/README.md"
+    if [ -f "${_rm_src}" ] && [ ! "${_rm_src}" -ef "${STATE_SUB}/README.md" ]; then
+        cp -f "${_rm_src}" "${STATE_SUB}/README.md" || warn "  README 复制失败(不阻断): ${_rm_src}"
+    fi
 
     # ③ 上传(防呆: --prune 且本地 0 个 tar ⇒ 拒绝, 防清空远端)
     L_PRE="$(_local_tarn "${STATE_SUB}")"
