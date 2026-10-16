@@ -87,8 +87,8 @@ deployments/scripts/
 │   │   ├── 03_k8s_hosts.sh         # 更新 /etc/hosts
 │   │   ├── 04_k8s_inventory.sh     # 生成 inventory + 同步配置
 │   │   ├── 05_k8s_ntp.sh           # NTP 时间同步
-│   │   ├── 06_k8s_deploy.sh        # 部署 kubespray(默认关, K8S_ENABLED; 完成后单节点集群自动解除 master 污点使其可调度)
-│   │   ├── 07_k8s_scale.sh         # 扩容集群(默认关, K8S_SCALE_ENABLED; 扩容后单 control-plane 重新解除污点)
+│   │   ├── 06_k8s_deploy.sh        # 部署 kubespray 基座(恒随全量部署; 完成后单节点集群自动解除 master 污点使其可调度)
+│   │   ├── 07_k8s_scale.sh         # 扩容集群(仅 --with-scale / --steps k8s_scale 触发, 无开关; 扩容后单 control-plane 重新解除污点)
 │   │   ├── 08_verify_kube_vip.sh   # 验证 API VIP 高可用(六项含漂移演练; --steps verify_kube_vip)
 │   │   ├── 09_kube_vip.sh          # API Server VIP 高可用(默认关; 双向收敛: KUBE_VIP_ENABLED=true 装/修,
 │   │   │                           #   =false 清理并校验无残留; DEFAULT:1 常驻全量运行; 见 docs/kube-vip-api-ha.md 第 18 节)
@@ -141,12 +141,12 @@ deployments/scripts/
 模块头部用注释声明元数据,框架**自动发现**(递归扫描子目录, 按 目录序号+文件序号 排序):
 
 ```bash
-# MODULE: k8s_deploy          # 模块 key(缺省=文件名去掉 NN_ 前缀)
-# DESC: 部署 kubespray 集群   # 一句话描述
-# PHASE: k8s                  # 阶段: env / k8s / addon
+# MODULE: ceph                # 模块 key(缺省=文件名去掉 NN_ 前缀)
+# DESC: 部署 Rook-Ceph 存储集群 # 一句话描述
+# PHASE: addon                # 阶段: env / k8s / addon
 # DEFAULT: 0                  # 是否默认启用
 # REPEAT: 0                   # 1=可重复执行(不写断点状态)
-# TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量, true 时自动启用
+# TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED   # (可选) cluster.conf 变量, true 时自动启用
 ```
 
 **新增模块**:
@@ -236,7 +236,7 @@ NODES=(
 
 ```bash
 sudo ./scripts/deploy-cluster.sh                       # 默认 = --with-cubestack(基座 + 全部启用的 operator)
-sudo ./scripts/deploy-cluster.sh --with-k8s            # 追加 k8s 部署模块(= --enable k8s, 兼容旧名)
+sudo ./scripts/deploy-cluster.sh --with-k8s            # 仅 kubespray 基座(k8s + metallb/local-path/registry, 不含 operator)
 sudo ./scripts/deploy-cluster.sh --steps vm,k8s        # 只运行指定模块(逗号分隔, 旧名自动映射)
 sudo ./scripts/deploy-cluster.sh --skip hosts          # 跳过某模块
 sudo ./scripts/deploy-cluster.sh --skip net --with-k8s  # 全裸金属:跳过网络模块, 部署 k8s

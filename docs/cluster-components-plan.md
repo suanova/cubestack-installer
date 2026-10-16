@@ -10,7 +10,7 @@
 
 | 序号 | P1必做核心组件 | 核心交付目标(极简) | 当前进度 | 当前状态 | 现存问题/阻塞点 | 计划完成时间 | 实际完成时间 | 对应模块/开关 |
 |---|---|---|---|---|---|---|---|---|
-| 1 | Kubernetes(Kubespray部署) | 基于Kubespray完成集群部署,核心资源(StatefulSet/PVC/Service等)正常创建调度,集群基础环境稳定可用 | 0% | 未开始 | - |  |  | `modules/02_k8s/06_k8s_deploy.sh` / `K8S_ENABLED` |
+| 1 | Kubernetes(Kubespray部署) | 基于Kubespray完成集群部署,核心资源(StatefulSet/PVC/Service等)正常创建调度,集群基础环境稳定可用 | 0% | 未开始 | - |  |  | `modules/02_k8s/06_k8s_deploy.sh`(基座, 恒随全量部署) |
 | 4 | Docker Registry(Harbor) | 搭建可用镜像仓库,实现镜像推送、拉取、目录同步,保障集群业务镜像正常部署 | 0% | 未开始 | - |  |  | `modules/03_addon/05_harbor.sh` / `HARBOR_ENABLED`(集群外私有仓库,唯一方案) |
 | 5 | 沐曦MetaX GPU Operator | 完成GPU驱动部署、硬件识别、集群GPU资源调度,配套MetaX指标采集,保障GPU容器正常启动运行 | 100% | ✅ 已完成(2026-08-23) | - |  | 2026-08-23 | `modules/03_addon/06_gpu_operator.sh` / `GPU_OPERATOR_ENABLED`(详见 `docs/metax-gpu-operator.md`) |
 | 6 | Ceph 存储集群 | 完成Ceph底层存储集群部署、集群健康自检、存储池初始化,为上层CSI服务提供稳定存储底座 | 100% | ✅ 已完成(2026-09-06) | - |  | 2026-09-06 | `modules/03_addon/02_ceph.sh` / `CEPH_ENABLED`(Rook v1.20.2 + 自动检测裸盘 + node label) |
@@ -69,8 +69,8 @@
 | P阶段 | 组件 | modules 模块 | cluster.conf 开关 | 现状 |
 |---|---|---|---|---|
 | 前置 | 环境准备(VM/SSH/Harbor/HAProxy/Keepalived) | `01_env/01~06` | `HARBOR_ENABLED` 等 | ✅ 已实现(Harbor 🧩 伪代码) |
-| 前置 | kubespray 离线部署(网络/inventory/NTP/部署/扩容) | `02_k8s/01~07` | `K8S_ENABLED` / `K8S_SCALE_ENABLED` | ✅ 已实现 |
-| P1-1 | Kubernetes(Kubespray) | `02_k8s/06_k8s_deploy.sh` | `K8S_ENABLED` | ✅ 已实现 |
+| 前置 | kubespray 离线部署(网络/inventory/NTP/部署/扩容) | `02_k8s/01~07` | 基座恒定 / 扩容 `--with-scale` | ✅ 已实现 |
+| P1-1 | Kubernetes(Kubespray) | `02_k8s/06_k8s_deploy.sh` | 恒随全量部署(无开关) | ✅ 已实现 |
 | P1-4 | Docker Registry(Harbor) | `01_env/04_harbor.sh`(集群外私有仓库) | `HARBOR_ENABLED` | 🧩 伪代码占位 |
 | P1-5 | 沐曦 MetaX GPU Operator | `03_addon/06_gpu_operator.sh` | `GPU_OPERATOR_ENABLED` | ✅ 已完成(helm 原生安装 + 离线 tar 加载, 9 节点 69 GPU; 见 `docs/metax-gpu-operator.md`) |
 | P1-6 | Ceph 存储集群 | `03_addon/02_ceph.sh` | `CEPH_ENABLED` | ✅ 已完成(Rook v1.20.2 离线, 实机验证 HEALTH_OK 15 OSD; 见 `docs/ceph-rook.md`) |

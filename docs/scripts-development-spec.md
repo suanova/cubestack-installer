@@ -87,13 +87,13 @@ modules/<NN_phase>/<NN>_<category>_<action>.sh
 ```bash
 #!/bin/bash
 # ============================================================
-# MODULE: k8s_deploy          # 模块 key(缺省=文件名去掉 NN_ 前缀)
-# DESC: 部署 kubespray 集群   # 一句话描述(print_steps 显示)
-# PHASE: k8s                  # 阶段: env | k8s | addon
+# MODULE: ceph                # 模块 key(缺省=文件名去掉 NN_ 前缀)
+# DESC: 部署 Rook-Ceph 存储集群 # 一句话描述(print_steps 显示)
+# PHASE: addon                # 阶段: env | k8s | addon
 # DEFAULT: 0                  # 1=默认启用; 0=需 --enable / TOGGLE / --steps
 # REPEAT: 0                   # 1=可重复执行(每次执行且不写断点状态)
-# TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量名, 值为 true/1 时自动启用
-# REQUIRES: k8s_passwordless  # (可选) 依赖模块 key 列表(空格分隔), 执行前须已完成; 框架自动拓扑排序
+# TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED   # (可选) cluster.conf 变量名(空格分隔多变量=OR), 值为 true/1 时自动启用
+# REQUIRES: k8s_deploy        # (可选) 依赖模块 key 列表(空格分隔), 执行前须已完成; 框架自动拓扑排序
 # UNINSTALL: 1                # (可选) 声明该模块可被 cluster-teardown 反序优雅卸载
 # 说明: <详细说明, 可选>
 # ============================================================
@@ -220,11 +220,12 @@ load_config
 | `DASHBOARD_ENABLED` | `false` | addons.yml | dashboard |
 | `CERT_MANAGER_ENABLED` | `false` | addons.yml | cert-manager |
 | `GATEWAY_API_ENABLED` | `false` | addons.yml | Gateway API |
-| `K8S_ENABLED` | `false` | `k8s_deploy` 模块 | 一键部署是否默认执行 kubespray |
-| `K8S_SCALE_ENABLED` | `false` | `k8s_scale` 模块 | 扩容 |
 | `GPU_OPERATOR_ENABLED` | `false` | `gpu_operator` 模块 | 沐曦 GPU Operator |
 
 > 镜像仓库双定位:集群外 = Harbor(`HARBOR_ENABLED`,唯一方案);集群内 = kubespray registry addon(`REGISTRY_ENABLED`,默认不部署)。
+> `k8s_deploy`(基座)无开关:恒随全量部署(默认/--with-k8s/--with-cubestack);`--steps` 单组件模式不含基座。
+> (2026-10-16 移除原 `K8S_ENABLED` —— 它实际不控制任何调度路径,旧 cluster.conf 残留该行无副作用。)
+> 扩容 `k8s_scale` 同样无开关: 仅经 `--with-scale` / `--steps k8s_scale` 触发(2026-10-16 移除 `K8S_SCALE_ENABLED`)。
 > addons.yml 的组件开关由 `sync-addons-config.sh` 从上述变量生成(幂等),其余组件配置(地址池/存储类等)保留在 addons.yml 手工维护。
 
 ---
@@ -315,7 +316,7 @@ trap cleanup EXIT   # 失败也清理测试资源
 
 ```bash
 sudo ./deploy-cluster.sh                                # 默认 env+k8s 基础模块
-sudo ./deploy-cluster.sh --with-k8s                     # 仅 kubespray 基座(k8s + metallb/local-path/registry)= --enable k8s
+sudo ./deploy-cluster.sh --with-k8s                     # 仅 kubespray 基座(k8s + metallb/local-path/registry)
 sudo ./deploy-cluster.sh --with-cubestack               # 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主)
 sudo ./deploy-cluster.sh --with-scale                   # 扩容
 sudo ./deploy-cluster.sh --steps k8s_deploy,k8s_ntp  # 只跑指定模块(旧名自动映射)

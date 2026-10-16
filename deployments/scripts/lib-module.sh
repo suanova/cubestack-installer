@@ -28,13 +28,13 @@
 #                              循环依赖/引用未知模块会报错。--steps 精确模式还会自动
 #                              把 REQUIRES 依赖加入执行列表(闭包)。
 # 示例:
-#   # MODULE: k8s_deploy
-#   # DESC: 部署 kubespray 集群(离线)
-#   # PHASE: k8s
+#   # MODULE: ceph
+#   # DESC: 部署 Rook-Ceph 存储集群
+#   # PHASE: addon
 #   # DEFAULT: 0
 #   # REPEAT: 0
-#   # TOGGLE: K8S_ENABLED
-#   # REQUIRES: k8s_passwordless k8s_hosts k8s_inventory
+#   # TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED
+#   # REQUIRES: k8s_deploy
 #
 # 模块内访问远端 kubectl 的统一入口(★ 必读):
 #   · 需要 SSH 到 master 执行 kubectl 的模块, 在 load_config 之后调用
@@ -458,7 +458,7 @@ print_steps() {
     echo "---------------------------------------------"
     echo "  --steps k1,k2  只运行指定模块    --skip k1,k2  跳过模块"
     echo "  --phase env|k8s|addon  仅运行指定阶段"
-    echo "  --enable k     启用默认关闭模块(如 ceph/nvidia_gpu_operator)  --with-k8s = --enable k8s"
+    echo "  --enable k     启用默认关闭模块(如 ceph/nvidia_gpu_operator)"
     echo "  --steps verify 默认执行全部 verify_* 验证模块(新增 verify step 后自动纳入):"
     echo "                 $(_verify_meta_list)"
     echo "  --list-steps   查看本列表"

@@ -64,7 +64,7 @@ usage() {
   01_env  vm_network vm_sshkey vm_create harbor
           (默认执行 vm_sshkey; vm_network 默认关 — 宿主网络初始化改由 tools/vm/create-vms.sh 创建 VM 时自动执行; vm_create 默认关 — 虚拟机创建由 tools/vm/create-vms.sh 独立执行)
   02_k8s  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp           (默认执行)
-          k8s_deploy(默认关, --with-k8s)  k8s_scale(默认关, --with-scale)
+          k8s_deploy(基座, 恒随全量部署)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           local_path(可选) k8s_registry 组件(全部可单独部署的组件见下方"组件单独部署"清单)
           自研: cubestack_operator(平台 Operator, 见 4.6b)
@@ -124,7 +124,7 @@ $(_component_meta_list stub)
 
 选项:
   --with-k8s            仅部署 kubespray 基座: k8s_deploy + kubespray 内置 addon(metallb/local-path/registry)
-                        不含任何 operator(= --enable k8s, 并跳过全部 operator)
+                        不含任何 operator(跳过全部 operator)
   --with-cubestack      全量部署: = 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主)
                         (如设 GPU_OPERATOR_ENABLED=true 即部署 gpu_operator)
   --with-scale          仅执行 k8s_scale 扩容模块(不连带 operator/已部署组件): 登录首个 master 核对
@@ -142,7 +142,7 @@ $(_component_meta_list stub)
                         见 docs/kubespray-versioning/
   --fresh, --refresh    默认流程 + **先清断点状态**(REPEAT:0 的模块强制重跑; 见"三种使用方式"②)
   --list                仅打印集群规划(只读)
-  --list-steps          列出全部模块
+  --list-steps          列出全部模块(启用状态/依赖/序号; ★ 建议部署前先看)
   --help, -h            显示本帮助
 
 示例:
@@ -161,6 +161,10 @@ $(_component_meta_list stub)
   sudo ./deploy-cluster.sh --steps ceph_backup      # Ceph 备份(CR+secret+mon store → master 根盘)
   sudo CEPH_BACKUP_ACTION=restore ./deploy-cluster.sh --steps ceph_backup  # Ceph 恢复(认领旧 OSD 数据)
   sudo ./deploy-cluster.sh --steps multus              # 单个组件(自动带基座; 见上方"单独安装某个组件"清单)
+  sudo ./deploy-cluster.sh --list-steps                # ★ 查看全部模块(启用状态/依赖/序号) —— 不知道选什么先看它
+
+★ 提示: sudo ./deployments/scripts/deploy-cluster.sh --list-steps
+        模块全清单(启用状态/依赖/序号/执行阶段) —— 选模块、看开关、排依赖, 都从这条命令开始
 EOF
     exit 0
 }
@@ -243,7 +247,13 @@ _enable_persist() {   # <key,...>
         tgl="${MODULE_TOGGLE[$idx]:-}"
         tgl="${tgl%% *}"   # TOGGLE 多变量(空格分隔=OR)时持久化第一个(如 ceph → CEPH_ENABLED)
         if [ -z "${tgl}" ]; then
-            warn "模块 ${nk} 无 cluster.conf 开关(TOGGLE 未定义, 如 verify 模块), 无法持久化; 请用 --steps ${s} 直接执行"
+            # 无 TOGGLE 的模块: DEFAULT:1(如 k8s_deploy 基座)恒随全量部署, 本就没有可写开关;
+            #   其余(verify_*/运维模块)只能 --steps 立即执行, 无开关可持久化。
+            if [ "${MODULE_DEFAULT[$idx]:-0}" = "1" ]; then
+                ok "模块 ${nk} 已是默认启用(DEFAULT:1), 恒随全量部署, 无需写入配置"
+            else
+                warn "模块 ${nk} 无 cluster.conf 开关(TOGGLE 未定义, 如 verify 模块), 无法持久化; 请用 --steps ${s} 直接执行"
+            fi
             continue
         fi
         # 当前生效值(load_config 已把 cluster.conf 读入环境; 兼容 ${VAR:-true} 默认写法)
@@ -259,13 +269,19 @@ _enable_persist() {   # <key,...>
         fi
         export "${tgl}=true"   # 同步到当前环境(同一次调用内再 --enable 同一模块幂等跳过)
         ok "已写入 ${CLUSTER_CONF}: ${tgl}=true(${nk})"
+        _ENABLE_PERSIST_WROTE=1
     done
 }
 if [ -n "${ENABLE_PERSIST_ARG}" ]; then
+    _ENABLE_PERSIST_WROTE=0
     _enable_persist "${ENABLE_PERSIST_ARG}"
     # 仅 --enable 且无其它部署触发(--steps/--with-*/--skip/--phase/--only) → 只写配置后退出, 不部署
     if [ -z "${STEPS_ARG}" ] && [ -z "${ENABLE_ARG}" ] && [ -z "${SKIP_ARG}" ] && [ -z "${PHASE_ARG}" ] && [ -z "${ONLY_HOSTS}" ]; then
-        say "已写入 cluster.conf(本次不部署)。下次执行 --with-cubestack / 默认部署即生效; 立即部署用 --steps ${ENABLE_PERSIST_ARG#,}"
+        if [ "${_ENABLE_PERSIST_WROTE}" = "1" ]; then
+            say "已写入 cluster.conf(本次不部署)。下次执行 --with-cubestack / 默认部署即生效; 立即部署用 --steps ${ENABLE_PERSIST_ARG#,}"
+        else
+            say "无 cluster.conf 变更(见上方说明)。立即部署用 --steps ${ENABLE_PERSIST_ARG#,}"
+        fi
         exit 0
     fi
 fi
