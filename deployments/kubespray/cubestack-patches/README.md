@@ -12,7 +12,7 @@
 - 每条改动的"原因 / 上游吸收判据 / 上游化"三项写在 **patch 文件头的注释块**里(本 README 的表格是摘要,
   以 patch 头为准);判据用于升级时跑"这个补丁是否已被上游吸收、可以退休"的检查(设计 §3.5)。
 
-## 补丁清单(14 处)
+## 补丁清单(15 处)
 
 | 补丁 | 目标文件 | 一句话原因(丢了会怎样) | 上游吸收判据 | 上游化 |
 |---|---|---|---|---|
@@ -30,6 +30,8 @@
 | `12-coredns-forward-resolvconf.patch` | `roles/kubernetes-apps/ansible/templates/coredns-config.yml.j2` | coredns 的 forward 不再直指 `upstream_dns_servers`(本仓库该变量是"防回环哨兵"如 127.0.0.1 ⇒ 直指会渲染成 forward pod 自身 127.0.0.1:53 ⇒ loop 插件 FATAL 自杀, 实机 18+ 次 CrashLoop);恒用 `/etc/resolv.conf`(经 resolved→nodelocaldns 链, 两处消费解耦) | 该模板不再用 upstream_dns_servers 渲染 forward | 不提 PR(环境特化) |
 | `13-skip-calico-checks-on-reset.patch` | `playbooks/reset.yml` + `roles/kubernetes/preinstall/tasks/main.yml` | 覆盖安装先 reset 旧集群: reset.yml 带 `tags:resolvconf` 引入 preinstall, 其 "Run calico checks" 会在活集群上做 "Check if inventory match current cluster configuration"(读现网 IPPool 与 inventory 比对)——旧集群网络模式与新配置不同(实机 2026-10-15: 旧 VXLAN/IPIP=Never vs 新 IPIP=Always)⇒ 断言必失败、reset 中断、覆盖安装卡死。修复: reset play 置 `cubestack_skip_calico_checks=true`(play 级 vars), calico 检查整体跳过; 安装/升级路径不带该变量 ⇒ 检查保留 | `reset.yml` 的 preinstall 调用不再触发 calico 一致性检查(或检查自带"仅安装期"守卫/能感知 reset 场景) | 建议提 PR(reset 不应被"旧集群 ≠ 新 inventory"拦停; 变量名需按上游口径调整) |
 | `14-calico-3.32.2-checksums.patch` | `roles/kubespray_defaults/vars/main/checksums.yml` | calico 3.31.7→**v3.32.2** 升级的校验值缺口: 树表封顶 3.31.7, pin 到 3.32.2 后 calicoctl 二进制与 kdd-crds 的 sha256 查表缺失 → 下载环节未定义中断(且 check.yml 的 supported-versions 断言按 crds 键拦停)。补 3 行(calicoctl amd64/arm64 + crds no_arch), **插在各表首**保持"首键=默认=最新"语义(⑯/⑱ 断言免改)。⚠ 仅 3.32 线可用 —— v3.33.0 上游单镜像改造(calico/cni 与 kube-controllers 停发), 见下文说明 | 两表出现 >=3.32.2 条目(换树自带新版表即退休) | 不提 PR(本地版本钉; 换树时由 --check-retired 判定) |
+
+| `15-calico-3.32.2-rbac.patch` | `roles/network_plugin/calico/templates/calico-cr.yml.j2` + `roles/kubernetes-apps/policy_controller/calico/templates/calico-kube-cr.yml.j2` | calico **3.32.2** 自带 ClusterRole 的规则缺口按上游逐字补齐: ① `calico-node` 缺 `policy.networking.k8s.io/clusternetworkpolicies` 与 `kubevirt.io/virtualmachineinstancemigrations` ⇒ felix 视为 datastore 故障(403≠404)、resync 永不完成 ⇒ **calico-node 全节点 0/1 ⇒ 一切非 hostNetwork pod 访问 ClusterIP 全断**(2026-10-15 实机: local-path crash → registry-pvc 不 Bound → `k8s_registry` 600s 超时, 部署中断); ② `calico-kube-controllers` 缺 `kubecontrollersconfigurations/status`(子资源独立授权) + `apps/daemonsets`\|`deployments` + `apiextensions/customresourcedefinitions` + `apiregistration/apiservices` + 4 个 `crd.projectcalico.org` 策略资源(实机 policy-name-migrator 逐条 403 暴露); ③ cni-plugin/kube-controllers 的 kubevirt 读权限对齐(防 kubevirt 环境同类 403) | kubespray 模板出现 `clusternetworkpolicies` / `virtualmachineinstancemigrations` / `kubecontrollersconfigurations/status` 规则 | 建议提 PR(模板应与所 pin 的 calico 版本自带 RBAC 对齐; 上游 v2.32.0 按旧版 calico 写死) |
 
 ### 已退休(1 处,别再加回来)
 

@@ -115,6 +115,64 @@ rules:
       - update
       # watch for changes
       - watch
+  # Status subresource authorization is independent of the parent resource
+  # (上面的 update 不覆盖 kubecontrollersconfigurations/status)。缺此规则控制器每次回写状态
+  # 恒 403(实机 2026-10-15 持续报错) —— cubestack: 见 cubestack-patches/15-calico-3.32.2-rbac.patch
+  - apiGroups: ["crd.projectcalico.org"]
+    resources:
+      - kubecontrollersconfigurations/status
+    verbs:
+      - get
+      - update
+  # KubeVirt VM/VMI informers for IPAM garbage collection of KubeVirt workloads.
+  # cubestack: 上游 calico 3.32.2 逐字对齐; 见 cubestack-patches/15-calico-3.32.2-rbac.patch
+  - apiGroups: ["kubevirt.io"]
+    resources:
+      - virtualmachines
+      - virtualmachineinstances
+    verbs:
+      - get
+      - list
+      - watch
+  # kube-controllers 的 policy-name-migrator / CRD 处理需要读取的集群级资源
+  # (上游 3.32.2 同位规则, 其中 apiservices/CRD 的 create/delete 上游亦有, 此处只取读权限 —— 最小够用;
+  #  缺这些读权限时迁移器每 5s 重试并在日志刷 forbidden, 2026-10-15 实机逐条暴露)
+  - apiGroups: ["apps"]
+    resources:
+      - daemonsets
+      - deployments
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources:
+      - apiservices
+    verbs:
+      - get
+      - list
+      - watch
+  # 策略改名迁移(存量集群升级路径); 上游同牌动词为 create/delete/get/list/update/watch, 逐字保留
+  - apiGroups: ["crd.projectcalico.org"]
+    resources:
+      - networkpolicies
+      - stagednetworkpolicies
+      - stagedglobalnetworkpolicies
+      - globalnetworkpolicies
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - update
+      - watch
   # Services are monitored for service LoadBalancer IP allocation
   - apiGroups: [""]
     resources:
