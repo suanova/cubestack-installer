@@ -1,0 +1,157 @@
+name: Refresh latest offline assets
+
+# ============================================================================
+# 上游组件 main 合并并发布 latest 后, 由各仓库 repository_dispatch 触发本流程。
+#
+# 只刷新 deployments/offline-files/*/image-list.tsv 中登记的滚动 latest 镜像:
+#   · 按 linux/amd64 manifest digest 比对, 只更新变化的镜像
+#   · skopeo copy 成单架构 tar, 写 .digest 边车
+#   · 先传 tar 再传边车, 只覆盖 MinIO 同名对象 (不 prune / 不删除)
+#
+# 触发来源:
+#   repository_dispatch: event_type=refresh-latest-offline
+#     client_payload: {source_repo, component, sha, run_url}
+#     component 可省略: 省略时刷新该仓库在 image-list.tsv 中的全部 latest 镜像;
+#     带上时只刷新该 component 的行。
+#   workflow_dispatch: 手动恢复/首次 seed
+#
+# 一次性配置:
+#   Org secrets: MINIO_HOSTNAME, MINIO_USERNAME, MINIO_PASSWORD
+#   Repo Secrets: HARBOR_MIRROR_PASSWORD
+#   Repo Vars:    HARBOR_MIRROR_USER, HARBOR_MIRROR_REGISTRY, HARBOR_MIRROR_INSECURE,
+#                 MINIO_BUCKET, MINIO_REMOTE_DIR, MINIO_INSECURE
+# ============================================================================
+
+on:
+  repository_dispatch:
+    types: [refresh-latest-offline]
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'suanova/cubestack | suanova/cubestack-operator | suanova/cubepilot | suanova/cuberouter | all'
+        required: false
+        default: 'all'
+      component:
+        description: 'optional component (empty = all components of source_repo)'
+        required: false
+        default: ''
+      images:
+        description: 'comma-separated image keys (empty = all images of source_repo)'
+        required: false
+        default: ''
+      sha:
+        description: 'commit sha (required for activity-agent SHA tar)'
+        required: false
+        default: ''
+      force:
+        description: 're-download/upload even when digest is unchanged'
+        type: boolean
+        default: false
+      dry_run:
+        description: 'only compare digests and print the plan'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-latest-${{ github.event.client_payload.source_repo || github.event.inputs.source_repo || 'all' }}-${{ github.event.client_payload.component || github.event.inputs.component || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Refresh latest offline images
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      SOURCE_REPO: ${{ github.event.client_payload.source_repo || github.event.inputs.source_repo || 'all' }}
+      COMPONENT: ${{ github.event.client_payload.component || github.event.inputs.component || '' }}
+      IMAGES: ${{ github.event.inputs.images || '' }}
+      SHA: ${{ github.event.client_payload.sha || github.event.inputs.sha || '' }}
+      FORCE: ${{ github.event.inputs.force || 'false' }}
+      DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+      HARBOR_MIRROR_USER: ${{ vars.HARBOR_MIRROR_USER || secrets.HARBOR_MIRROR_USER }}
+      HARBOR_MIRROR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
+      HARBOR_MIRROR_REGISTRY: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
+      HARBOR_MIRROR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
+      MINIO_ENDPOINT: ${{ secrets.MINIO_HOSTNAME }}
+      MINIO_ACCESS_KEY: ${{ secrets.MINIO_USERNAME }}
+      MINIO_SECRET_KEY: ${{ secrets.MINIO_PASSWORD }}
+      MINIO_BUCKET: ${{ vars.MINIO_BUCKET || 'cubestack-installer' }}
+      MINIO_REMOTE_DIR: ${{ vars.MINIO_REMOTE_DIR || 'offline-files' }}
+      MINIO_INSECURE: ${{ vars.MINIO_INSECURE || 'false' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate configuration
+        run: |
+          set -euo pipefail
+          missing=0
+          for v in MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::missing required configuration: ${v}"
+              missing=1
+            fi
+          done
+          [ "${missing}" = "0" ] || exit 1
+          if [ -z "${HARBOR_MIRROR_USER:-}" ] || [ -z "${HARBOR_MIRROR_PASSWORD:-}" ]; then
+            echo "::warning::Harbor credentials are empty; only public images can be refreshed"
+          fi
+          echo "source_repo=${SOURCE_REPO} component=${COMPONENT:-all} images=${IMAGES:-all} sha=${SHA:-<none>}"
+
+      - name: Reclaim disk space
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo
+          curl -fsSL https://dl.min.io/aistor/mc/release/linux-amd64/mc -o /tmp/mc
+          sudo install -m 0755 /tmp/mc /usr/local/bin/mc
+          skopeo --version
+          mc --version
+
+      - name: Build selection
+        id: selection
+        run: |
+          set -euo pipefail
+          args=(--repo "${SOURCE_REPO}")
+          if [ -n "${COMPONENT}" ]; then args+=(--component "${COMPONENT}"); fi
+          if [ -n "${IMAGES}" ]; then args+=(--only "${IMAGES}"); fi
+          if [ -n "${SHA}" ]; then args+=(--sha "${SHA}"); fi
+          printf '%s\n' "${args[@]}" > "${RUNNER_TEMP}/refresh.args"
+          bash deployments/scripts/tools/images/refresh-latest-offline.sh --list-plan "${args[@]}" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Preflight
+        run: |
+          set -euo pipefail
+          mapfile -t args < "${RUNNER_TEMP}/refresh.args"
+          bash deployments/scripts/tools/images/refresh-latest-offline.sh --preflight "${args[@]}" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Refresh
+        run: |
+          set -euo pipefail
+          mapfile -t args < "${RUNNER_TEMP}/refresh.args"
+          if [ "${FORCE}" = "true" ]; then args+=(--force); fi
+          if [ "${DRY_RUN}" = "true" ]; then args+=(--dry-run); fi
+          bash deployments/scripts/tools/images/refresh-latest-offline.sh \
+            --summary-file "${RUNNER_TEMP}/refresh-summary.md" "${args[@]}"
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/refresh-summary.md" ]; then
+            cat "${RUNNER_TEMP}/refresh-summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no summary produced" >> "$GITHUB_STEP_SUMMARY"
+          fi

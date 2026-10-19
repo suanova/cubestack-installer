@@ -1,0 +1,13 @@
+# CubeStack 开发镜像清单(jupyter / ssh 系列; 单一事实源)
+# 列: subdir<TAB>file<TAB>pull_ref<TAB>save_ref
+#   · 行 → offline-files/dev-lab/<subdir>/<file>(2026-10-16 起按家族分子目录: jupyter / ssh;
+#     迁移期模块双读顶层平铺)
+#   · pull_ref 留空 = 与 save_ref 相同; file 为**规范 tar 名**(实际可为 .tar.gz, 工具双读)
+#   · tag 统一由 cluster.conf 的 DEV_LAB_IMAGE_TAG 控制(默认 latest); 改 tag 需同步改本表与目录内 tar
+# 校验: tools/images/cubestack-platform-save-images.sh --list-check --out <本目录>
+jupyter	harbor.isuanova.com_suanova_jupyter-minimal_latest.tar		harbor.isuanova.com/suanova/jupyter-minimal:latest
+jupyter	harbor.isuanova.com_suanova_jupyter-maca-pytorch_latest.tar		harbor.isuanova.com/suanova/jupyter-maca-pytorch:latest
+jupyter	harbor.isuanova.com_suanova_jupyter-cuda-pytorch_latest.tar		harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest
+ssh	harbor.isuanova.com_suanova_ssh-ubuntu22.04_latest.tar		harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest
+ssh	harbor.isuanova.com_suanova_ssh-maca-pytorch_latest.tar		harbor.isuanova.com/suanova/ssh-maca-pytorch:latest
+ssh	harbor.isuanova.com_suanova_ssh-cuda-pytorch_latest.tar		harbor.isuanova.com/suanova/ssh-cuda-pytorch:latest
