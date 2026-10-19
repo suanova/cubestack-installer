@@ -89,6 +89,9 @@ FILES=(
     #   load_config 无条件加载它(主文件先、defaults 后); 漏同步 = 容器里高级变量全走内置兜底,
     #   离线路径/镜像源/Ceph 参数等大面积错值(且多数不报错, 属静默错误)。
     deployments/config/cluster.defaults.conf
+    # ★ 2026-10-19: 平台镜像清单也要同步 —— 容器内 `--steps cubestack_operator` 的离线推送
+    #   与 check-image-manifest / 保鲜工具都以它为登记源; 漏同步会让容器继续用旧镜像 tag。
+    deployments/config/images.manifest
     deployments/kubespray/cubestack-offline.sh
     # ★ 2026-09-28(评审 I2): 两个入口脚本此前**不在清单里** → 容器里根本没有"换树/重放补丁"
     #   的能力(只有离线入口), 遇到需要重放补丁的场景只能靠人手抄。它们是独立文件(非整树),

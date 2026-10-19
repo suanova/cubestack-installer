@@ -2,6 +2,9 @@
 
 > **一句话**: 本仓库部署所需的**全部上游原始镜像**统一收敛到 `harbor.isuanova.com/mirrors/**`;
 > 部署机只认 Harbor 一个源, 由它拉成离线 tar 再推入集群内置 registry —— 集群**永远不需要访问公网**。
+>
+> 大镜像(dev_lab / model-collection)**推送加速**(config-digest 幂等 / 层并行 / 跨镜像并行)见
+> [docs/image-push-optimization.md](image-push-optimization.md)。
 
 ---
 

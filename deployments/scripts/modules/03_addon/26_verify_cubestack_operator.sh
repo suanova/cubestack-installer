@@ -15,10 +15,13 @@
 #   · 为什么要有第 ② 步: "pod Running" 不能区分镜像来自集群 registry 还是 Harbor。
 #     本仓库的离线前提是**节点只从集群内置 registry 拉取**, 故直接断言 pod 的 image 前缀
 #     = ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/ —— 这是"离线集群能跑起来"的直接证据。
-#   · 为什么冒烟 CR 不启用任何组件: 组件(lws/envoy-gateway/prometheus/...)的镜像不在本模块
-#     的离线范围内(见 docs/cubestack-operator.md), 全禁用可验证 **operator 自身的调和链路**
-#     (watch → 渲染 → apply → status), 且秒级 Ready(CRD 文档: 无启用组件时 Ready 平凡为 True)。
-#   · 清理: trap 兜底删冒烟 CR(deletePolicy=uninstall; 无启用组件 ⇒ 无受管对象可删)。
+#   · 为什么冒烟 CR 必须**显式**全组件禁用 + deletePolicy=retain(2026-10-19 实机事故):
+#     省略 `spec.components` 并不等于"没有组件" —— operator 会继承 catalog/chart 默认值
+#     (新版 chart 默认启用 lws/envoyGateway/...)。冒烟 CR 原先只写 deletePolicy=uninstall,
+#     清理时 operator 按默认组件执行 uninstall, 把**真实**的 lws-system 命名空间
+#     (SA/ConfigMap/Secret/RBAC)删掉了, 真正的 LWS 控制器随后 CrashLoopBackOff。
+#     ⇒ 现在显式写全部 components.enabled=false + bundles=[] + deletePolicy=retain(双保险)。
+#   · 清理: trap 兜底删冒烟 CR(retain ⇒ 即使默认值再次漂移, 也不会卸载/删除任何共享资源)。
 # 数据源: cluster.conf (CUBESTACK_OPERATOR_* / REGISTRY_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps verify_cubestack_operator
 # ============================================================
@@ -127,8 +130,54 @@ metadata:
   name: ${CR_NAME}
   namespace: ${NS}
 spec:
-  deletePolicy: uninstall
+  # ⚠ 必须显式全禁用: 省略 components 会继承 catalog/chart 默认(新版默认启用 lws 等),
+  #   清理时曾把真实 lws-system 命名空间删掉(2026-10-19 实机事故)。
+  deletePolicy: retain
+  bundles: []
+  components:
+    lws: { enabled: false }
+    envoyGateway: { enabled: false }
+    aiGateway: { enabled: false }
+    cubestackControllerManager: { enabled: false }
+    modelBundles: { enabled: false }
+    prometheus: { enabled: false }
+    perses: { enabled: false }
+    cuberouter: { enabled: false }
+    cubepilot: { enabled: false }
+    cubestackPortal: { enabled: false }
+    observability: { enabled: false }
+    exporters:
+      bmc: { enabled: false }
+      metax: { enabled: false }
 EOF
+# 清理前的最后一道护栏: 若 operator 仍因默认值/未来新增组件启用了任何组件, 立即中止,
+# 不执行 cleanup 的卸载路径(cleanup 本身已是 retain, 但仍不让它碰任何共享资源)。
+_CR_JSON="$( (SSH "${K} -n ${NS} get csc ${CR_NAME} -o json 2>/dev/null") || true )"
+_ENABLED_ANY="$(printf '%s' "${_CR_JSON}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+try:
+    comps = d["spec"]["components"]
+except Exception:
+    comps = {}
+def walk(name, v):
+    if isinstance(v, dict):
+        if v.get("enabled") is True:
+            print(name)
+        for k, x in v.items():
+            if k != "enabled" and isinstance(x, dict):
+                walk(name + "." + k if name else k, x)
+for k, v in comps.items():
+    walk(k, v)
+' 2>/dev/null || true)"
+if [ -n "${_ENABLED_ANY}" ]; then
+    err "冒烟 CR ${CR_NAME} 出现了启用组件: ${_ENABLED_ANY}"
+    err "  → 中止验证, 不执行清理卸载(deletePolicy=retain 已兜底); 请检查 operator 默认组件值"
+    exit 1
+fi
 _ready="" ; _last=""
 for _i in $(seq 1 $((WAIT_READY_SECONDS / 5))); do
     CR_JSON="$( (SSH "${K} -n ${NS} get cubestackcluster ${CR_NAME} -o json 2>/dev/null" || true) )"

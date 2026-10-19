@@ -95,9 +95,24 @@ bash "${SCRIPT_DIR}/tools/lb/deploy-registry.sh"
 #   `|| VAR=600` 永不执行 → VAR 从未赋值 → 后续裸引用 unbound(曾致模块在部署成功后崩溃)。
 REGISTRY_WAIT_SECONDS="${REGISTRY_WAIT_SECONDS:-600}"
 _READY=0
+_CSI_STALE_FIXED=0
 for _i in $(seq 1 $((REGISTRY_WAIT_SECONDS / 10))); do
     _pc="$( (SSH "${K} -n kube-system get pvc registry-pvc -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
     if [ -z "${_pc}" ] || [ "${_pc}" != "Bound" ]; then
+        # ★ 2026-10-19 实机: ceph-block SC 晚于 registry PVC 出现时, CSI 可能创建了 RBD 卷
+        #   但 PV 未绑定; 后续重试一直报 "Volume ID pvc-... already exists", PVC 永远 Pending。
+        #   一次性清理 rbd-pool 半成品镜像并重启 RBD CSI controller, 让 provisioner 重建。
+        #   ⚠ 必须**周期**检查(每 30s)而不是只在第 6 次看一次: 实机的 already-exists 事件在
+        #   等待约 4 分钟后才出现, 一次性检查会错过 → 600s 超时(2026-10-19 实机)。
+        if [ "${_CSI_STALE_FIXED}" = "0" ] && [ "${_i}" -ge 3 ] && [ $((_i % 3)) -eq 0 ]; then
+            _ev="$( (SSH "${K} -n kube-system describe pvc registry-pvc 2>/dev/null") || true )"
+            if printf '%s' "${_ev}" | grep -q 'already exists'; then
+                warn "  registry PVC CSI 半成品卷(already exists) → 清 rbd-pool + 重启 RBD CSI controller..."
+                SSH "timeout 60 ${K} -n rook-ceph exec deploy/rook-ceph-tools -- timeout 30 sh -c 'for i in \$(rbd ls -p rbd-pool 2>/dev/null); do rbd snap purge rbd-pool/\$i >/dev/null 2>&1 || true; rbd rm rbd-pool/\$i >/dev/null 2>&1 || true; done'" >/dev/null 2>&1 || true
+                SSH "${K} -n rook-ceph rollout restart deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin >/dev/null 2>&1" || true
+                _CSI_STALE_FIXED=1
+            fi
+        fi
         [ "$((_i % 6))" -eq 0 ] && say "  registry-pvc 未 Bound(当前 ${_pc:-<无>}, 等 ${REGISTRY_STORAGE_CLASS:-local-path} SC 供给), 等待第 ${_i}/$((REGISTRY_WAIT_SECONDS / 10)) 次 ..."
         sleep 10; continue
     fi

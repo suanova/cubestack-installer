@@ -107,10 +107,63 @@ node_ssh() {
 #   故 [7/8] 自愈时必须**重放本清理**再重建 prepare。
 # 安全口径: 仅当 nbd 零引用(/sys/module/nbd/refcnt=0, 无活跃会话)才卸载 + 持久黑名单;
 #   有引用/refcnt 不可读 → 只告警不动(防误伤真实 nbd 用户)。
-# 输出: CLEARED / IN-USE / ABSENT / ?(未知)
+# 输出: CLEARED(=模块已加载且 0 设备) / UNLOADED(=未加载但设备已消失) / IN-USE / STILL-PRESENT / ?(未知)
 _ceph_nbd_clear_one() {  # <ip> <user>
-    ( (node_ssh "$1" "$2" \
-        "if lsmod | grep -q '^nbd '; then if [ \"\$(cat /sys/module/nbd/refcnt 2>/dev/null)\" = '0' ]; then sudo modprobe -r nbd 2>/dev/null; echo 'blacklist nbd' | sudo tee /etc/modprobe.d/blacklist-nbd.conf >/dev/null; echo CLEARED; else echo IN-USE; fi; else echo ABSENT; fi" 2>/dev/null || true) )
+    # 2026-10-19 根因(加深): CSI RBD nodeplugin 会**在容器内显式 modprobe nbd** —— 容器里的
+    #   modprobe 读不到宿主机 /etc/modprobe.d, 所以宿主机 `install nbd /bin/false` 挡不住它。
+    #   即使先卸载, CSI 也会在 OSD prepare 前把 nbd 重新载入并生成 /dev/nbd0..15,
+    #   ceph-volume inventory 扫到即崩溃 → 0 OSD(实机 23:14 CSI 启动 → 23:16 prepare 失败)。
+    #   可靠做法: 以 **nbds_max=0** 预载 nbd(模块在、但零设备)。CSI 的 modprobe 见已加载
+    #   即 no-op, 不会再生成 /sys/block/nbd*; OSD 就绪后由 _ceph_nbd_restore_one 恢复默认设备。
+    ( (node_ssh "$1" "$2" "bash -s" <<'NBD_CLEAR_EOF'
+set -u
+conf=/etc/modprobe.d/blacklist-nbd.conf
+printf 'blacklist nbd\ninstall nbd /bin/false\n' | sudo tee "${conf}" >/dev/null 2>&1 || true
+if lsmod | grep -q '^nbd '; then
+    rc="$(cat /sys/module/nbd/refcnt 2>/dev/null || echo "?")"
+    if [ "${rc}" != "0" ]; then echo IN-USE; exit 0; fi
+    sudo modprobe -r nbd 2>/dev/null || true
+fi
+sudo rm -f /dev/nbd* 2>/dev/null || true
+# 临时移开 install 规则才能载入(它会令 modprobe 直接返回 1)
+sudo mv "${conf}" "${conf}.nbd-clear" 2>/dev/null || true
+sudo modprobe nbd nbds_max=0 >/dev/null 2>&1
+_mrc=$?
+sudo mv "${conf}.nbd-clear" "${conf}" 2>/dev/null || true
+if ls /sys/block/nbd* >/dev/null 2>&1; then
+    echo STILL-PRESENT
+elif [ "${_mrc}" = "0" ] || lsmod | grep -q '^nbd '; then
+    echo CLEARED
+else
+    echo UNLOADED
+fi
+NBD_CLEAR_EOF
+) )
+}
+
+# OSD 就绪后恢复 nbd 默认设备(CSI RBD 的 krbd 需要 /dev/nbd*)。
+# 只撤掉本工具的临时黑名单并重载; 有活跃会话(refcnt!=0)时不动。
+# 输出: RESTORED / IN-USE / RESTORE-FAIL
+_ceph_nbd_restore_one() {  # <ip> <user>
+    ( (node_ssh "$1" "$2" "bash -s" <<'NBD_RESTORE_EOF'
+set -u
+conf=/etc/modprobe.d/blacklist-nbd.conf
+if lsmod | grep -q '^nbd '; then
+    rc="$(cat /sys/module/nbd/refcnt 2>/dev/null || echo "?")"
+    if [ "${rc}" != "0" ]; then echo IN-USE; exit 0; fi
+    sudo modprobe -r nbd 2>/dev/null || true
+fi
+sudo rm -f /dev/nbd* 2>/dev/null || true
+sudo rm -f "${conf}" "${conf}.nbd-clear" 2>/dev/null || true
+sudo modprobe nbd >/dev/null 2>&1
+_rc=$?
+if [ "${_rc}" = "0" ] && ls /sys/block/nbd0 >/dev/null 2>&1; then
+    echo RESTORED
+else
+    echo RESTORE-FAIL
+fi
+NBD_RESTORE_EOF
+) )
 }
 
 # ---------------- 派生变量(全部来自 cluster.conf) ----------------
@@ -402,6 +455,7 @@ fi
 
 # ---------------- 4) 存储节点准备(rbd 模块 + lvm2 + node label) ----------------
 say "[3/8] 存储节点准备(rbd 内核模块 / lvm2 离线安装 / node label)..."
+_CEPH_NBD_FAIL=0
 for _hn in "${CEPH_NODE_HOSTS[@]}"; do
     _ip=""; _user="${SSH_USER:-ubuntu}"
     for line in "${NODES[@]:-}"; do
@@ -416,8 +470,13 @@ for _hn in "${CEPH_NODE_HOSTS[@]}"; do
         && ok "    rbd 内核模块就绪" || warn "    rbd 模块加载失败(VM 内核需支持, 检查 modprobe rbd)"
     # 4a-bis. nbd 残留清理(首防线; 机制/安全口径见 _ceph_nbd_clear_one 注释)。[7/8] 自愈会重放。
     case "$(_ceph_nbd_clear_one "${_ip}" "${_user}")" in
-        CLEARED) ok "    nbd 残留已清理并持久黑名单(ceph-volume inventory 崩溃根因, 实机 2026-10-14)" ;;
-        IN-USE)  warn "    nbd 模块有活跃引用(未动) —— 若有真实 nbd 用户属预期; 若后续 OSD 为 0 请人工核查" ;;
+        CLEARED) ok "    nbd 已置为 nbds_max=0(模块在、零设备; CSI 再 modprobe 为 no-op)" ;;
+        UNLOADED|ABSENT) ok "    nbd 未加载且设备已清除(已写入 install nbd /bin/false 防宿主机重载)" ;;
+        IN-USE|STILL-PRESENT)
+            err "    nbd 模块无法置零或仍有 /sys/block/nbd* —— ceph-volume inventory 会崩溃(0 OSD)"
+            err "      现场: lsmod | grep nbd; ls -l /sys/block/nbd*; cat /sys/module/nbd/parameters/nbds_max"
+            err "      处置: 先停 RBD CSI nodeplugin(kubectl -n ${CEPH_NAMESPACE} ...)或重启该节点后重跑"
+            _CEPH_NBD_FAIL=1 ;;
         *)       : ;;
     esac
     # 4b. lvm2: 检测缺失 → 从离线 packages 安装(install-worker-packages.sh 含 offline-files/os/packages)
@@ -440,6 +499,15 @@ for _hn in "${CEPH_NODE_HOSTS[@]}"; do
         && ok "    node label 已打: ${CEPH_NODE_LABEL}" \
         || warn "    label 失败(节点 ${_hn} 可能尚未就绪?)"
 done
+
+if [ "${_CEPH_NBD_FAIL}" != "0" ]; then
+    err "存储节点仍有 nbd 残留, 拒绝继续创建 CephCluster:"
+    err "  nbd0 存在时 ceph-volume inventory 会抛 'No udev data could be retrieved',"
+    err "  导致 /dev/vdb/vdc/vdd 全被跳过 → 0 OSD → HEALTH_WARN 且官方导出脚本永久等待。"
+    err "  处置: ① 停/删 RBD CSI nodeplugin DaemonSet; ② 各节点 modprobe -r nbd;"
+    err "        ③ 确认 ls /sys/block/nbd* 为空; ④ 重跑 --steps ceph"
+    exit 1
+fi
 
 # ---------------- 5) Ceph 离线镜像就绪校验 ----------------
 # ★ 镜像已由 k8s 阶段预加载 play(cluster.yml 内置)随 kubespray 镜像一起同步到全部节点并
@@ -872,8 +940,14 @@ rm -f "${LOCAL_CR}"
             #   toolbox 的 exec 还没通, ceph -s 返回空输出(错误在 stderr, 被 2>/dev/null 吞掉),
             #   于是一次瞬时抖动变成了整轮部署失败。语义上它只该表示"还没就绪, 继续等下一轮"。
             _hl="$(printf '%s\n' "${_CEPH_SUM}" | grep -oE 'HEALTH_(OK|WARN|ERR)' | head -1 || true)"
-            if [ "${_hl}" = "HEALTH_OK" ]; then
-                ok "  Ceph 集群 HEALTH_OK"
+            _osd="$(printf '%s\n' "${_CEPH_SUM}" | grep -E '^\s+osd:' | sed 's/^\s*//' || true)"
+            _osd_n="$(printf '%s' "${_osd}" | sed -nE 's/.*osd: ([0-9]+) osds:.*/\1/p')"
+            # ★ 2026-10-19 实机根因: 新建集群 mon/mgr 刚起、OSD prepare 尚未完成时 ceph -s 可能
+            #   短暂 HEALTH_OK(此时还没有 PG/OSD 状态)。旧逻辑据此提前放行 → 实际 0 OSD,
+            #   继而 registry PVC 永久 Pending / rbd ls 挂起 / 整轮 --fresh 失败。
+            #   就绪判据必须是 HEALTH_OK **且 OSD>0**。
+            if [ "${_hl}" = "HEALTH_OK" ] && [ "${_osd_n:-0}" -gt 0 ] 2>/dev/null; then
+                ok "  Ceph 集群 HEALTH_OK(${_osd_n} OSD)"
                 CLUSTER_OK=1
                 break
             fi
@@ -906,8 +980,8 @@ rm -f "${LOCAL_CR}"
                         done
                         [ -n "${_ip2}" ] || continue
                         case "$(_ceph_nbd_clear_one "${_ip2}" "${_user2}")" in
-                            CLEARED) warn "    ${_hn2}: nbd 残留已重放清理"; _nbd_cleared=$((_nbd_cleared + 1)) ;;
-                            IN-USE)  warn "    ${_hn2}: nbd 有活跃引用(未动, 需人工核查)" ;;
+                            CLEARED|UNLOADED|ABSENT) warn "    ${_hn2}: nbd 已置零/清除(CSI 再 modprobe 为 no-op)"; _nbd_cleared=$((_nbd_cleared + 1)) ;;
+                            IN-USE|STILL-PRESENT) warn "    ${_hn2}: nbd 仍无法置零(0 OSD 根因; 需停 CSI nodeplugin 或重启)" ;;
                             *) : ;;
                         esac
                     done
@@ -932,6 +1006,20 @@ rm -f "${LOCAL_CR}"
         # 未 Ready(Progressing/Error)→ 硬失败 —— 否则 ceph_csi 模块必然报"未 Ready"且信息不如这里明确
         _ph_now="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
         if [ "${_ph_now}" = "Ready" ]; then
+            # ★ 2026-10-19: Ready 但 OSD=0 不能只 warn 继续 —— 否则会进入 ceph-expose-external
+            #   的官方导出, 在 0 OSD/PG inactive 上无限等待(实机 pending 15min+)。
+            _osd_now="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- timeout 15 ceph -s 2>/dev/null") || true )"
+            _osd_now="$(printf '%s\n' "${_osd_now}" | grep -E '^\s+osd:' | sed 's/^\s*//' || true)"
+            [ -n "${_osd_now}" ] || _osd_now="${_osd:-}"
+            if printf '%s' "${_osd_now}" | grep -q 'osd: 0 osds:'; then
+                err "  Ceph 集群 Ready 但 OSD=0 —— 不能继续(官方导出会永久等待, CSI/PVC 必失败)"
+                err "  常见根因: nbd 残留使 ceph-volume inventory 崩溃(No udev data for /sys/block/nbd0)"
+                err "  排查: kubectl -n ${CEPH_NAMESPACE} logs job/rook-ceph-osd-prepare-<node> --tail=50"
+                err "  处置: ① 停/删 RBD CSI nodeplugin; ② 各节点 modprobe -r nbd;"
+                err "        ③ 确认 ls /sys/block/nbd* 为空; ④ 删 prepare Job + 重启 rook-ceph-operator;"
+                err "        ⑤ 重跑 --steps ceph"
+                exit 1
+            fi
             warn "  Ceph 集群 Ready 但未 HEALTH_OK(ceph -s 见健康告警, 多数场景可继续)"
         else
             err "  Ceph 集群 900s 内未 Ready(phase=${_ph_now:-未知}); 查看: kubectl -n ${CEPH_NAMESPACE} get cephcluster,pods / ceph -s; 常见: 磁盘未清理/内存不足/镜像未同步"
@@ -939,6 +1027,26 @@ rm -f "${LOCAL_CR}"
         fi
         unset _ph_now
     fi
+
+    # ★ 2026-10-19: OSD 已就绪 → 把 nbd 从 nbds_max=0 恢复为默认设备。
+    #   [3/8] 预载 nbds_max=0 是为了挡住 CSI 在 prepare 前重载出 /dev/nbd*; 此时 OSD 已稳定,
+    #   CSI RBD 的 krbd 挂载需要 /dev/nbd*, 必须恢复(否则 PVC 挂载会失败)。
+    say "  恢复各节点 nbd 默认设备(CSI RBD krbd 需要)..."
+    for _hn4 in "${CEPH_NODE_HOSTS[@]}"; do
+        _ip4=""; _user4="${SSH_USER:-ubuntu}"
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            node_parse "${line}"
+            [ "${NODE_HOSTNAME}" = "${_hn4}" ] && { _ip4="${NODE_IP}"; _user4="${NODE_USER}"; break; }
+        done
+        [ -n "${_ip4}" ] || continue
+        case "$(_ceph_nbd_restore_one "${_ip4}" "${_user4}")" in
+            RESTORED) ok "    ${_hn4}: nbd 已恢复默认设备" ;;
+            IN-USE)   warn "    ${_hn4}: nbd 有活跃会话, 跳过恢复(不打断在用卷)" ;;
+            *)        warn "    ${_hn4}: nbd 恢复默认设备失败(CSI RBD 卷可能失败; 手工 modprobe nbd 后重跑)" ;;
+        esac
+    done
+    unset _hn4 _ip4 _user4
 
     # ★ 备份/恢复已拆出为独立模块(2026-09-07): 部署不再自动备份, 降低部署复杂度。
     #   需要备份时单独执行: --steps ceph_backup(CEPH_BACKUP_ACTION=save), 见 15_ceph_backup.sh。

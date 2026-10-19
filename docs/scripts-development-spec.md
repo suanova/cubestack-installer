@@ -246,7 +246,8 @@ load_config
 8. **声明可卸载(可卸载的组件)**:头部声明 `# UNINSTALL: 1` + 实现卸载分支(`CUBESTACK_MODULE_ACTION=uninstall`,位于 TOGGLE 检查之前;幂等/有界/告警不中止),供 cluster-teardown 反序优雅卸载 —— 设计见 docs/graceful-overwrite/design.md。
 
 > 验证:`bash deployments/scripts/tools/check-modules.sh`(静态校验, 必须 exit 0);
-> `sudo ./deploy-cluster.sh --list-steps` 应出现新模块(带 `依赖:xxx` 标注);
+> `sudo ./deploy-cluster.sh --list-steps` 应出现新模块(紧凑列表: 状态/↻/←N;
+> 完整 DESC/文件/依赖用 `--list-steps --verbose`);
 > `sudo ./deploy-cluster.sh --steps <key>` 可单独执行(--steps 精确模式: 只跑指定的模块 + REQUIRES 依赖, 不带出默认启用的其他 operator)。
 >
 > ⭐ 专项可执行流程见 `skills/cubestack-add-module/SKILL.md`(历史事故警示 + 测试用例)。

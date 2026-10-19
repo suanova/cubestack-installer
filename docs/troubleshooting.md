@@ -555,6 +555,7 @@ grep METAX_DRIVER_DEPLOY_POLICY config/cluster.conf
 | 重装时 `ceph [1/8]`/部署预检显示某几台节点 `裸盘: <未检测到>`(节点 `lsblk` 明明有盘, 且这些盘就是上次 Ceph 用的 OSD 盘); `ceph-cleanup.sh --all` 也清不到它们 | `ceph-detect-disks.sh` 只认"未使用裸盘"(整盘无子设备), 而 Rook/`ceph-volume lvm` 建的 OSD 盘是**有分区/LVM 的** → 被判为"在用"排除: ① CR 的 `storage.nodes[].devices` 漏掉这些盘 → 那几台节点 0 OSD; ② `--all` 拿到的"待清理盘"为空 → **清理空转**(盘上旧 ceph VG/LV 无人解绑, 重装时 osd-prepare 报 "already prepared"); ③ 确认屏只剩 `<未检测到>`, 人工分不清"没盘"还是"被上次部署占着" | **2026-09-24 已修复**: 新增 `tools/k8s/ceph-disk-classify.py` 分类器(只认强证据: bluestore 签名 / ceph 分区 GUID / 分区名 `ceph ` / `ceph-*` VG·`ceph.*` 标签 / `ceph--` dm 名), `ceph-detect-disks.sh` 新增 `--classify`, 盘分 `free`/`ceph`/`inuse`/`mixed` 四类并单独呈现 `ceph` 类; CR 取 `free ∪ ceph`; `ceph-cleanup.sh --wipe-disks`/`--all` 只清 `ceph` 类(新增 `--list` 只读计划); 02_ceph 7a 先调标准清除(解 LVM/dm)再跑原有 dd 签名擦除; `--wipe-node` 默认**拒绝**清 `inuse`/`mixed` 盘(需 `--force`)。⚠ **审查挖出的两类新坑**(都已修, 都是“看着干净”害死人): ① **整盘 LVM PV**(无分区表、无文件系统、VG 未激活时连 dm 子设备都没有)曾被判 `free` → 会被写进 CR 并被 7a 的 dd 清空, 而它可能装着任意业务数据(旧版把 `LVM2_member` 排除在候选外 = inuse, 属**反向回归**) —— 现规则: 见到 `LVM2_member` 或设备本身在 `pvs` 里却认不出归属 → 判 `inuse`(宁可不擦); 且因 `pvs` 不依赖 dm, **未激活的 `ceph-*` VG 也认得出** → 该清的仍清得到; ② `nbd*` 未被排除(默认 `CEPH_DETECT_EXCLUDE` 也不含 nbd)→ 当空闲盘擦会**写穿到背后 RBD 卷**, 现恒判 `inuse`。另: 清盘脚本的 LVM/dm 解除按**目标盘**收敛(不按名字正则扫全节点 —— `... \| grep ceph` 会误伤 `data-vg/cephbackup` 这类卷; `dmsetup remove_all` 已移除), 因 7a 让这段进了默认部署流程, 作用域必须严格。**验证边界: stub `ssh` + 逐节点 lsblk fixture 端到端跑通选盘/护栏/载荷完整性(--all 只擦 ceph 盘、/data 与混合盘被排除、护栏 5 种情形退出码全对、远端载荷语法通过); LVM 收敛逻辑用桩 `pvs/lvs/lvremove/vgremove` 实跑断言(目标盘 VG 选中、无关 `ceph-backup-vg` 零触碰); 分类器 12 用例覆盖整盘 PV/混合/挂载/nbd/空分区; 静态检查全过 —— **仍未在真实集群实机验证** |
 | `ceph-detect-disks.sh` 把 `nbd0..nbdN` 当**空闲裸盘**输出(会被写进 CR 当 OSD, 被 `ceph-cleanup.sh` 当 Ceph 盘擦) | 旧版只排除 `loop/ram/zram/sr/rbd` 前缀, **漏了 nbd**; 而 `CEPH_DETECT_EXCLUDE` 默认值 `^(sda\|sr0\|vda)$` 也不含 nbd → 配置兜不住。nbd 是网络块设备, 现场很可能是 `rbd-nbd` 映射(实测部署机上 `nbd0..nbd15`)→ `dd` 会写穿到背后的 RBD 卷, **销毁真实数据** | **2026-09-24 已修复**: `ceph-disk-classify.py` 里 `nbd*` 恒定判为 `inuse`(理由写清"可能是 rbd-nbd 映射, 用 rbd unmap 或重启解除"), 绝不进 CR、绝不清理; 不依赖 `CEPH_DETECT_EXCLUDE`。验证: 对本机真实 `lsblk`(含 nbd0..15, 排除规则只写 `^(sda\|sr0\|vda)$`)运行分类器 → 16 个 nbd 全部 `inuse`, 4 块挂载中 xfs 盘与 sda 也全部 `inuse`, 无一条 `free` |
 | k8s 阶段 ansible **长时间无输出**(实测 38 分钟以上), 最后停在 `Copy offline .deb packages to target` / `Install packages from local files`; 日志最后一行是那条 copy 的 profile 行, 之后整段空白 —— 看起来像"卡在拷贝 lvm2 包"; **只有部分节点会卡**(8 台里实测 2 台) | 卡的不是 copy, 是它后面的逐个 `dpkg -i`: `dmsetup`/`lvm2` 的 postinst 触发 `update-initramfs -u` → `mkinitramfs` → `hooks/mdadm` → **`/sbin/mdadm --examine --scan`(遍历所有块设备)** 读到**上一代集群遗留、后端已不可达的 `/dev/rbd0`** → 进程进 **D 状态(不可中断)** 永不返回; 同节点还有 ext4 挂在那块 rbd 上, 其 `jbd2` 线程一并卡死(实测内核线程 `[registry]` D 态 1h37m)。诊断方法: 在卡住的节点上 `ps -eo pid,stat,wchan,cmd \| grep -E '^ *[0-9]+ D'` + `ls -l /proc/<pid>/fd \| grep /dev/` → 看它读的是哪块盘 | **① 代码侧(2026-09-24 已修, `patch-playbooks/install-packages.yml`)**: 安装期间临时置 `update_initramfs=no`(装完恢复)→ 整条 initramfs 链(hooks 会跑 pvscan/vgscan/mdadm 扫设备)根本不被触发; 另加"已装同版本跳过"与"本节点存在内核 rbd 映射"告警。**② 环境侧(必须人工)**: 这类节点**只能重启**清除 —— hung 的 rbd 映射 unmap 会 EBUSY, D 态进程杀不掉; 重启后再部署即可。判据: `ls /sys/bus/rbd/devices` 非空 + 存在 D 态进程 |
+| **`node_pkgs` 在第一个节点永久 pending**: 输出停在 `── <IP> ──` + SSH warning; 节点上 `fuser /var/lib/dpkg/lock-frontend` 进程 D 状态 `ceph_mdsc_wait_request`(可挂 30+ 分钟); `findmnt -t ceph` 显示 `/mnt/cephfs/models` 的 mons 是旧集群 | **旧集群 `cephfs_mount` 宿主机挂载残留**(2026-10-19 实机): 集群非优雅拆除(API 已不可达/未走 uninstall)时 `/mnt/cephfs/models` 仍留在宿主机; mons 已不可达 → 内核 ceph 客户端无限重试; `fuser` 遍历 `/proc` 时撞上该挂载 → D 状态永不返回。旧 rbd 映射(`jbd2/rbd0`、`rbd remove`)同理。不是装包慢, 也不是 apt 锁被正常占用 | **2026-10-19 已修**: `tools/node/reconcile-node-packages.sh` 增加**控制器前置探测**(每节点 `timeout 20` 查 ceph/rbd 挂载、`/sys/bus/rbd/devices`、相关 D 状态、`fuser` 超时), 命中即**在分发/装包前失败**并打印重启步骤; 远端脚本同样在 `fuser`/apt 之前检测, `fuser` 带 `timeout 5`, 整轮远端对账带 `RECONCILE_SSH_TIMEOUT`(默认 1800s)。**现场处置(本次 6 台全部命中)**: `systemctl stop kubelet containerd; systemctl reboot -f`(跳过卡死的 ceph 卸载); 重启后 `findmnt -t ceph,rbd` 为空、`ls /sys/bus/rbd/devices` 为空、`timeout 5 fuser ...; echo rc=$?` 为 1, 再重跑部署。回归: `bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh` |
 
 **验证**
 ```bash
@@ -1099,6 +1100,79 @@ ssh <node> 'sudo systemctl disable --now rke2-agent'
 ssh <node> 'sudo /usr/local/bin/rke2-killall.sh'
 ```
 
+### 5. `--steps cubestack_operator` 报成功, 但 operator 仍跑旧镜像(在线/离线)
+
+**症状**: `sudo ./deploy-cluster.sh --steps cubestack_operator` 执行完成、`helm` 与 `rollout status`
+都成功; 但 `kubectl -n cubestack-system get deploy cubestack-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`
+仍是 `:latest`, Pod AGE 没变; 即使 `imagePullPolicy=Always` 也不生效。
+
+**根因**:
+- `Always` 只在**新建 Pod** 时重新解析 tag; 运行中的旧 Pod 不会因为 `Always` 自动重启;
+- `helm upgrade --install` 在 chart/values 渲染结果没变时(同 `:latest` tag)不会改 Pod 模板 → 不触发滚动;
+- 旧代码只有离线模式写 `podAnnotations.cubestack.io/image-digest`; 在线模式没有 digest 注解;
+- `CUBESTACK_OPERATOR_IMAGE_TAG` 没有真正进入 helm 渲染/安装参数, 只依赖 chart 默认 tag。
+
+**解法(2026-10-19 已落地)**:
+- 离线/在线**都**把 **operator 镜像 digest** 写进 `podAnnotations.cubestack.io/image-digest`
+  (digest 变 → Pod 模板变 → 自动滚动);
+- 在线模式取不到 Harbor digest 时, helm 后自动 `rollout restart deployment/${RELEASE}` 兜底;
+- `image.tag=${IMG_TAG}` 同时进入 chart 渲染与 helm 安装参数;
+- 离线 operator 与 CR 组件 `imagePullPolicy` 都改为 **Always**(每次新建 Pod 从集群 registry 重新解析);
+- `CUBESTACK_OPERATOR_IMAGE_PULL_POLICY` 保留兼容但不再生效(强制 Always)。
+
+**验证**:
+```bash
+kubectl -n cubestack-system get deploy cubestack-operator \
+  -o jsonpath='{.spec.template.metadata.annotations}{"\n"}'
+kubectl -n cubestack-system get pods -o wide
+# 更新镜像/ chart 后重跑 --steps, Pod AGE 应变化; 内容未变则 digest 注解不变、不重启
+bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
+```
+详见 `docs/cubestack-operator.md` §1.1 / §3.6。
+
+### 6. 【2026-10-19 事故】`verify_cubestack_operator` 的冒烟 CR 删掉了真实 `lws-system` 命名空间
+
+**症状**
+- `kubectl -n lws-system get pods` 只有 `lws-controller-manager`, 且 `CrashLoopBackOff`;
+  `describe` 报 `configmap "lws-manager-config" not found` / `secret "lws-webhook-server-cert" not found`;
+- 日志 `Unauthorized` + `the server has asked for the client to provide credentials`;
+- 命名空间里 **没有** `lws-controller-manager` ServiceAccount、ConfigMap、Secret、ClusterRole/Binding;
+- 但主 CR `kubectl -n cubestack-system get csc cubestack` 的 `status.components` 仍显示 `lws=Ready`。
+
+**根因(逐项证据)**
+1. `26_verify_cubestack_operator.sh` 的冒烟 CR 只写了 `deletePolicy: uninstall`, **省略了
+   `spec.components`**。operator 对省略的组件会继承 catalog/chart 默认值; 新版 chart 默认启用
+   `lws/envoyGateway/...` ⇒ 冒烟 CR 实际管理了真实组件;
+2. 验证结束 trap 删除冒烟 CR, `deletePolicy=uninstall` 触发组件卸载; operator 日志明确:
+   `uninstall deleted component namespace {"CubeStackCluster": {"name":"verify-csc"}, "component": "lws",
+   "namespace": "lws-system"}` —— 把**主 CR 正在使用的共享命名空间**整个删了;
+3. operator 的组件状态按 **desired hash** 比较; 资源被外部删除但 hash 未变时不会重新 apply
+   (没有 drift detection) ⇒ 主 CR 状态继续显示 `lws=Ready`, 不会自愈。
+
+**修复(2026-10-19 已落地)**
+- 冒烟 CR 显式写**全部** components `enabled: false`(含 `exporters.bmc/metax`)、`bundles: []`,
+  并把 `deletePolicy` 改为 **`retain`**(双保险; CRD 默认也是 retain);
+- 清理前增加护栏: 读取冒烟 CR 的 `spec.components`, 只要发现任何 `enabled: true` 就中止,
+  不执行卸载路径;
+- `test-cubestack-operator-update.sh` 增加静态断言(不能出现 `deletePolicy: uninstall`、
+  每个组件 key 必须在冒烟 CR 中显式禁用)。
+
+**恢复被误删的组件**(脚本修复后)
+```bash
+# 强制 operator 重新 apply: 把 lws 关掉再打开(改变 desired hash)
+kubectl -n cubestack-system patch csc cubestack --type=merge \
+  -p '{"spec":{"components":{"lws":{"enabled":false}}}}'
+kubectl -n cubestack-system patch csc cubestack --type=merge \
+  -p '{"spec":{"components":{"lws":{"enabled":true}}}}'
+# 等待 SA/ConfigMap/Secret/Deployment 重建 + Pod Running + CR phase=Ready
+kubectl -n lws-system get sa,cm,secret,deploy,pod
+kubectl -n cubestack-system get csc cubestack \
+  -o jsonpath='{range .status.components[?(@.name=="lws")]}{.phase}{end}'
+```
+**验证**: 重新执行 `--steps verify_cubestack_operator`; 结束后 `lws-system` 的 SA/CM/Secret
+必须仍在, Pod 仍 Running, 冒烟 CR 已被清理。回归:
+`bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh`。
+
 ---
 
 ## 四、离线部署
@@ -1407,3 +1481,99 @@ grep -rn "fs.protected_regular" deployments/scripts/   # 已落地的"预清陈�
 sysctl fs.protected_regular                            # 节点内核口径(2=对 O_CREAT 打开既有文件也生效)
 ssh <user>@<ip> "ls -la /tmp/cubestack-*.sh"           # 查遗留文件属主(与本次用户不一致即命中条件)
 ```
+
+---
+
+## 五、存储 / CephFS
+
+### 1. CephFS 宿主机挂载(cephfs_mount): 模块报成功但节点没有挂载 / 反复叠加挂载 / 卸载后挂载残留
+
+**症状**
+- `kubectl -n rook-ceph logs ds/cephfs-models-mount` 反复打印
+  `目标当前 fstype=ext4(hostPath 自身)` 与 `挂载成功`;节点 `findmnt -T /mnt/cephfs/models` 出现
+  **多条相同 ceph 挂载**(挂载栈越叠越高);
+- 或模块逐节点验证时报 `NOT_MOUNTED` / `校验失败: ceph`,但节点上其实已有 ceph 挂载;
+- 删除 DaemonSet 后,节点 `findmnt -T /mnt/cephfs/models` **仍是 ceph**(卸载不干净)。
+
+**根因(2026-10-19 实机, 逐项证据)**
+1. **hostPath 在容器里本身就是 bind mount** ⇒ `mountpoint -q "${TARGET}"` 恒为真。用它判断
+   "目标已被其他文件系统挂载"会把 hostPath 自身误判成外部 ext4 挂载并拒绝工作;
+2. 同一路径存在**挂载栈**(hostPath 的 ext4 + 历史 ceph 挂载),`findmnt -n -o FSTYPE -T <path>`
+   会输出**多行**("ext4\nceph\nceph");把整段多行输出与 `ceph` 比较必然不等 ⇒ 误判未挂载 ⇒
+   每 30s 再挂一次,越叠越多;
+3. `mountPropagation: Bidirectional` 传播到宿主机的 mount 是**宿主机命名空间里的独立 mount**,
+   容器/Pod 退出时**不保证**被卸载(`kubectl delete ds` 后实测仍残留 3~5 层 ceph);
+4. CephFS 挂载上执行**全局 `sync` 会挂住**(实测 `sync` 无输出、SSH 一直阻塞;同节点
+   `sync -f /mnt/cephfs/models` 与 `dd ... conv=fsync` 均正常);验证脚本里的 `sync` 会让整轮部署卡死;
+5. 远端 `kubectl ... -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'`:本地单引号被
+   shell 剥掉后,远端 shell 把 `?(`/`(` 当语法符号 ⇒ 语法错误;脚本把空输出误判为 NotReady
+   (本次实机曾出现"6 台全部非 Ready, 但模块仍报成功")。
+
+**解法(根治, 已落地)**
+- `mounted_ok()` / 验证统一取**最上层**: `findmnt -n -o FSTYPE -T <path> 2>/dev/null | tail -1`;
+  **禁止**用 `mountpoint -q` 判断是否已挂载;
+- 未挂载时才 `mount -t ceph`;子目录不存在时临时挂 FS 根 → `mkdir` + `chmod` → 再挂子目录;
+- uninstall 分支**逐节点显式 umount**(循环最多 20 层, 只卸载 fstype=ceph, 不动 ext4 等);
+- 验证探针去掉全局 `sync`(只做写入+读回);逐节点 SSH 加 `timeout 30`, 任何节点都不能拖死整轮;
+- 节点 Ready 判断改用 `kubectl get node <name> --no-headers | awk '{print $2}'`,
+  避免把含 `?(...)` 的 jsonpath 传给远端 shell;
+- **零节点验证必须硬失败**(`没有节点完成挂载校验`), 禁止"全部跳过=成功"的假绿。
+
+**验证(2026-10-19 实机, 已通过)**
+```bash
+# 部署 + 逐节点写读探针(6/6)
+bash deployments/scripts/modules/03_addon/07_cephfs_mount.sh
+# 每台节点恰好 1 层 ceph 挂载
+ssh <node> "findmnt -n -o FSTYPE -T /mnt/cephfs/models | grep -cx ceph"
+# 跨节点共享: master11 写 → worker13 读
+ssh <master11> "echo shared > /mnt/cephfs/models/.p; cat /mnt/cephfs/models/.p"
+ssh <worker13> "cat /mnt/cephfs/models/.p; rm -f /mnt/cephfs/models/.p"
+# 幂等重跑: 第二次仍 6/6, 挂载层数不增加
+# 卸载: DS/Secret/cephx 用户消失, 6 台节点 fstype 回到 ext4, 目录保留
+CUBESTACK_MODULE_ACTION=uninstall bash deployments/scripts/modules/03_addon/07_cephfs_mount.sh
+# 离线回归(无需集群)
+bash deployments/scripts/tools/tests/test-cephfs-mount.sh
+```
+**验证边界**: 未做多节点**并发写**/性能/配额测试; 未做真实节点重启(以删除 Pod 模拟重挂)。
+**相关命令**: `kubectl -n rook-ceph logs ds/cephfs-models-mount --tail=50`;
+`findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,SOURCE`;
+`kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph auth get client.cubestack-cephfs-models`.
+
+### 2. 【2026-10-19 实机】cubepilot-api 更新后永久 Pending: RWO PVC + RollingUpdate → Multi-Attach
+
+**症状**
+- `kubectl -n cubestack-system describe pod cubepilot-api-<new>` 一直 `ContainerCreating`;
+  Events: `Multi-Attach error for volume "pvc-..." Volume is already used by pod(s) cubepilot-api-<old>`;
+- 同一个 Deployment 下**两个 ReplicaSet 各 1 个 Pod**: 旧 Pod `Running`(另一个节点), 新 Pod
+  `Pending`; `status.conditions` 出现 `ProgressDeadlineExceeded`;
+- `kubectl get deploy cubepilot-api -o jsonpath='{.spec.strategy}'` 是默认的
+  `RollingUpdate{maxSurge:25%,maxUnavailable:25%}`。
+
+**根因**
+`cubepilot-api` 使用**单个 `ReadWriteOnce` PVC**。`maxSurge>0` 会先创建新 Pod; 新 Pod 被调度到
+另一节点后, RBD 卷仍 attach 在旧 Pod 所在节点, 无法同时挂载(`Multi-Attach`); 而
+`maxUnavailable` 取整后为 0, Deployment 又不会先停旧 Pod → 新旧 Pod 互相卡死。
+这是 Kubernetes 对 RWO 卷 + RollingUpdate 的经典冲突, 与镜像/网络无关。
+
+**解法(脚本已根治)**
+- `lib-common.sh` 新增 `ensure_rwo_deployments_recreate <ns> [selector] [wait]`:
+  解析 Deployment + PVC, 只把**引用 RWO PVC** 且策略非 Recreate 的 Deployment merge-patch 成
+  `strategy: {type: Recreate}`(无 PVC/RWX 的组件不动; 幂等)。
+- `25_cubestack_operator.sh` 的 `[6.5/6]` 在 operator 创建组件后自动执行(等待上界
+  `CUBESTACK_OPERATOR_RWO_STRATEGY_WAIT_SECONDS`, 默认 60s)。
+- `cubestack-component-update.sh`(`--steps cubepilot` 等)在 `rollout restart` **之前**执行,
+  纠正失败会中止滚动(避免把组件滚进 Multi-Attach)。
+- 手工即时修复(本次实机已执行, 旧 Pod 30s 内退出、新 Pod 40s 内 Running):
+  ```bash
+  kubectl -n cubestack-system patch deploy cubepilot-api --type=merge \
+    -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+  kubectl -n cubestack-system rollout status deploy/cubepilot-api --timeout=180s
+  ```
+- 验证: `kubectl -n cubestack-system get rs -l app=cubepilot-api` 旧 RS 应为 0;
+  `kubectl -n cubestack-system get pod -l app=cubepilot-api -o wide` 只应有一个 Running;
+  `kubectl -n cubestack-system get pvc cubepilot-api-data -o jsonpath='{.spec.accessModes}'`
+  确认为 `["ReadWriteOnce"]`。
+
+**注意**: operator 的 server-side apply 不渲染 `strategy` 字段, 因此本 patch 不会被下一轮
+调谐覆盖; 若上游 chart 将来显式加入 `strategy`, 需要上游改成 `Recreate` 或提供 values 开关,
+届时本守护会因 `strategy.type != Recreate` 继续纠正。

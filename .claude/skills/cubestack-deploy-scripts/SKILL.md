@@ -311,9 +311,18 @@ sudo ./deployments/scripts/deploy-cluster.sh --with-k8s --fresh # 仅 kubespray 
 sudo ./deployments/scripts/deploy-cluster.sh --skip gpu_operator   # 全量但排除某个 operator
 sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_operator  # 立即部署单个 operator(自动带基座, 只部署指定的)
 sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator # 只写 cluster.conf 预启用(不部署, 下次全量生效)
+sudo ./deployments/scripts/deploy-cluster.sh --steps lws            # 平台组件级更新(operator/CR 已就绪; 不重跑 cubestack_operator)
+sudo ./deployments/scripts/deploy-cluster.sh --steps cube-pilot     # 同上, 连字符别名
 sudo ./deployments/scripts/deploy-cluster.sh --phase addon          # 仅 addon 阶段
 sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全部模块
 ```
+
+- **平台组件级 step(2026-10-19)**: `--steps lws/cubepilot/envoy_gateway/...` 只更新指定平台组件
+  (只推该组件 tar + patch CR values/version + 滚动组件 Deployment), **不重跑 `cubestack_operator`**;
+  实现 = `modules/03_addon/4x_cubestack_<key>.sh` 薄壳 + `tools/k8s/cubestack-component-update.sh`。
+  第三方组件(lws/envoy-gateway/ai-gateway/prometheus/perses)不受 CR `global.imagePullPolicy` 影响,
+  工具会尝试 `values.image.pullPolicy=Always`; chart 路径不同时用 `CUBESTACK_COMPONENT_VALUES_FILE`。
+  默认全量部署仍由 `cubestack_operator` 负责全部组件; 组件 step `DEFAULT:0`, 无 TOGGLE。
 
 ## NODES 节点格式(5字段, 不区分虚拟机/裸金属)
 
@@ -535,9 +544,21 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   由 `tools/vm/create-vms.sh` 创建时自动附加。
 - **部署顺序(03_addon 已重排)**: `01_metallb → 02_ceph → 03_ceph_csi → 04_local_path → 05_k8s_registry → …`;
   registry 后端设 `REGISTRY_STORAGE_CLASS=ceph-block` 即走 ceph(替代 local-path)。
+- **CephFS 宿主机共享挂载(`cephfs_mount`, 默认随 `CEPHFS_ENABLED`)**: 用 cephcsi 镜像(自带
+  `mount.ceph`)跑 DaemonSet, hostPath + `mountPropagation: Bidirectional` 把 CephFS `models`
+  子目录挂到**每台节点** `/mnt/cephfs/models`(节点无需 ceph-common)。⚠ 实机踩坑(详见
+  `docs/troubleshooting.md` 五.1): ① hostPath 在容器里本身是 bind mount, **禁止**用
+  `mountpoint -q` 判断是否已挂载; ② `findmnt -T` 会输出挂载栈, 必须 `tail -1`; ③ 传播到宿主机的
+  挂载不会随 Pod 退出自动消失, uninstall 必须**逐节点显式 umount**; **非优雅拆除**(集群直接消失/
+  未走 uninstall)会残留 `/mnt/cephfs/models` → 重装时 `node_pkgs` 的 `fuser` 会 D 状态卡死; 必须
+  `systemctl stop kubelet containerd; systemctl reboot -f`(reconcile-node-packages 已加前置探测/指引); ④ CephFS 上全局 `sync` 会挂住
+  (用 `sync -f`/fsync); ⑤ 远端 `jsonpath` 含 `?(...)` 时要保证引号送达远端(Ready 判断建议
+  `--no-headers | awk '{print $2}'`); ⑥ 零节点验证必须硬失败。离线回归:
+  `bash deployments/scripts/tools/tests/test-cephfs-mount.sh`。
 - **常用命令**:
   ```bash
   sudo ./deploy-cluster.sh --steps ceph,ceph_csi          # 部署(或 CEPH_ENABLED=true+CEPH_CSI_ENABLED=true 随全量)
+  sudo ./deploy-cluster.sh --steps cephfs_mount           # CephFS → 每台节点 /mnt/cephfs/models
   sudo ./deploy-cluster.sh --steps verify_ceph            # 端到端: operator/CSI+Ready+ceph -s+RBD 块 I/O
   kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
   ```
@@ -574,6 +595,11 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   Harbor API repository 名要**双重 URL 编码** `%252F` 且不含项目前缀;
   `docker-archive:<file>` 末尾**必须带 `:<ref>`** 否则 RepoTags 为空;
   Harbor **项目**必须预建(仓库才自动建), 建项目需登录。
+- **大镜像 push 加速(dev_lab / model_images)**: 幂等必须比 **config digest**(push 会重压缩层,
+  manifest/layer digest 会变; 老逻辑比 manifest digest 会每轮重推 130G); 另用
+  `--image-parallel-copies`(层并行)、`--dest-precompute-digests`(跳过已有层)、base-first
+  有界跨镜像并行; 配置 `IMAGE_PUSH_*`, 详见 `docs/image-push-optimization.md`。
+  ⚠ skopeo 1.16.1 的 `--dest-compress-level/--dest-compress-format` 对 `docker://` 推送不生效。
 - ⚠ **加镜像时别忘了同步 `tools/offline/trim-offline-files.sh` 的 `PRELOAD_IMAGE_PATTERNS`**
   (k8s-base 组), 否则备料后被 trim 静默删掉 —— 用 `check-image-manifest.sh --kubespray` 兜底。
 ## 版本目录(离线资产按版本组织,2026-09-30 起)

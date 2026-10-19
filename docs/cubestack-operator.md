@@ -57,7 +57,7 @@ tar 推入集群内置 registry, 并把 CR 的全局镜像源(imageRegistry / ex
 |---|---|---|
 | 镜像引用 | 覆盖为集群内置 registry(`--set image.repository=<REG>/suanova-private/…`; CR 注入 `<REG>/suanova` + `<REG>/mirrors` 前缀) | **chart 定义原样**(harbor.isuanova.com/…, 不覆盖不搬运) |
 | 镜像来源 | 离线 tar → `skopeo` 推入集群 registry([4/6]+[4b/6]); 节点只拉内置 registry | 节点**直连 Harbor** 拉取 |
-| 拉取策略 | chart 默认 Always + **digest 钉注**(podAnnotations, 保证滚动触发) | **恒 Always** —— operator 经 `--set image.pullPolicy=Always`, CR 组件经 `global.imagePullPolicy=Always`(滚动 :latest 每次恒取最新) |
+| 拉取策略 | **恒 Always**(2026-10-19 起离线同样强制; 每次新建 Pod 从集群 registry 重新解析 tag) + **digest 钉注**(podAnnotations, 保证滚动触发) | **恒 Always** —— operator 经 `--set image.pullPolicy=Always`; CR 组件的**自研五件套**(portal/cubepilot/cuberouter/controller-manager/bmc)经 `global.imagePullPolicy=Always`; 第三方(lws/envoy-gateway/ai-gateway/prometheus/perses)仍用各自 chart 策略; 同样有 **digest 钉注**(digest 取不到时 helm 后 `rollout restart` 兜底) |
 | 认证 | 集群 registry 匿名可拉 → 清空 imagePullSecrets | `harbor-credentials` secret(用 `HARBOR_MIRROR_USER/PASSWORD` 或 `CUBESTACK_OPERATOR_HARBOR_*` 凭据自动幂等创建, 密码经 stdin 不进 argv; 无凭据则清空并告警) |
 | 适用 | 离线/隔离集群 | 可达 Harbor 的联网集群 |
 
@@ -189,8 +189,32 @@ Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator�
   (模型推理 Pod/GPU 需求, 非平台服务必需)+ bmc 关(需管理员先建 `cubestack-bmc-credentials` Secret)。
 - **imagePullSecrets 注入为空**: 集群 registry 匿名可拉; 留默认值(harbor-credentials)而 Secret
   不存在会让所有组件 ImagePullBackOff。
-- **已知缺口**: `docker.io/envoyproxy/ratelimit:8fe6ea42`(EG 的 RateLimit 配置值, 非默认拉起;
-  本网络到 docker.io 不通)。补料: 在可访问 docker.io 的机器 pull/save 后放入 offline-files。
+- **镜像清单与 chart 同步(2026-10-19)**: `offline-files/cubestack-operator/image-list.tsv` 是
+  平台镜像保鲜管道的**单一事实源**。gateway-helm v1.9.2 使用 `gateway:v1.9.2` +
+  `envoy:distroless-v1.39.1` + `ratelimit:0482748e`; ai-gateway v1.2.0 使用
+  `ai-gateway-controller:v1.2.0` + `ai-gateway-extproc:v1.2.0`。**升级 operator/chart 后必须同步
+  刷新清单并重跑 `cubestack-platform-save-images.sh`**, 否则离线集群会在 certgen/ratelimit 等
+  非主容器处 ImagePullBackOff(`registry.cubestack.io:5000/...: not found`)。
+  - `ratelimit:0482748e` 是 v1.9.2 chart 的默认 tag(旧 `8fe6ea42` 只适用于 v1.9.1), 已入清单;
+    它非默认拉起, 仅配置 `RateLimitPolicy` 时使用。
+  - `prometheus-windows-exporter:0.31.8` 只有 `windows/amd64` 清单, Linux 节点不调度, **不进入**
+    Linux 离线 tar 集合; 将来加 Windows 节点时需单独用 `--override-os windows` 保存。
+  - **一致性校验**: `cubestack-platform-save-images.sh --verify-remote` 逐行比对边车 ↔ Harbor
+    manifest digest, 并直接读 tar 的 config digest ↔ Harbor amd64 config digest; MinIO 侧用
+    `cubestack-platform-sync.sh --verify-minio` 做逐 tar sha256。发版/重部署前建议两条都跑。
+  - **CLI 镜像**: chart 是 vendored 进镜像的; 更新 `cubestack-addon/cubestack-operator/*.tgz`
+    后需重建 `cubestack-installer-cli`:
+    `sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build [--push]`。
+- **RWO 单卷组件的更新策略(2026-10-19)**: `cubepilot-api` 把单个 `ReadWriteOnce` PVC 挂在
+  Deployment 上; 默认 `RollingUpdate` 会先起新 Pod, 新 Pod 调度到另一节点后无法挂载同一块 RBD 卷
+  (`Multi-Attach error`), 旧 Pod 又因 `maxUnavailable` 不退出 → 永久 `ContainerCreating`。
+  模块 [6.5/6] 在 operator 创建组件后自动把这类 Deployment 改成 `strategy=Recreate`
+  (幂等; 无 PVC/RWX 的不动); `--steps cubepilot` 等单组件更新工具在 `rollout restart` 前也会
+  做同样守护。手工排查/修复见 `docs/troubleshooting.md` 五.2。
+- **验证模块安全(2026-10-19)**: `verify_cubestack_operator` 的冒烟 CR **必须显式**写全部
+  `components.*.enabled=false` + `deletePolicy: retain`。省略 `components` 会继承 catalog/chart
+  默认组件, 清理时曾以 `uninstall` 删掉真实的 `lws-system` 命名空间(SA/CM/Secret/RBAC),
+  主 CR 因 desired hash 未变不会自愈。事故与恢复见 `docs/troubleshooting.md` 三.6。
 
 **实机验证(2026-10-08)**: 全链路(推 36 镜像 → CR → 9 组件调谐)一次通过, `CR Ready=True`
 (lws/envoy-gateway/controller-manager/prometheus/perses/cuberouter/cubepilot/portal/observability
@@ -223,12 +247,81 @@ helm upgrade --install cubestack-operator <本地tgz> -n cubestack-system --crea
 
 | 坑 | 表现 | 处理 |
 |---|---|---|
-| **节点缓存冻结** | 镜像 ref 恒为 `:latest`, `IfNotPresent` 下 kubelet 认为"有缓存"→ 永远跑旧镜像 | 默认 `image.pullPolicy=Always`(与上游 README 对滚动构建的建议一致) |
-| **不滚动** | 镜像内容变了但 Deployment spec 没变 → ReplicaSet 不变 → 新镜像永远不会被拉起来 | 把刚推入镜像的 **digest** 写进 `podAnnotations` → 内容变则模板变 → 自动滚动 |
+| **节点缓存冻结** | 镜像 ref 恒为 `:latest`, `IfNotPresent` 下 kubelet 认为"有缓存"→ 永远跑旧镜像 | **离线/在线恒 `image.pullPolicy=Always`**(2026-10-19 用户口径; 离线镜像已推入集群 registry, 在线从 Harbor 拉, 每次新建 Pod 都重新解析 tag) |
+| **不滚动** | 镜像内容变了但 Deployment spec 没变 → ReplicaSet 不变 → 新镜像永远不会被拉起来 | 把 **operator 镜像的 digest** 写进 `podAnnotations`(**离线/在线都启用**)→ 内容变则模板变 → 自动滚动; 在线模式若 digest 取不到, helm 后 `rollout restart` 兜底 |
 | **误判"没变"** | `latest` 这种 tag "存在即跳过"的幂等判据会永远跳过推送 | 幂等判据用 **digest 比对**(`_digest()` 解析 `skopeo inspect --raw`: index 取 amd64 条目 / 单架构取清单字节 sha256), 取不到就**保守重推** |
 
 > `REPEAT: 1`(每次执行)也是为此: 安装类模块通常用 `REPEAT: 0` 断点跳过, 但那样会让本模块
 > 永远停在首次拉到的 chart/镜像版本。
+>
+> **2026-10-19 补充**: `CUBESTACK_OPERATOR_IMAGE_TAG` 现在同时进入 chart 渲染与 helm 安装参数
+> (`--set image.tag=...`), 不再只依赖 chart 默认值; `CUBESTACK_OPERATOR_IMAGE_PULL_POLICY`
+> 保留兼容但不再生效(离线/在线均强制 `Always`)。
+
+### 3.6b 组件级更新: `--steps lws` / `--steps cube-pilot`(2026-10-19)
+
+**默认全量部署仍由 `cubestack_operator` 负责 operator + CR + 全部组件**；组件级 step 只在
+operator/CR 已就绪后**单独更新某一个组件**，**不会重跑 `cubestack_operator` 模块、不执行 helm upgrade**。
+
+可用 step（连字符别名也支持）:
+
+```
+lws  envoy_gateway(envoy-gateway)  ai_gateway(ai-gateway)
+cubestack_controller_manager(cubestack-controller-manager)
+model_bundles(model-bundles)  prometheus  perses  bmc  metax
+cuberouter  cubepilot(cube-pilot)  cubestack_portal(cubestack-portal)  observability
+```
+
+每个 step 的实现是 `deployments/scripts/modules/03_addon/4x_cubestack_<key>.sh` 薄壳 +
+`tools/k8s/cubestack-component-update.sh`:
+
+1. 校验 `CubeStackCluster` CR 存在（否则提示先跑 `--steps cubestack_operator`）；
+2. **只推** `offline-files/cubestack-operator/<组件>/` 下该组件的镜像 tar
+   （config digest 幂等 + `IMAGE_PUSH_*` 层并行/precompute；不碰 operator 镜像）；
+3. 可选 patch CR `spec.components.<key>.version` / `values`；
+4. 第三方组件默认尝试 patch `values.image.pullPolicy=Always`（charts 不识别该路径时会告警，
+   需用 values 文件指定正确路径）；
+5. 按 `cubestack.io/component=<组件>` 找到组件 Deployment 并 `rollout restart`，确保新 Pod 重新拉取。
+
+```bash
+# 只更新 lws
+sudo ./deploy-cluster.sh --steps lws
+
+# 只更新 cubepilot（别名）
+sudo ./deploy-cluster.sh --steps cube-pilot
+
+# 指定版本 / 组件 values / pullPolicy
+sudo CUBESTACK_COMPONENT_VERSION=0.11.0 \
+     CUBESTACK_COMPONENT_VALUES_FILE=/path/lws-values.yaml \
+     CUBESTACK_COMPONENT_PULL_POLICY=Always \
+     ./deploy-cluster.sh --steps lws
+
+# 只推镜像、不重启组件（例如随后由 operator 自行调和）
+sudo CUBESTACK_COMPONENT_RESTART=0 ./deploy-cluster.sh --steps prometheus
+```
+
+可选环境变量（工具头注释）:
+
+| 变量 | 说明 |
+|---|---|
+| `CUBESTACK_COMPONENT_VERSION` | 覆盖 CR `spec.components.<key>.version` |
+| `CUBESTACK_COMPONENT_ENABLED` | `true/false`: 覆盖 CR `spec.components.<key>.enabled` |
+| `CUBESTACK_COMPONENT_BUNDLES` | `model-bundles` 专用: 逗号分隔 bundle 名列表 → CR `spec.bundles` |
+| `CUBESTACK_COMPONENT_VALUES_FILE` | 该组件的 values（YAML/JSON 的**组件 values 映射**），merge 到 CR |
+| `CUBESTACK_COMPONENT_PULL_POLICY` | 第三方组件 `values.image.pullPolicy`（默认 `Always`） |
+| `CUBESTACK_COMPONENT_RESTART` | `1`(默认)=rollout restart 组件 Deployment / `0`=不重启 |
+| `CUBESTACK_OPERATOR_OFFLINE_DIR` | 离线 tar 根目录 |
+| `CUBESTACK_OPERATOR_NAMESPACE` | operator/CR 命名空间 |
+
+**边界**:
+- `lws` / `envoy-gateway` / `ai-gateway` / `prometheus` / `perses` 是第三方组件，
+  **不受** `spec.global.imagePullPolicy` 影响；本工具会尝试 `values.image.pullPolicy=Always`，
+  若 chart 路径不同请用 `CUBESTACK_COMPONENT_VALUES_FILE` 覆盖。
+- `model-bundles` / `observability` / `metax` 等属于 assets/patch 组件，可能没有镜像 tar；
+  step 只做 CR values/version 覆盖（有对应 Deployment 时才重启）。
+- **组件 chart/version 升级**仍受 operator 内嵌 `assets/charts` 约束：离线升级 chart 需要
+  新的 operator 镜像；本 step 只更新镜像 + CR 覆盖，不会刷新 operator 内嵌 chart。
+- `--steps <组件>` 不部署基座/operator；集群与 registry 必须已就绪。
 
 ### 3.7 端到端验证(`26_verify_cubestack_operator.sh`)
 
@@ -246,6 +339,9 @@ helm upgrade --install cubestack-operator <本地tgz> -n cubestack-system --crea
 ```bash
 # 部署(自动带基座; 只在指定模块)
 sudo ./deploy-cluster.sh --steps cubestack_operator
+# 单独更新某个平台组件(operator/CR 已就绪; 不重跑 cubestack_operator)
+sudo ./deploy-cluster.sh --steps lws
+sudo ./deploy-cluster.sh --steps cube-pilot
 # 端到端验证
 sudo ./deploy-cluster.sh --steps verify_cubestack_operator
 # 预启用(写 cluster.conf, 下次全量部署生效)

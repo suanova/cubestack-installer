@@ -9,7 +9,7 @@ CubeStack 平台 Operator **及其平台组件**的离线资产(2026-10-08 起�
 |---|---|---|
 | `<上游ref>.tar`(**顶层**) | **operator 本体**(滚动 tag; `harbor-save-images.sh --group cubestack-operator` 生成) | —(operator 自身) |
 | `lws/` | LWS 控制器 | `lws` |
-| `envoy-gateway/` | envoy 控制面/数据面/envoy-distroless + ratelimit + AI 网关 ×2(共 6) | `envoyGateway`(+`aiGateway`) |
+| `envoy-gateway/` | envoy 控制面/数据面/envoy-distroless + ratelimit + AI 网关 ×2(共 5; gateway v1.9.2 / envoy distroless-v1.39.1 / ai-gateway v1.2.0 / ratelimit 0482748e) | `envoyGateway`(+`aiGateway`) |
 | `controller-manager/` | cubestack-controller-manager | `cubestackControllerManager` |
 | `prometheus/` | 监控栈 11 件: prometheus-operator(+config-reloader)/prometheus/alertmanager/node-exporter/kube-state-metrics/kube-rbac-proxy/thanos/grafana/k8s-sidecar(quay)/kube-webhook-certgen | `prometheus` |
 | `perses/` | perses + perses-operator + k8s-sidecar(docker.io) | `perses` |
@@ -61,7 +61,7 @@ CubeStack 平台 Operator **及其平台组件**的离线资产(2026-10-08 起�
 |---|---|---|
 | 自研(滚动 `:latest`) | `harbor.isuanova.com/suanova/<name>` | ⚠ **bmc-oem-exporter / idrac-exporter 已迁至 `suanova-private` 项目**; tar 文件名仍按部署口径 `suanova/…` 命名(目标 `<REG>/suanova/<name>` 不变, RepoTags 保存时同步重打) |
 | 第三方(钉版本) | `harbor.isuanova.com/mirrors/<上游ref>` | docker.io 本网络不通, 恒经 mirrors |
-| 例外(2026-10-16 实测/处理) | 见右 | `thanos:v0.42.4`、`opstree/redis-exporter:v1.44.0` 在 mirrors **缺库**(当前经 **quay 直连**); `docker.io/envoyproxy/envoy:v1.9.1` mirrors 无镜像可拉(本网络 docker.io 不通)。**三者已补登记 `images.manifest` 的 `cubestack-platform` 组**(push 后由 CI 同步进 mirrors); envoy 行的拉取源已切至 mirrors(待 CI 首同步后生效, 期间该行会如实报"失败") |
+| 例外(2026-10-19 校准) | 见右 | `gateway:v1.9.2` / `ai-gateway-controller:v1.2.0` / `ai-gateway-extproc:v1.2.0` / `envoy:distroless-v1.39.1` 均从 Harbor mirrors 拉取;**ratelimit 必须用 gateway-helm v1.9.2 的 chart 默认 tag `0482748e`**(旧 `8fe6ea42` 只在 v1.9.1 时代);`windows-exporter:0.31.8` 只有 `windows/amd64`, Linux 节点不调度, **不进入** Linux 离线集合 |
 
 刷新规程(零层拉取比对, 仅变化才替换):
 
@@ -86,6 +86,25 @@ CubeStack 平台 Operator **及其平台组件**的离线资产(2026-10-08 起�
 - **部署机取回**: `tools/offline/fetch-offline-from-minio.sh --sub cubestack-operator/<组件>`
   (刷新单组件; 下钻列表 `--list --sub cubestack-operator`; `--help` 打印全部可用子目录)。
 
+## 一致性校验(Harbor ↔ tar ↔ MinIO, 2026-10-19 增补)
+
+发版/重新部署前建议两条都跑(任一 gap 非 0 退出):
+
+```bash
+# ① tar ↔ Harbor: 逐行比对 .digest 边车 ↔ 远端 manifest digest,
+#    并直接读 tar 的 config digest ↔ Harbor amd64 config digest(内容身份, 不受重打包影响)
+bash deployments/scripts/tools/images/cubestack-platform-save-images.sh --verify-remote
+
+# ② tar ↔ MinIO: 上传后逐 tar 流式 sha256 比对(会完整读远端对象, 大集合较慢; --only 可限定)
+bash deployments/scripts/tools/images/cubestack-platform-sync.sh \
+  --state-dir /data --collection cubestack-operator --no-pull-state \
+  --verify-minio --conf /etc/cubestack-platform-sync.env
+```
+
+⚠ `--verify-remote` 2026-10-19 修复了一个会静默漏刷新的解析 bug: 清单里 `pull_ref` 留空的
+行(自研镜像)曾被 bash 的连续 tab 折叠成 `pull=save_ref, save=""`, 导致 `skopeo copy` 目标
+退化成 `docker-archive:<path>:` 而永远失败。现在用 `awk -F'\t'` 保留空字段。
+
 ## 版本真相 / 目录变量
 
 - 本体: `cluster.conf` 4.6b 的 `CUBESTACK_OPERATOR_IMAGE_TAG` / `CUBESTACK_OPERATOR_CHART_VERSION`;
@@ -105,5 +124,13 @@ CubeStack 平台 Operator **及其平台组件**的离线资产(2026-10-08 起�
   旧件存 `.backup-20261016/`; 发现 bmc/idrac 迁移至 `suanova-private`(见"镜像来源与刷新")。
 - ⚠ 2026-10-15: 独立的 LWS 部署模块(07_gpu_lws / lws-save-images)整体下线删码; `lws/` 下的 tar 是
   **唯一保留**的 LWS 资产 —— 平台 operator 的 CR 仍可下发 `lws` 组件, 由本模块统一推送。
+- **2026-10-19 刷新(chart v1.9.2 配套)**: operator chart 更新到 digest `45cc1b54…`(gateway-helm
+  v1.9.2); 补齐 `gateway:v1.9.2` / `envoy:distroless-v1.39.1` / `ai-gateway-controller:v1.2.0` /
+  `ai-gateway-extproc:v1.2.0` / `ratelimit:0482748e`(旧 `8fe6ea42` 只适用 v1.9.1); 刷新 7 个
+  自研滚动 `latest`(cubepilot ×4 / controller-manager / cuberouter / cubestack-ui), 旧件存
+  `.backup-20261019/`。修复保鲜工具 TSV 空字段解析并新增 `--verify-remote` 的 tar↔Harbor
+  config digest 校验; 本地 36/36 与 Harbor 一致。MinIO 上传后可用 `--verify-minio` 做逐文件
+  sha256 校验(需 `MINIO_*`/`minio.conf`)。`windows-exporter` 仅 `windows/amd64`, 不进入
+  Linux 离线集合。
 
 > ⚠ 本目录下的 `*.tar` / `*.digest` 已在 `.gitignore` 中忽略(不入库); 只有本 README 受版本控制。

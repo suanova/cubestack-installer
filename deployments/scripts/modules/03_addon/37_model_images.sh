@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # MODULE: model_images
-# DESC: 模型推理镜像(sglang / vllm-metax, 来源 suanova/model-collection 仓库)离线 tar → 集群内置 registry(排在 dev_lab 之后; 默认 push, digest 幂等)
+# DESC: 模型推理镜像(sglang / vllm-metax, 来源 suanova/model-collection 仓库)离线 tar → 集群内置 registry(排在 dev_lab 之后; 默认 push, config-digest 幂等 + 层/镜像并行)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
@@ -15,11 +15,15 @@
 #     缺某个 tar → 该镜像 warn 跳过(不阻断部署), 结尾汇总(不伪装成功)。
 #   · 目标 ref: <集群 registry>/<ref 去注册域后的路径>(suanova/… 与 yangle/… 原样保路径, 与 dev_lab 同款映射)。
 #   · 幂等: 目标 digest == 源 digest → 跳过(比 digest 防重建漂移, 不只看 tag)。
+#     ★ 2026-10-19 修正: 改比 **config digest**(push 会重压缩层, manifest/layer digest 会变;
+#       config blob digest 稳定), 否则每轮部署都会重推。
+#   · 加速: 层并行(--image-parallel-copies)+ 跳过已有层(--dest-precompute-digests)+
+#     首个镜像 base-first、其余有界并行; 配置 IMAGE_PUSH_*; 详见 docs/image-push-optimization.md。
 #   · 默认启用 = 默认 push(MODEL_IMAGES_ENABLED 默认 true); 跳过: --skip model_images 或置 false。
 #   · 顺序(2026-10-16 用户口径): **部署完集群与全部 operator 之后**才 push —— 模块文件排 37
 #     (dev_lab=36 之后)⇒ ≈95G 的大推送不占用关键链路时间, 前面组件先完成先验收;
 #     覆盖安装反序卸载时本模块无卸载动作(registry 镜像随集群/registry 覆盖消亡)。
-# 数据源: cluster.conf (MODEL_IMAGES_* / REGISTRY_* / NODES / SSH_KEY_NAME)
+# 数据源: cluster.conf (MODEL_IMAGES_* / REGISTRY_* / IMAGE_PUSH_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps model_images
 # ============================================================
 set -euo pipefail
@@ -56,11 +60,22 @@ skopeo_require "model_images"
 wait_registry_ready "http://${REG_DIRECT}/v2/" 30 \
     || { err "集群内置 registry ${REG_DIRECT}/v2/ 30s 内不可达(检查 SERVICE_EXPOSE_MODE / registry pod / REGISTRY_DIRECT)"; exit 1; }
 
-# ---------------- 主循环: 逐行(TSV: subdir<TAB>file<TAB>pull_ref<TAB>save_ref) ----------------
-_n_push=0; _n_skip=0; _n_miss=0; _n_fail=0
-while IFS=$'\t' read -r _sub _file _pull _save; do
-    case "${_sub}" in ''|\#*) continue ;; esac
-    [ -n "${_file}" ] || continue
+# 大镜像 push 加速: 层并行 + 跳过 registry 已有层(参数见 lib-common image_push_args_init)
+image_push_args_init
+PUSH_PARALLEL_IMAGES="${IMAGE_PUSH_PARALLEL_IMAGES:-2}"
+case "${PUSH_PARALLEL_IMAGES}" in ''|*[!0-9]*|0) PUSH_PARALLEL_IMAGES=1 ;; esac
+PUSH_RESULT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cubestack-model-push.XXXXXX")"
+trap 'rm -rf "${PUSH_RESULT_DIR}"' EXIT
+
+# 单镜像 worker(后台子 shell 执行; 结果写 ${PUSH_RESULT_DIR}/<idx>.result)
+# 参数: "<idx>|<subdir>|<file>|<pull_ref>|<save_ref>"
+_model_push_one() {
+    local task="$1" _idx _sub _file _pull _save _tar _c _path _dst _dst_ref
+    local _c_dst _c_src _d_dst _d_src _t0 _dt _size _rate
+    _idx="${task%%|*}"; task="${task#*|}"
+    _sub="${task%%|*}"; task="${task#*|}"
+    _file="${task%%|*}"; task="${task#*|}"
+    _pull="${task%%|*}"; _save="${task#*|}"
     [ -n "${_save}" ] || _save="${_pull}"
     # tar 定位: 先精确(子目录 → 顶层兼容; .tar → .tar.gz), 再交给共享助手兜底
     _tar=""
@@ -70,29 +85,88 @@ while IFS=$'\t' read -r _sub _file _pull _save; do
     done
     [ -n "${_tar}" ] || _tar="$(find_offline_tar "/${_save#*/}" "*.tar" "${SAVE_DIR}/${_sub}" "${SAVE_DIR}" 2>/dev/null || true)"
     if [ -z "${_tar}" ]; then
-        warn "  缺离线 tar: ${_file}(跳过; 备料见 ${SAVE_DIR}/README.md)"
-        _n_miss=$((_n_miss + 1)); continue
+        printf 'miss\t缺离线 tar: %s(跳过; 备料见 %s/README.md)\n' "${_file}" "${SAVE_DIR}" \
+            > "${PUSH_RESULT_DIR}/${_idx}.result"
+        return 0
     fi
     # 目标 ref: 去 Harbor 注册域, 保完整路径(suanova/…|yangle/…; 与 dev_lab 同款映射)
     _path="${_save#"${HARBOR_HOST}"/}"
     _dst="docker://${REG_DIRECT}/${_path}"
     _dst_ref="${REG_BASE}/${_path}"
-    # 幂等: digest 比对(防重建漂移)
-    _d_dst="$(image_digest_raw "${_dst}")"
-    _d_src="$(image_digest_raw "docker-archive:${_tar}")"
-    if [ -n "${_d_dst}" ] && [ -n "${_d_src}" ] && [ "${_d_dst}" = "${_d_src}" ]; then
-        ok "  ${_path}: 内容未变(digest ${_d_dst:0:19}...), 跳过推送"
-        _n_skip=$((_n_skip + 1)); continue
+    # 幂等(2026-10-19 修正): 优先比 **config digest** —— push 会重新压缩层, manifest/layer
+    # digest 会变(实测), 但 config blob digest 稳定; 老逻辑比 manifest digest 会每次重推。
+    _c_dst="$(image_config_digest_raw "${_dst}")"
+    _c_src="$(image_config_digest_raw "docker-archive:${_tar}")"
+    if [ -n "${_c_dst}" ] && [ "${_c_dst}" = "${_c_src}" ]; then
+        printf 'skip\t%s: 内容未变(config digest %s...), 跳过推送\n' "${_path}" "${_c_dst:0:19}" \
+            > "${PUSH_RESULT_DIR}/${_idx}.result"
+        return 0
     fi
-    if push_image_skopeo "docker-archive:${_tar}" "${_dst}"; then
-        ok "  ${_path}: 已推送(源 $(basename "${_tar}")${_d_dst:+, 旧 digest ${_d_dst:0:19}...})"
-        _n_push=$((_n_push + 1))
+    # 多架构/取不到 config digest 时回退 manifest digest(保守: 不相等即推送)
+    if [ -z "${_c_dst}" ] || [ -z "${_c_src}" ]; then
+        _d_dst="$(image_digest_raw "${_dst}")"
+        _d_src="$(image_digest_raw "docker-archive:${_tar}")"
+        if [ -n "${_d_dst}" ] && [ "${_d_dst}" = "${_d_src}" ]; then
+            printf 'skip\t%s: 内容未变(manifest digest %s...), 跳过推送\n' "${_path}" "${_d_dst:0:19}" \
+                > "${PUSH_RESULT_DIR}/${_idx}.result"
+            return 0
+        fi
+    fi
+    _t0="$(date +%s)"
+    say "  [${_path}] 开始推送(源 $(basename "${_tar}"), 层并发 ${IMAGE_PUSH_PARALLEL_LAYERS:-4})..."
+    if push_image_skopeo "docker-archive:${_tar}" "${_dst}" ${IMAGE_PUSH_ARGS[@]+"${IMAGE_PUSH_ARGS[@]}"}; then
+        _dt=$(( $(date +%s) - _t0 )); [ "${_dt}" -lt 1 ] && _dt=1
+        _size="$(stat -c %s "${_tar}" 2>/dev/null || echo 0)"
+        _rate=$(( _size / 1024 / 1024 / _dt ))
+        printf 'push\t%s: 已推送(源 %s, %ss, ~%s MB/s)\n' "${_path}" "$(basename "${_tar}")" "${_dt}" "${_rate}" \
+            > "${PUSH_RESULT_DIR}/${_idx}.result"
     else
-        warn "  ${_path}: 推送失败(重试 3 次后); 检查 registry 可达/磁盘空间"
-        _n_fail=$((_n_fail + 1))
+        printf 'fail\t%s: 推送失败(重试 3 次后); 检查 registry 可达/磁盘空间\n' "${_path}" \
+            > "${PUSH_RESULT_DIR}/${_idx}.result"
     fi
+    return 0
+}
+
+# 读取 TSV → 任务数组(基数 first: 第一个镜像同步推, 填充共享 base 层)
+_MODEL_TASKS=()
+_model_i=0
+while IFS=$'\t' read -r _sub _file _pull _save; do
+    case "${_sub}" in ''|\#*) continue ;; esac
+    [ -n "${_file}" ] || continue
+    [ -n "${_save}" ] || _save="${_pull}"
+    _MODEL_TASKS+=("${_model_i}|${_sub}|${_file}|${_pull}|${_save}")
+    _model_i=$((_model_i + 1))
 done < <(command grep -vE '^[[:space:]]*#|^[[:space:]]*$' "${LIST}")
-unset _sub _file _pull _save _tar _c _path _dst _dst_ref _d_dst _d_src
+unset _sub _file _pull _save _model_i
+
+if [ "${#_MODEL_TASKS[@]}" -eq 0 ]; then
+    warn "镜像清单为空: ${LIST}(跳过)"
+    exit 0
+fi
+
+# base-first: 先同步推第一个镜像(填充共享 base 层), 其余按 IMAGE_PUSH_PARALLEL_IMAGES 并行
+_model_push_one "${_MODEL_TASKS[0]}"
+[ "${#_MODEL_TASKS[@]}" -gt 1 ] \
+    && parallel_run "${PUSH_PARALLEL_IMAGES}" _model_push_one "${_MODEL_TASKS[@]:1}"
+
+# 汇总(按原顺序; worker 在子 shell, 计数在父 shell 完成)
+_n_push=0; _n_skip=0; _n_miss=0; _n_fail=0
+for _i in $(seq 0 $((${#_MODEL_TASKS[@]} - 1))); do
+    _res="${PUSH_RESULT_DIR}/${_i}.result"
+    if [ ! -f "${_res}" ]; then
+        warn "  任务 ${_i}: 推送进程异常退出(无结果)"
+        _n_fail=$((_n_fail + 1)); continue
+    fi
+    _st=""; _msg=""
+    IFS=$'\t' read -r _st _msg < "${_res}" || true
+    case "${_st}" in
+        push) ok "  ${_msg}"; _n_push=$((_n_push + 1)) ;;
+        skip) ok "  ${_msg}"; _n_skip=$((_n_skip + 1)) ;;
+        miss) warn "  ${_msg}"; _n_miss=$((_n_miss + 1)) ;;
+        *)    warn "  ${_msg:-任务 ${_i}: 推送失败(无结果信息)}"; _n_fail=$((_n_fail + 1)) ;;
+    esac
+done
+unset _MODEL_TASKS _i _res _st _msg
 
 echo "---------------------------------------------"
 say "模型推理镜像加载: 新推 ${_n_push} / digest 跳过 ${_n_skip} / 缺 tar ${_n_miss} / 失败 ${_n_fail}"

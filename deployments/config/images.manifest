@@ -189,23 +189,31 @@ metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/${METAX_MACA_IMAGE}
 cubestack-operator  ${CUBESTACK_OPERATOR_HARBOR_HOST}/suanova-private/cubestack-operator:${CUBESTACK_OPERATOR_IMAGE_TAG}
 # --- 平台组件镜像(CR 组件目录用; 2026-10-08 起经 CI 同步到 mirrors/) ---
 #   · ratelimit 是 EnvoyGateway CR 的 rateLimitDeployment 配置镜像(非默认拉起, 配 RateLimitPolicy
-#     时用); tag 8fe6ea42 是上游固定 commit tag —— 本部署网络到 docker.io 不通, 必须经本 CI
-#     通道同步到 Harbor mirrors 后再 harbor-save 成离线 tar(见 offline-files/cubestack-operator/README.md)。
-#     ⚠ 2026-10-16 起组件 tar 按组件分子目录, 本行 save 产出在**顶层** —— 请归位到 envoy-gateway/ 再推送。
+#     时用); tag 必须跟随 gateway-helm v1.9.2 的 chart 默认值 **0482748e**(旧 8fe6ea42 是
+#     v1.9.1 时代标签, 继续写会让 RateLimitPolicy 的 Pod ImagePullBackOff)。本部署网络到
+#     docker.io 不通, 必须经本 CI 通道同步到 Harbor mirrors 后再由保鲜管道 save 成离线 tar
+#     (见 offline-files/cubestack-operator/README.md)。
+#     ⚠ 组件 tar 按组件分子目录, 本行 save 产出在**顶层** —— 请归位到 envoy-gateway/ 再推送。
 #   · 其余平台组件镜像(envoy/prometheus 栈/perses/bmc/cubepilot/cnpg/opstree 等)的完整清单与
 #     维护方法见 offline-files/cubestack-operator/README.md; 如需经本 CI 同步, 按同格式逐条登记。
-cubestack-operator  docker.io/envoyproxy/ratelimit:8fe6ea42
+cubestack-operator  docker.io/envoyproxy/ratelimit:0482748e
 
 # ------------------------------------------------------------
 # [group: cubestack-platform] 平台组件镜像(2026-10-16 补登记)
 #   用途: 只把上游复刻到 Harbor mirrors/**, 供"平台镜像保鲜管道"经 mirrors 拉取离线 tar
 #   (tools/images/cubestack-platform-save-images.sh + offline-files/cubestack-operator/image-list.tsv)。
-#   ⚠ 三者此前在 mirrors/ 缺席: envoy:v1.9.1 无镜像可拉(本网络 docker.io 不通, 唯一通道=本 CI)、
-#     thanos / redis-exporter 从未同步。本仓库 push 后由本工作流补齐。
+#   ⚠ 2026-10-19 校准: envoy 数据面改用 gateway-helm v1.9.2 的 distroless-v1.39.1(旧 v1.9.1
+#     已无组件引用); 新增 gateway/ai-gateway 控制器与 extproc, 避免 operator 升级后 mirrors 缺件。
+#   ⚠ windows-exporter 只有 windows/amd64 清单(Linux 节点不调度), 仅复刻到 Harbor 备用,
+#     不进入 Linux 离线 tar 流程(保鲜工具的 --override-os linux 会拒绝)。
 #   本组**不供** harbor-save-images --group 使用(离线 tar 落盘由保鲜管道负责)。
-cubestack-platform  docker.io/envoyproxy/envoy:v1.9.1
+cubestack-platform  docker.io/envoyproxy/envoy:distroless-v1.39.1
+cubestack-platform  docker.io/envoyproxy/gateway:v1.9.2
+cubestack-platform  docker.io/envoyproxy/ai-gateway-controller:v1.2.0
+cubestack-platform  docker.io/envoyproxy/ai-gateway-extproc:v1.2.0
 cubestack-platform  quay.io/thanos/thanos:v0.42.4
 cubestack-platform  quay.io/opstree/redis-exporter:v1.44.0
+cubestack-platform  ghcr.io/prometheus-community/windows-exporter:0.31.8
 
 # ------------------------------------------------------------
 # [group: dev-lab] 开发镜像(jupyter / ssh 系列, 供开发环境/容器终端使用)

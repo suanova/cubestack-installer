@@ -24,7 +24,10 @@
 # 用法:
 #   bash tools/images/cubestack-platform-sync.sh [--state-dir <d>] [--conf <envfile>]
 #        [--collection <name,..>] [--only <子串,..>] [--force] [--no-pull-state] [--prune]
-#        [--seal-missing] [--dry-run] [--print-systemd]
+#        [--seal-missing] [--dry-run] [--verify-minio] [--print-systemd]
+#   · --verify-minio: 上传后逐 tar 流式 sha256 比对本地 ↔ MinIO(强一致; 会完整读远端对象,
+#     大集合较慢)。--only 同时限定上传与校验范围。
+#   · --no-pull-state: 不先用远端旧边车覆盖本地(本地已是最新 tar 时用, 避免无谓重拉)。
 # 退出码: 0=成功; 1=有集合失败(其余集合继续)
 # ============================================================
 set -euo pipefail
@@ -42,6 +45,7 @@ PULL_STATE=1
 PRUNE=0
 SEAL=0
 DRY=0
+VERIFY_MINIO=0
 PRINT_SYSTEMD=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -54,6 +58,7 @@ while [ $# -gt 0 ]; do
         --prune)     PRUNE=1; shift ;;
         --seal-missing) SEAL=1; shift ;;
         --dry-run)   DRY=1; shift ;;
+        --verify-minio) VERIFY_MINIO=1; shift ;;   # 上传后逐个 tar 流式 sha256 比对本地↔MinIO
         --print-systemd) PRINT_SYSTEMD=1; shift ;;
         *) err "未知参数: $1"; exit 1 ;;
     esac
@@ -153,7 +158,8 @@ for COL in ${COLLECTIONS}; do
     # ① 拉回现有边车(增量前提)
     if [ "${PULL_STATE}" = "1" ]; then
         say "[1/4] 从 MinIO 拉回现有 *.digest 边车(--exclude tars)..."
-        "${MC}" mirror --overwrite --exclude '*.tar' --exclude '*.tar.gz' ${DRY:+--dry-run} \
+        _PULL_DRY=(); [ "${DRY}" = "1" ] && _PULL_DRY=(--dry-run)
+        "${MC}" mirror --overwrite --exclude '*.tar' --exclude '*.tar.gz' ${_PULL_DRY[@]+"${_PULL_DRY[@]}"} \
             "${REMOTE}" "${STATE_SUB}/" 2>/dev/null || warn "  边车拉取失败(首次运行/前缀不存在? 继续全量)"
     fi
 
@@ -204,6 +210,44 @@ for COL in ${COLLECTIONS}; do
     else
         err "  集合 ${COL} 数量不一致或保鲜有失败(本地 ${L_N} / 远端 ${R_N}, save_rc=${SAVE_RC})"
         RC+=1; SUMMARY+=("${COL}: 失败(校验 ${L_N}/${R_N})")
+    fi
+
+    # ④b 可选: 逐文件流式 sha256 比对(本地 tar ↔ MinIO 对象) + .digest 边车比对。
+    # 强一致校验; 会完整读一遍远端对象(大集合耗时/耗流量), 故默认关闭, `--verify-minio` 开启。
+    # 与 --only 联动时只校验匹配的文件。
+    if [ "${VERIFY_MINIO}" = "1" ] && [ "${DRY}" != "1" ]; then
+        say "[4b/4] MinIO 内容校验(本地 tar ↔ 远端 sha256; 仅匹配 --only)..."
+        _vok=0; _vfail=0
+        while IFS= read -r lf; do
+            rel="${lf#"${STATE_SUB}"/}"
+            if [ -n "${ONLY}" ]; then
+                _hit=0
+                for _o in ${ONLY//,/ }; do case "${rel}" in *"${_o}"*) _hit=1 ;; esac; done
+                [ "${_hit}" = "1" ] || continue
+            fi
+            lsha="$(sha256sum "${lf}" | awk '{print $1}')"
+            rsha="$("${MC}" cat "${REMOTE}${rel}" 2>/dev/null | sha256sum | awk '{print $1}' || true)"
+            if [ -n "${rsha}" ] && [ "${lsha}" = "${rsha}" ]; then
+                _vok=$((_vok+1))
+            else
+                err "  sha256 不一致/远端缺失: ${rel}(本地 ${lsha:0:16}… 远端 ${rsha:0:16}…)"
+                _vfail=$((_vfail+1))
+            fi
+            if [ -f "${lf}.digest" ]; then
+                ldig="$(cat "${lf}.digest" 2>/dev/null || true)"
+                rdig="$("${MC}" cat "${REMOTE}${rel}.digest" 2>/dev/null || true)"
+                if [ "${ldig}" != "${rdig}" ]; then
+                    err "  .digest 不一致/远端缺失: ${rel}(本地=${ldig:0:19}… 远端=${rdig:0:19}…)"
+                    _vfail=$((_vfail+1))
+                fi
+            fi
+        done < <(find "${STATE_SUB}" -type f \( -name '*.tar' -o -name '*.tar.gz' \) -not -path '*/.*' | sort)
+        if [ "${_vfail}" = "0" ]; then
+            ok "  MinIO 内容一致(${_vok} 个对象)"
+        else
+            err "  MinIO 内容校验失败(${_vfail} 处)"
+            RC+=1; SUMMARY+=("${COL}: 失败(MinIO 内容 ${_vfail} 处)")
+        fi
     fi
 done
 

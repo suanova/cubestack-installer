@@ -919,6 +919,13 @@ _SECRET_PATHS=(
     deployments/config/cluster.conf                            # 含全部集群密码
 )
 for _p in "${_SECRET_PATHS[@]}"; do
+    if ! "${_GIT[@]}" rev-parse --git-dir >/dev/null 2>&1; then
+        # 部署容器 /opt/cubestack-installer 是 docker cp 出来的运行态, 没有 .git。
+        # 旧版会因 `git ls-files` 失败把 4 个密钥文件全部误报为"未被跟踪/忽略",
+        # 导致 sync-to-container 的容器内校验永远显示"未通过"(2026-10-19 实机)。
+        say "  ⑰ 非 git 工作区(部署容器运行态) → 跳过凭据卫生 git 检查"
+        break
+    fi
     if "${_GIT[@]}" ls-files --error-unmatch "${_p}" >/dev/null 2>&1; then
         ck_fail "⑰ ${_p} **被 git 跟踪** —— 该文件含真实密钥" \
             "      → 修法: git rm --cached ${_p} && git commit(磁盘文件保留)" \

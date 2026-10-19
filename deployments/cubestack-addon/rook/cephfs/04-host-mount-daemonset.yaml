@@ -1,0 +1,168 @@
+# ============================================================
+# DaemonSet: cephfs-models-mount(§7.x 宿主机共享挂载)
+# 把 CephFS 子目录挂到**每台节点**的宿主机路径:
+#   hostPath target(mountPropagation: Bidirectional) + 容器内 mount -t ceph
+#   → 挂载传播到宿主机同名路径; 节点无需安装 ceph-common(用 cephcsi 镜像自带的 mount.ceph)。
+#
+# 模板变量(__XXX__, 由 modules/03_addon/07_cephfs_mount.sh sed 渲染):
+#   __NAMESPACE__  命名空间(rook-ceph)
+#   __DS_NAME__    DaemonSet 名(cephfs-models-mount)
+#   __IMAGE__      运行镜像(cephcsi, 含 mount.ceph/ceph-fuse)
+#   __TARGET__     宿主机挂载点(/mnt/cephfs/models)
+#   __USER__       cephx 用户
+#   __SECRET__     Secret 名(key 字段)
+#   __MON_ADDRS__  mon 地址(逗号分隔, 如 ip1,ip2,ip3)
+#   __FS_NAME__    CephFilesystem 名(cephfs; 仅用于日志/自检)
+#   __SUBDIR__     CephFS 内子目录(models)
+#   __DIR_MODE__   子目录权限(0777)
+#   __KEY_SHA__    凭据摘要(用于 Secret 轮换时触发滚动更新)
+#
+# 设计要点:
+#   · 循环自愈: 未挂载 → 挂载; 手动 umount / Ceph 短暂不可用 → 最多 30s 后自动重挂。
+#   · 子目录不存在 → 先临时挂 FS 根, mkdir + chmod, 再挂子目录(首次部署自动建目录)。
+#   · key 经 Secret 注入 emptyDir 文件, mount 用 secretfile=(不出现在命令行/进程参数)。
+#   · hostPath 目标在容器里本身是 bind mount(mountpoint 恒真), 因此只按 fstype 判断:
+#     fstype=ceph → 已挂载; 否则尝试叠加 ceph 挂载(双向传播到宿主机目标路径)。
+#   · hostNetwork: 内核 ceph 客户端直接走节点网络(mon 为节点 IP)。
+# ============================================================
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: __DS_NAME__
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: __DS_NAME__
+    app.kubernetes.io/part-of: rook-ceph
+    app.kubernetes.io/managed-by: cubestack-installer
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: __DS_NAME__
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: __DS_NAME__
+        app.kubernetes.io/part-of: rook-ceph
+      annotations:
+        cubestack.io/cephfs-key-sha: "__KEY_SHA__"
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
+      terminationGracePeriodSeconds: 10
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: mounter
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: CEPH_MON_ADDRS
+              value: "__MON_ADDRS__"
+            - name: CEPHFS_NAME
+              value: "__FS_NAME__"
+            - name: CEPHFS_SUBDIR
+              value: "__SUBDIR__"
+            - name: CEPHFS_TARGET
+              value: "__TARGET__"
+            - name: CEPHFS_DIR_MODE
+              value: "__DIR_MODE__"
+            - name: CEPH_USER
+              value: "__USER__"
+            - name: CEPH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: __SECRET__
+                  key: key
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              TARGET="${CEPHFS_TARGET}"
+              SUBDIR="${CEPHFS_SUBDIR}"
+              MODE="${CEPHFS_DIR_MODE}"
+              KEYFILE=/tmp/cephfs-models.key
+              ROOT_TMP=/tmp/cephfs-models-root
+              log() { echo "[cephfs-models-mount] $*"; }
+
+              printf '%s' "${CEPH_KEY}" > "${KEYFILE}"
+              chmod 600 "${KEYFILE}"
+              mkdir -p "${ROOT_TMP}"
+
+              # 目标已挂载且最上层类型为 ceph → 正常。
+              # ⚠ 同一路径可能有挂载栈(hostPath 的 ext4 + 历史 ceph 挂载), findmnt -T 会输出多行;
+              #   必须取**最上层**(tail -1), 否则整段多行 != "ceph" → 误判未挂载并反复叠加挂载。
+              mounted_ok() {
+                findmnt -n -o FSTYPE -T "${TARGET}" 2>/dev/null | tail -1 | tr -d '[:space:]' | grep -qx ceph
+              }
+
+              try_mount_subdir() {
+                mkdir -p "${TARGET}"
+                mount -t ceph "${CEPH_MON_ADDRS}:/${SUBDIR}" "${TARGET}" \
+                  -o "name=${CEPH_USER},secretfile=${KEYFILE},noatime" 2>/tmp/mount.err
+              }
+
+              # 首次部署: 子目录不存在 → 临时挂根创建; 已存在时不会走到这里
+              ensure_subdir() {
+                log "子目录 ${SUBDIR} 不存在或挂载失败, 尝试创建..."
+                # 清理上一次失败可能遗留的临时根挂载(私有挂载, 不影响宿主机)
+                if findmnt -n -o FSTYPE -T "${ROOT_TMP}" 2>/dev/null | tail -1 | tr -d '[:space:]' | grep -qx ceph; then
+                  umount "${ROOT_TMP}" 2>/dev/null || true
+                fi
+                mount -t ceph "${CEPH_MON_ADDRS}:/" "${ROOT_TMP}" \
+                  -o "name=${CEPH_USER},secretfile=${KEYFILE},noatime" 2>/tmp/root.err || return 1
+                mkdir -p "${ROOT_TMP}/${SUBDIR}" && chmod "${MODE}" "${ROOT_TMP}/${SUBDIR}"
+                _rc=$?
+                umount "${ROOT_TMP}" 2>/dev/null || true
+                return ${_rc}
+              }
+
+              modprobe ceph 2>/dev/null || true
+              log "启动: fs=${CEPHFS_NAME} subdir=${SUBDIR} target=${TARGET} mons=${CEPH_MON_ADDRS}"
+              while true; do
+                if mounted_ok; then
+                  sleep 30
+                  continue
+                fi
+                # ⚠ 不要用 mountpoint -q 判"已被别人挂载": hostPath 本身在容器里就是 bind mount,
+                #   恒为真(实测会被误判成 ext4 外部挂载而拒绝工作)。这里只按 fstype 判断:
+                #   fstype != ceph → 尝试在目标目录上叠加 ceph 挂载(Bidirectional 会传播到宿主机)。
+                _cur_fs="$(findmnt -n -o FSTYPE -T "${TARGET}" 2>/dev/null | tail -1 | tr -d '[:space:]' || true)"
+                if [ -n "${_cur_fs}" ] && [ "${_cur_fs}" != "ceph" ]; then
+                  log "目标当前 fstype=${_cur_fs}(hostPath 自身), 尝试挂载 ceph..."
+                fi
+                if try_mount_subdir; then
+                  log "挂载成功: ${CEPH_MON_ADDRS}:/${SUBDIR} -> ${TARGET}"
+                  sleep 30
+                  continue
+                fi
+                log "挂载失败: $(tail -1 /tmp/mount.err 2>/dev/null || true)"
+                if ensure_subdir; then
+                  log "子目录已就绪, 立即重试"
+                  continue
+                fi
+                log "创建子目录失败: $(tail -1 /tmp/root.err 2>/dev/null || true); 15s 后重试"
+                sleep 15
+              done
+          volumeMounts:
+            - name: host-target
+              mountPath: __TARGET__
+              mountPropagation: Bidirectional
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+      volumes:
+        - name: host-target
+          hostPath:
+            path: __TARGET__
+            type: DirectoryOrCreate
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
+            type: Directory

@@ -274,12 +274,17 @@ skopeo_require() {
 }
 
 # 3 次整包重试的 skopeo copy(大 blob 连接中断时 skopeo 的 --retry-times 不覆盖)
-# 错误文件按 PID 隔离(并行安全)。用法: push_image_skopeo <src> <dst>
+# 额外参数原样透传(如 --image-parallel-copies / --dest-precompute-digests)。
+# 错误文件按 **BASHPID** 隔离(并行安全): 子 shell 的 $$ 仍是父 PID, 用 $$ 会让并行 worker
+# 互相覆盖错误文件(大镜像并行化后实测必要)。
+# 用法: push_image_skopeo <src> <dst> [extra skopeo copy args...]
 push_image_skopeo() {
-    local src="$1" dst="$2" n=1 errf="/tmp/skopeo-err-$$" err
+    local src="$1" dst="$2"; shift 2
+    local -a extra=("$@")
+    local n=1 errf="/tmp/skopeo-err-$$-${BASHPID:-$$}" err
     for n in 1 2 3; do
         if skopeo copy --quiet --src-tls-verify=false --dest-tls-verify=false \
-            --dest-no-creds "${src}" "${dst}" 2>"${errf}"; then
+            --dest-no-creds ${extra[@]+"${extra[@]}"} "${src}" "${dst}" 2>"${errf}"; then
             rm -f "${errf}"; return 0
         fi
         err="$(tail -1 "${errf}" 2>/dev/null || true)"
@@ -289,6 +294,42 @@ push_image_skopeo() {
         fi
     done
     rm -f "${errf}"; return 1
+}
+
+# 大镜像 push 额外参数(36_dev_lab / 37_model_images 使用; 其他模块保持原行为):
+#   IMAGE_PUSH_PARALLEL_LAYERS    单镜像内并发层数(1=串行; 默认 4)
+#   IMAGE_PUSH_PRECOMPUTE_DIGESTS 跳过 registry 已有层(默认 true)
+#   IMAGE_PUSH_RETRY_TIMES        skopeo 内部重试次数(默认 5; 0=不传)
+# 结果写入全局数组 IMAGE_PUSH_ARGS, 由调用方透传给 push_image_skopeo。
+# 注意: skopeo 1.16.1 的 --dest-compress-level/--dest-compress-format 在 docker:// 推送中
+#   不生效(实测目标仍为默认 gzip), 因此这里不暴露压缩参数; 加速靠层/镜像并行 + precompute。
+# 用法: image_push_args_init; push_image_skopeo src dst "${IMAGE_PUSH_ARGS[@]}"
+image_push_args_init() {
+    IMAGE_PUSH_ARGS=()
+    local n="${IMAGE_PUSH_PARALLEL_LAYERS:-4}" r="${IMAGE_PUSH_RETRY_TIMES:-5}"
+    case "${n}" in ''|*[!0-9]*) n=1 ;; *) n=$((10#${n})) ;; esac
+    [ "${n}" -gt 1 ] 2>/dev/null && IMAGE_PUSH_ARGS+=(--image-parallel-copies "${n}")
+    case "${IMAGE_PUSH_PRECOMPUTE_DIGESTS:-true}" in
+        true|1|yes|on) IMAGE_PUSH_ARGS+=(--dest-precompute-digests) ;;
+    esac
+    case "${r}" in ''|*[!0-9]*) r=0 ;; *) r=$((10#${r})) ;; esac
+    [ "${r}" -gt 0 ] 2>/dev/null && IMAGE_PUSH_ARGS+=(--retry-times "${r}")
+    return 0
+}
+
+# 有界并行: 对每个参数启动一个后台函数(在子 shell 执行), 同时最多 <max> 个。
+# 调用方负责汇总结果(父 shell 变量不会被 worker 回写; worker 应写结果文件)。
+# 用途: 大镜像并行推送(36/37)等。
+# 用法: parallel_run <max> <func> <arg>...
+parallel_run() {
+    local max="$1" func="$2"; shift 2
+    case "${max}" in ''|*[!0-9]*|0) max=1 ;; *) max=$((10#${max})) ;; esac
+    local task
+    for task in "$@"; do
+        while [ "$(jobs -rp | wc -l)" -ge "${max}" ]; do sleep 0.5; done
+        "${func}" "${task}" &
+    done
+    wait || true
 }
 
 # 幂等检查: registry 是否已有 <repo>:<tag>(优先 skopeo inspect, 缺失时 curl tags/list)
@@ -332,6 +373,27 @@ if isinstance(ms, list):                 # 多架构 index → amd64/linux 条�
             print(m.get("digest", "")); break
 else:                                     # 单架构清单 → 字节 sha256 = 它自己的 digest
     print("sha256:" + hashlib.sha256(raw).hexdigest())
+' 2>/dev/null || true
+}
+
+# 镜像内容身份(config digest): 比 manifest digest 更适合**幂等判断** ——
+#   docker-archive → registry 的 push 会重新压缩层(实测 skopeo 1.16.1: 源层 81MB→31.8MB),
+#   manifest/layer digest 会变; 但 config blob 的 digest 不变(源/目标一致)。
+#   多架构 index 无法在此单层取 config digest → 输出空, 调用方回退 manifest digest/直接推送。
+# 用法: c="$(image_config_digest_raw docker-archive:/path.tar)"  或  docker://ref
+image_config_digest_raw() {   # <docker://ref | docker-archive:path>
+    local ref="$1" raw=""
+    raw="$(skopeo inspect --raw --tls-verify=false "${ref}" 2>/dev/null || true)"
+    [ -n "${raw}" ] || return 0
+    printf '%s' "${raw}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(d.get("manifests"), list):
+    sys.exit(0)          # 多架构 index: 调用方回退
+print((d.get("config") or {}).get("digest", ""))
 ' 2>/dev/null || true
 }
 
@@ -2222,6 +2284,73 @@ init_remote_kubectl() {
     K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
     _INIT_REMOTE_KUBECTL=1
     return 0
+}
+
+# ---------------- RWO 单卷 Deployment 的更新策略守护 ----------------
+# 背景(2026-10-19 实机): cubepilot-api 把单个 ReadWriteOnce PVC 挂在 Deployment 上,
+#   默认 strategy=RollingUpdate + maxSurge>0 会**先**起新 Pod; 新 Pod 调度到另一节点后
+#   无法挂载同一 RWO 卷(attachdetach 报 Multi-Attach, 卷仍被旧 Pod 占用), 而 maxUnavailable
+#   又阻止旧 Pod 先退出 → Deployment 永久卡住(1 个旧 Pod Running + 1 个新 Pod ContainerCreating)。
+#   正确策略是 Recreate: 先停旧 Pod / 释放卷, 再起新 Pod。
+# 本函数在部署/单组件更新后扫描由 CubeStack operator 管理的 Deployment, 只把**确实引用
+#   RWO PVC** 的那些改成 strategy=Recreate(幂等; 不碰无 PVC / RWX 的组件)。
+# 用法: ensure_rwo_deployments_recreate <namespace> [label-selector] [wait-seconds]
+#   wait-seconds: operator 异步创建组件时轮询等待的上界(默认 0 = 只看当前状态)。
+#   ⚠ 调用前须已 init_remote_kubectl(提供 SSH/K)。
+# 返回: 0=已检查/已纠正(或没有需要纠正的对象); 1=发现对象但 patch 失败。
+ensure_rwo_deployments_recreate() {
+    local ns="$1" selector="${2:-cubestack.io/managed-by=cubestack-operator}" wait_s="${3:-0}"
+    case "${wait_s}" in ''|*[!0-9]*) wait_s=0 ;; esac
+    local tries=$(( wait_s / 5 )); [ "${tries}" -ge 1 ] || tries=1
+    local json="" targets="" i rc=0
+
+    command -v python3 >/dev/null 2>&1 || { warn "  ensure_rwo_deployments_recreate: 缺少 python3, 跳过"; return 0; }
+
+    for i in $(seq 1 "${tries}"); do
+        json="$( (SSH "${K} -n ${ns} get deploy,pvc -l ${selector} -o json 2>/dev/null") || true )"
+        # 解析 + 只输出 "namespace/name<TAB>claim1,claim2"(python 代码内不用单引号, 便于 -c)
+        targets="$(printf '%s' "${json}" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+pvcs = {}
+for item in data.get("items", []):
+    if item.get("kind") == "PersistentVolumeClaim":
+        pvcs[item["metadata"]["name"]] = item.get("spec", {}).get("accessModes", []) or []
+for item in data.get("items", []):
+    if item.get("kind") != "Deployment":
+        continue
+    spec = item.get("spec", {})
+    if spec.get("strategy", {}).get("type") == "Recreate":
+        continue
+    hits = []
+    for vol in spec.get("template", {}).get("spec", {}).get("volumes", []) or []:
+        claim = (vol.get("persistentVolumeClaim") or {}).get("claimName", "")
+        if claim and "ReadWriteOnce" in pvcs.get(claim, []):
+            hits.append(claim)
+    if hits:
+        print(item["metadata"]["namespace"] + "/" + item["metadata"]["name"] + "\t" + ",".join(sorted(set(hits))))
+' 2>/dev/null || true)"
+        [ -n "${targets}" ] && break
+        [ "${i}" -lt "${tries}" ] && sleep 5 || true
+    done
+
+    [ -n "${targets}" ] || return 0
+    while IFS=$'\t' read -r d claims; do
+        [ -n "${d}" ] || continue
+        local dns="${d%%/*}" dname="${d#*/}"
+        say "  RWO 单卷 Deployment → Recreate: ${d}(claims=${claims})"
+        if printf '%s' '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}' \
+                | SSH "${K} -n ${dns} patch deploy ${dname} --type=merge --patch-file=/dev/stdin" >/dev/null 2>&1; then
+            ok "    已纠正 ${d}(下次滚动先停旧 Pod, 避免 Multi-Attach)"
+        else
+            warn "    纠正失败: kubectl -n ${dns} patch deploy ${dname} --type=merge -p <Recreate JSON>"
+            rc=1
+        fi
+    done <<< "${targets}"
+    return "${rc}"
 }
 
 # ---------------- 停消费者前的副本数登记 / 恢复(2026-10-13, CodeRabbit 评审修订) ----------------

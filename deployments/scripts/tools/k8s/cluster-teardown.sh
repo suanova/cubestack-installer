@@ -30,6 +30,8 @@ discover_modules   # MODULE_KEY/MODULE_SCRIPT(文件序)供候选枚举
 CM_NS="kube-system"
 CM_NAME="cubestack-install-record"
 COMPONENT_TIMEOUT="${TEARDOWN_COMPONENT_TIMEOUT:-600}"
+# Ceph 卸载要等 Rook 擦 9 块 OSD 盘 + MDS/RGW 收尾, 600s 不够; 单独给 1800s 上界。
+CEPH_TEARDOWN_TIMEOUT="${CEPH_TEARDOWN_TIMEOUT:-1800}"
 CONFIRM_SLEEP="${TEARDOWN_CONFIRM_SLEEP:-30}"
 TEST_INV="${CUBESTACK_TEARDOWN_TEST_INVENTORY:-}"
 
@@ -155,15 +157,21 @@ print(json.dumps(cm))
 }
 
 run_component() {   # <key> <script_rel>  → 0=卸了; 1=失败/超时
-    local key="$1" rel="$2" mod="${MODULES_DIR}/${rel}"
+    local key="$1" rel="$2"
+    # ⚠ 不能与上一行合并成一条 local: bash 在**同一 local 语句**里按旧作用域求值 RHS,
+    #   set -u 下 ${rel} 会报 "unbound variable"(2026-10-19 实机: 优雅卸载在第一个组件
+    #   cubestack_operator 就中断, 后续 cephfs_mount 未卸载 → CephFS 挂载残留)。
+    local mod="${MODULES_DIR}/${rel}"
     [ -f "${mod}" ] || { warn "  模块脚本缺失: ${mod}(跳过 ${key})"; return 1; }
     say "  ▶ 卸载 ${key}(${rel})"
-    if CUBESTACK_MODULE_ACTION=uninstall timeout -k 15 "${COMPONENT_TIMEOUT}" bash "${mod}"; then
+    local _to="${COMPONENT_TIMEOUT}"
+    [ "${key}" = "ceph" ] && _to="${CEPH_TEARDOWN_TIMEOUT}"
+    if CUBESTACK_MODULE_ACTION=uninstall timeout -k 15 "${_to}" bash "${mod}"; then
         ok "  ✔ ${key} 已卸载"
         mark_uninstalled "${key}"
         return 0
     fi
-    warn "  ✖ ${key} 卸载失败/超时(${COMPONENT_TIMEOUT}s) —— 继续(后续 ceph 安全序与 k8s 覆盖兜底)"
+    warn "  ✖ ${key} 卸载失败/超时(${_to}s) —— 继续(后续 ceph 安全序与 k8s 覆盖兜底)"
     return 1
 }
 
@@ -249,7 +257,10 @@ PY
         _n_ok=0; _n_fail=0
         while IFS=$'\t' read -r _key _src _rel; do
             [ -n "${_key}" ] || continue
-            if run_component "${_key}" "${_rel}"; then _n_ok=$((_n_ok + 1)); else _n_fail=$((_n_fail + 1)); fi
+            # ⚠ 必须 </dev/null: run_component 内部的 ssh/helm 会读 stdin, 否则吞掉
+            #   这里的 here-string, 循环只执行第一个组件(2026-10-19 实机: 只卸了
+            #   cubestack_operator, cephfs_mount 等全部被静默跳过)。
+            if run_component "${_key}" "${_rel}" </dev/null; then _n_ok=$((_n_ok + 1)); else _n_fail=$((_n_fail + 1)); fi
         done <<< "${_order}"
         echo ""
         say "优雅卸载完成: 成功 ${_n_ok} 个, 失败/跳过 ${_n_fail} 个"

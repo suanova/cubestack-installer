@@ -96,6 +96,42 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray
 
+      # CephFS 宿主机挂载(cephfs_mount)离线桩式回归: 门禁/渲染/全节点验证/幂等/卸载/零节点硬失败
+      - name: CephFS 宿主机挂载离线回归(cephfs_mount)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-cephfs-mount.sh
+
+      # Ceph nbd/0-OSD/官方导出卡死: nbd 清理校验 / OSD=0 硬失败 / 导出预检+超时+RGW
+      - name: Ceph nbd/0-OSD/导出守护回归
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-ceph-nbd-guards.sh
+
+      # 大镜像推送加速离线回归: config-digest 幂等 / 参数透传 / 有界并发
+      - name: 大镜像推送加速离线回归(image push)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-image-push-optimize.sh
+
+      # 节点包对账的"卡死前检测": ceph/rbd 残留必须重启 / fuser 超时 / 前置探测
+      - name: 节点包对账卡死前检测回归(reconcile-node-packages)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh
+
+      # cubestack_operator 更新/滚动: 两模式 Always / digest 注解 / IMAGE_TAG 生效
+      - name: cubestack_operator 更新行为回归
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
+
+      # 平台组件级 step: --steps lws/cube-pilot 只更新指定组件, 不重跑 cubestack_operator
+      - name: 平台组件级 step 回归(cubestack components)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-cubestack-component-steps.sh
+
       # 凭据/公网地址卫生门禁(2026-10-16 明文入库事故后新增; 与 check-modules 的"凭据卫生"项互补:
       #   前者查配置规范, 本项查内容面 —— 明文密码赋值/私钥块/公网 IPv4/凭据类文件入库)。
       - name: 凭据/公网地址卫生(check-secrets.sh)

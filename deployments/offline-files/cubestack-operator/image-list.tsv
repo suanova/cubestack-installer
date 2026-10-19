@@ -23,12 +23,12 @@ cubepilot	harbor.isuanova.com_suanova_cubepilot-api_latest.tar		harbor.isuanova.
 cubepilot	harbor.isuanova.com_suanova_cubepilot-openclaw_latest.tar		harbor.isuanova.com/suanova/cubepilot-openclaw:latest
 cubepilot	harbor.isuanova.com_suanova_cubepilot-operator_latest.tar		harbor.isuanova.com/suanova/cubepilot-operator:latest
 cubepilot	harbor.isuanova.com_suanova_cubepilot-web_latest.tar		harbor.isuanova.com/suanova/cubepilot-web:latest
-envoy-gateway	docker.io_envoyproxy_ai-gateway-controller_v1.1.0.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ai-gateway-controller:v1.1.0	docker.io/envoyproxy/ai-gateway-controller:v1.1.0
-envoy-gateway	docker.io_envoyproxy_ai-gateway-extproc_v1.1.0.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ai-gateway-extproc:v1.1.0	docker.io/envoyproxy/ai-gateway-extproc:v1.1.0
+envoy-gateway	docker.io_envoyproxy_ai-gateway-controller_v1.2.0.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ai-gateway-controller:v1.2.0	docker.io/envoyproxy/ai-gateway-controller:v1.2.0
+envoy-gateway	docker.io_envoyproxy_ai-gateway-extproc_v1.2.0.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ai-gateway-extproc:v1.2.0	docker.io/envoyproxy/ai-gateway-extproc:v1.2.0
 envoy-gateway	docker.io_envoyproxy_envoy_distroless-v1.39.1.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/envoy:distroless-v1.39.1	docker.io/envoyproxy/envoy:distroless-v1.39.1
-envoy-gateway	docker.io_envoyproxy_envoy_v1.9.1.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/envoy:v1.9.1	docker.io/envoyproxy/envoy:v1.9.1
-envoy-gateway	docker.io_envoyproxy_gateway_v1.9.1.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/gateway:v1.9.1	docker.io/envoyproxy/gateway:v1.9.1
-envoy-gateway	docker.io_envoyproxy_ratelimit_8fe6ea42.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ratelimit:8fe6ea42	docker.io/envoyproxy/ratelimit:8fe6ea42
+envoy-gateway	docker.io_envoyproxy_gateway_v1.9.2.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/gateway:v1.9.2	docker.io/envoyproxy/gateway:v1.9.2
+# ratelimit tag 必须跟随 gateway-helm v1.9.2 的 chart 默认值(0482748e); 8fe6ea42 是 v1.9.1 时代标签
+envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ratelimit:0482748e	docker.io/envoyproxy/ratelimit:0482748e
 lws	registry.k8s.io_lws_lws_v0.10.0.tar	harbor.isuanova.com/mirrors/registry.k8s.io/lws/lws:v0.10.0	registry.k8s.io/lws/lws:v0.10.0
 bmc	harbor.isuanova.com_suanova_bmc-oem-exporter_latest.tar	harbor.isuanova.com/suanova-private/bmc-oem-exporter:latest	harbor.isuanova.com/suanova/bmc-oem-exporter:latest
 bmc	harbor.isuanova.com_suanova_idrac-exporter_latest.tar	harbor.isuanova.com/suanova-private/idrac-exporter:latest	harbor.isuanova.com/suanova/idrac-exporter:latest
@@ -42,3 +42,7 @@ portal	quay.io_opstree_redis-exporter_v1.44.0.tar		quay.io/opstree/redis-exporte
 portal	quay.io_opstree_redis-operator_v0.26.0.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-operator:v0.26.0	quay.io/opstree/redis-operator:v0.26.0
 portal	quay.io_opstree_redis-sentinel_v7.0.15.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-sentinel:v7.0.15	quay.io/opstree/redis-sentinel:v7.0.15
 portal	quay.io_opstree_redis_v7.0.15.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis:v7.0.15	quay.io/opstree/redis:v7.0.15
+# prometheus-windows-exporter 0.31.8 仅提供 windows/amd64(见 OCI index); 本部署目标为 Linux 节点,
+# 其 DaemonSet 为 0 副本, 镜像不参与 Linux 离线集合。将来若加入 Windows 节点, 需用
+# `skopeo copy --override-os windows --override-arch amd64` 单独保存, 不能套用本清单的 linux/amd64 流程。
+# prometheus	ghcr.io_prometheus-community_windows-exporter_0.31.8.tar	harbor.isuanova.com/mirrors/ghcr.io/prometheus-community/windows-exporter:0.31.8	ghcr.io/prometheus-community/windows-exporter:0.31.8

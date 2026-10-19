@@ -177,6 +177,39 @@ chk "⑤k 三处代码行不再操作不存在的 deploy registry" "0" \
        | awk '!/^[[:space:]]*#/ && /deploy registry/' | wc -l)"
 chk "⑤l 扫荡保留已 scale 0 的裸 RS(replicas==0 跳过 delrs)" "1" \
     "$(grep -cF 'elif ((_rsob.get("spec") or {}).get("replicas", 1) == 0):' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤m Ceph 清理先删 SubVolumeGroup/ObjectStoreUser/FS/ObjectStore CR" "2" \
+    "$(grep -cF 'for _cr in cephfilesystemsubvolumegroup cephobjectstoreuser cephfilesystem cephobjectstore' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤n FS/ObjectStore 删除先于 CephCluster 删除" "1" \
+    "$(awk '/for _cr in cephfilesystemsubvolumegroup cephobjectstoreuser/{a=NR} /delete cephcluster rook-ceph/{b=NR} END{print (a>0&&b>0&&a<b)?1:0}' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤o 破坏性删除也清受保护 registry PVC" "1" \
+    "$(grep -cF 'delete pvc registry-pvc' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤o ceph 卸载单独放宽超时(CEPH_TEARDOWN_TIMEOUT)" "2" \
+    "$(grep -c 'CEPH_TEARDOWN_TIMEOUT' "${ENGINE}")"
+chk "⑤p ceph-cleanup 等待 CephCluster 删除 900s" "1" \
+    "$(grep -c 'seq 1 180' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤q CephCluster finalizer 死锁兜底(清 finalizer/删旧守护)" "1" \
+    "$(grep -c '强制删除 CephCluster' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+# ⑤r-⑤x 2026-10-19 实机根因: PVC 删除循环里的 SSH 吞掉管道剩余行, 只删第一个 PVC →
+#   storage-perses-0 残留 Bound+PV, Rook 永远 waiting for csi volume attachments。
+chk "⑤r PVC 动作先收集再读 here-string(不再 pipe|while)" "1" \
+    "$(grep -cF '_pvc_actions="$(SSH' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤s PVC 删除 SSH 带 </dev/null" "1" \
+    "$(grep -cF 'delete pvc ${_pvc#*/} --wait=false </dev/null' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤t while-read 循环内 SSH 均不读取循环 stdin" "0" \
+    "$(awk '/while[[:space:]].*read/ {loop=1; next} loop && /^[[:space:]]*done/ {loop=0} loop && /SSH / && !/<\/dev\/null/ && !/patch-file=\/dev\/stdin/ {print NR": "$0}' "${SRC}/tools/k8s/ceph-cleanup.sh" | wc -l)"
+chk "⑤u 删 PVC 后等待 ceph PVC/PV 消失" "1" \
+    "$(grep -cF 'wait_ceph_volumes_gone 120 0' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤v 删 registry PVC 后等待全部 ceph 卷消失" "1" \
+    "$(grep -cF 'wait_ceph_volumes_gone 120 1' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤w 等待卷清理先于删 rbd nodeplugin" "1" \
+    "$(awk '/wait_ceph_volumes_gone 120 0/{a=NR} /delete ds rook-ceph.rbd.csi.ceph.com-nodeplugin/{b=NR} END{print (a>0&&b>0&&a<b)?1:0}' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤x 超时兜底清 ceph PV finalizer 后强删" "1" \
+    "$(grep -cF 'patch pv ${_pv}' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+# 2026-10-19 实机: Ceph 0 OSD/不可达时依赖 CR 的 finalizer 卡死, Rook 拒绝删 CephCluster。
+chk "⑤y 依赖 CR 未终结时清 finalizer 强删" "1" \
+    "$(grep -cF '依赖 CR 未在 120s 内终结' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤z 强删依赖 CR 先于删 CephCluster" "1" \
+    "$(awk '/依赖 CR 未在 120s 内终结/{a=NR} /delete cephcluster rook-ceph --wait=false/{b=NR} END { print (a>0 && b>0 && a<b) ? 1 : 0 }' "${SRC}/tools/k8s/ceph-cleanup.sh")"
 # ⑤m/⑤n 扫荡 python 行为夹具(从 ceph-cleanup.sh 提取首个 heredoc, 喂合成清单):
 #   裸 RS replicas=0(刚优雅停机, pod 尚在终结)→ 无动作; replicas=1 → delrs 原语义保留
 SWEEPPY="${TMP}/sweep.py"
@@ -251,6 +284,16 @@ chk "⑥c CR 残留门先于 helm uninstall(源码序; 残留=保留 operator)" 
   /CR_STUCK/ && /then/ { g=NR } /helm uninstall .*--timeout/ { h=NR }
   END { print (g>0 && h>0 && g<h) ? 1 : 0 }' "${MOD25}")"
 chk "⑥c CR 等待门钩子在位" "1" "$(grep -c 'CUBESTACK_OPERATOR_CR_WAIT_SECONDS' "${MOD25}" | awk '{print ($1>=2)?1:0}')"
+# ⑥d 2026-10-19 实机: cuberouter 的 RedisReplication finalizer 在 redis-operator 随命名空间
+#   退出后无人执行 → ns 永久 Terminating → 下一轮 --fresh 无法重建。CSC 级联后必须兜底。
+chk "⑥d 级联后清理卡死 Terminating 平台命名空间(定义+调用)" "1" \
+    "$(grep -cF 'cleanup_stuck_managed_namespaces' "${MOD25}" | awk '{print ($1>=2)?1:0}')"
+chk "⑥d 只处理 managed-by=cubestack-operator 的命名空间" "1" \
+    "$(grep -cF 'cubestack.io/managed-by=cubestack-operator' "${MOD25}" | awk '{print ($1>=1)?1:0}')"
+chk "⑥d 只处理已 Terminating(deletionTimestamp 非空)" "1" \
+    "$(grep -cF 'case "${_dt}" in ""|null) continue' "${MOD25}")"
+chk "⑥d 清理钩子在 CR 终结门之后、helm uninstall 之前" "1" \
+    "$(awk '/if \[ "\$\{_CR_STUCK\}" = "1" \]/{g=NR} /cleanup_stuck_managed_namespaces$/{c=NR} /helm uninstall .*--timeout/{h=NR} END { print (g>0 && c>g && h>c) ? 1 : 0 }' "${MOD25}")"
 
 echo "== ⑦ deploy-cluster 异常退出兜底(2026-10-13 CodeRabbit; 消费者不停在 0) =="
 # 失败/中断路径: EXIT 钩子(仅非 0 退出 + 计划含 ceph/k8s_deploy)按停机标记契约整组恢复;
@@ -319,5 +362,18 @@ chk "⑧f 清单含 .1 与 .2" "1" "$(printf '%s' "${OUT8}" | grep -c '10.0.0.1 
 OUT8B="$(_run_rbd 2)"
 chk "⑧g 真实残留=2 走'仍有 N 个'分支(不误给硬复位外的结论)" "1" "$(printf '%s' "${OUT8B}" | grep -cF '仍有 2 个内核 rbd 映射**' || true)"
 chk "⑧g 非零残留节点不做模块卸载" "0" "$(printf '%s' "${OUT8B}" | grep -c 'rbd/libceph 模块已卸载' || true)"
+
+echo "== ⑨ 静态围栏: run_component 不得在同一 local 语句内引用 rel =="
+RC_DECL="$(grep -A8 '^run_component()' "${ENGINE}" 2>/dev/null || true)"
+chk "⑨a key/rel 单独一条 local" "1" \
+    "$(printf '%s\n' "${RC_DECL}" | grep -cF 'local key="$1" rel="$2"')"
+chk "⑨b mod 使用独立 local(不引用同语句未赋值的 rel)" "1" \
+    "$(printf '%s\n' "${RC_DECL}" | grep -cF 'local mod="${MODULES_DIR}/${rel}"')"
+chk "⑨c 不存在旧写法 local key=... rel=... mod=...\${rel}" "0" \
+    "$(printf '%s\n' "${RC_DECL}" | grep -cE 'local[[:space:]]+key="\$1"[[:space:]]+rel="\$2"[[:space:]]+mod=')"
+
+echo "== ⑩ 静态围栏: run_component 不得吞掉 while 的 here-string =="
+chk "⑩a run_component 调用带 </dev/null" "1" \
+    "$(grep -cF 'run_component "${_key}" "${_rel}" </dev/null' "${ENGINE}")"
 
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }
