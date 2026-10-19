@@ -45,8 +45,7 @@ jobs:
       HARBOR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
       CHART_REF: oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart
       CHART_VERSION: ${{ github.event.client_payload.chart_version || github.event.inputs.chart_version || '1.0.0-latest' }}
-      SRC_IMAGE: harbor.isuanova.com/suanova/cubestack-installer-cli:latest
-      DST_IMAGE: harbor.isuanova.com/cubestack/cubestack-installer-cli:latest
+      IMAGE: harbor.isuanova.com/suanova/cubestack-installer-cli:latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -109,20 +108,17 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/docker/build-cli-context.sh --build --engine docker
 
-      - name: Tag and push both namespaces
+      - name: Push image
         run: |
           set -euo pipefail
-          docker tag "${SRC_IMAGE}" "${DST_IMAGE}"
-          docker push "${SRC_IMAGE}"
-          docker push "${DST_IMAGE}"
-          echo "pushed ${SRC_IMAGE}" | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "pushed ${DST_IMAGE}" | tee -a "$GITHUB_STEP_SUMMARY"
+          docker push "${IMAGE}"
+          echo "pushed ${IMAGE}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Verify chart inside image
         run: |
           set -euo pipefail
           path=/opt/cubestack-installer/deployments/cubestack-addon/cubestack-operator
-          listing="$(docker run --rm --entrypoint ls "${SRC_IMAGE}" "${path}")"
+          listing="$(docker run --rm --entrypoint ls "${IMAGE}" "${path}")"
           printf '%s\n' "${listing}" | tee -a "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "${listing}" | grep -q 'cubestack-operator-chart-.*\.tgz' \
             || { echo "::error::operator chart not found in image"; exit 1; }
