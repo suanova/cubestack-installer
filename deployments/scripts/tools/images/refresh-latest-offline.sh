@@ -274,19 +274,14 @@ _minio_env() {
     [ -n "${MINIO_SECRET_KEY:-}" ] || { bad "缺少 MINIO_SECRET_KEY"; return 1; }
     export MC_CONFIG_DIR="${WORK_DIR}/.mc"
     mkdir -p "${MC_CONFIG_DIR}"
-    local url
-    # 无 scheme 时默认 http(本部署 MinIO 无 TLS; 需要 https 就在 MINIO_HOSTNAME 里显式带)
-    url="$(python3 - "${MINIO_ENDPOINT}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" <<'PY'
-import sys, urllib.parse
-ep, ak, sk = sys.argv[1:4]
-u = urllib.parse.urlsplit(ep)
-scheme = u.scheme or "http"
-host = u.netloc or u.path
-print(f"{scheme}://{urllib.parse.quote(ak, safe='')}:{urllib.parse.quote(sk, safe='')}@{host}")
-PY
-)" || { bad "MINIO_ENDPOINT 无法解析: ${MINIO_ENDPOINT}"; return 1; }
-    export "MC_HOST_${MC_ALIAS}=${url}"
-    unset url
+
+    local ep="${MINIO_ENDPOINT}"
+    case "${ep}" in *://*) : ;; *) ep="http://${ep}" ;; esac
+    local -a a=("${MC_BIN}")
+    [ "${MINIO_INSECURE}" = "true" ] && a+=(--insecure)
+    # 与手工验证保持一致: 让 mc 自己处理凭据编码, 不依赖 MC_HOST_ 的 URL 拼装
+    "${a[@]}" alias set "${MC_ALIAS}" "${ep}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" >/dev/null \
+        || { bad "MinIO alias 配置失败: ${ep}"; return 1; }
 }
 
 _need_private() {
@@ -473,7 +468,7 @@ _preflight() {
 }
 
 AUTH_FILE="${WORK_DIR}/auth.json"
-trap 'rm -f "${AUTH_FILE}"' EXIT
+trap 'rm -f "${AUTH_FILE}"; rm -rf "${WORK_DIR}/.mc"' EXIT
 
 if [ "${PREFLIGHT}" = "1" ] || [ "${DRY_RUN}" = "1" ]; then
     _preflight || exit 1
