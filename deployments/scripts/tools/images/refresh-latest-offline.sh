@@ -375,7 +375,32 @@ _remote_digest() {   # <ref>
     printf '%s\n' "${dg}"
 }
 
-_tar_digest() { skopeo inspect --raw "docker-archive:$1" 2>/dev/null | _digest_normalize; }
+# docker-archive 的 raw manifest 可能是 transport 合成的, 其 digest 不等于 registry
+# manifest digest; 用 image config digest 校验内容一致。
+_remote_config_digest() {   # <ref> <manifest_digest>
+    skopeo inspect --raw --authfile "${AUTH_FILE}" "${_harbor_tls_args_inspect[@]}" \
+        "docker://$1@$2" 2>/dev/null |
+        python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+digest = (d.get("config") or {}).get("digest", "")
+if not digest:
+    sys.exit(1)
+print(digest)
+'
+}
+
+_tar_config_digest() {   # <tar>
+    skopeo inspect --raw "docker-archive:$1" 2>/dev/null |
+        python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+digest = (d.get("config") or {}).get("digest", "")
+if not digest:
+    sys.exit(1)
+print(digest)
+'
+}
 
 _save_tar() {   # <pull_ref> <save_ref> <out_tar>
     local pull="$1" save="$2" out="$3" i
@@ -535,9 +560,11 @@ while IFS='|' read -r collection subdir file pull save image extra_tags; do
         bad "  skopeo copy 失败: ${pull}"; row_failed=1
     fi
     if [ "${row_failed}" = "0" ]; then
-        actual="$(_tar_digest "${tmp_tar}")"
-        if [ -z "${actual}" ] || [ "${actual}" != "${remote_digest}" ]; then
-            bad "  tar digest 不匹配(远端 ${remote_digest}, tar ${actual:-空})"; row_failed=1
+        expected_config="$(_remote_config_digest "${pull}" "${remote_digest}")" || expected_config=""
+        actual_config="$(_tar_config_digest "${tmp_tar}")"
+        if [ -z "${expected_config}" ] || [ -z "${actual_config}" ] \
+            || [ "${actual_config}" != "${expected_config}" ]; then
+            bad "  tar config digest 不匹配(远端 ${expected_config:-空}, tar ${actual_config:-空})"; row_failed=1
         fi
     fi
     if [ "${row_failed}" = "0" ]; then
@@ -560,8 +587,8 @@ while IFS='|' read -r collection subdir file pull save image extra_tags; do
         if skopeo copy --quiet "docker-archive:${tmp_tar}:${save}" \
                 "docker-archive:${sha_tar}:${sha_ref}" 2>"${tmpdir}/sha.err" \
             || _save_tar "${pull}" "${sha_ref}" "${sha_tar}"; then
-            sha_actual="$(_tar_digest "${sha_tar}")"
-            if [ -n "${sha_actual}" ] && [ "${sha_actual}" = "${remote_digest}" ]; then
+            sha_actual="$(_tar_config_digest "${sha_tar}")"
+            if [ -n "${sha_actual}" ] && [ "${sha_actual}" = "${expected_config}" ]; then
                 printf '%s' "${remote_digest}" > "${sha_tar}.digest"
                 if _upload "${sha_tar}" "$(_remote_path "${collection}" "${subdir}" "${sha_file}")" \
                     && _upload "${sha_tar}.digest" "$(_remote_path "${collection}" "${subdir}" "${sha_file}.digest")"; then

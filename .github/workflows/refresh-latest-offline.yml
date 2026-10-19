@@ -56,7 +56,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: refresh-latest-${{ github.event.client_payload.source_repo || github.event.inputs.source_repo || 'all' }}-${{ github.event.client_payload.component || github.event.inputs.component || 'all' }}
+  group: refresh-latest-offline
   cancel-in-progress: false
 
 jobs:
