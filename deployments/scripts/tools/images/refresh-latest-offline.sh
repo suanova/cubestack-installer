@@ -373,8 +373,11 @@ _remote_digest() {   # <ref>
 # docker-archive 的 raw manifest 可能是 transport 合成的, 其 digest 不等于 registry
 # manifest digest; 用 image config digest 校验内容一致。
 _remote_config_digest() {   # <ref> <manifest_digest>
+    # digest 引用必须是 repo@sha256:..., 不能带 :tag
+    local base="$1"
+    case "${base##*/}" in *:*) base="${base%:*}" ;; esac
     skopeo inspect --raw --authfile "${AUTH_FILE}" "${_harbor_tls_args_inspect[@]}" \
-        "docker://$1@$2" 2>/dev/null |
+        "docker://${base}@$2" 2>/dev/null |
         python3 -c '
 import json, sys
 d = json.load(sys.stdin)
