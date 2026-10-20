@@ -212,6 +212,11 @@ OFFLINE_DIR="${CUBESTACK_OPERATOR_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-
 CR_ENABLED="${CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED:-true}"
 CR_VALUES_FILE="${CUBESTACK_OPERATOR_CR_VALUES_FILE:-}"
 BUNDLES_ENABLED="${CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED:-true}"   # 默认 true=保留 chart 的 8 个 bundles
+# 只接受显式 true|false: 大写/笔误(如 TRUE)不得静默落到"清空 bundles"分支(CodeRabbit 2026-10-20)。
+case "${BUNDLES_ENABLED}" in
+    true|false) : ;;
+    *) err "CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED 仅接受 true|false(当前=${BUNDLES_ENABLED})"; exit 1 ;;
+esac
 HARBOR_HOST="${CUBESTACK_OPERATOR_HARBOR_HOST:-${HARBOR_MIRROR_REGISTRY:-harbor.isuanova.com}}"
 # 私有项目凭据: 未单独配置时复用镜像源凭据(HARBOR_MIRROR_USER/PASSWORD, 同一台 Harbor)
 HARBOR_USER="${CUBESTACK_OPERATOR_HARBOR_USER:-${HARBOR_MIRROR_USER:-}}"
@@ -352,10 +357,11 @@ if [ "${CR_ENABLED}" = "true" ]; then
     #   spec.bundles(全部 8 个) / components.modelBundles(开启), 推理目录开箱可用;
     #   与上游 helm/cubestack-operator-chart/values.yaml 保持一致, 尽量减少定制。
     #   false = 显式清空 bundles + 关闭 modelBundles(只装平台服务)。
+    #   开关仅接受 true|false; 其他值在变量派生处直接报配置错误退出(不会静默清空 bundles)。
     #   bmc 不在此开关内: 跟随 chart 默认(开启); 未建 cubestack-bmc-credentials Secret 时会 Degraded。
     #   自定义 bundle 列表/裁剪用 CUBESTACK_OPERATOR_CR_VALUES_FILE(-f): true 分支没有 --set 抢先,
     #   用户 values 文件能真正生效。
-    if [ "${BUNDLES_ENABLED}" != "true" ]; then
+    if [ "${BUNDLES_ENABLED}" = "false" ]; then
         _CR_VALUES+=(
             --set-json "clusterCR.spec.bundles=[]"
             --set "clusterCR.spec.components.modelBundles.enabled=false"

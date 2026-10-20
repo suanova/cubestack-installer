@@ -12,7 +12,7 @@
 #   ④ digest 取不到时 online 兜底 rollout restart
 #   ⑤ 离线 loop 把 **operator 镜像** 的 digest 写入 _OPERATOR_DIGEST
 #   ⑥ 冒烟 CR 显式全禁用 + retain(不继承默认组件/不卸载真实资源)
-#   ⑦ 默认保留 chart 的 8 个 model bundles + modelBundles 开启(开关默认 true, 仅 false 分支裁剪)
+#   ⑦ 默认保留 chart 的 8 个 model bundles + modelBundles 开启(开关默认 true, 仅显式 false 分支裁剪, 非法值报错)
 # 用法: bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
 # ============================================================
 set -uo pipefail
@@ -65,15 +65,18 @@ chk_contains "清理前启用组件护栏" "_ENABLED_ANY" "${VERIFY}"
 echo "== ⑦ 默认保留 chart 的 model bundles(开关默认 true) =="
 # 2026-10-20 用户口径: 单步 --steps cubestack_operator 与全量部署都必须默认 bundles 非空;
 # 以 chart values.yaml 为主; 开关 CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED 放在 cluster.defaults.conf,
-# 默认 true; 只有 false 分支才清空 bundles / 关 modelBundles。
+# 默认 true; 仅显式 false 分支才清空 bundles / 关 modelBundles; 其他值必须报配置错误。
 DEFAULTS="${REPO_ROOT}/deployments/config/cluster.defaults.conf"
 chk_contains "defaults 定义 bundles 开关(默认 true)" \
     'CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED="${CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED:-true}"' "${DEFAULTS}"
 chk_contains "模块默认读取 true" 'CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED:-true' "${MOD}"
 chk_contains "保留 CR_VALUES_FILE 覆盖通道" 'CUBESTACK_OPERATOR_CR_VALUES_FILE' "${MOD}"
 chk_not_contains "模块不关闭 bmc(chart 默认保留)" 'clusterCR.spec.components.exporters.bmc.enabled=false' "${MOD}"
-# 裁剪语句只允许出现在 BUNDLES_ENABLED != true 的分支里
-_BUNDLE_BLOCK="$(awk '/BUNDLES_ENABLED.*!=.*"true"/{f=1} f{print} f&&/^    fi$/{exit}' "${MOD}")"
+chk_contains "非法 bundles 开关值报配置错误" 'CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED 仅接受 true|false' "${MOD}"
+chk_contains "非法值分支显式 exit 1" '仅接受 true|false(当前=${BUNDLES_ENABLED})"; exit 1' "${MOD}"
+chk_not_contains "不再用 != true 判断(避免笔误静默裁剪)" 'BUNDLES_ENABLED}" != "true"' "${MOD}"
+# 裁剪语句只允许出现在 BUNDLES_ENABLED = false 的分支里
+_BUNDLE_BLOCK="$(awk '/BUNDLES_ENABLED.*=.*"false"/{f=1} f{print} f&&/^    fi$/{exit}' "${MOD}")"
 if [ -n "${_BUNDLE_BLOCK}" ]; then
     echo "  ok  找到 BUNDLES_ENABLED=false 分支"
 else

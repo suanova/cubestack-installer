@@ -48,7 +48,7 @@ tar 推入集群内置 registry, 并把 CR 的全局镜像源(imageRegistry / ex
 注入为集群 registry —— 节点不访问 Harbor。
 默认值(2026-10-20 起): **保留 chart 默认的 8 个模型 bundles + modelBundles 开启**; bmc 也按 chart
 默认开启(未建 `cubestack-bmc-credentials` Secret 时该组件 Degraded, 不影响推理目录)。开关
-`CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(默认 `true`; `false` = 清空 bundles + 关 modelBundles);
+`CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(默认 `true`; 仅接受 `true`/`false`; `false` = 清空 bundles + 关 modelBundles);
 裁剪/定制时用 `CUBESTACK_OPERATOR_CR_VALUES_FILE`(-f) 覆盖。
 
 ### 1.1 部署模式切换: 在线 / 离线(2026-10-13)
@@ -191,7 +191,7 @@ Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator�
 - **默认值(2026-10-20 起)**: 不覆盖 chart 默认 —— `spec.bundles` 为全部 8 个模型 bundle,
   `modelBundles` 开启; bmc 也按 chart 默认开启(未建 `cubestack-bmc-credentials` Secret 时该组件
   Degraded, 不影响推理目录)。开关 `CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(默认 `true`;
-  `false` = 清空 bundles + 关 modelBundles); 裁剪/定制时用 `CUBESTACK_OPERATOR_CR_VALUES_FILE`(-f) 覆盖。
+  仅接受 `true`/`false`; `false` = 清空 bundles + 关 modelBundles); 裁剪/定制时用 `CUBESTACK_OPERATOR_CR_VALUES_FILE`(-f) 覆盖。
   - bundle 只 apply `InferenceRuntimeProfile` + `ModelVersion` + ConfigMap, **不** apply
     `isvc.example.yaml`; 实际服务需管理员创建 `llm` namespace 并复制/apply 一个 InferenceService。
   - `InferenceRuntimeProfile` 的镜像 ref 写死为 `harbor.isuanova.com/...`, model-bundles catalog
@@ -385,7 +385,7 @@ kubectl -n cubestack-system logs deploy/cubestack-operator
   chart / 在线拉镜像 / 备料 save**, 部署路径本身(本地 chart + 集群 registry)不需要。
 - **平台实例(CR)**: `CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED=true` 时保留 chart 默认的
   8 个模型 bundles + modelBundles 开启(见 §3.4b); bmc 也按 chart 默认开启; 开关
-  `CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(默认 `true`), 裁剪/定制经
+  `CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(默认 `true`; 仅接受 `true`/`false`), 裁剪/定制经
   `CUBESTACK_OPERATOR_CR_VALUES_FILE` 覆盖。
 - **多镜像扩展**: chart 若新增镜像, `[6/6]` 的渲染自检会报"未覆盖"并要求在本模块补 `--set`。
 - **chart 分发**: cubestack-operator 滚动 chart 暂不入 git(构建上下文进 CLI 镜像 + 部署机本地保留;
