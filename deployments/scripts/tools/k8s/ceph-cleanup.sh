@@ -43,6 +43,7 @@ CEPH_CLEANUP_FORCE_RECHECK_SECONDS="${CEPH_CLEANUP_FORCE_RECHECK_SECONDS:-30}"
 CEPH_CLEANUP_CLUSTER_FORCE_GONE_SECONDS="${CEPH_CLEANUP_CLUSTER_FORCE_GONE_SECONDS:-60}"
 CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP="${CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP:-0}"
 _CEPH_UNSAFE_UNMAP=0   # 1 = 卷未确认清理且未显式放行; cleanup_all 据此中止后续擦盘
+_CEPH_ABORT_WIPE=0     # 1 = 关键查询失败/集群状态无法确认; cleanup_all 不得继续擦盘
 
 # ---------------- 工具: 节点 SSH ----------------
 node_cmd() {   # <ip> <user> <cmd...>
@@ -69,7 +70,9 @@ inc = os.environ.get("INCLUDE_REGISTRY", "0") == "1"
 try:
     d = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
+    sys.exit(2)
+if not isinstance(d, dict) or "items" not in d:
+    sys.exit(2)
 for p in d.get("items", []):
     sc = ((p.get("spec") or {}).get("storageClassName") or "")
     if "ceph" not in sc:
@@ -91,7 +94,9 @@ inc = os.environ.get("INCLUDE_REGISTRY", "0") == "1"
 try:
     d = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
+    sys.exit(2)
+if not isinstance(d, dict) or "items" not in d:
+    sys.exit(2)
 for pv in d.get("items", []):
     spec = pv.get("spec") or {}
     driver = ((spec.get("csi") or {}).get("driver") or "")
@@ -115,7 +120,9 @@ import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
+    sys.exit(2)
+if not isinstance(d, dict) or "items" not in d:
+    sys.exit(2)
 for va in d.get("items", []):
     att = ((va.get("spec") or {}).get("attacher") or "")
     if "ceph" not in att:
@@ -128,10 +135,11 @@ wait_ceph_volumes_gone() {   # <timeout_seconds> <include_registry:0|1>
     local _to="${1:-120}" _inc="${2:-0}" _i _left_pvc _left_pv _left_va _rt _rtries
     _left_pvc=""; _left_pv=""; _left_va=""
     for _i in $(seq 1 $(( _to / 5 ))); do
-        _left_pvc="$(_list_ceph_pvcs "${_inc}")"
-        _left_pv="$(_list_ceph_pvs "${_inc}")"
-        _left_va="$(_list_ceph_volumeattachments)"
-        if [ -z "${_left_pvc}" ] && [ -z "${_left_pv}" ] && [ -z "${_left_va}" ]; then
+        # ★ 2026-10-20 CodeRabbit: 查询失败不能当成"资源已消失" —— 三个查询都成功且输出为空才算完成。
+        if _left_pvc="$(_list_ceph_pvcs "${_inc}")" \
+            && _left_pv="$(_list_ceph_pvs "${_inc}")" \
+            && _left_va="$(_list_ceph_volumeattachments)" \
+            && [ -z "${_left_pvc}" ] && [ -z "${_left_pv}" ] && [ -z "${_left_va}" ]; then
             ok "  ceph PVC/PV/VolumeAttachment 已清理(CSI detach/unmap 完成)"
             return 0
         fi
@@ -162,10 +170,11 @@ wait_ceph_volumes_gone() {   # <timeout_seconds> <include_registry:0|1>
     case "${_rt}" in ''|*[!0-9]*) _rt=30 ;; esac
     _rtries=$(( _rt / 5 )); [ "${_rtries}" -ge 1 ] || _rtries=1
     for _i in $(seq 1 "${_rtries}"); do
-        _left_pvc="$(_list_ceph_pvcs "${_inc}")"
-        _left_pv="$(_list_ceph_pvs "${_inc}")"
-        _left_va="$(_list_ceph_volumeattachments)"
-        if [ -z "${_left_pvc}" ] && [ -z "${_left_pv}" ] && [ -z "${_left_va}" ]; then
+        # 同样: 只有三项查询都成功且为空, 才算强删后 unmap 完成。
+        if _left_pvc="$(_list_ceph_pvcs "${_inc}")" \
+            && _left_pv="$(_list_ceph_pvs "${_inc}")" \
+            && _left_va="$(_list_ceph_volumeattachments)" \
+            && [ -z "${_left_pvc}" ] && [ -z "${_left_pv}" ] && [ -z "${_left_va}" ]; then
             ok "  强制清理后 ceph PVC/PV/VolumeAttachment 已消失(CSI detach/unmap 完成)"
             return 0
         fi
@@ -377,8 +386,17 @@ except Exception:
 # ---------------- ① 删除现有 CephCluster(Rook 擦盘) ----------------
 delete_cluster() {
     say "删除现有 CephCluster(cleanupPolicy yes-really-destroy-data, Rook 擦盘)..."
-    # 幂等: 无集群直接成功
-    _exists="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+    # 幂等: 无集群直接成功。
+    # ★ 2026-10-20 CodeRabbit: 查询失败不能当成"无集群"(否则 cleanup_all 会跳过删除直接擦盘)。
+    #   CRD 不存在(报 "doesn't have a resource type")= 确实没有集群, 可跳过; 其它错误必须失败。
+    _exists=""
+    if ! _exists="$(SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --ignore-not-found -o name 2>/dev/null")"; then
+        _exist_err="$(SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --ignore-not-found -o name 2>&1 >/dev/null || true")"
+        case "${_exist_err}" in
+            *"doesn't have a resource type"*|*"could not find the requested resource"*) : ;;
+            *) _CEPH_ABORT_WIPE=1; err "查询 CephCluster 失败(无法确认是否存在): ${_exist_err:0:200}"; return 1 ;;
+        esac
+    fi
     [ -z "${_exists}" ] && { ok "  无现有 CephCluster, 跳过"; return 0; }
 
     if ! stop_consumers; then
@@ -456,11 +474,16 @@ delete_cluster() {
     unset _deps_left
     SSH "${K} -n ${CEPH_NAMESPACE} delete cephcluster rook-ceph --wait=false >/dev/null 2>&1" || true
     _gone=0
+    _cluster_query_failed=0
     # 2026-10-19: Rook 擦 9 块 OSD 盘 + MDS/RGW 收尾可能 >5min; 等待上界 900s, 每 60s
     # 打一行 phase, 避免长时间静默被误判为卡死。
     for _i in $(seq 1 180); do
-        _still="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
-        [ -z "${_still}" ] && { _gone=1; break; }
+        # ★ 2026-10-20 CodeRabbit: 查询失败 ≠ 对象已消失; 只有查询成功且空输出才是 NotFound。
+        if _still="$(SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --ignore-not-found -o name 2>/dev/null")"; then
+            [ -z "${_still}" ] && { _gone=1; break; }
+        else
+            _cluster_query_failed=1
+        fi
         if [ $((_i % 12)) -eq 0 ]; then
             _ph="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null") || true )"
             say "    等待 CephCluster 删除... $((_i * 5))s(phase=${_ph:-unknown})"
@@ -474,8 +497,12 @@ delete_cluster() {
     warn "  CephCluster 删除超时(900s) → 重启 rook operator 再等 300s..."
     SSH "${K} -n "${CEPH_NAMESPACE}" rollout restart deploy/rook-ceph-operator >/dev/null 2>&1" || true
     for _i in $(seq 1 60); do
-        _still="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
-        [ -z "${_still}" ] && { _gone=1; break; }
+        # ★ 2026-10-20 CodeRabbit: 查询失败 ≠ 对象已消失; 只有查询成功且空输出才是 NotFound。
+        if _still="$(SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --ignore-not-found -o name 2>/dev/null")"; then
+            [ -z "${_still}" ] && { _gone=1; break; }
+        else
+            _cluster_query_failed=1
+        fi
         sleep 5
     done
     if [ "${_gone}" = "1" ]; then
@@ -501,15 +528,24 @@ delete_cluster() {
     case "${_force_wait}" in ''|*[!0-9]*) _force_wait=60 ;; esac
     _force_tries=$(( _force_wait / 5 )); [ "${_force_tries}" -ge 1 ] || _force_tries=1
     for _i in $(seq 1 "${_force_tries}"); do
-        _still="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph --no-headers 2>/dev/null") || true )"
-        [ -z "${_still}" ] && { _force_gone=1; break; }
+        # ★ 2026-10-20 CodeRabbit: 查询失败 ≠ 已删除; 只有查询成功且空输出才是 NotFound。
+        if _still="$(SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph --ignore-not-found -o name 2>/dev/null")"; then
+            [ -z "${_still}" ] && { _force_gone=1; break; }
+        else
+            _cluster_query_failed=1
+        fi
         sleep 5
     done
     if [ "${_force_gone}" = "1" ]; then
         ok "  CephCluster 已强制移除(后续物理擦盘/重建兜底)"
         return 0
     fi
-    err "  CephCluster 强制删除后仍存在(未确认移除; 下次安装可能遇到旧 CR)"
+    if [ "${_cluster_query_failed:-0}" = "1" ]; then
+        _CEPH_ABORT_WIPE=1
+        err "  CephCluster 删除结果无法确认(查询失败; 未确认移除)"
+    else
+        err "  CephCluster 强制删除后仍存在(未确认移除; 下次安装可能遇到旧 CR)"
+    fi
     err "    排查: kubectl -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o yaml(看 finalizer)"
     return 1
 }
@@ -711,8 +747,8 @@ list_plan() {
 cleanup_all() {
     local _dc_rc=0 _wipe_rc=0
     delete_cluster || _dc_rc=$?
-    if [ "${_CEPH_UNSAFE_UNMAP}" = "1" ]; then
-        err "ceph 卷未确认清理完成 → 中止后续清盘(避免在卷仍映射时擦盘)"
+    if [ "${_CEPH_UNSAFE_UNMAP}" = "1" ] || [ "${_CEPH_ABORT_WIPE}" = "1" ]; then
+        err "ceph 集群/卷状态未确认 → 中止后续清盘(避免在状态未知时擦盘)"
         return 1
     fi
     wipe_ceph_disks_all_nodes || _wipe_rc=$?
