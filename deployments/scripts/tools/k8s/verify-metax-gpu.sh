@@ -82,11 +82,11 @@ echo "${OUT}"
 # sysfs 不开 /dev 节点; device_count 报的是 vendor 配置的可见集, 不是成功的 open) —— 唯一能把
 # "资源分配到了但打不开"区分出来的断言 = 非 root 真实 open 设备(torch.cuda.is_available()
 # 即基于真实 open)。探针 = runAsUser/runAsGroup:1000 + metax-tech.com/gpu:1, 镜像用 dev_lab
-# 的 jupyter-maca-pytorch(集群 registry, 离线可用; 含 torch+MACA)。
+# 的 maca-pytorch(集群 registry, 离线可用; 含 torch+MACA)。
 if echo "${OUT}" | grep -q "GPU 识别节点数: 0 "; then
     say "权限探针: 跳过(集群无 GPU 节点)"
 else
-    _PROBE_IMG="${METAX_PERM_PROBE_IMAGE:-${REGISTRY_DOMAIN:-registry.cubestack.io}:${REGISTRY_PORT:-5000}/suanova/jupyter-maca-pytorch:${DEV_LAB_IMAGE_TAG:-latest}}"
+    _PROBE_IMG="${METAX_PERM_PROBE_IMAGE:-${REGISTRY_DOMAIN:-registry.cubestack.io}:${REGISTRY_PORT:-5000}/suanova/maca-pytorch:${DEV_LAB_IMAGE_TAG:-latest}}"
     say "权限探针: runAsUser=1000 真实打开 /dev/mxcd + torch.cuda.is_available()(镜像 ${_PROBE_IMG})..."
     SSH "${K} -n default delete pod metax-devperm-probe --ignore-not-found >/dev/null 2>&1" || true
     if SSH "${K} -n default apply -f - >/dev/null 2>&1" <<EOF

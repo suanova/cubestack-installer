@@ -24,7 +24,7 @@
 #     ⚠ 顺序保证: addon 阶段按文件序号执行 metallb→ceph→ceph_csi→local_path→registry;
 #       ceph/ceph_csi 模块已内置"等集群 Ready / CSI 就绪"的等待。本模块额外等 registry 自身 Ready。
 #   · PVC 容量保障(2026-10-13 实机事故): kubespray 默认 registry_disk_size=10Gi, 连一轮 dev_lab
-#     (6 镜像 ≈ 47G)都放不下 —— 推到一半盘满后 registry 对**所有** push 返回 500
+#     (当时 6 个镜像 ≈ 47G)都放不下 —— 推到一半盘满后 registry 对**所有** push 返回 500
 #     ("no space left on device"), 表象是"第一个镜像推成功、其余全部失败"。kubespray 重装 apply
 #     不会让已存在的 PVC 变大 ⇒ 本模块对存量 PVC 幂等扩容到 REGISTRY_DISK_SIZE
 #     (默认 200Gi, 与 sync-addons-config.sh 写入 addons.yml 的值同一数据源)。
@@ -142,11 +142,11 @@ else
 fi
 
 # ---------------- PVC 容量保障(存量集群幂等扩容; 2026-10-13 实机事故) ----------------
-# 事故链: kubespray registry_disk_size 默认仅 10Gi → dev_lab 的 jupyter-minimal(≈1.6G)推完后盘满,
+# 事故链: kubespray registry_disk_size 默认仅 10Gi → dev_lab 的首个镜像(当时 ≈1.6G)推完后盘满,
 #   后续每个镜像(含 multus)的 blob 上传都被 registry 以 500 拒绝("no space left on device"),
 #   且 skopeo 整包重试必然再满 —— 表象极具误导性("registry 可达但全部 500")。
 # 契约: REGISTRY_DISK_SIZE(默认 200Gi, 与 sync-addons-config.sh 写入 addons.yml 的值同源)
-#   须 ≥ 实际所需(dev_lab ≈47G + metax ≈8G + 滚动更新冗余)。新建 PVC 由 addons.yml 直接声明;
+#   须 ≥ 实际所需(dev_lab ≈21G + metax ≈8G + 滚动更新冗余)。新建 PVC 由 addons.yml 直接声明;
 #   **存量/覆盖安装** 的 PVC 靠这里扩: 当前 spec < 目标 → patch 扩容并等 status.capacity 追平
 #   (csi-resizer → rook RBD 在线扩 + 节点在线扩 FS, 实测秒级)。
 # ⚠ 只比整数前缀(约定 "NNGi"); local-path 后端不支持扩容(本地目录不强制配额), 只提示不阻断。

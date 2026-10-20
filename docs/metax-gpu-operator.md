@@ -188,7 +188,7 @@ GPU 任务测试(参考沐曦官方文档 §5, 需 maca 镜像就绪): 建 gpu-t
 > `runAsUser:1000 + metax-tech.com/gpu:1` 的探测 Pod, 断言"**非 root 真实 open 设备**
 > (`open('/dev/mxcd')` + `torch.cuda.is_available()`)"。**无 §0.1 前置键的节点上它会失败 ——
 > 这是刻意的**: mx-smi exit 0 / device_count() 这类"表面正常"的检查在那种节点上会静默通过,
-> 只有真实 open 能把"分配到了却打不开"区分出来。镜像默认用 dev_lab 的 jupyter-maca-pytorch
+> 只有真实 open 能把"分配到了却打不开"区分出来。镜像默认用 dev_lab 的 maca-pytorch
 > (集群 registry, 离线可用; `METAX_PERM_PROBE_IMAGE` 可覆盖)。
 
 ---

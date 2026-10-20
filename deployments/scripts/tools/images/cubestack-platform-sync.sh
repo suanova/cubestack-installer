@@ -7,7 +7,7 @@
 # 集合(collections; 每个 = offline-files/<集合>/ 目录 + 其 image-list.tsv 清单):
 #   · cubestack-operator  平台 Operator 与各组件镜像(37 件)
 #   · model-collection    模型推理镜像 sglang / vllm-metax(6 件 ≈95G, 大件建议 .tar.gz)
-#   · dev-lab             开发镜像 jupyter / ssh(6 件)
+#   · dev-lab             开发镜像 cpu / maca / cuda 家族(3 件; 顶层平铺)
 #   默认全部处理; --collection 可只跑其中若干(逗号/空格分隔)。
 # 流程(逐集合):
 #   ① 从 MinIO 拉回现有 *.digest 边车(--exclude '*.tar' '*.tar.gz', 只拉小文件)

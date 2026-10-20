@@ -1,23 +1,20 @@
 #!/bin/bash
 # ============================================================
 # MODULE: dev_lab
-# DESC: 开发镜像(jupyter/ssh 系列)离线 tar → 集群内置 registry(**排在全部部署模块末位**; 默认 push, config-digest 幂等 + 层/镜像并行)
+# DESC: 开发镜像(cpu/maca/cuda 家族)离线 tar → 集群内置 registry(**排在全部部署模块末位**; 默认 push, config-digest 幂等 + 层/镜像并行)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: DEV_LAB_ENABLED
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
-#   · 镜像(6 个; 上游均在本台 Harbor 的 suanova 项目 —— 不镜像到 mirrors/, save 直接用原始 ref):
-#       harbor.isuanova.com/suanova/jupyter-minimal:${DEV_LAB_IMAGE_TAG}
-#       harbor.isuanova.com/suanova/jupyter-maca-pytorch:${DEV_LAB_IMAGE_TAG}
-#       harbor.isuanova.com/suanova/jupyter-cuda-pytorch:${DEV_LAB_IMAGE_TAG}
-#       harbor.isuanova.com/suanova/ssh-ubuntu22.04:${DEV_LAB_IMAGE_TAG}
-#       harbor.isuanova.com/suanova/ssh-maca-pytorch:${DEV_LAB_IMAGE_TAG}
-#       harbor.isuanova.com/suanova/ssh-cuda-pytorch:${DEV_LAB_IMAGE_TAG}
-#   · 离线 tar: deployments/offline-files/dev-lab/{jupyter,ssh}/(2026-10-16 起按家族分子目录,
-#     顶层平铺兼容双读; 联网机: harbor-save-images.sh --group dev-lab; Harbor→MinIO 保鲜管道
-#     按 offline-files/dev-lab/image-list.tsv 增量维护);
+#   · 镜像(3 个; 上游均在本台 Harbor 的 suanova 项目 —— 不镜像到 mirrors/, save 直接用原始 ref):
+#       harbor.isuanova.com/suanova/cpu-pytorch:${DEV_LAB_IMAGE_TAG}
+#       harbor.isuanova.com/suanova/maca-pytorch:${DEV_LAB_IMAGE_TAG}
+#       harbor.isuanova.com/suanova/cuda-pytorch:${DEV_LAB_IMAGE_TAG}
+#   · 一个 accelerator 一个镜像: jupyter / ssh 模式由运行时 CUBSTACK_TYPE 决定, 不再按模式拆镜像。
+#   · 离线 tar: deployments/offline-files/dev-lab/ 顶层平铺(联网机: harbor-save-images.sh --group dev-lab;
+#     Harbor→MinIO 保鲜管道按 offline-files/dev-lab/image-list.tsv 增量维护);
 #     .tar 与 .tar.gz 均可(大件可就地 gzip 省盘; plain 内容校验 / .gz 文件名匹配, 见 README);
 #     缺某个 tar → 该镜像 warn 跳过(不阻断部署), 结尾汇总(🅰 诚实: 不伪装成功)。
 #   · 目标 ref: <集群 registry>/suanova/<name>:<tag>(去 Harbor 注册域保 suanova/ 路径,
@@ -31,7 +28,7 @@
 #   · 默认启用 = 默认 push: DEV_LAB_ENABLED 默认 true(见 cluster.conf.example 顶部开关区)
 #     ⇒ 每次默认部署自动把 tar 推入集群 registry; 跳过: --skip dev_lab 或 DEV_LAB_ENABLED=false。
 #   · 顺序(2026-10-13 用户口径): 模块文件排在 03_addon **末位 36**(全部 operator/组件/验证之后)
-#     —— 开发镜像无任何依赖(全仓无消费者, 已核对)⇒ ≈45G 的大推送不占用关键链路时间,
+#     —— 开发镜像无任何依赖(全仓无消费者, 已核对)⇒ ≈21G 的大推送不占用关键链路时间,
 #     前面的组件/验证先完成先验收; 覆盖安装"反序卸载"时 dev_lab 无卸载动作, 顺序变化无副作用。
 # 数据源: cluster.conf (DEV_LAB_* / REGISTRY_* / IMAGE_PUSH_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps dev_lab
@@ -56,12 +53,9 @@ REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_POR
 REG_BASE="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT:-5000}"
 
 IMAGES=(
-    jupyter-minimal
-    jupyter-maca-pytorch
-    jupyter-cuda-pytorch
-    ssh-ubuntu22.04
-    ssh-maca-pytorch
-    ssh-cuda-pytorch
+    cpu-pytorch
+    maca-pytorch
+    cuda-pytorch
 )
 
 say "开发镜像 → 集群内置 registry(共 ${#IMAGES[@]} 个; 源 ${SAVE_DIR}, tag=${TAG})..."
@@ -88,13 +82,9 @@ _devlab_push_one() {
     local task="$1" _idx _img _sd _tar _dst _dst_ref
     local _c_dst _c_src _d_dst _d_src _t0 _dt _size _rate
     _idx="${task%%|*}"; _img="${task#*|}"
-    # 目录分类(2026-10-16): jupyter/ 与 ssh/ 子目录优先, 兼容顶层平铺(迁移期双读)
-    case "${_img}" in
-        jupyter-*) _sd="${SAVE_DIR}/jupyter" ;;
-        ssh-*)     _sd="${SAVE_DIR}/ssh" ;;
-        *)         _sd="${SAVE_DIR}" ;;
-    esac
-    _tar="$(find_offline_tar "${_img}:${TAG}" "*.tar" "${_sd}" "${SAVE_DIR}" 2>/dev/null || true)"
+    # 离线 tar 顶层平铺: accelerator 家族镜像不再按模式/家族分子目录
+    _sd="${SAVE_DIR}"
+    _tar="$(find_offline_tar "${_img}:${TAG}" "*.tar" "${_sd}" 2>/dev/null || true)"
     if [ -z "${_tar}" ]; then
         printf 'miss\t缺离线 tar: %s:%s(跳过; 生成: sudo tools/images/harbor-save-images.sh --group dev-lab)\n' \
             "${_img}" "${TAG}" > "${PUSH_RESULT_DIR}/${_idx}.result"
