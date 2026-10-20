@@ -10,12 +10,12 @@
 #       subdir='.'   = 顶层 (collection 根目录)
 #
 # 本脚本只处理 save_ref 以 :latest 结尾的滚动镜像; 钉版本的第三方镜像跳过。
-# 组件(component)只是 dispatch 选择器, 映射到 subdir:
-#   operator-image -> controller-manager
-#   portal-image   -> portal
-#   dev-lab        -> jupyter + ssh
-#   publish        -> .            (operator 本体)
-#   bmc            -> bmc
+# 组件(component)只是 dispatch 选择器, 映射到 (collection:subdir):
+#   operator-image -> cubestack-operator:controller-manager
+#   portal-image   -> cubestack-operator:portal
+#   dev-lab        -> dev-lab:.                    (accelerator 家族镜像, 顶层平铺)
+#   publish        -> cubestack-operator:.         (operator 本体)
+#   bmc            -> cubestack-operator:bmc
 #   (cubepilot/cuberouter 没有 component, 按 repo 选择)
 #
 # 流程:
@@ -141,7 +141,9 @@ _extra_tags_for_image() {
     esac
 }
 
-# component -> 所属 repo / 对应 subdir(与 image-list.tsv 的 subdir 列一致)
+# component -> 所属 repo / 命中的 (collection:subdir) 键
+# 键带 collection: 顶层 subdir='.' 同时出现在 cubestack-operator(operator 本体)与
+# dev-lab(开发镜像)两个集合里, 只按 subdir 过滤会把 operator 本体一起选中。
 _component_repo() {
     case "$1" in
         operator-image|portal-image|dev-lab) echo "suanova/cubestack" ;;
@@ -149,43 +151,43 @@ _component_repo() {
         *) return 1 ;;
     esac
 }
-_component_subdirs() {
+_component_keys() {
     case "$1" in
-        operator-image) echo "controller-manager" ;;
-        portal-image)   echo "portal" ;;
-        dev-lab)        echo "jupyter ssh" ;;
-        publish)        echo "." ;;
-        bmc)            echo "bmc" ;;
+        operator-image) echo "cubestack-operator:controller-manager" ;;
+        portal-image)   echo "cubestack-operator:portal" ;;
+        dev-lab)        echo "dev-lab:." ;;
+        publish)        echo "cubestack-operator:." ;;
+        bmc)            echo "cubestack-operator:bmc" ;;
         *) return 1 ;;
     esac
 }
-_repo_subdirs() {
+_repo_keys() {
     case "$1" in
-        suanova/cubestack)          echo "controller-manager portal jupyter ssh" ;;
-        suanova/cubestack-operator) echo ". bmc" ;;
-        suanova/cubepilot)          echo "cubepilot" ;;
-        suanova/cuberouter)         echo "cuberouter" ;;
+        suanova/cubestack)          echo "cubestack-operator:controller-manager cubestack-operator:portal dev-lab:." ;;
+        suanova/cubestack-operator) echo "cubestack-operator:. cubestack-operator:bmc" ;;
+        suanova/cubepilot)          echo "cubestack-operator:cubepilot" ;;
+        suanova/cuberouter)         echo "cubestack-operator:cuberouter" ;;
         *) return 1 ;;
     esac
 }
 
-ALLOWED_SUBDIRS=""
+ALLOWED_KEYS=""
 if [ -n "${SEL_COMPONENTS}" ]; then
     for _c in ${SEL_COMPONENTS//,/ }; do
         _cr="$(_component_repo "${_c}")" || { bad "未知 component: ${_c}"; exit 2; }
         if [ -n "${SEL_REPOS}" ] && [ "${SEL_REPOS}" != "all" ] && ! _match_list "${_cr}" "${SEL_REPOS}"; then
             bad "component ${_c} 属于 ${_cr}, 与 --repo ${SEL_REPOS} 不匹配"; exit 2
         fi
-        _cs="$(_component_subdirs "${_c}")" || { bad "component 未映射 subdir: ${_c}"; exit 2; }
-        ALLOWED_SUBDIRS="${ALLOWED_SUBDIRS} ${_cs}"
+        _ck="$(_component_keys "${_c}")" || { bad "component 未映射 collection:subdir: ${_c}"; exit 2; }
+        ALLOWED_KEYS="${ALLOWED_KEYS} ${_ck}"
     done
 elif [ -n "${SEL_REPOS}" ] && [ "${SEL_REPOS}" != "all" ]; then
     for _r in ${SEL_REPOS//,/ }; do
-        _rs="$(_repo_subdirs "${_r}")" || { bad "未知 repo: ${_r}"; exit 2; }
-        ALLOWED_SUBDIRS="${ALLOWED_SUBDIRS} ${_rs}"
+        _rk="$(_repo_keys "${_r}")" || { bad "未知 repo: ${_r}"; exit 2; }
+        ALLOWED_KEYS="${ALLOWED_KEYS} ${_rk}"
     done
 fi
-ALLOWED_SUBDIRS="$(printf '%s' "${ALLOWED_SUBDIRS}" | xargs)"
+ALLOWED_KEYS="$(printf '%s' "${ALLOWED_KEYS}" | xargs)"
 
 # ---------- 解析 image-list.tsv ----------
 # 内部行(管道分隔): collection|subdir|file|pull|save|image|extra_tags
@@ -214,8 +216,8 @@ for _list in "${LISTS[@]}"; do
 
         # 只处理滚动 latest; 钉版本/第三方固定 tag 跳过
         case "${_save}" in *:latest) : ;; *) continue ;; esac
-        # 组件/仓库过滤
-        if [ -n "${ALLOWED_SUBDIRS}" ] && ! _match_list "${_subdir}" "${ALLOWED_SUBDIRS}"; then
+        # 组件/仓库过滤(collection:subdir 键)
+        if [ -n "${ALLOWED_KEYS}" ] && ! _match_list "${_collection}:${_subdir}" "${ALLOWED_KEYS}"; then
             continue
         fi
         # 本脚本只产出 .tar; .tar.gz 留给人工/分支工具
