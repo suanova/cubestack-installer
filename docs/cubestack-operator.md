@@ -55,7 +55,7 @@ tar 推入集群内置 registry, 并把 CR 的全局镜像源(imageRegistry / ex
 
 | | `false` 离线部署(**默认**) | `true` 在线部署 |
 |---|---|---|
-| 镜像引用 | 覆盖为集群内置 registry(`--set image.repository=<REG>/suanova-private/…`; CR 注入 `<REG>/suanova` + `<REG>/mirrors` 前缀) | **chart 定义原样**(harbor.isuanova.com/…, 不覆盖不搬运) |
+| 镜像引用 | 覆盖为集群内置 registry(`--set image.repository=<REG>/suanova-private/…`; CR 注入 `<REG>` + `<REG>/mirrors` 前缀) | **chart 定义原样**(harbor.isuanova.com/…, 不覆盖不搬运) |
 | 镜像来源 | 离线 tar → `skopeo` 推入集群 registry([4/6]+[4b/6]); 节点只拉内置 registry | 节点**直连 Harbor** 拉取 |
 | 拉取策略 | **恒 Always**(2026-10-19 起离线同样强制; 每次新建 Pod 从集群 registry 重新解析 tag) + **digest 钉注**(podAnnotations, 保证滚动触发) | **恒 Always** —— operator 经 `--set image.pullPolicy=Always`; CR 组件的**自研五件套**(portal/cubepilot/cuberouter/controller-manager/bmc)经 `global.imagePullPolicy=Always`; 第三方(lws/envoy-gateway/ai-gateway/prometheus/perses)仍用各自 chart 策略; 同样有 **digest 钉注**(digest 取不到时 helm 后 `rollout restart` 兜底) |
 | 认证 | 集群 registry 匿名可拉 → 清空 imagePullSecrets | `harbor-credentials` secret(用 `HARBOR_MIRROR_USER/PASSWORD` 或 `CUBESTACK_OPERATOR_HARBOR_*` 凭据自动幂等创建, 密码经 stdin 不进 argv; 无凭据则清空并告警) |
@@ -175,7 +175,7 @@ Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator�
 
 | tar 内镜像 | registry 目标路径 | CR 侧字段 |
 |---|---|---|
-| `harbor.isuanova.com/suanova/<name>:tag`(自研) | `<REG>/suanova/<name>:tag` | `spec.global.imageRegistry` |
+| `harbor.isuanova.com/suanova/<name>:tag`(自研) | `<REG>/suanova/<name>:tag` | `spec.global.imageRegistry`(注入 `<REG>`) |
 | `<上游ref>`(docker.io/quay.io/ghcr.io/registry.k8s.io…) | `<REG>/mirrors/<上游ref>` | `spec.global.externalImageRegistryPrefix` |
 
 - **目标 ref 以 tar 文件名为权威**(文件名 = 上游 ref 的 `/`/`:` → `_`), tar 内 RepoTags 仅作尾部校验

@@ -340,7 +340,7 @@ if [ "${CR_ENABLED}" = "true" ]; then
         #   · imagePullSecrets 置空 —— 集群 registry 匿名可拉; 保留渲染默认(harbor-credentials)而
         #     Secret 不存在时, 所有组件会 ImagePullBackOff(k8s: 引用不存在的 pull secret 直接失败)。
         _CR_VALUES+=(
-            --set "clusterCR.spec.global.imageRegistry=${REG_BASE}/suanova"
+            --set "clusterCR.spec.global.imageRegistry=${REG_BASE}"
             --set "clusterCR.spec.global.externalImageRegistryPrefix=${REG_BASE}/mirrors"
             --set-json "clusterCR.spec.global.imagePullSecrets=[]"
             --set "clusterCR.spec.global.imagePullPolicy=Always"
@@ -660,7 +660,7 @@ if [ "${CR_ENABLED}" = "true" ]; then
         say "    默认裁剪: 模型 bundles 清空 + modelBundles/bmc 关闭(开启方法见 docs/cubestack-operator.md)。"
     else
         say "  clusterCR.enabled=true: 平台组件镜像已由 [4b/6] 推入集群 registry, 且 CR 全局镜像源"
-        say "    已注入 ${REG_BASE}(自研→/suanova, 第三方→/mirrors)—— 节点不访问 Harbor。"
+        say "    已注入 ${REG_BASE}(自研)+ ${REG_BASE}/mirrors(第三方)—— 节点不访问 Harbor。"
         say "    默认裁剪: 模型 bundles 清空 + modelBundles/bmc 关闭(开启方法见 docs/cubestack-operator.md)。"
         if [ ! -f "${OFFLINE_DIR}/docker.io_envoyproxy_ratelimit_0482748e.tar" ] \
             && [ ! -f "${OFFLINE_DIR}/envoy-gateway/docker.io_envoyproxy_ratelimit_0482748e.tar" ]; then
@@ -699,7 +699,7 @@ if [ "${CR_ENABLED}" = "true" ]; then
             _want_secs='[]'
         fi
     else
-        _want_reg="${REG_BASE}/suanova"; _want_pref="${REG_BASE}/mirrors"; _want_pol="Always"; _want_secs='[]'
+        _want_reg="${REG_BASE}"; _want_pref="${REG_BASE}/mirrors"; _want_pol="Always"; _want_secs='[]'
     fi
     if [ -n "${_cr_name}" ] && { [ "${_cr_reg}" != "${_want_reg}" ] || [ "$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullPolicy}' 2>/dev/null" || true) )" != "${_want_pol}" ]; }; then
         warn "  CR 取值漂移(当前 imageRegistry=${_cr_reg:-<空>}), kubectl patch 纠正为 ${_want_reg} ..."
