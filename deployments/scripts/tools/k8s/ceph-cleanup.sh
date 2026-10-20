@@ -108,15 +108,19 @@ wait_ceph_volumes_gone() {   # <timeout_seconds> <include_registry:0|1>
     warn "  ceph 卷 ${_to}s 未清理干净: PVC=[$(printf '%s' "${_left_pvc}" | tr '\n' ' ')] PV=[$(printf '%s' "${_left_pv}" | tr '\n' ' ')] → 强制清理(数据随 Ceph 销毁)"
     # 兜底: 再删一次 PVC; 仍残留的 ceph PV 清 finalizer 后强删(只碰 ceph CSI PV,
     #   provisioner 卡死时这是唯一让 Rook 继续删除的路径; 新部署会重建卷)。
+    # ★ 2026-10-20 实机: `kubectl delete` 默认**等待对象消失**; PVC 的 pvc-protection /
+    #   PV 的 external-provisioner+ pv-protection finalizer 在 provisioner 卡住时不会自行
+    #   清除 → delete 无限阻塞(实测卡 7.5min+, 直到模块 1800s timeout)。强制清理必须
+    #   `--wait=false` + 外层 timeout, 只发起删除、不陪等 finalizer。
     while IFS= read -r _p; do
         [ -n "${_p}" ] || continue
-        SSH "${K} -n ${_p%/*} delete pvc ${_p#*/} --ignore-not-found --force --grace-period=0 </dev/null >/dev/null 2>&1" || true
+        SSH "timeout 30 ${K} -n ${_p%/*} delete pvc ${_p#*/} --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
     done <<< "${_left_pvc}"
     while IFS= read -r _pv; do
         [ -n "${_pv}" ] || continue
         printf '%s' '{"metadata":{"finalizers":null}}' \
-            | SSH "${K} patch pv ${_pv} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
-        SSH "${K} delete pv ${_pv} --ignore-not-found --force --grace-period=0 </dev/null >/dev/null 2>&1" || true
+            | SSH "timeout 30 ${K} patch pv ${_pv} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
+        SSH "timeout 30 ${K} delete pv ${_pv} --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
     done <<< "${_left_pv}"
     return 0
 }
@@ -214,7 +218,7 @@ PYEOF
             [ -n "${_act}" ] || continue
             case "${_act}" in
                 scale)  say "     停用 ${_a1}/${_a2} ${_a3}(replicas=0)"; SSH "${K} -n ${_a1} scale ${_a2,,} ${_a3} --replicas=0 </dev/null >/dev/null 2>&1" || true ;;
-                delpod) say "     删除 Pod ${_a1}/${_a2}(优雅退出, ≤20s)"; SSH "${K} -n ${_a1} delete pod ${_a2} --grace-period=20 </dev/null >/dev/null 2>&1" || true ;;
+                delpod) say "     删除 Pod ${_a1}/${_a2}(优雅退出, ≤20s)"; SSH "timeout 30 ${K} -n ${_a1} delete pod ${_a2} --grace-period=20 --wait=false </dev/null >/dev/null 2>&1" || true ;;
                 delrs)  say "     删除裸 ReplicaSet ${_a1}/${_a2}(无 Deployment 管理, 删 Pod 会被其重建)"; SSH "${K} -n ${_a1} delete rs ${_a2} --wait=false </dev/null >/dev/null 2>&1" || true ;;
                 delcr)  say "     删除 CR ${_a2}/${_a3}(级联收掉其组件)"; SSH "${K} -n ${_a1} delete ${_a2} ${_a3} --wait=false </dev/null >/dev/null 2>&1" || true ;;
             esac
@@ -366,8 +370,8 @@ delete_cluster() {
                 [ -n "${_obj}" ] || continue
                 say "    强制删除 ${_obj}"
                 printf '%s' '{"metadata":{"finalizers":null}}' \
-                    | SSH "${K} -n ${CEPH_NAMESPACE} patch ${_obj} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
-                SSH "${K} -n ${CEPH_NAMESPACE} delete ${_obj} --ignore-not-found --force --grace-period=0 </dev/null >/dev/null 2>&1" || true
+                    | SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} patch ${_obj} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
+                SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete ${_obj} --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
             done <<< "${_objs}"
         done
         unset _objs _obj
@@ -408,12 +412,12 @@ delete_cluster() {
     #   Rook 守护工作负载; 磁盘由后续 wipe_node 物理擦除, 新 Ceph 由 02_ceph 重建。
     warn "  operator 重启后仍 Deleting → 清 finalizer + 强制删除 CephCluster(物理擦盘兜底)"
     printf '%s' '{"metadata":{"finalizers":null}}' \
-        | SSH "${K} -n ${CEPH_NAMESPACE} patch cephcluster rook-ceph --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
-    SSH "${K} -n ${CEPH_NAMESPACE} delete cephcluster rook-ceph --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+        | SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} patch cephcluster rook-ceph --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
+    SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete cephcluster rook-ceph --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
     for _lbl in "app=rook-ceph-osd" "app=rook-ceph-mds" "app=rook-ceph-rgw" "app=rook-ceph-mon" "app=rook-ceph-mgr"; do
-        SSH "${K} -n ${CEPH_NAMESPACE} delete deploy -l "${_lbl}" --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+        SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete deploy -l ${_lbl} --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
     done
-    SSH "${K} -n ${CEPH_NAMESPACE} delete jobs -l app=rook-ceph-osd-prepare --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete jobs -l app=rook-ceph-osd-prepare --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
     unset _lbl
     ok "  CephCluster 已强制移除(后续物理擦盘/重建兜底)"
     return 0

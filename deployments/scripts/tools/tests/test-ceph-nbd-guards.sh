@@ -11,12 +11,14 @@
 #   ① nbd 清理: install nbd /bin/false、卸载后校验、STILL-PRESENT/IN-USE 硬失败
 #   ② OSD=0: Ceph Ready 但 OSD=0 必须 exit 1, 不再 warn 后继续
 #   ③ 官方导出: OSD=0 预检跳过 + python3 timeout + RGW 未就绪省略参数
+#   ④ 强制清理: 所有 --force delete 必须带 --wait=false(2026-10-20 实机 PV finalizer 卡死)
 # 用法: bash deployments/scripts/tools/tests/test-ceph-nbd-guards.sh
 # ============================================================
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 CEPH="${REPO_ROOT}/deployments/scripts/modules/03_addon/02_ceph.sh"
 EXPOSE="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-expose-external.sh"
+CLEANUP="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-cleanup.sh"
 fail=0
 chk_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  ok  $1"; else echo "  FAIL $1: [$3] 未包含 [$2]"; fail=1; fi; }
 
@@ -39,6 +41,22 @@ chk_contains "OSD=0 跳过官方导出" "Ceph OSD=0, 跳过官方" "${EXPOSE}"
 chk_contains "python3 带 timeout" "timeout 120 python3" "${EXPOSE}"
 chk_contains "RGW 未就绪省略参数" "CephObjectStore/RGW 未就绪" "${EXPOSE}"
 chk_contains "RGW 端点可达性探测" "timeout 5 curl" "${EXPOSE}"
+
+echo "== ④ Ceph 强制清理不得无限等待 finalizer =="
+# 2026-10-20 实机: wait_ceph_volumes_gone 的 `kubectl delete pv --force --grace-period=0`
+# 未带 --wait=false → PVC/PV 的 pvc-protection / external-provisioner finalizer 不清除时
+# delete 无限阻塞(卡 7.5min+, 直到模块 1800s timeout)。强制清理只应发起删除、不陪等。
+chk_contains "PVC 强删带 --wait=false" 'delete pvc ${_p#*/} --ignore-not-found --force --grace-period=0 --wait=false' "${CLEANUP}"
+chk_contains "PV 强删带 --wait=false" 'delete pv ${_pv} --ignore-not-found --force --grace-period=0 --wait=false' "${CLEANUP}"
+chk_contains "PV finalizer patch 有 timeout" 'timeout 30 ${K} patch pv' "${CLEANUP}"
+_bad_force="$(grep -nE -- 'delete .*--force' "${CLEANUP}" | grep -v -- '--wait=false' || true)"
+if [ -z "${_bad_force}" ]; then
+    echo "  ok  所有 --force delete 都带 --wait=false"
+else
+    echo "  FAIL 存在 --force delete 未带 --wait=false:"
+    printf '%s\n' "${_bad_force}" | sed 's/^/    /'
+    fail=1
+fi
 
 echo ""
 if [ "${fail}" = "0" ]; then
