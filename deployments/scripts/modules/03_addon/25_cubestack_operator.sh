@@ -340,7 +340,7 @@ if [ "${CR_ENABLED}" = "true" ]; then
         #   · imagePullSecrets 置空 —— 集群 registry 匿名可拉; 保留渲染默认(harbor-credentials)而
         #     Secret 不存在时, 所有组件会 ImagePullBackOff(k8s: 引用不存在的 pull secret 直接失败)。
         _CR_VALUES+=(
-            --set "clusterCR.spec.global.imageRegistry=${REG_BASE}/suanova"
+            --set "clusterCR.spec.global.imageRegistry=${REG_BASE}"
             --set "clusterCR.spec.global.externalImageRegistryPrefix=${REG_BASE}/mirrors"
             --set-json "clusterCR.spec.global.imagePullSecrets=[]"
             --set "clusterCR.spec.global.imagePullPolicy=Always"
