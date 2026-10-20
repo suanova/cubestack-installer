@@ -211,6 +211,7 @@ PIN_DIGEST="${CUBESTACK_OPERATOR_PIN_IMAGE_DIGEST:-true}"
 OFFLINE_DIR="${CUBESTACK_OPERATOR_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/cubestack-operator}"
 CR_ENABLED="${CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED:-true}"
 CR_VALUES_FILE="${CUBESTACK_OPERATOR_CR_VALUES_FILE:-}"
+BUNDLES_ENABLED="${CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED:-true}"   # 默认 true=保留 chart 的 8 个 bundles
 HARBOR_HOST="${CUBESTACK_OPERATOR_HARBOR_HOST:-${HARBOR_MIRROR_REGISTRY:-harbor.isuanova.com}}"
 # 私有项目凭据: 未单独配置时复用镜像源凭据(HARBOR_MIRROR_USER/PASSWORD, 同一台 Harbor)
 HARBOR_USER="${CUBESTACK_OPERATOR_HARBOR_USER:-${HARBOR_MIRROR_USER:-}}"
@@ -346,15 +347,20 @@ if [ "${CR_ENABLED}" = "true" ]; then
             --set "clusterCR.spec.global.imagePullPolicy=Always"
         )
     fi
-    # 默认裁剪(两模式共用; 离线开箱可部署; 要开用 CUBESTACK_OPERATOR_CR_VALUES_FILE 覆盖, 见 docs):
-    #   ① 模型 bundles 清空 + modelBundles 关 —— chart 默认下发 7 个 bundle(推理 Pod/GPU 需求),
-    #      非"平台服务"必需; ② bmc 关 —— 需管理员先建 cubestack-bmc-credentials Secret,
-    #      缺失会 Degraded(operator 只读该 Secret, 从不创建)。
-    _CR_VALUES+=(
-        --set-json "clusterCR.spec.bundles=[]"
-        --set "clusterCR.spec.components.modelBundles.enabled=false"
-        --set "clusterCR.spec.components.exporters.bmc.enabled=false"
-    )
+    # 模型 bundles 开关(2026-10-20 用户口径; 单步 --steps cubestack_operator 与全量部署共用):
+    #   CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED 默认 true = **不覆盖** chart 默认的
+    #   spec.bundles(全部 8 个) / components.modelBundles(开启), 推理目录开箱可用;
+    #   与上游 helm/cubestack-operator-chart/values.yaml 保持一致, 尽量减少定制。
+    #   false = 显式清空 bundles + 关闭 modelBundles(只装平台服务)。
+    #   bmc 不在此开关内: 跟随 chart 默认(开启); 未建 cubestack-bmc-credentials Secret 时会 Degraded。
+    #   自定义 bundle 列表/裁剪用 CUBESTACK_OPERATOR_CR_VALUES_FILE(-f): true 分支没有 --set 抢先,
+    #   用户 values 文件能真正生效。
+    if [ "${BUNDLES_ENABLED}" != "true" ]; then
+        _CR_VALUES+=(
+            --set-json "clusterCR.spec.bundles=[]"
+            --set "clusterCR.spec.components.modelBundles.enabled=false"
+        )
+    fi
     EXTRA_CR_VALUES_ARG=( "${_CR_VALUES[@]}" )
 fi
 if [ -n "${CR_VALUES_FILE}" ]; then
@@ -654,14 +660,21 @@ else
 fi
 
 if [ "${CR_ENABLED}" = "true" ]; then
+    if [ "${BUNDLES_ENABLED}" = "true" ]; then
+        _BUNDLES_STATE_MSG="保留 chart 默认的 8 个模型 bundles + modelBundles 开启(可用 CR_VALUES_FILE 改列表; bmc 同 chart 默认, 未建 Secret 时 Degraded)"
+    else
+        _BUNDLES_STATE_MSG="模型 bundles 清空 + modelBundles 关闭(CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED=false)"
+    fi
     if [ "${ONLINE_DEPLOY}" = "true" ]; then
         say "  clusterCR.enabled=true(**在线模式**): 组件镜像按 chart 定义(global.imageRegistry="
         say "    ${HARBOR_HOST}/suanova)恒拉(pullPolicy=Always); harbor-credentials 已同步供节点认证。"
-        say "    默认裁剪: 模型 bundles 清空 + modelBundles/bmc 关闭(开启方法见 docs/cubestack-operator.md)。"
+        say "    CR 默认值: ${_BUNDLES_STATE_MSG}。"
+        say "    覆盖: CUBESTACK_OPERATOR_CR_VALUES_FILE; 开关: CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED。"
     else
         say "  clusterCR.enabled=true: 平台组件镜像已由 [4b/6] 推入集群 registry, 且 CR 全局镜像源"
         say "    已注入 ${REG_BASE}(自研)+ ${REG_BASE}/mirrors(第三方)—— 节点不访问 Harbor。"
-        say "    默认裁剪: 模型 bundles 清空 + modelBundles/bmc 关闭(开启方法见 docs/cubestack-operator.md)。"
+        say "    CR 默认值: ${_BUNDLES_STATE_MSG}。"
+        say "    覆盖: CUBESTACK_OPERATOR_CR_VALUES_FILE; 开关: CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED。"
         if [ ! -f "${OFFLINE_DIR}/docker.io_envoyproxy_ratelimit_0482748e.tar" ] \
             && [ ! -f "${OFFLINE_DIR}/envoy-gateway/docker.io_envoyproxy_ratelimit_0482748e.tar" ]; then
             warn "    已知缺口: docker.io/envoyproxy/ratelimit:0482748e 未备料(gateway-helm v1.9.2 的 chart 默认 tag; 本网络到 docker.io 不通) —— 默认不拉起(仅配 RateLimitPolicy 时用); 补料: 从 Harbor mirrors 拉取或按 image-list.tsv 刷新 ${OFFLINE_DIR}/envoy-gateway/"
