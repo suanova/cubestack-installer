@@ -93,10 +93,12 @@ if [ -n "${CHART_TGZ}" ]; then
     if [ -n "${_VALS_PATH}" ]; then
         _VALS="$(tar -xOzf "${CHART_TGZ}" "${_VALS_PATH}" 2>/dev/null || true)"
         _N_BUNDLES="$(printf '%s\n' "${_VALS}" | sed -n '/^    bundles:/,/^    components:/p' | grep -c '^      - ' || true)"
-        if [ "${_N_BUNDLES:-0}" -ge 1 ]; then
-            echo "  ok  chart 默认 bundles 非空(${_N_BUNDLES} 个)"
+        # 精确断言 8 个(CodeRabbit): 该回归的目的就是保护 chart 默认的 8 bundle;
+        # 用 >=1 时 chart 减到 1 个也会误过。chart 有意变更时同步更新此断言。
+        if [ "${_N_BUNDLES:-0}" -eq 8 ]; then
+            echo "  ok  chart 默认 bundles = 8 个"
         else
-            echo "  FAIL chart 默认 bundles 为空(chart=${CHART_TGZ})"; fail=1
+            echo "  FAIL chart 默认 bundles 数量=${_N_BUNDLES:-0}(期望 8; chart=${CHART_TGZ})"; fail=1
         fi
         if printf '%s\n' "${_VALS}" | sed -n '/modelBundles:/,/enabled:/p' | grep -q 'enabled: true'; then
             echo "  ok  chart 默认 modelBundles.enabled=true"
