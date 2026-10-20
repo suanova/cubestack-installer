@@ -112,7 +112,7 @@ LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(占位; 见
 MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多网卡(见 4.7)
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(见 4.8)
 DEV_LAB_ENABLED="${DEV_LAB_ENABLED:-true}"              # 开发镜像随部署推入内置 registry(大推送排在末位; --skip dev_lab 跳过; 见 4.9)
-MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sglang/vllm-metax ≈95G)随部署推入内置 registry(排在 dev_lab 之后 = 最后; --skip model_images 跳过; 见 offline-files/model-collection/README.md)
+MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sglang/vllm-metax ≈85G)随部署推入内置 registry(排在 dev_lab 之后 = 最后; --skip model_images 跳过; 见 offline-files/model-collection/README.md)
 
 # ---- 节点组(可选; 配合 --only <组名> 使用) ----
 # 示例(按需取消注释并改值):

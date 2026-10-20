@@ -8,12 +8,12 @@
 # TOGGLE: MODEL_IMAGES_ENABLED
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
-#   · 镜像集 = offline-files/model-collection/image-list.tsv(单一事实源; 6 件 ≈95G:
-#     suanova/sglang ×3 变体(主版本 + qwen21-dev + h3-patch), suanova/vllm-metax ×2,
-#     yangle/vllm-metax ×1(0.25 py310 变体, 见 model-collection 仓库 refs))。
+#   · 镜像集 = offline-files/model-collection/image-list.tsv(单一事实源; 5 件 ≈85G:
+#     suanova/sglang ×3 变体(主版本 + qwen21-dev + h3-patch), suanova/vllm-metax ×2
+#     (0.27 py312 + 0.25 py310 变体))。
 #   · 离线 tar: deployments/offline-files/model-collection/{sglang,vllm}/(子目录; .tar 与 .tar.gz 均可);
 #     缺某个 tar → 该镜像 warn 跳过(不阻断部署), 结尾汇总(不伪装成功)。
-#   · 目标 ref: <集群 registry>/<ref 去注册域后的路径>(suanova/… 与 yangle/… 原样保路径, 与 dev_lab 同款映射)。
+#   · 目标 ref: <集群 registry>/<ref 去注册域后的路径>(suanova/… 原样保路径, 与 dev_lab 同款映射)。
 #   · 幂等: 目标 digest == 源 digest → 跳过(比 digest 防重建漂移, 不只看 tag)。
 #     ★ 2026-10-19 修正: 改比 **config digest**(push 会重压缩层, manifest/layer digest 会变;
 #       config blob digest 稳定), 否则每轮部署都会重推。
@@ -21,7 +21,7 @@
 #     首个镜像 base-first、其余有界并行; 配置 IMAGE_PUSH_*; 详见 docs/image-push-optimization.md。
 #   · 默认启用 = 默认 push(MODEL_IMAGES_ENABLED 默认 true); 跳过: --skip model_images 或置 false。
 #   · 顺序(2026-10-16 用户口径): **部署完集群与全部 operator 之后**才 push —— 模块文件排 37
-#     (dev_lab=36 之后)⇒ ≈95G 的大推送不占用关键链路时间, 前面组件先完成先验收;
+#     (dev_lab=36 之后)⇒ ≈85G 的大推送不占用关键链路时间, 前面组件先完成先验收;
 #     覆盖安装反序卸载时本模块无卸载动作(registry 镜像随集群/registry 覆盖消亡)。
 # 数据源: cluster.conf (MODEL_IMAGES_* / REGISTRY_* / IMAGE_PUSH_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps model_images
@@ -89,7 +89,7 @@ _model_push_one() {
             > "${PUSH_RESULT_DIR}/${_idx}.result"
         return 0
     fi
-    # 目标 ref: 去 Harbor 注册域, 保完整路径(suanova/…|yangle/…; 与 dev_lab 同款映射)
+    # 目标 ref: 去 Harbor 注册域, 保完整路径(suanova/…; 与 dev_lab 同款映射)
     _path="${_save#"${HARBOR_HOST}"/}"
     _dst="docker://${REG_DIRECT}/${_path}"
     _dst_ref="${REG_BASE}/${_path}"
@@ -173,7 +173,7 @@ say "模型推理镜像加载: 新推 ${_n_push} / digest 跳过 ${_n_skip} / �
 [ "${_n_miss}" -gt 0 ] && warn "  有 ${_n_miss} 个镜像缺离线 tar(备料见 ${SAVE_DIR}/README.md)"
 [ "${_n_fail}" -gt 0 ] && warn "  有 ${_n_fail} 个镜像推送失败(重跑本模块自动续推, 已推的按 digest 跳过)"
 if [ $((_n_push + _n_skip)) -gt 0 ]; then
-    ok "模型推理镜像处理完成(引用: ${REG_BASE}/suanova/… 或 yangle/…; 节点从此 registry 拉取)"
+    ok "模型推理镜像处理完成(引用: ${REG_BASE}/suanova/…; 节点从此 registry 拉取)"
     # 优雅覆盖登记(集群内资产: registry 镜像内容; 无独立卸载动作 —— 随集群/registry 覆盖消亡)
     record_installed_component "model_images"
 else
