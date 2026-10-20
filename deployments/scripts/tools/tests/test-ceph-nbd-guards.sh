@@ -57,6 +57,18 @@ else
     printf '%s\n' "${_bad_force}" | sed 's/^/    /'
     fail=1
 fi
+# 2026-10-20 CodeRabbit: --wait=false 只代表"不陪等 finalizer", 不代表 CSI unmap 完成。
+# 强制删除后必须有界复查; 仍残留则返回非零, 默认拒绝继续删 nodeplugin/CephCluster。
+chk_contains "强制清理后有界复查开关" 'CEPH_CLEANUP_FORCE_RECHECK_SECONDS' "${CLEANUP}"
+chk_contains "强制清理残留返回非零" '未确认 CSI unmap 完成' "${CLEANUP}"
+chk_contains "stop_consumers 检查卷清理结果" 'if ! wait_ceph_volumes_gone 120 0' "${CLEANUP}"
+chk_contains "默认拒绝删 rbd nodeplugin" '拒绝删除 rbd csi nodeplugin' "${CLEANUP}"
+chk_contains "显式不安全放行开关" 'CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP' "${CLEANUP}"
+chk_contains "delete_cluster 二次卷检查" 'if ! wait_ceph_volumes_gone 120 1' "${CLEANUP}"
+chk_contains "cleanup_all 不安全时中止清盘" '_CEPH_UNSAFE_UNMAP' "${CLEANUP}"
+chk_contains "CephCluster 强删后复查开关" 'CEPH_CLEANUP_CLUSTER_FORCE_GONE_SECONDS' "${CLEANUP}"
+chk_contains "CephCluster 未消失返回失败" 'CephCluster 强制删除后仍存在' "${CLEANUP}"
+chk_contains "cleanup_all 传播删除失败" '_dc_rc' "${CLEANUP}"
 
 echo ""
 if [ "${fail}" = "0" ]; then
