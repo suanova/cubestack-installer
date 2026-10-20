@@ -582,12 +582,16 @@ while IFS='|' read -r collection subdir file pull save image extra_tags; do
     fi
     if [ "${row_failed}" = "0" ] && [ -n "${sha_file}" ]; then
         sha_tar="${tmpdir}/${sha_file}"
-        if skopeo copy --quiet "docker-archive:${tmp_tar}:${save}" \
-                "docker-archive:${sha_tar}:${sha_ref}" 2>"${tmpdir}/sha.err" \
-            || _save_tar "${pull}" "${sha_ref}" "${sha_tar}"; then
+        sha_remote_digest="$(_remote_digest "${sha_ref}")" || sha_remote_digest=""
+        sha_expected_config=""
+        if [ -n "${sha_remote_digest}" ]; then
+            sha_expected_config="$(_remote_config_digest "${sha_ref}" "${sha_remote_digest}")" \
+                || sha_expected_config=""
+        fi
+        if [ -n "${sha_expected_config}" ] && _save_tar "${sha_ref}" "${sha_ref}" "${sha_tar}"; then
             sha_actual="$(_tar_config_digest "${sha_tar}")"
-            if [ -n "${sha_actual}" ] && [ "${sha_actual}" = "${expected_config}" ]; then
-                printf '%s' "${remote_digest}" > "${sha_tar}.digest"
+            if [ -n "${sha_actual}" ] && [ "${sha_actual}" = "${sha_expected_config}" ]; then
+                printf '%s' "${sha_remote_digest}" > "${sha_tar}.digest"
                 if _upload "${sha_tar}" "$(_remote_path "${collection}" "${subdir}" "${sha_file}")" \
                     && _upload "${sha_tar}.digest" "$(_remote_path "${collection}" "${subdir}" "${sha_file}.digest")"; then
                     ok "  已更新 SHA tar: ${sha_file}"
@@ -598,7 +602,7 @@ while IFS='|' read -r collection subdir file pull save image extra_tags; do
                 bad "  SHA tar digest 不匹配: ${sha_file}"; row_failed=1
             fi
         else
-            bad "  SHA tar 生成失败: ${sha_file}"; row_failed=1
+            bad "  SHA tar 生成失败(检查 ${sha_ref}): ${sha_file}"; row_failed=1
         fi
     fi
 
