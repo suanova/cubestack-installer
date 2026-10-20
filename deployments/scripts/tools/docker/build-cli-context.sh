@@ -248,8 +248,9 @@ if [ "${DO_BUILD}" = "1" ]; then
         say "构建 base 层(系统+工具链; 需要联网 apt/pip) → ${CLI_BASE_TAG} ..."
         ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f "${OUT}/Dockerfile-cli-base" -t "${CLI_BASE_TAG}" "${OUT}" \
             || { err "base 构建失败"; exit 1; }
-        _base_layers="$(${ENGINE} history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l)"
-        ok "base 层完成: ${CLI_BASE_TAG}(${_base_layers} 层)"
+        # 层数只用于展示: history 对不存在的镜像返回非 0, pipefail 下会中止整轮构建
+        _base_layers="$(${ENGINE} history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l || true)"
+        ok "base 层完成: ${CLI_BASE_TAG}(${_base_layers:-0} 层)"
     fi
 
     # ---- 代码层构建(两种 Dockerfile 都 FROM base): 只 copy deployments 代码, 层数不累积 ----
@@ -263,10 +264,10 @@ if [ "${DO_BUILD}" = "1" ]; then
     # 代码层只有一个 Dockerfile(2026-09-30): 工具/依赖都在 base, 本层只 copy deployments+skills。
     # --incremental 保留为**别名**(历史用法兼容), 行为与 --build 相同。
     _df="Dockerfile-cli"
-    # 层数信息(base 是固定的, 代码层每次只加 1~2 层; 这里给个可观察的数字)
-    _base_layers="$(${ENGINE} history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l)"
-    _cur_layers="$(${ENGINE} history --no-trunc "${IMAGE}" 2>/dev/null | tail -n +2 | wc -l)"
-    say "代码层构建(${_df} ← base ${CLI_BASE_TAG}(base ${_base_layers} 层 / 当前 latest ${_cur_layers:-0} 层)) ..."
+    # 层数只用于展示: 全新机器上没有 latest, history 返回非 0, pipefail 下会中止整轮构建
+    _base_layers="$(${ENGINE} history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l || true)"
+    _cur_layers="$(${ENGINE} history --no-trunc "${IMAGE}" 2>/dev/null | tail -n +2 | wc -l || true)"
+    say "代码层构建(${_df} ← base ${CLI_BASE_TAG}(base ${_base_layers:-0} 层 / 当前 latest ${_cur_layers:-0} 层)) ..."
     [ "${INCREMENTAL}" = "1" ] && say "  说明: --incremental 现与 --build 等价(工具/依赖都在 base; 变更依赖请 --base)"
     ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f "${OUT}/${_df}" --build-arg "CLI_BASE_TAG=${CLI_BASE_TAG}" -t "${IMAGE}" "${OUT}" \
         || { err "代码层构建失败"; exit 1; }
