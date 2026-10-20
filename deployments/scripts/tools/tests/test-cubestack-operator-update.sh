@@ -87,8 +87,24 @@ chk "modelBundles 关闭仅在 false 分支" "1" "$(printf '%s\n' "${_BUNDLE_BLO
 chk "模块中 bundles 清空仅此一处" "1" "$(grep -cF 'clusterCR.spec.bundles=[]' "${MOD}" || true)"
 chk "模块中 modelBundles 关闭仅此一处" "1" "$(grep -cF 'clusterCR.spec.components.modelBundles.enabled=false' "${MOD}" || true)"
 CHART_DIR="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator"
-CHART_TGZ="$(ls "${CHART_DIR}"/*.tgz 2>/dev/null | head -1 || true)"
-if [ -n "${CHART_TGZ}" ]; then
+# ★ 2026-10-20 CodeRabbit: 必须选模块实际会用的那份 chart(由 CHART_REF/CHART_VER 派生),
+#   不能 `ls | head -1` —— 目录里若同时有旧版 tgz, 会检查到错误的 chart 默认值。
+_CHART_CFG="$(
+    set +u
+    REPO_ROOT="${REPO_ROOT}"
+    [ -f "${REPO_ROOT}/deployments/config/cluster.defaults.conf" ] \
+        && . "${REPO_ROOT}/deployments/config/cluster.defaults.conf" >/dev/null 2>&1 || true
+    [ -f "${REPO_ROOT}/deployments/config/cluster.conf" ] \
+        && . "${REPO_ROOT}/deployments/config/cluster.conf" >/dev/null 2>&1 || true
+    printf '%s\t%s\n' \
+        "${CUBESTACK_OPERATOR_CHART_REF:-oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart}" \
+        "${CUBESTACK_OPERATOR_CHART_VERSION:-1.0.0-latest}"
+)"
+CHART_REF_T="${_CHART_CFG%%$'\t'*}"
+CHART_VER_T="${_CHART_CFG#*$'\t'}"
+CHART_NAME_T="$(basename "${CHART_REF_T}")"
+CHART_TGZ="${CHART_DIR}/${CHART_NAME_T}-${CHART_VER_T}.tgz"
+if [ -f "${CHART_TGZ}" ]; then
     _VALS_PATH="$(tar -tzf "${CHART_TGZ}" 2>/dev/null | grep -m1 '/values.yaml$' || true)"
     if [ -n "${_VALS_PATH}" ]; then
         _VALS="$(tar -xOzf "${CHART_TGZ}" "${_VALS_PATH}" 2>/dev/null || true)"
@@ -108,6 +124,8 @@ if [ -n "${CHART_TGZ}" ]; then
     else
         echo "  FAIL chart 内未找到 values.yaml(${CHART_TGZ})"; fail=1
     fi
+elif [ -n "$(find "${CHART_DIR}" -maxdepth 1 -type f -name '*.tgz' -print -quit 2>/dev/null || true)" ]; then
+    echo "  FAIL 模块配置的 chart 不存在: ${CHART_TGZ}(目录中其他 tgz 不会用于部署)"; fail=1
 else
     echo "  SKIP 未找到 vendored chart tgz(干净 checkout 属预期缺省)"
 fi
