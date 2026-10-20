@@ -371,7 +371,7 @@ except Exception:
                 _CEPH_UNSAFE_UNMAP=1
                 err "  拒绝删除 rbd csi nodeplugin: ceph PVC/PV 仍在(未确认 CSI unmap 完成)"
                 err "  先排查 PVC/PV finalizer / CSI 插件状态; 确认可接受风险后显式重跑:"
-                err "    CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 $0 ${ACTION:-stop-consumers}"
+                err "    CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 $0 --${ACTION:-stop-consumers}"
                 return 1
             fi
         fi
@@ -424,7 +424,7 @@ delete_cluster() {
         else
             _CEPH_UNSAFE_UNMAP=1
             err "  拒绝删除 CephCluster: ceph PVC/PV 仍在(未确认 CSI unmap 完成)"
-            err "  确认可接受风险后显式重跑: CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 $0 ${ACTION:-delete-cluster}"
+            err "  确认可接受风险后显式重跑: CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 $0 --${ACTION:-delete-cluster}"
             return 1
         fi
     fi

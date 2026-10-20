@@ -71,6 +71,8 @@ chk "两处复查都要求查询成功" "2" "$(grep -cF '_left_pv="$(_list_ceph_
 chk "CephCluster 查询均用 ignore-not-found" "5" "$(grep -cF -- '--ignore-not-found -o name' "${CLEANUP}" || true)"
 chk_not_contains "CephCluster 消失判断不吞查询错误" '_still="$( (SSH' "${CLEANUP}"
 chk_contains "无集群预检查不吞查询错误" '查询 CephCluster 失败(无法确认是否存在)' "${CLEANUP}"
+chk_contains "恢复命令带 -- 前缀" 'CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 $0 --${ACTION' "${CLEANUP}"
+chk_not_contains "恢复命令不再缺 --" 'CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 $0 ${ACTION' "${CLEANUP}"
 chk_contains "查询失败标记中止擦盘" '_CEPH_ABORT_WIPE' "${CLEANUP}"
 chk_contains "CephCluster 查询失败标记" '_cluster_query_failed' "${CLEANUP}"
 chk_contains "stop_consumers 检查卷清理结果" 'if ! wait_ceph_volumes_gone 120 0' "${CLEANUP}"
