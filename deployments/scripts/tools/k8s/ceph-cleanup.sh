@@ -58,9 +58,10 @@ node_cmd() {   # <ip> <user> <cmd...>
 #   "waiting for csi volume attachments ... to be cleaned up", CephCluster 永远 Deleting。
 #   下面统一: ①先收集动作再读 here-string；②所有循环内 SSH 加 </dev/null；
 #   ③删完 PVC 后等待 PVC/PV 真正消失(CSI unmap 完成)再删 nodeplugin / CephCluster。
-#   ④强制清理(--wait=false)只发起删除、不陪等 finalizer; 之后有界复查, 仍残留则返回非零,
+#   ④强制清理(--wait=false)只发起删除、不陪等 finalizer; 之后有界复查 PVC/PV + ceph CSI
+#     VolumeAttachment(attachment 状态才是 unmap 的可靠信号), 仍残留则返回非零,
 #     默认拒绝删 nodeplugin/CephCluster(CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 可显式放行)。
-_list_ceph_pvcs() {   # <include_registry:0|1> → 每行 ns/name(仅 Bound 且 SC 含 ceph)
+_list_ceph_pvcs() {   # <include_registry:0|1> → 每行 ns/name(仅 Bound/Lost 且 SC 含 ceph; Lost=PV 已被强删, 仍可能残留映射)
     local _inc="${1:-0}"
     SSH "${K} get pvc -A -o json 2>/dev/null </dev/null" | INCLUDE_REGISTRY="${_inc}" python3 -c '
 import json, os, sys
@@ -73,7 +74,7 @@ for p in d.get("items", []):
     sc = ((p.get("spec") or {}).get("storageClassName") or "")
     if "ceph" not in sc:
         continue
-    if (p.get("status") or {}).get("phase") != "Bound":
+    if (p.get("status") or {}).get("phase") not in ("Bound", "Lost"):
         continue
     ns = p["metadata"]["namespace"]; name = p["metadata"]["name"]
     if not inc and ns == "kube-system" and name == "registry-pvc":
@@ -104,20 +105,40 @@ for pv in d.get("items", []):
 '
 }
 
+# ceph CSI VolumeAttachment(CodeRabbit 2026-10-20): PV/PVC 对象存在性**不能**证明 unmap——
+#   强清 PV finalizer 会让 PV 立即消失、PVC 变 Lost; 而 attachment 仍在 = 节点侧仍可能持有
+#   内核 rbd 映射。删 nodeplugin / CephCluster 前必须等 ceph CSI attacher 的 VA 全部消失。
+#   注意: 不做 include_registry 过滤 —— 删 nodeplugin/集群前所有 ceph 卷都必须 detach。
+_list_ceph_volumeattachments() {
+    SSH "${K} get volumeattachment -o json 2>/dev/null </dev/null" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for va in d.get("items", []):
+    att = ((va.get("spec") or {}).get("attacher") or "")
+    if "ceph" not in att:
+        continue
+    print(va["metadata"]["name"])
+'
+}
+
 wait_ceph_volumes_gone() {   # <timeout_seconds> <include_registry:0|1>
-    local _to="${1:-120}" _inc="${2:-0}" _i _left_pvc _left_pv _rt _rtries
-    _left_pvc=""; _left_pv=""
+    local _to="${1:-120}" _inc="${2:-0}" _i _left_pvc _left_pv _left_va _rt _rtries
+    _left_pvc=""; _left_pv=""; _left_va=""
     for _i in $(seq 1 $(( _to / 5 ))); do
         _left_pvc="$(_list_ceph_pvcs "${_inc}")"
         _left_pv="$(_list_ceph_pvs "${_inc}")"
-        if [ -z "${_left_pvc}" ] && [ -z "${_left_pv}" ]; then
-            ok "  ceph PVC/PV 已清理(CSI unmap 完成)"
+        _left_va="$(_list_ceph_volumeattachments)"
+        if [ -z "${_left_pvc}" ] && [ -z "${_left_pv}" ] && [ -z "${_left_va}" ]; then
+            ok "  ceph PVC/PV/VolumeAttachment 已清理(CSI detach/unmap 完成)"
             return 0
         fi
-        [ $((_i % 6)) -eq 0 ] && say "    等待 ceph 卷清理... $((_i * 5))s(PVC: $(printf '%s' "${_left_pvc}" | tr '\n' ' '), PV: $(printf '%s' "${_left_pv}" | tr '\n' ' '))"
+        [ $((_i % 6)) -eq 0 ] && say "    等待 ceph 卷清理... $((_i * 5))s(PVC: $(printf '%s' "${_left_pvc}" | tr '\n' ' '), PV: $(printf '%s' "${_left_pv}" | tr '\n' ' '), VA: $(printf '%s' "${_left_va}" | tr '\n' ' '))"
         sleep 5
     done
-    warn "  ceph 卷 ${_to}s 未清理干净: PVC=[$(printf '%s' "${_left_pvc}" | tr '\n' ' ')] PV=[$(printf '%s' "${_left_pv}" | tr '\n' ' ')] → 强制清理(数据随 Ceph 销毁)"
+    warn "  ceph 卷 ${_to}s 未清理干净: PVC=[$(printf '%s' "${_left_pvc}" | tr '\n' ' ')] PV=[$(printf '%s' "${_left_pv}" | tr '\n' ' ')] VA=[$(printf '%s' "${_left_va}" | tr '\n' ' ')] → 强制清理(数据随 Ceph 销毁)"
     # 兜底: 再删一次 PVC; 仍残留的 ceph PV 清 finalizer 后强删(只碰 ceph CSI PV,
     #   provisioner 卡死时这是唯一让 Rook 继续删除的路径; 新部署会重建卷)。
     # ★ 2026-10-20 实机: `kubectl delete` 默认**等待对象消失**; PVC 的 pvc-protection /
@@ -143,13 +164,14 @@ wait_ceph_volumes_gone() {   # <timeout_seconds> <include_registry:0|1>
     for _i in $(seq 1 "${_rtries}"); do
         _left_pvc="$(_list_ceph_pvcs "${_inc}")"
         _left_pv="$(_list_ceph_pvs "${_inc}")"
-        if [ -z "${_left_pvc}" ] && [ -z "${_left_pv}" ]; then
-            ok "  强制清理后 ceph PVC/PV 已消失(CSI unmap 完成)"
+        _left_va="$(_list_ceph_volumeattachments)"
+        if [ -z "${_left_pvc}" ] && [ -z "${_left_pv}" ] && [ -z "${_left_va}" ]; then
+            ok "  强制清理后 ceph PVC/PV/VolumeAttachment 已消失(CSI detach/unmap 完成)"
             return 0
         fi
         sleep 5
     done
-    warn "  ⚠ 强制清理后仍有残留: PVC=[$(printf '%s' "${_left_pvc}" | tr '\n' ' ')] PV=[$(printf '%s' "${_left_pv}" | tr '\n' ' ')]"
+    warn "  ⚠ 强制清理后仍有残留: PVC=[$(printf '%s' "${_left_pvc}" | tr '\n' ' ')] PV=[$(printf '%s' "${_left_pv}" | tr '\n' ' ')] VA=[$(printf '%s' "${_left_va}" | tr '\n' ' ')]"
     warn "    未确认 CSI unmap 完成(默认拒绝继续删 nodeplugin/CephCluster; 可用 CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 显式放行)"
     return 1
 }

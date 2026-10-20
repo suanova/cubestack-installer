@@ -61,6 +61,9 @@ fi
 # 强制删除后必须有界复查; 仍残留则返回非零, 默认拒绝继续删 nodeplugin/CephCluster。
 chk_contains "强制清理后有界复查开关" 'CEPH_CLEANUP_FORCE_RECHECK_SECONDS' "${CLEANUP}"
 chk_contains "强制清理残留返回非零" '未确认 CSI unmap 完成' "${CLEANUP}"
+chk_contains "复查含 ceph CSI VolumeAttachment" '_list_ceph_volumeattachments' "${CLEANUP}"
+chk_contains "VolumeAttachment 消失才算 unmap" 'VolumeAttachment 已消失' "${CLEANUP}"
+chk_contains "PVC 清单包含 Lost(强删 PV 后)" '"Bound", "Lost"' "${CLEANUP}"
 chk_contains "stop_consumers 检查卷清理结果" 'if ! wait_ceph_volumes_gone 120 0' "${CLEANUP}"
 chk_contains "默认拒绝删 rbd nodeplugin" '拒绝删除 rbd csi nodeplugin' "${CLEANUP}"
 chk_contains "显式不安全放行开关" 'CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP' "${CLEANUP}"
