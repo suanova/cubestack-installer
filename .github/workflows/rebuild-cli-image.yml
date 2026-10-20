@@ -17,6 +17,20 @@ name: Rebuild installer CLI image
 # ============================================================================
 
 on:
+  # Code-layer inputs baked into the CLI image. offline-files/ and
+  # kubespray/versions/ are excluded on purpose (mounted/fetched at runtime).
+  push:
+    branches: [main]
+    paths:
+      - 'deployments/scripts/**'
+      - 'deployments/kubespray/**'
+      - '!deployments/kubespray/versions/**'
+      - 'deployments/cubestack-addon/**'
+      - 'deployments/config/**'
+      - 'skills/**'
+      - 'Dockerfile-cli'
+      - '.dockerignore'
+      - '.github/workflows/rebuild-cli-image.yml'
   repository_dispatch:
     types: [operator-chart-updated]
   workflow_dispatch:
