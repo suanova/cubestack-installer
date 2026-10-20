@@ -152,12 +152,6 @@ rdma  ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:${RDMA_IMAGE_TAG}
 netshoot  docker.io/nicolaka/netshoot:latest
 
 # ------------------------------------------------------------
-# [group: lws] LeaderWorkerSet(多机推理编排)
-#   目录: deployments/offline-files/lws/
-# ------------------------------------------------------------
-lws  registry.k8s.io/lws/lws:${LWS_IMAGE_TAG}
-
-# ------------------------------------------------------------
 # [group: metax-gpu] 沐曦 GPU Operator
 #   目录: deployments/offline-files/metax-gpu/
 #   ⚠ **本组默认不镜像到 mirrors/**: 沐曦不发布到公共 registry, 上游就是本台 Harbor 的
@@ -195,11 +189,31 @@ metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/${METAX_MACA_IMAGE}
 cubestack-operator  ${CUBESTACK_OPERATOR_HARBOR_HOST}/suanova-private/cubestack-operator:${CUBESTACK_OPERATOR_IMAGE_TAG}
 # --- 平台组件镜像(CR 组件目录用; 2026-10-08 起经 CI 同步到 mirrors/) ---
 #   · ratelimit 是 EnvoyGateway CR 的 rateLimitDeployment 配置镜像(非默认拉起, 配 RateLimitPolicy
-#     时用); tag 8fe6ea42 是上游固定 commit tag —— 本部署网络到 docker.io 不通, 必须经本 CI
-#     通道同步到 Harbor mirrors 后再 harbor-save 成离线 tar(见 offline-files/cubestack-operator/README.md)。
+#     时用); tag 必须跟随 gateway-helm v1.9.2 的 chart 默认值 **0482748e**(旧 8fe6ea42 是
+#     v1.9.1 时代标签, 继续写会让 RateLimitPolicy 的 Pod ImagePullBackOff)。本部署网络到
+#     docker.io 不通, 必须经本 CI 通道同步到 Harbor mirrors 后再由保鲜管道 save 成离线 tar
+#     (见 offline-files/cubestack-operator/README.md)。
+#     ⚠ 组件 tar 按组件分子目录, 本行 save 产出在**顶层** —— 请归位到 envoy-gateway/ 再推送。
 #   · 其余平台组件镜像(envoy/prometheus 栈/perses/bmc/cubepilot/cnpg/opstree 等)的完整清单与
 #     维护方法见 offline-files/cubestack-operator/README.md; 如需经本 CI 同步, 按同格式逐条登记。
-cubestack-operator  docker.io/envoyproxy/ratelimit:8fe6ea42
+cubestack-operator  docker.io/envoyproxy/ratelimit:0482748e
+
+# ------------------------------------------------------------
+# [group: cubestack-platform] 平台组件镜像(2026-10-16 补登记)
+#   用途: 只把上游复刻到 Harbor mirrors/**, 供"平台镜像保鲜管道"经 mirrors 拉取离线 tar
+#   (tools/images/cubestack-platform-save-images.sh + offline-files/cubestack-operator/image-list.tsv)。
+#   ⚠ 2026-10-19 校准: envoy 数据面改用 gateway-helm v1.9.2 的 distroless-v1.39.1(旧 v1.9.1
+#     已无组件引用); 新增 gateway/ai-gateway 控制器与 extproc, 避免 operator 升级后 mirrors 缺件。
+#   ⚠ windows-exporter 只有 windows/amd64 清单(Linux 节点不调度), 仅复刻到 Harbor 备用,
+#     不进入 Linux 离线 tar 流程(保鲜工具的 --override-os linux 会拒绝)。
+#   本组**不供** harbor-save-images --group 使用(离线 tar 落盘由保鲜管道负责)。
+cubestack-platform  docker.io/envoyproxy/envoy:distroless-v1.39.1
+cubestack-platform  docker.io/envoyproxy/gateway:v1.9.2
+cubestack-platform  docker.io/envoyproxy/ai-gateway-controller:v1.2.0
+cubestack-platform  docker.io/envoyproxy/ai-gateway-extproc:v1.2.0
+cubestack-platform  quay.io/thanos/thanos:v0.42.4
+cubestack-platform  quay.io/opstree/redis-exporter:v1.44.0
+cubestack-platform  ghcr.io/prometheus-community/windows-exporter:0.31.8
 
 # ------------------------------------------------------------
 # [group: dev-lab] 开发镜像(jupyter / ssh 系列, 供开发环境/容器终端使用)
@@ -216,3 +230,27 @@ dev-lab  harbor.isuanova.com/suanova/jupyter-cuda-pytorch:${DEV_LAB_IMAGE_TAG}
 dev-lab  harbor.isuanova.com/suanova/ssh-ubuntu22.04:${DEV_LAB_IMAGE_TAG}
 dev-lab  harbor.isuanova.com/suanova/ssh-maca-pytorch:${DEV_LAB_IMAGE_TAG}
 dev-lab  harbor.isuanova.com/suanova/ssh-cuda-pytorch:${DEV_LAB_IMAGE_TAG}
+
+# ------------------------------------------------------------
+# [group: nvidia-gpu-operator] NVIDIA GPU Operator(v26.7.2; chart 渲染提取口径)
+#   目录: deployments/offline-files/nvidia-gpu-operator/(tar 由 tools/images/nvidia-save-images.sh 生成)
+#   ⚠ 版本口径: 组件 tag 与 chart 版本(NVIDIA_GPU_OPERATOR_VERSION)耦合, 升级 chart 时同步核改;
+#     gpu-operator 本体用 ${NVIDIA_GPU_OPERATOR_VERSION}; 驱动用"分支-内核"参数化(预编译模式)。
+#   ⚠ 驱动: nvcr.io/nvidia/driver:${NVIDIA_GPU_DRIVER_BRANCH}-${NVIDIA_GPU_DRIVER_PRECOMPILED_KERNEL}-ubuntu22.04
+#     —— 内核必须恰在 NGC 预编译覆盖列表(module 有门禁); 多内核环境照格式手工补行。
+#   ⚠ NFD 不在此组: registry.k8s.io/nfd/node-feature-discovery 已登记于 k8s-base 组(同 ref, 避免重复);
+#     operator 自带的 NFD 镜像 tar 仍由 nvidia-save-images.sh 收进本组目录(部署模块按需推送)。
+#   ⚠ 后 4 条为沙箱/vGPU 边缘组件(全局开关默认关, 模块保守备料防启用时缺料); 默认部署不会被拉起。
+# ------------------------------------------------------------
+nvidia-gpu-operator  nvcr.io/nvidia/gpu-operator:${NVIDIA_GPU_OPERATOR_VERSION}
+nvidia-gpu-operator  nvcr.io/nvidia/k8s/container-toolkit:v1.20.1
+nvidia-gpu-operator  nvcr.io/nvidia/k8s-device-plugin:v0.20.1
+nvidia-gpu-operator  nvcr.io/nvidia/k8s/dcgm-exporter:4.6.1-4.8.4-distroless
+nvidia-gpu-operator  nvcr.io/nvidia/cloud-native/k8s-mig-manager:v0.15.1
+nvidia-gpu-operator  nvcr.io/nvidia/cloud-native/k8s-driver-manager:v0.12.1
+nvidia-gpu-operator  nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0-ubuntu22.04
+nvidia-gpu-operator  nvcr.io/nvidia/driver:${NVIDIA_GPU_DRIVER_BRANCH}-${NVIDIA_GPU_DRIVER_PRECOMPILED_KERNEL}-ubuntu22.04
+nvidia-gpu-operator  nvcr.io/nvidia/cloud-native/k8s-cc-manager:v0.4.4
+nvidia-gpu-operator  nvcr.io/nvidia/cloud-native/nvidia-sandbox-device-plugin:v0.0.5
+nvidia-gpu-operator  nvcr.io/nvidia/cloud-native/vgpu-device-manager:v0.5.1
+nvidia-gpu-operator  nvcr.io/nvidia/kubevirt-gpu-device-plugin:v1.6.0

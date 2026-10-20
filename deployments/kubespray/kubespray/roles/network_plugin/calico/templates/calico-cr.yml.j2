@@ -36,6 +36,14 @@ rules:
       - create
       - update
       - delete
+  # The CNI plugin reads KubeVirt resources for IPAM of KubeVirt workloads.
+  # cubestack: 上游 calico 3.32.2 逐字对齐; 见 cubestack-patches/15-calico-3.32.2-rbac.patch
+  - apiGroups: ["kubevirt.io"]
+    resources:
+      - virtualmachineinstances
+      - virtualmachines
+    verbs:
+      - get
 ---
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
@@ -91,6 +99,16 @@ rules:
     resources:
       - adminnetworkpolicies
       - baselineadminnetworkpolicies
+    verbs:
+      - watch
+      - list
+  # Watch for changes to Kubernetes ClusterNetworkPolicies.
+  # cubestack: calico >= 3.32 的 felix 固定 watch 该 CRD(随 calico 清单一起安装), 缺此规则
+  #   resync 永不完成 → calico-node 全节点 0/1 → pod 访问 ClusterIP 全断(2026-10-15 实机断网根因);
+  #   见 cubestack-patches/15-calico-3.32.2-rbac.patch
+  - apiGroups: ["policy.networking.k8s.io"]
+    resources:
+      - clusternetworkpolicies
     verbs:
       - watch
       - list
@@ -207,6 +225,17 @@ rules:
     verbs:
       - get
 {% endif %}
+  # For monitoring KubeVirt live migration.
+  # cubestack: 上游 calico 3.32.2 calico-node ClusterRole 自带(逐字对齐); 缺它 kubevirt 环境
+  #   该 watch 恒 403 → felix 同样 resync 不完成(felix 对 403 判"datastore 故障", 对 404 则正常跳过);
+  #   见 cubestack-patches/15-calico-3.32.2-rbac.patch
+  - apiGroups: ["kubevirt.io"]
+    resources:
+      - virtualmachineinstancemigrations
+    verbs:
+      - get
+      - list
+      - watch
   # Used for creating service account tokens to be used by the CNI plugin
   - apiGroups: [""]
     resources:

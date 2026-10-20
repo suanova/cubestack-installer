@@ -91,12 +91,79 @@ fi
 init_remote_kubectl || exit 1
 
 # ★ 逐节点 SSH 公共函数(替代历史 4 处重复 NSSH() 定义): node_ssh <ip> <user> <cmd...>
-#   user 传 NODE_USER 或 ${SSH_USER:-ubuntu} 均可; 不依赖任何外层函数定义。
+#   user 传 NODE_USER / "$(ssh_user_for_ip <ip>)" 均可; 不依赖任何外层函数定义。
 node_ssh() {
     local _nip="$1" _nuser="$2"
     shift 2
     ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
         "${_nuser}@${_nip}" "$@"
+}
+
+# nbd 残留清理(共享: [3/8] 首防线 + [7/8] 自愈重放; 2026-10-14 实机根因)。
+# 机制: ceph-volume inventory 会枚举**整机 /sys/block** 建 udev 数据; 节点上"已加载但零会话"的
+#   nbd0..15 取不到 udev 数据 ⇒ 整个 ceph-volume 调用崩溃 ⇒ rook 判**全部盘**"无法确认可用"
+#   ⇒ 0 OSD、HEALTH_WARN 永不 OK(实机: 10.66.3.214 集群)。卸载后同一套盘点立刻成功。
+# ⚠ 黑名单只挡别名自动加载, **挡不住显式 modprobe**(实机: 清理后 nbd 在一小时后又被载入)——
+#   故 [7/8] 自愈时必须**重放本清理**再重建 prepare。
+# 安全口径: 仅当 nbd 零引用(/sys/module/nbd/refcnt=0, 无活跃会话)才卸载 + 持久黑名单;
+#   有引用/refcnt 不可读 → 只告警不动(防误伤真实 nbd 用户)。
+# 输出: CLEARED(=模块已加载且 0 设备) / UNLOADED(=未加载但设备已消失) / IN-USE / STILL-PRESENT / ?(未知)
+_ceph_nbd_clear_one() {  # <ip> <user>
+    # 2026-10-19 根因(加深): CSI RBD nodeplugin 会**在容器内显式 modprobe nbd** —— 容器里的
+    #   modprobe 读不到宿主机 /etc/modprobe.d, 所以宿主机 `install nbd /bin/false` 挡不住它。
+    #   即使先卸载, CSI 也会在 OSD prepare 前把 nbd 重新载入并生成 /dev/nbd0..15,
+    #   ceph-volume inventory 扫到即崩溃 → 0 OSD(实机 23:14 CSI 启动 → 23:16 prepare 失败)。
+    #   可靠做法: 以 **nbds_max=0** 预载 nbd(模块在、但零设备)。CSI 的 modprobe 见已加载
+    #   即 no-op, 不会再生成 /sys/block/nbd*; OSD 就绪后由 _ceph_nbd_restore_one 恢复默认设备。
+    ( (node_ssh "$1" "$2" "bash -s" <<'NBD_CLEAR_EOF'
+set -u
+conf=/etc/modprobe.d/blacklist-nbd.conf
+printf 'blacklist nbd\ninstall nbd /bin/false\n' | sudo tee "${conf}" >/dev/null 2>&1 || true
+if lsmod | grep -q '^nbd '; then
+    rc="$(cat /sys/module/nbd/refcnt 2>/dev/null || echo "?")"
+    if [ "${rc}" != "0" ]; then echo IN-USE; exit 0; fi
+    sudo modprobe -r nbd 2>/dev/null || true
+fi
+sudo rm -f /dev/nbd* 2>/dev/null || true
+# 临时移开 install 规则才能载入(它会令 modprobe 直接返回 1)
+sudo mv "${conf}" "${conf}.nbd-clear" 2>/dev/null || true
+sudo modprobe nbd nbds_max=0 >/dev/null 2>&1
+_mrc=$?
+sudo mv "${conf}.nbd-clear" "${conf}" 2>/dev/null || true
+if ls /sys/block/nbd* >/dev/null 2>&1; then
+    echo STILL-PRESENT
+elif [ "${_mrc}" = "0" ] || lsmod | grep -q '^nbd '; then
+    echo CLEARED
+else
+    echo UNLOADED
+fi
+NBD_CLEAR_EOF
+) )
+}
+
+# OSD 就绪后恢复 nbd 默认设备(CSI RBD 的 krbd 需要 /dev/nbd*)。
+# 只撤掉本工具的临时黑名单并重载; 有活跃会话(refcnt!=0)时不动。
+# 输出: RESTORED / IN-USE / RESTORE-FAIL
+_ceph_nbd_restore_one() {  # <ip> <user>
+    ( (node_ssh "$1" "$2" "bash -s" <<'NBD_RESTORE_EOF'
+set -u
+conf=/etc/modprobe.d/blacklist-nbd.conf
+if lsmod | grep -q '^nbd '; then
+    rc="$(cat /sys/module/nbd/refcnt 2>/dev/null || echo "?")"
+    if [ "${rc}" != "0" ]; then echo IN-USE; exit 0; fi
+    sudo modprobe -r nbd 2>/dev/null || true
+fi
+sudo rm -f /dev/nbd* 2>/dev/null || true
+sudo rm -f "${conf}" "${conf}.nbd-clear" 2>/dev/null || true
+sudo modprobe nbd >/dev/null 2>&1
+_rc=$?
+if [ "${_rc}" = "0" ] && ls /sys/block/nbd0 >/dev/null 2>&1; then
+    echo RESTORED
+else
+    echo RESTORE-FAIL
+fi
+NBD_RESTORE_EOF
+) )
 }
 
 # ---------------- 派生变量(全部来自 cluster.conf) ----------------
@@ -202,7 +269,7 @@ if [ "${_LVM_DEB_PRESENT}" = "0" ]; then
             [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
         done
         [ -n "${_ip}" ] || continue
-        node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1 || _ALL_HAS_LVM=0
+        node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1 || _ALL_HAS_LVM=0
     done
     if [ "${_ALL_HAS_LVM}" = "0" ]; then
         err "lvm2 离线包未就绪且存储节点未安装 lvm —— 无法离线部署 Rook OSD(重启后逻辑卷需 lvm 激活)"
@@ -388,6 +455,7 @@ fi
 
 # ---------------- 4) 存储节点准备(rbd 模块 + lvm2 + node label) ----------------
 say "[3/8] 存储节点准备(rbd 内核模块 / lvm2 离线安装 / node label)..."
+_CEPH_NBD_FAIL=0
 for _hn in "${CEPH_NODE_HOSTS[@]}"; do
     _ip=""; _user="${SSH_USER:-ubuntu}"
     for line in "${NODES[@]:-}"; do
@@ -400,6 +468,17 @@ for _hn in "${CEPH_NODE_HOSTS[@]}"; do
     # 4a. rbd 内核模块(立即加载 + 持久化)
     node_ssh "${_ip}" "${_user}" "sudo modprobe rbd 2>/dev/null; grep -q '^rbd' /etc/modules-load.d/rbd.conf 2>/dev/null || echo 'rbd' | sudo tee /etc/modules-load.d/rbd.conf >/dev/null" \
         && ok "    rbd 内核模块就绪" || warn "    rbd 模块加载失败(VM 内核需支持, 检查 modprobe rbd)"
+    # 4a-bis. nbd 残留清理(首防线; 机制/安全口径见 _ceph_nbd_clear_one 注释)。[7/8] 自愈会重放。
+    case "$(_ceph_nbd_clear_one "${_ip}" "${_user}")" in
+        CLEARED) ok "    nbd 已置为 nbds_max=0(模块在、零设备; CSI 再 modprobe 为 no-op)" ;;
+        UNLOADED|ABSENT) ok "    nbd 未加载且设备已清除(已写入 install nbd /bin/false 防宿主机重载)" ;;
+        IN-USE|STILL-PRESENT)
+            err "    nbd 模块无法置零或仍有 /sys/block/nbd* —— ceph-volume inventory 会崩溃(0 OSD)"
+            err "      现场: lsmod | grep nbd; ls -l /sys/block/nbd*; cat /sys/module/nbd/parameters/nbds_max"
+            err "      处置: 先停 RBD CSI nodeplugin(kubectl -n ${CEPH_NAMESPACE} ...)或重启该节点后重跑"
+            _CEPH_NBD_FAIL=1 ;;
+        *)       : ;;
+    esac
     # 4b. lvm2: 检测缺失 → 从离线 packages 安装(install-worker-packages.sh 含 offline-files/os/packages)
     if ! node_ssh "${_ip}" "${_user}" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1; then
         say "    lvm2 缺失, 从离线 .deb 安装(packages 目录, 由 fetch-lvm-packages.sh 生成)..."
@@ -420,6 +499,15 @@ for _hn in "${CEPH_NODE_HOSTS[@]}"; do
         && ok "    node label 已打: ${CEPH_NODE_LABEL}" \
         || warn "    label 失败(节点 ${_hn} 可能尚未就绪?)"
 done
+
+if [ "${_CEPH_NBD_FAIL}" != "0" ]; then
+    err "存储节点仍有 nbd 残留, 拒绝继续创建 CephCluster:"
+    err "  nbd0 存在时 ceph-volume inventory 会抛 'No udev data could be retrieved',"
+    err "  导致 /dev/vdb/vdc/vdd 全被跳过 → 0 OSD → HEALTH_WARN 且官方导出脚本永久等待。"
+    err "  处置: ① 停/删 RBD CSI nodeplugin DaemonSet; ② 各节点 modprobe -r nbd;"
+    err "        ③ 确认 ls /sys/block/nbd* 为空; ④ 重跑 --steps ceph"
+    exit 1
+fi
 
 # ---------------- 5) Ceph 离线镜像就绪校验 ----------------
 # ★ 镜像已由 k8s 阶段预加载 play(cluster.yml 内置)随 kubespray 镜像一起同步到全部节点并
@@ -460,13 +548,14 @@ fi
 # ---------------- 6) 部署 Rook operator(crds → common → csi-operator → operator) ----------------
 say "[5/8] 部署 Rook operator(manifest: ${CEPH_ROOK_MANIFEST_DIR})..."
 REMOTE_DIR="/tmp/rook-manifests"
-# ★ 先建目录并立即 chown 给 SSH 用户: 此前 sudo mkdir 后目录属 root, scp(ubuntu)写不进去,
+# ★ 先建目录并立即 chown 给 SSH 用户: 此前 sudo mkdir 后目录属 root, 非 root 用户 scp 写不进去,
 #   5 个 manifest 全没拷过去 → apply crds.yaml 报 path does not exist(错误被 || true 吞掉)。
-SSH "sudo rm -rf ${REMOTE_DIR} && sudo mkdir -p ${REMOTE_DIR} && sudo chown ${SSH_USER:-ubuntu}:${SSH_USER:-ubuntu} ${REMOTE_DIR}" >/dev/null 2>&1
+#   ⚠ chown/scp 用**首个 master 的登录用户**(FIRST_MASTER_USER): root 部署=root, ubuntu 部署=ubuntu
+SSH "sudo rm -rf ${REMOTE_DIR} && sudo mkdir -p ${REMOTE_DIR} && sudo chown ${FIRST_MASTER_USER}:${FIRST_MASTER_USER} ${REMOTE_DIR}" >/dev/null 2>&1
 for f in crds.yaml common.yaml csi-operator.yaml operator.yaml toolbox.yaml; do
     [ -f "${CEPH_ROOK_MANIFEST_DIR}/${f}" ] || { warn "  缺 manifest: ${f}(重跑 rook-fetch-manifests.sh)"; continue; }
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-        "${CEPH_ROOK_MANIFEST_DIR}/${f}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:${REMOTE_DIR}/${f}" \
+        "${CEPH_ROOK_MANIFEST_DIR}/${f}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:${REMOTE_DIR}/${f}" \
         || { err "  scp ${f} 到 master 失败(检查 SSH 密钥/节点连通)"; exit 1; }
 done
 SSH "sudo chown -R \$(id -un) ${REMOTE_DIR}" >/dev/null 2>&1 || true
@@ -481,8 +570,8 @@ done
 #   csi-operator 调和 CSI 驱动(集群内 CephCluster 或外部 Ceph 都需要)。
 #   已存在 ceph-csi-operator 且 CSI 驱动(csi-rbdplugin DS)已就绪 → 跳过(不需要重复安装);
 #   未就绪 → 安装(需要)。用 ssh 直连规避 "函数 + $(函数 \"串\")" 嵌套解析异常。
-_CSI_OP="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get deploy ceph-csi-operator --no-headers 2>/dev/null")" || true
-_CSI_DS="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get ds rook-ceph.rbd.csi.ceph.com-nodeplugin --no-headers 2>/dev/null")" || true
+_CSI_OP="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${FIRST_MASTER_USER}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get deploy ceph-csi-operator --no-headers 2>/dev/null")" || true
+_CSI_DS="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${FIRST_MASTER_USER}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get ds rook-ceph.rbd.csi.ceph.com-nodeplugin --no-headers 2>/dev/null")" || true
 if [ -n "${_CSI_OP}" ] && [ -n "${_CSI_DS}" ]; then
     say "  ceph-csi-operator + CSI 驱动已存在, 跳过安装 csi-operator.yaml(不需要重复安装)"
 else
@@ -652,13 +741,18 @@ else
                 [ -n "${_ip}" ] || continue
                 for _d in ${NODE_DISKS[${_hn}]//,/ }; do
                     say "  wipe ${_hn} ${_d}(官方 zap-device 清 label 副本 + 头/分区表/尾, 逐处校验)..."
-                    node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo bash -s -- ${_d}" \
-                        <<< "$(bluestore_wipe_remote_lib; printf '\ntimeout -k 10 600 bash -c "$(declare -f bluestore_wipe_dev); bluestore_wipe_dev $1 || exit 1" _ "$1" || exit 1\n')" \
+                    # ⚠ 2026-10-13 实机修复: 内层 `bash -c` 是**独立子壳** —— 外层 `bash -s` 里
+                    #   remote_lib 定义的函数/变量不会自动继承。原来只 declare 了 bluestore_wipe_dev,
+                    #   导致子壳里 `_bstore_offsets: command not found`(候选偏移 dd 整段静默跳过)、
+                    #   `_BSTORE_IMG` 为空(官方 zap 也被跳过)—— ② 只剩 wipefs+校验在跑。现补全:
+                    #   函数一并 declare(远端展开)、镜像 ref 以环境前缀随调用注入(值无引号/空格, 安全)。
+                    node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "sudo bash -s -- ${_d}" \
+                        <<< "$(bluestore_wipe_remote_lib; printf '\ntimeout -k 10 600 bash -c "$(declare -f _bstore_offsets bluestore_wipe_dev); _BSTORE_IMG="${_BSTORE_IMG}" bluestore_wipe_dev $1 || exit 1" _ "$1" || exit 1\n')" \
                         && ok "    ${_hn} ${_d} 已彻底清空(无 bluestore label 残留)" \
                         || { warn "    ${_hn} ${_d} 清盘未通过校验(上方已打印残留偏移)"; _WIPE_FAIL="${_WIPE_FAIL} ${_hn}:${_d}"; }
                 done
                 # 遗留 rbd 设备: 曾导致 osd-prepare 的 show-label 扫到挂起 IO(AIO 读 D 状态) → prepare 永久卡死
-                node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "ls /dev/rbd* >/dev/null 2>&1 && { sudo rm -f /dev/rbd* && echo '  残留 rbd 设备节点已删(/dev/rbd*)'; } || true" \
+                node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "ls /dev/rbd* >/dev/null 2>&1 && { sudo rm -f /dev/rbd* && echo '  残留 rbd 设备节点已删(/dev/rbd*)'; } || true" \
                     | grep -v '^$' || true
             done
         fi
@@ -678,11 +772,11 @@ else
             [ -n "${_ip}" ] || continue
             if [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
                 say "  清理 ${_hn} /var/lib/rook 残留(mon-* + rook-ceph/osd 元数据 + config/keyring)..."
-                node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-* /var/lib/rook/rook-ceph 2>/dev/null; true" \
+                node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "sudo rm -rf /var/lib/rook/mon-* /var/lib/rook/rook-ceph 2>/dev/null; true" \
                     && ok "    ${_hn} /var/lib/rook 已清空" || warn "    ${_hn} /var/lib/rook 清理失败"
             else
                 say "  清理 ${_hn} 残留 mon store(/var/lib/rook/mon-*, 全新 mon 状态; osd 元数据保留辅助认领)..."
-                node_ssh "${_ip}" "${SSH_USER:-ubuntu}" "sudo rm -rf /var/lib/rook/mon-*" || warn "    ${_hn} mon store 清理失败(节点全新无残留可忽略)"
+                node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "sudo rm -rf /var/lib/rook/mon-*" || warn "    ${_hn} mon store 清理失败(节点全新无残留可忽略)"
             fi
         done
     fi
@@ -767,9 +861,11 @@ else
         done
     done
 } > "${LOCAL_CR}"
+SSH "sudo rm -f /tmp/cephcluster.yaml" >/dev/null 2>&1 || true   # 清陈旧目标(fs.protected_regular: 他人遗留文件会让 scp 被拒)
 scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-    "${LOCAL_CR}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/cephcluster.yaml" >/dev/null 2>&1
+    "${LOCAL_CR}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/cephcluster.yaml" >/dev/null 2>&1
 SSH "${K} apply -f /tmp/cephcluster.yaml" || { rm -f "${LOCAL_CR}"; err "应用 CephCluster CR 失败(检查 /tmp/cephcluster.yaml 与 rook operator 日志)"; exit 1; }
+SSH "rm -f /tmp/cephcluster.yaml" >/dev/null 2>&1 || true   # 用完即删(2026-10-16): 不留固定名残留(失败路径保留供诊断, 下次预清兜底)
 rm -f "${LOCAL_CR}"
 
     # toolbox(ceph CLI; 供 [7/8] 就绪检查与调优使用)
@@ -818,6 +914,7 @@ rm -f "${LOCAL_CR}"
     say "[7/8] 等待 Ceph 集群就绪(最长 900s, ceph -s HEALTH_OK)..."
     CLUSTER_OK=0
     _CEPH_TUNED=0   # 阈值预调优标记(第一次 phase=Ready 时设, 避免 clock skew 卡等待)
+    _CEPH_OSD_RETRIED=0   # 0-OSD 自愈一次性标记(见下方 2026-10-14 修复)
     for i in $(seq 1 90); do
         _ph="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
         if [ "${_ph}" = "Ready" ]; then
@@ -843,8 +940,14 @@ rm -f "${LOCAL_CR}"
             #   toolbox 的 exec 还没通, ceph -s 返回空输出(错误在 stderr, 被 2>/dev/null 吞掉),
             #   于是一次瞬时抖动变成了整轮部署失败。语义上它只该表示"还没就绪, 继续等下一轮"。
             _hl="$(printf '%s\n' "${_CEPH_SUM}" | grep -oE 'HEALTH_(OK|WARN|ERR)' | head -1 || true)"
-            if [ "${_hl}" = "HEALTH_OK" ]; then
-                ok "  Ceph 集群 HEALTH_OK"
+            _osd="$(printf '%s\n' "${_CEPH_SUM}" | grep -E '^\s+osd:' | sed 's/^\s*//' || true)"
+            _osd_n="$(printf '%s' "${_osd}" | sed -nE 's/.*osd: ([0-9]+) osds:.*/\1/p')"
+            # ★ 2026-10-19 实机根因: 新建集群 mon/mgr 刚起、OSD prepare 尚未完成时 ceph -s 可能
+            #   短暂 HEALTH_OK(此时还没有 PG/OSD 状态)。旧逻辑据此提前放行 → 实际 0 OSD,
+            #   继而 registry PVC 永久 Pending / rbd ls 挂起 / 整轮 --fresh 失败。
+            #   就绪判据必须是 HEALTH_OK **且 OSD>0**。
+            if [ "${_hl}" = "HEALTH_OK" ] && [ "${_osd_n:-0}" -gt 0 ] 2>/dev/null; then
+                ok "  Ceph 集群 HEALTH_OK(${_osd_n} OSD)"
                 CLUSTER_OK=1
                 break
             fi
@@ -855,6 +958,41 @@ rm -f "${LOCAL_CR}"
                 _osd="$(printf '%s\n' "${_CEPH_SUM}" | grep -E '^\s+osd:' | sed 's/^\s*//' || true)"
                 _pgs="$(printf '%s\n' "${_CEPH_SUM}" | grep -E '^\s+pgs:' | sed 's/^\s*//' || true)"
                 say "  [${i}/90] phase=${_ph} health=${_hl:-unknown}; ${_mon:-mon:?} ${_osd:-osd:?} ${_pgs:-pgs:?}(继续等待)"
+                # ★ 2026-10-14 自愈(实机 0-OSD 事故): phase=Ready 但 OSD 恒为 0 —— osd-prepare
+                #   是**一次性 Job**, 盘点被跳过(如 ceph-volume inventory 因 nbd 残留崩溃)时它
+                #   已 Completed, 单纯等待永远不会出现 OSD。此处**一次性**重触发: 删除已完成的
+                #   osd-prepare Job(按名字 grep, 不依赖 label), operator 会自动重建并重跑盘点
+                #   (前提条件已由 [3/8] 的 nbd 清理等修复)。只做一次, 不与 operator 循环对抗。
+                if [ "${_CEPH_OSD_RETRIED}" = "0" ] && [ "${i}" -ge 6 ] \
+                    && printf '%s' "${_osd}" | grep -q 'osd: 0 osds:'; then
+                    warn "  phase=Ready 但 OSD 恒为 0(>60s): 自愈重放(清 nbd 残留 → 删 prepare Job → 重启 operator)..."
+                    # 完整配方(2026-10-14 实机验证三步, 缺一不可):
+                    #   ① nbd 残留可能被**显式 modprobe**重新载入(黑名单只挡别名自动加载), 自愈需重放清理;
+                    #   ② 删除已完成的 osd-prepare Job(按名字 grep, 不依赖 label);
+                    #   ③ **重启 operator 强制重建** —— 实机: 仅删 Job 时 operator 不会自动重建, 必须踢一步。
+                    _nbd_cleared=0
+                    for _hn2 in "${CEPH_NODE_HOSTS[@]}"; do
+                        _ip2=""; _user2="${SSH_USER:-ubuntu}"
+                        for line in "${NODES[@]:-}"; do
+                            [ -z "${line}" ] && continue
+                            node_parse "${line}"
+                            [ "${NODE_HOSTNAME}" = "${_hn2}" ] && { _ip2="${NODE_IP}"; _user2="${NODE_USER}"; break; }
+                        done
+                        [ -n "${_ip2}" ] || continue
+                        case "$(_ceph_nbd_clear_one "${_ip2}" "${_user2}")" in
+                            CLEARED|UNLOADED|ABSENT) warn "    ${_hn2}: nbd 已置零/清除(CSI 再 modprobe 为 no-op)"; _nbd_cleared=$((_nbd_cleared + 1)) ;;
+                            IN-USE|STILL-PRESENT) warn "    ${_hn2}: nbd 仍无法置零(0 OSD 根因; 需停 CSI nodeplugin 或重启)" ;;
+                            *) : ;;
+                        esac
+                    done
+                    for _pj in $( (SSH "${K} -n ${CEPH_NAMESPACE} get jobs -o name 2>/dev/null" || true) | grep osd-prepare || true); do
+                        SSH "${K} -n ${CEPH_NAMESPACE} delete ${_pj} --ignore-not-found >/dev/null 2>&1" || true
+                    done
+                    SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-operator >/dev/null 2>&1" || true
+                    warn "    自愈重放完成(nbd 清理 ${_nbd_cleared} 台); operator 重建 prepare 后应出现 OSD"
+                    unset _hn2 _ip2 _user2 _pj _nbd_cleared
+                    _CEPH_OSD_RETRIED=1
+                fi
             fi
         elif [ "${i}" -eq 1 ] || [ $((i % 6)) -eq 0 ]; then
             say "  [${i}/90] phase=${_ph:-未知}(尚未 Ready, 继续等待)..."
@@ -868,6 +1006,20 @@ rm -f "${LOCAL_CR}"
         # 未 Ready(Progressing/Error)→ 硬失败 —— 否则 ceph_csi 模块必然报"未 Ready"且信息不如这里明确
         _ph_now="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
         if [ "${_ph_now}" = "Ready" ]; then
+            # ★ 2026-10-19: Ready 但 OSD=0 不能只 warn 继续 —— 否则会进入 ceph-expose-external
+            #   的官方导出, 在 0 OSD/PG inactive 上无限等待(实机 pending 15min+)。
+            _osd_now="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- timeout 15 ceph -s 2>/dev/null") || true )"
+            _osd_now="$(printf '%s\n' "${_osd_now}" | grep -E '^\s+osd:' | sed 's/^\s*//' || true)"
+            [ -n "${_osd_now}" ] || _osd_now="${_osd:-}"
+            if printf '%s' "${_osd_now}" | grep -q 'osd: 0 osds:'; then
+                err "  Ceph 集群 Ready 但 OSD=0 —— 不能继续(官方导出会永久等待, CSI/PVC 必失败)"
+                err "  常见根因: nbd 残留使 ceph-volume inventory 崩溃(No udev data for /sys/block/nbd0)"
+                err "  排查: kubectl -n ${CEPH_NAMESPACE} logs job/rook-ceph-osd-prepare-<node> --tail=50"
+                err "  处置: ① 停/删 RBD CSI nodeplugin; ② 各节点 modprobe -r nbd;"
+                err "        ③ 确认 ls /sys/block/nbd* 为空; ④ 删 prepare Job + 重启 rook-ceph-operator;"
+                err "        ⑤ 重跑 --steps ceph"
+                exit 1
+            fi
             warn "  Ceph 集群 Ready 但未 HEALTH_OK(ceph -s 见健康告警, 多数场景可继续)"
         else
             err "  Ceph 集群 900s 内未 Ready(phase=${_ph_now:-未知}); 查看: kubectl -n ${CEPH_NAMESPACE} get cephcluster,pods / ceph -s; 常见: 磁盘未清理/内存不足/镜像未同步"
@@ -875,6 +1027,26 @@ rm -f "${LOCAL_CR}"
         fi
         unset _ph_now
     fi
+
+    # ★ 2026-10-19: OSD 已就绪 → 把 nbd 从 nbds_max=0 恢复为默认设备。
+    #   [3/8] 预载 nbds_max=0 是为了挡住 CSI 在 prepare 前重载出 /dev/nbd*; 此时 OSD 已稳定,
+    #   CSI RBD 的 krbd 挂载需要 /dev/nbd*, 必须恢复(否则 PVC 挂载会失败)。
+    say "  恢复各节点 nbd 默认设备(CSI RBD krbd 需要)..."
+    for _hn4 in "${CEPH_NODE_HOSTS[@]}"; do
+        _ip4=""; _user4="${SSH_USER:-ubuntu}"
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            node_parse "${line}"
+            [ "${NODE_HOSTNAME}" = "${_hn4}" ] && { _ip4="${NODE_IP}"; _user4="${NODE_USER}"; break; }
+        done
+        [ -n "${_ip4}" ] || continue
+        case "$(_ceph_nbd_restore_one "${_ip4}" "${_user4}")" in
+            RESTORED) ok "    ${_hn4}: nbd 已恢复默认设备" ;;
+            IN-USE)   warn "    ${_hn4}: nbd 有活跃会话, 跳过恢复(不打断在用卷)" ;;
+            *)        warn "    ${_hn4}: nbd 恢复默认设备失败(CSI RBD 卷可能失败; 手工 modprobe nbd 后重跑)" ;;
+        esac
+    done
+    unset _hn4 _ip4 _user4
 
     # ★ 备份/恢复已拆出为独立模块(2026-09-07): 部署不再自动备份, 降低部署复杂度。
     #   需要备份时单独执行: --steps ceph_backup(CEPH_BACKUP_ACTION=save), 见 15_ceph_backup.sh。
@@ -912,7 +1084,7 @@ rm -f "${LOCAL_CR}"
             [ "${NODE_HOSTNAME}" = "${_hn3}" ] && { _ip3="${NODE_IP}"; break; }
         done
         [ -n "${_ip3}" ] || continue
-        node_ssh "${_ip3}" "${SSH_USER:-ubuntu}" "sudo chronyc makestep >/dev/null 2>&1 || true; sudo chronyc -a makestep >/dev/null 2>&1 || true" || true
+        node_ssh "${_ip3}" "$(ssh_user_for_ip "${_ip3}")" "sudo chronyc makestep >/dev/null 2>&1 || true; sudo chronyc -a makestep >/dev/null 2>&1 || true" || true
     done
     # 重启 mon deployments 触发 timecheck 重新采样(Rook 会重建, quorum 短暂重建, 不影响存储)
     SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-mon-a deploy/rook-ceph-mon-b deploy/rook-ceph-mon-c >/dev/null 2>&1" || true

@@ -3,14 +3,16 @@
 # MODULE: k8s_deploy
 # DESC: 部署 kubespray 集群(离线)
 # PHASE: k8s
-# DEFAULT: 0
+# DEFAULT: 1
 # REPEAT: 0
-# TOGGLE: K8S_ENABLED
 # REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs
 #   · node_pkgs(12_node_pkgs.sh): 节点系统包对账 —— 必须在 kubespray 之前(它的 bootstrap_os →
 #     system_packages 遇到 apt 依赖图破损会直接失败; 实测 2026-09-28 libudev1/udev 配对被打断)。
 #     ⚠ 序号 12 > 06 排不到前面 ⇒ 靠这行 REQUIRES 定序(与 kube_vip 当年同一手法)。
 # 说明: 调用 cubestack-offline.sh install; 透传 cluster.conf 中 PRELOAD_IMAGE_PATTERNS
+#   · 基座恒随全量部署(默认 / --with-k8s / --with-cubestack 都包含), 故 DEFAULT:1、无 TOGGLE ——
+#     原 K8S_ENABLED 开关已于 2026-10-16 移除(它不控制任何调度路径: 全量路径本就强制带上基座,
+#     --steps 单组件模式本就剔除基座); 旧 cluster.conf 里残留 K8S_ENABLED 行无副作用。
 # ============================================================
 set -euo pipefail
 
@@ -75,7 +77,7 @@ bash "${SCRIPT_DIR}/tools/k8s/sync-kubespray-config.sh" >/dev/null 2>&1 || \
 # ---------------- kube-vip: 阶段二的切换确认(必须在模块里做, 不能在 sync 里) ----------------
 # sync 的 stdout 上面被重定向到 /dev/null, 把倒计时放 sync 里用户看不见还会白等 30 秒。
 # 流程: 模块判阶段 → 需要切换则红底提示 + 倒计时 → 确认后 export 标志 → sync 才真正切入口。
-if [ "${KUBE_VIP_ENABLED:-false}" = "true" ] && [ "${HAPROXY_ENABLED:-false}" != "true" ] && [ "${KEEPALIVED_ENABLED:-false}" != "true" ]; then
+if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
     _KV_VIP="$(kube_vip_derive 2>/dev/null || true)"
     _KV_OLD="$(kube_vip_current_entry)"
     # 阶段二 = VIP 已真实绑在某台 master 上(与 sync 里的判定同一口径)
@@ -139,15 +141,16 @@ unset _ADDONS_YML
 if [ -n "${METALLB_POOL:-}" ] && [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "metallb" ]; then
     _FM_IP="$(first_master_ip 2>/dev/null || true)"
     if [ -n "${_FM_IP}" ]; then
+        _FM_USER="$(ssh_user_for_ip "${_FM_IP}")"
         _cur_pool="$(ssh -i "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}" \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
-            "${SSH_USER:-ubuntu}@${_FM_IP}" \
+            "${_FM_USER}@${_FM_IP}" \
             "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n metallb-system get ipaddresspool -o jsonpath='{.items[0].spec.addresses[0]}' 2>/dev/null" 2>/dev/null || true)"
         if [ -n "${_cur_pool}" ] && [ "${_cur_pool}" != "${METALLB_POOL}" ]; then
             warn "集群 MetalLB 池=${_cur_pool} 与 cluster.conf METALLB_POOL=${METALLB_POOL} 不一致, 重新应用池 CR..."
             ssh -i "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}" \
                 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
-                "${SSH_USER:-ubuntu}@${_FM_IP}" \
+                "${_FM_USER}@${_FM_IP}" \
                 "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n metallb-system patch ipaddresspool primary --type=merge -p '{\"spec\":{\"addresses\":[\"${METALLB_POOL}\"]}}' 2>/dev/null" >/dev/null 2>&1 \
                 && ok "已重新应用 MetalLB 池 → ${METALLB_POOL}" \
                 || warn "重新应用池失败(请手动: kubectl -n metallb-system patch ipaddresspool primary --type=merge -p '{\"spec\":{\"addresses\":[\"${METALLB_POOL}\"]}}')"
@@ -156,7 +159,7 @@ if [ -n "${METALLB_POOL:-}" ] && [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "metallb
         fi
         unset _cur_pool
     fi
-    unset _FM_IP
+    unset _FM_IP _FM_USER
 fi
 
 # ⚠ 覆盖安装前置: 检测节点上的**旧集群残留**(跨小版本 / 旧二进制)并(经确认后)自动清除。
@@ -193,6 +196,9 @@ OFFLINE_ENV=(
     "CUBESTACK_LOCAL_REPO_DIR=${LOCAL_REPO_DIR}"
     "CEPH_ENABLED=${_CEPH_SYSTEM_ON}"
     "CEPH_IMAGE_DIR=${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}"
+    # 节点 SSH 用户透传(root|ubuntu 单一旋钮): 修 cubestack-offline.sh 里 ansible ping -u 的
+    # 写死默认(ubuntu) —— 否则 SSH_USER=root 的集群在该连通性检查处必然失败(2026-10-15)。
+    "CUBESTACK_REMOTE_USER=${SSH_USER}"
 )
 unset _CEPH_SYSTEM_ON
 [ -n "${PRELOAD_IMAGE_PATTERNS+x}" ] && \

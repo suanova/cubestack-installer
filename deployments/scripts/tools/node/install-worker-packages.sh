@@ -122,12 +122,120 @@ declare -A NEED_SET
 for f in "${DEBS[@]}"; do
     pkg="$(deb_pkg_name "$f")"
     [ -n "${pkg}" ] || { warn "无法解析 deb 包名: $(basename "$f"), 跳过"; continue; }
+    # ★ 2026-10-14 重构(P0): 互斥提供者判定改为共享表(lib-common::pkg_conflict_providers,
+    #   与节点侧 _pkg_conflict_providers 同步; 夹具断言两处一致)—— 不再手写单个包名。
+    #   语义: 本工具只"补缺"; 若待装包的互斥提供者任一已装 → 跳过(保持节点既有口径 ——
+    #   如 VM 黄金镜像带 chrony 时跳过 timesyncd)。实机血证: 10-14 直接装 timesyncd
+    #   撞 dpkg "conflicts with time-daemon" 整批中止。
+    _cp_conflict=0
+    for _cp in $(pkg_conflict_providers "${pkg}"); do
+        [ -n "${REMOTE_VER[${_cp}]:-}" ] && { _cp_conflict=1; break; }
+    done
+    if [ "${_cp_conflict}" = "1" ]; then
+        warn "  [${pkg}] 节点已装互斥提供者(time-daemon 系只允许一个), 跳过(保持既有口径)"
+        continue
+    fi
     if [ -n "${REMOTE_VER[${pkg}]:-}" ]; then
         vlog "  [${pkg}] 已装 ${REMOTE_VER[${pkg}]}(离线包不重复装), 跳过"
         continue
     fi
     NEED_DEBS+=("$f"); NEED_PKGS+=("${pkg}"); NEED_SET["${pkg}"]=1
 done
+
+# ── ①b Breaks 预判 + 同版本 cohort 升级(2026-10-19 实机根因) ──
+# 场景: worker 未装 udev, 离线 udev=249.11-0ubuntu3.22 `Breaks: systemd (<< 249.11-0ubuntu3.22)`,
+#   而节点 systemd=3.21 已装。规则①"已装同包→跳过"让 systemd 升级版没进本次安装集合,
+#   只 dpkg -i udev → "installing udev would break systemd" 失败(实机 10.66.3.215/.204)。
+# 处理: 把 Breaks 指向的已装包**同版本 cohort**(离线集里所有同版本 deb, 如 systemd/
+#   libsystemd0/libudev1/systemd-sysv/libnss-systemd/libpam-systemd=3.22)一并加入本次安装,
+#   dpkg -i 原子升级整组; 若离线集没有可满足的升级版, 跳过该 deb 并告警(不制造半装/混合态)。
+if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1 && command -v dpkg >/dev/null 2>&1; then
+    declare -A DEB_BY_PKG=() DEB_VER_BY_PKG=() FORCE_COHORT=()
+    for f in "${DEBS[@]}"; do
+        p="$(deb_pkg_name "$f")"; [ -n "$p" ] || continue
+        v="$(dpkg-deb -f "$f" Version 2>/dev/null || true)"; [ -n "$v" ] || continue
+        if [ -z "${DEB_BY_PKG[${p}]:-}" ] || dpkg --compare-versions "$v" gt "${DEB_VER_BY_PKG[${p}]}"; then
+            DEB_BY_PKG["${p}"]="$f"; DEB_VER_BY_PKG["${p}"]="$v"
+        fi
+    done
+    _kept_debs=(); _kept_pkgs=()
+    for i in "${!NEED_DEBS[@]}"; do
+        f="${NEED_DEBS[$i]}"; pkg="${NEED_PKGS[$i]}"
+        _breaks="$(dpkg-deb -f "$f" Breaks 2>/dev/null || true)"
+        _bad=0
+        if [ -n "${_breaks}" ]; then
+            while IFS=',' read -ra _bgroups; do
+                for _bgrp in "${_bgroups[@]}"; do
+                    [ -n "${_bgrp// /}" ] || continue
+                    _bn="$(printf '%s' "$_bgrp" | sed -E 's/^[[:space:]]*([^ (]+).*/\1/')"
+                    _inst="${REMOTE_VER[${_bn}]:-}"
+                    [ -n "${_inst}" ] || continue
+                    # 只处理 "name (<< ver)" / "name (<= ver)" 等带版本约束的形态
+                    _op="$(printf '%s' "$_bgrp" | sed -nE 's/.*\(([<>]{1,2}=?|=)[[:space:]]*([^)]+)\).*/\1/p')"
+                    _bv="$(printf '%s' "$_bgrp" | sed -nE 's/.*\(([<>]{1,2}=?|=)[[:space:]]*([^)]+)\).*/\2/p')"
+                    [ -n "${_op}" ] && [ -n "${_bv}" ] || continue
+                    _conflict=0
+                    case "${_op}" in
+                        "<<") dpkg --compare-versions "${_inst}" lt "${_bv}" && _conflict=1 ;;
+                        "<=") dpkg --compare-versions "${_inst}" le "${_bv}" && _conflict=1 ;;
+                        "=")  dpkg --compare-versions "${_inst}" eq "${_bv}" && _conflict=1 ;;
+                        ">=") dpkg --compare-versions "${_inst}" ge "${_bv}" && _conflict=1 ;;
+                        ">>") dpkg --compare-versions "${_inst}" gt "${_bv}" && _conflict=1 ;;
+                    esac
+                    [ "${_conflict}" = "1" ] || continue
+                    _upv="${DEB_VER_BY_PKG[${_bn}]:-}"
+                    if [ -z "${_upv}" ]; then
+                        warn "  [${pkg}] Breaks ${_bn} (${_op} ${_bv}), 节点已装 ${_inst} 且离线集无该包升级版 → 跳过(不制造半装)"
+                        _bad=1; break
+                    fi
+                    _still=0
+                    case "${_op}" in
+                        "<<") dpkg --compare-versions "${_upv}" lt "${_bv}" && _still=1 ;;
+                        "<=") dpkg --compare-versions "${_upv}" le "${_bv}" && _still=1 ;;
+                        "=")  dpkg --compare-versions "${_upv}" eq "${_bv}" && _still=1 ;;
+                        ">=") dpkg --compare-versions "${_upv}" ge "${_bv}" && _still=1 ;;
+                        ">>") dpkg --compare-versions "${_upv}" gt "${_bv}" && _still=1 ;;
+                    esac
+                    if [ "${_still}" = "1" ]; then
+                        warn "  [${pkg}] Breaks ${_bn} (${_op} ${_bv}); 离线升级版 ${_upv} 仍不满足 → 跳过"
+                        _bad=1; break
+                    fi
+                    vlog "  [${pkg}] Breaks ${_bn} (${_op} ${_bv}) → 同版本 cohort 升级 ${_bn}=${_upv}"
+                    FORCE_COHORT["${_upv}"]=1
+                done
+                [ "${_bad}" = "1" ] && break
+            done <<< "${_breaks}"
+        fi
+        if [ "${_bad}" = "0" ]; then _kept_debs+=("$f"); _kept_pkgs+=("${pkg}"); fi
+    done
+    NEED_DEBS=("${_kept_debs[@]}"); NEED_PKGS=("${_kept_pkgs[@]}")
+    NEED_SET=(); for _kp in "${NEED_PKGS[@]}"; do NEED_SET["${_kp}"]=1; done
+    if [ "${#FORCE_COHORT[@]}" -gt 0 ]; then
+        for f in "${DEBS[@]}"; do
+            v="$(dpkg-deb -f "$f" Version 2>/dev/null || true)"
+            [ -n "${FORCE_COHORT[${v}]:-}" ] || continue
+            p="$(deb_pkg_name "$f")"; [ -n "$p" ] || continue
+            # cohort 是"整版本组"批量加入, 会绕过上面的互斥预检 —— time-daemon 系必须在这里
+            # 再挡一次: systemd-timesyncd Conflicts: time-daemon, 节点已装 chrony 时 dpkg -i
+            # 会因冲突整批失败(2026-10-19 实机解决 udev 问题时发现)。
+            if [ "${p}" = "systemd-timesyncd" ]; then
+                _td_installed=0
+                for _tdp in $(pkg_conflict_providers "${p}"); do
+                    [ -n "${REMOTE_VER[${_tdp}]:-}" ] && { _td_installed=1; break; }
+                done
+                unset _tdp
+                if [ "${_td_installed}" = "1" ]; then
+                    vlog "  [${p}] 节点已装 time-daemon 提供者 → cohort 中跳过(保持既有口径)"
+                    continue
+                fi
+            fi
+            if [ -z "${NEED_SET[${p}]:-}" ]; then
+                vlog "  [${p}] 同版本 cohort 升级(版本 ${v}) → 加入本次安装"
+                NEED_DEBS+=("$f"); NEED_PKGS+=("${p}"); NEED_SET["${p}"]=1
+            fi
+        done
+    fi
+fi
 
 # ② 依赖预检(fixpoint 迭代剔除): Depends 逗号分组(每组内 | 为备选), 每组至少一个备选
 #    在(远端已装 ∪ 剩余待装)内 → 满足; 否则该 deb 剔除并告警。最多迭代 10 轮。
@@ -217,7 +325,8 @@ fi
 rm -f "${REMOTE_FIX}"
 
 # ── 复制待装包到目标节点 ──
-${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" "mkdir -p /tmp/packages" 2>/dev/null || true
+# 重建目标目录(先清: /tmp 陈旧文件属主非本次用户时 scp/rsync 会被 fs.protected_regular 拒, root 也不例外)
+${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" "sudo rm -rf /tmp/packages && mkdir -p /tmp/packages" 2>/dev/null || true
 say "复制 ${#NEED_DEBS[@]} 个离线包到 ${IP}:/tmp/packages/ ..."
 for f in "${NEED_DEBS[@]}"; do
     vlog "  复制: $(basename "$f")"

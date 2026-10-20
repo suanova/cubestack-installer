@@ -41,7 +41,7 @@ deploy-cluster.sh --upgrade [--to <版本>]        # 同义包装(与 --fresh �
 - **幂等 + 断点续跑**:每一步(一个小版本 / etcd 桥版本)完成后写状态,可中断续跑;
 - **每一步都可验收**:升级后跑 `--steps verify_k8s_base`(待建)断言 apiserver/etcd/CNI 健康;
 - **默认 dry-run**:不带 `--yes` 只打印计划与风险点(与 `reset` 的显式确认风格一致);
-- **不碰数据面业务**:CRD/operator(ceph/rook、metax、lws…)各自有独立升级路径,本 feature 只负责 k8s 基座;
+- **不碰数据面业务**:CRD/operator(ceph/rook、metax、nvidia…)各自有独立升级路径,本 feature 只负责 k8s 基座;
 - **离线件**:每一步用到的二进制(逐小版本的 kubelet/kubeadm/kubectl、etcd 桥版本)必须先在
   `deployments/offline-files/kubespray/` 内(命名与 download role 的 dest 一致),缺件即停。
 
@@ -66,7 +66,7 @@ upgrade(cluster, target=cluster.conf 的 K8S_VERSION, bridge_etcd=3.5.33):
     4. 收尾:
        - 入口与 SAN: 若入口地址集合变化, 按两阶段流程处理(docs/kube-vip-api-ha.md §7)
        - 部署机 kubeconfig: client 证书轮换策略
-       - 组件面: 提示 operator(ceph/metax/lws)各自的升级动作(不在本 feature 内)
+       - 组件面: 提示 operator(ceph/metax/nvidia)各自的升级动作(不在本 feature 内)
     5. 回滚(每步前记录):
        - kubeadm 不支持降级 ⇒ 回滚 = 还原该步之前的 etcd 快照 + 节点快照(需先做备份, 见 reset 的替代)
        - 因此 --check 阶段必须显式声明"回滚窗口"与备份点

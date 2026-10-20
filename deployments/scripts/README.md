@@ -6,7 +6,7 @@
 
 本目录脚本提供完整的**命令行自动化**能力:从宿主网络初始化、SSH 密钥、master 虚拟机创建与免密登录,到 kubespray 兼容 inventory 生成与(可选)K8s 离线部署。
 
-所有脚本**统一读取** `config/cluster.conf` 作为唯一数据源,不硬编码 IP / 用户名 / 密码 / 路径。配置优先级:**环境变量 > 配置文件 > 内置兜底默认**。
+所有脚本**统一读取** `config/cluster.conf`(**必改项 + 组件开关 + 高频变量**)与 `config/cluster.defaults.conf`(**高级/默认值层**, 2026-10-15 拆分, 随仓库分发)作为唯一数据源,不硬编码 IP / 用户名 / 密码 / 路径。配置优先级:**环境变量 > cluster.conf > cluster.defaults.conf(内置兜底)**。
 
 > 断点续跑:每阶段完成自动保存状态到 `config/.deploy.state`;下次启动自动跳过已完成阶段;`--fresh` 清状态重新执行。
 
@@ -37,8 +37,8 @@ sudo docker run -itd --name cubestack-install --network=host \
 sudo docker exec -it cubestack-install bash
 
 # ⑤ 从 MinIO 拉取离线文件(默认下载部署必需子目录, 排除 virtual-machine; 已挂载即落盘宿主机)
-mc alias set minio http://192.168.16.6:9000 admin CHANGE_ME    # 换真实 MinIO 地址/凭证
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh   # 默认: kubespray/metax-gpu/lws/os/ceph(排除 VM 镜像)
+mc alias set minio http://<minio-host>:9000 admin CHANGE_ME    # 换真实 MinIO 地址/凭证
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh   # 默认: kubespray/metax-gpu/os/ceph(排除 VM 镜像)
 
 # ⑥ 首次: 从模板生成真实配置(cluster.conf 是唯一数据源, 所有 IP 不硬编码)
 cd /opt/cubestack-installer
@@ -80,17 +80,15 @@ deployments/scripts/
 │   │   ├── 01_vm_network.sh   #     VM 宿主网络(bridge/nat; 默认关, 由 tools/vm/create-vms.sh 创建 VM 时自动执行)
 │   │   ├── 02_vm_sshkey.sh    #     生成 SSH 密钥
 │   │   ├── 03_vm_create.sh    #     创建虚拟机(默认关, 由 tools/vm/create-vms.sh 独立执行)
-│   │   ├── 04_harbor.sh       #     Harbor 镜像仓库(集群外私有仓库, 部署前就绪)
-│   │   ├── 05_lb_haproxy.sh   #     HAProxy API 四层负载均衡(集群部署前准备)
-│   │   └── 06_lb_keepalived.sh#     Keepalived API VIP 高可用(集群部署前准备)
+│   │   └── 04_harbor.sh       #     Harbor 镜像仓库(集群外私有仓库, 部署前就绪)
 │   ├── 02_k8s/                #   阶段二: 离线部署 kubespray(不依赖 VM/裸金属)
 │   │   ├── 01_k8s_passwordless.sh  # SSH 免密
 │   │   ├── 02_k8s_workerbm.sh      # worker 节点离线装包(全部 worker)
 │   │   ├── 03_k8s_hosts.sh         # 更新 /etc/hosts
 │   │   ├── 04_k8s_inventory.sh     # 生成 inventory + 同步配置
 │   │   ├── 05_k8s_ntp.sh           # NTP 时间同步
-│   │   ├── 06_k8s_deploy.sh        # 部署 kubespray(默认关, K8S_ENABLED; 完成后单节点集群自动解除 master 污点使其可调度)
-│   │   ├── 07_k8s_scale.sh         # 扩容集群(默认关, K8S_SCALE_ENABLED; 扩容后单 control-plane 重新解除污点)
+│   │   ├── 06_k8s_deploy.sh        # 部署 kubespray 基座(恒随全量部署; 完成后单节点集群自动解除 master 污点使其可调度)
+│   │   ├── 07_k8s_scale.sh         # 扩容集群(仅 --with-scale / --steps k8s_scale 触发, 无开关; 扩容后单 control-plane 重新解除污点)
 │   │   ├── 08_verify_kube_vip.sh   # 验证 API VIP 高可用(六项含漂移演练; --steps verify_kube_vip)
 │   │   ├── 09_kube_vip.sh          # API Server VIP 高可用(默认关; 双向收敛: KUBE_VIP_ENABLED=true 装/修,
 │   │   │                           #   =false 清理并校验无残留; DEFAULT:1 常驻全量运行; 见 docs/kube-vip-api-ha.md 第 18 节)
@@ -104,14 +102,12 @@ deployments/scripts/
 │       ├── 04_local_path.sh   #    local-path-provisioner 就绪检查(可选, LOCAL_PATH_ENABLED)
 │       ├── 05_k8s_registry.sh #    集群内内置 registry addon(REGISTRY_ENABLED; 后端可用 ceph-block 替代 local-path)
 │       ├── 06_gpu_operator.sh #    沐曦 GPU Operator(P1-5, GPU_OPERATOR_ENABLED)
-│       ├── 07_gpu_lws.sh      #    LeaderWorkerSet(P1-8, LWS_ENABLED)
 │       ├── 11_keycloak.sh     #    Keycloak 统一认证(P2-1, KEYCLOAK_ENABLED)
 │       ├── 12_kueue.sh        #    Kueue 队列治理(P2-2 DEV-29, KUEUE_ENABLED)
 │       ├── 13_kubevirt.sh     #    KubeVirt 虚拟机能力(P2-3 DEV-35, KUBEVIRT_ENABLED)
 │       ├── 14_lustre_csi.sh   #    Lustre CSI(P3-1 DEV-26, LUSTRE_CSI_ENABLED)
-│       ├── 20_cubestack_apps.sh#   CubeStack 自研模块占位(20 起, CUBESTACK_APPS_ENABLED)
 │       └── 2x_verify_*.sh     #    端到端验证(verify_metallb / verify_registry_storage / verify_metax_gpu
-│                              #    / verify_lws / verify_ceph; --steps verify 全跑)
+│                              #    / verify_ceph 等; --steps verify 全跑)
 ├── tools/                     # ★ 工具脚本(模块的底层实现, 按领域分目录)
 │   ├── check-modules.sh       #   静态校验(全 19 项) — 开发期 + CI, 本地可一条命令复现
 │   ├── check-manifests.sh     #   静态校验: 仓库自有 YAML 清单能否解析
@@ -120,7 +116,7 @@ deployments/scripts/
 │   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / install-worker-packages.sh / prepare-workers.sh
 │   │                         #        setup-ntp.sh / sync-hosts.sh / sync-ca*.sh / rebootstrap*.sh
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
-│   ├── images/                #   离线镜像工具: metax-save/load-images.sh / lws-save-images.sh / ceph-save-images.sh
+│   ├── images/                #   离线镜像工具: metax-save/load-images.sh / ceph-save-images.sh
 │   │                         #        harbor-save-images.sh / rdma-save-images.sh / netshoot-rdma-build.sh
 │   ├── offline/               #   MinIO 离线文件: fetch-offline-from-minio.sh(拉取) / sync-to-minio.sh(推送) / trim-offline-files.sh(清理) / fetch-offline-files.sh(旧)
 │   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
@@ -145,12 +141,12 @@ deployments/scripts/
 模块头部用注释声明元数据,框架**自动发现**(递归扫描子目录, 按 目录序号+文件序号 排序):
 
 ```bash
-# MODULE: k8s_deploy          # 模块 key(缺省=文件名去掉 NN_ 前缀)
-# DESC: 部署 kubespray 集群   # 一句话描述
-# PHASE: k8s                  # 阶段: env / k8s / addon
+# MODULE: ceph                # 模块 key(缺省=文件名去掉 NN_ 前缀)
+# DESC: 部署 Rook-Ceph 存储集群 # 一句话描述
+# PHASE: addon                # 阶段: env / k8s / addon
 # DEFAULT: 0                  # 是否默认启用
 # REPEAT: 0                   # 1=可重复执行(不写断点状态)
-# TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量, true 时自动启用
+# TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED   # (可选) cluster.conf 变量, true 时自动启用
 ```
 
 **新增模块**:
@@ -160,28 +156,35 @@ deployments/scripts/
 
 **tools/ 工具脚本**:模块是"薄封装",具体动作(网络/SSH/装包/生成 inventory/配置同步等)在 `tools/<领域>/` 下的工具脚本中实现,被模块通过 `bash "${SCRIPT_DIR}/tools/<领域>/xxx.sh"` 复用。新增工具脚本放入对应领域目录即可(网络→`tools/net/`, 节点→`tools/node/`, inventory/配置→`tools/k8s/`, 负载均衡/registry→`tools/lb/`, 虚拟机→`tools/vm/`)。
 
-**向后兼容**:旧模块名(`net`/`ssh_key`/`vm`/`ssh_passwordless`/`worker_bm`/`hosts`/`inventory`/`ntp`/`k8s`/`scale`/`lws`)由 `lib-module.sh` 的 `MODULE_ALIAS` 自动映射,旧用法 `--steps vm,k8s` 仍然有效。
+**向后兼容**:旧模块名(`net`/`ssh_key`/`vm`/`ssh_passwordless`/`worker_bm`/`hosts`/`inventory`/`ntp`/`k8s`/`scale`)由 `lib-module.sh` 的 `MODULE_ALIAS` 自动映射,旧用法 `--steps vm,k8s` 仍然有效。
 
 项目根目录 `scripts/` 下仅有 dev 启动脚本(`dev.sh`/`start-backend.sh`/`start-frontend.sh`),部署脚本统一在 `deployments/scripts/`。
 
-统一配置:见 `config/cluster.conf`(真实,已 gitignore)与 `config/cluster.conf.example`(模板,提交)。
+统一配置:见 `config/cluster.conf`(真实,已 gitignore)、`config/cluster.conf.example`(主文件模板,提交)
+与 `config/cluster.defaults.conf`(高级/默认值层,提交,自动加载)。
 全阶段组件规划与进度追踪:见 `docs/cluster-components-plan.md`(P1/P2/P3)。
 
 ---
 
-## 3. 统一配置文件(config/cluster.conf)
+## 3. 统一配置文件(cluster.conf + cluster.defaults.conf)
 
-配置分五大块,字段含义见文件内注释:
+**两层结构(2026-10-15 拆分/精简)**:`cluster.conf`(从 `.example` 复制)= **必改项 + VIP/入口 + 全部 `*_ENABLED` 开关 + 凭据(用户名/密码)**;
+`cluster.defaults.conf`(随仓库分发, 一般不改)= 其余一切(版本基线/镜像版本钉子/PRELOAD 清单、组件深度参数、离线路径、NTP/CIDR、镜像源、Ceph 全套…)。
+`load_config` 先加载主文件、后加载 defaults(全 `${VAR:-default}` 自默认)⇒ **要覆盖 defaults 里任意变量, 在 cluster.conf 写同名项即可**。
+
+配置分五大块,字段含义见文件内注释(下表**粗体**= cluster.conf/cluster.conf.example 主文件; 其余在
+`cluster.defaults.conf` 高级层, 需要时在 cluster.conf 写同名变量覆盖):
 
 | 区块 | 关键项 | 说明 |
 |---|---|---|
-| **核心必改项** | `SSH_DEFAULT_PASSWORD` `NODES` `METALLB_POOL` | 节点默认密码、节点清单、MetalLB 地址池(文件顶部醒目位置) |
+| **核心必改项** | `SSH_USER` `SSH_DEFAULT_PASSWORD` `NODES` `METALLB_POOL` | 节点安装用户(root/ubuntu)、默认密码、节点清单、MetalLB 地址池(文件顶部醒目位置) |
 | 服务暴露 | `SERVICE_EXPOSE_MODE` | 对外暴露方式全局开关: `nodeport`(默认, NodePort, 自动关 MetalLB)/ `metallb`(生产, LoadBalancer VIP); 见 §5.8 |
-| 宿主机 | `HOST_PHYS_IP` | 宿主机物理 IP(SNAT 源) |
-| SSH | `SSH_KEY_NAME` | 密钥名(默认密码见核心必改项 `SSH_DEFAULT_PASSWORD`; 节点独立密码写 NODES 第5字段) |
+| 宿主机 | `HOST_PHYS_IP` | 宿主机物理 IP(SNAT 源; 留空=自动检测) — *在 `cluster.defaults.conf`* |
+| SSH | **`SSH_USER`** `SSH_KEY_NAME` | 节点安装用户(`root`/`ubuntu`, 默认 ubuntu; NODES 第4字段 `-` 跟随本值; **主文件**); 密钥名(`SSH_KEY_NAME` 在 defaults; 默认密码见核心必改项; 节点独立密码写 NODES 第5字段) |
 | 节点规划 | `NODES=( ... )` | 每行一节点(5字段, 不区分虚拟机/裸金属); 虚拟机规格见 `tools/vm/vm-nodes.conf` |
-| 离线文件 | `OFFLINE_FILES_DIR` `LOCAL_REPO_DIR` `MINIO_*` | 离线 binary/镜像目录与 MinIO 下载配置(§2.1b) |
-| kubespray | `KUBESPRAY_INV_DIR` `KUBESPRAY_DIR` `UPDATE_ETC_HOSTS` | inventory 输出位置、playbook 位置、是否写 /etc/hosts |
+| 离线文件 | `OFFLINE_FILES_DIR` `LOCAL_REPO_DIR` `MINIO_*` | 离线 binary/镜像目录与 MinIO 下载配置(§2.1b, **全部在 defaults**) |
+| kubespray | `KUBESPRAY_INV_DIR` `KUBESPRAY_DIR` `UPDATE_ETC_HOSTS` | inventory/树路径、hosts 更新开关(§2.7) — **全部在 defaults** |
+| 版本 | `KUBESPRAY_VERSION` `K8S_VERSION` `KUBESPRAY_PROFILE` / 镜像版本钉子 | **全部在 defaults**(★ 升级入口; 见 defaults「版本基线/镜像版本」节) |
 | NTP 时间同步 | `NTP_ENABLED` `NTP_SERVER` `NTP_UPSTREAM` `NTP_ALLOW` `NTP_MAX_OFFSET_MS` | k8s 部署前的节点时钟一致化(见 §5.8.2) |
 
 > **虚拟机配置已独立**: 虚拟机创建/网络变量(`BASE_IMG` `VM_DISK_DIR` `VM_SSH_USERS` `VM_SUBNET`
@@ -195,7 +198,8 @@ role,hostname,ip,ssh_user,ssh_password
 ```
 
 - `role`: `master`(控制平面) | `worker`(工作节点)
-- `ssh_user`: 节点 SSH 用户名
+- `ssh_user`: 节点 SSH 用户名。`-`(或留空) = **跟随全局 `SSH_USER`**(cluster.conf, 默认 `ubuntu`;
+  切换安装用户只改 SSH_USER 一处即可); 显式写用户名 = 该节点覆盖(与全局不一致时部署启动会告警)
 - `ssh_password`: `-` = 用默认密码 `SSH_DEFAULT_PASSWORD`(全节点默认一致); 显式密码 = 该节点用此密码(**支持裸金属不同密码场景**)
 
 ```bash
@@ -232,12 +236,12 @@ NODES=(
 
 ```bash
 sudo ./scripts/deploy-cluster.sh                       # 默认 = --with-cubestack(基座 + 全部启用的 operator)
-sudo ./scripts/deploy-cluster.sh --with-k8s            # 追加 k8s 部署模块(= --enable k8s, 兼容旧名)
+sudo ./scripts/deploy-cluster.sh --with-k8s            # 仅 kubespray 基座(k8s + metallb/local-path/registry, 不含 operator)
 sudo ./scripts/deploy-cluster.sh --steps vm,k8s        # 只运行指定模块(逗号分隔, 旧名自动映射)
 sudo ./scripts/deploy-cluster.sh --skip hosts          # 跳过某模块
 sudo ./scripts/deploy-cluster.sh --skip net --with-k8s  # 全裸金属:跳过网络模块, 部署 k8s
 sudo ./scripts/deploy-cluster.sh --phase k8s           # 仅运行 k8s 阶段
-sudo ./scripts/deploy-cluster.sh --enable gpu_operator,lws  # 启用默认关闭模块
+sudo ./scripts/deploy-cluster.sh --enable gpu_operator,ceph  # 启用默认关闭模块
 sudo ./scripts/deploy-cluster.sh --only <host>         # 仅处理指定节点(可多次)
 sudo ./scripts/deploy-cluster.sh --list-steps          # 查看全部模块(自动发现)
 sudo ./scripts/deploy-cluster.sh --list                # 仅打印集群规划(只读)
@@ -511,7 +515,7 @@ bare-metal worker(Ubuntu)无法联网时,用 offline-files 中的离线 `.deb` �
 
 ### 5.11 fetch-offline-from-minio.sh —— 从 MinIO 拉取离线文件
 
-部署机/新机器缺离线文件时,从 MinIO 下载(**默认拉取部署必需子目录**: kubespray/metax-gpu/lws/os/ceph 等,**排除 virtual-machine** 虚拟机镜像;需要时可 `--sub virtual-machine` 按需拉 VM 镜像,或 `--all` 真正全量)。
+部署机/新机器缺离线文件时,从 MinIO 下载(**默认拉取部署必需子目录**: kubespray/metax-gpu/os/ceph 等,**排除 virtual-machine** 虚拟机镜像;需要时可 `--sub virtual-machine` 按需拉 VM 镜像,或 `--all` 真正全量)。
 
 **默认下载目录: `/opt/cubestack-installer/deployments/offline-files`(即 `OFFLINE_FILES_DIR` 根)**:
 - 在 CLI 容器内执行:下载直接落到容器挂载的 offline-files(宿主机大磁盘),**即装即用**;
@@ -537,7 +541,7 @@ sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --auto       # 宿主�
 
 ### 5.12 sync-to-minio.sh —— 本地 offline-files 全量镜像同步到 MinIO
 
-源机器把本地 `offline-files` 的**所有子目录**(ceph/kubespray/lws/metax-gpu/os/virtual-machine ...)整体镜像到 MinIO 的 `<桶>/offline-files/`(远端目录结构与本地完全一致),供各部署机 `fetch-offline-from-minio.sh` 拉取(下载侧不变)。等价于 `mc mirror --overwrite ./offline-files/ minio/cubestack-installer/offline-files/`:
+源机器把本地 `offline-files` 的**所有子目录**(ceph/kubespray/metax-gpu/os/virtual-machine ...)整体镜像到 MinIO 的 `<桶>/offline-files/`(远端目录结构与本地完全一致),供各部署机 `fetch-offline-from-minio.sh` 拉取(下载侧不变)。等价于 `mc mirror --overwrite ./offline-files/ minio/cubestack-installer/offline-files/`:
 
 ```bash
 ./scripts/tools/offline/sync-to-minio.sh               # 增量同步(默认 mc mirror --overwrite, 自动发现新增/变更文件)

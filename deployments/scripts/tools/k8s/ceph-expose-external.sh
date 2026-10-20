@@ -128,8 +128,11 @@ _ceph_exec() {
 # ── 远端应用 YAML: <内容> <临时名> → cat > /tmp + kubectl apply(幂等) ──
 _apply_yaml() {
     local content="$1" name="$2"
+    # ★ 先清陈旧目标再写(2026-10-16 实机, 同 03_ceph_csi.sh apply_remote): sticky /tmp +
+    #   fs.protected_regular=2 下, 他人遗留的同名文件会让 O_CREAT 打开被拒(root 也不例外);
+    #   SSH_USER 切换后必炸。sudo rm -f 两种身份下都能清。
     printf '%s' "${content}" | ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "cat > /tmp/${name}.yaml && ${K} apply -f /tmp/${name}.yaml" \
+        "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}" "sudo rm -f /tmp/${name}.yaml; cat > /tmp/${name}.yaml && ${K} apply -f /tmp/${name}.yaml" \
         && SSH "rm -f /tmp/${name}.yaml" >/dev/null 2>&1 || true
 }
 _svc_np()  { ( SSH "${K} -n ${CEPH_NAMESPACE} get svc "$1" -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null" || true ); }
@@ -239,8 +242,19 @@ _export_official_env() {
     local _py="${ROOK_DIR}/external/create-external-cluster-resources.py"
     [ -f "${_py}" ] || { warn "  vendored 官方导出脚本缺失: ${_py}(联网机从 rook v1.20.2 deploy/examples/external 拷贝)"; return 1; }
     say "[导出] 官方 external-ceph.env(create-external-cluster-resources.py 经 toolbox)..."
+
+    # ★ 2026-10-19: 0 OSD 时官方脚本会在 inactive PG 上永久等待(实机 pending 15min+)。
+    #   先探测 OSD 数; 为 0 直接跳过(自研 conf 已导出), 由上层把 0-OSD 当硬失败。
+    local _osd_line _osd_n
+    _osd_line="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- timeout 15 ceph -s 2>/dev/null | grep -m1 'osd:'") || true )"
+    _osd_n="$(printf '%s' "${_osd_line}" | awk '{print $2}' | tr -d ',')"
+    if [ -n "${_osd_n}" ] && [ "${_osd_n}" = "0" ]; then
+        warn "  Ceph OSD=0, 跳过官方 external-ceph.env 导出(自研 conf 已导出; 先修复 OSD 再重跑)"
+        return 1
+    fi
+
     # ① 脚本拷进 toolbox(toolbox 内有 ceph.conf + admin keyring + python3)
-    if ! base64 -w0 "${_py}" | SSH "${K} -n ${CEPH_NAMESPACE} exec -i deploy/rook-ceph-tools -- bash -c 'base64 -d > /tmp/create-external-cluster-resources.py'" >/dev/null 2>&1; then
+    if ! base64 -w0 "${_py}" | SSH "${K} -n ${CEPH_NAMESPACE} exec -i deploy/rook-ceph-tools -- bash -c 'timeout 30 base64 -d > /tmp/create-external-cluster-resources.py'" >/dev/null 2>&1; then
         warn "  官方导出脚本拷入 toolbox 失败(检查 toolbox 是否 Ready: kubectl -n ${CEPH_NAMESPACE} get pods | grep tools)"; return 1
     fi
     # ② 组装参数: RBD 池必填; CephFS 启用时带 fs/两池; RGW 启用时带端点+realm/zone
@@ -255,11 +269,24 @@ _export_official_env() {
         #   声明生效前展开 → set -u 下 unbound variable(2026-09-10 实机命中)。拆两行。
         local _rgw_ep="${RGW_EP#http://}"
         _rgw_ep="${_rgw_ep#https://}"
-        _py_args="${_py_args} --rgw-endpoint ${_rgw_ep} --rgw-realm-name s3-store --rgw-zonegroup-name s3-store --rgw-zone-name s3-store"
+        # ★ 2026-10-19: RGW 未 Ready 时官方脚本会在 realm/zonegroup/zone 上反复失败并长时间空等
+        #   (实机: 0 OSD 修复后仍卡在 radosgw-admin; 端点 10.66.3.215:80 connection refused)。
+        #   先查 CephObjectStore phase + 端点可达性; 未就绪就省略 RGW 参数(CSI 用户仍会导出),
+        #   自研 conf 已包含 RGW 信息, 消费者可继续用手填路径。
+        local _rgw_phase _rgw_ok=0
+        _rgw_phase="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephobjectstore s3-store -o jsonpath='{.status.phase}' 2>/dev/null") || true )"
+        if [ "${_rgw_phase}" = "Ready" ] && timeout 5 curl -s -o /dev/null "http://${_rgw_ep}/" 2>/dev/null; then
+            _rgw_ok=1
+        else
+            warn "  CephObjectStore/RGW 未就绪(phase=${_rgw_phase:-unknown}, endpoint=${_rgw_ep}); 官方导出省略 RGW 参数"
+        fi
+        if [ "${_rgw_ok}" = "1" ]; then
+            _py_args="${_py_args} --rgw-endpoint ${_rgw_ep} --rgw-realm-name s3-store --rgw-zonegroup-name s3-store --rgw-zone-name s3-store"
+        fi
     fi
     # ③ toolbox 内运行(用户已存在 → 脚本幂等: EEXIST 回退 user info; 密钥轮换 CEPHX_KEY_GENERATION 自动递增)
     say "  toolbox 运行官方导出脚本(${_py_args})..."
-    if ! SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- python3 /tmp/create-external-cluster-resources.py ${_py_args}" >/tmp/ceph-ext-export.log 2>&1; then
+    if ! SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- timeout 120 python3 /tmp/create-external-cluster-resources.py ${_py_args}" >/tmp/ceph-ext-export.log 2>&1; then
         warn "  官方导出脚本运行失败(见 /tmp/ceph-ext-export.log; 常见: rgw 参数与 RGW 部署不一致/池不存在)"
         SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- tail -5 /tmp/create-external-cluster-resources.py.log" >/dev/null 2>&1 || true
         return 1
@@ -267,7 +294,7 @@ _export_official_env() {
     # ④ 取回 env 输出 → 部署机指定目录
     local _env_out="${REPO_ROOT}/deployments/config/external-ceph.env"
     mkdir -p "$(dirname "${_env_out}")"
-    if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- cat /tmp/external-ceph.env" > "${_env_out}" 2>/dev/null \
+    if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- timeout 60 cat /tmp/external-ceph.env" > "${_env_out}" 2>/dev/null \
         && grep -q "ROOK_EXTERNAL_FSID\|ROOK_EXTERNAL_CEPH_MON_DATA" "${_env_out}"; then
         chmod 600 "${_env_out}" 2>/dev/null || true
         ok "  官方 external-ceph.env 已导出 → ${_env_out}"
@@ -465,7 +492,7 @@ apply_main() {
             "${ROOK_DIR}/external/03-cephfilesystem-external.yaml")" \
             || { warn "  CephFilesystem CR 模板缺失: ${ROOK_DIR}/external/03-cephfilesystem-external.yaml"; unset _fp _fp_pool _fp_pg; return 0; }
         printf '%s' "${_FS_CR}" | ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "cat > /tmp/ceph-ext-fs.yaml && ${K} apply -f /tmp/ceph-ext-fs.yaml" \
+            "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}" "sudo rm -f /tmp/ceph-ext-fs.yaml; cat > /tmp/ceph-ext-fs.yaml && ${K} apply -f /tmp/ceph-ext-fs.yaml && rm -f /tmp/ceph-ext-fs.yaml" \
             && ok "  CephFilesystem CR ${EXT_FS} 已 apply(Rook 部署 MDS)" \
             || warn "  CephFilesystem CR apply 失败"
         # 等 MDS 拉起(fs active; 最长 300s)—— 消费方 CephFS SC 要等 fs 在线

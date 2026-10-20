@@ -5,7 +5,10 @@
 # PHASE: k8s
 # DEFAULT: 0
 # REPEAT: 1
-# TOGGLE: K8S_SCALE_ENABLED
+# 说明: 仅经命令行触发(--with-scale 只跑本模块 / --steps k8s_scale); 无 cluster.conf 开关 ——
+#   原 K8S_SCALE_ENABLED 已于 2026-10-16 移除: 历史注释称"= --with-scale"但实际不是 ——
+#   置 true 会把本模块塞进**每一次全量部署**, 且在全量计划中排在 k8s_deploy **之前**,
+#   新装环境集群尚不存在 → 本模块"集群不可达即中止" → 整次部署被掐断。
 #
 # 场景一: 新节点为虚拟机且尚未创建
 #   虚拟机创建由 tools/vm/create-vms.sh 独立执行(不经过主程序): 先在 tools/vm/vm-nodes.conf
@@ -383,6 +386,9 @@ OFFLINE_ENV=(
     "CEPH_ENABLED=${_CEPH_PRELOAD}"
     "CEPH_CSI_ENABLED=${_CEPH_PRELOAD}"
     "CEPH_IMAGE_DIR=${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}"
+    # 节点 SSH 用户透传(root|ubuntu 单一旋钮; 与 06_k8s_deploy 同口径 —— 修包装器里
+    # ansible ping -u 的写死默认)
+    "CUBESTACK_REMOTE_USER=${SSH_USER}"
 )
 [ -n "${PRELOAD_IMAGE_PATTERNS+x}" ] && \
     OFFLINE_ENV+=("CUBESTACK_PRELOAD_IMAGE_PATTERNS=${PRELOAD_IMAGE_PATTERNS}")

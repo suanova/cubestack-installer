@@ -22,6 +22,13 @@ export REAL_HOME REAL_USER
 CLUSTER_CONF="${CLUSTER_CONF:-${REPO_ROOT}/deployments/config/cluster.conf}"
 export CLUSTER_CONF
 
+# 高级/默认值层配置(2026-10-15 拆分, 唯一配置源的**默认值半边**):
+#   cluster.conf         = 必改项 + 组件启停开关 + 高频变量(用户日常编辑; gitignored)
+#   cluster.defaults.conf = 高级/自定义变量(随仓库分发; 全部 ${VAR:-default} 自默认写法)
+# 加载顺序(**cluster.conf 先, defaults 后**)⇒ 优先级: 环境变量 > cluster.conf > cluster.defaults.conf。
+CLUSTER_DEFAULTS_CONF="${CLUSTER_DEFAULTS_CONF:-${REPO_ROOT}/deployments/config/cluster.defaults.conf}"
+export CLUSTER_DEFAULTS_CONF
+
 # ---------------- 集群名(固定默认, 单集群) ----------------
 # 默认集群名 cubestack-cluster, 用于 inventory/offline-files 目录与日志命名; 环境变量可覆盖
 CLUSTER_NAME="${CLUSTER_NAME:-cubestack-cluster}"
@@ -230,7 +237,7 @@ emit_ip() {
 # ---------------- skopeo 运行时最小 trust policy(/etc/containers/policy.json) ----------------
 # 本机(尤其 CLI 容器内)无容器运行时 daemon 配置目录时, skopeo copy/inspect 会因读不到
 # policy.json 而 fatal: "Error loading trust policy: open /etc/containers/policy.json: no such file or directory"。
-# 所有用 skopeo 的模块(tar 镜像推送: gpu_operator/lws/ceph/... )source 本库后即自动就绪。
+# 所有用 skopeo 的模块(tar 镜像推送: gpu_operator/ceph/... )source 本库后即自动就绪。
 # 幂等: 已存在则不覆盖。insecureAcceptAnything 与本仓库离线内网 registry(--tls-verify=false)语义一致。
 ensure_skopeo_policy() {
     [ -f "/etc/containers/policy.json" ] && return 0
@@ -253,8 +260,8 @@ POLICY_EOF
 ensure_skopeo_policy
 
 # ---------------- 共享 skopeo 推送助手(tar → 集群内置 registry) ----------------
-# gpu_operator / lws / metax-load 曾各自复制同一份 _push_skopeo/_reg_has_tag;
-# 集中到本库供新代码复用, 已有 metax/gpu/lws 维持原状避免回归。
+# gpu_operator / metax-load 曾各自复制同一份 _push_skopeo/_reg_has_tag;
+# 集中到本库供新代码复用, 已有 metax/gpu 维持原状避免回归。
 # 全部为**新符号**, 不改任何现有调用方。
 
 # 前置检查: 缺失 skopeo 时给明确指引(而非 3 次重试后误报"未找到镜像")
@@ -267,12 +274,17 @@ skopeo_require() {
 }
 
 # 3 次整包重试的 skopeo copy(大 blob 连接中断时 skopeo 的 --retry-times 不覆盖)
-# 错误文件按 PID 隔离(并行安全)。用法: push_image_skopeo <src> <dst>
+# 额外参数原样透传(如 --image-parallel-copies / --dest-precompute-digests)。
+# 错误文件按 **BASHPID** 隔离(并行安全): 子 shell 的 $$ 仍是父 PID, 用 $$ 会让并行 worker
+# 互相覆盖错误文件(大镜像并行化后实测必要)。
+# 用法: push_image_skopeo <src> <dst> [extra skopeo copy args...]
 push_image_skopeo() {
-    local src="$1" dst="$2" n=1 errf="/tmp/skopeo-err-$$" err
+    local src="$1" dst="$2"; shift 2
+    local -a extra=("$@")
+    local n=1 errf="/tmp/skopeo-err-$$-${BASHPID:-$$}" err
     for n in 1 2 3; do
         if skopeo copy --quiet --src-tls-verify=false --dest-tls-verify=false \
-            --dest-no-creds "${src}" "${dst}" 2>"${errf}"; then
+            --dest-no-creds ${extra[@]+"${extra[@]}"} "${src}" "${dst}" 2>"${errf}"; then
             rm -f "${errf}"; return 0
         fi
         err="$(tail -1 "${errf}" 2>/dev/null || true)"
@@ -282,6 +294,42 @@ push_image_skopeo() {
         fi
     done
     rm -f "${errf}"; return 1
+}
+
+# 大镜像 push 额外参数(36_dev_lab / 37_model_images 使用; 其他模块保持原行为):
+#   IMAGE_PUSH_PARALLEL_LAYERS    单镜像内并发层数(1=串行; 默认 4)
+#   IMAGE_PUSH_PRECOMPUTE_DIGESTS 跳过 registry 已有层(默认 true)
+#   IMAGE_PUSH_RETRY_TIMES        skopeo 内部重试次数(默认 5; 0=不传)
+# 结果写入全局数组 IMAGE_PUSH_ARGS, 由调用方透传给 push_image_skopeo。
+# 注意: skopeo 1.16.1 的 --dest-compress-level/--dest-compress-format 在 docker:// 推送中
+#   不生效(实测目标仍为默认 gzip), 因此这里不暴露压缩参数; 加速靠层/镜像并行 + precompute。
+# 用法: image_push_args_init; push_image_skopeo src dst "${IMAGE_PUSH_ARGS[@]}"
+image_push_args_init() {
+    IMAGE_PUSH_ARGS=()
+    local n="${IMAGE_PUSH_PARALLEL_LAYERS:-4}" r="${IMAGE_PUSH_RETRY_TIMES:-5}"
+    case "${n}" in ''|*[!0-9]*) n=1 ;; *) n=$((10#${n})) ;; esac
+    [ "${n}" -gt 1 ] 2>/dev/null && IMAGE_PUSH_ARGS+=(--image-parallel-copies "${n}")
+    case "${IMAGE_PUSH_PRECOMPUTE_DIGESTS:-true}" in
+        true|1|yes|on) IMAGE_PUSH_ARGS+=(--dest-precompute-digests) ;;
+    esac
+    case "${r}" in ''|*[!0-9]*) r=0 ;; *) r=$((10#${r})) ;; esac
+    [ "${r}" -gt 0 ] 2>/dev/null && IMAGE_PUSH_ARGS+=(--retry-times "${r}")
+    return 0
+}
+
+# 有界并行: 对每个参数启动一个后台函数(在子 shell 执行), 同时最多 <max> 个。
+# 调用方负责汇总结果(父 shell 变量不会被 worker 回写; worker 应写结果文件)。
+# 用途: 大镜像并行推送(36/37)等。
+# 用法: parallel_run <max> <func> <arg>...
+parallel_run() {
+    local max="$1" func="$2"; shift 2
+    case "${max}" in ''|*[!0-9]*|0) max=1 ;; *) max=$((10#${max})) ;; esac
+    local task
+    for task in "$@"; do
+        while [ "$(jobs -rp | wc -l)" -ge "${max}" ]; do sleep 0.5; done
+        "${func}" "${task}" &
+    done
+    wait || true
 }
 
 # 幂等检查: registry 是否已有 <repo>:<tag>(优先 skopeo inspect, 缺失时 curl tags/list)
@@ -325,6 +373,27 @@ if isinstance(ms, list):                 # 多架构 index → amd64/linux 条�
             print(m.get("digest", "")); break
 else:                                     # 单架构清单 → 字节 sha256 = 它自己的 digest
     print("sha256:" + hashlib.sha256(raw).hexdigest())
+' 2>/dev/null || true
+}
+
+# 镜像内容身份(config digest): 比 manifest digest 更适合**幂等判断** ——
+#   docker-archive → registry 的 push 会重新压缩层(实测 skopeo 1.16.1: 源层 81MB→31.8MB),
+#   manifest/layer digest 会变; 但 config blob 的 digest 不变(源/目标一致)。
+#   多架构 index 无法在此单层取 config digest → 输出空, 调用方回退 manifest digest/直接推送。
+# 用法: c="$(image_config_digest_raw docker-archive:/path.tar)"  或  docker://ref
+image_config_digest_raw() {   # <docker://ref | docker-archive:path>
+    local ref="$1" raw=""
+    raw="$(skopeo inspect --raw --tls-verify=false "${ref}" 2>/dev/null || true)"
+    [ -n "${raw}" ] || return 0
+    printf '%s' "${raw}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(d.get("manifests"), list):
+    sys.exit(0)          # 多架构 index: 调用方回退
+print((d.get("config") or {}).get("digest", ""))
 ' 2>/dev/null || true
 }
 
@@ -454,7 +523,7 @@ helm_chart_ensure() {
 }
 
 # ---------------- 共享 nginx 校验镜像助手(verify 模块测试后端共用) ----------------
-# verify_metallb / verify_lws / verify_ceph 等的测试后端
+# verify_metallb / verify_ceph 等的测试后端
 # 统一用 **nginx**(测试 HTTP 后端, 静态页/JSON mock 皆可), 曾用 busybox httpd(依赖节点
 # containerd 预加载, 漏预加载即 Pending)。统一收敛到本助手:
 # 幂等确保 nginx 已推送进集群内置 registry, echo 出 **K8s 可见镜像 ref**(调用方在 $(...) 捕获,
@@ -565,8 +634,25 @@ load_config() {
         warn "未找到配置文件 ${CLUSTER_CONF},使用内置默认值"
         warn "建议: cp ${REPO_ROOT}/deployments/config/cluster.conf.example ${CLUSTER_CONF}"
     fi
+    # 高级/默认值层(2026-10-15): **必须在 cluster.conf 之后**(见文件头 CLUSTER_DEFAULTS_CONF 注释
+    # 的优先级: 环境变量 > cluster.conf > defaults)。全文件 ${VAR:-default} 自默认写法,
+    # 只补未定义变量 ⇒ 用户在 cluster.conf 写的同名覆盖项天然生效。
+    if [ -f "${CLUSTER_DEFAULTS_CONF}" ]; then
+        # shellcheck disable=SC1090
+        source "${CLUSTER_DEFAULTS_CONF}"
+    else
+        warn "未找到高级默认值层 ${CLUSTER_DEFAULTS_CONF}(部分高级变量将回退内置兜底; 该文件应随仓库分发)"
+    fi
+    # 节点 SSH 用户(2026-10-15): 全局安装用户单一旋钮(root|ubuntu, 默认 ubuntu)——
+    # 决定免密注入 / 即席 SSH / kubespray ansible_user 的口径。
+    #   · NODES 每行第4字段写 "-"(或留空) → 跟随本值(node_parse 归一);
+    #   · 显式写用户名 → 该节点覆盖(进阶场景; 与全局不一致时 deploy-cluster.sh 会点名告警)。
+    # ⚠ sudo 默认清掉未列入 env_keep 的环境变量: 想用环境变量传参要写 `sudo SSH_USER=root ./deploy-cluster.sh`
+    #   (赋值放在 sudo **之后**)或直接写进 cluster.conf(推荐)。
+    SSH_USER="${SSH_USER:-ubuntu}"
+    export SSH_USER
     # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
-    # (档案 > cluster.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
+    # (档案 > cluster.conf > cluster.defaults.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
     #  会静默变成"v2.28 的资产 + v1.35.8 的钉子")
     #   显式选择(明写了 KUBESPRAY_PROFILE, 或明写了 KUBESPRAY_VERSION)且档案缺失 → 硬失败:
     #     绝不静默退化成"别的版本的钉子"。err() 只打印不退出, 故这里显式 exit 1
@@ -858,8 +944,8 @@ cidr_contains() {
 }
 
 # ---------------- kube-vip: API Server VIP 推导与校验 ----------------
-# 详见 docs/kube-vip-api-ha.md。三个关键约束(任一违反都是确定性故障, 故为硬失败):
-#   ① 与 HAPROXY_ENABLED / KEEPALIVED_ENABLED 互斥 —— 三者都在争 loadbalancer_apiserver.address 的解释权
+# 详见 docs/kube-vip-api-ha.md。关键约束(任一违反都是确定性故障, 故为硬失败):
+#   (原 ① HAPROXY_ENABLED/KEEPALIVED_ENABLED 互斥已随该方案整块移除, 2026-10-14)
 #   ② VIP 不得落在 METALLB_POOL 内 —— 否则 MetalLB 可能把同一个 IP 分配给某个 Service, 抢走控制平面入口
 #   ③ VIP 不得等于任一节点 IP —— 会与真实网卡地址冲突(ARP 打架)
 
@@ -959,15 +1045,6 @@ kube_vip_validate_config() {
     #   翻成关, 全仓 11 处一起翻); api-ha 分支那版 `:-true` 是翻之前的写法, 不能照搬。
     [ "${KUBE_VIP_ENABLED:-false}" = "true" ] || return 0
 
-    # ① 互斥
-    if [ "${HAPROXY_ENABLED:-false}" = "true" ] || [ "${KEEPALIVED_ENABLED:-false}" = "true" ]; then
-        err "KUBE_VIP_ENABLED=true 与 HAPROXY_ENABLED/KEEPALIVED_ENABLED 互斥, 二者都在争 API 入口:"
-        err "  kube-vip  : KUBE_VIP_ENABLED=true"
-        err "  HAProxy+KA: HAPROXY_ENABLED=${HAPROXY_ENABLED:-false} KEEPALIVED_ENABLED=${KEEPALIVED_ENABLED:-false}"
-        err "二者只能留一个(推荐保留 kube-vip, 见 docs/kube-vip-api-ha.md)"
-        return 1
-    fi
-
     local vip="${K8S_API_VIP:-}"
 
     # ② VIP 不在 MetalLB 池内
@@ -1060,7 +1137,6 @@ kube_vip_derive() {
     local node_ips; node_ips="$(all_node_ips)"
     local m1; m1="$(first_master_ip)" || { err "无 master 节点, 无法推导 VIP"; return 1; }
     local base="${m1%.*}" ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-    local _user="${SSH_USER:-ubuntu}"
 
     # 探测器(在目标机上执行): 0 = 该地址空闲
     #   -c1 -W1   : ICMP 一次, 最多等 1s
@@ -1076,13 +1152,14 @@ kube_vip_derive() {
         local ip="$1" _ip
         for _ip in ${node_ips}; do [ "${_ip}" = "${ip}" ] && return 1; done
         metallb_pool_contains "${ip}" && return 1
-        local _host
+        local _host _u
         # ★ IP 而非主机名(同上): 容器解析不了节点名 ⇒ 拿主机名 SSH 恒失败 ⇒ 会把每个候选地址
         #   都误判成"被占用" ⇒ VIP 自动推导失效(显式 K8S_API_VIP 不受影响)
         for _host in $(master_ips); do
+            _u="$(ssh_user_for_ip "${_host}")"
             ssh -i "${ssh_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
                 -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-                "${_user}@${_host}" "${probe//__IP__/${ip}}" >/dev/null 2>&1 || return 1
+                "${_u}@${_host}" "${probe//__IP__/${ip}}" >/dev/null 2>&1 || return 1
         done
         return 0
     }
@@ -1136,7 +1213,8 @@ kube_vip_derive() {
 # 用法: if is_cluster_live; then ... fi     (探测失败一律视为"未运行")
 is_cluster_live() {
     local m1; m1="$(first_master_ip)" || return 1
-    local _user="${SSH_USER:-ubuntu}" ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    local ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    local _user; _user="$(ssh_user_for_ip "${m1}")"
     ssh -i "${ssh_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_user}@${m1}" \
         "command -v kubectl >/dev/null 2>&1 && sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes -o name 2>/dev/null | head -1" \
@@ -1151,11 +1229,12 @@ is_cluster_live() {
 kube_vip_is_bound() {
     local vip="${1:-}"
     [ -n "${vip}" ] || return 1
-    local _user="${SSH_USER:-ubuntu}" ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-    local _host
+    local ssh_key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    local _host _user
     # ★ 用 master_ips() 而非 master_hosts(): 部署容器解析不了节点名, 拿主机名 SSH 会静默失败
     #   —— 那时本函数**恒返回 1("VIP 未绑定")**, 哪怕 VIP 明明已绑(2026-09-28 实机, 见 master_ips 注释)
     for _host in $(master_ips); do
+        _user="$(ssh_user_for_ip "${_host}")"
         if ssh -i "${ssh_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_user}@${_host}" \
                "ip route get '${vip}' 2>/dev/null | grep -q 'local ${vip} '" 2>/dev/null; then
@@ -1326,10 +1405,6 @@ api_entry_validate_config() {
             err "API_EXTERNAL_ADDR=${API_EXTERNAL_ADDR} 与 KUBE_VIP_ENABLED=true 互斥 —— 入口只能有一个来源:"
             err "  复用环境已有 LB/VIP → 请设 KUBE_VIP_ENABLED=false"
             err "  由本方案自带 VIP → 请清空 API_EXTERNAL_ADDR"
-            return 1
-        fi
-        if bool_is_true "${HAPROXY_ENABLED:-false}" || bool_is_true "${KEEPALIVED_ENABLED:-false}"; then
-            err "API_EXTERNAL_ADDR 与 HAPROXY_ENABLED/KEEPALIVED_ENABLED 互斥(三者都在提供 API 入口)"
             return 1
         fi
         emit_ip "${API_EXTERNAL_ADDR}" >/dev/null 2>&1 || {
@@ -1503,6 +1578,11 @@ node_parse() {
     else
         NODE_USER="${f4}"; NODE_PW="${f5}"
     fi
+    # ssh_user 为 "-"/空 → 跟随全局 SSH_USER(root|ubuntu 单一旋钮; 见 load_config 注释)。
+    # 显式写了用户名 = 该节点覆盖(逐行覆盖优先)。
+    if [ -z "${NODE_USER}" ] || [ "${NODE_USER}" = "-" ]; then
+        NODE_USER="${SSH_USER:-ubuntu}"
+    fi
     # 密码归一: 显式密码优先; "-"/空 → 默认密码(全节点默认一致)
     if [ -z "${NODE_PW}" ] || [ "${NODE_PW}" = "-" ]; then
         NODE_PW="$(node_default_pw "${NODE_ROLE}")"
@@ -1634,12 +1714,112 @@ bluestore_wipe_dev() {   # <盘> → 0=已擦净(校验通过); 非 0=仍有 blu
 }
 # 毒化预检(有界 ≤10s, 只告警不阻断; 脚本顶层、每节点一次): 内核若残留死 IO, 全局 sync 会被
 # 拖住 —— 检出即给"择机重启清毒"指引(本库其余步骤已全部设备本地化, 不受其影响)。
-sync & _sp=$!
+# ⚠ 2026-10-14 实机(卡 15h): 后台 sync 必须**重定向 fd** —— 死 IO 下 sync 永不退出(D 态,
+#   TERM/KILL 皆无效), 若它继承着 SSH 的 stdout/stderr 管道, ssh 会一直等管道关闭 ⇒
+#   `node_ssh ... bash -s` **永不返回**, 整个部署无限挂起(判据: 本函数已打完"本步已全部设备
+#   本地化"的告警、后续却再无输出)。重定向后 sync 卡死只留在节点上, 不再攥住会话。
+sync >/dev/null 2>&1 & _sp=$!
 _sp_ok=0
 for _si in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$_sp" 2>/dev/null || { _sp_ok=1; break; }; sleep 1; done
 [ "${_sp_ok}" = "1" ] || echo "    ⚠ 该节点内核存在残留死 IO(全局 sync 被拖住>10s; 历史事故产物): 本步已全部设备本地化、不受影响; 建议择机重启清毒"
 unset _sp _sp_ok _si
 WIPELIB
+}
+
+# ---------------- 离线 deb 安装原语(共享; 2026-10-14 三轮实机事故重构, P0) ----------------
+# 背景: "离线装 deb" 多处各写一份, 口径漂移 ⇒ 同类坑换文件复发(10-07 timesyncd 互斥守卫只进
+#   reconcile; 10-14 chrony 直装只进 setup-ntp)。本区收口为**单一实现**, 三条硬口径:
+#   ① 走 **dpkg 直装**: apt 对任何操作先做全局依赖检查, 节点"预先破损态"(半装包/版本错位)下
+#      直接拒绝 —— 连纯本地事务也拒(10-14 实机: 节点三处破损, chrony 永远装不上);
+#   ② **已装即跳(任何版本)**: 只补缺、不升级 —— 把较旧系统库升级会打断既有版本钉
+#      (10-14 实机: 闭包的 libtinfo6 .3 打断本机 libncurses6=.2 ⇒ 新全局缺口);
+#   ③ **互斥提供者声明表**: time-daemon 系(chrony/timesyncd/openntpd/ntp)只允许一个提供者,
+#      装载前按表预卸(10-14 实机: dpkg 报 conflicting packages 拒装 chrony)。
+#   ④ 批量 dpkg -i 一包失败**逐包隔离重试**(不连坐); ⑤ 输出全程保留(禁止 >/dev/null 吞)。
+# ⚠ 禁令(10-14 实机血证): **禁止**在破损态节点上自动跑 `apt-get --fix-broken install` ——
+#   它"修复"的手段是移除/改版(曾击穿 .203 的 sshd), 且离线时拿不到缺件 = 纯风险零收益。
+# 互斥表(单一事实来源; 远程双胞胎 _pkg_conflict_providers 见 deb_install_remote_lib,
+#   ⚠ 两处必须同步 —— tools/tests/test-deb-install-lib.sh 会断言两侧一致)
+pkg_conflict_providers() {   # <包名> → 输出其互斥提供者(空格分隔; 无 → 空)
+    case "$1" in
+        chrony|systemd-timesyncd|openntpd|ntp)
+            echo "chrony openntpd ntp systemd-timesyncd" | tr ' ' '\n' | grep -vx "$1" | tr '\n' ' ' ;;
+        *) : ;;
+    esac
+}
+
+# 节点侧安装原语(文本经 SSH stdin 送往节点; 与 bluestore_wipe_remote_lib 同机制)。
+# 用法: { deb_install_remote_lib; printf '\ninstall_debs_offline %s %s\n' "<deb目录>" "<关注包...>"; } | ssh <节点> "sudo bash -s"
+#   install_debs_offline <deb目录> [关注包...]: 预卸互斥 → 已装即跳过 → 批量 dpkg → 失败逐包隔离;
+#   返回值恒 0, 由调用方按"关注包命令/状态"断言(如 command -v chronyd 或 assert_pkgs_ready)。
+deb_install_remote_lib() {
+    cat <<'DEBLIB'
+# 互斥提供者表(⚠ 与 lib-common::pkg_conflict_providers 同步; 夹具断言两侧一致)
+_pkg_conflict_providers() {
+    case "$1" in
+        chrony|systemd-timesyncd|openntpd|ntp)
+            echo "chrony openntpd ntp systemd-timesyncd" | tr ' ' '\n' | grep -vx "$1" | tr '\n' ' ' ;;
+        *) : ;;
+    esac
+}
+
+# 安装一批离线 deb: 只补缺失、预卸互斥、失败逐包隔离、输出全程保留。
+# 用法: install_debs_offline <deb目录> [关注包...]
+install_debs_offline() {
+    local d="$1"; shift
+    local want="$*"
+    local dlog=/tmp/cubestack-deb-install.log p c f pk list="" n_skip=0
+    : >"${dlog}"
+    # ① 预卸互斥提供者(对每个"关注包": 其提供者已装且不在同名关注列表 → 卸)
+    for p in ${want}; do
+        for c in $(_pkg_conflict_providers "${p}"); do
+            case " ${want} " in *" ${c} "*) continue ;; esac
+            if dpkg-query -W -f='${Status}' "${c}" 2>/dev/null | grep -q "install ok installed"; then
+                echo "  [deb-install] 预卸互斥包 ${c}(与待装 ${p} 冲突, dpkg 级直卸)"
+                dpkg --purge "${c}" >>"${dlog}" 2>&1 || true
+            fi
+        done
+    done
+    # ② 过滤: 已装即跳(任何版本); 只补缺, 不升级(防打断既有版本钉)
+    for f in "${d}"/*.deb; do
+        [ -f "${f}" ] || continue
+        pk="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
+        [ -n "${pk}" ] || continue
+        if [ -n "$(dpkg-query -W -f='${Status}' "${pk}" 2>/dev/null | grep -o 'install ok installed' || true)" ]; then
+            n_skip=$((n_skip + 1)); continue
+        fi
+        list="${list} ${f}"
+    done
+    if [ -z "${list}" ]; then
+        echo "  [deb-install] 全部已装(跳过 ${n_skip} 个), 无需安装"
+        return 0
+    fi
+    # ③ 批量 dpkg -i; 失败 → 逐包隔离(一个坏包不连坐好包)
+    # shellcheck disable=SC2086
+    if dpkg -i ${list} >>"${dlog}" 2>&1; then
+        echo "  [deb-install] dpkg 直装成功(跳过已装 ${n_skip}; 安装 $(echo ${list} | wc -w) 个)"
+        return 0
+    fi
+    echo "  [deb-install] 批量安装部分失败, 逐包隔离重试(明细: ${dlog}):"
+    local ok_n=0 fail_n=0
+    for f in ${list}; do
+        if dpkg -i "${f}" >>"${dlog}" 2>&1; then ok_n=$((ok_n + 1)); else fail_n=$((fail_n + 1)); fi
+    done
+    echo "  [deb-install] 隔离结果: 成功 ${ok_n} / 失败 ${fail_n}"
+    [ "${fail_n}" -gt 0 ] && tail -8 "${dlog}" | sed 's/^/      /'
+    return 0
+}
+
+# 断言关注包全部处于已装态(install_debs_offline 之后调用; 任一缺失 → 非 0)
+assert_pkgs_ready() {
+    local p
+    for p in "$@"; do
+        dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "install ok installed" \
+            || { echo "PKG-MISSING:${p}"; return 1; }
+    done
+    return 0
+}
+DEBLIB
 }
 
 # ---------------- 共用 MetalLB VIP 的约定(多服务共用一个 IP、不同端口) ----------------
@@ -1788,7 +1968,7 @@ ensure_hosts_block() {
 #      直连 master IP, 证书 SAN 常不含该 IP → 宿主机 kubectl 会 TLS x509 校验失败;
 #   ② 调用 tools/lb/setup-api-expose.sh 幂等配置宿主机 6443→first master 的 DNAT
 #      (PREROUTING + OUTPUT), 让 API_DOMAIN 从宿主机可访问。
-# 所有连 API 的模块(gpu_operator/gpu_lws/ceph_*/...)统一复用本函数, 不各自复制。
+# 所有连 API 的模块(gpu_operator/ceph_*/...)统一复用本函数, 不各自复制。
 # 用法: sync_kubeconfig → 退出码 0=宿主机可访问集群
 sync_kubeconfig() {
     local tmp newctx
@@ -1798,8 +1978,9 @@ sync_kubeconfig() {
     # admin.conf 属 root(600), scp 会 Permission denied → 用 ssh + sudo cat 读取
     # BatchMode=yes: 密钥失败立即返回(不读 tty 密码提示; 交互终端下读 tty 会 SIGTTIN
     #   永久卡死, 见 ceph-detect-disks.sh 2026-09-09 注释)
+    local _fm_user; _fm_user="$(ssh_user_for_ip "${fm}")"
     ssh -i "${SSH_KEY:-${HOME}/.ssh/cubestack_k8s}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "${SSH_USER:-ubuntu}@${fm}" "sudo cat /etc/kubernetes/admin.conf" > "${tmp}" 2>/dev/null \
+        "${_fm_user}@${fm}" "sudo cat /etc/kubernetes/admin.conf" > "${tmp}" 2>/dev/null \
         || { rm -f "${tmp}"; return 1; }
     [ -s "${tmp}" ] || { rm -f "${tmp}"; return 1; }
     # ★ server 改写为证书 SAN 内的 API_DOMAIN(直连 master IP 不在 SAN → TLS 校验失败)
@@ -1819,7 +2000,7 @@ sync_kubeconfig() {
     [ -n "${newctx}" ] && KUBECONFIG="${HOME}/.kube/config" kubectl config use-context "${newctx}" >/dev/null 2>&1 || true
     # ★ 强制收敛: 合并可能保留旧集群残留(如 lb.k8s.local / 直连 master IP, 不在证书 SAN → TLS 失败)。
     #   只把当前 context 对应 cluster 的 server 改写为 SAN 内 API_DOMAIN(保留证书校验), 不动其它集群。
-    #   注意: K/_ctx/_cl 必须 local —— 各 addon 模块(gpu_operator/lws/ceph_*)顶层也有同名
+    #   注意: K/_ctx/_cl 必须 local —— 各 addon 模块(gpu_operator/ceph_*)顶层也有同名
     #   全局 K(远端 kubectl), 若此处用全局并 unset 会把调用方的 K 冲掉 → set -u 报 unbound。
     local K _ctx _cl
     K="KUBECONFIG=${HOME}/.kube/config kubectl"
@@ -1838,8 +2019,8 @@ sync_kubeconfig() {
     #     以**后写者**为准, 故宿主机曾长期把 k8s-api.cubestack.io 解析到 10.66.3.28(单点)而不是
     #     已就绪的 VIP 10.66.3.240(2026-09-28 实机)。现两处同源。
     #   · REGISTRY_DOMAIN → REGISTRY_IP(MetalLB VIP; NodePort 模式为派生出的节点 IP)。
-    #     补在这里的原因: 本函数是宿主机侧 kubectl/helm 消费者的公共入口(gpu_operator/gpu_lws/
-    #     multus/rdma + 接入引导都会走)⇒ 受管域名**每轮安装都收敛一次**, 不必等各自的 addon 模块。
+    #     补在这里的原因: 本函数是宿主机侧 kubectl/helm 消费者的公共入口(gpu_operator/
+    #     multus/rdma/ceph + 接入引导都会走)⇒ 受管域名**每轮安装都收敛一次**, 不必等各自的 addon 模块。
     local _api_entry
     _api_entry="$(api_entry_ip 2>/dev/null)" || _api_entry="${API_IP}"
     ensure_hosts_entry "${_api_entry}" "${API_DOMAIN}"
@@ -2015,7 +2196,7 @@ check_offline_files() {
         echo -e "\033[41m\033[97m ⚠⚠⚠  离线文件缺失: ${OFFLINE_FILES_DIR:-<未配置>} 为空或不存在  ⚠⚠⚠\033[0m"
         echo -e "\033[41m\033[97m  离线安装需要 binary 与镜像, 请先准备离线文件:                     \033[0m"
         echo -e "\033[41m\033[97m   ① 内网/联网机从 MinIO 下载:                                    \033[0m"
-        echo -e "\033[41m\033[97m      sudo ./deployments/scripts/tools/offline/fetch-offline-files.sh\033[0m"
+        echo -e "\033[41m\033[97m      sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh\033[0m"
         echo -e "\033[41m\033[97m   ② 或手工拷贝离线文件到 ${OFFLINE_FILES_DIR:-deployments/offline-files}/   \033[0m"
         echo -e "\033[41m\033[97m   ③ kubespray 离线资源位于 ${LOCAL_REPO_DIR:-offline-files/kubespray}/    \033[0m"
         echo -e "\033[41m\033[97m      (镜像 images/ + 二进制 + packages/ 系统包)                    \033[0m"
@@ -2041,6 +2222,47 @@ first_master_ip() {
     return 1
 }
 
+# 按 IP 解析该节点在 NODES 中的登录用户(逐行覆盖优先; "-" 已由 node_parse 归一为全局 SSH_USER)。
+# 未命中(非 NODES 节点/池外地址) → 回退全局 SSH_USER。
+# ★ node_parse 会写 NODE_* 全局量 —— 查找循环放在**命令替换子shell**内, 不污染调用方 shell。
+# 用法: u="$(ssh_user_for_ip 10.0.0.1)"
+ssh_user_for_ip() {
+    local _ip="$1" _hit
+    _hit="$(
+        local _l
+        for _l in "${NODES[@]:-}"; do
+            [ -z "${_l}" ] && continue
+            node_parse "${_l}"
+            [ "${NODE_IP}" = "${_ip}" ] && { printf '%s' "${NODE_USER}"; break; }
+        done
+    )"
+    printf '%s\n' "${_hit:-${SSH_USER:-ubuntu}}"
+}
+
+# 一致性点名: NODES 逐行显式 ssh_user 与全局 SSH_USER 不一致时告警(一处点名, 不刷屏)。
+# 语义(2026-10-15): SSH_USER = 全局默认; NODES 第4字段显式值 = **该节点**覆盖。
+# 逐行覆盖要真正生效, 要求访问该节点的各通道都按 NODES 解析用户(本仓库即席 SSH 已统一走
+# ssh_user_for_ip/init_remote_kubectl); 但混用仍是进阶场景, 不一致时点名提醒而不是静默。
+# 恒返回 0(不拦停); 由 deploy-cluster.sh 启动预检调用一次。
+warn_ssh_user_mismatch() {
+    local _list
+    _list="$(
+        local _l _out=""
+        for _l in "${NODES[@]:-}"; do
+            [ -z "${_l}" ] && continue
+            node_parse "${_l}"
+            [ -n "${NODE_HOSTNAME}" ] || continue
+            [ "${NODE_USER}" = "${SSH_USER:-ubuntu}" ] && continue
+            _out+="${_out:+, }${NODE_HOSTNAME}(${NODE_USER})"
+        done
+        printf '%s' "${_out}"
+    )"
+    [ -n "${_list}" ] || return 0
+    warn "SSH 用户不一致: 全局 SSH_USER=${SSH_USER:-ubuntu}, 但 NODES 显式覆盖: ${_list}"
+    warn "  逐行覆盖仅对该节点生效(其余节点仍用全局 SSH_USER); 通常建议 NODES 第4字段写 \"-\" 跟随全局"
+    return 0
+}
+
 # ---------------- 远端 kubectl 统一初始化(幂等) ----------------
 # ★ 所有需要 SSH 到 master 执行 kubectl 的模块/脚本**必须**调用本函数获取:
 #   FIRST_MASTER / SSH_KEY / SSH() 函数 / K(远端 kubectl 简写)。
@@ -2052,13 +2274,83 @@ init_remote_kubectl() {
     [ "${_INIT_REMOTE_KUBECTL:-0}" = "1" ] && return 0   # 幂等: 同一进程只初始化一次
     FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点(cluster.conf NODES 无 role=master)"; return 1; }
     SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    # 登录用户按**首个 master 在 NODES 里的解析值**(逐行覆盖优先, 见 ssh_user_for_ip);
+    # 未命中/未配置 → 全局 SSH_USER(root|ubuntu 单一旋钮)。
+    FIRST_MASTER_USER="$(ssh_user_for_ip "${FIRST_MASTER}")"
     SSH() { ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-               "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
-    # 字符串式(伪代码/单行命令场景, 如 addon_stub 步骤数组): ssh ... ${SSH_USER:-ubuntu}@${FIRST_MASTER}
-    SSH_CMD="ssh -i ${SSH_KEY} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 ${SSH_USER:-ubuntu}@${FIRST_MASTER}"
+               "${FIRST_MASTER_USER}@${FIRST_MASTER}" "$@"; }
+    # 字符串式(伪代码/单行命令场景, 如 addon_stub 步骤数组): ssh ... ${FIRST_MASTER_USER}@${FIRST_MASTER}
+    SSH_CMD="ssh -i ${SSH_KEY} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 ${FIRST_MASTER_USER}@${FIRST_MASTER}"
     K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
     _INIT_REMOTE_KUBECTL=1
     return 0
+}
+
+# ---------------- RWO 单卷 Deployment 的更新策略守护 ----------------
+# 背景(2026-10-19 实机): cubepilot-api 把单个 ReadWriteOnce PVC 挂在 Deployment 上,
+#   默认 strategy=RollingUpdate + maxSurge>0 会**先**起新 Pod; 新 Pod 调度到另一节点后
+#   无法挂载同一 RWO 卷(attachdetach 报 Multi-Attach, 卷仍被旧 Pod 占用), 而 maxUnavailable
+#   又阻止旧 Pod 先退出 → Deployment 永久卡住(1 个旧 Pod Running + 1 个新 Pod ContainerCreating)。
+#   正确策略是 Recreate: 先停旧 Pod / 释放卷, 再起新 Pod。
+# 本函数在部署/单组件更新后扫描由 CubeStack operator 管理的 Deployment, 只把**确实引用
+#   RWO PVC** 的那些改成 strategy=Recreate(幂等; 不碰无 PVC / RWX 的组件)。
+# 用法: ensure_rwo_deployments_recreate <namespace> [label-selector] [wait-seconds]
+#   wait-seconds: operator 异步创建组件时轮询等待的上界(默认 0 = 只看当前状态)。
+#   ⚠ 调用前须已 init_remote_kubectl(提供 SSH/K)。
+# 返回: 0=已检查/已纠正(或没有需要纠正的对象); 1=发现对象但 patch 失败。
+ensure_rwo_deployments_recreate() {
+    local ns="$1" selector="${2:-cubestack.io/managed-by=cubestack-operator}" wait_s="${3:-0}"
+    case "${wait_s}" in ''|*[!0-9]*) wait_s=0 ;; esac
+    local tries=$(( wait_s / 5 )); [ "${tries}" -ge 1 ] || tries=1
+    local json="" targets="" i rc=0
+
+    command -v python3 >/dev/null 2>&1 || { warn "  ensure_rwo_deployments_recreate: 缺少 python3, 跳过"; return 0; }
+
+    for i in $(seq 1 "${tries}"); do
+        json="$( (SSH "${K} -n ${ns} get deploy,pvc -l ${selector} -o json 2>/dev/null") || true )"
+        # 解析 + 只输出 "namespace/name<TAB>claim1,claim2"(python 代码内不用单引号, 便于 -c)
+        targets="$(printf '%s' "${json}" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+pvcs = {}
+for item in data.get("items", []):
+    if item.get("kind") == "PersistentVolumeClaim":
+        pvcs[item["metadata"]["name"]] = item.get("spec", {}).get("accessModes", []) or []
+for item in data.get("items", []):
+    if item.get("kind") != "Deployment":
+        continue
+    spec = item.get("spec", {})
+    if spec.get("strategy", {}).get("type") == "Recreate":
+        continue
+    hits = []
+    for vol in spec.get("template", {}).get("spec", {}).get("volumes", []) or []:
+        claim = (vol.get("persistentVolumeClaim") or {}).get("claimName", "")
+        if claim and "ReadWriteOnce" in pvcs.get(claim, []):
+            hits.append(claim)
+    if hits:
+        print(item["metadata"]["namespace"] + "/" + item["metadata"]["name"] + "\t" + ",".join(sorted(set(hits))))
+' 2>/dev/null || true)"
+        [ -n "${targets}" ] && break
+        [ "${i}" -lt "${tries}" ] && sleep 5 || true
+    done
+
+    [ -n "${targets}" ] || return 0
+    while IFS=$'\t' read -r d claims; do
+        [ -n "${d}" ] || continue
+        local dns="${d%%/*}" dname="${d#*/}"
+        say "  RWO 单卷 Deployment → Recreate: ${d}(claims=${claims})"
+        if printf '%s' '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}' \
+                | SSH "${K} -n ${dns} patch deploy ${dname} --type=merge --patch-file=/dev/stdin" >/dev/null 2>&1; then
+            ok "    已纠正 ${d}(下次滚动先停旧 Pod, 避免 Multi-Attach)"
+        else
+            warn "    纠正失败: kubectl -n ${dns} patch deploy ${dname} --type=merge -p <Recreate JSON>"
+            rc=1
+        fi
+    done <<< "${targets}"
+    return "${rc}"
 }
 
 # ---------------- 停消费者前的副本数登记 / 恢复(2026-10-13, CodeRabbit 评审修订) ----------------

@@ -141,6 +141,72 @@ ssh <节点> 'timeout 6 tcpdump -ni manage0 "udp port 8472" &'
 echo x | nc -u <节点IP> 8472
 ```
 
+- **该 fabric 第二形态: MetalLB VIP 的跨段投递也会时通时断(2026-10-14 实机)**: 部署机 → `10.66.3.221:5000`
+  (registry VIP)死(连 ICMP 都回不可达), 而同 registry 的 NodePort(`<master>:30492`)与集群内节点侧 VIP
+  均正常 —— 同一天曾正常工作半小时后变死。**缓解已落**: `08_nvidia_gpu_operator.sh` 的 registry 端点
+  **自适应降级**(VIP 探测不通 → 查 svc 实际 nodePort → 推送/预检全程走它); 其余模块同类需求可照搬
+  (更好归宿 = 下沉 lib-common 的 REGISTRY_DIRECT 派生, 待排)。
+
+### 4. 【2026-10-15 事故】calico-node 全节点 0/1 ⇒ 一切非 hostNetwork pod 访问 ClusterIP 全断 —— calico 3.32.2 自带 RBAC 新规则漏在 kubespray 模板外(403 被 felix 判为 datastore 故障)
+
+**症状(三个层面, 表面故障离根因很远):**
+1. `kubectl -n kube-system get pod -l k8s-app=calico-node` —— **全节点 0/1 Running**(bird 侧正常;
+   readiness 503, felix 日志 `Reporter is not ready ... name="CalculationGraph"/"InternalDataplaneMainLoop"`);
+2. **一切非 hostNetwork 的 pod 访问 ClusterIP 全断**: `https://10.233.0.1:443` → `dial tcp ... i/o timeout`
+   (实机: `local-path-provisioner` CrashLoop、`calico-kube-controllers`/`coredns`/`metrics-server` 反复重启);
+3. 连锁到部署面: `registry-pvc` 永不 Bound → registry pod Pending → **`k8s_registry` 模块 600s 超时、
+   整个部署中断**(本次就这么断的)。
+
+**根因:** calico 3.31.7→**v3.32.2** 升级(补丁 14 同批)后, felix **固定 watch** 的两个资源在
+kubespray v2.32.0 的 `calico-node` ClusterRole 模板里**没有授权**:
+`policy.networking.k8s.io/clusternetworkpolicies`(calico 3.32 随清单安装的 CNP CRD)与
+`kubevirt.io/virtualmachineinstancemigrations` —— 实机 felix 日志各 `cannot list resource ... forbidden`
+685 次。关键机理: **felix 把 403 判为"datastore 连接故障"**(持续重试 + readiness 恒 503),
+而 **404("CRD 不存在")才是正常跳过** ⇒ 缺 RBAC 不是"少读一个资源", 而是 **felix 永不 Ready ⇒
+calico-node 全节点 0/1 ⇒ calico 数据面(策略/规则链)不完整 ⇒ pod 出不了 ClusterIP**。
+上游 calico v3.32.2 官方 `manifests/calico.yaml` **自带**这两条规则(kubespray 模板停留在旧版 calico
+的规则集; 规则文本可直接对照 `deployments/offline-files/calico/release-v3.32.2.tgz` 内的清单)。
+同类(实机逐个暴露): `calico-kube-controllers` 的 policy-name-migrator 缺 `apps/daemonsets`、
+策略资源列表、`apiextensions/customresourcedefinitions` 等读权限时**每 5s 刷 forbidden**;
+`kubecontrollersconfigurations/status` 是**子资源独立授权**——主资源规则(含 update)不覆盖它。
+
+**解法(根治):** 补丁 **`deployments/kubespray/cubestack-patches/15-calico-3.32.2-rbac.patch`**
+(安装/升级由补丁层自动重放; 比对口径 = 按 `(apiGroup, resource)` 归并 verbs 后与上游逐条 diff,
+排除 `projectcalico.org` 别名与 `crd.projectcalico.org` 通配的假差):
+- `calico-node`: +`policy.networking.k8s.io/clusternetworkpolicies`(watch/list)、
+  +`kubevirt.io/virtualmachineinstancemigrations`(get/list/watch);
+- `calico-kube-controllers`: +`kubecontrollersconfigurations/status`(get/update)、
+  +`apps/{daemonsets,deployments}` 读、+`apiextensions/customresourcedefinitions` 读、
+  +`apiregistration/apiservices` 读、+`crd.projectcalico.org` 四个策略资源(**上游同牌动词**);
+- `calico-cni-plugin` + `calico-kube-controllers`: kubevirt VM/VMI 读权限(上游对齐)。
+
+**验证(2026-10-15 实机, 通过):**
+```bash
+# ① 因果验证: 给 calico-node ClusterRole 补两条(等价 patch 15 的 calico-node 部分)后 ~75s:
+kubectl -n kube-system get pod -l k8s-app=calico-node   # 全节点 0/1 → 全节点 1/1; felix forbidden=0
+# ② 连锁恢复: local-path-provisioner 1/1 → registry-pvc Bound(pvc-50daa5ea…) → registry pod 1/1 Running
+# ③ 补丁层: bash deployments/kubespray/cubestack-patch-apply.sh --check   # rc=0(含 15; 容器内同绿)
+# ④ 端到端: 容器内重跑被中断的模块: ./deployments/scripts/deploy-cluster.sh --steps k8s_registry(通过)
+```
+**⚠ 已验证边界(如实标注):**
+- calico-node 两条 = **实机因果闭环**(补上即全节点 Ready、数据面恢复);
+- kube-controllers 的 `/status`、`daemonsets`、策略读、CRD 读 = 实机逐条验证(403 消失, 日志转静);
+  其中**策略资源的写动词**(改名迁移)按上游保留, 本集群为全新(无存量策略)未触发;
+- kubevirt 三条 = 上游逐字对齐(本集群未装 kubevirt, 属"防同类再现");
+- 与上游仍有**未跟齐项**(本次未纳入, 未观察到故障; 换版时按同法重比): `calico-node` 的
+  `ipamconfigurations`; `calico-kube-controllers` 的 `migration.projectcalico.org/datastoremigrations`
+  (仅 datastore 迁移用)与 `projectcalico.org` 别名组(etcd datastore 用);
+- 本补丁**不改运行中集群** —— 存量集群需按①手动补齐(或重跑 cluster.yml 让模板渲染)。
+
+**相关命令:**
+```bash
+# 判定 calico-node 0/1 是否属"felix 数据面未就绪":
+kubectl -n kube-system logs -l k8s-app=calico-node -c calico-node | \
+  grep -oE "cannot list resource \"[a-z]+\" in API group \"[^\"]+\"" | sort | uniq -c
+# 取上游自带 RBAC 对照:
+tar -xzf deployments/offline-files/calico/release-v3.32.2.tgz -C /tmp release-v3.32.2/manifests/calico.yaml
+```
+
 ---
 
 ## 二、时间同步
@@ -179,6 +245,59 @@ sudo ss -ulnp | grep ':123 '
 chronyc sources; chronyc tracking
 # 强制重启权威 chrony(手工抢救)
 sudo systemctl restart chrony; sleep 2; chronyc tracking | head -4
+```
+
+### 2. 【2026-10-14 事故】扩容节点 k8s_ntp "偏差超限"(6530ms→重对齐 2493ms)实为 VM 网络接入缺陷: 该节点与权威无 IP 通路
+
+**症状**
+- `--with-scale` 扩容新节点(worker13)跑到 k8s_ntp: 首次"时间已同步"→ 校验偏差 6530ms → 自动重对齐复测仍
+  2493ms → 模块失败, 报"时钟偏差超限"。
+- 该节点(10.66.3.222)上 `timedatectl timesync-status` = `System clock synchronized: no`, 日志反复
+  `Timed out waiting for reply from <权威>`(Packet count 0); 权威 `chronyc clients` 里**从来没有它**。
+
+**根因(证据链, 2026-10-14 现场实测)**
+1. **该 VM 与集群节点二层转发不可用**(平台网络接入缺陷): worker13 → `.213/.214/.215/.216/.203` ping 全 100%
+   丢包(双向); 清 ARP 缓存后它对权威的广播 ARP **应答时有时无**(代理 MAC `00:01:00:01:00:01` / 真实 MAC /
+   无应答), 权威侧 tcpdump **完全看不到它的帧**; 而它 → 网关/.211/互联网/部署机全通。
+2. **对照组**: 同批创建、同样无 chrony 走 timesyncd 的 .216(原名 clq-cubestack-node-1)"Initial
+   synchronization to 10.66.3.214" 正常 → 不是 timesyncd/NTP 配置问题, 唯独 worker13 这台接入异常。
+3. **代码放大**: `setup-ntp.sh` 当时没有"节点→权威"可达性预检(只有 installer→权威 的 SSH 预检, 那条经
+   路由总是通的), 于是一路走"硬对齐兜底 + 复测"——旧版硬对齐基准未补偿链路延迟、复测只等 1s,
+   把"网络黑洞"呈现成"偏差 6530→2493ms"的误导链。
+   ⚠ 平台知识见 §一.3: 该网络是 proxy-ARP/按 IP 转发的 fabric(所有 IP 可能解析到 `00:01:00:01:00:01`),
+   健康节点间 ICMP/NTP 实测可通 —— **单节点全部邻居不可达 + ARP 应答时有时无 = 该 VM 接入/转发状态异常**,
+   不是 fabric 常规行为。
+
+**解法(根治)**
+- **环境侧(主修, 用户当日已完成)**: 在虚拟化平台把该 VM 的网卡改接到与正常节点相同的虚拟网络/端口组
+  (本次实机即扩容 VM 创建时接错网络), 并改址 **10.66.3.204**(原 .222)。判据: 该节点 `ping <权威>`
+  与反向 ping 均稳定通 —— 实机重挂后 timesyncd 首次即同步成功(见"验证")。
+- **代码侧(已落, 2026-10-14)**: `setup-ntp.sh` 新增**节点→权威 IP 通路预检**(`authority_reachable_from`,
+  apply 与 `--check` 两条路径共用): SSH 不通 → "SSH 不可达"; SSH 通但 ping 权威不通 → 明确报"无 IP 通路,
+  检查该 VM 虚拟网络接入"并**提前终止**(不再进入重对齐/收敛等待); 特殊口径(仅禁 ICMP)可
+  `NTP_REACH_CHECK=0` 关闭。另含硬对齐基准中点半程补偿 + 复测改有界收敛等待(≤6×5s)。
+- **配置侧**: 排查中发现 `METALLB_POOL` 曾与节点 IP 重叠(.222 既在池内又是 worker13 节点 IP) —— 池必须
+  排除 `NODES` 中所有节点 IP(.221 已被集群侧 LB 占用可作反例佐证)。
+
+**验证(2026-10-14 当日更新)**
+- 代码侧(已实测): 修复版 `setup-ntp.sh --check` 在容器 d 对全部 6 节点跑通 —— 正常节点零误报;
+  探针判别性经黑洞对照验证(同节点 ping `.99`/旧 `.222` FAIL vs `.204`/`.214` OK ——
+  该 fabric 上 ICMP 可真实判别黑洞, 代理 ARP 应答不影响)。
+- 环境侧(用户已完成): worker13 的 VM 重挂正确网络并改址 10.66.3.204(原 .222)后,
+  `timesyncd` **首次即同步成功**("Initial synchronization to 10.66.3.214", 对比之前全程 timeout),
+  同一时刻 `--check` 偏差 164ms ✓ —— 根因确证 + 修复实证。
+- 端到端: 重跑 `--with-scale`(k8s_scale)把 worker13 接入集群 —— 待用户执行后补。
+
+**相关命令**
+```bash
+# 单节点与集群连通性判据(节点上执行)
+ping -c2 <权威IP>; ping -c2 <任一正常节点IP>; ip neigh show
+# 权威侧看客户端是否真的来过(NTP 层面)
+chronyc clients
+# 节点时间服务状态(无 chrony 的 timesyncd 节点)
+timedatectl timesync-status; journalctl -u systemd-timesyncd --no-pager | tail
+# 两侧抓包判定帧是否互通
+sudo tcpdump -nei <网卡> '(arp or icmp) and host <对端IP>'
 ```
 
 ---
@@ -404,37 +523,7 @@ kubectl -n metax-operator logs -l app=metax-driver --tail=20
 grep METAX_DRIVER_DEPLOY_POLICY config/cluster.conf
 ```
 
----
-
-### 4. LeaderWorkerSet (LWS) 部署故障速查
-
-**症状/排查对照**
-
-| 症状 | 根因 | 解法(根治) |
-|---|---|---|
-| controller CrashLoop, 日志 `cert dir /tmp/k8s-webhook-server/serving-certs` 不存在 | internal 模式未传 `--webhook-cert-dir` 或 chart 未挂 cert 卷 | chart 的 deployment 模板传 `--webhook-cert-dir` 并挂载 Secret 卷(见 `deployments/cubestack-addon/lws/charts/templates/deployment.yaml`) |
-| webhook 证书 x509 错误(cert-manager 模式) | 集群未装 cert-manager, Certificate 未生成 Secret | 改用 `LWS_CERT_MODE=internal`(离线友好)或先装 cert-manager |
-| webhook `context deadline exceeded` | 跨节点 fabric 数据面(与 §一.1 通用) | 确认 Calico IPIP 数据面可用(默认已根治, 见 `cluster-architecture.md` §3) |
-| 测试 LeaderWorkerSet 一直 Pending | busybox 镜像未预加载 / 节点资源不足 | 确认 `PRELOAD_IMAGE_PATTERNS` 含 busybox 与 `lws_manager`; `kubectl describe pod` 看事件 |
-| 部署后 `--steps verify_lws` 报 leader/worker 识别失败 | v0.10 用 `leaderworkerset.sigs.k8s.io/worker-index` 标签(=0 为 leader, >0 为 worker; 旧 `lws.io/role` 已废弃) | `kubectl -n lws-system logs deploy/lws-controller-manager`; 检查 webhook 配置与证书; 用 `tools/k8s/verify-lws.sh` 复跑 |
-
-**验证**
-```bash
-sudo ./deploy-cluster.sh --steps verify_lws
-kubectl -n lws-system get pods
-kubectl get crd leaderworkersets.leaderworkerset.x-k8s.io disaggregatedsets.disaggregatedset.x-k8s.io
-```
-
-**相关命令**
-```bash
-kubectl -n lws-system logs deploy/lws-controller-manager --tail=30
-kubectl -n lws-system get secret lws-webhook-server-cert   # internal 模式应为存在
-kubectl get validatingwebhookconfiguration lws-validating-webhook-configuration -o yaml
-```
-
----
-
-### 5. Ceph / Rook 部署故障速查
+### 4. Ceph / Rook 部署故障速查
 
 > 设计与离线流程见 `docs/ceph-rook.md`。
 
@@ -466,6 +555,7 @@ kubectl get validatingwebhookconfiguration lws-validating-webhook-configuration 
 | 重装时 `ceph [1/8]`/部署预检显示某几台节点 `裸盘: <未检测到>`(节点 `lsblk` 明明有盘, 且这些盘就是上次 Ceph 用的 OSD 盘); `ceph-cleanup.sh --all` 也清不到它们 | `ceph-detect-disks.sh` 只认"未使用裸盘"(整盘无子设备), 而 Rook/`ceph-volume lvm` 建的 OSD 盘是**有分区/LVM 的** → 被判为"在用"排除: ① CR 的 `storage.nodes[].devices` 漏掉这些盘 → 那几台节点 0 OSD; ② `--all` 拿到的"待清理盘"为空 → **清理空转**(盘上旧 ceph VG/LV 无人解绑, 重装时 osd-prepare 报 "already prepared"); ③ 确认屏只剩 `<未检测到>`, 人工分不清"没盘"还是"被上次部署占着" | **2026-09-24 已修复**: 新增 `tools/k8s/ceph-disk-classify.py` 分类器(只认强证据: bluestore 签名 / ceph 分区 GUID / 分区名 `ceph ` / `ceph-*` VG·`ceph.*` 标签 / `ceph--` dm 名), `ceph-detect-disks.sh` 新增 `--classify`, 盘分 `free`/`ceph`/`inuse`/`mixed` 四类并单独呈现 `ceph` 类; CR 取 `free ∪ ceph`; `ceph-cleanup.sh --wipe-disks`/`--all` 只清 `ceph` 类(新增 `--list` 只读计划); 02_ceph 7a 先调标准清除(解 LVM/dm)再跑原有 dd 签名擦除; `--wipe-node` 默认**拒绝**清 `inuse`/`mixed` 盘(需 `--force`)。⚠ **审查挖出的两类新坑**(都已修, 都是“看着干净”害死人): ① **整盘 LVM PV**(无分区表、无文件系统、VG 未激活时连 dm 子设备都没有)曾被判 `free` → 会被写进 CR 并被 7a 的 dd 清空, 而它可能装着任意业务数据(旧版把 `LVM2_member` 排除在候选外 = inuse, 属**反向回归**) —— 现规则: 见到 `LVM2_member` 或设备本身在 `pvs` 里却认不出归属 → 判 `inuse`(宁可不擦); 且因 `pvs` 不依赖 dm, **未激活的 `ceph-*` VG 也认得出** → 该清的仍清得到; ② `nbd*` 未被排除(默认 `CEPH_DETECT_EXCLUDE` 也不含 nbd)→ 当空闲盘擦会**写穿到背后 RBD 卷**, 现恒判 `inuse`。另: 清盘脚本的 LVM/dm 解除按**目标盘**收敛(不按名字正则扫全节点 —— `... \| grep ceph` 会误伤 `data-vg/cephbackup` 这类卷; `dmsetup remove_all` 已移除), 因 7a 让这段进了默认部署流程, 作用域必须严格。**验证边界: stub `ssh` + 逐节点 lsblk fixture 端到端跑通选盘/护栏/载荷完整性(--all 只擦 ceph 盘、/data 与混合盘被排除、护栏 5 种情形退出码全对、远端载荷语法通过); LVM 收敛逻辑用桩 `pvs/lvs/lvremove/vgremove` 实跑断言(目标盘 VG 选中、无关 `ceph-backup-vg` 零触碰); 分类器 12 用例覆盖整盘 PV/混合/挂载/nbd/空分区; 静态检查全过 —— **仍未在真实集群实机验证** |
 | `ceph-detect-disks.sh` 把 `nbd0..nbdN` 当**空闲裸盘**输出(会被写进 CR 当 OSD, 被 `ceph-cleanup.sh` 当 Ceph 盘擦) | 旧版只排除 `loop/ram/zram/sr/rbd` 前缀, **漏了 nbd**; 而 `CEPH_DETECT_EXCLUDE` 默认值 `^(sda\|sr0\|vda)$` 也不含 nbd → 配置兜不住。nbd 是网络块设备, 现场很可能是 `rbd-nbd` 映射(实测部署机上 `nbd0..nbd15`)→ `dd` 会写穿到背后的 RBD 卷, **销毁真实数据** | **2026-09-24 已修复**: `ceph-disk-classify.py` 里 `nbd*` 恒定判为 `inuse`(理由写清"可能是 rbd-nbd 映射, 用 rbd unmap 或重启解除"), 绝不进 CR、绝不清理; 不依赖 `CEPH_DETECT_EXCLUDE`。验证: 对本机真实 `lsblk`(含 nbd0..15, 排除规则只写 `^(sda\|sr0\|vda)$`)运行分类器 → 16 个 nbd 全部 `inuse`, 4 块挂载中 xfs 盘与 sda 也全部 `inuse`, 无一条 `free` |
 | k8s 阶段 ansible **长时间无输出**(实测 38 分钟以上), 最后停在 `Copy offline .deb packages to target` / `Install packages from local files`; 日志最后一行是那条 copy 的 profile 行, 之后整段空白 —— 看起来像"卡在拷贝 lvm2 包"; **只有部分节点会卡**(8 台里实测 2 台) | 卡的不是 copy, 是它后面的逐个 `dpkg -i`: `dmsetup`/`lvm2` 的 postinst 触发 `update-initramfs -u` → `mkinitramfs` → `hooks/mdadm` → **`/sbin/mdadm --examine --scan`(遍历所有块设备)** 读到**上一代集群遗留、后端已不可达的 `/dev/rbd0`** → 进程进 **D 状态(不可中断)** 永不返回; 同节点还有 ext4 挂在那块 rbd 上, 其 `jbd2` 线程一并卡死(实测内核线程 `[registry]` D 态 1h37m)。诊断方法: 在卡住的节点上 `ps -eo pid,stat,wchan,cmd \| grep -E '^ *[0-9]+ D'` + `ls -l /proc/<pid>/fd \| grep /dev/` → 看它读的是哪块盘 | **① 代码侧(2026-09-24 已修, `patch-playbooks/install-packages.yml`)**: 安装期间临时置 `update_initramfs=no`(装完恢复)→ 整条 initramfs 链(hooks 会跑 pvscan/vgscan/mdadm 扫设备)根本不被触发; 另加"已装同版本跳过"与"本节点存在内核 rbd 映射"告警。**② 环境侧(必须人工)**: 这类节点**只能重启**清除 —— hung 的 rbd 映射 unmap 会 EBUSY, D 态进程杀不掉; 重启后再部署即可。判据: `ls /sys/bus/rbd/devices` 非空 + 存在 D 态进程 |
+| **`node_pkgs` 在第一个节点永久 pending**: 输出停在 `── <IP> ──` + SSH warning; 节点上 `fuser /var/lib/dpkg/lock-frontend` 进程 D 状态 `ceph_mdsc_wait_request`(可挂 30+ 分钟); `findmnt -t ceph` 显示 `/mnt/cephfs/models` 的 mons 是旧集群 | **旧集群 `cephfs_mount` 宿主机挂载残留**(2026-10-19 实机): 集群非优雅拆除(API 已不可达/未走 uninstall)时 `/mnt/cephfs/models` 仍留在宿主机; mons 已不可达 → 内核 ceph 客户端无限重试; `fuser` 遍历 `/proc` 时撞上该挂载 → D 状态永不返回。旧 rbd 映射(`jbd2/rbd0`、`rbd remove`)同理。不是装包慢, 也不是 apt 锁被正常占用 | **2026-10-19 已修**: `tools/node/reconcile-node-packages.sh` 增加**控制器前置探测**(每节点 `timeout 20` 查 ceph/rbd 挂载、`/sys/bus/rbd/devices`、相关 D 状态、`fuser` 超时), 命中即**在分发/装包前失败**并打印重启步骤; 远端脚本同样在 `fuser`/apt 之前检测, `fuser` 带 `timeout 5`, 整轮远端对账带 `RECONCILE_SSH_TIMEOUT`(默认 1800s)。**现场处置(本次 6 台全部命中)**: `systemctl stop kubelet containerd; systemctl reboot -f`(跳过卡死的 ceph 卸载); 重启后 `findmnt -t ceph,rbd` 为空、`ls /sys/bus/rbd/devices` 为空、`timeout 5 fuser ...; echo rc=$?` 为 1, 再重跑部署。回归: `bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh` |
 
 **验证**
 ```bash
@@ -476,7 +566,7 @@ kubectl -n rook-ceph get cephcluster,cephblockpool; kubectl get sc ceph-block
 
 ---
 
-### 6. 新增配置项后, 宿主机 `check-modules.sh` 通过、容器内报 `TOGGLE 未声明`
+### 5. 新增配置项后, 宿主机 `check-modules.sh` 通过、容器内报 `TOGGLE 未声明`
 
 **症状:** 加了一个带 `TOGGLE` 的新模块, 宿主机 `bash deployments/scripts/tools/check-modules.sh` 全绿,
 同步进部署容器后容器内校验报 `TOGGLE=XXX 未在 cluster.conf.example 中声明默认值`。
@@ -492,7 +582,7 @@ kubectl -n rook-ceph get cephcluster,cephblockpool; kubectl get sc ceph-block
 docker cp deployments/config/cluster.conf.example <容器>:/opt/cubestack-installer/deployments/config/
 ```
 
-### 7. 大 ConfigMap 用客户端 apply 报 `metadata.annotations: Too long: may not be more than 262144 bytes`
+### 6. 大 ConfigMap 用客户端 apply 报 `metadata.annotations: Too long: may not be more than 262144 bytes`
 
 **症状:** 批量导入一堆配置(实测: 11 个 Grafana 看板 JSON 中**只有 460KB 的那一个**失败, 其余 10 个正常),
 `kubectl get cm -l <label>` 少一个, 但组件侧只表现为"少了那一条", 没有任何报错。
@@ -516,7 +606,7 @@ kubectl create configmap <名> -n <ns> --from-file=<文件> --dry-run=client -o 
 2. **模块里管道 apply 时别把 stderr 全 `2>/dev/null` 吞掉** —— 上面这条错误信息就这么被吞过,
    只剩一句"导入失败", 排查时得手工重放才知道是注解超限。
 
-### 8. RDMA 共享设备插件: pool 模式 selectors.ifNames 只剩第一块网卡(其余卡静默不匹配)
+### 7. RDMA 共享设备插件: pool 模式 selectors.ifNames 只剩第一块网卡(其余卡静默不匹配)
 
 **症状**
 `RDMA_HCA_MODE=pool` + 自动检测时, 日志里检测到 N 块 RDMA 网卡, 但生成的 ConfigMap 里
@@ -559,7 +649,7 @@ kubectl -n kube-system get cm rdma-devices -o go-template='{{index .data "config
 
 ---
 
-### 9. RDMA 资源名与真实 GPU 集群不一致 → Pod 申请 `rdma/ib_shared_devices` 永久 Pending
+### 8. RDMA 资源名与真实 GPU 集群不一致 → Pod 申请 `rdma/ib_shared_devices` 永久 Pending
 
 **症状**
 同一份 Pod 清单在真实 GPU 集群能跑, 在本安装器部署的集群上 Pending:
@@ -591,7 +681,7 @@ kubectl describe node <节点> | grep -A5 rdma/             # 节点上真正注
 
 ---
 
-### 10. kube-vip 控制面负载均衡(`lb_enable`):`lb_fwdmethod: local` 是**静默零效果**,且 ipvs 模式集群上还有一道 kube-proxy 关卡
+### 9. kube-vip 控制面负载均衡(`lb_enable`):`lb_fwdmethod: local` 是**静默零效果**,且 ipvs 模式集群上还有一道 kube-proxy 关卡
 
 **症状**
 给 kube-vip 的 manifest 加 `lb_enable: true`(其余不动)后**没有任何报错**,日志还会打
@@ -697,18 +787,18 @@ kubectl -n kube-system rollout restart daemonset/kube-proxy
 
 ---
 
-### 11. kube-vip 的几处"以为收敛了其实没有":关开关不清理 / 每轮白重启两次 / 全新集群部署中断 / 关闭态仍扫 VIP / 两套集群抢同一 VIP
+### 10. kube-vip 的几处"以为收敛了其实没有":关开关不清理 / 每轮白重启两次 / 全新集群部署中断 / 关闭态仍扫 VIP / 两套集群抢同一 VIP
 
 前三个问题的根因相邻(都是"目标状态与实际状态不一致,但没有任何东西去发现它"),
-于 2026-09-22 一并修复;11.4 / 11.5 是后来追加的两条。设计说明见 `docs/kube-vip-api-ha.md` 第 18 节。
+于 2026-09-22 一并修复;10.4 / 10.5 是后来追加的两条。设计说明见 `docs/kube-vip-api-ha.md` 第 18 节。
 
-> 🔁 **2026-09-28 收编**: **11.2 的"解法"已反转** —— 静态 Pod 清单改由 **kubespray 自己**渲染
+> 🔁 **2026-09-28 收编**: **10.2 的"解法"已反转** —— 静态 Pod 清单改由 **kubespray 自己**渲染
 > (`addons.yml` 的 `kube_vip_enabled` **跟随** `KUBE_VIP_ENABLED`),自持渲染器已删除。
 > 也就是说: 双写者问题依旧消除,但消除的方向从"关掉上游"改成"**关掉我们自己**"。
-> 11.1 / 11.3 / 11.4 的结论**不受影响**(开关语义、清理路径、定序、VIP 推导都还在)。
+> 10.1 / 10.3 / 10.4 的结论**不受影响**(开关语义、清理路径、定序、VIP 推导都还在)。
 > 详见 `docs/api-ha/07-kube-vip-upstream-assessment.md` 与 `docs/kube-vip-api-ha.md` §19。
 
-#### 11.1 `KUBE_VIP_ENABLED=false` 重跑后,manifest 还在、VIP 还被持有
+#### 10.1 `KUBE_VIP_ENABLED=false` 重跑后,manifest 还在、VIP 还被持有
 
 **症状**
 把开关改成 `false` 重跑,日志只有一行 `跳过 kube-vip(配置 KUBE_VIP_ENABLED=true 可启用)`,
@@ -749,7 +839,7 @@ done
 > ⚠ **阶段二下不能直接关**:API 入口已经指向 VIP 时删 kube-vip = 全集群 API 立刻失联。
 > 模块会**硬拦停**并给出两步走法(先把入口退回 master01 → 再关开关清理)。
 
-#### 11.2 每次全量运行,master01 上的 kube-vip 都会重启两次
+#### 10.2 每次全量运行,master01 上的 kube-vip 都会重启两次
 
 **症状**
 每跑一次全量部署,`crictl ps` 里 master01 的 kube-vip 容器 `started-at` 都会变
@@ -805,7 +895,7 @@ ssh <master01> "sudo sha256sum /etc/kubernetes/manifests/kube-vip.yml"
 > 证书 SAN(`kubeadm-setup.yml:48` 的 `sans_kube_vip_address` 只看它是否定义)。删掉它会导致
 > 下次开回来时证书重签。
 
-#### 11.3 全新集群部署在 `k8s_deploy` **之前**就中断了
+#### 10.3 全新集群部署在 `k8s_deploy` **之前**就中断了
 
 **症状**
 全新环境跑全量部署,日志走到 `k8s_ntp` 之后、`k8s_deploy` 之前就报:
@@ -847,7 +937,7 @@ sudo ./deploy-cluster.sh --steps kube_vip --list | grep 本次执行模块
 
 ---
 
-#### 11.4 `KUBE_VIP_ENABLED=false` 仍去推导 VIP → 部署中断在 `k8s_inventory`(第 4 个"以为收敛了其实没有")
+#### 10.4 `KUBE_VIP_ENABLED=false` 仍去推导 VIP → 部署中断在 `k8s_inventory`(第 4 个"以为收敛了其实没有")
 
 **症状**
 把 `KUBE_VIP_ENABLED` 置 `false` 后重跑,**依然**出现:
@@ -900,7 +990,7 @@ KUBESPRAY_INV_DIR=<inventory 副本> CLUSTER_CONF=<conf 副本> \
 ```
 
 
-#### 11.5 `kubectl` 时好时坏地报 `x509: certificate signed by unknown authority` —— 两套集群抢同一个 API VIP(2026-09-29 实机)
+#### 10.5 `kubectl` 时好时坏地报 `x509: certificate signed by unknown authority` —— 两套集群抢同一个 API VIP(2026-09-29 实机)
 
 **症状**
 同一条 `kubectl` 命令连跑三次: **成功 / 失败 / 失败**; 失败时报
@@ -930,7 +1020,7 @@ KUBESPRAY_INV_DIR=<inventory 副本> CLUSTER_CONF=<conf 副本> \
 "该地址被多个 apiserver 共用"并打印上面两条处置; 指纹稳定则提示"非多集群抢 VIP, 去 master 上核对集群健康"。
 `cluster.conf.example` 的 `K8S_API_VIP` 与 `METALLB_POOL` 注释都补了同款警告。
 
-### 12. 【2026-09-23 事故】部署跑 22 分钟后 `kubeadm join` 报 `[ERROR Port-10250]: Port 10250 is in use` —— 节点上的 RKE2 agent 占着端口, 而部署前清理对它"免疫"
+### 11. 【2026-09-23 事故】部署跑 22 分钟后 `kubeadm join` 报 `[ERROR Port-10250]: Port 10250 is in use` —— 节点上的 RKE2 agent 占着端口, 而部署前清理对它"免疫"
 
 **症状**
 
@@ -1009,6 +1099,79 @@ ssh <node> 'sudo systemctl disable --now rke2-agent'
 # 仍占着才需要官方兜底(只杀进程/清 CNI 运行态, 不动 /var/lib/rancher)
 ssh <node> 'sudo /usr/local/bin/rke2-killall.sh'
 ```
+
+### 5. `--steps cubestack_operator` 报成功, 但 operator 仍跑旧镜像(在线/离线)
+
+**症状**: `sudo ./deploy-cluster.sh --steps cubestack_operator` 执行完成、`helm` 与 `rollout status`
+都成功; 但 `kubectl -n cubestack-system get deploy cubestack-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`
+仍是 `:latest`, Pod AGE 没变; 即使 `imagePullPolicy=Always` 也不生效。
+
+**根因**:
+- `Always` 只在**新建 Pod** 时重新解析 tag; 运行中的旧 Pod 不会因为 `Always` 自动重启;
+- `helm upgrade --install` 在 chart/values 渲染结果没变时(同 `:latest` tag)不会改 Pod 模板 → 不触发滚动;
+- 旧代码只有离线模式写 `podAnnotations.cubestack.io/image-digest`; 在线模式没有 digest 注解;
+- `CUBESTACK_OPERATOR_IMAGE_TAG` 没有真正进入 helm 渲染/安装参数, 只依赖 chart 默认 tag。
+
+**解法(2026-10-19 已落地)**:
+- 离线/在线**都**把 **operator 镜像 digest** 写进 `podAnnotations.cubestack.io/image-digest`
+  (digest 变 → Pod 模板变 → 自动滚动);
+- 在线模式取不到 Harbor digest 时, helm 后自动 `rollout restart deployment/${RELEASE}` 兜底;
+- `image.tag=${IMG_TAG}` 同时进入 chart 渲染与 helm 安装参数;
+- 离线 operator 与 CR 组件 `imagePullPolicy` 都改为 **Always**(每次新建 Pod 从集群 registry 重新解析);
+- `CUBESTACK_OPERATOR_IMAGE_PULL_POLICY` 保留兼容但不再生效(强制 Always)。
+
+**验证**:
+```bash
+kubectl -n cubestack-system get deploy cubestack-operator \
+  -o jsonpath='{.spec.template.metadata.annotations}{"\n"}'
+kubectl -n cubestack-system get pods -o wide
+# 更新镜像/ chart 后重跑 --steps, Pod AGE 应变化; 内容未变则 digest 注解不变、不重启
+bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
+```
+详见 `docs/cubestack-operator.md` §1.1 / §3.6。
+
+### 6. 【2026-10-19 事故】`verify_cubestack_operator` 的冒烟 CR 删掉了真实 `lws-system` 命名空间
+
+**症状**
+- `kubectl -n lws-system get pods` 只有 `lws-controller-manager`, 且 `CrashLoopBackOff`;
+  `describe` 报 `configmap "lws-manager-config" not found` / `secret "lws-webhook-server-cert" not found`;
+- 日志 `Unauthorized` + `the server has asked for the client to provide credentials`;
+- 命名空间里 **没有** `lws-controller-manager` ServiceAccount、ConfigMap、Secret、ClusterRole/Binding;
+- 但主 CR `kubectl -n cubestack-system get csc cubestack` 的 `status.components` 仍显示 `lws=Ready`。
+
+**根因(逐项证据)**
+1. `26_verify_cubestack_operator.sh` 的冒烟 CR 只写了 `deletePolicy: uninstall`, **省略了
+   `spec.components`**。operator 对省略的组件会继承 catalog/chart 默认值; 新版 chart 默认启用
+   `lws/envoyGateway/...` ⇒ 冒烟 CR 实际管理了真实组件;
+2. 验证结束 trap 删除冒烟 CR, `deletePolicy=uninstall` 触发组件卸载; operator 日志明确:
+   `uninstall deleted component namespace {"CubeStackCluster": {"name":"verify-csc"}, "component": "lws",
+   "namespace": "lws-system"}` —— 把**主 CR 正在使用的共享命名空间**整个删了;
+3. operator 的组件状态按 **desired hash** 比较; 资源被外部删除但 hash 未变时不会重新 apply
+   (没有 drift detection) ⇒ 主 CR 状态继续显示 `lws=Ready`, 不会自愈。
+
+**修复(2026-10-19 已落地)**
+- 冒烟 CR 显式写**全部** components `enabled: false`(含 `exporters.bmc/metax`)、`bundles: []`,
+  并把 `deletePolicy` 改为 **`retain`**(双保险; CRD 默认也是 retain);
+- 清理前增加护栏: 读取冒烟 CR 的 `spec.components`, 只要发现任何 `enabled: true` 就中止,
+  不执行卸载路径;
+- `test-cubestack-operator-update.sh` 增加静态断言(不能出现 `deletePolicy: uninstall`、
+  每个组件 key 必须在冒烟 CR 中显式禁用)。
+
+**恢复被误删的组件**(脚本修复后)
+```bash
+# 强制 operator 重新 apply: 把 lws 关掉再打开(改变 desired hash)
+kubectl -n cubestack-system patch csc cubestack --type=merge \
+  -p '{"spec":{"components":{"lws":{"enabled":false}}}}'
+kubectl -n cubestack-system patch csc cubestack --type=merge \
+  -p '{"spec":{"components":{"lws":{"enabled":true}}}}'
+# 等待 SA/ConfigMap/Secret/Deployment 重建 + Pod Running + CR phase=Ready
+kubectl -n lws-system get sa,cm,secret,deploy,pod
+kubectl -n cubestack-system get csc cubestack \
+  -o jsonpath='{range .status.components[?(@.name=="lws")]}{.phase}{end}'
+```
+**验证**: 重新执行 `--steps verify_cubestack_operator`; 结束后 `lws-system` 的 SA/CM/Secret
+必须仍在, Pod 仍 Running, 冒烟 CR 已被清理。回归:
+`bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh`。
 
 ---
 
@@ -1115,7 +1278,7 @@ curl -u u:p "$API/api/v2.0/projects/<project>/repositories/${enc_repo}/artifacts
 #### 3.4 离线 tar 的 `RepoTags` 为空 → 模块识别不出 tar 内容
 
 **症状:** 用 skopeo 生成的 tar, `tar -xOf x.tar manifest.json` 看到 `"RepoTags": []`;
-`lib-common.sh` 的 `tar_first_image_tag` 返回空 → 依赖内容匹配的逻辑(lws/multus/rdma 的 tar 识别、
+`lib-common.sh` 的 `tar_first_image_tag` 返回空 → 依赖内容匹配的逻辑(multus/rdma 的 tar 识别、
 `ensure_registry_nginx`)全部失效。
 **根因:** `skopeo copy ... docker-archive:<file>` **末尾不带 `:<ref>` 时 skopeo 不写 RepoTags**
 (docker save 会写, 所以老的 tar 都正常)。
@@ -1189,3 +1352,228 @@ skopeo inspect --format '{{.Digest}}' docker://harbor.isuanova.com/mirrors/regis
 > 读到的是**加旗标之前落地的旧制品**, 然后才用新旗标重传。必须看**再下一轮**是否变成
 > `digest 未变, 跳过`。本项目第一轮据此把已生效的修复误判为"无效"并写进了文档, 第二轮才纠正。
 
+
+### 4. 【2026-10-15】覆盖安装 reset 被 Calico 一致性检查拦停: 旧集群网络模式 ≠ 新配置(断言 "Your inventory doesn't match the current cluster configuration")
+
+**症状:** 覆盖安装(先 `reset` 旧集群再全量部署)时, `ansible-playbook reset.yml` 在 preinstall 阶段中断:
+
+```
+TASK [kubernetes/preinstall : Run calico checks] ***
+fatal: [master01]: FAILED! => {"assertion": "not calico_pool_conf.spec.ipipMode is defined or calico_pool_conf.spec.ipipMode == calico_ipip_mode", ...
+  "msg": "Your inventory doesn't match the current cluster configuration"}
+```
+
+**根因:** `playbooks/reset.yml` 的 "Reset cluster" play 带 `tags:resolvconf` 引入 `kubernetes/preinstall`
+(为了还原 resolv.conf)—— 于是 preinstall 的 "Run calico checks" 也执行了。该检查**读活集群**
+(`calicoctl get ipPool`, 现网配置)与 **inventory**(新配置)逐项比对;而覆盖安装的典型场景正是
+"旧集群网络模式与新配置不同":实机 2026-10-15 为**旧集群 VXLAN(`vxlanMode=Always`/`ipipMode=Never`)
+vs 新配置 IPIP(`ipipMode=Always`/`vxlanMode=Never`)⇒ 断言必失败。
+该检查语义上只服务于**安装/升级**(防配置漂移),对"即将拆除"的 reset 场景没有意义 —— 却把整个
+reset(以及后续覆盖安装)拦死。
+
+**解法(根治):** 补丁 `deployments/kubespray/cubestack-patches/13-skip-calico-checks-on-reset.patch`
+(两文件):
+- `playbooks/reset.yml`: "Reset cluster" play 级 `vars: { cubestack_skip_calico_checks: true }`;
+- `roles/kubernetes/preinstall/tasks/main.yml`: "Run calico checks" 的 `when` 增加
+  `not (cubestack_skip_calico_checks | default(false) | bool)`。
+⇒ **reset 路径整体跳过该检查; cluster.yml / scale.yml / upgrade_cluster.yml 不带该变量, 检查原样保留**。
+补丁层由部署入口自动保障(install/scale 走 `ensure_kubespray`; reset 走 `cmd_reset` 的同款
+`_ensure_patches_applied`, 2026-10-15 一并补上 —— reset 直接消费树内 playbook, 存量树缺补丁会再次
+中断):缺位自动重放, 无需手工改树。
+
+**⚠ workaround 同步移除:** 临时方案(在 "Run calico checks" 的 `when` 里加 `- false`)是**全局**
+跳过(安装期也丢检查),整改后必须删掉 —— 否则树被外部改动, 补丁层的 `--check` 会报 MISSING、
+`--apply` 可能 CONFLICT。
+
+**验证:**
+```bash
+# ① 补丁在位(含 13):
+bash deployments/kubespray/cubestack-patch-apply.sh --check     # 全静默 rc=0
+# ② 树内两文件的语义(重置才跳过, 安装不跳过):
+grep -n "cubestack_skip_calico_checks" deployments/kubespray/kubespray/playbooks/reset.yml
+# ③ 端到端(实机): 覆盖安装跑 reset, 应不再出现 "Your inventory doesn't match the current cluster configuration"
+```
+**已验证边界(如实标注):** ① 机理已由实机验证 —— 用户 2026-10-15 在"Run calico checks"上临时加
+`- false` 后 reset/覆盖安装**能继续跑通**(即"重置场景跳过该检查"确为有效解法);② 补丁 13 是本仓库
+对同一机理的**正式实现**(范围收窄为 reset 路径),静态层验证已过(`--check` 全在位 / 纯净树前向重放
+逐字节一致 / YAML 合法);③ 补丁版的**端到端实机复验**尚待下一轮覆盖安装 —— 跑通后请回来把本行
+更新为"已实机验证"。
+
+### 5. 【2026-10-15; 2026-10-16 补"远端重定向"变体】节点脚本 scp / `cat > /tmp` 报 Permission denied: 固定 /tmp 名撞上 sticky /tmp 的 `fs.protected_regular=2`(遗留他人属主文件, **root 也不例外**)
+
+**症状:** root 安装(SSH_USER=root)时, 各模块向节点上传**固定 /tmp 名**脚本失败 —— 同一 run 中
+**部分节点失败、其余成功**是本故障的指纹, 报错文案极具误导性(实测凭证/sudo 完全正常):
+
+```
+scp: /tmp/cubestack-registry-node.sh: Permission denied
+⚠    cubestack-k8s-master11(10.66.3.214): 无法上传配置脚本(检查密钥/密码)   ← deploy-registry.sh
+⚠    cubestack-k8s-master12(10.66.3.216): 无法上传脚本(检查密钥/密码)       ← setup-ntp.sh(同类)
+```
+
+**变体(2026-10-16, 远端重定向形态, 实机命中):** 报错不在 scp 客户端, 而在**远端 bash 的重定向** ——
+同一内核保护对 `cat > /tmp/<固定名>.yaml`(O_CREAT|O_TRUNC 打开既有他人文件)同样生效:
+
+```
+bash: line 1: /tmp/ceph-rbd.yaml: Permission denied          ← 03_ceph_csi.sh [2/4] 建 rbd-pool(2026-10-16)
+【错误】  创建 rbd-pool/StorageClass 失败 → 模块 ceph_csi 退出 1 → 整次部署中断
+```
+
+**根因:** ① 上传目标是**固定 /tmp 文件名**;② 节点 /tmp 是 sticky + world-writable, 且实机
+`fs.protected_regular=2`(sysctl 实测)—— 打开**属主非本人**的既有文件会被内核拒为 EACCES;
+③ 文件是**历史运行的另一用户**遗留(实机: 昨天 ubuntu 部署留下 `ubuntu:ubuntu` 的
+`/tmp/cubestack-registry-node.sh`), 而本次部署用户是 root ⇒ 新用户的 scp(= open(O_CREAT|O_TRUNC))
+覆盖既有他人文件 → `Permission denied`。**root 不受豁免**(2026-10-15 实机三态实测:
+①覆盖既有他人文件=拒 ②新路径=过 ③先删再传=过)。无遗留文件的节点(实机 worker13, 重建后 /tmp 干净)
+走"新建路径" ⇒ 成功 —— 这就是"部分节点失败"的原因, 与密钥/密码/连通性无关。
+
+**解法(根治):** 上传固定 /tmp 名前**先清陈旧目标**(`ssh <user>@<ip> "sudo rm -f '<path>'"`,
+目录则 `rm -rf && mkdir -p`), 使 scp 恒为"新建文件"; 新建成功后的属主=本次用户, 后续运行同类安全。
+已落地: `setup-ntp.sh`(node_scp)/ `sync-ca.sh` / `rebootstrap-worker.sh` / `install-worker-packages.sh`
+(重建 `/tmp/packages`)/ `reconcile-node-packages.sh`(重建 `/tmp/cubestack-debs`)/ `02_ceph.sh` /
+`27_verify_ceph.sh`; 2026-10-15 补齐: **`deploy-registry.sh`**(node_scp, 本次实机故障点)+
+`21_verify_metallb.sh` / `27_verify_ceph.sh`(固定名 `/tmp/verify-lb.yaml`、`/tmp/verify-ceph-pod.yaml`)+
+`30_verify_rdma_shared_dev_plugin.sh`(`/tmp/verify-rdma-pod.yaml`)。
+
+**✅ 同类"远端重定向"点已补齐(2026-10-16 实机命中并修复):** 上述三处 ——
+`modules/03_addon/03_ceph_csi.sh::apply_remote` / `tools/k8s/ceph-expose-external.sh::_apply_yaml` /
+同文件 CephFilesystem 段(`/tmp/ceph-ext-fs.yaml`)—— 统一改为**同一条远端命令内先清后写**:
+`ssh … "sudo rm -f /tmp/<name>.yaml; cat > /tmp/<name>.yaml && ${K} apply -f …"`(一次 ssh 往返;
+`sudo rm -f` 在新旧两种身份下都能清, 不引入第二次连接)。命中链条(实机): 10-14 ubuntu 时代遗留
+`/tmp/{ceph-rbd,cephfs,cephfs-svgroups,rgw,rgw-users,ceph-ext-fs}.yaml`(属主 ubuntu:ubuntu),
+10-15 起部署用户切 root(容器 cluster.conf `SSH_USER=root`)⇒ ceph_csi [2/4] 以 root 打开他人文件被拒。
+最小复现: `sh -c "cat > /tmp/ceph-rbd.yaml </dev/null"`(root)→ `Permission denied`。
+
+**★ 双腿口径(2026-10-16 起全链路, 支持 root↔ubuntu **任意方向**切换部署):** **写前预清 + 用完即删**。
+⚠ **改权限(chmod)不是通解**: 拦截与"文件属主 + 文件对 group/other 的写位"共同相关 —— 实测 664 的
+他人文件 root 也被拒; 而改成 666 只会**必然触发**保护。唯一通用解 = **删除后重建**: 写前
+`sudo rm -f`, 用完 `rm -f`(删除可由 sudo/属主完成; 重建后属主=本次用户)。
+**"用完即删"落地(2026-10-16):** `03_ceph_csi.sh`(apply 后删 yaml)/ `ceph-expose-external.sh`
+(CephFilesystem 段; `_apply_yaml` 原本即删)/ `02_ceph.sh`(cephcluster.yaml)/ `ceph-backup.sh`
+(节点侧 refresh.sh 副本 + monstore tar 取回后删)/ `sync-ca.sh`(脚本 + CA 临时件)/
+`setup-ntp.sh`(节点脚本三处执行点)/ `deploy-registry.sh`(节点脚本)。原本就"预清+后删"齐备的:
+`install-worker-packages.sh` / `reconcile-node-packages.sh` / verify 系列(21/22/27/30; 22 的预清本次补齐)。
+**例外(有意保留):** `ceph-sync-images.sh` 的 `/tmp/ceph-images/`(镜像 tar + `.done` 断点复用;
+每次运行 `sudo rm -rf && chown` 重建, 跨用户安全); rook-ceph-tools **pod 内** `/tmp`(随 pod 生命周期)。
+
+**验证(2026-10-15 实机, 已通过):**
+```bash
+# ① 复现(容器内, 对仍有 ubuntu 遗留文件的节点): 覆盖既有文件拒 / 新路径过
+scp /tmp/t root@10.66.3.216:/tmp/cubestack-registry-node.sh   # → scp: Permission denied(rc=1)
+scp /tmp/t root@10.66.3.216:/tmp/brand-new-path.txt           # → rc=0(证明密钥/通路/权限正常)
+# ② 修复后端到端(容器内跑修复版工具): [2/4] 6/6 节点成功(修复前 5/6 失败)
+bash /opt/cubestack-installer/deployments/scripts/tools/lb/deploy-registry.sh
+#   ✅ 6 台节点 "certs.d 已就绪"; master11 的 /tmp/cubestack-registry-node.sh 变 root:root(新时间戳)
+# ③ 2026-10-16 远端重定向修复后复验(容器内): ./deploy-cluster.sh --steps ceph_csi
+#   → [2/4] CephBlockPool rbd-pool + 3×SC ✅ / [3/4] CephFS ✅ / [4/4] 校验 ✅ / 模块完成 EXIT=0;
+#   全日志无 Permission denied; 节点 /tmp/*.yaml 属主全部变 root:root(复跑新时间戳)
+# ④ 2026-10-16 "用完即删"复验(同上再重跑一次): EXIT=0;
+#   节点 `ls /tmp/ceph*.yaml` → **全部消失**(预清+后删双保险生效, 不再有任何 ceph 临时件残留)
+```
+**⚠ 边界(防误归因):** 本条只解决**节点脚本上传**。若 `k8s_registry` 模块仍以
+`registry 未在 600s 内就绪 —— 后端 local-path`(PVC 未 Bound)失败, 那是**另一个**故障 ——
+2026-10-15 实机链条: `local-path-provisioner` CrashLoop(其日志: 访问
+`https://10.233.0.1:443` **i/o timeout**)→ PVC 永不 Bound → registry pod Pending;
+叠加背景: calico-node **全节点 0/1**(felix 未就绪)与 apiserver 多次重启 —— 与 scp 无关。
+
+**相关命令:**
+```bash
+grep -rn "fs.protected_regular" deployments/scripts/   # 已落地的"预清陈旧目标"点
+sysctl fs.protected_regular                            # 节点内核口径(2=对 O_CREAT 打开既有文件也生效)
+ssh <user>@<ip> "ls -la /tmp/cubestack-*.sh"           # 查遗留文件属主(与本次用户不一致即命中条件)
+```
+
+---
+
+## 五、存储 / CephFS
+
+### 1. CephFS 宿主机挂载(cephfs_mount): 模块报成功但节点没有挂载 / 反复叠加挂载 / 卸载后挂载残留
+
+**症状**
+- `kubectl -n rook-ceph logs ds/cephfs-models-mount` 反复打印
+  `目标当前 fstype=ext4(hostPath 自身)` 与 `挂载成功`;节点 `findmnt -T /mnt/cephfs/models` 出现
+  **多条相同 ceph 挂载**(挂载栈越叠越高);
+- 或模块逐节点验证时报 `NOT_MOUNTED` / `校验失败: ceph`,但节点上其实已有 ceph 挂载;
+- 删除 DaemonSet 后,节点 `findmnt -T /mnt/cephfs/models` **仍是 ceph**(卸载不干净)。
+
+**根因(2026-10-19 实机, 逐项证据)**
+1. **hostPath 在容器里本身就是 bind mount** ⇒ `mountpoint -q "${TARGET}"` 恒为真。用它判断
+   "目标已被其他文件系统挂载"会把 hostPath 自身误判成外部 ext4 挂载并拒绝工作;
+2. 同一路径存在**挂载栈**(hostPath 的 ext4 + 历史 ceph 挂载),`findmnt -n -o FSTYPE -T <path>`
+   会输出**多行**("ext4\nceph\nceph");把整段多行输出与 `ceph` 比较必然不等 ⇒ 误判未挂载 ⇒
+   每 30s 再挂一次,越叠越多;
+3. `mountPropagation: Bidirectional` 传播到宿主机的 mount 是**宿主机命名空间里的独立 mount**,
+   容器/Pod 退出时**不保证**被卸载(`kubectl delete ds` 后实测仍残留 3~5 层 ceph);
+4. CephFS 挂载上执行**全局 `sync` 会挂住**(实测 `sync` 无输出、SSH 一直阻塞;同节点
+   `sync -f /mnt/cephfs/models` 与 `dd ... conv=fsync` 均正常);验证脚本里的 `sync` 会让整轮部署卡死;
+5. 远端 `kubectl ... -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'`:本地单引号被
+   shell 剥掉后,远端 shell 把 `?(`/`(` 当语法符号 ⇒ 语法错误;脚本把空输出误判为 NotReady
+   (本次实机曾出现"6 台全部非 Ready, 但模块仍报成功")。
+
+**解法(根治, 已落地)**
+- `mounted_ok()` / 验证统一取**最上层**: `findmnt -n -o FSTYPE -T <path> 2>/dev/null | tail -1`;
+  **禁止**用 `mountpoint -q` 判断是否已挂载;
+- 未挂载时才 `mount -t ceph`;子目录不存在时临时挂 FS 根 → `mkdir` + `chmod` → 再挂子目录;
+- uninstall 分支**逐节点显式 umount**(循环最多 20 层, 只卸载 fstype=ceph, 不动 ext4 等);
+- 验证探针去掉全局 `sync`(只做写入+读回);逐节点 SSH 加 `timeout 30`, 任何节点都不能拖死整轮;
+- 节点 Ready 判断改用 `kubectl get node <name> --no-headers | awk '{print $2}'`,
+  避免把含 `?(...)` 的 jsonpath 传给远端 shell;
+- **零节点验证必须硬失败**(`没有节点完成挂载校验`), 禁止"全部跳过=成功"的假绿。
+
+**验证(2026-10-19 实机, 已通过)**
+```bash
+# 部署 + 逐节点写读探针(6/6)
+bash deployments/scripts/modules/03_addon/07_cephfs_mount.sh
+# 每台节点恰好 1 层 ceph 挂载
+ssh <node> "findmnt -n -o FSTYPE -T /mnt/cephfs/models | grep -cx ceph"
+# 跨节点共享: master11 写 → worker13 读
+ssh <master11> "echo shared > /mnt/cephfs/models/.p; cat /mnt/cephfs/models/.p"
+ssh <worker13> "cat /mnt/cephfs/models/.p; rm -f /mnt/cephfs/models/.p"
+# 幂等重跑: 第二次仍 6/6, 挂载层数不增加
+# 卸载: DS/Secret/cephx 用户消失, 6 台节点 fstype 回到 ext4, 目录保留
+CUBESTACK_MODULE_ACTION=uninstall bash deployments/scripts/modules/03_addon/07_cephfs_mount.sh
+# 离线回归(无需集群)
+bash deployments/scripts/tools/tests/test-cephfs-mount.sh
+```
+**验证边界**: 未做多节点**并发写**/性能/配额测试; 未做真实节点重启(以删除 Pod 模拟重挂)。
+**相关命令**: `kubectl -n rook-ceph logs ds/cephfs-models-mount --tail=50`;
+`findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,SOURCE`;
+`kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph auth get client.cubestack-cephfs-models`.
+
+### 2. 【2026-10-19 实机】cubepilot-api 更新后永久 Pending: RWO PVC + RollingUpdate → Multi-Attach
+
+**症状**
+- `kubectl -n cubestack-system describe pod cubepilot-api-<new>` 一直 `ContainerCreating`;
+  Events: `Multi-Attach error for volume "pvc-..." Volume is already used by pod(s) cubepilot-api-<old>`;
+- 同一个 Deployment 下**两个 ReplicaSet 各 1 个 Pod**: 旧 Pod `Running`(另一个节点), 新 Pod
+  `Pending`; `status.conditions` 出现 `ProgressDeadlineExceeded`;
+- `kubectl get deploy cubepilot-api -o jsonpath='{.spec.strategy}'` 是默认的
+  `RollingUpdate{maxSurge:25%,maxUnavailable:25%}`。
+
+**根因**
+`cubepilot-api` 使用**单个 `ReadWriteOnce` PVC**。`maxSurge>0` 会先创建新 Pod; 新 Pod 被调度到
+另一节点后, RBD 卷仍 attach 在旧 Pod 所在节点, 无法同时挂载(`Multi-Attach`); 而
+`maxUnavailable` 取整后为 0, Deployment 又不会先停旧 Pod → 新旧 Pod 互相卡死。
+这是 Kubernetes 对 RWO 卷 + RollingUpdate 的经典冲突, 与镜像/网络无关。
+
+**解法(脚本已根治)**
+- `lib-common.sh` 新增 `ensure_rwo_deployments_recreate <ns> [selector] [wait]`:
+  解析 Deployment + PVC, 只把**引用 RWO PVC** 且策略非 Recreate 的 Deployment merge-patch 成
+  `strategy: {type: Recreate}`(无 PVC/RWX 的组件不动; 幂等)。
+- `25_cubestack_operator.sh` 的 `[6.5/6]` 在 operator 创建组件后自动执行(等待上界
+  `CUBESTACK_OPERATOR_RWO_STRATEGY_WAIT_SECONDS`, 默认 60s)。
+- `cubestack-component-update.sh`(`--steps cubepilot` 等)在 `rollout restart` **之前**执行,
+  纠正失败会中止滚动(避免把组件滚进 Multi-Attach)。
+- 手工即时修复(本次实机已执行, 旧 Pod 30s 内退出、新 Pod 40s 内 Running):
+  ```bash
+  kubectl -n cubestack-system patch deploy cubepilot-api --type=merge \
+    -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+  kubectl -n cubestack-system rollout status deploy/cubepilot-api --timeout=180s
+  ```
+- 验证: `kubectl -n cubestack-system get rs -l app=cubepilot-api` 旧 RS 应为 0;
+  `kubectl -n cubestack-system get pod -l app=cubepilot-api -o wide` 只应有一个 Running;
+  `kubectl -n cubestack-system get pvc cubepilot-api-data -o jsonpath='{.spec.accessModes}'`
+  确认为 `["ReadWriteOnce"]`。
+
+**注意**: operator 的 server-side apply 不渲染 `strategy` 字段, 因此本 patch 不会被下一轮
+调谐覆盖; 若上游 chart 将来显式加入 `strategy`, 需要上游改成 `Recreate` 或提供 values 开关,
+届时本守护会因 `strategy.type != Recreate` 继续纠正。

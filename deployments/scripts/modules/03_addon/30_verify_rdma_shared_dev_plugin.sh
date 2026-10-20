@@ -17,7 +17,7 @@
 # 说明:
 #   · **验证模块不设 TOGGLE**(否则 RDMA_ENABLED=true 时会被安装流程自动启用);
 #     保持 DEFAULT:0, 仅由 --steps verify_rdma_shared_dev_plugin 在安装后单个执行。
-#   · **门禁看实际部署, 不看配置开关**(仿 verify_lws): 只要 rdma-shared-dp-ds 实际在跑
+#   · **门禁看实际部署, 不看配置开关**(仿 verify_metallb): 只要 rdma-shared-dp-ds 实际在跑
 #     就验证(无论 RDMA_ENABLED true/false, 例如 --steps rdma_shared_dev_plugin 单独部署过);
 #     仅当"DaemonSet 不在 且 RDMA_ENABLED≠true"才跳过。
 #   · 资源注册: 插件经 /var/lib/kubelet/device-plugins 把资源注册进 kubelet → 节点
@@ -203,8 +203,11 @@ spec:
         ${_RES_PICK}: 1
 YAML
     # 提交走 scp + apply(不用 heredoc→SSH stdin 管道: 历史上会挂起, 同 21_verify_metallb)
+    # ★ 清陈旧目标(2026-10-15 实机, 同 setup-ntp.sh 口径): 覆盖他人遗留的同名 /tmp 文件会被 fs.protected_regular 拒(root 也不例外)
+    ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "${FIRST_MASTER_USER}@${FIRST_MASTER}" "sudo rm -f /tmp/${TEST_POD}.yaml" >/dev/null 2>&1 || true
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 -q \
-        "${LOCAL_YAML}" "${SSH_USER:-ubuntu}@${FIRST_MASTER}:/tmp/${TEST_POD}.yaml" \
+        "${LOCAL_YAML}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/${TEST_POD}.yaml" \
         || { rm -f "${LOCAL_YAML}"; err "测试 pod YAML 投递失败(scp → ${FIRST_MASTER})"; exit 1; }
     SSH "${K} apply -f /tmp/${TEST_POD}.yaml" \
         || { rm -f "${LOCAL_YAML}"; err "apply 测试 pod YAML 失败(检查内置 registry 可达性)"; exit 1; }

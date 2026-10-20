@@ -28,13 +28,13 @@
 #                              循环依赖/引用未知模块会报错。--steps 精确模式还会自动
 #                              把 REQUIRES 依赖加入执行列表(闭包)。
 # 示例:
-#   # MODULE: k8s_deploy
-#   # DESC: 部署 kubespray 集群(离线)
-#   # PHASE: k8s
+#   # MODULE: ceph
+#   # DESC: 部署 Rook-Ceph 存储集群
+#   # PHASE: addon
 #   # DEFAULT: 0
 #   # REPEAT: 0
-#   # TOGGLE: K8S_ENABLED
-#   # REQUIRES: k8s_passwordless k8s_hosts k8s_inventory
+#   # TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED
+#   # REQUIRES: k8s_deploy
 #
 # 模块内访问远端 kubectl 的统一入口(★ 必读):
 #   · 需要 SSH 到 master 执行 kubectl 的模块, 在 load_config 之后调用
@@ -46,7 +46,7 @@
 # 旧 key 别名(向后兼容, 旧用法 --steps vm,k8s 等仍然有效):
 #   net→vm_network ssh_key→vm_sshkey vm→vm_create ssh_passwordless→k8s_passwordless
 #   worker_bm→k8s_workerbm hosts→k8s_hosts inventory→k8s_inventory ntp→k8s_ntp
-#   k8s→k8s_deploy scale→k8s_scale lws→gpu_lws
+#   k8s→k8s_deploy scale→k8s_scale
 # ============================================================
 
 MODULES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/modules"
@@ -64,7 +64,16 @@ declare -A MODULE_ALIAS=(
     [k8s]=k8s_deploy
     [scale]=k8s_scale
     [gpu_operator]=gpu_operator
-    [lws]=gpu_lws
+    # CubeStack 平台组件级更新 step 的连字符别名(--steps cube-pilot / envoy-gateway ...)
+    [cube-pilot]=cubepilot
+    [cube_pilot]=cubepilot
+    [envoy-gateway]=envoy_gateway
+    [ai-gateway]=ai_gateway
+    [cubestack-controller-manager]=cubestack_controller_manager
+    [controller_manager]=cubestack_controller_manager
+    [model-bundles]=model_bundles
+    [cubestack-portal]=cubestack_portal
+    [portal]=cubestack_portal
 )
 
 # 归一化模块 key(旧别名 → 新 key; 未知 key 原样返回)
@@ -75,7 +84,7 @@ normalize_key() {
 
 # ---------------- operator 模块(显式调度用, 自动派生) ----------------
 # --steps 显式命名了任一 operator 时, 只部署被指定的 operator(+基座 env/k8s/metallb/local_path/k8s_registry),
-# 剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps lws 时不部署 gpu_operator);
+# 剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps ceph 时不部署 gpu_operator);
 # 未命名任何 operator(纯默认 / --with-k8s / --with-cubestack)时, 全部默认启用的 operator 照常部署。
 # (--enable 只写 cluster.conf, 不经过本处; 见 deploy-cluster.sh)
 #
@@ -274,7 +283,7 @@ resolve_run_steps() {
     done
 
     # ★ operator 显式调度: --steps 显式命名了 operator 时, 只保留被指定的 operator(+基座),
-    #   剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps lws 时不部署 gpu_operator)。
+    #   剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps ceph 时不部署 gpu_operator)。
     #   未命名任何 operator(纯默认 / --with-k8s / --with-cubestack)时保持原行为: 全部默认启用的 operator 照常部署。
     declare -A _op_keep=()
     for s in ${enable_arg//,/ }; do
@@ -443,26 +452,95 @@ run_module() {
 }
 
 # ---------------- 打印 ----------------
+# 按显示宽度截断(CJK 算 2 列), 用于 compact 列表
+_truncate_display() {   # <text> <max-width>
+    printf '%s' "$1" | python3 -c '
+import sys, unicodedata
+maxw = int(sys.argv[1]); w = 0; out = []
+for ch in sys.stdin.read():
+    cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    if w + cw > maxw:
+        out.append("…"); break
+    out.append(ch); w += cw
+sys.stdout.write("".join(out))
+' "$2"
+}
+
+# 单行模块展示(compact: 状态简写/短 DESC; verbose: 完整 DESC/文件/依赖)
+_print_module_line() {
+    local i="$1" verbose="${2:-0}"
+    local key="${MODULE_KEY[$i]}" desc="${MODULE_DESC[$i]:-}" state rep="" deps="${MODULE_REQUIRES[$i]:-}"
+    local tgl="${MODULE_TOGGLE[$i]:-}" script="${MODULE_SCRIPT[$i]:-}" n=0 d
+    if [ -n "${tgl}" ]; then
+        if [ "${verbose}" = "1" ]; then
+            n=$(printf '%s\n' "${tgl}" | wc -w)
+            if [ "${n}" -gt 1 ]; then state="toggle:${tgl%% *}(+$((n-1)))"; else state="toggle:${tgl}"; fi
+        else
+            state="toggle"
+        fi
+    elif [ "${MODULE_DEFAULT[$i]:-0}" = "1" ]; then
+        state="on"
+    else
+        state="off"
+    fi
+    [ "${MODULE_REPEAT[$i]:-0}" = "1" ] && rep="↻"
+    n=0; for d in ${deps}; do n=$((n+1)); done
+    [ "${n}" -gt 0 ] && rep="${rep}←${n}"
+    if [ "${verbose}" != "1" ] && [ "${#desc}" -gt 36 ]; then
+        desc="$(_truncate_display "${desc}" 72)"
+    fi
+    if [ "${verbose}" = "1" ]; then
+        printf "  %-31s %-34s %-4s %s  (%s)%s\n" "${key}" "${state}" "${rep}" "${desc}" "${script}" "${deps:+  依赖:${deps}}"
+    else
+        printf "  %-31s %-8s %-4s %s\n" "${key}" "${state}" "${rep}" "${desc}"
+    fi
+}
+
 print_steps() {
-    say "==== 部署模块列表(modules/, 自动发现) ===="
-    for i in "${!MODULE_KEY[@]}"; do
-        local flag="[${MODULE_DEFAULT[$i]:-0}]"
-        local desc="${MODULE_DESC[$i]:-}"
-        local phase="${MODULE_PHASE[$i]:-?}"
-        local tgl="${MODULE_TOGGLE[$i]:-}"
-        local reqs="${MODULE_REQUIRES[$i]:-}"
-        [ "${MODULE_REPEAT[$i]:-0}" = "1" ] && desc="${desc} [可重复执行]"
-        [ -n "${tgl}" ] && flag="[${tgl}]"
-        [ -n "${reqs}" ] && desc="${desc} 依赖:${reqs}"
-        printf "  %-18s %-6s 启用:%-8s %s\n" "${MODULE_KEY[$i]}" "(${MODULE_SCRIPT[$i]})" "${phase}/${flag}" "${desc}"
+    local _verbose="${LIST_VERBOSE:-0}" _phase i key _k _list
+    local _comp_keys=" lws envoy_gateway ai_gateway cubestack_controller_manager model_bundles prometheus perses bmc metax cuberouter cubepilot cubestack_portal observability "
+    say "==== 部署模块列表(自动发现) ===="
+    if [ "${_verbose}" = "1" ]; then
+        echo "  模式: --verbose(完整 DESC / 文件 / 依赖)"
+    else
+        echo "  图例: on=默认启用  off=默认关闭  toggle=由 cluster.conf 开关  ↻=可重复执行  ←N=依赖数"
+        echo "        完整说明: --list-steps --verbose"
+    fi
+    for _phase in env k8s addon; do
+        echo ""
+        echo -e "  \033[36m[${_phase}]\033[0m"
+        for i in "${!MODULE_KEY[@]}"; do
+            [ "${MODULE_PHASE[$i]:-}" = "${_phase}" ] || continue
+            key="${MODULE_KEY[$i]}"
+            [[ "${key}" == verify_* ]] && continue
+            case "${_comp_keys}" in *" ${key} "*) continue ;; esac
+            _print_module_line "${i}" "${_verbose}"
+        done
     done
+    echo ""
+    echo -e "  \033[36m[平台组件级更新]\033[0m  --steps <key>(operator/CR 已就绪; 默认全量部署仍由 cubestack_operator 负责)"
+    if [ "${_verbose}" = "1" ]; then
+        for i in "${!MODULE_KEY[@]}"; do
+            case "${_comp_keys}" in *" ${MODULE_KEY[$i]} "*) _print_module_line "${i}" 1 ;; esac
+        done
+    else
+        _list=""
+        for _k in ${_comp_keys}; do _list="${_list:+${_list}  }${_k}"; done
+        printf '%s\n' "${_list}" | fold -s -w 104 | sed 's/^/    /'
+    fi
+    echo ""
+    echo -e "  \033[36m[验证模块]\033[0m  --steps verify(全部) / --steps verify_<组件>(单个)"
+    if [ "${_verbose}" = "1" ]; then
+        for i in "${!MODULE_KEY[@]}"; do
+            [[ "${MODULE_KEY[$i]}" == verify_* ]] && _print_module_line "${i}" 1
+        done
+    else
+        _verify_meta_list | fold -s -w 104 | sed 's/^/    /'
+    fi
     echo "---------------------------------------------"
-    echo "  --steps k1,k2  只运行指定模块    --skip k1,k2  跳过模块"
-    echo "  --phase env|k8s|addon  仅运行指定阶段"
-    echo "  --enable k     启用默认关闭模块(如 gpu_operator/lws)   --with-k8s = --enable k8s"
-    echo "  --steps verify 默认执行全部 verify_* 验证模块(新增 verify step 后自动纳入):"
-    echo "                 $(_verify_meta_list)"
-    echo "  --list-steps   查看本列表"
+    echo "  --steps k1,k2  只跑指定模块   --skip k1,k2  跳过模块   --phase env|k8s|addon"
+    echo "  --enable k     持久启用(写 cluster.conf)   --steps verify  全部验证"
+    echo "  --list-steps --verbose  完整 DESC / 文件 / 依赖"
 }
 
 # 输出全部 verify_* 模块名(逗号分隔; 供 help/list 动态展示)
@@ -498,7 +576,7 @@ cluster_exists() {
     [ -f "${key}" ] || return 1     # 无密钥 → 连不上(新容器初始态), 交给接入引导, 不算"已存在"
     # ⚠ -n: 不让 ssh 读 stdin —— 否则会把调用方的 stdin(如 `bash -s < script`、管道)吃掉。
     ssh -n -i "${key}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${fm}" \
+        -o ConnectTimeout=8 "$(ssh_user_for_ip "${fm}")@${fm}" \
         "sudo -n kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes -o name >/dev/null 2>&1" \
         >/dev/null 2>&1
 }
@@ -674,7 +752,7 @@ warn_unhealthy_pods() {
     key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
     # ⚠ -n: 不让 ssh 读 stdin(与 cluster_exists 同款防护)
     out="$(ssh -n -i "${key}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=8 "${SSH_USER:-ubuntu}@${fm}" \
+        -o ConnectTimeout=8 "$(ssh_user_for_ip "${fm}")@${fm}" \
         "sudo -n kubectl --kubeconfig=/etc/kubernetes/admin.conf get pods -A --no-headers 2>/dev/null" \
         2>/dev/null || true)"
     [ -n "${out}" ] || return 0

@@ -4,7 +4,7 @@
 # ============================================================
 # 作用: 读 deployments/config/images.manifest, 把**每个镜像从 Harbor 拉下来并保存为 tar**,
 #       落到各组件既有的离线目录(deployments/offline-files/<group>/)。之后由部署模块
-#       (02_ceph / 07_gpu_lws / 09_multus / ...)推入集群内置 registry —— 节点只
+#       (02_ceph / 09_multus / ...)推入集群内置 registry —— 节点只
 #       从内置 registry 拉取。全程**不需要上游 registry**, 只要一台能连 Harbor 的机器。
 #
 # 制品流向(本脚本 = 中间那一段):

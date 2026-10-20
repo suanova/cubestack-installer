@@ -37,7 +37,7 @@ Harbor `mirrors/**` 还没同步 1.35 线(所以 `harbor-save-images.sh` 暂时�
 | # | 前置 | 不做的后果 |
 |---|---|---|
 | 1 | **重建 CLI 镜像**(树内 `requirements.txt` 已是 `ansible==12.3.0`;⚠ 还需 **Python ≥3.11** —— 22.04 自带 3.10 装不了 ansible 12,已改为装 deadsnakes python3.11,见 `Dockerfile-cli` 对应段) | 第一个 play 撞 ansible 版本门(要 ≥2.19 <2.20);或 pip 直接 `Requires-Python >=3.11` 报错 |
-| 2 | 新镜像**同步到 Harbor**(CI `sync-images-to-harbor.yml`;本支未在 main 上 → 用 `gh workflow run sync-images-to-harbor.yml -r feat/kubespray-v2.32 -f groups=k8s-base,multus,netshoot,lws`) | 第 3 步无从取 |
+| 2 | 新镜像**同步到 Harbor**(CI `sync-images-to-harbor.yml`;本支未在 main 上 → 用 `gh workflow run sync-images-to-harbor.yml -r feat/kubespray-v2.32 -f groups=k8s-base,multus,netshoot`) | 第 3 步无从取 |
 | 3 | ~~在**能连 Harbor 的机器**跑 `harbor-save-images.sh`(增量,只补缺的)~~ **已用另一条路解决**:联网机直连上游下载 → 2026-09-28 换代已把必需件全部落到仓库(见上方状态块);Harbor 同步仍待做(仅供 `harbor-save-images.sh` 后续增量用) | 原后果:镜像 tar 全是 1.32 线旧件,Pod 拉镜像失败 |
 | 4 | **容器侧**:新树+补丁层进容器(容器内跑 `cubestack-kubespray-upgrade.sh v2.32.0` 或重建镜像)+ 容器内 `cluster.conf` **补 8 个版本钉子**(值 = 本文件 §1 的 1.35 线) | 容器仍用 v2.28 树;或缺钉子 → sync fail-loud 停在 `k8s_inventory`(有意) |
 | 5 | 生态兼容确认:metax operator / rook v1.20 / ceph-csi × **k8s 1.35** 未核 | 组件可能不支持 1.35 |
@@ -67,7 +67,7 @@ Harbor `mirrors/**` 还没同步 1.35 线(所以 `harbor-save-images.sh` 暂时�
 | k8s-base | `docker.io/library/nginx:1.30.1-alpine` | `docker.io_library_nginx_1.30.1-alpine.tar` |
 | multus | `ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick` | `multus/ghcr.io_k8snetworkplumbingwg_multus-cni_v4.2.2-thick.tar` |
 | netshoot | `docker.io/nicolaka/netshoot:latest` | `netshoot/docker.io_nicolaka_netshoot_latest.tar` |
-| lws | `registry.k8s.io/lws/lws:v0.10.0` | `lws/registry.k8s.io_lws_lws_v0.10.0.tar`(开 LWS 才需要) |
+| (lws) | `registry.k8s.io/lws/lws:v0.10.0` | `cubestack-operator/registry.k8s.io_lws_lws_v0.10.0.tar`(仅平台 operator 的 CR 下发 `lws` 组件时需要; 独立 LWS 模块已于 2026-10-15 下线, 该 tar 随 cubestack-operator 组管理) |
 
 **按开关(默认关 → 不急)**
 | 组 | ref | 说明 |

@@ -32,11 +32,33 @@ description: CubeStack 部署脚本开发规范技能。当需要编写、修改
 > 否则文档会留下一个看似解决、实则解决不了的方案,误导后续排查。
 > 验证闭环:问题复现 → 修复 → **端到端验证通过(能跑通完整功能)** → 才更新文档。
 
+## 🔒 凭据 / 公网地址卫生(硬性红线; 2026-10-16 全历史清洗事故后新增)
+
+**背景事故**: 2026-08 曾把 MinIO 密码 / 节点 SSH 密码**明文提交入库**(installer 旧应用 +
+cluster.conf 内容); 2026-10-16 用 git-filter-repo 全历史清除 + 全分支强推(所有 SHA 变更)。
+**铁律: 真实凭据或公网 IP 一旦进过 git, 即视为已泄露 —— 必须轮换, 不能只删链接/重写历史。**
+
+规则(违反 = 拒绝合入; 已合入的 = 回滚 + 轮换凭据)
+1. **凭据类文件永不入库**: `cluster.conf` / `minio.conf` / `*.bak*` / `external-ceph*` / `*.env`
+   (模板 `*.env.example` 除外) —— 真实值只进 gitignored 配置、600 权限 env 文件、CI Secrets、
+   或运行时环境变量; 参考实现: `cubestack-platform-sync.sh` 的 `--print-systemd`(凭据仅进
+   `/etc/cubestack-platform-sync.env`, 600)。
+2. **示例一律占位符**: 密码用 `CHANGE_ME` / `${VAR}` / `<占位>`; 地址用 `<minio-host>` 等占位;
+   **禁止真实公网 IP 出现在任何文件**(内网地址同样建议占位, 至少避开 MinIO/Harbor 实地址)。
+3. **门禁(自动, 已落地)**: 每台 clone 先执行一次 `git config core.hooksPath .githooks`
+   → `.githooks/pre-commit` 提交前自动跑 `deployments/scripts/tools/check-secrets.sh --staged`;
+   CI(`ci-validate.yml`)对全仓跟踪文件跑同一检查; 误报用行尾 `# secret-scan: allow(原因)` 豁免。
+4. **本地禁词表**: `deployments/config/secret-blocklist.txt`(**gitignored**)登记真实密文/敏感地址,
+   供检查器(含 `--history` 历史巡检)逐字比对 —— **密文绝不写进任何入库文件(包括检查器源码)**。
+5. 新增脚本/文档**提交前**跑一把: `bash deployments/scripts/tools/check-secrets.sh`;
+   怀疑历史遗留: `--history`(需本地禁词表)。
+
 ## 关键文件位置(先读再改)
 
 | 文件 | 用途 |
 |---|---|
 | `config/cluster.conf.example` | 唯一配置源模板(所有变量在此声明, 含组件开关) |
+| `config/cluster.defaults.conf` | 高级/默认值层(组件深度参数/离线路径/…; 随仓库分发, load_config 自动加载) |
 | `deployments/scripts/lib-common.sh` | 公共库(配置加载/工具函数, 所有脚本 source) |
 | `deployments/scripts/lib-module.sh` | 模块框架(自动发现/元数据解析/调度/旧名别名) |
 | `deployments/scripts/deploy-cluster.sh` | 统一入口(薄壳: 参数解析 + 调度) |
@@ -73,12 +95,12 @@ deployments/scripts/
 ```bash
 #!/bin/bash
 # ============================================================
-# MODULE: k8s_deploy          # 模块 key(缺省=文件名去掉 NN_ 前缀)
-# DESC: 部署 kubespray 集群   # 一句话描述
-# PHASE: k8s                  # 阶段: env | k8s | addon
+# MODULE: ceph                # 模块 key(缺省=文件名去掉 NN_ 前缀)
+# DESC: 部署 Rook-Ceph 存储集群 # 一句话描述
+# PHASE: addon                # 阶段: env | k8s | addon
 # DEFAULT: 0                  # 1=默认启用; 0=需 --enable / TOGGLE / --steps
 # REPEAT: 0                   # 1=可重复执行(不写断点状态)
-# TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量名, true/1/yes/on 时自动启用
+# TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED   # (可选) cluster.conf 变量名, true/1/yes/on 时自动启用(空格分隔=OR)
 # REQUIRES: k8s_deploy        # (可选) 依赖模块 key 列表(执行前须已完成); 框架自动拓扑排序
 # UNINSTALL: 1                # (可选) 声明该模块可被 cluster-teardown 反序优雅卸载
 # 说明: <详细说明, 可选>
@@ -100,7 +122,7 @@ load_config
 2. **写元数据头**: 按上面模板填写 MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE, 需要依赖顺序时加 `REQUIRES`(引用必须存在、不可成环)
 3. **统一远端初始化**: 需要 SSH 到 master 执行 kubectl 的模块**必须**调用 `init_remote_kubectl || exit 1`(幂等, 提供 FIRST_MASTER/SSH_KEY/SSH()/K/SSH_CMD)。**禁止**在模块内手抄 `FIRST_MASTER=.../SSH() {...}/K="sudo kubectl..."` 初始化块 —— 曾致 `K: unbound variable` 部署成功后崩溃
 4. **实现逻辑**: 复用 `tools/` 工具脚本(`bash "${SCRIPT_DIR}/tools/<领域>/xxx.sh"`)或写新逻辑
-5. **加开关**(可选): 在 `config/cluster.conf.example` 加 `XXX_ENABLED` 变量, TOGGLE 指向它
+5. **加开关**(可选): 在 `config/cluster.conf.example`(**常用组件开关**)或 `config/cluster.defaults.conf`(**子开关/细节开关**)加 `XXX_ENABLED` 变量, TOGGLE 指向它(⑦ 校验两文件之一)
 6. **完成**: 无需修改 `deploy-cluster.sh` / `lib-module.sh` / 任何注册表(operator 自动派生)
 7. **登记(装进集群的组件)**: 安装成功点调用 `record_installed_component "<key>"`(优雅覆盖登记; 写失败仅告警, 不影响部署)
 8. **声明可卸载(可卸载的组件)**: 头部声明 `# UNINSTALL: 1` + 实现 `CUBESTACK_MODULE_ACTION=uninstall` 卸载分支(**必须在 TOGGLE 检查之前**; 幂等/有界/告警不中止; check-modules ⑲ 校验)
@@ -186,7 +208,11 @@ trap '清理测试资源' EXIT
 
 ## cluster.conf 组件开关(单一配置源)
 
-- `config/cluster.conf` 是**唯一**配置入口,所有脚本只从它读取(环境变量可覆盖)
+- 配置分**两层(2026-10-15 拆分)**:
+  - `config/cluster.conf`(模板 `cluster.conf.example`; 真实配置 gitignored)= **必改项 + 组件启停开关 + 高频变量**;
+  - `config/cluster.defaults.conf`(随仓库分发; 一般不改)= **高级/默认值层**(组件深度参数/离线路径/NTP/CIDR/镜像源/Ceph 全套…)。
+  - `load_config` 主文件先、defaults 后(全 `${VAR:-default}` 自默认)⇒ 要覆盖高级项**在 cluster.conf 写同名变量**即可;每个变量只许有一个声明处(check-modules ⑦-b 断言两文件变量集互斥)。
+  - ⚠ 新增/移动变量时务必同步 `deployments/scripts/tools/offline/sync-to-container.sh` 的 FILES(两个 conf 都要进容器)。
 - 变量写法一律 `VAR="${VAR:-default}"`
 - **`cluster.conf` 为主, 职责三分**(所有 operator 统一遵守):
   - **全量部署**: `--with-cubestack`/默认 = 基座 + cluster.conf 中已启用的**全部** operator; `--with-k8s` = 仅基座(跳过全部 operator)。
@@ -194,8 +220,7 @@ trap '清理测试资源' EXIT
   - **立即部署单个**: `--steps X` = 部署被指定的 X(自动带基座, 只部署被指定的 operator); `--steps verify` = 只跑验证模块。
   - **排除**: `--skip X` = 全量部署时剔除。
   - 新增 operator **无需改任何列表**: operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)= operator), 写 TOGGLE 即自动进入 --steps/--enable 调度。
-  - lb_haproxy/lb_keepalived(API-HA)默认 false, 需要时用 `--enable` 预启用 或 `--steps` 立即部署。
-- 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`K8S_ENABLED`、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`LWS_ENABLED`(默认false,已实现:默认官方 manifests.yaml bundle + kubectl apply --server-side; helm chart 保留于 lws/charts 供 cert-manager 用; 见 `docs/lws.md`)、`HAPROXY_ENABLED`(默认false)、`KEEPALIVED_ENABLED`(默认false)、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`、`CUBESTACK_APPS_ENABLED`
+- 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`DEV_LAB_ENABLED`(默认true)、`MODEL_IMAGES_ENABLED`(默认true, sglang/vllm ≈95G 排在 dev_lab 之后推送)、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`
 - 新增配置项流程: ① cluster.conf.example 加带注释默认声明 → ② 脚本引用 → ③ 如需同步 kubespray group_vars, 在 `tools/k8s/sync-kubespray-config.sh` / `tools/k8s/sync-addons-config.sh` 加同步逻辑
 
 ## 模块体内规范
@@ -286,17 +311,48 @@ sudo ./deployments/scripts/deploy-cluster.sh --with-k8s --fresh # 仅 kubespray 
 sudo ./deployments/scripts/deploy-cluster.sh --skip gpu_operator   # 全量但排除某个 operator
 sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_operator  # 立即部署单个 operator(自动带基座, 只部署指定的)
 sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator # 只写 cluster.conf 预启用(不部署, 下次全量生效)
+sudo ./deployments/scripts/deploy-cluster.sh --steps lws            # 平台组件级更新(operator/CR 已就绪; 不重跑 cubestack_operator)
+sudo ./deployments/scripts/deploy-cluster.sh --steps cube-pilot     # 同上, 连字符别名
 sudo ./deployments/scripts/deploy-cluster.sh --phase addon          # 仅 addon 阶段
 sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全部模块
 ```
 
+- **平台组件级 step(2026-10-19)**: `--steps lws/cubepilot/envoy_gateway/...` 只更新指定平台组件
+  (只推该组件 tar + patch CR values/version + 滚动组件 Deployment), **不重跑 `cubestack_operator`**;
+  实现 = `modules/03_addon/4x_cubestack_<key>.sh` 薄壳 + `tools/k8s/cubestack-component-update.sh`。
+  第三方组件(lws/envoy-gateway/ai-gateway/prometheus/perses)不受 CR `global.imagePullPolicy` 影响,
+  工具会尝试 `values.image.pullPolicy=Always`; chart 路径不同时用 `CUBESTACK_COMPONENT_VALUES_FILE`。
+  默认全量部署仍由 `cubestack_operator` 负责全部组件; 组件 step `DEFAULT:0`, 无 TOGGLE。
+
 ## NODES 节点格式(5字段, 不区分虚拟机/裸金属)
 
 - **cluster.conf NODES(5字段)**: `role,hostname,ip,ssh_user,ssh_password`
+  - `ssh_user` 为 `-`(或空) → **跟随全局 `SSH_USER`**(cluster.conf, `root|ubuntu`, 默认 ubuntu;
+    2026-10-15 起的"安装用户单一旋钮"): 免密注入 / 即席 SSH / kubespray `ansible_user` 全跟随;
+    显式写用户名 → 该节点覆盖(与全局不一致时 `deploy-cluster.sh` 启动点名告警)。
   - `ssh_password` 为 `-` → 用默认密码 `SSH_DEFAULT_PASSWORD`(全节点默认一致);
     显式密码 → 该节点独立密码(**支持裸金属不同密码场景**)。
   - 解析统一走 `lib-common.sh` 的 `node_parse`(输出 NODE_ROLE/NODE_HOSTNAME/NODE_IP/NODE_USER/NODE_PW 等全局变量),
     旧 10 字段格式(含 mac/mem/cpu/disk/node_type)向后兼容。
+  - **按 IP 查节点用户**一律用 `ssh_user_for_ip <ip>`(lib-common; 未命中回退全局 `SSH_USER`);
+    勿再手抄 NODES 遍历, 也勿在新代码写 `"${SSH_USER:-ubuntu}@<节点>"`(会绕过逐行覆盖)。
+  - ⚠ 环境变量传参的**赋值位置**: `sudo SSH_USER=root ./deploy-cluster.sh` 有效(赋值在 sudo 之后,
+    sudo 视作对命令的环境赋值); `SSH_USER=root sudo ./deploy-cluster.sh` **无效**(赋值在 sudo 之前,
+    会被 sudo 的环境重置清掉)。长期配置推荐直接写 cluster.conf。
+  - ⚠ root 安装假设节点装有 sudo(root 执行 sudo 免密): `k8s_passwordless` 模块对 root 节点做
+    sudo 存在性预检, 缺失时明确报错并给指引(远端命令大量经 sudo 提权, 不是可选项)。
+  - ⚠ **向节点上传"固定 /tmp 名"文件前必须先清陈旧目标**(`ssh <user>@<ip> "sudo rm -f '<path>'"`,
+    目录用 `rm -rf && mkdir -p`): 节点 /tmp 是 sticky+world-writable 且 `fs.protected_regular=2`,
+    覆盖"历史运行的另一用户"遗留的同名文件会被内核拒为 `scp: Permission denied`(远端 `cat > /tmp/<名>`
+    重定向形态同样命中)—— **root 也不例外**, 报错里的"检查密钥/密码"是误导
+    (2026-10-15 实机; 2026-10-16 实机补: ceph_csi 因此中断, 详见 `docs/troubleshooting.md` §四.5)。
+    已落地点: setup-ntp.sh / sync-ca.sh / rebootstrap-worker.sh / install-worker-packages.sh /
+    reconcile-node-packages.sh / 02_ceph.sh / deploy-registry.sh / verify_metallb|verify_ceph|verify_rdma;
+    **2026-10-16 补齐"远端重定向"形态**(`ssh … "sudo rm -f …; cat > /tmp/<名>.yaml && kubectl apply …"`):
+    03_ceph_csi.sh(apply_remote)/ ceph-expose-external.sh(_apply_yaml + CephFilesystem 段)。
+    新增脚本请沿用同一口径: **写前预清 + 用完即删**(写前 `sudo rm -f '<path>'`; 用完在远端同命令
+    追加 `&& rm -f` 或单独 `node_cmd … "rm -f '<path>'" || true`; ⚠ chmod 不是通解 ——
+    protected_regular 看"属主+写位", 666 反而必然被拦)。
 - **虚拟机创建独立执行, 主程序不判断节点类型**:
   - 需要创建虚拟机的节点在 `tools/vm/vm-nodes.conf`(10字段)定义;
     **`sudo ./deployments/scripts/tools/vm/create-vms.sh` 单独执行**(创建/启动 + 自动注入 5 字段到 NODES);
@@ -318,7 +374,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
     -v $HOME/.ssh:/root/.ssh cubestack-cli
   # 容器内: cd /opt/cubestack-installer && sudo ./deployments/scripts/deploy-cluster.sh
   ```
-- **离线文件下载**: `tools/offline/fetch-offline-files.sh` 用 mc 从 MinIO 同步到 `OFFLINE_FILES_DIR`
+- **离线文件下载**: `tools/offline/fetch-offline-from-minio.sh` 用 mc 从 MinIO 同步到 `OFFLINE_FILES_DIR`(--sub 支持嵌套/多值, 可细化到 `cubestack-operator/<组件>`; `--help` 打印全部可用子目录; 旧名 fetch-offline-files.sh 为兼容薄壳)
   (默认 `deployments/offline-files`); 配置 `MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY/BUCKET/REMOTE_DIR`。
 - **离线文件缺失检查**: `lib-common.sh` 的 `check_offline_files`(deploy-cluster.sh 启动时调用), 缺失时输出
   **红底醒目提示**并给出准备指引(不阻断)。部署前务必保证 `${LOCAL_REPO_DIR}` 下有
@@ -330,7 +386,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
 - **放哪**:`deployments/cubestack-addon/<组件>/`(一个 chart 一个子目录)。`.gitignore` 只挡
-  `offline-files/*`,不挡 `cubestack-addon/`,所以 `.tgz` 直接 `git add` 即可(如 lws / rook 的 chart 已在库里)。
+  `offline-files/*`,不挡 `cubestack-addon/`,所以 `.tgz` 直接 `git add` 即可(如 rook 的 chart 已在库里)。
 - **什么形态**:小 chart 放 `.tgz` + **同时提交 `<tgz>.digest` 边车**;大 chart(带几十个子 chart)
   放解包源码目录(含 `Chart.yaml`)。
 - **怎么装**:走共享助手,**不要手抄 pull/回退逻辑**:
@@ -341,7 +397,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   语义:online 拉远端 → 比 `Digest:` 与边车 → **未变继续用本地**(仓库保持干净)、有更新才覆盖本地
   并提示 commit、拉取失败降级回退本地;offline 完全不联网;最后判一次本地副本在不在,不在就 `err`。
 - **怎么刷新**:目前**没有**脚本化刷新工具 —— 手工 `helm pull` 覆盖 vendored 副本
-  (示例见 `deployments/cubestack-addon/lws/CUBESTACK.md` 的"升级到新版本"),`.tgz` 形态要一并更新
+  (手工 `helm pull` 覆盖 vendored 副本 —— 若为 `.tgz` 形态, 记得同步更新 `<tgz>.digest` 边车),`.tgz` 形态要一并更新
   `<tgz>.digest` 边车。跑完**必须 commit** —— 不提交等于没刷新。
 - **为什么是"恒用本地"而不是"线上优先"**:曾有模块写了"拉取失败回退本地 chart",
   但仓库里压根没有那份文件 —— 私服一抖动回退就是空转。回退只有在本地确实有一份时才有意义。
@@ -394,6 +450,31 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   实测跨节点 webhook/metallb 全通且 **pin workaround 可关**。
 - VXLAN 在该 fabric 需换端口: `CALICO_DATA_PATH=vxlan` + `CALICO_VXLAN_PORT=8472`。
 - **calico_network_backend 必须与数据面一致**(direct/ipip→bird, vxlan→vxlan), 漏配会无数据面。
+- **单节点与集群其余节点全不通(扩容新建 VM)**: fabric 上个别 VM 的接入/转发状态异常(2026-10-14 worker13
+  实机)—— 症状=双向 ICMP/NTP 全死、ARP 应答时有时无(代理 MAC 与真实 MAC 交错); 判据=该机 ping 网关/.211
+  通而 ping 集群节点全失败, 且权威 `chronyc clients` 从来看不到它。解法=平台侧把该 VM 网卡改接与正常节点
+  相同的网络(修复判据: 双向 ping 稳定通)。部署侧 `setup-ntp.sh` 已有节点→权威通路预检(NTP_REACH_CHECK)
+  在同步前点名。详见 `docs/troubleshooting.md` 二.2。
+
+## Calico RBAC × 版本升级速查(403 陷阱, 2026-10-15 事故)
+
+- **升级 calico(或换 kubespray 树)时必须重比 RBAC**: kubespray 的 calico ClusterRole 模板
+  (`roles/network_plugin/calico/templates/calico-cr.yml.j2` + `roles/kubernetes-apps/policy_controller/calico/templates/calico-kube-cr.yml.j2`)
+  是**按旧版 calico 写死**的 —— 新版 calico 自带清单里新增的规则不会自动进来。比对口径: 从
+  `offline-files/calico/release-<v>.tgz` 取 `manifests/calico.yaml`, 按 **(apiGroup, resource) 归并
+  verbs** 后与模板逐条 diff(排除 `projectcalico.org` 别名与 `crd.projectcalico.org` 通配的假差)。
+  已有实现: 补丁 `cubestack-patches/15-calico-3.32.2-rbac.patch`(3.32.2 的缺口)。
+- **判据(致命性)**: calico 的 felix/控制器把 **403 判为 datastore 故障**(一直重试 + readiness 恒 503),
+  **404 才是"CRD 不存在, 正常跳过"** ⇒ 缺读权限的后果**不是"少读一个资源"**, 而是:
+  `calico-node` **全节点 0/1** → calico 规则链不完整 → **一切非 hostNetwork pod 访问 ClusterIP 全断**
+  (实机连锁: local-path-provisioner CrashLoop → registry-pvc 永不 Bound → `k8s_registry` 600s 超时 →
+  部署中断)。症状与根因相隔极远, 排查先跑:
+  `kubectl -n kube-system logs -l k8s-app=calico-node -c calico-node | grep -oE "cannot list resource \"[a-z]+\" in API group \"[^\"]+\"" | sort | uniq -c`
+- **RBAC 子资源独立授权**: `update` 主资源**不**覆盖 `/status`(如
+  `kubecontrollersconfigurations/status`)—— 模板里"# update status"注释骗过了一轮排查。
+- **含 kubevirt 集成的环境**还要 `kubevirt.io` 读权限(calico 3.32 的 calico-node/kube-controllers/
+  cni-plugin 各一组; 无 kubevirt 时该 watch 404 无害, 装过 kubevirt 才会 403)。
+- 详见 `docs/troubleshooting.md` §一.4(含实机验证命令与未跟齐项清单)。
 
 ## MetaX GPU Operator 部署速查(沐曦)
 
@@ -414,6 +495,29 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   sudo ./deployments/scripts/tools/images/metax-save-images.sh   # 保存镜像 → 离线 tar
   sudo ./deployments/scripts/tools/images/metax-load-images.sh   # 加载 tar → 集群 registry(手动)
   METAX_LIST_IMAGES=true bash modules/03_addon/04_gpu_operator.sh   # 打印所需镜像 pull/save 命令
+  ```
+
+## NVIDIA GPU Operator 部署速查(英伟达; 2026-10-14 新增)
+
+> 完整文档 `docs/nvidia-gpu-operator.md`; 设计记录 `docs/superpowers/specs/2026-10-14-nvidia-gpu-operator-design.md`。
+
+- **双模式**: `ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR`(默认 false=离线: 镜像集推入集群内置 registry 的
+  `mirrors/nvcr.io/**`; true=在线按 chart 定义直拉, 或 `NVIDIA_GPU_OPERATOR_ONLINE_IMAGE_BASE` 切 Harbor 前缀)。
+- **驱动策略 = 预编译驱动容器**(`usePrecompiled` + 分支号): 实际镜像 `driver:<分支>-<内核>-ubuntu22.04`
+  由 operator 依 **NFD 内核标签**在运行期组合 —— 有卡节点内核必须恰在 NGC 覆盖列表(模块有内核门禁);
+  v26.7.2 标注 tech-preview(仅 ubuntu22.04); 退路=自制带包驱动镜像(文档已述)。
+- **镜像集唯一来源** `tools/images/nvidia-chart-images.sh`(渲染提取 + enabled 过滤 + 完整性绊线;
+  模块与备料工具共用, 安装与提取同参 → 零漂移); 备料 `tools/images/nvidia-save-images.sh`
+  (skopeo 直拉免 root; 内置 NGC 内核覆盖预检)。
+- **实施期踩坑(重要)**: NVIDIA chart 的组件镜像以 (repository,image,version) **三元组落在 ClusterPolicy CR**,
+  由 operator 运行期组合 —— 只用 `grep image:` 抓完整 ref 会漏; v26 起 **GFD 已并入 device-plugin 镜像**。
+- **常用命令**:
+  ```bash
+  sudo ./deploy-cluster.sh --enable nvidia_gpu_operator       # 写入开关(下次全量生效)
+  sudo ./deploy-cluster.sh --steps nvidia_gpu_operator        # 立即部署
+  sudo ./deploy-cluster.sh --steps verify_nvidia_gpu          # 端到端验证(无卡=组件级边界)
+  NVIDIA_LIST_IMAGES=true bash modules/03_addon/08_nvidia_gpu_operator.sh   # 打印备料清单(不部署)
+  sudo ./deployments/scripts/tools/images/nvidia-save-images.sh [--list]    # 联网机备料
   ```
 
 ## Ceph / Rook 部署速查(Rook v1.20.2 + Ceph v20.2.2, 详见 docs/ceph-rook.md)
@@ -440,9 +544,21 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   由 `tools/vm/create-vms.sh` 创建时自动附加。
 - **部署顺序(03_addon 已重排)**: `01_metallb → 02_ceph → 03_ceph_csi → 04_local_path → 05_k8s_registry → …`;
   registry 后端设 `REGISTRY_STORAGE_CLASS=ceph-block` 即走 ceph(替代 local-path)。
+- **CephFS 宿主机共享挂载(`cephfs_mount`, 默认随 `CEPHFS_ENABLED`)**: 用 cephcsi 镜像(自带
+  `mount.ceph`)跑 DaemonSet, hostPath + `mountPropagation: Bidirectional` 把 CephFS `models`
+  子目录挂到**每台节点** `/mnt/cephfs/models`(节点无需 ceph-common)。⚠ 实机踩坑(详见
+  `docs/troubleshooting.md` 五.1): ① hostPath 在容器里本身是 bind mount, **禁止**用
+  `mountpoint -q` 判断是否已挂载; ② `findmnt -T` 会输出挂载栈, 必须 `tail -1`; ③ 传播到宿主机的
+  挂载不会随 Pod 退出自动消失, uninstall 必须**逐节点显式 umount**; **非优雅拆除**(集群直接消失/
+  未走 uninstall)会残留 `/mnt/cephfs/models` → 重装时 `node_pkgs` 的 `fuser` 会 D 状态卡死; 必须
+  `systemctl stop kubelet containerd; systemctl reboot -f`(reconcile-node-packages 已加前置探测/指引); ④ CephFS 上全局 `sync` 会挂住
+  (用 `sync -f`/fsync); ⑤ 远端 `jsonpath` 含 `?(...)` 时要保证引号送达远端(Ready 判断建议
+  `--no-headers | awk '{print $2}'`); ⑥ 零节点验证必须硬失败。离线回归:
+  `bash deployments/scripts/tools/tests/test-cephfs-mount.sh`。
 - **常用命令**:
   ```bash
   sudo ./deploy-cluster.sh --steps ceph,ceph_csi          # 部署(或 CEPH_ENABLED=true+CEPH_CSI_ENABLED=true 随全量)
+  sudo ./deploy-cluster.sh --steps cephfs_mount           # CephFS → 每台节点 /mnt/cephfs/models
   sudo ./deploy-cluster.sh --steps verify_ceph            # 端到端: operator/CSI+Ready+ceph -s+RBD 块 I/O
   kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
   ```
@@ -450,7 +566,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 ## Harbor 统一镜像源(镜像清单 / 同步 / 备料, 详见 docs/harbor-mirror.md)
 
 - **唯一数据源**: `deployments/config/images.manifest`, 格式 `<group> <上游ref> [tar文件名覆盖]`;
-  ref 用 `${VAR}` 引用 **cluster.conf** 的版本变量(CI 上回退 cluster.conf.example 默认值)
+  ref 用 `${VAR}` 引用 **cluster.defaults.conf** 的版本变量(CI 上回退 defaults/example 默认值)
   ⇒ **升级只改 cluster.conf §3.3 一处**, 全链跟随。
 - **group → 目录**: 默认 `offline-files/<group>/`; 例外 `k8s-base`/`ceph` → `offline-files/kubespray/images/`
   (节点预加载走 kubespray)。
@@ -479,6 +595,11 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   Harbor API repository 名要**双重 URL 编码** `%252F` 且不含项目前缀;
   `docker-archive:<file>` 末尾**必须带 `:<ref>`** 否则 RepoTags 为空;
   Harbor **项目**必须预建(仓库才自动建), 建项目需登录。
+- **大镜像 push 加速(dev_lab / model_images)**: 幂等必须比 **config digest**(push 会重压缩层,
+  manifest/layer digest 会变; 老逻辑比 manifest digest 会每轮重推 130G); 另用
+  `--image-parallel-copies`(层并行)、`--dest-precompute-digests`(跳过已有层)、base-first
+  有界跨镜像并行; 配置 `IMAGE_PUSH_*`, 详见 `docs/image-push-optimization.md`。
+  ⚠ skopeo 1.16.1 的 `--dest-compress-level/--dest-compress-format` 对 `docker://` 推送不生效。
 - ⚠ **加镜像时别忘了同步 `tools/offline/trim-offline-files.sh` 的 `PRELOAD_IMAGE_PATTERNS`**
   (k8s-base 组), 否则备料后被 trim 静默删掉 —— 用 `check-image-manifest.sh --kubespray` 兜底。
 ## 版本目录(离线资产按版本组织,2026-09-30 起)

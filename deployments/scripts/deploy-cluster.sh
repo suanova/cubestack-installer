@@ -9,15 +9,15 @@
 # 阶段目录(按部署环境准备的阶段组织):
 #   01_env/    阶段一: 环境准备(VM/SSH/本地registry/HAProxy/Keepalived — 部署 kubespray 之前)
 #   02_k8s/    阶段二: 离线部署 kubespray(不依赖 VM/裸金属)
-#   03_addon/  阶段三: 附加组件(集群部署后: GPU/LWS/Harbor/Ceph/P2/P3)
+#   03_addon/  阶段三: 附加组件(集群部署后: GPU/Harbor/Ceph/P2/P3)
 #
 # 模块(stages):
-#   env 阶段:  vm_network vm_sshkey vm_create harbor lb_haproxy lb_keepalived
+#   env 阶段:  vm_network vm_sshkey vm_create harbor
 #   k8s 阶段:  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp
 #              k8s_deploy(默认关) k8s_scale(默认关)
-#   addon 阶段: gpu_operator gpu_lws k8s_registry ceph ceph_csi ceph_backup
+#   addon 阶段: gpu_operator k8s_registry ceph ceph_csi ceph_backup
 #              keycloak kueue kubevirt lustre_csi   (01~19 中间件, 默认关)
-#              cubestack_apps(20 起自研模块占位, 默认关)
+#              20 起为自研模块(cubestack_operator 25_…, 见 4.6b)
 #   验证:      verify_<组件>(自动发现; --steps verify 不指定 operator 默认执行全部 verify_*)
 #   运维:      ceph_backup(Ceph 备份/恢复, 默认关, --steps ceph_backup 单独执行)
 #
@@ -30,14 +30,14 @@
 #   sudo ./deploy-cluster.sh --with-cubestack               # 全量: 基座 + cluster.conf 中已启用的 operator
 #   sudo ./deploy-cluster.sh --steps vm_create,k8s_deploy   # 只跑指定模块
 #   sudo ./deploy-cluster.sh --skip k8s_hosts --with-cubestack   # 跳过某模块的全量部署
-#   sudo ./deploy-cluster.sh --enable gpu_operator,lws      # 只把开关写入 cluster.conf 预启用(不部署)
+#   sudo ./deploy-cluster.sh --enable gpu_operator,ceph     # 只把开关写入 cluster.conf 预启用(不部署)
 # #   sudo ./deploy-cluster.sh --phase k8s                    # 仅运行 k8s 阶段
 #   sudo ./deploy-cluster.sh --only <host> --with-k8s       # 仅处理指定节点
 #   sudo ./deploy-cluster.sh --with-scale                   # 扩容(仅 k8s_scale; 先登录 master 核对后 diff 新节点, 填入 cluster.conf)
 #   sudo ./deploy-cluster.sh --list / --list-steps / --fresh
-# 数据源: config/cluster.conf
+# 数据源: config/cluster.conf(必改项+开关+高频) + config/cluster.defaults.conf(高级/默认值层, 自动加载)
 #
-# 兼容: 旧模块名(net/ssh_key/vm/ssh_passwordless/worker_bm/hosts/inventory/ntp/k8s/scale/lws)自动映射到新名
+# 兼容: 旧模块名(net/ssh_key/vm/ssh_passwordless/worker_bm/hosts/inventory/ntp/k8s/scale)自动映射到新名
 # ============================================================
 set -euo pipefail
 
@@ -61,13 +61,17 @@ usage() {
    仅基座用 --with-k8s, 单个立即部署用 --steps。虚拟机创建由 tools/vm/create-vms.sh 独立执行。
 
 阶段目录与模块(自动发现):
-  01_env  vm_network vm_sshkey vm_create harbor lb_haproxy lb_keepalived
+  01_env  vm_network vm_sshkey vm_create harbor
           (默认执行 vm_sshkey; vm_network 默认关 — 宿主网络初始化改由 tools/vm/create-vms.sh 创建 VM 时自动执行; vm_create 默认关 — 虚拟机创建由 tools/vm/create-vms.sh 独立执行)
   02_k8s  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp           (默认执行)
-          k8s_deploy(默认关, --with-k8s)  k8s_scale(默认关, --with-scale)
+          k8s_deploy(基座, 恒随全量部署)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
+          cephfs_mount(CephFS → 每台节点 /mnt/cephfs/models, 默认随 CEPHFS_ENABLED)
           local_path(可选) k8s_registry 组件(全部可单独部署的组件见下方"组件单独部署"清单)
-          自研: cubestack_apps(占位)
+          自研: cubestack_operator(平台 Operator, 见 4.6b); model_images(模型推理镜像 sglang/vllm-metax, 排最后; 见 offline-files/model-collection/README.md)
+          组件级更新(operator 已就绪后单独更新某个平台组件, 不重跑 cubestack_operator):
+            lws / envoy_gateway / ai_gateway / cubestack_controller_manager / model_bundles /
+            prometheus / perses / bmc / metax / cuberouter / cubepilot / cubestack_portal / observability
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
@@ -113,8 +117,10 @@ $(_component_meta_list stub)
       harbor-sync-images.sh      上游 → Harbor(CI/联网机; 项目不存在自动创建)
       harbor-save-images.sh      Harbor → offline-files/<group>/*.tar(联网机)
       check-image-manifest.sh    清单静态校验(+ --kubespray 交叉核对 / --harbor 漂移报告)
-    升级组件版本只改 cluster.conf §3.3「镜像版本」一处, 全链自动跟随。详见 docs/harbor-mirror.md。
+    升级组件版本只改 cluster.defaults.conf 的「镜像版本」节一处, 全链自动跟随。详见 docs/harbor-mirror.md。
   · cluster.conf 的 NODES(5字段: role,hostname,ip,ssh_user,ssh_password)不区分虚拟机/裸金属;
+    ssh_user 写 "-" = 跟随全局 SSH_USER(cluster.conf, root|ubuntu, 默认 ubuntu —— 切换安装用户
+    只改 SSH_USER 一处); 显式写用户名 = 该节点覆盖(与全局不一致时部署启动会点名告警)。
     主程序不判断节点类型 — 需要创建虚拟机的节点在 tools/vm/vm-nodes.conf(10字段)定义,
     由 sudo ./deployments/scripts/tools/vm/create-vms.sh 独立执行(创建后自动注入 NODES)。
   · --only/--skip 均支持; 宿主网络初始化(vm_network)默认不再执行, 改由创建虚拟机时
@@ -122,9 +128,9 @@ $(_component_meta_list stub)
 
 选项:
   --with-k8s            仅部署 kubespray 基座: k8s_deploy + kubespray 内置 addon(metallb/local-path/registry)
-                        不含任何 operator(= --enable k8s, 并跳过全部 operator)
+                        不含任何 operator(跳过全部 operator)
   --with-cubestack      全量部署: = 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主)
-                        (如设 GPU_OPERATOR_ENABLED=true 即部署 gpu_operator; lb_haproxy/lb_keepalived 默认 false)
+                        (如设 GPU_OPERATOR_ENABLED=true 即部署 gpu_operator)
   --with-scale          仅执行 k8s_scale 扩容模块(不连带 operator/已部署组件): 登录首个 master 核对
                         实际集群节点 → 自动 diff 新节点(新节点先写入 cluster.conf)→ 仅对新节点
                         环境准备/装包/NTP/registry → 更新 inventory(new_node 组)→ cubestack-offline scale
@@ -140,15 +146,18 @@ $(_component_meta_list stub)
                         见 docs/kubespray-versioning/
   --fresh, --refresh    默认流程 + **先清断点状态**(REPEAT:0 的模块强制重跑; 见"三种使用方式"②)
   --list                仅打印集群规划(只读)
-  --list-steps          列出全部模块
+  --list-steps          列出全部模块(分组紧凑展示; 加 --verbose 看完整 DESC/文件/依赖)
   --help, -h            显示本帮助
 
 示例:
   sudo ./deploy-cluster.sh                          # 默认 = --with-cubestack(全量部署)
   sudo ./deploy-cluster.sh --with-k8s              # 仅部署 kubespray 基座(k8s+metallb+local-path+registry)
   sudo ./deploy-cluster.sh --skip gpu_operator --fresh   # 覆盖安装但排除 gpu_operator(--fresh 清状态)
-  sudo ./deploy-cluster.sh --enable lws             # 只把 LWS_ENABLED=true 写入 cluster.conf(不部署)
+  sudo ./deploy-cluster.sh --enable ceph            # 只把 CEPH_ENABLED=true 写入 cluster.conf(不部署)
   sudo ./deploy-cluster.sh --steps ceph            # 单独装/重跑 Ceph(不动基座; 接入自动处理)
+  sudo ./deploy-cluster.sh --steps cephfs_mount    # 把 CephFS models 挂到每台节点 /mnt/cephfs/models
+  sudo ./deploy-cluster.sh --steps lws             # 只更新平台组件 lws(operator 已就绪; 不重跑 cubestack_operator)
+  sudo ./deploy-cluster.sh --steps cube-pilot      # 只更新 cubepilot(连字符别名)
   sudo ./deploy-cluster.sh --steps ceph --fresh     # 同上, 且清断点状态(REPEAT:0 模块重跑用)
   sudo ./deploy-cluster.sh --steps verify_ceph      # 只验证 Ceph(operator/CSI + ceph -s + RBD 块 I/O)
   sudo ./deploy-cluster.sh --with-scale             # 扩容: 仅 k8s_scale(先登录 master 核对集群→diff 新节点→只动新节点)
@@ -159,12 +168,17 @@ $(_component_meta_list stub)
   sudo ./deploy-cluster.sh --steps ceph_backup      # Ceph 备份(CR+secret+mon store → master 根盘)
   sudo CEPH_BACKUP_ACTION=restore ./deploy-cluster.sh --steps ceph_backup  # Ceph 恢复(认领旧 OSD 数据)
   sudo ./deploy-cluster.sh --steps multus              # 单个组件(自动带基座; 见上方"单独安装某个组件"清单)
+  sudo ./deploy-cluster.sh --list-steps                # 查看全部模块(分组紧凑)
+  sudo ./deploy-cluster.sh --list-steps --verbose      # 完整 DESC / 文件 / 依赖
+
+★ 提示: sudo ./deployments/scripts/deploy-cluster.sh --list-steps
+        模块全清单(启用状态/依赖/序号/执行阶段) —— 选模块、看开关、排依赖, 都从这条命令开始
 EOF
     exit 0
 }
 
 # ---------------- 参数解析 ----------------
-FRESH=0; LIST=0; LIST_STEPS=0; ASSUME_YES=0
+FRESH=0; LIST=0; LIST_STEPS=0; LIST_VERBOSE=0; ASSUME_YES=0
 STEPS_ARG=""; SKIP_ARG=""; ENABLE_ARG=""; PHASE_ARG=""; ENABLE_PERSIST_ARG=""
 SCALE_ONLY=0
 ONLY_HOSTS=""
@@ -176,12 +190,13 @@ while [ $# -gt 0 ]; do
         --yes|-y) ASSUME_YES=1; shift ;;
         --list)     LIST=1; shift ;;
         --list-steps) LIST_STEPS=1; shift ;;
+        # --verbose 仅配合 --list-steps/--list: 显示完整 DESC/文件/依赖(默认紧凑)
+        --verbose|-v) LIST_VERBOSE=1; shift ;;
         # --with-k8s: 仅 kubespray 基座(k8s + metallb/local-path/registry), 不含任何 operator
-        --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; SKIP_ARG="${SKIP_ARG},gpu_operator,gpu_lws,lb_haproxy,lb_keepalived,ceph,ceph_csi,keycloak,kueue,kubevirt,lustre_csi,cubestack_apps"; shift ;;
+        --with-k8s) ENABLE_ARG="${ENABLE_ARG},k8s"; SKIP_ARG="${SKIP_ARG},gpu_operator,ceph,ceph_csi,keycloak,kueue,kubevirt,lustre_csi"; shift ;;
         # --with-scale: 仅扩容模块(k8s_scale), 不连带 operator/外层重复模块 —— 见下方 SCALE_ONLY 过滤
         --with-scale) ENABLE_ARG="${ENABLE_ARG},scale"; SCALE_ONLY=1; shift ;;
         # --with-cubestack = 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主, 不强制启用)
-        #   lb_haproxy/lb_keepalived 默认 false, 需要时在 cluster.conf 设 true 或 --enable
         --with-cubestack) ENABLE_ARG="${ENABLE_ARG},k8s"; shift ;;
         --steps)    STEPS_ARG="${2:?--steps 需要模块列表, 逗号分隔}"; shift 2 ;;
         --skip)     SKIP_ARG="${2:?--skip 需要模块列表, 逗号分隔}"; shift 2 ;;
@@ -198,6 +213,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 ONLY_HOSTS="${ONLY_HOSTS#,}"
+# --list/--list-steps 是只读展示: 从这里开始抑制 vlog [DEBUG] 噪音(含 --profile/--only 的调试行)
+if [ "${LIST_STEPS}" = "1" ] || [ "${LIST}" = "1" ]; then
+    LOG_VERBOSE=0
+fi
 # --profile: 在 load_config 之前 export(load_config 以环境变量优先读 KUBESPRAY_PROFILE)
 if [ -n "${PROFILE_ARG:-}" ]; then
     export KUBESPRAY_PROFILE="${PROFILE_ARG}"
@@ -223,8 +242,17 @@ export ONLY_HOSTS
 # ---------------- 配置加载 + 模块解析 ----------------
 load_config
 
-# 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 见 tools/offline/fetch-offline-files.sh)
-check_offline_files
+# 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 见 tools/offline/fetch-offline-from-minio.sh --help 全部子目录)
+# 只读列表/计划不检查(否则列表里会混入与展示无关的离线文件告警)
+if [ "${LIST_STEPS}" != "1" ] && [ "${LIST}" != "1" ]; then
+    check_offline_files
+fi
+
+# SSH 用户一致性点名(2026-10-15): NODES 逐行显式 ssh_user 与全局 SSH_USER(root|ubuntu 单一
+# 旋钮)不一致时告警 —— 只在本统一入口打一次, 模块进程不再各自刷屏。
+if [ "${LIST_STEPS}" != "1" ] && [ "${LIST}" != "1" ]; then
+    warn_ssh_user_mismatch
+fi
 
 # --enable k1,k2 = 只把模块开关写入 cluster.conf(持久化), 不立即部署。
 # 下次 --with-cubestack / 默认部署时按 cluster.conf 生效; 立即部署单个 operator 用 --steps k1,k2。
@@ -238,7 +266,13 @@ _enable_persist() {   # <key,...>
         tgl="${MODULE_TOGGLE[$idx]:-}"
         tgl="${tgl%% *}"   # TOGGLE 多变量(空格分隔=OR)时持久化第一个(如 ceph → CEPH_ENABLED)
         if [ -z "${tgl}" ]; then
-            warn "模块 ${nk} 无 cluster.conf 开关(TOGGLE 未定义, 如 verify 模块), 无法持久化; 请用 --steps ${s} 直接执行"
+            # 无 TOGGLE 的模块: DEFAULT:1(如 k8s_deploy 基座)恒随全量部署, 本就没有可写开关;
+            #   其余(verify_*/运维模块)只能 --steps 立即执行, 无开关可持久化。
+            if [ "${MODULE_DEFAULT[$idx]:-0}" = "1" ]; then
+                ok "模块 ${nk} 已是默认启用(DEFAULT:1), 恒随全量部署, 无需写入配置"
+            else
+                warn "模块 ${nk} 无 cluster.conf 开关(TOGGLE 未定义, 如 verify 模块), 无法持久化; 请用 --steps ${s} 直接执行"
+            fi
             continue
         fi
         # 当前生效值(load_config 已把 cluster.conf 读入环境; 兼容 ${VAR:-true} 默认写法)
@@ -254,13 +288,19 @@ _enable_persist() {   # <key,...>
         fi
         export "${tgl}=true"   # 同步到当前环境(同一次调用内再 --enable 同一模块幂等跳过)
         ok "已写入 ${CLUSTER_CONF}: ${tgl}=true(${nk})"
+        _ENABLE_PERSIST_WROTE=1
     done
 }
 if [ -n "${ENABLE_PERSIST_ARG}" ]; then
+    _ENABLE_PERSIST_WROTE=0
     _enable_persist "${ENABLE_PERSIST_ARG}"
     # 仅 --enable 且无其它部署触发(--steps/--with-*/--skip/--phase/--only) → 只写配置后退出, 不部署
     if [ -z "${STEPS_ARG}" ] && [ -z "${ENABLE_ARG}" ] && [ -z "${SKIP_ARG}" ] && [ -z "${PHASE_ARG}" ] && [ -z "${ONLY_HOSTS}" ]; then
-        say "已写入 cluster.conf(本次不部署)。下次执行 --with-cubestack / 默认部署即生效; 立即部署用 --steps ${ENABLE_PERSIST_ARG#,}"
+        if [ "${_ENABLE_PERSIST_WROTE}" = "1" ]; then
+            say "已写入 cluster.conf(本次不部署)。下次执行 --with-cubestack / 默认部署即生效; 立即部署用 --steps ${ENABLE_PERSIST_ARG#,}"
+        else
+            say "无 cluster.conf 变更(见上方说明)。立即部署用 --steps ${ENABLE_PERSIST_ARG#,}"
+        fi
         exit 0
     fi
 fi
@@ -273,7 +313,10 @@ fi
 #     (--list/--list-steps 展示默认全量计划); --steps/--with-*/--enable/--only/--help 明确指定时不触发。
 if [ -z "${STEPS_ARG}" ] && [ -z "${ENABLE_ARG}" ] && [ -z "${ONLY_HOSTS}" ]; then
     ENABLE_ARG="k8s"
-    say "默认模式: 等价于 --with-cubestack — 基座 + cluster.conf 中启用的全部 operator"
+    # 只读列表/计划不打印默认模式提示(避免混入 --list-steps 输出)
+    if [ "${LIST_STEPS}" != "1" ] && [ "${LIST}" != "1" ]; then
+        say "默认模式: 等价于 --with-cubestack — 基座 + cluster.conf 中启用的全部 operator"
+    fi
 fi
 
 if ! resolve_run_steps "${STEPS_ARG}" "${SKIP_ARG}" "${ENABLE_ARG}" "${PHASE_ARG}"; then
@@ -660,7 +703,7 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         _FM_IP="$(first_master_ip 2>/dev/null || true)"
         _CEPH_SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
         if [ -n "${_FM_IP}" ] && [ -f "${_CEPH_SSH_KEY}" ]; then
-            _CEPH_EXIST="$(ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER:-ubuntu}@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster --no-headers 2>/dev/null" 2>/dev/null || true)"
+            _CEPH_EXIST="$(ssh -i "${_CEPH_SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "$(ssh_user_for_ip "${_FM_IP}")@${_FM_IP}" "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get cephcluster --no-headers 2>/dev/null" 2>/dev/null || true)"
         fi
         if [ -n "${_CEPH_EXIST}" ]; then
             _CEPH_STATE="$(get_state "ceph")"
@@ -784,7 +827,7 @@ else
     echo "               · 改池后需重跑 tools/k8s/sync-kubespray-config.sh 并重新 apply 池 CR 再验证"
     echo "               · 测试环境无空闲地址时可用 nodeport(SERVICE_EXPOSE_MODE=nodeport)"
 fi
-echo "  下一步: 扩容用 --with-scale; 立即部署单个用 --steps gpu_operator,lws(...)(自动带基座); 预启用写入配置用 --enable ...(下次全量生效); 验证用 --steps verify"
+echo "  下一步: 扩容用 --with-scale; 立即部署单个用 --steps gpu_operator,ceph(...)(自动带基座); 预启用写入配置用 --enable ...(下次全量生效); 验证用 --steps verify"
 
 # ★ 外部 Ceph 接入信息(用户要求: 放安装末尾总结; 仅集群内 Ceph 且本次执行过暴露时提示)
 #   03_ceph_csi 已打印/导出, 此处收敛到"文件路径 + 单行入口", 不再重复打印含 key 的全文。

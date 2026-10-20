@@ -5,7 +5,7 @@
 > 相关:`docs/troubleshooting.md`(按症状索引)、`tools/node/reconcile-node-packages.sh`(自动化实现)、
 > `modules/02_k8s/12_node_pkgs.sh`(自动化的调度壳)。
 
-## 1. 三类根因(按发现顺序)
+## 1. 根因(按发现顺序)
 
 ### R1 · 离线 .deb 与节点已装系统包的**版本漂移** → dpkg 严格依赖被打破
 
@@ -20,7 +20,13 @@
 
 - 中断(尤其被 R3 卡死)会留下"已解包未配置"的 `Conf` 队列(`dpkg --audit` 可见)⇒ 必须先 `dpkg --configure -a`。
 
-### R3 · **D 状态死锁**:`mdadm --examine --scan` 撞上遗留 rbd 映射 → dpkg 永不放锁
+### R3 · **D 状态死锁**:`mdadm --examine --scan` / `fuser` 撞上遗留 rbd 或 CephFS 挂载 → dpkg 永不放锁
+
+**2026-10-19 新变体(`cephfs_mount` 宿主机挂载)**: `cephfs_mount` 把 CephFS 挂到
+`/mnt/cephfs/models`;集群**非优雅拆除**(API 已不可达/未走 uninstall)时该挂载会残留在宿主机。
+mons 已不可达 → 内核 ceph 客户端无限重试;`fuser /var/lib/dpkg/lock-frontend` 遍历 `/proc` 时
+撞上该挂载 → **D 状态(`ceph_mdsc_wait_request`)**, 永不返回 ⇒ `node_pkgs` 在第一个节点永久 pending。
+旧 rbd 映射同理(`jbd2/rbd0`、`rbd remove` D 状态)。
 
 ```
 dpkg -i /tmp/packages/dmsetup_*.deb          (或 apt-get -f install → dpkg --configure --pending)
@@ -29,7 +35,10 @@ dpkg -i /tmp/packages/dmsetup_*.deb          (或 apt-get -f install → dpkg --
 ```
 - 触发源:节点上有**内核 rbd 映射**(`/sys/bus/rbd/devices` 非空)其后端已不可达 —— 上一代集群残留;
 - 同批出现的 D 态还有挂在同块设备上的 ext4 的 jbd2 线程(`[calico]` / `[registry]` 等)与 `sync`;
-- ⚠ **D 态进程连 `SIGKILL` 都无效** ⇒ 自动化只能识别, **不能代重启**。
+- ⚠ **D 态进程连 `SIGKILL` 都无效** ⇒ **只有这种僵尸态**必须重启; 其余"不健康但未卡死"的
+  挂载由工具自动 `systemctl stop kubelet containerd` + `umount -l/-f` + `rbd unmap` 后再试
+  (2026-10-19 用户口径)。**活动且健康**的 Ceph/RBD(当前集群正在用, `ls`/`stat` 正常、无 D 态/
+  fuser 超时)不阻断部署 —— 旧逻辑把所有 ceph 挂载都当残留, 会误伤运行中的 CephFS/RBD PVC。
 
 ### R4 · 环境类:`/data/offline-files` 与仓库 `deployments/offline-files/` **分叉**
 
@@ -63,12 +72,22 @@ sudo apt-get -o Dir::Cache::archives=/tmp/cubestack-debs --no-download -y -f ins
 sudo dpkg --configure -a        # 先配置完, 再跑 R1 的 apt -f install
 ```
 
-**R3(死锁)——唯一解是重启该节点**
+**R3(僵尸态死锁)——唯一解是重启该节点**
+
+> 只有 **D 状态进程 / `fuser` 超时** 才走这里; 若挂载只是不健康但未卡死(`ls` 超时但无 D 态),
+> `reconcile-node-packages.sh` 会自动尝试 `umount -l/-f` + `rbd unmap`, 通常无需重启。
 ```bash
-sudo reboot -f
-# 为什么 -f: 节点上已有 D 态的 sync / mdadm, 常规关机会卡在同步/卸载上;
-#           本地 ext4 靠日志回放在开机时自愈, 该节点本来就要被重装, 强制重启是安全的。
-# 重启后复核: ls /sys/bus/rbd/devices 应为空(映射不持久化), dpkg 锁随进程消失。
+# ⚠ 已有 D 态进程时不要尝试 umount 残留的 /mnt/cephfs/models: 对端不可达时 umount 也可能进入
+#   D 状态。未卡死的不健康挂载才适合自动/手工 umount。
+# 先停旧 kubelet/containerd(避免重启后它们重建挂载/容器), 再强制重启:
+sudo systemctl stop kubelet containerd
+sudo systemctl reboot -f
+# 为什么 -f: 节点上已有 D 态的 sync / fuser / mdadm / rbd remove 进程, 常规关机会卡在
+#           同步/卸载上; 本地 ext4 靠日志回放在开机时自愈, 该节点本来就要被重装, 强制重启是安全的。
+# 重启后复核(应全部为空/快速返回):
+findmnt -t ceph,rbd
+ls /sys/bus/rbd/devices
+timeout 5 fuser /var/lib/dpkg/lock-frontend; echo rc=$?   # 无持有者 rc=1
 ```
 **残留 rbd / Ceph 盘清理**:`tools/k8s/ceph-rbd-cleanup.sh`(清理 rbd 映射)+ `ceph-cleanup.sh --all`(集群+盘)。
 
@@ -84,7 +103,7 @@ ls deployments/offline-files/kubespray/ | wc -l ; sudo ls /data/offline-files/ku
 |---|---|---|
 | R1 | ✅ 全自动 | `tools/node/reconcile-node-packages.sh`:把离线 .deb 按规范名喂给 apt(`Dir::Cache::archives` + `--no-download`), **由 apt 求解器"先摘后装"**;逐包对账并复核 |
 | R2 | ✅ 全自动 | 同上, 修复前先 `dpkg --configure -a` |
-| R3 | ⚠ **只识别 + 出指引** | 同上, 检测 D 态进程/rbd 残留并打印处置(D 态杀不掉, 不代重启);工具自身已加 `update_initramfs=no` 防护, **避免自己踩进这条链** |
+| R3 | ✅ **分级处理: 活动健康放行 / 不健康自动修复 / 僵尸态才重启** | `reconcile-node-packages.sh`:控制器前置探测(每节点 `timeout 20`)先查 ceph/rbd 挂载、`/sys/bus/rbd/devices`、相关 D 状态、`fuser` 超时。**D 状态/fuser 超时** → 在分发/装包前失败并打印重启步骤; **挂载不健康但未卡死** → 远端自动 `systemctl stop kubelet containerd` + `umount -l/-f` + `rbd unmap` 后继续; **活动且健康**(当前集群在用) → 不阻断。`fuser` 带 `timeout 5`;整轮远端对账带 `RECONCILE_SSH_TIMEOUT`(默认 1800s), 不再永久挂起。回归: `tools/tests/test-reconcile-node-packages.sh`(含健康/自动修复/僵尸态三组夹具) |
 | R4 | ⚠ 手动(一条 rsync) | 分叉检测未自动化(见记忆里的规则:改离线件收尾必跑 rsync) |
 
 调度:`modules/02_k8s/12_node_pkgs.sh`(PHASE k8s, DEFAULT/REPEAT 1), **在 kubespray 之前**(靠

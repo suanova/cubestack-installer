@@ -129,7 +129,7 @@ REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-blo
 > - `03_ceph_csi` 等 ceph-csi 控制器/插件就绪(最长 240s), 然后创建 `CephBlockPool rbd-pool` + `StorageClass ceph-block`;
 > - `05_k8s_registry` 配置完成后**额外等待** `registry-pvc Bound + pod Ready + /v2/ 可达`
 >   (默认 `REGISTRY_WAIT_SECONDS=600`, 覆盖首次 RBD 卷创建 + 镜像下载);
->   任一层未就绪即硬失败并给出排查指引 —— 避免后续 push 镜像的模块(gpu_operator/lws/...)
+>   任一层未就绪即硬失败并给出排查指引 —— 避免后续 push 镜像的模块(gpu_operator/...)
 >   ImagePullBackOff 且难以定位。
 >
 > 就绪判定链完整覆盖 ceph 集群 → csi → registry 三级依赖, 无需人工 sleep:
@@ -589,6 +589,62 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 - Agent(RWO 隔离): `cephfs/pvc-templates/06-*`
 - Skill Marketplace(RWX, durable): `cephfs/pvc-templates/07-*`
 - Image Registry(RBD Filesystem, Retain): `rbd/pvc-templates/07-*`
+
+### §12 CephFS 宿主机共享挂载(cephfs_mount, 默认启用)
+把 CephFS 内子目录(默认 `models`)挂到**每台节点**的宿主机路径(默认 `/mnt/cephfs/models`),
+供宿主机进程与容器(hostPath)共享模型等大文件。模块 `03_addon/07_cephfs_mount.sh`,
+默认随 `CEPHFS_ENABLED=true` 启用;单独执行: `sudo ./deploy-cluster.sh --steps cephfs_mount`。
+
+**实现方式**(节点无需安装 `ceph-common`):
+- 用集群已部署的 cephcsi 镜像(自带 `mount.ceph`)跑 DaemonSet `cephfs-models-mount`(rook-ceph);
+- 容器内 `mount -t ceph <mons>:/models`,hostPath 目标带 `mountPropagation: Bidirectional`
+  ⇒ 挂载传播到宿主机同名路径;节点重启由 DaemonSet 自动重挂(不写 fstab/systemd);
+- 子目录不存在时自动临时挂 FS 根 → `mkdir` + `chmod`(默认 `0777`)→ 再挂子目录;
+- 容器循环自愈: 手动 umount / Ceph 短暂不可用 → 最多 30s 后自动重挂;
+- 是否已挂载按 **fstype=ceph** 判断(hostPath 在容器里本身是 bind mount, 不能据此拒绝挂载);
+  同一路径的挂载栈取最上层(`findmnt -T | tail -1`), 避免重复叠加。
+
+**配置**(`cluster.defaults.conf`; 在 `cluster.conf` 写同名变量可覆盖):
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `CEPHFS_MOUNT_ENABLED` | 跟随 `CEPHFS_ENABLED` | 总开关 |
+| `CEPHFS_MOUNT_PATH` | `/mnt/cephfs/models` | 宿主机挂载点 |
+| `CEPHFS_MOUNT_SUBDIR` | `models` | CephFS 内子目录(自动创建) |
+| `CEPHFS_MOUNT_DIR_MODE` | `0777` | 子目录权限 |
+| `CEPHFS_MOUNT_USER` | `cubestack-cephfs-models` | internal 专用 cephx 用户 |
+| `CEPHFS_MOUNT_IMAGE` | 空(自动取 cephfs CSI nodeplugin 镜像) | 运行镜像 |
+
+**凭据**:
+- internal: 模块用 toolbox 创建专用用户 `client.<CEPHFS_MOUNT_USER>`:
+  `mon 'allow r'` / `mds 'allow rw fsname=cephfs'` /
+  `osd 'allow rw tag cephfs metadata=cephfs, allow rw tag cephfs data=cephfs'`;
+  密钥写入 `Secret/cephfs-models-client`(rook-ceph),容器用 `secretfile=` 挂载(不进命令行)。
+- external: 复用 `CEPHFS_NODE_USER/CEPHFS_NODE_KEYRING`(缺省回退 `CEPHFS_USER/CEPHFS_KEYRING`、
+  `CEPH_USER/CEPH_KEYRING`),mon 地址取 `CEPH_MONITORS`。
+
+**验证**:
+```bash
+sudo ./deploy-cluster.sh --steps cephfs_mount        # 部署 + 逐节点真实写读探针
+ssh <node> 'findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,SOURCE'
+kubectl -n rook-ceph get ds cephfs-models-mount
+kubectl -n rook-ceph logs ds/cephfs-models-mount --tail=50
+bash deployments/scripts/tools/tests/test-cephfs-mount.sh   # 离线桩式回归(无需集群)
+```
+> ⚠ 验证边界: 模块只验证**挂载可见 + 单节点写读**; 不做多节点并发写/性能/配额测试。
+
+**卸载**: `cluster-teardown.sh` 按登记反序调用模块 uninstall 分支 → 删 DaemonSet + **逐节点显式
+`umount`**(实测: 传播到宿主机的挂载不会必然随 Pod 退出消失) + Secret + internal 专用 cephx 用户;
+**保留 CephFS 内数据与宿主机空目录**。
+
+> ⚠ **非优雅拆除**: 若旧集群直接消失/未执行本模块 uninstall, 宿主机 `/mnt/cephfs/models` 的 ceph
+> 挂载会残留; mons 不可达时它会卡死 `fuser`/apt(`node_pkgs` 在首节点永久 pending)。
+> 重装前必须重启节点(`systemctl stop kubelet containerd; systemctl reboot -f`);
+> `tools/node/reconcile-node-packages.sh` 会在装包前检测并给出重启指引(详见
+> `docs/node-package-repair.md` R3)。
+
+> ⚠ mon 地址在 apply 时写入 DaemonSet(来自 `rook-ceph-mon-endpoints`);Rook 更新该 ConfigMap 后,
+> 重跑 `--steps cephfs_mount` 即可刷新(mon 地址在 hostNetwork 模式下通常稳定为节点 IP)。
 
 ### 命令清单(§21.1 对应)
 ```bash

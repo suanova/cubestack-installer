@@ -645,6 +645,40 @@ open(path, 'w').write('\n'.join(out) + '\n')
 PYEOF
     ok "已同步 containerd registry 信任 → ${REGISTRY_DOMAIN:-registry.cubestack.io}:${REGISTRY_PORT:-5000}(镜像 host: ${_MIRROR_HOST})"
 
+    # ---- 6b. containerd_extra_runtime_args: 设备属主(2026-10-13) ----
+    # 非 root 容器访问 MetaX GPU(/dev/mxcd)的节点前置 —— kubespray v2.32 **原生变量**
+    # (注入 [plugins."io.containerd.cri.v1.runtime"] 段; 角色默认值注释里的第一个示例就是本键)。
+    # 声明式渲染 ⇒ 重装/新节点天然带上; 存量节点由 gpu_operator 模块的
+    # tools/node/ensure-containerd-device-ownership.sh 即时落地。根因与生效时机见该工具头注释。
+    # CONTAINERD_DEVICE_OWNERSHIP=false 时幂等收敛为"移除本块"(不动其它配置)。
+    python3 - "${CONTAINERD_YML}" "${CONTAINERD_DEVICE_OWNERSHIP:-true}" << 'PYEOF'
+import re, sys
+path, own = sys.argv[1:3]
+lines = open(path).read().split('\n')
+out, i = [], 0
+while i < len(lines):
+    line = lines[i]
+    if re.match(r'^containerd_extra_runtime_args:', line):
+        i += 1
+        while i < len(lines):
+            l = lines[i]
+            if l.strip() == '' or l.startswith((' ', '\t')) or re.match(r'^[-#]', l):
+                i += 1
+            else:
+                break
+        continue
+    out.append(line); i += 1
+if own == "true":
+    out.append('containerd_extra_runtime_args:')
+    out.append('  device_ownership_from_security_context: true')
+open(path, 'w').write('\n'.join(out) + '\n')
+PYEOF
+    if [ "${CONTAINERD_DEVICE_OWNERSHIP:-true}" = "true" ]; then
+        ok "已同步 containerd_extra_runtime_args.device_ownership_from_security_context=true(非 root GPU 设备属主; 重装/新节点渲染生效)"
+    else
+        say "CONTAINERD_DEVICE_OWNERSHIP=false: 已移除 containerd_extra_runtime_args 块"
+    fi
+
     # containerd **配置版本**(默认 3; cluster.conf 可改; 2026-09-28 实机定位):
     #   沐曦 container-runtime 组件(/metax-runtime-install.sh, DaemonSet metax-container-runtime)只支持
     #   containerd 配置版本 ≤3; 而 containerd 2.3.x 上游模板写 `version = 4` ⇒ 该组件报

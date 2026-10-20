@@ -167,7 +167,7 @@ kubespray_tree_version() {
 # 离线文件**真根**(所有组件目录的共同父目录; 组件内再按版本分层, 见 KUBESPRAY_VERSION)
 #   offline-files/
 #   ├── kubespray/<版本>/   ← KUBESPRAY_VERSION 决定的 k8s 资产目录(二进制 + images/ + packages/)
-#   ├── metax-gpu/  ceph/  lws/ …(组件级规范, 按需迁移, 见 docs/kubespray-versioning/)
+#   ├── metax-gpu/  ceph/ …(组件级规范, 按需迁移, 见 docs/kubespray-versioning/)
 #   ⚠ 留空即由 lib-common 派生; 显式设置会同时改变各消费者路径(运维/容器挂载用)
 OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-}"
 # kubespray 版本(单一开关, 目录名 = 上游 tag 全名, 如 v2.32.0)

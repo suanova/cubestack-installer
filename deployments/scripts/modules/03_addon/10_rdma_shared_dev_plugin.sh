@@ -79,9 +79,9 @@ init_remote_kubectl || exit 1
 SAVE_DIR="${RDMA_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/rdma}"
 IMG_TAG="${RDMA_IMAGE_TAG:-v1.5.4}"            # ⚠ 官方源已迁 ghcr.io/mellanox(非 Docker Hub); 1.4.0 无 v 前缀, v1.5.1+ 带 v(默认 v1.5.4 最新: 修复 RoCE 口 issm 硬检查, 5 块 HCA 全暴露)
 NS="${RDMA_NAMESPACE:-kube-system}"
-# 自动检测执行所需: 全节点 SSH 身份(复用 init_remote_kubectl 的单 master 通道思路, 这里遍历每个节点)
+# 自动检测执行所需: 全节点 SSH 身份(复用 init_remote_kubectl 的单 master 通道思路, 这里遍历每个节点;
+# 登录用户按节点逐个解析: ssh_user_for_ip —— NODES 逐行覆盖优先, 全局 SSH_USER 兜底)
 SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-SSH_USER_D="${SSH_USER:-ubuntu}"
 # skopeo push 直连端点(nodeport → master:REGISTRY_NODEPORT; metallb → VIP:5000; 见 lib-common)
 REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-5000}}"
 # 节点可解析 registry 域名(:5000, 节点 containerd hosts.toml 已改写)
@@ -216,7 +216,7 @@ REMOTE_DETECT
         node_parse "${_line}"   # → NODE_IP / NODE_ROLE ...
         [ -n "${NODE_IP:-}" ] || continue
         _ifc="$(ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-                "${SSH_USER:-ubuntu}@${NODE_IP}" "ACTIVE_ONLY=${ACTIVE_ONLY} bash -s" < "${_DET_TMP}" 2>/dev/null || true)"
+                "$(ssh_user_for_ip "${NODE_IP}")@${NODE_IP}" "ACTIVE_ONLY=${ACTIVE_ONLY} bash -s" < "${_DET_TMP}" 2>/dev/null || true)"
         if [ -n "${_ifc}" ]; then
             # 按节点汇总到 DETECTED_HCAS(去重, 逗号分隔)
             while IFS= read -r _h; do

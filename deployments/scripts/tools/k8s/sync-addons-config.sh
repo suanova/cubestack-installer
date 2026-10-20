@@ -78,5 +78,9 @@ fi
 if [ -n "${REGISTRY_STORAGE_CLASS:-}" ]; then
     set_key registry_storage_class "\"${REGISTRY_STORAGE_CLASS}\""
 fi
+# registry PVC 容量: kubespray 缺省仅 10Gi, 放不下 dev_lab(≈47G)等大镜像 ⇒ 盘满后 push 全 500
+# (2026-10-13 实机事故)。存量集群的扩容由 05_k8s_registry.sh 幂等执行 —— 这里只决定**新建** PVC
+# 的声明大小(同一数据源 REGISTRY_DISK_SIZE, 两处默认值必须一致)。
+set_key registry_disk_size "\"${REGISTRY_DISK_SIZE:-200Gi}\""
 
 ok "addons.yml 组件开关已同步: $(grep -cE '^[a-z_]+_enabled: (true|false)$' "${ADDONS_YML}") 项"

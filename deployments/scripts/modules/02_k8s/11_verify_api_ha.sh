@@ -43,8 +43,9 @@ MANIFEST="/etc/kubernetes/manifests/nginx-proxy.yml"
 
 # ⚠ 一律传 IP, 不传主机名: 部署容器里通常没有节点名的 /etc/hosts 解析(历史假故障来源)
 _hssh() { local h="$1"; shift
+    # 登录用户按目标节点在 NODES 的解析值(逐行覆盖优先; 见 lib-common ssh_user_for_ip)
     ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${SSH_USER_NAME}@${h}" "$@"; }
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${h}")@${h}" "$@"; }
 
 # ⚠ **必须显式 return 0**: 循环的退出码 = 末次迭代的命令, 末节点角色不匹配时本函数返回 1。
 #   调用方 `ALL_IPS="$(_by_role master; _by_role worker)"` 会被赋值语句原样拿到该退出码,

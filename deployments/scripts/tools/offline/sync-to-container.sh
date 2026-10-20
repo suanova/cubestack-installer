@@ -85,6 +85,13 @@ FILES=(
     #   CEPH_MODE="external" 覆盖唯一开关行 → 容器内 cp example→conf 会把默认配置
     #   静默变 external。容器内 cluster.conf 本身仍默认不推送(见步骤 2)。
     deployments/config/cluster.conf.example
+    # ★ 2026-10-15(配置拆分): cluster.defaults.conf(高级/默认值层)必须同步 ——
+    #   load_config 无条件加载它(主文件先、defaults 后); 漏同步 = 容器里高级变量全走内置兜底,
+    #   离线路径/镜像源/Ceph 参数等大面积错值(且多数不报错, 属静默错误)。
+    deployments/config/cluster.defaults.conf
+    # ★ 2026-10-19: 平台镜像清单也要同步 —— 容器内 `--steps cubestack_operator` 的离线推送
+    #   与 check-image-manifest / 保鲜工具都以它为登记源; 漏同步会让容器继续用旧镜像 tag。
+    deployments/config/images.manifest
     deployments/kubespray/cubestack-offline.sh
     # ★ 2026-09-28(评审 I2): 两个入口脚本此前**不在清单里** → 容器里根本没有"换树/重放补丁"
     #   的能力(只有离线入口), 遇到需要重放补丁的场景只能靠人手抄。它们是独立文件(非整树),
@@ -132,14 +139,14 @@ docker exec "${CONTAINER}" bash -c 'rm -f /opt/cubestack-installer/deployments/c
 echo ""
 echo "── 4. 验证(容器内)──"
 docker exec "${CONTAINER}" bash -c '
-  echo "  cluster.conf 关键开关:"; grep -nE "^(CEPH_ENABLED|CEPH_CSI_ENABLED|KUBE_VIP_ENABLED|LWS_ENABLED)=" '"${CT_CONF}"' || echo "    (未显式写 = 走脚本内置默认)"
+  echo "  cluster.conf 关键开关:"; grep -nE "^(CEPH_ENABLED|CEPH_CSI_ENABLED|KUBE_VIP_ENABLED)=" '"${CT_CONF}"' || echo "    (未显式写 = 走脚本内置默认)"
   # ★ 2026-09-24: 容器里的 cluster.conf 与宿主机那份**是两份文件**(本脚本默认不推送, 见步骤 2)。
-  #   默认值改过以后(kube-vip / LWS 由默认开改为默认关), 容器里那份仍留旧值 → 重跑仍走开启态
+  #   默认值改过以后(kube-vip 由默认开改为默认关), 容器里那份仍留旧值 → 重跑仍走开启态
   #   ——"改了没生效", 本仓库反复踩。这里把可疑值直接点出来, 不让用户自己猜。
   #   ⚠ 本段处在宿主机的单引号区内, 载荷里一律不许出现单引号(会提前闭合外层, 把后面的功能性
   #     代码拖进错误的引用状态 —— 曾因此整段语法崩)。要拼宿主机变量, 用本文件既有的
   #     单引号-双引号-单引号三段拼接写法(sed 行末尾那处), 不要图省事直接写裸变量。
-  for _k in KUBE_VIP_ENABLED LWS_ENABLED; do
+  for _k in KUBE_VIP_ENABLED; do
       _v="$(grep -E "^${_k}=" '"${CT_CONF}"' 2>/dev/null | head -1)"
       case "${_v}" in
           *:-true*|*:-1*|*:-yes*|*:-on*)
@@ -154,7 +161,6 @@ docker exec "${CONTAINER}" bash -c '
   echo "  detect 分类器引用: $(grep -c "ceph-disk-classify.py" '"${CT}"/deployments/scripts/tools/k8s/ceph-detect-disks.sh' || true) 处; 分类器文件: $(test -f '"${CT}"/deployments/scripts/tools/k8s/ceph-disk-classify.py' && echo 在 || echo 缺失)"
   echo "  cleanup --wipe-disks: $(grep -c "wipe-disks" '"${CT}"/deployments/scripts/tools/k8s/ceph-cleanup.sh' || true) 处"
   echo "  kube-vip 默认关: $(grep -c "KUBE_VIP_ENABLED:-false" '"${CT}"/deployments/config/cluster.conf.example' || true) 处(期望 ≥1); 关闭态不推导 VIP: $(grep -c "KUBE_VIP_ENABLED:-false" '"${CT}"/deployments/scripts/tools/k8s/sync-kubespray-config.sh' || true) 处(期望 ≥1)"
-  echo "  LWS 默认关: $(grep -c "LWS_ENABLED:-false" '"${CT}"/deployments/config/cluster.conf.example' || true) 处(期望 ≥1)"
   echo "  install-packages offline_dir:"; grep -c "offline_dir" '"${CT}"/deployments/kubespray/kubespray/patch-playbooks/install-packages.yml' || true
   echo "  rook manifests:"; ls '"${CT}"/deployments/cubestack-addon/rook/'*.yaml 2>/dev/null | wc -l
   echo "  lvm 离线包(os/packages):"; ls '"${CT}/deployments/offline-files/os/packages/lvm2_"'*.deb 2>/dev/null | wc -l

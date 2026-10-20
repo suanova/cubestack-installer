@@ -40,15 +40,16 @@ IM_REPO_ROOT="${IM_REPO_ROOT:-${PWD}}"
 unset _d _IM_PATH_SELF
 
 # ---------- 1. 加载版本变量 ----------
-# 分层加载(标准 idiom): 先 source cluster.conf.example 取**全部默认值**, 再 source
-# cluster.conf 覆盖。这样:
-#   · CI 上没有 cluster.conf        → 纯用 example 内置默认, 照常工作;
-#   · 已有环境 cluster.conf 早于本次新增变量(如未重抄 example) → 缺失的用 example 默认补齐,
+# 分层加载(标准 idiom; 2026-10-15 拆分为三份): 先 source cluster.conf.example(主文件默认值)
+# 与 cluster.defaults.conf(高级默认值层), 再 source cluster.conf 覆盖。这样:
+#   · CI 上没有 cluster.conf        → 纯用 example/defaults 内置默认, 照常工作;
+#   · 已有环境 cluster.conf 早于本次新增变量(如未重抄 example) → 缺失的用默认补齐,
 #     **不需要用户改任何配置**;
 #   · 真实配置里显式设过的值优先。
 image_manifest_load() {
     local _conf="${IMAGE_MANIFEST_CONF:-}"        # 显式指定则只用它(单文件模式)
     local _example="${IM_REPO_ROOT}/deployments/config/cluster.conf.example"
+    local _defaults="${IM_REPO_ROOT}/deployments/config/cluster.defaults.conf"
     local _real="${IM_REPO_ROOT}/deployments/config/cluster.conf"
 
     # 保存调用方已显式设置的关键变量(有值才保护; 空值不保护 —— 空=用清单默认)
@@ -77,7 +78,7 @@ image_manifest_load() {
         # shellcheck disable=SC1090
         source "${_conf}" >/dev/null 2>&1; _src_rc=$?; _loaded="${_conf}"
     else
-        for _c in "${_example}" "${_real}"; do
+        for _c in "${_example}" "${_defaults}" "${_real}"; do
             [ -f "${_c}" ] || continue
             # shellcheck disable=SC1090
             source "${_c}" >/dev/null 2>&1 || _src_rc=$?
@@ -88,7 +89,7 @@ image_manifest_load() {
     unset _nounset_was_on
 
     if [ -z "${_loaded}" ]; then
-        echo "【错误】找不到 cluster.conf / cluster.conf.example(IMAGE_MANIFEST_CONF 可指定)" >&2
+        echo "【错误】找不到 cluster.conf / cluster.defaults.conf / cluster.conf.example(IMAGE_MANIFEST_CONF 可指定)" >&2
         return 1
     fi
     IM_CONF_FILE="${_loaded}"
@@ -99,7 +100,7 @@ image_manifest_load() {
             printf -v "${_v%%=*}" '%s' "${_v#*=}"
         done
     fi
-    unset _v _protected _c _conf _example _real _loaded _src_rc
+    unset _v _protected _c _conf _example _defaults _real _loaded _src_rc
     return 0
 }
 

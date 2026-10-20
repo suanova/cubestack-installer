@@ -14,7 +14,7 @@ load_config
 FIRST_MASTER="$(first_master_ip)" || { err "未找到 master 节点"; exit 1; }
 SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 SSH() { ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-           "${SSH_USER:-ubuntu}@${FIRST_MASTER}" "$@"; }
+           "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}" "$@"; }
 K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
 
 say "验证集群节点 GPU 识别情况(metax-tech.com/gpu, 入口=${FIRST_MASTER})..."
@@ -76,3 +76,55 @@ PY
 )"
 rm -f "${_TMP}"
 echo "${OUT}"
+
+# ---------------- 权限探针: 非 root 真实打开设备(2026-10-13 "family N" 加固) ----------------
+# 只信它: mx-smi exit 0 / device_count() 返回请求值在"设备无权限"时**全部正常**(mx-smi 只读
+# sysfs 不开 /dev 节点; device_count 报的是 vendor 配置的可见集, 不是成功的 open) —— 唯一能把
+# "资源分配到了但打不开"区分出来的断言 = 非 root 真实 open 设备(torch.cuda.is_available()
+# 即基于真实 open)。探针 = runAsUser/runAsGroup:1000 + metax-tech.com/gpu:1, 镜像用 dev_lab
+# 的 jupyter-maca-pytorch(集群 registry, 离线可用; 含 torch+MACA)。
+if echo "${OUT}" | grep -q "GPU 识别节点数: 0 "; then
+    say "权限探针: 跳过(集群无 GPU 节点)"
+else
+    _PROBE_IMG="${METAX_PERM_PROBE_IMAGE:-${REGISTRY_DOMAIN:-registry.cubestack.io}:${REGISTRY_PORT:-5000}/suanova/jupyter-maca-pytorch:${DEV_LAB_IMAGE_TAG:-latest}}"
+    say "权限探针: runAsUser=1000 真实打开 /dev/mxcd + torch.cuda.is_available()(镜像 ${_PROBE_IMG})..."
+    SSH "${K} -n default delete pod metax-devperm-probe --ignore-not-found >/dev/null 2>&1" || true
+    if SSH "${K} -n default apply -f - >/dev/null 2>&1" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: metax-devperm-probe
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: ${_PROBE_IMG}
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      resources:
+        limits:
+          metax-tech.com/gpu: 1
+      command: ["python3", "-c", "import os,sys; fd=os.open('/dev/mxcd', os.O_RDWR); print('open(/dev/mxcd) OK fd', fd); os.close(fd); import torch; ok=torch.cuda.is_available(); print('torch.cuda.is_available():', ok); sys.exit(0 if ok else 1)"]
+EOF
+    then
+        _state=""
+        for _i in $(seq 1 36); do
+            _state="$( (SSH "${K} -n default get pod metax-devperm-probe -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+            case "${_state}" in Succeeded|Failed) break ;; esac
+            sleep 5
+        done
+        ( SSH "${K} -n default logs metax-devperm-probe 2>/dev/null" || true ) | sed 's/^/    /'
+        SSH "${K} -n default delete pod metax-devperm-probe --ignore-not-found >/dev/null 2>&1" || true
+        if [ "${_state}" = "Succeeded" ]; then
+            ok "  权限探针通过: 非 root 可真实打开 GPU 设备"
+        else
+            err "  权限探针失败(${_state:-未结束}): 非 root 打不开 GPU 设备(资源分配了却无权限)!"
+            err "    → 检查节点 /etc/containerd/config.toml 的 device_ownership_from_security_context=true;"
+            err "      修复: bash deployments/scripts/tools/node/ensure-containerd-device-ownership.sh(改后需重建工作负载)"
+            exit 1
+        fi
+    else
+        warn "  权限探针 pod 创建失败(检查镜像可达: ${_PROBE_IMG} —— dev_lab 是否已推入集群 registry? 可用 METAX_PERM_PROBE_IMAGE 覆盖)"
+    fi
+fi

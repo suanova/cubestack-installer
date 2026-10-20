@@ -2,7 +2,7 @@
 # ============================================================
 # fetch-offline-from-minio.sh — 从 MinIO 下载离线部署文件到宿主机大磁盘, 并给出容器挂载命令
 # ------------------------------------------------------------
-# 用途: 从 MinIO 拉取离线部署文件(binary + 镜像 tar + 系统包 + GPU/LWS/虚拟机镜像)到
+# 用途: 从 MinIO 拉取离线部署文件(binary + 镜像 tar + 系统包 + GPU/虚拟机镜像)到
 #       默认下载目录 /opt/cubestack-installer/deployments/offline-files:
 #       · 容器内执行(CLI 镜像已内置 mc): 下载直接落到容器挂载的 offline-files, 即装即用;
 #       · 宿主机执行: 可 --auto 自动挑空闲最大的大磁盘下载, 完成后打印容器挂载命令。
@@ -14,7 +14,7 @@
 #     自动回退探测旧布局(cubestack-offline/kubespray);
 #   · 磁盘检查(默认开启): 醒目提示磁盘至少需 MIN_FREE_GB(默认 50)GiB 空闲, 并比对
 #     本次下载所需(远程总大小 + 缓冲)与目标可用空间; 不足时红色横幅警告并中止(--force 强制继续);
-#   · 下载范围: 默认下载【部署必需】子目录(kubespray/metax-gpu/lws/os 等),
+#   · 下载范围: 默认下载【部署必需】子目录(kubespray/metax-gpu/os 等),
 #     不下载 virtual-machine(虚拟机镜像, 体积大且仅创建 VM 时用);
 #     需要时可 --sub virtual-machine 只拉 VM 镜像, 或 --all 全量(含 VM 镜像)。
 #   · 子目录排除: DEFAULT_EXCLUDE_SUBS(默认 virtual-machine)在默认/全量下载时自动跳过;
@@ -35,6 +35,10 @@
 #   sudo ./fetch-offline-from-minio.sh --force                    # 跳过磁盘空间不足检查(谨慎)
 #   sudo ./fetch-offline-from-minio.sh --yes                      # 跳过交互确认(自动化)
 #   ./fetch-offline-from-minio.sh --list                          # 只列出 MinIO 可用目录(不需 root)
+#   ./fetch-offline-from-minio.sh --sub cubestack-operator         # 平台镜像整目录(37 件)
+#   ./fetch-offline-from-minio.sh --sub cubestack-operator/portal  # 下钻: 只取某个平台组件(刷新单组件)
+#   ./fetch-offline-from-minio.sh --sub ceph,cubestack-operator/lws   # 多值(逗号分隔, 或重复给 --sub)
+#   ./fetch-offline-from-minio.sh --list --sub cubestack-operator  # 列出其下全部组件名(无需登录 MinIO 控制台)
 # 数据源: config/minio.conf(独立 MinIO 配置, 模板 minio.conf.example)或 MINIO_* 环境变量;
 #         刻意不依赖 cluster.conf / lib-common.sh —— 本脚本是部署【前置】的下载工具,
 #         下载离线文件时集群配置往往还不存在, 不应要求先配好集群。
@@ -82,10 +86,34 @@ MIN_FREE_GB="${MIN_FREE_GB:-50}"     # 磁盘空间门槛(GB): 默认至少 50Gi
 WARN_NEED_GB="${WARN_NEED_GB:-50}"   # 醒目警告建议的总空闲门槛(GB)
 # 默认/全量下载时自动排除的子目录(体积大且非部署必需, 需用时 --sub 单独拉):
 DEFAULT_EXCLUDE_SUBS="${DEFAULT_EXCLUDE_SUBS:-virtual-machine}"
+
+# --help: 头部说明 + **可用子目录图**(不必登录 MinIO 控制台; 平台组件清单读仓库内 image-list.tsv)
+_print_help() {
+    awk '/^set -euo pipefail$/{exit} {print}' "$0" | sed 's/^# \{0,1\}//'
+    echo ""
+    echo "════ 可用子目录(offline-files/ 下; 实时: --list / 下钻: --list --sub <路径>)════"
+    echo "  kubespray/               kubespray 离线仓(版本子目录 vX.Y.Z; --sub kubespray/v2.32.0)"
+    echo "  ceph/  metax-gpu/  nvidia-gpu-operator/  multus/  rdma/  netshoot/  os/"
+    echo "  dev-lab/                 开发镜像: jupyter/ 与 ssh/(子目录; 大件 .tar.gz)"
+    echo "  model-collection/        模型推理镜像: sglang/ 与 vllm/(≈95G, .tar.gz; 来源 suanova/model-collection)"
+    echo "  virtual-machine/         虚拟机镜像(大; 默认排除, --sub virtual-machine 单独拉)"
+    echo "  cubestack-operator/      CubeStack 平台镜像(顶层 <上游ref>.tar = operator 本体)"
+    local _rd _list
+    _rd="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+    _list="${_rd}/deployments/offline-files/cubestack-operator/image-list.tsv"
+    if [ -f "${_list}" ]; then
+        echo "    组件子目录(取自仓库 image-list.tsv, 随组件自动更新):"
+        awk -F'\t' '!/^#/ && $1 != "." && NF {print $1}' "${_list}" | sort -u | tr '\n' ' ' | fold -s -w 96 | sed 's/^/      /'
+        echo ""
+    else
+        echo "    组件子目录: lws envoy-gateway controller-manager prometheus perses cuberouter bmc cubepilot portal"
+    fi
+    echo "  示例: ./fetch-offline-from-minio.sh --sub cubestack-operator/portal   # 只取某个平台组件"
+}
 while [ $# -gt 0 ]; do
     case "$1" in
         --dest) DEST_ARG="$2"; shift 2 ;;
-        --sub)  SUB_ARG="$2"; shift 2 ;;
+        --sub)  SUB_ARG="${SUB_ARG:+${SUB_ARG},}$2"; shift 2 ;;   # 支持多值: 逗号分隔或重复 --sub
         --min-free) MIN_FREE_GB="$2"; shift 2 ;;
         --all)  ALL=1; shift ;;
         --list) LIST_ONLY=1; shift ;;
@@ -93,7 +121,7 @@ while [ $# -gt 0 ]; do
         --force) FORCE=1; shift ;;
         -y|--yes) YES=1; shift ;;
         --kubespray-version) KUBESPRAY_VERSION_ARG="$2"; shift 2 ;;
-        -h|--help) head -40 "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) _print_help; exit 0 ;;
         *) err "未知参数: $1(可用 --dest/--sub/--kubespray-version/--min-free/--auto/--force/--all/--list/-y)"; exit 1 ;;
     esac
 done
@@ -102,11 +130,30 @@ if [ -n "${KUBESPRAY_VERSION_ARG}" ]; then
     [ -n "${SUB_ARG}" ] && { err "--kubespray-version 与 --sub 互斥(后者已给 ${SUB_ARG})"; exit 1; }
     SUB_ARG="kubespray/${KUBESPRAY_VERSION_ARG}"
 fi
-# --sub 允许嵌套路径, 但必须是**桶内相对路径**(拒绝绝对路径 / 上跳, 免得拼出桶外路径)
+# --sub: 多值 + 路径归一化 —— 容忍"桶内全路径"写法(如 offline-files/cubestack-operator/portal
+#   或 <桶名>/offline-files/...), 统一剥成相对 offline-files 的路径(cubestack-operator/portal);
+#   仍拒绝绝对路径 / 上跳(免得拼出桶外路径)。
 if [ -n "${SUB_ARG}" ]; then
-    case "${SUB_ARG}" in
-        /*|*..*) err "--sub 必须是桶内相对路径(不允许以 / 开头或含 ..): ${SUB_ARG}"; exit 1 ;;
-    esac
+    _norm=""
+    for _s in ${SUB_ARG//,/ }; do
+        [ -n "${_s}" ] || continue
+        _s="${_s#./}"
+        case "${_s}" in
+            "${MINIO_BUCKET:-cubestack-installer}/${MINIO_REMOTE_DIR:-offline-files}/"*)
+                _s="${_s#"${MINIO_BUCKET:-cubestack-installer}/${MINIO_REMOTE_DIR:-offline-files}/"}" ;;
+        esac
+        case "${_s}" in
+            "${MINIO_REMOTE_DIR:-offline-files}/"*) _s="${_s#"${MINIO_REMOTE_DIR:-offline-files}/"}" ;;
+            "${MINIO_REMOTE_DIR:-offline-files}")  _s="" ;;
+        esac
+        case "${_s}" in
+            /*|*..*) err "--sub 必须是桶内相对路径(不允许以 / 开头或含 ..): ${_s}"; exit 1 ;;
+        esac
+        [ -n "${_s}" ] || continue
+        case ",${_norm}," in *",${_s},"*) : ;; *) _norm="${_norm:+${_norm},}${_s}" ;; esac
+    done
+    SUB_ARG="${_norm}"
+    [ -n "${SUB_ARG}" ] || { err "--sub 归一化后为空(只给 offline-files 根=全量; 请不带 --sub 走默认模式)"; exit 1; }
 fi
 
 # ---------------- 1. mc client 检测 ----------------
@@ -170,7 +217,7 @@ if [ "${mc_alias_ready}" != "1" ]; then
         err "无可用 mc alias(--yes 模式不交互), 请先在 config/minio.conf 填 MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY 或配置 mc alias"; exit 1
     fi
     warn "未检测到可用的 MinIO 配置, 请交互录入(或先在 config/minio.conf 配置 MINIO_* 变量):"
-    read -r -p "  MinIO 服务地址 (如 http://192.168.16.6:9000): " _ept
+    read -r -p "  MinIO 服务地址 (如 http://<minio-host>:9000): " _ept
     read -r -p "  AccessKey: " _ak
     read -r -s -p "  SecretKey: " _sk; echo ""
     [ -n "${_ept}" ] || { err "未输入 MinIO 地址"; exit 1; }
@@ -209,16 +256,26 @@ echo ""
 
 # --list 模式: 到此结束
 if [ "${LIST_ONLY}" = "1" ]; then
+    if [ -n "${SUB_ARG}" ]; then
+        # --list --sub <路径>: 下钻一级(如 --list --sub cubestack-operator → 列出全部组件子目录)
+        _s="${SUB_ARG%%,*}"    # 列表模式取第一个(不做多值叠加)
+        echo ""
+        echo "  ${SRC_ROOT}/${_s}/ 下一级(全部可用名字):"
+        mc ls "${SRC_ROOT}/${_s}" 2>/dev/null | awk '{print "    - "$NF}' || true
+        echo ""
+        echo "  下载其中某项: sudo ./fetch-offline-from-minio.sh --sub ${_s}/<名字>"
+        exit 0
+    fi
     echo ""
-    echo "  二级(版本目录; 版本名 = 上游 tag 全名):"
-    # ⚠ 本脚本是 set -euo pipefail: 组件无版本子目录时 grep 退出 1 ⇒ 管道失败 ⇒ **整支脚本中止**
-    #   (实测: 第一个组件没版本目录就静默退出, 连下面的提示都不打)。故每处都 || true。
+    echo "  二级(版本目录 + 各组件子目录; 名字以本输为准, 无需登录 MinIO 控制台):"
+    # ⚠ set -euo pipefail: mc ls 打空时管道非 0 → 整支脚本静默中止; 每处都 || true。
     for _c in $(mc ls "${SRC_ROOT}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##' || true); do
         [ -n "${_c}" ] || continue
-        _vs="$( { mc ls "${SRC_ROOT}/${_c}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##' | grep -E '^v[0-9]+' || true; } | tr '\n' ' ')"
-        [ -n "${_vs}" ] && echo "    ${_c}: ${_vs}"
-    done | head -20
+        _subs="$( { mc ls "${SRC_ROOT}/${_c}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##' || true; } | tr '\n' ' ')"
+        [ -n "${_subs}" ] && echo "    ${_c}: ${_subs}"
+    done | head -30
     echo ""
+    echo "  下钻更多层级: sudo ./fetch-offline-from-minio.sh --list --sub cubestack-operator"
     echo "  只下载指定版本: sudo ./fetch-offline-from-minio.sh --kubespray-version v2.32.0"
     exit 0
 fi
@@ -302,10 +359,13 @@ if [ "${ALL}" = "1" ]; then
     mapfile -t SUBS < <(mc ls "${SRC_ROOT}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##')
     say "全量下载(--all, 含 ${DEFAULT_EXCLUDE_SUBS}): ${#SUBS[@]} 个子目录"
 elif [ -n "${SUB_ARG}" ]; then
-    # 显式 --sub 不受排除限制; 容错: 若 MinIO 中名字带尾斜杠, 剥离后比对
-    mc_has "${SRC_ROOT}/${SUB_ARG}" || { err "MinIO 中无子目录 ${SRC_ROOT}/${SUB_ARG}(用 --list 查看)"; exit 1; }
-    SUBS=("${SUB_ARG}")
-    say "只拉取子目录: ${SUB_ARG}"
+    # 显式 --sub 不受排除限制; 支持多值(逗号分隔, 已在解析期归一化/去重)—— 逐个校验存在性
+    for _s in ${SUB_ARG//,/ }; do
+        [ -n "${_s}" ] || continue
+        mc_has "${SRC_ROOT}/${_s}" || { err "MinIO 中无子目录 ${SRC_ROOT}/${_s}(用 --list 或 --list --sub <路径> 查看)"; exit 1; }
+        SUBS+=("${_s}")
+    done
+    say "只拉取子目录(${#SUBS[@]} 个): ${SUB_ARG}"
 else
     # 默认: 下载部署必需子目录(排除 virtual-machine)
     mapfile -t SUBS < <(_subs_all)

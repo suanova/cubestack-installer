@@ -1,5 +1,8 @@
 # API 入口高可用（本地代理 + kube-vip）实施计划
 
+> ⚠ **2026-10-14 变更**: 本文档涉及的 HAProxy/Keepalived 方案(`lb_haproxy`/`lb_keepalived` 模块与开关)
+> 已**整块移除**; 文中相关对比/规则/步骤均为**历史记录**, 当前 API 入口高可用唯一方案 = kube-vip。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让"节点侧 API 出口"不再依赖任何一台具体 master（kubespray 原生每节点本地代理），同时保留/支持外部稳定入口（kube-vip VIP 或环境已有 LB），并支持完全没有 VIP 的场景。
@@ -96,14 +99,14 @@ bash deployments/scripts/tools/images/check-image-manifest.sh
 
 | # | 文件 | 位置 |
 |---|---|---|
-| ① | `deployments/config/cluster.conf` | `:921` `PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-… busybox lws_manager}"` |
+| ① | `deployments/config/cluster.conf` | `:921` `PRELOAD_IMAGE_PATTERNS="${PRELOAD_IMAGE_PATTERNS:-… busybox}"` |
 | ② | `deployments/config/cluster.conf.example` | `:774` 同项 |
 | ③ | `deployments/scripts/tools/offline/trim-offline-files.sh` | `:41` 内置默认值 |
 
 改完后 ③ 的形态：
 
 ```bash
-DEFAULT_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb kube-vip library_registry local-path-provisioner busybox lws_manager library_nginx"
+DEFAULT_PATTERNS="calico_cni calico_kube-controllers calico_node etcd kube-apiserver kube-controller-manager kube-proxy kube-scheduler coredns cluster-proportional-autoscaler k8s-dns-node-cache metrics-server pause metallb kube-vip library_registry local-path-provisioner busybox library_nginx"
 ```
 
 （变量名以该文件实际为准；只改值，不改结构。）

@@ -98,7 +98,7 @@ init_remote_kubectl || exit 1
 
 1. **放在哪**:`deployments/cubestack-addon/<组件>/`,一个 chart 一个子目录。`.gitignore` 不覆盖
    `cubestack-addon/`,所以直接 `git add` 即可(参考已在库里的 `rook-charts/rook-ceph` 解包目录、
-   `lws/charts/`)。
+   `rook/`)。
 2. **什么形态**:小 chart 放 `.tgz` **并同时提交 `<tgz>.digest` 边车**;大 chart(带几十个子 chart)
    放解包源码目录(含 `Chart.yaml`)。
 3. **边车怎么写**:值是 helm 报告的 `Digest:` 那一行(`sha256:...`)。经典 helm repo 的 digest 就是
@@ -113,7 +113,7 @@ init_remote_kubectl || exit 1
    `ref` 是 `oci://…` 或经典 repo 的 chart 名(后者同时给 `repoURL`);只需要本地副本、不需要在线刷新时,
    把 `mode` 传 `offline` 即可(纯本地组件就该这么写)。
 5. **刷新**:目前**没有**脚本化刷新工具 —— 手工 `helm pull` 覆盖 vendored 副本
-   (示例见 `deployments/cubestack-addon/lws/CUBESTACK.md` 的"升级到新版本"),`.tgz` 形态
+   (示例: 手工 `helm pull` 覆盖 vendored 副本并同步 `<tgz>.digest` 边车),`.tgz` 形态
    要一并更新 `<tgz>.digest` 边车。**随 git 提交**才算刷新完成。
 6. **自检**:`bash deployments/scripts/tools/check-modules.sh` 第 ⑩ 项必须过。想确认它真会拦,
    把刚放的 chart 临时挪走再跑一次 —— 应该报 `找不到 vendored chart`。
@@ -126,7 +126,7 @@ init_remote_kubectl || exit 1
 1. **登记清单**:`deployments/config/images.manifest` 追加 `<group>  <上游全限定 ref>` 行,
    `group` 取**组件名**(与 `cubestack-addon/<组件>/`、模块 key 对齐)。ref 必须全限定
    (短名补 `docker.io/library/`),版本写 `${VAR}` 占位,不要写死 tag。
-2. **版本变量**:`XXX_IMAGE_VERSION` 放 `cluster.conf.example` 的「镜像版本(★ 升级入口)」节
+2. **版本变量**:`XXX_IMAGE_VERSION` 放 `cluster.defaults.conf` 的「镜像版本钉子(★ 升级入口)」节
    —— 升级只改这一处,清单 / CI / 离线包自动跟随。
 3. **建目录 + README(最容易漏)**:`deployments/offline-files/<group>/README.md`,照抄
    `offline-files/rdma/README.md`。⚠ **空目录 git 存不下,`.gitignore` 也只放行

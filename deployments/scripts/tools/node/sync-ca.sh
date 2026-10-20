@@ -38,7 +38,7 @@ done
 
 say "从 ${FIRST_MASTER}(${FIRST_MASTER_IP}) 获取集群 CA ..."
 CA_FILE="/tmp/cubestack-ca.crt"
-ssh ${SSH_OPTS} "${FIRST_MASTER_USER:-ubuntu}@${FIRST_MASTER_IP}" "sudo cat /etc/kubernetes/ssl/ca.crt" > "${CA_FILE}" 2>/dev/null
+ssh ${SSH_OPTS} "${FIRST_MASTER_USER:-${SSH_USER:-ubuntu}}@${FIRST_MASTER_IP}" "sudo cat /etc/kubernetes/ssl/ca.crt" > "${CA_FILE}" 2>/dev/null
 [ -s "${CA_FILE}" ] || { err "获取 CA 失败"; exit 1; }
 ok "CA 已获取 ($(wc -c < "${CA_FILE}") 字节)"
 
@@ -55,11 +55,12 @@ for line in "${NODES[@]:-}"; do
 
     COUNT=$((COUNT + 1))
     say "── [${NODE_HOSTNAME}](${NODE_IP}) 同步 CA + 更新 kubelet.conf + 重启 kubelet ..."
-    # 1. scp CA 和远端脚本
+    # 1. scp CA 和远端脚本(先清陈旧目标: 他人遗留的固定 /tmp 文件会让 scp 被 fs.protected_regular 拒)
+    ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" "sudo rm -f /tmp/cubestack-ca.crt /tmp/sync-ca-remote.sh" >/dev/null 2>&1 || true
     scp ${SSH_OPTS} -o BatchMode=yes "${CA_FILE}" "${NODE_USER}@${NODE_IP}:/tmp/cubestack-ca.crt" >/dev/null 2>&1 || { warn "  scp CA 失败,跳过"; continue; }
     scp ${SSH_OPTS} -o BatchMode=yes "${REMOTE_SCRIPT}" "${NODE_USER}@${NODE_IP}:/tmp/sync-ca-remote.sh" >/dev/null 2>&1 || { warn "  scp 脚本失败,跳过"; continue; }
-    # 2. root 执行远端修复脚本
-    if ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" "sudo bash /tmp/sync-ca-remote.sh; rm -f /tmp/sync-ca-remote.sh" >/dev/null 2>&1; then
+    # 2. root 执行远端修复脚本(执行完即删脚本与 CA 临时件 —— 节点 /tmp 不留固定名残留, 2026-10-16)
+    if ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" "sudo bash /tmp/sync-ca-remote.sh; rm -f /tmp/sync-ca-remote.sh /tmp/cubestack-ca.crt" >/dev/null 2>&1; then
         ok "  ${NODE_HOSTNAME} CA + kubelet.conf 已同步, kubelet 已重启"
     else
         warn "  ${NODE_HOSTNAME} 同步失败"

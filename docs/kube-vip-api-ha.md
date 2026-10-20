@@ -209,7 +209,7 @@ MetalLB 在做(见第 4 节决策 D1)。
 | D1 | 职责边界 | **只做控制平面 VIP**;`kube_vip_services_enabled: false` | MetalLB 已承载 registry / ingress / EG 的 LoadBalancer VIP 且实机验证充分。两者分工会互相抢 LoadBalancer 分配权 |
 | D2 | 启用策略 | **默认关闭**;需要时显式开启(存量集群还需显式重跑才切换) | ~~原为默认开启~~ —— 2026-09-24 改为默认关: 本项目的实际用法停在"阶段一"(VIP 上无流量、入口仍是首个 master), 默认开只是让每次部署多跑一遍昂贵且可能硬失败的 VIP 推导。开/关双向都有护栏与清盘路径, 见第 18 节 |
 | D3 | VIP 来源 | **自动推导 + 可显式覆盖** | 零配置可跑通;多集群共用网段时用 `K8S_API_VIP` 覆盖 |
-| D4 | 转发模式 | **纯故障切换**;`kube_vip_lb_enable: false` | ① `kube_vip_lb_fwdmethod` 的默认值 `local` 在内核里是 `ip_vs_null_xmit`(**不转发**),配了也没有任何负载均衡 —— 它只是让后端"登记上了";要真 LB 必须用 `masquerade`。② `masquerade` 有四个额外前提: privileged 容器 + `kube-vip-iptables` 镜像变体进离线资产 + kube-proxy `ipvs.excludeCIDRs` 与本项目**自动推导**的 VIP 长期保持一致 + 改宿主机 sysctl。第③条破坏"单一配置源":VIP 漂移后忘了同步排除段即**静默失效**。收益(API 请求三分摊)不足以抵消这些长期维护成本。详见 `docs/troubleshooting.md` 三.11 |
+| D4 | 转发模式 | **纯故障切换**;`kube_vip_lb_enable: false` | ① `kube_vip_lb_fwdmethod` 的默认值 `local` 在内核里是 `ip_vs_null_xmit`(**不转发**),配了也没有任何负载均衡 —— 它只是让后端"登记上了";要真 LB 必须用 `masquerade`。② `masquerade` 有四个额外前提: privileged 容器 + `kube-vip-iptables` 镜像变体进离线资产 + kube-proxy `ipvs.excludeCIDRs` 与本项目**自动推导**的 VIP 长期保持一致 + 改宿主机 sysctl。第③条破坏"单一配置源":VIP 漂移后忘了同步排除段即**静默失效**。收益(API 请求三分摊)不足以抵消这些长期维护成本。详见 `docs/troubleshooting.md` 三.9 |
 | D5 | 新集群路径 | **两阶段**(与存量集群同一套机制) | 用一次额外运行换掉第 7 节风险 R2 整条时序不确定性 |
 | D6 | 故障演练 | **verify 默认执行**,带自动恢复 | 漂移能力是这个方案唯一的核心价值,不实测等于没验证 |
 | D7 | 文档位置 | `docs/kube-vip-api-ha.md` | 与本仓库既有约定一致 |
@@ -229,9 +229,8 @@ KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"      # 留空=kube-vip 自动检测
 
 ### 5.2 三条硬性校验(运行期 + `check-modules` 静态各做一次)
 
-1. **互斥**: `KUBE_VIP_ENABLED=true` 与 `HAPROXY_ENABLED` / `KEEPALIVED_ENABLED`
-   同时为真 → **硬失败**。二者都在争 `loadbalancer_apiserver.address` 的解释权,
-   同时开是确定性配置冲突。
+1. ~~**互斥**: `KUBE_VIP_ENABLED=true` 与 `HAPROXY_ENABLED` / `KEEPALIVED_ENABLED` 同时为真 → 硬失败~~
+   **【2026-10-14 已随方案移除】** HAProxy/Keepalived 模块与开关整块删除, 本互斥规则不复存在(历史记录保留)。
 2. **地址隔离**: `K8S_API_VIP` 落在 `METALLB_POOL` 内 → **硬失败**。
    MetalLB 可能把 API VIP 分配给某个 Service,直接抢走控制平面入口。
 3. **可用性探测**(仅自动推导时): 候选地址需**同时**通过
@@ -263,7 +262,7 @@ KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"      # 留空=kube-vip 自动检测
 > **2026-09-23 补充 —— 部署侧写域名的几个地方也收敛了。** 上面讲的是 kubespray 侧。部署框架
 > 自己还有若干处会写 `k8s-api.cubestack.io` 的解析(`03_k8s_hosts`、`07_k8s_scale` 推给新节点、
 > `tools/node/sync-hosts.sh`、`tools/node/prepare-workers.sh`、`tools/lb/setup-api-expose.sh`、
-> `06_gpu_operator`、`07_gpu_lws`),原先是**一律写第一个 master** —— 与 kubespray 阶段二写入的
+> `06_gpu_operator` 等),原先是**一律写第一个 master** —— 与 kubespray 阶段二写入的
 > VIP **互相打架**(谁后跑谁生效),典型表现是"kube-vip 装好了,域名却还指着单台 master"。
 >
 > 现统一收敛到 `lib-common.sh` 的 **`api_entry_ip()`**: **VIP 已绑 → VIP,否则第一个 master**。
@@ -466,7 +465,7 @@ kube_apiserver_extra_args:
 > ⚠ 但这条"省一个镜像"的性质要看清: `local` 省下镜像的代价是**开不出负载均衡**
 > (内核里 `local` = `ip_vs_null_xmit`,不转发)。所以本项目实际是"选了不开 LB",
 > 而不是"用一个更省的姿势开了 LB"。若将来要开,`kube-vip-iptables:v${KUBE_VIP_VERSION}`
-> 必须同时进 `images.manifest` + `PRELOAD_IMAGE_PATTERNS`(见 `docs/troubleshooting.md` 三.11)。
+> 必须同时进 `images.manifest` + `PRELOAD_IMAGE_PATTERNS`(见 `docs/troubleshooting.md` 三.9)。
 
 ---
 
@@ -507,10 +506,10 @@ kube_apiserver_extra_args:
 
 ## 10. 模块关系与已知缺口
 
-### 10.1 与既有 LB 模块的关系
+### 10.1 与既有 LB 模块的关系【2026-10-14 已作废 —— 本节为历史记录】
 
-`01_env/05_lb_haproxy.sh` + `06_lb_keepalived.sh` **保留**,定位改为"外部 LB + VIP"
-用户的可选路径,与 kube-vip 二选一(由 5.2 第 1 条硬失败规则保证)。
+> ⚠ `01_env/05_lb_haproxy.sh` + `06_lb_keepalived.sh` 已于 2026-10-14 **整块移除**(采用该方案可能性不大);
+> 以下描述与 §5.2 第 1 条互斥规则均已不适用, API 入口高可用唯一方案 = kube-vip。
 
 ⚠ 顺带指出: `06_lb_keepalived.sh` 目前是**假 HA** —— `state MASTER` 写死、
 `virtual_router_id 51` 写死、只配置单实例,本质是"单机 VIP"而非高可用。
@@ -541,7 +540,7 @@ worker 角色),masters 只能通过全量 `k8s_deploy` 加入,而全量运行会
 | R4 | kube-vip 自动检测选错网卡(多网卡节点) | 中 | 提供 `KUBE_VIP_INTERFACE` 显式覆盖;verify ④ 把它变成可检测问题 |
 | R5 | ARP 模式的网络前提(交换机 ARP/ICMP 策略、DHCP snooping、DHCP 保留段) | 中 | `cluster.conf` 3.1 节已为 MetalLB 写明同类要求,可直接复用;VIP 必须排除在 DHCP 池外 |
 | R6 | 云环境免费 ARP 不可用 | 低 | 本方案面向裸金属 / VM 集群。BGP 模式(kubespray 亦支持:`kube_vip_bgp_*`)**预留但不实现** |
-| R7 | `lb_fwdmethod` 默认 `local` 下若误开 `lb_enable` | 低(**静默无效**,非致瘫) | 已定性(2026-09-22): 内核里 `local` = `ip_vs_null_xmit` → **零负载均衡且不报错**,`verify_kube_vip` 六项照样全绿;ipvs 模式集群上还会被 kube-proxy 30s 内删掉。D4 明确关闭,check-modules 第 ⑪ 项不校验此项(非必要)。**若要动 `lb_enable`,先读 `docs/troubleshooting.md` 三.11** |
+| R7 | `lb_fwdmethod` 默认 `local` 下若误开 `lb_enable` | 低(**静默无效**,非致瘫) | 已定性(2026-09-22): 内核里 `local` = `ip_vs_null_xmit` → **零负载均衡且不报错**,`verify_kube_vip` 六项照样全绿;ipvs 模式集群上还会被 kube-proxy 30s 内删掉。D4 明确关闭,check-modules 第 ⑪ 项不校验此项(非必要)。**若要动 `lb_enable`,先读 `docs/troubleshooting.md` 三.9** |
 
 ---
 

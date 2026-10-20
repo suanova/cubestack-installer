@@ -23,7 +23,16 @@
 #         否则后续 push 镜像的模块(gpu_operator/ceph/...)会 ImagePullBackOff 且难以定位。
 #     ⚠ 顺序保证: addon 阶段按文件序号执行 metallb→ceph→ceph_csi→local_path→registry;
 #       ceph/ceph_csi 模块已内置"等集群 Ready / CSI 就绪"的等待。本模块额外等 registry 自身 Ready。
-# 数据源: cluster.conf (REGISTRY_DOMAIN / REGISTRY_IP / REGISTRY_PORT / REGISTRY_STORAGE_CLASS / CEPH_ENABLED / NODES)
+#   · PVC 容量保障(2026-10-13 实机事故): kubespray 默认 registry_disk_size=10Gi, 连一轮 dev_lab
+#     (6 镜像 ≈ 47G)都放不下 —— 推到一半盘满后 registry 对**所有** push 返回 500
+#     ("no space left on device"), 表象是"第一个镜像推成功、其余全部失败"。kubespray 重装 apply
+#     不会让已存在的 PVC 变大 ⇒ 本模块对存量 PVC 幂等扩容到 REGISTRY_DISK_SIZE
+#     (默认 200Gi, 与 sync-addons-config.sh 写入 addons.yml 的值同一数据源)。
+#   · coredns 解析快照自愈(2026-10-13 实机): pod sandbox 创建期的 resolv.conf 快照若含 127.0.0.1
+#     (部署中途 resolved 动态文件瞬态) ⇒ coredns loop 插件探测打到 pod 内自己的 127.0.0.1:53 →
+#     误判回环 FATAL 无限重启; 本模块对"CrashLoopBackOff+plugin/loop"的 pod 重建一次即愈
+#     (新 sandbox 快照稳定后的文件; 实机双对照: 旧 sandbox 30 次崩溃 vs 新 pod 零重启)。
+# 数据源: cluster.conf (REGISTRY_DOMAIN / REGISTRY_IP / REGISTRY_PORT / REGISTRY_STORAGE_CLASS / REGISTRY_DISK_SIZE / CEPH_ENABLED / NODES)
 # ============================================================
 set -euo pipefail
 
@@ -86,9 +95,24 @@ bash "${SCRIPT_DIR}/tools/lb/deploy-registry.sh"
 #   `|| VAR=600` 永不执行 → VAR 从未赋值 → 后续裸引用 unbound(曾致模块在部署成功后崩溃)。
 REGISTRY_WAIT_SECONDS="${REGISTRY_WAIT_SECONDS:-600}"
 _READY=0
+_CSI_STALE_FIXED=0
 for _i in $(seq 1 $((REGISTRY_WAIT_SECONDS / 10))); do
     _pc="$( (SSH "${K} -n kube-system get pvc registry-pvc -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
     if [ -z "${_pc}" ] || [ "${_pc}" != "Bound" ]; then
+        # ★ 2026-10-19 实机: ceph-block SC 晚于 registry PVC 出现时, CSI 可能创建了 RBD 卷
+        #   但 PV 未绑定; 后续重试一直报 "Volume ID pvc-... already exists", PVC 永远 Pending。
+        #   一次性清理 rbd-pool 半成品镜像并重启 RBD CSI controller, 让 provisioner 重建。
+        #   ⚠ 必须**周期**检查(每 30s)而不是只在第 6 次看一次: 实机的 already-exists 事件在
+        #   等待约 4 分钟后才出现, 一次性检查会错过 → 600s 超时(2026-10-19 实机)。
+        if [ "${_CSI_STALE_FIXED}" = "0" ] && [ "${_i}" -ge 3 ] && [ $((_i % 3)) -eq 0 ]; then
+            _ev="$( (SSH "${K} -n kube-system describe pvc registry-pvc 2>/dev/null") || true )"
+            if printf '%s' "${_ev}" | grep -q 'already exists'; then
+                warn "  registry PVC CSI 半成品卷(already exists) → 清 rbd-pool + 重启 RBD CSI controller..."
+                SSH "timeout 60 ${K} -n rook-ceph exec deploy/rook-ceph-tools -- timeout 30 sh -c 'for i in \$(rbd ls -p rbd-pool 2>/dev/null); do rbd snap purge rbd-pool/\$i >/dev/null 2>&1 || true; rbd rm rbd-pool/\$i >/dev/null 2>&1 || true; done'" >/dev/null 2>&1 || true
+                SSH "${K} -n rook-ceph rollout restart deploy/rook-ceph.rbd.csi.ceph.com-ctrlplugin >/dev/null 2>&1" || true
+                _CSI_STALE_FIXED=1
+            fi
+        fi
         [ "$((_i % 6))" -eq 0 ] && say "  registry-pvc 未 Bound(当前 ${_pc:-<无>}, 等 ${REGISTRY_STORAGE_CLASS:-local-path} SC 供给), 等待第 ${_i}/$((REGISTRY_WAIT_SECONDS / 10)) 次 ..."
         sleep 10; continue
     fi
@@ -116,6 +140,92 @@ else
     err "  排查: kubectl -n kube-system get pvc,pods | grep registry(ceph-block: 先确认 ceph_csi 已建 SC ceph-block; 检查 rbd 卷创建, 见 docs/ceph-rook.md §8)"
     exit 1
 fi
+
+# ---------------- PVC 容量保障(存量集群幂等扩容; 2026-10-13 实机事故) ----------------
+# 事故链: kubespray registry_disk_size 默认仅 10Gi → dev_lab 的 jupyter-minimal(≈1.6G)推完后盘满,
+#   后续每个镜像(含 multus)的 blob 上传都被 registry 以 500 拒绝("no space left on device"),
+#   且 skopeo 整包重试必然再满 —— 表象极具误导性("registry 可达但全部 500")。
+# 契约: REGISTRY_DISK_SIZE(默认 200Gi, 与 sync-addons-config.sh 写入 addons.yml 的值同源)
+#   须 ≥ 实际所需(dev_lab ≈47G + metax ≈8G + 滚动更新冗余)。新建 PVC 由 addons.yml 直接声明;
+#   **存量/覆盖安装** 的 PVC 靠这里扩: 当前 spec < 目标 → patch 扩容并等 status.capacity 追平
+#   (csi-resizer → rook RBD 在线扩 + 节点在线扩 FS, 实测秒级)。
+# ⚠ 只比整数前缀(约定 "NNGi"); local-path 后端不支持扩容(本地目录不强制配额), 只提示不阻断。
+_DESIRED_SIZE="${REGISTRY_DISK_SIZE:-200Gi}"
+_CUR_SIZE="$( (SSH "${K} -n kube-system get pvc registry-pvc -o jsonpath='{.spec.resources.requests.storage}' 2>/dev/null" || true) )"
+case "${_CUR_SIZE}" in
+    ''|*[!0-9A-Za-z]*) ;;   # 拿不到/形态异常 → 跳过(不阻断; 容量问题会在 push 阶段显式暴露)
+    *)
+        case "${_DESIRED_SIZE%Gi}" in
+            ''|*[!0-9]*) warn "  REGISTRY_DISK_SIZE=${_DESIRED_SIZE} 形态异常(约定 NNGi), 跳过容量保障" ;;
+            *)
+                if [ "${_CUR_SIZE%Gi}" -lt "${_DESIRED_SIZE%Gi}" ] 2>/dev/null; then
+                    if [ "${REGISTRY_STORAGE_CLASS:-local-path}" = "local-path" ]; then
+                        warn "  registry-pvc 容量 ${_CUR_SIZE} < REGISTRY_DISK_SIZE=${_DESIRED_SIZE}(local-path 不支持在线扩容, 仅提示; 本地目录不强制配额, 节点盘需实际放得下)"
+                    else
+                        say "  registry-pvc 扩容: ${_CUR_SIZE} → ${_DESIRED_SIZE}(存量集群兼容; dev_lab 等大镜像需要, 防盘满 500)"
+                        if SSH "${K} -n kube-system patch pvc registry-pvc -p '{\"spec\":{\"resources\":{\"requests\":{\"storage\":\"${_DESIRED_SIZE}\"}}}}' >/dev/null 2>&1"; then
+                            _cap=""
+                            for _j in $(seq 1 18); do
+                                _cap="$( (SSH "${K} -n kube-system get pvc registry-pvc -o jsonpath='{.status.capacity.storage}' 2>/dev/null" || true) )"
+                                [ "${_cap}" = "${_DESIRED_SIZE}" ] && break
+                                sleep 10
+                            done
+                            if [ "${_cap}" = "${_DESIRED_SIZE}" ]; then
+                                ok "  registry-pvc 已扩容至 ${_DESIRED_SIZE}"
+                            else
+                                warn "  registry-pvc 扩容未在 180s 内完成(当前 capacity=${_cap:-<无>}); 通常稍后自愈, 可重跑本模块复查(kubectl -n kube-system get pvc registry-pvc)"
+                            fi
+                        else
+                            warn "  registry-pvc 扩容请求失败(检查 SC allowVolumeExpansion / PVC 事件; 手工: kubectl -n kube-system patch pvc registry-pvc -p '{\"spec\":{\"resources\":{\"requests\":{\"storage\":\"${_DESIRED_SIZE}\"}}}}')"
+                        fi
+                    fi
+                else
+                    say "  registry-pvc 容量 ${_CUR_SIZE}(≥ REGISTRY_DISK_SIZE=${_DESIRED_SIZE}), 无需扩容"
+                fi
+                ;;
+        esac
+        ;;
+esac
+
+# ---------------- coredns 解析快照自愈(2026-10-13 实机根因, 双重验证) ----------------
+# 根因链(实机抓包 + 对照实验闭环): kubelet 只在 **pod sandbox 创建时**写入 pod 的 /etc/resolv.conf,
+#   之后容器级重启永不更新。部署中途节点端 /run/systemd/resolve/resolv.conf(由 resolved 动态生成,
+#   其 FallbackDNS 含 upstream_dns_servers 的值)可能处于**瞬态**(含 127.0.0.1)。coredns 的 loop
+#   插件会把探测查询(HINFO <两个随机数>)发往 pod resolv.conf 里的**每个 nameserver**; 发往
+#   127.0.0.1:53, 在 pod 网络命名空间内 = **coredns 自己** → 收到自身探测 → 判回环 → FATAL 自杀。
+#   sandbox 复用 ⇒ 容器无限重启、永不恢复(实机: 30 次崩溃 vs 同配置新 pod 零重启健康 —— 差异
+#   仅在 sandbox 创建时刻)。稳定后新建的 pod(新 sandbox 读到干净文件)自然健康。
+# ⇒ 自愈: 对"CrashLoopBackOff/Error 且最近日志含 plugin/loop"的 coredns pod 重建一次(刷新快照)。
+# ⚠ 仅对明确 loop 症状动手; 重建后仍异常则只告警, 不与真实故障无限对抗。
+_COREDNS_REPAIRED=0
+for _p in $( (SSH "${K} -n kube-system get pods -l k8s-app=kube-dns -o jsonpath='{range .items[*]}{.metadata.name}={.status.containerStatuses[0].state.waiting.reason}{" "}{end}' 2>/dev/null" || true) ); do
+    _name="${_p%%=*}"; _why="${_p#*=}"
+    case "${_why}" in
+        *CrashLoopBackOff*|*Error*) ;;
+        *) continue ;;   # Running/其他状态不动
+    esac
+    if ( (SSH "${K} -n kube-system logs ${_name} --previous --tail=20 2>/dev/null" || true) ) | grep -q "plugin/loop"; then
+        warn "  coredns ${_name} 解析快照毒化(plugin/loop — sandbox 期 resolv.conf 含 127.0.0.1); 重建 pod 刷新快照 ..."
+        SSH "${K} -n kube-system delete pod ${_name} --wait=false >/dev/null 2>&1" || true
+        _COREDNS_REPAIRED=$((_COREDNS_REPAIRED + 1))
+    fi
+done
+if [ "${_COREDNS_REPAIRED}" -gt 0 ]; then
+    _ready=0
+    for _i in $(seq 1 12); do
+        _all="$( (SSH "${K} -n kube-system get pods -l k8s-app=kube-dns -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{" "}{end}' 2>/dev/null" || true) )"
+        case "${_all}" in
+            *false*|'') sleep 10 ;;
+            *) _ready=1; break ;;
+        esac
+    done
+    if [ "${_ready}" = "1" ]; then
+        ok "  coredns 重建后已全部 Ready(解析快照自愈完成)"
+    else
+        warn "  coredns 重建后 120s 内未全部 Ready; 若仍报 plugin/loop, 检查节点解析链(见模块头注释)"
+    fi
+fi
+unset _p _name _why _i _ready _all
 
 ok "内置 registry 配置完成"
 

@@ -11,7 +11,7 @@
 
 | 原则 | 说明 |
 |---|---|
-| **单一配置源** | 所有脚本只从 `config/cluster.conf` 读取配置(环境变量可覆盖),**不硬编码** IP/用户名/密码/路径/版本 |
+| **单一配置源** | 所有脚本只从 `config/cluster.conf` + `config/cluster.defaults.conf` 读取配置(环境变量可覆盖),**不硬编码** IP/用户名/密码/路径/版本 |
 | **模块即文件** | 每个部署功能 = `modules/NN_category_action.sh` 一个文件;新增模块 = 放一个文件,无需改任何注册表/入口 |
 | **自动发现** | `lib-module.sh` 扫描 `modules/*.sh`,按文件名序号排序、按头部元数据解析,`deploy-cluster.sh` 只做参数解析 + 调度 |
 | **薄封装复用** | 模块是"薄封装",具体逻辑复用 `tools/` 下工具脚本(`tools/k8s/gen-inventory.sh` / `tools/*/sync-*.sh` / `tools/*/setup-*.sh` / `cubestack-offline.sh`),不重复实现 |
@@ -29,9 +29,7 @@ deployments/scripts/
 ├── modules/                   # ★ 部署模块(按环境准备阶段组织子目录, 自动发现)
 │   ├── 01_env/                #   阶段一: 环境准备(发生在部署 kubespray 之前)
 │   │   ├── 01_vm_network.sh   #     格式: <序号>_<分类>_<动作>.sh
-│   │   ├── 04_harbor.sh       #     Harbor(集群外私有仓库, 部署前就绪)
-│   │   ├── 05_lb_haproxy.sh   #     HAProxy(集群部署前准备)
-│   │   └── 06_lb_keepalived.sh#     Keepalived(集群部署前准备)
+│   │   └── 04_harbor.sh       #     Harbor(集群外私有仓库, 部署前就绪)
 │   ├── 02_k8s/                #   阶段二: 离线部署 kubespray(不依赖 VM/裸金属)
 │   └── 03_addon/              #   阶段三: 附加组件(01~19 中间件, 20 起自研模块)
 ├── tools/                     # ★ 工具脚本(模块的底层实现, 按领域分目录)
@@ -47,15 +45,15 @@ deployments/scripts/
 
 | 目录 / PHASE | 含义 | 依赖 |
 |---|---|---|
-| `01_env` / `env` | 部署环境准备(宿主网络/SSH密钥/创建VM/Harbor/HAProxy/Keepalived) | 宿主机 |
+| `01_env` / `env` | 部署环境准备(宿主网络/SSH密钥/创建VM/Harbor) | 宿主机 |
 | `02_k8s` / `k8s` | 离线部署 kubespray(不依赖 VM 还是裸金属) | env 之后 |
 | `03_addon` / `addon` | 附加组件(集群部署后; 01~19 第三方中间件, 20 起 CubeStack 自研模块) | k8s 之后 |
 
-> 重要:Harbor(`04_harbor`)、HAProxy(`05_lb_haproxy`)、Keepalived(`06_lb_keepalived`)属于**环境准备阶段**,在部署 kubespray 之前完成——镜像仓库与 API 负载均衡/VIP 入口是集群部署的前置条件。
+> 重要:Harbor(`04_harbor`)属于**环境准备阶段**,在部署 kubespray 之前完成——镜像仓库是集群部署的前置条件。(原 `05_lb_haproxy`/`06_lb_keepalived` 方案已于 2026-10-14 整块移除, API 入口高可用改用 kube-vip, 见 `docs/kube-vip-api-ha.md`)
 >
 > 镜像仓库定位:集群外私有仓库 = **Harbor**(`01_env/04_harbor.sh`, 部署前于宿主机就绪);集群内 registry = kubespray addon(`03_addon/03_k8s_registry.sh`),**默认不部署**(`REGISTRY_ENABLED=0`)。原 `env_registry`(本地 docker registry)已移除,由 Harbor 承担。
 >
-> 序号约定:`03_addon/` 下 **01~19 为第三方中间件预留**(当前用到 01~11),**20 起为 CubeStack 自研模块**(起始 `20_cubestack_apps.sh`, 后续自研组件在 20 之后追加)。
+> 序号约定:`03_addon/` 下 **01~19 为第三方中间件预留**(当前用到 01~11),**20 起为 CubeStack 自研模块**(当前首个自研模块为 `25_cubestack_operator.sh`, 后续自研组件在 20 号段之后追加)。
 
 全阶段组件规划(P1/P2/P3)与进度追踪见 `docs/cluster-components-plan.md`。
 
@@ -77,10 +75,10 @@ modules/<NN_phase>/<NN>_<category>_<action>.sh
   - `k8s` — kubespray 部署相关(与 VM/裸金属无关)
   - `gpu` — GPU 组件
   - `lb` — 负载均衡/高可用(HAProxy/Keepalived)
-  - 其他:P1/P2/P3 组件用组件名作分类(如 `ceph`/`keycloak`/`lws`)
+  - 其他:P1/P2/P3 组件用组件名作分类(如 `ceph`/`keycloak`/`multus`)
 - `action`:模块动作(动词,如 `network`/`create`/`deploy`/`scale`/`registry`)。
 
-示例:`modules/01_env/01_vm_network.sh`、`modules/02_k8s/06_k8s_deploy.sh`、`modules/03_addon/07_gpu_lws.sh`。
+示例:`modules/01_env/01_vm_network.sh`、`modules/02_k8s/06_k8s_deploy.sh`、`modules/03_addon/09_multus.sh`。
 
 ### 2.2 模块元数据头(必填)
 
@@ -89,13 +87,13 @@ modules/<NN_phase>/<NN>_<category>_<action>.sh
 ```bash
 #!/bin/bash
 # ============================================================
-# MODULE: k8s_deploy          # 模块 key(缺省=文件名去掉 NN_ 前缀)
-# DESC: 部署 kubespray 集群   # 一句话描述(print_steps 显示)
-# PHASE: k8s                  # 阶段: env | k8s | addon
+# MODULE: ceph                # 模块 key(缺省=文件名去掉 NN_ 前缀)
+# DESC: 部署 Rook-Ceph 存储集群 # 一句话描述(print_steps 显示)
+# PHASE: addon                # 阶段: env | k8s | addon
 # DEFAULT: 0                  # 1=默认启用; 0=需 --enable / TOGGLE / --steps
 # REPEAT: 0                   # 1=可重复执行(每次执行且不写断点状态)
-# TOGGLE: K8S_ENABLED         # (可选) cluster.conf 变量名, 值为 true/1 时自动启用
-# REQUIRES: k8s_passwordless  # (可选) 依赖模块 key 列表(空格分隔), 执行前须已完成; 框架自动拓扑排序
+# TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED   # (可选) cluster.conf 变量名(空格分隔多变量=OR), 值为 true/1 时自动启用
+# REQUIRES: k8s_deploy        # (可选) 依赖模块 key 列表(空格分隔), 执行前须已完成; 框架自动拓扑排序
 # UNINSTALL: 1                # (可选) 声明该模块可被 cluster-teardown 反序优雅卸载
 # 说明: <详细说明, 可选>
 # ============================================================
@@ -139,7 +137,7 @@ load_config
 **凡安装 helm chart 的模块,其 chart 必须有一份 vendored 在 `deployments/cubestack-addon/<组件>/`
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
-模板(定位/安装 chart 的模块):`deployments/scripts/modules/03_addon/07_gpu_lws.sh` 与
+模板(定位/安装 chart 的模块):`deployments/scripts/modules/03_addon/02_ceph.sh` 与
 `06_gpu_operator.sh` 展示了 chart 路径定位与 `helm upgrade --install` 的完整写法。
 
 共享助手 `helm_chart_ensure`(用法见下面第 2 条)把"本地副本就绪 + digest 比对刷新"收敛到一处。
@@ -160,7 +158,7 @@ load_config
 3. **离线副本缺失 = 致命错误**(`err` + 退出),提示里必须给出获取方法;不要静默降级成"用线上那份"。
 4. **刷新走显式工具 + commit**,不要靠部署过程自动落盘:
    - chart:目前**没有**脚本化刷新工具 —— 手工 `helm pull` 覆盖 vendored 副本后 commit,
-     步骤示例见 `deployments/cubestack-addon/lws/CUBESTACK.md` 的"升级到新版本";
+     步骤示例: 手工 `helm pull` 覆盖 vendored 副本并同步 `<tgz>.digest` 边车;
    - 镜像:`tools/images/harbor-save-images.sh --group <组>`,源与命名由 `config/images.manifest` 统一声明。
 5. **`bash tools/check-modules.sh` 的第 ⑩ 项会强制校验这条**(行首是 helm 安装命令的模块,
    其引用的 `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`)。合入前必须全绿。
@@ -178,7 +176,7 @@ load_config
    `group` = **组件名**(与 `cubestack-addon/<组件>/`、模块 key 对齐),离线目录由 group 推导
    (见 `tools/images/lib-image-manifest.sh` 的 `image_group_dir()`;`k8s-base`/`ceph` 两组例外 → `kubespray/images/`)。
    ref 必须全限定(短名补 `docker.io/library/`),版本一律写 `${VAR}` 占位。
-2. **版本变量**:`XXX_IMAGE_VERSION` 集中放 `cluster.conf.example` 的「镜像版本(★ 升级入口)」节
+2. **版本变量**:`XXX_IMAGE_VERSION` 集中放 `cluster.defaults.conf` 的「镜像版本钉子(★ 升级入口)」节
    —— 升级只改这一处,清单 / CI / 离线包自动跟随。
 3. **建目录 + README**:`deployments/offline-files/<group>/README.md`,照抄
    `offline-files/rdma/README.md`(镜像 ref / 版本真相变量 / tar 命名 / 取镜像命令 / 谁消费 / 升级)。
@@ -201,9 +199,12 @@ load_config
 
 ### 3.1 规则
 
-- `config/cluster.conf` 是**唯一**配置入口,模板见 `config/cluster.conf.example`(真实配置含密码,已 gitignore)。
-- 所有变量写法:`VAR="${VAR:-default}"`(环境变量 > 配置文件 > 内置默认)。
-- 新增配置项流程:① 在 `cluster.conf.example`(及需要时 `.backup`)添加带注释的默认声明 → ② 相关脚本引用该变量 → ③ 如需同步到 kubespray group_vars,在 `sync-kubespray-config.sh` / `sync-addons-config.sh` 增加同步逻辑。
+- 配置分**两层(2026-10-15 拆分)**:
+  - `config/cluster.conf`(模板 `cluster.conf.example`; 真实配置含密码,已 gitignore)= **必改项 + 组件启停开关 + 高频变量**;
+  - `config/cluster.defaults.conf`(随仓库分发; 一般不改)= **高级/默认值层**(组件深度参数、离线路径、NTP/CIDR、镜像源、Ceph 全套…)。
+  - 加载顺序 = 主文件先、defaults 后;每个变量**只许有一个声明处**(check-modules ⑦-b 断言两文件变量集互斥)。
+- 所有变量写法:`VAR="${VAR:-default}"`(环境变量 > cluster.conf > cluster.defaults.conf)。
+- 新增配置项流程:① 判断归属(开关/必改/高频 → `cluster.conf.example`;其余 → `cluster.defaults.conf`)并加带注释的默认声明 → ② 相关脚本引用该变量 → ③ 如需同步到 kubespray group_vars,在 `sync-kubespray-config.sh` / `sync-addons-config.sh` 增加同步逻辑。
 
 ### 3.2 组件开关(推荐)
 
@@ -219,14 +220,12 @@ load_config
 | `DASHBOARD_ENABLED` | `false` | addons.yml | dashboard |
 | `CERT_MANAGER_ENABLED` | `false` | addons.yml | cert-manager |
 | `GATEWAY_API_ENABLED` | `false` | addons.yml | Gateway API |
-| `K8S_ENABLED` | `false` | `k8s_deploy` 模块 | 一键部署是否默认执行 kubespray |
-| `K8S_SCALE_ENABLED` | `false` | `k8s_scale` 模块 | 扩容 |
 | `GPU_OPERATOR_ENABLED` | `false` | `gpu_operator` 模块 | 沐曦 GPU Operator |
-| `LWS_ENABLED` | `false` | `gpu_lws` 模块 | LeaderWorkerSet |
-| `HAPROXY_ENABLED` | `false` | `lb_haproxy` 模块 | API 四层负载均衡(部署前准备) |
-| `KEEPALIVED_ENABLED` | `false` | `lb_keepalived` 模块 | API VIP 高可用(部署前准备) |
 
 > 镜像仓库双定位:集群外 = Harbor(`HARBOR_ENABLED`,唯一方案);集群内 = kubespray registry addon(`REGISTRY_ENABLED`,默认不部署)。
+> `k8s_deploy`(基座)无开关:恒随全量部署(默认/--with-k8s/--with-cubestack);`--steps` 单组件模式不含基座。
+> (2026-10-16 移除原 `K8S_ENABLED` —— 它实际不控制任何调度路径,旧 cluster.conf 残留该行无副作用。)
+> 扩容 `k8s_scale` 同样无开关: 仅经 `--with-scale` / `--steps k8s_scale` 触发(2026-10-16 移除 `K8S_SCALE_ENABLED`)。
 > addons.yml 的组件开关由 `sync-addons-config.sh` 从上述变量生成(幂等),其余组件配置(地址池/存储类等)保留在 addons.yml 手工维护。
 
 ---
@@ -241,13 +240,14 @@ load_config
 4. **实现逻辑**:复用现有工具脚本或写新逻辑(§2.3)。
    - 装 helm chart → chart 必须 vendored 到 `deployments/cubestack-addon/<组件>/`(§2.4,check-modules 第 ⑩ 项强制);
    - 拉容器镜像 → 必须登记 `config/images.manifest` + 建 `deployments/offline-files/<group>/`(含 README,§2.5)。
-5. **加开关**(可选):在 `cluster.conf.example` 加 `XXX_ENABLED` 变量,TOGGLE 指向它。
+5. **加开关**(可选):在 `cluster.conf.example`(常用组件开关)或 `cluster.defaults.conf`(子开关/细节开关)加 `XXX_ENABLED` 变量,TOGGLE 指向它(check-modules ⑦ 校验两文件之一)。
 6. **完成**:**无需改任何注册表** —— operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)即 operator),新增 operator 写 TOGGLE 即自动进入 `--steps`/`--enable` 调度。
 7. **登记(装进集群的组件)**:在安装成功点调用 `record_installed_component "<key>"` 登记(优雅覆盖用;写失败仅告警,不影响部署)。
 8. **声明可卸载(可卸载的组件)**:头部声明 `# UNINSTALL: 1` + 实现卸载分支(`CUBESTACK_MODULE_ACTION=uninstall`,位于 TOGGLE 检查之前;幂等/有界/告警不中止),供 cluster-teardown 反序优雅卸载 —— 设计见 docs/graceful-overwrite/design.md。
 
 > 验证:`bash deployments/scripts/tools/check-modules.sh`(静态校验, 必须 exit 0);
-> `sudo ./deploy-cluster.sh --list-steps` 应出现新模块(带 `依赖:xxx` 标注);
+> `sudo ./deploy-cluster.sh --list-steps` 应出现新模块(紧凑列表: 状态/↻/←N;
+> 完整 DESC/文件/依赖用 `--list-steps --verbose`);
 > `sudo ./deploy-cluster.sh --steps <key>` 可单独执行(--steps 精确模式: 只跑指定的模块 + REQUIRES 依赖, 不带出默认启用的其他 operator)。
 >
 > ⭐ 专项可执行流程见 `skills/cubestack-add-module/SKILL.md`(历史事故警示 + 测试用例)。
@@ -277,8 +277,7 @@ addon_stub "my_component" MY_COMPONENT_STEPS
 > 现有占位模块(伪代码, 已用 `addon_stub`, 按 `grep -rl addon_stub deployments/scripts/modules/` 核实):
 > - `01_env/`: `harbor`(集群外仓库, 宿主机部署)
 > - `03_addon/`: `keycloak` / `kueue` / `kubevirt` / `lustre_csi`
-> - `03_addon/20`: `cubestack_apps`(CubeStack 自研模块占位, 20 起为自研序号)
-> 其余模块(gpu_operator / gpu_lws / k8s_registry / ceph / ceph_csi 等)已是真实实现。
+> 其余模块(gpu_operator / k8s_registry / ceph / ceph_csi 等)已是真实实现。
 > 每个占位模块头部 `TODO` 注释即实现指引。
 
 ### 4.2 组件功能验证模块模板(verify_<组件>.sh)
@@ -318,10 +317,10 @@ trap cleanup EXIT   # 失败也清理测试资源
 
 ```bash
 sudo ./deploy-cluster.sh                                # 默认 env+k8s 基础模块
-sudo ./deploy-cluster.sh --with-k8s                     # 仅 kubespray 基座(k8s + metallb/local-path/registry)= --enable k8s
+sudo ./deploy-cluster.sh --with-k8s                     # 仅 kubespray 基座(k8s + metallb/local-path/registry)
 sudo ./deploy-cluster.sh --with-cubestack               # 基座 + cluster.conf 中 XXX_ENABLED=true 的 operator(以 cluster.conf 为主)
 sudo ./deploy-cluster.sh --with-scale                   # 扩容
-sudo ./deploy-cluster.sh --steps k8s_deploy,lb_haproxy  # 只跑指定模块(旧名自动映射)
+sudo ./deploy-cluster.sh --steps k8s_deploy,k8s_ntp  # 只跑指定模块(旧名自动映射)
 sudo ./deploy-cluster.sh --skip k8s_hosts --with-cubestack  # 跳某模块的全量部署(k8s_hosts 为 no-op, 可省略)
 sudo ./deploy-cluster.sh --phase k8s                    # 仅 k8s 阶段
 sudo ./deploy-cluster.sh --steps gpu_operator          # 立即部署某个 operator(自动带基座, 只部署指定的)

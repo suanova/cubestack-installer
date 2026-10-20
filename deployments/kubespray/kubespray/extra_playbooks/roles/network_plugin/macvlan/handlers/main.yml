@@ -1,0 +1,13 @@
+---
+- name: Macvlan | reload network
+  service:
+    # noqa: jinja[spacing]
+    name: >-
+      {% if ansible_facts['os_family'] == "RedHat" -%}
+      network
+      {%- elif ansible_facts['distribution'] == "Ubuntu" and ansible_facts['distribution_release'] == "bionic" -%}
+      systemd-networkd
+      {%- endif %}
+    state: restarted
+  when: ansible_facts['os_family'] != "Flatcar" and kube_network_plugin not in ['calico']
+  listen: Macvlan | restart network

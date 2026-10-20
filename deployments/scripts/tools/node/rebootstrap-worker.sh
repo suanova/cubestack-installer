@@ -33,7 +33,7 @@ done
 
 say "从 ${FIRST_MASTER}(${FIRST_MASTER_IP}) 获取 kubeadm join 命令 ..."
 JOIN_CMD=""
-ssh ${SSH_OPTS} -o BatchMode=yes "${FIRST_MASTER_USER:-ubuntu}@${FIRST_MASTER_IP}" \
+ssh ${SSH_OPTS} -o BatchMode=yes "${FIRST_MASTER_USER:-${SSH_USER:-ubuntu}}@${FIRST_MASTER_IP}" \
     "sudo kubeadm token create --print-join-command 2>/dev/null" > /tmp/cubestack-join-cmd.txt 2>/dev/null || { err "生成 join token 失败"; exit 1; }
 JOIN_CMD="$(cat /tmp/cubestack-join-cmd.txt)"
 rm -f /tmp/cubestack-join-cmd.txt
@@ -58,6 +58,7 @@ for line in "${NODES[@]:-}"; do
     say "── [${NODE_HOSTNAME}](${NODE_IP}) 清理旧状态 + kubeadm join ..."
 
     # scp 远端脚本
+    ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" "sudo rm -f /tmp/rebootstrap-remote.sh" >/dev/null 2>&1 || true   # 清陈旧目标(fs.protected_regular)
     scp ${SSH_OPTS} -o BatchMode=yes "${REMOTE_SCRIPT}" "${NODE_USER}@${NODE_IP}:/tmp/rebootstrap-remote.sh" >/dev/null 2>&1 || { warn "  scp 脚本失败,跳过"; continue; }
 
     # 用 JOIN_CMD 环境变量传递, root 执行远端脚本(避免 ssh 字符串转义问题)
