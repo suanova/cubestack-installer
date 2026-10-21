@@ -293,7 +293,7 @@ for COL in ${COLLECTIONS}; do
     # ④ 校验
     say "[4/4] 校验(本地/远端 tar + chart 数对照)..."
     L_N="$(_local_tarn "${STATE_SUB}")"
-    L_C="$(_local_chartn "${STATE_SUB}")"
+    L_C="$(_local_chartn "${STATE_SUB}/charts")"
     R_N="$("${MC}" ls -r "${REMOTE}" 2>/dev/null | command grep -v '/\.' | command grep -cE '\.tar(\.gz)?$' || true)"
     R_C="$("${MC}" ls -r "${REMOTE}" 2>/dev/null | command grep -v '/\.' | command grep -cE '\.tgz$' || true)"
     say "  本地 tar=${L_N} chart=${L_C}  远端 tar=${R_N} chart=${R_C}"

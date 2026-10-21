@@ -149,6 +149,9 @@ chk_contains "缺 chart 硬失败" 'if [ ! -f "${CHART_TGZ}" ]' "${MOD}"
 chk_not_contains "已删除 _legacy-readmes 处理" '_legacy-readmes' "${MOD}"
 chk_contains "离线包刷新提示走同步工具" 'cubestack-platform-sync.sh --collection cubestack-operator' "${LIB}"
 chk_contains "helm_chart_ensure 按路径区分提示" '*/deployments/offline-files/*' "${LIB}"
+SYNC="${REPO_ROOT}/deployments/scripts/tools/images/cubestack-platform-sync.sh"
+chk_contains "chart 计数扫描 charts/" 'L_C="$(_local_chartn "${STATE_SUB}/charts")"' "${SYNC}"
+chk_contains "镜像保鲜失败不发布" '镜像保鲜失败, 跳过 chart 刷新与上传' "${SYNC}"
 
 echo ""
 if [ "${fail}" = "0" ]; then
