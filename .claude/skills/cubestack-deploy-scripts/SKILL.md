@@ -386,7 +386,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
 **窄例外**:`cubestack-operator` 的 chart 随离线包分发,平铺在
-`deployments/offline-files/cubestack-operator/` 顶层(与镜像 tar 同目录),`.tgz`/`.digest` 不入 git。
+`deployments/offline-files/cubestack-operator/charts/`(与镜像 tar 同集合),`.tgz`/`.digest` 不入 git。
 模块用 `CUBESTACK_OPERATOR_CHART_DIR` > 离线包目录 > 旧 `cubestack-addon/` 的优先级解析;
 `check-modules.sh` ⑩ 识别该落点(要求 README 被 git 跟踪)。其它组件仍按下述规则。
 

@@ -13,7 +13,7 @@
 #   ⑤ 离线 loop 把 **operator 镜像** 的 digest 写入 _OPERATOR_DIGEST
 #   ⑥ 冒烟 CR 显式全禁用 + retain(不继承默认组件/不卸载真实资源)
 #   ⑦ 默认保留 chart 的 8 个 model bundles + modelBundles 开启(开关默认 true, 仅显式 false 分支裁剪, 非法值报错)
-#   ⑧ chart 随离线包分发: 平铺落点 / 显式覆盖 / legacy fallback / 缺 chart 硬失败
+#   ⑧ chart 随离线包分发: charts/ 落点 / 显式覆盖 / legacy fallback / 缺 chart 硬失败
 # 用法: bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
 # ============================================================
 set -uo pipefail
@@ -103,7 +103,7 @@ _CHART_CFG="$(
 CHART_REF_T="${_CHART_CFG%%$'\t'*}"
 CHART_VER_T="${_CHART_CFG#*$'\t'}"
 CHART_NAME_T="$(basename "${CHART_REF_T}")"
-OFFLINE_CHART_DIR="${REPO_ROOT}/deployments/offline-files/cubestack-operator"
+OFFLINE_CHART_DIR="${REPO_ROOT}/deployments/offline-files/cubestack-operator/charts"
 LEGACY_CHART_DIR="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator"
 CHART_DIR="${OFFLINE_CHART_DIR}"
 # 与模块同口径: 离线包优先, 旧路径只作 fallback
@@ -137,10 +137,12 @@ else
     echo "  SKIP 未找到 chart tgz(干净 checkout / 未备料属预期缺省)"
 fi
 
-echo "== ⑧ chart 随离线包分发(平铺) =="
+echo "== ⑧ chart 随离线包分发(charts/) =="
 LIB="${REPO_ROOT}/deployments/scripts/lib-common.sh"
 chk_contains "显式 chart 目录覆盖" 'CUBESTACK_OPERATOR_CHART_DIR' "${MOD}"
-chk_contains "主落点 = 离线包目录" 'PRIMARY_CHART_DIR="${OFFLINE_DIR}"' "${MOD}"
+chk_contains "主落点 = 离线包 charts/" 'PRIMARY_CHART_DIR="${OFFLINE_DIR}/charts"' "${MOD}"
+chk_contains "组件扫描跳过 charts" '"charts" ] && continue' "${MOD}"
+chk_contains "显式组件列表拒绝 charts" 'CUBESTACK_OPERATOR_COMPONENTS=charts 无效' "${MOD}"
 chk_contains "旧路径 fallback" 'LEGACY_CHART_DIR=' "${MOD}"
 chk_contains "路径解析函数" '_resolve_chart_dir' "${MOD}"
 chk_contains "缺 chart 硬失败" 'if [ ! -f "${CHART_TGZ}" ]' "${MOD}"

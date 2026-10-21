@@ -138,7 +138,7 @@ load_config
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
 **窄例外**:`cubestack-operator` 的 chart 随离线包分发,放在
-`deployments/offline-files/cubestack-operator/` 顶层(与组件镜像 tar 同目录),`.tgz`/`.digest`
+`deployments/offline-files/cubestack-operator/charts/`(与组件镜像 tar 同集合),`.tgz`/`.digest`
 不入 git,由内网同步机上传 MinIO。该例外需满足:模块显式引用该目录、目录下 `README.md` 被 git 跟踪;
 `check-modules.sh` ⑩ 按此识别。
 
@@ -199,7 +199,7 @@ operator 模块与 NVIDIA GPU operator 模块均调用它 —— 新模块**应�
    校验:`bash tools/images/check-image-manifest.sh`(格式/变量/重复;`--harbor` 额外比对漂移)。
 
 > 与 §2.4 的分工:chart 通常是**随 git 入仓**的 vendored 副本(`cubestack-addon/`);
-> operator chart 是文档化的例外,随离线包(`offline-files/cubestack-operator/`)分发。
+> operator chart 是文档化的例外,随离线包(`offline-files/cubestack-operator/charts/`)分发。
 > 镜像 tar 是**不入仓**的大文件(只登记 + 备料,`offline-files/`)。
 > 共同点:**首次就把资产放到约定目录**,不许靠部署过程自动落盘。
 

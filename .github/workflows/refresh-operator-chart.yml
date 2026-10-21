@@ -4,7 +4,7 @@ name: Refresh operator chart in MinIO
 # cubestack-operator 的 helm chart 变化后, 把最新 chart 上传到 MinIO 离线包。
 #
 # 为什么不再重建 CLI 镜像: chart 已改为随离线包分发
-#   (offline-files/cubestack-operator/ 顶层), CLI 镜像不再包含它。
+#   (offline-files/cubestack-operator/charts/), CLI 镜像不再包含它。
 #   chart 与组件镜像 tar 同目录, 部署机用 fetch-offline-from-minio.sh 一起取回。
 #
 # 触发:
@@ -83,7 +83,7 @@ jobs:
           done
           [ "${missing}" = "0" ] || exit 1
           echo "chart=${CHART_REF} version=${CHART_VERSION}"
-          echo "minio=${MINIO_BUCKET}/${MINIO_REMOTE_DIR}/cubestack-operator/"
+          echo "minio=${MINIO_BUCKET}/${MINIO_REMOTE_DIR}/cubestack-operator/charts/"
 
       - name: Setup helm
         uses: azure/setup-helm@v4
@@ -134,7 +134,7 @@ jobs:
             "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" >/dev/null
           mc "${mc_args[@]}" mb --ignore-existing "cubestack-chart/${MINIO_BUCKET}" >/dev/null
 
-          remote="cubestack-chart/${MINIO_BUCKET}/${MINIO_REMOTE_DIR}/cubestack-operator"
+          remote="cubestack-chart/${MINIO_BUCKET}/${MINIO_REMOTE_DIR}/cubestack-operator/charts"
           rdig="$(mc "${mc_args[@]}" cat "${remote}/${CHART_FILE}.digest" 2>/dev/null | tr -d '[:space:]' || true)"
 
           action=upload

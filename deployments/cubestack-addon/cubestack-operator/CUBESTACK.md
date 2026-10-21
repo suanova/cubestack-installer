@@ -3,7 +3,7 @@
 本目录**不再保存 chart**。`cubestack-operator-chart-*.tgz` 与 `.tgz.digest` 已迁移到:
 
 ```
-deployments/offline-files/cubestack-operator/
+deployments/offline-files/cubestack-operator/charts/
 ```
 
 ## 为什么
@@ -24,7 +24,7 @@ bash deployments/scripts/tools/images/cubestack-platform-sync.sh \
 
 # 手工
 helm pull oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart \
-  --version 1.0.0-latest -d deployments/offline-files/cubestack-operator
+  --version 1.0.0-latest -d deployments/offline-files/cubestack-operator/charts
 # 把 helm 输出的 "Digest:" 写入 <tgz>.digest —— 不要用 sha256sum
 ```
 
@@ -34,7 +34,7 @@ helm pull oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart \
 
 ```
 CUBESTACK_OPERATOR_CHART_DIR
-  > offline-files/cubestack-operator/
+  > offline-files/cubestack-operator/charts/
   > 本目录
 ```
 

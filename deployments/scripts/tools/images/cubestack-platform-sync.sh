@@ -7,7 +7,7 @@
 #   若组织的 GitHub 托管 runner 可访问 MinIO(现有 refresh-*.yml 即走这条通路), 也可由 CI 执行;
 #   两者产出同一份离线包, 选哪条取决于网络与凭据策略。
 # 集合(collections; 每个 = offline-files/<集合>/ 目录 + 其 image-list.tsv 清单):
-#   · cubestack-operator  平台 Operator 与各组件镜像(37 件)+ operator helm chart(顶层 tgz)
+#   · cubestack-operator  平台 Operator 与各组件镜像(37 件)+ operator helm chart(charts/ 子目录)
 #   · model-collection    模型推理镜像 sglang / vllm-metax(6 件 ≈95G, 大件建议 .tar.gz)
 #   · dev-lab             开发镜像 cpu / maca / cuda 家族(3 件; 顶层平铺)
 #   默认全部处理; --collection 可只跑其中若干(逗号/空格分隔)。
@@ -141,7 +141,7 @@ mkdir -p "${MC_CONFIG_DIR}"
 
 # 本地产出清单计数(.tar 与 .tar.gz 都算; 排除隐藏目录)
 _local_tarn() { find "$1" \( -name '*.tar' -o -name '*.tar.gz' \) -not -path '*/.*' 2>/dev/null | wc -l; }
-# operator 集合顶层平铺一个 chart tgz(随镜像 tar 一起走); 其它集合为 0
+# operator 集合 charts/ 下的 chart tgz(随镜像 tar 一起走); 其它集合为 0
 _local_chartn() { find "$1" -maxdepth 1 -name '*.tgz' -not -path '*/.*' 2>/dev/null | wc -l; }
 
 # ---------- operator chart 保鲜(仅 cubestack-operator 集合) ----------
@@ -150,11 +150,12 @@ _local_chartn() { find "$1" -maxdepth 1 -name '*.tgz' -not -path '*/.*' 2>/dev/n
 _HELM_REGISTRY_TMP=""
 _cleanup_helm_cfg() { [ -n "${_HELM_REGISTRY_TMP}" ] && rm -f "${_HELM_REGISTRY_TMP}" || true; }
 trap _cleanup_helm_cfg EXIT
-_sync_operator_chart() {   # <state_sub>
+_sync_operator_chart() {   # <chart_dir>
     local dir="$1"
     local ref="${CUBESTACK_OPERATOR_CHART_REF:-oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart}"
     local ver="${CUBESTACK_OPERATOR_CHART_VERSION:-1.0.0-latest}"
     local name tgz dgfile host user pass tmpd out pulled rdig ldig
+    mkdir -p "${dir}"
     name="$(basename "${ref}")"
     tgz="${dir}/${name}-${ver}.tgz"
     dgfile="${tgz}.digest"
@@ -250,18 +251,23 @@ for COL in ${COLLECTIONS}; do
     if [ -f "${_rm_src}" ] && [ ! "${_rm_src}" -ef "${STATE_SUB}/README.md" ]; then
         cp -f "${_rm_src}" "${STATE_SUB}/README.md" || warn "  README 复制失败(不阻断): ${_rm_src}"
     fi
+    _rm_charts="${REPO_SUB}/charts/README.md"
+    if [ -f "${_rm_charts}" ] && [ ! "${_rm_charts}" -ef "${STATE_SUB}/charts/README.md" ]; then
+        mkdir -p "${STATE_SUB}/charts"
+        cp -f "${_rm_charts}" "${STATE_SUB}/charts/README.md" || warn "  charts/README 复制失败(不阻断): ${_rm_charts}"
+    fi
 
-    # ②b operator chart 保鲜(源=Harbor OCI, 落点=本集合顶层; 失败则整集合不上传)
+    # ②b operator chart 保鲜(源=Harbor OCI, 落点=本集合 charts/; 失败则整集合不上传)
     if [ "${COL}" = "cubestack-operator" ]; then
-        say "[2b/4] operator chart 保鲜(Harbor → 离线包顶层)..."
-        if ! _sync_operator_chart "${STATE_SUB}"; then
+        say "[2b/4] operator chart 保鲜(Harbor → 离线包 charts/)..."
+        if ! _sync_operator_chart "${STATE_SUB}/charts"; then
             RC+=1; SUMMARY+=("${COL}: 失败(chart)"); continue
         fi
     fi
 
     # ③ 上传(防呆: --prune 且本地 0 个 tar ⇒ 拒绝, 防清空远端)
     L_PRE="$(_local_tarn "${STATE_SUB}")"
-    L_PRE_C="$(_local_chartn "${STATE_SUB}")"
+    L_PRE_C="$(_local_chartn "${STATE_SUB}/charts")"
     if [ "${L_PRE}" = "0" ]; then
         if [ "${PRUNE}" = "1" ]; then
             err "  集合 ${COL} 状态目录无任何 tar 且给了 --prune —— 拒绝上传(会清空远端)"

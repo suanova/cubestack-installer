@@ -288,22 +288,22 @@ while IFS= read -r -d '' f; do
         fi
         [ "${hit}" = "1" ] && break
     done <<< "${cands}"
-    # 离线包分发的窄例外(仅 cubestack-operator): 集合目录存在且 README 被 git 跟踪 ⇒ 视为合法落点。
-    # 本地 tgz 不入 git, CI 干净 checkout 不要求它存在(部署前由 fetch/同步机备料)。
+    # 离线包分发的窄例外(仅 cubestack-operator): 集合的 charts/ 存在且 README 被 git 跟踪
+    # ⇒ 视为合法落点。本地 tgz 不入 git, CI 干净 checkout 不要求它存在(部署前由 fetch/同步机备料)。
     # 用 CUBESTACK_OPERATOR_CHART_DIR 作为门禁, 避免其它模块因为引用了某个 offline-files 目录而误判。
     _bundle=0
     if [ "${hit}" = "0" ] && grep -q 'CUBESTACK_OPERATOR_CHART_DIR' "$f"; then
         while IFS= read -r oc; do
             [ -z "${oc}" ] && continue
-            [ -d "${REPO_DIR}/deployments/offline-files/${oc}" ] || continue
+            [ -d "${REPO_DIR}/deployments/offline-files/${oc}/charts" ] || continue
             if git -C "${REPO_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
                 if git -C "${REPO_DIR}" ls-files --error-unmatch \
-                       "deployments/offline-files/${oc}/README.md" >/dev/null 2>&1; then
+                       "deployments/offline-files/${oc}/charts/README.md" >/dev/null 2>&1; then
                     _bundle=1; break
                 fi
             else
                 # CLI 容器内可能没有 .git; 以 README 实文件存在为准
-                [ -f "${REPO_DIR}/deployments/offline-files/${oc}/README.md" ] && { _bundle=1; break; }
+                [ -f "${REPO_DIR}/deployments/offline-files/${oc}/charts/README.md" ] && { _bundle=1; break; }
             fi
         done <<< "${ocands}"
     fi

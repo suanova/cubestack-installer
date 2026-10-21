@@ -25,14 +25,14 @@
 #               **同样恒 pullPolicy=Always**(2026-10-19 用户口径: 每次都从 registry 重新解析 tag);
 #               CR 注入 registry 前缀 + 清 imagePullSecrets + digest podAnnotations 钉注。
 #  · chart 来源(需求 2): oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart,
-#     离线副本 = deployments/offline-files/cubestack-operator/<chart>-<版本>.tgz(+ .digest 边车),
+#     离线副本 = deployments/offline-files/cubestack-operator/charts/<chart>-<版本>.tgz(+ .digest 边车),
 #     随离线包(MinIO)分发, 与组件镜像 tar 同目录。安装**恒用这份本地副本** —— 线上拉到的东西
 #     不直接装(见 scripts-development-spec §2.4)。旧路径 cubestack-addon/ 仅作一个版本的只读 fallback。
 #   · 镜像清单(需求 4): **从 chart 渲染结果动态提取**(不写死清单); 逐个推入集群内置 registry。
 #     离线 tar 目录 = deployments/offline-files/cubestack-operator/(联网机用
 #     tools/images/harbor-save-images.sh --group cubestack-operator 生成**本体**)。
 #   ★ 2026-10-16 起平台组件 tar 按组件分子目录(offline-files/cubestack-operator/<组件>/,
-#     组件名 = CR spec.components; 顶层 = operator 本体/历史平铺); 单独更新某组件时可用
+#     组件名 = CR spec.components; 顶层 = operator 本体; charts/ = helm chart, 非组件); 单独更新某组件时可用
 #     CUBESTACK_OPERATOR_COMPONENTS="<组件>" 只推它的镜像(见 [4b/6] 与目录 README)。
 #   · 镜像拉取(需求 5): 节点**只从集群内置 registry 拉取**(--set image.repository=
 #     <REGISTRY_DOMAIN>:<port>/suanova-private/cubestack-operator), 部署时节点不访问 Harbor。
@@ -209,9 +209,9 @@ IMG_PULL_POLICY="Always"   # 2026-10-19 用户口径: 离线/在线都恒 Always
                            # CUBESTACK_OPERATOR_IMAGE_PULL_POLICY 保留兼容但不再生效(见 cluster.defaults.conf)。
 PIN_DIGEST="${CUBESTACK_OPERATOR_PIN_IMAGE_DIGEST:-true}"
 OFFLINE_DIR="${CUBESTACK_OPERATOR_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/cubestack-operator}"
-# chart 跟随离线包分发: 默认与组件镜像 tar 平铺在同一目录; 旧路径只读 fallback 保留一个版本。
+# chart 跟随离线包分发: 默认在离线包的 charts/ 子目录; 旧路径只读 fallback 保留一个版本。
 EXPLICIT_CHART_DIR="${CUBESTACK_OPERATOR_CHART_DIR:-}"
-PRIMARY_CHART_DIR="${OFFLINE_DIR}"
+PRIMARY_CHART_DIR="${OFFLINE_DIR}/charts"
 LEGACY_CHART_DIR="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator"
 CHART_DIR=""
 CHART_SOURCE=""
@@ -266,7 +266,7 @@ case "${SYNC_MODE}" in
     *) err "CUBESTACK_OPERATOR_CHART_SYNC 仅支持 auto|online|offline(当前=${SYNC_MODE})"; exit 1 ;;
 esac
 
-# chart 目录解析: 默认平铺在离线包目录(与组件镜像 tar 同目录); 旧 cubestack-addon 路径
+# chart 目录解析: 默认在离线包的 charts/(与组件镜像 tar 同集合); 旧 cubestack-addon 路径
 # 仅作一个版本的只读 fallback。显式 CUBESTACK_OPERATOR_CHART_DIR 优先且不回退(隐藏配置错误更糟)。
 _resolve_chart_dir() {
     if [ -n "${EXPLICIT_CHART_DIR}" ]; then
@@ -539,8 +539,8 @@ done
 # assets/charts 的渲染对账而来, 清单与维护方法见 offline-files/cubestack-operator/README.md)。
 # ★ 2026-10-16 目录分类: 组件 tar 按平台组件分子目录(offline-files/cubestack-operator/<组件>/,
 #   组件名 = CR spec.components 的键: lws / envoy-gateway / controller-manager / prometheus /
-#   perses / cuberouter / bmc / cubepilot / portal); **顶层** = operator 本体镜像与 chart(平铺;
-#   chart 是 .tgz, 不会进入下面的 *.tar 扫描)。
+#   perses / cuberouter / bmc / cubepilot / portal); **顶层** = operator 本体镜像;
+#   **charts/** = operator helm chart(.tgz), 不是平台组件, 扫描时显式跳过。
 #   过滤: CUBESTACK_OPERATOR_COMPONENTS="cubepilot,prometheus" → 只推列出的组件子目录
 #   (更新某个 operator 后单独推送其镜像的入口; 组件名不存在会 err 并列出可用目录)。
 # 目标映射(与 [3/6] 的 CR 两条前缀注入一一对应):
@@ -554,9 +554,11 @@ if [ "${CR_ENABLED}" = "true" ]; then
     if [ -n "${CUBESTACK_OPERATOR_COMPONENTS:-}" ]; then
         for _c in ${CUBESTACK_OPERATOR_COMPONENTS//,/ }; do
             [ -n "${_c}" ] || continue
+            # charts/ 放 operator helm chart, 不是平台组件; 误选时给明确错误
+            [ "${_c}" = "charts" ] && { err "CUBESTACK_OPERATOR_COMPONENTS=charts 无效: charts/ 是 operator chart 目录, 不是平台组件"; exit 1; }
             [ -d "${OFFLINE_DIR}/${_c}" ] || {
                 err "CUBESTACK_OPERATOR_COMPONENTS 指定了不存在的组件: ${_c}"
-                err "  可用组件(子目录): $(cd "${OFFLINE_DIR}" 2>/dev/null && ls -d */ 2>/dev/null | tr -d '/' | tr '\n' ' ')"
+                err "  可用组件(子目录): $(cd "${OFFLINE_DIR}" 2>/dev/null && ls -d */ 2>/dev/null | tr -d '/' | grep -vx 'charts' | tr '\n' ' ')"
                 exit 1
             }
             for _t in "${OFFLINE_DIR}/${_c}"/*.tar; do [ -f "${_t}" ] && _cand_tars+=("${_t}"); done
@@ -566,6 +568,8 @@ if [ "${CR_ENABLED}" = "true" ]; then
         for _t in "${OFFLINE_DIR}"/*.tar; do [ -f "${_t}" ] && _cand_tars+=("${_t}"); done
         for _d in "${OFFLINE_DIR}"/*/; do
             [ -d "${_d}" ] || continue
+            # charts/ 只放 helm chart(.tgz), 不是平台组件; 跳过, 避免被当成空组件
+            [ "$(basename "${_d}")" = "charts" ] && continue
             for _t in "${_d}"*.tar; do [ -f "${_t}" ] && _cand_tars+=("${_t}"); done
         done
         [ "${#_cand_tars[@]}" -gt 0 ] || warn "  ⚠ 未找到任何组件 tar(检查 ${OFFLINE_DIR}/<组件>/ 与顶层 *.tar)"

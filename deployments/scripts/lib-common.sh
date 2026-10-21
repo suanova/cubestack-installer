@@ -445,7 +445,7 @@ find_offline_tar() {
 # deployments/cubestack-addon/<组件>/ 下有一份随 git 分发的离线副本**(.tgz 或解包源码目录),
 # 且**安装一律用这份本地副本** —— 线上拉到的东西不直接装。缺了它, 私服/上游一抖动就装不上
 # (曾有模块就是这样: 回退代码写好了, 却压根没有可回退的文件)。
-# 窄例外: cubestack-operator 的 chart 随离线包分发(offline-files/cubestack-operator/*.tgz),
+# 窄例外: cubestack-operator 的 chart 随离线包分发(offline-files/cubestack-operator/charts/*.tgz),
 #   tgz/digest 不入 git, 由内网同步机上传播; 本助手通过传入路径自然支持, 不另开分支。
 #
 # 本助手把"本地副本就绪"这件事收敛到一处:

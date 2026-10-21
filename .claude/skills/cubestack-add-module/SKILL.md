@@ -85,7 +85,7 @@ init_remote_kubectl || exit 1
 - ⚠ **helm chart 必须自备离线副本(规则 7,强制)**: 模块只要装 chart,该 chart 就得 vendored 在
   `deployments/cubestack-addon/<组件>/` 下并随 git 分发,安装时**恒用这份本地副本**(在线只用于比对刷新)。
   做法见 §步骤 3.1;漏了会被 `check-modules.sh` 第 ⑩ 项拦下。
-  **窄例外**: `cubestack-operator` 的 chart 随离线包平铺在 `offline-files/cubestack-operator/` 顶层,
+  **窄例外**: `cubestack-operator` 的 chart 随离线包放在 `offline-files/cubestack-operator/charts/`,
   `.tgz`/`.digest` 不入 git;新组件不要照抄这个例外,除非同样由内网同步同步到 MinIO。
 - ⚠ **镜像必须登记 + 首建离线目录(规则 8,强制)**: 模块要拉的镜像登记到 `deployments/config/images.manifest`
   (`group` = 组件名),并建 `deployments/offline-files/<group>/`(**带 README.md**,否则空目录进不了 git)。

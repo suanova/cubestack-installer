@@ -8,7 +8,7 @@ CubeStack 平台 Operator **及其平台组件**的离线资产(2026-10-08 起�
 | 路径 | 内容 | 平台组件(`CubeStackCluster.spec.components`) |
 |---|---|---|
 | `<上游ref>.tar`(**顶层**) | **operator 本体**(滚动 tag; `harbor-save-images.sh --group cubestack-operator` 生成) | —(operator 自身) |
-| `cubestack-operator-chart-<版本>.tgz`(**顶层**) | **operator helm chart** + `.tgz.digest` 边车; 随离线包分发, 不入 git | —(不是平台组件) |
+| `charts/` | **operator helm chart** + `.tgz.digest` 边车; 随离线包分发, 不入 git | —(不是平台组件) |
 | `lws/` | LWS 控制器 | `lws` |
 | `envoy-gateway/` | envoy 控制面/数据面/envoy-distroless + ratelimit + AI 网关 ×2(共 5; gateway v1.9.2 / envoy distroless-v1.39.1 / ai-gateway v1.2.0 / ratelimit 0482748e) | `envoyGateway`(+`aiGateway`) |
 | `controller-manager/` | cubestack-controller-manager | `cubestackControllerManager` |
@@ -23,7 +23,7 @@ CubeStack 平台 Operator **及其平台组件**的离线资产(2026-10-08 起�
 映射权威 = chart `values.yaml` 的 `spec.components` + 各组件 legacy README(2026-10-16 对账);
 两处为推断(实机复核后可微调): opstree redis → portal、thanos → prometheus。
 ⚠ 子目录**只放镜像 tar**(`.tar` / `.digest`);非镜像资产继续放 `observability/` 等既有结构。
-operator chart 平铺在**顶层**(`.tgz`), 因为模块的顶层 `*.tar` 扫描不会把它当镜像。
+operator chart 放在 `charts/` 子目录; 它不是平台组件, 模块的组件扫描显式跳过该目录。
 
 ## 消费方与行为(2026-10-16 起)
 
@@ -32,7 +32,7 @@ operator chart 平铺在**顶层**(`.tgz`), 因为模块的顶层 `*.tar` 扫描
 - **在线模式**(`ONLINE_DEPLOY_CUBESTACK_OPERATOR=true`):[4/6]+[4b/6] 全部跳过 —— 镜像按 chart
   定义从 Harbor 直拉;**本目录的 tar 不被消费**(仅作补料来源)。
 - **离线模式**(默认):operator 本体(顶层 tar, digest 幂等)与 [4b/6] 组件镜像推入集群内置 registry。
-  [4b/6] 扫描范围 = **顶层 + 各组件子目录**的 `*.tar`(顶层 chart 是 `.tgz`, 天然不参与);
+  [4b/6] 扫描范围 = **顶层 + 各组件子目录**的 `*.tar`(`charts/` 除外, 它只有 chart);
   幂等 = digest 比对(同本体机制)。
 - **单独推送某个组件**(更新它之后只灌它的镜像, 值=子目录名, 逗号/空格分隔):
 
@@ -41,7 +41,7 @@ operator chart 平铺在**顶层**(`.tgz`), 因为模块的顶层 `*.tar` 扫描
   sudo CUBESTACK_OPERATOR_COMPONENTS="envoy-gateway,portal" ./deploy-cluster.sh   # 全量部署时限定范围
   ```
 
-  组件名不存在会**报错并列出可用子目录**。
+  组件名不存在会**报错并列出可用子目录**; `charts` 不是平台组件, 显式传入会被拒绝。
 
 ## 更新某个 operator 的镜像(离线通道)
 
@@ -58,7 +58,7 @@ operator chart 平铺在**顶层**(`.tgz`), 因为模块的顶层 `*.tar` 扫描
 
 ## 更新 operator chart(离线通道)
 
-chart 与组件镜像 tar 平铺在本目录顶层, 一起走 MinIO:
+chart 放在 `charts/` 子目录, 与组件镜像 tar 同集合、一起走 MinIO:
 
 ```bash
 # 内网同步机(能同时访问 Harbor 与 MinIO): 拉取 → 比对 Digest → 上传
@@ -70,7 +70,7 @@ bash deployments/scripts/tools/images/cubestack-platform-sync.sh \
 ```
 
 - 源: `oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart:1.0.0-latest`;
-- 落点: 本目录顶层 `cubestack-operator-chart-1.0.0-latest.tgz` + `.tgz.digest`;
+- 落点: `charts/cubestack-operator-chart-1.0.0-latest.tgz` + `.tgz.digest`;
 - 自动发布: cubestack-operator 仓库发 `repository_dispatch: operator-chart-updated` →
   `.github/workflows/refresh-operator-chart.yml` 拉取并上传 MinIO(无内网同步机时也适用);
 - `.digest` 必须写 helm 输出的 `Digest:` 行(OCI manifest 摘要), **不要** `sha256sum`;
@@ -132,7 +132,7 @@ bash deployments/scripts/tools/images/cubestack-platform-sync.sh \
 
 - 本体: `cluster.conf` 4.6b 的 `CUBESTACK_OPERATOR_IMAGE_TAG` / `CUBESTACK_OPERATOR_CHART_VERSION`;
 - 目录变量: `CUBESTACK_OPERATOR_OFFLINE_DIR`(默认指本目录);
-  chart 目录覆盖: `CUBESTACK_OPERATOR_CHART_DIR`(留空=本目录顶层);
+  chart 目录覆盖: `CUBESTACK_OPERATOR_CHART_DIR`(留空=本目录 `charts/`);
 - 平台组件镜像的**上游 ref** 见 tar 文件名;这些组件当前**不在** `images.manifest` 的 group 清单里
   (原 group 随 09-23 组件模块移除而删), 重新登记与否见 offline-files/os/README.md 的讨论。
 
@@ -157,8 +157,8 @@ bash deployments/scripts/tools/images/cubestack-platform-sync.sh \
   sha256 校验(需 `MINIO_*`/`minio.conf`)。`windows-exporter` 仅 `windows/amd64`, 不进入
   Linux 离线集合。
 - **2026-10-21 chart 迁移**: operator chart 从 CLI 镜像(`cubestack-addon/cubestack-operator/`)
-  移到本目录顶层, 与镜像 tar 同包分发; `.tgz`/`.digest` 不入 git, 由
+  移到本目录 `charts/`, 与镜像 tar 同包分发; `.tgz`/`.digest` 不入 git, 由
   `cubestack-platform-sync.sh --collection cubestack-operator` 上传 MinIO。
 
 > ⚠ 本目录下的 `*.tar` / `*.digest` / `*.tgz` / `*.tgz.digest` 已在 `.gitignore` 中忽略(不入库);
-> 只有本 README 与 `image-list.tsv` 受版本控制。
+> 受版本控制的是本 README、`image-list.tsv` 与 `charts/README.md`。

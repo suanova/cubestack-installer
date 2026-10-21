@@ -4,7 +4,7 @@
 > 各组件渲染并 apply 进集群, 管理健康与卸载)。
 > 上游: <https://github.com/suanova/cubestack-operator>(私有) · chart:
 > `oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart`
-> 分发: chart 随离线包(`offline-files/cubestack-operator/` 顶层)走, CLI 镜像不再包含它。
+> 分发: chart 随离线包(`offline-files/cubestack-operator/charts/`)走, CLI 镜像不再包含它。
 > 模块: `deployments/scripts/modules/03_addon/25_cubestack_operator.sh`(部署)
 > + `26_verify_cubestack_operator.sh`(端到端验证)
 > 开关: `CUBESTACK_OPERATOR_ENABLED`(**默认 true**, 2026-10-08 起) · 用法: `--steps cubestack_operator` / `--steps verify_cubestack_operator`
@@ -117,10 +117,12 @@ image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.App
 
 ```
 deployments/offline-files/cubestack-operator/
-├── cubestack-operator-chart-1.0.0-latest.tgz          # 随离线包分发(与镜像 tar 同目录)
-├── cubestack-operator-chart-1.0.0-latest.tgz.digest   # Digest 边车(helm 报告的 "Digest:" 行)
-├── <上游ref>.tar                                      # operator 本体镜像
-└── <组件>/                                            # 平台组件镜像
+├── charts/
+│   ├── cubestack-operator-chart-1.0.0-latest.tgz          # 随离线包分发
+│   ├── cubestack-operator-chart-1.0.0-latest.tgz.digest   # Digest 边车(helm 报告的 "Digest:" 行)
+│   └── README.md                                          # 唯一入库的条目
+├── <上游ref>.tar                                          # operator 本体镜像
+└── <组件>/                                                # 平台组件镜像
 ```
 
 **安装恒用这份本地副本**(`helm upgrade --install <本地 tgz>`), 线上拉到的东西不直接装 ——
@@ -130,7 +132,7 @@ chart 随离线包分发, tgz/digest 不入 git; `check-modules.sh` 第 ⑩ 项�
 解析优先级:
 
 1. `CUBESTACK_OPERATOR_CHART_DIR`(显式覆盖, 缺失即失败, 不回退);
-2. `${CUBESTACK_OPERATOR_OFFLINE_DIR}/`(默认 `offline-files/cubestack-operator/`, 平铺);
+2. `${CUBESTACK_OPERATOR_OFFLINE_DIR}/charts/`(默认 `offline-files/cubestack-operator/charts/`);
 3. 旧路径 `deployments/cubestack-addon/cubestack-operator/`(只读 fallback, 保留一个版本)。
 
 ### 3.3 在线时每次刷新 chart(需求 3)
@@ -228,7 +230,7 @@ Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator�
   - **一致性校验**: `cubestack-platform-save-images.sh --verify-remote` 逐行比对边车 ↔ Harbor
     manifest digest, 并直接读 tar 的 config digest ↔ Harbor amd64 config digest; MinIO 侧用
     `cubestack-platform-sync.sh --verify-minio` 做逐 tar sha256。发版/重部署前建议两条都跑。
-  - **chart 分发**: 更新 `offline-files/cubestack-operator/*.tgz` 后**不需要**重建 CLI 镜像;
+  - **chart 分发**: 更新 `offline-files/cubestack-operator/charts/*.tgz` 后**不需要**重建 CLI 镜像;
     用内网同步机 `cubestack-platform-sync.sh --collection cubestack-operator --no-pull-state`
     上传 MinIO, 部署机 `fetch-offline-from-minio.sh --sub cubestack-operator` 取回即可。
 - **RWO 单卷组件的更新策略(2026-10-19)**: `cubepilot-api` 把单个 `ReadWriteOnce` PVC 挂在
@@ -336,7 +338,7 @@ sudo CUBESTACK_COMPONENT_RESTART=0 ./deploy-cluster.sh --steps prometheus
 | `CUBESTACK_COMPONENT_VALUES_FILE` | 该组件的 values（YAML/JSON 的**组件 values 映射**），merge 到 CR |
 | `CUBESTACK_COMPONENT_PULL_POLICY` | 第三方组件 `values.image.pullPolicy`（默认 `Always`） |
 | `CUBESTACK_COMPONENT_RESTART` | `1`(默认)=rollout restart 组件 Deployment / `0`=不重启 |
-| `CUBESTACK_OPERATOR_OFFLINE_DIR` | 离线 tar/chart 根目录(默认 `offline-files/cubestack-operator`) |
+| `CUBESTACK_OPERATOR_OFFLINE_DIR` | 离线 tar 根目录; chart 在其 `charts/` 下(默认 `offline-files/cubestack-operator`) |
 | `CUBESTACK_OPERATOR_CHART_DIR` | chart 目录显式覆盖(最高优先级; 缺失即失败, 不回退) |
 | `CUBESTACK_OPERATOR_NAMESPACE` | operator/CR 命名空间 |
 
@@ -404,14 +406,14 @@ kubectl -n cubestack-system logs deploy/cubestack-operator
   `CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(默认 `true`; 仅接受 `true`/`false`), 裁剪/定制经
   `CUBESTACK_OPERATOR_CR_VALUES_FILE` 覆盖。
 - **多镜像扩展**: chart 若新增镜像, `[6/6]` 的渲染自检会报"未覆盖"并要求在本模块补 `--set`。
-- **chart 分发**: 随离线包分发(`offline-files/cubestack-operator/` 顶层, 与镜像 tar 同目录);
+- **chart 分发**: 随离线包分发(`offline-files/cubestack-operator/charts/`, 与镜像 tar 同集合);
   tgz/digest 不入 git, 由内网同步机上传 MinIO; 干净 checkout 属预期缺省。
 
 ## 6. 故障排查
 
 | 症状 | 根因 / 处理 |
 |---|---|
-| `[1/6]` 报"chart 缺失" | 离线包里没有 chart。跑 `fetch-offline-from-minio.sh --sub cubestack-operator`, 或 `helm pull` 到 `offline-files/cubestack-operator/` 并写 `Digest:` 边车 |
+| `[1/6]` 报"chart 缺失" | 离线包里没有 chart。跑 `fetch-offline-from-minio.sh --sub cubestack-operator`, 或 `helm pull` 到 `offline-files/cubestack-operator/charts/` 并写 `Digest:` 边车 |
 | 每次部署都告警"远端有更新"并覆盖本地副本 | `.digest` 边车值不对(常见: 自己 `sha256sum` 算的)。重取 helm pull 输出的 `Digest:` 行 |
 | `[4/6]` 报"可用源都不成立" | 离线机没 tar / 没凭据 / Harbor 不可达。跑 save 工具, 或配凭据 |
 | pod `ImagePullBackOff` 且 image 还是 `harbor.isuanova.com/...` | 有人手工 `helm install` 绕过了本模块(没走 `--set image.repository`)。用 `--steps cubestack_operator` 重装 |

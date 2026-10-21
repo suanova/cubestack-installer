@@ -98,13 +98,13 @@ _print_help() {
     echo "  model-collection/        模型推理镜像: sglang/ 与 vllm/(≈85G, .tar.gz; 来源 suanova/model-collection)"
     echo "  virtual-machine/         虚拟机镜像(大; 默认排除, --sub virtual-machine 单独拉)"
     echo "  cubestack-operator/      CubeStack 平台镜像 + operator chart"
-    echo "                           顶层 <上游ref>.tar = operator 本体; 顶层 *-chart-*.tgz = helm chart"
-    echo "                           (chart 与镜像 tar 同目录, 默认/--sub 会一起拉取)"
+    echo "                           顶层 <上游ref>.tar = operator 本体; charts/ = helm chart"
+    echo "                           (chart 与镜像同集合, 默认/--sub cubestack-operator 会一起拉取)"
     local _rd _list
     _rd="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
     _list="${_rd}/deployments/offline-files/cubestack-operator/image-list.tsv"
     if [ -f "${_list}" ]; then
-        echo "    组件子目录(取自仓库 image-list.tsv, 随组件自动更新; chart 不在子目录, 在顶层):"
+        echo "    组件子目录(取自仓库 image-list.tsv, 随组件自动更新; charts/ 是 chart, 不是组件):"
         awk -F'\t' '!/^#/ && $1 != "." && NF {print $1}' "${_list}" | sort -u | tr '\n' ' ' | fold -s -w 96 | sed 's/^/      /'
         echo ""
     else
