@@ -245,6 +245,11 @@ for COL in ${COLLECTIONS}; do
     [ "${DRY}" = "1" ] && SAVE_ARGS+=(--dry-run)
     SAVE_RC=0
     bash "${_self}/cubestack-platform-save-images.sh" "${SAVE_ARGS[@]}" || SAVE_RC=1
+    # 镜像保鲜失败时不发布 chart/上传: 否则远端会短暂出现"新 chart + 旧/不全镜像"的错位。
+    if [ "${SAVE_RC}" != "0" ]; then
+        err "  镜像保鲜失败, 跳过 chart 刷新与上传, 保持远端集合不变"
+        RC+=1; SUMMARY+=("${COL}: 失败(镜像保鲜)"); continue
+    fi
     # README 保鲜(仓库里有就带上; ⚠ state-dir 即仓库目录时 源=目标, 必须跳过 —— cp 同文件会报错,
     #   set -e 下直接终止整轮同步(2026-10-16 实机踩到: 上传一步都没执行))
     _rm_src="${REPO_SUB}/README.md"
