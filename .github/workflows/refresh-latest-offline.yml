@@ -8,6 +8,9 @@ name: Refresh latest offline assets
 #   · skopeo copy 成单架构 tar, 写 .digest 边车
 #   · 先传 tar 再传边车, 只覆盖 MinIO 同名对象 (不 prune / 不删除)
 #
+# operator helm chart 不在这里: 见 refresh-operator-chart.yml(同目录, 由
+#   operator-chart-updated 事件触发)。
+#
 # 触发来源:
 #   repository_dispatch: event_type=refresh-latest-offline
 #     client_payload: {source_repo, component, sha, run_url}

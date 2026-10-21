@@ -118,9 +118,9 @@ cluster.conf.backup
 # 物化版本树(由 cubestack-version-dir.sh materialize 生成; 见 docs/kubespray-versioning/)
 deployments/kubespray/versions/
 
-# cubestack-operator 滚动 chart(1.0.0-latest): **暂不入 git**(用户口径 2026-10-08)——
-#   分发通路 = 构建上下文进 CLI 镜像(Dockerfile-cli 的 COPY deployments)+ 部署机本地保留;
-#   ⚠ check-modules ⑩ 对此有 gitignore 豁免(降级 WARN), 干净 checkout 缺它属预期。
+# cubestack-operator 滚动 chart(1.0.0-latest): 已迁移到 offline-files/cubestack-operator/ 顶层
+#   (随离线包分发, 与镜像 tar 同目录; 现有分层规则已忽略 *.tgz)。以下为过渡期旧路径 fallback,
+#   下一版本删除(check-modules ⑩ 的 gitignore 豁免同步删除)。
 deployments/cubestack-addon/cubestack-operator/*.tgz
 deployments/cubestack-addon/cubestack-operator/*.tgz.digest
 

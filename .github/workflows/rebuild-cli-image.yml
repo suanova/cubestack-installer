@@ -1,15 +1,12 @@
 name: Rebuild installer CLI image
 
 # ============================================================================
-# cubestack-operator 的 helm chart 更新后, 重建 cubestack-installer-cli:latest。
+# 部署代码变更后, 重建 cubestack-installer-cli:latest。
 #
-# 为什么需要: operator chart 不入 git, 离线安装时模块从 CLI 镜像内
-#   deployments/cubestack-addon/cubestack-operator/ 读取它。只刷新镜像 tar 不会
-#   更新 chart; 重建镜像才是现有离线分发方式的正确落点。
+# operator chart 已改为随离线包分发(deployments/offline-files/cubestack-operator/
+# 顶层 .tgz, 由内网 cubestack-platform-sync.sh 上传 MinIO), 不再打进 CLI 镜像。
 #
-# 触发:
-#   repository_dispatch: event_type=operator-chart-updated (来自 cubestack-operator)
-#   workflow_dispatch:    手动重建
+# 触发: push 到 main(部署代码/脚本/模板) 或 workflow_dispatch 手动重建
 #
 # 一次性配置 (repo Settings):
 #   Secrets: HARBOR_MIRROR_PASSWORD
@@ -31,14 +28,7 @@ on:
       - 'Dockerfile-cli'
       - '.dockerignore'
       - '.github/workflows/rebuild-cli-image.yml'
-  repository_dispatch:
-    types: [operator-chart-updated]
   workflow_dispatch:
-    inputs:
-      chart_version:
-        description: 'operator chart version'
-        required: false
-        default: '1.0.0-latest'
 
 permissions:
   contents: read
@@ -57,8 +47,6 @@ jobs:
       HARBOR_USER: ${{ vars.HARBOR_MIRROR_USER || secrets.HARBOR_MIRROR_USER }}
       HARBOR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
       HARBOR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
-      CHART_REF: oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart
-      CHART_VERSION: ${{ github.event.client_payload.chart_version || github.event.inputs.chart_version || '1.0.0-latest' }}
       IMAGE: harbor.isuanova.com/suanova/cubestack-installer-cli:latest
     steps:
       - name: Checkout
@@ -84,11 +72,6 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
           df -h /
 
-      - name: Setup helm
-        uses: azure/setup-helm@v4
-        with:
-          version: v3.14.4
-
       - name: Login to Harbor
         env:
           HARBOR_USERNAME: ${{ env.HARBOR_USER }}
@@ -96,26 +79,6 @@ jobs:
         run: |
           set -euo pipefail
           echo "${HARBOR_SECRET}" | docker login "${HARBOR_HOST}" -u "${HARBOR_USERNAME}" --password-stdin
-          echo "${HARBOR_SECRET}" | helm registry login "${HARBOR_HOST}" -u "${HARBOR_USERNAME}" --password-stdin
-
-      - name: Pull latest operator chart
-        run: |
-          set -euo pipefail
-          chart_dir="deployments/cubestack-addon/cubestack-operator"
-          mkdir -p "${chart_dir}"
-          rm -f "${chart_dir}"/*.tgz "${chart_dir}"/*.tgz.digest
-
-          out="$(helm pull "${CHART_REF}" --version "${CHART_VERSION}" -d "${chart_dir}" 2>&1)" || {
-            printf '%s\n' "${out}"
-            exit 1
-          }
-          printf '%s\n' "${out}"
-          digest="$(printf '%s\n' "${out}" | sed -n 's/^Digest:[[:space:]]*//p' | head -1)"
-          tgz="$(ls -1t "${chart_dir}"/*.tgz 2>/dev/null | head -1)"
-          [ -n "${tgz}" ] || { echo "::error::helm pull produced no tgz"; exit 1; }
-          [ -n "${digest}" ] || { echo "::error::helm pull reported no Digest"; exit 1; }
-          printf '%s' "${digest}" > "${tgz}.digest"
-          echo "chart=$(basename "${tgz}") digest=${digest}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Build CLI image
         run: |
@@ -127,12 +90,3 @@ jobs:
           set -euo pipefail
           docker push "${IMAGE}"
           echo "pushed ${IMAGE}" | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Verify chart inside image
-        run: |
-          set -euo pipefail
-          path=/opt/cubestack-installer/deployments/cubestack-addon/cubestack-operator
-          listing="$(docker run --rm --entrypoint ls "${IMAGE}" "${path}")"
-          printf '%s\n' "${listing}" | tee -a "$GITHUB_STEP_SUMMARY"
-          printf '%s\n' "${listing}" | grep -q 'cubestack-operator-chart-.*\.tgz' \
-            || { echo "::error::operator chart not found in image"; exit 1; }
