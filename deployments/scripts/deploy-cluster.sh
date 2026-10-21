@@ -844,6 +844,16 @@ if [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ]; then
 else
     echo "  registry 入口: http://${REGISTRY_IP:-<自动派生>}:${REGISTRY_PORT:-5000}/ (${REGISTRY_SERVICE_TYPE})"
 fi
+# CubeStack Web UI(Envoy Gateway; 所有模块/镜像推送完成后动态发现)
+if [ "${CUBESTACK_OPERATOR_ENABLED:-false}" = "true" ] \
+   && [[ " ${RUN_STEPS[*]:-} " == *" cubestack_operator "* ]]; then
+    _ui_out="$(KUBESPRAY_INV_DIR="${KUBESPRAY_INV_DIR:-}" bash "${SCRIPT_DIR}/tools/k8s/cubestack-ui-url.sh" --wait 30 2>/dev/null || true)"
+    if [ -n "${_ui_out}" ]; then
+        echo "${_ui_out}"
+    else
+        echo "  CubeStack Web UI: 尚未发现(Envoy Gateway/HTTPRoute 可能尚未就绪; 稍后重跑: bash ${SCRIPT_DIR}/tools/k8s/cubestack-ui-url.sh)"
+    fi
+fi
 echo "  下一步: 扩容用 --with-scale; 立即部署单个用 --steps gpu_operator,ceph(...)(自动带基座); 预启用写入配置用 --enable ...(下次全量生效); 验证用 --steps verify"
 
 # ★ 外部 Ceph 接入信息(用户要求: 放安装末尾总结; 仅集群内 Ceph 且本次执行过暴露时提示)

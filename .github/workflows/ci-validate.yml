@@ -138,6 +138,12 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-release-mode.sh
 
+      # CubeStack Web UI 地址发现(Envoy Gateway/HTTPRoute/Service 解析, 假 kubectl 夹具)
+      - name: CubeStack Web UI 地址发现回归(cubestack-ui-url)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-cubestack-ui-url.sh
+
       # 凭据/公网地址卫生门禁(2026-10-16 明文入库事故后新增; 与 check-modules 的"凭据卫生"项互补:
       #   前者查配置规范, 本项查内容面 —— 明文密码赋值/私钥块/公网 IPv4/凭据类文件入库)。
       - name: 凭据/公网地址卫生(check-secrets.sh)
