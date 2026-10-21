@@ -144,6 +144,9 @@ $(_component_meta_list stub)
                         例: --profile v2.32.0; none = 不用档案(全部按 cluster.conf)
                         **不指定 = 部署最新版本**(max(仓库树, 有档案的版本目录); 本地临时版本须显式选)
                         见 docs/kubespray-versioning/
+  --release <版本>      使用离线发布版本目录(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
+                        版本变量以目录内 release.env 为准; 取件见 fetch-offline-from-minio.sh --release
+                        例: --release 2.0.0; 等价于 cluster.conf 的 CUBESTACK_RELEASE="2.0.0"
   --fresh, --refresh    默认流程 + **先清断点状态**(REPEAT:0 的模块强制重跑; 见"三种使用方式"②)
   --list                仅打印集群规划(只读)
   --list-steps          列出全部模块(分组紧凑展示; 加 --verbose 看完整 DESC/文件/依赖)
@@ -159,6 +162,7 @@ $(_component_meta_list stub)
   sudo ./deploy-cluster.sh --steps lws             # 只更新平台组件 lws(operator 已就绪; 不重跑 cubestack_operator)
   sudo ./deploy-cluster.sh --steps cube-pilot      # 只更新 cubepilot(连字符别名)
   sudo ./deploy-cluster.sh --steps ceph --fresh     # 同上, 且清断点状态(REPEAT:0 模块重跑用)
+  sudo ./deploy-cluster.sh --release 2.0.0          # 使用 2.0.0 离线发布版本目录(<root>/2.0.0/offline-files)
   sudo ./deploy-cluster.sh --steps verify_ceph      # 只验证 Ceph(operator/CSI + ceph -s + RBD 块 I/O)
   sudo ./deploy-cluster.sh --with-scale             # 扩容: 仅 k8s_scale(先登录 master 核对集群→diff 新节点→只动新节点)
   sudo ./deploy-cluster.sh --with-scale --only worker02   # 扩容指定节点(--only 也先经集群核对)
@@ -182,6 +186,7 @@ FRESH=0; LIST=0; LIST_STEPS=0; LIST_VERBOSE=0; ASSUME_YES=0
 STEPS_ARG=""; SKIP_ARG=""; ENABLE_ARG=""; PHASE_ARG=""; ENABLE_PERSIST_ARG=""
 SCALE_ONLY=0
 ONLY_HOSTS=""
+RELEASE_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --fresh|--refresh) FRESH=1; shift ;;
@@ -208,6 +213,9 @@ while [ $# -gt 0 ]; do
         #   须在 load_config 之前 export —— load_config 读的是环境变量
         #   (none = 禁用档案, 全部按 cluster.conf)
         --profile)  PROFILE_ARG="${2:?--profile 需要版本名(如 v2.32.0; none=禁用档案)}"; shift 2 ;;
+        # --release = 本次使用离线发布版本目录(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
+        #   须在 load_config 之前 export(load_config 读的是环境变量)
+        --release)  RELEASE_ARG="${2:?--release 需要版本号(如 2.0.0)}"; shift 2 ;;
         --help|-h)  usage ;;
         *)          err "未知参数: $1(用 --help 查看)"; exit 1 ;;
     esac
@@ -221,6 +229,11 @@ fi
 if [ -n "${PROFILE_ARG:-}" ]; then
     export KUBESPRAY_PROFILE="${PROFILE_ARG}"
     vlog "  --profile ${PROFILE_ARG} → KUBESPRAY_PROFILE(本机 cluster.conf 不变)"
+fi
+# --release: 在 load_config 之前 export(load_config 以环境变量优先读 CUBESTACK_RELEASE)
+if [ -n "${RELEASE_ARG:-}" ]; then
+    export CUBESTACK_RELEASE="${RELEASE_ARG}"
+    vlog "  --release ${RELEASE_ARG} → CUBESTACK_RELEASE(本机 cluster.conf 不变)"
 fi
 # 展开 --only 中的 group 名: NODE_GROUP_<name> 定义在 cluster.conf 中
 if [ -n "${ONLY_HOSTS}" ]; then
@@ -807,11 +820,10 @@ echo "              用法: kubectl --kubeconfig=${KUBESPRAY_INV_DIR}/artifacts/
 echo "  管理凭证:   无 kubeadmin 密码, 管理员权限=admin.conf(客户端证书); 节点 SSH 默认密码: ${SSH_DEFAULT_PASSWORD:-<未设置>}"
 # 服务暴露方式醒目提示: 当前模式(metallb / nodeport)+ 各自注意事项
 _C_BOLD="\033[1m"; _C_YELLOW="\033[33m"; _C_GREEN="\033[32m"; _C_OFF="\033[0m"
-if [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ]; then
-    _NIP="$(first_node_ip 2>/dev/null || echo '<节点IP>')"
+_NIP="$(first_node_ip 2>/dev/null || echo '<节点IP>')"
+if [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ]; then
     echo -e "${_C_BOLD}${_C_YELLOW}⚠ 服务暴露方式: 当前为 NodePort 模式(SERVICE_EXPOSE_MODE=nodeport, 未部署 MetalLB)${_C_OFF}"
     echo "  访问入口 = 任意节点 IP + NodePort(自动取集群第一个节点 IP: ${_NIP}, 跨节点自动转发):"
-    echo "               · registry:      http://${_NIP}:${REGISTRY_NODEPORT:-31148}/"
     echo "  ⚠ NodePort 注意事项:"
     echo "               · 端口默认 30000-32767, 超出需改 kube-apiserver --service-node-port-range"
     echo "               · 无固定 VIP, 入口=单节点 IP, 节点重启/换 IP 后入口会变(部署时自动取新 IP)"
@@ -819,13 +831,18 @@ if [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ]; then
     echo "                 (SERVICE_EXPOSE_MODE=metallb, 需提供同网段空闲的 METALLB_POOL)"
 else
     echo -e "${_C_BOLD}${_C_GREEN}✅ 服务暴露方式: 当前为 MetalLB LoadBalancer 模式(SERVICE_EXPOSE_MODE=metallb, 生产默认)${_C_OFF}"
-    echo "  访问入口 = LoadBalancer VIP(registry 固定 VIP ${REGISTRY_IP:-<自动派生>}:${REGISTRY_PORT:-5000};"
-    echo "               ingress 经各自 LoadBalancer VIP)"
+    echo "  访问入口 = LoadBalancer VIP(ingress 经各自 LoadBalancer VIP)"
     echo "  ⚠ MetalLB 注意事项:"
     echo "               · METALLB_POOL 必须与节点同网段、不含网络/广播地址(.0/.255), 且地址空闲"
     echo "               · 地址池建议 >1 个地址, 否则新建 LoadBalancer 可能无 VIP 可分配(verify_metallb 会校验)"
     echo "               · 改池后需重跑 tools/k8s/sync-kubespray-config.sh 并重新 apply 池 CR 再验证"
     echo "               · 测试环境无空闲地址时可用 nodeport(SERVICE_EXPOSE_MODE=nodeport)"
+fi
+# registry 入口独立于全局暴露模式(默认 NodePort, 不占 MetalLB VIP)
+if [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ]; then
+    echo "  registry 入口: http://${_NIP}:${REGISTRY_NODEPORT:-31148}/ (NodePort, 默认; 与 SERVICE_EXPOSE_MODE 解耦)"
+else
+    echo "  registry 入口: http://${REGISTRY_IP:-<自动派生>}:${REGISTRY_PORT:-5000}/ (${REGISTRY_SERVICE_TYPE})"
 fi
 echo "  下一步: 扩容用 --with-scale; 立即部署单个用 --steps gpu_operator,ceph(...)(自动带基座); 预启用写入配置用 --enable ...(下次全量生效); 验证用 --steps verify"
 
@@ -839,7 +856,7 @@ if [ "${CEPH_MODE:-internal}" != "external" ] && [ "${CEPH_ENABLED:-false}" = "t
     echo "  配置路径: ${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf"
     echo "              拷贝到目标集群 cluster.conf 设 CEPH_MODE=external 即可接入;"
     echo "              含 CEPH_MONITORS / CEPH_FSID / RBD(user+key+pool) / CephFS(user+key+fs) / RGW 端点"
-    echo "              入口(模式=${SERVICE_EXPOSE_MODE:-nodeport}: nodeport→IP+规律NodePort / metallb→VIP+Ceph原生端口6789):"
+    echo "              入口(模式=${SERVICE_EXPOSE_MODE:-metallb}: nodeport→IP+规律NodePort / metallb→VIP+Ceph原生端口6789):"
     echo "              $(grep '^CEPH_MONITORS=' "${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf" 2>/dev/null | cut -d= -f2- | tr -d '\"')"
     echo "  一键查看: cat ${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf"
     echo "  5 层自检(含外部客户端协议级测试): bash ${SCRIPT_DIR}/tools/k8s/ceph-expose-external.sh status"

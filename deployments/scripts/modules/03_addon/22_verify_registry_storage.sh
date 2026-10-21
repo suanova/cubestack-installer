@@ -64,7 +64,7 @@ PUSH_NS="verify"
 
 # 推送/校验端点: loadbalancer → VIP:PORT; nodeport → 首个节点 IP:REGISTRY_NODEPORT
 REGISTRY_ENDPOINT=""
-if [ "${REGISTRY_SERVICE_TYPE:-loadbalancer}" = "nodeport" ]; then
+if [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ]; then
     REGISTRY_ENDPOINT="$(SSH "${K} get nodes --no-headers -o wide | awk '{print \$6}' | head -1" 2>/dev/null || true):${REGISTRY_NODEPORT:-31148}"
 else
     REGISTRY_ENDPOINT="${REGISTRY_IP}:${REGISTRY_PORT:-5000}"

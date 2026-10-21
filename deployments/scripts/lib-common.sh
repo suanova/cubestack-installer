@@ -467,7 +467,7 @@ find_offline_tar() {
 #       与镜像 tar 的 <tar>.digest 同一约定)。
 helm_chart_ensure() {
     local comp="$1" tgz="$2" version="$3" mode="$4" ref="$5" repo="${6:-}"
-    local dgfile="${tgz}.digest" tmpd="" pulled="" rdig="" ldig="" out="" args=()
+    local dgfile="${tgz}.digest" tmpd="" pulled="" rdig="" ldig="" out="" args=() _coll=""
 
     case "${mode}" in
         online|offline) ;;
@@ -526,7 +526,11 @@ helm_chart_ensure() {
         err "  ${comp} 离线 chart 缺失: ${tgz}"
         case "${tgz}" in
             */deployments/offline-files/*)
-                err "    获取(离线包): ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub $(basename "$(dirname "${tgz}")")" ;;
+                # chart 在 <collection>/charts/ 下; --sub 需要的是 collection 名, 不是 charts
+                _coll="$(basename "$(dirname "$(dirname "${tgz}")")")"
+                err "    获取(离线包): ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub ${_coll}" ;;
+            */offline-files/*)
+                err "    获取(发布版本): ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE:-<版本>} --dest <本地桶根>" ;;
         esac
         err "    获取(在线/手工): helm pull ${ref}${repo:+ --repo ${repo}} --version ${version} -d $(dirname "${tgz}")"
         err "          并把 helm 输出的 Digest: 写入 $(basename "${tgz}").digest(不要用 sha256sum); tgz 不入 git"
@@ -574,10 +578,12 @@ ensure_registry_nginx() {
     # find_offline_tar 是 endswith 语义, 版本化 tag(nginx:1.31.4)不命中, 下方按内容兜底。
     _t="$(find_offline_tar "nginx:latest" "nginx*.tar" \
             "${REPO_ROOT}/deployments/offline-files/nginx" \
+            "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx" \
             "${LOCAL_REPO_DIR}/images")" || _t=""
     if [ -z "${_t}" ]; then
         # 兜底: 版本化 tag(如 nginx:1.31.4)按内容匹配(含 "nginx:" 即接受)
         for _d in "${REPO_ROOT}/deployments/offline-files/nginx" \
+                  "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx" \
                   "${LOCAL_REPO_DIR}/images"; do
             [ -d "${_d}" ] || continue
             for _f in "${_d}"/nginx*.tar; do
@@ -605,6 +611,7 @@ ensure_registry_nginx() {
     fi
     err "集群 registry 无 nginx(${ref}), 测试后端无法拉起。请任选其一:"
     err "  ① 准备离线 nginx 镜像 tar 放到 ${REPO_ROOT}/deployments/offline-files/nginx/nginx.tar(联网机: sudo docker pull nginx:latest && sudo docker save nginx:latest -o .../nginx.tar, 拷到部署机);"
+    err "     release 模式请放到 ${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx/nginx.tar;"
     err "  ② 部署机本地 docker 有 nginx:latest(sudo docker pull nginx:latest);"
     err "  ③ 允许在线拉取: VERIFY_IMAGE_ONLINE=true 重跑"
     return 1
@@ -664,6 +671,49 @@ load_config() {
     #   (赋值放在 sudo **之后**)或直接写进 cluster.conf(推荐)。
     SSH_USER="${SSH_USER:-ubuntu}"
     export SSH_USER
+    # ---- release 模式(2026-10-21): 版本目录 + release.env ----
+    # 本地桶根与 MinIO 同构: <root>/<版本>/{offline-files,cubestack-installer-cli.tar}
+    # release.env 提供版本变量, 必须在 kubespray 版本档案块之前加载(才能接管 KUBESPRAY_VERSION)。
+    OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
+    if [ -n "${CUBESTACK_RELEASE:-}" ]; then
+        CUBESTACK_RELEASE_ROOT="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
+        _rel_root="${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files"
+        if [ ! -f "${_rel_root}/release.env" ]; then
+            err "未找到发布版本 ${CUBESTACK_RELEASE}: ${_rel_root}/release.env"
+            err "  先取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --dest ${CUBESTACK_RELEASE_ROOT}"
+            exit 1
+        fi
+        # shellcheck disable=SC1090
+        source "${_rel_root}/release.env"
+        if [ "${RELEASE_VERSION:-}" != "${CUBESTACK_RELEASE}" ]; then
+            err "release.env 版本不符: RELEASE_VERSION=${RELEASE_VERSION:-<空>} CUBESTACK_RELEASE=${CUBESTACK_RELEASE}"
+            exit 1
+        fi
+        if [ -z "${KUBESPRAY_VERSION:-}" ]; then
+            err "release.env 缺少 KUBESPRAY_VERSION(${_rel_root}/release.env)"
+            exit 1
+        fi
+        OFFLINE_FILES_ROOT="${_rel_root}"
+        # 这些变量默认写死指向 dev offline-files; release 模式统一重定向到版本目录。
+        METAX_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/metax-gpu"
+        METAX_PKG_DIR="${METAX_OFFLINE_DIR}"
+        CUBESTACK_OPERATOR_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/cubestack-operator"
+        MULTUS_SAVE_DIR="${OFFLINE_FILES_ROOT}/multus"
+        NVIDIA_GPU_OPERATOR_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/nvidia-gpu-operator"
+        RDMA_SAVE_DIR="${OFFLINE_FILES_ROOT}/rdma"
+        NETSHOOT_SAVE_DIR="${OFFLINE_FILES_ROOT}/netshoot"
+        NETSHOOT_BASE_TAR="${OFFLINE_FILES_ROOT}/os/netshoot.tar"
+        DEV_LAB_SAVE_DIR="${OFFLINE_FILES_ROOT}/dev-lab"
+        MODEL_IMAGES_SAVE_DIR="${OFFLINE_FILES_ROOT}/model-collection"
+        CEPH_IMAGE_DIR="${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}/images"
+        export CUBESTACK_RELEASE_ROOT METAX_OFFLINE_DIR METAX_PKG_DIR \
+               CUBESTACK_OPERATOR_OFFLINE_DIR MULTUS_SAVE_DIR \
+               NVIDIA_GPU_OPERATOR_OFFLINE_DIR RDMA_SAVE_DIR \
+               NETSHOOT_SAVE_DIR NETSHOOT_BASE_TAR DEV_LAB_SAVE_DIR \
+               MODEL_IMAGES_SAVE_DIR CEPH_IMAGE_DIR
+        vlog "release 模式生效: ${CUBESTACK_RELEASE}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
+        unset _rel_root
+    fi
     # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
     # (档案 > cluster.conf > cluster.defaults.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
     #  会静默变成"v2.28 的资产 + v1.35.8 的钉子")
@@ -767,53 +817,50 @@ load_config() {
     #  centralized 于此, 让 deploy-registry.sh / setup-registry-expose.sh 等所有消费者拿到同一值)
     # 标记是否显式指定(供 deploy-registry.sh 冲突检测: 显式设置不再提示)
     export REGISTRY_IP_EXPLICIT="${REGISTRY_IP_EXPLICIT:-0}"
-    if [ -z "${REGISTRY_IP:-}" ]; then
-        # 按暴露模式决定默认入口(二选一):
-        #   nodeport(默认) → 集群第一个 master IP —— 节点 containerd 经 hosts.toml 直连该 IP 的
-        #     REGISTRY_NODEPORT 拉取, 宿主机经 deploy-registry.sh 的 DNAT 访问, 均无需手动配置;
-        #   metallb         → METALLB_POOL 池内首地址作为 LoadBalancer VIP(registry 固定 VIP)。
-        _EXPOSE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
-        if [ "${_EXPOSE}" = "nodeport" ]; then
-            REGISTRY_IP="$(first_master_ip)" || REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
-            vlog "REGISTRY_IP 留空, nodeport 模式取首个 master IP → ${REGISTRY_IP}"
-        else
-            REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
-            vlog "REGISTRY_IP 留空, 自动取 METALLB_POOL=${METALLB_POOL:-} 首地址 → ${REGISTRY_IP}"
-        fi
-        unset _EXPOSE
-        export REGISTRY_IP
-    else
-        export REGISTRY_IP_EXPLICIT=1
-    fi
     # 服务暴露方式归一化: SERVICE_EXPOSE_MODE ∈ {metallb, nodeport}
+    # 默认 **metallb**(生产); nodeport 仅作显式降级。
     # 大小写不敏感: 判断前先 tr 转小写, 任何大小写组合(nodeport/NodePort/nodePort/NODEPORT...)均接受
-    #   nodeport           → nodeport(默认, 测试环境, NodePort 经 kube-proxy 路由, 不依赖 MetalLB)
-    #   metallb/loadbalancer/其它 → metallb(生产, MetalLB LoadBalancer VIP)
     # 下游 sync-addons-config / sync-kubespray-config / verify / 部署汇总统一按此分支。
-    _EXPOSE_MODE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
+    _EXPOSE_MODE="$(echo "${SERVICE_EXPOSE_MODE:-metallb}" | tr '[:upper:]' '[:lower:]')"
     case "${_EXPOSE_MODE}" in
         nodeport) SERVICE_EXPOSE_MODE="nodeport" ;;
         *)        SERVICE_EXPOSE_MODE="metallb" ;;
     esac
     unset _EXPOSE_MODE
     export SERVICE_EXPOSE_MODE
-    # registry 暴露方式: 留空 → 按全局模式派生; 显式设置(loadbalancer|nodeport|clusterip)则覆盖。
-    # cluster.conf 留空 + 各脚本里 ":-loadbalancer" 兜底的默认值统一收敛到本处, 保证所有消费者拿到同一值。
+    # registry 暴露方式: **默认 nodeport, 与 SERVICE_EXPOSE_MODE 解耦**
+    #   - 显式 REGISTRY_SERVICE_TYPE=loadbalancer|nodeport|clusterip 时尊重显式值
+    #   - 即使全局是 metallb, registry 默认仍走 NodePort(直连首个 master, 不占 MetalLB VIP)
     if [ -z "${REGISTRY_SERVICE_TYPE:-}" ]; then
-        [ "${SERVICE_EXPOSE_MODE}" = "nodeport" ] && REGISTRY_SERVICE_TYPE="nodeport" || REGISTRY_SERVICE_TYPE="loadbalancer"
+        REGISTRY_SERVICE_TYPE="nodeport"
         export REGISTRY_SERVICE_TYPE
-        vlog "REGISTRY_SERVICE_TYPE 留空, 按 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE} 派生 → ${REGISTRY_SERVICE_TYPE}"
+        vlog "REGISTRY_SERVICE_TYPE 留空, 默认 nodeport(与 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE} 解耦)"
+    fi
+    # REGISTRY_IP: 与 registry Service 类型保持一致
+    #   nodeport     → 首个 master IP(NodePort 入口)
+    #   loadbalancer → METALLB_POOL 池内首地址(固定 VIP)
+    if [ -z "${REGISTRY_IP:-}" ]; then
+        if [ "${REGISTRY_SERVICE_TYPE}" = "nodeport" ]; then
+            REGISTRY_IP="$(first_master_ip)" || REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
+            vlog "REGISTRY_IP 留空, registry=nodeport → 首个 master IP ${REGISTRY_IP}"
+        else
+            REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
+            vlog "REGISTRY_IP 留空, registry=${REGISTRY_SERVICE_TYPE} → METALLB_POOL 首地址 ${REGISTRY_IP}"
+        fi
+        export REGISTRY_IP
+    else
+        export REGISTRY_IP_EXPLICIT=1
     fi
     # registry 宿主侧直连端点(预检 curl / skopeo push 用), 与镜像名 DOMAIN:PORT 解耦:
-    #   nodeport → 首个 master:REGISTRY_NODEPORT(无 VIP, 直连 NodePort; 容器/裸机均可达);
-    #   metallb   → REGISTRY_IP:REGISTRY_PORT(MetalLB VIP)。
+    #   nodeport     → REGISTRY_IP:REGISTRY_NODEPORT
+    #   loadbalancer → REGISTRY_IP:REGISTRY_PORT
     # 镜像名统一 registry.cubestack.io:5000(节点经 containerd hosts.toml 改写连接), 端口无需统一;
     # 显式设 REGISTRY_DIRECT 可覆盖(如经代理/别名推送)。
     # ⚠ nodeport 分支复用 REGISTRY_IP 而非直接 first_master_ip:
     #   create-vms.sh 等场景 load_config 时 NODES 可能已被清空 → first_master_ip 返回 1,
     #   在 set -euo pipefail 下命令替换失败会传导给赋值 → load_config 静默退出, 卡死 VM 创建。
     #   REGISTRY_IP 自带 first_master_ip || first_pool_addr 兜底(见上), 此处直接复用其值。
-    if [ "${SERVICE_EXPOSE_MODE}" = "nodeport" ]; then
+    if [ "${REGISTRY_SERVICE_TYPE}" = "nodeport" ]; then
         REGISTRY_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP}:${REGISTRY_NODEPORT:-31148}}"
     else
         REGISTRY_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP}:${REGISTRY_PORT:-5000}}"

@@ -315,27 +315,12 @@ while IFS= read -r -d '' f; do
             warn "     → 无法静态确认离线副本; 若 chart 在仓库外(占位/特例), 请忽略本告警"
             CHART_WARN=$((CHART_WARN + 1)); continue
         fi
-        # 过渡期: 旧路径的 gitignore 豁免(至少一个版本后删除)
-        _gi=0
-        while IFS= read -r c; do
-            [ -z "${c}" ] && continue
-            if git -C "${ADDON_DIR}/../.." check-ignore -q "${ADDON_DIR}/${c}/x.tgz" 2>/dev/null \
-               || git -C "${ADDON_DIR}/../.." check-ignore -q "${ADDON_DIR}/${c}" 2>/dev/null; then
-                _gi=1; break
-            fi
-        done <<< "${cands}"
-        if [ "${_gi}" = "1" ]; then
-            warn "  ${rel}: vendored chart 按仓库策略**不入 git**(过渡期 legacy fallback)"
-            warn "     → 请迁移到 deployments/offline-files/<集合>/ 顶层(见 offline-files README)"
-            CHART_WARN=$((CHART_WARN + 1))
-        else
         ck_fail "${rel}: 引用了 cubestack-addon/ 却**找不到 vendored chart**(.tgz 或 Chart.yaml)"
         ck_fail "      → 模块安装时恒用本地副本, 缺了它私服/上游一抖动就装不上(回退代码会空转)"
         ck_fail "      → 修法: 把 chart 放进 deployments/cubestack-addon/<组件>/ 并提交,"
-        ck_fail "             或按离线包例外放到 deployments/offline-files/<集合>/ 顶层(README 需跟踪);"
+        ck_fail "             或按离线包例外放到 deployments/offline-files/<集合>/charts/(README 需跟踪);"
         ck_fail "             tgz 形式请一并提交 <tgz>.digest 边车(供 helm_chart_ensure 比对刷新)"
         CHART_FAIL=$((CHART_FAIL + 1))
-        fi
     fi
 done < <(find "${MODULES_DIR}" -name '*.sh' -print0)
 [ "${CHART_FAIL}" = "0" ] && ok "安装 chart 的模块均有 vendored 离线副本(${CHART_OKN} 个模块通过)"

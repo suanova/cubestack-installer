@@ -1,7 +1,8 @@
 name: Rebuild installer CLI image
 
 # ============================================================================
-# 部署代码变更后, 重建 cubestack-installer-cli:latest。
+# 部署代码变更后, 重建 cubestack-installer-cli:latest, 并把镜像导出成 tar 同步到 MinIO
+# (offline-files/cli/cubestack-installer-cli.tar), 供离线部署机 fetch --sub cli 取回。
 #
 # operator chart 已改为随离线包分发(deployments/offline-files/cubestack-operator/
 # 顶层 .tgz, 由内网 cubestack-platform-sync.sh 上传 MinIO), 不再打进 CLI 镜像。
@@ -9,8 +10,9 @@ name: Rebuild installer CLI image
 # 触发: push 到 main(部署代码/脚本/模板) 或 workflow_dispatch 手动重建
 #
 # 一次性配置 (repo Settings):
-#   Secrets: HARBOR_MIRROR_PASSWORD
-#   Vars:    HARBOR_MIRROR_USER, HARBOR_MIRROR_REGISTRY, HARBOR_MIRROR_INSECURE
+#   Secrets: HARBOR_MIRROR_PASSWORD, MINIO_HOSTNAME, MINIO_USERNAME, MINIO_PASSWORD
+#   Vars:    HARBOR_MIRROR_USER, HARBOR_MIRROR_REGISTRY, HARBOR_MIRROR_INSECURE,
+#            MINIO_BUCKET, MINIO_REMOTE_DIR, MINIO_INSECURE
 # ============================================================================
 
 on:
@@ -29,6 +31,11 @@ on:
       - '.dockerignore'
       - '.github/workflows/rebuild-cli-image.yml'
   workflow_dispatch:
+    inputs:
+      version:
+        description: '额外推送的 CLI 镜像版本(如 2.0.0; 留空=只推 :latest)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -48,6 +55,13 @@ jobs:
       HARBOR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
       HARBOR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
       IMAGE: harbor.isuanova.com/suanova/cubestack-installer-cli:latest
+      IMAGE_VERSION: ${{ github.event.inputs.version || '' }}
+      MINIO_ENDPOINT: ${{ secrets.MINIO_HOSTNAME }}
+      MINIO_ACCESS_KEY: ${{ secrets.MINIO_USERNAME }}
+      MINIO_SECRET_KEY: ${{ secrets.MINIO_PASSWORD }}
+      MINIO_BUCKET: ${{ vars.MINIO_BUCKET || 'cubestack-installer' }}
+      MINIO_REMOTE_DIR: ${{ vars.MINIO_REMOTE_DIR || 'offline-files' }}
+      MINIO_INSECURE: ${{ vars.MINIO_INSECURE || 'false' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -90,3 +104,52 @@ jobs:
           set -euo pipefail
           docker push "${IMAGE}"
           echo "pushed ${IMAGE}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # release-2.0: 手动触发时额外推一个不可变版本 tag(如 :2.0.0), 供 release-publish.sh 生成 CLI tar
+      - name: Tag & push versioned CLI image
+        if: ${{ github.event.inputs.version != '' }}
+        run: |
+          set -euo pipefail
+          version="${{ github.event.inputs.version }}"
+          case "${version}" in
+            ''|*[!0-9A-Za-z._-]*) echo "::error::invalid version: ${version}"; exit 1 ;;
+          esac
+          target="${HARBOR_HOST}/suanova/cubestack-installer-cli:${version}"
+          docker tag "${IMAGE}" "${target}"
+          docker push "${target}"
+          echo "pushed ${target}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # 把 :latest 导出为离线 tar 同步到 MinIO; 镜像内容未变(按 image ID)则跳过
+      - name: Export CLI image & sync tar to MinIO
+        run: |
+          set -euo pipefail
+          if [ -z "${MINIO_ENDPOINT:-}" ] || [ -z "${MINIO_ACCESS_KEY:-}" ] || [ -z "${MINIO_SECRET_KEY:-}" ]; then
+            echo "::warning::MINIO_HOSTNAME/MINIO_USERNAME/MINIO_PASSWORD 未配置, 跳过 CLI tar 同步"
+            exit 0
+          fi
+          curl -fsSL https://dl.min.io/aistor/mc/release/linux-amd64/mc -o /tmp/mc
+          sudo install -m 0755 /tmp/mc /usr/local/bin/mc
+          mc --version
+          mc_args=()
+          if [ "${MINIO_INSECURE}" = "true" ]; then mc_args+=(--insecure); fi
+          mc "${mc_args[@]}" alias set cubestack-cli "${MINIO_ENDPOINT}" \
+            "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" >/dev/null
+          mc "${mc_args[@]}" mb --ignore-existing "cubestack-cli/${MINIO_BUCKET}" >/dev/null
+
+          remote="cubestack-cli/${MINIO_BUCKET}/${MINIO_REMOTE_DIR}/cli"
+          image_id="$(docker inspect --format '{{.Id}}' "${IMAGE}")"
+          remote_id="$(mc "${mc_args[@]}" cat "${remote}/cubestack-installer-cli.digest" 2>/dev/null \
+            | tr -d '[:space:]' || true)"
+          if [ "${remote_id}" = "${image_id}" ] \
+             && mc "${mc_args[@]}" stat "${remote}/cubestack-installer-cli.tar" >/dev/null 2>&1; then
+            echo "CLI image unchanged (${image_id}); skip tar upload" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          tar_path="${RUNNER_TEMP}/cubestack-installer-cli.tar"
+          docker save "${IMAGE}" -o "${tar_path}"
+          printf '%s' "${image_id}" > "${tar_path}.digest"
+          mc "${mc_args[@]}" cp "${tar_path}" "${remote}/cubestack-installer-cli.tar"
+          mc "${mc_args[@]}" cp "${tar_path}.digest" "${remote}/cubestack-installer-cli.digest"
+          mc "${mc_args[@]}" stat "${remote}/cubestack-installer-cli.tar" >/dev/null
+          echo "synced CLI tar → ${remote}/ (image ${image_id})" | tee -a "$GITHUB_STEP_SUMMARY"

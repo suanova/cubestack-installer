@@ -28,14 +28,14 @@ helm pull oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart \
 # 把 helm 输出的 "Digest:" 写入 <tgz>.digest —— 不要用 sha256sum
 ```
 
-## 过渡期
+## 状态
 
-本目录仅作为**一个版本**的只读 fallback。模块解析优先级:
+本目录**不再参与模块解析**。模块只认:
 
 ```
 CUBESTACK_OPERATOR_CHART_DIR
   > offline-files/cubestack-operator/charts/
-  > 本目录
 ```
 
-下一版本删除本目录、`.gitignore` 中的旧规则, 以及 `check-modules.sh` ⑩ 的过渡豁免。
+手动构建 CLI 镜像时**不需要**把 chart 放到本目录。本目录里的旧
+`cubestack-operator-chart-*.tgz` / `.tgz.digest` 可手工删除。

@@ -198,11 +198,11 @@ for _t in $(seq 1 15); do
         _registry_ready=1
         break
     fi
-    say "  registry ${REGISTRY_DIRECT}/v2/ 未就绪, ${_t}/15 次重试中(${SERVICE_EXPOSE_MODE} 数据面初始化) ..."
+    say "  registry ${REGISTRY_DIRECT}/v2/ 未就绪, ${_t}/15 次重试中(${REGISTRY_SERVICE_TYPE:-nodeport} 数据面初始化) ..."
     sleep 2
 done
 [ "${_registry_ready}" = "1" ] \
-    || { err "集群内置 registry ${REGISTRY_DIRECT}/v2/ 30s 内仍不可达(当前 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE}; nodeport 应能直连 <master>:${REGISTRY_NODEPORT:-31148}, metallb 检查 MetalLB VIP 与 registry Service 状态)"; exit 1; }
+    || { err "集群内置 registry ${REGISTRY_DIRECT}/v2/ 30s 内仍不可达(当前 REGISTRY_SERVICE_TYPE=${REGISTRY_SERVICE_TYPE:-nodeport}; nodeport 应能直连 <master>:${REGISTRY_NODEPORT:-31148}, metallb 检查 MetalLB VIP 与 registry Service 状态)"; exit 1; }
 ok "registry ${REGISTRY_DIRECT}/v2/ 可达"
 SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
     || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }

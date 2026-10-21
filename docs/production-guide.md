@@ -17,7 +17,7 @@
 | 控制面高可用 · 节点侧本地代理 | `API_LOCAL_LB_ENABLED` | **开** | §1.2 |
 | 控制面高可用 · 外部浮动 VIP | `KUBE_VIP_ENABLED` + `K8S_API_VIP` | **关**(需显式开) | §1.2 / §2.3 |
 | 对外负载均衡(LB Service) | `METALLB_ENABLED` + `METALLB_POOL` | 开 | §2.1 |
-| 服务暴露方式 | `SERVICE_EXPOSE_MODE` | `nodePort`(生产建议 `metallb`) | §2.2 |
+| 服务暴露方式 | `SERVICE_EXPOSE_MODE` | `metallb`（生产默认；测试环境可显式设 `nodeport`） | §2.2 |
 | 分布式存储(Rook-Ceph) | `CEPH_ENABLED` / `CEPH_CSI_ENABLED` | 关(需显式开) | §3.1 |
 | 块存储 / 文件存储 / 对象存储(S3) | `CEPH_CSI_ENABLED` / `CEPHFS_ENABLED` / `CEPH_RGW_ENABLED` | 随 `CEPH_CSI_ENABLED` | §3.2–§3.4 |
 | 接入**外部已有** Ceph 集群 | `CEPH_MODE=external` + `external-ceph.env` | `internal` | §3.5 |
@@ -277,14 +277,17 @@ registry   LoadBalancer   10.233.2.135   10.66.3.237   5000:30279/TCP
 
 | 取值 | 行为 | 什么时候用 |
 |---|---|---|
-| `nodePort`(默认) | 用 `NodePort` 暴露;registry 另有 DNAT/`REGISTRY_IP` 兜底 | 无 LB 地址段可用时 |
-| `metallb` | 关键服务用 `LoadBalancer`(由 MetalLB 发地址) | **生产推荐**(本环境用的就是它) |
+| `metallb`（默认） | 关键服务用 `LoadBalancer`(由 MetalLB 发地址) | **生产推荐**(本环境用的就是它) |
+| `nodePort` | 用 `NodePort` 暴露 | 无 LB 地址段可用时 |
 | `hostNetwork` | 直接占用节点端口 | 只有明确需要时 |
 
 ```bash
 SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-metallb}"
 ```
 
+> ⚠ **registry 独立默认走 NodePort**（`REGISTRY_SERVICE_TYPE=nodeport`），不随全局模式变化、不占 MetalLB VIP；
+> 要 registry 也走 LoadBalancer VIP，显式设 `REGISTRY_SERVICE_TYPE=loadbalancer`（defaults §3.2）。
+>
 > 它同时是 Ceph 对外暴露(`CEPH_EXTERNAL_EXPOSE_MODE`,见 §3.5)的默认随动值 —— 改这一处,存储暴露方式跟着变。
 
 ### 2.3 kube-vip:给 API 入口一个浮动 VIP

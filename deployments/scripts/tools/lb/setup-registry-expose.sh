@@ -27,7 +27,7 @@ esac
 #   loadbalancer → MetalLB 固定 VIP:REGISTRY_PORT
 #   nodeport     → 第一个节点的 NodePort(kube-proxy 自动转发到 registry pod, 不依赖 MetalLB)
 REGISTRY_FORWARD_TARGET=""
-case "${REGISTRY_SERVICE_TYPE:-loadbalancer}" in
+case "${REGISTRY_SERVICE_TYPE:-nodeport}" in
     nodeport)
         [ -n "${REGISTRY_NODEPORT:-}" ] || { err "未配置 REGISTRY_NODEPORT"; exit 1; }
         for line in "${NODES[@]:-}"; do

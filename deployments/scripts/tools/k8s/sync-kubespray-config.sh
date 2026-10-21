@@ -544,14 +544,19 @@ PYEOF
 }
 
 if [ -f "${ADDONS_YML}" ] && [ "${REGISTRY_ENABLED:-0}" = "1" ]; then
-    # REGISTRY_IP 自动派生: 留空则从 METALLB_POOL 取首地址(换环境只改池, 不用手改 VIP)
+    # REGISTRY_IP 自动派生: registry nodeport → 首个 master; registry loadbalancer → METALLB_POOL 首地址
     # load_config 已派生, 此处仅兜底(防单独直接运行本脚本时未走 load_config 派生分支)
     if [ -z "${REGISTRY_IP:-}" ]; then
-        REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
+        if [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ]; then
+            REGISTRY_IP="$(first_master_ip)" || REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
+            say "  REGISTRY_IP 留空, registry=nodeport → 首个 master IP ${REGISTRY_IP}"
+        else
+            REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
+            say "  REGISTRY_IP 留空, registry=${REGISTRY_SERVICE_TYPE} → METALLB_POOL=${METALLB_POOL} 首地址 ${REGISTRY_IP}"
+        fi
         [ -n "${REGISTRY_IP}" ] || REGISTRY_IP="10.244.2.100"
-        say "  REGISTRY_IP 留空, 自动取 METALLB_POOL=${METALLB_POOL} 首地址 → ${REGISTRY_IP}(需固定可显式设 REGISTRY_IP)"
     fi
-    case "${REGISTRY_SERVICE_TYPE:-loadbalancer}" in
+    case "${REGISTRY_SERVICE_TYPE:-nodeport}" in
         nodeport)
             say "更新 ${ADDONS_YML} (registry Service → NodePort ${REGISTRY_NODEPORT:-31148}) ..."
             sed -i -E "s|^([[:space:]]*)registry_service_type:.*|\1registry_service_type: NodePort|" "${ADDONS_YML}"
@@ -597,11 +602,11 @@ fi
 CONTAINERD_YML="${INV_DIR}/group_vars/all/containerd.yml"
 if [ -f "${CONTAINERD_YML}" ]; then
     say "更新 ${CONTAINERD_YML} (containerd 信任 registry) ..."
-    # 镜像 host 按暴露模式二选一:
-    #   nodeport(默认) → http://<首个 master IP>:${REGISTRY_NODEPORT} —— 节点 containerd 客户端侧
+    # 镜像 host 按 **registry Service 类型**二选一(与全局 SERVICE_EXPOSE_MODE 解耦):
+    #   registry nodeport(默认) → http://<首个 master IP>:${REGISTRY_NODEPORT} —— 节点 containerd 客户端侧
     #     直连 NodePort 拉取, 不依赖 /etc/hosts 解析与节点 iptables(kube-proxy 会重置节点规则);
-    #   metallb         → http://registry.cubestack.io:PORT(经 /etc/hosts → VIP)。
-    _EXPOSE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
+    #   registry loadbalancer   → http://registry.cubestack.io:PORT(经 /etc/hosts → VIP)。
+    _EXPOSE="$(echo "${REGISTRY_SERVICE_TYPE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
     if [ "${_EXPOSE}" = "nodeport" ]; then
         _MIRROR_HOST="http://${REGISTRY_IP}:${REGISTRY_NODEPORT:-31148}"
     else

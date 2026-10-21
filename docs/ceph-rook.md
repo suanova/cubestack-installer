@@ -168,7 +168,7 @@ REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-blo
    > ② 只有 node caps → **建卷失败**(RADOS permission error)。详见 §外部接入常见故障。
 
 **暴露模式**(大小写不敏感, 均经 `tr` 转小写归一):
-- 跟随 `SERVICE_EXPOSE_MODE`(默认): `nodeport` → NodePort Service / `metallb` → LoadBalancer(MetalLB VIP)
+- 跟随 `SERVICE_EXPOSE_MODE`(默认 `metallb`): `nodeport` → NodePort Service / `metallb` → LoadBalancer(MetalLB VIP)
 - `CEPH_EXTERNAL_EXPOSE_MODE=nodeport|loadbalancer|metallb|clusterip` 显式覆盖全部;
   `clusterip/off` = 不对外暴露(仅集群内可达)
 - `CEPH_RGW_EXPOSE_MODE` 仅覆盖 RGW(mon 仍随主模式); `CEPH_RGW_NODEPORT` 固定 RGW NodePort(空=自动)
@@ -215,8 +215,8 @@ sudo ./deploy-cluster.sh --steps verify_ceph                        # ⑨ 自动
    CEPH_RGW_ENABLED=true                    # 可选: 需要 S3 时
    CEPHFS_ENABLED=true                      # 可选: 需要外部 CephFS 时(给 B 提供 cephfs-ephemeral/durable)
    CEPH_MON_NODEPORT_BASE=30100             # 规律 NodePort(默认; ≤ apiserver range)
-   # SERVICE_EXPOSE_MODE 决定对外端口: nodeport(默认)→ IP:30100/30101/30102(规律);
-   #                                metallb → VIP:6789 等 Ceph 原生端口
+   # SERVICE_EXPOSE_MODE 决定对外端口: nodeport→ IP:30100/30101/30102(规律);
+   #                                metallb(默认)→ VIP:6789 等 Ceph 原生端口
    ```
 2. 部署:
    ```bash

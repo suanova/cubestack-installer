@@ -34,11 +34,12 @@ METALLB_POOL="10.66.1.131-10.66.1.132"   # ⚠ 必须排除已被其他集群/�
 # ════════════════════════════════════════════════════════════
 
 # ---- 服务暴露方式(全局开关) ----
-# nodePort(默认) = NodePort 暴露(不依赖 MetalLB/空闲 VIP; 外部访问 <任一节点IP>:<NodePort>);
-#                  registry 经首个 master 的 NodePort(REGISTRY_NODEPORT)访问, hosts.toml 客户端侧改写域名映射;
-# metallb        = MetalLB LoadBalancer VIP 暴露(生产; 需 METALLB_POOL 提供同网段空闲 IP)。
-# 其它值一律归一化为 metallb; 各服务可用 REGISTRY_SERVICE_TYPE 单独覆盖(defaults §3.2)。
-SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-nodePort}"
+# metallb(默认) = MetalLB LoadBalancer VIP 暴露(生产; 需 METALLB_POOL 提供同网段空闲 IP);
+# nodePort       = NodePort 暴露(不依赖 MetalLB/空闲 VIP; 外部访问 <任一节点IP>:<NodePort>)。
+# 其它值一律归一化为 metallb。
+# ⚠ registry 默认**独立走 NodePort**(REGISTRY_SERVICE_TYPE=nodeport, 不占 MetalLB VIP);
+#   要 registry 也走 LoadBalancer VIP, 显式设 REGISTRY_SERVICE_TYPE=loadbalancer(defaults §3.2)。
+SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-metallb}"
 
 # ---- MetalLB + API Server VIP(kube-vip; 见 docs/kube-vip-api-ha.md) ----
 METALLB_ENABLED="${METALLB_ENABLED:-true}"              # MetalLB 负载均衡(依赖 3.1 地址池; 需 strict_arp)
@@ -71,6 +72,11 @@ CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED="${CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED:-
 ONLINE_DEPLOY_CUBESTACK_OPERATOR="${ONLINE_DEPLOY_CUBESTACK_OPERATOR:-false}"  # 平台 Operator 镜像来源: false=离线(tar→内置 registry; 默认) / true=在线(按 chart 定义从 Harbor 直拉)
 # (NVIDIA 的 ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR 在下方"附加组件开关"区; 两者均于 2026-10-16 挪入主文件)
 # → 滚动 chart/镜像 tag(CHART_VERSION / IMAGE_TAG)与同步模式(CHART_SYNC) → defaults §4.6b
+
+# ---- 发布版本(可选; 详见 docs/release-management.md) ----
+# 设为 CUBESTACK_RELEASE="2.0.0" 时使用 <CUBESTACK_RELEASE_ROOT>/2.0.0/offline-files/ 内的
+# release.env 与离线件(变量默认值在 cluster.defaults.conf §4.10; 或 deploy-cluster.sh --release 2.0.0)。
+# 取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release 2.0.0 --dest <本地桶根>
 
 # ---- Harbor(集群外仓库; HARBOR_ENABLED 为预留模块开关, HARBOR_MIRROR_* 为镜像源凭据) ----
 HARBOR_ENABLED="${HARBOR_ENABLED:-false}"               # Harbor 外部镜像仓库(预留, 见 defaults §1.7)

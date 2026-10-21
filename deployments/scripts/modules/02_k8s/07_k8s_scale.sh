@@ -288,10 +288,11 @@ if [ -n "${NEW_NODE_HOSTS}" ] && [ -n "${API_IP:-}" ]; then
     # ⚠ 2026-09-28 rebase 取舍: api_entry_addr 在非 external 模式下**委托** api_entry_ip
     #   (见 lib-common)—— 于是 main 的"显式 API_ENTRY_IP 优先 / VIP 可用性体检"一并保留。
     _entry="$(api_entry_addr)" || { err "无法解析 API 入口地址(检查 cluster.conf 的 API_EXTERNAL_ADDR / KUBE_VIP_ENABLED 入口配置)"; exit 1; }
-    # nodeport 模式: 节点侧经 NodePort 直连首个 master; 否则经 REGISTRY_DOMAIN:REGISTRY_PORT(VIP)
+    # registry nodeport(默认, 与全局暴露模式解耦): 节点侧经 NodePort 直连首个 master;
+    # 否则经 REGISTRY_DOMAIN:REGISTRY_PORT(VIP)
     # ⚠ mirror 这里仍然用 API_IP(节点 IP 语义) —— VIP 不代理 NodePort, 换成 VIP 会让新节点拉不到镜像
     _np_mirror="http://${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
-    if [ "${REGISTRY_SERVICE_TYPE:-loadbalancer}" = "nodeport" ] || [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ]; then
+    if [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ]; then
         _np_mirror="http://${API_IP}:${REGISTRY_NODEPORT:-31148}"
     fi
     _certs_dir="/etc/containerd/certs.d/${REGISTRY_DOMAIN}:${REGISTRY_PORT}"

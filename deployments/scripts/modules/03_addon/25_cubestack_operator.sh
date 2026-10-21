@@ -27,7 +27,7 @@
 #  · chart 来源(需求 2): oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart,
 #     离线副本 = deployments/offline-files/cubestack-operator/charts/<chart>-<版本>.tgz(+ .digest 边车),
 #     随离线包(MinIO)分发, 与组件镜像 tar 同目录。安装**恒用这份本地副本** —— 线上拉到的东西
-#     不直接装(见 scripts-development-spec §2.4)。旧路径 cubestack-addon/ 仅作一个版本的只读 fallback。
+#     不直接装(见 scripts-development-spec §2.4)。旧路径 cubestack-addon/ 已不再参与解析。
 #   · 镜像清单(需求 4): **从 chart 渲染结果动态提取**(不写死清单); 逐个推入集群内置 registry。
 #     离线 tar 目录 = deployments/offline-files/cubestack-operator/(联网机用
 #     tools/images/harbor-save-images.sh --group cubestack-operator 生成**本体**)。
@@ -209,10 +209,9 @@ IMG_PULL_POLICY="Always"   # 2026-10-19 用户口径: 离线/在线都恒 Always
                            # CUBESTACK_OPERATOR_IMAGE_PULL_POLICY 保留兼容但不再生效(见 cluster.defaults.conf)。
 PIN_DIGEST="${CUBESTACK_OPERATOR_PIN_IMAGE_DIGEST:-true}"
 OFFLINE_DIR="${CUBESTACK_OPERATOR_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/cubestack-operator}"
-# chart 跟随离线包分发: 默认在离线包的 charts/ 子目录; 旧路径只读 fallback 保留一个版本。
+# chart 跟随离线包分发: 默认在离线包的 charts/ 子目录(dev/release 均同构); 不再使用 cubestack-addon 旧路径。
 EXPLICIT_CHART_DIR="${CUBESTACK_OPERATOR_CHART_DIR:-}"
 PRIMARY_CHART_DIR="${OFFLINE_DIR}/charts"
-LEGACY_CHART_DIR="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator"
 CHART_DIR=""
 CHART_SOURCE=""
 CHART_TGZ=""
@@ -266,19 +265,13 @@ case "${SYNC_MODE}" in
     *) err "CUBESTACK_OPERATOR_CHART_SYNC 仅支持 auto|online|offline(当前=${SYNC_MODE})"; exit 1 ;;
 esac
 
-# chart 目录解析: 默认在离线包的 charts/(与组件镜像 tar 同集合); 旧 cubestack-addon 路径
-# 仅作一个版本的只读 fallback。显式 CUBESTACK_OPERATOR_CHART_DIR 优先且不回退(隐藏配置错误更糟)。
+# chart 目录解析: 显式 CUBESTACK_OPERATOR_CHART_DIR 优先; 否则恒用离线包的 charts/。
+# 旧 cubestack-addon 路径**不再参与解析** —— 手动构建镜像时不需要再往那里放 chart。
 _resolve_chart_dir() {
     if [ -n "${EXPLICIT_CHART_DIR}" ]; then
         CHART_DIR="${EXPLICIT_CHART_DIR}"; CHART_SOURCE="explicit"
     elif [ -f "${PRIMARY_CHART_DIR}/${CHART_BASENAME}" ]; then
         CHART_DIR="${PRIMARY_CHART_DIR}"; CHART_SOURCE="offline-bundle"
-    elif [ -f "${LEGACY_CHART_DIR}/${CHART_BASENAME}" ]; then
-        if [ "${_MODE}" = "online" ]; then
-            CHART_DIR="${PRIMARY_CHART_DIR}"; CHART_SOURCE="migrate"
-        else
-            CHART_DIR="${LEGACY_CHART_DIR}"; CHART_SOURCE="legacy"
-        fi
     else
         CHART_DIR="${PRIMARY_CHART_DIR}"; CHART_SOURCE="missing"
     fi
@@ -322,10 +315,6 @@ else:                                     # 单架构清单 → 字节 sha256 = 
 # ---------------- [1/6] chart 离线副本就绪(在线则比对 digest 刷新) ----------------
 say "[1/6] chart 离线副本就绪(sync=${SYNC_MODE} → ${_MODE})..."
 _resolve_chart_dir
-case "${CHART_SOURCE}" in
-    legacy)  warn "  chart 仍在旧路径 ${CHART_DIR}(已弃用); 请迁移到 ${PRIMARY_CHART_DIR}/" ;;
-    migrate) say "  chart 将迁移到离线包目录 ${PRIMARY_CHART_DIR}/" ;;
-esac
 if [ "${_MODE}" = "online" ]; then
     if [ -n "${HARBOR_USER}" ]; then
         # --password-stdin: 不进 ps/日志(与 harbor-save-images.sh 的 auth 文件同一考虑)
@@ -335,21 +324,13 @@ if [ "${_MODE}" = "online" ]; then
         warn "  未配置 ${HARBOR_HOST} 凭据(CUBESTACK_OPERATOR_HARBOR_USER/HARBOR_MIRROR_USER): 依赖既有 helm 登录态, 否则远端拉取 401 并回退本地副本"
     fi
 fi
-if [ "${CHART_SOURCE}" = "migrate" ]; then
-    # 在线迁移: 拉到新位置; 失败则退回旧路径, 不再二次调用 helper(避免重复联网/覆盖)
-    if ! helm_chart_ensure "${RELEASE}" "${CHART_TGZ}" "${CHART_VER}" "${_MODE}" "${CHART_REF}"; then
-        warn "  chart 迁移到 ${PRIMARY_CHART_DIR}/ 失败, 回退旧路径只读副本"
-        CHART_DIR="${LEGACY_CHART_DIR}"; CHART_SOURCE="legacy"
-        CHART_TGZ="${CHART_DIR}/${CHART_BASENAME}"
-    fi
-else
-    # 不在这里 exit: 让下面的 fail-fast 统一打印"搜索过哪些路径 + 怎么补料"
-    helm_chart_ensure "${RELEASE}" "${CHART_TGZ}" "${CHART_VER}" "${_MODE}" "${CHART_REF}" || true
-fi
+# 不在这里 exit: 让下面的 fail-fast 统一打印"搜索过哪些路径 + 怎么补料"
+helm_chart_ensure "${RELEASE}" "${CHART_TGZ}" "${CHART_VER}" "${_MODE}" "${CHART_REF}" || true
 if [ ! -f "${CHART_TGZ}" ]; then
     err "  chart 缺失: ${CHART_TGZ}(source=${CHART_SOURCE})"
-    err "    已查找: ${EXPLICIT_CHART_DIR:-<未设置>} / ${PRIMARY_CHART_DIR} / ${LEGACY_CHART_DIR}"
+    err "    已查找: ${EXPLICIT_CHART_DIR:-<未设置>} / ${PRIMARY_CHART_DIR}"
     err "    离线包: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub cubestack-operator"
+    [ -n "${CUBESTACK_RELEASE:-}" ] && err "    发布版本: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --dest ${CUBESTACK_RELEASE_ROOT:-<本地桶根>}"
     err "    在线/手工: helm pull ${CHART_REF} --version ${CHART_VER} -d ${PRIMARY_CHART_DIR}"
     err "              并把 helm 输出的 Digest: 写入 ${CHART_BASENAME}.digest(不要用 sha256sum)"
     exit 1
@@ -366,7 +347,7 @@ ensure_hosts_entry "${API_ENTRY_IP}" "${API_DOMAIN}"
 grep -qE "^${REGISTRY_IP}[[:space:]]+${REGISTRY_DOMAIN}" /etc/hosts 2>/dev/null \
     || warn "无法写入宿主机 /etc/hosts(非 root?), ${REGISTRY_DOMAIN} 可能无法从宿主按域名访问"
 wait_registry_ready "http://${REG_DIRECT}/v2/" \
-    || { err "集群内置 registry ${REG_DIRECT}/v2/ 不可达(检查 REGISTRY_* 与 k8s_registry 模块; SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE:-nodeport})"; exit 1; }
+    || { err "集群内置 registry ${REG_DIRECT}/v2/ 不可达(检查 REGISTRY_* 与 k8s_registry 模块; REGISTRY_SERVICE_TYPE=${REGISTRY_SERVICE_TYPE:-nodeport})"; exit 1; }
 SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
     || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
 # helm 从宿主连 API Server(kubeconfig 的 server 改写为 API_DOMAIN + 宿主机 DNAT, 见 sync_kubeconfig)

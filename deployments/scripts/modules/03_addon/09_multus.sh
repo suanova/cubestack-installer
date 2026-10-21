@@ -113,7 +113,7 @@ unset _t
 say "[2/4] 推送 Multus 镜像到集群内置 registry(${REG_DIRECT}/k8snetworkplumbingwg)..."
 skopeo_require multus
 if ! wait_registry_ready "http://${REG_DIRECT}/v2/" 30; then
-    err "集群内置 registry ${REG_DIRECT}/v2/ 30s 内不可达(检查 SERVICE_EXPOSE_MODE / registry pod / REGISTRY_DIRECT)"
+    err "集群内置 registry ${REG_DIRECT}/v2/ 30s 内不可达(检查 REGISTRY_SERVICE_TYPE / registry pod / REGISTRY_DIRECT)"
     exit 1
 fi
 # 幂等: registry 已有该 tag 则跳过 push(此时不需要离线 tar, 与上面 [1/4] 的"不猜内容"不冲突)

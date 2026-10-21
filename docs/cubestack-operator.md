@@ -132,8 +132,10 @@ chart 随离线包分发, tgz/digest 不入 git; `check-modules.sh` 第 ⑩ 项�
 解析优先级:
 
 1. `CUBESTACK_OPERATOR_CHART_DIR`(显式覆盖, 缺失即失败, 不回退);
-2. `${CUBESTACK_OPERATOR_OFFLINE_DIR}/charts/`(默认 `offline-files/cubestack-operator/charts/`);
-3. 旧路径 `deployments/cubestack-addon/cubestack-operator/`(只读 fallback, 保留一个版本)。
+2. `${CUBESTACK_OPERATOR_OFFLINE_DIR}/charts/`(默认 `offline-files/cubestack-operator/charts/`)。
+
+> 旧路径 `deployments/cubestack-addon/cubestack-operator/` **不再参与解析**;
+> 手动构建 CLI 镜像时也不需要把 chart 放到那里。
 
 ### 3.3 在线时每次刷新 chart(需求 3)
 

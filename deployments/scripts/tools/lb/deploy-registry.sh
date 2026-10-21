@@ -87,7 +87,7 @@ for line in "${NODES[@]:-}"; do
 done
 [ -n "${FIRST_MASTER}" ] || { err "cluster.conf 中无 master 节点"; exit 1; }
 
-say "内置 registry 部署(域名=${REGISTRY_DOMAIN}, VIP=${REGISTRY_IP}, 端口=${REGISTRY_PORT}, 节点=${#NODE_ENTRIES[@]}台) ..."
+say "内置 registry 部署(域名=${REGISTRY_DOMAIN}, 地址=${REGISTRY_IP}, 端口=${REGISTRY_PORT}, 节点=${#NODE_ENTRIES[@]}台) ..."
 
 # ---------- 关键: 分配 registry VIP 前先检测冲突(避免撞上其他集群/设备的 IP) ----------
 # 背景: MetalLB Layer2 VIP 一旦被其他集群(同样默认取 METALLB_POOL 首地址)或设备占用,
@@ -104,6 +104,8 @@ say "内置 registry 部署(域名=${REGISTRY_DOMAIN}, VIP=${REGISTRY_IP}, 端�
 #     每次部署的 VIP 是【固定的】(自动取池首地址 / 显式指定), 不会每次随机变化 ——
 #     因此多集群/多环境必须保证 METALLB_POOL 或 REGISTRY_IP 彼此不重叠, 否则必然冲突。
 _registry_vip_check() {
+    # 仅 registry LoadBalancer 模式需要检查 VIP 冲突; nodeport(默认)不占 VIP, 跳过
+    [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ] && return 0
     local cand="${REGISTRY_IP:-}"
     [ -n "${cand}" ] || return 0
     # 仅自动派生(REGISTRY_IP_EXPLICIT=0)时探测; 显式设置跳过(用户已确认)
@@ -130,7 +132,7 @@ _registry_vip_check() {
 }
 
 # ---------------- 1. registry Service 暴露方式(LoadBalancer 固定 VIP / NodePort) ----------------
-say "[1/4] 设置 registry Service 暴露方式(${REGISTRY_SERVICE_TYPE:-loadbalancer}) ..."
+say "[1/4] 设置 registry Service 暴露方式(${REGISTRY_SERVICE_TYPE:-nodeport}) ..."
 # 分配前检测候选 VIP 是否与既有集群/设备冲突(仅自动派生时提示; 显式设置不提示)
 _registry_vip_check
 SVC_EXISTS=$(node_cmd "${FIRST_MASTER}" "${FIRST_MASTER_USER}" "${FIRST_MASTER_PW}" \
@@ -139,7 +141,7 @@ if [ -z "${SVC_EXISTS}" ]; then
     err "未找到 kube-system/registry Service(集群未部署 registry addon? 检查 addons.yml registry_enabled)"
     exit 1
 fi
-case "${REGISTRY_SERVICE_TYPE:-loadbalancer}" in
+case "${REGISTRY_SERVICE_TYPE:-nodeport}" in
     nodeport)
         CUR_NP=$(node_cmd "${FIRST_MASTER}" "${FIRST_MASTER_USER}" "${FIRST_MASTER_PW}" \
             "kubectl get svc -n kube-system registry -o jsonpath='{.spec.ports[0].nodePort}'" 2>/dev/null || echo "")
@@ -169,7 +171,7 @@ esac
 #   节点 nat 规则); 部署端(push/预检)经 REGISTRY_DIRECT 直连 <首个master>:REGISTRY_NODEPORT。
 #   **不再配置宿主机 DNAT/SNAT**: registry 已通过 NodePort 直连暴露(VIP/nodePort 皆可直接访问),
 #   无需宿主机级 iptables NAT 转发或 systemd 持久化(曾引入 NET_ADMIN/systemd 依赖与混淆)。
-if [ "${REGISTRY_SERVICE_TYPE:-loadbalancer}" = "nodeport" ]; then
+if [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ]; then
     _NP_MIRROR="http://${FIRST_MASTER}:${REGISTRY_NODEPORT:-31148}"
     say "[1.5/4] nodeport 模式: registry 已经 NodePort 直连暴露(${_NP_MIRROR}), 无需宿主机 DNAT/SNAT"
 else
@@ -227,7 +229,7 @@ rm -f "${NODE_SCRIPT}"
 if [ "${REGISTRY_EXPOSE_HOST:-0}" = "1" ]; then
     warn "[3/4] REGISTRY_EXPOSE_HOST 已废弃(registry 走 VIP/NodePort 直连即可), 不再配置宿主机 DNAT"
 else
-    say "[3/4] 跳过宿主机对外 DNAT(默认; 集群内/节点经 containerd hosts.toml 直连 registry —— ${SERVICE_EXPOSE_MODE} 模式)"
+    say "[3/4] 跳过宿主机对外 DNAT(默认; 集群内/节点经 containerd hosts.toml 直连 registry —— ${REGISTRY_SERVICE_TYPE:-nodeport} 模式)"
 fi
 
 # ---------------- 4. 验证 + 用法 ----------------
@@ -255,7 +257,7 @@ _wait_ready() {   # <url> <desc> → 恒定返回 0(可达=ok / 超时=warn, 都
     warn "  ${desc} ${tries} 次 × 2s 内未就绪 —— **不阻断**: 就绪判定交由 05_k8s_registry.sh 的权威等待继续(上限 ${REGISTRY_WAIT_SECONDS:-600}s)"
     return 0
 }
-if [ "${REGISTRY_SERVICE_TYPE:-loadbalancer}" = "nodeport" ]; then
+if [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ]; then
     NP_OK=$(node_cmd "${FIRST_MASTER}" "${FIRST_MASTER_USER}" "${FIRST_MASTER_PW}" \
         "kubectl get svc -n kube-system registry -o jsonpath='{.spec.ports[0].nodePort}'" 2>/dev/null || echo "")
     FIRST_NODE_IP="$(node_cmd "${FIRST_MASTER}" "${FIRST_MASTER_USER}" "${FIRST_MASTER_PW}" \
@@ -280,7 +282,7 @@ fi
 
 echo "---------------------------------------------"
 ok "内置 registry 部署完成"
-if [ "${SERVICE_EXPOSE_MODE}" = "nodeport" ]; then
+if [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ]; then
     echo "  集群内 pod 拉取:  image: ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/<namespace>/<image>:<tag>(节点经 containerd hosts.toml 直连 <master>:${REGISTRY_NODEPORT:-31148})"
 else
     echo "  集群内 pod 拉取:  image: ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/<namespace>/<image>:<tag>(走 MetalLB VIP ${REGISTRY_IP}:${REGISTRY_PORT})"
@@ -291,4 +293,8 @@ if [ "${REGISTRY_EXPOSE_HOST:-0}" = "1" ]; then
     echo "                    docker push ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/<namespace>/<image>:<tag>"
     echo "  撤销对外转发:    sudo ${SCRIPT_DIR}/tools/lb/setup-registry-expose.sh --delete"
 fi
-echo "  验证 registry:    curl http://${REGISTRY_IP}:${REGISTRY_PORT}/v2/  (loadbalancer) 或 节点:${REGISTRY_NODEPORT:-31148} (nodeport)"
+if [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ]; then
+    echo "  验证 registry:    curl http://${FIRST_MASTER}:${REGISTRY_NODEPORT:-31148}/v2/  (NodePort)"
+else
+    echo "  验证 registry:    curl http://${REGISTRY_IP}:${REGISTRY_PORT}/v2/  (LoadBalancer)"
+fi

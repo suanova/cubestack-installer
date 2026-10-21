@@ -128,7 +128,7 @@ IMG_REF="${REG_BASE}/netshoot/${IMG_NAME}:${IMG_TAG}"
 say "[2/4] 推送 ${IMG_NAME}:${IMG_TAG} → ${PUSH_REPO}(离线关键: 节点只从内置 registry 拉)..."
 skopeo_require netshoot
 wait_registry_ready "http://${REG_DIRECT}/v2/" 30 \
-    || { err "集群内置 registry ${REG_DIRECT}/v2/ 不可达(检查 SERVICE_EXPOSE_MODE / registry pod / REGISTRY_DIRECT)"; exit 1; }
+    || { err "集群内置 registry ${REG_DIRECT}/v2/ 不可达(检查 REGISTRY_SERVICE_TYPE / registry pod / REGISTRY_DIRECT)"; exit 1; }
 if reg_has_tag "${PUSH_REPO}" "${IMG_NAME}" "${IMG_TAG}"; then
     say "  registry 已有 ${IMG_NAME}:${IMG_TAG}, 跳过推送"
 else
