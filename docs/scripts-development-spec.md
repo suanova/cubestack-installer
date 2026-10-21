@@ -137,12 +137,16 @@ load_config
 **凡安装 helm chart 的模块,其 chart 必须有一份 vendored 在 `deployments/cubestack-addon/<组件>/`
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
+**窄例外**:`cubestack-operator` 的 chart 随离线包分发,放在
+`deployments/offline-files/cubestack-operator/charts/`(与组件镜像 tar 同集合),`.tgz`/`.digest`
+不入 git,由内网同步机上传 MinIO。该例外需满足:模块显式引用该目录、目录下 `README.md` 被 git 跟踪;
+`check-modules.sh` ⑩ 按此识别。
+
 模板(定位/安装 chart 的模块):`deployments/scripts/modules/03_addon/02_ceph.sh` 与
 `06_gpu_operator.sh` 展示了 chart 路径定位与 `helm upgrade --install` 的完整写法。
 
 共享助手 `helm_chart_ensure`(用法见下面第 2 条)把"本地副本就绪 + digest 比对刷新"收敛到一处。
-⚠ 它**当前没有任何模块调用**(原调用方已下架),但约定与 `check-modules.sh` 第 ⑩ 项仍在生效 ——
-新模块**应当**直接用它,而不要再手写一套比对逻辑。
+operator 模块与 NVIDIA GPU operator 模块均调用它 —— 新模块**应当**直接用它,不要再手写一套比对逻辑。
 
 1. **一个 chart 一个子目录**:`deployments/cubestack-addon/<组件>/`。形态二选一,同一组件内保持一致:
    - **`.tgz`**:小 chart 用这个,并**同时提交 `<tgz>.digest` 边车**
@@ -152,20 +156,24 @@ load_config
    ```bash
    helm_chart_ensure <组件名> <本地tgz路径> <版本> <online|offline> <ref> [repoURL] || exit 1
    ```
-   它负责:online 拉远端 → 取 `Digest:` 与边车比对 → 未变继续用本地(仓库保持干净)、
-   变了覆盖本地并提示 commit、拉取失败降级回退本地;offline 完全不联网;最后判一次本地副本在不在。
+   它负责:online 拉远端 → 取 `Digest:` 与边车比对 → 未变继续用本地、变了原子替换本地副本、
+   拉取失败降级回退本地;offline 完全不联网;最后判一次本地副本在不在。
    `ref` 传 `oci://…` 或经典 repo 的 chart 名(后者要同时给 `repoURL`)。
+   ⚠ 本地副本若在 `offline-files/` 下,刷新提示是"跑同步工具上传 MinIO",不再提示 `git commit`。
 3. **离线副本缺失 = 致命错误**(`err` + 退出),提示里必须给出获取方法;不要静默降级成"用线上那份"。
-4. **刷新走显式工具 + commit**,不要靠部署过程自动落盘:
-   - chart:目前**没有**脚本化刷新工具 —— 手工 `helm pull` 覆盖 vendored 副本后 commit,
-     步骤示例: 手工 `helm pull` 覆盖 vendored 副本并同步 `<tgz>.digest` 边车;
+4. **刷新走显式工具**,不要靠部署过程自动落盘:
+   - chart(operator 例外):`tools/images/cubestack-platform-sync.sh --collection cubestack-operator`
+     负责 `helm pull` + digest 比对 + 上传 MinIO;
+   - chart(其它组件):手工 `helm pull` 覆盖 vendored 副本后 commit,并同步 `<tgz>.digest` 边车;
    - 镜像:`tools/images/harbor-save-images.sh --group <组>`,源与命名由 `config/images.manifest` 统一声明。
 5. **`bash tools/check-modules.sh` 的第 ⑩ 项会强制校验这条**(行首是 helm 安装命令的模块,
-   其引用的 `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`)。合入前必须全绿。
+   其引用的 `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`;或按上述窄例外,
+   在 `offline-files/<集合>/` 下且 README 被跟踪)。合入前必须全绿。
 
 > 为什么定成"恒用本地副本"而不是"线上优先":曾有模块**写了**
 > "私服拉取失败就回退本地 chart",但仓库里压根没有那份文件 —— 私服一抖动,回退就是空转。
-> 回退逻辑只有在**本地确实有一份**时才有意义,所以那份副本必须是仓库的一部分,不能只在部署时落到盘上。
+> 回退逻辑只有在**本地确实有一份**时才有意义,所以那份副本必须是仓库(或离线包)的一部分,
+> 不能只在部署时临时拉到盘上。
 
 ### 2.5 镜像离线登记与目录(强制)
 
@@ -190,8 +198,10 @@ load_config
    registry),漏登记**不会有任何脚本报错**,只在离线部署时表现为"这个镜像没在离线包里"。
    校验:`bash tools/images/check-image-manifest.sh`(格式/变量/重复;`--harbor` 额外比对漂移)。
 
-> 与 §2.4 的分工:chart 是**随 git 入仓**的 vendored 副本(`cubestack-addon/`),镜像 tar 是**不入仓**的
-> 大文件(只登记 + 备料,`offline-files/`)。共同点:**首次就把资产放到约定目录**,不许靠部署过程自动落盘。
+> 与 §2.4 的分工:chart 通常是**随 git 入仓**的 vendored 副本(`cubestack-addon/`);
+> operator chart 是文档化的例外,随离线包(`offline-files/cubestack-operator/charts/`)分发。
+> 镜像 tar 是**不入仓**的大文件(只登记 + 备料,`offline-files/`)。
+> 共同点:**首次就把资产放到约定目录**,不许靠部署过程自动落盘。
 
 ---
 

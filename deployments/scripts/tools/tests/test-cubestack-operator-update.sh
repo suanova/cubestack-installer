@@ -13,6 +13,7 @@
 #   ⑤ 离线 loop 把 **operator 镜像** 的 digest 写入 _OPERATOR_DIGEST
 #   ⑥ 冒烟 CR 显式全禁用 + retain(不继承默认组件/不卸载真实资源)
 #   ⑦ 默认保留 chart 的 8 个 model bundles + modelBundles 开启(开关默认 true, 仅显式 false 分支裁剪, 非法值报错)
+#   ⑧ chart 随离线包分发: charts/ 落点 / 显式覆盖 / legacy fallback / 缺 chart 硬失败
 # 用法: bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
 # ============================================================
 set -uo pipefail
@@ -86,7 +87,6 @@ chk "bundles 裁剪仅在 false 分支" "1" "$(printf '%s\n' "${_BUNDLE_BLOCK}" 
 chk "modelBundles 关闭仅在 false 分支" "1" "$(printf '%s\n' "${_BUNDLE_BLOCK}" | grep -cF 'clusterCR.spec.components.modelBundles.enabled=false' || true)"
 chk "模块中 bundles 清空仅此一处" "1" "$(grep -cF 'clusterCR.spec.bundles=[]' "${MOD}" || true)"
 chk "模块中 modelBundles 关闭仅此一处" "1" "$(grep -cF 'clusterCR.spec.components.modelBundles.enabled=false' "${MOD}" || true)"
-CHART_DIR="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator"
 # ★ 2026-10-20 CodeRabbit: 必须选模块实际会用的那份 chart(由 CHART_REF/CHART_VER 派生),
 #   不能 `ls | head -1` —— 目录里若同时有旧版 tgz, 会检查到错误的 chart 默认值。
 _CHART_CFG="$(
@@ -103,6 +103,13 @@ _CHART_CFG="$(
 CHART_REF_T="${_CHART_CFG%%$'\t'*}"
 CHART_VER_T="${_CHART_CFG#*$'\t'}"
 CHART_NAME_T="$(basename "${CHART_REF_T}")"
+OFFLINE_CHART_DIR="${REPO_ROOT}/deployments/offline-files/cubestack-operator/charts"
+LEGACY_CHART_DIR="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator"
+CHART_DIR="${OFFLINE_CHART_DIR}"
+# 与模块同口径: 离线包优先, 旧路径只作 fallback
+[ -f "${CHART_DIR}/${CHART_NAME_T}-${CHART_VER_T}.tgz" ] \
+    || [ ! -f "${LEGACY_CHART_DIR}/${CHART_NAME_T}-${CHART_VER_T}.tgz" ] \
+    || CHART_DIR="${LEGACY_CHART_DIR}"
 CHART_TGZ="${CHART_DIR}/${CHART_NAME_T}-${CHART_VER_T}.tgz"
 if [ -f "${CHART_TGZ}" ]; then
     _VALS_PATH="$(tar -tzf "${CHART_TGZ}" 2>/dev/null | grep -m1 '/values.yaml$' || true)"
@@ -127,8 +134,24 @@ if [ -f "${CHART_TGZ}" ]; then
 elif [ -n "$(find "${CHART_DIR}" -maxdepth 1 -type f -name '*.tgz' -print -quit 2>/dev/null || true)" ]; then
     echo "  FAIL 模块配置的 chart 不存在: ${CHART_TGZ}(目录中其他 tgz 不会用于部署)"; fail=1
 else
-    echo "  SKIP 未找到 vendored chart tgz(干净 checkout 属预期缺省)"
+    echo "  SKIP 未找到 chart tgz(干净 checkout / 未备料属预期缺省)"
 fi
+
+echo "== ⑧ chart 随离线包分发(charts/) =="
+LIB="${REPO_ROOT}/deployments/scripts/lib-common.sh"
+chk_contains "显式 chart 目录覆盖" 'CUBESTACK_OPERATOR_CHART_DIR' "${MOD}"
+chk_contains "主落点 = 离线包 charts/" 'PRIMARY_CHART_DIR="${OFFLINE_DIR}/charts"' "${MOD}"
+chk_contains "组件扫描跳过 charts" '"charts" ] && continue' "${MOD}"
+chk_contains "显式组件列表拒绝 charts" 'CUBESTACK_OPERATOR_COMPONENTS=charts 无效' "${MOD}"
+chk_contains "旧路径 fallback" 'LEGACY_CHART_DIR=' "${MOD}"
+chk_contains "路径解析函数" '_resolve_chart_dir' "${MOD}"
+chk_contains "缺 chart 硬失败" 'if [ ! -f "${CHART_TGZ}" ]' "${MOD}"
+chk_not_contains "已删除 _legacy-readmes 处理" '_legacy-readmes' "${MOD}"
+chk_contains "离线包刷新提示走同步工具" 'cubestack-platform-sync.sh --collection cubestack-operator' "${LIB}"
+chk_contains "helm_chart_ensure 按路径区分提示" '*/deployments/offline-files/*' "${LIB}"
+SYNC="${REPO_ROOT}/deployments/scripts/tools/images/cubestack-platform-sync.sh"
+chk_contains "chart 计数扫描 charts/" 'L_C="$(_local_chartn "${STATE_SUB}/charts")"' "${SYNC}"
+chk_contains "镜像保鲜失败不发布" '镜像保鲜失败, 跳过 chart 刷新与上传' "${SYNC}"
 
 echo ""
 if [ "${fail}" = "0" ]; then

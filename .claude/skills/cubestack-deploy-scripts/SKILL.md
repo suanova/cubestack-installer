@@ -385,6 +385,11 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 **凡安装 helm chart 的模块,其 chart 必须有一份 vendored 在 `deployments/cubestack-addon/<组件>/`
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
+**窄例外**:`cubestack-operator` 的 chart 随离线包分发,平铺在
+`deployments/offline-files/cubestack-operator/charts/`(与镜像 tar 同集合),`.tgz`/`.digest` 不入 git。
+模块用 `CUBESTACK_OPERATOR_CHART_DIR` > 离线包目录 > 旧 `cubestack-addon/` 的优先级解析;
+`check-modules.sh` ⑩ 识别该落点(要求 README 被 git 跟踪)。其它组件仍按下述规则。
+
 - **放哪**:`deployments/cubestack-addon/<组件>/`(一个 chart 一个子目录)。`.gitignore` 只挡
   `offline-files/*`,不挡 `cubestack-addon/`,所以 `.tgz` 直接 `git add` 即可(如 rook 的 chart 已在库里)。
 - **什么形态**:小 chart 放 `.tgz` + **同时提交 `<tgz>.digest` 边车**;大 chart(带几十个子 chart)
@@ -396,13 +401,15 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   ```
   语义:online 拉远端 → 比 `Digest:` 与边车 → **未变继续用本地**(仓库保持干净)、有更新才覆盖本地
   并提示 commit、拉取失败降级回退本地;offline 完全不联网;最后判一次本地副本在不在,不在就 `err`。
-- **怎么刷新**:目前**没有**脚本化刷新工具 —— 手工 `helm pull` 覆盖 vendored 副本
-  (手工 `helm pull` 覆盖 vendored 副本 —— 若为 `.tgz` 形态, 记得同步更新 `<tgz>.digest` 边车),`.tgz` 形态要一并更新
-  `<tgz>.digest` 边车。跑完**必须 commit** —— 不提交等于没刷新。
+- **怎么刷新**:普通 chart 手工 `helm pull` 覆盖 vendored 副本
+  (`.tgz` 形态同步更新 `<tgz>.digest` 边车),跑完**必须 commit**。
+  operator 例外:用 `tools/images/cubestack-platform-sync.sh --collection cubestack-operator`
+  (Harbor → 离线包 → MinIO),**不要** `git add` 它的 `.tgz`。
 - **为什么是"恒用本地"而不是"线上优先"**:曾有模块写了"拉取失败回退本地 chart",
   但仓库里压根没有那份文件 —— 私服一抖动回退就是空转。回退只有在本地确实有一份时才有意义。
 - **强制校验**:`tools/check-modules.sh` 第 ⑩ 项。行首是 helm 安装命令的模块,其引用的
-  `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`,否则报错。
+  `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`;或按窄例外落在
+  `offline-files/<集合>/` 且该目录 `README.md` 被 git 跟踪。否则报错。
 - **边车 `.digest` 写什么值(实测, 2026-09-30)**:写 `helm pull` 输出里的 `Digest:` 那一行。
   经典 helm repo 的它 = tgz 文件 sha256(**可以** `sha256sum` 核验); **OCI chart 的它是 manifest 摘要,
   不是文件 sha256** —— 实测 `cubestack-operator-chart-1.0.0-latest.tgz`:helm 报 `sha256:06f0318d…`,
@@ -630,7 +637,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - [ ] 未硬编码 IP/密码/路径(全部来自 cluster.conf 变量)
 - [ ] 开关类模块有 TOGGLE 检查
 - [ ] 引用的工具脚本存在于 `tools/<领域>/` 且路径正确
-- [ ] **(装 chart 的模块)chart 已 vendored 到 `cubestack-addon/<组件>/`(tgz 附 `.digest` 边车)且已 `git add`**
+- [ ] **(装 chart 的模块)chart 已 vendored 到 `cubestack-addon/<组件>/`(tgz 附 `.digest` 边车)且已 `git add`; 或按 operator 窄例外随离线包分发(不入 git, 由同步工具上传)**
 - [ ] **(装 chart 的模块)走 `helm_chart_ensure` 恒用本地副本;缺副本时 `err` 退出并给获取方法**
 - [ ] **(改含内嵌远端脚本的文件)注释里没有 ASCII 双引号**(用全角 `“ ”`); 改完用 stub `ssh` 数参数个数, 确认载荷没被拆散
 - [ ] `bash deployments/scripts/tools/check-modules.sh` exit 0(含第 ⑩ 项离线副本检查)

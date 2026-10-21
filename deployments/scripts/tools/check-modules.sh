@@ -260,7 +260,8 @@ unset SH_ROOT 2>/dev/null || true
 # 但仓库里压根没有那份文件 —— 私服一抖动, 回退就是空转, 回退代码形同虚设。
 # 光靠文档挡不住这种缺失(写的时候都以为回退能兜住), 所以放进静态校验。
 say "[10/19] helm chart 离线副本检查 ..."
-ADDON_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)/deployments/cubestack-addon"
+REPO_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+ADDON_DIR="${REPO_DIR}/deployments/cubestack-addon"
 CHART_FAIL=0; CHART_WARN=0; CHART_OKN=0
 # 判据: **行首就是 helm 命令** —— 只排除注释不够, 变量/err 字符串里提到
 #   "helm upgrade --install" 的地方(如 verify 模块的排查提示)会被误判成"装了 chart"。
@@ -271,11 +272,9 @@ while IFS= read -r -d '' f; do
     grep -q 'addon_stub ' "$f" && continue      # 伪代码占位(未实现), 不参与本检查
     # 提取该模块引用的 cubestack-addon/<路径> 候选(含被变量截断的前缀, 后面靠存在性过滤)
     cands="$(sed -n 's#.*cubestack-addon/\([A-Za-z0-9_./-]*\).*#\1#p' "$f" | sort -u || true)"
-    if [ -z "${cands}" ]; then
-        warn "  ${rel}: 装了 helm chart 却未引用 cubestack-addon/ 下任何路径"
-        warn "     → 无法静态确认离线副本; 若 chart 在仓库外(占位/特例), 请忽略本告警"
-        CHART_WARN=$((CHART_WARN + 1)); continue
-    fi
+    # 窄例外: chart 随离线包分发时, 模块引用的是 offline-files/<集合>/ 顶层(与镜像 tar 同目录)
+    ocands="$(sed -n 's#.*offline-files/\([A-Za-z0-9_./-]*\).*#\1#p' "$f" \
+        | sed 's#/$##' | awk -F/ 'NF {print $1}' | sort -u || true)"
     hit=0
     while IFS= read -r c; do
         [ -z "${c}" ] && continue
@@ -289,29 +288,51 @@ while IFS= read -r -d '' f; do
         fi
         [ "${hit}" = "1" ] && break
     done <<< "${cands}"
-    if [ "${hit}" = "1" ]; then
+    # 离线包分发的窄例外(仅 cubestack-operator): 集合的 charts/ 存在且 README 被 git 跟踪
+    # ⇒ 视为合法落点。本地 tgz 不入 git, CI 干净 checkout 不要求它存在(部署前由 fetch/同步机备料)。
+    # 用 CUBESTACK_OPERATOR_CHART_DIR 作为门禁, 避免其它模块因为引用了某个 offline-files 目录而误判。
+    _bundle=0
+    if [ "${hit}" = "0" ] && grep -q 'CUBESTACK_OPERATOR_CHART_DIR' "$f"; then
+        while IFS= read -r oc; do
+            [ -z "${oc}" ] && continue
+            [ -d "${REPO_DIR}/deployments/offline-files/${oc}/charts" ] || continue
+            if git -C "${REPO_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                if git -C "${REPO_DIR}" ls-files --error-unmatch \
+                       "deployments/offline-files/${oc}/charts/README.md" >/dev/null 2>&1; then
+                    _bundle=1; break
+                fi
+            else
+                # CLI 容器内可能没有 .git; 以 README 实文件存在为准
+                [ -f "${REPO_DIR}/deployments/offline-files/${oc}/charts/README.md" ] && { _bundle=1; break; }
+            fi
+        done <<< "${ocands}"
+    fi
+    if [ "${hit}" = "1" ] || [ "${_bundle}" = "1" ]; then
         CHART_OKN=$((CHART_OKN + 1))
     else
-        # gitignore 豁免(2026-10-08): 该组件 chart 若被 .gitignore **显式声明不入 git**
-        # (如 cubestack-operator 滚动 chart —— 分发通路 = CLI 镜像 + 部署机本地), 干净
-        # checkout 缺它属预期 ⇒ 降级 WARN(否则 GitHub CI 的干净克隆必红)。
+        if [ -z "${cands}" ]; then
+            warn "  ${rel}: 装了 helm chart 却未引用 cubestack-addon/ 或 offline-files/ 下任何路径"
+            warn "     → 无法静态确认离线副本; 若 chart 在仓库外(占位/特例), 请忽略本告警"
+            CHART_WARN=$((CHART_WARN + 1)); continue
+        fi
+        # 过渡期: 旧路径的 gitignore 豁免(至少一个版本后删除)
         _gi=0
         while IFS= read -r c; do
             [ -z "${c}" ] && continue
-            # ADDON_DIR = <repo>/deployments/cubestack-addon ⇒ 上溯 2 级 = 仓库根
             if git -C "${ADDON_DIR}/../.." check-ignore -q "${ADDON_DIR}/${c}/x.tgz" 2>/dev/null \
                || git -C "${ADDON_DIR}/../.." check-ignore -q "${ADDON_DIR}/${c}" 2>/dev/null; then
                 _gi=1; break
             fi
         done <<< "${cands}"
         if [ "${_gi}" = "1" ]; then
-            warn "  ${rel}: vendored chart 按仓库策略**不入 git**(gitignore 豁免; 本地/CLI 镜像分发)"
-            warn "     → 干净 checkout 缺它属预期; 部署机上请确保本地副本在位(或从 CLI 镜像取)"
+            warn "  ${rel}: vendored chart 按仓库策略**不入 git**(过渡期 legacy fallback)"
+            warn "     → 请迁移到 deployments/offline-files/<集合>/ 顶层(见 offline-files README)"
             CHART_WARN=$((CHART_WARN + 1))
         else
         ck_fail "${rel}: 引用了 cubestack-addon/ 却**找不到 vendored chart**(.tgz 或 Chart.yaml)"
         ck_fail "      → 模块安装时恒用本地副本, 缺了它私服/上游一抖动就装不上(回退代码会空转)"
         ck_fail "      → 修法: 把 chart 放进 deployments/cubestack-addon/<组件>/ 并提交,"
+        ck_fail "             或按离线包例外放到 deployments/offline-files/<集合>/ 顶层(README 需跟踪);"
         ck_fail "             tgz 形式请一并提交 <tgz>.digest 边车(供 helm_chart_ensure 比对刷新)"
         CHART_FAIL=$((CHART_FAIL + 1))
         fi

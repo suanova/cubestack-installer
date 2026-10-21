@@ -445,6 +445,8 @@ find_offline_tar() {
 # deployments/cubestack-addon/<组件>/ 下有一份随 git 分发的离线副本**(.tgz 或解包源码目录),
 # 且**安装一律用这份本地副本** —— 线上拉到的东西不直接装。缺了它, 私服/上游一抖动就装不上
 # (曾有模块就是这样: 回退代码写好了, 却压根没有可回退的文件)。
+# 窄例外: cubestack-operator 的 chart 随离线包分发(offline-files/cubestack-operator/charts/*.tgz),
+#   tgz/digest 不入 git, 由内网同步机上传播; 本助手通过传入路径自然支持, 不另开分支。
 #
 # 本助手把"本地副本就绪"这件事收敛到一处:
 #   online : helm pull 到临时目录 → 取远端 digest, 与 <tgz>.digest 边车比对
@@ -471,9 +473,10 @@ helm_chart_ensure() {
         online|offline) ;;
         *) err "helm_chart_ensure: 模式仅支持 online|offline(当前=${mode})"; return 1 ;;
     esac
-    mkdir -p "$(dirname "${tgz}")"
 
     if [ "${mode}" = "online" ]; then
+        # 只在真的要落盘时建目录: offline 模式下拼错的显式路径不应凭空多出一个空目录。
+        mkdir -p "$(dirname "${tgz}")"
         if ! command -v helm >/dev/null 2>&1; then
             warn "  未找到 helm, 跳过在线校验(改用本地离线副本: $(basename "${tgz}"))" >&2
         else
@@ -502,7 +505,14 @@ helm_chart_ensure() {
                         warn "  ${comp} chart 远端有更新 → 已覆盖离线副本 $(basename "${tgz}")" >&2
                     fi
                     [ -n "${rdig}" ] && printf '%s' "${rdig}" > "${dgfile}"
-                    warn "    ⚠ 该文件是仓库内的 vendored 副本, 请 git add/commit 固化; 不提交则下次部署又回到旧版本" >&2
+                    case "${tgz}" in
+                        */deployments/offline-files/*)
+                            warn "    ⚠ 已更新离线包本地副本(该 tgz 不入 git); 请在内网同步机执行" >&2
+                            warn "      cubestack-platform-sync.sh --collection cubestack-operator --no-pull-state" >&2
+                            warn "      (或 sync-to-minio.sh)上传 MinIO, 否则其他部署机拿不到" >&2 ;;
+                        *)
+                            warn "    ⚠ 该文件是仓库内的 vendored 副本, 请 git add/commit 固化; 不提交则下次部署又回到旧版本" >&2 ;;
+                    esac
                 fi
             else
                 printf '%s\n' "${out}" | tail -3 | sed 's/^/    /' >&2
@@ -514,9 +524,12 @@ helm_chart_ensure() {
 
     if [ ! -f "${tgz}" ]; then
         err "  ${comp} 离线 chart 缺失: ${tgz}"
-        err "    获取: helm pull ${ref}${repo:+ --repo ${repo}} --version ${version} -d $(dirname "${tgz}")"
-        err "          然后把产出改名为 $(basename "${tgz}")(并写 <同名>.digest 边车), 提交入库"
-        err "    注意: 离线副本**必须随仓库分发**, 只在部署时拉到盘上不算数"
+        case "${tgz}" in
+            */deployments/offline-files/*)
+                err "    获取(离线包): ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub $(basename "$(dirname "${tgz}")")" ;;
+        esac
+        err "    获取(在线/手工): helm pull ${ref}${repo:+ --repo ${repo}} --version ${version} -d $(dirname "${tgz}")"
+        err "          并把 helm 输出的 Digest: 写入 $(basename "${tgz}").digest(不要用 sha256sum); tgz 不入 git"
         return 1
     fi
     return 0

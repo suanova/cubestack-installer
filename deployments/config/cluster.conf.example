@@ -66,7 +66,7 @@ CEPH_MODE="${CEPH_MODE:-internal}"          # internal(默认, 集群内) | exte
 #   ⚠ 凭据卫生: 默认值一律留空 —— 真实用户名/密码只填在 cluster.conf(已 gitignore), 不得写进本模板。
 CUBESTACK_OPERATOR_HARBOR_USER="${CUBESTACK_OPERATOR_HARBOR_USER:-}"
 CUBESTACK_OPERATOR_HARBOR_PASSWORD="${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}"
-CUBESTACK_OPERATOR_ENABLED="${CUBESTACK_OPERATOR_ENABLED:-true}"  # 默认启用; 本地 chart + 镜像入内置 registry
+CUBESTACK_OPERATOR_ENABLED="${CUBESTACK_OPERATOR_ENABLED:-true}"  # 默认启用; chart 随离线包 + 镜像入内置 registry
 CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED="${CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED:-true}"  # 打开会一并下发平台组件镜像(离线需另行备齐)
 ONLINE_DEPLOY_CUBESTACK_OPERATOR="${ONLINE_DEPLOY_CUBESTACK_OPERATOR:-false}"  # 平台 Operator 镜像来源: false=离线(tar→内置 registry; 默认) / true=在线(按 chart 定义从 Harbor 直拉)
 # (NVIDIA 的 ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR 在下方"附加组件开关"区; 两者均于 2026-10-16 挪入主文件)
