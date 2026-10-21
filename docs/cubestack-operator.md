@@ -46,7 +46,10 @@ cuberouter/cubepilot/portal/observability…)的**离线镜像链路已由本模
 模块把 `offline-files/cubestack-operator/`(2026-10-16 起平台组件按**组件子目录**分类)的各组件
 tar 推入集群内置 registry, 并把 CR 的全局镜像源(imageRegistry / externalImageRegistryPrefix)
 注入为集群 registry —— 节点不访问 Harbor。
-默认裁剪(可经 `CUBESTACK_OPERATOR_CR_VALUES_FILE` 覆盖): 模型 bundles 清空 + modelBundles/bmc 关闭。
+默认值(2026-10-20 起): **保留 chart 默认的 8 个模型 bundles + modelBundles 开启**; bmc 也按 chart
+默认开启(未建 `cubestack-bmc-credentials` Secret 时该组件 Degraded, 不影响推理目录)。开关
+`CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(默认 `true`; 仅接受 `true`/`false`; `false` = 清空 bundles + 关 modelBundles);
+裁剪/定制时用 `CUBESTACK_OPERATOR_CR_VALUES_FILE`(-f) 覆盖。
 
 ### 1.1 部署模式切换: 在线 / 离线(2026-10-13)
 
@@ -185,8 +188,16 @@ Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator�
 - **单独推送**(更新某一个 operator 后只灌它的镜像): `CUBESTACK_OPERATOR_COMPONENTS="<组件名>"`
   环境变量, 如 `sudo CUBESTACK_OPERATOR_COMPONENTS="cubepilot" ./deploy-cluster.sh --steps cubestack_operator`
   (组件名不存在会报错并列出可用子目录)。
-- **默认裁剪**(`CUBESTACK_OPERATOR_CR_VALUES_FILE` 可覆盖): `spec.bundles=[]` + modelBundles 关
-  (模型推理 Pod/GPU 需求, 非平台服务必需)+ bmc 关(需管理员先建 `cubestack-bmc-credentials` Secret)。
+- **默认值(2026-10-20 起)**: 不覆盖 chart 默认 —— `spec.bundles` 为全部 8 个模型 bundle,
+  `modelBundles` 开启; bmc 也按 chart 默认开启(未建 `cubestack-bmc-credentials` Secret 时该组件
+  Degraded, 不影响推理目录)。开关 `CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(默认 `true`;
+  仅接受 `true`/`false`; `false` = 清空 bundles + 关 modelBundles); 裁剪/定制时用 `CUBESTACK_OPERATOR_CR_VALUES_FILE`(-f) 覆盖。
+  - bundle 只 apply `InferenceRuntimeProfile` + `ModelVersion` + ConfigMap, **不** apply
+    `isvc.example.yaml`; 实际服务需管理员创建 `llm` namespace 并复制/apply 一个 InferenceService。
+  - `InferenceRuntimeProfile` 的镜像 ref 写死为 `harbor.isuanova.com/...`, model-bundles catalog
+    没有 `globalInjection` —— `spec.global.imageRegistry` **不会**改写它们。离线集群需让节点可达
+    Harbor, 或在 bundle/CR 中改写 ref(`37_model_images` 已把镜像推入内置 registry)。
+  - `ModelVersion` 的权重是 hostPath(`/mnt/cephfs/models/...`), 节点上必须已存在对应权重。
 - **imagePullSecrets 注入为空**: 集群 registry 匿名可拉; 留默认值(harbor-credentials)而 Secret
   不存在会让所有组件 ImagePullBackOff。
 - **镜像清单与 chart 同步(2026-10-19)**: `offline-files/cubestack-operator/image-list.tsv` 是
@@ -372,8 +383,10 @@ kubectl -n cubestack-system logs deploy/cubestack-operator
   在线模式(chart 刷新 + Harbor 拉镜像)与离线模式(chart 本地副本 + tar 源)均实机通过。
 - **凭据**: 拉 `suanova-private` 需要账号(2FA 账号请用「CLI Secret」)。凭据只用于**在线刷新
   chart / 在线拉镜像 / 备料 save**, 部署路径本身(本地 chart + 集群 registry)不需要。
-- **平台实例(CR)**: `CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED=true` 时默认裁剪模型 bundles 与
-  bmc(见 §3.4b); 开启项经 `CUBESTACK_OPERATOR_CR_VALUES_FILE` 覆盖。
+- **平台实例(CR)**: `CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED=true` 时保留 chart 默认的
+  8 个模型 bundles + modelBundles 开启(见 §3.4b); bmc 也按 chart 默认开启; 开关
+  `CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(默认 `true`; 仅接受 `true`/`false`), 裁剪/定制经
+  `CUBESTACK_OPERATOR_CR_VALUES_FILE` 覆盖。
 - **多镜像扩展**: chart 若新增镜像, `[6/6]` 的渲染自检会报"未覆盖"并要求在本模块补 `--set`。
 - **chart 分发**: cubestack-operator 滚动 chart 暂不入 git(构建上下文进 CLI 镜像 + 部署机本地保留;
   check-modules ⑩ 有 gitignore 豁免); 干净 checkout 属预期缺省。

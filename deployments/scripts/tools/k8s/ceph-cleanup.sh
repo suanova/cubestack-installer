@@ -33,6 +33,17 @@ load_config
 init_remote_kubectl || { err "init_remote_kubectl 失败(cluster.conf NODES 无 master?)"; exit 1; }
 
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
+# 强制清理语义(2026-10-20 CodeRabbit): `--wait=false` 只表示"发起删除、不陪等 finalizer",
+#   **不表示 CSI unmap 已完成**。发起强制删除后再有界复查; 仍残留则返回非零, 默认拒绝继续
+#   删 rbd nodeplugin / CephCluster(防 2026-09-05 的"unmap 前删插件"内核映射残留事故)。
+#   CEPH_CLEANUP_FORCE_RECHECK_SECONDS: 强制删除后的复查窗口(默认 30s)
+#   CEPH_CLEANUP_CLUSTER_FORCE_GONE_SECONDS: 强制删 CephCluster 后的复查窗口(默认 60s)
+#   CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 : 危险, 卷未确认清理时仍继续(nodeplugin/CephCluster/擦盘)
+CEPH_CLEANUP_FORCE_RECHECK_SECONDS="${CEPH_CLEANUP_FORCE_RECHECK_SECONDS:-30}"
+CEPH_CLEANUP_CLUSTER_FORCE_GONE_SECONDS="${CEPH_CLEANUP_CLUSTER_FORCE_GONE_SECONDS:-60}"
+CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP="${CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP:-0}"
+_CEPH_UNSAFE_UNMAP=0   # 1 = 卷未确认清理且未显式放行; cleanup_all 据此中止后续擦盘
+_CEPH_ABORT_WIPE=0     # 1 = 关键查询失败/集群状态无法确认; cleanup_all 不得继续擦盘
 
 # ---------------- 工具: 节点 SSH ----------------
 node_cmd() {   # <ip> <user> <cmd...>
@@ -48,7 +59,10 @@ node_cmd() {   # <ip> <user> <cmd...>
 #   "waiting for csi volume attachments ... to be cleaned up", CephCluster 永远 Deleting。
 #   下面统一: ①先收集动作再读 here-string；②所有循环内 SSH 加 </dev/null；
 #   ③删完 PVC 后等待 PVC/PV 真正消失(CSI unmap 完成)再删 nodeplugin / CephCluster。
-_list_ceph_pvcs() {   # <include_registry:0|1> → 每行 ns/name(仅 Bound 且 SC 含 ceph)
+#   ④强制清理(--wait=false)只发起删除、不陪等 finalizer; 之后有界复查 PVC/PV + ceph CSI
+#     VolumeAttachment(attachment 状态才是 unmap 的可靠信号), 仍残留则返回非零,
+#     默认拒绝删 nodeplugin/CephCluster(CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 可显式放行)。
+_list_ceph_pvcs() {   # <include_registry:0|1> → 每行 ns/name(仅 Bound/Lost 且 SC 含 ceph; Lost=PV 已被强删, 仍可能残留映射)
     local _inc="${1:-0}"
     SSH "${K} get pvc -A -o json 2>/dev/null </dev/null" | INCLUDE_REGISTRY="${_inc}" python3 -c '
 import json, os, sys
@@ -56,12 +70,14 @@ inc = os.environ.get("INCLUDE_REGISTRY", "0") == "1"
 try:
     d = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
+    sys.exit(2)
+if not isinstance(d, dict) or "items" not in d:
+    sys.exit(2)
 for p in d.get("items", []):
     sc = ((p.get("spec") or {}).get("storageClassName") or "")
     if "ceph" not in sc:
         continue
-    if (p.get("status") or {}).get("phase") != "Bound":
+    if (p.get("status") or {}).get("phase") not in ("Bound", "Lost"):
         continue
     ns = p["metadata"]["namespace"]; name = p["metadata"]["name"]
     if not inc and ns == "kube-system" and name == "registry-pvc":
@@ -78,7 +94,9 @@ inc = os.environ.get("INCLUDE_REGISTRY", "0") == "1"
 try:
     d = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
+    sys.exit(2)
+if not isinstance(d, dict) or "items" not in d:
+    sys.exit(2)
 for pv in d.get("items", []):
     spec = pv.get("spec") or {}
     driver = ((spec.get("csi") or {}).get("driver") or "")
@@ -92,33 +110,79 @@ for pv in d.get("items", []):
 '
 }
 
+# ceph CSI VolumeAttachment(CodeRabbit 2026-10-20): PV/PVC 对象存在性**不能**证明 unmap——
+#   强清 PV finalizer 会让 PV 立即消失、PVC 变 Lost; 而 attachment 仍在 = 节点侧仍可能持有
+#   内核 rbd 映射。删 nodeplugin / CephCluster 前必须等 ceph CSI attacher 的 VA 全部消失。
+#   注意: 不做 include_registry 过滤 —— 删 nodeplugin/集群前所有 ceph 卷都必须 detach。
+_list_ceph_volumeattachments() {
+    SSH "${K} get volumeattachment -o json 2>/dev/null </dev/null" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+if not isinstance(d, dict) or "items" not in d:
+    sys.exit(2)
+for va in d.get("items", []):
+    att = ((va.get("spec") or {}).get("attacher") or "")
+    if "ceph" not in att:
+        continue
+    print(va["metadata"]["name"])
+'
+}
+
 wait_ceph_volumes_gone() {   # <timeout_seconds> <include_registry:0|1>
-    local _to="${1:-120}" _inc="${2:-0}" _i _left_pvc _left_pv
-    _left_pvc=""; _left_pv=""
+    local _to="${1:-120}" _inc="${2:-0}" _i _left_pvc _left_pv _left_va _rt _rtries
+    _left_pvc=""; _left_pv=""; _left_va=""
     for _i in $(seq 1 $(( _to / 5 ))); do
-        _left_pvc="$(_list_ceph_pvcs "${_inc}")"
-        _left_pv="$(_list_ceph_pvs "${_inc}")"
-        if [ -z "${_left_pvc}" ] && [ -z "${_left_pv}" ]; then
-            ok "  ceph PVC/PV 已清理(CSI unmap 完成)"
+        # ★ 2026-10-20 CodeRabbit: 查询失败不能当成"资源已消失" —— 三个查询都成功且输出为空才算完成。
+        if _left_pvc="$(_list_ceph_pvcs "${_inc}")" \
+            && _left_pv="$(_list_ceph_pvs "${_inc}")" \
+            && _left_va="$(_list_ceph_volumeattachments)" \
+            && [ -z "${_left_pvc}" ] && [ -z "${_left_pv}" ] && [ -z "${_left_va}" ]; then
+            ok "  ceph PVC/PV/VolumeAttachment 已清理(CSI detach/unmap 完成)"
             return 0
         fi
-        [ $((_i % 6)) -eq 0 ] && say "    等待 ceph 卷清理... $((_i * 5))s(PVC: $(printf '%s' "${_left_pvc}" | tr '\n' ' '), PV: $(printf '%s' "${_left_pv}" | tr '\n' ' '))"
+        [ $((_i % 6)) -eq 0 ] && say "    等待 ceph 卷清理... $((_i * 5))s(PVC: $(printf '%s' "${_left_pvc}" | tr '\n' ' '), PV: $(printf '%s' "${_left_pv}" | tr '\n' ' '), VA: $(printf '%s' "${_left_va}" | tr '\n' ' '))"
         sleep 5
     done
-    warn "  ceph 卷 ${_to}s 未清理干净: PVC=[$(printf '%s' "${_left_pvc}" | tr '\n' ' ')] PV=[$(printf '%s' "${_left_pv}" | tr '\n' ' ')] → 强制清理(数据随 Ceph 销毁)"
+    warn "  ceph 卷 ${_to}s 未清理干净: PVC=[$(printf '%s' "${_left_pvc}" | tr '\n' ' ')] PV=[$(printf '%s' "${_left_pv}" | tr '\n' ' ')] VA=[$(printf '%s' "${_left_va}" | tr '\n' ' ')] → 强制清理(数据随 Ceph 销毁)"
     # 兜底: 再删一次 PVC; 仍残留的 ceph PV 清 finalizer 后强删(只碰 ceph CSI PV,
     #   provisioner 卡死时这是唯一让 Rook 继续删除的路径; 新部署会重建卷)。
+    # ★ 2026-10-20 实机: `kubectl delete` 默认**等待对象消失**; PVC 的 pvc-protection /
+    #   PV 的 external-provisioner+ pv-protection finalizer 在 provisioner 卡住时不会自行
+    #   清除 → delete 无限阻塞(实测卡 7.5min+, 直到模块 1800s timeout)。强制清理必须
+    #   `--wait=false` + 外层 timeout, 只发起删除、不陪等 finalizer。
     while IFS= read -r _p; do
         [ -n "${_p}" ] || continue
-        SSH "${K} -n ${_p%/*} delete pvc ${_p#*/} --ignore-not-found --force --grace-period=0 </dev/null >/dev/null 2>&1" || true
+        SSH "timeout 30 ${K} -n ${_p%/*} delete pvc ${_p#*/} --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
     done <<< "${_left_pvc}"
     while IFS= read -r _pv; do
         [ -n "${_pv}" ] || continue
         printf '%s' '{"metadata":{"finalizers":null}}' \
-            | SSH "${K} patch pv ${_pv} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
-        SSH "${K} delete pv ${_pv} --ignore-not-found --force --grace-period=0 </dev/null >/dev/null 2>&1" || true
+            | SSH "timeout 30 ${K} patch pv ${_pv} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
+        SSH "timeout 30 ${K} delete pv ${_pv} --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
     done <<< "${_left_pv}"
-    return 0
+    # ★ 2026-10-20 CodeRabbit: --wait=false 只表示"不陪等 finalizer", **不等于 unmap 完成**。
+    #   发起强制删除后再有界复查; 仍残留 → 返回 1, 由调用方决定是否显式放行继续。
+    #   (旧实现无条件 return 0 → stop_consumers 会接着删 rbd nodeplugin, 可能失去 unmap 执行者。)
+    _rt="${CEPH_CLEANUP_FORCE_RECHECK_SECONDS:-30}"
+    case "${_rt}" in ''|*[!0-9]*) _rt=30 ;; esac
+    _rtries=$(( _rt / 5 )); [ "${_rtries}" -ge 1 ] || _rtries=1
+    for _i in $(seq 1 "${_rtries}"); do
+        # 同样: 只有三项查询都成功且为空, 才算强删后 unmap 完成。
+        if _left_pvc="$(_list_ceph_pvcs "${_inc}")" \
+            && _left_pv="$(_list_ceph_pvs "${_inc}")" \
+            && _left_va="$(_list_ceph_volumeattachments)" \
+            && [ -z "${_left_pvc}" ] && [ -z "${_left_pv}" ] && [ -z "${_left_va}" ]; then
+            ok "  强制清理后 ceph PVC/PV/VolumeAttachment 已消失(CSI detach/unmap 完成)"
+            return 0
+        fi
+        sleep 5
+    done
+    warn "  ⚠ 强制清理后仍有残留: PVC=[$(printf '%s' "${_left_pvc}" | tr '\n' ' ')] PV=[$(printf '%s' "${_left_pv}" | tr '\n' ' ')] VA=[$(printf '%s' "${_left_va}" | tr '\n' ' ')]"
+    warn "    未确认 CSI unmap 完成(默认拒绝继续删 nodeplugin/CephCluster; 可用 CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 显式放行)"
+    return 1
 }
 
 # ---------------- ⓪① ② 停消费者 + 触发 unmap(可独立调用; --delete-cluster 的先导步) ----------------
@@ -214,7 +278,7 @@ PYEOF
             [ -n "${_act}" ] || continue
             case "${_act}" in
                 scale)  say "     停用 ${_a1}/${_a2} ${_a3}(replicas=0)"; SSH "${K} -n ${_a1} scale ${_a2,,} ${_a3} --replicas=0 </dev/null >/dev/null 2>&1" || true ;;
-                delpod) say "     删除 Pod ${_a1}/${_a2}(优雅退出, ≤20s)"; SSH "${K} -n ${_a1} delete pod ${_a2} --grace-period=20 </dev/null >/dev/null 2>&1" || true ;;
+                delpod) say "     删除 Pod ${_a1}/${_a2}(优雅退出, ≤20s)"; SSH "timeout 30 ${K} -n ${_a1} delete pod ${_a2} --grace-period=20 --wait=false </dev/null >/dev/null 2>&1" || true ;;
                 delrs)  say "     删除裸 ReplicaSet ${_a1}/${_a2}(无 Deployment 管理, 删 Pod 会被其重建)"; SSH "${K} -n ${_a1} delete rs ${_a2} --wait=false </dev/null >/dev/null 2>&1" || true ;;
                 delcr)  say "     删除 CR ${_a2}/${_a3}(级联收掉其组件)"; SSH "${K} -n ${_a1} delete ${_a2} ${_a3} --wait=false </dev/null >/dev/null 2>&1" || true ;;
             esac
@@ -299,7 +363,18 @@ except Exception:
             esac
         done <<< "${_pvc_actions}"
         unset _pvc_actions
-        wait_ceph_volumes_gone 120 0
+        if ! wait_ceph_volumes_gone 120 0; then
+            if [ "${CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP}" = "1" ]; then
+                warn "  卷清理未确认完成, 但 CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 → 继续删除 rbd nodeplugin"
+                warn "  ⚠ 风险: 仍被挂载的卷可能失去 unmap 执行者(内核 rbd 映射/锁残留, 可能需重启节点)"
+            else
+                _CEPH_UNSAFE_UNMAP=1
+                err "  拒绝删除 rbd csi nodeplugin: ceph PVC/PV 仍在(未确认 CSI unmap 完成)"
+                err "  先排查 PVC/PV finalizer / CSI 插件状态; 确认可接受风险后显式重跑:"
+                err "    CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 $0 --${ACTION:-stop-consumers}"
+                return 1
+            fi
+        fi
         say "  ② 删除 rbd csi nodeplugin DaemonSet(各节点执行内核 rbd unmap)..."
         SSH "${K} -n ${CEPH_NAMESPACE} delete ds rook-ceph.rbd.csi.ceph.com-nodeplugin --wait=false </dev/null >/dev/null 2>&1" || true
         sleep 5
@@ -311,11 +386,23 @@ except Exception:
 # ---------------- ① 删除现有 CephCluster(Rook 擦盘) ----------------
 delete_cluster() {
     say "删除现有 CephCluster(cleanupPolicy yes-really-destroy-data, Rook 擦盘)..."
-    # 幂等: 无集群直接成功
-    _exists="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+    # 幂等: 无集群直接成功。
+    # ★ 2026-10-20 CodeRabbit: 查询失败不能当成"无集群"(否则 cleanup_all 会跳过删除直接擦盘)。
+    #   CRD 不存在(报 "doesn't have a resource type")= 确实没有集群, 可跳过; 其它错误必须失败。
+    _exists=""
+    if ! _exists="$(SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --ignore-not-found -o name 2>/dev/null")"; then
+        _exist_err="$(SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --ignore-not-found -o name 2>&1 >/dev/null || true")"
+        case "${_exist_err}" in
+            *"doesn't have a resource type"*|*"could not find the requested resource"*) : ;;
+            *) _CEPH_ABORT_WIPE=1; err "查询 CephCluster 失败(无法确认是否存在): ${_exist_err:0:200}"; return 1 ;;
+        esac
+    fi
     [ -z "${_exists}" ] && { ok "  无现有 CephCluster, 跳过"; return 0; }
 
-    stop_consumers
+    if ! stop_consumers; then
+        err "  停止消费者/卷清理未完成 → 中止删除 CephCluster(防 unmap 前删集群/nodeplugin)"
+        return 1
+    fi
     # ★ 2026-10-19: 破坏性删除 Ceph 前必须删掉受保护的 registry PVC —— 否则 rbd-pool
     #   里的 registry 镜像让 CephBlockPool 永远 "contains images or snapshots",
     #   CephCluster 会一直卡 Deleting(Rook operator 日志实锤)。registry 数据本就随
@@ -330,7 +417,17 @@ delete_cluster() {
     unset _pvc_left
     # registry PVC 删掉后，其 PV 也要消失(CSI DeleteVolume)才允许删 CephBlockPool；
     # 同时兜住任何其它残留的 ceph PVC/PV(例如上一轮 stop_consumers 漏删的)。
-    wait_ceph_volumes_gone 120 1
+    if ! wait_ceph_volumes_gone 120 1; then
+        if [ "${CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP}" = "1" ]; then
+            warn "  卷清理未确认完成, 但 CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 → 继续删除 CephCluster"
+            warn "  ⚠ 风险: 仍有 ceph 卷映射, 强删 CephCluster 可能导致内核 rbd 映射/锁残留"
+        else
+            _CEPH_UNSAFE_UNMAP=1
+            err "  拒绝删除 CephCluster: ceph PVC/PV 仍在(未确认 CSI unmap 完成)"
+            err "  确认可接受风险后显式重跑: CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 $0 --${ACTION:-delete-cluster}"
+            return 1
+        fi
+    fi
     # ★ 2026-10-19: registry PVC 未 Bound 时 CSI 可能已创建半成品 RBD 镜像; 只删 PVC 不会
     #   清掉它 → CephBlockPool "contains images" 永远删不掉。这里显式 purge rbd-pool。
     say "  清空 rbd-pool 残留/半成品 RBD 镜像(防 CephBlockPool 非空)..."
@@ -366,8 +463,8 @@ delete_cluster() {
                 [ -n "${_obj}" ] || continue
                 say "    强制删除 ${_obj}"
                 printf '%s' '{"metadata":{"finalizers":null}}' \
-                    | SSH "${K} -n ${CEPH_NAMESPACE} patch ${_obj} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
-                SSH "${K} -n ${CEPH_NAMESPACE} delete ${_obj} --ignore-not-found --force --grace-period=0 </dev/null >/dev/null 2>&1" || true
+                    | SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} patch ${_obj} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
+                SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete ${_obj} --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
             done <<< "${_objs}"
         done
         unset _objs _obj
@@ -377,11 +474,16 @@ delete_cluster() {
     unset _deps_left
     SSH "${K} -n ${CEPH_NAMESPACE} delete cephcluster rook-ceph --wait=false >/dev/null 2>&1" || true
     _gone=0
+    _cluster_query_failed=0
     # 2026-10-19: Rook 擦 9 块 OSD 盘 + MDS/RGW 收尾可能 >5min; 等待上界 900s, 每 60s
     # 打一行 phase, 避免长时间静默被误判为卡死。
     for _i in $(seq 1 180); do
-        _still="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
-        [ -z "${_still}" ] && { _gone=1; break; }
+        # ★ 2026-10-20 CodeRabbit: 查询失败 ≠ 对象已消失; 只有查询成功且空输出才是 NotFound。
+        if _still="$(SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --ignore-not-found -o name 2>/dev/null")"; then
+            [ -z "${_still}" ] && { _gone=1; break; }
+        else
+            _cluster_query_failed=1
+        fi
         if [ $((_i % 12)) -eq 0 ]; then
             _ph="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null") || true )"
             say "    等待 CephCluster 删除... $((_i * 5))s(phase=${_ph:-unknown})"
@@ -395,8 +497,12 @@ delete_cluster() {
     warn "  CephCluster 删除超时(900s) → 重启 rook operator 再等 300s..."
     SSH "${K} -n "${CEPH_NAMESPACE}" rollout restart deploy/rook-ceph-operator >/dev/null 2>&1" || true
     for _i in $(seq 1 60); do
-        _still="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
-        [ -z "${_still}" ] && { _gone=1; break; }
+        # ★ 2026-10-20 CodeRabbit: 查询失败 ≠ 对象已消失; 只有查询成功且空输出才是 NotFound。
+        if _still="$(SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --ignore-not-found -o name 2>/dev/null")"; then
+            [ -z "${_still}" ] && { _gone=1; break; }
+        else
+            _cluster_query_failed=1
+        fi
         sleep 5
     done
     if [ "${_gone}" = "1" ]; then
@@ -408,15 +514,40 @@ delete_cluster() {
     #   Rook 守护工作负载; 磁盘由后续 wipe_node 物理擦除, 新 Ceph 由 02_ceph 重建。
     warn "  operator 重启后仍 Deleting → 清 finalizer + 强制删除 CephCluster(物理擦盘兜底)"
     printf '%s' '{"metadata":{"finalizers":null}}' \
-        | SSH "${K} -n ${CEPH_NAMESPACE} patch cephcluster rook-ceph --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
-    SSH "${K} -n ${CEPH_NAMESPACE} delete cephcluster rook-ceph --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+        | SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} patch cephcluster rook-ceph --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
+    SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete cephcluster rook-ceph --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
     for _lbl in "app=rook-ceph-osd" "app=rook-ceph-mds" "app=rook-ceph-rgw" "app=rook-ceph-mon" "app=rook-ceph-mgr"; do
-        SSH "${K} -n ${CEPH_NAMESPACE} delete deploy -l "${_lbl}" --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+        SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete deploy -l ${_lbl} --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
     done
-    SSH "${K} -n ${CEPH_NAMESPACE} delete jobs -l app=rook-ceph-osd-prepare --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete jobs -l app=rook-ceph-osd-prepare --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
     unset _lbl
-    ok "  CephCluster 已强制移除(后续物理擦盘/重建兜底)"
-    return 0
+    # ★ 2026-10-20 CodeRabbit: --wait=false 只表示"不陪等 finalizer", 必须复查对象真的消失;
+    #   否则 finalizer patch 失败/残留时会谎报"已强制移除"(旧 CR 会让下次安装撞上)。
+    _force_gone=0
+    _force_wait="${CEPH_CLEANUP_CLUSTER_FORCE_GONE_SECONDS:-60}"
+    case "${_force_wait}" in ''|*[!0-9]*) _force_wait=60 ;; esac
+    _force_tries=$(( _force_wait / 5 )); [ "${_force_tries}" -ge 1 ] || _force_tries=1
+    for _i in $(seq 1 "${_force_tries}"); do
+        # ★ 2026-10-20 CodeRabbit: 查询失败 ≠ 已删除; 只有查询成功且空输出才是 NotFound。
+        if _still="$(SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph --ignore-not-found -o name 2>/dev/null")"; then
+            [ -z "${_still}" ] && { _force_gone=1; break; }
+        else
+            _cluster_query_failed=1
+        fi
+        sleep 5
+    done
+    if [ "${_force_gone}" = "1" ]; then
+        ok "  CephCluster 已强制移除(后续物理擦盘/重建兜底)"
+        return 0
+    fi
+    if [ "${_cluster_query_failed:-0}" = "1" ]; then
+        _CEPH_ABORT_WIPE=1
+        err "  CephCluster 删除结果无法确认(查询失败; 未确认移除)"
+    else
+        err "  CephCluster 强制删除后仍存在(未确认移除; 下次安装可能遇到旧 CR)"
+    fi
+    err "    排查: kubectl -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o yaml(看 finalizer)"
+    return 1
 }
 
 # ---------------- ② 清理单个节点磁盘(物理擦除, 幂等) ----------------
@@ -614,8 +745,18 @@ list_plan() {
 
 # ---------------- ④ 全流程: 删集群 + 清理判为 Ceph 占用的盘 ----------------
 cleanup_all() {
-    delete_cluster || true
-    wipe_ceph_disks_all_nodes
+    local _dc_rc=0 _wipe_rc=0
+    delete_cluster || _dc_rc=$?
+    if [ "${_CEPH_UNSAFE_UNMAP}" = "1" ] || [ "${_CEPH_ABORT_WIPE}" = "1" ]; then
+        err "ceph 集群/卷状态未确认 → 中止后续清盘(避免在状态未知时擦盘)"
+        return 1
+    fi
+    wipe_ceph_disks_all_nodes || _wipe_rc=$?
+    if [ "${_dc_rc}" != "0" ]; then
+        err "CephCluster 删除未确认完成(见上方日志; 下次安装可能遇到旧 CR); 物理擦盘已按兜底继续"
+        return 1
+    fi
+    return "${_wipe_rc}"
 }
 
 # 分类各存储节点 → 只清被判为 Ceph 占用的盘(在用/混合盘一律不动)。
@@ -724,6 +865,10 @@ usage() {
 说明: 判定"哪些盘是 Ceph 盘"由 ceph-disk-classify.py 统一给出(强证据: bluestore 签名 /
       ceph 分区 GUID 或分区名 / ceph-* LVM 卷); 挂载中、非 ceph 文件系统、非 ceph LVM、
       系统盘一律不碰。混合盘(同盘既有 Ceph 又有别的数据)只报告, 需人工处理。
+环境变量:
+  CEPH_CLEANUP_FORCE_RECHECK_SECONDS=30   # 强制删除后的复查窗口(秒); 仍残留则拒绝继续
+  CEPH_CLEANUP_CLUSTER_FORCE_GONE_SECONDS=60  # 强制删 CephCluster 后的复查窗口(秒); 仍存在则失败
+  CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1       # 危险: 卷未确认清理时仍继续删 nodeplugin/CephCluster/擦盘
 USAGE
 }
 while [ $# -gt 0 ]; do

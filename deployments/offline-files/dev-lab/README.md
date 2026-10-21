@@ -9,9 +9,9 @@
 
 | 镜像(上游 = 本台 Harbor 的 `suanova` 项目; tag 统一由 `DEV_LAB_IMAGE_TAG` 控制, 默认 `latest`) |
 |---|
-| `cpu-pytorch:latest`(≈0.32 GiB) |
-| `maca-pytorch:latest`(≈10.56 GiB, linux/amd64) |
-| `cuda-pytorch:latest`(≈10.57 GiB, linux/amd64) |
+| `cpu-pytorch:latest`(Harbor ≈0.54 GiB; tar ≈1.13 GiB) |
+| `maca-pytorch:latest`(Harbor ≈10.58 GiB; tar ≈20.3 GiB, linux/amd64) |
+| `cuda-pytorch:latest`(Harbor ≈10.56 GiB; tar ≈10.6 GiB, linux/amd64) |
 
 - **清单(单一事实源)**: 本目录 `image-list.tsv`(subdir/file/pull_ref/save_ref)。
 - tar 名: 按**上游 ref** 自动派生(如 `harbor.isuanova.com_suanova_cpu-pytorch_latest.tar`)。
@@ -24,6 +24,9 @@
 - ⚠ tag 是滚动的 `latest`: 离线 tar 会随上游滚动构建失效 —— **重新部署前重跑 save 工具**
   (模块推送按 digest 比对, 内容变了自动重推, 没变跳过)。
 - ⚠ 旧仓库(`jupyter-*` / `ssh-*`)已停止发布, 其 `:latest` 冻结; 本目录不再保留它们的 tar。
+- ★ **2026-10-20 收敛**: 本目录仅保留 3 个顶层 tar(按当前 Harbor `latest` 重新生成); MinIO 旧
+  `jupyter/`、`ssh/` 对象已移至 `offline-files/dev-lab-legacy-20261020/`(保留备查, 不再随
+  `dev-lab` 拉取)。
 - 版本真相: `cluster.conf` 的 `DEV_LAB_IMAGE_TAG`; 目录变量: `DEV_LAB_SAVE_DIR`(默认指本目录)。
 
 ## 取镜像 / 保鲜

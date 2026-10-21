@@ -11,6 +11,8 @@
 #   ③ 在线模式识别 operator 镜像、取 digest、写 podAnnotations
 #   ④ digest 取不到时 online 兜底 rollout restart
 #   ⑤ 离线 loop 把 **operator 镜像** 的 digest 写入 _OPERATOR_DIGEST
+#   ⑥ 冒烟 CR 显式全禁用 + retain(不继承默认组件/不卸载真实资源)
+#   ⑦ 默认保留 chart 的 8 个 model bundles + modelBundles 开启(开关默认 true, 仅显式 false 分支裁剪, 非法值报错)
 # 用法: bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
 # ============================================================
 set -uo pipefail
@@ -59,6 +61,74 @@ done
 chk_contains "冒烟 CR 显式禁用 exporters.bmc" "bmc: { enabled: false }" "${VERIFY}"
 chk_contains "冒烟 CR 显式禁用 exporters.metax" "metax: { enabled: false }" "${VERIFY}"
 chk_contains "清理前启用组件护栏" "_ENABLED_ANY" "${VERIFY}"
+
+echo "== ⑦ 默认保留 chart 的 model bundles(开关默认 true) =="
+# 2026-10-20 用户口径: 单步 --steps cubestack_operator 与全量部署都必须默认 bundles 非空;
+# 以 chart values.yaml 为主; 开关 CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED 放在 cluster.defaults.conf,
+# 默认 true; 仅显式 false 分支才清空 bundles / 关 modelBundles; 其他值必须报配置错误。
+DEFAULTS="${REPO_ROOT}/deployments/config/cluster.defaults.conf"
+chk_contains "defaults 定义 bundles 开关(默认 true)" \
+    'CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED="${CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED:-true}"' "${DEFAULTS}"
+chk_contains "模块默认读取 true" 'CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED:-true' "${MOD}"
+chk_contains "保留 CR_VALUES_FILE 覆盖通道" 'CUBESTACK_OPERATOR_CR_VALUES_FILE' "${MOD}"
+chk_not_contains "模块不关闭 bmc(chart 默认保留)" 'clusterCR.spec.components.exporters.bmc.enabled=false' "${MOD}"
+chk_contains "非法 bundles 开关值报配置错误" 'CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED 仅接受 true|false' "${MOD}"
+chk_contains "非法值分支显式 exit 1" '仅接受 true|false(当前=${BUNDLES_ENABLED})"; exit 1' "${MOD}"
+chk_not_contains "不再用 != true 判断(避免笔误静默裁剪)" 'BUNDLES_ENABLED}" != "true"' "${MOD}"
+# 裁剪语句只允许出现在 BUNDLES_ENABLED = false 的分支里
+_BUNDLE_BLOCK="$(awk '/BUNDLES_ENABLED.*=.*"false"/{f=1} f{print} f&&/^    fi$/{exit}' "${MOD}")"
+if [ -n "${_BUNDLE_BLOCK}" ]; then
+    echo "  ok  找到 BUNDLES_ENABLED=false 分支"
+else
+    echo "  FAIL 未找到 BUNDLES_ENABLED=false 分支"; fail=1
+fi
+chk "bundles 裁剪仅在 false 分支" "1" "$(printf '%s\n' "${_BUNDLE_BLOCK}" | grep -cF 'clusterCR.spec.bundles=[]' || true)"
+chk "modelBundles 关闭仅在 false 分支" "1" "$(printf '%s\n' "${_BUNDLE_BLOCK}" | grep -cF 'clusterCR.spec.components.modelBundles.enabled=false' || true)"
+chk "模块中 bundles 清空仅此一处" "1" "$(grep -cF 'clusterCR.spec.bundles=[]' "${MOD}" || true)"
+chk "模块中 modelBundles 关闭仅此一处" "1" "$(grep -cF 'clusterCR.spec.components.modelBundles.enabled=false' "${MOD}" || true)"
+CHART_DIR="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator"
+# ★ 2026-10-20 CodeRabbit: 必须选模块实际会用的那份 chart(由 CHART_REF/CHART_VER 派生),
+#   不能 `ls | head -1` —— 目录里若同时有旧版 tgz, 会检查到错误的 chart 默认值。
+_CHART_CFG="$(
+    set +u
+    REPO_ROOT="${REPO_ROOT}"
+    [ -f "${REPO_ROOT}/deployments/config/cluster.defaults.conf" ] \
+        && . "${REPO_ROOT}/deployments/config/cluster.defaults.conf" >/dev/null 2>&1 || true
+    [ -f "${REPO_ROOT}/deployments/config/cluster.conf" ] \
+        && . "${REPO_ROOT}/deployments/config/cluster.conf" >/dev/null 2>&1 || true
+    printf '%s\t%s\n' \
+        "${CUBESTACK_OPERATOR_CHART_REF:-oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart}" \
+        "${CUBESTACK_OPERATOR_CHART_VERSION:-1.0.0-latest}"
+)"
+CHART_REF_T="${_CHART_CFG%%$'\t'*}"
+CHART_VER_T="${_CHART_CFG#*$'\t'}"
+CHART_NAME_T="$(basename "${CHART_REF_T}")"
+CHART_TGZ="${CHART_DIR}/${CHART_NAME_T}-${CHART_VER_T}.tgz"
+if [ -f "${CHART_TGZ}" ]; then
+    _VALS_PATH="$(tar -tzf "${CHART_TGZ}" 2>/dev/null | grep -m1 '/values.yaml$' || true)"
+    if [ -n "${_VALS_PATH}" ]; then
+        _VALS="$(tar -xOzf "${CHART_TGZ}" "${_VALS_PATH}" 2>/dev/null || true)"
+        _N_BUNDLES="$(printf '%s\n' "${_VALS}" | sed -n '/^    bundles:/,/^    components:/p' | grep -c '^      - ' || true)"
+        # 精确断言 8 个(CodeRabbit): 该回归的目的就是保护 chart 默认的 8 bundle;
+        # 用 >=1 时 chart 减到 1 个也会误过。chart 有意变更时同步更新此断言。
+        if [ "${_N_BUNDLES:-0}" -eq 8 ]; then
+            echo "  ok  chart 默认 bundles = 8 个"
+        else
+            echo "  FAIL chart 默认 bundles 数量=${_N_BUNDLES:-0}(期望 8; chart=${CHART_TGZ})"; fail=1
+        fi
+        if printf '%s\n' "${_VALS}" | sed -n '/modelBundles:/,/enabled:/p' | grep -q 'enabled: true'; then
+            echo "  ok  chart 默认 modelBundles.enabled=true"
+        else
+            echo "  FAIL chart 默认未开启 modelBundles"; fail=1
+        fi
+    else
+        echo "  FAIL chart 内未找到 values.yaml(${CHART_TGZ})"; fail=1
+    fi
+elif [ -n "$(find "${CHART_DIR}" -maxdepth 1 -type f -name '*.tgz' -print -quit 2>/dev/null || true)" ]; then
+    echo "  FAIL 模块配置的 chart 不存在: ${CHART_TGZ}(目录中其他 tgz 不会用于部署)"; fail=1
+else
+    echo "  SKIP 未找到 vendored chart tgz(干净 checkout 属预期缺省)"
+fi
 
 echo ""
 if [ "${fail}" = "0" ]; then
