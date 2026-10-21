@@ -2,8 +2,10 @@
 # ============================================================
 # cubestack-platform-sync.sh — 平台/组件镜像保鲜编排: Harbor → 离线 tar → MinIO(内网)
 # ------------------------------------------------------------
-# 定位: 跑在**能同时访问 Harbor 与 MinIO 的机器**上(Harbor 服务器 / 安装机; 2026-10-16 定案 ——
-#   MinIO 无 TLS, 不走公网/CI 托管 runner, 避免明文传密码与大流量公网传输)。
+# 定位: 跑在**能同时访问 Harbor 与 MinIO 的机器**上(Harbor 服务器 / 安装机; 2026-10-16 定案)。
+#   MinIO 无 TLS: 默认不在公网/CI 托管 runner 上跑, 避免明文传密码与大流量公网传输。
+#   若组织的 GitHub 托管 runner 可访问 MinIO(现有 refresh-*.yml 即走这条通路), 也可由 CI 执行;
+#   两者产出同一份离线包, 选哪条取决于网络与凭据策略。
 # 集合(collections; 每个 = offline-files/<集合>/ 目录 + 其 image-list.tsv 清单):
 #   · cubestack-operator  平台 Operator 与各组件镜像(37 件)+ operator helm chart(顶层 tgz)
 #   · model-collection    模型推理镜像 sglang / vllm-metax(6 件 ≈95G, 大件建议 .tar.gz)

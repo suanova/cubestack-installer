@@ -55,7 +55,7 @@ jobs:
       HARBOR_USER: ${{ vars.HARBOR_MIRROR_USER || secrets.HARBOR_MIRROR_USER }}
       HARBOR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
       HARBOR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
-      CHART_REF: oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart
+      CHART_REF: oci://${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}/suanova-private/cubestack-operator-chart
       CHART_VERSION: ${{ github.event.client_payload.chart_version || github.event.inputs.chart_version || '1.0.0-latest' }}
       MINIO_ENDPOINT: ${{ secrets.MINIO_HOSTNAME }}
       MINIO_ACCESS_KEY: ${{ secrets.MINIO_USERNAME }}

@@ -102,7 +102,8 @@ bash deployments/scripts/tools/images/cubestack-platform-sync.sh \
   - `cubestack-platform-sync.sh`: 编排(拉边车→保鲜→`mc mirror` 上传→数量校验), 供**定时任务**用;
     `--print-systemd` 直接生成 systemd unit+timer 模板(含 `/etc/cubestack-platform-sync.env` 用法)。
 - **部署位置(2026-10-16 定案)**: 跑在**同时能访问 Harbor 与 MinIO 的机器**(Harbor 服务器/安装机)。
-  ❗不走 GitHub 托管 runner: MinIO 无 TLS, 公网明文不可接受; 内网执行零公网传输。
+  MinIO 无 TLS, 默认内网执行; 若组织的 GitHub 托管 runner 可访问 MinIO, 也可走
+  `refresh-latest-offline.yml` / `refresh-operator-chart.yml`, 两条通路产出同一份离线包。
 - MinIO 目标: `<桶>/offline-files/cubestack-operator/`(结构与本目录一致, fetch 侧零改动);
   凭据只进 600 的 env 文件或环境变量, 不进仓库/argv/日志。
 - **部署机取回**: `tools/offline/fetch-offline-from-minio.sh --sub cubestack-operator/<组件>`
