@@ -539,6 +539,76 @@ helm_chart_ensure() {
     return 0
 }
 
+# ---------------- operator 镜像 tag 决策(helm 用) ----------------
+# 原则(2026-10-22 用户口径): 默认**完全跟随 chart / operator 自带版本**;
+#   installer 只保留一个显式逃生口, 且**只覆盖 cubestack-operator 自身的镜像 tag**,
+#   绝不覆盖 operator 内 catalog 定义的其他组件(平台 operator/服务)版本。
+#   - 未设 CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE → 输出空 → helm 用 chart 自带
+#     (Chart.yaml appVersion / values.image.tag);
+#   - 设了 override → 只传 --set image.tag=<tag> 给 operator chart。
+# CUBESTACK_OPERATOR_IMAGE_TAG 仅用于镜像清单/发布树登记, 不参与 helm 覆盖。
+operator_image_tag_for_helm() {
+    # ⚠ 必须恒返回 0: 调用方是 `x="$(operator_image_tag_for_helm ...)"` + set -e,
+    #   空 override 时若返回 1 会让整个模块静默退出(2026-10-22 实机)。
+    if [ -n "${1:-}" ]; then
+        printf '%s\n' "$1"
+    fi
+    return 0
+}
+
+# ---------------- CubeStack operator chart 定位(release 版本无关) ----------------
+# 在目录中定位 operator chart, 不要求 installer 预先写死版本:
+#   ① <name>-<desired>.tgz 存在 → 用它(desired 可空)
+#   ② release 模式(<release> 非空): 优先 <name>-<release>.tgz; 否则扫描 <name>-*.tgz,
+#      读取 Chart.yaml version, 匹配 <release> 或 <desired>; 唯一命中即用
+#   ③ 目录中只有一个 <name>-*.tgz → 用它(版本以 chart 自身为准)
+#   ④ 否则返回 1(调用方列出候选并报错)
+# 输出(stdout): "<tgz路径>\t<chart版本>"
+# 说明: 只读 tar, 不联网; 供 25_cubestack_operator.sh / release-publish.sh 共用。
+operator_chart_version() {
+    local _tgz="$1" _y
+    _y="$(tar -tzf "${_tgz}" 2>/dev/null | command grep -E '/Chart.yaml$' | head -1 || true)"
+    [ -n "${_y}" ] || return 0
+    tar -xOf "${_tgz}" "${_y}" 2>/dev/null | awk '/^[[:space:]]*version:[[:space:]]*/{print $2; exit}'
+}
+
+resolve_operator_chart_tgz() {   # <dir> <chart-name> [desired-version] [release-version]
+    local _dir="$1" _name="$2" _desired="${3:-}" _release="${4:-}"
+    local _files=() _f _v _hit="" _ver="" _ng=0
+    [ -d "${_dir}" ] || return 1
+    shopt -q nullglob && _ng=1
+    shopt -s nullglob
+    _files=("${_dir}/${_name}-"*.tgz)
+    [ "${_ng}" = "1" ] || shopt -u nullglob
+    [ "${#_files[@]}" -gt 0 ] || return 1
+
+    # release 模式优先按发布版本定位(即使默认的 desired=1.0.0-latest 仍在, 也不能抢跑)
+    if [ -n "${_release}" ] && [ -f "${_dir}/${_name}-${_release}.tgz" ]; then
+        _hit="${_dir}/${_name}-${_release}.tgz"
+    elif [ -n "${_desired}" ] && [ -f "${_dir}/${_name}-${_desired}.tgz" ]; then
+        _hit="${_dir}/${_name}-${_desired}.tgz"
+    elif [ -n "${_release}" ]; then
+        for _f in "${_files[@]}"; do
+            _v="$(operator_chart_version "${_f}")"
+            if [ "${_v}" = "${_release}" ] || { [ -n "${_desired}" ] && [ "${_v}" = "${_desired}" ]; }; then
+                _hit="${_f}"; break
+            fi
+        done
+    fi
+    if [ -z "${_hit}" ] && [ "${#_files[@]}" -eq 1 ]; then
+        _hit="${_files[0]}"
+    fi
+    [ -n "${_hit}" ] || return 1
+
+    _ver="$(operator_chart_version "${_hit}")"
+    if [ -z "${_ver}" ]; then
+        _ver="$(basename "${_hit}")"
+        _ver="${_ver#${_name}-}"
+        _ver="${_ver%.tgz}"
+    fi
+    printf '%s\t%s\n' "${_hit}" "${_ver}"
+}
+
 # ---------------- 共享 nginx 校验镜像助手(verify 模块测试后端共用) ----------------
 # verify_metallb / verify_ceph 等的测试后端
 # 统一用 **nginx**(测试 HTTP 后端, 静态页/JSON mock 皆可), 曾用 busybox httpd(依赖节点
@@ -2265,6 +2335,60 @@ check_offline_files() {
     fi
 }
 
+# ---------------- GPU 厂商探测(NVIDIA / 沐曦) ----------------
+# 用于“纯 CPU 环境”判定(2026-10-22 用户口径): 只有 **NVIDIA 与沐曦都未检测到**
+# 才允许提示“纯 CPU”; 任一厂商有卡都不能称为纯 CPU。
+#   NVIDIA: PCI vendor 0x10de(sysfs, 不依赖驱动) → 数量
+#   MetaX : mx-smi 'Attached GPUs'(依赖驱动); mx-smi 缺失/执行失败 → unknown
+# 输出(stdout): "<nvidia_count> <metax_count|unknown>"
+# 用法: read -r nv mx <<< "$(node_gpu_probe <ip> [user])"
+# 前置: SSH_KEY 已设置(模块内 init_remote_kubectl 提供); SSH 失败/不可达 → "0 unknown"
+node_gpu_probe() {
+    local _ip="$1" _u="${2:-$(ssh_user_for_ip "$1")}" _out
+    _out="$(ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+              "${_u}@${_ip}" '
+        nv=$(grep -l 0x10de /sys/bus/pci/devices/*/vendor 2>/dev/null | wc -l | tr -d " ")
+        [ -n "${nv}" ] || nv=0
+        if command -v mx-smi >/dev/null 2>&1; then
+            if mxout=$(sudo mx-smi 2>/dev/null); then
+                mx=$(printf "%s\n" "${mxout}" | awk "/Attached GPUs/{print \$NF}" | tr -d " ")
+                [ -n "${mx}" ] || mx=0
+            else
+                mx=unknown
+            fi
+        else
+            mx=unknown
+        fi
+        echo "${nv} ${mx}"
+    ' 2>/dev/null || echo "0 unknown")"
+    printf '%s\n' "${_out:-0 unknown}"
+}
+
+# 是否可判定为纯 CPU: NVIDIA 数量为 0 且沐曦明确为 0(unknown 不算纯 CPU)
+node_gpu_is_pure_cpu() { [ "${1:-1}" = "0" ] && [ "${2:-unknown}" = "0" ]; }
+
+# 远程探测宿主 NVIDIA 驱动是否**可用**(用于决定 operator 是否走 pre-installed):
+#   nvidia-smi -L 成功 或 /proc/driver/nvidia/version 可读 → yes
+#   否则 → no; SSH 失败/不可达 → unknown
+# 用法: st="$(node_host_nvidia_driver_works <ip> [user])"
+# 前置: SSH_KEY 已设置
+node_host_nvidia_driver_works() {
+    local _ip="$1" _u="${2:-$(ssh_user_for_ip "$1")}" _out
+    _out="$(ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+              "${_u}@${_ip}" '
+        if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+            echo yes
+        elif [ -r /proc/driver/nvidia/version ]; then
+            echo yes
+        else
+            echo no
+        fi
+    ' 2>/dev/null || echo unknown)"
+    printf '%s\n' "${_out:-unknown}"
+}
+
 # ---------------- 附加组件通用工具 ----------------
 
 # 返回第一个 master 节点 IP(附加组件执行 kubectl 的入口)
@@ -2344,6 +2468,83 @@ init_remote_kubectl() {
     K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
     _INIT_REMOTE_KUBECTL=1
     return 0
+}
+
+# ---------------- Envoy Gateway 数据面 Service 类型对齐 ----------------
+# 背景(2026-10-22 实机): CubeStackCluster 的 spec.global.serviceExposeMode 只作用于
+#   operator 自己渲染的 Service; Envoy Gateway 数据面 Service 由 EnvoyProxy 决定, 默认
+#   LoadBalancer。SERVICE_EXPOSE_MODE=nodeport(无 MetalLB)时公网 Service 会停在
+#   LoadBalancer / EXTERNAL-IP <pending>, 公网 Gateway 无地址, Web UI 地址发现回退到
+#   私有 ClusterIP(并被误标成 MetalLB)。
+# 做法(幂等): 创建/更新 EnvoyProxy(mergeType=StrategicMerge, 保留 chart 的镜像覆盖) →
+#   patch 公网 Gateway 的 spec.infrastructure.parametersRef → 等 Service 类型切换。
+# 前置: 已调用 init_remote_kubectl(提供 SSH/K)。
+# 用法: ensure_envoy_gateway_service_type [nodeport|metallb]
+# 返回: 0=服务类型已对齐; 1=未确认(调用方决定 warn/fail)
+ensure_envoy_gateway_service_type() {
+    local _mode="${1:-${SERVICE_EXPOSE_MODE:-metallb}}"
+    local _ns="${CUBESTACK_ENVOY_NAMESPACE:-envoy-gateway-system}"
+    local _gw="${CUBESTACK_GATEWAY_NAME:-cubestack-gateway}"
+    local _proxy="${CUBESTACK_GATEWAY_PROXY_NAME:-cubestack-proxy}"
+    local _type _yaml _st="" _i
+    case "${_mode,,}" in
+        nodeport) _type="NodePort" ;;
+        *)        _type="LoadBalancer" ;;
+    esac
+
+    # operator 异步创建公网 Gateway(上界 120s)
+    for _i in $(seq 1 24); do
+        SSH "${K} -n ${_ns} get gateway ${_gw} >/dev/null 2>&1" && break
+        sleep 5
+    done
+    if ! SSH "${K} -n ${_ns} get gateway ${_gw} >/dev/null 2>&1"; then
+        warn "  Envoy Gateway: 未找到公网 Gateway ${_ns}/${_gw}(operator 可能尚未就绪)"
+        return 1
+    fi
+
+    _yaml="$(cat <<EOF
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: ${_proxy}
+  namespace: ${_ns}
+  labels:
+    cubestack.io/cluster: ${CLUSTER_NAME:-cubestack}
+    cubestack.io/component: envoy-gateway
+    cubestack.io/managed-by: cubestack-operator
+spec:
+  mergeType: StrategicMerge
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: ${_type}
+EOF
+)"
+    if ! printf '%s\n' "${_yaml}" | SSH "${K} apply -f - >/dev/null 2>&1"; then
+        warn "  Envoy Gateway: EnvoyProxy ${_ns}/${_proxy} apply 失败"
+        return 1
+    fi
+
+    # 用 stdin 传 patch, 避免 JSON 引号在远端 shell 被拆散
+    if ! printf '{"spec":{"infrastructure":{"parametersRef":{"group":"gateway.envoyproxy.io","kind":"EnvoyProxy","name":"%s"}}}}' "${_proxy}" \
+            | SSH "${K} -n ${_ns} patch gateway "${_gw}" --type=merge --patch-file=/dev/stdin >/dev/null 2>&1"; then
+        warn "  Envoy Gateway: 公网 Gateway ${_gw} 挂载 EnvoyProxy 失败"
+        return 1
+    fi
+
+    # Envoy Gateway 重建数据面 Service 需要一点时间(上界 120s)
+    for _i in $(seq 1 24); do
+        _st="$( (SSH "${K} -n ${_ns} get svc -l gateway.envoyproxy.io/owning-gateway-name=${_gw} -o jsonpath='{.items[0].spec.type}' 2>/dev/null" || true) )"
+        [ "${_st}" = "${_type}" ] && break
+        sleep 5
+    done
+    if [ "${_st}" = "${_type}" ]; then
+        ok "  Envoy Gateway 公网 Service 类型: ${_type}"
+        return 0
+    fi
+    warn "  Envoy Gateway 公网 Service 类型仍为 ${_st:-<未就绪>}(期望 ${_type})"
+    return 1
 }
 
 # ---------------- RWO 单卷 Deployment 的更新策略守护 ----------------

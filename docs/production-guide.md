@@ -424,11 +424,11 @@ CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-true}"  # ← 置 true:供给层(池 + Sto
 
 `verify_ceph` 九段断言:① Rook operator + ceph-csi Ready → ② `CephCluster phase=Ready` 且 `ceph -s` 无 `HEALTH_ERR` → ③ SC 存在 → ④ **RBD 块设备真实读写** → ⑤ ≥3 个 OSD up → ⑥ 清理兜底 → ⑦ **CephFS RWX 文件 I/O** → ⑧ **RGW/S3 上传下载** → ⑨ 对外暴露自检。
 
-**要开 CephFS / 对象存储**,打开后重跑 `ceph_csi`(两项默认都是 true):
+**要开 CephFS / 对象存储**,打开后重跑 `ceph_csi`(两项默认跟随 `CEPH_CSI_ENABLED`;开启 CSI 时默认 true,Ceph 全关时不会启用):
 
 ```bash
-CEPHFS_ENABLED="${CEPHFS_ENABLED:-true}"     # RWX 共享文件系统
-CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-true}" # S3 对象存储网关(RGW)
+CEPHFS_ENABLED="${CEPHFS_ENABLED:-${CEPH_CSI_ENABLED:-false}}"   # RWX 共享文件系统(默认随 CSI)
+CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-${CEPH_CSI_ENABLED:-false}}" # S3 对象存储网关 RGW(默认随 CSI)
 ```
 
 > **CephFS 额外一步**:平台按 subvolume group 路由(`ephemeral` / `durable`),部署后补跑
@@ -851,10 +851,10 @@ sudo ./deploy-cluster.sh --enable gpu_operator     # 或只写开关,下次全�
 sudo ./deploy-cluster.sh --steps verify_metax_gpu
 ```
 
-**纯 CPU 集群**(无沐曦卡):模块会先逐节点跑 `mx-smi` 检测,自动走**快速路径**(只等 operator + `gpu-label` 就绪,不再傻等 300s),不会因为"没有 GPU"而失败。
+**无沐曦 GPU 的集群**(可能仍有 NVIDIA GPU):模块会先逐节点跑 `mx-smi` 检测,自动走**快速路径**(只等 operator + `gpu-label` 就绪,不再傻等 300s),不会因为"没有沐曦 GPU"而失败。⚠ 只有 **NVIDIA 与沐曦都未检测到** 才称为"纯 CPU 环境";仅有 NVIDIA GPU 时模块会明确提示"检测到 NVIDIA GPU, 非纯 CPU"。
 
 **master 节点特例**:沐曦组件的 DaemonSet **默认没有 control-plane 容忍**,而 master 通常带 `NoSchedule` 污点 →
-模块在检测到该 master **确实有 GPU** 时会**自动去污点 + uncordon**(否则 GPU 永远用不上);无 GPU 的 master 保持不可调度。
+模块在检测到该 master **确实有沐曦 GPU** 时会**自动去污点 + uncordon**(否则 GPU 永远用不上);无沐曦 GPU 的 master 保持不可调度。
 
 ### 5.4 Pod 里怎么用 GPU
 

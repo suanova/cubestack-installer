@@ -266,8 +266,9 @@ RELEASE_VERSION=2.0.0
 KUBESPRAY_VERSION=v2.32.0
 KUBESPRAY_PROFILE=v2.32.0
 
-# 自研镜像 tag（release-2.0: 所有自研组件统一 2.0.0）
+# 自研镜像 tag(仅镜像清单/发布树登记用; 部署时 operator 镜像 tag 由 chart 自带, installer 不覆盖)
 CUBESTACK_OPERATOR_IMAGE_TAG=2.0.0
+# chart 版本提示(可省略; release 模式优先按 CUBESTACK_RELEASE / Chart.yaml version 发现)
 CUBESTACK_OPERATOR_CHART_VERSION=2.0.0
 # release 树自带 chart(offline-files/cubestack-operator/charts/), 部署恒用本地副本
 CUBESTACK_OPERATOR_CHART_SYNC=offline
@@ -303,6 +304,13 @@ RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev
   根据实际根目录派生（§4.1）。
 - `release.env` 中的变量在 release 模式下**优先于 `cluster.conf` / `cluster.defaults.conf`**。
   发布树是版本真相；要例外，请改发布树并重新发布，而不是在客户 `cluster.conf` 里覆盖。
+- **operator 版本默认由 chart 决定(2026-10-22)**: 发布树的 chart 版本可以与 release 版本不同
+  (例: release `2.0.0-rc1` + chart `cubestack-operator-chart-1.0.0-latest.tgz`); 部署模块按
+  `<RELEASE>` / `CUBESTACK_OPERATOR_CHART_VERSION` / `Chart.yaml version` 发现 chart。
+  operator 镜像 tag **默认不传**, 由 chart 自带(`appVersion` / `values.image.tag`)决定;
+  只有必要时才设 `CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE=<tag>`(仅覆盖 cubestack-operator
+  自身镜像, **不覆盖** operator catalog 内其他组件版本)。`CUBESTACK_OPERATOR_IMAGE_TAG`
+  仅用于镜像清单/发布树登记。发布树的镜像 tar 必须按最终 operator ref 命名。
 - ⚠ `KUBESPRAY_VERSION` / `K8S_VERSION` 等 **kubespray 版本面变量**随后会被
   `deployments/config/profiles/<KUBESPRAY_PROFILE>.profile` 接管（`load_config` 的既有逻辑）。
   发布时 CLI 镜像固定为 `2.0.0`，镜像内的 profile 随之冻结，所以两者应当一致；发布脚本需校验

@@ -231,6 +231,15 @@ if [ "${CUBESTACK_COMPONENT_RESTART:-1}" != "0" ]; then
     fi
 fi
 
+# ③b envoy-gateway: 数据面 Service 类型对齐 SERVICE_EXPOSE_MODE
+#   operator 的 CR serviceExposeMode 不作用于 Envoy Gateway 的默认 EnvoyProxy; 单独更新
+#   envoy-gateway 后 Gateway/Service 可能被重建, 这里重新挂一次(幂等)。
+if [ "${_cr}" = "envoyGateway" ]; then
+    say "  对齐 Envoy Gateway 数据面 Service 类型(SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE:-metallb})..."
+    ensure_envoy_gateway_service_type "${SERVICE_EXPOSE_MODE:-metallb}" \
+        || warn "  Envoy Gateway 数据面 Service 类型未确认"
+fi
+
 echo "---------------------------------------------"
 say "组件 ${COMP}: 镜像新推 ${_n_push} / digest 跳过 ${_n_skip} / tar ${_n_tar}"
 ok "单组件更新完成(未重跑 cubestack_operator)"

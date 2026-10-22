@@ -11,6 +11,8 @@
 #   ③ 干净节点: 前置探测通过, 正常进入 scp/装包流程
 #   ④ 远端脚本静态围栏: 检测在 apt 锁检查之前; 自动修复动作与 fuser timeout 在位
 #   ⑤ 远端装包调用带 RECONCILE_SSH_TIMEOUT
+#   ⑥ SSH 认证失败(密码/公钥被拒)/网络不可达: 必须报 SSH 问题, **不得**误导成
+#      "Ceph/RBD 残留 → 重启"(2026-10-22 用户实机: 密码错 → 提示重启节点)
 # 隔离: 临时 cluster.conf + OFFLINE_FILES_ROOT + 假 ssh/scp(纯离线)
 # 用法: bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh
 # ============================================================
@@ -50,6 +52,8 @@ case "${cmd}" in
             1) echo "ceph/rbd-mount: /mnt/cephfs/models ceph (mons unreachable)"; exit 2 ;;
             2) echo "active-ceph-ok: /mnt/cephfs/models ceph"; echo "active-rbd-ok: 2"; exit 0 ;;
             3) echo "auto-repair-needed: /mnt/cephfs/models"; exit 0 ;;
+            4) echo "ubuntu@10.0.0.1: Permission denied (publickey,password)." >&2; exit 255 ;;
+            5) echo "ssh: connect to host 10.0.0.1 port 22: Connection timed out" >&2; exit 255 ;;
             *) exit 0 ;;
         esac ;;
     *) exit 0 ;;
@@ -103,6 +107,22 @@ rc="$(run_tool 3)"
 chk "退出码" "0" "${rc}"
 chk "执行了 scp(自动修复在远端进行)" "1" "$(wc -l < "${TMP}/scp-3.log")"
 chk_contains "日志点名自动卸载/解映射" "自动卸载/解映射" "${TMP}/out-3"
+
+echo "== ②d SSH 认证失败(密码/公钥被拒): 必须报 SSH, 不得误导为 Ceph/RBD/重启 =="
+rc="$(run_tool 4)"
+chk "退出码" "1" "${rc}"
+chk_contains "点名 SSH 认证失败" "SSH 认证失败" "${TMP}/out-4"
+chk_contains "给出密码核对指引" "SSH_DEFAULT_PASSWORD" "${TMP}/out-4"
+chk_not_contains "不误导为 Ceph/RBD 残留" "Ceph/RBD 残留" "${TMP}/out-4"
+chk_not_contains "不提示重启节点" "reboot -f" "${TMP}/out-4"
+chk "未执行 scp(认证都没过)" "0" "$(wc -l < "${TMP}/scp-4.log")"
+
+echo "== ②e SSH 网络不可达: 报网络问题, 不提示重启 =="
+rc="$(run_tool 5)"
+chk "退出码" "1" "${rc}"
+chk_contains "点名网络不可达" "网络不可达" "${TMP}/out-5"
+chk_not_contains "不提示重启节点" "reboot -f" "${TMP}/out-5"
+chk "未执行 scp" "0" "$(wc -l < "${TMP}/scp-5.log")"
 
 echo "== ③ 远端脚本静态围栏 =="
 awk '/<<.REMOTE_EOF./{f=1;next} /^REMOTE_EOF$/{f=0} f' "${TOOL}" > "${TMP}/remote.sh"

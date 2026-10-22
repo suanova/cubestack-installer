@@ -181,8 +181,9 @@ metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/${METAX_MACA_IMAGE}
 #   ⚠ **本组默认不镜像到 mirrors/**: 上游就是本台 Harbor 的 suanova-private 项目(私有),
 #     与 metax-gpu 同一处理 —— 同步工具按"注册域 == HARBOR_MIRROR_REGISTRY"自动跳过;
 #     取离线 tar 时 harbor-save-images.sh 对同源组**直接用原始 ref** 拉取(不拼 mirrors/, 那不存在的副本)。
-#   ⚠ tag 是滚动的 ${CUBESTACK_OPERATOR_IMAGE_TAG}(默认 latest), 与 chart(1.0.0-latest)配套;
-#     离线 tar 会随上游滚动构建失效 —— 重新部署前重跑一次 save 工具(见 README)。
+#   ⚠ 部署时 operator 镜像 tag 以 **chart 自带版本**为准(如 release 2.0.0 → :2.0.0);
+#     本行 tag(${CUBESTACK_OPERATOR_IMAGE_TAG})仅用于 Harbor 同步/离线备料登记。
+#     release 树以 deployments/releases/<版本>/release-images.tsv 为准(自研统一 :<版本>)。
 #   清单来源 = chart 渲染结果(templates/manager.yaml 的 .Values.image); 镜像 ref 的
 #   注册域/路径变更时, 25_cubestack_operator.sh 的渲染自检会拦住(它不读本行, 只做登记)。
 # ------------------------------------------------------------

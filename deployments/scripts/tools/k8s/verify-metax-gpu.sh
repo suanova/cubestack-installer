@@ -71,7 +71,7 @@ print(f"GPU 识别节点数: {len(gpu_nodes)}  总 GPU(allocatable): {total}")
 if anomaly:
     print(f"⚠ 异常: 节点 {anomaly} 已打 gpu.installed=true 但 allocatable 为空(设备插件未注册, 检查 metax-gpu-device pod)")
 if not gpu_nodes:
-    print("⚠ 未检测到任何节点识别 GPU(检查 gpu-label/gpu-device DaemonSet 与 metax 硬件)")
+    print("⚠ 未检测到任何节点识别沐曦 GPU(检查 gpu-label/gpu-device DaemonSet 与 metax 硬件)")
 PY
 )"
 rm -f "${_TMP}"
@@ -84,7 +84,7 @@ echo "${OUT}"
 # 即基于真实 open)。探针 = runAsUser/runAsGroup:1000 + metax-tech.com/gpu:1, 镜像用 dev_lab
 # 的 maca-pytorch(集群 registry, 离线可用; 含 torch+MACA)。
 if echo "${OUT}" | grep -q "GPU 识别节点数: 0 "; then
-    say "权限探针: 跳过(集群无 GPU 节点)"
+    say "权限探针: 跳过(集群无沐曦 GPU 节点)"
 else
     _PROBE_IMG="${METAX_PERM_PROBE_IMAGE:-${REGISTRY_DOMAIN:-registry.cubestack.io}:${REGISTRY_PORT:-5000}/suanova/maca-pytorch:${DEV_LAB_IMAGE_TAG:-latest}}"
     say "权限探针: runAsUser=1000 真实打开 /dev/mxcd + torch.cuda.is_available()(镜像 ${_PROBE_IMG})..."

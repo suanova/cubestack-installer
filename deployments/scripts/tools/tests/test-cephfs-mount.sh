@@ -3,7 +3,10 @@
 # test-cephfs-mount.sh — cephfs_mount 模块离线桩式回归(不连集群)
 # 覆盖:
 #   ① 模块/清单/配置默认值存在且元数据合规
+#   ①b 调度: Ceph 全关时计划里**不得**出现 cephfs_mount(2026-10-22 用户实机)
 #   ② 门禁: CEPHFS_MOUNT_ENABLED=false → 跳过(不 apply)
+#   ②b Ceph 全关(CEPH_ENABLED/CEPH_CSI_ENABLED=false): 默认不启用、不预检、不发 SSH
+#   ②c 门禁兜底: 即使 CEPHFS_MOUNT_ENABLED 被显式误开, Ceph 未部署也不得去预检
 #   ③ internal 模式渲染: mon 归一化 / Secret / DaemonSet 关键字段(privileged + 双向传播 + 目标路径)
 #   ④ 全节点真实验证命令覆盖(NODES 中每台都发 findmnt/探针)
 #   ⑤ 幂等重跑(第二次仍 exit 0)
@@ -36,6 +39,34 @@ CEPH_ENABLED="true"
 CEPH_CSI_ENABLED="true"
 CEPH_MODE="internal"
 CEPHFS_ENABLED="true"
+EOF
+
+# Ceph 全关(用户报告的场景): 不设置任何 CEPHFS_* 变量, 默认值必须让它保持关闭。
+cat > "${TMP}/cluster.conf.ceph-off" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
+  "master,m2,10.0.0.2,root,-"
+  "worker,w1,10.0.0.11,root,-"
+)
+SSH_USER="root"
+SSH_KEY_NAME="cubestack_k8s"
+KUBESPRAY_PROFILE="none"
+CEPH_ENABLED="false"
+CEPH_CSI_ENABLED="false"
+EOF
+
+# 显式误开 CEPHFS_MOUNT_ENABLED、但 Ceph 未部署: 模块自身也必须兜底跳过。
+cat > "${TMP}/cluster.conf.ceph-off-forced" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
+)
+SSH_USER="root"
+SSH_KEY_NAME="cubestack_k8s"
+KUBESPRAY_PROFILE="none"
+CEPH_ENABLED="false"
+CEPH_CSI_ENABLED="false"
+CEPHFS_ENABLED="true"
+CEPHFS_MOUNT_ENABLED="true"
 EOF
 
 # 假 ssh: 跳过选项, 记录 host/cmd, 按命令内容回放夹具
@@ -76,11 +107,11 @@ exit 0
 FAKE
 chmod +x "${TMP}/bin/ssh"
 
-run_module() {  # run_module <mode> → 退出码; 输出在 $TMP/run-<mode>.out
-    local mode="$1"
+run_module() {  # run_module <mode> [conf] → 退出码; 输出在 $TMP/run-<mode>.out
+    local mode="$1" conf="${2:-${TMP}/cluster.conf}"
     (
         export PATH="${TMP}/bin:${PATH}"
-        export CLUSTER_CONF="${TMP}/cluster.conf"
+        export CLUSTER_CONF="${conf}"
         export FAKE_SSH_LOG="${TMP}/ssh-${mode}.log"
         export FAKE_APPLY_LOG="${TMP}/apply-${mode}.log"
         : > "${FAKE_SSH_LOG}"; : > "${FAKE_APPLY_LOG}"
@@ -102,6 +133,11 @@ echo "== ① 模块/清单/默认值存在性 =="
 [ -f "${MODULE}" ] && chk_contains "元数据 REQUIRES" "REQUIRES: ceph_csi" "${MODULE}"
 [ -f "${MODULE}" ] && chk_contains "可卸载声明" "UNINSTALL: 1" "${MODULE}"
 [ -f "${DEFAULTS}" ] && chk_contains "默认值 CEPHFS_MOUNT_PATH" 'CEPHFS_MOUNT_PATH="${CEPHFS_MOUNT_PATH:-/mnt/cephfs/models}"' "${DEFAULTS}"
+# 2026-10-22 用户实机: Ceph 两个总开关都 false, 计划里却仍有 cephfs_mount, 然后去预检
+# CephCluster 失败。默认值必须跟随 Ceph CSI, 不能无条件 true。
+[ -f "${DEFAULTS}" ] && chk_contains "CEPHFS_ENABLED 默认跟随 CEPH_CSI_ENABLED" 'CEPHFS_ENABLED="${CEPHFS_ENABLED:-${CEPH_CSI_ENABLED:-false}}"' "${DEFAULTS}"
+[ -f "${DEFAULTS}" ] && chk_contains "CEPH_RGW_ENABLED 默认跟随 CEPH_CSI_ENABLED" 'CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-${CEPH_CSI_ENABLED:-false}}"' "${DEFAULTS}"
+[ -f "${DEFAULTS}" ] && chk_contains "CEPHFS_MOUNT_ENABLED 默认跟随 CEPHFS_ENABLED" 'CEPHFS_MOUNT_ENABLED="${CEPHFS_MOUNT_ENABLED:-${CEPHFS_ENABLED}}"' "${DEFAULTS}"
 # 回归(实机踩坑 2026-10-19): hostPath 在容器里本身就是 bind mount, mountpoint -q 恒真;
 # 若据此判"目标已被其他文件系统挂载"会拒绝工作。必须只按 fstype=ceph 判断。
 [ -f "${MANIFEST}" ] && chk_contains "仅按 fstype 判断是否已挂载" 'findmnt -n -o FSTYPE -T "${TARGET}"' "${MANIFEST}"
@@ -115,11 +151,35 @@ else
     echo "  ok  验证不使用全局 sync"
 fi
 
+echo "== ①b 调度: Ceph 全关时计划不得包含 cephfs_mount =="
+_plan="$(CLUSTER_CONF="${TMP}/cluster.conf.ceph-off" \
+    bash "${REPO_ROOT}/deployments/scripts/deploy-cluster.sh" --list 2>&1 || true)"
+_plan_line="$(printf '%s\n' "${_plan}" | grep -m1 '本次执行模块' || true)"
+if printf '%s' "${_plan_line}" | grep -qw 'cephfs_mount'; then
+    echo "  FAIL 计划仍包含 cephfs_mount: ${_plan_line}"; fail=1
+else
+    echo "  ok  计划不含 cephfs_mount"
+fi
+
 echo "== ② 门禁: 关闭时不 apply =="
 rc="$(run_module disabled)"
 chk "disabled 退出码" "0" "${rc}"
 chk_not_contains "disabled 无 apply" "=== APPLY ===" "${TMP}/apply-disabled.log"
 chk_contains "disabled 输出跳过" "跳过" "${TMP}/run-disabled.out"
+
+echo "== ②b Ceph 全关: 默认不启用、不预检、不发 SSH =="
+rc="$(run_module cephoff "${TMP}/cluster.conf.ceph-off")"
+chk "ceph-off 退出码" "0" "${rc}"
+chk_contains "ceph-off 输出跳过" "跳过" "${TMP}/run-cephoff.out"
+chk_not_contains "ceph-off 不做 Ceph 预检" "预检 Ceph 集群" "${TMP}/run-cephoff.out"
+chk "ceph-off 未发起 SSH" "0" "$(wc -l < "${TMP}/ssh-cephoff.log")"
+
+echo "== ②c 兜底: CEPHFS_MOUNT_ENABLED 误开但 Ceph 未部署 → 仍跳过 =="
+rc="$(run_module cephoffforced "${TMP}/cluster.conf.ceph-off-forced")"
+chk "ceph-off-forced 退出码" "0" "${rc}"
+chk_contains "明确报 Ceph 未启用" "Ceph 未启用" "${TMP}/run-cephoffforced.out"
+chk_not_contains "ceph-off-forced 不做 Ceph 预检" "预检 Ceph 集群" "${TMP}/run-cephoffforced.out"
+chk "ceph-off-forced 未发起 SSH" "0" "$(wc -l < "${TMP}/ssh-cephoffforced.log")"
 
 echo "== ③ 首次部署渲染 =="
 rc="$(run_module install1)"

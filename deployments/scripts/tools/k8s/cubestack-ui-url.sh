@@ -134,22 +134,28 @@ def gateway_endpoints(ns, name):
     if not listeners:
         listeners = [{"name": "http", "protocol": "HTTP", "port": 80}]
     addrs = []
-    if g:
-        for a in (g.get("status", {}) or {}).get("addresses", []) or []:
-            if a.get("value"):
-                addrs.append(("lb", a["value"]))
     svc = owning_service(ns, name)
+    svc_type = ""
     if svc:
         st = svc.get("spec", {}) or {}
+        svc_type = (st.get("type") or "ClusterIP")
         for i in (svc.get("status", {}) or {}).get("loadBalancer", {}).get("ingress", []) or []:
             v = i.get("ip") or i.get("hostname")
             if v:
                 addrs.append(("lb", v))
-        if st.get("type") == "NodePort" and node_ip:
+        if svc_type == "NodePort" and node_ip:
             for p in st.get("ports", []) or []:
                 np = p.get("nodePort")
                 if np:
                     addrs.append(("nodeport", int(np)))
+    # Gateway status address: only externally meaningful for LoadBalancer (or when the
+    # owning Service is not visible). A ClusterIP Service's address is the private
+    # gateway's internal VIP — never advertise it as the Web UI; NodePort is served
+    # through node IP + spec.ports[].nodePort above.
+    if g and svc_type in ("", "LoadBalancer"):
+        for a in (g.get("status", {}) or {}).get("addresses", []) or []:
+            if a.get("value"):
+                addrs.append(("lb", a["value"]))
     out = []
     for kind, val in addrs:
         if kind == "nodeport":
@@ -195,6 +201,14 @@ def route_paths(route):
                 paths.append(p)
     return paths or ["/"]
 
+def is_api_path(p):
+    # UI 地址只保留页面路径; API/后端代理路径(如 /cubestack/api/cubepilot/)会 404, 不打印
+    q = (p or "").lower()
+    return ("/api/" in q) or q.rstrip("/").endswith("/api") or ("cubepilot" in q)
+
+def ui_paths(route):
+    return [p for p in route_paths(route) if not is_api_path(p)]
+
 ui_routes = [r for r in routes if is_ui(r)]
 if not ui_routes:
     # 兜底: 任一路由的 backend 含 ui/portal/web
@@ -227,8 +241,11 @@ def emit_for_parent(r, rns, pref, hostnames):
         return
     endpoints, _ = gateway_endpoints(pns, pname)
     eps, kind = pick_endpoints(endpoints)
+    paths = ui_paths(r)
+    if not paths:
+        return
     for ep in eps:
-        for path in route_paths(r):
+        for path in paths:
             if not path.startswith("/"):
                 path = "/" + path
             port = "" if ep["port"] in (80, 443) else f":{ep['port']}"

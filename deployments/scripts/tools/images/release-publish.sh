@@ -181,8 +181,9 @@ _copy_chart() {
     [ -f "${src}" ] || src="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator/${CHART_TGZ}"
     if [ ! -f "${src}" ]; then
         err "chart 缺失: ${CHART_TGZ}"
-        err "  放到 ${OFFLINE_DIR}/cubestack-operator/charts/(需与 release.env 的 CUBESTACK_OPERATOR_CHART_VERSION 一致)"
-        err "  helm pull ${CUBESTACK_OPERATOR_CHART_REF:-oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart} --version ${CUBESTACK_OPERATOR_CHART_VERSION} -d ${OFFLINE_DIR}/cubestack-operator/charts"
+        err "  放到 ${OFFLINE_DIR}/cubestack-operator/charts/(命名 cubestack-operator-chart-<版本>.tgz;"
+        err "  版本默认取 RELEASE=${RELEASE}, 可用 release.env 的 CUBESTACK_OPERATOR_CHART_VERSION 覆盖)"
+        err "  helm pull ${CUBESTACK_OPERATOR_CHART_REF:-oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart} --version ${CUBESTACK_OPERATOR_CHART_VERSION:-${RELEASE}} -d ${OFFLINE_DIR}/cubestack-operator/charts"
         exit 1
     fi
     mkdir -p "${STAGE_TREE}/cubestack-operator/charts"
@@ -217,7 +218,7 @@ _write_release_json() {
     cli_size="$(stat -c %s "${CLI_TAR}")"
     git_commit="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
     git_tag="$(git -C "${REPO_ROOT}" describe --tags --always --dirty 2>/dev/null || echo unknown)"
-    python3 - "${RELEASE}" "${KUBESPRAY_VERSION}" "${CUBESTACK_OPERATOR_CHART_VERSION:-}" \
+    python3 - "${RELEASE}" "${KUBESPRAY_VERSION}" "${CUBESTACK_OPERATOR_CHART_VERSION:-${RELEASE}}" \
         "${RELEASE_GROUPS:-}" "${CLI_IMAGE}" "${cli_sha}" "${cli_size}" \
         "${git_commit}" "${git_tag}" "${STAGE_TREE}/release.json" <<'PY'
 import json, sys, datetime
@@ -349,14 +350,16 @@ _verify() {
     [ -f "${STAGE_TREE}/cubestack-operator/charts/${CHART_TGZ}.digest" ] \
         || warn "缺少 chart digest 边车: ${CHART_TGZ}.digest(离线可用, 在线比对会失效)"
     # chart 内 Chart.yaml 的 version 必须与 release.env 的 CHART_VERSION 一致
-    local chart_yaml chart_ver
+    # (release.env 可省略 CHART_VERSION: 默认按发布版本 <RELEASE> 校验/命名)
+    local chart_yaml chart_ver _want_chart_ver
+    _want_chart_ver="${CUBESTACK_OPERATOR_CHART_VERSION:-${RELEASE}}"
     chart_yaml="$(tar -tzf "${STAGE_TREE}/cubestack-operator/charts/${CHART_TGZ}" 2>/dev/null \
         | command grep '/Chart.yaml$' | head -1)"
     chart_ver=""
     [ -n "${chart_yaml}" ] && chart_ver="$(tar -xOf "${STAGE_TREE}/cubestack-operator/charts/${CHART_TGZ}" "${chart_yaml}" 2>/dev/null \
         | awk '/^version:/{print $2; exit}')"
-    if [ -n "${chart_ver}" ] && [ "${chart_ver}" != "${CUBESTACK_OPERATOR_CHART_VERSION:-}" ]; then
-        err "chart 版本不符: Chart.yaml version=${chart_ver} != release.env ${CUBESTACK_OPERATOR_CHART_VERSION:-<空>}"
+    if [ -n "${chart_ver}" ] && [ "${chart_ver}" != "${_want_chart_ver}" ]; then
+        err "chart 版本不符: Chart.yaml version=${chart_ver} != release.env ${_want_chart_ver}(可省略, 默认取 RELEASE)"
         exit 1
     fi
     [ -n "${chart_ver}" ] || warn "无法读取 chart Chart.yaml version, 仅按文件名校验"

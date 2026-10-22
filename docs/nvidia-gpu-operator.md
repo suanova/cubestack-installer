@@ -72,16 +72,28 @@ vendored 副本; 离线机自动纯本地。升级手册见 chart 目录 `CUBEST
 **预编译驱动容器**(`usePrecompiled=true`, 分支 595): 驱动镜像 = `driver:595-<内核>-ubuntu22.04`,
 内核模块已随镜像发布 → **驱动容器运行期不下载任何 OS 包、不需要本地包源** —— air-gap 官方推荐路径。
 
+> **宿主驱动优先(2026-10-22)**: 有卡节点若已装**可用宿主驱动**(`nvidia-smi -L` 成功), operator 会打
+> `nvidia.com/gpu.deploy.driver=pre-installed` 并跳过 driver DaemonSet。安装器据此**跳过预编译内核门禁**,
+> 也不再准备该内核的驱动镜像。只有**没有可用宿主驱动**的节点才需要预编译驱动容器, 才检查内核覆盖。
+
 三条纪律:
 
-1. **内核覆盖预检**: 内核必须恰在 NGC 预编译列表(NGC 随 Ubuntu 内核更新陆续构建)。
+1. **内核覆盖预检(仅无宿主驱动的节点)**: 这些节点的内核必须恰在 NGC 预编译列表(NGC 随 Ubuntu 内核更新陆续构建)。
    备料侧: `nvidia-save-images.sh` 内置存在性预检(不存在即报错并给出查询命令);
-   部署侧: 模块对有卡节点 `uname -r` 做白名单门禁(fail-fast + 补拉指令)。
+   部署侧: 模块对**需要容器驱动**的有卡节点 `uname -r` 做白名单门禁(fail-fast + 补拉指令)。
    速查: `skopeo list-tags docker://nvcr.io/nvidia/driver | grep '"595-'`。
 2. **内核升级 = 一次变更**: 升级节点内核前, 先确认新内核有对应预编译镜像 → 补拉 tar → 更新
    `NVIDIA_GPU_DRIVER_PRECOMPILED_KERNELS` → 重跑模块。**不允许**"先升内核、再碰运气"。
 3. **边界(如实标注)**: v26.7.2 将该特性标注为 **tech-preview(仅 ubuntu22.04)**; 不支持 vGPU/GDS;
    混 OS 集群不支持(driver 容器要求同 OS)。
+
+> **实测(2026-10-22)**: Ubuntu 22.04 的 `5.15.0-198-generic` 在 NGC `595` 分支**尚无**预编译镜像
+> (`skopeo list-tags docker://nvcr.io/nvidia/driver | grep '"595-'` 最新覆盖到 `5.15.0-187-generic`)。
+> 但本次节点已有**可用宿主驱动 `580.178.04`**, operator 走 `pre-installed`, 因此 198 的覆盖缺失不影响它
+> (安装器现在也会跳过该节点的预编译门禁)。若节点**没有**宿主驱动且内核 198, 则只有两条路:
+> ① 节点安装并启动到已覆盖内核(如 `5.15.0-186-generic`, 与金标镜像/离线驱动 tar 一致);
+> ② 按下方"退路"自制带包驱动镜像。
+> **不要**把 `5.15.0-198-generic` 直接写进白名单 —— 镜像不存在, operator 会 `ImagePullBackOff`。
 
 **退路(内核不在覆盖表/需定制时)**: 自制"带包驱动镜像" —— 在联网机把该内核的
 `linux-headers/-image/-modules` deb 闭包烤入官方 driver 镜像(同名 tag, 容器内配 file:// 本地源),
@@ -106,7 +118,10 @@ vendored 副本; 离线机自动纯本地。升级手册见 chart 目录 `CUBEST
 
 `--steps verify_nvidia_gpu` 四步: ①全部 Pod Running/Completed ②ClusterPolicy ready
 ③PCI 探测有卡判据(0x10de, sysfs, 不依赖 nvidia-smi) ④**有卡**: allocatable + `cuda-vectoradd`
-跑通(`Test PASSED`); **无卡**: 组件级通过 + 醒目"未验真卡"边界提示。
+跑通(`Test PASSED`); **无 NVIDIA 卡**: 组件级通过 + 醒目"未验真卡"边界提示。
+
+> **“纯 CPU”判定(2026-10-22)**: 无 NVIDIA 卡时还会探测沐曦(`mx-smi`); 只要检测到沐曦 GPU 就不称纯 CPU;
+> `mx-smi` 不可用时同样**不判定**纯 CPU(NVIDIA PCI 0x10de 与沐曦都明确为 0 才算纯 CPU)。
 
 ⚠ 本仓库测试集群无 NVIDIA 硬件 → 端到端验证须在真卡环境执行; 真卡首验清单:
 `kubectl -n gpu-operator get pods` 全绿 → `nvidia-smi` 在 driver pod 内可用 →

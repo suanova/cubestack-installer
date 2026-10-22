@@ -489,7 +489,7 @@ k8s-api.cubestack.io → API_ENTRY_IP(kube-vip 已绑 → VIP; 否则第一个 m
 
 **根因** metax 组件 DS 默认**无 control-plane 容忍**, 调度不到(带 NoSchedule 污点的)master → gpu-label 不给 master 打标。
 
-**解法(根治)** 部署时在宿主机用 `mx-smi` 检测 GPU(`sudo mx-smi | grep "Attached GPUs"`), 检测到 GPU 的 master 自动移除 control-plane/master 污点并 uncordon(模块已实现); 无 GPU 的 master 保持不可调度。
+**解法(根治)** 部署时在宿主机用 `mx-smi` 检测沐曦 GPU(`sudo mx-smi | grep "Attached GPUs"`), 检测到沐曦 GPU 的 master 自动移除 control-plane/master 污点并 uncordon(模块已实现); 无沐曦 GPU 的 master 保持不可调度。
 
 **相关命令**
 ```bash
@@ -1173,6 +1173,43 @@ kubectl -n cubestack-system get csc cubestack \
 必须仍在, Pod 仍 Running, 冒烟 CR 已被清理。回归:
 `bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh`。
 
+### 12. 【2026-10-22】`SERVICE_EXPOSE_MODE=nodeport` 但 Envoy Gateway 公网 Service 仍是 `LoadBalancer/<pending>`, Web UI 打印私有 ClusterIP
+
+**症状:** 部署汇总显示 NodePort 模式, 但:
+
+```
+kubectl -n envoy-gateway-system get services
+envoy-envoy-gateway-system-cubestack-gateway-xxxx   LoadBalancer   10.233.20.25   <pending>   80:32078/TCP
+CubeStack Web UI (MetalLB): http://10.233.54.28/
+```
+
+`10.233.54.28` 是私有网关 `cubestack-ai-private` 的 **ClusterIP**, 只能集群内访问。
+
+**根因:**
+1. `CubeStackCluster.spec.global.serviceExposeMode` 只作用于 operator 自己渲染的 Service;
+   Envoy Gateway 公网数据面 Service 由 **EnvoyProxy** 决定, 未指定时默认 `LoadBalancer`;
+2. 公网 Gateway 没有 `spec.infrastructure.parametersRef` → 使用默认 EnvoyProxy → LoadBalancer;
+3. `cubestack-ui-url.sh` 把 Gateway 的 `status.addresses` 一律当作 LoadBalancer 地址,
+   于是把私有网关的 ClusterIP 标成了 "MetalLB"。
+
+**解法(已落地):**
+- `25_cubestack_operator.sh`: 显式把 `SERVICE_EXPOSE_MODE` 写入 CR
+  `spec.global.serviceExposeMode`(`nodeport|loadbalancer`), 并对已有 CR 纠偏;
+- operator 就绪后调用 `ensure_envoy_gateway_service_type`(lib-common): 创建/更新
+  `EnvoyProxy/cubestack-proxy`(`envoyService.type=NodePort|LoadBalancer`)并挂到公网
+  `Gateway/cubestack-gateway` 的 `spec.infrastructure.parametersRef`;
+- `cubestack-ui-url.sh`: 只把 LoadBalancer 的地址当 MetalLB; NodePort 用节点 IP + nodePort;
+  ClusterIP 不再输出为 Web UI 地址;
+- `--steps cubestack_operator` / `--steps envoy_gateway` 每次都会幂等重挂。
+
+**验证:**
+```bash
+kubectl -n envoy-gateway-system get envoyproxy
+kubectl -n envoy-gateway-system get svc -l gateway.envoyproxy.io/owning-gateway-name=cubestack-gateway
+bash deployments/scripts/tools/tests/test-cubestack-ui-url.sh        # ⑥ 公网 NodePort + 私有 ClusterIP
+bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh # ⑨ serviceExposeMode / Envoy 兜底
+```
+
 ---
 
 ## 四、离线部署
@@ -1480,6 +1517,70 @@ bash /opt/cubestack-installer/deployments/scripts/tools/lb/deploy-registry.sh
 grep -rn "fs.protected_regular" deployments/scripts/   # 已落地的"预清陈旧目标"点
 sysctl fs.protected_regular                            # 节点内核口径(2=对 O_CREAT 打开既有文件也生效)
 ssh <user>@<ip> "ls -la /tmp/cubestack-*.sh"           # 查遗留文件属主(与本次用户不一致即命中条件)
+```
+
+### 6. 【2026-10-22】密码错误被报成"Ceph/RBD 残留, 必须重启": `k8s_passwordless` 只告警不失败 + `node_pkgs` 把 SSH rc=255 当成 Ceph 探测结果
+
+**症状:** cluster.conf 的 SSH 密码错误时, 部署一路跑到 `node_pkgs`, 报:
+
+```
+【错误】以下节点存在**不健康**的 Ceph/RBD 残留或不可达 —— 必须先重启后再部署:
+  10.6.7.135: Warning: Permanently added '10.6.7.135' (ED25519) to the list of known hosts.
+ubuntu@10.6.7.135: Permission denied (publickey,password).
+【错误】  处置: ① systemctl stop kubelet containerd
+【错误】        ② systemctl reboot -f   # 跳过卡死的 ceph 卸载
+```
+
+而更早的 `k8s_passwordless` 只打印 `⚠ 密码注入失败`, 随后仍打印 `✅ SSH 免密配置完成` 并退出 0。
+
+**根因:**
+1. `01_k8s_passwordless.sh` 对注入失败只 `warn` 后继续; 且未先检查密钥是否**已经可用**(幂等重跑时密码可能早已轮换, 不应再尝试密码)。
+2. `tools/node/reconcile-node-packages.sh` 的前置探测把**任何**非零 SSH 退出码(含 **255 = 连接/认证失败**)都归入"不健康 Ceph/RBD 残留", 处置只给重启 —— 真因(认证失败)被埋掉。
+
+**解法(已落地):**
+- `tools/node/setup-passwordless.sh`: 先验证密钥; 密钥不通才尝试密码; 密码被拒 / 网络不通分别给出明确诊断; 任一用户失败则非零退出。`01_k8s_passwordless.sh` 据此**中止部署**(后续模块都依赖免密 SSH), 不再谎报"完成"。
+- `tools/node/reconcile-node-packages.sh`: 前置探测按退出码分类 —— `255` → SSH 认证/网络失败(给密码/公钥指引, **不提示重启**); `2`/`124` → Ceph/RBD 僵尸态(才给重启指引); 其他 → 探测执行失败。
+- `deploy-cluster.sh` 的异常退出钩子先探测 SSH, 不通则跳过 Ceph 消费者恢复(不再在失败日志末尾刷两条 `Permission denied`)。
+
+**验证:**
+```bash
+bash deployments/scripts/tools/tests/test-k8s-passwordless.sh         # 密码错→模块非零退出; 密钥已就绪→不碰密码
+bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh  # ②d/②e: SSH 认证/网络失败不再提示重启
+```
+
+**相关命令:**
+```bash
+sudo ./deploy-cluster.sh --steps k8s_passwordless   # 修正密码后先单跑复核
+```
+
+### 7. 【2026-10-22】`CEPH_ENABLED=false` + `CEPH_CSI_ENABLED=false` 仍执行 `cephfs_mount`: 子开关默认值未跟随 Ceph 总开关
+
+**症状:** Ceph 两个总开关都是 `false`, 但部署计划里仍出现 `cephfs_mount`, 执行到:
+
+```
+→  [cephfs_mount] 自动把 CephFS 子目录挂载到**每台节点**的宿主机路径 ...
+→  预检 Ceph 集群与 CephFilesystem 'cephfs'...
+【错误】CephCluster phase=''(应为 Ready); 先部署/修复 ceph 模块
+```
+
+部署因此中断在一个与用户配置(不部署 Ceph)矛盾的模块上。
+
+**根因:** `cluster.defaults.conf` 里 `CEPHFS_ENABLED` / `CEPH_RGW_ENABLED` 无条件默认 `true`,
+而 `CEPHFS_MOUNT_ENABLED` 默认跟随 `CEPHFS_ENABLED` ⇒ 即使 `CEPH_ENABLED=false` + `CEPH_CSI_ENABLED=false`,
+`cephfs_mount` 仍被 `module_default_on` 判定为启用并排进计划;模块内部只检查 `CEPHFS_ENABLED`,
+于是继续去预检一个不存在的 `CephCluster`。
+
+**解法(已落地):**
+- `cluster.defaults.conf`: `CEPHFS_ENABLED` / `CEPH_RGW_ENABLED` 改为默认跟随 `CEPH_CSI_ENABLED`
+  (`${CEPH_CSI_ENABLED:-false}`)—— Ceph 全关时子能力也关闭;开启 CSI 时仍默认开启(行为不变)。
+- `07_cephfs_mount.sh`: internal 模式增加兜底 —— `CEPH_ENABLED` 与 `CEPH_CSI_ENABLED` 都为 false 时
+  **直接跳过**(即使 `CEPHFS_MOUNT_ENABLED` 被旧配置/显式误开),不再预检 Ceph。
+
+**验证:**
+```bash
+bash deployments/scripts/tools/tests/test-cephfs-mount.sh   # ①b 计划不含 cephfs_mount; ②b/②c 不预检/不发 SSH
+# 手工核对计划(Ceph 全关应看不到 ceph/ceph_csi/cephfs_mount):
+CLUSTER_CONF=<ceph-off.conf> ./deployments/scripts/deploy-cluster.sh --list | grep 本次执行模块
 ```
 
 ---

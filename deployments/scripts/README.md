@@ -271,6 +271,7 @@ sudo ./scripts/tools/node/setup-ntp.sh --check
 ```
 
 用配置的默认密码(`SSH_DEFAULT_PASSWORD`)注入公钥到目标主机 `~/.ssh/authorized_keys`,随后验证纯密钥登录。要求:已执行 `gen-ssh-key.sh`;目标允许 SSH 密码登录。
+工具会**先验证密钥是否已可用**(幂等重跑时不再要求密码);密钥不通才回退密码。密码被拒 / 网络不通会明确区分并**非零退出**(`k8s_passwordless` 模块据此中止部署, 不再"告警后继续")。
 
 ### 5.4 gen-inventory.sh —— kubespray inventory
 

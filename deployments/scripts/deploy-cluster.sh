@@ -410,6 +410,12 @@ _restore_marked_consumers_on_fail() {   # EXIT 钩子: 仅非 0 退出(含 Ctrl-
     local _rc="$?"
     [ "${_rc}" = "0" ] && return 0
     init_remote_kubectl >/dev/null 2>&1 || return 0
+    # SSH 都不通时不要再去 get/annotate —— 否则失败日志末尾会刷出两条
+    # "Permission denied"(2026-10-22 实机: 密码错误时比真因更抢眼)。
+    if ! SSH true >/dev/null 2>&1; then
+        say "  集群 SSH 不可达 → 跳过 Ceph 消费者恢复(无标记=无操作)"
+        return 0
+    fi
     say "  异常退出(rc=${_rc}) → 恢复本次停机登记的 Ceph 消费者(无标记=无操作)..."
     stop_restore_known_consumers || true
     return 0

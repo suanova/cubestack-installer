@@ -173,6 +173,13 @@ if [ "${CEPH_MODE}" = "external" ]; then
     [ -n "${CEPHFS_FS_NAME}" ] || { say "external 模式未配置 CEPHFS_FS, 跳过 CephFS 宿主机挂载"; exit 0; }
 else
     [ "${CEPHFS_ENABLED:-false}" = "true" ] || { say "CEPHFS_ENABLED=false(无 CephFS), 跳过宿主机挂载"; exit 0; }
+    # 兜底(2026-10-22 用户实机): Ceph 基座与 CSI 都未启用时, 即使本模块开关被旧配置/显式
+    # 误开, 也不得继续 —— 否则会去预检一个根本不存在的 CephCluster, 把部署打断在一个
+    # 与用户配置(CEPH_ENABLED=false)矛盾的模块上。external 模式走外部 Ceph, 不适用。
+    if [ "${CEPH_ENABLED:-false}" != "true" ] && [ "${CEPH_CSI_ENABLED:-false}" != "true" ]; then
+        say "Ceph 未启用(CEPH_ENABLED/CEPH_CSI_ENABLED=false), 跳过 CephFS 宿主机挂载"
+        exit 0
+    fi
     CEPHFS_FS_NAME="cephfs"
 fi
 
