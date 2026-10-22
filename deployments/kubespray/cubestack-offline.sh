@@ -1004,11 +1004,32 @@ PRELOAD_EOF
 import sys
 path, name = sys.argv[1], sys.argv[2]
 src = open(path).read()
+lines = src.splitlines(keepends=True)
+# ⚠ 2026-10-13: 插入位置必须在目标节点 **containerd 安装完成之后**(preload 用 ctr import,
+#   containerd 未就绪则整段失败)。scale.yml 的 (node) 锚点紧跟 (engine) play(装 containerd),
+#   插在其前 = engine 之后, 位置正确, 保持不变;
+#   cluster.yml 旧锚点 "Install etcd" 在装 containerd 的 "Install Kubernetes nodes" play
+#   **之前**(加入控制平面路径的潜在 bug: 新 CP 节点此时无 ctr) → 改锚 "Install the
+#   control plane"(= "Install Kubernetes nodes" 之后)。已挂载但位置错误(旧版锚点)→ 迁移。
 marker = {
-    "cluster.yml": "- name: Install etcd",
+    "cluster.yml": "- name: Install the control plane",
     "scale.yml": '- name: Target only workers to get kubelet installed and checking in on any new nodes(node)',
 }.get(name)
-if not marker or marker not in src:
+IMPORT = "import_playbook: ../patch-playbooks/cubestack-preload.yml"
+m_idx = next((i for i, l in enumerate(lines) if l.rstrip("\n") == marker), None)
+imp_idx = next((i for i, l in enumerate(lines) if IMPORT in l), None)
+if imp_idx is not None and m_idx is not None and imp_idx < m_idx:
+    # 旧位置(containerd 装好之前)→ 删掉已挂载的整块, 随后在正确位置重新插入
+    j = imp_idx
+    while j > 0 and (lines[j].lstrip().startswith("#")
+                     or lines[j].lstrip().startswith(
+                         ("- name: Preload offline images", "vars:",
+                          "preload_target:", "import_playbook: ../patch-playbooks/cubestack-preload.yml"))):
+        j -= 1
+    del lines[j + 1:imp_idx + 1]
+    m_idx = next((i for i, l in enumerate(lines) if l.rstrip("\n") == marker), None)
+    imp_idx = None
+if imp_idx is None and (marker is None or m_idx is None):
     print("marker not found, skip")
     sys.exit(0)
 block = (
@@ -1031,7 +1052,8 @@ else:
         "- name: Preload offline images to cluster nodes\n"
         "  import_playbook: ../patch-playbooks/cubestack-preload.yml\n"
     )
-open(path, "w").write(src.replace(marker, block + "\n" + marker, 1))
+lines.insert(m_idx, block)
+open(path, "w").writelines(lines)
 print("patched")
 PYEOF
         if grep -q "cubestack-preload.yml" "${py}"; then
@@ -2381,27 +2403,15 @@ PYEOF
     fi
 
     # ── 镜像预加载方案 ──
-    # 必须先于 scale.yml 加载镜像: kubelet 启动 kube-proxy 时会尝试拉镜像,
-    # 离线环境下必须先 load 到 containerd, 否则 ImagePullBackOff
-    # 新 worker 节点可能尚未安装 containerd(入口脚本直接预加载会跳过)
-    # 解决方案: 先跑一次 scale.yml 的前半段(仅安装 containerd + 下载镜像),
-    # 然后生成镜像清单 inventory/preload-images.lst, 由 scale.yml 内置的
-    # 预加载 play 在 containerd 装完后完成同步+加载
-    if [ "${SCALE_PLAYBOOK}" = "scale.yml" ]; then
-        log "预安装 containerd 到新节点(为镜像预加载做准备)..."
-        cd "${KUBESPRAY_DIR}"
-        run_ansible_playbook "/tmp/${CLUSTER_NAME}-prescale.log" scale.yml \
-            -i "${INVENTORY_DIR}/hosts.yml" \
-            --become --become-user=root \
-            ${LIMIT_FLAG} \
-            -e @${OFFLINE_VARS} \
-            --skip-tags system-packages,kube-proxy \
-            --tags container-engine,download \
-            -v 2>&1 || warn "containerd 预安装部分节点可能失败(首次 scale 可忽略)"
-        log "✅ containerd 预安装完成"
-    else
-        log "cluster.yml 全量路径: 跳过 scale.yml 专用 prescale(cluster.yml 自带 container-engine/预载 play, 新节点 containerd 由其安装)"
-    fi
+    # 必须在 kubelet 拉起静态 Pod 前把镜像 load 进 containerd, 否则离线环境 ImagePullBackOff。
+    # ⚠ 2026-10-13 提速: 删除旧的 "prescale"(先单独跑一遍 scale.yml 的
+    #   --tags container-engine,download 预装 containerd + 推镜像) —— 实机日志证明它整段冗余:
+    #   scale.yml 引擎 play 顺序是 preinstall → container-engine(containerd 安装并启动)
+    #   → download 角色(推镜像并 ctr import), 且镜像预加载 play 已挂载在引擎 play **之后**、
+    #   node/kubeadm/network play 之前(preload_target: kube_node), containerd 必然就绪后才
+    #   rsync+ctr import 全部清单镜像(逐镜像校验, 缺一个即失败)。prescale 每次多花 ~25min
+    #   (完整 bootstrap+facts+containerd 安装+9 次镜像 upload/load), 删除后镜像仍由
+    #   scale.yml 内置流程加载, 行为不变。cluster.yml 路径本就无 prescale(一直靠挂载 play)。
 
     # 生成镜像文件清单(inventory/preload-images.lst), 供 scale.yml 内置预加载 play 使用
     # (实际同步+加载由 scale.yml 完成, 入口脚本不再重复预加载)
