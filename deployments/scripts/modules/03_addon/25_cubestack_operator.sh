@@ -763,7 +763,7 @@ if [ "${CR_ENABLED}" = "true" ]; then
     fi
     if [ "${ONLINE_DEPLOY}" = "true" ]; then
         say "  clusterCR.enabled=true(**在线模式**): 组件镜像按 chart 定义(global.imageRegistry="
-        say "    ${HARBOR_HOST}/suanova)恒拉(pullPolicy=Always); harbor-credentials 已同步供节点认证。"
+        say "    ${HARBOR_HOST})恒拉(pullPolicy=Always); harbor-credentials 已同步供节点认证。"
         say "    CR 默认值: ${_BUNDLES_STATE_MSG}。"
         say "    覆盖: CUBESTACK_OPERATOR_CR_VALUES_FILE; 开关: CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED。"
     else
@@ -801,19 +801,23 @@ if [ "${CR_ENABLED}" = "true" ]; then
     _cr_name="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].metadata.name}' 2>/dev/null" || true) )"
     _cr_reg="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imageRegistry}' 2>/dev/null" || true) )"
     _cr_expose="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.serviceExposeMode}' 2>/dev/null" || true) )"
+    _cr_secs="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullSecrets}' 2>/dev/null" || true) )"
+    _cr_secs_norm="$(printf '%s' "${_cr_secs}" | tr -d '[:space:]')"
     _want_expose="loadbalancer"
     [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ] && _want_expose="nodeport"
     if [ "${ONLINE_DEPLOY}" = "true" ]; then
-        _want_reg="${HARBOR_HOST}/suanova"; _want_pref="${HARBOR_HOST}/mirrors"; _want_pol="Always"
+        # CR global.imageRegistry 是**注册域**(不含项目前缀); 组件镜像路径自带 suanova/。
+        # 写成 harbor.isuanova.com/suanova 会拼成 .../suanova/suanova/...(2026-10-22 实机)。
+        _want_reg="${HARBOR_HOST}"; _want_pref="${HARBOR_HOST}/mirrors"; _want_pol="Always"
         if [ -n "${HARBOR_USER}" ] && [ -n "${HARBOR_PASSWORD}" ]; then
-            _want_secs='[{"name":"harbor-credentials"}]'
+            _want_secs='["harbor-credentials"]'
         else
             _want_secs='[]'
         fi
     else
         _want_reg="${REG_BASE}"; _want_pref="${REG_BASE}/mirrors"; _want_pol="Always"; _want_secs='[]'
     fi
-    if [ -n "${_cr_name}" ] && { [ "${_cr_reg}" != "${_want_reg}" ] || [ "$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullPolicy}' 2>/dev/null" || true) )" != "${_want_pol}" ] || [ "${_cr_expose}" != "${_want_expose}" ]; }; then
+    if [ -n "${_cr_name}" ] && { [ "${_cr_reg}" != "${_want_reg}" ] || [ "$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullPolicy}' 2>/dev/null" || true) )" != "${_want_pol}" ] || [ "${_cr_expose}" != "${_want_expose}" ] || [ "${_cr_secs_norm}" != "${_want_secs}" ]; }; then
         warn "  CR 取值漂移(当前 imageRegistry=${_cr_reg:-<空>}, serviceExposeMode=${_cr_expose:-<空>}), kubectl patch 纠正为 ${_want_reg}/${_want_expose} ..."
         SSH "${K} -n ${NS} patch csc ${_cr_name} --type=merge -p '{\"spec\":{\"global\":{\"imageRegistry\":\"${_want_reg}\",\"externalImageRegistryPrefix\":\"${_want_pref}\",\"imagePullSecrets\":${_want_secs},\"imagePullPolicy\":\"${_want_pol}\",\"serviceExposeMode\":\"${_want_expose}\"}}}' >/dev/null 2>&1" \
             && ok "  CR 已纠偏(operator 将按新值滚动组件)" \
@@ -821,7 +825,7 @@ if [ "${CR_ENABLED}" = "true" ]; then
     else
         ok "  CR 取值与部署模式一致(${_want_reg}/${_want_expose})"
     fi
-    unset _cr_name _cr_reg _cr_expose _want_reg _want_pref _want_pol _want_secs _want_expose
+    unset _cr_name _cr_reg _cr_expose _cr_secs _cr_secs_norm _want_reg _want_pref _want_pol _want_secs _want_expose
 fi
 
 # ---------------- [6.5/6] RWO 单卷 Deployment 的更新策略守护 ----------------
