@@ -753,10 +753,6 @@ load_config() {
         if ! [[ "${CUBESTACK_RELEASE}" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
             err "CUBESTACK_RELEASE 格式非法: '${CUBESTACK_RELEASE}'(只允许字母数字开头, 后接字母数字/点/下划线/连字符)"
             exit 1
-    if [ -n "${CUBESTACK_RELEASE:-}" ]; then
-        if ! [[ "${CUBESTACK_RELEASE}" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
-            err "CUBESTACK_RELEASE 格式非法: ${CUBESTACK_RELEASE}"
-            exit 1
         fi
         CUBESTACK_RELEASE_ROOT="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
         _rel_root="${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files"
