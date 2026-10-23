@@ -746,6 +746,14 @@ load_config() {
     # release.env 提供版本变量, 必须在 kubespray 版本档案块之前加载(才能接管 KUBESPRAY_VERSION)。
     OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
     if [ -n "${CUBESTACK_RELEASE:-}" ]; then
+        # 版本名参与路径(<root>/<版本>/offline-files)并 source 其中的 release.env:
+        # 只允许字母数字开头 + 字母数字/点/下划线/连字符, 拒绝 ../、绝对路径、空白与
+        # shell 元字符 —— 防止 --release / cluster.conf 的值把 source 引到发布根之外
+        # (路径穿越 + 任意脚本执行; 2026-10-23 CodeRabbit)。
+        if ! [[ "${CUBESTACK_RELEASE}" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+            err "CUBESTACK_RELEASE 格式非法: '${CUBESTACK_RELEASE}'(只允许字母数字开头, 后接字母数字/点/下划线/连字符)"
+            exit 1
+        fi
         CUBESTACK_RELEASE_ROOT="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
         _rel_root="${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files"
         if [ ! -f "${_rel_root}/release.env" ]; then
@@ -1379,8 +1387,9 @@ kube_vip_is_bound() {
 #
 # ⚠ 与 API_IP 的分工, 二者**不可互换**:
 #   API_IP        = "一个能通 NodePort 的**节点** IP", 恒为首个 master。registry 的 containerd
-#                   mirror(`http://${API_IP}:${REGISTRY_NODEPORT}`)与 setup-api-expose 的 DNAT
-#                   判定都依赖"这是一台真实节点"。若改成 VIP 会坏两处:
+#                   mirror(`http://${REGISTRY_IP:-${API_IP}}:${REGISTRY_NODEPORT}`; REGISTRY_IP
+#                   显式指定时按配置, 缺省回退该节点 IP)与 setup-api-expose 的 DNAT 判定都依赖
+#                   "这是一台真实节点"。若用 VIP 会坏两处:
 #                     ① VIP 不代理 NodePort → 扩容的新节点拉不到 registry 镜像;
 #                     ② 宿主机被装一条 `DNAT VIP:6443 → master01:6443`, 把 kube-vip 的高可用打回单点。
 #   API_ENTRY_IP  = "集群 API 该从哪个地址进" —— /etc/hosts 里 API_DOMAIN 的解析、kubeconfig 用。
@@ -2369,7 +2378,11 @@ node_gpu_probe() {
 node_gpu_is_pure_cpu() { [ "${1:-1}" = "0" ] && [ "${2:-unknown}" = "0" ]; }
 
 # 远程探测宿主 NVIDIA 驱动是否**可用**(用于决定 operator 是否走 pre-installed):
-#   nvidia-smi -L 成功 或 /proc/driver/nvidia/version 可读 → yes
+#   仅以 `nvidia-smi -L` 成功为 yes —— 必须同时具备内核模块 + 宿主用户态(nvidia-smi/库)。
+#   ⚠ 不再用 /proc/driver/nvidia/version 兜底: operator 管理的驱动容器被卸载后, 内核模块
+#     会保持加载到重启前, /proc 仍可读, 但宿主并没有可用的 pre-installed 驱动。这种假 yes
+#     会让安装器跳过预编译内核门禁/驱动镜像准备 → 重装时 driver DS ImagePullBackOff
+#     (2026-10-23 CodeRabbit)。
 #   否则 → no; SSH 失败/不可达 → unknown
 # 用法: st="$(node_host_nvidia_driver_works <ip> [user])"
 # 前置: SSH_KEY 已设置
@@ -2379,8 +2392,6 @@ node_host_nvidia_driver_works() {
               -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
               "${_u}@${_ip}" '
         if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
-            echo yes
-        elif [ -r /proc/driver/nvidia/version ]; then
             echo yes
         else
             echo no

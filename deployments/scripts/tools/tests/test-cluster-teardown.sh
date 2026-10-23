@@ -175,6 +175,14 @@ chk "⑤i ceph-cleanup: registry 走 rs 且登记先于 scale 0" "1" "$(awk '
 chk "⑤j 05_k8s_registry: registry 走 rs 且登记先于 scale 0" "1" "$(awk '
   /stop_mark_replicas rs kube-system registry/ { a=NR } /scale rs registry --replicas=0/ { b=NR }
   END { print (a>0 && b>0 && a<b) ? 1 : 0 }' "${SRC}/modules/03_addon/05_k8s_registry.sh")"
+# ⑤j2~⑤j4 2026-10-23 CodeRabbit: 就绪探测/节点 mirror 必须用配置的 registry 端点,
+#   不能固定 FIRST_MASTER/API_IP(显式 REGISTRY_IP 指向其他节点时会探错/拉错地址)。
+chk "⑤j2 registry 就绪探测用 REGISTRY_DIRECT" "1" \
+    "$(grep -cF '_base="http://${REGISTRY_DIRECT' "${SRC}/modules/03_addon/05_k8s_registry.sh")"
+chk "⑤j3 扩容新节点 mirror 用 REGISTRY_IP(回退 API_IP)" "1" \
+    "$(grep -cF '_np_mirror="http://${REGISTRY_IP:-${API_IP}}' "${SRC}/modules/02_k8s/07_k8s_scale.sh")"
+chk "⑤j4 节点 mirror 生成用 REGISTRY_IP(回退 FIRST_MASTER)" "1" \
+    "$(grep -cF '_NP_MIRROR="http://${REGISTRY_IP:-${FIRST_MASTER}}' "${SRC}/tools/lb/deploy-registry.sh")"
 chk "⑤k 三处代码行不再操作不存在的 deploy registry" "0" \
     "$(cat "${SRC}/tools/k8s/ceph-cleanup.sh" "${SRC}/modules/03_addon/05_k8s_registry.sh" "${SRC}/modules/03_addon/02_ceph.sh" \
        | awk '!/^[[:space:]]*#/ && /deploy registry/' | wc -l)"

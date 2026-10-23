@@ -8,6 +8,7 @@
 #   ① 密钥不通 + 密码错误 → 模块必须非零退出, 明确报"密码认证失败" + 检查
 #      SSH_DEFAULT_PASSWORD, 且不得打印"完成"
 #   ② 密钥已就绪(即使密码错) → 幂等成功, 根本不应尝试密码注入
+#   ②b 其它身份(agent/ssh_config)可登录但部署密钥未注入 → 不得误判"已就绪", 必须走密码注入
 #   ③ 密钥不通 + 密码正确 → 注入 + 验证通过, 模块成功
 # 隔离: 临时 cluster.conf + 假 ssh/sshpass(纯离线)
 # 用法: bash deployments/scripts/tools/tests/test-k8s-passwordless.sh
@@ -15,6 +16,7 @@
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 MODULE="${REPO_ROOT}/deployments/scripts/modules/02_k8s/01_k8s_passwordless.sh"
+SETUP="${REPO_ROOT}/deployments/scripts/tools/node/setup-passwordless.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 fail=0
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }
@@ -34,12 +36,19 @@ mkdir -p "${TMP}/keys" "${TMP}/bin"
 echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForTestOnly test" > "${TMP}/keys/cubestack_k8s.pub"
 
 # 假 ssh: 按认证方式分流; 密码模式成功时留下标记, 让后续密钥验证也能通过
+# ②b 用: FAKE_OTHER_IDENTITY_OK=1 模拟"别的身份(agent/ssh_config)可登录" ——
+#   只有探测显式限制为部署密钥(-i + IdentitiesOnly=yes + -F /dev/null)时才不短路。
 cat > "${TMP}/bin/ssh" <<'FAKE'
 #!/bin/bash
-mode=key; host=""
-for a in "$@"; do
+mode=key; host=""; idonly=0; fnull=0; key=""
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+    a="${args[i]}"
     case "$a" in
         PreferredAuthentications=password*) mode=password ;;
+        IdentitiesOnly=yes) idonly=1 ;;
+        -F) [ "${args[i+1]:-}" = "/dev/null" ] && fnull=1 ;;
+        -i) key="${args[i+1]:-}" ;;
         *@*) host="$a" ;;
     esac
 done
@@ -51,6 +60,11 @@ if [ "${mode}" = "password" ]; then
     fi
     echo "${host}: Permission denied, please try again." >&2
     exit 255
+fi
+if [ "${FAKE_OTHER_IDENTITY_OK:-0}" = "1" ]; then
+    if [ "${idonly}" != "1" ] || [ "${fnull}" != "1" ] || [ "${key}" != "${FAKE_EXPECT_KEY:-}" ]; then
+        exit 0     # 未限制身份 → 别的身份可登录(旧行为会误判为部署密钥可用)
+    fi
 fi
 if [ "${FAKE_KEY_OK:-0}" = "1" ] || { [ -n "${FAKE_KEY_MARK:-}" ] && [ -f "${FAKE_KEY_MARK}" ]; }; then
     exit 0
@@ -74,6 +88,7 @@ run_module() {  # run_module <tag> [VAR=value ...] → 退出码; 输出在 $TMP
         export CLUSTER_CONF="${TMP}/cluster.conf"
         export SSH_KEY_DIR="${TMP}/keys"
         export SSH_KEY_NAME="cubestack_k8s"
+        export FAKE_EXPECT_KEY="${TMP}/keys/cubestack_k8s"
         export FAKE_SSH_LOG="${TMP}/ssh-${tag}.log"
         export FAKE_SSHPASS_LOG="${TMP}/sshpass-${tag}.log"
         export FAKE_KEY_MARK="${TMP}/key-ok-${tag}"
@@ -96,6 +111,16 @@ rc="$(run_module keyok FAKE_KEY_OK=1 FAKE_PW_OK=0)"
 chk "退出码 0" "0" "${rc}"
 chk_contains "报告免密已就绪" "免密登录已就绪" "${TMP}/out-keyok"
 chk "未尝试密码注入" "0" "$(_count "${TMP}/sshpass-keyok.log")"
+
+echo "== ②b 仅验证部署密钥: 其它身份可用时不得误判密钥已注入 =="
+rc="$(run_module otherid FAKE_KEY_OK=0 FAKE_PW_OK=1 FAKE_OTHER_IDENTITY_OK=1)"
+chk "退出码 0(密码注入 + 受限密钥验证)" "0" "${rc}"
+chk "尝试过密码注入(未被其它身份短路)" "1" "$(_count "${TMP}/sshpass-otherid.log")"
+chk_contains "报告注入成功" "免密登录成功" "${TMP}/out-otherid"
+chk_not_contains "不误报已就绪" "免密登录已就绪" "${TMP}/out-otherid"
+chk_contains "探测限制为部署密钥(IdentitiesOnly)" "IdentitiesOnly=yes" "${SETUP}"
+chk_contains "探测忽略用户 ssh_config(-F /dev/null)" "-F /dev/null" "${SETUP}"
+chk_contains "探测禁用 ssh-agent(IdentityAgent=none)" "IdentityAgent=none" "${SETUP}"
 
 echo "== ③ 密钥不通 + 密码正确: 注入并验证成功 =="
 rc="$(run_module pwok FAKE_KEY_OK=0 FAKE_PW_OK=1)"

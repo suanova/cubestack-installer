@@ -108,6 +108,15 @@ chk_not_contains "4b/6 不再用 manifest digest 比对源" '_d_src="$(_digest "
 chk_contains "operator 镜像目标侧用内容 digest" '_c_dst="$(_content_digest "${_dst}")"' "${MOD}"
 chk_contains "operator 镜像源侧用内容 digest" '_c_src="$(_content_digest "${_src_arg}")"' "${MOD}"
 
+echo "== ⑤e chart 同步默认 offline(cluster.conf 省略时不探测 Harbor) =="
+# 2026-10-23 CodeRabbit: CHART_SYNC 已上移 cluster.conf; 若某环境未写该项, 模块回退必须是
+# offline(文档基线), 否则 auto 会在 Harbor 可达时静默走在线刷新。
+chk_contains "模块兜底默认 offline" 'SYNC_MODE="${CUBESTACK_OPERATOR_CHART_SYNC:-offline}"' "${MOD}"
+chk_not_contains "模块不再以 auto 兜底" 'SYNC_MODE="${CUBESTACK_OPERATOR_CHART_SYNC:-auto}"' "${MOD}"
+chk_contains "cluster.conf.example 默认 offline" \
+    'CUBESTACK_OPERATOR_CHART_SYNC="${CUBESTACK_OPERATOR_CHART_SYNC:-offline}"' \
+    "${REPO_ROOT}/deployments/config/cluster.conf.example"
+
 echo "== ⑥ 冒烟 CR 不得继承默认组件/不得卸载真实资源 =="
 VERIFY="${REPO_ROOT}/deployments/scripts/modules/03_addon/26_verify_cubestack_operator.sh"
 chk_contains "冒烟 CR deletePolicy=retain" "deletePolicy: retain" "${VERIFY}"

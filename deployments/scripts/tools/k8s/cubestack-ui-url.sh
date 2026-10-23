@@ -139,11 +139,17 @@ def gateway_endpoints(ns, name):
     if svc:
         st = svc.get("spec", {}) or {}
         svc_type = (st.get("type") or "ClusterIP")
+        lb_addrs = []
         for i in (svc.get("status", {}) or {}).get("loadBalancer", {}).get("ingress", []) or []:
             v = i.get("ip") or i.get("hostname")
             if v:
-                addrs.append(("lb", v))
-        if svc_type == "NodePort" and node_ip:
+                lb_addrs.append(v)
+        for v in lb_addrs:
+            addrs.append(("lb", v))
+        # NodePort 回退: 显式 NodePort; 或 LoadBalancer 尚未分配 ingress(如 MetalLB 未就绪 /
+        # Service 仍在 Pending)但已分配 nodePort —— 供 pick_endpoints 从 metallb 回退到 NodePort
+        # (2026-10-23 CodeRabbit: 旧逻辑只认 type==NodePort, Pending LB 会得不到任何端点)。
+        if node_ip and (svc_type == "NodePort" or (svc_type == "LoadBalancer" and not lb_addrs)):
             for p in st.get("ports", []) or []:
                 np = p.get("nodePort")
                 if np:

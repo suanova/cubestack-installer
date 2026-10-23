@@ -4,6 +4,7 @@
 # 覆盖:
 #   ① load_config: CUBESTACK_RELEASE 派生 OFFLINE_FILES_ROOT + 11 个目录变量
 #   ② 缺少 release.env 时硬失败(退出码 1)
+#   ②b CUBESTACK_RELEASE 格式校验(拒绝 ../、绝对路径、空白/元字符; 不误杀合法版本名)
 #   ③ fetch-offline-from-minio.sh --release: 下载布局/SHA256SUMS/CLI tar 校验
 #   ④ --verify-only 通过; 篡改文件后失败
 #   ⑤ --list-releases 输出可用版本
@@ -11,6 +12,8 @@
 # 隔离: 临时 CLUSTER_CONF + 假 mc(纯离线)
 # 用法: bash deployments/scripts/tools/tests/test-release-mode.sh
 # ============================================================
+# 刻意不开 -e: 预期失败的场景用 rc=$? 捕获并由 chk/fail 汇总; 开 -e 会让首个失败
+# 直接退出、吞掉汇总(2026-10-23 CodeRabbit)。全部 set +e / set -e 切换已移除。
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 LIB="${REPO_ROOT}/deployments/scripts/lib-common.sh"
@@ -47,12 +50,36 @@ chk "netshoot 回退 tar 重定向" "${TMP}/rel/9.9.9/offline-files/os/netshoot.
 
 echo "== ② 缺少 release.env =="
 mkdir -p "${TMP}/rel/9.9.8/offline-files"
-set +e
 CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_RELEASE=9.9.8 CUBESTACK_RELEASE_ROOT="${TMP}/rel" \
     bash -c 'source "$1"; load_config' _ "${LIB}" >/dev/null 2>&1
 rc=$?
-set -e
 chk "缺少 release.env 退出码" "1" "${rc}"
+
+echo "== ②b CUBESTACK_RELEASE 格式校验(路径穿越/非法字符) =="
+# 反证: 不做格式校验时 '../decoy' 会让 _rel_root 落到 ${TMP}/decoy/offline-files,
+# source 其中的 release.env 会执行 touch(任意脚本执行)。校验必须在此前退出。
+mkdir -p "${TMP}/decoy/offline-files"
+{
+    printf 'touch "%s"\n' "${TMP}/pwned"
+    printf 'RELEASE_VERSION=../decoy\nKUBESPRAY_VERSION=v2.32.0\n'
+} > "${TMP}/decoy/offline-files/release.env"
+CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_RELEASE='../decoy' CUBESTACK_RELEASE_ROOT="${TMP}/rel" \
+    bash -c 'source "$1"; load_config' _ "${LIB}" >/dev/null 2>&1
+rc=$?
+chk "路径穿越值退出码 1" "1" "${rc}"
+chk "路径穿越值未 source 外部 release.env" "0" "$([ -e "${TMP}/pwned" ] && echo 1 || echo 0)"
+for bad in '..' '.' '/abs' 'a/b' 'a b' 'a;b' 'a$b' '-rc1'; do
+    CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_RELEASE="${bad}" CUBESTACK_RELEASE_ROOT="${TMP}/rel" \
+        bash -c 'source "$1"; load_config' _ "${LIB}" >/dev/null 2>&1
+    rc=$?
+    chk "拒绝非法 release: ${bad}" "1" "${rc}"
+done
+# 合法值只被"缺少 release.env"分支拦下(格式校验不误杀合法版本名):
+CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_RELEASE='2.0.0-rc1' CUBESTACK_RELEASE_ROOT="${TMP}/rel" \
+    bash -c 'source "$1"; load_config' _ "${LIB}" >"${TMP}/legal.out" 2>&1
+rc=$?
+chk "合法 release 名未被格式校验拦截" "1" "${rc}"
+chk_contains "合法值进入 release.env 缺失分支" "未找到发布版本" "$(cat "${TMP}/legal.out")"
 
 # ---------------- ③~⑤ fetch --release(假 mc + 假远端) ----------------
 echo "== ③~⑤ fetch --release =="
@@ -110,10 +137,8 @@ chk "CLI tar 落盘" "cli-tar-bytes" "$(cat "${TMP}/local/2.0.0/cubestack-instal
 bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
 chk "verify-only 通过" "0" "$?"
 printf 'tampered\n' >> "${TMP}/local/2.0.0/offline-files/ceph/test.txt"
-set +e
 bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
 rc=$?
-set -e
 chk "篡改后 verify-only 失败" "1" "${rc}"
 
 out="$(bash "${FETCH}" --list-releases 2>/dev/null)"

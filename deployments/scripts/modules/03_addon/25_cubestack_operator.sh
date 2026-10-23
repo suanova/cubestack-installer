@@ -11,9 +11,9 @@
 # UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
-#   · 离线 / 在线(需求 1): CUBESTACK_OPERATOR_CHART_SYNC=auto(默认) —— 探测 Harbor 可达则
-#     online(拉远端 → 取 Digest 与 <tgz>.digest 边车比对 → 变了覆盖本地副本, 未变仓库保持干净),
-#     否则 offline(纯本地, 不发起任何联网动作); 也可显式写 online|offline 强制。
+#   · 离线 / 在线(需求 1): CUBESTACK_OPERATOR_CHART_SYNC=offline(默认) —— 纯本地, 不发起联网动作;
+#     显式 auto 时才探测 Harbor 可达性(可达→online 比对 digest, 否则 offline), 也可显式写 online 强制。
+#     online: 拉远端 → 取 Digest 与 <tgz>.digest 边车比对 → 变了覆盖本地副本, 未变仓库保持干净。
 #   · 部署模式切换(2026-10-13 用户口径; 2026-10-19 增补 Always/滚动):
 #       ONLINE_DEPLOY_CUBESTACK_OPERATOR(true/false, 默认 false):
 #       true  = **在线部署**: 镜像**按 chart 定义**(harbor.isuanova.com/**, 不覆盖不搬运)直接
@@ -245,7 +245,7 @@ CHART_REF="${CUBESTACK_OPERATOR_CHART_REF:-oci://harbor.isuanova.com/suanova-pri
 CHART_VER="${CUBESTACK_OPERATOR_CHART_VERSION:-1.0.0-latest}"
 CHART_NAME="$(basename "${CHART_REF}")"                      # cubestack-operator-chart
 CHART_BASENAME="${CHART_NAME}-${CHART_VER}.tgz"
-SYNC_MODE="${CUBESTACK_OPERATOR_CHART_SYNC:-auto}"
+SYNC_MODE="${CUBESTACK_OPERATOR_CHART_SYNC:-offline}"
 # operator 镜像 tag: 默认由 chart 自带(appVersion / values.image.tag); 允许 chart 版本与
 # operator 版本不同(如 chart 1.0.0-latest + operator 2.0.0-rc1)。决策函数见下方 _IMG_TAG_FOR_HELM。
 IMG_SRC_MODE="${CUBESTACK_OPERATOR_IMAGE_SOURCE:-auto}"

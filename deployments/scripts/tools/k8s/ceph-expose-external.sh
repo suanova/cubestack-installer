@@ -753,7 +753,7 @@ case "${ACTION}" in
     show)  show_main ;;
     status) status_main ;;
     *)
-        err "用法: ceph-expose-external.sh {apply [--mode nodeport|loadbalancer|metallb|clusterip] | show | status}"
+        err "用法: ceph-expose-external.sh {apply [--mode host-network|nodeport|loadbalancer|metallb|clusterip] | show | status}"
         exit 1
         ;;
 esac

@@ -34,8 +34,13 @@ PUBKEY="$(cat "${KEY_PUB}")"
 FAILED=0
 
 # 密钥认证是否已可用(幂等判断; 失败时不打印噪声)
+# ⚠ 只验证**部署密钥本身**: -F /dev/null 忽略 ~/.ssh/config 里的其它 IdentityFile,
+#   IdentitiesOnly=yes + IdentityAgent=none 禁止 ssh-agent 用别的身份代答。否则"别的身份
+#   能登录"会被误判成"部署密钥已注入" → 跳过注入; 该身份一旦失效, 节点就没有承诺的免密
+#   访问(2026-10-23 CodeRabbit)。
 _key_ok() {
-    ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+    ssh -i "${SSH_KEY}" -F /dev/null -o IdentitiesOnly=yes -o IdentityAgent=none \
+        -o BatchMode=yes -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 "$1@${IP}" true 2>/dev/null
 }
 

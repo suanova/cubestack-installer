@@ -166,13 +166,14 @@ case "${REGISTRY_SERVICE_TYPE:-nodeport}" in
         ;;
 esac
 
-# ⚠ nodeport 模式(nodeport 默认): 节点侧 containerd 经 hosts.toml 镜像直连首个 master 的
-#   REGISTRY_NODEPORT(_NP_MIRROR, 客户端侧改写, 不依赖节点 iptables —— kube-proxy 会周期性重置
-#   节点 nat 规则); 部署端(push/预检)经 REGISTRY_DIRECT 直连 <首个master>:REGISTRY_NODEPORT。
+# ⚠ nodeport 模式(nodeport 默认): 节点侧 containerd 经 hosts.toml 镜像直连配置的 registry
+#   节点(REGISTRY_IP; 留空回退首个 master)的 REGISTRY_NODEPORT(_NP_MIRROR, 客户端侧改写,
+#   不依赖节点 iptables —— kube-proxy 会周期性重置节点 nat 规则); 部署端(push/预检)经
+#   REGISTRY_DIRECT 直连同一端点。
 #   **不再配置宿主机 DNAT/SNAT**: registry 已通过 NodePort 直连暴露(VIP/nodePort 皆可直接访问),
 #   无需宿主机级 iptables NAT 转发或 systemd 持久化(曾引入 NET_ADMIN/systemd 依赖与混淆)。
 if [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ]; then
-    _NP_MIRROR="http://${FIRST_MASTER}:${REGISTRY_NODEPORT:-31148}"
+    _NP_MIRROR="http://${REGISTRY_IP:-${FIRST_MASTER}}:${REGISTRY_NODEPORT:-31148}"
     say "[1.5/4] nodeport 模式: registry 已经 NodePort 直连暴露(${_NP_MIRROR}), 无需宿主机 DNAT/SNAT"
 else
     _NP_MIRROR="http://${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
@@ -294,7 +295,7 @@ if [ "${REGISTRY_EXPOSE_HOST:-0}" = "1" ]; then
     echo "  撤销对外转发:    sudo ${SCRIPT_DIR}/tools/lb/setup-registry-expose.sh --delete"
 fi
 if [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ]; then
-    echo "  验证 registry:    curl http://${FIRST_MASTER}:${REGISTRY_NODEPORT:-31148}/v2/  (NodePort)"
+    echo "  验证 registry:    curl http://${REGISTRY_DIRECT}/v2/  (NodePort)"
 else
-    echo "  验证 registry:    curl http://${REGISTRY_IP}:${REGISTRY_PORT}/v2/  (LoadBalancer)"
+    echo "  验证 registry:    curl http://${REGISTRY_DIRECT}/v2/  (LoadBalancer)"
 fi

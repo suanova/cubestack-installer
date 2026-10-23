@@ -40,6 +40,9 @@ on:
 permissions:
   contents: read
 
+# 发布串行化(2026-10-23 CodeRabbit): push 与 workflow_dispatch 共享同一 group,
+# 同一时刻只有一个 run 能写 MinIO 的 cli/ 前缀; cancel-in-progress=false 让后来的
+# run 排队等待, 而不是取消正在上传的 run(否则会留下半套 tar/digest)。
 concurrency:
   group: rebuild-cli-image
   cancel-in-progress: false
@@ -110,7 +113,9 @@ jobs:
         if: ${{ github.event.inputs.version != '' }}
         run: |
           set -euo pipefail
-          version="${{ github.event.inputs.version }}"
+          # 经 env 取值: GitHub 会在 shell 解析前展开表达式, 直接把 dispatch 输入拼进
+          # 脚本会让 $(...)/反引号在 case 校验前执行(模板注入; CodeRabbit/zizmor)。
+          version="${IMAGE_VERSION}"
           case "${version}" in
             ''|*[!0-9A-Za-z._-]*) echo "::error::invalid version: ${version}"; exit 1 ;;
           esac
@@ -148,8 +153,21 @@ jobs:
 
           tar_path="${RUNNER_TEMP}/cubestack-installer-cli.tar"
           docker save "${IMAGE}" -o "${tar_path}"
+          tar_size="$(stat -c %s "${tar_path}")"
           printf '%s' "${image_id}" > "${tar_path}.digest"
+          # 发布顺序: tar 先、digest 后 —— digest 是"提交标记", 只在 tar 完整上传后更新。
+          # 若 run 在两步之间中断, 远端是"新 tar + 旧 digest", 下次 run 会因 digest 不一致
+          # 重新上传两者(自愈), 不会把旧 tar 当成新镜像发布。
           mc "${mc_args[@]}" cp "${tar_path}" "${remote}/cubestack-installer-cli.tar"
           mc "${mc_args[@]}" cp "${tar_path}.digest" "${remote}/cubestack-installer-cli.digest"
-          mc "${mc_args[@]}" stat "${remote}/cubestack-installer-cli.tar" >/dev/null
-          echo "synced CLI tar → ${remote}/ (image ${image_id})" | tee -a "$GITHUB_STEP_SUMMARY"
+          # 发布后校验: 远端 tar 大小 + digest 必须与本次构建的镜像一致, 防止半套/截断产物
+          # 被当作成功发布(并发由上方 concurrency group 串行化)。
+          remote_id_check="$(mc "${mc_args[@]}" cat "${remote}/cubestack-installer-cli.digest" 2>/dev/null \
+            | tr -d '[:space:]' || true)"
+          remote_tar_size="$(mc "${mc_args[@]}" stat --json "${remote}/cubestack-installer-cli.tar" 2>/dev/null \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print(d.get("size",""))' 2>/dev/null || true)"
+          if [ "${remote_id_check}" != "${image_id}" ] || [ "${remote_tar_size}" != "${tar_size}" ]; then
+            echo "::error::CLI 发布校验失败: digest=${remote_id_check:-?}(期望 ${image_id}), tar_size=${remote_tar_size:-?}(期望 ${tar_size})"
+            exit 1
+          fi
+          echo "synced CLI tar → ${remote}/ (image ${image_id}, ${tar_size} bytes)" | tee -a "$GITHUB_STEP_SUMMARY"

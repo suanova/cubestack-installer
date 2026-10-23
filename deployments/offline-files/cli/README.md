@@ -11,6 +11,10 @@ CubeStack **CLI 镜像**的离线 tar（开发/滚动通道）。
     <bucket>/offline-files/cli/cubestack-installer-cli.digest
     ```
   - 镜像内容未变（按 image ID）时跳过上传
+  - 发布顺序: tar 先上传、`.digest` 后上传（digest = 发布提交标记）；run 结束前回读校验
+    远端 digest 与 tar 大小，不一致即失败。push / 手动触发由 workflow 级 concurrency
+    串行化，不会并发写同一前缀；若 run 中途中断留下“新 tar + 旧 digest”，下次运行会按
+    digest 不一致重传两者（自愈）。
 - 取回（部署机/联网机）:
   ```bash
   ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub cli

@@ -1116,7 +1116,8 @@ ssh <node> 'sudo /usr/local/bin/rke2-killall.sh'
 - 离线/在线**都**把 **operator 镜像 digest** 写进 `podAnnotations.cubestack.io/image-digest`
   (digest 变 → Pod 模板变 → 自动滚动);
 - 在线模式取不到 Harbor digest 时, helm 后自动 `rollout restart deployment/${RELEASE}` 兜底;
-- `image.tag=${IMG_TAG}` 同时进入 chart 渲染与 helm 安装参数;
+- `image.tag=${IMG_TAG}` 同时进入 chart 渲染与 helm 安装参数
+  (2026-10-22 起改为: **仅显式** `CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE` 才传 `image.tag`, 默认由 chart 自带);
 - 离线 operator 与 CR 组件 `imagePullPolicy` 都改为 **Always**(每次新建 Pod 从集群 registry 重新解析);
 - `CUBESTACK_OPERATOR_IMAGE_PULL_POLICY` 保留兼容但不再生效(强制 Always)。
 

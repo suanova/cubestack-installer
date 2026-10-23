@@ -168,21 +168,24 @@ REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-blo
    > ② 只有 node caps → **建卷失败**(RADOS permission error)。详见 §外部接入常见故障。
 
 **暴露模式**(大小写不敏感, 均经 `tr` 转小写归一):
-- 跟随 `SERVICE_EXPOSE_MODE`(默认 `metallb`): `nodeport` → NodePort Service / `metallb` → LoadBalancer(MetalLB VIP)
-- `CEPH_EXTERNAL_EXPOSE_MODE=nodeport|loadbalancer|metallb|clusterip` 显式覆盖全部;
+- 默认 `host-network`(`CEPH_EXPOSE_MODE` 默认值): mon 直接监听节点 IP 原生 6789/3300, 绕开 kube-proxy;
+  仅当 `CEPH_EXPOSE_MODE` 也为空时, 才按 `CEPH_HOST_NETWORK`(true→host-network) / `SERVICE_EXPOSE_MODE`
+  (nodeport→NodePort / metallb→LoadBalancer VIP) 兜底
+- `CEPH_EXTERNAL_EXPOSE_MODE=host-network|nodeport|loadbalancer|metallb|clusterip` 显式覆盖全部;
   `clusterip/off` = 不对外暴露(仅集群内可达)
+- 优先级: `--mode` > `CEPH_EXTERNAL_EXPOSE_MODE` > `CEPH_EXPOSE_MODE` > `CEPH_HOST_NETWORK`/`SERVICE_EXPOSE_MODE`
 - `CEPH_RGW_EXPOSE_MODE` 仅覆盖 RGW(mon 仍随主模式); `CEPH_RGW_NODEPORT` 固定 RGW NodePort(空=自动)
 
 **配置**(cluster.conf):
 ```bash
 CEPH_EXTERNAL_EXPOSE=true                       # 总开关(默认 true)
-CEPH_EXTERNAL_EXPOSE_MODE=""                    # 空=随 SERVICE_EXPOSE_MODE
+CEPH_EXTERNAL_EXPOSE_MODE=""                    # 空=随 CEPH_EXPOSE_MODE(默认 host-network), 再空才随 SERVICE_EXPOSE_MODE
 CEPH_RGW_EXPOSE_MODE=""                         # RGW 独立覆盖(默认随主模式)
 ```
 
 **手动操作 / 自检(5 层, 含外部客户端协议级测试)**:
 ```bash
-bash deployments/scripts/tools/k8s/ceph-expose-external.sh apply [--mode nodeport|loadbalancer|metallb|clusterip]  # 重新暴露+预定义(幂等)
+bash deployments/scripts/tools/k8s/ceph-expose-external.sh apply [--mode host-network|nodeport|loadbalancer|metallb|clusterip]  # 重新暴露+预定义(幂等)
 bash deployments/scripts/tools/k8s/ceph-expose-external.sh show     # 当前暴露状态
 bash deployments/scripts/tools/k8s/ceph-expose-external.sh status   # 5 层自检:
 #    [1/5] mon 网络可达(集群外 TCP) [2/5] 认证用户(profile caps) [3/5] 外部资源(pool/fs/app tag)

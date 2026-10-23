@@ -5,6 +5,7 @@
 #   ① HTTPRoute hostname + Gateway status address + LoadBalancer Service
 #   ② 无 hostname + NodePort Service(节点 IP + nodePort)
 #   ③ 无 HTTPRoute 时回退到 cubestack Gateway 基础地址
+#   ⑦ LoadBalancer 已分配 nodePort 但 ingress 未就绪 → 回退 NodePort(2026-10-23)
 # 隔离: 假 kubectl(纯 JSON 夹具, 无需集群)
 # 用法: bash deployments/scripts/tools/tests/test-cubestack-ui-url.sh
 # ============================================================
@@ -37,6 +38,8 @@ _gw_addr='{"items":[{"metadata":{"name":"cubestack-gateway","namespace":"cubesta
 _gw_none='{"items":[{"metadata":{"name":"cubestack-gateway","namespace":"cubestack-system"},"spec":{"listeners":[{"name":"http","protocol":"HTTP","port":80}]},"status":{"addresses":[]}}]}'
 _svc_lb='{"items":[{"metadata":{"name":"envoy-cubestack-gateway-abc","namespace":"cubestack-system","labels":{"gateway.envoyproxy.io/owning-gateway-name":"cubestack-gateway","gateway.envoyproxy.io/owning-gateway-namespace":"cubestack-system"}},"spec":{"type":"LoadBalancer","ports":[{"port":80,"nodePort":30080}]},"status":{"loadBalancer":{"ingress":[{"ip":"10.0.0.100"}]}}}]}'
 _svc_np='{"items":[{"metadata":{"name":"envoy-cubestack-gateway-abc","namespace":"cubestack-system","labels":{"gateway.envoyproxy.io/owning-gateway-name":"cubestack-gateway","gateway.envoyproxy.io/owning-gateway-namespace":"cubestack-system"}},"spec":{"type":"NodePort","ports":[{"port":80,"nodePort":30080}]},"status":{"loadBalancer":{}}}]}'
+# LoadBalancer 已分配 nodePort 但 MetalLB 尚未填入 ingress(Service Pending)—— 应回退 NodePort
+_svc_lb_pending='{"items":[{"metadata":{"name":"envoy-cubestack-gateway-abc","namespace":"cubestack-system","labels":{"gateway.envoyproxy.io/owning-gateway-name":"cubestack-gateway","gateway.envoyproxy.io/owning-gateway-namespace":"cubestack-system"}},"spec":{"type":"LoadBalancer","ports":[{"port":80,"nodePort":30080}]},"status":{"loadBalancer":{}}}]}'
 _rt_host='{"items":[{"metadata":{"name":"cubestack-ui","namespace":"cubestack-system"},"spec":{"hostnames":["ui.example.com"],"parentRefs":[{"name":"cubestack-gateway","namespace":"cubestack-system"}],"rules":[{"matches":[{"path":{"type":"PathPrefix","value":"/"}}],"backendRefs":[{"name":"cubestack-ui","port":80}]}]}}]}'
 _rt_multi='{"items":[{"metadata":{"name":"cubestack-ui","namespace":"cubestack-system"},"spec":{"parentRefs":[{"name":"cubestack-gateway","namespace":"cubestack-system"}],"rules":[{"matches":[{"path":{"type":"PathPrefix","value":"/"}}],"backendRefs":[{"name":"cubestack-ui","port":80}]},{"matches":[{"path":{"type":"PathPrefix","value":"/cubestack"}}],"backendRefs":[{"name":"cubestack-ui","port":80}]},{"matches":[{"path":{"type":"PathPrefix","value":"/cubestack/api/cubepilot/"}}],"backendRefs":[{"name":"cubepilot-api","port":80}]}]}}]}'
 _rt_nohost='{"items":[{"metadata":{"name":"cubestack-ui","namespace":"cubestack-system"},"spec":{"parentRefs":[{"name":"cubestack-gateway","namespace":"cubestack-system"}],"rules":[{"matches":[{"path":{"type":"PathPrefix","value":"/"}}],"backendRefs":[{"name":"cubestack-ui","port":80}]}]}}]}'
@@ -101,6 +104,16 @@ _ui_url_out="$(_run_human "$_gw_pair" "$_rt_pair" "$_svc_pair" nodeport)"
 chk_contains "NodePort 标签" "CubeStack Web UI (NodePort): http://10.0.0.10:30080/" "${_ui_url_out}"
 chk_not_contains "不输出私有 ClusterIP" "10.233.54.28" "${_ui_url_out}"
 chk_not_contains "不误标 MetalLB" "MetalLB" "${_ui_url_out}"
+
+echo "== ⑦ LoadBalancer 已分配 nodePort 但无 ingress → 回退 NodePort =="
+# 2026-10-23 CodeRabbit: Pending 的 LB Service 有 nodePort 却没有 ingress; 旧逻辑
+# 只对 type==NodePort 收集 nodePort → pick_endpoints 拿不到任何端点、报"未发现"。
+chk "metallb 模式回退 NodePort" '["http://10.0.0.10:30080/"]' \
+    "$(_run "$_gw_none" "$_rt_nohost" "$_svc_lb_pending" metallb | _urls)"
+chk "auto 模式回退 NodePort" '["http://10.0.0.10:30080/"]' \
+    "$(_run "$_gw_none" "$_rt_nohost" "$_svc_lb_pending" "" | _urls)"
+chk_contains "human 标签 NodePort" "CubeStack Web UI (NodePort): http://10.0.0.10:30080/" \
+    "$(_run_human "$_gw_none" "$_rt_nohost" "$_svc_lb_pending" metallb)"
 
 echo "---------------------------------------------"
 [ "${fail}" = "0" ] && { echo "✅ cubestack UI URL 发现回归通过"; exit 0; } || { echo "❌ cubestack UI URL 发现回归失败"; exit 1; }

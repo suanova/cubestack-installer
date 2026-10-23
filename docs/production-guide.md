@@ -288,7 +288,8 @@ SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-metallb}"
 > ⚠ **registry 独立默认走 NodePort**（`REGISTRY_SERVICE_TYPE=nodeport`），不随全局模式变化、不占 MetalLB VIP；
 > 要 registry 也走 LoadBalancer VIP，显式设 `REGISTRY_SERVICE_TYPE=loadbalancer`（defaults §3.2）。
 >
-> 它同时是 Ceph 对外暴露(`CEPH_EXTERNAL_EXPOSE_MODE`,见 §3.5)的默认随动值 —— 改这一处,存储暴露方式跟着变。
+> Ceph 对外暴露(`CEPH_EXTERNAL_EXPOSE_MODE`,见 §3.5)的**兜底**值之一 —— 仅当
+> `CEPH_EXTERNAL_EXPOSE_MODE` 与 `CEPH_EXPOSE_MODE` 都留空时才随本值(`CEPH_EXPOSE_MODE` 默认 `host-network`)。
 
 ### 2.3 kube-vip:给 API 入口一个浮动 VIP
 
@@ -607,7 +608,8 @@ CEPHFS_NODE_KEYRING="<A 导出>"
 
 ```bash
 CEPH_EXTERNAL_EXPOSE="${CEPH_EXTERNAL_EXPOSE:-true}"        # 总开关(默认开)
-CEPH_EXTERNAL_EXPOSE_MODE="${CEPH_EXTERNAL_EXPOSE_MODE:-}"  # nodeport|loadbalancer|metallb|clusterip;空=随 SERVICE_EXPOSE_MODE
+CEPH_EXTERNAL_EXPOSE_MODE="${CEPH_EXTERNAL_EXPOSE_MODE:-}"  # host-network|nodeport|loadbalancer|metallb|clusterip;
+                                                           # 空=随 CEPH_EXPOSE_MODE(默认 host-network), 再空才随 SERVICE_EXPOSE_MODE
 CEPH_EXTERNAL_USER="${CEPH_EXTERNAL_USER:-cubestack-ext-rbd}"                 # 外部专用 RBD 用户
 CEPH_EXTERNAL_RBD_POOL="${CEPH_EXTERNAL_RBD_POOL:-cubestack-ext-rbd-pool}"    # 外部专用 pool(与内部隔离)
 ```

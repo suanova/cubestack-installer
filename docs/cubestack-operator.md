@@ -102,8 +102,8 @@ image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.App
 
 ### 3.1 离线 / 在线(需求 1)
 
-`CUBESTACK_OPERATOR_CHART_SYNC=auto|online|offline`(模块兜底默认 **auto**; 当前 `cluster.conf`
-显式置 `offline`):
+`CUBESTACK_OPERATOR_CHART_SYNC=auto|online|offline`(模块兜底默认 **offline**; 仅显式设为 `auto`
+才会探测 Harbor 可达性; 当前 `cluster.conf` 亦为 `offline`):
 
 | 模式 | 行为 |
 |---|---|
@@ -305,7 +305,9 @@ helm upgrade --install cubestack-operator <本地tgz> -n cubestack-system --crea
   --set image.repository=<REGISTRY_DOMAIN>:<port>/suanova-private/cubestack-operator \
   --set image.pullPolicy=Always \
   --set podAnnotations.cubestack\.io/image-digest=<刚推入镜像的 digest> ...
-# ⚠ image.tag 仅在显式 override / release 默认时传入; 否则不传, 由 chart 自带
+# ⚠ 仅当显式设置 CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE 时才传 --set image.tag=<tag>;
+#   其余情况(含 release 模式)一律不传, 由 chart 自带(Chart.yaml appVersion / values.image.tag)决定。
+#   CUBESTACK_OPERATOR_IMAGE_TAG 只用于镜像清单/发布树登记, 不参与 helm。
 ```
 
 **渲染自检**: 覆盖后再渲染一次, 逐个断言镜像 ref 落在 `${REG_BASE}/` 之下; 有漏网的就 `err` 退出
