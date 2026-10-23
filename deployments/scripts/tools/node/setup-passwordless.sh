@@ -34,12 +34,15 @@ PUBKEY="$(cat "${KEY_PUB}")"
 FAILED=0
 
 # 密钥认证是否已可用(幂等判断; 失败时不打印噪声)
-# ⚠ 只验证**部署密钥本身**: -F /dev/null 忽略 ~/.ssh/config 里的其它 IdentityFile,
-#   IdentitiesOnly=yes + IdentityAgent=none 禁止 ssh-agent 用别的身份代答。否则"别的身份
-#   能登录"会被误判成"部署密钥已注入" → 跳过注入; 该身份一旦失效, 节点就没有承诺的免密
-#   访问(2026-10-23 CodeRabbit)。
+# ⚠ 只验证**部署密钥本身**:
+#   · -F /dev/null 忽略 ~/.ssh/config(其中可能有其它 IdentityFile);
+#   · -i "${SSH_KEY}" 取代 OpenSSH 默认身份列表(~/.ssh/id_*), 实际只会尝试这一把;
+#   · IdentitiesOnly=yes 禁止 ssh-agent 用**其它**身份代答。
+#   · **不禁用 agent**: 口令保护的部署密钥若已加载进 ssh-agent, 需要由 agent 用同一把密钥
+#     签名(BatchMode 无法交互输入口令); IdentitiesOnly 保证 agent 只能用它, 不会放行别的
+#     身份。IdentityAgent=none 会让这种密钥在无节点密码时被误判为不可用(2026-10-23 CodeRabbit)。
 _key_ok() {
-    ssh -i "${SSH_KEY}" -F /dev/null -o IdentitiesOnly=yes -o IdentityAgent=none \
+    ssh -i "${SSH_KEY}" -F /dev/null -o IdentitiesOnly=yes \
         -o BatchMode=yes -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 "$1@${IP}" true 2>/dev/null
 }

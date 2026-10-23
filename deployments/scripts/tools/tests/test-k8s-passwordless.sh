@@ -9,6 +9,7 @@
 #      SSH_DEFAULT_PASSWORD, 且不得打印"完成"
 #   ② 密钥已就绪(即使密码错) → 幂等成功, 根本不应尝试密码注入
 #   ②b 其它身份(agent/ssh_config)可登录但部署密钥未注入 → 不得误判"已就绪", 必须走密码注入
+#   ②c 口令保护的部署密钥仅存在于 ssh-agent → 探测必须允许 agent 用同一把密钥签名
 #   ③ 密钥不通 + 密码正确 → 注入 + 验证通过, 模块成功
 # 隔离: 临时 cluster.conf + 假 ssh/sshpass(纯离线)
 # 用法: bash deployments/scripts/tools/tests/test-k8s-passwordless.sh
@@ -38,15 +39,18 @@ echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForTestOnly test" > "${TMP}/ke
 # 假 ssh: 按认证方式分流; 密码模式成功时留下标记, 让后续密钥验证也能通过
 # ②b 用: FAKE_OTHER_IDENTITY_OK=1 模拟"别的身份(agent/ssh_config)可登录" ——
 #   只有探测显式限制为部署密钥(-i + IdentitiesOnly=yes + -F /dev/null)时才不短路。
+# ②c 用: FAKE_AGENT_KEY_ONLY=1 模拟"部署密钥有口令、仅 ssh-agent 持有" ——
+#   探测必须允许 agent(不能 IdentityAgent=none), 且仍只认部署密钥。
 cat > "${TMP}/bin/ssh" <<'FAKE'
 #!/bin/bash
-mode=key; host=""; idonly=0; fnull=0; key=""
+mode=key; host=""; idonly=0; fnull=0; key=""; agent_none=0
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
     a="${args[i]}"
     case "$a" in
         PreferredAuthentications=password*) mode=password ;;
         IdentitiesOnly=yes) idonly=1 ;;
+        IdentityAgent=none) agent_none=1 ;;
         -F) [ "${args[i+1]:-}" = "/dev/null" ] && fnull=1 ;;
         -i) key="${args[i+1]:-}" ;;
         *@*) host="$a" ;;
@@ -60,6 +64,13 @@ if [ "${mode}" = "password" ]; then
     fi
     echo "${host}: Permission denied, please try again." >&2
     exit 255
+fi
+if [ "${FAKE_AGENT_KEY_ONLY:-0}" = "1" ]; then
+    if [ "${agent_none}" = "1" ] || [ "${idonly}" != "1" ] || [ "${fnull}" != "1" ] || [ "${key}" != "${FAKE_EXPECT_KEY:-}" ]; then
+        echo "${host}: Permission denied (publickey)." >&2
+        exit 255
+    fi
+    exit 0     # agent 持有部署密钥 → 允许用同一把密钥签名
 fi
 if [ "${FAKE_OTHER_IDENTITY_OK:-0}" = "1" ]; then
     if [ "${idonly}" != "1" ] || [ "${fnull}" != "1" ] || [ "${key}" != "${FAKE_EXPECT_KEY:-}" ]; then
@@ -120,7 +131,15 @@ chk_contains "报告注入成功" "免密登录成功" "${TMP}/out-otherid"
 chk_not_contains "不误报已就绪" "免密登录已就绪" "${TMP}/out-otherid"
 chk_contains "探测限制为部署密钥(IdentitiesOnly)" "IdentitiesOnly=yes" "${SETUP}"
 chk_contains "探测忽略用户 ssh_config(-F /dev/null)" "-F /dev/null" "${SETUP}"
-chk_contains "探测禁用 ssh-agent(IdentityAgent=none)" "IdentityAgent=none" "${SETUP}"
+chk "探测不禁用 ssh-agent(口令密钥可经 agent 签名)" "0" \
+    "$(awk '/^_key_ok\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SETUP}" \
+        | grep -cF 'IdentityAgent=none' || true)"
+
+echo "== ②c 口令密钥在 ssh-agent 中: 不得因禁用 agent 而误判 =="
+rc="$(run_module agentkey FAKE_KEY_OK=0 FAKE_PW_OK=0 FAKE_AGENT_KEY_ONLY=1)"
+chk "退出码 0(agent 可用同一把部署密钥)" "0" "${rc}"
+chk_contains "报告免密已就绪" "免密登录已就绪" "${TMP}/out-agentkey"
+chk "未尝试密码注入" "0" "$(_count "${TMP}/sshpass-agentkey.log")"
 
 echo "== ③ 密钥不通 + 密码正确: 注入并验证成功 =="
 rc="$(run_module pwok FAKE_KEY_OK=0 FAKE_PW_OK=1)"
