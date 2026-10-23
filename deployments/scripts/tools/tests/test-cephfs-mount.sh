@@ -152,8 +152,10 @@ else
 fi
 
 echo "== ①b 调度: Ceph 全关时计划不得包含 cephfs_mount =="
-_plan="$(CLUSTER_CONF="${TMP}/cluster.conf.ceph-off" \
-    bash "${REPO_ROOT}/deployments/scripts/deploy-cluster.sh" --list 2>&1 || true)"
+if ! _plan="$(CLUSTER_CONF="${TMP}/cluster.conf.ceph-off" \
+    bash "${REPO_ROOT}/deployments/scripts/deploy-cluster.sh" --list 2>&1)"; then
+    echo "  FAIL 无法生成部署计划: ${_plan}"; fail=1
+fi
 _plan_line="$(printf '%s\n' "${_plan}" | grep -m1 '本次执行模块' || true)"
 if printf '%s' "${_plan_line}" | grep -qw 'cephfs_mount'; then
     echo "  FAIL 计划仍包含 cephfs_mount: ${_plan_line}"; fail=1
