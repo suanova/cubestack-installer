@@ -2470,6 +2470,67 @@ init_remote_kubectl() {
     return 0
 }
 
+# ---------------- 删除 CRD: 先清残留 CR 的 finalizer, 有界等待, 最后摘 CRD finalizer ----------------
+# 背景(2026-10-23 C 集群实机): 平台卸载时组件控制器已先被删, CRD 下仍有 CR
+#   (default/devenvironment test 带 ai.cubestack.io/dev-env-finalizer)。`kubectl delete crd`
+#   会卡在 apiextensions 的 customresourcecleanup.apiextensions.k8s.io finalizer 上**无限等待**
+#   (APIServer 要等该 CRD 下 CR 全部删完; 没有控制器 = 永不满足), 整个 teardown 只能等外层
+#   timeout 强杀; 残留的 Terminating CRD 还会挡住重装时 [5/6] 的 CRD apply。
+# 做法(幂等, 仅用于卸载/清理语义):
+#   ① 摘该 CRD 下所有 CR 的 finalizers(metadata.finalizers=null)
+#   ② kubectl delete crd --wait=false
+#   ③ 有界轮询(默认 60s, 每 5s): 再摘 CR finalizers + 检查 CRD 是否消失
+#   ④ 超时兜底: 摘 CRD 自身 finalizers → 强制删除(残留 CR 会成为孤儿, 但卸载场景宁可清干净)
+# ⚠ 循环内调用 SSH 必须接 `< /dev/null`: 否则 ssh 会吞掉 while 的管道输入, 只处理第一条就退出
+#   (2026-10-23 _reroll_stuck_pods 同类事故)。
+# 用法: delete_crd_with_finalizer_cleanup <crd-name | customresourcedefinition.apiextensions.k8s.io/<crd-name>> [wait-seconds]
+# 前置: init_remote_kubectl 已执行(提供 SSH/K)
+delete_crd_with_finalizer_cleanup() {
+    local crd="${1:-}" wait_s="${2:-60}" i=0
+    crd="${crd##*/}"
+    [ -n "${crd}" ] || return 0
+    case "${wait_s}" in ''|*[!0-9]*) wait_s=60 ;; esac
+    # 内部函数: 摘 <crd> 下所有 CR 的 finalizers(命名空间级与集群级都覆盖)
+    _crd_clear_cr_finalizers() {
+        local items ns name
+        items="$( (SSH "${K} get ${crd} -A -o json" 2>/dev/null) || true )"
+        [ -n "${items}" ] || return 0
+        printf '%s' "${items}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for m in d.get("items", []) or []:
+    md = m.get("metadata", {}) or {}
+    print("%s\t%s" % (md.get("namespace", ""), md.get("name", "")))
+' 2>/dev/null | while IFS=$'\t' read -r ns name; do
+            [ -n "${name}" ] || continue
+            if [ -n "${ns}" ]; then
+                SSH "${K} -n ${ns} patch ${crd} ${name} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'" >/dev/null 2>&1 < /dev/null || true
+            else
+                SSH "${K} patch ${crd} ${name} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'" >/dev/null 2>&1 < /dev/null || true
+            fi
+        done
+    }
+    # ① 先清一轮(尽量在 CRD 进入 Terminating 前摘掉)
+    _crd_clear_cr_finalizers
+    # ② 非阻塞删除
+    SSH "${K} delete crd ${crd} --ignore-not-found --wait=false" >/dev/null 2>&1 < /dev/null || true
+    # ③ 有界等待: CRD 消失即返回; 期间反复清 CR finalizer
+    while [ "${i}" -lt "${wait_s}" ]; do
+        SSH "${K} get crd ${crd}" >/dev/null 2>&1 < /dev/null || return 0
+        _crd_clear_cr_finalizers
+        if [ $((i + 5)) -lt "${wait_s}" ]; then sleep 5; fi
+        i=$((i + 5))
+    done
+    # ④ 兜底: 摘 CRD 自身 finalizer, 强制删除(避免整个卸载被一个残留对象拖死)
+    warn "  CRD ${crd} 在 ${wait_s}s 内未删净(残留 CR finalizer 拖住 customresourcecleanup) → 摘 CRD finalizer 强制清理"
+    SSH "${K} patch crd ${crd} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'" >/dev/null 2>&1 < /dev/null || true
+    SSH "${K} delete crd ${crd} --ignore-not-found --wait=false" >/dev/null 2>&1 < /dev/null || true
+    return 0
+}
+
 # ---------------- Envoy Gateway 数据面 Service 类型对齐 ----------------
 # 背景(2026-10-22 实机): CubeStackCluster 的 spec.global.serviceExposeMode 只作用于
 #   operator 自己渲染的 Service; Envoy Gateway 数据面 Service 由 EnvoyProxy 决定, 默认

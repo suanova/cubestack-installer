@@ -63,7 +63,7 @@ CEPH_MODE="${CEPH_MODE:-internal}"          # internal(默认, 集群内) | exte
 # → Ceph 子能力开关(CEPHFS_ENABLED / CEPH_RGW_ENABLED / CEPH_DASHBOARD_ENABLED)与 CEPH_FALLBACK_TO_LOCALPATH
 #   见 cluster.defaults.conf §4.3b
 
-# ---- CUBESTACK_OPERATOR(平台 Operator: 凭据 + 开关; 参数见 cluster.defaults.conf §4.6b) ----
+# ---- CUBESTACK_OPERATOR(平台 Operator: 凭据 + 版本 + 开关; 其余参数见 cluster.defaults.conf §4.6b) ----
 #   ⚠ 凭据卫生: 默认值一律留空 —— 真实用户名/密码只填在 cluster.conf(已 gitignore), 不得写进本模板。
 CUBESTACK_OPERATOR_HARBOR_USER="${CUBESTACK_OPERATOR_HARBOR_USER:-}"
 CUBESTACK_OPERATOR_HARBOR_PASSWORD="${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}"
@@ -71,7 +71,12 @@ CUBESTACK_OPERATOR_ENABLED="${CUBESTACK_OPERATOR_ENABLED:-true}"  # 默认启用
 CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED="${CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED:-true}"  # 打开会一并下发平台组件镜像(离线需另行备齐)
 ONLINE_DEPLOY_CUBESTACK_OPERATOR="${ONLINE_DEPLOY_CUBESTACK_OPERATOR:-false}"  # 平台 Operator 镜像来源: false=离线(tar→内置 registry; 默认) / true=在线(按 chart 定义从 Harbor 直拉)
 # (NVIDIA 的 ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR 在下方"附加组件开关"区; 两者均于 2026-10-16 挪入主文件)
-# → 滚动 chart/镜像 tag(CHART_VERSION / IMAGE_TAG)与同步模式(CHART_SYNC) → defaults §4.6b
+# 版本基线(2026-10-23 口径): chart 1.0.0-latest + 离线 chart + operator 跟随 chart 自带版本 + 保留 model bundles
+#   IMAGE_TAG_OVERRIDE 留空=跟随 chart(逃生口, 仅必要时填具体版本); MODEL_BUNDLES_ENABLED=true=保留 chart 的 8 个 bundle
+CUBESTACK_OPERATOR_CHART_VERSION="${CUBESTACK_OPERATOR_CHART_VERSION:-1.0.0-latest}"          # chart 版本期望值; release 模式优先按 Chart.yaml 发现
+CUBESTACK_OPERATOR_CHART_SYNC="${CUBESTACK_OPERATOR_CHART_SYNC:-offline}"                     # auto|online|offline(offline=不联网刷新, 恒用本地副本)
+CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE="${CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE:-}"            # 留空=跟随 chart 自带版本; 仅必要时填 tag(只覆盖 operator 自身镜像)
+CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED="${CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED:-true}"  # true=保留 chart 的 8 个 bundle; false=清空 bundles/关 modelBundles
 
 # ---- 发布版本(可选; 详见 docs/release-management.md) ----
 # 设为 CUBESTACK_RELEASE="2.0.0" 时使用 <CUBESTACK_RELEASE_ROOT>/2.0.0/offline-files/ 内的

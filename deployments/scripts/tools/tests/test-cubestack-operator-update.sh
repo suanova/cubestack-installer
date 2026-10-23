@@ -13,7 +13,7 @@
 #   ④ digest 取不到时 online 兜底 rollout restart
 #   ⑤ 离线 loop 把 **operator 镜像** 的 digest 写入 _OPERATOR_DIGEST
 #   ⑥ 冒烟 CR 显式全禁用 + retain(不继承默认组件/不卸载真实资源)
-#   ⑦ 默认保留 chart 的 8 个 model bundles + modelBundles 开启(开关默认 true, 仅显式 false 分支裁剪, 非法值报错)
+#   ⑦ operator 版本基线/bundles 开关在 cluster.conf(+example): 仅显式 false 分支裁剪, 非法值报错
 #   ⑧ chart 随离线包分发: charts/ 落点 / 显式覆盖 / legacy fallback / 缺 chart 硬失败
 # 用法: bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
 # ============================================================
@@ -59,6 +59,55 @@ echo "== ⑤ RWO 单卷 Deployment 策略守护 =="
 chk_contains "调用 ensure_rwo_deployments_recreate" 'ensure_rwo_deployments_recreate "${NS}"' "${MOD}"
 chk_contains "默认等待上界变量" 'CUBESTACK_OPERATOR_RWO_STRATEGY_WAIT_SECONDS' "${MOD}"
 
+echo "== ⑤b 离线推送后触发 ImagePullBackOff Pod 重拉 =="
+chk_contains "存在重拉助手" '_reroll_stuck_pods()' "${MOD}"
+chk_contains "只匹配本次平台镜像集合" '_PLATFORM_REFS+=' "${MOD}"
+chk_contains "删除命中 Pod" 'delete pod ${_pod}' "${MOD}"
+chk_contains "调用重拉助手" '_reroll_stuck_pods ${TARGET_REFS[@]+' "${MOD}"
+
+echo "== ⑤c 重拉助手: ssh 不得吞掉循环输入(所有命中 Pod 都要删) =="
+# 2026-10-23 A 集群实机: while read ... | ... 循环里直接调用 ssh, ssh 会把管道剩余行
+# 当作自己的 stdin 读走 → 只删第一个 Pod 就结束, 其余 Pod 继续 ImagePullBackOff。
+# 这里提取模块里的真实函数, 用假 SSH(delete 时读 stdin, 复现真实行为)验证删除数量。
+awk '/^_reroll_stuck_pods\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${MOD}" > "${TMP}/reroll-fn.sh"
+chk_contains "提取到重拉助手函数体" '_reroll_stuck_pods()' "${TMP}/reroll-fn.sh"
+cat > "${TMP}/pods.json" <<'EOF'
+{"items":[
+ {"metadata":{"namespace":"ns","name":"p1"},"status":{"containerStatuses":[{"image":"reg/a:1","state":{"waiting":{"reason":"ImagePullBackOff"}}}]}},
+ {"metadata":{"namespace":"ns","name":"p2"},"status":{"containerStatuses":[{"image":"reg/b:1","state":{"waiting":{"reason":"ErrImagePull"}}}]}},
+ {"metadata":{"namespace":"ns","name":"p3"},"status":{"containerStatuses":[{"image":"reg/c:1","state":{"waiting":{"reason":"ImagePullBackOff"}}}]}},
+ {"metadata":{"namespace":"ns","name":"p4"},"status":{"containerStatuses":[{"image":"reg/other:9","state":{"waiting":{"reason":"ImagePullBackOff"}}}]}}
+]}
+EOF
+cat > "${TMP}/reroll-run.sh" <<'EOF'
+set -uo pipefail
+K="kubectl"
+say() { :; }
+SSH() {
+    case "$*" in
+        *" get pods "*) cat "${JSON}" ;;
+        *" delete pod "*) cat >/dev/null; printf '%s\n' "$*" >> "${OUT}" ;;
+    esac
+    return 0
+}
+. "${FN}"
+_reroll_stuck_pods reg/a:1 reg/b:1 reg/c:1
+EOF
+JSON="${TMP}/pods.json" OUT="${TMP}/deleted.txt" FN="${TMP}/reroll-fn.sh" \
+    bash "${TMP}/reroll-run.sh" >/dev/null 2>&1 || true
+chk "3 个命中 Pod 全部删除(ssh 未吞 stdin)" "3" "$(wc -l < "${TMP}/deleted.txt" 2>/dev/null || echo 0)"
+chk_not_contains "非本次镜像集合的 Pod 不动" "p4" "${TMP}/deleted.txt"
+
+echo "== ⑤d 组件镜像幂等: 用 config digest(内容), 不用 manifest digest =="
+# docker-archive 的层未压缩, skopeo push 会重新 gzip → manifest digest 必变 → 每次重推。
+# 必须比 config digest(rootfs.diff_ids 不变)才能跳过。
+chk_contains "存在内容 digest 助手" '_content_digest()' "${MOD}"
+chk_contains "目标侧用内容 digest" '_d_dst="$(_content_digest "${_dst}")"' "${MOD}"
+chk_contains "源侧(archive)用内容 digest" '_d_src="$(_content_digest "docker-archive:${_tarfile}")"' "${MOD}"
+chk_not_contains "4b/6 不再用 manifest digest 比对源" '_d_src="$(_digest "docker-archive:${_tarfile}")"' "${MOD}"
+chk_contains "operator 镜像目标侧用内容 digest" '_c_dst="$(_content_digest "${_dst}")"' "${MOD}"
+chk_contains "operator 镜像源侧用内容 digest" '_c_src="$(_content_digest "${_src_arg}")"' "${MOD}"
+
 echo "== ⑥ 冒烟 CR 不得继承默认组件/不得卸载真实资源 =="
 VERIFY="${REPO_ROOT}/deployments/scripts/modules/03_addon/26_verify_cubestack_operator.sh"
 chk_contains "冒烟 CR deletePolicy=retain" "deletePolicy: retain" "${VERIFY}"
@@ -70,13 +119,23 @@ chk_contains "冒烟 CR 显式禁用 exporters.bmc" "bmc: { enabled: false }" "$
 chk_contains "冒烟 CR 显式禁用 exporters.metax" "metax: { enabled: false }" "${VERIFY}"
 chk_contains "清理前启用组件护栏" "_ENABLED_ANY" "${VERIFY}"
 
-echo "== ⑦ 默认保留 chart 的 model bundles(开关默认 true) =="
-# 2026-10-20 用户口径: 单步 --steps cubestack_operator 与全量部署都必须默认 bundles 非空;
-# 以 chart values.yaml 为主; 开关 CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED 放在 cluster.defaults.conf,
-# 默认 true; 仅显式 false 分支才清空 bundles / 关 modelBundles; 其他值必须报配置错误。
+echo "== ⑦ model bundles 开关 + 版本基线(2026-10-23 rc: 全部在 cluster.conf) =="
+# 2026-10-23: CUBESTACK_OPERATOR_{CHART_VERSION,CHART_SYNC,IMAGE_TAG_OVERRIDE,MODEL_BUNDLES_ENABLED}
+# 从 cluster.defaults.conf 挪到 cluster.conf(与其它 operator 变量同节), 模板同步到 cluster.conf.example。
+# 模块保留内置兜底(MODEL_BUNDLES_ENABLED=false); 仅显式 false 分支清空 bundles / 关 modelBundles;
+# 其他值必须报配置错误。
 DEFAULTS="${REPO_ROOT}/deployments/config/cluster.defaults.conf"
-chk_contains "defaults 定义 bundles 开关(默认 true)" \
-    'CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED="${CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED:-true}"' "${DEFAULTS}"
+EXAMPLE="${REPO_ROOT}/deployments/config/cluster.conf.example"
+chk_contains "example 定义 bundles 开关(默认 true)" \
+    'CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED="${CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED:-true}"' "${EXAMPLE}"
+chk_contains "example IMAGE_TAG_OVERRIDE 默认留空" \
+    'CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE="${CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE:-}"' "${EXAMPLE}"
+for _v in CHART_VERSION CHART_SYNC IMAGE_TAG_OVERRIDE MODEL_BUNDLES_ENABLED; do
+    chk_contains "example 定义 CUBESTACK_OPERATOR_${_v}" \
+        "CUBESTACK_OPERATOR_${_v}=\"\${CUBESTACK_OPERATOR_${_v}:-" "${EXAMPLE}"
+    chk_not_contains "defaults 不再定义 CUBESTACK_OPERATOR_${_v}" \
+        "CUBESTACK_OPERATOR_${_v}=\"\${CUBESTACK_OPERATOR_${_v}:-" "${DEFAULTS}"
+done
 chk_contains "模块默认读取 true" 'CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED:-true' "${MOD}"
 chk_contains "保留 CR_VALUES_FILE 覆盖通道" 'CUBESTACK_OPERATOR_CR_VALUES_FILE' "${MOD}"
 chk_not_contains "模块不关闭 bmc(chart 默认保留)" 'clusterCR.spec.components.exporters.bmc.enabled=false' "${MOD}"

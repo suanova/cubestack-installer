@@ -50,7 +50,8 @@ _metax_cleanup_residual() {
     local _mns="${METAX_NAMESPACE:-metax-operator}" _mrel="${METAX_RELEASE_NAME:-metax-gpu-operator}"
     say "  清理残留(CR / CRD / ${_mns} 命名空间 / default 旧资源)..."
     SSH "${K} delete clusteroperator -n ${_mns} cluster-operator --ignore-not-found >/dev/null 2>&1" || true
-    SSH "${K} delete crd clusteroperators.gpu.metax-tech.com --ignore-not-found >/dev/null 2>&1" || true
+    # 共享助手: 先摘残留 CR 的 finalizer 再有界删除(防 CRD 卡在 customresourcecleanup; 2026-10-23)
+    delete_crd_with_finalizer_cleanup clusteroperators.gpu.metax-tech.com
     SSH "${K} patch ns ${_mns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
     SSH "${K} delete ns ${_mns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
     # 清理集群级残留(ClusterRole/RoleBinding 无命名空间资源; 无 Helm 标签时 helm 无法接管 → 必须删掉)

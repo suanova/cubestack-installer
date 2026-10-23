@@ -107,6 +107,46 @@ EOS
     return 0
 }
 
+# ---------------- 推送后触发 ImagePullBackOff Pod 重新拉取 ----------------
+# 离线模式 [4/6]/[4b/6] 把 tar 推入 registry 后，kubelet 对 ImagePullBackOff 的退避
+# 可达 5 分钟；仅推镜像不会立刻重试（2026-10-23 A 集群实机：镜像已推进 registry，
+# portal/controller-manager 仍停在 11h 前的 not found 事件）。
+# 只删除**镜像命中本次平台镜像集合**且处于 ImagePullBackOff/ErrImagePull 的 Pod，
+# 由 Deployment/RS/Operator 重建后立即重新拉取；不碰其他故障 Pod（如 PVC Pending）。
+# 用法: _reroll_stuck_pods <ref...>
+_reroll_stuck_pods() {
+    local _refs=("$@") _json _ns _pod _img _reason _r
+    [ "${#_refs[@]}" -gt 0 ] || return 0
+    _json="$( (SSH "${K} get pods -A -o json" 2>/dev/null) || true )"
+    [ -n "${_json}" ] || return 0
+    printf '%s' "${_json}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for p in d.get("items", []):
+    md = p.get("metadata", {}) or {}
+    for cs in (p.get("status", {}) or {}).get("containerStatuses", []) or []:
+        w = (cs.get("state", {}) or {}).get("waiting", {}) or {}
+        if w.get("reason") in ("ImagePullBackOff", "ErrImagePull"):
+            print("%s\t%s\t%s\t%s" % (md.get("namespace", ""), md.get("name", ""), cs.get("image", ""), w.get("reason")))
+            break
+' | while IFS=$'\t' read -r _ns _pod _img _reason; do
+        [ -n "${_ns}" ] && [ -n "${_pod}" ] || continue
+        for _r in "${_refs[@]}"; do
+            if [ "${_img}" = "${_r}" ]; then
+                say "  ${_ns}/${_pod} 镜像已就绪但仍 ${_reason} → 删除 Pod 触发重新拉取"
+                # ★ stdin 必须接 /dev/null: ssh 会把 stdin 转发给远端命令, 不重定向时
+                #   ssh 会吞掉 while 循环的管道输入 → 只删第一个命中的 Pod 就提前结束
+                #   (2026-10-23 A 集群实机: portal/controller-manager 未被重拉, 滞留 ImagePullBackOff)。
+                SSH "${K} -n ${_ns} delete pod ${_pod} --wait=false >/dev/null 2>&1" < /dev/null || true
+                break
+            fi
+        done
+    done
+}
+
 # 卸载分支(优雅覆盖): ① 删平台实例 CR(clusterCR) → operator 级联优雅收掉 9 个平台组件
 #   (含 ceph PVC 消费者, 等在飞 IO 收敛) ② helm uninstall operator(尽力; 需宿主机 kubeconfig)
 #   ③ 命名空间/CRD 残留清理。⚠ 位于 TOGGLE 检查之前。
@@ -182,7 +222,11 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
     SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
     for _crd in $( (SSH "${K} get crd -o name 2>/dev/null") | grep -i cubestack || true); do
-        SSH "${K} delete ${_crd} --ignore-not-found >/dev/null 2>&1" || true
+        # ★ 2026-10-23 C 集群实机: 组件控制器先被删后, CRD 下残留 CR(如 devenvironment/test)
+        #   的 finalizer 无人摘 → delete crd 卡在 customresourcecleanup 上无限等待。
+        #   助手会反复清 CR finalizers, 有界等待(默认 60s), 超时摘 CRD finalizer 兜底。
+        delete_crd_with_finalizer_cleanup "${_crd}" \
+            "${CUBESTACK_OPERATOR_CRD_CLEANUP_WAIT_SECONDS:-60}"
     done
     ok "  cubestack-operator 已卸载(CR 级联 + helm uninstall + 残留清理)"
     exit 0
@@ -331,6 +375,28 @@ if isinstance(ms, list):                 # 多架构 index → amd64/linux 条�
             print(m.get("digest", "")); break
 else:                                     # 单架构清单 → 字节 sha256 = 它自己的 digest
     print("sha256:" + hashlib.sha256(raw).hexdigest())
+' 2>/dev/null || true
+}
+
+# 镜像**内容** digest(config digest): docker-archive ↔ registry 之间唯一可比的指纹。
+# 为什么不能复用 _digest(manifest digest): `docker save` 存的是**未压缩层**, skopeo push
+# 到 docker:// 默认重新 gzip → 层摘要与 manifest 字节全变, 源/目标 manifest digest 必然
+# 不等 → 每次执行都重推(2026-10-23 A 集群实测: 54 个组件镜像全部重推, 幂等形同虚设)。
+# config digest 覆盖 rootfs.diff_ids(未压缩层摘要)+ history, 与压缩方式无关; 相同即镜像
+# 内容相同, 可安全跳过(实测自研/第三方镜像均一致)。
+# 多架构 index 没有 config 字段 → 输出空 → 调用方保守重推, 不会误判。
+_content_digest() {   # <docker://ref | docker-archive:path>
+    local ref="$1"
+    skopeo inspect --raw --tls-verify=false "${ref}" 2>/dev/null \
+        | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(d.get("manifests"), list):
+    sys.exit(0)
+print((d.get("config") or {}).get("digest", ""))
 ' 2>/dev/null || true
 }
 
@@ -501,7 +567,8 @@ for _img in "${SRC_IMAGES[@]}"; do
     _tag="${_path##*:}"
     _dst="docker://${REG_DIRECT}/${_path}"               # 推送用直连端点
     _dst_ref="${REG_BASE}/${_path}"                      # 写进 chart 的引用(节点用它拉)
-    _d_dst="$(_digest "${_dst}")"
+    _d_dst="$(_digest "${_dst}")"                        # manifest digest(用于 podAnnotations)
+    _c_dst="$(_content_digest "${_dst}")"                # 内容 digest(仅用于幂等比对)
 
     _pushed=0
     # 源优先级: auto → ① Harbor(在线, 最新) ② 离线 tar ③ 本地 docker daemon; 也可显式指定
@@ -518,16 +585,16 @@ for _img in "${SRC_IMAGES[@]}"; do
     _tar="$(find_offline_tar "/${_path}" "*$(basename "${_path%%:*}")*.tar" "${OFFLINE_DIR}" 2>/dev/null || true)"
 
     for _s in "${_try[@]}"; do
-        _src_arg=""; _d_src=""
+        _src_arg=""; _c_src=""
         case "${_s}" in
             harbor)
                 _src_arg="docker://${_img}"
                 # 私有无凭据且未登录时, inspect 会失败 → digest 空 → 直接尝试 copy(失败则换下一个源)
-                _d_src="$(_digest "${_src_arg}")" ;;
+                _c_src="$(_content_digest "${_src_arg}")" ;;
             tar)
                 [ -n "${_tar}" ] || continue
                 _src_arg="docker-archive:${_tar}"
-                _d_src="$(_digest "${_src_arg}")" ;;
+                _c_src="$(_content_digest "${_src_arg}")" ;;
             docker)
                 _local="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -Fx "${_img}" | head -1 || true)"
                 [ -n "${_local}" ] || continue
@@ -535,15 +602,16 @@ for _img in "${SRC_IMAGES[@]}"; do
                 say "  从本地 docker daemon 导出: ${_local}"
                 if sudo docker save "${_local}" -o "${_tmp_tar}" >/dev/null 2>&1; then
                     _src_arg="docker-archive:${_tmp_tar}"
-                    _d_src="$(_digest "${_src_arg}")"
+                    _c_src="$(_content_digest "${_src_arg}")"
                 else
                     rm -f "${_tmp_tar}"; continue
                 fi ;;
         esac
 
-        # 幂等: 目标已有同 digest → 跳过(rolling :latest 必须比 digest, 不能只看 tag 存在)
-        if [ -n "${_d_dst}" ] && [ -n "${_d_src}" ] && [ "${_d_dst}" = "${_d_src}" ]; then
-            ok "  ${_path} 内容未变(digest ${_d_dst:0:19}...), 跳过推送(源=${_s})"
+        # 幂等: 目标已有同**内容** digest → 跳过(rolling :latest 必须比 digest, 不能只看 tag 存在;
+        # docker-archive 用 manifest digest 会永远不等 —— 见 _content_digest)
+        if [ -n "${_c_dst}" ] && [ -n "${_c_src}" ] && [ "${_c_dst}" = "${_c_src}" ]; then
+            ok "  ${_path} 内容未变(digest ${_c_dst:0:19}...), 跳过推送(源=${_s})"
             _pushed=1; break
         fi
         if push_image_skopeo "${_src_arg}" "${_dst}"; then
@@ -583,10 +651,12 @@ done
 # 目标映射(与 [3/6] 的 CR 两条前缀注入一一对应):
 #   自研 harbor.isuanova.com/suanova/<name>:tag  → <REG>/suanova/<name>:tag (imageRegistry)
 #   第三方 <上游ref>(docker.io/quay.io/ghcr.io…) → <REG>/mirrors/<上游ref> (externalImageRegistryPrefix)
-# 幂等: digest 比对(同本体机制)。失败即 err —— CR 模式缺组件镜像=组件将 ImagePullBackOff。
+# 幂等: config digest(内容)比对 —— docker-archive 的 manifest digest 与 registry 不可比,
+#       用它会每次重推(见 _content_digest)。失败即 err —— CR 模式缺组件镜像=组件将 ImagePullBackOff。
 if [ "${CR_ENABLED}" = "true" ]; then
-    say "[4b/6] 推送平台组件镜像(CR 用; 源=离线 tar, 幂等 digest 比对)..."
+    say "[4b/6] 推送平台组件镜像(CR 用; 源=离线 tar, 幂等内容(config digest)比对)..."
     _n_push=0; _n_skip=0
+    _PLATFORM_REFS=()
     _cand_tars=()
     if [ -n "${CUBESTACK_OPERATOR_COMPONENTS:-}" ]; then
         for _c in ${CUBESTACK_OPERATOR_COMPONENTS//,/ }; do
@@ -636,9 +706,12 @@ if [ "${CR_ENABLED}" = "true" ]; then
             "${HARBOR_HOST}"/suanova/*|"${HARBOR_HOST}"/mirrors/*) _dst_path="${_src_ref#${HARBOR_HOST}/}" ;;
             *) _dst_path="mirrors/${_src_ref}" ;;
         esac
+        _PLATFORM_REFS+=("${REG_BASE}/${_dst_path}")
         _dst="docker://${REG_DIRECT}/${_dst_path}"
-        _d_dst="$(_digest "${_dst}")"
-        _d_src="$(_digest "docker-archive:${_tarfile}")"
+        # 幂等: 比 **config digest**(内容), 不比 manifest digest —— 后者在 docker-archive
+        # 推送时因 skopeo 重新压缩而必然变化(见 _content_digest 注释)。
+        _d_dst="$(_content_digest "${_dst}")"
+        _d_src="$(_content_digest "docker-archive:${_tarfile}")"
         if [ -n "${_d_dst}" ] && [ "${_d_dst}" = "${_d_src}" ]; then
             _n_skip=$((_n_skip + 1)); continue
         fi
@@ -652,6 +725,10 @@ if [ "${CR_ENABLED}" = "true" ]; then
     done
     ok "  组件镜像就绪: 新推 ${_n_push} 个, digest 相同跳过 ${_n_skip} 个"
 fi
+
+# 推送完成后立即触发卡在 ImagePullBackOff/ErrImagePull 的平台 Pod 重新拉取
+# (kubelet 退避可达 5min; 只推镜像不保证 Pod 立刻重试)
+_reroll_stuck_pods ${TARGET_REFS[@]+"${TARGET_REFS[@]}"} ${_PLATFORM_REFS[@]+"${_PLATFORM_REFS[@]}"}
 
 fi   # 结束 ONLINE_DEPLOY!=true 的离线推送块([4/6]+[4b/6])
 

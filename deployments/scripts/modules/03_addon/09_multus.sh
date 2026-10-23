@@ -47,7 +47,8 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     else
         warn "  multus: 未找到 manifest ${_manifest}, 退化为只删 DS/CRD"
         SSH "${K} -n kube-system delete ds kube-multus-ds --ignore-not-found=true >/dev/null 2>&1 || true"
-        SSH "${K} delete crd network-attachment-definitions.k8s.cni.cncf.io --ignore-not-found=true >/dev/null 2>&1 || true"
+        # 共享助手: 先摘残留 NAD finalizer 再有界删除(防 CRD 卡在 customresourcecleanup; 2026-10-23)
+        delete_crd_with_finalizer_cleanup network-attachment-definitions.k8s.cni.cncf.io
     fi
     say "  删除示例 NAD ${_nad_ns}/${MULTUS_NAD_NAME:-multus-nad}..."
     SSH "${K} -n ${_nad_ns} delete network-attachment-definitions "${MULTUS_NAD_NAME:-multus-nad}" --ignore-not-found=true >/dev/null 2>&1 || true"

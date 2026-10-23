@@ -47,10 +47,10 @@ cuberouter/cubepilot/portal/observability…)的**离线镜像链路已由本模
 模块把 `offline-files/cubestack-operator/`(2026-10-16 起平台组件按**组件子目录**分类)的各组件
 tar 推入集群内置 registry, 并把 CR 的全局镜像源(imageRegistry / externalImageRegistryPrefix)
 注入为集群 registry —— 节点不访问 Harbor。
-默认值(2026-10-20 起): **保留 chart 默认的 8 个模型 bundles + modelBundles 开启**; bmc 也按 chart
-默认开启(未建 `cubestack-bmc-credentials` Secret 时该组件 Degraded, 不影响推理目录)。开关
-`CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(默认 `true`; 仅接受 `true`/`false`; `false` = 清空 bundles + 关 modelBundles);
-裁剪/定制时用 `CUBESTACK_OPERATOR_CR_VALUES_FILE`(-f) 覆盖。
+默认值: **保留 chart 默认的 8 个模型 bundles + modelBundles 开启**(模块兜底与 `cluster.conf`
+默认均为 `true`); bmc 按 chart 默认开启(未建 `cubestack-bmc-credentials` Secret 时该组件
+Degraded, 不影响推理目录)。开关 `CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(仅接受 `true`/`false`;
+`false` = 清空 bundles + 关 modelBundles); 裁剪/定制时用 `CUBESTACK_OPERATOR_CR_VALUES_FILE`(-f) 覆盖。
 
 ### 1.1 部署模式切换: 在线 / 离线(2026-10-13)
 
@@ -102,7 +102,8 @@ image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.App
 
 ### 3.1 离线 / 在线(需求 1)
 
-`CUBESTACK_OPERATOR_CHART_SYNC=auto|online|offline`(默认 **auto**):
+`CUBESTACK_OPERATOR_CHART_SYNC=auto|online|offline`(模块兜底默认 **auto**; 当前 `cluster.conf`
+显式置 `offline`):
 
 | 模式 | 行为 |
 |---|---|
@@ -260,6 +261,11 @@ coredns loop 插件 FATAL 自杀(kube-system coredns CrashLoopBackOff, cluster �
 ### 3.4c release chart / 镜像版本解析(2026-10-22)
 
 **原则: 默认完全跟随 cubestack-operator chart / operator 自带版本；installer 不隐式覆盖任何版本。**
+
+- 配置位置(2026-10-23): `CUBESTACK_OPERATOR_CHART_VERSION` / `CUBESTACK_OPERATOR_CHART_SYNC` /
+  `CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE` / `CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED` 统一放在
+  `cluster.conf`【CUBESTACK_OPERATOR】节(模板见 `cluster.conf.example`); `cluster.defaults.conf`
+  只保留说明、不再定义默认值。
 
 - chart 定位: 在 `offline-files/cubestack-operator/charts/` 中按以下顺序发现
   (`lib-common.sh` 的 `resolve_operator_chart_tgz`):

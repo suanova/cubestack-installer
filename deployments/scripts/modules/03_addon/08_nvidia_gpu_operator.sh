@@ -65,7 +65,8 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     say "  清理 CRD 与命名空间残留(幂等)..."
     for _crd in clusterpolicies.nvidia.com gpuclusters.nvidia.com nvidiadrivers.nvidia.com \
                 computedomaincliques.resource.nvidia.com computedomains.resource.nvidia.com; do
-        SSH "${K} delete crd ${_crd} --ignore-not-found >/dev/null 2>&1" || true
+        # 共享助手: 先摘残留 CR 的 finalizer 再有界删除(防 CRD 卡在 customresourcecleanup; 2026-10-23)
+        delete_crd_with_finalizer_cleanup "${_crd}"
     done
     SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
     SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
