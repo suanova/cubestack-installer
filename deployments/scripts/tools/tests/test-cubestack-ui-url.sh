@@ -6,6 +6,7 @@
 #   ② 无 hostname + NodePort Service(节点 IP + nodePort)
 #   ③ 无 HTTPRoute 时回退到 cubestack Gateway 基础地址
 #   ⑦ LoadBalancer 已分配 nodePort 但 ingress 未就绪 → 回退 NodePort(2026-10-23)
+#   ⑧ Service 不可见时私有 Gateway 地址不得当 MetalLB(2026-10-23)
 # 隔离: 假 kubectl(纯 JSON 夹具, 无需集群)
 # 用法: bash deployments/scripts/tools/tests/test-cubestack-ui-url.sh
 # ============================================================
@@ -114,6 +115,15 @@ chk "auto 模式回退 NodePort" '["http://10.0.0.10:30080/"]' \
     "$(_run "$_gw_none" "$_rt_nohost" "$_svc_lb_pending" "" | _urls)"
 chk_contains "human 标签 NodePort" "CubeStack Web UI (NodePort): http://10.0.0.10:30080/" \
     "$(_run_human "$_gw_none" "$_rt_nohost" "$_svc_lb_pending" metallb)"
+
+echo "== ⑧ Service 不可见时: 私有 Gateway 的 ClusterIP 不得当 MetalLB =="
+# 2026-10-23 CodeRabbit: Service 查询失败/暂缺时 svc_type 为空; 旧逻辑把 Gateway
+# status 地址一律当 lb → 私有网关的 ClusterIP(10.233.54.28)会被当成 MetalLB URL。
+_svc_none='{"items":[]}'
+chk "非私有 Gateway 仍保留状态地址回退" '["http://10.0.0.100/"]' \
+    "$(_run "$_gw_addr" "$_rt_nohost" "$_svc_none" metallb | _urls)"
+chk "私有 Gateway 的 ClusterIP 不输出" '[]' \
+    "$(_run "$_gw_pair" "$_rt_pair" "$_svc_none" metallb | _urls)"
 
 echo "---------------------------------------------"
 [ "${fail}" = "0" ] && { echo "✅ cubestack UI URL 发现回归通过"; exit 0; } || { echo "❌ cubestack UI URL 发现回归失败"; exit 1; }

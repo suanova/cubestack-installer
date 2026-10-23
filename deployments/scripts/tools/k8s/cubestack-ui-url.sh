@@ -154,11 +154,14 @@ def gateway_endpoints(ns, name):
                 np = p.get("nodePort")
                 if np:
                     addrs.append(("nodeport", int(np)))
-    # Gateway status address: only externally meaningful for LoadBalancer (or when the
-    # owning Service is not visible). A ClusterIP Service's address is the private
-    # gateway's internal VIP — never advertise it as the Web UI; NodePort is served
-    # through node IP + spec.ports[].nodePort above.
-    if g and svc_type in ("", "LoadBalancer"):
+    # Gateway status address: only externally meaningful for a LoadBalancer Service.
+    # When Service ownership is unavailable (svc_type == "", e.g. the Service query
+    # failed or the owning Service is temporarily absent), accept it only for
+    # non-private gateways: the paired private gateway's status address is a ClusterIP
+    # and must never be advertised as MetalLB (2026-10-23 CodeRabbit). NodePort is
+    # served through node IP + spec.ports[].nodePort above.
+    _private_gw = "private" in (name or "").lower()
+    if g and (svc_type == "LoadBalancer" or (svc_type == "" and not _private_gw)):
         for a in (g.get("status", {}) or {}).get("addresses", []) or []:
             if a.get("value"):
                 addrs.append(("lb", a["value"]))
