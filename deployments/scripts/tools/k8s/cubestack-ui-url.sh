@@ -322,7 +322,7 @@ while :; do
 done
 # 最后一次把诊断信息输出(便于部署日志直接看到)
 if [ "${JSON_OUT}" = "1" ]; then
-    echo '{"urls":[]}'
+    echo '{"mode":"unknown","urls":[],"entries":[]}'
 else
     echo "CubeStack Web UI: 尚未发现(Envoy Gateway/HTTPRoute 可能尚未就绪; 稍后重跑: bash ${BASH_SOURCE[0]})"
 fi
