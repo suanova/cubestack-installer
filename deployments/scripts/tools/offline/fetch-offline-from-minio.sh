@@ -564,6 +564,8 @@ _verify_release() {
         || { err "发布未完成: ${root}/offline-files/_SUCCESS 不存在"; return 1; }
     [ -f "${root}/offline-files/SHA256SUMS" ] \
         || { err "发布树不完整: 缺少 ${root}/offline-files/SHA256SUMS"; return 1; }
+    [ -f "${root}/offline-files/release.env" ] \
+        || { err "发布树不完整: 缺少 ${root}/offline-files/release.env"; return 1; }
     _ver="$(sed -nE 's/^RELEASE_VERSION=([^[:space:]#]+).*/\1/p' "${root}/offline-files/release.env" 2>/dev/null | head -1)"
     [ "${_ver}" = "${RELEASE_ARG}" ] \
         || { err "release.env 版本不符: ${_ver:-<空>} != ${RELEASE_ARG}"; return 1; }
