@@ -28,7 +28,7 @@
 #   · NFD: cluster.conf NFD_ENABLED=true(kubespray 已布 NFD)时自动 nfd.enabled=false;
 #     否则 operator 自带 NFD(v0.19.0, 镜像在本集内)。
 #   · 验证: sudo ./deploy-cluster.sh --steps verify_nvidia_gpu。
-#   · 本次设计边界(如实标注): 无卡集群走"快路径"(组件级就绪); 端到端(cuda-vectoradd)需真卡环境;
+#   · 本次设计边界(如实标注): 无 NVIDIA 卡集群走"快路径"(组件级就绪); 端到端(cuda-vectoradd)需真卡环境;
 #     预编译不支持 vGPU/GDS、混 OS 不适用(门禁报错); 禁用组件(vGPU/DRA/sandbox 等)未纳入离线
 #     支持(镜像虽在集内, repository 未覆盖, 启用需按文档补 --set 与备料)。
 # 数据源: cluster.conf (NVIDIA_GPU_OPERATOR_* / ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR / NFD_ENABLED /
@@ -65,7 +65,8 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     say "  清理 CRD 与命名空间残留(幂等)..."
     for _crd in clusterpolicies.nvidia.com gpuclusters.nvidia.com nvidiadrivers.nvidia.com \
                 computedomaincliques.resource.nvidia.com computedomains.resource.nvidia.com; do
-        SSH "${K} delete crd ${_crd} --ignore-not-found >/dev/null 2>&1" || true
+        # 共享助手: 先摘残留 CR 的 finalizer 再有界删除(防 CRD 卡在 customresourcecleanup; 2026-10-23)
+        delete_crd_with_finalizer_cleanup "${_crd}"
     done
     SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
     SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
@@ -217,6 +218,8 @@ ok "  前置检查通过(registry=${REG_DIRECT}, API=${API_DOMAIN}→${API_ENTRY
 # GPU 探测: 不依赖 nvidia-smi/lspci(驱动未装) —— 直接读 PCI vendor id(sysfs, 0x10de=NVIDIA)
 # 同时取内核与 OS(预编译驱动是按内核×OS 组合的镜像; 仅 ubuntu22.04 受支持)。
 GPU_NODES=()          # "<hostname> <ip> <kernel>"
+declare -A GPU_HOST_DRIVER=()   # hostname -> yes/no/unknown(宿主驱动是否可用)
+HAS_METAX_GPU="0"; METAX_UNKNOWN="0"   # 用于"纯 CPU"判定: 只有 NVIDIA/沐曦都无才可称纯 CPU
 for _line in "${NODES[@]:-}"; do
     [ -z "${_line}" ] && continue
     node_parse "${_line}"
@@ -228,30 +231,72 @@ for _line in "${NODES[@]:-}"; do
     _ngpu="$(printf '%s' "${_ngpu:-0}" | tr -d '[:space:]' | grep -E '^[0-9]+$' || echo 0)"
     if [ "${_ngpu}" -gt 0 ] 2>/dev/null; then
         ok "  节点 ${NODE_HOSTNAME}(${NODE_IP}) 检测到 ${_ngpu} 个 NVIDIA PCI 设备(内核 ${_kern}, OS ${_osid})"
-        [ "${_osid}" = "22.04" ] \
-            || { err "  ${NODE_HOSTNAME} OS=${_osid} 非 22.04: 预编译驱动容器仅支持 ubuntu22.04; 见 docs/nvidia-gpu-operator.md 的退路"; exit 1; }
+        # 宿主已有可用驱动 → operator 会走 pre-installed, 不需要预编译驱动镜像/内核门禁
+        _hostdrv="$(node_host_nvidia_driver_works "${NODE_IP}")"
+        GPU_HOST_DRIVER["${NODE_HOSTNAME}"]="${_hostdrv}"
+        if [ "${_hostdrv}" = "yes" ]; then
+            ok "  ${NODE_HOSTNAME} 宿主 NVIDIA 驱动可用 → operator 将使用 pre-installed(跳过预编译驱动门禁)"
+        else
+            [ "${_osid}" = "22.04" ] \
+                || { err "  ${NODE_HOSTNAME} OS=${_osid} 非 22.04: 预编译驱动容器仅支持 ubuntu22.04; 见 docs/nvidia-gpu-operator.md 的退路"; exit 1; }
+            say "  ${NODE_HOSTNAME} 宿主驱动不可用(${_hostdrv}) → 需要预编译驱动容器(内核 ${_kern})"
+        fi
         GPU_NODES+=("${NODE_HOSTNAME} ${NODE_IP} ${_kern}")
     else
-        say "  节点 ${NODE_HOSTNAME}(${NODE_IP}) 无 NVIDIA PCI 设备"
+        # 无 NVIDIA: 再查沐曦, 避免把"只有沐曦 GPU"的节点误称为纯 CPU
+        read -r _nv2 _mx <<< "$(node_gpu_probe "${NODE_IP}")"
+        if [ "${_mx:-unknown}" != "unknown" ] && [ "${_mx:-0}" -gt 0 ] 2>/dev/null; then
+            HAS_METAX_GPU="1"
+            say "  节点 ${NODE_HOSTNAME}(${NODE_IP}) 无 NVIDIA PCI 设备(检测到 ${_mx} 张沐曦 GPU; 非纯 CPU)"
+        elif [ "${_mx:-unknown}" = "unknown" ]; then
+            METAX_UNKNOWN="1"
+            say "  节点 ${NODE_HOSTNAME}(${NODE_IP}) 无 NVIDIA PCI 设备(沐曦 mx-smi 不可用; 不判定为纯 CPU)"
+        else
+            say "  节点 ${NODE_HOSTNAME}(${NODE_IP}) 无 NVIDIA PCI 设备"
+        fi
     fi
 done
 
-# 内核白名单门禁(有卡才检): 内核必须在本模块的预编译列表内, 且对应镜像可获取(离线=离线集/tar,
-# 在线=registry 已有或可拉) —— 否则 operator 会在运行期拉不到内核镜像, 报模糊错误。
+# 内核白名单门禁(仅对**没有可用宿主驱动**的节点): 这些节点由 operator 部署预编译驱动容器,
+# 内核必须在列表内且对应镜像可获取(离线=离线集/tar, 在线=registry 已有或可拉)。
+#   · 宿主驱动可用 → operator 会打 pre-installed 标签并跳过 driver DS, 不需要预编译镜像;
+#   · 无宿主驱动 → 记入 KERNELS_NEEDED, 只准备这些内核的驱动镜像(不推送用不到的)。
 IFS=',' read -r -a _KLIST <<< "${KERNELS}"
+KERNELS_NEEDED=()
 if [ "${#GPU_NODES[@]}" -gt 0 ]; then
+    _n_host=0
     for _gn in "${GPU_NODES[@]}"; do
+        _ghost="${_gn%% *}"
         _gk="${_gn##* }"
+        if [ "${GPU_HOST_DRIVER[$_ghost]:-no}" = "yes" ]; then
+            _n_host=$((_n_host + 1))
+            ok "  有卡节点 ${_ghost} 宿主驱动可用(pre-installed) → 跳过预编译内核门禁"
+            continue
+        fi
         _hit=0
         for _k in "${_KLIST[@]:-}"; do
             _k="$(printf '%s' "${_k}" | tr -d '[:space:]')"
             [ -n "${_k}" ] && [ "${_k}" = "${_gk}" ] && _hit=1
         done
         [ "${_hit}" = "1" ] \
-            || { err "  有卡节点 ${_gn%% *} 内核 ${_gk} 不在 NVIDIA_GPU_DRIVER_PRECOMPILED_KERNELS(${KERNELS}) 内"; \
-                 err "  → 补料: 联网机 skopeo copy docker://nvcr.io/nvidia/driver:${DRIVER_BRANCH}-${_gk}-ubuntu22.04 → 离线目录/registry 后重跑; 或改用自制带包驱动镜像(见文档)"; exit 1; }
+            || { err "  有卡节点 ${_ghost} 无可用宿主驱动, 且内核 ${_gk} 不在 NVIDIA_GPU_DRIVER_PRECOMPILED_KERNELS(${KERNELS}) 内"; \
+                 err "  → 先核实 NGC 是否**真的**发布了该内核的预编译驱动(很多新内核尚未覆盖):"; \
+                 err "      skopeo inspect docker://nvcr.io/nvidia/driver:${DRIVER_BRANCH}-${_gk}-ubuntu22.04"; \
+                 err "      skopeo list-tags docker://nvcr.io/nvidia/driver | grep '\"${DRIVER_BRANCH}-'   # 看已覆盖内核"; \
+                 err "  → 镜像存在: 联网机补入离线集/registry(nvidia-save-images.sh 或 skopeo copy)后重跑;"; \
+                 err "  → 镜像不存在: 把节点启动到白名单内核(${KERNELS}), 或按 docs/nvidia-gpu-operator.md §5 自制带包驱动镜像;"; \
+                 err "  → ⚠ 不要直接把未覆盖内核写进白名单 —— operator 运行期会拉不到驱动镜像(ImagePullBackOff)"; exit 1; }
+        case " ${KERNELS_NEEDED[*]:-} " in
+            *" ${_gk} "*) : ;;
+            *) KERNELS_NEEDED+=("${_gk}") ;;
+        esac
     done
-    ok "  内核门禁通过(有卡节点内核均在预编译覆盖列表内)"
+    if [ "${_n_host}" -eq "${#GPU_NODES[@]}" ]; then
+        ok "  所有有卡节点宿主驱动可用(pre-installed), 无需预编译驱动镜像/内核门禁"
+    else
+        ok "  内核门禁通过(需要容器驱动的节点内核均在预编译覆盖列表内)"
+        say "  需要预编译驱动的内核: ${KERNELS_NEEDED[*]:-无}"
+    fi
 else
     warn "  集群未检测到 NVIDIA 卡: 走快路径(仅验证组件级就绪; driver/toolkit 等 DS 不会落地)"
 fi
@@ -273,11 +318,14 @@ while IFS= read -r _l; do
     case "${_l}" in */driver:"${DRIVER_BRANCH}") continue ;; esac
     SRC_IMAGES+=("${_l}")
 done < <( bash "${IMG_TOOL}" "${CHART_TGZ}" "${_SET_DRIVER[@]}" "${_SET_NFD[@]}" )
-# 预编译驱动镜像(逐内核)
-for _k in "${_KLIST[@]:-}"; do
-    _k="$(printf '%s' "${_k}" | tr -d '[:space:]')"
-    [ -n "${_k}" ] && SRC_IMAGES+=("nvcr.io/nvidia/driver:${DRIVER_BRANCH}-${_k}-ubuntu22.04")
-done
+# 预编译驱动镜像(仅没有宿主驱动、需要容器驱动的内核; 去重已在门禁完成)
+if [ "${#KERNELS_NEEDED[@]}" -eq 0 ]; then
+    say "  所有有卡节点使用宿主驱动(pre-installed)或无 NVIDIA 卡 → 不准备/推送预编译驱动镜像"
+else
+    for _k in "${KERNELS_NEEDED[@]}"; do
+        SRC_IMAGES+=("nvcr.io/nvidia/driver:${DRIVER_BRANCH}-${_k}-ubuntu22.04")
+    done
+fi
 # 验证样例(verify 模块用; 归入本集, 备料/推送与组件一致)
 SRC_IMAGES+=("${VERIFY_SAMPLE}")
 [ "${#SRC_IMAGES[@]}" -gt 0 ] || { err "镜像集为空(chart 渲染失败? 手工确认: bash ${IMG_TOOL} ${CHART_TGZ})"; exit 1; }
@@ -481,12 +529,22 @@ fi
 echo "---------------------------------------------"
 if [ "${#GPU_NODES[@]}" -gt 0 ]; then
     ok "NVIDIA GPU Operator 部署完成(检测到 ${#GPU_NODES[@]} 个有卡节点)"
+elif [ "${HAS_METAX_GPU}" = "1" ]; then
+    ok "NVIDIA GPU Operator 部署完成(无 NVIDIA GPU, 但检测到沐曦 GPU; 组件级就绪; 插入 NVIDIA 卡后重跑本模块或 verify 复查)"
+elif [ "${METAX_UNKNOWN}" = "1" ]; then
+    ok "NVIDIA GPU Operator 部署完成(未检测到 NVIDIA GPU; 沐曦 mx-smi 不可用, 未判定纯 CPU; 组件级就绪)"
 else
     ok "NVIDIA GPU Operator 部署完成(纯 CPU 集群: 组件级就绪; 插入 NVIDIA 卡后重跑本模块或 verify 复查)"
 fi
 echo "  namespace:   ${NS}"
 echo "  部署模式:    $([ "${ONLINE_DEPLOY}" = "true" ] && echo "在线(按 chart 定义${_MIRROR:+ / ${_MIRROR}})恒拉" || echo "离线(镜像已推 ${REG_BASE}/mirrors/**)")"
-echo "  驱动:        预编译容器(分支 ${DRIVER_BRANCH}; 内核: ${KERNELS})"
+if [ "${#GPU_NODES[@]}" -eq 0 ]; then
+    echo "  驱动:        无 NVIDIA 卡(组件级就绪)"
+elif [ "${#KERNELS_NEEDED[@]}" -eq 0 ]; then
+    echo "  驱动:        宿主 pre-installed(所有有卡节点均检测到可用宿主驱动; 未使用容器驱动)"
+else
+    echo "  驱动:        宿主 pre-installed + 预编译容器(分支 ${DRIVER_BRANCH}; 需要的内核: ${KERNELS_NEEDED[*]})"
+fi
 echo "  资源查看:    kubectl get pods,ds -n ${NS}; kubectl get clusterpolicy ${_cp_name:-cluster-policy}"
 echo "  端到端验证:  sudo ./deploy-cluster.sh --steps verify_nvidia_gpu"
 echo "  卸载:        删除模块状态后重跑本模块卸载(cluster-teardown 反序优雅卸载), 或 helm uninstall ${RELEASE} -n ${NS}"

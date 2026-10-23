@@ -168,21 +168,24 @@ REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-blo
    > ② 只有 node caps → **建卷失败**(RADOS permission error)。详见 §外部接入常见故障。
 
 **暴露模式**(大小写不敏感, 均经 `tr` 转小写归一):
-- 跟随 `SERVICE_EXPOSE_MODE`(默认): `nodeport` → NodePort Service / `metallb` → LoadBalancer(MetalLB VIP)
-- `CEPH_EXTERNAL_EXPOSE_MODE=nodeport|loadbalancer|metallb|clusterip` 显式覆盖全部;
+- 默认 `host-network`(`CEPH_EXPOSE_MODE` 默认值): mon 直接监听节点 IP 原生 6789/3300, 绕开 kube-proxy;
+  仅当 `CEPH_EXPOSE_MODE` 也为空时, 才按 `CEPH_HOST_NETWORK`(true→host-network) / `SERVICE_EXPOSE_MODE`
+  (nodeport→NodePort / metallb→LoadBalancer VIP) 兜底
+- `CEPH_EXTERNAL_EXPOSE_MODE=host-network|nodeport|loadbalancer|metallb|clusterip` 显式覆盖全部;
   `clusterip/off` = 不对外暴露(仅集群内可达)
+- 优先级: `--mode` > `CEPH_EXTERNAL_EXPOSE_MODE` > `CEPH_EXPOSE_MODE` > `CEPH_HOST_NETWORK`/`SERVICE_EXPOSE_MODE`
 - `CEPH_RGW_EXPOSE_MODE` 仅覆盖 RGW(mon 仍随主模式); `CEPH_RGW_NODEPORT` 固定 RGW NodePort(空=自动)
 
 **配置**(cluster.conf):
 ```bash
 CEPH_EXTERNAL_EXPOSE=true                       # 总开关(默认 true)
-CEPH_EXTERNAL_EXPOSE_MODE=""                    # 空=随 SERVICE_EXPOSE_MODE
+CEPH_EXTERNAL_EXPOSE_MODE=""                    # 空=随 CEPH_EXPOSE_MODE(默认 host-network), 再空才随 SERVICE_EXPOSE_MODE
 CEPH_RGW_EXPOSE_MODE=""                         # RGW 独立覆盖(默认随主模式)
 ```
 
 **手动操作 / 自检(5 层, 含外部客户端协议级测试)**:
 ```bash
-bash deployments/scripts/tools/k8s/ceph-expose-external.sh apply [--mode nodeport|loadbalancer|metallb|clusterip]  # 重新暴露+预定义(幂等)
+bash deployments/scripts/tools/k8s/ceph-expose-external.sh apply [--mode host-network|nodeport|loadbalancer|metallb|clusterip]  # 重新暴露+预定义(幂等)
 bash deployments/scripts/tools/k8s/ceph-expose-external.sh show     # 当前暴露状态
 bash deployments/scripts/tools/k8s/ceph-expose-external.sh status   # 5 层自检:
 #    [1/5] mon 网络可达(集群外 TCP) [2/5] 认证用户(profile caps) [3/5] 外部资源(pool/fs/app tag)
@@ -215,8 +218,8 @@ sudo ./deploy-cluster.sh --steps verify_ceph                        # ⑨ 自动
    CEPH_RGW_ENABLED=true                    # 可选: 需要 S3 时
    CEPHFS_ENABLED=true                      # 可选: 需要外部 CephFS 时(给 B 提供 cephfs-ephemeral/durable)
    CEPH_MON_NODEPORT_BASE=30100             # 规律 NodePort(默认; ≤ apiserver range)
-   # SERVICE_EXPOSE_MODE 决定对外端口: nodeport(默认)→ IP:30100/30101/30102(规律);
-   #                                metallb → VIP:6789 等 Ceph 原生端口
+   # SERVICE_EXPOSE_MODE 决定对外端口: nodeport→ IP:30100/30101/30102(规律);
+   #                                metallb(默认)→ VIP:6789 等 Ceph 原生端口
    ```
 2. 部署:
    ```bash
@@ -590,10 +593,11 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 - Skill Marketplace(RWX, durable): `cephfs/pvc-templates/07-*`
 - Image Registry(RBD Filesystem, Retain): `rbd/pvc-templates/07-*`
 
-### §12 CephFS 宿主机共享挂载(cephfs_mount, 默认启用)
+### §12 CephFS 宿主机共享挂载(cephfs_mount, 默认随 CephFS 启用)
 把 CephFS 内子目录(默认 `models`)挂到**每台节点**的宿主机路径(默认 `/mnt/cephfs/models`),
 供宿主机进程与容器(hostPath)共享模型等大文件。模块 `03_addon/07_cephfs_mount.sh`,
-默认随 `CEPHFS_ENABLED=true` 启用;单独执行: `sudo ./deploy-cluster.sh --steps cephfs_mount`。
+默认随 `CEPHFS_ENABLED=true` 启用(`CEPHFS_ENABLED` 本身默认跟随 `CEPH_CSI_ENABLED`,
+Ceph 全关时不会排进部署计划);单独执行: `sudo ./deploy-cluster.sh --steps cephfs_mount`。
 
 **实现方式**(节点无需安装 `ceph-common`):
 - 用集群已部署的 cephcsi 镜像(自带 `mount.ceph`)跑 DaemonSet `cephfs-models-mount`(rook-ceph);

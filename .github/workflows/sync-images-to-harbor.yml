@@ -103,6 +103,16 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate
     timeout-minutes: 180
+    env:
+      # 统一经环境变量传 workflow_dispatch 输入: ${{ ... }} 在 shell 解析前展开,
+      # 直接拼进 run 脚本会让输入里的 $(...)/反引号先于校验执行(模板注入; 2026-10-23
+      # CodeRabbit/zizmor)。push/schedule 事件没有 inputs → 回退为空/false/all。
+      SYNC_GROUPS: ${{ inputs.groups || '' }}
+      SYNC_EXCLUDE_GROUPS: ${{ inputs.exclude_groups || '' }}
+      SYNC_FORCE: ${{ inputs.force || false }}
+      SYNC_DRY_RUN: ${{ inputs.dry_run || false }}
+      SYNC_PLATFORM: ${{ inputs.platform || 'all' }}
+      SYNC_INCLUDE_SAME_HARBOR: ${{ inputs.include_same_harbor || false }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -149,20 +159,20 @@ jobs:
         run: |
           set -euo pipefail
           args=()
-          [ -n "${{ inputs.groups }}" ]         && args+=( --group "${{ inputs.groups }}" )
-          [ -n "${{ inputs.exclude_groups }}" ] && args+=( --exclude-group "${{ inputs.exclude_groups }}" )
-          [ "${{ inputs.force }}" = "true" ]    && args+=( --force )
-          [ "${{ inputs.dry_run }}" = "true" ]  && args+=( --dry-run )
-          case "${{ inputs.platform }}" in
+          [ -n "${SYNC_GROUPS}" ]         && args+=( --group "${SYNC_GROUPS}" )
+          [ -n "${SYNC_EXCLUDE_GROUPS}" ] && args+=( --exclude-group "${SYNC_EXCLUDE_GROUPS}" )
+          [ "${SYNC_FORCE}" = "true" ]    && args+=( --force )
+          [ "${SYNC_DRY_RUN}" = "true" ]  && args+=( --dry-run )
+          case "${SYNC_PLATFORM}" in
             ''|all) platform=all ;;
-            *)      platform="${{ inputs.platform }}" ;;
+            *)      platform="${SYNC_PLATFORM}" ;;
           esac
           args+=( --platform "${platform}" )
 
           # 同台 Harbor 复制(metax: 上游就是本台 Harbor)默认**不镜像** ——
           # 目标"集群不访公网"对它们已经达成(部署模块直接从 metax/ 项目拉取),
           # 再复制到 mirrors/ 只会多占 8.4 GB 且每次升级都要重跑。要那份副本才勾选本项。
-          if [ "${{ inputs.include_same_harbor }}" = "true" ]; then
+          if [ "${SYNC_INCLUDE_SAME_HARBOR}" = "true" ]; then
             args+=( --include-same-harbor )
           fi
 

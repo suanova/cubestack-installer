@@ -482,7 +482,7 @@ for _hn in "${CEPH_NODE_HOSTS[@]}"; do
     # 4b. lvm2: 检测缺失 → 从离线 packages 安装(install-worker-packages.sh 含 offline-files/os/packages)
     if ! node_ssh "${_ip}" "${_user}" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1; then
         say "    lvm2 缺失, 从离线 .deb 安装(packages 目录, 由 fetch-lvm-packages.sh 生成)..."
-        if [ -d "${REPO_ROOT}/deployments/offline-files/os/packages" ] && \
+        if [ -d "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages" ] && \
             bash "${SCRIPT_DIR}/tools/node/install-worker-packages.sh" "${_ip}" "${_user}" >/dev/null 2>&1; then
             node_ssh "${_ip}" "${_user}" "command -v lvm >/dev/null 2>&1" >/dev/null 2>&1 \
                 && ok "    lvm2 已安装(离线包)" || err "    packages 无 lvm2 或安装失败 —— lvm2 离线包未就绪且节点无 lvm, 部署 OSD 必失败"

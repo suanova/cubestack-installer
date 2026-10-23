@@ -24,7 +24,7 @@ load_config
 # (sleep 30 倒计时供人工确认/修改), 与原有 METALLB_POOL 提示合并为统一提醒。
 #   nodeport → 未部署 MetalLB, 提示入口/端口范围/单节点风险等;
 #   metallb  → 提示地址池要求(METALLB_POOL)与池管理注意事项。
-_EXPOSE_MODE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
+_EXPOSE_MODE="$(echo "${SERVICE_EXPOSE_MODE:-metallb}" | tr '[:upper:]' '[:lower:]')"
 echo ""
 echo -e "\033[41m\033[97m================================================================\033[0m"
 if [ "${_EXPOSE_MODE}" = "nodeport" ]; then
@@ -118,16 +118,16 @@ fi
 
 _ADDONS_YML="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}/group_vars/k8s_cluster/addons.yml"
 if [ -f "${_ADDONS_YML}" ]; then
-    _EXPOSE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
+    _EXPOSE="$(echo "${REGISTRY_SERVICE_TYPE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
     _BAD=""
     if [ "${_EXPOSE}" = "nodeport" ] && grep -qE '^[[:space:]]*registry_service_loadbalancer_ip:[[:space:]]*[^#[:space:]]' "${_ADDONS_YML}"; then
         _BAD="registry_service_loadbalancer_ip(nodeport 模式须注释)"
     fi
     if [ "${_EXPOSE}" != "nodeport" ] && grep -qE '^[[:space:]]*registry_service_nodeport:' "${_ADDONS_YML}"; then
-        _BAD="${_BAD:+${_BAD} + }registry_service_nodeport(metallb 模式须注释)"
+        _BAD="${_BAD:+${_BAD} + }registry_service_nodeport(loadbalancer 模式须注释)"
     fi
     if [ -n "${_BAD}" ]; then
-        err "addons.yml registry 暴露配置与 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE:-nodeport} 不一致: ${_BAD}"
+        err "addons.yml registry 暴露配置与 REGISTRY_SERVICE_TYPE=${REGISTRY_SERVICE_TYPE:-nodeport} 不一致: ${_BAD}"
         err "修复: 重跑 bash tools/k8s/sync-kubespray-config.sh(自动归一化), 或手工注释 ${_ADDONS_YML} 对应行后再部署"
         exit 1
     fi
@@ -138,7 +138,10 @@ unset _ADDONS_YML
 # ⚠ MetalLB 地址池一致性: kubespray 重跑不重 apply 已存在的 IPAddressPool CR, 旧池残留
 # 会让新 LoadBalancer 分到过期/冲突地址(曾把 registry 分到其他集群已占用的 VIP, 导致
 # 节点拉镜像 NotFound)。集群已存在时, 显式核对并纠正池与 cluster.conf METALLB_POOL 一致。
-if [ -n "${METALLB_POOL:-}" ] && [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "metallb" ]; then
+# 注: SERVICE_EXPOSE_MODE 已在 load_config 中统一归一化为 metallb/nodeport(大小写不敏感,
+# 见 lib-common), 这里直接比较是安全的; 不要改成 _EXPOSE_MODE —— 模块内临时变量已在
+# 上方 unset, 在 set -u 下引用会 unbound(2026-10-23 CodeRabbit 建议的这处属误报)。
+if [ -n "${METALLB_POOL:-}" ] && [ "${SERVICE_EXPOSE_MODE:-metallb}" = "metallb" ]; then
     _FM_IP="$(first_master_ip 2>/dev/null || true)"
     if [ -n "${_FM_IP}" ]; then
         _FM_USER="$(ssh_user_for_ip "${_FM_IP}")"

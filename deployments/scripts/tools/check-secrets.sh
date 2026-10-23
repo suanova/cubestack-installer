@@ -4,7 +4,8 @@
 # ------------------------------------------------------------
 # 规则(命中即失败, exit 1):
 #   ① 路径硬规则: 凭据类文件一律不得被 git 跟踪 ——
-#      cluster.conf / minio.conf / *.bak* / external-ceph* / *.env(白名单 *.env.example)
+#      cluster.conf / minio.conf / *.bak* / external-ceph* / *.env(白名单 *.env.example、
+#      deployments/releases/*/release.env —— 发布版本元数据, 按设计入库; 内容规则仍扫描它)
 #   ② 内容硬规则(逐行, 行尾附 "# secret-scan: allow" 可豁免单行):
 #      · 密码类赋值: password/passwd/secret/token/api_key/access_key = <非占位值>;
 #        占位白名单: ${VAR}、<...>、CHANGE_ME、占位、示例占位词、空值、布尔;
@@ -42,6 +43,10 @@ if [ "${MODE}" = "tracked" ] || [ "${MODE}" = "all" ]; then
     while IFS= read -r f; do
         case "${f}" in
             *.env.example) continue ;;
+            # 发布树清单是**版本元数据**(RELEASE_VERSION/KUBESPRAY_VERSION/镜像 tag), 不是凭据;
+            # 它按设计入库供 load_config / release-publish / 测试读取。内容规则(②)仍会扫描,
+            # 真把密码/私钥写进去照样会被命中(2026-10-23 CI 误报)。
+            deployments/releases/*/release.env) continue ;;
         esac
         case "${f}" in
             */cluster.conf|*/minio.conf|*/secret-blocklist.txt|*.env|*.bak|*.bak.*|*external-ceph*) \

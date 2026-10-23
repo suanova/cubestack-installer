@@ -151,7 +151,7 @@ for _ip in "${CANDIDATES[@]}"; do
     if [ "${ALL}" != "1" ]; then
         _ngpu="$(_remote_bash "${_ip}" "sudo mx-smi 2>/dev/null | grep 'Attached GPUs' | awk '{print \$NF}'" 2>/dev/null | tr -d '[:space:]' | grep -E '^[0-9]+$' || echo 0)"
         if [ "${_ngpu:-0}" -le 0 ] 2>/dev/null; then
-            say "  ${_ip}: 无 GPU(mx-smi 未识别/无驱动), 跳过"
+            say "  ${_ip}: 无沐曦 GPU(mx-smi 未识别/无驱动), 跳过"
             _n_skip=$((_n_skip + 1)); continue
         fi
     fi
@@ -178,5 +178,5 @@ done
 unset _ip _out _l _a _ngpu _user _pw
 
 echo "---------------------------------------------"
-say "设备属主前置完成: 新应用 ${_n_applied} / 已启用 ${_n_already} / 跳过(无GPU等) ${_n_skip} / 失败 ${_n_fail}"
+say "设备属主前置完成: 新应用 ${_n_applied} / 已启用 ${_n_already} / 跳过(无沐曦 GPU 等) ${_n_skip} / 失败 ${_n_fail}"
 [ "${_n_fail}" -eq 0 ] || exit 1

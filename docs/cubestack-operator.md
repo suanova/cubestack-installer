@@ -47,10 +47,10 @@ cuberouter/cubepilot/portal/observability…)的**离线镜像链路已由本模
 模块把 `offline-files/cubestack-operator/`(2026-10-16 起平台组件按**组件子目录**分类)的各组件
 tar 推入集群内置 registry, 并把 CR 的全局镜像源(imageRegistry / externalImageRegistryPrefix)
 注入为集群 registry —— 节点不访问 Harbor。
-默认值(2026-10-20 起): **保留 chart 默认的 8 个模型 bundles + modelBundles 开启**; bmc 也按 chart
-默认开启(未建 `cubestack-bmc-credentials` Secret 时该组件 Degraded, 不影响推理目录)。开关
-`CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(默认 `true`; 仅接受 `true`/`false`; `false` = 清空 bundles + 关 modelBundles);
-裁剪/定制时用 `CUBESTACK_OPERATOR_CR_VALUES_FILE`(-f) 覆盖。
+默认值: **保留 chart 默认的 8 个模型 bundles + modelBundles 开启**(模块兜底与 `cluster.conf`
+默认均为 `true`); bmc 按 chart 默认开启(未建 `cubestack-bmc-credentials` Secret 时该组件
+Degraded, 不影响推理目录)。开关 `CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED`(仅接受 `true`/`false`;
+`false` = 清空 bundles + 关 modelBundles); 裁剪/定制时用 `CUBESTACK_OPERATOR_CR_VALUES_FILE`(-f) 覆盖。
 
 ### 1.1 部署模式切换: 在线 / 离线(2026-10-13)
 
@@ -102,7 +102,8 @@ image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.App
 
 ### 3.1 离线 / 在线(需求 1)
 
-`CUBESTACK_OPERATOR_CHART_SYNC=auto|online|offline`(默认 **auto**):
+`CUBESTACK_OPERATOR_CHART_SYNC=auto|online|offline`(模块兜底默认 **offline**; 仅显式设为 `auto`
+才会探测 Harbor 可达性; 当前 `cluster.conf` 亦为 `offline`):
 
 | 模式 | 行为 |
 |---|---|
@@ -132,8 +133,10 @@ chart 随离线包分发, tgz/digest 不入 git; `check-modules.sh` 第 ⑩ 项�
 解析优先级:
 
 1. `CUBESTACK_OPERATOR_CHART_DIR`(显式覆盖, 缺失即失败, 不回退);
-2. `${CUBESTACK_OPERATOR_OFFLINE_DIR}/charts/`(默认 `offline-files/cubestack-operator/charts/`);
-3. 旧路径 `deployments/cubestack-addon/cubestack-operator/`(只读 fallback, 保留一个版本)。
+2. `${CUBESTACK_OPERATOR_OFFLINE_DIR}/charts/`(默认 `offline-files/cubestack-operator/charts/`)。
+
+> 旧路径 `deployments/cubestack-addon/cubestack-operator/` **不再参与解析**;
+> 手动构建 CLI 镜像时也不需要把 chart 放到那里。
 
 ### 3.3 在线时每次刷新 chart(需求 3)
 
@@ -255,13 +258,56 @@ coredns loop 插件 FATAL 自杀(kube-system coredns CrashLoopBackOff, cluster �
 已修: `sync-kubespray-config.sh` 写 `upstream_dns_servers: [127.0.0.1]`(cluster.conf 的
 `UPSTREAM_DNS_SERVERS` 可改; 接入真实 DNS 时改之); 外部域名解析维持失败(与无上游语义一致)。
 
+### 3.4c release chart / 镜像版本解析(2026-10-22)
+
+**原则: 默认完全跟随 cubestack-operator chart / operator 自带版本；installer 不隐式覆盖任何版本。**
+
+- 配置位置(2026-10-23): `CUBESTACK_OPERATOR_CHART_VERSION` / `CUBESTACK_OPERATOR_CHART_SYNC` /
+  `CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE` / `CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED` 统一放在
+  `cluster.conf`【CUBESTACK_OPERATOR】节(模板见 `cluster.conf.example`); `cluster.defaults.conf`
+  只保留说明、不再定义默认值。
+
+- chart 定位: 在 `offline-files/cubestack-operator/charts/` 中按以下顺序发现
+  (`lib-common.sh` 的 `resolve_operator_chart_tgz`):
+  1. release 模式优先 `cubestack-operator-chart-<CUBESTACK_RELEASE>.tgz`;
+  2. 否则用 `CUBESTACK_OPERATOR_CHART_VERSION` 指定的文件(dev/滚动 chart);
+  3. 否则扫描目录, 读取每个 tgz 内 `Chart.yaml` 的 `version`, 匹配 release / desired;
+  4. 目录中只有一份 chart → 直接用它(版本以 chart 自身为准)。
+  **不需要**修改 installer 代码来适配 2.0.0/未来版本。
+- operator 镜像 tag: **默认不传** `--set image.tag`, 由 chart 自带
+  (`Chart.yaml appVersion` / `values.image.tag`)决定。
+  - `CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE` 是**逃生口**, 仅在必要时显式设置;
+    它**只覆盖 cubestack-operator 自身镜像**, 不覆盖 operator catalog 内其他组件/平台
+    operator 的版本。installer **从不**设置 `components.*.version` 或组件镜像 tag。
+  - `CUBESTACK_OPERATOR_IMAGE_TAG` 只用于 `images.manifest` / `release-images.tsv` 登记,
+    **不参与** helm 覆盖。
+- **推荐**: release `2.0.0-rc1` 使用自带 `Chart.yaml appVersion: 2.0.0-rc1` 的 release chart,
+  不设任何 override, installer 直接按 chart 版本部署。
+- **chart 版本与 operator 版本可以不同**(滚动 chart + 指定 operator 版本):
+  ```bash
+  # 滚动 chart: version 1.0.0-latest / appVersion latest
+  CUBESTACK_OPERATOR_CHART_VERSION=1.0.0-latest
+  # 只在需要固定 operator 版本时使用逃生口(仅 operator 自身镜像):
+  CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE=2.0.0-rc1
+  ```
+  默认(不写 override)会部署 chart 自带的 `latest`; 这是"必要时才覆盖"的显式选择。
+- release.env 的 `CUBESTACK_OPERATOR_CHART_VERSION` 可与 release 版本不同;
+  `CUBESTACK_OPERATOR_IMAGE_TAG` 仅作镜像清单登记。
+- 发布树一致性: 模块会读取 `deployments/releases/<RELEASE>/release-images.tsv`,
+  若最终 operator 镜像不在清单中会**告警**(提示 chart/override 与发布树版本不一致)。
+- 其他 release 版本同理: 放对 chart 文件、默认让 chart 自带版本生效; 确需覆盖时只用
+  `CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE`, 发布树 tar 按最终 ref 命名。
+
 ### 3.5 安装: 本地 chart + 集群 registry 镜像(需求 5)
 
 ```bash
 helm upgrade --install cubestack-operator <本地tgz> -n cubestack-system --create-namespace \
   --set image.repository=<REGISTRY_DOMAIN>:<port>/suanova-private/cubestack-operator \
-  --set image.tag=latest --set image.pullPolicy=Always \
+  --set image.pullPolicy=Always \
   --set podAnnotations.cubestack\.io/image-digest=<刚推入镜像的 digest> ...
+# ⚠ 仅当显式设置 CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE 时才传 --set image.tag=<tag>;
+#   其余情况(含 release 模式)一律不传, 由 chart 自带(Chart.yaml appVersion / values.image.tag)决定。
+#   CUBESTACK_OPERATOR_IMAGE_TAG 只用于镜像清单/发布树登记, 不参与 helm。
 ```
 
 **渲染自检**: 覆盖后再渲染一次, 逐个断言镜像 ref 落在 `${REG_BASE}/` 之下; 有漏网的就 `err` 退出
@@ -282,8 +328,10 @@ helm upgrade --install cubestack-operator <本地tgz> -n cubestack-system --crea
 > `REPEAT: 1`(每次执行)也是为此: 安装类模块通常用 `REPEAT: 0` 断点跳过, 但那样会让本模块
 > 永远停在首次拉到的 chart/镜像版本。
 >
-> **2026-10-19 补充**: `CUBESTACK_OPERATOR_IMAGE_TAG` 现在同时进入 chart 渲染与 helm 安装参数
-> (`--set image.tag=...`), 不再只依赖 chart 默认值; `CUBESTACK_OPERATOR_IMAGE_PULL_POLICY`
+> **2026-10-22 调整**: 镜像 tag 改为**由 chart 自身决定**(`Chart.yaml appVersion` /
+> `values.image.tag`)。release chart(如 2.0.0)已带正确版本, installer 不再
+> `--set image.tag=...` 覆盖; `CUBESTACK_OPERATOR_IMAGE_TAG` 仅用于镜像清单/发布树登记。
+> chart 定位也不要求写死版本(见 §3.4c); `CUBESTACK_OPERATOR_IMAGE_PULL_POLICY`
 > 保留兼容但不再生效(离线/在线均强制 `Always`)。
 
 ### 3.6b 组件级更新: `--steps lws` / `--steps cube-pilot`(2026-10-19)
@@ -351,6 +399,44 @@ sudo CUBESTACK_COMPONENT_RESTART=0 ./deploy-cluster.sh --steps prometheus
 - **组件 chart/version 升级**仍受 operator 内嵌 `assets/charts` 约束：离线升级 chart 需要
   新的 operator 镜像；本 step 只更新镜像 + CR 覆盖，不会刷新 operator 内嵌 chart。
 - `--steps <组件>` 不部署基座/operator；集群与 registry 必须已就绪。
+
+### 3.6c 服务暴露方式(NodePort / MetalLB)与 Envoy Gateway 数据面(2026-10-22)
+
+`cluster.conf` 的 `SERVICE_EXPOSE_MODE` 归一化为 `nodeport | metallb`, 安装模块会把它
+显式写入 CR:
+
+| `SERVICE_EXPOSE_MODE` | CR `spec.global.serviceExposeMode` | 说明 |
+|---|---|---|
+| `nodeport` | `nodeport` | 无 MetalLB; Service 走 NodePort(节点 IP + 30000-32767) |
+| `metallb` | `loadbalancer` | 生产默认; Service 走 LoadBalancer + `METALLB_POOL` |
+
+⚠ **Envoy Gateway 数据面是例外**: operator 的 `serviceExposeMode` 只作用于它自己渲染的
+Service; Envoy Gateway 公网数据面 Service 的类型由 **EnvoyProxy** 决定, 默认永远是
+`LoadBalancer`。在 `nodeport` 模式(无 MetalLB)下, 公网 Service 会停在
+`EXTERNAL-IP <pending>`, 公网 Gateway 无地址, Web UI 地址发现会误取私有 ClusterIP。
+
+安装模块在 operator 就绪后自动兜底(`lib-common.sh` 的 `ensure_envoy_gateway_service_type`):
+
+1. 创建/更新 `EnvoyProxy/envoy-gateway-system/cubestack-proxy`(`mergeType: StrategicMerge`,
+   `provider.kubernetes.envoyService.type = NodePort|LoadBalancer`);
+2. 给公网 `Gateway/envoy-gateway-system/cubestack-gateway` 的
+   `spec.infrastructure.parametersRef` 挂上该 EnvoyProxy(私有网关仍用自己的
+   `cubestack-proxy-private`, 不受影响);
+3. 等数据面 Service 类型切换(上界 120s); 失败仅告警, 不阻断部署。
+
+`--steps cubestack_operator` / `--steps envoy_gateway` 每次都会幂等重挂(operator 重建 Gateway
+后也能恢复)。手工核对/修复:
+
+```bash
+kubectl -n envoy-gateway-system get envoyproxy
+kubectl -n envoy-gateway-system get gateway cubestack-gateway -o yaml \
+  | grep -A5 infrastructure
+kubectl -n envoy-gateway-system get svc \
+  -l gateway.envoyproxy.io/owning-gateway-name=cubestack-gateway
+```
+
+Web UI 地址发现(`cubestack-ui-url.sh`)同时修正: **只**把 LoadBalancer 的地址当作 MetalLB;
+NodePort 用节点 IP + `nodePort`; ClusterIP(私有网关)不再作为 Web UI 地址输出。
 
 ### 3.7 端到端验证(`26_verify_cubestack_operator.sh`)
 

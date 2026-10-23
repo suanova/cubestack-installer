@@ -67,7 +67,7 @@ fi
 
 skopeo_require "dev_lab"
 wait_registry_ready "http://${REG_DIRECT}/v2/" 30 \
-    || { err "集群内置 registry ${REG_DIRECT}/v2/ 30s 内不可达(检查 SERVICE_EXPOSE_MODE / registry pod / REGISTRY_DIRECT)"; exit 1; }
+    || { err "集群内置 registry ${REG_DIRECT}/v2/ 30s 内不可达(检查 REGISTRY_SERVICE_TYPE / registry pod / REGISTRY_DIRECT)"; exit 1; }
 
 # 大镜像 push 加速: 层并行 + 跳过 registry 已有层(参数见 lib-common image_push_args_init)
 image_push_args_init

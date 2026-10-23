@@ -27,7 +27,7 @@
 #     用 helm upgrade --install 原生安装(helm 自动装 CRD + 命名空间); 每次重部署先清理残留
 #     (CR/CRD/命名空间/default 旧资源) → 等 operator DS/Pods 就绪 → 验证 metax-tech.com/gpu allocatable。
 #   · master 节点: 用 mx-smi 在宿主机检测 GPU 卡; 检测到 GPU 的 master 自动移除 control-plane 污点并
-#     uncordon(使其可调度, 供 PD 分离等 pod 使用); 无 GPU 的 master 保持默认不可调度。
+#     uncordon(使其可调度, 供 PD 分离等 pod 使用); 无沐曦 GPU 的 master 保持默认不可调度。
 #   · 设备属主前置(2026-10-13): 检测到 GPU 节点后调用 tools/node/ensure-containerd-device-ownership.sh,
 #     确保 containerd device_ownership_from_security_context=true(非 root 容器打不开 /dev/mxcd 的
 #     根因: 设备属主 root ⇒ EACCES, 而 mx-smi/device_count 表面全正常; 幂等, 键变化才重启 containerd;
@@ -50,7 +50,8 @@ _metax_cleanup_residual() {
     local _mns="${METAX_NAMESPACE:-metax-operator}" _mrel="${METAX_RELEASE_NAME:-metax-gpu-operator}"
     say "  清理残留(CR / CRD / ${_mns} 命名空间 / default 旧资源)..."
     SSH "${K} delete clusteroperator -n ${_mns} cluster-operator --ignore-not-found >/dev/null 2>&1" || true
-    SSH "${K} delete crd clusteroperators.gpu.metax-tech.com --ignore-not-found >/dev/null 2>&1" || true
+    # 共享助手: 先摘残留 CR 的 finalizer 再有界删除(防 CRD 卡在 customresourcecleanup; 2026-10-23)
+    delete_crd_with_finalizer_cleanup clusteroperators.gpu.metax-tech.com
     SSH "${K} patch ns ${_mns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
     SSH "${K} delete ns ${_mns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
     # 清理集群级残留(ClusterRole/RoleBinding 无命名空间资源; 无 Helm 标签时 helm 无法接管 → 必须删掉)
@@ -198,11 +199,11 @@ for _t in $(seq 1 15); do
         _registry_ready=1
         break
     fi
-    say "  registry ${REGISTRY_DIRECT}/v2/ 未就绪, ${_t}/15 次重试中(${SERVICE_EXPOSE_MODE} 数据面初始化) ..."
+    say "  registry ${REGISTRY_DIRECT}/v2/ 未就绪, ${_t}/15 次重试中(${REGISTRY_SERVICE_TYPE:-nodeport} 数据面初始化) ..."
     sleep 2
 done
 [ "${_registry_ready}" = "1" ] \
-    || { err "集群内置 registry ${REGISTRY_DIRECT}/v2/ 30s 内仍不可达(当前 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE}; nodeport 应能直连 <master>:${REGISTRY_NODEPORT:-31148}, metallb 检查 MetalLB VIP 与 registry Service 状态)"; exit 1; }
+    || { err "集群内置 registry ${REGISTRY_DIRECT}/v2/ 30s 内仍不可达(当前 REGISTRY_SERVICE_TYPE=${REGISTRY_SERVICE_TYPE:-nodeport}; nodeport 应能直连 <master>:${REGISTRY_NODEPORT:-31148}, metallb 检查 MetalLB VIP 与 registry Service 状态)"; exit 1; }
 ok "registry ${REGISTRY_DIRECT}/v2/ 可达"
 SSH "${K} get nodes --no-headers >/dev/null 2>&1" \
     || { err "无法访问集群(${FIRST_MASTER}); 检查 kubectl/集群状态"; exit 1; }
@@ -214,33 +215,45 @@ sync_kubeconfig \
     || { err "宿主机无法访问集群(admin.conf 下载/同步失败; 检查 ${FIRST_MASTER} 的 /etc/kubernetes/admin.conf, 以及 ${API_DOMAIN}→${API_ENTRY_IP} 解析)"; exit 1; }
 ok "前置检查通过(registry=${REGISTRY_BASE}, API=${API_DOMAIN}→${API_ENTRY_IP})"
 
-# ---------------- 0. GPU 节点检测(mx-smi)决定等待路径 ----------------
-# 先判断集群是否存在 GPU 节点(逐节点宿主机 mx-smi):
-#   · 有 GPU 节点 → 保持原有完整等待逻辑: 等全部组件 DaemonSet Ready + 解除 master 污点
-#     + gpu-label 打标 + allocatable 验证。
-#   · 无 GPU 节点(纯 CPU 集群)→ 快速路径: 只需 metax-gpu-operator deployment 与
-#     metax-gpu-label DaemonSet Ready 即可, 缩短等待时间(不再等 driver/container-runtime/
-#     maca/gpu-device/gpu-scheduler/topo 等组件就绪)。
-say "检测集群是否有 GPU 节点(逐节点 mx-smi)..."
+# ---------------- 0. GPU 厂商检测(NVIDIA PCI + 沐曦 mx-smi)决定等待路径 ----------------
+# 逐节点探测两个厂商(2026-10-22 用户口径: 只有两者都未检测到, 才允许称"纯 CPU"):
+#   · NVIDIA: PCI vendor 0x10de(sysfs, 不依赖驱动)
+#   · 沐曦:   mx-smi 'Attached GPUs'(依赖驱动); mx-smi 不可用 → 状态未知, 不判定纯 CPU
+#   · 有沐曦 GPU 节点 → 完整等待: 全部组件 DaemonSet Ready + 解除 master 污点 + allocatable 验证
+#   · 无沐曦 GPU(即使有 NVIDIA GPU) → 快速路径: 只等 metax-gpu-operator deployment 与
+#     metax-gpu-label DaemonSet Ready(不再等 driver/maca/gpu-device/scheduler/topo)
+say "检测集群 GPU 厂商(逐节点: NVIDIA PCI + 沐曦 mx-smi)..."
 HAS_GPU_NODE="0"; GPU_BOARD_COUNT="0"
+HAS_NVIDIA_GPU="0"; METAX_UNKNOWN="0"
 for _line in "${NODES[@]:-}"; do
     [ -z "${_line}" ] && continue
     node_parse "${_line}"
     [ -n "${NODE_IP}" ] || continue
-    _ngpu="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-        "$(ssh_user_for_ip "${NODE_IP}")@${NODE_IP}" "sudo mx-smi 2>/dev/null | grep 'Attached GPUs' | awk '{print \$NF}'" 2>/dev/null || echo 0)"
-    _ngpu="$(echo "${_ngpu:-0}" | tr -d '[:space:]' | grep -E '^[0-9]+$' || echo 0)"
-    if [ "${_ngpu}" -gt 0 ] 2>/dev/null; then
-        HAS_GPU_NODE="1"; GPU_BOARD_COUNT="$((GPU_BOARD_COUNT + _ngpu))"
-        ok "节点 ${NODE_HOSTNAME}(${NODE_IP}) 检测到 ${_ngpu} 张 GPU"
+    read -r _nv _mx <<< "$(node_gpu_probe "${NODE_IP}")"
+    _nv="$(printf '%s' "${_nv:-0}" | tr -d '[:space:]' | grep -E '^[0-9]+$' || echo 0)"
+    if [ "${_mx:-unknown}" != "unknown" ] && [ "${_mx:-0}" -gt 0 ] 2>/dev/null; then
+        HAS_GPU_NODE="1"; GPU_BOARD_COUNT="$((GPU_BOARD_COUNT + _mx))"
+        ok "节点 ${NODE_HOSTNAME}(${NODE_IP}) 检测到 ${_mx} 张沐曦 GPU"
     else
-        say "节点 ${NODE_HOSTNAME}(${NODE_IP}) 无 GPU(mx-smi 未识别到卡)"
+        if [ "${_nv}" -gt 0 ] 2>/dev/null; then
+            HAS_NVIDIA_GPU="1"
+            say "节点 ${NODE_HOSTNAME}(${NODE_IP}) 无沐曦 GPU(检测到 ${_nv} 个 NVIDIA PCI 设备; 非纯 CPU)"
+        elif [ "${_mx:-unknown}" = "unknown" ]; then
+            METAX_UNKNOWN="1"
+            say "节点 ${NODE_HOSTNAME}(${NODE_IP}) 未检测到沐曦 GPU(mx-smi 不可用; 不判定为纯 CPU)"
+        else
+            say "节点 ${NODE_HOSTNAME}(${NODE_IP}) 无沐曦 GPU"
+        fi
     fi
 done
 if [ "${HAS_GPU_NODE}" = "1" ]; then
-    ok "检测到 GPU 节点(共 ${GPU_BOARD_COUNT} 张卡), 保持完整等待流程(全部组件 DS Ready + allocatable 验证)"
+    ok "检测到沐曦 GPU 节点(共 ${GPU_BOARD_COUNT} 张卡), 保持完整等待流程(全部组件 DS Ready + allocatable 验证)"
+elif [ "${HAS_NVIDIA_GPU}" = "1" ]; then
+    warn "集群无沐曦 GPU(检测到 NVIDIA GPU): 采用快速路径, 仅等 operator + gpu-label Ready 即完成"
+elif [ "${METAX_UNKNOWN}" = "1" ]; then
+    warn "集群未检测到沐曦 GPU(mx-smi 不可用, 状态未知): 采用快速路径; 不判定为纯 CPU"
 else
-    warn "集群未检测到 GPU 节点(纯 CPU): 采用快速路径, 仅等 operator + gpu-label Ready 即完成"
+    warn "集群未检测到 NVIDIA/沐曦 GPU(纯 CPU): 采用快速路径, 仅等 operator + gpu-label Ready 即完成"
 fi
 
 # ---------------- 0.5 节点运行时前置: 设备属主(非 root 访问 GPU 必需) ----------------
@@ -254,7 +267,7 @@ if [ "${HAS_GPU_NODE}" = "1" ]; then
     bash "${SCRIPT_DIR}/tools/node/ensure-containerd-device-ownership.sh" \
         || warn "  设备属主前置有失败节点(见上方清单) —— 非 root GPU 容器可能仍 EACCES; 可在节点上单独重跑本工具"
 else
-    say "  无 GPU 节点, 跳过设备属主前置(集群不跑 Metax 工作负载)"
+    say "  无沐曦 GPU 节点, 跳过设备属主前置(集群不跑 Metax 工作负载)"
 fi
 
 # ---------------- 1. 确认资源(修复后的 chart + 镜像加载源) ----------------
@@ -466,7 +479,7 @@ helm upgrade --install "${METAX_RELEASE_NAME}" "${CHART_DIR}" \
 
 # ---------------- 5. 等待就绪 + 验证 ----------------
 # 有 GPU 节点: 保持原有完整等待(全部 DS Ready + 解除 master + 打标 + allocatable 验证)
-# 无 GPU 节点: 快速路径, 只需 operator deployment + metax-gpu-label DaemonSet Ready, 不再等其余组件
+# 无沐曦 GPU 节点: 快速路径, 只需 operator deployment + metax-gpu-label DaemonSet Ready, 不再等其余组件
 if [ "${HAS_GPU_NODE}" = "1" ]; then
 # ───────────────── 有 GPU 节点: 完整等待流程 ─────────────────
 say "[5/5] 等待 GPU Operator 组件就绪(最长 300s)..."
@@ -488,7 +501,7 @@ else
 fi
 
 # 条件解除 master 不可调度: 仅当宿主机用 mx-smi 检测到沐曦 GPU 卡的 master 才 uncordon(移除 control-plane/master 污点)。
-# 无 GPU 的 master 保持默认不可调度; 检测直接在节点上跑 mx-smi, 不依赖集群 label(避免"先有鸡还是蛋")。
+# 无沐曦 GPU 的 master 保持默认不可调度; 检测直接在节点上跑 mx-smi, 不依赖集群 label(避免"先有鸡还是蛋")。
 say "  检测 master 节点 GPU(mx-smi)并条件解除不可调度 ..."
 for _line in "${NODES[@]:-}"; do
     [ -z "${_line}" ] && continue
@@ -539,15 +552,15 @@ for _gpui in $(seq 1 60); do   # 最长 300s(每 5s; 设备插件注册通常数
     [ "${_gpui}" -lt 60 ] && sleep 5
 done
 unset -f _gpu_allocatable
-# 分两种结果明确提示, 避免"无 GPU 的集群"误以为 GPU 已可用:
-#   · 有 GPU → 正常流程: 列出已发现 GPU 的节点, 确认资源可调度
-#   · 无 GPU → operator 部署仍算成功(组件已就绪), 但明确"暂未发现 GPU 卡", 不误导
+# 分两种结果明确提示, 避免"无沐曦 GPU 的集群"误以为 GPU 已可用:
+#   · 有沐曦 GPU → 正常流程: 列出已发现 GPU 的节点, 确认资源可调度
+#   · 无沐曦 GPU → operator 部署仍算成功(组件已就绪), 但明确"暂未发现沐曦 GPU 卡", 不误导
 if [ -n "${GPU_NODES}" ]; then
     GPU_CNT="$(echo "${GPU_NODES}" | wc -l | tr -d ' ')"
     ok "节点已发现 GPU 资源, 可调度:"
     echo "    ${GPU_NODES}" | sed 's/^/    /'
 else
-    warn "暂未发现 GPU 卡(metax-tech.com/gpu allocatable 为空): 当前节点没有沐曦 GPU, GPU Operator 组件已就绪但暂无 GPU 资源可调度"
+    warn "暂未发现沐曦 GPU 卡(metax-tech.com/gpu allocatable 为空): 当前节点没有沐曦 GPU, GPU Operator 组件已就绪但暂无 GPU 资源可调度"
     warn "  后续插入 GPU 卡并确保驱动就绪后, 用 --steps verify_metax_gpu 复查节点是否发现 GPU 资源"
 fi
 
@@ -555,7 +568,7 @@ echo "---------------------------------------------"
 if [ -n "${GPU_NODES}" ]; then
     ok "沐曦 GPU Operator 部署完成, ${GPU_CNT} 个节点已发现 GPU 资源(可调度)"
 else
-    ok "沐曦 GPU Operator 部署完成(暂未发现 GPU 卡, 仅 operator 组件就绪; 节点暂无 GPU 资源)"
+    ok "沐曦 GPU Operator 部署完成(暂未发现沐曦 GPU 卡, 仅 operator 组件就绪; 节点暂无 GPU 资源)"
 fi
 echo "  namespace:   ${METAX_NAMESPACE}"
 echo "  镜像仓库:    ${METAX_REGISTRY}"
@@ -564,11 +577,11 @@ echo "  节点 GPU:    kubectl get nodes -o json | jq '.items[].status.allocatab
 echo "  GPU 任务测试: 参考文档 §5 gpu-task.yaml(vectorAdd), 需 MACA 镜像就绪"
 echo "  卸载:        删除 ${METAX_NAMESPACE} 与 CRD(gpu.metax-tech.com) 后重跑本模块"
 
-# ───────────────── 无 GPU 节点(纯 CPU): 快速路径等待 ─────────────────
+# ───────────────── 无沐曦 GPU 节点: 快速路径等待 ─────────────────
 else
-say "[5/5] 等待 GPU Operator 核心组件就绪(快速路径, 无 GPU 节点)..."
+say "[5/5] 等待 GPU Operator 核心组件就绪(快速路径, 无沐曦 GPU 节点)..."
 # 只需 operator deployment + metax-gpu-label DaemonSet Ready, 不再等 driver/container-runtime/
-# maca/gpu-device/gpu-scheduler/topo 等组件(它们依赖 GPU 卡, 纯 CPU 集群不会就绪)。
+# maca/gpu-device/gpu-scheduler/topo 等组件(它们依赖沐曦 GPU 卡, 无沐曦 GPU 的集群不会就绪)。
 # 注: gpu-label DaemonSet 名实测为 metax-gpu-label(部分版本/环境可能是 gpu-label),
 #     用正则匹配结尾 gpu-label 的 DS, 兼容两种命名。
 SSH "${K} rollout status deployment -n ${METAX_NAMESPACE} ${METAX_RELEASE_NAME}-metax-operator --timeout=120s" >/dev/null 2>&1 \
@@ -581,17 +594,24 @@ for _i in $(seq 1 24); do   # 最长 120s(gpu-label 是轻量打标 DS, 通常�
     sleep 5
 done
 if [ "${GPU_LABEL_READY}" = "1" ]; then
-    ok "gpu-label DaemonSet Ready(operator + gpu-label 就绪, 纯 CPU 集群快速路径完成)"
+    ok "gpu-label DaemonSet Ready(operator + gpu-label 就绪, 快速路径完成)"
 else
     warn "gpu-label DaemonSet 120s 内未 Ready(不阻塞; 用 kubectl -n ${METAX_NAMESPACE} get ds,pods 复查)"
 fi
 echo "---------------------------------------------"
-ok "沐曦 GPU Operator 部署完成(纯 CPU 集群: operator + gpu-label 已就绪, 无 GPU 资源)"
+if [ "${HAS_NVIDIA_GPU}" = "1" ]; then
+    ok "沐曦 GPU Operator 部署完成(无沐曦 GPU, 但检测到 NVIDIA GPU: operator + gpu-label 已就绪, 无沐曦 GPU 资源)"
+elif [ "${METAX_UNKNOWN}" = "1" ]; then
+    ok "沐曦 GPU Operator 部署完成(未检测到沐曦 GPU, mx-smi 不可用: operator + gpu-label 已就绪; 未判定纯 CPU)"
+else
+    ok "沐曦 GPU Operator 部署完成(纯 CPU 集群: operator + gpu-label 已就绪, 无 GPU 资源)"
+fi
 echo "  namespace:   ${METAX_NAMESPACE}"
 echo "  镜像仓库:    ${METAX_REGISTRY}"
 echo "  资源查看:    kubectl get pods,ds -n ${METAX_NAMESPACE}"
-echo "  说明:       当前集群无 GPU 节点, 已跳过 driver/maca/device/scheduler 等 GPU 组件等待;"
-echo "              后续插入 GPU 卡并确保驱动就绪后, 用 --steps verify_metax_gpu 复查节点是否发现 GPU 资源"
+echo "  说明:       当前集群无沐曦 GPU 节点, 已跳过 driver/maca/device/scheduler 等 GPU 组件等待;"
+[ "${HAS_NVIDIA_GPU}" = "1" ] && echo "              检测到 NVIDIA GPU: 本集群不是纯 CPU 环境; 沐曦 GPU 资源仍不可用。"
+echo "              后续插入沐曦 GPU 卡并确保驱动就绪后, 用 --steps verify_metax_gpu 复查节点是否发现 GPU 资源"
 fi
 
 # 优雅覆盖登记(仅安装路径到达此处)

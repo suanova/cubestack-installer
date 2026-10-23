@@ -105,18 +105,44 @@ if [ -n "${issues}" ]; then echo "${issues}"; exit 2; fi
 exit 0
 PROBE
 )"
+# ssh 自身失败(认证/网络)必须与"Ceph 探测发现卡死"分开报 —— 否则密码错误会被
+# 误导成"重置节点"(2026-10-22 用户实机: 密码错 → 提示 systemctl reboot -f)。
+# ssh 返回 255 = 连接/认证层失败; 远端探测显式返回 2 = D 状态/fuser 超时(只能重启)。
+_clean_out() {
+    printf '%s\n' "$1" | grep -vE '^Warning: Permanently added ' \
+        | grep -v '^[[:space:]]*$' | tail -3 | tr '\n' ' ' || true
+}
+_ssh_fail_reason() {   # <user@ip> <output> <rc>
+    local _host="$1" _out="$2" _rc="$3" _clean
+    _clean="$(_clean_out "${_out}")"
+    if printf '%s' "${_out}" | grep -qiE 'permission denied|no supported authentication methods'; then
+        printf '%s: SSH 认证失败(密码/公钥被拒绝): %s' "${_host}" "${_clean:-Permission denied}"
+    elif printf '%s' "${_out}" | grep -qiE 'connection refused|connection timed out|connection closed|no route to host|network is unreachable'; then
+        printf '%s: SSH 网络不可达: %s' "${_host}" "${_clean:-连接失败}"
+    else
+        printf '%s: SSH 连接失败(rc=%s): %s' "${_host}" "${_rc}" "${_clean:-无输出}"
+    fi
+}
 _preflight_bad=0
-_preflight_report=""
+_preflight_ssh_report=""
+_preflight_wedged_report=""
+_preflight_probe_report=""
 for _ip in "${IPS[@]}"; do
     _u="${USER:-$(ssh_user_for_ip "${_ip}")}"
     _out="$(timeout 20 ssh "${SSH_OPTS[@]}" "${_u}@${_ip}" "${_probe}" 2>&1)"
     _rc=$?
     if [ "${_rc}" -eq 124 ]; then
         _preflight_bad=1
-        _preflight_report="${_preflight_report}"$'\n'"  ${_ip}: 探测超时(节点可能被旧 ceph/rbd 卡死)"
+        _preflight_wedged_report="${_preflight_wedged_report}"$'\n'"  ${_u}@${_ip}: 探测超时(SSH 无响应; 可能被旧 ceph/rbd 卡死, 或网络不通)"
+    elif [ "${_rc}" -eq 255 ]; then
+        _preflight_bad=1
+        _preflight_ssh_report="${_preflight_ssh_report}"$'\n'"  $(_ssh_fail_reason "${_u}@${_ip}" "${_out}" "${_rc}")"
+    elif [ "${_rc}" -eq 2 ]; then
+        _preflight_bad=1
+        _preflight_wedged_report="${_preflight_wedged_report}"$'\n'"  ${_u}@${_ip}: 检测到 D 状态/fuser 超时: $(_clean_out "${_out}")"
     elif [ "${_rc}" -ne 0 ]; then
         _preflight_bad=1
-        _preflight_report="${_preflight_report}"$'\n'"  ${_ip}: ${_out}"
+        _preflight_probe_report="${_preflight_probe_report}"$'\n'"  ${_u}@${_ip}: 前置探测失败(rc=${_rc}): $(_clean_out "${_out}")"
     else
         case "${_out}" in
             *auto-repair-needed*)
@@ -127,11 +153,27 @@ for _ip in "${IPS[@]}"; do
     fi
 done
 if [ "${_preflight_bad}" -ne 0 ]; then
-    err "以下节点存在**不健康**的 Ceph/RBD 残留或不可达 —— 必须先重启后再部署:"
-    printf '%s\n' "${_preflight_report}"
-    err "  处置: ① systemctl stop kubelet containerd"
-    err "        ② systemctl reboot -f   # 跳过卡死的 ceph 卸载"
-    err "        ③ 重启后再重跑本模块"
+    if [ -n "${_preflight_ssh_report}" ]; then
+        err "以下节点 SSH 认证/连接失败 —— 部署无法继续(与 Ceph/RBD 无关):"
+        printf '%s\n' "${_preflight_ssh_report}"
+        err "  处置: ① 认证失败 → 核对 cluster.conf 的 SSH_DEFAULT_PASSWORD(或 NODES 行节点密码)"
+        err "        ② 网络不可达 → 检查节点网络/防火墙, 以及 sshd 是否监听 22"
+        err "        ③ 确认目标 sshd 允许该用户登录(密码登录需 PasswordAuthentication yes)"
+        err "        ④ 修正后先单跑复核: sudo ./deploy-cluster.sh --steps k8s_passwordless"
+        err "        ⑤ 纯密钥登录环境: 确认公钥已写入目标 ~/.ssh/authorized_keys"
+    fi
+    if [ -n "${_preflight_wedged_report}" ]; then
+        err "以下节点存在**不健康**的 Ceph/RBD 残留(僵尸态) —— 必须先重启后再部署:"
+        printf '%s\n' "${_preflight_wedged_report}"
+        err "  处置: ① systemctl stop kubelet containerd"
+        err "        ② systemctl reboot -f   # 跳过卡死的 ceph 卸载"
+        err "        ③ 重启后再重跑本模块"
+    fi
+    if [ -n "${_preflight_probe_report}" ]; then
+        err "以下节点前置探测执行失败(既非 Ceph/RBD 卡死, 也非 SSH 认证失败):"
+        printf '%s\n' "${_preflight_probe_report}"
+        err "  处置: 按上面的原始输出检查节点环境(如 findmnt/ps/fuser/timeout 是否可用)"
+    fi
     exit 1
 fi
 

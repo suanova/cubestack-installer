@@ -119,7 +119,10 @@ for _i in $(seq 1 $((REGISTRY_WAIT_SECONDS / 10))); do
     _pod="$( (SSH "${K} -n kube-system get pod -l k8s-app=registry -o jsonpath='{.items[0].status.phase}' 2>/dev/null" || true) )"
     _rdy="$( (SSH "${K} -n kube-system get pod -l k8s-app=registry -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null" || true) )"
     if [ "${_pod}" = "Running" ] && [ "${_rdy}" = "true" ]; then
-        _base=""; [ "${SERVICE_EXPOSE_MODE:-nodeport}" = "nodeport" ] && _base="http://${FIRST_MASTER:-localhost}:${REGISTRY_NODEPORT:-31148}" || _base="http://${REGISTRY_IP:-localhost}:${REGISTRY_PORT:-5000}"
+        # 就绪探测用**推送同款**直连端点(REGISTRY_DIRECT: nodeport=REGISTRY_IP:NODEPORT,
+        # loadbalancer=REGISTRY_IP:PORT)。旧逻辑 nodeport 固定 FIRST_MASTER: 显式
+        # REGISTRY_IP 指向其他节点时会 curl 错地址, 一直等到超时(2026-10-23 CodeRabbit)。
+        _base="http://${REGISTRY_DIRECT:-${REGISTRY_IP:-localhost}:${REGISTRY_PORT:-5000}}"
         if curl -s -m 5 "${_base}/v2/" >/dev/null 2>&1; then _READY=1; break; fi
     fi
     [ "$((_i % 6))" -eq 0 ] && say "  registry pod 未就绪(${_pod:-<无>}/${_rdy:-<无>}), 等待第 ${_i}/$((REGISTRY_WAIT_SECONDS / 10)) 次 ..."

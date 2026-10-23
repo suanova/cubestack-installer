@@ -87,7 +87,7 @@ ACTION="${1:-show}"
 #   CEPH_HOST_NETWORK=true 时默认 host-network(直连节点 IP:6789, 绕开 kube-proxy/DNAT);
 #   否则回退 SERVICE_EXPOSE_MODE(nodeport/metallb)。
 [ -z "${MODE}" ] && MODE="${CEPH_EXTERNAL_EXPOSE_MODE:-${CEPH_EXPOSE_MODE:-}}"
-[ -z "${MODE}" ] && { [ "${CEPH_HOST_NETWORK:-true}" = "true" ] && MODE="host-network" || MODE="${SERVICE_EXPOSE_MODE:-nodeport}"; }
+[ -z "${MODE}" ] && { [ "${CEPH_HOST_NETWORK:-true}" = "true" ] && MODE="host-network" || MODE="${SERVICE_EXPOSE_MODE:-metallb}"; }
 MODE="$(echo "${MODE}" | tr '[:upper:]' '[:lower:]')"
 # metallb(集群级暴露模式别名)→ loadbalancer(Service 类型语义)
 [ "${MODE}" = "metallb" ] && MODE="loadbalancer"
@@ -753,7 +753,7 @@ case "${ACTION}" in
     show)  show_main ;;
     status) status_main ;;
     *)
-        err "用法: ceph-expose-external.sh {apply [--mode nodeport|loadbalancer|metallb|clusterip] | show | status}"
+        err "用法: ceph-expose-external.sh {apply [--mode host-network|nodeport|loadbalancer|metallb|clusterip] | show | status}"
         exit 1
         ;;
 esac

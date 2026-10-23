@@ -467,7 +467,7 @@ find_offline_tar() {
 #       与镜像 tar 的 <tar>.digest 同一约定)。
 helm_chart_ensure() {
     local comp="$1" tgz="$2" version="$3" mode="$4" ref="$5" repo="${6:-}"
-    local dgfile="${tgz}.digest" tmpd="" pulled="" rdig="" ldig="" out="" args=()
+    local dgfile="${tgz}.digest" tmpd="" pulled="" rdig="" ldig="" out="" args=() _coll=""
 
     case "${mode}" in
         online|offline) ;;
@@ -526,13 +526,87 @@ helm_chart_ensure() {
         err "  ${comp} 离线 chart 缺失: ${tgz}"
         case "${tgz}" in
             */deployments/offline-files/*)
-                err "    获取(离线包): ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub $(basename "$(dirname "${tgz}")")" ;;
+                # chart 在 <collection>/charts/ 下; --sub 需要的是 collection 名, 不是 charts
+                _coll="$(basename "$(dirname "$(dirname "${tgz}")")")"
+                err "    获取(离线包): ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub ${_coll}" ;;
+            */offline-files/*)
+                err "    获取(发布版本): ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE:-<版本>} --dest <本地桶根>" ;;
         esac
         err "    获取(在线/手工): helm pull ${ref}${repo:+ --repo ${repo}} --version ${version} -d $(dirname "${tgz}")"
         err "          并把 helm 输出的 Digest: 写入 $(basename "${tgz}").digest(不要用 sha256sum); tgz 不入 git"
         return 1
     fi
     return 0
+}
+
+# ---------------- operator 镜像 tag 决策(helm 用) ----------------
+# 原则(2026-10-22 用户口径): 默认**完全跟随 chart / operator 自带版本**;
+#   installer 只保留一个显式逃生口, 且**只覆盖 cubestack-operator 自身的镜像 tag**,
+#   绝不覆盖 operator 内 catalog 定义的其他组件(平台 operator/服务)版本。
+#   - 未设 CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE → 输出空 → helm 用 chart 自带
+#     (Chart.yaml appVersion / values.image.tag);
+#   - 设了 override → 只传 --set image.tag=<tag> 给 operator chart。
+# CUBESTACK_OPERATOR_IMAGE_TAG 仅用于镜像清单/发布树登记, 不参与 helm 覆盖。
+operator_image_tag_for_helm() {
+    # ⚠ 必须恒返回 0: 调用方是 `x="$(operator_image_tag_for_helm ...)"` + set -e,
+    #   空 override 时若返回 1 会让整个模块静默退出(2026-10-22 实机)。
+    if [ -n "${1:-}" ]; then
+        printf '%s\n' "$1"
+    fi
+    return 0
+}
+
+# ---------------- CubeStack operator chart 定位(release 版本无关) ----------------
+# 在目录中定位 operator chart, 不要求 installer 预先写死版本:
+#   ① <name>-<desired>.tgz 存在 → 用它(desired 可空)
+#   ② release 模式(<release> 非空): 优先 <name>-<release>.tgz; 否则扫描 <name>-*.tgz,
+#      读取 Chart.yaml version, 匹配 <release> 或 <desired>; 唯一命中即用
+#   ③ 目录中只有一个 <name>-*.tgz → 用它(版本以 chart 自身为准)
+#   ④ 否则返回 1(调用方列出候选并报错)
+# 输出(stdout): "<tgz路径>\t<chart版本>"
+# 说明: 只读 tar, 不联网; 供 25_cubestack_operator.sh / release-publish.sh 共用。
+operator_chart_version() {
+    local _tgz="$1" _y
+    _y="$(tar -tzf "${_tgz}" 2>/dev/null | command grep -E '/Chart.yaml$' | head -1 || true)"
+    [ -n "${_y}" ] || return 0
+    tar -xOf "${_tgz}" "${_y}" 2>/dev/null | awk '/^[[:space:]]*version:[[:space:]]*/{print $2; exit}'
+}
+
+resolve_operator_chart_tgz() {   # <dir> <chart-name> [desired-version] [release-version]
+    local _dir="$1" _name="$2" _desired="${3:-}" _release="${4:-}"
+    local _files=() _f _v _hit="" _ver="" _ng=0
+    [ -d "${_dir}" ] || return 1
+    shopt -q nullglob && _ng=1
+    shopt -s nullglob
+    _files=("${_dir}/${_name}-"*.tgz)
+    [ "${_ng}" = "1" ] || shopt -u nullglob
+    [ "${#_files[@]}" -gt 0 ] || return 1
+
+    # release 模式优先按发布版本定位(即使默认的 desired=1.0.0-latest 仍在, 也不能抢跑)
+    if [ -n "${_release}" ] && [ -f "${_dir}/${_name}-${_release}.tgz" ]; then
+        _hit="${_dir}/${_name}-${_release}.tgz"
+    elif [ -n "${_desired}" ] && [ -f "${_dir}/${_name}-${_desired}.tgz" ]; then
+        _hit="${_dir}/${_name}-${_desired}.tgz"
+    elif [ -n "${_release}" ]; then
+        for _f in "${_files[@]}"; do
+            _v="$(operator_chart_version "${_f}")"
+            if [ "${_v}" = "${_release}" ] || { [ -n "${_desired}" ] && [ "${_v}" = "${_desired}" ]; }; then
+                _hit="${_f}"; break
+            fi
+        done
+    fi
+    if [ -z "${_hit}" ] && [ "${#_files[@]}" -eq 1 ]; then
+        _hit="${_files[0]}"
+    fi
+    [ -n "${_hit}" ] || return 1
+
+    _ver="$(operator_chart_version "${_hit}")"
+    if [ -z "${_ver}" ]; then
+        _ver="$(basename "${_hit}")"
+        _ver="${_ver#${_name}-}"
+        _ver="${_ver%.tgz}"
+    fi
+    printf '%s\t%s\n' "${_hit}" "${_ver}"
 }
 
 # ---------------- 共享 nginx 校验镜像助手(verify 模块测试后端共用) ----------------
@@ -574,10 +648,12 @@ ensure_registry_nginx() {
     # find_offline_tar 是 endswith 语义, 版本化 tag(nginx:1.31.4)不命中, 下方按内容兜底。
     _t="$(find_offline_tar "nginx:latest" "nginx*.tar" \
             "${REPO_ROOT}/deployments/offline-files/nginx" \
+            "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx" \
             "${LOCAL_REPO_DIR}/images")" || _t=""
     if [ -z "${_t}" ]; then
         # 兜底: 版本化 tag(如 nginx:1.31.4)按内容匹配(含 "nginx:" 即接受)
         for _d in "${REPO_ROOT}/deployments/offline-files/nginx" \
+                  "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx" \
                   "${LOCAL_REPO_DIR}/images"; do
             [ -d "${_d}" ] || continue
             for _f in "${_d}"/nginx*.tar; do
@@ -605,6 +681,7 @@ ensure_registry_nginx() {
     fi
     err "集群 registry 无 nginx(${ref}), 测试后端无法拉起。请任选其一:"
     err "  ① 准备离线 nginx 镜像 tar 放到 ${REPO_ROOT}/deployments/offline-files/nginx/nginx.tar(联网机: sudo docker pull nginx:latest && sudo docker save nginx:latest -o .../nginx.tar, 拷到部署机);"
+    err "     release 模式请放到 ${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx/nginx.tar;"
     err "  ② 部署机本地 docker 有 nginx:latest(sudo docker pull nginx:latest);"
     err "  ③ 允许在线拉取: VERIFY_IMAGE_ONLINE=true 重跑"
     return 1
@@ -664,6 +741,57 @@ load_config() {
     #   (赋值放在 sudo **之后**)或直接写进 cluster.conf(推荐)。
     SSH_USER="${SSH_USER:-ubuntu}"
     export SSH_USER
+    # ---- release 模式(2026-10-21): 版本目录 + release.env ----
+    # 本地桶根与 MinIO 同构: <root>/<版本>/{offline-files,cubestack-installer-cli.tar}
+    # release.env 提供版本变量, 必须在 kubespray 版本档案块之前加载(才能接管 KUBESPRAY_VERSION)。
+    OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
+    if [ -n "${CUBESTACK_RELEASE:-}" ]; then
+        # 版本名参与路径(<root>/<版本>/offline-files)并 source 其中的 release.env:
+        # 只允许字母数字开头 + 字母数字/点/下划线/连字符, 拒绝 ../、绝对路径、空白与
+        # shell 元字符 —— 防止 --release / cluster.conf 的值把 source 引到发布根之外
+        # (路径穿越 + 任意脚本执行; 2026-10-23 CodeRabbit)。
+        if ! [[ "${CUBESTACK_RELEASE}" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+            err "CUBESTACK_RELEASE 格式非法: '${CUBESTACK_RELEASE}'(只允许字母数字开头, 后接字母数字/点/下划线/连字符)"
+            exit 1
+        fi
+        CUBESTACK_RELEASE_ROOT="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
+        _rel_root="${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files"
+        if [ ! -f "${_rel_root}/release.env" ]; then
+            err "未找到发布版本 ${CUBESTACK_RELEASE}: ${_rel_root}/release.env"
+            err "  先取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --dest ${CUBESTACK_RELEASE_ROOT}"
+            exit 1
+        fi
+        # shellcheck disable=SC1090
+        source "${_rel_root}/release.env"
+        if [ "${RELEASE_VERSION:-}" != "${CUBESTACK_RELEASE}" ]; then
+            err "release.env 版本不符: RELEASE_VERSION=${RELEASE_VERSION:-<空>} CUBESTACK_RELEASE=${CUBESTACK_RELEASE}"
+            exit 1
+        fi
+        if [ -z "${KUBESPRAY_VERSION:-}" ]; then
+            err "release.env 缺少 KUBESPRAY_VERSION(${_rel_root}/release.env)"
+            exit 1
+        fi
+        OFFLINE_FILES_ROOT="${_rel_root}"
+        # 这些变量默认写死指向 dev offline-files; release 模式统一重定向到版本目录。
+        METAX_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/metax-gpu"
+        METAX_PKG_DIR="${METAX_OFFLINE_DIR}"
+        CUBESTACK_OPERATOR_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/cubestack-operator"
+        MULTUS_SAVE_DIR="${OFFLINE_FILES_ROOT}/multus"
+        NVIDIA_GPU_OPERATOR_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/nvidia-gpu-operator"
+        RDMA_SAVE_DIR="${OFFLINE_FILES_ROOT}/rdma"
+        NETSHOOT_SAVE_DIR="${OFFLINE_FILES_ROOT}/netshoot"
+        NETSHOOT_BASE_TAR="${OFFLINE_FILES_ROOT}/os/netshoot.tar"
+        DEV_LAB_SAVE_DIR="${OFFLINE_FILES_ROOT}/dev-lab"
+        MODEL_IMAGES_SAVE_DIR="${OFFLINE_FILES_ROOT}/model-collection"
+        CEPH_IMAGE_DIR="${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}/images"
+        export CUBESTACK_RELEASE_ROOT METAX_OFFLINE_DIR METAX_PKG_DIR \
+               CUBESTACK_OPERATOR_OFFLINE_DIR MULTUS_SAVE_DIR \
+               NVIDIA_GPU_OPERATOR_OFFLINE_DIR RDMA_SAVE_DIR \
+               NETSHOOT_SAVE_DIR NETSHOOT_BASE_TAR DEV_LAB_SAVE_DIR \
+               MODEL_IMAGES_SAVE_DIR CEPH_IMAGE_DIR
+        vlog "release 模式生效: ${CUBESTACK_RELEASE}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
+        unset _rel_root
+    fi
     # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
     # (档案 > cluster.conf > cluster.defaults.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
     #  会静默变成"v2.28 的资产 + v1.35.8 的钉子")
@@ -767,53 +895,50 @@ load_config() {
     #  centralized 于此, 让 deploy-registry.sh / setup-registry-expose.sh 等所有消费者拿到同一值)
     # 标记是否显式指定(供 deploy-registry.sh 冲突检测: 显式设置不再提示)
     export REGISTRY_IP_EXPLICIT="${REGISTRY_IP_EXPLICIT:-0}"
-    if [ -z "${REGISTRY_IP:-}" ]; then
-        # 按暴露模式决定默认入口(二选一):
-        #   nodeport(默认) → 集群第一个 master IP —— 节点 containerd 经 hosts.toml 直连该 IP 的
-        #     REGISTRY_NODEPORT 拉取, 宿主机经 deploy-registry.sh 的 DNAT 访问, 均无需手动配置;
-        #   metallb         → METALLB_POOL 池内首地址作为 LoadBalancer VIP(registry 固定 VIP)。
-        _EXPOSE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
-        if [ "${_EXPOSE}" = "nodeport" ]; then
-            REGISTRY_IP="$(first_master_ip)" || REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
-            vlog "REGISTRY_IP 留空, nodeport 模式取首个 master IP → ${REGISTRY_IP}"
-        else
-            REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
-            vlog "REGISTRY_IP 留空, 自动取 METALLB_POOL=${METALLB_POOL:-} 首地址 → ${REGISTRY_IP}"
-        fi
-        unset _EXPOSE
-        export REGISTRY_IP
-    else
-        export REGISTRY_IP_EXPLICIT=1
-    fi
     # 服务暴露方式归一化: SERVICE_EXPOSE_MODE ∈ {metallb, nodeport}
+    # 默认 **metallb**(生产); nodeport 仅作显式降级。
     # 大小写不敏感: 判断前先 tr 转小写, 任何大小写组合(nodeport/NodePort/nodePort/NODEPORT...)均接受
-    #   nodeport           → nodeport(默认, 测试环境, NodePort 经 kube-proxy 路由, 不依赖 MetalLB)
-    #   metallb/loadbalancer/其它 → metallb(生产, MetalLB LoadBalancer VIP)
     # 下游 sync-addons-config / sync-kubespray-config / verify / 部署汇总统一按此分支。
-    _EXPOSE_MODE="$(echo "${SERVICE_EXPOSE_MODE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
+    _EXPOSE_MODE="$(echo "${SERVICE_EXPOSE_MODE:-metallb}" | tr '[:upper:]' '[:lower:]')"
     case "${_EXPOSE_MODE}" in
         nodeport) SERVICE_EXPOSE_MODE="nodeport" ;;
         *)        SERVICE_EXPOSE_MODE="metallb" ;;
     esac
     unset _EXPOSE_MODE
     export SERVICE_EXPOSE_MODE
-    # registry 暴露方式: 留空 → 按全局模式派生; 显式设置(loadbalancer|nodeport|clusterip)则覆盖。
-    # cluster.conf 留空 + 各脚本里 ":-loadbalancer" 兜底的默认值统一收敛到本处, 保证所有消费者拿到同一值。
+    # registry 暴露方式: **默认 nodeport, 与 SERVICE_EXPOSE_MODE 解耦**
+    #   - 显式 REGISTRY_SERVICE_TYPE=loadbalancer|nodeport|clusterip 时尊重显式值
+    #   - 即使全局是 metallb, registry 默认仍走 NodePort(直连首个 master, 不占 MetalLB VIP)
     if [ -z "${REGISTRY_SERVICE_TYPE:-}" ]; then
-        [ "${SERVICE_EXPOSE_MODE}" = "nodeport" ] && REGISTRY_SERVICE_TYPE="nodeport" || REGISTRY_SERVICE_TYPE="loadbalancer"
+        REGISTRY_SERVICE_TYPE="nodeport"
         export REGISTRY_SERVICE_TYPE
-        vlog "REGISTRY_SERVICE_TYPE 留空, 按 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE} 派生 → ${REGISTRY_SERVICE_TYPE}"
+        vlog "REGISTRY_SERVICE_TYPE 留空, 默认 nodeport(与 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE} 解耦)"
+    fi
+    # REGISTRY_IP: 与 registry Service 类型保持一致
+    #   nodeport     → 首个 master IP(NodePort 入口)
+    #   loadbalancer → METALLB_POOL 池内首地址(固定 VIP)
+    if [ -z "${REGISTRY_IP:-}" ]; then
+        if [ "${REGISTRY_SERVICE_TYPE}" = "nodeport" ]; then
+            REGISTRY_IP="$(first_master_ip)" || REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
+            vlog "REGISTRY_IP 留空, registry=nodeport → 首个 master IP ${REGISTRY_IP}"
+        else
+            REGISTRY_IP="$(first_pool_addr "${METALLB_POOL:-}")"
+            vlog "REGISTRY_IP 留空, registry=${REGISTRY_SERVICE_TYPE} → METALLB_POOL 首地址 ${REGISTRY_IP}"
+        fi
+        export REGISTRY_IP
+    else
+        export REGISTRY_IP_EXPLICIT=1
     fi
     # registry 宿主侧直连端点(预检 curl / skopeo push 用), 与镜像名 DOMAIN:PORT 解耦:
-    #   nodeport → 首个 master:REGISTRY_NODEPORT(无 VIP, 直连 NodePort; 容器/裸机均可达);
-    #   metallb   → REGISTRY_IP:REGISTRY_PORT(MetalLB VIP)。
+    #   nodeport     → REGISTRY_IP:REGISTRY_NODEPORT
+    #   loadbalancer → REGISTRY_IP:REGISTRY_PORT
     # 镜像名统一 registry.cubestack.io:5000(节点经 containerd hosts.toml 改写连接), 端口无需统一;
     # 显式设 REGISTRY_DIRECT 可覆盖(如经代理/别名推送)。
     # ⚠ nodeport 分支复用 REGISTRY_IP 而非直接 first_master_ip:
     #   create-vms.sh 等场景 load_config 时 NODES 可能已被清空 → first_master_ip 返回 1,
     #   在 set -euo pipefail 下命令替换失败会传导给赋值 → load_config 静默退出, 卡死 VM 创建。
     #   REGISTRY_IP 自带 first_master_ip || first_pool_addr 兜底(见上), 此处直接复用其值。
-    if [ "${SERVICE_EXPOSE_MODE}" = "nodeport" ]; then
+    if [ "${REGISTRY_SERVICE_TYPE}" = "nodeport" ]; then
         REGISTRY_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP}:${REGISTRY_NODEPORT:-31148}}"
     else
         REGISTRY_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP}:${REGISTRY_PORT:-5000}}"
@@ -1262,8 +1387,9 @@ kube_vip_is_bound() {
 #
 # ⚠ 与 API_IP 的分工, 二者**不可互换**:
 #   API_IP        = "一个能通 NodePort 的**节点** IP", 恒为首个 master。registry 的 containerd
-#                   mirror(`http://${API_IP}:${REGISTRY_NODEPORT}`)与 setup-api-expose 的 DNAT
-#                   判定都依赖"这是一台真实节点"。若改成 VIP 会坏两处:
+#                   mirror(`http://${REGISTRY_IP:-${API_IP}}:${REGISTRY_NODEPORT}`; REGISTRY_IP
+#                   显式指定时按配置, 缺省回退该节点 IP)与 setup-api-expose 的 DNAT 判定都依赖
+#                   "这是一台真实节点"。若用 VIP 会坏两处:
 #                     ① VIP 不代理 NodePort → 扩容的新节点拉不到 registry 镜像;
 #                     ② 宿主机被装一条 `DNAT VIP:6443 → master01:6443`, 把 kube-vip 的高可用打回单点。
 #   API_ENTRY_IP  = "集群 API 该从哪个地址进" —— /etc/hosts 里 API_DOMAIN 的解析、kubeconfig 用。
@@ -2218,6 +2344,62 @@ check_offline_files() {
     fi
 }
 
+# ---------------- GPU 厂商探测(NVIDIA / 沐曦) ----------------
+# 用于“纯 CPU 环境”判定(2026-10-22 用户口径): 只有 **NVIDIA 与沐曦都未检测到**
+# 才允许提示“纯 CPU”; 任一厂商有卡都不能称为纯 CPU。
+#   NVIDIA: PCI vendor 0x10de(sysfs, 不依赖驱动) → 数量
+#   MetaX : mx-smi 'Attached GPUs'(依赖驱动); mx-smi 缺失/执行失败 → unknown
+# 输出(stdout): "<nvidia_count> <metax_count|unknown>"
+# 用法: read -r nv mx <<< "$(node_gpu_probe <ip> [user])"
+# 前置: SSH_KEY 已设置(模块内 init_remote_kubectl 提供); SSH 失败/不可达 → "0 unknown"
+node_gpu_probe() {
+    local _ip="$1" _u="${2:-$(ssh_user_for_ip "$1")}" _out
+    _out="$(ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+              "${_u}@${_ip}" '
+        nv=$(grep -l 0x10de /sys/bus/pci/devices/*/vendor 2>/dev/null | wc -l | tr -d " ")
+        [ -n "${nv}" ] || nv=0
+        if command -v mx-smi >/dev/null 2>&1; then
+            if mxout=$(sudo mx-smi 2>/dev/null); then
+                mx=$(printf "%s\n" "${mxout}" | awk "/Attached GPUs/{print \$NF}" | tr -d " ")
+                [ -n "${mx}" ] || mx=0
+            else
+                mx=unknown
+            fi
+        else
+            mx=unknown
+        fi
+        echo "${nv} ${mx}"
+    ' 2>/dev/null || echo "0 unknown")"
+    printf '%s\n' "${_out:-0 unknown}"
+}
+
+# 是否可判定为纯 CPU: NVIDIA 数量为 0 且沐曦明确为 0(unknown 不算纯 CPU)
+node_gpu_is_pure_cpu() { [ "${1:-1}" = "0" ] && [ "${2:-unknown}" = "0" ]; }
+
+# 远程探测宿主 NVIDIA 驱动是否**可用**(用于决定 operator 是否走 pre-installed):
+#   仅以 `nvidia-smi -L` 成功为 yes —— 必须同时具备内核模块 + 宿主用户态(nvidia-smi/库)。
+#   ⚠ 不再用 /proc/driver/nvidia/version 兜底: operator 管理的驱动容器被卸载后, 内核模块
+#     会保持加载到重启前, /proc 仍可读, 但宿主并没有可用的 pre-installed 驱动。这种假 yes
+#     会让安装器跳过预编译内核门禁/驱动镜像准备 → 重装时 driver DS ImagePullBackOff
+#     (2026-10-23 CodeRabbit)。
+#   否则 → no; SSH 失败/不可达 → unknown
+# 用法: st="$(node_host_nvidia_driver_works <ip> [user])"
+# 前置: SSH_KEY 已设置
+node_host_nvidia_driver_works() {
+    local _ip="$1" _u="${2:-$(ssh_user_for_ip "$1")}" _out
+    _out="$(ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+              "${_u}@${_ip}" '
+        if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+            echo yes
+        else
+            echo no
+        fi
+    ' 2>/dev/null || echo unknown)"
+    printf '%s\n' "${_out:-unknown}"
+}
+
 # ---------------- 附加组件通用工具 ----------------
 
 # 返回第一个 master 节点 IP(附加组件执行 kubectl 的入口)
@@ -2297,6 +2479,144 @@ init_remote_kubectl() {
     K="sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf"
     _INIT_REMOTE_KUBECTL=1
     return 0
+}
+
+# ---------------- 删除 CRD: 先清残留 CR 的 finalizer, 有界等待, 最后摘 CRD finalizer ----------------
+# 背景(2026-10-23 C 集群实机): 平台卸载时组件控制器已先被删, CRD 下仍有 CR
+#   (default/devenvironment test 带 ai.cubestack.io/dev-env-finalizer)。`kubectl delete crd`
+#   会卡在 apiextensions 的 customresourcecleanup.apiextensions.k8s.io finalizer 上**无限等待**
+#   (APIServer 要等该 CRD 下 CR 全部删完; 没有控制器 = 永不满足), 整个 teardown 只能等外层
+#   timeout 强杀; 残留的 Terminating CRD 还会挡住重装时 [5/6] 的 CRD apply。
+# 做法(幂等, 仅用于卸载/清理语义):
+#   ① 摘该 CRD 下所有 CR 的 finalizers(metadata.finalizers=null)
+#   ② kubectl delete crd --wait=false
+#   ③ 有界轮询(默认 60s, 每 5s): 再摘 CR finalizers + 检查 CRD 是否消失
+#   ④ 超时兜底: 摘 CRD 自身 finalizers → 强制删除(残留 CR 会成为孤儿, 但卸载场景宁可清干净)
+# ⚠ 循环内调用 SSH 必须接 `< /dev/null`: 否则 ssh 会吞掉 while 的管道输入, 只处理第一条就退出
+#   (2026-10-23 _reroll_stuck_pods 同类事故)。
+# 用法: delete_crd_with_finalizer_cleanup <crd-name | customresourcedefinition.apiextensions.k8s.io/<crd-name>> [wait-seconds]
+# 前置: init_remote_kubectl 已执行(提供 SSH/K)
+delete_crd_with_finalizer_cleanup() {
+    local crd="${1:-}" wait_s="${2:-60}" i=0
+    crd="${crd##*/}"
+    [ -n "${crd}" ] || return 0
+    case "${wait_s}" in ''|*[!0-9]*) wait_s=60 ;; esac
+    # 内部函数: 摘 <crd> 下所有 CR 的 finalizers(命名空间级与集群级都覆盖)
+    _crd_clear_cr_finalizers() {
+        local items ns name
+        items="$( (SSH "${K} get ${crd} -A -o json" 2>/dev/null) || true )"
+        [ -n "${items}" ] || return 0
+        printf '%s' "${items}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for m in d.get("items", []) or []:
+    md = m.get("metadata", {}) or {}
+    print("%s\t%s" % (md.get("namespace", ""), md.get("name", "")))
+' 2>/dev/null | while IFS=$'\t' read -r ns name; do
+            [ -n "${name}" ] || continue
+            if [ -n "${ns}" ]; then
+                SSH "${K} -n ${ns} patch ${crd} ${name} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'" >/dev/null 2>&1 < /dev/null || true
+            else
+                SSH "${K} patch ${crd} ${name} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'" >/dev/null 2>&1 < /dev/null || true
+            fi
+        done
+    }
+    # ① 先清一轮(尽量在 CRD 进入 Terminating 前摘掉)
+    _crd_clear_cr_finalizers
+    # ② 非阻塞删除
+    SSH "${K} delete crd ${crd} --ignore-not-found --wait=false" >/dev/null 2>&1 < /dev/null || true
+    # ③ 有界等待: CRD 消失即返回; 期间反复清 CR finalizer
+    while [ "${i}" -lt "${wait_s}" ]; do
+        SSH "${K} get crd ${crd}" >/dev/null 2>&1 < /dev/null || return 0
+        _crd_clear_cr_finalizers
+        if [ $((i + 5)) -lt "${wait_s}" ]; then sleep 5; fi
+        i=$((i + 5))
+    done
+    # ④ 兜底: 摘 CRD 自身 finalizer, 强制删除(避免整个卸载被一个残留对象拖死)
+    warn "  CRD ${crd} 在 ${wait_s}s 内未删净(残留 CR finalizer 拖住 customresourcecleanup) → 摘 CRD finalizer 强制清理"
+    SSH "${K} patch crd ${crd} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'" >/dev/null 2>&1 < /dev/null || true
+    SSH "${K} delete crd ${crd} --ignore-not-found --wait=false" >/dev/null 2>&1 < /dev/null || true
+    return 0
+}
+
+# ---------------- Envoy Gateway 数据面 Service 类型对齐 ----------------
+# 背景(2026-10-22 实机): CubeStackCluster 的 spec.global.serviceExposeMode 只作用于
+#   operator 自己渲染的 Service; Envoy Gateway 数据面 Service 由 EnvoyProxy 决定, 默认
+#   LoadBalancer。SERVICE_EXPOSE_MODE=nodeport(无 MetalLB)时公网 Service 会停在
+#   LoadBalancer / EXTERNAL-IP <pending>, 公网 Gateway 无地址, Web UI 地址发现回退到
+#   私有 ClusterIP(并被误标成 MetalLB)。
+# 做法(幂等): 创建/更新 EnvoyProxy(mergeType=StrategicMerge, 保留 chart 的镜像覆盖) →
+#   patch 公网 Gateway 的 spec.infrastructure.parametersRef → 等 Service 类型切换。
+# 前置: 已调用 init_remote_kubectl(提供 SSH/K)。
+# 用法: ensure_envoy_gateway_service_type [nodeport|metallb]
+# 返回: 0=服务类型已对齐; 1=未确认(调用方决定 warn/fail)
+ensure_envoy_gateway_service_type() {
+    local _mode="${1:-${SERVICE_EXPOSE_MODE:-metallb}}"
+    local _ns="${CUBESTACK_ENVOY_NAMESPACE:-envoy-gateway-system}"
+    local _gw="${CUBESTACK_GATEWAY_NAME:-cubestack-gateway}"
+    local _proxy="${CUBESTACK_GATEWAY_PROXY_NAME:-cubestack-proxy}"
+    local _type _yaml _st="" _i
+    case "${_mode,,}" in
+        nodeport) _type="NodePort" ;;
+        *)        _type="LoadBalancer" ;;
+    esac
+
+    # operator 异步创建公网 Gateway(上界 120s)
+    for _i in $(seq 1 24); do
+        SSH "${K} -n ${_ns} get gateway ${_gw} >/dev/null 2>&1" && break
+        sleep 5
+    done
+    if ! SSH "${K} -n ${_ns} get gateway ${_gw} >/dev/null 2>&1"; then
+        warn "  Envoy Gateway: 未找到公网 Gateway ${_ns}/${_gw}(operator 可能尚未就绪)"
+        return 1
+    fi
+
+    _yaml="$(cat <<EOF
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: ${_proxy}
+  namespace: ${_ns}
+  labels:
+    cubestack.io/cluster: ${CLUSTER_NAME:-cubestack}
+    cubestack.io/component: envoy-gateway
+    cubestack.io/managed-by: cubestack-operator
+spec:
+  mergeType: StrategicMerge
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: ${_type}
+EOF
+)"
+    if ! printf '%s\n' "${_yaml}" | SSH "${K} apply -f - >/dev/null 2>&1"; then
+        warn "  Envoy Gateway: EnvoyProxy ${_ns}/${_proxy} apply 失败"
+        return 1
+    fi
+
+    # 用 stdin 传 patch, 避免 JSON 引号在远端 shell 被拆散
+    if ! printf '{"spec":{"infrastructure":{"parametersRef":{"group":"gateway.envoyproxy.io","kind":"EnvoyProxy","name":"%s"}}}}' "${_proxy}" \
+            | SSH "${K} -n ${_ns} patch gateway "${_gw}" --type=merge --patch-file=/dev/stdin >/dev/null 2>&1"; then
+        warn "  Envoy Gateway: 公网 Gateway ${_gw} 挂载 EnvoyProxy 失败"
+        return 1
+    fi
+
+    # Envoy Gateway 重建数据面 Service 需要一点时间(上界 120s)
+    for _i in $(seq 1 24); do
+        _st="$( (SSH "${K} -n ${_ns} get svc -l gateway.envoyproxy.io/owning-gateway-name=${_gw} -o jsonpath='{.items[0].spec.type}' 2>/dev/null" || true) )"
+        [ "${_st}" = "${_type}" ] && break
+        sleep 5
+    done
+    if [ "${_st}" = "${_type}" ]; then
+        ok "  Envoy Gateway 公网 Service 类型: ${_type}"
+        return 0
+    fi
+    warn "  Envoy Gateway 公网 Service 类型仍为 ${_st:-<未就绪>}(期望 ${_type})"
+    return 1
 }
 
 # ---------------- RWO 单卷 Deployment 的更新策略守护 ----------------

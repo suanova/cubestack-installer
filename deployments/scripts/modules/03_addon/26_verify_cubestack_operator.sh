@@ -2,7 +2,7 @@
 # ============================================================
 # MODULE: verify_cubestack_operator
 # DESC: 端到端验证 CubeStack Operator 真正工作(非仅 pod Running): ① operator/CRD 就绪
-#       ② 镜像来源断言(必须来自**集群内置 registry**, 不是 Harbor —— 离线可用性的证据)
+#       ② 镜像来源断言(离线=**集群内置 registry**; 在线=Harbor —— 按部署模式分叉)
 #       ③ 建冒烟 CubeStackCluster(全组件禁用) → 等 status Ready=True → 断言无 Degraded
 #       ④ 清理冒烟 CR(全程 trap 兜底)
 # PHASE: addon
@@ -12,9 +12,9 @@
 # 说明:
 #   · **验证模块不设 TOGGLE**(否则 CUBESTACK_OPERATOR_ENABLED=true 时会被安装流程自动启用);
 #     保持 DEFAULT:0, 仅由 --steps verify_cubestack_operator 在安装后单独执行。
-#   · 为什么要有第 ② 步: "pod Running" 不能区分镜像来自集群 registry 还是 Harbor。
-#     本仓库的离线前提是**节点只从集群内置 registry 拉取**, 故直接断言 pod 的 image 前缀
-#     = ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/ —— 这是"离线集群能跑起来"的直接证据。
+#   · 为什么要有第 ② 步: "pod Running" 不能区分镜像来源。离线模式断言 pod image 前缀
+#     = ${REGISTRY_DOMAIN}:${REGISTRY_PORT}/ (节点只从内置 registry 拉); 在线模式断言
+#     前缀 = Harbor (chart 定义从 Harbor 拉) —— 两种模式都验证来源符合预期。
 #   · 为什么冒烟 CR 必须**显式**全组件禁用 + deletePolicy=retain(2026-10-19 实机事故):
 #     省略 `spec.components` 并不等于"没有组件" —— operator 会继承 catalog/chart 默认值
 #     (新版 chart 默认启用 lws/envoyGateway/...)。冒烟 CR 原先只写 deletePolicy=uninstall,
@@ -48,6 +48,14 @@ if [ "${_DEPLOYED:-0}" -eq 0 ] && [ "${CUBESTACK_OPERATOR_ENABLED:-false}" != "t
 fi
 # 期望的镜像前缀 = 集群内置 registry 的域名端点(节点按此拉取)
 REG_BASE="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT:-5000}"
+# 镜像来源断言按部署模式分叉(2026-10-22): 离线=集群内置 registry; 在线=Harbor。
+ONLINE_DEPLOY="${ONLINE_DEPLOY_CUBESTACK_OPERATOR:-false}"
+HARBOR_HOST="${CUBESTACK_OPERATOR_HARBOR_HOST:-${HARBOR_MIRROR_REGISTRY:-harbor.isuanova.com}}"
+if [ "${ONLINE_DEPLOY}" = "true" ]; then
+    EXPECTED_IMG_PREFIX="${HARBOR_HOST}"; IMG_SRC_LABEL="Harbor(在线模式)"
+else
+    EXPECTED_IMG_PREFIX="${REG_BASE}"; IMG_SRC_LABEL="集群内置 registry"
+fi
 CR_NAME="verify-csc"                     # 冒烟 CR(固定名: 重跑先删, 幂等)
 CRD="cubestackclusters.operator.cubestack.io"
 WAIT_READY_SECONDS="${VERIFY_CSC_WAIT_SECONDS:-120}"
@@ -84,8 +92,8 @@ SSH "${K} wait --for=condition=Established crd/${CRD} --timeout=60s" >/dev/null 
     || warn "  crd/${CRD} Established 条件未在 60s 内出现(继续, 后面用真实 CR 验证)"
 ok "  CRD 已注册"
 
-# ---------------- ② 镜像来源断言(离线可用性的直接证据) ----------------
-say "[3/5] 断言 operator 镜像来自集群内置 registry(${REG_BASE})..."
+# ---------------- ② 镜像来源断言(按部署模式: 离线=内置 registry / 在线=Harbor) ----------------
+say "[3/5] 断言 operator/组件镜像来自 ${IMG_SRC_LABEL}(${EXPECTED_IMG_PREFIX})..."
 POD_JSON="$( (SSH "${K} -n ${NS} get pods -l app.kubernetes.io/name=cubestack-operator-chart -o json 2>/dev/null" || true) )"
 [ -n "${POD_JSON}" ] || POD_JSON="$( (SSH "${K} -n ${NS} get pods -o json 2>/dev/null" || true) )"
 IMAGES="$(printf '%s' "${POD_JSON}" | python3 -c '
@@ -107,9 +115,13 @@ _ok_img=1
 while IFS= read -r _img; do
     [ -n "${_img}" ] || continue
     case "${_img}" in
-        "${REG_BASE}/"*) say "    ✓ ${_img}" ;;
-        *) err "镜像不来自集群内置 registry: ${_img}"
-           err "  → 节点将从 Harbor 拉取, 离线集群会 ImagePullBackOff(需求 5: 部署用本地 chart, 镜像走集群 registry)"
+        "${EXPECTED_IMG_PREFIX}/"*) say "    ✓ ${_img}" ;;
+        *) err "镜像不来自 ${IMG_SRC_LABEL}: ${_img}"
+           if [ "${ONLINE_DEPLOY}" = "true" ]; then
+               err "  → 在线模式要求 operator/组件镜像来自 ${HARBOR_HOST}(chart 定义); 检查 CR global.imageRegistry / imagePullSecrets"
+           else
+               err "  → 节点将从 Harbor 拉取, 离线集群会 ImagePullBackOff(需求 5: 部署用本地 chart, 镜像走集群 registry)"
+           fi
            _ok_img=0 ;;
     esac
 done <<< "${IMAGES}"
@@ -243,6 +255,6 @@ echo "---------------------------------------------"
 ok "CubeStack Operator 端到端验证通过"
 echo "  ① Deployment ${NS}/${_dep} Ready"
 echo "  ② CRD ${CRD} 已注册"
-echo "  ③ 镜像来自集群内置 registry ${REG_BASE}(离线前提成立)"
+echo "  ③ 镜像来自 ${IMG_SRC_LABEL} ${EXPECTED_IMG_PREFIX}"
 echo "  ④ 冒烟 CubeStackCluster Ready=True 且无 Degraded"
 echo "  后续(可选): 启用组件/平台实例见 docs/cubestack-operator.md"

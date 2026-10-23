@@ -350,6 +350,7 @@ gh secret set HARBOR_MIRROR_PASSWORD --repo suanova/cubestack-installer
 
 ## 10. 相关文档
 
+- **发布与制品管理(release-2.0 方案)**: `docs/release-management.md` —— 基于现有 `offline-files/<group>/` 结构增加 `releases/<版本>/` 版本根、`CUBESTACK_RELEASE` 切换、`fetch --release`、Harbor 侧版本化建议
 - 镜像清单: `deployments/config/images.manifest`
 - 版本变量(升级入口): `deployments/config/cluster.conf.example` §3.3
 - 部署脚本规范: `docs/scripts-development-spec.md`

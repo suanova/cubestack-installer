@@ -1,0 +1,42 @@
+# CubeStack release-2.0.0 平台镜像清单(release 专用)
+# 列: subdir<TAB>file<TAB>pull_ref<TAB>save_ref
+#   · 自研组件统一 :2.0.0; 第三方保持上游 tag
+#   · 用法: cubestack-platform-save-images.sh --list <本文件> --out <release>/cubestack-operator
+# 校验: cubestack-platform-save-images.sh --list-check --list <本文件> --out <release>/cubestack-operator
+.	harbor.isuanova.com_suanova-private_cubestack-operator_2.0.0.tar		harbor.isuanova.com/suanova-private/cubestack-operator:2.0.0
+perses	docker.io_kiwigrid_k8s-sidecar_2.11.2.tar	harbor.isuanova.com/mirrors/docker.io/kiwigrid/k8s-sidecar:2.11.2	docker.io/kiwigrid/k8s-sidecar:2.11.2
+perses	docker.io_persesdev_perses-operator_v0.5.0.tar	harbor.isuanova.com/mirrors/docker.io/persesdev/perses-operator:v0.5.0	docker.io/persesdev/perses-operator:v0.5.0
+perses	docker.io_persesdev_perses_v0.54.0.tar	harbor.isuanova.com/mirrors/docker.io/persesdev/perses:v0.54.0	docker.io/persesdev/perses:v0.54.0
+prometheus	docker.io_grafana_grafana_13.2.2-distroless.tar	harbor.isuanova.com/mirrors/docker.io/grafana/grafana:13.2.2-distroless	docker.io/grafana/grafana:13.2.2-distroless
+prometheus	ghcr.io_jkroepke_kube-webhook-certgen_1.8.8.tar	harbor.isuanova.com/mirrors/ghcr.io/jkroepke/kube-webhook-certgen:1.8.8	ghcr.io/jkroepke/kube-webhook-certgen:1.8.8
+prometheus	quay.io_brancz_kube-rbac-proxy_v0.22.1.tar	harbor.isuanova.com/mirrors/quay.io/brancz/kube-rbac-proxy:v0.22.1	quay.io/brancz/kube-rbac-proxy:v0.22.1
+prometheus	quay.io_kiwigrid_k8s-sidecar_2.11.2.tar	harbor.isuanova.com/mirrors/quay.io/kiwigrid/k8s-sidecar:2.11.2	quay.io/kiwigrid/k8s-sidecar:2.11.2
+prometheus	quay.io_prometheus-operator_prometheus-config-reloader_v0.94.0.tar	harbor.isuanova.com/mirrors/quay.io/prometheus-operator/prometheus-config-reloader:v0.94.0	quay.io/prometheus-operator/prometheus-config-reloader:v0.94.0
+prometheus	quay.io_prometheus-operator_prometheus-operator_v0.94.0.tar	harbor.isuanova.com/mirrors/quay.io/prometheus-operator/prometheus-operator:v0.94.0	quay.io/prometheus-operator/prometheus-operator:v0.94.0
+prometheus	quay.io_prometheus_alertmanager_v0.34.0.tar	harbor.isuanova.com/mirrors/quay.io/prometheus/alertmanager:v0.34.0	quay.io/prometheus/alertmanager:v0.34.0
+prometheus	quay.io_prometheus_node-exporter_v1.12.1-distroless.tar	harbor.isuanova.com/mirrors/quay.io/prometheus/node-exporter:v1.12.1-distroless	quay.io/prometheus/node-exporter:v1.12.1-distroless
+prometheus	quay.io_prometheus_prometheus_v3.14.0-distroless.tar	harbor.isuanova.com/mirrors/quay.io/prometheus/prometheus:v3.14.0-distroless	quay.io/prometheus/prometheus:v3.14.0-distroless
+prometheus	quay.io_thanos_thanos_v0.42.4.tar		quay.io/thanos/thanos:v0.42.4
+prometheus	registry.k8s.io_kube-state-metrics_kube-state-metrics_v2.20.0.tar	harbor.isuanova.com/mirrors/registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0	registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0
+cubepilot	harbor.isuanova.com_suanova_cubepilot-api_2.0.0.tar		harbor.isuanova.com/suanova/cubepilot-api:2.0.0
+cubepilot	harbor.isuanova.com_suanova_cubepilot-openclaw_2.0.0.tar		harbor.isuanova.com/suanova/cubepilot-openclaw:2.0.0
+cubepilot	harbor.isuanova.com_suanova_cubepilot-operator_2.0.0.tar		harbor.isuanova.com/suanova/cubepilot-operator:2.0.0
+cubepilot	harbor.isuanova.com_suanova_cubepilot-web_2.0.0.tar		harbor.isuanova.com/suanova/cubepilot-web:2.0.0
+envoy-gateway	docker.io_envoyproxy_ai-gateway-controller_v1.2.0.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ai-gateway-controller:v1.2.0	docker.io/envoyproxy/ai-gateway-controller:v1.2.0
+envoy-gateway	docker.io_envoyproxy_ai-gateway-extproc_v1.2.0.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ai-gateway-extproc:v1.2.0	docker.io/envoyproxy/ai-gateway-extproc:v1.2.0
+envoy-gateway	docker.io_envoyproxy_envoy_distroless-v1.39.1.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/envoy:distroless-v1.39.1	docker.io/envoyproxy/envoy:distroless-v1.39.1
+envoy-gateway	docker.io_envoyproxy_gateway_v1.9.2.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/gateway:v1.9.2	docker.io/envoyproxy/gateway:v1.9.2
+envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ratelimit:0482748e	docker.io/envoyproxy/ratelimit:0482748e
+lws	registry.k8s.io_lws_lws_v0.10.0.tar	harbor.isuanova.com/mirrors/registry.k8s.io/lws/lws:v0.10.0	registry.k8s.io/lws/lws:v0.10.0
+bmc	harbor.isuanova.com_suanova_bmc-oem-exporter_2.0.0.tar	harbor.isuanova.com/suanova-private/bmc-oem-exporter:2.0.0	harbor.isuanova.com/suanova/bmc-oem-exporter:2.0.0
+bmc	harbor.isuanova.com_suanova_idrac-exporter_2.0.0.tar	harbor.isuanova.com/suanova-private/idrac-exporter:2.0.0	harbor.isuanova.com/suanova/idrac-exporter:2.0.0
+controller-manager	harbor.isuanova.com_suanova_cubestack-controller-manager_2.0.0.tar		harbor.isuanova.com/suanova/cubestack-controller-manager:2.0.0
+controller-manager	harbor.isuanova.com_suanova_cubestack-activity-agent_2.0.0.tar		harbor.isuanova.com/suanova/cubestack-activity-agent:2.0.0
+cuberouter	ghcr.io_cloudnative-pg_cloudnative-pg_1.30.0.tar	harbor.isuanova.com/mirrors/ghcr.io/cloudnative-pg/cloudnative-pg:1.30.0	ghcr.io/cloudnative-pg/cloudnative-pg:1.30.0
+cuberouter	ghcr.io_cloudnative-pg_postgresql_16.14-system-trixie.tar	harbor.isuanova.com/mirrors/ghcr.io/cloudnative-pg/postgresql:16.14-system-trixie	ghcr.io/cloudnative-pg/postgresql:16.14-system-trixie
+cuberouter	harbor.isuanova.com_suanova_cuberouter_2.0.0.tar		harbor.isuanova.com/suanova/cuberouter:2.0.0
+portal	harbor.isuanova.com_suanova_cubestack-ui_2.0.0.tar		harbor.isuanova.com/suanova/cubestack-ui:2.0.0
+portal	quay.io_opstree_redis-exporter_v1.44.0.tar		quay.io/opstree/redis-exporter:v1.44.0
+portal	quay.io_opstree_redis-operator_v0.26.0.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-operator:v0.26.0	quay.io/opstree/redis-operator:v0.26.0
+portal	quay.io_opstree_redis-sentinel_v7.0.15.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-sentinel:v7.0.15	quay.io/opstree/redis-sentinel:v7.0.15
+portal	quay.io_opstree_redis_v7.0.15.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis:v7.0.15	quay.io/opstree/redis:v7.0.15

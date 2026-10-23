@@ -47,7 +47,8 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     else
         warn "  multus: 未找到 manifest ${_manifest}, 退化为只删 DS/CRD"
         SSH "${K} -n kube-system delete ds kube-multus-ds --ignore-not-found=true >/dev/null 2>&1 || true"
-        SSH "${K} delete crd network-attachment-definitions.k8s.cni.cncf.io --ignore-not-found=true >/dev/null 2>&1 || true"
+        # 共享助手: 先摘残留 NAD finalizer 再有界删除(防 CRD 卡在 customresourcecleanup; 2026-10-23)
+        delete_crd_with_finalizer_cleanup network-attachment-definitions.k8s.cni.cncf.io
     fi
     say "  删除示例 NAD ${_nad_ns}/${MULTUS_NAD_NAME:-multus-nad}..."
     SSH "${K} -n ${_nad_ns} delete network-attachment-definitions "${MULTUS_NAD_NAME:-multus-nad}" --ignore-not-found=true >/dev/null 2>&1 || true"
@@ -113,7 +114,7 @@ unset _t
 say "[2/4] 推送 Multus 镜像到集群内置 registry(${REG_DIRECT}/k8snetworkplumbingwg)..."
 skopeo_require multus
 if ! wait_registry_ready "http://${REG_DIRECT}/v2/" 30; then
-    err "集群内置 registry ${REG_DIRECT}/v2/ 30s 内不可达(检查 SERVICE_EXPOSE_MODE / registry pod / REGISTRY_DIRECT)"
+    err "集群内置 registry ${REG_DIRECT}/v2/ 30s 内不可达(检查 REGISTRY_SERVICE_TYPE / registry pod / REGISTRY_DIRECT)"
     exit 1
 fi
 # 幂等: registry 已有该 tag 则跳过 push(此时不需要离线 tar, 与上面 [1/4] 的"不猜内容"不冲突)

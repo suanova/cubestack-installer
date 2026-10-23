@@ -140,8 +140,8 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 - 镜像: 全部放集群内置 registry `registry.cubestack.io:5000/metax/...`(默认 **tar 离线加载**, 也可 `.run` 内嵌推送)。
 - 为何采用 helm 原生安装: 官方 chart 有 3 处 bug(deployment 缺 namespace / openshift.deploy 无默认 /
   vendor 字段空值未加引号)会在 kubectl apply 时失败; 修复 chart 后 helm install 自动装 CRD+命名空间, 最稳。
-- master 节点: 用 `mx-smi` 在宿主机检测 GPU, 检测到 GPU 的 master 自动移除 control-plane 污点并 uncordon
-  (供 PD 分离等 pod 调度); 无 GPU 的 master 保持默认不可调度。
+- master 节点: 用 `mx-smi` 在宿主机检测沐曦 GPU, 检测到沐曦 GPU 的 master 自动移除 control-plane 污点并 uncordon
+  (供 PD 分离等 pod 调度); 无沐曦 GPU 的 master 保持默认不可调度。
 - 部署/验证入口: `docs/metax-gpu-operator.md`。
 
 ### 5.5 Rook-Ceph 架构与原理(高可用分布式存储)

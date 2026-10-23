@@ -17,7 +17,7 @@
 | 控制面高可用 · 节点侧本地代理 | `API_LOCAL_LB_ENABLED` | **开** | §1.2 |
 | 控制面高可用 · 外部浮动 VIP | `KUBE_VIP_ENABLED` + `K8S_API_VIP` | **关**(需显式开) | §1.2 / §2.3 |
 | 对外负载均衡(LB Service) | `METALLB_ENABLED` + `METALLB_POOL` | 开 | §2.1 |
-| 服务暴露方式 | `SERVICE_EXPOSE_MODE` | `nodePort`(生产建议 `metallb`) | §2.2 |
+| 服务暴露方式 | `SERVICE_EXPOSE_MODE` | `metallb`（生产默认；测试环境可显式设 `nodeport`） | §2.2 |
 | 分布式存储(Rook-Ceph) | `CEPH_ENABLED` / `CEPH_CSI_ENABLED` | 关(需显式开) | §3.1 |
 | 块存储 / 文件存储 / 对象存储(S3) | `CEPH_CSI_ENABLED` / `CEPHFS_ENABLED` / `CEPH_RGW_ENABLED` | 随 `CEPH_CSI_ENABLED` | §3.2–§3.4 |
 | 接入**外部已有** Ceph 集群 | `CEPH_MODE=external` + `external-ceph.env` | `internal` | §3.5 |
@@ -277,15 +277,19 @@ registry   LoadBalancer   10.233.2.135   10.66.3.237   5000:30279/TCP
 
 | 取值 | 行为 | 什么时候用 |
 |---|---|---|
-| `nodePort`(默认) | 用 `NodePort` 暴露;registry 另有 DNAT/`REGISTRY_IP` 兜底 | 无 LB 地址段可用时 |
-| `metallb` | 关键服务用 `LoadBalancer`(由 MetalLB 发地址) | **生产推荐**(本环境用的就是它) |
+| `metallb`（默认） | 关键服务用 `LoadBalancer`(由 MetalLB 发地址) | **生产推荐**(本环境用的就是它) |
+| `nodePort` | 用 `NodePort` 暴露 | 无 LB 地址段可用时 |
 | `hostNetwork` | 直接占用节点端口 | 只有明确需要时 |
 
 ```bash
 SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-metallb}"
 ```
 
-> 它同时是 Ceph 对外暴露(`CEPH_EXTERNAL_EXPOSE_MODE`,见 §3.5)的默认随动值 —— 改这一处,存储暴露方式跟着变。
+> ⚠ **registry 独立默认走 NodePort**（`REGISTRY_SERVICE_TYPE=nodeport`），不随全局模式变化、不占 MetalLB VIP；
+> 要 registry 也走 LoadBalancer VIP，显式设 `REGISTRY_SERVICE_TYPE=loadbalancer`（defaults §3.2）。
+>
+> Ceph 对外暴露(`CEPH_EXTERNAL_EXPOSE_MODE`,见 §3.5)的**兜底**值之一 —— 仅当
+> `CEPH_EXTERNAL_EXPOSE_MODE` 与 `CEPH_EXPOSE_MODE` 都留空时才随本值(`CEPH_EXPOSE_MODE` 默认 `host-network`)。
 
 ### 2.3 kube-vip:给 API 入口一个浮动 VIP
 
@@ -421,11 +425,11 @@ CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-true}"  # ← 置 true:供给层(池 + Sto
 
 `verify_ceph` 九段断言:① Rook operator + ceph-csi Ready → ② `CephCluster phase=Ready` 且 `ceph -s` 无 `HEALTH_ERR` → ③ SC 存在 → ④ **RBD 块设备真实读写** → ⑤ ≥3 个 OSD up → ⑥ 清理兜底 → ⑦ **CephFS RWX 文件 I/O** → ⑧ **RGW/S3 上传下载** → ⑨ 对外暴露自检。
 
-**要开 CephFS / 对象存储**,打开后重跑 `ceph_csi`(两项默认都是 true):
+**要开 CephFS / 对象存储**,打开后重跑 `ceph_csi`(两项默认跟随 `CEPH_CSI_ENABLED`;开启 CSI 时默认 true,Ceph 全关时不会启用):
 
 ```bash
-CEPHFS_ENABLED="${CEPHFS_ENABLED:-true}"     # RWX 共享文件系统
-CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-true}" # S3 对象存储网关(RGW)
+CEPHFS_ENABLED="${CEPHFS_ENABLED:-${CEPH_CSI_ENABLED:-false}}"   # RWX 共享文件系统(默认随 CSI)
+CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-${CEPH_CSI_ENABLED:-false}}" # S3 对象存储网关 RGW(默认随 CSI)
 ```
 
 > **CephFS 额外一步**:平台按 subvolume group 路由(`ephemeral` / `durable`),部署后补跑
@@ -604,7 +608,8 @@ CEPHFS_NODE_KEYRING="<A 导出>"
 
 ```bash
 CEPH_EXTERNAL_EXPOSE="${CEPH_EXTERNAL_EXPOSE:-true}"        # 总开关(默认开)
-CEPH_EXTERNAL_EXPOSE_MODE="${CEPH_EXTERNAL_EXPOSE_MODE:-}"  # nodeport|loadbalancer|metallb|clusterip;空=随 SERVICE_EXPOSE_MODE
+CEPH_EXTERNAL_EXPOSE_MODE="${CEPH_EXTERNAL_EXPOSE_MODE:-}"  # host-network|nodeport|loadbalancer|metallb|clusterip;
+                                                           # 空=随 CEPH_EXPOSE_MODE(默认 host-network), 再空才随 SERVICE_EXPOSE_MODE
 CEPH_EXTERNAL_USER="${CEPH_EXTERNAL_USER:-cubestack-ext-rbd}"                 # 外部专用 RBD 用户
 CEPH_EXTERNAL_RBD_POOL="${CEPH_EXTERNAL_RBD_POOL:-cubestack-ext-rbd-pool}"    # 外部专用 pool(与内部隔离)
 ```
@@ -848,10 +853,10 @@ sudo ./deploy-cluster.sh --enable gpu_operator     # 或只写开关,下次全�
 sudo ./deploy-cluster.sh --steps verify_metax_gpu
 ```
 
-**纯 CPU 集群**(无沐曦卡):模块会先逐节点跑 `mx-smi` 检测,自动走**快速路径**(只等 operator + `gpu-label` 就绪,不再傻等 300s),不会因为"没有 GPU"而失败。
+**无沐曦 GPU 的集群**(可能仍有 NVIDIA GPU):模块会先逐节点跑 `mx-smi` 检测,自动走**快速路径**(只等 operator + `gpu-label` 就绪,不再傻等 300s),不会因为"没有沐曦 GPU"而失败。⚠ 只有 **NVIDIA 与沐曦都未检测到** 才称为"纯 CPU 环境";仅有 NVIDIA GPU 时模块会明确提示"检测到 NVIDIA GPU, 非纯 CPU"。
 
 **master 节点特例**:沐曦组件的 DaemonSet **默认没有 control-plane 容忍**,而 master 通常带 `NoSchedule` 污点 →
-模块在检测到该 master **确实有 GPU** 时会**自动去污点 + uncordon**(否则 GPU 永远用不上);无 GPU 的 master 保持不可调度。
+模块在检测到该 master **确实有沐曦 GPU** 时会**自动去污点 + uncordon**(否则 GPU 永远用不上);无沐曦 GPU 的 master 保持不可调度。
 
 ### 5.4 Pod 里怎么用 GPU
 
