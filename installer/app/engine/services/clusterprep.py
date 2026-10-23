@@ -6,8 +6,8 @@ from ...models import ClusterNode, DeployTask, Host, K8sCluster
 from ..executor import log_line
 from .vmprovision import _ssh
 
-# MinIO 凭据: 优先环境变量, 默认 CHANGE_ME(真实部署必须覆盖, 勿用明文默认)
-MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "10.66.1.207:9000")
+# MinIO 凭据: 优先环境变量,默认 localhost(本地开发);真实部署必须覆盖(勿用明文默认/内网地址入库)
+MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "localhost:9000")
 MINIO_ACCESS = os.environ.get("MINIO_ACCESS_KEY", "admin")
 MINIO_SECRET = os.environ.get("MINIO_SECRET_KEY", "CHANGE_ME")
 MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "cubestack")
