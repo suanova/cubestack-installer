@@ -178,7 +178,6 @@ _copy_glob() {   # <src-dir> <glob>
 }
 _copy_chart() {
     local src="${OFFLINE_DIR}/cubestack-operator/charts/${CHART_TGZ}"
-    [ -f "${src}" ] || src="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator/${CHART_TGZ}"
     if [ ! -f "${src}" ]; then
         err "chart 缺失: ${CHART_TGZ}"
         err "  放到 ${OFFLINE_DIR}/cubestack-operator/charts/(命名 cubestack-operator-chart-<版本>.tgz;"
