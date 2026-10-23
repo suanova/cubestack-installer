@@ -590,10 +590,10 @@ PY
                     || { err "CLI tar sha256 不符: ${_actual} != ${_cli_sha}"; return 1; }
                 ok "CLI tar sha256 一致"
             else
-                warn "release.json 未提供 cli_tar_sha256, 跳过 CLI tar 校验"
+                err "release.json 未提供 cli_tar_sha256, 无法校验 CLI tar"; return 1
             fi
         else
-            warn "release.json 不存在, 跳过 CLI tar 校验"
+            err "release.json 不存在, 无法校验 CLI tar"; return 1
         fi
     fi
     ok "发布版本 ${RELEASE_ARG} 校验通过"
