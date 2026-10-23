@@ -421,7 +421,7 @@ _publish() {
 
     say "上传发布树 → ${remote}/offline-files"
     mc mirror --overwrite "${STAGE_TREE}" "${remote}/offline-files" \
-        || { err "上传发布树失败"; exit 1; }
+        || { err "上传发布树失败; 远端残留需人工清理: mc rm --recursive --force ${remote}"; exit 1; }
     say "上传 CLI tar → ${remote}/cubestack-installer-cli.tar"
     mc cp "${CLI_TAR}" "${remote}/cubestack-installer-cli.tar" \
         || { err "上传 CLI tar 失败"; exit 1; }
