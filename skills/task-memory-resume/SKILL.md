@@ -12,7 +12,7 @@ description: 任务状态记忆与恢复。Use when 开始或继续任何多步�
 - 记忆目录：`/home/ubuntu/.claude/projects/-home-ubuntu-cubestack-installer/memory/`
 - 索引：`MEMORY.md`（会话启动时由系统自动加载，但仍要按下节流程读取进行中快照）
 - 每个任务/主题一个文件：`<topic>-<YYYYMMDD>.md`
-- ⚠ 旧路径 `...-home-supperadm-...` 已失效；一律用上面的 Ubuntu 路径。
+- ⚠ 旧路径 `...-home-supperadm-...` 已失效。若 Ubuntu 目录没有 `MEMORY.md` 或 `[进行中]` 快照，先从旧目录复制这些文件，再继续；之后一律用上面的 Ubuntu 路径。
 
 ## 会话启动：先读记忆（强制）
 
