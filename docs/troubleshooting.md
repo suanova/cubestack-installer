@@ -1679,3 +1679,82 @@ bash deployments/scripts/tools/tests/test-cephfs-mount.sh
 **注意**: operator 的 server-side apply 不渲染 `strategy` 字段, 因此本 patch 不会被下一轮
 调谐覆盖; 若上游 chart 将来显式加入 `strategy`, 需要上游改成 `Recreate` 或提供 values 开关,
 届时本守护会因 `strategy.type != Recreate` 继续纠正。
+
+---
+
+## 六、发布 / 安装链路(2026-10-25)
+
+### 1. CLI 镜像缺 GNU patch → kubespray 补丁层被静默跳过
+
+**症状**
+- `cubestack-offline.sh` 日志出现 `容器内无 patch 命令 → 跳过补丁层自动保障`;
+- 全新安装后 Calico RBAC 等 14 个补丁未生效(可能表现为 calico-node 0/1、非 hostNetwork Pod 访问 ClusterIP 失败、coredns forward 异常等)。
+
+**根因**
+`Dockerfile-cli-base` 已声明安装 `patch`，但 Harbor 上的 `cubestack-installer-cli-base:latest` 是旧构建(2026-09-30)，镜像里实际没有 `/usr/bin/patch`；代码层 CLI 镜像继承旧 base，补丁层检测失败后**降级跳过**而不是报错。
+
+**解法(已根治)**
+- `Dockerfile-cli-base` 增加构建期断言 `command -v patch && patch --version`；
+- `Dockerfile-cli` 最终校验链增加 `command -v patch`；
+- `rebuild-cli-image.yml` 构建后实际运行镜像校验 `patch`，并在 `ci-validate.yml` 加静态门禁；
+- 发布前/重建 base：
+  ```bash
+  sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base --push
+  sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build --push
+  docker run --rm --entrypoint bash <cli-image> -lc 'command -v patch'
+  ```
+
+**边界**: 补丁层仍建议保持"纯净上游 + patch 层"模型；仅对 Calico 单独做 post-render YAML 补丁不能覆盖其余 playbook 逻辑补丁，且重装会回退。
+
+### 2. nodeport registry 的 containerd `hosts.toml` server 指向 5000 → 新镜像拉取卡住
+
+**症状**
+- 新 Pod 长时间 `ContainerCreating`，Events 只有 `Pulling image "registry.cubestack.io:5000/..."`
+  且数分钟无进展(2026-10-25 实测: operator / CNPG postgres init / cuberouter 在 node-3 卡 5min+)；
+- 从节点 `curl http://<master>:31148/v2/` 与 manifest 都是毫秒级，registry 本身正常。
+
+**根因**
+`deploy-registry.sh` 在 nodeport 模式下把 `hosts.toml` 写成:
+```toml
+server = "http://registry.cubestack.io:5000"
+[host."http://<master>:31148"] ...
+```
+nodeport 模式的 registry **不监听 domain:5000**(只有 NodePort)，containerd 对 `server` 的请求超时/挂起，fallback 并不可靠；镜像已缓存时通常无感，一旦需要真正拉取就会卡住。
+
+**解法(已根治)**
+- nodeport 模式 `server` 直接写 `http://<master>:<REGISTRY_NODEPORT>`；
+  loadbalancer 模式仍写 `http://<VIP>:5000`；
+- 存量集群重跑 `--steps k8s_registry`，然后删除卡住的 Pod 让其重新拉取；
+- 验证:
+  ```bash
+  ssh <node> "sudo cat /etc/containerd/certs.d/registry.cubestack.io:5000/hosts.toml"
+  # 期望 server = "http://<master>:31148"
+  ```
+
+**边界**: 修改 `hosts.toml` 对**已经在进行中**的拉取不生效，需要删除/重建 Pod；containerd 不必须重启(每次拉取读取配置)。
+
+### 3. operator 在线/离线切换后 model-bundles Degraded: InferenceRuntimeProfile spec immutable
+
+**症状**
+- `kubectl -n cubestack-system get csc cubestack` → `Ready=False`，`model-bundles(Degraded)`；
+- operator 日志:
+  `applying InferenceRuntimeProfile /metax-sglang-dsv4-pd: ... denied request: spec is immutable`。
+
+**根因**
+`InferenceRuntimeProfile` CRD 带 ValidatingAdmissionPolicy `oldObject == null || object.spec == oldObject.spec`；
+离线模式创建的 profile 镜像前缀是 `registry.cubestack.io:5000`，切在线(Harbor)时 operator 尝试 update
+spec 被 admission 拒绝。helm 可能先把 CR 的 `global.imageRegistry` 改成目标值，所以只看 CR 不够。
+
+**解法(已根治)**
+- `25_cubestack_operator.sh` 在 CR 纠偏阶段检测: CR registry 变化 **或** profile 内任意 `image`
+  前缀不属于目标 registry → 删除 `inferenceruntimeprofiles.ai.cubestack.io --all`，
+  让 operator 按新 registry 重建；
+- 手工即时恢复:
+  ```bash
+  kubectl delete inferenceruntimeprofiles.ai.cubestack.io --all --wait=false
+  # operator 会自动重建；随后 CSC 应恢复 Ready=True
+  ```
+
+**边界 / 代价**: 删除 profile 会让对应模型服务重新调谐(模式切换的一次性操作)；若上游 operator
+改为"create-if-not-exists + spec 不变则跳过 update"，本保护可移除。验证:
+`kubectl get inferenceruntimeprofiles.ai.cubestack.io -o yaml | grep image:` 应全部指向目标 registry。
