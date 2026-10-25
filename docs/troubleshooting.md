@@ -1758,3 +1758,27 @@ spec 被 admission 拒绝。helm 可能先把 CR 的 `global.imageRegistry` 改�
 **边界 / 代价**: 删除 profile 会让对应模型服务重新调谐(模式切换的一次性操作)；若上游 operator
 改为"create-if-not-exists + spec 不变则跳过 update"，本保护可移除。验证:
 `kubectl get inferenceruntimeprofiles.ai.cubestack.io -o yaml | grep image:` 应全部指向目标 registry。
+
+### 4. NVIDIA ClusterPolicy repository 双前缀(在线 Harbor → 离线切换)
+
+**症状**
+- `kubectl get clusterpolicy cluster-policy -o yaml | grep repository:` 出现
+  `registry.cubestack.io:5000/mirrors/harbor.isuanova.com/mirrors/registry.../mirrors/nvcr.io/...`
+  这类多重前缀；组件可能 ImagePullBackOff / ClusterPolicy 不 ready。
+- 模块自检只判断 `startswith(目标base)`，双前缀值也以目标 base 开头 → 自检假绿。
+
+**根因**
+`08_nvidia_gpu_operator.sh` 的 CR 纠偏旧逻辑是"值不以目标 base 开头就 `base + "/" + 原值`"；
+从 Harbor 在线切回内置 registry 时，原值已带 `harbor.isuanova.com/mirrors/`，再拼一次就叠加成双前缀。
+
+**解法(已根治)**
+- 纠偏逻辑改为：在值中定位已知上游前缀(`nvcr.io/` 或 `registry.k8s.io/`)，重建为
+  `<目标base>/<上游路径>`；不再用 `startswith` 早退(双前缀也会以目标 base 开头)。
+- 已干净的值重建后不变 → 幂等；无已知上游前缀的值保持不动(避免误改)。
+- 手工修复:
+  ```bash
+  kubectl get clusterpolicy cluster-policy -o yaml | grep repository:   # 确认双前缀
+  ./deployments/scripts/deploy-cluster.sh --steps nvidia_gpu_operator   # 重新纠偏
+  kubectl get clusterpolicy cluster-policy -o yaml | grep repository: | head
+  # 期望 registry.cubestack.io:5000/mirrors/nvcr.io/nvidia/...
+  ```
