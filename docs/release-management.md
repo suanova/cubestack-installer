@@ -760,6 +760,17 @@ Harbor 不是本方案的依赖；现有部署代码只消费 MinIO 里的 tar�
    - `deployments/releases/2.0.0/release.env`
    - `deployments/releases/2.0.0/release-images.tsv`
 
+> **CLI 镜像必须内置 GNU `patch`**（kubespray 补丁层的前置）：`Dockerfile-cli-base` 安装 `patch`，
+> `Dockerfile-cli` 构建期断言 `command -v patch`；`.github/workflows/rebuild-cli-image.yml`
+> 构建后也会实际运行一次镜像做校验。2026-10-25 实机发现旧 base 镜像缺 `patch`，导致
+> `cubestack-offline.sh` 的补丁层被静默跳过（Calico RBAC 等 14 个补丁不生效）；发布前务必确认
+> `docker run --rm --entrypoint bash <cli-image> -lc 'command -v patch'` 成功。
+>
+> **已有发布树的 CLI tar 命名迁移**：旧布局 `<版本>/cubestack-installer-cli.tar` 应改为
+> `<版本>/cubestack-installer-cli-v<版本>.tar`；同步更新 `release.json` 的
+> `cli_tar`/`cli_tar_sha256`/`cli_tar_size`，重新生成 `SHA256SUMS`，最后重写 `_SUCCESS`。
+> `fetch --release` 仍兼容旧名（release.json 无 `cli_tar` 时自动回退）。
+
 ### 8.2 生成并发布 MinIO 发布树
 
 在能同时访问 Harbor 与 MinIO 的机器上：
