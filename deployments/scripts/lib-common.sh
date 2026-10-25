@@ -632,29 +632,36 @@ ensure_registry_nginx() {
     reg_has_tag "${pr}" "nginx" "${tag}" && { echo "${ref}"; return 0; }
     skopeo_require "verify"
     local src="" _tmp="" _t
-    # ① 本地 docker daemon(nginx 常被手工 pull 过, 快路径)
-    src="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '(/|^)nginx:(latest|[0-9.]+)$' | head -1 || true)"
-    if [ -n "${src}" ]; then
-        echo "  [nginx] 从本地 docker 推送: ${src}" >&2
-        _tmp="$(mktemp)"
-        if sudo docker save "${src}" -o "${_tmp}" >/dev/null 2>&1 \
-           && push_image_skopeo "docker-archive:${_tmp}" "docker://${pr}/nginx:${tag}" >/dev/null 2>&1; then
-            rm -f "${_tmp}"; echo "${ref}"; return 0
+    # 离线 tar 搜索目录: release 模式**只用发布树** —— 绝不回落到 dev/latest offline-files,
+    # 否则 2.0 验证可能拿到 latest 的 nginx(违反"release 与 latest 互不影响")。
+    local -a _nginx_dirs=()
+    if [ -n "${CUBESTACK_RELEASE:-}" ]; then
+        _nginx_dirs=("${OFFLINE_FILES_ROOT}/nginx" "${LOCAL_REPO_DIR}/images")
+    else
+        _nginx_dirs=("${REPO_ROOT}/deployments/offline-files/nginx" \
+                     "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx" \
+                     "${LOCAL_REPO_DIR}/images")
+    fi
+    # ① 本地 docker daemon(仅 dev 模式快路径; release 模式必须走发布树, 避免掩盖缺失的离线件)
+    if [ -z "${CUBESTACK_RELEASE:-}" ]; then
+        src="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '(/|^)nginx:(latest|[0-9.]+)$' | head -1 || true)"
+        if [ -n "${src}" ]; then
+            echo "  [nginx] 从本地 docker 推送: ${src}" >&2
+            _tmp="$(mktemp)"
+            if sudo docker save "${src}" -o "${_tmp}" >/dev/null 2>&1 \
+               && push_image_skopeo "docker-archive:${_tmp}" "docker://${pr}/nginx:${tag}" >/dev/null 2>&1; then
+                rm -f "${_tmp}"; echo "${ref}"; return 0
+            fi
+            rm -f "${_tmp}"; echo "  [nginx] 本地 docker 推送失败, 尝试离线 tar..." >&2
         fi
-        rm -f "${_tmp}"; echo "  [nginx] 本地 docker 推送失败, 尝试离线 tar..." >&2
     fi
     # ② 离线 tar: suffix 用 "nginx:latest"(无前导 /——find_offline_tar 的前导 / 约定只匹配带
     # registry 前缀的全格式, 库镜像短格式如 "nginx:latest" 会漏; glob nginx*.tar 已限定候选)。
     # find_offline_tar 是 endswith 语义, 版本化 tag(nginx:1.31.4)不命中, 下方按内容兜底。
-    _t="$(find_offline_tar "nginx:latest" "nginx*.tar" \
-            "${REPO_ROOT}/deployments/offline-files/nginx" \
-            "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx" \
-            "${LOCAL_REPO_DIR}/images")" || _t=""
+    _t="$(find_offline_tar "nginx:latest" "nginx*.tar" "${_nginx_dirs[@]}")" || _t=""
     if [ -z "${_t}" ]; then
         # 兜底: 版本化 tag(如 nginx:1.31.4)按内容匹配(含 "nginx:" 即接受)
-        for _d in "${REPO_ROOT}/deployments/offline-files/nginx" \
-                  "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx" \
-                  "${LOCAL_REPO_DIR}/images"; do
+        for _d in "${_nginx_dirs[@]}"; do
             [ -d "${_d}" ] || continue
             for _f in "${_d}"/nginx*.tar; do
                 [ -f "${_f}" ] || continue
@@ -742,7 +749,7 @@ load_config() {
     SSH_USER="${SSH_USER:-ubuntu}"
     export SSH_USER
     # ---- release 模式(2026-10-21): 版本目录 + release.env ----
-    # 本地桶根与 MinIO 同构: <root>/<版本>/{offline-files,cubestack-installer-cli.tar}
+    # 本地桶根与 MinIO 同构: <root>/<版本>/{offline-files,cubestack-installer-cli-v<版本>.tar}
     # release.env 提供版本变量, 必须在 kubespray 版本档案块之前加载(才能接管 KUBESPRAY_VERSION)。
     OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
     if [ -n "${CUBESTACK_RELEASE:-}" ]; then
@@ -2099,6 +2106,88 @@ ensure_hosts_block() {
         rm -f "${t}"
     fi
     printf '%s\n' "${content}" >> /etc/hosts 2>/dev/null || true
+}
+
+# ---------------- 节点侧 /etc/hosts: 把 NODES 的 hostname → IP 同步到所有节点 ----------------
+# 背景(2026-10-23 实机 MCCL/RoCE): NODES 的 hostname 是 kubespray inventory / K8s 节点名,
+#   但 installer 此前只写**部署机** /etc/hosts, 节点侧没有这些 hostname 的解析。hostNetwork
+#   Pod 按 hostname 找对端(MCCL socket)时 getent 失败 → 回退 127.0.0.1 → 多机通信失败。
+# 做法(幂等, 不碰 /etc/hostname):
+#   · 每台节点先删除**任一字段**等于受管 hostname 的旧行(含 127.0.1.1 / 换 IP 残留), 再追加当前映射;
+#   · 重复执行每个 hostname 恰好一行; 不改节点实际主机名, 只加 alias;
+#   · 远端写入用 SSH + sudo(密钥优先, 失败回退 sshpass 密码), 与扩容模块同款;
+#   · 任一节点失败 → 打印节点清单并 return 1(调用方必须中止或显式告警, 不得静默成功)。
+# 前置: load_config 已执行(NODES / SSH_KEY_* / SSH_DEFAULT_PASSWORD)。
+# 用法: sync_nodes_hosts_remote || exit 1
+sync_nodes_hosts_remote() {
+    local line hn ip user pw key tmp e
+    local -a entries=() targets=()
+    local -A seen=()
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        [ -n "${NODE_IP}" ] && [ -n "${NODE_HOSTNAME}" ] || continue
+        [ "${NODE_HOSTNAME}" = "-" ] && continue
+        [ -n "${seen[${NODE_HOSTNAME}]:-}" ] && continue
+        seen["${NODE_HOSTNAME}"]=1
+        entries+=("${NODE_IP} ${NODE_HOSTNAME}")
+        targets+=("${NODE_HOSTNAME}|${NODE_IP}|${NODE_USER}|${NODE_PW}")
+    done
+    if [ "${#entries[@]}" -eq 0 ]; then
+        warn "  NODES 无可同步的 hostname/IP, 跳过节点侧 /etc/hosts"
+        return 0
+    fi
+    local managed=""
+    for e in "${entries[@]}"; do managed="${managed} ${e#* }"; done
+    managed="${managed# }"
+    key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+
+    # 远端脚本: 过滤旧行(任一字段命中受管 hostname) + 追加当前映射, 原地覆盖写(不 rename)
+    tmp="$(mktemp)"
+    {
+        cat <<'EOS'
+#!/bin/bash
+set -e
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+EOS
+        printf 'managed=%q\n' "${managed}"
+        cat <<'EOS'
+awk -v managed="$managed" 'BEGIN { n=split(managed, a, " "); for (i=1;i<=n;i++) m[a[i]]=1 }
+{ keep=1; for (i=1;i<=NF;i++) if (m[$i]) { keep=0; break } if (keep) print }' /etc/hosts > "$tmp"
+EOS
+        for e in "${entries[@]}"; do
+            printf 'printf "%%s\\n" %q >> "$tmp"\n' "${e}"
+        done
+        printf 'cat "$tmp" > /etc/hosts\n'
+    } > "${tmp}"
+
+    local failed="" rcmd
+    for line in "${targets[@]}"; do
+        IFS='|' read -r hn ip user pw <<< "${line}"
+        rcmd="sudo bash -s"; [ "${user}" = "root" ] && rcmd="bash -s"
+        if [ -f "${key}" ] && ssh -i "${key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+                "${user}@${ip}" "${rcmd}" < "${tmp}" >/dev/null 2>&1; then
+            continue
+        fi
+        if [ -n "${pw}" ] && command -v sshpass >/dev/null 2>&1 && \
+            env SSHPASS="${pw}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=8 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                "${user}@${ip}" "${rcmd}" < "${tmp}" >/dev/null 2>&1; then
+            continue
+        fi
+        warn "  ${hn}(${ip}) 节点侧 /etc/hosts 写入失败(密钥/密码均不可达)"
+        failed="${failed} ${hn}(${ip})"
+    done
+    rm -f "${tmp}"
+    if [ -n "${failed}" ]; then
+        err "  节点侧 /etc/hosts 同步失败:${failed}"
+        err "  → 修复 SSH/免密后重跑; 否则 hostNetwork Pod 可能无法按 hostname 解析对端(回退 127.0.0.1)"
+        return 1
+    fi
+    ok "  节点侧 /etc/hosts 同步完成(${#entries[@]} 个 hostname → ${#targets[@]} 个节点)"
+    return 0
 }
 
 # ---------------- 宿主机 kubectl/helm 访问集群(共享, 防 TLS/DNAT 坑) ----------------

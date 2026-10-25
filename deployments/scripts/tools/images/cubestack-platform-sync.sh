@@ -8,7 +8,7 @@
 #   两者产出同一份离线包, 选哪条取决于网络与凭据策略。
 # 集合(collections; 每个 = offline-files/<集合>/ 目录 + 其 image-list.tsv 清单):
 #   · cubestack-operator  平台 Operator 与各组件镜像(37 件)+ operator helm chart(charts/ 子目录)
-#   · model-collection    模型推理镜像 sglang / vllm-metax(6 件 ≈95G, 大件建议 .tar.gz)
+#   · model-collection    模型推理镜像 sglang / vllm-metax(2 件 ≈31G, 大件建议 .tar.gz; 2026-10-23 收敛)
 #   · dev-lab             开发镜像 cpu / maca / cuda 家族(3 件; 顶层平铺)
 #   默认全部处理; --collection 可只跑其中若干(逗号/空格分隔)。
 # 流程(逐集合):

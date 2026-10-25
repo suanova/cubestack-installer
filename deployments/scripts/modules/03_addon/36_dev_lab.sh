@@ -9,9 +9,10 @@
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
 #   · 镜像(3 个; 上游均在本台 Harbor 的 suanova 项目 —— 不镜像到 mirrors/, save 直接用原始 ref):
-#       harbor.isuanova.com/suanova/cpu-pytorch:${DEV_LAB_IMAGE_TAG}
-#       harbor.isuanova.com/suanova/maca-pytorch:${DEV_LAB_IMAGE_TAG}
-#       harbor.isuanova.com/suanova/cuda-pytorch:${DEV_LAB_IMAGE_TAG}
+#       harbor.isuanova.com/suanova/cpu-pytorch:${DEV_LAB_CPU_TAG}(默认随 DEV_LAB_IMAGE_TAG=latest)
+#       harbor.isuanova.com/suanova/maca-pytorch:${DEV_LAB_MACA_TAG}
+#       harbor.isuanova.com/suanova/cuda-pytorch:${DEV_LAB_CUDA_TAG}
+#     ⚠ 三家 Harbor tag 命名不一致, 发布版本按镜像分别钉不可变 tag(release.env)。
 #   · 一个 accelerator 一个镜像: jupyter / ssh 模式由运行时 CUBSTACK_TYPE 决定, 不再按模式拆镜像。
 #   · 离线 tar: deployments/offline-files/dev-lab/ 顶层平铺(联网机: harbor-save-images.sh --group dev-lab;
 #     Harbor→MinIO 保鲜管道按 offline-files/dev-lab/image-list.tsv 增量维护);
@@ -46,7 +47,15 @@ init_remote_kubectl || exit 1
 
 # ---------------- 派生变量(全部来自 cluster.conf / load_config, 无硬编码) ----------------
 SAVE_DIR="${DEV_LAB_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/dev-lab}"
-TAG="${DEV_LAB_IMAGE_TAG:-latest}"
+# per-image tag: 发布版本三家 tag 命名不一致, 不能共用一个 DEV_LAB_IMAGE_TAG。
+_devlab_tag() {
+    case "$1" in
+        cpu-pytorch)  echo "${DEV_LAB_CPU_TAG:-${DEV_LAB_IMAGE_TAG:-latest}}" ;;
+        maca-pytorch) echo "${DEV_LAB_MACA_TAG:-${DEV_LAB_IMAGE_TAG:-latest}}" ;;
+        cuda-pytorch) echo "${DEV_LAB_CUDA_TAG:-${DEV_LAB_IMAGE_TAG:-latest}}" ;;
+        *)            echo "${DEV_LAB_IMAGE_TAG:-latest}" ;;
+    esac
+}
 HARBOR_HOST="harbor.isuanova.com"                        # 上游注册域(与 images.manifest dev-lab 组一致)
 # 集群内置 registry 双端点(与 multus/rdma/gpu 同款): REG_DIRECT=推送直连, REG_BASE=节点引用
 REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-5000}}"
@@ -58,7 +67,7 @@ IMAGES=(
     cuda-pytorch
 )
 
-say "开发镜像 → 集群内置 registry(共 ${#IMAGES[@]} 个; 源 ${SAVE_DIR}, tag=${TAG})..."
+say "开发镜像 → 集群内置 registry(共 ${#IMAGES[@]} 个; 源 ${SAVE_DIR}; per-image tag)..."
 if [ ! -d "${SAVE_DIR}" ]; then
     warn "离线目录不存在: ${SAVE_DIR}"
     warn "  生成离线 tar: sudo ./deployments/scripts/tools/images/harbor-save-images.sh --group dev-lab"
@@ -79,20 +88,21 @@ trap 'rm -rf "${PUSH_RESULT_DIR}"' EXIT
 # 单镜像 worker(后台子 shell 执行; 结果写 ${PUSH_RESULT_DIR}/<idx>.result)
 # 参数: "<idx>|<img>"(避免把含空格的路径拆开)
 _devlab_push_one() {
-    local task="$1" _idx _img _sd _tar _dst _dst_ref
+    local task="$1" _idx _img _tag _sd _tar _dst _dst_ref
     local _c_dst _c_src _d_dst _d_src _t0 _dt _size _rate
     _idx="${task%%|*}"; _img="${task#*|}"
+    _tag="$(_devlab_tag "${_img}")"
     # 离线 tar 顶层平铺: accelerator 家族镜像不再按模式/家族分子目录
     _sd="${SAVE_DIR}"
-    _tar="$(find_offline_tar "${_img}:${TAG}" "*.tar" "${_sd}" 2>/dev/null || true)"
+    _tar="$(find_offline_tar "${_img}:${_tag}" "*.tar" "${_sd}" 2>/dev/null || true)"
     if [ -z "${_tar}" ]; then
         printf 'miss\t缺离线 tar: %s:%s(跳过; 生成: sudo tools/images/harbor-save-images.sh --group dev-lab)\n' \
-            "${_img}" "${TAG}" > "${PUSH_RESULT_DIR}/${_idx}.result"
+            "${_img}" "${_tag}" > "${PUSH_RESULT_DIR}/${_idx}.result"
         return 0
     fi
     # 目标 ref: 去 Harbor 注册域, 保 suanova/ 路径(与 25 模块同款映射)
-    _dst="docker://${REG_DIRECT}/suanova/${_img}:${TAG}"
-    _dst_ref="${REG_BASE}/suanova/${_img}:${TAG}"
+    _dst="docker://${REG_DIRECT}/suanova/${_img}:${_tag}"
+    _dst_ref="${REG_BASE}/suanova/${_img}:${_tag}"
     # 幂等(2026-10-19 修正): 优先比 **config digest** —— push 会重新压缩层, manifest/layer
     # digest 会变(实测), 但 config blob digest 稳定; 老逻辑比 manifest digest 会每次重推。
     _c_dst="$(image_config_digest_raw "${_dst}")"
@@ -160,7 +170,7 @@ say "开发镜像加载: 新推 ${_n_push} / digest 跳过 ${_n_skip} / 缺 tar 
 [ "${_n_miss}" -gt 0 ] && warn "  有 ${_n_miss} 个镜像缺离线 tar(生成: harbor-save-images.sh --group dev-lab)"
 [ "${_n_fail}" -gt 0 ] && warn "  有 ${_n_fail} 个镜像推送失败(重跑本模块自动续推, 已推的按 digest 跳过)"
 if [ $((_n_push + _n_skip)) -gt 0 ]; then
-    ok "开发镜像处理完成(引用: ${REG_BASE}/suanova/<name>:${TAG}; 节点从此 registry 拉取)"
+    ok "开发镜像处理完成(引用: ${REG_BASE}/suanova/<name>:<per-image tag>; 节点从此 registry 拉取)"
     # 优雅覆盖登记(集群内资产: registry 镜像内容; 无独立卸载动作 —— 随集群/registry 覆盖消亡)
     record_installed_component "dev_lab"
 else

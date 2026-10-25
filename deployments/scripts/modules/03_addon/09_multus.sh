@@ -76,7 +76,49 @@ IMG_REF="${REG_BASE}/k8snetworkplumbingwg/multus-cni:${IMG_TAG}"
 # 示例 macvlan 网络参数(cluster.conf 可改)
 NAD_NAME="${MULTUS_NAD_NAME:-multus-nad}"
 NAD_NS="${MULTUS_NAD_NAMESPACE:-default}"
-MASTER_IFACE="${MULTUS_MASTER_IFACE:-eth0}"
+MASTER_IFACE="${MULTUS_MASTER_IFACE:-auto}"
+
+# 默认路由网卡探测(2026-10-25): 默认值曾是硬编码 eth0, 但 VM/裸金属常见 enp1s0/ens*,
+# NAD 的 macvlan master 指向不存在的网卡 → 测试 Pod / 业务 Pod 报 "Link not found"。
+# auto = 逐节点探测默认路由出口; 要求所有节点同名(单个 NAD 的 master 对所有节点生效)。
+_default_master_iface() {
+    local line ip u ifc out=""
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        ip="${NODE_IP}"
+        u="$(ssh_user_for_ip "${ip}")"
+        ifc="$(ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+                  -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${u}@${ip}" \
+                  "ip route show default 2>/dev/null | awk '{print \$5; exit}'" 2>/dev/null || true)"
+        [ -n "${ifc}" ] && out="${out}${out:+$'\n'}${ifc}"
+    done
+    printf '%s\n' "${out}" | sed '/^$/d' | sort -u
+}
+if [ "${MASTER_IFACE}" = "auto" ] || [ -z "${MASTER_IFACE}" ]; then
+    _ifaces="$(_default_master_iface)"
+    _nif="$(printf '%s\n' "${_ifaces}" | sed '/^$/d' | wc -l)"
+    if [ "${_nif}" -eq 1 ]; then
+        MASTER_IFACE="$(printf '%s\n' "${_ifaces}" | sed '/^$/d')"
+        say "  自动探测节点默认路由网卡: ${MASTER_IFACE}"
+    elif [ "${_nif}" -eq 0 ]; then
+        err "无法探测节点默认路由网卡; 请在 cluster.conf 显式设置 MULTUS_MASTER_IFACE=<网卡名>"
+        exit 1
+    else
+        err "各节点默认路由网卡不一致: $(printf '%s' "${_ifaces}" | tr '\n' ' ')"
+        err "  单个 NAD 的 master 对所有节点生效, 请显式设置 MULTUS_MASTER_IFACE=<统一网卡名>"
+        exit 1
+    fi
+fi
+# 显式值也做存在性预检: 不存在时提前失败, 不把坏 NAD 下发到集群。
+if ! ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "$(ssh_user_for_ip "$(first_master_ip)")@$(first_master_ip)" \
+        "ip link show dev '${MASTER_IFACE}' >/dev/null 2>&1"; then
+    err "MULTUS_MASTER_IFACE=${MASTER_IFACE} 在首个 master 上不存在; 检查 cluster.conf 或设为 auto"
+    exit 1
+fi
+
 NAD_SUBNET="${MULTUS_SUBNET:-192.168.99.0/24}"
 NAD_RANGE_START="${MULTUS_RANGE_START:-192.168.99.200}"
 NAD_RANGE_END="${MULTUS_RANGE_END:-192.168.99.216}"

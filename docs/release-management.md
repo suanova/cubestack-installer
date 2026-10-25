@@ -32,7 +32,7 @@ cubestack-installer/                     # MinIO 桶根
 │   │   ├── cubestack-operator/          # 与 offline-files 同构(含 charts/)
 │   │   ├── rdma/  multus/  dev-lab/  model-collection/  ...
 │   │   └── ...                          # 只包含本版本启用的组件
-│   └── cubestack-installer-cli.tar      # 2.0.0 的 CLI 镜像（离线加载用）
+│   └── cubestack-installer-cli-v2.0.0.tar      # 2.0.0 的 CLI 镜像（离线加载用）
 └── 1.9.0/                               # 历史版本，供回滚
 ```
 
@@ -49,7 +49,7 @@ sglang / vllm-metax 保持各自上游版本）；版本开关同时支持 `clus
 `deploy-cluster.sh --release`。
 
 **MinIO 结构（2026-10-21 定稿）**: `cubestack-installer/offline-files/` 完全不动；
-桶根新增 `<版本>/offline-files/` + `<版本>/cubestack-installer-cli.tar`（见上图）。
+桶根新增 `<版本>/offline-files/` + `<版本>/cubestack-installer-cli-v<版本>.tar`（见上图）。
 
 `load_config` 会把 `OFFLINE_FILES_ROOT` 指到 `.../2.0.0/offline-files`，并加载该目录的
 `release.env`；现有模块的 tar 查找逻辑**一行不用改**。
@@ -136,12 +136,13 @@ LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}}"
 
 ```text
 远端 <bucket>/<version>/offline-files/  →  本地 <base>/<version>/offline-files/
-远端 <bucket>/<version>/cubestack-installer-cli.tar
-                                        →  本地 <base>/<version>/cubestack-installer-cli.tar
+远端 <bucket>/<version>/cubestack-installer-cli-v<version>.tar
+                                        →  本地 <base>/<version>/cubestack-installer-cli-v<version>.tar
 ```
 
-`--release` 只切换源根与目标布局，磁盘预检、`mc mirror`、增量续传等逻辑复用现有实现；
-`--sub` 的语义完全不变。
+`--release` 只切换源根与目标布局，磁盘预检、增量续传等逻辑复用现有实现；发布树用
+**`mc cp --recursive` 按对象名精确复制**（`--sub` 仍用 `mc mirror`），不做目录同步/覆盖语义，
+从源头保证部署树只由该版本目录的对象决定，与 latest 通道互不影响。`--sub` 的语义完全不变。
 
 ### 1.5 现有 CI 的位置
 
@@ -178,7 +179,7 @@ cubestack-installer/                     # MinIO 桶根
 │   │   ├── cubestack-operator/          # 本体 + 各组件子目录 + charts/
 │   │   ├── rdma/  multus/  dev-lab/  model-collection/  ...
 │   │   └── ...                          # 只包含本版本启用的组件
-│   └── cubestack-installer-cli.tar      # 2.0.0 的 CLI 镜像（离线加载用）
+│   └── cubestack-installer-cli-v2.0.0.tar      # 2.0.0 的 CLI 镜像（离线加载用）
 └── 1.9.0/                               # 历史版本，供回滚
 ```
 
@@ -200,7 +201,7 @@ cubestack-installer/                     # MinIO 桶根
 ├── offline-files/                       # dev 通道（OFFLINE_FILES_ROOT）
 ├── 2.0.0/
 │   ├── offline-files/                   # release 根（部署时 OFFLINE_FILES_ROOT 指向这里）
-│   └── cubestack-installer-cli.tar
+│   └── cubestack-installer-cli-v2.0.0.tar
 └── 1.9.0/
 ```
 
@@ -208,7 +209,7 @@ cubestack-installer/                     # MinIO 桶根
 
 ```text
 /data/cubestack-installer/2.0.0/offline-files/...
-/data/cubestack-installer/2.0.0/cubestack-installer-cli.tar
+/data/cubestack-installer/2.0.0/cubestack-installer-cli-v2.0.0.tar
 ```
 
 部署配置：
@@ -243,10 +244,15 @@ CUBESTACK_RELEASE_ROOT="/data/cubestack-installer"
 | 大件（已包含） | `dev-lab`、`model-collection` | **2.0 已确认包含**（接受冗余；单版本体积较大） |
 | 虚拟机 | `virtual-machine` | **2.0 已确认排除**（按需单独交付） |
 
-`model-collection` 约 85G、`dev-lab` 约 44G，release-2.0 **明确把它们放进发布树**，
-因此单版本发布树会比较大（核心部署集 + 约 130G），这是已接受的存储冗余。
+`model-collection` 约 44G、`dev-lab` 约 46G，release-2.0 **明确把它们放进发布树**，
+因此单版本发布树会比较大（核心部署集 + 约 90G），这是已接受的存储冗余。
 `virtual-machine` 仍不放入发布树；如果后续某个版本需要，再按同一套
 `<版本>/offline-files/` 结构单独生成一份发布树，不影响本方案。
+
+> **NVIDIA 组必须自带 NFD 镜像**：`NFD_ENABLED=false`（默认）时 NVIDIA operator 使用内嵌
+> NFD，模块只从 `offline-files/nvidia-gpu-operator/` 找 `nfd/node-feature-discovery` 镜像。
+> 该镜像在 `images.manifest` 里登记为 `k8s-base`，`release-publish.sh stage` 会从发布树的
+> `kubespray/<ver>/images/` 自动补入本组，`verify` 会强制校验（缺失直接失败）。
 
 ---
 
@@ -267,20 +273,28 @@ KUBESPRAY_VERSION=v2.32.0
 KUBESPRAY_PROFILE=v2.32.0
 
 # 自研镜像 tag(仅镜像清单/发布树登记用; 部署时 operator 镜像 tag 由 chart 自带, installer 不覆盖)
-CUBESTACK_OPERATOR_IMAGE_TAG=2.0.0
-# chart 版本提示(可省略; release 模式优先按 CUBESTACK_RELEASE / Chart.yaml version 发现)
-CUBESTACK_OPERATOR_CHART_VERSION=2.0.0
+CUBESTACK_OPERATOR_IMAGE_TAG=v2.0.0-rc2
+# chart 版本(发布树文件名 + verify 校验用; Chart.yaml version 必须一致)
+CUBESTACK_OPERATOR_CHART_VERSION=2.0.0-rc2
 # release 树自带 chart(offline-files/cubestack-operator/charts/), 部署恒用本地副本
 CUBESTACK_OPERATOR_CHART_SYNC=offline
-DEV_LAB_IMAGE_TAG=2.0.0
-# CLI 镜像(发布脚本用它生成 <版本>/cubestack-installer-cli.tar)
-CUBESTACK_CLI_IMAGE=harbor.isuanova.com/suanova/cubestack-installer-cli:2.0.0
+# dev-lab: Harbor 三家 tag 命名不一致, 必须按镜像分别钉(不再使用单一 DEV_LAB_IMAGE_TAG)
+DEV_LAB_CPU_TAG=py310-torch2.4-v2.0.0-rc2
+DEV_LAB_MACA_TAG=3.9.0.12-py310-torch2.4-v2.0.0-rc2
+DEV_LAB_CUDA_TAG=26.08-v2.0.0-rc2
+# CLI 镜像(发布脚本用它生成 <版本>/cubestack-installer-cli-v<版本>.tar)
+CUBESTACK_CLI_IMAGE=harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2
 
 # model-collection 的 sglang / vllm-metax 保持各自上游 tag, 不在这里统一;
 # 具体 ref/文件名以 offline-files/model-collection/image-list.tsv 为准。
 
 # 上游固定版本：与 release tree 中 tar 文件名一致
-# （若无变化可省略，load_config 会沿用 cluster.defaults.conf；发布脚本应校验一致性）
+# images.manifest 引用的**全部版本变量都必须在此冻结**(发布机构建时优先于 cluster.conf,
+# 否则同一版本在不同发布机上会产出不同 tag 的发布树; test-release-mode.sh ⑥b 门禁)。
+K8S_VERSION=v1.35.8
+CALICO_VERSION=v3.32.2
+CEPH_VERSION=v20.2.2
+# …(其余 Ceph/CSI/kubespray 基座版本见 deployments/releases/2.0.0/release.env)
 RDMA_IMAGE_TAG=v1.5.4
 MULTUS_IMAGE_TAG=v4.2.2-thick
 
@@ -311,6 +325,10 @@ RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev
   只有必要时才设 `CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE=<tag>`(仅覆盖 cubestack-operator
   自身镜像, **不覆盖** operator catalog 内其他组件版本)。`CUBESTACK_OPERATOR_IMAGE_TAG`
   仅用于镜像清单/发布树登记。发布树的镜像 tar 必须按最终 operator ref 命名。
+- **`release-publish.sh verify` 门禁**: chart `Chart.yaml` 的 `version` 必须等于
+  `CUBESTACK_OPERATOR_CHART_VERSION`, `appVersion` 必须等于 `CUBESTACK_OPERATOR_IMAGE_TAG`
+  (防止 chart 与镜像错配); `release-images.tsv` 必须登记该 operator tag; `RELEASE_GROUPS`
+  中每个组必须在发布树里至少落位一个文件。
 - ⚠ `KUBESPRAY_VERSION` / `K8S_VERSION` 等 **kubespray 版本面变量**随后会被
   `deployments/config/profiles/<KUBESPRAY_PROFILE>.profile` 接管（`load_config` 的既有逻辑）。
   发布时 CLI 镜像固定为 `2.0.0`，镜像内的 profile 随之冻结，所以两者应当一致；发布脚本需校验
@@ -335,7 +353,7 @@ RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev
   "operator_chart_version": "2.0.0",
   "groups": ["kubespray", "ceph", "multus", "rdma", "netshoot", "nginx", "cubestack-operator", "dev-lab", "model-collection"],
   "cli_image": "harbor.isuanova.com/suanova/cubestack-installer-cli:2.0.0",
-  "cli_tar": "../cubestack-installer-cli.tar",
+  "cli_tar": "../cubestack-installer-cli-v2.0.0.tar",
   "cli_tar_sha256": "<64位hex，与 sha256sum 输出一致>",
   "cli_tar_size": 123456789,
   "harbor": {
@@ -355,8 +373,11 @@ RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev
 ```
 
 - `SHA256SUMS` 覆盖 `<版本>/offline-files/` 内除自身和 `_SUCCESS` 外的全部文件；
-- `cubestack-installer-cli.tar` 在 `<版本>/` 下，校验值写入 `release.json` 的
+- `cubestack-installer-cli-v2.0.0.tar` 在 `<版本>/` 下，校验值写入 `release.json` 的
   `cli_tar_sha256` / `cli_tar_size`（不放进 `SHA256SUMS`，避免跨目录相对路径）；
+- CLI tar 文件名**必须带发布版本**（`cubestack-installer-cli-v<版本>.tar`），保证不同版本在同一
+  本地桶根/下载目录互不覆盖；`fetch` 仍兼容旧布局 `cubestack-installer-cli.tar`
+  （`release.json` 无 `cli_tar` 字段或远端只有旧名时自动回退）。
 - `_SUCCESS` 内容为版本与时间，**最后写入**；
 - fetch 侧先检查 `_SUCCESS`，再下载，最后 `sha256sum -c` + 校验 CLI tar；
 - 发布脚本**拒绝覆盖**已存在的 `<版本>/`；修复发新 patch 版本。
@@ -507,7 +528,7 @@ sudo ./deploy-cluster.sh --release 2.0.0
 │   ├── SHA256SUMS
 │   ├── _SUCCESS
 │   └── kubespray/ cubestack-operator/ rdma/ ...
-└── cubestack-installer-cli.tar
+└── cubestack-installer-cli-v2.0.0.tar
 ```
 
 > ⚠ `--release` 模式下 `--dest` 是**本地桶根**（包含 `<版本>/` 与 `offline-files/`），
@@ -524,14 +545,15 @@ export CUBESTACK_RELEASE_ROOT=/data/cubestack-installer
 
 ### 5.2 实现方式
 
-`fetch-offline-from-minio.sh` 复用现有下载/磁盘预检/`mc mirror` 逻辑，只切换源根与目标布局：
+`fetch-offline-from-minio.sh` 复用现有下载/磁盘预检逻辑，只切换源根与目标布局；其中
+release 模式用 `mc cp --recursive` 精确复制版本目录对象，`--sub` 模式仍用 `mc mirror`：
 
 1. 解析 `--release <ver>`（与 `--sub` 互斥）：
    - 本地根 `TARGET`：`--dest` > 环境/minio.conf 的 `CUBESTACK_RELEASE_ROOT` > `${REPO_ROOT}/offline-releases`；
    - 远端版本目录 `RELEASE_BASE="<alias>/<bucket>/<ver>"`；
    - 检查 `${RELEASE_BASE}/offline-files/_SUCCESS`，否则报"发布未完成"；
 2. 下载 `${RELEASE_BASE}/offline-files/` → `${TARGET}/<ver>/offline-files/`；
-3. 下载 `${RELEASE_BASE}/cubestack-installer-cli.tar` → `${TARGET}/<ver>/cubestack-installer-cli.tar`；
+3. 下载 `${RELEASE_BASE}/cubestack-installer-cli-v<ver>.tar` → `${TARGET}/<ver>/cubestack-installer-cli-v<ver>.tar`；
 4. 默认校验：
    - 在 `${TARGET}/<ver>/offline-files/` 执行 `sha256sum -c SHA256SUMS`；
    - 按 `release.json.cli_tar_sha256` 校验 CLI tar；
@@ -620,13 +642,13 @@ export CUBESTACK_RELEASE_ROOT=/data/cubestack-installer
 5b. 产出 CLI tar（离线部署机加载用）：
      skopeo copy --override-os linux --override-arch amd64 \
        docker://harbor.isuanova.com/suanova/cubestack-installer-cli:2.0.0 \
-       docker-archive:/data/release-staging/2.0.0/cubestack-installer-cli.tar:harbor.isuanova.com/suanova/cubestack-installer-cli:2.0.0
+       docker-archive:/data/release-staging/2.0.0/cubestack-installer-cli-v2.0.0.tar:harbor.isuanova.com/suanova/cubestack-installer-cli:2.0.0
 6. 生成元数据（都在 staging/offline-files/ 下）：
      release.env / release.json / SHA256SUMS
-     release.json.cli_tar_sha256 / cli_tar_size 记录 ../cubestack-installer-cli.tar
+     release.json.cli_tar_sha256 / cli_tar_size 记录 ../cubestack-installer-cli-v2.0.0.tar
 7. 上传到：
      <bucket>/2.0.0/offline-files/                # 发布树
-     <bucket>/2.0.0/cubestack-installer-cli.tar   # CLI 镜像
+     <bucket>/2.0.0/cubestack-installer-cli-v2.0.0.tar   # CLI 镜像
    要求：<bucket>/2.0.0/ 不存在；先传文件，最后传 offline-files/_SUCCESS
 8. 校验：远端逐文件 sha256 ↔ SHA256SUMS；CLI tar ↔ release.json；release.env 版本一致
 ```
@@ -641,7 +663,7 @@ export CUBESTACK_RELEASE_ROOT=/data/cubestack-installer
 | dev-lab | `suanova/{cpu,maca,cuda}-pytorch:2.0.0` | `..._2.0.0.tar` | `<REG>/suanova/...` |
 | model-collection | `suanova/sglang:<上游tag>` / `suanova/vllm-metax:<上游tag>` | 按 `model-collection/image-list.tsv` | `<REG>/suanova/...` |
 | 固定短名 | `mirrors/...` | `busybox.tar` / `nginx.tar` | 按模块字面名读取 |
-| CLI 镜像 | `suanova/cubestack-installer-cli:2.0.0` | `cubestack-installer-cli.tar`（`<版本>/` 下） | 部署机 `docker load` |
+| CLI 镜像 | `suanova/cubestack-installer-cli:2.0.0` | `cubestack-installer-cli-v2.0.0.tar`（`<版本>/` 下） | 部署机 `docker load` |
 
 `release-images.tsv` 示例：
 
@@ -713,6 +735,16 @@ Harbor 不是本方案的依赖；现有部署代码只消费 MinIO 里的 tar�
 
 ## 8. release-2.0 操作手册
 
+### 8.0 分支与 cherry-pick 流程（2026-10-25）
+
+- `release-2.0` 是 2.0 的**发布维护分支**；`deployments/releases/2.0.0/`、CLI tar 带版本命名、
+  `fetch --release` 的 `mc cp --recursive` 精确取件、发布树 `_SUCCESS` 落位等契约在该分支冻结。
+- 日常修复先合入 `main`，再 **cherry-pick 到 `release-2.0`**；也可以直接对 `release-2.0` 提 PR。
+- CI（`.github/workflows/ci-validate.yml`）对 **push 到 `main` / `release-2.0`** 以及所有 PR
+  运行；其中 `test-release-mode.sh` 专门校验 release 模式契约（路径派生、带版本 CLI tar、
+  旧布局兼容、`mc cp` 取件、`_SUCCESS`、发布定义冻结）。
+- 正式发版在 `release-2.0` 分支上执行 `release-publish.sh stage/verify/publish --release 2.0.0`。
+
 ### 8.1 发布前（镜像生产）
 
 1. 各组件仓库产出 `2.0.0` 镜像（operator / 平台组件 / CLI / dev-lab）；
@@ -744,7 +776,7 @@ bash deployments/scripts/tools/images/release-publish.sh publish --release 2.0.0
 ```bash
 mc ls -r minio/cubestack-installer/2.0.0/offline-files/ | tail
 mc stat minio/cubestack-installer/2.0.0/offline-files/_SUCCESS
-mc stat minio/cubestack-installer/2.0.0/cubestack-installer-cli.tar
+mc stat minio/cubestack-installer/2.0.0/cubestack-installer-cli-v2.0.0.tar
 ```
 
 ### 8.3 部署机取件
@@ -753,7 +785,7 @@ mc stat minio/cubestack-installer/2.0.0/cubestack-installer-cli.tar
 # 1) 取发布版本（本地桶根 /data/cubestack-installer 与 MinIO 桶根同构）
 ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
     --release 2.0.0 --dest /data/cubestack-installer
-# → /data/cubestack-installer/2.0.0/{offline-files/, cubestack-installer-cli.tar}
+# → /data/cubestack-installer/2.0.0/{offline-files/, cubestack-installer-cli-v2.0.0.tar}
 
 # 2) 配置版本开关（cluster.conf）
 CUBESTACK_RELEASE="2.0.0"
@@ -761,7 +793,7 @@ CUBESTACK_RELEASE_ROOT="/data/cubestack-installer"
 OFFLINE_FILES_ROOT="/data/cubestack-installer/offline-files"   # dev 根
 
 # 3) 加载 2.0.0 的 CLI 镜像（名字/tag 以 tar 内 RepoTags 为准）
-sudo docker load -i /data/cubestack-installer/2.0.0/cubestack-installer-cli.tar
+sudo docker load -i /data/cubestack-installer/2.0.0/cubestack-installer-cli-v2.0.0.tar
 
 # 4) 部署（在 CLI 容器内或宿主机直跑）
 sudo ./deployments/scripts/deploy-cluster.sh
@@ -808,7 +840,7 @@ sudo ./deployments/scripts/deploy-cluster.sh
 - [ ] `model-collection/image-list.tsv` 存在于发布树（模块 37 依赖）；
 - [ ] `cubestack-operator/charts/<chart>-2.0.0.tgz` 存在于发布树（模块 25 恒用本地 chart）；
 - [ ] `2.0.0/offline-files/` 包含 `release.env`、`SHA256SUMS`、`_SUCCESS`；
-- [ ] `2.0.0/cubestack-installer-cli.tar` 存在，sha256 与 `release.json` 一致；
+- [ ] `2.0.0/cubestack-installer-cli-v2.0.0.tar` 存在，sha256 与 `release.json` 一致；
 - [ ] `_SUCCESS` 缺失时 `fetch --release` 拒绝下载；
 - [ ] `sha256sum -c SHA256SUMS` 全量通过；
 - [ ] `CUBESTACK_RELEASE=2.0.0` 时 `OFFLINE_FILES_ROOT` 指向 `2.0.0/offline-files`，且
@@ -888,7 +920,7 @@ cat deployments/releases/2.0.0/release-images.tsv
 # 2) 生成 staging
 bash deployments/scripts/tools/images/release-publish.sh stage --release 2.0.0
 #    → /data/release-staging/2.0.0/offline-files/{kubespray,multus,rdma,...,cubestack-operator}
-#    → /data/release-staging/2.0.0/cubestack-installer-cli.tar
+#    → /data/release-staging/2.0.0/cubestack-installer-cli-v2.0.0.tar
 #      注意: ceph 镜像按 image_group_dir 写入 kubespray/<ver>/images/, 无顶层 ceph/
 
 # 3) 校验 staging（Harbor digest ↔ tar，文件名 ↔ tag，SHA256SUMS，CLI tar）
@@ -901,7 +933,7 @@ bash deployments/scripts/tools/images/release-publish.sh publish --release 2.0.0
 # 5) 取件（本地桶根 /data/cubestack-installer 与 MinIO 桶根同构）
 ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
     --release 2.0.0 --dest /data/cubestack-installer
-# → /data/cubestack-installer/2.0.0/{offline-files/, cubestack-installer-cli.tar}
+# → /data/cubestack-installer/2.0.0/{offline-files/, cubestack-installer-cli-v2.0.0.tar}
 
 # 6) 配置
 #   cluster.conf:
@@ -910,7 +942,7 @@ bash deployments/scripts/tools/images/release-publish.sh publish --release 2.0.0
 #     OFFLINE_FILES_ROOT="/data/cubestack-installer/offline-files"
 
 # 7) 加载 CLI 镜像并部署
-sudo docker load -i /data/cubestack-installer/2.0.0/cubestack-installer-cli.tar
+sudo docker load -i /data/cubestack-installer/2.0.0/cubestack-installer-cli-v2.0.0.tar
 sudo ./deployments/scripts/deploy-cluster.sh
 
 # 8) 验证

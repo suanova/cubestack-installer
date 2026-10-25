@@ -268,7 +268,7 @@ bash "${SCRIPT_DIR}/modules/02_k8s/01_k8s_passwordless.sh" # 仅新节点注入�
 bash "${SCRIPT_DIR}/modules/02_k8s/02_k8s_workerbm.sh"     # 仅新 worker 离线装包(版本感知+依赖修复)
 bash "${SCRIPT_DIR}/modules/02_k8s/05_k8s_ntp.sh"          # NTP: 首 master chrony 权威(无过滤, 照常配置)+ 新节点同步/校验
 unset ONLY_HOSTS
-bash "${SCRIPT_DIR}/modules/02_k8s/03_k8s_hosts.sh"        # 宿主机 /etc/hosts 全量收敛(幂等, 默认关)
+bash "${SCRIPT_DIR}/modules/02_k8s/03_k8s_hosts.sh"        # 节点侧 hostname→IP(所有 NODES, 无条件) + 部署机 hosts(默认关)
 ok "环境就绪(新节点可 SSH, 时间已同步)"
 
 # ── 1.5 新节点 /etc/hosts + registry certs.d 域名同步(API 域名 → 生效入口 / registry 域名 → REGISTRY_IP; 幂等) ──

@@ -19,15 +19,19 @@ on:
   # Code-layer inputs baked into the CLI image. offline-files/ and
   # kubespray/versions/ are excluded on purpose (mounted/fetched at runtime).
   push:
-    branches: [main]
+    # main = dev 通道(:latest + MinIO offline-files/cli/);
+    # release-2.0 = 发布通道(只推 release.env 指定的版本化 CLI 镜像, 不碰 :latest/dev 前缀)。
+    branches: [main, release-2.0]
     paths:
       - 'deployments/scripts/**'
       - 'deployments/kubespray/**'
       - '!deployments/kubespray/versions/**'
       - 'deployments/cubestack-addon/**'
       - 'deployments/config/**'
+      - 'deployments/releases/**'
       - 'skills/**'
       - 'Dockerfile-cli'
+      - 'Dockerfile-cli-base'
       - '.dockerignore'
       - '.github/workflows/rebuild-cli-image.yml'
   workflow_dispatch:
@@ -57,7 +61,6 @@ jobs:
       HARBOR_USER: ${{ vars.HARBOR_MIRROR_USER || secrets.HARBOR_MIRROR_USER }}
       HARBOR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
       HARBOR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
-      IMAGE: harbor.isuanova.com/suanova/cubestack-installer-cli:latest
       IMAGE_VERSION: ${{ github.event.inputs.version || '' }}
       MINIO_ENDPOINT: ${{ secrets.MINIO_HOSTNAME }}
       MINIO_ACCESS_KEY: ${{ secrets.MINIO_USERNAME }}
@@ -83,6 +86,24 @@ jobs:
           done
           [ "${missing}" = "0" ] || exit 1
 
+      - name: Resolve target image & channel
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" = "refs/heads/release-2.0" ]; then
+            # release-2.0: 只推 release.env 钉死的版本化 CLI 镜像; 不写 :latest,
+            # 也不同步 MinIO offline-files/cli/(那是 dev/latest 通道)。
+            rel_env="deployments/releases/2.0.0/release.env"
+            [ -f "${rel_env}" ] || { echo "::error::missing ${rel_env}"; exit 1; }
+            image="$(set -a; . "${rel_env}"; set +a; printf '%s' "${CUBESTACK_CLI_IMAGE:-}")"
+            [ -n "${image}" ] || { echo "::error::${rel_env} 缺少 CUBESTACK_CLI_IMAGE"; exit 1; }
+            echo "SYNC_DEV_MINIO=false" >> "${GITHUB_ENV}"
+          else
+            image="${HARBOR_HOST}/suanova/cubestack-installer-cli:latest"
+            echo "SYNC_DEV_MINIO=true" >> "${GITHUB_ENV}"
+          fi
+          echo "IMAGE=${image}" >> "${GITHUB_ENV}"
+          echo "resolved image: ${image}" | tee -a "${GITHUB_STEP_SUMMARY}"
+
       - name: Reclaim disk space
         run: |
           set -euo pipefail
@@ -101,6 +122,19 @@ jobs:
         run: |
           set -euo pipefail
           bash deployments/scripts/tools/docker/build-cli-context.sh --build --engine docker
+          # build-cli-context.sh 固定产出 :latest; release-2.0 分支只额外打版本 tag,
+          # 不推送 :latest(避免 release 代码覆盖 dev/latest 通道)。
+          built="harbor.isuanova.com/suanova/cubestack-installer-cli:latest"
+          if [ "${IMAGE}" != "${built}" ]; then
+            docker tag "${built}" "${IMAGE}"
+          fi
+
+      - name: Verify required tools are baked into image
+        run: |
+          set -euo pipefail
+          # patch 是 kubespray 补丁层的必需工具; 缺失会让补丁层静默跳过。
+          docker run --rm --entrypoint bash "${IMAGE}" -lc \
+            'command -v patch >/dev/null && patch --version | head -1'
 
       - name: Push image
         run: |
@@ -124,8 +158,10 @@ jobs:
           docker push "${target}"
           echo "pushed ${target}" | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # 把 :latest 导出为离线 tar 同步到 MinIO; 镜像内容未变(按 image ID)则跳过
+      # 把 :latest 导出为离线 tar 同步到 MinIO; 镜像内容未变(按 image ID)则跳过。
+      # release-2.0 分支不做这一步(发布的 CLI tar 由 release-publish.sh 写入 <版本>/ )。
       - name: Export CLI image & sync tar to MinIO
+        if: env.SYNC_DEV_MINIO == 'true'
         run: |
           set -euo pipefail
           if [ -z "${MINIO_ENDPOINT:-}" ] || [ -z "${MINIO_ACCESS_KEY:-}" ] || [ -z "${MINIO_SECRET_KEY:-}" ]; then

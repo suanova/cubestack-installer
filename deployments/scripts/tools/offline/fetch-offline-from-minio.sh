@@ -45,7 +45,8 @@
 #   ./fetch-offline-from-minio.sh --release 2.0.0 --verify-only --dest /data/cubestack-installer
 #                                                                  # 只校验已下载的发布版本
 #   ./fetch-offline-from-minio.sh --release 2.0.0 --no-verify      # 跳过 sha256(调试用)
-#   · --release <版本>: 远端 = <bucket>/<版本>/{offline-files/,cubestack-installer-cli.tar},
+#   · --release <版本>: 远端 = <bucket>/<版本>/{offline-files/,cubestack-installer-cli-v<版本>.tar},
+#     旧布局的 cubestack-installer-cli.tar 仅做兼容读取;
 #     本地 = <本地桶根>/<版本>/; 本地桶根优先 --dest > CUBESTACK_RELEASE_ROOT >
 #     ${REPO_ROOT}/offline-releases。⚠ release 模式下 --dest 表示**本地桶根**
 #     (包含 <版本>/ 与 offline-files/), 与 --sub 的 --dest(offline-files 根)语义不同。
@@ -97,6 +98,7 @@ LIST_RELEASES=0
 VERIFY_ONLY=0
 NO_VERIFY=0
 RELEASE_MODE=0
+CLI_TAR_BASENAME=""                  # 解析后的 CLI tar 文件名(带版本; 旧布局兼容时=无版本名)
 MIN_FREE_GB="${MIN_FREE_GB:-50}"     # 磁盘空间门槛(GB): 默认至少 50GiB 空闲, 离线文件会持续增加
 WARN_NEED_GB="${WARN_NEED_GB:-50}"   # 醒目警告建议的总空闲门槛(GB)
 # 默认/全量下载时自动排除的子目录(体积大且非部署必需, 需用时 --sub 单独拉):
@@ -110,7 +112,7 @@ _print_help() {
     echo "  kubespray/               kubespray 离线仓(版本子目录 vX.Y.Z; --sub kubespray/v2.32.0)"
     echo "  ceph/  metax-gpu/  nvidia-gpu-operator/  multus/  rdma/  netshoot/  os/"
     echo "  dev-lab/                 开发镜像: cpu / maca / cuda 家族(3 件; 顶层平铺, 大件 .tar.gz)"
-    echo "  model-collection/        模型推理镜像: sglang/ 与 vllm/(≈85G, .tar.gz; 来源 suanova/model-collection)"
+    echo "  model-collection/        模型推理镜像: sglang/ 与 vllm/(2 件 ≈31G, .tar.gz; 来源 suanova/model-collection)"
     echo "  virtual-machine/         虚拟机镜像(大; 默认排除, --sub virtual-machine 单独拉)"
     echo "  cli/                     CLI 镜像 tar(rebuild-cli-image.yml 自动上传; 取回: --sub cli)"
     echo "  cubestack-operator/      CubeStack 平台镜像 + operator chart"
@@ -129,7 +131,7 @@ _print_help() {
     echo "  示例: ./fetch-offline-from-minio.sh --sub cubestack-operator/portal   # 只取某个平台组件"
     echo "        ./fetch-offline-from-minio.sh --sub cubestack-operator          # 取镜像 tar + chart"
     echo ""
-    echo "════ 发布版本(桶根 <版本>/offline-files + <版本>/cubestack-installer-cli.tar)════"
+    echo "════ 发布版本(桶根 <版本>/offline-files + <版本>/cubestack-installer-cli-v<版本>.tar)════"
     echo "  --list-releases                       列出桶根可用版本"
     echo "  --release 2.0.0 --dest <本地桶根>     取版本到 <本地桶根>/2.0.0/"
     echo "  --release 2.0.0 --verify-only ...     只校验已下载版本(sha256 + CLI tar)"
@@ -226,6 +228,47 @@ MINIO_REMOTE_DIR="${MINIO_REMOTE_DIR:-offline-files}"
 #   (桶级只有 1 行输出时 mc 已写完, 反而正常 —— 于是表现为"桶能访问、离线目录却找不到")。
 #   实测: 17 行输出的目录 = 141; 改用命令替换读完所有输出则正常。
 mc_has() { [ -n "$(mc ls "$1" 2>/dev/null)" ]; }
+
+# ---------------- 发布版本 CLI tar 命名(2026-10-25) ----------------
+# 新布局文件名带发布版本: cubestack-installer-cli-v<版本>.tar; 旧布局(无版本名)仅做兼容读取。
+# release.json 的 cli_tar 字段是首选来源; 只取 basename, 防止路径穿越。
+_default_cli_tar_name() { printf 'cubestack-installer-cli-v%s.tar' "${RELEASE_ARG#v}"; }
+_cli_tar_name_from_json() {
+    local json="$1"
+    [ -f "${json}" ] || { printf '%s' ""; return 0; }
+    python3 - "${json}" <<'PY' 2>/dev/null || true
+import json, os, sys
+try:
+    v = json.load(open(sys.argv[1])).get("cli_tar") or ""
+except Exception:
+    v = ""
+print(os.path.basename(v) if v else "")
+PY
+}
+# 本地已下载布局: 按 release.json/版本化默认名定位; 旧布局回退。
+_cli_tar_name_local() {
+    local root="$1" name
+    name="$(_cli_tar_name_from_json "${root}/offline-files/release.json")"
+    [ -n "${name}" ] || name="$(_default_cli_tar_name)"
+    if [ ! -f "${root}/${name}" ] && [ "${name}" != "cubestack-installer-cli.tar" ] \
+        && [ -f "${root}/cubestack-installer-cli.tar" ]; then
+        warn "本地缺少 ${name}, 回退旧布局 cubestack-installer-cli.tar"
+        name="cubestack-installer-cli.tar"
+    fi
+    printf '%s' "${name}"
+}
+# 远端下载: 同上, 但以远端对象是否存在为准(兼容旧版本目录)。
+_cli_tar_name_remote() {
+    local src="$1" name
+    name="$(_cli_tar_name_from_json "${DST_ROOT}/offline-files/release.json")"
+    [ -n "${name}" ] || name="$(_default_cli_tar_name)"
+    if ! mc_has "${src}/${name}" && [ "${name}" != "cubestack-installer-cli.tar" ] \
+        && mc_has "${src}/cubestack-installer-cli.tar"; then
+        warn "远端缺少 ${name}, 回退旧布局 cubestack-installer-cli.tar"
+        name="cubestack-installer-cli.tar"
+    fi
+    printf '%s' "${name}"
+}
 # mc du 的大小字段(如 "1.1GiB") → 字节数; 无法解析输出 0
 mc_size_to_bytes() {
     echo "${1:-}" | awk '
@@ -326,7 +369,7 @@ fi
 
 # ---------------- 4. 列出可用子目录 ----------------
 if [ "${RELEASE_MODE}" = "1" ]; then
-    say "发布版本 ${RELEASE_ARG} 包含: offline-files/ + cubestack-installer-cli.tar"
+    say "发布版本 ${RELEASE_ARG} 包含: offline-files/ + cubestack-installer-cli-v${RELEASE_ARG#v}.tar"
 else
 echo ""
 say "MinIO 中离线文件子目录(默认下载部署必需子目录, 排除 ${DEFAULT_EXCLUDE_SUBS}; 可 --sub <目录> 只拉某子目录 / --all 全量):"
@@ -450,7 +493,7 @@ _subs_all() {   # 输出 MinIO 根下全部子目录(排除 DEFAULT_EXCLUDE_SUBS
 SUBS=()
 if [ "${RELEASE_MODE}" = "1" ]; then
     SUBS=("offline-files")
-    say "发布版本 ${RELEASE_ARG}: 下载 offline-files/ + cubestack-installer-cli.tar"
+    say "发布版本 ${RELEASE_ARG}: 下载 offline-files/ + cubestack-installer-cli-v${RELEASE_ARG#v}.tar"
 elif [ "${ALL}" = "1" ]; then
     # --all = 真正全量(含 virtual-machine; 同样剥掉目录名尾斜杠)
     mapfile -t SUBS < <(mc ls "${SRC_ROOT}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##')
@@ -472,7 +515,11 @@ else
     fi
 fi
 
-# ---------------- 8. 磁盘空间检查(醒目警告, 默认启用) ----------------
+# ---------------- 8. 磁盘空间检查(醒目警告, 默认启用; --verify-only 跳过) ----------------
+# 只校验本地已有发布树时不下载任何文件, 空间预检没有意义(且会误报"空间不足")。
+if [ "${VERIFY_ONLY}" = "1" ]; then
+    say "只校验模式: 跳过下载磁盘空间预检"
+else
 # 下载需要足够空间: 醒目提示至少 MIN_FREE_GB(默认 50)GiB 空闲;
 # 并按"远程待下载大小 + 缓冲"预检, 不足时红色横幅警告并中止(--force 强制继续)。
 [ -d "${DST_ROOT}" ] || mkdir -p "${DST_ROOT}"
@@ -507,9 +554,12 @@ for s in "${SUBS[@]}"; do
     NEED_BYTES=$(( NEED_BYTES + _rbytes ))
 done
 if [ "${RELEASE_MODE}" = "1" ]; then
-    _cli_rsize="$(mc du "${SRC_ROOT}/cubestack-installer-cli.tar" 2>/dev/null | awk -F'\t' '{print $1}' || true)"
+    # 此时 release.json 尚未下载到本地; 先按版本化默认名探测, 旧版本目录回退旧名。
+    _cli_rname="$(_default_cli_tar_name)"
+    mc_has "${SRC_ROOT}/${_cli_rname}" || _cli_rname="cubestack-installer-cli.tar"
+    _cli_rsize="$(mc du "${SRC_ROOT}/${_cli_rname}" 2>/dev/null | awk -F'\t' '{print $1}' || true)"
     _cli_rbytes="$(mc_size_to_bytes "${_cli_rsize}")"
-    say "  远程 cubestack-installer-cli.tar: ${_cli_rsize:-?}"
+    say "  远程 ${_cli_rname}: ${_cli_rsize:-?}"
     NEED_BYTES=$(( NEED_BYTES + ${_cli_rbytes:-0} ))
 fi
 NEED_BYTES=$(( NEED_BYTES + 10 * 1024 * 1024 ))
@@ -519,7 +569,7 @@ echo ""
 echo -e "\033[41m\033[97m================================================================\033[0m"
 echo -e "\033[41m\033[97m ⚠ 磁盘空间检查: 离线文件下载至少需要 ${WARN_NEED_GB} GiB 空闲空间           \033[0m"
 echo -e "\033[41m\033[97m   本次下载约需 ${NEED_GB} GiB, 目标 ${DST_ROOT} 可用 ${TARGET_AVAIL_GB} GiB         \033[0m"
-echo -e "\033[41m\033[97m   空间不足会导致 mc mirror 下载中断/文件损坏, 请确保磁盘充足!      \033[0m"
+echo -e "\033[41m\033[97m   空间不足会导致 mc mirror/mc cp 下载中断/文件损坏, 请确保磁盘充足!      \033[0m"
 echo -e "\033[41m\033[97m================================================================\033[0m"
 echo ""
 
@@ -555,11 +605,12 @@ for s in "${SUBS[@]}"; do
         warn "⚠ 远程 ${s}(${_rsize}) + ${MIN_FREE_GB} GiB 余量已接近/超过 ${TARGET} 可用空间, 建议 --dest 换更大磁盘"
     fi
 done
+fi
 
 # ---------------- 9. 下载 / 校验 ----------------
 # release 模式校验: _SUCCESS + release.env 版本 + SHA256SUMS + CLI tar
 _verify_release() {
-    local root="${DST_ROOT}" _ver _cli_sha _actual
+    local root="${DST_ROOT}" _ver _cli_sha _actual _cli_name
     [ -f "${root}/offline-files/_SUCCESS" ] \
         || { err "发布未完成: ${root}/offline-files/_SUCCESS 不存在"; return 1; }
     [ -f "${root}/offline-files/SHA256SUMS" ] \
@@ -583,9 +634,10 @@ except Exception:
 PY
 )"
             if [ -n "${_cli_sha}" ]; then
-                [ -f "${root}/cubestack-installer-cli.tar" ] \
-                    || { err "缺少 CLI tar: ${root}/cubestack-installer-cli.tar"; return 1; }
-                _actual="$(sha256sum "${root}/cubestack-installer-cli.tar" | awk '{print $1}')"
+                _cli_name="$(_cli_tar_name_local "${root}")"
+                [ -f "${root}/${_cli_name}" ] \
+                    || { err "缺少 CLI tar: ${root}/${_cli_name}"; return 1; }
+                _actual="$(sha256sum "${root}/${_cli_name}" | awk '{print $1}')"
                 [ "${_actual}" = "${_cli_sha}" ] \
                     || { err "CLI tar sha256 不符: ${_actual} != ${_cli_sha}"; return 1; }
                 ok "CLI tar sha256 一致"
@@ -600,19 +652,29 @@ PY
 }
 
 if [ "${VERIFY_ONLY}" = "1" ]; then
+    CLI_TAR_BASENAME="$(_cli_tar_name_local "${DST_ROOT}")"
     say "只校验, 不下载: ${DST_ROOT}"
     _verify_release || exit 1
 else
     for s in "${SUBS[@]}"; do
         [ -n "${s}" ] || continue
-        say "同步 ${SRC_ROOT}/${s}/ → ${DST_ROOT}/${s}/ ..."
-        mc mirror --overwrite "${SRC_ROOT}/${s}" "${DST_ROOT}/${s}" \
-            || { err "同步 ${s} 失败(检查网络/磁盘空间)"; exit 1; }
+        if [ "${RELEASE_MODE}" = "1" ]; then
+            # release 模式用 mc cp --recursive: 只复制版本目录里的精确对象(按对象名),
+            # 不做 mirror 的目录同步/覆盖语义 —— 发布树内容由 MinIO 版本目录唯一决定。
+            say "复制(精确对象) ${SRC_ROOT}/${s}/ → ${DST_ROOT}/${s}/ ..."
+            mc cp --recursive "${SRC_ROOT}/${s}" "${DST_ROOT}/${s}" \
+                || { err "复制 ${s} 失败(检查网络/磁盘空间)"; exit 1; }
+        else
+            say "同步 ${SRC_ROOT}/${s}/ → ${DST_ROOT}/${s}/ ..."
+            mc mirror --overwrite "${SRC_ROOT}/${s}" "${DST_ROOT}/${s}" \
+                || { err "同步 ${s} 失败(检查网络/磁盘空间)"; exit 1; }
+        fi
         ok "完成: ${DST_ROOT}/${s}  ($(du -sh "${DST_ROOT}/${s}" 2>/dev/null | awk '{print $1}'))"
     done
     if [ "${RELEASE_MODE}" = "1" ]; then
-        say "下载 ${SRC_ROOT}/cubestack-installer-cli.tar → ${DST_ROOT}/cubestack-installer-cli.tar ..."
-        mc cp "${SRC_ROOT}/cubestack-installer-cli.tar" "${DST_ROOT}/cubestack-installer-cli.tar" \
+        CLI_TAR_BASENAME="$(_cli_tar_name_remote "${SRC_ROOT}")"
+        say "下载 ${SRC_ROOT}/${CLI_TAR_BASENAME} → ${DST_ROOT}/${CLI_TAR_BASENAME} ..."
+        mc cp "${SRC_ROOT}/${CLI_TAR_BASENAME}" "${DST_ROOT}/${CLI_TAR_BASENAME}" \
             || { err "下载 CLI tar 失败"; exit 1; }
         _verify_release || exit 1
     fi
@@ -630,7 +692,7 @@ if [ "${RELEASE_MODE}" = "1" ]; then
     echo "     CUBESTACK_RELEASE=\"${RELEASE_ARG}\""
     echo "     CUBESTACK_RELEASE_ROOT=\"${TARGET}\""
     echo "  加载 CLI 镜像:"
-    echo "     sudo docker load -i ${DST_ROOT}/cubestack-installer-cli.tar"
+    echo "     sudo docker load -i ${DST_ROOT}/${CLI_TAR_BASENAME:-cubestack-installer-cli-v${RELEASE_ARG#v}.tar}"
     echo "  部署:"
     echo "     sudo ./deployments/scripts/deploy-cluster.sh --release ${RELEASE_ARG}"
 elif [ "${IS_CONTAINER}" = "1" ]; then
