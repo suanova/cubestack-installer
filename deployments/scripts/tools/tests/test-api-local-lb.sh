@@ -45,6 +45,7 @@ chk() {  # chk <描述> <期望> <实际>
     if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi
 }
 cnt() { grep -c "$1" "$2" 2>/dev/null | tr -d ' '; }   # 无匹配时 grep -c 退出码非 0, 但输出仍是 0
+has() { [ "${1:-0}" -ge 1 ] && echo 1 || echo 0; }    # 出现 ≥1 次(源码契约不锁具体次数)
 
 # 夹具 conf: NODES 全用 TEST-NET-1; 开关用 ${VAR:-default} 形式以便环境变量覆盖
 mk_conf() {  # mk_conf <文件> <NODES 条目…(已带引号)>
@@ -129,7 +130,7 @@ src_of() { sed -n "/^$1() {/,/^}/p" "${MOD}"; }
 code_of() { src_of "$1" | grep -v '^[[:space:]]*#'; }
 chk "⑤ run_enabled 里没有 '&& vlog' 吞失败" "0" "$(code_of run_enabled | grep -c 'converge_hosts .*&&')"
 chk "⑤ run_disabled 里没有 '|| true' 吞失败" "0" "$(code_of run_disabled | grep -c '|| true')"
-chk "⑤ 清理前有显式探活(_hssh <ip> true)" "1" "$(code_of run_disabled | grep -c '_hssh "${ip}" "true"')"
+chk "⑤ 清理前有显式探活(_hssh <ip> true)" "1" "$(has "$(code_of run_disabled | grep -c '_hssh "${ip}" "true"')")"
 chk "⑤ 删除后有 crictl 复核(容器确实消失)" "1" "$(code_of run_disabled | grep -c 'crictl ps')"
 chk "⑤ _workers 有显式 return 0" "1" "$(code_of _workers | grep -c 'return 0')"
 chk "⑤ _all_nodes 有显式 return 0" "1" "$(code_of _all_nodes | grep -c 'return 0')"
@@ -143,6 +144,17 @@ chk "⑤ 模块头写明 fail-closed 约定" "1" "$(grep -c '节点不可达必�
 # ============================================================
 chk "⑥ 关闭态明确提示'随后重跑 k8s_deploy'" "1" "$(code_of run_disabled | grep -c '请随后重跑 k8s_deploy')"
 chk "⑥ 该提示走 warn(不是 err/拦停)" "1" "$(code_of run_disabled | grep -c '^\s*warn "  请随后重跑 k8s_deploy')"
+
+# ============================================================
+# ⑦ master kubelet.conf 收敛契约(设计 A3; 2026-10-25)
+#    kubespray 上游只改写 worker; master 保留 kubeadm 的 https://<自身IP>:6443。
+#    本模块必须在启用态收敛为 127.0.0.1:6443、关闭态恢复入口域名, 且幂等(已匹配不重启)。
+# ============================================================
+chk "⑦ 有 _masters() 且显式 return 0" "1" "$(code_of _masters | grep -c 'return 0')"
+chk "⑦ 启用态收敛 master → 127.0.0.1:6443" "1" "$(has "$(code_of run_enabled | grep -c 'https://127.0.0.1:6443')")"
+chk "⑦ 关闭态恢复 master → 入口域名" "1" "$(has "$(code_of run_disabled | grep -c 'https://${HOSTS_DOMAIN}:6443')")"
+chk "⑦ 收敛后重启 kubelet" "1" "$(code_of converge_master_kubelet | grep -c 'systemctl restart kubelet')"
+chk "⑦ 收敛幂等(已匹配则不重启)" "1" "$(code_of converge_master_kubelet | grep -c 'grep -q')"
 
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then

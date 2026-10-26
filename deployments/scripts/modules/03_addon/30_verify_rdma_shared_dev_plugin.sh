@@ -150,9 +150,20 @@ for _res in ${_RES_LIST}; do
     while IFS= read -r _n; do
         [ -z "${_n}" ] && continue
         _node="$(echo "${_n}" | awk '{print $1}')"
-        # 查该节点 allocatable 是否含该扩展资源
+        # 查该节点 allocatable 是否含该扩展资源 —— 必须**值 > 0**才算注册:
+        # 占位模式/未加载驱动时键会以 "0" 出现, 只 grep 键名会误判 → 测试 pod 永远 Pending
+        # (2026-10-25 实机)。
         _alloc="$(SSH "${K} get node ${_node} -o jsonpath='{.status.allocatable}' 2>/dev/null" || true)"
-        if echo "${_alloc}" | grep -q "${_res}"; then
+        _alloc_val="$(printf '%s' "${_alloc}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+v = str(d.get(sys.argv[1], "0"))
+print(v if v.isdigit() else "0")
+' "${_res}" 2>/dev/null || echo 0)"
+        if [ "${_alloc_val:-0}" -gt 0 ]; then
             _NODES_WITH=$((_NODES_WITH + 1))
         fi
     done <<< "${_NODES}"
@@ -281,5 +292,5 @@ else
     err "RDMA 插件验证未通过: 无节点注册扩展资源(检查节点驱动与 RDMA_* 配置); 见上方排查指引"
     exit 1
 fi
-unset _NRUN _NTOT _CM _PH_CM _PLACEHOLDER _CM_JSON _RES_LIST _RES_OK _RES_MISS _FOUND _NODES_WITH _NODES_TOTAL _NODES _n _node _alloc _block _p 2>/dev/null || true
+unset _NRUN _NTOT _CM _PH_CM _PLACEHOLDER _CM_JSON _RES_LIST _RES_OK _RES_MISS _FOUND _NODES_WITH _NODES_TOTAL _NODES _n _node _alloc _alloc_val _block _p 2>/dev/null || true
 unset _RES_PICK _DEV_OK _POD_RUNNING _POD_NODE _DEVS _UVERB _WHY _st _cst _i LOCAL_YAML 2>/dev/null || true

@@ -302,6 +302,70 @@ sudo tcpdump -nei <网卡> '(arp or icmp) and host <对端IP>'
 
 ---
 
+### 3. 【2026-10-26 事故】全量部署 k8s_ntp 只在 master02 失败(4.1s), standalone 却 256ms; worker05-08 装包报 sudo 需密码
+
+**症状**
+- 全量 `--fresh` 跑到 k8s_ntp: master02 偏差 `4108ms → 重对齐 4119ms` 失败; 其余 10 台约 258-272ms,
+  worker06 1480ms 通过。
+- 同一集群单独 `--steps k8s_ntp`(root 用户)时 master02 仅 **256ms**, 全绿。
+- 第一次全量用 `user=ubuntu` 时 worker05-08(10.193.78.101-104)装包报
+  `sudo: a terminal is required... / sudo: a password is required`; 切到 `SSH_USER=root` 后装包通过。
+
+**根因(三条线叠加)**
+1. **权限**: `k8s_passwordless` 只注入 SSH 公钥, 不写 sudoers; `install-worker-packages.sh` 只用
+   `ssh ... "sudo bash -s"`(无密码回退) ⇒ `ubuntu` 无 NOPASSWD 时 dpkg 阶段才报 sudo 密码错误;
+   旧 `k8s_workerbm` 只 `warn` 后继续, 把问题拖到 NTP 阶段。
+2. **测量口径**: `clock_offset` 用 SSH `date` 差值, 抓了 `hb`/`ha` 却未做 RTT 补偿。全量部署时
+   master02 的 SSH/sudo 在负载下慢约 4s, 被直接当成"时钟偏差 4s"; 重对齐仍用同一慢路径采样,
+   所以 `4108→4119` 几乎不变。standalone 时负载低, 同一节点只有 256ms。
+3. **NTP 有效性检查被弱化**: `chronyc sources` 的 Reach 是第 **5** 列, 旧代码取 `$6`(LastRx),
+   阈值判断无意义; 权威 `stratum != 10` 也只 `warn` 后继续。客户端"偏差小但 NTP 没工作"可能漏过。
+
+**修复(2026-10-26)**
+- `setup-ntp.sh`:
+  - `node_cmd` 对 **root 不再套 sudo**(消除 sudo/PAM/DNS 的数秒延迟); 新增 `node_sudo_ready` 前置,
+    apply/verify 对非 root 且 sudo 不可用的节点直接点名失败。
+  - **客户端缺 chrony 时自动安装**: apply 把 offline-files 里的 chrony deb 推给缺 chrony 的节点,
+    远端脚本用 `install_debs_offline` 安装; 装不上才回退 `systemd-timesyncd`, 并校验其 active。
+    离线目录必须是**完整依赖闭包**(chrony + libpam/libaudit/libffi/libpcre2/zlib 等):
+    `deployments/scripts/tools/node/chrony-offline-debs.py --check <chrony目录>` 只读自检;
+    联网 Ubuntu 22.04 amd64 构建机用 `--fetch <chrony目录>` 补齐缺失 deb。
+    setup-ntp 在 apply 前会自动 check 并 warn; 严格离线可设 `NTP_REQUIRE_CHRONY_CLOSURE=1` 直接失败。
+  - `clock_offset` **优先 chrony 自身口径**: `System time` + `Leap status=Normal` + `^*` 源 `Reach>=1`;
+    不可用时才回退 SSH `date`, 并用两个采样的中点做 RTT 补偿; 权威自身无上游时直接返回 0,
+    不再 SSH 自测吃 0.2-0.6s 噪声。同时区分 `chrony 未安装` 与 `chrony 已安装但未选中源/Reach=0`。
+  - 权威 `stratum != 10`(无上游时)从 warn 改为**硬失败**, 并打印 `chronyc tracking/sources`、
+    `ss -lunp`、`journalctl -u chrony`。
+  - 远端节点脚本输出 `SYNC-OK`/`SYNC-FAIL`; **只有时间守护进程 active(chrony/timesyncd)** 且
+    chrony makestep/date 对齐成功才 `SYNC-OK`; 无守护进程输出 `NO-TIME-DAEMON` + `SYNC-FAIL`。
+  - Reach 改取第 5 列, 并强制 `^*` 源 + `Reach>=1`; Reach<37 只告警"收敛中", 不阻塞部署。
+  - verify 阶段无 chrony 且 timesyncd 未运行 → 直接失败, 不再靠一次性 `date -s` 通过。
+- `k8s_workerbm`: 非 root 节点先 `sudo -n true` 前置; 装包失败计入 `PKG_FAIL` 并 **exit 1**,
+  不再"warn 后继续"。
+- 新增离线回归 `deployments/scripts/tools/tests/test-k8s-ntp.sh`(root 无 sudo / chrony 优先 /
+  权威自身 0 / 回退 / SYNC 标记 / workerbm 权限门禁), 已挂入 `check-modules.sh`。
+
+**验证**
+- `SSH_USER=root` + `--steps k8s_ntp`: 权威 stratum 10; 全节点 259-277ms 通过;
+  worker06/07/08 因负载仍在 1.3-1.9s, 但 `chronyc tracking` 的 `System time` 很小 ⇒ 测量噪声而非时钟偏差。
+- 命令:
+```bash
+# 判断 4s 是时钟还是 SSH/sudo 延迟
+/usr/bin/time -f 'ssh+date %e s' ssh -i /root/.ssh/cubestack_k8s root@10.193.78.22 'date +%s.%N'
+/usr/bin/time -f 'ssh+sudo %e s' ssh -i /root/.ssh/cubestack_k8s root@10.193.78.22 'sudo date +%s.%N'
+# 节点 chrony 自身偏移(真正判据)
+ssh -i /root/.ssh/cubestack_k8s root@10.193.78.22 'chronyc tracking; chronyc sources -v; uptime; free -h'
+# 非 root 用户权限
+ssh -i /root/.ssh/cubestack_k8s ubuntu@10.193.78.22 'sudo -n true; echo rc=$?'
+```
+- 若 `chronyc tracking` 的 `System time` 很小且 `^*`/Reach 377, 不要用 `NTP_MAX_OFFSET_MS` 放宽阈值;
+  先查 master02 负载/残留 Pod(本次全量前有 176 个 Terminating/CrashLoopBackOff)。
+- 若确实需要 `ubuntu` 用户: 在节点写
+  `/etc/sudoers.d/90-cubestack`: `ubuntu ALL=(ALL) NOPASSWD:ALL`(chmod 440 + `visudo -c`),
+  或 `SSH_USER=root`。
+
+---
+
 ## 三、集群组件
 
 ### MetalLB 部署故障速查(先对号入座)
@@ -539,6 +603,7 @@ grep METAX_DRIVER_DEPLOY_POLICY config/cluster.conf
 | registry PVC 一直 Pending | `REGISTRY_STORAGE_CLASS=ceph-block` 但 `ceph-block` SC 未创建 | 先部署 ceph_csi 模块(建 rbd-pool + SC); PVC 会自动绑定; 老 PVC 删除后 registry 重建即切换 |
 | mon/osd 未调度到目标节点 / 一直在 Pending | 节点缺 label 或 CEPH_NODES 与预期不符 | `kubectl get node --show-labels \| grep ceph-storage`; 模块自动打 `CEPH_NODE_LABEL`; 核对 CEPH_NODES |
 | 部署模块报"所有存储节点均未检测到裸盘" | VM 未附加数据盘 / 盘已被分区 | VM: `vm-nodes.conf` 设 `VM_DATA_DISKS=3 VM_DATA_DISK_SIZE=200` 后重建 VM; 裸金属: 挂新盘; 或显式 `CEPH_DATA_DISKS="node:/dev/vdb,…"` |
+| 显式 `CEPH_DATA_DISKS` 的三块盘**全显示在第一个节点**, 其余节点 `<未检测到>` | 节点之间误用**逗号**: `node0:/dev/vdb,node1:/dev/vdb,node2:/dev/vdb`; 解析器把 `node1:/dev/vdb` 当成 node0 的盘列表(逗号是同一节点多盘的分隔符) | **2026-10-26 已修**: 节点之间必须用**分号 `;`**, 逗号只用于同一节点的多块盘; 或全节点同盘直接写 `/dev/vdb`; 新增 `ceph_validate_explicit_config`(lib-common) 在解析前拒绝该写法, `02_ceph`/`deploy-cluster` 均已接入, 回归 `test-ceph-data-disks.sh` |
 | 预检显示全节点裸盘 `<未检测到>` 但节点 `lsblk` 确有裸盘(如 vdb/vdc/vdd) | `ceph-detect-disks.sh` 仅用 `ssh -i` 密钥认证: 全新环境 k8s_passwordless 未分发密钥 / 容器未挂载密钥 → 全部节点 SSH 失败; 且预检 `2>/dev/null` 吞掉"无法读取 lsblk"原因 | **2026-09-07 已修复**: 脚本密钥缺失不再硬退出, 新增**密码回退**(SSHPASS + NODES 第5字段密码, 与 setup-passwordless.sh 同款; 密钥优先、失败回退密码); 预检 stderr 透传显示真实原因。验证: `bash deployments/scripts/tools/k8s/ceph-detect-disks.sh -m` 应输出各节点 `/dev/vdb,...` |
 | CephCluster 删不掉/卡 Terminating | 未设 cleanupPolicy | `kubectl -n rook-ceph patch cephcluster rook-ceph --type merge -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}'` 后再 delete |
 | **CEPH_MODE=external 部署卡在 ceph_csi [1/4] 等 CSI 插件 240s** / 未部署任何 ceph-csi-operator | ① ceph 模块**未被调度**: `TOGGLE: CEPH_ENABLED`(false)而模块自身 external 分支实际由 `CEPH_CSI_ENABLED` 放行 → rook operator/csi-operator 从未安装; ② 排序缺陷: 默认模式 `k8s_deploy` 由 enable 循环追加在 RUN_STEPS 末尾, `ceph_csi` 仅声明 `REQUIRES: ceph`(不在运行列表→视为满足)被拓扑排序**浮到 k8s_deploy 之前**, 直接 SSH 到未部署/未就绪集群; ③ k8s 阶段 ceph 镜像预加载仅看 `CEPH_ENABLED=true`, external 模式不预载 rook/csi 镜像 → 离线 operator ImagePullBackOff | **2026-09-08 已修复(3 处)**: ① `TOGGLE` 支持空格分隔多变量(OR), 02_ceph 改 `TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED` → external 模式自动调度装 operator/csi-operator(不建 CephCluster); ② 03_ceph_csi `REQUIRES: ceph k8s_deploy` → 永远排在 k8s_deploy 之后; ③ 06_k8s_deploy 传给 cubestack-offline.sh 的 CEPH_ENABLED 取派生值(CEPH_ENABLED 或 CEPH_CSI_ENABLED true 即 true) → external 模式也预载 rook/csi 镜像。**验证边界**: 调度层已复现验证(容器内 `--list` 顺序 = k8s_deploy→ceph→ceph_csi, 15 模块), check-modules 全绿; **未实机跑通全流程** |
@@ -557,12 +622,15 @@ grep METAX_DRIVER_DEPLOY_POLICY config/cluster.conf
 | k8s 阶段 ansible **长时间无输出**(实测 38 分钟以上), 最后停在 `Copy offline .deb packages to target` / `Install packages from local files`; 日志最后一行是那条 copy 的 profile 行, 之后整段空白 —— 看起来像"卡在拷贝 lvm2 包"; **只有部分节点会卡**(8 台里实测 2 台) | 卡的不是 copy, 是它后面的逐个 `dpkg -i`: `dmsetup`/`lvm2` 的 postinst 触发 `update-initramfs -u` → `mkinitramfs` → `hooks/mdadm` → **`/sbin/mdadm --examine --scan`(遍历所有块设备)** 读到**上一代集群遗留、后端已不可达的 `/dev/rbd0`** → 进程进 **D 状态(不可中断)** 永不返回; 同节点还有 ext4 挂在那块 rbd 上, 其 `jbd2` 线程一并卡死(实测内核线程 `[registry]` D 态 1h37m)。诊断方法: 在卡住的节点上 `ps -eo pid,stat,wchan,cmd \| grep -E '^ *[0-9]+ D'` + `ls -l /proc/<pid>/fd \| grep /dev/` → 看它读的是哪块盘 | **① 代码侧(2026-09-24 已修, `patch-playbooks/install-packages.yml`)**: 安装期间临时置 `update_initramfs=no`(装完恢复)→ 整条 initramfs 链(hooks 会跑 pvscan/vgscan/mdadm 扫设备)根本不被触发; 另加"已装同版本跳过"与"本节点存在内核 rbd 映射"告警。**② 环境侧(必须人工)**: 这类节点**只能重启**清除 —— hung 的 rbd 映射 unmap 会 EBUSY, D 态进程杀不掉; 重启后再部署即可。判据: `ls /sys/bus/rbd/devices` 非空 + 存在 D 态进程 |
 | **`node_pkgs` 在第一个节点永久 pending**: 输出停在 `── <IP> ──` + SSH warning; 节点上 `fuser /var/lib/dpkg/lock-frontend` 进程 D 状态 `ceph_mdsc_wait_request`(可挂 30+ 分钟); `findmnt -t ceph` 显示 `/mnt/cephfs/models` 的 mons 是旧集群 | **旧集群 `cephfs_mount` 宿主机挂载残留**(2026-10-19 实机): 集群非优雅拆除(API 已不可达/未走 uninstall)时 `/mnt/cephfs/models` 仍留在宿主机; mons 已不可达 → 内核 ceph 客户端无限重试; `fuser` 遍历 `/proc` 时撞上该挂载 → D 状态永不返回。旧 rbd 映射(`jbd2/rbd0`、`rbd remove`)同理。不是装包慢, 也不是 apt 锁被正常占用 | **2026-10-19 已修**: `tools/node/reconcile-node-packages.sh` 增加**控制器前置探测**(每节点 `timeout 20` 查 ceph/rbd 挂载、`/sys/bus/rbd/devices`、相关 D 状态、`fuser` 超时), 命中即**在分发/装包前失败**并打印重启步骤; 远端脚本同样在 `fuser`/apt 之前检测, `fuser` 带 `timeout 5`, 整轮远端对账带 `RECONCILE_SSH_TIMEOUT`(默认 1800s)。**现场处置(本次 6 台全部命中)**: `systemctl stop kubelet containerd; systemctl reboot -f`(跳过卡死的 ceph 卸载); 重启后 `findmnt -t ceph,rbd` 为空、`ls /sys/bus/rbd/devices` 为空、`timeout 5 fuser ...; echo rc=$?` 为 1, 再重跑部署。回归: `bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh` |
 
+| **覆盖安装 + `CEPH_MODE=external` 失败**: cephfs_mount 报 `/mnt/cephfs/models` 卸载失败; ceph 卸载日志出现 `删除现有 CephCluster(cleanupPolicy yes-really-destroy-data, Rook 擦盘)` | **external 模式的 ceph_csi 会创建 `CephCluster rook-ceph-external`(`spec.external.enable=true`)**; 02_ceph 的“活态判定”只看“有没有 CephCluster”, 把外部接入 CR 误判成 internal 旧集群 → 执行 `ceph-cleanup --delete-cluster`; 同时 cephfs_mount 对**外部** CephFS 做宿主机 umount, 消费者 busy 时必然失败 | **2026-10-26 已修复**: ① 02_ceph uninstall/install 都读取 `spec.external.enable`, 存在 external CR 时**拒绝销毁/幂等清理**(显式 `CEPH_CLEANUP_ALLOW_EXTERNAL=1` 才放行); ② `ceph-cleanup.sh delete_cluster` 自身也拒绝 external CR(防御); ③ cephfs_mount 在 external 模式**保留宿主机挂载**(外部资源, 新部署复用; 不可读时安装前预检再 lazy umount), internal 模式仍严格卸载; ④ 卸载失败日志过滤 SSH warning, 显示真实 umount/findmnt 原因; ⑤ 回归 `test-cephfs-mount.sh` ⑥b + 02_ceph/ceph-cleanup 静态围栏。**验证**: `kubectl -n rook-ceph get cephcluster -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable`; external 覆盖安装应打印“跳过销毁”且不再尝试 umount `/mnt/cephfs/models` |
+
 **验证**
 ```bash
 sudo ./deploy-cluster.sh --steps verify_ceph          # 端到端: operator/CSI + phase=Ready + ceph -s + RBD 块 I/O
 kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
 kubectl -n rook-ceph get cephcluster,cephblockpool; kubectl get sc ceph-block
 ```
+
 
 ---
 
@@ -1679,3 +1747,212 @@ bash deployments/scripts/tools/tests/test-cephfs-mount.sh
 **注意**: operator 的 server-side apply 不渲染 `strategy` 字段, 因此本 patch 不会被下一轮
 调谐覆盖; 若上游 chart 将来显式加入 `strategy`, 需要上游改成 `Recreate` 或提供 values 开关,
 届时本守护会因 `strategy.type != Recreate` 继续纠正。
+
+---
+
+## 六、发布 / 安装链路(2026-10-25)
+
+### 1. CLI 镜像缺 GNU patch → kubespray 补丁层被静默跳过
+
+**症状**
+- `cubestack-offline.sh` 日志出现 `容器内无 patch 命令 → 跳过补丁层自动保障`;
+- 全新安装后 Calico RBAC 等 14 个补丁未生效(可能表现为 calico-node 0/1、非 hostNetwork Pod 访问 ClusterIP 失败、coredns forward 异常等)。
+
+**根因**
+`Dockerfile-cli-base` 已声明安装 `patch`，但 Harbor 上的 `cubestack-installer-cli-base:latest` 是旧构建(2026-09-30)，镜像里实际没有 `/usr/bin/patch`；代码层 CLI 镜像继承旧 base，补丁层检测失败后**降级跳过**而不是报错。
+
+**解法(已根治)**
+- `Dockerfile-cli-base` 增加构建期断言 `command -v patch && patch --version`；
+- `Dockerfile-cli` 最终校验链增加 `command -v patch`；
+- `rebuild-cli-image.yml` 构建后实际运行镜像校验 `patch`，并在 `ci-validate.yml` 加静态门禁；
+- 发布前/重建 base：
+  ```bash
+  sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base --push
+  sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build --push
+  docker run --rm --entrypoint bash <cli-image> -lc 'command -v patch'
+  ```
+
+**边界**: 补丁层仍建议保持"纯净上游 + patch 层"模型；仅对 Calico 单独做 post-render YAML 补丁不能覆盖其余 playbook 逻辑补丁，且重装会回退。
+
+### 2. nodeport registry 的 containerd `hosts.toml` server 指向 5000 → 新镜像拉取卡住
+
+**症状**
+- 新 Pod 长时间 `ContainerCreating`，Events 只有 `Pulling image "registry.cubestack.io:5000/..."`
+  且数分钟无进展(2026-10-25 实测: operator / CNPG postgres init / cuberouter 在 node-3 卡 5min+)；
+- 从节点 `curl http://<master>:31148/v2/` 与 manifest 都是毫秒级，registry 本身正常。
+
+**根因**
+`deploy-registry.sh` 在 nodeport 模式下把 `hosts.toml` 写成:
+```toml
+server = "http://registry.cubestack.io:5000"
+[host."http://<master>:31148"] ...
+```
+nodeport 模式的 registry **不监听 domain:5000**(只有 NodePort)，containerd 对 `server` 的请求超时/挂起，fallback 并不可靠；镜像已缓存时通常无感，一旦需要真正拉取就会卡住。
+
+**解法(已根治)**
+- nodeport 模式 `server` 直接写 `http://<master>:<REGISTRY_NODEPORT>`；
+  loadbalancer 模式仍写 `http://<VIP>:5000`；
+- 存量集群重跑 `--steps k8s_registry`，然后删除卡住的 Pod 让其重新拉取；
+- 验证:
+  ```bash
+  ssh <node> "sudo cat /etc/containerd/certs.d/registry.cubestack.io:5000/hosts.toml"
+  # 期望 server = "http://<master>:31148"
+  ```
+
+**边界**: 修改 `hosts.toml` 对**已经在进行中**的拉取不生效，需要删除/重建 Pod；containerd 不必须重启(每次拉取读取配置)。
+
+### 3. operator 在线/离线切换后 model-bundles Degraded: InferenceRuntimeProfile spec immutable
+
+**症状**
+- `kubectl -n cubestack-system get csc cubestack` → `Ready=False`，`model-bundles(Degraded)`；
+- operator 日志:
+  `applying InferenceRuntimeProfile /metax-sglang-dsv4-pd: ... denied request: spec is immutable`。
+
+**根因**
+`InferenceRuntimeProfile` CRD 带 ValidatingAdmissionPolicy `oldObject == null || object.spec == oldObject.spec`；
+离线模式创建的 profile 镜像前缀是 `registry.cubestack.io:5000`，切在线(Harbor)时 operator 尝试 update
+spec 被 admission 拒绝。helm 可能先把 CR 的 `global.imageRegistry` 改成目标值，所以只看 CR 不够。
+
+**解法(已根治)**
+- `25_cubestack_operator.sh` 在 CR 纠偏阶段检测: CR registry 变化 **或** profile 内任意 `image`
+  前缀不属于目标 registry → 删除 `inferenceruntimeprofiles.ai.cubestack.io --all`，
+  让 operator 按新 registry 重建；
+- 手工即时恢复:
+  ```bash
+  kubectl delete inferenceruntimeprofiles.ai.cubestack.io --all --wait=false
+  # operator 会自动重建；随后 CSC 应恢复 Ready=True
+  ```
+
+**边界 / 代价**: 删除 profile 会让对应模型服务重新调谐(模式切换的一次性操作)；若上游 operator
+改为"create-if-not-exists + spec 不变则跳过 update"，本保护可移除。验证:
+`kubectl get inferenceruntimeprofiles.ai.cubestack.io -o yaml | grep image:` 应全部指向目标 registry。
+
+### 4. NVIDIA ClusterPolicy repository 双前缀(在线 Harbor → 离线切换)
+
+**症状**
+- `kubectl get clusterpolicy cluster-policy -o yaml | grep repository:` 出现
+  `registry.cubestack.io:5000/mirrors/harbor.isuanova.com/mirrors/registry.../mirrors/nvcr.io/...`
+  这类多重前缀；组件可能 ImagePullBackOff / ClusterPolicy 不 ready。
+- 模块自检只判断 `startswith(目标base)`，双前缀值也以目标 base 开头 → 自检假绿。
+
+**根因**
+`08_nvidia_gpu_operator.sh` 的 CR 纠偏旧逻辑是"值不以目标 base 开头就 `base + "/" + 原值`"；
+从 Harbor 在线切回内置 registry 时，原值已带 `harbor.isuanova.com/mirrors/`，再拼一次就叠加成双前缀。
+
+**解法(已根治)**
+- 纠偏逻辑改为：在值中定位已知上游前缀(`nvcr.io/` 或 `registry.k8s.io/`)，重建为
+  `<目标base>/<上游路径>`；不再用 `startswith` 早退(双前缀也会以目标 base 开头)。
+- 已干净的值重建后不变 → 幂等；无已知上游前缀的值保持不动(避免误改)。
+- 手工修复:
+  ```bash
+  kubectl get clusterpolicy cluster-policy -o yaml | grep repository:   # 确认双前缀
+  ./deployments/scripts/deploy-cluster.sh --steps nvidia_gpu_operator   # 重新纠偏
+  kubectl get clusterpolicy cluster-policy -o yaml | grep repository: | head
+  # 期望 registry.cubestack.io:5000/mirrors/nvcr.io/nvidia/...
+  ```
+
+### 5. release-2.0 组件刷新: `_REFRESH_PENDING` / tag 不一致 / `_SUCCESS` 缺失
+
+**症状**
+- `fetch --release` 报“发布正在原地刷新(_REFRESH_PENDING)”；
+- `release-sync-images.sh` 报 `dispatch tag != release.env` 或 `source_repo 不匹配`；
+- 刷新失败后 MinIO 上 `<release>/_REFRESH_PENDING` 残留、`offline-files/_SUCCESS` 不存在。
+
+**根因**
+- 组件 dispatch 早于 installer release-2.0 的 `release.env` / `release-images.tsv` 更新；
+- 刷新中断（网络/凭据/磁盘）保留了 marker，`_SUCCESS` 已按设计临时删除。
+
+**解法**
+1. 先更新 `deployments/releases/<release>/release.env` + `release-images.tsv`（同一 tag）；
+2. 用相同 component 重跑（marker 会自动进入恢复模式）：
+   ```bash
+   bash deployments/scripts/tools/images/release-sync-images.sh \
+     --release 2.0.0 --component <same-component>
+   ```
+3. 若 `_SUCCESS` 被手工删除且无 marker，才需要显式 `--recover`：
+   ```bash
+   bash deployments/scripts/tools/images/release-sync-images.sh \
+     --release 2.0.0 --component all --recover
+   ```
+4. 确认：
+   ```bash
+   mc stat minio/cubestack-installer/2.0.0/offline-files/_SUCCESS
+   mc stat minio/cubestack-installer/2.0.0/_REFRESH_PENDING   # 应不存在
+   mc cat  minio/cubestack-installer/2.0.0/offline-files/SHA256SUMS | sha256sum
+   ```
+
+**边界**: marker component/subdirs 与本次不一致时脚本会拒绝（避免半套修复）；必须用覆盖原
+scope 的 component 或 `all` 重跑。刷新期间不要手工删 marker。
+
+### 5b. Harbor 与 MinIO 的 CLI digest 不一致
+
+**症状**
+- `skopeo inspect --raw .../cubestack-installer-cli:v2.0.0-rc2` 的 digest 与
+  MinIO `<release>/_CLI_IMAGE_DIGEST` / `release.json.cli_image_digest` 不同；
+- 离线部署（MinIO tar）与在线部署（Harbor tag）实际跑的是两版 CLI。
+
+**根因**
+- 旧流程 push `release-2.0` 后由 `rebuild-cli-image.yml` 只推 Harbor，CLI tar 依赖
+  `sync-release-2.0-images.yml` 的 `workflow_run`；默认分支 main 的监听器缺失/滞后，
+  或同步 workflow 失败时，MinIO 就停在旧 tar。
+
+**解法**
+1. 先确认差异：
+   ```bash
+   skopeo inspect --raw docker://harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2 | sha256sum
+   mc cat minio/cubestack-installer/2.0.0/_CLI_IMAGE_DIGEST; echo
+   mc cat minio/cubestack-installer/2.0.0/offline-files/release.json | jq -r .cli_image_digest
+   ```
+2. 用 Harbor 上的目标镜像重新生成 tar 并 CLI-only 同步（不碰镜像/chart）：
+   ```bash
+   docker pull harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2
+   docker save -o /tmp/cubestack-installer-cli-v2.0.0.tar \
+     harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2
+   bash deployments/scripts/tools/images/release-sync-images.sh \
+     --release 2.0.0 --component cli \
+     --cli-tar /tmp/cubestack-installer-cli-v2.0.0.tar \
+     --cli-image-digest sha256:<Harbor registry digest>
+   ```
+3. 或重新触发 `rebuild-cli-image.yml`（release-2.0）。2026-10-26 起该 workflow 在**同一 job**
+   内完成 Harbor → MinIO 同步，并在写 `_SUCCESS` 前断言三方 digest 一致。
+4. 刷新期间 `_SUCCESS` 会被临时删除，fetch 会明确失败；完成后复查 `_SUCCESS` 与 marker。
+
+### 6. k8s_deploy 期间修改 cluster.conf 导致 addons 与后续模块不一致
+
+**症状**
+- kubespray 部署完成，但 addon 阶段 `01_metallb.sh` 报 `未找到 metallb-system 命名空间`；
+- `addons.yml` 里 `metallb_enabled: false`，而 `cluster.conf` 当前是
+  `SERVICE_EXPOSE_MODE=metallb` / `METALLB_ENABLED=true`；
+- 常见于 `k8s_deploy` 的 30s 倒计时或 kubespray 长时间运行期间修改了 `SERVICE_EXPOSE_MODE`。
+
+**根因**
+`k8s_deploy` 在入口一次性 `load_config`，随后用旧变量生成 inventory/addons.yml 并跑 kubespray；
+后续 addon 模块会重新 `load_config` 读到新值。两边不一致时，MetalLB 模块要求
+`metallb-system`，但 kubespray 按旧 nodeport 配置根本没安装它。
+
+**脚本门禁（2026-10-26 已根治）**
+- `lib-common.sh` 新增 `config_fingerprint` / `addons_metallb_enabled`；
+- `06_k8s_deploy.sh` 在启动时记录 cluster.conf 指纹，**倒计时后和 kubespray 完成后各校验一次**；
+  检测到变更直接中止，并提示重新运行，避免半新半旧；
+- `01_metallb.sh` 在连集群前校验 `addons.yml metallb_enabled/metallb_speaker_enabled`；
+  不一致时直接给出根因和修复命令，不再只报“未找到命名空间”。
+
+**恢复**
+```bash
+# 以“当前 cluster.conf 想要的模式”为准
+bash deployments/scripts/tools/k8s/gen-inventory.sh
+
+# 若当前是 metallb：按当前配置重跑基座，让 kubespray 安装 MetalLB
+sudo ./deploy-cluster.sh --steps k8s_deploy --fresh --yes
+sudo ./deploy-cluster.sh
+
+# 若当前实际想用 nodeport：把 cluster.conf 改为
+#   SERVICE_EXPOSE_MODE="nodeport"
+#   METALLB_ENABLED="false"
+# 再 gen-inventory + 正常重跑（metallb 模块会自动跳过）
+```
+
+**验证**
+- `kubectl get ns metallb-system` 存在，`kubectl -n metallb-system get pods` controller/speaker 1/1；
+- `kubectl get ipaddresspools.metallb.io -n metallb-system` 的池 == `METALLB_POOL`；
+- 重新运行部署不再出现配置漂移中止。

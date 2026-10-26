@@ -24,7 +24,9 @@ name: Validate scripts & manifests
 on:
   pull_request:
   push:
-    branches: [main]
+    # release-2.0 维护分支: cherry-pick / 直接提交到该分支时, 必须走与 main 相同的
+    # 静态校验 + release 模式回归(发布树路径派生/取件/命名契约)。
+    branches: [main, release-2.0]
   workflow_dispatch:
 
 permissions:
@@ -137,6 +139,28 @@ jobs:
         run: |
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-release-mode.sh
+
+      # release-2.0 组件镜像原地刷新: fake mc + fixture, 覆盖 tar/chart/CLI/SHA256SUMS/_SUCCESS
+      - name: release-2.0 组件镜像同步回归(release sync)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-release-sync-images.sh
+
+      # k8s_deploy 期间改 cluster.conf 导致 addons.yml/后续模块配置漂移的门禁回归
+      - name: 部署配置漂移门禁回归(config guard)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-deploy-config-guard.sh
+
+      # CLI 镜像必须内置 patch: kubespray 补丁层缺失 patch 时会静默跳过
+      # (2026-10-25 实机: base 镜像是旧构建, Calico RBAC 等 14 个补丁未生效)。
+      - name: CLI 镜像必需工具(patch)静态门禁
+        run: |
+          set -euo pipefail
+          command grep -qE '^[[:space:]]*netcat-openbsd patch' Dockerfile-cli-base \
+            || { echo "::error::Dockerfile-cli-base 未安装 patch"; exit 1; }
+          command grep -q 'command -v patch' Dockerfile-cli \
+            || { echo "::error::Dockerfile-cli 缺少 patch 构建期断言"; exit 1; }
 
       # CubeStack Web UI 地址发现(Envoy Gateway/HTTPRoute/Service 解析, 假 kubectl 夹具)
       - name: CubeStack Web UI 地址发现回归(cubestack-ui-url)

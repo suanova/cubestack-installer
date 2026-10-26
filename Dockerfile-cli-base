@@ -51,6 +51,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         moreutils \
     && rm -rf /var/lib/apt/lists/*
 
+# 构建期门禁(2026-10-25): patch 是 kubespray 补丁层(cubestack-offline.sh)的必需工具。
+# 缺失时补丁层会**静默跳过**, 导致 Calico RBAC / coredns / metallb 等补丁不生效。
+RUN command -v patch >/dev/null && patch --version | head -1
+
 # ---------- Python 3.11(deadsnakes)—— ansible 12.x 在**控制端**硬要求 Python ≥3.11 ----------
 # 树内 requirements.txt 是 ansible==12.3.0(= ansible-core 2.19.x);ubuntu:22.04 自带 python3=3.10
 # → pip 直接拒绝("Ignored the following versions that require a different python version: …

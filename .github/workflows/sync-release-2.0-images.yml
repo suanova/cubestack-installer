@@ -1,0 +1,221 @@
+name: Sync release-2.0 images to MinIO
+
+# ============================================================================
+# release-2.0 组件镜像原地刷新: Harbor → MinIO <release>/offline-files/
+#
+# 触发:
+#   · repository_dispatch: release-2.0-updated
+#       {release, component, tag?, source_repo?, sha?, checkout_ref?}
+#   · workflow_dispatch: 手动/首次 seed/恢复
+#   · CLI tar 由 rebuild-cli-image.yml 在**同一 job** 内同步; 本 workflow 不再
+#     监听 workflow_run(避免默认分支监听器缺失/滞后导致 Harbor 与 MinIO 不一致)。
+#
+# ⚠ 本文件在 main 与 release-2.0 必须保持完全一致:
+#   GitHub 的 repository_dispatch 只触发默认分支(main)上的 workflow;
+#   main 副本 checkout release-2.0 后执行 release-2.0 的脚本。
+#   main 副本请不要改脚本路径/默认 checkout_ref.
+#
+# 前置:
+#   · deployments/releases/<release>/{release.env,release-images.tsv,components.tsv}
+#     已指向目标 tag (组件 dispatch 前必须完成);
+#   · MinIO 上 <bucket>/<release>/offline-files/_SUCCESS 已存在(完整发布树);
+#   · secrets/vars 与 refresh-latest-offline.yml 相同, 可选
+#     CUBESTACK_OPERATOR_HARBOR_USER/PASSWORD 拉私有 operator/chart.
+# ============================================================================
+
+on:
+  repository_dispatch:
+    types: [release-2.0-updated]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'MinIO release 目录 (如 2.0.0)'
+        required: false
+        default: '2.0.0'
+      component:
+        description: 'components.tsv 组件 (CSV; all/platform/publish/cli/bmc/...)'
+        required: false
+        default: 'all'
+      tag:
+        description: '可选: dispatch 的镜像 tag (用于 tag/env 一致性校验)'
+        required: false
+        default: ''
+      source_repo:
+        description: '可选: 触发组件仓库 (如 suanova/cubestack-operator)'
+        required: false
+        default: ''
+      checkout_ref:
+        description: 'checkout 的发布分支'
+        required: false
+        default: 'release-2.0'
+      force:
+        description: '强制重拉/重传选中的镜像'
+        type: boolean
+        default: false
+      dry_run:
+        description: '只演练, 不上传'
+        type: boolean
+        default: false
+      verify_remote:
+        description: '上传后逐文件流式 sha256 校验'
+        type: boolean
+        default: true
+      first_party_only:
+        description: '只处理 first-party 行(跳过第三方依赖)'
+        type: boolean
+        default: false
+      recover:
+        description: '允许 _SUCCESS 缺失且无 marker 时手动恢复'
+        type: boolean
+        default: false
+      keep_stale:
+        description: '不删除选中子目录里旧 tag 的 tar'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# 所有发布同步串行; 不做 cancel-in-progress(避免上传中途被取消).
+concurrency:
+  group: sync-release-images
+  cancel-in-progress: false
+
+env:
+  RELEASE: ${{ github.event.client_payload.release || github.event.inputs.release || '2.0.0' }}
+  COMPONENT: ${{ github.event.client_payload.component || github.event.inputs.component || 'all' }}
+  TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag || '' }}
+  SOURCE_REPO: ${{ github.event.client_payload.source_repo || github.event.inputs.source_repo || '' }}
+  CHECKOUT_REF: ${{ github.event.client_payload.checkout_ref || github.event.inputs.checkout_ref || 'release-2.0' }}
+  FORCE: ${{ github.event.inputs.force || 'false' }}
+  DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+  VERIFY_REMOTE_INPUT: ${{ github.event.inputs.verify_remote }}
+  FIRST_PARTY_ONLY: ${{ github.event.inputs.first_party_only || 'false' }}
+  RECOVER: ${{ github.event.inputs.recover || 'false' }}
+  KEEP_STALE: ${{ github.event.inputs.keep_stale || 'false' }}
+  HARBOR_HOST: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
+  HARBOR_USER: ${{ vars.HARBOR_MIRROR_USER || secrets.HARBOR_MIRROR_USER }}
+  HARBOR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
+  HARBOR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
+  MINIO_ENDPOINT: ${{ secrets.MINIO_HOSTNAME }}
+  MINIO_ACCESS_KEY: ${{ secrets.MINIO_USERNAME }}
+  MINIO_SECRET_KEY: ${{ secrets.MINIO_PASSWORD }}
+  MINIO_BUCKET: ${{ vars.MINIO_BUCKET || 'cubestack-installer' }}
+  MINIO_INSECURE: ${{ vars.MINIO_INSECURE || 'false' }}
+  CUBESTACK_OPERATOR_HARBOR_HOST: ${{ vars.CUBESTACK_OPERATOR_HARBOR_HOST || 'harbor.isuanova.com' }}
+  CUBESTACK_OPERATOR_HARBOR_USER: ${{ vars.CUBESTACK_OPERATOR_HARBOR_USER || secrets.CUBESTACK_OPERATOR_HARBOR_USER }}
+  CUBESTACK_OPERATOR_HARBOR_PASSWORD: ${{ secrets.CUBESTACK_OPERATOR_HARBOR_PASSWORD }}
+
+jobs:
+  release-list:
+    name: Resolve release directories
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      releases: ${{ steps.resolve.outputs.releases }}
+    steps:
+      - name: Resolve releases
+        id: resolve
+        run: |
+          set -euo pipefail
+          case "${RELEASE}" in
+            ''|*[!0-9A-Za-z._-]*) echo "::error::invalid release: ${RELEASE}"; exit 1 ;;
+          esac
+          json="$(RELEASE="${RELEASE}" python3 -c \
+            'import json,os; print(json.dumps([os.environ["RELEASE"]]))')"
+          echo "releases=${json}" >> "$GITHUB_OUTPUT"
+          echo "releases: ${json}" >> "$GITHUB_STEP_SUMMARY"
+
+  sync:
+    name: Sync ${{ matrix.release }}
+    needs: release-list
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        release: ${{ fromJSON(needs.release-list.outputs.releases) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+          persist-credentials: false
+
+      - name: Validate configuration
+        env:
+          MATRIX_RELEASE: ${{ matrix.release }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for v in MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MATRIX_RELEASE; do
+            if [ -z "${!v:-}" ]; then echo "::error::missing ${v}"; missing=1; fi
+          done
+          if [ -z "${HARBOR_USER:-}" ] && [ -z "${CUBESTACK_OPERATOR_HARBOR_USER:-}" ]; then
+            echo "::error::missing Harbor user (HARBOR_MIRROR_USER or CUBESTACK_OPERATOR_HARBOR_USER)"; missing=1
+          fi
+          if [ -z "${HARBOR_PASSWORD:-}" ] && [ -z "${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}" ]; then
+            echo "::error::missing Harbor password"; missing=1
+          fi
+          case "${MATRIX_RELEASE}" in ''|*[!0-9A-Za-z._-]*) echo "::error::invalid release: ${MATRIX_RELEASE}"; missing=1 ;; esac
+          case "${CHECKOUT_REF}" in ''|*[!0-9A-Za-z._/-]*|*..*) echo "::error::invalid checkout_ref: ${CHECKOUT_REF}"; missing=1 ;; esac
+          [ "${missing}" = "0" ] || exit 1
+          echo "release=${MATRIX_RELEASE} component=${COMPONENT:-all} tag=${TAG:-<none>} checkout_ref=${CHECKOUT_REF}"
+
+      - name: Reclaim disk space
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Install skopeo & mc
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo
+          curl -fsSL https://dl.min.io/aistor/mc/release/linux-amd64/mc -o /tmp/mc
+          sudo install -m 0755 /tmp/mc /usr/local/bin/mc
+          skopeo --version
+          mc --version
+
+      - name: Setup helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
+      - name: Preflight & sync
+        env:
+          MATRIX_RELEASE: ${{ matrix.release }}
+        run: |
+          set -euo pipefail
+          args=(--release "${MATRIX_RELEASE}" --component "${COMPONENT:-all}"
+                --summary-file "${RUNNER_TEMP}/sync-summary.md")
+          [ -n "${TAG:-}" ] && args+=(--tag "${TAG}")
+          [ -n "${SOURCE_REPO:-}" ] && args+=(--source-repo "${SOURCE_REPO}")
+          [ "${FORCE:-false}" = "true" ] && args+=(--force)
+          [ "${FIRST_PARTY_ONLY:-false}" = "true" ] && args+=(--first-party-only)
+          [ "${RECOVER:-false}" = "true" ] && args+=(--recover)
+          [ "${KEEP_STALE:-false}" = "true" ] && args+=(--keep-stale)
+          [ "${VERIFY_REMOTE_INPUT:-true}" = "false" ] && args+=(--no-verify-remote)
+
+          echo "::group::preflight"
+          bash deployments/scripts/tools/images/release-sync-images.sh "${args[@]}" --preflight
+          echo "::endgroup::"
+
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            echo "::group::dry-run"
+            bash deployments/scripts/tools/images/release-sync-images.sh "${args[@]}" --dry-run
+            echo "::endgroup::"
+          else
+            bash deployments/scripts/tools/images/release-sync-images.sh "${args[@]}"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/sync-summary.md" ]; then
+            cat "${RUNNER_TEMP}/sync-summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no sync summary produced" >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -97,7 +97,9 @@ echo "== ④ setup-ntp 静态围栏 =="
 _SETUP_NTP="${_DEPLOY_DIR}/scripts/tools/node/setup-ntp.sh"
 chk "④权威可达性预检在位" "1" "$(grep -c 'NTP 权威 ${NTP_AUTHORITY} 不可达' "${_SETUP_NTP}")"
 chk "④无可执行的 apt --fix-broken(禁令)" "0" "$(grep -cE '^[[:space:]]*apt-get --fix-broken' "${_SETUP_NTP}")"
-chk "④离线安装改调共享原语" "1" "$(grep -c 'install_debs_offline /tmp/cubestack-ntp-debs chrony' "${_SETUP_NTP}")"
+# authority 与客户端 NODE_SCRIPT 都会调用共享原语, 至少 1 处即可。
+_ntp_install_hits="$(grep -c 'install_debs_offline /tmp/cubestack-ntp-debs chrony' "${_SETUP_NTP}")"
+chk "④离线安装改调共享原语(至少 1 处)" "1" "$([ "${_ntp_install_hits}" -ge 1 ] && echo 1 || echo 0)"
 
 echo "---------------------------------------------"
 if [ "${_fail}" = "0" ]; then echo "✅ deb 安装原语夹具全部通过"; else echo "❌ 存在失败断言"; exit 1; fi

@@ -29,6 +29,29 @@ export CLUSTER_CONF
 CLUSTER_DEFAULTS_CONF="${CLUSTER_DEFAULTS_CONF:-${REPO_ROOT}/deployments/config/cluster.defaults.conf}"
 export CLUSTER_DEFAULTS_CONF
 
+# ---------------- 配置漂移门禁工具(2026-10-26) ----------------
+# k8s_deploy 在启动时一次性 load_config; 若用户在 30s 倒计时/长时间 kubespray 运行期间
+# 修改 cluster.conf, 后续 addon 模块会重新 load_config 看到新值, 而 addons.yml 仍是旧值
+# (实机: nodeport→metallb, addons metallb_enabled=false → metallb 模块失败).
+# 这两个 helper 供 k8s_deploy/metallb 门禁复用; 只读, 不修改配置.
+config_fingerprint() {
+    local conf="${CLUSTER_CONF:-${REPO_ROOT}/deployments/config/cluster.conf}"
+    [ -f "${conf}" ] || { printf 'missing\n'; return 0; }
+    # 只对"生效行"取指纹: 注释/空行变化不算配置漂移, 避免无谓中止.
+    command grep -vE '^[[:space:]]*(#|$)' "${conf}" 2>/dev/null \
+        | sha256sum | awk '{print $1}' || true
+}
+addons_metallb_enabled() {
+    local yml="${1:-${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}/group_vars/k8s_cluster/addons.yml}"
+    [ -f "${yml}" ] || { printf 'missing\n'; return 0; }
+    awk -F':[[:space:]]*' '
+        /^[[:space:]]*metallb_enabled:/ {
+            v=$2; gsub(/["[:space:]]/, "", v); print v; found=1; exit
+        }
+        END { if (!found) print "missing" }
+    ' "${yml}"
+}
+
 # ---------------- 集群名(固定默认, 单集群) ----------------
 # 默认集群名 cubestack-cluster, 用于 inventory/offline-files 目录与日志命名; 环境变量可覆盖
 CLUSTER_NAME="${CLUSTER_NAME:-cubestack-cluster}"
@@ -632,29 +655,36 @@ ensure_registry_nginx() {
     reg_has_tag "${pr}" "nginx" "${tag}" && { echo "${ref}"; return 0; }
     skopeo_require "verify"
     local src="" _tmp="" _t
-    # ① 本地 docker daemon(nginx 常被手工 pull 过, 快路径)
-    src="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '(/|^)nginx:(latest|[0-9.]+)$' | head -1 || true)"
-    if [ -n "${src}" ]; then
-        echo "  [nginx] 从本地 docker 推送: ${src}" >&2
-        _tmp="$(mktemp)"
-        if sudo docker save "${src}" -o "${_tmp}" >/dev/null 2>&1 \
-           && push_image_skopeo "docker-archive:${_tmp}" "docker://${pr}/nginx:${tag}" >/dev/null 2>&1; then
-            rm -f "${_tmp}"; echo "${ref}"; return 0
+    # 离线 tar 搜索目录: release 模式**只用发布树** —— 绝不回落到 dev/latest offline-files,
+    # 否则 2.0 验证可能拿到 latest 的 nginx(违反"release 与 latest 互不影响")。
+    local -a _nginx_dirs=()
+    if [ -n "${CUBESTACK_RELEASE:-}" ]; then
+        _nginx_dirs=("${OFFLINE_FILES_ROOT}/nginx" "${LOCAL_REPO_DIR}/images")
+    else
+        _nginx_dirs=("${REPO_ROOT}/deployments/offline-files/nginx" \
+                     "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx" \
+                     "${LOCAL_REPO_DIR}/images")
+    fi
+    # ① 本地 docker daemon(仅 dev 模式快路径; release 模式必须走发布树, 避免掩盖缺失的离线件)
+    if [ -z "${CUBESTACK_RELEASE:-}" ]; then
+        src="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '(/|^)nginx:(latest|[0-9.]+)$' | head -1 || true)"
+        if [ -n "${src}" ]; then
+            echo "  [nginx] 从本地 docker 推送: ${src}" >&2
+            _tmp="$(mktemp)"
+            if sudo docker save "${src}" -o "${_tmp}" >/dev/null 2>&1 \
+               && push_image_skopeo "docker-archive:${_tmp}" "docker://${pr}/nginx:${tag}" >/dev/null 2>&1; then
+                rm -f "${_tmp}"; echo "${ref}"; return 0
+            fi
+            rm -f "${_tmp}"; echo "  [nginx] 本地 docker 推送失败, 尝试离线 tar..." >&2
         fi
-        rm -f "${_tmp}"; echo "  [nginx] 本地 docker 推送失败, 尝试离线 tar..." >&2
     fi
     # ② 离线 tar: suffix 用 "nginx:latest"(无前导 /——find_offline_tar 的前导 / 约定只匹配带
     # registry 前缀的全格式, 库镜像短格式如 "nginx:latest" 会漏; glob nginx*.tar 已限定候选)。
     # find_offline_tar 是 endswith 语义, 版本化 tag(nginx:1.31.4)不命中, 下方按内容兜底。
-    _t="$(find_offline_tar "nginx:latest" "nginx*.tar" \
-            "${REPO_ROOT}/deployments/offline-files/nginx" \
-            "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx" \
-            "${LOCAL_REPO_DIR}/images")" || _t=""
+    _t="$(find_offline_tar "nginx:latest" "nginx*.tar" "${_nginx_dirs[@]}")" || _t=""
     if [ -z "${_t}" ]; then
         # 兜底: 版本化 tag(如 nginx:1.31.4)按内容匹配(含 "nginx:" 即接受)
-        for _d in "${REPO_ROOT}/deployments/offline-files/nginx" \
-                  "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx" \
-                  "${LOCAL_REPO_DIR}/images"; do
+        for _d in "${_nginx_dirs[@]}"; do
             [ -d "${_d}" ] || continue
             for _f in "${_d}"/nginx*.tar; do
                 [ -f "${_f}" ] || continue
@@ -742,9 +772,20 @@ load_config() {
     SSH_USER="${SSH_USER:-ubuntu}"
     export SSH_USER
     # ---- release 模式(2026-10-21): 版本目录 + release.env ----
-    # 本地桶根与 MinIO 同构: <root>/<版本>/{offline-files,cubestack-installer-cli.tar}
+    # 本地桶根与 MinIO 同构: <root>/<版本>/{offline-files,cubestack-installer-cli-v<版本>.tar}
     # release.env 提供版本变量, 必须在 kubespray 版本档案块之前加载(才能接管 KUBESPRAY_VERSION)。
     OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
+    # 自动检测(2026-10-26): flat offline 根存在 release.env 时, 直接以它为准进入 release
+    # 模式, 不需要 cluster.conf 再写 CUBESTACK_RELEASE / LAYOUT; 版本也取自 release.env。
+    _auto_rel_env="${OFFLINE_FILES_ROOT}/release.env"
+    if [ "${CUBESTACK_RELEASE_AUTO:-true}" = "true" ] \
+       && [ -z "${CUBESTACK_RELEASE:-}" ] && [ -f "${_auto_rel_env}" ]; then
+        _auto_ver="$(sed -nE 's/^RELEASE_VERSION=([^[:space:]#]+).*/\1/p' "${_auto_rel_env}" | head -1)"
+        [ -n "${_auto_ver}" ] || { err "自动检测到 ${_auto_rel_env}, 但缺少 RELEASE_VERSION"; exit 1; }
+        CUBESTACK_RELEASE="${_auto_ver}"
+        [ -n "${CUBESTACK_RELEASE_LAYOUT:-}" ] || CUBESTACK_RELEASE_LAYOUT="flat"
+        vlog "自动检测 release.env: ${_auto_rel_env} → release=${CUBESTACK_RELEASE} layout=${CUBESTACK_RELEASE_LAYOUT}"
+    fi
     if [ -n "${CUBESTACK_RELEASE:-}" ]; then
         # 版本名参与路径(<root>/<版本>/offline-files)并 source 其中的 release.env:
         # 只允许字母数字开头 + 字母数字/点/下划线/连字符, 拒绝 ../、绝对路径、空白与
@@ -754,13 +795,48 @@ load_config() {
             err "CUBESTACK_RELEASE 格式非法: '${CUBESTACK_RELEASE}'(只允许字母数字开头, 后接字母数字/点/下划线/连字符)"
             exit 1
         fi
-        CUBESTACK_RELEASE_ROOT="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
-        _rel_root="${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files"
-        if [ ! -f "${_rel_root}/release.env" ]; then
-            err "未找到发布版本 ${CUBESTACK_RELEASE}: ${_rel_root}/release.env"
-            err "  先取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --dest ${CUBESTACK_RELEASE_ROOT}"
-            exit 1
+        # 未显式指定 layout: 有版本树(root 非空且存在)用 tree; 否则 flat offline 有 release.env
+        # 用 flat; 都没有用 tree(保持旧报错路径, 提示取件)。
+        if [ -z "${CUBESTACK_RELEASE_LAYOUT:-}" ]; then
+            if [ -n "${CUBESTACK_RELEASE_ROOT:-}" ] \
+               && [ -f "${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files/release.env" ]; then
+                CUBESTACK_RELEASE_LAYOUT="tree"
+            elif [ -f "${OFFLINE_FILES_ROOT}/release.env" ]; then
+                CUBESTACK_RELEASE_LAYOUT="flat"
+            else
+                CUBESTACK_RELEASE_LAYOUT="tree"
+            fi
         fi
+        _layout="${CUBESTACK_RELEASE_LAYOUT}"
+        CUBESTACK_RELEASE_ROOT="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
+        case "${_layout}" in
+            tree)
+                _rel_root="${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files"
+                if [ ! -f "${_rel_root}/release.env" ]; then
+                    err "未找到发布版本 ${CUBESTACK_RELEASE}: ${_rel_root}/release.env"
+                    err "  先取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --dest ${CUBESTACK_RELEASE_ROOT}"
+                    exit 1
+                fi
+                ;;
+            flat)
+                # flat: 资产平铺在 OFFLINE_FILES_ROOT; 优先用其中的 release.env(用户口径:
+                # 部署以 release.env 为主), 没有时回退仓库内发布定义。
+                if [ -f "${OFFLINE_FILES_ROOT}/release.env" ]; then
+                    _rel_root="${OFFLINE_FILES_ROOT}"
+                else
+                    _rel_root="${REPO_ROOT}/deployments/releases/${CUBESTACK_RELEASE}"
+                fi
+                if [ ! -f "${_rel_root}/release.env" ]; then
+                    err "未找到 release.env: ${OFFLINE_FILES_ROOT}/release.env 或 ${REPO_ROOT}/deployments/releases/${CUBESTACK_RELEASE}/release.env(flat 模式)"
+                    exit 1
+                fi
+                CUBESTACK_RELEASE_ROOT=""
+                ;;
+            *)
+                err "CUBESTACK_RELEASE_LAYOUT 仅支持 tree|flat(当前=${_layout})"
+                exit 1
+                ;;
+        esac
         # shellcheck disable=SC1090
         source "${_rel_root}/release.env"
         if [ "${RELEASE_VERSION:-}" != "${CUBESTACK_RELEASE}" ]; then
@@ -771,8 +847,12 @@ load_config() {
             err "release.env 缺少 KUBESPRAY_VERSION(${_rel_root}/release.env)"
             exit 1
         fi
-        OFFLINE_FILES_ROOT="${_rel_root}"
-        # 这些变量默认写死指向 dev offline-files; release 模式统一重定向到版本目录。
+        if [ "${_layout}" = "flat" ]; then
+            OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
+        else
+            OFFLINE_FILES_ROOT="${_rel_root}"
+        fi
+        # 这些变量默认写死指向 dev offline-files; release 模式统一重定向到发布根。
         METAX_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/metax-gpu"
         METAX_PKG_DIR="${METAX_OFFLINE_DIR}"
         CUBESTACK_OPERATOR_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/cubestack-operator"
@@ -784,13 +864,13 @@ load_config() {
         DEV_LAB_SAVE_DIR="${OFFLINE_FILES_ROOT}/dev-lab"
         MODEL_IMAGES_SAVE_DIR="${OFFLINE_FILES_ROOT}/model-collection"
         CEPH_IMAGE_DIR="${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}/images"
-        export CUBESTACK_RELEASE_ROOT METAX_OFFLINE_DIR METAX_PKG_DIR \
+        export CUBESTACK_RELEASE_LAYOUT CUBESTACK_RELEASE_ROOT METAX_OFFLINE_DIR METAX_PKG_DIR \
                CUBESTACK_OPERATOR_OFFLINE_DIR MULTUS_SAVE_DIR \
                NVIDIA_GPU_OPERATOR_OFFLINE_DIR RDMA_SAVE_DIR \
                NETSHOOT_SAVE_DIR NETSHOOT_BASE_TAR DEV_LAB_SAVE_DIR \
                MODEL_IMAGES_SAVE_DIR CEPH_IMAGE_DIR
-        vlog "release 模式生效: ${CUBESTACK_RELEASE}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
-        unset _rel_root
+        vlog "release 模式生效: ${CUBESTACK_RELEASE} layout=${_layout}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
+        unset _rel_root _layout _auto_rel_env _auto_ver
     fi
     # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
     # (档案 > cluster.conf > cluster.defaults.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
@@ -1777,6 +1857,66 @@ ceph_storage_hosts() {
     return 0
 }
 
+# 校验显式 Ceph 节点/裸盘配置(CEPH_NODES / CEPH_DATA_DISKS)。
+# 目的: 防止 "node0:/dev/vdb,node1:/dev/vdb,node2:/dev/vdb" 这种**节点间用逗号**的写法
+# 被解析器静默当成 node0 的三块盘(2026-10-26 实机: 三块盘全显示在第一个节点, 另外两台
+# <未检测到>)。必须用分号分隔节点, 逗号只分隔同一节点的多块盘。
+# 返回: 0=通过; 1=格式/节点名非法(err 已打印原因)。
+ceph_validate_explicit_config() {
+    local _line _h _g _grp _hn _ds _d _ncolon
+    local -a _hosts=() _grps=()
+    # 合法节点名来自 NODES; node_parse 放子 shell, 避免污染调用方 NODE_* 全局态。
+    while IFS= read -r _h; do
+        [ -n "${_h}" ] && _hosts+=("${_h}")
+    done < <(for _line in "${NODES[@]:-}"; do
+        [ -z "${_line}" ] && continue
+        node_parse "${_line}"
+        [ -n "${NODE_HOSTNAME}" ] && printf '%s\n' "${NODE_HOSTNAME}"
+    done)
+
+    # CEPH_NODES: 裸 hostname 逗号分隔, 不允许 role 前缀/未知节点。
+    if [ -n "${CEPH_NODES:-}" ]; then
+        for _h in ${CEPH_NODES//,/ }; do
+            [ -n "${_h}" ] || continue
+            if ! printf '%s\n' "${_hosts[@]:-}" | command grep -qxF -- "${_h}"; then
+                err "CEPH_NODES 含未知节点: ${_h}(NODES 中不存在; 只写 hostname, 不要写 master/worker 角色前缀)"
+                return 1
+            fi
+        done
+    fi
+
+    # CEPH_DATA_DISKS: 节点之间用 ;, 同一节点多盘用 ,
+    if [ -n "${CEPH_DATA_DISKS:-}" ]; then
+        while IFS=';' read -ra _grps; do
+            for _g in "${_grps[@]:-}"; do
+                [ -n "${_g}" ] || continue
+                _ncolon="$(printf '%s' "${_g}" | tr -cd ':' | wc -c)"
+                if [ "${_ncolon}" -gt 1 ]; then
+                    err "CEPH_DATA_DISKS 格式错误: 节点之间必须用分号 ; 分隔, 逗号只用于同一节点的多块盘"
+                    err "  问题项: ${_g}"
+                    err "  正确示例: node0:/dev/vdb;node1:/dev/vdb;node2:/dev/vdb"
+                    err "  或全节点同盘: /dev/vdb"
+                    return 1
+                fi
+                _hn="${_g%%:*}"; _ds="${_g#*:}"
+                if [ "${_hn}" != "${_ds}" ]; then
+                    if ! printf '%s\n' "${_hosts[@]:-}" | command grep -qxF -- "${_hn}"; then
+                        err "CEPH_DATA_DISKS 含未知节点: ${_hn}(NODES 中不存在; 只写 hostname, 不要写角色前缀)"
+                        return 1
+                    fi
+                fi
+                for _d in ${_ds//,/ }; do
+                    [ -n "${_d}" ] || continue
+                    case "${_d}" in
+                        *:*) err "CEPH_DATA_DISKS 磁盘项含 ':' (${_d}); 节点之间请用分号 ;, 不要用逗号"; return 1 ;;
+                    esac
+                done
+            done
+        done <<< "${CEPH_DATA_DISKS}"
+    fi
+    return 0
+}
+
 # Ceph 存储节点数量(复用上面的选择规则; 供预检/提示用)
 ceph_storage_host_count() {
     local n
@@ -2099,6 +2239,88 @@ ensure_hosts_block() {
         rm -f "${t}"
     fi
     printf '%s\n' "${content}" >> /etc/hosts 2>/dev/null || true
+}
+
+# ---------------- 节点侧 /etc/hosts: 把 NODES 的 hostname → IP 同步到所有节点 ----------------
+# 背景(2026-10-23 实机 MCCL/RoCE): NODES 的 hostname 是 kubespray inventory / K8s 节点名,
+#   但 installer 此前只写**部署机** /etc/hosts, 节点侧没有这些 hostname 的解析。hostNetwork
+#   Pod 按 hostname 找对端(MCCL socket)时 getent 失败 → 回退 127.0.0.1 → 多机通信失败。
+# 做法(幂等, 不碰 /etc/hostname):
+#   · 每台节点先删除**任一字段**等于受管 hostname 的旧行(含 127.0.1.1 / 换 IP 残留), 再追加当前映射;
+#   · 重复执行每个 hostname 恰好一行; 不改节点实际主机名, 只加 alias;
+#   · 远端写入用 SSH + sudo(密钥优先, 失败回退 sshpass 密码), 与扩容模块同款;
+#   · 任一节点失败 → 打印节点清单并 return 1(调用方必须中止或显式告警, 不得静默成功)。
+# 前置: load_config 已执行(NODES / SSH_KEY_* / SSH_DEFAULT_PASSWORD)。
+# 用法: sync_nodes_hosts_remote || exit 1
+sync_nodes_hosts_remote() {
+    local line hn ip user pw key tmp e
+    local -a entries=() targets=()
+    local -A seen=()
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        [ -n "${NODE_IP}" ] && [ -n "${NODE_HOSTNAME}" ] || continue
+        [ "${NODE_HOSTNAME}" = "-" ] && continue
+        [ -n "${seen[${NODE_HOSTNAME}]:-}" ] && continue
+        seen["${NODE_HOSTNAME}"]=1
+        entries+=("${NODE_IP} ${NODE_HOSTNAME}")
+        targets+=("${NODE_HOSTNAME}|${NODE_IP}|${NODE_USER}|${NODE_PW}")
+    done
+    if [ "${#entries[@]}" -eq 0 ]; then
+        warn "  NODES 无可同步的 hostname/IP, 跳过节点侧 /etc/hosts"
+        return 0
+    fi
+    local managed=""
+    for e in "${entries[@]}"; do managed="${managed} ${e#* }"; done
+    managed="${managed# }"
+    key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+
+    # 远端脚本: 过滤旧行(任一字段命中受管 hostname) + 追加当前映射, 原地覆盖写(不 rename)
+    tmp="$(mktemp)"
+    {
+        cat <<'EOS'
+#!/bin/bash
+set -e
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+EOS
+        printf 'managed=%q\n' "${managed}"
+        cat <<'EOS'
+awk -v managed="$managed" 'BEGIN { n=split(managed, a, " "); for (i=1;i<=n;i++) m[a[i]]=1 }
+{ keep=1; for (i=1;i<=NF;i++) if (m[$i]) { keep=0; break } if (keep) print }' /etc/hosts > "$tmp"
+EOS
+        for e in "${entries[@]}"; do
+            printf 'printf "%%s\\n" %q >> "$tmp"\n' "${e}"
+        done
+        printf 'cat "$tmp" > /etc/hosts\n'
+    } > "${tmp}"
+
+    local failed="" rcmd
+    for line in "${targets[@]}"; do
+        IFS='|' read -r hn ip user pw <<< "${line}"
+        rcmd="sudo bash -s"; [ "${user}" = "root" ] && rcmd="bash -s"
+        if [ -f "${key}" ] && ssh -i "${key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+                "${user}@${ip}" "${rcmd}" < "${tmp}" >/dev/null 2>&1; then
+            continue
+        fi
+        if [ -n "${pw}" ] && command -v sshpass >/dev/null 2>&1 && \
+            env SSHPASS="${pw}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=8 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+                "${user}@${ip}" "${rcmd}" < "${tmp}" >/dev/null 2>&1; then
+            continue
+        fi
+        warn "  ${hn}(${ip}) 节点侧 /etc/hosts 写入失败(密钥/密码均不可达)"
+        failed="${failed} ${hn}(${ip})"
+    done
+    rm -f "${tmp}"
+    if [ -n "${failed}" ]; then
+        err "  节点侧 /etc/hosts 同步失败:${failed}"
+        err "  → 修复 SSH/免密后重跑; 否则 hostNetwork Pod 可能无法按 hostname 解析对端(回退 127.0.0.1)"
+        return 1
+    fi
+    ok "  节点侧 /etc/hosts 同步完成(${#entries[@]} 个 hostname → ${#targets[@]} 个节点)"
+    return 0
 }
 
 # ---------------- 宿主机 kubectl/helm 访问集群(共享, 防 TLS/DNAT 坑) ----------------

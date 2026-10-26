@@ -90,6 +90,8 @@ spec:
   - name: ${TEST_POD}
     command: ["/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"]
     image: ${TEST_IMAGE}
+    # 离线节点已预载 busybox:latest; 默认 Always 会强制回 docker.io 拉取并超时(2026-10-25 实机)
+    imagePullPolicy: IfNotPresent
 EOF
 _POD_RUNNING=0
 for _i in $(seq 1 36); do
@@ -106,16 +108,17 @@ ok "    测试 pod Running ✓"
 
 say "  ④ 断言附加接口 net 存在 + network-status 注解..."
 # 从首个 master exec: 容器 bridge 网络到不了 pod overlay IP, 必须经 SSH 到节点(kubectl exec 走 apiserver→kubelet)
-_NET_IFACE="$(SSH "${K}" -n ${TEST_NS} exec ${TEST_POD} -- ip -o link show 2>/dev/null || true | grep -oE '^[0-9]+: net[0-9]+' || true)"  # net1/net2...
+# ⚠ 管道优先级: 必须先把 SSH 的输出整体取出再 grep(`(SSH ... || true) | grep`),
+#   写成 `SSH ... || true | grep` 会让 SSH 成功时绕过 grep, 把整段 ip 输出当命中(假绿; 2026-10-25 实测)。
+_NET_IFACE="$( (SSH "${K}" -n ${TEST_NS} exec ${TEST_POD} -- ip -o link show 2>/dev/null || true) \
+    | grep -oE '^[0-9]+: net[0-9]+' | head -1 || true)"
 if [ -n "${_NET_IFACE}" ]; then
-    ok "    附加接口出现: $(echo "${_NET_IFACE}" | head -1) ✓"
+    ok "    附加接口出现: ${_NET_IFACE} ✓"
 else
-    _IFACES="$(SSH "${K}" -n ${TEST_NS} exec ${TEST_POD} -- ip -o link show 2>/dev/null || true)"
-    if [ -n "${_IFACES}" ]; then
-        warn "    pod 内接口: $(echo "${_IFACES}" | awk '{print $2}' | tr '\n' ' ') 未含 net(检查 NAD config / master 网卡是否存在)"
-        exit 1
-    fi
-    err "    exec ip a 无输出(容器无法执行 ip 命令?)"; exit 1
+    _IFACES="$( (SSH "${K}" -n ${TEST_NS} exec ${TEST_POD} -- ip -o link show 2>/dev/null || true) \
+        | awk -F': ' '{print $2}' | tr '\n' ' ' || true)"
+    err "    pod 内未出现 net 附加接口(当前接口: ${_IFACES:-<无输出>}); 检查 NAD config / master 网卡是否存在"
+    exit 1
 fi
 # network-status 注解: kubectl describe 含 k8s.v1.cni.cncf.io/network-status 且含示例网络
 _NSTATUS="$(SSH "${K}" -n ${TEST_NS} get pod ${TEST_POD} -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}' 2>/dev/null || true)"

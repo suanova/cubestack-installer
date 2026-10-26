@@ -116,7 +116,13 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
         sleep 5
     done
     # ③ 逐节点卸载 ceph 挂载(可能有历史堆叠, 最多 20 层; 不动非 ceph 文件系统)
+    # ★ 2026-10-26: external 模式保留宿主机挂载 —— 外部 Ceph 不是本次 K8s 覆盖的资产,
+    #   卸载它既不必要也可能因消费者 busy 而失败; 新部署的 cephfs_mount 会复用可读挂载,
+    #   不可读时再按安装前预检 lazy umount。internal 模式仍需严格卸载(随后 Ceph 会被销毁)。
     _unmount_fail=0
+    if [ "${CEPH_MODE}" = "external" ]; then
+        say "  CEPH_MODE=external → 保留宿主机 CephFS 挂载 ${CEPHFS_MOUNT_PATH}(外部 Ceph 资源; 新部署可复用)"
+    else
     for _line in "${NODES[@]:-}"; do
         [ -z "${_line}" ] && continue
         node_parse "${_line}"
@@ -135,9 +141,14 @@ echo CEPH_UNMOUNT_OK"
         _out="$(_node_ssh "${_ip}" "${_unmount_cmd}" 2>&1 || true)"
         case "${_out}" in
             *CEPH_UNMOUNT_OK*) ok "  ${_host}(${_ip}) 宿主机挂载已卸载" ;;
-            *) _unmount_fail=1; warn "  ${_host}(${_ip}) 卸载失败/仍有 ceph 挂载: $(printf '%s' "${_out}" | tail -1)" ;;
+            *)
+                _unmount_fail=1
+                _err_tail="$(printf '%s\n' "${_out}" | command grep -v '^Warning: Permanently added' | tail -3 | tr '\n' ' ' || true)"
+                warn "  ${_host}(${_ip}) 卸载失败/仍有 ceph 挂载: ${_err_tail:-<无输出>}"
+                ;;
         esac
     done
+    fi
     SSH "${K}" -n "${CEPH_NAMESPACE}" delete secret "${CEPHFS_MOUNT_SECRET}" --ignore-not-found >/dev/null 2>&1 \
         || warn "  删除 Secret 失败(继续)"
     if [ "${CEPH_MODE}" != "external" ]; then

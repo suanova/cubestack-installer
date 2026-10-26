@@ -183,7 +183,7 @@ deployments/scripts/
 | SSH | **`SSH_USER`** `SSH_KEY_NAME` | 节点安装用户(`root`/`ubuntu`, 默认 ubuntu; NODES 第4字段 `-` 跟随本值; **主文件**); 密钥名(`SSH_KEY_NAME` 在 defaults; 默认密码见核心必改项; 节点独立密码写 NODES 第5字段) |
 | 节点规划 | `NODES=( ... )` | 每行一节点(5字段, 不区分虚拟机/裸金属); 虚拟机规格见 `tools/vm/vm-nodes.conf` |
 | 离线文件 | `OFFLINE_FILES_DIR` `LOCAL_REPO_DIR` `MINIO_*` | 离线 binary/镜像目录与 MinIO 下载配置(§2.1b, **全部在 defaults**) |
-| kubespray | `KUBESPRAY_INV_DIR` `KUBESPRAY_DIR` `UPDATE_ETC_HOSTS` | inventory/树路径、hosts 更新开关(§2.7) — **全部在 defaults** |
+| kubespray | `KUBESPRAY_INV_DIR` `KUBESPRAY_DIR` `UPDATE_ETC_HOSTS` | inventory/树路径、**部署机** hosts 更新开关(§2.7); 节点侧 NODES hostname→IP 由 k8s_hosts 无条件同步 — **全部在 defaults** |
 | 版本 | `KUBESPRAY_VERSION` `K8S_VERSION` `KUBESPRAY_PROFILE` / 镜像版本钉子 | **全部在 defaults**(★ 升级入口; 见 defaults「版本基线/镜像版本」节) |
 | NTP 时间同步 | `NTP_ENABLED` `NTP_SERVER` `NTP_UPSTREAM` `NTP_ALLOW` `NTP_MAX_OFFSET_MS` | k8s 部署前的节点时钟一致化(见 §5.8.2) |
 
