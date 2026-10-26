@@ -771,6 +771,9 @@ if [ "${CLI_ONLY}" = "1" ] || [ -n "${CLI_IMAGE}" ]; then
         CLI_CHANGED=1
     elif [ -n "${OLD_CLI_DIGEST}" ] && [ -n "${CLI_NEW_DIGEST}" ] && [ "${OLD_CLI_DIGEST}" != "${CLI_NEW_DIGEST}" ]; then
         CLI_CHANGED=1
+    elif [ -z "${OLD_CLI_DIGEST}" ] && [ -n "${CLI_NEW_DIGEST}" ] && [ -z "${CLI_TAR_IN}" ]; then
+        # 无历史 digest 且未提供本地 tar: 无法证明远端 tar 对应该 digest, 重建以保持一致
+        CLI_CHANGED=1
     fi
 fi
 CLI_LOCAL=""
