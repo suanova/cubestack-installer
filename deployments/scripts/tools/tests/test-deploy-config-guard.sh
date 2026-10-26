@@ -24,13 +24,13 @@ SERVICE_EXPOSE_MODE="metallb"
 METALLB_ENABLED="true"
 METALLB_POOL="10.66.3.225-10.66.3.226"
 EOF
-fp1="$(CLUSTER_CONF="${TMP}/cluster.conf" bash -c 'source "$1"; config_fingerprint' _ "${LIB}" 2>/dev/null)"
+fp1="$(CLUSTER_CONF="${TMP}/cluster.conf" bash -c 'source "$1" >/dev/null 2>&1; config_fingerprint' _ "${LIB}" 2>/dev/null)"
 cat >> "${TMP}/cluster.conf" <<'EOF'
 # comment-only change
 EOF
-fp2="$(CLUSTER_CONF="${TMP}/cluster.conf" bash -c 'source "$1"; config_fingerprint' _ "${LIB}" 2>/dev/null)"
+fp2="$(CLUSTER_CONF="${TMP}/cluster.conf" bash -c 'source "$1" >/dev/null 2>&1; config_fingerprint' _ "${LIB}" 2>/dev/null)"
 sed -i 's/^SERVICE_EXPOSE_MODE=.*/SERVICE_EXPOSE_MODE="nodeport"/' "${TMP}/cluster.conf"
-fp3="$(CLUSTER_CONF="${TMP}/cluster.conf" bash -c 'source "$1"; config_fingerprint' _ "${LIB}" 2>/dev/null)"
+fp3="$(CLUSTER_CONF="${TMP}/cluster.conf" bash -c 'source "$1" >/dev/null 2>&1; config_fingerprint' _ "${LIB}" 2>/dev/null)"
 chk "注释变更不影响 fingerprint" "${fp1}" "${fp2}"
 chk "变量变更改变 fingerprint" "1" "$([ "${fp1}" != "${fp3}" ] && echo 1 || echo 0)"
 
@@ -39,10 +39,10 @@ cat > "${TMP}/addons.yml" <<'EOF'
 metallb_enabled: true
 metallb_speaker_enabled: true
 EOF
-chk "enabled=true" "true" "$(bash -c 'source "$1"; addons_metallb_enabled "$2"' _ "${LIB}" "${TMP}/addons.yml" 2>/dev/null)"
+chk "enabled=true" "true" "$(bash -c 'source "$1" >/dev/null 2>&1; addons_metallb_enabled "$2"' _ "${LIB}" "${TMP}/addons.yml" 2>/dev/null)"
 sed -i 's/^metallb_enabled:.*/metallb_enabled: false/' "${TMP}/addons.yml"
-chk "enabled=false" "false" "$(bash -c 'source "$1"; addons_metallb_enabled "$2"' _ "${LIB}" "${TMP}/addons.yml" 2>/dev/null)"
-chk "missing file" "missing" "$(bash -c 'source "$1"; addons_metallb_enabled "$2"' _ "${LIB}" "${TMP}/no-such.yml" 2>/dev/null)"
+chk "enabled=false" "false" "$(bash -c 'source "$1" >/dev/null 2>&1; addons_metallb_enabled "$2"' _ "${LIB}" "${TMP}/addons.yml" 2>/dev/null)"
+chk "missing file" "missing" "$(bash -c 'source "$1" >/dev/null 2>&1; addons_metallb_enabled "$2"' _ "${LIB}" "${TMP}/no-such.yml" 2>/dev/null)"
 
 echo "== ③ k8s_deploy 配置漂移门禁 =="
 k8s_txt="$(cat "${K8S}" 2>/dev/null)"
