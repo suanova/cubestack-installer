@@ -18,6 +18,9 @@
 # 用法:
 #   release-sync-images.sh --release 2.0.0 --component all [选项]
 #   release-sync-images.sh --release 2.0.0 --component publish --source-dir /path
+#   release-sync-images.sh --release 2.0.0 --component cli \
+#       --cli-tar /path/cubestack-installer-cli-v2.0.0.tar --cli-image-digest sha256:...
+#     (cli = 仅刷新 CLI tar + release.json/SHA256SUMS/_SUCCESS; 不处理镜像/chart)
 #
 # 选项:
 #   --release/--release-dir/--component/--tag/--source-repo
@@ -41,7 +44,7 @@ warn() { printf '\033[33m⚠  %s\033[0m\n' "$*" >&2; }
 err()  { printf '\033[31m【错误】%s\033[0m\n' "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
-usage() { sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 RELEASE=""
 RELEASE_DIR=""
@@ -434,12 +437,15 @@ if not selected:
 
 selected_subdirs = []
 chart_only = False
+cli_only = False
 for c in selected:
     subs = comps[c]["subdirs"]
     if subs == ["*"]:
         selected_subdirs.extend(all_subdirs)
     elif subs == ["-"]:
         chart_only = True
+    elif subs == ["cli"]:
+        cli_only = True
     else:
         selected_subdirs.extend(subs)
 selected_subdirs = sorted(set(selected_subdirs))
@@ -489,7 +495,7 @@ for d in selected_subdirs:
 sel_rows = [r for r in trows if r["subdir"] in selected_subdirs]
 if first_only:
     sel_rows = [r for r in sel_rows if is_first_party(r)]
-if not sel_rows and not chart_only and not first_only:
+if not sel_rows and not chart_only and not first_only and not cli_only:
     print("选中的 component 没有镜像行", file=sys.stderr); sys.exit(1)
 
 for r in sel_rows:
@@ -510,7 +516,7 @@ with open(os.path.join(out, "source_repos.list"), "w", encoding="utf-8") as f:
         if r not in ("", "-"): f.write(r + "\n")
 with open(os.path.join(out, "plan.json"), "w", encoding="utf-8") as f:
     json.dump({"selected": selected, "subdirs": selected_subdirs, "chart_only": chart_only,
-               "rows": sel_rows, "first_party_only": first_only}, f)
+               "cli_only": cli_only, "rows": sel_rows, "first_party_only": first_only}, f)
 os.makedirs(os.path.join(out, "allowed"), exist_ok=True)
 for d in selected_subdirs:
     safe = "_root" if d == "." else d.replace("/", "_")
@@ -527,6 +533,28 @@ import json,sys
 print("1" if json.load(open(sys.argv[1])).get("chart_only") else "0")
 PY
 CHART_ONLY="$(cat "${WORK}/chart_only.flag")"
+CLI_ONLY=0
+if printf '%s\n' "${SELECTED_COMPONENTS[@]}" | command grep -qxF -- cli \
+   && [ "${#SELECTED_SUBDIRS[@]}" -eq 0 ] && [ "${CHART_ONLY}" = "0" ]; then
+    CLI_ONLY=1
+fi
+if [ "${CLI_ONLY}" = "1" ]; then
+    [ -n "${CLI_TAR_IN}" ] || die "--component cli 需要 --cli-tar <文件>"
+    [ -f "${CLI_TAR_IN}" ] || die "CLI tar 不存在: ${CLI_TAR_IN}"
+    [ -n "${CLI_DIGEST_IN}" ] || die "--component cli 需要 --cli-image-digest <sha256:...>"
+    [ -n "${CLI_IMAGE}" ] || die "--component cli 需要 release.env 的 CUBESTACK_CLI_IMAGE"
+fi
+if [ -n "${CLI_DIGEST_IN}" ]; then
+    case "${CLI_DIGEST_IN}" in
+        sha256:*) : ;;
+        *) CLI_DIGEST_IN="sha256:${CLI_DIGEST_IN}" ;;
+    esac
+    _cli_hex="${CLI_DIGEST_IN#sha256:}"
+    [ -n "${_cli_hex}" ] || die "非法 --cli-image-digest: ${CLI_DIGEST_IN}"
+    case "${_cli_hex}" in
+        *[!0-9A-Za-z._-]*) die "非法 --cli-image-digest: ${CLI_DIGEST_IN}" ;;
+    esac
+fi
 
 # marker scope 校验: marker 的 subdirs 必须是本次选中 subdirs 的子集
 if [ "${RECOVER_MODE}" = "1" ] && [ -n "${MARKER_SUBDIRS}" ]; then
@@ -538,9 +566,10 @@ if [ "${RECOVER_MODE}" = "1" ] && [ -n "${MARKER_SUBDIRS}" ]; then
 fi
 
 # ---------- release.env diff ----------
-python3 - "${WORK}/release.env" "${REL_ENV}" "${OP_TAG}" "${CHART_VER}" "${CLI_IMAGE}" "${WORK}" <<'PY' > "${WORK}/envdiff.psv" || die "release.env diff 失败"
+python3 - "${WORK}/release.env" "${REL_ENV}" "${OP_TAG}" "${CHART_VER}" "${CLI_IMAGE}" "${CLI_ONLY}" "${WORK}" <<'PY' > "${WORK}/envdiff.psv" || die "release.env diff 失败"
 import json, re, sys
-remote, git, op_tag, chart_ver, cli_image, out = sys.argv[1:]
+remote, git, op_tag, chart_ver, cli_image, cli_only, out = sys.argv[1:]
+cli_only = (cli_only == "1")
 
 def parse(path):
     d = {}
@@ -565,15 +594,18 @@ r, rd = parse(remote)
 g, gd = parse(git)
 if rd or gd:
     print("release.env 存在重复 key: " + ",".join(sorted(rd | gd)), file=sys.stderr); sys.exit(1)
-apply_keys = {"CUBESTACK_OPERATOR_IMAGE_TAG", "CUBESTACK_OPERATOR_CHART_VERSION", "CUBESTACK_CLI_IMAGE"}
+apply_keys = {"CUBESTACK_CLI_IMAGE"} if cli_only else {"CUBESTACK_OPERATOR_IMAGE_TAG", "CUBESTACK_OPERATOR_CHART_VERSION", "CUBESTACK_CLI_IMAGE"}
 ignore_prefix = ("DEV_LAB_", "METAX_", "NVIDIA_")
 ignore_exact = {"RDMA_IMAGE_TAG", "MULTUS_IMAGE_TAG", "NGINX_TAG"}
+cli_out_of_scope = {"CUBESTACK_OPERATOR_IMAGE_TAG", "CUBESTACK_OPERATOR_CHART_VERSION"}
 apply, ignore, fail = [], [], []
 for k in sorted(set(r) | set(g)):
     if r.get(k) == g.get(k):
         continue
     if k in apply_keys:
         apply.append(k)
+    elif cli_only and k in cli_out_of_scope:
+        ignore.append(k)
     elif k in ignore_exact or k.startswith(ignore_prefix):
         ignore.append(k)
     else:
@@ -698,6 +730,19 @@ else
     warn "CLI tar 缺失: ${CLI_TAR_REMOTE}, 将重建"
     CLI_NEEDS_SYNC=1
 fi
+# 本地显式 tar 与 release.json 记录不一致 → 必须更新。
+# (不能只看远端大小: 新旧 tar 可能恰好同大小, 但内容/digest 已变。)
+CLI_LOCAL_SHA=""
+CLI_LOCAL_SIZE=""
+if [ -n "${CLI_TAR_IN}" ] && [ -f "${CLI_TAR_IN}" ]; then
+    CLI_LOCAL_SHA="$(sha256sum "${CLI_TAR_IN}" | awk '{print $1}')"
+    CLI_LOCAL_SIZE="$(stat -c %s "${CLI_TAR_IN}")"
+    if [ "${CLI_LOCAL_SHA}" != "${CLI_TAR_SHA}" ] \
+       || { [ -n "${CLI_TAR_SIZE}" ] && [ "${CLI_LOCAL_SIZE}" != "${CLI_TAR_SIZE}" ]; }; then
+        say "本地 CLI tar 与 release.json 记录不一致, 将更新"
+        CLI_NEEDS_SYNC=1
+    fi
+fi
 CLI_NEW_DIGEST="${CLI_DIGEST_IN}"
 if [ -z "${CLI_NEW_DIGEST}" ] && [ -n "${CLI_IMAGE}" ]; then
     _skopeo_init || true
@@ -709,8 +754,19 @@ OLD_CLI_DIGEST=""
 if _remote_exists "${CLI_MARKER}"; then
     OLD_CLI_DIGEST="$(mcrun cat "${CLI_MARKER}" 2>/dev/null | tr -d '[:space:]' || true)"
 fi
+if [ -z "${OLD_CLI_DIGEST}" ]; then
+    # 兼容尚未写 _CLI_IMAGE_DIGEST 的发布树: 以 release.json 记录为准。
+    OLD_CLI_DIGEST="$(python3 - "${WORK}/release.json" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get("cli_image_digest") or "")
+except Exception:
+    pass
+PY
+)"
+fi
 CLI_CHANGED=0
-if [ -n "${CLI_IMAGE}" ]; then
+if [ "${CLI_ONLY}" = "1" ] || [ -n "${CLI_IMAGE}" ]; then
     if [ "${CLI_ENV_CHANGED}" = "1" ] || [ "${CLI_NEEDS_SYNC}" = "1" ] || [ "${RECOVER_MODE}" = "1" ]; then
         CLI_CHANGED=1
     elif [ -n "${OLD_CLI_DIGEST}" ] && [ -n "${CLI_NEW_DIGEST}" ] && [ "${OLD_CLI_DIGEST}" != "${CLI_NEW_DIGEST}" ]; then
@@ -721,7 +777,7 @@ CLI_LOCAL=""
 CLI_NEW_SHA=""
 CLI_NEW_SIZE=""
 if [ "${CLI_CHANGED}" = "1" ]; then
-    [ -n "${CLI_IMAGE}" ] || die "CLI 需要同步但 release.env 无 CUBESTACK_CLI_IMAGE"
+    [ -n "${CLI_IMAGE}" ] || [ -n "${CLI_TAR_IN}" ] || die "CLI 需要同步但 release.env 无 CUBESTACK_CLI_IMAGE 且未提供 --cli-tar"
     if [ "${PREFLIGHT}" = "1" ] || [ "${DRY_RUN}" = "1" ]; then
         _add_summary "- CLI: would rebuild (${CLI_IMAGE})"
     else
@@ -983,9 +1039,9 @@ REF_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GIT_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
 COMP_CSV="$(IFS=,; printf '%s' "${SELECTED_COMPONENTS[*]:-none}")"
 python3 - "${WORK}/release.json" "${WORK}/release.json.new" "${CHART_VER}" "${CLI_IMAGE}" \
-    "${CLI_NEW_SHA}" "${CLI_NEW_SIZE}" "${REF_AT}" "${COMP_CSV}" "${GIT_COMMIT}" "${ANY_CHANGED}" <<'PY'
+    "${CLI_NEW_SHA}" "${CLI_NEW_SIZE}" "${CLI_NEW_DIGEST}" "${REF_AT}" "${COMP_CSV}" "${GIT_COMMIT}" "${ANY_CHANGED}" <<'PY'
 import json, sys
-src, out, chart, cli, cli_sha, cli_size, at, comps, commit, changed = sys.argv[1:]
+src, out, chart, cli, cli_sha, cli_size, cli_digest, at, comps, commit, changed = sys.argv[1:]
 d = json.load(open(src, encoding="utf-8"))
 if chart:
     d["operator_chart_version"] = chart
@@ -995,6 +1051,8 @@ if cli_sha:
     d["cli_tar_sha256"] = cli_sha
 if cli_size:
     d["cli_tar_size"] = int(cli_size)
+if cli_digest:
+    d["cli_image_digest"] = cli_digest
 if changed == "1":
     d["refreshed_at"] = at
     d["refreshed_components"] = [c for c in comps.split(",") if c]
@@ -1058,6 +1116,25 @@ if [ "${VERIFY_REMOTE}" = "1" ]; then
     [ "${rsu}" = "${SUMS_SHA}" ] || { mcrun rm "${REMOTE_OFF}/_SUCCESS" >/dev/null 2>&1 || true; die "远端 SHA256SUMS 校验失败"; }
 fi
 
+# CLI 一致性: release.json 必须记录本次镜像 digest
+if [ -n "${CLI_NEW_DIGEST}" ]; then
+    rcli="$(_remote_cat "${REMOTE_OFF}/release.json" | python3 -c '
+import json,sys
+try: print(json.load(sys.stdin).get("cli_image_digest",""))
+except Exception: pass
+' 2>/dev/null || true)"
+    [ "${rcli}" = "${CLI_NEW_DIGEST}" ] \
+        || die "release.json cli_image_digest 不一致: ${rcli:-<空>} != ${CLI_NEW_DIGEST}"
+fi
+
+# CLI digest marker(在 _SUCCESS 之前写: 失败则不发布)
+if [ -n "${CLI_NEW_DIGEST}" ]; then
+    printf '%s' "${CLI_NEW_DIGEST}" > "${WORK}/cli.digest"
+    mcrun cp "${WORK}/cli.digest" "${CLI_MARKER}" >/dev/null 2>&1 || die "写 _CLI_IMAGE_DIGEST 失败"
+    rd="$(_remote_cat "${CLI_MARKER}" | tr -d '[:space:]' || true)"
+    [ "${rd}" = "${CLI_NEW_DIGEST}" ] || die "远端 _CLI_IMAGE_DIGEST 不一致: ${rd:-<空>} != ${CLI_NEW_DIGEST}"
+fi
+
 # _SUCCESS last
 OLD_BUILT_AT="$(python3 - "${WORK}/release.json" 2>/dev/null <<'PY' || true
 import json,sys
@@ -1079,16 +1156,12 @@ if [ "${VERIFY_REMOTE}" = "1" ]; then
     fi
 fi
 
-# CLI digest marker
-if [ -n "${CLI_NEW_DIGEST}" ]; then
-    printf '%s' "${CLI_NEW_DIGEST}" > "${WORK}/cli.digest"
-    mcrun cp "${WORK}/cli.digest" "${CLI_MARKER}" >/dev/null 2>&1 || warn "写 _CLI_IMAGE_DIGEST 失败"
-fi
 # remove marker
 mcrun rm "${MARKER}" >/dev/null 2>&1 || warn "删除 _REFRESH_PENDING 失败"
 
 _add_summary ""
 _add_summary "release: ${RELEASE}; components: ${SELECTED_COMPONENTS[*]:-none}"
+[ "${CLI_ONLY}" = "1" ] && _add_summary "- CLI-only: ${CLI_TAR_NAME} (${CLI_NEW_DIGEST:-?})"
 _add_summary "images changed: ${IMG_CHANGED}; chart changed: ${CHART_CHANGED}; cli changed: ${CLI_CHANGED}; env changed: ${ENV_CHANGED}; stale deleted: ${#STALE_RELS[@]}"
 _add_summary "SHA256SUMS sha256: ${SUMS_SHA}"
 _add_summary "result: success"

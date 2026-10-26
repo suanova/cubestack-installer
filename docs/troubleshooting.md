@@ -1816,6 +1816,39 @@ spec 被 admission 拒绝。helm 可能先把 CR 的 `global.imageRegistry` 改�
 **边界**: marker component/subdirs 与本次不一致时脚本会拒绝（避免半套修复）；必须用覆盖原
 scope 的 component 或 `all` 重跑。刷新期间不要手工删 marker。
 
+### 5b. Harbor 与 MinIO 的 CLI digest 不一致
+
+**症状**
+- `skopeo inspect --raw .../cubestack-installer-cli:v2.0.0-rc2` 的 digest 与
+  MinIO `<release>/_CLI_IMAGE_DIGEST` / `release.json.cli_image_digest` 不同；
+- 离线部署（MinIO tar）与在线部署（Harbor tag）实际跑的是两版 CLI。
+
+**根因**
+- 旧流程 push `release-2.0` 后由 `rebuild-cli-image.yml` 只推 Harbor，CLI tar 依赖
+  `sync-release-2.0-images.yml` 的 `workflow_run`；默认分支 main 的监听器缺失/滞后，
+  或同步 workflow 失败时，MinIO 就停在旧 tar。
+
+**解法**
+1. 先确认差异：
+   ```bash
+   skopeo inspect --raw docker://harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2 | sha256sum
+   mc cat minio/cubestack-installer/2.0.0/_CLI_IMAGE_DIGEST; echo
+   mc cat minio/cubestack-installer/2.0.0/offline-files/release.json | jq -r .cli_image_digest
+   ```
+2. 用 Harbor 上的目标镜像重新生成 tar 并 CLI-only 同步（不碰镜像/chart）：
+   ```bash
+   docker pull harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2
+   docker save -o /tmp/cubestack-installer-cli-v2.0.0.tar \
+     harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2
+   bash deployments/scripts/tools/images/release-sync-images.sh \
+     --release 2.0.0 --component cli \
+     --cli-tar /tmp/cubestack-installer-cli-v2.0.0.tar \
+     --cli-image-digest sha256:<Harbor registry digest>
+   ```
+3. 或重新触发 `rebuild-cli-image.yml`（release-2.0）。2026-10-26 起该 workflow 在**同一 job**
+   内完成 Harbor → MinIO 同步，并在写 `_SUCCESS` 前断言三方 digest 一致。
+4. 刷新期间 `_SUCCESS` 会被临时删除，fetch 会明确失败；完成后复查 `_SUCCESS` 与 marker。
+
 ### 6. k8s_deploy 期间修改 cluster.conf 导致 addons 与后续模块不一致
 
 **症状**

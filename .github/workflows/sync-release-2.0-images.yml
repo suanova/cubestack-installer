@@ -7,12 +7,12 @@ name: Sync release-2.0 images to MinIO
 #   · repository_dispatch: release-2.0-updated
 #       {release, component, tag?, source_repo?, sha?, checkout_ref?}
 #   · workflow_dispatch: 手动/首次 seed/恢复
-#   · workflow_run: Rebuild installer CLI image 在 release-2.0 成功后
-#       (等 CLI 镜像推完再同步, 避免 release.env CLI image race)
+#   · CLI tar 由 rebuild-cli-image.yml 在**同一 job** 内同步; 本 workflow 不再
+#     监听 workflow_run(避免默认分支监听器缺失/滞后导致 Harbor 与 MinIO 不一致)。
 #
 # ⚠ 本文件在 main 与 release-2.0 必须保持完全一致:
-#   GitHub 的 repository_dispatch / workflow_run 只触发默认分支(main)上的
-#   workflow; main 副本 checkout release-2.0 后执行 release-2.0 的脚本。
+#   GitHub 的 repository_dispatch 只触发默认分支(main)上的 workflow;
+#   main 副本 checkout release-2.0 后执行 release-2.0 的脚本。
 #   main 副本请不要改脚本路径/默认 checkout_ref.
 #
 # 前置:
@@ -33,7 +33,7 @@ on:
         required: false
         default: '2.0.0'
       component:
-        description: 'components.tsv 组件 (CSV; all/platform/publish/bmc/...)'
+        description: 'components.tsv 组件 (CSV; all/platform/publish/cli/bmc/...)'
         required: false
         default: 'all'
       tag:
@@ -72,10 +72,6 @@ on:
         description: '不删除选中子目录里旧 tag 的 tar'
         type: boolean
         default: false
-  workflow_run:
-    workflows: ["Rebuild installer CLI image"]
-    types: [completed]
-    branches: [release-2.0]
 
 permissions:
   contents: read
@@ -115,63 +111,24 @@ jobs:
     name: Resolve release directories
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.ref == 'refs/heads/main' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'release-2.0')
     outputs:
       releases: ${{ steps.resolve.outputs.releases }}
     steps:
-      - name: Checkout triggering commit
-        if: github.event_name == 'workflow_run'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-          fetch-depth: 2
-          persist-credentials: false
-
       - name: Resolve releases
         id: resolve
-        env:
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_run" ]; then
-            rels=()
-            if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
-              while IFS= read -r d; do
-                [ -n "${d}" ] || continue
-                case "${d}" in
-                  ''|*[!0-9A-Za-z._-]*) continue ;;
-                esac
-                [ -f "deployments/releases/${d}/release.env" ] && rels+=("${d}")
-              done < <(git diff --name-only "${HEAD_SHA}^" "${HEAD_SHA}" -- deployments/releases \
-                         | awk -F/ 'NF>=3 && $1=="deployments" && $2=="releases" {print $3}' | sort -u)
-            fi
-            if [ "${#rels[@]}" -eq 0 ]; then
-              echo 'releases=["__none__"]' >> "$GITHUB_OUTPUT"
-              echo "no deployments/releases change in ${HEAD_SHA}; skip" >> "$GITHUB_STEP_SUMMARY"
-            else
-              json="$(printf '%s\n' "${rels[@]}" | python3 -c \
-                'import json,sys; print(json.dumps(sorted(set(x.strip() for x in sys.stdin if x.strip()))))')"
-              echo "releases=${json}" >> "$GITHUB_OUTPUT"
-              echo "releases: ${json}" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          else
-            case "${RELEASE}" in
-              ''|*[!0-9A-Za-z._-]*) echo "::error::invalid release: ${RELEASE}"; exit 1 ;;
-            esac
-            json="$(RELEASE="${RELEASE}" python3 -c \
-              'import json,os; print(json.dumps([os.environ["RELEASE"]]))')"
-            echo "releases=${json}" >> "$GITHUB_OUTPUT"
-            echo "releases: ${json}" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          case "${RELEASE}" in
+            ''|*[!0-9A-Za-z._-]*) echo "::error::invalid release: ${RELEASE}"; exit 1 ;;
+          esac
+          json="$(RELEASE="${RELEASE}" python3 -c \
+            'import json,os; print(json.dumps([os.environ["RELEASE"]]))')"
+          echo "releases=${json}" >> "$GITHUB_OUTPUT"
+          echo "releases: ${json}" >> "$GITHUB_STEP_SUMMARY"
 
   sync:
     name: Sync ${{ matrix.release }}
     needs: release-list
-    if: ${{ needs.release-list.outputs.releases != '["__none__"]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -183,7 +140,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || env.CHECKOUT_REF }}
+          ref: ${{ env.CHECKOUT_REF }}
           persist-credentials: false
 
       - name: Validate configuration

@@ -150,8 +150,8 @@ LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}}"
 |---|---|---|
 | `sync-images-to-harbor.yml` | 上游镜像 → Harbor `mirrors/**` | 发布前确保 Harbor 有正确上游镜像 |
 | `refresh-latest-offline.yml` | 滚动 `latest` 镜像 → MinIO `offline-files/` | **只服务 dev 通道**，不得写版本目录 |
-| `sync-release-2.0-images.yml` | release-2.0 组件镜像/ chart / CLI tar → MinIO `<release>/offline-files/` 原地刷新 | `repository_dispatch` / `workflow_dispatch` / CLI 构建完成 `workflow_run`；见 §6.6 |
-| `rebuild-cli-image.yml` | 重建 `cubestack-installer-cli:latest`；导出 tar 自动同步到 MinIO `offline-files/cli/` | main 合并即自动更新 dev CLI tar；发布时用 `version=2.0.0` 额外推 `:2.0.0`，release tar 由 `release-publish.sh` 写入 `<版本>/` |
+| `sync-release-2.0-images.yml` | release-2.0 组件镜像/ chart / CLI tar → MinIO `<release>/offline-files/` 原地刷新 | `repository_dispatch` / `workflow_dispatch`；CLI tar 由 `rebuild-cli-image.yml` 同 job 内同步；见 §6.6 |
+| `rebuild-cli-image.yml` | 重建 CLI 镜像；main 导出 tar 到 MinIO `offline-files/cli/`；release-2.0 推版本化镜像并在同一 job 内同步 `<版本>/` CLI 元数据 | main 合并即自动更新 dev CLI tar；release-2.0 push 自动完成 Harbor + MinIO 一致发布；`version=` 可额外推版本 tag |
 
 目前只有 CI、没有 CD。因此本方案的**发布动作**是**在能同时访问 Harbor 与 MinIO 的机器上执行同步脚本**，
 CI 仅作为可选自动化入口，不假设存在发布流水线。main 合并的 dev 通道已可自动完成
@@ -392,8 +392,13 @@ RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev
   fetch 在此期间会明确报“发布正在原地刷新”，不会拿半套树。
 - 刷新完成后最后写 `_SUCCESS`，删除 marker；失败保留 marker + 无 `_SUCCESS`，
   下一次同 subdirs/`all` 重跑修复。
-- CLI tar 的 raw manifest digest 记录在 `<版本>/_CLI_IMAGE_DIGEST`（offline-files 外），
-  用于发现同 tag 内容变化；CLI tar 本身仍只由 `release.json.cli_tar_sha256` 校验。
+- CLI tar 的 raw manifest digest 同时记录在 `<版本>/_CLI_IMAGE_DIGEST`（offline-files 外）
+  和 `release.json.cli_image_digest`；CLI tar 本身仍由 `release.json.cli_tar_sha256/size` 校验。
+- **CLI 一致性不变量**：Harbor 镜像 digest == `release.json.cli_image_digest` ==
+  `<版本>/_CLI_IMAGE_DIGEST`，且 `sha256(<版本>/cubestack-installer-cli-v<版本>.tar)` ==
+  `release.json.cli_tar_sha256`。release-2.0 的 `rebuild-cli-image.yml` 在同一 job 内调用
+  `release-sync-images.sh --component cli ...`，脚本在写 `_SUCCESS` 前断言上述值；失败则不写
+  `_SUCCESS`，fetch 会拒绝半套树。
 
 ---
 
@@ -817,12 +822,15 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
    `tag`/`source_repo` 只用于一致性校验。**dispatch 前必须先把 release 定义更新到新 tag**，
    否则 tag/env 校验会失败，不会静默同步错版本。
 2. `workflow_dispatch` 手动触发（首次 seed/恢复/补跑）；
-3. `workflow_run`：`rebuild-cli-image.yml` 在 release-2.0 成功后自动触发，确保 CLI 镜像已推完
-   （避免 release.env 的 `CUBESTACK_CLI_IMAGE` 与镜像 race）。它按触发 commit 与父 commit 的
-   `deployments/releases/**` diff 选择 release 目录；一次 push 多个 commit 时只覆盖最后一个
-   commit 的变更，漏掉的目录用 `workflow_dispatch` 补跑。
+3. **CLI tar 不走本 workflow**：`rebuild-cli-image.yml` 在 release-2.0 推完版本化镜像后，
+   在同一 job 内执行 `release-sync-images.sh --component cli ...`，避免跨 workflow 的
+   Harbor/MinIO 不一致窗口；本 workflow 只处理组件镜像/chart 的 dispatch。
 
-> GitHub 的 `repository_dispatch` / `workflow_run` 只触发默认分支 `main` 上的 workflow；
+   `component=cli` 可用于手动重试 CLI tar：需显式提供
+   `--cli-tar <版本化 tar>` 与 `--cli-image-digest sha256:...`，只更新 CLI 与三份元数据，
+   不处理镜像/chart。
+
+> GitHub 的 `repository_dispatch` 只触发默认分支 `main` 上的 workflow；
 > 因此 `.github/workflows/sync-release-2.0-images.yml` 在 **main 和 release-2.0 各有一份
 > 完全相同**的文件，main 副本 checkout release-2.0 后执行 release-2.0 的脚本。
 > 修改时必须两份同步 cherry-pick。
@@ -839,7 +847,8 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
   → 上传 tar → .digest; stale tar 清理; chart; CLI tar
   → release.env; release.json; SHA256SUMS
   → 远端逐文件 sha256 校验
-  → 最后写 _SUCCESS; 写 _CLI_IMAGE_DIGEST; 删除 _REFRESH_PENDING
+  → 写 _CLI_IMAGE_DIGEST(并回读校验)
+  → 最后写 _SUCCESS; 删除 _REFRESH_PENDING
 ```
 
 - **允许变化**：`CUBESTACK_OPERATOR_IMAGE_TAG`、`CUBESTACK_OPERATOR_CHART_VERSION`、`CUBESTACK_CLI_IMAGE`；
@@ -849,7 +858,10 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
 - `stale tar 清理`：只扫 selected subdir 的 maxdepth=1，删除不在该 subdir 全量 tsv 行里的旧
   `*.tar`/`*.tar.gz` 及 `.digest`；`README.md`/`observability/`/`charts/` 保留；`--keep-stale` 关闭；
 - **CLI tar**：在 `<release>/` 下，不进 `SHA256SUMS`；`release.json.cli_tar_sha256/cli_tar_size`
-  校验；同 tag 内容变化由 `_CLI_IMAGE_DIGEST` 发现。
+  校验；同 tag 内容变化由 `_CLI_IMAGE_DIGEST` 和 `release.json.cli_image_digest` 发现。
+  `--component cli --cli-tar <tar> --cli-image-digest sha256:...` 是 CLI-only 模式：只更新
+  CLI tar 与 `release.json`/`SHA256SUMS`/`_SUCCESS`，不读镜像/chart；CLI 构建 workflow
+  在同一个 job 内用它完成发布，失败则整个 workflow 失败。
 - 其他组件（cubepilot/controller-manager/portal/cuberouter）只同步镜像 tar；若本次 release 同时
   改了 operator chart 里的组件 tag/values，需要再 dispatch `component=operator-chart`（或在
   release 定义里改 chart version，让 `sync_chart` 生效）。
@@ -981,7 +993,7 @@ mc stat minio/cubestack-installer/2.0.0/cubestack-installer-cli-v2.0.0.tar
 # 1) 更新 release 定义（release-2.0 分支，PR/直接提交）：
 #    release.env: CUBESTACK_OPERATOR_IMAGE_TAG / CHART_VERSION / CLI_IMAGE
 #    release-images.tsv: 对应镜像行 file/tag
-# 2) 等 rebuild-cli-image.yml 在 release-2.0 成功（workflow_run 会自动触发同步）
+# 2) rebuild-cli-image.yml 在 release-2.0 推完镜像后，同一 job 内自动同步 CLI tar
 # 3) 或在发布机/CI 手动：
 bash deployments/scripts/tools/images/release-sync-images.sh \
   --release 2.0.0 --component all --preflight
@@ -989,6 +1001,11 @@ bash deployments/scripts/tools/images/release-sync-images.sh \
   --release 2.0.0 --component all --dry-run
 bash deployments/scripts/tools/images/release-sync-images.sh \
   --release 2.0.0 --component all
+# 3b) 只重试 CLI tar（不碰镜像/chart；需提供版本化 tar 与 Harbor registry digest）：
+bash deployments/scripts/tools/images/release-sync-images.sh \
+  --release 2.0.0 --component cli \
+  --cli-tar /path/cubestack-installer-cli-v2.0.0.tar \
+  --cli-image-digest sha256:<registry-digest>
 # 4) 验收
 bash deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
   --release 2.0.0 --dest /tmp/release-verify --yes

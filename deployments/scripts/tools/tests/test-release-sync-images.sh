@@ -219,6 +219,7 @@ bmc	suanova/cubestack-operator	bmc	bmc
 cubepilot	suanova/cubepilot	cubepilot	cubepilot
 portal-image	suanova/cubestack	portal	portal
 platform	-	. bmc cubepilot portal	first-party
+cli	-	cli	CLI tar only
 all	-	*	all
 EOF
 
@@ -328,6 +329,13 @@ run_sync() {
         --cli-tar "${CLI_TAR_CURRENT}" \
         --cli-image-digest "${CLI_DIGEST_CURRENT}" \
         --min-free-gb 0 --summary-file "${TMP}/summary.md" "$@" 2>&1
+}
+run_cli_sync() {
+    bash "${SYNC}" --release "${REL}" --release-dir "${REL_DIR}" \
+        --component cli \
+        --cli-tar "${CLI_TAR_CURRENT}" \
+        --cli-image-digest "${CLI_DIGEST_CURRENT}" \
+        --min-free-gb 0 --summary-file "${TMP}/cli-summary.md" "$@" 2>&1
 }
 
 REMOTE_OP="${REMOTE_OFF}/cubestack-operator/${OP_TAR}"
@@ -502,6 +510,52 @@ chk "CLI digest 退出码" "0" "${rc}"
 chk "CLI digest tar" "ga-cli2" "$(cat "${REMOTE_ROOT}/cubestack-installer-cli-v2.0.0.tar" 2>/dev/null)"
 chk "CLI digest marker" "sha256:ga-cli2" "$(cat "${REMOTE_ROOT}/_CLI_IMAGE_DIGEST" 2>/dev/null)"
 
+echo "== ⑮b cli-only: 只更新 CLI, 不动镜像/chart =="
+build_fixture
+run_sync --component publish >/dev/null 2>&1
+before_op="$(sha256sum "${REMOTE_OFF}/cubestack-operator/${OP_TAR}" | awk '{print $1}')"
+before_chart="$(sha256sum "${REMOTE_OFF}/cubestack-operator/charts/${CHART_NAME}" | awk '{print $1}')"
+make_cli_new "cli-only-tar" "sha256:cli-only"
+: > "${FAKE_MC_LOG}"
+out="$(run_cli_sync)"; rc=$?
+chk "cli-only 退出码" "0" "${rc}"
+chk "cli-only tar" "cli-only-tar" "$(cat "${REMOTE_ROOT}/cubestack-installer-cli-v2.0.0.tar" 2>/dev/null)"
+chk "cli-only release.json sha" "$(sha256sum "${TMP}/src/cli.tar" | awk '{print $1}')" \
+    "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("cli_tar_sha256"))' "${REMOTE_OFF}/release.json" 2>/dev/null)"
+chk "cli-only release.json digest" "sha256:cli-only" \
+    "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("cli_image_digest"))' "${REMOTE_OFF}/release.json" 2>/dev/null)"
+chk "cli-only marker" "sha256:cli-only" "$(cat "${REMOTE_ROOT}/_CLI_IMAGE_DIGEST" 2>/dev/null)"
+chk "cli-only operator 未变" "${before_op}" "$(sha256sum "${REMOTE_OFF}/cubestack-operator/${OP_TAR}" | awk '{print $1}')"
+chk "cli-only chart 未变" "${before_chart}" "$(sha256sum "${REMOTE_OFF}/cubestack-operator/charts/${CHART_NAME}" | awk '{print $1}')"
+chk "cli-only 无镜像/chart cp" "0" "$(command grep -cE '^cp .*(cubestack-operator|charts)' "${FAKE_MC_LOG}" 2>/dev/null || true)"
+( cd "${REMOTE_OFF}" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ); chk "cli-only sums" "0" "$?"
+chk "cli-only marker 清理" "0" "$([ -e "${REMOTE_ROOT}/_REFRESH_PENDING" ] && echo 1 || echo 0)"
+chk_contains "cli-only summary" "cli" "$(cat "${TMP}/cli-summary.md" 2>/dev/null)"
+
+echo "== ⑮c cli-only 幂等 no-op =="
+: > "${FAKE_MC_LOG}"
+out="$(run_cli_sync)"; rc=$?
+chk "cli-only no-op 退出码" "0" "${rc}"
+chk "cli-only no-op 无 cp/rm" "0" "$(command grep -cE '^(cp|rm) ' "${FAKE_MC_LOG}" 2>/dev/null || true)"
+chk_contains "cli-only no-op summary" "no-op" "${out}"
+
+echo "== ⑮d cli-only 忽略 operator env diff + 参数校验 =="
+build_fixture
+make_cli_new "cli-only-env" "sha256:cli-only-env"
+env_set CUBESTACK_OPERATOR_IMAGE_TAG "v9.9.9"
+out="$(run_cli_sync)"; rc=$?
+chk "cli-only 忽略 operator env diff 退出码" "0" "${rc}"
+chk "cli-only operator env 保持旧值" "v2.0.0-rc2" "$(remote_env_value CUBESTACK_OPERATOR_IMAGE_TAG)"
+chk "cli-only env tar" "cli-only-env" "$(cat "${REMOTE_ROOT}/cubestack-installer-cli-v2.0.0.tar" 2>/dev/null)"
+out="$(bash "${SYNC}" --release "${REL}" --release-dir "${REL_DIR}" --component cli \
+    --cli-image-digest "sha256:x" --min-free-gb 0 2>&1)"; rc=$?
+chk "缺 cli-tar 退出码非 0" "1" "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+chk_contains "缺 cli-tar 提示" "--cli-tar" "${out}"
+out="$(bash "${SYNC}" --release "${REL}" --release-dir "${REL_DIR}" --component cli \
+    --cli-tar "${TMP}/src/cli.tar" --min-free-gb 0 2>&1)"; rc=$?
+chk "缺 cli digest 退出码非 0" "1" "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+chk_contains "缺 cli digest 提示" "--cli-image-digest" "${out}"
+
 echo "== ⑯ chart-only(operator-chart) =="
 build_fixture
 env_set CUBESTACK_OPERATOR_CHART_VERSION "2.0.0"
@@ -590,7 +644,7 @@ for line in open(comp, encoding="utf-8"):
         continue
     parts = line.split("\t")
     for d in parts[2].split():
-        if d not in ("-", "*") and d not in subs:
+        if d not in ("-", "*", "cli") and d not in subs:
             bad.append(d)
 print("\n".join(sorted(set(bad))))
 PY
@@ -607,7 +661,7 @@ for line in open(comp, encoding="utf-8"):
         continue
     parts = line.split("\t")
     for d in parts[2].split():
-        if d not in ("-", "*") and d not in subs:
+        if d not in ("-", "*", "cli") and d not in subs:
             bad.append(d)
 print("\n".join(sorted(set(bad))))
 PY
@@ -680,11 +734,16 @@ PY
 
 echo "== ㉙ workflow 静态契约 =="
 WF="${REPO_ROOT}/.github/workflows/sync-release-2.0-images.yml"
+CLI_WF="${REPO_ROOT}/.github/workflows/rebuild-cli-image.yml"
 chk "workflow 存在" "0" "$([ -f "${WF}" ] && echo 0 || echo 1)"
 chk_contains "dispatch 事件" "release-2.0-updated" "$(cat "${WF}" 2>/dev/null)"
-chk_contains "workflow_run CLI" "Rebuild installer CLI image" "$(cat "${WF}" 2>/dev/null)"
+chk "sync workflow 无 workflow_run 触发" "0" "$(command grep -cE '^[[:space:]]*workflow_run:' "${WF}" 2>/dev/null || true)"
 chk "不含 push 触发" "0" "$(command grep -cE '^[[:space:]]*push:' "${WF}" 2>/dev/null || true)"
 chk_contains "checkout ref" "CHECKOUT_REF" "$(cat "${WF}" 2>/dev/null)"
+chk "CLI rebuild workflow 存在" "0" "$([ -f "${CLI_WF}" ] && echo 0 || echo 1)"
+chk_contains "release CLI 同 job 内同步" "--component cli" "$(cat "${CLI_WF}" 2>/dev/null)"
+chk_contains "release CLI tar 导出" "cubestack-installer-cli-v" "$(cat "${CLI_WF}" 2>/dev/null)"
+chk_contains "release CLI 一致性断言" "--cli-image-digest" "$(cat "${CLI_WF}" 2>/dev/null)"
 
 echo ""
 if [ "${fail}" = "0" ]; then echo "✅ test-release-sync-images: 全部通过"; else echo "❌ test-release-sync-images: 有失败"; fi
