@@ -78,7 +78,7 @@ permissions:
 
 # 所有发布同步串行; 不做 cancel-in-progress(避免上传中途被取消).
 concurrency:
-  group: sync-release-images
+  group: release-minio-writes
   cancel-in-progress: false
 
 env:
