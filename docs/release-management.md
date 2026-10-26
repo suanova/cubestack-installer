@@ -279,10 +279,10 @@ CUBESTACK_OPERATOR_IMAGE_TAG=v2.0.0-rc2
 CUBESTACK_OPERATOR_CHART_VERSION=2.0.0-rc2
 # release 树自带 chart(offline-files/cubestack-operator/charts/), 部署恒用本地副本
 CUBESTACK_OPERATOR_CHART_SYNC=offline
-# dev-lab: Harbor 三家 tag 命名不一致, 必须按镜像分别钉(不再使用单一 DEV_LAB_IMAGE_TAG)
-DEV_LAB_CPU_TAG=py310-torch2.4-v2.0.0-rc2
-DEV_LAB_MACA_TAG=3.9.0.12-py310-torch2.4-v2.0.0-rc2
-DEV_LAB_CUDA_TAG=26.08-v2.0.0-rc2
+# dev-lab: Harbor 三家 tag 命名不一致, 必须按镜像分别钉; dev-lab 镜像名不追加 release 后缀
+DEV_LAB_CPU_TAG=py310-torch2.4
+DEV_LAB_MACA_TAG=3.9.0.12-py310-torch2.4
+DEV_LAB_CUDA_TAG=26.08
 # CLI 镜像(发布脚本用它生成 <版本>/cubestack-installer-cli-v<版本>.tar)
 CUBESTACK_CLI_IMAGE=harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2
 

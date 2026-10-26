@@ -88,13 +88,24 @@ trap 'rm -rf "${PUSH_RESULT_DIR}"' EXIT
 # 单镜像 worker(后台子 shell 执行; 结果写 ${PUSH_RESULT_DIR}/<idx>.result)
 # 参数: "<idx>|<img>"(避免把含空格的路径拆开)
 _devlab_push_one() {
-    local task="$1" _idx _img _tag _sd _tar _dst _dst_ref
+    local task="$1" _idx _img _tag _sd _tar _dst _dst_ref _cand _src
     local _c_dst _c_src _d_dst _d_src _t0 _dt _size _rate
     _idx="${task%%|*}"; _img="${task#*|}"
     _tag="$(_devlab_tag "${_img}")"
     # 离线 tar 顶层平铺: accelerator 家族镜像不再按模式/家族分子目录
     _sd="${SAVE_DIR}"
     _tar="$(find_offline_tar "${_img}:${_tag}" "*.tar" "${_sd}" 2>/dev/null || true)"
+    # 兼容旧发布树: tar 内容 tag 可能仍带 release 后缀(如 py310-torch2.4-v2.0.0-rc2),
+    # 但目标镜像名要求不带后缀。按 "<tag>-" 前缀回退匹配(仅 dev-lab, 不影响其他模块)。
+    if [ -z "${_tar}" ] && [ -d "${_sd}" ]; then
+        for _cand in "${_sd}"/*.tar; do
+            [ -f "${_cand}" ] || continue
+            _src="$(tar_first_image_tag "${_cand}")"
+            case "${_src}" in
+                *"${_img}:${_tag}-"*) _tar="${_cand}"; break ;;
+            esac
+        done
+    fi
     if [ -z "${_tar}" ]; then
         printf 'miss\t缺离线 tar: %s:%s(跳过; 生成: sudo tools/images/harbor-save-images.sh --group dev-lab)\n' \
             "${_img}" "${_tag}" > "${PUSH_RESULT_DIR}/${_idx}.result"
