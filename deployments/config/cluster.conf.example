@@ -82,6 +82,11 @@ CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED="${CUBESTACK_OPERATOR_MODEL_BUNDLES_ENA
 # 设为 CUBESTACK_RELEASE="2.0.0" 时使用 <CUBESTACK_RELEASE_ROOT>/2.0.0/offline-files/ 内的
 # release.env 与离线件(变量默认值在 cluster.defaults.conf §4.10; 或 deploy-cluster.sh --release 2.0.0)。
 # 取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release 2.0.0 --dest <本地桶根>
+#
+# 若希望发布资产平铺在标准 deployments/offline-files(不建 <root>/<版本>/offline-files 版本树):
+# CUBESTACK_RELEASE="2.0.0"
+# CUBESTACK_RELEASE_LAYOUT="flat"
+# (flat 模式仍从 deployments/releases/2.0.0/release.env 读取版本变量)
 
 # ---- Harbor(集群外仓库; HARBOR_ENABLED 为预留模块开关, HARBOR_MIRROR_* 为镜像源凭据) ----
 HARBOR_ENABLED="${HARBOR_ENABLED:-false}"               # Harbor 外部镜像仓库(预留, 见 defaults §1.7)

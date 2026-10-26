@@ -49,6 +49,18 @@ chk "model-collection 目录重定向" "${TMP}/rel/9.9.9/offline-files/model-col
 chk "ceph 镜像目录重定向" "${TMP}/rel/9.9.9/offline-files/kubespray/v2.32.0/images" "$(printf '%s\n' "${out}" | sed -n '5p')"
 chk "netshoot 回退 tar 重定向" "${TMP}/rel/9.9.9/offline-files/os/netshoot.tar" "$(printf '%s\n' "${out}" | sed -n '6p')"
 
+echo "== ①b release flat 模式(发布定义在 repo, 资产平铺 offline-files) =="
+mkdir -p "${TMP}/flat"
+out="$(CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_RELEASE=2.0.0 CUBESTACK_RELEASE_LAYOUT=flat \
+    OFFLINE_FILES_ROOT="${TMP}/flat" \
+    bash -c 'source "$1"; load_config; printf "%s\n" "$OFFLINE_FILES_ROOT" "$CUBESTACK_OPERATOR_OFFLINE_DIR" "$CEPH_IMAGE_DIR" "$CUBESTACK_OPERATOR_CHART_VERSION" "$CUBESTACK_RELEASE_ROOT"' _ "${LIB}" 2>/dev/null)"
+chk "flat OFFLINE_FILES_ROOT" "${TMP}/flat" "$(printf '%s\n' "${out}" | sed -n '1p')"
+chk "flat operator 目录" "${TMP}/flat/cubestack-operator" "$(printf '%s\n' "${out}" | sed -n '2p')"
+chk "flat ceph 镜像目录" "${TMP}/flat/kubespray/v2.32.0/images" "$(printf '%s\n' "${out}" | sed -n '3p')"
+_flat_chart="$(sed -nE 's/^CUBESTACK_OPERATOR_CHART_VERSION=//p' "${REPO_ROOT}/deployments/releases/2.0.0/release.env" | head -1)"
+chk "flat release.env chart 覆盖" "${_flat_chart}" "$(printf '%s\n' "${out}" | sed -n '4p')"
+chk "flat 不保留 version tree root" "" "$(printf '%s\n' "${out}" | sed -n '5p')"
+
 echo "== ② 缺少 release.env =="
 mkdir -p "${TMP}/rel/9.9.8/offline-files"
 CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_RELEASE=9.9.8 CUBESTACK_RELEASE_ROOT="${TMP}/rel" \

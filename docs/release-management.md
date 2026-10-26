@@ -507,6 +507,46 @@ sudo ./deploy-cluster.sh --release 2.0.0
 > release 模式下由 `CUBESTACK_RELEASE_ROOT` + `CUBESTACK_RELEASE` 派生出发布根，
 > 再覆盖 `OFFLINE_FILES_ROOT`。
 
+### 4.4 flat 布局：release 资产平铺在 `deployments/offline-files`
+
+如果部署机不希望创建 `<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files/` 版本树，可让 release-2.0
+直接使用标准 `deployments/offline-files/`：
+
+```bash
+# cluster.conf
+CUBESTACK_RELEASE="2.0.0"
+CUBESTACK_RELEASE_LAYOUT="flat"
+# CUBESTACK_RELEASE_ROOT 留空/忽略; 不再使用 /data/cubestack-installer/2.0.0/...
+```
+
+行为：
+
+- `release.env` 仍从 **仓库内** `deployments/releases/2.0.0/release.env` 读取，版本变量/Chart
+  覆盖仍然生效；
+- `OFFLINE_FILES_ROOT` 保持 `deployments/offline-files`（容器内
+  `/opt/cubestack-installer/deployments/offline-files`）；
+- operator / multus / rdma / ceph / dev-lab / model-collection 等全部从该平铺目录读取；
+- `CUBESTACK_RELEASE_ROOT` 在 flat 模式下被置空，避免误回落到 `/data/...` 版本树。
+
+```text
+deployments/offline-files/
+├── cubestack-operator/
+├── kubespray/v2.32.0/{images,packages,...}
+├── multus/  rdma/  metax-gpu/  nvidia-gpu-operator/
+├── dev-lab/  model-collection/  os/  ...
+└── (release.json/SHA256SUMS 可选，仅发布树校验用)
+```
+
+> MinIO 上的 `<bucket>/2.0.0/offline-files/` 仍保持版本化布局；flat 只是**部署机本地**的
+> 平铺方式。把远端树平铺到本地可用 `mc mirror <alias>/<bucket>/2.0.0/offline-files/ <本地>/`
+> （或后续 fetch 的 flat 模式）。
+
+| 模式 | `CUBESTACK_RELEASE` | `CUBESTACK_RELEASE_LAYOUT` | 实际 `OFFLINE_FILES_ROOT` | `release.env` 来源 |
+|---|---|---|---|---|
+| dev | 空 | — | `deployments/offline-files` | 不加载 |
+| release tree | `2.0.0` | `tree`（默认） | `<root>/2.0.0/offline-files` | 发布树内 |
+| **release flat** | `2.0.0` | `flat` | `deployments/offline-files` | `deployments/releases/2.0.0/release.env` |
+
 ---
 
 ## 5. 离线取件：`fetch --release`

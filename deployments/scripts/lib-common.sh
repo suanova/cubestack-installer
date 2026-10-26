@@ -785,12 +785,32 @@ load_config() {
             exit 1
         fi
         CUBESTACK_RELEASE_ROOT="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
-        _rel_root="${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files"
-        if [ ! -f "${_rel_root}/release.env" ]; then
-            err "未找到发布版本 ${CUBESTACK_RELEASE}: ${_rel_root}/release.env"
-            err "  先取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --dest ${CUBESTACK_RELEASE_ROOT}"
-            exit 1
-        fi
+        _layout="${CUBESTACK_RELEASE_LAYOUT:-tree}"
+        case "${_layout}" in
+            tree)
+                _rel_root="${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files"
+                if [ ! -f "${_rel_root}/release.env" ]; then
+                    err "未找到发布版本 ${CUBESTACK_RELEASE}: ${_rel_root}/release.env"
+                    err "  先取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --dest ${CUBESTACK_RELEASE_ROOT}"
+                    exit 1
+                fi
+                ;;
+            flat)
+                # flat: 发布定义仍从 repo 读取, 但离线资产平铺在 OFFLINE_FILES_ROOT
+                # (默认 deployments/offline-files, 即容器 C 的 /opt/.../offline-files);
+                # 不创建 <root>/<version>/offline-files/ 版本树。
+                _rel_root="${REPO_ROOT}/deployments/releases/${CUBESTACK_RELEASE}"
+                if [ ! -f "${_rel_root}/release.env" ]; then
+                    err "未找到发布定义: ${_rel_root}/release.env(flat 模式需要仓库内 deployments/releases/<版本>/release.env)"
+                    exit 1
+                fi
+                CUBESTACK_RELEASE_ROOT=""
+                ;;
+            *)
+                err "CUBESTACK_RELEASE_LAYOUT 仅支持 tree|flat(当前=${_layout})"
+                exit 1
+                ;;
+        esac
         # shellcheck disable=SC1090
         source "${_rel_root}/release.env"
         if [ "${RELEASE_VERSION:-}" != "${CUBESTACK_RELEASE}" ]; then
@@ -801,8 +821,12 @@ load_config() {
             err "release.env 缺少 KUBESPRAY_VERSION(${_rel_root}/release.env)"
             exit 1
         fi
-        OFFLINE_FILES_ROOT="${_rel_root}"
-        # 这些变量默认写死指向 dev offline-files; release 模式统一重定向到版本目录。
+        if [ "${_layout}" = "flat" ]; then
+            OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
+        else
+            OFFLINE_FILES_ROOT="${_rel_root}"
+        fi
+        # 这些变量默认写死指向 dev offline-files; release 模式统一重定向到发布根。
         METAX_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/metax-gpu"
         METAX_PKG_DIR="${METAX_OFFLINE_DIR}"
         CUBESTACK_OPERATOR_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/cubestack-operator"
@@ -814,13 +838,13 @@ load_config() {
         DEV_LAB_SAVE_DIR="${OFFLINE_FILES_ROOT}/dev-lab"
         MODEL_IMAGES_SAVE_DIR="${OFFLINE_FILES_ROOT}/model-collection"
         CEPH_IMAGE_DIR="${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}/images"
-        export CUBESTACK_RELEASE_ROOT METAX_OFFLINE_DIR METAX_PKG_DIR \
+        export CUBESTACK_RELEASE_LAYOUT CUBESTACK_RELEASE_ROOT METAX_OFFLINE_DIR METAX_PKG_DIR \
                CUBESTACK_OPERATOR_OFFLINE_DIR MULTUS_SAVE_DIR \
                NVIDIA_GPU_OPERATOR_OFFLINE_DIR RDMA_SAVE_DIR \
                NETSHOOT_SAVE_DIR NETSHOOT_BASE_TAR DEV_LAB_SAVE_DIR \
                MODEL_IMAGES_SAVE_DIR CEPH_IMAGE_DIR
-        vlog "release 模式生效: ${CUBESTACK_RELEASE}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
-        unset _rel_root
+        vlog "release 模式生效: ${CUBESTACK_RELEASE} layout=${_layout}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
+        unset _rel_root _layout
     fi
     # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
     # (档案 > cluster.conf > cluster.defaults.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
