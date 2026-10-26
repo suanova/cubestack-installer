@@ -711,6 +711,20 @@ case "${ACTION}" in
         else
             warn "  未找到 chrony 离线包(${NTP_DEB_DIR}/chrony_*.deb); 客户端缺 chrony 时将回退 systemd-timesyncd"
         fi
+        # 闭包自检(离线安装 chrony 的真实前置): 只 warn, 节点可能已自带部分依赖;
+        # 需要严格离线保证时设 NTP_REQUIRE_CHRONY_CLOSURE=1。
+        _NTP_CLOSURE_TOOL="${SCRIPT_DIR}/tools/node/chrony-offline-debs.py"
+        if [ "${NTP_HAS_DEB}" = "1" ] && [ -f "${_NTP_CLOSURE_TOOL}" ] && command -v python3 >/dev/null 2>&1; then
+            if ! _closure_out="$(python3 -I "${_NTP_CLOSURE_TOOL}" --check "${NTP_DEB_DIR}" 2>&1)"; then
+                warn "  chrony 离线依赖闭包不完整(干净节点会安装失败):" >&2
+                printf '%s\n' "${_closure_out}" | command grep -E '^  - ' | head -10 | sed 's/^/    /' >&2 || true
+                warn "  联网构建机补齐: python3 ${_NTP_CLOSURE_TOOL} --fetch ${NTP_DEB_DIR}" >&2
+                if [ "${NTP_REQUIRE_CHRONY_CLOSURE:-0}" = "1" ]; then
+                    err "NTP_REQUIRE_CHRONY_CLOSURE=1 → 停止部署"
+                    exit 1
+                fi
+            fi
+        fi
         say "下发并执行节点时间同步(chrony/timesyncd + 一次性硬对齐, 权威=${NTP_AUTHORITY}) ..."
         REACH_FAIL=""
         APPLY_FAIL=""

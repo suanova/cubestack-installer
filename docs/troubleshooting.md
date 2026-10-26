@@ -327,6 +327,10 @@ sudo tcpdump -nei <网卡> '(arp or icmp) and host <对端IP>'
     apply/verify 对非 root 且 sudo 不可用的节点直接点名失败。
   - **客户端缺 chrony 时自动安装**: apply 把 offline-files 里的 chrony deb 推给缺 chrony 的节点,
     远端脚本用 `install_debs_offline` 安装; 装不上才回退 `systemd-timesyncd`, 并校验其 active。
+    离线目录必须是**完整依赖闭包**(chrony + libpam/libaudit/libffi/libpcre2/zlib 等):
+    `deployments/scripts/tools/node/chrony-offline-debs.py --check <chrony目录>` 只读自检;
+    联网 Ubuntu 22.04 amd64 构建机用 `--fetch <chrony目录>` 补齐缺失 deb。
+    setup-ntp 在 apply 前会自动 check 并 warn; 严格离线可设 `NTP_REQUIRE_CHRONY_CLOSURE=1` 直接失败。
   - `clock_offset` **优先 chrony 自身口径**: `System time` + `Leap status=Normal` + `^*` 源 `Reach>=1`;
     不可用时才回退 SSH `date`, 并用两个采样的中点做 RTT 补偿; 权威自身无上游时直接返回 0,
     不再 SSH 自测吃 0.2-0.6s 噪声。同时区分 `chrony 未安装` 与 `chrony 已安装但未选中源/Reach=0`。
