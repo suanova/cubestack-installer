@@ -388,15 +388,34 @@ delete_cluster() {
     # ★ 2026-10-26: external CephCluster 是"外部 Ceph 接入声明", 不是本安装器资产。
     #   覆盖安装时若把它当 internal 旧集群删除, 会删掉 external CR/依赖 CR, 甚至触发
     #   Rook cleanupPolicy 擦盘流程。默认拒绝; 仅显式 CEPH_CLEANUP_ALLOW_EXTERNAL=1 放行。
-    local _ext_rows _ext_cc
-    _ext_rows="$(SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster \
-        -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers 2>/dev/null || true)"
+    local _ext_rows _ext_cc _ext_err
+    # ★ 2026-10-26 CodeRabbit: 分类查询失败 ≠ "没有 external" —— 必须 fail-closed。
+    #   旧写法 `... 2>/dev/null || true` 会把 SSH/API 故障吞成空结果; 后续存在性查询一旦成功,
+    #   就会在"未确认是否 external"的情况下继续删消费者/PVC/CR(可能破坏外部 Ceph 接入)。
+    #   CRD 不存在(全新集群)仍视为"无 CephCluster" —— 与下方存在性查询同一口径。
+    if ! _ext_rows="$(SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster \
+            -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers 2>/dev/null)"; then
+        _ext_err="$(SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster \
+            -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers 2>&1 >/dev/null || true)"
+        case "${_ext_err}" in
+            *"doesn't have a resource type"*|*"could not find the requested resource"*) _ext_rows="" ;;
+            *) _CEPH_ABORT_WIPE=1
+               err "查询 CephCluster external 标记失败(无法确认是否 external): ${_ext_err:-<无 stderr>}"
+               return 1 ;;
+        esac
+    fi
     _ext_cc="$(printf '%s\n' "${_ext_rows}" | awk '$2=="true"{print $1}' | tr '\n' ' ')"
     if [ -n "${_ext_cc}" ]; then
         err "检测到 external CephCluster(${_ext_cc}) —— 外部 Ceph 不是本安装器资产, 拒绝销毁"
         err "  如确认要清理集群内 internal Ceph, 请先手工处理 external CR;"
         err "  或显式 CEPH_CLEANUP_ALLOW_EXTERNAL=1 重跑(危险: 可能破坏外部 Ceph 接入)"
-        [ "${CEPH_CLEANUP_ALLOW_EXTERNAL:-0}" = "1" ] || return 1
+        if [ "${CEPH_CLEANUP_ALLOW_EXTERNAL:-0}" != "1" ]; then
+            # ★ cleanup_all 只看 _CEPH_ABORT_WIPE/_CEPH_UNSAFE_UNMAP, **不看 delete_cluster 返回码**;
+            #   不置位的话 --all 在"拒绝销毁"后仍会继续 wipe_ceph_disks_all_nodes —— 外部 Ceph
+            #   若使用这些节点上的盘, 数据会被抹掉(2026-10-26 CodeRabbit Critical)。
+            _CEPH_ABORT_WIPE=1
+            return 1
+        fi
         warn "CEPH_CLEANUP_ALLOW_EXTERNAL=1 → 继续销毁(风险自负)"
     fi
     say "删除现有 CephCluster(cleanupPolicy yes-really-destroy-data, Rook 擦盘)..."

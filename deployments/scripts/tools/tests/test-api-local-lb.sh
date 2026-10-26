@@ -156,6 +156,36 @@ chk "⑦ 关闭态恢复 master → 入口域名" "1" "$(has "$(code_of run_disa
 chk "⑦ 收敛后重启 kubelet" "1" "$(code_of converge_master_kubelet | grep -c 'systemctl restart kubelet')"
 chk "⑦ 收敛幂等(已匹配则不重启)" "1" "$(code_of converge_master_kubelet | grep -c 'grep -q')"
 
+# ============================================================
+# ⑧ 关闭态 master kubelet 恢复的前置门禁(2026-10-26)
+#    /etc/hosts 域名行收敛失败(或入口地址为空)时, 不得把 master 的 kubelet.conf 改成
+#    https://<域名>:6443 —— 关闭态没有 loadbalancer_apiserver 块, 域名只能靠 /etc/hosts
+#    解析; 映射缺失时 kubelet 会失去 API 访问(节点 NotReady)。修复前是无条件改写。
+#    夹具用假 ssh(拦截远端命令, 不碰真机): "true" 通、manifest 不存在、/etc/hosts 收敛失败。
+# ============================================================
+mkdir -p "${TMP}/fakebin"
+cat > "${TMP}/fakebin/ssh" <<'FAKE'
+#!/bin/bash
+cmd="${*: -1}"
+printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}"
+case "${cmd}" in
+    true) exit 0 ;;
+    *"/etc/hosts"*)   exit 1 ;;   # 模拟 hosts 域名行收敛失败
+    *"test -f"*)      exit 1 ;;   # manifest 不存在 → 跳过删除
+    *"kubelet.conf"*) exit 1 ;;   # 未收敛(若门禁失效, 会触发 cp/sed/restart)
+    *) exit 0 ;;
+esac
+FAKE
+chmod +x "${TMP}/fakebin/ssh"
+_sshlog="${TMP}/ssh8.log"; : > "${_sshlog}"
+rc="$(run_mod "${TMP}/m_only.conf" API_LOCAL_LB_ENABLED=false \
+        PATH="${TMP}/fakebin:${PATH}" FAKE_SSH_LOG="${_sshlog}")"
+chk "⑧ 模块确实跑到分派(夹具有效性)" "1" "$(cnt '本地代理已关闭' "${TMP}/last.log")"
+chk "⑧ hosts 收敛失败 → 退出码非 0" "非0" "$(as_ok "${rc}")"
+chk "⑧ 明确说明保持 kubelet.conf 不变" "1" "$(cnt '保持 kubelet.conf 不变' "${TMP}/last.log")"
+chk "⑧ 未向 master 发送任何 kubelet.conf 命令" "0" "$(cnt 'kubelet.conf' "${_sshlog}")"
+chk "⑧ 入口地址为空时同样不改 kubelet(静态门禁)" "1" "$(code_of run_disabled | grep -c '无法解析 API 入口地址')"
+
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then
     echo "✅ 全部 ${n} 项断言通过(${MOD})"

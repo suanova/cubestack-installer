@@ -86,6 +86,32 @@ if ! SSH "${K} -n metallb-system get l2advertisements -o name 2>/dev/null | grep
     exit 1
 fi
 
+# 远端 IPAddressPool(-o json) 的 .spec.addresses 是否 == 目标池 JSON 数组(输出 1/0)。
+# ★ 2026-10-26 CodeRabbit: 不能用 jsonpath='{.spec.addresses}' —— kubectl 打印的是 Go 切片
+#   字面量 `[10.0.0.1-10.0.0.2]`(不是合法 JSON), json.loads 恒失败 → 每次都 patch; 只读权限
+#   的部署会因此报错退出。这里比较整对象里的 .spec.addresses 数组。
+# 远端 JSON 缺失/非法一律输出 0(保守: 触发幂等 patch)。
+_metallb_pool_matches() {  # <kubectl get ipaddresspool -o json> <目标池 JSON 数组>
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+def cur_addrs(s):
+    try:
+        d = json.loads(s)
+    except Exception:
+        return None
+    v = (d.get("spec") or {}).get("addresses") if isinstance(d, dict) else None
+    return [str(x).strip() for x in v] if isinstance(v, list) else None
+def want(s):
+    try:
+        v = json.loads(s)
+        return [str(x).strip() for x in v] if isinstance(v, list) else None
+    except Exception:
+        return None
+a, b = cur_addrs(sys.argv[1]), want(sys.argv[2])
+print("1" if a is not None and b is not None and a == b else "0")
+PY
+}
+
 # ④ 地址池与 cluster.conf 收敛(2026-10-25):
 #   只校验 CR 存在不够 —— 改 METALLB_POOL 后重跑本模块/verify_metallb 仍会用旧池,
 #   LoadBalancer 分不到 VIP(实机踩到)。这里把 primary 池收敛到 METALLB_POOL,
@@ -112,9 +138,27 @@ for it in d.get("items", []) or []:
     for ip in (it.get("spec") or {}).get("externalIPs") or []:
         print(ip)
 ' 2>/dev/null || true)"
-        _cand_ips="$(python3 - "${METALLB_POOL}" <<'PY'
+        # 展开上限(2026-10-26): range 与 CIDR 都**惰性**取, 且整池最多 1024 个地址;
+        # 超限直接中止预检并报错, 不再"静默只查前 1024 个"(那会给假安全感)。
+        # ⚠ CIDR 不能写 list(...hosts())[:1024]: IPv6 /64 有 2^64 个地址,
+        #   先物化再切片会在部署机上耗尽内存(islice 只取上限+1 个即可判定)。
+        if ! _cand_ips="$(python3 - "${METALLB_POOL}" <<'PY'
 import ipaddress, sys
+from itertools import islice
+
+MAX_CHECK = 1024
 out = []
+
+def too_big(tok):
+    print(f"METALLB_POOL 条目 '{tok}' 展开后超过冲突预检上限 {MAX_CHECK} 个地址", file=sys.stderr)
+    sys.exit(2)
+
+def take(tok, ips):
+    got = list(islice(ips, MAX_CHECK + 1))
+    if len(got) > MAX_CHECK or len(out) + len(got) > MAX_CHECK:
+        too_big(tok)
+    out.extend(got)
+
 for tok in sys.argv[1].split(','):
     tok = tok.strip()
     if not tok:
@@ -124,20 +168,28 @@ for tok in sys.argv[1].split(','):
             a, b = tok.split('-', 1)
             s = int(ipaddress.ip_address(a.strip()))
             e = int(ipaddress.ip_address(b.strip()))
-            out.extend(str(ipaddress.ip_address(n)) for n in range(s, e + 1))
+            take(tok, (str(ipaddress.ip_address(n)) for n in range(s, e + 1)))
         elif '/' in tok:
-            out.extend(str(h) for h in list(ipaddress.ip_network(tok, strict=False).hosts())[:1024])
+            take(tok, (str(h) for h in ipaddress.ip_network(tok, strict=False).hosts()))
         else:
-            out.append(str(ipaddress.ip_address(tok)))
+            take(tok, [str(ipaddress.ip_address(tok))])
     except Exception:
         pass
 print('\n'.join(out))
 PY
-)"
+        )"; then
+            err "METALLB_POOL 冲突预检中止: 展开后超过检查上限(整池 1024 个地址)"
+            err "  超限时不再静默只查前 1024 个(那样会给出'预检通过'的假安全感); 请缩小地址池, 或"
+            err "  确认无冲突后 SKIP_METALLB_POOL_CHECK=true 重跑(风险自负)"
+            exit 1
+        fi
         _conflicts=""
         while IFS= read -r _ip; do
             [ -n "${_ip}" ] || continue
-            case " ${_alloc_ips} " in *" ${_ip} "*) continue ;; esac
+            # 已分配 VIP 必须按**整行**匹配: _alloc_ips 是多行(每行一个 IP), 用
+            # `case " ${_alloc_ips} " in *" ${_ip} "*)` 会因换行分隔符一个都命中不了,
+            # 多 VIP 集群重跑时就会 ping 自己的 VIP 并误判为地址冲突(2026-10-26)。
+            if command grep -Fxq -- "${_ip}" <<< "${_alloc_ips}"; then continue; fi
             # SSH 必须接 </dev/null: 否则会吞掉 while 的剩余输入, 只检查第一个地址
             if SSH "ping -c1 -W1 ${_ip} >/dev/null 2>&1" </dev/null; then
                 _conflicts="${_conflicts} ${_ip}"
@@ -151,18 +203,8 @@ PY
         fi
         ok "MetalLB 地址池冲突预检通过(已排除本集群已分配 VIP)"
     fi
-    _cur_addrs="$(SSH "${K} -n metallb-system get ipaddresspool primary -o jsonpath='{.spec.addresses}' 2>/dev/null" || true)"
-    _same="$(python3 - "${_cur_addrs:-[]}" "${_pool_json}" <<'PY'
-import json, sys
-def norm(s):
-    try:
-        v = json.loads(s)
-        return [str(x).strip() for x in v] if isinstance(v, list) else []
-    except Exception:
-        return []
-print("1" if norm(sys.argv[1]) == norm(sys.argv[2]) else "0")
-PY
-)"
+    _cur_addrs="$(SSH "${K} -n metallb-system get ipaddresspool primary -o json 2>/dev/null" || true)"
+    _same="$(_metallb_pool_matches "${_cur_addrs:-}" "${_pool_json}")"
     if [ "${_same}" != "1" ]; then
         say "  ④ 收敛 IPAddressPool primary → ${METALLB_POOL} ..."
         if ! SSH "${K} -n metallb-system patch ipaddresspool primary --type=merge --patch-file=/dev/stdin" >/dev/null 2>&1 <<EOF

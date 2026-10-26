@@ -733,6 +733,8 @@ case "${ACTION}" in
                     err "NTP_REQUIRE_CHRONY_CLOSURE=1 → 停止部署"
                     exit 1
                 fi
+                warn "  闭包不完整: 不向客户端推送 chrony deb(避免预卸 systemd-timesyncd 后安装失败)" >&2
+                NTP_HAS_DEB=0
             fi
         fi
         say "下发并执行节点时间同步(chrony/timesyncd + 一次性硬对齐, 权威=${NTP_AUTHORITY}) ..."
