@@ -146,6 +146,12 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-release-sync-images.sh
 
+      # k8s_deploy 期间改 cluster.conf 导致 addons.yml/后续模块配置漂移的门禁回归
+      - name: 部署配置漂移门禁回归(config guard)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-deploy-config-guard.sh
+
       # CLI 镜像必须内置 patch: kubespray 补丁层缺失 patch 时会静默跳过
       # (2026-10-25 实机: base 镜像是旧构建, Calico RBAC 等 14 个补丁未生效)。
       - name: CLI 镜像必需工具(patch)静态门禁

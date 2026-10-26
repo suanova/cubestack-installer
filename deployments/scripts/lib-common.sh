@@ -29,6 +29,29 @@ export CLUSTER_CONF
 CLUSTER_DEFAULTS_CONF="${CLUSTER_DEFAULTS_CONF:-${REPO_ROOT}/deployments/config/cluster.defaults.conf}"
 export CLUSTER_DEFAULTS_CONF
 
+# ---------------- 配置漂移门禁工具(2026-10-26) ----------------
+# k8s_deploy 在启动时一次性 load_config; 若用户在 30s 倒计时/长时间 kubespray 运行期间
+# 修改 cluster.conf, 后续 addon 模块会重新 load_config 看到新值, 而 addons.yml 仍是旧值
+# (实机: nodeport→metallb, addons metallb_enabled=false → metallb 模块失败).
+# 这两个 helper 供 k8s_deploy/metallb 门禁复用; 只读, 不修改配置.
+config_fingerprint() {
+    local conf="${CLUSTER_CONF:-${REPO_ROOT}/deployments/config/cluster.conf}"
+    [ -f "${conf}" ] || { printf 'missing\n'; return 0; }
+    # 只对"生效行"取指纹: 注释/空行变化不算配置漂移, 避免无谓中止.
+    command grep -vE '^[[:space:]]*(#|$)' "${conf}" 2>/dev/null \
+        | sha256sum | awk '{print $1}' || true
+}
+addons_metallb_enabled() {
+    local yml="${1:-${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}/group_vars/k8s_cluster/addons.yml}"
+    [ -f "${yml}" ] || { printf 'missing\n'; return 0; }
+    awk -F':[[:space:]]*' '
+        /^[[:space:]]*metallb_enabled:/ {
+            v=$2; gsub(/["[:space:]]/, "", v); print v; found=1; exit
+        }
+        END { if (!found) print "missing" }
+    ' "${yml}"
+}
+
 # ---------------- 集群名(固定默认, 单集群) ----------------
 # 默认集群名 cubestack-cluster, 用于 inventory/offline-files 目录与日志命名; 环境变量可覆盖
 CLUSTER_NAME="${CLUSTER_NAME:-cubestack-cluster}"

@@ -1815,3 +1815,43 @@ spec 被 admission 拒绝。helm 可能先把 CR 的 `global.imageRegistry` 改�
 
 **边界**: marker component/subdirs 与本次不一致时脚本会拒绝（避免半套修复）；必须用覆盖原
 scope 的 component 或 `all` 重跑。刷新期间不要手工删 marker。
+
+### 6. k8s_deploy 期间修改 cluster.conf 导致 addons 与后续模块不一致
+
+**症状**
+- kubespray 部署完成，但 addon 阶段 `01_metallb.sh` 报 `未找到 metallb-system 命名空间`；
+- `addons.yml` 里 `metallb_enabled: false`，而 `cluster.conf` 当前是
+  `SERVICE_EXPOSE_MODE=metallb` / `METALLB_ENABLED=true`；
+- 常见于 `k8s_deploy` 的 30s 倒计时或 kubespray 长时间运行期间修改了 `SERVICE_EXPOSE_MODE`。
+
+**根因**
+`k8s_deploy` 在入口一次性 `load_config`，随后用旧变量生成 inventory/addons.yml 并跑 kubespray；
+后续 addon 模块会重新 `load_config` 读到新值。两边不一致时，MetalLB 模块要求
+`metallb-system`，但 kubespray 按旧 nodeport 配置根本没安装它。
+
+**脚本门禁（2026-10-26 已根治）**
+- `lib-common.sh` 新增 `config_fingerprint` / `addons_metallb_enabled`；
+- `06_k8s_deploy.sh` 在启动时记录 cluster.conf 指纹，**倒计时后和 kubespray 完成后各校验一次**；
+  检测到变更直接中止，并提示重新运行，避免半新半旧；
+- `01_metallb.sh` 在连集群前校验 `addons.yml metallb_enabled/metallb_speaker_enabled`；
+  不一致时直接给出根因和修复命令，不再只报“未找到命名空间”。
+
+**恢复**
+```bash
+# 以“当前 cluster.conf 想要的模式”为准
+bash deployments/scripts/tools/k8s/gen-inventory.sh
+
+# 若当前是 metallb：按当前配置重跑基座，让 kubespray 安装 MetalLB
+sudo ./deploy-cluster.sh --steps k8s_deploy --fresh --yes
+sudo ./deploy-cluster.sh
+
+# 若当前实际想用 nodeport：把 cluster.conf 改为
+#   SERVICE_EXPOSE_MODE="nodeport"
+#   METALLB_ENABLED="false"
+# 再 gen-inventory + 正常重跑（metallb 模块会自动跳过）
+```
+
+**验证**
+- `kubectl get ns metallb-system` 存在，`kubectl -n metallb-system get pods` controller/speaker 1/1；
+- `kubectl get ipaddresspools.metallb.io -n metallb-system` 的池 == `METALLB_POOL`；
+- 重新运行部署不再出现配置漂移中止。

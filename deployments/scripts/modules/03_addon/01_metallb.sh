@@ -30,12 +30,30 @@ load_config
 [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ] \
     && { say "SERVICE_EXPOSE_MODE=nodeport(自动关闭 MetalLB), 跳过 metallb 就绪检查"; exit 0; }
 
+# addons.yml 与 cluster.conf 一致性门禁(2026-10-26 实机):
+# k8s_deploy 入口一次性 load_config; 若用户在倒计时/kubespray 运行期间改了 cluster.conf,
+# k8s_deploy 仍按旧配置生成 addons.yml, 而本模块重新加载后看到新值 → 直接报“未找到
+# metallb-system”, 根因被掩盖。这里先给出可操作的明确错误, 不再让用户猜 addons.yml。
+_ADDONS_YML="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}/group_vars/k8s_cluster/addons.yml"
+_m_enabled="$(addons_metallb_enabled "${_ADDONS_YML}")"
+_m_speaker="$(awk -F':[[:space:]]*' '/^[[:space:]]*metallb_speaker_enabled:/{v=$2; gsub(/["[:space:]]/,"",v); print v; found=1; exit} END{if(!found) print "missing"}' "${_ADDONS_YML}" 2>/dev/null || true)"
+if [ "${_m_enabled}" != "true" ] || [ "${_m_speaker}" != "true" ]; then
+    err "MetalLB 配置不一致: 当前 SERVICE_EXPOSE_MODE=${SERVICE_EXPOSE_MODE:-metallb} / METALLB_ENABLED=${METALLB_ENABLED:-true}"
+    err "  但 ${_ADDONS_YML} 的 metallb_enabled=${_m_enabled:-missing} metallb_speaker_enabled=${_m_speaker:-missing}"
+    err "  根因通常是 k8s_deploy 期间修改了 cluster.conf: 已加载旧变量生成 addons.yml, 后续模块读到新值。"
+    err "  修复: bash deployments/scripts/tools/k8s/gen-inventory.sh && sudo ./deploy-cluster.sh --steps k8s_deploy --fresh --yes"
+    exit 1
+fi
+unset _ADDONS_YML _m_enabled _m_speaker
+
 init_remote_kubectl || exit 1
 
 say "检查 MetalLB 就绪(registry 等 LoadBalancer 组件的前置依赖)..."
 say "  ① metallb-system 命名空间..."
 if ! SSH "${K} get ns metallb-system >/dev/null 2>&1"; then
     err "未找到 metallb-system 命名空间, 检查 addons.yml metallb_enabled 且 kubespray 已部署 metallb"
+    err "  若 addons.yml 已为 true, 说明本次 k8s_deploy 未成功安装 addon; 重跑:"
+    err "  sudo ./deploy-cluster.sh --steps k8s_deploy --fresh --yes"
     exit 1
 fi
 say "  ② 等待 controller/speaker pod 全部 Running(最长 90s)..."

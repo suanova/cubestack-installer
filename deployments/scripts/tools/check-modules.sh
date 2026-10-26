@@ -675,7 +675,8 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-api-entry-mode.sh test-api-local-lb.sh test-sync-api-entry.sh \
            test-kubespray-version-select.sh test-deb-install-lib.sh \
            test-ssh-user.sh test-k8s-passwordless.sh test-gpu-vendor-probe.sh \
-           test-nvidia-host-driver.sh test-node-hosts-sync.sh test-release-sync-images.sh; do
+           test-nvidia-host-driver.sh test-node-hosts-sync.sh test-release-sync-images.sh \
+           test-deploy-config-guard.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
     if [ ! -f "${_tp}" ]; then
         ck_fail "⑮ 离线套件缺失: ${_tp#${REPO_ROOT}/}(⑮ 的回归证据没了)"
