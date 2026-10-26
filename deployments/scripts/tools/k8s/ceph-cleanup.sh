@@ -385,6 +385,20 @@ except Exception:
 
 # ---------------- ① 删除现有 CephCluster(Rook 擦盘) ----------------
 delete_cluster() {
+    # ★ 2026-10-26: external CephCluster 是"外部 Ceph 接入声明", 不是本安装器资产。
+    #   覆盖安装时若把它当 internal 旧集群删除, 会删掉 external CR/依赖 CR, 甚至触发
+    #   Rook cleanupPolicy 擦盘流程。默认拒绝; 仅显式 CEPH_CLEANUP_ALLOW_EXTERNAL=1 放行。
+    local _ext_rows _ext_cc
+    _ext_rows="$(SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster \
+        -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers 2>/dev/null || true)"
+    _ext_cc="$(printf '%s\n' "${_ext_rows}" | awk '$2=="true"{print $1}' | tr '\n' ' ')"
+    if [ -n "${_ext_cc}" ]; then
+        err "检测到 external CephCluster(${_ext_cc}) —— 外部 Ceph 不是本安装器资产, 拒绝销毁"
+        err "  如确认要清理集群内 internal Ceph, 请先手工处理 external CR;"
+        err "  或显式 CEPH_CLEANUP_ALLOW_EXTERNAL=1 重跑(危险: 可能破坏外部 Ceph 接入)"
+        [ "${CEPH_CLEANUP_ALLOW_EXTERNAL:-0}" = "1" ] || return 1
+        warn "CEPH_CLEANUP_ALLOW_EXTERNAL=1 → 继续销毁(风险自负)"
+    fi
     say "删除现有 CephCluster(cleanupPolicy yes-really-destroy-data, Rook 擦盘)..."
     # 幂等: 无集群直接成功。
     # ★ 2026-10-20 CodeRabbit: 查询失败不能当成"无集群"(否则 cleanup_all 会跳过删除直接擦盘)。

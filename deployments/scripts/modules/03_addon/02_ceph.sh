@@ -64,6 +64,22 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
         say "  ceph: 集群内无 CephCluster(未装/internal 已删/external 模式), 跳过"
         exit 0
     fi
+    # ★ 2026-10-26: external CephCluster(rook-ceph-external, spec.external.enable=true)
+    #   是**外部 Ceph 的接入声明**, 不是本安装器创建的存储集群。ceph_csi 的官方导入路径
+    #   会 apply cluster-external.yaml 创建它; 覆盖安装时绝不能把它当 internal 旧集群
+    #   执行 --delete-cluster(否则会删外部 CR/依赖 CR, 甚至触发 Rook 擦盘流程)。
+    _cc_ext_rows="$( (SSH "${K}" -n "${_cns}" get cephcluster \
+        -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers 2>/dev/null) || true )"
+    _cc_ext="$(printf '%s\n' "${_cc_ext_rows}" | awk '$2=="true"{print $1}' | tr '\n' ' ')"
+    if [ -n "${_cc_ext}" ]; then
+        say "  ceph: 检测到 external CephCluster(${_cc_ext}) → 外部 Ceph 非本安装器资产, 跳过销毁"
+        if [ "${CEPH_CLEANUP_ALLOW_EXTERNAL:-0}" = "1" ]; then
+            warn "  CEPH_CLEANUP_ALLOW_EXTERNAL=1 → 继续销毁(危险: 可能破坏外部 Ceph 接入)"
+        else
+            warn "  如需清理集群内 internal CephCluster, 请先手工处理 external CR; 或显式 CEPH_CLEANUP_ALLOW_EXTERNAL=1(危险)"
+            exit 0
+        fi
+    fi
     if [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ]; then
         say "  ceph: 完整安全序卸载(停消费者→unmap→删集群; OSD 数据销毁)"
         bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --delete-cluster \
@@ -634,6 +650,17 @@ ok "  Rook operator 已部署"
 #   ① 盘名/节点过时(历史残留 /dev/rbd0 → OSD 永不创建) ② 残留 mon store(/var/lib/rook/mon-*,
 #   集群无关路径)被新 mon 直接复用, monmap 还是旧集群的死 IP → quorum 永久卡死。
 _HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+# ★ 2026-10-26: external CephCluster(rook-ceph-external, spec.external.enable=true) 不是
+#   本安装器资产; 覆盖安装/幂等清理都不能把它当 internal 旧集群删除。
+if [ -n "${_HAS_CC_NOW}" ]; then
+    _CC_EXT_ROWS="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster \
+        -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers 2>/dev/null) || true )"
+    _CC_EXT_NOW="$(printf '%s\n' "${_CC_EXT_ROWS}" | awk '$2=="true"{print $1}' | tr '\n' ' ')"
+    if [ -n "${_CC_EXT_NOW}" ]; then
+        say "  检测到 external CephCluster(${_CC_EXT_NOW}) → 跳过集群内 CephCluster 销毁/幂等清理"
+        _HAS_CC_NOW=""
+    fi
+fi
 # ★ 幂等卸载(2026-09-05 重构): PRE_CLEANUP=true(覆盖安装)且检测到已有 CephCluster 时,
 #   先走标准卸载流程删旧集群(Rook cleanupPolicy yes-really-destroy-data 擦盘), 再走下方 7a 物理清盘。
 #   支持两种幂等场景:
