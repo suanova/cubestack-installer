@@ -152,11 +152,13 @@ jobs:
           for v in MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MATRIX_RELEASE; do
             if [ -z "${!v:-}" ]; then echo "::error::missing ${v}"; missing=1; fi
           done
-          if [ -z "${HARBOR_MIRROR_USER:-}" ] && [ -z "${CUBESTACK_OPERATOR_HARBOR_USER:-}" ]; then
-            echo "::error::missing Harbor user (HARBOR_MIRROR_USER or CUBESTACK_OPERATOR_HARBOR_USER)"; missing=1
-          fi
-          if [ -z "${HARBOR_MIRROR_PASSWORD:-}" ] && [ -z "${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}" ]; then
-            echo "::error::missing Harbor password (HARBOR_MIRROR_PASSWORD or CUBESTACK_OPERATOR_HARBOR_PASSWORD)"; missing=1
+          # 凭据必须成对: mirror 对或 operator 对任一完整即可; 不允许"一个来源的 user +
+          # 另一个来源的 password"通过校验(release-sync-images.sh 也只会选完整的一对)。
+          _harbor_pair=0
+          if [ -n "${HARBOR_MIRROR_USER:-}" ] && [ -n "${HARBOR_MIRROR_PASSWORD:-}" ]; then _harbor_pair=1; fi
+          if [ -n "${CUBESTACK_OPERATOR_HARBOR_USER:-}" ] && [ -n "${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}" ]; then _harbor_pair=1; fi
+          if [ "${_harbor_pair}" != "1" ]; then
+            echo "::error::missing complete Harbor credential pair (HARBOR_MIRROR_USER+HARBOR_MIRROR_PASSWORD or CUBESTACK_OPERATOR_HARBOR_USER+CUBESTACK_OPERATOR_HARBOR_PASSWORD)"; missing=1
           fi
           case "${MATRIX_RELEASE}" in ''|*[!0-9A-Za-z._-]*) echo "::error::invalid release: ${MATRIX_RELEASE}"; missing=1 ;; esac
           case "${CHECKOUT_REF}" in ''|*[!0-9A-Za-z._/-]*|*..*) echo "::error::invalid checkout_ref: ${CHECKOUT_REF}"; missing=1 ;; esac
