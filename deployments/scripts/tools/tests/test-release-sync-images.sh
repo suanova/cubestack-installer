@@ -11,6 +11,7 @@
 #   ⑥ --tag / source_repo / release.env 一致性
 #   ⑦ chart / CLI / stale cleanup / dry-run / preflight / recover
 #   ⑧ fetch --release 集成与刷新中提示
+#   ⑨ Harbor 凭据成对选择(mirror/operator 不混搭 user/password 来源)
 # 隔离: 临时 fake mc + fixture; 不访问 Harbor/MinIO/集群.
 # 用法: bash deployments/scripts/tools/tests/test-release-sync-images.sh
 # ============================================================
@@ -752,6 +753,31 @@ chk "CLI rebuild workflow 存在" "0" "$([ -f "${CLI_WF}" ] && echo 0 || echo 1)
 chk_contains "release CLI 同 job 内同步" "--component cli" "$(cat "${CLI_WF}" 2>/dev/null)"
 chk_contains "release CLI tar 导出" "cubestack-installer-cli-v" "$(cat "${CLI_WF}" 2>/dev/null)"
 chk_contains "release CLI 一致性断言" "--cli-image-digest" "$(cat "${CLI_WF}" 2>/dev/null)"
+
+echo "== ㉚ Harbor 凭据成对选择(不混搭 user/password 来源) =="
+# 2026-10-26 CodeRabbit: 旧实现 user 取 mirror, password 独立回落 operator —— 只配一项
+# mirror 凭据时会拼出无效组合, 即使 operator 对完整也认证失败。
+sed -n '/^_harbor_pick_pair() {/,/^}/p' "${SYNC}" > "${TMP}/harbor_pair.sh"
+[ -s "${TMP}/harbor_pair.sh" ] || { echo "FAIL 抽取 _harbor_pick_pair 失败"; fail=1; }
+pair_of() {  # <env...> → user<TAB>pass
+    env -u HARBOR_MIRROR_USER -u HARBOR_MIRROR_PASSWORD \
+        -u CUBESTACK_OPERATOR_HARBOR_USER -u CUBESTACK_OPERATOR_HARBOR_PASSWORD "$@" \
+        bash -c 'source "$1"; warn() { :; }; _harbor_pick_pair; printf "%s\t%s" "${_HARBOR_USER}" "${_HARBOR_PASS}"' \
+        _ "${TMP}/harbor_pair.sh"
+}
+chk "mirror 对完整 → 用 mirror" $'mu\tmp' \
+    "$(pair_of HARBOR_MIRROR_USER=mu HARBOR_MIRROR_PASSWORD=mp CUBESTACK_OPERATOR_HARBOR_USER=ou CUBESTACK_OPERATOR_HARBOR_PASSWORD=op)"
+chk "mirror 仅 user + operator 对完整 → 用 operator(不混搭)" $'ou\top' \
+    "$(pair_of HARBOR_MIRROR_USER=mu CUBESTACK_OPERATOR_HARBOR_USER=ou CUBESTACK_OPERATOR_HARBOR_PASSWORD=op)"
+chk "mirror 仅 password + operator 对完整 → 用 operator" $'ou\top' \
+    "$(pair_of HARBOR_MIRROR_PASSWORD=mp CUBESTACK_OPERATOR_HARBOR_USER=ou CUBESTACK_OPERATOR_HARBOR_PASSWORD=op)"
+chk "无 mirror + operator 对完整 → 用 operator" $'ou\top' \
+    "$(pair_of CUBESTACK_OPERATOR_HARBOR_USER=ou CUBESTACK_OPERATOR_HARBOR_PASSWORD=op)"
+chk "两对都不完整 → 空(不认证)" $'\t' \
+    "$(pair_of HARBOR_MIRROR_USER=mu CUBESTACK_OPERATOR_HARBOR_PASSWORD=op)"
+chk_not_contains "脚本不再混搭凭据来源" \
+    '_HARBOR_USER="${HARBOR_MIRROR_USER:-${CUBESTACK_OPERATOR_HARBOR_USER:-}}"' "${SYNC}"
+chk_contains "workflow 要求完整凭据对" 'complete Harbor credential pair' "$(cat "${WF}" 2>/dev/null)"
 
 echo ""
 if [ "${fail}" = "0" ]; then echo "✅ test-release-sync-images: 全部通过"; else echo "❌ test-release-sync-images: 有失败"; fi

@@ -217,8 +217,25 @@ if [ "${MIN_FREE_GB}" -gt 0 ] && [ "${PREFLIGHT}" = "0" ] && [ "${DRY_RUN}" = "0
 fi
 
 # ---------- Harbor 认证(skopeo/helm) ----------
-_HARBOR_USER="${HARBOR_MIRROR_USER:-${CUBESTACK_OPERATOR_HARBOR_USER:-}}"
-_HARBOR_PASS="${HARBOR_MIRROR_PASSWORD:-${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}}"
+# ★ 2026-10-26 CodeRabbit: 凭据必须**成对**选择 —— 旧实现 user 取 mirror、password 单独回落
+#   operator, 会拼出 "HARBOR_MIRROR_USER + CUBESTACK_OPERATOR_HARBOR_PASSWORD" 的无效组合;
+#   即使 operator 凭据对完整, 认证仍会失败并阻断刷新。规则:
+#     ① mirror 对完整 → 用 mirror 对;
+#     ② 否则 operator 对完整 → 用 operator 对;
+#     ③ 都不完整 → 空(不认证, 回退 docker config/匿名), 绝不跨来源混搭。
+_harbor_pick_pair() {
+    _HARBOR_USER=""; _HARBOR_PASS=""
+    if [ -n "${HARBOR_MIRROR_USER:-}" ] && [ -n "${HARBOR_MIRROR_PASSWORD:-}" ]; then
+        _HARBOR_USER="${HARBOR_MIRROR_USER}"; _HARBOR_PASS="${HARBOR_MIRROR_PASSWORD}"; return 0
+    fi
+    if [ -n "${CUBESTACK_OPERATOR_HARBOR_USER:-}" ] && [ -n "${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}" ]; then
+        _HARBOR_USER="${CUBESTACK_OPERATOR_HARBOR_USER}"; _HARBOR_PASS="${CUBESTACK_OPERATOR_HARBOR_PASSWORD}"; return 0
+    fi
+    if [ -n "${HARBOR_MIRROR_USER:-}${HARBOR_MIRROR_PASSWORD:-}" ]; then
+        warn "HARBOR_MIRROR_USER/PASSWORD 仅配置一项 → 忽略该不完整凭据对(不会与 operator 凭据混搭)"
+    fi
+}
+_harbor_pick_pair
 _harbor_auth() {
     if [ -n "${REGISTRY_AUTH_FILE:-}" ] && [ -f "${REGISTRY_AUTH_FILE}" ]; then
         printf '%s\n' "${REGISTRY_AUTH_FILE}"; return 0
