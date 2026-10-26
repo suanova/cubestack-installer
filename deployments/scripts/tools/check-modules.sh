@@ -677,7 +677,7 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-ssh-user.sh test-k8s-passwordless.sh test-gpu-vendor-probe.sh \
            test-nvidia-host-driver.sh test-node-hosts-sync.sh test-release-sync-images.sh \
            test-deploy-config-guard.sh test-k8s-ntp.sh test-cephfs-mount.sh \
-           test-chrony-offline-debs.sh; do
+           test-chrony-offline-debs.sh test-ceph-data-disks.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
     if [ ! -f "${_tp}" ]; then
         ck_fail "⑮ 离线套件缺失: ${_tp#${REPO_ROOT}/}(⑮ 的回归证据没了)"

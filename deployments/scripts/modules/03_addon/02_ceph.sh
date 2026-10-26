@@ -299,6 +299,9 @@ fi
 # ★ external 模式(CEPH_MODE=external): 不涉及本地裸盘/覆盖确认, 跳过裸盘选择与安全确认段;
 #   仅 internal(集群内 Rook-Ceph)需要。operator/csi-operator 部署仍执行(供 CephConnection 使用)。
 if [ "${CEPH_MODE:-internal}" != "external" ]; then
+# 显式 CEPH_NODES/CEPH_DATA_DISKS 先做格式/节点名校验: 防止节点间误用逗号被静默解析成
+# "第一个节点拥有全部盘、其余节点无盘"(2026-10-26 实机)。
+ceph_validate_explicit_config || exit 1
 # ---------------- 2) 裸盘选择(显式指定 或 自动检测) ----------------
 # 需求: 裸盘可在 cluster.conf 显式指定(CEPH_DATA_DISKS); 未指定则自动检测。
 #   explicit 格式: "hostname:盘名1,盘名2;hostname2:盘名3" —— hostname 可省略(无 ':' → 应用到全部存储节点,

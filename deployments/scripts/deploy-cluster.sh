@@ -621,6 +621,10 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         done < <(ceph_storage_hosts)
         unset _h
         _CEPH_CONFIRM_DETECT_FAIL=0
+        # 显式 CEPH_NODES/CEPH_DATA_DISKS 先校验: 节点之间必须用分号, 不能误用逗号把
+        # 三块盘都解析到第一个节点(2026-10-26 实机)。
+        ceph_validate_explicit_config \
+            || { err "Ceph 节点/裸盘配置非法, 请修正 deployments/config/cluster.conf 后重跑"; exit 1; }
         if [ -n "${CEPH_DATA_DISKS:-}" ]; then
             # 显式指定: 与 ceph 模块两轮解析一致(hostname 条目优先, 全节点条目仅填充未指定)
             while IFS=';' read -ra _grp; do

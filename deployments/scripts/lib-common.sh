@@ -1857,6 +1857,66 @@ ceph_storage_hosts() {
     return 0
 }
 
+# 校验显式 Ceph 节点/裸盘配置(CEPH_NODES / CEPH_DATA_DISKS)。
+# 目的: 防止 "node0:/dev/vdb,node1:/dev/vdb,node2:/dev/vdb" 这种**节点间用逗号**的写法
+# 被解析器静默当成 node0 的三块盘(2026-10-26 实机: 三块盘全显示在第一个节点, 另外两台
+# <未检测到>)。必须用分号分隔节点, 逗号只分隔同一节点的多块盘。
+# 返回: 0=通过; 1=格式/节点名非法(err 已打印原因)。
+ceph_validate_explicit_config() {
+    local _line _h _g _grp _hn _ds _d _ncolon
+    local -a _hosts=() _grps=()
+    # 合法节点名来自 NODES; node_parse 放子 shell, 避免污染调用方 NODE_* 全局态。
+    while IFS= read -r _h; do
+        [ -n "${_h}" ] && _hosts+=("${_h}")
+    done < <(for _line in "${NODES[@]:-}"; do
+        [ -z "${_line}" ] && continue
+        node_parse "${_line}"
+        [ -n "${NODE_HOSTNAME}" ] && printf '%s\n' "${NODE_HOSTNAME}"
+    done)
+
+    # CEPH_NODES: 裸 hostname 逗号分隔, 不允许 role 前缀/未知节点。
+    if [ -n "${CEPH_NODES:-}" ]; then
+        for _h in ${CEPH_NODES//,/ }; do
+            [ -n "${_h}" ] || continue
+            if ! printf '%s\n' "${_hosts[@]:-}" | command grep -qxF -- "${_h}"; then
+                err "CEPH_NODES 含未知节点: ${_h}(NODES 中不存在; 只写 hostname, 不要写 master/worker 角色前缀)"
+                return 1
+            fi
+        done
+    fi
+
+    # CEPH_DATA_DISKS: 节点之间用 ;, 同一节点多盘用 ,
+    if [ -n "${CEPH_DATA_DISKS:-}" ]; then
+        while IFS=';' read -ra _grps; do
+            for _g in "${_grps[@]:-}"; do
+                [ -n "${_g}" ] || continue
+                _ncolon="$(printf '%s' "${_g}" | tr -cd ':' | wc -c)"
+                if [ "${_ncolon}" -gt 1 ]; then
+                    err "CEPH_DATA_DISKS 格式错误: 节点之间必须用分号 ; 分隔, 逗号只用于同一节点的多块盘"
+                    err "  问题项: ${_g}"
+                    err "  正确示例: node0:/dev/vdb;node1:/dev/vdb;node2:/dev/vdb"
+                    err "  或全节点同盘: /dev/vdb"
+                    return 1
+                fi
+                _hn="${_g%%:*}"; _ds="${_g#*:}"
+                if [ "${_hn}" != "${_ds}" ]; then
+                    if ! printf '%s\n' "${_hosts[@]:-}" | command grep -qxF -- "${_hn}"; then
+                        err "CEPH_DATA_DISKS 含未知节点: ${_hn}(NODES 中不存在; 只写 hostname, 不要写角色前缀)"
+                        return 1
+                    fi
+                fi
+                for _d in ${_ds//,/ }; do
+                    [ -n "${_d}" ] || continue
+                    case "${_d}" in
+                        *:*) err "CEPH_DATA_DISKS 磁盘项含 ':' (${_d}); 节点之间请用分号 ;, 不要用逗号"; return 1 ;;
+                    esac
+                done
+            done
+        done <<< "${CEPH_DATA_DISKS}"
+    fi
+    return 0
+}
+
 # Ceph 存储节点数量(复用上面的选择规则; 供预检/提示用)
 ceph_storage_host_count() {
     local n
