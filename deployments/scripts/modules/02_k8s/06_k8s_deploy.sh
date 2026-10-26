@@ -56,7 +56,11 @@ else
     echo -e "\033[41m\033[97m ⚠⚠⚠  即将部署 kubespray — 当前为 MetalLB LoadBalancer 暴露模式(生产默认)  ⚠⚠⚠\033[0m"
     echo -e "\033[41m\033[97m  当前: METALLB_POOL=${METALLB_POOL:-<未设置>}\033[0m"
     echo -e "\033[41m\033[97m  要求: 池内 IP 必须与集群节点同一二层网络且空闲(避免被 DHCP 占用):\033[0m"
-    echo -e "\033[41m\033[97m    · 虚拟机集群: 已由 create-vms.sh 自动推导为 VM 网段(如 10.244.1.200-209)\033[0m"
+    # 仅当 cluster.conf 由 create-vms.sh 自动推导过 METALLB_POOL(带该注释)时才提示 VM 网段;
+    # 手工创建的 VM / 裸金属集群不显示这条, 避免误导(2026-10-26 用户要求)。
+    if command grep -qF '由 create-vms.sh 自动推导' "${CLUSTER_CONF}" 2>/dev/null; then
+        echo -e "\033[41m\033[97m    · 虚拟机集群: 已由 create-vms.sh 自动推导为 VM 网段(如 10.244.1.200-209)\033[0m"
+    fi
     echo -e "\033[41m\033[97m    · 裸金属集群: 手动填节点物理网段空闲段(如 10.66.1.130-139)\033[0m"
     echo -e "\033[41m\033[97m  ⚠ MetalLB 注意事项:\033[0m"
     echo -e "\033[41m\033[97m    · 地址池建议 >1 个地址, 否则新建 LoadBalancer 可能无 VIP 可分配(verify_metallb 会校验)\033[0m"

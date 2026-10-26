@@ -58,6 +58,9 @@ chk_contains "显式说明配置漂移根因" "addons.yml" "${mb_txt}"
 chk_contains "给出 gen-inventory 修复命令" "gen-inventory.sh" "${mb_txt}"
 chk_contains "给出 k8s_deploy 重跑命令" "steps k8s_deploy --fresh" "${mb_txt}"
 
+echo "== ⑤ VM 网段提示条件(2026-10-26) =="
+chk_contains "VM 提示受 create-vms.sh 注释保护" "command grep -qF '由 create-vms.sh 自动推导'" "${k8s_txt}"
+
 echo ""
 if [ "${fail}" = "0" ]; then echo "✅ test-deploy-config-guard: 全部通过"; else echo "❌ test-deploy-config-guard: 有失败"; fi
 exit "${fail}"
