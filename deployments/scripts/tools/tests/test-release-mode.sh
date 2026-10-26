@@ -61,6 +61,21 @@ _flat_chart="$(sed -nE 's/^CUBESTACK_OPERATOR_CHART_VERSION=//p' "${REPO_ROOT}/d
 chk "flat release.env chart 覆盖" "${_flat_chart}" "$(printf '%s\n' "${out}" | sed -n '4p')"
 chk "flat 不保留 version tree root" "" "$(printf '%s\n' "${out}" | sed -n '5p')"
 
+echo "== ①c 自动检测 offline-files/release.env(无需 cluster.conf 开关) =="
+mkdir -p "${TMP}/auto"
+cat > "${TMP}/auto/release.env" <<'EOF'
+RELEASE_VERSION=9.9.9
+KUBESPRAY_VERSION=v2.32.0
+CUBESTACK_OPERATOR_CHART_VERSION=9.9.9
+EOF
+out="$(CLUSTER_CONF="${TMP}/cluster.conf" OFFLINE_FILES_ROOT="${TMP}/auto" \
+    bash -c 'source "$1"; load_config; printf "%s\n" "$CUBESTACK_RELEASE" "$CUBESTACK_RELEASE_LAYOUT" "$OFFLINE_FILES_ROOT" "$CUBESTACK_RELEASE_ROOT" "$CUBESTACK_OPERATOR_CHART_VERSION"' _ "${LIB}" 2>/dev/null)"
+chk "auto 识别 CUBESTACK_RELEASE" "9.9.9" "$(printf '%s\n' "${out}" | sed -n '1p')"
+chk "auto 默认 layout=flat" "flat" "$(printf '%s\n' "${out}" | sed -n '2p')"
+chk "auto OFFLINE_FILES_ROOT" "${TMP}/auto" "$(printf '%s\n' "${out}" | sed -n '3p')"
+chk "auto 不保留 version tree root" "" "$(printf '%s\n' "${out}" | sed -n '4p')"
+chk "auto 以 release.env 为主" "9.9.9" "$(printf '%s\n' "${out}" | sed -n '5p')"
+
 echo "== ② 缺少 release.env =="
 mkdir -p "${TMP}/rel/9.9.8/offline-files"
 CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_RELEASE=9.9.8 CUBESTACK_RELEASE_ROOT="${TMP}/rel" \

@@ -775,6 +775,17 @@ load_config() {
     # 本地桶根与 MinIO 同构: <root>/<版本>/{offline-files,cubestack-installer-cli-v<版本>.tar}
     # release.env 提供版本变量, 必须在 kubespray 版本档案块之前加载(才能接管 KUBESPRAY_VERSION)。
     OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
+    # 自动检测(2026-10-26): flat offline 根存在 release.env 时, 直接以它为准进入 release
+    # 模式, 不需要 cluster.conf 再写 CUBESTACK_RELEASE / LAYOUT; 版本也取自 release.env。
+    _auto_rel_env="${OFFLINE_FILES_ROOT}/release.env"
+    if [ "${CUBESTACK_RELEASE_AUTO:-true}" = "true" ] \
+       && [ -z "${CUBESTACK_RELEASE:-}" ] && [ -f "${_auto_rel_env}" ]; then
+        _auto_ver="$(sed -nE 's/^RELEASE_VERSION=([^[:space:]#]+).*/\1/p' "${_auto_rel_env}" | head -1)"
+        [ -n "${_auto_ver}" ] || { err "自动检测到 ${_auto_rel_env}, 但缺少 RELEASE_VERSION"; exit 1; }
+        CUBESTACK_RELEASE="${_auto_ver}"
+        [ -n "${CUBESTACK_RELEASE_LAYOUT:-}" ] || CUBESTACK_RELEASE_LAYOUT="flat"
+        vlog "自动检测 release.env: ${_auto_rel_env} → release=${CUBESTACK_RELEASE} layout=${CUBESTACK_RELEASE_LAYOUT}"
+    fi
     if [ -n "${CUBESTACK_RELEASE:-}" ]; then
         # 版本名参与路径(<root>/<版本>/offline-files)并 source 其中的 release.env:
         # 只允许字母数字开头 + 字母数字/点/下划线/连字符, 拒绝 ../、绝对路径、空白与
@@ -784,8 +795,20 @@ load_config() {
             err "CUBESTACK_RELEASE 格式非法: '${CUBESTACK_RELEASE}'(只允许字母数字开头, 后接字母数字/点/下划线/连字符)"
             exit 1
         fi
+        # 未显式指定 layout: 有版本树(root 非空且存在)用 tree; 否则 flat offline 有 release.env
+        # 用 flat; 都没有用 tree(保持旧报错路径, 提示取件)。
+        if [ -z "${CUBESTACK_RELEASE_LAYOUT:-}" ]; then
+            if [ -n "${CUBESTACK_RELEASE_ROOT:-}" ] \
+               && [ -f "${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files/release.env" ]; then
+                CUBESTACK_RELEASE_LAYOUT="tree"
+            elif [ -f "${OFFLINE_FILES_ROOT}/release.env" ]; then
+                CUBESTACK_RELEASE_LAYOUT="flat"
+            else
+                CUBESTACK_RELEASE_LAYOUT="tree"
+            fi
+        fi
+        _layout="${CUBESTACK_RELEASE_LAYOUT}"
         CUBESTACK_RELEASE_ROOT="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
-        _layout="${CUBESTACK_RELEASE_LAYOUT:-tree}"
         case "${_layout}" in
             tree)
                 _rel_root="${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files"
@@ -796,12 +819,15 @@ load_config() {
                 fi
                 ;;
             flat)
-                # flat: 发布定义仍从 repo 读取, 但离线资产平铺在 OFFLINE_FILES_ROOT
-                # (默认 deployments/offline-files, 即容器 C 的 /opt/.../offline-files);
-                # 不创建 <root>/<version>/offline-files/ 版本树。
-                _rel_root="${REPO_ROOT}/deployments/releases/${CUBESTACK_RELEASE}"
+                # flat: 资产平铺在 OFFLINE_FILES_ROOT; 优先用其中的 release.env(用户口径:
+                # 部署以 release.env 为主), 没有时回退仓库内发布定义。
+                if [ -f "${OFFLINE_FILES_ROOT}/release.env" ]; then
+                    _rel_root="${OFFLINE_FILES_ROOT}"
+                else
+                    _rel_root="${REPO_ROOT}/deployments/releases/${CUBESTACK_RELEASE}"
+                fi
                 if [ ! -f "${_rel_root}/release.env" ]; then
-                    err "未找到发布定义: ${_rel_root}/release.env(flat 模式需要仓库内 deployments/releases/<版本>/release.env)"
+                    err "未找到 release.env: ${OFFLINE_FILES_ROOT}/release.env 或 ${REPO_ROOT}/deployments/releases/${CUBESTACK_RELEASE}/release.env(flat 模式)"
                     exit 1
                 fi
                 CUBESTACK_RELEASE_ROOT=""
@@ -844,7 +870,7 @@ load_config() {
                NETSHOOT_SAVE_DIR NETSHOOT_BASE_TAR DEV_LAB_SAVE_DIR \
                MODEL_IMAGES_SAVE_DIR CEPH_IMAGE_DIR
         vlog "release 模式生效: ${CUBESTACK_RELEASE} layout=${_layout}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
-        unset _rel_root _layout
+        unset _rel_root _layout _auto_rel_env _auto_ver
     fi
     # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
     # (档案 > cluster.conf > cluster.defaults.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0

@@ -510,23 +510,39 @@ sudo ./deploy-cluster.sh --release 2.0.0
 ### 4.4 flat 布局：release 资产平铺在 `deployments/offline-files`
 
 如果部署机不希望创建 `<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files/` 版本树，可让 release-2.0
-直接使用标准 `deployments/offline-files/`：
+直接使用标准 `deployments/offline-files/`。**推荐无需在 cluster.conf 配置**：只要该目录里有
+`release.env`，`load_config` 会自动进入 flat release 模式。
 
 ```bash
-# cluster.conf
+# 最小用法：把 release 树的 offline-files 平铺到 deployments/offline-files
+mc mirror <alias>/<bucket>/2.0.0/offline-files/ /opt/cubestack-installer/deployments/offline-files/
+sudo ./deploy-cluster.sh
+# load_config 自动读取 offline-files/release.env:
+#   CUBESTACK_RELEASE=<release.env 的 RELEASE_VERSION>
+#   CUBESTACK_RELEASE_LAYOUT=flat
+#   CUBESTACK_RELEASE_ROOT=""（不再使用 /data/cubestack-installer/2.0.0/...）
+```
+
+需要显式覆盖时仍可写：
+
+```bash
+# cluster.conf（可选）
 CUBESTACK_RELEASE="2.0.0"
 CUBESTACK_RELEASE_LAYOUT="flat"
-# CUBESTACK_RELEASE_ROOT 留空/忽略; 不再使用 /data/cubestack-installer/2.0.0/...
+# CUBESTACK_RELEASE_ROOT 留空/忽略
 ```
 
 行为：
 
-- `release.env` 仍从 **仓库内** `deployments/releases/2.0.0/release.env` 读取，版本变量/Chart
-  覆盖仍然生效；
+- **`release.env` 优先取平铺目录内** `${OFFLINE_FILES_ROOT}/release.env`（部署以它为主）；
+  若不存在，才回退仓库内 `deployments/releases/<版本>/release.env`；
 - `OFFLINE_FILES_ROOT` 保持 `deployments/offline-files`（容器内
   `/opt/cubestack-installer/deployments/offline-files`）；
 - operator / multus / rdma / ceph / dev-lab / model-collection 等全部从该平铺目录读取；
-- `CUBESTACK_RELEASE_ROOT` 在 flat 模式下被置空，避免误回落到 `/data/...` 版本树。
+- `CUBESTACK_RELEASE_ROOT` 在 flat 模式下被置空，避免误回落到 `/data/...` 版本树；
+- 没有 `release.env` 时保持 dev 模式（读同一目录的 latest 资产）；
+- 切回 latest 时若平铺目录里仍有 `release.env`，可显式设 `CUBESTACK_RELEASE_AUTO="false"`
+  强制 dev 模式（或移除/改名该 release.env）。
 
 ```text
 deployments/offline-files/
@@ -534,18 +550,19 @@ deployments/offline-files/
 ├── kubespray/v2.32.0/{images,packages,...}
 ├── multus/  rdma/  metax-gpu/  nvidia-gpu-operator/
 ├── dev-lab/  model-collection/  os/  ...
-└── (release.json/SHA256SUMS 可选，仅发布树校验用)
+├── release.env / release.json / SHA256SUMS / _SUCCESS
 ```
 
 > MinIO 上的 `<bucket>/2.0.0/offline-files/` 仍保持版本化布局；flat 只是**部署机本地**的
-> 平铺方式。把远端树平铺到本地可用 `mc mirror <alias>/<bucket>/2.0.0/offline-files/ <本地>/`
-> （或后续 fetch 的 flat 模式）。
+> 平铺方式。把远端树平铺到本地可用 `mc mirror <alias>/<bucket>/2.0.0/offline-files/ <本地>/`。
+> 切换到 latest 前请移除/改名该 `release.env`，否则会被自动识别为 release 模式。
 
 | 模式 | `CUBESTACK_RELEASE` | `CUBESTACK_RELEASE_LAYOUT` | 实际 `OFFLINE_FILES_ROOT` | `release.env` 来源 |
 |---|---|---|---|---|
-| dev | 空 | — | `deployments/offline-files` | 不加载 |
-| release tree | `2.0.0` | `tree`（默认） | `<root>/2.0.0/offline-files` | 发布树内 |
-| **release flat** | `2.0.0` | `flat` | `deployments/offline-files` | `deployments/releases/2.0.0/release.env` |
+| dev | 空且目录无 release.env | — | `deployments/offline-files` | 不加载 |
+| release tree | `2.0.0` | `tree` | `<root>/2.0.0/offline-files` | 发布树内 |
+| **release flat（自动）** | 由 `offline-files/release.env` 自动推导 | `flat` | `deployments/offline-files` | `deployments/offline-files/release.env`（优先） |
+| release flat（显式） | `2.0.0` | `flat` | `deployments/offline-files` | 同上；缺失时回退 repo 发布定义 |
 
 ---
 
