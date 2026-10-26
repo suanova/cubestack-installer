@@ -32,6 +32,7 @@ cat > "${TMP}/ssh" <<'FAKE'
 printf '%s\n' "$*" >> "${FAKE_SSH_LOG:?}"
 cmd="${*: -1}"
 case "$cmd" in
+    *"command -v chronyc"*) [ "${FAKE_CHRONY_PRESENT:-1}" = "1" ] && exit 0 || exit 1 ;;
     *"chronyc tracking"*) cat "${FAKE_TRACKING:-/dev/null}" 2>/dev/null || true ;;
     *"chronyc sources"*)  cat "${FAKE_SOURCES:-/dev/null}" 2>/dev/null || true ;;
     *"date +%s%3N"*)      cat "${FAKE_DATE:-/dev/null}" 2>/dev/null || true ;;
@@ -91,6 +92,16 @@ off="$(clock_offset 10.0.0.2 root "")"
 chk "Reach=17 仍用 chrony 4ms" "4" "${off}"
 export FAKE_SOURCES="${TMP}/sources.ok"
 
+echo "== ②c chrony 未安装: 明确提示 =="
+_err="${TMP}/err-chrony-missing"; : > "${_err}"
+off="$(FAKE_CHRONY_PRESENT=0 clock_offset 10.0.0.2 root "" 2>"${_err}")"
+if printf '%s' "${off}" | command grep -qE '^[0-9]+$'; then
+    echo "  ok  chrony 未安装时回退 SSH date 返回数值(${off}ms)"
+else
+    echo "  FAIL chrony 未安装时返回非数值: ${off}"; fail=1
+fi
+chk_contains "提示 chrony 未安装" "chrony 未安装" "$(cat "${_err}")"
+
 echo "== ③ 权威自身无上游: 直接 0 =="
 : > "${FAKE_SSH_LOG}"
 off="$(clock_offset 10.0.0.1 root "")"
@@ -122,6 +133,10 @@ chk_contains "apply 检查 SYNC-OK" "grep -q 'SYNC-OK'" "$(cat "${SETUP}")"
 chk_contains "节点 sudo 前置" "node_sudo_ready" "$(cat "${SETUP}")"
 chk_contains "偏差非数字防御" '=~ ^-?[0-9]+$' "$(cat "${SETUP}")"
 chk_contains "clock_offset 诊断走 stderr" '回退 SSH date 测量(受 SSH/负载延迟影响)" >&2' "$(cat "${SETUP}")"
+chk_contains "客户端离线安装 chrony" "install_debs_offline /tmp/cubestack-ntp-debs chrony" "$(cat "${SETUP}")"
+chk_contains "无守护进程标记" "NO-TIME-DAEMON" "$(cat "${SETUP}")"
+chk_contains "SYNC-OK 要求 DAEMON_OK" 'DAEMON_OK}" = "1"' "$(cat "${SETUP}")"
+chk_contains "客户端 deb 推送开关" "NTP_HAS_DEB" "$(cat "${SETUP}")"
 
 echo "== ⑥ workerbm 权限/失败语义 =="
 chk_contains "workerbm sudo 前置" "sudo -n true" "$(cat "${WORKERBM}")"

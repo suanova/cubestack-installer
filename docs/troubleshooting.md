@@ -325,13 +325,17 @@ sudo tcpdump -nei <网卡> '(arp or icmp) and host <对端IP>'
 - `setup-ntp.sh`:
   - `node_cmd` 对 **root 不再套 sudo**(消除 sudo/PAM/DNS 的数秒延迟); 新增 `node_sudo_ready` 前置,
     apply/verify 对非 root 且 sudo 不可用的节点直接点名失败。
-  - `clock_offset` **优先 chrony 自身口径**: `System time` + `Leap status=Normal` + `^*` 源 `Reach>=37`;
+  - **客户端缺 chrony 时自动安装**: apply 把 offline-files 里的 chrony deb 推给缺 chrony 的节点,
+    远端脚本用 `install_debs_offline` 安装; 装不上才回退 `systemd-timesyncd`, 并校验其 active。
+  - `clock_offset` **优先 chrony 自身口径**: `System time` + `Leap status=Normal` + `^*` 源 `Reach>=1`;
     不可用时才回退 SSH `date`, 并用两个采样的中点做 RTT 补偿; 权威自身无上游时直接返回 0,
-    不再 SSH 自测吃 0.2-0.6s 噪声。
+    不再 SSH 自测吃 0.2-0.6s 噪声。同时区分 `chrony 未安装` 与 `chrony 已安装但未选中源/Reach=0`。
   - 权威 `stratum != 10`(无上游时)从 warn 改为**硬失败**, 并打印 `chronyc tracking/sources`、
     `ss -lunp`、`journalctl -u chrony`。
-  - 远端节点脚本输出 `SYNC-OK`/`SYNC-FAIL`; `apply` 必须看到 `SYNC-OK` 才算成功, 不再只看 ssh 退出码。
-  - Reach 改取第 5 列, 并强制 `^*` 源 + `Reach>=37`; 不满足先 `makestep` 复检, 仍不满足则失败。
+  - 远端节点脚本输出 `SYNC-OK`/`SYNC-FAIL`; **只有时间守护进程 active(chrony/timesyncd)** 且
+    chrony makestep/date 对齐成功才 `SYNC-OK`; 无守护进程输出 `NO-TIME-DAEMON` + `SYNC-FAIL`。
+  - Reach 改取第 5 列, 并强制 `^*` 源 + `Reach>=1`; Reach<37 只告警"收敛中", 不阻塞部署。
+  - verify 阶段无 chrony 且 timesyncd 未运行 → 直接失败, 不再靠一次性 `date -s` 通过。
 - `k8s_workerbm`: 非 root 节点先 `sudo -n true` 前置; 装包失败计入 `PKG_FAIL` 并 **exit 1**,
   不再"warn 后继续"。
 - 新增离线回归 `deployments/scripts/tools/tests/test-k8s-ntp.sh`(root 无 sudo / chrony 优先 /
