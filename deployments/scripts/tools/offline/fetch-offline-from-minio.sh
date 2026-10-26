@@ -360,7 +360,12 @@ if [ -n "${RELEASE_ARG}" ]; then
         exit 1
     fi
     if ! mc_has "${RELEASE_ROOT}/offline-files/_SUCCESS"; then
-        err "发布未完成: ${RELEASE_ROOT}/offline-files/_SUCCESS 不存在(上传中断或版本目录不完整)"
+        if mc_has "${RELEASE_ROOT}/_REFRESH_PENDING"; then
+            err "发布正在原地刷新: ${RELEASE_ROOT}/_REFRESH_PENDING 存在(组件镜像同步中)"
+            err "  刷新完成后 _SUCCESS 会重新写入; 请稍后重试, 不要手工删除 marker"
+        else
+            err "发布未完成: ${RELEASE_ROOT}/offline-files/_SUCCESS 不存在(上传中断或版本目录不完整)"
+        fi
         exit 1
     fi
     SRC_ROOT="${RELEASE_ROOT}"

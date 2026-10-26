@@ -150,6 +150,7 @@ LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}}"
 |---|---|---|
 | `sync-images-to-harbor.yml` | 上游镜像 → Harbor `mirrors/**` | 发布前确保 Harbor 有正确上游镜像 |
 | `refresh-latest-offline.yml` | 滚动 `latest` 镜像 → MinIO `offline-files/` | **只服务 dev 通道**，不得写版本目录 |
+| `sync-release-2.0-images.yml` | release-2.0 组件镜像/ chart / CLI tar → MinIO `<release>/offline-files/` 原地刷新 | `repository_dispatch` / `workflow_dispatch` / CLI 构建完成 `workflow_run`；见 §6.6 |
 | `rebuild-cli-image.yml` | 重建 `cubestack-installer-cli:latest`；导出 tar 自动同步到 MinIO `offline-files/cli/` | main 合并即自动更新 dev CLI tar；发布时用 `version=2.0.0` 额外推 `:2.0.0`，release tar 由 `release-publish.sh` 写入 `<版本>/` |
 
 目前只有 CI、没有 CD。因此本方案的**发布动作**是**在能同时访问 Harbor 与 MinIO 的机器上执行同步脚本**，
@@ -381,6 +382,18 @@ RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev
 - `_SUCCESS` 内容为版本与时间，**最后写入**；
 - fetch 侧先检查 `_SUCCESS`，再下载，最后 `sha256sum -c` + 校验 CLI tar；
 - 发布脚本**拒绝覆盖**已存在的 `<版本>/`；修复发新 patch 版本。
+
+**release-2.0 组件原地刷新例外（2026-10-26）**：
+
+- `sync-release-2.0-images.yml` + `release-sync-images.sh` 可以原地刷新已发布版本；
+  这是**唯一**允许修改已存在 `<版本>/` 的受控通道，范围仅 `cubestack-operator/` 集合、
+  operator chart、CLI tar 和三个 `release.env` 变量（见 §6.6）。
+- 刷新开始写 `<版本>/_REFRESH_PENDING`，并**临时删除** `offline-files/_SUCCESS`；
+  fetch 在此期间会明确报“发布正在原地刷新”，不会拿半套树。
+- 刷新完成后最后写 `_SUCCESS`，删除 marker；失败保留 marker + 无 `_SUCCESS`，
+  下一次同 subdirs/`all` 重跑修复。
+- CLI tar 的 raw manifest digest 记录在 `<版本>/_CLI_IMAGE_DIGEST`（offline-files 外），
+  用于发现同 tag 内容变化；CLI tar 本身仍只由 `release.json.cli_tar_sha256` 校验。
 
 ---
 
@@ -681,6 +694,8 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
 
 - **只写** `<bucket>/<版本>/`；**绝不修改** `offline-files/<group>/` 下的现有文件；
 - **不覆盖**已存在的 `<bucket>/<版本>/`；版本号已存在直接失败；
+  **唯一例外**是 §6.6 的 `release-sync-images.sh` 原地组件刷新（仅 cubestack-operator 集合 + chart + CLI，
+  且必须按 tar/digest → release.env/release.json → SHA256SUMS → _SUCCESS 顺序）；
 - `_SUCCESS` 必须最后写入（位于 `<版本>/offline-files/`）；
 - `SHA256SUMS` 必须覆盖发布树全部文件；CLI tar 的校验值写入 `release.json`；
 - 发布前校验每个 Harbor ref 的 digest 与预期一致（`skopeo inspect --raw`），避免"tag 还在但内容变了"；
@@ -692,9 +707,111 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
 ### 6.5 与现有 CI 的关系
 
 - 现有 `refresh-latest-offline.yml` **不动**，继续维护 dev `offline-files/`；
+- `sync-release-2.0-images.yml` 只维护 `<release>/offline-files/`，绝不写 dev 前缀；
 - 发布脚本可以先手工/定时在内网机器执行（与 `cubestack-platform-sync.sh` 的部署位置一致：
   需同时访问 Harbor 与 MinIO）；
 - 将来若加 CD，只需在发布机上调用同一个脚本，不改变 MinIO 契约。
+
+### 6.6 release-2.0 组件镜像原地刷新（`release-sync-images.sh`）
+
+**定位**：发布树已经由 `release-publish.sh` 完整发布后，组件仓库又发了 rc/GA 镜像、chart 或 CLI
+时，用同一套流程把 `<bucket>/<release>/offline-files/cubestack-operator/` 原地刷新到新版本。
+`2.0.0-rcX` 与 `2.0.0` GA 都走这一个脚本/工作流，不硬编码 rc/GA。
+
+**数据源（release 定义是唯一真相）**：
+
+- `deployments/releases/<release>/release.env`：operator tag、chart version、CLI image；
+- `deployments/releases/<release>/release-images.tsv`：37 个镜像的 subdir/file/pull/save；
+- `deployments/releases/<release>/components.tsv`：component → 来源仓库/子目录：
+
+  ```text
+  component            source_repo                    subdirs
+  publish              suanova/cubestack-operator     .
+  cubestack-operator   suanova/cubestack-operator     . bmc
+  operator-chart       suanova/cubestack-operator     -
+  bmc                  suanova/cubestack-operator     bmc
+  operator-image       suanova/cubestack              controller-manager
+  portal-image         suanova/cubestack              portal
+  cubepilot            suanova/cubepilot              cubepilot
+  cuberouter           suanova/cuberouter             cuberouter
+  platform             -                              . bmc controller-manager cubepilot cuberouter portal
+  all                  -                              *
+  ```
+
+- `*` = 全部 37 行（含第三方依赖）；`-` = 仅 chart；`platform` = first-party 子目录。
+
+**触发方式**：
+
+1. 组件仓库发 `repository_dispatch: release-2.0-updated`：
+
+   ```json
+   {"event_type":"release-2.0-updated",
+    "client_payload":{"release":"2.0.0","component":"publish","tag":"v2.0.0",
+                      "source_repo":"suanova/cubestack-operator","sha":"<commit>",
+                      "checkout_ref":"release-2.0"}}
+   ```
+
+   `component` 可省略（默认 `all`），也可 CSV（如 `operator-image,portal-image`）；
+   `tag`/`source_repo` 只用于一致性校验。**dispatch 前必须先把 release 定义更新到新 tag**，
+   否则 tag/env 校验会失败，不会静默同步错版本。
+2. `workflow_dispatch` 手动触发（首次 seed/恢复/补跑）；
+3. `workflow_run`：`rebuild-cli-image.yml` 在 release-2.0 成功后自动触发，确保 CLI 镜像已推完
+   （避免 release.env 的 `CUBESTACK_CLI_IMAGE` 与镜像 race）。它按触发 commit 与父 commit 的
+   `deployments/releases/**` diff 选择 release 目录；一次 push 多个 commit 时只覆盖最后一个
+   commit 的变更，漏掉的目录用 `workflow_dispatch` 补跑。
+
+> GitHub 的 `repository_dispatch` / `workflow_run` 只触发默认分支 `main` 上的 workflow；
+> 因此 `.github/workflows/sync-release-2.0-images.yml` 在 **main 和 release-2.0 各有一份
+> 完全相同**的文件，main 副本 checkout release-2.0 后执行 release-2.0 的脚本。
+> 修改时必须两份同步 cherry-pick。
+
+**执行顺序（`release-sync-images.sh`）**：
+
+```text
+预检 (_SUCCESS/SHA256SUMS/release.env/release.json/CLI tar)
+  → 选择 components.tsv + release-images.tsv 行, 校验 tag/source_repo
+  → release.env diff (仅 3 个允许 key; dev-lab/metax/nvidia 等 out-of-scope 只告警保持旧值)
+  → 拉取/构建所有源 (镜像/chart/CLI) —— 失败在写 marker 前退出, 发布树仍可用
+  → 写 <release>/_REFRESH_PENDING
+  → 删除 offline-files/_SUCCESS
+  → 上传 tar → .digest; stale tar 清理; chart; CLI tar
+  → release.env; release.json; SHA256SUMS
+  → 远端逐文件 sha256 校验
+  → 最后写 _SUCCESS; 写 _CLI_IMAGE_DIGEST; 删除 _REFRESH_PENDING
+```
+
+- **允许变化**：`CUBESTACK_OPERATOR_IMAGE_TAG`、`CUBESTACK_OPERATOR_CHART_VERSION`、`CUBESTACK_CLI_IMAGE`；
+- **允许忽略并告警**：`DEV_LAB_*`、`METAX_*`、`NVIDIA_*`、`RDMA_IMAGE_TAG`、`MULTUS_IMAGE_TAG`、
+  `NGINX_TAG`（树内保持旧值；这些组要升级需完整 `release-publish.sh`）；
+- **其他 key 变化**（KUBESPRAY_VERSION/RELEASE_GROUPS/上游版本等）→ 失败；
+- `stale tar 清理`：只扫 selected subdir 的 maxdepth=1，删除不在该 subdir 全量 tsv 行里的旧
+  `*.tar`/`*.tar.gz` 及 `.digest`；`README.md`/`observability/`/`charts/` 保留；`--keep-stale` 关闭；
+- **CLI tar**：在 `<release>/` 下，不进 `SHA256SUMS`；`release.json.cli_tar_sha256/cli_tar_size`
+  校验；同 tag 内容变化由 `_CLI_IMAGE_DIGEST` 发现。
+- 其他组件（cubepilot/controller-manager/portal/cuberouter）只同步镜像 tar；若本次 release 同时
+  改了 operator chart 里的组件 tag/values，需要再 dispatch `component=operator-chart`（或在
+  release 定义里改 chart version，让 `sync_chart` 生效）。
+
+**常用命令**：
+
+```bash
+# 只读预检（推荐先跑）
+bash deployments/scripts/tools/images/release-sync-images.sh --release 2.0.0 --component all --preflight
+# 演练（不写 marker/不上传）
+bash deployments/scripts/tools/images/release-sync-images.sh --release 2.0.0 --component all --dry-run
+# 只同步某个组件（第三方依赖用 --first-party-only 跳过）
+bash deployments/scripts/tools/images/release-sync-images.sh --release 2.0.0 --component portal-image --first-party-only
+# 失败恢复：同 component 重跑即可；_SUCCESS 被手工删掉时加 --recover
+bash deployments/scripts/tools/images/release-sync-images.sh --release 2.0.0 --component publish --recover
+```
+
+> `--source-dir <dir>` 的布局与发布树 `cubestack-operator/` 同构：
+> `<dir>/cubestack-operator/<subdir>/<file>` + `<file>.digest`（顶层 `.` 就是
+> `<dir>/cubestack-operator/<file>`），供发布机复用已备好的 tar。
+
+> ⚠ **原地刷新会改变已发布版本**，rc→GA 时旧 rc tar 会被清理（回滚能力减弱）。
+> 建议 GA 前对 `<release>/` 做 MinIO 快照/版本化，或改用新版本目录（完整 `release-publish.sh`）。
+> 刷新期间 fetch 会失败（`_SUCCESS` 缺失 + `_REFRESH_PENDING` 提示），完成后恢复。
 
 ---
 
@@ -742,8 +859,11 @@ Harbor 不是本方案的依赖；现有部署代码只消费 MinIO 里的 tar�
 - 日常修复先合入 `main`，再 **cherry-pick 到 `release-2.0`**；也可以直接对 `release-2.0` 提 PR。
 - CI（`.github/workflows/ci-validate.yml`）对 **push 到 `main` / `release-2.0`** 以及所有 PR
   运行；其中 `test-release-mode.sh` 专门校验 release 模式契约（路径派生、带版本 CLI tar、
-  旧布局兼容、`mc cp` 取件、`_SUCCESS`、发布定义冻结）。
+  旧布局兼容、`mc cp` 取件、`_SUCCESS`、发布定义冻结）；`test-release-sync-images.sh` 校验
+  组件原地刷新（fake mc/fixture，覆盖 tar/chart/CLI/SHA256SUMS/_SUCCESS/恢复）。
 - 正式发版在 `release-2.0` 分支上执行 `release-publish.sh stage/verify/publish --release 2.0.0`。
+- 发布后的组件增量更新走 `sync-release-2.0-images.yml`（§6.6）；`release-publish.sh` 仍是
+  首次完整发布/新版本目录的唯一入口。
 
 ### 8.1 发布前（镜像生产）
 
@@ -759,6 +879,7 @@ Harbor 不是本方案的依赖；现有部署代码只消费 MinIO 里的 tar�
 4. 仓库内准备：
    - `deployments/releases/2.0.0/release.env`
    - `deployments/releases/2.0.0/release-images.tsv`
+   - `deployments/releases/2.0.0/components.tsv`（组件 → 来源仓库/子目录，见 §6.6）
 
 > **CLI 镜像必须内置 GNU `patch`**（kubespray 补丁层的前置）：`Dockerfile-cli-base` 安装 `patch`，
 > `Dockerfile-cli` 构建期断言 `command -v patch`；`.github/workflows/rebuild-cli-image.yml`
@@ -789,6 +910,33 @@ mc ls -r minio/cubestack-installer/2.0.0/offline-files/ | tail
 mc stat minio/cubestack-installer/2.0.0/offline-files/_SUCCESS
 mc stat minio/cubestack-installer/2.0.0/cubestack-installer-cli-v2.0.0.tar
 ```
+
+### 8.2b 组件增量刷新（rcX → GA）
+
+发布树完整发布后，组件仓库发 rc/GA 镜像时不需要重新发布 118G 全树，走 §6.6 的原地刷新：
+
+```bash
+# 1) 更新 release 定义（release-2.0 分支，PR/直接提交）：
+#    release.env: CUBESTACK_OPERATOR_IMAGE_TAG / CHART_VERSION / CLI_IMAGE
+#    release-images.tsv: 对应镜像行 file/tag
+# 2) 等 rebuild-cli-image.yml 在 release-2.0 成功（workflow_run 会自动触发同步）
+# 3) 或在发布机/CI 手动：
+bash deployments/scripts/tools/images/release-sync-images.sh \
+  --release 2.0.0 --component all --preflight
+bash deployments/scripts/tools/images/release-sync-images.sh \
+  --release 2.0.0 --component all --dry-run
+bash deployments/scripts/tools/images/release-sync-images.sh \
+  --release 2.0.0 --component all
+# 4) 验收
+bash deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
+  --release 2.0.0 --dest /tmp/release-verify --yes
+bash deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
+  --release 2.0.0 --dest /tmp/release-verify --verify-only
+```
+
+> rcX 与 GA 的差别只在 `release.env`/`release-images.tsv` 里的 tag/chart/CLI 值；脚本不硬编码。
+> `DEV_LAB_*`/`METAX_*`/`NVIDIA_*` 等 out-of-scope diff 只告警、保持旧值；这些组升级仍需完整发布。
+> 同一 release 目录内 rc→GA 会清理旧 rc tar（回滚能力减弱，GA 前建议快照）。
 
 ### 8.3 部署机取件
 
@@ -847,7 +995,7 @@ sudo ./deployments/scripts/deploy-cluster.sh
 
 - [ ] dev 模式（`CUBESTACK_RELEASE` 为空）行为与今天完全一致；
 - [ ] release-2.0 发布树**包含** `dev-lab` / `model-collection`，**不含** `virtual-machine`；
-- [ ] 所有自研组件镜像 tag 均为 `2.0.0`；`model-collection` 镜像按 `image-list.tsv` 保持上游 tag；
+- [ ] 所有自研组件镜像 tag 与 `release.env` / `release-images.tsv` 一致（rcX 或 `2.0.0` GA）；`model-collection` 镜像按 `image-list.tsv` 保持上游 tag；
 - [ ] `model-collection/image-list.tsv` 存在于发布树（模块 37 依赖）；
 - [ ] `cubestack-operator/charts/<chart>-2.0.0.tgz` 存在于发布树（模块 25 恒用本地 chart）；
 - [ ] `2.0.0/offline-files/` 包含 `release.env`、`SHA256SUMS`、`_SUCCESS`；
@@ -861,6 +1009,10 @@ sudo ./deployments/scripts/deploy-cluster.sh
 - [ ] 部署后关键镜像的 tag 为 `2.0.0`（或 release.env 中对应版本），无 `_latest` 残留；
 - [ ] 回滚到上一个版本可重复执行；
 - [ ] 发布脚本重复执行时，检测到已存在的版本直接失败，不覆盖；
+- [ ] 组件增量刷新后 `_REFRESH_PENDING` 不存在，`_SUCCESS.sha256sums == sha256(SHA256SUMS)`；
+- [ ] 刷新期间 `fetch --release` 明确报“正在原地刷新”，刷新后 `--verify-only` 通过；
+- [ ] 组件增量刷新不删除未选中子目录文件；stale cleanup 只清理 selected subdir 旧 tag；
+- [ ] CLI tar 不在 `SHA256SUMS`，其 sha256/size 与 `release.json` 一致；
 - [ ] 现有 `refresh-latest-offline.yml` / `sync-to-minio.sh` 不会写顶层版本目录。
 
 ---
@@ -877,6 +1029,9 @@ sudo ./deployments/scripts/deploy-cluster.sh
 | `fetch --release` 全量 sha256 较慢 | 取件时间增加 | 默认校验，提供 `--no-verify` |
 | 固定短名文件（busybox/nginx）在版本间变化 | 旧版本被新文件覆盖 | 版本目录隔离，各版本各存一份 |
 | CLI tar 与 `release.env` 版本不一致 | 部署机用了错误版本的 CLI | 发布脚本校验 tar RepoTags = `cubestack-installer-cli:2.0.0`；fetch 校验 `release.json.cli_tar_sha256` |
+| 组件原地刷新中途失败 | 发布树暂时没有 `_SUCCESS` | 保留 `_REFRESH_PENDING`，同 subdirs/`all` 重跑；fetch 明确报“正在刷新” |
+| rc→GA 原地刷新删除旧 rc tar | 旧版本回滚能力减弱 | GA 前对 `<release>/` 做 MinIO 快照/版本化，或改用新版本目录完整发布 |
+| main/release-2.0 两份 workflow 漂移 | 自动触发行为不一致 | 文件头注明必须同步 cherry-pick；v1 靠评审/文档 |
 | 现有 `sync-to-minio.sh --prune` 误删版本目录 | 回滚能力丢失 | 版本目录在桶根、与 `offline-files/` 平级；prune 只作用于 dev 前缀，发布脚本不使用 prune |
 
 **已确认决策（2026-10-21）**：
@@ -979,6 +1134,11 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps verify_cubestack_operator
 > `model-collection` 的 sglang / vllm-metax tag 在
 > `offline-files/model-collection/image-list.tsv` 中，没有全局变量；
 > `virtual-machine` 不在 release-2.0 发布树中。
+>
+> release-2.0 组件刷新额外文件/字段：
+> - `deployments/releases/<版本>/components.tsv`（组件 → 来源仓库/子目录，§6.6）；
+> - `<版本>/_REFRESH_PENDING`（刷新中，fetch 会明确拒绝）、`<版本>/_CLI_IMAGE_DIGEST`（CLI raw digest）；
+> - `release.json` 的 `refreshed_at` / `refreshed_components` / `refreshed_git_commit` / `refreshed_by`。
 
 > 上游版本变量（`CEPH_VERSION`、`ROOK_VERSION`、`CSI_*`、`METAX_*` 等）若与
 > `cluster.defaults.conf` 一致可省略；发布脚本应校验 `images.manifest` 中每个 `${VAR}`

@@ -1,0 +1,22 @@
+# CubeStack release-2.0 组件 -> 镜像子目录/来源仓库映射
+#
+# 列: component <TAB> source_repo <TAB> subdirs <TAB> description(可选)
+#   subdirs 以空格分隔；"." = cubestack-operator 顶层；"*" = 全部镜像行；
+#   "-" = 无镜像子目录(仅 operator chart)。
+# 用途: .github/workflows/sync-release-2.0-images.yml 的 component 选择器。
+# 约束: component 名唯一；非 "-"/"*" 的 subdir 必须存在于 release-images.tsv。
+# 说明: 子目录 -> 来源仓库来自现有 refresh-latest-offline.sh 的组件映射；
+#       bmc 使用 commit sha, 不参与 release.env tag 校验。
+publish	suanova/cubestack-operator	.	operator 本体
+operator	suanova/cubestack-operator	.	operator 本体(别名)
+cubestack-operator	suanova/cubestack-operator	. bmc	operator 本体 + bmc(meta)
+operator-chart	suanova/cubestack-operator	-	仅 operator helm chart
+bmc	suanova/cubestack-operator	bmc	BMC exporters(commit 固定)
+operator-image	suanova/cubestack	controller-manager	controller-manager + activity-agent
+controller-manager	suanova/cubestack	controller-manager	controller-manager(别名)
+portal-image	suanova/cubestack	portal	CubeStack UI(含 redis 依赖)
+portal	suanova/cubestack	portal	CubeStack UI(别名)
+cubepilot	suanova/cubepilot	cubepilot	CubePilot
+cuberouter	suanova/cuberouter	cuberouter	cuberouter(含 CNPG 依赖)
+platform	-	. bmc controller-manager cubepilot cuberouter portal	全部 first-party 平台镜像
+all	-	*	全部 37 个镜像(含第三方依赖)

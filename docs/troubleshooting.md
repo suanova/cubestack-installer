@@ -1782,3 +1782,36 @@ spec 被 admission 拒绝。helm 可能先把 CR 的 `global.imageRegistry` 改�
   kubectl get clusterpolicy cluster-policy -o yaml | grep repository: | head
   # 期望 registry.cubestack.io:5000/mirrors/nvcr.io/nvidia/...
   ```
+
+### 5. release-2.0 组件刷新: `_REFRESH_PENDING` / tag 不一致 / `_SUCCESS` 缺失
+
+**症状**
+- `fetch --release` 报“发布正在原地刷新(_REFRESH_PENDING)”；
+- `release-sync-images.sh` 报 `dispatch tag != release.env` 或 `source_repo 不匹配`；
+- 刷新失败后 MinIO 上 `<release>/_REFRESH_PENDING` 残留、`offline-files/_SUCCESS` 不存在。
+
+**根因**
+- 组件 dispatch 早于 installer release-2.0 的 `release.env` / `release-images.tsv` 更新；
+- 刷新中断（网络/凭据/磁盘）保留了 marker，`_SUCCESS` 已按设计临时删除。
+
+**解法**
+1. 先更新 `deployments/releases/<release>/release.env` + `release-images.tsv`（同一 tag）；
+2. 用相同 component 重跑（marker 会自动进入恢复模式）：
+   ```bash
+   bash deployments/scripts/tools/images/release-sync-images.sh \
+     --release 2.0.0 --component <same-component>
+   ```
+3. 若 `_SUCCESS` 被手工删除且无 marker，才需要显式 `--recover`：
+   ```bash
+   bash deployments/scripts/tools/images/release-sync-images.sh \
+     --release 2.0.0 --component all --recover
+   ```
+4. 确认：
+   ```bash
+   mc stat minio/cubestack-installer/2.0.0/offline-files/_SUCCESS
+   mc stat minio/cubestack-installer/2.0.0/_REFRESH_PENDING   # 应不存在
+   mc cat  minio/cubestack-installer/2.0.0/offline-files/SHA256SUMS | sha256sum
+   ```
+
+**边界**: marker component/subdirs 与本次不一致时脚本会拒绝（避免半套修复）；必须用覆盖原
+scope 的 component 或 `all` 重跑。刷新期间不要手工删 marker。
