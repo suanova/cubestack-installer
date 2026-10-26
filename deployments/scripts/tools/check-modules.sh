@@ -679,7 +679,8 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-deploy-config-guard.sh test-k8s-ntp.sh test-cephfs-mount.sh \
            test-chrony-offline-debs.sh test-ceph-data-disks.sh \
            test-metallb-pool-check.sh test-ceph-cluster-detect.sh \
-           test-multus-iface-detect.sh test-devlab-tar-select.sh; do
+           test-multus-iface-detect.sh test-devlab-tar-select.sh \
+           test-inventory-ssh-user-precedence.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
     if [ ! -f "${_tp}" ]; then
         ck_fail "⑮ 离线套件缺失: ${_tp#${REPO_ROOT}/}(⑮ 的回归证据没了)"

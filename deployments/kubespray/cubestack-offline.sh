@@ -66,6 +66,10 @@ INVENTORY_BASE="${BASE_DIR}/inventory"
 #   ② 未显式给值 → 从 inventory hosts.yml 首条 ansible_user 派生(与 gen-inventory.sh 同源,
 #      standalone 直跑本脚本时也能跟随 cluster.conf 的 SSH_USER/NODES 逐行覆盖);
 #   ③ 都拿不到 → ubuntu(历史默认)。解析见文件尾 resolve_remote_user()(需 INVENTORY_DIR 就绪)。
+# ⚠ 该值只作**组级兜底**写进 group_vars/all/offline.yml, 绝不能再用 `-e @offline.yml` 传给
+#   ansible-playbook: -e 是 extra vars(最高优先级), 会把 hosts.yml 里 NODES 逐行覆盖的
+#   ansible_user 全部压成"首个节点的用户" —— 混用 root/ubuntu 时表现为 root 节点仍按
+#   ubuntu 登录(Permission denied)。2026-10-26 实机即此问题。
 REMOTE_USER="${CUBESTACK_REMOTE_USER:-}"
 CONTAINER_RUNTIME="containerd"
 KUBESPRAY_REPO="https://github.com/kubernetes-sigs/kubespray.git"
@@ -168,7 +172,7 @@ usage() {
     echo "命令:"
     echo "  init       [名称]           初始化环境"
     echo "  download   [名称]           下载离线资源（使用 download-hosts.yml，本地 root）"
-    echo "  install    [名称] [选项]    执行集群安装（使用 hosts.yml，目标节点 ubuntu）"
+    echo "  install    [名称] [选项]    执行集群安装（使用 hosts.yml，各节点用户按 ansible_user）"
     echo "  reset      [名称] --yes     清除目标节点上的旧集群状态（覆盖安装的前置步骤; 见下）"
     echo "  scale      [名称] [选项]    扩容集群 — 添加新节点到已有集群"
     echo "  check      [名称]           预检资源与连通性"
@@ -487,6 +491,10 @@ DOWNLOAD_EOF
 
 build_extra_vars() {
     EXTRA_VARS_STR=""
+    # ⚠ 这里产出的 `-e @` 是 extra vars(最高优先级), **只供 download 的 localhost 用途**(generate_list.sh
+    #   接 download-hosts.yml、以及下面的 URL→dest 映射 play)。绝不要把它复用到连集群节点的
+    #   install/scale/reset playbook 上 —— 会压掉 hosts.yml 里 NODES 逐行的 ansible_user
+    #   (见文件头 REMOTE_USER 注释; 2026-10-26 实机事故)。
     # ⚠ k8s-versions.yml 必须在列: 它才是**版本钉子的单一来源**(kube_version/calico_version…)。
     #   不带它时两个 ansible 调用会各算一套版本 —— generate_list.sh 用 `-i <hosts.yml>` 拿得到
     #   它(经 inventory 的 group_vars), 而下面生成 URL→dest 映射的 play 用的是 `-i localhost,`
@@ -2183,6 +2191,9 @@ cmd_install() {
     reset_kubernetes_if_needed all \
         || err "节点 10250 端口清理未通过(元凶见上方输出), 已中止部署"
     log "注入离线安装变量..."
+    # ⚠ 本文件位于 ${INVENTORY_DIR}/group_vars/all/offline.yml, **作为 group_vars 自动加载**;
+    #   不要再给 ansible-playbook 加 `-e @${OFFLINE_VARS}`: extra vars 优先级高于 hosts.yml
+    #   的 host vars, 会把 NODES 逐行 ansible_user(root/ubuntu 混用)压成单一全局用户。
     OFFLINE_VARS="${INVENTORY_DIR}/group_vars/all/offline.yml"
     {
         echo "---"
@@ -2265,7 +2276,6 @@ cmd_install() {
         ansible-playbook playbooks/facts.yml \
             -i "${INVENTORY_DIR}/hosts.yml" \
             --become --become-user=root \
-            -e @${OFFLINE_VARS} \
             --skip-tags system-packages,kube-proxy \
             -v 2>&1 | tee "/tmp/${CLUSTER_NAME}-facts.log" || true
         log "✅ Facts 收集完成"
@@ -2275,7 +2285,6 @@ cmd_install() {
         -i "${INVENTORY_DIR}/hosts.yml" \
         --become --become-user=root \
         ${LIMIT_FLAG} \
-        -e @${OFFLINE_VARS} \
         --skip-tags system-packages,kube-proxy \
         -vv
 
@@ -2396,7 +2405,6 @@ PYEOF
         ansible-playbook playbooks/facts.yml \
             -i "${INVENTORY_DIR}/hosts.yml" \
             --become --become-user=root \
-            -e @${OFFLINE_VARS} \
             --skip-tags system-packages,kube-proxy \
             -v 2>&1 | tee "/tmp/${CLUSTER_NAME}-facts.log"
         log "✅ Facts 收集完成"
@@ -2440,7 +2448,6 @@ PYEOF
         -i "${INVENTORY_DIR}/hosts.yml" \
         --become --become-user=root \
         ${LIMIT_FLAG} \
-        -e @${OFFLINE_VARS} \
         --skip-tags system-packages,kube-proxy \
         -vv || {
             err "Kubespray 扩容失败,完整日志: /tmp/${CLUSTER_NAME}-scale.log"
@@ -2532,7 +2539,9 @@ PYEOF
     # (曾出现: 全部 VM 关机 → 部署卡在预检不动)。timeout 60 兜底 + ConnectTimeout 让单节点快速失败。
     # 注意: ansible -e key=value 的值含空格时会被解析器按空格拆成多个 var, 必须在值外层再包一层引号,
     #       否则 ansible_ssh_common_args 只拿到 "-o", ssh 报 "no argument after keyword -o", 预检恒失败。
-    timeout 60 ansible all -i "${INVENTORY_DIR}/hosts.yml" -m ping -u "${REMOTE_USER}" --become \
+    # ⚠ 不要加 `-u`: 命令行 -u 同样高于 host vars, 会让 root 节点按首个节点用户(ubuntu)探测;
+    #   各节点用户以 hosts.yml 为准, 未写时由 group_vars/all/offline.yml 的 ansible_user 兜底。
+    timeout 60 ansible all -i "${INVENTORY_DIR}/hosts.yml" -m ping --become \
         -e "ansible_ssh_common_args='-o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2'" \
         >/dev/null 2>&1 || warn "部分主机 SSH/sudo 异常或不可达(预检连通性超时 60s)"
     log "✅ 预检通过"
@@ -2678,15 +2687,17 @@ cmd_reset() {
     done
     printf '\r\033[K'
 
-    local ov="${INVENTORY_DIR}/group_vars/all/offline.yml"
-    local -a _ov=(); [ -f "${ov}" ] && _ov=(-e "@${ov}")
+    # ⚠ 不要给 reset.yml 传 `-e @${INVENTORY_DIR}/group_vars/all/offline.yml`:
+    #   offline.yml 本就位于 inventory 旁边的 group_vars/all/, 已作为 group_vars 自动加载;
+    #   再用 -e 传一遍就成了 extra vars(最高优先级), 其中 ansible_user(= 首个节点的用户)
+    #   会压掉 hosts.yml 里 NODES 逐行的 ansible_user ⇒ root/ubuntu 混用时 reset 阶段
+    #   同样按错误用户登录(Permission denied; 与 install/scale 同一类问题, 2026-10-26)。
     log "执行 kubespray reset(日志: ${log})..."
     run_ansible_playbook "${log}" reset.yml \
         -i "${INVENTORY_DIR}/hosts.yml" \
         --become --become-user=root \
         ${LIMIT_FLAG} \
         -e reset_confirmation=yes \
-        "${_ov[@]}" \
         -vv || err "reset 失败, 见 ${log}"
 
     log "✅ 旧集群状态已清除(etcd 数据 / /etc/kubernetes / cri 容器与 Pod)"
@@ -2698,20 +2709,43 @@ cmd_reset() {
     #   上游版本闸(roles/etcd/tasks/clean_v2_store.yml:12)下一次照样会拦。
     #   reset 角色本就会删 bin_dir 下的 etcd/etcdctl/kubelet/kubeadm/kubectl/helm/calicoctl
     #   (roles/reset/tasks/main.yml:355-375), 这里只做**验证**(失败不中止, 给手工修法)。
-    local _fm _probe=""
-    _fm="$(first_master_ip 2>/dev/null || true)"
-    if [ -n "${_fm}" ]; then
-        _probe="$(ssh -i "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}" \
+    # 首个 master 的连接参数(host|user|key)**逐节点**取自 hosts.yml —— 不要用 `first_master_ip`(本脚本
+    #   不 source lib-common, 该函数不存在 ⇒ 复核曾静默变成空操作), 也不要用 `${SSH_USER:-ubuntu}`
+    #   兜底(root 节点会被按 ubuntu 连 ⇒ 复核永远"看不到"残留)。
+    local _fm="" _fuser="" _fkey=""
+    local _mstr
+    _mstr=$(ansible-inventory -i "${INVENTORY_DIR}/hosts.yml" --list 2>/dev/null | python3 -c '
+import sys, json
+inv = json.load(sys.stdin)
+meta = inv.get("_meta", {}).get("hostvars", {})
+cp = inv.get("kube_control_plane", {}).get("hosts", [])
+if not cp:
+    sys.exit(0)
+hv = meta.get(cp[0], {})
+print("%s|%s|%s" % (
+    hv.get("ansible_host", cp[0]),
+    hv.get("ansible_user", ""),
+    hv.get("ansible_ssh_private_key_file", "~/.ssh/cubestack_k8s"),
+))' 2>/dev/null || true)
+    [ -n "${_mstr}" ] && IFS='|' read -r _fm _fuser _fkey <<< "${_mstr}"
+    local _probe="" _prc=1
+    if [ -n "${_fm}" ] && [ -n "${_fuser}" ]; then
+        _probe="$(ssh -i "${_fkey/#\~/${HOME}}" \
             -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-            "${SSH_USER:-ubuntu}@${_fm}" \
-            "ls -d /usr/local/bin/etcd /usr/local/bin/etcdctl /usr/local/bin/kubeadm /usr/local/bin/kubelet /etc/etcd.env 2>/dev/null || true" 2>/dev/null || true)"
+            "${_fuser}@${_fm}" \
+            "ls -d /usr/local/bin/etcd /usr/local/bin/etcdctl /usr/local/bin/kubeadm /usr/local/bin/kubelet /etc/etcd.env 2>/dev/null || true" 2>/dev/null)" && _prc=0
+    elif [ -n "${_fm}" ]; then
+        warn "hosts.yml 的首个 master(${_fm})未写 ansible_user, 跳过残留二进制复核"
     fi
     if [ -n "${_probe}" ]; then
         warn "首个 master(${_fm})上仍残留旧集群文件 —— 它们会让下一次安装重新走【升级】路径:"
         echo "${_probe}" | sed 's/^/      /'
         warn "  手工修法(逐台 master): sudo rm -rf /usr/local/bin/{etcd,etcdctl,kubeadm,kubelet} /etc/etcd.env"
-    else
-        [ -n "${_fm}" ] && log "✅ 已复核: 首个 master 上无残留的 etcd/kubeadm/kubelet 二进制与 /etc/etcd.env"
+    elif [ "${_prc}" = "0" ]; then
+        log "✅ 已复核: 首个 master 上无残留的 etcd/kubeadm/kubelet 二进制与 /etc/etcd.env"
+    elif [ -n "${_fm}" ] && [ -n "${_fuser}" ]; then
+        # 复核不可用 ≠ 已干净: 明确告知(别让上面的 ✅ 口径误导成"验过了")
+        warn "无法 SSH 复核首个 master(${_fm}, user=${_fuser})上的残留二进制 —— reset 本身的日志见 ${log}"
     fi
     echo ""
     log "ℹ️ 下一步: 全量部署(etcd 会以 ${ETCD_VERSION:-当前钉值} 全新安装) —— 在容器内跑 deploy-cluster.sh 即可"
