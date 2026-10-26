@@ -204,7 +204,7 @@ master_chrony_setup() {
     NTP_DEB_DIR="${OFFLINE_FILES_ROOT}/os/packages/chrony"
     if [ -d "${NTP_DEB_DIR}" ]; then
         for deb in "${NTP_DEB_DIR}"/chrony_*.deb; do [ -f "${deb}" ] && { has_deb=1; break; }; done
-        [ "${has_deb}" = "1" ] && say "  chrony 离线包: ${NTP_DEB_DIR}($(ls "${NTP_DEB_DIR}"/chrony_*.deb | wc -l) 个)"
+        [ "${has_deb}" = "1" ] && say "  chrony 离线包: ${NTP_DEB_DIR}($(ls "${NTP_DEB_DIR}"/*.deb | wc -l) 个)"
     fi
     mconf_tmp="$(mktemp)"
     mscript_tmp="$(mktemp)"
@@ -310,7 +310,9 @@ EOF
         node_cmd "${m_ip}" "${m_user}" "${m_pw}" "rm -rf /tmp/cubestack-ntp-debs && mkdir -p /tmp/cubestack-ntp-debs" >/dev/null 2>&1 || true
         for deb in "${NTP_DEB_DIR}"/*.deb; do
             [ -f "${deb}" ] || continue
-            node_scp "${deb}" "${m_ip}" "${m_user}" "${m_pw}" "/tmp/cubestack-ntp-debs/" >/dev/null 2>&1 || true
+            # ⚠ 目标必须写成**文件全路径**：node_scp 对以 / 结尾的目录目标会先
+            #   rm -rf 整个目录再拷 —— 在循环里会把前一次推的 deb 全删掉, 最后只剩 1 个。
+            node_scp "${deb}" "${m_ip}" "${m_user}" "${m_pw}" "/tmp/cubestack-ntp-debs/$(basename "${deb}")" >/dev/null 2>&1 || true
         done
     fi
     # 执行远程脚本并**保留输出**: 失败时打印诊断(tail)。旧实现 `>/dev/null 2>&1` 吞掉一切,
@@ -385,6 +387,11 @@ if [ -n "${SERVER}" ]; then
         if [ "${HAS_DEB}" = "1" ] && ls /tmp/cubestack-ntp-debs/chrony_*.deb >/dev/null 2>&1; then
             echo "  [install] chrony 缺失 → 离线安装($(ls /tmp/cubestack-ntp-debs/*.deb 2>/dev/null | wc -l) 个 deb) ..."
             install_debs_offline /tmp/cubestack-ntp-debs chrony || true
+        fi
+        # 安装失败时把 dpkg 日志尾部打出来, 避免只看到 NO-TIME-DAEMON 而不知道缺什么。
+        if ! command -v chronyd >/dev/null 2>&1 || ! command -v chronyc >/dev/null 2>&1; then
+            echo "CHRONY-INSTALL-FAILED"
+            tail -10 /tmp/cubestack-deb-install.log 2>/dev/null | sed 's/^/  /' || true
         fi
     fi
     if command -v chronyd >/dev/null 2>&1 && command -v chronyc >/dev/null 2>&1; then
@@ -707,7 +714,7 @@ case "${ACTION}" in
         NTP_HAS_DEB=0
         if compgen -G "${NTP_DEB_DIR}/chrony_*.deb" >/dev/null; then
             NTP_HAS_DEB=1
-            say "  chrony 离线包: ${NTP_DEB_DIR}($(ls "${NTP_DEB_DIR}"/chrony_*.deb | wc -l) 个; 客户端缺失时自动安装)"
+            say "  chrony 离线包: ${NTP_DEB_DIR}($(ls "${NTP_DEB_DIR}"/*.deb | wc -l) 个; 客户端缺失时自动安装)"
         else
             warn "  未找到 chrony 离线包(${NTP_DEB_DIR}/chrony_*.deb); 客户端缺 chrony 时将回退 systemd-timesyncd"
         fi
@@ -750,7 +757,9 @@ case "${ACTION}" in
                 node_cmd "${ip}" "${u}" "${pw}" "rm -rf /tmp/cubestack-ntp-debs && mkdir -p /tmp/cubestack-ntp-debs" >/dev/null 2>&1 || true
                 for _deb in "${NTP_DEB_DIR}"/*.deb; do
                     [ -f "${_deb}" ] || continue
-                    node_scp "${_deb}" "${ip}" "${u}" "${pw}" "/tmp/cubestack-ntp-debs/" >/dev/null 2>&1 \
+                    # ⚠ 必须用文件全路径, 不能用 "/tmp/cubestack-ntp-debs/" 目录尾斜杠:
+                    #   node_scp 会先 rm -rf 该目录, 循环中会把前面推的 deb 全部删掉。
+                    node_scp "${_deb}" "${ip}" "${u}" "${pw}" "/tmp/cubestack-ntp-debs/$(basename "${_deb}")" >/dev/null 2>&1 \
                         || warn "  ${hn}(${ip}) chrony deb 推送失败: $(basename "${_deb}")"
                 done
             fi

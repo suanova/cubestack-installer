@@ -137,6 +137,10 @@ chk_contains "客户端离线安装 chrony" "install_debs_offline /tmp/cubestack
 chk_contains "无守护进程标记" "NO-TIME-DAEMON" "$(cat "${SETUP}")"
 chk_contains "SYNC-OK 要求 DAEMON_OK" 'DAEMON_OK}" = "1"' "$(cat "${SETUP}")"
 chk_contains "客户端 deb 推送开关" "NTP_HAS_DEB" "$(cat "${SETUP}")"
+chk_contains "authority deb 逐文件落位" '/tmp/cubestack-ntp-debs/$(basename "${deb}")' "$(cat "${SETUP}")"
+chk_contains "client deb 逐文件落位" '/tmp/cubestack-ntp-debs/$(basename "${_deb}")' "$(cat "${SETUP}")"
+chk "deb 推送不用目录尾斜杠" "0" "$(command grep -c 'node_scp .*cubestack-ntp-debs/"' "${SETUP}" 2>/dev/null || true)"
+chk_contains "安装失败打印 dpkg 日志" "CHRONY-INSTALL-FAILED" "$(cat "${SETUP}")"
 
 echo "== ⑥ workerbm 权限/失败语义 =="
 chk_contains "workerbm sudo 前置" "sudo -n true" "$(cat "${WORKERBM}")"
