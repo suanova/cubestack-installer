@@ -497,7 +497,7 @@ clock_offset() {
     # 1) 优先 chrony 自身口径: System time + Leap status + 选中源 Reach。
     #    这样 master02 这类"SSH/sudo 慢 4s 但时钟其实已同步"的节点不会被误判。
     #    同时区分"chrony 未安装"与"已安装但未选中源", 便于定位缺包问题。
-    if node_cmd "${ip}" "${u}" "${pw}" "command -v chronyc >/dev/null 2>&1" >/dev/null 2>&1; then
+    if node_cmd "${ip}" "${u}" "${pw}" "bash -c 'command -v chronyc >/dev/null 2>&1'" >/dev/null 2>&1; then
         tracking="$(node_cmd "${ip}" "${u}" "${pw}" "chronyc tracking 2>/dev/null" 2>/dev/null || true)"
         if [ -n "${tracking}" ]; then
             sys="$(printf '%s\n' "${tracking}" | awk '/^System time/{for(i=1;i<=NF;i++) if($i ~ /^-?[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$/) {print $i; exit}}')"
@@ -575,8 +575,11 @@ verify_clocks() {
         fi
         # 没有 chrony 且 timesyncd 未运行 ⇒ 节点没有持久时间服务。
         # 此时一次性 date -s 只能保证部署瞬间, 不能算 NTP 通过。
+        # ⚠ 必须用 bash -c 包住整条 `||` 链: node_cmd 对非 root 会前置 sudo,
+        #   而 `sudo command -v` 无法执行 shell 内建 → 所有节点被误判无守护进程
+        #   (2026-10-26 实机: apply 全部 SYNC-OK, verify 却全员报 NO daemon)。
         if ! node_cmd "${ip}" "${u}" "${pw}" \
-            "command -v chronyc >/dev/null 2>&1 || systemctl is-active systemd-timesyncd >/dev/null 2>&1" >/dev/null 2>&1; then
+            "bash -c 'command -v chronyc >/dev/null 2>&1 || systemctl is-active systemd-timesyncd >/dev/null 2>&1'" >/dev/null 2>&1; then
             err "  ${hn}(${ip}) 无可用时间守护进程(chrony 未安装且 systemd-timesyncd 未运行)"
             err "    修复: 安装 chrony 离线 deb, 或 systemctl enable --now systemd-timesyncd 后重跑"
             FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
@@ -657,7 +660,7 @@ verify_clocks() {
             #   缺 allow 时客户端永远 ^?(Reach 0), 只有一次性 makestep 兜底, 后续漂移无收敛。
             #   客户端若是 chrony 且权威为首 master, 校验 sources 里权威源的 Reach(期望 377)。
             if [ "${ip}" != "${NTP_AUTHORITY}" ] && node_cmd "${ip}" "${u}" "${pw}" \
-                "command -v chronyc >/dev/null 2>&1" 2>/dev/null; then
+                "bash -c 'command -v chronyc >/dev/null 2>&1'" 2>/dev/null; then
                 # Reach 是 `chronyc sources` 的第 5 列(1=^*, 2=源, 3=stratum, 4=poll, 5=reach);
                 # 旧实现取 $6(LastRx), 阈值判断没有意义 —— 这里修正为 $5。
                 _reach="$(node_cmd "${ip}" "${u}" "${pw}" \
@@ -753,7 +756,7 @@ case "${ACTION}" in
             fi
             # 客户端缺 chrony 时推送离线 deb(已装则跳过); 远端脚本负责 install_debs_offline。
             if [ "${NTP_HAS_DEB}" = "1" ] \
-               && ! node_cmd "${ip}" "${u}" "${pw}" "command -v chronyd >/dev/null 2>&1 && command -v chronyc >/dev/null 2>&1" >/dev/null 2>&1; then
+               && ! node_cmd "${ip}" "${u}" "${pw}" "bash -c 'command -v chronyd >/dev/null 2>&1 && command -v chronyc >/dev/null 2>&1'" >/dev/null 2>&1; then
                 node_cmd "${ip}" "${u}" "${pw}" "rm -rf /tmp/cubestack-ntp-debs && mkdir -p /tmp/cubestack-ntp-debs" >/dev/null 2>&1 || true
                 for _deb in "${NTP_DEB_DIR}"/*.deb; do
                     [ -f "${_deb}" ] || continue

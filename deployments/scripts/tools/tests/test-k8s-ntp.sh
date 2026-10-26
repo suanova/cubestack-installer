@@ -141,6 +141,11 @@ chk_contains "authority deb 逐文件落位" '/tmp/cubestack-ntp-debs/$(basename
 chk_contains "client deb 逐文件落位" '/tmp/cubestack-ntp-debs/$(basename "${_deb}")' "$(cat "${SETUP}")"
 chk "deb 推送不用目录尾斜杠" "0" "$(command grep -c 'node_scp .*cubestack-ntp-debs/"' "${SETUP}" 2>/dev/null || true)"
 chk_contains "安装失败打印 dpkg 日志" "CHRONY-INSTALL-FAILED" "$(cat "${SETUP}")"
+chk_contains "daemon precheck 整链 bash -c(避免 sudo builtin)" "bash -c 'command -v chronyc" "$(cat "${SETUP}")"
+chk "node_cmd 不再裸跑 command -v chronyc(避免 sudo builtin)" "0" \
+    "$(command grep -c 'node_cmd .*"command -v chronyc' "${SETUP}" 2>/dev/null || true)"
+chk "chronyc 存在性检查至少 3 处 bash -c" "1" \
+    "$([ "$(command grep -c "bash -c 'command -v chronyc" "${SETUP}" 2>/dev/null || true)" -ge 3 ] && echo 1 || echo 0)"
 
 echo "== ⑥ workerbm 权限/失败语义 =="
 chk_contains "workerbm sudo 前置" "sudo -n true" "$(cat "${WORKERBM}")"
