@@ -2287,7 +2287,11 @@ EOS
         printf 'managed=%q\n' "${managed}"
         cat <<'EOS'
 awk -v managed="$managed" 'BEGIN { n=split(managed, a, " "); for (i=1;i<=n;i++) m[a[i]]=1 }
-{ keep=1; for (i=1;i<=NF;i++) if (m[$i]) { keep=0; break } if (keep) print }' /etc/hosts > "$tmp"
+/^[[:space:]]*(#|$)/ { print; next }
+{ out=$1; kept=0
+  for (i=2;i<=NF;i++) { if ($i ~ /^#/) { for (j=i;j<=NF;j++) out=out" "$j; break }
+                        if (!m[$i]) { out=out" "$i; kept=1 } }
+  if (kept) print out }' /etc/hosts > "$tmp"
 EOS
         for e in "${entries[@]}"; do
             printf 'printf "%%s\\n" %q >> "$tmp"\n' "${e}"
