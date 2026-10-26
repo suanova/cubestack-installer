@@ -302,6 +302,62 @@ sudo tcpdump -nei <网卡> '(arp or icmp) and host <对端IP>'
 
 ---
 
+### 3. 【2026-10-26 事故】全量部署 k8s_ntp 只在 master02 失败(4.1s), standalone 却 256ms; worker05-08 装包报 sudo 需密码
+
+**症状**
+- 全量 `--fresh` 跑到 k8s_ntp: master02 偏差 `4108ms → 重对齐 4119ms` 失败; 其余 10 台约 258-272ms,
+  worker06 1480ms 通过。
+- 同一集群单独 `--steps k8s_ntp`(root 用户)时 master02 仅 **256ms**, 全绿。
+- 第一次全量用 `user=ubuntu` 时 worker05-08(10.193.78.101-104)装包报
+  `sudo: a terminal is required... / sudo: a password is required`; 切到 `SSH_USER=root` 后装包通过。
+
+**根因(三条线叠加)**
+1. **权限**: `k8s_passwordless` 只注入 SSH 公钥, 不写 sudoers; `install-worker-packages.sh` 只用
+   `ssh ... "sudo bash -s"`(无密码回退) ⇒ `ubuntu` 无 NOPASSWD 时 dpkg 阶段才报 sudo 密码错误;
+   旧 `k8s_workerbm` 只 `warn` 后继续, 把问题拖到 NTP 阶段。
+2. **测量口径**: `clock_offset` 用 SSH `date` 差值, 抓了 `hb`/`ha` 却未做 RTT 补偿。全量部署时
+   master02 的 SSH/sudo 在负载下慢约 4s, 被直接当成"时钟偏差 4s"; 重对齐仍用同一慢路径采样,
+   所以 `4108→4119` 几乎不变。standalone 时负载低, 同一节点只有 256ms。
+3. **NTP 有效性检查被弱化**: `chronyc sources` 的 Reach 是第 **5** 列, 旧代码取 `$6`(LastRx),
+   阈值判断无意义; 权威 `stratum != 10` 也只 `warn` 后继续。客户端"偏差小但 NTP 没工作"可能漏过。
+
+**修复(2026-10-26)**
+- `setup-ntp.sh`:
+  - `node_cmd` 对 **root 不再套 sudo**(消除 sudo/PAM/DNS 的数秒延迟); 新增 `node_sudo_ready` 前置,
+    apply/verify 对非 root 且 sudo 不可用的节点直接点名失败。
+  - `clock_offset` **优先 chrony 自身口径**: `System time` + `Leap status=Normal` + `^*` 源 `Reach>=37`;
+    不可用时才回退 SSH `date`, 并用两个采样的中点做 RTT 补偿; 权威自身无上游时直接返回 0,
+    不再 SSH 自测吃 0.2-0.6s 噪声。
+  - 权威 `stratum != 10`(无上游时)从 warn 改为**硬失败**, 并打印 `chronyc tracking/sources`、
+    `ss -lunp`、`journalctl -u chrony`。
+  - 远端节点脚本输出 `SYNC-OK`/`SYNC-FAIL`; `apply` 必须看到 `SYNC-OK` 才算成功, 不再只看 ssh 退出码。
+  - Reach 改取第 5 列, 并强制 `^*` 源 + `Reach>=37`; 不满足先 `makestep` 复检, 仍不满足则失败。
+- `k8s_workerbm`: 非 root 节点先 `sudo -n true` 前置; 装包失败计入 `PKG_FAIL` 并 **exit 1**,
+  不再"warn 后继续"。
+- 新增离线回归 `deployments/scripts/tools/tests/test-k8s-ntp.sh`(root 无 sudo / chrony 优先 /
+  权威自身 0 / 回退 / SYNC 标记 / workerbm 权限门禁), 已挂入 `check-modules.sh`。
+
+**验证**
+- `SSH_USER=root` + `--steps k8s_ntp`: 权威 stratum 10; 全节点 259-277ms 通过;
+  worker06/07/08 因负载仍在 1.3-1.9s, 但 `chronyc tracking` 的 `System time` 很小 ⇒ 测量噪声而非时钟偏差。
+- 命令:
+```bash
+# 判断 4s 是时钟还是 SSH/sudo 延迟
+/usr/bin/time -f 'ssh+date %e s' ssh -i /root/.ssh/cubestack_k8s root@10.193.78.22 'date +%s.%N'
+/usr/bin/time -f 'ssh+sudo %e s' ssh -i /root/.ssh/cubestack_k8s root@10.193.78.22 'sudo date +%s.%N'
+# 节点 chrony 自身偏移(真正判据)
+ssh -i /root/.ssh/cubestack_k8s root@10.193.78.22 'chronyc tracking; chronyc sources -v; uptime; free -h'
+# 非 root 用户权限
+ssh -i /root/.ssh/cubestack_k8s ubuntu@10.193.78.22 'sudo -n true; echo rc=$?'
+```
+- 若 `chronyc tracking` 的 `System time` 很小且 `^*`/Reach 377, 不要用 `NTP_MAX_OFFSET_MS` 放宽阈值;
+  先查 master02 负载/残留 Pod(本次全量前有 176 个 Terminating/CrashLoopBackOff)。
+- 若确实需要 `ubuntu` 用户: 在节点写
+  `/etc/sudoers.d/90-cubestack`: `ubuntu ALL=(ALL) NOPASSWD:ALL`(chmod 440 + `visudo -c`),
+  或 `SSH_USER=root`。
+
+---
+
 ## 三、集群组件
 
 ### MetalLB 部署故障速查(先对号入座)

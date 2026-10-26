@@ -80,14 +80,35 @@ SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 SSH_OPTS=(-i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8)
 
 # 在节点以 root 执行单条命令(<ip> <user> <pw> <remote cmd...>)
+# ★ 2026-10-26: root 用户不再套 sudo。实机 master02 在全量部署负载下
+#   `sudo date` 延迟约 4s, 被 clock_offset 误判成"时钟偏差 4s"; root 本身已有权限,
+#   去掉 sudo 同时消除 PAM/DNS/终端等延迟源。
 node_cmd() {
     local ip="$1" u="$2" pw="$3"; shift 3
-    local full="sudo $*"
+    local full
+    if [ "${u}" = "root" ]; then
+        full="$*"
+    else
+        full="sudo $*"
+    fi
     if ssh "${SSH_OPTS[@]}" -o BatchMode=yes "${u}@${ip}" "$full" 2>/dev/null; then return 0; fi
     [ -n "${pw}" ] || return 1
-    SSHPASS="${pw}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=8 \
-        "${u}@${ip}" "echo '${pw}' | sudo -S -p '' $*"
+    if [ "${u}" = "root" ]; then
+        SSHPASS="${pw}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=8 \
+            "${u}@${ip}" "$*"
+    else
+        SSHPASS="${pw}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=8 \
+            "${u}@${ip}" "echo '${pw}' | sudo -S -p '' $*"
+    fi
+}
+
+# 节点 sudo 是否可用(root 直接可用; 其他用户要求免密或密码回退可执行 sudo true)
+node_sudo_ready() {
+    local ip="$1" u="$2" pw="$3"
+    [ "${u}" = "root" ] && return 0
+    node_cmd "${ip}" "${u}" "${pw}" "true" >/dev/null 2>&1
 }
 
 # 复制本地脚本到节点(<local> <ip> <user> <pw> <remote_path>)
@@ -132,6 +153,20 @@ for line in "${NODES[@]:-}"; do
 done
 [ "${#NODE_ENTRIES[@]}" -gt 0 ] || { err "cluster.conf NODES 为空"; exit 1; }
 
+# 解析权威节点的 SSH 凭据(不能拿"当前被测节点"的 user/pw 去连权威 —— 节点独立密码时
+# 会把权威采样读空/读慢, 进而把 SSH 延迟误判成时钟偏差)。
+AUTH_USER="${SSH_USER:-ubuntu}"
+AUTH_PW=""
+resolve_authority_creds() {
+    local e ip rest u pw
+    AUTH_USER="${SSH_USER:-ubuntu}"; AUTH_PW=""
+    for e in "${NODE_ENTRIES[@]:-}"; do
+        ip="${e%%:*}"; [ "${ip}" = "${NTP_AUTHORITY}" ] || continue
+        rest="${e#*:}"; u="${rest%%:*}"; rest="${rest#*:}"; pw="${rest%%:*}"
+        AUTH_USER="${u}"; AUTH_PW="${pw}"; return 0
+    done
+}
+
 # ---------------- 第一个 master chrony 权威服务端配置(仅 apply 且未显式 NTP_SERVER 时) ----------------
 # 不再用宿主机(installer 节点)作权威; 改由第一个 master 起 chrony 服务端,
 # 其他节点作为客户端指向它。首 master 本身: 有 NTP_UPSTREAM 则同步公网上游,
@@ -148,6 +183,13 @@ master_chrony_setup() {
     [ -n "${m_user:-}" ] || { warn "未找到第一个 master(${m_ip}) 连接信息, 跳过其 chrony 服务端配置"; return 0; }
 
     say "配置第一个 master ${m_ip} 为 NTP 权威服务端(local stratum + allow 集群网段) ..."
+    # 权限前置: 非 root 用户必须 sudo 可用, 否则后面的 cp/systemctl/chronyc 全部静默失败,
+    # 最终只表现为"权威没起来"或客户端偏差超限, 排查方向会被带偏。
+    if ! node_sudo_ready "${m_ip}" "${m_user}" "${m_pw}"; then
+        err "第一个 master ${m_ip} 的 ${m_user} 用户 sudo 不可用 —— 请设 SSH_USER=root,"
+        err "  或在节点配置 sudoers: echo '${m_user} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-cubestack"
+        exit 1
+    fi
     # ⚠ 配置用 scp 文件写入(真实换行), 不再用内联 heredoc —— 字面 \n 会把 chrony.conf 写坏
     local mconf_tmp mscript_tmp
     # ★ 2026-10-07 修复(离线环境权威缺 chrony 事故根因): VM 黄金镜像预装的 chrony 会被
@@ -278,14 +320,30 @@ EOF
     if [ "${_mok}" = "1" ]; then
         node_cmd "${m_ip}" "${m_user}" "${m_pw}" "rm -f /tmp/cubestack-chrony-master.sh" >/dev/null 2>&1 || true
         node_cmd "${m_ip}" "${m_user}" "${m_pw}" "rm -rf /tmp/cubestack-ntp-debs" >/dev/null 2>&1 || true
-        # 二次确认(防自检误判): 权威自身 stratum 应为 10(local)
+        # 二次确认(防自检误判): 无上游时权威必须 local stratum 10;
+        # 有上游时允许已同步的任意 stratum(1-15), 但 Leap status 必须是 Normal。
         # `|| true`: node_cmd(ssh)一抖就会让管道非 0 → 赋值非 0 → set -e 结束模块;
-        # 下面按 `${_STRATUM:-?}` 处理空值(打印"应为 10"的 warn 并继续), 语义上允许为空。
+        # 下面按空值走硬失败, 不再"warn 后继续"。
         _STRATUM="$(node_cmd "${m_ip}" "${m_user}" "${m_pw}" "chronyc tracking 2>/dev/null | awk '/Stratum/{print \$3}'" 2>/dev/null | tr -d ' \r' || true)"
-        if [ "${_STRATUM:-0}" = "10" ]; then
-            ok "  第一个 master ${m_ip} chrony 服务端已就绪(监听 123, local stratum 10)"
+        _LEAP="$(node_cmd "${m_ip}" "${m_user}" "${m_pw}" "chronyc tracking 2>/dev/null | awk -F: '/Leap status/{gsub(/^ +/,\"\",\$2); print \$2}'" 2>/dev/null | tr -d ' \r' || true)"
+        _AUTH_READY=0
+        if [ -n "${NTP_UPSTREAM:-}" ]; then
+            if [ -n "${_STRATUM}" ] && [ "${_STRATUM}" -gt 0 ] 2>/dev/null && [ "${_LEAP}" = "Normal" ]; then
+                _AUTH_READY=1
+            fi
         else
-            warn "  chrony 已监听 123 但 stratum=${_STRATUM:-?}(应为 10); 继续(客户端仍可同步, 后续偏差校验会兜底)"
+            [ "${_STRATUM:-}" = "10" ] && _AUTH_READY=1
+        fi
+        if [ "${_AUTH_READY}" = "1" ]; then
+            ok "  第一个 master ${m_ip} chrony 服务端已就绪(监听 123, stratum ${_STRATUM}${NTP_UPSTREAM:+, upstream})"
+        else
+            err "  第一个 master ${m_ip} chrony 未就绪: stratum=${_STRATUM:-?}, leap=${_LEAP:-?}(无上游时应为 stratum 10)"
+            err "  诊断输出(chronyc/端口/journal):"
+            node_cmd "${m_ip}" "${m_user}" "${m_pw}" \
+                "chronyc tracking 2>&1; chronyc sources -v 2>&1; ss -lunp 2>/dev/null | grep ':123 ' || true; journalctl -u chrony -n 80 --no-pager 2>&1" 2>&1 \
+                | grep -v '^Warning' | tail -40 | sed 's/^/      /' || true
+            rm -f "${mconf_tmp}" "${mscript_tmp}"
+            exit 1
         fi
     else
         err "第一个 master ${m_ip} chrony 服务端配置失败(未监听 NTP 123) —— 客户端将无法真正同步; 请检查后重跑本模块"
@@ -352,12 +410,28 @@ fi
 # 一次性硬对齐: 仅当 chrony 未能即时精调(makestep 失败/无 chrony)时,
 # 用权威时钟 epoch 兜底覆盖偏差 >1s 的时钟。注意 HOST_MS 采集于连接建立之前(含网络延迟),
 # 直接 date 覆盖会引入与延迟等量的虚假偏差, 故不得用于干扰正常同步的时钟。
+STEPPED=0
+OFF_ABS=0
 if [ "${CHRONY_OK}" != "1" ]; then
     NODE_MS="$(date +%s%3N)"
     OFF=$(( NODE_MS - HOST_MS ))
-    if [ "${OFF#-}" -gt 1000 ]; then
-        date -s "@$(( HOST_MS / 1000 ))" >/dev/null 2>&1 && echo "date-stepped-by-${OFF}ms" || echo "date-step-failed"
+    OFF_ABS=${OFF#-}
+    if [ "${OFF_ABS}" -gt 1000 ]; then
+        if date -s "@$(( HOST_MS / 1000 ))" >/dev/null 2>&1; then
+            STEPPED=1
+            echo "date-stepped-by-${OFF}ms"
+        else
+            echo "date-step-failed"
+        fi
     fi
+fi
+
+# 明确成功信号: chrony makestep 成功 / 偏差本就 ≤1s / date -s 成功。
+# apply 侧必须看到 SYNC-OK 才算成功, 不再只看 ssh 退出码(远端脚本吞错误时会被误报)。
+if [ "${CHRONY_OK}" = "1" ] || [ "${STEPPED}" = "1" ] || [ "${OFF_ABS}" -le 1000 ]; then
+    echo "SYNC-OK"
+else
+    echo "SYNC-FAIL"
 fi
 
 # 返回最终 epoch(ms)
@@ -371,26 +445,52 @@ else
     sed -i "/__UPSTREAM_LINE__/d" "${NODE_SCRIPT}"
 fi
 
-# 读取单节点时钟偏差(3 样本取中位数, 过滤 SSH RTT/单次波动; 已在宿主侧做中点半程补偿)
+# 读取单节点时钟偏差(优先 chrony 自身 offset; 回退 RTT 补偿的 SSH date)
 # 权威基准: 第一个 master(或显式 NTP_SERVER)的时钟, 不再用宿主机(installer)时钟。
 # <ip> <user> <pw> → stdout: 偏差ms(绝对值), 全部样本读取失败输出 -1
 clock_offset() {
     local ip="$1" u="$2" pw="$3"
-    local hb ha node_ms s samples=() vals
-    for _ in 1 2 3; do
-        hb="$(date +%s%3N)"
-        node_ms="$(node_cmd "${ip}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
-        ha="$(date +%s%3N)"
-        [ -z "${node_ms:-}" ] && continue
-        # 权威时钟: 显式 NTP_SERVER 用其 epoch; 否则用首 master(权威)epoch
-        local auth_ms
-        if [ -n "${NTP_SERVER:-}" ]; then
-            auth_ms="$(node_cmd "${NTP_SERVER}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
-        else
-            auth_ms="$(node_cmd "${FIRST_MASTER_IP}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
+    local hb ha node_ms auth_ms s samples=() vals
+    local tracking sys leap reach
+    local nb na ab ae node_mid auth_mid
+
+    # 权威自身: 无上游时它就是基准。不要再 SSH 自测 —— 否则 SSH/sudo 抖动
+    # 会被当成 0.2-0.6s 的"偏差", 把阈值预算白白吃掉。
+    if [ "${ip}" = "${NTP_AUTHORITY}" ] && [ -z "${NTP_UPSTREAM:-}" ]; then
+        echo 0
+        return
+    fi
+
+    # 1) 优先 chrony 自身口径: System time + Leap status + 选中源 Reach。
+    #    这样 master02 这类"SSH/sudo 慢 4s 但时钟其实已同步"的节点不会被误判。
+    tracking="$(node_cmd "${ip}" "${u}" "${pw}" "chronyc tracking 2>/dev/null" 2>/dev/null || true)"
+    if [ -n "${tracking}" ]; then
+        sys="$(printf '%s\n' "${tracking}" | awk '/^System time/{for(i=1;i<=NF;i++) if($i ~ /^-?[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$/) {print $i; exit}}')"
+        leap="$(printf '%s\n' "${tracking}" | awk -F: '/^Leap status/{gsub(/^ +/,"",$2); print $2; exit}')"
+        reach="$(node_cmd "${ip}" "${u}" "${pw}" \
+            "chronyc sources 2>/dev/null | awk '\$1==\"^*\"{print \$5; exit}'" 2>/dev/null | tr -d ' \r' || true)"
+        if [ -n "${sys}" ] && [ "${leap}" = "Normal" ] && [ -n "${reach}" ] && [ "${reach}" -ge 37 ] 2>/dev/null; then
+            awk -v s="${sys}" 'BEGIN{d=s; if(d<0)d=-d; printf "%.0f", d*1000}'
+            return
         fi
+    fi
+
+    # 2) 回退: SSH date 对比。用两个采样的中点对齐, 减少 SSH/负载延迟造成的假偏差;
+    #    权威采样用权威自己的 user/pw, 不用被测节点的凭据。
+    warn "  ${ip}: chrony tracking 不可用/未选中源, 回退 SSH date 测量(受 SSH/负载延迟影响)"
+    for _ in 1 2 3; do
+        nb="$(date +%s%3N)"
+        node_ms="$(node_cmd "${ip}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
+        na="$(date +%s%3N)"
+        [ -z "${node_ms:-}" ] && continue
+        ab="$(date +%s%3N)"
+        auth_ms="$(node_cmd "${NTP_AUTHORITY}" "${AUTH_USER:-${u}}" "${AUTH_PW:-${pw}}" \
+            "date +%s%3N" 2>/dev/null || true)"
+        ae="$(date +%s%3N)"
         [ -z "${auth_ms:-}" ] && continue
-        s=$(( node_ms - auth_ms )); [ "${s}" -lt 0 ] && s=$(( -s ))
+        node_mid=$(( (nb + na) / 2 ))
+        auth_mid=$(( (ab + ae) / 2 ))
+        s=$(( node_ms - auth_ms - (node_mid - auth_mid) )); [ "${s}" -lt 0 ] && s=$(( -s ))
         samples+=("${s}")
     done
     [ "${#samples[@]}" -eq 0 ] && { echo -1; return; }
@@ -409,13 +509,13 @@ verify_clocks() {
     #   sshd 一旦不可达, clock_offset 里"权威 epoch"读取全空 ⇒ **每个节点都被误报
     #   "无法读取时钟(SSH/sudo 失败?)"**(真实故障在权威身上, 报错却指向全部节点 ⇒ 排查方向全错)。
     #   先定向探测权威可达性: 不可达 → 一条明确的权威级错误 + 退出(不再逐节点空转误报)。
-    local _AUTH_USER="${SSH_USER:-ubuntu}" _AUTH_PW="" _e _aip _arest
-    for _e in "${NODE_ENTRIES[@]:-}"; do
-        _aip="${_e%%:*}"; [ "${_aip}" = "${NTP_AUTHORITY}" ] || continue
-        _arest="${_e#*:}"; _AUTH_USER="${_arest%%:*}"; _arest="${_arest#*:}"; _AUTH_PW="${_arest%%:*}"
-        break
-    done
-    if ! node_cmd "${NTP_AUTHORITY}" "${_AUTH_USER:-ubuntu}" "${_AUTH_PW:-}" "true" >/dev/null 2>&1; then
+    resolve_authority_creds
+    if ! node_sudo_ready "${NTP_AUTHORITY}" "${AUTH_USER}" "${AUTH_PW}"; then
+        err "  NTP 权威 ${NTP_AUTHORITY} sudo 不可用(user=${AUTH_USER}) —— 请设 SSH_USER=root,"
+        err "  或在节点配置 sudoers: echo '${AUTH_USER} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-cubestack"
+        exit 1
+    fi
+    if ! node_cmd "${NTP_AUTHORITY}" "${AUTH_USER:-ubuntu}" "${AUTH_PW:-}" "true" >/dev/null 2>&1; then
         err "  NTP 权威 ${NTP_AUTHORITY} 不可达(SSH 失败/连接拒绝)—— 校准基准缺失, 其余节点读数必然全部失败"
         err "  请先在该节点控制台检查 ssh 服务(systemctl status ssh; 典型: sshd 未运行/节点异常),"
         err "  恢复后重跑本步骤; 亦可用 NTP_SERVER 显式指定其他校准基准"
@@ -426,6 +526,11 @@ verify_clocks() {
         local ip rest u pw hn
         ip="${e%%:*}"; rest="${e#*:}"; u="${rest%%:*}"; rest="${rest#*:}"; pw="${rest%%:*}"; rest="${rest#*:}"; hn="${rest%%:*}"
         node_matches "${hn}" || continue
+        if ! node_sudo_ready "${ip}" "${u}" "${pw}"; then
+            err "  ${hn}(${ip}) sudo 不可用(user=${u}) —— 请设 SSH_USER=root 或在节点配置 NOPASSWD"
+            FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
+            continue
+        fi
         # ★ 2026-10-14: 节点→权威 IP 通路预检(与 apply 同一口径)。--check 模式由此获得明确诊断,
         #   不再把"无 IP 通路"呈现为"无法读取时钟"/"偏差超限"这类指向错误方向的报错。
         local _rr=0
@@ -450,21 +555,18 @@ verify_clocks() {
                 warn "  ${hn}(${ip}) 偏差 ${off}ms ✗(>${NTP_MAX_OFFSET_MS}ms), 自动重对齐并复测 ..."
                 # ★ 2026-09-08 修复: 重对齐基准必须用**权威时钟**(与 apply 主流程一致)——
                 #   旧实现取部署机(installer)时钟, 与权威偏差可能数百 ms, 会把节点设到错误基准
-                local hms _hb _ha _aut
+                local hms _hb _ha _aut _rout
                 # ★ 2026-10-14 修复(扩容实机: 新 VM 偏 6.5s; 重对齐后复测仍 2493ms 失败):
                 #   ① 硬对齐基准 = **采集时刻**的权威 epoch, scp+脚本启动延迟未补偿 ⇒ 落点必然
                 #      偏迟数百 ms~数秒。改为**中点半程补偿**(同 clock_offset 口径; 权威不可达时
                 #      退回控制器时钟, 不做补偿)。
                 _hb="$(date +%s%3N)"
-                if [ -n "${NTP_SERVER:-}" ]; then
-                    _aut="$(node_cmd "${NTP_SERVER}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
-                else
-                    _aut="$(node_cmd "${FIRST_MASTER_IP}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
-                fi
+                _aut="$(node_cmd "${NTP_AUTHORITY}" "${AUTH_USER}" "${AUTH_PW}" "date +%s%3N" 2>/dev/null || true)"
                 _ha="$(date +%s%3N)"
                 if [ -n "${_aut}" ]; then hms=$(( _aut + (_ha - _hb) / 2 )); else hms="$(date +%s%3N)"; fi
                 if node_scp "${NODE_SCRIPT}" "${ip}" "${u}" "${pw}" "${REMOTE_SCRIPT}" \
-                    && node_cmd "${ip}" "${u}" "${pw}" "bash ${REMOTE_SCRIPT} apply ${hms}" >/dev/null 2>&1; then
+                    && _rout="$(node_cmd "${ip}" "${u}" "${pw}" "bash ${REMOTE_SCRIPT} apply ${hms}" 2>&1)" \
+                    && printf '%s' "${_rout}" | command grep -q 'SYNC-OK'; then
                     #   ② 旧实现复测只等 1s: chrony 客户端首个 iburst 样本还没到, 尚未自我纠正。
                     #      改为**有界收敛等待**(每 5s 复测, ≤6 次): 正常节点一两个 NTP 样本内步进到
                     #      ms 级直接通过; 真故障节点仍在 ~40s 内有界失败。
@@ -479,11 +581,13 @@ verify_clocks() {
                 node_cmd "${ip}" "${u}" "${pw}" "rm -f ${REMOTE_SCRIPT}" >/dev/null 2>&1 || true   # 用完即删(2026-10-16)
                 unset _hb _ha _aut
                 if [ "${off}" -eq -1 ] || [ "${off}" -gt "${NTP_MAX_OFFSET_MS}" ]; then
+                    [ -n "${_rout:-}" ] && warn "    远端输出: $(printf '%s' "${_rout}" | tail -3 | tr '\n' ' ')"
                     warn "  ${hn}(${ip}) 复测仍偏差 ${off}ms ✗(>${NTP_MAX_OFFSET_MS}ms)"
                     FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
                 else
                     ok "  ${hn}(${ip}) 自动重对齐后偏差 ${off}ms ✓"
                 fi
+                unset _rout
             else
                 warn "  ${hn}(${ip}) 偏差 ${off}ms ✗(>${NTP_MAX_OFFSET_MS}ms)"
                 FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
@@ -494,17 +598,21 @@ verify_clocks() {
             #   缺 allow 时客户端永远 ^?(Reach 0), 只有一次性 makestep 兜底, 后续漂移无收敛。
             #   客户端若是 chrony 且权威为首 master, 校验 sources 里权威源的 Reach(期望 377)。
             if [ "${ip}" != "${NTP_AUTHORITY}" ] && node_cmd "${ip}" "${u}" "${pw}" \
-                "command -v chronyc >/dev/null 2>&1 && chronyc sources 2>/dev/null | awk '\$1 ~ /\\*|\\^/ {print \$NF}' | grep -q ." 2>/dev/null; then
-                # `|| true`: 同上 —— 取不到就按 `${_reach:-0}` 走"Reach 偏低, 强制 makestep 复检"分支
+                "command -v chronyc >/dev/null 2>&1" 2>/dev/null; then
+                # Reach 是 `chronyc sources` 的第 5 列(1=^*, 2=源, 3=stratum, 4=poll, 5=reach);
+                # 旧实现取 $6(LastRx), 阈值判断没有意义 —— 这里修正为 $5。
                 _reach="$(node_cmd "${ip}" "${u}" "${pw}" \
-                    "chronyc sources 2>/dev/null | awk '/^\\^\\*/{print \\\$6}'" 2>/dev/null | tr -d ' \r' || true)"
-                if [ "${_reach:-0}" -lt 37 ]; then
-                    warn "  ${hn}(${ip}) 偏差达标但 NTP 源 Reach=${_reach:-0}(<37, 同步不稳定/未生效), 强制 makestep 后复检 ..."
+                    "chronyc sources 2>/dev/null | awk '\$1==\"^*\"{print \$5; exit}'" 2>/dev/null | tr -d ' \r' || true)"
+                if [ -z "${_reach}" ] || ! [ "${_reach}" -ge 37 ] 2>/dev/null; then
+                    warn "  ${hn}(${ip}) 偏差达标但 NTP 源 Reach=${_reach:-无}(无 ^* 源或 <37), 强制 makestep 后复检 ..."
                     node_cmd "${ip}" "${u}" "${pw}" "chronyc -a makestep >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
                     sleep 3
                     _reach="$(node_cmd "${ip}" "${u}" "${pw}" \
-                        "chronyc sources 2>/dev/null | awk '/^\\^\\*/{print \\\$6}'" 2>/dev/null | tr -d ' \r' || true)"
-                    [ "${_reach:-0}" -lt 37 ] && { warn "  ${hn}(${ip}) NTP 源仍 Reach=${_reach:-0}(检查: 权威 chrony 是否 allow 节点网段 / chronyc sources)"; FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "; }
+                        "chronyc sources 2>/dev/null | awk '\$1==\"^*\"{print \$5; exit}'" 2>/dev/null | tr -d ' \r' || true)"
+                    if [ -z "${_reach}" ] || ! [ "${_reach}" -ge 37 ] 2>/dev/null; then
+                        warn "  ${hn}(${ip}) NTP 源仍 Reach=${_reach:-无}(检查: 权威 chrony 是否 allow 节点网段 / chronyc sources)"
+                        FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
+                    fi
                 fi
             fi
         fi
@@ -537,11 +645,20 @@ case "${ACTION}" in
         ;;
     apply)
         master_chrony_setup
+        resolve_authority_creds
         say "下发并执行节点时间同步(chrony/timesyncd + 一次性硬对齐, 权威=${NTP_AUTHORITY}) ..."
         REACH_FAIL=""
+        APPLY_FAIL=""
         for e in "${NODE_ENTRIES[@]:-}"; do
             ip="${e%%:*}"; rest="${e#*:}"; u="${rest%%:*}"; rest="${rest#*:}"; pw="${rest%%:*}"; rest="${rest#*:}"; hn="${rest%%:*}"
             node_matches "${hn}" || continue
+            # 权限前置: 非 root 的 sudo 不可用时, 后续 scp/脚本/chronyc 都会失败,
+            # 且容易被误报成"时间同步失败"; 这里直接点名。
+            if ! node_sudo_ready "${ip}" "${u}" "${pw}"; then
+                err "  ${hn}(${ip}) sudo 不可用(user=${u}) —— 请设 SSH_USER=root 或在节点配置 NOPASSWD"
+                APPLY_FAIL="${APPLY_FAIL}${hn} "
+                continue
+            fi
             # 权威 = 第一个 master(或显式 NTP_SERVER); 首 master 自身若未显式 NTP_SERVER,
             # 已是权威服务端, 不再向自己同步(跳过), 其余节点作为客户端指向它。
             if [ -z "${NTP_SERVER:-}" ] && [ "${ip}" = "${FIRST_MASTER_IP}" ]; then
@@ -565,29 +682,32 @@ case "${ACTION}" in
                 REACH_FAIL="${REACH_FAIL}${hn} "
                 continue
             fi
-            # 一次性硬对齐基准: 权威时钟 epoch。显式 NTP_SERVER 时用其 epoch;
-            # 否则用首 master 的 epoch(权威), 不再用宿主机(installer)时钟。
+            # 一次性硬对齐基准: 权威时钟 epoch(权威自己的 user/pw, 不用被测节点凭据)。
             # ★ 2026-10-14: 采样加**中点半程补偿**(消除 SSH RTT 偏迟; scp+脚本启动的小段残余
             #   延迟由 verify_clocks 的收敛等待窗口吸收)。
             _hb="$(date +%s%3N)"
-            if [ -n "${NTP_SERVER:-}" ]; then
-                _aut="$(node_cmd "${NTP_SERVER}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
-            else
-                _aut="$(node_cmd "${FIRST_MASTER_IP}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
-            fi
+            _aut="$(node_cmd "${NTP_AUTHORITY}" "${AUTH_USER}" "${AUTH_PW}" "date +%s%3N" 2>/dev/null || true)"
             _ha="$(date +%s%3N)"
             if [ -n "${_aut}" ]; then HOST_MS=$(( _aut + (_ha - _hb) / 2 )); else HOST_MS="$(date +%s%3N)"; fi
             unset _hb _ha _aut
             if node_scp "${NODE_SCRIPT}" "${ip}" "${u}" "${pw}" "${REMOTE_SCRIPT}"; then
-                node_cmd "${ip}" "${u}" "${pw}" "bash ${REMOTE_SCRIPT} apply ${HOST_MS}" >/dev/null 2>&1 \
-                    && ok "  ${hn}(${ip}) 时间已同步" || warn "  ${hn}(${ip}) 配置失败(检查密钥/密码)"
+                _rout="$(node_cmd "${ip}" "${u}" "${pw}" "bash ${REMOTE_SCRIPT} apply ${HOST_MS}" 2>&1)" && _rok=1 || _rok=0
+                if [ "${_rok}" = "1" ] && printf '%s' "${_rout}" | command grep -q 'SYNC-OK'; then
+                    ok "  ${hn}(${ip}) 时间已同步"
+                else
+                    warn "  ${hn}(${ip}) 同步失败: $(printf '%s' "${_rout}" | tail -3 | tr '\n' ' ')"
+                    APPLY_FAIL="${APPLY_FAIL}${hn} "
+                fi
             else
                 warn "  ${hn}(${ip}) 无法上传脚本(检查密钥/密码)"
+                APPLY_FAIL="${APPLY_FAIL}${hn} "
             fi
+            unset _rout _rok
             node_cmd "${ip}" "${u}" "${pw}" "rm -f ${REMOTE_SCRIPT}" >/dev/null 2>&1 || true   # 用完即删(2026-10-16)
         done
-        if [ -n "${REACH_FAIL}" ]; then
-            err "存在无法与权威建立通路的节点: ${REACH_FAIL}(原因见上); 网络修复前时间同步不可能成功, 已提前终止"
+        if [ -n "${REACH_FAIL}" ] || [ -n "${APPLY_FAIL}" ]; then
+            [ -n "${REACH_FAIL}" ] && err "存在无法与权威建立通路的节点: ${REACH_FAIL}(原因见上); 网络修复前时间同步不可能成功"
+            [ -n "${APPLY_FAIL}" ] && err "以下节点时间同步执行失败: ${APPLY_FAIL}(查看上方 SYNC-FAIL/date-step-failed 输出)"
             rm -f "${NODE_SCRIPT}"
             exit 1
         fi
