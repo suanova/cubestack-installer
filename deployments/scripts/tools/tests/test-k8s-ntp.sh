@@ -47,7 +47,7 @@ export FAKE_SSH_LOG="${TMP}/ssh.log"
 # 从脚本抽取函数(不执行主流程)
 {
     echo 'SSH_OPTS=()'
-    echo 'warn() { :; }'
+    echo 'warn() { echo "WARN $*"; }'   # 模拟 lib-common: warn 默认写 stdout
     command sed -n '/^node_cmd()/,/^}/p' "${SETUP}"
     command sed -n '/^node_sudo_ready()/,/^}/p' "${SETUP}"
     command sed -n '/^clock_offset()/,/^}/p' "${SETUP}"
@@ -84,6 +84,13 @@ export FAKE_TRACKING="${TMP}/tracking.ok" FAKE_SOURCES="${TMP}/sources.ok" FAKE_
 off="$(clock_offset 10.0.0.2 root "")"
 chk "chrony System time 4ms" "4" "${off}"
 
+echo "== ②b Reach 17(收敛中)仍用 chrony, 不误判 =="
+printf '17\n' > "${TMP}/sources.converging"
+export FAKE_SOURCES="${TMP}/sources.converging"
+off="$(clock_offset 10.0.0.2 root "")"
+chk "Reach=17 仍用 chrony 4ms" "4" "${off}"
+export FAKE_SOURCES="${TMP}/sources.ok"
+
 echo "== ③ 权威自身无上游: 直接 0 =="
 : > "${FAKE_SSH_LOG}"
 off="$(clock_offset 10.0.0.1 root "")"
@@ -113,6 +120,8 @@ chk_contains "远端成功信号 SYNC-OK" "SYNC-OK" "$(cat "${SETUP}")"
 chk_contains "远端失败信号 SYNC-FAIL" "SYNC-FAIL" "$(cat "${SETUP}")"
 chk_contains "apply 检查 SYNC-OK" "grep -q 'SYNC-OK'" "$(cat "${SETUP}")"
 chk_contains "节点 sudo 前置" "node_sudo_ready" "$(cat "${SETUP}")"
+chk_contains "偏差非数字防御" '=~ ^-?[0-9]+$' "$(cat "${SETUP}")"
+chk_contains "clock_offset 诊断走 stderr" '回退 SSH date 测量(受 SSH/负载延迟影响)" >&2' "$(cat "${SETUP}")"
 
 echo "== ⑥ workerbm 权限/失败语义 =="
 chk_contains "workerbm sudo 前置" "sudo -n true" "$(cat "${WORKERBM}")"

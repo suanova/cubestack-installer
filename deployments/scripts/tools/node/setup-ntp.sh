@@ -469,7 +469,9 @@ clock_offset() {
         leap="$(printf '%s\n' "${tracking}" | awk -F: '/^Leap status/{gsub(/^ +/,"",$2); print $2; exit}')"
         reach="$(node_cmd "${ip}" "${u}" "${pw}" \
             "chronyc sources 2>/dev/null | awk '\$1==\"^*\"{print \$5; exit}'" 2>/dev/null | tr -d ' \r' || true)"
-        if [ -n "${sys}" ] && [ "${leap}" = "Normal" ] && [ -n "${reach}" ] && [ "${reach}" -ge 37 ] 2>/dev/null; then
+        # Reach>0 且已选中 ^* 源即说明 NTP 已在工作; 37/377 只是"收敛稳定"的更高标准,
+        # 刚重启 chrony 时通常要几十秒才到 377, 不能因此判失败。
+        if [ -n "${sys}" ] && [ "${leap}" = "Normal" ] && [ -n "${reach}" ] && [ "${reach}" -ge 1 ] 2>/dev/null; then
             awk -v s="${sys}" 'BEGIN{d=s; if(d<0)d=-d; printf "%.0f", d*1000}'
             return
         fi
@@ -477,7 +479,8 @@ clock_offset() {
 
     # 2) 回退: SSH date 对比。用两个采样的中点对齐, 减少 SSH/负载延迟造成的假偏差;
     #    权威采样用权威自己的 user/pw, 不用被测节点的凭据。
-    warn "  ${ip}: chrony tracking 不可用/未选中源, 回退 SSH date 测量(受 SSH/负载延迟影响)"
+    # ⚠ warn 必须显式 >&2: 本函数在 $(...) 中调用, stdout 只能留最终数字。
+    warn "  ${ip}: chrony 未选中源/Reach=0, 回退 SSH date 测量(受 SSH/负载延迟影响)" >&2
     for _ in 1 2 3; do
         nb="$(date +%s%3N)"
         node_ms="$(node_cmd "${ip}" "${u}" "${pw}" "date +%s%3N" 2>/dev/null || true)"
@@ -545,6 +548,14 @@ verify_clocks() {
             continue
         fi
         off="$(clock_offset "${ip}" "${u}" "${pw}")"
+        # 防御: clock_offset 的 stdout 必须只有数字。任何诊断(warn/say)都必须走 stderr;
+        # 否则 off 会变成"⚠ ... 3986", 后续 [ -eq/-gt ] 报 integer expression expected,
+        # 并且两个比较都失败后会被误走到"✓ 通过"分支。
+        if ! [[ "${off}" =~ ^-?[0-9]+$ ]]; then
+            err "  ${hn}(${ip}) 时钟偏差解析失败(非数字): ${off}"
+            FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
+            continue
+        fi
         if [ "${off}" -eq -1 ]; then
             warn "  ${hn}(${ip}) 无法读取时钟(SSH/sudo 失败?)"
             FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
@@ -603,16 +614,19 @@ verify_clocks() {
                 # 旧实现取 $6(LastRx), 阈值判断没有意义 —— 这里修正为 $5。
                 _reach="$(node_cmd "${ip}" "${u}" "${pw}" \
                     "chronyc sources 2>/dev/null | awk '\$1==\"^*\"{print \$5; exit}'" 2>/dev/null | tr -d ' \r' || true)"
-                if [ -z "${_reach}" ] || ! [ "${_reach}" -ge 37 ] 2>/dev/null; then
-                    warn "  ${hn}(${ip}) 偏差达标但 NTP 源 Reach=${_reach:-无}(无 ^* 源或 <37), 强制 makestep 后复检 ..."
+                if [ -z "${_reach}" ] || ! [ "${_reach}" -ge 1 ] 2>/dev/null; then
+                    warn "  ${hn}(${ip}) 无 ^* 源或 Reach=0, 强制 makestep 后复检 ..."
                     node_cmd "${ip}" "${u}" "${pw}" "chronyc -a makestep >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
                     sleep 3
                     _reach="$(node_cmd "${ip}" "${u}" "${pw}" \
                         "chronyc sources 2>/dev/null | awk '\$1==\"^*\"{print \$5; exit}'" 2>/dev/null | tr -d ' \r' || true)"
-                    if [ -z "${_reach}" ] || ! [ "${_reach}" -ge 37 ] 2>/dev/null; then
-                        warn "  ${hn}(${ip}) NTP 源仍 Reach=${_reach:-无}(检查: 权威 chrony 是否 allow 节点网段 / chronyc sources)"
+                    if [ -z "${_reach}" ] || ! [ "${_reach}" -ge 1 ] 2>/dev/null; then
+                        warn "  ${hn}(${ip}) NTP 源仍无 ^* 源/Reach=0(检查: 权威 chrony 是否 allow 节点网段 / chronyc sources)"
                         FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
                     fi
+                elif [ "${_reach}" -lt 37 ] 2>/dev/null; then
+                    # Reach 17/33 等说明已经收到过权威响应、NTP 正在收敛; 不阻塞部署。
+                    warn "  ${hn}(${ip}) NTP 源 Reach=${_reach}(收敛中, 已选中 ^* 源; 继续)"
                 fi
             fi
         fi
