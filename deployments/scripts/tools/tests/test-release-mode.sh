@@ -186,6 +186,16 @@ chk_contains "release 取件使用 mc cp --recursive" "cp-recursive" "$(cat "${T
 
 bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
 chk "verify-only 通过" "0" "$?"
+
+echo "== ③c release --flat 平铺到 offline-files 根 =="
+rm -rf "${TMP}/flatdest"
+bash "${FETCH}" --release 2.0.0 --flat --dest "${TMP}/flatdest" --yes >/dev/null 2>&1
+chk "flat fetch 退出码" "0" "$?"
+chk "flat 文件落位" "hello" "$(cat "${TMP}/flatdest/ceph/test.txt" 2>/dev/null)"
+chk "flat 无版本子目录" "0" "$([ -e "${TMP}/flatdest/2.0.0" ] && echo 1 || echo 0)"
+chk "flat release.env 落位" "RELEASE_VERSION=2.0.0" "$(head -1 "${TMP}/flatdest/release.env" 2>/dev/null)"
+bash "${FETCH}" --release 2.0.0 --flat --verify-only --dest "${TMP}/flatdest" >/dev/null 2>&1
+chk "flat verify-only 通过" "0" "$?"
 # --verify-only 不下载任何文件, 不应做"下载需要多少空间"的预检(否则在小盘上误报)
 out="$(WARN_NEED_GB=999999 bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" 2>&1)"
 rc=$?
@@ -282,7 +292,8 @@ DEV_LAB_CPU_TAG=drift
 EOF
 out="$(set -a; . "${REL_ENV}"; set +a
     IMAGE_MANIFEST_CONF="${TMP}/drift.conf" bash -c 'source "$1"; image_manifest_load; printf "%s %s %s\n" "$K8S_VERSION" "$CALICO_VERSION" "$DEV_LAB_CPU_TAG"' _ "${REPO_ROOT}/deployments/scripts/tools/images/lib-image-manifest.sh" 2>/dev/null)"
-chk "K8S/Calico/dev-lab 版本变量未被覆盖" "v1.35.8 v3.32.2 py310-torch2.4-v2.0.0-rc2" "${out}"
+_want_dev="$(sed -nE 's/^DEV_LAB_CPU_TAG=//p' "${REL_ENV}" | head -1)"
+chk "K8S/Calico/dev-lab 版本变量未被覆盖" "v1.35.8 v3.32.2 ${_want_dev}" "${out}"
 
 echo "---------------------------------------------"
 [ "${fail}" = "0" ] && { echo "✅ release 模式回归通过"; exit 0; } || { echo "❌ release 模式回归失败"; exit 1; }

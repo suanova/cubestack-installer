@@ -45,11 +45,16 @@
 #   ./fetch-offline-from-minio.sh --release 2.0.0 --verify-only --dest /data/cubestack-installer
 #                                                                  # 只校验已下载的发布版本
 #   ./fetch-offline-from-minio.sh --release 2.0.0 --no-verify      # 跳过 sha256(调试用)
+#   ./fetch-offline-from-minio.sh --release 2.0.0 --flat --dest /opt/cubestack-installer/deployments/offline-files
+#                                                                  # flat: 把 <版本>/offline-files 平铺到 offline-files 根
 #   · --release <版本>: 远端 = <bucket>/<版本>/{offline-files/,cubestack-installer-cli-v<版本>.tar},
 #     旧布局的 cubestack-installer-cli.tar 仅做兼容读取;
 #     本地 = <本地桶根>/<版本>/; 本地桶根优先 --dest > CUBESTACK_RELEASE_ROOT >
 #     ${REPO_ROOT}/offline-releases。⚠ release 模式下 --dest 表示**本地桶根**
 #     (包含 <版本>/ 与 offline-files/), 与 --sub 的 --dest(offline-files 根)语义不同。
+#   · --flat(仅配合 --release): 不建 <版本>/ 目录, 把远端的 <版本>/offline-files/ 内容
+#     平铺到 --dest(默认 deployments/offline-files); release.env 随资产一起落地,
+#     load_config 会自动识别 release flat 模式。CLI tar 不在 flat 模式下载。
 # 数据源: config/minio.conf(独立 MinIO 配置, 模板 minio.conf.example)或 MINIO_* 环境变量;
 #         刻意不依赖 cluster.conf / lib-common.sh —— 本脚本是部署【前置】的下载工具,
 #         下载离线文件时集群配置往往还不存在, 不应要求先配好集群。
@@ -98,6 +103,7 @@ LIST_RELEASES=0
 VERIFY_ONLY=0
 NO_VERIFY=0
 RELEASE_MODE=0
+FLAT=0
 CLI_TAR_BASENAME=""                  # 解析后的 CLI tar 文件名(带版本; 旧布局兼容时=无版本名)
 MIN_FREE_GB="${MIN_FREE_GB:-50}"     # 磁盘空间门槛(GB): 默认至少 50GiB 空闲, 离线文件会持续增加
 WARN_NEED_GB="${WARN_NEED_GB:-50}"   # 醒目警告建议的总空闲门槛(GB)
@@ -149,11 +155,12 @@ while [ $# -gt 0 ]; do
         -y|--yes) YES=1; shift ;;
         --kubespray-version) KUBESPRAY_VERSION_ARG="$2"; shift 2 ;;
         --release) RELEASE_ARG="$2"; shift 2 ;;
+        --flat) FLAT=1; shift ;;
         --list-releases) LIST_RELEASES=1; shift ;;
         --verify-only) VERIFY_ONLY=1; shift ;;
         --no-verify) NO_VERIFY=1; shift ;;
         -h|--help) _print_help; exit 0 ;;
-        *) err "未知参数: $1(可用 --dest/--sub/--release/--list-releases/--verify-only/--no-verify/--kubespray-version/--min-free/--auto/--force/--all/--list/-y)"; exit 1 ;;
+        *) err "未知参数: $1(可用 --dest/--sub/--release/--list-releases/--verify-only/--no-verify/--kubespray-version/--min-free/--auto/--force/--all/--list/--flat/-y)"; exit 1 ;;
     esac
 done
 # --release 与 --sub/--all/--kubespray-version 互斥; --verify-only/--no-verify 只用于 release
@@ -163,6 +170,7 @@ if [ -n "${RELEASE_ARG}" ]; then
     [ -n "${KUBESPRAY_VERSION_ARG}" ] && { err "--release 与 --kubespray-version 互斥"; exit 1; }
 fi
 [ "${VERIFY_ONLY}" = "1" ] && [ -z "${RELEASE_ARG}" ] && { err "--verify-only 需要配合 --release <版本>"; exit 1; }
+[ "${FLAT}" = "1" ] && [ -z "${RELEASE_ARG}" ] && { err "--flat 需要配合 --release <版本>(平铺到 offline-files 根)"; exit 1; }
 [ "${NO_VERIFY}" = "1" ] && [ -z "${RELEASE_ARG}" ] && { err "--no-verify 需要配合 --release <版本>"; exit 1; }
 # --kubespray-version <V> ≡ --sub kubespray/<V>(只下载该版本的离线件; 版本名 = 上游 tag 全名)
 if [ -n "${KUBESPRAY_VERSION_ARG}" ]; then
@@ -426,12 +434,16 @@ fi
 #    天然就是 offline-files 总根语义, 不会下载进 kubespray/ 内层。)
 DEFAULT_DIR="${REPO_ROOT}/deployments/offline-files"
 if [ "${RELEASE_MODE}" = "1" ]; then
-    DEFAULT_DIR="${REPO_ROOT}/offline-releases"
+    if [ "${FLAT}" = "1" ]; then
+        DEFAULT_DIR="${REPO_ROOT}/deployments/offline-files"
+    else
+        DEFAULT_DIR="${REPO_ROOT}/offline-releases"
+    fi
 fi
 if [ -n "${DEST_ARG}" ]; then
     TARGET="${DEST_ARG}"
     say "使用指定下载目录: ${TARGET}"
-elif [ "${RELEASE_MODE}" = "1" ] && [ -n "${CUBESTACK_RELEASE_ROOT:-}" ]; then
+elif [ "${RELEASE_MODE}" = "1" ] && [ "${FLAT}" != "1" ] && [ -n "${CUBESTACK_RELEASE_ROOT:-}" ]; then
     TARGET="${CUBESTACK_RELEASE_ROOT}"
     say "使用 CUBESTACK_RELEASE_ROOT 本地桶根: ${TARGET}"
 elif [ -n "${OFFLINE_FILES_DIR_EXPLICIT:-}" ] && [ "${RELEASE_MODE}" != "1" ]; then
@@ -451,7 +463,7 @@ elif [ "${AUTO}" = "1" ]; then
         | sort -rn | head -1 | awk '{print $2}' || true)"
     if [ -n "${BEST}" ]; then
         BEST_AVAIL="$(df -Pk "${BEST}" 2>/dev/null | awk 'NR==2 {printf "%.1f", $4/1024/1024}')"
-        if [ "${RELEASE_MODE}" = "1" ]; then
+        if [ "${RELEASE_MODE}" = "1" ] && [ "${FLAT}" != "1" ]; then
             TARGET="${BEST}/cubestack-installer"
         else
             TARGET="${BEST}/offline-files"
@@ -476,8 +488,13 @@ else
 fi
 DST_ROOT="${TARGET}"
 if [ "${RELEASE_MODE}" = "1" ]; then
-    DST_ROOT="${TARGET}/${RELEASE_ARG}"
-    say "发布版本下载目录: ${DST_ROOT}"
+    if [ "${FLAT}" = "1" ]; then
+        DST_ROOT="${TARGET}"
+        say "release flat 下载目录(offline-files 根): ${DST_ROOT}"
+    else
+        DST_ROOT="${TARGET}/${RELEASE_ARG}"
+        say "发布版本下载目录: ${DST_ROOT}"
+    fi
 fi
 
 # ---------------- 7. 选择下载范围 ----------------
@@ -498,7 +515,11 @@ _subs_all() {   # 输出 MinIO 根下全部子目录(排除 DEFAULT_EXCLUDE_SUBS
 SUBS=()
 if [ "${RELEASE_MODE}" = "1" ]; then
     SUBS=("offline-files")
-    say "发布版本 ${RELEASE_ARG}: 下载 offline-files/ + cubestack-installer-cli-v${RELEASE_ARG#v}.tar"
+    if [ "${FLAT}" = "1" ]; then
+        say "发布版本 ${RELEASE_ARG}: flat 平铺 offline-files/ → ${DST_ROOT}/"
+    else
+        say "发布版本 ${RELEASE_ARG}: 下载 offline-files/ + cubestack-installer-cli-v${RELEASE_ARG#v}.tar"
+    fi
 elif [ "${ALL}" = "1" ]; then
     # --all = 真正全量(含 virtual-machine; 同样剥掉目录名尾斜杠)
     mapfile -t SUBS < <(mc ls "${SRC_ROOT}" 2>/dev/null | awk '{print $NF}' | sed 's#/$##')
@@ -551,14 +572,16 @@ for s in "${SUBS[@]}"; do
     _rbytes="${_rbytes:-0}"
     say "  远程 ${s}: ${_rsize:-?}"
     # 计算未下载部分大小(增量续传场景)
-    if [ "${_rbytes}" -gt 0 ] && [ -d "${DST_ROOT}/${s}" ]; then
-        _local="$(du -sb "${DST_ROOT}/${s}" 2>/dev/null | awk '{print $1}')"
+    _local_dir="${DST_ROOT}/${s}"
+    [ "${FLAT}" = "1" ] && _local_dir="${DST_ROOT}"
+    if [ "${_rbytes}" -gt 0 ] && [ -d "${_local_dir}" ]; then
+        _local="$(du -sb "${_local_dir}" 2>/dev/null | awk '{print $1}')"
         _local="${_local:-0}"
         [ "${_local}" -gt 0 ] && [ "${_local}" -le "${_rbytes}" ] && _rbytes=$(( _rbytes - _local ))
     fi
     NEED_BYTES=$(( NEED_BYTES + _rbytes ))
 done
-if [ "${RELEASE_MODE}" = "1" ]; then
+if [ "${RELEASE_MODE}" = "1" ] && [ "${FLAT}" != "1" ]; then
     # 此时 release.json 尚未下载到本地; 先按版本化默认名探测, 旧版本目录回退旧名。
     _cli_rname="$(_default_cli_tar_name)"
     mc_has "${SRC_ROOT}/${_cli_rname}" || _cli_rname="cubestack-installer-cli.tar"
@@ -615,22 +638,26 @@ fi
 # ---------------- 9. 下载 / 校验 ----------------
 # release 模式校验: _SUCCESS + release.env 版本 + SHA256SUMS + CLI tar
 _verify_release() {
-    local root="${DST_ROOT}" _ver _cli_sha _actual _cli_name
-    [ -f "${root}/offline-files/_SUCCESS" ] \
-        || { err "发布未完成: ${root}/offline-files/_SUCCESS 不存在"; return 1; }
-    [ -f "${root}/offline-files/SHA256SUMS" ] \
-        || { err "发布树不完整: 缺少 ${root}/offline-files/SHA256SUMS"; return 1; }
-    [ -f "${root}/offline-files/release.env" ] \
-        || { err "发布树不完整: 缺少 ${root}/offline-files/release.env"; return 1; }
-    _ver="$(sed -nE 's/^RELEASE_VERSION=([^[:space:]#]+).*/\1/p' "${root}/offline-files/release.env" 2>/dev/null | head -1)"
+    local root="${DST_ROOT}" base="${DST_ROOT}/offline-files" _ver _cli_sha _actual _cli_name
+    [ "${FLAT}" = "1" ] && base="${DST_ROOT}"
+    [ -f "${base}/_SUCCESS" ] \
+        || { err "发布未完成: ${base}/_SUCCESS 不存在"; return 1; }
+    [ -f "${base}/SHA256SUMS" ] \
+        || { err "发布树不完整: 缺少 ${base}/SHA256SUMS"; return 1; }
+    [ -f "${base}/release.env" ] \
+        || { err "发布树不完整: 缺少 ${base}/release.env"; return 1; }
+    _ver="$(sed -nE 's/^RELEASE_VERSION=([^[:space:]#]+).*/\1/p' "${base}/release.env" 2>/dev/null | head -1)"
     [ "${_ver}" = "${RELEASE_ARG}" ] \
         || { err "release.env 版本不符: ${_ver:-<空>} != ${RELEASE_ARG}"; return 1; }
     if [ "${NO_VERIFY}" != "1" ]; then
-        say "校验发布树 sha256(${root}/offline-files)..."
-        ( cd "${root}/offline-files" && sha256sum -c SHA256SUMS >/dev/null ) \
+        say "校验发布树 sha256(${base})..."
+        ( cd "${base}" && sha256sum -c SHA256SUMS >/dev/null ) \
             || { err "SHA256SUMS 校验失败(文件损坏/上传中断)"; return 1; }
-        if [ -f "${root}/offline-files/release.json" ]; then
-            _cli_sha="$(python3 - "${root}/offline-files/release.json" <<'PY' 2>/dev/null || true
+        if [ "${FLAT}" = "1" ]; then
+            ok "flat 发布树校验通过(CLI tar 不在本模式下载)"
+        else
+            if [ -f "${base}/release.json" ]; then
+                _cli_sha="$(python3 - "${base}/release.json" <<'PY' 2>/dev/null || true
 import json, sys
 try:
     print((json.load(open(sys.argv[1])).get("cli_tar_sha256") or "").replace("sha256:", "").strip())
@@ -638,24 +665,24 @@ except Exception:
     pass
 PY
 )"
-            if [ -n "${_cli_sha}" ]; then
-                _cli_name="$(_cli_tar_name_local "${root}")"
-                [ -f "${root}/${_cli_name}" ] \
-                    || { err "缺少 CLI tar: ${root}/${_cli_name}"; return 1; }
-                _actual="$(sha256sum "${root}/${_cli_name}" | awk '{print $1}')"
-                [ "${_actual}" = "${_cli_sha}" ] \
-                    || { err "CLI tar sha256 不符: ${_actual} != ${_cli_sha}"; return 1; }
-                ok "CLI tar sha256 一致"
+                if [ -n "${_cli_sha}" ]; then
+                    _cli_name="$(_cli_tar_name_local "${root}")"
+                    [ -f "${root}/${_cli_name}" ] \
+                        || { err "缺少 CLI tar: ${root}/${_cli_name}"; return 1; }
+                    _actual="$(sha256sum "${root}/${_cli_name}" | awk '{print $1}')"
+                    [ "${_actual}" = "${_cli_sha}" ] \
+                        || { err "CLI tar sha256 不符: ${_actual} != ${_cli_sha}"; return 1; }
+                    ok "CLI tar sha256 一致"
+                else
+                    err "release.json 未提供 cli_tar_sha256, 无法校验 CLI tar"; return 1
+                fi
             else
-                err "release.json 未提供 cli_tar_sha256, 无法校验 CLI tar"; return 1
+                err "release.json 不存在, 无法校验 CLI tar"; return 1
             fi
-        else
-            err "release.json 不存在, 无法校验 CLI tar"; return 1
         fi
     fi
     ok "发布版本 ${RELEASE_ARG} 校验通过"
 }
-
 if [ "${VERIFY_ONLY}" = "1" ]; then
     CLI_TAR_BASENAME="$(_cli_tar_name_local "${DST_ROOT}")"
     say "只校验, 不下载: ${DST_ROOT}"
@@ -663,7 +690,11 @@ if [ "${VERIFY_ONLY}" = "1" ]; then
 else
     for s in "${SUBS[@]}"; do
         [ -n "${s}" ] || continue
-        if [ "${RELEASE_MODE}" = "1" ]; then
+        if [ "${RELEASE_MODE}" = "1" ] && [ "${FLAT}" = "1" ]; then
+            say "平铺复制 ${SRC_ROOT}/${s}/ → ${DST_ROOT}/ ..."
+            mc mirror --overwrite "${SRC_ROOT}/${s}" "${DST_ROOT}" \
+                || { err "平铺复制 ${s} 失败(检查网络/磁盘空间)"; exit 1; }
+        elif [ "${RELEASE_MODE}" = "1" ]; then
             # release 模式用 mc cp --recursive: 只复制版本目录里的精确对象(按对象名),
             # 不做 mirror 的目录同步/覆盖语义 —— 发布树内容由 MinIO 版本目录唯一决定。
             say "复制(精确对象) ${SRC_ROOT}/${s}/ → ${DST_ROOT}/${s}/ ..."
@@ -674,13 +705,19 @@ else
             mc mirror --overwrite "${SRC_ROOT}/${s}" "${DST_ROOT}/${s}" \
                 || { err "同步 ${s} 失败(检查网络/磁盘空间)"; exit 1; }
         fi
-        ok "完成: ${DST_ROOT}/${s}  ($(du -sh "${DST_ROOT}/${s}" 2>/dev/null | awk '{print $1}'))"
+        if [ "${FLAT}" = "1" ]; then
+            ok "完成: ${DST_ROOT}  ($(du -sh "${DST_ROOT}" 2>/dev/null | awk '{print $1}'))"
+        else
+            ok "完成: ${DST_ROOT}/${s}  ($(du -sh "${DST_ROOT}/${s}" 2>/dev/null | awk '{print $1}'))"
+        fi
     done
     if [ "${RELEASE_MODE}" = "1" ]; then
-        CLI_TAR_BASENAME="$(_cli_tar_name_remote "${SRC_ROOT}")"
-        say "下载 ${SRC_ROOT}/${CLI_TAR_BASENAME} → ${DST_ROOT}/${CLI_TAR_BASENAME} ..."
-        mc cp "${SRC_ROOT}/${CLI_TAR_BASENAME}" "${DST_ROOT}/${CLI_TAR_BASENAME}" \
-            || { err "下载 CLI tar 失败"; exit 1; }
+        if [ "${FLAT}" != "1" ]; then
+            CLI_TAR_BASENAME="$(_cli_tar_name_remote "${SRC_ROOT}")"
+            say "下载 ${SRC_ROOT}/${CLI_TAR_BASENAME} → ${DST_ROOT}/${CLI_TAR_BASENAME} ..."
+            mc cp "${SRC_ROOT}/${CLI_TAR_BASENAME}" "${DST_ROOT}/${CLI_TAR_BASENAME}" \
+                || { err "下载 CLI tar 失败"; exit 1; }
+        fi
         _verify_release || exit 1
     fi
 fi
@@ -693,13 +730,22 @@ du -sh "${DST_ROOT}" 2>/dev/null | awk '{print "  总大小: "$1}'
 echo ""
 if [ "${RELEASE_MODE}" = "1" ]; then
     echo "  发布版本 ${RELEASE_ARG} 已就绪 → ${DST_ROOT}"
-    echo "  配置(cluster.conf):"
-    echo "     CUBESTACK_RELEASE=\"${RELEASE_ARG}\""
-    echo "     CUBESTACK_RELEASE_ROOT=\"${TARGET}\""
-    echo "  加载 CLI 镜像:"
-    echo "     sudo docker load -i ${DST_ROOT}/${CLI_TAR_BASENAME:-cubestack-installer-cli-v${RELEASE_ARG#v}.tar}"
-    echo "  部署:"
-    echo "     sudo ./deployments/scripts/deploy-cluster.sh --release ${RELEASE_ARG}"
+    if [ "${FLAT}" = "1" ]; then
+        echo "  flat 布局: 资产已平铺在 offline-files 根; 无需在 cluster.conf 配 release 变量。"
+        echo "  load_config 会自动读取 ${DST_ROOT}/release.env(RELEASE_VERSION/版本变量)。"
+        echo "  如需切回 latest: 移除/改名该 release.env, 或设 CUBESTACK_RELEASE_AUTO=\"false\"。"
+        echo "  CLI tar 不在 flat 模式下载; 使用已有 CLI 镜像或单独 mc cp。"
+        echo "  部署:"
+        echo "     sudo ./deployments/scripts/deploy-cluster.sh"
+    else
+        echo "  配置(cluster.conf):"
+        echo "     CUBESTACK_RELEASE=\"${RELEASE_ARG}\""
+        echo "     CUBESTACK_RELEASE_ROOT=\"${TARGET}\""
+        echo "  加载 CLI 镜像:"
+        echo "     sudo docker load -i ${DST_ROOT}/${CLI_TAR_BASENAME:-cubestack-installer-cli-v${RELEASE_ARG#v}.tar}"
+        echo "  部署:"
+        echo "     sudo ./deployments/scripts/deploy-cluster.sh --release ${RELEASE_ARG}"
+    fi
 elif [ "${IS_CONTAINER}" = "1" ]; then
     echo "  容器内下载完成: 离线文件已落在 ${DST_ROOT}(容器挂载的 offline-files)。"
     echo "  接下来配置并开始部署:"

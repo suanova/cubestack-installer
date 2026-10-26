@@ -554,8 +554,13 @@ deployments/offline-files/
 ```
 
 > MinIO 上的 `<bucket>/2.0.0/offline-files/` 仍保持版本化布局；flat 只是**部署机本地**的
-> 平铺方式。把远端树平铺到本地可用 `mc mirror <alias>/<bucket>/2.0.0/offline-files/ <本地>/`。
-> 切换到 latest 前请移除/改名该 `release.env`，否则会被自动识别为 release 模式。
+> 平铺方式。推荐用 fetch 的 flat 模式：
+> ```bash
+> ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
+>   --release 2.0.0 --flat --dest /opt/cubestack-installer/deployments/offline-files
+> ```
+> （`--flat` 不建 `<版本>/` 目录；CLI tar 不在 flat 模式下载）
+> 切换到 latest 前请移除/改名该 `release.env`，或设 `CUBESTACK_RELEASE_AUTO="false"`。
 
 | 模式 | `CUBESTACK_RELEASE` | `CUBESTACK_RELEASE_LAYOUT` | 实际 `OFFLINE_FILES_ROOT` | `release.env` 来源 |
 |---|---|---|---|---|
