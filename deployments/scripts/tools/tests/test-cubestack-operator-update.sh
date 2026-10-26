@@ -15,11 +15,12 @@
 #   ⑥ 冒烟 CR 显式全禁用 + retain(不继承默认组件/不卸载真实资源)
 #   ⑦ operator 版本基线/bundles 开关在 cluster.conf(+example): 仅显式 false 分支裁剪, 非法值报错
 #   ⑧ chart 随离线包分发: charts/ 落点 / 显式覆盖 / legacy fallback / 缺 chart 硬失败
+#   · InferenceRuntimeProfile 重建顺序: 先纠偏 CR → 再删除并等待(防 immutable 竞态)
 # 用法: bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
 # ============================================================
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-MOD="${REPO_ROOT}/deployments/scripts/modules/03_addon/25_cubestack_operator.sh"
+MOD="${MODULE_UNDER_TEST:-${REPO_ROOT}/deployments/scripts/modules/03_addon/25_cubestack_operator.sh}"
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 fail=0
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }
@@ -290,6 +291,20 @@ if grep -qE 'clusterCR\.spec\.components\.[A-Za-z0-9]+\.version|components\.[A-Z
 else
     echo "  ok  installer 不覆盖 operator 内组件版本"
 fi
+
+echo "== ⑫ profile 重建顺序: 先纠偏 CR, 再删除并等待 =="
+# 2026-10-26 CodeRabbit: 旧实现先异步 delete(--wait=false) 再 patch CR —— operator 会在窗口内
+# 按旧 registry 重建 immutable profile, 后续纠偏被 "spec is immutable" 拒绝(model-bundles Degraded)。
+_patch_line="$(grep -nF 'patch csc ${_cr_name}' "${MOD}" | head -1 | cut -d: -f1)"
+_del_line="$(grep -nF 'delete inferenceruntimeprofiles.ai.cubestack.io' "${MOD}" | head -1 | cut -d: -f1)"
+chk "CR patch 行在 profile 删除行之前" "1" \
+    "$([ -n "${_patch_line}" ] && [ -n "${_del_line}" ] && [ "${_patch_line}" -lt "${_del_line}" ] && echo 1 || echo 0)"
+chk_contains "删除等待完成(--wait=true)" \
+    'delete inferenceruntimeprofiles.ai.cubestack.io --all --ignore-not-found --wait=true' "${MOD}"
+chk_not_contains "不再异步删(--wait=false)" \
+    'inferenceruntimeprofiles.ai.cubestack.io --all --ignore-not-found --wait=false' "${MOD}"
+chk_contains "删除前复核 CR 已是目标 registry" '_cr_now_reg' "${MOD}"
+chk_contains "CR 未切到目标 registry 时跳过重建" '跳过 profile 重建' "${MOD}"
 
 echo ""
 if [ "${fail}" = "0" ]; then

@@ -18,7 +18,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 CEPH="${REPO_ROOT}/deployments/scripts/modules/03_addon/02_ceph.sh"
 EXPOSE="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-expose-external.sh"
-CLEANUP="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-cleanup.sh"
+CLEANUP="${MODULE_UNDER_TEST:-${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-cleanup.sh}"
 fail=0
 chk_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  ok  $1"; else echo "  FAIL $1: [$3] 未包含 [$2]"; fail=1; fi; }
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }
@@ -83,6 +83,31 @@ chk_contains "cleanup_all 不安全时中止清盘" '_CEPH_UNSAFE_UNMAP' "${CLEA
 chk_contains "CephCluster 强删后复查开关" 'CEPH_CLEANUP_CLUSTER_FORCE_GONE_SECONDS' "${CLEANUP}"
 chk_contains "CephCluster 未消失返回失败" 'CephCluster 强制删除后仍存在' "${CLEANUP}"
 chk_contains "cleanup_all 传播删除失败" '_dc_rc' "${CLEANUP}"
+# 2026-10-26 CodeRabbit(Critical): external CR 拒绝销毁时, cleanup_all **不看** delete_cluster
+# 返回码, 只认 _CEPH_ABORT_WIPE/_CEPH_UNSAFE_UNMAP —— 拒绝分支不置位的话 --all 仍会物理清盘。
+_start="$(grep -nF 'if [ -n "${_ext_cc}" ]; then' "${CLEANUP}" | head -1 | cut -d: -f1)"
+_end="$(awk -v s="${_start:-0}" 'NR>s && /^    fi$/{print NR; exit}' "${CLEANUP}")"
+_ext_block="$(sed -n "${_start:-1},${_end:-1}p" "${CLEANUP}")"
+chk "external 拒绝分支可提取" "1" "$([ -n "${_start}" ] && [ -n "${_end}" ] && echo 1 || echo 0)"
+_abort_ln="$(printf '%s\n' "${_ext_block}" | grep -nF '_CEPH_ABORT_WIPE=1' | head -1 | cut -d: -f1)"
+_ret_ln="$(printf '%s\n' "${_ext_block}" | grep -nF 'return 1' | head -1 | cut -d: -f1)"
+chk "external 拒绝时置 _CEPH_ABORT_WIPE" "1" "$([ -n "${_abort_ln}" ] && echo 1 || echo 0)"
+chk "_CEPH_ABORT_WIPE 置位在 return 之前" "1" \
+    "$([ -n "${_abort_ln}" ] && [ -n "${_ret_ln}" ] && [ "${_abort_ln}" -lt "${_ret_ln}" ] && echo 1 || echo 0)"
+chk_contains "显式放行开关仍在(行为不变)" 'CEPH_CLEANUP_ALLOW_EXTERNAL=1' "${CLEANUP}"
+# 2026-10-26 CodeRabbit: external 分类查询失败必须 fail-closed —— 不能 `|| true` 吞成
+# "无 external"(否则后续存在性查询一旦成功, 会在未确认的情况下继续删消费者/PVC/CR)。
+chk_contains "external 分类查询用 if ! 捕获失败" 'if ! _ext_rows="$(SSH' "${CLEANUP}"
+chk_not_contains "external 分类查询不再 || true 吞错" \
+    'EXT:.spec.external.enable --no-headers 2>/dev/null || true' "${CLEANUP}"
+_ext_q_start="$(grep -nF 'if ! _ext_rows="$(SSH' "${CLEANUP}" | head -1 | cut -d: -f1)"
+_ext_q_end="$(awk -v s="${_ext_q_start:-0}" 'NR>s && /^    fi$/{print NR; exit}' "${CLEANUP}")"
+_ext_q_block="$(sed -n "${_ext_q_start:-1},${_ext_q_end:-1}p" "${CLEANUP}")"
+chk "external 分类查询失败分支可提取" "1" "$([ -n "${_ext_q_start}" ] && [ -n "${_ext_q_end}" ] && echo 1 || echo 0)"
+chk "external 查询失败置 _CEPH_ABORT_WIPE" "1" \
+    "$(printf '%s\n' "${_ext_q_block}" | grep -cF '_CEPH_ABORT_WIPE=1' || true)"
+chk "CRD 不存在仍视为无集群(不误拦)" "1" \
+    "$(printf '%s\n' "${_ext_q_block}" | grep -cF "doesn't have a resource type" || true)"
 
 echo ""
 if [ "${fail}" = "0" ]; then

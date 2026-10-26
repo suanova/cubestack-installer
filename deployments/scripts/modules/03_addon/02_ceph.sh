@@ -652,15 +652,17 @@ ok "  Rook operator 已部署"
 #   绝不整份恢复旧 CR: 旧 CR 的 storage.nodes/devices/placement 来自上一代环境, apply 后
 #   ① 盘名/节点过时(历史残留 /dev/rbd0 → OSD 永不创建) ② 残留 mon store(/var/lib/rook/mon-*,
 #   集群无关路径)被新 mon 直接复用, monmap 还是旧集群的死 IP → quorum 永久卡死。
-_HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+_HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph --no-headers 2>/dev/null" || true) )"
 # ★ 2026-10-26: external CephCluster(rook-ceph-external, spec.external.enable=true) 不是
 #   本安装器资产; 覆盖安装/幂等清理都不能把它当 internal 旧集群删除。
+#   ⚠ 但"internal 集群是否存在"必须**只看 internal 名 rook-ceph**: 同命名空间并存
+#     rook-ceph-external 时, 若把"存在 external CR"当成"没有 internal 集群", 会在 internal
+#     集群仍运行时进入 7a 物理清盘(磁盘数据被抹) —— 这正是本判定只认 rook-ceph 的原因。
 if [ -n "${_HAS_CC_NOW}" ]; then
-    _CC_EXT_ROWS="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster \
-        -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers 2>/dev/null) || true )"
-    _CC_EXT_NOW="$(printf '%s\n' "${_CC_EXT_ROWS}" | awk '$2=="true"{print $1}' | tr '\n' ' ')"
-    if [ -n "${_CC_EXT_NOW}" ]; then
-        say "  检测到 external CephCluster(${_CC_EXT_NOW}) → 跳过集群内 CephCluster 销毁/幂等清理"
+    _CC_EXT_NOW="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster rook-ceph \
+        -o jsonpath='{.spec.external.enable}' 2>/dev/null) || true )"
+    if [ "${_CC_EXT_NOW}" = "true" ]; then
+        say "  检测到 external CephCluster(rook-ceph) → 跳过集群内 CephCluster 销毁/幂等清理"
         _HAS_CC_NOW=""
     fi
 fi
@@ -674,7 +676,9 @@ if [ -n "${_HAS_CC_NOW}" ] && [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
     say "  检测到已有 CephCluster($(echo "${_HAS_CC_NOW}" | awk '{print $1}')) + CEPH_PRE_CLEANUP_EXISTING=true → 幂等卸载旧集群(Rook 擦盘)..."
     bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --delete-cluster \
         || warn "  旧集群删除超时/失败(继续, 7a 将物理清盘兜底)"
-    _HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+    # 复核 internal(rook-ceph)是否真的消失: 只看 rook-ceph, 外部接入 CR(rook-ceph-external)
+    # 是否残留与本安装器的 internal 集群无关(否则会误跳过 7a/7b, 留下 mon store 残骸)。
+    _HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph --no-headers 2>/dev/null" || true) )"
 fi
 if [ -n "${_HAS_CC_NOW}" ]; then
     say "  集群内已有 CephCluster($(echo "${_HAS_CC_NOW}" | awk '{print $1}')), 用当前 CR 幂等更新(不重建)"

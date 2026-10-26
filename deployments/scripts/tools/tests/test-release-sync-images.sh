@@ -21,8 +21,8 @@ FETCH="${REPO_ROOT}/deployments/scripts/tools/offline/fetch-offline-from-minio.s
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 fail=0
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }
-chk_contains() { if printf '%s' "$3" | command grep -qF -- "$2"; then echo "  ok  $1"; else echo "  FAIL $1: 未包含 [$2]"; fail=1; fi; }
-chk_not_contains() { if printf '%s' "$3" | command grep -qF -- "$2"; then echo "  FAIL $1: 不应包含 [$2]"; fail=1; else echo "  ok  $1"; fi; }
+chk_contains() { if [[ "$3" == *"$2"* ]]; then echo "  ok  $1"; else echo "  FAIL $1: 未包含 [$2]"; fail=1; fi; }
+chk_not_contains() { if [[ "$3" == *"$2"* ]]; then echo "  FAIL $1: 不应包含 [$2]"; fail=1; else echo "  ok  $1"; fi; }
 
 # ---------------- fake mc ----------------
 mkdir -p "${TMP}/bin"
@@ -740,6 +740,14 @@ chk_contains "dispatch 事件" "release-2.0-updated" "$(cat "${WF}" 2>/dev/null)
 chk "sync workflow 无 workflow_run 触发" "0" "$(command grep -cE '^[[:space:]]*workflow_run:' "${WF}" 2>/dev/null || true)"
 chk "不含 push 触发" "0" "$(command grep -cE '^[[:space:]]*push:' "${WF}" 2>/dev/null || true)"
 chk_contains "checkout ref" "CHECKOUT_REF" "$(cat "${WF}" 2>/dev/null)"
+# workflow 传的 Harbor 变量名必须 == release-sync-images.sh 读取的名字(HARBOR_MIRROR_*);
+# 传旧 HARBOR_HOST/USER/PASSWORD/INSECURE 时脚本只会回落到 CUBESTACK_OPERATOR_*, mirror 凭据被静默忽略。
+chk "workflow Harbor 变量名与脚本一致" "4" \
+    "$(command grep -cE '^[[:space:]]+HARBOR_MIRROR_(REGISTRY|USER|PASSWORD|INSECURE):' "${WF}" 2>/dev/null || true)"
+chk "workflow 不使用旧 HARBOR_* 名" "0" \
+    "$(command grep -cE '^[[:space:]]+HARBOR_(HOST|USER|PASSWORD|INSECURE):' "${WF}" 2>/dev/null || true)"
+chk_contains "validate 读 HARBOR_MIRROR_USER" '${HARBOR_MIRROR_USER:-}' "$(cat "${WF}" 2>/dev/null)"
+chk_contains "validate 读 HARBOR_MIRROR_PASSWORD" '${HARBOR_MIRROR_PASSWORD:-}' "$(cat "${WF}" 2>/dev/null)"
 chk "CLI rebuild workflow 存在" "0" "$([ -f "${CLI_WF}" ] && echo 0 || echo 1)"
 chk_contains "release CLI 同 job 内同步" "--component cli" "$(cat "${CLI_WF}" 2>/dev/null)"
 chk_contains "release CLI tar 导出" "cubestack-installer-cli-v" "$(cat "${CLI_WF}" 2>/dev/null)"

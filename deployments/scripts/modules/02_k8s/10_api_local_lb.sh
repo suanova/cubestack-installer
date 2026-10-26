@@ -26,6 +26,9 @@
 #     kubeconfig" 任务只对非 control-plane 节点生效, master 保留 kubeadm 生成的 https://<自身IP>:6443。
 #     本模块启用态把 master 收敛为 https://127.0.0.1:6443(打自己的 apiserver, 不依赖节点网卡),
 #     关闭态恢复为 https://<API_DOMAIN>:6443; 变更后重启 kubelet, 幂等(已匹配则不重启)。
+#     ⚠ 关闭态恢复前必须: 入口地址可解析 **且** 该 master 的 /etc/hosts 域名行收敛成功;
+#       任一前置失败则保持 kubelet.conf 原样(fail-closed)—— 否则 kubelet 指向解析不到的
+#       域名会直接失去 API 访问(关闭态没有 loadbalancer_apiserver 块, 域名只靠 /etc/hosts)。
 #   · **节点不可达必须响亮失败(fail-closed, R9)**: 一律**不允许**把"不可达"当作"已收敛/已干净"。
 #     "连通性"与"存在性"必须分开判(`test -f` 在 SSH 不通时同样返回非零, 合并判断会把网络故障
 #     误诊成"上游没装本地代理"): 清理前先显式探活(`_hssh <ip> true`), 删完再复核容器确实消失;
@@ -101,6 +104,14 @@ converge_master_kubelet() {  # converge_master_kubelet <ip> <desired-server-url>
     _hssh "${ip}" "sudo cp -a /etc/kubernetes/kubelet.conf /etc/kubernetes/kubelet.conf.cubestack.bak && \
                    sudo sed -i -E 's#^([[:space:]]*)server: https://.*#\1server: ${desired}#' /etc/kubernetes/kubelet.conf && \
                    sudo systemctl restart kubelet" >/dev/null
+}
+
+# 判断某个 IP 是否在列表里(纯 bash: 不用 printf|grep -q —— pipefail 下 grep 提前退出
+# 会让 printf 收 SIGPIPE, 大输入时偶发假阴性)。
+_list_has() {  # _list_has <needle> <item...>
+    local needle="$1" x; shift
+    for x in "$@"; do [ "${x}" = "${needle}" ] && return 0; done
+    return 1
 }
 
 # 收敛一个节点上的 hosts 域名行(先删同域名旧行, 再写一行)
@@ -190,7 +201,7 @@ run_enabled() {
 
 run_disabled() {
     say "本地代理已关闭: 清理残留的 nginx-proxy 静态 Pod(上游不会删)"
-    local entry ip _state _fail=() _deleted=()
+    local entry ip _state _fail=() _deleted=() _hosts_ok=()
     entry="$(api_entry_addr)" || entry=""
     for ip in $(_all_nodes); do
         # ---- 0. 可达性前置: 不可达 ≠ 已干净(fail-closed) ----
@@ -218,6 +229,7 @@ run_disabled() {
         if [ -n "${entry}" ]; then
             if converge_hosts "${ip}" "${entry}"; then
                 vlog "  ${ip}: /etc/hosts ${HOSTS_DOMAIN} → ${entry}"
+                _hosts_ok+=("${ip}")
             else
                 err "节点 ${ip}: /etc/hosts 域名行收敛失败"
                 _fail+=("${ip}(hosts)")
@@ -247,6 +259,21 @@ run_disabled() {
         if ! _hssh "${ip}" "true" >/dev/null 2>&1; then
             err "master ${ip} SSH 不可达 —— 无法恢复 kubelet.conf"
             _kfail+=("${ip}(不可达)")
+            continue
+        fi
+        # ⚠ 恢复前必须确认两个前置, 否则保持 kubelet.conf 原样(fail-closed):
+        #   ① 入口地址可解析(entry 非空) —— 为空时 hosts 收敛整段被跳过;
+        #   ② 该 master 的 /etc/hosts 域名行确实收敛成功。
+        #   关闭态没有 loadbalancer_apiserver 块, HOSTS_DOMAIN 只能靠 /etc/hosts 解析;
+        #   映射不存在时把 kubelet 指过去 = kubelet 打不到 apiserver(节点 NotReady)。
+        if [ -z "${entry}" ]; then
+            err "master ${ip}: 无法解析 API 入口地址 —— 保持 kubelet.conf 不变(域名 ${HOSTS_DOMAIN} 无 /etc/hosts 映射会失去 API 访问)"
+            _kfail+=("${ip}(无入口地址)")
+            continue
+        fi
+        if ! _list_has "${ip}" "${_hosts_ok[@]}"; then
+            err "master ${ip}: /etc/hosts ${HOSTS_DOMAIN} 域名行未成功收敛 —— 保持 kubelet.conf 不变(避免 kubelet 打不了解析的域名)"
+            # hosts 收敛失败已在 _fail 里记过, 这里不重复记账(只说明 kubelet 为何未动)
             continue
         fi
         if converge_master_kubelet "${ip}" "https://${HOSTS_DOMAIN}:6443"; then

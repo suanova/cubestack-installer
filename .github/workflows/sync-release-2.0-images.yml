@@ -93,10 +93,10 @@ env:
   FIRST_PARTY_ONLY: ${{ github.event.inputs.first_party_only || 'false' }}
   RECOVER: ${{ github.event.inputs.recover || 'false' }}
   KEEP_STALE: ${{ github.event.inputs.keep_stale || 'false' }}
-  HARBOR_HOST: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
-  HARBOR_USER: ${{ vars.HARBOR_MIRROR_USER || secrets.HARBOR_MIRROR_USER }}
-  HARBOR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
-  HARBOR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
+  HARBOR_MIRROR_REGISTRY: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
+  HARBOR_MIRROR_USER: ${{ vars.HARBOR_MIRROR_USER || secrets.HARBOR_MIRROR_USER }}
+  HARBOR_MIRROR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
+  HARBOR_MIRROR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
   MINIO_ENDPOINT: ${{ secrets.MINIO_HOSTNAME }}
   MINIO_ACCESS_KEY: ${{ secrets.MINIO_USERNAME }}
   MINIO_SECRET_KEY: ${{ secrets.MINIO_PASSWORD }}
@@ -152,11 +152,11 @@ jobs:
           for v in MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MATRIX_RELEASE; do
             if [ -z "${!v:-}" ]; then echo "::error::missing ${v}"; missing=1; fi
           done
-          if [ -z "${HARBOR_USER:-}" ] && [ -z "${CUBESTACK_OPERATOR_HARBOR_USER:-}" ]; then
+          if [ -z "${HARBOR_MIRROR_USER:-}" ] && [ -z "${CUBESTACK_OPERATOR_HARBOR_USER:-}" ]; then
             echo "::error::missing Harbor user (HARBOR_MIRROR_USER or CUBESTACK_OPERATOR_HARBOR_USER)"; missing=1
           fi
-          if [ -z "${HARBOR_PASSWORD:-}" ] && [ -z "${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}" ]; then
-            echo "::error::missing Harbor password"; missing=1
+          if [ -z "${HARBOR_MIRROR_PASSWORD:-}" ] && [ -z "${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}" ]; then
+            echo "::error::missing Harbor password (HARBOR_MIRROR_PASSWORD or CUBESTACK_OPERATOR_HARBOR_PASSWORD)"; missing=1
           fi
           case "${MATRIX_RELEASE}" in ''|*[!0-9A-Za-z._-]*) echo "::error::invalid release: ${MATRIX_RELEASE}"; missing=1 ;; esac
           case "${CHECKOUT_REF}" in ''|*[!0-9A-Za-z._/-]*|*..*) echo "::error::invalid checkout_ref: ${CHECKOUT_REF}"; missing=1 ;; esac

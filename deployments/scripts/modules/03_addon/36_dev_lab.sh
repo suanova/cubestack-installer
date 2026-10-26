@@ -18,6 +18,9 @@
 #     Harbor→MinIO 保鲜管道按 offline-files/dev-lab/image-list.tsv 增量维护);
 #     .tar 与 .tar.gz 均可(大件可就地 gzip 省盘; plain 内容校验 / .gz 文件名匹配, 见 README);
 #     缺某个 tar → 该镜像 warn 跳过(不阻断部署), 结尾汇总(🅰 诚实: 不伪装成功)。
+#     旧发布树的 tar 内嵌 tag 可能带 release 后缀(如 py310-torch2.4-v2.0.0-rc2):
+#     只接受 DEV_LAB_LEGACY_TAG_SUFFIXES 定义的后缀(未设置时取 -${CUBESTACK_OPERATOR_IMAGE_TAG});
+#     未定义/多个匹配一律跳过, 不再按 "<tag>-" 任意前缀猜(防 *-hotfix 冒充钉死 tag)。
 #   · 目标 ref: <集群 registry>/suanova/<name>:<tag>(去 Harbor 注册域保 suanova/ 路径,
 #     与 25_cubestack_operator 的自研镜像映射同款)。
 #   · 幂等: 目标 digest == 源 digest → 跳过 —— tag 是滚动的 latest, **必须比 digest**,
@@ -85,28 +88,63 @@ case "${PUSH_PARALLEL_IMAGES}" in ''|*[!0-9]*|0) PUSH_PARALLEL_IMAGES=1 ;; esac
 PUSH_RESULT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cubestack-dev-lab-push.XXXXXX")"
 trap 'rm -rf "${PUSH_RESULT_DIR}"' EXIT
 
+# 旧后缀 tar 选择(2026-10-26): 只接受**定义过**的旧 tag 后缀, 且必须唯一命中;
+# 不再按 "<tag>-" 任意前缀猜 —— 否则 *-hotfix 之类的 tar 会被冒充成钉死的 release tag。
+#   后缀定义: DEV_LAB_LEGACY_TAG_SUFFIXES(逗号分隔, 含前导 '-');
+#   未设置时取当前发布的镜像 tag 后缀 -${CUBESTACK_OPERATOR_IMAGE_TAG}(如 -v2.0.0-rc2,
+#   旧发布树把 release tag 拼在 dev-lab tag 之后)。
+# 输出三态(TAB 分隔): "ok<TAB><path>" / "none" / "ambig<TAB><文件列表>"
+_devlab_find_legacy_tar() {  # <img> <tag> <dir>
+    local img="$1" tag="$2" sd="$3" suffixes _cand _src _suf
+    local -a _suf_list=() _matches=()
+    suffixes="${DEV_LAB_LEGACY_TAG_SUFFIXES:-}"
+    if [ -z "${suffixes}" ] && [ -n "${CUBESTACK_OPERATOR_IMAGE_TAG:-}" ]; then
+        suffixes="-${CUBESTACK_OPERATOR_IMAGE_TAG}"
+    fi
+    [ -n "${suffixes}" ] || { printf 'none'; return 0; }
+    IFS=',' read -r -a _suf_list <<< "${suffixes}"
+    for _cand in "${sd}"/*.tar; do
+        [ -f "${_cand}" ] || continue
+        _src="$(tar_first_image_tag "${_cand}")"
+        for _suf in "${_suf_list[@]}"; do
+            case "${_src}" in
+                "${img}:${tag}${_suf}"|*"/${img}:${tag}${_suf}")
+                    _matches+=("${_cand}"); break ;;
+            esac
+        done
+    done
+    case "${#_matches[@]}" in
+        0) printf 'none' ;;
+        1) printf 'ok\t%s' "${_matches[0]}" ;;
+        *) printf 'ambig\t%s' "$(printf '%s ' "${_matches[@]##*/}")" ;;
+    esac
+}
+
 # 单镜像 worker(后台子 shell 执行; 结果写 ${PUSH_RESULT_DIR}/<idx>.result)
 # 参数: "<idx>|<img>"(避免把含空格的路径拆开)
 _devlab_push_one() {
-    local task="$1" _idx _img _tag _sd _tar _dst _dst_ref _cand _src
+    local task="$1" _idx _img _tag _sd _tar _dst _dst_ref _sel _legacy_note=""
     local _c_dst _c_src _d_dst _d_src _t0 _dt _size _rate
     _idx="${task%%|*}"; _img="${task#*|}"
     _tag="$(_devlab_tag "${_img}")"
     # 离线 tar 顶层平铺: accelerator 家族镜像不再按模式/家族分子目录
     _sd="${SAVE_DIR}"
     _tar="$(find_offline_tar "${_img}:${_tag}" "*.tar" "${_sd}" 2>/dev/null || true)"
-    # 兼容旧发布树: tar 内容 tag 可能仍带 release 后缀(如 py310-torch2.4-v2.0.0-rc2),
-    # 但目标镜像名要求不带后缀。按 "<tag>-" 前缀回退匹配(仅 dev-lab, 不影响其他模块)。
+    # 精确内容匹配失败时, 只接受**定义过**的旧后缀(见 _devlab_find_legacy_tar);
+    # 0 个/多个匹配都不猜: 分别按"缺 tar"/"歧义"记 miss, 由结尾汇总告警。
     if [ -z "${_tar}" ] && [ -d "${_sd}" ]; then
-        for _cand in "${_sd}"/*.tar; do
-            [ -f "${_cand}" ] || continue
-            _src="$(tar_first_image_tag "${_cand}")"
-            case "${_src}" in
-                *"${_img}:${_tag}-"*) _tar="${_cand}"; break ;;
-            esac
-        done
+        _sel="$(_devlab_find_legacy_tar "${_img}" "${_tag}" "${_sd}")"
+        case "${_sel}" in
+            ok$'\t'*)    _tar="${_sel#ok$'\t'}" ;;
+            ambig$'\t'*) _legacy_note="匹配到多个旧后缀 tar(${_sel#ambig$'\t'}) —— 无法唯一确定" ;;
+        esac
     fi
     if [ -z "${_tar}" ]; then
+        if [ -n "${_legacy_note}" ]; then
+            printf 'miss\t%s:%s %s; 跳过(清理重复 tar 或把 DEV_LAB_*_TAG 钉到精确 tag)\n' \
+                "${_img}" "${_tag}" "${_legacy_note}" > "${PUSH_RESULT_DIR}/${_idx}.result"
+            return 0
+        fi
         printf 'miss\t缺离线 tar: %s:%s(跳过; 生成: sudo tools/images/harbor-save-images.sh --group dev-lab)\n' \
             "${_img}" "${_tag}" > "${PUSH_RESULT_DIR}/${_idx}.result"
         return 0
