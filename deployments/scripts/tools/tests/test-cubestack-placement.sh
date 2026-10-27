@@ -90,6 +90,41 @@ else
     echo "  FAIL 无法执行 apply(tool missing)"; fail=1
 fi
 
+echo "== ⑥ check 精确校验 nodeSelector(不得被 toleration 假阳性) =="
+# 2026-10-27 容器 c 实测: Deployment 只有 tolerations、没有 nodeSelector 时旧 --check 仍报 OK,
+# 因为 grep 整个 JSON 会命中 toleration 里的 control-plane 字符串 → 必须按字段解析。
+mkdir -p "${TMP}/bin-check"
+cat > "${TMP}/bin-check/ssh" <<'FAKE'
+#!/bin/bash
+cmd="$*"
+case "${cmd}" in
+    *" -o json"*) cat "${FAKE_DEPLOY_JSON:?}" ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-check/ssh"
+run_check() {   # <deploy json>
+    (
+        export PATH="${TMP}/bin-check:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        export FAKE_DEPLOY_JSON="$1"
+        bash "${TOOL}" --check
+    )
+}
+cat > "${TMP}/dep-no-sel.json" <<'EOF'
+{"spec":{"template":{"spec":{"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}}}
+EOF
+cat > "${TMP}/dep-ok.json" <<'EOF'
+{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""},"tolerations":[{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}}}
+EOF
+out="$(run_check "${TMP}/dep-no-sel.json" 2>&1)"; rc=$?
+chk "⑥ 仅 toleration 无 nodeSelector → check 失败" "1" "${rc}"
+chk_contains "⑥ 报 placement 不完整" "placement 不完整" "${out}"
+out="$(run_check "${TMP}/dep-ok.json" 2>&1)"; rc=$?
+chk "⑥ selector+toleration → check 通过" "0" "${rc}"
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-cubestack-placement: 全部通过"

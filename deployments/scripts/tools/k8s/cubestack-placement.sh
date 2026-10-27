@@ -71,11 +71,24 @@ _check_one() {
         say "  [${_ns}/${_type}/${_name}] 不存在, 跳过"; return 0
     fi
     _json="$(SSH "${K}" -n ${_ns} get ${_type} ${_name} -o json 2>/dev/null || true)"
-    if ! printf '%s' "${_json}" | grep -q 'node-role.kubernetes.io/control-plane'; then
-        err "  [${_ns}/${_type}/${_name}] 缺 master nodeSelector(control-plane)"; return 1
-    fi
-    if ! printf '%s' "${_json}" | grep -q 'node.kubernetes.io/unschedulable'; then
-        err "  [${_ns}/${_type}/${_name}] 缺 unschedulable toleration"; return 1
+    # ★ 2026-10-27: 必须**只检查 nodeSelector/tolerations 字段** —— tolerations 里也含
+    #   control-plane/unschedulable 字符串, 旧实现 grep 整个 JSON 会对"只有 tolerations、
+    #   没有 nodeSelector"的 Deployment 误报 OK(容器 c 实测: Pod 实际全在 worker)。
+    if ! printf '%s' "${_json}" | python3 -c '
+import json, sys
+try:
+    s = json.load(sys.stdin)["spec"]["template"]["spec"]
+except Exception:
+    sys.exit(1)
+sel = s.get("nodeSelector") or {}
+tols = s.get("tolerations") or []
+ok = sel.get("node-role.kubernetes.io/control-plane") == "" and any(
+    t.get("key") == "node.kubernetes.io/unschedulable" and t.get("effect") == "NoSchedule"
+    for t in tols
+)
+sys.exit(0 if ok else 1)
+'; then
+        err "  [${_ns}/${_type}/${_name}] placement 不完整(需 master nodeSelector + unschedulable toleration)"; return 1
     fi
     ok "  [${_ns}/${_type}/${_name}] placement OK"
 }
