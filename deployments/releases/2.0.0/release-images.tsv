@@ -3,7 +3,7 @@
 #   · 自研组件统一 :v2.0.0-rc2(chart 2.0.0-rc2 / operator 镜像 v2.0.0-rc2); 第三方保持上游 tag
 #   · 用法: cubestack-platform-save-images.sh --list <本文件> --out <release>/cubestack-operator
 # 校验: cubestack-platform-save-images.sh --list-check --list <本文件> --out <release>/cubestack-operator
-.	harbor.isuanova.com_suanova-private_cubestack-operator_v2.0.0-rc2.tar		harbor.isuanova.com/suanova-private/cubestack-operator:v2.0.0-rc2
+.	harbor.isuanova.com_suanova-private_cubestack-operator_v2.0.0-rc3.tar		harbor.isuanova.com/suanova-private/cubestack-operator:v2.0.0-rc3
 perses	docker.io_kiwigrid_k8s-sidecar_2.11.2.tar	harbor.isuanova.com/mirrors/docker.io/kiwigrid/k8s-sidecar:2.11.2	docker.io/kiwigrid/k8s-sidecar:2.11.2
 perses	docker.io_persesdev_perses-operator_v0.5.0.tar	harbor.isuanova.com/mirrors/docker.io/persesdev/perses-operator:v0.5.0	docker.io/persesdev/perses-operator:v0.5.0
 perses	docker.io_persesdev_perses_v0.54.0.tar	harbor.isuanova.com/mirrors/docker.io/persesdev/perses:v0.54.0	docker.io/persesdev/perses:v0.54.0
@@ -18,10 +18,10 @@ prometheus	quay.io_prometheus_node-exporter_v1.12.1-distroless.tar	harbor.isuano
 prometheus	quay.io_prometheus_prometheus_v3.14.0-distroless.tar	harbor.isuanova.com/mirrors/quay.io/prometheus/prometheus:v3.14.0-distroless	quay.io/prometheus/prometheus:v3.14.0-distroless
 prometheus	quay.io_thanos_thanos_v0.42.4.tar		quay.io/thanos/thanos:v0.42.4
 prometheus	registry.k8s.io_kube-state-metrics_kube-state-metrics_v2.20.0.tar	harbor.isuanova.com/mirrors/registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0	registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0
-cubepilot	harbor.isuanova.com_suanova_cubepilot-api_v2.0.0-rc2.tar		harbor.isuanova.com/suanova/cubepilot-api:v2.0.0-rc2
-cubepilot	harbor.isuanova.com_suanova_cubepilot-openclaw_v2.0.0-rc2.tar		harbor.isuanova.com/suanova/cubepilot-openclaw:v2.0.0-rc2
-cubepilot	harbor.isuanova.com_suanova_cubepilot-operator_v2.0.0-rc2.tar		harbor.isuanova.com/suanova/cubepilot-operator:v2.0.0-rc2
-cubepilot	harbor.isuanova.com_suanova_cubepilot-web_v2.0.0-rc2.tar		harbor.isuanova.com/suanova/cubepilot-web:v2.0.0-rc2
+cubepilot	harbor.isuanova.com_suanova_cubepilot-api_v2.0.0-rc3.tar		harbor.isuanova.com/suanova/cubepilot-api:v2.0.0-rc3
+cubepilot	harbor.isuanova.com_suanova_cubepilot-openclaw_v2.0.0-rc3.tar		harbor.isuanova.com/suanova/cubepilot-openclaw:v2.0.0-rc3
+cubepilot	harbor.isuanova.com_suanova_cubepilot-operator_v2.0.0-rc3.tar		harbor.isuanova.com/suanova/cubepilot-operator:v2.0.0-rc3
+cubepilot	harbor.isuanova.com_suanova_cubepilot-web_v2.0.0-rc3.tar		harbor.isuanova.com/suanova/cubepilot-web:v2.0.0-rc3
 envoy-gateway	docker.io_envoyproxy_ai-gateway-controller_v1.2.0.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ai-gateway-controller:v1.2.0	docker.io/envoyproxy/ai-gateway-controller:v1.2.0
 envoy-gateway	docker.io_envoyproxy_ai-gateway-extproc_v1.2.0.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ai-gateway-extproc:v1.2.0	docker.io/envoyproxy/ai-gateway-extproc:v1.2.0
 envoy-gateway	docker.io_envoyproxy_envoy_distroless-v1.39.1.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/envoy:distroless-v1.39.1	docker.io/envoyproxy/envoy:distroless-v1.39.1
@@ -30,12 +30,12 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
 lws	registry.k8s.io_lws_lws_v0.10.0.tar	harbor.isuanova.com/mirrors/registry.k8s.io/lws/lws:v0.10.0	registry.k8s.io/lws/lws:v0.10.0
 bmc	harbor.isuanova.com_suanova_bmc-oem-exporter_cd15d0eecee33417be00e123ded31fb10d8488f7.tar	harbor.isuanova.com/suanova-private/bmc-oem-exporter:cd15d0eecee33417be00e123ded31fb10d8488f7	harbor.isuanova.com/suanova/bmc-oem-exporter:cd15d0eecee33417be00e123ded31fb10d8488f7
 bmc	harbor.isuanova.com_suanova_idrac-exporter_cd15d0eecee33417be00e123ded31fb10d8488f7.tar	harbor.isuanova.com/suanova-private/idrac-exporter:cd15d0eecee33417be00e123ded31fb10d8488f7	harbor.isuanova.com/suanova/idrac-exporter:cd15d0eecee33417be00e123ded31fb10d8488f7
-controller-manager	harbor.isuanova.com_suanova_cubestack-controller-manager_v2.0.0-rc2.tar		harbor.isuanova.com/suanova/cubestack-controller-manager:v2.0.0-rc2
-controller-manager	harbor.isuanova.com_suanova_cubestack-activity-agent_v2.0.0-rc2.tar		harbor.isuanova.com/suanova/cubestack-activity-agent:v2.0.0-rc2
+controller-manager	harbor.isuanova.com_suanova_cubestack-controller-manager_v2.0.0-rc3.tar		harbor.isuanova.com/suanova/cubestack-controller-manager:v2.0.0-rc3
+controller-manager	harbor.isuanova.com_suanova_cubestack-activity-agent_v2.0.0-rc3.tar		harbor.isuanova.com/suanova/cubestack-activity-agent:v2.0.0-rc3
 cuberouter	ghcr.io_cloudnative-pg_cloudnative-pg_1.30.0.tar	harbor.isuanova.com/mirrors/ghcr.io/cloudnative-pg/cloudnative-pg:1.30.0	ghcr.io/cloudnative-pg/cloudnative-pg:1.30.0
 cuberouter	ghcr.io_cloudnative-pg_postgresql_16.14-system-trixie.tar	harbor.isuanova.com/mirrors/ghcr.io/cloudnative-pg/postgresql:16.14-system-trixie	ghcr.io/cloudnative-pg/postgresql:16.14-system-trixie
-cuberouter	harbor.isuanova.com_suanova_cuberouter_v2.0.0-rc2.tar		harbor.isuanova.com/suanova/cuberouter:v2.0.0-rc2
-portal	harbor.isuanova.com_suanova_cubestack-ui_v2.0.0-rc2.tar		harbor.isuanova.com/suanova/cubestack-ui:v2.0.0-rc2
+cuberouter	harbor.isuanova.com_suanova_cuberouter_v2.0.0-rc3.tar		harbor.isuanova.com/suanova/cuberouter:v2.0.0-rc3
+portal	harbor.isuanova.com_suanova_cubestack-ui_v2.0.0-rc3.tar		harbor.isuanova.com/suanova/cubestack-ui:v2.0.0-rc3
 portal	quay.io_opstree_redis-exporter_v1.44.0.tar		quay.io/opstree/redis-exporter:v1.44.0
 portal	quay.io_opstree_redis-operator_v0.26.0.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-operator:v0.26.0	quay.io/opstree/redis-operator:v0.26.0
 portal	quay.io_opstree_redis-sentinel_v7.0.15.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-sentinel:v7.0.15	quay.io/opstree/redis-sentinel:v7.0.15
