@@ -1064,6 +1064,15 @@ if [ "${CR_ENABLED}" = "true" ]; then
         || warn "  Envoy Gateway 公网 Service 类型未确认; Web UI 可能暂时无法从节点外访问"
 fi
 
+# ★ 2026-10-27 容器 c 全新安装实测: operator 组件是**异步创建**的, [6.5/6] 的 60s 窗口内
+#   cuberouter 可能还没出现 → 策略保持 RollingUpdate, 首次 HA/模板收敛滚动撞 RWO Multi-Attach
+#   (旧 Pod 持卷, 新 Pod Init 卡死)。结束前再兜一次(此时组件已基本创建完)。
+if [ "${CR_ENABLED}" = "true" ]; then
+    ensure_rwo_deployments_recreate "${NS}" "cubestack.io/managed-by=cubestack-operator" \
+        "${CUBESTACK_OPERATOR_RWO_STRATEGY_WAIT_SECONDS:-120}" \
+        || warn "  RWO 策略二次纠正未全部成功; 下次滚动前请手工确认"
+fi
+
 echo "---------------------------------------------"
 ( SSH "${K} -n ${NS} get pods,deploy -o wide 2>/dev/null" || true ) | sed 's/^/    /'
 echo "---------------------------------------------"

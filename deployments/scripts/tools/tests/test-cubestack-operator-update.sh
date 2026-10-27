@@ -58,6 +58,8 @@ chk_contains "采集 target digest" '_OPERATOR_DIGEST="${_d_dst}"' "${MOD}"
 
 echo "== ⑤ RWO 单卷 Deployment 策略守护 =="
 chk_contains "调用 ensure_rwo_deployments_recreate" 'ensure_rwo_deployments_recreate "${NS}"' "${MOD}"
+chk "RWO 策略二次兜底(operator 异步创建组件)" "2" \
+    "$(count_of x 'ensure_rwo_deployments_recreate "${NS}"' "${MOD}")"
 chk_contains "默认等待上界变量" 'CUBESTACK_OPERATOR_RWO_STRATEGY_WAIT_SECONDS' "${MOD}"
 
 echo "== ⑤b 离线推送后触发 ImagePullBackOff Pod 重拉 =="
