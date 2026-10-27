@@ -1892,9 +1892,9 @@ scope 的 component 或 `all` 重跑。刷新期间不要手工删 marker。
 - 离线部署（MinIO tar）与在线部署（Harbor tag）实际跑的是两版 CLI。
 
 **根因**
-- 旧流程 push `release-2.0` 后由 `rebuild-cli-image.yml` 只推 Harbor，CLI tar 依赖
-  `sync-release-2.0-images.yml` 的 `workflow_run`；默认分支 main 的监听器缺失/滞后，
-  或同步 workflow 失败时，MinIO 就停在旧 tar。
+- 旧流程 push `release-2.0` 后由 `rebuild-cli-image.yml` 只推 Harbor，CLI tar 曾依赖
+  `sync-release-images.yml` 的 `workflow_run`（该触发已移除，现在同一 job 内同步）；
+  历史上默认分支 main 的监听器缺失/滞后，或同步 workflow 失败时，MinIO 就停在旧 tar。
 
 **解法**
 1. 先确认差异：

@@ -1,31 +1,32 @@
-name: Sync release-2.0 images to MinIO
+name: Sync release images to MinIO
 
 # ============================================================================
-# release-2.0 组件镜像原地刷新: Harbor → MinIO <release>/offline-files/
+# 组件镜像/chart 原地刷新: Harbor → MinIO <release>/offline-files/
 #
 # 触发:
-#   · repository_dispatch: release-2.0-updated
-#       {release, component, tag?, source_repo?, sha?, checkout_ref?}
+#   · repository_dispatch: release-updated / release-2.0-updated(兼容)
+#       {release, component, tag?, source_repo?, checkout_ref?}
+#   · push 到 release-*: 版本定义变更(release.env / release-images.tsv)
 #   · workflow_dispatch: 手动/首次 seed/恢复
 #   · CLI tar 由 rebuild-cli-image.yml 在**同一 job** 内同步; 本 workflow 不再
 #     监听 workflow_run(避免默认分支监听器缺失/滞后导致 Harbor 与 MinIO 不一致)。
 #
-# ⚠ 本文件在 main 与 release-2.0 必须保持完全一致:
+# ⚠ 本文件在 main 与各 release-* 分支必须保持完全一致:
 #   GitHub 的 repository_dispatch 只触发默认分支(main)上的 workflow;
-#   main 副本 checkout release-2.0 后执行 release-2.0 的脚本。
-#   main 副本请不要改脚本路径/默认 checkout_ref.
+#   push 触发使用被推送分支上的本文件, 因此每个 release 分支都要带同一份.
 #
-# 前置:
-#   · deployments/releases/<release>/{release.env,release-images.tsv,components.tsv}
-#     已指向目标 tag (组件 dispatch 前必须完成);
-#   · MinIO 上 <bucket>/<release>/offline-files/_SUCCESS 已存在(完整发布树);
-#   · secrets/vars 与 refresh-latest-offline.yml 相同, 可选
-#     CUBESTACK_OPERATOR_HARBOR_USER/PASSWORD 拉私有 operator/chart.
+# Concurrency: GitHub keeps only one pending run per concurrency group, so a burst of
+# pushes can replace a still-pending run. Recover a missed sync via workflow_dispatch.
 # ============================================================================
 
 on:
   repository_dispatch:
-    types: [release-2.0-updated]
+    types: [release-updated, release-2.0-updated]
+  push:
+    branches: ['release-*']
+    paths:
+      - 'deployments/releases/*/release.env'
+      - 'deployments/releases/*/release-images.tsv'
   workflow_dispatch:
     inputs:
       release:
@@ -45,9 +46,9 @@ on:
         required: false
         default: ''
       checkout_ref:
-        description: 'checkout 的发布分支'
+        description: 'checkout 的发布分支(留空=由 release 推导)'
         required: false
-        default: 'release-2.0'
+        default: ''
       force:
         description: '强制重拉/重传选中的镜像'
         type: boolean
@@ -86,7 +87,7 @@ env:
   COMPONENT: ${{ github.event.client_payload.component || github.event.inputs.component || 'all' }}
   TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag || '' }}
   SOURCE_REPO: ${{ github.event.client_payload.source_repo || github.event.inputs.source_repo || '' }}
-  CHECKOUT_REF: ${{ github.event.client_payload.checkout_ref || github.event.inputs.checkout_ref || 'release-2.0' }}
+  CHECKOUT_REF: ${{ github.event.client_payload.checkout_ref || github.event.inputs.checkout_ref || (github.event_name == 'push' && github.ref_name) || '' }}
   FORCE: ${{ github.event.inputs.force || 'false' }}
   DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
   VERIFY_REMOTE_INPUT: ${{ github.event.inputs.verify_remote }}
@@ -113,24 +114,66 @@ jobs:
     timeout-minutes: 5
     outputs:
       releases: ${{ steps.resolve.outputs.releases }}
+      checkout_ref: ${{ steps.resolve.outputs.checkout_ref }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Resolve releases
         id: resolve
         run: |
           set -euo pipefail
-          case "${RELEASE}" in
-            ''|*[!0-9A-Za-z._-]*) echo "::error::invalid release: ${RELEASE}"; exit 1 ;;
-          esac
-          json="$(RELEASE="${RELEASE}" python3 -c \
-            'import json,os; print(json.dumps([os.environ["RELEASE"]]))')"
-          echo "releases=${json}" >> "$GITHUB_OUTPUT"
-          echo "releases: ${json}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            base="${{ github.event.before }}"
+            head="${{ github.event.after }}"
+            case "${base}" in
+              ''|0000000000000000000000000000000000000000)
+                # New branch: diff against the default branch instead of the root commit,
+                # otherwise every historical release dir would be synced.
+                default_branch="${{ github.event.repository.default_branch }}"
+                git fetch --no-tags origin "+refs/heads/${default_branch}:refs/remotes/origin/${default_branch}"
+                base="$(git merge-base "${head}" "origin/${default_branch}")" ;;
+            esac
+            releases="$(git diff --name-only "${base}" "${head}" \
+              -- 'deployments/releases/*/release.env' 'deployments/releases/*/release-images.tsv' \
+              | awk -F/ '{print $3}' | sort -u | python3 -c \
+                'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
+            count="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "${releases}")"
+            if [ "${count}" != "1" ]; then
+              echo "::error::push event must touch exactly one release: ${releases}"
+              exit 1
+            fi
+          else
+            releases="$(RELEASE="${RELEASE}" python3 -c \
+              'import json,os; print(json.dumps([os.environ["RELEASE"]]))')"
+          fi
+          ref="${CHECKOUT_REF:-}"
+          if [ -z "${ref}" ]; then
+            ref="$(python3 - "${releases}" <<'PY'
+          import json, sys
+          rels = json.loads(sys.argv[1])
+          if len(rels) != 1:
+              raise SystemExit("checkout_ref 缺失且 release 不是唯一值: " + repr(rels))
+          m = rels[0].split(".")
+          print(f"release-{m[0]}.{m[1]}")
+          PY
+          )"
+          fi
+          case "${ref}" in ''|*[!0-9A-Za-z._/-]*|*..*)
+            echo "::error::invalid checkout_ref: ${ref}"; exit 1 ;; esac
+          echo "releases=${releases}" >> "$GITHUB_OUTPUT"
+          echo "checkout_ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "releases: ${releases} (checkout_ref=${ref})" >> "$GITHUB_STEP_SUMMARY"
 
   sync:
     name: Sync ${{ matrix.release }}
     needs: release-list
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      # job 级覆盖: 校验与 checkout 都用 resolve 的结果, 不再依赖 workflow 级默认值
+      CHECKOUT_REF: ${{ needs.release-list.outputs.checkout_ref }}
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -140,7 +183,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.CHECKOUT_REF }}
+          ref: ${{ needs.release-list.outputs.checkout_ref }}
           persist-credentials: false
 
       - name: Validate configuration
@@ -191,33 +234,43 @@ jobs:
           MATRIX_RELEASE: ${{ matrix.release }}
         run: |
           set -euo pipefail
-          args=(--release "${MATRIX_RELEASE}" --component "${COMPONENT:-all}"
-                --summary-file "${RUNNER_TEMP}/sync-summary.md")
-          [ -n "${TAG:-}" ] && args+=(--tag "${TAG}")
-          [ -n "${SOURCE_REPO:-}" ] && args+=(--source-repo "${SOURCE_REPO}")
-          [ "${FORCE:-false}" = "true" ] && args+=(--force)
-          [ "${FIRST_PARTY_ONLY:-false}" = "true" ] && args+=(--first-party-only)
-          [ "${RECOVER:-false}" = "true" ] && args+=(--recover)
-          [ "${KEEP_STALE:-false}" = "true" ] && args+=(--keep-stale)
-          [ "${VERIFY_REMOTE_INPUT:-true}" = "false" ] && args+=(--no-verify-remote)
+          common=(--release "${MATRIX_RELEASE}")
+          [ "${FORCE:-false}" = "true" ] && common+=(--force)
+          [ "${RECOVER:-false}" = "true" ] && common+=(--recover)
+          [ "${KEEP_STALE:-false}" = "true" ] && common+=(--keep-stale)
+          [ "${VERIFY_REMOTE_INPUT:-true}" = "false" ] && common+=(--no-verify-remote)
 
-          echo "::group::preflight"
-          bash deployments/scripts/tools/images/release-sync-images.sh "${args[@]}" --preflight
-          echo "::endgroup::"
-
-          if [ "${DRY_RUN:-false}" = "true" ]; then
-            echo "::group::dry-run"
-            bash deployments/scripts/tools/images/release-sync-images.sh "${args[@]}" --dry-run
+          # Each invocation gets its own summary file; the script truncates it.
+          run_group() {
+            local summary="$1"; shift
+            echo "::group::$*"
+            bash deployments/scripts/tools/images/release-sync-images.sh "$@" --summary-file "${summary}" --preflight
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              bash deployments/scripts/tools/images/release-sync-images.sh "$@" --summary-file "${summary}" --dry-run
+            else
+              bash deployments/scripts/tools/images/release-sync-images.sh "$@" --summary-file "${summary}"
+            fi
             echo "::endgroup::"
+          }
+
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            run_group "${RUNNER_TEMP}/sync-summary-images.md" "${common[@]}" --component all --first-party-only
+            run_group "${RUNNER_TEMP}/sync-summary-chart.md" "${common[@]}" --component operator-chart
           else
-            bash deployments/scripts/tools/images/release-sync-images.sh "${args[@]}"
+            args=("${common[@]}" --component "${COMPONENT:-all}")
+            [ -n "${TAG:-}" ] && args+=(--tag "${TAG}")
+            [ -n "${SOURCE_REPO:-}" ] && args+=(--source-repo "${SOURCE_REPO}")
+            [ "${FIRST_PARTY_ONLY:-false}" = "true" ] && args+=(--first-party-only)
+            run_group "${RUNNER_TEMP}/sync-summary.md" "${args[@]}"
           fi
 
       - name: Summary
         if: always()
         run: |
-          if [ -f "${RUNNER_TEMP}/sync-summary.md" ]; then
-            cat "${RUNNER_TEMP}/sync-summary.md" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "no sync summary produced" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          found=0
+          for f in "${RUNNER_TEMP}"/sync-summary*.md; do
+            [ -f "${f}" ] || continue
+            cat "${f}" >> "$GITHUB_STEP_SUMMARY"
+            found=1
+          done
+          [ "${found}" = "1" ] || echo "no sync summary produced" >> "$GITHUB_STEP_SUMMARY"
