@@ -768,9 +768,12 @@ _WORK="$(mktemp -d)"
 trap '_cleanup; rm -rf "${_WORK}"' EXIT
 
 # 节点池(2026-10-27): operator pod 自身钉 master + 容忍 control-plane/unschedulable。
-# 平台组件(controller-manager/envoy/ai-gateway/lws/portal/monitoring 等)由 node_pool 模块的
-# cubestack-placement.sh 在部署末尾 patch —— 不改 CR spec.global, 避免把 model bundle 的
-# sglang/vllm 推理负载也钉到 master(GPU 隔离在后续阶段单独处理)。
+# 平台组件：cubepilot-api/operator、cubestack-controller-manager、cubestack-portal 等
+# **组件 chart 原生支持 nodeSelector/tolerations**，这里通过 CubeStackCluster 的
+# components.<name>.values 在**创建 Deployment 时**就下发（不依赖部署末尾 patch）。
+# 其余平台组件(envoy/ai-gateway/lws/cuberouter/monitoring)仍由 node_pool 模块的
+# cubestack-placement.sh 兜底；**不使用** CR spec.global 的 placement 字段 —— 它会注入
+# 到所有组件(含 model bundle 推理负载)。
 if [ "${NODE_POOL_CUBESTACK_PLACEMENT:-true}" = "true" ]; then
     _NODE_POOL_VALUES="${_WORK}/node-pool-values.yaml"
     cat > "${_NODE_POOL_VALUES}" <<'EOF'
@@ -783,6 +786,66 @@ tolerations:
   - key: node.kubernetes.io/unschedulable
     operator: Exists
     effect: NoSchedule
+
+# 平台组件：通过 component values 传给各自 chart（chart 已原生支持）。
+# cubepilot-chart: operator/api/web；controller-manager/portal chart: 顶层。
+clusterCR:
+  spec:
+    components:
+      cubepilot:
+        values:
+          operator:
+            nodeSelector:
+              node-role.kubernetes.io/control-plane: ""
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node.kubernetes.io/unschedulable
+                operator: Exists
+                effect: NoSchedule
+          api:
+            nodeSelector:
+              node-role.kubernetes.io/control-plane: ""
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node.kubernetes.io/unschedulable
+                operator: Exists
+                effect: NoSchedule
+          web:
+            nodeSelector:
+              node-role.kubernetes.io/control-plane: ""
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node.kubernetes.io/unschedulable
+                operator: Exists
+                effect: NoSchedule
+      cubestackControllerManager:
+        values:
+          nodeSelector:
+            node-role.kubernetes.io/control-plane: ""
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+            - key: node.kubernetes.io/unschedulable
+              operator: Exists
+              effect: NoSchedule
+      cubestackPortal:
+        values:
+          nodeSelector:
+            node-role.kubernetes.io/control-plane: ""
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+            - key: node.kubernetes.io/unschedulable
+              operator: Exists
+              effect: NoSchedule
 EOF
     _EXTRA_VALUES+=( -f "${_NODE_POOL_VALUES}" )
 fi

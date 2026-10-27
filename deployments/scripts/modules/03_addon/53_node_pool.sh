@@ -1,21 +1,25 @@
 #!/bin/bash
 # ============================================================
 # MODULE: node_pool
-# DESC: 节点池调度隔离(master 打 node-pool=control-plane + 可选 cordon; 默认不随全量部署)
+# DESC: 节点池调度隔离(默认启用: 平台组件钉 master, master 默认不 cordon; 可选 cordon)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: NODE_POOL_ENABLED
 # REQUIRES: k8s_deploy
 # 说明:
-#   · 目标(2026-10-27): master 保持 Unschedulable=True(SchedulingDisabled), 但 Ceph/
-#     operator 等平台 Pod 通过 nodeSelector + special toleration
-#     (node.kubernetes.io/unschedulable:NoSchedule)仍能调度到 master。
-#   · 本模块只做节点侧标签/cordon; **不 patch 工作负载**。平台组件 placement 配置完成后再启用。
-#   · 默认 DEFAULT:0 + NODE_POOL_ENABLED=false ⇒ 不随全量部署; 需要时:
+#   · 默认口径(2026-10-27): master 保持**可调度**(Unschedulable=false)，CubeStack operator/
+#     平台组件通过 nodeSelector + toleration 钉到 master。需要维护窗口时显式
+#     NODE_POOL_MASTER_CORDON=true；Pod 侧已有 node.kubernetes.io/unschedulable:NoSchedule
+#     toleration，仍能调度到 cordon master。
+#   · 本模块 = 平台 placement(先) + master 标签/按需 cordon(后)：
+#       - NODE_POOL_CUBESTACK_PLACEMENT=true(默认): cubestack-placement.sh 兜底 patch 平台 Deployment；
+#         25_cubestack_operator.sh 还会通过 CubeStackCluster components.<name>.values 在创建
+#         cubepilot-api/operator、controller-manager、portal 时直接下发 master placement。
+#       - NODE_POOL_PLATFORM_PLACEMENT=false(默认): 不动 CoreDNS/metrics/registry/MetalLB 等系统组件。
+#   · NODE_POOL_ENABLED 默认 true ⇒ 随全量部署在 addon 末尾(本文件 53)执行；也可手动:
 #       sudo ./deploy-cluster.sh --steps node_pool
 #       NODE_POOL_ACTION=remove sudo ./deploy-cluster.sh --steps node_pool   # 回滚
-#     若在 cluster.conf 设 NODE_POOL_ENABLED=true, 全量部署会在 addon 末尾(本文件 53)执行。
 #   · cordon 由本工具创建时会打 ownership annotation; remove 只回滚自己创建的 cordon,
 #     不会误删用户/其他工具预先设置的 cordon。
 #   · 详见 docs/node-pool.md。

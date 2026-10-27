@@ -338,6 +338,23 @@ chk_contains "HA 例外: lws 保持单副本(CPU)" 'clusterCR.spec.components.lw
 chk_contains "活体 CR 组件 HA 例外纠偏" 'CR 组件 HA 例外已收敛' "${MOD}"
 chk_contains "Deployment 副本数纠偏" 'scale deploy ${_DEP_NAME} --replicas=${OP_REPLICAS}' "${MOD}"
 
+echo "== ⑭ 默认平台组件 master placement(chart values 透传, 不改组件 chart) =="
+# 2026-10-27: cubepilot-api/operator、controller-manager、portal 的 chart 已原生支持
+# nodeSelector/tolerations；operator 模块通过 CubeStackCluster components.<name>.values
+# 在创建 Deployment 时下发，不依赖 node_pool 模块的末尾 patch。
+for k in 'cubepilot:' 'cubestackControllerManager:' 'cubestackPortal:'; do
+    chk_contains "CR component ${k}" "$(printf '      %s' "${k}")" "${MOD}"
+done
+for k in 'operator:' 'api:' 'web:'; do
+    chk_contains "cubepilot subcomponent ${k}" "$(printf '          %s' "${k}")" "${MOD}"
+done
+chk_contains "CR values nodeSelector" 'node-role.kubernetes.io/control-plane: ""' "${MOD}"
+chk_contains "CR values unschedulable toleration" 'node.kubernetes.io/unschedulable' "${MOD}"
+chk_contains "defaults NODE_POOL_ENABLED=true" 'NODE_POOL_ENABLED="${NODE_POOL_ENABLED:-true}"' "${DEFAULTS}"
+chk_contains "defaults NODE_POOL_MASTER_CORDON=false" 'NODE_POOL_MASTER_CORDON="${NODE_POOL_MASTER_CORDON:-false}"' "${DEFAULTS}"
+chk_contains "defaults NODE_POOL_PLATFORM_PLACEMENT=false" 'NODE_POOL_PLATFORM_PLACEMENT="${NODE_POOL_PLATFORM_PLACEMENT:-false}"' "${DEFAULTS}"
+chk_contains "defaults NODE_POOL_CUBESTACK_PLACEMENT=true" 'NODE_POOL_CUBESTACK_PLACEMENT="${NODE_POOL_CUBESTACK_PLACEMENT:-true}"' "${DEFAULTS}"
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-cubestack-operator-update: 全部通过"

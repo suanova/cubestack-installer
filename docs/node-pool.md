@@ -1,12 +1,14 @@
 # 节点池调度隔离(node pool)
 
-> 2026-10-27 起分阶段实现。当前阶段：**master 节点标签 + 可选 cordon 的节点侧基础工具**；
-> 平台组件 placement 加固与 GPU worker 隔离在后续阶段补充。
+> 2026-10-27 起分阶段实现。当前**默认口径**：master 保持可调度（`Unschedulable=false`），
+> CubeStack operator/平台组件通过 nodeSelector + toleration 钉到 master；master cordon 仅作为
+> 维护窗口的可选项。GPU worker 隔离在后续阶段补充。
 
 ## 目标
 
-- **master**：保持 `Unschedulable=True`（`kubectl get nodes` 显示 `SchedulingDisabled`），
-  但 Ceph / operator / 平台业务 Pod 仍能调度到 master。
+- **master**：默认**不 cordon**（`Unschedulable=false`），但 Ceph / operator / 平台组件通过
+  nodeSelector + toleration 钉到 master；需要维护时显式 `NODE_POOL_MASTER_CORDON=true`，
+  Pod 已带 `node.kubernetes.io/unschedulable:NoSchedule` toleration，仍能调度到 cordon master。
 - **GPU worker**：纯 GPU 节点，只允许 sglang/vllm 推理与 GPU 驱动/设备插件等必要 Pod；
   系统 DaemonSet 例外。
 - 允许临时维护时对 master `cordon/drain`，不破坏平台组件的重调度。
@@ -69,18 +71,19 @@ sudo ./deployments/scripts/tools/node/node-pool.sh --apply --only <master-hostna
 `deployments/scripts/modules/03_addon/53_node_pool.sh`
 
 ```bash
-# 手动执行(推荐; 平台 placement 配置完成后再跑)
-NODE_POOL_ENABLED=true sudo ./deploy-cluster.sh --steps node_pool
+# 默认已随全量部署执行(NODE_POOL_ENABLED=true)；也可手动单跑
+sudo ./deploy-cluster.sh --steps node_pool
 
 # 回滚
-NODE_POOL_ENABLED=true NODE_POOL_ACTION=remove sudo ./deploy-cluster.sh --steps node_pool
+NODE_POOL_ACTION=remove sudo ./deploy-cluster.sh --steps node_pool
 ```
 
-- `DEFAULT: 0`、`TOGGLE: NODE_POOL_ENABLED`：默认不随全量部署；
-- 若在 cluster.conf 设 `NODE_POOL_ENABLED=true`，它会在 addon 末尾（文件 53）执行；
+- `DEFAULT: 0`、`TOGGLE: NODE_POOL_ENABLED`（默认 **true**）⇒ 随全量部署在 addon 末尾（文件 53）执行；
 - `REQUIRES: k8s_deploy`：集群必须先存在；已部署集群上 `k8s_deploy` 状态 done 时不会重跑；
-- 执行顺序：先 `master-placement.sh --apply` 给系统组件加 master placement，再 cordon；
-  `remove` 先 uncordon，再移除系统组件的 master nodeSelector。
+- 执行顺序：先 `cubestack-placement.sh --apply` 给平台组件加 master placement（
+  `NODE_POOL_PLATFORM_PLACEMENT=true` 时再跑 `master-placement.sh`），最后打 master 标签/
+  按需 cordon；
+  `remove` 先 uncordon，再移除 master nodeSelector。
 
 ### 系统组件 master placement(阶段二 B-1)
 
@@ -95,7 +98,7 @@ NODE_POOL_ENABLED=true NODE_POOL_ACTION=remove sudo ./deploy-cluster.sh --steps 
 - `metallb-system/deploy/controller`
 
 `metallb-system/ds/speaker` 是 DaemonSet，只补 toleration（必须全节点，含 cordon master）。
-用 `NODE_POOL_PLATFORM_PLACEMENT=false` 可关闭该步骤。
+`NODE_POOL_PLATFORM_PLACEMENT=true` 可开启该步骤（默认 false：不动系统组件）。
 
 > ⚠ kubespray 重跑 `k8s_deploy` 会按 addons.yml 重新渲染这些 Deployment；之后需重跑
 > `--steps node_pool` 重新应用。`--remove` 只移除本工具加的 master nodeSelector，
@@ -120,18 +123,30 @@ sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worke
 `NODE_POOL_CUBESTACK_PLACEMENT=false` 可关闭。
 
 - operator 自身的 chart 安装也加了 `nodeSelector`/`tolerations`（`25_cubestack_operator.sh`），
-  新建/重装时 operator pod 直接落 master；存量 Deployment 由上面的工具 patch。
+  新建/重装时 operator pod 直接落 master。
+- **默认通过 chart 透传**：`25_cubestack_operator.sh` 在 `NODE_POOL_CUBESTACK_PLACEMENT=true`
+  时生成 values 文件，把以下组件值传给 CubeStackCluster（组件 chart 已原生支持，无需改 chart）：
+  - `components.cubepilot.values.operator/api/web`
+  - `components.cubestackControllerManager.values`
+  - `components.cubestackPortal.values`
+  对应 `nodeSelector: node-role.kubernetes.io/control-plane=""` + control-plane/unschedulable
+  tolerations ⇒ **创建 Deployment 时即钉 master**，不依赖部署末尾 patch。
+- 其余平台组件（Envoy 控制器、ai-gateway、lws、cuberouter、monitoring 等）仍由
+  `cubestack-placement.sh` 在 node_pool 模块末尾兜底 patch。
 - **没有**设置 `CubeStackCluster.spec.global.nodeSelector/tolerations`——它是全局注入，
-  可能把 model bundle 推理负载也钉到 master；平台组件用直接 patch，GPU 阶段再单独处理 bundle。
+  可能把 model bundle 推理负载也钉到 master；平台组件用 component values/直接 patch，
+  GPU 阶段再单独处理 bundle。
 
 ### 配置（cluster.defaults.conf §2.8）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `NODE_POOL_ENABLED` | `false` | 总开关（默认不随全量部署） |
+| `NODE_POOL_ENABLED` | `true` | 总开关（默认随全量部署） |
 | `NODE_POOL_ACTION` | `apply` | `apply` / `check` / `remove` |
 | `NODE_POOL_MASTER_LABEL` | `node-pool=control-plane` | master 标签 |
-| `NODE_POOL_MASTER_CORDON` | `true` | master 是否 cordon |
+| `NODE_POOL_MASTER_CORDON` | `false` | master 是否 cordon（默认保持可调度） |
+| `NODE_POOL_PLATFORM_PLACEMENT` | `false` | 是否把 CoreDNS/metrics/registry/MetalLB 等系统组件也钉 master |
+| `NODE_POOL_CUBESTACK_PLACEMENT` | `true` | CubeStack operator/平台组件钉 master（含 chart values 透传） |
 | `NODE_POOL_GPU_LABEL` | `node-pool=gpu` | 阶段二使用 |
 | `NODE_POOL_GPU_TAINT` | `dedicated=gpu:NoSchedule` | 阶段二使用 |
 | `NODE_POOL_GPU_NODES` | 空 | 阶段二使用（hostname 列表） |
