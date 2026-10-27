@@ -894,6 +894,42 @@ if [ "${CR_ENABLED}" = "true" ]; then
     else
         _want_reg="${REG_BASE}"; _want_pref="${REG_BASE}/mirrors"; _want_pol="Always"; _want_secs='[]'
     fi
+    # 模式切换保护(2026-10-25 实机): InferenceRuntimeProfile 的 CRD 有 ValidatingAdmissionPolicy
+    # "spec is immutable"; 离线创建的 profile 里是内置 registry 镜像, 切在线后 operator 尝试改成
+    # Harbor 会被拒绝 → model-bundles Degraded。registry 变化时先删除 profile, 让 operator 按新
+    # registry 重建(模式切换的一次性代价; 模型服务需重新调谐)。
+    # 注意: helm 可能已先把 CR 改到目标 registry, 所以不能只看 CR; 还要扫描 profile 内实际
+    # image 前缀是否已属于目标 registry。
+    _need_recreate="0"
+    if [ -n "${_cr_name}" ] && [ -n "${_cr_reg}" ] && [ "${_cr_reg}" != "${_want_reg}" ]; then
+        _need_recreate="1"
+    else
+        _prof_json="$( (SSH "${K} get inferenceruntimeprofiles.ai.cubestack.io -o json 2>/dev/null" || true) )"
+        if [ -n "${_prof_json}" ]; then
+            _stale="$(printf '%s' "${_prof_json}" | python3 -c '
+import json, sys
+want = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+def walk(o):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k == "image" and isinstance(v, str) and v and not v.startswith(want):
+                print("1"); raise SystemExit
+            walk(v)
+    elif isinstance(o, list):
+        for v in o:
+            walk(v)
+walk(d.get("items", []))
+' "${_want_reg}" 2>/dev/null || true)"
+            [ -n "${_stale}" ] && _need_recreate="1"
+        fi
+    fi
+    if [ "${_need_recreate}" = "1" ]; then
+        say "  检测到 InferenceRuntimeProfile 镜像前缀与目标 registry(${_want_reg})不一致: 先纠偏 CR, 再重建 immutable profile..."
+    fi
     if [ -n "${_cr_name}" ] && { [ "${_cr_reg}" != "${_want_reg}" ] || [ "$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullPolicy}' 2>/dev/null" || true) )" != "${_want_pol}" ] || [ "${_cr_expose}" != "${_want_expose}" ] || [ "${_cr_secs_norm}" != "${_want_secs}" ]; }; then
         warn "  CR 取值漂移(当前 imageRegistry=${_cr_reg:-<空>}, serviceExposeMode=${_cr_expose:-<空>}), kubectl patch 纠正为 ${_want_reg}/${_want_expose} ..."
         SSH "${K} -n ${NS} patch csc ${_cr_name} --type=merge -p '{\"spec\":{\"global\":{\"imageRegistry\":\"${_want_reg}\",\"externalImageRegistryPrefix\":\"${_want_pref}\",\"imagePullSecrets\":${_want_secs},\"imagePullPolicy\":\"${_want_pol}\",\"serviceExposeMode\":\"${_want_expose}\"}}}' >/dev/null 2>&1" \
@@ -902,7 +938,25 @@ if [ "${CR_ENABLED}" = "true" ]; then
     else
         ok "  CR 取值与部署模式一致(${_want_reg}/${_want_expose})"
     fi
-    unset _cr_name _cr_reg _cr_expose _cr_secs _cr_secs_norm _want_reg _want_pref _want_pol _want_secs _want_expose
+    # ★ profile 删除必须在 CR 纠偏**之后**并等待完成(2026-10-26 CodeRabbit):
+    #   先删再 patch 时, operator 会趁窗口按**旧 registry** 重建 immutable profile;
+    #   随后的纠偏被 ValidatingAdmissionPolicy("spec is immutable")拒绝 → model-bundles Degraded。
+    #   删除前再读一次 CR: 只有它确实已是目标 registry 才删, 否则跳过(避免按旧值重建);
+    #   --wait + timeout 保证报告"已删除"时旧 profile 确实消失(不再停留在 terminating)。
+    if [ "${_need_recreate}" = "1" ]; then
+        _cr_now_reg="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imageRegistry}' 2>/dev/null" || true) )"
+        if [ -n "${_cr_name}" ] && [ "${_cr_now_reg}" != "${_want_reg}" ]; then
+            warn "  CR 尚未切到 ${_want_reg}(当前 ${_cr_now_reg:-<空>}) → 跳过 profile 重建(避免 operator 按旧 registry 生成新的 immutable profile)"
+        else
+            say "  删除旧 InferenceRuntimeProfile 并等待删除完成(operator 将按 ${_want_reg} 重建)..."
+            if SSH "${K} delete inferenceruntimeprofiles.ai.cubestack.io --all --ignore-not-found --wait=true --timeout=120s" </dev/null >/dev/null 2>&1; then
+                ok "  已删除旧 InferenceRuntimeProfile(operator 将按 ${_want_reg} 重建)"
+            else
+                warn "  删除/等待 InferenceRuntimeProfile 失败; model-bundles 可能 Degraded"
+            fi
+        fi
+    fi
+    unset _cr_name _cr_reg _cr_expose _cr_secs _cr_secs_norm _cr_now_reg _want_reg _want_pref _want_pol _want_secs _want_expose
 fi
 
 # ---------------- [6.5/6] RWO 单卷 Deployment 的更新策略守护 ----------------

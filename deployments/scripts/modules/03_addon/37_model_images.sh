@@ -8,9 +8,9 @@
 # TOGGLE: MODEL_IMAGES_ENABLED
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
-#   · 镜像集 = offline-files/model-collection/image-list.tsv(单一事实源; 5 件 ≈85G:
-#     suanova/sglang ×3 变体(主版本 + qwen21-dev + h3-patch), suanova/vllm-metax ×2
-#     (0.27 py312 + 0.25 py310 变体))。
+#   · 镜像集 = offline-files/model-collection/image-list.tsv(单一事实源; 2 件 ≈31G:
+#     suanova/sglang ×1(0.5.13 py310 主版本) + suanova/vllm-metax ×1(0.27.0 py312);
+#     2026-10-23 由 5 个变体收敛为 2 个)。
 #   · 离线 tar: deployments/offline-files/model-collection/{sglang,vllm}/(子目录; .tar 与 .tar.gz 均可);
 #     缺某个 tar → 该镜像 warn 跳过(不阻断部署), 结尾汇总(不伪装成功)。
 #   · 目标 ref: <集群 registry>/<ref 去注册域后的路径>(suanova/… 原样保路径, 与 dev_lab 同款映射)。
@@ -21,7 +21,7 @@
 #     首个镜像 base-first、其余有界并行; 配置 IMAGE_PUSH_*; 详见 docs/image-push-optimization.md。
 #   · 默认启用 = 默认 push(MODEL_IMAGES_ENABLED 默认 true); 跳过: --skip model_images 或置 false。
 #   · 顺序(2026-10-16 用户口径): **部署完集群与全部 operator 之后**才 push —— 模块文件排 37
-#     (dev_lab=36 之后)⇒ ≈85G 的大推送不占用关键链路时间, 前面组件先完成先验收;
+#     (dev_lab=36 之后)⇒ ≈31G 的大推送不占用关键链路时间, 前面组件先完成先验收;
 #     覆盖安装反序卸载时本模块无卸载动作(registry 镜像随集群/registry 覆盖消亡)。
 # 数据源: cluster.conf (MODEL_IMAGES_* / REGISTRY_* / IMAGE_PUSH_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps model_images

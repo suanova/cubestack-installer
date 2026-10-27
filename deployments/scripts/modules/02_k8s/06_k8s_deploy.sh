@@ -20,6 +20,20 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
+# 配置漂移门禁(2026-10-26): 本模块在入口一次性 load_config; 若用户在倒计时/长时间
+# kubespray 运行期间修改 cluster.conf, 已加载变量不会重读, 但后续 addon 模块会重新加载。
+# 实机事故: k8s_deploy 按 nodeport 生成 addons.yml, 用户改为 metallb 后 metallb 模块
+# 看到新值但集群没有 metallb-system → 部署中断。检测到变更直接中止, 避免半新半旧。
+_CONF_FP_START="$(config_fingerprint)"
+_conf_guard() {
+    local now; now="$(config_fingerprint)"
+    [ "${now}" = "${_CONF_FP_START}" ] && return 0
+    err "cluster.conf 在本次 k8s_deploy 期间被修改(已加载旧配置): ${CLUSTER_CONF}"
+    err "  继续会生成/使用与当前配置不一致的 addons.yml(例如 SERVICE_EXPOSE_MODE=metallb 但未安装 MetalLB)。"
+    err "  本次已中止; 修改完成后请重新运行: sudo ./deploy-cluster.sh --steps k8s_deploy --fresh --yes"
+    exit 1
+}
+
 # ⚠ 部署 kubespray 前醒目提示当前服务暴露方式(nodeport / metallb)+ 各自注意事项,
 # (sleep 30 倒计时供人工确认/修改), 与原有 METALLB_POOL 提示合并为统一提醒。
 #   nodeport → 未部署 MetalLB, 提示入口/端口范围/单节点风险等;
@@ -42,7 +56,11 @@ else
     echo -e "\033[41m\033[97m ⚠⚠⚠  即将部署 kubespray — 当前为 MetalLB LoadBalancer 暴露模式(生产默认)  ⚠⚠⚠\033[0m"
     echo -e "\033[41m\033[97m  当前: METALLB_POOL=${METALLB_POOL:-<未设置>}\033[0m"
     echo -e "\033[41m\033[97m  要求: 池内 IP 必须与集群节点同一二层网络且空闲(避免被 DHCP 占用):\033[0m"
-    echo -e "\033[41m\033[97m    · 虚拟机集群: 已由 create-vms.sh 自动推导为 VM 网段(如 10.244.1.200-209)\033[0m"
+    # 仅当 cluster.conf 由 create-vms.sh 自动推导过 METALLB_POOL(带该注释)时才提示 VM 网段;
+    # 手工创建的 VM / 裸金属集群不显示这条, 避免误导(2026-10-26 用户要求)。
+    if command grep -qF '由 create-vms.sh 自动推导' "${CLUSTER_CONF}" 2>/dev/null; then
+        echo -e "\033[41m\033[97m    · 虚拟机集群: 已由 create-vms.sh 自动推导为 VM 网段(如 10.244.1.200-209)\033[0m"
+    fi
     echo -e "\033[41m\033[97m    · 裸金属集群: 手动填节点物理网段空闲段(如 10.66.1.130-139)\033[0m"
     echo -e "\033[41m\033[97m  ⚠ MetalLB 注意事项:\033[0m"
     echo -e "\033[41m\033[97m    · 地址池建议 >1 个地址, 否则新建 LoadBalancer 可能无 VIP 可分配(verify_metallb 会校验)\033[0m"
@@ -50,6 +68,7 @@ else
     echo -e "\033[41m\033[97m  如需修改: ${CLUSTER_CONF} 的 METALLB_POOL / SERVICE_EXPOSE_MODE 行\033[0m"
 fi
 echo -e "\033[41m\033[97m================================================================\033[0m"
+echo -e "\033[33m  ⚠ 倒计时/部署期间修改 ${CLUSTER_CONF} 会被检测到并中止本次部署, 需重新运行 \033[0m"
 # 倒计时(单行刷新, 两种模式统一, 30s)
 for _c in $(seq 30 -1 1); do
     printf "\r%s" "$(printf '\033[41m\033[97m  ⏳ 倒计时 %d 秒继续        \033[0m' "${_c}")"
@@ -57,6 +76,7 @@ for _c in $(seq 30 -1 1); do
 done
 printf "\r%s\n" "$(printf '\033[0m  %s             ')"
 printf "\r%s\n" "$(printf '\033[0m  %s             ')"
+_conf_guard
 unset _EXPOSE_MODE
 
 # ⚠ Ceph 部署前确认已由 deploy-cluster.sh 在调度前统一执行(红底列出 节点+裸盘 并倒计时
@@ -207,4 +227,5 @@ unset _CEPH_SYSTEM_ON
 [ -n "${PRELOAD_IMAGE_PATTERNS+x}" ] && \
     OFFLINE_ENV+=("CUBESTACK_PRELOAD_IMAGE_PATTERNS=${PRELOAD_IMAGE_PATTERNS}")
 env "${OFFLINE_ENV[@]}" bash "${OFFLINE_SCRIPT}" install
+_conf_guard
 ok "kubespray 集群部署完成"

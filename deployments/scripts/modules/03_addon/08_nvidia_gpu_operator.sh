@@ -464,17 +464,29 @@ if [ -n "${_MIRROR}" ] && [ -n "${_cp_name}" ]; then
 import json, sys
 base = sys.argv[1].rstrip("/")
 outfile = sys.argv[2]
+known = ("nvcr.io", "registry.k8s.io")
 try:
     d = json.load(sys.stdin)
 except Exception:
     print(""); sys.exit(0)
 spec = d.get("spec", {})
 ch = []
+def norm(v):
+    # 定位已知上游前缀并重建为 <base>/<上游路径>。不做 startswith(base) 早退:
+    # 双前缀值(.../mirrors/harbor.../mirrors/.../nvcr.io/...)也以 base 开头, 早退会漏修。
+    # 已干净的值重建后与原值相同 → 不会误改/重复 patch。
+    for up in known:
+        idx = v.find(up + "/")
+        if idx >= 0:
+            return base + "/" + v[idx:]
+    return None
 def walk(o, p):
     if isinstance(o, dict):
         for k, v in list(o.items()):
-            if k == "repository" and isinstance(v, str) and v and not v.startswith(base):
-                ch.append("/".join(p + [k])); o[k] = base + "/" + v
+            if k == "repository" and isinstance(v, str) and v:
+                nv = norm(v)
+                if nv is not None and nv != v:
+                    ch.append("/".join(p + [k])); o[k] = nv
             else:
                 walk(v, p + [k])
     elif isinstance(o, list):

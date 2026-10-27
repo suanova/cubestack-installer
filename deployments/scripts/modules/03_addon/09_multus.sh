@@ -76,7 +76,94 @@ IMG_REF="${REG_BASE}/k8snetworkplumbingwg/multus-cni:${IMG_TAG}"
 # 示例 macvlan 网络参数(cluster.conf 可改)
 NAD_NAME="${MULTUS_NAD_NAME:-multus-nad}"
 NAD_NS="${MULTUS_NAD_NAMESPACE:-default}"
-MASTER_IFACE="${MULTUS_MASTER_IFACE:-eth0}"
+MASTER_IFACE="${MULTUS_MASTER_IFACE:-auto}"
+
+# 默认路由网卡探测(2026-10-25): 默认值曾是硬编码 eth0, 但 VM/裸金属常见 enp1s0/ens*,
+# NAD 的 macvlan master 指向不存在的网卡 → 测试 Pod / 业务 Pod 报 "Link not found"。
+# auto = 逐节点探测默认路由出口; 要求所有节点同名(单个 NAD 的 master 对所有节点生效)。
+# 默认路由出口网卡的远端提取命令(2026-10-26): 必须按 "dev <name>" 取, **不能写死第 5 列** ——
+# `default dev eth0 scope link` 的第 5 列是 "link" 而不是网卡名, 写死字段会把 link 当网卡,
+# 随后 `ip link show dev link` 预检失败(自动探测形态的部署直接中止)。
+# 同时兼容 `default via <gw> dev <iface> ...` 与直连(`dev` 在第 2 列)两种形态。
+_route_iface_cmd() {
+    cat <<'CMD'
+ip route show default 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}'
+CMD
+}
+
+_default_master_iface() {
+    local line ip u ifc out="" _bad=() route_cmd
+    route_cmd="$(_route_iface_cmd)"
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        ip="${NODE_IP}"
+        u="$(ssh_user_for_ip "${ip}")"
+        if ! ifc="$(ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+                      -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${u}@${ip}" \
+                      "${route_cmd}" 2>/dev/null)"; then
+            _bad+=("${ip}(探测失败)")
+            continue
+        fi
+        if [ -z "${ifc}" ]; then
+            _bad+=("${ip}(无默认路由)")
+            continue
+        fi
+        out="${out}${out:+$'\n'}${ifc}"
+    done
+    # ★ 自动选择必须**每个**节点都返回网卡名: 一块 NAD 的 master 对所有节点生效,
+    #   漏掉任一节点就可能给它下发不存在的网卡(测试/业务 Pod 报 "Link not found")。
+    #   任一节点探测失败/无默认路由 → 返回非 0, 由调用方中止并提示显式设置。
+    if [ "${#_bad[@]}" -gt 0 ]; then
+        err "  以下节点无法探测默认路由网卡: ${_bad[*]}"
+        return 1
+    fi
+    printf '%s\n' "${out}" | sed '/^$/d' | sort -u
+}
+if [ "${MASTER_IFACE}" = "auto" ] || [ -z "${MASTER_IFACE}" ]; then
+    if ! _ifaces="$(_default_master_iface)"; then
+        err "自动探测节点默认路由网卡失败; 请在 cluster.conf 显式设置 MULTUS_MASTER_IFACE=<网卡名>"
+        exit 1
+    fi
+    _nif="$(printf '%s\n' "${_ifaces}" | sed '/^$/d' | wc -l)"
+    if [ "${_nif}" -eq 1 ]; then
+        MASTER_IFACE="$(printf '%s\n' "${_ifaces}" | sed '/^$/d')"
+        say "  自动探测节点默认路由网卡: ${MASTER_IFACE}"
+    elif [ "${_nif}" -eq 0 ]; then
+        err "无法探测节点默认路由网卡; 请在 cluster.conf 显式设置 MULTUS_MASTER_IFACE=<网卡名>"
+        exit 1
+    else
+        err "各节点默认路由网卡不一致: $(printf '%s' "${_ifaces}" | tr '\n' ' ')"
+        err "  单个 NAD 的 master 对所有节点生效, 请显式设置 MULTUS_MASTER_IFACE=<统一网卡名>"
+        exit 1
+    fi
+fi
+# 显式值也做存在性预检: **每个节点**都要有该网卡 —— 集群级 NAD 的 master 对所有节点生效,
+# 只在首个 master 上检查会漏掉缺网卡的 worker(该节点 Pod 报 "Link not found"; 2026-10-26)。
+# (auto 探测结果在这里同样复核一遍, 成本可忽略。)
+_bad_iface=()
+for _line in "${NODES[@]:-}"; do
+    [ -z "${_line}" ] && continue
+    node_parse "${_line}"
+    _ip="${NODE_IP}"
+    _u="$(ssh_user_for_ip "${_ip}")"
+    _res=""
+    if ! _res="$(ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+                    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_u}@${_ip}" \
+                    "if ip link show dev '${MASTER_IFACE}' >/dev/null 2>&1; then echo OK; else echo NO_IFACE; fi" \
+                    2>/dev/null)"; then
+        _bad_iface+=("${_ip}(不可达)")
+    elif [ "${_res}" != "OK" ]; then
+        _bad_iface+=("${_ip}(无此网卡)")
+    fi
+done
+if [ "${#_bad_iface[@]}" -gt 0 ]; then
+    err "MULTUS_MASTER_IFACE=${MASTER_IFACE} 在以下节点缺失或不可达: ${_bad_iface[*]}"
+    err "  集群级 NAD 的 master 对所有节点生效, 请改成各节点都存在的统一网卡名(或设为 auto)"
+    exit 1
+fi
+unset _line _ip _u _res _bad_iface
+
 NAD_SUBNET="${MULTUS_SUBNET:-192.168.99.0/24}"
 NAD_RANGE_START="${MULTUS_RANGE_START:-192.168.99.200}"
 NAD_RANGE_END="${MULTUS_RANGE_END:-192.168.99.216}"

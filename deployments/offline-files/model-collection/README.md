@@ -1,17 +1,15 @@
 # offline-files/model-collection/
 
 **模型推理镜像**(sglang / vllm-metax)离线资产 —— 镜像集 = [`suanova/model-collection`](https://github.com/suanova/model-collection)
-仓库引用的全部 ref(2026-10-16 快照; 5 件 ≈85G; 2026-10-20 vllm py310 变体已转 `suanova/`)。
+仓库引用的 ref；2026-10-23 收敛为 **2 件 ≈31G**：仅保留 sglang 主版本 + vllm-metax 0.27.0
+（原 5 个变体已删除，含 qwen21-dev / h3-patch / vllm py310）。
 
 ## 目录结构
 
 | 子目录 | 内容(上游 ref) | Harbor 体积 |
 |---|---|---|
-| `sglang/` | `harbor.isuanova.com/suanova/sglang:0.5.13-maca.ai3.8.1.3-torch2.10-py310-ubuntu22.04-amd64`(主版本) | 20.25 GiB |
-| | `…:0.5.13-…-amd64-qwen21-dev`(dev 变体) | 20.25 GiB |
-| | `…:0.5.12-maca.ai3.8.2.7-torch2.10-py312-ubuntu22.04-amd64-h3-patch` | 22.38 GiB |
+| `sglang/` | `harbor.isuanova.com/suanova/sglang:0.5.13-maca.ai3.8.1.3-torch2.10-py310-ubuntu22.04-amd64` | 20.25 GiB |
 | `vllm/` | `harbor.isuanova.com/suanova/vllm-metax:0.27.0-maca.ai3.8.2.302-torch2.10-py312-ubuntu22.04-amd64` | 10.97 GiB |
-| | `harbor.isuanova.com/suanova/vllm-metax:0.25.0-maca.ai3.8.2.108-torch2.10-py310-ubuntu22.04-amd64`(2026-10-20 从 `yangle/` 复制为 `suanova/` 同 tag) | ≈10.9 GiB |
 
 - **清单(单一事实源)**: 本目录 `image-list.tsv`(subdir/file/pull_ref/save_ref; 拉取与推送同源)。
 - **tar 命名**: 按上游 ref 派生(`/`、`:` → `_`);**大件压缩存储 `.tar.gz`**(pigz 流式压缩,
@@ -26,7 +24,7 @@
 
 - **部署(推入集群内置 registry, 排最后)**: `modules/03_addon/37_model_images.sh`
   (`MODEL_IMAGES_ENABLED`, 默认 true; 模块排 37 = **dev_lab(36) 之后**, 保证集群与全部 operator
-  部署完成才做 ≈85G 的大推送; 缺失 tar 只告警跳过, 不阻断部署);
+  部署完成才做 ≈31G 的大推送; 缺失 tar 只告警跳过, 不阻断部署);
   目标 ref = `<集群 registry>/<ref 去注册域后的路径>`(`suanova/…` 原样保路径)。
   单独执行: `sudo ./deploy-cluster.sh --steps model_images`; 跳过: `--skip model_images`。
 - **同步(Harbor→MinIO 保鲜管道, 内网)**: `tools/images/cubestack-platform-sync.sh`
