@@ -85,7 +85,7 @@ jobs:
           done
           targets="${targets[*]}"
 
-          info=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergedAt,baseRefName,headRefName,isCrossRepository)
+          info=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergedAt,baseRefName,headRefName)
           if [ "$(jq -r 'if .mergedAt then "true" else "false" end' <<<"$info")" != true ]; then
             reject "PR #$PR_NUMBER is not merged."
           fi
@@ -94,16 +94,14 @@ jobs:
             reject "only PRs merged into main can be cherry-picked (this one targets '$base')."
           fi
 
-          # The action drops any target equal to the head branch name, even when
-          # a fork's head branch only shares that name.
-          if [ "$(jq -r .isCrossRepository <<<"$info")" = true ]; then
-            head=$(jq -r .headRefName <<<"$info")
-            for branch in $targets; do
-              if [ "$branch" = "$head" ]; then
-                reject "'$branch' matches the head branch of this fork PR; the cherry-pick action would skip it."
-              fi
-            done
-          fi
+          # The action drops any target equal to the head branch name,
+          # regardless of which repository the head branch lives in.
+          head=$(jq -r .headRefName <<<"$info")
+          for branch in $targets; do
+            if [ "$branch" = "$head" ]; then
+              reject "'$branch' matches this PR's head branch; the cherry-pick action would skip it."
+            fi
+          done
 
           # ls-remote avoids URL-encoding a branch name with slashes in an API path.
           for branch in $targets; do
@@ -196,21 +194,33 @@ jobs:
             rmdir "$wt"
             git worktree add --detach "$wt" FETCH_HEAD >/dev/null
 
-            if ! git -C "$wt" cherry-pick -x $shas >/dev/null 2>&1; then
-              files=$(git -C "$wt" diff --name-only --diff-filter=U)
-              git -C "$wt" cherry-pick --abort >/dev/null 2>&1 || true
-              if [ -n "$files" ]; then
-                body=$(mktemp)
-                {
-                  echo "Cherry-pick to \`$target\` failed; conflicting files:"
-                  echo
-                  printf '%s\n' "$files" | sed 's/^/- `/; s/$/`/'
-                  echo
-                  echo "Run: $RUN_URL"
-                } > "$body"
-                gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$body"
-                rm -f "$body"
+            git_id=(-c user.name='github-actions[bot]' -c user.email='github-actions[bot]@users.noreply.github.com')
+            files=""
+            for sha in $shas; do
+              if git -C "$wt" "${git_id[@]}" cherry-pick -x "$sha" >/dev/null 2>&1; then
+                continue
               fi
+              files=$(git -C "$wt" diff --name-only --diff-filter=U)
+              if [ -n "$files" ]; then
+                break
+              fi
+              # Already-applied commits leave nothing to pick; skip and continue,
+              # as the backport action does.
+              git -C "$wt" cherry-pick --skip >/dev/null 2>&1 || \
+                git -C "$wt" cherry-pick --abort >/dev/null 2>&1 || true
+            done
+            git -C "$wt" cherry-pick --abort >/dev/null 2>&1 || true
+            if [ -n "$files" ]; then
+              body=$(mktemp)
+              {
+                echo "Cherry-pick to \`$target\` failed; conflicting files:"
+                echo
+                printf '%s\n' "$files" | sed 's/^/- `/; s/$/`/'
+                echo
+                echo "Run: $RUN_URL"
+              } > "$body"
+              gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$body"
+              rm -f "$body"
             fi
             git worktree remove --force "$wt" >/dev/null 2>&1 || true
           done <<<"$TARGETS"
