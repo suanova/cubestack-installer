@@ -184,9 +184,12 @@ jobs:
           # A shallow checkout cannot resolve the merged commits; deepen it once.
           git fetch --quiet --unshallow origin 2>/dev/null || git fetch --quiet origin
 
-          while IFS='=' read -r target ok; do
+          while IFS= read -r record; do
+            case "$record" in
+              *"=false") target=${record%"=false"} ;;
+              *) continue ;;
+            esac
             [ -n "$target" ] || continue
-            [ "$ok" = false ] || continue
 
             if ! git fetch --quiet origin "refs/heads/$target"; then
               echo "Could not fetch $target; skipping"
