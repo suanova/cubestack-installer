@@ -3,7 +3,7 @@
 # 列: component <TAB> source_repo <TAB> subdirs <TAB> description(可选)
 #   subdirs 以空格分隔；"." = cubestack-operator 顶层；"*" = 全部镜像行；
 #   "-" = 无镜像子目录(仅 operator chart)；"cli" = 仅 CLI tar(不处理镜像/chart)
-# 用途: .github/workflows/sync-release-2.0-images.yml 的 component 选择器。
+# 用途: .github/workflows/sync-release-images.yml 的 component 选择器。
 # 约束: component 名唯一；非 "-"/"*" 的 subdir 必须存在于 release-images.tsv。
 # 说明: 子目录 -> 来源仓库来自现有 refresh-latest-offline.sh 的组件映射；
 #       bmc 使用 commit sha, 不参与 release.env tag 校验。
@@ -21,3 +21,4 @@ cuberouter	suanova/cuberouter	cuberouter	cuberouter(含 CNPG 依赖)
 platform	-	. bmc controller-manager cubepilot cuberouter portal	全部 first-party 平台镜像
 cli	-	cli	仅 CLI tar 原地刷新(需 --cli-tar/--cli-image-digest)
 all	-	*	全部 37 个镜像(含第三方依赖)
+release-first-party	-	. controller-manager cubepilot cuberouter portal	全部 first-party 镜像(上游统一 tag)

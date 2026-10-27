@@ -734,12 +734,15 @@ PY
 )"
 
 echo "== ㉙ workflow 静态契约 =="
-WF="${REPO_ROOT}/.github/workflows/sync-release-2.0-images.yml"
+WF="${REPO_ROOT}/.github/workflows/sync-release-images.yml"
 CLI_WF="${REPO_ROOT}/.github/workflows/rebuild-cli-image.yml"
 chk "workflow 存在" "0" "$([ -f "${WF}" ] && echo 0 || echo 1)"
-chk_contains "dispatch 事件" "release-2.0-updated" "$(cat "${WF}" 2>/dev/null)"
+chk_contains "dispatch 事件(通用+兼容)" "types: [release-updated, release-2.0-updated]" "$(cat "${WF}" 2>/dev/null)"
+chk_contains "push 触发" "branches: ['release-*']" "$(cat "${WF}" 2>/dev/null)"
+chk_contains "push 仅允许单个 release" "push event must touch exactly one release" "$(cat "${WF}" 2>/dev/null)"
+chk_contains "write 并发组" "group: release-minio-writes" "$(cat "${WF}" 2>/dev/null)"
+chk_contains "CLI 共用并发组" "group: release-minio-writes" "$(cat "${CLI_WF}" 2>/dev/null)"
 chk "sync workflow 无 workflow_run 触发" "0" "$(command grep -cE '^[[:space:]]*workflow_run:' "${WF}" 2>/dev/null || true)"
-chk "不含 push 触发" "0" "$(command grep -cE '^[[:space:]]*push:' "${WF}" 2>/dev/null || true)"
 chk_contains "checkout ref" "CHECKOUT_REF" "$(cat "${WF}" 2>/dev/null)"
 # workflow 传的 Harbor 变量名必须 == release-sync-images.sh 读取的名字(HARBOR_MIRROR_*);
 # 传旧 HARBOR_HOST/USER/PASSWORD/INSECURE 时脚本只会回落到 CUBESTACK_OPERATOR_*, mirror 凭据被静默忽略。
