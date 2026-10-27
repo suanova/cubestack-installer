@@ -263,6 +263,18 @@ python3 -c "print([i for i,l in enumerate(open('模块.sh'),1) if not l.strip().
 
 然后 **`bash -n` + `tools/check-modules.sh` 双绿**才算过。
 
+### 变体: `</dev/null` 必须写在 SSH 参数**引号外** —— 引号内是远端重定向, 本地 ssh 仍吞 stdin
+
+`SSH "kubectl ... </dev/null"` 里的重定向属于**远端命令字符串**; 本地 `ssh` 仍会读取并转发自己的
+stdin。在 `while read ... done <<< "${list}"` 里, 循环体第一条 ssh 就会把剩余行一次读空 → 循环只处理
+第一条(2026-10-19 PVC 强删只删第一个、2026-10-27 依赖 CR 强删漏掉 `CephFilesystem`/`CephFilesystemSubVolumeGroup`
+都栽在这里; 后者让 Rook 拒绝删除 CephCluster, 空等 900s+, 见 #73)。
+
+强制写法: 循环内/无需 stdin 的远端调用统一走薄包装 **`SSH_N(){ SSH "$@" </dev/null; }`**;
+需要喂 stdin 的(`printf ... | SSH "... --patch-file=/dev/stdin"`)保持管道。静态围栏在
+`tools/tests/test-cluster-teardown.sh`:⑤t/⑤t2(非注释 `</dev/null` 只允许出现在 `SSH_N` 定义处)+
+⑤aa(桩 SSH 行为回归:here-string 两条对象必须都执行)。
+
 ### 变体: `ssh host "sudo bash -c '...'"` 内嵌远端脚本 —— 注释里的 ASCII 引号会**静默拆散载荷**
 
 同一条规则的另一面: 内嵌脚本外层 `"..."`、内层 `'...'`, 若**注释里出现未转义的 ASCII 双引号**,
