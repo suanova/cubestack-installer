@@ -134,6 +134,8 @@ chk "localhost=true" "1" "$(cnt '^loadbalancer_apiserver_localhost: true' "${D1}
 # (kubeadm 侧 apiserver_sans 有 `| unique`, 见 kubeadm-setup.yml:28, 重复无害)
 chk "SAN = 域名 + masters + 入口" "10.0.0.1 10.0.0.1 10.0.0.2 k8s-api.cubestack.io " "$(san "${D1}/group_vars/all/all.yml")"
 chk "上游示例块未被误动(保持注释)" "1" "$(cnt '^#   address: 1\.2\.3\.4' "${D1}/group_vars/all/all.yml")"
+CAL1="${D1}/group_vars/k8s_cluster/k8s-net-calico.yml"
+chk "Calico 源地址提示默认 true" "1" "$(cnt '^calico_use_default_route_src_ipaddr: true$' "${CAL1}")"
 
 echo "== ② 幂等: 同配置重跑不产生重复/漂移 =="
 chk "重跑退出码 0" "0" "$(run_sync "${D1}" "${C1}"; echo $?)"
@@ -158,6 +160,7 @@ chk "localhost=false" "1" "$(cnt '^loadbalancer_apiserver_localhost: false' "${D
 chk "示例块仍保持注释" "1" "$(cnt '^#   address: 1\.2\.3\.4' "${D1}/group_vars/all/all.yml")"
 chk "示例块的假地址未变成活配置" "0" "$(cnt '^  address: 1\.2\.3\.4' "${D1}/group_vars/all/all.yml")"
 chk "首个真块地址 = 本次入口" "10.0.0.1" "$(first_entry "${D1}/group_vars/all/all.yml")"
+chk "Calico 源地址提示重跑不重复" "1" "$(cnt '^calico_use_default_route_src_ipaddr: true$' "${CAL1}")"
 
 echo "== ④ 外部入口模式 + 本地代理开: 入口地址进 SAN, 且块内 address 不被改写 =="
 D2="${TMP}/d2"; mk_inv "${D2}"; C3="${TMP}/c3"
@@ -233,5 +236,20 @@ for dns_form in absent inline indented unindented; do
     chk "${dns_form}: 重跑成功" "0" "$(run_sync "${D6}" "${C9}"; echo $?)"
     chk "${dns_form}: 重跑内容不变" "${DNS_MD5}" "$(md5sum < "${A6}")"
 done
+
+echo "== ⑩ Calico 源地址提示(IB 源策略路由/rpfilter 根因修复) =="
+# 2026-10-27: calico_use_default_route_src_ipaddr=true 让 Felix 给每 Pod 设备路由写 src=节点IP,
+#   否则 IB 节点 host→本地 Pod 被 Calico rpfilter 丢弃(coredns/metallb 0/1 无限重启)。
+# D1 已在 ①②③ 同步 3 次(默认 true 已在 ①/③ 断言); 这里只验证“旧 false 原地改写”与“显式关闭”。
+# 用 KUBE_VIP_ENABLED=false 的配置跑, 避免 kube-vip 探测拖慢测试。
+sed -i -E 's/^calico_use_default_route_src_ipaddr:.*/calico_use_default_route_src_ipaddr: false/' "${CAL1}"
+C10="${TMP}/c10"; mk_conf "${C10}" true 'KUBE_VIP_ENABLED=false' 'CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=true'
+chk "旧 false 被改写为 true" "1" "$(run_sync "${D1}" "${C10}"; cnt '^calico_use_default_route_src_ipaddr: true$' "${CAL1}")"
+chk "旧 false 不残留" "0" "$(cnt '^calico_use_default_route_src_ipaddr: false$' "${CAL1}")"
+# 显式关闭 → 写 false(k8s_deploy 的门禁只在 true/1/yes/on 时断言; 用户可明确关闭)
+D8="${TMP}/d8"; mk_inv "${D8}"; C11="${TMP}/c11"
+mk_conf "${C11}" true 'KUBE_VIP_ENABLED=false' 'CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=false'
+CAL8="${D8}/group_vars/k8s_cluster/k8s-net-calico.yml"
+chk "显式 false 写入" "1" "$(run_sync "${D8}" "${C11}"; cnt '^calico_use_default_route_src_ipaddr: false$' "${CAL8}")"
 
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }

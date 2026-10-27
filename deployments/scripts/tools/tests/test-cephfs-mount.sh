@@ -86,6 +86,62 @@ CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
 EOF
 
+# 2026-10-27: 只给 external-ceph.env(Rook 官方导出), 不手填 CEPH_MONITORS/CEPHFS_FS/凭据 ——
+# 模块必须自动派生, 否则 external 宿主机挂载永远要用户重复配置(实机容器 d 的现状)。
+cat > "${TMP}/external-ceph.env" <<'EOF'
+export ROOK_EXTERNAL_FSID=1fa1539b-c40f-4e4a-a68f-64118766121f
+export ROOK_EXTERNAL_USERNAME=client.healthchecker
+export ROOK_EXTERNAL_USER_SECRET=AQBHealthKey==  # secret-scan: allow(fake test fixture)
+export ROOK_EXTERNAL_CEPH_MON_DATA=a=10.0.0.5:6789,b=10.0.0.6:6789
+export CEPHFS_FS_NAME=cubestack-ext-fs
+export CSI_CEPHFS_NODE_SECRET=AQBCsiNodeKey==  # secret-scan: allow(fake test fixture)
+export CSI_CEPHFS_NODE_SECRET_NAME=csi-cephfs-node
+export CEPHX_KEY_GENERATION=1
+EOF
+cat > "${TMP}/cluster.conf.external-env" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
+  "master,m2,10.0.0.2,root,-"
+  "worker,w1,10.0.0.11,root,-"
+)
+SSH_USER="root"
+SSH_KEY_NAME="cubestack_k8s"
+KUBESPRAY_PROFILE="none"
+CEPH_ENABLED="false"
+CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
+CEPHFS_ENABLED="true"
+CEPHFS_MOUNT_ENABLED="true"
+CEPHFS_MOUNT_PATH="/mnt/cephfs/models"
+EOF
+
+# 2026-10-27: 只读 external 提供方(用户手册 client.linux-host-ro):
+# 凭据/网段/FS 放专用 external-cephfs.env(gitignored), 不在 cluster.conf 重复。
+cat > "${TMP}/external-cephfs.env" <<'EOF'
+CEPH_MONITORS="10.0.0.5:6789"
+CEPHFS_FS="cephfs-ro"
+CEPHFS_NODE_USER="linux-host-ro"
+CEPHFS_NODE_KEYRING="AQBReadOnlyKey=="  # secret-scan: allow(fake test fixture)
+CEPHFS_MOUNT_READ_ONLY="true"
+CEPHFS_MOUNT_PATH="/mnt/cephfs/ro-env"
+EOF
+cat > "${TMP}/cluster.conf.external-ro" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
+  "master,m2,10.0.0.2,root,-"
+  "worker,w1,10.0.0.11,root,-"
+)
+SSH_USER="root"
+SSH_KEY_NAME="cubestack_k8s"
+KUBESPRAY_PROFILE="none"
+CEPH_ENABLED="false"
+CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
+CEPHFS_ENABLED="true"
+CEPHFS_MOUNT_ENABLED="true"
+CEPHFS_MOUNT_PATH="/mnt/cephfs/ro-conf"
+EOF
+
 # 假 ssh: 跳过选项, 记录 host/cmd, 按命令内容回放夹具
 mkdir -p "${TMP}/bin"
 cat > "${TMP}/bin/ssh" <<'FAKE'
@@ -147,7 +203,10 @@ echo "== ① 模块/清单/默认值存在性 =="
 [ -f "${MANIFEST}" ] && echo "  ok  manifest exists" || { echo "  FAIL manifest missing: ${MANIFEST}"; fail=1; }
 [ -f "${MODULE}" ] && chk_contains "元数据 MODULE" "MODULE: cephfs_mount" "${MODULE}"
 [ -f "${MODULE}" ] && chk_contains "元数据 TOGGLE" "TOGGLE: CEPHFS_MOUNT_ENABLED" "${MODULE}"
-[ -f "${MODULE}" ] && chk_contains "元数据 REQUIRES" "REQUIRES: ceph_csi" "${MODULE}"
+# 2026-10-27: external 只做宿主机挂载时不应被 REQUIRES 强拉整个 ceph_csi 外部导入;
+# 全量部署仍按文件序号(03 ceph_csi → 07 cephfs_mount)保证 internal 顺序。
+[ -f "${MODULE}" ] && chk_not_contains "不 REQUIRES ceph_csi(允许 external 单独挂载)" "REQUIRES: ceph_csi" "${MODULE}"
+[ -f "${MODULE}" ] && chk_contains "REQUIRES: k8s_deploy(集群必须先存在)" "REQUIRES: k8s_deploy" "${MODULE}"
 [ -f "${MODULE}" ] && chk_contains "可卸载声明" "UNINSTALL: 1" "${MODULE}"
 CEPH_MOD="${REPO_ROOT}/deployments/scripts/modules/03_addon/02_ceph.sh"
 CEPH_CLEANUP="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-cleanup.sh"
@@ -160,6 +219,8 @@ chk_contains "ceph-cleanup 拒绝 external" "外部 Ceph 不是本安装器资�
 [ -f "${DEFAULTS}" ] && chk_contains "CEPHFS_ENABLED 默认跟随 CEPH_CSI_ENABLED" 'CEPHFS_ENABLED="${CEPHFS_ENABLED:-${CEPH_CSI_ENABLED:-false}}"' "${DEFAULTS}"
 [ -f "${DEFAULTS}" ] && chk_contains "CEPH_RGW_ENABLED 默认跟随 CEPH_CSI_ENABLED" 'CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-${CEPH_CSI_ENABLED:-false}}"' "${DEFAULTS}"
 [ -f "${DEFAULTS}" ] && chk_contains "CEPHFS_MOUNT_ENABLED 默认跟随 CEPHFS_ENABLED" 'CEPHFS_MOUNT_ENABLED="${CEPHFS_MOUNT_ENABLED:-${CEPHFS_ENABLED}}"' "${DEFAULTS}"
+[ -f "${DEFAULTS}" ] && chk_contains "只读挂载开关默认值" 'CEPHFS_MOUNT_READ_ONLY="${CEPHFS_MOUNT_READ_ONLY:-false}"' "${DEFAULTS}"
+[ -f "${DEFAULTS}" ] && chk_contains "挂载专用 env 文件开关" 'CEPHFS_MOUNT_ENV_FILE="${CEPHFS_MOUNT_ENV_FILE:-}"' "${DEFAULTS}"
 # 回归(实机踩坑 2026-10-19): hostPath 在容器里本身就是 bind mount, mountpoint -q 恒真;
 # 若据此判"目标已被其他文件系统挂载"会拒绝工作。必须只按 fstype=ceph 判断。
 [ -f "${MANIFEST}" ] && chk_contains "仅按 fstype 判断是否已挂载" 'findmnt -n -o FSTYPE -T "${TARGET}"' "${MANIFEST}"
@@ -275,6 +336,36 @@ chk_not_contains "external 不执行 umount" "sudo umount" "${TMP}/ssh-uninstall
 chk_not_contains "external 不删 cephx 用户" "ceph auth del" "${TMP}/ssh-uninstall-external.log"
 chk_contains "external 保留挂载提示" "保留宿主机 CephFS 挂载" "${TMP}/run-uninstall-external.out"
 chk_contains "external 仍删除 DaemonSet" "delete ds cephfs-models-mount" "${TMP}/ssh-uninstall-external.log"
+
+echo "== ⑧ external 自动派生 external-ceph.env(Rook 官方导出) =="
+export CEPH_EXTERNAL_ENV_FILE="${TMP}/external-ceph.env"
+rc="$(run_module external-env "${TMP}/cluster.conf.external-env")"
+unset CEPH_EXTERNAL_ENV_FILE
+chk "external-env 退出码" "0" "${rc}"
+APPLY_ENV="${TMP}/apply-external-env.log"
+chk_contains "mon 自动派生" '10.0.0.5:6789,10.0.0.6:6789' "${APPLY_ENV}"
+chk_contains "CephFS 名自动派生" 'cubestack-ext-fs' "${APPLY_ENV}"
+chk_contains "节点用户自动派生(含 generation 后缀)" 'csi-cephfs-node.1' "${APPLY_ENV}"
+chk_contains "节点 key 自动派生" 'AQBCsiNodeKey==' "${APPLY_ENV}"
+chk_not_contains "不用 healthchecker 兜底(有 CSI node secret 时)" 'healthchecker' "${APPLY_ENV}"
+
+echo "== ⑨ external 只读挂载(专用 external-cephfs.env + CEPHFS_MOUNT_READ_ONLY) =="
+export CEPHFS_MOUNT_ENV_FILE="${TMP}/external-cephfs.env"
+unset CEPH_EXTERNAL_ENV_FILE
+rc="$(run_module external-ro "${TMP}/cluster.conf.external-ro")"
+unset CEPHFS_MOUNT_ENV_FILE
+chk "external-ro 退出码" "0" "${rc}"
+APPLY_RO="${TMP}/apply-external-ro.log"
+chk_contains "只读用户" 'linux-host-ro' "${APPLY_RO}"
+chk_contains "只读 key" 'AQBReadOnlyKey==' "${APPLY_RO}"
+chk_contains "只读 FS" 'cephfs-ro' "${APPLY_RO}"
+chk_contains "只读标志写入 DaemonSet" 'CEPHFS_READ_ONLY' "${APPLY_RO}"
+chk_contains "只读值为 true" 'value: "true"' "${APPLY_RO}"
+chk_contains "专用 env 覆盖挂载路径" 'path: /mnt/cephfs/ro-env' "${APPLY_RO}"
+chk_contains "只读挂载选项" 'MOUNT_OPTS' "${APPLY_RO}"
+chk_contains "只读不创建子目录" 'read-only 模式: 不创建子目录' "${APPLY_RO}"
+chk_contains "验证区分只读" 'NOT_READONLY' "${MODULE}"
+chk_contains "只读用 ls 验证" "timeout 10 ls" "${MODULE}"
 
 echo "== ⑦ 零节点验证必须失败(不得假成功) =="
 rc="$(run_module notready)"

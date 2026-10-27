@@ -483,6 +483,27 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   cni-plugin 各一组; 无 kubevirt 时该 watch 404 无害, 装过 kubevirt 才会 403)。
 - 详见 `docs/troubleshooting.md` §一.4(含实机验证命令与未跟齐项清单)。
 
+## Calico × 多网卡/IB 源策略路由速查(2026-10-27 事故)
+
+- **症状**: 只有带 IB 网卡的节点上, coredns/metallb controller/metrics-server `Running (READY 0/1)`、
+  重启数百次、探针 `context deadline exceeded`; MetalLB rollout 超时; **宿主机 → 本机 Pod 100% 丢包**,
+  `ping -I <管理IP> <PodIP>` 正常。
+- **根因**: 主机镜像 netplan `routing-policy: from <IB> lookup <table>` + Calico 本地 Pod 设备路由
+  没有 preferred source → 内核按接口枚举顺序选 IB 作源; Pod 回包到宿主机 `cali` 后, Calico raw 表
+  `rpfilter --validmark --invert` 用回包目的地址(IB)查路由 → 命中 IB 表 → 出接口≠入接口 → DROP。
+- **根治(默认)**: `CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=true` → sync 写
+  `calico_use_default_route_src_ipaddr: true` → kubespray 渲染
+  `FELIX_DEVICEROUTESOURCEADDRESS=status.hostIP` → Felix 给每 Pod 路由写 `src=<节点 IP>`。
+  `k8s_deploy` 在 sync 后断言该键真的进了 inventory。
+- **预检**: `modules/02_k8s/13_node_net_guard.sh` + `tools/node/node-net-guard.sh`(k8s_deploy/k8s_scale
+  的 REQUIRES 已接线)。判据是**反向路径分歧**, 不是只看 `ip rule`: 比较
+  `ip route get <pod_probe> from <节点IP>` 与每个本地地址 `from <addr>` 的 `dev`/可达性。
+- **兜底(默认关)**: `NODE_NET_GUARD_ACTION=rule` → 幂等 `ip rule pref <N> to <KUBE_PODS_SUBNET> lookup main`
+  + systemd oneshot。只加 Pod 网段(ClusterIP 是 local 路由, service CIDR 不需要); 该规则对所有源生效,
+  可能影响远端 Pod 回包走 IB 的非对称路径, 所以不作为默认。
+- **验证**: `bash deployments/scripts/tools/tests/test-node-net-guard.sh`; 修复后节点上
+  `ip route get <本地 Pod IP>` 的 `src` 应为管理 IP。详见 `docs/troubleshooting.md` §一.5。
+
 ## MetaX GPU Operator 部署速查(沐曦)
 
 > 完整部署/镜像准备/故障见 `docs/metax-gpu-operator.md` 与 `docs/troubleshooting.md` §三.3。

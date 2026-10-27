@@ -519,6 +519,24 @@ else
     ck_fail "缺少 tests/test-pod-health-scan.sh(本回归必须接线)"
 fi
 
+# ---------- ⑫c 节点源策略路由/Calico rpfilter 预检回归(2026-10-27 IB 多网卡) ----------
+# 背景: 主机 netplan 的 `routing-policy: from <IB> lookup <table>` 会让内核给本地 Pod
+#   设备路由选 IB 源; Calico rpfilter 反向校验命中 IB 表 → 出接口≠入接口 → DROP。
+#   本回归锁定 preflight 的三件事: 风险识别(不是只看 ip rule)、原生修复开关的分支、
+#   rule fallback 的幂等/动态网段/持久化。夹具纯离线(假 ssh/ip/systemctl)。
+_NETGUARD_SH="${SCRIPT_DIR}/tests/test-node-net-guard.sh"
+if [ -f "${_NETGUARD_SH}" ]; then
+    if _NETGUARD_OUT="$(bash "${_NETGUARD_SH}" 2>&1)"; then
+        ok "  节点源策略路由/Calico rpfilter 预检回归通过"
+    else
+        printf '%s\n' "${_NETGUARD_OUT}" | sed 's/^/    /'
+        ck_fail "节点源策略路由/Calico rpfilter 预检回归未通过(详见上方失败项)"
+    fi
+    unset _NETGUARD_OUT
+else
+    ck_fail "缺少 tests/test-node-net-guard.sh(本回归必须接线, 防'写了没人跑')"
+fi
+
 # ---------- ⑬ API 入口: 本地代理语义与 all.yml 的自洽 ----------
 # 背景: kubespray 的 kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支
 #   **优先于** localhost 分支 —— 只要 all.yml 里还有**未注释**的 loadbalancer_apiserver 块,

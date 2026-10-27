@@ -276,6 +276,24 @@ if [ -f "${CALICO_YML}" ]; then
         echo "calico_ip_auto_method: \"can-reach=${FIRST_WORKER}\"" >> "${CALICO_YML}"
     fi
     ok "已同步 calico_ip_auto_method → can-reach=${FIRST_WORKER}"
+
+    # 每 Pod 设备路由的源地址提示(2026-10-27 IB/多网卡实机):
+    #   主机镜像的 `routing-policy: from <IB> lookup <table>` 会让内核给 Calico 本地 Pod 路由
+    #   选到 IB 源; Calico rpfilter 反向校验命中 IB 表 → 出接口≠入接口 → 本地 Pod 回包被丢。
+    #   FELIX_DEVICEROUTESOURCEADDRESS=status.hostIP 让 Felix 给每 Pod 路由写 src=<节点 IP>,
+    #   从源头消除失配(不依赖主机 ip rule / reboot 持久化)。
+    _CALICO_SRC_HINT="${CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR:-true}"
+    case "${_CALICO_SRC_HINT,,}" in
+        true|1|yes|on) _CALICO_SRC_HINT=true ;;
+        *)             _CALICO_SRC_HINT=false ;;
+    esac
+    if grep -q '^calico_use_default_route_src_ipaddr:' "${CALICO_YML}"; then
+        sed -i -E "s|^calico_use_default_route_src_ipaddr:.*|calico_use_default_route_src_ipaddr: ${_CALICO_SRC_HINT}|" "${CALICO_YML}"
+    else
+        printf '\n# CubeStack: host→本地 Pod 路由源地址提示(IB 策略路由/rpfilter 修复)\ncalico_use_default_route_src_ipaddr: %s\n' "${_CALICO_SRC_HINT}" >> "${CALICO_YML}"
+    fi
+    ok "已同步 calico_use_default_route_src_ipaddr=${_CALICO_SRC_HINT}"
+    unset _CALICO_SRC_HINT
 else
     warn "未找到 ${CALICO_YML},跳过"
 fi

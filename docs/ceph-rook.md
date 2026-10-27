@@ -603,7 +603,8 @@ Ceph 全关时不会排进部署计划);单独执行: `sudo ./deploy-cluster.sh 
 - 用集群已部署的 cephcsi 镜像(自带 `mount.ceph`)跑 DaemonSet `cephfs-models-mount`(rook-ceph);
 - 容器内 `mount -t ceph <mons>:/models`,hostPath 目标带 `mountPropagation: Bidirectional`
   ⇒ 挂载传播到宿主机同名路径;节点重启由 DaemonSet 自动重挂(不写 fstab/systemd);
-- 子目录不存在时自动临时挂 FS 根 → `mkdir` + `chmod`(默认 `0777`)→ 再挂子目录;
+- 子目录不存在时(rw 模式)自动临时挂 FS 根 → `mkdir` + `chmod`(默认 `0777`)→ 再挂子目录;
+  只读模式(`CEPHFS_MOUNT_READ_ONLY=true`)不创建, 要求子目录已存在并在日志中明确提示;
 - 容器循环自愈: 手动 umount / Ceph 短暂不可用 → 最多 30s 后自动重挂;
 - 是否已挂载按 **fstype=ceph** 判断(hostPath 在容器里本身是 bind mount, 不能据此拒绝挂载);
   同一路径的挂载栈取最上层(`findmnt -T | tail -1`), 避免重复叠加。
@@ -615,9 +616,11 @@ Ceph 全关时不会排进部署计划);单独执行: `sudo ./deploy-cluster.sh 
 | `CEPHFS_MOUNT_ENABLED` | 跟随 `CEPHFS_ENABLED` | 总开关 |
 | `CEPHFS_MOUNT_PATH` | `/mnt/cephfs/models` | 宿主机挂载点 |
 | `CEPHFS_MOUNT_SUBDIR` | `models` | CephFS 内子目录(自动创建) |
-| `CEPHFS_MOUNT_DIR_MODE` | `0777` | 子目录权限 |
+| `CEPHFS_MOUNT_DIR_MODE` | `0777` | 子目录权限(只读模式不创建/不改权限) |
 | `CEPHFS_MOUNT_USER` | `cubestack-cephfs-models` | internal 专用 cephx 用户 |
 | `CEPHFS_MOUNT_IMAGE` | 空(自动取 cephfs CSI nodeplugin 镜像) | 运行镜像 |
+| `CEPHFS_MOUNT_ENV_FILE` | 空(自动探测 `deployments/config/external-cephfs.env`) | external 挂载专用 env(**该文件出现的变量优先**) |
+| `CEPHFS_MOUNT_READ_ONLY` | `false` | `true`=`mount -o ro`;不创建子目录;验证只读+`ls` |
 
 **凭据**:
 - internal: 模块用 toolbox 创建专用用户 `client.<CEPHFS_MOUNT_USER>`:
@@ -626,11 +629,52 @@ Ceph 全关时不会排进部署计划);单独执行: `sudo ./deploy-cluster.sh 
   密钥写入 `Secret/cephfs-models-client`(rook-ceph),容器用 `secretfile=` 挂载(不进命令行)。
 - external: 复用 `CEPHFS_NODE_USER/CEPHFS_NODE_KEYRING`(缺省回退 `CEPHFS_USER/CEPHFS_KEYRING`、
   `CEPH_USER/CEPH_KEYRING`),mon 地址取 `CEPH_MONITORS`。
+  **未显式配置时自动从提供方 `external-ceph.env` 派生**(2026-10-27, 容器 d 实机验证):
+  - `CEPH_MONITORS` ← `ROOK_EXTERNAL_CEPH_MON_DATA`(如 `a=10.66.3.213:6789` → `10.66.3.213:6789`);
+  - `CEPHFS_FS` ← `CEPHFS_FS_NAME`(如 `cubestack-ext-fs`);
+  - `CEPHFS_NODE_USER` ← `CSI_CEPHFS_NODE_SECRET_NAME` + `.<CEPHX_KEY_GENERATION>`
+    (generation 非空/非 0 时; 与 `03_ceph_csi.sh` 的 `_ext_uid` 同口径, 如 `csi-cephfs-node.1`);
+  - `CEPHFS_NODE_KEYRING` ← `CSI_CEPHFS_NODE_SECRET`;无 CSI secret 时回退
+    `ROOK_EXTERNAL_USERNAME`/`ROOK_EXTERNAL_USER_SECRET`(healthchecker, 通常只读)。
+  **多 FS 环境必须显式选 FS**: 挂载选项带 `mds_namespace=<CEPHFS_FS>`, 否则内核会挂默认 FS
+  (容器 d 的 external 集群同时有 `cephfs` 与 `cubestack-ext-fs`, 实测必须指定后者)。
+- external 只做宿主机挂载(不导入 CSI)时 `REQUIRES` 改为 `k8s_deploy`(集群必须先存在), 不再强拉
+  `ceph_csi`; 已部署集群上 `k8s_deploy` 状态为 done(REPEAT:0) → `--steps cephfs_mount` 不会重跑它,
+  全新集群则先部署 k8s。可用专用
+  `deployments/config/external-cephfs.env` 提供 mon/FS/只读用户/key(该文件含 key, 已 gitignore;
+  模板 `external-cephfs.env.example`)。文件里出现的变量优先于 cluster.conf/defaults。
+
+**external 只读提供方示例**(如提供方给 `client.linux-host-ro`, 只读 caps):
+```bash
+# deployments/config/external-cephfs.env (chmod 600; 不要提交)
+cat > deployments/config/external-cephfs.env <<'EOF'
+CEPH_MONITORS="10.66.3.46:6789"
+CEPHFS_FS="cephfs"
+CEPHFS_NODE_USER="linux-host-ro"
+CEPHFS_NODE_KEYRING="<提供方给的裸 key>"
+CEPHFS_MOUNT_READ_ONLY="true"
+EOF
+CEPH_MODE=external CEPHFS_MOUNT_ENABLED=true \
+  sudo ./deployments/scripts/deploy-cluster.sh --steps cephfs_mount
+```
+- 只读模式不创建子目录: `CEPHFS_MOUNT_SUBDIR`(默认 `models`)必须已在 FS 内存在; 否则 DaemonSet
+  日志会明确报"子目录不存在(只读模式不创建)", 请先在 CephFS 内建好。
+- 只读验证: `findmnt -o OPTIONS` 含 `ro` + `ls` 可读; 写操作由本地 VFS(`ro`)与提供方 caps 双重拦截。
+- 容器 d 实测(2026-10-27): `10.66.3.46:/models` 以 `ro,mds_namespace=cephfs` 挂载成功,
+  `ls` 可见模型目录, `touch` 返回 `Read-only file system`。
+- ⚠ 常见错误(容器 d 实测): external 挂载用 `csi-cephfs-node`(漏 `CEPHX_KEY_GENERATION` 后缀)会报
+  `mount error: no mds is up` / `RADOS permission denied`。核对实际 userID:
+  `kubectl -n rook-ceph get secret rook-csi-cephfs-node -o jsonpath='{.data.userID}' | base64 -d`
+  (应为 `csi-cephfs-node.1` 这类带 generation 的名字); 不要用 healthchecker 或
+  CSI provisioner 的 key 做宿主机挂载(通常 caps 不足)。
+- ⚠ 多 FS 集群不指定 `mds_namespace` 时内核会挂默认 FS(通常是 `cephfs`), 不是 `CEPHFS_FS`;
+  模块已固定写入 `mds_namespace=<CEPHFS_FS>`。
 
 **验证**:
 ```bash
-sudo ./deploy-cluster.sh --steps cephfs_mount        # 部署 + 逐节点真实写读探针
-ssh <node> 'findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,SOURCE'
+sudo ./deploy-cluster.sh --steps cephfs_mount        # 部署 + 逐节点真实写读探针(只读模式则 ro+ls)
+ssh <node> 'findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,SOURCE,OPTIONS'
+# 只读模式应看到 ro、mds_namespace=<FS>; touch 预期 Read-only file system
 kubectl -n rook-ceph get ds cephfs-models-mount
 kubectl -n rook-ceph logs ds/cephfs-models-mount --tail=50
 bash deployments/scripts/tools/tests/test-cephfs-mount.sh   # 离线桩式回归(无需集群)

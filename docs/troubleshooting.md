@@ -209,6 +209,96 @@ tar -xzf deployments/offline-files/calico/release-v3.32.2.tgz -C /tmp release-v3
 
 ---
 
+### 5. 【2026-10-27 事故】IB 节点 host→本地 Pod 探针全超时(Calico rpfilter 与主机源策略路由冲突)—— coredns/metallb/metrics-server 0/1 无限重启, 部署卡在 MetalLB rollout
+
+**症状**
+```
+TASK [kubernetes-apps/metallb : Kubernetes Apps | Wait for MetalLB controller to be running]
+fatal: [cubestack-k8s-master01]: FAILED! => error: timed out waiting for the condition
+```
+收尾巡检多个 Pod `Running (READY 0/1)`、重启数百次, 且**只出现在带 IB 网卡的节点**:
+- `coredns`(worker08, 137 次重启)、`metallb controller`(worker08, 185 次)、`metrics-server`(worker05, 161 次)、`dns-autoscaler`(worker08, 0/1);
+- Pod 事件统一为探针超时:
+  `Readiness probe failed: Get "http://10.233.64.2:8181/ready": context deadline exceeded`
+  `Liveness probe failed: Get "http://10.233.64.4:7472/metrics": context deadline exceeded`
+- 连通性特征: **Pod → 宿主机正常; 宿主机 → 本机 Pod 100% 丢包**; `ping -I <管理IP> <PodIP>` 正常。
+
+**根因(证据链)**
+1. 主机镜像 `/etc/netplan/12-ens1np0.yaml` 自带源策略路由(早于部署):
+   ```
+   32761: from 172.16.1.104 lookup 150 proto static
+   table 150: default via 172.16.1.1 dev ens1np0
+   ```
+2. Calico 给本地 Pod 的设备路由**没有 preferred source**, 内核按接口枚举顺序选源; 该批 g1 机器 IB 网卡(`ens1np0`)枚举早于管理网卡:
+   ```
+   ip route get 10.233.64.2
+   # 坏节点: 10.233.64.2 dev calie9e90a66c4a src 172.16.1.104
+   # 正常节点: 10.233.86.193 dev cali1711f3dbf68 src 10.193.78.157
+   ```
+3. Pod 回包 `10.233.64.2 → 172.16.1.104` 到达宿主机 `cali` 网卡后, Calico raw 表:
+   ```
+   -A cali-PREROUTING -m rpfilter --validmark --invert -j DROP
+   ```
+   反向校验用回包**目的地址**(IB)查路由 → 命中 `from 172.16.1.104 lookup 150` → 出接口 `ens1np0` ≠ 入接口 `cali` → **DROP**。
+4. 抓包可见回包已到达 `cali`, 但 conntrack 计数为 0; `iptables -t raw -L cali-PREROUTING -nv` 的 DROP 计数与失败 ping 包数一一对应。
+
+**解法(根治): 让 Calico 给每 Pod 设备路由写源地址提示**
+- `deployments/config/cluster.defaults.conf` 默认:
+  ```
+  CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=true
+  ```
+- `tools/k8s/sync-kubespray-config.sh` 写入 group_vars:
+  ```
+  calico_use_default_route_src_ipaddr: true
+  ```
+  kubespray 渲染 `FELIX_DEVICEROUTESOURCEADDRESS=status.hostIP` → Felix 给每 Pod 设备路由写 `src=<节点 IP>`。
+- 之后 host→本地 Pod 的源地址固定为管理 IP; rpfilter 反向查询变成 `from <管理IP>` → main → `cali`, 不再命中 IB 表。
+- `06_k8s_deploy.sh` 在 sync 后**硬门禁**: 若配置为 true 但生成 inventory 没有该键, 直接中止(防"配置开了但没写进去"静默退回内核自选源)。
+- ⚠ 存量集群需跑一次 `--steps k8s_deploy`(滚动 calico-node)才生效; 只跑预检模块不会改 Calico。
+
+**验证**
+```bash
+# 修复前(坏节点): src 是 IB 地址, from IB 走 table 150
+ip route get <本地 Pod IP>
+ip route get <本地 Pod IP> from <IB 地址>
+
+# 修复后: src 应为节点管理 IP; from 管理IP 走 cali
+ip route get <本地 Pod IP>
+kubectl -n kube-system get ds calico-node -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="FELIX_DEVICEROUTESOURCEADDRESS")]}{.valueFrom.fieldRef.fieldPath}{"\n"}{end}'
+# 应输出 status.hostIP(具体值在 pod 内 env 为节点 IP)
+```
+- 离线回归: `bash deployments/scripts/tools/tests/test-node-net-guard.sh`; 静态校验 `bash deployments/scripts/tools/check-modules.sh`。
+- 部署前预检: `node_net_guard` 模块(`--steps node_net_guard`)会逐节点比较 `from <节点IP>` 与每个本地地址的路由; 命中且原生修复开启 → 告警不阻断; 关闭 → 硬失败。
+
+**兜底(仅存量集群/无法改 Calico 时; 可选)**
+```bash
+# 幂等加规则 + systemd oneshot(只加 Pod 网段, 不加 service 网段)
+sudo NODE_NET_GUARD_ACTION=rule ./deployments/scripts/deploy-cluster.sh --steps node_net_guard
+# 等价的单节点手动形态(仅临时验证, reboot 后会丢; 持久化请用上面的工具):
+sudo ip rule add pref 30000 to <KUBE_PODS_SUBNET> lookup main
+```
+- 工具: `deployments/scripts/tools/node/node-net-guard.sh --apply-rule`; 持久化 unit:
+  `/etc/systemd/system/cubestack-pod-net-routing.service`(脚本 `/usr/local/sbin/cubestack-pod-net-routing`)。
+- 清理: `node-net-guard.sh --remove`(只删自己登记过的网段; 手工加的 /16 规则需自行 `ip rule del`)。
+- ⚠ 为什么只加 **Pod 网段**: ClusterIP 是 `local` 路由(源地址=VIP), rpfilter 反向查询的 `daddr` 是 Pod IP, service CIDR 规则基本无用且增加影响面。
+- ⚠ `to <pod> lookup main` 对所有源生效, 可能影响“远端 Pod 回包走 IB”的非对称路径; 因此**默认不做**, 优先用 Calico 原生 source hint。
+
+**相关命令**
+```bash
+# 反向路径分歧(预检核心判据)
+ip route get <pod_probe> from <节点IP>
+ip route get <pod_probe> from <本机其他地址>
+# Calico rpfilter 计数器(每 2 个失败 ping +2)
+iptables -t raw -Z cali-PREROUTING; ping -c2 <PodIP>; iptables -t raw -L cali-PREROUTING -nv | grep rpfilter
+# 回包已到 cali 但被丢
+tcpdump -ni cali<iface> icmp
+conntrack -L | grep <PodIP>      # [UNREPLIED] packets=0
+# 本机所有 ip rule(确认 IB 源策略路由)
+ip rule show; ip route show table <table>
+```
+
+---
+
 ## 二、时间同步
 
 ### 1. 【2026-09-08 事故】k8s_ntp 失败: 个别节点偏差稳定 ~2s 不收敛, 其余节点 ~1s 但"通过"

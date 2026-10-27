@@ -41,6 +41,8 @@ deployments/config/cluster.conf.bak
 deployments/config/cluster.conf.bak.*
 # 外部 Ceph 官方接入 env(含真实 CSI key/RGW admin 密钥, 勿提交; 由提供方导出)
 deployments/config/external-ceph.env
+# 外部 CephFS 宿主机挂载专用 env(含只读 key, 勿提交; 模板 external-cephfs.env.example 需提交)
+deployments/config/external-cephfs.env
 # 外部 Ceph 自研导出配置(**由 ceph-expose-external.sh 生成, 含真实 keyring**, 勿提交)
 # ⚠ 2026-09-20 事故: 该文件被生成器从"示例"覆写成真值后仍处于**被跟踪**状态, 险些随提交入库
 deployments/config/external-ceph-self-define-access.conf

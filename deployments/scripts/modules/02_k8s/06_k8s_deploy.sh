@@ -5,7 +5,7 @@
 # PHASE: k8s
 # DEFAULT: 1
 # REPEAT: 0
-# REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs
+# REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs node_net_guard
 #   · node_pkgs(12_node_pkgs.sh): 节点系统包对账 —— 必须在 kubespray 之前(它的 bootstrap_os →
 #     system_packages 遇到 apt 依赖图破损会直接失败; 实测 2026-09-28 libudev1/udev 配对被打断)。
 #     ⚠ 序号 12 > 06 排不到前面 ⇒ 靠这行 REQUIRES 定序(与 kube_vip 当年同一手法)。
@@ -93,6 +93,29 @@ bash "${SCRIPT_DIR}/tools/k8s/gen-inventory.sh"
 # gen-inventory 已内部调用 sync, 此处再显式兜底归一化一次, 并在 kubespray 前快速失败给出可操作提示。
 bash "${SCRIPT_DIR}/tools/k8s/sync-kubespray-config.sh" >/dev/null 2>&1 || \
     warn "sync-kubespray-config.sh 归一化失败(以下方预检为准)"
+
+# Calico 源地址提示强制门禁(2026-10-27): IB/多网卡节点上, 主机 netplan 的
+# `routing-policy: from <IB> lookup <table>` 会让内核给本地 Pod 设备路由选 IB 源;
+# Calico rpfilter 反向校验用回包目的地址(IB)查路由 → 命中 IB 表 → 出接口≠入接口 → DROP,
+# 表现为 kubelet 探针超时、coredns/metallb/metrics-server 0/1 无限重启。
+# sync 会按 CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR 写 calico_use_default_route_src_ipaddr;
+# 这里断言“真的写进 inventory 了”, 防止配置开了、生成文件却没跟上(静默退回内核自选源)。
+_CALICO_SRC_ON=0
+case "$(echo "${CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR:-true}" | tr '[:upper:]' '[:lower:]')" in
+    true|1|yes|on) _CALICO_SRC_ON=1 ;;
+esac
+if [ "${KUBE_NETWORK_PLUGIN:-calico}" = "calico" ] && [ "${_CALICO_SRC_ON}" = "1" ]; then
+    _CALICO_SRC_YML="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}/group_vars/k8s_cluster/k8s-net-calico.yml"
+    if ! grep -qE '^calico_use_default_route_src_ipaddr:[[:space:]]*true' "${_CALICO_SRC_YML}" 2>/dev/null; then
+        err "Calico 源地址提示未写入 ${_CALICO_SRC_YML}"
+        err "  CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=true 但 inventory 未出现 calico_use_default_route_src_ipaddr: true"
+        err "  这是 IB/多网卡节点 host→本地 Pod 探针被 rpfilter 丢弃的根因修复; 继续部署会复现 0/1 重启"
+        err "  修复: bash ${SCRIPT_DIR}/tools/k8s/sync-kubespray-config.sh 后重跑"
+        exit 1
+    fi
+    unset _CALICO_SRC_YML
+fi
+unset _CALICO_SRC_ON
 
 # ---------------- kube-vip: 阶段二的切换确认(必须在模块里做, 不能在 sync 里) ----------------
 # sync 的 stdout 上面被重定向到 /dev/null, 把倒计时放 sync 里用户看不见还会白等 30 秒。

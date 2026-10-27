@@ -5,6 +5,7 @@
 # PHASE: k8s
 # DEFAULT: 0
 # REPEAT: 1
+# REQUIRES: node_net_guard
 # 说明: 仅经命令行触发(--with-scale 只跑本模块 / --steps k8s_scale); 无 cluster.conf 开关 ——
 #   原 K8S_SCALE_ENABLED 已于 2026-10-16 移除: 历史注释称"= --with-scale"但实际不是 ——
 #   置 true 会把本模块塞进**每一次全量部署**, 且在全量计划中排在 k8s_deploy **之前**,
