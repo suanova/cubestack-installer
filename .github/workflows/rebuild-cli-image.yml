@@ -6,7 +6,7 @@ name: Rebuild installer CLI image
 #   · release-2.0 = 发布通道: 推 release.env 钉死的版本化 CLI 镜像, 并在同一 job
 #                   内导出版本化 tar + 更新 MinIO <release>/ 的 CLI 元数据
 #                   (release.json/SHA256SUMS/_SUCCESS/_CLI_IMAGE_DIGEST)。
-#                   CLI 同步不再依赖 sync-release-2.0-images.yml 的 workflow_run。
+#                   CLI 同步不再依赖 sync-release-images.yml 的 workflow_run。
 #
 # operator chart 已改为随离线包分发(deployments/offline-files/cubestack-operator/
 # 顶层 .tgz, 由内网 cubestack-platform-sync.sh 上传 MinIO), 不再打进 CLI 镜像。
@@ -53,7 +53,7 @@ permissions:
 # cancel-in-progress=false 让后来的 run 排队等待, 而不是取消正在上传的 run
 # (否则会留下半套 tar/digest)。
 concurrency:
-  group: rebuild-cli-image
+  group: release-minio-writes
   cancel-in-progress: false
 
 jobs:
@@ -185,7 +185,7 @@ jobs:
           echo "pushed ${target}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       # release-2.0: 同一 job 内完成 CLI tar + MinIO 元数据同步。
-      # 不再依赖 sync-release-2.0-images.yml 的 workflow_run(默认分支监听器可能
+      # 不再依赖 sync-release-images.yml 的 workflow_run(默认分支监听器可能
       # 缺失/滞后)。同步失败 -> 本 workflow 失败, 且 MinIO 侧 _SUCCESS 不会写,
       # fetch 会明确拒绝半套发布树。
       - name: Sync release CLI tar to MinIO

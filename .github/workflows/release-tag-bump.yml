@@ -1,0 +1,290 @@
+name: Open release bump PR
+
+# ============================================================================
+# 上游 tag 发布成功 -> 更新 release 版本定义并开/更新累积 PR.
+#
+# 触发:
+#   repository_dispatch: release-tag-published
+#     {release, source_repo, component, git_tag, image_tag, chart_version?}
+#   workflow_dispatch: 手动补跑
+#
+# 本 workflow 不写 MinIO; 合并 PR 后由 sync-release-images.yml 的 push 触发同步.
+# ============================================================================
+
+on:
+  repository_dispatch:
+    types: [release-tag-published]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'release 目录 (如 2.0.0)'
+        required: true
+      source_repo:
+        description: '触发仓库 (如 suanova/cubestack-operator)'
+        required: true
+      component:
+        description: 'components.tsv 组件 (默认 release-first-party)'
+        required: true
+      git_tag:
+        description: '上游 git tag (如 v2.0.0)'
+        required: true
+      image_tag:
+        description: '实际推送的镜像 tag (不要自行去 v)'
+        required: true
+      chart_version:
+        description: 'operator chart 版本(可选)'
+        required: false
+        default: ''
+      checkout_ref:
+        description: '覆盖发布分支(留空=由 release 推导 release-<major>.<minor>)'
+        required: false
+        default: ''
+      dry_run:
+        description: '只演练, 不提交/不开 PR'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-bump-${{ github.event.client_payload.release || github.event.inputs.release || 'unknown' }}
+  cancel-in-progress: false
+
+env:
+  EVENT_NAME: ${{ github.event_name }}
+  RELEASE: ${{ github.event.client_payload.release || github.event.inputs.release || '' }}
+  SOURCE_REPO: ${{ github.event.client_payload.source_repo || github.event.inputs.source_repo || '' }}
+  COMPONENT: ${{ github.event.client_payload.component || github.event.inputs.component || '' }}
+  GIT_TAG: ${{ github.event.client_payload.git_tag || github.event.inputs.git_tag || '' }}
+  IMAGE_TAG: ${{ github.event.client_payload.image_tag || github.event.inputs.image_tag || '' }}
+  CHART_VERSION: ${{ github.event.client_payload.chart_version || github.event.inputs.chart_version || '' }}
+  CHECKOUT_REF: ${{ github.event.client_payload.checkout_ref || github.event.inputs.checkout_ref || '' }}
+  DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+  HARBOR_MIRROR_REGISTRY: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
+  HARBOR_MIRROR_USER: ${{ vars.HARBOR_MIRROR_USER || secrets.HARBOR_MIRROR_USER }}
+  HARBOR_MIRROR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
+  HARBOR_MIRROR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
+  CUBESTACK_OPERATOR_HARBOR_USER: ${{ vars.CUBESTACK_OPERATOR_HARBOR_USER || secrets.CUBESTACK_OPERATOR_HARBOR_USER }}
+  CUBESTACK_OPERATOR_HARBOR_PASSWORD: ${{ secrets.CUBESTACK_OPERATOR_HARBOR_PASSWORD }}
+
+jobs:
+  resolve:
+    name: Resolve release and branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.resolve.outputs.release }}
+      checkout_ref: ${{ steps.resolve.outputs.checkout_ref }}
+      skip: ${{ steps.resolve.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Resolve
+        id: resolve
+        run: |
+          set -euo pipefail
+          python3 - "$GITHUB_OUTPUT" <<'PY'
+          import os, re, sys
+          out = sys.argv[1]
+          repo_root = os.getcwd()
+          image_tag = os.environ.get("IMAGE_TAG", "")
+          payload_release = os.environ.get("RELEASE", "")
+          # Automatic triggers can only come from the operator tag publisher;
+          # manual runs may target any component (hotfix path).
+          event_name = os.environ.get("EVENT_NAME", "")
+          source_repo = os.environ.get("SOURCE_REPO", "")
+          component = os.environ.get("COMPONENT", "")
+          if event_name == "repository_dispatch":
+              if source_repo != "suanova/cubestack-operator" or component != "release-first-party":
+                  print(f"::error::automatic trigger rejected: source_repo={source_repo!r} component={component!r}")
+                  sys.exit(1)
+          m = re.match(r'^v?([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$', image_tag)
+          if not m:
+              print(f"::error::image_tag is not semver: {image_tag!r}")
+              sys.exit(1)
+          git_tag = os.environ.get("GIT_TAG", "")
+          if not re.match(r'^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$', git_tag):
+              print(f"::error::git_tag is not a v-prefixed semver: {git_tag!r}")
+              sys.exit(1)
+          release = f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
+          if payload_release and payload_release != release:
+              print(f"::error::release {payload_release} != derived {release}")
+              sys.exit(1)
+          checkout_ref = os.environ.get("CHECKOUT_REF", "") or f"release-{m.group(1)}.{m.group(2)}"
+          if not checkout_ref or re.search(r'[^0-9A-Za-z._/-]', checkout_ref) or ".." in checkout_ref:
+              print(f"::error::invalid checkout_ref: {checkout_ref!r}")
+              sys.exit(1)
+          skip = "0"
+          if not os.path.isdir(os.path.join(repo_root, "deployments", "releases", release)):
+              print(f"::warning::release {release} 不存在; 若是新发布线请先执行 release-publish.sh")
+              skip = "1"
+          with open(out, "a", encoding="utf-8") as f:
+              f.write(f"release={release}\ncheckout_ref={checkout_ref}\nskip={skip}\n")
+          print(f"git_tag={git_tag} release={release} checkout_ref={checkout_ref} skip={skip}")
+          PY
+
+  bump:
+    name: Update version definitions
+    needs: resolve
+    if: needs.resolve.outputs.skip != '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack-installer
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.checkout_ref }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Install skopeo & helm
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo
+          curl -fsSL https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz | tar -xz -C /tmp
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          skopeo --version
+          helm version --short
+
+      - name: Create or update bump branch
+        env:
+          BRANCH: release-bump/${{ needs.resolve.outputs.release }}
+          BASE: ${{ needs.resolve.outputs.checkout_ref }}
+        run: |
+          set -euo pipefail
+          git config user.name "suanova-bot"
+          git config user.email "bot@isuanova.com"
+          if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
+            git fetch origin "${BRANCH}"
+            git checkout -B "${BRANCH}" "origin/${BRANCH}"
+            git merge --no-edit "origin/${BASE}" || {
+              echo "::error::bump 分支与 ${BASE} 冲突, 请人工处理"; exit 1; }
+          else
+            git checkout -B "${BRANCH}" "origin/${BASE}"
+          fi
+
+      - name: Preflight Harbor
+        env:
+          RELEASE: ${{ needs.resolve.outputs.release }}
+        run: |
+          set -euo pipefail
+          auth="${RUNNER_TEMP}/harbor-auth.json"
+          if [ -n "${HARBOR_MIRROR_USER:-}" ] && [ -n "${HARBOR_MIRROR_PASSWORD:-}" ]; then
+            HU="${HARBOR_MIRROR_USER}"; HP="${HARBOR_MIRROR_PASSWORD}"
+          elif [ -n "${CUBESTACK_OPERATOR_HARBOR_USER:-}" ] && [ -n "${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}" ]; then
+            HU="${CUBESTACK_OPERATOR_HARBOR_USER}"; HP="${CUBESTACK_OPERATOR_HARBOR_PASSWORD}"
+          else
+            echo "::error::missing complete Harbor credential pair"; exit 1
+          fi
+          _HU="${HU}" _HP="${HP}" _HH="${HARBOR_MIRROR_REGISTRY}" python3 - "${auth}" <<'PY'
+          import base64, json, os, sys
+          auth = base64.b64encode(f"{os.environ['_HU']}:{os.environ['_HP']}".encode()).decode()
+          json.dump({"auths": {os.environ["_HH"]: {"auth": auth}}}, open(sys.argv[1], "w"))
+          PY
+          chmod 600 "${auth}"
+          skopeo_args=(--authfile "${auth}")
+          helm_login_insecure=()
+          helm_show_insecure=()
+          if [ "${HARBOR_MIRROR_INSECURE}" = "true" ]; then
+            skopeo_args+=(--tls-verify=false)
+            helm_login_insecure+=(--insecure)
+            helm_show_insecure+=(--insecure-skip-tls-verify)
+          fi
+          targets="$(bash deployments/scripts/tools/images/release-bump-pr.sh \
+            --release "${RELEASE}" --component "${COMPONENT}" --image-tag "${IMAGE_TAG}" --print-targets)"
+          operator_bump=0
+          printf '%s\n' "${targets}" | grep -q $'^\.\t' && operator_bump=1
+          if [ "${operator_bump}" = "1" ] && [ -z "${CHART_VERSION}" ]; then
+            echo "::error::operator image bump requires chart_version"; exit 1
+          fi
+          while IFS=$'\t' read -r sub ref; do
+            [ -n "${ref:-}" ] || continue
+            skopeo inspect "${skopeo_args[@]}" "docker://${ref}" >/dev/null \
+              || { echo "::error::Harbor 缺少镜像 ${ref}"; exit 1; }
+          done <<< "${targets}"
+          if [ -n "${CHART_VERSION}" ]; then
+            printf '%s' "${HP}" | helm registry login "${HARBOR_MIRROR_REGISTRY}" -u "${HU}" --password-stdin "${helm_login_insecure[@]}"
+            chart_meta="$(helm show chart \
+              "oci://${HARBOR_MIRROR_REGISTRY}/suanova-private/cubestack-operator-chart" \
+              --version "${CHART_VERSION}" "${helm_show_insecure[@]}")" || {
+                echo "::error::Harbor 缺少 chart ${CHART_VERSION}"; exit 1; }
+            app_version="$(printf '%s\n' "${chart_meta}" \
+              | sed -n 's/^appVersion:[[:space:]]*//p' | head -1 | tr -d '"')"
+            if [ "${operator_bump}" = "1" ]; then
+              [ -n "${app_version}" ] || { echo "::error::cannot read appVersion from chart ${CHART_VERSION}"; exit 1; }
+              [ "${app_version}" = "${IMAGE_TAG}" ] || {
+                echo "::error::chart ${CHART_VERSION} appVersion ${app_version} != image_tag ${IMAGE_TAG}"; exit 1; }
+            fi
+          fi
+
+      - name: Apply bump
+        env:
+          RELEASE: ${{ needs.resolve.outputs.release }}
+        run: |
+          set -euo pipefail
+          args=(--release "${RELEASE}" --component "${COMPONENT}" --image-tag "${IMAGE_TAG}"
+                --summary-file "${RUNNER_TEMP}/bump-summary.md")
+          [ -n "${CHART_VERSION}" ] && args+=(--chart-version "${CHART_VERSION}")
+          [ -n "${SOURCE_REPO}" ] && args+=(--source-repo "${SOURCE_REPO}")
+          [ "${DRY_RUN}" = "true" ] && args+=(--dry-run)
+          bash deployments/scripts/tools/images/release-bump-pr.sh "${args[@]}"
+          cat "${RUNNER_TEMP}/bump-summary.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Commit and push
+        if: env.DRY_RUN != 'true'
+        env:
+          RELEASE: ${{ needs.resolve.outputs.release }}
+          BRANCH: release-bump/${{ needs.resolve.outputs.release }}
+        run: |
+          set -euo pipefail
+          git add "deployments/releases/${RELEASE}"
+          if git diff --cached --quiet; then
+            echo "no changes to commit"
+            exit 0
+          fi
+          git commit -m "bump: ${RELEASE} ${COMPONENT} -> ${IMAGE_TAG}"
+          git push origin "${BRANCH}"
+
+      - name: Open or update PR
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE: ${{ needs.resolve.outputs.release }}
+          BRANCH: release-bump/${{ needs.resolve.outputs.release }}
+          BASE: ${{ needs.resolve.outputs.checkout_ref }}
+        run: |
+          set -euo pipefail
+          if ! git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
+            echo "branch ${BRANCH} does not exist; nothing to publish"
+            exit 0
+          fi
+          if [ -n "$(gh pr list --head "${BRANCH}" --json number --jq '.[].number')" ]; then
+            echo "PR already open for ${BRANCH}"
+            exit 0
+          fi
+          gh pr create --base "${BASE}" --head "${BRANCH}" \
+            --title "release: bump ${RELEASE} (${COMPONENT} -> ${IMAGE_TAG})" \
+            --body "$(cat <<EOF
+          由上游 tag 触发的版本定义更新。
+
+          - release: ${RELEASE}
+          - component: ${COMPONENT}
+          - image tag: ${IMAGE_TAG}
+          - chart version: ${CHART_VERSION:-<none>}
+
+          合并后由 \`sync-release-images.yml\` 的 push 触发同步到 MinIO 版本树。
+          EOF
+          )"
