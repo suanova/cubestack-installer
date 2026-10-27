@@ -1,0 +1,111 @@
+#!/bin/bash
+# ============================================================
+# test-master-placement.sh — 系统组件 master placement 工具回归
+#
+# 背景(2026-10-27 节点池): master cordon 后, CoreDNS/metrics-server/dns-autoscaler/
+#   calico-kube-controllers/registry/MetalLB controller 等 Deployment/ReplicaSet 必须
+#   带 node-role.kubernetes.io/control-plane nodeSelector + control-plane/unschedulable
+#   tolerations; MetalLB speaker 是 DaemonSet, 只需 toleration(全节点)。
+#
+# 覆盖:
+#   ① 工具存在且声明 apply/check/remove
+#   ② 覆盖预期 workload 名称
+#   ③ patch 含 master nodeSelector + 两个 toleration key
+#   ④ speaker 只加 toleration(不加 master nodeSelector)
+#   ⑤ apply 对每个 workload 发出 patch 命令(假 ssh)
+#
+# 隔离: 假 ssh 记录远端命令; 不连集群。
+# 用法: bash deployments/scripts/tools/tests/test-master-placement.sh
+# ============================================================
+set -uo pipefail
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+TOOL="${REPO_ROOT}/deployments/scripts/tools/k8s/master-placement.sh"
+TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+fail=0
+chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }
+chk_contains() { if [[ "$3" == *"$2"* ]]; then echo "  ok  $1"; else echo "  FAIL $1: 未包含 [$2]"; fail=1; fi; }
+
+[ -f "${TOOL}" ] && echo "  ok  tool exists" || { echo "  FAIL tool missing: ${TOOL}"; fail=1; }
+
+if [ -f "${TOOL}" ]; then
+    src="$(cat "${TOOL}")"
+    echo "== ① 模式 =="
+    chk_contains "apply" "--apply" "${src}"
+    chk_contains "check" "--check" "${src}"
+    chk_contains "remove" "--remove" "${src}"
+
+    echo "== ② workload 覆盖 =="
+    for w in coredns metrics-server dns-autoscaler calico-kube-controllers registry; do
+        chk_contains "workload ${w}" "${w}" "${src}"
+    done
+    chk_contains "metallb controller" "metallb-system" "${src}"
+    chk_contains "metallb speaker" "speaker" "${src}"
+
+    echo "== ③ master nodeSelector + tolerations =="
+    chk_contains "control-plane selector key" "node-role.kubernetes.io/control-plane" "${src}"
+    chk_contains "unschedulable toleration key" "node.kubernetes.io/unschedulable" "${src}"
+
+    echo "== ④ speaker 只加 toleration =="
+    # speaker patch 变量不应包含 nodeSelector 的 control-plane 键
+    if grep -q '_DS_PATCH=' "${TOOL}"; then
+        ds_line="$(grep '_DS_PATCH=' "${TOOL}" | head -1)"
+        chk_contains "speaker patch toleration" "node.kubernetes.io/unschedulable" "${ds_line}"
+        if [[ "${ds_line}" == *nodeSelector* ]]; then
+            echo "  FAIL speaker patch 不应带 nodeSelector"; fail=1
+        else
+            echo "  ok  speaker patch 无 nodeSelector"
+        fi
+    else
+        echo "  FAIL 缺少 _DS_PATCH"; fail=1
+    fi
+fi
+
+echo "== ⑤ apply 假 ssh 执行 =="
+mkdir -p "${TMP}/bin" "${TMP}/keys" "${TMP}/offline"
+: > "${TMP}/keys/fake_key"; : > "${TMP}/defaults.conf"; : > "${TMP}/ssh.log"
+cat > "${TMP}/bin/ssh" <<'FAKE'
+#!/bin/bash
+seen=0; cmd=""
+for a in "$@"; do
+    if [ "${seen}" = "0" ]; then case "$a" in *@*) seen=1 ;; esac; else cmd="${cmd}${cmd:+ }${a}"; fi
+done
+printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}"
+exit 0
+FAKE
+chmod +x "${TMP}/bin/ssh"
+cat > "${TMP}/cluster.conf" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
+)
+SSH_USER="root"
+KUBESPRAY_PROFILE="none"
+EOF
+if [ -f "${TOOL}" ]; then
+    (
+        export PATH="${TMP}/bin:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        export FAKE_SSH_LOG="${TMP}/ssh.log"
+        bash "${TOOL}" --apply
+    ) >/dev/null 2>&1
+    log="$(cat "${TMP}/ssh.log")"
+    for w in coredns metrics-server dns-autoscaler calico-kube-controllers; do
+        chk_contains "apply patch ${w}" "patch deploy ${w}" "${log}" || true
+    done
+    chk_contains "apply patch registry" "patch rs registry" "${log}"
+    chk_contains "registry pod recreate" "delete pod -l k8s-app=registry" "${log}"
+    chk_contains "apply patch metallb controller" "patch deploy controller" "${log}"
+    chk_contains "apply patch metallb speaker" "patch ds speaker" "${log}"
+    chk_contains "apply toleration" "node.kubernetes.io/unschedulable" "${log}"
+else
+    echo "  FAIL 无法执行 apply(tool missing)"; fail=1
+fi
+
+echo ""
+if [ "${fail}" = "0" ]; then
+    echo "✅ test-master-placement: 全部通过"
+else
+    echo "❌ test-master-placement: 存在失败项"
+fi
+exit "${fail}"

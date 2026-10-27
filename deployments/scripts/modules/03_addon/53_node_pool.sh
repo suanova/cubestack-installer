@@ -37,6 +37,9 @@ esac
 if [ "${_ACTION}" = "remove" ]; then
     say "节点池回滚(master 标签/cordon)..."
     bash "${SCRIPT_DIR}/tools/node/node-pool.sh" --remove
+    if [ "${NODE_POOL_PLATFORM_PLACEMENT:-true}" = "true" ]; then
+        bash "${SCRIPT_DIR}/tools/k8s/master-placement.sh" --remove || warn "  系统组件 placement 回滚失败(不阻断)"
+    fi
     exit 0
 fi
 
@@ -47,10 +50,18 @@ fi
 
 case "${_ACTION}" in
     apply)
+        if [ "${NODE_POOL_PLATFORM_PLACEMENT:-true}" = "true" ]; then
+            say "系统组件 master placement(CoreDNS/metrics/registry/MetalLB 等)..."
+            bash "${SCRIPT_DIR}/tools/k8s/master-placement.sh" --apply
+        fi
         say "节点池隔离: master 打标签$( [ "${NODE_POOL_MASTER_CORDON:-true}" = "true" ] && echo ' + cordon' || echo '' )..."
         bash "${SCRIPT_DIR}/tools/node/node-pool.sh" --apply
         ;;
     check)
+        if [ "${NODE_POOL_PLATFORM_PLACEMENT:-true}" = "true" ]; then
+            say "校验系统组件 master placement..."
+            bash "${SCRIPT_DIR}/tools/k8s/master-placement.sh" --check
+        fi
         say "节点池隔离: 校验 master 标签/cordon..."
         bash "${SCRIPT_DIR}/tools/node/node-pool.sh" --check
         ;;

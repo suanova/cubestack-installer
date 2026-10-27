@@ -78,7 +78,28 @@ NODE_POOL_ENABLED=true NODE_POOL_ACTION=remove sudo ./deploy-cluster.sh --steps 
 
 - `DEFAULT: 0`、`TOGGLE: NODE_POOL_ENABLED`：默认不随全量部署；
 - 若在 cluster.conf 设 `NODE_POOL_ENABLED=true`，它会在 addon 末尾（文件 53）执行；
-- `REQUIRES: k8s_deploy`：集群必须先存在；已部署集群上 `k8s_deploy` 状态 done 时不会重跑。
+- `REQUIRES: k8s_deploy`：集群必须先存在；已部署集群上 `k8s_deploy` 状态 done 时不会重跑；
+- 执行顺序：先 `master-placement.sh --apply` 给系统组件加 master placement，再 cordon；
+  `remove` 先 uncordon，再移除系统组件的 master nodeSelector。
+
+### 系统组件 master placement(阶段二 B-1)
+
+`deployments/scripts/tools/k8s/master-placement.sh` 在 cordon 前给以下组件加
+`node-role.kubernetes.io/control-plane` nodeSelector + control-plane/unschedulable tolerations：
+
+- `kube-system/deploy/coredns`
+- `kube-system/deploy/metrics-server`
+- `kube-system/deploy/dns-autoscaler`
+- `kube-system/deploy/calico-kube-controllers`
+- `kube-system/rs/registry`（registry 是 kubespray 的裸 ReplicaSet）
+- `metallb-system/deploy/controller`
+
+`metallb-system/ds/speaker` 是 DaemonSet，只补 toleration（必须全节点，含 cordon master）。
+用 `NODE_POOL_PLATFORM_PLACEMENT=false` 可关闭该步骤。
+
+> ⚠ kubespray 重跑 `k8s_deploy` 会按 addons.yml 重新渲染这些 Deployment；之后需重跑
+> `--steps node_pool` 重新应用。`--remove` 只移除本工具加的 master nodeSelector，
+> tolerations 保留（避免 control-plane taint 下的组件 Pending）。
 
 ### 配置（cluster.defaults.conf §2.8）
 
