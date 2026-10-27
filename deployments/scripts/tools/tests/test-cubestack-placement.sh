@@ -42,6 +42,7 @@ if [ -f "${TOOL}" ]; then
     echo "== ③ placement =="
     chk_contains "control-plane selector" "node-role.kubernetes.io/control-plane" "${src}"
     chk_contains "unschedulable toleration" "node.kubernetes.io/unschedulable" "${src}"
+    chk_contains "patch 前先给 RWO Deployment 设 Recreate" 'ensure_rwo_deployments_recreate' "${src}"
 
     echo "== ④ 不碰数据面/推理 =="
     # workload 列表不应包含 envoy-envoy-gateway-system- / sglang / vllm / model

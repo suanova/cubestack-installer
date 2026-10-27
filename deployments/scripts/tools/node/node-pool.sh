@@ -154,19 +154,19 @@ for host in "${MASTER_HOSTS[@]}"; do
             else
                 say "  [${host}] 标签不存在或值不同, 跳过移除"
             fi
-            if [ "${MASTER_CORDON}" = "true" ]; then
-                if _np_owned "${ann}"; then
-                    if SSH "${K} uncordon ${host}" >/dev/null 2>&1; then
-                        SSH "${K} annotate node ${host} cubestack.io/node-pool-cordoned-by-installer-" >/dev/null 2>&1 || true
-                        ok "  [${host}] 已 uncordon(本工具创建)"
-                    else
-                        err "  [${host}] uncordon 失败"; FAILED=1
-                    fi
-                elif [ "${unsched}" = "true" ]; then
-                    warn "  [${host}] 节点 cordon 非本工具创建(无 ownership annotation), 不 uncordon"
+            # ★ remove 不看当前 NODE_POOL_MASTER_CORDON: 只要 ownership annotation 在,
+            #   就回滚 cordon(创建时可能是 true, 之后配置改回 false 也要能清理)。
+            if _np_owned "${ann}"; then
+                if SSH "${K} uncordon ${host}" >/dev/null 2>&1; then
+                    SSH "${K} annotate node ${host} cubestack.io/node-pool-cordoned-by-installer-" >/dev/null 2>&1 || true
+                    ok "  [${host}] 已 uncordon(本工具创建)"
                 else
-                    say "  [${host}] 节点未 cordon, 无需 uncordon"
+                    err "  [${host}] uncordon 失败"; FAILED=1
                 fi
+            elif [ "${unsched}" = "true" ]; then
+                warn "  [${host}] 节点 cordon 非本工具创建(无 ownership annotation), 不 uncordon"
+            else
+                say "  [${host}] 节点未 cordon, 无需 uncordon"
             fi
             ;;
     esac

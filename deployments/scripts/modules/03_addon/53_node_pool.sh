@@ -1,25 +1,27 @@
 #!/bin/bash
 # ============================================================
 # MODULE: node_pool
-# DESC: 节点池调度隔离(默认启用: 平台组件钉 master, master 默认不 cordon; 可选 cordon)
+# DESC: 节点池调度隔离(默认启用: master 默认 cordon, 平台组件仍可调度到 master)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: NODE_POOL_ENABLED
 # REQUIRES: k8s_deploy
 # 说明:
-#   · 默认口径(2026-10-27): master 保持**可调度**(Unschedulable=false)，CubeStack operator/
-#     平台组件通过 nodeSelector + toleration 钉到 master。需要维护窗口时显式
-#     NODE_POOL_MASTER_CORDON=true；Pod 侧已有 node.kubernetes.io/unschedulable:NoSchedule
-#     toleration，仍能调度到 cordon master。
-#   · 本模块 = 平台 placement(先) + master 标签/按需 cordon(后)：
-#       - NODE_POOL_CUBESTACK_PLACEMENT=true(默认): cubestack-placement.sh 兜底 patch 平台 Deployment；
+#   · 默认口径(2026-10-27): master 默认 **cordon(Unschedulable=true)**；CubeStack operator/
+#     平台组件通过 nodeSelector + toleration 仍能调度/重建到 master。设
+#     NODE_POOL_MASTER_CORDON=false 可保持 master 可调度；Pod 侧已带
+#     node.kubernetes.io/unschedulable:NoSchedule + control-plane toleration。
+#   · 本模块 = 平台 placement(先) + master 标签/cordon(后)：
+#       - NODE_POOL_CUBESTACK_PLACEMENT=true(默认): cubestack-placement.sh 兜底 patch 平台 Deployment
+#         (patch 前先给 RWO PVC 的 Deployment 设 Recreate，避免 Multi-Attach)；
 #         25_cubestack_operator.sh 还会通过 CubeStackCluster components.<name>.values 在创建
 #         cubepilot-api/operator、controller-manager、portal 时直接下发 master placement。
 #       - NODE_POOL_PLATFORM_PLACEMENT=false(默认): 不动 CoreDNS/metrics/registry/MetalLB 等系统组件。
 #   · NODE_POOL_ENABLED 默认 true ⇒ 随全量部署在 addon 末尾(本文件 53)执行；也可手动:
 #       sudo ./deploy-cluster.sh --steps node_pool
 #       NODE_POOL_ACTION=remove sudo ./deploy-cluster.sh --steps node_pool   # 回滚
+#   · remove 不看当前 NODE_POOL_MASTER_CORDON：ownership annotation 在就 uncordon。
 #   · cordon 由本工具创建时会打 ownership annotation; remove 只回滚自己创建的 cordon,
 #     不会误删用户/其他工具预先设置的 cordon。
 #   · 详见 docs/node-pool.md。

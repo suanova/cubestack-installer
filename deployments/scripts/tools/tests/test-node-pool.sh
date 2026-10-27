@@ -181,6 +181,14 @@ chk_contains "m1 标签删除命令" "node-pool-" "$(cat "${TMP}/kubectl.log")"
 chk "m1 已 uncordon" "false" "$(_unsched m1)"
 chk "m1 annotation 已删" "" "$(_ann m1)"
 
+echo "== ④b remove 不看当前 CORDON 配置: annotation 在就 uncordon =="
+_reset
+_run -- --apply >/dev/null
+out="$(_run NODE_POOL_MASTER_CORDON=false -- --remove)"
+chk "remove(false) 退出码 0" "0" "$?"
+chk "m1 已 uncordon(当前配置 false 也回滚)" "false" "$(_unsched m1)"
+chk "m1 annotation 已删" "" "$(_ann m1)"
+
 echo "== ⑤ 预存 cordon(无 annotation): 不抢 ownership, remove 不 uncordon =="
 _reset
 echo true > "${TMP}/state/m1.unschedulable"

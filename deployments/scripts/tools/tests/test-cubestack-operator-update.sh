@@ -351,7 +351,7 @@ done
 chk_contains "CR values nodeSelector" 'node-role.kubernetes.io/control-plane: ""' "${MOD}"
 chk_contains "CR values unschedulable toleration" 'node.kubernetes.io/unschedulable' "${MOD}"
 chk_contains "defaults NODE_POOL_ENABLED=true" 'NODE_POOL_ENABLED="${NODE_POOL_ENABLED:-true}"' "${DEFAULTS}"
-chk_contains "defaults NODE_POOL_MASTER_CORDON=false" 'NODE_POOL_MASTER_CORDON="${NODE_POOL_MASTER_CORDON:-false}"' "${DEFAULTS}"
+chk_contains "defaults NODE_POOL_MASTER_CORDON=true" 'NODE_POOL_MASTER_CORDON="${NODE_POOL_MASTER_CORDON:-true}"' "${DEFAULTS}"
 chk_contains "defaults NODE_POOL_PLATFORM_PLACEMENT=false" 'NODE_POOL_PLATFORM_PLACEMENT="${NODE_POOL_PLATFORM_PLACEMENT:-false}"' "${DEFAULTS}"
 chk_contains "defaults NODE_POOL_CUBESTACK_PLACEMENT=true" 'NODE_POOL_CUBESTACK_PLACEMENT="${NODE_POOL_CUBESTACK_PLACEMENT:-true}"' "${DEFAULTS}"
 

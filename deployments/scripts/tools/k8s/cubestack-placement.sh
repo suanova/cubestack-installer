@@ -97,6 +97,13 @@ FAILED=0
 case "${ACTION}" in
     apply)
         say "CubeStack operator/平台组件 master placement(Deployment) ..."
+        # ★ 2026-10-27: 下面的 template patch 会触发 Deployment 滚动。若 Deployment 挂 RWO PVC
+        #   且策略仍是 RollingUpdate, 旧 Pod 持卷、新 Pod Multi-Attach 卡死(实机 cuberouter)。
+        #   先把这些 Deployment 改成 Recreate, 再 patch placement(来自 lib-common)。
+        for _ns in cubestack-system cuberouter; do
+            ensure_rwo_deployments_recreate "${_ns}" "cubestack.io/managed-by=cubestack-operator" 30 || true
+        done
+        unset _ns
         for _w in "${_CB_WORKLOADS[@]}"; do
             IFS='|' read -r _t _n _name <<< "${_w}"
             if ! _exists "${_t}" "${_n}" "${_name}"; then

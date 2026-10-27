@@ -1,14 +1,14 @@
 # 节点池调度隔离(node pool)
 
-> 2026-10-27 起分阶段实现。当前**默认口径**：master 保持可调度（`Unschedulable=false`），
-> CubeStack operator/平台组件通过 nodeSelector + toleration 钉到 master；master cordon 仅作为
-> 维护窗口的可选项。GPU worker 隔离在后续阶段补充。
+> 2026-10-27 起分阶段实现。当前**默认口径**：master 默认 **cordon（`Unschedulable=true`）**，
+> CubeStack operator/平台组件通过 nodeSelector + toleration 仍能调度/重建到 master；设置
+> `NODE_POOL_MASTER_CORDON=false` 可保持 master 可调度。GPU worker 隔离在后续阶段补充。
 
 ## 目标
 
-- **master**：默认**不 cordon**（`Unschedulable=false`），但 Ceph / operator / 平台组件通过
-  nodeSelector + toleration 钉到 master；需要维护时显式 `NODE_POOL_MASTER_CORDON=true`，
-  Pod 已带 `node.kubernetes.io/unschedulable:NoSchedule` toleration，仍能调度到 cordon master。
+- **master**：默认 **cordon**（`Unschedulable=true`），但 Ceph / operator / 平台组件通过
+  nodeSelector + toleration 仍能调度到 master；设 `NODE_POOL_MASTER_CORDON=false` 可保持
+  master 可调度（Pod 侧 toleration 仍保留，便于随时 cordon）。
 - **GPU worker**：纯 GPU 节点，只允许 sglang/vllm 推理与 GPU 驱动/设备插件等必要 Pod；
   系统 DaemonSet 例外。
 - 允许临时维护时对 master `cordon/drain`，不破坏平台组件的重调度。
@@ -144,7 +144,7 @@ sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worke
 | `NODE_POOL_ENABLED` | `true` | 总开关（默认随全量部署） |
 | `NODE_POOL_ACTION` | `apply` | `apply` / `check` / `remove` |
 | `NODE_POOL_MASTER_LABEL` | `node-pool=control-plane` | master 标签 |
-| `NODE_POOL_MASTER_CORDON` | `false` | master 是否 cordon（默认保持可调度） |
+| `NODE_POOL_MASTER_CORDON` | `true` | master 是否 cordon（默认 cordon；false=保持可调度） |
 | `NODE_POOL_PLATFORM_PLACEMENT` | `false` | 是否把 CoreDNS/metrics/registry/MetalLB 等系统组件也钉 master |
 | `NODE_POOL_CUBESTACK_PLACEMENT` | `true` | CubeStack operator/平台组件钉 master（含 chart values 透传） |
 | `NODE_POOL_GPU_LABEL` | `node-pool=gpu` | 阶段二使用 |
