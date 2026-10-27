@@ -738,6 +738,27 @@ fi   # 结束 ONLINE_DEPLOY!=true 的离线推送块([4/6]+[4b/6])
 say "[5/6] 应用 chart 内的 CRD(crds/ 目录)..."
 _WORK="$(mktemp -d)"
 trap '_cleanup; rm -rf "${_WORK}"' EXIT
+
+# 节点池(2026-10-27): operator pod 自身钉 master + 容忍 control-plane/unschedulable。
+# 平台组件(controller-manager/envoy/ai-gateway/lws/portal/monitoring 等)由 node_pool 模块的
+# cubestack-placement.sh 在部署末尾 patch —— 不改 CR spec.global, 避免把 model bundle 的
+# sglang/vllm 推理负载也钉到 master(GPU 隔离在后续阶段单独处理)。
+if [ "${NODE_POOL_CUBESTACK_PLACEMENT:-true}" = "true" ]; then
+    _NODE_POOL_VALUES="${_WORK}/node-pool-values.yaml"
+    cat > "${_NODE_POOL_VALUES}" <<'EOF'
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node.kubernetes.io/unschedulable
+    operator: Exists
+    effect: NoSchedule
+EOF
+    _EXTRA_VALUES+=( -f "${_NODE_POOL_VALUES}" )
+fi
+
 tar -xzf "${CHART_TGZ}" -C "${_WORK}"
 CRD_DIR="$(find "${_WORK}" -maxdepth 2 -type d -name crds | head -1 || true)"
 if [ -n "${CRD_DIR}" ] && ls "${CRD_DIR}"/*.yaml >/dev/null 2>&1; then

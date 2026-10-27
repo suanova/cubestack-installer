@@ -101,6 +101,29 @@ NODE_POOL_ENABLED=true NODE_POOL_ACTION=remove sudo ./deploy-cluster.sh --steps 
 > `--steps node_pool` 重新应用。`--remove` 只移除本工具加的 master nodeSelector，
 > tolerations 保留（避免 control-plane taint 下的组件 Pending）。
 
+### CubeStack operator/平台组件 master placement(阶段二 B-2)
+
+`deployments/scripts/tools/k8s/cubestack-placement.sh` 给以下 Deployment 加 master
+nodeSelector + control-plane/unschedulable tolerations：
+
+- `cubestack-system`：`cubestack-operator`、`cubestack-controller-manager`、`cubepilot-api`、
+  `cubepilot-operator`、`cubestack-portal`
+- `envoy-gateway-system`：`envoy-gateway` 控制器
+- `ai-gateway-system`：`ai-gateway-controller`
+- `lws-system`：`lws-controller-manager`
+- `cuberouter`：`cuberouter`、`cuberouter-cloudnative-pg`、`redis-operator`
+- `monitoring`：`kube-prometheus-grafana`、`kube-prometheus-kube-prome-operator`、
+  `kube-prometheus-kube-state-metrics`、`perses-operator-controller-manager`
+
+**明确不动**：Envoy Gateway 数据面 proxy Deployment（`envoy-envoy-gateway-system-*`）、
+sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worker 隔离在后续阶段单独做。
+`NODE_POOL_CUBESTACK_PLACEMENT=false` 可关闭。
+
+- operator 自身的 chart 安装也加了 `nodeSelector`/`tolerations`（`25_cubestack_operator.sh`），
+  新建/重装时 operator pod 直接落 master；存量 Deployment 由上面的工具 patch。
+- **没有**设置 `CubeStackCluster.spec.global.nodeSelector/tolerations`——它是全局注入，
+  可能把 model bundle 推理负载也钉到 master；平台组件用直接 patch，GPU 阶段再单独处理 bundle。
+
 ### 配置（cluster.defaults.conf §2.8）
 
 | 变量 | 默认 | 说明 |
