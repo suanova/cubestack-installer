@@ -143,6 +143,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Create cherry-pick PRs
+        id: backport
         uses: korthout/backport-action@8560fb503c275d433c56f05a2f64850093baa9f7 # v4
         with:
           github_token: ${{ steps.app-token.outputs.token }}
@@ -155,3 +156,61 @@ jobs:
           # bypass the prepare job (e.g. a "backport main" label).
           label_pattern: ''
           comment_style: summary
+
+      # backport-action reports the failure but not the conflicting files (they
+      # are only in its log). Replay the cherry-pick it tried and post them.
+      - name: Report conflicting files
+        if: steps.backport.outputs.was_successful == 'false'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          TARGETS: ${{ steps.backport.outputs.was_successful_by_target }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # The action's failure comment carries the exact commits it tried.
+          shas=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq '.[] | select(.user.login == "suanova-bot[bot]") | .body' \
+            | grep -oE 'git cherry-pick -x [0-9a-f ]+' | head -1 \
+            | sed 's/^git cherry-pick -x //') || true
+          if [ -z "$shas" ]; then
+            echo "No cherry-pick command in the action comment; nothing to replay."
+            exit 0
+          fi
+
+          # A shallow checkout cannot resolve the merged commits; deepen it once.
+          git fetch --quiet --unshallow origin 2>/dev/null || git fetch --quiet origin
+
+          while IFS='=' read -r target ok; do
+            [ -n "$target" ] || continue
+            [ "$ok" = false ] || continue
+
+            if ! git fetch --quiet origin "refs/heads/$target"; then
+              echo "Could not fetch $target; skipping"
+              continue
+            fi
+            wt=$(mktemp -d)
+            rmdir "$wt"
+            git worktree add --detach "$wt" FETCH_HEAD >/dev/null
+
+            if ! git -C "$wt" cherry-pick -x $shas >/dev/null 2>&1; then
+              files=$(git -C "$wt" diff --name-only --diff-filter=U)
+              git -C "$wt" cherry-pick --abort >/dev/null 2>&1 || true
+              if [ -n "$files" ]; then
+                body=$(mktemp)
+                {
+                  echo "Cherry-pick to \`$target\` failed; conflicting files:"
+                  echo
+                  printf '%s\n' "$files" | sed 's/^/- `/; s/$/`/'
+                  echo
+                  echo "Run: $RUN_URL"
+                } > "$body"
+                gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$body"
+                rm -f "$body"
+              fi
+            fi
+            git worktree remove --force "$wt" >/dev/null 2>&1 || true
+          done <<<"$TARGETS"
