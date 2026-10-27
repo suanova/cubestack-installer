@@ -64,6 +64,22 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
         say "  ceph: 集群内无 CephCluster(未装/internal 已删/external 模式), 跳过"
         exit 0
     fi
+    # ★ 2026-10-26: external CephCluster(rook-ceph-external, spec.external.enable=true)
+    #   是**外部 Ceph 的接入声明**, 不是本安装器创建的存储集群。ceph_csi 的官方导入路径
+    #   会 apply cluster-external.yaml 创建它; 覆盖安装时绝不能把它当 internal 旧集群
+    #   执行 --delete-cluster(否则会删外部 CR/依赖 CR, 甚至触发 Rook 擦盘流程)。
+    _cc_ext_rows="$( (SSH "${K}" -n "${_cns}" get cephcluster \
+        -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers 2>/dev/null) || true )"
+    _cc_ext="$(printf '%s\n' "${_cc_ext_rows}" | awk '$2=="true"{print $1}' | tr '\n' ' ')"
+    if [ -n "${_cc_ext}" ]; then
+        say "  ceph: 检测到 external CephCluster(${_cc_ext}) → 外部 Ceph 非本安装器资产, 跳过销毁"
+        if [ "${CEPH_CLEANUP_ALLOW_EXTERNAL:-0}" = "1" ]; then
+            warn "  CEPH_CLEANUP_ALLOW_EXTERNAL=1 → 继续销毁(危险: 可能破坏外部 Ceph 接入)"
+        else
+            warn "  如需清理集群内 internal CephCluster, 请先手工处理 external CR; 或显式 CEPH_CLEANUP_ALLOW_EXTERNAL=1(危险)"
+            exit 0
+        fi
+    fi
     if [ "${CEPH_PRE_CLEANUP_EXISTING:-true}" = "true" ]; then
         say "  ceph: 完整安全序卸载(停消费者→unmap→删集群; OSD 数据销毁)"
         bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --delete-cluster \
@@ -283,6 +299,9 @@ fi
 # ★ external 模式(CEPH_MODE=external): 不涉及本地裸盘/覆盖确认, 跳过裸盘选择与安全确认段;
 #   仅 internal(集群内 Rook-Ceph)需要。operator/csi-operator 部署仍执行(供 CephConnection 使用)。
 if [ "${CEPH_MODE:-internal}" != "external" ]; then
+# 显式 CEPH_NODES/CEPH_DATA_DISKS 先做格式/节点名校验: 防止节点间误用逗号被静默解析成
+# "第一个节点拥有全部盘、其余节点无盘"(2026-10-26 实机)。
+ceph_validate_explicit_config || exit 1
 # ---------------- 2) 裸盘选择(显式指定 或 自动检测) ----------------
 # 需求: 裸盘可在 cluster.conf 显式指定(CEPH_DATA_DISKS); 未指定则自动检测。
 #   explicit 格式: "hostname:盘名1,盘名2;hostname2:盘名3" —— hostname 可省略(无 ':' → 应用到全部存储节点,
@@ -633,7 +652,20 @@ ok "  Rook operator 已部署"
 #   绝不整份恢复旧 CR: 旧 CR 的 storage.nodes/devices/placement 来自上一代环境, apply 后
 #   ① 盘名/节点过时(历史残留 /dev/rbd0 → OSD 永不创建) ② 残留 mon store(/var/lib/rook/mon-*,
 #   集群无关路径)被新 mon 直接复用, monmap 还是旧集群的死 IP → quorum 永久卡死。
-_HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+_HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph --no-headers 2>/dev/null" || true) )"
+# ★ 2026-10-26: external CephCluster(rook-ceph-external, spec.external.enable=true) 不是
+#   本安装器资产; 覆盖安装/幂等清理都不能把它当 internal 旧集群删除。
+#   ⚠ 但"internal 集群是否存在"必须**只看 internal 名 rook-ceph**: 同命名空间并存
+#     rook-ceph-external 时, 若把"存在 external CR"当成"没有 internal 集群", 会在 internal
+#     集群仍运行时进入 7a 物理清盘(磁盘数据被抹) —— 这正是本判定只认 rook-ceph 的原因。
+if [ -n "${_HAS_CC_NOW}" ]; then
+    _CC_EXT_NOW="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster rook-ceph \
+        -o jsonpath='{.spec.external.enable}' 2>/dev/null) || true )"
+    if [ "${_CC_EXT_NOW}" = "true" ]; then
+        say "  检测到 external CephCluster(rook-ceph) → 跳过集群内 CephCluster 销毁/幂等清理"
+        _HAS_CC_NOW=""
+    fi
+fi
 # ★ 幂等卸载(2026-09-05 重构): PRE_CLEANUP=true(覆盖安装)且检测到已有 CephCluster 时,
 #   先走标准卸载流程删旧集群(Rook cleanupPolicy yes-really-destroy-data 擦盘), 再走下方 7a 物理清盘。
 #   支持两种幂等场景:
@@ -644,7 +676,9 @@ if [ -n "${_HAS_CC_NOW}" ] && [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
     say "  检测到已有 CephCluster($(echo "${_HAS_CC_NOW}" | awk '{print $1}')) + CEPH_PRE_CLEANUP_EXISTING=true → 幂等卸载旧集群(Rook 擦盘)..."
     bash "${SCRIPT_DIR}/tools/k8s/ceph-cleanup.sh" --delete-cluster \
         || warn "  旧集群删除超时/失败(继续, 7a 将物理清盘兜底)"
-    _HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+    # 复核 internal(rook-ceph)是否真的消失: 只看 rook-ceph, 外部接入 CR(rook-ceph-external)
+    # 是否残留与本安装器的 internal 集群无关(否则会误跳过 7a/7b, 留下 mon store 残骸)。
+    _HAS_CC_NOW="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph --no-headers 2>/dev/null" || true) )"
 fi
 if [ -n "${_HAS_CC_NOW}" ]; then
     say "  集群内已有 CephCluster($(echo "${_HAS_CC_NOW}" | awk '{print $1}')), 用当前 CR 幂等更新(不重建)"

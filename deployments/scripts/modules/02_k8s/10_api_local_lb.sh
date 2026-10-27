@@ -22,6 +22,13 @@
 #     DEFAULT: 1 让它成为常驻项, 由脚本内部按开关分派安装/清理。
 #   · **不做**: 不在 master 上装本地代理(master 打自己的 apiserver, 无跨节点依赖; 且上游因
 #     kube_apiserver_bind_address='::' 会端口冲突而刻意排除控制面)。
+#   · **master kubelet.conf 收敛(2026-10-25, 设计 A3)**: 上游的 "Update server field in kubelet
+#     kubeconfig" 任务只对非 control-plane 节点生效, master 保留 kubeadm 生成的 https://<自身IP>:6443。
+#     本模块启用态把 master 收敛为 https://127.0.0.1:6443(打自己的 apiserver, 不依赖节点网卡),
+#     关闭态恢复为 https://<API_DOMAIN>:6443; 变更后重启 kubelet, 幂等(已匹配则不重启)。
+#     ⚠ 关闭态恢复前必须: 入口地址可解析 **且** 该 master 的 /etc/hosts 域名行收敛成功;
+#       任一前置失败则保持 kubelet.conf 原样(fail-closed)—— 否则 kubelet 指向解析不到的
+#       域名会直接失去 API 访问(关闭态没有 loadbalancer_apiserver 块, 域名只靠 /etc/hosts)。
 #   · **节点不可达必须响亮失败(fail-closed, R9)**: 一律**不允许**把"不可达"当作"已收敛/已干净"。
 #     "连通性"与"存在性"必须分开判(`test -f` 在 SSH 不通时同样返回非零, 合并判断会把网络故障
 #     误诊成"上游没装本地代理"): 清理前先显式探活(`_hssh <ip> true`), 删完再复核容器确实消失;
@@ -73,6 +80,40 @@ _all_nodes() {
     return 0   # 同上: 退出码不许依赖"末节点角色"
 }
 
+_masters() {
+    local line
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        [ "${NODE_ROLE}" = "master" ] && printf '%s\n' "${NODE_IP}"
+    done
+    return 0
+}
+
+# master 自身 kubelet 的 API 地址收敛(2026-10-25):
+#   设计 A3 要求启用本地代理时 master kubelet.conf = https://127.0.0.1:6443
+#   (打自己的 apiserver, 不依赖节点网卡/入口), 关闭时 = https://<API_DOMAIN>:6443。
+#   但 kubespray 上游的 "Update server field in kubelet kubeconfig" 任务只对
+#   **非 control-plane** 节点生效, master 保留 kubeadm 生成的 https://<自身IP>:6443。
+#   本函数幂等改写并重启 kubelet 使配置生效。
+converge_master_kubelet() {  # converge_master_kubelet <ip> <desired-server-url>
+    local ip="$1" desired="$2"
+    if _hssh "${ip}" "sudo grep -q 'server: ${desired}' /etc/kubernetes/kubelet.conf" >/dev/null 2>&1; then
+        return 0
+    fi
+    _hssh "${ip}" "sudo cp -a /etc/kubernetes/kubelet.conf /etc/kubernetes/kubelet.conf.cubestack.bak && \
+                   sudo sed -i -E 's#^([[:space:]]*)server: https://.*#\1server: ${desired}#' /etc/kubernetes/kubelet.conf && \
+                   sudo systemctl restart kubelet" >/dev/null
+}
+
+# 判断某个 IP 是否在列表里(纯 bash: 不用 printf|grep -q —— pipefail 下 grep 提前退出
+# 会让 printf 收 SIGPIPE, 大输入时偶发假阴性)。
+_list_has() {  # _list_has <needle> <item...>
+    local needle="$1" x; shift
+    for x in "$@"; do [ "${x}" = "${needle}" ] && return 0; done
+    return 1
+}
+
 # 收敛一个节点上的 hosts 域名行(先删同域名旧行, 再写一行)
 converge_hosts() {  # converge_hosts <ip> <addr>
     local ip="$1" addr="$2"
@@ -98,7 +139,7 @@ run_enabled() {
     local entry; entry="$(api_entry_addr)" || { err "无法解析 API 入口地址"; return 1; }
     say "本地代理模式: 入口地址 = ${entry}"
 
-    local ip _fail=() _done=0
+    local ip _fail=() _done=0 _kfail=() _rc=0
     for ip in $(_workers); do
         # ⚠ 连通性与"文件在不在"分开判: SSH 不可达时 `test -f` 也返回非零, 合并判断会把
         #   网络/密钥故障误诊成"上游没装本地代理"(排查方向全错, 实测踩到过)
@@ -132,14 +173,35 @@ run_enabled() {
     if [ "${#_fail[@]}" -gt 0 ]; then
         err "以下节点的 /etc/hosts 域名行收敛失败: ${_fail[*]}"
         err "  排查: SSH 可达性(ssh ${SSH_USER_NAME}@<ip>) / sudo 权限"
-        return 1
+        _rc=1
     fi
-    ok "节点 /etc/hosts 域名行已收敛到 ${entry}(${_done} 台节点)"
+
+    # master kubelet.conf 收敛(设计 A3): 上游只改写 worker, master 保留 kubeadm 生成的
+    # https://<自身IP>:6443; 本模块补齐为 https://127.0.0.1:6443(打自己的 apiserver)。
+    for ip in $(_masters); do
+        if ! _hssh "${ip}" "true" >/dev/null 2>&1; then
+            err "master ${ip} SSH 不可达 —— 无法收敛 kubelet.conf"
+            _kfail+=("${ip}(不可达)")
+            continue
+        fi
+        if converge_master_kubelet "${ip}" "https://127.0.0.1:6443"; then
+            ok "master ${ip}: kubelet.conf = https://127.0.0.1:6443"
+        else
+            err "master ${ip}: kubelet.conf 收敛失败(期望 https://127.0.0.1:6443)"
+            _kfail+=("${ip}")
+        fi
+    done
+    if [ "${#_kfail[@]}" -gt 0 ]; then
+        err "以下 master 的 kubelet.conf 收敛失败: ${_kfail[*]}"
+        _rc=1
+    fi
+    [ "${#_fail[@]}" -eq 0 ] && ok "节点 /etc/hosts 域名行已收敛到 ${entry}(${_done} 台节点)"
+    return "${_rc}"
 }
 
 run_disabled() {
     say "本地代理已关闭: 清理残留的 nginx-proxy 静态 Pod(上游不会删)"
-    local entry ip _state _fail=() _deleted=()
+    local entry ip _state _fail=() _deleted=() _hosts_ok=()
     entry="$(api_entry_addr)" || entry=""
     for ip in $(_all_nodes); do
         # ---- 0. 可达性前置: 不可达 ≠ 已干净(fail-closed) ----
@@ -167,6 +229,7 @@ run_disabled() {
         if [ -n "${entry}" ]; then
             if converge_hosts "${ip}" "${entry}"; then
                 vlog "  ${ip}: /etc/hosts ${HOSTS_DOMAIN} → ${entry}"
+                _hosts_ok+=("${ip}")
             else
                 err "节点 ${ip}: /etc/hosts 域名行收敛失败"
                 _fail+=("${ip}(hosts)")
@@ -190,6 +253,40 @@ run_disabled() {
         done
     fi
 
+    # ---- 3b. master kubelet.conf 恢复为入口域名(启用态本模块改成了 127.0.0.1) ----
+    local _kfail=()
+    for ip in $(_masters); do
+        if ! _hssh "${ip}" "true" >/dev/null 2>&1; then
+            err "master ${ip} SSH 不可达 —— 无法恢复 kubelet.conf"
+            _kfail+=("${ip}(不可达)")
+            continue
+        fi
+        # ⚠ 恢复前必须确认两个前置, 否则保持 kubelet.conf 原样(fail-closed):
+        #   ① 入口地址可解析(entry 非空) —— 为空时 hosts 收敛整段被跳过;
+        #   ② 该 master 的 /etc/hosts 域名行确实收敛成功。
+        #   关闭态没有 loadbalancer_apiserver 块, HOSTS_DOMAIN 只能靠 /etc/hosts 解析;
+        #   映射不存在时把 kubelet 指过去 = kubelet 打不到 apiserver(节点 NotReady)。
+        if [ -z "${entry}" ]; then
+            err "master ${ip}: 无法解析 API 入口地址 —— 保持 kubelet.conf 不变(域名 ${HOSTS_DOMAIN} 无 /etc/hosts 映射会失去 API 访问)"
+            _kfail+=("${ip}(无入口地址)")
+            continue
+        fi
+        if ! _list_has "${ip}" "${_hosts_ok[@]}"; then
+            err "master ${ip}: /etc/hosts ${HOSTS_DOMAIN} 域名行未成功收敛 —— 保持 kubelet.conf 不变(避免 kubelet 打不了解析的域名)"
+            # hosts 收敛失败已在 _fail 里记过, 这里不重复记账(只说明 kubelet 为何未动)
+            continue
+        fi
+        if converge_master_kubelet "${ip}" "https://${HOSTS_DOMAIN}:6443"; then
+            vlog "  ${ip}: kubelet.conf → https://${HOSTS_DOMAIN}:6443"
+        else
+            err "master ${ip}: kubelet.conf 恢复失败(期望 https://${HOSTS_DOMAIN}:6443)"
+            _kfail+=("${ip}")
+        fi
+    done
+    if [ "${#_kfail[@]}" -gt 0 ]; then
+        _fail+=("${_kfail[@]}")
+    fi
+
     if [ "${#_fail[@]}" -gt 0 ]; then
         err "清理未完成, 以下节点存在问题: ${_fail[*]}"
         err "  排查: SSH 可达性(ssh ${SSH_USER_NAME}@<ip>) / sudo 权限 / sudo crictl ps -a | grep nginx-proxy"
@@ -197,13 +294,14 @@ run_disabled() {
     fi
 
     # ---- 4. 操作顺序提示: 只提示, 不拦停 ----
-    # 本模块只做"删 manifest + 收敛 hosts"; 把各节点 kubelet.conf 从 https://localhost:6443 改回
-    # https://<域名>:6443 是**上游 k8s_deploy 的活**(关闭态下 sync 脚本会取消注释 all.yml 的
-    # loadbalancer_apiserver 块并写回入口地址, kubespray 据此重写各节点 kubelet.conf)。
+    # 本模块只做"删 manifest + 收敛 hosts + master kubelet.conf"; 把 **worker** 的 kubelet.conf
+    # 从 https://localhost:6443 改回 https://<域名>:6443 是**上游 k8s_deploy 的活**(关闭态下 sync
+    # 脚本会取消注释 all.yml 的 loadbalancer_apiserver 块并写回入口地址, kubespray 据此重写 worker)。
     # 若运维只跑 `--steps api_local_lb` 关开关就收工, 会留下"代理已删、kubelet 仍指 localhost"的窗口
     # → worker 打不到任何 apiserver → NotReady。按仓库惯例(2026-09-17 起"人为操作顺序"类护栏
     # 一律**只提示不拦停**), 这里只 warn —— 本模块的产出是干净的, 只是集群还需要上游那一步。
-    warn "本地代理已清理, 但各节点的 kubelet.conf 仍指向 https://localhost:6443(kubespray 上游才会改写它)"
+    warn "本地代理已清理; master 的 kubelet.conf 已恢复为 https://${HOSTS_DOMAIN}:6443"
+    warn "worker 的 kubelet.conf 仍指向 https://localhost:6443(kubespray 上游才会改写它)"
     warn "  请随后重跑 k8s_deploy(./deploy-cluster.sh --steps k8s_deploy)让上游改回 https://${API_DOMAIN}:6443,"
     warn "  否则 worker 的 kubelet 打不到 API 而 NotReady(代理已删, 该地址已不存在)"
     ok "清理完成: 全部节点可达、无残留 manifest、无运行中的 nginx-proxy"

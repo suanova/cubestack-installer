@@ -223,12 +223,14 @@ cubestack-platform  ghcr.io/prometheus-community/windows-exporter:0.31.8
 #     harbor-save 对同源组直接用原始 ref 拉取(不拼 mirrors/, 那不存在的副本);
 #     部署模块把它们推入集群内置 registry 的 <REG>/suanova/<name>(自研映射, 与 cubestack-operator 同款)。
 #   ⚠ jupyter / ssh 是同一个镜像的两种运行模式(CUBSTACK_TYPE), 不再按模式拆镜像。
-#   ⚠ tag 由 `DEV_LAB_IMAGE_TAG` 统一控制(默认 latest, 上游滚动构建);
+#   ⚠ tag 由 per-image 变量控制(默认随 `DEV_LAB_IMAGE_TAG`=latest, 上游滚动构建);
+#     发布版本可用 DEV_LAB_CPU_TAG / DEV_LAB_MACA_TAG / DEV_LAB_CUDA_TAG 钉各自不可变 tag
+#     (三家 Harbor tag 命名不一致, 不能再用单一 DEV_LAB_IMAGE_TAG)。
 #     离线 tar 会随上游滚动失效 —— 重新部署前重跑 save 工具(见 README)。
 # ------------------------------------------------------------
-dev-lab  harbor.isuanova.com/suanova/cpu-pytorch:${DEV_LAB_IMAGE_TAG}
-dev-lab  harbor.isuanova.com/suanova/maca-pytorch:${DEV_LAB_IMAGE_TAG}
-dev-lab  harbor.isuanova.com/suanova/cuda-pytorch:${DEV_LAB_IMAGE_TAG}
+dev-lab  harbor.isuanova.com/suanova/cpu-pytorch:${DEV_LAB_CPU_TAG}
+dev-lab  harbor.isuanova.com/suanova/maca-pytorch:${DEV_LAB_MACA_TAG}
+dev-lab  harbor.isuanova.com/suanova/cuda-pytorch:${DEV_LAB_CUDA_TAG}
 
 # ------------------------------------------------------------
 # [group: nvidia-gpu-operator] NVIDIA GPU Operator(v26.7.2; chart 渲染提取口径)

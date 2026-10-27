@@ -69,6 +69,23 @@ CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
 EOF
 
+# external Ceph 模式: 覆盖安装时不得 umount 宿主机 CephFS(外部资源), 也不得删 cephx 用户。
+cat > "${TMP}/cluster.conf.external" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
+  "master,m2,10.0.0.2,root,-"
+  "worker,w1,10.0.0.11,root,-"
+)
+SSH_USER="root"
+SSH_KEY_NAME="cubestack_k8s"
+KUBESPRAY_PROFILE="none"
+CEPH_ENABLED="false"
+CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
+CEPHFS_ENABLED="true"
+CEPHFS_MOUNT_ENABLED="true"
+EOF
+
 # 假 ssh: 跳过选项, 记录 host/cmd, 按命令内容回放夹具
 mkdir -p "${TMP}/bin"
 cat > "${TMP}/bin/ssh" <<'FAKE'
@@ -116,7 +133,7 @@ run_module() {  # run_module <mode> [conf] → 退出码; 输出在 $TMP/run-<mo
         export FAKE_APPLY_LOG="${TMP}/apply-${mode}.log"
         : > "${FAKE_SSH_LOG}"; : > "${FAKE_APPLY_LOG}"
         case "${mode}" in
-            uninstall) CUBESTACK_MODULE_ACTION=uninstall bash "${MODULE}" ;;
+            uninstall|uninstall-external) CUBESTACK_MODULE_ACTION=uninstall bash "${MODULE}" ;;
             disabled)  CEPHFS_MOUNT_ENABLED=false bash "${MODULE}" ;;
             notready)  FAKE_NOTREADY=1 bash "${MODULE}" ;;
             *)         bash "${MODULE}" ;;
@@ -132,6 +149,11 @@ echo "== ① 模块/清单/默认值存在性 =="
 [ -f "${MODULE}" ] && chk_contains "元数据 TOGGLE" "TOGGLE: CEPHFS_MOUNT_ENABLED" "${MODULE}"
 [ -f "${MODULE}" ] && chk_contains "元数据 REQUIRES" "REQUIRES: ceph_csi" "${MODULE}"
 [ -f "${MODULE}" ] && chk_contains "可卸载声明" "UNINSTALL: 1" "${MODULE}"
+CEPH_MOD="${REPO_ROOT}/deployments/scripts/modules/03_addon/02_ceph.sh"
+CEPH_CLEANUP="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-cleanup.sh"
+chk_contains "02_ceph external CR 保护" "external CephCluster" "${CEPH_MOD}"
+chk_contains "02_ceph spec.external.enable" "spec.external.enable" "${CEPH_MOD}"
+chk_contains "ceph-cleanup 拒绝 external" "外部 Ceph 不是本安装器资产" "${CEPH_CLEANUP}"
 [ -f "${DEFAULTS}" ] && chk_contains "默认值 CEPHFS_MOUNT_PATH" 'CEPHFS_MOUNT_PATH="${CEPHFS_MOUNT_PATH:-/mnt/cephfs/models}"' "${DEFAULTS}"
 # 2026-10-22 用户实机: Ceph 两个总开关都 false, 计划里却仍有 cephfs_mount, 然后去预检
 # CephCluster 失败。默认值必须跟随 Ceph CSI, 不能无条件 true。
@@ -245,6 +267,14 @@ if awk '/部分节点仍有 ceph 挂载残留/{f=1} f&&/exit 1/{found=1} END{exi
 else
     echo "  FAIL 残留时未非零退出"; fail=1
 fi
+
+echo "== ⑥b external uninstall: 保留宿主机挂载 =="
+rc="$(run_module uninstall-external "${TMP}/cluster.conf.external")"
+chk "external uninstall 退出码" "0" "${rc}"
+chk_not_contains "external 不执行 umount" "sudo umount" "${TMP}/ssh-uninstall-external.log"
+chk_not_contains "external 不删 cephx 用户" "ceph auth del" "${TMP}/ssh-uninstall-external.log"
+chk_contains "external 保留挂载提示" "保留宿主机 CephFS 挂载" "${TMP}/run-uninstall-external.out"
+chk_contains "external 仍删除 DaemonSet" "delete ds cephfs-models-mount" "${TMP}/ssh-uninstall-external.log"
 
 echo "== ⑦ 零节点验证必须失败(不得假成功) =="
 rc="$(run_module notready)"

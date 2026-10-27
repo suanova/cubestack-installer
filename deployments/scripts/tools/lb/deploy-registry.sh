@@ -174,9 +174,14 @@ esac
 #   无需宿主机级 iptables NAT 转发或 systemd 持久化(曾引入 NET_ADMIN/systemd 依赖与混淆)。
 if [ "${REGISTRY_SERVICE_TYPE:-nodeport}" = "nodeport" ]; then
     _NP_MIRROR="http://${REGISTRY_IP:-${FIRST_MASTER}}:${REGISTRY_NODEPORT:-31148}"
+    # ⚠ nodeport 模式下 registry 并不监听 domain:5000(只有 NodePort); hosts.toml 的 server
+    #   必须直指 NodePort, 否则 containerd 每次新镜像拉取先试 5000 → 卡住/超时(2026-10-25 实机:
+    #   operator/postgres 在 node-3 卡 5min+)。旧实现把 NodePort 当 fallback, 不可靠。
+    _REG_SERVER="${_NP_MIRROR}"
     say "[1.5/4] nodeport 模式: registry 已经 NodePort 直连暴露(${_NP_MIRROR}), 无需宿主机 DNAT/SNAT"
 else
     _NP_MIRROR="http://${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
+    _REG_SERVER="${_NP_MIRROR}"
 fi
 
 # ---------------- 2. 各节点 /etc/hosts + containerd certs.d(vm + bm 全覆盖, 幂等) ----------------
@@ -196,10 +201,8 @@ sed -i -E "/[[:space:]]\${_rd}([[:space:]]|\$)/d" /etc/hosts 2>/dev/null || true
 echo "${REGISTRY_IP} ${REGISTRY_DOMAIN}" >> /etc/hosts
 mkdir -p "${CERTS_DIR}"
 cat > "${CERTS_DIR}/hosts.toml" <<HT
-server = "http://${REGISTRY_DOMAIN}:${REGISTRY_PORT}"
-[host."${_NP_MIRROR}"]
-  capabilities = ["pull", "resolve"]
-  skip_verify = true
+# nodeport 模式: server 必须是 <master>:<NodePort>; loadbalancer: VIP:${REGISTRY_PORT}(2026-10-25)
+server = "${_REG_SERVER}"
 HT
 if [ ! -f /var/lib/containerd/certs.d-stamp ]; then
     systemctl restart containerd
