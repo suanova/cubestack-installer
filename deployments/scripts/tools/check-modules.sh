@@ -537,6 +537,22 @@ else
     ck_fail "缺少 tests/test-node-net-guard.sh(本回归必须接线, 防'写了没人跑')"
 fi
 
+# ---------- ⑫d 节点池基础回归(2026-10-27) ----------
+# master cordon + special toleration 的节点侧工具: 标签/cordon 幂等、check 漂移、remove 只回滚
+# 本工具创建的 cordon(ownership annotation), 预存 cordon 不误删。
+_NODEPOOL_SH="${SCRIPT_DIR}/tests/test-node-pool.sh"
+if [ -f "${_NODEPOOL_SH}" ]; then
+    if _NODEPOOL_OUT="$(bash "${_NODEPOOL_SH}" 2>&1)"; then
+        ok "  节点池基础工具回归通过"
+    else
+        printf '%s\n' "${_NODEPOOL_OUT}" | sed 's/^/    /'
+        ck_fail "节点池基础工具回归未通过(详见上方失败项)"
+    fi
+    unset _NODEPOOL_OUT
+else
+    ck_fail "缺少 tests/test-node-pool.sh(本回归必须接线, 防'写了没人跑')"
+fi
+
 # ---------- ⑬ API 入口: 本地代理语义与 all.yml 的自洽 ----------
 # 背景: kubespray 的 kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支
 #   **优先于** localhost 分支 —— 只要 all.yml 里还有**未注释**的 loadbalancer_apiserver 块,
