@@ -150,7 +150,8 @@ LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}}"
 |---|---|---|
 | `sync-images-to-harbor.yml` | 上游镜像 → Harbor `mirrors/**` | 发布前确保 Harbor 有正确上游镜像 |
 | `refresh-latest-offline.yml` | 滚动 `latest` 镜像 → MinIO `offline-files/` | **只服务 dev 通道**，不得写版本目录 |
-| `sync-release-2.0-images.yml` | release-2.0 组件镜像/ chart / CLI tar → MinIO `<release>/offline-files/` 原地刷新 | `repository_dispatch` / `workflow_dispatch`；CLI tar 由 `rebuild-cli-image.yml` 同 job 内同步；见 §6.6 |
+| `sync-release-images.yml` | 组件镜像/ chart / CLI tar → MinIO `<release>/offline-files/` 原地刷新 | `repository_dispatch` / `push`(release-* 版本定义) / `workflow_dispatch`；CLI tar 由 `rebuild-cli-image.yml` 同 job 内同步；见 §6.6 |
+| `release-tag-bump.yml` | 上游 `release-tag-published` → 更新 `deployments/releases/<release>/release.env` 与 `release-images.tsv` → 开/更新一个 `release-bump/<release>` PR | 版本定义必须先 review 合并，push 触发的同步才会执行；见 §6.6 |
 | `rebuild-cli-image.yml` | 重建 CLI 镜像；main 导出 tar 到 MinIO `offline-files/cli/`；release-2.0 推版本化镜像并在同一 job 内同步 `<版本>/` CLI 元数据 | main 合并即自动更新 dev CLI tar；release-2.0 push 自动完成 Harbor + MinIO 一致发布；`version=` 可额外推版本 tag |
 
 目前只有 CI、没有 CD。因此本方案的**发布动作**是**在能同时访问 Harbor 与 MinIO 的机器上执行同步脚本**，
@@ -385,7 +386,7 @@ RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev
 
 **release-2.0 组件原地刷新例外（2026-10-26）**：
 
-- `sync-release-2.0-images.yml` + `release-sync-images.sh` 可以原地刷新已发布版本；
+- `sync-release-images.yml` + `release-sync-images.sh` 可以原地刷新已发布版本；
   这是**唯一**允许修改已存在 `<版本>/` 的受控通道，范围仅 `cubestack-operator/` 集合、
   operator chart、CLI tar 和三个 `release.env` 变量（见 §6.6）。
 - 刷新开始写 `<版本>/_REFRESH_PENDING`，并**临时删除** `offline-files/_SUCCESS`；
@@ -774,7 +775,7 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
 ### 6.5 与现有 CI 的关系
 
 - 现有 `refresh-latest-offline.yml` **不动**，继续维护 dev `offline-files/`；
-- `sync-release-2.0-images.yml` 只维护 `<release>/offline-files/`，绝不写 dev 前缀；
+- `sync-release-images.yml` 只维护 `<release>/offline-files/`，绝不写 dev 前缀；
 - 发布脚本可以先手工/定时在内网机器执行（与 `cubestack-platform-sync.sh` 的部署位置一致：
   需同时访问 Harbor 与 MinIO）；
 - 将来若加 CD，只需在发布机上调用同一个脚本，不改变 MinIO 契约。
@@ -803,16 +804,18 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
   cuberouter           suanova/cuberouter             cuberouter
   platform             -                              . bmc controller-manager cubepilot cuberouter portal
   all                  -                              *
+  release-first-party  -                              . controller-manager cubepilot cuberouter portal
   ```
 
 - `*` = 全部 37 行（含第三方依赖）；`-` = 仅 chart；`platform` = first-party 子目录。
+- `release-first-party` = 上游统一 tag 的全部 first-party 镜像，**不含 `bmc`**（bmc 按 commit SHA 固定）。
 
 **触发方式**：
 
-1. 组件仓库发 `repository_dispatch: release-2.0-updated`：
+1. 组件仓库发 `repository_dispatch: release-updated`（`release-2.0-updated` 兼容）：
 
    ```json
-   {"event_type":"release-2.0-updated",
+   {"event_type":"release-updated",
     "client_payload":{"release":"2.0.0","component":"publish","tag":"v2.0.0",
                       "source_repo":"suanova/cubestack-operator","sha":"<commit>",
                       "checkout_ref":"release-2.0"}}
@@ -821,8 +824,11 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
    `component` 可省略（默认 `all`），也可 CSV（如 `operator-image,portal-image`）；
    `tag`/`source_repo` 只用于一致性校验。**dispatch 前必须先把 release 定义更新到新 tag**，
    否则 tag/env 校验会失败，不会静默同步错版本。
-2. `workflow_dispatch` 手动触发（首次 seed/恢复/补跑）；
-3. **CLI tar 不走本 workflow**：`rebuild-cli-image.yml` 在 release-2.0 推完版本化镜像后，
+2. push 到 `release-*` 且改动 `deployments/releases/*/{release.env,release-images.tsv}`：
+   从 push 的 before..after 推导 release 目录，先同步 first-party 镜像，再同步 operator chart。
+   这类改动通常来自上游 tag 触发的版本定义 PR（见下文「上游 tag 自动更新版本定义」）。
+3. `workflow_dispatch` 手动触发（首次 seed/恢复/补跑）；
+4. **CLI tar 不走本 workflow**：`rebuild-cli-image.yml` 在 release-2.0 推完版本化镜像后，
    在同一 job 内执行 `release-sync-images.sh --component cli ...`，避免跨 workflow 的
    Harbor/MinIO 不一致窗口；本 workflow 只处理组件镜像/chart 的 dispatch。
 
@@ -831,9 +837,9 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
    不处理镜像/chart。
 
 > GitHub 的 `repository_dispatch` 只触发默认分支 `main` 上的 workflow；
-> 因此 `.github/workflows/sync-release-2.0-images.yml` 在 **main 和 release-2.0 各有一份
-> 完全相同**的文件，main 副本 checkout release-2.0 后执行 release-2.0 的脚本。
-> 修改时必须两份同步 cherry-pick。
+> 因此 `.github/workflows/sync-release-images.yml` 在 **main 与各 release-* 分支各有一份
+> 完全相同**的文件，main 副本 checkout 目标 release 后执行对应脚本。
+> 修改时必须同步 cherry-pick。
 
 **执行顺序（`release-sync-images.sh`）**：
 
@@ -887,6 +893,27 @@ bash deployments/scripts/tools/images/release-sync-images.sh --release 2.0.0 --c
 > 建议 GA 前对 `<release>/` 做 MinIO 快照/版本化，或改用新版本目录（完整 `release-publish.sh`）。
 > 刷新期间 fetch 会失败（`_SUCCESS` 缺失 + `_REFRESH_PENDING` 提示），完成后恢复。
 
+#### 上游 tag 自动更新版本定义
+
+cubestack-operator 在 cubestack / cubepilot / cuberouter 都已发布同一版本后推送 `v*` tag 时，
+`.github/workflows/release-tag-bump.yml` 通过 `release-tag-published` dispatch 自动更新版本定义：
+
+- **payload**：`release`、`source_repo=suanova/cubestack-operator`、`component=release-first-party`、
+  `git_tag`（如 `v2.0.0`）、`image_tag`（带 v 前缀的实际镜像 tag）、`chart_version`（裸 SemVer）。
+- **流程**：校验触发来源 → 要求 `deployments/releases/<release>/` 已存在 → 在 Harbor 预检
+  每个 first-party 镜像与 chart → 更新 `release.env` 与 `release-images.tsv` → 提交到
+  `release-bump/<release>` → 对 `release-<major>.<minor>` 开一个（或复用已有）PR。
+- **合并后**：push 触发 `release-sync-images.sh`，把镜像与 chart 写入 MinIO `<release>/offline-files/`。
+- **失败**：其他仓库的制品尚未发布时不会开 PR；发布后重跑 bump workflow 即可
+  （手动输入 `source_repo`、`component`、`image_tag`、`chart_version`、`git_tag`、`release`、`checkout_ref`）。
+- **单仓库 hotfix**：改用 `workflow_dispatch`，填该仓库的 `component` 和实际镜像 tag。
+- **上线耦合**：bump workflow、`release-bump-pr.sh`、改名后的 `sync-release-images.yml` 与
+  `release-first-party` 行必须先 cherry-pick 到 `release-2.0` 再开启 operator dispatch，
+  否则 bump PR 能开，但合并后的 MinIO 同步不会运行。
+- **回滚**：合并前关闭 bump PR 即可取消本次更新；**合并后关闭 PR 无效**，发布树与 MinIO
+  已更新。需要回退时重跑 `sync-release-images.yml` 指向目标版本，或走完整
+  `release-publish.sh` 修正发布树。
+
 ---
 
 ## 7. Harbor 侧建议（非强制）
@@ -936,7 +963,7 @@ Harbor 不是本方案的依赖；现有部署代码只消费 MinIO 里的 tar�
   旧布局兼容、`mc cp` 取件、`_SUCCESS`、发布定义冻结）；`test-release-sync-images.sh` 校验
   组件原地刷新（fake mc/fixture，覆盖 tar/chart/CLI/SHA256SUMS/_SUCCESS/恢复）。
 - 正式发版在 `release-2.0` 分支上执行 `release-publish.sh stage/verify/publish --release 2.0.0`。
-- 发布后的组件增量更新走 `sync-release-2.0-images.yml`（§6.6）；`release-publish.sh` 仍是
+- 发布后的组件增量更新走 `sync-release-images.yml`（§6.6）；`release-publish.sh` 仍是
   首次完整发布/新版本目录的唯一入口。
 
 ### 8.1 发布前（镜像生产）
