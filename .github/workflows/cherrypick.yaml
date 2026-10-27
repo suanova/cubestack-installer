@@ -170,8 +170,10 @@ jobs:
           set -euo pipefail
 
           # The action's failure comment carries the exact commits it tried.
-          shas=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-            --jq '.[] | select(.user.login == "suanova-bot[bot]") | .body' \
+          # Comments come back oldest first; keep the summary for this run.
+          shas=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate --slurp \
+            | jq -r --arg run_url "$RUN_URL" \
+              '[.[][] | select(.user.login == "suanova-bot[bot]" and (.body | contains($run_url)))] | last | .body // empty' \
             | grep -oE 'git cherry-pick -x [0-9a-f ]+' | head -1 \
             | sed 's/^git cherry-pick -x //') || true
           if [ -z "$shas" ]; then
