@@ -1238,6 +1238,24 @@ master_ips() {
     return 0
 }
 
+# CubeStack operator HA 拓扑(2026-10-27 用户口径):
+#   master >= 3 → "<n> 2 true"  (operator replicas=2; CubeStackCluster.spec.global.ha.enabled=true)
+#   master < 3  → "<n> 1 false" (单 master/两 master 一律 non-HA; replicas=1)
+# 输出 "<master_count> <replicas> <ha_enabled>"。
+# ⚠ node_parse/master_ips 会写 NODE_* 全局量 —— 本函数内部在命令替换子 shell 中统计, 不污染调用方。
+cubestack_operator_ha_profile() {
+    local _n
+    _n="$(master_ips | wc -w | tr -d '[:space:]')"
+    case "${_n}" in ''|*[!0-9]*) _n=0 ;; esac
+    if [ "${_n}" -ge 3 ]; then
+        printf '%s 2 true\n' "${_n}"
+    else
+        printf '%s 1 false\n' "${_n}"
+    fi
+    return 0
+}
+
+
 # 收集全部节点 IP(空格分隔; 供 VIP 冲突判定复用)
 all_node_ips() {
     local line

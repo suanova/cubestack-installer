@@ -306,6 +306,36 @@ chk_not_contains "不再异步删(--wait=false)" \
 chk_contains "删除前复核 CR 已是目标 registry" '_cr_now_reg' "${MOD}"
 chk_contains "CR 未切到目标 registry 时跳过重建" '跳过 profile 重建' "${MOD}"
 
+echo "== ⑬ HA 拓扑: master 数量 → operator replicas + CR ha.enabled =="
+# 2026-10-27 用户口径: 单 master=non-HA(replicas=1, ha.enabled=false);
+# 3 master=HA(replicas=2, ha.enabled=true)。2 master 按 non-HA, >=3 按 HA。
+_ha_profile() (
+    set +u
+    # shellcheck disable=SC1090
+    source "${LIB}" >/dev/null 2>&1
+    NODES=( "$@" )
+    cubestack_operator_ha_profile
+)
+chk "1 master → 1 副本 / ha=false" "1 1 false" \
+    "$(_ha_profile 'master,m1,10.0.0.1,root,-')"
+chk "2 master → 1 副本 / ha=false" "2 1 false" \
+    "$(_ha_profile 'master,m1,10.0.0.1,root,-' 'master,m2,10.0.0.2,root,-')"
+chk "3 master → 2 副本 / ha=true" "3 2 true" \
+    "$(_ha_profile 'master,m1,10.0.0.1,root,-' 'master,m2,10.0.0.2,root,-' 'master,m3,10.0.0.3,root,-')"
+chk "4 master → 2 副本 / ha=true" "4 2 true" \
+    "$(_ha_profile 'master,m1,10.0.0.1,root,-' 'master,m2,10.0.0.2,root,-' 'master,m3,10.0.0.3,root,-' 'master,m4,10.0.0.4,root,-')"
+chk_contains "模块使用拓扑派生函数" 'cubestack_operator_ha_profile' "${MOD}"
+chk_contains "operator replicas 传 chart(在线+离线共 2 处)" '--set "replicas=${OP_REPLICAS}"' "${MOD}"
+chk "operator replicas 两处" "2" "$(count_of x '--set "replicas=${OP_REPLICAS}"' "${MOD}")"
+chk_contains "CR 传 ha.enabled" 'clusterCR.spec.global.ha.enabled=${HA_ENABLED}' "${MOD}"
+chk_contains "CR HA 时显式 ha.replicas" 'clusterCR.spec.global.ha.replicas=${OP_REPLICAS}' "${MOD}"
+chk_contains "活体 CR 读取 ha.enabled" '_cr_ha=' "${MOD}"
+chk_contains "活体 CR 纠偏 ha" '\"ha\":${_want_ha_patch}' "${MOD}"
+chk_contains "HA 例外: cuberouter 保持单副本(RWO)" 'clusterCR.spec.components.cuberouter.values.cubeRouter.replicaCount=1' "${MOD}"
+chk_contains "HA 例外: lws 保持单副本(CPU)" 'clusterCR.spec.components.lws.values.replicaCount=1' "${MOD}"
+chk_contains "活体 CR 组件 HA 例外纠偏" 'CR 组件 HA 例外已收敛' "${MOD}"
+chk_contains "Deployment 副本数纠偏" 'scale deploy ${_DEP_NAME} --replicas=${OP_REPLICAS}' "${MOD}"
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-cubestack-operator-update: 全部通过"
