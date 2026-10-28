@@ -11,6 +11,10 @@
 #   ④ 全节点真实验证命令覆盖(NODES 中每台都发 findmnt/探针)
 #   ⑤ 幂等重跑(第二次仍 exit 0)
 #   ⑥ uninstall 分支: 删 DS / Secret / cephx 用户, 且不 apply
+#   ⑧ external 自动派生 external-ceph.env(Rook 导出: mon/FS/CSI node 凭据)
+#   ⑨ external 只读挂载(专用 external-cephfs.env + CEPHFS_MOUNT_READ_ONLY)
+#   ⑩ external 凭据成对派生: 只显式给 user 时不借用其他身份的 key(预检失败); 显式成对优先
+#   ⑪ 预清理按 mds_namespace 判 FS: 旧 FS/缺少 mds_namespace → lazy umount; 匹配 → 保留复用
 # 隔离: CLUSTER_CONF=临时配置 + PATH 前置假 ssh(纯离线; 无集群/无网络)
 # 用法: bash deployments/scripts/tools/tests/test-cephfs-mount.sh
 # ============================================================
@@ -142,8 +146,45 @@ CEPHFS_MOUNT_ENABLED="true"
 CEPHFS_MOUNT_PATH="/mnt/cephfs/ro-conf"
 EOF
 
+# 2026-10-28: 凭据必须成对派生 —— 只显式给 node 用户名(与 CSI node secret 不同身份)时,
+# 不得从 external-ceph.env 借用 CSI node key; 应在"external 模式缺凭据"预检失败。
+cat > "${TMP}/cluster.conf.external-user-only" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
+  "master,m2,10.0.0.2,root,-"
+  "worker,w1,10.0.0.11,root,-"
+)
+SSH_USER="root"
+SSH_KEY_NAME="cubestack_k8s"
+KUBESPRAY_PROFILE="none"
+CEPH_ENABLED="false"
+CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
+CEPHFS_ENABLED="true"
+CEPHFS_MOUNT_ENABLED="true"
+CEPHFS_NODE_USER="custom-node-user"
+EOF
+# 显式成对凭据(优先): 不被 external-ceph.env 的 CSI node 凭据覆盖。
+cat > "${TMP}/cluster.conf.external-explicit" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
+  "master,m2,10.0.0.2,root,-"
+  "worker,w1,10.0.0.11,root,-"
+)
+SSH_USER="root"
+SSH_KEY_NAME="cubestack_k8s"
+KUBESPRAY_PROFILE="none"
+CEPH_ENABLED="false"
+CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
+CEPHFS_ENABLED="true"
+CEPHFS_MOUNT_ENABLED="true"
+CEPHFS_NODE_USER="explicit-node"
+CEPHFS_NODE_KEYRING="AQBExplicitPair=="  # secret-scan: allow(fake test fixture)
+EOF
+
 # 假 ssh: 跳过选项, 记录 host/cmd, 按命令内容回放夹具
-mkdir -p "${TMP}/bin"
+mkdir -p "${TMP}/bin" "${TMP}/mnt-state"
 cat > "${TMP}/bin/ssh" <<'FAKE'
 #!/bin/bash
 while [ $# -gt 0 ]; do
@@ -170,6 +211,25 @@ case "${cmd}" in
     *"rollout status"*) echo 'daemon set "cephfs-models-mount" successfully rolled out' ;;
     *"get node "*) if [ "${FAKE_NOTREADY:-0}" = "1" ]; then echo "node NotReady <none> 1m v1.35.8"; else echo "node Ready <none> 1m v1.35.8"; fi ;;
     *"CEPH_UNMOUNT_OK"*) echo "CEPH_UNMOUNT_OK" ;;
+    *"echo CEPH_MOUNT_OK"*) echo "CEPH_MOUNT_OK" ;;
+    *"-o FSTYPE"*)
+        if [ "${FAKE_MNT_STUB:-0}" = "1" ]; then
+            h="${host#*@}"
+            [ -f "${FAKE_MNT_STATE_DIR}/${h}.mounted" ] && echo ceph || echo ""
+        else
+            echo "CEPH_MOUNT_OK"
+        fi ;;
+    *"-o OPTIONS"*)
+        if [ "${FAKE_MNT_STUB:-0}" = "1" ]; then
+            h="${host#*@}"
+            [ -f "${FAKE_MNT_STATE_DIR}/${h}.mounted" ] && cat "${FAKE_MNT_STATE_DIR}/${h}.mounted" || true
+        else
+            echo "CEPH_MOUNT_OK"
+        fi ;;
+    *"umount"*)
+        if [ "${FAKE_MNT_STUB:-0}" = "1" ]; then
+            h="${host#*@}"; rm -f "${FAKE_MNT_STATE_DIR}/${h}.mounted"; echo "unmounted"
+        fi ;;
     *"findmnt"*) echo "CEPH_MOUNT_OK" ;;
     *"delete ds "*) echo 'daemonset.apps "cephfs-models-mount" deleted' ;;
     *"delete secret "*) echo 'secret "cephfs-models-client" deleted' ;;
@@ -311,7 +371,7 @@ chk_contains "Ceph 非 Ready 时幂等跳过" 'CephCluster 非 Ready' "${MODULE}
 chk_contains "逐节点卸载宿主机挂载" "CEPH_UNMOUNT_OK" "${TMP}/ssh-uninstall.log"
 chk_contains "执行 umount" "sudo umount -l '/mnt/cephfs/models'" "${TMP}/ssh-uninstall.log"
 chk_contains "卸载必须 sudo(ubuntu 用户非 root)" "sudo umount -l" "${MODULE}"
-chk_contains "旧挂载预清理" "旧集群残留自动 lazy umount" "${MODULE}"
+chk_contains "旧挂载预清理" "旧集群残留/FS/只读变更自动 lazy umount" "${MODULE}"
 chk_contains "预清理使用 lazy umount" "umount -l" "${MODULE}"
 chk_contains "hostPath 超时快速失败" "hostPath(host-target)挂载超时" "${MODULE}"
 chk_contains "给出 stop kubelet/containerd + reboot 指引" "systemctl reboot -f" "${MODULE}"
@@ -339,8 +399,9 @@ chk_contains "external 仍删除 DaemonSet" "delete ds cephfs-models-mount" "${T
 
 echo "== ⑧ external 自动派生 external-ceph.env(Rook 官方导出) =="
 export CEPH_EXTERNAL_ENV_FILE="${TMP}/external-ceph.env"
+export CEPHFS_MOUNT_ENV_FILE="${TMP}/absent-mount.env"   # 隔离: 不读本机 gitignored 默认文件
 rc="$(run_module external-env "${TMP}/cluster.conf.external-env")"
-unset CEPH_EXTERNAL_ENV_FILE
+unset CEPH_EXTERNAL_ENV_FILE CEPHFS_MOUNT_ENV_FILE
 chk "external-env 退出码" "0" "${rc}"
 APPLY_ENV="${TMP}/apply-external-env.log"
 chk_contains "mon 自动派生" '10.0.0.5:6789,10.0.0.6:6789' "${APPLY_ENV}"
@@ -366,6 +427,55 @@ chk_contains "只读挂载选项" 'MOUNT_OPTS' "${APPLY_RO}"
 chk_contains "只读不创建子目录" 'read-only 模式: 不创建子目录' "${APPLY_RO}"
 chk_contains "验证区分只读" 'NOT_READONLY' "${MODULE}"
 chk_contains "只读用 ls 验证" "timeout 10 ls" "${MODULE}"
+
+echo "== ⑩ external 凭据成对派生: 只显式给 user 时不得借用其他身份的 key =="
+export CEPH_EXTERNAL_ENV_FILE="${TMP}/external-ceph.env"
+export CEPHFS_MOUNT_ENV_FILE="${TMP}/absent-mount.env"
+rc="$(run_module external-user-only "${TMP}/cluster.conf.external-user-only")"
+unset CEPH_EXTERNAL_ENV_FILE CEPHFS_MOUNT_ENV_FILE
+chk "user-only 退出码非 0" "1" "${rc}"
+chk_contains "user-only 在缺凭据预检失败" "缺凭据" "${TMP}/run-external-user-only.out"
+chk_not_contains "user-only 不写 Secret/DaemonSet" "=== APPLY ===" "${TMP}/apply-external-user-only.log"
+
+export CEPH_EXTERNAL_ENV_FILE="${TMP}/external-ceph.env"
+export CEPHFS_MOUNT_ENV_FILE="${TMP}/absent-mount.env"
+rc="$(run_module external-explicit "${TMP}/cluster.conf.external-explicit")"
+unset CEPH_EXTERNAL_ENV_FILE CEPHFS_MOUNT_ENV_FILE
+chk "显式成对凭据退出码 0" "0" "${rc}"
+APPLY_EXPL="${TMP}/apply-external-explicit.log"
+chk_contains "显式 node 用户生效" 'explicit-node' "${APPLY_EXPL}"
+chk_contains "显式 node key 生效" 'AQBExplicitPair==' "${APPLY_EXPL}"
+chk_not_contains "不被 CSI node 身份覆盖" 'csi-cephfs-node.1' "${APPLY_EXPL}"
+
+echo "== ⑪ 预清理按 mds_namespace 判 FS: 旧 FS/缺选项 → umount; 匹配 → 复用 =="
+_seed_mount() {   # _seed_mount "<findmnt OPTIONS>" → 所有节点视为已挂载且可读
+    rm -f "${TMP}/mnt-state"/* 2>/dev/null || true
+    local ip
+    for ip in 10.0.0.1 10.0.0.2 10.0.0.11; do
+        printf '%s\n' "$1" > "${TMP}/mnt-state/${ip}.mounted"
+    done
+}
+export FAKE_MNT_STUB=1 FAKE_MNT_STATE_DIR="${TMP}/mnt-state"
+# 旧 FS 的可读挂载: 必须 lazy umount 让 DS 挂当前 CEPHFS_FS_NAME(cephfs)
+_seed_mount "rw,noatime,name=csi-cephfs-node,acl,mds_namespace=old-fs"
+rc="$(run_module fs-mismatch "${TMP}/cluster.conf")"
+chk "旧 FS 不一致退出码" "0" "${rc}"
+chk_contains "点名旧 FS 与期望 FS" "fs='old-fs'(期望 cephfs)" "${TMP}/run-fs-mismatch.out"
+chk_contains "旧 FS 执行 lazy umount" "umount -l '/mnt/cephfs/models'" "${TMP}/ssh-fs-mismatch.log"
+chk_contains "旧 FS 卸载后继续 apply" "name: cephfs-models-mount" "${TMP}/apply-fs-mismatch.log"
+# FS 与只读状态匹配: 保留复用, 不 umount
+_seed_mount "rw,noatime,name=csi-cephfs-node,acl,mds_namespace=cephfs"
+rc="$(run_module fs-match "${TMP}/cluster.conf")"
+chk "FS 匹配退出码" "0" "${rc}"
+chk_contains "FS 匹配保留复用" "保留复用" "${TMP}/run-fs-match.out"
+chk_not_contains "FS 匹配不 umount" "umount" "${TMP}/ssh-fs-match.log"
+# 缺少 mds_namespace(旧 DS/手工挂载): 不得当作匹配
+_seed_mount "rw,noatime,name=csi-cephfs-node,acl"
+rc="$(run_module fs-absent "${TMP}/cluster.conf")"
+chk "缺少 mds_namespace 退出码" "0" "${rc}"
+chk_contains "缺少选项按不匹配处理" "无 mds_namespace" "${TMP}/run-fs-absent.out"
+chk_contains "缺少选项执行 lazy umount" "umount -l '/mnt/cephfs/models'" "${TMP}/ssh-fs-absent.log"
+unset FAKE_MNT_STUB FAKE_MNT_STATE_DIR
 
 echo "== ⑦ 零节点验证必须失败(不得假成功) =="
 rc="$(run_module notready)"

@@ -636,6 +636,10 @@ Ceph 全关时不会排进部署计划);单独执行: `sudo ./deploy-cluster.sh 
     (generation 非空/非 0 时; 与 `03_ceph_csi.sh` 的 `_ext_uid` 同口径, 如 `csi-cephfs-node.1`);
   - `CEPHFS_NODE_KEYRING` ← `CSI_CEPHFS_NODE_SECRET`;无 CSI secret 时回退
     `ROOK_EXTERNAL_USERNAME`/`ROOK_EXTERNAL_USER_SECRET`(healthchecker, 通常只读)。
+  - ⚠ `CEPHFS_NODE_USER`/`CEPHFS_NODE_KEYRING` **成对派生**(2026-10-28): 只要显式给了其中
+    一个(含专用 `external-cephfs.env` 里的值), 另一个就**不再**从 `external-ceph.env` 借用;
+    缺 keyring 会在「external 模式缺凭据」预检明确失败, 而不是把另一个身份的 key 写进
+    Secret、到 mount 阶段才认证失败。显式用户名若与 Rook 导出同一身份, 需同时显式给 keyring。
   **多 FS 环境必须显式选 FS**: 挂载选项带 `mds_namespace=<CEPHFS_FS>`, 否则内核会挂默认 FS
   (容器 d 的 external 集群同时有 `cephfs` 与 `cubestack-ext-fs`, 实测必须指定后者)。
 - external 只做宿主机挂载(不导入 CSI)时 `REQUIRES` 改为 `k8s_deploy`(集群必须先存在), 不再强拉
@@ -669,6 +673,11 @@ CEPH_MODE=external CEPHFS_MOUNT_ENABLED=true \
   CSI provisioner 的 key 做宿主机挂载(通常 caps 不足)。
 - ⚠ 多 FS 集群不指定 `mds_namespace` 时内核会挂默认 FS(通常是 `cephfs`), 不是 `CEPHFS_FS`;
   模块已固定写入 `mds_namespace=<CEPHFS_FS>`。
+- ⚠ **更换 `CEPHFS_FS` 后旧挂载不会自动消失**: DS 的 `mounted_ok` 只按 `fstype=ceph` 判断
+  "已挂载"; 模块在 apply DS 前会比对现有挂载的 `mds_namespace`(缺失也算不匹配)与只读状态,
+  不一致即 lazy umount, 让 DS 按新 FS 重挂; 逐节点最终验证也要求
+  `findmnt OPTIONS` 含 `mds_namespace=<CEPHFS_FS>`(实测内核 5.15 可见该选项), 避免
+  "脚本报新 FS 成功、消费者实际读旧 FS 数据"。
 
 **验证**:
 ```bash

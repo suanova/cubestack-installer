@@ -1885,6 +1885,32 @@ bash deployments/scripts/tools/tests/test-cephfs-mount.sh
 调谐覆盖; 若上游 chart 将来显式加入 `strategy`, 需要上游改成 `Recreate` 或提供 values 开关,
 届时本守护会因 `strategy.type != Recreate` 继续纠正。
 
+### 3. 【2026-10-28】更换 `CEPHFS_FS` 后部署报成功, 但宿主机读到的仍是旧文件系统
+
+**症状:** 修改 `CEPHFS_FS`/`CEPHFS_FS_NAME`(或换 external 提供方 FS)后重跑 cephfs_mount,
+模块与逐节点校验都通过, 但 `/mnt/cephfs/models` 里的数据仍是旧 FS 的内容;
+`findmnt -T /mnt/cephfs/models -o OPTIONS` 显示 `mds_namespace=<旧 FS>`(或没有该选项)。
+
+**根因:**
+1. DaemonSet 的 `mounted_ok` 只按 `fstype=ceph` 判断"已挂载"(只读模式额外看 `ro`), **不看
+   `mds_namespace`** —— 目标上已有旧 FS 的可读挂载时容器直接进入 `sleep 30` 永不重挂;
+2. 模块的安装前预清理只比对只读状态、不比对文件系统; 旧 FS 挂载可读就被"保留复用";
+3. 逐节点验证同样只查 fstype + 写读探针 → 旧挂载也通过, 最终报成功。
+
+**解法(已落地):**
+- 预清理增加 `mds_namespace` 比对: 现有挂载的 `mds_namespace` ≠ `CEPHFS_FS_NAME`(或缺失)
+  与只读状态不一致一样, 走既有的 lazy umount 路径, 由 DS 按当前配置重挂;
+- 逐节点最终验证要求 `mds_namespace=<CEPHFS_FS_NAME>`, 不匹配即 `WRONG_FS` 失败;
+- 内核 5.15 实测 `findmnt -n -o OPTIONS` 会显示 DS `mount -o mds_namespace=...` 写入的值
+  (集群 c 节点: `...,acl,mds_namespace=cephfs`)。
+
+**验证:**
+```bash
+ssh <node> "findmnt -n -o OPTIONS -T /mnt/cephfs/models | tail -1"   # 应含 mds_namespace=<选定 FS>
+bash deployments/scripts/tools/tests/test-cephfs-mount.sh            # ⑪: 旧 FS/缺选项 umount, 匹配保留
+```
+边界: 离线桩式回归 + 内核选项可见性实机确认; 未做真实"换 FS 覆盖部署"的端到端重挂验证。
+
 ---
 
 ## 六、发布 / 安装链路(2026-10-25)

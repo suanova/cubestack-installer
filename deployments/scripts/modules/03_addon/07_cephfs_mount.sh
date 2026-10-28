@@ -21,14 +21,16 @@
 #   · 凭据: internal 模式创建专用 cephx 用户(mon allow r / mds allow rw fsname=<fs> /
 #     osd allow rw tag cephfs metadata|data=<fs>), 密钥只存 K8s Secret + Pod 内 secretfile;
 #     external 模式复用 CEPHFS_NODE_USER/KEYRING(或 CEPHFS_USER/KEYRING、CEPH_USER/KEYRING),
-#     未显式配置时从 external-ceph.env 的 CSI_CEPHFS_NODE_SECRET* / ROOK_EXTERNAL_* 派生。
+#     未显式配置时从 external-ceph.env 的 CSI_CEPHFS_NODE_SECRET* / ROOK_EXTERNAL_* 派生
+#     (user/keyring **成对**派生: 任一显式设置即不派生另一个, 避免不同 CephX 身份混配)。
 #   · mon 地址: internal 从 ConfigMap rook-ceph-mon-endpoints 归一化; external 用 CEPH_MONITORS
 #     (未显式配置时从 external-ceph.env 的 ROOK_EXTERNAL_CEPH_MON_DATA 派生)。
 #   · 依赖: REQUIRES k8s_deploy(集群必须先存在); 不再 REQUIRES ceph_csi —— external 只做宿主机挂载时不需要导入外部 CSI;
 #     --steps cephfs_mount 在已部署集群上: k8s_deploy 状态 done(REPEAT:0) → 闭包跳过, 不会重跑; 全新集群则先部署 k8s。
 #     internal 全量部署仍按文件序号(03 ceph_csi → 07 cephfs_mount)保证顺序, 单独 --steps
 #     internal 时请一并跑 ceph,ceph_csi(模块会预检 CephCluster/CephFilesystem 并就绪)。
-#   · 验证: DaemonSet Ready 后逐台 Ready 节点 SSH 校验(fstype=ceph + 读写/只读探针)。
+#   · 验证: DaemonSet Ready 后逐台 Ready 节点 SSH 校验(fstype=ceph + mds_namespace=选定 FS +
+#     读写/只读探针); 预检会卸载 FS/只读状态不一致的旧挂载(DS 只按 fstype 判"已挂载")。
 #   · 卸载: 删 DaemonSet + 等 Pod 退出 + **逐节点显式 umount**(传播到宿主机的挂载不会必然随
 #     Pod 退出消失, 2026-10-19 实机验证) + Secret + internal 专用 cephx 用户;
 #     **任一节点仍有 ceph 挂载残留 → 非零退出**(不能静默成功, 否则 Ceph 销毁后挂载变僵尸态);
@@ -56,6 +58,8 @@ load_config
 #      只补空值, 显式 cluster.conf / 环境变量始终优先;
 #   ③ 只读开关未显式设置时读专用文件。
 # 凭据选择: CSI_CEPHFS_NODE_SECRET(节点角色) > ROOK_EXTERNAL_USER_SECRET(healthchecker 兜底);
+#   仅当 CEPHFS_NODE_USER 与 CEPHFS_NODE_KEYRING **都未显式设置**时才派生, 且两者成对派生
+#   (只显式给一个时, 另一个保持空 → 由缺凭据预检明确报错, 不会跨身份凑对)。
 # 只读提供方用专用文件写 CEPHFS_MOUNT_READ_ONLY=true, 不要把只读 key 写进仓库。
 _normalize_mons() {
     local raw part out=""
@@ -86,6 +90,7 @@ _env_get() {
 _load_external_cephfs_env() {
     [ "${CEPH_MODE:-internal}" = "external" ] || return 0
     local _ext_env _mount_env _v _val _raw _nu _ru _nk _rk _ro _gen
+    local _user_explicit _key_explicit
     _ext_env="${CEPH_EXTERNAL_ENV_FILE:-${REPO_ROOT}/deployments/config/external-ceph.env}"
     _mount_env="${CEPHFS_MOUNT_ENV_FILE:-${REPO_ROOT}/deployments/config/external-cephfs.env}"
 
@@ -99,12 +104,19 @@ _load_external_cephfs_env() {
     fi
 
     # ② Rook 官方 external-ceph.env(只补未显式设置的变量)
+    # ★ 凭据必须"成对"派生(2026-10-28): CEPHFS_NODE_USER / CEPHFS_NODE_KEYRING 属于同一个
+    #   CephX 身份。只要用户**显式给了其中任一个**(cluster.conf/env 变量, 或上面的专用 mount
+    #   env), 另一个就**不再**从 external-ceph.env 派生 —— 否则会把 CSI node secret(或
+    #   ROOK_EXTERNAL_*)的 key 配到另一个用户名上, 直到 mount 时才认证失败(根因难定位)。
+    #   此时缺 keyring 会落在下方"external 模式缺凭据"预检, 给出明确错误。
+    _user_explicit="${CEPHFS_NODE_USER:-}"
+    _key_explicit="${CEPHFS_NODE_KEYRING:-}"
     if [ -z "${CEPH_MONITORS:-}" ]; then
         _raw="$(_env_get "${_ext_env}" ROOK_EXTERNAL_CEPH_MON_DATA)"
         [ -n "${_raw}" ] && CEPH_MONITORS="$(_normalize_mons "${_raw}")"
     fi
     [ -n "${CEPHFS_FS:-}" ] || CEPHFS_FS="$(_env_get "${_ext_env}" CEPHFS_FS_NAME)"
-    if [ -z "${CEPHFS_NODE_USER:-}" ]; then
+    if [ -z "${CEPHFS_NODE_USER:-}" ] && [ -z "${_key_explicit}" ]; then
         _nu="$(_env_get "${_ext_env}" CSI_CEPHFS_NODE_SECRET_NAME)"
         _gen="$(_env_get "${_ext_env}" CEPHX_KEY_GENERATION)"
         if [ -n "${_nu}" ]; then
@@ -116,7 +128,7 @@ _load_external_cephfs_env() {
             [ -n "${_ru}" ] && CEPHFS_NODE_USER="${_ru#client.}"
         fi
     fi
-    if [ -z "${CEPHFS_NODE_KEYRING:-}" ]; then
+    if [ -z "${CEPHFS_NODE_KEYRING:-}" ] && [ -z "${_user_explicit}" ]; then
         _nk="$(_env_get "${_ext_env}" CSI_CEPHFS_NODE_SECRET)"
         [ -n "${_nk}" ] && CEPHFS_NODE_KEYRING="${_nk}"
         if [ -z "${CEPHFS_NODE_KEYRING:-}" ]; then
@@ -373,7 +385,13 @@ if [ "${CEPH_MODE}" = "external" ]; then
     CEPH_USER_NAME="${CEPHFS_NODE_USER:-${CEPHFS_USER:-${CEPH_USER:-admin}}}"
     CEPH_USER_KEY="${CEPHFS_NODE_KEYRING:-${CEPHFS_KEYRING:-${CEPH_KEYRING:-}}}"
     [ -n "${CEPH_USER_KEY}" ] \
-        || { err "external 模式缺凭据: 设置 CEPHFS_NODE_KEYRING 或 CEPHFS_KEYRING/CEPH_KEYRING"; exit 1; }
+        || {
+            err "external 模式缺凭据: 设置 CEPHFS_NODE_KEYRING 或 CEPHFS_KEYRING/CEPH_KEYRING"
+            if [ -n "${CEPHFS_NODE_USER:-}" ]; then
+                err "  注: 显式给了 CEPHFS_NODE_USER 时不会从 external-ceph.env 借用 key(不同身份不能混配); 需成对提供 CEPHFS_NODE_KEYRING"
+            fi
+            exit 1
+        }
     ok "  凭据: 复用 external 用户 client.${CEPH_USER_NAME}"
 else
     say "确保专用 cephx 用户 client.${CEPHFS_MOUNT_USER} 存在..."
@@ -420,8 +438,13 @@ ok "  Secret 已就绪"
 # ---------------- 预清理旧集群 CephFS 残留(2026-10-19 实机) ----------------
 # 新 Ceph 集群 FSID 与旧挂载不匹配时, /mnt/cephfs/models 仍是 ceph fstype 但 ls/stat
 # 永久超时; DS 容器会以为"已挂载"而跳过, Pod 卡 ContainerCreating, 写读探针进 D 状态。
-# 这里在 apply DS 前逐节点探测: 现有 ceph 挂载可读 → 保留复用; 不可读 → lazy umount。
-say "预检节点现有 CephFS 挂载(旧集群残留自动 lazy umount)..."
+# 这里在 apply DS 前逐节点探测: 现有 ceph 挂载的 fstype/只读状态/**文件系统**都与期望一致
+# 且可读 → 保留复用; 否则 lazy umount 让 DS 按当前配置重挂。
+# ⚠ DS 的 mounted_ok 只看 fstype(和只读), **不看 mds_namespace** —— CEPHFS_FS_NAME 变更后
+#   若不在这里处理, 旧 FS 的可读挂载会被一直复用, 脚本报新 FS 成功而消费者读的是旧数据。
+#   mds_namespace 由 DS 的 mount -o 传入, 内核 5.15 的 findmnt OPTIONS 可见(实机验证);
+#   缺失该选项同样按不匹配处理(不当作匹配)。
+say "预检节点现有 CephFS 挂载(旧集群残留/FS/只读变更自动 lazy umount)..."
 _STALE_FAIL=0
 for _line in "${NODES[@]:-}"; do
     [ -z "${_line}" ] && continue
@@ -430,16 +453,21 @@ for _line in "${NODES[@]:-}"; do
     [ -n "${_ip}" ] || continue
     _fs="$(_node_ssh "${_ip}" "findmnt -n -o FSTYPE -T '${CEPHFS_MOUNT_PATH}' 2>/dev/null | tail -1 | tr -d '[:space:]'" 2>/dev/null || true)"
     [ "${_fs}" = "ceph" ] || continue
-    # 只读开关与现有挂载选项不一致时先卸载, 否则 DS 会以为"已挂载"而跳过(ro/rw 切换不生效)。
+    # 只读开关/文件系统与现有挂载选项不一致时先卸载, 否则 DS 会以为"已挂载"而跳过
+    # (ro/rw 切换、更换 CEPHFS_FS_NAME 都不生效)。
     _opts="$(_node_ssh "${_ip}" "findmnt -n -o OPTIONS -T '${CEPHFS_MOUNT_PATH}' 2>/dev/null | tail -1 | tr -d '[:space:]'" 2>/dev/null || true)"
     _is_ro=false
     case ",${_opts}," in *,ro,*) _is_ro=true ;; esac
-    if [ "${_is_ro}" != "${CEPHFS_MOUNT_READ_ONLY}" ]; then
-        warn "  ${_host}(${_ip}) 现有 ceph 挂载 ro=${_is_ro} 与 CEPHFS_MOUNT_READ_ONLY=${CEPHFS_MOUNT_READ_ONLY} 不一致, lazy umount..."
+    _mns=""
+    case ",${_opts}," in
+        *,mds_namespace=*) _mns="${_opts#*mds_namespace=}"; _mns="${_mns%%,*}" ;;
+    esac
+    if [ "${_is_ro}" != "${CEPHFS_MOUNT_READ_ONLY}" ] || [ "${_mns}" != "${CEPHFS_FS_NAME}" ]; then
+        warn "  ${_host}(${_ip}) 现有 ceph 挂载 ro=${_is_ro}(期望 ${CEPHFS_MOUNT_READ_ONLY}), fs='${_mns:-<无 mds_namespace>}'(期望 ${CEPHFS_FS_NAME}) 不一致, lazy umount..."
         _node_ssh "${_ip}" "timeout 20 sudo umount -l '${CEPHFS_MOUNT_PATH}' 2>/dev/null || timeout 20 sudo umount -f '${CEPHFS_MOUNT_PATH}' 2>/dev/null || true" || true
         _fs2="$(_node_ssh "${_ip}" "findmnt -n -o FSTYPE -T '${CEPHFS_MOUNT_PATH}' 2>/dev/null | tail -1 | tr -d '[:space:]'" 2>/dev/null || true)"
         if [ "${_fs2}" = "ceph" ]; then
-            err "  ${_host}(${_ip}) 卸载后仍有 ceph 挂载, 无法切换只读选项 —— 需停 kubelet/containerd 后重启该节点"
+            err "  ${_host}(${_ip}) 卸载后仍有 ceph 挂载, 无法切换只读选项/文件系统 —— 需停 kubelet/containerd 后重启该节点"
             _STALE_FAIL=1
         fi
         continue
@@ -518,8 +546,14 @@ for _line in "${NODES[@]:-}"; do
     _verify_cmd="set -e
 fstype=\$(findmnt -n -o FSTYPE -T '${CEPHFS_MOUNT_PATH}' 2>/dev/null | tail -1 | tr -d '[:space:]' || true)
 [ \"\${fstype}\" = ceph ] || { echo \"NOT_MOUNTED:\${fstype}\"; exit 2; }
+opts=\$(findmnt -n -o OPTIONS -T '${CEPHFS_MOUNT_PATH}' 2>/dev/null | tail -1 | tr -d '[:space:]' || true)
+# 验的是**选定的 FS**: 只看 fstype 会放过旧 FS 的可读挂载(DS 不重挂), 场景见上方预清理注释。
+mns=\"\"
+case \",\${opts},\" in
+    *,mds_namespace=*) mns=\"\${opts#*mds_namespace=}\"; mns=\"\${mns%%,*}\" ;;
+esac
+[ \"\${mns}\" = '${CEPHFS_FS_NAME}' ] || { echo \"WRONG_FS:期望 ${CEPHFS_FS_NAME}; opts=\${opts}\"; exit 4; }
 if [ '${CEPHFS_MOUNT_READ_ONLY}' = 'true' ]; then
-    opts=\$(findmnt -n -o OPTIONS -T '${CEPHFS_MOUNT_PATH}' 2>/dev/null | tail -1 || true)
     case \",\${opts},\" in
         *,ro,*) ;;
         *) echo \"NOT_READONLY:\${opts}\"; exit 3 ;;
