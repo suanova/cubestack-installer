@@ -62,7 +62,21 @@ _CB_WORKLOADS=(
 _PATCH='{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}}}'
 _UNPATCH='{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}}}}}'
 
-_exists() { SSH "${K} -n $2 get $1 $3 >/dev/null 2>&1"; }
+# 三态存在性探测: 0=存在; 1=不存在; 2=查询失败(API/RBAC/SSH)。
+# ★ remove 必须区分"不存在"与"查不到"(2026-10-28 CodeRabbit): 查询失败时跳过循环会让
+#   残留的 master selector 被报成回滚成功。apply/check 仍按"非 0 即跳过"处理(行为不变)。
+_EXISTS_ERR=""
+_exists() {   # <type> <ns> <name>
+    local out rc=0
+    _EXISTS_ERR=""
+    out="$(SSH "${K} -n $2 get $1 $3" 2>&1)" || rc=$?
+    [ "${rc}" -eq 0 ] && return 0
+    case "${out}" in
+        *NotFound*|*"not found"*) return 1 ;;
+    esac
+    _EXISTS_ERR="$(printf '%s' "${out}" | tail -1 || true)"
+    return 2
+}
 _patch_one() { SSH "${K} -n $2 patch $1 $3 --type=strategic -p '$4'" >/dev/null 2>&1; }
 
 _check_one() {
@@ -127,7 +141,11 @@ case "${ACTION}" in
         say "移除 CubeStack 平台组件 master nodeSelector(tolerations 保留) ..."
         for _w in "${_CB_WORKLOADS[@]}"; do
             IFS='|' read -r _t _n _name <<< "${_w}"
-            if ! _exists "${_t}" "${_n}" "${_name}"; then
+            _ex=0; _exists "${_t}" "${_n}" "${_name}" || _ex=$?
+            if [ "${_ex}" -eq 2 ]; then
+                err "  [${_n}/${_t}/${_name}] remove 查询失败, 未清理(可能残留 master selector): ${_EXISTS_ERR:-未知错误}"; FAILED=1; continue
+            fi
+            if [ "${_ex}" -ne 0 ]; then
                 say "  [${_n}/${_t}/${_name}] 不存在, 跳过"; continue
             fi
             if _patch_one "${_t}" "${_n}" "${_name}" "${_UNPATCH}"; then

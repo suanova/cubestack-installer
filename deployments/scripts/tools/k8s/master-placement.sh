@@ -63,21 +63,40 @@ _PATCH='{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/co
 _DS_PATCH='{"spec":{"template":{"spec":{"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}}}'
 _UNPATCH='{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}}}}}'
 
-_exists() { SSH "${K} -n $2 get $1 $3 >/dev/null 2>&1"; }
+# 三态存在性探测: 0=存在; 1=不存在; 2=查询失败(API/RBAC/SSH)。
+# ★ remove 必须区分"不存在"与"查不到"(2026-10-28 CodeRabbit): 查询失败时跳过循环会让
+#   残留的 master selector 被报成回滚成功。apply/check 仍按"非 0 即跳过"处理(行为不变)。
+_EXISTS_ERR=""
+_exists() {   # <type> <ns> <name>
+    local out rc=0
+    _EXISTS_ERR=""
+    out="$(SSH "${K} -n $2 get $1 $3" 2>&1)" || rc=$?
+    [ "${rc}" -eq 0 ] && return 0
+    case "${out}" in
+        *NotFound*|*"not found"*) return 1 ;;
+    esac
+    _EXISTS_ERR="$(printf '%s' "${out}" | tail -1 || true)"
+    return 2
+}
 
 _patch_one() {   # <type> <ns> <name> <patch>
     SSH "${K} -n $2 patch $1 $3 --type=strategic -p '$4'" >/dev/null 2>&1
 }
 
-# 当前 PodTemplate 是否带 master nodeSelector(0=带)。remove 用: 未应用过 placement 时
-# 不做 null 合并补丁, 尤其 registry 是裸 RS —— 模板无变化却"删 Pod 重建"会白白重启 registry。
+# 当前 PodTemplate 是否带 master nodeSelector: 0=带; 1=不带; 2=读取/解析失败。
+# ★ 必须先把 SSH 输出捕获下来(2026-10-28 CodeRabbit): 否则 pipefail 下"SSH 非零但输出
+#   完整 JSON"会让管道返回 SSH 状态, 被误判成"无 selector"; JSON 非法也与"无 selector"
+#   混为一谈。remove 对 2 必须报错而非跳过。
 _has_master_selector() {   # <type> <ns> <name>
-    SSH "${K} -n $2 get $1 $3 -o json 2>/dev/null" | python3 -c '
+    local _out _rc=0
+    _out="$(SSH "${K} -n $2 get $1 $3 -o json" 2>/dev/null)" || _rc=$?
+    [ "${_rc}" -eq 0 ] || return 2
+    printf '%s' "${_out}" | python3 -c '
 import json, sys
 try:
     sel = json.load(sys.stdin)["spec"]["template"]["spec"].get("nodeSelector") or {}
 except Exception:
-    sys.exit(1)
+    sys.exit(2)
 sys.exit(0 if "node-role.kubernetes.io/control-plane" in sel else 1)
 '
 }
@@ -173,12 +192,20 @@ case "${ACTION}" in
         say "移除系统组件 master nodeSelector(tolerations 保留) ..."
         for _w in "${_MASTER_WORKLOADS[@]}"; do
             IFS='|' read -r _t _n _name <<< "${_w}"
-            if ! _exists "${_t}" "${_n}" "${_name}"; then
+            _ex=0; _exists "${_t}" "${_n}" "${_name}" || _ex=$?
+            if [ "${_ex}" -eq 2 ]; then
+                err "  [${_n}/${_t}/${_name}] remove 查询失败, 未清理(可能残留 master selector): ${_EXISTS_ERR:-未知错误}"; FAILED=1; continue
+            fi
+            if [ "${_ex}" -ne 0 ]; then
                 say "  [${_n}/${_t}/${_name}] 不存在, 跳过"; continue
             fi
             # ★ 2026-10-28: 只有确实带 master nodeSelector 才 patch —— 未应用过 placement
             #   时跳过(含 registry RS 的 Pod 删除), 避免回滚动作重启无关组件。
-            if ! _has_master_selector "${_t}" "${_n}" "${_name}"; then
+            _sel_rc=0
+            _has_master_selector "${_t}" "${_n}" "${_name}" || _sel_rc=$?
+            if [ "${_sel_rc}" -eq 2 ]; then
+                err "  [${_n}/${_t}/${_name}] 读取 PodTemplate 失败, 无法确认 master nodeSelector"; FAILED=1; continue
+            elif [ "${_sel_rc}" -eq 1 ]; then
                 say "  [${_n}/${_t}/${_name}] 无 master nodeSelector, 跳过"; continue
             fi
             if _patch_one "${_t}" "${_n}" "${_name}" "${_UNPATCH}"; then

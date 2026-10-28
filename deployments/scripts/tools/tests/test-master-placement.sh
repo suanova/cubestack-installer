@@ -15,7 +15,7 @@
 #   ⑤ apply 对每个 workload 发出 patch 命令(假 ssh)
 #   ⑥ check 精确校验 nodeSelector + 双 toleration(control-plane/unschedulable)
 #   ⑦ remove 只处理确实带 master selector 的对象(未应用过时不 patch/不重建 registry Pod);
-#      remove patch 失败 → 非 0(不得降级为 warning)
+#      remove patch 失败 → 非 0(不得降级为 warning); 存在性/selector 读取失败同样非 0
 #   ⑧ apply/remove 的 registry Pod 删除失败 → 非 0(不得误报"已删除")
 #
 # 隔离: 假 ssh 记录远端命令; 不连集群。
@@ -160,10 +160,15 @@ case "${cmd}" in
     *" patch "*) [ "${FAKE_PATCH_FAIL:-0}" = "1" ] && exit 1 ;;
     *" delete pod"*) [ "${FAKE_DELETE_FAIL:-0}" = "1" ] && exit 1 ;;
     *" -o json"*)
+        if [ "${FAKE_JSON_BAD:-0}" = "1" ]; then echo "not-json"; exit 0; fi
         name="$(printf '%s\n' "${cmd}" | awk '{for(i=1;i<=NF;i++) if($i=="get"){print $(i+2); exit}}')"
         f="${FAKE_JSON_DIR}/${name}.json"
-        [ -f "$f" ] && cat "$f"
+        # 成功路径必须依赖显式 fixture: 缺失时按读取失败处理(fail-closed), 不再隐式
+        # 返回"无 selector", 否则测试无法区分"确实没有 selector"与"读不到对象"。
+        if [ -f "$f" ]; then cat "$f"; else echo "missing fixture: $f" >&2; exit 1; fi
+        [ "${FAKE_JSON_TRANSPORT_FAIL:-0}" = "1" ] && exit 1
         ;;
+    *" get "*) [ "${FAKE_GET_FAIL:-0}" = "1" ] && { echo "Error from server: connection refused" >&2; exit 1; } ;;
 esac
 exit 0
 FAKE
@@ -174,6 +179,14 @@ EOF
 cat > "${TMP}/json-sel/registry.json" <<'EOF'
 {"spec":{"template":{"spec":{}}}}
 EOF
+# 每个 workload 都有显式 fixture(不再依赖隐式缺省):
+#   json-none = 6 个 workload 全为"无 selector"; json-sel 其余 4 个同样无 selector。
+for _w in coredns metrics-server dns-autoscaler calico-kube-controllers registry controller; do
+    printf '%s\n' '{"spec":{"template":{"spec":{}}}}' > "${TMP}/json-none/${_w}.json"
+done
+for _w in metrics-server dns-autoscaler calico-kube-controllers controller; do
+    printf '%s\n' '{"spec":{"template":{"spec":{}}}}' > "${TMP}/json-sel/${_w}.json"
+done
 run_remove() {   # <json dir> → 输出; ssh 日志在 $TMP/ssh-remove.log
     : > "${TMP}/ssh-remove.log"
     (
@@ -211,6 +224,21 @@ out="$(run_remove "${TMP}/json-sel")"; rc=$?
 unset FAKE_DELETE_FAIL
 chk "⑦ remove 删 Pod 失败退出码非 0" "1" "${rc}"
 chk_contains "⑦ remove 报删除旧 Pod 失败" "删除旧 Pod 失败" "${out}"
+export FAKE_GET_FAIL=1
+out="$(run_remove "${TMP}/json-sel")"; rc=$?
+unset FAKE_GET_FAIL
+chk "⑦ 存在性查询失败退出码非 0" "1" "${rc}"
+chk_contains "⑦ 报 remove 查询失败" "remove 查询失败" "${out}"
+export FAKE_JSON_TRANSPORT_FAIL=1
+out="$(run_remove "${TMP}/json-sel")"; rc=$?
+unset FAKE_JSON_TRANSPORT_FAIL
+chk "⑦ selector 读取传输失败退出码非 0" "1" "${rc}"
+chk_contains "⑦ 传输失败报读取失败" "读取 PodTemplate 失败" "${out}"
+export FAKE_JSON_BAD=1
+out="$(run_remove "${TMP}/json-sel")"; rc=$?
+unset FAKE_JSON_BAD
+chk "⑦ selector JSON 非法退出码非 0" "1" "${rc}"
+chk_contains "⑦ JSON 非法报读取失败" "读取 PodTemplate 失败" "${out}"
 
 echo "== ⑧ apply: registry Pod 删除失败 → 非 0(不得误报已删除) =="
 out="$(
