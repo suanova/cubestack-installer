@@ -133,7 +133,7 @@ case "${ACTION}" in
             if _patch_one "${_t}" "${_n}" "${_name}" "${_UNPATCH}"; then
                 ok "  [${_n}/${_t}/${_name}] 已移除 master nodeSelector"
             else
-                warn "  [${_n}/${_t}/${_name}] remove patch 失败(不阻断)"
+                err "  [${_n}/${_t}/${_name}] remove patch 失败"; FAILED=1
             fi
         done
         ;;

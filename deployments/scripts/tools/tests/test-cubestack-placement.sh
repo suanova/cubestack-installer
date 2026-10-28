@@ -9,6 +9,8 @@
 #   ③ patch 含 master nodeSelector + control-plane/unschedulable tolerations
 #   ④ 明确不碰 Envoy 数据面 proxy / sglang / vllm / model 推理负载
 #   ⑤ apply 假 ssh 对每个平台 Deployment 发 patch
+#   ⑥ check 精确校验 nodeSelector(toleration 不得假阳性)
+#   ⑦ remove patch 失败 → 非 0(不得降级为 warning)
 #
 # 隔离: 假 ssh 记录命令; 不连集群。
 # 用法: bash deployments/scripts/tools/tests/test-cubestack-placement.sh
@@ -125,6 +127,29 @@ chk "⑥ 仅 toleration 无 nodeSelector → check 失败" "1" "${rc}"
 chk_contains "⑥ 报 placement 不完整" "placement 不完整" "${out}"
 out="$(run_check "${TMP}/dep-ok.json" 2>&1)"; rc=$?
 chk "⑥ selector+toleration → check 通过" "0" "${rc}"
+
+echo "== ⑦ remove patch 失败 → 非 0(不得降级为 warning) =="
+mkdir -p "${TMP}/bin-rmfail"
+cat > "${TMP}/bin-rmfail/ssh" <<'FAKE'
+#!/bin/bash
+case "$*" in
+    *" patch "*) exit 1 ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-rmfail/ssh"
+out="$(
+    (
+        export PATH="${TMP}/bin-rmfail:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        bash "${TOOL}" --remove
+    ) 2>&1
+)"; rc=$?
+chk "⑦ remove patch 失败退出码" "1" "${rc}"
+chk_contains "⑦ 报 remove patch 失败" "remove patch 失败" "${out}"
+chk_not_contains "⑦ 不再标注不阻断" "remove patch 失败(不阻断)" "${out}"
 
 echo ""
 if [ "${fail}" = "0" ]; then

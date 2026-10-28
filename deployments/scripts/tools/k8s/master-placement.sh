@@ -12,9 +12,12 @@
 # 注意:
 #   · kubespray 下次 k8s_deploy 会按 addons.yml 重新渲染这些 Deployment; 本工具需在
 #     k8s_deploy 之后执行(node_pool 模块在 addon 末尾调用), 或重跑 --steps node_pool。
+#   · registry 是裸 ReplicaSet: 模板变更不会自动替换现有 Pod, apply/remove 都会删旧 Pod
+#     让其按新模板重建; **删除失败会报错并非 0 退出**(否则"已删除"是假成功)。
 #   · --remove 只移除本工具加的 master nodeSelector; tolerations 保留(无害, 避免
 #     master 仍有 control-plane taint 时把组件卡 Pending)。组件会留到当前 master 上,
-#     下次滚动才会重新调度。
+#     下次滚动才会重新调度。未带 master selector 的对象**跳过**(不 patch、不为 registry
+#     重建 Pod) —— 从未应用过 placement 时回滚不会扰动任何组件。
 #
 # 用法:
 #   sudo ./master-placement.sh --apply
@@ -66,6 +69,19 @@ _patch_one() {   # <type> <ns> <name> <patch>
     SSH "${K} -n $2 patch $1 $3 --type=strategic -p '$4'" >/dev/null 2>&1
 }
 
+# 当前 PodTemplate 是否带 master nodeSelector(0=带)。remove 用: 未应用过 placement 时
+# 不做 null 合并补丁, 尤其 registry 是裸 RS —— 模板无变化却"删 Pod 重建"会白白重启 registry。
+_has_master_selector() {   # <type> <ns> <name>
+    SSH "${K} -n $2 get $1 $3 -o json 2>/dev/null" | python3 -c '
+import json, sys
+try:
+    sel = json.load(sys.stdin)["spec"]["template"]["spec"].get("nodeSelector") or {}
+except Exception:
+    sys.exit(1)
+sys.exit(0 if "node-role.kubernetes.io/control-plane" in sel else 1)
+'
+}
+
 _check_one() {   # <type> <ns> <name> <require_selector:0|1>
     local _type="$1" _ns="$2" _name="$3" _need_sel="$4" _json
     if ! _exists "${_type}" "${_ns}" "${_name}"; then
@@ -76,6 +92,8 @@ _check_one() {   # <type> <ns> <name> <require_selector:0|1>
     # ★ 2026-10-27: 必须**只检查 nodeSelector/tolerations 字段** —— tolerations 里也含
     #   control-plane/unschedulable 字符串, 旧实现 grep 整个 JSON 会对"只有 tolerations、
     #   没有 nodeSelector"的对象误报 OK(容器 c 实测: Pod 实际全在 worker)。
+    # ★ 2026-10-28: control-plane 与 unschedulable 两个 toleration 都必须校验 —— 只有
+    #   unschedulable 时, master 的 control-plane taint 仍会把 Pod 挡在 master 外。
     if ! printf '%s' "${_json}" | python3 -c '
 import json, sys
 try:
@@ -94,7 +112,7 @@ ok = (not need_sel or sel.get("node-role.kubernetes.io/control-plane") == "") an
 )
 sys.exit(0 if ok else 1)
 ' "${_need_sel}"; then
-        err "  [${_ns}/${_type}/${_name}] placement 不完整(selector=${_need_sel}, 需 master nodeSelector + unschedulable toleration)"; return 1
+        err "  [${_ns}/${_type}/${_name}] placement 不完整(selector=${_need_sel}, 需 master nodeSelector + control-plane/unschedulable tolerations)"; return 1
     fi
     ok "  [${_ns}/${_type}/${_name}] placement OK"
     return 0
@@ -114,9 +132,14 @@ case "${ACTION}" in
                 ok "  [${_n}/${_t}/${_name}] 已加 master nodeSelector + tolerations"
                 # ReplicaSet 不会因模板变更自动替换现有 Pod; registry 是 kubespray 的裸 RS,
                 # 必须删旧 Pod 让 RS 按新模板在 master 重建。
+                # delete 失败不能报成功: 模板已改但运行中的 Pod 仍是旧调度(旧模板),
+                # 必须让调用方看到 FAILED(2026-10-28 CodeRabbit)。
                 if [ "${_t}" = "rs" ]; then
-                    SSH "${K} -n ${_n} delete pod -l k8s-app=registry --wait=false >/dev/null 2>&1 || true"
-                    say "  [${_n}/${_t}/${_name}] 已删除旧 Pod, 由 ReplicaSet 按新模板重建"
+                    if SSH "${K} -n ${_n} delete pod -l k8s-app=registry --wait=false >/dev/null 2>&1"; then
+                        say "  [${_n}/${_t}/${_name}] 已删除旧 Pod, 由 ReplicaSet 按新模板重建"
+                    else
+                        err "  [${_n}/${_t}/${_name}] 删除旧 Pod 失败, registry Pod 仍使用旧调度模板"; FAILED=1
+                    fi
                 fi
             else
                 err "  [${_n}/${_t}/${_name}] patch 失败"; FAILED=1
@@ -153,14 +176,22 @@ case "${ACTION}" in
             if ! _exists "${_t}" "${_n}" "${_name}"; then
                 say "  [${_n}/${_t}/${_name}] 不存在, 跳过"; continue
             fi
+            # ★ 2026-10-28: 只有确实带 master nodeSelector 才 patch —— 未应用过 placement
+            #   时跳过(含 registry RS 的 Pod 删除), 避免回滚动作重启无关组件。
+            if ! _has_master_selector "${_t}" "${_n}" "${_name}"; then
+                say "  [${_n}/${_t}/${_name}] 无 master nodeSelector, 跳过"; continue
+            fi
             if _patch_one "${_t}" "${_n}" "${_name}" "${_UNPATCH}"; then
                 ok "  [${_n}/${_t}/${_name}] 已移除 master nodeSelector"
                 if [ "${_t}" = "rs" ]; then
-                    SSH "${K} -n ${_n} delete pod -l k8s-app=registry --wait=false >/dev/null 2>&1 || true"
-                    say "  [${_n}/${_t}/${_name}] 已删除旧 Pod, 由 ReplicaSet 按新模板重建"
+                    if SSH "${K} -n ${_n} delete pod -l k8s-app=registry --wait=false >/dev/null 2>&1"; then
+                        say "  [${_n}/${_t}/${_name}] 已删除旧 Pod, 由 ReplicaSet 按新模板重建"
+                    else
+                        err "  [${_n}/${_t}/${_name}] 删除旧 Pod 失败, registry Pod 仍使用旧调度模板"; FAILED=1
+                    fi
                 fi
             else
-                warn "  [${_n}/${_t}/${_name}] remove patch 失败(不阻断)"
+                err "  [${_n}/${_t}/${_name}] remove patch 失败"; FAILED=1
             fi
         done
         ;;
