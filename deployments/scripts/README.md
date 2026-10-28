@@ -591,8 +591,8 @@ sudo ./scripts/tools/offline/trim-offline-files.sh              # 实际清理
 VM_NET_MODE=bridge ./scripts/tools/vm/create-libvirt-vm.sh ...     # 覆盖 NET_MODE
 # 单次指定密码 / 密钥
 SSH_DEFAULT_PASSWORD='xxx' ./scripts/tools/node/setup-passwordless.sh 10.244.1.11
-# 指定配置文件
-CLUSTER_CONF=/path/to/cluster.conf sudo ./scripts/deploy-cluster.sh --list
+# 指定配置文件(变量经 env 传给 root: sudo 默认 env_reset 会清掉 "VAR=... sudo" 前置赋值)
+sudo env CLUSTER_CONF=/path/to/cluster.conf ./scripts/deploy-cluster.sh --list
 ```
 
 ---

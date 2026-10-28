@@ -228,7 +228,8 @@ except Exception: print("{}")')"
 
 # ---------------- 输出函数(同时写入日志文件) ----------------
 # 日志文件路径: 设置 LOG_FILE 后, 所有输出同时写入该文件
-# 用法: export LOG_FILE=/tmp/deploy.log; sudo ./deploy-cluster.sh ...
+# 用法: sudo env LOG_FILE=/tmp/deploy.log ./deploy-cluster.sh ...
+#   (变量经 env 传给 root: sudo 默认 env_reset 会清掉 export/前置赋值)
 # 日志开关: LOG_VERBOSE=1 显示详细日志(默认) / 0 仅显示关键信息
 LOG_VERBOSE="${LOG_VERBOSE:-1}"
 _log_file() { [ -n "${LOG_FILE:-}" ] && echo -e "$*" >> "${LOG_FILE}" 2>/dev/null || true; }
