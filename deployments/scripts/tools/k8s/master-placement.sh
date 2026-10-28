@@ -101,6 +101,31 @@ sys.exit(0 if "node-role.kubernetes.io/control-plane" in sel else 1)
 '
 }
 
+# 仍带 master nodeSelector 的 Pod 名(每行一个): 0=有; 1=确认没有; 2=查询/解析失败。
+# ★ partial remove 的重试(2026-10-28 CodeRabbit): 上一次 patch 已生效、删 Pod 失败时,
+#   RS 模板已无 selector —— 只看模板会跳过, 旧 Pod 会一直留在 master 上。重试时按 Pod
+#   实际 spec 补删, 且只删**确实仍带** selector 的 Pod(从未应用过 placement 的健康 Pod
+#   不会被白重启)。
+_pods_with_master_selector() {   # <ns> <label-selector>
+    local _out _rc=0
+    _out="$(SSH "${K} -n $1 get pods -l $2 -o json" 2>/dev/null)" || _rc=$?
+    [ "${_rc}" -eq 0 ] || return 2
+    printf '%s' "${_out}" | python3 -c '
+import json, sys
+try:
+    items = json.load(sys.stdin).get("items", [])
+except Exception:
+    sys.exit(2)
+sel = "node-role.kubernetes.io/control-plane"
+names = [i["metadata"]["name"] for i in items
+         if sel in ((i.get("spec") or {}).get("nodeSelector") or {})]
+if names:
+    print("\n".join(names))
+    sys.exit(0)
+sys.exit(1)
+'
+}
+
 _check_one() {   # <type> <ns> <name> <require_selector:0|1>
     local _type="$1" _ns="$2" _name="$3" _need_sel="$4" _json
     if ! _exists "${_type}" "${_ns}" "${_name}"; then
@@ -206,6 +231,28 @@ case "${ACTION}" in
             if [ "${_sel_rc}" -eq 2 ]; then
                 err "  [${_n}/${_t}/${_name}] 读取 PodTemplate 失败, 无法确认 master nodeSelector"; FAILED=1; continue
             elif [ "${_sel_rc}" -eq 1 ]; then
+                # ★ partial remove 重试(2026-10-28 CodeRabbit): 上一次 patch 已生效但删 Pod
+                #   失败时, 模板已无 selector; 只看模板会跳过, 旧 Pod 仍以 master selector
+                #   留在 master 上。只补删**确实仍带** selector 的 Pod —— 从未应用过
+                #   placement 的 registry Pod 没有该 selector, 不会被白重启。
+                if [ "${_t}" = "rs" ]; then
+                    _pod_rc=0
+                    _stale_pods="$(_pods_with_master_selector "${_n}" "k8s-app=registry")" || _pod_rc=$?
+                    if [ "${_pod_rc}" -eq 2 ]; then
+                        err "  [${_n}/${_t}/${_name}] 读取 Pod 失败, 无法确认是否有残留 registry Pod"; FAILED=1; continue
+                    fi
+                    if [ "${_pod_rc}" -eq 0 ] && [ -n "${_stale_pods}" ]; then
+                        while IFS= read -r _p; do
+                            [ -n "${_p}" ] || continue
+                            if SSH "${K} -n ${_n} delete pod ${_p} --wait=false >/dev/null 2>&1"; then
+                                say "  [${_n}/${_t}/${_name}] 已删除残留 Pod ${_p}(仍带 master nodeSelector)"
+                            else
+                                err "  [${_n}/${_t}/${_name}] 删除残留 Pod ${_p} 失败, 仍使用旧调度模板"; FAILED=1
+                            fi
+                        done <<< "${_stale_pods}"
+                    fi
+                    unset _stale_pods _pod_rc
+                fi
                 say "  [${_n}/${_t}/${_name}] 无 master nodeSelector, 跳过"; continue
             fi
             if _patch_one "${_t}" "${_n}" "${_name}" "${_UNPATCH}"; then

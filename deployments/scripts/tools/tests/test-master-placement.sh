@@ -17,6 +17,7 @@
 #   ⑦ remove 只处理确实带 master selector 的对象(未应用过时不 patch/不重建 registry Pod);
 #      remove patch 失败 → 非 0(不得降级为 warning); 存在性/selector 读取失败同样非 0
 #   ⑧ apply/remove 的 registry Pod 删除失败 → 非 0(不得误报"已删除")
+#   ⑦b partial remove 重试: 模板已无 selector 时仍补删仍带 master selector 的 registry Pod
 #
 # 隔离: 假 ssh 记录远端命令; 不连集群。
 # 用法: bash deployments/scripts/tools/tests/test-master-placement.sh
@@ -157,8 +158,19 @@ cat > "${TMP}/bin-remove/ssh" <<'FAKE'
 cmd="$*"
 printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}"
 case "${cmd}" in
-    *" patch "*) [ "${FAKE_PATCH_FAIL:-0}" = "1" ] && exit 1 ;;
+    *" patch "*)
+        [ "${FAKE_PATCH_FAIL:-0}" = "1" ] && exit 1
+        # patch 成功后模拟模板已更新: 重跑 remove 时 registry 模板应显示"无 selector"
+        case "${cmd}" in
+            *"patch rs registry"*) printf '%s\n' '{"spec":{"template":{"spec":{}}}}' > "${FAKE_JSON_DIR}/registry.json" ;;
+        esac
+        ;;
     *" delete pod"*) [ "${FAKE_DELETE_FAIL:-0}" = "1" ] && exit 1 ;;
+    *" get pods "*)
+        # Pod 级 fixture(partial remove 重试): 缺省=无 Pod
+        if [ -f "${FAKE_JSON_DIR}/pods.json" ]; then cat "${FAKE_JSON_DIR}/pods.json"; else echo '{"items":[]}'; fi
+        [ "${FAKE_JSON_TRANSPORT_FAIL:-0}" = "1" ] && exit 1
+        ;;
     *" -o json"*)
         if [ "${FAKE_JSON_BAD:-0}" = "1" ]; then echo "not-json"; exit 0; fi
         name="$(printf '%s\n' "${cmd}" | awk '{for(i=1;i<=NF;i++) if($i=="get"){print $(i+2); exit}}')"
@@ -219,11 +231,31 @@ out="$(run_remove "${TMP}/json-sel")"; rc=$?
 unset FAKE_PATCH_FAIL
 chk "⑦ remove patch 失败退出码非 0" "1" "${rc}"
 chk_contains "⑦ 报 remove patch 失败" "remove patch 失败" "${out}"
+# 上一步(及此前的成功 remove)已让假 patch 把模板 selector 清掉, 重新写回以覆盖删除失败路径
+cat > "${TMP}/json-sel/registry.json" <<'EOF'
+{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""}}}}}
+EOF
 export FAKE_DELETE_FAIL=1
 out="$(run_remove "${TMP}/json-sel")"; rc=$?
 unset FAKE_DELETE_FAIL
 chk "⑦ remove 删 Pod 失败退出码非 0" "1" "${rc}"
 chk_contains "⑦ remove 报删除旧 Pod 失败" "删除旧 Pod 失败" "${out}"
+
+# ⑦b partial remove(模板已无 selector、旧 Pod 仍在)重跑: 必须补删仍带 selector 的残留 Pod
+cat > "${TMP}/json-sel/pods.json" <<'EOF'
+{"items":[{"metadata":{"name":"registry-stale"},"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""}}}]}
+EOF
+out="$(run_remove "${TMP}/json-sel")"; rc=$?
+chk "⑦b partial remove 重试退出码 0" "0" "${rc}"
+chk_contains "⑦b 重试补删残留 Pod" "delete pod registry-stale" "$(cat "${TMP}/ssh-remove.log")"
+chk_not_contains "⑦b 重试不再 patch registry" "patch rs registry" "$(cat "${TMP}/ssh-remove.log")"
+# 从未应用过 placement 的健康 Pod(无 master selector)不得被删除
+cat > "${TMP}/json-sel/pods.json" <<'EOF'
+{"items":[{"metadata":{"name":"registry-ok"},"spec":{}}]}
+EOF
+out="$(run_remove "${TMP}/json-sel")"; rc=$?
+chk "⑦b 健康 Pod 退出码 0" "0" "${rc}"
+chk_not_contains "⑦b 健康 Pod 不删除" "delete pod registry-ok" "$(cat "${TMP}/ssh-remove.log")"
 export FAKE_GET_FAIL=1
 out="$(run_remove "${TMP}/json-sel")"; rc=$?
 unset FAKE_GET_FAIL
