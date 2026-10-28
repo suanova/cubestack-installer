@@ -124,8 +124,8 @@ ssh ubuntu@<node> 'sudo wc -l < /proc/net/ip_vs'              # 规则条数
 
 # 十六进制解码速查
 #   0AE90001 = 10.233.0.1    01BB = 443      192B = 6443
-#   0A42031C = 10.66.3.28    0A42031D = .29  0A42031F = .31
-# 例: "TCP 0AE90001:01BB → 0A42031F 192B" = kubernetes Service 转发到 10.66.3.31:6443
+#   C000021C = 192.0.2.28    C000021D = .29  C000021F = .31
+# 例: "TCP 0AE90001:01BB → C000021F 192B" = kubernetes Service 转发到 192.0.2.31:6443
 
 # 需要 ipvsadm 的完整视图时，用诊断 pod（需要时再装）
 ./deploy-cluster.sh --steps netshoot
