@@ -100,9 +100,18 @@ bash "${SCRIPT_DIR}/tools/k8s/sync-kubespray-config.sh" >/dev/null 2>&1 || \
 # 表现为 kubelet 探针超时、coredns/metallb/metrics-server 0/1 无限重启。
 # sync 会按 CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR 写 calico_use_default_route_src_ipaddr;
 # 这里断言“真的写进 inventory 了”, 防止配置开了、生成文件却没跟上(静默退回内核自选源)。
+# ★ 非法取值直接失败(2026-10-28): 旧实现把拼写错误静默当作 false → 门禁被跳过;
+#   本模块又用 `|| warn` 吞掉 sync 的失败, 所以这里必须自己再校验一次。
 _CALICO_SRC_ON=0
-case "$(echo "${CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR:-true}" | tr '[:upper:]' '[:lower:]')" in
+_CALICO_SRC_RAW="${CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR:-true}"
+case "$(echo "${_CALICO_SRC_RAW}" | tr '[:upper:]' '[:lower:]')" in
     true|1|yes|on) _CALICO_SRC_ON=1 ;;
+    false|0|no|off) : ;;
+    *)
+        err "CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR 非法: '${_CALICO_SRC_RAW}'(只接受 true|false, 兼容 1/0/yes/no/on/off)"
+        err "  拼写错误不能继续部署(节点将既无 Calico 源提示, NODE_NET_GUARD_ACTION=off 时也无 ip rule 兜底)"
+        exit 1
+        ;;
 esac
 if [ "${KUBE_NETWORK_PLUGIN:-calico}" = "calico" ] && [ "${_CALICO_SRC_ON}" = "1" ]; then
     _CALICO_SRC_YML="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}/group_vars/k8s_cluster/k8s-net-calico.yml"
@@ -115,7 +124,7 @@ if [ "${KUBE_NETWORK_PLUGIN:-calico}" = "calico" ] && [ "${_CALICO_SRC_ON}" = "1
     fi
     unset _CALICO_SRC_YML
 fi
-unset _CALICO_SRC_ON
+unset _CALICO_SRC_ON _CALICO_SRC_RAW
 
 # ---------------- kube-vip: 阶段二的切换确认(必须在模块里做, 不能在 sync 里) ----------------
 # sync 的 stdout 上面被重定向到 /dev/null, 把倒计时放 sync 里用户看不见还会白等 30 秒。

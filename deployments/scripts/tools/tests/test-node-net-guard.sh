@@ -17,6 +17,13 @@
 #      不写 service CIDR; 重复执行不重复; 网段变化时清理旧规则
 #   ⑤ --remove 清理规则/unit/conf; SSH 不可达时点名失败节点
 #   ⑥ CIDR 从 KUBE_PODS_SUBNET 动态读取(夹具用 10.244.0.0/16 反证不硬编码 10.233)
+#   ⑧ 探测实际本地 Pod 地址(dev cali*); 网段首主机与新 Pod 路由不同时不得漏报;
+#      无本地 Pod 时回退网段首主机
+#   ⑨ PREF 变化: 按 APPLIED 记录的旧优先级删除旧规则(同 CIDR 不残留双规则);
+#      --remove 也按记录的优先级清理; 旧版单 CIDR 状态按当前 PREF 兼容
+#   ⑩ --apply-rule 不得自动清除已在位的兜底(探测被规则掩盖会造成来回翻转)
+#   ⑪ 地址查询失败不得当作"无分歧": 原生修复关闭 → 非 0/写兜底; 开启 → 仅告警;
+#      查询成功但无地址仍属正常(不算失败)
 #
 # 隔离: 假 ssh 把远端载荷在本机执行; 假 ip 按节点夹具返回路由查询结果;
 #       绝对路径(/etc/cubestack, /usr/local/sbin, /etc/systemd/system)重写到临时根。
@@ -70,6 +77,10 @@ for a in "$@"; do
 done
 case "${want}" in
     addr)
+        case "${FAKE_ADDR_FAIL:-0}" in
+            1) exit 2 ;;
+            empty) exit 0 ;;
+        esac
         cat "${FAKE_IP_DIR}/${node}.addrs" 2>/dev/null || true
         exit 0 ;;
     rule)
@@ -127,18 +138,24 @@ case "${want}" in
         fi
         exit 0 ;;
     route)
-        from="*"
+        if [[ "$*" == *" show"* ]]; then
+            cat "${FAKE_IP_DIR}/${node}.showroutes" 2>/dev/null || true
+            exit 0
+        fi
+        from="*"; dst=""
         args=("$@")
         for ((i=0;i<${#args[@]};i++)); do
             [ "${args[$i]}" = "from" ] && from="${args[$((i+1))]}"
+            [ "${args[$i]}" = "get" ] && dst="${args[$((i+1))]}"
         done
-        line="$(command grep -F "${from}|" "${FAKE_IP_DIR}/${node}.routes" 2>/dev/null | head -1 || true)"
-        if [ -z "${line}" ]; then
-            line="$(command grep -F '*|' "${FAKE_IP_DIR}/${node}.routes" 2>/dev/null | head -1 || true)"
-        fi
+        line=""
+        for key in "${from}|${dst}" "${from}|*" "*|${dst}" "*|*"; do
+            line="$(command grep -F "${key}|" "${FAKE_IP_DIR}/${node}.routes" 2>/dev/null | head -1 || true)"
+            [ -n "${line}" ] && break
+        done
         [ -n "${line}" ] || exit 1
-        rc="${line#*|}"; rc="${rc%%|*}"
-        out="${line#*|*|}"
+        rc="${line#*|*|}"; rc="${rc%%|*}"
+        out="${line#*|*|*|}"
         printf '%s\n' "${out}"
         exit "${rc}" ;;
 esac
@@ -163,14 +180,28 @@ EOF
 cat > "${TMP}/ip/10.0.0.2.addrs" <<'EOF'
 2: eno1       inet 10.0.0.2/24 brd 10.0.0.255 scope global eno1
 EOF
+# 2026-10-28: 只有网段首主机(10.233.64.1, 属别的节点的 /26 block, 经 tunl0)
+# 在两套路由表里一致 → 旧探测漏报; 本地 Pod 10.233.64.7(dev cali)在 IB 策略表里走
+# ens1np0 → 才是真实分歧。工具必须探测 dev cali* 的本地 Pod 地址。
+cat > "${TMP}/ip/10.0.0.1.showroutes" <<'EOF'
+10.233.64.0/26 dev tunl0 proto bird scope link
+10.233.64.7 dev cali1234 scope link
+default via 10.0.0.254 dev eno1
+EOF
+# 该节点没有本地 Pod(无 dev cali 路由): 必须回退到网段首主机探测
+cat > "${TMP}/ip/10.0.0.2.showroutes" <<'EOF'
+default via 10.0.0.254 dev eno1
+EOF
 cat > "${TMP}/ip/10.0.0.1.routes" <<'EOF'
-10.0.0.1|0|10.233.64.1 from 10.0.0.1 dev cali src 10.0.0.1
-172.16.1.104|0|10.233.64.1 from 172.16.1.104 via 172.16.1.1 dev ens1np0 table 150
-*|0|10.233.64.1 dev cali src 10.0.0.1
+10.0.0.1|10.233.64.1|0|10.233.64.1 from 10.0.0.1 dev tunl0 src 10.0.0.1
+172.16.1.104|10.233.64.1|0|10.233.64.1 from 172.16.1.104 dev tunl0 table 150
+10.0.0.1|10.233.64.7|0|10.233.64.7 from 10.0.0.1 dev cali1234 src 10.0.0.1
+172.16.1.104|10.233.64.7|0|10.233.64.7 from 172.16.1.104 via 172.16.1.1 dev ens1np0 table 150
+*|*|0|10.233.64.7 dev cali1234 src 10.0.0.1
 EOF
 cat > "${TMP}/ip/10.0.0.2.routes" <<'EOF'
-10.0.0.2|0|10.233.64.1 from 10.0.0.2 dev cali src 10.0.0.2
-*|0|10.233.64.1 dev cali src 10.0.0.2
+10.0.0.2|10.233.64.1|0|10.233.64.1 from 10.0.0.2 dev cali src 10.0.0.2
+*|*|0|10.233.64.1 dev cali src 10.0.0.2
 EOF
 # 安全节点上仍保留一条源策略路由(模拟"临时 ip rule 把分歧掩盖掉"或规则本身不覆盖 Pod 网段):
 # 反向路径探测无分歧, 但 preflight 应通过源策略路由指纹给出告警而不是完全沉默。
@@ -236,6 +267,12 @@ chk_contains "安全节点不误报" "[w1](10.0.0.2)" "${out}"
 chk_not_contains "安全节点无冲突" "[w1](10.0.0.2) 检测到源策略路由冲突" "${out}"
 chk_contains "源策略路由指纹告警(防临时规则掩盖)" "可能已被临时 ip rule 掩盖" "${out}"
 
+echo "== ⑧ 探测实际本地 Pod 地址(不只网段首主机) =="
+chk_contains "风险行点名本地 Pod" "172.16.1.104 (本地 Pod 10.233.64.7)" "${out}"
+chk_contains "实际查询本地 Pod 路由" "route get 10.233.64.7 from 172.16.1.104" "$(cat "${TMP}/ip/log")"
+chk_not_contains "不把网段首主机当作探测目标" "本地 Pod 10.233.64.1" "${out}"
+chk_contains "无本地 Pod 时回退网段首主机" "route get 10.233.64.1 from 10.0.0.2" "$(cat "${TMP}/ip/log")"
+
 echo "== ② 原生修复关闭: --check 硬失败并给指引 =="
 _reset_rule_state
 out="$(_run CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=false -- --check)"
@@ -296,6 +333,83 @@ out="$(FAKE_RULE_ADD_FAIL=1 _run -- --apply-rule)"
 rc=$?
 chk "退出码 1" "1" "${rc}"
 chk_contains "点名写入失败" "兜底规则写入失败" "${out}"
+
+echo "== ⑨ PREF 变化: 按记录的旧优先级清理(不残留双规则) =="
+_reset_rule_state
+out="$(_run -- --apply-rule)"
+chk "⑨ 首次 apply 退出码 0" "0" "$?"
+chk "⑨ APPLIED 记录 PREF+CIDR" "30000 10.233.64.0/18" \
+    "$(cat "${TMP}/root/etc/cubestack/pod-net-routing.applied" 2>/dev/null || true)"
+: > "${TMP}/ip/log"
+out="$(_run NODE_NET_GUARD_RULE_PREF=31000 -- --apply-rule)"
+chk "⑨ 改 pref 退出码 0" "0" "$?"
+_log="$(cat "${TMP}/ip/log")"
+chk_contains "⑨ 按旧 pref 删除旧规则" "RULE_DEL|30000|10.233.64.0/18|main" "${_log}"
+chk_contains "⑨ 新 pref 写入" "RULE_ADD|31000|10.233.64.0/18|main" "${_log}"
+chk "⑨ state 只剩新 pref" "31000|10.233.64.0/18|main" "$(_node_state)"
+chk "⑨ APPLIED 更新为新 pref" "31000 10.233.64.0/18" \
+    "$(cat "${TMP}/root/etc/cubestack/pod-net-routing.applied" 2>/dev/null || true)"
+
+# remove 必须按 APPLIED 记录的 pref 删除(即使 conf 已被改成新 pref)
+printf '30000 10.233.64.0/18\n' > "${TMP}/root/etc/cubestack/pod-net-routing.applied"
+: > "${TMP}/ip/log"
+out="$(_run NODE_NET_GUARD_RULE_PREF=31000 -- --remove)"
+chk "⑨ remove 退出码 0" "0" "$?"
+_log="$(cat "${TMP}/ip/log")"
+chk_contains "⑨ remove 按记录 pref 删除" "RULE_DEL|30000|10.233.64.0/18|main" "${_log}"
+chk_contains "⑨ remove 也删当前 pref" "RULE_DEL|31000|10.233.64.0/18|main" "${_log}"
+chk "⑨ remove 后 state 为空" "0" "$(command grep -c . <<< "$(_node_state)" || true)"
+
+# 旧版 APPLIED(单 CIDR 行)按当前 PREF 兼容清理
+_reset_rule_state
+printf '10.244.0.0/16\n' > "${TMP}/root/etc/cubestack/pod-net-routing.applied"
+: > "${TMP}/ip/log"
+out="$(_run -- --apply-rule)"
+chk "⑨ 旧格式 apply 退出码 0" "0" "$?"
+chk_contains "⑨ 旧格式按当前 pref 清理" "RULE_DEL|30000|10.244.0.0/16|main" "$(cat "${TMP}/ip/log")"
+chk "⑨ APPLIED 迁移为新格式" "30000 10.233.64.0/18" \
+    "$(cat "${TMP}/root/etc/cubestack/pod-net-routing.applied" 2>/dev/null || true)"
+
+echo "== ⑩ apply-rule 不得自动清除已在位的兜底(防规则掩盖导致来回翻转) =="
+_reset_rule_state
+# 模拟上一轮 --apply-rule 的产物: 安全节点(10.0.0.2)已有一条兜底规则 + unit/conf。
+# 该规则会让本节点探测变成"无分歧" —— 旧实现据此自动删除, 造成守卫每两次运行翻转一次。
+printf '30000|10.233.64.0/18|main\n' > "${TMP}/ip/state.10.0.0.2"
+printf "POD_CIDR='10.233.64.0/18'\nPREF='30000'\n" > "${TMP}/root/etc/cubestack/pod-net-routing.conf"
+: > "${TMP}/root/usr/local/sbin/cubestack-pod-net-routing"
+: > "${TMP}/root/etc/systemd/system/cubestack-pod-net-routing.service"
+: > "${TMP}/ip/log"
+out="$(_run -- --apply-rule)"
+chk "⑩ 退出码 0" "0" "$?"
+_log="$(cat "${TMP}/ip/log")"
+chk_not_contains "⑩ 不删除已有的兜底规则" "RULE_DEL|30000|10.233.64.0/18|main" "${_log}"
+chk "⑩ 安全节点规则仍在" "30000|10.233.64.0/18|main" "$(cat "${TMP}/ip/state.10.0.0.2" 2>/dev/null || true)"
+chk_not_contains "⑩ 不报告自动清理" "已清理历史兜底规则" "${out}"
+
+echo "== ⑪ 地址查询失败不得当作'无分歧' =="
+_reset_rule_state
+out="$(FAKE_ADDR_FAIL=1 _run CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=false -- --check)"
+rc=$?
+chk "⑪ 原生修复关闭: 查询失败 → 非 0" "1" "${rc}"
+chk_contains "⑪ 点名查询失败" "本地地址查询失败" "${out}"
+chk_contains "⑪ 说明按风险处理" "按风险处理" "${out}"
+
+out="$(FAKE_ADDR_FAIL=1 _run CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=true -- --check)"
+rc=$?
+chk "⑪ 原生修复开启: 仅告警不阻断" "0" "${rc}"
+chk_contains "⑪ 原生修复开启有告警" "预检不完整" "${out}"
+
+# 查询成功但无地址(如只有 loopback): 不是查询失败, 不得报错
+out="$(FAKE_ADDR_FAIL=empty _run CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=false -- --check)"
+rc=$?
+chk "⑪ 空地址列表不算查询失败" "0" "${rc}"
+chk_not_contains "⑪ 空地址列表无失败告警" "本地地址查询失败" "${out}"
+
+# rule 模式: 探测不完整时仍按显式要求写兜底(比漏保护安全)
+_reset_rule_state
+out="$(FAKE_ADDR_FAIL=1 _run CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=false -- --apply-rule)"
+chk "⑪ rule 动作退出码 0" "0" "$?"
+chk_contains "⑪ 探测不完整时仍写入兜底" "RULE_ADD|30000|10.233.64.0/18|main" "$(cat "${TMP}/ip/log")"
 
 echo ""
 if [ "${fail}" = "0" ]; then

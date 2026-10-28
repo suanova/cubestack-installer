@@ -283,9 +283,15 @@ if [ -f "${CALICO_YML}" ]; then
     #   FELIX_DEVICEROUTESOURCEADDRESS=status.hostIP 让 Felix 给每 Pod 路由写 src=<节点 IP>,
     #   从源头消除失配(不依赖主机 ip rule / reboot 持久化)。
     _CALICO_SRC_HINT="${CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR:-true}"
+    # ★ 非法取值必须硬失败(2026-10-28 CodeRabbit): 旧实现把拼写错误(如 ture)静默归为 false;
+    #   NODE_NET_GUARD_ACTION=off 的节点既没有 Calico 源提示、也没有兜底 ip rule → rpfilter 继续丢包。
     case "${_CALICO_SRC_HINT,,}" in
-        true|1|yes|on) _CALICO_SRC_HINT=true ;;
-        *)             _CALICO_SRC_HINT=false ;;
+        true|1|yes|on)   _CALICO_SRC_HINT=true ;;
+        false|0|no|off)  _CALICO_SRC_HINT=false ;;
+        *)
+            err "CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR 非法: '${_CALICO_SRC_HINT}'(只接受 true|false, 兼容 1/0/yes/no/on/off)"
+            exit 1
+            ;;
     esac
     if grep -q '^calico_use_default_route_src_ipaddr:' "${CALICO_YML}"; then
         sed -i -E "s|^calico_use_default_route_src_ipaddr:.*|calico_use_default_route_src_ipaddr: ${_CALICO_SRC_HINT}|" "${CALICO_YML}"

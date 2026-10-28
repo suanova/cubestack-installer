@@ -14,12 +14,20 @@
 #   → Felix 给每 Pod 设备路由写 src=<节点 IP>, host→本地 Pod 流量不再选 IB 源。
 #
 # 本工具的职责:
-#   ① 预检: 逐节点比较 `ip route get <pod_probe> from <节点IP>` 与每个本地地址
+#   ① 预检: 逐节点比较 `ip route get <probe> from <节点IP>` 与每个本地地址
 #      `from <addr>` 的路由, 发现“反向路径分歧”(即 rpfilter 会丢包的条件);
+#      probe 取**本节点实际 Pod 地址**(Calico 的 `dev cali*` 主机侧路由); 无本地 Pod 时
+#      回退到 pod 网段首主机(网段首主机可能属于别的节点的 /26 block, 单探它会漏报);
+#      `ip -o -4 addr show` 失败会输出 ADDR_ERR(探测不完整): 原生修复关闭按风险处理,
+#      开启则仅告警; 查询成功但无地址不算失败。
 #   ② --check: 只检测。原生修复开启 → 告警不阻断; 关闭 → 硬失败并给指引;
 #   ③ --apply-rule: 可选兜底。幂等加 `pref <N> to <KUBE_PODS_SUBNET> lookup main`
 #      + systemd oneshot 持久化(只加 Pod 网段; ClusterIP 是 local 路由, 不需要 service 网段);
-#   ④ --remove: 清理兜底规则/unit/conf(非风险节点在 --apply-rule 时也会自动清理)。
+#      **已在位的兜底不会被自动清除** —— 探测无法区分"本无分歧"与"分歧被兜底规则掩盖",
+#      自动删除会造成守卫在两次运行间来回翻转; 清理只走显式 --remove。
+#   ④ --remove: 清理兜底规则/unit/conf;
+#      applied 状态每行记录 "<PREF> <CIDR>", 改 PREF/网段时都按**记录的 PREF** 删除,
+#      旧优先级的规则不会残留(旧版单 CIDR 状态按当前 PREF 兼容清理)。
 #
 # 用法:
 #   sudo ./node-net-guard.sh --check
@@ -52,14 +60,36 @@ EOS
 _dev() { awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' <<< "$1"; }
 _table() { awk '{for(i=1;i<=NF;i++) if($i=="table"){print $(i+1); exit}}' <<< "$1"; }
 
-base_out="$(ip route get "$POD_PROBE" from "$NODE_IP" 2>&1)"; base_rc=$?
-base_dev="$(_dev "$base_out")"; base_tab="$(_table "$base_out")"
-printf 'BASE|%s|%s|%s|%s\n' "$base_rc" "$base_dev" "$base_tab" "$POD_PROBE"
+# 探测目标 = **实际本地 Pod 地址**(Calico 为每个本地 Pod 写 `dev cali*` 的主机侧路由)。
+# 只探测 pod 网段首主机不够(2026-10-28): 首主机常属于别的节点的 /26 block 或尚未分配,
+# 其路由(经 tunl0/vxlan)与本地 Pod 的 cali 路由不同 → 源策略路由分歧会被漏报; rpfilter
+# 丢包也只发生在本地 Pod 的 cali 设备上。该节点当前没有本地 Pod 时回退到网段首主机
+# (下面仍会输出源策略路由指纹告警)。
+pod_probes=()
+while read -r dst dev; do
+    case "$dev" in
+        cali*) pod_probes+=("${dst%/32}") ;;
+    esac
+done < <(ip -4 route show 2>/dev/null | awk '{
+        dst=$1; dev="";
+        for (i=1;i<=NF;i++) if ($i=="dev") { dev=$(i+1); break }
+        if (dev != "") print dst, dev
+    }' | sort -u)
+if [ "${#pod_probes[@]}" -eq 0 ]; then
+    pod_probes=("$POD_PROBE")
+fi
+printf 'PROBES|%s\n' "${#pod_probes[@]}"
 
 # 本地地址(scope global); 跳过 loopback/link-local/节点 IP, 以及 kube-ipvs0/CNI 虚拟接口
 # (kube-ipvs0 上挂着全部 ClusterIP, 逐个查会白跑几百次; cali/tunl/vxlan 没有宿主地址)。
 # 注意: 不能只解析 ip rule 的 from 项 —— 规则可能是 CIDR/由其他组件写入,
 # 直接对每个宿主地址做反向路径查询才能覆盖实际 rpfilter 行为。
+# ★ 查询失败必须显式上报(2026-10-28): 旧实现用进程替换 + 2>/dev/null 吞掉 rc, 失败时
+#   host_addrs 为空、没有任何 ADDR 记录, 调用方会当成"无分歧"放行。成功但无地址不算失败。
+addr_out=""; addr_rc=0
+addr_out="$(ip -o -4 addr show scope global 2>/dev/null)" || addr_rc=$?
+[ "${addr_rc}" -eq 0 ] || printf 'ADDR_ERR|%s\n' "${addr_rc}"
+host_addrs=()
 while read -r iface cidr; do
     [ -n "$cidr" ] || continue
     case "$iface" in
@@ -70,14 +100,23 @@ while read -r iface cidr; do
         127.*|169.254.*) continue ;;
     esac
     [ "$addr" = "$NODE_IP" ] && continue
-    out="$(ip route get "$POD_PROBE" from "$addr" 2>&1)"; rc=$?
-    dev="$(_dev "$out")"; tab="$(_table "$out")"
-    risk=0
-    if [ "$rc" -ne 0 ] && [ "$base_rc" -eq 0 ]; then risk=1; fi
-    if [ "$rc" -eq 0 ] && [ "$base_rc" -ne 0 ]; then risk=1; fi
-    if [ "$rc" -eq 0 ] && [ "$base_rc" -eq 0 ] && [ "$dev" != "$base_dev" ]; then risk=1; fi
-    printf 'ADDR|%s|%s|%s|%s|%s\n' "$addr" "$dev" "$rc" "$tab" "$risk"
-done < <(ip -o -4 addr show scope global 2>/dev/null | awk '{print $2, $4}')
+    host_addrs+=("$addr")
+done < <(printf '%s\n' "${addr_out}" | awk 'NF>=4 {print $2, $4}')
+
+for probe in "${pod_probes[@]}"; do
+    base_out="$(ip route get "$probe" from "$NODE_IP" 2>&1)"; base_rc=$?
+    base_dev="$(_dev "$base_out")"; base_tab="$(_table "$base_out")"
+    printf 'BASE|%s|%s|%s|%s\n' "$base_rc" "$base_dev" "$base_tab" "$probe"
+    for addr in "${host_addrs[@]}"; do
+        out="$(ip route get "$probe" from "$addr" 2>&1)"; rc=$?
+        dev="$(_dev "$out")"; tab="$(_table "$out")"
+        risk=0
+        if [ "$rc" -ne 0 ] && [ "$base_rc" -eq 0 ]; then risk=1; fi
+        if [ "$rc" -eq 0 ] && [ "$base_rc" -ne 0 ]; then risk=1; fi
+        if [ "$rc" -eq 0 ] && [ "$base_rc" -eq 0 ] && [ "$dev" != "$base_dev" ]; then risk=1; fi
+        printf 'ADDR|%s|%s|%s|%s|%s|%s\n' "$addr" "$dev" "$rc" "$tab" "$risk" "$probe"
+    done
+done
 
 # 源策略路由指纹: 用于识别“当前反向路径已被临时 ip rule 掩盖”的节点。
 # 只看 ADDR 会漏报 —— 临时 `to <pod> lookup main` 规则会让反向查询暂时回到 main,
@@ -118,17 +157,20 @@ SCRIPT=/usr/local/sbin/cubestack-pod-net-routing
 UNIT=/etc/systemd/system/cubestack-pod-net-routing.service
 
 if [ "$ACTION" = "remove" ]; then
-    # 先读 conf(其中记录实际写入时的 PREF/POD_CIDR), 再按它清理 APPLIED 里的旧网段;
-    # conf 不存在时退回调用方传入的 PREF/POD_CIDR。
+    # 先读 conf(其中记录实际写入时的 PREF/POD_CIDR), 再清理 APPLIED;
+    # APPLIED 每行 "<PREF> <CIDR>": 必须按**记录的 PREF** 删除 —— 改过
+    # NODE_NET_GUARD_RULE_PREF 的节点, 旧规则挂在旧 pref 上, 用新 PREF 删不到。
+    # 旧版本只有单 CIDR 行 → 退回当前 PREF(尽力清理)。
     if [ -f "$CONF" ]; then . "$CONF"; fi
     if [ -f "$APPLIED" ]; then
-        while IFS= read -r old; do
-            [ -n "$old" ] || continue
-            ip rule del pref "$PREF" to "$old" lookup main 2>/dev/null || true
+        while read -r _p _c; do
+            [ -n "$_p" ] || continue
+            if [ -z "$_c" ]; then _c="$_p"; _p="${PREF:-30000}"; fi
+            ip rule del pref "$_p" to "$_c" lookup main 2>/dev/null || true
         done < "$APPLIED"
     fi
     if [ -n "${POD_CIDR:-}" ]; then
-        ip rule del pref "$PREF" to "$POD_CIDR" lookup main 2>/dev/null || true
+        ip rule del pref "${PREF:-30000}" to "$POD_CIDR" lookup main 2>/dev/null || true
     fi
     systemctl disable --now cubestack-pod-net-routing.service 2>/dev/null || true
     rm -f "$UNIT" "$SCRIPT" "$CONF" "$APPLIED"
@@ -152,17 +194,20 @@ APPLIED=/etc/cubestack/pod-net-routing.applied
 . "$CONF"
 [ -n "${POD_CIDR:-}" ] || exit 0
 PREF="${PREF:-30000}"
-# 清理上一次配置遗留的网段(改网段/缩网段时不残留)
+# 清理上一次配置遗留的规则(改网段/改 PREF 都不能残留): APPLIED 每行 "<PREF> <CIDR>",
+# 按**记录的 PREF** 删除 —— 同一 CIDR 改过优先级时, 旧优先级规则也必须删掉;
+# 旧格式(单 CIDR)按当前 PREF 兼容清理。
 if [ -f "$APPLIED" ]; then
-    while IFS= read -r old; do
-        [ -n "$old" ] || continue
-        [ "$old" = "$POD_CIDR" ] && continue
-        ip rule del pref "$PREF" to "$old" lookup main 2>/dev/null || true
+    while read -r _p _c; do
+        [ -n "$_p" ] || continue
+        if [ -z "$_c" ]; then _c="$_p"; _p="$PREF"; fi
+        ip rule del pref "$_p" to "$_c" lookup main 2>/dev/null || true
     done < "$APPLIED"
 fi
 ip rule add pref "$PREF" to "$POD_CIDR" lookup main 2>/dev/null || true
-printf '%s\n' "$POD_CIDR" > "$APPLIED"
-ip -4 rule show 2>/dev/null | grep -F "to $POD_CIDR lookup main" >/dev/null
+printf '%s %s\n' "$PREF" "$POD_CIDR" > "$APPLIED"
+# 校验的是**新 PREF** 上的规则(同一 CIDR 的旧优先级残留不能算成功)
+ip -4 rule show 2>/dev/null | grep -E "^${PREF}:[[:space:]]" | grep -F "to $POD_CIDR lookup main" >/dev/null
 SCRIPT_EOF
 chmod 0755 "$SCRIPT"
 
@@ -347,22 +392,38 @@ for line in "${NODES[@]:-}"; do
         continue
     fi
 
-    # 解析 ADDR|addr|dev|rc|table|risk
-    risks="$(awk -F'|' '$1=="ADDR" && $6=="1" {printf "%s|%s|%s\n", $2, $3, $5}' <<< "${probe_out}")"
-    guard_present="$(awk -F'|' '$1=="GUARD" {print $2}' <<< "${probe_out}")"
-    base_rc="$(awk -F'|' '$1=="BASE" {print $2}' <<< "${probe_out}")"
-    base_probe="$(awk -F'|' '$1=="BASE" {print $5}' <<< "${probe_out}")"
-    if [ -n "${base_rc}" ] && [ "${base_rc}" != "0" ]; then
-        warn "  [${NODE_HOSTNAME}](${NODE_IP}) 基准查询失败(ip route get ${base_probe:-<probe>} from ${NODE_IP}, rc=${base_rc}); 预检结果可能不完整"
+    # 解析 ADDR|addr|dev|rc|table|risk|probe(同一地址在多个探测目标下只报一次)
+    risks="$(awk -F'|' '$1=="ADDR" && $6=="1" {
+        if (!seen[$2]++) printf "%s|%s|%s|%s\n", $2, $3, $5, $7
+    }' <<< "${probe_out}")"
+    # 远端仍输出 GUARD|供诊断; 不再据此自动删除兜底(探测分不清"本无分歧"与"被兜底掩盖", 见文件头 ③)
+    probe_cnt="$(awk -F'|' '$1=="PROBES" {print $2; exit}' <<< "${probe_out}")"
+    # 任一探测目标的基准查询失败都提示(结果可能不完整)
+    base_bad="$(awk -F'|' '$1=="BASE" && $2!="0" {printf "%s|%s", $2, $5; exit}' <<< "${probe_out}")"
+    if [ -n "${base_bad}" ]; then
+        warn "  [${NODE_HOSTNAME}](${NODE_IP}) 基准查询失败(ip route get ${base_bad#*|} from ${NODE_IP}, rc=${base_bad%%|*}); 预检结果可能不完整"
+    fi
+    # ★ 地址查询失败 = 探测不完整, 不能当"无分歧"(2026-10-28): 失败时没有 ADDR 记录;
+    #   原生修复关闭 → 按风险处理(与真实分歧同口径: check 硬失败 / rule 写兜底);
+    #   原生修复开启 → 只告警。成功但无地址(如仅 loopback)不算失败。
+    addr_err="$(awk -F'|' '$1=="ADDR_ERR" {print $2; exit}' <<< "${probe_out}")"
+    if [ -n "${addr_err}" ]; then
+        if _native_fix_active; then
+            warn "  [${NODE_HOSTNAME}](${NODE_IP}) 本地地址查询失败(ip -o -4 addr show scope global, rc=${addr_err}): 预检不完整; 原生修复已启用, 不阻断"
+        else
+            err "  [${NODE_HOSTNAME}](${NODE_IP}) 本地地址查询失败(rc=${addr_err}), 且原生修复未启用: 无法确认反向路径, 按风险处理"
+        fi
     fi
 
-    if [ -n "${risks}" ]; then
+    if [ -n "${risks}" ] || [ -n "${addr_err}" ]; then
         RISKY_CNT=$((RISKY_CNT + 1))
-        warn "  [${NODE_HOSTNAME}](${NODE_IP}) 检测到源策略路由冲突:"
-        while IFS='|' read -r addr dev tab; do
-            [ -n "${addr}" ] || continue
-            warn "    ${addr} → dev ${dev:-?}${tab:+ (table ${tab})}; 反向查询与节点 IP ${NODE_IP} 的路径不一致"
-        done <<< "${risks}"
+        if [ -n "${risks}" ]; then
+            warn "  [${NODE_HOSTNAME}](${NODE_IP}) 检测到源策略路由冲突:"
+            while IFS='|' read -r addr dev tab probe; do
+                [ -n "${addr}" ] || continue
+                warn "    ${addr} (本地 Pod ${probe:-?}) → dev ${dev:-?}${tab:+ (table ${tab})}; 反向查询与节点 IP ${NODE_IP} 的路径不一致"
+            done <<< "${risks}"
+        fi
 
         case "${ACTION}" in
             check)
@@ -395,7 +456,7 @@ for line in "${NODES[@]:-}"; do
         # 无反向路径分歧 ≠ 没有问题: 临时 `to <pod> lookup main` 规则会把分歧掩盖掉,
         # reboot/删规则后复发。这里用源策略路由指纹补一条明确告警。
         src_rules="$(awk -F'|' '$1=="SRC_RULE" {printf "%s|%s\n", $2, $3}' <<< "${probe_out}")"
-        ok "  [${NODE_HOSTNAME}](${NODE_IP}) 未发现源策略路由冲突"
+        ok "  [${NODE_HOSTNAME}](${NODE_IP}) 未发现源策略路由冲突(探测目标 ${probe_cnt:-?} 个)"
         if [ -n "${src_rules}" ]; then
             warn "  [${NODE_HOSTNAME}](${NODE_IP}) 检测到源策略路由规则(当前反向路径未分歧, 可能已被临时 ip rule 掩盖):"
             while IFS='|' read -r src tab; do
@@ -403,14 +464,9 @@ for line in "${NODES[@]:-}"; do
                 warn "    from ${src} lookup ${tab}"
             done <<< "${src_rules}"
             if _native_fix_active; then
-                warn "    原生修复已启用: k8s_deploy 后每 Pod 路由源=节点 IP; 随后可删除临时 ip rule"
+                warn "    原生修复已启用: k8s_deploy 后每 Pod 路由源=节点 IP; 随后可显式 --remove 清理临时 ip rule"
             else
                 warn "    原生修复未启用: 临时 ip rule 在 reboot 后丢失会复发; 建议 CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=true 或 NODE_NET_GUARD_ACTION=rule"
-            fi
-        fi
-        if [ "${ACTION}" = "rule" ] && [ "${guard_present}" = "1" ]; then
-            if _apply_node "${NODE_IP}" "${NODE_USER}" "${NODE_PW}" remove >/dev/null 2>&1; then
-                ok "    [${NODE_HOSTNAME}] 已清理历史兜底规则"
             fi
         fi
     fi

@@ -251,5 +251,14 @@ D8="${TMP}/d8"; mk_inv "${D8}"; C11="${TMP}/c11"
 mk_conf "${C11}" true 'KUBE_VIP_ENABLED=false' 'CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=false'
 CAL8="${D8}/group_vars/k8s_cluster/k8s-net-calico.yml"
 chk "显式 false 写入" "1" "$(run_sync "${D8}" "${C11}"; cnt '^calico_use_default_route_src_ipaddr: false$' "${CAL8}")"
+# 非法取值必须硬失败(不得静默当 false): 拼写错误会让 NODE_NET_GUARD_ACTION=off 的节点
+# 既没有 Calico 源提示、也没有兜底 ip rule。部署门禁(06_k8s_deploy.sh)也必须拒绝。
+D9="${TMP}/d9"; mk_inv "${D9}"; C12="${TMP}/c12"
+mk_conf "${C12}" true 'KUBE_VIP_ENABLED=false' 'CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=ture'
+CAL9="${D9}/group_vars/k8s_cluster/k8s-net-calico.yml"
+chk "非法取值退出码非 0" "1" "$(run_sync "${D9}" "${C12}"; echo $?)"
+chk "非法取值不写 inventory" "0" "$(cnt '^calico_use_default_route_src_ipaddr:' "${CAL9}")"
+chk "部署门禁同样拒绝非法取值" "1" \
+    "$(cnt 'CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR 非法' "${REPO_ROOT}/deployments/scripts/modules/02_k8s/06_k8s_deploy.sh")"
 
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }

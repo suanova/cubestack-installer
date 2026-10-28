@@ -280,6 +280,12 @@ sudo ip rule add pref 30000 to <KUBE_PODS_SUBNET> lookup main
 - 工具: `deployments/scripts/tools/node/node-net-guard.sh --apply-rule`; 持久化 unit:
   `/etc/systemd/system/cubestack-pod-net-routing.service`(脚本 `/usr/local/sbin/cubestack-pod-net-routing`)。
 - 清理: `node-net-guard.sh --remove`(只删自己登记过的网段; 手工加的 /16 规则需自行 `ip rule del`)。
+  ⚠ `--apply-rule` **不会**自动清除非风险节点上已在位的兜底: 兜底规则本身会把探测结果变成
+  "无分歧", 自动删除会让守卫在两次运行间来回翻转; 清理只走显式 `--remove`。
+- 改 `NODE_NET_GUARD_RULE_PREF` 后重跑 `--apply-rule`: 工具按
+  `/etc/cubestack/pod-net-routing.applied` 记录的 `<PREF> <CIDR>` 删除旧优先级规则, 再按新
+  pref 写入; `--remove` 同样按记录清理(旧版"单 CIDR"状态按当前 pref 兼容)。只按新 pref 删除
+  会漏掉旧规则, 形成同一网段双优先级。
 - ⚠ 为什么只加 **Pod 网段**: ClusterIP 是 `local` 路由(源地址=VIP), rpfilter 反向查询的 `daddr` 是 Pod IP, service CIDR 规则基本无用且增加影响面。
 - ⚠ `to <pod> lookup main` 对所有源生效, 可能影响“远端 Pod 回包走 IB”的非对称路径; 因此**默认不做**, 优先用 Calico 原生 source hint。
 
@@ -296,6 +302,11 @@ conntrack -L | grep <PodIP>      # [UNREPLIED] packets=0
 # 本机所有 ip rule(确认 IB 源策略路由)
 ip rule show; ip route show table <table>
 ```
+> `<pod_probe>` 必须取**本节点实际 Pod 地址**(`ip route show | awk '$0 ~ /dev cali/'`), 不要用
+> Pod 网段首主机: 首主机通常属于别的节点的 /26 block(或未分配), 走 `tunl0`/默认网关, 与本地 Pod
+> 的 `dev cali*` 路由完全不同(2026-10-28 集群 c 实测: `10.233.64.1 via 10.66.3.254 dev enp1s0`,
+> 而本地 Pod `10.233.78.195 dev cali...`)。用首主机探测会掩盖只出现在本地 Pod 上的源策略分歧。
+> `node-net-guard.sh` 已改为探测本地 Pod 地址; 节点无本地 Pod 时回退网段首主机。
 
 ---
 
