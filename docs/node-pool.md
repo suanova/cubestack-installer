@@ -4,9 +4,10 @@
 > CubeStack operator/平台组件通过 nodeSelector + toleration 仍能调度/重建到 master；设置
 > `NODE_POOL_MASTER_CORDON=false` 可保持 master 可调度。GPU worker 隔离在后续阶段补充。
 >
-> **无 worker 安全护栏（2026-10-28）**：`NODES` 中没有 `role=worker`（单节点 all-in-one /
-> 纯 master 集群）时，即使 `NODE_POOL_MASTER_CORDON=true` 也**自动跳过 cordon**，master
-> 保持可调度。详见下文「无 worker 拓扑」。
+> **无可用 worker 安全护栏（2026-10-28）**：没有 **Ready 且未 cordon** 的 worker（单节点
+> all-in-one / 纯 master 集群，或配置的 worker 全部 NotReady / 已 cordon）时，即使
+> `NODE_POOL_MASTER_CORDON=true` 也**自动跳过 cordon**，master 保持可调度。详见下文
+> 「无可用 worker 拓扑」。
 
 ## 目标
 
@@ -73,14 +74,17 @@ sudo ./deployments/scripts/tools/node/node-pool.sh --apply --only <master-hostna
   （annotation 判定）会被 uncordon 并清除 annotation；用户/其他工具创建的 cordon 保持不动
   （只告警）。模块的 apply 前不会先跑 `--remove`，所以改开关后重跑即可恢复可调度。
 - **ownership 标记写/删失败不再静默忽略**：cordon 后写标记失败 → 回滚 uncordon（不留
-  "已 cordon 但无所有权"的不可回滚状态）；uncordon 后删标记失败 → 重新 cordon 回去并
-  返回非 0，保持"marker ⇒ 本工具创建"的契约（避免 stale marker 让后续 `--remove` 误
-  uncordon 管理员后来创建的 cordon）；修复后重跑即可收敛。
+  "已 cordon 但无所有权"的不可回滚状态）；uncordon 后删标记返回失败 → **确认性重读**
+  annotation：确认已清则视为完成（annotate 可能已在远端生效），确认仍在才重新 cordon 并
+  返回非 0；读取失败则不擅自 cordon/报错（避免留下无标记、后续不会被回滚的 cordon）。
+  修复后重跑 `--apply/--remove` 即可收敛。
 
-### 无 worker 拓扑（单节点 all-in-one / 纯 master 集群）
+### 无可用 worker 拓扑（单节点 all-in-one / 纯 master / worker 不可用）
 
-`NODES` 中 `role=worker` 数为 0 时，**即使 `NODE_POOL_MASTER_CORDON=true` 也不 cordon**：
+没有 **Ready 且未 cordon** 的 worker 时，**即使 `NODE_POOL_MASTER_CORDON=true` 也不 cordon**：
 
+- **触发条件**：`NODES` 中 `role=worker` 数为 0；或配置的 worker 全部 NotReady / 已 cordon
+  （apply/check 会实际查询 worker 的 STATUS 与 `spec.unschedulable`，逐个告警不可用原因）。
 - **原因**：kubespray 的 CoreDNS / dns-autoscaler 模板只容忍
   `node-role.kubernetes.io/control-plane:NoSchedule`，**没有** `node.kubernetes.io/unschedulable`
   容忍；默认 `NODE_POOL_PLATFORM_PLACEMENT=false` 也不会给它们补。集群里所有节点都被 cordon 后，
@@ -90,7 +94,7 @@ sudo ./deployments/scripts/tools/node/node-pool.sh --apply --only <master-hostna
 - **遗留 cordon 自动回滚**：`--apply` 会把**本工具此前创建**（有 ownership annotation）的 cordon
   回滚（典型场景：先有 worker 时 cordon，后来 worker 被移除）；非本工具创建的 cordon 只告警、不动。
 - **`--check`**：该拓扑下期望 master **可调度**；节点被 cordon（任何来源）即报漂移、非 0。
-- 有 worker（`role=worker` ≥ 1）时行为不变：按 `NODE_POOL_MASTER_CORDON` 执行。
+- 存在可用 worker（Ready 且未 cordon）时行为不变：按 `NODE_POOL_MASTER_CORDON` 执行。
 
 ### 模块
 
@@ -113,7 +117,9 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
   应用后把 `NODE_POOL_CUBESTACK_PLACEMENT`/`NODE_POOL_PLATFORM_PLACEMENT` 改成 false
   再执行 remove，仍会清掉本工具施加的 nodeSelector（与 cordon 的 ownership 口径一致）。
   `master-placement.sh --remove` 只处理**当前确实带** master selector 的对象——从未应用过
-  placement 时不会 patch，也不会重建 registry Pod。移除 patch 失败**不再降级为告警**：
+  placement 时不会 patch，也不会重建 registry Pod。存在性查询失败（API/RBAC/SSH）或
+  PodTemplate 读取/JSON 解析失败都会让 remove **非 0 退出**，不会被当作"对象不存在/
+  无 selector"静默跳过。移除 patch 失败**不再降级为告警**：
   任一 placement 回滚失败都会让工具与 `node_pool` 的 remove **非 0 退出**，避免把残留
   selector 当成功。
 
@@ -176,7 +182,7 @@ sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worke
 | `NODE_POOL_ENABLED` | `true` | 总开关（默认随全量部署） |
 | `NODE_POOL_ACTION` | `apply` | `apply` / `check` / `remove` |
 | `NODE_POOL_MASTER_LABEL` | `node-pool=control-plane` | master 标签 |
-| `NODE_POOL_MASTER_CORDON` | `true` | master 是否 cordon（默认 cordon；false=保持可调度；**无 worker 集群自动跳过 cordon**） |
+| `NODE_POOL_MASTER_CORDON` | `true` | master 是否 cordon（默认 cordon；false=保持可调度；**无可用 worker 时自动跳过 cordon**） |
 | `NODE_POOL_PLATFORM_PLACEMENT` | `false` | 是否把 CoreDNS/metrics/registry/MetalLB 等系统组件也钉 master |
 | `NODE_POOL_CUBESTACK_PLACEMENT` | `true` | CubeStack operator/平台组件钉 master（含 chart values 透传） |
 | `NODE_POOL_GPU_LABEL` | `node-pool=gpu` | 阶段二使用 |

@@ -11,16 +11,18 @@
 #                  cubestack.io/node-pool-cordoned-by-installer=true;
 #                  CORDON=false 时反向收敛: 本工具创建过的 cordon(annotation 判定)会被
 #                  uncordon 并清 annotation; 用户/其他工具创建的 cordon 保持不动;
-#                  ownership 标记写/删失败不会静默忽略: 写失败回滚 cordon; 删失败重新
-#                  cordon 回去并返回非 0(保持"marker ⇒ 本工具创建"一致, 修复后重试收敛);
+#                  ownership 标记写/删失败不会静默忽略: 写失败回滚 cordon;
+#                  删失败先**确认性重读** annotation: 已清则视为完成, 仍在才重新 cordon,
+#                  读取失败则不擅自动作并报错(避免留下无标记、永不回滚的 cordon);
 #     · --check  : 只读校验期望态(标签 + cordon); 漂移非 0;
 #     · --remove : 移除本工具打的标签; 仅当 ownership annotation 存在时 uncordon
 #                  (不会误删用户/其他工具创建的 cordon)。
 #   DaemonSet 会由控制器自动容忍 node.kubernetes.io/unschedulable:NoSchedule;
 #   Deployment/StatefulSet 需要在其 PodTemplate 里显式加该 toleration(见 docs/node-pool.md)。
 #
-#   ★ 无 worker 安全护栏(2026-10-28): NODES 中 role=worker 数为 0(单节点 all-in-one
-#     或纯 master 集群)时, 即使 NODE_POOL_MASTER_CORDON=true 也**跳过 cordon**:
+#   ★ 无可用 worker 安全护栏(2026-10-28): 没有 **Ready 且未 cordon** 的 worker 时(单节点
+#     all-in-one、纯 master 集群, 或配置的 worker 全部 NotReady/已 cordon), 即使
+#     NODE_POOL_MASTER_CORDON=true 也**跳过 cordon**:
 #       - CoreDNS/dns-autoscaler 的 kubespray 模板只容忍 control-plane:NoSchedule,
 #         没有 node.kubernetes.io/unschedulable 容忍; NODE_POOL_PLATFORM_PLACEMENT=false
 #         (默认)也不会补 ⇒ 全部节点 cordon 后, DNS 组件滚动/重启会永久 Pending;
@@ -80,15 +82,20 @@ init_remote_kubectl || exit 1
 
 _np_get_labels() { SSH "${K} get node "$1" --show-labels --no-headers" 2>/dev/null | awk '{print $NF}'; }
 _np_get_unsched() { SSH "${K} get node "$1" -o jsonpath='{.spec.unschedulable}'" 2>/dev/null || true; }
-_np_get_annotations() { SSH "${K} get node "$1" -o jsonpath='{.metadata.annotations}'" 2>/dev/null || true; }
+_np_get_annotations() { SSH "${K} get node "${1}" -o jsonpath='{.metadata.annotations}'" 2>/dev/null || true; }
+# 读取 annotations 并**保留退出码**: 用于区分"读取失败"与"标记确实不存在"。
+_np_read_annotations() { SSH "${K} get node "${1}" -o jsonpath='{.metadata.annotations}'" 2>/dev/null; }
 _np_label_present() { local labels="$1"; case ",${labels}," in *",${MASTER_KEY}=${MASTER_VAL},"*) return 0 ;; *) return 1 ;; esac; }
 _np_owned() {
     # 真实 kubectl -o jsonpath='{.metadata.annotations}' 返回 JSON 对象:
     #   {"cubestack.io/node-pool-cordoned-by-installer":"true",...}
     # 测试/旧版本可能给 map[key:value]; 两种都认。
+    # ★ 必须锚定 key 的左边界(2026-10-28): 否则 example.cubestack.io/node-pool-cordoned-by-installer
+    #   这类相似 key 会被误判为本工具标记(--remove 会误 uncordon)。
     case "$1" in
-        *cubestack.io/node-pool-cordoned-by-installer:true*) return 0 ;;
-        *'cubestack.io/node-pool-cordoned-by-installer":"true'*) return 0 ;;
+        *'[cubestack.io/node-pool-cordoned-by-installer:true'*) return 0 ;;
+        *' cubestack.io/node-pool-cordoned-by-installer:true'*) return 0 ;;
+        *'"cubestack.io/node-pool-cordoned-by-installer":"true'*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -108,24 +115,39 @@ _np_uncordon_owned() {   # <host> <success-suffix> → 0=成功; 1=失败(已 er
         ok "  [${host}] 已 uncordon(本工具创建${suf})"
         return 0
     fi
-    if SSH "${K} cordon ${host}" >/dev/null 2>&1; then
-        err "  [${host}] uncordon 成功但 ownership 标记删除失败; 已重新 cordon 保持状态一致, 请修复后重跑${suf:+(${suf})}"
-    else
-        err "  [${host}] ownership 标记删除失败且无法重新 cordon: 节点可调度但 marker 仍在, 请手工处理${suf:+(${suf})}"
-        err "           修复后先删标记: kubectl annotate node ${host} cubestack.io/node-pool-cordoned-by-installer-"
+    # annotate 返回非 0 也可能已在远端删除成功(仅 SSH 返回失败) —— 必须**确认性重读**:
+    #   读取失败(空输出) ≠ 标记不存在; 只有读取成功且确认无标记才视为完成。
+    #   确认标记仍在时才补偿 cordon; 无法确认时不擅自 cordon(否则会留下无标记的 cordon,
+    #   后续 apply/remove 会当外部 cordon 永不回滚)。
+    local _ann2=""
+    if _ann2="$(_np_read_annotations "${host}")"; then
+        if _np_owned "${_ann2}"; then
+            if SSH "${K} cordon ${host}" >/dev/null 2>&1; then
+                err "  [${host}] uncordon 成功但 ownership 标记仍在; 已重新 cordon 保持状态一致, 请修复后重跑${suf:+(${suf})}"
+            else
+                err "  [${host}] ownership 标记仍在且无法重新 cordon: 节点可调度但 marker 仍在, 请手工处理${suf:+(${suf})}"
+                err "           修复后先删标记: kubectl annotate node ${host} cubestack.io/node-pool-cordoned-by-installer-"
+            fi
+            return 1
+        fi
+        ok "  [${host}] 已 uncordon; ownership 标记已清除(annotate 返回非 0, 复核确认生效${suf})"
+        return 0
     fi
+    err "  [${host}] ownership 标记删除返回失败且无法复核(读取 annotations 失败); 未重新 cordon(避免创建无标记 cordon)${suf:+(${suf})}"
+    err "           请检查: kubectl get node ${host} -o jsonpath='{.metadata.annotations}' ; 然后重跑 --apply/--remove 收敛"
     return 1
 }
 
 # 收集 master(可选 --only) + 统计 worker(--only 不影响 worker 计数: 护栏看的是集群拓扑)
 MASTER_HOSTS=()
+WORKER_HOSTS=()
 WORKER_COUNT=0
 for _line in "${NODES[@]:-}"; do
     [ -z "${_line}" ] && continue
     node_parse "${_line}"
     [ -n "${NODE_HOSTNAME}" ] || continue
     case "${NODE_ROLE}" in
-        worker) WORKER_COUNT=$((WORKER_COUNT + 1)); continue ;;
+        worker) WORKER_COUNT=$((WORKER_COUNT + 1)); WORKER_HOSTS+=("${NODE_HOSTNAME}"); continue ;;
         master) : ;;
         *) continue ;;
     esac
@@ -137,19 +159,48 @@ if [ "${#MASTER_HOSTS[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# ★ 无 worker 安全护栏: 没有 worker 时 cordon 会把集群里最后一个可调度节点也关掉。
+# ★ 无**可用** worker 安全护栏(2026-10-28): 仅按 NODES 配置数量不够 —— worker 全部 NotReady
+#   或已被 cordon 时，cordon master 同样会让集群没有可调度节点:
 #   CoreDNS/dns-autoscaler(kubespray 模板只容忍 control-plane:NoSchedule, 无
 #   node.kubernetes.io/unschedulable 容忍; 默认也不跑 master-placement.sh)滚动/重启后
 #   永久 Pending ⇒ 单节点 all-in-one 集群整集群 DNS 失效; 单节点 play 的 uncordon 也会被撤销。
-#   ⇒ 有 worker 才 cordon; 无 worker 时等同 NODE_POOL_MASTER_CORDON=false(apply 不新增
-#   cordon, 并回滚本工具此前创建的 cordon)。
+#   ⇒ 只有存在 Ready 且未 cordon 的 worker 才 cordon; 否则等同 NODE_POOL_MASTER_CORDON=false
+#   (apply 不新增 cordon, 并回滚本工具此前创建的 cordon)。--remove 不探测(不需要该判定)。
 NO_WORKER_CORDON_GUARD=0
-if [ "${MASTER_CORDON}" = "true" ] && [ "${WORKER_COUNT}" -eq 0 ]; then
-    NO_WORKER_CORDON_GUARD=1
-    MASTER_CORDON="false"
-    warn "NODES 无 role=worker 节点(${#MASTER_HOSTS[@]} 台 master): 跳过 cordon, master 保持可调度"
-    warn "  原因: 无 worker 时 cordon 会让 CoreDNS/dns-autoscaler 等系统组件滚动/重启后永久 Pending"
-    warn "  (--check 在本拓扑下同样期望 master 可调度)"
+USABLE_WORKERS=0
+if [ "${MASTER_CORDON}" = "true" ] && [ "${ACTION}" != "remove" ]; then
+    if [ "${WORKER_COUNT}" -eq 0 ]; then
+        NO_WORKER_CORDON_GUARD=1
+        MASTER_CORDON="false"
+        warn "NODES 无 role=worker 节点(${#MASTER_HOSTS[@]} 台 master): 跳过 cordon, master 保持可调度"
+        warn "  原因: 无 worker 时 cordon 会让 CoreDNS/dns-autoscaler 等系统组件滚动/重启后永久 Pending"
+        warn "  (--check 在本拓扑下同样期望 master 可调度)"
+    else
+        for _wh in "${WORKER_HOSTS[@]}"; do
+            _wst="$(SSH "${K} get node "${_wh}" --no-headers" 2>/dev/null | awk '{print $2}')" || true
+            _wun="$(_np_get_unsched "${_wh}")"
+            _why=""
+            case "${_wst}" in
+                Ready|Ready,*) : ;;
+                *) _why="状态='${_wst:-未知}'" ;;
+            esac
+            if [ "${_wun}" = "true" ]; then
+                _why="${_why:+${_why}, }已 cordon"
+            fi
+            if [ -z "${_why}" ]; then
+                USABLE_WORKERS=$((USABLE_WORKERS + 1))
+            else
+                warn "  worker ${_wh} 不可用(${_why})"
+            fi
+        done
+        if [ "${USABLE_WORKERS}" -eq 0 ]; then
+            NO_WORKER_CORDON_GUARD=1
+            MASTER_CORDON="false"
+            warn "NODES 有 ${WORKER_COUNT} 台 worker 但无可用(Ready 且未 cordon)worker: 跳过 cordon, master 保持可调度"
+            warn "  原因: 无可用 worker 时 cordon 会让 CoreDNS/dns-autoscaler 等系统组件滚动/重启后永久 Pending"
+            warn "  (--check 在本拓扑下同样期望 master 可调度)"
+        fi
+    fi
 fi
 
 say "节点池(master)动作=${ACTION}: ${#MASTER_HOSTS[@]} 台 master, ${WORKER_COUNT} 台 worker; label=${MASTER_KEY}=${MASTER_VAL}; cordon=${MASTER_CORDON}"

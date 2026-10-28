@@ -18,8 +18,9 @@
 #         25_cubestack_operator.sh 还会通过 CubeStackCluster components.<name>.values 在创建
 #         cubepilot-api/operator、controller-manager、portal 时直接下发 master placement。
 #       - NODE_POOL_PLATFORM_PLACEMENT=false(默认): 不动 CoreDNS/metrics/registry/MetalLB 等系统组件。
-#   · 无 worker 安全护栏(2026-10-28): NODES 中没有 role=worker(单节点 all-in-one /
-#     纯 master 集群)时, node-pool.sh 自动**跳过 cordon**, master 保持可调度 ——
+#   · 无可用 worker 安全护栏(2026-10-28): 没有 **Ready 且未 cordon** 的 worker(单节点
+#     all-in-one / 纯 master 集群, 或配置的 worker 全部 NotReady/已 cordon)时,
+#     node-pool.sh 自动**跳过 cordon**, master 保持可调度 ——
 #     否则 CoreDNS/dns-autoscaler(不带 node.kubernetes.io/unschedulable 容忍)滚动/重启
 #     后会永久 Pending, 单节点集群将失去 DNS; 单节点 play 的 uncordon 也不会被撤销。
 #     有 worker 时才按 NODE_POOL_MASTER_CORDON 执行。

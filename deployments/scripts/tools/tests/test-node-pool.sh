@@ -22,6 +22,9 @@
 #   ⑫ CORDON=false 时 --apply 会 uncordon 本工具创建的 cordon(annotation 判定), 外部 cordon 不动
 #   ⑬ ownership 标记删除失败: 重新 cordon 保持一致 + 非 0; 重试可收敛(apply/remove)
 #   ⑭ ownership 标记写入失败: 回滚 cordon(不留下"已 cordon 但无所有权"的状态)+ 非 0
+#   ⑮ annotate 已生效但返回非 0: 确认性重读后视为完成, 不创建无标记 cordon
+#   ⑯ 配置了 worker 但 NotReady/已 cordon: 视为无可用 worker, 跳过 master cordon
+#   ⑰ ownership 判定锚定 key 左边界: 相似 key(example.cubestack.io/...)不算本工具标记
 #
 # 隔离: 假 ssh 执行假 kubectl, 节点标签/cordon/annotation 落临时状态目录。
 # 用法: bash deployments/scripts/tools/tests/test-node-pool.sh
@@ -90,6 +93,12 @@ case "$cmd" in
         elif [[ "$*" == *".metadata.annotations"* ]]; then
             ann=""; [ -s "${st}/${h}.annotations" ] && ann="$(sed 's/^/"/; s/=/":"/; s/$/"/' "${st}/${h}.annotations" | paste -sd, -)"
             echo "{${ann}}"
+        elif [[ "$*" == *"--no-headers"* ]]; then
+            if [ "${FAKE_WORKER_NOTREADY:-0}" = "1" ] && [ "${h}" = "w1" ]; then
+                echo "${h} NotReady <none> 1m v1.35.8"
+            else
+                echo "${h} Ready <none> 1m v1.35.8"
+            fi
         fi
         ;;
     label)
@@ -98,6 +107,10 @@ case "$cmd" in
         h="${args[2]:-}"; kv="${args[3]:-}"
         if [[ "$kv" == *- && "${FAKE_ANNOTATE_DEL_FAIL:-0}" = "1" ]]; then exit 1; fi
         if [[ "$kv" != *- && "${FAKE_ANNOTATE_SET_FAIL:-0}" = "1" ]]; then exit 1; fi
+        # 模拟"远端已删除成功, 但 SSH/命令返回非 0"(连接中断等)
+        if [[ "$kv" == *- && "${FAKE_ANNOTATE_DEL_FAIL_AFTER:-0}" = "1" ]]; then
+            _set_ann "$h" "$kv"; exit 1
+        fi
         _set_ann "$h" "$kv"; echo "node/${h} annotated" ;;
     cordon)
         h="${args[1]:-}"; echo true > "${st}/${h}.unschedulable"; echo "node/${h} cordoned" ;;
@@ -302,7 +315,7 @@ out="$(FAKE_ANNOTATE_DEL_FAIL=1 _run NODE_POOL_MASTER_CORDON=false -- --apply)"
 chk "标记删除失败退出码非 0" "1" "$?"
 chk "m1 重新 cordon(保持一致)" "true" "$(_unsched m1)"
 chk_contains "标记仍在" "cubestack.io/node-pool-cordoned-by-installer=true" "$(_ann m1)"
-chk_contains "报标记删除失败" "标记删除失败" "${out}"
+chk_contains "报标记仍在" "ownership 标记仍在" "${out}"
 chk_contains "说明已重新 cordon" "重新 cordon" "${out}"
 out="$(_run NODE_POOL_MASTER_CORDON=false -- --apply)"
 chk "重试退出码 0" "0" "$?"
@@ -327,6 +340,50 @@ chk "标记写入失败退出码非 0" "1" "$?"
 chk "m1 已回滚 uncordon" "false" "$(_unsched m1)"
 chk "无 ownership 标记" "" "$(_ann m1)"
 chk_contains "报标记写入失败" "标记写入失败" "${out}"
+
+echo "== ⑮ annotate 已生效但返回非 0: 复核确认后视为完成(不产生无标记 cordon) =="
+_reset
+_run -- --apply >/dev/null                       # 先 cordon + annotation
+out="$(FAKE_ANNOTATE_DEL_FAIL_AFTER=1 _run NODE_POOL_MASTER_CORDON=false -- --apply)"
+chk "⑮ 退出码 0(复核确认标记已清)" "0" "$?"
+chk "⑮ m1 已 uncordon" "false" "$(_unsched m1)"
+chk "⑮ 标记已清" "" "$(_ann m1)"
+chk_contains "⑮ 提示复核确认生效" "复核确认生效" "${out}"
+
+echo "== ⑯ 配置了 worker 但不可用(NotReady/已 cordon): 同样跳过 master cordon =="
+_reset
+out="$(FAKE_WORKER_NOTREADY=1 _run -- --apply)"
+chk "⑯ NotReady 退出码 0" "0" "$?"
+chk "⑯ NotReady 时 m1 未 cordon" "" "$(_unsched m1)"
+chk_contains "⑯ 点名 worker 不可用" "worker w1 不可用" "${out}"
+chk_contains "⑯ 说明跳过 cordon" "跳过 cordon" "${out}"
+
+_reset
+echo true > "${TMP}/state/w1.unschedulable"      # worker 被 cordon
+out="$(_run -- --apply)"
+chk "⑯ worker cordon 退出码 0" "0" "$?"
+chk "⑯ worker cordon 时 m1 未 cordon" "" "$(_unsched m1)"
+chk_contains "⑯ 提示 worker 已 cordon" "已 cordon" "${out}"
+
+echo "== ⑰ ownership 判定锚定 key 左边界: 相似 key 不算本工具标记 =="
+# 端到端: 节点被 cordon, annotation 只有相似 key(example.cubestack.io/...), --remove 不得 uncordon
+_reset
+echo true > "${TMP}/state/m1.unschedulable"
+echo "example.cubestack.io/node-pool-cordoned-by-installer=true" > "${TMP}/state/m1.annotations"
+out="$(_run -- --remove)"
+chk "⑰ 退出码 0" "0" "$?"
+chk "⑰ 相似 key 不触发 uncordon" "true" "$(_unsched m1)"
+chk_contains "⑰ 告警非本工具" "非本工具创建" "${out}"
+chk_contains "⑰ 相似 key 保留" "example.cubestack.io/node-pool-cordoned-by-installer=true" "$(_ann m1)"
+# 函数级: map[...](旧/test 形态)与 JSON(当前 kubectl 形态)两种输出都要锚定左边界
+eval "$(sed -n '/^_np_owned() {/,/^}/p' "${TOOL}")"
+_owned_rc() { if _np_owned "$1"; then echo 0; else echo 1; fi; }
+chk "⑰ map 形态: 首项本工具 key" "0" "$(_owned_rc 'map[cubestack.io/node-pool-cordoned-by-installer:true]')"
+chk "⑰ map 形态: 非首项本工具 key" "0" "$(_owned_rc 'map[a:b cubestack.io/node-pool-cordoned-by-installer:true]')"
+chk "⑰ map 形态: 相似 key" "1" "$(_owned_rc 'map[example.cubestack.io/node-pool-cordoned-by-installer:true]')"
+chk "⑰ map 形态: 非首项相似 key" "1" "$(_owned_rc 'map[a:b example.cubestack.io/node-pool-cordoned-by-installer:true]')"
+chk "⑰ JSON 形态: 本工具 key" "0" "$(_owned_rc '{"cubestack.io/node-pool-cordoned-by-installer":"true"}')"
+chk "⑰ JSON 形态: 相似 key" "1" "$(_owned_rc '{"example.cubestack.io/node-pool-cordoned-by-installer":"true"}')"
 
 echo ""
 if [ "${fail}" = "0" ]; then
