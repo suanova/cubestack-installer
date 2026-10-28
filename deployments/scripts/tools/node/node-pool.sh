@@ -122,8 +122,16 @@ for host in "${MASTER_HOSTS[@]}"; do
                     fi
                 else
                     if SSH "${K} cordon ${host}" >/dev/null 2>&1; then
-                        SSH "${K} annotate node ${host} cubestack.io/node-pool-cordoned-by-installer=true --overwrite" >/dev/null 2>&1 || true
-                        ok "  [${host}] 已 cordon + ownership 标记"
+                        if SSH "${K} annotate node ${host} cubestack.io/node-pool-cordoned-by-installer=true --overwrite" >/dev/null 2>&1; then
+                            ok "  [${host}] 已 cordon + ownership 标记"
+                        else
+                            if SSH "${K} uncordon ${host}" >/dev/null 2>&1; then
+                                err "  [${host}] ownership 标记失败, 已回滚 cordon"
+                            else
+                                err "  [${host}] ownership 标记失败, cordon 回滚失败"
+                            fi
+                            FAILED=1
+                        fi
                     else
                         err "  [${host}] cordon 失败"; FAILED=1
                     fi
