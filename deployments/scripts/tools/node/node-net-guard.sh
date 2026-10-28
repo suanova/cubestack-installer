@@ -18,13 +18,17 @@
 #      `from <addr>` 的路由, 发现“反向路径分歧”(即 rpfilter 会丢包的条件);
 #      probe 取**本节点实际 Pod 地址**(Calico 的 `dev cali*` 主机侧路由); 无本地 Pod 时
 #      回退到 pod 网段首主机(网段首主机可能属于别的节点的 /26 block, 单探它会漏报);
-#      `ip -o -4 addr show` 失败会输出 ADDR_ERR(探测不完整): 原生修复关闭按风险处理,
-#      开启则仅告警; 查询成功但无地址不算失败。
+#      `ip -4 route show` 失败会输出 ROUTE_ERR(原生修复关闭按风险处理, 开启仅告警);
+#      只有**查询成功且无 cali* 路由**时才回退首主机。`ip -o -4 addr show` 失败输出
+#      ADDR_ERR(同口径); 查询成功但无地址不算失败。
 #   ② --check: 只检测。原生修复开启 → 告警不阻断; 关闭 → 硬失败并给指引;
 #   ③ --apply-rule: 可选兜底。幂等加 `pref <N> to <KUBE_PODS_SUBNET> lookup main`
 #      + systemd oneshot 持久化(只加 Pod 网段; ClusterIP 是 local 路由, 不需要 service 网段);
-#      **已在位的兜底不会被自动清除** —— 探测无法区分"本无分歧"与"分歧被兜底规则掩盖",
-#      自动删除会造成守卫在两次运行间来回翻转; 清理只走显式 --remove。
+#      systemctl enable 失败会输出 PERSIST_FAILED 并非 0 退出(规则当前生效但重启后会丢失,
+#      不谎报"已持久化");
+#      **已在位的兜底不会被自动移除** —— 探测无法区分"本无分歧"与"分歧被兜底规则掩盖",
+#      自动删除会造成守卫在两次运行间来回翻转; 但 rule 模式下已就位的兜底会按当前 PREF
+#      重新收敛(更新 conf/applied); 清理只走显式 --remove。
 #   ④ --remove: 清理兜底规则/unit/conf;
 #      applied 状态每行记录 "<PREF> <CIDR>", 改 PREF/网段时都按**记录的 PREF** 删除,
 #      旧优先级的规则不会残留(旧版单 CIDR 状态按当前 PREF 兼容清理)。
@@ -72,17 +76,23 @@ _table() { awk '{for(i=1;i<=NF;i++) if($i=="table"){print $(i+1); exit}}' <<< "$
 # 其路由(经 tunl0/vxlan)与本地 Pod 的 cali 路由不同 → 源策略路由分歧会被漏报; rpfilter
 # 丢包也只发生在本地 Pod 的 cali 设备上。该节点当前没有本地 Pod 时回退到网段首主机
 # (下面仍会输出源策略路由指纹告警)。
+# ★ 路由列表查询失败必须显式上报(2026-10-28): 旧实现 2>/dev/null 吞掉 rc, 失败与
+#   "无本地 Pod"不可区分, 会静默回退首主机 → 本地 Pod 分歧可能漏报。仅**查询成功且
+#   无 cali* 路由**时才回退 POD_PROBE。
+route_out=""; route_rc=0
+route_out="$(ip -4 route show 2>/dev/null)" || route_rc=$?
+[ "${route_rc}" -eq 0 ] || printf 'ROUTE_ERR|%s\n' "${route_rc}"
 pod_probes=()
 while read -r dst dev; do
     case "$dev" in
         cali*) pod_probes+=("${dst%/32}") ;;
     esac
-done < <(ip -4 route show 2>/dev/null | awk '{
+done < <(printf '%s\n' "${route_out}" | awk '{
         dst=$1; dev="";
         for (i=1;i<=NF;i++) if ($i=="dev") { dev=$(i+1); break }
         if (dev != "") print dst, dev
     }' | sort -u)
-if [ "${#pod_probes[@]}" -eq 0 ]; then
+if [ "${#pod_probes[@]}" -eq 0 ] && [ "${route_rc}" -eq 0 ]; then
     pod_probes=("$POD_PROBE")
 fi
 printf 'PROBES|%s\n' "${#pod_probes[@]}"
@@ -243,7 +253,11 @@ if ! "$SCRIPT"; then
 fi
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload 2>/dev/null || true
-    systemctl enable cubestack-pod-net-routing.service 2>/dev/null || true
+    # enable 失败必须上报(2026-10-28): 规则当前已生效, 但重启后会丢失; 不能仍报"已持久化"。
+    if ! systemctl enable cubestack-pod-net-routing.service 2>/dev/null; then
+        printf 'PERSIST_FAILED|%s|%s\n' "$PREF" "$POD_CIDR"
+        exit 1
+    fi
     systemctl restart cubestack-pod-net-routing.service 2>/dev/null || true
 fi
 printf 'APPLIED|%s|%s|%s|%s|%s\n' "$PREF" "$POD_CIDR" "$UNIT" "$SCRIPT" "$CONF"
@@ -377,8 +391,32 @@ _apply_node() {   # <ip> <user> <pw> <apply|remove>
     _remote_apply_script "${POD_CIDR}" "${PREF}" "${how}" > "${tmp}"
     out="$(_run_on_node "${ip}" "${user}" "${pw}" "${tmp}")" || rc=$?
     rm -f "${tmp}"
-    [ "${rc}" -eq 0 ] || return 1
+    # 失败时也输出远端载荷(如 PERSIST_FAILED/APPLY_FAILED), 供调用方区分失败原因。
     printf '%s\n' "${out}"
+    [ "${rc}" -eq 0 ] || return 1
+}
+
+# 在节点上应用/收敛兜底规则并统一报告。mode=risk 首次写入(计入 FIXED_CNT);
+# mode=converge 已就位的兜底按当前 PREF 重新收敛(改 NODE_NET_GUARD_RULE_PREF 时)。
+_apply_rule_node() {   # <host> <ip> <user> <pw> <risk|converge>
+    local host="$1" ip="$2" user="$3" pw="$4" mode="$5" applied_out=""
+    if applied_out="$(_apply_node "${ip}" "${user}" "${pw}" apply)"; then
+        if [ "${mode}" = "converge" ]; then
+            ok "    [${host}] 兜底已就位; 已按当前 PREF 收敛(pref ${PREF})"
+        else
+            ok "    [${host}] 已写入 ip rule: pref ${PREF} to ${POD_CIDR} lookup main"
+        fi
+        ok "    [${host}] 已持久化: /etc/systemd/system/cubestack-pod-net-routing.service (systemd enabled)"
+        [ "${mode}" = "converge" ] || FIXED_CNT=$((FIXED_CNT + 1))
+        return 0
+    fi
+    if printf '%s' "${applied_out}" | command grep -q '^PERSIST_FAILED|'; then
+        err "    [${host}] 兜底规则已写入但 systemd 持久化失败(重启后规则会丢失)"
+    else
+        err "    [${host}] 兜底规则写入失败"
+    fi
+    FAILED=1; FAILED_NODES="${FAILED_NODES} ${host}(${ip})"
+    return 1
 }
 
 # ---------------- 主流程 -------------------------------------------------------------------
@@ -422,7 +460,8 @@ for line in "${NODES[@]:-}"; do
     risks="$(awk -F'|' '$1=="ADDR" && $6=="1" {
         if (!seen[$2]++) printf "%s|%s|%s|%s\n", $2, $3, $5, $7
     }' <<< "${probe_out}")"
-    # 远端仍输出 GUARD|供诊断; 不再据此自动删除兜底(探测分不清"本无分歧"与"被兜底掩盖", 见文件头 ③)
+    # 远端 GUARD|: 兜底规则是否已在位(用于"无分歧但已就位"时按当前 PREF 收敛, 不做自动删除)
+    guard_present="$(awk -F'|' '$1=="GUARD" {print $2}' <<< "${probe_out}")"
     probe_cnt="$(awk -F'|' '$1=="PROBES" {print $2; exit}' <<< "${probe_out}")"
     # 任一探测目标的基准查询失败都提示(结果可能不完整)
     base_bad="$(awk -F'|' '$1=="BASE" && $2!="0" {printf "%s|%s", $2, $5; exit}' <<< "${probe_out}")"
@@ -440,8 +479,17 @@ for line in "${NODES[@]:-}"; do
             err "  [${NODE_HOSTNAME}](${NODE_IP}) 本地地址查询失败(rc=${addr_err}), 且原生修复未启用: 无法确认反向路径, 按风险处理"
         fi
     fi
+    # ★ 路由列表查询失败同理(2026-10-28): 失败时不能回退首主机当作"无本地 Pod"。
+    route_err="$(awk -F'|' '$1=="ROUTE_ERR" {print $2; exit}' <<< "${probe_out}")"
+    if [ -n "${route_err}" ]; then
+        if _native_fix_active; then
+            warn "  [${NODE_HOSTNAME}](${NODE_IP}) 本地 Pod 路由列表查询失败(ip -4 route show, rc=${route_err}): 预检不完整; 原生修复已启用, 不阻断"
+        else
+            err "  [${NODE_HOSTNAME}](${NODE_IP}) 本地 Pod 路由列表查询失败(rc=${route_err}), 且原生修复未启用: 无法确认本地 Pod 路由, 按风险处理"
+        fi
+    fi
 
-    if [ -n "${risks}" ] || [ -n "${addr_err}" ]; then
+    if [ -n "${risks}" ] || [ -n "${addr_err}" ] || [ -n "${route_err}" ]; then
         RISKY_CNT=$((RISKY_CNT + 1))
         if [ -n "${risks}" ]; then
             warn "  [${NODE_HOSTNAME}](${NODE_IP}) 检测到源策略路由冲突:"
@@ -468,14 +516,7 @@ for line in "${NODES[@]:-}"; do
                 if _native_fix_active; then
                     warn "    原生修复已启用; 本次仍按 NODE_NET_GUARD_ACTION=rule 加兜底(可随时 --remove 清理)"
                 fi
-                if applied_out="$(_apply_node "${NODE_IP}" "${NODE_USER}" "${NODE_PW}" apply)"; then
-                    ok "    [${NODE_HOSTNAME}] 已写入 ip rule: pref ${PREF} to ${POD_CIDR} lookup main"
-                    ok "    [${NODE_HOSTNAME}] 已持久化: /etc/systemd/system/cubestack-pod-net-routing.service (systemd enabled)"
-                    FIXED_CNT=$((FIXED_CNT + 1))
-                else
-                    err "    [${NODE_HOSTNAME}] 兜底规则写入失败"
-                    FAILED=1; FAILED_NODES="${FAILED_NODES} ${NODE_HOSTNAME}(${NODE_IP})"
-                fi
+                _apply_rule_node "${NODE_HOSTNAME}" "${NODE_IP}" "${NODE_USER}" "${NODE_PW}" risk || true
                 ;;
         esac
     else
@@ -494,6 +535,12 @@ for line in "${NODES[@]:-}"; do
             else
                 warn "    原生修复未启用: 临时 ip rule 在 reboot 后丢失会复发; 建议 CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=true 或 NODE_NET_GUARD_ACTION=rule"
             fi
+        fi
+        # ★ 兜底已在位时探测会被规则掩盖成"无分歧"; 仍需按当前 PREF 收敛 conf/applied,
+        #   否则改 NODE_NET_GUARD_RULE_PREF 后重启仍用旧优先级(与 troubleshooting 文档一致)。
+        #   只在显式 rule 模式、且探测确认兜底在位时执行; 不做自动删除。
+        if [ "${ACTION}" = "rule" ] && [ "${guard_present}" = "1" ]; then
+            _apply_rule_node "${NODE_HOSTNAME}" "${NODE_IP}" "${NODE_USER}" "${NODE_PW}" converge || true
         fi
     fi
 done

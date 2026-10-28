@@ -21,10 +21,13 @@
 #      无本地 Pod 时回退网段首主机
 #   ⑨ PREF 变化: 按 APPLIED 记录的旧优先级删除旧规则(同 CIDR 不残留双规则);
 #      --remove 也按记录的优先级清理; 旧版单 CIDR 状态按当前 PREF 兼容
-#   ⑩ --apply-rule 不得自动清除已在位的兜底(探测被规则掩盖会造成来回翻转)
+#   ⑩ rule 模式不移除已在位的兜底; 按当前 PREF 收敛(探测被规则掩盖也不丢状态)
 #   ⑪ 地址查询失败不得当作"无分歧": 原生修复关闭 → 非 0/写兜底; 开启 → 仅告警;
 #      查询成功但无地址仍属正常(不算失败)
 #   ⑫ SSH 主机密钥: 默认 accept-new + 持久 known_hosts(不再 no//dev/null); 非法策略非 0
+#   ⑭ 路由列表(ip -4 route show)查询失败: 原生修复关闭→非 0; 开启→仅告警; rule 仍写兜底
+#   ⑮ systemd enable 失败: PERSIST_FAILED → 非 0, 不打印"已持久化"
+#   ⑯ 改 PREF 后 clean 且已有兜底的节点按新 PREF 收敛(删旧 pref/写新 pref)
 #
 # 隔离: 假 ssh 把远端载荷在本机执行; 假 ip 按节点夹具返回路由查询结果;
 #       绝对路径(/etc/cubestack, /usr/local/sbin, /etc/systemd/system)重写到临时根。
@@ -140,6 +143,7 @@ case "${want}" in
         exit 0 ;;
     route)
         if [[ "$*" == *" show"* ]]; then
+            [ "${FAKE_ROUTE_SHOW_FAIL:-0}" = "1" ] && exit 2
             cat "${FAKE_IP_DIR}/${node}.showroutes" 2>/dev/null || true
             exit 0
         fi
@@ -168,6 +172,7 @@ chmod +x "${TMP}/bin/ip"
 cat > "${TMP}/bin/systemctl" <<'FAKE'
 #!/bin/bash
 printf '%s\n' "$*" >> "${FAKE_SYSTEMCTL_LOG:?}"
+[ "${FAKE_SYSTEMCTL_FAIL:-0}" = "1" ] && exit 1
 exit 0
 FAKE
 chmod +x "${TMP}/bin/systemctl"
@@ -371,10 +376,10 @@ chk_contains "⑨ 旧格式按当前 pref 清理" "RULE_DEL|30000|10.244.0.0/16|
 chk "⑨ APPLIED 迁移为新格式" "30000 10.233.64.0/18" \
     "$(cat "${TMP}/root/etc/cubestack/pod-net-routing.applied" 2>/dev/null || true)"
 
-echo "== ⑩ apply-rule 不得自动清除已在位的兜底(防规则掩盖导致来回翻转) =="
+echo "== ⑩ apply-rule 不移除已在位的兜底; 按当前 PREF 收敛(防虚假持久化状态) =="
 _reset_rule_state
 # 模拟上一轮 --apply-rule 的产物: 安全节点(10.0.0.2)已有一条兜底规则 + unit/conf。
-# 该规则会让本节点探测变成"无分歧" —— 旧实现据此自动删除, 造成守卫每两次运行翻转一次。
+# 该规则会让本节点探测变成"无分歧" —— rule 模式下仍应按当前 PREF 收敛, 但不能移除。
 printf '30000|10.233.64.0/18|main\n' > "${TMP}/ip/state.10.0.0.2"
 printf "POD_CIDR='10.233.64.0/18'\nPREF='30000'\n" > "${TMP}/root/etc/cubestack/pod-net-routing.conf"
 : > "${TMP}/root/usr/local/sbin/cubestack-pod-net-routing"
@@ -383,8 +388,10 @@ printf "POD_CIDR='10.233.64.0/18'\nPREF='30000'\n" > "${TMP}/root/etc/cubestack/
 out="$(_run -- --apply-rule)"
 chk "⑩ 退出码 0" "0" "$?"
 _log="$(cat "${TMP}/ip/log")"
-chk_not_contains "⑩ 不删除已有的兜底规则" "RULE_DEL|30000|10.233.64.0/18|main" "${_log}"
+chk_contains "⑩ 按当前 PREF 重新收敛" "RULE_ADD|30000|10.233.64.0/18|main" "${_log}"
 chk "⑩ 安全节点规则仍在" "30000|10.233.64.0/18|main" "$(cat "${TMP}/ip/state.10.0.0.2" 2>/dev/null || true)"
+chk "⑩ unit 仍在" "yes" "$([ -f "${TMP}/root/etc/systemd/system/cubestack-pod-net-routing.service" ] && echo yes || echo no)"
+chk_contains "⑩ 报 PREF 收敛" "按当前 PREF 收敛" "${out}"
 chk_not_contains "⑩ 不报告自动清理" "已清理历史兜底规则" "${out}"
 
 echo "== ⑪ 地址查询失败不得当作'无分歧' =="
@@ -423,6 +430,46 @@ out="$(_run NODE_NET_GUARD_SSH_HOST_KEY_CHECKING=bogus -- --check)"
 rc=$?
 chk "⑫ 非法策略退出码 1" "1" "${rc}"
 chk_contains "⑫ 点名策略变量" "NODE_NET_GUARD_SSH_HOST_KEY_CHECKING" "${out}"
+
+echo "== ⑭ 路由列表查询失败不得静默回退首主机 =="
+_reset_rule_state
+out="$(FAKE_ROUTE_SHOW_FAIL=1 _run CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=false -- --check)"
+rc=$?
+chk "⑭ 原生修复关闭: 路由查询失败 → 非 0" "1" "${rc}"
+chk_contains "⑭ 点名路由查询失败" "本地 Pod 路由列表查询失败" "${out}"
+out="$(FAKE_ROUTE_SHOW_FAIL=1 _run CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=true -- --check)"
+rc=$?
+chk "⑭ 原生修复开启: 仅告警" "0" "${rc}"
+chk_contains "⑭ 原生修复开启有告警" "预检不完整" "${out}"
+_reset_rule_state
+out="$(FAKE_ROUTE_SHOW_FAIL=1 _run CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=false -- --apply-rule)"
+chk "⑭ rule 动作退出码 0" "0" "$?"
+chk_contains "⑭ 探测不完整时仍写入兜底" "RULE_ADD|30000|10.233.64.0/18|main" "$(cat "${TMP}/ip/log")"
+
+echo "== ⑮ systemd enable 失败: 不得谎报已持久化 =="
+_reset_rule_state
+out="$(FAKE_SYSTEMCTL_FAIL=1 _run -- --apply-rule)"
+rc=$?
+chk "⑮ enable 失败退出码 1" "1" "${rc}"
+chk_contains "⑮ 报持久化失败" "持久化失败" "${out}"
+chk_not_contains "⑮ 不报已持久化" "已持久化" "${out}"
+
+echo "== ⑯ 改 PREF 后, 已就位兜底的 clean 节点也按新 PREF 收敛 =="
+_reset_rule_state
+printf '30000|10.233.64.0/18|main\n' > "${TMP}/ip/state.10.0.0.2"
+printf "POD_CIDR='10.233.64.0/18'\nPREF='30000'\n" > "${TMP}/root/etc/cubestack/pod-net-routing.conf"
+printf '30000 10.233.64.0/18\n' > "${TMP}/root/etc/cubestack/pod-net-routing.applied"
+: > "${TMP}/root/usr/local/sbin/cubestack-pod-net-routing"
+: > "${TMP}/root/etc/systemd/system/cubestack-pod-net-routing.service"
+: > "${TMP}/ip/log"
+out="$(_run NODE_NET_GUARD_RULE_PREF=31000 -- --apply-rule --only w1)"
+chk "⑯ 退出码 0" "0" "$?"
+_log="$(cat "${TMP}/ip/log")"
+chk_contains "⑯ 按旧 PREF 删除" "RULE_DEL|30000|10.233.64.0/18|main" "${_log}"
+chk_contains "⑯ 按新 PREF 写入" "RULE_ADD|31000|10.233.64.0/18|main" "${_log}"
+chk "⑯ 节点状态为新 PREF" "31000|10.233.64.0/18|main" "$(cat "${TMP}/ip/state.10.0.0.2" 2>/dev/null || true)"
+chk_contains "⑯ APPLIED 更新" "31000 10.233.64.0/18" "$(cat "${TMP}/root/etc/cubestack/pod-net-routing.applied" 2>/dev/null || true)"
+chk_contains "⑯ 提示 PREF 收敛" "按当前 PREF 收敛" "${out}"
 
 echo ""
 if [ "${fail}" = "0" ]; then

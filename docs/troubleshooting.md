@@ -280,12 +280,13 @@ sudo ip rule add pref 30000 to <KUBE_PODS_SUBNET> lookup main
 - 工具: `deployments/scripts/tools/node/node-net-guard.sh --apply-rule`; 持久化 unit:
   `/etc/systemd/system/cubestack-pod-net-routing.service`(脚本 `/usr/local/sbin/cubestack-pod-net-routing`)。
 - 清理: `node-net-guard.sh --remove`(只删自己登记过的网段; 手工加的 /16 规则需自行 `ip rule del`)。
-  ⚠ `--apply-rule` **不会**自动清除非风险节点上已在位的兜底: 兜底规则本身会把探测结果变成
-  "无分歧", 自动删除会让守卫在两次运行间来回翻转; 清理只走显式 `--remove`。
-- 改 `NODE_NET_GUARD_RULE_PREF` 后重跑 `--apply-rule`: 工具按
-  `/etc/cubestack/pod-net-routing.applied` 记录的 `<PREF> <CIDR>` 删除旧优先级规则, 再按新
-  pref 写入; `--remove` 同样按记录清理(旧版"单 CIDR"状态按当前 pref 兼容)。只按新 pref 删除
-  会漏掉旧规则, 形成同一网段双优先级。
+  ⚠ `--apply-rule` **不会移除**非风险节点上已在位的兜底(仅按当前 PREF 重新收敛, 见下);
+  自动移除会让守卫在两次运行间来回翻转; 清理只走显式 `--remove`。
+- 改 `NODE_NET_GUARD_RULE_PREF` 后重跑 `--apply-rule`: 对**已就位兜底**的节点(包括探测被
+  规则掩盖成"无分歧"的节点), 工具按 `/etc/cubestack/pod-net-routing.applied` 记录的
+  `<PREF> <CIDR>` 删除旧优先级规则, 再按新 pref 写入并更新记录; `--remove` 同样按记录清理
+  (旧版"单 CIDR"状态按当前 pref 兼容)。只按新 pref 删除会漏掉旧规则, 形成同一网段双优先级。
+  从未安装过兜底、且探测无风险的节点不会写 conf/applied, 因此也没有旧 pref 需要更新。
 - ⚠ 为什么只加 **Pod 网段**: ClusterIP 是 `local` 路由(源地址=VIP), rpfilter 反向查询的 `daddr` 是 Pod IP, service CIDR 规则基本无用且增加影响面。
 - ⚠ `to <pod> lookup main` 对所有源生效, 可能影响“远端 Pod 回包走 IB”的非对称路径; 因此**默认不做**, 优先用 Calico 原生 source hint。
 
