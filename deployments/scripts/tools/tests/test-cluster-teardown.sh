@@ -188,10 +188,12 @@ chk "⑤k 三处代码行不再操作不存在的 deploy registry" "0" \
        | awk '!/^[[:space:]]*#/ && /deploy registry/' | wc -l)"
 chk "⑤l 扫荡保留已 scale 0 的裸 RS(replicas==0 跳过 delrs)" "1" \
     "$(grep -cF 'elif ((_rsob.get("spec") or {}).get("replicas", 1) == 0):' "${SRC}/tools/k8s/ceph-cleanup.sh")"
-chk "⑤m Ceph 清理先删 SubVolumeGroup/ObjectStoreUser/FS/ObjectStore CR" "2" \
-    "$(grep -cF 'for _cr in cephfilesystemsubvolumegroup cephobjectstoreuser cephfilesystem cephobjectstore' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤m Ceph 清理依赖 CR 清单完整(SubVolumeGroup/ObjectStoreUser/FS/ObjectStore/...)" "1" \
+    "$(grep -cF '_DEP_CRS="cephfilesystemsubvolumegroup cephobjectstoreuser cephfilesystem cephobjectstore cephblockpool cephnfs cephrbdmirror"' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤m2 两处删除循环都从统一清单派生" "2" \
+    "$(grep -cF 'for _cr in ${_DEP_CRS}' "${SRC}/tools/k8s/ceph-cleanup.sh")"
 chk "⑤n FS/ObjectStore 删除先于 CephCluster 删除" "1" \
-    "$(awk '/for _cr in cephfilesystemsubvolumegroup cephobjectstoreuser/{a=NR} /delete cephcluster rook-ceph/{b=NR} END{print (a>0&&b>0&&a<b)?1:0}' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+    "$(awk '/_DEP_CRS="cephfilesystemsubvolumegroup/{a=NR} /delete cephcluster rook-ceph --wait=false/{b=NR} END{print (a>0&&b>0&&a<b)?1:0}' "${SRC}/tools/k8s/ceph-cleanup.sh")"
 chk "⑤o 破坏性删除也清受保护 registry PVC" "1" \
     "$(grep -cF 'delete pvc registry-pvc' "${SRC}/tools/k8s/ceph-cleanup.sh")"
 chk "⑤o ceph 卸载单独放宽超时(CEPH_TEARDOWN_TIMEOUT)" "2" \
@@ -204,10 +206,12 @@ chk "⑤q CephCluster finalizer 死锁兜底(清 finalizer/删旧守护)" "1" \
 #   storage-perses-0 残留 Bound+PV, Rook 永远 waiting for csi volume attachments。
 chk "⑤r PVC 动作先收集再读 here-string(不再 pipe|while)" "1" \
     "$(grep -cF '_pvc_actions="$(SSH' "${SRC}/tools/k8s/ceph-cleanup.sh")"
-chk "⑤s PVC 删除 SSH 带 </dev/null" "1" \
-    "$(grep -cF 'delete pvc ${_pvc#*/} --wait=false </dev/null' "${SRC}/tools/k8s/ceph-cleanup.sh")"
-chk "⑤t while-read 循环内 SSH 均不读取循环 stdin" "0" \
-    "$(awk '/while[[:space:]].*read/ {loop=1; next} loop && /^[[:space:]]*done/ {loop=0} loop && /SSH / && !/<\/dev\/null/ && !/patch-file=\/dev\/stdin/ {print NR": "$0}' "${SRC}/tools/k8s/ceph-cleanup.sh" | wc -l)"
+chk "⑤s PVC 删除走 SSH_N(本地 stdin=/dev/null, 不吞循环行)" "1" \
+    "$(grep -cF 'SSH_N "${K} -n ${_pvc%/*} delete pvc ${_pvc#*/} --wait=false' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤t while-read 循环内远端调用一律 SSH_N(不读取循环 stdin)" "0" \
+    "$(awk '!/^[[:space:]]*#/ && /while[[:space:]].*read/ {loop=1; next} loop && /^[[:space:]]*done/ {loop=0} loop && !/^[[:space:]]*#/ && /(^|[^_A-Za-z0-9])SSH / && !/patch-file=\/dev\/stdin/ {print NR": "$0}' "${SRC}/tools/k8s/ceph-cleanup.sh" | wc -l)"
+chk "⑤t2 本地 stdin 重定向只出现在 SSH_N 包装器(引号内 </dev/null 无效)" "1" \
+    "$(awk '!/^[[:space:]]*#/ && /<\/dev\/null/ {n++} END{print n+0}' "${SRC}/tools/k8s/ceph-cleanup.sh")"
 chk "⑤u 删 PVC 后等待 ceph PVC/PV 消失" "1" \
     "$(grep -cF 'wait_ceph_volumes_gone 120 0' "${SRC}/tools/k8s/ceph-cleanup.sh")"
 chk "⑤v 删 registry PVC 后等待全部 ceph 卷消失" "1" \
@@ -221,6 +225,40 @@ chk "⑤y 依赖 CR 未终结时清 finalizer 强删" "1" \
     "$(grep -cF '依赖 CR 未在 120s 内终结' "${SRC}/tools/k8s/ceph-cleanup.sh")"
 chk "⑤z 强删依赖 CR 先于删 CephCluster" "1" \
     "$(awk '/依赖 CR 未在 120s 内终结/{a=NR} /delete cephcluster rook-ceph --wait=false/{b=NR} END { print (a>0 && b>0 && a<b) ? 1 : 0 }' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+# 2026-10-27 #73: 强删只处理第一条(</dev/null 写在引号内=远端重定向), 且删完不做后置校验 →
+#   残留依赖让 Rook 拒绝删 CephCluster, 空等 900s。修复: SSH_N + 残留重试 3 轮 + 未收敛中止。
+chk "⑤z2 强删依赖 CR 后置校验: 残留→重试→中止(不进入 900s 等待)" "1" \
+    "$(grep -cF '依赖 CR 强删 3 轮后仍有残留' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤z3 后置校验先于删 CephCluster" "1" \
+    "$(awk '/依赖 CR 强删 3 轮后仍有残留/{a=NR} /delete cephcluster rook-ceph --wait=false/{b=NR} END{print (a>0&&b>0&&a<b)?1:0}' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+chk "⑤z4 强删依赖 CR 有界重试(3 轮)" "1" \
+    "$(grep -cF '第 ${_dep_try}/3 轮' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+# ⑤aa 行为回归(2026-10-27 #73): 从真实文件提取强删 while-read 循环, 桩 SSH 模拟"默认读取并
+#   转发本地 stdin" —— 旧写法(</dev/null 在引号内)只执行第一条; SSH_N 修复后两条都要执行。
+DEPLOOP="${TMP}/dep_loop.sh"; DEPLOG="${TMP}/dep_loop.log"
+awk '/while IFS= read -r _obj; do/ {f=1} f {print} f && /done <<< "\$\{_objs\}"/ {exit}' \
+    "${SRC}/tools/k8s/ceph-cleanup.sh" > "${DEPLOOP}"
+cat > "${TMP}/dep_harness.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+K="kubectl"
+CEPH_NAMESPACE="rook-ceph"
+_dep_try=1
+say() { :; }
+SSH() {   # 真实 ssh 默认读并转发本地 stdin; 非 tty 时模拟吞掉 here-string
+    if [ ! -t 0 ]; then cat >/dev/null; fi
+    printf '%s\n' "$*" >> "${DEPLOG}"
+}
+SSH_N() { SSH "$@" </dev/null; }   # 被测文件中的包装器(本地 stdin=/dev/null)
+_objs=$'cephfilesystem.ceph.rook.io/cubestack-ext-fs\ncephfilesystem.ceph.rook.io/durable'
+source "${DEPLOOP}"
+EOF
+: > "${DEPLOG}"
+DEPLOG="${DEPLOG}" DEPLOOP="${DEPLOOP}" bash "${TMP}/dep_harness.sh"
+chk "⑤aa 强删循环执行全部对象(不止第一条)" "2" \
+    "$(grep -c 'delete cephfilesystem' "${DEPLOG}" || true)"
+chk "⑤aa 两个对象都发出删除(cubestack-ext-fs/durable)" "1" \
+    "$(grep -qF 'cubestack-ext-fs' "${DEPLOG}" && grep -qF 'durable' "${DEPLOG}" && echo 1 || echo 0)"
 # ⑤m/⑤n 扫荡 python 行为夹具(从 ceph-cleanup.sh 提取首个 heredoc, 喂合成清单):
 #   裸 RS replicas=0(刚优雅停机, pod 尚在终结)→ 无动作; replicas=1 → delrs 原语义保留
 SWEEPPY="${TMP}/sweep.py"

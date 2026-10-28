@@ -228,7 +228,7 @@ else
 fi
 
 # ---------------- ⑦ 证书 SAN 含入口地址 ----------------
-# ⚠ 用**锚定的**正则而非裸 ${ENTRY}: 裸串会让入口 10.66.1.13 在 SAN 的 10.66.1.130 上假通过
+# ⚠ 用**锚定的**正则而非裸 ${ENTRY}: 裸串会让入口 192.168.100.13 在 SAN 的 192.168.100.130 上假通过
 #   (前缀相同)。[.] 代替 \. 避免经 ${SSH_CMD} 字符串传递时的转义歧义。
 _ENTRY_RE="${ENTRY//./[.]}"
 if ${SSH_CMD} "sudo openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -text | grep -qE '(^|[^0-9.])${_ENTRY_RE}([^0-9.]|\$)'"; then

@@ -118,7 +118,7 @@ node_ssh() {
 # nbd 残留清理(共享: [3/8] 首防线 + [7/8] 自愈重放; 2026-10-14 实机根因)。
 # 机制: ceph-volume inventory 会枚举**整机 /sys/block** 建 udev 数据; 节点上"已加载但零会话"的
 #   nbd0..15 取不到 udev 数据 ⇒ 整个 ceph-volume 调用崩溃 ⇒ rook 判**全部盘**"无法确认可用"
-#   ⇒ 0 OSD、HEALTH_WARN 永不 OK(实机: 10.66.3.214 集群)。卸载后同一套盘点立刻成功。
+#   ⇒ 0 OSD、HEALTH_WARN 永不 OK(实机: 192.0.2.214 集群)。卸载后同一套盘点立刻成功。
 # ⚠ 黑名单只挡别名自动加载, **挡不住显式 modprobe**(实机: 清理后 nbd 在一小时后又被载入)——
 #   故 [7/8] 自愈时必须**重放本清理**再重建 prepare。
 # 安全口径: 仅当 nbd 零引用(/sys/module/nbd/refcnt=0, 无活跃会话)才卸载 + 持久黑名单;
@@ -613,6 +613,40 @@ for _i in $(seq 1 24); do
 done
 [ "${_CRD_OK}" = "1" ] && ok "  operatorconfigs.csi.ceph.io CRD Established" \
     || warn "  CRD 120s 内未 Established(继续尝试 apply, 若失败查看下方 kubectl 报错)"
+# 把 Rook operator 钉到 master, 并容忍 master cordon/control-plane。节点池 cordon 后
+# operator 重调度仍能工作; patch 失败只告警(不影响已在 worker 运行的 operator)。
+_patch_rook_operator_placement() {
+    local _patch
+    _patch='{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unreachable","operator":"Exists","effect":"NoExecute","tolerationSeconds":5}]}}}}'
+    if SSH "${K} -n ${CEPH_NAMESPACE} patch deploy rook-ceph-operator --type=strategic -p '${_patch}'" >/dev/null 2>&1; then
+        ok "  Rook operator placement → master(容忍 control-plane/unschedulable)"
+    else
+        warn "  Rook operator placement patch 失败(不影响已运行 operator; 检查 RBAC)"
+    fi
+}
+
+# Rook 不会把 CephCluster.spec.placement 的变更回写到**已存在**的 mon/mgr/osd Deployment 模板
+# (2026-10-27 容器 c 实测: CR 已含 unschedulable, Deployment 仍只有 control-plane)。
+# 节点池 cordon 后这些 daemon 重启会 Pending, 因此对存量 Deployment 直接补 toleration(幂等)。
+_patch_ceph_daemon_placement() {
+    local _d _list _tols _cur _cmd
+    _tols='{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}'
+    _list="$(SSH "${K}" -n ${CEPH_NAMESPACE} get deploy --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)"
+    for _d in $(printf '%s\n' "${_list}" | awk '/^rook-ceph-(mon|mgr|osd)-/ {print $1}'); do
+        _cur="$(SSH "${K}" -n ${CEPH_NAMESPACE} get deploy ${_d} -o json 2>/dev/null || true)"
+        if printf '%s' "${_cur}" | grep -q 'node-role.kubernetes.io/control-plane' \
+            && printf '%s' "${_cur}" | grep -q 'node.kubernetes.io/unschedulable'; then
+            continue
+        fi
+        _cmd="${K} -n ${CEPH_NAMESPACE} patch deploy ${_d} --type=strategic -p '{\"spec\":{\"template\":{\"spec\":{\"tolerations\":[${_tols}]}}}}'"
+        if SSH "${_cmd}" >/dev/null 2>&1; then
+            ok "  ${_d} placement 已收敛(control-plane+unschedulable)"
+        else
+            warn "  ${_d} placement patch 失败(不阻断; 检查 RBAC)"
+        fi
+    done
+}
+
 say "  apply operator.yaml ..."
 # 普通 apply 也做重试(CRD 刚建立时 discovery 可能瞬时未刷新)
 _OP_APPLY=0
@@ -638,6 +672,9 @@ for i in $(seq 1 18); do
 done
 [ "${OP_OK:-0}" -ge 1 ] 2>/dev/null || { warn "  rook operator 未就绪(检查 kubectl -n rook-ceph get pods)"; }
 ok "  Rook operator 已部署"
+_patch_rook_operator_placement
+SSH "${K} -n ${CEPH_NAMESPACE} rollout status deploy/rook-ceph-operator --timeout=180s" >/dev/null 2>&1 \
+    || warn "  Rook operator patch 后 180s 内未 Ready(检查 master 标签/taint 与 operator pod 事件)"
 
 # ---------------- 7) 生成并应用 CephCluster CR(按节点+裸盘) ----------------
 # ★ 重装策略(2026-09-07 简化: 备份/恢复已拆出为独立模块 ceph_backup, 部署脚本只保留覆盖安装/清理):
@@ -857,16 +894,19 @@ else
     echo "  placement:"
     # ★ 2026-09-24 修复: 每个 Ceph **守护进程**都要显式钉到存储节点 —— 原来只手写了 mon/osd,
     #   于是 mgr(真 daemon, 也往宿主机 /var/lib/rook 写数据)被调度到 worker 上(实机: mgr-a
-    #   落在 mxgpu-3-36), 还被 Rook 带出 crashcollector-mxgpu-3-36 / exporter-mxgpu-3-36 两个
+    #   落在 node-3-36), 还被 Rook 带出 crashcollector-node-3-36 / exporter-node-3-36 两个
     #   伴生 pod 一起写到 worker 的 /var/lib/rook —— 与文档 docs/ceph-rook.md §2"只调度到指定
     #   的存储节点(默认只装在 master 节点)"直接冲突, 也让重装清理(只清存储节点)在 worker 上留残留。
     #   ⚠ 不要图省事改用 `placement.all`: Rook 会把 `all` 一并套到 **CSI daemonsets** 上,
     #     把 rbd/cephfs nodeplugin 也钉死在存储节点 —— 那些 nodeplugin 必须跑在**每个**可能挂
     #     ceph 卷的节点(worker 上的 PVC 全靠它), 钉死 = worker 上的卷挂不上。只逐个 daemon 写。
-    _emit_placement() {   # <daemon 名> → 统一的"容忍 master taint + 只调度到存储节点"
+    _emit_placement() {   # <daemon 名> → 统一的"容忍 master taint/cordon + 只调度到存储节点"
         echo "    $1:"
         echo "      tolerations:"
         echo "        - key: node-role.kubernetes.io/control-plane"
+        echo "          operator: Exists"
+        echo "          effect: NoSchedule"
+        echo "        - key: node.kubernetes.io/unschedulable"
         echo "          operator: Exists"
         echo "          effect: NoSchedule"
         echo "      nodeAffinity:"
@@ -1152,6 +1192,25 @@ fi   # _CEPH_SKIP_CLUSTER=1 → 跳过集群内 CephCluster 创建
 # ⚠ 失败路径兜底(2026-10-13 CodeRabbit): 本模块若在 7.9 之前 exit 1(如集群 900s 未 Ready),
 #   或整轮部署异常退出, 由 deploy-cluster.sh 的 EXIT 钩子调用**同一函数**
 #   stop_restore_known_consumers 恢复 —— 消费者不会因一次失败停在 0。
+_patch_ceph_daemon_placement
+# 存量 daemon 模板 patch 会触发滚动(mon/osd/mgr); 等 Ceph 恢复 HEALTH_OK 再继续, 避免
+# ceph_csi/registry 在恢复期创建卷。全新安装时模板已带 toleration → 上面跳过 → 无额外等待。
+if [ "${CEPH_MODE:-internal}" = "internal" ]; then
+    say "等待 Ceph daemon 滚动后恢复 HEALTH_OK(最长 600s)..."
+    _HL_OK=0
+    for _i in $(seq 1 60); do
+        _hl="$(SSH "${K}" -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null || true)"
+        _hl="$(printf '%s\n' "${_hl}" | grep -oE 'HEALTH_(OK|WARN|ERR)' | head -1 || true)"
+        [ "${_hl}" = "HEALTH_OK" ] && { _HL_OK=1; break; }
+        sleep 10
+    done
+    if [ "${_HL_OK}" = "1" ]; then
+        ok "  Ceph daemon 滚动后 HEALTH_OK"
+    else
+        warn "  Ceph daemon 滚动后未 HEALTH_OK(继续; 部署后用 ceph -s 复查)"
+    fi
+    unset _HL_OK _hl _i
+fi
 stop_restore_known_consumers
 
 # ---------------- 8) 汇总 ----------------

@@ -270,7 +270,7 @@ _export_official_env() {
         local _rgw_ep="${RGW_EP#http://}"
         _rgw_ep="${_rgw_ep#https://}"
         # ★ 2026-10-19: RGW 未 Ready 时官方脚本会在 realm/zonegroup/zone 上反复失败并长时间空等
-        #   (实机: 0 OSD 修复后仍卡在 radosgw-admin; 端点 10.66.3.215:80 connection refused)。
+        #   (实机: 0 OSD 修复后仍卡在 radosgw-admin; 端点 192.0.2.215:80 connection refused)。
         #   先查 CephObjectStore phase + 端点可达性; 未就绪就省略 RGW 参数(CSI 用户仍会导出),
         #   自研 conf 已包含 RGW 信息, 消费者可继续用手填路径。
         local _rgw_phase _rgw_ok=0

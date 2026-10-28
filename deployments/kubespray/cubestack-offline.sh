@@ -1106,7 +1106,7 @@ block = (
 )
 # 注: "单节点控制面污点收敛"play 原先是和上面这条一起插在这里的 —— 那是**错的**:
 #     它要用 kubectl 读 /etc/kubernetes/admin.conf, 而此处还在 "Install etcd"/kubeadm 之前,
-#     全新集群上 admin.conf 必然不存在(2026-09-28 实机中断在 mxgpu-3-28)。
+#     全新集群上 admin.conf 必然不存在(2026-09-28 实机中断在 node-3-28)。
 #     现由 ensure_single_node_play 挂在"K8s+CNI 之后、addon 之前"(见该函数)。
 open(path, "w").write(src.replace(marker, block + "\n" + marker, 1))
 print("patched")
@@ -1125,7 +1125,7 @@ PYEOF
 #       包来源与 lvm2 离线准备见 patch-playbooks/install-packages.yml 头部注释。
 # 将"单节点集群控制面污点收敛"play 注入 cluster.yml/scale.yml(幂等, 与 ensure_cni_restart_play 同机制)
 # ⚠ 位置必须在**控制面起来之后**:该 play 用 kubectl(`/etc/kubernetes/admin.conf`)数 control-plane 节点,
-#   在 "Install etcd"/kubeadm 之前跑必然失败(2026-09-28 实机:全新集群全量部署中断在 mxgpu-3-28,
+#   在 "Install etcd"/kubeadm 之前跑必然失败(2026-09-28 实机:全新集群全量部署中断在 node-3-28,
 #   报 "stat /etc/kubernetes/admin.conf: no such file or directory")。旧实现把它和 registry hosts play
 #   一起插在 "Install etcd" 之前 —— 那个位置对 registry(只写 /etc/hosts)无害, 对本 play 是错的;
 #   scale.yml 场景(集群已存在)掩盖了这个 bug。现与 cubestack-cni-restart.yml 用同一组锚点。
@@ -1883,7 +1883,7 @@ update_loadbalancer_all_yml() {
 # ⚠ 要让路的对象不止 kubeadm 残留, 而是**任何占着 10250 的东西**, 包括 RKE2/k3s/microK8s
 #   这类第三方发行版: 它们的内嵌 kubelet 由各自的 agent 单元托管(不叫 kubelet.service),
 #   对 `kubeadm reset -f` 和 `systemctl stop kubelet` 完全免疫。
-#   2026-09-23 实机事故: 9 台节点里只有 mxgpu-3-32 的 rke2-agent 还在跑(另外 4 台装了 RKE2
+#   2026-09-23 实机事故: 9 台节点里只有 node-3-32 的 rke2-agent 还在跑(另外 4 台装了 RKE2
 #   但已 disabled), 旧清理逻辑对它三个判据全部漏检 → 部署跑 22 分钟后才在 kubespray 的
 #   kubeadm join 阶段报 `[ERROR Port-10250]: Port 10250 is in use` 中断, 报错点离真因
 #   (RKE2 agent)隔了一整个 playbook, 且现场早已"✅ 清理完成: 7 台成功"。
@@ -2146,7 +2146,7 @@ print("%s|%s|%s" % (
                 rm -f /etc/etcd.env /etc/systemd/system/etcd.service 2>/dev/null;
                 # ── ③ 复核: 10250 必须真的空出来 ──────────────────────────────────
                 # 原实现这里以 true 收尾 → ssh 恒返回 0 → “N 台成功” 是**假信号**:
-                # 2026-09-23 事故里 mxgpu-3-32 被报“清理成功”, 22 分钟后却因 10250 被占中断部署。
+                # 2026-09-23 事故里 node-3-32 被报“清理成功”, 22 分钟后却因 10250 被占中断部署。
                 # 改成真实判据: 最多等 10s 让 LISTEN socket 释放, 仍被占则打印元凶并以非 0 退出。
                 for _i in 1 2 3 4 5 6 7 8 9 10; do
                     ss -lnt 2>/dev/null | grep -qE \"[:.]10250[[:space:]]\" || exit 0

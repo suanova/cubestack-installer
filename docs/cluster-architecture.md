@@ -13,7 +13,7 @@
 | 环境 | 节点 | 网络 | 用途 |
 |---|---|---|---|
 | **VM 集群** | master01-03 + worker01-04, 在 `tools/vm/vm-nodes.conf` 定义(自动创建并注入 NODES) | libvirt 桥 `privbr0`, 网段 `10.244.0.0/16`(节点 `10.244.1.x`) | 开发/验证、离线链路自测 |
-| **BM 集群** | 9 台裸金属 `mxgpu-*`(3 master + 6 worker), 直接在 NODES 填写(不在 vm-nodes.conf) | 物理网段 `10.66.1.0/24`, 但底层是 **proxy-ARP 虚拟化 fabric**(见 §2) | 生产目标 |
+| **BM 集群** | 9 台裸金属 `node-*`(3 master + 6 worker), 直接在 NODES 填写(不在 vm-nodes.conf) | 物理网段 `192.168.100.0/24`, 但底层是 **proxy-ARP 虚拟化 fabric**(见 §2) | 生产目标 |
 
 > 注: cluster.conf 的 NODES 统一为 5 字段(`role,hostname,ip,ssh_user,ssh_password`), **不区分虚拟机/裸金属**;
 > 虚拟机规格(mac/内存/CPU/磁盘)在 `tools/vm/vm-nodes.conf`(10字段)定义, 创建后自动注入 NODES。
@@ -172,7 +172,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 | **speaker** | DaemonSet(每节点 1) | Layer2 模式: 把 VIP 以 **ARP 应答**通告到节点网卡, 成为该 VIP 在 L2 的"入口"; 进入 VIP 的流量 → 转发给后端 pod |
 
 **配置 CRD**(metallb 角色 apply, 池从 `cluster.conf` 的 `METALLB_POOL` 同步):
-- `IPAddressPool`: 地址池, 如 `10.66.1.130-10.66.1.139`;
+- `IPAddressPool`: 地址池, 如 `192.168.100.130-192.168.100.139`;
 - `L2Advertisement`: 声明 Layer2 通告并关联池。
 
 **数据面(外部访问流程)**
@@ -200,7 +200,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 
 ```bash
 # 1) 编辑 deployments/config/cluster.conf: NODES(节点)/ 网络 / 组件开关
-#    (BM 集群: NODES 直接填 5 字段节点, vm-nodes.conf 不定义节点, METALLB_POOL=10.66.1.130-139)
+#    (BM 集群: NODES 直接填 5 字段节点, vm-nodes.conf 不定义节点, METALLB_POOL=192.168.100.130-139)
 # 2) 一键部署(默认 = --with-cubestack: 节点准备 → NTP → kubespray 离线安装 → 基座 + 启用的 operator)
 sudo ./deployments/scripts/deploy-cluster.sh          # 全量(基座 + cluster.conf 中已启用的 operator)
 sudo ./deployments/scripts/deploy-cluster.sh --with-k8s   # 仅 kubespray 基座(k8s + metallb/local-path/registry)

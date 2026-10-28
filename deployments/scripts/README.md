@@ -278,7 +278,7 @@ sudo ./scripts/tools/node/setup-ntp.sh --check
 ```bash
 ./scripts/tools/k8s/gen-inventory.sh                    # 生成全部节点
 INV_ROLES=master ./scripts/tools/k8s/gen-inventory.sh   # 仅 master(先部署控制平面)
-INV_EXCLUDE=mxgpu-1-232 ./scripts/tools/k8s/gen-inventory.sh  # 排除指定节点(逗号分隔)
+INV_EXCLUDE=node-1-232 ./scripts/tools/k8s/gen-inventory.sh  # 排除指定节点(逗号分隔)
 ```
 
 生成:
@@ -481,7 +481,7 @@ sudo ./scripts/deploy-cluster.sh --only worker02   # 仅处理指定节点(框�
 NTP_ENABLED="${NTP_ENABLED:-1}"                       # 0=跳过时间同步(不推荐)
 NTP_SERVER="${NTP_SERVER:-}"                          # 权威时间源 IP; 留空=第一个 master 为权威
 NTP_UPSTREAM="${NTP_UPSTREAM:-}"                      # 权威(首 master)的公网上游(如 "pool ntp.aliyun.com iburst"); 留空=离线
-NTP_ALLOW="${NTP_ALLOW:-}"                            # 权威 chrony allow 子网; 默认空=仅本机(多子网节点填 "10.66.1.0/24")
+NTP_ALLOW="${NTP_ALLOW:-}"                            # 权威 chrony allow 子网; 默认空=仅本机(多子网节点填 "192.168.100.0/24")
 NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"        # 节点-权威偏差阈值(ms); 超限→中止 k8s 部署
 ```
 
@@ -509,7 +509,7 @@ bare-metal worker(Ubuntu)无法联网时,用 offline-files 中的离线 `.deb` �
 
 ```bash
 ./scripts/tools/node/install-worker-packages.sh <IP> [user]
-./scripts/tools/node/install-worker-packages.sh 10.66.1.232 ubuntu
+./scripts/tools/node/install-worker-packages.sh 192.168.100.232 ubuntu
 ```
 
 包来源: `deployments/offline-files/kubespray/cubestack-cluster/`(由 `OFFLINE_FILES_DIR` 全局变量指定)下的 `.deb` 文件(仓库根目录,与 kubeadm/etcd 等二进制同层)或 `packages/` 子目录,脚本自动收集两者并去重。包含 iputils-ping / rsync / iptables / curl / ca-certificates 及依赖。
@@ -591,8 +591,8 @@ sudo ./scripts/tools/offline/trim-offline-files.sh              # 实际清理
 VM_NET_MODE=bridge ./scripts/tools/vm/create-libvirt-vm.sh ...     # 覆盖 NET_MODE
 # 单次指定密码 / 密钥
 SSH_DEFAULT_PASSWORD='xxx' ./scripts/tools/node/setup-passwordless.sh 10.244.1.11
-# 指定配置文件
-CLUSTER_CONF=/path/to/cluster.conf sudo ./scripts/deploy-cluster.sh --list
+# 指定配置文件(变量经 env 传给 root: sudo 默认 env_reset 会清掉 "VAR=... sudo" 前置赋值)
+sudo env CLUSTER_CONF=/path/to/cluster.conf ./scripts/deploy-cluster.sh --list
 ```
 
 ---

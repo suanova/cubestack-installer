@@ -121,6 +121,55 @@ _ceph_yaml_file() {   # <subdir/file.yaml> [<file2.yaml>...] → 各文件变量
     printf '%s' "${out}"
 }
 
+# Rook 不会把 CephFilesystem/CephObjectStore.spec.placement 的变更回写到**已存在**的
+# mds/rgw Deployment 模板; 对存量 Deployment 直接补 unschedulable toleration(幂等)。
+_patch_cephfs_rgw_placement() {
+    local _d _list _tols _cur _cmd _i
+    _tols='{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}'
+    _list=""
+    for _i in $(seq 1 12); do
+        _list="$(SSH "${K}" -n ${CEPH_NAMESPACE} get deploy --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)"
+        printf '%s\n' "${_list}" | grep -qE '^rook-ceph-(mds|rgw)-' && break
+        sleep 5
+    done
+    for _d in $(printf '%s\n' "${_list}" | awk '/^rook-ceph-(mds|rgw)-/ {print $1}'); do
+        _cur="$(SSH "${K}" -n ${CEPH_NAMESPACE} get deploy ${_d} -o json 2>/dev/null || true)"
+        if printf '%s' "${_cur}" | grep -q 'node-role.kubernetes.io/control-plane' \
+            && printf '%s' "${_cur}" | grep -q 'node.kubernetes.io/unschedulable'; then
+            continue
+        fi
+        _cmd="${K} -n ${CEPH_NAMESPACE} patch deploy ${_d} --type=strategic -p '{\"spec\":{\"template\":{\"spec\":{\"tolerations\":[${_tols}]}}}}'"
+        if SSH "${_cmd}" >/dev/null 2>&1; then
+            ok "  ${_d} 增加 unschedulable toleration"
+        else
+            warn "  ${_d} placement patch 失败(不阻断; 检查 RBAC)"
+        fi
+    done
+}
+
+# ceph-csi-operator 调和的 Driver CR placement:
+#   controllerPlugin → master(容忍 control-plane + unschedulable);
+#   nodePlugin → 每个节点(含 cordon master; Exists 容忍所有 taint)。
+# 直接 patch Driver CR(而非 Deployment/DS), 由 ceph-csi-operator 负责收敛, 避免被回滚。
+_patch_csi_driver_placement() {
+    local _drv _patch _ctrl_patch
+    _patch='{"spec":{"controllerPlugin":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists"}]}]}}},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]},"nodePlugin":{"tolerations":[{"operator":"Exists"}]}}}'
+    _ctrl_patch='{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}}}'
+    # ceph-csi-operator 自身(controller-manager)也钉到 master; Driver CR 的 controllerPlugin 管不到它。
+    if SSH "${K} -n ${CEPH_NAMESPACE} patch deploy ceph-csi-controller-manager --type=strategic -p '${_ctrl_patch}'" >/dev/null 2>&1; then
+        ok "  ceph-csi-controller-manager placement → master"
+    else
+        warn "  ceph-csi-controller-manager placement patch 失败(可能尚未创建; 不阻断)"
+    fi
+    for _drv in rook-ceph.rbd.csi.ceph.com rook-ceph.cephfs.csi.ceph.com; do
+        if SSH "${K} -n ${CEPH_NAMESPACE} patch drivers.csi.ceph.io/${_drv} --type=merge -p '${_patch}'" >/dev/null 2>&1; then
+            ok "  CSI Driver ${_drv} placement 已收敛"
+        else
+            warn "  CSI Driver ${_drv} placement patch 失败(可能尚未创建/CRD 不支持; 不阻断)"
+        fi
+    done
+}
+
 say "[1/4] 确认 CSI 插件(ceph-csi-operator 调和)csi-rbdplugin / csi-cephfsplugin 就绪(最长 240s)..."
 CSI_OK=0
 for i in $(seq 1 24); do
@@ -136,6 +185,18 @@ for i in $(seq 1 24); do
     sleep 10
 done
 [ "${CSI_OK}" = "1" ] && ok "  ceph-csi 控制器/插件就绪" || warn "  ceph-csi 未完全就绪(检查 rook operator 日志; rook v1.20 必须已 apply csi-operator.yaml)"
+
+# 把 CSI 控制器钉到 master、nodeplugin 放开所有 taint(cordon master 仍能挂卷)
+_patch_csi_driver_placement
+for _d in rook-ceph.rbd.csi.ceph.com-ctrlplugin rook-ceph.cephfs.csi.ceph.com-ctrlplugin; do
+    SSH "${K} -n ${CEPH_NAMESPACE} rollout status deploy/${_d} --timeout=180s" >/dev/null 2>&1 \
+        || warn "  ${_d} 180s 内未完成滚动(检查 master 标签/taint 与 Driver CR)"
+done
+for _d in rook-ceph.rbd.csi.ceph.com-nodeplugin rook-ceph.cephfs.csi.ceph.com-nodeplugin; do
+    SSH "${K} -n ${CEPH_NAMESPACE} rollout status ds/${_d} --timeout=180s" >/dev/null 2>&1 \
+        || warn "  ${_d} 180s 内未完成滚动(检查 cordon master 的 toleration 是否生效)"
+done
+unset _d
 
 apply_remote() {   # <本地YAML内容> <临时文件名> → 远端 kubectl apply
     local content="$1" name="$2"
@@ -1098,6 +1159,12 @@ if [ "${_CEPH_EXTERNAL}" = "0" ]; then
     else
         warn "  未找到 ${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf(确认 expose 工具已 apply 成功)"
     fi
+fi
+
+# 存量 MDS/RGW Deployment(含 expose 创建的外部 cubestack-ext-fs)补 cordon-master toleration;
+# CR placement 变更不回写已有 Deployment, 必须直接 patch 存量模板。
+if [ "${_CEPH_EXTERNAL}" = "0" ] && { [ "${CEPHFS_ENABLED}" = "true" ] || [ "${CEPH_RGW_ENABLED}" = "true" ]; }; then
+    _patch_cephfs_rgw_placement
 fi
 
 say "[4/4] 验证 StorageClass 与池..."

@@ -47,6 +47,11 @@
 #     2026-10-19 修复: 在线只靠 Always 不会重启运行中的旧 pod); ② pullPolicy **离线/在线恒 Always**
 #     (每次新建 Pod 都从 registry/Harbor 重新解析 tag)。release chart(如 2.0.0)镜像 tag 由 chart
 #     自带, installer **不再** --set image.tag 覆盖; CUBESTACK_OPERATOR_IMAGE_TAG 只用于清单登记。
+#   · HA 拓扑(2026-10-27 用户口径): 按 cluster.conf NODES 的 master 数量自动决定 ——
+#     1~2 台 master = non-HA: operator replicas=1 + CubeStackCluster.spec.global.ha.enabled=false;
+#     >=3 台 master = HA: operator replicas=2 + CR global.ha.enabled=true
+#     (CRD 的 ha 只有 enabled; 组件副本由 catalog 各自的 value path 决定, 不写 ha.replicas)。
+#     与 master 是否 cordon 无关; 部署后还会对活体 CR/Deployment 做一次纠偏。
 # 数据源: cluster.conf (CUBESTACK_OPERATOR_* / ONLINE_DEPLOY_CUBESTACK_OPERATOR / REGISTRY_* / HARBOR_MIRROR_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps cubestack_operator
 # 验证:   sudo ./deploy-cluster.sh --steps verify_cubestack_operator
@@ -237,6 +242,14 @@ fi
 
 init_remote_kubectl || exit 1
 command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+): 本模块用 helm template 提取镜像 + helm upgrade --install 安装(CLI 镜像已内置)"; exit 1; }
+
+# ★ 2026-10-27 拓扑派生(用户口径): master 数量决定 operator 副本与平台 HA ——
+#   · 仅 1 台 master(或 2 台): non-HA → operator replicas=1, CR spec.global.ha.enabled=false;
+#   · 3 台及以上 master: HA → operator replicas=2(leader-election 热备), CR ha.enabled=true
+#     (ha.replicas 不是 CRD 字段 — chart CRD 注明副本由 catalog 各 value path 决定)。
+#   与 master 是否 cordon 无关; 只看 cluster.conf NODES 中 role=master 的数量。
+read -r _MASTER_COUNT OP_REPLICAS HA_ENABLED <<< "$(cubestack_operator_ha_profile)"
+say "  拓扑派生: master=${_MASTER_COUNT} 台 → operator replicas=${OP_REPLICAS}, clusterCR.spec.global.ha.enabled=${HA_ENABLED}"
 
 # ---------------- 派生变量(全部来自 cluster.conf, 无硬编码) ----------------
 NS="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
@@ -453,6 +466,23 @@ say "[3/6] 渲染 chart 提取镜像清单(helm template, 不写死清单)..."
 EXTRA_CR_VALUES_ARG=()
 if [ "${CR_ENABLED}" = "true" ]; then
     _CR_VALUES=( --set "clusterCR.enabled=true" )
+    # HA 全局开关由 master 数量派生(见文首): 单 master=false(组件保持默认单副本);
+    # >=3 master=true(catalog 支持 HA 的组件按各自 value path 展开副本 + 反亲和)。
+    # ⚠ CRD 的 spec.global.ha **只有 enabled**(chart CRD 明确注明 replicas 不是全局字段),
+    #   不要写 ha.replicas —— apiserver 会报 unknown field 并剪掉。
+    _CR_VALUES+=( --set "clusterCR.spec.global.ha.enabled=${HA_ENABLED}" )
+    if [ "${HA_ENABLED}" = "true" ]; then
+        # ★ 组件级 HA 例外(2026-10-27 容器 c 实测, 别再踩):
+        #   · cuberouter Deployment 挂 RWO PVC(app-data/app-logs) → 2 副本必然 Multi-Attach,
+        #     保持单副本(catalog 的 HA 注入路径 = cubeRouter.replicaCount);
+        #   · lws 第 2 副本在 3 master 上因 CPU 不足 + required 反亲和 Pending, 保持单副本
+        #     (catalog 的 HA 注入路径 = chart 顶层 replicaCount, 不是 controller.replicaCount)。
+        #   用户 values 优先级高于 global HA 注入, 这两条覆盖可稳定收敛。
+        _CR_VALUES+=(
+            --set "clusterCR.spec.components.cuberouter.values.cubeRouter.replicaCount=1"
+            --set "clusterCR.spec.components.lws.values.replicaCount=1"
+        )
+    fi
     # 服务暴露方式: CRD 默认是 nodeport, 但 metallb 集群必须显式写 loadbalancer, 否则
     # operator 渲染的组件 Service 会走 NodePort(2026-10-22 实机: CR 里看到 nodeport
     # 而集群实际用 MetalLB 时即为漏配)。Envoy Gateway 数据面另有 EnvoyProxy 兜底, 见 [6.2/6]。
@@ -738,6 +768,90 @@ fi   # 结束 ONLINE_DEPLOY!=true 的离线推送块([4/6]+[4b/6])
 say "[5/6] 应用 chart 内的 CRD(crds/ 目录)..."
 _WORK="$(mktemp -d)"
 trap '_cleanup; rm -rf "${_WORK}"' EXIT
+
+# 节点池(2026-10-27): operator pod 自身钉 master + 容忍 control-plane/unschedulable。
+# 平台组件：cubepilot-api/operator、cubestack-controller-manager、cubestack-portal 等
+# **组件 chart 原生支持 nodeSelector/tolerations**，这里通过 CubeStackCluster 的
+# components.<name>.values 在**创建 Deployment 时**就下发（不依赖部署末尾 patch）。
+# 其余平台组件(envoy/ai-gateway/lws/cuberouter/monitoring)仍由 node_pool 模块的
+# cubestack-placement.sh 兜底；**不使用** CR spec.global 的 placement 字段 —— 它会注入
+# 到所有组件(含 model bundle 推理负载)。
+if [ "${NODE_POOL_CUBESTACK_PLACEMENT:-true}" = "true" ]; then
+    _NODE_POOL_VALUES="${_WORK}/node-pool-values.yaml"
+    cat > "${_NODE_POOL_VALUES}" <<'EOF'
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node.kubernetes.io/unschedulable
+    operator: Exists
+    effect: NoSchedule
+
+# 平台组件：通过 component values 传给各自 chart（chart 已原生支持）。
+# cubepilot-chart: operator/api/web；controller-manager/portal chart: 顶层。
+clusterCR:
+  spec:
+    components:
+      cubepilot:
+        values:
+          operator:
+            nodeSelector:
+              node-role.kubernetes.io/control-plane: ""
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node.kubernetes.io/unschedulable
+                operator: Exists
+                effect: NoSchedule
+          api:
+            nodeSelector:
+              node-role.kubernetes.io/control-plane: ""
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node.kubernetes.io/unschedulable
+                operator: Exists
+                effect: NoSchedule
+          web:
+            nodeSelector:
+              node-role.kubernetes.io/control-plane: ""
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node.kubernetes.io/unschedulable
+                operator: Exists
+                effect: NoSchedule
+      cubestackControllerManager:
+        values:
+          nodeSelector:
+            node-role.kubernetes.io/control-plane: ""
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+            - key: node.kubernetes.io/unschedulable
+              operator: Exists
+              effect: NoSchedule
+      cubestackPortal:
+        values:
+          nodeSelector:
+            node-role.kubernetes.io/control-plane: ""
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+            - key: node.kubernetes.io/unschedulable
+              operator: Exists
+              effect: NoSchedule
+EOF
+    _EXTRA_VALUES+=( -f "${_NODE_POOL_VALUES}" )
+fi
+
 tar -xzf "${CHART_TGZ}" -C "${_WORK}"
 CRD_DIR="$(find "${_WORK}" -maxdepth 2 -type d -name crds | head -1 || true)"
 if [ -n "${CRD_DIR}" ] && ls "${CRD_DIR}"/*.yaml >/dev/null 2>&1; then
@@ -755,7 +869,7 @@ fi
 # ---------------- [6/6] helm upgrade --install(本地 chart; 在线=按 chart 定义拉 Harbor / 离线=集群 registry) ----------------
 if [ "${ONLINE_DEPLOY}" = "true" ]; then
     say "[6/6] helm upgrade --install(本地 chart; **在线模式**: 镜像按 chart 定义从 ${HARBOR_HOST} 拉, pullPolicy=Always)..."
-    _SET_ARGS=( --set "image.pullPolicy=Always" "${_TAG_SET_ARGS[@]}" )
+    _SET_ARGS=( --set "image.pullPolicy=Always" --set "replicas=${OP_REPLICAS}" "${_TAG_SET_ARGS[@]}" )
     if [ -n "${HARBOR_USER}" ] && [ -n "${HARBOR_PASSWORD}" ]; then
         _SET_ARGS+=( --set "imagePullSecrets[0].name=harbor-credentials" )
         # harbor-credentials: 节点向 Harbor 拉私有镜像(cubestack-operator 在 suanova-private 项目)。
@@ -793,6 +907,7 @@ else
         --set "image.repository=${IMG_REPO_OVERRIDE}"
         "${_TAG_SET_ARGS[@]}"
         --set "image.pullPolicy=Always"
+        --set "replicas=${OP_REPLICAS}"
     )
 fi
 
@@ -880,8 +995,21 @@ if [ "${CR_ENABLED}" = "true" ]; then
     _cr_expose="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.serviceExposeMode}' 2>/dev/null" || true) )"
     _cr_secs="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullSecrets}' 2>/dev/null" || true) )"
     _cr_secs_norm="$(printf '%s' "${_cr_secs}" | tr -d '[:space:]')"
+    _cr_ha="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.ha.enabled}' 2>/dev/null" || true) )"
     _want_expose="loadbalancer"
     [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ] && _want_expose="nodeport"
+    # HA 取值同样做活体纠偏(helm 三路合并对 CR 不可靠): 单 master=false; >=3 master=true。
+    # ⚠ 只校验/写 enabled: CRD schema(chart 与实机)中 spec.global.ha 只有 enabled,
+    #   replicas 由各 catalog 条目按 value path 决定, 不是全局字段(写它会 unknown field 被剪掉)。
+    if [ "${HA_ENABLED}" = "true" ]; then
+        _want_ha_patch='{"enabled":true}'
+        _ha_now="ha.enabled=${_cr_ha:-<空>}"
+        _ha_desc="ha=${HA_ENABLED}"
+    else
+        _want_ha_patch='{"enabled":false}'
+        _ha_now="ha.enabled=${_cr_ha:-<空>}"
+        _ha_desc="ha=${HA_ENABLED}"
+    fi
     if [ "${ONLINE_DEPLOY}" = "true" ]; then
         # CR global.imageRegistry 是**注册域**(不含项目前缀); 组件镜像路径自带 suanova/。
         # 写成 harbor.isuanova.com/suanova 会拼成 .../suanova/suanova/...(2026-10-22 实机)。
@@ -930,13 +1058,20 @@ walk(d.get("items", []))
     if [ "${_need_recreate}" = "1" ]; then
         say "  检测到 InferenceRuntimeProfile 镜像前缀与目标 registry(${_want_reg})不一致: 先纠偏 CR, 再重建 immutable profile..."
     fi
-    if [ -n "${_cr_name}" ] && { [ "${_cr_reg}" != "${_want_reg}" ] || [ "$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullPolicy}' 2>/dev/null" || true) )" != "${_want_pol}" ] || [ "${_cr_expose}" != "${_want_expose}" ] || [ "${_cr_secs_norm}" != "${_want_secs}" ]; }; then
-        warn "  CR 取值漂移(当前 imageRegistry=${_cr_reg:-<空>}, serviceExposeMode=${_cr_expose:-<空>}), kubectl patch 纠正为 ${_want_reg}/${_want_expose} ..."
-        SSH "${K} -n ${NS} patch csc ${_cr_name} --type=merge -p '{\"spec\":{\"global\":{\"imageRegistry\":\"${_want_reg}\",\"externalImageRegistryPrefix\":\"${_want_pref}\",\"imagePullSecrets\":${_want_secs},\"imagePullPolicy\":\"${_want_pol}\",\"serviceExposeMode\":\"${_want_expose}\"}}}' >/dev/null 2>&1" \
+    if [ -n "${_cr_name}" ] && { [ "${_cr_reg}" != "${_want_reg}" ] || [ "$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullPolicy}' 2>/dev/null" || true) )" != "${_want_pol}" ] || [ "${_cr_expose}" != "${_want_expose}" ] || [ "${_cr_secs_norm}" != "${_want_secs}" ] || [ "${_cr_ha}" != "${HA_ENABLED}" ]; }; then
+        warn "  CR 取值漂移(当前 imageRegistry=${_cr_reg:-<空>}, serviceExposeMode=${_cr_expose:-<空>}, ${_ha_now}), kubectl patch 纠正为 ${_want_reg}/${_want_expose}/${_ha_desc} ..."
+        SSH "${K} -n ${NS} patch csc ${_cr_name} --type=merge -p '{\"spec\":{\"global\":{\"imageRegistry\":\"${_want_reg}\",\"externalImageRegistryPrefix\":\"${_want_pref}\",\"imagePullSecrets\":${_want_secs},\"imagePullPolicy\":\"${_want_pol}\",\"serviceExposeMode\":\"${_want_expose}\",\"ha\":${_want_ha_patch}}}}' >/dev/null 2>&1" \
             && ok "  CR 已纠偏(operator 将按新值滚动组件)" \
             || warn "  CR 纠偏失败(手工: kubectl -n ${NS} get csc -o yaml)"
     else
-        ok "  CR 取值与部署模式一致(${_want_reg}/${_want_expose})"
+        ok "  CR 取值与部署模式一致(${_want_reg}/${_want_expose}/${_ha_desc})"
+    fi
+    # ★ 组件级 HA 例外也要活体纠偏(helm 对 CR 的更新不可靠; 仅 HA 开启时):
+    #   cuberouter 的 RWO PVC 不支持 2 副本; lws 第 2 副本在 3 master 上 CPU 不足。
+    if [ "${HA_ENABLED}" = "true" ] && [ -n "${_cr_name}" ]; then
+        SSH "${K} -n ${NS} patch csc ${_cr_name} --type=merge -p '{\"spec\":{\"components\":{\"lws\":{\"values\":{\"replicaCount\":1}},\"cuberouter\":{\"values\":{\"cubeRouter\":{\"replicaCount\":1}}}}}}' >/dev/null 2>&1" \
+            && ok "  CR 组件 HA 例外已收敛(lws/cuberouter=1; RWO/CPU 约束)" \
+            || warn "  CR 组件 HA 例外纠偏失败(手工检查 lws/cuberouter replicas)"
     fi
     # ★ profile 删除必须在 CR 纠偏**之后**并等待完成(2026-10-26 CodeRabbit):
     #   先删再 patch 时, operator 会趁窗口按**旧 registry** 重建 immutable profile;
@@ -956,7 +1091,7 @@ walk(d.get("items", []))
             fi
         fi
     fi
-    unset _cr_name _cr_reg _cr_expose _cr_secs _cr_secs_norm _cr_now_reg _want_reg _want_pref _want_pol _want_secs _want_expose
+    unset _cr_name _cr_reg _cr_expose _cr_secs _cr_secs_norm _cr_now_reg _cr_ha _ha_now _ha_desc _want_reg _want_pref _want_pol _want_secs _want_expose _want_ha_patch
 fi
 
 # ---------------- [6.5/6] RWO 单卷 Deployment 的更新策略守护 ----------------
@@ -976,6 +1111,19 @@ SSH "${K} -n ${NS} rollout status deployment/${RELEASE} --timeout=180s" >/dev/nu
     || SSH "${K} -n ${NS} rollout status deployment/${RELEASE}-cubestack-operator --timeout=180s" >/dev/null 2>&1 \
     || warn "  operator Deployment 未在 180s 内就绪(继续汇总; 端到端验证会给出确切状态)"
 
+# 副本数纠偏: helm --set 正常会生效; 若活体仍与拓扑目标不一致(旧 release/手工 scale),
+# 显式 scale, 避免"单 master 跑 2 副本 / 3 master 只跑 1 副本"。
+_DEP_NAME="${RELEASE}"
+SSH "${K} -n ${NS} get deploy ${_DEP_NAME} >/dev/null 2>&1" || _DEP_NAME="${RELEASE}-cubestack-operator"
+_cur_reps="$( (SSH "${K} -n ${NS} get deploy ${_DEP_NAME} -o jsonpath='{.spec.replicas}' 2>/dev/null" || true) )"
+if [ -n "${_cur_reps}" ] && [ "${_cur_reps}" != "${OP_REPLICAS}" ]; then
+    warn "  operator Deployment 副本数漂移(当前=${_cur_reps}, 目标=${OP_REPLICAS}) → 纠正"
+    SSH "${K} -n ${NS} scale deploy ${_DEP_NAME} --replicas=${OP_REPLICAS}" >/dev/null 2>&1 \
+        && ok "  operator replicas 已纠正为 ${OP_REPLICAS}" \
+        || warn "  operator replicas 纠正失败(手工: kubectl -n ${NS} scale deploy ${_DEP_NAME} --replicas=${OP_REPLICAS})"
+fi
+unset _cur_reps _DEP_NAME
+
 # ---------------- [6.6/6] Envoy Gateway 公网数据面 Service 类型对齐 ----------------
 # operator 的 spec.global.serviceExposeMode 不作用于 Envoy Gateway 数据面(其 Service 类型由
 # EnvoyProxy 决定, 默认 LoadBalancer)。NodePort 集群必须在这里补一个 EnvoyProxy 并挂到
@@ -987,11 +1135,21 @@ if [ "${CR_ENABLED}" = "true" ]; then
         || warn "  Envoy Gateway 公网 Service 类型未确认; Web UI 可能暂时无法从节点外访问"
 fi
 
+# ★ 2026-10-27 容器 c 全新安装实测: operator 组件是**异步创建**的, [6.5/6] 的 60s 窗口内
+#   cuberouter 可能还没出现 → 策略保持 RollingUpdate, 首次 HA/模板收敛滚动撞 RWO Multi-Attach
+#   (旧 Pod 持卷, 新 Pod Init 卡死)。结束前再兜一次(此时组件已基本创建完)。
+if [ "${CR_ENABLED}" = "true" ]; then
+    ensure_rwo_deployments_recreate "${NS}" "cubestack.io/managed-by=cubestack-operator" \
+        "${CUBESTACK_OPERATOR_RWO_STRATEGY_WAIT_SECONDS:-120}" \
+        || warn "  RWO 策略二次纠正未全部成功; 下次滚动前请手工确认"
+fi
+
 echo "---------------------------------------------"
 ( SSH "${K} -n ${NS} get pods,deploy -o wide 2>/dev/null" || true ) | sed 's/^/    /'
 echo "---------------------------------------------"
 ok "CubeStack Operator 部署完成"
 echo "  release:      ${RELEASE}(namespace ${NS})"
+echo "  拓扑/HA:      master=${_MASTER_COUNT} → operator replicas=${OP_REPLICAS}, clusterCR.spec.global.ha.enabled=${HA_ENABLED}"
 echo "  chart:        $(basename "${CHART_TGZ}")(sync=${SYNC_MODE}→${_MODE}; source=${CHART_SOURCE}; dir=${CHART_DIR})"
 if [ "${ONLINE_DEPLOY}" = "true" ]; then
     echo "  部署模式:     在线(ONLINE_DEPLOY_CUBESTACK_OPERATOR=true)"

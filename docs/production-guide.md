@@ -117,8 +117,8 @@ kubectl get nodes                                # 容器内已配好集群访�
 
 | 层 | 组件 | 解决什么 | 开关 | 【实机】证据(本环境) |
 |---|---|---|---|---|
-| ① 外部侧 | **kube-vip** 静态 Pod(每台 master 一个,租约选举出一台持有 VIP) | 给"人/CI/外部系统"一个**不随 master 增减变化的稳定地址** | `KUBE_VIP_ENABLED=true` + `K8S_API_VIP` | 3 台 master 均有 `/etc/kubernetes/manifests/kube-vip.yml`,`address=10.66.3.239`,持有者 `mxgpu-3-28`,`vip_arp=True` |
-| ② 集群内 | kube-proxy **ipvs** | Pod → `kubernetes.default.svc` 轮询 3 台 apiserver | 无需配置(ipvs 默认) | `kubectl get endpoints kubernetes` = `10.66.3.28/29/31:6443` 三条 |
+| ① 外部侧 | **kube-vip** 静态 Pod(每台 master 一个,租约选举出一台持有 VIP) | 给"人/CI/外部系统"一个**不随 master 增减变化的稳定地址** | `KUBE_VIP_ENABLED=true` + `K8S_API_VIP` | 3 台 master 均有 `/etc/kubernetes/manifests/kube-vip.yml`,`address=192.0.2.239`,持有者 `node-3-28`,`vip_arp=True` |
+| ② 集群内 | kube-proxy **ipvs** | Pod → `kubernetes.default.svc` 轮询 3 台 apiserver | 无需配置(ipvs 默认) | `kubectl get endpoints kubernetes` = `192.0.2.28/29/31:6443` 三条 |
 | ③ 节点侧 | **本地代理** nginx-proxy 静态 Pod(每台节点) | kubelet/kube-proxy 走**本机** `127.0.0.1:6443`,不再依赖某一台具体 master | `API_LOCAL_LB_ENABLED=true` | 各节点有 `nginx-proxy.yml`;worker 的 `kubelet.conf` = `https://localhost:6443` |
 
 **为什么三层都要**:① 只覆盖外部客户端;kubelet 走的是 kubeconfig 里的地址,如果不做 ③,某个 master 挂掉会让**指向它的节点**失联;kube-proxy 的 ipvs 只管**集群内 Service**,管不到节点上的 kubelet。【代码】`10_api_local_lb.sh` + `09_kube_vip.sh` + kubespray 原生 ipvs 共同构成。
@@ -163,16 +163,16 @@ kubelet / kube-proxy / kubectl / CI  →  https://k8s-api.cubestack.io:6443
 # 【实机】证据:入口域名 + 三台 master IP + VIP 都在证书 SAN 里
 $ ssh <master> "sudo openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -text" | grep -A2 'Subject Alternative'
                 DNS:k8s-api.cubestack.io
- IP Address:10.66.3.28      IP Address:10.66.3.29      IP Address:10.66.3.31
- IP Address:10.66.3.239     ← VIP 也在(所以换 VIP 必须重签/重装)
+ IP Address:192.0.2.28      IP Address:192.0.2.29      IP Address:192.0.2.31
+ IP Address:192.0.2.239     ← VIP 也在(所以换 VIP 必须重签/重装)
 
 # 【实机】节点侧本地代理的 upstream = 三台 master(least_conn,1s 超时)
 $ ssh <worker> "sudo grep -A5 upstream /etc/nginx/nginx.conf"
   upstream kube_apiserver {
     least_conn;
-    server 10.66.3.28:6443;
-    server 10.66.3.29:6443;
-    server 10.66.3.31:6443;
+    server 192.0.2.28:6443;
+    server 192.0.2.29:6443;
+    server 192.0.2.31:6443;
     }
 ```
 - ⚠ **改 VIP 必须重装集群**:证书 SAN 在 `kubeadm init` 时固化,存量集群的 SAN 只含旧 VIP。
@@ -238,7 +238,7 @@ $ ssh <worker> "sudo grep -A5 upstream /etc/nginx/nginx.conf"
 
 ```bash
 METALLB_ENABLED="${METALLB_ENABLED:-true}"          # 总开关
-METALLB_POOL="${METALLB_POOL:-10.66.3.237-10.66.3.238}"   # ⚠ 必须是与节点同二层网段里的空闲地址段
+METALLB_POOL="${METALLB_POOL:-192.0.2.237-192.0.2.238}"   # ⚠ 必须是与节点同二层网段里的空闲地址段
 ```
 
 | 约束 | 说明 |
@@ -262,7 +262,7 @@ METALLB_POOL="${METALLB_POOL:-10.66.3.237-10.66.3.238}"   # ⚠ 必须是与节�
 # 【实机】本环境输出
 $ kubectl get ipaddresspool -A
 NAMESPACE        NAME      AUTO ASSIGN   AVOID BUGGY IPS   ADDRESSES
-metallb-system   primary   true          false             ["10.66.3.237-10.66.3.238"]
+metallb-system   primary   true          false             ["192.0.2.237-192.0.2.238"]
 
 $ kubectl get l2advertisement -A
 NAMESPACE        NAME      IPADDRESSPOOLS   IPADDRESSPOOL SELECTORS   INTERFACES
@@ -270,7 +270,7 @@ metallb-system   primary   ["primary"]
 
 $ kubectl -n kube-system get svc registry        # 内置镜像仓库拿到的地址
 NAME       TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)
-registry   LoadBalancer   10.233.2.135   10.66.3.237   5000:30279/TCP
+registry   LoadBalancer   10.233.2.135   192.0.2.237   5000:30279/TCP
 ```
 
 ### 2.2 服务暴露方式:`SERVICE_EXPOSE_MODE`
@@ -299,7 +299,7 @@ SERVICE_EXPOSE_MODE="${SERVICE_EXPOSE_MODE:-metallb}"
 
 ```bash
 KUBE_VIP_ENABLED="${KUBE_VIP_ENABLED:-false}"   # ⚠ 默认关;要外部入口 HA 必须显式置 true
-K8S_API_VIP="${K8S_API_VIP:-10.66.3.239}"       # 留空 = 自动推导(从 .210 起逐地址探测空闲)
+K8S_API_VIP="${K8S_API_VIP:-192.0.2.239}"       # 留空 = 自动推导(从 .210 起逐地址探测空闲)
 KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"    # 留空 = kube-vip 自动检测网卡;多网卡建议显式指定
 KUBE_VIP_CP_DETECT="${KUBE_VIP_CP_DETECT:-false}"  # apiserver 进程级故障检测(默认关,与上游一致)
 ```
@@ -308,7 +308,7 @@ KUBE_VIP_CP_DETECT="${KUBE_VIP_CP_DETECT:-false}"  # apiserver 进程级故障�
 
 | 来源 | 行为 | 建议 |
 |---|---|---|
-| **显式**(`K8S_API_VIP=10.66.3.239`) | 直接用,不做任何探测 | **生产推荐** —— 可控、可审计,且同网段多套集群时必须显式错开 |
+| **显式**(`K8S_API_VIP=192.0.2.239`) | 直接用,不做任何探测 | **生产推荐** —— 可控、可审计,且同网段多套集群时必须显式错开 |
 | **自动推导**(留空) | 在各 master 上从 `.210` 起逐地址探测(**ICMP 无应答 且 6443 不可达** = 空闲),排除节点 IP 与 `METALLB_POOL`;起点可用 `K8S_API_VIP_START` 改 | 单集群、网段干净时可用;⚠ 探测由各 master 经 SSH 执行,容器解析不了节点名会静默失效(该缺陷已修) |
 
 **启用步骤**:
@@ -328,10 +328,10 @@ $ ssh <master> "ls /etc/kubernetes/manifests/"     # 三台都有:
 kube-apiserver.yaml  kube-controller-manager.yaml  kube-scheduler.yaml  kube-vip.yml
 
 $ ssh <master> "sudo grep -A1 'name: address' /etc/kubernetes/manifests/kube-vip.yml"
-      value: "10.66.3.239"                          # 三台一致(同一个 VIP,由租约决定谁持有)
+      value: "192.0.2.239"                          # 三台一致(同一个 VIP,由租约决定谁持有)
 
-$ ssh mxgpu-3-28 "ip -4 -o addr show | grep 239"    # 只有持有者的网卡上能看到
-5: br-lan    inet 10.66.3.239/32 scope global ...   # 本环境持有者 = mxgpu-3-28
+$ ssh node-3-28 "ip -4 -o addr show | grep 239"    # 只有持有者的网卡上能看到
+5: br-lan    inet 192.0.2.239/32 scope global ...   # 本环境持有者 = node-3-28
 ```
 
 **故障行为(选型时要知道的边界)**
@@ -369,7 +369,7 @@ VIP 就位 ≠ 入口已切。**存量集群**必须按两阶段走,因为切换
 
 ### 2.5 ⚠ 同网段跑多套集群:**VIP 与 MetalLB 池都必须错开**
 
-这是本项目**实机踩过的事故**(2026-09-29):同网段两套集群都用 `10.66.3.240` 当 API VIP,两边的 kube-vip 都持有该地址 ⇒ 客户端到 VIP 的流量**随机落到另一套集群的 apiserver** ⇒ `kubectl` 时好时坏地报:
+这是本项目**实机踩过的事故**(2026-09-29):同网段两套集群都用 `192.0.2.240` 当 API VIP,两边的 kube-vip 都持有该地址 ⇒ 客户端到 VIP 的流量**随机落到另一套集群的 apiserver** ⇒ `kubectl` 时好时坏地报:
 
 ```
 x509: certificate signed by unknown authority
@@ -582,7 +582,7 @@ CEPH_MODE=external
 CEPH_ENABLED=true
 CEPH_CSI_ENABLED=true
 # --- 以下取自 A 的导出(按实际值替换; ⚠ 含真实 keyring, 该文件永不入库) ---
-CEPH_MONITORS="10.66.3.28:30100,10.66.3.29:30100,10.66.3.31:30100"   # A 导出的 mon 端点
+CEPH_MONITORS="192.0.2.28:30100,192.0.2.29:30100,192.0.2.31:30100"   # A 导出的 mon 端点
 CEPH_POOL="cubestack-ext-rbd-pool"
 CEPH_USER="cubestack-ext-rbd"
 CEPH_KEYRING="<A 导出的 RBD key>"
@@ -942,8 +942,8 @@ kubectl -n metax-operator get ds -o custom-columns=NAME:.metadata.name,SEL:.spec
 | `NODES` | 8 台(3 master + 5 worker) | 集群节点清单 |
 | `K8S_VERSION` | `v1.35.8` | K8s 版本钉子(与 vendored kubespray 表值一致) |
 | `SERVICE_EXPOSE_MODE` | `metallb` | 服务暴露方式 |
-| `METALLB_ENABLED` / `METALLB_POOL` | `true` / `10.66.3.237-238` | LB 地址池 |
-| `KUBE_VIP_ENABLED` / `K8S_API_VIP` | `true` / `10.66.3.239` | API 浮动 VIP |
+| `METALLB_ENABLED` / `METALLB_POOL` | `true` / `192.0.2.237-238` | LB 地址池 |
+| `KUBE_VIP_ENABLED` / `K8S_API_VIP` | `true` / `192.0.2.239` | API 浮动 VIP |
 | `API_LOCAL_LB_ENABLED` | `true` | 节点侧本地代理 |
 | `CEPH_ENABLED` / `CEPH_CSI_ENABLED` | `true` / `true` | Ceph 底座 + 供给层 |
 | `CEPH_MODE` / `CEPH_NODE_ROLE` / `CEPH_MON_COUNT` | `internal` / `master` / `3` | 内部模式,存储节点=master,mon=3 |

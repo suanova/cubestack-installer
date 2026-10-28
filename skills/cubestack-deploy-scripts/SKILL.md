@@ -281,7 +281,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 > 详见 `docs/troubleshooting.md` 三.1(症状→根因→解法→验证全记录)。此处只沉淀关键知识点:
 
 - **controller 永久 Pending + speaker 全报 `secret "memberlist" not found`** → 先看 `describe pod` 的
-  `Node-Selectors`: 残留了**旧环境(裸金属)主机名**(如 `kubernetes.io/hostname: mxgpu-1-232`), 本环境无此节点
+  `Node-Selectors`: 残留了**旧环境(裸金属)主机名**(如 `kubernetes.io/hostname: node-1-232`), 本环境无此节点
   → controller 调度不上 → 从不启动 → **不会自动创建 memberlist secret** → speaker 连锁失败。
   `memberlist` secret 缺失是**结果不是根因**, 模板无需加该 Secret(v0.13.x 由 controller 启动时自建)。
 - **快速恢复/验证**(无需重跑部署):

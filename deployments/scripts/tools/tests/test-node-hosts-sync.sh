@@ -21,10 +21,10 @@ chk_contains() { if [[ "$3" == *"$2"* ]]; then echo "  ok  $1"; else echo "  FAI
 
 mkdir -p "${TMP}/bin" "${TMP}/keys" "${TMP}/hosts"
 : > "${TMP}/keys/fake_key"
-printf '127.0.0.1 localhost\n127.0.1.1 mxgpu-01\n10.9.9.9 m1\n'  > "${TMP}/hosts/10.0.0.1.hosts"
-printf '127.0.0.1 localhost\n127.0.1.1 mxgpu-02\n10.9.9.9 w1\n'  > "${TMP}/hosts/10.0.0.2.hosts"
-printf '127.0.0.1 localhost\n127.0.1.1 mxgpu-03\n'               > "${TMP}/hosts/10.0.0.3.hosts"
-printf '127.0.0.1 localhost\n127.0.1.1 mxgpu-11\n10.9.9.9 m1\n'  > "${TMP}/hosts/10.0.0.11.hosts"
+printf '127.0.0.1 localhost\n127.0.1.1 node-01\n10.9.9.9 m1\n'  > "${TMP}/hosts/10.0.0.1.hosts"
+printf '127.0.0.1 localhost\n127.0.1.1 node-02\n10.9.9.9 w1\n'  > "${TMP}/hosts/10.0.0.2.hosts"
+printf '127.0.0.1 localhost\n127.0.1.1 node-03\n'               > "${TMP}/hosts/10.0.0.3.hosts"
+printf '127.0.0.1 localhost\n127.0.1.1 node-11\n10.9.9.9 m1\n'  > "${TMP}/hosts/10.0.0.11.hosts"
 
 # 假 ssh: 读取 stdin 的远端脚本 → 把 /etc/hosts 换成该 IP 的临时文件 → 本地执行
 cat > "${TMP}/bin/ssh" <<'FAKE'
@@ -63,7 +63,7 @@ chk "退出码 0" "0" "$?"
 chk_contains "汇总信息" "节点侧 /etc/hosts 同步完成" "${out}"
 chk "node1 m1 解析到 10.0.0.1" "10.0.0.1 m1" "$(command grep -E '(^|[[:space:]])m1([[:space:]]|$)' "${TMP}/hosts/10.0.0.1.hosts" | head -1)"
 chk "node1 w1 解析到 10.0.0.2" "10.0.0.2 w1" "$(command grep -E '(^|[[:space:]])w1([[:space:]]|$)' "${TMP}/hosts/10.0.0.1.hosts" | head -1)"
-chk_contains "保留节点实际 hostname" "127.0.1.1 mxgpu-01" "$(cat "${TMP}/hosts/10.0.0.1.hosts")"
+chk_contains "保留节点实际 hostname" "127.0.1.1 node-01" "$(cat "${TMP}/hosts/10.0.0.1.hosts")"
 chk "旧 IP 行已删除(10.9.9.9 m1)" "0" "$(command grep -cF '10.9.9.9 m1' "${TMP}/hosts/10.0.0.1.hosts" || true)"
 
 echo "== ② 重复执行幂等(每 hostname 一行) =="
