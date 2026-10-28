@@ -54,6 +54,8 @@ load_config
 # 要用户重复抄一遍。这里在默认值之前补全:
 #   ① CEPHFS_MOUNT_ENV_FILE(专用, 默认 deployments/config/external-cephfs.env): 文件里出现的
 #      变量优先(挂载专用, 含只读 key; 用户可用它覆盖 path/subdir/read_only);
+#      ⚠ 该文件只覆盖 CEPHFS_NODE_USER、不同时给 CEPHFS_NODE_KEYRING, 而 cluster.conf/env
+#      已给 keyring 时会硬失败(可能是不同 CephX 身份); 同名覆盖或成对提供仍接受。
 #   ② 其次 CEPH_EXTERNAL_ENV_FILE(默认 deployments/config/external-ceph.env)的 Rook 导出:
 #      只补空值, 显式 cluster.conf / 环境变量始终优先;
 #   ③ 只读开关未显式设置时读专用文件。
@@ -76,10 +78,14 @@ _normalize_mons() {
 }
 
 # 在子 shell 中 source env 文件并取一个变量(不污染本模块全局变量)
+# ★ 必须先 unset 目标变量(2026-10-28): 子 shell 会继承父 shell 的同名变量, 文件未定义该
+#   变量时 ${!v} 会读到**父进程的值**, 让调用方误判"文件里出现了该变量"(凭据成对校验/覆盖
+#   优先级都依赖这个判断)。
 _env_get() {
     local _f="$1" _v="$2"
     [ -f "${_f}" ] || return 0
     (
+        unset "${_v}" 2>/dev/null || true
         set +u
         # shellcheck disable=SC1090
         . "${_f}" >/dev/null 2>&1
@@ -90,17 +96,33 @@ _env_get() {
 _load_external_cephfs_env() {
     [ "${CEPH_MODE:-internal}" = "external" ] || return 0
     local _ext_env _mount_env _v _val _raw _nu _ru _nk _rk _ro _gen
-    local _user_explicit _key_explicit
+    local _user_explicit _key_explicit _pre_user _pre_key _mount_key_set=0
     _ext_env="${CEPH_EXTERNAL_ENV_FILE:-${REPO_ROOT}/deployments/config/external-ceph.env}"
     _mount_env="${CEPHFS_MOUNT_ENV_FILE:-${REPO_ROOT}/deployments/config/external-cephfs.env}"
 
     # ① 专用挂载 env: **该文件里出现的变量优先**(它是挂载专用的唯一配置源; 含只读 key)。
+    # 覆盖前快照: 用于识别"挂载 env 只改 user、key 仍来自 cluster.conf/env"的跨来源混配。
+    _pre_user="${CEPHFS_NODE_USER:-}"
+    _pre_key="${CEPHFS_NODE_KEYRING:-}"
     if [ -f "${_mount_env}" ]; then
         for _v in CEPH_MONITORS CEPHFS_FS CEPHFS_NODE_USER CEPHFS_NODE_KEYRING \
                   CEPHFS_MOUNT_READ_ONLY CEPHFS_MOUNT_PATH CEPHFS_MOUNT_SUBDIR; do
             _val="$(_env_get "${_mount_env}" "${_v}")"
-            [ -n "${_val}" ] && printf -v "${_v}" '%s' "${_val}"
+            [ -n "${_val}" ] || continue
+            [ "${_v}" = "CEPHFS_NODE_KEYRING" ] && _mount_key_set=1
+            printf -v "${_v}" '%s' "${_val}"
         done
+    fi
+    # ★ 跨来源成对校验(2026-10-28 CodeRabbit): 挂载 env 把 user 改成另一个身份、却**没有**
+    #   同时提供 keyring, 而 keyring 已由 cluster.conf/env 给出 ⇒ 用户与 key 可能属于不同
+    #   CephX 身份, 直到 mount 才认证失败。仅拒绝这一种"只改 user"的组合; 同名覆盖、或该文件
+    #   同时提供 user+key 仍接受。
+    if [ "${_mount_key_set}" = "0" ] && [ -n "${_pre_key}" ] \
+        && [ "${CEPHFS_NODE_USER:-}" != "${_pre_user}" ]; then
+        err "CEPHFS_NODE_USER 被 ${_mount_env} 覆盖为 '${CEPHFS_NODE_USER:-}', 但该文件未同时提供 CEPHFS_NODE_KEYRING"
+        err "  现有 CEPHFS_NODE_KEYRING 来自其它来源(cluster.conf/env), 可能与新用户属于不同 CephX 身份"
+        err "  修法: 在 ${_mount_env} 同时设置成对的 CEPHFS_NODE_KEYRING, 或去掉其中的 CEPHFS_NODE_USER 覆盖"
+        return 1
     fi
 
     # ② Rook 官方 external-ceph.env(只补未显式设置的变量)
@@ -143,7 +165,7 @@ _load_external_cephfs_env() {
     fi
     return 0
 }
-_load_external_cephfs_env
+_load_external_cephfs_env || exit 1
 
 # ---------------- 变量与默认值 ----------------
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
@@ -539,10 +561,15 @@ for _line in "${NODES[@]:-}"; do
     # (远端 shell 会因未加引号的 ( 报语法错, 曾致所有节点被误判 NotReady)
     _ready="$( (SSH "${K}" get node "${_host}" --no-headers 2>/dev/null) || true )"
     _ready="$(printf '%s' "${_ready}" | awk '{print $2}')"
-    if [ "${_ready}" != "Ready" ]; then
-        warn "  节点 ${_host}(${_ip}) 状态='${_ready:-未知}'(非 Ready), 跳过挂载校验"
-        continue
-    fi
+    # ★ cordon 的节点 STATUS 是 "Ready,SchedulingDisabled"(2026-10-28 容器 c 实测):
+    #   只比较 "Ready" 会把默认 cordon 的 master 全部误判为非 Ready, 跳过其挂载校验。
+    case "${_ready}" in
+        Ready|Ready,*) : ;;
+        *)
+            warn "  节点 ${_host}(${_ip}) 状态='${_ready:-未知}'(非 Ready), 跳过挂载校验"
+            continue
+            ;;
+    esac
     _verify_cmd="set -e
 fstype=\$(findmnt -n -o FSTYPE -T '${CEPHFS_MOUNT_PATH}' 2>/dev/null | tail -1 | tr -d '[:space:]' || true)
 [ \"\${fstype}\" = ceph ] || { echo \"NOT_MOUNTED:\${fstype}\"; exit 2; }

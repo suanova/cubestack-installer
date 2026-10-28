@@ -640,6 +640,9 @@ Ceph 全关时不会排进部署计划);单独执行: `sudo ./deploy-cluster.sh 
     一个(含专用 `external-cephfs.env` 里的值), 另一个就**不再**从 `external-ceph.env` 借用;
     缺 keyring 会在「external 模式缺凭据」预检明确失败, 而不是把另一个身份的 key 写进
     Secret、到 mount 阶段才认证失败。显式用户名若与 Rook 导出同一身份, 需同时显式给 keyring。
+  - ⚠ 专用 `external-cephfs.env` 只覆盖 `CEPHFS_NODE_USER`(改成不同名)、却**没有**同时给
+    `CEPHFS_NODE_KEYRING`, 而 keyring 已由 cluster.conf/env 提供 → **硬失败**
+    (用户与 key 可能属于不同 CephX 身份); 同名覆盖、或该文件成对提供 user+key 仍接受。
   **多 FS 环境必须显式选 FS**: 挂载选项带 `mds_namespace=<CEPHFS_FS>`, 否则内核会挂默认 FS
   (容器 d 的 external 集群同时有 `cephfs` 与 `cubestack-ext-fs`, 实测必须指定后者)。
 - external 只做宿主机挂载(不导入 CSI)时 `REQUIRES` 改为 `k8s_deploy`(集群必须先存在), 不再强拉

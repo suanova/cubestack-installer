@@ -15,6 +15,8 @@
 #   ⑨ external 只读挂载(专用 external-cephfs.env + CEPHFS_MOUNT_READ_ONLY)
 #   ⑩ external 凭据成对派生: 只显式给 user 时不借用其他身份的 key(预检失败); 显式成对优先
 #   ⑪ 预清理按 mds_namespace 判 FS: 旧 FS/缺少 mds_namespace → lazy umount; 匹配 → 保留复用
+#   ⑫ external 挂载 env 只覆盖 user、key 来自其它来源 → 拒绝混配(同名/成对仍接受)
+#   ⑬ cordon 节点(Ready,SchedulingDisabled)仍参与逐节点挂载校验
 # 隔离: CLUSTER_CONF=临时配置 + PATH 前置假 ssh(纯离线; 无集群/无网络)
 # 用法: bash deployments/scripts/tools/tests/test-cephfs-mount.sh
 # ============================================================
@@ -183,6 +185,45 @@ CEPHFS_NODE_USER="explicit-node"
 CEPHFS_NODE_KEYRING="AQBExplicitPair=="  # secret-scan: allow(fake test fixture)
 EOF
 
+# 2026-10-28: 专用 mount env 只覆盖 user、不同时给 keyring, 而 cluster.conf 已有 keyring →
+#   可能是不同 CephX 身份, 必须在加载阶段硬失败; 同名覆盖 / 成对提供则仍接受。
+cat > "${TMP}/external-cephfs-user-only.env" <<'EOF'
+CEPHFS_NODE_USER="override-node-user"
+EOF
+cat > "${TMP}/cluster.conf.external-key-only" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
+  "master,m2,10.0.0.2,root,-"
+  "worker,w1,10.0.0.11,root,-"
+)
+SSH_USER="root"
+SSH_KEY_NAME="cubestack_k8s"
+KUBESPRAY_PROFILE="none"
+CEPH_ENABLED="false"
+CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
+CEPHFS_ENABLED="true"
+CEPHFS_MOUNT_ENABLED="true"
+CEPHFS_NODE_KEYRING="AQBClusterKey=="  # secret-scan: allow(fake test fixture)
+EOF
+cat > "${TMP}/cluster.conf.external-same-user" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
+  "master,m2,10.0.0.2,root,-"
+  "worker,w1,10.0.0.11,root,-"
+)
+SSH_USER="root"
+SSH_KEY_NAME="cubestack_k8s"
+KUBESPRAY_PROFILE="none"
+CEPH_ENABLED="false"
+CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
+CEPHFS_ENABLED="true"
+CEPHFS_MOUNT_ENABLED="true"
+CEPHFS_NODE_USER="override-node-user"
+CEPHFS_NODE_KEYRING="AQBClusterKey=="  # secret-scan: allow(fake test fixture)
+EOF
+
 # 假 ssh: 跳过选项, 记录 host/cmd, 按命令内容回放夹具
 mkdir -p "${TMP}/bin" "${TMP}/mnt-state"
 cat > "${TMP}/bin/ssh" <<'FAKE'
@@ -209,7 +250,10 @@ case "${cmd}" in
     *"ceph auth get-or-create"*) echo "[client.cubestack-cephfs-models]" ;;
     *"ceph auth print-key"*) echo "AQBTestKey1234567890abcdef==" ;;
     *"rollout status"*) echo 'daemon set "cephfs-models-mount" successfully rolled out' ;;
-    *"get node "*) if [ "${FAKE_NOTREADY:-0}" = "1" ]; then echo "node NotReady <none> 1m v1.35.8"; else echo "node Ready <none> 1m v1.35.8"; fi ;;
+    *"get node "*)
+        if [ "${FAKE_NOTREADY:-0}" = "1" ]; then echo "node NotReady <none> 1m v1.35.8"
+        elif [ "${FAKE_CORDONED:-0}" = "1" ]; then echo "node Ready,SchedulingDisabled <none> 1m v1.35.8"
+        else echo "node Ready <none> 1m v1.35.8"; fi ;;
     *"CEPH_UNMOUNT_OK"*) echo "CEPH_UNMOUNT_OK" ;;
     *"echo CEPH_MOUNT_OK"*) echo "CEPH_MOUNT_OK" ;;
     *"-o FSTYPE"*)
@@ -252,6 +296,7 @@ run_module() {  # run_module <mode> [conf] → 退出码; 输出在 $TMP/run-<mo
             uninstall|uninstall-external) CUBESTACK_MODULE_ACTION=uninstall bash "${MODULE}" ;;
             disabled)  CEPHFS_MOUNT_ENABLED=false bash "${MODULE}" ;;
             notready)  FAKE_NOTREADY=1 bash "${MODULE}" ;;
+            cordoned)  FAKE_CORDONED=1 bash "${MODULE}" ;;
             *)         bash "${MODULE}" ;;
         esac
     ) > "${TMP}/run-${mode}.out" 2>&1
@@ -476,6 +521,32 @@ chk "缺少 mds_namespace 退出码" "0" "${rc}"
 chk_contains "缺少选项按不匹配处理" "无 mds_namespace" "${TMP}/run-fs-absent.out"
 chk_contains "缺少选项执行 lazy umount" "umount -l '/mnt/cephfs/models'" "${TMP}/ssh-fs-absent.log"
 unset FAKE_MNT_STUB FAKE_MNT_STATE_DIR
+
+echo "== ⑫ external 挂载 env 只覆盖 user、key 仍来自 cluster.conf → 拒绝混配 =="
+export CEPH_EXTERNAL_ENV_FILE="${TMP}/external-ceph.env"
+export CEPHFS_MOUNT_ENV_FILE="${TMP}/external-cephfs-user-only.env"
+rc="$(run_module mix-user-only "${TMP}/cluster.conf.external-key-only")"
+unset CEPH_EXTERNAL_ENV_FILE CEPHFS_MOUNT_ENV_FILE
+chk "混配退出码 1" "1" "${rc}"
+chk_contains "点名 CEPHFS_NODE_USER" "CEPHFS_NODE_USER" "${TMP}/run-mix-user-only.out"
+chk_contains "点名 CEPHFS_NODE_KEYRING" "CEPHFS_NODE_KEYRING" "${TMP}/run-mix-user-only.out"
+chk_not_contains "混配不写 Secret/DaemonSet" "=== APPLY ===" "${TMP}/apply-mix-user-only.log"
+
+# 同名覆盖仍接受: cluster.conf 与 mount env 的 user 相同, key 由 cluster.conf 提供
+export CEPH_EXTERNAL_ENV_FILE="${TMP}/external-ceph.env"
+export CEPHFS_MOUNT_ENV_FILE="${TMP}/external-cephfs-user-only.env"
+rc="$(run_module mix-same-user "${TMP}/cluster.conf.external-same-user")"
+unset CEPH_EXTERNAL_ENV_FILE CEPHFS_MOUNT_ENV_FILE
+chk "同名覆盖退出码 0" "0" "${rc}"
+APPLY_SAME="${TMP}/apply-mix-same-user.log"
+chk_contains "同名覆盖使用显式 user" 'override-node-user' "${APPLY_SAME}"
+chk_contains "同名覆盖使用 cluster.conf key" 'AQBClusterKey==' "${APPLY_SAME}"
+
+echo "== ⑬ cordon 的 master(Ready,SchedulingDisabled)仍须参与挂载校验 =="
+rc="$(run_module cordoned)"
+chk "cordoned 退出码" "0" "${rc}"
+chk_contains "cordoned master 挂载 OK" "m1(10.0.0.1) 挂载 OK" "${TMP}/run-cordoned.out"
+chk_not_contains "不误判非 Ready" "非 Ready" "${TMP}/run-cordoned.out"
 
 echo "== ⑦ 零节点验证必须失败(不得假成功) =="
 rc="$(run_module notready)"
