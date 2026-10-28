@@ -29,6 +29,12 @@
 #      applied 状态每行记录 "<PREF> <CIDR>", 改 PREF/网段时都按**记录的 PREF** 删除,
 #      旧优先级的规则不会残留(旧版单 CIDR 状态按当前 PREF 兼容清理)。
 #
+#   ★ SSH 主机密钥(2026-10-28): 节点 SSH 不再禁用主机密钥校验、也不再丢弃 known_hosts;
+#     默认 accept-new + 持久 known_hosts(首次记录、之后换钥拒绝), 密码回退同样受此约束。
+#     策略 NODE_NET_GUARD_SSH_HOST_KEY_CHECKING(accept-new|yes|no; 默认 accept-new),
+#     文件 NODE_NET_GUARD_SSH_KNOWN_HOSTS(默认 ${SSH_KEY_DIR}/cubestack_known_hosts)。
+#     VM 同 IP 重建后需删除 stale 条目再重试; 全仓信任体系仍待实施(见 docs/security-ssh-host-keys.md)。
+#
 # 用法:
 #   sudo ./node-net-guard.sh --check
 #   sudo ./node-net-guard.sh --apply-rule
@@ -38,7 +44,8 @@
 #        --pod-cidr <CIDR> --pref <N>     # 内部/测试用: 在本机执行探测载荷
 #
 # 数据源: cluster.conf NODES / KUBE_PODS_SUBNET / CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR /
-#         NODE_NET_GUARD_ACTION / NODE_NET_GUARD_RULE_PREF
+#         NODE_NET_GUARD_ACTION / NODE_NET_GUARD_RULE_PREF /
+#         NODE_NET_GUARD_SSH_HOST_KEY_CHECKING / NODE_NET_GUARD_SSH_KNOWN_HOSTS
 # ============================================================
 set -euo pipefail
 
@@ -281,6 +288,23 @@ POD_CIDR="${KUBE_PODS_SUBNET:-10.233.64.0/18}"
 NATIVE_FIX="${CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR:-true}"
 CNI="${KUBE_NETWORK_PLUGIN:-calico}"
 SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+# SSH 主机密钥策略: accept-new=首次记录, 之后换钥拒(默认); yes=仅接受已记录 key; no=显式关闭(仅 lab)
+SSH_HKC="${NODE_NET_GUARD_SSH_HOST_KEY_CHECKING:-accept-new}"
+case "${SSH_HKC}" in
+    accept-new|yes|no) : ;;
+    *)
+        err "NODE_NET_GUARD_SSH_HOST_KEY_CHECKING 非法: '${SSH_HKC}'(accept-new|yes|no)"
+        exit 1
+        ;;
+esac
+SSH_KNOWN_HOSTS="${NODE_NET_GUARD_SSH_KNOWN_HOSTS:-${SSH_KEY_DIR:-${HOME}/.ssh}/cubestack_known_hosts}"
+mkdir -p "$(dirname "${SSH_KNOWN_HOSTS}")" 2>/dev/null || true
+if [ "${SSH_HKC}" = "no" ]; then
+    warn "SSH 主机密钥校验被显式关闭(NODE_NET_GUARD_SSH_HOST_KEY_CHECKING=no); 仅限受信实验环境"
+fi
+if [ "${SSH_HKC}" = "yes" ] && [ ! -s "${SSH_KNOWN_HOSTS}" ]; then
+    warn "NODE_NET_GUARD_SSH_HOST_KEY_CHECKING=yes 但 ${SSH_KNOWN_HOSTS} 为空/不存在; 首次连接会失败(需预置节点 host key)"
+fi
 
 case "${ACTION}" in
     check|rule|remove|off) : ;;
@@ -319,13 +343,15 @@ _cidr_first_host() {
 _run_on_node() {   # <ip> <user> <pw> <script-file>
     local ip="$1" user="$2" pw="$3" file="$4" rcmd
     rcmd="sudo bash -s"; [ "${user}" = "root" ] && rcmd="bash -s"
-    if [ -f "${SSH_KEY}" ] && ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+    if [ -f "${SSH_KEY}" ] && ssh -i "${SSH_KEY}" -o BatchMode=yes \
+            -o StrictHostKeyChecking="${SSH_HKC}" -o UserKnownHostsFile="${SSH_KNOWN_HOSTS}" \
+            -o ConnectTimeout=8 \
             "${user}@${ip}" "${rcmd}" < "${file}" 2>/dev/null; then
         return 0
     fi
     if [ -n "${pw}" ] && command -v sshpass >/dev/null 2>&1; then
-        env SSHPASS="${pw}" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        env SSHPASS="${pw}" sshpass -e ssh \
+            -o StrictHostKeyChecking="${SSH_HKC}" -o UserKnownHostsFile="${SSH_KNOWN_HOSTS}" \
             -o ConnectTimeout=8 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
             "${user}@${ip}" "${rcmd}" < "${file}" 2>/dev/null
         return $?

@@ -24,6 +24,7 @@
 #   ⑩ --apply-rule 不得自动清除已在位的兜底(探测被规则掩盖会造成来回翻转)
 #   ⑪ 地址查询失败不得当作"无分歧": 原生修复关闭 → 非 0/写兜底; 开启 → 仅告警;
 #      查询成功但无地址仍属正常(不算失败)
+#   ⑫ SSH 主机密钥: 默认 accept-new + 持久 known_hosts(不再 no//dev/null); 非法策略非 0
 #
 # 隔离: 假 ssh 把远端载荷在本机执行; 假 ip 按节点夹具返回路由查询结果;
 #       绝对路径(/etc/cubestack, /usr/local/sbin, /etc/systemd/system)重写到临时根。
@@ -410,6 +411,18 @@ _reset_rule_state
 out="$(FAKE_ADDR_FAIL=1 _run CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR=false -- --apply-rule)"
 chk "⑪ rule 动作退出码 0" "0" "$?"
 chk_contains "⑪ 探测不完整时仍写入兜底" "RULE_ADD|30000|10.233.64.0/18|main" "$(cat "${TMP}/ip/log")"
+
+echo "== ⑫ SSH 主机密钥: accept-new + 持久 known_hosts =="
+_tool_src="$(cat "${TOOL}")"
+chk_contains "默认策略 accept-new" 'NODE_NET_GUARD_SSH_HOST_KEY_CHECKING:-accept-new' "${_tool_src}"
+chk_contains "使用持久 known_hosts" 'UserKnownHostsFile="${SSH_KNOWN_HOSTS}"' "${_tool_src}"
+_code="$(command grep -v '^[[:space:]]*#' "${TOOL}")"
+chk_not_contains "不再禁用主机密钥校验" 'StrictHostKeyChecking=no' "${_code}"
+chk_not_contains "不再丢弃 known_hosts" 'UserKnownHostsFile=/dev/null' "${_code}"
+out="$(_run NODE_NET_GUARD_SSH_HOST_KEY_CHECKING=bogus -- --check)"
+rc=$?
+chk "⑫ 非法策略退出码 1" "1" "${rc}"
+chk_contains "⑫ 点名策略变量" "NODE_NET_GUARD_SSH_HOST_KEY_CHECKING" "${out}"
 
 echo ""
 if [ "${fail}" = "0" ]; then
