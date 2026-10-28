@@ -32,7 +32,8 @@ echo "============= 1. 删除 SNAT 规则 ============="
 _snat_deleted=0
 _snat_try=0
 while [ "${_snat_try}" -lt 50 ]; do
-    _rule="$(iptables -t nat -S POSTROUTING 2>/dev/null \
+    _list="$(iptables -t nat -S POSTROUTING)" || { err "读取 nat POSTROUTING 规则失败"; exit 1; }
+    _rule="$(printf '%s\n' "${_list}" \
         | command grep -F -- "-s ${VM_SUBNET}" \
         | command grep -F -- " -j SNAT" | head -1 || true)"
     [ -n "${_rule}" ] || break
