@@ -92,10 +92,10 @@ for line in "${NODES[@]:-}"; do
 
     # 3. 推送 /etc/hosts
     say "更新 /etc/hosts ..."
-    # 先删旧块 + 旧裸条目(nova-k8s-*/mxgpu-*/k8s-api.nova.local / k8s-api.cubestack.io), 再追加新块 → 主机名不重复
+    # 先删旧块 + 旧裸条目(nova-k8s-*/node-*/k8s-api.nova.local / k8s-api.cubestack.io), 再追加新块 → 主机名不重复
     ${SSH_SUDO} timeout 30 ssh ${SSH_OPTS} "${NODE_USER}@${NODE_IP}" "sudo bash -c '
         sed -i \"/# >>> cubestack-cluster/,/# <<< cubestack-cluster/d\" /etc/hosts
-        sed -i -E \"/nova-k8s-(master|node)/d; /mxgpu-[0-9]/d; /k8s-api\\\\.(nova\\\\.local|cubestack\\\\.io)/d\" /etc/hosts
+        sed -i -E \"/nova-k8s-(master|node)/d; /node-[0-9]/d; /k8s-api\\\\.(nova\\\\.local|cubestack\\\\.io)/d\" /etc/hosts
         echo \"${HOSTS_BLOCK}\" >> /etc/hosts
     '" 2>&1 && ok "hosts 已更新" || warn "hosts 更新失败"
     vlog "  校验: ${NODE_USER}@${NODE_IP} hostname = $(${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" 'hostname' 2>/dev/null)"

@@ -19,7 +19,7 @@
 #             推送到集群内置 registry(需先用 tools/images/metax-save-images.sh 在联网机生成 tar)
 #   · 镜像目标: 集群内置 registry 的 METAX_REGISTRY(默认 registry.cubestack.io:5000/metax);
 #     模块自动把宿主机 /etc/hosts 的 registry.cubestack.io/k8s-api 解析到正确 IP(registry VIP / API 入口,
-#     不留 10.66.3.37 这类过期条目), 宿主机即可按域名 push 与 helm 连集群(外部机器同理改 /etc/hosts)。
+#     不留 192.0.2.37 这类过期条目), 宿主机即可按域名 push 与 helm 连集群(外部机器同理改 /etc/hosts)。
 #   · METAX_LIST_IMAGES=true 可仅打印所需镜像的 docker pull+save 命令(离线 tar 预置清单), 不部署。
 #   · MACA SDK 与内核驱动镜像不在资源包内: 优先本地 docker / METAX_OFFLINE_DIR 离线 tar,
 #     否则尝试在线从 cr.metax-tech.com 拉取推送(best-effort, 缺省仅 warn 不阻塞)。
@@ -180,7 +180,7 @@ say "检查沐曦 GPU Operator 前置条件..."
 command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 请先安装 Helm"; exit 1; }
 command -v skopeo >/dev/null 2>&1 || { warn "未找到 skopeo(tar 模式推送将不可用)"; }
 # skopeo 所需最小 trust policy 已在 lib-common.sh source 时自动生成(ensure_skopeo_policy)
-# 宿主机 /etc/hosts 每次部署统一更新为正确 IP(不允许遗留 10.66.3.37 等过期条目):
+# 宿主机 /etc/hosts 每次部署统一更新为正确 IP(不允许遗留 192.0.2.37 等过期条目):
 #   REGISTRY_DOMAIN → REGISTRY_IP(集群内置 registry VIP, 供宿主按域名 push)
 #   API_DOMAIN      → API_ENTRY_IP(API Server 入口: kube-vip 已绑 → VIP, 未绑 → 首个 master)
 # 复用 lib-common 的 ensure_hosts_entry(先删旧行再写当前 IP, 无 grep 守卫 → 多集群不残留旧 IP)

@@ -22,7 +22,7 @@
 | failureDomain | **host** | 每主机一份副本, 真正跨主机冗余(≥3 台存储节点) |
 | mon | **3**(allowMultiplePerNode=false) | 3 台主机真实法定人数(奇数) |
 | mgr | **2**(`CEPH_MGR_COUNT`, active+standby) | 单 mgr 是滚动单点: 它所在节点挂/被排空 → 集群进 `no active mgr`(dashboard/模块/PG autoscaler 停摆)。mgr 很轻, 1→2 成本可忽略 |
-| 守护进程 placement | mon/**osd**/**mgr**(写在 `CephCluster.placement`)+ **mds**(写在 `CephFilesystem.metadataServer.placement`)+ **rgw**(写在 `CephObjectStore.gateway.placement`)各自显式写 nodeAffinity(`ceph-storage` label)+ control-plane toleration | 2026-09-24 事故: 只写了 mon/osd → **mgr 被调度到 worker**(还带出 crashcollector/exporter 往那台写 `/var/lib/rook`)。⭐ 2026-09-29 补齐 **mds/rgw**: 它们是**存储守护进程但不在 CephCluster 里**, 原先完全没有 placement ⇒ 实机 MDS 落到 mxgpu-3-36、`cubestack-ext-fs` 的 MDS 落到 3-32、RGW 落到 3-34(同样带出 crashcollector/exporter)。⚠ 不要改用 `placement.all`: Rook 会把 `all` 一并套到 **CSI daemonsets** 上, 把必须跑在**每个**节点的 rbd/cephfs nodeplugin 钉死在存储节点 → worker 上的 PVC 挂不上。**CSI nodeplugin 全节点是设计使然, 不属于"该约束"的范围** |
+| 守护进程 placement | mon/**osd**/**mgr**(写在 `CephCluster.placement`)+ **mds**(写在 `CephFilesystem.metadataServer.placement`)+ **rgw**(写在 `CephObjectStore.gateway.placement`)各自显式写 nodeAffinity(`ceph-storage` label)+ control-plane toleration | 2026-09-24 事故: 只写了 mon/osd → **mgr 被调度到 worker**(还带出 crashcollector/exporter 往那台写 `/var/lib/rook`)。⭐ 2026-09-29 补齐 **mds/rgw**: 它们是**存储守护进程但不在 CephCluster 里**, 原先完全没有 placement ⇒ 实机 MDS 落到 node-3-36、`cubestack-ext-fs` 的 MDS 落到 3-32、RGW 落到 3-34(同样带出 crashcollector/exporter)。⚠ 不要改用 `placement.all`: Rook 会把 `all` 一并套到 **CSI daemonsets** 上, 把必须跑在**每个**节点的 rbd/cephfs nodeplugin 钉死在存储节点 → worker 上的 PVC 挂不上。**CSI nodeplugin 全节点是设计使然, 不属于"该约束"的范围** |
 | toolbox | `rook-ceph-tools` 也 patch 上同一 nodeSelector | 它只是 CLI pod, 但同样属于"ceph 组件只在存储节点"的约定(实测 Rook reconcile 不会回滚该 patch) |
 | 存储节点选择 | `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master**) + node label(`CEPH_NODE_LABEL`, 默认 `ceph-storage=rook-ceph`) | 只调度到指定的存储节点(**默认只装在 master 节点**) |
 | 裸盘 | **自动分类**磁盘(`tools/k8s/ceph-detect-disks.sh`, 判定见 §4) | CR 取 `free ∪ ceph`(空闲 + 上次 Ceph 占用); `inuse`(在用)/`mixed`(混合)不选不清理; 精确盘名, 不用正则, 防误选 |
@@ -104,7 +104,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps ceph,ceph_csi
 CEPH_ENABLED=true
 CEPH_CSI_ENABLED=true
 CEPH_MODE=external
-CEPH_MONITORS="10.66.1.21:6789,10.66.1.22:6789"   # 外部 Ceph monitors(必填)
+CEPH_MONITORS="192.168.100.21:6789,192.168.100.22:6789"   # 外部 Ceph monitors(必填)
 CEPH_POOL="rbd"                                    # 外部 RBD pool(外部集群已有)
 CEPH_USER="admin"                                  # 外部认证用户
 CEPH_KEYRING="AQCxxx=="                            # 外部认证 keyring(必填)
@@ -630,7 +630,7 @@ Ceph 全关时不会排进部署计划);单独执行: `sudo ./deploy-cluster.sh 
 - external: 复用 `CEPHFS_NODE_USER/CEPHFS_NODE_KEYRING`(缺省回退 `CEPHFS_USER/CEPHFS_KEYRING`、
   `CEPH_USER/CEPH_KEYRING`),mon 地址取 `CEPH_MONITORS`。
   **未显式配置时自动从提供方 `external-ceph.env` 派生**(2026-10-27, 容器 d 实机验证):
-  - `CEPH_MONITORS` ← `ROOK_EXTERNAL_CEPH_MON_DATA`(如 `a=10.66.3.213:6789` → `10.66.3.213:6789`);
+  - `CEPH_MONITORS` ← `ROOK_EXTERNAL_CEPH_MON_DATA`(如 `a=192.0.2.213:6789` → `192.0.2.213:6789`);
   - `CEPHFS_FS` ← `CEPHFS_FS_NAME`(如 `cubestack-ext-fs`);
   - `CEPHFS_NODE_USER` ← `CSI_CEPHFS_NODE_SECRET_NAME` + `.<CEPHX_KEY_GENERATION>`
     (generation 非空/非 0 时; 与 `03_ceph_csi.sh` 的 `_ext_uid` 同口径, 如 `csi-cephfs-node.1`);
@@ -652,7 +652,7 @@ Ceph 全关时不会排进部署计划);单独执行: `sudo ./deploy-cluster.sh 
 ```bash
 # deployments/config/external-cephfs.env (chmod 600; 不要提交)
 cat > deployments/config/external-cephfs.env <<'EOF'
-CEPH_MONITORS="10.66.3.46:6789"
+CEPH_MONITORS="192.0.2.46:6789"
 CEPHFS_FS="cephfs"
 CEPHFS_NODE_USER="linux-host-ro"
 CEPHFS_NODE_KEYRING="<提供方给的裸 key>"
@@ -664,7 +664,7 @@ CEPH_MODE=external CEPHFS_MOUNT_ENABLED=true \
 - 只读模式不创建子目录: `CEPHFS_MOUNT_SUBDIR`(默认 `models`)必须已在 FS 内存在; 否则 DaemonSet
   日志会明确报"子目录不存在(只读模式不创建)", 请先在 CephFS 内建好。
 - 只读验证: `findmnt -o OPTIONS` 含 `ro` + `ls` 可读; 写操作由本地 VFS(`ro`)与提供方 caps 双重拦截。
-- 容器 d 实测(2026-10-27): `10.66.3.46:/models` 以 `ro,mds_namespace=cephfs` 挂载成功,
+- 容器 d 实测(2026-10-27): `192.0.2.46:/models` 以 `ro,mds_namespace=cephfs` 挂载成功,
   `ls` 可见模型目录, `touch` 返回 `Read-only file system`。
 - ⚠ 常见错误(容器 d 实测): external 挂载用 `csi-cephfs-node`(漏 `CEPHX_KEY_GENERATION` 后缀)会报
   `mount error: no mds is up` / `RADOS permission denied`。核对实际 userID:

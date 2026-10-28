@@ -61,7 +61,7 @@ else
     if command grep -qF '由 create-vms.sh 自动推导' "${CLUSTER_CONF}" 2>/dev/null; then
         echo -e "\033[41m\033[97m    · 虚拟机集群: 已由 create-vms.sh 自动推导为 VM 网段(如 10.244.1.200-209)\033[0m"
     fi
-    echo -e "\033[41m\033[97m    · 裸金属集群: 手动填节点物理网段空闲段(如 10.66.1.130-139)\033[0m"
+    echo -e "\033[41m\033[97m    · 裸金属集群: 手动填节点物理网段空闲段(如 192.168.100.130-139)\033[0m"
     echo -e "\033[41m\033[97m  ⚠ MetalLB 注意事项:\033[0m"
     echo -e "\033[41m\033[97m    · 地址池建议 >1 个地址, 否则新建 LoadBalancer 可能无 VIP 可分配(verify_metallb 会校验)\033[0m"
     echo -e "\033[41m\033[97m    · 改池后部署会自动核对并重 apply 池 CR(见 kubespray 前预检); 已存在的 LoadBalancer 需删除重建才换新 VIP\033[0m"

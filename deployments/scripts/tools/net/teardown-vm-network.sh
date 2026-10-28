@@ -17,7 +17,7 @@ BRIDGE="${BRIDGE:-privbr0}"
 BRIDGE_IP="${BRIDGE_IP:-10.244.0.1}"
 VM_SUBNET="${VM_SUBNET:-10.244.0.0/16}"
 # HOST_PHYS_IP 由 lib-common load_config 统一提供(留空自动检测), 不再本地设置
-PHYS_WORKER_NET="${PHYS_WORKER_NET:-10.66.1.0/24}"
+PHYS_WORKER_NET="${PHYS_WORKER_NET:-192.168.100.0/24}"
 
 SYSCTL_CONF="/etc/sysctl.d/99-k8s-forward.conf"
 SVC_NAME="privbr0-net.service"

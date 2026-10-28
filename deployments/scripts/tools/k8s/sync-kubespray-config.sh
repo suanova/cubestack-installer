@@ -360,7 +360,7 @@ if [ -f "${CALICO_YML}" ]; then
     sed -i -E "s/^calico_ipip_mode:.*/calico_ipip_mode: 'Always'/" "${CALICO_YML}"
     sed -i -E "s/^calico_vxlan_mode:.*/calico_vxlan_mode: 'Never'/" "${CALICO_YML}"
     sed -i -E "s/^calico_mtu:.*/calico_mtu: 1480/" "${CALICO_YML}"
-    # calico-node 内存上限: 树默认 500M 在**大核数节点**上不够 —— 实机取证 2026-09-28(全新安装, mxgpu-3-28 等 6 台 / 160 vCPU / 2TB):
+    # calico-node 内存上限: 树默认 500M 在**大核数节点**上不够 —— 实机取证 2026-09-28(全新安装, node-3-28 等 6 台 / 160 vCPU / 2TB):
     #   · 现象: calico-node 6/6 CrashLoopBackOff(Last State: OOMKilled/137), 每轮启动约 2s 即被杀。
     #   · 根因(dmesg OOM 报告 + 调用栈, 决定性): constraint=CONSTRAINT_MEMCG, cgroup 用量
     #     `memory: usage 488268kB, limit 488280kB`, 分解 **anon 172MB + percpu 218MB**;

@@ -118,7 +118,7 @@ node_ssh() {
 # nbd 残留清理(共享: [3/8] 首防线 + [7/8] 自愈重放; 2026-10-14 实机根因)。
 # 机制: ceph-volume inventory 会枚举**整机 /sys/block** 建 udev 数据; 节点上"已加载但零会话"的
 #   nbd0..15 取不到 udev 数据 ⇒ 整个 ceph-volume 调用崩溃 ⇒ rook 判**全部盘**"无法确认可用"
-#   ⇒ 0 OSD、HEALTH_WARN 永不 OK(实机: 10.66.3.214 集群)。卸载后同一套盘点立刻成功。
+#   ⇒ 0 OSD、HEALTH_WARN 永不 OK(实机: 192.0.2.214 集群)。卸载后同一套盘点立刻成功。
 # ⚠ 黑名单只挡别名自动加载, **挡不住显式 modprobe**(实机: 清理后 nbd 在一小时后又被载入)——
 #   故 [7/8] 自愈时必须**重放本清理**再重建 prepare。
 # 安全口径: 仅当 nbd 零引用(/sys/module/nbd/refcnt=0, 无活跃会话)才卸载 + 持久黑名单;
@@ -894,7 +894,7 @@ else
     echo "  placement:"
     # ★ 2026-09-24 修复: 每个 Ceph **守护进程**都要显式钉到存储节点 —— 原来只手写了 mon/osd,
     #   于是 mgr(真 daemon, 也往宿主机 /var/lib/rook 写数据)被调度到 worker 上(实机: mgr-a
-    #   落在 mxgpu-3-36), 还被 Rook 带出 crashcollector-mxgpu-3-36 / exporter-mxgpu-3-36 两个
+    #   落在 node-3-36), 还被 Rook 带出 crashcollector-node-3-36 / exporter-node-3-36 两个
     #   伴生 pod 一起写到 worker 的 /var/lib/rook —— 与文档 docs/ceph-rook.md §2"只调度到指定
     #   的存储节点(默认只装在 master 节点)"直接冲突, 也让重装清理(只清存储节点)在 worker 上留残留。
     #   ⚠ 不要图省事改用 `placement.all`: Rook 会把 `all` 一并套到 **CSI daemonsets** 上,

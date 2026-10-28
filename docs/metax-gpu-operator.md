@@ -204,7 +204,7 @@ GPU 任务测试(参考沐曦官方文档 §5, 需 maca 镜像就绪): 建 gpu-t
 | helm 拒绝安装 | 历史 kubectl apply 留下的资源无 Helm 标签 | 模块每次重部署先清理(含集群级 ClusterRole/RoleBinding) |
 | skopeo `docker-daemon:` 报 API 版本过旧 | 此 docker 版本 | 改 `docker save` 成 tar + `skopeo docker-archive` 推送 |
 | `.run push --plain-http` 报错 | 工具把 flag 置于镜像 ref 之后 | 模块用 `.run ctr load` + 自行 `ctr push --plain-http`(flag 在前) |
-| 宿主机 `registry.cubestack.io`/`k8s-api` 连不通 | /etc/hosts 残留旧 IP(10.66.3.37) 或 DNAT 被旧规则遮蔽 | 模块每次部署修正 /etc/hosts 指向正确 IP |
+| 宿主机 `registry.cubestack.io`/`k8s-api` 连不通 | /etc/hosts 残留旧 IP(192.0.2.37) 或 DNAT 被旧规则遮蔽 | 模块每次部署修正 /etc/hosts 指向正确 IP |
 | 镜像不在 .run 包内(driver/maca) | 需单独推送 | 本地 docker(`docker save`+skopeo) / 离线 tar / 在线, 逐级尝试; 模块已实现 |
 | master 无 `gpu.installed` 标签 | metax DS 无 control-plane 容忍, 调度不到 master | 部署时 mx-smi 检测到 GPU 的 master 自动移除污点+uncordon(见 §4.5) |
 
@@ -226,6 +226,6 @@ sudo ./deploy-cluster.sh --steps gpu_operator
 sudo ./deploy-cluster.sh --steps verify_metax_gpu
 # 设备属主前置(§0.1; 对 GPU 节点幂等执行, 键变化才重启 containerd; 改后需重建工作负载生效)
 sudo ./deployments/scripts/tools/node/ensure-containerd-device-ownership.sh
-sudo ./deployments/scripts/tools/node/ensure-containerd-device-ownership.sh 10.66.3.13 10.66.3.48
+sudo ./deployments/scripts/tools/node/ensure-containerd-device-ownership.sh 192.0.2.13 192.0.2.48
 # 卸载: 删 metax-operator 命名空间 + CRD 后重跑模块
 ```

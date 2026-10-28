@@ -32,7 +32,7 @@ spec:
     placement:
       # ★ 2026-09-29: MDS 也是**存储守护进程**(往宿主机 /var/lib/rook 写数据),
       #   必须和 mon/osd/mgr 一样钉在存储节点 —— 否则 Rook 会把它调度到 worker(实机踩过:
-      #   cephfs 的 MDS 落在 mxgpu-3-36), 还会带出 crashcollector/exporter 一起写到 worker。
+      #   cephfs 的 MDS 落在 node-3-36), 还会带出 crashcollector/exporter 一起写到 worker。
       #   ⚠ 这里是 CephFilesystem 的 placement, 与 CephCluster 的 placement 是两套字段 ——
       #     只在 CephCluster 里写 mon/osd/mgr 管不到 MDS/RGW(这就是当初漏掉的原因)。
       #   ⚠ 不要图省事改用 CephCluster 的 `placement.all`: 它会被一并套到 CSI daemonset 上,

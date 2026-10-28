@@ -40,7 +40,7 @@
 ⚠ **对现有集群 A/B 的部署另行择期**(换树后全量部署会把它从 1.32.5 升到 1.35.8)。
 
 ⚠ **2026-09-28 首次实跑暴露的阻断(已修,待重跑验收)**:容器 a 全量部署中断在
-`patch-playbooks/cubestack-single-node.yml:34`,mxgpu-3-28 报 `stat /etc/kubernetes/admin.conf: no such file or directory`。
+`patch-playbooks/cubestack-single-node.yml:34`,node-3-28 报 `stat /etc/kubernetes/admin.conf: no such file or directory`。
 - **根因**:该 play 用 `kubectl`(读 admin.conf)数 control-plane 节点,却和 registry hosts play 一起被
   `ensure_registry_play` 插在 **"Install etcd" 之前** ⇒ 全新集群上控制面还没起,admin.conf 必然不存在。
   `scale.yml` 场景(集群已存在)掩盖了它,直到第一次用它跑**全新集群**才暴露。

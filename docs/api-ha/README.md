@@ -31,7 +31,7 @@ worker kubelet ─┐                               worker kubelet → localhost
 master kubelet ─┤                               master kubelet → 127.0.0.1:6443 → 自己        │
 kube-proxy     ─┼→ k8s-api.cubestack.io                                                  ▼
 kubectl / CI   ─┤      ↓ /etc/hosts               kubectl / CI → 域名 → VIP ──────→ [m01 m02 m03]
-外部系统        ─┘  10.66.3.28 (master01)        外部系统    → 域名 → VIP ──────→ (least_conn)
+外部系统        ─┘  192.0.2.28 (master01)        外部系统    → 域名 → VIP ──────→ (least_conn)
                        │
                   [m01]  ← 单点                    Pod → kubernetes.default.svc → ipvs → 三台
                   m02 m03（闲置）
@@ -70,7 +70,7 @@ kubectl / CI   ─┤      ↓ /etc/hosts               kubectl / CI → 域名 
 > **四份** `PRELOAD_IMAGE_PATTERNS` 副本）、三个单测全绿（第 ⑪ 项是既有的、与本方案无关的红项；
 > 第 ⑬ 项因未同步 `all.yml` 而跳过）。
 > ✅ **实机状态（2026-09-28 更新）**：kube-vip 已在真集群生效 —— 静态 Pod 清单在场、容器 Running、
-> **VIP `10.66.3.240` 已绑到节点网卡**；节点侧本地代理的实机收敛随下一轮部署（见
+> **VIP `192.0.2.240` 已绑到节点网卡**；节点侧本地代理的实机收敛随下一轮部署（见
 > [07](07-kube-vip-upstream-assessment.md) §8.1 的验收进度表）。
 
 ```bash

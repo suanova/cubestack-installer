@@ -145,7 +145,7 @@ done
 # ── ①b Breaks 预判 + 同版本 cohort 升级(2026-10-19 实机根因) ──
 # 场景: worker 未装 udev, 离线 udev=249.11-0ubuntu3.22 `Breaks: systemd (<< 249.11-0ubuntu3.22)`,
 #   而节点 systemd=3.21 已装。规则①"已装同包→跳过"让 systemd 升级版没进本次安装集合,
-#   只 dpkg -i udev → "installing udev would break systemd" 失败(实机 10.66.3.215/.204)。
+#   只 dpkg -i udev → "installing udev would break systemd" 失败(实机 192.0.2.215/.204)。
 # 处理: 把 Breaks 指向的已装包**同版本 cohort**(离线集里所有同版本 deb, 如 systemd/
 #   libsystemd0/libudev1/systemd-sysv/libnss-systemd/libpam-systemd=3.22)一并加入本次安装,
 #   dpkg -i 原子升级整组; 若离线集没有可满足的升级版, 跳过该 deb 并告警(不制造半装/混合态)。
@@ -340,7 +340,7 @@ done
 #   → initramfs-tools.postinst → `update-initramfs -u` → `mkinitramfs` → `hooks/mdadm`
 #   → `mdadm --examine --scan` 遍历所有块设备 → 若节点上有**后端不可达的内核 rbd 映射/挂死块设备**,
 #   进程进 D 状态(不可中断) → 本脚本的 ssh 调用**永不返回**, 表现为部署"卡在这里很长时间"
-#   (实测 10.66.3.36 卡 38 分钟以上, mdadm 的 fd 直指 /dev/rbd0)。
+#   (实测 192.0.2.36 卡 38 分钟以上, mdadm 的 fd 直指 /dev/rbd0)。
 #   我们装的包(lvm2 家族)在节点上不需要重建 initrd(内核未变、root 不在 LVM 上), 禁用是安全的。
 #   载荷用**引号 heredoc** 构造(仓库既有风格): 免去多层转义, 也便于离线测试。
 INSTALL_PAYLOAD="$(cat <<'PAYLOAD'

@@ -113,7 +113,7 @@ kubectl -n metallb-system logs deploy/controller | grep -E "no matches for kind"
 
 **症状**
 - direct 路由(无封装)下跨节点 pod 100% 丢包, 部署卡在 metallb 池 apply webhook `context deadline exceeded`;
-- 节点虽同网段(如 10.66.1.0/24), 但跨节点 pod 流量发出去即丢, 同节点 pod 可达。
+- 节点虽同网段(如 192.168.100.0/24), 但跨节点 pod 流量发出去即丢, 同节点 pod 可达。
 
 **根因(以证据判定)**
 1. `ip neigh` 发现**所有节点 IP(含网关)的 ARP 都解析到同一个 MAC**(如 `00:01:00:01:00:01`), 而各节点真实 manage0 MAC 各不相同 → 网络是 **proxy-ARP / 按 IP 转发**的虚拟化 fabric,**不是真实 L2**;
@@ -141,7 +141,7 @@ ssh <节点> 'timeout 6 tcpdump -ni manage0 "udp port 8472" &'
 echo x | nc -u <节点IP> 8472
 ```
 
-- **该 fabric 第二形态: MetalLB VIP 的跨段投递也会时通时断(2026-10-14 实机)**: 部署机 → `10.66.3.221:5000`
+- **该 fabric 第二形态: MetalLB VIP 的跨段投递也会时通时断(2026-10-14 实机)**: 部署机 → `192.0.2.221:5000`
   (registry VIP)死(连 ICMP 都回不可达), 而同 registry 的 NodePort(`<master>:30492`)与集群内节点侧 VIP
   均正常 —— 同一天曾正常工作半小时后变死。**缓解已落**: `08_nvidia_gpu_operator.sh` 的 registry 端点
   **自适应降级**(VIP 探测不通 → 查 svc 实际 nodePort → 推送/预检全程走它); 其余模块同类需求可照搬
@@ -353,15 +353,15 @@ sudo systemctl restart chrony; sleep 2; chronyc tracking | head -4
 **症状**
 - `--with-scale` 扩容新节点(worker13)跑到 k8s_ntp: 首次"时间已同步"→ 校验偏差 6530ms → 自动重对齐复测仍
   2493ms → 模块失败, 报"时钟偏差超限"。
-- 该节点(10.66.3.222)上 `timedatectl timesync-status` = `System clock synchronized: no`, 日志反复
+- 该节点(192.0.2.222)上 `timedatectl timesync-status` = `System clock synchronized: no`, 日志反复
   `Timed out waiting for reply from <权威>`(Packet count 0); 权威 `chronyc clients` 里**从来没有它**。
 
 **根因(证据链, 2026-10-14 现场实测)**
 1. **该 VM 与集群节点二层转发不可用**(平台网络接入缺陷): worker13 → `.213/.214/.215/.216/.203` ping 全 100%
    丢包(双向); 清 ARP 缓存后它对权威的广播 ARP **应答时有时无**(代理 MAC `00:01:00:01:00:01` / 真实 MAC /
    无应答), 权威侧 tcpdump **完全看不到它的帧**; 而它 → 网关/.211/互联网/部署机全通。
-2. **对照组**: 同批创建、同样无 chrony 走 timesyncd 的 .216(原名 clq-cubestack-node-1)"Initial
-   synchronization to 10.66.3.214" 正常 → 不是 timesyncd/NTP 配置问题, 唯独 worker13 这台接入异常。
+2. **对照组**: 同批创建、同样无 chrony 走 timesyncd 的 .216(原名 cluster-node-1)"Initial
+   synchronization to 192.0.2.214" 正常 → 不是 timesyncd/NTP 配置问题, 唯独 worker13 这台接入异常。
 3. **代码放大**: `setup-ntp.sh` 当时没有"节点→权威"可达性预检(只有 installer→权威 的 SSH 预检, 那条经
    路由总是通的), 于是一路走"硬对齐兜底 + 复测"——旧版硬对齐基准未补偿链路延迟、复测只等 1s,
    把"网络黑洞"呈现成"偏差 6530→2493ms"的误导链。
@@ -371,7 +371,7 @@ sudo systemctl restart chrony; sleep 2; chronyc tracking | head -4
 
 **解法(根治)**
 - **环境侧(主修, 用户当日已完成)**: 在虚拟化平台把该 VM 的网卡改接到与正常节点相同的虚拟网络/端口组
-  (本次实机即扩容 VM 创建时接错网络), 并改址 **10.66.3.204**(原 .222)。判据: 该节点 `ping <权威>`
+  (本次实机即扩容 VM 创建时接错网络), 并改址 **192.0.2.204**(原 .222)。判据: 该节点 `ping <权威>`
   与反向 ping 均稳定通 —— 实机重挂后 timesyncd 首次即同步成功(见"验证")。
 - **代码侧(已落, 2026-10-14)**: `setup-ntp.sh` 新增**节点→权威 IP 通路预检**(`authority_reachable_from`,
   apply 与 `--check` 两条路径共用): SSH 不通 → "SSH 不可达"; SSH 通但 ping 权威不通 → 明确报"无 IP 通路,
@@ -384,8 +384,8 @@ sudo systemctl restart chrony; sleep 2; chronyc tracking | head -4
 - 代码侧(已实测): 修复版 `setup-ntp.sh --check` 在容器 d 对全部 6 节点跑通 —— 正常节点零误报;
   探针判别性经黑洞对照验证(同节点 ping `.99`/旧 `.222` FAIL vs `.204`/`.214` OK ——
   该 fabric 上 ICMP 可真实判别黑洞, 代理 ARP 应答不影响)。
-- 环境侧(用户已完成): worker13 的 VM 重挂正确网络并改址 10.66.3.204(原 .222)后,
-  `timesyncd` **首次即同步成功**("Initial synchronization to 10.66.3.214", 对比之前全程 timeout),
+- 环境侧(用户已完成): worker13 的 VM 重挂正确网络并改址 192.0.2.204(原 .222)后,
+  `timesyncd` **首次即同步成功**("Initial synchronization to 192.0.2.214", 对比之前全程 timeout),
   同一时刻 `--check` 偏差 164ms ✓ —— 根因确证 + 修复实证。
 - 端到端: 重跑 `--with-scale`(k8s_scale)把 worker13 接入集群 —— 待用户执行后补。
 
@@ -488,7 +488,7 @@ fatal: [cubestack-k8s-master01]: FAILED!  error: timed out waiting for the condi
 ```
 - controller Pod `STATUS= Pending`, 事件: `0/7 nodes are available: 7 node(s) didn't match Pod's node affinity/selector`;
 - 所有 speaker Pod `STATUS= CreateContainerConfigError`, 事件: `Error: secret "memberlist" not found`;
-- `describe` controller 可见 `Node-Selectors: kubernetes.io/hostname=<旧环境主机名>`(如 `mxgpu-1-232`)。
+- `describe` controller 可见 `Node-Selectors: kubernetes.io/hostname=<旧环境主机名>`(如 `node-1-232`)。
 
 **根因**
 `inventory/<集群>/group_vars/k8s_cluster/addons.yml` 中 `metallb_config.controller.nodeselector` 残留了**上一环境(裸金属)的主机名**(该 pin 本是 §一.1 的 webhook workaround,按主机名钉 controller)。当前环境没有该主机名节点 → controller **永远调度不上**(一直 Pending)。
@@ -630,14 +630,14 @@ docker save <img> -o /tmp/x.tar && skopeo copy docker-archive:/tmp/x.tar docker:
 
 #### 3.5 宿主机 curl `registry.cubestack.io:5000` / helm 连 `k8s-api.cubestack.io` 失败(EOF / no route to host)
 
-**根因** 宿主机 /etc/hosts 残留旧 IP(如 `10.66.3.37` = 宿主机自身)或 DNAT 被历史规则遮蔽(两条规则指向 10.244.2.100 与 10.66.1.130, 旧规则先命中)。
+**根因** 宿主机 /etc/hosts 残留旧 IP(如 `192.0.2.37` = 宿主机自身)或 DNAT 被历史规则遮蔽(两条规则指向 10.244.2.100 与 192.168.100.130, 旧规则先命中)。
 
 **解法(根治)** 每次部署由模块修正 /etc/hosts:
 ```
-registry.cubestack.io → REGISTRY_IP(集群 registry VIP, 如 10.66.1.130)
+registry.cubestack.io → REGISTRY_IP(集群 registry VIP, 如 192.168.100.130)
 k8s-api.cubestack.io → API_ENTRY_IP(kube-vip 已绑 → VIP; 否则第一个 master)
 ```
-不留 10.66.3.37 这类过期条目。
+不留 192.0.2.37 这类过期条目。
 
 > ⚠ 两个域名的目标 IP 语义**不同**, 别照抄成同一个变量:
 > `REGISTRY_IP` / `API_IP` 是"能通 NodePort 的**节点** IP"(registry 的 containerd mirror、DNAT 判定依赖它),
@@ -913,8 +913,8 @@ D4 保持"纯故障切换"、不开 `lb_enable`。理由是收益/代价不划�
 - `excludeCIDRs` 必须与 VIP **长期保持一致**,而本项目 VIP 是**自动推导**的 —— VIP 一漂移,
   排除段忘了跟就会静默失效(又回到"看起来配了其实没生效")。
 - 排除 VIP 还有个连带副作用: kube-proxy 从此**不再管理 VIP 上的 NodePort 规则**,已有条目被冻结。
-  实测 `10.66.1.139:31680` 的后端被摘掉后不再恢复(本集群 registry 拉镜像走 `registry.cubestack.io`
-  → `10.66.1.131`,**不依赖** VIP 的 NodePort,故影响有限,但确实是个反直觉的行为变化)。
+  实测 `192.168.100.139:31680` 的后端被摘掉后不再恢复(本集群 registry 拉镜像走 `registry.cubestack.io`
+  → `192.168.100.131`,**不依赖** VIP 的 NodePort,故影响有限,但确实是个反直觉的行为变化)。
 - 而"API 入口不单点"这件事,**现状已经做到**(`verify_kube_vip` ⑥ 漂移演练实测通过)。
 
 **若将来仍要开**,唯一推荐做法:由部署模块从**同一个 VIP 变量**同时生成 kube-vip manifest 与
@@ -929,7 +929,7 @@ D4 保持"纯故障切换"、不开 `lb_enable`。理由是收益/代价不划�
 - **② 的结论**:读本集群实际版本 kube-proxy **v1.32.5** 的 `cleanLegacyService` 确认;
   实机配置 `excludeCIDRs` 并重启后,VIP 上的既有 IPVS 条目**保留未被清理**,与代码里的
   `isIPInExcludeCIDRs` 跳过分支一致。
-- **本集群现状**:VIP `10.66.1.139` 由 `10.66.1.154` 持有,IPVS 中**无** `10.66.1.139:6443` 条目
+- **本集群现状**:VIP `192.168.100.139` 由 `192.168.100.154` 持有,IPVS 中**无** `192.168.100.139:6443` 条目
   —— 即 LB 未启用(设计如此)。
 
 **未验证(不要当成已验收)**:
@@ -1112,9 +1112,9 @@ sudo ./deploy-cluster.sh --steps kube_vip --list | grep 本次执行模块
 **症状**
 把 `KUBE_VIP_ENABLED` 置 `false` 后重跑,**依然**出现:
 ```
-[DEBUG] 当前入口 10.66.3.28 不是可用 VIP(节点 IP 或落在 MetalLB 池内)→ 重新推导
-→  推导 API VIP(起于 10.66.3.210, 逐个探测直至 .254)...
-【错误】在 10.66.3.210-10.66.3.254 范围内未找到空闲 VIP(全部被占用/被排除)
+[DEBUG] 当前入口 192.0.2.28 不是可用 VIP(节点 IP 或落在 MetalLB 池内)→ 重新推导
+→  推导 API VIP(起于 192.0.2.210, 逐个探测直至 .254)...
+【错误】在 192.0.2.210-192.0.2.254 范围内未找到空闲 VIP(全部被占用/被排除)
 【错误】请在 .../cluster.conf 显式指定 K8S_API_VIP=<同网段空闲地址>
 【错误】模块 [k8s_inventory] ... 退出码 1 → 部署中断
 ```
@@ -1197,10 +1197,10 @@ KUBESPRAY_INV_DIR=<inventory 副本> CLUSTER_CONF=<conf 副本> \
 全量部署跑到 kubespray 的 join 阶段中断, 9 台里**只有一台**失败, 且 0.08 秒就失败:
 
 ```
-fatal: [mxgpu-3-32]: FAILED! => {"cmd": ["timeout","-k","120s","120s","/usr/local/bin/kubeadm","join", ...],
+fatal: [node-3-32]: FAILED! => {"cmd": ["timeout","-k","120s","120s","/usr/local/bin/kubeadm","join", ...],
   "delta": "0:00:00.084779",
   "stderr": "error execution phase preflight: [preflight] Some fatal errors occurred:\n\t[ERROR Port-10250]: Port 10250 is in use"}
-PLAY RECAP: mxgpu-3-32 failed=1, 其余 8 台 failed=0
+PLAY RECAP: node-3-32 failed=1, 其余 8 台 failed=0
 ```
 
 迷惑点: 同一轮部署**开头**刚打印过 `✅ 清理完成: 7 台成功, 0 台失败`。
@@ -1245,8 +1245,8 @@ PLAY RECAP: mxgpu-3-32 failed=1, 其余 8 台 failed=0
 
 ```bash
 # ① 检测层: 9 台真机跑新探针 —— 只有真因节点被点名 rke2-agent:running
-#    mxgpu-3-32 → port-10250;rke2-agent:running;rke2-server:installed;kubelet-unit;...
-#    mxgpu-3-33 → port-10250;rke2-agent:installed;kubelet:running;...   ← 装了但没跑
+#    node-3-32 → port-10250;rke2-agent:running;rke2-server:installed;kubelet-unit;...
+#    node-3-33 → port-10250;rke2-agent:installed;kubelet:running;...   ← 装了但没跑
 # ② 清理层: 对 3-32 实跑清理脚本
 sudo ss -lntp | grep 10250          # 清理前: kubelet(pid=127993) 占着 *:10250
                                     # 清理后: 无监听、无残留 kubelet/rke2 进程
@@ -1426,7 +1426,7 @@ bash deployments/scripts/tools/tests/test-node-pool.sh   # ⑧⑨⑩: 跳过 cor
 (`tasks/main.yml:112` "Drain node") 后失败:
 
 ```
-fatal: [cmxgpu-1-232]: FAILED! => {"cmd": ["/usr/local/bin/kubectl", "--kubeconfig",
+fatal: [node-1-232]: FAILED! => {"cmd": ["/usr/local/bin/kubectl", "--kubeconfig",
 "/etc/kubernetes/admin.conf", "get", "nodes", ...],
 "stderr": "error: stat /etc/kubernetes/admin.conf: no such file or directory"}
 ```
@@ -1649,8 +1649,8 @@ grep -n "cubestack_skip_calico_checks" deployments/kubespray/kubespray/playbooks
 
 ```
 scp: /tmp/cubestack-registry-node.sh: Permission denied
-⚠    cubestack-k8s-master11(10.66.3.214): 无法上传配置脚本(检查密钥/密码)   ← deploy-registry.sh
-⚠    cubestack-k8s-master12(10.66.3.216): 无法上传脚本(检查密钥/密码)       ← setup-ntp.sh(同类)
+⚠    cubestack-k8s-master11(192.0.2.214): 无法上传配置脚本(检查密钥/密码)   ← deploy-registry.sh
+⚠    cubestack-k8s-master12(192.0.2.216): 无法上传脚本(检查密钥/密码)       ← setup-ntp.sh(同类)
 ```
 
 **变体(2026-10-16, 远端重定向形态, 实机命中):** 报错不在 scp 客户端, 而在**远端 bash 的重定向** ——
@@ -1701,8 +1701,8 @@ bash: line 1: /tmp/ceph-rbd.yaml: Permission denied          ← 03_ceph_csi.sh 
 **验证(2026-10-15 实机, 已通过):**
 ```bash
 # ① 复现(容器内, 对仍有 ubuntu 遗留文件的节点): 覆盖既有文件拒 / 新路径过
-scp /tmp/t root@10.66.3.216:/tmp/cubestack-registry-node.sh   # → scp: Permission denied(rc=1)
-scp /tmp/t root@10.66.3.216:/tmp/brand-new-path.txt           # → rc=0(证明密钥/通路/权限正常)
+scp /tmp/t root@192.0.2.216:/tmp/cubestack-registry-node.sh   # → scp: Permission denied(rc=1)
+scp /tmp/t root@192.0.2.216:/tmp/brand-new-path.txt           # → rc=0(证明密钥/通路/权限正常)
 # ② 修复后端到端(容器内跑修复版工具): [2/4] 6/6 节点成功(修复前 5/6 失败)
 bash /opt/cubestack-installer/deployments/scripts/tools/lb/deploy-registry.sh
 #   ✅ 6 台节点 "certs.d 已就绪"; master11 的 /tmp/cubestack-registry-node.sh 变 root:root(新时间戳)

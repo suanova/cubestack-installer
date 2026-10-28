@@ -4,7 +4,7 @@
 # 生成: /etc/hosts + /etc/dnsmasq.hosts
 #   k8s-api.cubestack.io → 宿主机 API 地址
 #   所有 master/worker 节点 hostname → IP
-# 幂等: 自动移除旧的 nova-k8s-* / mxgpu-* / k8s-api.nova.local 条目再追加新条目
+# 幂等: 自动移除旧的 nova-k8s-* / node-* / k8s-api.nova.local 条目再追加新条目
 # 用法: sudo ./sync-hosts.sh
 # 数据源: deployments/config/cluster.conf
 # ============================================================
@@ -45,7 +45,7 @@ ok "已更新 /etc/hosts (${#NODES[@]} 节点)"
 # ---- 更新 /etc/dnsmasq.hosts ----
 if [ -f /etc/dnsmasq.hosts ]; then
     sed -i '/# >>> cubestack-cluster/,/# <<< cubestack-cluster/d' /etc/dnsmasq.hosts
-    sed -i -E '/nova-k8s-(master|node)/d; /mxgpu-[0-9]/d; /k8s-api\.(nova\.local|cubestack\.io)/d' /etc/dnsmasq.hosts
+    sed -i -E '/nova-k8s-(master|node)/d; /node-[0-9]/d; /k8s-api\.(nova\.local|cubestack\.io)/d' /etc/dnsmasq.hosts
     echo "${HOSTS_BLOCK}" >> /etc/dnsmasq.hosts
     systemctl restart dnsmasq 2>/dev/null || true
     ok "已更新 /etc/dnsmasq.hosts + 重启 dnsmasq"

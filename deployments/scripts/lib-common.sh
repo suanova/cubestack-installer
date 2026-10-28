@@ -1187,7 +1187,7 @@ metallb_pool_contains() {
 # 由节点主机名反查其 IP(供 SSH/端口探测复用)。
 # ⚠ 必须用 IP 而不是主机名去做 SSH: 部署容器里通常没有各节点的 /etc/hosts 解析,
 #   用主机名会**静默连不上**(stderr 被丢弃时尤其难查)。09_kube_vip 曾因此误报镜像缺失。
-# 用法: ip="$(node_ip_by_hostname mxgpu-1-147)"
+# 用法: ip="$(node_ip_by_hostname node-1-147)"
 node_ip_by_hostname() {
     local want="$1" line
     [ -n "${want}" ] || return 1
@@ -1222,10 +1222,10 @@ master_hosts() {
 # ⚠ 与 master_hosts 的分工(2026-09-28 实机事故, 别再混用):
 #   · master_hosts 给的是**主机名** —— 只可用于"要名字"的场合(如 vip_nodename);
 #   · **凡是要 SSH 的场合必须用本函数(IP)** —— 部署容器里通常没有节点名的 /etc/hosts 解析
-#     (`getent hosts mxgpu-3-28` 实测失败), 拿主机名 SSH 会**静默连不上**, 而调用方常把
+#     (`getent hosts node-3-28` 实测失败), 拿主机名 SSH 会**静默连不上**, 而调用方常把
 #     "连不上"当成"条件不成立": kube_vip_is_bound 曾因此恒判"VIP 未绑定" ⇒ api_entry_ip()
 #     永远回落首个 master ⇒ 宿主机与全部节点的 k8s-api.cubestack.io 都指向单点 Master,
-#     kube-vip 白装(实机: VIP 10.66.3.240 明明已绑在 mxgpu-3-28, 判定却说"未绑定")。
+#     kube-vip 白装(实机: VIP 192.0.2.240 明明已绑在 node-3-28, 判定却说"未绑定")。
 #   08/09 两个 kube-vip 模块早就是这么做的(node_ip_by_hostname 转 IP 再 SSH), 这里补齐。
 master_ips() {
     local line
@@ -2232,7 +2232,7 @@ ensure_hosts_entry() {
 }
 
 # 幂等追加【整块】宿主机 hosts 条目(与 ensure_hosts_entry 同套防重复理念, 适用于多行块):
-#   · 命中任意主机名(含 k8s-api.cubestack.io / k8s-api.nova.local / nova-k8s-* / mxgpu-* 旧版裸条目)即视为已有该块,
+#   · 命中任意主机名(含 k8s-api.cubestack.io / k8s-api.nova.local / nova-k8s-* / node-* 旧版裸条目)即视为已有该块,
 #     【先删除旧块标记段 + 匹配主机名的裸行, 再追加新块】, 主机名→IP 永不重复。
 #   · 块标记仅保留一段, 重复追加(历史版本多次写入)也会被收敛成一段。
 #   · bind-mount 安全(同 ensure_hosts_entry): 过滤→sponge 或临时文件+cat 覆盖写。
@@ -2245,13 +2245,13 @@ ensure_hosts_block() {
     if command -v sponge >/dev/null 2>&1; then
         sed -e "/${start}/,/${end}/d" \
             -e '/nova-k8s-\(master\|node\)/d' \
-            -e '/mxgpu-[0-9]/d' \
+            -e '/node-[0-9]/d' \
             -e '/k8s-api\.\(nova\.local\|cubestack\.io\)/d' \
             /etc/hosts | sponge /etc/hosts 2>/dev/null || return 0
     else
         sed -e "/${start}/,/${end}/d" \
             -e '/nova-k8s-\(master\|node\)/d' \
-            -e '/mxgpu-[0-9]/d' \
+            -e '/node-[0-9]/d' \
             -e '/k8s-api\.\(nova\.local\|cubestack\.io\)/d' \
             /etc/hosts > "${t}" 2>/dev/null || return 0
         cat "${t}" > /etc/hosts 2>/dev/null || { rm -f "${t}"; return 0; }
@@ -2400,8 +2400,8 @@ sync_kubeconfig() {
     #   · API_DOMAIN → **api_entry_ip()**(显式 API_ENTRY_IP > kube-vip 已绑 ⇒ VIP > 首个 master)。
     #     ⚠ 不用 API_IP —— 那是"能通 NodePort 的节点 IP"语义(见其定义处注释)。本行原先写的就是
     #     API_IP, 而下面 setup-api-expose.sh 用 api_entry_ip()(双保险的那一半是对的): 两者不一致时
-    #     以**后写者**为准, 故宿主机曾长期把 k8s-api.cubestack.io 解析到 10.66.3.28(单点)而不是
-    #     已就绪的 VIP 10.66.3.240(2026-09-28 实机)。现两处同源。
+    #     以**后写者**为准, 故宿主机曾长期把 k8s-api.cubestack.io 解析到 192.0.2.28(单点)而不是
+    #     已就绪的 VIP 192.0.2.240(2026-09-28 实机)。现两处同源。
     #   · REGISTRY_DOMAIN → REGISTRY_IP(MetalLB VIP; NodePort 模式为派生出的节点 IP)。
     #     补在这里的原因: 本函数是宿主机侧 kubectl/helm 消费者的公共入口(gpu_operator/
     #     multus/rdma/ceph + 接入引导都会走)⇒ 受管域名**每轮安装都收敛一次**, 不必等各自的 addon 模块。

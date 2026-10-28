@@ -30,7 +30,7 @@ RGW_ZONE = os.environ.get("RGW_ZONE", "s3-store")
 ENDPOINT = os.environ.get("ENDPOINT", "http://rook-ceph-rgw-s3-store.rook-ceph.svc:80")
 if ENDPOINT and not ENDPOINT.startswith(("http://", "https://")):
     # 只给 host[:port] 时补 scheme —— 否则 urlparse().netloc 为空、urllib 也认不出 url 类型,
-    # 报的错与"端点不通"无法区分(2026-09-29 实机: 用户写 ENDPOINT=10.66.3.29:80 踩到)
+    # 报的错与"端点不通"无法区分(2026-09-29 实机: 用户写 ENDPOINT=192.0.2.29:80 踩到)
     ENDPOINT = "http://" + ENDPOINT
 REGION = os.environ.get("REGION", "us-east-1")
 SERVICE = "s3"

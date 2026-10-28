@@ -35,7 +35,7 @@ spec:
     priorityClassName: system-cluster-critical
     placement:
       # ★ 2026-09-29: 与内部 cephfs 同理 —— MDS 是存储守护进程, 必须钉在存储节点
-      #   (实机踩过: cubestack-ext-fs 的 MDS 落在 worker mxgpu-3-32)。
+      #   (实机踩过: cubestack-ext-fs 的 MDS 落在 worker node-3-32)。
       #   本 FS 只有 1 个 MDS(activeCount:1, activeStandby:false), 钉住可避免它漂到
       #   非存储节点后, 外部消费方的挂载依赖 worker 可用性。
       tolerations:

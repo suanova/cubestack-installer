@@ -1,11 +1,11 @@
 #!/bin/bash
 # CubeStack 虚拟机私有网桥(privbr0)宿主机网络初始化脚本（可直接落地）
 # ============================================================
-# 解决痛点: 虚拟机网段 10.244.0.0/16(privbr0) 与 物理Worker网段 10.66.1.0/24 跨二层非直连,
+# 解决痛点: 虚拟机网段 10.244.0.0/16(privbr0) 与 物理Worker网段 192.168.100.0/24 跨二层非直连,
 #           物理Worker 无法配置指向 10.244.0.0/16 的静态路由(下一跳非直连,路由不生效)。
 # 方案:     虚拟机出网 SNAT 伪装 + 宿主机本地回程静态路由,双向互通,零改动物理机网络。
 #
-#   正向流量: VM(10.244.x) → 宿主机转发 → SNAT 成宿主机物理 IP(${HOST_PHYS_IP}, 自动检测) → 物理Worker(10.66.1.x)
+#   正向流量: VM(10.244.x) → 宿主机转发 → SNAT 成宿主机物理 IP(${HOST_PHYS_IP}, 自动检测) → 物理Worker(192.168.100.x)
 #   回程流量: Worker 回包给宿主机物理 IP(${HOST_PHYS_IP}) → conntrack 反解回 10.244.x → 回程路由(10.244/16 dev privbr0) → VM
 #
 # 幂等: 可重复执行,重复运行仅提示"已存在"。开机自启由 systemd oneshot 兜底,
@@ -33,7 +33,7 @@ BRIDGE_IP="${BRIDGE_IP:-10.244.0.1}"
 VM_SUBNET="${VM_SUBNET:-10.244.0.0/16}"
 BRIDGE_PREFIX="${BRIDGE_PREFIX:-${VM_SUBNET#*/}}"
 # HOST_PHYS_IP 由 lib-common load_config 统一提供(留空自动检测), 不再本地设置
-PHYS_WORKER_NET="${PHYS_WORKER_NET:-10.66.1.0/24}"
+PHYS_WORKER_NET="${PHYS_WORKER_NET:-192.168.100.0/24}"
 
 SYSCTL_CONF="/etc/sysctl.d/99-k8s-forward.conf"
 SVC_NAME="privbr0-net.service"
