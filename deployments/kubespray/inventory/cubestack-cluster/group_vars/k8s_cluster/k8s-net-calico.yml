@@ -126,7 +126,10 @@ calico_vxlan_mode: 'Never'
 
 # If you want use the default route interface when you use multiple interface with dynamique route (iproute2)
 # see https://docs.projectcalico.org/reference/node/configuration : FELIX_DEVICEROUTESOURCEADDRESS
-# calico_use_default_route_src_ipaddr: false
+# CubeStack(2026-10-27): IB/多网卡节点必须开启 —— Felix 给每 Pod 设备路由写 src=status.hostIP,
+#   否则主机 netplan 的 `from <IB> lookup <table>` 会让 rpfilter 反向校验失配, 本地 Pod 探针全超时。
+#   由 tools/k8s/sync-kubespray-config.sh 按 CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR 幂等同步。
+calico_use_default_route_src_ipaddr: true
 
 # Enable calico traffic encryption with wireguard
 # calico_wireguard_enabled: false

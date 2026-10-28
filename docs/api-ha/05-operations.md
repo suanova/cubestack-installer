@@ -16,7 +16,7 @@ getent hosts k8s-api.cubestack.io
 
 # ③ 节点侧解析（**v2.32 起不是 kubespray 写的**：由本仓库 03_k8s_hosts / 10_api_local_lb 收敛）
 for i in 28 29 31 32 33 34 35 36; do
-  printf '3-%-3s ' $i; ssh -o BatchMode=yes ubuntu@10.66.3.$i "grep -h 'k8s-api' /etc/hosts"
+  printf '3-%-3s ' $i; ssh -o BatchMode=yes ubuntu@192.0.2.$i "grep -h 'k8s-api' /etc/hosts"
 done
 
 # ④ 每个客户端实际用什么地址（最关键的两条）
@@ -124,8 +124,8 @@ ssh ubuntu@<node> 'sudo wc -l < /proc/net/ip_vs'              # 规则条数
 
 # 十六进制解码速查
 #   0AE90001 = 10.233.0.1    01BB = 443      192B = 6443
-#   0A42031C = 10.66.3.28    0A42031D = .29  0A42031F = .31
-# 例: "TCP 0AE90001:01BB → 0A42031F 192B" = kubernetes Service 转发到 10.66.3.31:6443
+#   C000021C = 192.0.2.28    C000021D = .29  C000021F = .31
+# 例: "TCP 0AE90001:01BB → C000021F 192B" = kubernetes Service 转发到 192.0.2.31:6443
 
 # 需要 ipvsadm 的完整视图时，用诊断 pod（需要时再装）
 ./deploy-cluster.sh --steps netshoot
@@ -283,10 +283,10 @@ ssh ubuntu@<node> 'sudo ss -lntp | grep 6443'                           # 谁在
 kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'; echo; getent hosts k8s-api.cubestack.io
 
 # 三台 master 是否都活着
-for i in 28 29 31; do printf '3-%s: ' $i; ssh -o ConnectTimeout=5 -o BatchMode=yes ubuntu@10.66.3.$i 'sudo systemctl is-active kubelet; sudo ss -lnt | grep -c ":6443"'; done
+for i in 28 29 31; do printf '3-%s: ' $i; ssh -o ConnectTimeout=5 -o BatchMode=yes ubuntu@192.0.2.$i 'sudo systemctl is-active kubelet; sudo ss -lnt | grep -c ":6443"'; done
 
 # 全集群节点侧入口一览
-for i in 28 29 31 32 33 34 35 36; do printf '3-%-3s ' $i; ssh -o ConnectTimeout=5 -o BatchMode=yes ubuntu@10.66.3.$i "sudo grep -m1 -o 'server:.*' /etc/kubernetes/kubelet.conf"; done
+for i in 28 29 31 32 33 34 35 36; do printf '3-%-3s ' $i; ssh -o ConnectTimeout=5 -o BatchMode=yes ubuntu@192.0.2.$i "sudo grep -m1 -o 'server:.*' /etc/kubernetes/kubelet.conf"; done
 
 # 集群内 API 端点
 kubectl get endpoints kubernetes -n default

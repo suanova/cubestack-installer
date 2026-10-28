@@ -97,7 +97,7 @@ kube_control_plane[0]` 判定, 同一节点每次渲染结果相同。抖动来�
 
 | 验收项 | 状态 |
 |---|---|
-| 实机端到端 | ✅ **已生效**:`/etc/kubernetes/manifests/kube-vip.yml` 在场且由上游渲染、`mxgpu-3-28` 上 kube-vip 容器 Running、**VIP `10.66.3.240` 已实际绑在节点网卡上** |
+| 实机端到端 | ✅ **已生效**:`/etc/kubernetes/manifests/kube-vip.yml` 在场且由上游渲染、`node-3-28` 上 kube-vip 容器 Running、**VIP `192.0.2.240` 已实际绑在节点网卡上** |
 | 幂等(**撤契约的正当性证据**) | ❌ **仍未验** —— 连跑两次部署、`RESTARTS` 不增长、清单 sha256 不变 |
 | 关闭态清理 | ❌ 仍未验(清单删除 + VIP 从所有 master 释放 + 入口仍指 VIP 时拦停) |
 | 换代一次性抖动 | ⚠ 未单独观测(与上面同批) |

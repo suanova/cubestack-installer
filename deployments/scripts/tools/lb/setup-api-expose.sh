@@ -3,7 +3,7 @@
 # setup-api-expose.sh — 宿主机 K8s API 入口 DNAT(6443 → 第一个 master)
 # ------------------------------------------------------------
 # 用途: kubespray 生成的 admin.conf 证书 SAN 通常含 API_DOMAIN(如 k8s-api.cubestack.io)
-#       但不含 master 直连 IP(如 10.66.1.232 / 10.244.1.11)。宿主侧要让 kubectl/helm 能经
+#       但不含 master 直连 IP(如 192.168.100.232 / 10.244.1.11)。宿主侧要让 kubectl/helm 能经
 #       API_DOMAIN 访问集群, 需要:
 #         1) /etc/hosts: API_DOMAIN → API_ENTRY_IP(= api_entry_ip(): kube-vip 已绑 → VIP, 未绑 → 首个
 #            master; 入口模式 external 时 = 环境 LB 地址)

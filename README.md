@@ -340,7 +340,7 @@ cubestack-installer/
 > **② SSH 密码**:NODES 最后一位 `-` = 用默认 `SSH_DEFAULT_PASSWORD`(默认无,需在 cluster.conf 中自行设置);不同节点不同密码就写该节点密码。
 > **③ METALLB_POOL(3.1 节,裸金属必须改)**:
 > - 虚拟机集群: `create-vms.sh` 自动推导为 VM 网段,通常无需手改;
-> - **裸金属集群:必须手动填节点物理网段空闲段**(如 `10.66.1.130-139`)。
+> - **裸金属集群:必须手动填节点物理网段空闲段**(如 `192.168.100.130-139`)。
 > 部署 kubespray 前,脚本会红底醒目提示并 `sleep 15s` 供确认 METALLB_POOL。
 
 **一键命令(默认装全部组件 + kubespray):**

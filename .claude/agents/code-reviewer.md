@@ -9,7 +9,7 @@ tools: Read, Grep, Glob, Bash
 ## 项目关键规范(审查依据, 缺一不可)
 
 1. **脚本通用性(硬性)**: 禁止硬编码 IP / 密码 / 路径 —— 一律从 `deployments/config/cluster.conf`(经 `lib-common.sh` 的 `load_config`)读取或派生。
-   - 检查是否有字面量 IP(如 `10.244.x` / `10.66.x` / `10.233.x`)、端口、密码、绝对路径。
+   - 检查是否有字面量 IP(如 `10.x.x.x` 等具体地址)、端口、密码、绝对路径。
    - 允许 `:-默认值` 形式的回退默认(与现有脚本风格一致)。
 2. **网络架构约束(硬性)**: 网络固定 **Calico + IPIP**(`calico_network_backend: bird` + `calico_ipip_mode: Always` + `calico_mtu: 1480`)。
    - 不得引入依赖 **UDP 4789** 或**无封装直连路由**(direct/native)的方案 —— 本集群底层是 proxy-ARP fabric, 这两类不可行(见 `docs/cluster-architecture.md`)。

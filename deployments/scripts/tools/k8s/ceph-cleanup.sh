@@ -32,6 +32,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 init_remote_kubectl || { err "init_remote_kubectl 失败(cluster.conf NODES 无 master?)"; exit 1; }
 
+# ★ 2026-10-27 #73: ssh 默认会读取并转发**本地 stdin**。在 while-read(here-string/管道)
+#   循环里, 循环体内第一条 ssh 会把剩余行一次性读空 → 循环只处理第一条。
+#   ⚠ 把 `</dev/null` 写在 SSH 的**引号内**只是"远端命令的重定向", 对本地 ssh 完全无效
+#   (2026-10-19 PVC 删除只删第一个、2026-10-27 依赖 CR 强删漏掉 CephFilesystem 都是这个坑:
+#   残留依赖让 Rook 拒绝删除 CephCluster, 空等 900s+)。循环内/无需 stdin 的远端调用统一用
+#   SSH_N(本地 stdin 恒为 /dev/null); 需要喂 stdin 的(printf | SSH patch)保持原样。
+SSH_N() { SSH "$@" </dev/null; }
+
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
 # 强制清理语义(2026-10-20 CodeRabbit): `--wait=false` 只表示"发起删除、不陪等 finalizer",
 #   **不表示 CSI unmap 已完成**。发起强制删除后再有界复查; 仍残留则返回非零, 默认拒绝继续
@@ -57,14 +65,14 @@ node_cmd() {   # <ip> <user> <cmd...>
 #   **第一次 ssh 就吞掉管道里其余 PVC 行** → 只删掉第一个 PVC。实机表现为
 #   monitoring/storage-perses-0 残留 Bound + PV 存活, Rook 反复报
 #   "waiting for csi volume attachments ... to be cleaned up", CephCluster 永远 Deleting。
-#   下面统一: ①先收集动作再读 here-string；②所有循环内 SSH 加 </dev/null；
+#   下面统一: ①先收集动作再读 here-string；②所有循环内 SSH 用 SSH_N(本地 stdin=/dev/null, 见文首)；
 #   ③删完 PVC 后等待 PVC/PV 真正消失(CSI unmap 完成)再删 nodeplugin / CephCluster。
 #   ④强制清理(--wait=false)只发起删除、不陪等 finalizer; 之后有界复查 PVC/PV + ceph CSI
 #     VolumeAttachment(attachment 状态才是 unmap 的可靠信号), 仍残留则返回非零,
 #     默认拒绝删 nodeplugin/CephCluster(CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 可显式放行)。
 _list_ceph_pvcs() {   # <include_registry:0|1> → 每行 ns/name(仅 Bound/Lost 且 SC 含 ceph; Lost=PV 已被强删, 仍可能残留映射)
     local _inc="${1:-0}"
-    SSH "${K} get pvc -A -o json 2>/dev/null </dev/null" | INCLUDE_REGISTRY="${_inc}" python3 -c '
+    SSH_N "${K} get pvc -A -o json 2>/dev/null" | INCLUDE_REGISTRY="${_inc}" python3 -c '
 import json, os, sys
 inc = os.environ.get("INCLUDE_REGISTRY", "0") == "1"
 try:
@@ -88,7 +96,7 @@ for p in d.get("items", []):
 
 _list_ceph_pvs() {   # <include_registry:0|1> → 每行 PV 名(仅 ceph CSI provisioned)
     local _inc="${1:-0}"
-    SSH "${K} get pv -o json 2>/dev/null </dev/null" | INCLUDE_REGISTRY="${_inc}" python3 -c '
+    SSH_N "${K} get pv -o json 2>/dev/null" | INCLUDE_REGISTRY="${_inc}" python3 -c '
 import json, os, sys
 inc = os.environ.get("INCLUDE_REGISTRY", "0") == "1"
 try:
@@ -115,7 +123,7 @@ for pv in d.get("items", []):
 #   内核 rbd 映射。删 nodeplugin / CephCluster 前必须等 ceph CSI attacher 的 VA 全部消失。
 #   注意: 不做 include_registry 过滤 —— 删 nodeplugin/集群前所有 ceph 卷都必须 detach。
 _list_ceph_volumeattachments() {
-    SSH "${K} get volumeattachment -o json 2>/dev/null </dev/null" | python3 -c '
+    SSH_N "${K} get volumeattachment -o json 2>/dev/null" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -155,13 +163,13 @@ wait_ceph_volumes_gone() {   # <timeout_seconds> <include_registry:0|1>
     #   `--wait=false` + 外层 timeout, 只发起删除、不陪等 finalizer。
     while IFS= read -r _p; do
         [ -n "${_p}" ] || continue
-        SSH "timeout 30 ${K} -n ${_p%/*} delete pvc ${_p#*/} --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
+        SSH_N "timeout 30 ${K} -n ${_p%/*} delete pvc ${_p#*/} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" || true
     done <<< "${_left_pvc}"
     while IFS= read -r _pv; do
         [ -n "${_pv}" ] || continue
         printf '%s' '{"metadata":{"finalizers":null}}' \
             | SSH "timeout 30 ${K} patch pv ${_pv} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
-        SSH "timeout 30 ${K} delete pv ${_pv} --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
+        SSH_N "timeout 30 ${K} delete pv ${_pv} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" || true
     done <<< "${_left_pv}"
     # ★ 2026-10-20 CodeRabbit: --wait=false 只表示"不陪等 finalizer", **不等于 unmap 完成**。
     #   发起强制删除后再有界复查; 仍残留 → 返回 1, 由调用方决定是否显式放行继续。
@@ -206,10 +214,10 @@ stop_consumers() {
     _vj="$(mktemp)"; _pj="$(mktemp)"; _rj="$(mktemp)"; _sj="$(mktemp)"
     _sweep_done=0
     for _wi in $(seq 1 12); do
-        SSH "${K} get pvc -A -o json 2>/dev/null" > "${_vj}" || true
-        SSH "${K} get pods -A -o json 2>/dev/null" > "${_pj}" || true
-        SSH "${K} get rs -A -o json 2>/dev/null" > "${_rj}" || true
-        SSH "${K} get sts -A -o json 2>/dev/null" > "${_sj}" || true
+        SSH_N "${K} get pvc -A -o json 2>/dev/null" > "${_vj}" || true
+        SSH_N "${K} get pods -A -o json 2>/dev/null" > "${_pj}" || true
+        SSH_N "${K} get rs -A -o json 2>/dev/null" > "${_rj}" || true
+        SSH_N "${K} get sts -A -o json 2>/dev/null" > "${_sj}" || true
         _acts="$(python3 - "${_vj}" "${_pj}" "${_rj}" "${_sj}" <<'PYEOF'
 import json, sys
 def load(p):
@@ -272,15 +280,15 @@ for pod in load(sys.argv[2]).get("items", []):
 PYEOF
 )"
         [ -z "${_acts}" ] && { _sweep_done=1; break; }
-        # ⚠ 循环内每个 SSH 都必须 </dev/null: ssh 默认读 stdin, 会吞掉 here-string 里
+        # ⚠ 循环内每个 SSH 都必须走 SSH_N(本地 stdin=/dev/null): ssh 默认读 stdin, 会吞掉 here-string 里
         #   其余动作(2026-10-19 实机同类 bug: PVC 删除循环只执行了第一条)。
         while IFS=$'\t' read -r _act _a1 _a2 _a3; do
             [ -n "${_act}" ] || continue
             case "${_act}" in
-                scale)  say "     停用 ${_a1}/${_a2} ${_a3}(replicas=0)"; SSH "${K} -n ${_a1} scale ${_a2,,} ${_a3} --replicas=0 </dev/null >/dev/null 2>&1" || true ;;
-                delpod) say "     删除 Pod ${_a1}/${_a2}(优雅退出, ≤20s)"; SSH "timeout 30 ${K} -n ${_a1} delete pod ${_a2} --grace-period=20 --wait=false </dev/null >/dev/null 2>&1" || true ;;
-                delrs)  say "     删除裸 ReplicaSet ${_a1}/${_a2}(无 Deployment 管理, 删 Pod 会被其重建)"; SSH "${K} -n ${_a1} delete rs ${_a2} --wait=false </dev/null >/dev/null 2>&1" || true ;;
-                delcr)  say "     删除 CR ${_a2}/${_a3}(级联收掉其组件)"; SSH "${K} -n ${_a1} delete ${_a2} ${_a3} --wait=false </dev/null >/dev/null 2>&1" || true ;;
+                scale)  say "     停用 ${_a1}/${_a2} ${_a3}(replicas=0)"; SSH_N "${K} -n ${_a1} scale ${_a2,,} ${_a3} --replicas=0 >/dev/null 2>&1" || true ;;
+                delpod) say "     删除 Pod ${_a1}/${_a2}(优雅退出, ≤20s)"; SSH_N "timeout 30 ${K} -n ${_a1} delete pod ${_a2} --grace-period=20 --wait=false >/dev/null 2>&1" || true ;;
+                delrs)  say "     删除裸 ReplicaSet ${_a1}/${_a2}(无 Deployment 管理, 删 Pod 会被其重建)"; SSH_N "${K} -n ${_a1} delete rs ${_a2} --wait=false >/dev/null 2>&1" || true ;;
+                delcr)  say "     删除 CR ${_a2}/${_a3}(级联收掉其组件)"; SSH_N "${K} -n ${_a1} delete ${_a2} ${_a3} --wait=false >/dev/null 2>&1" || true ;;
             esac
         done <<< "${_acts}"
         sleep 10
@@ -332,9 +340,9 @@ PYEOF
         #   stdin, 第一条 delete 就吞掉管道里其余 PVC 行 → 只删掉第一个 PVC。实机残留
         #   monitoring/storage-perses-0(Bound + PV 存活), Rook 一直
         #   "waiting for csi volume attachments ... to be cleaned up" 拒删 CephCluster。
-        #   现在先收集动作再读 here-string, SSH 全部 </dev/null, 并在删完后等待 PVC/PV 消失
+        #   现在先收集动作再读 here-string, SSH 全部走 SSH_N(本地 stdin=/dev/null), 并在删完后等待 PVC/PV 消失
         #   (证明 CSI unmap 完成)再进入删 nodeplugin / CephCluster。
-        _pvc_actions="$(SSH "${K} get pvc -A -o json 2>/dev/null </dev/null" | python3 -c '
+        _pvc_actions="$(SSH_N "${K} get pvc -A -o json 2>/dev/null" | python3 -c '
 import sys, json
 PROTECT = {("kube-system", "registry-pvc")}      # kubespray 建的 registry 声明: 删了不会自愈
 try:
@@ -358,7 +366,7 @@ except Exception:
             [ -n "${_pvc:-}" ] || continue
             case "${_act}" in
                 DEL)  say "     删除 PVC ${_pvc}(数据将销毁)..."
-                      SSH "${K} -n ${_pvc%/*} delete pvc ${_pvc#*/} --wait=false </dev/null >/dev/null 2>&1" || true ;;
+                      SSH_N "${K} -n ${_pvc%/*} delete pvc ${_pvc#*/} --wait=false >/dev/null 2>&1" || true ;;
                 KEEP) say "     保留 PVC ${_pvc} ${_why:-}" ;;
             esac
         done <<< "${_pvc_actions}"
@@ -376,7 +384,7 @@ except Exception:
             fi
         fi
         say "  ② 删除 rbd csi nodeplugin DaemonSet(各节点执行内核 rbd unmap)..."
-        SSH "${K} -n ${CEPH_NAMESPACE} delete ds rook-ceph.rbd.csi.ceph.com-nodeplugin --wait=false </dev/null >/dev/null 2>&1" || true
+        SSH_N "${K} -n ${CEPH_NAMESPACE} delete ds rook-ceph.rbd.csi.ceph.com-nodeplugin --wait=false >/dev/null 2>&1" || true
         sleep 5
     else
         say "  保留模式(--keep-pvcs): 跳过 Bound PVC 删除与 nodeplugin 删除(集群保留, 无需 unmap; 应用卷数据不受影响)"
@@ -443,7 +451,7 @@ delete_cluster() {
     say "  删除受保护的 registry PVC(破坏性删除 Ceph 前必须, 否则 rbd-pool 非空)..."
     SSH "${K} -n kube-system delete pvc registry-pvc --ignore-not-found --wait=false >/dev/null 2>&1" || true
     for _i in $(seq 1 24); do
-        _pvc_left="$( (SSH "${K} -n kube-system get pvc registry-pvc --no-headers 2>/dev/null") || true )"
+        _pvc_left="$( (SSH_N "${K} -n kube-system get pvc registry-pvc --no-headers 2>/dev/null") || true )"
         [ -z "${_pvc_left}" ] && break
         sleep 5
     done
@@ -471,9 +479,10 @@ delete_cluster() {
     #   CephFilesystemSubVolumeGroup(durable/ephemeral) → CephFilesystem
     #   CephObjectStoreUser(rgw-model-admin/reader)     → CephObjectStore
     #   CephBlockPool(rbd-pool, 依赖 registry PVC 已删)
+    _DEP_CRS="cephfilesystemsubvolumegroup cephobjectstoreuser cephfilesystem cephobjectstore cephblockpool cephnfs cephrbdmirror"
     say "  删除 Ceph 依赖 CR(SubVolumeGroup/ObjectStoreUser → FS/ObjectStore/BlockPool)..."
-    for _cr in cephfilesystemsubvolumegroup cephobjectstoreuser cephfilesystem cephobjectstore cephblockpool cephnfs cephrbdmirror; do
-        SSH "${K} -n ${CEPH_NAMESPACE} delete "${_cr}" --all --wait=false >/dev/null 2>&1" || true
+    for _cr in ${_DEP_CRS}; do
+        SSH_N "${K} -n ${CEPH_NAMESPACE} delete ${_cr} --all --wait=false >/dev/null 2>&1" || true
     done
     unset _cr
     # ★ 2026-10-19 实机: Ceph 不可达 / 0 OSD 时, 依赖 CR 的 finalizer 需要执行 ceph 命令,
@@ -482,29 +491,68 @@ delete_cluster() {
     #   等待 120s, 仍在 → 清 finalizer 强删(数据本就随 Ceph 销毁; 只为让重建拿到干净命名空间)。
     say "  等待 Ceph 依赖 CR 终结(上限 120s)..."
     _deps_left=""
+    _deps_query_failed=0
     for _i in $(seq 1 24); do
-        _deps_left="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephfilesystemsubvolumegroup,cephobjectstoreuser,cephfilesystem,cephobjectstore,cephblockpool,cephnfs,cephrbdmirror --no-headers 2>/dev/null") || true )"
-        [ -z "${_deps_left}" ] && break
+        # ★ 查询失败 ≠ "已终结": 只有查询成功且输出为空才算干净(失败按残留处理, 走强删/后置校验)。
+        if _deps_left="$(SSH_N "${K} -n ${CEPH_NAMESPACE} get ${_DEP_CRS// /,} --no-headers 2>/dev/null")"; then
+            [ -z "${_deps_left}" ] && break
+        else
+            _deps_query_failed=1
+            _deps_left="<查询失败: 无法确认依赖 CR 是否终结>"
+        fi
         sleep 5
     done
     if [ -n "${_deps_left}" ]; then
-        warn "  依赖 CR 未在 120s 内终结(Ceph 不可达时 finalizer 卡死) → 清 finalizer 强删..."
-        for _cr in cephfilesystemsubvolumegroup cephobjectstoreuser cephfilesystem cephobjectstore cephblockpool cephnfs cephrbdmirror; do
-            _objs="$( (SSH "${K} -n ${CEPH_NAMESPACE} get ${_cr} -o name 2>/dev/null") || true )"
-            [ -n "${_objs}" ] || continue
-            while IFS= read -r _obj; do
-                [ -n "${_obj}" ] || continue
-                say "    强制删除 ${_obj}"
-                printf '%s' '{"metadata":{"finalizers":null}}' \
-                    | SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} patch ${_obj} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
-                SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete ${_obj} --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
-            done <<< "${_objs}"
+        if [ "${_deps_query_failed}" = "1" ]; then
+            warn "  依赖 CR 终结状态无法确认(查询失败) → 按残留处理: 清 finalizer 强删..."
+        else
+            warn "  依赖 CR 未在 120s 内终结(Ceph 不可达时 finalizer 卡死) → 清 finalizer 强删..."
+        fi
+        # ★ 2026-10-27 #73: 强删循环里的 SSH 必须用 SSH_N(本地 stdin=/dev/null) —— 旧写法把
+        #   `</dev/null` 写在引号内(只是远端重定向), 本地 ssh 仍会读空 here-string, 循环只处理
+        #   第一条(实机: cephfilesystem 有 cubestack-ext-fs/durable 两条只删了前者,
+        #   cephfilesystemsubvolumegroup 的 ephemeral 同样被漏掉) → 残留依赖让 Rook 拒绝删除
+        #   CephCluster, 空等 900s+。另外强删后必须**后置校验**: 仍有残留则重试(最多 3 轮),
+        #   仍不收敛直接报错中止, 绝不带着残留进入"删 CephCluster + 900s 等待"。
+        _dep_clean=0
+        _dep_try=1
+        while [ "${_dep_try}" -le 3 ]; do
+            for _cr in ${_DEP_CRS}; do
+                _objs="$( (SSH_N "${K} -n ${CEPH_NAMESPACE} get ${_cr} -o name 2>/dev/null") || true )"
+                [ -n "${_objs}" ] || continue
+                while IFS= read -r _obj; do
+                    [ -n "${_obj}" ] || continue
+                    say "    强制删除 ${_obj}(第 ${_dep_try}/3 轮)"
+                    printf '%s' '{"metadata":{"finalizers":null}}' \
+                        | SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} patch ${_obj} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
+                    SSH_N "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete ${_obj} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" || true
+                done <<< "${_objs}"
+            done
+            unset _objs _obj _cr
+            # 后置校验: 只有查询成功且输出为空才算强删完成; 查询失败同样视为未确认。
+            if _deps_left="$(SSH_N "${K} -n ${CEPH_NAMESPACE} get ${_DEP_CRS// /,} --no-headers 2>/dev/null")"; then
+                [ -z "${_deps_left}" ] && { _dep_clean=1; break; }
+            else
+                _deps_left="<查询失败: 无法确认依赖 CR 是否终结>"
+            fi
+            if [ "${_dep_try}" -lt 3 ]; then
+                warn "  依赖 CR 仍有残留, 5s 后重试(第 $((_dep_try + 1))/3 轮): $(printf '%s' "${_deps_left}" | tr '\n' ' ')"
+                sleep 5
+            fi
+            _dep_try=$((_dep_try + 1))
         done
-        unset _objs _obj
+        if [ "${_dep_clean}" != "1" ]; then
+            _CEPH_ABORT_WIPE=1
+            err "  依赖 CR 强删 3 轮后仍有残留 → 中止删除 CephCluster(否则 Rook 拒绝并空等 900s):"
+            err "    $(printf '%s' "${_deps_left}" | tr '\n' ' ')"
+            err "  排查: kubectl -n ${CEPH_NAMESPACE} get ${_DEP_CRS// /,} -o yaml(看 finalizer/ownerReferences)"
+            return 1
+        fi
+        ok "  依赖 CR 已全部强删"
     else
         ok "  依赖 CR 已全部终结"
     fi
-    unset _deps_left
+    unset _deps_left _deps_query_failed _dep_clean _dep_try _DEP_CRS
     SSH "${K} -n ${CEPH_NAMESPACE} delete cephcluster rook-ceph --wait=false >/dev/null 2>&1" || true
     _gone=0
     _cluster_query_failed=0
@@ -548,11 +596,11 @@ delete_cluster() {
     warn "  operator 重启后仍 Deleting → 清 finalizer + 强制删除 CephCluster(物理擦盘兜底)"
     printf '%s' '{"metadata":{"finalizers":null}}' \
         | SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} patch cephcluster rook-ceph --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
-    SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete cephcluster rook-ceph --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
+    SSH_N "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete cephcluster rook-ceph --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" || true
     for _lbl in "app=rook-ceph-osd" "app=rook-ceph-mds" "app=rook-ceph-rgw" "app=rook-ceph-mon" "app=rook-ceph-mgr"; do
-        SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete deploy -l ${_lbl} --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
+        SSH_N "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete deploy -l ${_lbl} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" || true
     done
-    SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete jobs -l app=rook-ceph-osd-prepare --ignore-not-found --force --grace-period=0 --wait=false </dev/null >/dev/null 2>&1" || true
+    SSH_N "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete jobs -l app=rook-ceph-osd-prepare --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" || true
     unset _lbl
     # ★ 2026-10-20 CodeRabbit: --wait=false 只表示"不陪等 finalizer", 必须复查对象真的消失;
     #   否则 finalizer patch 失败/残留时会谎报"已强制移除"(旧 CR 会让下次安装撞上)。

@@ -93,12 +93,12 @@ echo "== ⑧ 远端池比较: 用 -o json 的 .spec.addresses(不用 jsonpath) =
 sed -n '/^_metallb_pool_matches() {/,/^}/p' "${MOD}" > "${TMP}/pool_match.sh"
 [ -s "${TMP}/pool_match.sh" ] || { echo "FAIL 抽取 _metallb_pool_matches 失败"; exit 1; }
 source "${TMP}/pool_match.sh"
-_current='{"apiVersion":"metallb.io/v1beta1","kind":"IPAddressPool","metadata":{"name":"primary"},"spec":{"addresses":["10.66.3.225-10.66.3.226"]}}'
-_want='["10.66.3.225-10.66.3.226"]'
+_current='{"apiVersion":"metallb.io/v1beta1","kind":"IPAddressPool","metadata":{"name":"primary"},"spec":{"addresses":["192.0.2.225-192.0.2.226"]}}'
+_want='["192.0.2.225-192.0.2.226"]'
 chk "一致 → 1(不再无谓 patch)" "1" "$(_metallb_pool_matches "${_current}" "${_want}")"
-chk "不一致 → 0" "0" "$(_metallb_pool_matches "${_current}" '["10.66.3.230-10.66.3.231"]')"
+chk "不一致 → 0" "0" "$(_metallb_pool_matches "${_current}" '["192.0.2.230-192.0.2.231"]')"
 chk "远端查询失败/空 → 0(保守 patch)" "0" "$(_metallb_pool_matches "" "${_want}")"
-chk "旧 jsonpath 字面量不再被当 JSON → 0" "0" "$(_metallb_pool_matches '[10.66.3.225-10.66.3.226]' "${_want}")"
+chk "旧 jsonpath 字面量不再被当 JSON → 0" "0" "$(_metallb_pool_matches '[192.0.2.225-192.0.2.226]' "${_want}")"
 chk "缺 spec.addresses → 0" "0" "$(_metallb_pool_matches '{"spec":{}}' "${_want}")"
 _code() { command grep -v '^[[:space:]]*#' "${MOD}"; }
 chk "模块用 -o json 取池" "1" "$(command grep -cF 'get ipaddresspool primary -o json' "${MOD}" || true)"

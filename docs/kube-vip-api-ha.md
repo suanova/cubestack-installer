@@ -731,7 +731,7 @@ kubespray 的 `kube_apiserver_endpoint`(`kubespray_defaults/defaults/main/main.y
   代价:kube-vip 失去意义(它存在的理由是给外部/跨系统一个稳定入口),对外入口也没了。
   **只有当"不需要对外稳定 API 入口"时才成立** —— 与本方案的目标直接冲突,故不采用。
 
-### 16.2 实测(2026-09-22, bare-metal 集群 mxgpu-1-147/152/154 + worker 165)
+### 16.2 实测(2026-09-22, bare-metal 集群 node-1-147/152/154 + worker 165)
 
 **测法**:在 worker 165 上用 kubespray 同款 nginx 配置(`least_conn` + `proxy_connect_timeout 1s`)
 起一个本地代理,upstream 里放入**黑洞地址**模拟已死的 apiserver,完全不触碰集群节点。
@@ -895,9 +895,9 @@ kube-vip 退出时会**主动释放租约**(而非等租约自然过期),故切�
 
 > ⚠ **验收边界(2026-09-22 复核补记)**: 上表全部通过的都是**阶段一(VIP 就位)**。
 > 集群至今**仍停在阶段一** —— 实测:`all.yml` 的 `loadbalancer_apiserver.address` 仍是
-> `10.66.1.147`(master01),四台节点(3 master + 1 worker)`/etc/hosts` 里
-> `k8s-api.cubestack.io` 都指向 `10.66.1.147`,`ss` 里对外连接也全部落在 `10.66.1.147:6443`。
-> kube-vip 在 `.154` 上正常持有 VIP `10.66.1.139` 并能漂移,但**没有任何客户端使用它**。
+> `192.168.100.147`(master01),四台节点(3 master + 1 worker)`/etc/hosts` 里
+> `k8s-api.cubestack.io` 都指向 `192.168.100.147`,`ss` 里对外连接也全部落在 `192.168.100.147:6443`。
+> kube-vip 在 `.154` 上正常持有 VIP `192.168.100.139` 并能漂移,但**没有任何客户端使用它**。
 > 也就是说:**"API 入口"目前仍是 master01 单点,高可用尚未实际生效**。
 > 要生效需按第 7 节**显式**跑一次全量 `k8s_deploy`(探测到 VIP 已 bound → 阶段二 + 30s 倒计时确认)
 > ——那一步会触发证书 SAN 重签与各节点 apiserver 重启,应在维护窗口做。
@@ -1144,7 +1144,7 @@ run_module "${key}" || { FAILED=1; break; }
 ### 19.4 实机状态(2026-09-28)
 
 【实机】已生效:集群上 `/etc/kubernetes/manifests/kube-vip.yml` **在场且由上游渲染**,
-`mxgpu-3-28` 上 kube-vip 容器 Running,**VIP `10.66.3.240` 已实际绑在节点网卡上**。
+`node-3-28` 上 kube-vip 容器 Running,**VIP `192.0.2.240` 已实际绑在节点网卡上**。
 （⚠ 该机所在网段当时还有**另一套集群**也持有同一个 VIP —— 见 19.5 ②，别把这条读成"独占干净"。）
 
 **仍未验 —— 第一条就是"撤契约"的正当性证据**:
@@ -1160,22 +1160,22 @@ run_module "${key}" || { FAILED=1; break; }
 **① `kube_vip_is_bound()` 恒判"未绑定" ⇒ kube-vip 装了白装(2026-09-28 实机取证)**
 
 函数体是 `for _host in $(master_hosts)` —— `master_hosts` 给的是**主机名**,而部署容器解析不了节点名
-(`getent hosts mxgpu-3-28` 实机失败)⇒ `ssh ubuntu@mxgpu-3-28` 静默失败 ⇒ 循环永不命中 ⇒ **恒返回 1**。
+(`getent hosts node-3-28` 实机失败)⇒ `ssh ubuntu@node-3-28` 静默失败 ⇒ 循环永不命中 ⇒ **恒返回 1**。
 后果不止一条:
 
 - `api_entry_ip()` 永远走"未绑定 ⇒ 回落首个 master"分支 —— 域名解析**永远切不到 VIP**
-  (实机:VIP 明明已绑,`/etc/hosts` 里的 `k8s-api.cubestack.io` 却仍是 10.66.3.28)
+  (实机:VIP 明明已绑,`/etc/hosts` 里的 `k8s-api.cubestack.io` 却仍是 192.0.2.28)
 - `_kube_vip_candidate_free()`(VIP 自动推导的候选探测)同一 bug ⇒ **自动推导路径也全废**
   —— 显式 `K8S_API_VIP` 不受影响,这正是它此前没被发现的原因
 
 修法:新增 `master_ips()`(与 `master_hosts` 并列,注释写明"要 SSH 必须用 IP"),两处调用点改用它。
 同仓 08/09 两个模块**早就**用 `node_ip_by_hostname` 转 IP 再 SSH 并写了警告注释,`lib-common.sh` 这两处是漏网。
-**实机复核**:容器内 `kube_vip_is_bound 10.66.3.240` → 是;`api_entry_ip()` 三分支
+**实机复核**:容器内 `kube_vip_is_bound 192.0.2.240` → 是;`api_entry_ip()` 三分支
 (VIP 已绑 → VIP / 开关关 → 首个 master / 显式值优先)全部符合预期。
 
 **② 两套集群共用同一个 `K8S_API_VIP` ⇒ kubectl 时好时坏(2026-09-29 00:1x 实机取证)**
 
-同网段两套集群都持有 `10.66.3.240` 时,到 `VIP:6443` 的流量**随机落到任一套的 apiserver** ⇒
+同网段两套集群都持有 `192.0.2.240` 时,到 `VIP:6443` 的流量**随机落到任一套的 apiserver** ⇒
 `kubectl` 间歇报 `x509: certificate signed by unknown authority`(连跑三次:成功 / 失败 / 失败)。
 **不是代码缺陷,是部署编排事故** —— 但浮 VIP 方案天然有这个坑,故登记为长期注意事项。
 

@@ -58,6 +58,8 @@ chk_contains "采集 target digest" '_OPERATOR_DIGEST="${_d_dst}"' "${MOD}"
 
 echo "== ⑤ RWO 单卷 Deployment 策略守护 =="
 chk_contains "调用 ensure_rwo_deployments_recreate" 'ensure_rwo_deployments_recreate "${NS}"' "${MOD}"
+chk "RWO 策略二次兜底(operator 异步创建组件)" "2" \
+    "$(count_of x 'ensure_rwo_deployments_recreate "${NS}"' "${MOD}")"
 chk_contains "默认等待上界变量" 'CUBESTACK_OPERATOR_RWO_STRATEGY_WAIT_SECONDS' "${MOD}"
 
 echo "== ⑤b 离线推送后触发 ImagePullBackOff Pod 重拉 =="
@@ -305,6 +307,56 @@ chk_not_contains "不再异步删(--wait=false)" \
     'inferenceruntimeprofiles.ai.cubestack.io --all --ignore-not-found --wait=false' "${MOD}"
 chk_contains "删除前复核 CR 已是目标 registry" '_cr_now_reg' "${MOD}"
 chk_contains "CR 未切到目标 registry 时跳过重建" '跳过 profile 重建' "${MOD}"
+
+echo "== ⑬ HA 拓扑: master 数量 → operator replicas + CR ha.enabled =="
+# 2026-10-27 用户口径: 单 master=non-HA(replicas=1, ha.enabled=false);
+# 3 master=HA(replicas=2, ha.enabled=true)。2 master 按 non-HA, >=3 按 HA。
+_ha_profile() (
+    set +u
+    # shellcheck disable=SC1090
+    source "${LIB}" >/dev/null 2>&1
+    NODES=( "$@" )
+    cubestack_operator_ha_profile
+)
+chk "1 master → 1 副本 / ha=false" "1 1 false" \
+    "$(_ha_profile 'master,m1,10.0.0.1,root,-')"
+chk "2 master → 1 副本 / ha=false" "2 1 false" \
+    "$(_ha_profile 'master,m1,10.0.0.1,root,-' 'master,m2,10.0.0.2,root,-')"
+chk "3 master → 2 副本 / ha=true" "3 2 true" \
+    "$(_ha_profile 'master,m1,10.0.0.1,root,-' 'master,m2,10.0.0.2,root,-' 'master,m3,10.0.0.3,root,-')"
+chk "4 master → 2 副本 / ha=true" "4 2 true" \
+    "$(_ha_profile 'master,m1,10.0.0.1,root,-' 'master,m2,10.0.0.2,root,-' 'master,m3,10.0.0.3,root,-' 'master,m4,10.0.0.4,root,-')"
+chk_contains "模块使用拓扑派生函数" 'cubestack_operator_ha_profile' "${MOD}"
+chk_contains "operator replicas 传 chart(在线+离线共 2 处)" '--set "replicas=${OP_REPLICAS}"' "${MOD}"
+chk "operator replicas 两处" "2" "$(count_of x '--set "replicas=${OP_REPLICAS}"' "${MOD}")"
+chk_contains "CR 传 ha.enabled" 'clusterCR.spec.global.ha.enabled=${HA_ENABLED}' "${MOD}"
+# CRD 的 spec.global.ha 只有 enabled(chart CRD 明确注明 replicas 不是全局字段):
+# 不得写/读 ha.replicas, 否则 apiserver unknown field 剪掉并造成永久漂移。
+chk_not_contains "不写 CRD 不支持的 ha.replicas" 'clusterCR.spec.global.ha.replicas' "${MOD}"
+chk_contains "活体 CR 读取 ha.enabled" '_cr_ha=' "${MOD}"
+chk_not_contains "不读取 ha.replicas(非 CRD 字段)" '_cr_ha_replicas' "${MOD}"
+chk_contains "活体 CR 纠偏 ha" '\"ha\":${_want_ha_patch}' "${MOD}"
+chk_contains "HA 例外: cuberouter 保持单副本(RWO)" 'clusterCR.spec.components.cuberouter.values.cubeRouter.replicaCount=1' "${MOD}"
+chk_contains "HA 例外: lws 保持单副本(CPU)" 'clusterCR.spec.components.lws.values.replicaCount=1' "${MOD}"
+chk_contains "活体 CR 组件 HA 例外纠偏" 'CR 组件 HA 例外已收敛' "${MOD}"
+chk_contains "Deployment 副本数纠偏" 'scale deploy ${_DEP_NAME} --replicas=${OP_REPLICAS}' "${MOD}"
+
+echo "== ⑭ 默认平台组件 master placement(chart values 透传, 不改组件 chart) =="
+# 2026-10-27: cubepilot-api/operator、controller-manager、portal 的 chart 已原生支持
+# nodeSelector/tolerations；operator 模块通过 CubeStackCluster components.<name>.values
+# 在创建 Deployment 时下发，不依赖 node_pool 模块的末尾 patch。
+for k in 'cubepilot:' 'cubestackControllerManager:' 'cubestackPortal:'; do
+    chk_contains "CR component ${k}" "$(printf '      %s' "${k}")" "${MOD}"
+done
+for k in 'operator:' 'api:' 'web:'; do
+    chk_contains "cubepilot subcomponent ${k}" "$(printf '          %s' "${k}")" "${MOD}"
+done
+chk_contains "CR values nodeSelector" 'node-role.kubernetes.io/control-plane: ""' "${MOD}"
+chk_contains "CR values unschedulable toleration" 'node.kubernetes.io/unschedulable' "${MOD}"
+chk_contains "defaults NODE_POOL_ENABLED=true" 'NODE_POOL_ENABLED="${NODE_POOL_ENABLED:-true}"' "${DEFAULTS}"
+chk_contains "defaults NODE_POOL_MASTER_CORDON=true" 'NODE_POOL_MASTER_CORDON="${NODE_POOL_MASTER_CORDON:-true}"' "${DEFAULTS}"
+chk_contains "defaults NODE_POOL_PLATFORM_PLACEMENT=false" 'NODE_POOL_PLATFORM_PLACEMENT="${NODE_POOL_PLATFORM_PLACEMENT:-false}"' "${DEFAULTS}"
+chk_contains "defaults NODE_POOL_CUBESTACK_PLACEMENT=true" 'NODE_POOL_CUBESTACK_PLACEMENT="${NODE_POOL_CUBESTACK_PLACEMENT:-true}"' "${DEFAULTS}"
 
 echo ""
 if [ "${fail}" = "0" ]; then

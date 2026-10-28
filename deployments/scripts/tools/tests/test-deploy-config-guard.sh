@@ -22,7 +22,7 @@ echo "== ① config_fingerprint =="
 cat > "${TMP}/cluster.conf" <<'EOF'
 SERVICE_EXPOSE_MODE="metallb"
 METALLB_ENABLED="true"
-METALLB_POOL="10.66.3.225-10.66.3.226"
+METALLB_POOL="192.0.2.225-192.0.2.226"
 EOF
 fp1="$(CLUSTER_CONF="${TMP}/cluster.conf" bash -c 'source "$1" >/dev/null 2>&1; config_fingerprint' _ "${LIB}" 2>/dev/null)"
 cat >> "${TMP}/cluster.conf" <<'EOF'

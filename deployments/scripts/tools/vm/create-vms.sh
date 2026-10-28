@@ -149,7 +149,7 @@ print(f"{ipaddress.ip_address(start)}-{ipaddress.ip_address(end)}")
 PY
 )"
     # 用 sed 更新 cluster.conf 的 METALLB_POOL(写**实际值**, 而非 ${VAR} 模板字面量)
-    # 否则 load_config source 时 NEW_POOL 未定义 → 回退旧默认(如 10.66.1.130-139), 部署仍用旧 IP。
+    # 否则 load_config source 时 NEW_POOL 未定义 → 回退旧默认(如 192.168.100.130-139), 部署仍用旧 IP。
     sed -i -E "s|^(METALLB_POOL=).*|METALLB_POOL=\"${NEW_POOL}\"   # 由 create-vms.sh 自动推导(与 VM 网段同段)|" "${CLUSTER_CONF}"
     ok "自动更新 METALLB_POOL → ${NEW_POOL}(与 VM 网段同为 ${VM_IP_FIRST}.0/24, 池 .200-.209 避开 VM 静态 IP)"
 fi

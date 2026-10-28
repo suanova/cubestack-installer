@@ -24,7 +24,7 @@ SSH_KEY="${SSH_KEY_DIR}/${SSH_KEY_NAME}"
 
 # ---------------- 解析节点 ----------------
 # 角色过滤: INV_ROLES="master" 仅生成控制平面; 空=全部
-# 排除过滤: INV_EXCLUDE="mxgpu-1-232" 排除指定节点(逗号分隔)
+# 排除过滤: INV_EXCLUDE="node-1-232" 排除指定节点(逗号分隔)
 INV_ROLES="${INV_ROLES:-}"
 role_included() { # <role> → 0=包含
     [ -z "${INV_ROLES}" ] && return 0

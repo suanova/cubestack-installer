@@ -16,7 +16,7 @@ registry_disk_size: "200Gi"
 # 通过 MetalLB 对外暴露 registry(LoadBalancer 类型), 分配 METALLB_POOL 中的 VIP
 # 也可改为 NodePort(registry_service_nodeport)或 ClusterIP 仅供集群内部使用
 # ⚠ 以下三行由 sync-kubespray-config.sh 按 SERVICE_EXPOSE_MODE 自动改写, 请勿手工填环境 IP
-#   (曾因模板残留 10.66.1.130 导致 kubespray 严格校验直接失败: "registry_service_loadbalancer_ip
+#   (曾因模板残留 192.168.100.130 导致 kubespray 严格校验直接失败: "registry_service_loadbalancer_ip
 #    support only compatible with LoadBalancer")
 registry_service_type: NodePort
 registry_service_nodeport: "31148"
@@ -185,7 +185,7 @@ metallb_config:
     primary:
       # ⚠ 占位默认(与 cluster.conf METALLB_POOL 默认一致, 非环境 IP);
       #   部署时由 sync-kubespray-config.sh 从 METALLB_POOL 覆盖 —— 曾因模板残留旧环境
-      #   池(10.66.1.130-139)被新集群继承, 分到其他集群已占用的 VIP 导致镜像拉取失败。
+      #   池(192.168.100.130-139)被新集群继承, 分到其他集群已占用的 VIP 导致镜像拉取失败。
       ip_range:
         - 10.244.1.200-10.244.1.209
       auto_assign: true

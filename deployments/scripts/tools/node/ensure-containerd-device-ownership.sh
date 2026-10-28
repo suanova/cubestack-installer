@@ -22,7 +22,7 @@
 #   每次部署(gpu_operator 模块)会重跑本工具兜底; 怀疑被改时手工重跑本工具即可。
 # 用法:
 #   sudo ./ensure-containerd-device-ownership.sh                  # NODES 中 GPU 节点
-#   sudo ./ensure-containerd-device-ownership.sh 10.66.3.13 10.66.3.48   # 指定 IP
+#   sudo ./ensure-containerd-device-ownership.sh 192.0.2.13 192.0.2.48   # 指定 IP
 #   sudo ./ensure-containerd-device-ownership.sh --all            # 不筛 GPU, 全部 NODES
 # 数据源: cluster.conf (NODES / SSH_USER / SSH_DEFAULT_PASSWORD / CONTAINERD_DEVICE_OWNERSHIP)
 # ============================================================

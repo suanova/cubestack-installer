@@ -50,7 +50,7 @@ description: CubeStack 集群 Operator 上架标准流程技能。当需要新�
 ```bash
 # ---------------- XXX 组件(说明) ----------------
 XXX_ENABLED="${XXX_ENABLED:-false}"    # 默认 false; --with-cubestack 按此部署全部启用; --enable 写 true; 立即部署用 --steps
-XXX_IP="${XXX_IP:-10.66.1.140}"         # 需要的外部 IP/端口从配置读, 勿硬编码在脚本
+XXX_IP="${XXX_IP:-192.168.100.140}"         # 需要的外部 IP/端口从配置读, 勿硬编码在脚本
 ```
 > 规范: **`cluster.conf` 为主, `XXX_ENABLED=true` 才启用**(默认 false, 基座 addon metallb/local-path/registry 除外, 默认 true)。
 > - `--with-cubestack`/默认 = 基座 + cluster.conf 中为 true 的**全部** operator; `--with-k8s` = 仅基座(跳过全部 operator)。

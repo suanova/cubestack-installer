@@ -22,8 +22,9 @@
 #   · 参考: docs/ceph-backup-restore.md
 # 数据源: cluster.conf (CEPH_BACKUP_ACTION / CEPH_BACKUP_DIR / CEPH_BACKUP_RETENTION / NODES)
 # 用法:   sudo ./deploy-cluster.sh --steps ceph_backup                            # 默认 save
-#         CEPH_BACKUP_ACTION=restore sudo ./deploy-cluster.sh --steps ceph_backup # 恢复(认领旧 OSD 数据)
-#         CEPH_BACKUP_ACTION=install-cron sudo ./deploy-cluster.sh --steps ceph_backup
+#         sudo env CEPH_BACKUP_ACTION=restore ./deploy-cluster.sh --steps ceph_backup # 恢复(认领旧 OSD 数据)
+#         sudo env CEPH_BACKUP_ACTION=install-cron ./deploy-cluster.sh --steps ceph_backup
+#         (变量经 env 传给 root: sudo 默认 env_reset 会清掉 "VAR=... sudo" 前置赋值)
 # ============================================================
 set -euo pipefail
 

@@ -775,7 +775,7 @@ warn_unhealthy_pods() {
 
 print_plan() {
     say "==== 集群规划(配置: ${CLUSTER_CONF}) ===="
-    echo "  网络模式: ${NET_MODE:-bridge}   虚拟机网段: ${VM_SUBNET:-10.244.0.0/16}   物理Worker: ${PHYS_WORKER_NET:-10.66.1.0/24}"
+    echo "  网络模式: ${NET_MODE:-bridge}   虚拟机网段: ${VM_SUBNET:-10.244.0.0/16}   物理Worker: ${PHYS_WORKER_NET:-192.168.100.0/24}"
     echo "  SSH密钥: ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}   默认密码: ${SSH_DEFAULT_PASSWORD:-<未配置>}"
     echo "  本次执行模块: ${RUN_STEPS[*]:-<空>}"
     print_undeployed_summary
