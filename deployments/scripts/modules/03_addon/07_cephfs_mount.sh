@@ -153,8 +153,13 @@ case "${CEPHFS_MOUNT_READ_ONLY,,}" in
     true|1|yes|on)   CEPHFS_MOUNT_READ_ONLY="true" ;;
     false|0|no|off|"") CEPHFS_MOUNT_READ_ONLY="false" ;;
     *)
-        err "CEPHFS_MOUNT_READ_ONLY 非法: '${CEPHFS_MOUNT_READ_ONLY}'(可用 true/false)"
-        exit 1 ;;
+        if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+            warn "CEPHFS_MOUNT_READ_ONLY 非法, 卸载时忽略: '${CEPHFS_MOUNT_READ_ONLY}'"
+            CEPHFS_MOUNT_READ_ONLY="false"
+        else
+            err "CEPHFS_MOUNT_READ_ONLY 非法: '${CEPHFS_MOUNT_READ_ONLY}'(可用 true/false)"
+            exit 1
+        fi ;;
 esac
 CEPHFS_FS_NAME=""
 
