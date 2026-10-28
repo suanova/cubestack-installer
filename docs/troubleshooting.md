@@ -1370,6 +1370,41 @@ bash deployments/scripts/tools/tests/test-cubestack-ui-url.sh        # ⑥ 公�
 bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh # ⑨ serviceExposeMode / Envoy 兜底
 ```
 
+### 13. 【2026-10-28】单节点 / 无 worker 集群被 node_pool cordon: CoreDNS 滚动或节点重启后永久 Pending
+
+**症状:** 单节点 all-in-one(或只有 master、无 worker)集群部署完成后, CoreDNS / dns-autoscaler
+副本一旦滚动、扩缩容或节点重启, 新 Pod 永久 `Pending`, 事件:
+
+```
+0/1 nodes are available: 1 node(s) were unschedulable.
+```
+
+已有 Pod 仍 Running, 部署汇总看起来正常, 直到下一次 DNS 组件变更/节点重启才爆发(整集群 DNS 失效)。
+
+**根因:**
+1. `NODE_POOL_ENABLED` / `NODE_POOL_MASTER_CORDON` 默认都是 `true`, `53_node_pool` 在 addon
+   末尾把**所有** master cordon —— 无 worker 时这就是集群里仅有的可调度节点;
+2. kubespray 模板的 CoreDNS/dns-autoscaler 只容忍
+   `node-role.kubernetes.io/control-plane:NoSchedule`, **没有**
+   `node.kubernetes.io/unschedulable:NoSchedule`(scheduler `NodeUnschedulable` 插件检查的隐式
+   taint); 默认 `NODE_POOL_PLATFORM_PLACEMENT=false` 也不跑 `master-placement.sh` 补容忍;
+3. `patch-playbooks/cubestack-single-node.yml` 在部署早期特意 uncordon 单 control-plane,
+   随后被 node_pool 又 cordon 回去。
+
+**解法(已落地):** `tools/node/node-pool.sh` 增加"无 worker 安全护栏":
+- `NODES` 中 `role=worker` 数为 0 时, 即使 `NODE_POOL_MASTER_CORDON=true` 也**跳过 cordon**;
+- `--apply` 自动回滚**本工具此前创建**(ownership annotation)的 cordon(先有 worker、后来移除
+  worker 的场景); 非本工具创建的 cordon 只告警、不动;
+- `--check` 在该拓扑下期望 master 可调度, 被 cordon 即报漂移;
+- 有 worker 时行为不变。详见 `docs/node-pool.md`「无 worker 拓扑」。
+
+**验证:**
+```bash
+bash deployments/scripts/tools/tests/test-node-pool.sh   # ⑧⑨⑩: 跳过 cordon / 回滚遗留 cordon / check 漂移
+```
+边界: "CoreDNS 不带 unschedulable 容忍 → Pending" 机制已在容器 d 验证(见 `docs/node-pool.md`
+关键机制); 本修复由离线回归覆盖, 尚未在真实单节点集群跑全量部署复验。
+
 ---
 
 ## 四、离线部署

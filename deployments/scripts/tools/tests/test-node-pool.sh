@@ -15,6 +15,13 @@
 #   ⑤ 预存 cordon(无 annotation): apply 不抢 ownership; remove 不 uncordon
 #   ⑥ --only 只处理指定节点; NODE_POOL_MASTER_CORDON=false 只打标签不 cordon
 #   ⑦ 无 master → 非 0
+#   ⑧ 无 worker(单节点): 默认 CORDON=true 自动跳过 cordon; check 期望可调度
+#   ⑨ 无 worker: 本工具遗留 cordon 在 apply 时自动回滚(annotation 清除)
+#   ⑩ 无 worker + 非本工具 cordon: check 报漂移(非 0)
+#   ⑪ 模块 remove: placement 回滚不受当前开关门控; 失败时非 0(不降级为告警)
+#   ⑫ CORDON=false 时 --apply 会 uncordon 本工具创建的 cordon(annotation 判定), 外部 cordon 不动
+#   ⑬ ownership 标记删除失败: 重新 cordon 保持一致 + 非 0; 重试可收敛(apply/remove)
+#   ⑭ ownership 标记写入失败: 回滚 cordon(不留下"已 cordon 但无所有权"的状态)+ 非 0
 #
 # 隔离: 假 ssh 执行假 kubectl, 节点标签/cordon/annotation 落临时状态目录。
 # 用法: bash deployments/scripts/tools/tests/test-node-pool.sh
@@ -88,7 +95,10 @@ case "$cmd" in
     label)
         h="${args[2]:-}"; kv="${args[3]:-}"; _set_label "$h" "$kv"; echo "node/${h} labeled" ;;
     annotate)
-        h="${args[2]:-}"; kv="${args[3]:-}"; _set_ann "$h" "$kv"; echo "node/${h} annotated" ;;
+        h="${args[2]:-}"; kv="${args[3]:-}"
+        if [[ "$kv" == *- && "${FAKE_ANNOTATE_DEL_FAIL:-0}" = "1" ]]; then exit 1; fi
+        if [[ "$kv" != *- && "${FAKE_ANNOTATE_SET_FAIL:-0}" = "1" ]]; then exit 1; fi
+        _set_ann "$h" "$kv"; echo "node/${h} annotated" ;;
     cordon)
         h="${args[1]:-}"; echo true > "${st}/${h}.unschedulable"; echo "node/${h} cordoned" ;;
     uncordon)
@@ -111,6 +121,13 @@ EOF
 cat > "${TMP}/cluster.conf.nomaster" <<'EOF'
 NODES=(
   "worker,w1,10.0.0.3,root,-"
+)
+SSH_USER="root"
+KUBESPRAY_PROFILE="none"
+EOF
+cat > "${TMP}/cluster.conf.single" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
 )
 SSH_USER="root"
 KUBESPRAY_PROFILE="none"
@@ -218,6 +235,98 @@ _reset
 out="$(CLUSTER_CONF="${TMP}/cluster.conf.nomaster" _run -- --apply)"
 chk "无 master 非 0" "1" "$?"
 chk_contains "明确报错" "master" "${out}"
+
+echo "== ⑧ 无 worker(单节点): 默认 CORDON=true 自动跳过 cordon =="
+_reset
+out="$(CLUSTER_CONF="${TMP}/cluster.conf.single" _run -- --apply)"
+chk "退出码 0" "0" "$?"
+chk_contains "m1 标签" "node-pool=control-plane" "$(_label m1)"
+chk "m1 未 cordon" "" "$(_unsched m1)"
+chk_contains "提示无 worker 跳过" "跳过 cordon" "${out}"
+chk_contains "汇总 0 台 worker" "0 台 worker" "${out}"
+out="$(CLUSTER_CONF="${TMP}/cluster.conf.single" _run -- --check)"
+chk "check 通过(期望可调度)" "0" "$?"
+
+echo "== ⑨ 无 worker: 本工具遗留 cordon 在 apply 时自动回滚 =="
+_reset
+echo true > "${TMP}/state/m1.unschedulable"
+echo "cubestack.io/node-pool-cordoned-by-installer=true" > "${TMP}/state/m1.annotations"
+out="$(CLUSTER_CONF="${TMP}/cluster.conf.single" _run -- --apply)"
+chk "退出码 0" "0" "$?"
+chk "m1 已 uncordon" "false" "$(_unsched m1)"
+chk "annotation 已清" "" "$(_ann m1)"
+chk_contains "提示回滚" "回滚本工具" "${out}"
+
+echo "== ⑩ 无 worker + 非本工具 cordon: check 报漂移 =="
+_reset
+CLUSTER_CONF="${TMP}/cluster.conf.single" _run -- --apply >/dev/null
+echo true > "${TMP}/state/m1.unschedulable"   # 模拟外部 cordon(无 annotation)
+out="$(CLUSTER_CONF="${TMP}/cluster.conf.single" _run -- --check)"
+chk "check 非 0" "1" "$?"
+chk_contains "点名 m1" "m1" "${out}"
+chk_contains "说明被 cordon" "cordon" "${out}"
+
+echo "== ⑪ 模块 remove 分支: placement 回滚不受当前开关影响 =="
+MODULE53="${REPO_ROOT}/deployments/scripts/modules/03_addon/53_node_pool.sh"
+_rm_block="$(sed -n '/^if \[ "\${_ACTION}" = "remove" \]; then$/,/^    exit 0$/p' "${MODULE53}")"
+[ -n "${_rm_block}" ] && echo "  ok  remove 分支已提取" || { echo "  FAIL 未提取到 remove 分支"; fail=1; }
+chk_contains "调用 cubestack-placement --remove" 'cubestack-placement.sh" --remove' "${_rm_block}"
+chk_contains "调用 master-placement --remove" 'master-placement.sh" --remove' "${_rm_block}"
+chk_not_contains "不受 CUBESTACK_PLACEMENT 开关门控" "NODE_POOL_CUBESTACK_PLACEMENT" "${_rm_block}"
+chk_not_contains "不受 PLATFORM_PLACEMENT 开关门控" "NODE_POOL_PLATFORM_PLACEMENT" "${_rm_block}"
+chk_contains "记录 placement 回滚失败" "_rm_failed=1" "${_rm_block}"
+chk_contains "失败时非 0 退出" "placement 移除存在失败项" "${_rm_block}"
+chk_not_contains "placement 失败不降级为告警" "placement 回滚失败(不阻断)" "${_rm_block}"
+
+echo "== ⑫ CORDON=false 时 --apply 回滚本工具创建的 cordon(不动外部 cordon) =="
+_reset
+_run -- --apply >/dev/null                       # 默认 true: m1/m2 cordon + annotation
+chk "前置: m1 已 cordon" "true" "$(_unsched m1)"
+out="$(_run NODE_POOL_MASTER_CORDON=false -- --apply)"
+chk "CORDON=false 退出码 0" "0" "$?"
+chk "m1 已 uncordon" "false" "$(_unsched m1)"
+chk "m1 annotation 已清" "" "$(_ann m1)"
+chk "m2 已 uncordon" "false" "$(_unsched m2)"
+chk_contains "提示按 CORDON=false 回滚" "CORDON=false" "${out}"
+
+_reset
+echo true > "${TMP}/state/m1.unschedulable"      # 外部 cordon(无 annotation)
+out="$(_run NODE_POOL_MASTER_CORDON=false -- --apply)"
+chk "外部 cordon 保持不动" "true" "$(_unsched m1)"
+chk_contains "外部 cordon 只告警" "非本工具创建" "${out}"
+
+echo "== ⑬ ownership 标记删除失败: 重新 cordon 保持一致, 重试可收敛 =="
+_reset
+_run -- --apply >/dev/null                       # 默认 true: m1/m2 cordon + annotation
+out="$(FAKE_ANNOTATE_DEL_FAIL=1 _run NODE_POOL_MASTER_CORDON=false -- --apply)"
+chk "标记删除失败退出码非 0" "1" "$?"
+chk "m1 重新 cordon(保持一致)" "true" "$(_unsched m1)"
+chk_contains "标记仍在" "cubestack.io/node-pool-cordoned-by-installer=true" "$(_ann m1)"
+chk_contains "报标记删除失败" "标记删除失败" "${out}"
+chk_contains "说明已重新 cordon" "重新 cordon" "${out}"
+out="$(_run NODE_POOL_MASTER_CORDON=false -- --apply)"
+chk "重试退出码 0" "0" "$?"
+chk "重试后 m1 已 uncordon" "false" "$(_unsched m1)"
+chk "重试后标记已清" "" "$(_ann m1)"
+
+# remove 路径同样: 标记删不掉 → 重新 cordon + 非 0; 重试可收敛
+_reset
+_run -- --apply >/dev/null
+out="$(FAKE_ANNOTATE_DEL_FAIL=1 _run -- --remove)"
+chk "remove 标记删除失败退出码非 0" "1" "$?"
+chk "remove 失败后节点重新 cordon" "true" "$(_unsched m1)"
+out="$(_run -- --remove)"
+chk "remove 重试退出码 0" "0" "$?"
+chk "remove 重试后已 uncordon" "false" "$(_unsched m1)"
+chk "remove 重试后标记已清" "" "$(_ann m1)"
+
+echo "== ⑭ ownership 标记写入失败: 回滚 cordon(不留'已 cordon 但无所有权'状态) =="
+_reset
+out="$(FAKE_ANNOTATE_SET_FAIL=1 _run -- --apply)"
+chk "标记写入失败退出码非 0" "1" "$?"
+chk "m1 已回滚 uncordon" "false" "$(_unsched m1)"
+chk "无 ownership 标记" "" "$(_ann m1)"
+chk_contains "报标记写入失败" "标记写入失败" "${out}"
 
 echo ""
 if [ "${fail}" = "0" ]; then
