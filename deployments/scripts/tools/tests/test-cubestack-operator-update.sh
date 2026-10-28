@@ -330,10 +330,11 @@ chk_contains "模块使用拓扑派生函数" 'cubestack_operator_ha_profile' "$
 chk_contains "operator replicas 传 chart(在线+离线共 2 处)" '--set "replicas=${OP_REPLICAS}"' "${MOD}"
 chk "operator replicas 两处" "2" "$(count_of x '--set "replicas=${OP_REPLICAS}"' "${MOD}")"
 chk_contains "CR 传 ha.enabled" 'clusterCR.spec.global.ha.enabled=${HA_ENABLED}' "${MOD}"
-chk_contains "CR HA 时显式 ha.replicas" 'clusterCR.spec.global.ha.replicas=${OP_REPLICAS}' "${MOD}"
+# CRD 的 spec.global.ha 只有 enabled(chart CRD 明确注明 replicas 不是全局字段):
+# 不得写/读 ha.replicas, 否则 apiserver unknown field 剪掉并造成永久漂移。
+chk_not_contains "不写 CRD 不支持的 ha.replicas" 'clusterCR.spec.global.ha.replicas' "${MOD}"
 chk_contains "活体 CR 读取 ha.enabled" '_cr_ha=' "${MOD}"
-chk_contains "活体 CR 读取 ha.replicas" '_cr_ha_replicas=' "${MOD}"
-chk_contains "HA 时副本数漂移参与判定" '[ "${_cr_ha_replicas}" != "${OP_REPLICAS}" ]' "${MOD}"
+chk_not_contains "不读取 ha.replicas(非 CRD 字段)" '_cr_ha_replicas' "${MOD}"
 chk_contains "活体 CR 纠偏 ha" '\"ha\":${_want_ha_patch}' "${MOD}"
 chk_contains "HA 例外: cuberouter 保持单副本(RWO)" 'clusterCR.spec.components.cuberouter.values.cubeRouter.replicaCount=1' "${MOD}"
 chk_contains "HA 例外: lws 保持单副本(CPU)" 'clusterCR.spec.components.lws.values.replicaCount=1' "${MOD}"

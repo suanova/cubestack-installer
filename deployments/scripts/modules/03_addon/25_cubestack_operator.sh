@@ -49,7 +49,8 @@
 #     自带, installer **不再** --set image.tag 覆盖; CUBESTACK_OPERATOR_IMAGE_TAG 只用于清单登记。
 #   · HA 拓扑(2026-10-27 用户口径): 按 cluster.conf NODES 的 master 数量自动决定 ——
 #     1~2 台 master = non-HA: operator replicas=1 + CubeStackCluster.spec.global.ha.enabled=false;
-#     >=3 台 master = HA: operator replicas=2 + CR global.ha.enabled=true(并显式 ha.replicas=2)。
+#     >=3 台 master = HA: operator replicas=2 + CR global.ha.enabled=true
+#     (CRD 的 ha 只有 enabled; 组件副本由 catalog 各自的 value path 决定, 不写 ha.replicas)。
 #     与 master 是否 cordon 无关; 部署后还会对活体 CR/Deployment 做一次纠偏。
 # 数据源: cluster.conf (CUBESTACK_OPERATOR_* / ONLINE_DEPLOY_CUBESTACK_OPERATOR / REGISTRY_* / HARBOR_MIRROR_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps cubestack_operator
@@ -245,7 +246,7 @@ command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+): 本模块用
 # ★ 2026-10-27 拓扑派生(用户口径): master 数量决定 operator 副本与平台 HA ——
 #   · 仅 1 台 master(或 2 台): non-HA → operator replicas=1, CR spec.global.ha.enabled=false;
 #   · 3 台及以上 master: HA → operator replicas=2(leader-election 热备), CR ha.enabled=true
-#     (+ ha.replicas=2, 让 catalog 声明了 replica/反亲和的组件按 HA 展开)。
+#     (ha.replicas 不是 CRD 字段 — chart CRD 注明副本由 catalog 各 value path 决定)。
 #   与 master 是否 cordon 无关; 只看 cluster.conf NODES 中 role=master 的数量。
 read -r _MASTER_COUNT OP_REPLICAS HA_ENABLED <<< "$(cubestack_operator_ha_profile)"
 say "  拓扑派生: master=${_MASTER_COUNT} 台 → operator replicas=${OP_REPLICAS}, clusterCR.spec.global.ha.enabled=${HA_ENABLED}"
@@ -466,10 +467,11 @@ EXTRA_CR_VALUES_ARG=()
 if [ "${CR_ENABLED}" = "true" ]; then
     _CR_VALUES=( --set "clusterCR.enabled=true" )
     # HA 全局开关由 master 数量派生(见文首): 单 master=false(组件保持默认单副本);
-    # >=3 master=true + ha.replicas=2(catalog 支持 HA 的组件展开 2 副本 + 反亲和)。
+    # >=3 master=true(catalog 支持 HA 的组件按各自 value path 展开副本 + 反亲和)。
+    # ⚠ CRD 的 spec.global.ha **只有 enabled**(chart CRD 明确注明 replicas 不是全局字段),
+    #   不要写 ha.replicas —— apiserver 会报 unknown field 并剪掉。
     _CR_VALUES+=( --set "clusterCR.spec.global.ha.enabled=${HA_ENABLED}" )
     if [ "${HA_ENABLED}" = "true" ]; then
-        _CR_VALUES+=( --set "clusterCR.spec.global.ha.replicas=${OP_REPLICAS}" )
         # ★ 组件级 HA 例外(2026-10-27 容器 c 实测, 别再踩):
         #   · cuberouter Deployment 挂 RWO PVC(app-data/app-logs) → 2 副本必然 Multi-Attach,
         #     保持单副本(catalog 的 HA 注入路径 = cubeRouter.replicaCount);
@@ -994,16 +996,15 @@ if [ "${CR_ENABLED}" = "true" ]; then
     _cr_secs="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullSecrets}' 2>/dev/null" || true) )"
     _cr_secs_norm="$(printf '%s' "${_cr_secs}" | tr -d '[:space:]')"
     _cr_ha="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.ha.enabled}' 2>/dev/null" || true) )"
-    _cr_ha_replicas="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.ha.replicas}' 2>/dev/null" || true) )"
     _want_expose="loadbalancer"
     [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ] && _want_expose="nodeport"
-    # HA 取值同样做活体纠偏(helm 三路合并对 CR 不可靠): 单 master=false; >=3 master=true+replicas=2。
-    # ★ replicas 也必须参与漂移判定(2026-10-28): 只看 enabled 时, enabled=true 但 replicas
-    #   残留 3 的 CR 会被判"一致", 纠偏 patch 被跳过。
+    # HA 取值同样做活体纠偏(helm 三路合并对 CR 不可靠): 单 master=false; >=3 master=true。
+    # ⚠ 只校验/写 enabled: CRD schema(chart 与实机)中 spec.global.ha 只有 enabled,
+    #   replicas 由各 catalog 条目按 value path 决定, 不是全局字段(写它会 unknown field 被剪掉)。
     if [ "${HA_ENABLED}" = "true" ]; then
-        _want_ha_patch='{"enabled":true,"replicas":'"${OP_REPLICAS}"'}'
-        _ha_now="ha.enabled=${_cr_ha:-<空>},ha.replicas=${_cr_ha_replicas:-<空>}"
-        _ha_desc="ha=${HA_ENABLED},replicas=${OP_REPLICAS}"
+        _want_ha_patch='{"enabled":true}'
+        _ha_now="ha.enabled=${_cr_ha:-<空>}"
+        _ha_desc="ha=${HA_ENABLED}"
     else
         _want_ha_patch='{"enabled":false}'
         _ha_now="ha.enabled=${_cr_ha:-<空>}"
@@ -1057,7 +1058,7 @@ walk(d.get("items", []))
     if [ "${_need_recreate}" = "1" ]; then
         say "  检测到 InferenceRuntimeProfile 镜像前缀与目标 registry(${_want_reg})不一致: 先纠偏 CR, 再重建 immutable profile..."
     fi
-    if [ -n "${_cr_name}" ] && { [ "${_cr_reg}" != "${_want_reg}" ] || [ "$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullPolicy}' 2>/dev/null" || true) )" != "${_want_pol}" ] || [ "${_cr_expose}" != "${_want_expose}" ] || [ "${_cr_secs_norm}" != "${_want_secs}" ] || [ "${_cr_ha}" != "${HA_ENABLED}" ] || { [ "${HA_ENABLED}" = "true" ] && [ "${_cr_ha_replicas}" != "${OP_REPLICAS}" ]; }; }; then
+    if [ -n "${_cr_name}" ] && { [ "${_cr_reg}" != "${_want_reg}" ] || [ "$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullPolicy}' 2>/dev/null" || true) )" != "${_want_pol}" ] || [ "${_cr_expose}" != "${_want_expose}" ] || [ "${_cr_secs_norm}" != "${_want_secs}" ] || [ "${_cr_ha}" != "${HA_ENABLED}" ]; }; then
         warn "  CR 取值漂移(当前 imageRegistry=${_cr_reg:-<空>}, serviceExposeMode=${_cr_expose:-<空>}, ${_ha_now}), kubectl patch 纠正为 ${_want_reg}/${_want_expose}/${_ha_desc} ..."
         SSH "${K} -n ${NS} patch csc ${_cr_name} --type=merge -p '{\"spec\":{\"global\":{\"imageRegistry\":\"${_want_reg}\",\"externalImageRegistryPrefix\":\"${_want_pref}\",\"imagePullSecrets\":${_want_secs},\"imagePullPolicy\":\"${_want_pol}\",\"serviceExposeMode\":\"${_want_expose}\",\"ha\":${_want_ha_patch}}}}' >/dev/null 2>&1" \
             && ok "  CR 已纠偏(operator 将按新值滚动组件)" \
@@ -1090,7 +1091,7 @@ walk(d.get("items", []))
             fi
         fi
     fi
-    unset _cr_name _cr_reg _cr_expose _cr_secs _cr_secs_norm _cr_now_reg _cr_ha _cr_ha_replicas _ha_now _ha_desc _want_reg _want_pref _want_pol _want_secs _want_expose _want_ha_patch
+    unset _cr_name _cr_reg _cr_expose _cr_secs _cr_secs_norm _cr_now_reg _cr_ha _ha_now _ha_desc _want_reg _want_pref _want_pol _want_secs _want_expose _want_ha_patch
 fi
 
 # ---------------- [6.5/6] RWO 单卷 Deployment 的更新策略守护 ----------------
