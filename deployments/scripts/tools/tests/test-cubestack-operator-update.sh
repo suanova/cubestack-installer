@@ -332,6 +332,8 @@ chk "operator replicas 两处" "2" "$(count_of x '--set "replicas=${OP_REPLICAS}
 chk_contains "CR 传 ha.enabled" 'clusterCR.spec.global.ha.enabled=${HA_ENABLED}' "${MOD}"
 chk_contains "CR HA 时显式 ha.replicas" 'clusterCR.spec.global.ha.replicas=${OP_REPLICAS}' "${MOD}"
 chk_contains "活体 CR 读取 ha.enabled" '_cr_ha=' "${MOD}"
+chk_contains "活体 CR 读取 ha.replicas" '_cr_ha_replicas=' "${MOD}"
+chk_contains "HA 时副本数漂移参与判定" '[ "${_cr_ha_replicas}" != "${OP_REPLICAS}" ]' "${MOD}"
 chk_contains "活体 CR 纠偏 ha" '\"ha\":${_want_ha_patch}' "${MOD}"
 chk_contains "HA 例外: cuberouter 保持单副本(RWO)" 'clusterCR.spec.components.cuberouter.values.cubeRouter.replicaCount=1' "${MOD}"
 chk_contains "HA 例外: lws 保持单副本(CPU)" 'clusterCR.spec.components.lws.values.replicaCount=1' "${MOD}"

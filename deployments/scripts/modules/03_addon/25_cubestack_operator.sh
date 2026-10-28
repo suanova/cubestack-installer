@@ -994,13 +994,20 @@ if [ "${CR_ENABLED}" = "true" ]; then
     _cr_secs="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullSecrets}' 2>/dev/null" || true) )"
     _cr_secs_norm="$(printf '%s' "${_cr_secs}" | tr -d '[:space:]')"
     _cr_ha="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.ha.enabled}' 2>/dev/null" || true) )"
+    _cr_ha_replicas="$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.ha.replicas}' 2>/dev/null" || true) )"
     _want_expose="loadbalancer"
     [ "${SERVICE_EXPOSE_MODE:-metallb}" = "nodeport" ] && _want_expose="nodeport"
     # HA 取值同样做活体纠偏(helm 三路合并对 CR 不可靠): 单 master=false; >=3 master=true+replicas=2。
+    # ★ replicas 也必须参与漂移判定(2026-10-28): 只看 enabled 时, enabled=true 但 replicas
+    #   残留 3 的 CR 会被判"一致", 纠偏 patch 被跳过。
     if [ "${HA_ENABLED}" = "true" ]; then
         _want_ha_patch='{"enabled":true,"replicas":'"${OP_REPLICAS}"'}'
+        _ha_now="ha.enabled=${_cr_ha:-<空>},ha.replicas=${_cr_ha_replicas:-<空>}"
+        _ha_desc="ha=${HA_ENABLED},replicas=${OP_REPLICAS}"
     else
         _want_ha_patch='{"enabled":false}'
+        _ha_now="ha.enabled=${_cr_ha:-<空>}"
+        _ha_desc="ha=${HA_ENABLED}"
     fi
     if [ "${ONLINE_DEPLOY}" = "true" ]; then
         # CR global.imageRegistry 是**注册域**(不含项目前缀); 组件镜像路径自带 suanova/。
@@ -1050,13 +1057,13 @@ walk(d.get("items", []))
     if [ "${_need_recreate}" = "1" ]; then
         say "  检测到 InferenceRuntimeProfile 镜像前缀与目标 registry(${_want_reg})不一致: 先纠偏 CR, 再重建 immutable profile..."
     fi
-    if [ -n "${_cr_name}" ] && { [ "${_cr_reg}" != "${_want_reg}" ] || [ "$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullPolicy}' 2>/dev/null" || true) )" != "${_want_pol}" ] || [ "${_cr_expose}" != "${_want_expose}" ] || [ "${_cr_secs_norm}" != "${_want_secs}" ] || [ "${_cr_ha}" != "${HA_ENABLED}" ]; }; then
-        warn "  CR 取值漂移(当前 imageRegistry=${_cr_reg:-<空>}, serviceExposeMode=${_cr_expose:-<空>}, ha.enabled=${_cr_ha:-<空>}), kubectl patch 纠正为 ${_want_reg}/${_want_expose}/ha=${HA_ENABLED} ..."
+    if [ -n "${_cr_name}" ] && { [ "${_cr_reg}" != "${_want_reg}" ] || [ "$( (SSH "${K} -n ${NS} get csc -o jsonpath='{.items[0].spec.global.imagePullPolicy}' 2>/dev/null" || true) )" != "${_want_pol}" ] || [ "${_cr_expose}" != "${_want_expose}" ] || [ "${_cr_secs_norm}" != "${_want_secs}" ] || [ "${_cr_ha}" != "${HA_ENABLED}" ] || { [ "${HA_ENABLED}" = "true" ] && [ "${_cr_ha_replicas}" != "${OP_REPLICAS}" ]; }; }; then
+        warn "  CR 取值漂移(当前 imageRegistry=${_cr_reg:-<空>}, serviceExposeMode=${_cr_expose:-<空>}, ${_ha_now}), kubectl patch 纠正为 ${_want_reg}/${_want_expose}/${_ha_desc} ..."
         SSH "${K} -n ${NS} patch csc ${_cr_name} --type=merge -p '{\"spec\":{\"global\":{\"imageRegistry\":\"${_want_reg}\",\"externalImageRegistryPrefix\":\"${_want_pref}\",\"imagePullSecrets\":${_want_secs},\"imagePullPolicy\":\"${_want_pol}\",\"serviceExposeMode\":\"${_want_expose}\",\"ha\":${_want_ha_patch}}}}' >/dev/null 2>&1" \
             && ok "  CR 已纠偏(operator 将按新值滚动组件)" \
             || warn "  CR 纠偏失败(手工: kubectl -n ${NS} get csc -o yaml)"
     else
-        ok "  CR 取值与部署模式一致(${_want_reg}/${_want_expose}/ha=${HA_ENABLED})"
+        ok "  CR 取值与部署模式一致(${_want_reg}/${_want_expose}/${_ha_desc})"
     fi
     # ★ 组件级 HA 例外也要活体纠偏(helm 对 CR 的更新不可靠; 仅 HA 开启时):
     #   cuberouter 的 RWO PVC 不支持 2 副本; lws 第 2 副本在 3 master 上 CPU 不足。
@@ -1083,7 +1090,7 @@ walk(d.get("items", []))
             fi
         fi
     fi
-    unset _cr_name _cr_reg _cr_expose _cr_secs _cr_secs_norm _cr_now_reg _cr_ha _want_reg _want_pref _want_pol _want_secs _want_expose _want_ha_patch
+    unset _cr_name _cr_reg _cr_expose _cr_secs _cr_secs_norm _cr_now_reg _cr_ha _cr_ha_replicas _ha_now _ha_desc _want_reg _want_pref _want_pol _want_secs _want_expose _want_ha_patch
 fi
 
 # ---------------- [6.5/6] RWO 单卷 Deployment 的更新策略守护 ----------------
