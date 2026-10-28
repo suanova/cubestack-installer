@@ -286,6 +286,8 @@ for host in "${MASTER_HOSTS[@]}"; do
                 else
                     ok "  [${host}] 可调度 OK(无 worker 拓扑跳过 cordon)"
                 fi
+            elif [ "${unsched}" = "true" ] && _np_owned "${ann}"; then
+                err "  [${host}] 本工具创建的 cordon 仍存在(NODE_POOL_MASTER_CORDON=false); 请运行 --apply 收敛"; FAILED=1
             fi
             ;;
         remove)
