@@ -178,13 +178,19 @@ if [ "${MASTER_CORDON}" = "true" ] && [ "${ACTION}" != "remove" ]; then
     else
         for _wh in "${WORKER_HOSTS[@]}"; do
             _wst="$(SSH "${K} get node "${_wh}" --no-headers" 2>/dev/null | awk '{print $2}')" || true
-            _wun="$(_np_get_unsched "${_wh}")"
+            # ★ 读取失败 ≠ 未 cordon(2026-10-28 CodeRabbit): jsonpath 查询成功但字段为空
+            #   才是"未 cordon"; SSH/API 失败同样输出空, 必须用退出码区分。否则 worker 实际
+            #   已 cordon 而读取失败时会被当成可用 worker → 继续 cordon master, 击穿护栏。
+            _wun_ok=1
+            _wun="$(SSH "${K} get node "${_wh}" -o jsonpath='{.spec.unschedulable}'" 2>/dev/null)" || _wun_ok=0
             _why=""
             case "${_wst}" in
                 Ready|Ready,*) : ;;
                 *) _why="状态='${_wst:-未知}'" ;;
             esac
-            if [ "${_wun}" = "true" ]; then
+            if [ "${_wun_ok}" != "1" ]; then
+                _why="${_why:+${_why}, }spec.unschedulable 读取失败"
+            elif [ "${_wun}" = "true" ]; then
                 _why="${_why:+${_why}, }已 cordon"
             fi
             if [ -z "${_why}" ]; then

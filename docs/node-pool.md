@@ -194,9 +194,11 @@ sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worke
 ```bash
 sudo ./deployments/scripts/tools/node/node-pool.sh --apply
 kubectl get node <master> -o jsonpath='{.spec.unschedulable}{"\n"}{.metadata.labels.node-pool}{"\n"}'
-kubectl get nodes   # master 显示 SchedulingDisabled
+kubectl get nodes   # NODE_POOL_MASTER_CORDON=true 且有可用 worker 时 master 显示 SchedulingDisabled;
+                    # 无可用 worker 时 master 保持可调度(见「无可用 worker 拓扑」)
 
-# 带 toleration 的测试 Pod(参见上方 YAML)应 Running; 不带应 Pending
+# 带 toleration 的测试 Pod(参见上方 YAML)应 Running; 不带 toleration 时, 仅当 master 仍有
+# control-plane 污点或已 cordon 才 Pending(单节点无 worker 集群已移除污点且不 cordon, Pod 可调度)
 # 回滚
 sudo ./deployments/scripts/tools/node/node-pool.sh --remove
 kubectl get node <master> -o jsonpath='{.spec.unschedulable}{"\n"}'   # 空/false

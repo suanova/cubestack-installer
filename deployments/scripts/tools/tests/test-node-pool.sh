@@ -23,7 +23,7 @@
 #   ⑬ ownership 标记删除失败: 重新 cordon 保持一致 + 非 0; 重试可收敛(apply/remove)
 #   ⑭ ownership 标记写入失败: 回滚 cordon(不留下"已 cordon 但无所有权"的状态)+ 非 0
 #   ⑮ annotate 已生效但返回非 0: 确认性重读后视为完成, 不创建无标记 cordon
-#   ⑯ 配置了 worker 但 NotReady/已 cordon: 视为无可用 worker, 跳过 master cordon
+#   ⑯ 配置了 worker 但 NotReady/已 cordon/读取失败: 视为无可用 worker, 跳过 master cordon
 #   ⑰ ownership 判定锚定 key 左边界: 相似 key(example.cubestack.io/...)不算本工具标记
 #
 # 隔离: 假 ssh 执行假 kubectl, 节点标签/cordon/annotation 落临时状态目录。
@@ -89,6 +89,7 @@ case "$cmd" in
             if [ -s "${st}/${h}.labels" ]; then labs="${labs},$(paste -sd, "${st}/${h}.labels")"; fi
             echo "${h} Ready control-plane 1m v1.35.8 ${labs}"
         elif [[ "$*" == *".spec.unschedulable"* ]]; then
+            if [ "${FAKE_UNSCHED_READ_FAIL:-0}" = "1" ] && [ "${h}" = "w1" ]; then exit 1; fi
             cat "${st}/${h}.unschedulable" 2>/dev/null || true
         elif [[ "$*" == *".metadata.annotations"* ]]; then
             ann=""; [ -s "${st}/${h}.annotations" ] && ann="$(sed 's/^/"/; s/=/":"/; s/$/"/' "${st}/${h}.annotations" | paste -sd, -)"
@@ -364,6 +365,14 @@ out="$(_run -- --apply)"
 chk "⑯ worker cordon 退出码 0" "0" "$?"
 chk "⑯ worker cordon 时 m1 未 cordon" "" "$(_unsched m1)"
 chk_contains "⑯ 提示 worker 已 cordon" "已 cordon" "${out}"
+
+# spec.unschedulable 读取失败: 空输出 ≠ 未 cordon, 必须按不可用处理(否则可能 cordon 掉
+# 最后一个可调度节点, 击穿 CoreDNS 护栏)
+_reset
+out="$(FAKE_UNSCHED_READ_FAIL=1 _run -- --apply)"
+chk "⑯ 读取失败退出码 0" "0" "$?"
+chk "⑯ 读取失败时 m1 未 cordon" "" "$(_unsched m1)"
+chk_contains "⑯ 点名读取失败" "spec.unschedulable 读取失败" "${out}"
 
 echo "== ⑰ ownership 判定锚定 key 左边界: 相似 key 不算本工具标记 =="
 # 端到端: 节点被 cordon, annotation 只有相似 key(example.cubestack.io/...), --remove 不得 uncordon
