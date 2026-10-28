@@ -31,12 +31,15 @@ echo "============= 1. 删除 SNAT 规则 ============="
 # 当前目的网段, 会漏删遗留规则并误报"不存在"。这里不回写任何旧网段字面量(仓库卫生)。
 _snat_deleted=0
 _snat_try=0
-while [ "${_snat_try}" -lt 50 ]; do
+while true; do
     _list="$(iptables -t nat -S POSTROUTING)" || { err "读取 nat POSTROUTING 规则失败"; exit 1; }
     _rule="$(printf '%s\n' "${_list}" \
         | command grep -F -- "-s ${VM_SUBNET}" \
         | command grep -F -- " -j SNAT" | head -1 || true)"
     [ -n "${_rule}" ] || break
+    # 上限只在**仍有匹配规则**时生效: 恰好删满 50 条且已无残留时, 循环下一轮会因
+    # _rule 为空而 break, 不会误报"未收敛"并跳过后续清理步骤。
+    [ "${_snat_try}" -lt 50 ] || { err "SNAT 规则删除未收敛(>50 条), 请人工检查 nat 表"; exit 1; }
     _del="${_rule/-A POSTROUTING/-D POSTROUTING}"
     read -r -a _args <<< "${_del}"
     if iptables -t nat "${_args[@]}"; then
@@ -48,7 +51,6 @@ while [ "${_snat_try}" -lt 50 ]; do
     fi
     _snat_try=$((_snat_try + 1))
 done
-[ "${_snat_try}" -lt 50 ] || { err "SNAT 规则删除未收敛(>50 条), 请人工检查 nat 表"; exit 1; }
 [ "${_snat_deleted}" -gt 0 ] || echo -e "→ SNAT 规则不存在,跳过"
 
 echo "============= 2. 删除回程路由 ============="
