@@ -86,6 +86,9 @@ sel = s.get("nodeSelector") or {}
 tols = s.get("tolerations") or []
 need_sel = sys.argv[1] == "1"
 ok = (not need_sel or sel.get("node-role.kubernetes.io/control-plane") == "") and any(
+    t.get("key") == "node-role.kubernetes.io/control-plane" and t.get("effect") == "NoSchedule"
+    for t in tols
+) and any(
     t.get("key") == "node.kubernetes.io/unschedulable" and t.get("effect") == "NoSchedule"
     for t in tols
 )
