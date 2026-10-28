@@ -303,10 +303,10 @@ conntrack -L | grep <PodIP>      # [UNREPLIED] packets=0
 ip rule show; ip route show table <table>
 ```
 > `<pod_probe>` 必须取**本节点实际 Pod 地址**(`ip route show | awk '$0 ~ /dev cali/'`), 不要用
-> Pod 网段首主机: 首主机通常属于别的节点的 /26 block(或未分配), 走 `tunl0`/默认网关, 与本地 Pod
-> 的 `dev cali*` 路由完全不同(2026-10-28 集群 c 实测: `10.233.64.1 via 10.66.3.254 dev enp1s0`,
-> 而本地 Pod `10.233.78.195 dev cali...`)。用首主机探测会掩盖只出现在本地 Pod 上的源策略分歧。
-> `node-net-guard.sh` 已改为探测本地 Pod 地址; 节点无本地 Pod 时回退网段首主机。
+> Pod 网段首主机: 首主机通常属于别的节点的 /26 block(或未分配), 走 `tunl0`/默认网关, 与本地
+> Pod 的 `dev cali*` 路由完全不同(2026-10-28 集群 c 实测: 首主机经默认网关
+> `via <网关IP> dev <管理网卡>`, 本地 Pod 走 `dev cali*`)。用首主机探测会掩盖只出现在本地
+> Pod 上的源策略分歧。`node-net-guard.sh` 已改为探测本地 Pod 地址; 节点无本地 Pod 时回退网段首主机。
 
 ---
 
