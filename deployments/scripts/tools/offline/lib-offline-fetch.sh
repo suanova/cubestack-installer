@@ -40,9 +40,11 @@ try:
     d = json.load(open(sys.argv[1], encoding="utf-8"))
 except Exception:
     raise SystemExit
+seen = set()
 for f in d.get("failures") or []:
     p = f.get("path")
-    if p:
+    if p and p not in seen:
+        seen.add(p)
         print(p)
 PY
 )
@@ -52,17 +54,24 @@ PY
     mkdir -p "${qbase}" 2>/dev/null \
         || qbase="${TMPDIR:-/var/tmp}/cubestack-repair/${RELEASE_ARG}/${ts}"
     mkdir -p "${qbase}" || return 1
+    local rc=0 n_fixed=0
     for rel in "${bad[@]}"; do
         rel="${rel#./}"
+        # 元数据项由校验器 --seal --update-success 重建, 不在 SHA256SUMS 内, 不能用 mc cp 修复;
+        # 截断文件会让 _SUCCESS.bytes 校验失败, 若不跳过会先撞上它而放弃后续文件(2026-10-29 实测)。
+        case "${rel}" in
+            _SUCCESS|SHA256SUMS|SIZES)
+                warn "  跳过元数据项: ${rel}(由 verify --seal --update-success 重建)"
+                continue ;;
+        esac
         case "${rel}" in
             cubestack-installer-cli-*.tar|cubestack-installer-cli.tar)
                 src="${SRC_ROOT}/${rel}"; dst="${DST_ROOT}/${rel}" ;;
             *)
-                if [ "${FLAT}" = "1" ]; then
-                    src="${SRC_ROOT}/${rel}"; dst="${DST_ROOT}/${rel}"
-                else
-                    src="${SRC_ROOT}/offline-files/${rel}"; dst="${DST_ROOT}/offline-files/${rel}"
-                fi ;;
+                # 两种布局的远端都在 <release>/offline-files/ 下; flat 只改本地落点。
+                # (旧实现 flat 用 ${SRC_ROOT}/${rel}, 少了 offline-files/, 续传/重下必失败)
+                src="${SRC_ROOT}/offline-files/${rel}"
+                if [ "${FLAT}" = "1" ]; then dst="${DST_ROOT}/${rel}"; else dst="${DST_ROOT}/offline-files/${rel}"; fi ;;
         esac
         local expected="" lsize="" rsize=""
         case "${rel}" in
@@ -89,6 +98,7 @@ PY
                 if mc cat --offset "${lsize}" "${src}" >> "${dst}" 2>/dev/null \
                    && [ "$(sha256sum "${dst}" | awk '{print $1}')" = "${expected,,}" ]; then
                     ok "断点续传完成: ${rel}"
+                    n_fixed=$((n_fixed + 1))
                     continue
                 fi
                 warn "续传后校验失败, 改为完整重下: ${rel}"
@@ -99,14 +109,18 @@ PY
             mv -f "${dst}" "${qbase}/${rel}" || true
         fi
         say "重新下载 ${rel} ..."
-        _mc_retry mc cp --overwrite "${src}" "${dst}" \
-            || { err "重新下载失败: ${rel}(检查网络/mc 配置)"; return 1; }
+        # 2026-10-29: mc RELEASE.2026-09 起 `mc cp` 已移除 --overwrite(默认即覆盖);
+        #   带该 flag 会 "flag provided but not defined" 导致 repair 全部失败。
+        _mc_retry mc cp "${src}" "${dst}" \
+            || { err "重新下载失败: ${rel}(检查网络/mc 配置)"; rc=1; continue; }
         if [ -n "${expected}" ] && [ "$(sha256sum "${dst}" | awk '{print $1}')" != "${expected,,}" ]; then
             err "重下后 sha 仍不符(远端可能已变化/损坏): ${rel}"
-            return 1
+            rc=1; continue
         fi
+        n_fixed=$((n_fixed + 1))
     done
-    ok "已重下 ${#bad[@]} 个文件; 重新校验..."
+    [ "${rc}" = "0" ] || return 1
+    ok "已修复 ${n_fixed} 个文件; 重新校验..."
     return 0
 }
 
