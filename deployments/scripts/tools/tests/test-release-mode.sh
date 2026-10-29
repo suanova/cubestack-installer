@@ -104,6 +104,7 @@ for bad in '..' '.' '/abs' 'a/b' 'a b' 'a;b' 'a$b' '-rc1'; do
 done
 # 合法值只被"缺少 release.env"分支拦下(格式校验不误杀合法版本名):
 CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_RELEASE='2.0.0-rc1' CUBESTACK_RELEASE_ROOT="${TMP}/rel" \
+    CUBESTACK_RELEASE_LAYOUT=tree \
     bash -c 'source "$1"; load_config' _ "${LIB}" >"${TMP}/legal.out" 2>&1
 rc=$?
 chk "合法 release 名未被格式校验拦截" "1" "${rc}"
@@ -144,11 +145,26 @@ case "${cmd}" in
         d="$(p "${1:?}")"; [ -e "${d}" ] || exit 0
         printf '%s\t1\t%s\n' "$(du -sh "${d}" 2>/dev/null | awk '{print $1}')" "${1}" ;;
     mirror)
-        while [ $# -gt 0 ]; do case "$1" in --overwrite) shift ;; *) break ;; esac; done
+        _remove=0
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --overwrite) shift ;;
+                --remove) _remove=1; shift ;;
+                --*) shift ;;
+                *) break ;;
+            esac
+        done
         _src="$1"; _dst="$2"
         case "$_src" in minio/*) _src="$(p "$_src")" ;; esac
         case "$_dst" in minio/*) _dst="$(p "$_dst")" ;; esac
-        mkdir -p "${_dst}"; cp -a "${_src}"/. "${_dst}"/ ;;
+        if [ "${_remove}" = "1" ] && [ -d "${_dst}" ]; then
+            find "${_dst}" -depth -mindepth 1 -print0 | while IFS= read -r -d '' _f; do
+                _rel="${_f#${_dst}/}"
+                [ -e "${_src}/${_rel}" ] || rm -rf "${_f}"
+            done
+        fi
+        mkdir -p "${_dst}"; cp -a "${_src}"/. "${_dst}"/
+        [ "${_remove}" = "1" ] && echo "mirror-remove ${_src} ${_dst}" >> "${FAKE_MC_LOG:-/dev/null}" || true ;;
     cp)
         _rec=0
         while [ $# -gt 0 ]; do
@@ -167,7 +183,26 @@ case "${cmd}" in
         else
             mkdir -p "$(dirname "${_dst}")"; cp -a "${_src}" "${_dst}"
         fi ;;
-    cat) cat "$(p "${1:?}")" ;;
+    stat)
+        _json=0
+        while [ $# -gt 0 ]; do
+            case "$1" in --json) _json=1; shift ;; --*) shift ;; *) break ;; esac
+        done
+        _src="$(p "${1:?}")"
+        _sz="$(stat -c %s "${_src}" 2>/dev/null || echo 0)"
+        if [ "${_json}" = "1" ]; then printf '{"size":%s}\n' "${_sz}"; else printf '%s\n' "${_sz}"; fi ;;
+    cat)
+        _off=0
+        while [ $# -gt 0 ]; do
+            case "$1" in --offset) _off="${2:?}"; shift 2 ;; --*) shift ;; *) break ;; esac
+        done
+        _src="$(p "${1:?}")"
+        if [ "${_off}" -gt 0 ]; then
+            printf 'cat-offset %s %s\n' "${_off}" "${1}" >> "${FAKE_MC_LOG:-/dev/null}"
+            tail -c +$((_off + 1)) "${_src}"
+        else
+            cat "${_src}"
+        fi ;;
     *) echo "fake mc: unsupported ${cmd}" >&2; exit 1 ;;
 esac
 FAKE
@@ -177,20 +212,81 @@ export FAKE_REMOTE="${TMP}/remote"
 export MINIO_ENDPOINT="http://fake" MINIO_ACCESS_KEY="x" MINIO_SECRET_KEY="y"
 export FAKE_MC_LOG="${TMP}/mc-calls.log"
 
+# 预置多余文件 + .cubestack-*: 默认 clean 应删除前者、保留后者
+mkdir -p "${TMP}/local/2.0.0/offline-files/.cubestack-manifest-backup"
+printf 'extra\n' > "${TMP}/local/2.0.0/offline-files/extra.txt"
+printf 'keep\n' > "${TMP}/local/2.0.0/offline-files/.cubestack-manifest-backup/keep.txt"
+# mc 重试 helper: 前两次失败, 第三次成功 / 全部失败
+awk '/^_mc_retry\(\)/,/^}/' "${REPO_ROOT}/deployments/scripts/tools/offline/lib-offline-fetch.sh" > "${TMP}/mcretry.sh"
+warn() { :; }
+FETCH_RETRY=3 FETCH_RETRY_DELAY=0
+# shellcheck disable=SC1090
+source "${TMP}/mcretry.sh"
+_n=0; _f() { _n=$((_n+1)); [ "${_n}" -ge 3 ]; }
+_mc_retry _f; chk "mc 重试第三次成功" "0" "$?"
+chk "mc 重试尝试 3 次" "3" "${_n}"
+_n=0; _g() { _n=$((_n+1)); return 1; }
+_mc_retry _g; chk "mc 重试最终失败" "1" "$?"
+chk "mc 失败尝试 3 次" "3" "${_n}"
+
 bash "${FETCH}" --release 2.0.0 --dest "${TMP}/local" --yes >/dev/null 2>&1
 chk "fetch --release 退出码" "0" "$?"
+chk "clean 删除多余文件" "0" "$([ -e "${TMP}/local/2.0.0/offline-files/extra.txt" ] && echo 1 || echo 0)"
+chk "clean 保留 .cubestack-*" "keep" "$(cat "${TMP}/local/2.0.0/offline-files/.cubestack-manifest-backup/keep.txt" 2>/dev/null)"
 chk "发布树落盘" "hello" "$(cat "${TMP}/local/2.0.0/offline-files/ceph/test.txt" 2>/dev/null)"
 chk "CLI tar 落盘(带版本名)" "cli-tar-bytes" "$(cat "${TMP}/local/2.0.0/cubestack-installer-cli-v2.0.0.tar" 2>/dev/null)"
 chk "不再生成旧名 CLI tar" "0" "$([ -e "${TMP}/local/2.0.0/cubestack-installer-cli.tar" ] && echo 1 || echo 0)"
-chk_contains "release 取件使用 mc cp --recursive" "cp-recursive" "$(cat "${TMP}/mc-calls.log" 2>/dev/null)"
+chk_contains "release 取件使用精确镜像(清理)" "mirror-remove" "$(cat "${TMP}/mc-calls.log" 2>/dev/null)"
+
+# --clean-countdown 必须是数字
+out="$(bash "${FETCH}" --clean-countdown abc 2>&1)"; rc=$?
+chk "clean-countdown 非数字拒绝" "1" "${rc}"
+chk_contains "提示非负整数" "非负整数" "${out}"
+
+# 非交互且无 --yes: 精确清理必须中止
+out="$(bash "${FETCH}" --release 2.0.0 --dest "${TMP}/local-abort" </dev/null 2>&1)"
+rc=$?
+chk "非交互无 --yes 中止" "1" "${rc}"
+chk_contains "提示 --yes/--no-clean" "--yes" "${out}"
+
+# --no-clean: 保留本地多余文件(--no-verify 避免覆盖性校验失败)
+printf 'keep-extra\n' > "${TMP}/local/2.0.0/offline-files/keep-extra.txt"
+bash "${FETCH}" --release 2.0.0 --dest "${TMP}/local" --yes --no-clean --no-verify >/dev/null 2>&1
+chk "--no-clean 保留多余文件" "keep-extra" "$(cat "${TMP}/local/2.0.0/offline-files/keep-extra.txt" 2>/dev/null)"
+rm -f "${TMP}/local/2.0.0/offline-files/keep-extra.txt"
 
 bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
 chk "verify-only 通过" "0" "$?"
+# 断点续传: 本地只保留前 3 字节, --repair 应 offset 追加并校验通过
+head -c 3 "${TMP}/local/2.0.0/offline-files/ceph/test.txt" > "${TMP}/part.tmp"
+mv -f "${TMP}/part.tmp" "${TMP}/local/2.0.0/offline-files/ceph/test.txt"
+: > "${FAKE_MC_LOG}"
+bash "${FETCH}" --release 2.0.0 --resume --dest "${TMP}/local" --yes >/dev/null 2>&1
+chk "断点续传 --resume 退出码" "0" "$?"
+chk "断点续传恢复内容" "hello" "$(cat "${TMP}/local/2.0.0/offline-files/ceph/test.txt" 2>/dev/null)"
+chk_contains "使用 mc cat --offset" "cat-offset 3" "$(cat "${FAKE_MC_LOG}" 2>/dev/null)"
+rm -f "${TMP}/local/2.0.0/offline-files/ceph/test.txt"
+out="$(bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" 2>&1)"
+rc=$?
+chk "fetch 缺失文件严格失败" "1" "${rc}"
+chk_contains "fetch 提示文件不存在" "文件不存在或已被删除" "${out}"
+bash "${FETCH}" --release 2.0.0 --repair --dest "${TMP}/local" --yes >/dev/null 2>&1
+chk "fetch 缺失文件 repair" "0" "$?"
 
 echo "== ③c release --flat 平铺到 offline-files 根 =="
 rm -rf "${TMP}/flatdest"
-bash "${FETCH}" --release 2.0.0 --flat --dest "${TMP}/flatdest" --yes >/dev/null 2>&1
+mkdir -p "${TMP}/flatdest/.cubestack-manifest-backup"
+printf 'extra-flat\n' > "${TMP}/flatdest/extra-flat.txt"
+printf 'keep-flat\n' > "${TMP}/flatdest/.cubestack-manifest-backup/keep.txt"
+out="$(bash "${FETCH}" --release 2.0.0 --flat --dest "${TMP}/flatdest" --yes 2>&1)"
 chk "flat fetch 退出码" "0" "$?"
+chk_contains "flat 末尾提示生成 cluster.conf" "cluster.conf.example" "${out}"
+chk_contains "flat 末尾提示修改配置" "vim deployments/config/cluster.conf" "${out}"
+_hint_ln="$(printf '%s\n' "${out}" | command grep -n 'vim deployments/config/cluster.conf' | tail -1 | cut -d: -f1)"
+_deploy_ln="$(printf '%s\n' "${out}" | command grep -n 'sudo ./deployments/scripts/deploy-cluster.sh' | tail -1 | cut -d: -f1)"
+chk "部署命令在配置提示之后" "1" "$([ -n "${_hint_ln}" ] && [ -n "${_deploy_ln}" ] && [ "${_deploy_ln}" -gt "${_hint_ln}" ] && echo 1 || echo 0)"
+chk "flat clean 删除多余文件" "0" "$([ -e "${TMP}/flatdest/extra-flat.txt" ] && echo 1 || echo 0)"
+chk "flat clean 保留 .cubestack-*" "keep-flat" "$(cat "${TMP}/flatdest/.cubestack-manifest-backup/keep.txt" 2>/dev/null)"
 chk "flat 文件落位" "hello" "$(cat "${TMP}/flatdest/ceph/test.txt" 2>/dev/null)"
 chk "flat 无版本子目录" "0" "$([ -e "${TMP}/flatdest/2.0.0" ] && echo 1 || echo 0)"
 chk "flat release.env 落位" "RELEASE_VERSION=2.0.0" "$(head -1 "${TMP}/flatdest/release.env" 2>/dev/null)"
@@ -202,9 +298,24 @@ rc=$?
 chk "verify-only 跳过空间预检退出码" "0" "${rc}"
 chk_contains "verify-only 提示跳过空间预检" "跳过下载磁盘空间预检" "${out}"
 printf 'tampered\n' >> "${TMP}/local/2.0.0/offline-files/ceph/test.txt"
-bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
+out="$(bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" 2>&1)"
 rc=$?
 chk "篡改后 verify-only 失败" "1" "${rc}"
+chk_contains "失败点名坏文件" "ceph/test.txt" "${out}"
+chk_contains "失败提示 --repair" "--repair" "${out}"
+bash "${FETCH}" --release 2.0.0 --repair --dest "${TMP}/local" --yes >/dev/null 2>&1
+chk "repair 退出码" "0" "$?"
+chk "repair 恢复文件" "hello" "$(cat "${TMP}/local/2.0.0/offline-files/ceph/test.txt" 2>/dev/null)"
+bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
+chk "repair 后 verify-only 通过" "0" "$?"
+# _SUCCESS 绑定损坏也可 --repair(从远端重取)
+printf 'release=2.0.0\nsha256sums=%064d\n' 0 > "${TMP}/local/2.0.0/offline-files/_SUCCESS"
+bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
+chk "_SUCCESS 损坏 verify-only 失败" "1" "$?"
+bash "${FETCH}" --release 2.0.0 --repair --dest "${TMP}/local" --yes >/dev/null 2>&1
+chk "_SUCCESS repair 退出码" "0" "$?"
+bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
+chk "_SUCCESS repair 后通过" "0" "$?"
 
 out="$(bash "${FETCH}" --list-releases 2>/dev/null)"
 chk_contains "list-releases 输出版本" "2.0.0" "${out}"

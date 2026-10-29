@@ -23,6 +23,8 @@ TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 fail=0
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }
 chk_contains() { if [[ "$3" == *"$2"* ]]; then echo "  ok  $1"; else echo "  FAIL $1: 未包含 [$2]"; fail=1; fi; }
+# 读取文件内容: 合法 tar 取 payload 成员(测试夹具用 fake_tar 生成), 其他文件直接 cat
+content() { if tar -tf "$1" >/dev/null 2>&1; then tar -xOf "$1" payload 2>/dev/null; else cat "$1" 2>/dev/null; fi; }
 chk_not_contains() { if [[ "$3" == *"$2"* ]]; then echo "  FAIL $1: 不应包含 [$2]"; fail=1; else echo "  ok  $1"; fi; }
 
 # ---------------- fake mc ----------------
@@ -117,10 +119,24 @@ case "${cmd}" in
         rm -f "${p}"
         log "rm ${1}" ;;
     mirror)
-        while [ $# -gt 0 ]; do case "$1" in --overwrite|--remove|--preserve) shift ;; *) break ;; esac; done
+        _remove=0
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --overwrite|--preserve) shift ;;
+                --remove) _remove=1; shift ;;
+                --*) shift ;;
+                *) break ;;
+            esac
+        done
         sm="$(map "${1:?}")"; dm="$(map "${2:?}")"
+        if [ "${_remove}" = "1" ] && [ -d "${dm}" ]; then
+            find "${dm}" -depth -mindepth 1 -print0 | while IFS= read -r -d '' _f; do
+                _rel="${_f#${dm}/}"
+                [ -e "${sm}/${_rel}" ] || rm -rf "${_f}"
+            done
+        fi
         mkdir -p "${dm}"; cp -a "${sm}"/. "${dm}"/
-        log "mirror ${1} ${2}" ;;
+        log "mirror${_remove:+--remove} ${1} ${2}" ;;
     *)
         echo "fake mc: unsupported ${cmd}" >&2; exit 1 ;;
 esac
@@ -157,6 +173,14 @@ CHART_TGZ_CURRENT=""
 CHART_DIGEST_CURRENT=""
 CLI_TAR_CURRENT=""
 CLI_DIGEST_CURRENT="sha256:old-cli"
+
+fake_tar() {   # <out.tar> <tag> — 生成合法的最小 docker-archive tar(供完整性校验)
+    local out="$1" tag="$2" d
+    d="$(mktemp -d)"
+    printf '%s\n' "${tag}" > "${d}/payload"
+    tar -C "${d}" -cf "${out}" payload
+    rm -rf "${d}"
+}
 
 make_chart() {   # <out.tgz> <version> <appversion>
     local out="$1" ver="$2" app="$3" d="${TMP}/chart-src"
@@ -225,18 +249,18 @@ all	-	*	all
 EOF
 
     # remote image tars (old)
-    printf 'old-operator\n' > "${REMOTE_OFF}/cubestack-operator/${OP_TAR}"
+    fake_tar "${REMOTE_OFF}/cubestack-operator/${OP_TAR}" "old-operator"
     printf 'sha256:old-operator' > "${REMOTE_OFF}/cubestack-operator/${OP_TAR}.digest"
-    printf 'old-bmc\n' > "${REMOTE_OFF}/cubestack-operator/bmc/${BMC_TAR}"
+    fake_tar "${REMOTE_OFF}/cubestack-operator/bmc/${BMC_TAR}" "old-bmc"
     printf 'sha256:old-bmc' > "${REMOTE_OFF}/cubestack-operator/bmc/${BMC_TAR}.digest"
-    printf 'old-cubepilot\n' > "${REMOTE_OFF}/cubestack-operator/cubepilot/${CP_TAR}"
+    fake_tar "${REMOTE_OFF}/cubestack-operator/cubepilot/${CP_TAR}" "old-cubepilot"
     printf 'sha256:old-cubepilot' > "${REMOTE_OFF}/cubestack-operator/cubepilot/${CP_TAR}.digest"
-    printf 'old-ui\n' > "${REMOTE_OFF}/cubestack-operator/portal/${UI_TAR}"
+    fake_tar "${REMOTE_OFF}/cubestack-operator/portal/${UI_TAR}" "old-ui"
     printf 'sha256:old-ui' > "${REMOTE_OFF}/cubestack-operator/portal/${UI_TAR}.digest"
-    printf 'old-redis\n' > "${REMOTE_OFF}/cubestack-operator/portal/${REDIS_TAR}"
+    fake_tar "${REMOTE_OFF}/cubestack-operator/portal/${REDIS_TAR}" "old-redis"
     printf 'sha256:old-redis' > "${REMOTE_OFF}/cubestack-operator/portal/${REDIS_TAR}.digest"
     printf 'readme\n' > "${REMOTE_OFF}/cubestack-operator/README.md"
-    printf 'stale-rc\n' > "${REMOTE_OFF}/cubestack-operator/harbor.isuanova.com_suanova-private_cubestack-operator_v2.0.0-rc1.tar"
+    fake_tar "${REMOTE_OFF}/cubestack-operator/harbor.isuanova.com_suanova-private_cubestack-operator_v2.0.0-rc1.tar" "stale-rc"
     printf 'sha256:stale-rc' > "${REMOTE_OFF}/cubestack-operator/harbor.isuanova.com_suanova-private_cubestack-operator_v2.0.0-rc1.tar.digest"
 
     # chart (old)
@@ -263,7 +287,7 @@ EOF
     write_success
 
     # source: new operator tar same tag (digest drift), chart/CLI same
-    printf 'new-operator\n' > "${TMP}/src/cubestack-operator/${OP_TAR}"
+    fake_tar "${TMP}/src/cubestack-operator/${OP_TAR}" "new-operator"
     printf 'sha256:new-operator' > "${TMP}/src/cubestack-operator/${OP_TAR}.digest"
     make_chart "${TMP}/src/charts/${CHART_NAME}" "2.0.0-rc2" "v2.0.0-rc2"
     printf 'sha256:old-chart' > "${TMP}/src/charts/${CHART_NAME}.digest"
@@ -346,7 +370,7 @@ echo "== ① 新 tar 上传 + 元数据 =="
 out="$(run_sync --component publish)"; rc=$?
 chk "退出码" "0" "${rc}"
 chk_contains "summary 记录 operator" "operator" "${out}"
-chk "远端 tar 已更新" "new-operator" "$(cat "${REMOTE_OP}" 2>/dev/null)"
+chk "远端 tar 已更新" "new-operator" "$(content "${REMOTE_OP}")"
 chk "远端 digest 已更新" "sha256:new-operator" "$(cat "${REMOTE_OP}.digest" 2>/dev/null)"
 ( cd "${REMOTE_OFF}" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ); chk "SHA256SUMS 校验" "0" "$?"
 succ_sha="$(sha256sum "${REMOTE_OFF}/SHA256SUMS" | awk '{print $1}')"
@@ -358,7 +382,7 @@ last_cp="$(command grep '^cp ' "${FAKE_MC_LOG}" | command grep '/offline-files/'
 chk_contains "_SUCCESS 最后上传" "_SUCCESS" "${last_cp}"
 chk "stale rc tar 已删除" "0" "$([ -e "${REMOTE_OFF}/cubestack-operator/harbor.isuanova.com_suanova-private_cubestack-operator_v2.0.0-rc1.tar" ] && echo 1 || echo 0)"
 chk "README 保留" "readme" "$(cat "${REMOTE_OFF}/cubestack-operator/README.md" 2>/dev/null)"
-chk "未选中 cubepilot 不变" "old-cubepilot" "$(cat "${REMOTE_OFF}/cubestack-operator/cubepilot/${CP_TAR}" 2>/dev/null)"
+chk "未选中 cubepilot 不变" "old-cubepilot" "$(content "${REMOTE_OFF}/cubestack-operator/cubepilot/${CP_TAR}")"
 chk "CLI tar 不在 SHA256SUMS" "0" "$(command grep -cF 'cubestack-installer-cli-v2.0.0.tar' "${REMOTE_OFF}/SHA256SUMS" 2>/dev/null || true)"
 chk "built_at 保留" "built_at=2026-10-25T00:00:00Z" "$(sed -n 's/^built_at=/built_at=/p' "${REMOTE_OFF}/_SUCCESS" | head -1)"
 
@@ -367,7 +391,7 @@ echo "== ② 幂等 no-op =="
 out="$(run_sync --component publish)"; rc=$?
 chk "退出码" "0" "${rc}"
 chk "无 cp/rm" "0" "$(command grep -cE '^(cp|rm) ' "${FAKE_MC_LOG}" 2>/dev/null || true)"
-chk "远端 tar 不变" "new-operator" "$(cat "${REMOTE_OP}" 2>/dev/null)"
+chk "远端 tar 不变" "new-operator" "$(content "${REMOTE_OP}")"
 
 echo "== ③ 缺 _SUCCESS =="
 rm -f "${REMOTE_OFF}/_SUCCESS"
@@ -452,13 +476,13 @@ env_set CUBESTACK_OPERATOR_CHART_VERSION "2.0.0"
 env_set CUBESTACK_CLI_IMAGE "harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0"
 env_set DEV_LAB_CPU_TAG "py310-torch2.4-v2.0.0"
 tvs_set_operator "${GA_TAG}"
-printf 'ga-operator\n' > "${TMP}/src/cubestack-operator/${GA_TAR}"
+fake_tar "${TMP}/src/cubestack-operator/${GA_TAR}" "ga-operator"
 printf 'sha256:ga-operator' > "${TMP}/src/cubestack-operator/${GA_TAR}.digest"
 make_chart_new "2.0.0" "v2.0.0" "sha256:ga-chart"
 make_cli_new "ga-cli" "sha256:ga-cli"
 out="$(run_sync --component publish)"; rc=$?
 chk "GA 退出码" "0" "${rc}"
-chk "GA operator tar" "ga-operator" "$(cat "${REMOTE_OFF}/cubestack-operator/${GA_TAR}" 2>/dev/null)"
+chk "GA operator tar" "ga-operator" "$(content "${REMOTE_OFF}/cubestack-operator/${GA_TAR}")"
 chk "旧 rc2 operator tar 已清理" "0" "$([ -e "${REMOTE_OFF}/cubestack-operator/${OP_TAR}" ] && echo 1 || echo 0)"
 chk "GA release.env operator tag" "v2.0.0" "$(remote_env_value CUBESTACK_OPERATOR_IMAGE_TAG)"
 chk "GA release.env chart" "2.0.0" "$(remote_env_value CUBESTACK_OPERATOR_CHART_VERSION)"
@@ -565,19 +589,19 @@ out="$(run_sync --component operator-chart)"; rc=$?
 chk "chart-only 退出码" "0" "${rc}"
 chk "新 chart 存在" "0" "$([ -e "${REMOTE_OFF}/cubestack-operator/charts/${CHART_NAME}" ] && echo 0 || echo 1)"
 chk "旧 chart 保留" "0" "$([ -e "${REMOTE_OFF}/cubestack-operator/charts/cubestack-operator-chart-2.0.0-rc2.tgz" ] && echo 0 || echo 1)"
-chk "chart-only 不动 operator" "old-operator" "$(cat "${REMOTE_OFF}/cubestack-operator/${OP_TAR}" 2>/dev/null)"
+chk "chart-only 不动 operator" "old-operator" "$(content "${REMOTE_OFF}/cubestack-operator/${OP_TAR}")"
 chk "chart-only release.env" "2.0.0" "$(remote_env_value CUBESTACK_OPERATOR_CHART_VERSION)"
 chk "chart-only release.json" "2.0.0" "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("operator_chart_version"))' "${REMOTE_OFF}/release.json" 2>/dev/null)"
 
 echo "== ⑰ first-party-only 不误删第三方 =="
 build_fixture
 mkdir -p "${TMP}/src/cubestack-operator/portal"
-printf 'new-ui\n' > "${TMP}/src/cubestack-operator/portal/${UI_TAR}"
+fake_tar "${TMP}/src/cubestack-operator/portal/${UI_TAR}" "new-ui"
 printf 'sha256:new-ui' > "${TMP}/src/cubestack-operator/portal/${UI_TAR}.digest"
 out="$(run_sync --component portal-image --first-party-only)"; rc=$?
 chk "first-party 退出码" "0" "${rc}"
-chk "UI 更新" "new-ui" "$(cat "${REMOTE_OFF}/cubestack-operator/portal/${UI_TAR}" 2>/dev/null)"
-chk "redis 保留" "old-redis" "$(cat "${REMOTE_OFF}/cubestack-operator/portal/${REDIS_TAR}" 2>/dev/null)"
+chk "UI 更新" "new-ui" "$(content "${REMOTE_OFF}/cubestack-operator/portal/${UI_TAR}")"
+chk "redis 保留" "old-redis" "$(content "${REMOTE_OFF}/cubestack-operator/portal/${REDIS_TAR}")"
 ( cd "${REMOTE_OFF}" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ); chk "first-party sums" "0" "$?"
 
 echo "== ⑱ keep-stale =="
@@ -690,31 +714,31 @@ chk "no-op 补写 CLI marker" "sha256:old-cli" "$(cat "${REMOTE_ROOT}/_CLI_IMAGE
 echo "== ㉕ --force 只重传 selected =="
 build_fixture
 run_sync --component publish >/dev/null 2>&1
-printf 'force-operator\n' > "${TMP}/src/cubestack-operator/${OP_TAR}"
+fake_tar "${TMP}/src/cubestack-operator/${OP_TAR}" "force-operator"
 printf 'sha256:force-operator' > "${TMP}/src/cubestack-operator/${OP_TAR}.digest"
 out="$(run_sync --component publish --force)"; rc=$?
 chk "force 退出码" "0" "${rc}"
-chk "force 更新 selected" "force-operator" "$(cat "${REMOTE_OFF}/cubestack-operator/${OP_TAR}" 2>/dev/null)"
-chk "force 不动未选中" "old-cubepilot" "$(cat "${REMOTE_OFF}/cubestack-operator/cubepilot/${CP_TAR}" 2>/dev/null)"
+chk "force 更新 selected" "force-operator" "$(content "${REMOTE_OFF}/cubestack-operator/${OP_TAR}")"
+chk "force 不动未选中" "old-cubepilot" "$(content "${REMOTE_OFF}/cubestack-operator/cubepilot/${CP_TAR}")"
 ( cd "${REMOTE_OFF}" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ); chk "force sums" "0" "$?"
 
 echo "== ㉖ all 通配 + bmc commit tag =="
 build_fixture
 mkdir -p "${TMP}/src/cubestack-operator/bmc" "${TMP}/src/cubestack-operator/cubepilot" \
          "${TMP}/src/cubestack-operator/portal"
-printf 'new-bmc\n' > "${TMP}/src/cubestack-operator/bmc/${BMC_TAR}"
+fake_tar "${TMP}/src/cubestack-operator/bmc/${BMC_TAR}" "new-bmc"
 printf 'sha256:new-bmc' > "${TMP}/src/cubestack-operator/bmc/${BMC_TAR}.digest"
-printf 'new-cubepilot\n' > "${TMP}/src/cubestack-operator/cubepilot/${CP_TAR}"
+fake_tar "${TMP}/src/cubestack-operator/cubepilot/${CP_TAR}" "new-cubepilot"
 printf 'sha256:new-cubepilot' > "${TMP}/src/cubestack-operator/cubepilot/${CP_TAR}.digest"
-printf 'new-ui\n' > "${TMP}/src/cubestack-operator/portal/${UI_TAR}"
+fake_tar "${TMP}/src/cubestack-operator/portal/${UI_TAR}" "new-ui"
 printf 'sha256:new-ui' > "${TMP}/src/cubestack-operator/portal/${UI_TAR}.digest"
-printf 'new-redis\n' > "${TMP}/src/cubestack-operator/portal/${REDIS_TAR}"
+fake_tar "${TMP}/src/cubestack-operator/portal/${REDIS_TAR}" "new-redis"
 printf 'sha256:new-redis' > "${TMP}/src/cubestack-operator/portal/${REDIS_TAR}.digest"
 out="$(run_sync --component all --tag v2.0.0-rc2)"; rc=$?
 chk "all 退出码" "0" "${rc}"
-chk "all bmc" "new-bmc" "$(cat "${REMOTE_OFF}/cubestack-operator/bmc/${BMC_TAR}" 2>/dev/null)"
-chk "all cubepilot" "new-cubepilot" "$(cat "${REMOTE_OFF}/cubestack-operator/cubepilot/${CP_TAR}" 2>/dev/null)"
-chk "all redis(第三方)" "new-redis" "$(cat "${REMOTE_OFF}/cubestack-operator/portal/${REDIS_TAR}" 2>/dev/null)"
+chk "all bmc" "new-bmc" "$(content "${REMOTE_OFF}/cubestack-operator/bmc/${BMC_TAR}")"
+chk "all cubepilot" "new-cubepilot" "$(content "${REMOTE_OFF}/cubestack-operator/cubepilot/${CP_TAR}")"
+chk "all redis(第三方)" "new-redis" "$(content "${REMOTE_OFF}/cubestack-operator/portal/${REDIS_TAR}")"
 ( cd "${REMOTE_OFF}" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ); chk "all sums" "0" "$?"
 
 echo "== ㉗ tag/source_repo 匹配时通过 =="
@@ -737,25 +761,25 @@ echo "== ㉙ workflow 静态契约 =="
 WF="${REPO_ROOT}/.github/workflows/sync-release-images.yml"
 CLI_WF="${REPO_ROOT}/.github/workflows/rebuild-cli-image.yml"
 chk "workflow 存在" "0" "$([ -f "${WF}" ] && echo 0 || echo 1)"
-chk_contains "dispatch 事件(通用+兼容)" "types: [release-updated, release-2.0-updated]" "$(cat "${WF}" 2>/dev/null)"
-chk_contains "push 触发" "branches: ['release-*']" "$(cat "${WF}" 2>/dev/null)"
-chk_contains "push 仅允许单个 release" "push event must touch exactly one release" "$(cat "${WF}" 2>/dev/null)"
-chk_contains "write 并发组" "group: release-minio-writes" "$(cat "${WF}" 2>/dev/null)"
-chk_contains "CLI 共用并发组" "group: release-minio-writes" "$(cat "${CLI_WF}" 2>/dev/null)"
+chk_contains "dispatch 事件(通用+兼容)" "types: [release-updated, release-2.0-updated]" "$(content "${WF}")"
+chk_contains "push 触发" "branches: ['release-*']" "$(content "${WF}")"
+chk_contains "push 仅允许单个 release" "push event must touch exactly one release" "$(content "${WF}")"
+chk_contains "write 并发组" "group: release-minio-writes" "$(content "${WF}")"
+chk_contains "CLI 共用并发组" "group: release-minio-writes" "$(content "${CLI_WF}")"
 chk "sync workflow 无 workflow_run 触发" "0" "$(command grep -cE '^[[:space:]]*workflow_run:' "${WF}" 2>/dev/null || true)"
-chk_contains "checkout ref" "CHECKOUT_REF" "$(cat "${WF}" 2>/dev/null)"
+chk_contains "checkout ref" "CHECKOUT_REF" "$(content "${WF}")"
 # workflow 传的 Harbor 变量名必须 == release-sync-images.sh 读取的名字(HARBOR_MIRROR_*);
 # 传旧 HARBOR_HOST/USER/PASSWORD/INSECURE 时脚本只会回落到 CUBESTACK_OPERATOR_*, mirror 凭据被静默忽略。
 chk "workflow Harbor 变量名与脚本一致" "4" \
     "$(command grep -cE '^[[:space:]]+HARBOR_MIRROR_(REGISTRY|USER|PASSWORD|INSECURE):' "${WF}" 2>/dev/null || true)"
 chk "workflow 不使用旧 HARBOR_* 名" "0" \
     "$(command grep -cE '^[[:space:]]+HARBOR_(HOST|USER|PASSWORD|INSECURE):' "${WF}" 2>/dev/null || true)"
-chk_contains "validate 读 HARBOR_MIRROR_USER" '${HARBOR_MIRROR_USER:-}' "$(cat "${WF}" 2>/dev/null)"
-chk_contains "validate 读 HARBOR_MIRROR_PASSWORD" '${HARBOR_MIRROR_PASSWORD:-}' "$(cat "${WF}" 2>/dev/null)"
+chk_contains "validate 读 HARBOR_MIRROR_USER" '${HARBOR_MIRROR_USER:-}' "$(content "${WF}")"
+chk_contains "validate 读 HARBOR_MIRROR_PASSWORD" '${HARBOR_MIRROR_PASSWORD:-}' "$(content "${WF}")"
 chk "CLI rebuild workflow 存在" "0" "$([ -f "${CLI_WF}" ] && echo 0 || echo 1)"
-chk_contains "release CLI 同 job 内同步" "--component cli" "$(cat "${CLI_WF}" 2>/dev/null)"
-chk_contains "release CLI tar 导出" "cubestack-installer-cli-v" "$(cat "${CLI_WF}" 2>/dev/null)"
-chk_contains "release CLI 一致性断言" "--cli-image-digest" "$(cat "${CLI_WF}" 2>/dev/null)"
+chk_contains "release CLI 同 job 内同步" "--component cli" "$(content "${CLI_WF}")"
+chk_contains "release CLI tar 导出" "cubestack-installer-cli-v" "$(content "${CLI_WF}")"
+chk_contains "release CLI 一致性断言" "--cli-image-digest" "$(content "${CLI_WF}")"
 
 echo "== ㉚ Harbor 凭据成对选择(不混搭 user/password 来源) =="
 # 2026-10-26 CodeRabbit: 旧实现 user 取 mirror, password 独立回落 operator —— 只配一项
@@ -780,7 +804,7 @@ chk "两对都不完整 → 空(不认证)" $'\t' \
     "$(pair_of HARBOR_MIRROR_USER=mu CUBESTACK_OPERATOR_HARBOR_PASSWORD=op)"
 chk_not_contains "脚本不再混搭凭据来源" \
     '_HARBOR_USER="${HARBOR_MIRROR_USER:-${CUBESTACK_OPERATOR_HARBOR_USER:-}}"' "${SYNC}"
-chk_contains "workflow 要求完整凭据对" 'complete Harbor credential pair' "$(cat "${WF}" 2>/dev/null)"
+chk_contains "workflow 要求完整凭据对" 'complete Harbor credential pair' "$(content "${WF}")"
 
 echo ""
 if [ "${fail}" = "0" ]; then echo "✅ test-release-sync-images: 全部通过"; else echo "❌ test-release-sync-images: 有失败"; fi
