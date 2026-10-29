@@ -151,7 +151,7 @@ _print_help() {
     echo "  kubespray/               kubespray 离线仓(版本子目录 vX.Y.Z; --sub kubespray/v2.32.0)"
     echo "  ceph/  metax-gpu/  nvidia-gpu-operator/  multus/  rdma/  netshoot/  os/"
     echo "  dev-lab/                 开发镜像: cpu / maca / cuda 家族(3 件; 顶层平铺, 大件 .tar.gz)"
-    echo "  model-collection/        模型推理镜像: sglang/ 与 vllm/(2 件 ≈31G, .tar.gz; 来源 suanova/model-collection)"
+    echo "  model-collection/        模型推理镜像: sglang/ 与 vllm/(3 件 ≈33G, .tar.gz; 来源 suanova/model-collection)"
     echo "  virtual-machine/         虚拟机镜像(大; 默认排除, --sub virtual-machine 单独拉)"
     echo "  cli/                     CLI 镜像 tar(rebuild-cli-image.yml 自动上传; 取回: --sub cli)"
     echo "  cubestack-operator/      CubeStack 平台镜像 + operator chart"
