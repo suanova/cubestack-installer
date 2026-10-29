@@ -955,7 +955,8 @@ PY
 fi
 # chart 目录同样只允许当前版本: 增量同步按文件名上传, 旧版本必须一并清理(含 .digest).
 if [ "${CHART_IN_SCOPE}" = "1" ] && [ "${KEEP_STALE}" != "1" ]; then
-    mcrun ls --json "${REMOTE_OFF}/cubestack-operator/charts" 2>/dev/null > "${WORK}/ls-charts.json" || true
+    mcrun ls --json "${REMOTE_OFF}/cubestack-operator/charts" 2>/dev/null > "${WORK}/ls-charts.json" \
+        || warn "列出 charts 目录失败, 旧 chart 版本未清理: ${REMOTE_OFF}/cubestack-operator/charts"
     while IFS= read -r name; do
         [ -n "${name}" ] || continue
         case "${name}" in

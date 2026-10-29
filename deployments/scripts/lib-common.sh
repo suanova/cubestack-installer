@@ -661,7 +661,8 @@ prune_operator_chart_dir() {   # <charts-dir> <chart-name> <keep-tgz-basename>; 
     local _dir="$1" _b _n=0
     while IFS= read -r _b; do
         [ -n "${_b}" ] || continue
-        rm -f "${_dir}/${_b}" && _n=$((_n + 1))
+        rm -f "${_dir}/${_b}" || { printf '删除旧 chart 失败: %s\n' "${_dir}/${_b}" >&2; return 1; }
+        _n=$((_n + 1))
     done < <(operator_chart_dir_extras "$@")
     printf '%s' "${_n}"
 }
