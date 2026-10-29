@@ -147,6 +147,10 @@ $(_component_meta_list stub)
   --release <版本>      使用离线发布版本目录(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
                         版本变量以目录内 release.env 为准; 取件见 fetch-offline-from-minio.sh --release
                         例: --release 2.0.0; 等价于 cluster.conf 的 CUBESTACK_RELEASE="2.0.0"
+  --verify-offline[=auto|quick|full|off]
+                        离线文件完整性校验强度(默认 auto: release/flat/sealed 首次 full,
+                        之后走校验戳; 未 seal 的开发树 quick)。失败会在任何模块执行前停止。
+  --no-verify-offline   跳过离线文件完整性校验(逃生口; 会打印醒目提示)
   --fresh, --refresh    默认流程 + **先清断点状态**(REPEAT:0 的模块强制重跑; 见"三种使用方式"②)
   --list                仅打印集群规划(只读)
   --list-steps          列出全部模块(分组紧凑展示; 加 --verbose 看完整 DESC/文件/依赖)
@@ -187,6 +191,8 @@ STEPS_ARG=""; SKIP_ARG=""; ENABLE_ARG=""; PHASE_ARG=""; ENABLE_PERSIST_ARG=""
 SCALE_ONLY=0
 ONLY_HOSTS=""
 RELEASE_ARG=""
+VERIFY_OFFLINE_ARG=""
+NO_VERIFY_OFFLINE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --fresh|--refresh) FRESH=1; shift ;;
@@ -216,6 +222,10 @@ while [ $# -gt 0 ]; do
         # --release = 本次使用离线发布版本目录(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
         #   须在 load_config 之前 export(load_config 读的是环境变量)
         --release)  RELEASE_ARG="${2:?--release 需要版本号(如 2.0.0)}"; shift 2 ;;
+        # 离线文件完整性门禁: 默认 auto(首次 full, 之后走校验戳); 可强制 quick/full/off。
+        --verify-offline) VERIFY_OFFLINE_ARG="auto"; shift ;;
+        --verify-offline=*) VERIFY_OFFLINE_ARG="${1#*=}"; shift ;;
+        --no-verify-offline) NO_VERIFY_OFFLINE=1; shift ;;
         --help|-h)  usage ;;
         *)          err "未知参数: $1(用 --help 查看)"; exit 1 ;;
     esac
@@ -254,6 +264,41 @@ export ONLY_HOSTS
 
 # ---------------- 配置加载 + 模块解析 ----------------
 load_config
+
+# ---------------- 离线文件完整性门禁(2026-10-28) ----------------
+# 默认 auto: release/flat/sealed 首次 full, 之后走校验戳; 未 seal 的开发树只做 quick。
+# 跳过: 只读列表 / 纯 verify_* 步骤 / 仅 --enable 写配置(不实际部署)。
+_verify_skip=0
+if [ "${LIST_STEPS}" = "1" ] || [ "${LIST}" = "1" ]; then
+    _verify_skip=1
+fi
+if [ -n "${ENABLE_PERSIST_ARG}" ] && [ -z "${STEPS_ARG}" ] && [ -z "${ENABLE_ARG}" ] \
+   && [ -z "${SKIP_ARG}" ] && [ -z "${PHASE_ARG}" ] && [ -z "${ONLY_HOSTS}" ]; then
+    _verify_skip=1
+fi
+if [ -n "${STEPS_ARG}" ]; then
+    _all_verify=1
+    for _s in ${STEPS_ARG//,/ }; do
+        [ -z "${_s}" ] && continue
+        case "${_s}" in verify_*) ;; *) _all_verify=0 ;; esac
+    done
+    [ "${_all_verify}" = "1" ] && _verify_skip=1
+fi
+if [ "${_verify_skip}" = "0" ]; then
+    if [ "${NO_VERIFY_OFFLINE}" = "1" ]; then
+        OFFLINE_VERIFY_MODE="off"
+    elif [ -n "${VERIFY_OFFLINE_ARG}" ]; then
+        case "${VERIFY_OFFLINE_ARG}" in
+            auto|quick|full|off) OFFLINE_VERIFY_MODE="${VERIFY_OFFLINE_ARG}" ;;
+            *) err "--verify-offline 取值非法: ${VERIFY_OFFLINE_ARG}(可用 auto|quick|full|off)"; exit 1 ;;
+        esac
+    fi
+    if ! verify_offline_gate; then
+        err "离线文件完整性校验未通过, 已停止部署(逃生口: --no-verify-offline)"
+        exit 1
+    fi
+fi
+unset _verify_skip _all_verify _s 2>/dev/null || true
 
 # 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 见 tools/offline/fetch-offline-from-minio.sh --help 全部子目录)
 # 只读列表/计划不检查(否则列表里会混入与展示无关的离线文件告警)

@@ -131,7 +131,7 @@ LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(占位; 见
 MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多网卡(见 4.7)
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(见 4.8)
 DEV_LAB_ENABLED="${DEV_LAB_ENABLED:-true}"              # 开发镜像随部署推入内置 registry(大推送排在末位; --skip dev_lab 跳过; 见 4.9)
-MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sglang/vllm-metax ≈85G)随部署推入内置 registry(排在 dev_lab 之后 = 最后; --skip model_images 跳过; 见 offline-files/model-collection/README.md)
+MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sglang×2/vllm-metax ≈33G)随部署推入内置 registry(排在 dev_lab 之后 = 最后; --skip model_images 跳过; 见 offline-files/model-collection/README.md)
 
 # ---- 节点组(可选; 配合 --only <组名> 使用) ----
 # 示例(按需取消注释并改值):
@@ -145,3 +145,8 @@ MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sgl
 #   §3 MetalLB/Registry/镜像源 | §4 沐曦/Ceph/平台 Operator/Multus/NVIDIA/RDMA/netshoot/dev-lab
 # 加载优先级: 环境变量 > cluster.conf > cluster.defaults.conf
 # ════════════════════════════════════════════════════════════
+
+# ---- 离线文件完整性校验(2026-10-28; 详见 docs/offline-files-integrity.md) ----
+# 默认 auto: release/flat/sealed 首次 full, 之后走校验戳; 未 seal 开发树只做 quick。
+# 失败会在任何模块执行前停止; 逃生口: --no-verify-offline / OFFLINE_VERIFY_MODE="off"
+# 变量声明在 cluster.defaults.conf §4.11; 需要覆盖时在本文件写同名项。
