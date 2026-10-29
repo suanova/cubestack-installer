@@ -198,7 +198,8 @@ _copy_chart() {
     local dst="${STAGE_TREE}/cubestack-operator/charts"
     mkdir -p "${dst}"
     # --resume 复用 staging 时可能残留旧版本 chart; 发布树只允许当前版本.
-    prune_operator_chart_dir "${dst}" "${CHART_NAME}" "${CHART_TGZ}" >/dev/null
+    prune_operator_chart_dir "${dst}" "${CHART_NAME}" "${CHART_TGZ}" >/dev/null \
+        || { err "清理旧版本 chart 失败: ${dst}"; exit 1; }
     cp -a "${src}" "${dst}/"
     if [ -f "${src}.digest" ]; then
         cp -a "${src}.digest" "${STAGE_TREE}/cubestack-operator/charts/"
