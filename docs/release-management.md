@@ -140,9 +140,9 @@ LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}}"
                                         →  本地 <base>/<version>/cubestack-installer-cli-v<version>.tar
 ```
 
-`--release` 只切换源根与目标布局，磁盘预检、增量续传等逻辑复用现有实现；发布树用
-**`mc cp --recursive` 按对象名精确复制**（`--sub` 仍用 `mc mirror`），不做目录同步/覆盖语义，
-从源头保证部署树只由该版本目录的对象决定，与 latest 通道互不影响。`--sub` 的语义完全不变。
+`--release` 只切换源根与目标布局，磁盘预检、增量续传等逻辑复用现有实现；发布树默认用
+**`mc mirror --overwrite --remove` 精确镜像**（`--no-clean` 时用 `mc cp --recursive` 按对象名复制；
+`--sub` 仍用 `mc mirror`），从源头保证部署树只由该版本目录的对象决定，与 latest 通道互不影响。
 
 ### 1.5 现有 CI 的位置
 
@@ -382,7 +382,11 @@ RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev
   （`release.json` 无 `cli_tar` 字段或远端只有旧名时自动回退）。
 - `_SUCCESS` 内容为版本与时间，**最后写入**；
 - fetch 侧先检查 `_SUCCESS`，再下载，最后 `sha256sum -c` + 校验 CLI tar；
+  (2026-10-28 起统一由 `verify-offline-files.sh` 校验，并校验
+  `_SUCCESS.sha256sums == sha256(SHA256SUMS)` 绑定与清单双向覆盖)
 - 发布脚本**拒绝覆盖**已存在的 `<版本>/`；修复发新 patch 版本。
+- 发布树随带校验器 `offline-files/tools/verify-offline-files.sh`（由 `SHA256SUMS`
+  覆盖），供纯宿主机部署离线使用。
 
 **release-2.0 组件原地刷新例外（2026-10-26）**：
 
@@ -592,6 +596,16 @@ deployments/offline-files/
 ./fetch-offline-from-minio.sh --release 2.0.0 --verify-only \
     --dest /data/cubestack-installer
 
+# 精确同步(默认: release/flat 覆盖并删除本地多余文件; 30s 倒计时)
+./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/cubestack-installer
+# 下载失败后断点续传(先校验本地, 部分文件按 offset 续传, 完整则跳过下载)
+./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/cubestack-installer --resume
+# 调整下载重试(默认 3 次, 间隔 3s)
+./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/cubestack-installer --retry 5 --retry-delay 5
+# 保留本地多余文件 / 调整倒计时
+./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/cubestack-installer --no-clean
+./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/cubestack-installer --clean-countdown 30
+
 # 列出 MinIO 上可用版本（桶根下除 offline-files/ 外的版本目录）
 ./fetch-offline-from-minio.sh --list-releases
 ```
@@ -627,7 +641,8 @@ export CUBESTACK_RELEASE_ROOT=/data/cubestack-installer
 ### 5.2 实现方式
 
 `fetch-offline-from-minio.sh` 复用现有下载/磁盘预检逻辑，只切换源根与目标布局；其中
-release 模式用 `mc cp --recursive` 精确复制版本目录对象，`--sub` 模式仍用 `mc mirror`：
+release 模式默认用 `mc mirror --overwrite --remove` 精确镜像版本目录（`--no-clean` 时用
+`mc cp --recursive`），`--sub` 模式仍用 `mc mirror`：
 
 1. 解析 `--release <ver>`（与 `--sub` 互斥）：
    - 本地根 `TARGET`：`--dest` > 环境/minio.conf 的 `CUBESTACK_RELEASE_ROOT` > `${REPO_ROOT}/offline-releases`；
@@ -643,6 +658,13 @@ release 模式用 `mc cp --recursive` 精确复制版本目录对象，`--sub` �
 
 > `fetch` 可从环境/`minio.conf` 读 `CUBESTACK_RELEASE_ROOT`；部署时请在 `cluster.conf`
 > 设置同一路径（`load_config` 只读 cluster.conf/defaults/环境，不读 minio.conf）。
+>
+> release/flat 模式默认**精确清理**：`mc mirror --overwrite --remove` 会让本地
+> `offline-files` 与 MinIO 一致，删除本地多余文件。执行前有 30 秒红色倒计时
+> （`--clean-countdown N` 调整，`--yes` 跳过），`Ctrl-C` 中止；非交互环境没有
+> `--yes` 会直接中止。`--no-clean` 保留本地多余文件（此时完整性校验会因
+> “磁盘存在但清单未登记”失败，仅建议调试用）。`.cubestack-*`（校验戳/清单备份）
+> 始终保留。
 
 改动集中在参数解析、源根切换和下载后校验，约 60 行；`--sub` 的现有行为不变，
 `DEFAULT_EXCLUDE_SUBS` 也无需改动（版本目录在 `offline-files/` 之外）。
@@ -655,10 +677,14 @@ release 模式用 `mc cp --recursive` 精确复制版本目录对象，`--sub` �
 | `<ver>/offline-files/_SUCCESS` 存在 | 报错"发布未完成/上传中断" |
 | `SHA256SUMS` 存在 | 报错"发布树不完整" |
 | 发布树每个文件 sha256 匹配 | 报错，列出不匹配文件 |
+| `_SUCCESS.sha256sums == sha256(SHA256SUMS)` | 报错(发布标记与清单不匹配) |
 | `release.json.cli_tar_sha256` 与 CLI tar 匹配 | 报错（CLI 镜像不完整） |
 | `release.env` 中 `RELEASE_VERSION == <ver>` | 报错 |
 
 `--no-verify` 可跳过全量 sha256 / CLI tar 校验（仅建议在反复调试时使用）。
+`--repair` 会在校验失败时只重下坏文件（最多 1 轮），坏文件先移到
+`<本地桶根>/.repair-quarantine/<版本>/<时间戳>/`。校验通过后会写
+`.cubestack-verified.json` 校验戳，部署门禁可秒级复查。
 
 ---
 
@@ -683,6 +709,9 @@ release 模式用 `mc cp --recursive` 精确复制版本目录对象，`--sub` �
 > `deployments/releases/` 是**仓库内的发布定义目录**（版本变量 + 平台镜像清单），
 > 与 MinIO 桶根的版本目录（`cubestack-installer/2.0.0/`）是两回事：
 > 前者进 git、随 CLI 镜像分发；后者是运行期制品。
+>
+> 发布树还会带上 `offline-files/tools/verify-offline-files.sh`（校验器本体），
+> 由 `SHA256SUMS` 覆盖，确保纯宿主机部署也能做完整性校验。
 
 ### 6.2 参考流程
 
@@ -956,7 +985,7 @@ Harbor 不是本方案的依赖；现有部署代码只消费 MinIO 里的 tar�
 ### 8.0 分支与 cherry-pick 流程（2026-10-25）
 
 - `release-2.0` 是 2.0 的**发布维护分支**；`deployments/releases/2.0.0/`、CLI tar 带版本命名、
-  `fetch --release` 的 `mc cp --recursive` 精确取件、发布树 `_SUCCESS` 落位等契约在该分支冻结。
+  `fetch --release` 的精确取件/清理、发布树 `_SUCCESS` 落位等契约在该分支冻结。
 - 日常修复先合入 `main`，再 **cherry-pick 到 `release-2.0`**；也可以直接对 `release-2.0` 提 PR。
 - CI（`.github/workflows/ci-validate.yml`）对 **push 到 `main` / `release-2.0`** 以及所有 PR
   运行；其中 `test-release-mode.sh` 专门校验 release 模式契约（路径派生、带版本 CLI tar、
