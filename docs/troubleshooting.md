@@ -2051,7 +2051,7 @@ scope 的 component 或 `all` 重跑。刷新期间不要手工删 marker。
 ### 5b. Harbor 与 MinIO 的 CLI digest 不一致
 
 **症状**
-- `skopeo inspect --raw .../cubestack-installer-cli:v2.0.0-rc2` 的 digest 与
+- `skopeo inspect --raw .../cubestack-installer-cli:v2.0.0` 的 digest 与
   MinIO `<release>/_CLI_IMAGE_DIGEST` / `release.json.cli_image_digest` 不同；
 - 离线部署（MinIO tar）与在线部署（Harbor tag）实际跑的是两版 CLI。
 
@@ -2063,15 +2063,15 @@ scope 的 component 或 `all` 重跑。刷新期间不要手工删 marker。
 **解法**
 1. 先确认差异：
    ```bash
-   skopeo inspect --raw docker://harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2 | sha256sum
+   skopeo inspect --raw docker://harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0 | sha256sum
    mc cat minio/cubestack-installer/2.0.0/_CLI_IMAGE_DIGEST; echo
    mc cat minio/cubestack-installer/2.0.0/offline-files/release.json | jq -r .cli_image_digest
    ```
 2. 用 Harbor 上的目标镜像重新生成 tar 并 CLI-only 同步（不碰镜像/chart）：
    ```bash
-   docker pull harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2
+   docker pull harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0
    docker save -o /tmp/cubestack-installer-cli-v2.0.0.tar \
-     harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2
+     harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0
    bash deployments/scripts/tools/images/release-sync-images.sh \
      --release 2.0.0 --component cli \
      --cli-tar /tmp/cubestack-installer-cli-v2.0.0.tar \
