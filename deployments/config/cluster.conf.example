@@ -145,3 +145,8 @@ MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sgl
 #   §3 MetalLB/Registry/镜像源 | §4 沐曦/Ceph/平台 Operator/Multus/NVIDIA/RDMA/netshoot/dev-lab
 # 加载优先级: 环境变量 > cluster.conf > cluster.defaults.conf
 # ════════════════════════════════════════════════════════════
+
+# ---- 离线文件完整性校验(2026-10-28; 详见 docs/offline-files-integrity.md) ----
+# 默认 auto: release/flat/sealed 首次 full, 之后走校验戳; 未 seal 开发树只做 quick。
+# 失败会在任何模块执行前停止; 逃生口: --no-verify-offline / OFFLINE_VERIFY_MODE="off"
+# 变量声明在 cluster.defaults.conf §4.11; 需要覆盖时在本文件写同名项。
