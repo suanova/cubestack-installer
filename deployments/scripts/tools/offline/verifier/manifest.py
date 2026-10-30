@@ -77,6 +77,8 @@ def check_metadata(ctx, root, layout, args):
                 try:
                     want_n = int(success[key])
                 except ValueError:
+                    fail(ctx, "_SUCCESS", "success_binding",
+                         f"{key}={success[key]} 不是整数")
                     continue
                 if key == "files" and want_n != len(ctx.files):
                     if getattr(args, "skip_missing", False):
