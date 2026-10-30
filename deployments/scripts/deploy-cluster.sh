@@ -225,6 +225,7 @@ while [ $# -gt 0 ]; do
         --release)  RELEASE_ARG="${2:?--release 需要版本号(如 2.0.0)}"; shift 2 ;;
         # 离线文件完整性门禁: 默认 auto(首次 full, 之后走校验戳); 可强制 quick/full/off。
         --verify-offline) VERIFY_OFFLINE_ARG="auto"; shift ;;
+        --verify-offline=) err "--verify-offline 需要取值(auto|quick|full|off)"; exit 1 ;;
         --verify-offline=*) VERIFY_OFFLINE_ARG="${1#*=}"; shift ;;
         --no-verify-offline) NO_VERIFY_OFFLINE=1; shift ;;
         --help|-h)  usage ;;
