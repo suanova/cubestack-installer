@@ -356,7 +356,7 @@ if [ "${LIST_ONLY}" = "0" ] && [ "${LIST_RELEASES}" = "0" ]; then
     else
         TARGET="${DEFAULT_DIR}"
         say "下载目录(默认): ${TARGET}"
-        if [ "${YES}" != "1" ] && [ "${VERIFY_ONLY}" != "1" ]; then
+        if [ "${YES}" != "1" ] && [ "${VERIFY_ONLY}" != "1" ] && [ -t 0 ]; then
             read -r -p "  确认下载到此目录? [Y/n] (n = --auto 自动挑最大磁盘, 或直接输入其他路径): " _ans
             case "${_ans:-Y}" in
                 [Yy]|"") : ;;
