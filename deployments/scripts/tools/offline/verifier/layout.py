@@ -32,6 +32,8 @@ def collect_files(ctx, root):
                 fail(ctx, rel.replace("\n", "\\n"), "bad_name", "文件名含换行, 无法纳入清单")
                 continue
             if is_meta(rel):
+                if os.path.islink(full):
+                    fail(ctx, rel, "symlink", "树内不允许符号链接")
                 continue
             st = os.lstat(full)
             if stat.S_ISLNK(st.st_mode):
