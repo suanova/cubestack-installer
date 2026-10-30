@@ -281,14 +281,14 @@ coredns loop 插件 FATAL 自杀(kube-system coredns CrashLoopBackOff, cluster �
     operator 的版本。installer **从不**设置 `components.*.version` 或组件镜像 tag。
   - `CUBESTACK_OPERATOR_IMAGE_TAG` 只用于 `images.manifest` / `release-images.tsv` 登记,
     **不参与** helm 覆盖。
-- **推荐**: release `2.0.0-rc1` 使用自带 `Chart.yaml appVersion: 2.0.0-rc1` 的 release chart,
+- **推荐**: release `2.0.0` 使用自带 `Chart.yaml appVersion: 2.0.0` 的 release chart,
   不设任何 override, installer 直接按 chart 版本部署。
 - **chart 版本与 operator 版本可以不同**(滚动 chart + 指定 operator 版本):
   ```bash
   # 滚动 chart: version 1.0.0-latest / appVersion latest
   CUBESTACK_OPERATOR_CHART_VERSION=1.0.0-latest
   # 只在需要固定 operator 版本时使用逃生口(仅 operator 自身镜像):
-  CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE=2.0.0-rc1
+  CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE=2.0.0
   ```
   默认(不写 override)会部署 chart 自带的 `latest`; 这是"必要时才覆盖"的显式选择。
 - release.env 的 `CUBESTACK_OPERATOR_CHART_VERSION` 可与 release 版本不同;

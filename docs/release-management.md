@@ -280,10 +280,10 @@ CUBESTACK_OPERATOR_IMAGE_TAG=v2.0.0
 CUBESTACK_OPERATOR_CHART_VERSION=2.0.0
 # release 树自带 chart(offline-files/cubestack-operator/charts/), 部署恒用本地副本
 CUBESTACK_OPERATOR_CHART_SYNC=offline
-# dev-lab: Harbor 三家 tag 命名不一致, 必须按镜像分别钉; dev-lab 镜像名不追加 release 后缀
-DEV_LAB_CPU_TAG=py310-torch2.4
-DEV_LAB_MACA_TAG=3.9.0.12-py310-torch2.4
-DEV_LAB_CUDA_TAG=26.08
+# dev-lab: Harbor 三家 tag 命名不一致, 必须按镜像分别钉; 2.0.0 起均带 -v2.0.0 发布后缀
+DEV_LAB_CPU_TAG=py310-torch2.4-v2.0.0
+DEV_LAB_MACA_TAG=3.9.0.12-py310-torch2.4-v2.0.0
+DEV_LAB_CUDA_TAG=26.08-v2.0.0
 # CLI 镜像(发布脚本用它生成 <版本>/cubestack-installer-cli-v<版本>.tar)
 CUBESTACK_CLI_IMAGE=harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0
 
@@ -321,7 +321,7 @@ RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev
 - `release.env` 中的变量在 release 模式下**优先于 `cluster.conf` / `cluster.defaults.conf`**。
   发布树是版本真相；要例外，请改发布树并重新发布，而不是在客户 `cluster.conf` 里覆盖。
 - **operator 版本默认由 chart 决定(2026-10-22)**: 发布树的 chart 版本可以与 release 版本不同
-  (例: release `2.0.0-rc1` + chart `cubestack-operator-chart-1.0.0-latest.tgz`); 部署模块按
+  (例: release `2.0.0` + chart `cubestack-operator-chart-1.0.0-latest.tgz`); 部署模块按
   `<RELEASE>` / `CUBESTACK_OPERATOR_CHART_VERSION` / `Chart.yaml version` 发现 chart。
   operator 镜像 tag **默认不传**, 由 chart 自带(`appVersion` / `values.image.tag`)决定;
   只有必要时才设 `CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE=<tag>`(仅覆盖 cubestack-operator
@@ -702,7 +702,7 @@ release 模式默认用 `mc mirror --overwrite --remove` 精确镜像版本目�
 | 版本变量 | `deployments/releases/2.0.0/release.env` | 决定 tar 文件名中的 tag |
 | 平台组件镜像清单 | `deployments/releases/2.0.0/release-images.tsv` | 复用现有 TSV 格式（`subdir / file / pull_ref / save_ref`） |
 | model-collection 清单 | `deployments/offline-files/model-collection/image-list.tsv` | sglang / vllm-metax，保持上游 tag |
-| dev-lab | `deployments/config/images.manifest` 的 `dev-lab` 组 | 由 `DEV_LAB_IMAGE_TAG=2.0.0` 控制 |
+| dev-lab | `deployments/config/images.manifest` 的 `dev-lab` 组 | 由 release.env 的 `DEV_LAB_CPU_TAG` / `DEV_LAB_MACA_TAG` / `DEV_LAB_CUDA_TAG` 分别钉（2.0.0 均带 `-v2.0.0`） |
 | 上游镜像清单 | `deployments/config/images.manifest` | 现有唯一清单 |
 | Harbor 凭据 | 环境变量 / 600 权限文件 | 不落仓库、不进 argv |
 
@@ -725,7 +725,7 @@ release 模式默认用 `mc mirror --overwrite --remove` 精确镜像版本目�
        harbor-save-images.sh \
          --exclude-group cubestack-operator,cubestack-platform,netshoot
    （nginx / multus / rdma / nvidia / kubespray+ceph / dev-lab 等由该工具按清单写入；
-     dev-lab 用 release.env 的 DEV_LAB_IMAGE_TAG=2.0.0 生成 *_2.0.0.tar；
+     dev-lab 用 release.env 的 DEV_LAB_CPU/MACA/CUDA_TAG 生成 *_<tag>.tar（2.0.0 均带 -v2.0.0）；
      netshoot 组只用于构建派生镜像, 模块部署时不用它, 故排除）
 4. 平台/自研镜像 → staging/offline-files/cubestack-operator：
      cubestack-platform-save-images.sh \
@@ -1261,7 +1261,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps verify_cubestack_operator
 | `CUBESTACK_OPERATOR_CHART_VERSION` | operator chart 版本 | `2.0.0` |
 | `CUBESTACK_OPERATOR_CHART_SYNC` | chart 来源（release 树恒用本地） | `offline` |
 | `CUBESTACK_CLI_IMAGE` | 生成 CLI tar 的镜像 ref | `harbor.isuanova.com/suanova/cubestack-installer-cli:2.0.0` |
-| `DEV_LAB_IMAGE_TAG` | dev-lab 镜像 tag（release-2.0 包含 dev-lab） | `2.0.0` |
+| `DEV_LAB_CPU_TAG` / `DEV_LAB_MACA_TAG` / `DEV_LAB_CUDA_TAG` | dev-lab 三个镜像的完整不可变 tag | `py310-torch2.4-v2.0.0` / `3.9.0.12-py310-torch2.4-v2.0.0` / `26.08-v2.0.0` |
 | `RDMA_IMAGE_TAG` | RDMA 插件 tag | `v1.5.4` |
 | `MULTUS_IMAGE_TAG` | Multus tag | `v4.2.2-thick` |
 | `RELEASE_GROUPS` | 发布树包含的组（审计用） | `kubespray ceph ...` |

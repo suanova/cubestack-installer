@@ -23,6 +23,9 @@
   拉取(不拼 `mirrors/`); 需要在能连 Harbor 的机器上执行(容器 CLI 自带 skopeo 与凭据)。
 - ⚠ tag 是滚动的 `latest`: 离线 tar 会随上游滚动构建失效 —— **重新部署前重跑 save 工具**
   (模块推送按 digest 比对, 内容变了自动重推, 没变跳过)。
+- ★ **发布版本**: `release.env` 用 `DEV_LAB_CPU_TAG` / `DEV_LAB_MACA_TAG` / `DEV_LAB_CUDA_TAG`
+  钉完整不可变 tag(2.0.0 起均带 `-v2.0.0`, 如 `3.9.0.12-py310-torch2.4-v2.0.0`);
+  发布树 tar 的**文件名与内部 RepoTag 必须逐字一致**, 模块只做精确匹配(不做旧后缀兼容)。
 - ⚠ 旧仓库(`jupyter-*` / `ssh-*`)已停止发布, 其 `:latest` 冻结; 本目录不再保留它们的 tar。
 - ★ **2026-10-20 收敛**: 本目录仅保留 3 个顶层 tar(按当前 Harbor `latest` 重新生成); MinIO 旧
   `jupyter/`、`ssh/` 对象已移至 `offline-files/dev-lab-legacy-20261020/`(保留备查, 不再随
