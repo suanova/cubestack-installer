@@ -243,6 +243,28 @@ out="$(bash "${FETCH}" --clean-countdown abc 2>&1)"; rc=$?
 chk "clean-countdown 非数字拒绝" "1" "${rc}"
 chk_contains "提示非负整数" "非负整数" "${out}"
 
+# --retry 超出 bash 整数范围必须拒绝: 否则 _mc_retry 的 while 条件报错(恒假) →
+# 一次传输都不做却返回成功(--no-verify 时会假报下载完成)。用 --list 提前退出避免真下载。
+out="$(bash "${FETCH}" --retry 9223372036854775808 --list 2>&1)"; rc=$?
+chk "retry 超出整数范围拒绝" "1" "${rc}"
+chk_contains "提示超出 bash 整数范围" "超出 bash 整数范围" "${out}"
+bash "${FETCH}" --retry 9223372036854775807 --list >/dev/null 2>&1
+chk "retry 上限内接受" "0" "$?"
+
+# --clean-countdown 前导零必须按十进制解析(bash 算术/printf 会把 08 当非法八进制)
+# 单测 _clean_warning: sleep 打桩(不真等 8 秒), 断言倒计时完整跑完、脚本不中止。
+out="$(bash -c '
+    set -euo pipefail
+    source "$1"
+    CLEAN_COUNTDOWN=08 YES=0
+    sleep() { :; }
+    _clean_warning "test-dir"
+    echo "COUNTDOWN_OK"
+' _ "${REPO_ROOT}/deployments/scripts/tools/offline/lib-offline-fetch.sh" 2>&1)"
+rc=$?
+chk "clean-countdown 前导零(08)不中止" "0" "${rc}"
+chk_contains "前导零倒计时完整结束" "COUNTDOWN_OK" "${out}"
+
 # 非交互且无 --yes: 精确清理必须中止
 out="$(bash "${FETCH}" --release 2.0.0 --dest "${TMP}/local-abort" </dev/null 2>&1)"
 rc=$?
@@ -257,6 +279,51 @@ rm -f "${TMP}/local/2.0.0/offline-files/keep-extra.txt"
 
 bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
 chk "verify-only 通过" "0" "$?"
+
+# --verify-only 是纯本地路径(文档: 不联网): 本地校验器缺失时必须直接失败,
+# 不得走 ensure_offline_verify_tool 的在线安装(3×curl + 退避 sleep)。
+# 做法: 复制一份工具目录并删掉本地校验器候选, 用假 curl 计数。
+mkdir -p "${TMP}/bin-vo"
+cat > "${TMP}/bin-vo/curl" <<'EOF'
+#!/bin/bash
+echo x >> "${FAKE_CURL_LOG}"
+exit 7
+EOF
+cat > "${TMP}/bin-vo/sleep" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "${TMP}/bin-vo/curl" "${TMP}/bin-vo/sleep"
+cp -r "${REPO_ROOT}/deployments/scripts/tools/offline" "${TMP}/offline-notool"
+rm -f "${TMP}/offline-notool/verify-offline-files.sh" "${TMP}/offline-notool/verify-offline-files.pyz"
+out="$(PATH="${TMP}/bin-vo:${PATH}" FAKE_CURL_LOG="${TMP}/vo-curl.log" \
+    OFFLINE_VERIFY_TOOL_SHA256="$(printf '0%.0s' {1..64})" \
+    XDG_CACHE_HOME="${TMP}/cache-vo" \
+    bash "${TMP}/offline-notool/fetch-offline-from-minio.sh" \
+        --release 9.9.9 --verify-only --dest "${TMP}/vo" 2>&1)"
+rc=$?
+chk "verify-only 校验器缺失仍失败" "1" "${rc}"
+chk "verify-only 不触发在线安装" "0" "$([ -e "${TMP}/vo-curl.log" ] && echo 1 || echo 0)"
+chk_contains "verify-only 提示禁用在线安装" "OFFLINE_VERIFY_ONLINE_INSTALL=never" "${out}"
+
+# --resume 本地树完整: 必须先做纯本地校验并直接退出, 不依赖 mc/MinIO 可达
+# (假 mc 一律失败并计数: 若脚本先连 MinIO 会在这里中止)
+mkdir -p "${TMP}/bin-nomc"
+cat > "${TMP}/bin-nomc/mc" <<'EOF'
+#!/bin/bash
+echo "$*" >> "${FAKE_MC_RESUME_LOG}"
+exit 1
+EOF
+chmod +x "${TMP}/bin-nomc/mc"
+rm -f "${TMP}/mc-resume.log"
+out="$(PATH="${TMP}/bin-nomc:${PATH}" FAKE_MC_RESUME_LOG="${TMP}/mc-resume.log" \
+    MINIO_ENDPOINT="http://unreachable.invalid" MINIO_ACCESS_KEY="x" MINIO_SECRET_KEY="y" \
+    bash "${FETCH}" --release 2.0.0 --resume --dest "${TMP}/local" --yes 2>&1)"
+rc=$?
+chk "resume 完整树不依赖 MinIO 退出码" "0" "${rc}"
+chk "resume 完整树不调用 mc" "0" "$([ -e "${TMP}/mc-resume.log" ] && echo 1 || echo 0)"
+chk_contains "resume 完整树提示无需下载" "无需重新下载" "${out}"
+
 # 断点续传: 本地只保留前 3 字节, --repair 应 offset 追加并校验通过
 head -c 3 "${TMP}/local/2.0.0/offline-files/ceph/test.txt" > "${TMP}/part.tmp"
 mv -f "${TMP}/part.tmp" "${TMP}/local/2.0.0/offline-files/ceph/test.txt"
@@ -338,6 +405,23 @@ chk "旧布局 fetch 退出码" "0" "$?"
 chk "旧布局 CLI tar 落盘" "legacy-cli" "$(cat "${TMP}/local-legacy/1.9.9/cubestack-installer-cli.tar" 2>/dev/null)"
 bash "${FETCH}" --release 1.9.9 --verify-only --dest "${TMP}/local-legacy" >/dev/null 2>&1
 chk "旧布局 verify-only 通过" "0" "$?"
+
+# ⑤b2 旧布局 + release.json 无 cli_tar 字段: 校验器自身只认元数据/版本化名,
+#       fetch 必须把已下载的 cubestack-installer-cli.tar 显式传给 --cli-tar。
+mkdir -p "${TMP}/remote/cubestack-installer/1.9.8/offline-files/ceph"
+printf 'legacy2\n' > "${TMP}/remote/cubestack-installer/1.9.8/offline-files/ceph/test.txt"
+printf 'RELEASE_VERSION=1.9.8\n' > "${TMP}/remote/cubestack-installer/1.9.8/offline-files/release.env"
+: > "${TMP}/remote/cubestack-installer/1.9.8/offline-files/_SUCCESS"
+printf '{}\n' > "${TMP}/remote/cubestack-installer/1.9.8/offline-files/release.json"
+( cd "${TMP}/remote/cubestack-installer/1.9.8/offline-files" \
+    && sha256sum ./ceph/test.txt ./release.env ./release.json > SHA256SUMS )
+printf 'legacy2-cli\n' > "${TMP}/remote/cubestack-installer/1.9.8/cubestack-installer-cli.tar"
+bash "${FETCH}" --release 1.9.8 --dest "${TMP}/local-legacy2" --yes >/dev/null 2>&1
+chk "旧布局无 cli_tar 元数据 fetch 退出码" "0" "$?"
+chk "旧布局无 cli_tar 元数据 CLI tar 落盘" "legacy2-cli" \
+    "$(cat "${TMP}/local-legacy2/1.9.8/cubestack-installer-cli.tar" 2>/dev/null)"
+bash "${FETCH}" --release 1.9.8 --verify-only --dest "${TMP}/local-legacy2" >/dev/null 2>&1
+chk "旧布局无 cli_tar 元数据 verify-only 通过" "0" "$?"
 
 # ---------------- ⑥ release 定义静态约束 ----------------
 echo "== ⑥ release 定义静态约束 =="

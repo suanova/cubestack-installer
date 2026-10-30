@@ -2534,30 +2534,35 @@ cmd_check() {
     # 离线文件完整性门禁(2026-10-28): 有清单走 auto(校验戳/全量); 无清单只做 quick。
     # 2026-10-30: 继承顶层 --verify-offline 口径(OFFLINE_VERIFY_MODE 由 lib-common export),
     #   不再硬编码 auto —— 否则顶层 --verify-offline=quick 仍会在这里重复整树 full+deep。
+    # off 必须在查找校验器之前判定: 否则显式 --no-verify-offline 仍可能因校验器不可用
+    #   (或有清单)被判失败, 且会触发无谓的在线安装尝试。
     local _vt_lib="${SCRIPT_DIR}/../scripts/tools/offline/lib-offline-verify.sh"
     local _vt="" _vlevel="${OFFLINE_VERIFY_MODE:-auto}"
-    if [ -f "${_vt_lib}" ]; then
-        # shellcheck disable=SC1090
-        source "${_vt_lib}"
-        _vt="$(ensure_offline_verify_tool)" || _vt=""
-    fi
-    if [ -n "${_vt}" ]; then
-        if [ "${_vlevel}" = "off" ]; then
-            warn "已跳过离线文件完整性校验(OFFLINE_VERIFY_MODE=off)"
-        elif [ -f "${OFFLINE_FILES_ROOT}/SHA256SUMS" ]; then
-            bash "${_vt}" --root "${OFFLINE_FILES_ROOT}" --level "${_vlevel}" \
-                --jobs "${OFFLINE_VERIFY_JOBS:-4}" --fail-missing \
-                || { err "离线文件完整性校验失败(见上方点名)"; return 1; }
-        else
-            bash "${_vt}" --root "${OFFLINE_FILES_ROOT}" --level quick --allow-unsealed --fail-missing \
-                || { err "离线文件结构检查失败(见上方点名)"; return 1; }
-        fi
-    elif [ -f "${OFFLINE_FILES_ROOT}/SHA256SUMS" ]; then
-        err "校验器不可用; 有清单的离线树不能跳过完整性校验"
-        return 1
-    else
-        warn "校验器不可用; 跳过离线文件完整性校验"
-    fi
+    case "${_vlevel}" in
+        off|Off|OFF)
+            warn "已跳过离线文件完整性校验(OFFLINE_VERIFY_MODE=off)" ;;
+        *)
+            if [ -f "${_vt_lib}" ]; then
+                # shellcheck disable=SC1090
+                source "${_vt_lib}"
+                _vt="$(ensure_offline_verify_tool)" || _vt=""
+            fi
+            if [ -n "${_vt}" ]; then
+                if [ -f "${OFFLINE_FILES_ROOT}/SHA256SUMS" ]; then
+                    bash "${_vt}" --root "${OFFLINE_FILES_ROOT}" --level "${_vlevel}" \
+                        --jobs "${OFFLINE_VERIFY_JOBS:-4}" --fail-missing \
+                        || { err "离线文件完整性校验失败(见上方点名)"; return 1; }
+                else
+                    bash "${_vt}" --root "${OFFLINE_FILES_ROOT}" --level quick --allow-unsealed --fail-missing \
+                        || { err "离线文件结构检查失败(见上方点名)"; return 1; }
+                fi
+            elif [ -f "${OFFLINE_FILES_ROOT}/SHA256SUMS" ]; then
+                err "校验器不可用; 有清单的离线树不能跳过完整性校验"
+                return 1
+            else
+                warn "校验器不可用; 跳过离线文件完整性校验"
+            fi ;;
+    esac
 
     cd "${KUBESPRAY_DIR}"
     source .venv/bin/activate 2>/dev/null || true

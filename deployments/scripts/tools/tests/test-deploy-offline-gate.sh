@@ -116,6 +116,11 @@ chk_contains "lib-common export 含 OFFLINE_VERIFY_MODE" 'OFFLINE_VERIFY_MODE OF
 chk_contains "cubestack-offline 继承 OFFLINE_VERIFY_MODE" '_vlevel="${OFFLINE_VERIFY_MODE:-auto}"' "$(cat "${OFFLINE_SH}")"
 chk "cubestack-offline 不再硬编码 --level auto" "0" "$(grep -c -- '--level auto' "${OFFLINE_SH}" || true)"
 chk_contains "cubestack-offline off 分支" 'OFFLINE_VERIFY_MODE=off' "$(cat "${OFFLINE_SH}")"
+# off 必须在查找校验器之前判定: 否则 --no-verify-offline 仍可能因校验器不可用/有清单而失败
+_off_ln="$(command grep -F -n 'off|Off|OFF)' "${OFFLINE_SH}" | head -1 | cut -d: -f1)"
+_ens_ln="$(command grep -F -n 'ensure_offline_verify_tool' "${OFFLINE_SH}" | head -1 | cut -d: -f1)"
+chk "cubestack-offline off 判定先于校验器查找" "1" \
+    "$([ -n "${_off_ln}" ] && [ -n "${_ens_ln}" ] && [ "${_off_ln}" -lt "${_ens_ln}" ] && echo 1 || echo 0)"
 
 echo "== ⑧ 默认安装门禁 quick =="
 # 2026-10-30 用户口径: 安装过程默认 quick(全量/--steps 一致); auto/full 改为显式 opt-in。

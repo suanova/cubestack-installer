@@ -9,7 +9,7 @@
 # 全局契约(调用方在调用前必须设置):
 #   DST_ROOT, FLAT, RELEASE_ARG, SRC_ROOT, TARGET, REPAIR, REPAIR_DONE,
 #   NO_VERIFY, CLEAN, CLEAN_COUNTDOWN, YES, FETCH_RETRY, FETCH_RETRY_DELAY,
-#   _CLEAN_STASH, _CLEAN_DST
+#   _CLEAN_STASH, _CLEAN_DST; 可选: CLI_TAR_BASENAME(本次选中的 CLI tar 文件名)
 # 日志函数 say/ok/warn/err 由调用方提供。
 # ============================================================
 
@@ -138,7 +138,16 @@ _verify_release() {
         _args+=(--layout flat)
     else
         _args+=(--layout release)
+        # CLI tar 路径: 优先本次选中的文件名(CLI_TAR_BASENAME, 下载路径已按远端解析),
+        # 其次版本化默认名, 最后兼容旧布局 —— 旧 release.json 可能没有 cli_tar 字段,
+        # 校验器自身只会找 release.json 与版本化名, 否则会把已下载的
+        # cubestack-installer-cli.tar 在 --require-cli-tar 下误判为缺失。
         local _cli="${root}/cubestack-installer-cli-v${RELEASE_ARG}.tar"
+        if [ -n "${CLI_TAR_BASENAME:-}" ] && [ -f "${root}/${CLI_TAR_BASENAME}" ]; then
+            _cli="${root}/${CLI_TAR_BASENAME}"
+        elif [ ! -f "${_cli}" ] && [ -f "${root}/cubestack-installer-cli.tar" ]; then
+            _cli="${root}/cubestack-installer-cli.tar"
+        fi
         [ -f "${_cli}" ] && _args+=(--cli-tar "${_cli}")
         _args+=(--require-cli-tar)
     fi
@@ -223,7 +232,9 @@ _clean_end() {
     _CLEAN_DST=""
 }
 _clean_warning() {   # <desc>
-    local desc="$1" i="${CLEAN_COUNTDOWN}"
+    # 10#: --clean-countdown 允许前导零(如 08), 但 bash 的 $(( )) 与 printf %d 会把
+    # 08 当非法八进制(非 $((10#...)) 方式在 set -e 下会直接中止脚本), 故这里先归一为十进制。
+    local desc="$1" i=$((10#${CLEAN_COUNTDOWN:-0}))
     echo -e "\033[41m\033[97m================================================================\033[0m"
     echo -e "\033[41m\033[97m ⚠ 精确同步: 将覆盖本地文件, 并删除 MinIO 中不存在的多余文件\033[0m"
     echo -e "\033[41m\033[97m   目标: ${desc}\033[0m"

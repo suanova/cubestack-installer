@@ -23,10 +23,15 @@ def seal(root, args):
                 problems.append(f"符号链接: {norm_rel(os.path.relpath(full, root))}")
         for name in filenames:
             full = os.path.join(dirpath, name)
-            rel = norm_rel(os.path.relpath(full, root))
+            raw_rel = os.path.relpath(full, root)
+            rel = norm_rel(raw_rel)
             if is_meta(rel):
                 continue
-            if "\n" in rel or "\r" in rel:
+            # norm_rel 会把 \ 归一成 /; 若不先按原始名拒绝, 含反斜杠的文件会被
+            # 当成子目录路径: 目标不存在 → 哈希抛异常中止; 恰好同名存在 → 重复登记且漏哈希。
+            if "\\" in raw_rel:
+                problems.append(f"文件名含反斜杠: {raw_rel!r}")
+            elif "\n" in rel or "\r" in rel:
                 problems.append(f"文件名含换行: {rel!r}")
             elif os.path.islink(full):
                 problems.append(f"符号链接: {rel}")

@@ -285,9 +285,8 @@ def check_operator_chart_presence(ctx, root):
     want = env.get("CUBESTACK_OPERATOR_CHART_VERSION", "")
     if not want:
         return
-    chart_dir = os.path.join(root, "cubestack-operator", "charts")
-    if not os.path.isdir(chart_dir):
-        return
+    # 不能因为 cubestack-operator/charts/ 目录不存在就跳过: release.env 声明了 chart 版本,
+    # 部署就必须用到它(module 25 缺 chart 直接 err), 目录整体缺失同样是"缺少该 chart"。
     expected = os.path.join("cubestack-operator", "charts",
                             f"cubestack-operator-chart-{want}.tgz")
     if expected not in ctx.files:

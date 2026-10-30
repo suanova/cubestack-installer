@@ -268,7 +268,8 @@ export ONLY_HOSTS
 load_config
 
 # ---------------- 离线文件完整性门禁(2026-10-28) ----------------
-# 默认 auto: release/flat/sealed 首次 full, 之后走校验戳; 未 seal 的开发树只做 quick。
+# 默认 quick: 结构/覆盖率校验(不算 sha256/镜像层); 需要强校验设 auto 或 full
+# (auto = release/flat/sealed 首次 full, 之后走校验戳; 未 seal 开发树自动降级 quick)。
 # 跳过: 只读列表 / 纯 verify_* 步骤 / 仅 --enable 写配置(不实际部署)。
 _verify_skip=0
 if [ "${LIST_STEPS}" = "1" ] || [ "${LIST}" = "1" ]; then

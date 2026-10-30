@@ -28,7 +28,7 @@ sudo ./deployments/scripts/tools/offline/verify-offline-files.sh \
 sudo ./deployments/scripts/tools/offline/verify-offline-files.sh \
     --root deployments/offline-files --level full
 
-# ④ 部署(默认 auto: 首次 full, 之后走校验戳)
+# ④ 部署(默认 quick: 结构/覆盖率; auto = 封存树首次 full, 之后走校验戳)
 sudo ./deployments/scripts/deploy-cluster.sh
 
 # 强制全量 / 跳过(逃生口)
@@ -73,8 +73,10 @@ sudo ./deployments/scripts/deploy-cluster.sh --no-verify-offline
 - 逐 layer 计算 sha256 并与 `diff_ids` 比对（gzip layer 先解压）；
 - 对超大 `.tar.gz`/`.tgz` 完整解压遍历 tar；对普通 `.gz` 做完整 CRC/ISIZE。
 
-这样 `full` 通过就意味着：字节与发布清单一致，且镜像 archive 内部结构/layer digest 自洽，
-不会出现“校验通过但 `skopeo copy`/`ctr import` 报错”的传输/结构损坏。
+这样 `full` 通过就意味着：字节与发布清单一致。**含 `manifest.json` 的镜像 archive**
+内部结构/layer digest 自洽（缺少 `rootfs.diff_ids` 时只 warning 并跳过 layer digest 校验）。
+**不含 `manifest.json` 的 tar** 只校验 tar 结构与 sha256，
+不保证 `skopeo copy`/`ctr import` 可导入。
 CLI tar 若可解析为 tar, 也会做同样的 tar/镜像层校验；不可解析时明确 warning 并仅做 sha256。
 TTY 下镜像层校验只显示单行进度条（归档、当前 layer、i/n、大小），不再逐层刷屏；
 非 TTY 只显示每个归档的开始/结束。逐 layer 的 `expected/actual/OK|FAIL` 明细写入

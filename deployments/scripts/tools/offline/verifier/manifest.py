@@ -41,7 +41,13 @@ def parse_sizes(ctx, path):
             if not m:
                 fail(ctx, "SIZES", "manifest_format", f"第 {lineno} 行格式非法")
                 continue
-            result[norm_rel(gnu_unescape(m.group(2)))] = int(m.group(1))
+            rel = norm_rel(gnu_unescape(m.group(2)))
+            # 重复路径会静默覆盖前一行的大小(值相同则完全无感知), 与 SHA256SUMS 的
+            # manifest_dup 对齐: 点名重复并保留首条, 不覆盖。
+            if rel in result:
+                fail(ctx, rel, "manifest_dup", "SIZES 重复路径")
+                continue
+            result[rel] = int(m.group(1))
     return result
 
 def check_metadata(ctx, root, layout, args):

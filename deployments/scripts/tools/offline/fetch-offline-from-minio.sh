@@ -63,8 +63,9 @@
 #     ${REPO_ROOT}/offline-releases。⚠ release 模式下 --dest 表示**本地桶根**
 #     (包含 <版本>/ 与 offline-files/), 与 --sub 的 --dest(offline-files 根)语义不同。
 #   · --verify-only: 只校验本地已下载的树, **不需要 mc/MinIO 配置**(纯本地, 不联网);
-#   · --resume: 下载前先 full 校验本地树; 部分文件按 offset 续传并校验 sha; 完整则跳过下载;
-#     失败/不完整再正常下载并最终全量校验。下载命令默认重试 3 次(--retry/--retry-delay)。
+#   · --resume: 下载前先 full 校验本地树(**先于 MinIO 连接**; 完整则直接退出, 远端不可达也不影响);
+#     不完整时连接 MinIO, 部分文件按 offset 续传并校验 sha, 失败/不完整再正常下载并最终全量校验。
+#     下载命令默认重试 3 次(--retry/--retry-delay)。
 #   · --clean/--no-clean: release/flat 默认精确清理(删除本地多余文件); dev/--sub 需显式 --clean;
 #     非交互环境必须加 --yes, 否则中止; .cubestack-* (校验戳/清单备份) 保留。
 #   · --flat(仅配合 --release): 不建 <版本>/ 目录, 把远端的 <版本>/offline-files/ 内容
@@ -128,6 +129,7 @@ NO_VERIFY=0
 REPAIR=0
 RESUME=0
 REPAIR_DONE=0
+_RESUME_REPAIR=0                    # --resume: 本地校验失败, 待远端就绪后修复
 RELEASE_MODE=0
 FLAT=0
 CLEAN_MODE="auto"                     # auto|yes|no; auto = release/flat 默认清理
@@ -227,6 +229,12 @@ fi
 [ "${RESUME}" = "1" ] && [ "${NO_VERIFY}" = "1" ] && { err "--resume 不能与 --no-verify 同用(续传后必须校验)"; exit 1; }
 case "${CLEAN_COUNTDOWN}" in ''|*[!0-9]*) err "--clean-countdown 必须是非负整数: ${CLEAN_COUNTDOWN}"; exit 1 ;; esac
 case "${FETCH_RETRY}" in ''|*[!0-9]*|0) err "--retry 必须是正整数: ${FETCH_RETRY}"; exit 1 ;; esac
+# 超出 bash 支持的整数范围时, `[ ]` 数值比较返回 2(integer expression expected);
+# _mc_retry 的 while 条件会因此恒假 → 一次传输都不执行却返回成功(配合 --no-verify
+# 会假报"下载完成")。用一次恒真比较探测范围: 越界时 [ 自身报错(rc=2), 正常值 rc=0。
+if ! [ "${FETCH_RETRY}" -ge 1 ] 2>/dev/null; then
+    err "--retry 超出 bash 整数范围: ${FETCH_RETRY}"; exit 1
+fi
 case "${FETCH_RETRY_DELAY}" in ''|*[!0-9]*) err "--retry-delay 必须是非负整数: ${FETCH_RETRY_DELAY}"; exit 1 ;; esac
 # --kubespray-version <V> ≡ --sub kubespray/<V>(只下载该版本的离线件; 版本名 = 上游 tag 全名)
 if [ -n "${KUBESPRAY_VERSION_ARG}" ]; then
@@ -259,6 +267,9 @@ if [ -n "${SUB_ARG}" ]; then
     [ -n "${SUB_ARG}" ] || { err "--sub 归一化后为空(只给 offline-files 根=全量; 请不带 --sub 走默认模式)"; exit 1; }
 fi
 
+# release 模式标记: 目标目录决策/断点续传在连接 MinIO 之前就要用到(原在远端探测处设置)
+[ -n "${RELEASE_ARG}" ] && RELEASE_MODE=1
+
 # ---------------- 0. 校验器封装(供 verify-only / 下载后校验) ----------------
 # release 模式校验: 统一调用 verify-offline-files.sh(唯一实现)。
 # 失败时点名文件; --repair 只重下坏文件(最多 1 轮, 避免无限循环)。
@@ -273,10 +284,123 @@ if [ "${VERIFY_ONLY}" = "1" ]; then
         DST_ROOT="${TARGET}/${RELEASE_ARG}"
     fi
     say "只校验, 不下载: ${DST_ROOT}(跳过下载磁盘空间预检)"
-    _verify_release || exit 1
+    # --verify-only 是纯本地路径(文档: 不联网): 校验器缺失时直接失败,
+    # 不走 ensure_offline_verify_tool 的在线安装(3×curl + 退避 sleep)。
+    OFFLINE_VERIFY_ONLINE_INSTALL=never _verify_release || exit 1
     echo ""
     ok "校验完成(未改动任何文件)"
     exit 0
+fi
+
+# ---------------- 0a. 运行环境检测(容器内 / 宿主机) ----------------
+# 容器内(CLI 镜像): 下载即落在 /opt/cubestack-installer/deployments/offline-files(离线文件唯一入口),
+#   即装即用, 无需挂载提示; 宿主机: --auto 自动挑空闲 ≥ 门槛的最大磁盘, 完成后打印挂载命令。
+IS_CONTAINER=0
+if [ -f "/.dockerenv" ] || grep -qE '/docker/|/containerd/' /proc/1/cgroup 2>/dev/null; then
+    IS_CONTAINER=1
+fi
+
+# ---------------- 0b. 目标目录决策(离线文件根目录) ----------------
+# 放在连接 MinIO 之前: --resume 需要先按 DST_ROOT 做纯本地校验(见 0c)。
+# --list/--list-releases 只读远端清单、不落盘, 跳过本段(避免无谓的交互确认)。
+if [ "${LIST_ONLY}" = "0" ] && [ "${LIST_RELEASES}" = "0" ]; then
+    # 默认下载到 /opt/cubestack-installer/deployments/offline-files:
+    #   · 容器内: REPO_ROOT=/opt/cubestack-installer, 即默认 offline-files 路径;
+    #   · 宿主机直跑本仓库: 默认同一路径; 磁盘不足时用 --auto 换更大磁盘。
+    # 下载目录 = offline-files 总根(远端 offline-files/<子目录> 直接落到 <TARGET>/<子目录>):
+    #   只认用户显式 OFFLINE_FILES_DIR(环境变量/minio.conf)或 --dest; 都不设则用默认总根。
+    #   (本脚本不依赖 lib-common, 不会有它自动导出的 .../offline-files/kubespray 内层默认,
+    #    天然就是 offline-files 总根语义, 不会下载进 kubespray/ 内层。)
+    DEFAULT_DIR="${REPO_ROOT}/deployments/offline-files"
+    if [ "${RELEASE_MODE}" = "1" ]; then
+        if [ "${FLAT}" = "1" ]; then
+            DEFAULT_DIR="${REPO_ROOT}/deployments/offline-files"
+        else
+            DEFAULT_DIR="${REPO_ROOT}/offline-releases"
+        fi
+    fi
+    if [ -n "${DEST_ARG}" ]; then
+        TARGET="${DEST_ARG}"
+        say "使用指定下载目录: ${TARGET}"
+    elif [ "${RELEASE_MODE}" = "1" ] && [ "${FLAT}" != "1" ] && [ -n "${CUBESTACK_RELEASE_ROOT:-}" ]; then
+        TARGET="${CUBESTACK_RELEASE_ROOT}"
+        say "使用 CUBESTACK_RELEASE_ROOT 本地桶根: ${TARGET}"
+    elif [ -n "${OFFLINE_FILES_DIR_EXPLICIT:-}" ] && [ "${RELEASE_MODE}" != "1" ]; then
+        # 仅用户显式设置(环境变量/minio.conf)时才采用; release 模式不沿用 dev 根语义
+        TARGET="${OFFLINE_FILES_DIR_EXPLICIT}"
+        say "使用显式 OFFLINE_FILES_DIR 下载目录: ${TARGET}"
+    elif [ "${IS_CONTAINER}" = "1" ]; then
+        TARGET="${DEFAULT_DIR}"
+        say "容器内执行: 下载到默认目录 ${TARGET}"
+    elif [ "${AUTO}" = "1" ]; then
+        _minkib="$(( MIN_FREE_GB * 1024 * 1024 ))"
+        # `|| true`: df/sort 任一环节失败都会让赋值非 0 → set -e 结束脚本; 下面正是靠
+        # `[ -n "${BEST}" ]` 判"没探到合适挂载点 → 用默认目录 + warn"。
+        BEST="$(df -Pk 2>/dev/null \
+            | awk -v mink="${_minkib}" 'NR>1 && $4 >= mink && $1 !~ /^\/dev\/loop/ && $1 !~ /^(tmpfs|devtmpfs|overlay|squashfs|shm|udev|none|proc|sysfs|iso9660|nfs|fuse|cgroup)/ \
+                   && $6 !~ /^\/(proc|sys|dev|run|snap|boot)/ {print $4, $6}' \
+            | sort -rn | head -1 | awk '{print $2}' || true)"
+        if [ -n "${BEST}" ]; then
+            BEST_AVAIL="$(df -Pk "${BEST}" 2>/dev/null | awk 'NR==2 {printf "%.1f", $4/1024/1024}')"
+            if [ "${RELEASE_MODE}" = "1" ] && [ "${FLAT}" != "1" ]; then
+                TARGET="${BEST}/cubestack-installer"
+            else
+                TARGET="${BEST}/offline-files"
+            fi
+            say "自动检测: 空闲 ≥ ${MIN_FREE_GB} GiB 的挂载点中最大 = ${BEST}(约 ${BEST_AVAIL} GiB 可用)"
+            say "下载目标: ${TARGET}"
+        else
+            TARGET="${DEFAULT_DIR}"
+            warn "无可选磁盘空闲 ≥ ${MIN_FREE_GB} GiB(或检测失败), 使用默认目录: ${TARGET}"
+        fi
+    else
+        TARGET="${DEFAULT_DIR}"
+        say "下载目录(默认): ${TARGET}"
+        if [ "${YES}" != "1" ] && [ "${VERIFY_ONLY}" != "1" ]; then
+            read -r -p "  确认下载到此目录? [Y/n] (n = --auto 自动挑最大磁盘, 或直接输入其他路径): " _ans
+            case "${_ans:-Y}" in
+                [Yy]|"") : ;;
+                [Nn]) TARGET="${TARGET}" ;;
+                *) TARGET="${_ans}" ;;
+            esac
+        fi
+    fi
+    DST_ROOT="${TARGET}"
+    if [ "${RELEASE_MODE}" = "1" ]; then
+        if [ "${FLAT}" = "1" ]; then
+            DST_ROOT="${TARGET}"
+            say "release flat 下载目录(offline-files 根): ${DST_ROOT}"
+        else
+            DST_ROOT="${TARGET}/${RELEASE_ARG}"
+            say "发布版本下载目录: ${DST_ROOT}"
+        fi
+    fi
+
+    # ---------------- 0c. --resume: 先做纯本地校验(不依赖 MinIO 可达) ----------------
+    # 本地树已完整 ⇒ 直接退出: 不配 alias、不探测远端、不跑远程磁盘预检;
+    # 不完整 ⇒ 打标记, 等 MinIO 就绪后再做 offset 续传/重下(修复必须联网)。
+    if [ "${RESUME}" = "1" ]; then
+        _resume_base="${DST_ROOT}/offline-files"
+        [ "${FLAT}" = "1" ] && _resume_base="${DST_ROOT}"
+        if [ -f "${_resume_base}/SHA256SUMS" ]; then
+            say "断点续传: 校验本地树 ${_resume_base} ...(full 含镜像层校验, 大版本可能需数分钟)"
+            # 此阶段还没有 SRC_ROOT/mc alias, 只能校验不能修复: 临时关掉 REPAIR
+            # (用户同时给 --repair 的修复也一并推迟到远端就绪后)。
+            _resume_repair_arg="${REPAIR}"
+            REPAIR=0
+            if _verify_release; then
+                ok "本地树已完整, 无需重新下载"
+                exit 0
+            fi
+            REPAIR="${_resume_repair_arg}"
+            unset _resume_repair_arg
+            _RESUME_REPAIR=1
+            warn "本地树不完整; 连接 MinIO 后续传/修复(完成后仍会全量校验)"
+        else
+            warn "本地无 SHA256SUMS, 无法断点续传; 将正常下载"
+        fi
+        unset _resume_base
+    fi
 fi
 
 # ---------------- 1. mc client 检测 ----------------
@@ -336,7 +460,7 @@ _cli_tar_name_local() {
     [ -n "${name}" ] || name="$(_default_cli_tar_name)"
     if [ ! -f "${root}/${name}" ] && [ "${name}" != "cubestack-installer-cli.tar" ] \
         && [ -f "${root}/cubestack-installer-cli.tar" ]; then
-        warn "本地缺少 ${name}, 回退旧布局 cubestack-installer-cli.tar"
+        warn "本地缺少 ${name}, 回退旧布局 cubestack-installer-cli.tar" >&2
         name="cubestack-installer-cli.tar"
     fi
     printf '%s' "${name}"
@@ -348,7 +472,7 @@ _cli_tar_name_remote() {
     [ -n "${name}" ] || name="$(_default_cli_tar_name)"
     if ! mc_has "${src}/${name}" && [ "${name}" != "cubestack-installer-cli.tar" ] \
         && mc_has "${src}/cubestack-installer-cli.tar"; then
-        warn "远端缺少 ${name}, 回退旧布局 cubestack-installer-cli.tar"
+        warn "远端缺少 ${name}, 回退旧布局 cubestack-installer-cli.tar" >&2
         name="cubestack-installer-cli.tar"
     fi
     printf '%s' "${name}"
@@ -492,87 +616,6 @@ if [ "${LIST_ONLY}" = "1" ]; then
     exit 0
 fi
 
-# ---------------- 5. 运行环境检测(容器内 / 宿主机) ----------------
-# 容器内(CLI 镜像): 下载即落在 /opt/cubestack-installer/deployments/offline-files(离线文件唯一入口),
-#   即装即用, 无需挂载提示; 宿主机: --auto 自动挑空闲 ≥ 门槛的最大磁盘, 完成后打印挂载命令。
-IS_CONTAINER=0
-if [ -f "/.dockerenv" ] || grep -qE '/docker/|/containerd/' /proc/1/cgroup 2>/dev/null; then
-    IS_CONTAINER=1
-fi
-
-# ---------------- 6. 目标目录决策(离线文件根目录) ----------------
-# 默认下载到 /opt/cubestack-installer/deployments/offline-files:
-#   · 容器内: REPO_ROOT=/opt/cubestack-installer, 即默认 offline-files 路径;
-#   · 宿主机直跑本仓库: 默认同一路径; 磁盘不足时用 --auto 换更大磁盘。
-# 下载目录 = offline-files 总根(远端 offline-files/<子目录> 直接落到 <TARGET>/<子目录>):
-#   只认用户显式 OFFLINE_FILES_DIR(环境变量/minio.conf)或 --dest; 都不设则用默认总根。
-#   (本脚本不依赖 lib-common, 不会有它自动导出的 .../offline-files/kubespray 内层默认,
-#    天然就是 offline-files 总根语义, 不会下载进 kubespray/ 内层。)
-DEFAULT_DIR="${REPO_ROOT}/deployments/offline-files"
-if [ "${RELEASE_MODE}" = "1" ]; then
-    if [ "${FLAT}" = "1" ]; then
-        DEFAULT_DIR="${REPO_ROOT}/deployments/offline-files"
-    else
-        DEFAULT_DIR="${REPO_ROOT}/offline-releases"
-    fi
-fi
-if [ -n "${DEST_ARG}" ]; then
-    TARGET="${DEST_ARG}"
-    say "使用指定下载目录: ${TARGET}"
-elif [ "${RELEASE_MODE}" = "1" ] && [ "${FLAT}" != "1" ] && [ -n "${CUBESTACK_RELEASE_ROOT:-}" ]; then
-    TARGET="${CUBESTACK_RELEASE_ROOT}"
-    say "使用 CUBESTACK_RELEASE_ROOT 本地桶根: ${TARGET}"
-elif [ -n "${OFFLINE_FILES_DIR_EXPLICIT:-}" ] && [ "${RELEASE_MODE}" != "1" ]; then
-    # 仅用户显式设置(环境变量/minio.conf)时才采用; release 模式不沿用 dev 根语义
-    TARGET="${OFFLINE_FILES_DIR_EXPLICIT}"
-    say "使用显式 OFFLINE_FILES_DIR 下载目录: ${TARGET}"
-elif [ "${IS_CONTAINER}" = "1" ]; then
-    TARGET="${DEFAULT_DIR}"
-    say "容器内执行: 下载到默认目录 ${TARGET}"
-elif [ "${AUTO}" = "1" ]; then
-    _minkib="$(( MIN_FREE_GB * 1024 * 1024 ))"
-    # `|| true`: df/sort 任一环节失败都会让赋值非 0 → set -e 结束脚本; 下面正是靠
-    # `[ -n "${BEST}" ]` 判"没探到合适挂载点 → 用默认目录 + warn"。
-    BEST="$(df -Pk 2>/dev/null \
-        | awk -v mink="${_minkib}" 'NR>1 && $4 >= mink && $1 !~ /^\/dev\/loop/ && $1 !~ /^(tmpfs|devtmpfs|overlay|squashfs|shm|udev|none|proc|sysfs|iso9660|nfs|fuse|cgroup)/ \
-               && $6 !~ /^\/(proc|sys|dev|run|snap|boot)/ {print $4, $6}' \
-        | sort -rn | head -1 | awk '{print $2}' || true)"
-    if [ -n "${BEST}" ]; then
-        BEST_AVAIL="$(df -Pk "${BEST}" 2>/dev/null | awk 'NR==2 {printf "%.1f", $4/1024/1024}')"
-        if [ "${RELEASE_MODE}" = "1" ] && [ "${FLAT}" != "1" ]; then
-            TARGET="${BEST}/cubestack-installer"
-        else
-            TARGET="${BEST}/offline-files"
-        fi
-        say "自动检测: 空闲 ≥ ${MIN_FREE_GB} GiB 的挂载点中最大 = ${BEST}(约 ${BEST_AVAIL} GiB 可用)"
-        say "下载目标: ${TARGET}"
-    else
-        TARGET="${DEFAULT_DIR}"
-        warn "无可选磁盘空闲 ≥ ${MIN_FREE_GB} GiB(或检测失败), 使用默认目录: ${TARGET}"
-    fi
-else
-    TARGET="${DEFAULT_DIR}"
-    say "下载目录(默认): ${TARGET}"
-    if [ "${YES}" != "1" ] && [ "${VERIFY_ONLY}" != "1" ]; then
-        read -r -p "  确认下载到此目录? [Y/n] (n = --auto 自动挑最大磁盘, 或直接输入其他路径): " _ans
-        case "${_ans:-Y}" in
-            [Yy]|"") : ;;
-            [Nn]) TARGET="${TARGET}" ;;
-            *) TARGET="${_ans}" ;;
-        esac
-    fi
-fi
-DST_ROOT="${TARGET}"
-if [ "${RELEASE_MODE}" = "1" ]; then
-    if [ "${FLAT}" = "1" ]; then
-        DST_ROOT="${TARGET}"
-        say "release flat 下载目录(offline-files 根): ${DST_ROOT}"
-    else
-        DST_ROOT="${TARGET}/${RELEASE_ARG}"
-        say "发布版本下载目录: ${DST_ROOT}"
-    fi
-fi
-
 # ---------------- 7. 选择下载范围 ----------------
 # 默认下载【部署必需】子目录(排除 DEFAULT_EXCLUDE_SUBS=virtual-machine, 仅创建 VM 时用);
 #   --all = 真正全量(含 virtual-machine); --sub <目录> = 只拉指定目录(不受排除限制)。
@@ -711,24 +754,18 @@ for s in "${SUBS[@]}"; do
 done
 fi
 
-# --resume: 下载前先校验本地树; 不完整的文件按 offset 续传, 完整则直接退出
-if [ "${RESUME}" = "1" ]; then
-    _resume_base="${DST_ROOT}/offline-files"
-    [ "${FLAT}" = "1" ] && _resume_base="${DST_ROOT}"
-    if [ -f "${_resume_base}/SHA256SUMS" ]; then
-        say "断点续传: 校验并修复本地树 ${_resume_base} ...(full 含镜像层校验, 大版本可能需数分钟)"
-        REPAIR=1
-        if _verify_release; then
-            ok "本地树已完整, 无需重新下载"
-            exit 0
-        fi
-        warn "断点续传/修复未完成, 继续正常下载(完成后仍会全量校验)"
-        REPAIR=0
-        REPAIR_DONE=0
-    else
-        warn "本地无 SHA256SUMS, 无法断点续传; 将正常下载"
+# --resume(续): 0c 的纯本地校验未通过; MinIO 就绪后做 offset 续传/重下(修复必须联网)
+if [ "${_RESUME_REPAIR}" = "1" ]; then
+    say "断点续传: 修复本地树 ${DST_ROOT} ...(full 含镜像层校验, 大版本可能需数分钟)"
+    REPAIR=1
+    if _verify_release; then
+        ok "本地树已完整, 无需重新下载"
+        exit 0
     fi
-    unset _resume_base
+    warn "断点续传/修复未完成, 继续正常下载(完成后仍会全量校验)"
+    REPAIR=0
+    REPAIR_DONE=0
+    _RESUME_REPAIR=0
 fi
 
 # 清理模式: auto = release/flat 默认; dev/--sub 需显式 --clean
