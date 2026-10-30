@@ -10,6 +10,14 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"          # deployments/scripts/ → 根目录
 
+# 离线文件校验器定位/自举(不依赖本库, 供 deploy/fetch/cubestack-offline 共用)
+# shellcheck source=tools/offline/lib-offline-verify.sh
+source "${SCRIPT_DIR}/tools/offline/lib-offline-verify.sh"
+
+# 离线文件门禁/release.env 预校验(独立模块; 依赖 lib-offline-verify + warn/err)
+# shellcheck source=tools/offline/lib-offline-gate.sh
+source "${SCRIPT_DIR}/tools/offline/lib-offline-gate.sh"
+
 # 真实用户 home(sudo bash 下 HOME=/root 会出错, 用 SUDO_USER 定位真实用户)
 REAL_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 REAL_HOME="$(getent passwd "${REAL_USER}" 2>/dev/null | cut -d: -f6)"
@@ -870,6 +878,10 @@ load_config() {
                 ;;
         esac
         # shellcheck disable=SC1090
+        # 损坏的 release.env 不允许被 root 执行(存在 SHA256SUMS 时强制; 无清单只警告)
+        if ! verify_release_env_precheck "${_rel_root}"; then
+            exit 1
+        fi
         source "${_rel_root}/release.env"
         if [ "${RELEASE_VERSION:-}" != "${CUBESTACK_RELEASE}" ]; then
             err "release.env 版本不符: RELEASE_VERSION=${RELEASE_VERSION:-<空>} CUBESTACK_RELEASE=${CUBESTACK_RELEASE}"
@@ -1001,7 +1013,8 @@ load_config() {
             KUBESPRAY_BASE_DIR="${REPO_ROOT}/deployments/kubespray/versions/${KUBESPRAY_VERSION}"
         fi
     fi
-    export OFFLINE_FILES_ROOT KUBESPRAY_VERSION OFFLINE_FILES_DIR LOCAL_REPO_DIR KUBESPRAY_BASE_DIR
+    export OFFLINE_FILES_ROOT KUBESPRAY_VERSION OFFLINE_FILES_DIR LOCAL_REPO_DIR KUBESPRAY_BASE_DIR \
+           OFFLINE_VERIFY_MODE OFFLINE_VERIFY_JOBS
     # 全局派生变量(续): REGISTRY_IP 留空时从 METALLB_POOL 自动取池内首地址作为 LoadBalancer VIP
     # (cluster.conf 约定 "留空 = 自动派生", 与 sync-kubespray-config.sh 写入 addons.yml 的规则一致;
     #  centralized 于此, 让 deploy-registry.sh / setup-registry-expose.sh 等所有消费者拿到同一值)

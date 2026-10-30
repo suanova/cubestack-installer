@@ -237,6 +237,24 @@ get_save_cmd() {
     esac
 }
 
+# tree.tar.gz 解包前校验边车(存在即强制; 缺边车只警告 —— 开发树常见)
+verify_tree_tar_sidecar() {   # <version-dir>
+    local dir="$1" tar="${1}/tree.tar.gz" side="${1}/tree.tar.gz.sha256" want got
+    [ -f "${tar}" ] || return 0
+    if [ ! -f "${side}" ]; then
+        warn "缺少 ${side}; 跳过 tree.tar.gz 校验(开发树常见)"
+        return 0
+    fi
+    want="$(tr -d '[:space:]' < "${side}")"
+    got="$(sha256sum "${tar}" | awk '{print $1}')"
+    if [ "${want,,}" != "${got,,}" ]; then
+        err "tree.tar.gz 校验失败: 期望 ${want} 实际 ${got}"
+        return 1
+    fi
+    log "✅ tree.tar.gz 校验通过"
+    return 0
+}
+
 ensure_kubespray() {
     if [ -d "${KUBESPRAY_DIR}/.git" ] || [ -f "${KUBESPRAY_DIR}/cluster.yml" ]; then
         log "✅ Kubespray 源码已就绪: ${KUBESPRAY_DIR}"
@@ -252,6 +270,7 @@ ensure_kubespray() {
     #    deployments/kubespray/kubespray/(与 HEAD 可能不一致) —— 那不是本机制该做的事。
     if [ -n "${OFFLINE_FILES_DIR:-}" ] && [ -f "${_tree_tar}" ] && [ "${KUBESPRAY_VERSION}" != "${_repo_tree_ver}" ]; then
         highlight "从版本目录物化 Kubespray ${KUBESPRAY_VERSION}(离线, 顶层 kubespray/)"
+        verify_tree_tar_sidecar "$(dirname "${_tree_tar}")" || return 1
         mkdir -p "$(dirname "${KUBESPRAY_DIR}")"
         tar -xzf "${_tree_tar}" -C "$(dirname "${KUBESPRAY_DIR}")" || err "解树失败: ${_tree_tar}"
         log "✅ 已物化: ${KUBESPRAY_DIR}(版本 ${KUBESPRAY_VERSION}; .venv 由 ensure_venv 按需重建)"
@@ -2511,6 +2530,39 @@ cmd_check() {
         err "未找到离线二进制文件: ${LOCAL_REPO_DIR}"
     fi
     log "✅ 离线资源完整"
+
+    # 离线文件完整性门禁(2026-10-28): 有清单走 auto(校验戳/全量); 无清单只做 quick。
+    # 2026-10-30: 继承顶层 --verify-offline 口径(OFFLINE_VERIFY_MODE 由 lib-common export),
+    #   不再硬编码 auto —— 否则顶层 --verify-offline=quick 仍会在这里重复整树 full+deep。
+    # off 必须在查找校验器之前判定: 否则显式 --no-verify-offline 仍可能因校验器不可用
+    #   (或有清单)被判失败, 且会触发无谓的在线安装尝试。
+    local _vt_lib="${SCRIPT_DIR}/../scripts/tools/offline/lib-offline-verify.sh"
+    local _vt="" _vlevel="${OFFLINE_VERIFY_MODE:-auto}"
+    case "${_vlevel}" in
+        off|Off|OFF)
+            warn "已跳过离线文件完整性校验(OFFLINE_VERIFY_MODE=off)" ;;
+        *)
+            if [ -f "${_vt_lib}" ]; then
+                # shellcheck disable=SC1090
+                source "${_vt_lib}"
+                _vt="$(ensure_offline_verify_tool)" || _vt=""
+            fi
+            if [ -n "${_vt}" ]; then
+                if [ -f "${OFFLINE_FILES_ROOT}/SHA256SUMS" ]; then
+                    bash "${_vt}" --root "${OFFLINE_FILES_ROOT}" --level "${_vlevel}" \
+                        --jobs "${OFFLINE_VERIFY_JOBS:-4}" --fail-missing \
+                        || { err "离线文件完整性校验失败(见上方点名)"; return 1; }
+                else
+                    bash "${_vt}" --root "${OFFLINE_FILES_ROOT}" --level quick --allow-unsealed --fail-missing \
+                        || { err "离线文件结构检查失败(见上方点名)"; return 1; }
+                fi
+            elif [ -f "${OFFLINE_FILES_ROOT}/SHA256SUMS" ]; then
+                err "校验器不可用; 有清单的离线树不能跳过完整性校验"
+                return 1
+            else
+                warn "校验器不可用; 跳过离线文件完整性校验"
+            fi ;;
+    esac
 
     cd "${KUBESPRAY_DIR}"
     source .venv/bin/activate 2>/dev/null || true

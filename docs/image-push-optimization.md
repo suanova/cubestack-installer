@@ -1,6 +1,6 @@
 # 大镜像 push 加速(dev_lab / model-collection)
 
-> 适用: `36_dev_lab.sh`(6 镜像 ≈44G)、`37_model_images.sh`(5 镜像 ≈86G)把离线 tar 推入
+> 适用: `36_dev_lab.sh`(6 镜像 ≈44G)、`37_model_images.sh`(3 镜像 ≈33G)把离线 tar 推入
 > 集群内置 registry。本文记录瓶颈、已落地的优化、配置旋钮与 benchmark 方法。
 > 相关: `docs/harbor-mirror.md`(镜像保鲜管道)、`docs/ceph-rook.md`(registry 后端)。
 
