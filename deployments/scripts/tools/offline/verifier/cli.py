@@ -85,7 +85,7 @@ def main():
         return 2
 
     # 便利入口: --root 指向本地桶根时下钻到 <ver>/offline-files
-    if args.release and os.path.isdir(os.path.join(root, "offline-files")):
+    if args.release:
         candidate = os.path.join(root, args.release, "offline-files")
         if os.path.isdir(candidate):
             root = candidate
