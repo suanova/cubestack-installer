@@ -44,6 +44,33 @@ verify_release_env_precheck() {   # <offline-files-root>
     return 0
 }
 
+# 解析本次部署的有效离线校验级别(纯函数, 便于单测).
+# 规则(2026-10-30):
+#   ① --no-verify-offline → off
+#   ② --verify-offline=<auto|quick|full|off> → 该值(显式优先)
+#   ③ 部分部署(--steps 非空)且配置为 auto → quick(不做整树 full+deep)
+#   ④ 其余 → 配置值(全量部署 auto 仍走 full/校验戳)
+# 输出: 第一行=有效级别; 若因 --steps 降级, 追加第二行 "downgraded".
+offline_verify_effective_mode() {  # <mode> <steps_arg> <no_verify> <verify_arg>
+    local mode="${1:-auto}" steps_arg="${2:-}" no_verify="${3:-0}" verify_arg="${4:-}"
+    if [ "${no_verify}" = "1" ]; then
+        printf 'off\n'
+        return 0
+    fi
+    if [ -n "${verify_arg}" ]; then
+        case "${verify_arg}" in
+            auto|quick|full|off) printf '%s\n' "${verify_arg}"; return 0 ;;
+            *) printf 'invalid\n'; return 1 ;;
+        esac
+    fi
+    if [ -n "${steps_arg}" ] && [ "${mode}" = "auto" ]; then
+        printf 'quick\ndowngraded\n'
+        return 0
+    fi
+    printf '%s\n' "${mode}"
+    return 0
+}
+
 # 安装前完整性门禁: 调用独立校验器(唯一实现)。失败返回 1; 未 seal 的开发树按
 # OFFLINE_VERIFY_STRICT_DEV 决定"检出损坏是否阻断"(默认 true)。
 verify_offline_gate() {

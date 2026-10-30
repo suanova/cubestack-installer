@@ -95,6 +95,34 @@ rm -f "${TMP}/miss/a.bin"
 chk "gate 缺失文件失败" "1" "$(gate "${TMP}/miss" full)"
 chk_contains "gate 提示文件不存在" "文件不存在或已被删除" "$(cat "${TMP}/out")"
 
+echo "== ⑥ 部分部署(--steps)默认 quick(模式解析) =="
+mode() { bash -c 'source "$1"; offline_verify_effective_mode "$2" "$3" "$4" "$5"' _ "${LIB}" "$@"; }
+chk "全量 auto 保持 auto" "auto" "$(mode auto "" 0 "")"
+_out="$(mode auto "--steps cubestack_operator" 0 "")"
+chk "--steps + auto → quick" "quick" "$(printf '%s\n' "${_out}" | sed -n '1p')"
+chk "--steps + auto 标记 downgraded" "downgraded" "$(printf '%s\n' "${_out}" | sed -n '2p')"
+chk "--steps + full 保持 full" "full" "$(mode full "--steps cubestack_operator" 0 "")"
+chk "--verify-offline full 显式优先" "full" "$(mode auto "--steps cubestack_operator" 0 full)"
+chk "--verify-offline quick 显式优先" "quick" "$(mode auto "" 0 quick)"
+chk "--no-verify-offline → off" "off" "$(mode auto "--steps x" 1 "")"
+bash -c 'source "$1"; offline_verify_effective_mode auto "--steps x" 0 bogus' _ "${LIB}" >/dev/null 2>&1
+chk "非法 --verify-offline 返回 1" "1" "$?"
+
+echo "== ⑦ Kubespray 封装继承 OFFLINE_VERIFY_MODE =="
+# 2026-10-30: cubestack-offline.sh 的 cmd_check 曾硬编码 --level auto, 顶层
+#   --verify-offline=quick 时仍会整树 full+deep 重复校验; 现继承 OFFLINE_VERIFY_MODE。
+OFFLINE_SH="${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
+chk_contains "lib-common export 含 OFFLINE_VERIFY_MODE" 'OFFLINE_VERIFY_MODE OFFLINE_VERIFY_JOBS' "$(cat "${LIB}")"
+chk_contains "cubestack-offline 继承 OFFLINE_VERIFY_MODE" '_vlevel="${OFFLINE_VERIFY_MODE:-auto}"' "$(cat "${OFFLINE_SH}")"
+chk "cubestack-offline 不再硬编码 --level auto" "0" "$(grep -c -- '--level auto' "${OFFLINE_SH}" || true)"
+chk_contains "cubestack-offline off 分支" 'OFFLINE_VERIFY_MODE=off' "$(cat "${OFFLINE_SH}")"
+
+echo "== ⑧ 默认安装门禁 quick =="
+# 2026-10-30 用户口径: 安装过程默认 quick(全量/--steps 一致); auto/full 改为显式 opt-in。
+DEF="${REPO_ROOT}/deployments/config/cluster.defaults.conf"
+chk_contains "cluster.defaults 默认 quick" 'OFFLINE_VERIFY_MODE="${OFFLINE_VERIFY_MODE:-quick}"' "$(cat "${DEF}")"
+chk_contains "deploy-cluster 帮助默认 quick" '默认 quick' "$(cat "${REPO_ROOT}/deployments/scripts/deploy-cluster.sh")"
+
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then
     echo "✅ 部署门禁回归通过"

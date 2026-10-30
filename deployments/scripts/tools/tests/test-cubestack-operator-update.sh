@@ -358,6 +358,44 @@ chk_contains "defaults NODE_POOL_MASTER_CORDON=true" 'NODE_POOL_MASTER_CORDON="$
 chk_contains "defaults NODE_POOL_PLATFORM_PLACEMENT=false" 'NODE_POOL_PLATFORM_PLACEMENT="${NODE_POOL_PLATFORM_PLACEMENT:-false}"' "${DEFAULTS}"
 chk_contains "defaults NODE_POOL_CUBESTACK_PLACEMENT=true" 'NODE_POOL_CUBESTACK_PLACEMENT="${NODE_POOL_CUBESTACK_PLACEMENT:-true}"' "${DEFAULTS}"
 
+echo "== ⑮ uninstall: 清 operator ns 内残留 CR finalizer =="
+# 2026-10-30 覆盖安装实测: helm uninstall 后 cubestack-system 里仍有
+#   AgentInstance(admin-cubepilot) 带 finalizer, 控制器已退出 → delete ns 永久 Terminating。
+# 补丁在强删 ns 前清除 ai.cubestack.io / operator.cubestack.io CR 的 finalizer。
+sed -n '/^clear_operator_ns_cr_finalizers() {/,/^}/p' "${MOD}" > "${TMP}/fn-finalizers.sh"
+chk "helper 已定义" "1" "$([ -s "${TMP}/fn-finalizers.sh" ] && echo 1 || echo 0)"
+chk_contains "调用点提示" '清除 ${_ns} 内残留 Cubestack CR 的 finalizer' "${MOD}"
+_ln_helm="$(grep -n 'helm uninstall "${_rel}"' "${MOD}" | cut -d: -f1 | head -1)"
+_ln_clear="$(grep -n 'clear_operator_ns_cr_finalizers "${_ns}"' "${MOD}" | cut -d: -f1 | head -1)"
+_ln_sec3="$(grep -n '^    # ③ 命名空间 / CRD 残留清理' "${MOD}" | cut -d: -f1 | head -1)"
+chk "顺序: helm uninstall < 清 finalizer < 强删 ns" "1" \
+    "$([ -n "${_ln_helm}" ] && [ -n "${_ln_clear}" ] && [ -n "${_ln_sec3}" ] \
+       && [ "${_ln_helm}" -lt "${_ln_clear}" ] && [ "${_ln_clear}" -lt "${_ln_sec3}" ] && echo 1 || echo 0)"
+_patch_log="${TMP}/finalizer-patches.log"; : > "${_patch_log}"
+SSH() {   # stub: <cmd...>
+    local cmd="$*"
+    case "${cmd}" in
+        *api-resources*)
+            printf 'agentinstances.ai.cubestack.io\ndevenvironments.ai.cubestack.io\npods\n' ;;
+        *"get agentinstances.ai.cubestack.io -o name"*)
+            printf 'agentinstance.ai.cubestack.io/admin-cubepilot\n' ;;
+        *"get agentinstance.ai.cubestack.io/admin-cubepilot -o jsonpath"*)
+            printf '["ai.cubestack.io/agentinstance"]' ;;
+        *"get devenvironments.ai.cubestack.io -o name"*)
+            : ;;
+        *"patch agentinstance.ai.cubestack.io/admin-cubepilot"*)
+            printf '%s\n' "${cmd}" >> "${_patch_log}" ;;
+        *) : ;;
+    esac
+}
+say() { :; }
+K="kubectl"
+# shellcheck disable=SC1090
+source "${TMP}/fn-finalizers.sh"
+clear_operator_ns_cr_finalizers cubestack-system
+chk "清除 AgentInstance finalizer" "1" "$(count_of x 'agentinstance.ai.cubestack.io/admin-cubepilot' "${_patch_log}")"
+chk "未触碰 pods finalizer" "0" "$(count_of x 'pods' "${_patch_log}")"
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-cubestack-operator-update: 全部通过"

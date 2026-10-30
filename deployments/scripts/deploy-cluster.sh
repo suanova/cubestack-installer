@@ -148,8 +148,9 @@ $(_component_meta_list stub)
                         版本变量以目录内 release.env 为准; 取件见 fetch-offline-from-minio.sh --release
                         例: --release 2.0.0; 等价于 cluster.conf 的 CUBESTACK_RELEASE="2.0.0"
   --verify-offline[=auto|quick|full|off]
-                        离线文件完整性校验强度(默认 auto: release/flat/sealed 首次 full,
-                        之后走校验戳; 未 seal 的开发树 quick)。失败会在任何模块执行前停止。
+                        离线文件完整性校验强度(默认 quick: 结构/覆盖率, 不做整树深度;
+                        auto = 全量部署首次 full+校验戳; full = 强制深度)。
+                        失败会在任何模块执行前停止。
   --no-verify-offline   跳过离线文件完整性校验(逃生口; 会打印醒目提示)
   --fresh, --refresh    默认流程 + **先清断点状态**(REPEAT:0 的模块强制重跑; 见"三种使用方式"②)
   --list                仅打印集群规划(只读)
@@ -285,14 +286,14 @@ if [ -n "${STEPS_ARG}" ]; then
     [ "${_all_verify}" = "1" ] && _verify_skip=1
 fi
 if [ "${_verify_skip}" = "0" ]; then
-    if [ "${NO_VERIFY_OFFLINE}" = "1" ]; then
-        OFFLINE_VERIFY_MODE="off"
-    elif [ -n "${VERIFY_OFFLINE_ARG}" ]; then
-        case "${VERIFY_OFFLINE_ARG}" in
-            auto|quick|full|off) OFFLINE_VERIFY_MODE="${VERIFY_OFFLINE_ARG}" ;;
-            *) err "--verify-offline 取值非法: ${VERIFY_OFFLINE_ARG}(可用 auto|quick|full|off)"; exit 1 ;;
-        esac
-    fi
+    _eff_mode="$(offline_verify_effective_mode "${OFFLINE_VERIFY_MODE:-auto}" "${STEPS_ARG}" "${NO_VERIFY_OFFLINE}" "${VERIFY_OFFLINE_ARG}")" || {
+        err "--verify-offline 取值非法: ${VERIFY_OFFLINE_ARG}(可用 auto|quick|full|off)"; exit 1; }
+    OFFLINE_VERIFY_MODE="${_eff_mode%%$'\n'*}"
+    case "${_eff_mode}" in
+        *$'\n'downgraded)
+            warn "部分部署(--steps): 离线完整性门禁使用 quick(结构/覆盖率); 需要全树深度校验请加 --verify-offline full" ;;
+    esac
+    unset _eff_mode
     if ! verify_offline_gate; then
         err "离线文件完整性校验未通过, 已停止部署(逃生口: --no-verify-offline)"
         exit 1

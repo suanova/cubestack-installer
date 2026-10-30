@@ -2532,16 +2532,20 @@ cmd_check() {
     log "✅ 离线资源完整"
 
     # 离线文件完整性门禁(2026-10-28): 有清单走 auto(校验戳/全量); 无清单只做 quick。
+    # 2026-10-30: 继承顶层 --verify-offline 口径(OFFLINE_VERIFY_MODE 由 lib-common export),
+    #   不再硬编码 auto —— 否则顶层 --verify-offline=quick 仍会在这里重复整树 full+deep。
     local _vt_lib="${SCRIPT_DIR}/../scripts/tools/offline/lib-offline-verify.sh"
-    local _vt=""
+    local _vt="" _vlevel="${OFFLINE_VERIFY_MODE:-auto}"
     if [ -f "${_vt_lib}" ]; then
         # shellcheck disable=SC1090
         source "${_vt_lib}"
         _vt="$(ensure_offline_verify_tool)" || _vt=""
     fi
     if [ -n "${_vt}" ]; then
-        if [ -f "${OFFLINE_FILES_ROOT}/SHA256SUMS" ]; then
-            bash "${_vt}" --root "${OFFLINE_FILES_ROOT}" --level auto \
+        if [ "${_vlevel}" = "off" ]; then
+            warn "已跳过离线文件完整性校验(OFFLINE_VERIFY_MODE=off)"
+        elif [ -f "${OFFLINE_FILES_ROOT}/SHA256SUMS" ]; then
+            bash "${_vt}" --root "${OFFLINE_FILES_ROOT}" --level "${_vlevel}" \
                 --jobs "${OFFLINE_VERIFY_JOBS:-4}" --fail-missing \
                 || { err "离线文件完整性校验失败(见上方点名)"; return 1; }
         else
