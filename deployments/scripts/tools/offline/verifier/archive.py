@@ -178,7 +178,8 @@ def check_compressed(ctx, path, rel):
                     return False
             chart_rel = next((n for n in names if os.path.basename(n) == "Chart.yaml"), None)
             base = os.path.basename(rel).lower()
-            chart_like = ("/charts/" in f"/{rel}" or "/helm/" in f"/{rel}" or "operator" in base)
+            is_docker = manifest is not None or "manifest.json" in members
+            chart_like = not is_docker and ("/charts/" in f"/{rel}" or "/helm/" in f"/{rel}" or "operator" in base)
             if chart_like and not chart_rel:
                 fail(ctx, rel, "chart_invalid", "chart 缺少 Chart.yaml")
                 return False
