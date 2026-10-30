@@ -116,6 +116,9 @@ def check_metadata(ctx, root, layout, args):
     if not has_sums:
         if layout == "unsealed-dev" and args.allow_unsealed:
             warn(ctx, "无 SHA256SUMS, 仅做结构检查")
+            for rel in ctx.files:
+                if os.stat(os.path.join(root, rel)).st_size == 0:
+                    fail(ctx, rel, "zero_byte", "0 字节文件")
             ctx.checks["coverage"] = "skipped"
             ctx.checks["metadata"] = "fail" if ctx.failures else "ok"
             return {}
