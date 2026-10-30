@@ -8,7 +8,7 @@ def entry() -> "NoReturn":
     try:
         code = main()
     except BrokenPipeError:
-        code = 0
+        code = 1
     except Exception as exc:  # noqa: BLE001
         print(f"❌ 校验器内部错误: {exc}", file=sys.stderr)
         code = 2
