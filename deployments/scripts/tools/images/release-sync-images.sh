@@ -953,6 +953,31 @@ PY
 )
     done
 fi
+# chart 目录同样只允许当前版本: 增量同步按文件名上传, 旧版本必须一并清理(含 .digest).
+if [ "${CHART_IN_SCOPE}" = "1" ] && [ "${KEEP_STALE}" != "1" ]; then
+    mcrun ls --json "${REMOTE_OFF}/cubestack-operator/charts" 2>/dev/null > "${WORK}/ls-charts.json" \
+        || warn "列出 charts 目录失败, 旧 chart 版本未清理: ${REMOTE_OFF}/cubestack-operator/charts"
+    while IFS= read -r name; do
+        [ -n "${name}" ] || continue
+        case "${name}" in
+            "${CHART_NAME}"|"${CHART_NAME}.digest") continue ;;
+            cubestack-operator-chart-*.tgz|cubestack-operator-chart-*.tgz.digest) ;;
+            *) continue ;;
+        esac
+        STALE_RELS+=("cubestack-operator/charts/${name}")
+    done < <(python3 - "${WORK}/ls-charts.json" <<'PY'
+import json, sys
+for line in open(sys.argv[1], encoding="utf-8", errors="ignore"):
+    line = line.strip()
+    if not line: continue
+    try: d = json.loads(line)
+    except Exception: continue
+    if isinstance(d, dict) and d.get("type") == "file":
+        k = str(d.get("key") or "")
+        if k: print(k.rsplit("/", 1)[-1])
+PY
+)
+fi
 if [ "${RECOVER_MODE}" = "1" ] && [ -n "${MARKER_STALE}" ]; then
     for rel in ${MARKER_STALE}; do STALE_RELS+=("${rel}"); done
 fi

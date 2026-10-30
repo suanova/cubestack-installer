@@ -633,6 +633,37 @@ resolve_operator_chart_tgz() {   # <dir> <chart-name> [desired-version] [release
     printf '%s\t%s\n' "${_hit}" "${_ver}"
 }
 
+# release 树的 charts/ 只允许当前版本 operator chart: 增量刷新/--resume staging 会
+# 留下旧版本 tgz, 不清掉会被一并上传并写进 SHA256SUMS. extras 每行输出一个多余文件名.
+operator_chart_dir_extras() {   # <charts-dir> <chart-name> <keep-tgz-basename>
+    local _dir="$1" _name="$2" _keep="$3" _f _b _ng=0
+    [ -d "${_dir}" ] || return 0
+    shopt -q nullglob && _ng=1
+    shopt -s nullglob
+    local -a _files=("${_dir}/${_name}-"*.tgz "${_dir}/${_name}-"*.tgz.digest)
+    [ "${_ng}" = "1" ] || shopt -u nullglob
+    for _f in "${_files[@]}"; do
+        _b="${_f##*/}"
+        case "${_b}" in "${_keep}"|"${_keep}.digest") continue ;; esac
+        printf '%s\n' "${_b}"
+    done
+}
+
+prune_operator_chart_dir() {   # <charts-dir> <chart-name> <keep-tgz-basename>; 输出删除个数
+    local _dir="$1" _b _n=0
+    # 只清理 staging 内真实目录, 避免符号链接把删除带到别处.
+    if [ -L "${_dir}" ]; then
+        printf '拒绝清理符号链接 charts 目录: %s\n' "${_dir}" >&2
+        return 1
+    fi
+    while IFS= read -r _b; do
+        [ -n "${_b}" ] || continue
+        rm -f "${_dir}/${_b}" || { printf '删除旧 chart 失败: %s\n' "${_dir}/${_b}" >&2; return 1; }
+        _n=$((_n + 1))
+    done < <(operator_chart_dir_extras "$@")
+    printf '%s' "${_n}"
+}
+
 # ---------------- 共享 nginx 校验镜像助手(verify 模块测试后端共用) ----------------
 # verify_metallb / verify_ceph 等的测试后端
 # 统一用 **nginx**(测试 HTTP 后端, 静态页/JSON mock 皆可), 曾用 busybox httpd(依赖节点

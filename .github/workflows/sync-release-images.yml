@@ -70,7 +70,7 @@ on:
         type: boolean
         default: false
       keep_stale:
-        description: '不删除选中子目录里旧 tag 的 tar'
+        description: '不清理旧 tag 的 tar 与旧版本 chart'
         type: boolean
         default: false
 
