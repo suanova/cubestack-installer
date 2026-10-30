@@ -46,7 +46,7 @@ def main():
     ap.add_argument("--deep-log", default="",
                     help="深度校验逐 layer 明细日志(默认: TMPDIR/cubestack-verify-deep-*.log)")
     ap.add_argument("--seal", action="store_true", help="生成/更新 SHA256SUMS + SIZES")
-    ap.add_argument("--force", action="store_true", help="seal 覆盖正式树 / 忽略校验戳")
+    ap.add_argument("--force", action="store_true", help="seal 覆盖正式树")
     ap.add_argument("--update-success", action="store_true",
                     help="seal 后同步重写 _SUCCESS(本地修复)")
     ap.add_argument("--json", action="store_true", help="stdout 输出 JSON")

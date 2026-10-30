@@ -58,6 +58,13 @@ echo "== ⓪ --version =="
 chk "退出码" "0" "$(run "${TOOL}" --version)"
 chk_contains "版本号" "1.0.0" "$(cat "${TMP}/out")"
 
+echo "== ⓪b --help 文案 =="
+"${TOOL}" --help > "${TMP}/help.txt" 2>&1
+chk_contains "--force 仅描述 seal 覆盖" "seal 覆盖正式树" "$(cat "${TMP}/help.txt")"
+chk "--force 帮助不再声称忽略校验戳" "0" \
+    "$(command grep -E '^  --force ' "${TMP}/help.txt" | command grep -c '校验戳' || true)"
+chk_contains "--force-full 是戳旁路" "忽略有效校验戳强制 full" "$(cat "${TMP}/help.txt")"
+
 echo "== ① 布局识别: release =="
 mk_release_tree "${TMP}/bucket" "2.0.0"
 chk "release metadata 通过" "0" \
