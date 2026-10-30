@@ -651,6 +651,11 @@ operator_chart_dir_extras() {   # <charts-dir> <chart-name> <keep-tgz-basename>
 
 prune_operator_chart_dir() {   # <charts-dir> <chart-name> <keep-tgz-basename>; 输出删除个数
     local _dir="$1" _b _n=0
+    # 只清理 staging 内真实目录, 避免符号链接把删除带到别处.
+    if [ -L "${_dir}" ]; then
+        printf '拒绝清理符号链接 charts 目录: %s\n' "${_dir}" >&2
+        return 1
+    fi
     while IFS= read -r _b; do
         [ -n "${_b}" ] || continue
         rm -f "${_dir}/${_b}" || { printf '删除旧 chart 失败: %s\n' "${_dir}/${_b}" >&2; return 1; }
