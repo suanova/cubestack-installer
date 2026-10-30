@@ -388,7 +388,7 @@ if [ "${LIST_ONLY}" = "0" ] && [ "${LIST_RELEASES}" = "0" ]; then
             # (用户同时给 --repair 的修复也一并推迟到远端就绪后)。
             _resume_repair_arg="${REPAIR}"
             REPAIR=0
-            if _verify_release; then
+            if OFFLINE_VERIFY_ONLINE_INSTALL=never _verify_release; then
                 ok "本地树已完整, 无需重新下载"
                 exit 0
             fi
