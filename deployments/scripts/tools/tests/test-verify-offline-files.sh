@@ -127,6 +127,17 @@ chk "绑定错误失败" "1" \
     "$(run "${TOOL}" --root "${TMP}/rel2/2.0.0/offline-files" --release 2.0.0 --layout release --level metadata)"
 chk_contains "点名绑定" "sha256sums" "$(cat "${TMP}/out")"
 
+# 声明了 files= 但值为空: 不能当成"未提供"而跳过计数校验(空值应走 int() 报错)
+mkdir -p "${TMP}/emptycount"
+printf 'x' > "${TMP}/emptycount/a.txt"
+mk_manifests "${TMP}/emptycount"
+printf 'sha256sums=%s\nsizes=%s\nfiles=\n' \
+    "$(sha256sum "${TMP}/emptycount/SHA256SUMS" | awk '{print $1}')" \
+    "$(sha256sum "${TMP}/emptycount/SIZES" | awk '{print $1}')" \
+    > "${TMP}/emptycount/_SUCCESS"
+chk "空 files= 拒绝" "1" "$(run "${TOOL}" --root "${TMP}/emptycount" --level metadata)"
+chk_contains "点名 files= 非整数" "files= 不是整数" "$(cat "${TMP}/out")"
+
 echo "== ⑦ 结构: 截断 tar / 空壳 docker-archive =="
 mkdir -p "${TMP}/st" "${TMP}/st_src" "${TMP}/st_shellsrc"
 printf 'layerdata' > "${TMP}/st_src/layer.tar"
@@ -192,6 +203,16 @@ chk "full 通过" "0" "$(run "${TOOL}" --root "${TMP}/full" --level full)"
 printf 'bbbb' > "${TMP}/full/a.bin"
 chk "full 坏字节失败" "1" "$(run "${TOOL}" --root "${TMP}/full" --level full)"
 chk_contains "点名 a.bin" "a.bin" "$(cat "${TMP}/out")"
+
+# --require-cli-tar 且 release.json 无 cli_tar_sha256: 不能只看 tar 可解析就放行
+mkdir -p "${TMP}/clinosha/root"
+printf 'not-a-tar' > "${TMP}/clinosha/cubestack-installer-cli-v9.9.9.tar"
+printf 'x' > "${TMP}/clinosha/root/a.txt"
+printf '{}' > "${TMP}/clinosha/root/release.json"
+mk_manifests "${TMP}/clinosha/root"
+chk "缺 cli_tar_sha256 时 require-cli-tar 失败" "1" \
+    "$(run "${TOOL}" --root "${TMP}/clinosha/root" --release 9.9.9 --level full --require-cli-tar)"
+chk_contains "点名缺 cli_tar_sha256" "缺少 cli_tar_sha256" "$(cat "${TMP}/out")"
 
 mk_release_tree "${TMP}/rel3" "3.0.0"
 chk "CLI tar 正确通过" "0" \

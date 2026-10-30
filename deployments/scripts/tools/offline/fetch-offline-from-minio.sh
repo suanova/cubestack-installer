@@ -228,6 +228,12 @@ fi
 [ "${RESUME}" = "1" ] && [ "${VERIFY_ONLY}" = "1" ] && { err "--resume 不能与 --verify-only 同用(verify-only 只校验)"; exit 1; }
 [ "${RESUME}" = "1" ] && [ "${NO_VERIFY}" = "1" ] && { err "--resume 不能与 --no-verify 同用(续传后必须校验)"; exit 1; }
 case "${CLEAN_COUNTDOWN}" in ''|*[!0-9]*) err "--clean-countdown 必须是非负整数: ${CLEAN_COUNTDOWN}"; exit 1 ;; esac
+# 有效数字(去前导零)超过 18 位时, 10# 归一后仍会超出 bash 64 位有符号范围而回绕:
+# ≥2^63 变负数 → 倒计时被当成 0 直接执行; ≥2^64 变余数 → 倒计时长度错误。
+# 随后的清理是 mc mirror --remove(删除不可逆), 必须在这里拒绝而不是依赖溢出后的值。
+_cd_digits="${CLEAN_COUNTDOWN#"${CLEAN_COUNTDOWN%%[!0]*}"}"
+[ "${#_cd_digits}" -le 18 ] || { err "--clean-countdown 超出范围(最多 18 位有效数字): ${CLEAN_COUNTDOWN}"; exit 1; }
+unset _cd_digits
 case "${FETCH_RETRY}" in ''|*[!0-9]*|0) err "--retry 必须是正整数: ${FETCH_RETRY}"; exit 1 ;; esac
 # 超出 bash 支持的整数范围时, `[ ]` 数值比较返回 2(integer expression expected);
 # _mc_retry 的 while 条件会因此恒假 → 一次传输都不执行却返回成功(配合 --no-verify

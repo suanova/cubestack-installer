@@ -79,7 +79,9 @@ def check_metadata(ctx, root, layout, args):
                 fail(ctx, "_SUCCESS", "success_binding",
                      "sizes 与实际 SIZES 不符", want_sizes, actual)
         for key, path in (("files", None), ("bytes", None)):
-            if success.get(key):
+            # 用 key in success 而不是 success.get(key): 声明了 files=/bytes= 但值为空
+            # 也必须走 int("") 报错, 不能当成"未提供"静默跳过计数校验。
+            if key in success:
                 try:
                     want_n = int(success[key])
                 except ValueError:

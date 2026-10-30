@@ -265,6 +265,19 @@ rc=$?
 chk "clean-countdown 前导零(08)不中止" "0" "${rc}"
 chk_contains "前导零倒计时完整结束" "COUNTDOWN_OK" "${out}"
 
+# --clean-countdown 有效数字超过 18 位必须拒绝: bash 64 位算术会回绕(≥2^63 变负 →
+# 倒计时被当成 0 立即执行, 随后是不可逆的 mc mirror --remove); 前导零不计入位数。
+for _v in 9223372036854775808 18446744073709551616 1000000000000000000; do
+    out="$(bash "${FETCH}" --clean-countdown "${_v}" --list 2>&1)"; rc=$?
+    chk "clean-countdown 19 位拒绝(${_v})" "1" "${rc}"
+done
+chk_contains "提示超出范围" "超出范围" \
+    "$(bash "${FETCH}" --clean-countdown 9223372036854775808 --list 2>&1)"
+bash "${FETCH}" --clean-countdown 999999999999999999 --list >/dev/null 2>&1
+chk "clean-countdown 18 位接受" "0" "$?"
+bash "${FETCH}" --clean-countdown 0000000000000000000008 --list >/dev/null 2>&1
+chk "clean-countdown 前导零不计位数" "0" "$?"
+
 # 非交互且无 --yes: 精确清理必须中止
 out="$(bash "${FETCH}" --release 2.0.0 --dest "${TMP}/local-abort" </dev/null 2>&1)"
 rc=$?
@@ -412,10 +425,13 @@ mkdir -p "${TMP}/remote/cubestack-installer/1.9.8/offline-files/ceph"
 printf 'legacy2\n' > "${TMP}/remote/cubestack-installer/1.9.8/offline-files/ceph/test.txt"
 printf 'RELEASE_VERSION=1.9.8\n' > "${TMP}/remote/cubestack-installer/1.9.8/offline-files/release.env"
 : > "${TMP}/remote/cubestack-installer/1.9.8/offline-files/_SUCCESS"
-printf '{}\n' > "${TMP}/remote/cubestack-installer/1.9.8/offline-files/release.json"
+# 旧布局只缺 cli_tar 名字, 但 sha 仍应在(require-cli-tar 下没有 sha 拒绝放行)
+printf 'legacy2-cli\n' > "${TMP}/remote/cubestack-installer/1.9.8/cubestack-installer-cli.tar"
+legacy2_sha="$(sha256sum "${TMP}/remote/cubestack-installer/1.9.8/cubestack-installer-cli.tar" | awk '{print $1}')"
+printf '{"cli_tar_sha256":"%s"}\n' "${legacy2_sha}" \
+    > "${TMP}/remote/cubestack-installer/1.9.8/offline-files/release.json"
 ( cd "${TMP}/remote/cubestack-installer/1.9.8/offline-files" \
     && sha256sum ./ceph/test.txt ./release.env ./release.json > SHA256SUMS )
-printf 'legacy2-cli\n' > "${TMP}/remote/cubestack-installer/1.9.8/cubestack-installer-cli.tar"
 bash "${FETCH}" --release 1.9.8 --dest "${TMP}/local-legacy2" --yes >/dev/null 2>&1
 chk "旧布局无 cli_tar 元数据 fetch 退出码" "0" "$?"
 chk "旧布局无 cli_tar 元数据 CLI tar 落盘" "legacy2-cli" \

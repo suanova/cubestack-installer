@@ -95,6 +95,12 @@ def check_full(ctx, root, sums, args):
             if got != want_sha:
                 fail(ctx, os.path.basename(cli), "cli_tar", "CLI tar sha256 不符", want_sha, got)
                 ctx.checks["cli_tar"] = "fail"
+        elif args.require_cli_tar:
+            # 有 --require-cli-tar 时不能只凭 "tar 可解析" 放行: release.json 没给 sha
+            # 就无法证明 tar 与发布一致(fail-closed)。
+            fail(ctx, os.path.basename(cli), "cli_tar",
+                 "release.json 缺少 cli_tar_sha256, 无法校验 CLI tar")
+            ctx.checks["cli_tar"] = "fail"
     elif args.require_cli_tar:
         fail(ctx, "cubestack-installer-cli.tar", "cli_tar_missing", "缺少 CLI tar")
         ctx.checks["cli_tar"] = "fail"
