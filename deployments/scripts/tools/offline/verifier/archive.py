@@ -195,9 +195,10 @@ def check_compressed(ctx, path, rel):
                     warn(ctx, f"{rel}: 非 release.env 指定的 chart 版本 {want}(陈旧文件, 可删除)")
                 elif want:
                     chart = read_chart_yaml(path)
-                    if chart.get("version") and chart["version"] != want:
+                    found = chart.get("version", "")
+                    if found != want:
                         fail(ctx, rel, "chart_invalid",
-                             f"Chart.yaml version={chart['version']} != {want}")
+                             f"Chart.yaml version={found or '<missing>'} != {want}")
                         return False
         except Exception as exc:
             fail(ctx, rel, "gzip_invalid", f"gzip/tar 解析失败: {exc}")

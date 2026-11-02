@@ -302,6 +302,12 @@ printf 'apiVersion: v2\nname: test\nversion: 1.0.0\n' > "${TMP}/chartsrc/Chart.y
 tar -C "${TMP}/chartsrc" -czf "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-9.9.9.tgz" .
 mk_manifests "${TMP}/chart"
 chk "chart 版本不符失败" "1" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
+# Chart.yaml 缺 version: helm install 会报 chart.metadata.version is required, 必须失败
+printf 'apiVersion: v2\nname: test\n' > "${TMP}/chartsrc/Chart.yaml"
+tar -C "${TMP}/chartsrc" -czf "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-9.9.9.tgz" .
+mk_manifests "${TMP}/chart"
+chk "chart 缺 version 失败" "1" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
+chk_contains "点名 version 缺失" "version=<missing>" "$(cat "${TMP}/out")"
 rm -f "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-9.9.9.tgz"
 mk_manifests "${TMP}/chart"
 chk "指定 chart 缺失失败" "1" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
