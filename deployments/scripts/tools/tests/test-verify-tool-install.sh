@@ -104,6 +104,17 @@ env -u CUBESTACK_VERIFY_TOOL OFFLINE_FILES_ROOT="${TMP}/tree" \
     bash -c 'source "$1"; ensure_offline_verify_tool' _ "${LIB}" >/dev/null 2>&1 || rc=$?
 chk "引导校验失败拒绝" "1" "${rc}"
 
+echo "== ⑤b 发布树缺 pyz 拒绝 =="
+# wrapper 缺少同目录 pyz 时会回退到 `python3 -m verifier`(发布树无 verifier/ 包), 必须拒绝
+rm -f "${TMP}/tree/tools/verify-offline-files.pyz"
+printf '%s  ./tools/verify-offline-files.sh\n' "$(sha256sum "${TOOL}" | awk '{print $1}')" \
+    > "${TMP}/tree/SHA256SUMS"
+rc=0
+env -u CUBESTACK_VERIFY_TOOL OFFLINE_FILES_ROOT="${TMP}/tree" \
+    OFFLINE_VERIFY_ONLINE_INSTALL=never \
+    bash -c 'source "$1"; ensure_offline_verify_tool' _ "${LIB}" >/dev/null 2>&1 || rc=$?
+chk "缺 pyz 拒绝" "1" "${rc}"
+
 echo "== ⑥ OFFLINE_VERIFY_ONLINE_INSTALL=never =="
 rc=0
 env -u OFFLINE_FILES_ROOT -u CUBESTACK_VERIFY_TOOL \

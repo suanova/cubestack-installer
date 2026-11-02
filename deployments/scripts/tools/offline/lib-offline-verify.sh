@@ -23,7 +23,8 @@ _OV_CACHE_DIR="${XDG_CACHE_HOME:-${HOME:-/root}/.cache}/cubestack/verify"
 _ov_log() { echo "$*" >&2; }
 _ov_sha() { sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
 
-# 发布树副本引导校验: 在树的 SHA256SUMS 中校验 wrapper(以及存在时的 pyz)
+# 发布树副本引导校验: wrapper 与 pyz 必须同时存在且都在 SHA256SUMS 中登记。
+# (wrapper 缺少同目录 pyz 时会回退到 `python3 -m verifier`, 而发布树不带 verifier/ 包, 必然失败)
 _ov_bootstrap_one() {   # <tree-root> <relative-path>
     local root="$1" rel="$2" want got
     want="$(awk -v p="./${rel}" '$2==p {print $1}' "${root}/SHA256SUMS" 2>/dev/null | head -1)"
@@ -35,10 +36,9 @@ _ov_bootstrap_one() {   # <tree-root> <relative-path>
 _ov_bootstrap_ok() {   # <tree-root>
     local root="$1"
     [ -f "${root}/SHA256SUMS" ] || return 1
+    [ -f "${root}/tools/${_OV_PYZ_NAME}" ] || return 1
     _ov_bootstrap_one "${root}" "tools/${_OV_TOOL_NAME}" || return 1
-    if [ -f "${root}/tools/${_OV_PYZ_NAME}" ]; then
-        _ov_bootstrap_one "${root}" "tools/${_OV_PYZ_NAME}" || return 1
-    fi
+    _ov_bootstrap_one "${root}" "tools/${_OV_PYZ_NAME}" || return 1
     return 0
 }
 
