@@ -298,13 +298,21 @@ def check_operator_chart_presence(ctx, root):
              f"release.env 要求 CUBESTACK_OPERATOR_CHART_VERSION={want}, 但树内缺少该 chart")
         ctx.checks["structure"] = "fail"
 
-def check_structure(ctx, root, sums):
+def check_structure(ctx, root, sums, skip_missing=True):
     ctx.checks["structure"] = "ok"
     check_operator_chart_presence(ctx, root)
     for rel in ctx.files:
         path = os.path.join(root, rel)
         low = rel.lower()
         if not os.path.isfile(path):
+            # check_metadata 已在收集阶段之后检查过清单缺失; 这里覆盖"收集后被删除"的竞态,
+            # 与 --skip-missing / --fail-missing 语义保持一致, 不再静默跳过。
+            if skip_missing:
+                warn(ctx, f"{rel}: 文件不存在或已被删除，已跳过")
+                ctx.missing_skipped.append(rel)
+            else:
+                fail(ctx, rel, "missing_file", "文件不存在或已被删除(已跳过结构检查)")
+                ctx.checks["structure"] = "fail"
             continue
         ok = True
         if low.endswith(".tar"):

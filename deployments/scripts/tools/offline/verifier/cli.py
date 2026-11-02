@@ -143,7 +143,7 @@ def main():
         warn(ctx, "SIZES 缺失: quick 无法检测截断, 建议 --level full")
 
     if level in ("quick", "full"):
-        check_structure(ctx, root, sums)
+        check_structure(ctx, root, sums, skip_missing=args.skip_missing)
     if level == "full":
         check_full(ctx, root, sums, args)
         if not ctx.failures and not args.no_stamp and sums and not ctx.missing_skipped:

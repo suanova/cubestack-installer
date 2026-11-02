@@ -26,7 +26,7 @@ def self_test():
         ctx.files = collect_files(ctx, d)
         sums = check_metadata(ctx, d, ctx.layout, argparse.Namespace(
             release="", allow_unsealed=False, staging=False, require_success=False))
-        check_structure(ctx, d, sums)
+        check_structure(ctx, d, sums, skip_missing=False)
         check_full(ctx, d, sums, argparse.Namespace(
             release="", cli_tar="", layout=ctx.layout, require_cli_tar=False, jobs=2))
         if ctx.failures:

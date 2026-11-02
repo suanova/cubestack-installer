@@ -120,6 +120,25 @@ class ArchiveTests(unittest.TestCase):
             self.assertFalse(archive.check_tar(ctx, img, "img.tar"))
             self.assertTrue(any(f["kind"] == "image_layer" for f in ctx.failures))
 
+    def test_structure_missing_file_modes(self):
+        # 文件在 collect_files 之后消失(竞态): 不能静默跳过
+        with tempfile.TemporaryDirectory() as d:
+            ctx = Ctx()
+            ctx.root = d
+            ctx.files = ["gone.txt"]
+            archive.check_structure(ctx, d, {}, skip_missing=True)
+            self.assertEqual(ctx.checks["structure"], "ok")
+            self.assertEqual(ctx.missing_skipped, ["gone.txt"])
+            self.assertTrue(any("gone.txt" in w for w in ctx.warnings))
+
+            ctx2 = Ctx()
+            ctx2.root = d
+            ctx2.files = ["gone.txt"]
+            archive.check_structure(ctx2, d, {}, skip_missing=False)
+            self.assertEqual(ctx2.checks["structure"], "fail")
+            self.assertTrue(any(f["path"] == "gone.txt" and f["kind"] == "missing_file"
+                                for f in ctx2.failures))
+
 
 class StampSealTests(unittest.TestCase):
     def test_stamp_roundtrip(self):
