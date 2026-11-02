@@ -27,7 +27,13 @@ def collect_files(ctx, root):
                 dirnames.remove(d)
         for name in filenames:
             full = os.path.join(dirpath, name)
-            rel = norm_rel(os.path.relpath(full, root))
+            raw_rel = os.path.relpath(full, root)
+            # norm_rel 会把 \ 归一成 /; 必须先按原始名拒绝, 避免 a\b.txt 与 a/b.txt
+            # 归一后碰撞, 让多余文件逃过 extra_file/哈希/结构检查。
+            if "\\" in raw_rel:
+                fail(ctx, raw_rel, "bad_name", "文件名含反斜杠, 无法纳入清单")
+                continue
+            rel = norm_rel(raw_rel)
             if "\n" in rel or "\r" in rel:
                 fail(ctx, rel.replace("\n", "\\n"), "bad_name", "文件名含换行, 无法纳入清单")
                 continue

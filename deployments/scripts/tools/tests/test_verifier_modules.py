@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(REPO, "deployments", "scripts", "tools", "offlin
 
 from verifier import archive, fsutil, manifest, seal, selftest, stamp  # noqa: E402
 from verifier.context import Ctx  # noqa: E402
-from verifier.layout import detect_layout  # noqa: E402
+from verifier.layout import collect_files, detect_layout  # noqa: E402
 from verifier.report import emit  # noqa: E402
 
 
@@ -75,6 +75,19 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(detect_layout(d, "2.0.0", "auto"), "flat")
             os.remove(os.path.join(d, "SHA256SUMS"))
             self.assertEqual(detect_layout(d, "", "auto"), "unsealed-dev")
+
+    def test_collect_files_rejects_backslash_names(self):
+        # norm_rel 会把 a\b.txt 归一成 a/b.txt, 与真实嵌套文件碰撞; 必须在收集时拒绝
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "a"))
+            with open(os.path.join(d, "a", "b.txt"), "w", encoding="utf-8") as f:
+                f.write("nested\n")
+            with open(os.path.join(d, "a\\b.txt"), "w", encoding="utf-8") as f:
+                f.write("flat\n")
+            ctx = Ctx()
+            files = collect_files(ctx, d)
+            self.assertEqual(files, ["a/b.txt"])
+            self.assertTrue(any(f["kind"] == "bad_name" for f in ctx.failures))
 
 
 class ArchiveTests(unittest.TestCase):
