@@ -1394,8 +1394,10 @@ bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh # ⑨ ser
 已有 Pod 仍 Running, 部署汇总看起来正常, 直到下一次 DNS 组件变更/节点重启才爆发(整集群 DNS 失效)。
 
 **根因:**
-1. `NODE_POOL_ENABLED` / `NODE_POOL_MASTER_CORDON` 默认都是 `true`, `53_node_pool` 在 addon
-   末尾把**所有** master cordon —— 无 worker 时这就是集群里仅有的可调度节点;
+1. (2026-10-27 口径, 已于 2026-11-02 调整) `NODE_POOL_ENABLED` / `NODE_POOL_MASTER_CORDON`
+   当时默认都是 `true`, `53_node_pool` 在 addon 末尾把**所有** master cordon —— 无 worker 时
+   这就是集群里仅有的可调度节点; 当前默认已改为 `NODE_POOL_MASTER_CORDON=false` +
+   `NODE_POOL_MASTER_SCHEDULABLE=true`(master 可调度);
 2. kubespray 模板的 CoreDNS/dns-autoscaler 只容忍
    `node-role.kubernetes.io/control-plane:NoSchedule`, **没有**
    `node.kubernetes.io/unschedulable:NoSchedule`(scheduler `NodeUnschedulable` 插件检查的隐式
@@ -1846,6 +1848,40 @@ bash deployments/scripts/tools/tests/test-cephfs-mount.sh
 **相关命令**: `kubectl -n rook-ceph logs ds/cephfs-models-mount --tail=50`;
 `findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,SOURCE`;
 `kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph auth get client.cubestack-cephfs-models`.
+
+### 1b. 【2026-11-02 实机】cephfs_mount 随机中断: rollout 报完成但单节点 `NOT_MOUNTED:ext4`(首次挂载竞态)
+
+**症状**
+- Secret/DaemonSet 均成功, 日志打印 `DaemonSet 已滚动完成`;
+- 逐节点校验仅 1 台失败(本次 worker03, 10.193.78.115):
+  `NOT_MOUNTED:ext4: cubestack-k8s-worker03(...)`, 模块退出 1、整个部署中断;
+- 失败后数十秒~数分钟在节点实测挂载完全正常; `dmesg` 时间线:
+  `ceph: loaded (mds proto 32)` → 约 5s 后 `libceph: mon0 ... session established` /
+  `client... fsid ...`(挂载在容器启动后约 5s 才完成)。
+
+**根因(校验竞态, 非节点/凭据/网络问题)**
+1. `04-host-mount-daemonset.yaml` 的 mounter 是**常驻循环**容器, 原先没有 readinessProbe:
+   kubelet 在进程启动瞬间即判 Ready, `kubectl rollout status ds` 在 `mount -t ceph` 完成前
+   就返回"已滚动完成";
+2. `07_cephfs_mount.sh` 的逐节点校验原先**只执行一次、无重试**; 全新节点首次挂载要
+   `modprobe ceph` + 建 mon 会话(约 5s+, 新节点/新集群更明显), 排在后面的节点恰好落在
+   窗口内 → `findmnt` 读到 hostPath 自身的 ext4 → 误报 `NOT_MOUNTED:ext4`。
+
+**解法(已落地)**
+- DaemonSet mounter 增加 `readinessProbe`: 仅当目标路径最上层 `fstype=ceph`
+  (只读挂载还要含 `ro`)才 Ready ⇒ `rollout status` 成功即代表每台节点真实挂载;
+- 逐节点校验改为**有界重试**: `CEPHFS_MOUNT_VERIFY_TIMEOUT`(默认 90s) 内按
+  `CEPHFS_MOUNT_VERIFY_INTERVAL`(默认 5s) 轮询, 只有持续失败才判节点异常;
+- DaemonSet rollout 超时改为可配 `CEPHFS_MOUNT_ROLLOUT_TIMEOUT`(默认 300s), 大集群
+  逐台首次挂载不会被 180s 截断。
+
+**验证**
+```bash
+bash deployments/scripts/tools/tests/test-cephfs-mount.sh   # ⑭ 首次竞态重试后成功; ⑮ 持续失败才报错
+# 现场核对: rollout 完成时各节点应已挂载(而不是等 30 分钟后再看)
+kubectl -n rook-ceph rollout status ds/cephfs-models-mount
+ssh <node> "findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,OPTIONS | tail -1"
+```
 
 ### 2. 【2026-10-19 实机】cubepilot-api 更新后永久 Pending: RWO PVC + RollingUpdate → Multi-Attach
 
