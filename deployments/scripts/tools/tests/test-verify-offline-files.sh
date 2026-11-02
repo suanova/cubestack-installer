@@ -397,6 +397,17 @@ rm -f "${TMP}/missing2/a.txt"
 chk "缺文件 + 计数默认通过" "0" "$(run "${TOOL}" --root "${TMP}/missing2" --level full)"
 chk_contains "提示缺失" "文件不存在或已被删除" "$(cat "${TMP}/out")"
 
+echo "== ⑱b 完整树 _SUCCESS 计数不符: 仍然失败 =="
+# --skip-missing 只应在确实有缺失文件时降级; 完整树计数错误必须失败
+mkdir -p "${TMP}/countbad"
+printf 'x' > "${TMP}/countbad/a.txt"
+mk_manifests "${TMP}/countbad"
+chk "完整树 seal 写 _SUCCESS" "0" "$(run "${TOOL}" --root "${TMP}/countbad" --seal --force --update-success --release 9.9.9)"
+sed -i 's/^files=1$/files=2/' "${TMP}/countbad/_SUCCESS"
+chk "完整树 files= 不符失败" "1" "$(run "${TOOL}" --root "${TMP}/countbad" --level metadata)"
+chk_contains "点名 files= 计数" "files=2 != 实际 1" "$(cat "${TMP}/out")"
+chk "完整树 --skip-missing 仍失败" "1" "$(run "${TOOL}" --root "${TMP}/countbad" --level metadata --skip-missing)"
+
 echo "== ⑲ 镜像 layer digest(deep/full 默认) =="
 mkdir -p "${TMP}/imgsrc/layersrc" "${TMP}/imgsrc/build" "${TMP}/img"
 printf 'layerdata' > "${TMP}/imgsrc/layersrc/f"

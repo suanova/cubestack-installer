@@ -50,6 +50,23 @@ def parse_sizes(ctx, path):
             result[rel] = int(m.group(1))
     return result
 
+def check_success_counts(ctx, args, declared, missing):
+    """校验 _SUCCESS 的 files=/bytes= 计数。
+
+    --skip-missing 只在本轮确实存在清单缺失文件时把差异降级为警告;
+    完整树(无缺失)上的计数不符仍然是失败。
+    """
+    for key, want_n in declared.items():
+        actual = len(ctx.files) if key == "files" else ctx.total_bytes
+        if want_n == actual:
+            continue
+        if getattr(args, "skip_missing", False) and missing:
+            warn(ctx, f"_SUCCESS.{key}={want_n} != 当前 {actual}"
+                      "(缺失文件已跳过; 覆盖性检查为准)")
+        else:
+            fail(ctx, "_SUCCESS", "success_binding",
+                 f"{key}={want_n} != 实际 {actual}", want_n, actual)
+
 def check_metadata(ctx, root, layout, args):
     ctx.checks["metadata"] = "ok"
     ctx.checks["coverage"] = "ok"
@@ -57,6 +74,7 @@ def check_metadata(ctx, root, layout, args):
     sums_path = os.path.join(root, "SHA256SUMS")
     success_path = os.path.join(root, "_SUCCESS")
     success = {}
+    declared_counts = {}
     has_sums = os.path.isfile(sums_path)
 
     # ---- _SUCCESS ----
@@ -78,30 +96,17 @@ def check_metadata(ctx, root, layout, args):
             if actual != want_sizes:
                 fail(ctx, "_SUCCESS", "success_binding",
                      "sizes 与实际 SIZES 不符", want_sizes, actual)
-        for key, path in (("files", None), ("bytes", None)):
+        # 先解析计数; 比较推迟到覆盖性检查之后: 只有确实存在缺失文件时
+        # --skip-missing 才允许把计数差异降级为警告。
+        for key in ("files", "bytes"):
             # 用 key in success 而不是 success.get(key): 声明了 files=/bytes= 但值为空
             # 也必须走 int("") 报错, 不能当成"未提供"静默跳过计数校验。
             if key in success:
                 try:
-                    want_n = int(success[key])
+                    declared_counts[key] = int(success[key])
                 except ValueError:
                     fail(ctx, "_SUCCESS", "success_binding",
                          f"{key}={success[key]} 不是整数")
-                    continue
-                if key == "files" and want_n != len(ctx.files):
-                    if getattr(args, "skip_missing", False):
-                        warn(ctx, f"_SUCCESS.files={want_n} != 当前 {len(ctx.files)}"
-                                  "(缺失文件已跳过; 覆盖性检查为准)")
-                    else:
-                        fail(ctx, "_SUCCESS", "success_binding",
-                             f"files={want_n} != 实际 {len(ctx.files)}", want_n, len(ctx.files))
-                if key == "bytes" and want_n != ctx.total_bytes:
-                    if getattr(args, "skip_missing", False):
-                        warn(ctx, f"_SUCCESS.bytes={want_n} != 当前 {ctx.total_bytes}"
-                                  "(缺失文件已跳过; 覆盖性检查为准)")
-                    else:
-                        fail(ctx, "_SUCCESS", "success_binding",
-                             f"bytes={want_n} != 实际 {ctx.total_bytes}", want_n, ctx.total_bytes)
     elif layout == "release" and not args.staging:
         fail(ctx, "_SUCCESS", "success_missing", "release 布局缺少 _SUCCESS")
     elif args.require_success:
@@ -127,6 +132,8 @@ def check_metadata(ctx, root, layout, args):
             for rel in ctx.files:
                 if os.stat(os.path.join(root, rel)).st_size == 0:
                     fail(ctx, rel, "zero_byte", "0 字节文件")
+            # 无清单时无法认定缺失集合; 计数不符按完整树处理(失败)
+            check_success_counts(ctx, args, declared_counts, [])
             ctx.checks["coverage"] = "skipped"
             ctx.checks["metadata"] = "fail" if ctx.failures else "ok"
             return {}
@@ -138,7 +145,8 @@ def check_metadata(ctx, root, layout, args):
     sums = parse_sha256sums(ctx, sums_path)
     disk = set(ctx.files)
     listed = set(sums)
-    for rel in sorted(listed - disk):
+    missing = sorted(listed - disk)
+    for rel in missing:
         if getattr(args, "skip_missing", False):
             warn(ctx, f"{rel}: 文件不存在或已被删除，已跳过")
             ctx.missing_skipped.append(rel)
@@ -154,6 +162,8 @@ def check_metadata(ctx, root, layout, args):
         if st.st_size == 0:
             fail(ctx, rel, "zero_byte", "0 字节文件")
             ctx.checks["coverage"] = "fail"
+    # 覆盖性检查已算出缺失集合: 此时才能判断 --skip-missing 的计数降级是否成立。
+    check_success_counts(ctx, args, declared_counts, missing)
 
     # ---- SIZES ----
     sizes_path = os.path.join(root, "SIZES")
