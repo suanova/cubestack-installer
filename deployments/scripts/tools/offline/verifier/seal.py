@@ -1,6 +1,7 @@
 import concurrent.futures as cf
 import os
 import shutil
+import stat
 import sys
 import time
 
@@ -35,6 +36,9 @@ def seal(root, args):
                 problems.append(f"文件名含换行: {rel!r}")
             elif os.path.islink(full):
                 problems.append(f"符号链接: {rel}")
+            elif not stat.S_ISREG(os.lstat(full).st_mode):
+                # FIFO/socket/设备节点: _seal_one 打开 FIFO 可能永久阻塞
+                problems.append(f"非普通文件: {rel}")
             elif TEMP_RE.search(rel):
                 problems.append(f"临时文件: {rel}")
             elif not os.access(full, os.R_OK):

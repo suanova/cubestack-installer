@@ -181,6 +181,19 @@ class StampSealTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(d, "SIZES")))
             self.assertTrue(os.path.isfile(os.path.join(d, "_SUCCESS")))
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "需要 mkfifo")
+    def test_seal_rejects_fifo(self):
+        # FIFO 无写端时 open 会阻塞; seal 预检必须拒绝非普通文件
+        with tempfile.TemporaryDirectory() as d:
+            os.mkfifo(os.path.join(d, "pipe"))
+            args = Namespace(force=True, update_success=False, release="", jobs=2)
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rc = seal.seal(d, args)
+            self.assertEqual(rc, 2)
+            self.assertIn("非普通文件", err.getvalue())
+            self.assertFalse(os.path.isfile(os.path.join(d, "SHA256SUMS")))
+
 
 class ReportTests(unittest.TestCase):
     def test_emit_json(self):
