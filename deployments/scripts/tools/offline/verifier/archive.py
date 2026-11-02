@@ -51,6 +51,9 @@ def validate_docker_archive(ctx, tf, members, manifest, rel):
             return False
         return True
     entries = manifest if isinstance(manifest, list) else [manifest]
+    if not entries:
+        fail(ctx, rel, "image_manifest", "manifest.json 不含任何镜像条目")
+        return False
     ok = True
     for idx, e in enumerate(entries):
         if not isinstance(e, dict):

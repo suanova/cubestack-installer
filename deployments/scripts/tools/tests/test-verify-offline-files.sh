@@ -160,6 +160,15 @@ chk_contains "点名 shell.tar" "shell.tar" "$(cat "${TMP}/out")"
 rm -f "${TMP}/st/trunc.tar" "${TMP}/st/shell.tar"
 mk_manifests "${TMP}/st"
 chk "合法 docker-archive 通过" "0" "$(run "${TOOL}" --root "${TMP}/st" --level quick)"
+# 空 manifest: [] 没有任何镜像条目, 不能因为循环不执行而误判通过
+mkdir -p "${TMP}/st_emptysrc"
+printf '[]' > "${TMP}/st_emptysrc/manifest.json"
+tar -C "${TMP}/st_emptysrc" -cf "${TMP}/st/empty.tar" .
+mk_manifests "${TMP}/st"
+chk "空 manifest 失败" "1" "$(run "${TOOL}" --root "${TMP}/st" --level quick)"
+chk_contains "点名 empty.tar" "empty.tar" "$(cat "${TMP}/out")"
+rm -f "${TMP}/st/empty.tar"
+mk_manifests "${TMP}/st"
 
 echo "== ⑧ 结构: 二进制/SIZES/树边车 =="
 mkdir -p "${TMP}/bin"
