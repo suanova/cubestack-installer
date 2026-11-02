@@ -26,6 +26,9 @@ def seal(root, args):
             full = os.path.join(dirpath, name)
             raw_rel = os.path.relpath(full, root)
             rel = norm_rel(raw_rel)
+            if os.path.islink(full):
+                problems.append(f"符号链接: {rel}")
+                continue
             if is_meta(rel):
                 continue
             # norm_rel 会把 \ 归一成 /; 若不先按原始名拒绝, 含反斜杠的文件会被
