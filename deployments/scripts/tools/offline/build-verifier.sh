@@ -46,8 +46,8 @@ if [ "${MODE}" = "check" ]; then
 import sys, zipfile
 a = zipfile.ZipFile(sys.argv[1])
 b = zipfile.ZipFile(sys.argv[2])
-na = sorted(n for n in a.namelist() if n.startswith("verifier/") and n.endswith(".py"))
-nb = sorted(n for n in b.namelist() if n.startswith("verifier/") and n.endswith(".py"))
+na = sorted(n for n in a.namelist() if not n.endswith("/"))
+nb = sorted(n for n in b.namelist() if not n.endswith("/"))
 if na != nb:
     print(f"❌ pyz 源码文件列表不一致:\n  committed={na}\n  source={nb}", file=sys.stderr)
     sys.exit(1)
