@@ -2,8 +2,9 @@
 # 列: subdir<TAB>file<TAB>pull_ref<TAB>save_ref
 #   · 行 → offline-files/model-collection/<subdir>/<file>
 #   · pull_ref 留空 = 与 save_ref 相同; file 为**规范 tar 名**(实际可为 .tar.gz, 工具双读)
-#   · 2026-10-23 收敛: 仅保留 sglang 主版本 + vllm-metax 0.27.0 各 1 个(原 5 个变体减为 2 个)。
-#   · 大件 ≈31G: 压缩存储(.tar.gz, pigz 流式); 逐镜像更新可经 Harbor→MinIO 保鲜管道(本清单)
+#   · 2026-10-29: sglang = 0.5.14 主版本 + v0.5.12-glm5-rc4 两个; vllm-metax 0.27.0 不变(共 3 件)。
+#   · 大件压缩存储(.tar.gz, pigz); 逐镜像更新可经 Harbor→MinIO 保鲜管道(本清单)
 # 校验: tools/images/cubestack-platform-save-images.sh --list-check --out <本目录>
-sglang	harbor.isuanova.com_suanova_sglang_0.5.13-maca.ai3.8.1.3-torch2.10-py310-ubuntu22.04-amd64.tar		harbor.isuanova.com/suanova/sglang:0.5.13-maca.ai3.8.1.3-torch2.10-py310-ubuntu22.04-amd64
+sglang	harbor.isuanova.com_suanova_sglang_0.5.14-maca.ai3.8.2.122-torch2.10-py312-ubuntu22.04-amd64.tar		harbor.isuanova.com/suanova/sglang:0.5.14-maca.ai3.8.2.122-torch2.10-py312-ubuntu22.04-amd64
+sglang	harbor.isuanova.com_suanova_sglang_v0.5.12-glm5-rc4-maca.ai.3.7.1.13-torch2.8-py310-ubuntu22.04-amd64.tar		harbor.isuanova.com/suanova/sglang:v0.5.12-glm5-rc4-maca.ai.3.7.1.13-torch2.8-py310-ubuntu22.04-amd64
 vllm	harbor.isuanova.com_suanova_vllm-metax_0.27.0-maca.ai3.8.2.302-torch2.10-py312-ubuntu22.04-amd64.tar		harbor.isuanova.com/suanova/vllm-metax:0.27.0-maca.ai3.8.2.302-torch2.10-py312-ubuntu22.04-amd64

@@ -136,6 +136,11 @@ for _cf in cluster.conf.example cluster.defaults.conf; do
         || { err "构建上下文缺配置模板: deployments/config/${_cf}(检查 rsync 排除项)"; exit 1; }
     ok "  配置模板就位: deployments/config/${_cf}"
 done
+[ -x "${OUT}/deployments/scripts/tools/offline/verify-offline-files.sh" ] \
+    || { err "构建上下文缺可执行校验器: deployments/scripts/tools/offline/verify-offline-files.sh"; exit 1; }
+[ -f "${OUT}/deployments/scripts/tools/offline/verify-offline-files.pyz" ] \
+    || { err "构建上下文缺校验器 pyz: deployments/scripts/tools/offline/verify-offline-files.pyz"; exit 1; }
+ok "  校验器就位: verify-offline-files.sh + .pyz"
 
 # ---------------- CLI 工具链: 拷进构建上下文 bin/(base 层用) ----------------
 # 用户口径(2026-09-30): **常用且版本固定的工具全部打进 base 镜像**(不再靠运行期挂载补)。

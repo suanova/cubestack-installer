@@ -140,6 +140,43 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-release-mode.sh
 
+      # offline-files 完整性: 校验器四布局/清单/结构/哈希/戳/seal
+      - name: 离线文件完整性校验回归(verify-offline-files)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-verify-offline-files.sh
+
+      # verifier pyz 必须与 verifier/ 源码一致(防止改了源码忘重建)
+      - name: 校验器源码/pyz 一致性
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/offline/build-verifier.sh --check
+
+      # verifier 模块级单测(纯 Python, 独立于 CLI/夹具)
+      - name: 校验器模块单测(verifier modules)
+        run: |
+          set -euo pipefail
+          PYTHONPATH=deployments/scripts/tools/offline \
+            python3 -m unittest deployments/scripts/tools/tests/test_verifier_modules.py -v
+
+      # 校验器自举: 在线安装 3 次 / 固定 sha256 / 发布树引导校验
+      - name: 校验器自举回归(verify tool install)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-verify-tool-install.sh
+
+      # 部署前门禁: auto/full/off / 未 seal 严格模式 / release.env source 前校验
+      - name: 部署前完整性门禁回归(offline gate)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-deploy-offline-gate.sh
+
+      # kubespray tree.tar.gz 边车校验(解包前)
+      - name: tree.tar.gz 边车回归(tree sidecar)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-offline-tree-check.sh
+
       # release-2.0 组件镜像原地刷新: fake mc + fixture, 覆盖 tar/chart/CLI/SHA256SUMS/_SUCCESS
       - name: release-2.0 组件镜像同步回归(release sync)
         run: |

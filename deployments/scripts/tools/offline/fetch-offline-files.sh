@@ -12,6 +12,7 @@
 #   ./fetch-offline-files.sh cubestack-operator/portal    ≡ 新脚本 --sub cubestack-operator/portal
 #   ./fetch-offline-files.sh --dest /data/offline-files   # 选项原样透传(含取值)
 #   ./fetch-offline-files.sh --list --sub cubestack-operator
+#   ./fetch-offline-files.sh --release 2.0.0 --resume     # release 增量/续传(等价新脚本)
 # 建议直接使用新脚本: tools/offline/fetch-offline-from-minio.sh --help(会打印全部可用子目录)
 # ============================================================
 set -euo pipefail
@@ -19,7 +20,8 @@ _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 args=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --dest|--sub|--kubespray-version|--min-free) args+=("$1" "$2"); shift 2 ;;
+        --dest|--sub|--kubespray-version|--min-free|--release|--clean-countdown|--retry|--retry-delay)
+            args+=("$1" "$2"); shift 2 ;;
         -y|--yes|--all|--list|--auto|--force|-h|--help) args+=("$1"); shift ;;
         --*) args+=("$1"); shift ;;          # 未知选项透传, 由新脚本统一报错
         *)   args+=(--sub "$1"); shift ;;    # 旧用法的裸位置参数 = 桶内子目录

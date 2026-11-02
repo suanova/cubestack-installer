@@ -1211,6 +1211,31 @@ if ! bash "${SCRIPT_DIR}/tests/test-cluster-teardown.sh" >/dev/null 2>&1; then
 fi
 [ "${UN_FAIL}" = "0" ] && ok "UNINSTALL 声明与分支位置合规 + 夹具通过"
 
+# ---------- 校验器存在性/pin 一致性(2026-10-28) ----------
+say "校验器 verify-offline-files.sh + pin ..."
+_VT="${REPO_ROOT}/deployments/scripts/tools/offline/verify-offline-files.sh"
+_VT_PYZ="${REPO_ROOT}/deployments/scripts/tools/offline/verify-offline-files.pyz"
+_VT_PIN="${REPO_ROOT}/deployments/config/verify-tool.sha256"
+if [ ! -x "${_VT}" ] || [ ! -f "${_VT_PYZ}" ]; then
+    ck_fail "校验器缺失: ${_VT} 或 ${_VT_PYZ}"
+elif [ ! -f "${_VT_PIN}" ]; then
+    ck_fail "缺少 pin 文件: ${_VT_PIN}"
+else
+    _vt_actual="$(sha256sum "${_VT_PYZ}" | awk '{print $1}')"
+    _vt_want="$(tr -d '[:space:]' < "${_VT_PIN}")"
+    if [ "${_vt_actual}" != "${_vt_want}" ]; then
+        ck_fail "校验器 pin 不一致: 实际 ${_vt_actual} != pin ${_vt_want}(改工具后更新 ${_VT_PIN})"
+    else
+        ok "  校验器 pin 一致"
+    fi
+    if ! bash "${REPO_ROOT}/deployments/scripts/tools/offline/build-verifier.sh" --check >/dev/null 2>&1; then
+        ck_fail "校验器 pyz 与 verifier/ 源码不一致(运行 build-verifier.sh --update-pin 后提交)"
+    else
+        ok "  校验器 pyz 与源码一致"
+    fi
+fi
+unset _VT _VT_PYZ _VT_PIN _vt_actual _vt_want 2>/dev/null || true
+
 echo "---------------------------------------------"
 if [ "${FAIL}" = "0" ]; then
     ok "模块校验全部通过(${#ALLKEYS[@]} 个模块)"
