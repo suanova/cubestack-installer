@@ -36,6 +36,8 @@ def stamp_valid(root, args, sums):
         data = json.load(open(path, encoding="utf-8"))
     except Exception as exc:
         return False, path, f"parse: {exc}"
+    if not isinstance(data, dict):
+        return False, path, "parse: stamp is not a JSON object"
     sums_path = os.path.join(root, "SHA256SUMS")
     if not os.path.isfile(sums_path):
         return False, path, "manifest missing"
