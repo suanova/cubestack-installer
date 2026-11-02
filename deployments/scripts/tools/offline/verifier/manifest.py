@@ -41,7 +41,13 @@ def parse_sizes(ctx, path):
             if not m:
                 fail(ctx, "SIZES", "manifest_format", f"第 {lineno} 行格式非法")
                 continue
-            result[norm_rel(gnu_unescape(m.group(2)))] = int(m.group(1))
+            rel = norm_rel(gnu_unescape(m.group(2)))
+            # 重复路径会静默覆盖前一行的大小(值相同则完全无感知), 与 SHA256SUMS 的
+            # manifest_dup 对齐: 点名重复并保留首条, 不覆盖。
+            if rel in result:
+                fail(ctx, rel, "manifest_dup", "SIZES 重复路径")
+                continue
+            result[rel] = int(m.group(1))
     return result
 
 def check_metadata(ctx, root, layout, args):
@@ -73,10 +79,14 @@ def check_metadata(ctx, root, layout, args):
                 fail(ctx, "_SUCCESS", "success_binding",
                      "sizes 与实际 SIZES 不符", want_sizes, actual)
         for key, path in (("files", None), ("bytes", None)):
-            if success.get(key):
+            # 用 key in success 而不是 success.get(key): 声明了 files=/bytes= 但值为空
+            # 也必须走 int("") 报错, 不能当成"未提供"静默跳过计数校验。
+            if key in success:
                 try:
                     want_n = int(success[key])
                 except ValueError:
+                    fail(ctx, "_SUCCESS", "success_binding",
+                         f"{key}={success[key]} 不是整数")
                     continue
                 if key == "files" and want_n != len(ctx.files):
                     if getattr(args, "skip_missing", False):
@@ -114,6 +124,9 @@ def check_metadata(ctx, root, layout, args):
     if not has_sums:
         if layout == "unsealed-dev" and args.allow_unsealed:
             warn(ctx, "无 SHA256SUMS, 仅做结构检查")
+            for rel in ctx.files:
+                if os.stat(os.path.join(root, rel)).st_size == 0:
+                    fail(ctx, rel, "zero_byte", "0 字节文件")
             ctx.checks["coverage"] = "skipped"
             ctx.checks["metadata"] = "fail" if ctx.failures else "ok"
             return {}

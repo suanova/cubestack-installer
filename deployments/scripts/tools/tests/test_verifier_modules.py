@@ -13,12 +13,13 @@ import tarfile
 import tempfile
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "deployments", "scripts", "tools", "offline"))
 
-from verifier import archive, fsutil, manifest, seal, stamp  # noqa: E402
+from verifier import archive, fsutil, manifest, seal, selftest, stamp  # noqa: E402
 from verifier.context import Ctx  # noqa: E402
 from verifier.layout import detect_layout  # noqa: E402
 from verifier.report import emit  # noqa: E402
@@ -163,6 +164,16 @@ class ReportTests(unittest.TestCase):
         data = json.loads(buf.getvalue())
         self.assertEqual(data["schema"], 1)
         self.assertTrue(data["ok"])
+
+
+class SelftestTests(unittest.TestCase):
+    def test_seal_failure_prints_and_returns_1(self):
+        # 失败分支必须能打印(selftest.py 曾漏 import sys → NameError 被入口吞成内部错误)
+        err = io.StringIO()
+        with mock.patch.object(selftest, "seal", return_value=1), redirect_stderr(err):
+            rc = selftest.self_test()
+        self.assertEqual(rc, 1)
+        self.assertIn("self-test: seal 失败", err.getvalue())
 
 
 if __name__ == "__main__":

@@ -46,7 +46,7 @@ def main():
     ap.add_argument("--deep-log", default="",
                     help="深度校验逐 layer 明细日志(默认: TMPDIR/cubestack-verify-deep-*.log)")
     ap.add_argument("--seal", action="store_true", help="生成/更新 SHA256SUMS + SIZES")
-    ap.add_argument("--force", action="store_true", help="seal 覆盖正式树 / 忽略校验戳")
+    ap.add_argument("--force", action="store_true", help="seal 覆盖正式树")
     ap.add_argument("--update-success", action="store_true",
                     help="seal 后同步重写 _SUCCESS(本地修复)")
     ap.add_argument("--json", action="store_true", help="stdout 输出 JSON")
@@ -85,7 +85,7 @@ def main():
         return 2
 
     # 便利入口: --root 指向本地桶根时下钻到 <ver>/offline-files
-    if args.release and os.path.isdir(os.path.join(root, "offline-files")):
+    if args.release:
         candidate = os.path.join(root, args.release, "offline-files")
         if os.path.isdir(candidate):
             root = candidate
@@ -104,6 +104,10 @@ def main():
     ctx.deep = bool(args.deep)
     ctx.level_defaulted = _level_defaulted
     ctx.files = collect_files(ctx, root)
+    # auto 在未 seal 开发树上的语义 = quick 结构检查; 必须在 metadata 校验前放行,
+    # 否则 manifest_missing 会先写入 failures(之后再把 allow_unsealed 置真也救不回来)。
+    if args.level == "auto" and ctx.layout == "unsealed-dev":
+        args.allow_unsealed = True
     sums = check_metadata(ctx, root, ctx.layout, args)
 
     if args.level == "metadata":
@@ -117,7 +121,9 @@ def main():
         else:
             valid, spath, reason = stamp_valid(root, args, sums)
             ctx.stamp_info = {"valid": valid, "path": spath, "reason": reason}
-            if valid and not args.force_full and not args.no_stamp:
+            # --require-cli-tar 只在 full 里校验(戳只管树内清单, 不覆盖树外 CLI tar),
+            # 不能走戳短路, 否则该 flag 会被静默忽略。
+            if valid and not args.force_full and not args.no_stamp and not args.require_cli_tar:
                 ctx.checks["stamp"] = "ok"
                 ctx.level = "auto"
                 return emit(ctx, args)
