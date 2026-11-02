@@ -246,8 +246,8 @@ CUBESTACK_RELEASE_ROOT="/data/cubestack-installer"
 | 大件（已包含） | `dev-lab`、`model-collection` | **2.0 已确认包含**（接受冗余；单版本体积较大） |
 | 虚拟机 | `virtual-machine` | **2.0 已确认排除**（按需单独交付） |
 
-`model-collection` 约 44G、`dev-lab` 约 46G，release-2.0 **明确把它们放进发布树**，
-因此单版本发布树会比较大（核心部署集 + 约 90G），这是已接受的存储冗余。
+`model-collection` 约 33G、`dev-lab` 约 46G，release-2.0 **明确把它们放进发布树**，
+因此单版本发布树会比较大（核心部署集 + 约 79G），这是已接受的存储冗余。
 `virtual-machine` 仍不放入发布树；如果后续某个版本需要，再按同一套
 `<版本>/offline-files/` 结构单独生成一份发布树，不影响本方案。
 
