@@ -70,6 +70,7 @@ deployments/kubespray/inventory/cubestack-cluster/inventory.ini
 # ⚠ 注意: `check-modules.sh` 第 ⑫ 项在 ceph-disk-tests.sh 缺席时会打印"跳过(未找到)" —— 这是设计好的降级。
 deployments/scripts/tools/tests/*
 !deployments/scripts/tools/tests/test-*.sh
+!deployments/scripts/tools/tests/test_verifier_modules.py
 
 # 虚拟机基础镜像/磁盘(大文件,勿提交)
 deployments/virtual-machine/
