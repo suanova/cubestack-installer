@@ -12,7 +12,7 @@
 | 未 seal 的 dev 树 | 无清单本身只警告; **quick 检出明确损坏(截断/ELF 头坏/0 字节)仍阻断** | 用户确认("明确损坏就阻断") |
 | 工具交付 | ① 默认内置 `cubestack-installer-cli` 镜像 + 发布树; ② 检测不到时在线安装, **最多 3 次** | 用户要求 |
 | 实施节奏 | **先 P0, P1 单独 PR** | 用户确认 |
-| 工具形态 | 单文件 `verify-offline-files.sh`(bash + 内嵌 Python), 在线安装只需一个文件/一个固定哈希 | 本设计 |
+| 工具形态 | wrapper `verify-offline-files.sh` + zipapp `verify-offline-files.pyz`(源码在 `verifier/`), 在线安装只下载 `.pyz`、只校验一个固定哈希 | 本设计 |
 
 ## 2. 背景与目标
 
@@ -68,7 +68,7 @@
 
 ```
                       ┌─────────────────────────────────────┐
-                      │ verify-offline-files.sh (单文件)     │
+                      │ verify-offline-files.sh + .pyz       │
                       │  metadata / quick / full / auto      │
                       │  --seal  --json  --stamp             │
                       └───────────────┬─────────────────────┘
@@ -527,7 +527,7 @@ unsealed-dev 警告继续。
 
 ### 10.1 P0(本次)
 
-1. `verify-offline-files.sh` 单文件实现 + `--seal` + 校验戳 + JSON + 退出码。
+1. `verify-offline-files.sh`(wrapper)+ `verifier/` 包(打包为 `verify-offline-files.pyz`)+ `--seal` + 校验戳 + JSON + 退出码。
 2. 工具交付: `Dockerfile-cli` 内置/symlink/构建门禁; `build-cli-context.sh`/`check-modules.sh` 自检;
    `verify-tool.sha256` pin + CI 一致性检查; `release-publish.sh stage` 拷贝进发布树, 且
    `_write_sha256sums` 排除 `.cubestack-*`(避免把 staging 校验戳带进发布)。

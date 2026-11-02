@@ -6,7 +6,7 @@
 
 **Goal:** 交付离线文件完整性校验器、工具自举、部署前门禁、fetch 校验/修复、`tree.tar.gz` 校验、测试与文档，使坏镜像/坏二进制在安装前被点名拦截，且重复部署走校验戳秒级通过。
 
-**Architecture:** 新增单文件 `verify-offline-files.sh`(bash 入口 + 内嵌 Python)，作为唯一校验实现；`lib-offline-verify.sh` 负责工具定位与在线安装；`lib-common.sh`/`deploy-cluster.sh` 在 `load_config` 后接入门禁；`fetch-offline-from-minio.sh` 下载后调用同一工具并支持 `--repair`；`cubestack-offline.sh` 解包前校验 `tree.tar.gz`、预检接工具。
+**Architecture:** `verify-offline-files.sh` 是 bash 入口(wrapper)，校验实现拆分为 `verifier/` Python 包并打包为单制品 `verify-offline-files.pyz`(zipapp)；`build-verifier.sh` 负责构建/一致性检查并更新 `verify-tool.sha256`；`lib-offline-verify.sh` 负责工具定位与在线安装(只下载并校验 `.pyz`)；`lib-common.sh`/`deploy-cluster.sh` 在 `load_config` 后接入门禁；`fetch-offline-from-minio.sh` 下载后调用同一工具并支持 `--repair`；`cubestack-offline.sh` 解包前校验 `tree.tar.gz`、预检接工具。
 
 **Tech Stack:** Bash 5、Python 3.8+ 标准库(`argparse/hashlib/json/tarfile/concurrent.futures`)、GNU coreutils/tar、现有仓库测试框架(纯 bash)。
 
@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- 校验器必须**单文件**：`deployments/scripts/tools/offline/verify-offline-files.sh`，无同目录 `.py` 依赖；在线安装只取一个文件、只校验一个 sha256。
+- 校验器由 wrapper `deployments/scripts/tools/offline/verify-offline-files.sh` 与 zipapp `deployments/scripts/tools/offline/verify-offline-files.pyz` 组成；在线安装只下载 `.pyz`，只校验 `deployments/config/verify-tool.sha256` 固定的一个 sha256。
 - 不依赖 `mc`/网络/root；只依赖 `python3>=3.8`、`sha256sum`、`tar`、`gzip`。
 - 退出码固定：`0` 通过、`1` 完整性失败、`2` 用法/环境错误。
 - 人类输出中文、精简；`--json` 时 stdout 只能是 JSON，进度/提示走 stderr。
@@ -110,7 +110,7 @@ Expected: FAIL（`No such file or directory` / `verify-offline-files.sh` 不存�
 ```bash
 #!/usr/bin/env bash
 # ============================================================
-# verify-offline-files.sh — offline-files 完整性校验器(单文件)
+# verify-offline-files.sh — offline-files 完整性校验器入口(wrapper; 实现见 verifier/)
 # 用法:
 #   ./verify-offline-files.sh                     # 校验仓库 deployments/offline-files
 #   ./verify-offline-files.sh --root DIR          # 校验任意树
@@ -1860,18 +1860,24 @@ ok "  校验器就位: deployments/scripts/tools/offline/verify-offline-files.sh
 # ---------- 校验器存在性/pin 一致性(2026-10-28) ----------
 say "校验器 verify-offline-files.sh + pin ..."
 _VT="${REPO_ROOT}/deployments/scripts/tools/offline/verify-offline-files.sh"
+_VT_PYZ="${REPO_ROOT}/deployments/scripts/tools/offline/verify-offline-files.pyz"
 _VT_PIN="${REPO_ROOT}/deployments/config/verify-tool.sha256"
-if [ ! -x "${_VT}" ]; then
-    ck_fail "校验器缺失或不可执行: ${_VT}"; FAIL=$((FAIL+1))
+if [ ! -x "${_VT}" ] || [ ! -f "${_VT_PYZ}" ]; then
+    ck_fail "校验器缺失: ${_VT} 或 ${_VT_PYZ}"; FAIL=$((FAIL+1))
 elif [ ! -f "${_VT_PIN}" ]; then
     ck_fail "缺少 pin 文件: ${_VT_PIN}"; FAIL=$((FAIL+1))
 else
-    _vt_actual="$(sha256sum "${_VT}" | awk '{print $1}')"
+    _vt_actual="$(sha256sum "${_VT_PYZ}" | awk '{print $1}')"
     _vt_want="$(tr -d '[:space:]' < "${_VT_PIN}")"
     if [ "${_vt_actual}" != "${_vt_want}" ]; then
         ck_fail "校验器 pin 不一致: 实际 ${_vt_actual} != pin ${_vt_want}(改工具后更新 ${_VT_PIN})"; FAIL=$((FAIL+1))
     else
         ok "  校验器 pin 一致"
+    fi
+    if ! bash "${REPO_ROOT}/deployments/scripts/tools/offline/build-verifier.sh" --check >/dev/null 2>&1; then
+        ck_fail "校验器 pyz 与 verifier/ 源码不一致(运行 build-verifier.sh --update-pin 后提交)"; FAIL=$((FAIL+1))
+    else
+        ok "  校验器 pyz 与源码一致"
     fi
 fi
 ```
@@ -1905,11 +1911,10 @@ _write_sha256sums() {
 
 - [ ] **Step 5: pin 文件**
 
-工具最终形态确定后生成：
+工具最终形态确定后生成(构建 pyz 并把其 sha256 写入 pin)：
 
 ```bash
-sha256sum deployments/scripts/tools/offline/verify-offline-files.sh \
-  | awk '{print $1}' > deployments/config/verify-tool.sha256
+bash deployments/scripts/tools/offline/build-verifier.sh --update-pin
 ```
 
 - [ ] **Step 6: CI**
@@ -1933,7 +1938,7 @@ Run:
 ```bash
 bash -n deployments/scripts/tools/check-modules.sh
 bash -n deployments/scripts/tools/images/release-publish.sh
-sha256sum deployments/scripts/tools/offline/verify-offline-files.sh | awk '{print $1}' > deployments/config/verify-tool.sha256
+bash deployments/scripts/tools/offline/build-verifier.sh --check
 bash deployments/scripts/tools/check-modules.sh
 ```
 Expected: 校验器 pin 一致；全部通过。
