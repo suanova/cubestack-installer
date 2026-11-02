@@ -84,6 +84,18 @@ env -u OFFLINE_FILES_ROOT -u CUBESTACK_VERIFY_TOOL \
 chk "pin 缺失失败" "1" "${rc}"
 chk "未尝试下载" "0" "$([ -e "${TMP}/count4" ] && echo 1 || echo 0)"
 
+echo "== ④b 缓存路径含特殊字符拒绝 =="
+# 生成 wrapper 时 pyz 路径被写入双引号; 特殊字符必须 fail-closed, 且不得开始下载
+export FAKE_COUNT="${TMP}/count4b" FAKE_MODE=success
+rc=0
+env -u OFFLINE_FILES_ROOT -u CUBESTACK_VERIFY_TOOL \
+    OFFLINE_VERIFY_TOOL_URL="https://example.invalid/tool" \
+    OFFLINE_VERIFY_TOOL_SHA256="$(sha256sum "${PYZ}" | awk '{print $1}')" \
+    XDG_CACHE_HOME="${TMP}/bad\"cache" \
+    bash -c 'source "$1"; ensure_offline_verify_tool' _ "${LIB}" >/dev/null 2>&1 || rc=$?
+chk "特殊字符拒绝" "1" "${rc}"
+chk "未尝试下载" "0" "$([ -e "${FAKE_COUNT}" ] && echo 1 || echo 0)"
+
 echo "== ⑤ 发布树副本引导校验 =="
 mkdir -p "${TMP}/tree/tools"
 cp "${TOOL}" "${TMP}/tree/tools/verify-offline-files.sh"

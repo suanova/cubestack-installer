@@ -55,6 +55,13 @@ _ov_try_online() {
         _ov_log "⚠ 未配置校验器 pin(OFFLINE_VERIFY_TOOL_SHA256 / ${_OV_PIN_FILE}), 拒绝在线安装"
         return 1
     fi
+    # 生成的 wrapper 会把 pyz 路径嵌入双引号; 特殊字符会破坏路径或注入 shell 语法
+    case "${_OV_CACHE_DIR}" in
+        *[\"\$\`\\]* | *$'\n'*)
+            _ov_log "⚠ 缓存路径含 shell 特殊字符, 拒绝在线安装: ${_OV_CACHE_DIR}"
+            return 1
+            ;;
+    esac
     mkdir -p "${_OV_CACHE_DIR}" || return 1
     tmp="${pyz}.part.$$"
     for n in 1 2 3; do
