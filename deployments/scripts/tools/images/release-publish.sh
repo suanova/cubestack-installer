@@ -292,8 +292,21 @@ PY
 }
 _write_sha256sums() {
     say "生成 SHA256SUMS..."
-    ( cd "${STAGE_TREE}" && find . -type f ! -name SHA256SUMS ! -name _SUCCESS -print0 \
+    ( cd "${STAGE_TREE}" && find . -type f \
+        ! -name SHA256SUMS ! -name SIZES ! -name _SUCCESS ! -name '.cubestack-*' -print0 \
         | sort -z | xargs -0 sha256sum ) > "${STAGE_TREE}/SHA256SUMS"
+}
+
+# 发布树随带校验器(2026-10-28): 纯宿主机部署也有离线副本; 由 SHA256SUMS 覆盖
+_copy_verify_tool() {
+    local dir="${REPO_ROOT}/deployments/scripts/tools/offline"
+    [ -x "${dir}/verify-offline-files.sh" ] || { err "缺少校验器: ${dir}/verify-offline-files.sh"; exit 1; }
+    [ -f "${dir}/verify-offline-files.pyz" ] || { err "缺少校验器 pyz: ${dir}/verify-offline-files.pyz"; exit 1; }
+    mkdir -p "${STAGE_TREE}/tools"
+    cp -f "${dir}/verify-offline-files.sh" "${STAGE_TREE}/tools/verify-offline-files.sh"
+    cp -f "${dir}/verify-offline-files.pyz" "${STAGE_TREE}/tools/verify-offline-files.pyz"
+    chmod 0755 "${STAGE_TREE}/tools/verify-offline-files.sh" "${STAGE_TREE}/tools/verify-offline-files.pyz"
+    ok "  校验器就位: tools/verify-offline-files.sh + .pyz"
 }
 
 # ---------- 子命令: stage ----------
@@ -354,6 +367,7 @@ _stage() {
     _copy_cli_tar
 
     say "[6/7] 生成 release.env / release.json"
+    _copy_verify_tool
     cp -f "${RELEASE_DIR}/release.env" "${STAGE_TREE}/release.env"
     _write_release_json
 

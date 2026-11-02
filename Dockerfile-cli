@@ -61,6 +61,13 @@ RUN test -f ${REPO_ROOT}/deployments/scripts/deploy-cluster.sh \
  && test -f ${REPO_ROOT}/deployments/config/cluster.defaults.conf \
  && command -v patch >/dev/null
 
+# 离线文件完整性校验器(2026-10-28): 必须随镜像分发; 缺失/不可执行/无法运行直接构建失败
+RUN test -x ${REPO_ROOT}/deployments/scripts/tools/offline/verify-offline-files.sh \
+ && test -f ${REPO_ROOT}/deployments/scripts/tools/offline/verify-offline-files.pyz \
+ && ${REPO_ROOT}/deployments/scripts/tools/offline/verify-offline-files.sh --version \
+ && ln -sf ${REPO_ROOT}/deployments/scripts/tools/offline/verify-offline-files.sh \
+           /usr/local/bin/cubestack-verify-offline
+
 WORKDIR ${REPO_ROOT}
 # 默认进入交互式 bash(docker run -it 即可; 不要再设 ENTRYPOINT= bash,
 # 否则与 CMD 拼接成 "/bin/bash /bin/bash" 报 cannot execute binary file)
