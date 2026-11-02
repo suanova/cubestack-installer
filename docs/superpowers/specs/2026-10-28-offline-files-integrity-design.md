@@ -373,7 +373,7 @@ pin 解析顺序: 环境变量 `OFFLINE_VERIFY_TOOL_SHA256` > 相对库位置
 |---|---|---|
 | 1 | `CUBESTACK_VERIFY_TOOL` | 用户显式指定 |
 | 2 | 仓库副本 `deployments/scripts/tools/offline/verify-offline-files.sh` | 随安装器代码/镜像 |
-| 3 | 发布树副本 `<OFFLINE_FILES_ROOT>/tools/verify-offline-files.sh` | **必须**先在 `SHA256SUMS` 中找到该条目并校验通过才执行; 未登记/哈希不符 → 拒绝使用该副本 |
+| 3 | 发布树副本 `<OFFLINE_FILES_ROOT>/tools/verify-offline-files.sh` + `verify-offline-files.pyz` | **必须**在 `SHA256SUMS` 中找到 wrapper 与 pyz 两个条目并校验通过才执行; 缺失/未登记/哈希不符 → 拒绝使用该副本 |
 | 4 | PATH `cubestack-verify-offline` | CLI 镜像内置 |
 | 5 | 在线下载 | 固定 sha256 校验通过才执行 |
 
@@ -381,13 +381,14 @@ pin 解析顺序: 环境变量 `OFFLINE_VERIFY_TOOL_SHA256` > 相对库位置
 
 - 配置:
   - `OFFLINE_VERIFY_ONLINE_INSTALL=auto|never`(默认 `auto`)
-  - `OFFLINE_VERIFY_TOOL_URL`(默认 `https://raw.githubusercontent.com/suanova/cubestack-installer/main/deployments/scripts/tools/offline/verify-offline-files.sh`;
+  - `OFFLINE_VERIFY_TOOL_URL`(默认 `https://raw.githubusercontent.com/suanova/cubestack-installer/main/deployments/scripts/tools/offline/verify-offline-files.pyz`;
     发布环境建议覆盖为对应 tag)
   - `OFFLINE_VERIFY_TOOL_SHA256`(来自 `deployments/config/verify-tool.sha256`, 仓库内置)
 - 过程:
   - `curl -fsSL --connect-timeout 5 --max-time 30 -o <tmp> <url>`, **最多 3 次**, 间隔 3s/6s;
   - 下载到 `.part`; `sha256sum` 与固定 pin 比对;
-  - 通过后 `chmod 0755`, 原子 `mv` 到 `${XDG_CACHE_HOME:-$HOME/.cache}/cubestack/verify/verify-offline-files.sh`;
+  - 通过后先 `--version` 冒烟, 再原子 `mv` 到 `${XDG_CACHE_HOME:-$HOME/.cache}/cubestack/verify/verify-offline-files.pyz`;
+  - 在缓存目录**本地生成** wrapper `verify-offline-files.sh`(`exec python3 "<pyz>" "$@"`), `chmod 0755`;
   - 失败清理 `.part`, 不落任何半成品。
 - 安全:
   - **pin 缺失或哈希不符 → 拒绝执行(fail-closed)**; 不安装来源不明的校验器;
