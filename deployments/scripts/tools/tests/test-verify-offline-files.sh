@@ -35,7 +35,12 @@ mk_success() {   # <offline-files-dir> <release>
 
 mk_release_tree() {   # <root> <ver>
     local root="$1" ver="$2"
-    mkdir -p "${root}/${ver}/offline-files"
+    mkdir -p "${root}/${ver}/offline-files" \
+             "${root}/${ver}/offline-files/cubestack-operator/charts" "${TMP}/chartsrc-${ver}"
+    # release.env 声明 CHART_VERSION=9.9.9 ⇒ 校验器要求树内必须有对应 chart
+    printf 'apiVersion: v2\nname: test\nversion: 9.9.9\n' > "${TMP}/chartsrc-${ver}/Chart.yaml"
+    tar -C "${TMP}/chartsrc-${ver}" -czf \
+        "${root}/${ver}/offline-files/cubestack-operator/charts/cubestack-operator-chart-9.9.9.tgz" .
     printf 'RELEASE_VERSION=%s\nKUBESPRAY_VERSION=v9.9.9\nCUBESTACK_OPERATOR_CHART_VERSION=9.9.9\n' "${ver}" \
         > "${root}/${ver}/offline-files/release.env"
     printf 'x' > "${root}/${ver}/offline-files/a.txt"
@@ -52,6 +57,13 @@ mk_release_tree() {   # <root> <ver>
 echo "== ⓪ --version =="
 chk "退出码" "0" "$(run "${TOOL}" --version)"
 chk_contains "版本号" "1.0.0" "$(cat "${TMP}/out")"
+
+echo "== ⓪b --help 文案 =="
+"${TOOL}" --help > "${TMP}/help.txt" 2>&1
+chk_contains "--force 仅描述 seal 覆盖" "seal 覆盖正式树" "$(cat "${TMP}/help.txt")"
+chk "--force 帮助不再声称忽略校验戳" "0" \
+    "$(command grep -E '^  --force ' "${TMP}/help.txt" | command grep -c '校验戳' || true)"
+chk_contains "--force-full 是戳旁路" "忽略有效校验戳强制 full" "$(cat "${TMP}/help.txt")"
 
 echo "== ① 布局识别: release =="
 mk_release_tree "${TMP}/bucket" "2.0.0"
@@ -74,6 +86,10 @@ chk "unsealed 无 --allow-unsealed 失败" "1" "$(run "${TOOL}" --root "${TMP}/d
 chk "unsealed + --allow-unsealed 通过" "0" \
     "$(run "${TOOL}" --root "${TMP}/dev" --level metadata --allow-unsealed --json)"
 chk_contains "layout=unsealed-dev" '"layout": "unsealed-dev"' "$(cat "${TMP}/out")"
+# --level auto 在未 seal 树 = quick 结构检查(metadata 校验前自动放行, 无需显式 flag)
+chk "auto 未 seal 树结构检查通过" "0" "$(run "${TOOL}" --root "${TMP}/dev" --level auto)"
+# 其它级别不受影响: 显式 quick 无 --allow-unsealed 仍应按缺清单失败
+chk "quick 未 seal 无 --allow-unsealed 仍失败" "1" "$(run "${TOOL}" --root "${TMP}/dev" --level quick)"
 mk_manifests "${TMP}/dev"
 chk "sealed 通过" "0" "$(run "${TOOL}" --root "${TMP}/dev" --level metadata --json)"
 chk_contains "layout=sealed-dev" '"layout": "sealed-dev"' "$(cat "${TMP}/out")"
@@ -110,6 +126,17 @@ printf 'release=2.0.0\nsha256sums=%064d\n' 0 > "${TMP}/rel2/2.0.0/offline-files/
 chk "绑定错误失败" "1" \
     "$(run "${TOOL}" --root "${TMP}/rel2/2.0.0/offline-files" --release 2.0.0 --layout release --level metadata)"
 chk_contains "点名绑定" "sha256sums" "$(cat "${TMP}/out")"
+
+# 声明了 files= 但值为空: 不能当成"未提供"而跳过计数校验(空值应走 int() 报错)
+mkdir -p "${TMP}/emptycount"
+printf 'x' > "${TMP}/emptycount/a.txt"
+mk_manifests "${TMP}/emptycount"
+printf 'sha256sums=%s\nsizes=%s\nfiles=\n' \
+    "$(sha256sum "${TMP}/emptycount/SHA256SUMS" | awk '{print $1}')" \
+    "$(sha256sum "${TMP}/emptycount/SIZES" | awk '{print $1}')" \
+    > "${TMP}/emptycount/_SUCCESS"
+chk "空 files= 拒绝" "1" "$(run "${TOOL}" --root "${TMP}/emptycount" --level metadata)"
+chk_contains "点名 files= 非整数" "files= 不是整数" "$(cat "${TMP}/out")"
 
 echo "== ⑦ 结构: 截断 tar / 空壳 docker-archive =="
 mkdir -p "${TMP}/st" "${TMP}/st_src" "${TMP}/st_shellsrc"
@@ -149,6 +176,13 @@ mk_manifests "${TMP}/bin"
 printf '\177ELF' > "${TMP}/bin/run"
 chk "SIZES 截断失败" "1" "$(run "${TOOL}" --root "${TMP}/bin" --level quick)"
 chk_contains "点名 run" "run" "$(cat "${TMP}/out")"
+# SIZES 重复路径必须拒绝(否则后一行静默覆盖前一行; 值相同则完全无感知)
+mkdir -p "${TMP}/sizedup"
+printf 'abcd' > "${TMP}/sizedup/a.txt"
+mk_manifests "${TMP}/sizedup"
+printf '%s  ./a.txt\n' "$(stat -c %s "${TMP}/sizedup/a.txt")" >> "${TMP}/sizedup/SIZES"
+chk "SIZES 重复路径拒绝" "1" "$(run "${TOOL}" --root "${TMP}/sizedup" --level quick)"
+chk_contains "点名 SIZES 重复" "SIZES 重复路径" "$(cat "${TMP}/out")"
 
 mkdir -p "${TMP}/tree/kubespray/v9.9.9" "${TMP}/treesrc/kubespray"
 printf 'tree' > "${TMP}/treesrc/kubespray/f"
@@ -170,6 +204,16 @@ printf 'bbbb' > "${TMP}/full/a.bin"
 chk "full 坏字节失败" "1" "$(run "${TOOL}" --root "${TMP}/full" --level full)"
 chk_contains "点名 a.bin" "a.bin" "$(cat "${TMP}/out")"
 
+# --require-cli-tar 且 release.json 无 cli_tar_sha256: 不能只看 tar 可解析就放行
+mkdir -p "${TMP}/clinosha/root"
+printf 'not-a-tar' > "${TMP}/clinosha/cubestack-installer-cli-v9.9.9.tar"
+printf 'x' > "${TMP}/clinosha/root/a.txt"
+printf '{}' > "${TMP}/clinosha/root/release.json"
+mk_manifests "${TMP}/clinosha/root"
+chk "缺 cli_tar_sha256 时 require-cli-tar 失败" "1" \
+    "$(run "${TOOL}" --root "${TMP}/clinosha/root" --release 9.9.9 --level full --require-cli-tar)"
+chk_contains "点名缺 cli_tar_sha256" "缺少 cli_tar_sha256" "$(cat "${TMP}/out")"
+
 mk_release_tree "${TMP}/rel3" "3.0.0"
 chk "CLI tar 正确通过" "0" \
     "$(run "${TOOL}" --root "${TMP}/rel3/3.0.0/offline-files" --release 3.0.0 --layout release --level full)"
@@ -184,6 +228,9 @@ chk "full+写戳" "0" "$(run "${TOOL}" --root "${TMP}/full" --level full)"
 [ -f "${TMP}/full/.cubestack-verified.json" ] && echo "  ok  戳已写" || { echo "  FAIL 戳未写"; fail=1; }
 chk "auto 走戳通过" "0" "$(run "${TOOL}" --root "${TMP}/full" --level auto --json)"
 chk_contains "stamp.valid=true" '"valid": true' "$(cat "${TMP}/out")"
+# 有效戳不能短路 --require-cli-tar(戳只覆盖树内清单, 不覆盖树外 CLI tar)
+chk "auto+require-cli-tar 不走戳" "1" "$(run "${TOOL}" --root "${TMP}/full" --level auto --require-cli-tar)"
+chk_contains "点名缺少 CLI tar" "缺少 CLI tar" "$(cat "${TMP}/out")"
 touch "${TMP}/full/a.bin"
 chk "touch 后 auto 重算 full 通过" "0" "$(run "${TOOL}" --root "${TMP}/full" --level auto --json)"
 printf 'cccc' > "${TMP}/full/a.bin"
@@ -202,6 +249,13 @@ chk "备份存在" "1" \
 printf 'x' > "${TMP}/seal/left.part"
 chk "临时文件拒绝" "2" "$(run "${TOOL}" --root "${TMP}/seal" --seal)"
 rm -f "${TMP}/seal/left.part"
+# 反斜杠文件名必须在 seal 枚举阶段拒绝(norm_rel 会把 \ 归一成 / → 哈希异常或重复/漏哈希)
+mkdir -p "${TMP}/badname"
+printf 'x' > "${TMP}/badname/a\\b.txt"
+chk "反斜杠文件名拒绝" "2" "$(run "${TOOL}" --root "${TMP}/badname" --seal)"
+chk_contains "点名反斜杠" "反斜杠" "$(cat "${TMP}/err")"
+chk_not_contains "不以内部错误中止" "内部错误" "$(cat "${TMP}/err")"
+chk "拒绝后未生成清单" "0" "$([ -e "${TMP}/badname/SHA256SUMS" ] && echo 1 || echo 0)"
 printf 'RELEASE_VERSION=9.9.9\n' > "${TMP}/seal/release.env"
 chk "正式树拒绝(无 --force)" "2" "$(run "${TOOL}" --root "${TMP}/seal" --seal)"
 chk "--force 允许" "0" "$(run "${TOOL}" --root "${TMP}/seal" --seal --force)"
@@ -243,6 +297,11 @@ rm -f "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-9.9.9.tgz
 mk_manifests "${TMP}/chart"
 chk "指定 chart 缺失失败" "1" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
 chk_contains "点名缺失 chart(stdout)" "缺少该 chart" "$(cat "${TMP}/out")"
+# charts/ 目录整体缺失也必须失败(不能提前 return 绕过 chart_missing)
+rm -rf "${TMP}/chart/cubestack-operator/charts"
+mk_manifests "${TMP}/chart"
+chk "charts 目录缺失仍失败" "1" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
+chk_contains "点名缺失 chart(目录缺失)" "缺少该 chart" "$(cat "${TMP}/out")"
 
 echo "== ⑭ SIZES 缺失提示只在 quick 出现 =="
 mkdir -p "${TMP}/nosizes"
