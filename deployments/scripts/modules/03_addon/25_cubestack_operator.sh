@@ -112,6 +112,35 @@ EOS
     return 0
 }
 
+# 清除 operator 命名空间内残留 Cubestack CR 的 finalizer(2026-10-30 覆盖安装实测)。
+# 背景: CSC 级联 + helm uninstall 之后, 命名空间里仍可能有**其他** CR(如 cubepilot 的
+#   AgentInstance `admin-cubepilot`)带 finalizer; 控制器已随组件/operator 退出, finalizer
+#   无人处理 → 后续 `kubectl delete ns --force` 永久卡在 Terminating(模块 600s 超时)。
+# 口径: 只处理 <ns> 内 ai.cubestack.io / operator.cubestack.io 的 CR; **不碰** PVC/Service
+#   等系统资源, 避免误清系统 finalizer。调用点: helm uninstall 之后、强删 ns 之前。
+clear_operator_ns_cr_finalizers() {   # <ns>
+    local ns="$1" _resources _res _names _n _fin
+    _resources="$( (SSH "${K} api-resources --verbs=list --namespaced -o name 2>/dev/null") || true )"
+    [ -n "${_resources}" ] || return 0
+    while IFS= read -r _res; do
+        [ -n "${_res}" ] || continue
+        case "${_res}" in
+            *.ai.cubestack.io|*.operator.cubestack.io) ;;
+            *) continue ;;
+        esac
+        _names="$( (SSH "${K} -n ${ns} get ${_res} -o name 2>/dev/null") || true )"
+        [ -n "${_names}" ] || continue
+        while IFS= read -r _n; do
+            [ -n "${_n}" ] || continue
+            _fin="$( (SSH "${K} -n ${ns} get ${_n} -o jsonpath='{.metadata.finalizers}' 2>/dev/null") || true )"
+            case "${_fin}" in ""|"[]") continue ;; esac
+            say "  清除 ${_n} 的 finalizer: ${_fin}"
+            SSH "${K} -n ${ns} patch ${_n} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
+        done <<< "${_names}"
+    done < <(printf '%s\n' "${_resources}" | command grep -E '\.(ai|operator)\.cubestack\.io$' || true)
+    return 0
+}
+
 # ---------------- 推送后触发 ImagePullBackOff Pod 重新拉取 ----------------
 # 离线模式 [4/6]/[4b/6] 把 tar 推入 registry 后，kubelet 对 ImagePullBackOff 的退避
 # 可达 5 分钟；仅推镜像不会立刻重试（2026-10-23 A 集群实机：镜像已推进 registry，
@@ -218,6 +247,12 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
             || warn "  helm uninstall 未完成(残留由命名空间清理兜底)"
     else
         warn "  helm 不可用 / kubeconfig 同步失败 → 跳过 helm uninstall"
+    fi
+    # ②b 控制器已卸载: 清掉 ns 内残留 CR 的 finalizer(如 AgentInstance admin-cubepilot),
+    #     否则 ③ 的强删 ns 会永久 Terminating(2026-10-30 容器 c 覆盖安装实测)。
+    if SSH "${K} get ns ${_ns} >/dev/null 2>&1"; then
+        say "  清除 ${_ns} 内残留 Cubestack CR 的 finalizer..."
+        clear_operator_ns_cr_finalizers "${_ns}"
     fi
     # ③ 命名空间 / CRD 残留清理(幂等; CRD 随 K8s 覆盖也会消亡, 这里完整卸载顺手清)
     # ★ 破坏性清理的前提是 **CR 已全部终结** —— 未终结场景已在 ② 之前提前告警 exit 1(保留
