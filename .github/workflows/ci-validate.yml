@@ -165,6 +165,18 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-verify-tool-install.sh
 
+      # 部署前门禁: auto/full/off / 未 seal 严格模式 / release.env source 前校验
+      - name: 部署前完整性门禁回归(offline gate)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-deploy-offline-gate.sh
+
+      # kubespray tree.tar.gz 边车校验(解包前)
+      - name: tree.tar.gz 边车回归(tree sidecar)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-offline-tree-check.sh
+
       # release-2.0 组件镜像原地刷新: fake mc + fixture, 覆盖 tar/chart/CLI/SHA256SUMS/_SUCCESS
       - name: release-2.0 组件镜像同步回归(release sync)
         run: |
