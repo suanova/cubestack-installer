@@ -1,8 +1,11 @@
 # 节点池调度隔离(node pool)
 
-> 2026-10-27 起分阶段实现。当前**默认口径**：master 默认 **cordon（`Unschedulable=true`）**，
-> CubeStack operator/平台组件通过 nodeSelector + toleration 仍能调度/重建到 master；设置
-> `NODE_POOL_MASTER_CORDON=false` 可保持 master 可调度。GPU worker 隔离在后续阶段补充。
+> 2026-11-02 起**默认口径**：master 默认 **可调度** —— 不 cordon，且由 `node_pool` 模块移除
+> kubespray 默认给 control-plane 打的 `node-role.kubernetes.io/control-plane:NoSchedule`
+> 污点；CubeStack operator/平台组件仍通过 nodeSelector + toleration 钉到 master。设置
+> `NODE_POOL_MASTER_CORDON=true` 可改为 cordon 隔离；设置
+> `NODE_POOL_MASTER_SCHEDULABLE=false` 可保留 kubespray 默认污点（不可调度但也不 cordon）。
+> GPU worker 隔离在后续阶段补充。
 >
 > **无可用 worker 安全护栏（2026-10-28）**：没有 **Ready 且未 cordon** 的 worker（单节点
 > all-in-one / 纯 master 集群，或配置的 worker 全部 NotReady / 已 cordon）时，即使
@@ -11,9 +14,10 @@
 
 ## 目标
 
-- **master**：默认 **cordon**（`Unschedulable=true`），但 Ceph / operator / 平台组件通过
-  nodeSelector + toleration 仍能调度到 master；设 `NODE_POOL_MASTER_CORDON=false` 可保持
-  master 可调度（Pod 侧 toleration 仍保留，便于随时 cordon）。
+- **master**：默认 **可调度**（不 cordon、无 control-plane/master 污点），
+  Ceph / operator / 平台组件通过 nodeSelector + toleration 钉到 master；设
+  `NODE_POOL_MASTER_CORDON=true` 可切回 cordon 隔离（Pod 侧 toleration 保留，
+  便于随时切换）。
 - **GPU worker**：纯 GPU 节点，只允许 sglang/vllm 推理与 GPU 驱动/设备插件等必要 Pod；
   系统 DaemonSet 例外。
 - 允许临时维护时对 master `cordon/drain`，不破坏平台组件的重调度。
@@ -65,7 +69,10 @@ sudo ./deployments/scripts/tools/node/node-pool.sh --apply --only <master-hostna
 ```
 
 - 只处理 `NODES` 中 `role=master` 的节点；
-- 标签/键值、cordon 开关来自 `cluster.defaults.conf` §2.8；
+- 标签/键值、污点、cordon 开关来自 `cluster.defaults.conf` §2.8；
+- `NODE_POOL_MASTER_SCHEDULABLE=true`（默认）时，`--apply` 幂等移除 master 的
+  `node-role.kubernetes.io/control-plane` / `node-role.kubernetes.io/master` 污点
+  （其他污点保持不动）；`--check` 发现残留污点即报漂移。`--remove` **不还原**已移除的污点；
 - cordon 由本工具创建时写 annotation
   `cubestack.io/node-pool-cordoned-by-installer=true`；
 - `--remove` **只**回滚本工具创建的 cordon（annotation 判定），不会误删用户预先设置的 cordon；
@@ -113,6 +120,12 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
 - 执行顺序：先 `cubestack-placement.sh --apply` 给平台组件加 master placement（
   `NODE_POOL_PLATFORM_PLACEMENT=true` 时再跑 `master-placement.sh`），最后打 master 标签/
   按需 cordon；
+- **k8s 阶段提前收敛(2026-11-03)**：`06_k8s_deploy.sh` 在 kubespray 成功后、addon 之前会调用
+  `tools/node/node-pool.sh --apply`（临时强制 `NODE_POOL_MASTER_CORDON=false`）只做
+  "master 可调度"（移除 control-plane/master 污点 + 加 master 标签）。原因：kubespray 的
+  registry ReplicaSet 没有 control-plane toleration，而 `05_k8s_registry` 会等它 Ready；
+  纯 master / 多 master 无 worker 集群若等到本模块（53）才去污点，registry 会先 600s 超时。
+  cordon 与平台 placement 仍由本模块在 addon 末尾按配置执行（幂等重跑）。
 - `remove` 先 uncordon，再移除 master nodeSelector。**回滚不看当前 placement 开关**：
   应用后把 `NODE_POOL_CUBESTACK_PLACEMENT`/`NODE_POOL_PLATFORM_PLACEMENT` 改成 false
   再执行 remove，仍会清掉本工具施加的 nodeSelector（与 cordon 的 ownership 口径一致）。
@@ -182,7 +195,8 @@ sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worke
 | `NODE_POOL_ENABLED` | `true` | 总开关（默认随全量部署） |
 | `NODE_POOL_ACTION` | `apply` | `apply` / `check` / `remove` |
 | `NODE_POOL_MASTER_LABEL` | `node-pool=control-plane` | master 标签 |
-| `NODE_POOL_MASTER_CORDON` | `true` | master 是否 cordon（默认 cordon；false=保持可调度；**无可用 worker 时自动跳过 cordon**） |
+| `NODE_POOL_MASTER_CORDON` | `false` | master 是否 cordon（默认 false=可调度；true=cordon；**无可用 worker 时自动跳过 cordon**） |
+| `NODE_POOL_MASTER_SCHEDULABLE` | `true` | 是否移除 master 的 control-plane/master NoSchedule 污点（默认 true=可调度；false=保留 kubespray 默认污点） |
 | `NODE_POOL_PLATFORM_PLACEMENT` | `false` | 是否把 CoreDNS/metrics/registry/MetalLB 等系统组件也钉 master |
 | `NODE_POOL_CUBESTACK_PLACEMENT` | `true` | CubeStack operator/平台组件钉 master（含 chart values 透传） |
 | `NODE_POOL_GPU_LABEL` | `node-pool=gpu` | 阶段二使用 |
@@ -193,9 +207,10 @@ sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worke
 
 ```bash
 sudo ./deployments/scripts/tools/node/node-pool.sh --apply
-kubectl get node <master> -o jsonpath='{.spec.unschedulable}{"\n"}{.metadata.labels.node-pool}{"\n"}'
-kubectl get nodes   # NODE_POOL_MASTER_CORDON=true 且有可用 worker 时 master 显示 SchedulingDisabled;
-                    # 无可用 worker 时 master 保持可调度(见「无可用 worker 拓扑」)
+kubectl get node <master> -o jsonpath='{.spec.unschedulable}{"\n"}{.metadata.labels.node-pool}{"\n"}{.spec.taints}{"\n"}'
+kubectl get nodes   # 默认 NODE_POOL_MASTER_CORDON=false + SCHEDULABLE=true → master 可调度;
+                    # CORDON=true 且有可用 worker 时 master 显示 SchedulingDisabled;
+                    # 无可用 worker 时永远不 cordon(见「无可用 worker 拓扑」)
 
 # 带 toleration 的测试 Pod(参见上方 YAML)应 Running; 不带 toleration 时, 仅当 master 仍有
 # control-plane 污点或已 cordon 才 Pending(单节点无 worker 集群已移除污点且不 cordon, Pod 可调度)

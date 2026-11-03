@@ -2,21 +2,25 @@
 # ============================================================
 # node-pool.sh — 节点池基础操作(master 标签 + 可选 cordon; 幂等可回滚)
 # ------------------------------------------------------------
-# 目标(2026-10-27): master 保持 Unschedulable=True(SchedulingDisabled), 但 Ceph/
-#   operator 等平台 Pod 通过 nodeSelector + special toleration
-#   (node.kubernetes.io/unschedulable:NoSchedule)仍可调度到 master。
-#   本工具只做**节点侧**标签/cordon:
+# 目标(2026-11-02 默认口径): master 默认**可调度** —— 不 cordon, 且移除 kubespray 默认
+#   给 control-plane 打的 node-role.kubernetes.io/control-plane:NoSchedule 污点。
+#   CubeStack/operator 等平台 Pod 仍通过 nodeSelector + special toleration
+#   (node.kubernetes.io/unschedulable:NoSchedule)可调度到 master;
+#   需要隔离时设 NODE_POOL_MASTER_CORDON=true 改为 cordon。
+#   本工具只做**节点侧**标签/cordon/污点:
 #     · --apply  : master 打 NODE_POOL_MASTER_LABEL(默认 node-pool=control-plane);
 #                  NODE_POOL_MASTER_CORDON=true 时 cordon, 并打 ownership annotation
 #                  cubestack.io/node-pool-cordoned-by-installer=true;
 #                  CORDON=false 时反向收敛: 本工具创建过的 cordon(annotation 判定)会被
 #                  uncordon 并清 annotation; 用户/其他工具创建的 cordon 保持不动;
+#                  NODE_POOL_MASTER_SCHEDULABLE=true(默认)时移除 master 的
+#                  control-plane/master NoSchedule 污点(幂等, 对既存集群重跑同样生效);
 #                  ownership 标记写/删失败不会静默忽略: 写失败回滚 cordon;
 #                  删失败先**确认性重读** annotation: 已清则视为完成, 仍在才重新 cordon,
 #                  读取失败则不擅自动作并报错(避免留下无标记、永不回滚的 cordon);
-#     · --check  : 只读校验期望态(标签 + cordon); 漂移非 0;
+#     · --check  : 只读校验期望态(标签 + cordon + 污点); 漂移非 0;
 #     · --remove : 移除本工具打的标签; 仅当 ownership annotation 存在时 uncordon
-#                  (不会误删用户/其他工具创建的 cordon)。
+#                  (不会误删用户/其他工具创建的 cordon); 不还原已移除的污点。
 #   DaemonSet 会由控制器自动容忍 node.kubernetes.io/unschedulable:NoSchedule;
 #   Deployment/StatefulSet 需要在其 PodTemplate 里显式加该 toleration(见 docs/node-pool.md)。
 #
@@ -60,11 +64,20 @@ ACTION="${ACTION:-${NODE_POOL_ACTION:-apply}}"
 case "${ACTION}" in apply|check|remove) : ;; *) err "NODE_POOL_ACTION=${ACTION} 非法(apply|check|remove)"; exit 1 ;; esac
 
 MASTER_LABEL="${NODE_POOL_MASTER_LABEL:-node-pool=control-plane}"
-MASTER_CORDON="${NODE_POOL_MASTER_CORDON:-true}"
+MASTER_CORDON="${NODE_POOL_MASTER_CORDON:-false}"
 case "${MASTER_CORDON,,}" in
     true|1|yes|on)  MASTER_CORDON="true" ;;
     false|0|no|off|"") MASTER_CORDON="false" ;;
     *) err "NODE_POOL_MASTER_CORDON 非法: '${MASTER_CORDON}'(true/false)"; exit 1 ;;
+esac
+# master 是否可调度: 默认 true = 移除 kubespray 默认的 control-plane/master NoSchedule 污点。
+# 与 MASTER_CORDON 独立: CORDON=true 时仍可先移除污点, 最终由 cordon 的隐式
+# node.kubernetes.io/unschedulable:NoSchedule 决定不可调度。
+MASTER_SCHEDULABLE="${NODE_POOL_MASTER_SCHEDULABLE:-true}"
+case "${MASTER_SCHEDULABLE,,}" in
+    true|1|yes|on)  MASTER_SCHEDULABLE="true" ;;
+    false|0|no|off|"") MASTER_SCHEDULABLE="false" ;;
+    *) err "NODE_POOL_MASTER_SCHEDULABLE 非法: '${MASTER_SCHEDULABLE}'(true/false)"; exit 1 ;;
 esac
 MASTER_KEY="${MASTER_LABEL%%=*}"
 MASTER_VAL="${MASTER_LABEL#*=}"
@@ -85,6 +98,33 @@ _np_get_unsched() { SSH "${K} get node "$1" -o jsonpath='{.spec.unschedulable}'"
 _np_get_annotations() { SSH "${K} get node "${1}" -o jsonpath='{.metadata.annotations}'" 2>/dev/null || true; }
 # 读取 annotations 并**保留退出码**: 用于区分"读取失败"与"标记确实不存在"。
 _np_read_annotations() { SSH "${K} get node "${1}" -o jsonpath='{.metadata.annotations}'" 2>/dev/null; }
+# 读取 taints 并保留退出码: 区分"读取失败"与"确实没有污点"(后者输出为空)。
+_np_get_taints() { SSH "${K} get node "${1}" -o jsonpath='{.spec.taints}'" 2>/dev/null; }
+# 是否带 master/control-plane 污点; etcd/自定义污点不在此列, 保持不动。
+_np_has_master_taint() { case "$1" in *'node-role.kubernetes.io/control-plane'*|*'node-role.kubernetes.io/master'*) return 0 ;; *) return 1 ;; esac; }
+# 让 master 可调度: 幂等移除 control-plane/master NoSchedule 污点(保留其他污点)。
+# 注意: 不 uncordon —— cordon 由 NODE_POOL_MASTER_CORDON 独立控制, 互不覆盖。
+_np_make_master_schedulable() {   # <host> <success-suffix> → 0=成功; 1=失败(已 err)
+    local host="$1" suf="${2:-}" taints key
+    if ! taints="$(_np_get_taints "${host}")"; then
+        err "  [${host}] 读取 taints 失败(无法确认 master 是否可调度${suf:+; ${suf}})"
+        return 1
+    fi
+    if ! _np_has_master_taint "${taints}"; then
+        ok "  [${host}] 无 control-plane/master 污点(master 可调度${suf:+; ${suf}})"
+        return 0
+    fi
+    for key in node-role.kubernetes.io/control-plane node-role.kubernetes.io/master; do
+        case "${taints}" in *"${key}"*) ;; *) continue ;; esac
+        if SSH "${K} taint node ${host} ${key}-" >/dev/null 2>&1; then
+            ok "  [${host}] 已移除 ${key} 污点(master 可调度${suf:+; ${suf}})"
+        else
+            err "  [${host}] 移除 ${key} 污点失败(手动: kubectl taint node ${host} ${key}-)"
+            return 1
+        fi
+    done
+    return 0
+}
 _np_label_present() { local labels="$1"; case ",${labels}," in *",${MASTER_KEY}=${MASTER_VAL},"*) return 0 ;; *) return 1 ;; esac; }
 _np_owned() {
     # 真实 kubectl -o jsonpath='{.metadata.annotations}' 返回 JSON 对象:
@@ -209,7 +249,7 @@ if [ "${MASTER_CORDON}" = "true" ] && [ "${ACTION}" != "remove" ]; then
     fi
 fi
 
-say "节点池(master)动作=${ACTION}: ${#MASTER_HOSTS[@]} 台 master, ${WORKER_COUNT} 台 worker; label=${MASTER_KEY}=${MASTER_VAL}; cordon=${MASTER_CORDON}"
+say "节点池(master)动作=${ACTION}: ${#MASTER_HOSTS[@]} 台 master, ${WORKER_COUNT} 台 worker; label=${MASTER_KEY}=${MASTER_VAL}; cordon=${MASTER_CORDON}; schedulable=${MASTER_SCHEDULABLE}"
 FAILED=0
 for host in "${MASTER_HOSTS[@]}"; do
     labels="$(_np_get_labels "${host}")"
@@ -226,6 +266,9 @@ for host in "${MASTER_HOSTS[@]}"; do
                 else
                     err "  [${host}] 打标签失败"; FAILED=1
                 fi
+            fi
+            if [ "${MASTER_SCHEDULABLE}" = "true" ]; then
+                _np_make_master_schedulable "${host}" || FAILED=1
             fi
             if [ "${MASTER_CORDON}" = "true" ]; then
                 if [ "${unsched}" = "true" ]; then
@@ -279,6 +322,16 @@ for host in "${MASTER_HOSTS[@]}"; do
                 ok "  [${host}] 标签 OK(${MASTER_KEY}=${MASTER_VAL})"
             else
                 err "  [${host}] 标签缺失/不匹配: 实际 labels=${labels:-<none>}, 期望 ${MASTER_KEY}=${MASTER_VAL}"; FAILED=1
+            fi
+            if [ "${MASTER_SCHEDULABLE}" = "true" ]; then
+                if ! _taints="$(_np_get_taints "${host}")"; then
+                    err "  [${host}] 读取 taints 失败"; FAILED=1
+                elif _np_has_master_taint "${_taints}"; then
+                    err "  [${host}] 仍有 control-plane/master 污点(NODE_POOL_MASTER_SCHEDULABLE=true): ${_taints}"; FAILED=1
+                else
+                    ok "  [${host}] 无 control-plane/master 污点 OK"
+                fi
+                unset _taints
             fi
             if [ "${MASTER_CORDON}" = "true" ]; then
                 if [ "${unsched}" = "true" ]; then

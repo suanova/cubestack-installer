@@ -29,8 +29,11 @@
 #     --steps cephfs_mount 在已部署集群上: k8s_deploy 状态 done(REPEAT:0) → 闭包跳过, 不会重跑; 全新集群则先部署 k8s。
 #     internal 全量部署仍按文件序号(03 ceph_csi → 07 cephfs_mount)保证顺序, 单独 --steps
 #     internal 时请一并跑 ceph,ceph_csi(模块会预检 CephCluster/CephFilesystem 并就绪)。
-#   · 验证: DaemonSet Ready 后逐台 Ready 节点 SSH 校验(fstype=ceph + mds_namespace=选定 FS +
-#     读写/只读探针); 预检会卸载 FS/只读状态不一致的旧挂载(DS 只按 fstype 判"已挂载")。
+#   · 验证: DaemonSet **readinessProbe 就绪**(目标路径 fstype=ceph, 只读时含 ro)后才算
+#     rollout 完成; 随后逐台 Ready 节点 SSH 校验(fstype=ceph + mds_namespace=选定 FS +
+#     读写/只读探针), 首次挂载/传播延迟用有界重试容忍(CEPHFS_MOUNT_VERIFY_TIMEOUT /
+#     CEPHFS_MOUNT_VERIFY_INTERVAL), 持续失败才判节点异常;
+#     预检会卸载 FS/只读状态不一致的旧挂载(DS 只按 fstype 判"已挂载")。
 #   · 卸载: 删 DaemonSet + 等 Pod 退出 + **逐节点显式 umount**(传播到宿主机的挂载不会必然随
 #     Pod 退出消失, 2026-10-19 实机验证) + Secret + internal 专用 cephx 用户;
 #     **任一节点仍有 ceph 挂载残留 → 非零退出**(不能静默成功, 否则 Ceph 销毁后挂载变僵尸态);
@@ -531,8 +534,12 @@ DS_YAML="$(sed \
 _apply_yaml "${DS_YAML}" >/dev/null || { err "应用 DaemonSet 失败"; exit 1; }
 
 ROLLOUT_OK=0
-if ( SSH "${K}" -n "${CEPH_NAMESPACE}" rollout status "ds/${CEPHFS_MOUNT_DS_NAME}" --timeout=180s >/dev/null 2>&1 ); then
-    ROLLOUT_OK=1; ok "  DaemonSet 已滚动完成"
+# ★ 2026-11-02: readinessProbe 已把 Ready 定义为"目标路径真实 fstype=ceph", 因此 rollout
+#   status 成功即代表每台节点挂载完成; 超时时间可配(大集群逐台首次挂载会累加)。
+_ROLLOUT_TIMEOUT="${CEPHFS_MOUNT_ROLLOUT_TIMEOUT:-300}"
+case "${_ROLLOUT_TIMEOUT}" in ''|*[!0-9]*) warn "  CEPHFS_MOUNT_ROLLOUT_TIMEOUT='${_ROLLOUT_TIMEOUT}' 非法, 回退 300"; _ROLLOUT_TIMEOUT=300 ;; esac
+if ( SSH "${K}" -n "${CEPH_NAMESPACE}" rollout status "ds/${CEPHFS_MOUNT_DS_NAME}" --timeout="${_ROLLOUT_TIMEOUT}s" >/dev/null 2>&1 ); then
+    ROLLOUT_OK=1; ok "  DaemonSet 已滚动完成(mounter readiness = 目标路径已挂载 CephFS)"
 else
     # 2026-10-19 实机: 旧 CephFS 挂载 lazy umount 后, 内核 ceph 客户端仍可能卡住 →
     #   kubelet 对 hostPath(host-target)的 bind mount 超时("unmounted volumes=[host-target]:
@@ -545,13 +552,22 @@ else
         err "        重启后重跑 --steps cephfs_mount(不要在 Pod 卡住时继续)"
         exit 1
     fi
-    warn "  DaemonSet 180s 内未完成滚动(继续逐节点校验; 失败节点会列出)"
+    warn "  DaemonSet ${_ROLLOUT_TIMEOUT}s 内未完成滚动(继续逐节点校验; 失败节点会列出)"
 fi
 
-# ---------------- 逐节点真实验证 ----------------
-say "逐节点验证宿主机挂载(需 Ready + fstype=ceph + 写读探针)..."
+# ---------------- 逐节点真实验证(有界重试) ----------------
+# ★ 2026-11-02 实机竞态: 全新节点首次挂载要先 modprobe ceph + 建 mon 会话(约 5s+),
+#   旧实现只校验一次, worker03 恰好在窗口内读到 ext4 → NOT_MOUNTED 误判、部署中断。
+#   这里对每个节点做**有界重试**: 只有持续超过 CEPHFS_MOUNT_VERIFY_TIMEOUT 才判异常。
+#   DaemonSet 侧同时加了 readinessProbe(目标路径真实 fstype=ceph), rollout 完成的语义
+#   也同步修正 —— 两层防护互为兜底(旧 Pod 模板/传播延迟仍能靠本循环收敛)。
+say "逐节点验证宿主机挂载(需 Ready + fstype=ceph + 写读探针; 首次挂载竞态自动重试)..."
 VERIFY_FAIL=""
 VERIFIED=0
+_VERIFY_TIMEOUT="${CEPHFS_MOUNT_VERIFY_TIMEOUT:-90}"
+_VERIFY_INTERVAL="${CEPHFS_MOUNT_VERIFY_INTERVAL:-5}"
+case "${_VERIFY_TIMEOUT}" in ''|*[!0-9]*) warn "  CEPHFS_MOUNT_VERIFY_TIMEOUT='${_VERIFY_TIMEOUT}' 非法, 回退 90"; _VERIFY_TIMEOUT=90 ;; esac
+case "${_VERIFY_INTERVAL}" in ''|*[!0-9]*) warn "  CEPHFS_MOUNT_VERIFY_INTERVAL='${_VERIFY_INTERVAL}' 非法, 回退 5"; _VERIFY_INTERVAL=5 ;; esac
 for _line in "${NODES[@]:-}"; do
     [ -z "${_line}" ] && continue
     node_parse "${_line}"
@@ -593,10 +609,30 @@ else
     rm -f \"\${p}\"
 fi
 echo CEPH_MOUNT_OK"
-    _out="$(_node_ssh "${_ip}" "${_verify_cmd}" 2>&1 || true)"
+    _deadline=$(( $(date +%s) + _VERIFY_TIMEOUT ))
+    _attempt=0
+    _out=""
+    while :; do
+        _attempt=$((_attempt + 1))
+        _out="$(_node_ssh "${_ip}" "${_verify_cmd}" 2>&1 || true)"
+        case "${_out}" in *CEPH_MOUNT_OK*) break ;; esac
+        if [ "$(date +%s)" -ge "${_deadline}" ]; then break; fi
+        say "  ${_host}(${_ip}) 尚未就绪(第 ${_attempt} 次: $(printf '%s' "${_out}" | tail -1)), ${_VERIFY_INTERVAL}s 后重试..."
+        sleep "${_VERIFY_INTERVAL}"
+    done
     case "${_out}" in
-        *CEPH_MOUNT_OK*) VERIFIED=$((VERIFIED + 1)); ok "  ${_host}(${_ip}) 挂载 OK" ;;
-        *) VERIFY_FAIL="${VERIFY_FAIL}${_host}(${_ip}) "; warn "  ${_host}(${_ip}) 校验失败: $(printf '%s' "${_out}" | tail -1)" ;;
+        *CEPH_MOUNT_OK*)
+            VERIFIED=$((VERIFIED + 1))
+            if [ "${_attempt}" -gt 1 ]; then
+                ok "  ${_host}(${_ip}) 挂载 OK(重试 ${_attempt} 次后)"
+            else
+                ok "  ${_host}(${_ip}) 挂载 OK"
+            fi
+            ;;
+        *)
+            VERIFY_FAIL="${VERIFY_FAIL}${_host}(${_ip}) "
+            warn "  ${_host}(${_ip}) 持续 ${_VERIFY_TIMEOUT}s 校验失败(共 ${_attempt} 次): $(printf '%s' "${_out}" | tail -1)"
+            ;;
     esac
 done
 if [ "${VERIFIED}" -eq 0 ]; then

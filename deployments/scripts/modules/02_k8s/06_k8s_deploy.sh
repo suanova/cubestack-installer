@@ -232,6 +232,16 @@ unset _pre_args
 OFFLINE_SCRIPT="${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
 [ -f "${OFFLINE_SCRIPT}" ] || { err "未找到 ${OFFLINE_SCRIPT}"; exit 1; }
 
+# ★ 2026-11-03: 固定 NodePort 泄漏预检(--fresh/重跑友好)
+#   apiserver 的 NodePort 分配器可能保留上一次部署的固定端口(registry 默认 31148)为
+#   "已分配但无 Service 持有", repair 控制器约 6min 才清理; 落在窗口内的 registry apply
+#   会报 "provided port is already allocated"(实机 2026-11-03, docs/troubleshooting.md 三.14)。
+#   registry role 内已有等待补丁(16); 这里在 k8s_deploy 入口再做一次**只读**预检,
+#   让 --fresh/重跑尽早收敛。集群尚不存在/不可达 → 工具直接跳过。
+say "固定 NodePort 泄漏预检(registry ${REGISTRY_NODEPORT:-31148}; 仅集群已存在时)..."
+bash "${SCRIPT_DIR}/tools/k8s/nodeport-leak-preflight.sh" --port "${REGISTRY_NODEPORT:-31148}" \
+    || warn "NodePort 泄漏预检失败(继续; registry role 内仍有等待/报错)"
+
 say "执行 kubespray 离线部署 (via cubestack-offline.sh) ..."
 # 透传 cluster.conf 的预加载镜像集合; 仅当显式定义了该变量(含空串=全量同步)才传递,
 # 否则由 cubestack-offline.sh 回退内置默认最小集合
@@ -261,3 +271,19 @@ unset _CEPH_SYSTEM_ON
 env "${OFFLINE_ENV[@]}" bash "${OFFLINE_SCRIPT}" install
 _conf_guard
 ok "kubespray 集群部署完成"
+
+# ★ 2026-11-03: 把 master 可调度收敛**提前到 addon 之前**。
+#   原因: kubespray 的 registry ReplicaSet 没有 control-plane toleration
+#   (roles/kubernetes-apps/registry/templates/registry-rs.yml.j2 无 tolerations), 在纯
+#   master(无 worker)或 master 仍带 control-plane:NoSchedule 的集群上会一直 Pending;
+#   而 05_k8s_registry 会等待 pod Ready(默认 600s)⇒ 超时失败。负责移除污点的 node_pool
+#   模块序号是 53, 排在 registry(05)之后, 来不及。
+#   这里在 k8s 阶段结束时先做一次"仅可调度收敛"(幂等): 临时强制 CORDON=false, 只移除
+#   control-plane/master 污点(是否移除仍由 NODE_POOL_MASTER_SCHEDULABLE 决定);
+#   cordon 与平台 placement 仍由 53_node_pool 在 addon 末尾按配置执行。
+if [ "${NODE_POOL_ENABLED:-true}" = "true" ] || [ "${NODE_POOL_ENABLED:-true}" = "1" ]; then
+    say "master 可调度收敛(k8s 阶段提前; 仅移除污点, 不在此阶段 cordon)..."
+    NODE_POOL_MASTER_CORDON=false \
+        bash "${REPO_ROOT}/deployments/scripts/tools/node/node-pool.sh" --apply \
+        || { err "master 可调度收敛失败: 后续 addon(registry 等)可能因 control-plane 污点 Pending; 可稍后 --steps node_pool 重试"; exit 1; }
+fi
