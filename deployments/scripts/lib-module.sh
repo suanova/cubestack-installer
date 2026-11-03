@@ -52,9 +52,16 @@
 MODULES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/modules"
 
 # Merge extra module roots (colon-separated) into a temporary modules root so
-# discovery and execution paths stay unchanged. The merged root only holds
-# symlinks and is left for the system /tmp cleanup.
-if [ -n "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ] && [ -z "${CUBESTACK_MODULES_MERGED:-}" ]; then
+# discovery and execution paths stay unchanged. Child processes reuse the
+# exported merged root. The merged root only holds symlinks and is left for the
+# system /tmp cleanup.
+if [ -n "${CUBESTACK_MODULES_MERGED:-}" ]; then
+    [ -d "${CUBESTACK_MODULES_MERGED}" ] || {
+        echo "error: merged modules dir missing: ${CUBESTACK_MODULES_MERGED}" >&2
+        exit 1
+    }
+    MODULES_DIR="${CUBESTACK_MODULES_MERGED}"
+elif [ -n "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ]; then
     _cs_merged="$(mktemp -d "${TMPDIR:-/tmp}/cubestack-modules.XXXXXX")" || {
         echo "error: failed to create temporary modules dir" >&2
         exit 1

@@ -34,6 +34,10 @@ merged="$(bash -c "CUBESTACK_EXTRA_MODULES_DIRS='${TMP}/extra'; source '${LIB_CO
 chk_not "extra root changes MODULES_DIR" "${REPO_ROOT}/deployments/scripts/modules" "${merged}"
 if [ -L "${merged}/03_addon/99_test_extra.sh" ]; then echo "  ok  extra module is symlinked"; else echo "  FAIL extra module symlink missing"; fail=1; fi
 
+# Child process (e.g. cluster-teardown.sh) reuses the exported merged root.
+out="$(bash -c "CUBESTACK_MODULES_MERGED='${merged}'; source '${LIB_COMMON}' >/dev/null 2>&1; source '${LIB_MODULE}'; discover_modules; module_index test_extra")"
+chk_not "child reuses merged root" "-1" "${out}"
+
 # Extra phase dir directly: also accepted.
 out="$(bash -c "CUBESTACK_EXTRA_MODULES_DIRS='${TMP}/extra/03_addon'; source '${LIB_COMMON}' >/dev/null 2>&1; source '${LIB_MODULE}'; discover_modules; module_index test_extra")"
 chk_not "extra phase dir discovers module" "-1" "${out}"
