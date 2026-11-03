@@ -22,7 +22,7 @@
 #     只接受 DEV_LAB_LEGACY_TAG_SUFFIXES 定义的后缀(未设置时取 -${CUBESTACK_OPERATOR_IMAGE_TAG});
 #     未定义/多个匹配一律跳过, 不再按 "<tag>-" 任意前缀猜(防 *-hotfix 冒充钉死 tag)。
 #   · 目标 ref: <集群 registry>/suanova/<name>:<tag>(去 Harbor 注册域保 suanova/ 路径,
-#     与 25_cubestack_operator 的自研镜像映射同款)。
+#     与平台镜像映射同款)。
 #   · 幂等: 目标 digest == 源 digest → 跳过 —— tag 是滚动的 latest, **必须比 digest**,
 #     不能只看 tag 存在(与 25 模块同款教训)。
 #     ★ 2026-10-19 修正: 改比 **config digest**(push 会重压缩层, manifest/layer digest 会变;

@@ -53,7 +53,7 @@ deployments/scripts/
 >
 > 镜像仓库定位:集群外私有仓库 = **Harbor**(`01_env/04_harbor.sh`, 部署前于宿主机就绪);集群内 registry = kubespray addon(`03_addon/03_k8s_registry.sh`),**默认不部署**(`REGISTRY_ENABLED=0`)。原 `env_registry`(本地 docker registry)已移除,由 Harbor 承担。
 >
-> 序号约定:`03_addon/` 下 **01~19 为第三方中间件预留**(当前用到 01~11),**20 起为 CubeStack 自研模块**(当前首个自研模块为 `25_cubestack_operator.sh`, 后续自研组件在 20 号段之后追加)。
+> 序号约定:`03_addon/` 下 **01~19 为第三方中间件预留**(当前用到 01~11),**20 起序号预留给外部提供的自研模块**(本仓库不再内置)。
 
 全阶段组件规划(P1/P2/P3)与进度追踪见 `docs/cluster-components-plan.md`。
 

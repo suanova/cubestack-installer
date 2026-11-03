@@ -117,7 +117,7 @@ _ref_digest() {   # <ref> → "sha256:..."; 3 次重试(连续逐查多镜像时
 
 # ---------- 镜像内容身份: config digest(比 manifest digest 更适合 tar↔Harbor 比对) ----------
 # docker-archive 由 skopeo 重打包时 manifest 字节会变(RepoTags/媒体类型), 但 config digest
-# 不变(层次内容身份)。25_cubestack_operator.sh 的推送幂等也用同一口径。
+# 不变(层次内容身份)。平台模块的推送幂等也用同一口径。
 # 远端多架构 index → 先取 amd64/linux 条目, 再 inspect 该 manifest; archive → 直接读 manifest。
 _config_digest() {   # <docker://ref | docker-archive:path> → "sha256:..."
     local ref="$1" raw="" mdig=""

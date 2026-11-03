@@ -458,7 +458,7 @@ find_offline_tar() {
         # ★ 2026-10-12: .tar.gz 支持(大件就地 gzip 省盘)—— **文件名匹配, 不做内容检查**:
         #   · gzip 不可反向寻址, 而 docker-archive 的 manifest.json 在**归档末尾**
         #     ⇒ 任何内容检查 = 整卷解压(11G 级 ~90s/次, 逐镜像调用不可承受; 实测);
-        #   · tar 文件名是权威(上游 ref 的 /,: → _; 同 25_cubestack_operator 的实践),
+        #   · tar 文件名是权威(上游 ref 的 /,: → _; 平台模块同此约定),
         #     内容校验由生产侧(harbor-save)与 plain .tar 路径(可随机寻址, 毫秒级)承担。
         #   文件名形如 <域>_<路径(段内 _)>_<tag>.tar.gz —— 归一化 suffix 后做尾部匹配。
         _ns="$(printf '%s' "${suffix}" | tr '/:' '__')"
@@ -596,7 +596,7 @@ operator_image_tag_for_helm() {
 #   ③ 目录中只有一个 <name>-*.tgz → 用它(版本以 chart 自身为准)
 #   ④ 否则返回 1(调用方列出候选并报错)
 # 输出(stdout): "<tgz路径>\t<chart版本>"
-# 说明: 只读 tar, 不联网; 供 25_cubestack_operator.sh / release-publish.sh 共用。
+# 说明: 只读 tar, 不联网; 供 installer 模块与打包工具共用。
 operator_chart_version() {
     local _tgz="$1" _y
     _y="$(tar -tzf "${_tgz}" 2>/dev/null | command grep -E '/Chart.yaml$' | head -1 || true)"

@@ -98,11 +98,11 @@ chk_contains "gate 提示文件不存在" "文件不存在或已被删除" "$(ca
 echo "== ⑥ 部分部署(--steps)默认 quick(模式解析) =="
 mode() { bash -c 'source "$1"; offline_verify_effective_mode "$2" "$3" "$4" "$5"' _ "${LIB}" "$@"; }
 chk "全量 auto 保持 auto" "auto" "$(mode auto "" 0 "")"
-_out="$(mode auto "--steps cubestack_operator" 0 "")"
+_out="$(mode auto "--steps gpu_operator" 0 "")"
 chk "--steps + auto → quick" "quick" "$(printf '%s\n' "${_out}" | sed -n '1p')"
 chk "--steps + auto 标记 downgraded" "downgraded" "$(printf '%s\n' "${_out}" | sed -n '2p')"
-chk "--steps + full 保持 full" "full" "$(mode full "--steps cubestack_operator" 0 "")"
-chk "--verify-offline full 显式优先" "full" "$(mode auto "--steps cubestack_operator" 0 full)"
+chk "--steps + full 保持 full" "full" "$(mode full "--steps gpu_operator" 0 "")"
+chk "--verify-offline full 显式优先" "full" "$(mode auto "--steps gpu_operator" 0 full)"
 chk "--verify-offline quick 显式优先" "quick" "$(mode auto "" 0 quick)"
 chk "--no-verify-offline → off" "off" "$(mode auto "--steps x" 1 "")"
 bash -c 'source "$1"; offline_verify_effective_mode auto "--steps x" 0 bogus' _ "${LIB}" >/dev/null 2>&1

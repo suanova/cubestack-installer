@@ -173,9 +173,9 @@ nodeSelector + control-plane/unschedulable tolerations：
 sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worker 隔离在后续阶段单独做。
 `NODE_POOL_CUBESTACK_PLACEMENT=false` 可关闭。
 
-- operator 自身的 chart 安装也加了 `nodeSelector`/`tolerations`（`25_cubestack_operator.sh`），
+- operator 自身的 chart 安装也加了 `nodeSelector`/`tolerations`（平台 operator 模块），
   新建/重装时 operator pod 直接落 master。
-- **默认通过 chart 透传**：`25_cubestack_operator.sh` 在 `NODE_POOL_CUBESTACK_PLACEMENT=true`
+- **默认通过 chart 透传**：平台 operator 模块在 `NODE_POOL_CUBESTACK_PLACEMENT=true`
   时生成 values 文件，把以下组件值传给 CubeStackCluster（组件 chart 已原生支持，无需改 chart）：
   - `components.cubepilot.values.operator/api/web`
   - `components.cubestackControllerManager.values`

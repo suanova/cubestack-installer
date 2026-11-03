@@ -122,18 +122,6 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh
 
-      # cubestack_operator 更新/滚动: 两模式 Always / digest 注解 / IMAGE_TAG 生效
-      - name: cubestack_operator 更新行为回归
-        run: |
-          set -euo pipefail
-          bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
-
-      # 平台组件级 step: --steps lws/cube-pilot 只更新指定组件, 不重跑 cubestack_operator
-      - name: 平台组件级 step 回归(cubestack components)
-        run: |
-          set -euo pipefail
-          bash deployments/scripts/tools/tests/test-cubestack-component-steps.sh
-
       # 额外私有模块目录: 默认行为不变 / 合并发现 / 重复文件与 key 拒绝
       - name: 额外私有模块目录回归(extra modules dirs)
         run: |

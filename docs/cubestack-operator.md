@@ -1,12 +1,11 @@
-# CubeStack Operator 部署(25_cubestack_operator)
+# CubeStack Operator 部署(平台模块)
 
 > 组件: **CubeStack 平台 Operator**(一个 CR `CubeStackCluster` 描述整个平台, operator 按组件目录把
 > 各组件渲染并 apply 进集群, 管理健康与卸载)。
 > 上游: <https://github.com/suanova/cubestack-operator>(私有) · chart:
 > `oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart`
 > 分发: chart 随离线包(`offline-files/cubestack-operator/charts/`)走, CLI 镜像不再包含它。
-> 模块: `deployments/scripts/modules/03_addon/25_cubestack_operator.sh`(部署)
-> + `26_verify_cubestack_operator.sh`(端到端验证)
+> 模块: 平台 operator 部署 + 端到端验证模块(由外部版本树提供, 不在本仓库内置)
 > 开关: `CUBESTACK_OPERATOR_ENABLED`(**默认 true**, 2026-10-08 起) · 用法: `--steps cubestack_operator` / `--steps verify_cubestack_operator`
 
 本文既是**设计说明**(为什么这么做), 也是**操作手册**(怎么做)。文中标注实测/未实测的部分。
@@ -438,7 +437,7 @@ kubectl -n envoy-gateway-system get svc \
 Web UI 地址发现(`cubestack-ui-url.sh`)同时修正: **只**把 LoadBalancer 的地址当作 MetalLB;
 NodePort 用节点 IP + `nodePort`; ClusterIP(私有网关)不再作为 Web UI 地址输出。
 
-### 3.7 端到端验证(`26_verify_cubestack_operator.sh`)
+### 3.7 端到端验证(`verify_cubestack_operator`)
 
 | 步 | 断言 | 为什么 |
 |---|---|---|

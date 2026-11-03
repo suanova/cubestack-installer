@@ -27,7 +27,7 @@ operator chart 放在 `charts/` 子目录; 它不是平台组件, 模块的组�
 
 ## 消费方与行为(2026-10-16 起)
 
-`modules/03_addon/25_cubestack_operator.sh`:
+平台 operator 模块:
 
 - **在线模式**(`ONLINE_DEPLOY_CUBESTACK_OPERATOR=true`):[4/6]+[4b/6] 全部跳过 —— 镜像按 chart
   定义从 Harbor 直拉;**本目录的 tar 不被消费**(仅作补料来源)。

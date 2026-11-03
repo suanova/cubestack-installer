@@ -160,7 +160,7 @@ run_component() {   # <key> <script_rel>  → 0=卸了; 1=失败/超时
     local key="$1" rel="$2"
     # ⚠ 不能与上一行合并成一条 local: bash 在**同一 local 语句**里按旧作用域求值 RHS,
     #   set -u 下 ${rel} 会报 "unbound variable"(2026-10-19 实机: 优雅卸载在第一个组件
-    #   cubestack_operator 就中断, 后续 cephfs_mount 未卸载 → CephFS 挂载残留)。
+    #   就中断, 后续 cephfs_mount 未卸载 → CephFS 挂载残留)。
     local mod="${MODULES_DIR}/${rel}"
     [ -f "${mod}" ] || { warn "  模块脚本缺失: ${mod}(跳过 ${key})"; return 1; }
     say "  ▶ 卸载 ${key}(${rel})"
@@ -259,7 +259,7 @@ PY
             [ -n "${_key}" ] || continue
             # ⚠ 必须 </dev/null: run_component 内部的 ssh/helm 会读 stdin, 否则吞掉
             #   这里的 here-string, 循环只执行第一个组件(2026-10-19 实机: 只卸了
-            #   cubestack_operator, cephfs_mount 等全部被静默跳过)。
+            #   第一个组件, cephfs_mount 等全部被静默跳过)。
             if run_component "${_key}" "${_rel}" </dev/null; then _n_ok=$((_n_ok + 1)); else _n_fail=$((_n_fail + 1)); fi
         done <<< "${_order}"
         echo ""

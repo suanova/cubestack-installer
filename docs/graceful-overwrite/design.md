@@ -64,9 +64,9 @@
     首装序——"按安装顺序反序"的正确语义），只更新 `lastSeenAt`/`status`。
   - 幂等；**任何失败仅 warn，绝不阻断安装**（登记是增强，不是依赖）。`K` 未初始化时直接跳过。
 - **调用点**：各模块在**安装成功点**显式调用（不用框架自动钩子——模块自我跳过 TOGGLE=false /
-  ceph 存储节点不足等情形不落登记，语义精确）。约 10 处：`01_metallb`、`04_local_path`、
+  ceph 存储节点不足等情形不落登记，语义精确）。约 9 处：`01_metallb`、`04_local_path`、
   `05_k8s_registry`、`02_ceph`、`03_ceph_csi`、`06_gpu_operator`、`09_multus`、
-  `10_rdma_shared_dev_plugin`、`25_cubestack_operator`、`35_netshoot`。
+  `10_rdma_shared_dev_plugin`、`35_netshoot`。
 - 登记内容 = "operator"广义集（本安装器部署进集群的全部组件，含 kubespray addon 类基座）。
   用户手工 kubectl 部署的第三方负载不在登记内（ceph 消费者兜底仍由 ceph-cleanup ⓪ 泛化扫描覆盖）。
 
@@ -89,7 +89,6 @@ fi
 
 | 组件 | 卸载动作 | 备注 |
 |---|---|---|
-| cubestack_operator | 删 clusterCR（operator 级联优雅收掉 9 个平台组件）→ **有界等待 csc CR 本体终结（finalizer 完成的契约信号；非 Pod 计数）** → `helm uninstall` operator → 清残留 CRD/命名空间 | 先 CR 后 operator：CR 的 finalizer 需要 operator 活着处理。⚠ 2026-10-13(CodeRabbit): 等待门原先用 Pod 计数(Running 视为已收敛→首轮即放行, 等于没等); CR 未终结则**保留 operator(不 helm uninstall)** + **跳过** ns finalizer 清除/强制删 ns/CRD 清理(防 force-finalize 孤儿对象在重装后复活)并**非 0 退出**(引擎不标 uninstalled) |
 | gpu_operator (metax) | 复用现有"清理残留"序列（提为函数，安装/卸载共用）：删 clusteroperator CR → helm uninstall → 删 CRD/ClusterRole/ns/default 旧资源 | 现安装路径 376-390 行就是这套 |
 | multus | 删 vendored manifest 资源（DS/CRD/RBAC）+ 本模块创建的示例 NAD | |
 | rdma_shared_dev_plugin | 删 DS + ConfigMap | RDMA_NAMESPACE 可配 |

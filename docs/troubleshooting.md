@@ -1298,7 +1298,6 @@ kubectl -n cubestack-system get deploy cubestack-operator \
   -o jsonpath='{.spec.template.metadata.annotations}{"\n"}'
 kubectl -n cubestack-system get pods -o wide
 # 更新镜像/ chart 后重跑 --steps, Pod AGE 应变化; 内容未变则 digest 注解不变、不重启
-bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
 ```
 详见 `docs/cubestack-operator.md` §1.1 / §3.6。
 
@@ -1312,7 +1311,7 @@ bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
 - 但主 CR `kubectl -n cubestack-system get csc cubestack` 的 `status.components` 仍显示 `lws=Ready`。
 
 **根因(逐项证据)**
-1. `26_verify_cubestack_operator.sh` 的冒烟 CR 只写了 `deletePolicy: uninstall`, **省略了
+1. 平台 operator 验证模块的冒烟 CR 只写了 `deletePolicy: uninstall`, **省略了
    `spec.components`**。operator 对省略的组件会继承 catalog/chart 默认值; 新版 chart 默认启用
    `lws/envoyGateway/...` ⇒ 冒烟 CR 实际管理了真实组件;
 2. 验证结束 trap 删除冒烟 CR, `deletePolicy=uninstall` 触发组件卸载; operator 日志明确:
@@ -1326,7 +1325,7 @@ bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
   并把 `deletePolicy` 改为 **`retain`**(双保险; CRD 默认也是 retain);
 - 清理前增加护栏: 读取冒烟 CR 的 `spec.components`, 只要发现任何 `enabled: true` 就中止,
   不执行卸载路径;
-- `test-cubestack-operator-update.sh` 增加静态断言(不能出现 `deletePolicy: uninstall`、
+- 平台 operator 回归测试增加静态断言(不能出现 `deletePolicy: uninstall`、
   每个组件 key 必须在冒烟 CR 中显式禁用)。
 
 **恢复被误删的组件**(脚本修复后)
@@ -1342,8 +1341,7 @@ kubectl -n cubestack-system get csc cubestack \
   -o jsonpath='{range .status.components[?(@.name=="lws")]}{.phase}{end}'
 ```
 **验证**: 重新执行 `--steps verify_cubestack_operator`; 结束后 `lws-system` 的 SA/CM/Secret
-必须仍在, Pod 仍 Running, 冒烟 CR 已被清理。回归:
-`bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh`。
+必须仍在, Pod 仍 Running, 冒烟 CR 已被清理。
 
 ### 12. 【2026-10-22】`SERVICE_EXPOSE_MODE=nodeport` 但 Envoy Gateway 公网 Service 仍是 `LoadBalancer/<pending>`, Web UI 打印私有 ClusterIP
 
@@ -1365,7 +1363,7 @@ CubeStack Web UI (MetalLB): http://10.233.54.28/
    于是把私有网关的 ClusterIP 标成了 "MetalLB"。
 
 **解法(已落地):**
-- `25_cubestack_operator.sh`: 显式把 `SERVICE_EXPOSE_MODE` 写入 CR
+- 平台 operator 模块: 显式把 `SERVICE_EXPOSE_MODE` 写入 CR
   `spec.global.serviceExposeMode`(`nodeport|loadbalancer`), 并对已有 CR 纠偏;
 - operator 就绪后调用 `ensure_envoy_gateway_service_type`(lib-common): 创建/更新
   `EnvoyProxy/cubestack-proxy`(`envoyService.type=NodePort|LoadBalancer`)并挂到公网
@@ -1379,7 +1377,6 @@ CubeStack Web UI (MetalLB): http://10.233.54.28/
 kubectl -n envoy-gateway-system get envoyproxy
 kubectl -n envoy-gateway-system get svc -l gateway.envoyproxy.io/owning-gateway-name=cubestack-gateway
 bash deployments/scripts/tools/tests/test-cubestack-ui-url.sh        # ⑥ 公网 NodePort + 私有 ClusterIP
-bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh # ⑨ serviceExposeMode / Envoy 兜底
 ```
 
 ### 13. 【2026-10-28】单节点 / 无 worker 集群被 node_pool cordon: CoreDNS 滚动或节点重启后永久 Pending
@@ -2007,9 +2004,9 @@ ssh <node> "findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,OPTIONS | tail -1"
 - `lib-common.sh` 新增 `ensure_rwo_deployments_recreate <ns> [selector] [wait]`:
   解析 Deployment + PVC, 只把**引用 RWO PVC** 且策略非 Recreate 的 Deployment merge-patch 成
   `strategy: {type: Recreate}`(无 PVC/RWX 的组件不动; 幂等)。
-- `25_cubestack_operator.sh` 的 `[6.5/6]` 在 operator 创建组件后自动执行(等待上界
+- 平台 operator 模块在创建组件后自动执行(等待上界
   `CUBESTACK_OPERATOR_RWO_STRATEGY_WAIT_SECONDS`, 默认 60s)。
-- `cubestack-component-update.sh`(`--steps cubepilot` 等)在 `rollout restart` **之前**执行,
+- 平台组件的 `rollout restart` 之前执行同样的纠正,
   纠正失败会中止滚动(避免把组件滚进 Multi-Attach)。
 - 手工即时修复(本次实机已执行, 旧 Pod 30s 内退出、新 Pod 40s 内 Running):
   ```bash
@@ -2118,7 +2115,7 @@ nodeport 模式的 registry **不监听 domain:5000**(只有 NodePort)，contain
 spec 被 admission 拒绝。helm 可能先把 CR 的 `global.imageRegistry` 改成目标值，所以只看 CR 不够。
 
 **解法(已根治)**
-- `25_cubestack_operator.sh` 在 CR 纠偏阶段检测: CR registry 变化 **或** profile 内任意 `image`
+- 平台 operator 模块在 CR 纠偏阶段检测: CR registry 变化 **或** profile 内任意 `image`
   前缀不属于目标 registry → 删除 `inferenceruntimeprofiles.ai.cubestack.io --all`，
   让 operator 按新 registry 重建；
 - 手工即时恢复:

@@ -17,7 +17,7 @@
 #   · 本模块 = 平台 placement(先) + master 标签/污点/cordon(后)：
 #       - NODE_POOL_CUBESTACK_PLACEMENT=true(默认): cubestack-placement.sh 兜底 patch 平台 Deployment
 #         (patch 前先给 RWO PVC 的 Deployment 设 Recreate，避免 Multi-Attach)；
-#         25_cubestack_operator.sh 还会通过 CubeStackCluster components.<name>.values 在创建
+#         平台 operator 模块还会通过 CubeStackCluster components.<name>.values 在创建
 #         cubepilot-api/operator、controller-manager、portal 时直接下发 master placement。
 #       - NODE_POOL_PLATFORM_PLACEMENT=false(默认): 不动 CoreDNS/metrics/registry/MetalLB 等系统组件。
 #   · 无可用 worker 安全护栏(2026-10-28): 没有 **Ready 且未 cordon** 的 worker(单节点

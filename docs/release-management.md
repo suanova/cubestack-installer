@@ -8,7 +8,6 @@
 > **适用范围**: `release-2.0` 及后续版本；**以离线 MinIO 为主**，Harbor 部分仅为建议
 > **关联文档**:
 > - [`docs/harbor-mirror.md`](harbor-mirror.md) —— 上游镜像 → Harbor `mirrors` 的现有机制
-> - [`docs/cubestack-operator.md`](cubestack-operator.md) —— operator 部署与滚动 `latest`
 > - [`deployments/offline-files/cubestack-operator/README.md`](../deployments/offline-files/cubestack-operator/README.md) —— 平台组件离线镜像现状
 > - [`deployments/config/images.manifest`](../deployments/config/images.manifest) —— 上游镜像清单
 
@@ -117,7 +116,7 @@ LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}}"
 ```
 
 少数历史短名由清单第 3 列锁死：`busybox.tar`、`nginx.tar`。模块按**文件名**解析目标 ref
-（`25_cubestack_operator.sh` 的组件推送逻辑），所以：
+（平台组件推送逻辑），所以：
 
 - **不要改 tar 命名规则**；
 - 版本化发布时，自研镜像文件名里必须带版本（如 `..._2.0.0.tar`），模块才能解析出 `:2.0.0`；
