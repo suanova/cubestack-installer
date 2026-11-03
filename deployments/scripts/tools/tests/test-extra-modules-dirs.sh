@@ -21,25 +21,32 @@ cat > "${TMP}/extra/03_addon/99_test_extra.sh" <<'EOF'
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 0
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
+echo "extra_module_lib_common_ok"
 EOF
 
 # Default: no merge, no extra key.
-out="$(bash -c "source '${LIB_COMMON}' >/dev/null 2>&1; source '${LIB_MODULE}'; discover_modules; module_index test_extra")"
+out="$(bash -c 'source "$1" >/dev/null 2>&1; source "$2"; discover_modules; module_index test_extra' _ "${LIB_COMMON}" "${LIB_MODULE}")"
 chk "default keeps extra module absent" "-1" "${out}"
 
 # Extra root (modules/ with 03_addon/): merged and discoverable.
-out="$(bash -c "CUBESTACK_EXTRA_MODULES_DIRS='${TMP}/extra'; source '${LIB_COMMON}' >/dev/null 2>&1; source '${LIB_MODULE}'; discover_modules; module_index test_extra")"
+out="$(bash -c 'CUBESTACK_EXTRA_MODULES_DIRS="$1"; source "$2" >/dev/null 2>&1; source "$3"; discover_modules; module_index test_extra' _ "${TMP}/extra" "${LIB_COMMON}" "${LIB_MODULE}")"
 chk_not "extra root discovers module" "-1" "${out}"
-merged="$(bash -c "CUBESTACK_EXTRA_MODULES_DIRS='${TMP}/extra'; source '${LIB_COMMON}' >/dev/null 2>&1; source '${LIB_MODULE}'; echo \"\${MODULES_DIR}\"")"
+merged="$(bash -c 'CUBESTACK_EXTRA_MODULES_DIRS="$1"; source "$2" >/dev/null 2>&1; source "$3"; echo "${MODULES_DIR}"' _ "${TMP}/extra" "${LIB_COMMON}" "${LIB_MODULE}")"
 chk_not "extra root changes MODULES_DIR" "${REPO_ROOT}/deployments/scripts/modules" "${merged}"
 if [ -L "${merged}/03_addon/99_test_extra.sh" ]; then echo "  ok  extra module is symlinked"; else echo "  FAIL extra module symlink missing"; fail=1; fi
+if bash "${merged}/03_addon/99_test_extra.sh" 2>/dev/null | grep -qF "extra_module_lib_common_ok"; then
+    echo "  ok  merged module resolves lib-common"
+else
+    echo "  FAIL merged module cannot resolve lib-common"; fail=1
+fi
 
 # Child process (e.g. cluster-teardown.sh) reuses the exported merged root.
-out="$(bash -c "CUBESTACK_MODULES_MERGED='${merged}'; source '${LIB_COMMON}' >/dev/null 2>&1; source '${LIB_MODULE}'; discover_modules; module_index test_extra")"
+out="$(bash -c 'CUBESTACK_MODULES_MERGED="$1"; source "$2" >/dev/null 2>&1; source "$3"; discover_modules; module_index test_extra' _ "${merged}" "${LIB_COMMON}" "${LIB_MODULE}")"
 chk_not "child reuses merged root" "-1" "${out}"
 
 # Extra phase dir directly: also accepted.
-out="$(bash -c "CUBESTACK_EXTRA_MODULES_DIRS='${TMP}/extra/03_addon'; source '${LIB_COMMON}' >/dev/null 2>&1; source '${LIB_MODULE}'; discover_modules; module_index test_extra")"
+out="$(bash -c 'CUBESTACK_EXTRA_MODULES_DIRS="$1"; source "$2" >/dev/null 2>&1; source "$3"; discover_modules; module_index test_extra' _ "${TMP}/extra/03_addon" "${LIB_COMMON}" "${LIB_MODULE}")"
 chk_not "extra phase dir discovers module" "-1" "${out}"
 
 # Duplicate file name must fail during merge.
@@ -50,7 +57,7 @@ cat > "${TMP}/dupfile/03_addon/25_cubestack_operator.sh" <<'EOF'
 # DESC: duplicate file
 # PHASE: addon
 EOF
-if bash -c "CUBESTACK_EXTRA_MODULES_DIRS='${TMP}/dupfile'; source '${LIB_COMMON}' >/dev/null 2>&1; source '${LIB_MODULE}'" >"${TMP}/dupfile.log" 2>&1; then
+if bash -c 'CUBESTACK_EXTRA_MODULES_DIRS="$1"; source "$2" >/dev/null 2>&1; source "$3"' _ "${TMP}/dupfile" "${LIB_COMMON}" "${LIB_MODULE}" >"${TMP}/dupfile.log" 2>&1; then
     echo "  FAIL duplicate file should fail"; fail=1
 else
     echo "  ok  duplicate file rejected"
@@ -65,7 +72,7 @@ cat > "${TMP}/dupkey/03_addon/98_dupkey.sh" <<'EOF'
 # DESC: duplicate key
 # PHASE: addon
 EOF
-if bash -c "CUBESTACK_EXTRA_MODULES_DIRS='${TMP}/dupkey'; source '${LIB_COMMON}' >/dev/null 2>&1; source '${LIB_MODULE}'; discover_modules" >"${TMP}/dupkey.log" 2>&1; then
+if bash -c 'CUBESTACK_EXTRA_MODULES_DIRS="$1"; source "$2" >/dev/null 2>&1; source "$3"; discover_modules' _ "${TMP}/dupkey" "${LIB_COMMON}" "${LIB_MODULE}" >"${TMP}/dupkey.log" 2>&1; then
     echo "  FAIL duplicate key should fail"; fail=1
 else
     echo "  ok  duplicate key rejected"

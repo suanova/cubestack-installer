@@ -52,9 +52,9 @@
 MODULES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/modules"
 
 # Merge extra module roots (colon-separated) into a temporary modules root so
-# discovery and execution paths stay unchanged. Child processes reuse the
-# exported merged root. The merged root only holds symlinks and is left for the
-# system /tmp cleanup.
+# discovery and execution paths stay unchanged. The merged root sits next to
+# modules/ so modules keep resolving ../../lib-common.sh and ../../tools/.
+# Child processes reuse the exported merged root.
 if [ -n "${CUBESTACK_MODULES_MERGED:-}" ]; then
     [ -d "${CUBESTACK_MODULES_MERGED}" ] || {
         echo "error: merged modules dir missing: ${CUBESTACK_MODULES_MERGED}" >&2
@@ -62,7 +62,8 @@ if [ -n "${CUBESTACK_MODULES_MERGED:-}" ]; then
     }
     MODULES_DIR="${CUBESTACK_MODULES_MERGED}"
 elif [ -n "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ]; then
-    _cs_merged="$(mktemp -d "${TMPDIR:-/tmp}/cubestack-modules.XXXXXX")" || {
+    _cs_scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _cs_merged="$(mktemp -d "${_cs_scripts_dir}/.modules-merged.XXXXXX")" || {
         echo "error: failed to create temporary modules dir" >&2
         exit 1
     }
@@ -110,7 +111,7 @@ elif [ -n "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ]; then
     MODULES_DIR="${_cs_merged}"
     export CUBESTACK_MODULES_MERGED="${_cs_merged}"
     unset -f _cs_link_phase
-    unset _cs_merged _cs_phase_dir _cs_phase_dirs _cs_root
+    unset _cs_merged _cs_phase_dir _cs_phase_dirs _cs_root _cs_scripts_dir
 fi
 
 # ---------------- 旧 key → 新 key 别名(向后兼容) ----------------

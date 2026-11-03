@@ -193,9 +193,11 @@ cubestack-installer/                     # MinIO 桶根
 - 发布树自包含，回滚只需切版本号，不依赖 dev 目录当时的状态；
 - 代价是 MinIO 存储按版本重复。控制方式见 §2.3。
 
-> 新 release 布局（`cubestack-release`）还会在版本目录下带 `modules/`（私有模块）。
-> 部署时设置 `CUBESTACK_EXTRA_MODULES_DIRS=<版本目录>/modules`，框架会与内置模块合并；
-> 2.0.x 旧布局不设置该变量，行为不变。
+> 新 release 布局（`cubestack-release`）由 `materialize` 在版本目录下生成
+> `modules/`（私有模块）。部署时设置
+> `CUBESTACK_EXTRA_MODULES_DIRS=<版本目录>/modules`，框架会与内置模块合并。
+> 旧的 `fetch --release` 布局只下载 `offline-files/` 和 CLI tar，不包含
+> `modules/`，不要设置该变量；2.0.x 旧布局行为不变。
 
 ### 2.2 本地目录
 
