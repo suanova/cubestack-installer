@@ -7,11 +7,10 @@
 ## 1. 快速开始
 
 ```bash
-# ① 从 MinIO 取发布版本(下载完成后自动 full 校验 + 写校验戳)
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
-    --release 2.0.0 --dest /data/cubestack-installer
+# ① 版本树由外部打包流程物化(materialize)到本地
+#    <root>/<版本>/offline-files + modules/; 安装侧不再负责下载。
 
-# ② 只校验已下载的树(不下载)
+# ② 校验版本树
 #    默认(不指定 --level) = quick 结构检查, 会明确提示; 全量请加 --level full
 ./deployments/scripts/tools/offline/verify-offline-files.sh \
     --root /data/cubestack-installer/2.0.0/offline-files \
@@ -161,36 +160,11 @@ OFFLINE_VERIFY_ONLINE_INSTALL=auto  # auto|never
 OFFLINE_VERIFY_TOOL_URL=...
 ```
 
-## 7. fetch 校验与修复
+## 7. 版本树的来源
 
-`fetch-offline-from-minio.sh --release` 下载后调用同一校验器（`--level full`），
-失败会点名文件；加 `--repair` 只重下坏文件（最多 1 轮）：
-
-```bash
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
-    --release 2.0.0 --dest /data/cubestack-installer --repair
-```
-
-坏文件会先移到 `<本地桶根>/.repair-quarantine/<版本>/<时间戳>/`（保留证据）。
-
-下载命令默认重试 3 次（`--retry N`、`--retry-delay S`；`mc mirror` 同时启用按对象
-`--retry`）。下载中断后重跑加 `--resume`：
-
-```bash
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
-    --release 2.0.0 --resume --dest /data/cubestack-installer
-```
-
-`--resume` 先 full 校验本地树；对“本地大小 < 远端大小”的文件用 `mc cat --offset`
-追加剩余字节，并按 `SHA256SUMS` 的 sha256 校验；续传后不符则完整重下，
-最后再全量校验。本地已完整则直接退出，不重新下载。
-
-`--release`/`--flat` 下载默认还会**精确清理**：本地 `offline-files` 中 MinIO 不存在的
-文件会被删除，使目录与远端一致；执行前有 30 秒倒计时（`--clean-countdown N`，`--yes`
-跳过），非交互环境没有 `--yes` 会中止。`--no-clean` 保留本地多余文件（此时完整性
-校验会因“磁盘存在但清单未登记”失败，仅建议调试）。`.cubestack-*` 校验戳/清单备份
-始终保留；`--sub`/dev 模式需要显式 `--clean`，且只清理本次选中的子目录。
-源端也坏时明确报错，不会无限重试。`--no-verify` 仅调试用。
+2.1 起 installer 不再从 MinIO 下载版本树：外部打包流程负责 `materialize` / `merge-tree`，
+installer 只消费已经落到本地的 `<root>/<版本>/offline-files`。
+若交付过程中出现损坏，重新物化该版本树；完整性由上面的校验器负责。
 
 ## 8. 工具自举（三种来源）
 

@@ -26,7 +26,7 @@ gate() {   # <root> <mode> [strict]
     OFFLINE_FILES_ROOT="$1" OFFLINE_VERIFY_MODE="$2" \
     OFFLINE_VERIFY_STRICT_DEV="${3:-true}" OFFLINE_VERIFY_STAMP=true \
     OFFLINE_VERIFY_ONLINE_INSTALL=never \
-    env -u CUBESTACK_RELEASE -u CUBESTACK_RELEASE_LAYOUT -u CUBESTACK_RELEASE_ROOT \
+    env -u CUBESTACK_RELEASE -u CUBESTACK_RELEASE_ROOT \
         bash -c 'source "$1"; verify_offline_gate' _ "${LIB}" \
         >"${TMP}/out" 2>"${TMP}/err"
     echo $?

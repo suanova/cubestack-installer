@@ -2679,7 +2679,7 @@ elif [ -z "${PRELOAD_IMAGE_PATTERNS:-}" ]; then
     # 内置默认最小集合: kubespray 默认部署 + calico 网络插件 + metallb/registry/local-path/nginx 附加组件所需镜像
     # (排除 cilium/flannel/ingress-nginx/dashboard 等未启用组件的镜像)
     # ⚠ 本行是**第 4 份**副本(standalone 直跑本脚本时的兜底默认值), 必须与 cluster.conf /
-    #   cluster.conf.example / tools/offline/trim-offline-files.sh 三份**逐字节一致** ——
+    #   cluster.conf.example / cluster.defaults.conf **逐字节一致** ——
     #   check-modules.sh 第 ⑭ 项断言这**四份**(2026-09-28 起本份已纳入; 本行不在 file 顶部,
     #   断言脚本会跳过上面那条 ${CUBESTACK_PRELOAD_IMAGE_PATTERNS} 透传行, 取到本行);
     #   本份漂移会让"备料保留 / 节点预加载"两边不一致

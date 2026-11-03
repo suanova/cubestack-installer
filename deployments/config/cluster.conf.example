@@ -78,18 +78,13 @@ CUBESTACK_OPERATOR_CHART_SYNC="${CUBESTACK_OPERATOR_CHART_SYNC:-offline}"       
 CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE="${CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE:-}"            # 留空=跟随 chart 自带版本; 仅必要时填 tag(只覆盖 operator 自身镜像)
 CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED="${CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED:-true}"  # true=保留 chart 的 8 个 bundle; false=清空 bundles/关 modelBundles
 
-# ---- 发布版本(可选; 详见 docs/release-management.md) ----
-# 推荐：无需在此配置。把 release 树的 offline-files 平铺到 deployments/offline-files 后，
-# load_config 会自动读取其中的 release.env(RELEASE_VERSION/版本变量)，并按 flat 布局部署。
-# 切回 latest 时如 release.env 仍在，可设 CUBESTACK_RELEASE_AUTO="false" 强制 dev 模式。
-# 也可显式: CUBESTACK_RELEASE="2.0.0" + CUBESTACK_RELEASE_LAYOUT="flat" (或 --release 2.0.0)。
-# 版本树模式(默认 tree)使用 <CUBESTACK_RELEASE_ROOT>/2.0.0/offline-files/release.env；
-# 取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release 2.0.0 --dest <本地桶根>
-#
-# 若希望发布资产平铺在标准 deployments/offline-files(不建 <root>/<版本>/offline-files 版本树):
-# CUBESTACK_RELEASE="2.0.0"
-# CUBESTACK_RELEASE_LAYOUT="flat"
-# (flat 模式优先读 deployments/offline-files/release.env)
+# ---- 发布版本(可选) ----
+# 推荐: 直接把版本树的 offline-files/ 挂到 deployments/offline-files;
+# load_config 会读取其中的 release.env 并自动进入 release 模式。
+# 或显式指定版本: CUBESTACK_RELEASE="2.1.0"(--release 2.1.0),
+#   默认从 <CUBESTACK_RELEASE_ROOT>/2.1.0/offline-files/release.env 读取。
+# 切回 dev 模式: 移除 release.env, 或设 CUBESTACK_RELEASE_AUTO="false"。
+# 版本树由外部打包流程物化, 安装侧不再负责下载/打包。
 
 # ---- Harbor(集群外仓库; HARBOR_ENABLED 为预留模块开关, HARBOR_MIRROR_* 为镜像源凭据) ----
 HARBOR_ENABLED="${HARBOR_ENABLED:-false}"               # Harbor 外部镜像仓库(预留, 见 defaults §1.7)

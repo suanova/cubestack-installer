@@ -8,7 +8,7 @@
 #   ② 每条 ref 全限定(带注册域), 且能推出合法 Harbor 目标路径
 #   ③ 无重复 ref(同一镜像声明两次 → 同步两遍)
 #   ④ group 能推出离线目录路径(硬判); 目录/README 是否就位只做提示(④b, warn, 不影响退出码)
-#   ⑤ [--kubespray] k8s-base 组与 tools/offline/trim-offline-files.sh 的 PRELOAD_IMAGE_PATTERNS
+#   ⑤ [--kubespray] k8s-base 组与 cluster.defaults.conf 的 PRELOAD_IMAGE_PATTERNS
 #      交叉核对 —— 两者不一致会导致镜像被裁掉(真实事故类型: 清单加了镜像却被 trim 删除)
 #   ⑥ [--harbor] 联网比对 Harbor 现状: 列出"清单有但 Harbor 没有 / tag 不一致"的漂移项
 #
@@ -134,16 +134,14 @@ fi
 
 # ---------- ⑤ kubespray PRELOAD_IMAGE_PATTERNS 交叉核对 ----------
 if [ "${DO_KUBESPRAY}" = "1" ]; then
-    TRIM="${IM_REPO_ROOT}/deployments/scripts/tools/offline/trim-offline-files.sh"
-    if [ ! -f "${TRIM}" ]; then
-        warn "⑤ 找不到 ${TRIM}, 跳过交叉核对"
+    DEFAULTS="${IM_REPO_ROOT}/deployments/config/cluster.defaults.conf"
+    if [ ! -f "${DEFAULTS}" ]; then
+        warn "⑤ 找不到 ${DEFAULTS}, 跳过交叉核对"
     else
-        # 取 trim 脚本里的默认 PRELOAD_IMAGE_PATTERNS(该行形如 PRELOAD_IMAGE_PATTERNS="${VAR:-...默认...}")
-        # `|| true`: 该行不在 trim 脚本里时 grep 无匹配 → set -e+pipefail 会让这个校验脚本
-        # 崩掉; 下面正是靠 `[ -z "${PATS}" ]` 走"解析不出, 跳过"分支。
-        PATS="$(grep -m1 '^PRELOAD_IMAGE_PATTERNS=' "${TRIM}" | sed 's/.*:-//; s/}".*//' || true)"
+        # 取 defaults 里的默认 PRELOAD_IMAGE_PATTERNS(该行形如 PRELOAD_IMAGE_PATTERNS="${VAR:-...默认...}")
+        PATS="$(grep -m1 '^[[:space:]]*PRELOAD_IMAGE_PATTERNS=' "${DEFAULTS}" | sed 's/.*:-//; s/}".*//' || true)"
         if [ -z "${PATS}" ]; then
-            warn "⑤ 未能从 trim-offline-files.sh 解析出 PRELOAD_IMAGE_PATTERNS, 跳过"
+            warn "⑤ 未能从 cluster.defaults.conf 解析出 PRELOAD_IMAGE_PATTERNS, 跳过"
         else
             N_MISS=0
             # k8s-base 组每条 ref 的 tar 文件名, 必须能被某个 pattern 命中(否则 trim 会删掉它)

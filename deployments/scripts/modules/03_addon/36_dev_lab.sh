@@ -14,8 +14,7 @@
 #       harbor.isuanova.com/suanova/cuda-pytorch:${DEV_LAB_CUDA_TAG}
 #     ⚠ 三家 Harbor tag 命名不一致, 发布版本按镜像分别钉不可变 tag(release.env)。
 #   · 一个 accelerator 一个镜像: jupyter / ssh 模式由运行时 CUBSTACK_TYPE 决定, 不再按模式拆镜像。
-#   · 离线 tar: deployments/offline-files/dev-lab/ 顶层平铺(联网机: harbor-save-images.sh --group dev-lab;
-#     Harbor→MinIO 保鲜管道按 offline-files/dev-lab/image-list.tsv 增量维护);
+#   · 离线 tar: 版本树的 offline-files/dev-lab/ 顶层平铺(由外部打包流程物化);
 #     .tar 与 .tar.gz 均可(大件可就地 gzip 省盘; plain 内容校验 / .gz 文件名匹配, 见 README);
 #     缺某个 tar → 该镜像 warn 跳过(不阻断部署), 结尾汇总(🅰 诚实: 不伪装成功)。
 #     旧发布树的 tar 内嵌 tag 可能带 release 后缀(如 py310-torch2.4-v2.0.0-rc2):

@@ -47,7 +47,7 @@
 # [group: k8s-base] kubespray 基座(节点 containerd 预加载)
 #   目录: deployments/offline-files/kubespray/images/
 #   ⚠ 版本必须与 kubespray 实际解析出的 kube_version / 各 addon 版本一致;
-#     升级 K8s 时改 K8S_VERSION。清单来源 = tools/offline/trim-offline-files.sh 的
+#     升级 K8s 时改 K8S_VERSION。清单来源 = cluster.defaults.conf 的
 #     PRELOAD_IMAGE_PATTERNS(两者必须同步: 改了这里也要改那里, 否则镜像会被裁掉)。
 # ------------------------------------------------------------
 k8s-base  registry.k8s.io/kube-apiserver:${K8S_VERSION}
@@ -174,63 +174,6 @@ metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/gpu-scheduler:${METAX_VERSION}-amd64
 metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/driver-image:${METAX_DRIVER_VERSION}
 # maca: METAX_MACA_IMAGE 本身已含 "仓库名:tag"(maca:3.8.1.2-ubuntu22.04-amd64), 故整体拼接
 metax-gpu  ${METAX_HARBOR}/${METAX_PROJECT}/${METAX_MACA_IMAGE}
-
-# ------------------------------------------------------------
-# [group: cubestack-operator] CubeStack 平台 Operator(自研; 见 cluster.conf 4.6b)
-#   目录: deployments/offline-files/cubestack-operator/
-#   ⚠ **本组默认不镜像到 mirrors/**: 上游就是本台 Harbor 的 suanova-private 项目(私有),
-#     与 metax-gpu 同一处理 —— 同步工具按"注册域 == HARBOR_MIRROR_REGISTRY"自动跳过;
-#     取离线 tar 时 harbor-save-images.sh 对同源组**直接用原始 ref** 拉取(不拼 mirrors/, 那不存在的副本)。
-#   ⚠ 部署时 operator 镜像 tag 以 **chart 自带版本**为准(如 release 2.0.0 → :2.0.0);
-#     本行 tag(${CUBESTACK_OPERATOR_IMAGE_TAG})仅用于 Harbor 同步/离线备料登记。
-#     release 树以 deployments/releases/<版本>/release-images.tsv 为准(自研统一 :<版本>)。
-#   清单来源 = chart 渲染结果(templates/manager.yaml 的 .Values.image); 镜像 ref 的
-#   注册域/路径变更时, 平台 operator 模块的渲染自检会拦住(它不读本行, 只做登记)。
-# ------------------------------------------------------------
-cubestack-operator  ${CUBESTACK_OPERATOR_HARBOR_HOST}/suanova-private/cubestack-operator:${CUBESTACK_OPERATOR_IMAGE_TAG}
-# --- 平台组件镜像(CR 组件目录用; 2026-10-08 起经 CI 同步到 mirrors/) ---
-#   · ratelimit 是 EnvoyGateway CR 的 rateLimitDeployment 配置镜像(非默认拉起, 配 RateLimitPolicy
-#     时用); tag 必须跟随 gateway-helm v1.9.2 的 chart 默认值 **0482748e**(旧 8fe6ea42 是
-#     v1.9.1 时代标签, 继续写会让 RateLimitPolicy 的 Pod ImagePullBackOff)。本部署网络到
-#     docker.io 不通, 必须经本 CI 通道同步到 Harbor mirrors 后再由保鲜管道 save 成离线 tar
-#     (见 offline-files/cubestack-operator/README.md)。
-#     ⚠ 组件 tar 按组件分子目录, 本行 save 产出在**顶层** —— 请归位到 envoy-gateway/ 再推送。
-#   · 其余平台组件镜像(envoy/prometheus 栈/perses/bmc/cubepilot/cnpg/opstree 等)的完整清单与
-#     维护方法见 offline-files/cubestack-operator/README.md; 如需经本 CI 同步, 按同格式逐条登记。
-cubestack-operator  docker.io/envoyproxy/ratelimit:0482748e
-
-# ------------------------------------------------------------
-# [group: cubestack-platform] 平台组件镜像(2026-10-16 补登记)
-#   用途: 只把上游复刻到 Harbor mirrors/**, 供"平台镜像保鲜管道"经 mirrors 拉取离线 tar
-#   (tools/images/cubestack-platform-save-images.sh + offline-files/cubestack-operator/image-list.tsv)。
-#   ⚠ 2026-10-19 校准: envoy 数据面改用 gateway-helm v1.9.2 的 distroless-v1.39.1(旧 v1.9.1
-#     已无组件引用); 新增 gateway/ai-gateway 控制器与 extproc, 避免 operator 升级后 mirrors 缺件。
-#   ⚠ windows-exporter 只有 windows/amd64 清单(Linux 节点不调度), 仅复刻到 Harbor 备用,
-#     不进入 Linux 离线 tar 流程(保鲜工具的 --override-os linux 会拒绝)。
-#   本组**不供** harbor-save-images --group 使用(离线 tar 落盘由保鲜管道负责)。
-cubestack-platform  docker.io/envoyproxy/envoy:distroless-v1.39.1
-cubestack-platform  docker.io/envoyproxy/gateway:v1.9.2
-cubestack-platform  docker.io/envoyproxy/ai-gateway-controller:v1.2.0
-cubestack-platform  docker.io/envoyproxy/ai-gateway-extproc:v1.2.0
-cubestack-platform  quay.io/thanos/thanos:v0.42.4
-cubestack-platform  quay.io/opstree/redis-exporter:v1.44.0
-cubestack-platform  ghcr.io/prometheus-community/windows-exporter:0.31.8
-
-# ------------------------------------------------------------
-# [group: dev-lab] 开发镜像(一个 accelerator 一个镜像, 供开发环境/容器终端使用)
-#   目录: deployments/offline-files/dev-lab/(顶层平铺)
-#   ⚠ **本组默认不镜像到 mirrors/**: 上游就是本台 Harbor 的 suanova 项目 ——
-#     harbor-save 对同源组直接用原始 ref 拉取(不拼 mirrors/, 那不存在的副本);
-#     部署模块把它们推入集群内置 registry 的 <REG>/suanova/<name>(自研映射, 与 cubestack-operator 同款)。
-#   ⚠ jupyter / ssh 是同一个镜像的两种运行模式(CUBSTACK_TYPE), 不再按模式拆镜像。
-#   ⚠ tag 由 per-image 变量控制(默认随 `DEV_LAB_IMAGE_TAG`=latest, 上游滚动构建);
-#     发布版本可用 DEV_LAB_CPU_TAG / DEV_LAB_MACA_TAG / DEV_LAB_CUDA_TAG 钉各自不可变 tag
-#     (三家 Harbor tag 命名不一致, 不能再用单一 DEV_LAB_IMAGE_TAG)。
-#     离线 tar 会随上游滚动失效 —— 重新部署前重跑 save 工具(见 README)。
-# ------------------------------------------------------------
-dev-lab  harbor.isuanova.com/suanova/cpu-pytorch:${DEV_LAB_CPU_TAG}
-dev-lab  harbor.isuanova.com/suanova/maca-pytorch:${DEV_LAB_MACA_TAG}
-dev-lab  harbor.isuanova.com/suanova/cuda-pytorch:${DEV_LAB_CUDA_TAG}
 
 # ------------------------------------------------------------
 # [group: nvidia-gpu-operator] NVIDIA GPU Operator(v26.7.2; chart 渲染提取口径)

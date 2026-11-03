@@ -41,4 +41,4 @@ sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build
 
 > ⚠ 本目录的文件**不入库**(`.gitignore` 只放行各层 README.md);本 README 是唯一受版本控制的条目 ——
 > 少了它,`os/` 组在 git 里就不存在(空目录存不下)。备料/同步见仓库根 `README.md` 与
-> `tools/offline/fetch-offline-from-minio.sh`(远端结构与本地同构)。
+> 外部打包流程物化的版本树(结构与本目录同构)。

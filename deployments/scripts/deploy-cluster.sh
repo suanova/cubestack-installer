@@ -141,9 +141,9 @@ $(_component_meta_list stub)
                         例: --profile v2.32.0; none = 不用档案(全部按 cluster.conf)
                         **不指定 = 部署最新版本**(max(仓库树, 有档案的版本目录); 本地临时版本须显式选)
                         见 docs/kubespray-versioning/
-  --release <版本>      使用离线发布版本目录(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
-                        版本变量以目录内 release.env 为准; 取件见 fetch-offline-from-minio.sh --release
-                        例: --release 2.0.0; 等价于 cluster.conf 的 CUBESTACK_RELEASE="2.0.0"
+  --release <版本>      使用已物化的版本树(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
+                        版本变量以目录内 release.env 为准; 也可直接挂载版本树的 offline-files/
+                        例: --release 2.1.0; 等价于 cluster.conf 的 CUBESTACK_RELEASE="2.1.0"
   --verify-offline[=auto|quick|full|off]
                         离线文件完整性校验强度(默认 quick: 结构/覆盖率, 不做整树深度;
                         auto = 全量部署首次 full+校验戳; full = 强制深度)。
@@ -162,7 +162,7 @@ $(_component_meta_list stub)
   sudo ./deploy-cluster.sh --steps ceph            # 单独装/重跑 Ceph(不动基座; 接入自动处理)
   sudo ./deploy-cluster.sh --steps cephfs_mount    # 把 CephFS models 挂到每台节点 /mnt/cephfs/models
   sudo ./deploy-cluster.sh --steps ceph --fresh     # 同上, 且清断点状态(REPEAT:0 模块重跑用)
-  sudo ./deploy-cluster.sh --release 2.0.0          # 使用 2.0.0 离线发布版本目录(<root>/2.0.0/offline-files)
+  sudo ./deploy-cluster.sh --release 2.1.0          # 使用 2.1.0 版本树(<root>/2.1.0/offline-files)
   sudo ./deploy-cluster.sh --steps verify_ceph      # 只验证 Ceph(operator/CSI + ceph -s + RBD 块 I/O)
   sudo ./deploy-cluster.sh --with-scale             # 扩容: 仅 k8s_scale(先登录 master 核对集群→diff 新节点→只动新节点)
   sudo ./deploy-cluster.sh --with-scale --only worker02   # 扩容指定节点(--only 也先经集群核对)
@@ -215,9 +215,9 @@ while [ $# -gt 0 ]; do
         #   须在 load_config 之前 export —— load_config 读的是环境变量
         #   (none = 禁用档案, 全部按 cluster.conf)
         --profile)  PROFILE_ARG="${2:?--profile 需要版本名(如 v2.32.0; none=禁用档案)}"; shift 2 ;;
-        # --release = 本次使用离线发布版本目录(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
+        # --release = 本次使用已物化的版本树(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
         #   须在 load_config 之前 export(load_config 读的是环境变量)
-        --release)  RELEASE_ARG="${2:?--release 需要版本号(如 2.0.0)}"; shift 2 ;;
+        --release)  RELEASE_ARG="${2:?--release 需要版本号(如 2.1.0)}"; shift 2 ;;
         # 离线文件完整性门禁: 默认 auto(首次 full, 之后走校验戳); 可强制 quick/full/off。
         --verify-offline) VERIFY_OFFLINE_ARG="auto"; shift ;;
         --verify-offline=) err "--verify-offline 需要取值(auto|quick|full|off)"; exit 1 ;;
@@ -264,7 +264,7 @@ load_config
 
 # ---------------- 离线文件完整性门禁(2026-10-28) ----------------
 # 默认 quick: 结构/覆盖率校验(不算 sha256/镜像层); 需要强校验设 auto 或 full
-# (auto = release/flat/sealed 首次 full, 之后走校验戳; 未 seal 开发树自动降级 quick)。
+# (auto = release/sealed 首次 full, 之后走校验戳; 未 seal 开发树自动降级 quick)。
 # 跳过: 只读列表 / 纯 verify_* 步骤 / 仅 --enable 写配置(不实际部署)。
 _verify_skip=0
 if [ "${LIST_STEPS}" = "1" ] || [ "${LIST}" = "1" ]; then
@@ -298,7 +298,7 @@ if [ "${_verify_skip}" = "0" ]; then
 fi
 unset _verify_skip _all_verify _s 2>/dev/null || true
 
-# 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 见 tools/offline/fetch-offline-from-minio.sh --help 全部子目录)
+# 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 版本树由外部打包流程提供)
 # 只读列表/计划不检查(否则列表里会混入与展示无关的离线文件告警)
 if [ "${LIST_STEPS}" != "1" ] && [ "${LIST}" != "1" ]; then
     check_offline_files

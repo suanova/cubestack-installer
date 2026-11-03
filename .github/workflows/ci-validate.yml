@@ -171,12 +171,6 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-offline-tree-check.sh
 
-      # release-2.0 组件镜像原地刷新: fake mc + fixture, 覆盖 tar/chart/CLI/SHA256SUMS/_SUCCESS
-      - name: release-2.0 组件镜像同步回归(release sync)
-        run: |
-          set -euo pipefail
-          bash deployments/scripts/tools/tests/test-release-sync-images.sh
-
       # k8s_deploy 期间改 cluster.conf 导致 addons.yml/后续模块配置漂移的门禁回归
       - name: 部署配置漂移门禁回归(config guard)
         run: |

@@ -28,7 +28,7 @@
 #      C) **写入者闭环**: inventory 的 group_vars/all/k8s-versions.yml 里 10 个 kubespray 版本变量
 #         确实存在且 == cluster.conf 的钉子(写入者 = tools/k8s/sync-kubespray-config.sh 3.2 节)
 #      A 只证"钉子自洽"(== 表值), C 才证"部署真会用钉子"; 缺 C 时删掉写入节/改错值照样全绿。
-#   ⑰ 凭据卫生: 含密钥的"生成物"(external-ceph 导出 / minio.conf / cluster.conf)必须**未被 git 跟踪**
+#   ⑰ 凭据卫生: 含密钥的"生成物"(external-ceph 导出 / cluster.conf)必须**未被 git 跟踪**
 #      且被 .gitignore 覆盖 —— ⚠ 忽略规则对**已跟踪**文件无效, "看着封堵了"≠"封堵了"
 #   ⑱ 版本目录 ↔ 档案闭合: 入库档案逐版本 ↔ 其树表值; 在场版本目录的 VERSION.profile ↔ 入库档案、
 #      tree.tar.gz 指纹、关键二进制与 K8S_VERSION 匹配、LOCAL_ONLY 语义自洽(无目录则跳过)
@@ -643,12 +643,11 @@ fi
 # 不变量(Global Constraints): 同一份模式串必须在**四处逐字节一致** ——
 #   ① deployments/config/cluster.conf                             本地部署配置(未纳入 git, 含密码)
 #   ② deployments/config/cluster.conf.example                     模板(随 git 分发; CI 上唯一在场的那份)
-#   ③ deployments/scripts/tools/offline/trim-offline-files.sh:41  备料时**真正执行** trim 用的默认值
 #   ④ deployments/kubespray/cubestack-offline.sh               standalone 直跑预加载脚本时的内置兜底
 #      (该文件里有两条赋值: 上面那条是环境变量透传, 底下 elif 分支里的才是内置默认模式串 ——
 #       断言取后者, 见 _preload_patterns 的说明)
-# 为什么必须有这一条: 既有 CI 只覆盖「trim ↔ images.manifest」一对(check-image-manifest.sh ⑤),
-#   漂移若只发生在 ①/②, CI 照样通过 → 联网机备料后镜像**仍被静默 trim 掉**(装了却没有镜像)。
+# 为什么必须有这一条: 漂移若只发生在 ①/②, CI 照样通过 → 打包侧按错误清单备料,
+#   部署时**镜像缺失**(装了却没有镜像)。
 # 比较的是**模式串本身**(各处变量名可能不同), 不是整行; 引号/行尾注释等写法差异先归一化掉。
 # 注: 第 ④ 份曾长期陈旧(缺 library_nginx 等条目), 2026-09-28 Task 7 已补齐并与前三分逐字节相同,
 #     故自本轮起纳入断言(此前注释写的"有意不纳入"已过期)。
@@ -677,10 +676,9 @@ PRELOAD_BAD=0; PRELOAD_N=0
 PRELOAD_PATHS=(
     "${REPO_ROOT}/deployments/config/cluster.conf"
     "${CONF_DEFAULTS}"
-    "${REPO_ROOT}/deployments/scripts/tools/offline/trim-offline-files.sh"
     "${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
 )
-PRELOAD_NAMES=( cluster.conf cluster.defaults.conf trim-offline-files.sh cubestack-offline.sh )
+PRELOAD_NAMES=( cluster.conf cluster.defaults.conf cubestack-offline.sh )
 PRELOAD_VALS=(); PRELOAD_SEEN=()
 for _i in "${!PRELOAD_PATHS[@]}"; do
     _p="${PRELOAD_PATHS[$_i]}"; _n="${PRELOAD_NAMES[$_i]}"
@@ -689,7 +687,7 @@ for _i in "${!PRELOAD_PATHS[@]}"; do
         continue
     fi
     # cluster.conf **未声明**该键(2026-10-15 PRELOAD 下沉 cluster.defaults.conf 后属正常) → 跳过;
-    #   ⚠ 只对这一份可选副本放宽 —— 另三份(defaults/trim/offline)缺声明仍是硬失败(真回归)。
+    #   ⚠ 只对这一份可选副本放宽 —— 另两份(defaults/offline)缺声明仍是硬失败(真回归)。
     if [ "${_n}" = "cluster.conf" ] && ! grep -qE '^[[:space:]]*PRELOAD_IMAGE_PATTERNS=' "${_p}" 2>/dev/null; then
         say "  cluster.conf: 未声明 PRELOAD_IMAGE_PATTERNS(已下沉 cluster.defaults.conf), 跳过该副本"
         continue
@@ -758,7 +756,7 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-kubespray-version-select.sh test-deb-install-lib.sh \
            test-ssh-user.sh test-k8s-passwordless.sh test-gpu-vendor-probe.sh \
            test-nvidia-host-driver.sh test-inventory-ssh-user-precedence.sh \
-           test-node-hosts-sync.sh test-release-sync-images.sh \
+           test-node-hosts-sync.sh \
            test-deploy-config-guard.sh test-k8s-ntp.sh test-cephfs-mount.sh \
            test-chrony-offline-debs.sh test-ceph-data-disks.sh \
            test-metallb-pool-check.sh test-ceph-cluster-detect.sh \
@@ -1010,7 +1008,6 @@ _GIT=(git -C "${REPO_ROOT}")
 _SECRET_PATHS=(
     deployments/config/external-ceph-self-define-access.conf   # 生成器写出三个真 keyring
     deployments/config/external-ceph.env                       # Rook 官方导出(mon/CSI/RGW 用户密钥)
-    deployments/config/minio.conf                              # 含 MinIO 密钥
     deployments/config/cluster.conf                            # 含全部集群密码
 )
 for _p in "${_SECRET_PATHS[@]}"; do

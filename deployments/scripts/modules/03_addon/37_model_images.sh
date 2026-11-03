@@ -8,7 +8,7 @@
 # TOGGLE: MODEL_IMAGES_ENABLED
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
-#   · 镜像集 = offline-files/model-collection/image-list.tsv(单一事实源; 3 件 ≈33G:
+#   · 镜像集 = 版本树的 offline-files/model-collection/image-list.tsv(由打包流程生成; 3 件 ≈33G:
 #     suanova/sglang ×2(0.5.14 py312 主版本 + v0.5.12-glm5-rc4 py310) + suanova/vllm-metax ×1(0.27.0 py312);
 #     2026-10-29 sglang 更新, vllm 不变)。
 #   · 离线 tar: deployments/offline-files/model-collection/{sglang,vllm}/(子目录; .tar 与 .tar.gz 均可);

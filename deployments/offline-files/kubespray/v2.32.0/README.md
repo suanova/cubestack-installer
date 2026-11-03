@@ -11,7 +11,7 @@ kubespray 基座的**离线资产**(二进制 / 系统包 / 节点预加载镜�
 > | `VERSION.profile` | 该版本**版本钉子**的副本(入库正本在 `deployments/config/profiles/v2.32.0.profile`;由 check-modules ⑱ 逐键断言二者一致) |
 >
 > 切换版本用 `KUBESPRAY_VERSION`(或 `deploy-cluster.sh --profile v2.32.0`);只下载本版本用
-> `fetch-offline-from-minio.sh --kubespray-version v2.32.0`。
+> 外部打包流程物化的版本树。
 
 ## 本目录的部分资产
 
@@ -142,7 +142,7 @@ sudo ./deployments/scripts/tools/images/harbor-save-images         --group k8s-b
 > 预载漏了就是 `ImagePullBackOff`。两个 tag 都是**开机即用的官方 tag**(上游直接拼 `v<版本>`),
 > 清单条目照仓库惯例走 `${LOCAL_VOLUME_PROVISIONER_VERSION}` / `${NFD_VERSION}` 占位 ——
 > **版本只有一处真相**(`cluster.conf` 的版本变量),升级只改那一处,清单/Harbor/离线 tar
-> 全部跟随(改完重走 Harbor 同步 → 离线 tar → `trim-offline-files.sh` 备料)。
+> 全部跟随(改完重走 Harbor 同步 → 离线 tar → 版本树物化)。
 >
 > ⚠ **现状(2026-09-28)**:`local-volume-provisioner:v2.5.0` tar **已就位**;
 > `nfd/node-feature-discovery:v0.19.0` 的 tar **仍缺**(联网机那批下载件里没有、Harbor mirrors 也还没同步 1.35 线)

@@ -53,7 +53,7 @@ image_manifest_load() {
     local _real="${IM_REPO_ROOT}/deployments/config/cluster.conf"
 
     # 保存调用方已显式设置的关键变量(有值才保护; 空值不保护 —— 空=用清单默认)
-    # 发布构建(release-publish.sh)会先 source release.env 再调用本库/镜像保存工具:
+    # 打包流程会先 source release.env 再调用本库/镜像保存工具:
     # 这些版本变量必须**以 release.env 为准**, 不能被发布机 cluster.conf/defaults 覆盖,
     # 否则同一 release 在不同机器上会拉出不同 tag 的发布树(P0: 发布不可复现)。
     local -a _protected=()
@@ -191,7 +191,7 @@ image_group_dir() {
     local ver; ver="$(_kubespray_version)"
     case "${group}" in
         # kubespray 基座 + ceph: 节点 containerd **预加载**走 kubespray 的 images/ 目录
-        # (见 02_ceph.sh 的 CEPH_IMAGE_DIR 与 tools/offline/trim-offline-files.sh), 必须同目录
+        # (见 02_ceph.sh 的 CEPH_IMAGE_DIR 与 PRELOAD_IMAGE_PATTERNS 口径), 必须同目录
         # ⇒ 两者都带版本层(这些 tar 属于某个 kubespray 版本, 见 k8s-base 组清单)
         k8s-base|ceph) echo "${IMAGE_K8S_IMAGES_DIR:-${base}/kubespray/${ver}/images}" ;;
         *)             echo "${base}/${group}" ;;

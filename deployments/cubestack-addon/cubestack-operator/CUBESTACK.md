@@ -16,10 +16,10 @@ deployments/offline-files/cubestack-operator/charts/
 
 ```bash
 # 部署机(离线包)
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub cubestack-operator
+# 版本树由外部打包流程物化后随包交付
 
 # 内网同步机(Harbor → 离线包 → MinIO)
-bash deployments/scripts/tools/images/cubestack-platform-sync.sh \
+# (旧同步工具已移除) \
   --collection cubestack-operator --no-pull-state
 
 # 手工

@@ -181,7 +181,7 @@ bash ./check-image-manifest.sh --harbor       # 额外: 比对 Harbor 现状, �
 > 规则见 [`scripts-development-spec.md` §2.5](scripts-development-spec.md)。
 
 `--kubespray` 那一项**真的抓到过问题**: `nginx` 曾被放进 `k8s-base` 组, 而它不在
-`tools/offline/trim-offline-files.sh` 的 `PRELOAD_IMAGE_PATTERNS` 里 → 备料后会被 trim
+`PRELOAD_IMAGE_PATTERNS` 里 → 备料时会被过滤
 静默删掉。两个列表**必须同步**。
 
 ---
@@ -258,7 +258,7 @@ sudo ./deploy-cluster.sh --steps verify_ceph
 
 `K8S_VERSION`、`CALICO_VERSION`、`ETCD_VERSION` 等一组变量在 `cluster.conf.example` 3.3 节。
 ⚠ 这些**必须与 kubespray 实际解析出的版本一致** —— 改了必须重跑 `k8s_deploy`,
-并同步 `tools/offline/trim-offline-files.sh` 的 `PRELOAD_IMAGE_PATTERNS`
+并同步 `cluster.defaults.conf` / `cubestack-offline.sh` 的 `PRELOAD_IMAGE_PATTERNS`
 (用 `check-image-manifest.sh --kubespray` 兜底检查)。
 
 ### 浮动 tag 的处理
@@ -280,7 +280,7 @@ sudo ./deploy-cluster.sh --steps verify_ceph
 | Harbor 漂移检查把**已存在**的镜像全报"缺失" | Harbor API 的 repository 名要**双重 URL 编码**(`%252F`), 且路径里**不含项目前缀** | 见 `check-image-manifest.sh` 的 `enc_repo` |
 | 离线 tar 的 `RepoTags` 为空 → 模块的 `tar_first_image_tag` 识别不出内容 | `skopeo copy ... docker-archive:<file>` **末尾必须带 `:<ref>`**, 否则不写 RepoTags | 工具写 `docker-archive:<file>:<上游 ref>` |
 | Harbor 项目不存在, push 失败 | Harbor 只在 push 时自动建**仓库**, **项目**必须预建 | `harbor-sync-images.sh` 自动建(需凭据; 匿名会 401) |
-| 清单里的镜像被 `trim-offline-files.sh` 静默删掉 | 与 `PRELOAD_IMAGE_PATTERNS` 不同步 | `check-image-manifest.sh --kubespray` 交叉核对 |
+| 清单里的镜像在备料时被过滤掉 | 与 `PRELOAD_IMAGE_PATTERNS` 不同步 | `check-image-manifest.sh --kubespray` 交叉核对 |
 
 ---
 

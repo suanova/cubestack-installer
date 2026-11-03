@@ -41,8 +41,7 @@ cluster.conf 内容); 2026-10-16 用 git-filter-repo 全历史清除 + 全分支
 规则(违反 = 拒绝合入; 已合入的 = 回滚 + 轮换凭据)
 1. **凭据类文件永不入库**: `cluster.conf` / `minio.conf` / `*.bak*` / `external-ceph*` / `*.env`
    (模板 `*.env.example` 除外) —— 真实值只进 gitignored 配置、600 权限 env 文件、CI Secrets、
-   或运行时环境变量; 参考实现: `cubestack-platform-sync.sh` 的 `--print-systemd`(凭据仅进
-   `/etc/cubestack-platform-sync.env`, 600)。
+   或运行时环境变量(600 权限 env 文件, 不进日志/argv)。
 2. **示例一律占位符**: 密码用 `CHANGE_ME` / `${VAR}` / `<占位>`; 地址用 `<minio-host>` 等占位;
    **禁止真实公网 IP 出现在任何文件**(内网地址同样建议占位, 至少避开 MinIO/Harbor 实地址)。
 3. **门禁(自动, 已落地)**: 每台 clone 先执行一次 `git config core.hooksPath .githooks`
@@ -261,8 +260,8 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
     -v $HOME/.ssh:/root/.ssh cubestack-cli
   # 容器内: cd /opt/cubestack-installer && sudo ./deployments/scripts/deploy-cluster.sh
   ```
-- **离线文件下载**: `tools/offline/fetch-offline-from-minio.sh` 用 mc 从 MinIO 同步到 `OFFLINE_FILES_DIR`(--sub 支持嵌套/多值, 可细化到 `cubestack-operator/<组件>`; `--help` 打印全部可用子目录; 旧名 fetch-offline-files.sh 为兼容薄壳)
-  (默认 `deployments/offline-files`); 配置 `MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY/BUCKET/REMOTE_DIR`。
+- **版本树**: 离线文件由外部打包流程物化(`<root>/<版本>/{offline-files,modules}`),
+  安装侧用 `--release <版本>` 或挂载 `offline-files/` 消费; 不再从 MinIO 下载。
 - **离线文件缺失检查**: `lib-common.sh` 的 `check_offline_files`(deploy-cluster.sh 启动时调用), 缺失时输出
   **红底醒目提示**并给出准备指引(不阻断)。部署前务必保证 `${LOCAL_REPO_DIR}` 下有
   `images/`(镜像 tar)+ 二进制 + `packages/`(系统包)。

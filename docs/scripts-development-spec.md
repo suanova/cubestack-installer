@@ -162,7 +162,7 @@ operator 模块与 NVIDIA GPU operator 模块均调用它 —— 新模块**应�
    ⚠ 本地副本若在 `offline-files/` 下,刷新提示是"跑同步工具上传 MinIO",不再提示 `git commit`。
 3. **离线副本缺失 = 致命错误**(`err` + 退出),提示里必须给出获取方法;不要静默降级成"用线上那份"。
 4. **刷新走显式工具**,不要靠部署过程自动落盘:
-   - chart(operator 例外):`tools/images/cubestack-platform-sync.sh --collection cubestack-operator`
+   - chart: 随版本树分发(外部打包流程物化)
      负责 `helm pull` + digest 比对 + 上传 MinIO;
    - chart(其它组件):手工 `helm pull` 覆盖 vendored 副本后 commit,并同步 `<tgz>.digest` 边车;
    - 镜像:`tools/images/harbor-save-images.sh --group <组>`,源与命名由 `config/images.manifest` 统一声明。

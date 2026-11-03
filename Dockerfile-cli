@@ -27,7 +27,7 @@
 #   容器内:
 #     cd /opt/cubestack-installer
 #     ./deployments/scripts/deploy-cluster.sh          # 默认 = --with-cluster(全量, 最新版本)
-#     ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh   # 离线文件缺失时从 MinIO 下载
+#     版本树(offline-files/ + modules/)由外部打包流程物化后挂载进容器
 # 说明: 宿主机需要 libvirt 时(创建虚拟机), 建议 --privileged 或挂载 /var/run/libvirt;
 #       纯裸金属离线部署(kubespray + operator)无需额外特权。
 # =====================================================================

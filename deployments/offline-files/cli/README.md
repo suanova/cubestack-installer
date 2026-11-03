@@ -17,10 +17,10 @@ CubeStack **CLI 镜像**的离线 tar（开发/滚动通道）。
     digest 不一致重传两者（自愈）。
 - 取回（部署机/联网机）:
   ```bash
-  ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub cli
+  # 版本树由外部打包流程物化后随包交付
   sudo docker load -i deployments/offline-files/cli/cubestack-installer-cli.tar
   ```
-- 发布版本（`2.0.0` 等）的 CLI tar 不在这里：由 `release-publish.sh` 生成到
+- 发布版本的 CLI tar 不在这里：由外部打包流程生成到
   `<bucket>/<版本>/cubestack-installer-cli.tar`，随 release 树一起分发。
 
 > 本目录只放 README（tar 不入 git）；MinIO 前缀由 `rebuild-cli-image.yml` 自动创建。
