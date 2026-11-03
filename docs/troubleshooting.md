@@ -1421,6 +1421,110 @@ bash deployments/scripts/tools/tests/test-node-pool.sh   # ⑧⑨⑩: 跳过 cor
 
 ---
 
+### 14. 【2026-11-03 实机】`Registry | Apply manifests` 报 `nodePort 31148: provided port is already allocated`(apiserver 泄漏分配尚未 repair)
+
+**症状:** 部署在 kubespray `kubernetes-apps/registry` 的 `Registry | Apply manifests` 中断:
+
+```
+The Service "registry" is invalid: spec.ports[0].nodePort: Invalid value: 31148: provided port is already allocated
+```
+
+`PLAY RECAP` failed=1; 随后 registry Pod `Pending`, 事件 `persistentvolumeclaim "registry-pvc" not found`
+(role 在 Apply manifests 处中断, 后面的 PVC 任务没有执行)。但集群里**没有任何 Service 占用 31148**
+(`kubectl get svc -A` 只有 kubernetes/coredns/metrics-server)。
+
+**根因:** kube-apiserver 的 NodePort 分配器在 etcd `/registry/ranges/servicenodeports` 中保留了
+上一次 registry Service 的分配(上次部署/集群重置遗留)。新 apiserver 启动时会把它判定为"泄漏",
+但 repair 控制器按周期清理。实机 master01 apiserver 日志:
+
+```
+11:59:11 repair.go:201 "the node port 31148 may have leaked: flagging for later clean up"
+12:02:13 registry apply → provided port is already allocated
+12:05:11 repair.go:214 "the node port 31148 appears to have leaked: cleaning up"
+```
+
+即 **apply 落在"已标记泄漏、尚未清理"的 ~6 分钟窗口内**。role 中断导致 `registry-pvc` 未创建,
+registry Pod 一直 Pending —— 不是端口真的被别的 Service 占用。
+
+**解法(已落地):** 补丁 `deployments/kubespray/cubestack-patches/16-registry-nodeport-leak-wait.patch`:
+registry apply 前先用 `kubectl apply --dry-run=server` 探测 registry-svc; 仅当错误为
+`already allocated` 时等待 repair 控制器清理(默认 60×10s, 可用
+`registry_nodeport_repair_retries` / `registry_nodeport_repair_delay` 调整), 其他错误(命名空间不存在 /
+API 不可达等)立即放行, 由真正的 apply 给出权威报错。repair 一次清理全部泄漏端口, 因此也会顺带
+恢复 ingress-nginx 等固定 NodePort。
+
+**验证:**
+```bash
+bash deployments/kubespray/cubestack-patch-apply.sh --check   # 16 号补丁在位(rc=0)
+# 现网确认端口无持有者(repair 清理后)
+sudo kubectl get svc -A -o wide
+```
+本次实机 12:05 已由 repair 清理, 端口可正常分配; 完整重跑部署留待用户执行(未在本次修复中重跑)。
+
+**当前失败集群的处理:** 不需要 `--fresh`; `k8s_deploy` 失败未写成功状态, repair 清理后直接重跑
+`deploy-cluster.sh` 即可(补丁会在 kubespray 运行前自动重放)。
+
+**关联修复(预防性):** 同轮排查发现 `05_k8s_registry` 会等 registry Pod Ready, 而 registry RS
+没有 control-plane toleration; 移除污点的 `node_pool` 是模块 53(排在 05 之后)。纯 master / 多 master
+无 worker 集群在 NodePort 修好后仍会卡在 registry 600s 超时。已在 `06_k8s_deploy.sh` kubespray
+成功后、addon 之前提前调用 `node-pool.sh --apply`(临时 `NODE_POOL_MASTER_CORDON=false`, 只去污点;
+cordon/placement 仍由 53 执行)。该预防修复基于静态分析 + 现网节点污点状态, 未做端到端复验。
+
+**`--fresh` 入口预检:** `06_k8s_deploy.sh` 在 kubespray 前调用
+`tools/k8s/nodeport-leak-preflight.sh`(只读 `kubectl apply --dry-run=server`)：端口无 Service
+持有但报 `already allocated` 时等待 repair 清理(默认最多 600s，`NODEPORT_LEAK_WAIT_SECONDS` /
+`NODEPORT_LEAK_WAIT_INTERVAL` 可调)。因此 `--fresh` / 重跑会自己收敛，不需要人工等待；超时也不阻断，
+由 registry role 内的补丁兜底。离线回归：`bash deployments/scripts/tools/tests/test-nodeport-leak-preflight.sh`。
+
+---
+
+### 15. 【2026-11-03 实机】`ceph` 模块 900s 超时 / CephCluster `Progressing`: 旧 local-path registry 数据撑爆根盘 → DiskPressure → mon-c canary Pending
+
+**症状:** `--fresh` 重装走到 `02_ceph` 时，`[7/8] 等待 Ceph 集群就绪` 直到 900s 仍
+`phase=Progressing`；收尾巡检显示:
+
+```
+kube-system/registry-949fn                              Pending
+rook-ceph/rook-ceph-mon-c-canary-7f7cc4cffb-...         Pending
+```
+
+`kubectl get nodes` 中某台 master 带 `node.kubernetes.io/disk-pressure:NoSchedule`；
+`kubectl -n rook-ceph get events` 里 mon-c canary:
+
+```
+1 node(s) had untolerated taint(s), 2 node(s) didn't have free ports ...
+```
+
+**根因:** 节点根盘被**上一套集群**的 local-path registry 数据占满:
+`/opt/local-path-provisioner/pvc-<旧UID>_kube-system_registry-pvc`(实机 master03 上 **65G**，
+根盘 84G/97G=86%)。当前 `kubectl get pv` 为空、唯一的 `registry-pvc` 是 ceph-block(UID 不同)，
+旧目录无 PV/PVC 引用、无挂载/无进程打开 ⇒ 纯孤儿数据。kubelet 因可用空间低于阈值打
+`disk-pressure` 污点；mon-c 需要落在 master03(另外两台 hostNetwork 的 mon 端口已占用)，
+被污点挡住 ⇒ 3 个 mon 起不来 ⇒ CephCluster 永远 Ready 不了 ⇒ ceph 模块 900s 超时。
+
+**解法(已落地):**
+1. **一次性清理**(本次已执行): 删除该孤儿目录后根盘 84G→19G(78G 可用)，kubelet 下个周期清除
+   `disk-pressure` 污点，mon-c 可调度;
+2. **代码修复**: `05_k8s_registry.sh` 的卸载(覆盖安装)分支新增
+   `_cleanup_orphan_registry_localpath`：仅当新 `REGISTRY_STORAGE_CLASS` **不是 local-path**、
+   目录 UID **不被当前任何 PV/PVC 引用**、且**未被挂载**时，逐节点删除
+   `/opt/local-path-provisioner/pvc-*_kube-system_registry-pvc`。因此下次 `--fresh`/覆盖安装
+   会自动清掉旧数据，避免同类 DiskPressure。
+
+**验证:**
+```bash
+# 清理前(实机)
+df -h /                                  # /dev/vda1 84G used / 14G avail
+kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}: {.spec.taints}{"\n"}{end}'
+# 清理后
+df -h /                                  # 19G used / 78G avail
+kubectl get node <master03> -o jsonpath='{.spec.taints}'   # 等 kubelet 清除 disk-pressure
+kubectl -n rook-ceph get pods -l app=rook-ceph-mon -o wide
+```
+清理与磁盘释放已实机验证；`--fresh` 全流程复跑待用户执行(本次仅修到 Ceph 就绪前)。
+
+---
+
 ## 四、离线部署
 
 ### 1. 【单机/重装】`Drain node` → `Remove-node | List nodes` 报 `error: stat /etc/kubernetes/admin.conf: no such file or directory`

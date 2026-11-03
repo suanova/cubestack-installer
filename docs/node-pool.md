@@ -120,6 +120,12 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
 - 执行顺序：先 `cubestack-placement.sh --apply` 给平台组件加 master placement（
   `NODE_POOL_PLATFORM_PLACEMENT=true` 时再跑 `master-placement.sh`），最后打 master 标签/
   按需 cordon；
+- **k8s 阶段提前收敛(2026-11-03)**：`06_k8s_deploy.sh` 在 kubespray 成功后、addon 之前会调用
+  `tools/node/node-pool.sh --apply`（临时强制 `NODE_POOL_MASTER_CORDON=false`）只做
+  "master 可调度"（移除 control-plane/master 污点 + 加 master 标签）。原因：kubespray 的
+  registry ReplicaSet 没有 control-plane toleration，而 `05_k8s_registry` 会等它 Ready；
+  纯 master / 多 master 无 worker 集群若等到本模块（53）才去污点，registry 会先 600s 超时。
+  cordon 与平台 placement 仍由本模块在 addon 末尾按配置执行（幂等重跑）。
 - `remove` 先 uncordon，再移除 master nodeSelector。**回滚不看当前 placement 开关**：
   应用后把 `NODE_POOL_CUBESTACK_PLACEMENT`/`NODE_POOL_PLATFORM_PLACEMENT` 改成 false
   再执行 remove，仍会清掉本工具施加的 nodeSelector（与 cordon 的 ownership 口径一致）。

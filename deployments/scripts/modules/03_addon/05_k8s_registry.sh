@@ -32,6 +32,10 @@
 #     (部署中途 resolved 动态文件瞬态) ⇒ coredns loop 插件探测打到 pod 内自己的 127.0.0.1:53 →
 #     误判回环 FATAL 无限重启; 本模块对"CrashLoopBackOff+plugin/loop"的 pod 重建一次即愈
 #     (新 sandbox 快照稳定后的文件; 实机双对照: 旧 sandbox 30 次崩溃 vs 新 pod 零重启)。
+#   · 覆盖安装清理(2026-11-03 实机): 新 registry 后端不是 local-path 时, 卸载分支会清理旧集群
+#     遗留的 /opt/local-path-provisioner/pvc-*_kube-system_registry-pvc 孤儿目录(仅当无 PV/PVC
+#     引用且未挂载)。否则旧数据可能撑爆节点根盘 → kubelet DiskPressure → Ceph mon canary
+#     Pending → ceph 模块 900s 超时(实机 master03 65G)。
 # 数据源: cluster.conf (REGISTRY_DOMAIN / REGISTRY_IP / REGISTRY_PORT / REGISTRY_STORAGE_CLASS / REGISTRY_DISK_SIZE / CEPH_ENABLED / NODES)
 # ============================================================
 set -euo pipefail
@@ -39,6 +43,75 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# ---------------- 旧 local-path registry 孤儿数据清理(2026-11-03 实机) ----------------
+# 背景: 上一次集群用 local-path 时, registry 数据落在
+#   /opt/local-path-provisioner/pvc-<uid>_kube-system_registry-pvc; 集群重建后 PV/PVC 已不存在,
+#   但目录仍在(实机 master03 上 65G) → 根盘 DiskPressure → Ceph mon-c canary Pending
+#   → 02_ceph 等待 900s 超时。详见 docs/troubleshooting.md §三.15。
+# 只在**覆盖安装/卸载**分支执行, 且满足全部条件才删(绝不误删仍在使用的数据):
+#   ① 新 registry 后端不是 local-path; ② 目录 UID 不被当前任何 PV/PVC 引用; ③ 目录未被挂载。
+_reg_node_ssh() {
+    local _nip="$1" _nuser="$2"
+    shift 2
+    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "${_nuser}@${_nip}" "$@"
+}
+_reg_current_ref_uids() {   # <pv-json> <pvc-json>
+    printf '%s\n' "$1" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for it in d.get("items",[]):
+    print(it.get("metadata",{}).get("uid",""))
+    cr=(it.get("spec") or {}).get("claimRef") or {}
+    print(cr.get("uid",""))' 2>/dev/null || true
+    printf '%s\n' "$2" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for it in d.get("items",[]):
+    print(it.get("metadata",{}).get("uid",""))' 2>/dev/null || true
+}
+_cleanup_orphan_registry_localpath() {
+    [ "${REGISTRY_STORAGE_CLASS:-local-path}" != "local-path" ] || return 0
+    local _refs _line _ip _u _hn _dirs _d _uid _sz _pv_json _pvc_json
+    # 安全门: 读不到 PV/PVC 时**不清理** —— 无法证明目录已无引用(例如 API 不可达)。
+    SSH "${K}" get nodes --no-headers >/dev/null 2>&1 \
+        || { warn "  集群 API 不可达, 跳过旧 local-path registry 数据清理"; return 0; }
+    _pv_json="$( (SSH "${K}" get pv -o json 2>/dev/null) || true )"
+    _pvc_json="$( (SSH "${K}" get pvc -A -o json 2>/dev/null) || true )"
+    if [ -z "${_pv_json}" ] || [ -z "${_pvc_json}" ]; then
+        warn "  无法读取 PV/PVC, 跳过旧 local-path registry 数据清理(无法证明无引用)"
+        return 0
+    fi
+    _refs="$(_reg_current_ref_uids "${_pv_json}" "${_pvc_json}")"
+    for _line in "${NODES[@]:-}"; do
+        [ -n "${_line}" ] || continue
+        node_parse "${_line}" || continue
+        _ip="${NODE_IP}"; _hn="${NODE_HOSTNAME}"
+        _u="$(ssh_user_for_ip "${_ip}")"
+        _dirs="$(_reg_node_ssh "${_ip}" "${_u}" "sudo sh -c 'ls -d /opt/local-path-provisioner/pvc-*_kube-system_registry-pvc 2>/dev/null' || true")"
+        # 目录名只含 UID(无空格), 允许按空白切分
+        # shellcheck disable=SC2086
+        for _d in ${_dirs}; do
+            _uid="$(basename "${_d}" | sed -n 's/^pvc-\([0-9a-f-]*\)_kube-system_registry-pvc$/\1/p')"
+            [ -n "${_uid}" ] || continue
+            if printf '%s\n' "${_refs}" | command grep -qxF "${_uid}"; then
+                say "  保留仍被 PV/PVC 引用的 local-path registry 数据: ${_hn}:${_d}"
+                continue
+            fi
+            if _reg_node_ssh "${_ip}" "${_u}" "mount | command grep -qF '${_uid}'" >/dev/null 2>&1; then
+                warn "  ${_hn}: ${_d} 仍被挂载, 跳过(不清理)"
+                continue
+            fi
+            _sz="$(_reg_node_ssh "${_ip}" "${_u}" "sudo du -sh '${_d}' 2>/dev/null | awk '{print \$1}'" 2>/dev/null || true)"
+            if _reg_node_ssh "${_ip}" "${_u}" "sudo rm -rf --one-file-system -- '${_d}'"; then
+                ok "  已清理旧 local-path registry 孤儿数据: ${_hn}:${_d} (${_sz:-?})"
+            else
+                warn "  ${_hn}: 清理失败 ${_d}(可手工 sudo rm -rf)"
+            fi
+        done
+    done
+}
 
 # 卸载分支(优雅覆盖): registry 是 ceph PVC 消费者之一 —— K8s 覆盖前先优雅停机
 # (scale 0; registry-pvc 受保护不动, kubespray 重装 apply 自带恢复副本)。
@@ -55,6 +128,8 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     else
         say "  registry: 不存在, 跳过"
     fi
+    # 切换 registry 后端/覆盖安装时, 清掉旧 local-path 数据(否则可能撑爆根盘 → DiskPressure)
+    _cleanup_orphan_registry_localpath
     exit 0
 fi
 
