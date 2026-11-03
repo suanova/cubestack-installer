@@ -48,11 +48,11 @@ REG_BASE="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT:-5000}"
 say "模型推理镜像 → 集群内置 registry(源 ${SAVE_DIR})..."
 if [ ! -d "${SAVE_DIR}" ]; then
     warn "离线目录不存在: ${SAVE_DIR}"
-    warn "  备料: 联网机 docker pull/save(见 ${SAVE_DIR}/README.md), 或经 Harbor→MinIO 保鲜管道同步"
+    warn "  请检查版本树是否包含 offline-files/model-collection/(由外部打包流程物化)"
     exit 0
 fi
 if [ ! -f "${LIST}" ]; then
-    warn "镜像清单缺失: ${LIST}(跳过; 见目录 README)"
+    warn "镜像清单缺失: ${LIST}(跳过; 请检查版本树的 image-list.tsv)"
     exit 0
 fi
 

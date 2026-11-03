@@ -72,7 +72,7 @@ IMAGES=(
 say "开发镜像 → 集群内置 registry(共 ${#IMAGES[@]} 个; 源 ${SAVE_DIR}; per-image tag)..."
 if [ ! -d "${SAVE_DIR}" ]; then
     warn "离线目录不存在: ${SAVE_DIR}"
-    warn "  生成离线 tar: sudo ./deployments/scripts/tools/images/harbor-save-images.sh --group dev-lab"
+    warn "  请从版本树获取离线 tar: offline-files/dev-lab/"
     exit 0
 fi
 
@@ -144,7 +144,7 @@ _devlab_push_one() {
                 "${_img}" "${_tag}" "${_legacy_note}" > "${PUSH_RESULT_DIR}/${_idx}.result"
             return 0
         fi
-        printf 'miss\t缺离线 tar: %s:%s(跳过; 生成: sudo tools/images/harbor-save-images.sh --group dev-lab)\n' \
+        printf 'miss\t缺离线 tar: %s:%s(跳过; 请检查版本树 offline-files/dev-lab/)\n' \
             "${_img}" "${_tag}" > "${PUSH_RESULT_DIR}/${_idx}.result"
         return 0
     fi
@@ -215,7 +215,7 @@ unset _DEVLAB_TASKS _i _res _st _msg _img
 
 echo "---------------------------------------------"
 say "开发镜像加载: 新推 ${_n_push} / digest 跳过 ${_n_skip} / 缺 tar ${_n_miss} / 失败 ${_n_fail}"
-[ "${_n_miss}" -gt 0 ] && warn "  有 ${_n_miss} 个镜像缺离线 tar(生成: harbor-save-images.sh --group dev-lab)"
+[ "${_n_miss}" -gt 0 ] && warn "  有 ${_n_miss} 个镜像缺离线 tar(请检查版本树 offline-files/dev-lab/)"
 [ "${_n_fail}" -gt 0 ] && warn "  有 ${_n_fail} 个镜像推送失败(重跑本模块自动续推, 已推的按 digest 跳过)"
 if [ $((_n_push + _n_skip)) -gt 0 ]; then
     ok "开发镜像处理完成(引用: ${REG_BASE}/suanova/<name>:<per-image tag>; 节点从此 registry 拉取)"
