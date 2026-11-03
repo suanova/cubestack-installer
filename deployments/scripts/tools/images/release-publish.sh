@@ -581,7 +581,7 @@ _publish() {
     rm -f "${tmp}"
 
     ok "发布完成: ${remote}"
-    echo "  取件: fetch-offline-from-minio.sh --release ${RELEASE} --dest <本地桶根>"
+    echo "  取件: fetch-offline-from-minio.sh --release ${RELEASE} --no-flat --dest <本地桶根>"
 }
 
 case "${CMD}" in

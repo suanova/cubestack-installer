@@ -13,6 +13,29 @@
 # 日志函数 say/ok/warn/err 由调用方提供。
 # ============================================================
 
+# 深度校验提示只打印一次(完整校验成功时)
+_DEEP_HINT_SHOWN=0
+
+# 打印"建议单独执行深度校验"的提示(仅在本次确实跳过了 deep 时)。
+_print_deep_hint() {   # <tool> <tree-base> <skipped-deep 0|1>
+    local tool="$1" base="$2" skipped="$3" cmd
+    [ "${skipped}" = "1" ] || return 0
+    [ "${_DEEP_HINT_SHOWN}" = "1" ] && return 0
+    _DEEP_HINT_SHOWN=1
+    cmd="${tool} --root ${base} --level full --deep"
+    [ -n "${RELEASE_ARG:-}" ] && cmd="${cmd} --release ${RELEASE_ARG}"
+    if [ "${FLAT:-0}" = "1" ]; then
+        cmd="${cmd} --layout flat"
+    else
+        cmd="${cmd} --layout release"
+    fi
+    echo ""
+    warn "本次为 full 校验(全量 sha256 + 结构检查), 未做深度校验(镜像 layer digest / 大包完整解压)"
+    echo "   建议单独执行深度校验(首次部署、介质搬运后强烈推荐; 耗时更长):"
+    echo "     ${cmd}"
+    echo ""
+}
+
 _print_verify_failures() {   # <json>
     python3 - "$1" <<'PY' >&2 || true
 import json, sys
@@ -134,6 +157,13 @@ _verify_release() {
     _vt="$(ensure_offline_verify_tool)" || { err "校验器不可用; 无法校验发布树"; return 1; }
     _json="$(mktemp)"
     local -a _args=(--root "${base}" --release "${RELEASE_ARG}" --level full --json --fail-missing)
+    # 默认 full 不做 deep(深度解压/镜像 layer digest 耗时很长); 旧版校验器没有 --no-deep,
+    # 探测后才追加, 避免拿发布树里的旧副本时报 "unrecognized arguments"。
+    # ⚠ 用命令替换读完输出再匹配: `--help | grep -q` 命中即退出会让左侧收到 SIGPIPE,
+    #   pipefail 下可能把"支持 --no-deep"误判成不支持。
+    local _skipped_deep=0 _help
+    _help="$("${_vt}" --help 2>&1 || true)"
+    case "${_help}" in *--no-deep*) _args+=(--no-deep); _skipped_deep=1 ;; esac
     if [ "${FLAT}" = "1" ]; then
         _args+=(--layout flat)
     else
@@ -152,11 +182,13 @@ _verify_release() {
         _args+=(--require-cli-tar)
     fi
     say "校验发布树(完整 sha256 + CLI tar): ${base}"
+    say "  大版本全量校验可能需要数分钟(约 300s 量级), 每 10s 打印进度, 请耐心等待, 不要中断"
     _rc=0
     bash "${_vt}" ${_args[@]+"${_args[@]}"} > "${_json}" || _rc=$?
     if [ "${_rc}" = "0" ]; then
         rm -f "${_json}"
         ok "发布版本 ${RELEASE_ARG} 校验通过"
+        _print_deep_hint "${_vt}" "${base}" "${_skipped_deep}"
         return 0
     fi
     _print_verify_failures "${_json}"
