@@ -984,7 +984,7 @@ kubectl get sc && kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
 | MetalLB | v0.13.9 |
 | kube-vip | v1.0.3 |
 | RDMA 设备插件 | v1.5.4 |
-| 内置 registry | registry:2.8.1 |
+| 内置 registry | registry:3.1.2 |
 
 ### 6.4 相关文档
 
