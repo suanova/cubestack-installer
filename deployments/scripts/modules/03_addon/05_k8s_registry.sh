@@ -95,7 +95,7 @@ _cleanup_orphan_registry_localpath() {
         for _d in ${_dirs}; do
             _uid="$(basename "${_d}" | sed -n 's/^pvc-\([0-9a-f-]*\)_kube-system_registry-pvc$/\1/p')"
             [ -n "${_uid}" ] || continue
-            if printf '%s\n' "${_refs}" | command grep -qxF "${_uid}"; then
+            if command grep -qxF -- "${_uid}" <<< "${_refs}"; then
                 say "  保留仍被 PV/PVC 引用的 local-path registry 数据: ${_hn}:${_d}"
                 continue
             fi
