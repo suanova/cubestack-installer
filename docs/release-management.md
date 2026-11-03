@@ -207,12 +207,15 @@ cubestack-installer/                     # MinIO 桶根
 └── 1.9.0/
 ```
 
-`fetch --release 2.0.0 --dest /data/cubestack-installer` 会下载：
+`fetch --release 2.0.0 --no-flat --dest /data/cubestack-installer` 会下载：
 
 ```text
 /data/cubestack-installer/2.0.0/offline-files/...
 /data/cubestack-installer/2.0.0/cubestack-installer-cli-v2.0.0.tar
 ```
+
+> 默认（不加 `--no-flat`）是 **flat**：把 `<版本>/offline-files/` 平铺到 offline-files 根
+> （默认 `deployments/offline-files`，可用 `--dest` 指定），且不下载 CLI tar。
 
 部署配置：
 
@@ -564,12 +567,12 @@ deployments/offline-files/
 ```
 
 > MinIO 上的 `<bucket>/2.0.0/offline-files/` 仍保持版本化布局；flat 只是**部署机本地**的
-> 平铺方式。推荐用 fetch 的 flat 模式：
+> 平铺方式。推荐直接用默认 flat（`--flat` 现在可省略；`--no-flat` 才建版本目录）：
 > ```bash
 > ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
->   --release 2.0.0 --flat --dest /opt/cubestack-installer/deployments/offline-files
+>   --release 2.0.0 --dest /opt/cubestack-installer/deployments/offline-files
 > ```
-> （`--flat` 不建 `<版本>/` 目录；CLI tar 不在 flat 模式下载）
+> （默认平铺到 `deployments/offline-files`；CLI tar 不在 flat 模式下载）
 > 切换到 latest 前请移除/改名该 `release.env`，或设 `CUBESTACK_RELEASE_AUTO="false"`。
 
 | 模式 | `CUBESTACK_RELEASE` | `CUBESTACK_RELEASE_LAYOUT` | 实际 `OFFLINE_FILES_ROOT` | `release.env` 来源 |
@@ -586,25 +589,29 @@ deployments/offline-files/
 ### 5.1 用户视角
 
 ```bash
-# 默认下载到 <本地桶根>/2.0.0/（默认本地桶根 = deployments/）
+# 默认 flat：平铺到 deployments/offline-files（可直接部署；不下载 CLI tar）
 ./fetch-offline-from-minio.sh --release 2.0.0
 
-# 推荐：指定本地桶根（与 MinIO cubestack-installer/ 同构）
-./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/cubestack-installer
+# 指定 offline-files 根（仍 flat）
+./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/offline-files
 
-# 只校验本地已下载的发布版本
-./fetch-offline-from-minio.sh --release 2.0.0 --verify-only \
+# 版本目录布局（<本地桶根>/2.0.0/ + CLI tar）：显式 --no-flat
+./fetch-offline-from-minio.sh --release 2.0.0 --no-flat --dest /data/cubestack-installer
+
+# 只校验本地已下载的发布版本（flat 默认；版本目录布局加 --no-flat）
+./fetch-offline-from-minio.sh --release 2.0.0 --verify-only
+./fetch-offline-from-minio.sh --release 2.0.0 --no-flat --verify-only \
     --dest /data/cubestack-installer
 
 # 精确同步(默认: release/flat 覆盖并删除本地多余文件; 30s 倒计时)
-./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/cubestack-installer
+./fetch-offline-from-minio.sh --release 2.0.0
 # 下载失败后断点续传(先校验本地, 部分文件按 offset 续传, 完整则跳过下载)
-./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/cubestack-installer --resume
+./fetch-offline-from-minio.sh --release 2.0.0 --resume
 # 调整下载重试(默认 3 次, 间隔 3s)
-./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/cubestack-installer --retry 5 --retry-delay 5
+./fetch-offline-from-minio.sh --release 2.0.0 --retry 5 --retry-delay 5
 # 保留本地多余文件 / 调整倒计时
-./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/cubestack-installer --no-clean
-./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/cubestack-installer --clean-countdown 30
+./fetch-offline-from-minio.sh --release 2.0.0 --no-clean
+./fetch-offline-from-minio.sh --release 2.0.0 --clean-countdown 30
 
 # 列出 MinIO 上可用版本（桶根下除 offline-files/ 外的版本目录）
 ./fetch-offline-from-minio.sh --list-releases
@@ -1066,9 +1073,9 @@ bash deployments/scripts/tools/images/release-sync-images.sh \
   --cli-image-digest sha256:<registry-digest>
 # 4) 验收
 bash deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
-  --release 2.0.0 --dest /tmp/release-verify --yes
+  --release 2.0.0 --no-flat --dest /tmp/release-verify --yes
 bash deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
-  --release 2.0.0 --dest /tmp/release-verify --verify-only
+  --release 2.0.0 --no-flat --dest /tmp/release-verify --verify-only
 ```
 
 > rcX 与 GA 的差别只在 `release.env`/`release-images.tsv` 里的 tag/chart/CLI 值；脚本不硬编码。
@@ -1080,7 +1087,7 @@ bash deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
 ```bash
 # 1) 取发布版本（本地桶根 /data/cubestack-installer 与 MinIO 桶根同构）
 ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
-    --release 2.0.0 --dest /data/cubestack-installer
+    --release 2.0.0 --no-flat --dest /data/cubestack-installer
 # → /data/cubestack-installer/2.0.0/{offline-files/, cubestack-installer-cli-v2.0.0.tar}
 
 # 2) 配置版本开关（cluster.conf）
@@ -1235,7 +1242,7 @@ bash deployments/scripts/tools/images/release-publish.sh publish --release 2.0.0
 # ===== 部署机 =====
 # 5) 取件（本地桶根 /data/cubestack-installer 与 MinIO 桶根同构）
 ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
-    --release 2.0.0 --dest /data/cubestack-installer
+    --release 2.0.0 --no-flat --dest /data/cubestack-installer
 # → /data/cubestack-installer/2.0.0/{offline-files/, cubestack-installer-cli-v2.0.0.tar}
 
 # 6) 配置

@@ -229,7 +229,7 @@ _n=0; _g() { _n=$((_n+1)); return 1; }
 _mc_retry _g; chk "mc 重试最终失败" "1" "$?"
 chk "mc 失败尝试 3 次" "3" "${_n}"
 
-bash "${FETCH}" --release 2.0.0 --dest "${TMP}/local" --yes >/dev/null 2>&1
+bash "${FETCH}" --release 2.0.0 --no-flat --dest "${TMP}/local" --yes >/dev/null 2>&1
 chk "fetch --release 退出码" "0" "$?"
 chk "clean 删除多余文件" "0" "$([ -e "${TMP}/local/2.0.0/offline-files/extra.txt" ] && echo 1 || echo 0)"
 chk "clean 保留 .cubestack-*" "keep" "$(cat "${TMP}/local/2.0.0/offline-files/.cubestack-manifest-backup/keep.txt" 2>/dev/null)"
@@ -279,18 +279,18 @@ bash "${FETCH}" --clean-countdown 0000000000000000000008 --list >/dev/null 2>&1
 chk "clean-countdown 前导零不计位数" "0" "$?"
 
 # 非交互且无 --yes: 精确清理必须中止
-out="$(bash "${FETCH}" --release 2.0.0 --dest "${TMP}/local-abort" </dev/null 2>&1)"
+out="$(bash "${FETCH}" --release 2.0.0 --no-flat --dest "${TMP}/local-abort" </dev/null 2>&1)"
 rc=$?
 chk "非交互无 --yes 中止" "1" "${rc}"
 chk_contains "提示 --yes/--no-clean" "--yes" "${out}"
 
 # --no-clean: 保留本地多余文件(--no-verify 避免覆盖性校验失败)
 printf 'keep-extra\n' > "${TMP}/local/2.0.0/offline-files/keep-extra.txt"
-bash "${FETCH}" --release 2.0.0 --dest "${TMP}/local" --yes --no-clean --no-verify >/dev/null 2>&1
+bash "${FETCH}" --release 2.0.0 --no-flat --dest "${TMP}/local" --yes --no-clean --no-verify >/dev/null 2>&1
 chk "--no-clean 保留多余文件" "keep-extra" "$(cat "${TMP}/local/2.0.0/offline-files/keep-extra.txt" 2>/dev/null)"
 rm -f "${TMP}/local/2.0.0/offline-files/keep-extra.txt"
 
-bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
+bash "${FETCH}" --release 2.0.0 --no-flat --verify-only --dest "${TMP}/local" >/dev/null 2>&1
 chk "verify-only 通过" "0" "$?"
 
 # --verify-only 是纯本地路径(文档: 不联网): 本地校验器缺失时必须直接失败,
@@ -313,7 +313,7 @@ out="$(PATH="${TMP}/bin-vo:${PATH}" FAKE_CURL_LOG="${TMP}/vo-curl.log" \
     OFFLINE_VERIFY_TOOL_SHA256="$(printf '0%.0s' {1..64})" \
     XDG_CACHE_HOME="${TMP}/cache-vo" \
     bash "${TMP}/offline-notool/fetch-offline-from-minio.sh" \
-        --release 9.9.9 --verify-only --dest "${TMP}/vo" 2>&1)"
+        --release 9.9.9 --no-flat --verify-only --dest "${TMP}/vo" 2>&1)"
 rc=$?
 chk "verify-only 校验器缺失仍失败" "1" "${rc}"
 chk "verify-only 不触发在线安装" "0" "$([ -e "${TMP}/vo-curl.log" ] && echo 1 || echo 0)"
@@ -331,7 +331,7 @@ chmod +x "${TMP}/bin-nomc/mc"
 rm -f "${TMP}/mc-resume.log"
 out="$(PATH="${TMP}/bin-nomc:${PATH}" FAKE_MC_RESUME_LOG="${TMP}/mc-resume.log" \
     MINIO_ENDPOINT="http://unreachable.invalid" MINIO_ACCESS_KEY="x" MINIO_SECRET_KEY="y" \
-    bash "${FETCH}" --release 2.0.0 --resume --dest "${TMP}/local" --yes 2>&1)"
+    bash "${FETCH}" --release 2.0.0 --no-flat --resume --dest "${TMP}/local" --yes 2>&1)"
 rc=$?
 chk "resume 完整树不依赖 MinIO 退出码" "0" "${rc}"
 chk "resume 完整树不调用 mc" "0" "$([ -e "${TMP}/mc-resume.log" ] && echo 1 || echo 0)"
@@ -341,16 +341,16 @@ chk_contains "resume 完整树提示无需下载" "无需重新下载" "${out}"
 head -c 3 "${TMP}/local/2.0.0/offline-files/ceph/test.txt" > "${TMP}/part.tmp"
 mv -f "${TMP}/part.tmp" "${TMP}/local/2.0.0/offline-files/ceph/test.txt"
 : > "${FAKE_MC_LOG}"
-bash "${FETCH}" --release 2.0.0 --resume --dest "${TMP}/local" --yes >/dev/null 2>&1
+bash "${FETCH}" --release 2.0.0 --no-flat --resume --dest "${TMP}/local" --yes >/dev/null 2>&1
 chk "断点续传 --resume 退出码" "0" "$?"
 chk "断点续传恢复内容" "hello" "$(cat "${TMP}/local/2.0.0/offline-files/ceph/test.txt" 2>/dev/null)"
 chk_contains "使用 mc cat --offset" "cat-offset 3" "$(cat "${FAKE_MC_LOG}" 2>/dev/null)"
 rm -f "${TMP}/local/2.0.0/offline-files/ceph/test.txt"
-out="$(bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" 2>&1)"
+out="$(bash "${FETCH}" --release 2.0.0 --no-flat --verify-only --dest "${TMP}/local" 2>&1)"
 rc=$?
 chk "fetch 缺失文件严格失败" "1" "${rc}"
 chk_contains "fetch 提示文件不存在" "文件不存在或已被删除" "${out}"
-bash "${FETCH}" --release 2.0.0 --repair --dest "${TMP}/local" --yes >/dev/null 2>&1
+bash "${FETCH}" --release 2.0.0 --no-flat --repair --dest "${TMP}/local" --yes >/dev/null 2>&1
 chk "fetch 缺失文件 repair" "0" "$?"
 
 echo "== ③c release --flat 平铺到 offline-files 根 =="
@@ -372,29 +372,42 @@ chk "flat 无版本子目录" "0" "$([ -e "${TMP}/flatdest/2.0.0" ] && echo 1 ||
 chk "flat release.env 落位" "RELEASE_VERSION=2.0.0" "$(head -1 "${TMP}/flatdest/release.env" 2>/dev/null)"
 bash "${FETCH}" --release 2.0.0 --flat --verify-only --dest "${TMP}/flatdest" >/dev/null 2>&1
 chk "flat verify-only 通过" "0" "$?"
+
+echo "== ③c2 release 默认 flat(不传 --flat) =="
+rm -rf "${TMP}/flatdefault"
+bash "${FETCH}" --release 2.0.0 --dest "${TMP}/flatdefault" --yes >/dev/null 2>&1
+chk "默认 flat 退出码" "0" "$?"
+chk "默认 flat 文件落位" "hello" "$(cat "${TMP}/flatdefault/ceph/test.txt" 2>/dev/null)"
+chk "默认 flat 无版本子目录" "0" "$([ -e "${TMP}/flatdefault/2.0.0" ] && echo 1 || echo 0)"
+chk "默认 flat release.env 落位" "RELEASE_VERSION=2.0.0" "$(head -1 "${TMP}/flatdefault/release.env" 2>/dev/null)"
+chk "默认 flat 不下载 CLI tar" "0" "$(find "${TMP}/flatdefault" -maxdepth 1 -name 'cubestack-installer-cli-*.tar' | wc -l)"
+out="$(bash "${FETCH}" --release 2.0.0 --flat --no-flat --dest "${TMP}/x" 2>&1)"; rc=$?
+chk "--flat 与 --no-flat 互斥" "1" "${rc}"
+out="$(bash "${FETCH}" --no-flat --list 2>&1)"; rc=$?
+chk "--no-flat 需要 --release" "1" "${rc}"
 # --verify-only 不下载任何文件, 不应做"下载需要多少空间"的预检(否则在小盘上误报)
-out="$(WARN_NEED_GB=999999 bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" 2>&1)"
+out="$(WARN_NEED_GB=999999 bash "${FETCH}" --release 2.0.0 --no-flat --verify-only --dest "${TMP}/local" 2>&1)"
 rc=$?
 chk "verify-only 跳过空间预检退出码" "0" "${rc}"
 chk_contains "verify-only 提示跳过空间预检" "跳过下载磁盘空间预检" "${out}"
 printf 'tampered\n' >> "${TMP}/local/2.0.0/offline-files/ceph/test.txt"
-out="$(bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" 2>&1)"
+out="$(bash "${FETCH}" --release 2.0.0 --no-flat --verify-only --dest "${TMP}/local" 2>&1)"
 rc=$?
 chk "篡改后 verify-only 失败" "1" "${rc}"
 chk_contains "失败点名坏文件" "ceph/test.txt" "${out}"
 chk_contains "失败提示 --repair" "--repair" "${out}"
-bash "${FETCH}" --release 2.0.0 --repair --dest "${TMP}/local" --yes >/dev/null 2>&1
+bash "${FETCH}" --release 2.0.0 --no-flat --repair --dest "${TMP}/local" --yes >/dev/null 2>&1
 chk "repair 退出码" "0" "$?"
 chk "repair 恢复文件" "hello" "$(cat "${TMP}/local/2.0.0/offline-files/ceph/test.txt" 2>/dev/null)"
-bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
+bash "${FETCH}" --release 2.0.0 --no-flat --verify-only --dest "${TMP}/local" >/dev/null 2>&1
 chk "repair 后 verify-only 通过" "0" "$?"
 # _SUCCESS 绑定损坏也可 --repair(从远端重取)
 printf 'release=2.0.0\nsha256sums=%064d\n' 0 > "${TMP}/local/2.0.0/offline-files/_SUCCESS"
-bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
+bash "${FETCH}" --release 2.0.0 --no-flat --verify-only --dest "${TMP}/local" >/dev/null 2>&1
 chk "_SUCCESS 损坏 verify-only 失败" "1" "$?"
-bash "${FETCH}" --release 2.0.0 --repair --dest "${TMP}/local" --yes >/dev/null 2>&1
+bash "${FETCH}" --release 2.0.0 --no-flat --repair --dest "${TMP}/local" --yes >/dev/null 2>&1
 chk "_SUCCESS repair 退出码" "0" "$?"
-bash "${FETCH}" --release 2.0.0 --verify-only --dest "${TMP}/local" >/dev/null 2>&1
+bash "${FETCH}" --release 2.0.0 --no-flat --verify-only --dest "${TMP}/local" >/dev/null 2>&1
 chk "_SUCCESS repair 后通过" "0" "$?"
 
 out="$(bash "${FETCH}" --list-releases 2>/dev/null)"
@@ -413,10 +426,10 @@ printf '{"cli_tar":"../cubestack-installer-cli.tar","cli_tar_sha256":"%s"}\n' "$
 ( cd "${TMP}/remote/cubestack-installer/1.9.9/offline-files" \
     && sha256sum ./ceph/test.txt ./release.env ./release.json > SHA256SUMS )
 
-bash "${FETCH}" --release 1.9.9 --dest "${TMP}/local-legacy" --yes >/dev/null 2>&1
+bash "${FETCH}" --release 1.9.9 --no-flat --dest "${TMP}/local-legacy" --yes >/dev/null 2>&1
 chk "旧布局 fetch 退出码" "0" "$?"
 chk "旧布局 CLI tar 落盘" "legacy-cli" "$(cat "${TMP}/local-legacy/1.9.9/cubestack-installer-cli.tar" 2>/dev/null)"
-bash "${FETCH}" --release 1.9.9 --verify-only --dest "${TMP}/local-legacy" >/dev/null 2>&1
+bash "${FETCH}" --release 1.9.9 --no-flat --verify-only --dest "${TMP}/local-legacy" >/dev/null 2>&1
 chk "旧布局 verify-only 通过" "0" "$?"
 
 # ⑤b2 旧布局 + release.json 无 cli_tar 字段: 校验器自身只认元数据/版本化名,
@@ -432,11 +445,11 @@ printf '{"cli_tar_sha256":"%s"}\n' "${legacy2_sha}" \
     > "${TMP}/remote/cubestack-installer/1.9.8/offline-files/release.json"
 ( cd "${TMP}/remote/cubestack-installer/1.9.8/offline-files" \
     && sha256sum ./ceph/test.txt ./release.env ./release.json > SHA256SUMS )
-bash "${FETCH}" --release 1.9.8 --dest "${TMP}/local-legacy2" --yes >/dev/null 2>&1
+bash "${FETCH}" --release 1.9.8 --no-flat --dest "${TMP}/local-legacy2" --yes >/dev/null 2>&1
 chk "旧布局无 cli_tar 元数据 fetch 退出码" "0" "$?"
 chk "旧布局无 cli_tar 元数据 CLI tar 落盘" "legacy2-cli" \
     "$(cat "${TMP}/local-legacy2/1.9.8/cubestack-installer-cli.tar" 2>/dev/null)"
-bash "${FETCH}" --release 1.9.8 --verify-only --dest "${TMP}/local-legacy2" >/dev/null 2>&1
+bash "${FETCH}" --release 1.9.8 --no-flat --verify-only --dest "${TMP}/local-legacy2" >/dev/null 2>&1
 chk "旧布局无 cli_tar 元数据 verify-only 通过" "0" "$?"
 
 # ---------------- ⑥ release 定义静态约束 ----------------

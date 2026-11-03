@@ -562,7 +562,7 @@ helm_chart_ensure() {
                 _coll="$(basename "$(dirname "$(dirname "${tgz}")")")"
                 err "    获取(离线包): ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub ${_coll}" ;;
             */offline-files/*)
-                err "    获取(发布版本): ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE:-<版本>} --dest <本地桶根>" ;;
+                err "    获取(发布版本): ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE:-<版本>} --no-flat --dest <本地桶根>" ;;
         esac
         err "    获取(在线/手工): helm pull ${ref}${repo:+ --repo ${repo}} --version ${version} -d $(dirname "${tgz}")"
         err "          并把 helm 输出的 Digest: 写入 $(basename "${tgz}").digest(不要用 sha256sum); tgz 不入 git"
@@ -854,7 +854,7 @@ load_config() {
                 _rel_root="${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files"
                 if [ ! -f "${_rel_root}/release.env" ]; then
                     err "未找到发布版本 ${CUBESTACK_RELEASE}: ${_rel_root}/release.env"
-                    err "  先取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --dest ${CUBESTACK_RELEASE_ROOT}"
+                    err "  先取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --no-flat --dest ${CUBESTACK_RELEASE_ROOT}"
                     exit 1
                 fi
                 ;;

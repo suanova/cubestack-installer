@@ -92,6 +92,9 @@ FILES=(
     # ★ 2026-10-19: 平台镜像清单也要同步 —— 容器内 `--steps cubestack_operator` 的离线推送
     #   与 check-image-manifest / 保鲜工具都以它为登记源; 漏同步会让容器继续用旧镜像 tag。
     deployments/config/images.manifest
+    # ★ 2026-11-03: 校验器 pin 也要同步 —— 修改 verifier 后 pyz 与 pin 同时变化;
+    #   漏同步会让容器内"校验器缺位时在线安装"按旧 sha 判失败(树外独立文件, 走 FILES)。
+    deployments/config/verify-tool.sha256
     deployments/kubespray/cubestack-offline.sh
     # ★ 2026-09-28(评审 I2): 两个入口脚本此前**不在清单里** → 容器里根本没有"换树/重放补丁"
     #   的能力(只有离线入口), 遇到需要重放补丁的场景只能靠人手抄。它们是独立文件(非整树),

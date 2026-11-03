@@ -471,7 +471,7 @@ if [ ! -f "${CHART_TGZ}" ]; then
         unset _cands
     fi
     err "    离线包: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub cubestack-operator"
-    [ -n "${CUBESTACK_RELEASE:-}" ] && err "    发布版本: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --dest ${CUBESTACK_RELEASE_ROOT:-<本地桶根>}"
+    [ -n "${CUBESTACK_RELEASE:-}" ] && err "    发布版本: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --no-flat --dest ${CUBESTACK_RELEASE_ROOT:-<本地桶根>}"
     err "    在线/手工: helm pull ${CHART_REF} --version ${CHART_VER} -d ${PRIMARY_CHART_DIR}"
     err "              并把 helm 输出的 Digest: 写入 ${CHART_BASENAME}.digest(不要用 sha256sum)"
     exit 1

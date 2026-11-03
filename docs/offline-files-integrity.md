@@ -7,19 +7,22 @@
 ## 1. 快速开始
 
 ```bash
-# ① 从 MinIO 取发布版本(下载完成后自动 full 校验 + 写校验戳)
+# ① 从 MinIO 取发布版本(默认 flat: 平铺到 offline-files 根; 自动 full 校验(不做 deep)+ 写校验戳)
 ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
-    --release 2.0.0 --dest /data/cubestack-installer
+    --release 2.0.0 --dest /data/offline-files
+#    保留版本目录布局(<本地桶根>/2.0.0/)时加 --no-flat:
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
+    --release 2.0.0 --no-flat --dest /data/cubestack-installer
 
 # ② 只校验已下载的树(不下载)
 #    默认(不指定 --level) = quick 结构检查, 会明确提示; 全量请加 --level full
 ./deployments/scripts/tools/offline/verify-offline-files.sh \
-    --root /data/cubestack-installer/2.0.0/offline-files \
+    --root /data/offline-files --layout flat \
     --release 2.0.0 --level full
 
 #    只做 quick 结构 + 深度解压(不跑全量 sha)
 ./deployments/scripts/tools/offline/verify-offline-files.sh \
-    --root /data/cubestack-installer/2.0.0/offline-files \
+    --root /data/offline-files --layout flat \
     --release 2.0.0 --level quick --deep
 
 # ③ 开发/手工拷贝树: 先生成清单, 再纳入门禁
@@ -57,6 +60,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --no-verify-offline
 | `metadata` | 清单格式/路径/重复、双向覆盖、0 字节、临时文件、`_SUCCESS.sha256sums` 绑定、`release.env` 版本、`release.json` 格式、权限警告 | 秒级(仅 stat/小文件) |
 | `quick` | metadata + `SIZES` 大小 + tar 结束块/tar 头、docker-archive `Config`/`Layers` 存在性、gzip/chart、ELF/deb/qcow2 魔数、`tree.tar.gz.sha256` | 秒级(不读镜像数据块) |
 | `full` | quick + 全量 sha256 + **镜像 archive 深度校验**(manifest/config/layer digest) + 大包解压/CRC + CLI tar/`tree.tar.gz` | 容器 c 126G/301 文件实测 **7m36s**（layer 校验单线程）；机械盘更久 |
+| `full --no-deep` | quick + 全量 sha256(不做镜像 layer digest/大包完整解压) | 比 `full` 快, 不随 layer 数线性增长 |
 | `auto` | 校验戳有效 → 秒级复查；否则 full；未 seal 的开发树 → quick | 视情况 |
 
 **默认级别是 `quick`**：不指定 `--level` 时只做结构检查（不计算全量 sha256），
@@ -86,6 +90,27 @@ TTY 下镜像层校验只显示单行进度条（归档、当前 layer、i/n、�
 `--deep` 用于 **quick 也强制深度校验**（`--level quick --deep`）；`--level full` 已默认 deep。
 `--deep` 较慢，按需使用。
 
+全量 sha256 阶段会先打印文件数/总字节与参考耗时，之后**每 10s 打印一次进度**
+（`sha256 完成/总数 (已用秒, 吞吐, 剩余约 Ns)`），避免大版本校验时误以为进程中断；
+可用 `CUBESTACK_VERIFY_HEARTBEAT_SEC` 调整心跳间隔（默认 10，测试时可用 1）。
+
+`--no-deep` 用于 **full 但跳过深度校验**（`--level full --no-deep`）：仍做全量 sha256 与结构检查，
+但不逐 layer 校验镜像 digest、也不对超过阈值的 `.tar.gz` 完整解压。`fetch-offline-from-minio.sh`
+下载完成后默认使用该级别（速度快），并在校验通过后提示单独执行深度校验：
+
+```bash
+# 深度校验(建议首次部署 / 介质搬运后单独执行; 耗时更长)
+# flat 布局(默认):
+./deployments/scripts/tools/offline/verify-offline-files.sh \
+    --root <offline-files 根> --layout flat --release <版本> --level full --deep
+# 版本目录布局(--no-flat 下载):
+./deployments/scripts/tools/offline/verify-offline-files.sh \
+    --root <本地桶根>/<版本>/offline-files --layout release --release <版本> --level full --deep
+```
+
+> 注意: `--no-deep` 的 full 写出的校验戳 `deep=false`，`--level auto` 不会信任它（会重跑 full+deep），
+> 因此部署门禁仍然保证深度校验。
+
 普通 `.gz`（不是 `.tar.gz`/`.tgz`）的支持：
 
 | 文件 | quick | full | `--deep` |
@@ -105,6 +130,7 @@ TTY 下镜像层校验只显示单行进度条（归档、当前 layer、i/n、�
 --staging         # 允许 _SUCCESS 缺失(发布 staging)
 --require-cli-tar # release 布局必须有 CLI tar
 --deep            # quick 下也强制深度校验(镜像 layer digest/大包解压/CRC); full 已默认
+--no-deep         # full 下跳过深度校验(仅全量 sha256 + 结构); 需配合 --level full|auto
 --deep-log PATH   # 逐 layer 明细日志(默认 TMPDIR/cubestack-verify-deep-*.log)
 --skip-missing    # 清单登记但磁盘缺失仅警告并跳过(默认)
 --fail-missing    # 清单登记但磁盘缺失即失败(部署门禁/fetch 使用)
