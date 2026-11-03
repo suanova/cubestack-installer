@@ -709,12 +709,15 @@ done
 # assets/charts 的渲染对账而来, 清单与维护方法见 offline-files/cubestack-operator/README.md)。
 # ★ 2026-10-16 目录分类: 组件 tar 按平台组件分子目录(offline-files/cubestack-operator/<组件>/,
 #   组件名 = CR spec.components 的键: lws / envoy-gateway / controller-manager / prometheus /
-#   perses / cuberouter / bmc / cubepilot / portal); **顶层** = operator 本体镜像;
+#   perses / cuberouter / bmc / cubepilot / portal / docs); **顶层** = operator 本体镜像;
 #   **charts/** = operator helm chart(.tgz), 不是平台组件, 扫描时显式跳过。
 #   过滤: CUBESTACK_OPERATOR_COMPONENTS="cubepilot,prometheus" → 只推列出的组件子目录
 #   (更新某个 operator 后单独推送其镜像的入口; 组件名不存在会 err 并列出可用目录)。
 # 目标映射(与 [3/6] 的 CR 两条前缀注入一一对应):
 #   自研 harbor.isuanova.com/suanova/<name>:tag  → <REG>/suanova/<name>:tag (imageRegistry)
+#   私有 harbor.isuanova.com/suanova-private/<name>:tag → <REG>/suanova-private/<name>:tag
+#     (operator 会把 cubestackDocs 组件的镜像重写为 <global.imageRegistry>/suanova-private/…,
+#      见 CRD spec.components.cubestackDocs; 漏掉这一支会被推到 <REG>/mirrors/harbor.isuanova.com/…)
 #   第三方 <上游ref>(docker.io/quay.io/ghcr.io…) → <REG>/mirrors/<上游ref> (externalImageRegistryPrefix)
 # 幂等: config digest(内容)比对 —— docker-archive 的 manifest digest 与 registry 不可比,
 #       用它会每次重推(见 _content_digest)。失败即 err —— CR 模式缺组件镜像=组件将 ImagePullBackOff。
@@ -768,7 +771,7 @@ if [ "${CR_ENABLED}" = "true" ]; then
             esac
         fi
         case "${_src_ref}" in
-            "${HARBOR_HOST}"/suanova/*|"${HARBOR_HOST}"/mirrors/*) _dst_path="${_src_ref#${HARBOR_HOST}/}" ;;
+            "${HARBOR_HOST}"/suanova/*|"${HARBOR_HOST}"/suanova-private/*|"${HARBOR_HOST}"/mirrors/*) _dst_path="${_src_ref#${HARBOR_HOST}/}" ;;
             *) _dst_path="mirrors/${_src_ref}" ;;
         esac
         _PLATFORM_REFS+=("${REG_BASE}/${_dst_path}")
