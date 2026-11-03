@@ -134,6 +134,12 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-cubestack-component-steps.sh
 
+      # 额外私有模块目录: 默认行为不变 / 合并发现 / 重复文件与 key 拒绝
+      - name: 额外私有模块目录回归(extra modules dirs)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-extra-modules-dirs.sh
+
       # release 模式: load_config 路径派生 / fetch --release 下载+校验 / release 定义静态约束
       - name: 发布版本模式回归(release mode)
         run: |

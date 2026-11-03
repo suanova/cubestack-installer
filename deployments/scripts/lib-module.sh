@@ -51,6 +51,61 @@
 
 MODULES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/modules"
 
+# Merge extra module roots (colon-separated) into a temporary modules root so
+# discovery and execution paths stay unchanged. The merged root only holds
+# symlinks and is left for the system /tmp cleanup.
+if [ -n "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ] && [ -z "${CUBESTACK_MODULES_MERGED:-}" ]; then
+    _cs_merged="$(mktemp -d "${TMPDIR:-/tmp}/cubestack-modules.XXXXXX")" || {
+        echo "error: failed to create temporary modules dir" >&2
+        exit 1
+    }
+    _cs_link_phase() {
+        local phase_dir="$1" phase f base
+        phase="$(basename "${phase_dir}")"
+        mkdir -p "${_cs_merged}/${phase}"
+        for f in "${phase_dir}"/[0-9][0-9]_*.sh; do
+            [ -f "${f}" ] || continue
+            base="$(basename "${f}")"
+            if [ -e "${_cs_merged}/${phase}/${base}" ] || [ -L "${_cs_merged}/${phase}/${base}" ]; then
+                echo "error: duplicate module file: ${phase}/${base} (${f})" >&2
+                exit 1
+            fi
+            ln -s "${f}" "${_cs_merged}/${phase}/${base}"
+        done
+    }
+    for _cs_phase_dir in "${MODULES_DIR}"/[0-9][0-9]_*; do
+        [ -d "${_cs_phase_dir}" ] && _cs_link_phase "${_cs_phase_dir}"
+    done
+    while IFS= read -r _cs_root; do
+        [ -n "${_cs_root}" ] || continue
+        [ -d "${_cs_root}" ] || {
+            echo "error: extra modules dir not found: ${_cs_root}" >&2
+            exit 1
+        }
+        _cs_root="$(cd "${_cs_root}" && pwd)" || {
+            echo "error: cannot resolve extra modules dir: ${_cs_root}" >&2
+            exit 1
+        }
+        _cs_phase_dirs=("${_cs_root}"/[0-9][0-9]_*)
+        if [ ! -d "${_cs_phase_dirs[0]}" ]; then
+            case "$(basename "${_cs_root}")" in
+                [0-9][0-9]_*) _cs_phase_dirs=("${_cs_root}") ;;
+                *)
+                    echo "error: extra modules dir has no NN_* phase dir: ${_cs_root}" >&2
+                    exit 1
+                    ;;
+            esac
+        fi
+        for _cs_phase_dir in "${_cs_phase_dirs[@]}"; do
+            [ -d "${_cs_phase_dir}" ] && _cs_link_phase "${_cs_phase_dir}"
+        done
+    done < <(printf '%s\n' "${CUBESTACK_EXTRA_MODULES_DIRS}" | tr ':' '\n')
+    MODULES_DIR="${_cs_merged}"
+    export CUBESTACK_MODULES_MERGED="${_cs_merged}"
+    unset -f _cs_link_phase
+    unset _cs_merged _cs_phase_dir _cs_phase_dirs _cs_root
+fi
+
 # ---------------- 旧 key → 新 key 别名(向后兼容) ----------------
 declare -A MODULE_ALIAS=(
     [net]=vm_network
@@ -137,7 +192,7 @@ module_meta() {
 #   MODULE_DEFAULT / MODULE_REPEAT / MODULE_PHASE / MODULE_TOGGLE / MODULE_REQUIRES
 discover_modules() {
     MODULE_KEY=(); MODULE_DESC=(); MODULE_SCRIPT=(); MODULE_DEFAULT=(); MODULE_REPEAT=(); MODULE_PHASE=(); MODULE_TOGGLE=(); MODULE_REQUIRES=()
-    local f dir base key rel
+    local f dir base key rel _dups
     # 遍历 modules/NN_*/NN_*.sh(两级), 按路径字典序 = 目录序号+文件序号 排序
     for f in "${MODULES_DIR}"/[0-9][0-9]_*/[0-9][0-9]_*.sh; do
         [ -f "${f}" ] || continue
@@ -155,6 +210,11 @@ discover_modules() {
         MODULE_TOGGLE+=("$(module_meta "${f}" TOGGLE)")
         MODULE_REQUIRES+=("$(module_meta "${f}" REQUIRES)")
     done
+    _dups="$(printf '%s\n' "${MODULE_KEY[@]}" | sort | uniq -d)"
+    if [ -n "${_dups}" ]; then
+        err "duplicate module key(s): ${_dups//$'\n'/, }"
+        return 1
+    fi
     # ★ operator 自动派生: 有 TOGGLE 且不在基座集合(BASE_MODULES)即 operator。
     #   新增 operator 模块写 TOGGLE 即自动纳入 --steps 精确调度, 无需改本文件。
     OPERATOR_MODULES=()
