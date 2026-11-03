@@ -8,10 +8,10 @@
 
 | 组件 | 版本 | 说明 |
 |---|---|---|
-| Rook | **v1.20.2** | operator manifest(离线 vendoring: `deployments/cubestack-addon/rook/`) |
+| Rook | **v1.21.1** | operator manifest(离线 vendoring: `deployments/cubestack-addon/rook/`) |
 | Ceph | **v20.2.2** | `quay.io/ceph/ceph:v20.2.2`(mon/mgr/osd/工具) |
-| ceph-csi-operator | **v1.0.4** | rook v1.20 **必须**(csi-operator.yaml), 跳过会静默破坏 CSI Provision |
-| cephcsi | **v3.17.0** | CSI RBD/CephFS 驱动 |
+| ceph-csi-operator | **v1.1.0** | rook v1.21 **必须**(csi-operator.yaml), 跳过会静默破坏 CSI Provision |
+| cephcsi | **v3.18.1** | CSI RBD/CephFS 驱动 |
 | 时间同步 | chrony | Ceph 对时钟亚秒级敏感(仓库 NTP 模块已统一, 生产存储节点建议 chrony) |
 
 ## 1. 核心设计决策
@@ -35,7 +35,7 @@
 
 | 物料 | 工具 | 落到 |
 |---|---|---|
-| Rook manifests(crds/common/csi-operator/operator/toolbox) | `tools/k8s/rook-fetch-manifests.sh`(ROOK_VERSION=v1.20.2) | `deployments/cubestack-addon/rook/` |
+| Rook manifests(crds/common/csi-operator/operator/toolbox) | `tools/k8s/rook-fetch-manifests.sh`(ROOK_VERSION=v1.21.1) | `deployments/cubestack-addon/rook/` |
 | Ceph 镜像 tar(13 个) | `tools/images/ceph-save-images.sh` | `deployments/offline-files/kubespray/images/`(与 kubespray 镜像同目录, 不再用独立 offline-files/ceph) |
 | lvm2 + 依赖 `.deb` | `tools/offline/fetch-lvm-packages.sh` | `deployments/offline-files/kubespray/packages/`(✅ 已就绪: 11 个 lvm 家族 .deb) |
 | VM 数据盘 | `vm-nodes.conf` 的 `VM_DATA_DISKS=3`/`VM_DATA_DISK_SIZE=200` | 每台 VM 附加 3×200GB 裸盘(Guest: `/dev/vdb~vdX`) |
@@ -230,7 +230,7 @@ sudo ./deploy-cluster.sh --steps verify_ceph                        # ⑨ 自动
    - 导出外部接入配置 **`deployments/config/external-ceph-self-define-access.conf`**(自研格式, 手填路径用)
    - **★ 自动导出官方 `deployments/config/external-ceph.env`**(2026-09-10):
      ceph-expose-external.sh 经 toolbox 运行官方 `create-external-cluster-resources.py`
-     (vendored, v1.20.2)—— 在 A 上创建官方 CSI 双角色用户(csi-rbd-node/provisioner +
+     (vendored, v1.21.1)—— 在 A 上创建官方 CSI 双角色用户(csi-rbd-node/provisioner +
      csi-cephfs-node/provisioner)+ client.healthchecker + rgw-admin-ops-user(RGW 启用时),
      `--format bash` 输出 export 行。该文件含真实 key(gitignore), **拷给集群 B 即可**。
    - 安装末尾总结打印配置路径 + 入口行
@@ -282,7 +282,7 @@ Ctrl-C 修正配置再重跑, 不必等整轮 K8s 部署跑完才发现(02_ceph 
 1. source env → 建 `rook-ceph-mon` secret + `rook-ceph-mon-endpoints` CM +
    4 个 CSI secret(**双角色凭据天然分开** = Bug A 官方路径天然成立)+
    `rgw-admin-ops-user` secret(env 带 RGW 密钥时);
-2. apply `common-external.yaml` + `cluster-external.yaml`(vendored, v1.20.2)→
+2. apply `common-external.yaml` + `cluster-external.yaml`(vendored, v1.21.1)→
    Rook operator 自动建 `CephConnection`/`ClientProfile` 并做 mon 健康检查;
 3. 等 `CephCluster rook-ceph-external` **STATE=Connected**(官方 healthCheck 机制,
    §3.4.5 已知限制在本路径不适用);
@@ -389,7 +389,7 @@ kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph auth caps client.csi-ce
 **现象(仅手填路径)**: 消费者集群的 `CephConnection`/`ClientProfile` 无 `cephx` 块; Rook 提供方导出的
 `ROOK_EXTERNAL_USERNAME`(client.healthchecker)/`ROOK_EXTERNAL_USER_SECRET` 在消费者侧**无处接线**。
 
-**根因(已核实, 非接线遗漏)**: 手填路径走 **ceph-csi-operator**(`csi.ceph.io` 组 v1.0.4,
+**根因(已核实, 非接线遗漏)**: 手填路径走 **ceph-csi-operator**(`csi.ceph.io` 组 v1.1.0,
 `CephConnection`/`ClientProfile` CRD)——两个 CRD 的 structured schema **没有 `cephx`/`healthCheck`
 字段**(`CephConnection.spec` 仅 `monitors`/`rbdMirrorDaemonCount`/`readAffinity`;
 `ClientProfile.spec` 仅 `cephConnectionRef`/`cephFs`/`nfs`/`nvmeof`/`rbd`)。硬塞 `cephx:` 会被
@@ -474,13 +474,13 @@ Rook 官方 import 流程 —— 消费者侧 apply `cluster-external.yaml`(`Cep
 这类名字里恰好带 ceph 的无关卷), 也不用 `dmsetup remove_all`(那会拆掉本节点所有 dm 映射)。
 这段现在跑在**默认部署流程**(02_ceph.sh 7a)里, 所以作用域必须严格。
 
-## 5. 手动(参考)安装要点 —— Rook v1.20
+## 5. 手动(参考)安装要点 —— Rook v1.21
 
 若不用模块而要手工验证(在线/已有 manifest), 参考官方步骤:
 ```bash
 kubectl create -f rook/deploy/examples/crds.yaml
 kubectl create -f rook/deploy/examples/common.yaml
-kubectl create -f rook/deploy/examples/csi-operator.yaml    # ⚠ v1.20 必须
+kubectl create -f rook/deploy/examples/csi-operator.yaml    # ⚠ v1.21 必须
 kubectl create -f rook/deploy/examples/operator.yaml
 # 等 operator + ceph-csi-controller Running → 创建 CephCluster(mon=3/size=3)…
 ```
@@ -556,7 +556,7 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 `tools/offline/fetch-lvm-packages.sh`、`tools/k8s/rook-fetch-manifests.sh`、cluster.conf `CEPH_*` 配置段、
 `patch-playbooks/install-packages.yml`(lvm2 离线安装, cubestack-offline.sh 自动挂载)。
 
-> 更完整的手工操作手册(池播种/PG 调优/CephFS/RGW/快照/风险)见参考设计文档(按 Rook v1.20.2 官方 + 生产实践编写)。
+> 更完整的手工操作手册(池播种/PG 调优/CephFS/RGW/快照/风险)见参考设计文档(按 Rook v1.21.1 官方 + 生产实践编写)。
 
 ### 3.2 条件不足自动回退 local-path(CEPH_FALLBACK_TO_LOCALPATH)
 

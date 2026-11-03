@@ -112,8 +112,8 @@ LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}}"
 
 ```text
 <上游 ref> 的 / 和 : 全部替换为 _，再加 .tar
-例: registry.k8s.io/sig-storage/csi-provisioner:v6.2.0
- -> registry.k8s.io_sig-storage_csi-provisioner_v6.2.0.tar
+例: registry.k8s.io/sig-storage/csi-provisioner:v6.3.0
+ -> registry.k8s.io_sig-storage_csi-provisioner_v6.3.0.tar
 ```
 
 少数历史短名由清单第 3 列锁死：`busybox.tar`、`nginx.tar`。模块按**文件名**解析目标 ref
