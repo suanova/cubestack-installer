@@ -105,6 +105,25 @@ if [ -n "${issues}" ]; then echo "${issues}"; exit 2; fi
 exit 0
 PROBE
 )"
+# 控制器侧"激进自动修复"(2026-11-04): 检测到 D 状态/fuser 超时的僵尸态时, 先在节点上
+#   stop kubelet/containerd + lazy 卸载 ceph/rbd 挂载 + rbd unmap -o force, 再重新探测。
+#   mount 被 lazy 摘除后 fuser 不再遍历僵尸挂载, 常见"mons 已不可达"的残留可不重启恢复;
+#   只有真正不可 kill 的 D 状态才回退到"必须重启"的指引(见下方 rc=2/124 分支)。
+#   ⚠ 用 /proc/mounts 而非 findmnt: 避免与前置探测命令模式混淆(测试桩按 findmnt 匹配)。
+_repair="$(cat <<'REPAIR'
+systemctl stop kubelet containerd 2>/dev/null || true
+awk '$3=="ceph"||$3=="rbd"{print $2}' /proc/mounts 2>/dev/null | while read -r _t; do
+    [ -n "${_t}" ] && { umount -l "${_t}" 2>/dev/null || umount -f "${_t}" 2>/dev/null || true; }
+done
+if command -v rbd >/dev/null 2>&1; then
+    for _d in $(rbd showmapped 2>/dev/null | awk 'NR>1{print $5}'); do
+        [ -n "${_d}" ] && rbd unmap -o force "${_d}" 2>/dev/null || true
+    done
+fi
+sync -f 2>/dev/null || sync 2>/dev/null || true
+exit 0
+REPAIR
+)"
 # ssh 自身失败(认证/网络)必须与"Ceph 探测发现卡死"分开报 —— 否则密码错误会被
 # 误导成"重置节点"(2026-10-22 用户实机: 密码错 → 提示 systemctl reboot -f)。
 # ssh 返回 255 = 连接/认证层失败; 远端探测显式返回 2 = D 状态/fuser 超时(只能重启)。
@@ -131,6 +150,17 @@ for _ip in "${IPS[@]}"; do
     _u="${USER:-$(ssh_user_for_ip "${_ip}")}"
     _out="$(timeout 20 ssh "${SSH_OPTS[@]}" "${_u}@${_ip}" "${_probe}" 2>&1)"
     _rc=$?
+    # 僵尸态(D 状态/fuser 超时/探测超时)先尝试自动修复, 再重探一次(2026-11-04):
+    #   常见"旧 ceph mons 已不可达"的残留可用 lazy umount 摘除而不必重启。
+    #   ⚠ 探测超时(rc=124)时 SSH 本身仍可用(卡的是节点内的 fuser), 修复有较大机会成功。
+    if [ "${_rc}" -eq 2 ] || [ "${_rc}" -eq 124 ]; then
+        say "  ${_ip}: 检测到 Ceph/RBD 僵尸态(rc=${_rc}) → 自动修复(stop kubelet/containerd + lazy umount + rbd unmap)..."
+        timeout 90 ssh "${SSH_OPTS[@]}" "${_u}@${_ip}" "${_repair}" >/dev/null 2>&1 || true
+        _out="$(timeout 20 ssh "${SSH_OPTS[@]}" "${_u}@${_ip}" "${_probe}" 2>&1)"
+        _rc=$?
+        [ "${_rc}" -eq 0 ] && say "  ${_ip}: 自动修复后探测通过, 继续" \
+            || say "  ${_ip}: 自动修复后仍异常(rc=${_rc}), 将按下方指引处理"
+    fi
     if [ "${_rc}" -eq 124 ]; then
         _preflight_bad=1
         _preflight_wedged_report="${_preflight_wedged_report}"$'\n'"  ${_u}@${_ip}: 探测超时(SSH 无响应; 可能被旧 ceph/rbd 卡死, 或网络不通)"

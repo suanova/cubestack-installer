@@ -81,13 +81,18 @@ run_tool() {  # run_tool <wedged 0|1> → stdout/stderr 在 $TMP/out
     echo $?
 }
 
-echo "== ① 残留节点: 必须在 scp/装包前失败 =="
+echo "== ① 残留节点: 先自动修复, 仍卡死则在 scp/装包前失败 =="
 rc="$(run_tool 1)"
 chk "退出码" "1" "${rc}"
 chk_contains "给出重启指引" "重启" "${TMP}/out-1"
 chk_contains "点名 ceph/rbd 残留" "ceph/rbd-mount" "${TMP}/out-1"
 chk "未执行 scp(未分发离线包)" "0" "$(wc -l < "${TMP}/scp-1.log")"
-chk "前置探测已执行" "1" "$(grep -c 'findmnt -t ceph,rbd' "${TMP}/ssh-1.log")"
+# 2026-11-04: 僵尸态先自动修复(stop kubelet/containerd + lazy umount + rbd unmap)再重探;
+#   测试桩对 findmnt 恒返回 rc=2 ⇒ 初探 + 修复后重探 = 2 次 findmnt 探测。
+chk "自动修复后重探(初探+重探=2)" "2" "$(grep -c 'findmnt -t ceph,rbd' "${TMP}/ssh-1.log")"
+chk_contains "日志显示尝试自动修复" "自动修复" "${TMP}/out-1"
+chk_contains "修复动作停 kubelet/containerd" "systemctl stop kubelet containerd" "${TMP}/ssh-1.log"
+chk_contains "修复动作 lazy umount" "umount -l" "${TMP}/ssh-1.log"
 
 echo "== ② 干净节点: 前置探测通过并进入装包 =="
 rc="$(run_tool 0)"
