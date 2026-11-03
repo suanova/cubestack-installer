@@ -90,8 +90,10 @@ TTY 下镜像层校验只显示单行进度条（归档、当前 layer、i/n、�
 `--deep` 用于 **quick 也强制深度校验**（`--level quick --deep`）；`--level full` 已默认 deep。
 `--deep` 较慢，按需使用。
 
-全量 sha256 阶段会先打印文件数/总字节与参考耗时，之后**每 10s 打印一次进度**
-（`sha256 完成/总数 (已用秒, 吞吐, 剩余约 Ns)`），避免大版本校验时误以为进程中断；
+全量 sha256 阶段先打印文件数/总字节，之后**每 10s 打印一次实测进度**
+（`sha256 完成/总数 (已用秒, 吞吐, 完成百分比, 剩余约 Ns)`），避免大版本校验时误以为进程中断。
+吞吐与"剩余"都按**已读字节**计算（单文件哈希期间也持续累计），因此不再出现"头部参考 270s、
+进度里剩余 460s"这种两套口径互相矛盾的情况；单个超大文件哈希时也会按心跳持续输出。
 可用 `CUBESTACK_VERIFY_HEARTBEAT_SEC` 调整心跳间隔（默认 10，测试时可用 1）。
 
 `--no-deep` 用于 **full 但跳过深度校验**（`--level full --no-deep`）：仍做全量 sha256 与结构检查，
@@ -194,7 +196,7 @@ OFFLINE_VERIFY_TOOL_URL=...
 
 ```bash
 ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
-    --release 2.0.0 --dest /data/cubestack-installer --repair
+    --release 2.0.0 --no-flat --dest /data/cubestack-installer --repair
 ```
 
 坏文件会先移到 `<本地桶根>/.repair-quarantine/<版本>/<时间戳>/`（保留证据）。
@@ -204,7 +206,7 @@ OFFLINE_VERIFY_TOOL_URL=...
 
 ```bash
 ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh \
-    --release 2.0.0 --resume --dest /data/cubestack-installer
+    --release 2.0.0 --no-flat --resume --dest /data/cubestack-installer
 ```
 
 `--resume` 先 full 校验本地树；对“本地大小 < 远端大小”的文件用 `mc cat --offset`

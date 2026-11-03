@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tarfile
+import threading
 import time
 
 from .archive import check_tar
@@ -43,53 +44,74 @@ def check_full(ctx, root, sums, args):
                 sizes[rel] = 0
         total_bytes = sum(sizes.values())
         # 心跳: 大版本(100+ GiB)全量 sha256 可持续数分钟。没有持续输出时用户容易
-        # 误以为进程卡死 → 先给规模/参考耗时, 之后每 10s 打印一次进度(按"时间"
-        # 而非文件数, 单个超大文件也能看到进程仍活着)。
-        _gib = total_bytes / (1024 ** 3)
-        _rate_ref = 400 * 1024 * 1024   # 参考吞吐(SSD/多线程), 仅用于事前估计
-        _est = int(total_bytes / _rate_ref) if total_bytes else 0
-        _est_txt = f", 预计约 {_est}s(参考)" if _est >= 10 else ""
+        # 误以为进程卡死 → 每 HEARTBEAT_SEC 打印一次进度。
+        # ⚠ 2026-11-03 修正两处矛盾(实机 302 文件/105.7 GiB):
+        #   ① 头部曾按固定 400 MiB/s 给"预计约 270s", 与实际 277 MiB/s/391s 和进度里的
+        #      "剩余约 460s" 互相打架 ⇒ **删掉事前秒数**, 只保留实测估计(同一口径)。
+        #   ② 心跳原先只在"某个文件完成"时才检查 ⇒ 单个 11 GiB 文件哈希的 134s 内零输出,
+        #      吞吐/剩余也在文件完成瞬间跳变 ⇒ 改成 sha256 读盘回调按字节累计 + 独立
+        #      心跳线程按时间打印(文件再大也每 10s 有进度)。
         _hb_txt = f"{HEARTBEAT_SEC:g}"
-        print(f"  ℹ 全量 sha256: {total} 个文件 / {_gib:.1f} GiB{_est_txt}; "
-              f"每 {_hb_txt}s 打印进度, 请耐心等待, 不要中断", file=sys.stderr)
+        print(f"  ℹ 全量 sha256: {total} 个文件 / {total_bytes / (1024 ** 3):.1f} GiB; "
+              f"每 {_hb_txt}s 打印实测进度与剩余估计, 请耐心等待, 不要中断", file=sys.stderr)
+
+        lock = threading.Lock()
+        stats = {"done": 0, "bytes": 0}
+        stop = threading.Event()
+        start = time.time()
+
+        def _progress(n):
+            with lock:
+                stats["bytes"] += n
 
         def work(rel):
             try:
-                return rel, sha256_file(os.path.join(root, rel)), None
+                return rel, sha256_file(os.path.join(root, rel), progress=_progress), None
             except Exception as exc:
                 return rel, None, exc
-        done = 0
-        done_bytes = 0
-        start = time.time()
-        last_tick = start
-        with cf.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
-            futs = {ex.submit(work, rel): rel for rel in sums}
-            for fut in cf.as_completed(futs):
-                rel, got, exc = fut.result()
-                done += 1
-                done_bytes += sizes.get(rel, 0)
-                if exc is not None:
-                    if rel in _missing:
-                        pass  # metadata 已报告/跳过
-                    elif isinstance(exc, FileNotFoundError) and getattr(args, "skip_missing", False):
-                        warn(ctx, f"{rel}: 文件在校验期间被删除，已跳过")
+
+        def _print_progress():
+            with lock:
+                done_now, read_bytes = stats["done"], stats["bytes"]
+            elapsed = time.time() - start
+            rate = read_bytes / elapsed if elapsed > 0 else 0
+            remain = max(0, total_bytes - read_bytes)
+            eta = int(remain / rate) if rate > 0 else 0
+            pct = (min(read_bytes, total_bytes) * 100.0 / total_bytes) if total_bytes else 100.0
+            print(f"  sha256 {done_now}/{total} ({elapsed:.0f}s, "
+                  f"{rate / (1024 ** 2):.0f} MiB/s, {pct:.1f}%, 剩余约 {eta}s)",
+                  file=sys.stderr)
+
+        def _heartbeat():
+            while not stop.wait(HEARTBEAT_SEC):
+                _print_progress()
+
+        hb = threading.Thread(target=_heartbeat, name="sha256-heartbeat", daemon=True)
+        hb.start()
+        try:
+            with cf.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+                futs = {ex.submit(work, rel): rel for rel in sums}
+                for fut in cf.as_completed(futs):
+                    rel, got, exc = fut.result()
+                    with lock:
+                        stats["done"] += 1
+                    if exc is not None:
+                        if rel in _missing:
+                            pass  # metadata 已报告/跳过
+                        elif isinstance(exc, FileNotFoundError) and getattr(args, "skip_missing", False):
+                            warn(ctx, f"{rel}: 文件在校验期间被删除，已跳过")
+                        else:
+                            fail(ctx, rel, "read_error", f"读取失败: {exc}")
+                            ctx.checks["sha256"] = "fail"
                     else:
-                        fail(ctx, rel, "read_error", f"读取失败: {exc}")
-                        ctx.checks["sha256"] = "fail"
-                else:
-                    want = sums[rel].lower()
-                    if got != want:
-                        fail(ctx, rel, "sha256_mismatch", "sha256 不符", want, got)
-                        ctx.checks["sha256"] = "fail"
-                now = time.time()
-                if now - last_tick >= HEARTBEAT_SEC or done == total:
-                    elapsed = now - start
-                    rate = done_bytes / elapsed if elapsed > 0 else 0
-                    eta = int((total_bytes - done_bytes) / rate) if rate > 0 else 0
-                    print(f"  sha256 {done}/{total} ({elapsed:.0f}s, "
-                          f"{rate / (1024 ** 2):.0f} MiB/s, 剩余约 {eta}s)",
-                          file=sys.stderr)
-                    last_tick = now
+                        want = sums[rel].lower()
+                        if got != want:
+                            fail(ctx, rel, "sha256_mismatch", "sha256 不符", want, got)
+                            ctx.checks["sha256"] = "fail"
+        finally:
+            stop.set()
+            hb.join()
+        _print_progress()
 
     # CLI tar
     ctx.checks["cli_tar"] = "ok"
