@@ -88,6 +88,11 @@ data:
   # Whether to create all Rook pods to run on the host network, for example in environments where a CNI is not enabled
   ROOK_ENFORCE_HOST_NETWORK: "false"
 
+  # Whether Rook creates the CephConnection and ClientProfile CRs consumed by the ceph-csi-operator.
+  # Set to "false" for clusters that use no CSI driver, such as object store only clusters, so the
+  # ceph-csi-operator and its CRDs (csi-operator.yaml) are not required.
+  ROOK_CREATE_CSI_OPERATOR_RESOURCES: "true"
+
   # RevisionHistoryLimit value for all deployments created by rook.
   # ROOK_REVISION_HISTORY_LIMIT: "3"
 
@@ -100,20 +105,23 @@ data:
 # For the complete list of ceph-csi-operator chart settings, see:
 # https://github.com/ceph/ceph-csi-operator/blob/main/docs/helm-charts/drivers-chart.md#configuration
 
-# ImageSet ConfigMap defines the container images used by the CSI drivers.
+# CSI image configmap, default images are managed by the ceph-csi-operator.
+# Empty values allow the ceph-csi-operator to use its built-in defaults.
+# Set values here to override the defaults.
+# See the ceph-csi-operator documentation for details.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: rook-csi-operator-image-set-configmap
   namespace: rook-ceph # namespace:operator
 data:
-  provisioner: "registry.k8s.io/sig-storage/csi-provisioner:v6.2.0"
-  attacher: "registry.k8s.io/sig-storage/csi-attacher:v4.12.0"
-  resizer: "registry.k8s.io/sig-storage/csi-resizer:v2.1.0"
-  snapshotter: "registry.k8s.io/sig-storage/csi-snapshotter:v8.5.0"
-  registrar: "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.17.0"
-  plugin: "quay.io/cephcsi/cephcsi:v3.17.0"
-  addons: "quay.io/csiaddons/k8s-sidecar:v0.14.0"
+  provisioner: ""
+  attacher: ""
+  resizer: ""
+  snapshotter: ""
+  registrar: ""
+  plugin: ""
+  addons: ""
 ---
 # OperatorConfig defines the default settings for all CSI drivers.
 apiVersion: csi.ceph.io/v1
@@ -201,7 +209,7 @@ spec:
       serviceAccountName: rook-ceph-system
       containers:
         - name: rook-ceph-operator
-          image: docker.io/rook/ceph:v1.20.2
+          image: docker.io/rook/ceph:v1.21.1
           args: ["ceph", "operator"]
           securityContext:
             runAsNonRoot: true

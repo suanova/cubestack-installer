@@ -126,7 +126,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 | **MetalLB** | 裸金属 LoadBalancer | Layer2: speaker 用 ARP 通告 VIP; controller 分配地址池 | 无云 LB 的裸金属/VM 环境标准方案; L2 通告与 IPIP 共存 | kubespray 内置 + `verify_metallb` 端到端验证 |
 | **metrics-server** | HPA 依赖的指标 | kubelet Summary API 聚合 | kubespray 标准组件, HPA 必需 | `METRICS_SERVER_ENABLED=true` |
 | **MetaX GPU Operator** | 沐曦 GPU 驱动/识别/调度 | helm chart + CRD(ClusterOperator)驱动组件 DaemonSet; 内置 registry 存放镜像 | 裸金属沐曦 GPU 必备; 离线 tar 加载 + helm 原生安装; master 有 GPU 时自动解除不可调度 | `GPU_OPERATOR_ENABLED=true` + 见 `docs/metax-gpu-operator.md` |
-| **Rook-Ceph** | 企业级分布式存储(块 RBD / 可选 CephFS / RGW) | Rook v1.20.2 operator + CephCluster(mon=3, host 故障域, 3 副本); OSD 用**自动分类出的可用盘**(`free ∪ ceph`, per-node devices); 节点经 label(`ceph-storage=rook-ceph`)选择 | 可承受节点故障的高可用存储(P1-6/7 刚需); 供 registry 等 PVC 后端(替代 local-path); 离线镜像 ctr import + lvm2 离线包 | `CEPH_ENABLED=true`/`CEPH_CSI_ENABLED=true` + `--steps ceph,ceph_csi` + 见 `docs/ceph-rook.md` |
+| **Rook-Ceph** | 企业级分布式存储(块 RBD / 可选 CephFS / RGW) | Rook v1.21.1 operator + CephCluster(mon=3, host 故障域, 3 副本); OSD 用**自动分类出的可用盘**(`free ∪ ceph`, per-node devices); 节点经 label(`ceph-storage=rook-ceph`)选择 | 可承受节点故障的高可用存储(P1-6/7 刚需); 供 registry 等 PVC 后端(替代 local-path); 离线镜像 ctr import + lvm2 离线包 | `CEPH_ENABLED=true`/`CEPH_CSI_ENABLED=true` + `--steps ceph,ceph_csi` + 见 `docs/ceph-rook.md` |
 | **CubeStack Operator** | 平台自研组件的编排者: 一个 `CubeStackCluster` CR 描述整个平台, operator 按组件目录(catalog)渲染 chart 并 apply, 管理健康与卸载 | 独立 helm chart 安装(**本地 vendored 副本**恒用, 在线只用于比对刷新); chart 渲染动态提取镜像 → 推入集群内置 registry → 节点只从那里拉; 滚动 `:latest` 用 digest 注解触发滚动 + `Always` 拉取; CRD 每次预 apply(helm 的 `crds/` 只在不存在时装) | 平台组件统一由 CR 声明式管理(装卸/健康集中一处); 离线可部署(镜像入内置 registry, 部署不访问 Harbor) | `CUBESTACK_OPERATOR_ENABLED=true` / `--steps cubestack_operator` + 见 `docs/cubestack-operator.md` |
 
 > 详细部署/开关见 `cluster.conf` 组件开关段与 `deployments/scripts/modules/`。
@@ -146,7 +146,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 
 ### 5.5 Rook-Ceph 架构与原理(高可用分布式存储)
 
-- 架构: Rook v1.20.2 operator(Rook 在 k8s 内自举 mon/mgr/osd)调和 CephCluster CR → 守护进程
+- 架构: Rook v1.21.1 operator(Rook 在 k8s 内自举 mon/mgr/osd)调和 CephCluster CR → 守护进程
   Deployment/StatefulSet; 数据面 = OSD 直管节点**裸盘**(LVM/bluestore)。
 - 存储节点选择: `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master** — 即默认只装在 master 节点; worker/all 可选); 候选由 `lib-common.sh` 的 `ceph_storage_hosts()` 统一给出; 模块自动给节点打 label `CEPH_NODE_LABEL`
   (默认 `ceph-storage=rook-ceph`), CephCluster 的 placement + storage.nodes 只落这些节点。

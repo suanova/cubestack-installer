@@ -38,7 +38,7 @@
 #     与 kubespray 镜像同目录) → k8s 阶段由 cluster.yml 内置预加载 play 统一同步到节点并 ctr import。
 #   · registry 后端(需求 6): REGISTRY_STORAGE_CLASS=ceph-block(见 docs/ceph-rook.md)时,
 #     registry 的 PVC 改走 ceph RBD(替代 local-path); 模块设计顺序在 registry 配置之前。
-#   · 参考: docs/ceph-rook.md(Rook v1.20.2 / Ceph v20.2.2 生产设计: 3 副本 host 故障域 +
+#   · 参考: docs/ceph-rook.md(Rook v1.21.1 / Ceph v20.2.2 生产设计: 3 副本 host 故障域 +
 #     3 mon + 2 mgr; mon/osd/mgr/toolbox 全部按 label 钉在存储节点)
 # 数据源: cluster.conf (CEPH_ENABLED / CEPH_NODES / CEPH_NODE_LABEL / CEPH_* / CEPH_IMAGE_DIR /
 #                       CEPH_ROOK_MANIFEST_DIR / REGISTRY_STORAGE_CLASS / NODES / SSH_KEY_NAME)
@@ -261,7 +261,7 @@ fi
 
 # 前置: rook manifest 必须就绪(联网机已 fetch); 缺失给指引
 [ -f "${CEPH_ROOK_MANIFEST_DIR}/operator.yaml" ] && [ -f "${CEPH_ROOK_MANIFEST_DIR}/csi-operator.yaml" ] || {
-    err "Rook manifest 缺失: ${CEPH_ROOK_MANIFEST_DIR}(缺 operator.yaml/csi-operator.yaml)。请先联网执行 tools/k8s/rook-fetch-manifests.sh(默认 Rook ${ROOK_VERSION:-v1.20.2})后拷到部署机"
+    err "Rook manifest 缺失: ${CEPH_ROOK_MANIFEST_DIR}(缺 operator.yaml/csi-operator.yaml)。请先联网执行 tools/k8s/rook-fetch-manifests.sh(默认 Rook ${ROOK_VERSION:-v1.21.1})后拷到部署机"
     exit 1
 }
 
@@ -377,7 +377,7 @@ say "[2/8] 部署前安全确认 ..."
 echo ""
 echo -e "\033[41m\033[97m================================================================================\033[0m"
 echo -e "\033[41m\033[97m ⚠⚠⚠  Ceph 集群部署确认(将使用以下节点与裸盘, 请仔细核对)      ⚠⚠⚠\033[0m"
-echo -e "\033[41m\033[97m   Rook ${ROOK_VERSION:-v1.20.2} / Ceph ${CEPH_VERSION} / mon=${CEPH_MON_COUNT} / mgr=${CEPH_MGR_COUNT}\033[0m"
+echo -e "\033[41m\033[97m   Rook ${ROOK_VERSION:-v1.21.1} / Ceph ${CEPH_VERSION} / mon=${CEPH_MON_COUNT} / mgr=${CEPH_MGR_COUNT}\033[0m"
 echo -e "\033[41m\033[97m   副本 size=${CEPH_POOL_REPLICAS} min_size=${CEPH_POOL_MIN_SIZE}(host 故障域)\033[0m"
 echo -e "\033[41m\033[97m   存储节点 label: ${CEPH_NODE_LABEL}   命名空间: ${CEPH_NAMESPACE}\033[0m"
 # 确认屏用: 按分类逐行列出某节点的磁盘 + 证据(供人工核对到底动哪些盘)
@@ -587,19 +587,25 @@ for f in crds.yaml common.yaml; do
 done
 # ★ ceph-csi-operator 按需安装(需求: 已装则不装, 未装才装):
 #   csi-operator 调和 CSI 驱动(集群内 CephCluster 或外部 Ceph 都需要)。
-#   已存在 ceph-csi-operator 且 CSI 驱动(csi-rbdplugin DS)已就绪 → 跳过(不需要重复安装);
-#   未就绪 → 安装(需要)。用 ssh 直连规避 "函数 + $(函数 \"串\")" 嵌套解析异常。
+#   已存在 ceph-csi-operator 且 CSI 驱动(csi-rbdplugin DS)已就绪 **且镜像版本 == 当前钉子** → 跳过;
+#   未就绪 或 版本落后 → 安装/升级(否则升级 Rook 时 csi-operator 永远停在旧版本)。
+#   用 ssh 直连规避 "函数 + $(函数 \"串\")" 嵌套解析异常。
 _CSI_OP="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${FIRST_MASTER_USER}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get deploy ceph-csi-operator --no-headers 2>/dev/null")" || true
 _CSI_DS="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${FIRST_MASTER_USER}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get ds rook-ceph.rbd.csi.ceph.com-nodeplugin --no-headers 2>/dev/null")" || true
-if [ -n "${_CSI_OP}" ] && [ -n "${_CSI_DS}" ]; then
-    say "  ceph-csi-operator + CSI 驱动已存在, 跳过安装 csi-operator.yaml(不需要重复安装)"
+_CSI_IMG="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${FIRST_MASTER_USER}@${FIRST_MASTER}" "${K} -n ${CEPH_NAMESPACE} get deploy ceph-csi-operator -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null")" || true
+if [ -n "${_CSI_OP}" ] && [ -n "${_CSI_DS}" ] && [ "${_CSI_IMG##*:}" = "${CEPH_CSI_OPERATOR_VERSION}" ]; then
+    say "  ceph-csi-operator ${CEPH_CSI_OPERATOR_VERSION} + CSI 驱动已存在, 跳过安装 csi-operator.yaml(不需要重复安装)"
 else
-    say "  apply csi-operator.yaml ..."
+    if [ -n "${_CSI_OP}" ] && [ "${_CSI_IMG##*:}" != "${CEPH_CSI_OPERATOR_VERSION}" ]; then
+        say "  ceph-csi-operator 升级: ${_CSI_IMG##*:} → ${CEPH_CSI_OPERATOR_VERSION}, apply csi-operator.yaml ..."
+    else
+        say "  apply csi-operator.yaml ..."
+    fi
     SSH "${K} apply --server-side -f ${REMOTE_DIR}/csi-operator.yaml >/dev/null 2>&1" \
         || SSH "${K} apply -f ${REMOTE_DIR}/csi-operator.yaml >/dev/null 2>&1" \
         || { err "  apply csi-operator.yaml 失败"; exit 1; }
 fi
-unset _CSI_OP _CSI_DS
+unset _CSI_OP _CSI_DS _CSI_IMG
 # ★ operator.yaml 的 operatorconfig CR 依赖 csi-operator 提供的 CRD; CRD 未 Established 时
 #   apply 会报 "no matches for kind"(竞态)。等 CRD Established 后再 apply, 失败留 stderr 便于定位。
 say "  等待 csi-operator CRD Established(最长 120s)..."
@@ -1215,7 +1221,7 @@ stop_restore_known_consumers
 
 # ---------------- 8) 汇总 ----------------
 echo "---------------------------------------------"
-ok "Ceph 存储集群部署完成(Rook ${ROOK_VERSION:-v1.20.2} / Ceph ${CEPH_VERSION})"
+ok "Ceph 存储集群部署完成(Rook ${ROOK_VERSION:-v1.21.1} / Ceph ${CEPH_VERSION})"
 echo "  命名空间:    ${CEPH_NAMESPACE}"
 if [ "${CEPH_MODE:-internal}" = "external" ]; then
     echo "  模式:        CEPH_MODE=external(外部 Ceph, 无集群内 CephCluster)"

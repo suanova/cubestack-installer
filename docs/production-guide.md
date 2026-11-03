@@ -1,7 +1,7 @@
 # CubeStack 平台底座 · 生产环境配置指南
 
 > **适用对象**:交付工程师 / 客户运维 / 平台二次开发者
-> **适用底座版本**:Kubernetes **v1.35.8**(kubespray v2.32 线)· Rook-Ceph **v1.20.2** · MetalLB **v0.13.9** · containerd **2.3.5**
+> **适用底座版本**:Kubernetes **v1.35.8**(kubespray v2.32 线)· Rook-Ceph **v1.21.1** · MetalLB **v0.13.9** · containerd **2.3.5**
 > **编写依据**:本仓库部署代码 + 一套真实生产集群(8 节点:3 control-plane + 5 worker)的**现场取证**(2026-09-29)
 > **约定**:文中标注 **【实机】** 的结论来自上述真集群的实测输出;标注 **【代码】** 的来自仓库实现;两者冲突时以【实机】为准并请回报。所有配置键的**唯一权威来源**是 `deployments/config/cluster.conf`(模板见 `cluster.conf.example`)。
 
@@ -181,7 +181,7 @@ $ ssh <worker> "sudo grep -A5 upstream /etc/nginx/nginx.conf"
 ### 1.3 Ceph 存储架构(内部模式)
 
 ```
-                    ┌───────────────── Rook Operator(v1.20.2)─────────────────┐
+                    ┌───────────────── Rook Operator(v1.21.1)─────────────────┐
                     │  监听 CephCluster CR,自动编排 mon/mgr/osd/mds/rgw      │
                     └───────────────────────────┬────────────────────────────┘
                                                 ▼
@@ -979,8 +979,8 @@ kubectl get sc && kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
 | Kubernetes | v1.35.8 |
 | containerd | 2.3.5 |
 | kubespray(树) | v2.32.0 |
-| Rook / Ceph | v1.20.2 / v20.2.2 |
-| ceph-csi / csi-operator | v3.17.0 / v1.0.4 |
+| Rook / Ceph | v1.21.1 / v20.2.2 |
+| ceph-csi / csi-operator | v3.18.1 / v1.1.0 |
 | MetalLB | v0.13.9 |
 | kube-vip | v1.0.3 |
 | RDMA 设备插件 | v1.5.4 |
