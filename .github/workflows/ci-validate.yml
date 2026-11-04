@@ -88,6 +88,12 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-install-online.sh
 
+      # mirror-updated(base scope): 只在 baseline 引用的镜像变化时更新 mirror pin
+      - name: mirror pin 接收回归(mirror-updated)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-mirror-pin.sh
+
       - name: 模块静态校验(check-modules.sh 全 19 项)
         run: |
           set -uo pipefail

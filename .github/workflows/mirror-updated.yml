@@ -1,0 +1,76 @@
+name: Update mirror pin
+
+# The mirror dispatches mirror-updated after images/** changes. This workflow
+# only consumes base-scope changes: it bumps the mirror catalog pin in
+# versions/base.yaml and opens a PR. Platform scope is release's responsibility.
+#
+# GitHub only runs repository_dispatch workflows that exist on the default
+# branch. Keep this file on main and use CUBESTACK_BASELINE_BRANCH to select the
+# branch that owns versions/base.yaml.
+
+on:
+  repository_dispatch:
+    types: [mirror-updated]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: mirror-updated-base
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      BASE_BRANCH: ${{ vars.CUBESTACK_BASELINE_BRANCH || 'release-2.1' }}
+      MIRROR_REPO: ${{ vars.MIRROR_REPO || 'suanova/container-image-mirror' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: pip install --quiet --disable-pip-version-check pyyaml
+
+      - name: Validate payload and fetch catalog
+        env:
+          COMMIT: ${{ github.event.client_payload.catalog_commit }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${COMMIT}" =~ ^[0-9a-f]{7,40}$ ]]; then
+            echo "::error::invalid catalog_commit: '${COMMIT}'"
+            exit 1
+          fi
+          curl -fsSL \
+            "https://raw.githubusercontent.com/${MIRROR_REPO}/${COMMIT}/index.json" \
+            -o "${RUNNER_TEMP}/mirror-index.json"
+
+      - name: Update mirror pin
+        env:
+          COMMIT: ${{ github.event.client_payload.catalog_commit }}
+        run: |
+          set -euo pipefail
+          python deployments/scripts/tools/online/update-mirror-pin.py \
+            --root . --repo "${MIRROR_REPO}" --commit "${COMMIT}" \
+            --index "${RUNNER_TEMP}/mirror-index.json"
+
+      - uses: peter-evans/create-pull-request@v6
+        with:
+          base: ${{ env.BASE_BRANCH }}
+          branch: chore/mirror-${{ github.event.client_payload.catalog_commit }}
+          delete-branch: true
+          title: "chore(base): bump mirror catalog pin"
+          commit-message: "chore(base): bump mirror catalog pin"
+          body: |
+            The mirror catalog changed for base-scope images. This PR only moves
+            the pinned catalog commit; image versions are still selected in
+            `versions/base.yaml`.
+
+            - catalog commit: `${{ github.event.client_payload.catalog_commit }}`
+            - mirror ref: `${{ github.event.client_payload.ref }}`
