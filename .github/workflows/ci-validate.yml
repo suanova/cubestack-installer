@@ -76,6 +76,18 @@ jobs:
           python3 -m pip install --quiet --disable-pip-version-check pyyaml
           python3 deployments/scripts/tools/validate-base-baseline.py
 
+      # 在线安装基础工具: catalog 解析 / 镜像物化 / OS 包预检(不安装)
+      - name: 在线安装工具回归(base catalog/materialize/precheck)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-online-base-catalog.sh
+
+      # 在线安装入口与 online 模式门禁: 预取/跳过 OS 包安装/预检可选
+      - name: 在线安装流程回归(install-online)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-install-online.sh
+
       - name: 模块静态校验(check-modules.sh 全 19 项)
         run: |
           set -uo pipefail
