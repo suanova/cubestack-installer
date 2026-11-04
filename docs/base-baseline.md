@@ -21,6 +21,10 @@ schema: 1
 kubespray:
   version: v2.32.0
   source: {type: git, repo: suanova/cubestack-installer, path: deployments/kubespray/kubespray}
+mirror:
+  repo: suanova/container-image-mirror
+  commit: <sha>
+  path: index.json
 os:
   - family: debian
     id: ubuntu
@@ -38,6 +42,8 @@ images:
 要点：
 
 - `key` 全局唯一，格式 `<group>:<source>`。
+- `mirror` 固定 mirror catalog 的 repo/commit/index；base 镜像的 digest 必须以该
+  commit 的 `index.json` 为准，避免漂移。
 - `catalog_id` 指向 mirror catalog（`container-image-mirror/index.json` 的 `id`）；
   自建公开镜像（如 netshoot-rdma）用 `source_ref` 指向 public `suanova/**`，两者互斥。
 - `version` 可以是 `${VAR}` 或字面量；变量必须在 `cluster.defaults.conf` /

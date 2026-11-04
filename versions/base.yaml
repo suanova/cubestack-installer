@@ -5,6 +5,11 @@ kubespray:
     type: git
     repo: suanova/cubestack-installer
     path: deployments/kubespray/kubespray
+mirror:
+  # TODO: switch to suanova/container-image-mirror after the mirror PR merges.
+  repo: zhujian7/container-image-mirror
+  commit: 1c16e009c25eee53567ba61657ad65386e26b193
+  path: index.json
 os:
 - family: debian
   id: ubuntu

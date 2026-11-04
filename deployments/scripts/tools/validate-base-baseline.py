@@ -66,6 +66,13 @@ def main() -> int:
     if not str(kubespray.get("version", "")).strip():
         errors.append("kubespray.version is required")
 
+    mirror = baseline.get("mirror") or {}
+    for field in ("repo", "commit", "path"):
+        if not str(mirror.get(field, "")).strip():
+            errors.append(f"mirror.{field} is required")
+    if mirror.get("commit") and not re.match(r"^[0-9a-f]{7,40}$", str(mirror["commit"])):
+        errors.append("mirror.commit must be a 7-40 character hex commit")
+
     known_vars = defaults_keys(defaults_path) | {"KUBESPRAY_VERSION"}
     known_vars |= {str(k) for k in (baseline.get("env") or {})}
 
