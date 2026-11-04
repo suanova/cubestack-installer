@@ -48,12 +48,15 @@ cmd="$*"
 printf '%s\t%s\n' "${host}" "${cmd}" >> "${FAKE_SSH_LOG:-/dev/null}"
 case "${cmd}" in
     *"findmnt -t ceph,rbd"*)
-        case "${FAKE_WEDGED:-1}" in
-            1) echo "ceph/rbd-mount: /mnt/cephfs/models ceph (mons unreachable)"; exit 2 ;;
+        case "${FAKE_WEDGED:-0}" in
+            0) exit 0 ;;                                                  # 干净节点(无输出)
+            1) echo "repair-needed: /mnt/cephfs/models"; exit 0 ;;        # 逐挂载确认读不出 → 仅卸载该挂载
             2) echo "active-ceph-ok: /mnt/cephfs/models ceph"; echo "active-rbd-ok: 2"; exit 0 ;;
-            3) echo "auto-repair-needed: /mnt/cephfs/models"; exit 0 ;;
+            3) echo "d-state-unrelated: 123 D rsync -a /data"; exit 0 ;;  # 非存储 D 状态 → 不修复
             4) echo "ubuntu@10.0.0.1: Permission denied (publickey,password)." >&2; exit 255 ;;
             5) echo "ssh: connect to host 10.0.0.1 port 22: Connection timed out" >&2; exit 255 ;;
+            6) echo "d-state-storage: 123 D dpkg --configure -a"; exit 0 ;;   # D 状态+存储 → 不自动卸载
+            7) exit 124 ;;                                                # 探测超时
             *) exit 0 ;;
         esac ;;
     *) exit 0 ;;
@@ -81,18 +84,38 @@ run_tool() {  # run_tool <wedged 0|1> → stdout/stderr 在 $TMP/out
     echo $?
 }
 
-echo "== ① 残留节点: 先自动修复, 仍卡死则在 scp/装包前失败 =="
+echo "== ① 存储不健康(逐挂载确认): 仅卸载确认挂载, 仍不健康则失败 =="
 rc="$(run_tool 1)"
 chk "退出码" "1" "${rc}"
 chk_contains "给出重启指引" "重启" "${TMP}/out-1"
-chk_contains "点名 ceph/rbd 残留" "ceph/rbd-mount" "${TMP}/out-1"
+chk_contains "点名存储不健康" "存储不健康" "${TMP}/out-1"
 chk "未执行 scp(未分发离线包)" "0" "$(wc -l < "${TMP}/scp-1.log")"
-# 2026-11-04: 僵尸态先自动修复(stop kubelet/containerd + lazy umount + rbd unmap)再重探;
-#   测试桩对 findmnt 恒返回 rc=2 ⇒ 初探 + 修复后重探 = 2 次 findmnt 探测。
+# 初探 + 修复后重探 = 2 次 findmnt 探测
 chk "自动修复后重探(初探+重探=2)" "2" "$(grep -c 'findmnt -t ceph,rbd' "${TMP}/ssh-1.log")"
-chk_contains "日志显示尝试自动修复" "自动修复" "${TMP}/out-1"
-chk_contains "修复动作停 kubelet/containerd" "systemctl stop kubelet containerd" "${TMP}/ssh-1.log"
-chk_contains "修复动作 lazy umount" "umount -l" "${TMP}/ssh-1.log"
+# 2026-11-04 (CodeRabbit): 只卸载"逐挂载检查确认读不出"的挂载(作为参数传入), 不碰健康卷
+chk_contains "仅卸载确认挂载(传入参数)" "sudo bash -s -- /mnt/cephfs/models" "${TMP}/ssh-1.log"
+# 修复未清除时恢复 kubelet/containerd(restore 命令以 "sudo bash -s" 结尾, 无参数)
+chk "修复失败后恢复服务" "1" "$(grep -cE 'sudo bash -s$' "${TMP}/ssh-1.log")"
+
+echo "== ①b 非存储 D 状态(rsync): 不触发修复, 继续装包 =="
+rc="$(run_tool 3)"
+chk "退出码" "0" "${rc}"
+chk "执行了 scp(不阻断)" "1" "$(wc -l < "${TMP}/scp-3.log")"
+chk_contains "日志点名非存储 D 状态" "非存储 D 状态" "${TMP}/out-3"
+chk_not_contains "未触发卸载" "sudo bash -s --" "${TMP}/ssh-3.log"
+
+echo "== ①c D 状态 + 存储挂载: 不自动卸载(交人工/重启), 失败 =="
+rc="$(run_tool 6)"
+chk "退出码" "1" "${rc}"
+chk "未执行 scp" "0" "$(wc -l < "${TMP}/scp-6.log")"
+chk_not_contains "未自动卸载" "sudo bash -s --" "${TMP}/ssh-6.log"
+chk_contains "提示需人工/重启" "重启" "${TMP}/out-6"
+
+echo "== ①d 探测超时: 不自动修复, 失败 =="
+rc="$(run_tool 7)"
+chk "退出码" "1" "${rc}"
+chk "未执行 scp" "0" "$(wc -l < "${TMP}/scp-7.log")"
+chk_not_contains "未自动卸载" "sudo bash -s --" "${TMP}/ssh-7.log"
 
 echo "== ② 干净节点: 前置探测通过并进入装包 =="
 rc="$(run_tool 0)"
@@ -107,11 +130,7 @@ chk "执行了 scp" "1" "$(wc -l < "${TMP}/scp-2.log")"
 chk "执行了远端装包脚本" "1" "$(grep -c 'sudo bash /tmp/cubestack-debs/' "${TMP}/ssh-2.log")"
 chk_contains "日志点名活动 Ceph/RBD" "活动 Ceph/RBD 健康" "${TMP}/out-2"
 
-echo "== ②c 挂载不健康但未卡死: 控制器放行, 远端自动修复 =="
-rc="$(run_tool 3)"
-chk "退出码" "0" "${rc}"
-chk "执行了 scp(自动修复在远端进行)" "1" "$(wc -l < "${TMP}/scp-3.log")"
-chk_contains "日志点名自动卸载/解映射" "自动卸载/解映射" "${TMP}/out-3"
+echo "== ②c (已并入 ①b: 非存储 D 状态不阻断; 存储不健康在 ① 验证) =="
 
 echo "== ②d SSH 认证失败(密码/公钥被拒): 必须报 SSH, 不得误导为 Ceph/RBD/重启 =="
 rc="$(run_tool 4)"

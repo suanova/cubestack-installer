@@ -78,51 +78,48 @@ SSH_OPTS=(-i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKn
 #   · 活动且健康的 Ceph/RBD(当前集群正在用) → 不阻断(避免误伤运行中的 CephFS/RBD PVC)。
 _probe="$(cat <<'PROBE'
 ceph_mnts=$(timeout 5 findmnt -t ceph,rbd -n -o TARGET,FSTYPE 2>/dev/null | head -5)
-stuck=$(timeout 5 ps -eo pid,stat,etime,cmd 2>/dev/null | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|sync|fuser/' | head -3)
+# D 状态进程(ps 只读 /proc, 不触碰挂载); 排除 rsync 等仅因含 "sync" 而误匹配的进程。
+stuck=$(timeout 5 ps -eo pid,stat,etime,cmd 2>/dev/null | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|fuser/ && $0 !~ /rsync/' | head -3)
 n_rbd=$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ')
-timeout 5 fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1
-frc=$?
-issues=""
-# 活动且健康的 Ceph/RBD(当前集群正在用)不是"旧集群残留": 只要挂载可读、无 D 状态/
-# fuser 超时, 就放行(2026-10-19 实机: cephfs_mount DS + RBD PVC 正常在用, 却被旧逻辑误拦)。
-_ceph_bad=""
-if [ -n "${ceph_mnts}" ] && [ -z "${stuck}" ] && [ "${frc}" -ne 124 ]; then
+# ★ 修复的唯一判据 = 逐挂载健康检查: 只有读不出(ls 失败)的 ceph/rbd 挂载才算"存储不健康"。
+#   不能把任意 D 状态进程当作存储不健康(2026-11-04 CodeRabbit) —— 否则会卸载/解映射正在使用的健康卷。
+#   存在 D 状态时不执行 ls(挂载可能已卡死, ls 会再次挂起), 只做上报。
+_bad=""
+if [ -n "${ceph_mnts}" ] && [ -z "${stuck}" ]; then
     while read -r _t _f; do
         [ -n "${_t}" ] || continue
-        timeout 5 ls "${_t}" >/dev/null 2>&1 || _ceph_bad="${_ceph_bad} ${_t}"
+        timeout 5 ls "${_t}" >/dev/null 2>&1 || _bad="${_bad} ${_t}"
     done <<< "${ceph_mnts}"
-else
-    _ceph_bad="${ceph_mnts}"
 fi
-[ -n "${stuck}" ] && issues="${issues}D-state: ${stuck}; "
-[ "${frc}" -eq 124 ] && issues="${issues}fuser-timeout; "
-# 只有 D 状态/fuser 超时才是"不可自动修复"的僵尸态。挂载不健康但未卡死 → 交给远端脚本
-# 自动 stop kubelet/containerd + umount/rbd unmap 后再试。
-if [ -n "${issues}" ]; then echo "${issues}"; exit 2; fi
-[ -n "${_ceph_bad}" ] && echo "auto-repair-needed:${_ceph_bad}"
+if [ -n "${_bad}" ]; then echo "repair-needed:${_bad}"; exit 0; fi
+# D 状态: 有存储挂载时无法安全逐挂载确认 → 不自动卸载(交人工/重启); 无存储挂载 → 与本次无关
+if [ -n "${stuck}" ] && [ -n "${ceph_mnts}" ]; then echo "d-state-storage:${stuck}"; exit 0; fi
+if [ -n "${stuck}" ]; then echo "d-state-unrelated:${stuck}"; exit 0; fi
 [ -n "${ceph_mnts}" ] && echo "active-ceph-ok: $(printf '%s' "${ceph_mnts}" | tr '\n' ' ')"
 [ "${n_rbd:-0}" -gt 0 ] && echo "active-rbd-ok: ${n_rbd}"
 exit 0
 PROBE
 )"
-# 控制器侧"激进自动修复"(2026-11-04): 检测到 D 状态/fuser 超时的僵尸态时, 先在节点上
-#   stop kubelet/containerd + lazy 卸载 ceph/rbd 挂载 + rbd unmap -o force, 再重新探测。
-#   mount 被 lazy 摘除后 fuser 不再遍历僵尸挂载, 常见"mons 已不可达"的残留可不重启恢复;
-#   只有真正不可 kill 的 D 状态才回退到"必须重启"的指引(见下方 rc=2/124 分支)。
-#   ⚠ 用 /proc/mounts 而非 findmnt: 避免与前置探测命令模式混淆(测试桩按 findmnt 匹配)。
+# 控制器侧"外科式自动修复"(2026-11-04): 只卸载**逐挂载检查确认读不出**的挂载(由控制器作为
+#   参数传入), 绝不碰健康卷; 不对 rbd 设备做 force unmap(可能正被健康 PVC 使用)。
+#   挂载被 lazy 摘除后 fuser 不再遍历僵尸挂载, 常见残留可不重启恢复; 仍不健康则交人工/重启。
 _repair="$(cat <<'REPAIR'
 systemctl stop kubelet containerd 2>/dev/null || true
-awk '$3=="ceph"||$3=="rbd"{print $2}' /proc/mounts 2>/dev/null | while read -r _t; do
-    [ -n "${_t}" ] && { umount -l "${_t}" 2>/dev/null || umount -f "${_t}" 2>/dev/null || true; }
+for _t in "$@"; do
+    [ -n "${_t}" ] || continue
+    umount -l "${_t}" 2>/dev/null || umount -f "${_t}" 2>/dev/null || true
 done
-if command -v rbd >/dev/null 2>&1; then
-    for _d in $(rbd showmapped 2>/dev/null | awk 'NR>1{print $5}'); do
-        [ -n "${_d}" ] && rbd unmap -o force "${_d}" 2>/dev/null || true
-    done
-fi
 sync -f 2>/dev/null || sync 2>/dev/null || true
 exit 0
 REPAIR
+)"
+# 修复未成功时恢复服务(2026-11-04, CodeRabbit): _repair 先停了 kubelet/containerd,
+#   若重探仍失败, preflight 会 exit 1; 必须把它们重新拉起, 否则节点被留在"服务已停"的
+#   不可用状态, 只能等人工处理。仅在重探仍异常时执行(成功路径由后续 k8s 覆盖流程接管)。
+_restore="$(cat <<'RESTORE'
+systemctl start containerd kubelet 2>/dev/null || true
+exit 0
+RESTORE
 )"
 # ssh 自身失败(认证/网络)必须与"Ceph 探测发现卡死"分开报 —— 否则密码错误会被
 # 误导成"重置节点"(2026-10-22 用户实机: 密码错 → 提示 systemctl reboot -f)。
@@ -150,33 +147,42 @@ for _ip in "${IPS[@]}"; do
     _u="${USER:-$(ssh_user_for_ip "${_ip}")}"
     _out="$(timeout 20 ssh "${SSH_OPTS[@]}" "${_u}@${_ip}" "${_probe}" 2>&1)"
     _rc=$?
-    # 僵尸态(D 状态/fuser 超时/探测超时)先尝试自动修复, 再重探一次(2026-11-04):
-    #   常见"旧 ceph mons 已不可达"的残留可用 lazy umount 摘除而不必重启。
-    #   ⚠ 探测超时(rc=124)时 SSH 本身仍可用(卡的是节点内的 fuser), 修复有较大机会成功。
-    if [ "${_rc}" -eq 2 ] || [ "${_rc}" -eq 124 ]; then
-        say "  ${_ip}: 检测到 Ceph/RBD 僵尸态(rc=${_rc}) → 自动修复(stop kubelet/containerd + lazy umount + rbd unmap)..."
-        timeout 90 ssh "${SSH_OPTS[@]}" "${_u}@${_ip}" "${_repair}" >/dev/null 2>&1 || true
-        _out="$(timeout 20 ssh "${SSH_OPTS[@]}" "${_u}@${_ip}" "${_probe}" 2>&1)"
-        _rc=$?
-        [ "${_rc}" -eq 0 ] && say "  ${_ip}: 自动修复后探测通过, 继续" \
-            || say "  ${_ip}: 自动修复后仍异常(rc=${_rc}), 将按下方指引处理"
-    fi
     if [ "${_rc}" -eq 124 ]; then
+        # 探测本身超时: 没有逐挂载健康信息 → 不做破坏性 repair(避免误伤健康卷)
         _preflight_bad=1
-        _preflight_wedged_report="${_preflight_wedged_report}"$'\n'"  ${_u}@${_ip}: 探测超时(SSH 无响应; 可能被旧 ceph/rbd 卡死, 或网络不通)"
+        _preflight_wedged_report="${_preflight_wedged_report}"$'\n'"  ${_u}@${_ip}: 探测超时(SSH 无响应/节点卡死; 无逐挂载健康信息, 不自动修复)"
     elif [ "${_rc}" -eq 255 ]; then
         _preflight_bad=1
         _preflight_ssh_report="${_preflight_ssh_report}"$'\n'"  $(_ssh_fail_reason "${_u}@${_ip}" "${_out}" "${_rc}")"
-    elif [ "${_rc}" -eq 2 ]; then
-        _preflight_bad=1
-        _preflight_wedged_report="${_preflight_wedged_report}"$'\n'"  ${_u}@${_ip}: 检测到 D 状态/fuser 超时: $(_clean_out "${_out}")"
     elif [ "${_rc}" -ne 0 ]; then
         _preflight_bad=1
         _preflight_probe_report="${_preflight_probe_report}"$'\n'"  ${_u}@${_ip}: 前置探测失败(rc=${_rc}): $(_clean_out "${_out}")"
     else
         case "${_out}" in
-            *auto-repair-needed*)
-                say "  ${_ip}: Ceph/RBD 挂载不健康但未卡死 → 远端自动卸载/解映射" ;;
+            *repair-needed*)
+                # 逐挂载健康检查确认"读不出" → 仅卸载这些挂载(不碰健康卷)
+                _bad_mnts="${_out#*repair-needed:}"; _bad_mnts="${_bad_mnts%%$'\n'*}"
+                _bad_mnts="${_bad_mnts# }"
+                say "  ${_ip}: 存储不健康(逐挂载确认读不出:${_bad_mnts}) → 仅自动卸载这些挂载..."
+                printf '%s\n' "${_repair}" | timeout 90 ssh "${SSH_OPTS[@]}" "${_u}@${_ip}" "sudo bash -s -- ${_bad_mnts}" >/dev/null 2>&1 || true
+                _out="$(timeout 20 ssh "${SSH_OPTS[@]}" "${_u}@${_ip}" "${_probe}" 2>&1)"; _rc=$?
+                if [ "${_rc}" -eq 0 ] && ! printf '%s' "${_out}" | grep -q 'repair-needed'; then
+                    say "  ${_ip}: 自动卸载后存储恢复, 继续"
+                else
+                    say "  ${_ip}: 自动卸载后仍不健康 → 恢复 kubelet/containerd 并交人工/重启处理"
+                    printf '%s\n' "${_restore}" | timeout 60 ssh "${SSH_OPTS[@]}" "${_u}@${_ip}" "sudo bash -s" >/dev/null 2>&1 || true
+                    _preflight_bad=1
+                    _preflight_wedged_report="${_preflight_wedged_report}"$'\n'"  ${_u}@${_ip}: 自动卸载后仍不健康(逐挂载检查) —— 需人工/重启"
+                fi
+                ;;
+            *d-state-storage*)
+                say "  ${_ip}: 存在 D 状态且有待存储挂载, 无法安全逐挂载确认 → 不自动卸载(需人工/重启)"
+                _preflight_bad=1
+                _preflight_wedged_report="${_preflight_wedged_report}"$'\n'"  ${_u}@${_ip}: D 状态+存储挂载(未自动卸载): $(_clean_out "${_out}")"
+                ;;
+            *d-state-unrelated*)
+                say "  ${_ip}: 检测到非存储 D 状态进程(不触发修复, 继续): $(_clean_out "${_out}")"
+                ;;
             *active-ceph-ok*|*active-rbd-ok*|*"活动 Ceph/RBD"*)
                 say "  ${_ip}: 活动 Ceph/RBD 健康(当前集群在用), 不阻断" ;;
         esac
