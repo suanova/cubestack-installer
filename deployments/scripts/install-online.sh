@@ -70,9 +70,31 @@ while [ $# -gt 0 ]; do
 done
 
 # Load cluster config so ${K8S_VERSION} etc. can be resolved before the deploy
-# flow starts. deploy-cluster.sh will load it again in its own process.
+# flow starts. The baseline env is authoritative for online installs; defaults
+# and profiles only fill private/derived values not present there.
 # shellcheck source=lib-common.sh
 source "${SCRIPT_DIR}/lib-common.sh"
+
+load_baseline_env() {
+    local baseline="$1" out
+    if ! out="$(python3 - "${baseline}" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+import yaml
+
+data = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8"))
+env = data.get("env") or {}
+for key, value in sorted(env.items()):
+    print(f"export {key}={shlex.quote(str(value))}")
+PY
+)"; then
+        die "cannot read baseline env from ${baseline} (python3 + PyYAML required)"
+    fi
+    eval "${out}"
+}
+load_baseline_env "${BASELINE}"
+
 if [ -n "${PROFILE_ARG}" ]; then
     export KUBESPRAY_PROFILE="${PROFILE_ARG}"
 fi

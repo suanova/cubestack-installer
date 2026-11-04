@@ -25,6 +25,10 @@ mirror:
   repo: suanova/container-image-mirror
   commit: <sha>
   path: index.json
+env:
+  K8S_VERSION: v1.35.8
+  KUBESPRAY_VERSION: v2.32.0
+  # ... public version values used by images below
 os:
   - family: debian
     id: ubuntu
@@ -42,6 +46,9 @@ images:
 要点：
 
 - `key` 全局唯一，格式 `<group>:<source>`。
+- `env` 是**公共版本值的唯一来源**：镜像的 `version`/`dest`/`tar` 通过 `${VAR}` 引用它；
+  在线安装启动时会先加载这份 env，再交给 `load_config`。`cluster.defaults.conf`/profile
+  只补私有/派生值，不再定义这些公共版本。
 - `mirror` 固定 mirror catalog 的 repo/commit/index；base 镜像的 digest 必须以该
   commit 的 `index.json` 为准，避免漂移。
 - `catalog_id` 指向 mirror catalog（`container-image-mirror/index.json` 的 `id`）；

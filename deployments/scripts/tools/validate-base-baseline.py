@@ -73,8 +73,16 @@ def main() -> int:
     if mirror.get("commit") and not re.match(r"^[0-9a-f]{7,40}$", str(mirror["commit"])):
         errors.append("mirror.commit must be a 7-40 character hex commit")
 
-    known_vars = defaults_keys(defaults_path) | {"KUBESPRAY_VERSION"}
-    known_vars |= {str(k) for k in (baseline.get("env") or {})}
+    env = baseline.get("env") or {}
+    if not isinstance(env, dict) or not env:
+        errors.append("env must be a non-empty mapping")
+        env = {}
+    for key, value in env.items():
+        if not re.match(r"^[A-Z_][A-Z0-9_]*$", str(key)):
+            errors.append(f"env: invalid key {key!r}")
+        if not str(value).strip():
+            errors.append(f"env: {key} must not be empty")
+    known_vars = {str(k) for k in env}
 
     os_entries = baseline.get("os") or []
     if not os_entries:
