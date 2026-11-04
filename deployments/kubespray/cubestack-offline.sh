@@ -172,6 +172,7 @@ usage() {
     echo "命令:"
     echo "  init       [名称]           初始化环境"
     echo "  download   [名称]           下载离线资源（使用 download-hosts.yml，本地 root）"
+    echo "  download-files [名称]       仅下载 k8s 二进制/文件（不拉镜像；在线安装用）"
     echo "  install    [名称] [选项]    执行集群安装（使用 hosts.yml，各节点用户按 ansible_user）"
     echo "  reset      [名称] --yes     清除目标节点上的旧集群状态（覆盖安装的前置步骤; 见下）"
     echo "  scale      [名称] [选项]    扩容集群 — 添加新节点到已有集群"
@@ -376,6 +377,30 @@ ensure_cluster_dirs() {
     log "✅ 集群目录已就绪: ${CLUSTER_NAME}"
 }
 
+# download-hosts.yml is only used to generate the offline image/file lists on
+# localhost. `download` and `download-files` both need it; keep the template in
+# one place.
+ensure_download_hosts() {
+    [ -f "${INVENTORY_DIR}/download-hosts.yml" ] && return 0
+    cat > "${INVENTORY_DIR}/download-hosts.yml" << 'DOWNLOAD_EOF'
+# Download-only inventory — localhost with root
+# Used by generate_list.sh, no SSH to nodes required.
+[kube_control_plane]
+node1 ansible_host=localhost ansible_user=root
+
+[etcd:children]
+kube_control_plane
+
+[kube_node]
+node1 ansible_host=localhost ansible_user=root
+
+[k8s_cluster:children]
+kube_control_plane
+kube_node
+DOWNLOAD_EOF
+    log "✅ 已生成 download-hosts.yml（本地 root，用于下载离线资源）"
+}
+
 cmd_init() {
     highlight "初始化集群 [${CLUSTER_NAME}] 部署环境..."
     ensure_kubespray
@@ -486,25 +511,7 @@ kube_control_plane
 kube_node
 SCALE_MASTER_EOF
     log "✅ 已生成 Scale 示例文件: ${INVENTORY_DIR}/_examples/"
-    if [ ! -f "${INVENTORY_DIR}/download-hosts.yml" ]; then
-        cat > "${INVENTORY_DIR}/download-hosts.yml" << 'DOWNLOAD_EOF'
-# Download-only inventory — localhost with root
-# Used by generate_list.sh, no SSH to nodes required.
-[kube_control_plane]
-node1 ansible_host=localhost ansible_user=root
-
-[etcd:children]
-kube_control_plane
-
-[kube_node]
-node1 ansible_host=localhost ansible_user=root
-
-[k8s_cluster:children]
-kube_control_plane
-kube_node
-DOWNLOAD_EOF
-        log "✅ 已生成 download-hosts.yml（本地 root，用于下载离线资源）"
-    fi
+    ensure_download_hosts
     log "🎉 集群 [${CLUSTER_NAME}] 初始化完成! 下一步: 编辑 hosts.yml → $0 download ${CLUSTER_NAME}"
 }
 
@@ -555,22 +562,27 @@ cmd_download() {
     ensure_kubespray
     ensure_venv
     ensure_cluster_dirs
+    ensure_download_hosts
 
     DOWNLOAD_HOSTS_FILE="${DOWNLOAD_HOSTS:-${INVENTORY_DIR}/download-hosts.yml}"
     [ -f "${DOWNLOAD_HOSTS_FILE}" ] || err "Download hosts 不存在: ${DOWNLOAD_HOSTS_FILE}"
 
-    runtime=$(detect_runtime)
-    pull_cmd=$(get_pull_cmd "$runtime")
-    save_cmd=$(get_save_cmd "$runtime")
-    log "容器运行时: ${runtime}"
+    if [ "${SKIP_IMAGES}" != "1" ]; then
+        runtime=$(detect_runtime)
+        pull_cmd=$(get_pull_cmd "$runtime")
+        save_cmd=$(get_save_cmd "$runtime")
+        log "容器运行时: ${runtime}"
+    fi
 
     build_extra_vars
 
     log "[1/4] 生成离线资源清单..."
     cd "${OFFLINE_CONTRIB}"
     bash generate_list.sh -i "${DOWNLOAD_HOSTS_FILE}" ${EXTRA_VARS_STR}
-    [ -s "temp/images.list" ] || err "images.list 为空"
     [ -s "temp/files.list" ] || err "files.list 为空"
+    if [ "${SKIP_IMAGES}" != "1" ]; then
+        [ -s "temp/images.list" ] || err "images.list 为空"
+    fi
 
     log "    生成文件命名映射..."
     cd "${KUBESPRAY_DIR}"
@@ -600,10 +612,17 @@ PLAYBOOK_EOF
     cd "${OFFLINE_CONTRIB}"
     [ -s "temp/url_dest.map" ] || warn "URL→dest 映射为空，将使用 URL basename"
 
-    total_images=$(wc -l < "temp/images.list" | tr -d ' ')
+    if [ "${SKIP_IMAGES}" = "1" ]; then
+        total_images=0
+    else
+        total_images=$(wc -l < "temp/images.list" | tr -d ' ')
+    fi
     total_files=$(wc -l < "temp/files.list" | tr -d ' ')
     log "    镜像清单: ${total_images} 个, 文件清单: ${total_files} 个"
 
+    if [ "${SKIP_IMAGES}" = "1" ]; then
+        log "[2/4] 跳过容器镜像（在线模式使用 mirror 物化结果）"
+    else
     log "[2/4] 下载容器镜像..."
     mkdir -p "${LOCAL_REPO_DIR}/images"
 
@@ -639,6 +658,7 @@ PLAYBOOK_EOF
     done < "temp/images.list"
 
     log "    镜像下载完成: $(ls "${LOCAL_REPO_DIR}/images/" | wc -l) 个"
+    fi
 
     log "[3/4] 下载二进制文件..."
     url_dest_map="${OFFLINE_CONTRIB}/temp/url_dest.map"
@@ -1213,6 +1233,10 @@ PYEOF
 }
 
 ensure_packages_play() {
+    if [ "${CUBESTACK_ONLINE:-0}" = "1" ]; then
+        log "在线模式：跳过离线系统包 play（OS 包由运维预装）"
+        return 0
+    fi
     local py name packages_file="${KUBESPRAY_DIR}/patch-playbooks/install-packages.yml"
     # kubespray 升级/重新 clone 会丢失 patch-playbooks → 从内置内容重新生成(与 ensure_preload_play 同机制)
 # 生成 PKG_EOF 内嵌内容(权威源; 由 _write_if_changed 决定是否落盘)
@@ -2603,6 +2627,7 @@ PYEOF
 # 主入口 — 参数解析
 # ──────────────────────────────────────────────────────────
 LIMIT_GROUP=""
+SKIP_IMAGES=0
 COMMAND=""
 CLUSTER_ARG=""
 RESET_YES=0
@@ -2814,6 +2839,10 @@ case "${COMMAND}" in
     init)     cmd_init ;;
     paths)    cmd_paths ;;
     download) cmd_download ;;
+    download-files)
+        SKIP_IMAGES=1
+        cmd_download
+        ;;
     reset)    cmd_reset ;;
     install)
         # 整个安装过程所有日志(含 ansible): 同时显示终端 + 写入日志文件

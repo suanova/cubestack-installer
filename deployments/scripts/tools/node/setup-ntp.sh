@@ -257,6 +257,7 @@ set -u
 # ★ 2026-10-07: 节点无外网时 apt 在线必失败, 旧实现 `|| true` 把错误静默吞掉 ⇒ 权威不监听 123,
 #   客户端全 Reach=0, 模块只报一句"未监听 NTP 123"无从排查。现改为: 失败亮出 apt 输出, 再硬失败。
 HAS_DEB="${1:-0}"
+ONLINE="${2:-0}"
 if ! command -v chronyd >/dev/null 2>&1; then
     # ★ 2026-10-14 三轮实机事故后重构: 离线安装统一走 lib-common::install_debs_offline
     #   (随本脚本头部预挂载; 口径单一事实来源 —— 预卸互斥提供者 / 已装即跳不升级 /
@@ -274,7 +275,9 @@ if ! command -v chronyd >/dev/null 2>&1; then
             fi
         fi
     fi
-    command -v chronyd >/dev/null 2>&1 || apt-get install -y chrony >/dev/null 2>&1 || true
+    if [ "${ONLINE}" != "1" ]; then
+        command -v chronyd >/dev/null 2>&1 || apt-get install -y chrony >/dev/null 2>&1 || true
+    fi
 fi
 command -v chronyd >/dev/null 2>&1 || { echo "CHRONY-INSTALL-FAILED(离线 deb 缺失/依赖不满足且无外网)"; exit 1; }
 cp /tmp/cubestack-chrony.conf /etc/chrony/chrony.conf
@@ -318,7 +321,7 @@ EOF
     # 执行远程脚本并**保留输出**: 失败时打印诊断(tail)。旧实现 `>/dev/null 2>&1` 吞掉一切,
     # 只剩一句"未监听 NTP 123", 无从排查 —— 2026-10-07 教训。
     local _rout _mok
-    _rout="$(node_cmd "${m_ip}" "${m_user}" "${m_pw}" "bash /tmp/cubestack-chrony-master.sh ${has_deb}" 2>&1)" && _mok=1 || _mok=0
+    _rout="$(node_cmd "${m_ip}" "${m_user}" "${m_pw}" "bash /tmp/cubestack-chrony-master.sh ${has_deb} ${CUBESTACK_ONLINE:-0}" 2>&1)" && _mok=1 || _mok=0
     if [ "${_mok}" = "1" ]; then
         node_cmd "${m_ip}" "${m_user}" "${m_pw}" "rm -f /tmp/cubestack-chrony-master.sh" >/dev/null 2>&1 || true
         node_cmd "${m_ip}" "${m_user}" "${m_pw}" "rm -rf /tmp/cubestack-ntp-debs" >/dev/null 2>&1 || true

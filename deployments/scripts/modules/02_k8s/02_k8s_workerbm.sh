@@ -14,6 +14,11 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
+if [ "${CUBESTACK_ONLINE:-0}" = "1" ]; then
+    say "在线模式：跳过 worker 离线包安装（OS 包由运维预装，installer 不安装）"
+    exit 0
+fi
+
 say "worker 节点连通性检查 + 离线包安装(全部 worker, 不区分虚拟机/裸金属) ..."
 PKG_FAIL=0
 for line in "${NODES[@]:-}"; do

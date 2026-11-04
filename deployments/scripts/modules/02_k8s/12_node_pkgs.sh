@@ -24,6 +24,11 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
+if [ "${CUBESTACK_ONLINE:-0}" = "1" ]; then
+    say "在线模式：跳过节点系统包对账（OS 包由运维预装，installer 不安装）"
+    exit 0
+fi
+
 say "节点系统包对账(离线 .deb; 旧版本先摘后装; 修复破损的 apt 依赖图)..."
 bash "${SCRIPT_DIR}/tools/node/reconcile-node-packages.sh" ${RECONCILE_ARGS:-}
 ok "节点系统包已对账"
