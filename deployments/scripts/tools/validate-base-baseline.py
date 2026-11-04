@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Validate the public base baseline (versions/base.yaml) and OS package lock.
+"""Validate the public base baseline (versions/base.yaml) and OS check manifest.
 
-The baseline is the public source of truth for base versions: kubespray, OS
-packages, and the base image set. It is consumed by:
+The baseline is the public source of truth for base versions: kubespray, the
+pre-install OS package check, and the base image set. It is consumed by:
   - cubestack-installer open-source online install (read directly)
   - cubestack-release (read at a pinned installer commit) for commercial packaging
+
+OS packages are a pre-install check only. The installer verifies that the listed
+packages exist on the nodes; it does not download or install them.
 """
 
 from __future__ import annotations
@@ -71,15 +74,15 @@ def main() -> int:
         errors.append("os[] must contain at least one entry")
     for idx, entry in enumerate(os_entries):
         where = f"os[{idx}]"
-        for field in ("family", "id", "version", "packages_lock"):
+        for field in ("family", "id", "version", "packages_check"):
             if not str(entry.get(field, "")).strip():
                 errors.append(f"{where}: {field} is required")
-        lock_rel = str(entry.get("packages_lock", "")).strip()
+        lock_rel = str(entry.get("packages_check", "")).strip()
         if not lock_rel:
             continue
         lock_path = root / lock_rel
         if not lock_path.is_file():
-            errors.append(f"{where}: packages_lock not found: {lock_rel}")
+            errors.append(f"{where}: packages_check not found: {lock_rel}")
             continue
         try:
             lock = load_yaml(lock_path)

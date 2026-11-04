@@ -10,7 +10,9 @@ os:
   id: ubuntu
   version: '22.04'
   arch: amd64
-  packages_lock: versions/os/ubuntu-22.04.lock
+  # Pre-install check only: the installer verifies these packages are present on
+  # every node. It does not download or install them.
+  packages_check: versions/os/ubuntu-22.04.lock
 images:
 - key: k8s-base:registry.k8s.io/kube-apiserver
   catalog_id: kubernetes/kube-apiserver

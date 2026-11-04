@@ -1,10 +1,11 @@
+# Pre-install check manifest. The installer only verifies these packages are
+# present on the nodes; it does not download or install them.
 schema: 1
 family: debian
 id: ubuntu
 version: "22.04"
 codename: jammy
-source: "http://archive.ubuntu.com/ubuntu (jammy, jammy-updates, jammy-security) as of 2026-11-04"
-# TODO: switch to an immutable snapshot.ubuntu.com timestamp when fetch-os-packages lands.
+source: "Ubuntu 22.04 package set; versions observed on archive.ubuntu.com as of 2026-11-04"
 packages:
   reconcile:
     "lvm2": "2.03.11-2.1ubuntu5"

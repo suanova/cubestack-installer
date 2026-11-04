@@ -26,7 +26,7 @@ os:
     id: ubuntu
     version: "22.04"
     arch: amd64
-    packages_lock: versions/os/ubuntu-22.04.lock
+    packages_check: versions/os/ubuntu-22.04.lock
 images:
   - key: k8s-base:registry.k8s.io/kube-apiserver
     catalog_id: kubernetes/kube-apiserver      # container-image-mirror index.json 的 id
@@ -44,12 +44,14 @@ images:
   profile 里有定义。禁止 `latest`。
 - `dest` / `tar` 里的 `${VAR}` 由安装器解析；`tar` 决定物化后的文件名，模块 35 等
   依赖固定命名。
-- OS 资产（kubespray 树/二进制、deb/rpm）由 release 的 base `files[]` 打包；
-  `packages_lock` 只记录包版本。
+- OS 包不由 installer 下载或安装；`packages_check` 指向安装前预检清单，installer 只验证
+  节点上是否已存在这些包，缺失时列清单退出。
+- K8s 二进制（kubelet/kubeadm/kubectl/crictl/CNI 等）仍由 installer 准备；商业离线版由
+  release 的 base `files[]` 打包。
 
-## OS 包 lock
+## OS 包预检清单
 
-`versions/os/<id>-<version>.lock`：
+`versions/os/<id>-<version>.lock` 是**安装前检查清单**，不是下载/安装清单：
 
 ```yaml
 schema: 1
@@ -57,23 +59,24 @@ family: debian
 id: ubuntu
 version: "22.04"
 codename: jammy
-source: "http://archive.ubuntu.com/ubuntu (jammy, jammy-updates, jammy-security) as of 2026-11-04"
+source: "Ubuntu 22.04 package set; versions observed on archive.ubuntu.com as of 2026-11-04"
 packages:
-  reconcile:      # 所有节点对账安装
+  reconcile:      # 所有节点都要有
     lvm2: "2.03.11-2.1ubuntu5"
-  chrony:         # 仅 NTP 模块按需安装
+  chrony:         # 仅 NTP 模块按需检查
     chrony: "4.2-2ubuntu2.1"
 ```
 
-> 当前版本解析自 archive.ubuntu.com；后续切换到 `snapshot.ubuntu.com` 的固定时间戳，
-> 由 `fetch-os-packages` 下载并写入 bundle digest。
+- installer 只检查包是否存在；默认按包名检查，`--strict` 可额外校验版本。
+- 不下载 `.deb`、不执行 `apt-get install`；缺包时由运维按清单自行安装。
+- 版本号仅作为已知良好参考，不参与默认预检。
 
 ## 更新流程
 
 1. 第三方镜像先改 `container-image-mirror` 的 `images/*.yaml`（tag + digest），合并后
    产生新的 `index.json`；
 2. 在 `versions/base.yaml` 改 `version`（或新增镜像条目），保持 `catalog_id` 不变；
-3. 改 OS 包时更新对应的 `.lock`；
+3. 改 OS 预检清单时更新对应的 `.lock`；
 4. 本地校验：
 
    ```bash
@@ -85,5 +88,5 @@ packages:
 
 ## Rocky 扩展点
 
-`os[]` 的 schema 支持多个 OS family；2.1 只实现 Ubuntu。Rocky 的 rpm/dnf 模块、
-Rocky 包 lock、Rocky VM 模板和 NVIDIA rhel9 驱动都在后续版本补充，当前不阻塞。
+`os[]` 的 schema 支持多个 OS family；2.1 只实现 Ubuntu 预检。Rocky 的 rpm 包预检、
+Rocky VM 模板和 NVIDIA rhel9 驱动都在后续版本补充，当前不阻塞。
