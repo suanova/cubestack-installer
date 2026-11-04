@@ -72,7 +72,7 @@ Harbor `mirrors/**` 还没同步 1.35 线(所以 `harbor-save-images.sh` 暂时�
 **按开关(默认关 → 不急)**
 | 组 | ref | 说明 |
 |---|---|---|
-| k8s-base | `registry.k8s.io/sig-storage/local-volume-provisioner:v2.5.0` | 只有 `LOCAL_VOLUME_PROVISIONER_ENABLED=true` 才需要 |
+| k8s-base | `registry.k8s.io/sig-storage/local-volume-provisioner:v2.10.0` | 只有 `LOCAL_VOLUME_PROVISIONER_ENABLED=true` 才需要 |
 | k8s-base | `registry.k8s.io/nfd/node-feature-discovery:v0.19.0` | 只有 `NFD_ENABLED=true` 才需要 |
 
 > ⚠ **multus 那条是硬门禁**:盘上现有的 `multus/multus-cni.tar` 内容实测仍是 `snapshot-thick`,
