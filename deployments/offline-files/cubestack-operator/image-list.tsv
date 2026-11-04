@@ -42,6 +42,12 @@ portal	quay.io_opstree_redis-exporter_v1.44.0.tar		quay.io/opstree/redis-exporte
 portal	quay.io_opstree_redis-operator_v0.26.0.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-operator:v0.26.0	quay.io/opstree/redis-operator:v0.26.0
 portal	quay.io_opstree_redis-sentinel_v7.0.15.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-sentinel:v7.0.15	quay.io/opstree/redis-sentinel:v7.0.15
 portal	quay.io_opstree_redis_v7.0.15.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis:v7.0.15	quay.io/opstree/redis:v7.0.15
+# cubestack-docs: 产品文档静态站(nginx; operator 的 cubestackDocs 组件引用, 经平台 Gateway 服务在 /cubestack/docs)。
+#   镜像在**私有项目 suanova-private**, operator 渲染时重写为
+#     <global.imageRegistry>/suanova-private/cubestack-docs:<tag>
+#   tag 默认跟随 catalog 的 :latest, 由 CR spec.components.cubestackDocs.version 钉到发布 tag;
+#   pull_ref 留空 = 与 save_ref 同源(直接从本台 Harbor 私有项目拉取, 不拼 mirrors/)。
+docs	harbor.isuanova.com_suanova-private_cubestack-docs_v2.0.1.tar		harbor.isuanova.com/suanova-private/cubestack-docs:v2.0.1
 # prometheus-windows-exporter 0.31.8 仅提供 windows/amd64(见 OCI index); 本部署目标为 Linux 节点,
 # 其 DaemonSet 为 0 副本, 镜像不参与 Linux 离线集合。将来若加入 Windows 节点, 需用
 # `skopeo copy --override-os windows --override-arch amd64` 单独保存, 不能套用本清单的 linux/amd64 流程。

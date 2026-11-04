@@ -199,12 +199,14 @@ Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator�
 | tar 内镜像 | registry 目标路径 | CR 侧字段 |
 |---|---|---|
 | `harbor.isuanova.com/suanova/<name>:tag`(自研) | `<REG>/suanova/<name>:tag` | `spec.global.imageRegistry`(注入 `<REG>`) |
+| `harbor.isuanova.com/suanova-private/<name>:tag`(私有, 如 cubestack-docs) | `<REG>/suanova-private/<name>:tag` | 同上(operator 把 cubestackDocs 组件镜像重写为 `<global.imageRegistry>/suanova-private/…`) |
 | `<上游ref>`(docker.io/quay.io/ghcr.io/registry.k8s.io…) | `<REG>/mirrors/<上游ref>` | `spec.global.externalImageRegistryPrefix` |
 
 - **目标 ref 以 tar 文件名为权威**(文件名 = 上游 ref 的 `/`/`:` → `_`), tar 内 RepoTags 仅作尾部校验
   —— 早期 tar 的 RepoTags 可能是短式(缺 docker.io 域), 按它推会与节点拉取路径不一致(实机 not found)。
-- 组件镜像集与 operator 镜像内 `assets/charts` 的**渲染对账**而来(37 个 tar, 2026-10-16 起按平台
-  组件分入子目录): 见 `offline-files/cubestack-operator/README.md`(结构表 / 维护方法 / 单独推送流程)。
+- 组件镜像集与 operator 镜像内 `assets/charts` 的**渲染对账**而来(38 个 tar, 2026-10-16 起按平台
+  组件分入子目录; 2026-11-03 增补 `docs/` = cubestack-docs 文档站): 见
+  `offline-files/cubestack-operator/README.md`(结构表 / 维护方法 / 单独推送流程)。
 - **单独推送**(更新某一个 operator 后只灌它的镜像): `CUBESTACK_OPERATOR_COMPONENTS="<组件名>"`
   环境变量, 如 `sudo CUBESTACK_OPERATOR_COMPONENTS="cubepilot" ./deploy-cluster.sh --steps cubestack_operator`
   (组件名不存在会报错并列出可用子目录)。

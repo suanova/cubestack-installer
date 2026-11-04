@@ -7,7 +7,7 @@
 #   若组织的 GitHub 托管 runner 可访问 MinIO(现有 refresh-*.yml 即走这条通路), 也可由 CI 执行;
 #   两者产出同一份离线包, 选哪条取决于网络与凭据策略。
 # 集合(collections; 每个 = offline-files/<集合>/ 目录 + 其 image-list.tsv 清单):
-#   · cubestack-operator  平台 Operator 与各组件镜像(37 件)+ operator helm chart(charts/ 子目录)
+#   · cubestack-operator  平台 Operator 与各组件镜像(38 件)+ operator helm chart(charts/ 子目录)
 #   · model-collection    模型推理镜像 sglang / vllm-metax(3 件 ≈33G, 大件建议 .tar.gz;
 #                         2026-10-29: sglang = 0.5.14 + v0.5.12-glm5-rc4, vllm 不变)
 #   · dev-lab             开发镜像 cpu / maca / cuda 家族(3 件; 顶层平铺)

@@ -9,13 +9,13 @@ perses	docker.io_persesdev_perses-operator_v0.5.0.tar	harbor.isuanova.com/mirror
 perses	docker.io_persesdev_perses_v0.54.0.tar	harbor.isuanova.com/mirrors/docker.io/persesdev/perses:v0.54.0	docker.io/persesdev/perses:v0.54.0
 prometheus	docker.io_grafana_grafana_13.2.2-distroless.tar	harbor.isuanova.com/mirrors/docker.io/grafana/grafana:13.2.2-distroless	docker.io/grafana/grafana:13.2.2-distroless
 prometheus	ghcr.io_jkroepke_kube-webhook-certgen_1.8.8.tar	harbor.isuanova.com/mirrors/ghcr.io/jkroepke/kube-webhook-certgen:1.8.8	ghcr.io/jkroepke/kube-webhook-certgen:1.8.8
-prometheus	quay.io_brancz_kube-rbac-proxy_v0.22.1.tar	harbor.isuanova.com/mirrors/quay.io/brancz/kube-rbac-proxy:v0.22.1	quay.io/brancz/kube-rbac-proxy:v0.22.1
+prometheus	quay.io_brancz_kube-rbac-proxy_v0.23.1.tar	harbor.isuanova.com/mirrors/quay.io/brancz/kube-rbac-proxy:v0.23.1	quay.io/brancz/kube-rbac-proxy:v0.23.1
 prometheus	quay.io_kiwigrid_k8s-sidecar_2.11.2.tar	harbor.isuanova.com/mirrors/quay.io/kiwigrid/k8s-sidecar:2.11.2	quay.io/kiwigrid/k8s-sidecar:2.11.2
-prometheus	quay.io_prometheus-operator_prometheus-config-reloader_v0.94.0.tar	harbor.isuanova.com/mirrors/quay.io/prometheus-operator/prometheus-config-reloader:v0.94.0	quay.io/prometheus-operator/prometheus-config-reloader:v0.94.0
-prometheus	quay.io_prometheus-operator_prometheus-operator_v0.94.0.tar	harbor.isuanova.com/mirrors/quay.io/prometheus-operator/prometheus-operator:v0.94.0	quay.io/prometheus-operator/prometheus-operator:v0.94.0
-prometheus	quay.io_prometheus_alertmanager_v0.34.0.tar	harbor.isuanova.com/mirrors/quay.io/prometheus/alertmanager:v0.34.0	quay.io/prometheus/alertmanager:v0.34.0
+prometheus	quay.io_prometheus-operator_prometheus-config-reloader_v0.94.2.tar	harbor.isuanova.com/mirrors/quay.io/prometheus-operator/prometheus-config-reloader:v0.94.2	quay.io/prometheus-operator/prometheus-config-reloader:v0.94.2
+prometheus	quay.io_prometheus-operator_prometheus-operator_v0.94.2.tar	harbor.isuanova.com/mirrors/quay.io/prometheus-operator/prometheus-operator:v0.94.2	quay.io/prometheus-operator/prometheus-operator:v0.94.2
+prometheus	quay.io_prometheus_alertmanager_v0.34.2.tar	harbor.isuanova.com/mirrors/quay.io/prometheus/alertmanager:v0.34.2	quay.io/prometheus/alertmanager:v0.34.2
 prometheus	quay.io_prometheus_node-exporter_v1.12.1-distroless.tar	harbor.isuanova.com/mirrors/quay.io/prometheus/node-exporter:v1.12.1-distroless	quay.io/prometheus/node-exporter:v1.12.1-distroless
-prometheus	quay.io_prometheus_prometheus_v3.14.0-distroless.tar	harbor.isuanova.com/mirrors/quay.io/prometheus/prometheus:v3.14.0-distroless	quay.io/prometheus/prometheus:v3.14.0-distroless
+prometheus	quay.io_prometheus_prometheus_v3.15.1-distroless.tar	harbor.isuanova.com/mirrors/quay.io/prometheus/prometheus:v3.15.1-distroless	quay.io/prometheus/prometheus:v3.15.1-distroless
 prometheus	quay.io_thanos_thanos_v0.42.4.tar		quay.io/thanos/thanos:v0.42.4
 prometheus	registry.k8s.io_kube-state-metrics_kube-state-metrics_v2.20.0.tar	harbor.isuanova.com/mirrors/registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0	registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0
 cubepilot	harbor.isuanova.com_suanova_cubepilot-api_v2.0.0-rc2.tar		harbor.isuanova.com/suanova/cubepilot-api:v2.0.0-rc2
