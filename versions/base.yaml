@@ -298,3 +298,13 @@ images:
   version: v1.6.0
   dest: offline-files/nvidia-gpu-operator
   tar: nvcr.io_nvidia_kubevirt-gpu-device-plugin_v1.6.0.tar
+# K8s binaries bundle (kubelet/kubeadm/kubectl/crictl/CNI/containerd/runc/etcd).
+# Build and publish with .github/workflows/build-k8s-binaries.yml, then pin the
+# release asset URL/digest here. The release base tree consumes it via files[].
+# files:
+#   - key: k8s:binaries
+#     path: offline-files/kubespray/v2.32.0/binaries.tar.gz
+#     source: {type: url, url: "https://github.com/suanova/cubestack-installer/releases/download/k8s-binaries-v2.32.0-amd64/kubespray-binaries-v2.32.0-amd64.tar.gz"}
+#     digest: sha256:<64 hex>
+#     extract: true
+#     mode: '0644'

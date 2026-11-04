@@ -119,6 +119,46 @@ def main() -> int:
                     if not str(pkg).strip() or not str(ver).strip():
                         errors.append(f"{lock_rel}: packages.{group} has an empty name/version")
 
+    files = baseline.get("files") or []
+    file_keys: set[str] = set()
+    file_paths: set[str] = set()
+    for idx, item in enumerate(files):
+        where = f"files[{idx}]"
+        key = str(item.get("key", "")).strip()
+        path = str(item.get("path", "")).strip()
+        source = item.get("source") or {}
+        if not key:
+            errors.append(f"{where}: key is required")
+        elif key in file_keys:
+            errors.append(f"{where}: duplicate key {key!r}")
+        else:
+            file_keys.add(key)
+        if not path:
+            errors.append(f"{where}: path is required")
+        elif path in file_paths:
+            errors.append(f"{where}: duplicate path {path!r}")
+        else:
+            file_paths.add(path)
+        kind = str(source.get("type", "")).strip()
+        if kind == "git":
+            for field in ("repo", "ref"):
+                if not str(source.get(field, "")).strip():
+                    errors.append(f"{where}: git source requires {field}")
+        elif kind == "url":
+            if not str(source.get("url", "")).strip():
+                errors.append(f"{where}: url source requires url")
+        elif kind == "local":
+            if not str(source.get("path", "")).strip():
+                errors.append(f"{where}: local source requires path")
+        else:
+            errors.append(f"{where}: source.type must be git|url|local")
+        digest = str(item.get("digest", "")).strip()
+        if digest and not re.match(r"^sha256:[0-9a-f]{64}$", digest):
+            errors.append(f"{where}: invalid digest {digest!r}")
+        mode = str(item.get("mode", "0644"))
+        if not re.match(r"^[0-7]{4}$", mode):
+            errors.append(f"{where}: mode must be 4 octal digits")
+
     images = baseline.get("images") or []
     if not images:
         errors.append("images[] must contain at least one entry")

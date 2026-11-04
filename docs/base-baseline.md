@@ -99,6 +99,17 @@ packages:
 5. 提交到 installer；合并后 CI 发 `baseline-updated` 给 release，release 开 PR 更新
    `baseline.commit` 并重建 base pin。
 
+## K8s 二进制包
+
+kubelet/kubeadm/kubectl/crictl/CNI/containerd/runc/etcd 等由 installer 准备：
+
+1. 手动触发 `.github/workflows/build-k8s-binaries.yml`，输入不可变 tag
+   （如 `v2.32.0-amd64`；内容变化用 `-rN`）。
+2. workflow 用 `tools/offline/build-k8s-binaries.sh` 生成
+   `kubespray-binaries-<version>-<arch>.tar.gz`，上传到 GitHub Release。
+3. 在 `versions/base.yaml` 的 `files[]` 记录 URL 和 sha256；release 的
+   `fetch-base-sources` 会下载、校验并解包到 `offline-files/kubespray/<ver>/`。
+
 ## Rocky 扩展点
 
 `os[]` 的 schema 支持多个 OS family；2.1 只实现 Ubuntu 预检。Rocky 的 rpm 包预检、

@@ -1,0 +1,102 @@
+name: Build k8s binaries bundle
+
+# Builds the kubelet/kubeadm/kubectl/crictl/CNI/containerd/runc/etcd bundle used
+# by the commercial release base tree. The tag is immutable: content changes
+# must use a new tag (for example v2.32.0-amd64-r2).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Immutable bundle tag (e.g. v2.32.0-amd64)'
+        required: true
+      kubespray_version:
+        description: 'Kubespray version'
+        required: false
+        default: 'v2.32.0'
+      arch:
+        description: 'Target architecture'
+        required: false
+        default: 'amd64'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: k8s-binaries-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate inputs
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${TAG}" =~ ^[0-9A-Za-z._-]+$ ]] || [ "${TAG}" = "latest" ]; then
+            echo "::error::invalid or forbidden tag: '${TAG}'"
+            exit 1
+          fi
+
+      - name: Build bundle
+        id: build
+        env:
+          VERSION: ${{ inputs.kubespray_version }}
+          ARCH: ${{ inputs.arch }}
+        run: |
+          set -euo pipefail
+          out="$(bash deployments/scripts/tools/offline/build-k8s-binaries.sh \
+            --version "${VERSION}" --arch "${ARCH}" \
+            --output "${RUNNER_TEMP}/kubespray-binaries-${VERSION}-${ARCH}.tar.gz")"
+          printf '%s\n' "${out}"
+          path="$(printf '%s\n' "${out}" | sed -n 's/^output=//p')"
+          digest="$(printf '%s\n' "${out}" | sed -n 's/^sha256=//p')"
+          [ -f "${path}" ] || { echo "::error::bundle not found: ${path}"; exit 1; }
+          echo "path=${path}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### k8s binaries bundle"
+            echo ""
+            echo "- sha256: \`sha256:${digest}\`"
+            echo "- size: $(stat -c %s "${path}") bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: k8s-binaries-${{ inputs.tag }}
+          name: k8s binaries ${{ inputs.tag }}
+          files: ${{ steps.build.outputs.path }}
+          fail_on_unmatched_files: true
+          overwrite_files: false
+
+      - name: Summary
+        env:
+          TAG: ${{ inputs.tag }}
+          KUBESPRAY_VERSION: ${{ inputs.kubespray_version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PATH: ${{ steps.build.outputs.path }}
+        run: |
+          name="$(basename "${PATH}")"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/k8s-binaries-${TAG}/${name}"
+          {
+            echo ""
+            echo "URL: ${url}"
+            echo ""
+            echo "Add to the installer baseline \`files[]\`:"
+            echo ""
+            echo '```yaml'
+            echo "files:"
+            echo "  - key: k8s:binaries"
+            echo "    path: offline-files/kubespray/${KUBESPRAY_VERSION}/binaries.tar.gz"
+            echo "    source: {type: url, url: \"${url}\"}"
+            echo "    digest: sha256:${DIGEST}"
+            echo "    extract: true"
+            echo "    mode: '0644'"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
