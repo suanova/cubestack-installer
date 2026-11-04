@@ -34,8 +34,8 @@ bmc	harbor.isuanova.com_suanova_bmc-oem-exporter_latest.tar	harbor.isuanova.com/
 bmc	harbor.isuanova.com_suanova_idrac-exporter_latest.tar	harbor.isuanova.com/suanova-private/idrac-exporter:latest	harbor.isuanova.com/suanova/idrac-exporter:latest
 controller-manager	harbor.isuanova.com_suanova_cubestack-controller-manager_latest.tar		harbor.isuanova.com/suanova/cubestack-controller-manager:latest
 controller-manager	harbor.isuanova.com_suanova_cubestack-activity-agent_latest.tar		harbor.isuanova.com/suanova/cubestack-activity-agent:latest
-cuberouter	ghcr.io_cloudnative-pg_cloudnative-pg_1.30.0.tar	harbor.isuanova.com/mirrors/ghcr.io/cloudnative-pg/cloudnative-pg:1.30.0	ghcr.io/cloudnative-pg/cloudnative-pg:1.30.0
-cuberouter	ghcr.io_cloudnative-pg_postgresql_16.14-system-trixie.tar	harbor.isuanova.com/mirrors/ghcr.io/cloudnative-pg/postgresql:16.14-system-trixie	ghcr.io/cloudnative-pg/postgresql:16.14-system-trixie
+cuberouter	ghcr.io_cloudnative-pg_cloudnative-pg_1.30.1.tar	harbor.isuanova.com/mirrors/ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1	ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1
+cuberouter	ghcr.io_cloudnative-pg_postgresql_16.15-system-trixie.tar	harbor.isuanova.com/mirrors/ghcr.io/cloudnative-pg/postgresql:16.15-system-trixie	ghcr.io/cloudnative-pg/postgresql:16.15-system-trixie
 cuberouter	harbor.isuanova.com_suanova_cuberouter_latest.tar		harbor.isuanova.com/suanova/cuberouter:latest
 portal	harbor.isuanova.com_suanova_cubestack-ui_latest.tar		harbor.isuanova.com/suanova/cubestack-ui:latest
 portal	quay.io_opstree_redis-exporter_v1.44.0.tar		quay.io/opstree/redis-exporter:v1.44.0
