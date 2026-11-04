@@ -1,0 +1,212 @@
+suite: toolbox deployment
+templates:
+  - deployment.yaml
+tests:
+  - it: renders nothing when the toolbox is disabled
+    set:
+      toolbox.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: composes the image from the cephImage settings
+    set:
+      toolbox.enabled: true
+      cephImage.repository: quay.io/ceph/ceph
+      cephImage.tag: v20.2.2
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: quay.io/ceph/ceph:v20.2.2
+
+  - it: tracks a custom cephImage repository and tag
+    set:
+      toolbox.enabled: true
+      cephImage.repository: registry.example.com/ceph/ceph
+      cephImage.tag: v19.2.3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.example.com/ceph/ceph:v19.2.3
+
+  - it: prefers toolbox.image over the cephImage settings
+    set:
+      toolbox.enabled: true
+      cephImage.repository: quay.io/ceph/ceph
+      cephImage.tag: v20.2.2
+      toolbox.image: registry.example.com/rook/ceph:v1.18.0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.example.com/rook/ceph:v1.18.0
+
+  - it: takes the tag from cephImage when only toolbox.repository is set
+    set:
+      toolbox.enabled: true
+      cephImage.repository: quay.io/ceph/ceph
+      cephImage.tag: v20.2.2
+      toolbox.repository: registry.example.com/rook/ceph
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.example.com/rook/ceph:v20.2.2
+
+  - it: takes the repository from cephImage when only toolbox.tag is set
+    set:
+      toolbox.enabled: true
+      cephImage.repository: quay.io/ceph/ceph
+      cephImage.tag: v20.2.2
+      toolbox.tag: v19.2.3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: quay.io/ceph/ceph:v19.2.3
+
+  - it: composes toolbox.repository and toolbox.tag when both are set
+    set:
+      toolbox.enabled: true
+      cephImage.repository: quay.io/ceph/ceph
+      cephImage.tag: v20.2.2
+      toolbox.repository: registry.example.com/rook/ceph
+      toolbox.tag: v1.18.0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.example.com/rook/ceph:v1.18.0
+
+  - it: prefers toolbox.repository over toolbox.image
+    set:
+      toolbox.enabled: true
+      cephImage.repository: quay.io/ceph/ceph
+      cephImage.tag: v20.2.2
+      toolbox.image: registry.example.com/legacy/ceph:v18.2.0
+      toolbox.repository: registry.example.com/rook/ceph
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.example.com/rook/ceph:v20.2.2
+
+  - it: prefers toolbox.tag over toolbox.image
+    set:
+      toolbox.enabled: true
+      cephImage.repository: quay.io/ceph/ceph
+      cephImage.tag: v20.2.2
+      toolbox.image: registry.example.com/legacy/ceph:v18.2.0
+      toolbox.tag: v19.2.3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: quay.io/ceph/ceph:v19.2.3
+
+  - it: leaves hostNetwork unset unless the cluster uses the host network
+    set:
+      toolbox.enabled: true
+    asserts:
+      - notExists:
+          path: spec.template.spec.hostNetwork
+
+  - it: enables hostNetwork for a host network provider
+    set:
+      toolbox.enabled: true
+      cephClusterSpec.network.provider: host
+    asserts:
+      - equal:
+          path: spec.template.spec.hostNetwork
+          value: true
+
+  - it: omits revisionHistoryLimit unless it is set
+    set:
+      toolbox.enabled: true
+    asserts:
+      - notExists:
+          path: spec.revisionHistoryLimit
+
+  - it: applies revisionHistoryLimit when set
+    set:
+      toolbox.enabled: true
+      revisionHistoryLimit: 3
+    asserts:
+      - equal:
+          path: spec.revisionHistoryLimit
+          value: 3
+
+  - it: adds no extra volumes, volumeMounts, env, or envFrom by default
+    set:
+      toolbox.enabled: true
+    asserts:
+      - exists:
+          path: spec.template.spec.containers[0].env[0]
+      - exists:
+          path: spec.template.spec.volumes[3]
+      - exists:
+          path: spec.template.spec.containers[0].volumeMounts[3]
+      - notExists:
+          path: spec.template.spec.containers[0].env[1]
+      - notExists:
+          path: spec.template.spec.containers[0].envFrom
+      - notExists:
+          path: spec.template.spec.volumes[4]
+      - notExists:
+          path: spec.template.spec.containers[0].volumesMounts[4]
+
+  - it: adds an extra volume
+    set:
+      toolbox.enabled: true
+      toolbox.additionalVolumes[0]:
+        name: foo
+        configMap:
+          name: bar
+    asserts:
+      - exists:
+          path: spec.template.spec.volumes[4]
+      - equal:
+          path: spec.template.spec.volumes[4].name
+          value: foo
+      - equal:
+          path: spec.template.spec.volumes[4].configMap.name
+          value: bar
+
+  - it: adds an extra volumeMount
+    set:
+      toolbox.enabled: true
+      toolbox.additionalVolumeMounts[0]:
+        name: foo
+        mountPath: /bar
+    asserts:
+      - exists:
+          path: spec.template.spec.containers[0].volumeMounts[4]
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[4].name
+          value: foo
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[4].mountPath
+          value: /bar
+
+  - it: adds an extra env
+    set:
+      toolbox.enabled: true
+      toolbox.additionalEnv[0]:
+        name: foo
+        value: bar
+    asserts:
+      - exists:
+          path: spec.template.spec.containers[0].env[1]
+      - equal:
+          path: spec.template.spec.containers[0].env[1].name
+          value: foo
+      - equal:
+          path: spec.template.spec.containers[0].env[1].value
+          value: bar
+
+  - it: adds an extra envFrom
+    set:
+      toolbox.enabled: true
+      toolbox.additionalEnvFrom[0]:
+        configMapRef:
+          name: foo
+    asserts:
+      - exists:
+          path: spec.template.spec.containers[0].envFrom[0]
+      - equal:
+          path: spec.template.spec.containers[0].envFrom[0].configMapRef.name
+          value: foo

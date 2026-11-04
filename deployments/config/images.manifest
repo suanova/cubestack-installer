@@ -99,7 +99,7 @@ nginx  docker.io/library/nginx:${NGINX_TAG}   nginx.tar
 # [group: ceph] Rook + Ceph(internal 模式; CEPH_ENABLED / CEPH_CSI_ENABLED)
 #   目录: deployments/offline-files/kubespray/images/(与 kubespray 同目录 —— 节点预加载走同一条
 #   路径, 见 02_ceph.sh 的 CEPH_IMAGE_DIR=${OFFLINE_FILES_DIR}/images)
-#   ⚠ ceph-csi 四件套与 snapshot-controller 也在此: kubespray 的 csi 相关 addon 会用到
+#   ⚠ ceph-csi sidecar(含 snapshot-metadata)与 snapshot-controller 也在此: kubespray 的 csi 相关 addon 会用到
 # ------------------------------------------------------------
 ceph      docker.io/rook/ceph:${ROOK_VERSION}
 ceph      quay.io/cephcsi/ceph-csi-operator:${CEPH_CSI_OPERATOR_VERSION}
@@ -111,6 +111,7 @@ ceph      registry.k8s.io/sig-storage/csi-node-driver-registrar:${CSI_NODE_DRIVE
 ceph      registry.k8s.io/sig-storage/csi-provisioner:${CSI_PROVISIONER_VERSION}
 ceph      registry.k8s.io/sig-storage/csi-resizer:${CSI_RESIZER_VERSION}
 ceph      registry.k8s.io/sig-storage/csi-snapshotter:${CSI_SNAPSHOTTER_VERSION}
+ceph      registry.k8s.io/sig-storage/csi-snapshot-metadata:${CSI_SNAPSHOT_METADATA_VERSION}
 ceph      registry.k8s.io/sig-storage/snapshot-controller:${SNAPSHOT_CONTROLLER_VERSION}
 
 # ------------------------------------------------------------
