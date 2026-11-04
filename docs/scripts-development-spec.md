@@ -162,10 +162,9 @@ operator 模块与 NVIDIA GPU operator 模块均调用它 —— 新模块**应�
    ⚠ 本地副本若在 `offline-files/` 下,刷新提示是"跑同步工具上传 MinIO",不再提示 `git commit`。
 3. **离线副本缺失 = 致命错误**(`err` + 退出),提示里必须给出获取方法;不要静默降级成"用线上那份"。
 4. **刷新走显式工具**,不要靠部署过程自动落盘:
-   - chart: 随版本树分发(外部打包流程物化)
-     负责 `helm pull` + digest 比对 + 上传 MinIO;
+   - chart(operator):随版本树分发(外部打包流程物化);
    - chart(其它组件):手工 `helm pull` 覆盖 vendored 副本后 commit,并同步 `<tgz>.digest` 边车;
-   - 镜像:`tools/images/harbor-save-images.sh --group <组>`,源与命名由 `config/images.manifest` 统一声明。
+   - 镜像:第三方镜像由 `container-image-mirror` 同步到 Harbor mirrors,离线 tar 由版本树提供。
 5. **`bash tools/check-modules.sh` 的第 ⑩ 项会强制校验这条**(行首是 helm 安装命令的模块,
    其引用的 `cubestack-addon/**` 下必须能定位到 `.tgz` 或 `Chart.yaml`;或按上述窄例外,
    在 `offline-files/<集合>/` 下且 README 被跟踪)。合入前必须全绿。
@@ -175,28 +174,24 @@ operator 模块与 NVIDIA GPU operator 模块均调用它 —— 新模块**应�
 > 回退逻辑只有在**本地确实有一份**时才有意义,所以那份副本必须是仓库(或离线包)的一部分,
 > 不能只在部署时临时拉到盘上。
 
-### 2.5 镜像离线登记与目录(强制)
+### 2.5 镜像与离线目录(强制)
 
-**凡模块部署时要拉取的镜像,必须在 `config/images.manifest` 登记(唯一数据源),`group` 取组件名;
-对应的离线目录 `deployments/offline-files/<group>/` 首次即建,并放入 `README.md`。**
+**installer 不再维护镜像清单或镜像同步。** 第三方镜像由
+[`container-image-mirror`](https://github.com/suanova/container-image-mirror) 统一同步到
+`harbor.isuanova.com/mirrors/**`; 版本/组件 pin 由外部打包流程冻结, 打包好的 tar 随版本树
+`offline-files/<group>/` 交付。
 
-1. **登记**:在 `deployments/config/images.manifest` 追加 `<group>  <上游全限定 ref>` 行。
-   `group` = **组件名**(与 `cubestack-addon/<组件>/`、模块 key 对齐),离线目录由 group 推导
-   (见 `tools/images/lib-image-manifest.sh` 的 `image_group_dir()`;`k8s-base`/`ceph` 两组例外 → `kubespray/images/`)。
-   ref 必须全限定(短名补 `docker.io/library/`),版本一律写 `${VAR}` 占位。
-2. **版本变量**:`XXX_IMAGE_VERSION` 集中放 `cluster.defaults.conf` 的「镜像版本钉子(★ 升级入口)」节
-   —— 升级只改这一处,清单 / CI / 离线包自动跟随。
-3. **建目录 + README**:`deployments/offline-files/<group>/README.md`,照抄
-   `offline-files/rdma/README.md`(镜像 ref / 版本真相变量 / tar 命名 / 取镜像命令 / 谁消费 / 升级)。
-   ⚠ **空目录 git 存不下,且 `.gitignore` 忽略 `offline-files/` 下所有文件、只放行 `*/README.md`**
-   —— 不写 README,新目录提交后会消失(现有 8 个随 git 分发的子目录都是靠 README 才存在)。
-4. **tar 不入库**:离线 tar 由 `tools/images/harbor-save-images.sh --group <组>` 生成
-   (从 Harbor 拉取 → 落到该组对应目录,目录不存在会自动补建)。入库的是 manifest + README。
-5. **特例**:上游本身就是本台 Harbor 的组(`metax-gpu`)**默认不镜像**,
-   但仍登记在清单里 —— 清单同时承担"本仓库用到哪些镜像"的登记职责。
-6. **为什么强制**:同一份清单有三处消费者(CI 同步 Harbor / 联网机拉离线 tar / 部署模块推集群内置
-   registry),漏登记**不会有任何脚本报错**,只在离线部署时表现为"这个镜像没在离线包里"。
-   校验:`bash tools/images/check-image-manifest.sh`(格式/变量/重复;`--harbor` 额外比对漂移)。
+模块侧只需要:
+
+1. **按文件名找 tar**:沿用 `lib-common.sh` 的 `find_offline_tar` / 各模块约定的命名
+   (`<域>_<路径>_<tag>.tar`),路径以版本树为准。
+2. **README 说明消费契约**:新增组件目录时可在 `deployments/offline-files/<group>/` 放 README
+   说明该目录由版本树提供,但 **tar/清单不入库**。
+3. **不要新增镜像清单/同步工具**:新镜像加到 `container-image-mirror` 的 `images/*.yaml`
+   (source / target / tag / digest),升级是一次可评审的 PR。
+
+> 为什么强制:版本树里的 tar 是唯一运行时输入;清单和同步都发生在发布侧,installer 重复维护
+> 必然漂移。
 
 > 与 §2.4 的分工:chart 通常是**随 git 入仓**的 vendored 副本(`cubestack-addon/`);
 > operator chart 是文档化的例外,随离线包(`offline-files/cubestack-operator/charts/`)分发。
@@ -249,7 +244,7 @@ operator 模块与 NVIDIA GPU operator 模块均调用它 —— 新模块**应�
 3. **统一远端初始化**:需要 SSH 到 master 执行 kubectl 的模块调用 `init_remote_kubectl || exit 1`(见 §2.2,禁止手抄初始化块)。
 4. **实现逻辑**:复用现有工具脚本或写新逻辑(§2.3)。
    - 装 helm chart → chart 必须 vendored 到 `deployments/cubestack-addon/<组件>/`(§2.4,check-modules 第 ⑩ 项强制);
-   - 拉容器镜像 → 必须登记 `config/images.manifest` + 建 `deployments/offline-files/<group>/`(含 README,§2.5)。
+   - 拉容器镜像 → 加到 `container-image-mirror`; 离线 tar 由版本树提供(§2.5)。
 5. **加开关**(可选):在 `cluster.conf.example`(常用组件开关)或 `cluster.defaults.conf`(子开关/细节开关)加 `XXX_ENABLED` 变量,TOGGLE 指向它(check-modules ⑦ 校验两文件之一)。
 6. **完成**:**无需改任何注册表** —— operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)即 operator),新增 operator 写 TOGGLE 即自动进入 `--steps`/`--enable` 调度。
 7. **登记(装进集群的组件)**:在安装成功点调用 `record_installed_component "<key>"` 登记(优雅覆盖用;写失败仅告警,不影响部署)。
@@ -385,8 +380,8 @@ sudo ./deploy-cluster.sh --list-steps | --list | --fresh
   (产出新版本 / 选版部署 / 只下载指定版本 / operator 接入规范);
 - 设计决策:D1–D8 见 [`design.md`](../kubespray-versioning/design.md);
 - 静态校验:`check-modules.sh` ⑱(逐版本档案 ↔ 树表值、版本目录自检);
-- **新增/迁移一个"按版本选"的组件时, 四条一起改**(资产目录 / 版本开关 / `images.manifest` 落点 /
-  trim 的 `--version`), 详见上述手册 §5。
+- **新增/迁移一个"按版本选"的组件时, 资产目录与版本开关一起改**(版本目录 / 版本开关 /
+  版本树落点), 详见上述手册 §5。
 
 ## 7. 静态校验与 CI(提交前必过)
 
@@ -397,15 +392,13 @@ sudo ./deploy-cluster.sh --list-steps | --list | --fresh
 |---|---|
 | `deployments/scripts/tools/check-modules.sh` | 全 19 项:模块元数据 / `REQUIRES` 拓扑 / `bash -n` / TOGGLE 声明 / helm 离线副本 / kubespray 补丁在位 / 离线回归套件 / 版本钉子闭环 / 凭据卫生 |
 | `deployments/scripts/tools/check-manifests.sh` | 仓库自有 YAML 能否解析(排除 vendored 上游树 / chart 的 Go 模板 / INI 格式 inventory) |
-| `deployments/scripts/tools/images/check-image-manifest.sh --kubespray` | `images.manifest` ↔ kubespray 预加载清单交叉核对 |
 | 优雅覆盖/UNINSTALL | 见 [`docs/graceful-overwrite/`](../graceful-overwrite/)(design / README):安装登记(`record_installed_component`)+ 反序优雅卸载(cluster-teardown.sh);check-modules ⑲ 静态校验 |
 
 一条命令本地复现 CI 全口径(失败即 `exit 1`):
 
 ```bash
 bash deployments/scripts/tools/check-modules.sh \
-  && bash deployments/scripts/tools/check-manifests.sh \
-  && bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray
+  && bash deployments/scripts/tools/check-manifests.sh
 ```
 
 CI 只做**静态**验证(语法 / 元数据 / 依赖 / 清单 / 补丁在位);集群侧的真实功能验证仍是各模块的

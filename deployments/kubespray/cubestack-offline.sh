@@ -721,7 +721,7 @@ resolve_preload_image_files() {
     # ★ Ceph 离线镜像纳入 k8s 阶段预加载(与 kubespray 镜像同机制): CEPH_ENABLED=true 时把
     #   CEPH_IMAGE_DIR 的 *.tar(rook/ceph/cephcsi 等)一并写进 preload-images.lst,
     #   由 cluster.yml 内置预加载 play 同步到全部节点并 ctr import —— 替代 ceph 模块的
-    #   ceph-sync-images.sh 独立同步, 统一在 k8s 部署阶段完成(需求)。
+    #   镜像由版本树提供, 统一在 k8s 部署阶段同步到节点并 ctr import(需求)。
     # ⚠ 必须用**真实复制(cp)**, 不用软链/硬链: 离线文件需经 mc mirror 上传 MinIO 再下载分发,
     #   软链会被当小链接文件上传(下载回来是坏文件), 硬链虽传真实内容但在对象存储中无链接语义。
     #   真实复制后 images/ 目录全是普通文件, mc mirror / rsync / preload 均安全。

@@ -714,8 +714,7 @@ RDMA_PLACEHOLDER_HCAS="${RDMA_PLACEHOLDER_HCAS:-mlx5_0,mlx5_1,mlx5_2}"  # 见下
 
 ```bash
 # ① 离线镜像(联网机准备一次)
-sudo ./deployments/scripts/tools/images/rdma-save-images.sh          # 存到 offline-files/rdma/
-sudo RDMA_IMAGE_TAG=v1.5.4 ./deployments/scripts/tools/images/rdma-save-images.sh   # ⚠ VAR= 必须写在 sudo 之后
+# 版本树的 offline-files/rdma/ 应包含该 tar(第三方镜像由 container-image-mirror 同步)
 
 # ② 部署(模块名 = 文件名去序号)
 sudo ./deployments/scripts/deploy-cluster.sh --steps rdma_shared_dev_plugin
@@ -832,7 +831,7 @@ metax-operator (Deployment, 带 master 容忍+偏好亲和)
 | 2 | **不需要 NFD** | `NFD_ENABLED=false`(默认);节点打标由沐曦自带 `gpu-label` 完成。日志里出现 `NFD volume is not mounted` 是**镜像自带提示**,不是故障 |
 | 3 | 宿主机驱动 | 节点已装沐曦内核驱动(`lsmod \| grep metax`),默认 `METAX_DRIVER_DEPLOY_POLICY=PreferHost`(**不要改成 PreferCloud** —— 它会尝试卸载宿主驱动,失败即 CrashLoop) |
 | 4 | 集群内置 registry 可达 | `REQUIRES: k8s_deploy k8s_registry`;镜像默认推到 `registry.cubestack.io:5000/metax/*` |
-| 5 | 离线镜像 | 联网机 `sudo ./deployments/scripts/tools/images/metax-save-images.sh` → `offline-files/metax-gpu/`(tar 约 27 个 / ~19G,**不入库**) |
+| 5 | 离线镜像 | 版本树 `offline-files/metax-gpu/`(tar 约 27 个 / ~19G,**不入库**) |
 | 6 | `METAX_CLUSTER_TYPE=k8s` | 否则 operator 会去探测 OpenShift API 报 `clusterversions ... is forbidden` |
 
 ### 5.3 启用步骤
@@ -997,6 +996,6 @@ kubectl get sc && kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
 | GPU operator | `docs/metax-gpu-operator.md` |
 | RDMA 组件设计 | `deployments/cubestack-addon/rdma/CUBESTACK.md` |
 | 排障手册(实测事故全集) | `docs/troubleshooting.md` |
-| 镜像/Harbor 与离线资产 | `docs/harbor-mirror.md` · `deployments/offline-files/*/README.md` |
+| 镜像/Harbor 与离线资产 | `container-image-mirror` 仓库 · 版本树 `offline-files/` |
 | 部署脚本开发规范 | `docs/scripts-development-spec.md` |
 

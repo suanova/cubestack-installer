@@ -68,7 +68,7 @@ usage() {
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           cephfs_mount(CephFS → 每台节点 /mnt/cephfs/models, 默认随 CEPHFS_ENABLED)
           local_path(可选) k8s_registry 组件(全部可单独部署的组件见下方"组件单独部署"清单)
-          model_images(模型推理镜像 sglang/vllm-metax, 排最后; 见 offline-files/model-collection/README.md)
+          model_images(模型推理镜像 sglang/vllm-metax, 排最后; 由版本树提供)
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
@@ -108,13 +108,8 @@ $(_component_meta_list stub)
     (镜像 tar 不入镜像; 见 README §容器化 CLI 的 docker run 挂载示例)。
 
 注:
-  · 镜像统一镜像源(Harbor): 全部上游镜像声明在 deployments/config/images.manifest,
-    先经 CI 同步到 harbor.isuanova.com/mirrors/**, 再由工具拉成离线 tar 供各模块推入内置
-    registry(集群无需访问公网)。三个工具(tools/images/):
-      harbor-sync-images.sh      上游 → Harbor(CI/联网机; 项目不存在自动创建)
-      harbor-save-images.sh      Harbor → offline-files/<group>/*.tar(联网机)
-      check-image-manifest.sh    清单静态校验(+ --kubespray 交叉核对 / --harbor 漂移报告)
-    升级组件版本只改 cluster.defaults.conf 的「镜像版本」节一处, 全链自动跟随。详见 docs/harbor-mirror.md。
+  · 第三方镜像由 container-image-mirror 仓库统一同步到 harbor.isuanova.com/mirrors/**;
+    安装侧只使用版本树里的离线 tar, 不直接访问上游 registry。
   · cluster.conf 的 NODES(5字段: role,hostname,ip,ssh_user,ssh_password)不区分虚拟机/裸金属;
     ssh_user 写 "-" = 跟随全局 SSH_USER(cluster.conf, root|ubuntu, 默认 ubuntu —— 切换安装用户
     只改 SSH_USER 一处); 显式写用户名 = 该节点覆盖(与全局不一致时部署启动会点名告警)。

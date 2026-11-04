@@ -116,7 +116,7 @@ if [ "${NVIDIA_LIST_IMAGES:-false}" = "true" ]; then
     echo "  验证样例镜像(verify 模块用):"
     echo "    ${VERIFY_SAMPLE}"
     echo "=============================================="
-    echo "  备料: sudo ./deployments/scripts/tools/images/nvidia-save-images.sh"
+    echo "  备料: 版本树的 offline-files/nvidia-gpu-operator/(第三方镜像由 container-image-mirror 同步)"
     echo "       (或 docker pull + docker save 至 ${OFFLINE_DIR}, tar 命名 <域>_<路径>_<tag>.tar)"
     exit 0
 fi
@@ -283,7 +283,7 @@ if [ "${#GPU_NODES[@]}" -gt 0 ]; then
                  err "  → 先核实 NGC 是否**真的**发布了该内核的预编译驱动(很多新内核尚未覆盖):"; \
                  err "      skopeo inspect docker://nvcr.io/nvidia/driver:${DRIVER_BRANCH}-${_gk}-ubuntu22.04"; \
                  err "      skopeo list-tags docker://nvcr.io/nvidia/driver | grep '\"${DRIVER_BRANCH}-'   # 看已覆盖内核"; \
-                 err "  → 镜像存在: 联网机补入离线集/registry(nvidia-save-images.sh 或 skopeo copy)后重跑;"; \
+                 err "  → 镜像存在: 版本树补入离线集后再重跑;"; \
                  err "  → 镜像不存在: 把节点启动到白名单内核(${KERNELS}), 或按 docs/nvidia-gpu-operator.md §5 自制带包驱动镜像;"; \
                  err "  → ⚠ 不要直接把未覆盖内核写进白名单 —— operator 运行期会拉不到驱动镜像(ImagePullBackOff)"; exit 1; }
         case " ${KERNELS_NEEDED[*]:-} " in
@@ -377,11 +377,11 @@ else
             if [ "${_img}" = "${VERIFY_SAMPLE}" ]; then
                 _N_WARN=$((_N_WARN+1))
                 warn "  验证样例镜像未就绪(verify_nvidia_gpu 的端到端步会跳过): ${_img}"
-                warn "    补料: nvidia-save-images.sh 或 docker pull/save 到 ${OFFLINE_DIR}/"
+                warn "    补料: 把镜像 tar 放入版本树的 ${OFFLINE_DIR}/"
             else
                 err "镜像推送失败: ${_img}"
                 err "  可用源都不成立(离线 tar 缺 + 本地 docker 无${_MODE:+ + 上游不可达})"
-                err "  修法: ① 联网机备料: sudo ./deployments/scripts/tools/images/nvidia-save-images.sh"
+                err "  修法: ① 检查版本树 offline-files/nvidia-gpu-operator/ 是否完整"
                 err "        ② 或把 ${_img} 手工 pull/save 到 ${OFFLINE_DIR}/ 后重跑"
                 exit 1
             fi

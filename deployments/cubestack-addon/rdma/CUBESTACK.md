@@ -19,9 +19,9 @@
 ## 离线镜像
 
 ```bash
-# 联网机(见 deployments/scripts/tools/images/rdma-save-images.sh):
+# 版本树 offline-files/rdma/:
 # ⚠ 官方镜像源在 ghcr.io/mellanox(Docker Hub 无此镜像); 1.4.0 无 v 前缀(v1.4.0 在 ghcr 404), v1.5.1+ 才带 v; 默认 v1.5.4 最新(修复 RoCE 口 issm 硬检查, 5 块 HCA 全暴露)
-sudo ./deployments/scripts/tools/images/rdma-save-images.sh
+ls <root>/<version>/offline-files/rdma/*.tar
 # → deployments/offline-files/rdma/ghcr.io_mellanox_k8s-rdma-shared-dev-plugin_v1.5.4.tar
 ```
 

@@ -775,7 +775,7 @@ unset _t _tp _tout 2>/dev/null || true
 
 # ---------- ⑯ k8s 基座钉子闭环: A 钉子 vs 树内表值 / B 无模块开关键 / C 写入者(inventory) ----------
 # 为什么必须有 A: cluster.conf 的"k8s 基座组"是**显式钉子**(离线 tar / Harbor 同步需要确定的
-#   ref —— images.manifest 直接以 ${VAR} 引用它们), 而它们的真值在 vendored kubespray 的版本表里。
+#   ref —— cluster.defaults.conf 的版本钉子), 而它们的真值在 vendored kubespray 的版本表里。
 #   两边漂移时**部署期才发现**: 表里没有该补丁 / addon 版本与表不符 → 离线集群拉不到镜像。
 #   人工抄表必然出错(版本靠人记), 所以这里每次跑 check 都**从树内表机械重算一遍**期望值。
 #   ⚠ 与 ⑪-C 同原则: **不写死任何期望值** —— 换树/换钉子后本项自动给出新的期望值。
@@ -803,7 +803,8 @@ unset _t _tp _tout 2>/dev/null || true
 #   被写进 inventory**。在此之前那 8 个变量在 vendored 树之外**没有任何写入者**, 于是部署按
 #   **树内默认**解析(ansible 实测 kube_version=1.36.4 / coredns=1.14.2 / pod_infra=3.10.2),
 #   与我们钉的 1.35 线**不是同一套** → 离线 tar 与部署期要的镜像不符, download/validate 阶段
-#   响亮失败(与 images.manifest:49 的"必须与 kubespray 实际解析出的版本一致"自相矛盾)。
+#   响亮失败(与
+#   "必须与 kubespray 实际解析出的版本一致"的钉子口径自相矛盾)。
 #   写入者已落地 = tools/k8s/sync-kubespray-config.sh 3.2 节(group_vars/all/k8s-versions.yml),
 #   C 断言其产物与钉子逐键一致 —— 删掉写入节 / 手工改错值 / 换了 conf 忘跑 sync 都会被点名。
 say "[16/19] k8s 基座钉子闭环(A 树内表值 / B 无模块开关 / C inventory 写入者) ..."
@@ -920,7 +921,7 @@ else
         fi
 
         # 比较: 只判"我方钉值 == 上游表值", **v 前缀等价**(我方钉子可带/不带 v; 上游变量侧不带 v,
-        #   镜像 tag 侧另有 'v' 前缀 —— 那是 images.manifest 的职责, 本项不做形态断言)
+        #   镜像 tag 侧另有 'v' 前缀 —— 由发布侧保证, 本项不做形态断言)
         _ksd_cmp() {   # <变量> <上游期望> <上游出处>
             local got
             got="$(_ksd_conf_value "${_cf}" "$1")"
@@ -967,7 +968,7 @@ else
                     KSD_BAD=1
                 elif [ "${_got#v}" != "${_pin#v}" ]; then
                     ck_fail "⑯-C ${_cn}: ${_kv}='${_got}' 与钉子 ${_pv}='${_pin}' 不符" \
-                        "      → 部署用的是 inventory 里的 '${_got}'(不是钉子), 与离线 tar / images.manifest 对不上" \
+                        "      → 部署用的是 inventory 里的 '${_got}'(不是钉子), 与离线 tar / 版本树对不上" \
                         "      → 修法: 重跑 sync-kubespray-config.sh(写入节会按 cluster.conf 覆盖); 勿手改该文件"
                     KSD_BAD=1
                 else

@@ -1,7 +1,7 @@
 # 版本树与发布边界（2.1+）
 
 > 适用范围：`release-2.1` 及后续版本。
-> 发布打包已迁到外部流程（`外部发布流程`）。本仓库不再产出发布包，只负责**部署**。
+> 发布打包已迁到外部发布流程。本仓库不再产出发布包，只负责**部署**。
 
 ## 职责划分
 
@@ -56,10 +56,10 @@ sudo ./deploy-cluster.sh --with-cubestack
 
 ## 本仓库不再负责
 
-- 组件/base 打包与发布锁（`外部发布流程`）
+- 组件/base 打包与发布锁（外部发布流程）
 - 私有平台镜像清单（版本树的 `tree.tsv`）
 - MinIO 下载/上传与旧 `--release` fetch 布局
 - release/sync/refresh 流水线
 
-公共 base 镜像的 Harbor 同步仍由本仓库的 `sync-images-to-harbor.yml` +
-`deployments/config/images.manifest` 负责（镜像供给，不产出发布包）。
+第三方镜像的 Harbor 同步由 `container-image-mirror` 仓库负责；
+本仓库不再维护镜像清单或同步流水线。

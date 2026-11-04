@@ -58,7 +58,7 @@ _devlab_tag() {
         *)            echo "${DEV_LAB_IMAGE_TAG:-latest}" ;;
     esac
 }
-HARBOR_HOST="harbor.isuanova.com"                        # 上游注册域(与 images.manifest dev-lab 组一致)
+HARBOR_HOST="harbor.isuanova.com"                        # 上游注册域
 # 集群内置 registry 双端点(与 multus/rdma/gpu 同款): REG_DIRECT=推送直连, REG_BASE=节点引用
 REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-5000}}"
 REG_BASE="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT:-5000}"

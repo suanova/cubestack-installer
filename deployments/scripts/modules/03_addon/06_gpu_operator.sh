@@ -16,7 +16,7 @@
 #       run = 用包内 metax-k8s-images.<ver>.run 内嵌镜像直接 push(无需预存 tar, 离线可用;
 #             本机容器运行时用 ctr, 支持 --plain-http 免 daemon 配置)
 #       tar = 从 METAX_OFFLINE_DIR(默认 offline-files/metax-gpu)加载离线 tar 逐镜像 skopeo
-#             推送到集群内置 registry(需先用 tools/images/metax-save-images.sh 在联网机生成 tar)
+#             推送到集群内置 registry(tar 由版本树提供)
 #   · 镜像目标: 集群内置 registry 的 METAX_REGISTRY(默认 registry.cubestack.io:5000/metax);
 #     模块自动把宿主机 /etc/hosts 的 registry.cubestack.io/k8s-api 解析到正确 IP(registry VIP / API 入口,
 #     不留 192.0.2.37 这类过期条目), 宿主机即可按域名 push 与 helm 连集群(外部机器同理改 /etc/hosts)。
@@ -118,7 +118,7 @@ if [ "${METAX_LIST_IMAGES:-false}" = "true" ]; then
     echo "  内核驱动(不在资源包, 需手动 pull+save; 或 METAX_DRIVER_DEPLOY_POLICY=PreferHost 用宿主机驱动免该镜像):"
     _save_cmd "cr.metax-tech.com/public-cloud-release/driver-image:${METAX_DRIVER_VERSION}"
     echo "=============================================="
-    echo "  说明: save 的 tar 放入 METAX_OFFLINE_DIR=${METAX_OFFLINE_DIR}(可用 tools/images/metax-save-images.sh 一键生成), tar 模式按 METAX_TAR_PATTERN=${METAX_TAR_PATTERN} 自动推送"
+    echo "  说明: tar 由版本树提供, 放入 METAX_OFFLINE_DIR=${METAX_OFFLINE_DIR}, tar 模式按 METAX_TAR_PATTERN=${METAX_TAR_PATTERN} 自动推送"
     exit 0
 fi
 
@@ -389,7 +389,7 @@ else
             || { err "推送失败(3 次重试后) ${t} → ${PUSH_REGISTRY}/${comp}:${ver}"; exit 1; }
         _PUSHED=$((_PUSHED+1))
     done
-    [ "${_PUSHED}" -gt 0 ] || { err "METAX_OFFLINE_DIR=${METAX_OFFLINE_DIR} / METAX_IMAGE_DIR=${METAX_IMAGE_DIR} 未找到匹配 ${METAX_TAR_PATTERN} 的 tar(可用 metax-save-images.sh 生成, 或改 METAX_TAR_PATTERN)"; exit 1; }
+    [ "${_PUSHED}" -gt 0 ] || { err "METAX_OFFLINE_DIR=${METAX_OFFLINE_DIR} / METAX_IMAGE_DIR=${METAX_IMAGE_DIR} 未找到匹配 ${METAX_TAR_PATTERN} 的 tar(请检查版本树, 或改 METAX_TAR_PATTERN)"; exit 1; }
 fi
 
 # MACA + 驱动镜像(不在 .run 包内): registry 已有 → 本地 docker → 离线 tar → 在线, 逐级尝试

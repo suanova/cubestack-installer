@@ -175,16 +175,14 @@ helm template <release> <本地tgz> -n <ns> | sed -n 's/^[[:space:]]*image:[[:sp
 镜像搬运路径(离线机):
 
 ```
-Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator──▶ 顶层 <上游ref>.tar(本体)
-上游/Harbor(各平台组件)   ──手工 save──▶ <组件>/<上游ref>.tar(平台组件) ──模块──▶ 集群内置 registry
+版本树 offline-files/cubestack-operator/ ──模块──▶ 集群内置 registry
+  (外部打包流程已按 pin 从 Harbor 拉好 tar, 安装侧不再自行 save)
 ```
 
-- 登记: `deployments/config/images.manifest` 的 `cubestack-operator` 组(tag 写
-  `${CUBESTACK_OPERATOR_IMAGE_TAG}`, 升级只改 cluster.conf 一处)
-- 离线目录: `deployments/offline-files/cubestack-operator/`(+README; tar 不入库)
-- ⚠ 该组**不镜像到 `mirrors/`**(上游就是本台 Harbor 的私有项目, 与 metax-gpu 同一处理)。
-  为此给 `harbor-save-images.sh` 补了同源分支: 同源组**直接用原始 ref** 拉(skip 的
-  `mirrors/<路径>` 那副本本来就不存在)。
+- 镜像 tar 由版本树的 `offline-files/cubestack-operator/` 提供(tar 不入库);
+  外部打包流程按组件 pin 从 Harbor 拉取。
+- 第三方平台镜像由 `container-image-mirror` 同步到 `mirrors/`;
+  本项目镜像来自本台 Harbor 的 `suanova-private` 项目。
 
 ### 3.4b 平台组件镜像推送 + CR 全局注入(2026-10-08 实机落地, CR 模式)
 
@@ -271,7 +269,7 @@ coredns loop 插件 FATAL 自杀(kube-system coredns CrashLoopBackOff, cluster �
   - `CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE` 是**逃生口**, 仅在必要时显式设置;
     它**只覆盖 cubestack-operator 自身镜像**, 不覆盖 operator catalog 内其他组件/平台
     operator 的版本。installer **从不**设置 `components.*.version` 或组件镜像 tag。
-  - `CUBESTACK_OPERATOR_IMAGE_TAG` 只用于 `images.manifest` / `release-images.tsv` 登记,
+  - `CUBESTACK_OPERATOR_IMAGE_TAG` 只用于镜像登记/审计,
     **不参与** helm 覆盖。
 - **推荐**: release `2.0.0-rc1` 使用自带 `Chart.yaml appVersion: 2.0.0-rc1` 的 release chart,
   不设任何 override, installer 直接按 chart 版本部署。
@@ -455,13 +453,7 @@ sudo ./deploy-cluster.sh --steps verify_cubestack_operator
 sudo ./deploy-cluster.sh --enable cubestack_operator
 ```
 
-**离线备料(联网机)**:
-
-```bash
-# cluster.conf 设 CUBESTACK_OPERATOR_HARBOR_USER/PASSWORD(或 HARBOR_MIRROR_USER/PASSWORD)
-sudo ./deployments/scripts/tools/images/harbor-save-images.sh --group cubestack-operator --force
-# 把 offline-files/ 拷到部署机(见 docs/offline-readiness.md / tools/offline/)
-```
+**离线物料**: 由版本树 `offline-files/cubestack-operator/` 提供。
 
 **状态**:
 

@@ -34,7 +34,7 @@
 #   · 节点准备: 每台存储节点加载并持久化 rbd 内核模块; 确保 lvm2
 #     (离线 .deb 由 tools/offline/fetch-lvm-packages.sh 放到 offline-files/os/packages,
 #     本模块部署前预检"离线包就绪 或 节点已在线装 lvm", 缺失硬失败; 部署时自动从该目录安装)。
-#   · 离线镜像(需求 5): tools/images/ceph-save-images.sh(联网机下载到 offline-files/kubespray/images,
+#   · 离线镜像(需求 5): 版本树的 offline-files/kubespray/<版本>/images/,
 #     与 kubespray 镜像同目录) → k8s 阶段由 cluster.yml 内置预加载 play 统一同步到节点并 ctr import。
 #   · registry 后端(需求 6): REGISTRY_STORAGE_CLASS=ceph-block(见 docs/ceph-rook.md)时,
 #     registry 的 PVC 改走 ceph RBD(替代 local-path); 模块设计顺序在 registry 配置之前。
@@ -532,7 +532,7 @@ fi
 # ★ 镜像已由 k8s 阶段预加载 play(cluster.yml 内置)随 kubespray 镜像一起同步到全部节点并
 #   ctr import(见 cubestack-offline.sh resolve_preload_image_files: CEPH_ENABLED=true 时把
 #   CEPH_IMAGE_DIR 的 *.tar 追加进 preload-images.lst)。此处不再重复同步, 只做就绪校验,
-#   并给离线环境明确指引(缺失时 warn + 提供 ceph-sync-images.sh 手工补救, 不阻断)。
+#   并给离线环境明确指引(缺失时 warn 并提示检查版本树, 不阻断)。
 say "[4/8] 校验 ceph 离线镜像已预加载到节点(ctr -n k8s.io images ls)..."
 # 源目录 CEPH_IMAGE_DIR 可能已删除(镜像已并入 k8s 阶段 images/ 预加载, 源目录仅为保存副本):
 # 目录存在才逐节点校验缺失; 不存在则跳过校验(节点镜像由 k8s 阶段保证, 无需源目录)。
@@ -557,7 +557,7 @@ if [ -d "${CEPH_IMAGE_DIR}" ] && ls "${CEPH_IMAGE_DIR}"/*.tar >/dev/null 2>&1; t
     done
     if [ "${#_MISSING[@]}" -gt 0 ]; then
         warn "  以下节点未检测到 ceph 镜像: ${_MISSING[*]} —— 可能预加载未覆盖(k8s 阶段 CEPH_ENABLED 需 true); 手工补救:"
-        warn "    bash ${SCRIPT_DIR}/tools/images/ceph-sync-images.sh --node ${_MISSING[0]}"
+        warn "    请检查版本树的 offline-files/kubespray/<版本>/images/ 是否完整"
         warn "    或在 cluster.conf 设 CEPH_ENABLED=true 后重跑 k8s_deploy 阶段(全量覆盖安装: ./deploy-cluster.sh --fresh)"
     fi
 else

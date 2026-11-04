@@ -699,7 +699,7 @@ grep METAX_DRIVER_DEPLOY_POLICY config/cluster.conf
 |---|---|---|
 | OSD Prepare 失败 / osd Pod CrashLoop | 裸盘残留文件系统/LVM/分区签名, Rook 视为"已使用" | 只在**确认空闲的数据盘**上清盘: `wipefs --all -f /dev/<盘>; sgdisk --zap-all /dev/<盘>; rm -rf /var/lib/rook`; 勿碰系统盘(先 `lsblk` 核对) |
 | 节点重启后 OSD 逻辑卷无法激活 | **lvm2 未安装**(Rook OSD 依赖 lvm 激活 LVM 卷) | 离线包放入 `offline-files/kubespray/packages`(联网机 `tools/offline/fetch-lvm-packages.sh`)后 `dpkg -i`; 或 apt 安装 lvm2 后重启 OSD |
-| ceph 镜像 ImagePullBackOff | 节点 containerd 无镜像(离线) | `tools/images/ceph-save-images.sh`(联网机, `--platform linux/amd64` 单架构)生成 tar → `ceph-sync-images.sh` 同步并 `ctr -n k8s.io images import --no-unpack` |
+| ceph 镜像 ImagePullBackOff | 节点 containerd 无镜像(离线) | 检查版本树 `offline-files/kubespray/<版本>/images/`; 模块会把单架构 tar 同步到节点并 `ctr -n k8s.io images import --no-unpack` |
 | ctr import 报 "content digest not found" | 多架构(manifest-list)tar | 拉取用 `--platform linux/amd64` 单架构; import 加 `--no-unpack` |
 | `ceph -s` HEALTH_WARN clock skew | 存储节点时钟漂移(离线无上游) | 部署前 NTP 模块对齐; 生产存储节点用 chrony, `chronyc makestep`, offset<20ms |
 | registry PVC 一直 Pending | `REGISTRY_STORAGE_CLASS=ceph-block` 但 `ceph-block` SC 未创建 | 先部署 ceph_csi 模块(建 rbd-pool + SC); PVC 会自动绑定; 老 PVC 删除后 registry 重建即切换 |
@@ -1579,127 +1579,6 @@ docker exec <容器> rm -f /opt/cubestack-installer/deployments/scripts/modules/
 ```
 同步工具末尾的"容器内静态校验"就是用来拦这个的 —— **报错务必处理, 别当噪音**。
 
-### 3. Harbor 统一镜像源(上游→Harbor→离线 tar)工具链的 5 个坑
-
-**背景:** `docs/harbor-mirror.md` 的统一镜像源工具(`tools/images/harbor-{sync,save}-images.sh`、
-`check-image-manifest.sh`)实现时踩到的坑。都不报"明显错误", 而是**静默失效**, 特此沉淀。
-
-#### 3.1 skopeo 连公开镜像都 fatal: `reading JSON file "/run/containers/<uid>/auth.json": permission denied`
-
-**症状:** 拉公开镜像(无需任何凭据)也失败, 报读不到默认 auth 文件。
-**根因:** skopeo 默认 auth 文件路径是 `${XDG_RUNTIME_DIR}/containers/auth.json`, 未设该变量时
-退到 `/run/containers/<uid>/auth.json` —— **容器内 / 非 root 场景该目录普遍不可读**, skopeo 直接 fatal。
-**解法(根治):** 显式指定自建 auth 文件, 不让 skopeo 猜默认路径:
-```bash
-AUTH=$(mktemp); chmod 600 "$AUTH"; printf '{"auths":{}}' > "$AUTH"
-export REGISTRY_AUTH_FILE="$AUTH"        # 有凭据时写入 {"auths":{"<host>":{"auth":"<base64 u:p>"}}}
-```
-顺带好处: 凭据写文件而非 `--src-creds/--dest-creds`, **不进 argv / 不进 ps / 不进 CI 日志**。
-**验证:** `REGISTRY_AUTH_FILE=$AUTH skopeo inspect docker://registry.k8s.io/pause:3.10` 能返回 digest。
-
-#### 3.2 `skopeo inspect` 报 `unknown flag: --src-tls-verify` 被 2>/dev/null 吞掉 → 幂等静默失效
-
-**症状:** 同步工具每次都全量重传, "digest 未变则跳过"从不生效。
-**根因:** `copy` 与 `inspect` 的 TLS 旗标名**不同**: `copy` 用 `--src-tls-verify`/`--dest-tls-verify`,
-**`inspect` 用 `--tls-verify`(单数)**。传错 → 命令失败 → 被 `2>/dev/null || true` 吞成"取不到 digest"
-→ 退化成"跳过比对直接同步" → 每次全传。
-**解法(根治):** 两套参数**分开维护**(`SKOPEO_SRC_OPTS` vs `INSPECT_SRC_OPTS`)。
-**验证:** 连跑两次 `harbor-sync-images.sh --group rdma`, 第二次必须打印 `digest 未变, 跳过`。
-> 教训: `2>/dev/null` 会把"参数写错"伪装成"环境问题"。关键判据(这里=digest)取空时要有
-> 独立的告警, 不能只当"无数据"处理。
-
-#### 3.3 Harbor 漂移检查把**已存在**的镜像全报"缺失"
-
-**症状:** `check-image-manifest.sh --harbor` 把 63 个镜像全报缺失, 但 Harbor 上确实有。
-**根因:** Harbor API `GET /projects/{p}/repositories/{repo}/artifacts/{ref}` 有两条硬规则:
-① repository 名要**双重 URL 编码**(`/` → `%252F`, 单重 `%2F` 一律 404);
-② 路径里的 repository 名**不含项目前缀**(项目已在路径段里)。
-**解法(根治):**
-```bash
-path="${dst#<host>/<project>/}"; tag="${path##*:}"; repo="${path%:*}"
-enc_repo="$(printf '%s' "$repo" | sed 's#/#%252F#g')"
-curl -u u:p "$API/api/v2.0/projects/<project>/repositories/${enc_repo}/artifacts/${tag}"
-```
-**验证:** 该端点对已存在镜像返回 200, 不存在返回 404。
-
-#### 3.4 离线 tar 的 `RepoTags` 为空 → 模块识别不出 tar 内容
-
-**症状:** 用 skopeo 生成的 tar, `tar -xOf x.tar manifest.json` 看到 `"RepoTags": []`;
-`lib-common.sh` 的 `tar_first_image_tag` 返回空 → 依赖内容匹配的逻辑(multus/rdma 的 tar 识别、
-`ensure_registry_nginx`)全部失效。
-**根因:** `skopeo copy ... docker-archive:<file>` **末尾不带 `:<ref>` 时 skopeo 不写 RepoTags**
-(docker save 会写, 所以老的 tar 都正常)。
-**解法(根治):** 目标写成 `docker-archive:<file>:<上游 ref>`, 且 ref 用**上游 ref**
-(与 docker save 产出一致, 既有模块的通配/内容匹配都不用改)。
-**验证:** `bash -c 'source deployments/scripts/lib-common.sh; tar_first_image_tag <tar>'`
-应打印 `<上游 ref>`, 如 `registry.k8s.io/pause:3.10`(与 tar 名后缀一致)。
-
-#### 3.5 Harbor 项目不存在导致 push 失败(仓库会自动建, 项目不会)
-
-**症状:** `skopeo copy` 推到 `harbor.isuanova.com/mirrors/...` 报项目不存在/未授权。
-**根因:** Harbor 只在首次 push 时自动创建**仓库(repository)**; **项目(project)必须预先存在**,
-且**创建项目需要登录**(匿名建项 401)。
-**解法(根治):** 同步工具先探测项目(HTTP 200?), 不存在则用凭据 POST 创建(公开只读,
-便于部署机匿名拉取); 无凭据时给出明确指引而不是让 push 以一个含糊错误失败。
-**验证:** `curl -u u:p -X POST "$API/api/v2.0/projects" -d '{"project_name":"mirrors","metadata":{"public":"true"}}'`
-返回 201(已存在则 409)。
-
-> 另: Harbor 上 `clquan` **不是 sysadmin**, 但仍可创建项目(实测 201)——
-> 判断"能不能建"要实测, 不要凭 `sysadmin_flag` 推断。
-#### 3.6 CI 登录 Harbor 报 `unauthorized` —— `gh secret set --body -` 把字面量 `-` 存成了密钥值
-
-**症状:** GitHub Actions 工作流在 `docker/login-action` 步骤失败:
-`Error response from daemon: Get "https://harbor.isuanova.com/v2/": unauthorized:`;
-但同一组用户名/密码用 `curl -u` 在本机验证完全正常。
-
-**根因:** 设密钥时用了 `printf '%s' 'EErMChQa123' | gh secret set NAME --body -`。
-`gh secret set` 的 `-b/--body` 是"**直接给出值**", 不是"从 stdin 读"的标记 ——
-传 `-` 会把**字面量 `-`** 存成密钥值。要走 stdin 必须**省略 `--body`**。
-(密钥一旦写入无法读回校验, 所以只能从"登录失败 + 本机 curl 正常"这个矛盾反推出来。)
-
-**解法(根治):**
-```bash
-gh secret set HARBOR_MIRROR_USER     --repo <owner>/<repo>   # ← 不写 --body, 管道喂 stdin
-gh secret set HARBOR_MIRROR_PASSWORD --repo <owner>/<repo>
-```
-**验证:** 重跑工作流, 日志里 `HARBOR_MIRROR_PASSWORD` 显示为 `***` 且登录成功。
-
-> ⚠ **附带教训(本项目实测踩到)**: 凭证自检步骤**不要回显密码长度**。
-> 仓库是 public 时工作流日志公开可见, 长度属可被利用的旁路信息。只回显用户名即可。
-#### 3.7 【已解决】registry.k8s.io/pause:3.10 每次同步都被整包重传(~552 MB / 64s)
-
-**症状:** CI 全量同步里 46/47 命中 `digest 未变, 跳过`, 只有 `registry.k8s.io/pause:3.10`
-每次都被完整重传(实测 08:32:39 → 08:33:43, 约 64 秒; 镜像 552 MB)。
-
-**根因:** `skopeo copy` 在搬运多架构镜像时会**重写 manifest list 的序列化**, 落地 digest
-因此 ≠ 源 digest ⇒ digest 比对永远不相等 ⇒ **每次同步都整包重传**。
-
-**关键证据(如何判定"是重写而非上游变化"):**
-- 源 digest `sha256:ee6521f290b2168b...` 与库 digest `sha256:e9622b01071c38e4...`
-  在连续 3 次运行中**各自稳定、始终不等** —— 上游真换了内容的话, 变化的是**源侧** digest。
-- 对照: 同批的另一个多架构镜像(6 平台 docker manifest list; 当时取的是
-  `quay.io/prometheus/node-exporter:v1.12.1`, 该镜像已随监控栈移除, 此处仅作测量记录)
-  源/库 digest 完全一致、正常跳过 ⇒ **特定镜像触发, 不是所有多架构镜像都这样**。
-
-**解法(根治):** `skopeo copy` 加 `--preserve-digests`(要求原样保留源侧 manifest/list 的
-digest —— 这本就是"镜像"应有的语义)。已落到 `tools/images/harbor-sync-images.sh`。
-
-**验证(⚠ 时机是关键, 第一轮曾据此误判):**
-```bash
-# 库 digest 应变成与源一致(不再是自己重写后的值)
-skopeo inspect --format '{{.Digest}}' docker://harbor.isuanova.com/mirrors/registry.k8s.io/pause:3.10
-#   修复前: sha256:e9622b01071c38e4...   (≠ 源)
-#   修复后: sha256:ee6521f290b2168b...   (= 源) ✅
-# 下一轮全量同步应全部跳过
-#   ✅ 同步完成: 新同步 0 个, digest 未变跳过 47 个, 失败 0 个
-```
-
-> ⚠ **踩坑: 别在"做重传的那一轮"里判断修复有没有生效。**
-> 加旗标后的**第一轮**运行必然仍然打印 `digest 不一致, 重新同步` —— 因为那一轮的 digest 比对
-> 读到的是**加旗标之前落地的旧制品**, 然后才用新旗标重传。必须看**再下一轮**是否变成
-> `digest 未变, 跳过`。本项目第一轮据此把已生效的修复误判为"无效"并写进了文档, 第二轮才纠正。
-
-
 ### 4. 【2026-10-15】覆盖安装 reset 被 Calico 一致性检查拦停: 旧集群网络模式 ≠ 新配置(断言 "Your inventory doesn't match the current cluster configuration")
 
 **症状:** 覆盖安装(先 `reset` 旧集群再全量部署)时, `ansible-playbook reset.yml` 在 preinstall 阶段中断:
@@ -1799,8 +1678,8 @@ bash: line 1: /tmp/ceph-rbd.yaml: Permission denied          ← 03_ceph_csi.sh 
 (节点侧 refresh.sh 副本 + monstore tar 取回后删)/ `sync-ca.sh`(脚本 + CA 临时件)/
 `setup-ntp.sh`(节点脚本三处执行点)/ `deploy-registry.sh`(节点脚本)。原本就"预清+后删"齐备的:
 `install-worker-packages.sh` / `reconcile-node-packages.sh` / verify 系列(21/22/27/30; 22 的预清本次补齐)。
-**例外(有意保留):** `ceph-sync-images.sh` 的 `/tmp/ceph-images/`(镜像 tar + `.done` 断点复用;
-每次运行 `sudo rm -rf && chown` 重建, 跨用户安全); rook-ceph-tools **pod 内** `/tmp`(随 pod 生命周期)。
+**例外(历史):** 已移除的 `ceph-sync-images.sh` 曾使用 `/tmp/ceph-images/`;
+rook-ceph-tools **pod 内** `/tmp` 随 pod 生命周期回收。
 
 **验证(2026-10-15 实机, 已通过):**
 ```bash

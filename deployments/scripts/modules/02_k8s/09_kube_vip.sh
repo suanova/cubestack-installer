@@ -266,7 +266,7 @@ done
 if [ "${#_MISSING[@]}" -gt 0 ]; then
     err "以下 master 上缺少 kube-vip 镜像 ${_KV_IMAGE}: ${_MISSING[*]}"
     err "离线方案: 该镜像应在 offline-files/kubespray/images/ 内, 由预加载流程推入节点"
-    err "  · 取镜像(联网机): tools/images/harbor-save-images.sh --group k8s-base"
+    err "  · 取镜像: 版本树 offline-files/kubespray/<版本>/images/(第三方镜像由 container-image-mirror 同步)"
     err "  · 务必已在 PRELOAD_IMAGE_PATTERNS 内, 否则预加载会把它裁掉"
     exit 1
 fi

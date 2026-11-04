@@ -2,7 +2,7 @@
 
 > 适用: `36_dev_lab.sh`(6 镜像 ≈44G)、`37_model_images.sh`(3 镜像 ≈33G)把离线 tar 推入
 > 集群内置 registry。本文记录瓶颈、已落地的优化、配置旋钮与 benchmark 方法。
-> 相关: `docs/harbor-mirror.md`(镜像保鲜管道)、`docs/ceph-rook.md`(registry 后端)。
+> 相关: `container-image-mirror`(镜像同步)、`docs/ceph-rook.md`(registry 后端)。
 
 ## 1. 瓶颈(实测)
 
@@ -85,7 +85,7 @@ sudo IMAGE_PUSH_PARALLEL_LAYERS=4 IMAGE_PUSH_PARALLEL_IMAGES=2 \
 - **registry HTTP timeout**: distribution 默认 `http.timeout` 可能截断超长 blob 上传
   (慢链路 + 10G 层);出问题时可把 `http.timeout` 调大(需改 registry 配置并重启);
 - **直接节点预载**: 若目标只是"节点能拉到镜像",用 `ctr -n k8s.io images import` 直接导入
-  各节点(参考 `tools/images/ceph-sync-images.sh`)通常比 registry push 更快,但绕过 registry
+  各节点(把 tar 直接分发到节点 `ctr import`)通常比 registry push 更快,但绕过 registry
   的集中管理与 GC;
 - **验证边界**: 本文的 skopeo 行为数据来自本地 `registry:2.8.1` + `nginx.tar` 实测;
   集群当前不可用,端到端加速比需在集群恢复后按 §4 复测。

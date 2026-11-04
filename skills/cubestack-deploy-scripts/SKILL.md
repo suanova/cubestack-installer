@@ -309,8 +309,8 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 
 > 完整部署/镜像准备/故障见 `docs/metax-gpu-operator.md` 与 `docs/troubleshooting.md` §三.3。
 
-- **镜像来源**: 驱动与 maca **不在** `.run` 包内, 需单独推送; 离线 tar 用 `tools/images/metax-save-images.sh`
-  在已有镜像的机器上生成到 `METAX_OFFLINE_DIR`(默认 `deployments/offline-files/metax-gpu`, gitignore)。
+- **镜像来源**: 驱动与 maca **不在** `.run` 包内; 离线 tar 由版本树的
+  `offline-files/metax-gpu/` 提供(模块部署时推入集群 registry)。
 - **默认 tar 加载**: `METAX_IMAGE_MODE=tar` → 模块从 offline 目录逐 tar `skopeo docker-archive` 推送
   到集群内置 registry; 核心组件去架构后缀(`0.15.3-amd64 → 0.15.3`), maca/driver 原样。
 - **helm 原生安装**(不是 kubectl apply): 官方 chart 有 3 处 bug 需修(deployment 缺 namespace /
@@ -321,8 +321,6 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   ```bash
   sudo ./deploy-cluster.sh --steps gpu_operator            # 立即部署(自动带基座, 只部署指定的)
   sudo ./deploy-cluster.sh --steps verify_metax_gpu          # 验证 GPU 识别(或 --steps verify)
-  sudo ./deployments/scripts/tools/images/metax-save-images.sh   # 保存镜像 → 离线 tar
-  sudo ./deployments/scripts/tools/images/metax-load-images.sh   # 加载 tar → 集群 registry(手动)
   METAX_LIST_IMAGES=true bash modules/03_addon/04_gpu_operator.sh   # 打印所需镜像 pull/save 命令
   ```
 
@@ -368,15 +366,15 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 ## Ceph / Rook 部署速查(Rook v1.20.2 + Ceph v20.2.2, 详见 docs/ceph-rook.md)
 
 - **定位**: 高可用分布式存储(块 RBD; 可选 CephFS/RGW)。生产设计 `size=3 + failureDomain=host + min_size=2 + mon=3`。
-- **离线三件套(联网机)**: `tools/k8s/rook-fetch-manifests.sh`(rook manifest → `cubestack-addon/rook/`)、
-  `tools/images/ceph-save-images.sh`(镜像 → `offline-files/ceph`, **每镜像独立 tar + --platform linux/amd64**,
-  多架构 tar 会让 `ctr import` 报 "content digest not found")、`tools/offline/fetch-lvm-packages.sh`
+- **离线物料**: `tools/k8s/rook-fetch-manifests.sh`(rook manifest → `cubestack-addon/rook/`)、
+  版本树里的 Ceph 镜像 tar(**每镜像独立 tar + --platform linux/amd64**, 多架构 tar 会让
+  `ctr import` 报 "content digest not found")、`tools/offline/fetch-lvm-packages.sh`
   (lvm2 .deb → `offline-files/kubespray/packages`, OSD 重启需 lvm 激活逻辑卷)。
 - **节点选择**: `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master**)→ 唯一实现为 lib-common 的 `ceph_storage_hosts()`; 模块自动打 label `CEPH_NODE_LABEL`(默认 `ceph-storage=rook-ceph`)。
 - **裸盘自动检测(防覆盖)**: `tools/k8s/ceph-detect-disks.sh` 判定"未使用裸盘"(无分区/格式化/挂载/LVM 且非系统盘)
   → 生成 CephCluster CR 的 per-node devices(精确盘名)。部署前**红底列出节点+盘并 sleep CEPH_CONFIRM_SLEEP(60s)**
   double-check; CI 可 `CEPH_CONFIRM_SLEEP=0`。
-- **镜像同步**: `tools/images/ceph-sync-images.sh`(复制 tar 到全部节点 + `ctr -n k8s.io images import --no-unpack`)。
+- **镜像同步**: 模块把版本树里的 tar 复制到全部节点 + `ctr -n k8s.io images import --no-unpack`。
 - **VM 测试盘**: `vm-nodes.conf` 的 `VM_DATA_DISKS=3/VM_DATA_DISK_SIZE=200` → 每台 VM 附加 3×200GB 裸盘(Guest `/dev/vdb~`),
   由 `tools/vm/create-vms.sh` 创建时自动附加。
 - **部署顺序(03_addon 已重排)**: `01_metallb → 02_ceph → 03_ceph_csi → 04_local_path → 05_k8s_registry → …`;

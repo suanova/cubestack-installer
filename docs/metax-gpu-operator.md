@@ -68,15 +68,13 @@ containerd 置以下键后, 容器创建时按容器 runAsUser/runAsGroup 对设
 
 ### 1.3 镜像离线 tar(推荐离线路径, 默认方式)
 
-用 `tools/images/metax-save-images.sh` 在**已有这些镜像的机器**(如内网/在线机)上从 docker 一键导出:
+镜像 tar 由版本树 `offline-files/metax-gpu/` 提供(外部打包流程从 Harbor 拉取):
 
 ```bash
-sudo ./deployments/scripts/tools/images/metax-save-images.sh
-# 默认枚举 harbor.isuanova.com/metax/* (可在 cluster.conf 改 METAX_SAVE_PATTERN 选 cr.metax-tech.com/cloud/)
-# 默认排除 sglang(METAX_SAVE_EXCLUDE); 输出到 METAX_OFFLINE_DIR
+ls <root>/<version>/offline-files/metax-gpu/    # 约 27 个 tar(19G)
 ```
 
-生成的 tar 共 **27 个(约 19G)**, 含: 核心组件(10 个 × amd64/arm64)、maca(3 个版本)、driver-image(2 个版本)、operator-bundle/catalog。
+共 **27 个(约 19G)**, 含: 核心组件(10 个 × amd64/arm64)、maca(3 个版本)、driver-image(2 个版本)、operator-bundle/catalog。
 也可用 `METAX_LIST_IMAGES=true bash modules/03_addon/06_gpu_operator.sh` 打印所需镜像的 `docker pull/save` 命令。
 
 ---
@@ -86,8 +84,8 @@ sudo ./deployments/scripts/tools/images/metax-save-images.sh
 ```
 deployments/
 ├── cubestack-addon/metax-gpu-operator/metax-operator/   # 修复后的 helm chart(已修 3 处 bug, 直接 helm 安装; 入库)
-├── offline-files/metax-gpu/               # 镜像 tar + 资源包/.run 等大文件(gitignore, 不入库)
-│   ├── <image>_<tag>.tar                  # metax-save-images.sh 生成的 27 个 tar
+├── offline-files/metax-gpu/               # 版本树挂载点(镜像 tar + 资源包/.run, 不入库)
+│   ├── <image>_<tag>.tar                  # 版本树提供的 27 个 tar
 │   ├── metax-gpu-k8s-package.<ver>.tar.gz
 │   ├── metax-k8s-images.<ver>.run
 │   ├── metax-k8s-driver-image.<ver>.run
@@ -95,8 +93,6 @@ deployments/
 └── scripts/
     ├── modules/03_addon/06_gpu_operator.sh       # 部署模块(默认 tar 加载)
     ├── modules/03_addon/23_verify_metax_gpu.sh   # 验证模块(--steps verify 自动纳入)
-    └── tools/images/metax-save-images.sh         # 保存镜像 → tar
-    └── tools/images/metax-load-images.sh         # 加载 tar → 集群 registry(手动)
     └── tools/k8s/verify-metax-gpu.sh             # 节点 GPU 识别验证脚本(含非 root 权限探针)
     └── tools/node/ensure-containerd-device-ownership.sh  # 设备属主前置(非 root GPU 必需; 幂等)
 ```
@@ -168,7 +164,7 @@ sudo ./deploy-cluster.sh --with-cubestack   # 全量: 基座 + cluster.conf 中�
        模块仍走快速路径, 但提示"检测到 NVIDIA GPU, 非纯 CPU"。mx-smi 不可用(未装驱动)时无法确认沐曦是否存在,
        模块会保守地**不判定**纯 CPU。
 
-> 也可手动加载镜像: `sudo ./deployments/scripts/tools/images/metax-load-images.sh`。
+> 镜像 tar 由版本树提供, 模块会在部署时推入集群 registry。
 
 ---
 
@@ -215,10 +211,8 @@ GPU 任务测试(参考沐曦官方文档 §5, 需 maca 镜像就绪): 建 gpu-t
 ## 7. 相关命令速查
 
 ```bash
-# 保存镜像为离线 tar(在已有镜像的机器上)
-sudo ./deployments/scripts/tools/images/metax-save-images.sh
-# 加载 tar 到集群 registry(手动, 与模块 tar 模式等价)
-sudo ./deployments/scripts/tools/images/metax-load-images.sh
+# 检查版本树里的 metax 镜像
+ls <root>/<version>/offline-files/metax-gpu/*.tar
 # 打印所需镜像的 pull/save 命令
 METAX_LIST_IMAGES=true bash deployments/scripts/modules/03_addon/06_gpu_operator.sh
 # 部署 / 验证

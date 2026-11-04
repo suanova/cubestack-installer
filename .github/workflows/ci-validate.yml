@@ -6,7 +6,6 @@ name: Validate scripts & manifests
 #   job scripts    ① 全仓 shell 语法(`bash -n`, 按 git 清单逐个过)
 #                  ② check-modules.sh 全 19 项(模块元数据/依赖拓扑/helm 离线副本/
 #                     kubespray 补丁在位/5 个离线回归套件/版本钉子闭环/凭据卫生)
-#                  ③ images.manifest ↔ kubespray 交叉校验
 #   job manifests  ④ 仓库自有 YAML 清单解析(check-manifests.sh)
 #
 # 为什么是这两支脚本: check-modules.sh / check-manifests.sh 本身就是"开发期 + CI"两用的
@@ -15,7 +14,6 @@ name: Validate scripts & manifests
 #
 #   bash deployments/scripts/tools/check-modules.sh \
 #     && bash deployments/scripts/tools/check-manifests.sh \
-#     && bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray
 #
 # 这里只做**静态**验证: 语法/元数据/依赖/清单/补丁在位。集群侧的真实功能验证仍是各模块的
 # verify_* 与 tools/k8s/verify-*.sh(需真集群), 不在本工作流范围内。
@@ -92,11 +90,6 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-
-      - name: 镜像清单校验(images.manifest ↔ kubespray)
-        run: |
-          set -euo pipefail
-          bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray
 
       # CephFS 宿主机挂载(cephfs_mount)离线桩式回归: 门禁/渲染/全节点验证/幂等/卸载/零节点硬失败
       - name: CephFS 宿主机挂载离线回归(cephfs_mount)
