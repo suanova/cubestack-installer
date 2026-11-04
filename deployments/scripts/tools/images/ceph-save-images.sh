@@ -12,12 +12,12 @@
 # ⚠ tar 完整性: 保存后校验 <10MB 视为残缺(拉取中断/多架构 index-only)删除重下 ——
 #   曾出现 quay.io/ceph/ceph:v20.2.2 仅 7.6KB 的损坏 tar, 同步到节点 ctr import 缺层必失败。
 # 镜像清单(默认, 版本可经 CEPH_VERSION/ROOK_VERSION/CEPHCSI_VERSION/CEPH_CSI_OPERATOR_VERSION 覆盖):
-#   docker.io/rook/ceph:v1.20.2                     Rook operator
-#   quay.io/cephcsi/ceph-csi-operator:v1.0.4        CSI operator(rook v1.20 必须)
+#   docker.io/rook/ceph:v1.21.1                     Rook operator
+#   quay.io/cephcsi/ceph-csi-operator:v1.1.0        CSI operator(rook v1.21 必须)
 #   quay.io/ceph/ceph:v20.2.2                       全部 Ceph 守护进程
-#   quay.io/cephcsi/cephcsi:v3.17.0                 CSI 驱动
-#   registry.k8s.io/sig-storage/csi-*               CSI sidecar(provisioner/attacher/resizer/snapshotter/registrar)
-#   quay.io/csiaddons/k8s-sidecar:v0.14.0           csiaddons sidecar
+#   quay.io/cephcsi/cephcsi:v3.18.1                 CSI 驱动
+#   registry.k8s.io/sig-storage/csi-*               CSI sidecar(provisioner/attacher/resizer/snapshotter/registrar/snapshot-metadata)
+#   quay.io/csiaddons/k8s-sidecar:v0.15.1           csiaddons sidecar
 #   registry.k8s.io/sig-storage/snapshot-controller:v8.0.1
 #   ubuntu:22.04                                    (通用工具/验证镜像)
 #   nginx:1.27                                      (通用工具/验证镜像)
@@ -56,9 +56,9 @@ mkdir -p "${CEPH_IMAGE_DIR}"
 
 # ---------------- 版本(可经环境变量覆盖) ----------------
 CEPH_VERSION="${CEPH_VERSION:-v20.2.2}"
-ROOK_VERSION="${ROOK_VERSION:-v1.20.2}"
-CEPHCSI_VERSION="${CEPHCSI_VERSION:-v3.17.0}"
-CEPH_CSI_OPERATOR_VERSION="${CEPH_CSI_OPERATOR_VERSION:-v1.0.4}"
+ROOK_VERSION="${ROOK_VERSION:-v1.21.1}"
+CEPHCSI_VERSION="${CEPHCSI_VERSION:-v3.18.1}"
+CEPH_CSI_OPERATOR_VERSION="${CEPH_CSI_OPERATOR_VERSION:-v1.1.0}"
 
 # ---------------- 默认镜像清单(每行一个; CEPH_IMAGE_LIST 环境变量可整体覆盖; 命令行参数追加) ----------------
 CEPH_IMAGE_LIST="${CEPH_IMAGE_LIST:-}"
@@ -67,12 +67,13 @@ if [ -z "${CEPH_IMAGE_LIST}" ]; then
 quay.io/cephcsi/ceph-csi-operator:${CEPH_CSI_OPERATOR_VERSION}
 quay.io/ceph/ceph:${CEPH_VERSION}
 quay.io/cephcsi/cephcsi:${CEPHCSI_VERSION}
-registry.k8s.io/sig-storage/csi-provisioner:v6.2.0
-registry.k8s.io/sig-storage/csi-attacher:v4.12.0
-registry.k8s.io/sig-storage/csi-resizer:v2.1.0
-registry.k8s.io/sig-storage/csi-snapshotter:v8.5.0
-registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.17.0
-quay.io/csiaddons/k8s-sidecar:v0.14.0
+registry.k8s.io/sig-storage/csi-provisioner:v6.3.0
+registry.k8s.io/sig-storage/csi-attacher:v4.13.0
+registry.k8s.io/sig-storage/csi-resizer:v2.2.1
+registry.k8s.io/sig-storage/csi-snapshotter:v8.6.0
+registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.18.0
+registry.k8s.io/sig-storage/csi-snapshot-metadata:v1.1.0
+quay.io/csiaddons/k8s-sidecar:v0.15.1
 registry.k8s.io/sig-storage/snapshot-controller:v8.0.1
 ubuntu:22.04
 nginx:1.27"

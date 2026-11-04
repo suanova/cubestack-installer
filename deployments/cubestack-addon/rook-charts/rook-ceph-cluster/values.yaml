@@ -24,8 +24,15 @@ configOverride:
 toolbox:
   # -- Enable Ceph debugging pod deployment. See [toolbox](../Troubleshooting/ceph-toolbox.md)
   enabled: false
-  # -- Toolbox image, defaults to the image used by the Ceph cluster
-  image: #quay.io/ceph/ceph:v20.2.2
+  # -- The repository from which to pull the toolbox image
+  # @default -- `.Values.cephImage.repository`
+  repository: #quay.io/ceph/ceph
+  # -- The tag of the toolbox image
+  # @default -- `.Values.cephImage.tag`
+  tag: #v20.2.4
+  # -- Toolbox image, superseded by `toolbox.repository` and `toolbox.tag`
+  # @default -- the image used by the Ceph cluster
+  image: #quay.io/ceph/ceph:v20.2.4
   # -- Toolbox tolerations
   tolerations: []
   # -- Toolbox affinity
@@ -48,6 +55,16 @@ toolbox:
       memory: "128Mi"
   # -- Set the priority class for the toolbox if desired
   priorityClassName:
+
+  # -- Add additional volumes to the toolbox pod.
+  # Note that this is subject to the SCC defined in ./templates/securityContextConstraints.yaml on OpenShift.
+  additionalVolumes: []
+  # -- Add additional volume mounts to the toolbox pod
+  additionalVolumeMounts: []
+  # -- Add additional environment variables to the toolbox pod
+  additionalEnv: []
+  # -- Add additional environment variable sources to the toolbox pod
+  additionalEnvFrom: []
 
 monitoring:
   # -- Enable Prometheus integration, will also create necessary RBAC rules to allow Operator to create ServiceMonitors.
@@ -74,6 +91,16 @@ monitoring:
   # externalMgrPrometheusPort: <port>
   # Scrape interval for prometheus
   # interval: 10s
+  # Scrape timeout for prometheus, in seconds. Must not be greater than the interval.
+  # scrapeTimeoutSeconds: 5
+  # Enable native HTTPS on the Ceph mgr prometheus endpoint (Ceph v20.2+).
+  # Rook mounts the TLS Secret and configures the prometheus module; it does not create certificates.
+  # metricsTLS:
+  #   secretName: rook-ceph-prometheus-server-tls
+  #   ca:
+  #     configMap:
+  #       name: rook-ceph-mgr-metrics-service-ca
+  #       key: service-ca.crt
   # allow adding custom labels and annotations to the prometheus rule
   prometheusRule:
     # -- Labels applied to PrometheusRule
@@ -97,8 +124,8 @@ cephImage:
   repository: quay.io/ceph/ceph
   # In production, use a specific version tag instead of the general v20 flag, which pulls the latest release and could result in different
   # versions running within the cluster. See tags available at https://hub.docker.com/r/ceph/ceph/tags/.
-  # To be more precise, you can always use a timestamp tag such as quay.io/ceph/ceph:v20.2.2-20260616
-  tag: v20.2.2
+  # To be more precise, you can always use a timestamp tag such as quay.io/ceph/ceph:v20.2.4-20260818
+  tag: v20.2.4
   # Whether to allow unsupported versions of Ceph. Currently Squid and Tentacle are supported.
   # Future versions would require this to be set to `true`.
   # Do not set to true in production.
@@ -143,6 +170,11 @@ cephClusterSpec:
   # Default is false.
   upgradeOSDRequiresHealthyPGs: false
 
+  security:
+    cephx:
+      csi:
+        keyType: aes # required when Kubernetes nodes don't run Linux kernel 7.0+
+
   mon:
     # Set the number of mons to be started. Generally recommended to be 3.
     # For highest availability, an odd number of mons should be specified.
@@ -160,8 +192,9 @@ cephClusterSpec:
     modules:
       # List of modules to optionally enable or disable.
       # Note the "dashboard" and "monitoring" modules are already configured by other settings in the cluster CR.
-      # - name: rook
-      #   enabled: true
+      # The rook mgr module is not recommended. The only impact is that some small features will be disabled in the Ceph dashboard.
+      - name: rook
+        enabled: false
 
   # enable the ceph dashboard for viewing cluster status
   dashboard:
@@ -173,6 +206,9 @@ cephClusterSpec:
     # Serve the dashboard using SSL (if using ingress to expose the dashboard and `ssl: true` you need to set
     # the corresponding "backend protocol" annotation(s) for your ingress controller of choice)
     ssl: true
+    # The Kubernetes secret name in the current namespace to use as the dashboard SSL certificate, if the secret
+    # type is kubernetes.io/tls and the private key is RSA. If not set, a self-signed certificate is created.
+    # sslCertificateRef: rook-ceph-dashboard-tls
 
   # Network configuration, see: https://github.com/rook/rook/blob/master/Documentation/CRDs/Cluster/ceph-cluster-crd.md#network-configuration-settings
   network:
@@ -192,7 +228,7 @@ cephClusterSpec:
       # Whether to require communication over msgr2. If true, the msgr v1 port (6789) will be disabled
       # and clients will be required to connect to the Ceph cluster with the v2 port (3300).
       # Requires a kernel that supports msgr v2 (kernel 5.11 or CentOS 8.4 or newer).
-      requireMsgr2: false
+      requireMsgr2: true
   #   # enable host networking
   #   provider: host
   #   # EXPERIMENTAL: enable the Multus network provider
@@ -537,6 +573,12 @@ cephBlockPools:
         csi.storage.k8s.io/controller-publish-secret-namespace: "{{ .Release.Namespace }}"
         csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
         csi.storage.k8s.io/node-stage-secret-namespace: "{{ .Release.Namespace }}"
+        # Needed for VolumeAttributesClass (dynamic QoS modification on existing volumes).
+        csi.storage.k8s.io/controller-modify-secret-name: rook-csi-rbd-provisioner
+        csi.storage.k8s.io/controller-modify-secret-namespace: "{{ .Release.Namespace }}"
+        # Needed for krbd QoS enforcement.
+        csi.storage.k8s.io/node-publish-secret-name: rook-csi-rbd-node
+        csi.storage.k8s.io/node-publish-secret-namespace: "{{ .Release.Namespace }}"
         # Specify the filesystem type of the volume. If not specified, csi-provisioner
         # will set default as `ext4`. Note that `xfs` is not recommended due to potential deadlock
         # in hyperconverged settings where the volume is mounted on the same node as the osds.
@@ -698,6 +740,51 @@ cephObjectStores:
       #   - name: internal
       #     namespace: kube-system
       #     sectionName: https
+## CephObjectRealm, CephObjectZoneGroup, and CephObjectZone configure RGW multisite. They are
+## disabled by default; remove the comments and set desired values to enable them. See
+## https://rook.io/docs/rook/latest/Storage-Configuration/Object-Storage-RGW/ceph-object-multisite/
+## The example below creates a new realm on this (primary) cluster. On a secondary cluster that
+## syncs from another realm, add a `spec.pull.endpoint` to the realm instead (see the realm CRD docs).
+#cephObjectRealms:
+#  - name: realm-a
+#    # spec is only required to pull a realm from another cluster; omit it to create a new realm
+#    # spec:
+#    #   pull:
+#    #     endpoint: http://<master-zone-endpoint>
+#cephObjectZoneGroups:
+#  - name: zonegroup-a
+#    spec:
+#      realm: realm-a
+#cephObjectZones:
+#  - name: zone-a
+#    spec:
+#      zoneGroup: zonegroup-a
+#      metadataPool:
+#        failureDomain: host
+#        replicated:
+#          size: 3
+#          requireSafeReplicaSize: true
+#      dataPool:
+#        failureDomain: host
+#        replicated:
+#          size: 3
+#          requireSafeReplicaSize: true
+#        parameters:
+#          compression_mode: none
+#          bulk: "true"
+#      # recommended to set this value if ingress used for exposing rgw endpoints
+#      # customEndpoints:
+#      #   - "http://rgw-a.fqdn"
+#      # if the pools need to be removed from backend enable following setting
+#      # preservePoolsOnDelete: false
+## cephObjectStoreUsers create S3 users in a CephObjectStore. They are disabled by default;
+## remove the comments and set desired values to enable them. See
+## https://rook.io/docs/rook/latest/CRDs/Object-Storage/ceph-object-store-user-crd/
+#cephObjectStoreUsers:
+#  - name: my-user
+#    spec:
+#      store: ceph-objectstore
+#      displayName: my display name
 ## cephECBlockPools are disabled by default, please remove the comments and set desired values to enable it
 ## For erasure coded a replicated metadata pool is required.
 ## https://rook.io/docs/rook/latest/CRDs/Shared-Filesystem/ceph-filesystem-crd/#erasure-coded

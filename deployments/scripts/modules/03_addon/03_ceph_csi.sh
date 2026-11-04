@@ -14,7 +14,7 @@
 #   · ★ REQUIRES 含 k8s_deploy: 本模块 SSH 到 master 跑 kubectl, 必须等集群部署完成 ——
 #     默认模式 k8s_deploy 由 enable 循环追加在 RUN_STEPS 末尾, 若只依赖 ceph(且 ceph 不在
 #     运行列表时)会被拓扑排序浮到 k8s_deploy 之前(历史事故: ceph_csi 排在 k8s_deploy 前卡死)。
-#   · 设计: rook v1.20 中 CSI 由 csi-operator.yaml + operator 调和自动部署(ceph-csi-operator);
+#   · 设计: rook v1.21 中 CSI 由 csi-operator.yaml + operator 调和自动部署(ceph-csi-operator);
 #     本模块负责"存储供给层"(对齐 docs §7 资源设计):
 #     · CephBlockPool rbd-pool(3 副本/host 故障域/min_size 2)
 #     · RBD StorageClass 三变体: ceph-rbd-ephemeral(WFFC/Delete, 默认) /
@@ -173,7 +173,7 @@ _patch_csi_driver_placement() {
 say "[1/4] 确认 CSI 插件(ceph-csi-operator 调和)csi-rbdplugin / csi-cephfsplugin 就绪(最长 240s)..."
 CSI_OK=0
 for i in $(seq 1 24); do
-    # rook v1.20: csi-operator 调和的 DS 名为 <driver>-nodeplugin(label app=<driver>-nodeplugin),
+    # rook v1.21: csi-operator 调和的 DS 名为 <driver>-nodeplugin(label app=<driver>-nodeplugin),
     # 不是旧版 app=csi-rbdplugin; controller 为 ceph-csi-controller-manager。
     _rbd="$( (SSH "${K} -n ${CEPH_NAMESPACE} get ds rook-ceph.rbd.csi.ceph.com-nodeplugin --no-headers 2>/dev/null" || true) )"
     _ctr="$( (SSH "${K} -n ${CEPH_NAMESPACE} get deploy ceph-csi-controller-manager --no-headers 2>/dev/null" || true) )"
@@ -184,7 +184,7 @@ for i in $(seq 1 24); do
     fi
     sleep 10
 done
-[ "${CSI_OK}" = "1" ] && ok "  ceph-csi 控制器/插件就绪" || warn "  ceph-csi 未完全就绪(检查 rook operator 日志; rook v1.20 必须已 apply csi-operator.yaml)"
+[ "${CSI_OK}" = "1" ] && ok "  ceph-csi 控制器/插件就绪" || warn "  ceph-csi 未完全就绪(检查 rook operator 日志; rook v1.21 必须已 apply csi-operator.yaml)"
 
 # 把 CSI 控制器钉到 master、nodeplugin 放开所有 taint(cordon master 仍能挂卷)
 _patch_csi_driver_placement
@@ -255,7 +255,7 @@ _ext_wait_csi_config_ready() {
 #   自动创建 CephConnection/ClientProfile 并做 mon 健康检查 → STATE=Connected 上报
 #   (官方 healthCheck 机制, 即 Bug D 的官方解法)。RGW 密钥存在时自动接外部对象存储。
 #   参考: cubestack-addon/rook/external/{import-external-cluster.sh,cluster-external.yaml,
-#   common-external.yaml,object-external.yaml}(v1.20.2 vendored)
+#   common-external.yaml,object-external.yaml}(v1.21.1 vendored)
 # ════════════════════════════════════════════════════════════════════
 _ext_import_official() {
     local _env_file="${CEPH_EXTERNAL_ENV_FILE}"
