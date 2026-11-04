@@ -387,6 +387,9 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   # 容器内: cd /opt/cubestack-installer && sudo ./deployments/scripts/deploy-cluster.sh
   ```
 - **离线文件下载**: `tools/offline/fetch-offline-from-minio.sh` 用 mc 从 MinIO 同步到 `OFFLINE_FILES_DIR`(--sub 支持嵌套/多值, 可细化到 `cubestack-operator/<组件>`; `--help` 打印全部可用子目录; 旧名 fetch-offline-files.sh 为兼容薄壳)
+  - **release/flat 默认走"内容寻址增量"**(2026-11-04): 以远端 `offline-files/SHA256SUMS` 为判据, 只下缺失/哈希不符的文件并删除多余文件, 与对象 mtime 无关(`mc mirror --overwrite` 会整树重传 —— 见 troubleshooting 四.8); 计划器 `tools/offline/manifest-plan.py`(纯计算, 有 `test-offline-incremental-plan.sh` 回归); `--full` 回退旧整树 mirror。
+  - ⚠ 改动清单内文件后必须同步 `SHA256SUMS` 行 + 重绑 `_SUCCESS.sha256sums`, 否则增量会反复重下且全量校验失败。
+  - 版本目录是整树复制时(如 `2.0.1` 内仍是 2.0.0 元数据), 校验按树内 `release.env` 的 `RELEASE_VERSION` 执行并告警, 不误判失败。
   (默认 `deployments/offline-files`); 配置 `MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY/BUCKET/REMOTE_DIR`。
 - **离线文件缺失检查**: `lib-common.sh` 的 `check_offline_files`(deploy-cluster.sh 启动时调用), 缺失时输出
   **红底醒目提示**并给出准备指引(不阻断)。部署前务必保证 `${LOCAL_REPO_DIR}` 下有

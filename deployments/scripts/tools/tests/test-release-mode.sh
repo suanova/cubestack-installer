@@ -236,7 +236,7 @@ chk "clean 保留 .cubestack-*" "keep" "$(cat "${TMP}/local/2.0.0/offline-files/
 chk "发布树落盘" "hello" "$(cat "${TMP}/local/2.0.0/offline-files/ceph/test.txt" 2>/dev/null)"
 chk "CLI tar 落盘(带版本名)" "cli-tar-bytes" "$(cat "${TMP}/local/2.0.0/cubestack-installer-cli-v2.0.0.tar" 2>/dev/null)"
 chk "不再生成旧名 CLI tar" "0" "$([ -e "${TMP}/local/2.0.0/cubestack-installer-cli.tar" ] && echo 1 || echo 0)"
-chk_contains "release 取件使用精确镜像(清理)" "mirror-remove" "$(cat "${TMP}/mc-calls.log" 2>/dev/null)"
+chk "release 取件走增量(不做整树 mirror)" "0" "$( [ -f "${TMP}/mc-calls.log" ] && grep -c '^mirror-remove' "${TMP}/mc-calls.log" || echo 0 )"
 
 # --clean-countdown 必须是数字
 out="$(bash "${FETCH}" --clean-countdown abc 2>&1)"; rc=$?

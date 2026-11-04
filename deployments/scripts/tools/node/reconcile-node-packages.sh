@@ -71,11 +71,15 @@ SSH_OPTS=(-i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKn
 # ---------------- 控制器侧前置探测(2026-10-19 实机事故) ----------------
 # 在分发离线包/装包之前, 用短超时探测每个节点是否有**旧集群 Ceph/RBD 残留**:
 #   ceph/rbd 挂载、/sys/bus/rbd/devices、相关 D 状态进程、fuser 超时。
-# 处置策略(2026-10-19 用户口径):
-#   · D 状态 / fuser 超时 = 僵尸态, 无法自动修复 → 整轮失败并给出重启指引;
+# 处置策略(2026-11-04 更新):
+#   · D 状态 + 存储挂载 = 僵尸态: 默认**不阻断**(覆盖安装口径) —— 只告警、不自动卸载、
+#     继续分发/装包, 由后续 Ceph/K8s 覆盖流程重建; 需要回到旧行为时设
+#     NODE_PKGS_ALLOW_DSTATE=0(硬失败并给重启指引);
+#   · D 状态 / fuser 超时但探测本身无响应(rc=124) 仍失败 —— 拿不到证据, 不能盲目继续;
 #   · 挂载不健康但未卡死 → 控制器放行, 由远端脚本自动 stop kubelet/containerd +
 #     umount -l/-f + rbd unmap, 成功后继续;
 #   · 活动且健康的 Ceph/RBD(当前集群正在用) → 不阻断(避免误伤运行中的 CephFS/RBD PVC)。
+NODE_PKGS_ALLOW_DSTATE="${NODE_PKGS_ALLOW_DSTATE:-1}"
 _probe="$(cat <<'PROBE'
 ceph_mnts=$(timeout 5 findmnt -t ceph,rbd -n -o TARGET,FSTYPE 2>/dev/null | head -5)
 # D 状态进程(ps 只读 /proc, 不触碰挂载); 排除 rsync 等仅因含 "sync" 而误匹配的进程。
@@ -143,6 +147,7 @@ _preflight_bad=0
 _preflight_ssh_report=""
 _preflight_wedged_report=""
 _preflight_probe_report=""
+_preflight_warn_report=""
 for _ip in "${IPS[@]}"; do
     _u="${USER:-$(ssh_user_for_ip "${_ip}")}"
     _out="$(timeout 20 ssh "${SSH_OPTS[@]}" "${_u}@${_ip}" "${_probe}" 2>&1)"
@@ -176,9 +181,16 @@ for _ip in "${IPS[@]}"; do
                 fi
                 ;;
             *d-state-storage*)
-                say "  ${_ip}: 存在 D 状态且有待存储挂载, 无法安全逐挂载确认 → 不自动卸载(需人工/重启)"
-                _preflight_bad=1
-                _preflight_wedged_report="${_preflight_wedged_report}"$'\n'"  ${_u}@${_ip}: D 状态+存储挂载(未自动卸载): $(_clean_out "${_out}")"
+                if [ "${NODE_PKGS_ALLOW_DSTATE}" = "1" ]; then
+                    # 覆盖安装口径(2026-11-04 用户): 旧集群 Ceph 已被拆, D 状态 + 陈旧的
+                    # ceph 挂载属预期残留; 不卸载(避免误伤), 直接继续分发/装包。
+                    warn "  ${_ip}: 存在 D 状态 + 存储挂载(覆盖安装策略: 忽略并继续, 不自动卸载): $(_clean_out "${_out}")"
+                    _preflight_warn_report="${_preflight_warn_report}"$'\n'"  ${_u}@${_ip}: D 状态+存储挂载(已忽略, 覆盖安装继续)"
+                else
+                    say "  ${_ip}: 存在 D 状态且有待存储挂载, 无法安全逐挂载确认 → 不自动卸载(需人工/重启)"
+                    _preflight_bad=1
+                    _preflight_wedged_report="${_preflight_wedged_report}"$'\n'"  ${_u}@${_ip}: D 状态+存储挂载(未自动卸载): $(_clean_out "${_out}")"
+                fi
                 ;;
             *d-state-unrelated*)
                 say "  ${_ip}: 检测到非存储 D 状态进程(不触发修复, 继续): $(_clean_out "${_out}")"
@@ -188,6 +200,10 @@ for _ip in "${IPS[@]}"; do
         esac
     fi
 done
+if [ -n "${_preflight_warn_report}" ]; then
+    warn "以下节点存在 D 状态 + 存储挂载残留(覆盖安装策略: 已忽略, 继续装包; 设 NODE_PKGS_ALLOW_DSTATE=0 可恢复硬失败):"
+    printf '%s\n' "${_preflight_warn_report}"
+fi
 if [ "${_preflight_bad}" -ne 0 ]; then
     if [ -n "${_preflight_ssh_report}" ]; then
         err "以下节点 SSH 认证/连接失败 —— 部署无法继续(与 Ceph/RBD 无关):"

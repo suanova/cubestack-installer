@@ -1898,6 +1898,51 @@ CLUSTER_CONF=<ceph-off.conf> ./deployments/scripts/deploy-cluster.sh --list | gr
 
 ---
 
+### 8. 【2026-11-04】换版本取件时 104 GiB 全量重传(本地大部分文件并未变化)；另一种情况是同大小内容变化被静默跳过
+
+**症状:** `fetch-offline-from-minio.sh --release <新版本>` 的预检写着"本次下载约需 2.0 GiB",
+实际却把整个 `offline-files/`(104 GiB / 300 文件)重下一遍(267 MiB/s ≈ 6.5 分钟);
+换回同一版本再跑则很快。反过来, 如果去掉 `--overwrite`, 一个"大小相同但内容被改坏"的本地文件
+又会被 `mc mirror` 静默跳过 —— 两种行为都不能接受。
+
+**根因:**
+1. `lib-offline-fetch.sh` 的 CLEAN 分支用 `mc mirror --overwrite --remove`;
+   mc 的跳过条件是 **本地文件比远端对象更新**(mtime 严格更大)。`--overwrite` 连"相等"档也重传,
+   并且 **mc 不比对内容**(实测: 同大小改 1 字节, plain mirror 直接跳过)。
+2. MinIO 的 `Last-Modified` 由服务端分配、**不可写**: 用 `mc mirror --preserve` 整树复制出来的
+   新版本目录, 所有对象 mtime 都变成复制时间(实测 2.0.0=2026-10-23, 2.0.1 副本=2026-11-04)
+   ⇒ 本地(旧版本下载的)文件永远"更旧" ⇒ 100% 重传。`--preserve` 救不了(只带自定义 metadata)。
+3. 脚本的"本次下载约需"按 `远端总量 − 本地目录大小` 估算(≈2 GiB), 属于增量假设;
+   与 `--overwrite` 的实际行为自相矛盾, 所以提示与结果差 50 倍。
+
+**解法(已落地, 内容寻址增量):**
+- 新增 `deployments/scripts/tools/offline/manifest-plan.py`(纯计算, 可离线单测):
+  以远端 `offline-files/SHA256SUMS` 为**唯一判据**, 产出 `fetch`/`delete` 计划;
+  哈希缓存 `.cubestack-hashes.json` 以 `(size, mtime_ns)` 命中, 未变化的文件不重读。
+- `lib-offline-fetch.sh` 新增 `_manifest_transfer`: 先取 SHA256SUMS → 只 `mc cp` 缺失/哈希不符的文件
+  → 删除清单外多余文件(保留 `.cubestack-*`、CLI tar 与 `SHA256SUMS/_SUCCESS/SIZES`) → 刷新缓存;
+  `SHA256SUMS/_SUCCESS/SIZES` 不在清单内, 必须**显式同取**。
+- 安全兜底: 清单不可用/非法(rc=3)时回退旧的整树 mirror; 下载后仍跑全量 sha256;
+  `--full` 可强制旧行为(排障/强刷)。
+- 版本身份: 校验以**树内 `release.env` 的 `RELEASE_VERSION`** 为准。整树复制出的版本目录
+  (如 MinIO `2.0.1` 里仍是 2.0.0 的元数据, 待 CI 覆盖)不再误报
+  `release=2.0.0 != 2.0.1`, 但会打印醒目告警。
+- ⚠ 配套纪律: **改动清单内任何文件后, 必须同步更新 `SHA256SUMS` 对应行并重绑 `_SUCCESS.sha256sums`**
+  (本次就出现过 `VERSION.profile` 改了内容但清单未更新 → 每次取件都重下该文件、全量校验失败)。
+
+**验证(2026-11-04 实测, `--release 2.0.1 --dest /data/offline-files`):**
+```bash
+# 已是最新: 1.9s / 下载 0 个(旧行为: 6.5min / 104 GiB)
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release 2.0.1 --dest /data/offline-files --yes --no-verify
+# 删 1 个文件 → 只下 1 个, sha 与清单一致; 放 1 个多余文件 → 只删 1 个
+# 全量校验(以树内 release=2.0.0 为准)通过
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release 2.0.1 --dest /data/offline-files --verify-only
+bash deployments/scripts/tools/tests/test-offline-incremental-plan.sh         # 计划器回归
+bash deployments/scripts/tools/tests/test-release-mode.sh                     # fetch/校验回归
+```
+
+---
+
 ## 五、存储 / CephFS
 
 ### 1. CephFS 宿主机挂载(cephfs_mount): 模块报成功但节点没有挂载 / 反复叠加挂载 / 卸载后挂载残留

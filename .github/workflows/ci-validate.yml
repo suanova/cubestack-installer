@@ -146,6 +146,12 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-verify-offline-files.sh
 
+      # 离线增量下载计划: 内容寻址(同大小变更/多余文件/prefix/缓存/非法清单回退)
+      - name: 离线增量下载计划回归(manifest-plan)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-offline-incremental-plan.sh
+
       # verifier pyz 必须与 verifier/ 源码一致(防止改了源码忘重建)
       - name: 校验器源码/pyz 一致性
         run: |

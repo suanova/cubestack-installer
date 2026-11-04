@@ -104,12 +104,28 @@ chk "执行了 scp(不阻断)" "1" "$(wc -l < "${TMP}/scp-3.log")"
 chk_contains "日志点名非存储 D 状态" "非存储 D 状态" "${TMP}/out-3"
 chk_not_contains "未触发卸载" "sudo bash -s --" "${TMP}/ssh-3.log"
 
-echo "== ①c D 状态 + 存储挂载: 不自动卸载(交人工/重启), 失败 =="
+echo "== ①c D 状态 + 存储挂载: 默认忽略并继续(覆盖安装口径), 不自动卸载 =="
 rc="$(run_tool 6)"
-chk "退出码" "1" "${rc}"
-chk "未执行 scp" "0" "$(wc -l < "${TMP}/scp-6.log")"
+chk "退出码" "0" "${rc}"
+chk "执行了 scp(不阻断)" "1" "$(wc -l < "${TMP}/scp-6.log")"
 chk_not_contains "未自动卸载" "sudo bash -s --" "${TMP}/ssh-6.log"
-chk_contains "提示需人工/重启" "重启" "${TMP}/out-6"
+chk_contains "日志点名已忽略" "已忽略" "${TMP}/out-6"
+
+echo "== ①c2 NODE_PKGS_ALLOW_DSTATE=0: 恢复硬失败(旧行为) =="
+(
+    export PATH="${TMP}/bin:${PATH}"
+    export CLUSTER_CONF="${TMP}/cluster.conf"
+    export OFFLINE_FILES_ROOT="${TMP}/offline"
+    export FAKE_SSH_LOG="${TMP}/ssh-6s.log"
+    export FAKE_SCP_LOG="${TMP}/scp-6s.log"
+    export FAKE_WEDGED=6
+    export NODE_PKGS_ALLOW_DSTATE=0
+    : > "${FAKE_SSH_LOG}"; : > "${FAKE_SCP_LOG}"
+    bash "${TOOL}" --ip 10.0.0.1 --user root
+) > "${TMP}/out-6s" 2>&1
+chk "strict 退出码" "1" "$?"
+chk "strict 未执行 scp" "0" "$(wc -l < "${TMP}/scp-6s.log")"
+chk_contains "strict 提示需重启" "重启" "${TMP}/out-6s"
 
 echo "== ①d 探测超时: 不自动修复, 失败 =="
 rc="$(run_tool 7)"
