@@ -112,7 +112,7 @@ PROBE
 #   ⚠ 用 /proc/mounts 而非 findmnt: 避免与前置探测命令模式混淆(测试桩按 findmnt 匹配)。
 _repair="$(cat <<'REPAIR'
 systemctl stop kubelet containerd 2>/dev/null || true
-awk '$3=="ceph"||$3=="rbd"{print $2}' /proc/mounts 2>/dev/null | while read -r _t; do
+awk '$3=="ceph"||$3=="rbd"||$1 ~ /^\/dev\/rbd/{print $2}' /proc/mounts 2>/dev/null | while read -r _t; do
     [ -n "${_t}" ] && { umount -l "${_t}" 2>/dev/null || umount -f "${_t}" 2>/dev/null || true; }
 done
 if command -v rbd >/dev/null 2>&1; then
