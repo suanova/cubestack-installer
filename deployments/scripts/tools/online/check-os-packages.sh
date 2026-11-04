@@ -1,16 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
-# Pre-install OS package check.
+# Node prerequisite package check.
 #
-# The installer does not download or install OS packages. It only verifies that
-# the packages listed in versions/os/<id>-<version>.lock are already present on
-# the target nodes, and fails with an explicit list when something is missing.
+# These are packages installed on the k8s nodes by the OS package manager
+# (lvm2, chrony, curl, rsync, iptables, ...), not container images or k8s
+# binaries. The installer does not download or install them; it only checks
+# presence, and fails (or warns with --warn-only) with an explicit list.
 #
 # Usage:
 #   ./check-os-packages.sh [--baseline versions/base.yaml] [--group all|reconcile|chrony]
 #                          [--hosts user@ip,user@ip] [--key PATH] [--password PW]
-#                          [--strict] [--dry-run]
+#                          [--strict] [--warn-only] [--dry-run]
 #
 # With no --hosts, the local host is checked. --strict also compares versions.
 
@@ -22,6 +23,7 @@ HOSTS=""
 SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
 SSH_PASSWORD=""
 STRICT=0
+WARN_ONLY=0
 DRY_RUN=0
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -35,6 +37,7 @@ while [ $# -gt 0 ]; do
         --key) SSH_KEY="${2:?--key needs a path}"; shift 2 ;;
         --password) SSH_PASSWORD="${2:?--password needs a value}"; shift 2 ;;
         --strict) STRICT=1; shift ;;
+        --warn-only) WARN_ONLY=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --help|-h) sed -n '2,18p' "$0"; exit 0 ;;
         *) die "unknown option: $1" ;;
@@ -160,8 +163,14 @@ else
 fi
 
 if [ "${failed}" -ne 0 ]; then
-    echo "OS package pre-check failed. Install the missing packages on the nodes" >&2
-    echo "listed above, then rerun. The installer does not install OS packages." >&2
+    if [ "${WARN_ONLY}" = "1" ]; then
+        echo "WARNING: node prerequisite packages are missing (warn-only; continuing)." >&2
+        echo "The installer does not install OS packages; prepare them in the OS image." >&2
+        exit 0
+    fi
+    echo "Node prerequisite package pre-check failed. Install the missing packages" >&2
+    echo "on the nodes listed above, then rerun. The installer does not install" >&2
+    echo "OS packages." >&2
     exit 1
 fi
-say "OS package pre-check passed"
+say "Node prerequisite package pre-check passed"

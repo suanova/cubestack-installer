@@ -49,22 +49,30 @@ if grep -nE '(^|[^#])\b(apt-get[[:space:]]+install|dpkg[[:space:]]+-i)\b' \
 fi
 pass "install-online.sh has no OS package install command"
 
-# Dry-run: image materialization and OS pre-check are skipped by default, and
-# the deploy command is printed rather than executed.
+# Dry-run: image materialization is skipped, and the node prerequisite check
+# runs in warn-only mode by default.
 printf '{}\n' > "${TMP}/index.json"
 out="$(cd "${ROOT}" && CLUSTER_CONF="${CONF}" \
     bash "${SCRIPTS}/install-online.sh" \
     --index "${TMP}/index.json" --no-materialize --dry-run --with-k8s 2>&1)"
 grep -q "skipping image materialization" <<<"${out}" || fail "dry-run did not skip materialization"
-grep -q "OS package pre-check skipped" <<<"${out}" || fail "dry-run did not skip OS pre-check"
+grep -q "node prerequisite pre-check (warn-only)" <<<"${out}" || fail "dry-run did not run warn-only pre-check"
 grep -q "would exec: .*deploy-cluster.sh --with-k8s" <<<"${out}" || fail "dry-run did not print deploy command"
-pass "install-online dry-run skips materialization/pre-check"
+pass "install-online dry-run skips materialization and warns on prerequisites"
 
-# Optional pre-check can be enabled without touching the nodes in dry-run.
+# The pre-check can be skipped explicitly.
+out="$(cd "${ROOT}" && CLUSTER_CONF="${CONF}" \
+    bash "${SCRIPTS}/install-online.sh" \
+    --index "${TMP}/index.json" --no-materialize --dry-run \
+    --no-check-os-packages 2>&1)"
+grep -q "skipped (--no-check-os-packages)" <<<"${out}" || fail "pre-check skip flag not honored"
+pass "install-online can skip the prerequisite pre-check"
+
+# Blocking pre-check can be enabled without touching the nodes in dry-run.
 out="$(cd "${ROOT}" && CLUSTER_CONF="${CONF}" \
     bash "${SCRIPTS}/install-online.sh" \
     --index "${TMP}/index.json" --no-materialize --dry-run --check-os-packages 2>&1)"
 grep -q "pre-check passed" <<<"${out}" || fail "enabled pre-check dry-run did not pass"
-pass "install-online can enable the optional OS pre-check"
+pass "install-online can enable the blocking prerequisite pre-check"
 
 echo "all install-online tests passed"

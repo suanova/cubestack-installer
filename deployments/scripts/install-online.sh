@@ -7,8 +7,8 @@ set -euo pipefail
 # prefetches k8s binaries through the existing deploy flow, and then runs
 # deploy-cluster.sh. It never touches MinIO or cubestack-release.
 #
-# OS packages are not installed. The pre-check tool is available but disabled by
-# default in 2.1; pass --check-os-packages to run it.
+# Node prerequisite packages are not installed. A warn-only check runs by
+# default; --check-os-packages makes it blocking, --no-check-os-packages skips it.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -19,7 +19,7 @@ INDEX_URL="${CUBESTACK_MIRROR_INDEX_URL:-https://raw.githubusercontent.com/suano
 OFFLINE_ROOT=""
 MATERIALIZE=1
 FORCE_INDEX=0
-CHECK_OS=0
+CHECK_OS_MODE="warn"
 DRY_RUN=0
 PROFILE_ARG=""
 PASSTHRU=()
@@ -33,8 +33,8 @@ Usage: install-online.sh [online options] [deploy-cluster options]
 
 Reads versions/base.yaml + the mirror catalog, materializes the base images,
 prefetches k8s binaries, then runs deploy-cluster.sh. It never touches MinIO or
-cubestack-release. OS packages are not installed; the optional pre-check is
-disabled by default in 2.1.
+cubestack-release. Node prerequisite packages are not installed; a warn-only
+pre-check runs by default.
 
 Online options:
   --baseline PATH          versions/base.yaml (default: <repo>/versions/base.yaml)
@@ -43,7 +43,9 @@ Online options:
   --offline-root PATH      offline-files root (default: from cluster config)
   --no-materialize         skip image materialization
   --force-index            re-download the mirror index
-  --check-os-packages      run the optional OS package pre-check
+  --check-os-packages      run a blocking node prerequisite pre-check
+                           (default is warn-only)
+  --no-check-os-packages   skip the pre-check
   --dry-run                print actions without materializing or deploying
   --profile NAME           pass through to deploy-cluster.sh (also used for
                            version resolution)
@@ -60,7 +62,8 @@ while [ $# -gt 0 ]; do
         --offline-root) OFFLINE_ROOT="${2:?--offline-root needs a path}"; shift 2 ;;
         --no-materialize) MATERIALIZE=0; shift ;;
         --force-index) FORCE_INDEX=1; shift ;;
-        --check-os-packages) CHECK_OS=1; shift ;;
+        --check-os-packages) CHECK_OS_MODE="fail"; shift ;;
+        --no-check-os-packages) CHECK_OS_MODE="off"; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --profile) PROFILE_ARG="${2:?--profile needs a name}"; PASSTHRU+=("$1" "$2"); shift 2 ;;
         --help|-h) usage ;;
@@ -135,7 +138,7 @@ else
     say "skipping image materialization (--no-materialize)"
 fi
 
-if [ "${CHECK_OS}" = "1" ]; then
+if [ "${CHECK_OS_MODE}" != "off" ]; then
     hosts=""
     for line in "${NODES[@]:-}"; do
         [ -z "${line}" ] && continue
@@ -144,18 +147,24 @@ if [ "${CHECK_OS}" = "1" ]; then
         hosts+="${NODE_USER}@${NODE_IP},"
     done
     hosts="${hosts%,}"
-    [ -n "${hosts}" ] || die "no target nodes found for OS package pre-check"
+    [ -n "${hosts}" ] || die "no target nodes found for node prerequisite pre-check"
     check_args=(--baseline "${BASELINE}" --hosts "${hosts}"
         --key "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}")
     if [ -n "${SSH_DEFAULT_PASSWORD:-}" ]; then
         check_args+=(--password "${SSH_DEFAULT_PASSWORD}")
+    fi
+    if [ "${CHECK_OS_MODE}" = "warn" ]; then
+        check_args+=(--warn-only)
+        say "node prerequisite pre-check (warn-only)"
+    else
+        say "node prerequisite pre-check (blocking)"
     fi
     if [ "${DRY_RUN}" = "1" ]; then
         check_args+=(--dry-run)
     fi
     bash "${SCRIPT_DIR}/tools/online/check-os-packages.sh" "${check_args[@]}"
 else
-    say "OS package pre-check skipped (2.1 default; pass --check-os-packages to enable)"
+    say "node prerequisite pre-check skipped (--no-check-os-packages)"
 fi
 
 export CUBESTACK_ONLINE=1

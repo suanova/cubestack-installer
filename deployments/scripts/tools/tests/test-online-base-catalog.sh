@@ -145,6 +145,13 @@ fi
 grep -q "MISSING definitely-not-a-real-package" "${TMP}/pre.out" || fail "pre-check: missing package not reported"
 pass "pre-check reports a missing package"
 
+if ! "${ONLINE}/check-os-packages.sh" --baseline "${TMP}/baseline/versions/base.yaml" \
+    --warn-only >"${TMP}/pre.out" 2>&1; then
+    fail "pre-check: warn-only should exit 0"
+fi
+grep -q "WARNING: node prerequisite packages are missing" "${TMP}/pre.out" || fail "pre-check: warn-only warning missing"
+pass "pre-check warn-only reports but does not fail"
+
 cat > "${TMP}/baseline/versions/os/test.lock" <<'EOF'
 schema: 1
 family: debian

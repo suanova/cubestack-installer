@@ -57,12 +57,17 @@ images:
   profile 里有定义。禁止 `latest`。
 - `dest` / `tar` 里的 `${VAR}` 由安装器解析；`tar` 决定物化后的文件名，模块 35 等
   依赖固定命名。
-- OS 包不由 installer 下载或安装；`packages_check` 指向安装前预检清单，installer 只验证
+- 节点前置包（OS 包管理器安装在每个 k8s node 上的依赖，如 lvm2/chrony/curl）不由
+  installer 下载或安装；`packages_check` 指向安装前体检清单，installer 只验证
   节点上是否已存在这些包，缺失时列清单退出。
 - K8s 二进制（kubelet/kubeadm/kubectl/crictl/CNI 等）仍由 installer 准备；商业离线版由
   release 的 base `files[]` 打包。
 
-## OS 包预检清单
+## 节点前置包体检清单
+
+> 节点前置包 = 通过 OS 包管理器安装在每个 k8s node 上的依赖（lvm2、chrony、curl、
+> rsync、iptables、iputils-ping、ca-certificates、skopeo 等），不是容器镜像，也不是
+> kubelet/kubeadm 等 k8s 二进制。
 
 `versions/os/<id>-<version>.lock` 是**安装前检查清单**，不是下载/安装清单：
 
@@ -80,16 +85,17 @@ packages:
     chrony: "4.2-2ubuntu2.1"
 ```
 
-- installer 只检查包是否存在；默认按包名检查，`--strict` 可额外校验版本。
+- installer 只检查包是否存在；默认按包名检查，`--strict` 可额外校验版本，
+  `--warn-only` 只告警不失败（2.1 在线安装默认使用该模式）。
 - 不下载 `.deb`、不执行 `apt-get install`；缺包时由运维按清单自行安装。
-- 版本号仅作为已知良好参考，不参与默认预检。
+- 版本号仅作为已知良好参考，不参与默认检查。
 
 ## 更新流程
 
 1. 第三方镜像先改 `container-image-mirror` 的 `images/*.yaml`（tag + digest），合并后
    产生新的 `index.json`；
 2. 在 `versions/base.yaml` 改 `version`（或新增镜像条目），保持 `catalog_id` 不变；
-3. 改 OS 预检清单时更新对应的 `.lock`；
+3. 改节点前置包体检清单时更新对应的 `.lock`；
 4. 本地校验：
 
    ```bash
@@ -112,5 +118,5 @@ kubelet/kubeadm/kubectl/crictl/CNI/containerd/runc/etcd 等由 installer 准备�
 
 ## Rocky 扩展点
 
-`os[]` 的 schema 支持多个 OS family；2.1 只实现 Ubuntu 预检。Rocky 的 rpm 包预检、
+`os[]` 的 schema 支持多个 OS family；2.1 只实现 Ubuntu 节点前置包体检。Rocky 的 rpm 包体检、
 Rocky VM 模板和 NVIDIA rhel9 驱动都在后续版本补充，当前不阻塞。
