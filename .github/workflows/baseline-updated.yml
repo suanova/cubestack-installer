@@ -1,0 +1,60 @@
+name: Dispatch base baseline update
+
+# The public base baseline (versions/base.yaml) is the source of truth for
+# kubespray, OS packages and base image versions. cubestack-release references
+# it at a pinned installer commit. Notify it when the baseline changes so it can
+# open a PR that bumps the pinned commit and regenerates the commercial base pin.
+#
+# The dispatch is skipped when the release GitHub App is not configured, so this
+# can land before the downstream workflow exists.
+
+on:
+  push:
+    branches: [main, release-2.1]
+    paths:
+      - 'versions/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: baseline-updated
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      RELEASE_REPO: ${{ vars.CUBESTACK_RELEASE_REPO || 'suanova/cubestack-release' }}
+    steps:
+      - name: Skip dispatch when the release GitHub App is not configured
+        if: env.RELEASE_APP_ID == '' || env.RELEASE_APP_PRIVATE_KEY == ''
+        run: |
+          echo "::warning::RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY are not configured; skipping baseline-updated dispatch"
+
+      - name: Create GitHub App token
+        id: app
+        if: env.RELEASE_APP_ID != '' && env.RELEASE_APP_PRIVATE_KEY != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ env.RELEASE_APP_ID }}
+          private-key: ${{ env.RELEASE_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack-release
+
+      - name: Dispatch baseline-updated
+        if: steps.app.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          payload=$(jq -n \
+            --arg sha "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF_NAME" \
+            '{event_type: "baseline-updated",
+              client_payload: {installer_commit: $sha, ref: $ref,
+                               baseline_path: "versions/base.yaml"}}')
+          printf '%s' "$payload" | gh api --method POST "repos/${RELEASE_REPO}/dispatches" --input -
+          echo "dispatched baseline-updated to ${RELEASE_REPO} at ${GITHUB_SHA}"

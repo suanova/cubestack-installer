@@ -26,6 +26,8 @@ on:
       - '!deployments/kubespray/versions/**'
       - 'deployments/cubestack-addon/**'
       - 'deployments/config/**'
+      - 'versions/**'
+
       - 'skills/**'
       - 'Dockerfile-cli'
       - 'Dockerfile-cli-base'

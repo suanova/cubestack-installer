@@ -70,6 +70,12 @@ jobs:
             exit 1
           fi
 
+      - name: 公共 base 基线校验(versions/base.yaml)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml
+          python3 deployments/scripts/tools/validate-base-baseline.py
+
       - name: 模块静态校验(check-modules.sh 全 19 项)
         run: |
           set -uo pipefail
