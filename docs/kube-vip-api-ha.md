@@ -5,6 +5,11 @@
 > 涉及模块: `02_k8s/09_kube_vip.sh`(部署)· `02_k8s/08_verify_kube_vip.sh`(验证)· `02_k8s/06_k8s_deploy.sh`(阶段确认门)
 > 开关: `KUBE_VIP_ENABLED`(**默认 false**, 2026-09-24 由默认开改为默认关)· 配置项 `K8S_API_VIP` / `KUBE_VIP_INTERFACE` / `KUBE_VIP_CP_DETECT`(**默认 false**, 2026-09-24 由默认开改为默认关) / `KUBE_VIP_LOCAL_PROXY`
 > 上游资产: kubespray 原生支持(`deployments/kubespray/kubespray/`), 无需自研
+
+> ⚠️ **镜像供给已迁出(2026-11)**: 本文中出现的 `images.manifest` /
+> `harbor-save-images.sh` / `harbor-sync-images.sh` 是 2026-09 的历史实现。
+> 第三方镜像现由 [`container-image-mirror`](https://github.com/suanova/container-image-mirror)
+> 同步到 Harbor mirrors; installer 不再维护镜像清单或同步工具, 只消费版本树。
 >
 > 🔁 **2026-09-28 收编(读第 18 节前必看)**: 静态 Pod 清单的**写入权已完整交还 kubespray** ——
 > `addons.yml` 的 `kube_vip_enabled` 改为**跟随 `KUBE_VIP_ENABLED`**,自持渲染器与其测试已删除,
