@@ -1,0 +1,24 @@
+# patch: 17-local-volume-provisioner-2.10.0.patch
+# 目标: roles/kubespray_defaults/defaults/main/download.yml
+# 加入: 2026-11-04
+# 原因: 2026-11 Harbor CVE 报告(suanova/cubestack-operator#203)显示随包分发的
+#       local-volume-provisioner v2.5.0 是 Debian 11 + Go 1.17 的老镜像(18 Critical / 151 High)。
+#       上游 sig-storage-local-static-provisioner v2.10.0(2026-10-08)切到 Go 1.26.6 并修了
+#       CVE-2026-56854/56855/84304 等; 树内 v2.32.0 仍钉 2.5.0(latest kubespray 也未跟进),
+#       故用补丁把树内默认抬到 2.10.0, 让 profile/cluster.conf 的钉子与树表继续同值
+#       (check-modules ⑯/⑱ 断言免改)。LVP addon 默认关闭, 该镜像仅随离线包预载,
+#       升级不改动任何运行中组件; kubespray 的 DaemonSet 模板只传 `-v=`, 与 2.10.0 兼容。
+# 上游吸收判据: download.yml 的 local_volume_provisioner_version >= 2.10.0(换树自带新值即退休)
+# 上游化: 不提 PR(升级到上游尚未支持的版本属本地版本钉; 换树时由 --check-retired 判定退休)
+# ------------------------------------------------------------
+--- a/roles/kubespray_defaults/defaults/main/download.yml
++++ b/roles/kubespray_defaults/defaults/main/download.yml
+@@ -296,7 +296,7 @@ registry_image_tag: "{{ registry_version }}"
+ metrics_server_version: "0.9.0"
+ metrics_server_image_repo: "{{ kube_image_repo }}/metrics-server/metrics-server"
+ metrics_server_image_tag: "v{{ metrics_server_version }}"
+-local_volume_provisioner_version: "2.5.0"
++local_volume_provisioner_version: "2.10.0"
+ local_volume_provisioner_image_repo: "{{ kube_image_repo }}/sig-storage/local-volume-provisioner"
+ local_volume_provisioner_image_tag: "v{{ local_volume_provisioner_version }}"
+ local_path_provisioner_version: "0.0.37"
