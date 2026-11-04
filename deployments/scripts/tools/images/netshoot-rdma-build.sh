@@ -23,6 +23,9 @@
 #         sudo ./netshoot-rdma-build.sh --force         # 强制重建
 #         sudo ./netshoot-rdma-build.sh --online        # 基础镜像走 docker pull(不用本地 tar)
 #         sudo ./netshoot-rdma-build.sh --output DIR    # 指定输出目录
+#         sudo ./netshoot-rdma-build.sh --tag TAG --push --no-save
+#                                                      # CI: 构建 + 自检 + 推送 Harbor(不落 tar)
+#   ⚠ --push 需要 NETSHOOT_RDMA_IMAGE=<registry>/<project>/netshoot-rdma(完整 ref)
 # 换版本: sudo 会清空环境变量, VAR= 必须写在 sudo **之后**:
 #         sudo PERFTEST_VERSION=26.04.17 ./netshoot-rdma-build.sh --force
 # ============================================================
@@ -63,16 +66,25 @@ DOCKERFILE="${SCRIPT_DIR}/netshoot-rdma.Dockerfile"
 IMG_REF="${IMAGE_REPO}:${IMAGE_TAG}"
 TAR_PATH="${SAVE_DIR}/netshoot-rdma-${IMAGE_TAG}.tar"
 
-FORCE=0; ONLINE=0
+FORCE=0; ONLINE=0; PUSH=0; NO_SAVE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --force|-f)  FORCE=1 ;;
         --online)    ONLINE=1 ;;
-        --output)    shift; SAVE_DIR="${1:?--output 需要目录参数}"; TAR_PATH="${SAVE_DIR}/netshoot-rdma-${IMAGE_TAG}.tar" ;;
+        --push)      PUSH=1 ;;
+        --no-save)   NO_SAVE=1 ;;
+        --tag)       shift; IMAGE_TAG="${1:?--tag 需要版本参数}" ;;
+        --output)    shift; SAVE_DIR="${1:?--output 需要目录参数}" ;;
         *) err "未知参数: $1(用法见脚本头)"; exit 1 ;;
     esac
     shift
 done
+case "${IMAGE_TAG}" in ''|*[!0-9A-Za-z._-]*|latest) err "IMAGE_TAG 非法或禁止 latest: ${IMAGE_TAG}"; exit 1 ;; esac
+TAR_PATH="${SAVE_DIR}/netshoot-rdma-${IMAGE_TAG}.tar"
+IMG_REF="${IMAGE_REPO}:${IMAGE_TAG}"
+if [ "${PUSH}" = "1" ]; then
+    case "${IMAGE_REPO}" in */*) : ;; *) err "--push 需要 NETSHOOT_RDMA_IMAGE=<registry>/<project>/netshoot-rdma"; exit 1 ;; esac
+fi
 
 # ---- 前置检查 ----
 command -v docker >/dev/null 2>&1 || { err "未找到 docker(本脚本需在**联网机**上执行)"; exit 1; }
@@ -186,15 +198,33 @@ else
     exit 1
 fi
 
+# ---- 推送(CI) ----
+if [ "${PUSH}" = "1" ]; then
+    say " 推送 ${IMG_REF} ..."
+    docker push "${IMG_REF}" || { err "docker push 失败"; exit 1; }
+    _digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${IMG_REF}" \
+        | awk -F@ -v r="${IMG_REF}" '$1==r {print $2; exit}')"
+    ok "已推送: ${IMG_REF}${_digest:+ (${_digest})}"
+fi
+
 # ---- 保存 tar ----
-mkdir -p "${SAVE_DIR}"
-say " 保存离线 tar → ${TAR_PATH}"
-docker save "${IMG_REF}" -o "${TAR_PATH}" || { err "docker save 失败"; exit 1; }
-ok "已保存: ${TAR_PATH}($(du -h "${TAR_PATH}" | awk '{print $1}'))"
+if [ "${NO_SAVE}" = "1" ]; then
+    ok "已跳过 tar 保存(--no-save)"
+else
+    mkdir -p "${SAVE_DIR}"
+    say " 保存离线 tar → ${TAR_PATH}"
+    docker save "${IMG_REF}" -o "${TAR_PATH}" || { err "docker save 失败"; exit 1; }
+    ok "已保存: ${TAR_PATH}($(du -h "${TAR_PATH}" | awk '{print $1}'))"
+fi
 
 echo "---------------------------------------------"
 echo "  镜像 ref : ${IMG_REF}"
-echo "  离线 tar : ${TAR_PATH}"
+if [ "${NO_SAVE}" != "1" ]; then
+    echo "  离线 tar : ${TAR_PATH}"
+fi
+if [ "${PUSH}" = "1" ]; then
+    echo "  已推送   : ${IMG_REF}"
+fi
 echo "  下一步   :"
 echo "    ① tar 已在 ${SAVE_DIR}/ —— 与仓库约定一致, 部署机/容器同步即可;"
 echo "    ② 部署: sudo ./deploy-cluster.sh --steps netshoot(模块把 tar 推入集群内置 registry 后起诊断 pod)"

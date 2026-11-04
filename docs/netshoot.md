@@ -5,7 +5,9 @@
 (`ib_write_bw` / `ib_read_bw` / `ib_write_lat` …),用于 RDMA(IB/RoCE)链路诊断与带宽/时延实测。
 
 - 模块: `deployments/scripts/modules/03_addon/35_netshoot.sh`(key `netshoot`)
-- 镜像物料: `deployments/offline-files/netshoot/`(自建 tar;回退用 `offline-files/os/netshoot.tar`)
+- 镜像: `harbor.isuanova.com/suanova/netshoot-rdma:<immutable-tag>`(public)
+  - 构建/推送: `.github/workflows/build-netshoot-rdma.yml`(手工触发)
+  - 离线 tar: 由 release 打包或开源安装时从 public Harbor 物化到 `offline-files/netshoot/`
 - 默认命名空间 `default`,pod 名 `cubestack-netshoot`(固定名,便于 exec)
 
 ---
@@ -68,10 +70,20 @@ ib_write_bw -d mlx5_0 -a                 # 带宽实测(对端要同步起 ib_wr
 
 > 不降级的后果很直接: 无卡集群里 pod 永远 `Pending` —— "诊断工具"自己先挂了。
 
-## 4. 镜像构建(联网机)
+## 4. 镜像构建
+
+### 4.1 CI(发布通道, 推荐)
+
+`.github/workflows/build-netshoot-rdma.yml` 手工触发, 输入不可变 `tag`(如 `26.04.17`
+或 `26.04.17-r2`), 构建 + 自检后推送 `harbor.isuanova.com/suanova/netshoot-rdma:<tag>`。
+该镜像是 release base pin 和开源在线物化的共同来源; 不要用 `latest`。
+
+### 4.2 本地/联网机构建
 
 ```bash
 sudo ./deployments/scripts/tools/images/netshoot-rdma-build.sh            # 构建 + 自检 + 保存 tar
+sudo ./deployments/scripts/tools/images/netshoot-rdma-build.sh --tag 26.04.17-r2 --push --no-save
+                                                                            # 构建 + 自检 + 推送, 不落 tar
 sudo APK_MIRROR=https://mirrors.aliyun.com/alpine \
      ./deployments/scripts/tools/images/netshoot-rdma-build.sh --force    # 慢网络: 换 apk 源
 ```
