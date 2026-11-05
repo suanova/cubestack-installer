@@ -8,7 +8,12 @@ name: Rebuild installer CLI image
 #
 # operator chart 由外部版本树随包分发, 不再打进 CLI 镜像。
 #
-# 触发: push 到 main(部署代码/脚本/模板) 或 workflow_dispatch 手动重建
+# 触发: push 到 main/release-2.1(部署代码/脚本/模板) 或 workflow_dispatch 手动重建
+#
+# 按改动选择重建哪一层:
+#   · images/installer-cli-base/** 变化 → 重建 base + 代码层，并推两个镜像
+#   · images/installer-cli/** 或代码输入变化 → 只重建代码层
+#   · 代码层永远基于当前 base；base 变了必须连带重建代码层
 #
 # 一次性配置 (repo Settings):
 #   Secrets: HARBOR_MIRROR_PASSWORD
@@ -19,7 +24,7 @@ on:
   # Code-layer inputs baked into the CLI image. offline-files/ and
   # kubespray/versions/ are excluded on purpose (mounted/fetched at runtime).
   push:
-    branches: [main]
+    branches: [main, release-2.1]
     paths:
       - 'deployments/scripts/**'
       - 'deployments/kubespray/**'
@@ -39,6 +44,11 @@ on:
         description: '推送的 CLI 镜像版本(如 2.1.0; 留空=只推 :latest)'
         required: false
         default: ''
+      force_base:
+        description: '强制重建 base 层（base 变了会自动触发）'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -64,6 +74,34 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Detect changed layers
+        id: changes
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            build_base="${{ inputs.force_base }}"
+            build_cli=true
+          else
+            before="${{ github.event.before }}"
+            if [ -z "${before}" ] || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+              before="$(git rev-parse HEAD^)"
+            fi
+            changed="$(git diff --name-only "${before}" HEAD)"
+            echo "changed files:"; printf '%s\n' "${changed}"
+            build_base=false
+            build_cli=false
+            grep -qE '^images/installer-cli-base/' <<<"${changed}" && build_base=true
+            grep -qE '^images/installer-cli/' <<<"${changed}" && build_cli=true
+            grep -qE '^(deployments/scripts/|deployments/kubespray/|deployments/cubestack-addon/|deployments/config/|versions/|skills/|\.dockerignore$)' <<<"${changed}" \
+              && build_cli=true
+            # A base change is useless without rebuilding the code layer on top.
+            [ "${build_base}" = "true" ] && build_cli=true
+          fi
+          echo "build_base=${build_base}" >> "${GITHUB_OUTPUT}"
+          echo "build_cli=${build_cli}" >> "${GITHUB_OUTPUT}"
+          echo "build_base=${build_base} build_cli=${build_cli}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Validate configuration
         run: |
@@ -103,9 +141,14 @@ jobs:
           echo "${HARBOR_SECRET}" | docker login "${HARBOR_HOST}" -u "${HARBOR_USERNAME}" --password-stdin
 
       - name: Build CLI image
+        if: steps.changes.outputs.build_cli == 'true'
         run: |
           set -euo pipefail
-          bash deployments/scripts/tools/docker/build-cli-image.sh --build --engine docker
+          if [ "${{ steps.changes.outputs.build_base }}" = "true" ]; then
+            bash deployments/scripts/tools/docker/build-cli-image.sh --base --engine docker
+          else
+            bash deployments/scripts/tools/docker/build-cli-image.sh --build --engine docker
+          fi
           # build-cli-image.sh 固定产出 :latest; 需要版本 tag 时再打一层。
           built="harbor.isuanova.com/suanova/cubestack-installer-cli:latest"
           if [ "${IMAGE}" != "${built}" ]; then
@@ -113,13 +156,21 @@ jobs:
           fi
 
       - name: Verify required tools are baked into image
+        if: steps.changes.outputs.build_cli == 'true'
         run: |
           set -euo pipefail
           # patch 是 kubespray 补丁层的必需工具; 缺失会让补丁层静默跳过。
           docker run --rm --entrypoint bash "${IMAGE}" -lc \
             'command -v patch >/dev/null && patch --version | head -1'
 
+      - name: Push base image
+        if: steps.changes.outputs.build_base == 'true'
+        run: |
+          set -euo pipefail
+          docker push "${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:latest"
+
       - name: Push image
+        if: steps.changes.outputs.build_cli == 'true'
         run: |
           set -euo pipefail
           push_log="${RUNNER_TEMP}/docker-push.log"
