@@ -111,7 +111,7 @@ deployments/scripts/
 │   ├── check-manifests.sh     #   静态校验: 仓库自有 YAML 清单能否解析
 │   ├── vm/                    #   虚拟机: create-libvirt-vm.sh / create-vm-template.sh / register-vm.sh
 │   ├── net/                   #   网络: setup-vm-network.sh / verify-vm-network.sh / teardown-vm-network.sh / setup-libvirt-nat.sh
-│   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / install-worker-packages.sh / prepare-workers.sh
+│   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / prepare-workers.sh
 │   │                         #        setup-ntp.sh / sync-hosts.sh / sync-ca*.sh / rebootstrap*.sh
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
 │   ├── images/                #   镜像工具: nvidia-chart-images.sh(chart 反推镜像) / netshoot-rdma.Dockerfile
@@ -502,16 +502,17 @@ VM 已通过其他方式创建时,用此脚本将其注册到 `cluster.conf` 的
 
 幂等(已存在则跳过),内部复用 `lib-common.sh` 的 `register_node_to_conf()`(awk 实现)。
 
-### 5.10 install-worker-packages.sh —— 离线包安装到裸机 worker
+### 5.10 节点前置包检查
 
-bare-metal worker(Ubuntu)无法联网时,用 offline-files 中的离线 `.deb` 包安装 kubespray 所需系统包:
+节点前置包（iputils-ping / rsync / iptables / curl / ca-certificates / lvm2 / chrony 等）
+由 OS 黄金镜像或运维预装。installer 不下载、不安装 OS 包，只在部署前做存在性检查：
 
 ```bash
-./scripts/tools/node/install-worker-packages.sh <IP> [user]
-./scripts/tools/node/install-worker-packages.sh 192.168.100.232 ubuntu
+./scripts/tools/online/check-os-packages.sh \
+  --baseline versions/base.yaml --hosts ubuntu@<IP> --warn-only
 ```
 
-包来源: `deployments/offline-files/kubespray/cubestack-cluster/`(由 `OFFLINE_FILES_DIR` 全局变量指定)下的 `.deb` 文件(仓库根目录,与 kubeadm/etcd 等二进制同层)或 `packages/` 子目录,脚本自动收集两者并去重。包含 iputils-ping / rsync / iptables / curl / ca-certificates 及依赖。
+缺包时按清单在节点上安装后重跑；`--warn-only` 只告警，`--check-os-packages` 阻断。
 
 ### 5.11 版本树(offline-files)消费
 
@@ -619,7 +620,7 @@ sudo ./scripts/deploy-cluster.sh --with-k8s
 2. `gen-ssh-key.sh` 生成 SSH 密钥
 3. 按 NODES 创建 master/worker 虚拟机(基础镜像已由 `create-vm-template.sh` 预制 kubespray 所需包, 创建 VM 不安装任何组件, 离线环境安全)
 4. `setup-passwordless.sh` 注入公钥
-5. 对 worker 执行 `install-worker-packages.sh` 安装离线包
+5. 检查 worker 节点前置包是否已安装（installer 不安装 OS 包）
 6. `gen-inventory.sh` + `sync-kubespray-config.sh` 生成 inventory 与配置
 7. `setup-ntp.sh`(modules/02_k8s/05_k8s_ntp)同步各节点时间到权威(首 master), 校验偏差 ≤ `NTP_MAX_OFFSET_MS`(在 kubespray 之前)
 8. `cubestack-offline.sh install` 执行 kubespray 离线部署
@@ -676,8 +677,9 @@ CUBESTACK_KUBESPRAY_DIR=$PWD/kubespray \
 export SSHPASS='<worker密码>'
 sshpass -e ssh ubuntu@<workerIP> "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" < ~/.ssh/cubestack_k8s.pub
 
-# ② 安装离线系统包
-./scripts/tools/node/install-worker-packages.sh <workerIP> ubuntu
+# ② 确认节点前置包已安装（installer 不安装 OS 包）
+./scripts/tools/online/check-os-packages.sh \
+  --baseline versions/base.yaml --hosts ubuntu@<workerIP> --warn-only
 
 # ③ 加入 inventory 后扩容
 #    注意: worker 通过宿主机 IP:6443(DNAT)访问 API Server,需确保 /etc/hosts 与证书 SAN 配置正确(见 5.8)

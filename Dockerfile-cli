@@ -46,6 +46,7 @@ WORKDIR ${REPO_ROOT}
 RUN rm -rf ${REPO_ROOT}/deployments ${REPO_ROOT}/skills 2>/dev/null || true
 COPY deployments ${REPO_ROOT}/deployments
 COPY skills ${REPO_ROOT}/skills
+COPY versions ${REPO_ROOT}/versions
 
 # ⚠ 本层**只放部署代码**(用户口径 2026-09-30): 系统工具/package/ansible 依赖全在 base 层;
 #   requirements.txt 变了(新增 python 依赖)请**重建 base**: --base。

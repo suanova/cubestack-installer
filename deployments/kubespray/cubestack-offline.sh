@@ -89,8 +89,8 @@ err()       { local m="[ERROR] $*"; echo -e "${RED}${m}${NC}" >&2; _log_file "${
 highlight() { local m=">>> $*";     echo -e "${CYAN}${m}${NC}"; _log_file "${m}"; }
 
 # 写文件: 内嵌内容为权威 —— 缺失则生成; 存在但内容不同则覆盖(2026-10-08)。
-# 背景: 旧的"仅缺失才生成"模式在内容演进后**永不更新**(实机: 老树 install-packages.yml 缺
-#   os/packages 新路径修复, 靠人肉 docker cp 补; 树文件丢失走兜底重建时还会生成旧内容)。
+# 背景: 旧的"仅缺失才生成"模式在内容演进后**永不更新**(实机: 老树 playbook 缺
+#   新路径修复, 靠人肉 docker cp 补; 树文件丢失走兜底重建时还会生成旧内容)。
 _write_if_changed() {
     local target="$1" tmp
     tmp="$(mktemp)"
@@ -172,6 +172,7 @@ usage() {
     echo "命令:"
     echo "  init       [名称]           初始化环境"
     echo "  download   [名称]           下载离线资源（使用 download-hosts.yml，本地 root）"
+    echo "  download-files [名称]       仅下载 k8s 二进制/文件（不拉镜像；在线安装用）"
     echo "  install    [名称] [选项]    执行集群安装（使用 hosts.yml，各节点用户按 ansible_user）"
     echo "  reset      [名称] --yes     清除目标节点上的旧集群状态（覆盖安装的前置步骤; 见下）"
     echo "  scale      [名称] [选项]    扩容集群 — 添加新节点到已有集群"
@@ -376,6 +377,30 @@ ensure_cluster_dirs() {
     log "✅ 集群目录已就绪: ${CLUSTER_NAME}"
 }
 
+# download-hosts.yml is only used to generate the offline image/file lists on
+# localhost. `download` and `download-files` both need it; keep the template in
+# one place.
+ensure_download_hosts() {
+    [ -f "${INVENTORY_DIR}/download-hosts.yml" ] && return 0
+    cat > "${INVENTORY_DIR}/download-hosts.yml" << 'DOWNLOAD_EOF'
+# Download-only inventory — localhost with root
+# Used by generate_list.sh, no SSH to nodes required.
+[kube_control_plane]
+node1 ansible_host=localhost ansible_user=root
+
+[etcd:children]
+kube_control_plane
+
+[kube_node]
+node1 ansible_host=localhost ansible_user=root
+
+[k8s_cluster:children]
+kube_control_plane
+kube_node
+DOWNLOAD_EOF
+    log "✅ 已生成 download-hosts.yml（本地 root，用于下载离线资源）"
+}
+
 cmd_init() {
     highlight "初始化集群 [${CLUSTER_NAME}] 部署环境..."
     ensure_kubespray
@@ -486,25 +511,7 @@ kube_control_plane
 kube_node
 SCALE_MASTER_EOF
     log "✅ 已生成 Scale 示例文件: ${INVENTORY_DIR}/_examples/"
-    if [ ! -f "${INVENTORY_DIR}/download-hosts.yml" ]; then
-        cat > "${INVENTORY_DIR}/download-hosts.yml" << 'DOWNLOAD_EOF'
-# Download-only inventory — localhost with root
-# Used by generate_list.sh, no SSH to nodes required.
-[kube_control_plane]
-node1 ansible_host=localhost ansible_user=root
-
-[etcd:children]
-kube_control_plane
-
-[kube_node]
-node1 ansible_host=localhost ansible_user=root
-
-[k8s_cluster:children]
-kube_control_plane
-kube_node
-DOWNLOAD_EOF
-        log "✅ 已生成 download-hosts.yml（本地 root，用于下载离线资源）"
-    fi
+    ensure_download_hosts
     log "🎉 集群 [${CLUSTER_NAME}] 初始化完成! 下一步: 编辑 hosts.yml → $0 download ${CLUSTER_NAME}"
 }
 
@@ -555,22 +562,27 @@ cmd_download() {
     ensure_kubespray
     ensure_venv
     ensure_cluster_dirs
+    ensure_download_hosts
 
     DOWNLOAD_HOSTS_FILE="${DOWNLOAD_HOSTS:-${INVENTORY_DIR}/download-hosts.yml}"
     [ -f "${DOWNLOAD_HOSTS_FILE}" ] || err "Download hosts 不存在: ${DOWNLOAD_HOSTS_FILE}"
 
-    runtime=$(detect_runtime)
-    pull_cmd=$(get_pull_cmd "$runtime")
-    save_cmd=$(get_save_cmd "$runtime")
-    log "容器运行时: ${runtime}"
+    if [ "${SKIP_IMAGES}" != "1" ]; then
+        runtime=$(detect_runtime)
+        pull_cmd=$(get_pull_cmd "$runtime")
+        save_cmd=$(get_save_cmd "$runtime")
+        log "容器运行时: ${runtime}"
+    fi
 
     build_extra_vars
 
     log "[1/4] 生成离线资源清单..."
     cd "${OFFLINE_CONTRIB}"
     bash generate_list.sh -i "${DOWNLOAD_HOSTS_FILE}" ${EXTRA_VARS_STR}
-    [ -s "temp/images.list" ] || err "images.list 为空"
     [ -s "temp/files.list" ] || err "files.list 为空"
+    if [ "${SKIP_IMAGES}" != "1" ]; then
+        [ -s "temp/images.list" ] || err "images.list 为空"
+    fi
 
     log "    生成文件命名映射..."
     cd "${KUBESPRAY_DIR}"
@@ -600,10 +612,17 @@ PLAYBOOK_EOF
     cd "${OFFLINE_CONTRIB}"
     [ -s "temp/url_dest.map" ] || warn "URL→dest 映射为空，将使用 URL basename"
 
-    total_images=$(wc -l < "temp/images.list" | tr -d ' ')
+    if [ "${SKIP_IMAGES}" = "1" ]; then
+        total_images=0
+    else
+        total_images=$(wc -l < "temp/images.list" | tr -d ' ')
+    fi
     total_files=$(wc -l < "temp/files.list" | tr -d ' ')
     log "    镜像清单: ${total_images} 个, 文件清单: ${total_files} 个"
 
+    if [ "${SKIP_IMAGES}" = "1" ]; then
+        log "[2/4] 跳过容器镜像（在线模式使用 mirror 物化结果）"
+    else
     log "[2/4] 下载容器镜像..."
     mkdir -p "${LOCAL_REPO_DIR}/images"
 
@@ -639,6 +658,7 @@ PLAYBOOK_EOF
     done < "temp/images.list"
 
     log "    镜像下载完成: $(ls "${LOCAL_REPO_DIR}/images/" | wc -l) 个"
+    fi
 
     log "[3/4] 下载二进制文件..."
     url_dest_map="${OFFLINE_CONTRIB}/temp/url_dest.map"
@@ -1138,10 +1158,6 @@ PYEOF
     done
 }
 
-# 将"离线安装系统包(lvm2 等)"play 注入 cluster.yml/scale.yml(幂等, 与 ensure_registry_play 同机制)
-# 作用: 在 k8s 部署阶段把 offline-files/os/packages 的 .deb(lvm2 全家桶等)自动
-#       安装到全部 kube_node —— 供后续 ceph/Rook OSD 使用(重启后逻辑卷激活依赖 lvm)。
-#       包来源与 lvm2 离线准备见 patch-playbooks/install-packages.yml 头部注释。
 # 将"单节点集群控制面污点收敛"play 注入 cluster.yml/scale.yml(幂等, 与 ensure_cni_restart_play 同机制)
 # ⚠ 位置必须在**控制面起来之后**:该 play 用 kubectl(`/etc/kubernetes/admin.conf`)数 control-plane 节点,
 #   在 "Install etcd"/kubeadm 之前跑必然失败(2026-09-28 实机:全新集群全量部署中断在 node-3-28,
@@ -1208,296 +1224,6 @@ PYEOF
             log "✅ 已挂载单节点收敛 play 到 ${name}(K8s+CNI 之后)"
         else
             warn "无法挂载单节点收敛 play 到 ${name}(未找到插入标记, kubespray 版本结构可能已变化)"
-        fi
-    done
-}
-
-ensure_packages_play() {
-    local py name packages_file="${KUBESPRAY_DIR}/patch-playbooks/install-packages.yml"
-    # kubespray 升级/重新 clone 会丢失 patch-playbooks → 从内置内容重新生成(与 ensure_preload_play 同机制)
-# 生成 PKG_EOF 内嵌内容(权威源; 由 _write_if_changed 决定是否落盘)
-_gen_install_packages_play() {
-    cat << 'PKG_EOF'
----
-# ============================================================
-# 离线安装**全部 k8s 节点**(worker + control-plane)的系统包(lvm2/curl/rsync/iptables 等)
-# ⚠ 2026-09-30 根因修复: 原为 `hosts: kube_node`(**只 worker**)⇒ **master 从未拿到这批离线包**,
-#   而 master 上 base 镜像没自带 curl ⇒ 依赖 curl 的检查/脚本全挂(实测: master01 缺 curl,
-#   而 lvm2/rsync/iptables/ca-certificates 都在 —— 别处装过, curl 只在这条 play 里发)。
-#   注意 master 在本项目里**也可能是 Ceph 存储节点**(CEPH_NODE_ROLE 默认 master)⇒ lvm 家族同样需要。
-# 将 offline-files 中的 .deb 包复制到目标节点并安装
-# 包来源: offline-files/os/packages/*.deb(**版本无关 OS 层**, 2026-10-08 起节点 .deb 统一收敛
-#         到此目录; 原 <版本目录>/packages 与 packages/repair 已并入 —— 同名同版本去重)
-# 路径说明: playbook 位于 kubespray/patch-playbooks/,
-#           {{ offline_dir }}/../../os/packages = deployments/offline-files/os/packages
-# 挂载: 由 cubestack-offline.sh ensure_packages_play 自动注入 cluster.yml/scale.yml
-#       (k8s 部署阶段自动安装; kubespray 升级后自动重新挂载)。
-# lvm2: 离线包由联网机 tools/offline/fetch-lvm-packages.sh 生成到共享 packages/ 目录;
-#       未包含 lvm2 .deb 时仅告警不失败(其余包照常安装), 避免 packages/ 内容变化误失败。
-# 用法(手动):
-#   ansible-playbook -i <inventory> install-packages.yml
-# ============================================================
-- name: Install required packages on all cluster nodes (workers + control plane)
-  hosts: kube_node:kube_control_plane
-  gather_facts: false
-  vars:
-    # 必需包(唯一来源): 末尾断言按此校验; 上面的"资产预检"也按此检查 .deb 是否随离线件提供。
-    required_packages:
-      - iputils-ping
-      - rsync
-      - iptables
-      - curl
-      - ca-certificates
-      - lvm2
-      - dmsetup
-      - dmeventd
-      - libdevmapper1.02.1
-      - libdevmapper-event1.02.1
-      - thin-provisioning-tools
-    # ★ 离线目录解析: 优先用 offline.yml 注入的 download_cache_dir(= LOCAL_REPO_DIR, 由
-    #   cubestack-offline.sh 生成且 -e @offline.yml 全局可用), 保证与离线文件实际位置一致;
-    #   容器/standalone 下 playbook_dir 相对路径会算到 deployments/kubespray/offline-files(不存在)。
-    #   回退: 相对路径(inventory_dir | basename, 无硬编码)。
-    offline_dir: "{{ download_cache_dir | default(playbook_dir + '/../../offline-files/kubespray') }}"
-    # ★ 2026-10-08: 节点 .deb 统一收敛到 offline-files/os/packages(版本无关 OS 层, 见该目录 README);
-    #   原 <版本目录>/packages 与 packages/repair 已并入(同名同版本去重), repair 白名单 find 一并取消。
-    packages_dirs:
-      - "{{ offline_dir }}/../../os/packages"
-
-  tasks:
-    - name: Ensure /tmp/packages directory exists on target
-      file:
-        path: /tmp/packages
-        state: directory
-
-    - name: Find offline .deb packages (os/packages)
-      find:
-        paths: "{{ packages_dirs }}"
-        patterns: "*.deb"
-        file_type: file
-      delegate_to: localhost
-      register: deb_files
-
-    - name: Copy offline .deb packages to target
-      # ★ 不能 delegate_to: localhost —— 那样 src/dest 都解析为控制器路径, 只会把 .deb 原地复制到
-      #   控制器 /tmp/packages, 节点永远收不到(此前 dpkg 报 cannot access archive)。
-      #   不 delegate 时任务在目标节点执行, copy 自动从控制器(src)拉取到节点(dest), 这才是跨主机传输。
-      copy:
-        src: "{{ item.path }}"
-        dest: /tmp/packages/
-      loop: "{{ deb_files.files | default([]) }}"
-      when: (deb_files.files | default([])) | length > 0
-
-    - name: Install packages from local files (逐包安装, 单包失败不阻断)
-      # ★ 逐个 dpkg -i + ignore_errors: 任何单个包失败(如 skopeo 缺 golang-github-containers-common /
-      #   libgpgme11, sysstat 缺 libsensors5)都只记失败、不中断整个 k8s 部署 —— 需要与否由下方
-      #   "Verify required packages" 按必需包校验(仅 base 工具 + lvm 家族, 非全部 .deb)。
-      # ★ 2026-09-24 事故修复(实机: ansible 任务"有时候卡在这里很长时间", 实测卡 38 分钟以上):
-      #   链式根因 —— dpkg -i dmsetup/lvm2 → initramfs-tools.postinst → `update-initramfs -u`
-      #   → mkinitramfs → hooks/mdadm → `mdadm --examine --scan`(遍历**所有**块设备)
-      #   → 读到**上一代集群遗留、后端已不可达的 /dev/rbd0** → 进程进 D 状态(不可中断), 永不返回;
-      #   同一节点上还有 ext4 挂在那块 rbd 上, 其 jbd2 线程也一并卡死(实测 [registry] 内核线程
-      #   D 态 1h37m)。8 台里只有 2 台(3-33/3-36)有该残留 → 于是表现为"有时候"卡住。
-      #   两层修复:
-      #     ① **安装期间禁用 initramfs 重建**(update_initramfs=no, 装完恢复): 我们发的包
-      #        (lvm2/dmsetup 家族)在这些节点上**不需要**重建 initrd(内核没变、root 不在 LVM 上),
-      #        而重建会把 initramfs 的所有 hooks 跑一遍(pvscan/vgscan/mdadm 都会扫设备)——
-      #        只要有 hang 住的块设备就必卡。禁用后这条链根本不会被触发。
-      #     ② **已安装且版本相同 → 跳过**: 之前每次部署都对同一批 .deb 重跑 dpkg -i,
-      #        不仅重复触发 postinst/触发器链, 也在无谓地消耗时间。
-      shell: |
-        set -u
-        ir_conf=/etc/initramfs-tools/update-initramfs.conf
-        ir_backup=""
-        if [ -f "${ir_conf}" ] && ! grep -qE '^[[:space:]]*update_initramfs[[:space:]]*=[[:space:]]*no' "${ir_conf}"; then
-          ir_backup="$(mktemp)"
-          cp -a "${ir_conf}" "${ir_backup}"
-          if grep -qE '^[[:space:]]*update_initramfs=' "${ir_conf}"; then
-            sed -i -E 's|^[[:space:]]*update_initramfs=.*|update_initramfs=no|' "${ir_conf}"
-          else
-            echo 'update_initramfs=no' >> "${ir_conf}"
-          fi
-          echo "[install-packages] 本次安装期间已禁用 initramfs 重建(避免 mdadm/lvm hooks 扫描块设备而卡死)"
-        fi
-        n_rbd="$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ')"
-        if [ "${n_rbd:-0}" -gt 0 ]; then
-          echo "[install-packages] ⚠ 本节点存在 ${n_rbd} 个内核 rbd 映射 —— 若其后端已不可达, 任何设备扫描都会卡死; 见 docs/troubleshooting.md"
-        fi
-        # ★ 2026-09-29(用户要求: 装之前先修 apt)—— **离线安全版**:
-        #   `apt --fix-broken install` / `apt-get -f install` 在纯离线节点上会去抓缺失的包并失败
-        #   (实机: `E: Unable to fetch some archives`), 所以这里只做**不需要网络**的两步:
-        #     ① `dpkg --configure -a`        —— 把"解包未配置"(iU)的包配上(依赖已在场时才可能成功)
-        #     ② `apt-get -f install --no-download` —— 只用 /var/cache/apt/archives 里已有的包补依赖
-        #   两步都 best-effort 不阻断; 真正"缺依赖且离线补不到"的可选包由下方回滚逻辑兜底。
-        dpkg --configure -a >/dev/null 2>&1 || true
-        apt-get -f install --no-download -y >/dev/null 2>&1 || true
-        dpkg --configure -a >/dev/null 2>&1 || true
-        failed=""
-        skipped=""
-        attempted=""
-        for deb in /tmp/packages/*.deb; do
-          [ -e "${deb}" ] || continue
-          pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"
-          newver="$(dpkg-deb -f "${deb}" Version 2>/dev/null)"
-          curstat="$(dpkg-query -W -f='${db:Status-Abbrev}|${Version}' "${pkg}" 2>/dev/null || true)"
-          # ★ 2026-09-28 事故修复(实机): 判据原为"**已装且版本相同**才跳过" ⇒ 版本不同的离线包
-          #   会被覆盖安装 —— 本仓库的 libudev1_…3.22 就这么把节点的 libudev1(3.12)升了级,
-          #   而节点的 udev 仍是 3.12 且**严格依赖 `libudev1 (= 3.12)`** ⇒ dpkg 依赖被打破,
-          #   该节点上**任何 apt 操作都失败**(E: Unmet dependencies)⇒ 下次部署在 bootstrap_os →
-          #   system_packages 的 "Manage packages" 上死掉(且报错只提 udev, 根因在几轮之前)。
-          #   现改为与 tools/node/install-worker-packages.sh 同一条经过验证的规则:
-          #   **远端已装同名包(任意版本) ⇒ 一律跳过**(宁缺毋滥, 绝不拿离线包去动节点已装的系统包);
-          #   需要"升级"时走 apt, 不走这套离线 .deb。必需包**是否在场**由下方 Verify required packages 校验。
-          if [ -n "${pkg}" ] && [ -n "${newver}" ] && [ "${curstat#ii }" != "${curstat}" ]; then
-            skipped="${skipped} ${pkg}"
-            continue
-          fi
-          attempted="${attempted} ${deb}"
-          dpkg -i "${deb}" >/dev/null 2>&1 || true
-        done
-        # ★ 2026-09-29 根因修复(第二层): 逐个 dpkg -i 时, **依赖包排在后面就必然先失败** ——
-        #   curl 依赖 libcurl4, 而字典序 `curl_*` 在 `libcurl4_*` 之前 ⇒ curl 首轮必失败、
-        #   libcurl4 紧随其后装上, 结果 curl 始终缺失(在自带 curl 的镜像上被掩盖)。
-        #   这里把首轮**没装上**的包**成组再装一次**: 同一次 dpkg -i 调用内 dpkg 会自行排序,
-        #   满足批内依赖。
-        retry=""
-        for deb in ${attempted}; do
-          pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"
-          dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null | grep -q '^ii' || retry="${retry} ${deb}"
-        done
-        if [ -n "${retry}" ]; then
-          # shellcheck disable=SC2086
-          dpkg -i ${retry} >/dev/null 2>&1 || true
-        fi
-        # ★ 2026-09-29 根因修复(第三层; 实机: 精简 VM 上 sysstat 卡在 `iU` ⇒ apt 依赖图破损 ⇒
-        #   node_pkgs 对账硬失败、整个部署中断):
-        #   可选包的**依赖没随离线件提供**时, dpkg -i 会把它留在"解包未配置"(iU) —— 这不止是该包
-        #   不可用, 还会**弄坏 apt 依赖图**(之后任何 apt 操作都报 Unmet dependencies), 而离线节点上
-        #   apt 补不回来(要联网抓包) ⇒ **回滚**: 把尝试过却没配起来的包 purge 掉, 恢复 apt 健康,
-        #   并明确打印"缺哪个依赖 → 应补哪个 deb 进 packages/"。最终成功与否一律按**实际安装状态**
-        #   (dpkg-query 的 `ii`)判定, 不看 dpkg 退出码。
-        rolled=""
-        for deb in ${attempted}; do
-          pkg="$(dpkg-deb -f "${deb}" Package 2>/dev/null)"
-          [ -n "${pkg}" ] || continue
-          st="$(dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null || true)"
-          case "${st}" in
-            ii*) continue ;;                                            # 装好
-            "")  failed="${failed} $(basename "${deb}")"; continue ;;    # 根本没落进 dpkg
-          esac
-          miss=""
-          for d in $(dpkg-deb -f "${deb}" Depends 2>/dev/null | tr ',' '\n' \
-                     | sed 's/([^)]*)//g; s/|.*//g; s/[[:space:]]//g'); do
-            [ -n "${d}" ] || continue
-            dpkg-query -W -f='${db:Status-Abbrev}' "${d}" 2>/dev/null | grep -q '^ii' || miss="${miss} ${d}"
-          done
-          if dpkg --purge "${pkg}" >/dev/null 2>&1; then
-            rolled="${rolled} ${pkg}(缺:${miss:-未知})"
-          else
-            failed="${failed} ${pkg}(回滚失败)"
-          fi
-        done
-        if [ -n "${ir_backup}" ] && [ -f "${ir_backup}" ]; then
-          cp -a "${ir_backup}" "${ir_conf}"; rm -f "${ir_backup}"
-        fi
-        rm -rf /tmp/packages
-        [ -n "${skipped}" ] && echo "[install-packages] 已装(任意版本) ⇒ 跳过(不改动节点已装系统包):${skipped}"
-        if [ -n "${rolled}" ]; then
-          echo "⚠ 以下可选包因**依赖未随离线件提供**装不全, 已回滚(purge)以保住 apt 依赖图健康:${rolled}"
-          echo "   ↳ 修法: 把这些依赖的 .deb 也放进 packages/(或在联网机把它们加进 tools/offline/fetch-lvm-packages.sh 的清单后重跑)"
-        fi
-        if [ -n "${failed}" ]; then
-          echo "⚠ 以下包安装失败且未能回滚(请人工确认, 会影响 apt 依赖图):${failed}"
-        fi
-      become: true
-      ignore_errors: true
-      when: deb_files.files | length > 0
-
-    - name: Derive expected package names from shipped .deb files
-      # deb 文件名 <name>_<version>_<arch>.deb → 包名(如 lvm2_2.03.11-2.1ubuntu2_amd64.deb → lvm2)
-      set_fact:
-        expected_packages: >-
-          {{ (deb_files.files | default([]))
-             | map(attribute='path') | map('basename') | map('regex_replace', '_.*', '') | unique | list }}
-      when: (deb_files.files | default([])) | length > 0
-
-    - name: Warn when lvm2 offline package is not shipped
-      debug:
-        msg: >-
-          ⚠ os/packages 未包含 lvm2 离线包 —— 存储节点无法离线安装 lvm2
-          (Rook OSD 重启后需 lvm 激活逻辑卷)。请先在联网机执行
-          tools/offline/fetch-lvm-packages.sh 并把 .deb 放到 os/packages 目录。
-      when:
-        - deb_files.files | length > 0
-        - "'lvm2' not in expected_packages"
-
-    - name: "Precheck: 必需包必须随离线件提供 .deb(缺失则立刻停, 不等节点断言)"
-      # ★ 2026-09-29 加: 这条把"离线件缺包"从**节点上的断言失败**(在 3 台机器上刷屏、看不出该补什么)
-      #   提前成**起点处的明确报错**。本文件历史上就吃过一次: required_packages 里有 curl,
-      #   而 curl 的 .deb 只在 packages/repair/(find 不递归扫不到) ⇒ 精简 VM 上必失败。
-      #   (2026-10-08 repair/ 并入 os/packages 后此坑自动消失, 断言保留作一般防护)
-      assert:
-        that:
-          - item in (expected_packages | default([]))
-        fail_msg: >-
-          ❌ 必需包 {{ item }} 没有对应的 .deb 随离线件提供(它会缺席节点, 并让本 play 末尾的断言失败)。
-          修法: 把 {{ item }} 的 .deb 放进 offline-files/os/packages/(联网机下载后同步该目录)。
-        success_msg: "必需包 {{ item }} 的 .deb 已随离线件提供"
-      loop: "{{ required_packages }}"
-      when: (deb_files.files | default([])) | length > 0
-
-    - name: Verify required packages
-      package_facts:
-        manager: apt
-      when: deb_files.files | length > 0
-
-    - name: "Check installation status (仅必需包: base 工具 + lvm 家族; skopeo/sysstat 等可选包失败不阻断)"
-      assert:
-        that:
-          - item in ansible_facts.packages
-        fail_msg: "Required package missing on {{ inventory_hostname }}: {{ item }}"
-        success_msg: "All required packages installed on {{ inventory_hostname }}"
-      loop: "{{ required_packages }}"
-      when: (deb_files.files | default([])) | length > 0
-PKG_EOF
-}
-
-    # 2026-10-08: 内嵌内容为权威 —— 缺失生成, 漂移即刷新(旧版不更新曾致实机缺口)
-    _write_if_changed "${packages_file}" < <(_gen_install_packages_play)
-    for py in "${KUBESPRAY_DIR}/playbooks/cluster.yml" "${KUBESPRAY_DIR}/playbooks/scale.yml"; do
-        [ -f "${py}" ] || continue
-        name="$(basename "${py}")"
-        if grep -q "install-packages.yml" "${py}"; then
-            log "✅ ${name} 已挂载系统包安装 play"
-            continue
-        fi
-        python3 - "${py}" "${name}" << 'PYEOF'
-import sys
-path, name = sys.argv[1], sys.argv[2]
-src = open(path).read()
-marker = {
-    "cluster.yml": "- name: Install etcd",
-    "scale.yml": '- name: Target only workers to get kubelet installed and checking in on any new nodes(node)',
-}.get(name)
-if not marker or marker not in src:
-    print("marker not found, skip")
-    sys.exit(0)
-block = (
-    "# ──────────────────────────────────────────────────────────────────────\n"
-    "# 离线安装系统包(lvm2 全家桶等): 把 offline-files/os/packages 的 .deb\n"
-    "# 装到全部 kube_node, 供后续 ceph/Rook OSD 使用(重启后逻辑卷激活依赖 lvm)。\n"
-    "# 本 import 由入口脚本 ensure_packages_play 自动维护(kubespray 升级后重新挂载)\n"
-    "# ──────────────────────────────────────────────────────────────────────\n"
-    "- name: Install offline packages (lvm2 etc.) on kube nodes\n"
-    "  import_playbook: ../patch-playbooks/install-packages.yml\n"
-)
-open(path, "w").write(src.replace(marker, block + "\n" + marker, 1))
-print("patched")
-PYEOF
-        if grep -q "install-packages.yml" "${py}"; then
-            log "✅ 已挂载系统包安装 play 到 ${name}"
-        else
-            warn "无法挂载系统包安装 play 到 ${name}(未找到插入标记, kubespray 版本结构可能已变化)"
         fi
     done
 }
@@ -2273,9 +1999,6 @@ cmd_install() {
     # 确保 cluster.yml 已挂载单节点控制面收敛 play(⚠ 必须在 K8s+CNI 之后, 见函数注释)
     ensure_single_node_play
 
-    # 确保 cluster.yml 已挂载系统包安装 play(lvm2 等离线 .deb, 供 ceph/Rook OSD)
-    ensure_packages_play
-
     # 确保 cluster.yml 已挂载 CNI 重启 play(K8s+CNI 之后、operator 之前重启 containerd+kubelet)
     ensure_cni_restart_play
 
@@ -2450,9 +2173,6 @@ PYEOF
     # 确保 scale.yml 已挂载镜像预加载 play(kubespray 升级后自动重新挂载)
     ensure_preload_play
 
-    # 确保 scale.yml 已挂载系统包安装 play(新 worker 离线安装 lvm2 等)
-    ensure_packages_play
-
     # 确保 scale.yml 已挂载 CNI 重启 play(新节点 K8s+CNI 之后重启 containerd+kubelet)
     ensure_cni_restart_play
 
@@ -2603,6 +2323,7 @@ PYEOF
 # 主入口 — 参数解析
 # ──────────────────────────────────────────────────────────
 LIMIT_GROUP=""
+SKIP_IMAGES=0
 COMMAND=""
 CLUSTER_ARG=""
 RESET_YES=0
@@ -2814,6 +2535,10 @@ case "${COMMAND}" in
     init)     cmd_init ;;
     paths)    cmd_paths ;;
     download) cmd_download ;;
+    download-files)
+        SKIP_IMAGES=1
+        cmd_download
+        ;;
     reset)    cmd_reset ;;
     install)
         # 整个安装过程所有日志(含 ansible): 同时显示终端 + 写入日志文件

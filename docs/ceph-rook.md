@@ -28,7 +28,7 @@
 | 裸盘 | **自动分类**磁盘(`tools/k8s/ceph-detect-disks.sh`, 判定见 §4) | CR 取 `free ∪ ceph`(空闲 + 上次 Ceph 占用); `inuse`(在用)/`mixed`(混合)不选不清理; 精确盘名, 不用正则, 防误选 |
 | 安全确认 | 部署前红底列出"节点+裸盘", **sleep 60s**(`CEPH_CONFIRM_SLEEP`) | 防覆盖系统盘/在用盘(CI 可 `CEPH_CONFIRM_SLEEP=0`); **k8s 部署阶段**(`k8s_deploy`)也预检一次 |
 | 镜像 | 离线 tar → `ctr -n k8s.io import --no-unpack` | 保持原始 ref, 无需改 manifest; 多架构需 `--platform linux/amd64` 单架构拉取 |
-| lvm2 | 离线 `.deb`(`offline-files/kubespray/packages`) | 重启后 Rook OSD 逻辑卷需 lvm 激活; **k8s 部署阶段由 install-packages.yml 自动安装**(见 §2) |
+| lvm2 | OS 镜像/运维预装 | 重启后 Rook OSD 逻辑卷需 lvm 激活; **installer 只检查, 不安装**(缺失时 `02_ceph` 硬失败) |
 | registry 后端 | `REGISTRY_STORAGE_CLASS=ceph-block` | registry PVC 走 ceph RBD, **替代 local-path**(ceph 模块排在 registry 之前; 可 `LOCAL_PATH_ENABLED=false` 彻底不装 local-path) |
 
 ## 2. 前置离线物料(联网机准备, 部署机离线)
@@ -37,22 +37,16 @@
 |---|---|---|
 | Rook manifests(crds/common/csi-operator/operator/toolbox) | `tools/k8s/rook-fetch-manifests.sh`(ROOK_VERSION=v1.20.2) | `deployments/cubestack-addon/rook/` |
 | Ceph 镜像 tar(13 个) | 版本树 / `container-image-mirror` 同步 Harbor | `offline-files/kubespray/<版本>/images/`(与 kubespray 镜像同目录) |
-| lvm2 + 依赖 `.deb` | `tools/offline/fetch-lvm-packages.sh` | `deployments/offline-files/kubespray/packages/`(✅ 已就绪: 11 个 lvm 家族 .deb) |
 | VM 数据盘 | `vm-nodes.conf` 的 `VM_DATA_DISKS=3`/`VM_DATA_DISK_SIZE=200` | 每台 VM 附加 3×200GB 裸盘(Guest: `/dev/vdb~vdX`) |
 
 ```
 # 联网机一次性:
 sudo ./deployments/scripts/tools/k8s/rook-fetch-manifests.sh
-sudo ./deployments/scripts/tools/offline/fetch-lvm-packages.sh   # ⚠ 必须先于 ceph 部署: 生成 lvm2 全家桶 .deb
 ```
 
-> **lvm2 离线包(fetch-lvm-packages.sh)**: 用 `apt-get download` 显式拉取 lvm2 + 依赖
-> (dmsetup/dmeventd/thin-provisioning-tools/libdevmapper*/liblvm2cmd2.03/libaio1/libudev1/libreadline8/libedit2,
-> 共 11 个)——不用 `--download-only`(本机已装 lvm2 会 0 upgraded 什么都不下载)。
-> 每次重跑幂等(已存在跳过)。
-> **lvm 部署前预检(02_ceph 模块)**: 部署 ceph 集群前硬校验"packages/ 含 lvm2_*.deb **或** 存储节点已在线装 lvm",
-> 均不满足 → 红底硬失败并指引先跑 fetch-lvm-packages.sh —— 杜绝"OSD 因缺 lvm 无法激活"的隐性失败;
-> 部署中按节点检测 lvm2, 缺失时从 packages/ 自动 dpkg -i。
+> **lvm2 由节点 OS 镜像/运维预装**: 2.1 起 installer 不下载、不安装 `lvm2` 及其依赖。
+> 部署前用 `tools/online/check-os-packages.sh` 检查存储节点是否有 lvm2；
+> `02_ceph` 在缺 lvm2 时直接失败，避免"OSD 因缺 lvm 无法激活"的隐性失败。
 
 ## 3. 启用与部署顺序
 
@@ -551,8 +545,7 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 `deployments/cubestack-addon/rook/`(manifests + CUBESTACK.md)、`02_ceph.sh`、`03_ceph_csi.sh`、
 `tools/k8s/ceph-detect-disks.sh`、`tools/k8s/ceph-disk-classify.py`(分类判定唯一实现)、
 `tools/k8s/ceph-cleanup.sh`(`--list`/`--wipe-disks`/`--all`/`--wipe-node`)、
-`tools/offline/fetch-lvm-packages.sh`、`tools/k8s/rook-fetch-manifests.sh`、cluster.conf `CEPH_*` 配置段、
-`patch-playbooks/install-packages.yml`(lvm2 离线安装, cubestack-offline.sh 自动挂载)。
+`tools/k8s/rook-fetch-manifests.sh`、cluster.conf `CEPH_*` 配置段。
 
 > 更完整的手工操作手册(池播种/PG 调优/CephFS/RGW/快照/风险)见参考设计文档(按 Rook v1.20.2 官方 + 生产实践编写)。
 
@@ -708,10 +701,9 @@ bash deployments/scripts/tools/tests/test-cephfs-mount.sh   # 离线桩式回归
 **保留 CephFS 内数据与宿主机空目录**。
 
 > ⚠ **非优雅拆除**: 若旧集群直接消失/未执行本模块 uninstall, 宿主机 `/mnt/cephfs/models` 的 ceph
-> 挂载会残留; mons 不可达时它会卡死 `fuser`/apt(`node_pkgs` 在首节点永久 pending)。
+> 挂载会残留; mons 不可达时它会卡死 `fuser`/其他系统操作。
 > 重装前必须重启节点(`systemctl stop kubelet containerd; systemctl reboot -f`);
-> `tools/node/reconcile-node-packages.sh` 会在装包前检测并给出重启指引(详见
-> `docs/node-package-repair.md` R3)。
+> installer 不再做节点包对账, 部署前请自行确认残留挂载已清理。
 
 > ⚠ mon 地址在 apply 时写入 DaemonSet(来自 `rook-ceph-mon-endpoints`);Rook 更新该 ConfigMap 后,
 > 重跑 `--steps cephfs_mount` 即可刷新(mon 地址在 hostNetwork 模式下通常稳定为节点 IP)。

@@ -45,7 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl wget git unzip jq \
         openssh-client sshpass rsync iputils-ping iptables dnsutils \
         netcat-openbsd patch \
-        python3 python3-pip python3-venv \
+        python3 python3-pip python3-venv python3-yaml \
         libvirt-clients vim gnupg software-properties-common \
         iproute2 kmod systemd procps bridge-utils chrony \
         moreutils \

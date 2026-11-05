@@ -124,6 +124,8 @@ rsync -a \
     "${REPO_ROOT}/deployments/" "${OUT}/deployments/"
 say "同步 skills ..."
 rsync -a --exclude '.git' "${REPO_ROOT}/skills" "${OUT}/"
+say "同步 versions ..."
+rsync -a --exclude '.git' "${REPO_ROOT}/versions" "${OUT}/"
 
 # ---------------- 配置模板就位校验(2026-10-15 用户口径: 必须进镜像) ----------------
 # CLI 镜像必须含两个配置模板:
@@ -140,6 +142,8 @@ done
     || { err "构建上下文缺可执行校验器: deployments/scripts/tools/offline/verify-offline-files.sh"; exit 1; }
 [ -f "${OUT}/deployments/scripts/tools/offline/verify-offline-files.pyz" ] \
     || { err "构建上下文缺校验器 pyz: deployments/scripts/tools/offline/verify-offline-files.pyz"; exit 1; }
+[ -f "${OUT}/versions/base.yaml" ] \
+    || { err "构建上下文缺公共 base 基线: versions/base.yaml"; exit 1; }
 ok "  校验器就位: verify-offline-files.sh + .pyz"
 
 # ---------------- CLI 工具链: 拷进构建上下文 bin/(base 层用) ----------------

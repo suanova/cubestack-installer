@@ -95,15 +95,13 @@ FILES=(
     #   也不含运行数据, 走 FILES 逐个同步最稳(树本体见上面 DIRS 的注释)。
     deployments/kubespray/cubestack-patch-apply.sh
     deployments/kubespray/cubestack-kubespray-upgrade.sh
-    # ★ 2026-09-28: 5 个注入 play 全部逐个同步 —— 原先只列了 install-packages.yml,
-    #   另外 4 个(preload/registry/cni-restart/single-node)改了永远进不去容器
-    #   (树本体有意不整拷, 见上面 DIRS 注释; 这几个是**我们自持**的 play, 不是上游树内容)。
-    #   代价是修单节点收敛 play 的挂载位置时, 得靠入口脚本的 ensure_* 迁移逻辑(已实现)。
+    # ★ 2026-09-28: 4 个注入 play 全部逐个同步 —— 另外 4 个(preload/registry/cni-restart/single-node)
+    #   改了永远进不去容器(树本体有意不整拷, 见上面 DIRS 注释; 这几个是**我们自持**的 play,
+    #   不是上游树内容)。代价是修单节点收敛 play 的挂载位置时, 得靠入口脚本的 ensure_* 迁移逻辑(已实现)。
     deployments/kubespray/kubespray/patch-playbooks/cubestack-preload.yml
     deployments/kubespray/kubespray/patch-playbooks/cubestack-registry.yml
     deployments/kubespray/kubespray/patch-playbooks/cubestack-cni-restart.yml
     deployments/kubespray/kubespray/patch-playbooks/cubestack-single-node.yml
-    deployments/kubespray/kubespray/patch-playbooks/install-packages.yml
     # (rook 离线 manifests 已由上面 DIRS 的 cubestack-addon 整目录覆盖, 不再逐条列)
 )
 for f in "${FILES[@]}"; do
@@ -158,9 +156,7 @@ docker exec "${CONTAINER}" bash -c '
   echo "  detect 分类器引用: $(grep -c "ceph-disk-classify.py" '"${CT}"/deployments/scripts/tools/k8s/ceph-detect-disks.sh' || true) 处; 分类器文件: $(test -f '"${CT}"/deployments/scripts/tools/k8s/ceph-disk-classify.py' && echo 在 || echo 缺失)"
   echo "  cleanup --wipe-disks: $(grep -c "wipe-disks" '"${CT}"/deployments/scripts/tools/k8s/ceph-cleanup.sh' || true) 处"
   echo "  kube-vip 默认关: $(grep -c "KUBE_VIP_ENABLED:-false" '"${CT}"/deployments/config/cluster.conf.example' || true) 处(期望 ≥1); 关闭态不推导 VIP: $(grep -c "KUBE_VIP_ENABLED:-false" '"${CT}"/deployments/scripts/tools/k8s/sync-kubespray-config.sh' || true) 处(期望 ≥1)"
-  echo "  install-packages offline_dir:"; grep -c "offline_dir" '"${CT}"/deployments/kubespray/kubespray/patch-playbooks/install-packages.yml' || true
   echo "  rook manifests:"; ls '"${CT}"/deployments/cubestack-addon/rook/'*.yaml 2>/dev/null | wc -l
-  echo "  lvm 离线包(os/packages):"; ls '"${CT}/deployments/offline-files/os/packages/lvm2_"'*.deb 2>/dev/null | wc -l
   echo "  METALLB_POOL(注意是否与节点同网段):"; grep -E "^METALLB_POOL=" '"${CT_CONF}"' | head -1
 '
 
