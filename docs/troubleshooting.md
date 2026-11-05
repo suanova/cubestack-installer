@@ -1867,6 +1867,11 @@ ubuntu@10.6.7.135: Permission denied (publickey,password).
   (`CephCluster rook-ceph-external` / `CephConnection` / `ClientProfile`); 外部 Ceph 的
   pool/filesystem 是外部资产, **绝不删除**。`02_ceph.sh` 的 `--delete-cluster` 已按
   `spec.external.enable=true` 跳过 external CephCluster, 与 internal 集群的销毁方式区分。
+- external Ceph MON 是 **msgr2-only NodePort**(如 3300)时(2026-11-05 实机): 内核 ceph 客户端
+  默认用 v1 连接, `dmesg` 反复报 `libceph: mon0 ... socket closed (con state V1_BANNER)`,
+  宿主机挂载报 `mount error: no mds (Metadata Server) is up`。`07_cephfs_mount.sh` 现在
+  在 external 模式给挂载选项加 `ms_mode=prefer-secure`(优先 msgr2、回退 v1; 兼容 external
+  v1/v2 与 internal)。
 
 **验证:**
 ```bash
