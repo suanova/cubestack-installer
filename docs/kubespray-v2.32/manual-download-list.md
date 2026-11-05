@@ -10,7 +10,7 @@
 联网机下载的那套(在 `/data/kubespray-2.32/offline-files/kubespray/cubestack-cluster/`)里**必需件已全部落到**
 `deployments/offline-files/kubespray/`:
 
-- **二进制/文件 13 个**:kubelet/kubectl/kubeadm-1.35.8、etcd-3.6.14、cni-plugins-1.9.1、calicoctl-3.31.7、
+- **二进制/文件 13 个**:kubelet/kubectl/kubeadm-1.35.8、etcd-3.6.16、cni-plugins-1.9.1、calicoctl-3.31.7、
   crictl-1.35.0、containerd-2.3.5、runc-1.4.3、nerdctl-2.3.5、helm-3.22.0、`calico-3.31.7-kdd-crds.yaml`、
   `gateway-api-standard-install.yaml` —— **sha256 逐条对 kubespray 树 `checksums.yml` 全过**;
 - **k8s-base 预加载镜像 20 个**(1.35.8 全套 + calico 3.31.7 + coredns/metrics-server/pause/metallb/
@@ -89,7 +89,7 @@ Harbor `mirrors/**` 还没同步 1.35 线(所以 `harbor-save-images.sh` 暂时�
 | kubelet | 1.35.8 | `https://dl.k8s.io/release/v1.35.8/bin/linux/amd64/kubelet` | `kubelet-1.35.8-amd64` |
 | kubectl | 1.35.8 | `…/v1.35.8/bin/linux/amd64/kubectl` | `kubectl-1.35.8-amd64` |
 | kubeadm | 1.35.8 | `…/v1.35.8/bin/linux/amd64/kubeadm` | `kubeadm-1.35.8-amd64` |
-| etcd | 3.6.14 | `https://github.com/etcd-io/etcd/releases/download/v3.6.14/etcd-v3.6.14-linux-amd64.tar.gz` | `etcd-3.6.14-linux-amd64.tar.gz` |
+| etcd | 3.6.16 | `https://github.com/etcd-io/etcd/releases/download/v3.6.16/etcd-v3.6.16-linux-amd64.tar.gz` | `etcd-3.6.16-linux-amd64.tar.gz` |
 | cni-plugins | **1.9.1** | `https://github.com/containernetworking/plugins/releases/download/v1.9.1/cni-plugins-linux-amd64-v1.9.1.tgz` | `cni-plugins-linux-amd64-1.9.1.tgz` |
 | calicoctl | **3.31.7** | `https://github.com/projectcalico/calico/releases/download/v3.31.7/calicoctl-linux-amd64` | `calicoctl-3.31.7-amd64` |
 | calico CRDs | 3.31.7 | `https://github.com/projectcalico/calico/raw/v3.31.7/manifests/crds.yaml` | (同既有 CRD 文件的命名) |
@@ -105,6 +105,11 @@ Harbor `mirrors/**` 还没同步 1.35 线(所以 `harbor-save-images.sh` 暂时�
 > **默认落盘位置**(2026-09-28 起):在仓库内直跑(不传 `OFFLINE_FILES_DIR`)时 ——
 > `deployments/offline-files/kubespray/`:镜像 tar 进其 `images/`,上表这些二进制放该目录**本身**
 > (与 `cluster.conf` 的 `LOCAL_REPO_DIR` 是同一处,部署流程读的就是它;布局表见 `deployments/kubespray/README.md`)。
+> ⚠ **etcd 缓存名必须去掉上游资产名的 `v` 前缀**：kubespray 的 `downloads.etcd.dest` 是
+> `etcd-<版本>-linux-<arch>.tar.gz`（如 `etcd-3.6.16-linux-amd64.tar.gz`），而上游 URL 的资产名是
+> `etcd-v<版本>-linux-<arch>.tar.gz`。下载后请按上表重命名；只放带 `v` 的文件会被判为缓存缺失，
+> 从而回退到 GitHub 在线下载。
+>
 > ⚠ 另有 `deployments/offline-files/kubespray/packages/` 的 `helm_4.2.0-1_amd64.deb` / `lvm2_*.deb` 等系统包 ——
 > 与上面的 helm 二进制不是一回事, 本清单未涉及, 若系统包也要换代以 `check-modules`/部署日志为准。
 
