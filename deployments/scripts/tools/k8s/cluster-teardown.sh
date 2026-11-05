@@ -169,9 +169,11 @@ unmount_node_ceph_mounts() {
     _ips=(); read -r -a _ips <<< "$(all_node_ips 2>/dev/null || true)"
     [ "${#_ips[@]}" -gt 0 ] || return 0
     say "  预清理节点 Ceph/RBD CSI 挂载(避免后端删除后 jbd2 D 状态)..."
+    local _scan_unknown=0 _leftover=0 _rc=0
     for _ip in "${_ips[@]}"; do
         [ -n "${_ip}" ] || continue
         _u="$(ssh_user_for_ip "${_ip}")"
+        _rc=0
         _left="$(timeout 60 ssh -n -i "${_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_u}@${_ip}" "
                 for _m in \$(findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
@@ -185,13 +187,19 @@ unmount_node_ceph_mounts() {
                 done
                 findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
                     | awk '\$3 ~ /ceph/ || \$2 ~ /^\\/dev\\/rbd/ {print \$1}' | head -5
-            " 2>/dev/null || true)"
-        if [ -n "${_left}" ]; then
+            " 2>/dev/null)" || _rc=$?
+        if [ "${_rc}" -ne 0 ]; then
+            # SSH 失败/超时(255/124)时输出为空; 绝不能当成“无残留”放行。
+            warn "  ${_ip}: 无法确认 Ceph/RBD 挂载状态(SSH rc=${_rc}: 超时/不可达) —— 不判定为无残留"
+            _scan_unknown=1
+        elif [ -n "${_left}" ]; then
             warn "  ${_ip}: 仍有 Ceph/RBD 挂载未卸净(后续 reset/重启兜底): $(printf '%s' "${_left}" | tr '\n' ' ')"
+            _leftover=1
         else
             say "  ${_ip}: 无残留 Ceph/RBD CSI 挂载"
         fi
     done
+    [ "${_scan_unknown}" -eq 0 ] && [ "${_leftover}" -eq 0 ]
 }
 
 run_component() {   # <key> <script_rel>  → 0=卸了; 1=失败/超时
@@ -303,7 +311,8 @@ PY
         # ★ 外部 Ceph(2026-11-05): 删旧集群资源前先摘节点 CSI 挂载, 避免 jbd2/rbd D 状态。
         #   内部 Ceph 的同类清理在 ceph 模块/cubestack-offline reset 前置里做。
         if [ "${CEPH_MODE:-internal}" = "external" ]; then
-            unmount_node_ceph_mounts
+            unmount_node_ceph_mounts \
+                || warn "  (有节点未能确认/卸净 Ceph/RBD 挂载; 后续 reset/重启兜底)"
         fi
         echo ""
         say "优雅卸载完成: 成功 ${_n_ok} 个, 失败/跳过 ${_n_fail} 个"

@@ -474,6 +474,13 @@ chk "⑪f 使用 read -a 拆分(不是 mapfile 单行)" "1" \
 # CodeRabbit: SSH 登录用户常为 ubuntu, umount 需 root; 必须走 sudo(且 -n 防密码提示挂起)
 chk "⑪g 远程 umount 经 sudo -n 提权" "1" \
     "$(grep -cF 'timeout 10 sudo -n umount -l' "${ENGINE}")"
+# CodeRabbit: SSH 失败/超时输出为空, 不能误报“无残留”; rc 必须单独判定
+chk "⑪h SSH 失败明确告警(不判无残留)" "1" \
+    "$(grep -cF '无法确认 Ceph/RBD 挂载状态' "${ENGINE}")"
+_n_unknown="$(grep -cF '_scan_unknown' "${ENGINE}" || true)"
+chk "⑪i 扫描 rc 单独判定" "1" "$([ "${_n_unknown:-0}" -ge 1 ] && echo 1 || echo 0)"
+chk "⑪j 未确认/残留时函数返回非 0" "1" \
+    "$(grep -cF '[ "${_scan_unknown}" -eq 0 ] && [ "${_leftover}" -eq 0 ]' "${ENGINE}")"
 
 echo "== ⑫ ceph_csi: external 模式只删接入声明, 不碰外部 Ceph 数据 =="
 CSI="${REPO_ROOT}/deployments/scripts/modules/03_addon/03_ceph_csi.sh"
