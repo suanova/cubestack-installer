@@ -31,16 +31,24 @@ out="$(CLUSTER_CONF="${CONF}" CUBESTACK_ONLINE=0 \
 grep -q "非在线模式" <<<"${out}" || fail "offline asset prefetch did not exit"
 pass "asset prefetch is a no-op offline"
 
-# Online mode must not reach the OS package installers.
-out="$(CLUSTER_CONF="${CONF}" CUBESTACK_ONLINE=1 \
-    bash "${SCRIPTS}/modules/02_k8s/02_k8s_workerbm.sh" 2>&1)"
-grep -q "在线模式：跳过 worker 离线包安装" <<<"${out}" || fail "workerbm online guard missing"
-pass "worker package install is skipped online"
-
-out="$(CLUSTER_CONF="${CONF}" CUBESTACK_ONLINE=1 \
+# node_pkgs skips when the online entry point already ran the pre-check.
+out="$(CLUSTER_CONF="${CONF}" CUBESTACK_OS_CHECK_DONE=1 \
     bash "${SCRIPTS}/modules/02_k8s/12_node_pkgs.sh" 2>&1)"
-grep -q "在线模式：跳过节点系统包对账" <<<"${out}" || fail "node_pkgs online guard missing"
-pass "node package reconcile is skipped online"
+grep -q "已由在线安装预检" <<<"${out}" || fail "node_pkgs online pre-check guard missing"
+pass "node package check is skipped after the online pre-check"
+
+# Modules must not fall back to the deleted OS package installers.
+for f in "${SCRIPTS}/modules/02_k8s/02_k8s_workerbm.sh" \
+         "${SCRIPTS}/modules/02_k8s/12_node_pkgs.sh"; do
+    if grep -qE 'install-worker-packages|reconcile-node-packages' "${f}"; then
+        fail "OS package installer reference remains: ${f}"
+    fi
+done
+[ ! -e "${SCRIPTS}/tools/node/install-worker-packages.sh" ] \
+    || fail "install-worker-packages.sh still exists"
+[ ! -e "${SCRIPTS}/tools/node/reconcile-node-packages.sh" ] \
+    || fail "reconcile-node-packages.sh still exists"
+pass "OS package installers are gone"
 
 # The online entry point must not install OS packages.
 if grep -nE '(^|[^#])\b(apt-get[[:space:]]+install|dpkg[[:space:]]+-i)\b' \

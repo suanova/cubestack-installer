@@ -235,23 +235,6 @@ for _pat in 'deployments/offline-files/kubespray/\*/' 'deployments/kubespray/ver
     fi
 done
 
-echo "== ⑫ 节点系统包链路(2026-09-30 事故的防回归) =="
-# 事故: install-packages 的 play 只跑 kube_node(worker) ⇒ **master 从未拿到离线 .deb**,
-# 而 master 上 curl 只在这条 play 里发 ⇒ 探针拿到空串被误判成网络故障。以下四条锁死修复。
-_PLAY="${REPO_ROOT}/deployments/kubespray/kubespray/patch-playbooks/install-packages.yml"
-chk "play 覆盖 master(hosts 含 kube_control_plane)" "有" "$(grep -q 'hosts: kube_node:kube_control_plane' "${_PLAY}" && echo 有 || echo 无)"
-chk "play 的 required_packages 含 curl" "有" "$(grep -qE '^\s+- curl$' "${_PLAY}" && echo 有 || echo 无)"
-# ⚠ 2026-10-08: 节点 .deb 统一收敛到 offline-files/os/packages(版本无关 OS 层);
-#   原断言钉的是 <版本目录>/packages/(旧布局), repair/ 已并入主目录 —— 此处改钉新位置。
-# ⚠ 这些 .deb 属 gitignored 离线件: 干净 checkout/CI/未备料机**主包集为空**, 无从断言 ⇒ 跳过
-#   (与 check-modules ⑱ "无在场版本目录(纯 checkout/未备料)⇒ 跳过" 同口径; 备料机上仍必查 ——
-#   2026-10-09 CI 首跑踩: 无条件断言在 runner 上恒红)。
-if ls ${REPO_ROOT}/deployments/offline-files/os/packages/*.deb >/dev/null 2>&1; then
-    chk "curl 的 .deb 在 os/packages 主包集里(repair 已并入, 不再按版本目录)" "有" "$(ls ${REPO_ROOT}/deployments/offline-files/os/packages/curl_*.deb >/dev/null 2>&1 && echo 有 || echo 无)"
-else
-    echo "  skip curl .deb 主包集断言(os/packages 未备料 —— 纯 checkout/CI 属正常)"
-fi
-
 echo "== ⑪ 默认版本 = 最新(用户口径); 本地临时版本不进默认; 目录副本回退 =="
 # 带夹具根的探针(OFFLINE_FILES_ROOT 指向夹具, 用于"版本目录自带档案副本"的回退路径)
 _probe_root() { # _probe_root <offline_root> <版本|-> <conf 行...>

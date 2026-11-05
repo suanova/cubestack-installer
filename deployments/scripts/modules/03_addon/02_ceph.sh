@@ -31,9 +31,8 @@
 #   · 安全确认(需求 2): 应用 CR 前红底醒目列出"将使用的节点 + 各节点磁盘按类分组
 #     (空闲 / 上次 Ceph 占用 / 在用 / 混合)+ 判定证据", **sleep CEPH_CONFIRM_SLEEP(默认 60)s**
 #     供人工 double-check; 核对无误自动继续。CI 可 CEPH_CONFIRM_SLEEP=0 跳过。
-#   · 节点准备: 每台存储节点加载并持久化 rbd 内核模块; 确保 lvm2
-#     (离线 .deb 由 tools/offline/fetch-lvm-packages.sh 放到 offline-files/os/packages,
-#     本模块部署前预检"离线包就绪 或 节点已在线装 lvm", 缺失硬失败; 部署时自动从该目录安装)。
+#   · 节点准备: 每台存储节点加载并持久化 rbd 内核模块; 检查 lvm2 是否存在
+#     (由 OS 镜像/运维预装; installer 不安装 OS 包, 缺失直接失败)。
 #   · 离线镜像(需求 5): 版本树的 offline-files/kubespray/<版本>/images/,
 #     与 kubespray 镜像同目录) → k8s 阶段由 cluster.yml 内置预加载 play 统一同步到节点并 ctr import。
 #   · registry 后端(需求 6): REGISTRY_STORAGE_CLASS=ceph-block(见 docs/ceph-rook.md)时,
@@ -265,36 +264,8 @@ fi
     exit 1
 }
 
-# 前置: lvm2 离线包就绪(需求: 先准备 lvm 离线包, 再在部署 ceph 前安装)。
-#   离线包来源: offline-files/os/packages(lvm2_*.deb + 依赖, 版本无关 OS 层), 由联网机
-#   tools/offline/fetch-lvm-packages.sh 生成。存储节点缺 lvm 且无离线包 → 硬失败,
-#   避免"看起来部署成功、OSD 因无 lvm 无法激活"的隐性失败(比 warn 更早暴露)。
-_LVM_DEB_PRESENT=0
-for _p in "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"/os/packages/lvm2_*.deb \
-          "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"/os/packages/lvm2_*.rpm; do
-    [ -f "${_p}" ] && _LVM_DEB_PRESENT=1
-done
-if [ "${_LVM_DEB_PRESENT}" = "0" ]; then
-    say "检查存储节点 lvm2 是否已在线安装(离线包未就绪时以此兜底)..."
-    _ALL_HAS_LVM=1
-    for _hn in "${CEPH_NODE_HOSTS[@]}"; do
-        _ip=""
-        for line in "${NODES[@]:-}"; do
-            [ -z "${line}" ] && continue
-            node_parse "${line}"
-            [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
-        done
-        [ -n "${_ip}" ] || continue
-        node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1 || _ALL_HAS_LVM=0
-    done
-    if [ "${_ALL_HAS_LVM}" = "0" ]; then
-        err "lvm2 离线包未就绪且存储节点未安装 lvm —— 无法离线部署 Rook OSD(重启后逻辑卷需 lvm 激活)"
-        err "  请先在**联网机**执行: sudo ./deployments/scripts/tools/offline/fetch-lvm-packages.sh"
-        err "  生成 lvm2_*.deb → ${REPO_ROOT}/deployments/offline-files/os/packages/, 再重跑本模块"
-        exit 1
-    fi
-    warn "  lvm2 离线包未就绪, 但存储节点已在线安装 lvm, 继续(重启后逻辑卷激活依赖已满足)"
-fi
+# 前置: lvm2 由 OS 镜像/运维预装; installer 只检查, 不安装。
+#   存储节点缺 lvm2 时在下方 4b 硬失败, 避免"看起来部署成功、OSD 因无 lvm 无法激活"。
 
 # ★ external 模式(CEPH_MODE=external): 不涉及本地裸盘/覆盖确认, 跳过裸盘选择与安全确认段;
 #   仅 internal(集群内 Rook-Ceph)需要。operator/csi-operator 部署仍执行(供 CephConnection 使用)。
@@ -473,7 +444,7 @@ fi
 fi
 
 # ---------------- 4) 存储节点准备(rbd 模块 + lvm2 + node label) ----------------
-say "[3/8] 存储节点准备(rbd 内核模块 / lvm2 离线安装 / node label)..."
+say "[3/8] 存储节点准备(rbd 内核模块 / lvm2 检查 / node label)..."
 _CEPH_NBD_FAIL=0
 for _hn in "${CEPH_NODE_HOSTS[@]}"; do
     _ip=""; _user="${SSH_USER:-ubuntu}"
@@ -498,25 +469,12 @@ for _hn in "${CEPH_NODE_HOSTS[@]}"; do
             _CEPH_NBD_FAIL=1 ;;
         *)       : ;;
     esac
-    # 4b. lvm2: 检测缺失 → 从离线 packages 安装(install-worker-packages.sh 含 offline-files/os/packages)
+    # 4b. lvm2: 只检查, 不安装(OS 包由节点镜像/运维负责)
     if ! node_ssh "${_ip}" "${_user}" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1; then
-        if [ "${CUBESTACK_ONLINE:-0}" = "1" ]; then
-            err "在线模式：${_ip} 缺少 lvm2；请先在节点安装 lvm2（installer 不安装 OS 包）"
-            exit 1
-        fi
-        say "    lvm2 缺失, 从离线 .deb 安装(packages 目录, 由 fetch-lvm-packages.sh 生成)..."
-        if [ -d "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages" ] && \
-            bash "${SCRIPT_DIR}/tools/node/install-worker-packages.sh" "${_ip}" "${_user}" >/dev/null 2>&1; then
-            node_ssh "${_ip}" "${_user}" "command -v lvm >/dev/null 2>&1" >/dev/null 2>&1 \
-                && ok "    lvm2 已安装(离线包)" || err "    packages 无 lvm2 或安装失败 —— lvm2 离线包未就绪且节点无 lvm, 部署 OSD 必失败"
-        else
-            # 前置 lvm 预检已保证"离线包存在 或 节点已在线装 lvm", 走到这里 = 前置被绕过/包缺失
-            err "    lvm2 离线安装失败(install-worker-packages.sh 退出非 0)。请联网机先跑 tools/offline/fetch-lvm-packages.sh 生成 lvm2_*.deb, 重跑本模块"
-            exit 1
-        fi
-    else
-        ok "    lvm2 已就绪"
+        err "存储节点 ${_ip} 缺少 lvm2；请先在节点安装 lvm2（installer 不安装 OS 包）"
+        exit 1
     fi
+    ok "    lvm2 已就绪"
     # 4c. node label(选择部署节点)
     SSH "${K} label node ${_hn} ${CEPH_NODE_LABEL} --overwrite >/dev/null 2>&1" \
         && ok "    node label 已打: ${CEPH_NODE_LABEL}" \

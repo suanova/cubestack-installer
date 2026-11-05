@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Build the k8s binaries bundle from kubespray's files.list.
 #
-# This is the installer-owned asset consumed by the commercial release base
-# tree (kubelet/kubeadm/kubectl/crictl/CNI/containerd/runc/etcd/...). It does
+# This is the installer-owned asset consumed by commercial base packaging
+# (kubelet/kubeadm/kubectl/crictl/CNI/containerd/runc/etcd/...). It does
 # not pull container images; OS packages are a pre-install check.
 #
 # Usage:
@@ -12,7 +12,7 @@ set -euo pipefail
 #                           [--output PATH] [--workdir DIR]
 #
 # The output is a deterministic .tar.gz with the files at the archive root, so
-# release files[] can use extract: true.
+# packaging files[] can use extract: true.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"

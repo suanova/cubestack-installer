@@ -35,7 +35,7 @@ deployments/scripts/
 ├── tools/                     # ★ 工具脚本(模块的底层实现, 按领域分目录)
 │   ├── vm/                    #   虚拟机: create-libvirt-vm.sh / create-vm-template.sh / register-vm.sh
 │   ├── net/                   #   网络: setup-vm-network.sh / verify-vm-network.sh / teardown-vm-network.sh / setup-libvirt-nat.sh
-│   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / install-worker-packages.sh / setup-ntp.sh / sync-hosts.sh / sync-ca*.sh / rebootstrap*.sh / prepare-workers.sh
+│   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / setup-ntp.sh / sync-hosts.sh / sync-ca*.sh / rebootstrap*.sh / prepare-workers.sh
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
 │   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 └── README.md

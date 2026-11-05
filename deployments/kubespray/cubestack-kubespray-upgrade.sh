@@ -31,10 +31,10 @@
 #   与 .venv 实测值比对, 过旧即**停住**(rc=2)—— ansible 大版本换了(如 2.16 → 2.19), 必须依新
 #   requirements.txt 重建 venv, 否则陈旧 venv 会顶掉 CLI 镜像的新 ansible, 部署第一个 play 硬失败。
 #   保留 patch-playbooks 的理由: 它是**我们自持的注入 play**(cubestack-registry / single-node /
-#   cni-restart / preload / install-packages), **不是上游文件** —— 上游任何版本都不带它。
+#   cni-restart / preload), **不是上游文件** —— 上游任何版本都不带它。
 #   cubestack-offline.sh 的 ensure_*_play 只在**文件缺失时**从内置副本重建(且 registry /
 #   single-node 两个 play 连内置副本都没有, 见 ensure_registry_play), 故换树丢掉它 = 注入内容
-#   退化为脚本内置的旧版(实测 install-packages.yml 的内置副本比树内副本旧), 必须原样保留。
+#   退化为脚本内置的旧版, 必须原样保留。
 #   保留粒度 = 只保 `inventory/local`(Ruling 15): 树内 `inventory/sample` 是**上游模板**
 #   (新集群种子, 见 cubestack-offline.sh:191-192 的 cp -rn), 必须随新树刷新; 本仓库的实盘
 #   inventory 在**树外** `deployments/kubespray/inventory/cubestack-cluster`, 不在这里。

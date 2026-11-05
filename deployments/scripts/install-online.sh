@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Reads versions/base.yaml + the mirror catalog, materializes the base images,
 # prefetches k8s binaries through the existing deploy flow, and then runs
-# deploy-cluster.sh. It never touches MinIO or cubestack-release.
+# deploy-cluster.sh. It never touches MinIO or commercial packaging.
 #
 # Node prerequisite packages are not installed. A warn-only check runs by
 # default; --check-os-packages makes it blocking, --no-check-os-packages skips it.
@@ -33,7 +33,7 @@ Usage: install-online.sh [online options] [deploy-cluster options]
 
 Reads versions/base.yaml + the mirror catalog, materializes the base images,
 prefetches k8s binaries, then runs deploy-cluster.sh. It never touches MinIO or
-cubestack-release. Node prerequisite packages are not installed; a warn-only
+commercial packaging. Node prerequisite packages are not installed; a warn-only
 pre-check runs by default.
 
 Online options:
@@ -167,6 +167,7 @@ else
     say "node prerequisite pre-check skipped (--no-check-os-packages)"
 fi
 
+export CUBESTACK_OS_CHECK_DONE=1
 export CUBESTACK_ONLINE=1
 export CUBESTACK_OPERATOR_ENABLED=false
 export DEV_LAB_ENABLED=false

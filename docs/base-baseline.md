@@ -1,18 +1,18 @@
 # 公共 base 基线（versions/base.yaml）
 
-`versions/base.yaml` 是**公共 base 的唯一版本真源**：kubespray、OS 软件包和 base 镜像
-的版本都在这里。它由 installer 维护；release 以**固定 commit** 读取它，不在 release
-里复制一份版本定义。
+`versions/base.yaml` 是**公共 base 的唯一版本真源**：kubespray、节点前置包和 base 镜像
+的版本都在这里。它由 installer 维护；商业打包侧以**固定 commit** 读取，
+不在下游复制一份版本定义。
 
 ## 谁消费
 
 | 消费方 | 方式 |
 |---|---|
 | installer 开源在线安装 | 直接读本文件的版本，按镜像 catalog 解析 ref/digest |
-| cubestack-release（商业版） | 在 `components/base.yaml` 记录 `baseline: {repo, commit, path}`，构建时读取 |
+| 商业打包侧 | 在自己的基线 pin 中记录 `{repo, commit, path}`，构建时读取 |
 | CLI 镜像 | `deployments/` + `versions/` 一起打进镜像，安装容器内可直接读 |
 
-依赖方向：installer → release 只发 `baseline-updated`；release 不回写 installer。
+依赖方向：installer 只提供公开基线；商业打包侧读取，不回写 installer。
 
 ## 结构
 
@@ -59,9 +59,11 @@ images:
   依赖固定命名。
 - 节点前置包（OS 包管理器安装在每个 k8s node 上的依赖，如 lvm2/chrony/curl）不由
   installer 下载或安装；`packages_check` 指向安装前体检清单，installer 只验证
-  节点上是否已存在这些包，缺失时列清单退出。
+  节点上是否已存在这些包，缺失时列清单告警或退出。
+- 包安装后的配置与服务操作仍由 installer 负责：chrony 配置与同步、LVM/Ceph 准备、
+  k8s 运行时配置等不属于 OS 包安装。
 - K8s 二进制（kubelet/kubeadm/kubectl/crictl/CNI 等）仍由 installer 准备；商业离线版由
-  release 的 base `files[]` 打包。
+  商业 base 的 `files[]` 打包。
 
 ## 节点前置包体检清单
 
@@ -85,8 +87,9 @@ packages:
     chrony: "4.2-2ubuntu2.1"
 ```
 
-- installer 只检查包是否存在；默认按包名检查，`--strict` 可额外校验版本，
-  `--warn-only` 只告警不失败（2.1 在线安装默认使用该模式）。
+- installer 只检查包是否存在；默认按包名检查，`--strict` 可额外校验版本。
+- 2.1 在线安装默认 `--warn-only`：缺包时列清单告警但不失败；`--check-os-packages`
+  改为阻断，`--no-check-os-packages` 跳过。
 - 不下载 `.deb`、不执行 `apt-get install`；缺包时由运维按清单自行安装。
 - 版本号仅作为已知良好参考，不参与默认检查。
 
@@ -102,23 +105,23 @@ packages:
    python3 deployments/scripts/tools/validate-base-baseline.py
    ```
 
-5. 提交到 installer；合并后 CI 发 `baseline-updated` 给 release，release 开 PR 更新
-   `baseline.commit` 并重建 base pin。
+5. 提交到 installer；商业打包侧按自己的节奏更新基线 commit 并重建 base pin，
+   公开 installer 不依赖下游流程。
 
 ## K8s 二进制包
 
 kubelet/kubeadm/kubectl/crictl/CNI/containerd/runc/etcd 等由 installer 维护**来源和版本**：
 
 - `versions/base.yaml` 的 `files[]` 使用 `source.type: installer-binaries`，
-  只声明 `version` / `arch`；release 在固定 baseline commit 上补 `repo` / `ref`。
-- release 打包时 checkout installer 的 pinned commit，调用
+  只声明 `version` / `arch`；商业打包侧在固定 baseline commit 上补 `repo` / `ref`。
+- 商业打包时 checkout installer 的 pinned commit，调用
   `tools/offline/build-k8s-binaries.sh` 从 kubespray 的上游 URL 下载并打成
   `binaries.tar.gz`，不依赖 GitHub Release 资产。
-- 生成的 tar 由 `fetch-base-sources` 计算 digest、写入 tree、打进 base 树；
+- 生成的 tar 由下游 `fetch-base-sources` 计算 digest、写入 tree、打进 base 树；
   `materialize-base` 解包到 `offline-files/kubespray/<ver>/`。
 - 开源在线安装仍由 `k8s_asset_prefetch` 在安装时用同一套 `download-files` 逻辑下载。
 
-这样 installer 只维护“从哪里下载、下载什么版本”，字节由 release 在打包时获取。
+这样 installer 只维护“从哪里下载、下载什么版本”，字节由商业打包侧获取。
 
 ## Rocky 扩展点
 

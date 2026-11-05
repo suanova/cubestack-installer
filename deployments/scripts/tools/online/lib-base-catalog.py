@@ -3,7 +3,7 @@
 
 The resolver is the only place that maps a baseline image entry to a concrete
 Harbor reference. It expands ${VAR} from the environment (cluster defaults,
-profile, release env), looks up the mirror catalog, and emits a deterministic
+profile, deployment env), looks up the mirror catalog, and emits a deterministic
 JSON plan for the materializer.
 
 OS packages are intentionally absent: they are a pre-install check, not a

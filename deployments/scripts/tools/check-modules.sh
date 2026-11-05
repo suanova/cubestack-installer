@@ -753,12 +753,12 @@ fi
 #   (补丁层 / 收编映射 / 入口模式 / 本地代理)现在每轮 check-modules 都会跑到。
 for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-api-entry-mode.sh test-api-local-lb.sh test-sync-api-entry.sh \
-           test-kubespray-version-select.sh test-deb-install-lib.sh \
+           test-kubespray-version-select.sh \
            test-ssh-user.sh test-k8s-passwordless.sh test-gpu-vendor-probe.sh \
            test-nvidia-host-driver.sh test-inventory-ssh-user-precedence.sh \
            test-node-hosts-sync.sh \
            test-deploy-config-guard.sh test-k8s-ntp.sh test-cephfs-mount.sh \
-           test-chrony-offline-debs.sh test-ceph-data-disks.sh \
+           test-ceph-data-disks.sh \
            test-metallb-pool-check.sh test-ceph-cluster-detect.sh \
            test-multus-iface-detect.sh test-devlab-tar-select.sh \
            test-nodeport-leak-preflight.sh; do

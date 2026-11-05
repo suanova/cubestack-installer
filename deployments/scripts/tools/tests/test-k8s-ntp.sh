@@ -13,7 +13,7 @@
 #   ③ clock_offset: 权威自身无上游时直接返回 0, 不再 SSH 自测吃噪声
 #   ④ clock_offset: chrony 不可用/未同步时回退 SSH date(仍能返回数值)
 #   ⑤ 权威 stratum 硬失败、SYNC-OK/FAIL、apply 检查 SYNC-OK 静态围栏
-#   ⑥ workerbm sudo 前置 + 安装失败硬退出
+#   ⑥ workerbm 只做连通性检查, 不再安装 OS 包
 # 用法: bash deployments/scripts/tools/tests/test-k8s-ntp.sh
 # ============================================================
 set -uo pipefail
@@ -135,24 +135,18 @@ chk_contains "apply 检查 SYNC-OK" "grep -q 'SYNC-OK'" "$(cat "${SETUP}")"
 chk_contains "节点 sudo 前置" "node_sudo_ready" "$(cat "${SETUP}")"
 chk_contains "偏差非数字防御" '=~ ^-?[0-9]+$' "$(cat "${SETUP}")"
 chk_contains "clock_offset 诊断走 stderr" '回退 SSH date 测量(受 SSH/负载延迟影响)" >&2' "$(cat "${SETUP}")"
-chk_contains "客户端离线安装 chrony" "install_debs_offline /tmp/cubestack-ntp-debs chrony" "$(cat "${SETUP}")"
+chk_contains "缺 chrony 时不安装 OS 包" "CHRONY-NOT-INSTALLED" "$(cat "${SETUP}")"
 chk_contains "无守护进程标记" "NO-TIME-DAEMON" "$(cat "${SETUP}")"
 chk_contains "SYNC-OK 要求 DAEMON_OK" 'DAEMON_OK}" = "1"' "$(cat "${SETUP}")"
-chk_contains "客户端 deb 推送开关" "NTP_HAS_DEB" "$(cat "${SETUP}")"
-chk_contains "authority deb 逐文件落位" '/tmp/cubestack-ntp-debs/$(basename "${deb}")' "$(cat "${SETUP}")"
-chk_contains "client deb 逐文件落位" '/tmp/cubestack-ntp-debs/$(basename "${_deb}")' "$(cat "${SETUP}")"
-chk "deb 推送不用目录尾斜杠" "0" "$(command grep -c 'node_scp .*cubestack-ntp-debs/"' "${SETUP}" 2>/dev/null || true)"
-chk_contains "安装失败打印 dpkg 日志" "CHRONY-INSTALL-FAILED" "$(cat "${SETUP}")"
 chk_contains "daemon precheck 整链 bash -c(避免 sudo builtin)" "bash -c 'command -v chronyc" "$(cat "${SETUP}")"
 chk "node_cmd 不再裸跑 command -v chronyc(避免 sudo builtin)" "0" \
     "$(command grep -c 'node_cmd .*"command -v chronyc' "${SETUP}" 2>/dev/null || true)"
 chk "chronyc 存在性检查至少 3 处 bash -c" "1" \
     "$([ "$(command grep -c "bash -c 'command -v chronyc" "${SETUP}" 2>/dev/null || true)" -ge 3 ] && echo 1 || echo 0)"
 
-echo "== ⑥ workerbm 权限/失败语义 =="
-chk_contains "workerbm sudo 前置" "sudo -n true" "$(cat "${WORKERBM}")"
-chk_contains "workerbm 安装失败计入 PKG_FAIL" "PKG_FAIL=1" "$(cat "${WORKERBM}")"
-chk_contains "workerbm 失败退出" "exit 1" "$(cat "${WORKERBM}")"
+echo "== ⑥ workerbm 只做连通性检查 =="
+chk "workerbm 不再调用装包脚本" "0" "$(command grep -c 'install-worker-packages' "${WORKERBM}" 2>/dev/null || true)"
+chk_contains "workerbm 连通性检查" "连通性检查" "$(cat "${WORKERBM}")"
 
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then echo "✅ test-k8s-ntp: 全部通过"; else echo "❌ test-k8s-ntp: 有失败"; fi

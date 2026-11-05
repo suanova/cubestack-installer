@@ -6,8 +6,8 @@
 # DEFAULT: 1
 # REPEAT: 0
 # REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs node_net_guard k8s_asset_prefetch
-#   · node_pkgs(12_node_pkgs.sh): 节点系统包对账 —— 必须在 kubespray 之前(它的 bootstrap_os →
-#     system_packages 遇到 apt 依赖图破损会直接失败; 实测 2026-09-28 libudev1/udev 配对被打断)。
+#   · node_pkgs(12_node_pkgs.sh): 节点前置包只读检查 —— 必须在 kubespray 之前,
+#     让缺包尽早暴露; installer 不安装/修复 OS 包。
 #     ⚠ 序号 12 > 06 排不到前面 ⇒ 靠这行 REQUIRES 定序(与 kube_vip 当年同一手法)。
 # 说明: 调用 cubestack-offline.sh install; 透传 cluster.conf 中 PRELOAD_IMAGE_PATTERNS
 #   · 基座恒随全量部署(默认 / --with-k8s / --with-cubestack 都包含), 故 DEFAULT:1、无 TOGGLE ——

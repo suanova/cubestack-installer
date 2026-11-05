@@ -374,7 +374,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator   # 只写 cl
 | `deployments/scripts/tools/k8s/gen-inventory.sh` | 生成 kubespray inventory(`INV_ROLES`/`INV_EXCLUDE` 过滤) |
 | `deployments/scripts/tools/k8s/sync-kubespray-config.sh` | 从 cluster.conf 动态生成 group_vars 中的 IP/组件配置(避免硬编码) |
 | `deployments/scripts/tools/vm/register-vm.sh` | 注册已存在 VM 到 cluster.conf |
-| `deployments/scripts/tools/node/install-worker-packages.sh` | 离线 .deb 包安装到 bare-metal worker |
+| `deployments/scripts/tools/online/check-os-packages.sh` | 节点前置包只读检查（不安装） |
 | `deployments/kubespray/cubestack-offline.sh` | kubespray 离线安装/扩容(init/download/install/scale/check) |
 
 > 脚本开发规范(模块命名/元数据/新增模块流程/最佳实践)见 **`docs/scripts-development-spec.md`**;部署套件总览(支持的软件/架构/镜像路径)见 **`deployments/README.md`**。

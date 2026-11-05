@@ -133,12 +133,6 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-image-push-optimize.sh
 
-      # 节点包对账的"卡死前检测": ceph/rbd 残留必须重启 / fuser 超时 / 前置探测
-      - name: 节点包对账卡死前检测回归(reconcile-node-packages)
-        run: |
-          set -euo pipefail
-          bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh
-
       # 额外私有模块目录: 默认行为不变 / 合并发现 / 重复文件与 key 拒绝
       - name: 额外私有模块目录回归(extra modules dirs)
         run: |

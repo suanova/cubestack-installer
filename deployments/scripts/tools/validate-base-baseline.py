@@ -4,7 +4,7 @@
 The baseline is the public source of truth for base versions: kubespray, the
 pre-install OS package check, and the base image set. It is consumed by:
   - cubestack-installer open-source online install (read directly)
-  - cubestack-release (read at a pinned installer commit) for commercial packaging
+  - commercial packaging (read at a pinned installer commit)
 
 OS packages are a pre-install check only. The installer verifies that the listed
 packages exist on the nodes; it does not download or install them.
