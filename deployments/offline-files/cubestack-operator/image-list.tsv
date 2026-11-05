@@ -40,8 +40,8 @@ cuberouter	harbor.isuanova.com_suanova_cuberouter_latest.tar		harbor.isuanova.co
 portal	harbor.isuanova.com_suanova_cubestack-ui_latest.tar		harbor.isuanova.com/suanova/cubestack-ui:latest
 portal	quay.io_opstree_redis-exporter_v1.44.0.tar		quay.io/opstree/redis-exporter:v1.44.0
 portal	quay.io_opstree_redis-operator_v0.26.0.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-operator:v0.26.0	quay.io/opstree/redis-operator:v0.26.0
-portal	quay.io_opstree_redis-sentinel_v7.0.15.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-sentinel:v7.0.15	quay.io/opstree/redis-sentinel:v7.0.15
-portal	quay.io_opstree_redis_v7.0.15.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis:v7.0.15	quay.io/opstree/redis:v7.0.15
+portal	quay.io_opstree_redis-sentinel_v7.4.11.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-sentinel:v7.4.11	quay.io/opstree/redis-sentinel:v7.4.11
+portal	quay.io_opstree_redis_v7.4.11.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis:v7.4.11	quay.io/opstree/redis:v7.4.11
 # cubestack-docs: 产品文档静态站(nginx; operator 的 cubestackDocs 组件引用, 经平台 Gateway 服务在 /cubestack/docs)。
 #   镜像在**私有项目 suanova-private**, operator 渲染时重写为
 #     <global.imageRegistry>/suanova-private/cubestack-docs:<tag>
