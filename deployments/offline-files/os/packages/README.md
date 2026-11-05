@@ -4,7 +4,7 @@
 `offline-files/` 的规划原则:
 - **版本相关**的资产(裸二进制 / images)→ `kubespray/<版本>/`;
 - **版本无关**的 OS 级资产 → 版本目录之外:
-  - 镜像/二进制 → `os/` 顶层(ubuntu-22.04.tar / netshoot.tar / mc-*);
+  - 镜像/二进制 → `os/` 顶层(ubuntu-22.04.tar / mc-*);
   - **节点 OS deb 包 → 本目录**。
 
 **2026-10-08 收敛**: 原 `kubespray/<版本>/packages/` 与 `packages/repair/` 的全部 .deb 已并入

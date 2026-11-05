@@ -20,13 +20,13 @@ kubeadm reset 兜底 —— 与"覆盖安装必成功"口径一致。
 - **写入**: 各模块在**安装成功点**调用 `record_installed_component "<key>"`
   (`deployments/scripts/lib-common.sh`); **写失败仅告警, 绝不影响部署**(覆盖时自会走探测降级)。
 - **登记点(12 处)**: metallb / local_path / ceph / ceph_csi / k8s_registry / gpu_operator /
-  nvidia_gpu_operator / dev_lab / multus / rdma_shared_dev_plugin / cubestack_operator / netshoot。
+  nvidia_gpu_operator / dev_lab / multus / rdma_shared_dev_plugin / cubestack_operator。
 - **查看**: `bash deployments/scripts/tools/k8s/cluster-teardown.sh --list`
 
 ## 反序卸载规则(设计 §3.3)
 
-候选 = 声明 `# UNINSTALL: 1` 的模块(**8 个**: ceph / k8s_registry / gpu_operator / nvidia_gpu_operator /
-multus / rdma_shared_dev_plugin / cubestack_operator / netshoot)∪ 登记中的组件。拆序:
+候选 = 声明 `# UNINSTALL: 1` 的模块(**7 个**: ceph / k8s_registry / gpu_operator / nvidia_gpu_operator /
+multus / rdma_shared_dev_plugin / cubestack_operator)∪ 登记中的组件。拆序:
 
 1. **登记 `seq` 降序**(真装过、有首装序的, 最晚装的先卸);
 2. **无登记组件**(存量集群降级路径)按**模块文件序反排**, 整组插在主序组之后: 各模块卸载段

@@ -71,7 +71,7 @@ kubectl get nodes                                # 容器内已配好集群访�
 │  业务/平台应用        GPU 推理 · 队列调度(Kueue) · 自研模块(cubestack_operator)      │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  Operator / Addon     沐曦 GPU Operator · Rook-Ceph(CSI) · MetalLB ·       │
-│                       Multus · RDMA Device Plugin · registry · netshoot   │
+│                       Multus · RDMA Device Plugin · registry              │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  K8s 基座(kubespray)  kube-apiserver×3 · etcd×3 · Calico(IPIP) ·          │
 │   【实机 v1.35.8】      CoreDNS · kube-proxy(ipvs) · 本地代理 · kube-vip    │
@@ -787,7 +787,7 @@ rdma-shared-dp-ds 8         8         8       8            8
 ```
 
 > ⚠ **验证边界**:上述套件**不含真实 RDMA 流量**(离线镜像集内没有 perftest)。要给出吞吐/时延数据,请另配
-> `perftest` 镜像实测;**不要据此判定数据面已验收**。诊断 pod(`--steps netshoot`,内置 rdma-core+perftest)可用于这一步。
+> `perftest` 镜像实测;**不要据此判定数据面已验收**。诊断 pod（netshoot）已于 2026-11-05 随 docker.io/nicolaka/netshoot 移除；如需实测请自备含 perftest 的临时镜像。
 
 ### 4.7 常见坑(精选;完整 24 条见 `deployments/cubestack-addon/rdma/CUBESTACK.md` 与 `docs/troubleshooting.md` §8/§9)
 
@@ -802,7 +802,7 @@ rdma-shared-dp-ds 8         8         8       8            8
 | 7 | 装了卡但**驱动没起** | 容器内 `ibv_devices` 无输出 → 查宿主机 MLNX_OFED / `lsmod \| grep mlx5_ib` |
 | 8 | 本插件是 **PF 共享** | 需要 SR-IOV 独占 VF 的场景要换 `sriov-network-device-plugin`(不在本平台范围内) |
 
-> 深挖:`deployments/cubestack-addon/rdma/CUBESTACK.md`(逐项设计说明)、`docs/troubleshooting.md` §8/§9(实测事故)、`docs/netshoot.md`(诊断 pod)。
+> 深挖:`deployments/cubestack-addon/rdma/CUBESTACK.md`(逐项设计说明)、`docs/troubleshooting.md` §8/§9(实测事故)。
 
 ---
 

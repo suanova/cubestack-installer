@@ -331,7 +331,7 @@ _stage() {
     say "[1/7] 上游镜像 + dev-lab → ${STAGE_TREE}"
     IMAGE_OFFLINE_ROOT="${STAGE_TREE}" \
         bash "${IMAGES_DIR}/harbor-save-images.sh" \
-            --exclude-group cubestack-operator,cubestack-platform,netshoot
+            --exclude-group cubestack-operator,cubestack-platform
 
     say "[2/7] 平台/自研组件 → ${STAGE_TREE}/cubestack-operator"
     bash "${IMAGES_DIR}/cubestack-platform-save-images.sh" \
@@ -346,7 +346,7 @@ _stage() {
     [ -f "${OFFLINE_DIR}/model-collection/README.md" ] \
         && cp -f "${OFFLINE_DIR}/model-collection/README.md" "${STAGE_TREE}/model-collection/README.md" || true
 
-    say "[4/7] 非镜像资产(kubespray/os/netshoot/observability/chart/metax)"
+    say "[4/7] 非镜像资产(kubespray/os/observability/chart/metax)"
     _copy_kubespray_nonimage
     if [ -d "${OFFLINE_DIR}/os" ]; then
         mkdir -p "${STAGE_TREE}/os"
@@ -355,7 +355,6 @@ _stage() {
     else
         warn "os/ 不存在, 跳过"
     fi
-    _copy_glob "${OFFLINE_DIR}/netshoot" "netshoot-rdma-*.tar*"
     if [ -d "${OFFLINE_DIR}/cubestack-operator/observability" ]; then
         cp -a "${OFFLINE_DIR}/cubestack-operator/observability" "${STAGE_TREE}/cubestack-operator/"
     fi

@@ -142,7 +142,7 @@ MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sgl
 # 其余全部在 **cluster.defaults.conf**(load_config 自动加载; 覆盖时在本文件写同名变量):
 #   ★ 版本基线/镜像钉子/PRELOAD | API 入口细节
 #   §1 宿主机/SSH/API 域名/Harbor | §2 离线路径+MinIO/NTP/CIDR/CNI/containerd/hosts
-#   §3 MetalLB/Registry/镜像源 | §4 沐曦/Ceph/平台 Operator/Multus/NVIDIA/RDMA/netshoot/dev-lab
+#   §3 MetalLB/Registry/镜像源 | §4 沐曦/Ceph/平台 Operator/Multus/NVIDIA/RDMA/dev-lab
 # 加载优先级: 环境变量 > cluster.conf > cluster.defaults.conf
 # ════════════════════════════════════════════════════════════
 

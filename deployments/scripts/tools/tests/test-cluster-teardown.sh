@@ -79,9 +79,9 @@ J3="$(printf '%s' "${J2}" | libfn '_record_merge_json metallb')"
 chk "① 重跑不改变首装序(metallb 仍 1)" "1" "$(jget "${J3}" 'next(c["seq"] for c in d["components"] if c["key"]=="metallb")')"
 chk "① 重跑不追加重复条目" "2" "$(jget "${J3}" 'len(d["components"])')"
 
-J4="$(printf '%s' 'not-json-at-all' | libfn '_record_merge_json netshoot')"
+J4="$(printf '%s' 'not-json-at-all' | libfn '_record_merge_json legacy_probe')"
 chk "① 坏 JSON 容错(重建空登记)" "1" "$(jget "${J4}" 'd["components"][0]["seq"]')"
-chk "① 坏 JSON 容错 key" "netshoot" "$(jget "${J4}" 'd["components"][0]["key"]')"
+chk "① 坏 JSON 容错 key" "legacy_probe" "$(jget "${J4}" 'd["components"][0]["key"]')"
 
 echo "== ② 登记写回(record_installed_component + 假 SSH) =="
 FAKE_APPLY="${TMP}/apply1.json" libfn 'record_installed_component github_registry' >/dev/null
@@ -121,10 +121,10 @@ chk "③ 登记 seq 降序判别(multus seq5 先于 registry seq2)" "1" "$(print
   END { print (a>0 && b>0 && a<b) ? 1 : 0 }')"
 chk "③ metallb 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'metallb')"
 chk "③ ceph_csi 有 UNINSTALL → 进拆序" "1" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'ceph_csi')"
-chk "③ 探测降级组(netshoot)在登记组之后" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
-  { n++; if ($1=="cubestack_operator") a=n; if ($1=="netshoot") b=n }
+chk "③ 探测降级组(rdma_shared_dev_plugin)在登记组之后" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
+  { n++; if ($1=="cubestack_operator") a=n; if ($1=="rdma_shared_dev_plugin") b=n }
   END { print (a>0 && b>0 && b>a) ? 1 : 0 }')"
-chk "③ netshoot 来源=probe" "probe" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '$1=="netshoot"{print $2}')"
+chk "③ rdma_shared_dev_plugin 来源=probe" "probe" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '$1=="rdma_shared_dev_plugin"{print $2}')"
 
 echo "== ④ 引擎离线 dry-run(--uninstall + 夹具 → 只打印不执行) =="
 OUT4="$(CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_TEARDOWN_TEST_INVENTORY="${INV}" bash "${ENGINE}" --uninstall 2>&1)"

@@ -99,7 +99,6 @@ LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}}"
 | Multus | `MULTUS_SAVE_DIR` | `${REPO_ROOT}/deployments/offline-files/multus` |
 | NVIDIA GPU | `NVIDIA_GPU_OPERATOR_OFFLINE_DIR` | `${REPO_ROOT}/deployments/offline-files/nvidia-gpu-operator` |
 | RDMA | `RDMA_SAVE_DIR` | `${REPO_ROOT}/deployments/offline-files/rdma` |
-| netshoot | `NETSHOOT_SAVE_DIR` / `NETSHOOT_BASE_TAR` | `.../netshoot` / `.../os/netshoot.tar` |
 | dev-lab | `DEV_LAB_SAVE_DIR` | `${REPO_ROOT}/deployments/offline-files/dev-lab` |
 | model images | `MODEL_IMAGES_SAVE_DIR` | `${REPO_ROOT}/deployments/offline-files/model-collection` |
 
@@ -170,7 +169,7 @@ cubestack-installer/                     # MinIO 桶根
 │   ├── ceph/                           # │
 │   ├── kubespray/v2.32.0/              # │ k8s + ceph 镜像都在 images/
 │   ├── cubestack-operator/             # │
-│   ├── rdma/  multus/  netshoot/ ...   # ┘
+│   ├── rdma/  multus/ ...              # ┘
 ├── 2.0.0/                               # 新增：一个自包含的发布版本
 │   ├── offline-files/                   # 与现有 offline-files 完全同构
 │   │   ├── release.env                  # 版本变量（部署时加载）
@@ -243,7 +242,7 @@ CUBESTACK_RELEASE_ROOT="/data/cubestack-installer"
 |---|---|---|
 | 基座 | `kubespray`（含 `images/` + 二进制 + packages） | 必选 |
 | 存储 | `ceph`（写入 `kubespray/<ver>/images`） | 随 `CEPH_ENABLED` |
-| 网络/设备 | `multus`、`rdma`、`netshoot`、`nginx` | 随开关 |
+| 网络/设备 | `multus`、`rdma`、`nginx` | 随开关 |
 | 平台 | `cubestack-operator`（本体 + 各组件子目录） | 必选 |
 | GPU | `metax-gpu`、`nvidia-gpu-operator` | 随开关 |
 | 大件（已包含） | `dev-lab`、`model-collection` | **2.0 已确认包含**（接受冗余；单版本体积较大） |
@@ -314,7 +313,7 @@ NVIDIA_GPU_DRIVER_BRANCH=595
 NVIDIA_GPU_DRIVER_PRECOMPILED_KERNEL=5.15.0-186-generic
 
 # 本发布树包含的组（供发布脚本/人工核对）
-RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev-lab model-collection metax-gpu nvidia-gpu-operator"
+RELEASE_GROUPS="kubespray ceph multus rdma nginx cubestack-operator dev-lab model-collection metax-gpu nvidia-gpu-operator"
 ```
 
 规则：
@@ -356,7 +355,7 @@ RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev
   "built_by": "release-operator",
   "kubespray_version": "v2.32.0",
   "operator_chart_version": "2.0.0",
-  "groups": ["kubespray", "ceph", "multus", "rdma", "netshoot", "nginx", "cubestack-operator", "dev-lab", "model-collection"],
+  "groups": ["kubespray", "ceph", "multus", "rdma", "nginx", "cubestack-operator", "dev-lab", "model-collection"],
   "cli_image": "harbor.isuanova.com/suanova/cubestack-installer-cli:2.0.0",
   "cli_tar": "../cubestack-installer-cli-v2.0.0.tar",
   "cli_tar_sha256": "<64位hex，与 sha256sum 输出一致>",
@@ -444,15 +443,13 @@ if [ -n "${CUBESTACK_RELEASE:-}" ]; then
     MULTUS_SAVE_DIR="${OFFLINE_FILES_ROOT}/multus"
     NVIDIA_GPU_OPERATOR_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/nvidia-gpu-operator"
     RDMA_SAVE_DIR="${OFFLINE_FILES_ROOT}/rdma"
-    NETSHOOT_SAVE_DIR="${OFFLINE_FILES_ROOT}/netshoot"
-    NETSHOOT_BASE_TAR="${OFFLINE_FILES_ROOT}/os/netshoot.tar"
     # dev-lab / model-collection 也随发布树分发（接受冗余）
     DEV_LAB_SAVE_DIR="${OFFLINE_FILES_ROOT}/dev-lab"
     MODEL_IMAGES_SAVE_DIR="${OFFLINE_FILES_ROOT}/model-collection"
     CEPH_IMAGE_DIR="${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}/images"
     export CUBESTACK_RELEASE_ROOT METAX_OFFLINE_DIR METAX_PKG_DIR CUBESTACK_OPERATOR_OFFLINE_DIR \
            MULTUS_SAVE_DIR NVIDIA_GPU_OPERATOR_OFFLINE_DIR RDMA_SAVE_DIR \
-           NETSHOOT_SAVE_DIR NETSHOOT_BASE_TAR DEV_LAB_SAVE_DIR \
+           DEV_LAB_SAVE_DIR \
            MODEL_IMAGES_SAVE_DIR CEPH_IMAGE_DIR
     unset _rel_root
 fi
@@ -730,10 +727,10 @@ release 模式默认用 `mc mirror --overwrite --remove` 精确镜像版本目�
 3. 上游镜像 → staging/offline-files/（复用现有工具，不新增下载逻辑）：
      IMAGE_OFFLINE_ROOT=/data/release-staging/2.0.0/offline-files \
        harbor-save-images.sh \
-         --exclude-group cubestack-operator,cubestack-platform,netshoot
+         --exclude-group cubestack-operator,cubestack-platform
    （nginx / multus / rdma / nvidia / kubespray+ceph / dev-lab 等由该工具按清单写入；
      dev-lab 用 release.env 的 DEV_LAB_IMAGE_TAG=2.0.0 生成 *_2.0.0.tar；
-     netshoot 组只用于构建派生镜像, 模块部署时不用它, 故排除）
+     netshoot 组已于 2026-11-05 随 docker.io/nicolaka/netshoot 一并移除，不再存在）
 4. 平台/自研镜像 → staging/offline-files/cubestack-operator：
      cubestack-platform-save-images.sh \
        --list deployments/releases/2.0.0/release-images.tsv \
@@ -748,7 +745,6 @@ release 模式默认用 `mc mirror --overwrite --remove` 精确镜像版本目�
 5. 复制非镜像资产（现有 offline-files 里已有的）到 staging/offline-files/：
      kubespray/<KUBESPRAY_VERSION>/ 的二进制/packages/tree.tar.gz/VERSION.profile
      os/（含 packages/）
-     netshoot/ 的自建 netshoot-rdma-*.tar（上游 netshoot 组已排除，不需要）
      cubestack-operator/observability/ 非镜像资产
      cubestack-operator/charts/<chart>-<版本>.tgz + .digest（版本 = release.env 的 CUBESTACK_OPERATOR_CHART_VERSION）
      metax-gpu/ 整个目录（tars + run/资源包/chart；该组默认不走 harbor-save；未启用 GPU 时跳过）

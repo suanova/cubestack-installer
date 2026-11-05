@@ -903,15 +903,13 @@ load_config() {
         MULTUS_SAVE_DIR="${OFFLINE_FILES_ROOT}/multus"
         NVIDIA_GPU_OPERATOR_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/nvidia-gpu-operator"
         RDMA_SAVE_DIR="${OFFLINE_FILES_ROOT}/rdma"
-        NETSHOOT_SAVE_DIR="${OFFLINE_FILES_ROOT}/netshoot"
-        NETSHOOT_BASE_TAR="${OFFLINE_FILES_ROOT}/os/netshoot.tar"
         DEV_LAB_SAVE_DIR="${OFFLINE_FILES_ROOT}/dev-lab"
         MODEL_IMAGES_SAVE_DIR="${OFFLINE_FILES_ROOT}/model-collection"
         CEPH_IMAGE_DIR="${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}/images"
         export CUBESTACK_RELEASE_LAYOUT CUBESTACK_RELEASE_ROOT METAX_OFFLINE_DIR METAX_PKG_DIR \
                CUBESTACK_OPERATOR_OFFLINE_DIR MULTUS_SAVE_DIR \
                NVIDIA_GPU_OPERATOR_OFFLINE_DIR RDMA_SAVE_DIR \
-               NETSHOOT_SAVE_DIR NETSHOOT_BASE_TAR DEV_LAB_SAVE_DIR \
+               DEV_LAB_SAVE_DIR \
                MODEL_IMAGES_SAVE_DIR CEPH_IMAGE_DIR
         vlog "release 模式生效: ${CUBESTACK_RELEASE} layout=${_layout}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
         unset _rel_root _layout _auto_rel_env _auto_ver

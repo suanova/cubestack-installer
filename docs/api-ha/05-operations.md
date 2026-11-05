@@ -127,9 +127,8 @@ ssh ubuntu@<node> 'sudo wc -l < /proc/net/ip_vs'              # 规则条数
 #   C000021C = 192.0.2.28    C000021D = .29  C000021F = .31
 # 例: "TCP 0AE90001:01BB → C000021F 192B" = kubernetes Service 转发到 192.0.2.31:6443
 
-# 需要 ipvsadm 的完整视图时，用诊断 pod（需要时再装）
-./deploy-cluster.sh --steps netshoot
-kubectl -n default exec -it cubestack-netshoot -- ipvsadm -Ln
+# 需要 ipvsadm 的完整视图时，在节点上直接执行（netshoot 诊断 pod 已于 2026-11-05 移除）
+# ipvsadm -Ln
 ```
 
 ---
