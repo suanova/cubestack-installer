@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # MODULE: model_images
-# DESC: 模型推理镜像(sglang / vllm-metax, 来源 suanova/model-collection 仓库)离线 tar → 集群内置 registry(排在 dev_lab 之后; 默认 push, config-digest 幂等 + 层/镜像并行)
+# DESC: 模型推理镜像(sglang / vllm-metax, 由外部版本树提供)离线 tar → 集群内置 registry(排在 dev_lab 之后; 默认 push, config-digest 幂等 + 层/镜像并行)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
