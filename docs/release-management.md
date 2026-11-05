@@ -193,6 +193,11 @@ cubestack-installer/                     # MinIO 桶根
 - 发布树自包含，回滚只需切版本号，不依赖 dev 目录当时的状态；
 - 代价是 MinIO 存储按版本重复。控制方式见 §2.3。
 
+> 版本目录若包含 `modules/`（私有模块），部署时设置
+> `CUBESTACK_EXTRA_MODULES_DIRS=<版本目录>/modules`，框架会与内置模块合并。
+> 旧的 `fetch --release` 布局只下载 `offline-files/` 和 CLI tar，不包含
+> `modules/`，不要设置该变量；2.0.x 旧布局行为不变。
+
 ### 2.2 本地目录
 
 本地目录与 MinIO 桶根**同构**（`<base>` = 本地镜像的桶根；生产建议 dev 与 release
@@ -967,7 +972,7 @@ Harbor 不是本方案的依赖；现有部署代码只消费 MinIO 里的 tar�
 - Harbor 项目可对 `2.*` 开启 immutable tag rule，防止同名 tag 被覆盖；
 - 发布脚本记录每个 ref 的 digest（写入 `release.json` 可选字段），并在同步前用
   `skopeo inspect --raw` 校验；
-- 若已有 `cubestack-release` 之类的独立项目，可将发布镜像放进去；没有也不影响本方案，
+- 若已有独立的发布镜像项目，可将发布镜像放进去；没有也不影响本方案，
   同步脚本只需能按显式 ref 拉取即可。
 
 ### 7.3 自研镜像的版本号
