@@ -157,7 +157,7 @@ deployments/scripts/
 
 **额外私有模块目录**:`CUBESTACK_EXTRA_MODULES_DIRS` 可指定冒号分隔的目录,每个目录结构同 `modules/`(例如版本目录中的 `modules/`)。设置后框架把内置模块和这些目录合并到临时模块根再发现/执行;未设置时行为与原来完全一致。重复的模块文件名或 `MODULE` key 会直接报错。
 
-项目根目录 `scripts/` 下仅有 dev 启动脚本(`dev.sh`/`start-backend.sh`/`start-frontend.sh`),部署脚本统一在 `deployments/scripts/`。
+项目根目录 `scripts/` 下仅保留 roadmap 生成脚本；部署脚本统一在 `deployments/scripts/`。
 
 统一配置:见 `config/cluster.conf`(真实,已 gitignore)、`config/cluster.conf.example`(主文件模板,提交)
 与 `config/cluster.defaults.conf`(高级/默认值层,提交,自动加载)。
