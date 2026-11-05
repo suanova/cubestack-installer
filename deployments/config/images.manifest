@@ -85,7 +85,8 @@ k8s-base  docker.io/rancher/local-path-provisioner:${LOCAL_PATH_VERSION}
 k8s-base  docker.io/library/busybox:${BUSYBOX_TAG}   busybox.tar
 
 # API 本地代理(kubespray nginx-proxy 静态 Pod)用; 同时被 verify 模块的 ensure_registry_nginx
-# 复用为测试后端。tag 必须与 kubespray download.yml 的 nginx_image_tag 一致
+# 复用为测试后端。tag 必须与 kubespray download.yml 的 nginx_image_tag 一致。
+# 独立 nginx 组已移除(2.0.0/2.0.1 的 RELEASE_GROUPS 均不含 nginx), 该镜像只在 k8s-base 登记。
 k8s-base  docker.io/library/nginx:${API_LB_NGINX_IMAGE_TAG}
 
 # ------------------------------------------------------------

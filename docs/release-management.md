@@ -243,7 +243,7 @@ CUBESTACK_RELEASE_ROOT="/data/cubestack-installer"
 |---|---|---|
 | 基座 | `kubespray`（含 `images/` + 二进制 + packages） | 必选 |
 | 存储 | `ceph`（写入 `kubespray/<ver>/images`） | 随 `CEPH_ENABLED` |
-| 网络/设备 | `multus`、`rdma`、`netshoot`、`nginx` | 随开关 |
+| 网络/设备 | `multus`、`rdma`、`netshoot` | 随开关；nginx 由 k8s-base 提供，不再单列 |
 | 平台 | `cubestack-operator`（本体 + 各组件子目录） | 必选 |
 | GPU | `metax-gpu`、`nvidia-gpu-operator` | 随开关 |
 | 大件（已包含） | `dev-lab`、`model-collection` | **2.0 已确认包含**（接受冗余；单版本体积较大） |
@@ -314,7 +314,7 @@ NVIDIA_GPU_DRIVER_BRANCH=595
 NVIDIA_GPU_DRIVER_PRECOMPILED_KERNEL=5.15.0-186-generic
 
 # 本发布树包含的组（供发布脚本/人工核对）
-RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev-lab model-collection metax-gpu nvidia-gpu-operator"
+RELEASE_GROUPS="kubespray ceph multus rdma netshoot cubestack-operator dev-lab model-collection metax-gpu nvidia-gpu-operator"
 ```
 
 规则：
@@ -356,7 +356,7 @@ RELEASE_GROUPS="kubespray ceph multus rdma netshoot nginx cubestack-operator dev
   "built_by": "release-operator",
   "kubespray_version": "v2.32.0",
   "operator_chart_version": "2.0.0",
-  "groups": ["kubespray", "ceph", "multus", "rdma", "netshoot", "nginx", "cubestack-operator", "dev-lab", "model-collection"],
+  "groups": ["kubespray", "ceph", "multus", "rdma", "netshoot", "cubestack-operator", "dev-lab", "model-collection"],
   "cli_image": "harbor.isuanova.com/suanova/cubestack-installer-cli:2.0.0",
   "cli_tar": "../cubestack-installer-cli-v2.0.0.tar",
   "cli_tar_sha256": "<64位hex，与 sha256sum 输出一致>",
@@ -730,7 +730,7 @@ release 模式默认用 `mc mirror --overwrite --remove` 精确镜像版本目�
      IMAGE_OFFLINE_ROOT=/data/release-staging/2.0.0/offline-files \
        harbor-save-images.sh \
          --exclude-group cubestack-operator,cubestack-platform,netshoot
-   （nginx / multus / rdma / nvidia / kubespray+ceph / dev-lab 等由该工具按清单写入；
+   （multus / rdma / nvidia / kubespray+ceph / dev-lab 等由该工具按清单写入；k8s-base 的 nginx 也由该工具写入；
      dev-lab 用 release.env 的 DEV_LAB_IMAGE_TAG=2.0.0 生成 *_2.0.0.tar；
      netshoot 组只用于构建派生镜像, 模块部署时不用它, 故排除）
 4. 平台/自研镜像 → staging/offline-files/cubestack-operator：
@@ -894,7 +894,7 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
 
 - **允许变化**：`CUBESTACK_OPERATOR_IMAGE_TAG`、`CUBESTACK_OPERATOR_CHART_VERSION`、`CUBESTACK_CLI_IMAGE`；
 - **允许忽略并告警**：`DEV_LAB_*`、`METAX_*`、`NVIDIA_*`、`RDMA_IMAGE_TAG`、`MULTUS_IMAGE_TAG`、
-  `NGINX_TAG`（仅 2.0.0 保留；2.0.1 已移除，verify 复用 k8s-base 的 nginx tar；这些组要升级需完整 `release-publish.sh`）；
+  `NGINX_TAG`（2.0.0/2.0.1 均已移除，verify 复用 k8s-base 的 nginx tar；这些组要升级需完整 `release-publish.sh`）；
 - **其他 key 变化**（KUBESPRAY_VERSION/RELEASE_GROUPS/上游版本等）→ 失败；
 - `stale 清理`：只扫 selected subdir 的 maxdepth=1，删除不在该 subdir 全量 tsv 行里的旧
   `*.tar`/`*.tar.gz` 及 `.digest`；chart 目录只保留 `CUBESTACK_OPERATOR_CHART_VERSION`
@@ -966,7 +966,7 @@ Harbor 不是本方案的依赖；现有部署代码只消费 MinIO 里的 tar�
 | operator chart | `2.0.0`（替代 `1.0.0-latest`） |
 | CLI 镜像 | `cubestack-installer-cli:2.0.0`（替代只发 `latest`） |
 | 第三方 | 保持上游版本 tag；不要用 `latest` 进入发布树 |
-| 固定短名镜像 | `busybox` / `nginx` 在发布树内锁定具体版本 |
+| 固定短名镜像 | `busybox` 在发布树内锁定具体版本；nginx 复用 k8s-base 镜像 |
 
 ### 7.2 不可变与 digest
 
@@ -1170,7 +1170,7 @@ sudo ./deployments/scripts/deploy-cluster.sh
 | tar 文件名与 `release.env` tag 不一致 | 模块找不到 tar | 发布脚本发布前做机械校验（文件名 ↔ tag） |
 | Harbor tag 被覆盖 | 同步到的内容与发布时不同 | 发布前记录 digest；Harbor 建议开 immutable |
 | `fetch --release` 全量 sha256 较慢 | 取件时间增加 | 默认校验，提供 `--no-verify` |
-| 固定短名文件（busybox/nginx）在版本间变化 | 旧版本被新文件覆盖 | 版本目录隔离，各版本各存一份 |
+| 固定短名文件（busybox）在版本间变化 | 旧版本被新文件覆盖 | 版本目录隔离，各版本各存一份 |
 | CLI tar 与 `release.env` 版本不一致 | 部署机用了错误版本的 CLI | 发布脚本校验 tar RepoTags = `cubestack-installer-cli:2.0.0`；fetch 校验 `release.json.cli_tar_sha256` |
 | 组件原地刷新中途失败 | 发布树暂时没有 `_SUCCESS` | 保留 `_REFRESH_PENDING`，同 subdirs/`all` 重跑；fetch 明确报“正在刷新” |
 | rc→GA 原地刷新删除旧 rc tar | 旧版本回滚能力减弱 | GA 前对 `<release>/` 做 MinIO 快照/版本化，或改用新版本目录完整发布 |
