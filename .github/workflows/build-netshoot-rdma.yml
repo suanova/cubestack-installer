@@ -1,0 +1,120 @@
+name: Build netshoot-rdma image
+
+# Builds the RDMA-enabled netshoot diagnostic image and optionally pushes it to
+# the public Harbor project. The image is consumed by:
+#   - cubestack-release: pinned as a base image and packaged into the version tree
+#   - cubestack-installer open-source online install: materialized from public Harbor
+#
+# The tag is immutable: content changes must use a new tag (for example
+# 26.04.17-r2). This workflow never overwrites an existing tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Immutable image tag (e.g. 26.04.17 or 26.04.17-r2)'
+        required: true
+      perftest_version:
+        description: 'perftest source version (default: tag without -rN suffix)'
+        required: false
+        default: ''
+      push:
+        description: 'Push to Harbor (uncheck for build-only validation)'
+        type: boolean
+        default: true
+      apk_mirror:
+        description: 'Optional apk mirror (e.g. https://mirrors.aliyun.com/alpine)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: netshoot-rdma-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build netshoot-rdma
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      HARBOR_HOST: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
+      HARBOR_USER: ${{ vars.HARBOR_MIRROR_USER || secrets.HARBOR_MIRROR_USER }}
+      HARBOR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
+      IMAGE: ${{ vars.NETSHOOT_RDMA_IMAGE || 'harbor.isuanova.com/suanova/netshoot-rdma' }}
+      # TODO: pin this to an immutable base tag/digest once the public mirror
+      # catalog carries a pinned netshoot base.
+      BASE_IMAGE: ${{ vars.NETSHOOT_RDMA_BASE_IMAGE || 'nicolaka/netshoot:latest' }}
+      IMAGE_TAG_INPUT: ${{ inputs.tag }}
+      PERFTEST_INPUT: ${{ inputs.perftest_version }}
+      PUSH_INPUT: ${{ inputs.push }}
+      APK_MIRROR_INPUT: ${{ inputs.apk_mirror }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          tag="${IMAGE_TAG_INPUT}"
+          [[ "${tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] \
+            || { echo "::error::invalid image tag: '${tag}'"; exit 1; }
+          [[ "${tag,,}" != "latest" ]] \
+            || { echo "::error::'latest' is not allowed"; exit 1; }
+          perftest="${PERFTEST_INPUT:-${tag%-r*}}"
+          [[ "${perftest}" =~ ^[0-9A-Za-z._-]+$ ]] \
+            || { echo "::error::invalid perftest version: '${perftest}'"; exit 1; }
+          if [ -n "${APK_MIRROR_INPUT}" ] && [[ ! "${APK_MIRROR_INPUT}" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "::error::apk_mirror must be an https URL"
+            exit 1
+          fi
+          echo "IMAGE_TAG=${tag}" >>"${GITHUB_ENV}"
+          echo "PERFTEST_VERSION=${perftest}" >>"${GITHUB_ENV}"
+
+      - name: Login to Harbor
+        if: env.PUSH_INPUT == 'true'
+        run: |
+          set -euo pipefail
+          if [[ -z "${HARBOR_USER:-}" || -z "${HARBOR_PASSWORD:-}" ]]; then
+            echo "::error::HARBOR_MIRROR_USER / HARBOR_MIRROR_PASSWORD are required to push"
+            exit 1
+          fi
+          echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_HOST}" -u "${HARBOR_USER}" --password-stdin
+
+      - name: Ensure tag is new
+        if: env.PUSH_INPUT == 'true'
+        run: |
+          set -euo pipefail
+          if docker manifest inspect "${IMAGE}:${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "::error::tag already exists, refusing to overwrite: ${IMAGE}:${IMAGE_TAG}"
+            exit 1
+          fi
+
+      - name: Build, self-check and optionally push
+        run: |
+          set -euo pipefail
+          make netshoot-rdma \
+            NETSHOOT_RDMA_IMAGE="${IMAGE}" \
+            NETSHOOT_RDMA_TAG="${IMAGE_TAG}" \
+            NETSHOOT_RDMA_BASE_IMAGE="${BASE_IMAGE}" \
+            NETSHOOT_RDMA_PERFTEST_VERSION="${PERFTEST_VERSION}" \
+            NETSHOOT_RDMA_APK_MIRROR="${APK_MIRROR_INPUT}" \
+            NETSHOOT_RDMA_PUSH="${PUSH_INPUT}"
+
+      - name: Verify pushed digest
+        if: env.PUSH_INPUT == 'true'
+        run: |
+          set -euo pipefail
+          ref="${IMAGE}:${IMAGE_TAG}"
+          digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${ref}" \
+            | awk -F@ -v r="${ref}" '$1==r {print $2; exit}')"
+          [[ -n "${digest}" ]] || { echo "::error::cannot resolve pushed digest for ${ref}"; exit 1; }
+          {
+            echo "### netshoot-rdma pushed"
+            echo ""
+            echo "\`${ref}@${digest}\`"
+          } >>"$GITHUB_STEP_SUMMARY"

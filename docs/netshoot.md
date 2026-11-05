@@ -5,7 +5,10 @@
 (`ib_write_bw` / `ib_read_bw` / `ib_write_lat` …),用于 RDMA(IB/RoCE)链路诊断与带宽/时延实测。
 
 - 模块: `deployments/scripts/modules/03_addon/35_netshoot.sh`(key `netshoot`)
-- 镜像物料: `deployments/offline-files/netshoot/`(自建 tar;回退用 `offline-files/os/netshoot.tar`)
+- 镜像: `harbor.isuanova.com/suanova/netshoot-rdma:<immutable-tag>`(public)
+  - 构建/推送: `.github/workflows/build-netshoot-rdma.yml`(手工触发)
+  - 本地构建: `make netshoot-rdma NETSHOOT_RDMA_TAG=<tag> [NETSHOOT_RDMA_PUSH=1]`
+  - tar: 由 release 打包或开源在线安装从 public Harbor 物化到 `offline-files/netshoot/`
 - 默认命名空间 `default`,pod 名 `cubestack-netshoot`(固定名,便于 exec)
 
 ---
@@ -22,8 +25,10 @@
 - 离线集群按设计不带软件源 → RDMA 工具**必须构建期装好**(实测某集群 pod 能连 apk 源,
   但离线交付不能依赖这点)。
 
-于是有了 `tools/images/netshoot-rdma.Dockerfile`(两阶段构建)+ `tools/images/netshoot-rdma-build.sh`
-(联网机执行)。构建与踩坑见 §4。
+于是有了 `deployments/scripts/tools/images/netshoot-rdma.Dockerfile`(两阶段构建)+
+`make netshoot-rdma` target 和 CI workflow。构建与踩坑见 §4。
+
+> TODO(layout): 后续把 Dockerfile 统一挪到 `images/netshoot-rdma/Dockerfile`。
 
 ## 2. 部署与使用
 
@@ -68,35 +73,60 @@ ib_write_bw -d mlx5_0 -a                 # 带宽实测(对端要同步起 ib_wr
 
 > 不降级的后果很直接: 无卡集群里 pod 永远 `Pending` —— "诊断工具"自己先挂了。
 
-## 4. 镜像构建(联网机)
+## 4. 镜像构建
+
+### 4.1 CI(发布通道, 推荐)
+
+`.github/workflows/build-netshoot-rdma.yml` 手工触发, 输入不可变 `tag`(如 `26.04.17`
+或 `26.04.17-r2`), 构建 + 自检后推送 `harbor.isuanova.com/suanova/netshoot-rdma:<tag>`。
+该镜像是 release base pin 和开源在线物化的共同来源; 不要用 `latest`。
+
+### 4.2 本地/联网机构建
 
 ```bash
-sudo ./deployments/scripts/tools/images/netshoot-rdma-build.sh            # 构建 + 自检 + 保存 tar
-sudo APK_MIRROR=https://mirrors.aliyun.com/alpine \
-     ./deployments/scripts/tools/images/netshoot-rdma-build.sh --force    # 慢网络: 换 apk 源
+make netshoot-rdma NETSHOOT_RDMA_TAG=26.04.17
+make netshoot-rdma NETSHOOT_RDMA_TAG=26.04.17 NETSHOOT_RDMA_PUSH=1
+make netshoot-rdma NETSHOOT_RDMA_TAG=26.04.17-r2 \
+  NETSHOOT_RDMA_APK_MIRROR=https://mirrors.aliyun.com/alpine
 ```
 
-脚本流程: 载入基础镜像(优先 `offline-files/os/netshoot.tar`,**不依赖 Docker Hub**)→ 宿主机下载
-perftest 源码 → 两阶段构建 → **容器内自检**(缺 `ibv_*`/`ib_write_bw`/`tcpdump` 直接失败, 不产出残缺 tar)
-→ `docker save` 到 `offline-files/netshoot/netshoot-rdma-<版本>.tar`。
+Makefile 流程：
 
-构建踩过的坑(都已固化进脚本/Dockerfile):
+```text
+宿主机下载 perftest 源码
+  → docker build（不依赖容器内访问 GitHub）
+  → 容器内自检（缺 ibv_*/ib_write_bw/tcpdump 直接失败）
+  → 可选 docker push
+```
+
+常用变量：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `NETSHOOT_RDMA_TAG` | 无（必填） | 镜像 tag；禁止 `latest` |
+| `NETSHOOT_RDMA_PERFTEST_VERSION` | tag 去掉 `-rN` | perftest 源码版本 |
+| `NETSHOOT_RDMA_BASE_IMAGE` | `nicolaka/netshoot:latest` | 基础镜像；2.1 建议固定到 public mirror 的 tag/digest |
+| `NETSHOOT_RDMA_IMAGE` | `harbor.isuanova.com/suanova/netshoot-rdma` | 目标镜像 |
+| `NETSHOOT_RDMA_PUSH` | `0` | `1` 时 push；tag 已存在会拒绝覆盖 |
+| `NETSHOOT_RDMA_APK_MIRROR` | 空 | 慢网络时换 Alpine 源 |
+
+构建踩过的坑(都已固化进 Makefile/Dockerfile):
 
 | 现象 | 根因 | 处理 |
 |---|---|---|
-| `apk add build-base` 像卡死(十几分钟无输出) | 上游 Alpine CDN 实测 ~70 KB/s | `APK_MIRROR=https://mirrors.aliyun.com/alpine`(实测 ~3 MB/s) |
-| 容器内 `wget github.com` 报 `Resource temporarily unavailable` | 容器出网受限(宿主机正常) | 源码改由**宿主机下载**后 COPY 进构建上下文 |
+| `apk add build-base` 像卡死(十几分钟无输出) | 上游 Alpine CDN 实测 ~70 KB/s | `NETSHOOT_RDMA_APK_MIRROR=https://mirrors.aliyun.com/alpine`(实测 ~3 MB/s) |
+| 容器内 `wget github.com` 报 `Resource temporarily unavailable` | 容器出网受限(宿主机正常) | Makefile 在**宿主机下载**源码后 COPY 进构建上下文 |
 | `configure: error: pciutils header files not found` | perftest 要 pciutils 头 | builder 装 `pciutils-dev`,runtime 装 `pciutils-libs` |
 | `error: '_SC_LEVEL1_DCACHE_LINESIZE' undeclared` | 该常量是 glibc 扩展, **musl 没有** | Dockerfile 里 `sed` 替换为常量 64(仅用于缓冲区对齐, 不影响测量) |
-| 下载 perftest 源码 SSL 断流 | 到 GitHub 的 TLS 间歇性失败 | 脚本 3 次重试; 或 `PERFTEST_TARBALL=<已下好的包>` 直接喂 |
+| 下载 perftest 源码 SSL 断流 | 到 GitHub 的 TLS 间歇性失败 | Makefile 3 次重试 |
 
-升级 perftest: 改 `cluster.conf` 的 `NETSHOOT_RDMA_VERSION`(= 镜像 tag = perftest 版本)后重建镜像。
+升级 perftest: 改 `cluster.conf` 的 `NETSHOOT_RDMA_VERSION`(= 镜像 tag = perftest 版本)后重新构建并 push。
 
 > ⚠ **改了镜像内容(加包/打补丁)必须换新 tag** —— 同 tag 重建到不了集群: 模块 35 见 registry
 > 已有同名 tag 会**跳过推送**, 且 pod `imagePullPolicy: IfNotPresent` 会命中节点旧缓存。
 > 约定 `<perftest 版本>-r<N>`(如 `26.04.17-r2`):
 > ```bash
-> sudo IMAGE_TAG=26.04.17-r2 ./deployments/scripts/tools/images/netshoot-rdma-build.sh --force
+> make netshoot-rdma NETSHOOT_RDMA_TAG=26.04.17-r2 NETSHOOT_RDMA_PUSH=1
 > # 再把 cluster.conf 的 NETSHOOT_RDMA_VERSION 改成 26.04.17-r2, 重跑 --steps netshoot
 > ```
 
