@@ -150,8 +150,15 @@ def main() -> int:
         elif kind == "local":
             if not str(source.get("path", "")).strip():
                 errors.append(f"{where}: local source requires path")
+        elif kind == "installer-binaries":
+            if not str(source.get("version", "")).strip():
+                errors.append(f"{where}: installer-binaries source requires version")
+            if source.get("repo") and not re.match(r"^[^/]+/[^/]+$", str(source["repo"])):
+                errors.append(f"{where}: installer-binaries repo must be owner/name")
+            if source.get("ref") and not re.match(r"^[0-9a-f]{7,40}$", str(source["ref"])):
+                errors.append(f"{where}: installer-binaries ref must be a commit")
         else:
-            errors.append(f"{where}: source.type must be git|url|local")
+            errors.append(f"{where}: source.type must be git|url|local|installer-binaries")
         digest = str(item.get("digest", "")).strip()
         if digest and not re.match(r"^sha256:[0-9a-f]{64}$", digest):
             errors.append(f"{where}: invalid digest {digest!r}")

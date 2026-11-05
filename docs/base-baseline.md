@@ -107,14 +107,18 @@ packages:
 
 ## K8s 二进制包
 
-kubelet/kubeadm/kubectl/crictl/CNI/containerd/runc/etcd 等由 installer 准备：
+kubelet/kubeadm/kubectl/crictl/CNI/containerd/runc/etcd 等由 installer 维护**来源和版本**：
 
-1. 手动触发 `.github/workflows/build-k8s-binaries.yml`，输入不可变 tag
-   （如 `v2.32.0-amd64`；内容变化用 `-rN`）。
-2. workflow 用 `tools/offline/build-k8s-binaries.sh` 生成
-   `kubespray-binaries-<version>-<arch>.tar.gz`，上传到 GitHub Release。
-3. 在 `versions/base.yaml` 的 `files[]` 记录 URL 和 sha256；release 的
-   `fetch-base-sources` 会下载、校验并解包到 `offline-files/kubespray/<ver>/`。
+- `versions/base.yaml` 的 `files[]` 使用 `source.type: installer-binaries`，
+  只声明 `version` / `arch`；release 在固定 baseline commit 上补 `repo` / `ref`。
+- release 打包时 checkout installer 的 pinned commit，调用
+  `tools/offline/build-k8s-binaries.sh` 从 kubespray 的上游 URL 下载并打成
+  `binaries.tar.gz`，不依赖 GitHub Release 资产。
+- 生成的 tar 由 `fetch-base-sources` 计算 digest、写入 tree、打进 base 树；
+  `materialize-base` 解包到 `offline-files/kubespray/<ver>/`。
+- 开源在线安装仍由 `k8s_asset_prefetch` 在安装时用同一套 `download-files` 逻辑下载。
+
+这样 installer 只维护“从哪里下载、下载什么版本”，字节由 release 在打包时获取。
 
 ## Rocky 扩展点
 
