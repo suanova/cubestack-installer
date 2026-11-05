@@ -97,7 +97,7 @@ jobs:
           if [ "${GITHUB_REF}" = "refs/heads/release-2.0" ]; then
             # release-2.0: 只推 release.env 钉死的版本化 CLI 镜像; 不写 :latest,
             # 也不同步 MinIO offline-files/cli/(那是 dev/latest 通道)。
-            rel_env="deployments/releases/2.0.0/release.env"
+            rel_env="deployments/releases/2.0.1/release.env"
             [ -f "${rel_env}" ] || { echo "::error::missing ${rel_env}"; exit 1; }
             set -a
             # shellcheck disable=SC1090
