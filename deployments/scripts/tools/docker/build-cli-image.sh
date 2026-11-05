@@ -51,7 +51,11 @@ DO_BUILD=0
 DO_BASE=0
 DO_PUSH=0
 STAGE_DIR=""
-cleanup() { [ -n "${STAGE_DIR}" ] && rm -rf "${STAGE_DIR}"; }
+cleanup() {
+    if [ -n "${STAGE_DIR}" ]; then
+        rm -rf "${STAGE_DIR}"
+    fi
+}
 trap cleanup EXIT
 while [ $# -gt 0 ]; do
     case "$1" in
