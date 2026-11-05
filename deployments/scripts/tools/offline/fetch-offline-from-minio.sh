@@ -24,8 +24,10 @@
 #   · 断点续传/重试: mc mirror 按对象 --retry + 整命令重试(--retry N, 默认 3);
 #     --resume 先校验本地树, 部分文件用 mc cat --offset 续传后按清单 sha 校验,
 #     失败再完整重下; 本地已完整则直接退出; --repair 重下坏文件;
-#   · 精确清理(release/flat 默认): 用 mc mirror --overwrite --remove 让本地树与 MinIO 一致,
-#     删除本地多余文件; 默认 30s 红色倒计时(--clean-countdown N / --yes 跳过);
+#   · 精确清理(release/flat 默认): **内容寻址增量** —— 以远端 offline-files/SHA256SUMS 为判据,
+#     只重下"缺失/哈希不符"的文件, 并删除本地多余文件(与对象 mtime/ETag 无关);
+#     哈希缓存 .cubestack-hashes.json 避免每次重读整棵树; --full 回退旧的整树 mc mirror;
+#     默认 30s 红色倒计时(--clean-countdown N / --yes 跳过);
 #     非交互环境无 --yes 时中止; --no-clean 保留本地多余文件; .cubestack-* 始终保留。
 #   · 结果提示: 容器内就绪提示; 宿主机打印容器挂载命令 + 直跑 OFFLINE_FILES_DIR 指引。
 #   · 校验级别: 下载完成 / --verify-only 默认执行 full 校验(全量 sha256 + 结构检查),
@@ -75,8 +77,9 @@
 #   · --resume: 下载前先 full 校验本地树(**先于 MinIO 连接**; 完整则直接退出, 远端不可达也不影响);
 #     不完整时连接 MinIO, 部分文件按 offset 续传并校验 sha, 失败/不完整再正常下载并最终全量校验。
 #     下载命令默认重试 3 次(--retry/--retry-delay)。
-#   · --clean/--no-clean: release/flat 默认精确清理(删除本地多余文件); dev/--sub 需显式 --clean;
+#   · --clean/--no-clean: release/flat 默认精确同步(增量下载 + 删除本地多余文件); dev/--sub 需显式 --clean;
 #     非交互环境必须加 --yes, 否则中止; .cubestack-* (校验戳/清单备份) 保留。
+#   · --full: 跳过内容寻址增量, 回退 `mc mirror --overwrite --remove` 整树重传(排障/强刷用)。
 #   · --flat / --no-flat(仅配合 --release): release **默认 flat** —— 不建 <版本>/ 目录,
 #     把远端的 <版本>/offline-files/ 内容平铺到 offline-files 根(默认 deployments/offline-files);
 #     release.env 随资产一起落地, load_config 会自动识别 release flat 模式。
@@ -147,6 +150,7 @@ FLAT_SET=""                         # ""=未指定(release 默认 flat) | yes=--
 CLEAN_MODE="auto"                     # auto|yes|no; auto = release/flat 默认清理
 CLEAN_COUNTDOWN="${CLEAN_COUNTDOWN:-30}"  # 清理倒计时秒数(--yes 跳过)
 CLEAN=0
+FULL_FETCH=0                          # --full: 跳过内容寻址增量, 回退整树 mc mirror(排障用)
 FETCH_RETRY="${FETCH_RETRY:-3}"
 FETCH_RETRY_DELAY="${FETCH_RETRY_DELAY:-3}"
 _CLEAN_STASH=""
@@ -193,7 +197,8 @@ _print_help() {
     echo "  --release 2.0.0 --repair ...          校验失败时只重下坏文件(最多 1 轮)"
     echo "  --release 2.0.0 --resume ...          断点续传: 校验本地树, 部分文件用 offset 续传"
     echo "  --release 2.0.0 --no-verify ...       跳过 sha256(调试用)"
-    echo "  --release 2.0.0 --clean ...           精确镜像: 覆盖并删除本地多余文件"
+    echo "  --release 2.0.0 --clean ...           精确同步: 增量下载 + 删除本地多余文件"
+    echo "  --release 2.0.0 --full ...            回退旧行为: 整树 mc mirror 全量重传(排障用)"
     echo "  --release 2.0.0 --no-clean ...        保留本地多余文件(默认 release/flat 清理)"
     echo "  --clean-countdown N                   清理倒计时秒数(默认 30; --yes 跳过)"
     echo "  --retry N                             下载失败重试次数(默认 3)"
@@ -220,11 +225,12 @@ while [ $# -gt 0 ]; do
         --resume) RESUME=1; shift ;;
         --clean) CLEAN_MODE=yes; shift ;;
         --no-clean) CLEAN_MODE=no; shift ;;
+        --full) FULL_FETCH=1; shift ;;
         --clean-countdown) CLEAN_COUNTDOWN="${2:?--clean-countdown 需要秒数}"; shift 2 ;;
         --retry) FETCH_RETRY="${2:?--retry 需要次数}"; shift 2 ;;
         --retry-delay) FETCH_RETRY_DELAY="${2:?--retry-delay 需要秒数}"; shift 2 ;;
         -h|--help) _print_help; exit 0 ;;
-        *) err "未知参数: $1(可用 --dest/--sub/--release/--list-releases/--verify-only/--no-verify/--repair/--clean/--no-clean/--clean-countdown/--kubespray-version/--min-free/--auto/--force/--all/--list/--flat/--no-flat/-y)"; exit 1 ;;
+        *) err "未知参数: $1(可用 --dest/--sub/--release/--list-releases/--verify-only/--no-verify/--repair/--clean/--no-clean/--full/--clean-countdown/--kubespray-version/--min-free/--auto/--force/--all/--list/--flat/--no-flat/-y)"; exit 1 ;;
     esac
 done
 # --release 与 --sub/--all/--kubespray-version 互斥; --verify-only/--no-verify 只用于 release
@@ -825,20 +831,27 @@ else
         [ -n "${s}" ] || continue
         if [ "${RELEASE_MODE}" = "1" ] && [ "${FLAT}" = "1" ]; then
             if [ "${CLEAN}" = "1" ]; then
-                say "精确镜像(清理多余) ${SRC_ROOT}/${s}/ → ${DST_ROOT}/ ..."
+                say "增量镜像(只下变更 + 清理多余) ${SRC_ROOT}/${s}/ → ${DST_ROOT}/ ..."
             else
                 say "平铺复制 ${SRC_ROOT}/${s}/ → ${DST_ROOT}/ ..."
             fi
-            _transfer "${SRC_ROOT}/${s}" "${DST_ROOT}" 0 \
+            _transfer "${SRC_ROOT}/${s}" "${DST_ROOT}" 0 "" \
                 || { err "平铺复制 ${s} 失败(检查网络/磁盘空间)"; exit 1; }
         elif [ "${RELEASE_MODE}" = "1" ]; then
-            # 默认 mc cp --recursive(按对象名精确复制); --clean 时用 mirror --remove 清理多余。
+            # 默认 mc cp --recursive(按对象名精确复制); --clean 时走 SHA256SUMS 增量 + 清理多余。
             if [ "${CLEAN}" = "1" ]; then
-                say "精确镜像(清理多余) ${SRC_ROOT}/${s}/ → ${DST_ROOT}/${s}/ ..."
+                say "增量镜像(只下变更 + 清理多余) ${SRC_ROOT}/${s}/ → ${DST_ROOT}/${s}/ ..."
             else
                 say "复制(精确对象) ${SRC_ROOT}/${s}/ → ${DST_ROOT}/${s}/ ..."
             fi
-            _transfer "${SRC_ROOT}/${s}" "${DST_ROOT}/${s}" 1 \
+            # 清单路径以 offline-files/ 为根, 所以增量 prefix = s 相对 offline-files 的子路径
+            # (版本目录布局下 s=offline-files → prefix 为空; 将来若支持子目录下载也正确)。
+            _pfx=""
+            case "${s}" in
+                offline-files|"") _pfx="" ;;
+                offline-files/*) _pfx="${s#offline-files/}/" ;;
+            esac
+            _transfer "${SRC_ROOT}/${s}" "${DST_ROOT}/${s}" 1 "${_pfx}" \
                 || { err "复制 ${s} 失败(检查网络/磁盘空间)"; exit 1; }
         else
             say "同步 ${SRC_ROOT}/${s}/ → ${DST_ROOT}/${s}/ ..."

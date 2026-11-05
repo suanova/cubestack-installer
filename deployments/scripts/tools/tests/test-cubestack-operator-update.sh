@@ -372,6 +372,13 @@ _ln_sec3="$(grep -n '^    # ③ 命名空间 / CRD 残留清理' "${MOD}" | cut 
 chk "顺序: helm uninstall < 清 finalizer < 强删 ns" "1" \
     "$([ -n "${_ln_helm}" ] && [ -n "${_ln_clear}" ] && [ -n "${_ln_sec3}" ] \
        && [ "${_ln_helm}" -lt "${_ln_clear}" ] && [ "${_ln_clear}" -lt "${_ln_sec3}" ] && echo 1 || echo 0)"
+# 2026-11-05 实机: 强删 ns 缺 --wait=false, namespace 有 finalizer 时 kubectl 无限等待
+chk_contains "强删 ns 带 timeout + --wait=false" 'timeout 30 ${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 --wait=false' "${MOD}"
+if bash -n "${MOD}" 2>"${TMP}/mod.syntax"; then
+    echo "  ok  模块 bash -n 通过"
+else
+    echo "  FAIL 模块 bash -n:"; sed 's/^/      /' "${TMP}/mod.syntax"; fail=1
+fi
 _patch_log="${TMP}/finalizer-patches.log"; : > "${_patch_log}"
 SSH() {   # stub: <cmd...>
     local cmd="$*"

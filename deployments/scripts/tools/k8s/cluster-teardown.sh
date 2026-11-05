@@ -156,6 +156,52 @@ print(json.dumps(cm))
         || warn "  登记状态更新失败: ${key}(不影响卸载)"
 }
 
+# 外部 Ceph 覆盖前, 先卸载各节点 /var/lib/kubelet 下的 Ceph/RBD 挂载。
+# 为什么(2026-11-05 实机): 旧集群的 RBD 卷被删/后端失效后, 节点上的 jbd2/rbdX
+#   线程会进入不可中断 D 状态; 下次 node_pkgs 的 fuser 必然超时, 只能重启节点。
+#   外部 Ceph 模式下后端由外部集群提供、不会被本集群销毁 —— 删旧资源前先摘挂载,
+#   即可安全复用, 不需要每次覆盖都重启节点。
+# 只处理 /var/lib/kubelet 下的 CSI 挂载; 宿主机 /mnt/cephfs/models 是外部资源, 保留。
+unmount_node_ceph_mounts() {
+    local _key _ips _ip _u _left
+    _key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    # all_node_ips 输出是**单行空格分隔**(带尾随空格); read -a 按空白拆分, 单节点/多节点都正确。
+    _ips=(); read -r -a _ips <<< "$(all_node_ips 2>/dev/null || true)"
+    [ "${#_ips[@]}" -gt 0 ] || return 0
+    say "  预清理节点 Ceph/RBD CSI 挂载(避免后端删除后 jbd2 D 状态)..."
+    local _scan_unknown=0 _leftover=0 _rc=0
+    for _ip in "${_ips[@]}"; do
+        [ -n "${_ip}" ] || continue
+        _u="$(ssh_user_for_ip "${_ip}")"
+        _rc=0
+        _left="$(timeout 60 ssh -n -i "${_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_u}@${_ip}" "
+                for _m in \$(findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
+                    | awk '\$3 ~ /ceph/ || \$2 ~ /^\\/dev\\/rbd/ {print \$1}' | tac); do
+                    timeout 10 sudo -n umount -l \"\${_m}\" 2>/dev/null || true
+                done
+                for _i in 1 2 3 4 5 6 7 8 9 10; do
+                    findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
+                        | awk '\$3 ~ /ceph/ || \$2 ~ /^\\/dev\\/rbd/ {print \$1}' | grep -q . || break
+                    sleep 1
+                done
+                findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
+                    | awk '\$3 ~ /ceph/ || \$2 ~ /^\\/dev\\/rbd/ {print \$1}' | head -5
+            " 2>/dev/null)" || _rc=$?
+        if [ "${_rc}" -ne 0 ]; then
+            # SSH 失败/超时(255/124)时输出为空; 绝不能当成“无残留”放行。
+            warn "  ${_ip}: 无法确认 Ceph/RBD 挂载状态(SSH rc=${_rc}: 超时/不可达) —— 不判定为无残留"
+            _scan_unknown=1
+        elif [ -n "${_left}" ]; then
+            warn "  ${_ip}: 仍有 Ceph/RBD 挂载未卸净(后续 reset/重启兜底): $(printf '%s' "${_left}" | tr '\n' ' ')"
+            _leftover=1
+        else
+            say "  ${_ip}: 无残留 Ceph/RBD CSI 挂载"
+        fi
+    done
+    [ "${_scan_unknown}" -eq 0 ] && [ "${_leftover}" -eq 0 ]
+}
+
 run_component() {   # <key> <script_rel>  → 0=卸了; 1=失败/超时
     local key="$1" rel="$2"
     # ⚠ 不能与上一行合并成一条 local: bash 在**同一 local 语句**里按旧作用域求值 RHS,
@@ -254,6 +300,14 @@ PY
         fi
         init_remote_kubectl || { err "集群不可达(SSH 初始化失败), 无法执行卸载"; exit 1; }
         SSH "${K} get ns ${CM_NS} >/dev/null 2>&1" || { err "集群不可达(远端 kubectl 探测失败), 无法执行卸载"; exit 1; }
+        # ★ 外部 Ceph(2026-11-05): **必须在任何组件卸载之前**先摘节点 CSI 挂载 ——
+        #   ceph_csi 的 uninstall 会删除外部 CephCluster/接入声明; 删除后再摘挂载可能
+        #   触发 jbd2/rbd D 状态(本清理要防的正是这个顺序)。内部 Ceph 的同类清理在
+        #   ceph 模块/cubestack-offline reset 前置里做。
+        if [ "${CEPH_MODE:-internal}" = "external" ]; then
+            unmount_node_ceph_mounts \
+                || warn "  (有节点未能确认/卸净 Ceph/RBD 挂载; 后续 reset/重启兜底)"
+        fi
         _n_ok=0; _n_fail=0
         while IFS=$'\t' read -r _key _src _rel; do
             [ -n "${_key}" ] || continue

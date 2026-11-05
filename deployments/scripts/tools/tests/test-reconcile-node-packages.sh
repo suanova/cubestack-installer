@@ -104,12 +104,30 @@ chk "执行了 scp(不阻断)" "1" "$(wc -l < "${TMP}/scp-3.log")"
 chk_contains "日志点名非存储 D 状态" "非存储 D 状态" "${TMP}/out-3"
 chk_not_contains "未触发卸载" "sudo bash -s --" "${TMP}/ssh-3.log"
 
-echo "== ①c D 状态 + 存储挂载: 不自动卸载(交人工/重启), 失败 =="
+echo "== ①c D 状态 + 存储挂载: 默认忽略并继续(覆盖安装口径), 不自动卸载 =="
 rc="$(run_tool 6)"
-chk "退出码" "1" "${rc}"
-chk "未执行 scp" "0" "$(wc -l < "${TMP}/scp-6.log")"
+chk "退出码" "0" "${rc}"
+chk "执行了 scp(不阻断)" "1" "$(wc -l < "${TMP}/scp-6.log")"
 chk_not_contains "未自动卸载" "sudo bash -s --" "${TMP}/ssh-6.log"
-chk_contains "提示需人工/重启" "重启" "${TMP}/out-6"
+chk_contains "日志点名已忽略" "已忽略" "${TMP}/out-6"
+# CodeRabbit 2026-11-05: 控制器放行 D 状态时, 远端安装器必须收到同一策略
+chk_contains "远端安装器收到 --allow-dstate" "--allow-dstate" "${TMP}/ssh-6.log"
+
+echo "== ①c2 NODE_PKGS_ALLOW_DSTATE=0: 恢复硬失败(旧行为) =="
+(
+    export PATH="${TMP}/bin:${PATH}"
+    export CLUSTER_CONF="${TMP}/cluster.conf"
+    export OFFLINE_FILES_ROOT="${TMP}/offline"
+    export FAKE_SSH_LOG="${TMP}/ssh-6s.log"
+    export FAKE_SCP_LOG="${TMP}/scp-6s.log"
+    export FAKE_WEDGED=6
+    export NODE_PKGS_ALLOW_DSTATE=0
+    : > "${FAKE_SSH_LOG}"; : > "${FAKE_SCP_LOG}"
+    bash "${TOOL}" --ip 10.0.0.1 --user root
+) > "${TMP}/out-6s" 2>&1
+chk "strict 退出码" "1" "$?"
+chk "strict 未执行 scp" "0" "$(wc -l < "${TMP}/scp-6s.log")"
+chk_contains "strict 提示需重启" "重启" "${TMP}/out-6s"
 
 echo "== ①d 探测超时: 不自动修复, 失败 =="
 rc="$(run_tool 7)"
@@ -164,7 +182,13 @@ chk_contains "D 状态匹配 rbd/ceph" "rbd|ceph" "${TMP}/remote.sh"
 chk_contains "自动卸载挂载" "umount -l" "${TMP}/remote.sh"
 chk_contains "自动解映射 rbd" "rbd unmap" "${TMP}/remote.sh"
 chk_contains "自动修复前停 kubelet/containerd" "systemctl stop kubelet containerd" "${TMP}/remote.sh"
-chk_contains "仅僵尸态提示重启" "D 状态/fuser 超时" "${TMP}/remote.sh"
+# CodeRabbit 2026-11-05: 远端 D-state 门禁必须跟随控制器策略; fuser 超时仍硬失败;
+# D 状态存在时不做挂载健康探测/自动卸载(避免误卸正被僵尸进程引用的挂载)
+chk_contains "远端接受 --allow-dstate" "--allow-dstate" "${TMP}/remote.sh"
+chk_contains "远端读取 ALLOW_DSTATE" "ALLOW_DSTATE" "${TMP}/remote.sh"
+chk_contains "D 状态时跳过挂载修复" "_skip_ceph_repair" "${TMP}/remote.sh"
+chk_contains "fuser 超时仍硬失败" "fuser /var/lib/dpkg/lock-frontend 超时" "${TMP}/remote.sh"
+chk_contains "仅僵尸态提示重启" "节点存在 D 状态进程" "${TMP}/remote.sh"
 chk_contains "活动健康挂载放行" "活动 Ceph/RBD(健康" "${TMP}/remote.sh"
 # 2026-10-19 实机: 逐包 apt-get install 导致 systemd/udev 版本组混合(libudev1 3.22 +
 #   systemd/libsystemd0 3.21), 每轮 --fresh 都告警。必须整批交给 apt 求解。
@@ -174,6 +198,8 @@ chk_contains "整批失败才逐包兜底" "整批安装失败" "${TMP}/remote.s
 echo "== ④ 远端装包超时 =="
 chk_contains "RECONCILE_SSH_TIMEOUT" "RECONCILE_SSH_TIMEOUT" "${TOOL}"
 chk_contains "调用被 timeout 包裹" "timeout \"\${RECONCILE_SSH_TIMEOUT}\" ssh" "${TOOL}"
+# all_node_ips 是单行空格分隔 → 回退路径必须按空白拆分, 不能 read 一行当单 IP
+chk_contains "all_node_ips 回退按空白拆分" 'for ip in $(all_node_ips)' "${TOOL}"
 
 echo "== ⑤ worker 装包: Breaks ↔ 同版本 cohort =="
 TOOL2="${REPO_ROOT}/deployments/scripts/tools/node/install-worker-packages.sh"

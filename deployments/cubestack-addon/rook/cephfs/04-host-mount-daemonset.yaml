@@ -125,7 +125,7 @@ spec:
               printf '%s' "${CEPH_KEY}" > "${KEYFILE}"
               chmod 600 "${KEYFILE}"
               mkdir -p "${ROOT_TMP}"
-              MOUNT_OPTS="name=${CEPH_USER},secretfile=${KEYFILE},noatime"
+              MOUNT_OPTS="name=${CEPH_USER},secretfile=${KEYFILE},noatime__MS_MODE__"
               # external 集群可能有多个 FS(如 cephfs + cubestack-ext-fs), 必须显式选 FS;
               # 不指定 mds_namespace 时内核客户端会挂默认 FS(通常 cephfs), 与 CEPHFS_NAME 可能不一致。
               [ -n "${CEPHFS_NAME}" ] && MOUNT_OPTS="${MOUNT_OPTS},mds_namespace=${CEPHFS_NAME}"

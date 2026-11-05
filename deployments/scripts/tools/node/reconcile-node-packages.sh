@@ -48,7 +48,8 @@ if [ "${#IPS[@]}" -eq 0 ]; then
             < <(awk '/^[[:space:]]*ansible_host:/{print $2}' "${_hosts}" | sort -u)
     fi
     if [ "${#IPS[@]}" -eq 0 ]; then
-        while IFS= read -r ip; do [ -n "${ip}" ] && IPS+=("${ip}"); done < <(all_node_ips)
+        # all_node_ips 输出单行空格分隔 → 按空白拆分(与 cluster-teardown 同口径)
+        for ip in $(all_node_ips); do [ -n "${ip}" ] && IPS+=("${ip}"); done
     fi
 fi
 [ "${#IPS[@]}" -gt 0 ] || { err "没有目标节点(cluster.conf NODES 为空?)"; exit 1; }
@@ -71,11 +72,15 @@ SSH_OPTS=(-i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKn
 # ---------------- 控制器侧前置探测(2026-10-19 实机事故) ----------------
 # 在分发离线包/装包之前, 用短超时探测每个节点是否有**旧集群 Ceph/RBD 残留**:
 #   ceph/rbd 挂载、/sys/bus/rbd/devices、相关 D 状态进程、fuser 超时。
-# 处置策略(2026-10-19 用户口径):
-#   · D 状态 / fuser 超时 = 僵尸态, 无法自动修复 → 整轮失败并给出重启指引;
+# 处置策略(2026-11-04 更新):
+#   · D 状态 + 存储挂载 = 僵尸态: 默认**不阻断**(覆盖安装口径) —— 只告警、不自动卸载、
+#     继续分发/装包, 由后续 Ceph/K8s 覆盖流程重建; 需要回到旧行为时设
+#     NODE_PKGS_ALLOW_DSTATE=0(硬失败并给重启指引);
+#   · D 状态 / fuser 超时但探测本身无响应(rc=124) 仍失败 —— 拿不到证据, 不能盲目继续;
 #   · 挂载不健康但未卡死 → 控制器放行, 由远端脚本自动 stop kubelet/containerd +
 #     umount -l/-f + rbd unmap, 成功后继续;
 #   · 活动且健康的 Ceph/RBD(当前集群正在用) → 不阻断(避免误伤运行中的 CephFS/RBD PVC)。
+NODE_PKGS_ALLOW_DSTATE="${NODE_PKGS_ALLOW_DSTATE:-1}"
 _probe="$(cat <<'PROBE'
 ceph_mnts=$(timeout 5 findmnt -t ceph,rbd -n -o TARGET,FSTYPE 2>/dev/null | head -5)
 # D 状态进程(ps 只读 /proc, 不触碰挂载); 排除 rsync 等仅因含 "sync" 而误匹配的进程。
@@ -110,12 +115,19 @@ for _t in "$@"; do
     umount -l "${_t}" 2>/dev/null || umount -f "${_t}" 2>/dev/null || true
 done
 sync -f 2>/dev/null || sync 2>/dev/null || true
+# ★ 成功路径也必须恢复 containerd(2026-11-05 实机):
+#   后续 k8s 覆盖流程的 `kubeadm reset -f` 是**通过 CRI** 停止/删除旧静态 Pod 容器的。
+#   containerd 停着时 reset 只能删文件, 旧容器(shim 存活)继续占 6443/10257/10259
+#   → kubespray 随后报 `[ERROR Port-10257]: Port 10257 is in use` 中断部署。
+#   只拉起 containerd, **不拉 kubelet** —— 避免旧集群在清理前被重新拉起。
+systemctl start containerd 2>/dev/null || true
 exit 0
 REPAIR
 )"
 # 修复未成功时恢复服务(2026-11-04, CodeRabbit): _repair 先停了 kubelet/containerd,
 #   若重探仍失败, preflight 会 exit 1; 必须把它们重新拉起, 否则节点被留在"服务已停"的
-#   不可用状态, 只能等人工处理。仅在重探仍异常时执行(成功路径由后续 k8s 覆盖流程接管)。
+#   不可用状态, 只能等人工处理。仅在重探仍异常时执行(成功路径由 _repair 恢复 containerd、
+#   kubelet 留给后续 k8s 覆盖流程)。
 _restore="$(cat <<'RESTORE'
 systemctl start containerd kubelet 2>/dev/null || true
 exit 0
@@ -143,6 +155,7 @@ _preflight_bad=0
 _preflight_ssh_report=""
 _preflight_wedged_report=""
 _preflight_probe_report=""
+_preflight_warn_report=""
 for _ip in "${IPS[@]}"; do
     _u="${USER:-$(ssh_user_for_ip "${_ip}")}"
     _out="$(timeout 20 ssh "${SSH_OPTS[@]}" "${_u}@${_ip}" "${_probe}" 2>&1)"
@@ -176,9 +189,16 @@ for _ip in "${IPS[@]}"; do
                 fi
                 ;;
             *d-state-storage*)
-                say "  ${_ip}: 存在 D 状态且有待存储挂载, 无法安全逐挂载确认 → 不自动卸载(需人工/重启)"
-                _preflight_bad=1
-                _preflight_wedged_report="${_preflight_wedged_report}"$'\n'"  ${_u}@${_ip}: D 状态+存储挂载(未自动卸载): $(_clean_out "${_out}")"
+                if [ "${NODE_PKGS_ALLOW_DSTATE}" = "1" ]; then
+                    # 覆盖安装口径(2026-11-04 用户): 旧集群 Ceph 已被拆, D 状态 + 陈旧的
+                    # ceph 挂载属预期残留; 不卸载(避免误伤), 直接继续分发/装包。
+                    warn "  ${_ip}: 存在 D 状态 + 存储挂载(覆盖安装策略: 忽略并继续, 不自动卸载): $(_clean_out "${_out}")"
+                    _preflight_warn_report="${_preflight_warn_report}"$'\n'"  ${_u}@${_ip}: D 状态+存储挂载(已忽略, 覆盖安装继续)"
+                else
+                    say "  ${_ip}: 存在 D 状态且有待存储挂载, 无法安全逐挂载确认 → 不自动卸载(需人工/重启)"
+                    _preflight_bad=1
+                    _preflight_wedged_report="${_preflight_wedged_report}"$'\n'"  ${_u}@${_ip}: D 状态+存储挂载(未自动卸载): $(_clean_out "${_out}")"
+                fi
                 ;;
             *d-state-unrelated*)
                 say "  ${_ip}: 检测到非存储 D 状态进程(不触发修复, 继续): $(_clean_out "${_out}")"
@@ -188,6 +208,10 @@ for _ip in "${IPS[@]}"; do
         esac
     fi
 done
+if [ -n "${_preflight_warn_report}" ]; then
+    warn "以下节点存在 D 状态 + 存储挂载残留(覆盖安装策略: 已忽略, 继续装包; 设 NODE_PKGS_ALLOW_DSTATE=0 可恢复硬失败):"
+    printf '%s\n' "${_preflight_warn_report}"
+fi
 if [ "${_preflight_bad}" -ne 0 ]; then
     if [ -n "${_preflight_ssh_report}" ]; then
         err "以下节点 SSH 认证/连接失败 —— 部署无法继续(与 Ceph/RBD 无关):"
@@ -220,7 +244,14 @@ cat > "${REMOTE}" <<'REMOTE_EOF'
 # 在节点上执行(由 reconcile-node-packages.sh 推入): 用 /tmp/cubestack-debs 的离线 .deb 对账系统包
 set -uo pipefail
 D=/tmp/cubestack-debs
-[ "${1:-}" = "--dry-run" ] && DRY=1 || DRY=0
+# 参数: --dry-run / --allow-dstate(跟随控制器侧 NODE_PKGS_ALLOW_DSTATE)
+DRY=0; ALLOW_DSTATE=0
+for _a in "$@"; do
+    case "${_a}" in
+        --dry-run) DRY=1 ;;
+        --allow-dstate) ALLOW_DSTATE=1 ;;
+    esac
+done
 APT=( -o "Dir::Cache::archives=${D}" --no-download -y --no-install-recommends
       -o "Dpkg::Options::=--force-confdef" -o "Dpkg::Options::=--force-confold" )
 
@@ -234,23 +265,40 @@ APT=( -o "Dir::Cache::archives=${D}" --no-download -y --no-install-recommends
 #   · D 状态进程 / fuser 超时 = 僵尸态, SIGKILL 无效 → **只有这种情况**才提示重启;
 #   · 挂载不健康但未卡死 → 自动 stop kubelet/containerd + umount -l/-f + rbd unmap;
 #   · 活动且健康的 Ceph/RBD(当前集群正在用) → 不动, 直接继续。
+# ★ 2026-11-05 (CodeRabbit): 远端门禁必须跟随控制器侧的 NODE_PKGS_ALLOW_DSTATE
+#   （覆盖安装策略）——控制器放行 D 状态时，远端不能无条件 exit 2；但 fuser 超时
+#   （无法判断锁持有者）仍必须硬失败。D 状态存在时**不做**挂载健康探测/自动卸载
+#   （挂载可能正被僵尸进程引用，卸载不安全）。
 _ceph_mnts="$(timeout 5 findmnt -t ceph,rbd -n -o TARGET,FSTYPE 2>/dev/null | head -5 || true)"
 _stuck="$(timeout 5 ps -eo pid,stat,etime,cmd 2>/dev/null \
     | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|sync|fuser/' | head -3 || true)"
 _n_rbd="$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ' || true)"
 timeout 5 fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1
 _frc=$?
-if [ -n "${_stuck}" ] || [ "${_frc}" -eq 124 ]; then
-    echo "         ❌ 节点存在 D 状态/fuser 超时(僵尸进程, 无法自动修复, 必须重启):"
-    [ -n "${_stuck}" ] && echo "${_stuck}" | sed 's/^/            D 状态进程: /'
-    [ "${_frc}" -eq 124 ] && echo "            fuser /var/lib/dpkg/lock-frontend 超时"
+if [ "${_frc}" -eq 124 ]; then
+    echo "         ❌ fuser /var/lib/dpkg/lock-frontend 超时(僵尸态, 无法自动修复, 必须重启):"
     echo "            处置: ① systemctl stop kubelet containerd"
     echo "                  ② systemctl reboot -f   # 跳过卡死的 ceph 卸载"
     echo "                  ③ 重启后再重跑本模块"
     exit 2
 fi
+_skip_ceph_repair=0
+if [ -n "${_stuck}" ]; then
+    if [ "${ALLOW_DSTATE}" = "1" ]; then
+        echo "         ⚠ 存在 D 状态进程(覆盖安装策略: 忽略并继续, 不自动卸载):"
+        echo "${_stuck}" | sed 's/^/            D 状态进程: /'
+        _skip_ceph_repair=1
+    else
+        echo "         ❌ 节点存在 D 状态进程(僵尸态, 无法自动修复, 必须重启):"
+        echo "${_stuck}" | sed 's/^/            D 状态进程: /'
+        echo "            处置: ① systemctl stop kubelet containerd"
+        echo "                  ② systemctl reboot -f   # 跳过卡死的 ceph 卸载"
+        echo "                  ③ 重启后再重跑本模块"
+        exit 2
+    fi
+fi
 _ceph_bad=""
-if [ -n "${_ceph_mnts}" ]; then
+if [ -n "${_ceph_mnts}" ] && [ "${_skip_ceph_repair}" = "0" ]; then
     while read -r _t _f; do
         [ -n "${_t}" ] || continue
         timeout 5 ls "${_t}" >/dev/null 2>&1 || _ceph_bad="${_ceph_bad} ${_t}"
@@ -285,7 +333,11 @@ if [ -n "${_ceph_bad}" ]; then
     echo "         ✅ 自动卸载/解映射完成, 继续"
 fi
 if [ -n "${_ceph_mnts}" ] || [ "${_n_rbd:-0}" -gt 0 ]; then
-    echo "         ℹ 活动 Ceph/RBD(健康, 当前集群在用): ${_ceph_mnts:-无挂载}; rbd=${_n_rbd:-0}; 继续"
+    if [ "${_skip_ceph_repair}" = "1" ]; then
+        echo "         ℹ Ceph/RBD 挂载存在(D 状态策略: 未做健康检查/未卸载): ${_ceph_mnts:-无挂载}; rbd=${_n_rbd:-0}; 继续"
+    else
+        echo "         ℹ 活动 Ceph/RBD(健康, 当前集群在用): ${_ceph_mnts:-无挂载}; rbd=${_n_rbd:-0}; 继续"
+    fi
 fi
 
 # ---- ① apt 锁仲裁(2026-10-10 实测事故): 节点重启后 apt-daily 定时器触发 unattended-upgrades,
@@ -412,7 +464,9 @@ for ip in "${IPS[@]}"; do
     if ! scp -q "${SSH_OPTS[@]}" "${DEBS[@]}" "${REMOTE}" "${_u}@${ip}:/tmp/cubestack-debs/" 2>/dev/null; then
         warn "  分发离线包失败, 跳过"; FAIL=1; continue
     fi
-    _args=""; [ "${DRY}" = "1" ] && _args="--dry-run"
+    _args=""
+    [ "${DRY}" = "1" ] && _args="${_args} --dry-run"
+    [ "${NODE_PKGS_ALLOW_DSTATE}" = "1" ] && _args="${_args} --allow-dstate"
     if timeout "${RECONCILE_SSH_TIMEOUT}" ssh "${SSH_OPTS[@]}" "${_u}@${ip}" "sudo bash /tmp/cubestack-debs/$(basename "${REMOTE}") ${_args}" 2>&1; then
         ok "  ${ip}: 对账完成, apt 依赖图健康"
     else
