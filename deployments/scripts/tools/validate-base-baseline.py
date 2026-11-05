@@ -191,8 +191,15 @@ def main() -> int:
             catalog_ids.add(catalog_id)
             if not re.match(r"^[a-z0-9-]+/[a-z0-9][a-z0-9._-]*$", catalog_id):
                 errors.append(f"{where}: catalog_id must look like <category>/<name> (got {catalog_id!r})")
-        if source_ref and not source_ref.startswith("harbor.isuanova.com/"):
-            errors.append(f"{where}: source_ref must be a public Harbor ref, got {source_ref!r}")
+        if source_ref:
+            if not source_ref.startswith("harbor.isuanova.com/"):
+                errors.append(f"{where}: source_ref must be a public Harbor ref, got {source_ref!r}")
+            # source_ref has no catalog entry; the digest is the only pin.
+            digest = str(img.get("digest", "")).strip()
+            if not re.match(r"^sha256:[0-9a-f]{64}$", digest):
+                errors.append(f"{where}: source_ref requires a sha256 digest")
+        if "optional" in img and not isinstance(img.get("optional"), bool):
+            errors.append(f"{where}: optional must be a boolean")
         version = str(img.get("version", "")).strip()
         if not version:
             errors.append(f"{where}: version is required")

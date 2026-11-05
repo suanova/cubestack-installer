@@ -21,6 +21,12 @@ cat > "${TMP}/baseline/versions/base.yaml" <<'EOF'
 schema: 1
 kubespray:
   version: v2.32.0
+mirror:
+  repo: suanova/container-image-mirror
+  commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  path: index.json
+env:
+  UNUSED: x
 os:
   - family: debian
     id: ubuntu
@@ -35,8 +41,16 @@ images:
   - key: "netshoot:netshoot-rdma"
     source_ref: "harbor.isuanova.com/suanova/netshoot-rdma"
     version: "26.04.17"
+    digest: "sha256:4444444444444444444444444444444444444444444444444444444444444444"
     dest: "offline-files/netshoot"
     tar: "netshoot-rdma-26.04.17.tar"
+  - key: "dev-lab:harbor.isuanova.com/suanova/cpu-pytorch"
+    source_ref: "harbor.isuanova.com/suanova/cpu-pytorch"
+    version: "py310-torch2.4"
+    digest: "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+    dest: "offline-files/dev-lab"
+    tar: "harbor.isuanova.com_suanova_cpu-pytorch_py310-torch2.4.tar"
+    optional: true
 EOF
 
 cat > "${TMP}/baseline/versions/os/test.lock" <<'EOF'
@@ -71,11 +85,12 @@ EOF
 # ---- resolver ----
 PLAN="$(python3 "${ONLINE}/lib-base-catalog.py" \
     --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/index.json")"
-[ "$(jq -r '.images | length' <<<"${PLAN}")" = "2" ] || fail "resolver: expected 2 images"
+[ "$(jq -r '.images | length' <<<"${PLAN}")" = "3" ] || fail "resolver: expected 3 images"
 [ "$(jq -r '.images[0].path' <<<"${PLAN}")" = "offline-files/kubespray/v2.32.0/images/registry.k8s.io_kube-apiserver_v1.35.8.tar" ] || fail "resolver: bad path"
 [ "$(jq -r '.images[0].ref' <<<"${PLAN}")" = "harbor.isuanova.com/mirrors/registry.k8s.io/kube-apiserver@sha256:6a7b73e718540d2c097cbcdc84c0f2cffad7a51ebccaf7f0b8cceb464715e1d9" ] || fail "resolver: bad ref"
 [ "$(jq -r '.images[0].repo_tag' <<<"${PLAN}")" = "registry.k8s.io/kube-apiserver:v1.35.8" ] || fail "resolver: bad repo_tag"
-[ "$(jq -r '.images[1].ref' <<<"${PLAN}")" = "harbor.isuanova.com/suanova/netshoot-rdma:26.04.17" ] || fail "resolver: bad source_ref"
+[ "$(jq -r '.images[1].ref' <<<"${PLAN}")" = "harbor.isuanova.com/suanova/netshoot-rdma@sha256:4444444444444444444444444444444444444444444444444444444444444444" ] || fail "resolver: bad source_ref ref"
+[ "$(jq -r '.images[2].optional' <<<"${PLAN}")" = "true" ] || fail "resolver: optional flag lost"
 pass "resolver maps catalog and source_ref entries"
 
 sed 's/v1.35.8/v9.9.9/' "${TMP}/baseline/versions/base.yaml" > "${TMP}/bad-tag.yaml"
@@ -99,6 +114,18 @@ fi
 grep -q "undefined variable" "${TMP}/err" || fail "resolver: undefined-variable error not reported"
 pass "resolver rejects an undefined variable"
 
+# ---- baseline validator ----
+python3 "${ROOT}/deployments/scripts/tools/validate-base-baseline.py" \
+    --root "${TMP}/baseline" >/dev/null || fail "validator: valid fixture rejected"
+grep -v 'sha256:444444' "${TMP}/baseline/versions/base.yaml" > "${TMP}/baseline/versions/base-bad.yaml"
+if python3 "${ROOT}/deployments/scripts/tools/validate-base-baseline.py" \
+    --root "${TMP}/baseline" --baseline "${TMP}/baseline/versions/base-bad.yaml" >/dev/null 2>"${TMP}/err"; then
+    fail "validator: source_ref without digest should fail"
+fi
+grep -q "source_ref requires a sha256 digest" "${TMP}/err" \
+    || fail "validator: missing source_ref digest not reported"
+pass "validator requires a digest on source_ref images"
+
 # ---- materializer ----
 cat > "${TMP}/bin/skopeo" <<'EOF'
 #!/bin/bash
@@ -116,8 +143,18 @@ PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
     --offline-root "${TMP}/offline" >"${TMP}/mat.out"
 [ -s "${TMP}/offline/kubespray/v2.32.0/images/registry.k8s.io_kube-apiserver_v1.35.8.tar" ] || fail "materializer: missing catalog tar"
 [ -s "${TMP}/offline/netshoot/netshoot-rdma-26.04.17.tar" ] || fail "materializer: missing source_ref tar"
+[ ! -e "${TMP}/offline/dev-lab" ] || fail "materializer: optional image should be skipped by default"
 grep -q "copied=2" "${TMP}/mat.out" || fail "materializer: unexpected summary"
-pass "materializer writes both tar kinds"
+grep -q "optional-skipped=1" "${TMP}/mat.out" || fail "materializer: optional skip not reported"
+pass "materializer writes catalog/source_ref tars and skips optional images"
+
+PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
+    --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/index.json" \
+    --offline-root "${TMP}/offline" --include-optional >"${TMP}/mat-opt.out"
+[ -s "${TMP}/offline/dev-lab/harbor.isuanova.com_suanova_cpu-pytorch_py310-torch2.4.tar" ] \
+    || fail "materializer: optional image not written with --include-optional"
+grep -q "copied=1 skipped=2" "${TMP}/mat-opt.out" || fail "materializer: optional include summary"
+pass "materializer includes optional images on request"
 
 PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
     --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/index.json" \

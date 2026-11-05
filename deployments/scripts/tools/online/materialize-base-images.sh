@@ -15,6 +15,7 @@ set -euo pipefail
 #   --index PATH          container-image-mirror index.json (required)
 #   --offline-root PATH   offline-files root (default: <repo>/deployments/offline-files)
 #   --force               rebuild tars that already exist
+#   --include-optional    also materialize images marked optional: true
 #   --dry-run             print the skopeo commands without running them
 #   --continue-on-error   keep going when one image fails; exit non-zero at the end
 
@@ -25,6 +26,7 @@ INDEX=""
 OFFLINE_ROOT="${REPO_ROOT}/deployments/offline-files"
 FORCE=0
 DRY_RUN=0
+INCLUDE_OPTIONAL=0
 CONTINUE_ON_ERROR=0
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -36,6 +38,7 @@ while [ $# -gt 0 ]; do
         --index) INDEX="${2:?--index needs a path}"; shift 2 ;;
         --offline-root) OFFLINE_ROOT="${2:?--offline-root needs a path}"; shift 2 ;;
         --force) FORCE=1; shift ;;
+        --include-optional) INCLUDE_OPTIONAL=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --continue-on-error) CONTINUE_ON_ERROR=1; shift ;;
         --help|-h) sed -n '2,20p' "$0"; exit 0 ;;
@@ -63,9 +66,15 @@ failed=0
 total=0
 copied=0
 skipped=0
+skipped_optional=0
 
 while IFS= read -r item; do
     [ -n "${item}" ] || continue
+    if [ "$(jq -r '.optional // false' <<<"${item}")" = "true" ] \
+        && [ "${INCLUDE_OPTIONAL}" != "1" ]; then
+        skipped_optional=$((skipped_optional + 1))
+        continue
+    fi
     total=$((total + 1))
     key="$(jq -r '.key' <<<"${item}")"
     path="$(jq -r '.path' <<<"${item}")"
@@ -107,5 +116,5 @@ while IFS= read -r item; do
     fi
 done < <(jq -c '.images[]' "${PLAN}")
 
-say "done: total=${total} copied=${copied} skipped=${skipped} failed=${failed}"
+say "done: total=${total} copied=${copied} skipped=${skipped} optional-skipped=${skipped_optional} failed=${failed}"
 [ "${failed}" -eq 0 ]
