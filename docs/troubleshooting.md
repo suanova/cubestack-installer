@@ -1854,6 +1854,9 @@ ubuntu@10.6.7.135: Permission denied (publickey,password).
 - `tools/node/setup-passwordless.sh`: 先验证密钥; 密钥不通才尝试密码; 密码被拒 / 网络不通分别给出明确诊断; 任一用户失败则非零退出。`01_k8s_passwordless.sh` 据此**中止部署**(后续模块都依赖免密 SSH), 不再谎报"完成"。
 - `tools/node/reconcile-node-packages.sh`: 前置探测按退出码分类 —— `255` → SSH 认证/网络失败(给密码/公钥指引, **不提示重启**); `2`/`124` → Ceph/RBD 僵尸态(才给重启指引); 其他 → 探测执行失败。
 - `deploy-cluster.sh` 的异常退出钩子先探测 SSH, 不通则跳过 Ceph 消费者恢复(不再在失败日志末尾刷两条 `Permission denied`)。
+- `tools/node/reconcile-node-packages.sh`(2026-11-05, CodeRabbit): 控制器侧 `NODE_PKGS_ALLOW_DSTATE=1`
+  (覆盖安装口径)现在通过 `--allow-dstate` 传给远端安装器, 远端 D 状态门禁跟随同一策略继续;
+  存在 D 状态时**不做**挂载健康探测/自动卸载(挂载可能正被僵尸进程引用), `fuser` 超时仍硬失败。
 
 **验证:**
 ```bash

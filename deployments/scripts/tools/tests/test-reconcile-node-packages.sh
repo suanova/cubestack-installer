@@ -110,6 +110,8 @@ chk "退出码" "0" "${rc}"
 chk "执行了 scp(不阻断)" "1" "$(wc -l < "${TMP}/scp-6.log")"
 chk_not_contains "未自动卸载" "sudo bash -s --" "${TMP}/ssh-6.log"
 chk_contains "日志点名已忽略" "已忽略" "${TMP}/out-6"
+# CodeRabbit 2026-11-05: 控制器放行 D 状态时, 远端安装器必须收到同一策略
+chk_contains "远端安装器收到 --allow-dstate" "--allow-dstate" "${TMP}/ssh-6.log"
 
 echo "== ①c2 NODE_PKGS_ALLOW_DSTATE=0: 恢复硬失败(旧行为) =="
 (
@@ -180,7 +182,13 @@ chk_contains "D 状态匹配 rbd/ceph" "rbd|ceph" "${TMP}/remote.sh"
 chk_contains "自动卸载挂载" "umount -l" "${TMP}/remote.sh"
 chk_contains "自动解映射 rbd" "rbd unmap" "${TMP}/remote.sh"
 chk_contains "自动修复前停 kubelet/containerd" "systemctl stop kubelet containerd" "${TMP}/remote.sh"
-chk_contains "仅僵尸态提示重启" "D 状态/fuser 超时" "${TMP}/remote.sh"
+# CodeRabbit 2026-11-05: 远端 D-state 门禁必须跟随控制器策略; fuser 超时仍硬失败;
+# D 状态存在时不做挂载健康探测/自动卸载(避免误卸正被僵尸进程引用的挂载)
+chk_contains "远端接受 --allow-dstate" "--allow-dstate" "${TMP}/remote.sh"
+chk_contains "远端读取 ALLOW_DSTATE" "ALLOW_DSTATE" "${TMP}/remote.sh"
+chk_contains "D 状态时跳过挂载修复" "_skip_ceph_repair" "${TMP}/remote.sh"
+chk_contains "fuser 超时仍硬失败" "fuser /var/lib/dpkg/lock-frontend 超时" "${TMP}/remote.sh"
+chk_contains "仅僵尸态提示重启" "节点存在 D 状态进程" "${TMP}/remote.sh"
 chk_contains "活动健康挂载放行" "活动 Ceph/RBD(健康" "${TMP}/remote.sh"
 # 2026-10-19 实机: 逐包 apt-get install 导致 systemd/udev 版本组混合(libudev1 3.22 +
 #   systemd/libsystemd0 3.21), 每轮 --fresh 都告警。必须整批交给 apt 求解。

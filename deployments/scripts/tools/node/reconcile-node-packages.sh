@@ -243,7 +243,14 @@ cat > "${REMOTE}" <<'REMOTE_EOF'
 # 在节点上执行(由 reconcile-node-packages.sh 推入): 用 /tmp/cubestack-debs 的离线 .deb 对账系统包
 set -uo pipefail
 D=/tmp/cubestack-debs
-[ "${1:-}" = "--dry-run" ] && DRY=1 || DRY=0
+# 参数: --dry-run / --allow-dstate(跟随控制器侧 NODE_PKGS_ALLOW_DSTATE)
+DRY=0; ALLOW_DSTATE=0
+for _a in "$@"; do
+    case "${_a}" in
+        --dry-run) DRY=1 ;;
+        --allow-dstate) ALLOW_DSTATE=1 ;;
+    esac
+done
 APT=( -o "Dir::Cache::archives=${D}" --no-download -y --no-install-recommends
       -o "Dpkg::Options::=--force-confdef" -o "Dpkg::Options::=--force-confold" )
 
@@ -257,23 +264,40 @@ APT=( -o "Dir::Cache::archives=${D}" --no-download -y --no-install-recommends
 #   · D 状态进程 / fuser 超时 = 僵尸态, SIGKILL 无效 → **只有这种情况**才提示重启;
 #   · 挂载不健康但未卡死 → 自动 stop kubelet/containerd + umount -l/-f + rbd unmap;
 #   · 活动且健康的 Ceph/RBD(当前集群正在用) → 不动, 直接继续。
+# ★ 2026-11-05 (CodeRabbit): 远端门禁必须跟随控制器侧的 NODE_PKGS_ALLOW_DSTATE
+#   （覆盖安装策略）——控制器放行 D 状态时，远端不能无条件 exit 2；但 fuser 超时
+#   （无法判断锁持有者）仍必须硬失败。D 状态存在时**不做**挂载健康探测/自动卸载
+#   （挂载可能正被僵尸进程引用，卸载不安全）。
 _ceph_mnts="$(timeout 5 findmnt -t ceph,rbd -n -o TARGET,FSTYPE 2>/dev/null | head -5 || true)"
 _stuck="$(timeout 5 ps -eo pid,stat,etime,cmd 2>/dev/null \
     | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|sync|fuser/' | head -3 || true)"
 _n_rbd="$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ' || true)"
 timeout 5 fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1
 _frc=$?
-if [ -n "${_stuck}" ] || [ "${_frc}" -eq 124 ]; then
-    echo "         ❌ 节点存在 D 状态/fuser 超时(僵尸进程, 无法自动修复, 必须重启):"
-    [ -n "${_stuck}" ] && echo "${_stuck}" | sed 's/^/            D 状态进程: /'
-    [ "${_frc}" -eq 124 ] && echo "            fuser /var/lib/dpkg/lock-frontend 超时"
+if [ "${_frc}" -eq 124 ]; then
+    echo "         ❌ fuser /var/lib/dpkg/lock-frontend 超时(僵尸态, 无法自动修复, 必须重启):"
     echo "            处置: ① systemctl stop kubelet containerd"
     echo "                  ② systemctl reboot -f   # 跳过卡死的 ceph 卸载"
     echo "                  ③ 重启后再重跑本模块"
     exit 2
 fi
+_skip_ceph_repair=0
+if [ -n "${_stuck}" ]; then
+    if [ "${ALLOW_DSTATE}" = "1" ]; then
+        echo "         ⚠ 存在 D 状态进程(覆盖安装策略: 忽略并继续, 不自动卸载):"
+        echo "${_stuck}" | sed 's/^/            D 状态进程: /'
+        _skip_ceph_repair=1
+    else
+        echo "         ❌ 节点存在 D 状态进程(僵尸态, 无法自动修复, 必须重启):"
+        echo "${_stuck}" | sed 's/^/            D 状态进程: /'
+        echo "            处置: ① systemctl stop kubelet containerd"
+        echo "                  ② systemctl reboot -f   # 跳过卡死的 ceph 卸载"
+        echo "                  ③ 重启后再重跑本模块"
+        exit 2
+    fi
+fi
 _ceph_bad=""
-if [ -n "${_ceph_mnts}" ]; then
+if [ -n "${_ceph_mnts}" ] && [ "${_skip_ceph_repair}" = "0" ]; then
     while read -r _t _f; do
         [ -n "${_t}" ] || continue
         timeout 5 ls "${_t}" >/dev/null 2>&1 || _ceph_bad="${_ceph_bad} ${_t}"
@@ -308,7 +332,11 @@ if [ -n "${_ceph_bad}" ]; then
     echo "         ✅ 自动卸载/解映射完成, 继续"
 fi
 if [ -n "${_ceph_mnts}" ] || [ "${_n_rbd:-0}" -gt 0 ]; then
-    echo "         ℹ 活动 Ceph/RBD(健康, 当前集群在用): ${_ceph_mnts:-无挂载}; rbd=${_n_rbd:-0}; 继续"
+    if [ "${_skip_ceph_repair}" = "1" ]; then
+        echo "         ℹ Ceph/RBD 挂载存在(D 状态策略: 未做健康检查/未卸载): ${_ceph_mnts:-无挂载}; rbd=${_n_rbd:-0}; 继续"
+    else
+        echo "         ℹ 活动 Ceph/RBD(健康, 当前集群在用): ${_ceph_mnts:-无挂载}; rbd=${_n_rbd:-0}; 继续"
+    fi
 fi
 
 # ---- ① apt 锁仲裁(2026-10-10 实测事故): 节点重启后 apt-daily 定时器触发 unattended-upgrades,
@@ -435,7 +463,9 @@ for ip in "${IPS[@]}"; do
     if ! scp -q "${SSH_OPTS[@]}" "${DEBS[@]}" "${REMOTE}" "${_u}@${ip}:/tmp/cubestack-debs/" 2>/dev/null; then
         warn "  分发离线包失败, 跳过"; FAIL=1; continue
     fi
-    _args=""; [ "${DRY}" = "1" ] && _args="--dry-run"
+    _args=""
+    [ "${DRY}" = "1" ] && _args="${_args} --dry-run"
+    [ "${NODE_PKGS_ALLOW_DSTATE}" = "1" ] && _args="${_args} --allow-dstate"
     if timeout "${RECONCILE_SSH_TIMEOUT}" ssh "${SSH_OPTS[@]}" "${_u}@${ip}" "sudo bash /tmp/cubestack-debs/$(basename "${REMOTE}") ${_args}" 2>&1; then
         ok "  ${ip}: 对账完成, apt 依赖图健康"
     else
