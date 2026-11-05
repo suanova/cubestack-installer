@@ -2193,24 +2193,43 @@ print("%s|%s|%s" % (
                 # ── ③ 复核: 控制面端口必须真的空出来 ─────────────────────────────
                 # 原实现只查 10250 → 2026-11-05 实机把“旧容器还占着 10257”误报成清理成功
                 # (kubelet 停了 10250 自然空出)。判据扩到 6443/10250/10257/10259:
-                # 先等 15s 释放; 仍被占则按 pid 强杀(此时节点上不存在属于新集群的进程),
-                # 最后复检, 仍不空才失败 —— 让报错落在清理阶段而不是 20 分钟后的 kubeadm。
+                # 先等 15s 释放; 仍被占时**只对确认是旧 Kubernetes 组件**的监听进程发信号
+                # (看 /proc/<pid>/exe 的程序本体, 不看进程名 —— 同名 nginx/别人的服务不能误杀);
+                # 未确认的监听者绝不 kill: 打印端口/pid/命令后走 PORT_BUSY 失败路径。
                 for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
                     ss -lnt 2>/dev/null | grep -qE \"[:.](6443|10250|10257|10259)[[:space:]]\" || exit 0
                     sleep 1
                 done
                 for _p in 6443 10250 10257 10259; do
                     _pid=\$(ss -lntp 2>/dev/null | grep -E \"[:.]\${_p}[[:space:]]\" | grep -oE \"pid=[0-9]+\" | head -1 | cut -d= -f2)
-                    if [ -n \"\${_pid}\" ]; then
-                        echo \"KILL: 端口 \${_p} 仍被 pid \${_pid} 占用, 强制结束\"
-                        ps -o pid,lstart,cmd -p \"\${_pid}\" | tail -1
-                        kill -9 \"\${_pid}\" 2>/dev/null || true
-                    fi
+                    [ -n \"\${_pid}\" ] || continue
+                    _exe=\$(readlink /proc/\${_pid}/exe 2>/dev/null || true)
+                    _base=\${_exe##*/}
+                    _base=\${_base% (deleted)}
+                    case \"\${_base}\" in
+                        kube-apiserver|kube-controller-manager|kube-scheduler|kubelet)
+                            echo \"KILL: 端口 \${_p} 由旧 Kubernetes 组件 \${_base}(pid \${_pid})持有, 结束它\"
+                            ps -o pid,lstart,cmd -p \"\${_pid}\" | tail -1
+                            kill -9 \"\${_pid}\" 2>/dev/null || true
+                            ;;
+                        *)
+                            echo \"SKIP: 端口 \${_p} 被未确认进程持有(pid \${_pid}, exe \${_exe:-unknown}), 不发信号\"
+                            ;;
+                    esac
                 done
                 sleep 1
                 if ss -lnt 2>/dev/null | grep -qE \"[:.](6443|10250|10257|10259)[[:space:]]\"; then
                     echo \"PORT_BUSY: 控制面端口仍被占用, kubeadm init/join 必然失败:\"
-                    ss -lntp 2>/dev/null | grep -E \"[:.](6443|10250|10257|10259)[[:space:]]\" | head -5
+                    for _p in 6443 10250 10257 10259; do
+                        _line=\$(ss -lntp 2>/dev/null | grep -E \"[:.]\${_p}[[:space:]]\" | head -1)
+                        [ -n \"\${_line}\" ] || continue
+                        _pid=\$(printf \"%s\" \"\${_line}\" | grep -oE \"pid=[0-9]+\" | head -1 | cut -d= -f2)
+                        if [ -n \"\${_pid}\" ]; then
+                            echo \"  端口 \${_p}: pid \${_pid} \$(ps -o comm= -p \${_pid} 2>/dev/null || true) \$(ps -o args= -p \${_pid} 2>/dev/null | cut -c1-160 || true)\"
+                        else
+                            echo \"  端口 \${_p}: \${_line}\"
+                        fi
+                    done
                     exit 1
                 fi
                 exit 0

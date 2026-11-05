@@ -1972,7 +1972,10 @@ bash deployments/scripts/tools/tests/test-release-mode.sh                     # 
   - reset 前 `systemctl start containerd` 并等待 `/run/containerd/containerd.sock`;
   - `kubeadm reset -f` 的输出与返回码不再静默丢弃(`[kubeadm-reset]` 前缀打日志);
   - reset 后 `crictl pods -q | xargs -r crictl rmp -f` + `crictl ps -aq | xargs -r crictl rm -f` 兜底清孤儿容器;
-  - 复核端口从“只有 10250”扩到 **6443/10250/10257/10259**,仍被占则按 pid `kill -9`,最后复检不空才失败;
+  - 复核端口从“只有 10250”扩到 **6443/10250/10257/10259**;仍被占时**只对确认的旧 Kubernetes 组件**
+    (经 `/proc/<pid>/exe` 判定为 `kube-apiserver`/`kube-controller-manager`/`kube-scheduler`/`kubelet`)
+    发信号,未确认的监听者绝不 kill —— 打印端口/pid/进程名后走 `PORT_BUSY` 失败路径
+    (契约:不误杀同名 nginx/其它集群;CodeRabbit 2026-11-05);最后复检不空才失败。
   - 残留探测也识别 6443/10257/10259(处理“只有旧容器、痕迹文件已被删”的节点)。
 
 **验证**
