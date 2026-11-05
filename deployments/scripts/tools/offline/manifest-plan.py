@@ -179,6 +179,11 @@ def plan(entries, root, prefix, cache):
                 rel = f"{base}/{name}" if base else name
                 if rel in entries or _is_meta_name(name):
                     continue
+                # 防 TSV 注入: 本地文件名可含换行/Tab, 直接写进计划会多出一行
+                # (消费方按行 rm -f -- "${root}/${rel}"), 可能删到树外; ".." 组件同理。
+                if any(c in rel for c in "\n\r\t") or ".." in rel.split("/"):
+                    warn(f"跳过含控制字符或 .. 的本地路径: {rel!r}")
+                    continue
                 plan_rows.append(("delete", rel))
 
     # 缓存裁剪: 只保留清单里仍存在、且属于本次 prefix 的键

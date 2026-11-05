@@ -79,6 +79,15 @@ python3 "${PLANNER}" --manifest "${TMP}/sums" --root "${ROOT}" --cache "${TMP}/c
 chk "刷新成功" "0" "$?"
 chk "缓存已记录该文件" "1" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(1 if "kubespray/v1/a.tar" in d["files"] else 0)' "${TMP}/cache.json")"
 
+echo "[8] 含控制字符的本地路径不得进 delete 计划(防 TSV 注入)";
+printf 'x\n' > "${ROOT}/os/tab"$'\t'"evil"
+printf 'x\n' > "${ROOT}/os/nl"$'\n'"evil"
+python3 "${PLANNER}" --manifest "${TMP}/sums" --root "${ROOT}" --cache "${TMP}/cache.json" \
+    --out "${TMP}/p8.tsv" >"${TMP}/s8.json" 2>"${TMP}/e8.log"
+chk "控制字符路径未被写成 delete" "0" "$(grep -c '^delete' "${TMP}/p8.tsv" || true)"
+chk "已提示跳过(含控制字符)" "2" "$(grep -c '跳过含控制字符' "${TMP}/e8.log" || true)"
+rm -f "${ROOT}/os/tab"$'\t'"evil" "${ROOT}/os/nl"$'\n'"evil"
+
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then
     echo "✅ 离线增量下载计划回归通过"
