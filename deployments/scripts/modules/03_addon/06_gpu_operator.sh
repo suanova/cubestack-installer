@@ -396,6 +396,7 @@ push_extra() {   # <comp> <源镜像>  (如 maca cr.metax-tech.com/public-librar
         warn "  ${comp} tar 推送失败, 尝试在线..."
     fi
     warn "  ${comp} 镜像未就绪(本地 docker / 离线 tar 均无)。请先 docker pull ${src} 或放离线 tar 到 ${METAX_IMAGE_DIR}"
+    if [ "${comp}" = "maca" ]; then err "  maca 镜像缺失, 中止安装"; exit 1; fi
     return 0
 }
 push_extra "maca" "cr.metax-tech.com/public-library/${METAX_MACA_IMAGE}"
