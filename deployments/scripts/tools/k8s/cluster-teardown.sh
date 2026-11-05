@@ -156,6 +156,43 @@ print(json.dumps(cm))
         || warn "  登记状态更新失败: ${key}(不影响卸载)"
 }
 
+# 外部 Ceph 覆盖前, 先卸载各节点 /var/lib/kubelet 下的 Ceph/RBD 挂载。
+# 为什么(2026-11-05 实机): 旧集群的 RBD 卷被删/后端失效后, 节点上的 jbd2/rbdX
+#   线程会进入不可中断 D 状态; 下次 node_pkgs 的 fuser 必然超时, 只能重启节点。
+#   外部 Ceph 模式下后端由外部集群提供、不会被本集群销毁 —— 删旧资源前先摘挂载,
+#   即可安全复用, 不需要每次覆盖都重启节点。
+# 只处理 /var/lib/kubelet 下的 CSI 挂载; 宿主机 /mnt/cephfs/models 是外部资源, 保留。
+unmount_node_ceph_mounts() {
+    local _key _ips _ip _u _left
+    _key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    mapfile -t _ips < <(all_node_ips 2>/dev/null || true)
+    [ "${#_ips[@]}" -gt 0 ] || return 0
+    say "  预清理节点 Ceph/RBD CSI 挂载(避免后端删除后 jbd2 D 状态)..."
+    for _ip in "${_ips[@]}"; do
+        [ -n "${_ip}" ] || continue
+        _u="$(ssh_user_for_ip "${_ip}")"
+        _left="$(timeout 60 ssh -n -i "${_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_u}@${_ip}" "
+                for _m in \$(findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
+                    | awk '\$3 ~ /ceph/ || \$2 ~ /^\\/dev\\/rbd/ {print \$1}' | tac); do
+                    timeout 10 umount -l \"\${_m}\" 2>/dev/null || true
+                done
+                for _i in 1 2 3 4 5 6 7 8 9 10; do
+                    findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
+                        | awk '\$3 ~ /ceph/ || \$2 ~ /^\\/dev\\/rbd/ {print \$1}' | grep -q . || break
+                    sleep 1
+                done
+                findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
+                    | awk '\$3 ~ /ceph/ || \$2 ~ /^\\/dev\\/rbd/ {print \$1}' | head -5
+            " 2>/dev/null || true)"
+        if [ -n "${_left}" ]; then
+            warn "  ${_ip}: 仍有 Ceph/RBD 挂载未卸净(后续 reset/重启兜底): $(printf '%s' "${_left}" | tr '\n' ' ')"
+        else
+            say "  ${_ip}: 无残留 Ceph/RBD CSI 挂载"
+        fi
+    done
+}
+
 run_component() {   # <key> <script_rel>  → 0=卸了; 1=失败/超时
     local key="$1" rel="$2"
     # ⚠ 不能与上一行合并成一条 local: bash 在**同一 local 语句**里按旧作用域求值 RHS,
@@ -262,6 +299,11 @@ PY
             #   cubestack_operator, cephfs_mount 等全部被静默跳过)。
             if run_component "${_key}" "${_rel}" </dev/null; then _n_ok=$((_n_ok + 1)); else _n_fail=$((_n_fail + 1)); fi
         done <<< "${_order}"
+        # ★ 外部 Ceph(2026-11-05): 删旧集群资源前先摘节点 CSI 挂载, 避免 jbd2/rbd D 状态。
+        #   内部 Ceph 的同类清理在 ceph 模块/cubestack-offline reset 前置里做。
+        if [ "${CEPH_MODE:-internal}" = "external" ]; then
+            unmount_node_ceph_mounts
+        fi
         echo ""
         say "优雅卸载完成: 成功 ${_n_ok} 个, 失败/跳过 ${_n_fail} 个"
         if [ "${_n_fail}" -gt 0 ]; then

@@ -103,8 +103,8 @@ EOS
         if SSH "${K} get ns ${_ns} --no-headers >/dev/null 2>&1"; then
             warn "  ${_ns} 仍 Terminating → 清 namespace finalizer 强制终结"
             printf '%s' '{"spec":{"finalizers":[]}}' \
-                | SSH "${K} patch ns ${_ns} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1 || true
-            SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 </dev/null >/dev/null 2>&1 || true
+                | SSH "${K} patch ns ${_ns} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
+            SSH "timeout 30 ${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
         else
             ok "  ${_ns} 已删除"
         fi
@@ -260,7 +260,7 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     #   强制删 ns 会把仍带 finalizer 的对象孤儿化(重装 --create-namespace 后可能复活);
     #   CRD 删除同理会把残留 CR 链式卡死(重装的 [5/6] CRD apply 也会撞上 Terminating CRD)。
     SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
-    SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "timeout 30 ${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
     for _crd in $( (SSH "${K} get crd -o name 2>/dev/null") | grep -i cubestack || true); do
         # ★ 2026-10-23 C 集群实机: 组件控制器先被删后, CRD 下残留 CR(如 devenvironment/test)
         #   的 finalizer 无人摘 → delete crd 卡在 customresourcecleanup 上无限等待。

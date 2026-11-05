@@ -457,4 +457,14 @@ echo "== ⑩ 静态围栏: run_component 不得吞掉 while 的 here-string =="
 chk "⑩a run_component 调用带 </dev/null" "1" \
     "$(grep -cF 'run_component "${_key}" "${_rel}" </dev/null' "${ENGINE}")"
 
+echo "== ⑪ 外部 Ceph: 覆盖前先卸节点 /var/lib/kubelet Ceph/RBD 挂载 =="
+chk "⑪a unmount_node_ceph_mounts 已定义" "1" \
+    "$(grep -cF 'unmount_node_ceph_mounts()' "${ENGINE}")"
+chk "⑪b 仅 external 模式调用(内部由 ceph/reset 兜底)" "1" \
+    "$(grep -cF 'if [ "${CEPH_MODE:-internal}" = "external" ]; then' "${ENGINE}")"
+_n_call="$(grep -cF 'unmount_node_ceph_mounts' "${ENGINE}" || true)"
+chk "⑪c 函数+调用已接线" "1" "$([ "${_n_call:-0}" -ge 2 ] && echo 1 || echo 0)"
+_n_kubelib="$(grep -cF 'findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet' "${ENGINE}" || true)"
+chk "⑪d 只处理 /var/lib/kubelet 下的 CSI 挂载" "1" "$([ "${_n_kubelib:-0}" -ge 1 ] && echo 1 || echo 0)"
+
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }

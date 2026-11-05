@@ -69,7 +69,7 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
         delete_crd_with_finalizer_cleanup "${_crd}"
     done
     SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
-    SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "timeout 30 ${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
     ok "  NVIDIA GPU Operator 已卸载"
     say "  注: 节点侧残留(内核模块已加载至重启前、/run/nvidia 驱动根、containerd 的 99-nvidia.toml"
     say "      注入配置)不在本分支清理范围 —— 重装/回退详见 docs/nvidia-gpu-operator.md 卸载节"

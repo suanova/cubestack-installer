@@ -1857,6 +1857,11 @@ ubuntu@10.6.7.135: Permission denied (publickey,password).
 - `tools/node/reconcile-node-packages.sh`(2026-11-05, CodeRabbit): 控制器侧 `NODE_PKGS_ALLOW_DSTATE=1`
   (覆盖安装口径)现在通过 `--allow-dstate` 传给远端安装器, 远端 D 状态门禁跟随同一策略继续;
   存在 D 状态时**不做**挂载健康探测/自动卸载(挂载可能正被僵尸进程引用), `fuser` 超时仍硬失败。
+- external Ceph 覆盖(2026-11-05 实机): `cluster-teardown.sh` 在删除旧集群资源前, 先卸载各节点
+  `/var/lib/kubelet` 下的 Ceph/RBD CSI 挂载(只 external 模式; 宿主机 `/mnt/cephfs/models` 保留)。
+  否则旧 RBD 卷被删后 `jbd2/rbdX` 进入不可中断 D 状态, 下次 `node_pkgs` 的 `fuser` 必然超时、
+  只能重启节点。另: 所有 `kubectl delete ns` 加 `timeout 30 ... --wait=false`,
+  避免 namespace finalizer 让删除无限等待(2026-11-05 实机卡 9 分钟)。
 
 **验证:**
 ```bash
