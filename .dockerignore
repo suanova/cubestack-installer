@@ -5,24 +5,13 @@
 # (如 inventory group_vars 模板缺失会导致容器内 k8s_inventory 模块失败)。
 # ============================================================
 # 依赖与缓存(临时文件)
-**/node_modules
 **/.venv
 # 裸机路径的离线 wheel 缓存(63MB 级; 容器里已预装 ansible, 镜像不需要它)
 **/.venv_wheels
 **/__pycache__
 **/*.pyc
 **/.pytest_cache
-**/.vite
 *.log
-
-# 构建产物(临时文件, 镜像内会重新构建)
-**/dist
-installer/app/static
-installer/*.egg-info
-
-# 运行时数据(临时文件)
-installer/userhub.db
-installer/workspace
 
 # VCS 元数据(不入镜像, 常规做法)
 .git

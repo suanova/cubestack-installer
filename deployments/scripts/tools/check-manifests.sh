@@ -5,7 +5,7 @@
 #   那时人已在集群前、前置模块都跑完了。本脚本把这类错误提前到提交前: 逐个文件解析一遍,
 #   失败即列出 `文件:行:列` 与原因。
 # 校验范围 = **仓库自有、git 跟踪**的 *.yaml/*.yml(rook/multus 清单、自研 inventory、
-#   .github/workflows、docker-compose.yml 等)。
+#   .github/workflows 等)。
 # 排除三类(**都是"看着像 YAML 但确实不是普通 YAML"**, 判据即下面 python 里的 SKIP_* 三行;
 #   2026-09-30 逐类反证过, 不是图省事):
 #   ① deployments/kubespray/kubespray/  vendored 上游源码树(内含 Jinja / ansible 模板)

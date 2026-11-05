@@ -58,12 +58,12 @@ list_files() {
         *)       git ls-files ;;
     esac | sort -u
 }
-# 形状启发式(password/IP)的作用域: 排除 vendored 上游树/第三方 chart/前端/旧应用 ——
+# 形状启发式(password/IP)的作用域: 排除 vendored 上游树/第三方 chart ——
 # 这些来源充满 schema 属性名/示例凭据/版本号(x.y.z 形似 IPv4), 实测 908 误报;
 # 禁词表(③)对**全部路径**生效, 不受此排除影响。
 _heuristic_scope() {  # <file> → 0=做启发式
     case "$1" in
-        deployments/kubespray/*|deployments/cubestack-addon/*|ui/*|installer/*) return 1 ;;
+        deployments/kubespray/*|deployments/cubestack-addon/*) return 1 ;;
         *) return 0 ;;
     esac
 }
