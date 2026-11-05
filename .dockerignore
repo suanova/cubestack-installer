@@ -1,6 +1,6 @@
 # ============================================================
 # 排除策略: 只排除两类文件 —— ① offline-files 大文件(binary/镜像/系统包/VM 镜像,
-# 体积大且经卷挂载/fetch-offline-from-minio.sh 获取); ② 临时/运行期文件(缓存、
+# 体积大且经卷挂载/版本树获取); ② 临时/运行期文件(缓存、
 # 依赖、构建产物、运行时数据)。其余源码/配置/模板**全量打进镜像**,避免漏文件
 # (如 inventory group_vars 模板缺失会导致容器内 k8s_inventory 模块失败)。
 # ============================================================
@@ -29,7 +29,7 @@ installer/workspace
 
 # ---------- Dockerfile-cli 专用: offline-files 大文件排除 ----------
 # (CLI 镜像只含源码 + 少量 CLI 二进制; 海量离线镜像/VM 经卷挂载或
-#  fetch-offline-from-minio.sh 下载)
+#  版本树(外部打包流程物化)
 # 注意: dockerignore 与 gitignore 不同——没有 '!' 取反/重新包含, 排除即排除。
 # 因此无法"先排除整个 offline-files/ 再单独放行 kubectl/helm/skopeo",
 # 改为逐项排除每个子目录/镜像/OS 大件, 保留 Dockerfile-cli 拷贝的 3 个轻量

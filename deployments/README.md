@@ -222,7 +222,7 @@ deployments/offline-files/
 
 - **生成方式**:联网机执行 `./deployments/kubespray/cubestack-offline.sh download`(读取 inventory group_vars 决定下载哪些镜像/文件),产物即离线仓库。
 - **预加载机制**:`inventory/<cluster>/preload-images.lst`(由 `PRELOAD_IMAGE_PATTERNS` 过滤生成)指定部署时同步到节点 containerd 的最小镜像集合;离线部署时节点镜像拉取不依赖公网。
-- **MinIO 分发**:源机器 `tools/offline/sync-to-minio.sh` 把本地 offline-files 增量同步到 MinIO(`mc mirror --overwrite`);部署机 `tools/offline/fetch-offline-from-minio.sh` 拉取(默认排除 virtual-machine,按需 `--sub virtual-machine`/`--all`);冗余清理见 `tools/offline/trim-offline-files.sh`。
+- **分发**:版本树(含 offline-files)由外部打包流程物化并交付; 安装侧不直连 MinIO。
 
 ### 5.2 虚拟机基础镜像(offline-files/virtual-machine/)
 

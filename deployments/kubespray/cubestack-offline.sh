@@ -721,7 +721,7 @@ resolve_preload_image_files() {
     # ★ Ceph 离线镜像纳入 k8s 阶段预加载(与 kubespray 镜像同机制): CEPH_ENABLED=true 时把
     #   CEPH_IMAGE_DIR 的 *.tar(rook/ceph/cephcsi 等)一并写进 preload-images.lst,
     #   由 cluster.yml 内置预加载 play 同步到全部节点并 ctr import —— 替代 ceph 模块的
-    #   ceph-sync-images.sh 独立同步, 统一在 k8s 部署阶段完成(需求)。
+    #   镜像由版本树提供, 统一在 k8s 部署阶段同步到节点并 ctr import(需求)。
     # ⚠ 必须用**真实复制(cp)**, 不用软链/硬链: 离线文件需经 mc mirror 上传 MinIO 再下载分发,
     #   软链会被当小链接文件上传(下载回来是坏文件), 硬链虽传真实内容但在对象存储中无链接语义。
     #   真实复制后 images/ 目录全是普通文件, mc mirror / rsync / preload 均安全。
@@ -2679,7 +2679,7 @@ elif [ -z "${PRELOAD_IMAGE_PATTERNS:-}" ]; then
     # 内置默认最小集合: kubespray 默认部署 + calico 网络插件 + metallb/registry/local-path/nginx 附加组件所需镜像
     # (排除 cilium/flannel/ingress-nginx/dashboard 等未启用组件的镜像)
     # ⚠ 本行是**第 4 份**副本(standalone 直跑本脚本时的兜底默认值), 必须与 cluster.conf /
-    #   cluster.conf.example / tools/offline/trim-offline-files.sh 三份**逐字节一致** ——
+    #   cluster.conf.example / cluster.defaults.conf **逐字节一致** ——
     #   check-modules.sh 第 ⑭ 项断言这**四份**(2026-09-28 起本份已纳入; 本行不在 file 顶部,
     #   断言脚本会跳过上面那条 ${CUBESTACK_PRELOAD_IMAGE_PATTERNS} 透传行, 取到本行);
     #   本份漂移会让"备料保留 / 节点预加载"两边不一致

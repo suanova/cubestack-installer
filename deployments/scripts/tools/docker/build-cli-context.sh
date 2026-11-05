@@ -117,7 +117,7 @@ rsync -a \
     --exclude 'kubespray/versions' \
     --exclude '.git' --exclude '.venv' --exclude 'venv' --exclude '.ansible' --exclude '.cache' \
     --exclude 'config/cluster.conf' --exclude 'config/cluster.conf.bak' --exclude 'config/cluster.conf.bak.*' \
-    --exclude 'config/external-ceph*' --exclude 'config/minio.conf' \
+    --exclude 'config/external-ceph*' \
     --exclude 'config/.deploy.state' --exclude 'config/.deploy.state.lock' \
     --exclude 'hosts.yml' --exclude 'inventory.ini' --exclude 'artifacts' \
     --exclude '*.swp' --exclude '*.swo' --exclude '*.swx' --exclude '*~' \
@@ -130,7 +130,7 @@ rsync -a --exclude '.git' "${REPO_ROOT}/skills" "${OUT}/"
 #   cluster.conf.example  主文件模板(必改项+开关+凭据; 容器内 cp example→conf 的源头)
 #   cluster.defaults.conf 高级/默认值层(load_config 无条件加载)
 # 缺失后果是**静默**的: 容器内高级变量全部退化成内置兜底(离线路径/镜像源/Ceph 参数等大面积错值)。
-# 故在生成上下文时就硬失败(rsync 排除项只挡真实凭据 config/cluster.conf* / external-ceph* / minio.conf)。
+# 故在生成上下文时就硬失败(rsync 排除项只挡真实凭据 config/cluster.conf* / external-ceph*)。
 for _cf in cluster.conf.example cluster.defaults.conf; do
     [ -f "${OUT}/deployments/config/${_cf}" ] \
         || { err "构建上下文缺配置模板: deployments/config/${_cf}(检查 rsync 排除项)"; exit 1; }
@@ -245,7 +245,7 @@ if [ "${DO_BUILD}" = "1" ]; then
                 say "本地无 ${BASE_IMAGE}, 从离线文件 ${ENGINE} load ..."
                 ${ENGINE} load -i "${OS_TAR}"
             else
-                err "基础镜像 ${BASE_IMAGE} 缺失且离线文件不存在(${OS_TAR}); 先运行 fetch-offline-from-minio.sh 或 ${ENGINE} pull ${BASE_IMAGE}"
+                err "基础镜像 ${BASE_IMAGE} 缺失且离线文件不存在(${OS_TAR}); 请从版本树补齐离线文件或 ${ENGINE} pull ${BASE_IMAGE}"
                 exit 1
             fi
         fi

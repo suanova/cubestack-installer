@@ -1,12 +1,11 @@
-# CubeStack Operator 部署(25_cubestack_operator)
+# CubeStack Operator 部署(平台模块)
 
 > 组件: **CubeStack 平台 Operator**(一个 CR `CubeStackCluster` 描述整个平台, operator 按组件目录把
 > 各组件渲染并 apply 进集群, 管理健康与卸载)。
 > 上游: <https://github.com/suanova/cubestack-operator>(私有) · chart:
 > `oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart`
 > 分发: chart 随离线包(`offline-files/cubestack-operator/charts/`)走, CLI 镜像不再包含它。
-> 模块: `deployments/scripts/modules/03_addon/25_cubestack_operator.sh`(部署)
-> + `26_verify_cubestack_operator.sh`(端到端验证)
+> 模块: 平台 operator 部署 + 端到端验证模块(由外部版本树提供, 不在本仓库内置)
 > 开关: `CUBESTACK_OPERATOR_ENABLED`(**默认 true**, 2026-10-08 起) · 用法: `--steps cubestack_operator` / `--steps verify_cubestack_operator`
 
 本文既是**设计说明**(为什么这么做), 也是**操作手册**(怎么做)。文中标注实测/未实测的部分。
@@ -150,11 +149,8 @@ online: helm pull → 取远端 "Digest:" 与 .digest 边车比对
 offline: 不联网, 直接用本地副本
 ```
 
-本地副本在 `offline-files/` 下时, 刷新后由内网同步机
-`cubestack-platform-sync.sh --collection cubestack-operator --no-pull-state`
-上传 MinIO(或 `sync-to-minio.sh`); 不要 `git add` 这个 tgz。
-没有内网同步机时, 由 operator 仓库发 `repository_dispatch: operator-chart-updated` →
-`.github/workflows/refresh-operator-chart.yml` 在 GitHub runner 上拉取并上传 MinIO。
+本地副本在版本树的 `offline-files/` 下时, 刷新与发布由外部打包流程统一完成;
+不要 `git add` 这个 tgz。
 
 ⚠ 两个实测坑:
 
@@ -179,16 +175,14 @@ helm template <release> <本地tgz> -n <ns> | sed -n 's/^[[:space:]]*image:[[:sp
 镜像搬运路径(离线机):
 
 ```
-Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator──▶ 顶层 <上游ref>.tar(本体)
-上游/Harbor(各平台组件)   ──手工 save──▶ <组件>/<上游ref>.tar(平台组件) ──模块──▶ 集群内置 registry
+版本树 offline-files/cubestack-operator/ ──模块──▶ 集群内置 registry
+  (外部打包流程已按 pin 从 Harbor 拉好 tar, 安装侧不再自行 save)
 ```
 
-- 登记: `deployments/config/images.manifest` 的 `cubestack-operator` 组(tag 写
-  `${CUBESTACK_OPERATOR_IMAGE_TAG}`, 升级只改 cluster.conf 一处)
-- 离线目录: `deployments/offline-files/cubestack-operator/`(+README; tar 不入库)
-- ⚠ 该组**不镜像到 `mirrors/`**(上游就是本台 Harbor 的私有项目, 与 metax-gpu 同一处理)。
-  为此给 `harbor-save-images.sh` 补了同源分支: 同源组**直接用原始 ref** 拉(skip 的
-  `mirrors/<路径>` 那副本本来就不存在)。
+- 镜像 tar 由版本树的 `offline-files/cubestack-operator/` 提供(tar 不入库);
+  外部打包流程按组件 pin 从 Harbor 拉取。
+- 第三方平台镜像由 `container-image-mirror` 同步到 `mirrors/`;
+  本项目镜像来自本台 Harbor 的 `suanova-private` 项目。
 
 ### 3.4b 平台组件镜像推送 + CR 全局注入(2026-10-08 实机落地, CR 模式)
 
@@ -220,22 +214,18 @@ Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator�
   - `ModelVersion` 的权重是 hostPath(`/mnt/cephfs/models/...`), 节点上必须已存在对应权重。
 - **imagePullSecrets 注入为空**: 集群 registry 匿名可拉; 留默认值(harbor-credentials)而 Secret
   不存在会让所有组件 ImagePullBackOff。
-- **镜像清单与 chart 同步(2026-10-19)**: `offline-files/cubestack-operator/image-list.tsv` 是
-  平台镜像保鲜管道的**单一事实源**。gateway-helm v1.9.2 使用 `gateway:v1.9.2` +
+- **镜像清单与 chart 同步(2026-10-19)**: 平台镜像清单由版本树的 `tree.tsv` 承载(外部打包流程
+  生成)。gateway-helm v1.9.2 使用 `gateway:v1.9.2` +
   `envoy:distroless-v1.39.1` + `ratelimit:0482748e`; ai-gateway v1.2.0 使用
   `ai-gateway-controller:v1.2.0` + `ai-gateway-extproc:v1.2.0`。**升级 operator/chart 后必须同步
-  刷新清单并重跑 `cubestack-platform-save-images.sh`**, 否则离线集群会在 certgen/ratelimit 等
+  在外部打包流程中重新冻结 pin/物化版本树**, 否则离线集群会在 certgen/ratelimit 等
   非主容器处 ImagePullBackOff(`registry.cubestack.io:5000/...: not found`)。
   - `ratelimit:0482748e` 是 v1.9.2 chart 的默认 tag(旧 `8fe6ea42` 只适用于 v1.9.1), 已入清单;
     它非默认拉起, 仅配置 `RateLimitPolicy` 时使用。
   - `prometheus-windows-exporter:0.31.8` 只有 `windows/amd64` 清单, Linux 节点不调度, **不进入**
     Linux 离线 tar 集合; 将来加 Windows 节点时需单独用 `--override-os windows` 保存。
-  - **一致性校验**: `cubestack-platform-save-images.sh --verify-remote` 逐行比对边车 ↔ Harbor
-    manifest digest, 并直接读 tar 的 config digest ↔ Harbor amd64 config digest; MinIO 侧用
-    `cubestack-platform-sync.sh --verify-minio` 做逐 tar sha256。发版/重部署前建议两条都跑。
-  - **chart 分发**: 更新 `offline-files/cubestack-operator/charts/*.tgz` 后**不需要**重建 CLI 镜像;
-    用内网同步机 `cubestack-platform-sync.sh --collection cubestack-operator --no-pull-state`
-    上传 MinIO, 部署机 `fetch-offline-from-minio.sh --sub cubestack-operator` 取回即可。
+  - **chart 分发**: operator chart 随版本树分发(不重建 CLI 镜像); 刷新 chart 由外部打包流程
+    重新物化版本树完成。
 - **RWO 单卷组件的更新策略(2026-10-19)**: `cubepilot-api` 把单个 `ReadWriteOnce` PVC 挂在
   Deployment 上; 默认 `RollingUpdate` 会先起新 Pod, 新 Pod 调度到另一节点后无法挂载同一块 RBD 卷
   (`Multi-Attach error`), 旧 Pod 又因 `maxUnavailable` 不退出 → 永久 `ContainerCreating`。
@@ -279,7 +269,7 @@ coredns loop 插件 FATAL 自杀(kube-system coredns CrashLoopBackOff, cluster �
   - `CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE` 是**逃生口**, 仅在必要时显式设置;
     它**只覆盖 cubestack-operator 自身镜像**, 不覆盖 operator catalog 内其他组件/平台
     operator 的版本。installer **从不**设置 `components.*.version` 或组件镜像 tag。
-  - `CUBESTACK_OPERATOR_IMAGE_TAG` 只用于 `images.manifest` / `release-images.tsv` 登记,
+  - `CUBESTACK_OPERATOR_IMAGE_TAG` 只用于镜像登记/审计,
     **不参与** helm 覆盖。
 - **推荐**: release `2.0.0-rc1` 使用自带 `Chart.yaml appVersion: 2.0.0-rc1` 的 release chart,
   不设任何 override, installer 直接按 chart 版本部署。
@@ -293,8 +283,8 @@ coredns loop 插件 FATAL 自杀(kube-system coredns CrashLoopBackOff, cluster �
   默认(不写 override)会部署 chart 自带的 `latest`; 这是"必要时才覆盖"的显式选择。
 - release.env 的 `CUBESTACK_OPERATOR_CHART_VERSION` 可与 release 版本不同;
   `CUBESTACK_OPERATOR_IMAGE_TAG` 仅作镜像清单登记。
-- 发布树一致性: 模块会读取 `deployments/releases/<RELEASE>/release-images.tsv`,
-  若最终 operator 镜像不在清单中会**告警**(提示 chart/override 与发布树版本不一致)。
+- 版本树一致性: 模块会读取版本树的 `offline-files/tree.tsv` / `release.yaml`,
+  若最终 operator 镜像不在清单中会**告警**(提示 chart/override 与版本树不一致)。
 - 其他 release 版本同理: 放对 chart 文件、默认让 chart 自带版本生效; 确需覆盖时只用
   `CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE`, 发布树 tar 按最终 ref 命名。
 
@@ -438,7 +428,7 @@ kubectl -n envoy-gateway-system get svc \
 Web UI 地址发现(`cubestack-ui-url.sh`)同时修正: **只**把 LoadBalancer 的地址当作 MetalLB;
 NodePort 用节点 IP + `nodePort`; ClusterIP(私有网关)不再作为 Web UI 地址输出。
 
-### 3.7 端到端验证(`26_verify_cubestack_operator.sh`)
+### 3.7 端到端验证(`verify_cubestack_operator`)
 
 | 步 | 断言 | 为什么 |
 |---|---|---|
@@ -463,13 +453,7 @@ sudo ./deploy-cluster.sh --steps verify_cubestack_operator
 sudo ./deploy-cluster.sh --enable cubestack_operator
 ```
 
-**离线备料(联网机)**:
-
-```bash
-# cluster.conf 设 CUBESTACK_OPERATOR_HARBOR_USER/PASSWORD(或 HARBOR_MIRROR_USER/PASSWORD)
-sudo ./deployments/scripts/tools/images/harbor-save-images.sh --group cubestack-operator --force
-# 把 offline-files/ 拷到部署机(见 docs/offline-readiness.md / tools/offline/)
-```
+**离线物料**: 由版本树 `offline-files/cubestack-operator/` 提供。
 
 **状态**:
 
@@ -499,7 +483,7 @@ kubectl -n cubestack-system logs deploy/cubestack-operator
 
 | 症状 | 根因 / 处理 |
 |---|---|
-| `[1/6]` 报"chart 缺失" | 离线包里没有 chart。跑 `fetch-offline-from-minio.sh --sub cubestack-operator`, 或 `helm pull` 到 `offline-files/cubestack-operator/charts/` 并写 `Digest:` 边车 |
+| `[1/6]` 报"chart 缺失" | 版本树里没有 chart。检查版本树是否完整/重新物化; 或 `helm pull` 到 `offline-files/cubestack-operator/charts/` 并写 `Digest:` 边车 |
 | 每次部署都告警"远端有更新"并覆盖本地副本 | `.digest` 边车值不对(常见: 自己 `sha256sum` 算的)。重取 helm pull 输出的 `Digest:` 行 |
 | `[4/6]` 报"可用源都不成立" | 离线机没 tar / 没凭据 / Harbor 不可达。跑 save 工具, 或配凭据 |
 | pod `ImagePullBackOff` 且 image 还是 `harbor.isuanova.com/...` | 有人手工 `helm install` 绕过了本模块(没走 `--set image.repository`)。用 `--steps cubestack_operator` 重装 |

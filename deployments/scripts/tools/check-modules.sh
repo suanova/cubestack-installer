@@ -28,7 +28,7 @@
 #      C) **写入者闭环**: inventory 的 group_vars/all/k8s-versions.yml 里 10 个 kubespray 版本变量
 #         确实存在且 == cluster.conf 的钉子(写入者 = tools/k8s/sync-kubespray-config.sh 3.2 节)
 #      A 只证"钉子自洽"(== 表值), C 才证"部署真会用钉子"; 缺 C 时删掉写入节/改错值照样全绿。
-#   ⑰ 凭据卫生: 含密钥的"生成物"(external-ceph 导出 / minio.conf / cluster.conf)必须**未被 git 跟踪**
+#   ⑰ 凭据卫生: 含密钥的"生成物"(external-ceph 导出 / cluster.conf)必须**未被 git 跟踪**
 #      且被 .gitignore 覆盖 —— ⚠ 忽略规则对**已跟踪**文件无效, "看着封堵了"≠"封堵了"
 #   ⑱ 版本目录 ↔ 档案闭合: 入库档案逐版本 ↔ 其树表值; 在场版本目录的 VERSION.profile ↔ 入库档案、
 #      tree.tar.gz 指纹、关键二进制与 K8S_VERSION 匹配、LOCAL_ONLY 语义自洽(无目录则跳过)
@@ -643,12 +643,11 @@ fi
 # 不变量(Global Constraints): 同一份模式串必须在**四处逐字节一致** ——
 #   ① deployments/config/cluster.conf                             本地部署配置(未纳入 git, 含密码)
 #   ② deployments/config/cluster.conf.example                     模板(随 git 分发; CI 上唯一在场的那份)
-#   ③ deployments/scripts/tools/offline/trim-offline-files.sh:41  备料时**真正执行** trim 用的默认值
 #   ④ deployments/kubespray/cubestack-offline.sh               standalone 直跑预加载脚本时的内置兜底
 #      (该文件里有两条赋值: 上面那条是环境变量透传, 底下 elif 分支里的才是内置默认模式串 ——
 #       断言取后者, 见 _preload_patterns 的说明)
-# 为什么必须有这一条: 既有 CI 只覆盖「trim ↔ images.manifest」一对(check-image-manifest.sh ⑤),
-#   漂移若只发生在 ①/②, CI 照样通过 → 联网机备料后镜像**仍被静默 trim 掉**(装了却没有镜像)。
+# 为什么必须有这一条: 漂移若只发生在 ①/②, CI 照样通过 → 打包侧按错误清单备料,
+#   部署时**镜像缺失**(装了却没有镜像)。
 # 比较的是**模式串本身**(各处变量名可能不同), 不是整行; 引号/行尾注释等写法差异先归一化掉。
 # 注: 第 ④ 份曾长期陈旧(缺 library_nginx 等条目), 2026-09-28 Task 7 已补齐并与前三分逐字节相同,
 #     故自本轮起纳入断言(此前注释写的"有意不纳入"已过期)。
@@ -677,10 +676,9 @@ PRELOAD_BAD=0; PRELOAD_N=0
 PRELOAD_PATHS=(
     "${REPO_ROOT}/deployments/config/cluster.conf"
     "${CONF_DEFAULTS}"
-    "${REPO_ROOT}/deployments/scripts/tools/offline/trim-offline-files.sh"
     "${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
 )
-PRELOAD_NAMES=( cluster.conf cluster.defaults.conf trim-offline-files.sh cubestack-offline.sh )
+PRELOAD_NAMES=( cluster.conf cluster.defaults.conf cubestack-offline.sh )
 PRELOAD_VALS=(); PRELOAD_SEEN=()
 for _i in "${!PRELOAD_PATHS[@]}"; do
     _p="${PRELOAD_PATHS[$_i]}"; _n="${PRELOAD_NAMES[$_i]}"
@@ -689,7 +687,7 @@ for _i in "${!PRELOAD_PATHS[@]}"; do
         continue
     fi
     # cluster.conf **未声明**该键(2026-10-15 PRELOAD 下沉 cluster.defaults.conf 后属正常) → 跳过;
-    #   ⚠ 只对这一份可选副本放宽 —— 另三份(defaults/trim/offline)缺声明仍是硬失败(真回归)。
+    #   ⚠ 只对这一份可选副本放宽 —— 另两份(defaults/offline)缺声明仍是硬失败(真回归)。
     if [ "${_n}" = "cluster.conf" ] && ! grep -qE '^[[:space:]]*PRELOAD_IMAGE_PATTERNS=' "${_p}" 2>/dev/null; then
         say "  cluster.conf: 未声明 PRELOAD_IMAGE_PATTERNS(已下沉 cluster.defaults.conf), 跳过该副本"
         continue
@@ -758,7 +756,7 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-kubespray-version-select.sh test-deb-install-lib.sh \
            test-ssh-user.sh test-k8s-passwordless.sh test-gpu-vendor-probe.sh \
            test-nvidia-host-driver.sh test-inventory-ssh-user-precedence.sh \
-           test-node-hosts-sync.sh test-release-sync-images.sh \
+           test-node-hosts-sync.sh \
            test-deploy-config-guard.sh test-k8s-ntp.sh test-cephfs-mount.sh \
            test-chrony-offline-debs.sh test-ceph-data-disks.sh \
            test-metallb-pool-check.sh test-ceph-cluster-detect.sh \
@@ -777,7 +775,7 @@ unset _t _tp _tout 2>/dev/null || true
 
 # ---------- ⑯ k8s 基座钉子闭环: A 钉子 vs 树内表值 / B 无模块开关键 / C 写入者(inventory) ----------
 # 为什么必须有 A: cluster.conf 的"k8s 基座组"是**显式钉子**(离线 tar / Harbor 同步需要确定的
-#   ref —— images.manifest 直接以 ${VAR} 引用它们), 而它们的真值在 vendored kubespray 的版本表里。
+#   ref —— cluster.defaults.conf 的版本钉子), 而它们的真值在 vendored kubespray 的版本表里。
 #   两边漂移时**部署期才发现**: 表里没有该补丁 / addon 版本与表不符 → 离线集群拉不到镜像。
 #   人工抄表必然出错(版本靠人记), 所以这里每次跑 check 都**从树内表机械重算一遍**期望值。
 #   ⚠ 与 ⑪-C 同原则: **不写死任何期望值** —— 换树/换钉子后本项自动给出新的期望值。
@@ -805,7 +803,8 @@ unset _t _tp _tout 2>/dev/null || true
 #   被写进 inventory**。在此之前那 8 个变量在 vendored 树之外**没有任何写入者**, 于是部署按
 #   **树内默认**解析(ansible 实测 kube_version=1.36.4 / coredns=1.14.2 / pod_infra=3.10.2),
 #   与我们钉的 1.35 线**不是同一套** → 离线 tar 与部署期要的镜像不符, download/validate 阶段
-#   响亮失败(与 images.manifest:49 的"必须与 kubespray 实际解析出的版本一致"自相矛盾)。
+#   响亮失败(与
+#   "必须与 kubespray 实际解析出的版本一致"的钉子口径自相矛盾)。
 #   写入者已落地 = tools/k8s/sync-kubespray-config.sh 3.2 节(group_vars/all/k8s-versions.yml),
 #   C 断言其产物与钉子逐键一致 —— 删掉写入节 / 手工改错值 / 换了 conf 忘跑 sync 都会被点名。
 say "[16/19] k8s 基座钉子闭环(A 树内表值 / B 无模块开关 / C inventory 写入者) ..."
@@ -922,7 +921,7 @@ else
         fi
 
         # 比较: 只判"我方钉值 == 上游表值", **v 前缀等价**(我方钉子可带/不带 v; 上游变量侧不带 v,
-        #   镜像 tag 侧另有 'v' 前缀 —— 那是 images.manifest 的职责, 本项不做形态断言)
+        #   镜像 tag 侧另有 'v' 前缀 —— 由发布侧保证, 本项不做形态断言)
         _ksd_cmp() {   # <变量> <上游期望> <上游出处>
             local got
             got="$(_ksd_conf_value "${_cf}" "$1")"
@@ -969,7 +968,7 @@ else
                     KSD_BAD=1
                 elif [ "${_got#v}" != "${_pin#v}" ]; then
                     ck_fail "⑯-C ${_cn}: ${_kv}='${_got}' 与钉子 ${_pv}='${_pin}' 不符" \
-                        "      → 部署用的是 inventory 里的 '${_got}'(不是钉子), 与离线 tar / images.manifest 对不上" \
+                        "      → 部署用的是 inventory 里的 '${_got}'(不是钉子), 与离线 tar / 版本树对不上" \
                         "      → 修法: 重跑 sync-kubespray-config.sh(写入节会按 cluster.conf 覆盖); 勿手改该文件"
                     KSD_BAD=1
                 else
@@ -1010,7 +1009,6 @@ _GIT=(git -C "${REPO_ROOT}")
 _SECRET_PATHS=(
     deployments/config/external-ceph-self-define-access.conf   # 生成器写出三个真 keyring
     deployments/config/external-ceph.env                       # Rook 官方导出(mon/CSI/RGW 用户密钥)
-    deployments/config/minio.conf                              # 含 MinIO 密钥
     deployments/config/cluster.conf                            # 含全部集群密码
 )
 for _p in "${_SECRET_PATHS[@]}"; do

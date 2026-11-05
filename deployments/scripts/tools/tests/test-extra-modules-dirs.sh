@@ -7,7 +7,13 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 LIB_COMMON="${REPO_ROOT}/deployments/scripts/lib-common.sh"
 LIB_MODULE="${REPO_ROOT}/deployments/scripts/lib-module.sh"
-TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+TMP="$(mktemp -d)"
+_cleanup_merged() {
+    find "${REPO_ROOT}/deployments/scripts" -maxdepth 1 -type d \
+        -name '.modules-merged.*' -exec rm -rf {} + 2>/dev/null || true
+}
+trap '_cleanup_merged; rm -rf "${TMP}"' EXIT
+_cleanup_merged
 fail=0
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: expected[$2] actual[$3]"; fail=1; fi; }
 chk_not() { if [ "$2" != "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: unexpected[$3]"; fail=1; fi; }
@@ -51,7 +57,7 @@ chk_not "extra phase dir discovers module" "-1" "${out}"
 
 # Duplicate file name must fail during merge.
 mkdir -p "${TMP}/dupfile/03_addon"
-cat > "${TMP}/dupfile/03_addon/25_cubestack_operator.sh" <<'EOF'
+cat > "${TMP}/dupfile/03_addon/02_ceph.sh" <<'EOF'
 #!/bin/bash
 # MODULE: dup_file
 # DESC: duplicate file

@@ -1,14 +1,14 @@
 #!/bin/bash
 # ============================================================
 # MODULE: model_images
-# DESC: 模型推理镜像(sglang / vllm-metax, 来源 suanova/model-collection 仓库)离线 tar → 集群内置 registry(排在 dev_lab 之后; 默认 push, config-digest 幂等 + 层/镜像并行)
+# DESC: 模型推理镜像(sglang / vllm-metax, 由外部版本树提供)离线 tar → 集群内置 registry(排在 dev_lab 之后; 默认 push, config-digest 幂等 + 层/镜像并行)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: MODEL_IMAGES_ENABLED
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
-#   · 镜像集 = offline-files/model-collection/image-list.tsv(单一事实源; 3 件 ≈33G:
+#   · 镜像集 = 版本树的 offline-files/model-collection/image-list.tsv(由打包流程生成; 3 件 ≈33G:
 #     suanova/sglang ×2(0.5.14 py312 主版本 + v0.5.12-glm5-rc4 py310) + suanova/vllm-metax ×1(0.27.0 py312);
 #     2026-10-29 sglang 更新, vllm 不变)。
 #   · 离线 tar: deployments/offline-files/model-collection/{sglang,vllm}/(子目录; .tar 与 .tar.gz 均可);
@@ -48,11 +48,11 @@ REG_BASE="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT:-5000}"
 say "模型推理镜像 → 集群内置 registry(源 ${SAVE_DIR})..."
 if [ ! -d "${SAVE_DIR}" ]; then
     warn "离线目录不存在: ${SAVE_DIR}"
-    warn "  备料: 联网机 docker pull/save(见 ${SAVE_DIR}/README.md), 或经 Harbor→MinIO 保鲜管道同步"
+    warn "  请检查版本树是否包含 offline-files/model-collection/(由外部打包流程物化)"
     exit 0
 fi
 if [ ! -f "${LIST}" ]; then
-    warn "镜像清单缺失: ${LIST}(跳过; 见目录 README)"
+    warn "镜像清单缺失: ${LIST}(跳过; 请检查版本树的 image-list.tsv)"
     exit 0
 fi
 

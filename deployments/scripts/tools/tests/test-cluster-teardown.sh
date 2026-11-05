@@ -1,14 +1,12 @@
 #!/bin/bash
 # 桩式测试: 优雅覆盖链路 —— ① 登记合并(纯函数) ② 登记写回(假 SSH) ③ 引擎拆序/降级/离线 dry-run(Task 9 扩展)
 #   ④ 引擎 --uninstall 离线 dry-run ⑤ 消费者停机↔恢复契约(注解标记驱动, 2026-10-13 CodeRabbit 修订)
-#   ⑥ cubestack_operator 卸载 CR 终结门(源模块直跑 + 假 SSH/helm shim; 2026-10-13 CodeRabbit 修订)
 #   ⑦ deploy-cluster 异常退出兜底接线(静态围栏; 2026-10-13 CodeRabbit 修订)
 # 隔离手段(与 test-sync-api-entry.sh 同风格):
 #   ① CLUSTER_CONF 指向临时配置(load_config 只读它, 不碰真 cluster.conf)
 #   ② init_remote_kubectl 之后用假 SSH 覆盖(记录调用; get cm → $FAKE_CM; apply -f - → 存 $FAKE_APPLY)
 #   ③ 引擎用 CUBESTACK_TEARDOWN_TEST_INVENTORY 夹具 JSON 走离线路径(不连任何集群)
 #   ⑤ 假 deploy/rs 状态机(FAKE_DEPLOY_REPLICAS=对象存在+副本数; FAKE_DEPLOY_ANNO=登记注解)
-#   ⑥ 假 csc/CRD 清单(FAKE_CSC_LIST/FAKE_CSC_NOW/FAKE_CRD_LIST) + PATH 裸 ssh 桩(sync_kubeconfig 下载失败 → helm 步确定性跳过)
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 ENGINE="${REPO_ROOT}/deployments/scripts/tools/k8s/cluster-teardown.sh"
@@ -51,13 +49,6 @@ libfn() {  # libfn <表达式>
                 *"annotate "*)
                     printf '%s' "$(printf '%s\n' "$*" | sed -E 's/.*pre-stop-replicas=([0-9]+).*/\1/')" > "${FAKE_DEPLOY_ANNO:-/dev/null}"
                     return 0 ;;
-                # ⑥ 用: 假 csc/CRD 清单(文件内容; 文件缺失=空输出)
-                *"get csc -o name"*) cat "${FAKE_CSC_LIST:-/nonexistent}" 2>/dev/null; return 0 ;;
-                *"get csc --no-headers"*) cat "${FAKE_CSC_NOW:-/nonexistent}" 2>/dev/null; return 0 ;;
-                *"get crd -o name"*) cat "${FAKE_CRD_LIST:-/nonexistent}" 2>/dev/null; return 0 ;;
-                # ⑥e 用: CRD 下的残留 CR 清单(JSON); CRD 存在性检查默认返回"已删除"
-                *" -A -o json"*) cat "${FAKE_CR_JSON:-/nonexistent}" 2>/dev/null; return 0 ;;
-                *"get crd "*) [ "${FAKE_CRD_STUCK:-0}" = "1" ] && return 0 || return 1 ;;
             esac
             return 0
         }
@@ -110,19 +101,19 @@ cat > "${INV}" <<'EOF'
  {"key":"k8s_registry","seq":2,"status":"done"},
  {"key":"ceph","seq":3,"status":"done"},
  {"key":"multus","seq":5,"status":"done"},
- {"key":"cubestack_operator","seq":9,"status":"done"}
+ {"key":"nvidia_gpu_operator","seq":9,"status":"done"}
 ]}
 EOF
 ORDER="$(CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_TEARDOWN_TEST_INVENTORY="${INV}" bash "${ENGINE}" --list --raw 2>/dev/null)"
 chk "③ ceph 压轴(最后一行)" "ceph" "$(printf '%s\n' "${ORDER}" | tail -1 | cut -f1)"
-chk "③ 登记 seq 降序生效(operator 在 ceph 前)" "cubestack_operator" "$(printf '%s\n' "${ORDER}" | sed -n '1p' | cut -f1)"
+chk "③ 登记 seq 降序生效(nvidia_gpu_operator 在 ceph 前)" "nvidia_gpu_operator" "$(printf '%s\n' "${ORDER}" | sed -n '1p' | cut -f1)"
 chk "③ 登记 seq 降序判别(multus seq5 先于 registry seq2)" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
   { n++; if ($1=="multus") a=n; if ($1=="k8s_registry") b=n }
   END { print (a>0 && b>0 && a<b) ? 1 : 0 }')"
 chk "③ metallb 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'metallb')"
 chk "③ ceph_csi 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'ceph_csi')"
 chk "③ 探测降级组(netshoot)在登记组之后" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
-  { n++; if ($1=="cubestack_operator") a=n; if ($1=="netshoot") b=n }
+  { n++; if ($1=="nvidia_gpu_operator") a=n; if ($1=="netshoot") b=n }
   END { print (a>0 && b>0 && b>a) ? 1 : 0 }')"
 chk "③ netshoot 来源=probe" "probe" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '$1=="netshoot"{print $2}')"
 
@@ -285,96 +276,6 @@ FAKE_DEPLOY_REPLICAS="${DREP}" FAKE_DEPLOY_ANNO="${DANNO}" FAKE_LOG="${DLOG}" \
     libfn 'stop_restore_known_consumers' >/dev/null
 chk "⑤o 整组恢复: operator 按标记恢复(=3)" "1" "$(grep -c 'scale deploy cubestack-operator --replicas=3' "${DLOG}")"
 chk "⑤o 整组恢复: registry 无标记自动跳过" "0" "$(grep -c 'scale rs registry' "${DLOG}")"
-
-echo "== ⑥ cubestack_operator 卸载: CR 终结门(2026-10-13 CodeRabbit; 不收敛跳过 ns 强制清理) =="
-# 源模块直跑(假 SSH): 等 CR 终结门(非 Pod 计数); CR 残留则跳过 ns finalizer 清除/强制删 ns/
-# CRD 清理 + 非 0 退出(引擎不标 uninstalled)。
-# ⚠ 模块会重新 source lib-common(桩函数会被覆盖), 故 sync_kubeconfig 用**裸 ssh 桩**隔离:
-#   ssh shim 空输出 → admin.conf 下载失败 → ② helm 步确定性跳过(不依赖本机 helm, 不触真集群)。
-MOD25="${REPO_ROOT}/deployments/scripts/modules/03_addon/25_cubestack_operator.sh"
-CSHIM="${TMP}/shim"; mkdir -p "${CSHIM}"
-cat > "${CSHIM}/ssh" <<'EOF'
-#!/bin/bash
-exit 0
-EOF
-chmod +x "${CSHIM}/ssh"
-printf '1' > "${DREP}"     # get deploy 走 ⑤ 假臂 = 对象存在(⑤f 曾删除该文件)
-printf '%s\n' 'clusterstackcluster.cubestack.io/cluster' > "${TMP}/csc_list"
-: > "${TMP}/csc_now"       # 空 = 已终结
-printf '%s\n' 'customresourcedefinition.apiextensions.k8s.io/clusterstackclusters.cubestack.io' > "${TMP}/crd_list"
-# ⑥e: CRD 下残留 CR(带 finalizer) → 卸载助手必须先摘 finalizer 再删 CRD
-printf '%s' '{"items":[{"metadata":{"namespace":"default","name":"test"}}]}' > "${TMP}/cr_json"
-# ⑥a 成功路径: CR 终结门通过 → ns/CRD 清理全执行
-: > "${DLOG}"
-CUBESTACK_MODULE_ACTION=uninstall FAKE_LOG="${DLOG}" FAKE_DEPLOY_REPLICAS="${DREP}" \
-  FAKE_CSC_LIST="${TMP}/csc_list" FAKE_CSC_NOW="${TMP}/csc_now" FAKE_CRD_LIST="${TMP}/crd_list" \
-  FAKE_CR_JSON="${TMP}/cr_json" \
-  PATH="${CSHIM}:${PATH}" CUBESTACK_OPERATOR_CR_WAIT_SECONDS=10 \
-  CUBESTACK_OPERATOR_CRD_CLEANUP_WAIT_SECONDS=1 \
-    libfn "source \"${MOD25}\"" >/dev/null 2>&1
-_rcA=$?
-chk "⑥a 成功路径退出 0" "0" "${_rcA}"
-chk "⑥a 删除 CR" "1" "$(grep -c 'delete clusterstackcluster.cubestack.io/cluster' "${DLOG}")"
-chk "⑥a ns finalizer 清除 + 强制删 ns 已执行" "2" "$(grep -cE 'patch ns .*finalizers|delete ns ' "${DLOG}")"
-chk "⑥a CRD 清理已执行" "1" "$(grep -cE 'delete (crd|customresourcedefinition)' "${DLOG}")"
-chk "⑥e 残留 CR finalizer 已摘(patch metadata.finalizers=null)" "1" \
-    "$(grep -c 'n default patch clusterstackclusters.cubestack.io test ' "${DLOG}")"
-# ⑥b 残留路径: CR 始终不消失 → 提前退出(保留 operator, 不 helm uninstall)+ 跳过破坏性清理
-: > "${DLOG}"
-_out6b="$(CUBESTACK_MODULE_ACTION=uninstall FAKE_LOG="${DLOG}" FAKE_DEPLOY_REPLICAS="${DREP}" \
-  FAKE_CSC_LIST="${TMP}/csc_list" FAKE_CSC_NOW="${TMP}/csc_list" FAKE_CRD_LIST="${TMP}/crd_list" \
-  PATH="${CSHIM}:${PATH}" CUBESTACK_OPERATOR_CR_WAIT_SECONDS=10 \
-  CUBESTACK_OPERATOR_CRD_CLEANUP_WAIT_SECONDS=1 \
-    libfn "source \"${MOD25}\"" 2>&1)"
-_rcB=$?
-chk "⑥b CR 残留 → 非 0 退出(引擎不标 uninstalled)" "1" "${_rcB}"
-chk "⑥b 保留 operator(提前退出, 声明跳过 helm uninstall)" "1" "$(printf '%s' "${_out6b}" | grep -c '跳过 helm uninstall' || true)"
-chk "⑥b 跳过 ns finalizer 清除" "0" "$(grep -c 'finalizers' "${DLOG}")"
-chk "⑥b 跳过强制删 ns" "0" "$(grep -cE 'delete ns ' "${DLOG}")"
-chk "⑥b 跳过 CRD 清理" "0" "$(grep -c 'delete customresourcedefinition' "${DLOG}")"
-# ⑥c 静态围栏: 旧 Pod 计数判据(_nleft)已移除; 等待门先于 helm uninstall(源码序); 等待门钩子在位
-chk "⑥c 旧 Pod 计数判据已移除(_nleft)" "0" "$(grep -c '_nleft' "${MOD25}")"
-chk "⑥c CR 等待门先于 helm uninstall(源码序; 先杀 operator 必卡死 finalizer)" "1" "$(awk '
-  /等待 CR 终结/ { w=NR } /helm uninstall .*--timeout/ { h=NR } END { print (w>0 && h>0 && w<h) ? 1 : 0 }' "${MOD25}")"
-chk "⑥c CR 残留门先于 helm uninstall(源码序; 残留=保留 operator)" "1" "$(awk '
-  /CR_STUCK/ && /then/ { g=NR } /helm uninstall .*--timeout/ { h=NR }
-  END { print (g>0 && h>0 && g<h) ? 1 : 0 }' "${MOD25}")"
-chk "⑥c CR 等待门钩子在位" "1" "$(grep -c 'CUBESTACK_OPERATOR_CR_WAIT_SECONDS' "${MOD25}" | awk '{print ($1>=2)?1:0}')"
-# ⑥d 2026-10-19 实机: cuberouter 的 RedisReplication finalizer 在 redis-operator 随命名空间
-#   退出后无人执行 → ns 永久 Terminating → 下一轮 --fresh 无法重建。CSC 级联后必须兜底。
-chk "⑥d 级联后清理卡死 Terminating 平台命名空间(定义+调用)" "1" \
-    "$(grep -cF 'cleanup_stuck_managed_namespaces' "${MOD25}" | awk '{print ($1>=2)?1:0}')"
-chk "⑥d 只处理 managed-by=cubestack-operator 的命名空间" "1" \
-    "$(grep -cF 'cubestack.io/managed-by=cubestack-operator' "${MOD25}" | awk '{print ($1>=1)?1:0}')"
-chk "⑥d 只处理已 Terminating(deletionTimestamp 非空)" "1" \
-    "$(grep -cF 'case "${_dt}" in ""|null) continue' "${MOD25}")"
-chk "⑥d 清理钩子在 CR 终结门之后、helm uninstall 之前" "1" \
-    "$(awk '/if \[ "\$\{_CR_STUCK\}" = "1" \]/{g=NR} /cleanup_stuck_managed_namespaces$/{c=NR} /helm uninstall .*--timeout/{h=NR} END { print (g>0 && c>g && h>c) ? 1 : 0 }' "${MOD25}")"
-
-# ⑥e/⑥f 2026-10-23 C 集群实机: 组件控制器先被删后, CRD 下的残留 CR finalizer 会把
-#   `kubectl delete crd` 永久卡在 customresourcecleanup 上。卸载必须:
-#   ① 先摘 CR finalizer ② 有界等待(默认 60s) ③ 超时摘 CRD finalizer 兜底。
-chk "⑥f 共享助手定义在 lib-common" "1" \
-    "$(grep -c '^delete_crd_with_finalizer_cleanup() {' "${REPO_ROOT}/deployments/scripts/lib-common.sh")"
-chk "⑥f 模块调用共享助手(不再裸删 CRD)" "1" \
-    "$(grep -c 'delete_crd_with_finalizer_cleanup "${_crd}"' "${MOD25}")"
-chk "⑥f 有界等待可配置且默认 60s" "1" \
-    "$(grep -c 'CUBESTACK_OPERATOR_CRD_CLEANUP_WAIT_SECONDS:-60' "${MOD25}")"
-chk "⑥f 助手超时兜底摘 CRD finalizer" "1" \
-    "$(grep -c 'patch crd .* --type=merge' "${REPO_ROOT}/deployments/scripts/lib-common.sh" | awk '{print ($1>=1)?1:0}')"
-chk "⑥f 助手内 SSH 不吞 stdin(< /dev/null)" "1" \
-    "$(awk '/^delete_crd_with_finalizer_cleanup\(\) \{/,/^\}$/' "${REPO_ROOT}/deployments/scripts/lib-common.sh" \
-        | grep -c '< /dev/null' | awk '{print ($1>=6)?1:0}')"
-# ⑥g 功能验证: CRD 始终不消失(残留 CR 拖住) → 有界等待后必须摘 CRD 自身 finalizer 兜底
-: > "${DLOG}"
-CUBESTACK_MODULE_ACTION=uninstall FAKE_LOG="${DLOG}" FAKE_DEPLOY_REPLICAS="${DREP}" \
-  FAKE_CSC_LIST="${TMP}/csc_list" FAKE_CSC_NOW="${TMP}/csc_now" FAKE_CRD_LIST="${TMP}/crd_list" \
-  FAKE_CR_JSON="${TMP}/cr_json" FAKE_CRD_STUCK=1 \
-  PATH="${CSHIM}:${PATH}" CUBESTACK_OPERATOR_CR_WAIT_SECONDS=10 \
-  CUBESTACK_OPERATOR_CRD_CLEANUP_WAIT_SECONDS=1 \
-    libfn "source \"${MOD25}\"" >/dev/null 2>&1
-chk "⑥g CRD 卡住 → 超时摘 CRD finalizer 强制清理" "1" \
-    "$(grep -c 'patch crd clusterstackclusters.cubestack.io --type=merge' "${DLOG}")"
 
 echo "== ⑦ deploy-cluster 异常退出兜底(2026-10-13 CodeRabbit; 消费者不停在 0) =="
 # 失败/中断路径: EXIT 钩子(仅非 0 退出 + 计划含 ceph/k8s_deploy)按停机标记契约整组恢复;

@@ -406,7 +406,7 @@ cat <<EOF
      - 本次核验用的 k8s 钉子 = ${K8S_REQ}(来源: ${K8S_FROM})${K8S_HINT}
      - check-modules 的版本一致性断言(⑯)落地后会自动报差异
   2) 渲染器对拍(SOP 8): 自持 manifest 渲染器 vs 新树模板(kube-vip 等)
-  3) 离线缺口(SOP 8): images.manifest 新镜像 / offline-files 备料(k8s_deploy 前必须补齐)
+  3) 离线缺口(SOP 8): 版本树 offline-files/ 备料(k8s_deploy 前必须补齐)
   4) 回归(SOP 8): 静态检查 + 补丁 --check + 树 diff + 实机
      - 树 diff:  diff -rq --no-dereference ${TREE} ${TREE_SRC}     # --no-dereference: 树内相对符号链接(指向 inventory/)不跟着展开
        (预期只剩: ${N_PATCH} 个补丁的目标文件(清单见 cubestack-patches/README.md)+ 保留的 inventory/local + 剔除的顶层点文件)

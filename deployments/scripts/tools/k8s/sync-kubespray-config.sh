@@ -416,7 +416,7 @@ fi
 # ---------------- 3.2 写入 k8s 基座版本钉子(group_vars/all/k8s-versions.yml) ----------------
 # 为什么必须**落盘**(2026-09-28 评审 Critical): cluster.conf 的"k8s 基座组"(K8S_VERSION / PAUSE /
 #   COREDNS / DNS_NODE_CACHE / METRICS_SERVER / CPA / ETCD / CALICO)是**离线制品的唯一真值来源**
-#   (离线 tar / Harbor 同步 / images.manifest 直接以 ${VAR} 引用), 但 kubespray 消费的是**它自己的
+#   (离线 tar / 版本树), 但 kubespray 消费的是**它自己的
 #   变量名**(kube_version / coredns_version / …)。在此之前全仓**没有任何写入者** → 部署取**树内默认**
 #   (v2.32 树 ansible 实测 kube_version=1.36.4 / coredns=1.14.2 / pod_infra=3.10.2), 与我们钉的
 #   1.35 线离线 tar **不是同一套** → download/validate 阶段**响亮失败**。此处把钉子落盘, 让
@@ -441,7 +441,7 @@ _vpin_line() {   # <cluster.conf 里的钉子变量名> <kubespray 变量名>
         # 停住。这里**不能 warn 后跳过写该键**: 那正好重犯本次要修的静默错版缺陷。
         err "cluster.conf 未声明 ${1} → 无法写出 kubespray 变量 ${2}"
         err "  这份 cluster.conf 落后于 deployments/config/cluster.conf.example 的\"镜像版本\"节"
-        err "  (缺钉子 = 部署会按树内默认解析版本, 与离线 tar / images.manifest 不是一套)"
+        err "  (缺钉子 = 部署会按树内默认解析版本, 与离线 tar / 版本树不是一套)"
         err "  修法: 从 cluster.conf.example 补齐 ${1} 的声明后重跑本脚本"
         exit 1
     fi

@@ -350,11 +350,9 @@ cubestack-installer/
 cp config/cluster.conf.example config/cluster.conf
 vim config/cluster.conf          # 修改 NODES 里的 IP 等信息
 
-# 离线文件缺失时,先从 MinIO 拉取(需先配置 mc alias 指向 MinIO)
-mc alias set minio http://<minio-host>:9000 admin CHANGE_ME    # CHANGE_ME 替换为真实 MinIO SecretKey
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh            # 默认下载部署必需子目录(排除 virtual-machine)
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub virtual-machine   # 仅创建虚拟机时按需拉 VM 镜像
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --all      # 真正全量(含 virtual-machine)
+# 版本树(离线文件)由外部打包流程物化, 见 docs/release-management.md:
+#   · 把版本树的 offline-files/ 挂到 deployments/offline-files, 或
+#   · 指定版本树根: --release 2.1.0 / CUBESTACK_RELEASE_ROOT=<root>
 
 # 全流程部署(默认 = 装全部组件 + kubespray 离线安装 + cluster.conf 中启用的 operator)
 sudo ./deployments/scripts/deploy-cluster.sh                          # 默认 = --with-cubestack(全量)
@@ -411,39 +409,30 @@ sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build     # 生�
 sudo ./deployments/scripts/tools/docker/build-cli-context.sh --push      # 生成 + 构建 + 推送 Harbor
 ```
 
-**第 0 步: 获取离线文件(缺失时)**
+**第 0 步: 准备版本树(离线文件)**
 
-离线镜像/二进制不入镜像,需先下载到磁盘。脚本默认下载到 `/opt/cubestack-installer/deployments/offline-files`(容器内执行即落到挂载的 offline-files,即装即用),并默认开启**磁盘空间检查**(醒目提示至少 50GiB 空闲,不足则中止);宿主机想用大磁盘时加 `--auto` 自动挑空闲 ≥ 门槛的最大挂载点:
+离线镜像/二进制不入镜像, 由外部打包流程物化成一个版本树(见 `docs/release-management.md`):
 
-```bash
-sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh            # 默认: 下载部署必需子目录(排除 virtual-machine)
-sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub virtual-machine  # 按需拉 VM 镜像(仅创建虚拟机时)
-sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --all      # 真正全量(含 virtual-machine)
-sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub kubespray   # 只拉某子目录(如 kubespray)
-sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --auto      # 宿主机: 自动挑空闲 ≥ 50GiB 的最大磁盘
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --list           # 查看 MinIO 可用目录
+```text
+<root>/<version>/
+  cubestack-installer-cli.tar
+  modules/                 # 私有平台模块
+  offline-files/           # 镜像/chart tar + release.env + SHA256SUMS
 ```
 
-下载完成后:容器内执行可直接开始部署;宿主机下载到 `<下载目录>` 后,下方挂载命令把 `deployments/offline-files` 换成 `<下载目录>` 即可(脚本结束时会直接打印完整命令)。
-
-**离线文件管理(源机器同步/清理, 可选)**
-
-离线文件仓库侧(制作/维护 offline-files 的机器)可把本地清理后的精简文件同步到 MinIO, 供各部署机拉取:
+在宿主机直接部署时:
 
 ```bash
-# ① 先清理本部署不需要的镜像/二进制(只留部署必需, 可 --dry-run 预览)
-sudo ./deployments/scripts/tools/offline/trim-offline-files.sh --dry-run   # 预览将删除项
-sudo ./deployments/scripts/tools/offline/trim-offline-files.sh             # 实际清理
-
-# ② 本地 offline-files → MinIO 增量同步(mc mirror --overwrite, 只传新增/变更)
-./deployments/scripts/tools/offline/sync-to-minio.sh                       # 增量同步
-./deployments/scripts/tools/offline/sync-to-minio.sh --prune               # 同步 + 删除远端多余文件(与本地严格一致, 慎用)
-./deployments/scripts/tools/offline/sync-to-minio.sh --dry-run             # 仅预览
-
-# ③ 部署机拉取: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh
+sudo ./deployments/scripts/deploy-cluster.sh --release 2.1.0
+# 或把版本树的 offline-files/ 挂到 deployments/offline-files(自动识别 release.env)
 ```
 
-> 定位: `fetch-offline-from-minio.sh`(拉取)+ `sync-to-minio.sh`(推送)+ `trim-offline-files.sh`(清理)构成离线文件闭环 —— MinIO 侧只存部署必需文件, 部署机默认只拉部署必需子目录(虚拟镜像按需)。
+容器化部署时把版本树挂进容器(见下方 docker run):
+
+```bash
+-v <root>/2.1.0/offline-files:/opt/cubestack-installer/deployments/offline-files
+-v <root>/2.1.0/modules:/opt/cubestack-installer/modules
+```
 
 **方式一: 交互式(推荐)**
 

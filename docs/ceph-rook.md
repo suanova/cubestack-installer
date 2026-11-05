@@ -36,14 +36,13 @@
 | 物料 | 工具 | 落到 |
 |---|---|---|
 | Rook manifests(crds/common/csi-operator/operator/toolbox) | `tools/k8s/rook-fetch-manifests.sh`(ROOK_VERSION=v1.20.2) | `deployments/cubestack-addon/rook/` |
-| Ceph 镜像 tar(13 个) | `tools/images/ceph-save-images.sh` | `deployments/offline-files/kubespray/images/`(与 kubespray 镜像同目录, 不再用独立 offline-files/ceph) |
+| Ceph 镜像 tar(13 个) | 版本树 / `container-image-mirror` 同步 Harbor | `offline-files/kubespray/<版本>/images/`(与 kubespray 镜像同目录) |
 | lvm2 + 依赖 `.deb` | `tools/offline/fetch-lvm-packages.sh` | `deployments/offline-files/kubespray/packages/`(✅ 已就绪: 11 个 lvm 家族 .deb) |
 | VM 数据盘 | `vm-nodes.conf` 的 `VM_DATA_DISKS=3`/`VM_DATA_DISK_SIZE=200` | 每台 VM 附加 3×200GB 裸盘(Guest: `/dev/vdb~vdX`) |
 
 ```
 # 联网机一次性:
 sudo ./deployments/scripts/tools/k8s/rook-fetch-manifests.sh
-sudo ./deployments/scripts/tools/images/ceph-save-images.sh      # 默认输出仓库内 offline-files/kubespray/images(与 k8s 镜像同目录); 独立拷到联网机任意目录也可运行
 sudo ./deployments/scripts/tools/offline/fetch-lvm-packages.sh   # ⚠ 必须先于 ceph 部署: 生成 lvm2 全家桶 .deb
 ```
 
@@ -76,7 +75,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps ceph,ceph_csi
 `02_ceph.sh` 流程: ① 确定存储节点(ceph_storage_hosts: CEPH_NODES 显式 > CEPH_NODE_ROLE, 默认 master) ② 逐节点自动检测裸盘
 ③ **红底确认 + sleep CEPH_CONFIRM_SLEEP(60s)** double-check 节点与盘名
 ④ 节点准备(modprobe rbd 持久化 + lvm2 离线安装 + 打 label `ceph-storage=rook-ceph`)
-⑤ `ceph-sync-images.sh` 同步镜像到存储节点并 `ctr import`
+⑤ 把版本树里的镜像 tar 同步到存储节点并 `ctr import`
 ⑥ apply rook crds/common/csi-operator/operator, 等 operator Ready
 ⑦ 生成 CephCluster CR(mon=3 / mgr=2, storage.nodes[].devices=检测盘, mon·osd·**mgr** 各自按
    label 钉存储节点)并 apply, 等 `cephcluster phase=Ready` + `ceph -s HEALTH_OK`(最长 900s)
@@ -542,7 +541,7 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 
 - OSD 一直 Prepare/CrashLoop: 裸盘残留文件系统签名 → wipefs/sgdisk 清理; 或 lvm2 缺失(重启后逻辑卷无法激活)。
 - 镜像 ImagePullBackOff: 未 ctr import 或 import 多架构 tar 报 digest → 用 `--platform linux/amd64` 单架构 + `--no-unpack`;
-  或 tar 残缺(如 quay.io/ceph/ceph:v20.2.2 仅 7.6KB 的 index-only 产物)→ 删掉该 tar 重跑 ceph-save-images.sh(已自动校验 <10MB 判残)。
+  或 tar 残缺(如 quay.io/ceph/ceph:v20.2.2 仅 7.6KB 的 index-only 产物)→ 重新物化版本树(打包侧会校验 tar 完整性)。
 - HEALTH_WARN clock skew: 存储节点时钟 → chrony 对齐(仓库 NTP 模块)。
 - registry PVC Pending: 等 `ceph-block` SC 由 03_ceph_csi 创建后自动绑定。
 - mon/osd 未调度到目标节点: 检查节点 label `ceph-storage=rook-ceph` 与 CEPH_NODES。
@@ -552,7 +551,6 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 `deployments/cubestack-addon/rook/`(manifests + CUBESTACK.md)、`02_ceph.sh`、`03_ceph_csi.sh`、
 `tools/k8s/ceph-detect-disks.sh`、`tools/k8s/ceph-disk-classify.py`(分类判定唯一实现)、
 `tools/k8s/ceph-cleanup.sh`(`--list`/`--wipe-disks`/`--all`/`--wipe-node`)、
-`tools/images/ceph-save-images.sh`、`tools/images/ceph-sync-images.sh`、
 `tools/offline/fetch-lvm-packages.sh`、`tools/k8s/rook-fetch-manifests.sh`、cluster.conf `CEPH_*` 配置段、
 `patch-playbooks/install-packages.yml`(lvm2 离线安装, cubestack-offline.sh 自动挂载)。
 

@@ -262,7 +262,7 @@ cmd_new() {   # new <标签> --from-root DIR [--local] [--assets-from DIR] [--k8
         cp -a "${assets_from}"/. "${d}"/
     fi
     ok "版本目录已产出: ${d}"
-    [ "${local_only}" = "1" ] && warn "本地临时版本(LOCAL_ONLY): 不会进 git、不会被 sync-to-minio 上传"
+    [ "${local_only}" = "1" ] && warn "本地临时版本(LOCAL_ONLY): 不会进 git、不会进入发布包"
     say "下一步: $0 verify ${v}    # 校验(树指纹/档案/images)"
 }
 

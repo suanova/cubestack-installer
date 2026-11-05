@@ -699,7 +699,7 @@ grep METAX_DRIVER_DEPLOY_POLICY config/cluster.conf
 |---|---|---|
 | OSD Prepare 失败 / osd Pod CrashLoop | 裸盘残留文件系统/LVM/分区签名, Rook 视为"已使用" | 只在**确认空闲的数据盘**上清盘: `wipefs --all -f /dev/<盘>; sgdisk --zap-all /dev/<盘>; rm -rf /var/lib/rook`; 勿碰系统盘(先 `lsblk` 核对) |
 | 节点重启后 OSD 逻辑卷无法激活 | **lvm2 未安装**(Rook OSD 依赖 lvm 激活 LVM 卷) | 离线包放入 `offline-files/kubespray/packages`(联网机 `tools/offline/fetch-lvm-packages.sh`)后 `dpkg -i`; 或 apt 安装 lvm2 后重启 OSD |
-| ceph 镜像 ImagePullBackOff | 节点 containerd 无镜像(离线) | `tools/images/ceph-save-images.sh`(联网机, `--platform linux/amd64` 单架构)生成 tar → `ceph-sync-images.sh` 同步并 `ctr -n k8s.io images import --no-unpack` |
+| ceph 镜像 ImagePullBackOff | 节点 containerd 无镜像(离线) | 检查版本树 `offline-files/kubespray/<版本>/images/`; 模块会把单架构 tar 同步到节点并 `ctr -n k8s.io images import --no-unpack` |
 | ctr import 报 "content digest not found" | 多架构(manifest-list)tar | 拉取用 `--platform linux/amd64` 单架构; import 加 `--no-unpack` |
 | `ceph -s` HEALTH_WARN clock skew | 存储节点时钟漂移(离线无上游) | 部署前 NTP 模块对齐; 生产存储节点用 chrony, `chronyc makestep`, offset<20ms |
 | registry PVC 一直 Pending | `REGISTRY_STORAGE_CLASS=ceph-block` 但 `ceph-block` SC 未创建 | 先部署 ceph_csi 模块(建 rbd-pool + SC); PVC 会自动绑定; 老 PVC 删除后 registry 重建即切换 |
@@ -1298,7 +1298,6 @@ kubectl -n cubestack-system get deploy cubestack-operator \
   -o jsonpath='{.spec.template.metadata.annotations}{"\n"}'
 kubectl -n cubestack-system get pods -o wide
 # 更新镜像/ chart 后重跑 --steps, Pod AGE 应变化; 内容未变则 digest 注解不变、不重启
-bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
 ```
 详见 `docs/cubestack-operator.md` §1.1 / §3.6。
 
@@ -1312,7 +1311,7 @@ bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
 - 但主 CR `kubectl -n cubestack-system get csc cubestack` 的 `status.components` 仍显示 `lws=Ready`。
 
 **根因(逐项证据)**
-1. `26_verify_cubestack_operator.sh` 的冒烟 CR 只写了 `deletePolicy: uninstall`, **省略了
+1. 平台 operator 验证模块的冒烟 CR 只写了 `deletePolicy: uninstall`, **省略了
    `spec.components`**。operator 对省略的组件会继承 catalog/chart 默认值; 新版 chart 默认启用
    `lws/envoyGateway/...` ⇒ 冒烟 CR 实际管理了真实组件;
 2. 验证结束 trap 删除冒烟 CR, `deletePolicy=uninstall` 触发组件卸载; operator 日志明确:
@@ -1326,7 +1325,7 @@ bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
   并把 `deletePolicy` 改为 **`retain`**(双保险; CRD 默认也是 retain);
 - 清理前增加护栏: 读取冒烟 CR 的 `spec.components`, 只要发现任何 `enabled: true` 就中止,
   不执行卸载路径;
-- `test-cubestack-operator-update.sh` 增加静态断言(不能出现 `deletePolicy: uninstall`、
+- 平台 operator 回归测试增加静态断言(不能出现 `deletePolicy: uninstall`、
   每个组件 key 必须在冒烟 CR 中显式禁用)。
 
 **恢复被误删的组件**(脚本修复后)
@@ -1342,8 +1341,7 @@ kubectl -n cubestack-system get csc cubestack \
   -o jsonpath='{range .status.components[?(@.name=="lws")]}{.phase}{end}'
 ```
 **验证**: 重新执行 `--steps verify_cubestack_operator`; 结束后 `lws-system` 的 SA/CM/Secret
-必须仍在, Pod 仍 Running, 冒烟 CR 已被清理。回归:
-`bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh`。
+必须仍在, Pod 仍 Running, 冒烟 CR 已被清理。
 
 ### 12. 【2026-10-22】`SERVICE_EXPOSE_MODE=nodeport` 但 Envoy Gateway 公网 Service 仍是 `LoadBalancer/<pending>`, Web UI 打印私有 ClusterIP
 
@@ -1365,7 +1363,7 @@ CubeStack Web UI (MetalLB): http://10.233.54.28/
    于是把私有网关的 ClusterIP 标成了 "MetalLB"。
 
 **解法(已落地):**
-- `25_cubestack_operator.sh`: 显式把 `SERVICE_EXPOSE_MODE` 写入 CR
+- 平台 operator 模块: 显式把 `SERVICE_EXPOSE_MODE` 写入 CR
   `spec.global.serviceExposeMode`(`nodeport|loadbalancer`), 并对已有 CR 纠偏;
 - operator 就绪后调用 `ensure_envoy_gateway_service_type`(lib-common): 创建/更新
   `EnvoyProxy/cubestack-proxy`(`envoyService.type=NodePort|LoadBalancer`)并挂到公网
@@ -1379,7 +1377,6 @@ CubeStack Web UI (MetalLB): http://10.233.54.28/
 kubectl -n envoy-gateway-system get envoyproxy
 kubectl -n envoy-gateway-system get svc -l gateway.envoyproxy.io/owning-gateway-name=cubestack-gateway
 bash deployments/scripts/tools/tests/test-cubestack-ui-url.sh        # ⑥ 公网 NodePort + 私有 ClusterIP
-bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh # ⑨ serviceExposeMode / Envoy 兜底
 ```
 
 ### 13. 【2026-10-28】单节点 / 无 worker 集群被 node_pool cordon: CoreDNS 滚动或节点重启后永久 Pending
@@ -1582,127 +1579,6 @@ docker exec <容器> rm -f /opt/cubestack-installer/deployments/scripts/modules/
 ```
 同步工具末尾的"容器内静态校验"就是用来拦这个的 —— **报错务必处理, 别当噪音**。
 
-### 3. Harbor 统一镜像源(上游→Harbor→离线 tar)工具链的 5 个坑
-
-**背景:** `docs/harbor-mirror.md` 的统一镜像源工具(`tools/images/harbor-{sync,save}-images.sh`、
-`check-image-manifest.sh`)实现时踩到的坑。都不报"明显错误", 而是**静默失效**, 特此沉淀。
-
-#### 3.1 skopeo 连公开镜像都 fatal: `reading JSON file "/run/containers/<uid>/auth.json": permission denied`
-
-**症状:** 拉公开镜像(无需任何凭据)也失败, 报读不到默认 auth 文件。
-**根因:** skopeo 默认 auth 文件路径是 `${XDG_RUNTIME_DIR}/containers/auth.json`, 未设该变量时
-退到 `/run/containers/<uid>/auth.json` —— **容器内 / 非 root 场景该目录普遍不可读**, skopeo 直接 fatal。
-**解法(根治):** 显式指定自建 auth 文件, 不让 skopeo 猜默认路径:
-```bash
-AUTH=$(mktemp); chmod 600 "$AUTH"; printf '{"auths":{}}' > "$AUTH"
-export REGISTRY_AUTH_FILE="$AUTH"        # 有凭据时写入 {"auths":{"<host>":{"auth":"<base64 u:p>"}}}
-```
-顺带好处: 凭据写文件而非 `--src-creds/--dest-creds`, **不进 argv / 不进 ps / 不进 CI 日志**。
-**验证:** `REGISTRY_AUTH_FILE=$AUTH skopeo inspect docker://registry.k8s.io/pause:3.10` 能返回 digest。
-
-#### 3.2 `skopeo inspect` 报 `unknown flag: --src-tls-verify` 被 2>/dev/null 吞掉 → 幂等静默失效
-
-**症状:** 同步工具每次都全量重传, "digest 未变则跳过"从不生效。
-**根因:** `copy` 与 `inspect` 的 TLS 旗标名**不同**: `copy` 用 `--src-tls-verify`/`--dest-tls-verify`,
-**`inspect` 用 `--tls-verify`(单数)**。传错 → 命令失败 → 被 `2>/dev/null || true` 吞成"取不到 digest"
-→ 退化成"跳过比对直接同步" → 每次全传。
-**解法(根治):** 两套参数**分开维护**(`SKOPEO_SRC_OPTS` vs `INSPECT_SRC_OPTS`)。
-**验证:** 连跑两次 `harbor-sync-images.sh --group rdma`, 第二次必须打印 `digest 未变, 跳过`。
-> 教训: `2>/dev/null` 会把"参数写错"伪装成"环境问题"。关键判据(这里=digest)取空时要有
-> 独立的告警, 不能只当"无数据"处理。
-
-#### 3.3 Harbor 漂移检查把**已存在**的镜像全报"缺失"
-
-**症状:** `check-image-manifest.sh --harbor` 把 63 个镜像全报缺失, 但 Harbor 上确实有。
-**根因:** Harbor API `GET /projects/{p}/repositories/{repo}/artifacts/{ref}` 有两条硬规则:
-① repository 名要**双重 URL 编码**(`/` → `%252F`, 单重 `%2F` 一律 404);
-② 路径里的 repository 名**不含项目前缀**(项目已在路径段里)。
-**解法(根治):**
-```bash
-path="${dst#<host>/<project>/}"; tag="${path##*:}"; repo="${path%:*}"
-enc_repo="$(printf '%s' "$repo" | sed 's#/#%252F#g')"
-curl -u u:p "$API/api/v2.0/projects/<project>/repositories/${enc_repo}/artifacts/${tag}"
-```
-**验证:** 该端点对已存在镜像返回 200, 不存在返回 404。
-
-#### 3.4 离线 tar 的 `RepoTags` 为空 → 模块识别不出 tar 内容
-
-**症状:** 用 skopeo 生成的 tar, `tar -xOf x.tar manifest.json` 看到 `"RepoTags": []`;
-`lib-common.sh` 的 `tar_first_image_tag` 返回空 → 依赖内容匹配的逻辑(multus/rdma 的 tar 识别、
-`ensure_registry_nginx`)全部失效。
-**根因:** `skopeo copy ... docker-archive:<file>` **末尾不带 `:<ref>` 时 skopeo 不写 RepoTags**
-(docker save 会写, 所以老的 tar 都正常)。
-**解法(根治):** 目标写成 `docker-archive:<file>:<上游 ref>`, 且 ref 用**上游 ref**
-(与 docker save 产出一致, 既有模块的通配/内容匹配都不用改)。
-**验证:** `bash -c 'source deployments/scripts/lib-common.sh; tar_first_image_tag <tar>'`
-应打印 `<上游 ref>`, 如 `registry.k8s.io/pause:3.10`(与 tar 名后缀一致)。
-
-#### 3.5 Harbor 项目不存在导致 push 失败(仓库会自动建, 项目不会)
-
-**症状:** `skopeo copy` 推到 `harbor.isuanova.com/mirrors/...` 报项目不存在/未授权。
-**根因:** Harbor 只在首次 push 时自动创建**仓库(repository)**; **项目(project)必须预先存在**,
-且**创建项目需要登录**(匿名建项 401)。
-**解法(根治):** 同步工具先探测项目(HTTP 200?), 不存在则用凭据 POST 创建(公开只读,
-便于部署机匿名拉取); 无凭据时给出明确指引而不是让 push 以一个含糊错误失败。
-**验证:** `curl -u u:p -X POST "$API/api/v2.0/projects" -d '{"project_name":"mirrors","metadata":{"public":"true"}}'`
-返回 201(已存在则 409)。
-
-> 另: Harbor 上 `clquan` **不是 sysadmin**, 但仍可创建项目(实测 201)——
-> 判断"能不能建"要实测, 不要凭 `sysadmin_flag` 推断。
-#### 3.6 CI 登录 Harbor 报 `unauthorized` —— `gh secret set --body -` 把字面量 `-` 存成了密钥值
-
-**症状:** GitHub Actions 工作流在 `docker/login-action` 步骤失败:
-`Error response from daemon: Get "https://harbor.isuanova.com/v2/": unauthorized:`;
-但同一组用户名/密码用 `curl -u` 在本机验证完全正常。
-
-**根因:** 设密钥时用了 `printf '%s' 'EErMChQa123' | gh secret set NAME --body -`。
-`gh secret set` 的 `-b/--body` 是"**直接给出值**", 不是"从 stdin 读"的标记 ——
-传 `-` 会把**字面量 `-`** 存成密钥值。要走 stdin 必须**省略 `--body`**。
-(密钥一旦写入无法读回校验, 所以只能从"登录失败 + 本机 curl 正常"这个矛盾反推出来。)
-
-**解法(根治):**
-```bash
-gh secret set HARBOR_MIRROR_USER     --repo <owner>/<repo>   # ← 不写 --body, 管道喂 stdin
-gh secret set HARBOR_MIRROR_PASSWORD --repo <owner>/<repo>
-```
-**验证:** 重跑工作流, 日志里 `HARBOR_MIRROR_PASSWORD` 显示为 `***` 且登录成功。
-
-> ⚠ **附带教训(本项目实测踩到)**: 凭证自检步骤**不要回显密码长度**。
-> 仓库是 public 时工作流日志公开可见, 长度属可被利用的旁路信息。只回显用户名即可。
-#### 3.7 【已解决】registry.k8s.io/pause:3.10 每次同步都被整包重传(~552 MB / 64s)
-
-**症状:** CI 全量同步里 46/47 命中 `digest 未变, 跳过`, 只有 `registry.k8s.io/pause:3.10`
-每次都被完整重传(实测 08:32:39 → 08:33:43, 约 64 秒; 镜像 552 MB)。
-
-**根因:** `skopeo copy` 在搬运多架构镜像时会**重写 manifest list 的序列化**, 落地 digest
-因此 ≠ 源 digest ⇒ digest 比对永远不相等 ⇒ **每次同步都整包重传**。
-
-**关键证据(如何判定"是重写而非上游变化"):**
-- 源 digest `sha256:ee6521f290b2168b...` 与库 digest `sha256:e9622b01071c38e4...`
-  在连续 3 次运行中**各自稳定、始终不等** —— 上游真换了内容的话, 变化的是**源侧** digest。
-- 对照: 同批的另一个多架构镜像(6 平台 docker manifest list; 当时取的是
-  `quay.io/prometheus/node-exporter:v1.12.1`, 该镜像已随监控栈移除, 此处仅作测量记录)
-  源/库 digest 完全一致、正常跳过 ⇒ **特定镜像触发, 不是所有多架构镜像都这样**。
-
-**解法(根治):** `skopeo copy` 加 `--preserve-digests`(要求原样保留源侧 manifest/list 的
-digest —— 这本就是"镜像"应有的语义)。已落到 `tools/images/harbor-sync-images.sh`。
-
-**验证(⚠ 时机是关键, 第一轮曾据此误判):**
-```bash
-# 库 digest 应变成与源一致(不再是自己重写后的值)
-skopeo inspect --format '{{.Digest}}' docker://harbor.isuanova.com/mirrors/registry.k8s.io/pause:3.10
-#   修复前: sha256:e9622b01071c38e4...   (≠ 源)
-#   修复后: sha256:ee6521f290b2168b...   (= 源) ✅
-# 下一轮全量同步应全部跳过
-#   ✅ 同步完成: 新同步 0 个, digest 未变跳过 47 个, 失败 0 个
-```
-
-> ⚠ **踩坑: 别在"做重传的那一轮"里判断修复有没有生效。**
-> 加旗标后的**第一轮**运行必然仍然打印 `digest 不一致, 重新同步` —— 因为那一轮的 digest 比对
-> 读到的是**加旗标之前落地的旧制品**, 然后才用新旗标重传。必须看**再下一轮**是否变成
-> `digest 未变, 跳过`。本项目第一轮据此把已生效的修复误判为"无效"并写进了文档, 第二轮才纠正。
-
-
 ### 4. 【2026-10-15】覆盖安装 reset 被 Calico 一致性检查拦停: 旧集群网络模式 ≠ 新配置(断言 "Your inventory doesn't match the current cluster configuration")
 
 **症状:** 覆盖安装(先 `reset` 旧集群再全量部署)时, `ansible-playbook reset.yml` 在 preinstall 阶段中断:
@@ -1802,8 +1678,8 @@ bash: line 1: /tmp/ceph-rbd.yaml: Permission denied          ← 03_ceph_csi.sh 
 (节点侧 refresh.sh 副本 + monstore tar 取回后删)/ `sync-ca.sh`(脚本 + CA 临时件)/
 `setup-ntp.sh`(节点脚本三处执行点)/ `deploy-registry.sh`(节点脚本)。原本就"预清+后删"齐备的:
 `install-worker-packages.sh` / `reconcile-node-packages.sh` / verify 系列(21/22/27/30; 22 的预清本次补齐)。
-**例外(有意保留):** `ceph-sync-images.sh` 的 `/tmp/ceph-images/`(镜像 tar + `.done` 断点复用;
-每次运行 `sudo rm -rf && chown` 重建, 跨用户安全); rook-ceph-tools **pod 内** `/tmp`(随 pod 生命周期)。
+**例外(历史):** 已移除的 `ceph-sync-images.sh` 曾使用 `/tmp/ceph-images/`;
+rook-ceph-tools **pod 内** `/tmp` 随 pod 生命周期回收。
 
 **验证(2026-10-15 实机, 已通过):**
 ```bash
@@ -2007,9 +1883,9 @@ ssh <node> "findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,OPTIONS | tail -1"
 - `lib-common.sh` 新增 `ensure_rwo_deployments_recreate <ns> [selector] [wait]`:
   解析 Deployment + PVC, 只把**引用 RWO PVC** 且策略非 Recreate 的 Deployment merge-patch 成
   `strategy: {type: Recreate}`(无 PVC/RWX 的组件不动; 幂等)。
-- `25_cubestack_operator.sh` 的 `[6.5/6]` 在 operator 创建组件后自动执行(等待上界
+- 平台 operator 模块在创建组件后自动执行(等待上界
   `CUBESTACK_OPERATOR_RWO_STRATEGY_WAIT_SECONDS`, 默认 60s)。
-- `cubestack-component-update.sh`(`--steps cubepilot` 等)在 `rollout restart` **之前**执行,
+- 平台组件的 `rollout restart` 之前执行同样的纠正,
   纠正失败会中止滚动(避免把组件滚进 Multi-Attach)。
 - 手工即时修复(本次实机已执行, 旧 Pod 30s 内退出、新 Pod 40s 内 Running):
   ```bash
@@ -2118,7 +1994,7 @@ nodeport 模式的 registry **不监听 domain:5000**(只有 NodePort)，contain
 spec 被 admission 拒绝。helm 可能先把 CR 的 `global.imageRegistry` 改成目标值，所以只看 CR 不够。
 
 **解法(已根治)**
-- `25_cubestack_operator.sh` 在 CR 纠偏阶段检测: CR registry 变化 **或** profile 内任意 `image`
+- 平台 operator 模块在 CR 纠偏阶段检测: CR registry 变化 **或** profile 内任意 `image`
   前缀不属于目标 registry → 删除 `inferenceruntimeprofiles.ai.cubestack.io --all`，
   让 operator 按新 registry 重建；
 - 手工即时恢复:
@@ -2154,72 +2030,6 @@ spec 被 admission 拒绝。helm 可能先把 CR 的 `global.imageRegistry` 改�
   kubectl get clusterpolicy cluster-policy -o yaml | grep repository: | head
   # 期望 registry.cubestack.io:5000/mirrors/nvcr.io/nvidia/...
   ```
-
-### 5. release-2.0 组件刷新: `_REFRESH_PENDING` / tag 不一致 / `_SUCCESS` 缺失
-
-**症状**
-- `fetch --release` 报“发布正在原地刷新(_REFRESH_PENDING)”；
-- `release-sync-images.sh` 报 `dispatch tag != release.env` 或 `source_repo 不匹配`；
-- 刷新失败后 MinIO 上 `<release>/_REFRESH_PENDING` 残留、`offline-files/_SUCCESS` 不存在。
-
-**根因**
-- 组件 dispatch 早于 installer release-2.0 的 `release.env` / `release-images.tsv` 更新；
-- 刷新中断（网络/凭据/磁盘）保留了 marker，`_SUCCESS` 已按设计临时删除。
-
-**解法**
-1. 先更新 `deployments/releases/<release>/release.env` + `release-images.tsv`（同一 tag）；
-2. 用相同 component 重跑（marker 会自动进入恢复模式）：
-   ```bash
-   bash deployments/scripts/tools/images/release-sync-images.sh \
-     --release 2.0.0 --component <same-component>
-   ```
-3. 若 `_SUCCESS` 被手工删除且无 marker，才需要显式 `--recover`：
-   ```bash
-   bash deployments/scripts/tools/images/release-sync-images.sh \
-     --release 2.0.0 --component all --recover
-   ```
-4. 确认：
-   ```bash
-   mc stat minio/cubestack-installer/2.0.0/offline-files/_SUCCESS
-   mc stat minio/cubestack-installer/2.0.0/_REFRESH_PENDING   # 应不存在
-   mc cat  minio/cubestack-installer/2.0.0/offline-files/SHA256SUMS | sha256sum
-   ```
-
-**边界**: marker component/subdirs 与本次不一致时脚本会拒绝（避免半套修复）；必须用覆盖原
-scope 的 component 或 `all` 重跑。刷新期间不要手工删 marker。
-
-### 5b. Harbor 与 MinIO 的 CLI digest 不一致
-
-**症状**
-- `skopeo inspect --raw .../cubestack-installer-cli:v2.0.0-rc2` 的 digest 与
-  MinIO `<release>/_CLI_IMAGE_DIGEST` / `release.json.cli_image_digest` 不同；
-- 离线部署（MinIO tar）与在线部署（Harbor tag）实际跑的是两版 CLI。
-
-**根因**
-- 旧流程 push `release-2.0` 后由 `rebuild-cli-image.yml` 只推 Harbor，CLI tar 曾依赖
-  `sync-release-images.yml` 的 `workflow_run`（该触发已移除，现在同一 job 内同步）；
-  历史上默认分支 main 的监听器缺失/滞后，或同步 workflow 失败时，MinIO 就停在旧 tar。
-
-**解法**
-1. 先确认差异：
-   ```bash
-   skopeo inspect --raw docker://harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2 | sha256sum
-   mc cat minio/cubestack-installer/2.0.0/_CLI_IMAGE_DIGEST; echo
-   mc cat minio/cubestack-installer/2.0.0/offline-files/release.json | jq -r .cli_image_digest
-   ```
-2. 用 Harbor 上的目标镜像重新生成 tar 并 CLI-only 同步（不碰镜像/chart）：
-   ```bash
-   docker pull harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2
-   docker save -o /tmp/cubestack-installer-cli-v2.0.0.tar \
-     harbor.isuanova.com/suanova/cubestack-installer-cli:v2.0.0-rc2
-   bash deployments/scripts/tools/images/release-sync-images.sh \
-     --release 2.0.0 --component cli \
-     --cli-tar /tmp/cubestack-installer-cli-v2.0.0.tar \
-     --cli-image-digest sha256:<Harbor registry digest>
-   ```
-3. 或重新触发 `rebuild-cli-image.yml`（release-2.0）。2026-10-26 起该 workflow 在**同一 job**
-   内完成 Harbor → MinIO 同步，并在写 `_SUCCESS` 前断言三方 digest 一致。
-4. 刷新期间 `_SUCCESS` 会被临时删除，fetch 会明确失败；完成后复查 `_SUCCESS` 与 marker。
 
 ### 6. k8s_deploy 期间修改 cluster.conf 导致 addons 与后续模块不一致
 

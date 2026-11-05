@@ -36,9 +36,7 @@ sudo docker run -itd --name cubestack-install --network=host \
 # ④ 进入容器(容器内已是 root, 无需 sudo)
 sudo docker exec -it cubestack-install bash
 
-# ⑤ 从 MinIO 拉取离线文件(默认下载部署必需子目录, 排除 virtual-machine; 已挂载即落盘宿主机)
-mc alias set minio http://<minio-host>:9000 admin CHANGE_ME    # 换真实 MinIO 地址/凭证
-./deployments/scripts/tools/offline/fetch-offline-from-minio.sh   # 默认: kubespray/metax-gpu/os/ceph(排除 VM 镜像)
+# ⑤ 准备版本树(外部打包流程物化; 把 offline-files/ 挂进容器 offline-files, modules/ 挂到模块目录)
 
 # ⑥ 首次: 从模板生成真实配置(cluster.conf 是唯一数据源, 所有 IP 不硬编码)
 cd /opt/cubestack-installer
@@ -52,8 +50,8 @@ vim deployments/config/cluster.conf
 ```
 
 **为什么离线目录要挂载(不下载进容器)**:
-- 离线文件不入镜像(20G+ 级), **挂载 `offline-files` 后下载即落盘宿主机大磁盘**, 多集群/换环境复用, 免重复下载;
-- 容器内 `deploy-cluster.sh` / `fetch-offline-from-minio.sh` 读写的就是挂载目录(`/opt/cubestack-installer/deployments/offline-files`);
+- 离线文件不入镜像(20G+ 级), **挂载版本树的 `offline-files/` 到宿主机大磁盘**, 多集群/换环境复用;
+- 容器内 `deploy-cluster.sh` 读的就是挂载目录(`/opt/cubestack-installer/deployments/offline-files`);
 - `config/` 挂载: 宿主机编辑 `cluster.conf` 容器内即时生效, 真实配置(含密码)不进容器层。
 
 **宿主机直跑替代**(不想用容器, 机器已装 ansible/skopeo/mc 等):直接 clone 本仓库, 在仓库根执行同样命令(第 ⑤ 步起), 离线文件默认落 `deployments/offline-files`, 脚本自动磁盘检查。
@@ -116,9 +114,8 @@ deployments/scripts/
 │   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / install-worker-packages.sh / prepare-workers.sh
 │   │                         #        setup-ntp.sh / sync-hosts.sh / sync-ca*.sh / rebootstrap*.sh
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
-│   ├── images/                #   离线镜像工具: metax-save/load-images.sh / ceph-save-images.sh
-│   │                         #        harbor-save-images.sh / rdma-save-images.sh / netshoot-rdma.Dockerfile
-│   ├── offline/               #   MinIO 离线文件: fetch-offline-from-minio.sh(拉取) / sync-to-minio.sh(推送) / trim-offline-files.sh(清理) / fetch-offline-files.sh(旧)
+│   ├── images/                #   镜像工具: nvidia-chart-images.sh(chart 反推镜像) / netshoot-rdma.Dockerfile
+│   ├── offline/               #   离线完整性: verify-offline-files(校验) / build-verifier(.pyz 构建) / sync-to-container(开发同步)
 │   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 └── README.md                  # 本文件
 ```
@@ -516,63 +513,28 @@ bare-metal worker(Ubuntu)无法联网时,用 offline-files 中的离线 `.deb` �
 
 包来源: `deployments/offline-files/kubespray/cubestack-cluster/`(由 `OFFLINE_FILES_DIR` 全局变量指定)下的 `.deb` 文件(仓库根目录,与 kubeadm/etcd 等二进制同层)或 `packages/` 子目录,脚本自动收集两者并去重。包含 iputils-ping / rsync / iptables / curl / ca-certificates 及依赖。
 
-### 5.11 fetch-offline-from-minio.sh —— 从 MinIO 拉取离线文件
+### 5.11 版本树(offline-files)消费
 
-部署机/新机器缺离线文件时,从 MinIO 下载(**默认拉取部署必需子目录**: kubespray/metax-gpu/os/ceph 等,**排除 virtual-machine** 虚拟机镜像;需要时可 `--sub virtual-machine` 按需拉 VM 镜像,或 `--all` 真正全量)。
+2.1 起发布打包由外部流程完成, 本仓库只消费物化好的版本树(见 `docs/release-management.md`):
 
-**默认下载目录: `/opt/cubestack-installer/deployments/offline-files`(即 `OFFLINE_FILES_DIR` 根)**:
-- 在 CLI 容器内执行:下载直接落到容器挂载的 offline-files(宿主机大磁盘),**即装即用**;
-- 宿主机直跑本仓库:默认同一路径;想用大磁盘时 `--auto` 自动挑空闲 ≥ 门槛的最大挂载点。
-
-脚本默认开启**磁盘空间检查**:醒目横幅提示至少需要 `MIN_FREE_GB`(默认 **50 GiB**)空闲空间,并比对本次下载所需(远程大小 + 缓冲)与目标可用空间,不足则中止(`--force` 强制继续)。
-
-```bash
-./scripts/tools/offline/fetch-offline-from-minio.sh            # 默认: 下载部署必需子目录(排除 virtual-machine)
-./scripts/tools/offline/fetch-offline-from-minio.sh --sub virtual-machine  # 按需拉 VM 镜像(仅创建虚拟机时)
-./scripts/tools/offline/fetch-offline-from-minio.sh --all      # 真正全量(含 virtual-machine)
-./scripts/tools/offline/fetch-offline-from-minio.sh --sub kubespray     # 只拉某子目录(如 kubespray)
-./scripts/tools/offline/fetch-offline-from-minio.sh --dest /data/offline-files   # 指定下载目录(即 offline-files 根)
-sudo ./scripts/tools/offline/fetch-offline-from-minio.sh --auto       # 宿主机: 自动挑空闲 ≥ 门槛的最大磁盘
-./scripts/tools/offline/fetch-offline-from-minio.sh --list      # 只列出 MinIO 可用目录
+```text
+<root>/<version>/
+  cubestack-installer-cli.tar
+  modules/                 # 私有平台模块
+  offline-files/           # release.env + tree.tsv + SHA256SUMS + 镜像/chart tar
 ```
 
-- **mc 检测**:未安装时给出安装指引,可选择自动下载(MinIO 官方二进制,与 Dockerfile-cli 同源);alias 优先用独立 MinIO 配置(`config/minio.conf` 或 `MINIO_*` 环境变量,本脚本刻意不读 cluster.conf —— 它是部署前置工具,下载时集群配置往往还不存在)自动配置,否则探测本机已有 alias,再否则交互录入。
-- **桶/目录自适应**:默认桶 `cubestack-installer`、目录 `offline-files`(与 MinIO 实际布局一致),自动回退探测旧布局 `cubestack-offline/kubespray`。
-- **子目录排除(默认开启)**:`DEFAULT_EXCLUDE_SUBS`(默认 `virtual-machine`, 体积大且仅创建 VM 时用)在默认/`--all` 下载时自动跳过;`--sub <目录>` 不受排除限制。
-- **磁盘空间检查(默认开启)**:醒目提示至少 `MIN_FREE_GB`(默认 50 GiB)空闲;比对本次下载所需(远程大小 + 缓冲)与目标可用空间,不足时红色横幅警告并中止(`--force` 强制继续)。
-- **下载后提示**:容器内直接 `cd /opt/cubestack-installer && ./deployments/scripts/deploy-cluster.sh`;宿主机下载到 `<下载目录>` 后,把该目录挂进容器 offline-files(见 §1 快速开始),或 `export OFFLINE_FILES_DIR=<下载目录>` 直跑。
-
-### 5.12 sync-to-minio.sh —— 本地 offline-files 全量镜像同步到 MinIO
-
-源机器把本地 `offline-files` 的**所有子目录**(ceph/kubespray/metax-gpu/os/virtual-machine ...)整体镜像到 MinIO 的 `<桶>/offline-files/`(远端目录结构与本地完全一致),供各部署机 `fetch-offline-from-minio.sh` 拉取(下载侧不变)。等价于 `mc mirror --overwrite ./offline-files/ minio/cubestack-installer/offline-files/`:
-
 ```bash
-./scripts/tools/offline/sync-to-minio.sh               # 增量同步(默认 mc mirror --overwrite, 自动发现新增/变更文件)
-./scripts/tools/offline/sync-to-minio.sh --prune       # 同步 + 删除远端多余文件(与本地严格一致; 远端其他集群共享时勿用)
-./scripts/tools/offline/sync-to-minio.sh --dry-run     # 仅预览(不实际同步)
+# 版本树根 + 版本号
+sudo ./deployments/scripts/deploy-cluster.sh --release 2.1.0
+
+# 或直接把版本树的 offline-files/ 挂到默认位置(自动读取 release.env)
+export OFFLINE_FILES_ROOT=<root>/2.1.0/offline-files
 ```
 
-- **MinIO 配置**:已有 `minio` mc alias 优先复用;否则用 cluster.conf 的 `MINIO_*`(endpoint/ak/sk)自动配置;都没有则报错给指引(不再探测/交互)。
-- **桶/目录**:默认 `cubestack-installer` / `offline-files`(可 `MINIO_BUCKET` / `MINIO_REMOTE_DIR` 覆盖),桶不存在自动创建。
-- **可读性预检**:mc mirror 对不可读文件(如 root 属主 0600 的 docker-save tar)会**静默跳过**;同步前先全量扫描,发现不可读文件即报错给指引(`sudo chmod -R a+r <源>` 或 `sudo ./sync-to-minio.sh`),避免部分目录未同步却报"同步完成"。
-- **--prune(谨慎)**:等价 `mc mirror --remove`,把远端本地没有的文件一并删除 —— 多集群共用同一 MinIO 桶时慎用。
-
-### 5.13 trim-offline-files.sh —— 清理 offline-files 冗余(只留部署必需)
-
-kubespray/metax-gpu 离线目录由下载命令生成全量清单,含大量本部署用不到的镜像与二进制:
-
-- **kubespray/images**:未匹配 `PRELOAD_IMAGE_PATTERNS`(calico/etcd/kube-*/coredns/metallb 等白名单)的镜像 tar(cilium/flannel/weave/arm64 等);
-- **kubespray 根下二进制**:非 containerd 运行时(cilium/cri-o/gvisor/kata/youki/crun/nerdctl/cri-dockerd);
-- **metax-gpu**:非当前 `METAX_VERSION`/非 amd64/非本部署组件(operator-bundle/catalog)的镜像 tar。
-
-```bash
-sudo ./scripts/tools/offline/trim-offline-files.sh --dry-run    # 仅预览将删除项(推荐先跑)
-sudo ./scripts/tools/offline/trim-offline-files.sh              # 实际清理
-```
-
-> ⚠ 删除前先备份 offline-files;未来启用新 addon/切换架构/版本时需重新下载或从 MinIO 恢复。
-
-清理后配合 `sync-to-minio.sh` 把精简结果同步回 MinIO,MinIO 侧只存部署必需文件。
+- **完整性**: `release.env` 先经 `SHA256SUMS` 预校验, 再用 `verify-offline-files.sh` 校验整树;
+- **模块**: 平台模块由版本树的 `modules/` 提供(通过 `CUBESTACK_EXTRA_MODULES_DIRS` 合并);
+- **不再提供**: MinIO 拉取/推送/trim 工具与旧 `--release` 布局。
 
 ### 5.14 容器化部署(补充说明)
 
@@ -581,7 +543,7 @@ sudo ./scripts/tools/offline/trim-offline-files.sh              # 实际清理
 - **`--network host` 必须**:容器内 ssh 直连节点/集群/registry(默认桥接网段无法访问)。
 - **创建虚拟机(依赖宿主机 libvirt)**:加 `--privileged` 或挂载 `/var/run/libvirt`;纯裸金属离线部署无需额外特权。
 - **后台运行 + `docker exec`**(非交互式启动):`sudo docker run -itd --name cubestack-install --network host ...` 后 `sudo docker exec -it cubestack-install bash`(见 §1 步骤③④)。
-- **离线文件不下载进容器**:离线镜像/二进制不入镜像,由挂载目录共享 —— 容器内 `fetch-offline-from-minio.sh` 下载即落宿主机大磁盘,多集群/换环境复用。
+- **离线文件不下载进容器**:离线镜像/二进制不入镜像,由版本树挂载目录共享,多集群/换环境复用。
 - 根 `README.md` §十四 还有镜像构建(`build-cli-context.sh`)与挂载参数说明。
 
 ---

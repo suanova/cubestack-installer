@@ -2,8 +2,7 @@
 # ============================================================
 # lib-offline-gate.sh — 离线文件安装前门禁/release.env 预校验(被 source)
 # 依赖: lib-offline-verify.sh(ensure_offline_verify_tool) + 调用方的 warn/err.
-# 全局契约: OFFLINE_FILES_ROOT/OFFLINE_VERIFY_*/CUBESTACK_RELEASE*/
-#           CUBESTACK_RELEASE_LAYOUT/CUBESTACK_RELEASE_ROOT.
+# 全局契约: OFFLINE_FILES_ROOT/OFFLINE_VERIFY_*/CUBESTACK_RELEASE/CUBESTACK_RELEASE_ROOT.
 # ============================================================
 
 # ---------------- 离线文件完整性校验(2026-10-28) ----------------
@@ -98,14 +97,7 @@ verify_offline_gate() {
     fi
     args=(--root "${root}" --level "${level}" --jobs "${OFFLINE_VERIFY_JOBS:-4}" --fail-missing)
     if [ -n "${CUBESTACK_RELEASE:-}" ]; then
-        args+=(--release "${CUBESTACK_RELEASE}")
-        if [ "${CUBESTACK_RELEASE_LAYOUT:-}" = "flat" ]; then
-            args+=(--layout flat)
-        else
-            args+=(--layout release)
-            local _cli="${CUBESTACK_RELEASE_ROOT:-}/${CUBESTACK_RELEASE}/cubestack-installer-cli-v${CUBESTACK_RELEASE}.tar"
-            [ -f "${_cli}" ] && args+=(--cli-tar "${_cli}")
-        fi
+        args+=(--release "${CUBESTACK_RELEASE}" --layout release)
     elif [ ! -f "${root}/SHA256SUMS" ]; then
         args+=(--allow-unsealed)
     fi
