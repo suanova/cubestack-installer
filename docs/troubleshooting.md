@@ -1862,6 +1862,11 @@ ubuntu@10.6.7.135: Permission denied (publickey,password).
   否则旧 RBD 卷被删后 `jbd2/rbdX` 进入不可中断 D 状态, 下次 `node_pkgs` 的 `fuser` 必然超时、
   只能重启节点。另: 所有 `kubectl delete ns` 加 `timeout 30 ... --wait=false`,
   避免 namespace finalizer 让删除无限等待(2026-11-05 实机卡 9 分钟)。
+- external Ceph **只有 CSI operator**(无集群内 CephCluster)的卸载(2026-11-05): `ceph_csi` 现在
+  有独立 uninstall 分支 —— 只删本模块的 StorageClass + 外部**接入声明**
+  (`CephCluster rook-ceph-external` / `CephConnection` / `ClientProfile`); 外部 Ceph 的
+  pool/filesystem 是外部资产, **绝不删除**。`02_ceph.sh` 的 `--delete-cluster` 已按
+  `spec.external.enable=true` 跳过 external CephCluster, 与 internal 集群的销毁方式区分。
 
 **验证:**
 ```bash

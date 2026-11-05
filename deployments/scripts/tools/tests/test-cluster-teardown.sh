@@ -120,7 +120,7 @@ chk "③ 登记 seq 降序判别(multus seq5 先于 registry seq2)" "1" "$(print
   { n++; if ($1=="multus") a=n; if ($1=="k8s_registry") b=n }
   END { print (a>0 && b>0 && a<b) ? 1 : 0 }')"
 chk "③ metallb 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'metallb')"
-chk "③ ceph_csi 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'ceph_csi')"
+chk "③ ceph_csi 有 UNINSTALL → 进拆序" "1" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'ceph_csi')"
 chk "③ 探测降级组(netshoot)在登记组之后" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
   { n++; if ($1=="cubestack_operator") a=n; if ($1=="netshoot") b=n }
   END { print (a>0 && b>0 && b>a) ? 1 : 0 }')"
@@ -466,5 +466,16 @@ _n_call="$(grep -cF 'unmount_node_ceph_mounts' "${ENGINE}" || true)"
 chk "⑪c 函数+调用已接线" "1" "$([ "${_n_call:-0}" -ge 2 ] && echo 1 || echo 0)"
 _n_kubelib="$(grep -cF 'findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet' "${ENGINE}" || true)"
 chk "⑪d 只处理 /var/lib/kubelet 下的 CSI 挂载" "1" "$([ "${_n_kubelib:-0}" -ge 1 ] && echo 1 || echo 0)"
+
+echo "== ⑫ ceph_csi: external 模式只删接入声明, 不碰外部 Ceph 数据 =="
+CSI="${REPO_ROOT}/deployments/scripts/modules/03_addon/03_ceph_csi.sh"
+chk "⑫a UNINSTALL 声明" "1" "$(grep -cF '# UNINSTALL: 1' "${CSI}")"
+_n_ext="$(grep -cF 'if [ "${CEPH_MODE:-internal}" = "external" ]; then' "${CSI}" || true)"
+chk "⑫b external 分支" "1" "$([ "${_n_ext:-0}" -ge 1 ] && echo 1 || echo 0)"
+chk "⑫c 删除外部接入声明(CephCluster rook-ceph-external)" "1" \
+    "$(grep -cF 'delete cephcluster rook-ceph-external' "${CSI}")"
+chk "⑫d 删除本模块 StorageClass" "1" "$(grep -cF 'delete storageclass' "${CSI}")"
+chk "⑫e 不调用 ceph-cleanup(外部 Ceph 数据非本安装器资产)" "0" \
+    "$(grep -cF 'ceph-cleanup.sh' "${CSI}" || true)"
 
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }
