@@ -57,8 +57,10 @@ cp deployments/config/cluster.conf.example deployments/config/cluster.conf
 镜像：
 
 ```text
-harbor.isuanova.com/suanova/cubestack-installer-cli:latest
+harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
 ```
+
+2.1 分支使用 `:2.1-latest`，不覆盖 2.0.x 仍在使用的 `:latest`。
 
 构建/推送：
 
@@ -74,7 +76,7 @@ sudo docker run --rm -it --network host \
   -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
   -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
   -v $HOME/.ssh:/root/.ssh \
-  harbor.isuanova.com/suanova/cubestack-installer-cli:latest
+  harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
 ```
 
 容器内已是 root，直接运行部署脚本。离线文件挂载复用，不进入镜像。

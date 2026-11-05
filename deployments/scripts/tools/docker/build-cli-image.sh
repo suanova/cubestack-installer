@@ -26,11 +26,12 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 
-IMAGE="harbor.isuanova.com/suanova/cubestack-installer-cli:latest"
+IMAGE="${CLI_IMAGE:-harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest}"
 BASE_IMAGE="ubuntu:22.04"
 # Namespaces intentionally differ: base is pushed to cubestack, the code image
-# to suanova (separate push permissions).
-CLI_BASE_TAG="harbor.isuanova.com/cubestack/cubestack-installer-cli-base:latest"
+# to suanova (separate push permissions). The 2.1 channel never overwrites
+# :latest, which release-2.0 still uses.
+BASE_TAG="${CLI_BASE_TAG:-harbor.isuanova.com/cubestack/cubestack-installer-cli-base:2.1-latest}"
 BASE_DOCKERFILE="${REPO_ROOT}/images/installer-cli-base/Dockerfile"
 CODE_DOCKERFILE="${REPO_ROOT}/images/installer-cli/Dockerfile"
 REQUIREMENTS="${REPO_ROOT}/deployments/kubespray/kubespray/requirements.txt"
@@ -70,10 +71,10 @@ ensure_ubuntu() {
 }
 
 ensure_cli_base() {
-    ${ENGINE} image inspect "${CLI_BASE_TAG}" >/dev/null 2>&1 && return 0
-    say "local ${CLI_BASE_TAG} missing; pulling from Harbor ..."
-    ${ENGINE} pull "${CLI_BASE_TAG}" 2>/dev/null || {
-        err "missing base image ${CLI_BASE_TAG} locally and in Harbor"
+    ${ENGINE} image inspect "${BASE_TAG}" >/dev/null 2>&1 && return 0
+    say "local ${BASE_TAG} missing; pulling from Harbor ..."
+    ${ENGINE} pull "${BASE_TAG}" 2>/dev/null || {
+        err "missing base image ${BASE_TAG} locally and in Harbor"
         err "  → build it first: sudo $0 --base"
         exit 1
     }
@@ -86,12 +87,12 @@ build_base() {
     STAGE_DIR="$(mktemp -d -t cubestack-cli-base.XXXXXX)"
     mkdir -p "${STAGE_DIR}/deployments/kubespray/kubespray"
     cp "${REQUIREMENTS}" "${STAGE_DIR}/deployments/kubespray/kubespray/requirements.txt"
-    say "building base layer -> ${CLI_BASE_TAG} ..."
-    ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f "${BASE_DOCKERFILE}" -t "${CLI_BASE_TAG}" "${STAGE_DIR}" \
+    say "building base layer -> ${BASE_TAG} ..."
+    ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f "${BASE_DOCKERFILE}" -t "${BASE_TAG}" "${STAGE_DIR}" \
         || { err "base build failed"; exit 1; }
     local layers
-    layers="$(${ENGINE} history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l || true)"
-    ok "base layer ready: ${CLI_BASE_TAG} (${layers:-0} layers)"
+    layers="$(${ENGINE} history --no-trunc "${BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l || true)"
+    ok "base layer ready: ${BASE_TAG} (${layers:-0} layers)"
 }
 
 build_code() {
@@ -99,7 +100,7 @@ build_code() {
     [ -f "${CODE_DOCKERFILE}" ] || { err "code Dockerfile not found: ${CODE_DOCKERFILE}"; exit 1; }
     say "building code layer from ${REPO_ROOT} -> ${IMAGE} ..."
     ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f "${CODE_DOCKERFILE}" \
-        --build-arg "CLI_BASE_TAG=${CLI_BASE_TAG}" -t "${IMAGE}" "${REPO_ROOT}" \
+        --build-arg "CLI_BASE_TAG=${BASE_TAG}" -t "${IMAGE}" "${REPO_ROOT}" \
         || { err "code build failed"; exit 1; }
     ok "image ready: ${IMAGE}"
 }
@@ -109,7 +110,7 @@ if [ "${DO_BUILD}" = "1" ]; then
     build_code
     if [ "${DO_PUSH}" = "1" ]; then
         push_images=()
-        [ "${DO_BASE}" = "1" ] && push_images+=("${CLI_BASE_TAG}")
+        [ "${DO_BASE}" = "1" ] && push_images+=("${BASE_TAG}")
         push_images+=("${IMAGE}")
         for push_image in "${push_images[@]}"; do
             say "pushing ${push_image} ..."
@@ -119,7 +120,7 @@ if [ "${DO_BUILD}" = "1" ]; then
     fi
 else
     echo "Manual builds:"
-    echo "  code: sudo ${ENGINE} build ${ENGINE_FMT_ARGS[*]} -f ${CODE_DOCKERFILE} --build-arg CLI_BASE_TAG=${CLI_BASE_TAG} -t ${IMAGE} ${REPO_ROOT}"
-    echo "  base: sudo ${ENGINE} build ${ENGINE_FMT_ARGS[*]} -f ${BASE_DOCKERFILE} -t ${CLI_BASE_TAG} <staged-requirements-context>"
+    echo "  code: sudo ${ENGINE} build ${ENGINE_FMT_ARGS[*]} -f ${CODE_DOCKERFILE} --build-arg CLI_BASE_TAG=${BASE_TAG} -t ${IMAGE} ${REPO_ROOT}"
+    echo "  base: sudo ${ENGINE} build ${ENGINE_FMT_ARGS[*]} -f ${BASE_DOCKERFILE} -t ${BASE_TAG} <staged-requirements-context>"
     echo "  push: sudo ${ENGINE} push ${IMAGE}"
 fi

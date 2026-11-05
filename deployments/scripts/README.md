@@ -23,7 +23,7 @@
 #    kubectl/helm/skopeo/yq/mc —— 2026-09-30 最终口径: 工具链**打进 base 层**(非登录 shell 也有);
 #    运行期钩子只在工具缺失时从挂载的版本目录补齐、不覆盖(见 docs/kubespray-versioning/README.md §8);
 #    部署流程仍用 bash -lc(既有口径))
-docker pull harbor.isuanova.com/suanova/cubestack-installer-cli:latest
+docker pull harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
 
 # ② 宿主机准备大磁盘离线目录(离线文件较大, 建议 ≥50GiB 空闲; 多集群可共用同一份)
 mkdir -p /data/offline-files
@@ -31,7 +31,7 @@ mkdir -p /data/offline-files
 # ③ 启动容器(后台 + network host): 把离线目录/配置/SSH 密钥挂进容器
 sudo docker run -itd --name cubestack-install --network=host \
   -v /data/offline-files:/opt/cubestack-installer/deployments/offline-files \
-  harbor.isuanova.com/suanova/cubestack-installer-cli:latest bash
+  harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest bash
 
 # ④ 进入容器(容器内已是 root, 无需 sudo)
 sudo docker exec -it cubestack-install bash

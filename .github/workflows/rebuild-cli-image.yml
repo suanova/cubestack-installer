@@ -69,6 +69,9 @@ jobs:
       HARBOR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
       HARBOR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
       IMAGE_VERSION: ${{ github.event.inputs.version || '' }}
+      # main keeps the 2.0 :latest channel; release-2.1 uses its own moving tag
+      # so a 2.1 base can never break a 2.0.1 build.
+      CLI_CHANNEL: ${{ github.ref_name == 'main' && 'latest' || '2.1-latest' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -118,13 +121,19 @@ jobs:
       - name: Resolve target image
         run: |
           set -euo pipefail
-          tag="${IMAGE_VERSION:-latest}"
+          tag="${IMAGE_VERSION:-${CLI_CHANNEL}}"
           case "${tag}" in
             ''|*[!0-9A-Za-z._-]*) echo "::error::invalid version: ${tag}"; exit 1 ;;
           esac
           image="${HARBOR_HOST}/suanova/cubestack-installer-cli:${tag}"
-          echo "IMAGE=${image}" >> "${GITHUB_ENV}"
-          echo "resolved image: ${image}" | tee -a "${GITHUB_STEP_SUMMARY}"
+          channel_image="${HARBOR_HOST}/suanova/cubestack-installer-cli:${CLI_CHANNEL}"
+          base_image="${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:${CLI_CHANNEL}"
+          {
+            echo "IMAGE=${image}"
+            echo "CLI_IMAGE=${channel_image}"
+            echo "CLI_BASE_TAG=${base_image}"
+          } >> "${GITHUB_ENV}"
+          echo "channel=${CLI_CHANNEL} image=${image} base=${base_image}" | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Reclaim disk space
         run: |
@@ -149,10 +158,9 @@ jobs:
           else
             bash deployments/scripts/tools/docker/build-cli-image.sh --build --engine docker
           fi
-          # build-cli-image.sh 固定产出 :latest; 需要版本 tag 时再打一层。
-          built="harbor.isuanova.com/suanova/cubestack-installer-cli:latest"
-          if [ "${IMAGE}" != "${built}" ]; then
-            docker tag "${built}" "${IMAGE}"
+          # build-cli-image.sh builds the channel tag; add the version tag on top.
+          if [ "${IMAGE}" != "${CLI_IMAGE}" ]; then
+            docker tag "${CLI_IMAGE}" "${IMAGE}"
           fi
 
       - name: Verify required tools are baked into image
@@ -167,13 +175,29 @@ jobs:
         if: steps.changes.outputs.build_base == 'true'
         run: |
           set -euo pipefail
-          docker push "${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:latest"
+          version_tag=""
+          if [ -n "${IMAGE_VERSION}" ]; then
+            version_tag="${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:${IMAGE_VERSION}"
+            if docker manifest inspect "${version_tag}" >/dev/null 2>&1; then
+              echo "::error::immutable base tag already exists: ${version_tag}"
+              exit 1
+            fi
+          fi
+          docker push "${CLI_BASE_TAG}"
+          if [ -n "${version_tag}" ]; then
+            docker tag "${CLI_BASE_TAG}" "${version_tag}"
+            docker push "${version_tag}"
+            echo "pushed immutable base: ${version_tag}" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Push image
         if: steps.changes.outputs.build_cli == 'true'
         run: |
           set -euo pipefail
           push_log="${RUNNER_TEMP}/docker-push.log"
+          if [ "${CLI_IMAGE}" != "${IMAGE}" ]; then
+            docker push "${CLI_IMAGE}"
+          fi
           docker push "${IMAGE}" 2>&1 | tee "${push_log}"
           # registry digest 是 Harbor/MinIO 一致性的锚点; docker push 最后一行含
           # "digest: sha256:..."。RepoDigests 作为兼容兜底(部分 Docker 版本)。
