@@ -20,4 +20,10 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 默认 LWS values: master placement + CPU request 200m(不设 limits)。
+# 可用 CUBESTACK_COMPONENT_VALUES_FILE 覆盖。
+: "${CUBESTACK_COMPONENT_VALUES_FILE:=${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator/lws-values.yaml}"
+export CUBESTACK_COMPONENT_VALUES_FILE
+
 bash "${SCRIPT_DIR}/tools/k8s/cubestack-component-update.sh" "lws"
