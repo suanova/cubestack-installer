@@ -48,7 +48,8 @@ if [ "${#IPS[@]}" -eq 0 ]; then
             < <(awk '/^[[:space:]]*ansible_host:/{print $2}' "${_hosts}" | sort -u)
     fi
     if [ "${#IPS[@]}" -eq 0 ]; then
-        while IFS= read -r ip; do [ -n "${ip}" ] && IPS+=("${ip}"); done < <(all_node_ips)
+        # all_node_ips 输出单行空格分隔 → 按空白拆分(与 cluster-teardown 同口径)
+        for ip in $(all_node_ips); do [ -n "${ip}" ] && IPS+=("${ip}"); done
     fi
 fi
 [ "${#IPS[@]}" -gt 0 ] || { err "没有目标节点(cluster.conf NODES 为空?)"; exit 1; }

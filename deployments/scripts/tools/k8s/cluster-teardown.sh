@@ -165,7 +165,8 @@ print(json.dumps(cm))
 unmount_node_ceph_mounts() {
     local _key _ips _ip _u _left
     _key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-    mapfile -t _ips < <(all_node_ips 2>/dev/null || true)
+    # all_node_ips 输出是**单行空格分隔**(带尾随空格); read -a 按空白拆分, 单节点/多节点都正确。
+    _ips=(); read -r -a _ips <<< "$(all_node_ips 2>/dev/null || true)"
     [ "${#_ips[@]}" -gt 0 ] || return 0
     say "  预清理节点 Ceph/RBD CSI 挂载(避免后端删除后 jbd2 D 状态)..."
     for _ip in "${_ips[@]}"; do

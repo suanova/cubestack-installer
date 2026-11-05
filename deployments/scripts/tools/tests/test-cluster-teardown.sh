@@ -466,6 +466,11 @@ _n_call="$(grep -cF 'unmount_node_ceph_mounts' "${ENGINE}" || true)"
 chk "⑪c 函数+调用已接线" "1" "$([ "${_n_call:-0}" -ge 2 ] && echo 1 || echo 0)"
 _n_kubelib="$(grep -cF 'findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet' "${ENGINE}" || true)"
 chk "⑪d 只处理 /var/lib/kubelet 下的 CSI 挂载" "1" "$([ "${_n_kubelib:-0}" -ge 1 ] && echo 1 || echo 0)"
+# CodeRabbit: all_node_ips 输出单行空格分隔(带尾随空格), mapfile 只会得到 1 个元素。
+_n_ips="$(libfn 'read -r -a a <<< "$(all_node_ips)"; echo "${#a[@]}"')"
+chk "⑪e all_node_ips 空格分隔被拆成 3 个" "3" "${_n_ips}"
+chk "⑪f 使用 read -a 拆分(不是 mapfile 单行)" "1" \
+    "$(grep -cF 'read -r -a _ips <<< "$(all_node_ips' "${ENGINE}")"
 
 echo "== ⑫ ceph_csi: external 模式只删接入声明, 不碰外部 Ceph 数据 =="
 CSI="${REPO_ROOT}/deployments/scripts/modules/03_addon/03_ceph_csi.sh"

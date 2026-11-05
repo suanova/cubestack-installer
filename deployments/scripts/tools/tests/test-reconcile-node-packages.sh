@@ -198,6 +198,8 @@ chk_contains "整批失败才逐包兜底" "整批安装失败" "${TMP}/remote.s
 echo "== ④ 远端装包超时 =="
 chk_contains "RECONCILE_SSH_TIMEOUT" "RECONCILE_SSH_TIMEOUT" "${TOOL}"
 chk_contains "调用被 timeout 包裹" "timeout \"\${RECONCILE_SSH_TIMEOUT}\" ssh" "${TOOL}"
+# all_node_ips 是单行空格分隔 → 回退路径必须按空白拆分, 不能 read 一行当单 IP
+chk_contains "all_node_ips 回退按空白拆分" 'for ip in $(all_node_ips)' "${TOOL}"
 
 echo "== ⑤ worker 装包: Breaks ↔ 同版本 cohort =="
 TOOL2="${REPO_ROOT}/deployments/scripts/tools/node/install-worker-packages.sh"
