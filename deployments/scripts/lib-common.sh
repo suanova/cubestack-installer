@@ -301,7 +301,7 @@ ensure_skopeo_policy
 skopeo_require() {
     command -v skopeo >/dev/null 2>&1 && return 0
     err "未找到 skopeo(推送镜像到集群内置 registry 必需)。请安装 skopeo, 或使用项目 CLI 镜像"
-    err "  (tools/docker/build-cli-context.sh 内置 skopeo-1.16.1-amd64)"
+    err "  (tools/docker/build-cli-image.sh 内置 skopeo-1.16.1-amd64)"
     exit 1
 }
 

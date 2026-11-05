@@ -9,6 +9,12 @@ name: Build netshoot-rdma image
 # 26.04.17-r2). This workflow never overwrites an existing tag.
 
 on:
+  # Dockerfile changes are build-only (no push): the tag must be chosen
+  # explicitly because tags are immutable.
+  push:
+    branches: [main, release-2.1]
+    paths:
+      - 'images/netshoot-rdma/**'
   workflow_dispatch:
     inputs:
       tag:
@@ -47,10 +53,10 @@ jobs:
       # TODO: pin this to an immutable base tag/digest once the public mirror
       # catalog carries a pinned netshoot base.
       BASE_IMAGE: ${{ vars.NETSHOOT_RDMA_BASE_IMAGE || 'nicolaka/netshoot:latest' }}
-      IMAGE_TAG_INPUT: ${{ inputs.tag }}
-      PERFTEST_INPUT: ${{ inputs.perftest_version }}
-      PUSH_INPUT: ${{ inputs.push }}
-      APK_MIRROR_INPUT: ${{ inputs.apk_mirror }}
+      IMAGE_TAG_INPUT: ${{ github.event_name == 'push' && format('ci-{0}', github.sha) || inputs.tag }}
+      PERFTEST_INPUT: ${{ github.event_name == 'push' && (vars.NETSHOOT_RDMA_PERFTEST_VERSION || '26.04.17') || inputs.perftest_version }}
+      PUSH_INPUT: ${{ github.event_name == 'push' && 'false' || inputs.push }}
+      APK_MIRROR_INPUT: ${{ github.event_name == 'push' && '' || inputs.apk_mirror }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

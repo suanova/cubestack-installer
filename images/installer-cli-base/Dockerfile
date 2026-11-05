@@ -1,10 +1,11 @@
 # =====================================================================
-# Dockerfile-cli-base — CubeStack CLI 容器的**基础层**(系统 + 工具链, 极少变)
+# images/installer-cli-base/Dockerfile — CubeStack CLI 容器的**基础层**(系统 + 工具链, 极少变)
 # ---------------------------------------------------------------------
 # 设计(2026-09-30, 用户口径): **镜像分两层**
 #   ① 本文件 = base 镜像: ubuntu:22.04 + apt 系统工具 + python3.11 + ansible(requirements.txt)
-#      + mc。**只在"新增 package / 工具 或 依赖版本变化"时重建**(构建慢, 需要联网装 apt/pip)。
-#   ② Dockerfile-cli(代码层): `FROM <base>` + **只 copy deployments/skills 代码** —— 日常
+#      + kubectl/helm/skopeo/yq/mc(按 pinned version + sha256 从上游下载)。
+#      **只在"新增 package / 工具 或 依赖版本变化"时重建**(需要联网 apt/pip)。
+#   ② images/installer-cli/Dockerfile(代码层): `FROM <base>` + **只 copy deployments/skills 代码** —— 日常
 #      "改了部署脚本要出新镜像"走这一层, 秒级~分钟级, 且**层数不累积**(每次都基于同一个 base,
 #      而不是叠在上一版镜像上)。
 #
@@ -14,12 +15,12 @@
 #   分层后: base 层数固定, 代码层每次只加 1~2 层 ⇒ 该问题从结构上消失。
 #
 # 构建/推送:
-#   sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base            # 生成上下文 + 构建 base
-#   sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base --push     # 并推送到 Harbor
-# 依赖: 构建机联网(apt 清华源 + PyPI 清华源); 基础 ubuntu:22.04 本地缺失时自动 docker load 离线 tar。
+#   sudo ./deployments/scripts/tools/docker/build-cli-image.sh --base            # 构建 base
+#   sudo ./deployments/scripts/tools/docker/build-cli-image.sh --base --push     # 并推送到 Harbor
+# 依赖: 构建机联网(apt 清华源 + PyPI 清华源 + 上游工具下载); ubuntu:22.04 本地缺失时自动 pull。
 # =====================================================================
 
-# 基础镜像: ubuntu:22.04(离线构建由 build-cli-context.sh --base 自动 docker load)
+# 基础镜像: ubuntu:22.04(build-cli-image.sh --base 本地缺失时自动 pull)
 ARG BASE_IMAGE=ubuntu:22.04
 FROM ${BASE_IMAGE}
 
@@ -69,35 +70,59 @@ RUN apt-get update && apt-get install -y --no-install-recommends software-proper
     && rm -rf /var/lib/apt/lists/* \
     && python3.11 -V
 
-# ---------- CLI 工具链(kubectl / helm / skopeo / yq)---------- 
-# ⚠ 2026-09-30 用户口径修订: **常用且版本固定的工具全部打进 base 镜像**(不再靠运行期挂载补)——
-#   实测事故: 运行期钩子只在**登录 shell** 生效, `docker exec … bash` / 脚本里的非登录 shell
-#   拿不到工具 ⇒ `kubectl: command not found`(部署流程里也有这种调用面)。
-#   工具版本随 kubespray 版本目录(cluster.conf 钉子)走: 升级改版本 → 重建 base 即可。
-#   取值: build-cli-context.sh 从 <版本目录> 拷进构建上下文 bin/(离线件优先, 缺失才回退联网/宿主机)。
-COPY bin/kubectl /usr/local/bin/kubectl
-RUN chmod +x /usr/local/bin/kubectl && kubectl version --client 2>/dev/null | head -1
+# ---------- CLI 工具链(kubectl / helm / skopeo / yq / mc) ----------
+# All tools are downloaded from their upstream release URLs with pinned versions
+# and sha256 checksums. Nothing is read from the build host's PATH or offline
+# directory, so a clean checkout is enough to rebuild this layer.
+ARG TARGETARCH=amd64
+ARG KUBECTL_VERSION=v1.35.8
+ARG KUBECTL_SHA256=874d5e72dbb819f43cff16bcd1e4f8bac5b7f2361fe1e55049b0a6c676fb0cbf
+ARG HELM_VERSION=3.22.0
+ARG HELM_SHA256=1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb
+ARG SKOPEO_VERSION=1.16.1
+ARG SKOPEO_SHA256=8813fb7fcd7a723196ac287683dd929d280f6fe7f0782eace452fe1e3ff2b7eb
+ARG YQ_VERSION=4.42.1
+ARG YQ_SHA256=1a95960dddd426321354d58d2beac457717f7c49a9ec0806749a5a9e400eb45e
+ARG MC_VERSION=RELEASE.2026-09-19T15-24-59Z
+ARG MC_SHA256=83938eded435e7c28c397ece1dc590b2a79626dd9354aae2107060fec559ae2b
 
-COPY bin/helm-archive.tar.gz /tmp/helm.tar.gz
-RUN tar xzf /tmp/helm.tar.gz -C /tmp \
-    && mv /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/linux-amd64 /tmp/helm.tar.gz \
-    && helm version --short
+RUN set -eux; \
+    [ "${TARGETARCH}" = "amd64" ] || { echo "only linux/amd64 is supported" >&2; exit 1; }; \
+    curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"; \
+    echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c -; \
+    install -m 0755 /tmp/kubectl /usr/local/bin/kubectl; \
+    rm -f /tmp/kubectl; \
+    kubectl version --client 2>/dev/null | head -1
 
-COPY bin/skopeo /usr/local/bin/skopeo
-RUN chmod +x /usr/local/bin/skopeo && skopeo --version
+RUN set -eux; \
+    curl -fsSL -o /tmp/helm.tar.gz "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"; \
+    echo "${HELM_SHA256}  /tmp/helm.tar.gz" | sha256sum -c -; \
+    tar xzf /tmp/helm.tar.gz -C /tmp; \
+    install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm; \
+    rm -rf /tmp/linux-amd64 /tmp/helm.tar.gz; \
+    helm version --short
 
-COPY bin/yq /usr/local/bin/yq
-RUN chmod +x /usr/local/bin/yq && yq --version
+RUN set -eux; \
+    curl -fsSL -o /tmp/skopeo "https://github.com/lework/skopeo-binary/releases/download/v${SKOPEO_VERSION}/skopeo-linux-amd64"; \
+    echo "${SKOPEO_SHA256}  /tmp/skopeo" | sha256sum -c -; \
+    install -m 0755 /tmp/skopeo /usr/local/bin/skopeo; \
+    rm -f /tmp/skopeo; \
+    skopeo --version
 
-# ---------- mc(MinIO Client, 拉离线文件的**引导工具**) ----------
-# ⚠ mc 是**唯一必须打进镜像**的工具: 容器正是靠它去 MinIO **拉**离线文件 —— 不能像
-#   kubectl/helm/skopeo 那样"运行期从挂载的版本目录取"(先有鸡还是先有蛋)。
-# ⚠ 官方下载路径**会变**: 老路径 https://dl.min.io/client/mc/release/linux-amd64/mc 已 410 Gone,
-#   新路径 https://dl.min.io/aistor/mc/release/linux-<arch>/mc(2026-09-30 实测 200)。
-#   ⇒ 由 build-cli-context.sh 从**离线件** offline-files/os/mc-* 拷入构建上下文 bin/mc
-#     (缺失时回退联网下载/宿主机 mc); 升级 mc 只需换那个离线件再重建 base。
-COPY bin/mc /usr/local/bin/mc
-RUN chmod +x /usr/local/bin/mc && mc --version
+RUN set -eux; \
+    curl -fsSL -o /tmp/yq "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"; \
+    echo "${YQ_SHA256}  /tmp/yq" | sha256sum -c -; \
+    install -m 0755 /tmp/yq /usr/local/bin/yq; \
+    rm -f /tmp/yq; \
+    yq --version
+
+# mc bootstraps MinIO downloads and cannot be supplied by a mount.
+RUN set -eux; \
+    curl -fsSL -o /tmp/mc "https://dl.min.io/aistor/mc/release/linux-amd64/archive/mc.${MC_VERSION}"; \
+    echo "${MC_SHA256}  /tmp/mc" | sha256sum -c -; \
+    install -m 0755 /tmp/mc /usr/local/bin/mc; \
+    rm -f /tmp/mc; \
+    mc --version
 
 # ---------- kubespray Python 依赖(ansible 等; 构建时下载 wheel 缓存, 运行时离线安装) ----------
 # ① 构建机联网时(清华源) pip download 拉 wheel 到 /tmp/pipcache;

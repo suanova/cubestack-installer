@@ -57,14 +57,17 @@ cp deployments/config/cluster.conf.example deployments/config/cluster.conf
 镜像：
 
 ```text
-harbor.isuanova.com/suanova/cubestack-installer-cli:latest
+harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
 ```
+
+镜像 tag 由仓库根 `VERSION_LINE` 派生（当前 `2.1` → `:2.1-latest`），
+不覆盖 2.0.x 仍在使用的 `:latest`。
 
 构建/推送：
 
 ```bash
-sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build
-sudo ./deployments/scripts/tools/docker/build-cli-context.sh --push
+sudo ./deployments/scripts/tools/docker/build-cli-image.sh --build
+sudo ./deployments/scripts/tools/docker/build-cli-image.sh --push
 ```
 
 运行：
@@ -74,7 +77,7 @@ sudo docker run --rm -it --network host \
   -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
   -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
   -v $HOME/.ssh:/root/.ssh \
-  harbor.isuanova.com/suanova/cubestack-installer-cli:latest
+  harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
 ```
 
 容器内已是 root，直接运行部署脚本。离线文件挂载复用，不进入镜像。
@@ -93,8 +96,10 @@ versions/
   os/                       # 节点前置包体检清单
 docs/                       # 设计、运行、排障文档
 skills/                     # 维护者技能文档
-Dockerfile-cli              # CLI 镜像（代码层）
-Dockerfile-cli-base         # CLI 镜像（基础层）
+images/
+  installer-cli/            # CLI 镜像（代码层）Dockerfile
+  installer-cli-base/       # CLI 镜像（基础层）Dockerfile
+  netshoot-rdma/            # RDMA 诊断镜像 Dockerfile
 Makefile                    # 辅助构建目标（netshoot-rdma 等）
 ```
 

@@ -63,3 +63,20 @@ sudo ./deploy-cluster.sh --with-cubestack
 
 第三方镜像的 Harbor 同步由 `container-image-mirror` 仓库负责；
 本仓库不再维护镜像清单或同步流水线。
+
+## 镜像构建原则
+
+1. **构建输入只来自仓库或网络**：不读取构建机的 `PATH`、`offline-files/`、
+   `bin/` 或本地缓存。代码层以仓库根为上下文；base 层只从仓库取
+   `requirements.txt`，工具链按 pinned version + sha256 从上游下载。
+2. **网络下载必须钉版本和校验和**：禁止 `latest` URL；版本和 sha256 写在
+   Dockerfile 的 `ARG` 里。
+3. **base 变化必须连带重建代码层**：代码层永远 `FROM` 一个固定 base；base
+   重建后必须重建并推送代码层，否则镜像内容与 Dockerfile 不一致。
+4. **镜像 tag 按发布线隔离**：
+   - 仓库根 `VERSION_LINE=X.Y` 是版本线的唯一来源；
+   - CI 派生 `<X.Y>-latest`（如 `2.1-latest`），不再使用全局 `latest`；
+   - `release-X.Y` 分支的 `VERSION_LINE` 必须是 `X.Y`，CI 会校验；
+   - 正式发布使用不可变版本 tag（如 `2.1.0`），并优先按 digest 引用。
+   这样 2.1 的 base 更新不会影响尚未发布的 2.0.1 CLI 构建。
+5. **不可变 tag 不覆盖**：版本 tag 已存在时构建失败，要求换版本或显式处理。

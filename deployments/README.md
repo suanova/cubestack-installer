@@ -6,7 +6,7 @@
 - **脚本开发规范**(模块命名/元数据/新增模块流程):见 [`docs/scripts-development-spec.md`](../docs/scripts-development-spec.md)
 - **P1/P2/P3 全阶段组件规划与进度追踪**:见 [`docs/cluster-components-plan.md`](../docs/cluster-components-plan.md)
 - **kubespray 离线工具**(多集群):见 [`deployments/kubespray/README.md`](kubespray/README.md)
-- **CLI 容器(可选)**: [`Dockerfile-cli`](../Dockerfile-cli) 打包 kubespray 源码 + 部署脚本 + 工具链
+- **CLI 容器(可选)**: [`images/installer-cli/Dockerfile`](../images/installer-cli/Dockerfile) 打包 kubespray 源码 + 部署脚本 + 工具链
   (ansible/helm/skopeo/mc/kubectl 等, 不含离线镜像/binary), 可在容器内直接离线安装。
   运行(仓库根目录执行, 挂载离线文件/配置/SSH 密钥, `--network host` 必须):
   ```bash

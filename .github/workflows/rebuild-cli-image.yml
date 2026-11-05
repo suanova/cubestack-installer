@@ -2,13 +2,19 @@ name: Rebuild installer CLI image
 
 # ============================================================================
 # 部署代码变更后重建 CLI 镜像。
-#   · push main → :latest(开发通道)
+#   · push main/release-X.Y → :<VERSION_LINE>-latest(开发通道)
 #   · workflow_dispatch + version → 额外推送 :<version>(发布通道; 外部打包流程
 #     按 Harbor 中的镜像 digest 取 CLI tar)
 #
 # operator chart 由外部版本树随包分发, 不再打进 CLI 镜像。
 #
-# 触发: push 到 main(部署代码/脚本/模板) 或 workflow_dispatch 手动重建
+# 触发: push 到 main/release-2.1(部署代码/脚本/模板) 或 workflow_dispatch 手动重建
+#
+# 按改动选择重建哪一层:
+#   · images/installer-cli-base/** 变化 → 重建 base + 代码层，并推两个镜像
+#   · 版本线由仓库根 VERSION_LINE 决定；release-X.Y 分支必须与文件一致
+#   · images/installer-cli/** 或代码输入变化 → 只重建代码层
+#   · 代码层永远基于当前 base；base 变了必须连带重建代码层
 #
 # 一次性配置 (repo Settings):
 #   Secrets: HARBOR_MIRROR_PASSWORD
@@ -19,7 +25,7 @@ on:
   # Code-layer inputs baked into the CLI image. offline-files/ and
   # kubespray/versions/ are excluded on purpose (mounted/fetched at runtime).
   push:
-    branches: [main]
+    branches: [main, release-2.1]
     paths:
       - 'deployments/scripts/**'
       - 'deployments/kubespray/**'
@@ -29,16 +35,22 @@ on:
       - 'versions/**'
 
       - 'skills/**'
-      - 'Dockerfile-cli'
-      - 'Dockerfile-cli-base'
+      - 'VERSION_LINE'
+      - 'images/installer-cli/**'
+      - 'images/installer-cli-base/**'
       - '.dockerignore'
       - '.github/workflows/rebuild-cli-image.yml'
   workflow_dispatch:
     inputs:
       version:
-        description: '推送的 CLI 镜像版本(如 2.1.0; 留空=只推 :latest)'
+        description: '推送的 CLI 镜像版本(如 2.1.0; 留空=只推 <VERSION_LINE>-latest)'
         required: false
         default: ''
+      force_base:
+        description: '强制重建 base 层（base 变了会自动触发）'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -64,6 +76,36 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Detect changed layers
+        id: changes
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            build_base="${{ inputs.force_base }}"
+            build_cli=true
+          else
+            before="${{ github.event.before }}"
+            if [ -z "${before}" ] || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+              before="$(git rev-parse HEAD^)"
+            fi
+            changed="$(git diff --name-only "${before}" HEAD)"
+            echo "changed files:"; printf '%s\n' "${changed}"
+            build_base=false
+            build_cli=false
+            grep -qE '^images/installer-cli-base/' <<<"${changed}" && build_base=true
+            # A new version line needs a base for the new channel.
+            grep -qE '^VERSION_LINE$' <<<"${changed}" && build_base=true
+            grep -qE '^images/installer-cli/' <<<"${changed}" && build_cli=true
+            grep -qE '^(deployments/scripts/|deployments/kubespray/|deployments/cubestack-addon/|deployments/config/|versions/|skills/|VERSION_LINE$|\.dockerignore$)' <<<"${changed}" \
+              && build_cli=true
+            # A base change is useless without rebuilding the code layer on top.
+            [ "${build_base}" = "true" ] && build_cli=true
+          fi
+          echo "build_base=${build_base}" >> "${GITHUB_OUTPUT}"
+          echo "build_cli=${build_cli}" >> "${GITHUB_OUTPUT}"
+          echo "build_base=${build_base} build_cli=${build_cli}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Validate configuration
         run: |
@@ -77,16 +119,42 @@ jobs:
           done
           [ "${missing}" = "0" ] || exit 1
 
+      - name: Resolve version line
+        run: |
+          set -euo pipefail
+          line="$(tr -d '[:space:]' < VERSION_LINE)"
+          case "${line}" in
+            [0-9]*.[0-9]*) ;;
+            *) echo "::error::invalid VERSION_LINE: '${line}'"; exit 1 ;;
+          esac
+          case "${GITHUB_REF_NAME}" in
+            release-*)
+              if [ "${GITHUB_REF_NAME}" != "release-${line}" ]; then
+                echo "::error::VERSION_LINE=${line} does not match ${GITHUB_REF_NAME}"
+                exit 1
+              fi
+              ;;
+          esac
+          echo "VERSION_LINE=${line}" >> "${GITHUB_ENV}"
+          echo "CLI_CHANNEL=${line}-latest" >> "${GITHUB_ENV}"
+          echo "version line=${line} channel=${line}-latest" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Resolve target image
         run: |
           set -euo pipefail
-          tag="${IMAGE_VERSION:-latest}"
+          tag="${IMAGE_VERSION:-${CLI_CHANNEL}}"
           case "${tag}" in
             ''|*[!0-9A-Za-z._-]*) echo "::error::invalid version: ${tag}"; exit 1 ;;
           esac
           image="${HARBOR_HOST}/suanova/cubestack-installer-cli:${tag}"
-          echo "IMAGE=${image}" >> "${GITHUB_ENV}"
-          echo "resolved image: ${image}" | tee -a "${GITHUB_STEP_SUMMARY}"
+          channel_image="${HARBOR_HOST}/suanova/cubestack-installer-cli:${CLI_CHANNEL}"
+          base_image="${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:${CLI_CHANNEL}"
+          {
+            echo "IMAGE=${image}"
+            echo "CLI_IMAGE=${channel_image}"
+            echo "CLI_BASE_TAG=${base_image}"
+          } >> "${GITHUB_ENV}"
+          echo "channel=${CLI_CHANNEL} image=${image} base=${base_image}" | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Reclaim disk space
         run: |
@@ -103,26 +171,54 @@ jobs:
           echo "${HARBOR_SECRET}" | docker login "${HARBOR_HOST}" -u "${HARBOR_USERNAME}" --password-stdin
 
       - name: Build CLI image
+        if: steps.changes.outputs.build_cli == 'true'
         run: |
           set -euo pipefail
-          bash deployments/scripts/tools/docker/build-cli-context.sh --build --engine docker
-          # build-cli-context.sh 固定产出 :latest; 需要版本 tag 时再打一层。
-          built="harbor.isuanova.com/suanova/cubestack-installer-cli:latest"
-          if [ "${IMAGE}" != "${built}" ]; then
-            docker tag "${built}" "${IMAGE}"
+          if [ "${{ steps.changes.outputs.build_base }}" = "true" ]; then
+            bash deployments/scripts/tools/docker/build-cli-image.sh --base --engine docker
+          else
+            bash deployments/scripts/tools/docker/build-cli-image.sh --build --engine docker
+          fi
+          # build-cli-image.sh builds the channel tag; add the version tag on top.
+          if [ "${IMAGE}" != "${CLI_IMAGE}" ]; then
+            docker tag "${CLI_IMAGE}" "${IMAGE}"
           fi
 
       - name: Verify required tools are baked into image
+        if: steps.changes.outputs.build_cli == 'true'
         run: |
           set -euo pipefail
           # patch 是 kubespray 补丁层的必需工具; 缺失会让补丁层静默跳过。
           docker run --rm --entrypoint bash "${IMAGE}" -lc \
             'command -v patch >/dev/null && patch --version | head -1'
 
+      - name: Push base image
+        if: steps.changes.outputs.build_base == 'true'
+        run: |
+          set -euo pipefail
+          version_tag=""
+          if [ -n "${IMAGE_VERSION}" ]; then
+            version_tag="${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:${IMAGE_VERSION}"
+            if docker manifest inspect "${version_tag}" >/dev/null 2>&1; then
+              echo "::error::immutable base tag already exists: ${version_tag}"
+              exit 1
+            fi
+          fi
+          docker push "${CLI_BASE_TAG}"
+          if [ -n "${version_tag}" ]; then
+            docker tag "${CLI_BASE_TAG}" "${version_tag}"
+            docker push "${version_tag}"
+            echo "pushed immutable base: ${version_tag}" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Push image
+        if: steps.changes.outputs.build_cli == 'true'
         run: |
           set -euo pipefail
           push_log="${RUNNER_TEMP}/docker-push.log"
+          if [ "${CLI_IMAGE}" != "${IMAGE}" ]; then
+            docker push "${CLI_IMAGE}"
+          fi
           docker push "${IMAGE}" 2>&1 | tee "${push_log}"
           # registry digest 是 Harbor/MinIO 一致性的锚点; docker push 最后一行含
           # "digest: sha256:..."。RepoDigests 作为兼容兜底(部分 Docker 版本)。

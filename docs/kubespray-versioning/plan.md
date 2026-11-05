@@ -1023,7 +1023,7 @@ ls /tmp/fetch-probe/kubespray/v2.32.0/packages | head
 
 - [x] **Step 1: 逐处改经变量**(统一口径:`${OFFLINE_FILES_DIR}` = 版本资产目录;`${OFFLINE_FILES_ROOT}` = 真根)
 - [x] **Step 2: `.dockerignore`** 路径加版本层(`deployments/offline-files/kubespray/*/images` 等)——
-  该文件无变量能力,只能逐条改;以 `Dockerfile-cli` 的 `COPY` 清单为准逐条对齐(两处必须成对改)
+  该文件无变量能力,只能逐条改;以 `images/installer-cli/Dockerfile` 的 `COPY` 清单为准逐条对齐(两处必须成对改)
 - [x] **Step 3: 校验**
 
 ```bash

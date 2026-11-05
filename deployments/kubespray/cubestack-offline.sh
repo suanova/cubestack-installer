@@ -117,7 +117,7 @@ _ensure_patches_applied() {
     local n
     [ -f "${tool}" ] || { warn "未找到补丁工具 ${tool}, 跳过补丁层保障"; return 0; }
     # ⚠ CLI 镜像曾未内置 `patch`(2026-10-08 实测)⇒ 检查恒 MISSING、apply 必炸 —— 先防呆,
-    #   工具不备时**降级跳过**(不 err 中断部署);镜像/Dockerfile-cli-base 已补装 GNU patch。
+    #   工具不备时**降级跳过**(不 err 中断部署);镜像/images/installer-cli-base/Dockerfile 已补装 GNU patch。
     command -v patch >/dev/null 2>&1 || {
         warn "容器内无 patch 命令 → 跳过补丁层自动保障(修法: 重建 CLI 镜像[已含 patch], 或 docker cp /usr/bin/patch 进容器)"
         return 0
@@ -311,7 +311,7 @@ ensure_venv() {
 
     if [ ! -d ".venv" ]; then
         highlight "创建 Python 虚拟环境(继承镜像预装的系统依赖, 完全离线)..."
-        # --system-site-packages: 复用镜像/系统已预装的 ansible 等依赖(见 Dockerfile-cli),
+        # --system-site-packages: 复用镜像/系统已预装的 ansible 等依赖(见 images/installer-cli/Dockerfile),
         # 避免新建空 venv 后联网 pip install 拉取失败(离线环境)。
         # ⚠ 解释器选择: 树内 requirements.txt 是 ansible==12.3.0(= ansible-core 2.19.x), 它在
         #   **控制端**硬要求 Python ≥3.11;ubuntu 22.04 自带的 python3 是 3.10 → 建 3.10 venv 时

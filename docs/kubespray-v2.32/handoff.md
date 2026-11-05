@@ -22,9 +22,9 @@
 
 ## 二、待办(交回本机/联网机/真机环境执行)
 
-**T12 重建 CLI 镜像** —— 树内 `requirements.txt` 已是 `ansible==12.3.0`;`Dockerfile-cli` 直接 COPY 它。**不重建则任何部署都会撞 ansible 2.19 版本门**(≥2.19 <2.20)。同时 `.venv_wheels/` 缓存若要用于裸机路径需刷新。
+**T12 重建 CLI 镜像** —— 树内 `requirements.txt` 已是 `ansible==12.3.0`;`images/installer-cli/Dockerfile` 直接 COPY 它。**不重建则任何部署都会撞 ansible 2.19 版本门**(≥2.19 <2.20)。同时 `.venv_wheels/` 缓存若要用于裸机路径需刷新。
 ⚠ **2026-09-28 实测更正:这不是"机械动作"** —— `ansible==12.3.0`(= ansible-core 2.19.x)**在控制端要求 Python ≥3.11**,而基础镜像/ubuntu 22.04 是 **3.10** ⇒ `python3 -m pip install -r requirements.txt` 直接失败(`Requires-Python >=3.11`)。已修:
-`Dockerfile-cli` + `Dockerfile-cli-incremental` 装 **deadsnakes python3.11** 并让 ansible 走它(系统 python3 仍 3.10,不动 python3-libvirt);
+`images/installer-cli/Dockerfile` + `images/installer-cli/Dockerfile` 装 **deadsnakes python3.11** 并让 ansible 走它(系统 python3 仍 3.10,不动 python3-libvirt);
 `cubestack-offline.sh:ensure_venv` 改为**优先挑 python3.12/3.11**(裸机路径),宿主要装 ≥3.11;
 `.venv_wheels/` 已加 gitignore(原机制在、缓存从没产出)。SOP 同步:`docs/kubespray-upgrade.md` 新增第 8 条。
 

@@ -23,7 +23,7 @@
 #    kubectl/helm/skopeo/yq/mc —— 2026-09-30 最终口径: 工具链**打进 base 层**(非登录 shell 也有);
 #    运行期钩子只在工具缺失时从挂载的版本目录补齐、不覆盖(见 docs/kubespray-versioning/README.md §8);
 #    部署流程仍用 bash -lc(既有口径))
-docker pull harbor.isuanova.com/suanova/cubestack-installer-cli:latest
+docker pull harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
 
 # ② 宿主机准备大磁盘离线目录(离线文件较大, 建议 ≥50GiB 空闲; 多集群可共用同一份)
 mkdir -p /data/offline-files
@@ -31,7 +31,7 @@ mkdir -p /data/offline-files
 # ③ 启动容器(后台 + network host): 把离线目录/配置/SSH 密钥挂进容器
 sudo docker run -itd --name cubestack-install --network=host \
   -v /data/offline-files:/opt/cubestack-installer/deployments/offline-files \
-  harbor.isuanova.com/suanova/cubestack-installer-cli:latest bash
+  harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest bash
 
 # ④ 进入容器(容器内已是 root, 无需 sudo)
 sudo docker exec -it cubestack-install bash
@@ -114,7 +114,7 @@ deployments/scripts/
 │   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / prepare-workers.sh
 │   │                         #        setup-ntp.sh / sync-hosts.sh / sync-ca*.sh / rebootstrap*.sh
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
-│   ├── images/                #   镜像工具: nvidia-chart-images.sh(chart 反推镜像) / netshoot-rdma.Dockerfile
+│   ├── images/                #   镜像工具: nvidia-chart-images.sh(chart 反推镜像); netshoot Dockerfile 在仓库根 images/netshoot-rdma/
 │   ├── offline/               #   离线完整性: verify-offline-files(校验) / build-verifier(.pyz 构建) / sync-to-container(开发同步)
 │   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 └── README.md                  # 本文件
@@ -545,7 +545,7 @@ export OFFLINE_FILES_ROOT=<root>/2.1.0/offline-files
 - **创建虚拟机(依赖宿主机 libvirt)**:加 `--privileged` 或挂载 `/var/run/libvirt`;纯裸金属离线部署无需额外特权。
 - **后台运行 + `docker exec`**(非交互式启动):`sudo docker run -itd --name cubestack-install --network host ...` 后 `sudo docker exec -it cubestack-install bash`(见 §1 步骤③④)。
 - **离线文件不下载进容器**:离线镜像/二进制不入镜像,由版本树挂载目录共享,多集群/换环境复用。
-- 根 `README.md` §十四 还有镜像构建(`build-cli-context.sh`)与挂载参数说明。
+- 根 `README.md` §十四 还有镜像构建(`build-cli-image.sh`)与挂载参数说明。
 
 ---
 

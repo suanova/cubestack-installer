@@ -193,10 +193,10 @@ jobs:
       - name: CLI 镜像必需工具(patch)静态门禁
         run: |
           set -euo pipefail
-          command grep -qE '^[[:space:]]*netcat-openbsd patch' Dockerfile-cli-base \
-            || { echo "::error::Dockerfile-cli-base 未安装 patch"; exit 1; }
-          command grep -q 'command -v patch' Dockerfile-cli \
-            || { echo "::error::Dockerfile-cli 缺少 patch 构建期断言"; exit 1; }
+          command grep -qE '^[[:space:]]*netcat-openbsd patch' images/installer-cli-base/Dockerfile \
+            || { echo "::error::installer-cli-base Dockerfile 未安装 patch"; exit 1; }
+          command grep -q 'command -v patch' images/installer-cli/Dockerfile \
+            || { echo "::error::installer-cli Dockerfile 缺少 patch 构建期断言"; exit 1; }
 
       # CubeStack Web UI 地址发现(Envoy Gateway/HTTPRoute/Service 解析, 假 kubectl 夹具)
       - name: CubeStack Web UI 地址发现回归(cubestack-ui-url)

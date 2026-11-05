@@ -81,7 +81,7 @@
 
 `.dockerignore:40-64`(逐一列扁平文件名的硬清单)、`tools/node/reconcile-node-packages.sh:54-55`、
 `modules/03_addon/02_ceph.sh:163-164`(lvm2 通配)、`modules/03_addon/22_verify_registry_storage.sh:74`
-(字面 `busybox.tar`)、`tools/offline/sync-to-container.sh:158`、`tools/docker/build-cli-context.sh:97`。
+(字面 `busybox.tar`)、`tools/offline/sync-to-container.sh:158`、`tools/docker/build-cli-image.sh:97`。
 
 ### 2.5 布局探针用"目录名"判定
 

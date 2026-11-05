@@ -248,12 +248,12 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
     (含 VM=宿主机物理 IP / 全裸金属=第一个 master IP, load_config + sync-kubespray-config), 不是节点处理判断。
 - 新增脚本解析 NODES 一律用 `node_parse "${line}"`, 不要再用 `IFS=, read -r role hostname ip mac ...`。
 
-## 离线部署容器(Dockerfile-cli)与离线文件
+## 离线部署容器(images/installer-cli/Dockerfile)与离线文件
 
-- **Dockerfile-cli**: 打包 kubespray 源码 + deployments 目录 + 工具链(ansible/helm/skopeo/mc/kubectl/sshpass/virsh),
+- **images/installer-cli/Dockerfile**: 打包 kubespray 源码 + deployments 目录 + 工具链(ansible/helm/skopeo/mc/kubectl/sshpass/virsh),
   **不含离线镜像与 binary**(`.dockerignore` 排除 offline-files(含 virtual-machine)/inventory)。构建运行:
   ```bash
-  docker build -f Dockerfile-cli -t cubestack-cli .
+  docker build -f images/installer-cli/Dockerfile -t cubestack-cli .
   docker run --rm -it --network host \
     -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
     -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
