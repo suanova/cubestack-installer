@@ -16,6 +16,22 @@
 # VCS 元数据(不入镜像, 常规做法)
 .git
 
+# 运行期凭据/状态: 构建机工作区里可能存在(已 gitignore), 但绝不能进镜像层
+cluster.conf
+cluster.conf.bak*
+cluster.conf.backup
+deployments/config/cluster.conf
+deployments/config/cluster.conf.bak
+deployments/config/cluster.conf.bak.*
+deployments/config/external-ceph*
+deployments/config/.deploy.state
+deployments/config/.deploy.state.lock
+deployments/config/secret-blocklist.txt
+deployments/*@*/
+deployments/cli-context/
+deployments/scripts/.modules-merged.*
+offline-releases/
+
 # ---------- installer-cli 镜像 专用: offline-files 大文件排除 ----------
 # (CLI 镜像只含源码 + 少量 CLI 二进制; 海量离线镜像/VM 经卷挂载或
 #  版本树(外部打包流程物化)
@@ -26,7 +42,7 @@
 # 注意: 下面的归档/镜像规则须先列 helm 白名单(helm tarball 是唯一要打进的
 # 压缩包), 其余 *.tar.gz / *.tgz / *.tar / *.tar.xz 全部排除。
 # 保留 helm tarball 作为唯一打进镜像的压缩包;
-# 版本目录整层排除(2026-09-30 起离线件在 kubespray/<版本>/ 下; 二进制由 build-cli-context.sh
+# 版本目录整层排除(2026-09-30 起离线件在 kubespray/<版本>/ 下; 二进制由 build-cli-image.sh
 #   从版本目录拷进 bin/ 再 COPY, 不依赖构建上下文里的 offline-files)。⚠ 漏了这行的后果:
 #   整仓上下文 docker build 会把 4.5GB 离线件打进镜像/拖慢构建。
 deployments/offline-files/kubespray/*/

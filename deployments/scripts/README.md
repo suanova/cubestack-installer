@@ -545,7 +545,7 @@ export OFFLINE_FILES_ROOT=<root>/2.1.0/offline-files
 - **创建虚拟机(依赖宿主机 libvirt)**:加 `--privileged` 或挂载 `/var/run/libvirt`;纯裸金属离线部署无需额外特权。
 - **后台运行 + `docker exec`**(非交互式启动):`sudo docker run -itd --name cubestack-install --network host ...` 后 `sudo docker exec -it cubestack-install bash`(见 §1 步骤③④)。
 - **离线文件不下载进容器**:离线镜像/二进制不入镜像,由版本树挂载目录共享,多集群/换环境复用。
-- 根 `README.md` §十四 还有镜像构建(`build-cli-context.sh`)与挂载参数说明。
+- 根 `README.md` §十四 还有镜像构建(`build-cli-image.sh`)与挂载参数说明。
 
 ---
 

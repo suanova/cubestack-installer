@@ -1951,8 +1951,8 @@ bash deployments/scripts/tools/tests/test-cephfs-mount.sh            # ⑪: 旧 
 - `rebuild-cli-image.yml` 构建后实际运行镜像校验 `patch`，并在 `ci-validate.yml` 加静态门禁；
 - 发布前/重建 base：
   ```bash
-  sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base --push
-  sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build --push
+  sudo ./deployments/scripts/tools/docker/build-cli-image.sh --base --push
+  sudo ./deployments/scripts/tools/docker/build-cli-image.sh --build --push
   docker run --rm --entrypoint bash <cli-image> -lc 'command -v patch'
   ```
 

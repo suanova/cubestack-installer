@@ -14,12 +14,12 @@
 #   分层后: base 层数固定, 代码层每次只加 1~2 层 ⇒ 该问题从结构上消失。
 #
 # 构建/推送:
-#   sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base            # 生成上下文 + 构建 base
-#   sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base --push     # 并推送到 Harbor
+#   sudo ./deployments/scripts/tools/docker/build-cli-image.sh --base            # 生成上下文 + 构建 base
+#   sudo ./deployments/scripts/tools/docker/build-cli-image.sh --base --push     # 并推送到 Harbor
 # 依赖: 构建机联网(apt 清华源 + PyPI 清华源); 基础 ubuntu:22.04 本地缺失时自动 docker load 离线 tar。
 # =====================================================================
 
-# 基础镜像: ubuntu:22.04(离线构建由 build-cli-context.sh --base 自动 docker load)
+# 基础镜像: ubuntu:22.04(离线构建由 build-cli-image.sh --base 自动 docker load)
 ARG BASE_IMAGE=ubuntu:22.04
 FROM ${BASE_IMAGE}
 
@@ -74,7 +74,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends software-proper
 #   实测事故: 运行期钩子只在**登录 shell** 生效, `docker exec … bash` / 脚本里的非登录 shell
 #   拿不到工具 ⇒ `kubectl: command not found`(部署流程里也有这种调用面)。
 #   工具版本随 kubespray 版本目录(cluster.conf 钉子)走: 升级改版本 → 重建 base 即可。
-#   取值: build-cli-context.sh 从 <版本目录> 拷进构建上下文 bin/(离线件优先, 缺失才回退联网/宿主机)。
+#   取值: build-cli-image.sh 从 <版本目录> 拷进临时构建目录 bin/(离线件优先, 缺失才回退联网/宿主机)。
 COPY bin/kubectl /usr/local/bin/kubectl
 RUN chmod +x /usr/local/bin/kubectl && kubectl version --client 2>/dev/null | head -1
 
@@ -94,7 +94,7 @@ RUN chmod +x /usr/local/bin/yq && yq --version
 #   kubectl/helm/skopeo 那样"运行期从挂载的版本目录取"(先有鸡还是先有蛋)。
 # ⚠ 官方下载路径**会变**: 老路径 https://dl.min.io/client/mc/release/linux-amd64/mc 已 410 Gone,
 #   新路径 https://dl.min.io/aistor/mc/release/linux-<arch>/mc(2026-09-30 实测 200)。
-#   ⇒ 由 build-cli-context.sh 从**离线件** offline-files/os/mc-* 拷入构建上下文 bin/mc
+#   ⇒ 由 build-cli-image.sh 从**离线件** offline-files/os/mc-* 拷入临时构建目录 bin/mc
 #     (缺失时回退联网下载/宿主机 mc); 升级 mc 只需换那个离线件再重建 base。
 COPY bin/mc /usr/local/bin/mc
 RUN chmod +x /usr/local/bin/mc && mc --version

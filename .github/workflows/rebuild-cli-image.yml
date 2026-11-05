@@ -105,8 +105,8 @@ jobs:
       - name: Build CLI image
         run: |
           set -euo pipefail
-          bash deployments/scripts/tools/docker/build-cli-context.sh --build --engine docker
-          # build-cli-context.sh 固定产出 :latest; 需要版本 tag 时再打一层。
+          bash deployments/scripts/tools/docker/build-cli-image.sh --build --engine docker
+          # build-cli-image.sh 固定产出 :latest; 需要版本 tag 时再打一层。
           built="harbor.isuanova.com/suanova/cubestack-installer-cli:latest"
           if [ "${IMAGE}" != "${built}" ]; then
             docker tag "${built}" "${IMAGE}"

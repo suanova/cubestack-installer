@@ -8,9 +8,9 @@
 #        而不是叠在上一版镜像上 —— 旧做法实测累积到 590 层会撞内核 overlay 挂载上限)。
 #
 # ★ 构建方式(统一入口; 会先自动准备 base: 本地有就用, 没有就拉 Harbor, 再没有就提示 --base):
-#     sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build     # 生成上下文 + 构建代码层
-#     sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build --incremental   # 别名(等价)
-#     sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base      # 仅在系统/工具/依赖变化时重建 base
+#     sudo ./deployments/scripts/tools/docker/build-cli-image.sh --build     # 生成上下文 + 构建代码层
+#     sudo ./deployments/scripts/tools/docker/build-cli-image.sh --build --incremental   # 别名(等价)
+#     sudo ./deployments/scripts/tools/docker/build-cli-image.sh --base      # 仅在系统/工具/依赖变化时重建 base
 # ---------------------------------------------------------------------
 # 镜像内容契约(用户口径): **只含 deployments/ 代码**
 #   · kubespray 源码(deployments/kubespray/kubespray)+ 全部部署脚本 + cubestack-addon + skills
@@ -32,7 +32,7 @@
 #       纯裸金属离线部署(kubespray + operator)无需额外特权。
 # =====================================================================
 
-# base 镜像(系统+工具链层): 默认走 Harbor; 本地/离线场景由 build-cli-context.sh 传 --build-arg 覆盖
+# base 镜像(系统+工具链层): 默认走 Harbor; 本地/离线场景由 build-cli-image.sh 传 --build-arg 覆盖
 ARG CLI_BASE_TAG=harbor.isuanova.com/cubestack/cubestack-installer-cli-base:latest
 FROM ${CLI_BASE_TAG}
 

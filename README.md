@@ -63,8 +63,8 @@ harbor.isuanova.com/suanova/cubestack-installer-cli:latest
 构建/推送：
 
 ```bash
-sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build
-sudo ./deployments/scripts/tools/docker/build-cli-context.sh --push
+sudo ./deployments/scripts/tools/docker/build-cli-image.sh --build
+sudo ./deployments/scripts/tools/docker/build-cli-image.sh --push
 ```
 
 运行：

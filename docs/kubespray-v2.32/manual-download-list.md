@@ -26,7 +26,7 @@
 
 校验:镜像 tar 47 个 + multus 2 个,完整性(全量读)/身份(RepoTags)/自洽性(index→manifest→blob)全过。
 连带:`cluster.conf`(+`.example`)的 `LOCAL_PATH_VERSION` v0.0.24 → **v0.0.37**;`images/installer-cli/Dockerfile` 与
-`build-cli-context.sh` 引用的 kubectl/helm 旧件名同步换代(否则删旧件后 CLI 镜像构建会缺文件)。
+`build-cli-image.sh` 引用的 kubectl/helm 旧件名同步换代(否则删旧件后 CLI 镜像构建会缺文件)。
 
 **仍缺**:`nfd/node-feature-discovery:v0.19.0` 的 tar(NFD 默认关 ⇒ 默认部署不需要);
 Harbor `mirrors/**` 还没同步 1.35 线(所以 `harbor-save-images.sh` 暂时拉不到新件 —— 这也是本次
