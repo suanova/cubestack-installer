@@ -8,8 +8,8 @@
 #     · perftest   → ib_write_bw / ib_read_bw / ib_write_lat ...(带宽/时延实测)
 #   ⚠ Alpine **没有 perftest 包**(社区源里查不到), 只能源码编译 → 两阶段构建, 构建期不留编译工具。
 #
-# 谁构建: 联网机 tools/images/netshoot-rdma-build.sh(本文件不由部署机执行, 不在模块里 build)
-# 数据源: 无(cluster.conf 只在 build 脚本里用于 tag/输出目录)
+# 谁构建: make netshoot-rdma / .github/workflows/build-netshoot-rdma.yml
+# 数据源: 无(cluster.conf 只在 build 目标里用于 tag/输出目录)
 # ============================================================
 ARG BASE_IMAGE=nicolaka/netshoot:latest
 # apk 源: 留空 = 保持镜像自带的上游 dl-cdn.alpinelinux.org(默认, 不改变外部环境行为)。

@@ -12,9 +12,9 @@
 #   · 定位: 集群里**常驻一台"网络工具箱"** —— kubectl exec 进去就能用 tcpdump / ip / ss / ethtool /
 #     mtr / ping / nslookup 排障; 镜像里额外装了 rdma-core(ibv_devices/ibv_devinfo)与
 #     perftest(ib_write_bw/ib_read_bw...), 用于 RDMA(IB/RoCE)链路诊断与带宽/时延实测。
-#   · 镜像(离线): 自建镜像 tar 由**联网机** tools/images/netshoot-rdma-build.sh 生成
-#     (netshoot-rdma.Dockerfile: netshoot + rdma-core + 源码编译 perftest —— Alpine 无 perftest 包);
-#     放到 ${NETSHOOT_SAVE_DIR}(默认 deployments/offline-files/netshoot/)→ 本模块推入集群内置 registry。
+#   · 镜像: `make netshoot-rdma` / CI 构建并 push public Harbor;
+#     release 打包或开源在线安装再从 Harbor 物化成 tar, 放到 ${NETSHOOT_SAVE_DIR}
+#     (默认 deployments/offline-files/netshoot/) → 本模块推入集群内置 registry。
 #     ⚠ 自建 tar 缺失时**回退**用离线包里的原始 netshoot(netshoot.tar): pod 照样能起, 但
 #       **没有 ibv_*/perftest**(会有醒目告警) —— 总比"诊断工具起不来"强。
 #   · ★ RDMA 资源**自动降级**: 只有集群节点真的注册了 ${NETSHOOT_RDMA_RESOURCE}(默认
@@ -111,13 +111,13 @@ if [ -z "${TAR_FILE}" ]; then
     USING_RDMA_IMG=0
     IMG_NAME="netshoot"
     [ -f "${BASE_TAR}" ] || { err "自建镜像 tar 与回退 tar 都没有:"; \
-        err "  ① 自建(推荐, 含 ibv_*/perftest): 联网机跑 tools/images/netshoot-rdma-build.sh → tar 放到 ${SAVE_DIR}/"; \
+        err "  ① 用 release 打包或开源在线安装从 Harbor 物化 netshoot-rdma 到 ${SAVE_DIR}/"; \
         err "  ② 或放原始 netshoot 到 ${BASE_TAR}(无 ibv_*/perftest)"; exit 1; }
     TAR_FILE="${BASE_TAR}"
     TAG="$(tar_first_image_tag "${TAR_FILE}")"; TAG="${TAG##*:}"
     [ -n "${TAG}" ] || TAG="latest"
     warn "  未找到自建镜像 tar(netshoot-rdma-*.tar in ${SAVE_DIR})→ 回退原始 netshoot(${TAR_FILE##*/})"
-    warn "  ⚠ 回退版**没有 ibv_*/perftest**; 要 RDMA 诊断: 联网机跑 tools/images/netshoot-rdma-build.sh 后重跑本模块"
+    warn "  ⚠ 回退版**没有 ibv_*/perftest**; 要 RDMA 诊断: 用 release/开源安装物化 netshoot-rdma tar 后重跑本模块"
 else
     ok "  自建镜像 tar: ${TAR_FILE}"
 fi

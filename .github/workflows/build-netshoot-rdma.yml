@@ -43,6 +43,10 @@ jobs:
       HARBOR_HOST: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
       HARBOR_USER: ${{ vars.HARBOR_MIRROR_USER || secrets.HARBOR_MIRROR_USER }}
       HARBOR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
+      IMAGE: ${{ vars.NETSHOOT_RDMA_IMAGE || 'harbor.isuanova.com/suanova/netshoot-rdma' }}
+      # TODO: pin this to an immutable base tag/digest once the public mirror
+      # catalog carries a pinned netshoot base.
+      BASE_IMAGE: ${{ vars.NETSHOOT_RDMA_BASE_IMAGE || 'nicolaka/netshoot:latest' }}
       IMAGE_TAG_INPUT: ${{ inputs.tag }}
       PERFTEST_INPUT: ${{ inputs.perftest_version }}
       PUSH_INPUT: ${{ inputs.push }}
@@ -57,13 +61,19 @@ jobs:
         run: |
           set -euo pipefail
           tag="${IMAGE_TAG_INPUT}"
-          case "${tag}" in
-            ''|*[!0-9A-Za-z._-]*|latest)
-              echo "::error::invalid or forbidden tag: '${tag}' (no latest, no shell metacharacters)"
-              exit 1 ;;
-          esac
+          [[ "${tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] \
+            || { echo "::error::invalid image tag: '${tag}'"; exit 1; }
+          [[ "${tag,,}" != "latest" ]] \
+            || { echo "::error::'latest' is not allowed"; exit 1; }
+          perftest="${PERFTEST_INPUT:-${tag%-r*}}"
+          [[ "${perftest}" =~ ^[0-9A-Za-z._-]+$ ]] \
+            || { echo "::error::invalid perftest version: '${perftest}'"; exit 1; }
+          if [ -n "${APK_MIRROR_INPUT}" ] && [[ ! "${APK_MIRROR_INPUT}" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "::error::apk_mirror must be an https URL"
+            exit 1
+          fi
           echo "IMAGE_TAG=${tag}" >>"${GITHUB_ENV}"
-          echo "PERFTEST_VERSION=${PERFTEST_INPUT:-${tag%-r*}}" >>"${GITHUB_ENV}"
+          echo "PERFTEST_VERSION=${perftest}" >>"${GITHUB_ENV}"
 
       - name: Login to Harbor
         if: env.PUSH_INPUT == 'true'
@@ -75,31 +85,33 @@ jobs:
           fi
           echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_HOST}" -u "${HARBOR_USER}" --password-stdin
 
-      - name: Build, self-check and optionally push
-        env:
-          NETSHOOT_IMAGE: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}/suanova/netshoot-rdma
+      - name: Ensure tag is new
+        if: env.PUSH_INPUT == 'true'
         run: |
           set -euo pipefail
-          args=(--online --tag "${IMAGE_TAG}" --no-save)
-          if [[ "${PUSH_INPUT}" == "true" ]]; then
-            args+=(--push)
+          if docker manifest inspect "${IMAGE}:${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "::error::tag already exists, refusing to overwrite: ${IMAGE}:${IMAGE_TAG}"
+            exit 1
           fi
-          sudo env \
-            NETSHOOT_RDMA_IMAGE="${NETSHOOT_IMAGE}" \
-            PERFTEST_VERSION="${PERFTEST_VERSION}" \
-            APK_MIRROR="${APK_MIRROR_INPUT}" \
-            bash deployments/scripts/tools/images/netshoot-rdma-build.sh "${args[@]}"
+
+      - name: Build, self-check and optionally push
+        run: |
+          set -euo pipefail
+          make netshoot-rdma \
+            NETSHOOT_RDMA_IMAGE="${IMAGE}" \
+            NETSHOOT_RDMA_TAG="${IMAGE_TAG}" \
+            NETSHOOT_RDMA_BASE_IMAGE="${BASE_IMAGE}" \
+            NETSHOOT_RDMA_PERFTEST_VERSION="${PERFTEST_VERSION}" \
+            NETSHOOT_RDMA_APK_MIRROR="${APK_MIRROR_INPUT}" \
+            NETSHOOT_RDMA_PUSH="${PUSH_INPUT}"
 
       - name: Verify pushed digest
         if: env.PUSH_INPUT == 'true'
-        env:
-          NETSHOOT_IMAGE: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}/suanova/netshoot-rdma
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq skopeo
-          ref="${NETSHOOT_IMAGE}:${IMAGE_TAG}"
-          digest="sha256:$(skopeo inspect --raw "docker://${ref}" | sha256sum | cut -d' ' -f1)"
+          ref="${IMAGE}:${IMAGE_TAG}"
+          digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${ref}" \
+            | awk -F@ -v r="${ref}" '$1==r {print $2; exit}')"
           [[ -n "${digest}" ]] || { echo "::error::cannot resolve pushed digest for ${ref}"; exit 1; }
           {
             echo "### netshoot-rdma pushed"
