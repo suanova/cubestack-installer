@@ -1,6 +1,6 @@
 # Rook-Ceph 离线 vendoring — CubeStack 适配说明
 
-本目录存放 **Rook Operator 离线安装 manifest**(`v1.20.2`, 与 `docs/ceph-rook.md` 版本一致),
+本目录存放 **Rook Operator 离线安装 manifest**(`v1.21.1`, 与 `docs/ceph-rook.md` 版本一致),
 供 `modules/03_addon/02_ceph.sh` 离线部署 CephCluster / `03_ceph_csi.sh` 部署 ceph-csi 使用。
 
 > ⚠ manifest 文件不在仓库内(体积大、来自官方 release tag): 首次使用在**联网机**执行
@@ -12,7 +12,7 @@
 ```
 deployments/cubestack-addon/rook/
 ├── CUBESTACK.md
-├── crds.yaml            # Rook CRDs(取自官方 release v1.20.2: rook/deploy/examples/crds.yaml)
+├── crds.yaml            # Rook CRDs(取自官方 release v1.21.1: rook/deploy/examples/crds.yaml)
 ├── common.yaml          # 公共 RBAC/命名空间
 ├── csi-operator.yaml    # ⚠ rook v1.20 新增且必须(ceph-csi-operator), 跳过会静默破坏 CSI Provision
 ├── operator.yaml        # Rook operator Deployment
@@ -23,7 +23,7 @@ deployments/cubestack-addon/rook/
 
 ## external/ — 官方外部 Ceph 接入文件(2026-09-10 vendored)
 
-来源: Rook v1.20.2 `deploy/examples/external/`(与上方 manifest 同版本, 离线拷贝, 无需联网)。
+来源: Rook v1.21.1 `deploy/examples/external/`(与上方 manifest 同版本, 离线拷贝, 无需联网)。
 用于 **CEPH_MODE=external** 消费者接入外部 Rook-Ceph(官方 import-external-cluster 流程):
 
 | 文件 | 用途 |
@@ -39,7 +39,7 @@ deployments/cubestack-addon/rook/
 
 ## rook-charts/ — Helm charts(单独目录)
 
-`deployments/cubestack-addon/rook-charts/` 存放 Rook 官方 Helm charts(v1.20.2 `deploy/charts/`):
+`deployments/cubestack-addon/rook-charts/` 存放 Rook 官方 Helm charts(v1.21.1 `deploy/charts/`):
 `rook-ceph`(operator, 依赖 library + ceph-csi-operator)/ `rook-ceph-cluster`(CephCluster 声明)/
 `library`(共享 helper)/ `ceph-csi-drivers`。当前部署走 kubectl apply manifest 路线,
 charts 备用(helm 部署路线/参考 values), 不与 manifest 混放。
@@ -47,8 +47,8 @@ charts 备用(helm 部署路线/参考 values), 不与 manifest 混放。
 ## 获取(联网机)
 
 ```bash
-sudo ./deployments/scripts/tools/k8s/rook-fetch-manifests.sh            # 默认 ROOK_VERSION=v1.20.2
-# 指定版本: ROOK_VERSION=v1.20.2 sudo ./deployments/scripts/tools/k8s/rook-fetch-manifests.sh
+sudo ./deployments/scripts/tools/k8s/rook-fetch-manifests.sh            # 默认 ROOK_VERSION=v1.21.1
+# 指定版本: ROOK_VERSION=v1.21.1 sudo ./deployments/scripts/tools/k8s/rook-fetch-manifests.sh
 ```
 
 ## 项目集成
@@ -64,5 +64,9 @@ sudo ./deployments/scripts/tools/k8s/rook-fetch-manifests.sh            # 默认
 
 ## 升级 Rook
 
-联网机更新 ROOK_VERSION 重新 fetch(替换 4 个 yaml, 保留 CUBESTACK.md), 并同步
-cluster.conf 的 ROOK_VERSION / CEPH_VERSION / CEPHCSI_VERSION / CEPH_CSI_OPERATOR_VERSION。
+联网机更新 ROOK_VERSION 重新 fetch(替换 crds/common/csi-operator/operator/toolbox 5 个 yaml,
+保留 CUBESTACK.md 与 external/ 的本项目定制文件), 同步替换 `../rook-charts/`(官方
+`deploy/charts/`, 解引用 symlink 后整体覆盖), 并同步 `cluster.conf`(或
+`cluster.defaults.conf` / `releases/*/release.env`)中的 ROOK_VERSION /
+CEPH_CSI_OPERATOR_VERSION / CEPHCSI_VERSION, 以及 ceph-csi-operator 内置默认值对应的
+CSI sidecar 版本(provisioner/attacher/resizer/snapshotter/registrar/snapshot-metadata/addons)。

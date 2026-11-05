@@ -232,7 +232,7 @@ _mon_np() {   # <idx>
 }
 
 # ════════════════════════════ 官方 external-ceph.env 导出(2026-09-10) ════════════════════════════
-# 经 toolbox 运行官方 create-external-cluster-resources.py(vendored, v1.20.2):
+# 经 toolbox 运行官方 create-external-cluster-resources.py(vendored, v1.21.1):
 #   · 在提供方 Ceph 上创建官方 CSI 双角色用户(csi-rbd-node/provisioner + csi-cephfs-node/provisioner,
 #     带 caps)/ client.healthchecker / rgw-admin-ops-user(RGW 启用时)
 #   · --format bash 输出 export 行(Rook 官方 external-ceph.env 格式), 供消费方
@@ -240,7 +240,7 @@ _mon_np() {   # <idx>
 # 输出: ${REPO_ROOT}/deployments/config/external-ceph.env(gitignore, 勿提交真实 key)
 _export_official_env() {
     local _py="${ROOK_DIR}/external/create-external-cluster-resources.py"
-    [ -f "${_py}" ] || { warn "  vendored 官方导出脚本缺失: ${_py}(联网机从 rook v1.20.2 deploy/examples/external 拷贝)"; return 1; }
+    [ -f "${_py}" ] || { warn "  vendored 官方导出脚本缺失: ${_py}(联网机从 rook v1.21.1 deploy/examples/external 拷贝)"; return 1; }
     say "[导出] 官方 external-ceph.env(create-external-cluster-resources.py 经 toolbox)..."
 
     # ★ 2026-10-19: 0 OSD 时官方脚本会在 inactive PG 上永久等待(实机 pending 15min+)。
