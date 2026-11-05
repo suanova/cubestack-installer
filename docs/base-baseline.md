@@ -68,6 +68,12 @@ images:
 - K8s 二进制（kubelet/kubeadm/kubectl/crictl/CNI 等）仍由 installer 准备；商业离线版由
   商业 base 的 `files[]` 打包。
 
+## 物料清单
+
+`materials:` 记录无法从公共 registry 拉取的厂商制品（当前为 MetaX 资源包/镜像包/
+驱动包）。开源用户按 `source.portal` 自行下载，商业打包在 overlay 里用同一个 key
+提供本地来源。字段与流程见 [`materials.md`](materials.md)。
+
 ## 节点前置包体检清单
 
 > 节点前置包 = 通过 OS 包管理器安装在每个 k8s node 上的依赖（lvm2、chrony、curl、

@@ -24,6 +24,8 @@ FORCE_INDEX=0
 CHECK_OS_MODE="warn"
 DRY_RUN=0
 WITH_DEV_LAB=0
+WITH_METAX=0
+CHECK_MATERIALS=0
 PROFILE_ARG=""
 PASSTHRU=()
 MIRROR_REPO=""
@@ -56,6 +58,9 @@ Online options:
   --offline-root PATH      offline-files root (default: from cluster config)
   --no-materialize         skip image materialization
   --with-dev-lab           also materialize the optional dev-lab images
+  --with-metax             require MetaX vendor materials and enable GPU operator
+  --check-materials        report missing vendor materials (warn only)
+  --require-materials      fail when a declared vendor material is missing
   --force-index            re-download the mirror index
   --check-os-packages      run a blocking node prerequisite pre-check
                            (default is warn-only)
@@ -78,6 +83,9 @@ while [ $# -gt 0 ]; do
         --offline-root) OFFLINE_ROOT="${2:?--offline-root needs a path}"; shift 2 ;;
         --no-materialize) MATERIALIZE=0; shift ;;
         --with-dev-lab) WITH_DEV_LAB=1; shift ;;
+        --with-metax) WITH_METAX=1; CHECK_MATERIALS=2; shift ;;
+        --check-materials) CHECK_MATERIALS=1; shift ;;
+        --require-materials) CHECK_MATERIALS=2; shift ;;
         --force-index) FORCE_INDEX=1; shift ;;
         --check-os-packages) CHECK_OS_MODE="fail"; shift ;;
         --no-check-os-packages) CHECK_OS_MODE="off"; shift ;;
@@ -230,9 +238,26 @@ else
     say "node prerequisite pre-check skipped (--no-check-os-packages)"
 fi
 
+if [ "${CHECK_MATERIALS}" != "0" ]; then
+    material_args=(--baseline "${BASELINE}" --offline-root "${OFFLINE_ROOT}")
+    if [ "${CHECK_MATERIALS}" = "1" ]; then
+        material_args+=(--warn-only)
+        say "vendor materials check (warn-only)"
+    else
+        say "vendor materials check (blocking)"
+    fi
+    if [ "${DRY_RUN}" = "1" ]; then
+        material_args+=(--dry-run)
+    fi
+    bash "${SCRIPT_DIR}/tools/online/check-materials.sh" "${material_args[@]}"
+else
+    say "vendor materials check skipped (--check-materials / --with-metax to enable)"
+fi
+
 export CUBESTACK_OS_CHECK_DONE=1
 export CUBESTACK_ONLINE=1
 export CUBESTACK_OPERATOR_ENABLED=false
+[ "${WITH_METAX}" = "1" ] && export GPU_OPERATOR_ENABLED=true
 if [ "${WITH_DEV_LAB}" = "1" ]; then
     export DEV_LAB_ENABLED=true
 else

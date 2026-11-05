@@ -12,6 +12,11 @@ cp deployments/config/cluster.conf.example deployments/config/cluster.conf
 vim deployments/config/cluster.conf        # 填写 NODES / 密码 / MetalLB 等
 
 sudo ./deployments/scripts/install-online.sh
+
+# 可选：带 dev-lab 镜像；检查/要求 MetaX 厂商物料
+sudo ./deployments/scripts/install-online.sh --with-dev-lab
+sudo ./deployments/scripts/install-online.sh --check-materials
+sudo ./deployments/scripts/install-online.sh --with-metax
 ```
 
 在线安装从 public Harbor 物化 `versions/base.yaml` 中声明的镜像，并在安装时下载

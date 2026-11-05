@@ -94,6 +94,12 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-netshoot-pin.sh
 
+      # 物料清单: 缺失/校验和/告警模式
+      - name: 物料清单预检回归(materials)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-materials.sh
+
       # mirror-updated(base scope): 只在 baseline 引用的镜像变化时更新 mirror pin
       - name: mirror pin 接收回归(mirror-updated)
         run: |

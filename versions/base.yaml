@@ -35,6 +35,8 @@ env:
   LOCAL_PATH_VERSION: v0.0.37
   LOCAL_VOLUME_PROVISIONER_VERSION: 2.5.0
   METALLB_VERSION: v0.13.9
+  METAX_DRIVER_VERSION: 3.8.1.6-amd64
+  METAX_VERSION: 0.15.3
   METRICS_SERVER_VERSION: v0.9.0
   MULTUS_IMAGE_TAG: v4.2.2-thick
   NFD_VERSION: 0.19.0
@@ -48,6 +50,43 @@ env:
   ROOK_VERSION: v1.20.2
   SNAPSHOT_CONTROLLER_VERSION: v8.0.1
   NETSHOOT_RDMA_VERSION: 2.1-latest
+# Vendor artifacts that cannot be fetched from a public registry. Each entry is
+# an index item: the open-source flow points users at the vendor portal, and the
+# commercial packaging overlay supplies a local source for the same key.
+materials:
+- key: metax:gpu-k8s-package
+  module: gpu_operator
+  version: ${METAX_VERSION}
+  file: metax-gpu-k8s-package.${METAX_VERSION}.tar.gz
+  dest: offline-files/metax-gpu
+  optional: true
+  source:
+    type: vendor-portal
+    provider: metax
+    portal: https://metax-tech.com
+    account_required: true
+- key: metax:k8s-images
+  module: gpu_operator
+  version: ${METAX_VERSION}
+  file: metax-k8s-images.${METAX_VERSION}.run
+  dest: offline-files/metax-gpu
+  optional: true
+  source:
+    type: vendor-portal
+    provider: metax
+    portal: https://metax-tech.com
+    account_required: true
+- key: metax:k8s-driver-image
+  module: gpu_operator
+  version: ${METAX_DRIVER_VERSION}
+  file: metax-k8s-driver-image.${METAX_DRIVER_VERSION}.run
+  dest: offline-files/metax-gpu
+  optional: true
+  source:
+    type: vendor-portal
+    provider: metax
+    portal: https://metax-tech.com
+    account_required: true
 os:
 - family: debian
   id: ubuntu

@@ -48,6 +48,10 @@ containerd 置以下键后, 容器创建时按容器 runAsUser/runAsGroup 对设
 
 > 来源: [沐曦软件中心](https://metax-tech.com) 登录后 → 下载 → 软件栈 / 镜像。账号与命令以官网最新为准。
 > 全部文件放入 **`deployments/offline-files/metax-gpu/`**(即 `METAX_OFFLINE_DIR`; 已 gitignore, 不入库)。
+>
+> 这些文件已登记在 `versions/base.yaml` 的 `materials:` 清单里；开源安装可用
+> `install-online.sh --check-materials` 检查，`--with-metax` 要求齐全并启用 GPU operator。
+> 字段与商业打包方式见 [`materials.md`](materials.md)。
 
 ### 1.1 核心资源包(必下)
 
