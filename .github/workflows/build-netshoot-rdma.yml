@@ -46,6 +46,9 @@ jobs:
     name: Build netshoot-rdma
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      digest: ${{ steps.digest.outputs.digest }}
     env:
       HARBOR_HOST: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
       HARBOR_USER: ${{ vars.CI_BOT_NAME }}
@@ -66,6 +69,7 @@ jobs:
           persist-credentials: false
 
       - name: Resolve tag and validate
+        id: tag
         run: |
           set -euo pipefail
           if [ "${IS_CHANNEL}" = "true" ]; then
@@ -92,6 +96,7 @@ jobs:
           fi
           echo "IMAGE_TAG=${tag}" >>"${GITHUB_ENV}"
           echo "PERFTEST_VERSION=${perftest}" >>"${GITHUB_ENV}"
+          echo "tag=${tag}" >>"${GITHUB_OUTPUT}"
           echo "resolved tag=${tag} perftest=${perftest} channel=${IS_CHANNEL}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Login to Harbor
@@ -125,6 +130,7 @@ jobs:
             NETSHOOT_RDMA_PUSH="${PUSH_INPUT}"
 
       - name: Verify pushed digest
+        id: digest
         if: env.PUSH_INPUT == 'true'
         run: |
           set -euo pipefail
@@ -132,8 +138,51 @@ jobs:
           digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${ref}" \
             | awk -F@ -v r="${ref}" '$1==r {print $2; exit}')"
           [[ -n "${digest}" ]] || { echo "::error::cannot resolve pushed digest for ${ref}"; exit 1; }
+          echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
           {
             echo "### netshoot-rdma pushed"
             echo ""
             echo "\`${ref}@${digest}\`"
           } >>"$GITHUB_STEP_SUMMARY"
+
+  update-baseline:
+    name: Update versions/base.yaml
+    needs: build
+    if: needs.build.outputs.digest != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - name: Update netshoot pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ vars.NETSHOOT_RDMA_IMAGE || 'harbor.isuanova.com/suanova/netshoot-rdma' }}
+          TAG: ${{ needs.build.outputs.tag }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          python3 deployments/scripts/tools/online/update-netshoot-pin.py \
+            --root . --image "${IMAGE}" --tag "${TAG}" --digest "${DIGEST}"
+          if git diff --quiet -- versions/base.yaml; then
+            echo "base.yaml unchanged"
+            exit 0
+          fi
+          short="${DIGEST#sha256:}"
+          branch="bot/netshoot-${TAG}-${short:0:12}"
+          git config user.name suanova-bot
+          git config user.email bot@isuanova.com
+          git checkout -b "${branch}"
+          git add versions/base.yaml
+          git commit -s -m "chore(netshoot): pin ${TAG} (${DIGEST:0:19})"
+          git push -f origin "${branch}"
+          if [ "$(gh pr list --head "${branch}" --json number --jq length)" != "0" ]; then
+            echo "PR already exists for ${branch}"
+          else
+            gh pr create --base "${GITHUB_REF_NAME}" --head "${branch}" \
+              --title "chore(netshoot): pin ${TAG}" \
+              --body "Automated digest update from the netshoot-rdma workflow: ${IMAGE}:${TAG}@${DIGEST}"
+          fi
