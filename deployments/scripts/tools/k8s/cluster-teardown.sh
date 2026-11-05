@@ -176,7 +176,7 @@ unmount_node_ceph_mounts() {
             -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_u}@${_ip}" "
                 for _m in \$(findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
                     | awk '\$3 ~ /ceph/ || \$2 ~ /^\\/dev\\/rbd/ {print \$1}' | tac); do
-                    timeout 10 umount -l \"\${_m}\" 2>/dev/null || true
+                    timeout 10 sudo -n umount -l \"\${_m}\" 2>/dev/null || true
                 done
                 for _i in 1 2 3 4 5 6 7 8 9 10; do
                     findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
