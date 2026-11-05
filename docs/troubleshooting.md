@@ -622,13 +622,6 @@ Error response from daemon: client version 1.22 is too old. Minimum supported AP
 docker save <img> -o /tmp/x.tar && skopeo copy docker-archive:/tmp/x.tar docker://registry.cubestack.io:5000/metax/<name>:<tag> --dest-tls-verify=false --dest-no-creds
 ```
 
-#### 3.4 `metax-k8s-images.<ver>.run push` 报 `ctr: image "--plain-http": not found`
-
-**根因** 工具的 ctr 分支把 `--plain-http` 放在镜像 ref **之后**(`push <ref> --plain-http`), 新版 ctr 把 flag 当镜像名。
-
-**解法(根治)** 不用工具自带 push: `.run ctr load` 把内嵌镜像加载进宿主 ctr, 再逐组件
-`ctr -n k8s.io images tag <src> registry.cubestack.io:5000/metax/<comp>:<ver>` + `ctr -n k8s.io images push --plain-http <dst>`(flag 在前)。
-
 #### 3.5 宿主机 curl `registry.cubestack.io:5000` / helm 连 `k8s-api.cubestack.io` 失败(EOF / no route to host)
 
 **根因** 宿主机 /etc/hosts 残留旧 IP(如 `192.0.2.37` = 宿主机自身)或 DNAT 被历史规则遮蔽(两条规则指向 10.244.2.100 与 192.168.100.130, 旧规则先命中)。
@@ -647,9 +640,9 @@ k8s-api.cubestack.io → API_ENTRY_IP(kube-vip 已绑 → VIP; 否则第一个 m
 
 #### 3.6 driver / maca 镜像拉不到(`ErrImagePull: ... not found`)
 
-**根因** `driver-image` 与 `maca` **不在** `metax-k8s-images.<ver>.run` 包内, 需单独推送; 即使 PreferHost 驱动 DS 的 init 容器也要拉 `driver-image`(解包内核模块)。
+**根因** `driver-image` 与 `maca` 不在核心组件 tar 集合内, 需单独推送; 即使 PreferHost 驱动 DS 的 init 容器也要拉 `driver-image`(解包内核模块)。
 
-**解法(根治)** 模块 `push_extra` 按 本地 docker(`docker save`+skopeo) → 离线 tar(METAX_OFFLINE_DIR) → 在线 逐级推送; `METAX_DRIVER_VERSION` 须与本地可用镜像匹配(如 `3.8.1.6-amd64`)。
+**解法(根治)** 模块 `push_extra` 按 本地 docker(`docker save`+skopeo) → 离线 tar(METAX_OFFLINE_DIR) 逐级推送; `METAX_DRIVER_VERSION` 须与本地可用镜像匹配(如 `3.8.1.6-amd64`)。
 
 #### 3.7 master 节点没有 `metax-tech.com/gpu.installed` 标签 / GPU 用不上
 

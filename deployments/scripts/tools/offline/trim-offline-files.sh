@@ -101,7 +101,7 @@ _metax_keep() {   # <文件名> → 0=保留
     # 文件名形如: harbor.isuanova.com_metax_<comp>_<ver>.tar(组件名可含 "-", 版本可含 "_")
     case "${f}" in
         *.tar) ;;
-        *) return 0 ;;   # 非 tar(如 .run/.tgz/package)不处理
+        *) return 0 ;;   # 非 tar(如 .tgz/package)不处理
     esac
     rest="${f#harbor.isuanova.com_metax_}"
     comp="${rest%_*}"              # 去掉最后一个 "_" 及之后 → 组件名(container-runtime)

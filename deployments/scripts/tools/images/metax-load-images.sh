@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # metax-load-images.sh — 把离线目录中的沐曦(MetaX)镜像 tar 加载推送到集群内置 registry
-# 用途: 离线环境(METAX_IMAGE_MODE=tar 的替代入口)手动把 tar 推送到集群 registry,
+# 用途: 离线环境(gpu-operator 模块离线 tar 的替代入口)手动把 tar 推送到集群 registry,
 #       之后由 gpu-operator 模块 helm 安装使用。幂等, 可重复执行。
 # 数据源: cluster.conf (METAX_OFFLINE_DIR / METAX_IMAGE_DIR / METAX_TAR_PATTERN /
 #                      METAX_REGISTRY / REGISTRY_* / METAX_VERSION)
