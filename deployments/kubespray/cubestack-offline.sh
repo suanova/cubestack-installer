@@ -1893,10 +1893,10 @@ update_loadbalancer_all_yml() {
 }
 
 # 在真正部署前, 通过 SSH 检查并中立化目标节点上的旧 Kubernetes 状态
-# 检测到残留 → 醒目警告 + sleep 60 → 中立化旧 K8s + kubeadm reset -f + IPVS 清理
+# 检测到残留 → 醒目警告 + sleep 60 → 中立化旧 K8s + kubeadm reset -f + crictl 兜底 + IPVS 清理
 # 未检测到 → 直接部署, 不执行清理
 # 用法: reset_kubernetes_if_needed <scope>
-# 返回: 0 = 目标节点的 kubelet API 端口(10250)已确认让出(部署可继续)
+# 返回: 0 = 目标节点的控制面端口(6443/10250/10257/10259)已确认让出(部署可继续)
 #       1 = 仍有节点被占(调用方**必须中止** —— 见下方"真实退出码")
 #
 # ⚠ 要让路的对象不止 kubeadm 残留, 而是**任何占着 10250 的东西**, 包括 RKE2/k3s/microK8s
@@ -1906,6 +1906,11 @@ update_loadbalancer_all_yml() {
 #   但已 disabled), 旧清理逻辑对它三个判据全部漏检 → 部署跑 22 分钟后才在 kubespray 的
 #   kubeadm join 阶段报 `[ERROR Port-10250]: Port 10250 is in use` 中断, 报错点离真因
 #   (RKE2 agent)隔了一整个 playbook, 且现场早已"✅ 清理完成: 7 台成功"。
+#   2026-11-05 实机: kubeadm reset 本可清掉旧静态 Pod, 但它依赖 CRI —— node_pkgs 的 Ceph
+#   自动修复先把 containerd 停了, reset 只能删文件, 旧 kube-controller-manager 继续占
+#   10257 → kubeadm init 报 `[ERROR Port-10257]: Port 10257 is in use`。因此清理前必须
+#   确保 containerd 可用、reset 后用 crictl 兜底清容器, 复核端口覆盖 6443/10257/10259
+#   (不能只看 10250: kubelet 一停它就空, 会把“容器还在跑”误报成成功)。
 # 检查并重置节点上的旧 Kubernetes 状态(部署/扩容前清理残留)
 # 参数 scope:
 #   all — 检查并重置全部有残留的节点(全新部署场景, 旧集群将被整体替换)
@@ -2001,6 +2006,9 @@ print("%s|%s|%s" % (
                 _d=\"\"
                 # ① 端口被占(kubeadm join 的硬门槛)
                 ss -lnt 2>/dev/null | grep -qE \"[:.]10250[[:space:]]\" && _d=\"\${_d}port-10250;\"
+                # ①b 旧控制面容器占端口: 可能只剩进程(容器 shim 存活、痕迹文件已被删),
+                #     kubeadm init/join 的 preflight 会因 6443/10257/10259 被占直接失败
+                ss -lnt 2>/dev/null | grep -qE \"[:.](6443|10257|10259)[[:space:]]\" && _d=\"\${_d}port-control-plane;\"
                 # ② 第三方 K8s 发行版: 内嵌 kubelet 由各自 agent 单元托管, 不叫 kubelet.service
                 for _u in rke2-agent rke2-server k3s k3s-agent microk8s; do
                     if systemctl is-active \"\${_u}.service\" >/dev/null 2>&1; then
@@ -2084,7 +2092,8 @@ print("%s|%s|%s" % (
     printf "\r  ✅ 继续部署...                          \n"
     echo ""
 
-    # 执行清理: 先让出 10250(第三方发行版 stop+disable) → 再 kubeadm reset -f + IPVS 清理 + 删残留
+    # 执行清理: 先让出控制面/ kubelet 端口(第三方发行版 stop+disable) → 确保 CRI 可用
+    # (kubeadm reset 靠它停容器) → kubeadm reset -f + crictl 兜底 + IPVS 清理 + 删残留
     log "清理节点上的旧 Kubernetes 状态(第三方发行版 stop+disable + kubeadm reset -f + IPVS 清理)..."
     log "  (顺序: worker 先于 master —— 旧集群存储后端在 master 上, 须让 worker 先卸掉残留挂载)"
     local reset_ok=0 reset_fail=0
@@ -2140,7 +2149,25 @@ print("%s|%s|%s" % (
                     [ -x /usr/local/bin/k3s-killall.sh ] && /usr/local/bin/k3s-killall.sh >/dev/null 2>&1 || true
                 fi
                 # ── ② kubeadm/kubespray 残留(原有逻辑) ──────────────────────────────
-                kubeadm reset -f 2>/dev/null || true;
+                # ★ kubeadm reset 是通过 CRI 停止/删除旧静态 Pod 容器的(2026-11-05 实机):
+                #   containerd 停着时 reset 只能删文件, 旧容器(shim 存活)继续占 6443/10257/10259,
+                #   随后 kubeadm init/join 的 preflight 直接失败。先确保 CRI 可用再 reset。
+                systemctl start containerd 2>/dev/null || true
+                for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+                    [ -S /run/containerd/containerd.sock ] && break
+                    sleep 0.5
+                done
+                _reset_out=\$(kubeadm reset -f 2>&1); _reset_rc=\$?
+                if [ -n \"\${_reset_out}\" ]; then
+                    printf \"%s\n\" \"\${_reset_out}\" | sed \"s/^/      [kubeadm-reset] /\"
+                fi
+                [ \"\${_reset_rc}\" = \"0\" ] || echo \"      WARN: kubeadm reset rc=\${_reset_rc}(继续用 CRI 兜底清理)\"
+                # reset 的容器删除依赖 CRI 状态一致; containerd 重启过 / 沙箱状态异常时会漏删。
+                # 用 crictl 强制清空旧 pod sandbox 与残余容器对象(kubelet 已停, 不会再拉起)。
+                if command -v crictl >/dev/null 2>&1; then
+                    crictl pods -q 2>/dev/null | xargs -r crictl rmp -f >/dev/null 2>&1 || true
+                    crictl ps -aq 2>/dev/null | xargs -r crictl rm -f >/dev/null 2>&1 || true
+                fi
                 # 清理 IPVS 规则与 kube-ipvs0 虚拟接口
                 ipvsadm -C 2>/dev/null;
                 ip link del kube-ipvs0 2>/dev/null;
@@ -2163,19 +2190,30 @@ print("%s|%s|%s" % (
                       /etc/kubernetes/kubelet.env 2>/dev/null;
                 systemctl daemon-reload 2>/dev/null || true;
                 rm -f /etc/etcd.env /etc/systemd/system/etcd.service 2>/dev/null;
-                # ── ③ 复核: 10250 必须真的空出来 ──────────────────────────────────
-                # 原实现这里以 true 收尾 → ssh 恒返回 0 → “N 台成功” 是**假信号**:
-                # 2026-09-23 事故里 node-3-32 被报“清理成功”, 22 分钟后却因 10250 被占中断部署。
-                # 改成真实判据: 最多等 10s 让 LISTEN socket 释放, 仍被占则打印元凶并以非 0 退出。
-                for _i in 1 2 3 4 5 6 7 8 9 10; do
-                    ss -lnt 2>/dev/null | grep -qE \"[:.]10250[[:space:]]\" || exit 0
+                # ── ③ 复核: 控制面端口必须真的空出来 ─────────────────────────────
+                # 原实现只查 10250 → 2026-11-05 实机把“旧容器还占着 10257”误报成清理成功
+                # (kubelet 停了 10250 自然空出)。判据扩到 6443/10250/10257/10259:
+                # 先等 15s 释放; 仍被占则按 pid 强杀(此时节点上不存在属于新集群的进程),
+                # 最后复检, 仍不空才失败 —— 让报错落在清理阶段而不是 20 分钟后的 kubeadm。
+                for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+                    ss -lnt 2>/dev/null | grep -qE \"[:.](6443|10250|10257|10259)[[:space:]]\" || exit 0
                     sleep 1
                 done
-                echo \"PORT_BUSY: 10250 仍被占用, kubeadm join 必然失败:\"
-                ss -lntp 2>/dev/null | grep -E \"[:.]10250[[:space:]]\" | head -3
-                _pid=\$(ss -lntp 2>/dev/null | grep -E \"[:.]10250[[:space:]]\" | grep -oE \"pid=[0-9]+\" | head -1 | cut -d= -f2)
-                [ -n \"\${_pid}\" ] && ps -o pid,lstart,cmd -p \"\${_pid}\" | tail -1
-                exit 1
+                for _p in 6443 10250 10257 10259; do
+                    _pid=\$(ss -lntp 2>/dev/null | grep -E \"[:.]\${_p}[[:space:]]\" | grep -oE \"pid=[0-9]+\" | head -1 | cut -d= -f2)
+                    if [ -n \"\${_pid}\" ]; then
+                        echo \"KILL: 端口 \${_p} 仍被 pid \${_pid} 占用, 强制结束\"
+                        ps -o pid,lstart,cmd -p \"\${_pid}\" | tail -1
+                        kill -9 \"\${_pid}\" 2>/dev/null || true
+                    fi
+                done
+                sleep 1
+                if ss -lnt 2>/dev/null | grep -qE \"[:.](6443|10250|10257|10259)[[:space:]]\"; then
+                    echo \"PORT_BUSY: 控制面端口仍被占用, kubeadm init/join 必然失败:\"
+                    ss -lntp 2>/dev/null | grep -E \"[:.](6443|10250|10257|10259)[[:space:]]\" | head -5
+                    exit 1
+                fi
+                exit 0
             '" 2>&1) || cleanup_rc=$?
         if [ "${cleanup_rc}" = "0" ]; then
             reset_ok=$((reset_ok + 1))
@@ -2184,7 +2222,7 @@ print("%s|%s|%s" % (
             if [ "${cleanup_rc}" = "124" ]; then
                 warn "  ${node}: 远端清理**超时**(240s) —— 该步已强制脱挂, 仍超时请排查(见下方输出)后重跑"
             else
-                warn "  ${node}: 清理后 kubelet API 端口(10250)仍未让出(ssh rc=${cleanup_rc}):"
+                warn "  ${node}: 清理后控制面端口(6443/10250/10257/10259)仍未让出(ssh rc=${cleanup_rc}):"
             fi
             if [ -n "${cleanup_out}" ]; then printf '%s\n' "${cleanup_out}" | sed 's/^/      /'; fi
         fi
@@ -2193,7 +2231,7 @@ print("%s|%s|%s" % (
         log "⚠ 清理完成: ${reset_ok} 台成功, ${reset_fail} 台失败(元凶见上方输出)"
         return 1
     fi
-    log "✅ 清理完成: ${reset_ok} 台成功(10250 均已确认让出)"
+    log "✅ 清理完成: ${reset_ok} 台成功(6443/10250/10257/10259 均已确认让出)"
     return 0
 }
 

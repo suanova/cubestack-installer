@@ -1943,6 +1943,69 @@ bash deployments/scripts/tools/tests/test-release-mode.sh                     # 
 
 ---
 
+### 9. 【2026-11-05 实机】旧控制面容器没删干净: `kubeadm init` 报 `[ERROR Port-10257]: Port 10257 is in use`(清理阶段误报"3 台成功")
+
+**症状**
+- 覆盖安装跑到 `kubernetes/control-plane : Kubeadm | Initialize first control plane node`,preflight 失败:
+  `[ERROR Port-10257]: Port 10257 is in use`(retry 也失败,因为 retry 的 `--ignore-preflight-errors` 只含 `Port-10250`)。
+- 清理阶段日志却是 `✅ 清理完成: 3 台成功(10250 均已确认让出)`。
+- 现场 `ss -lntp` 显示旧静态 Pod 容器仍在跑:master01 `kube-controller-manager` 占 10257;
+  master02 `kube-scheduler` 占 10259(即使 master01 修好,join 也会因 10259 失败)。
+
+**根因(证据链)**
+1. `node_pkgs` 探测到 `/mnt/cephfs/models` 读不出,自动修复脚本
+   `deployments/scripts/tools/node/reconcile-node-packages.sh` 执行
+   `systemctl stop kubelet containerd` 后 lazy umount;**修复成功路径只 `exit 0`,不重启 containerd**
+   (注释假设“由后续 k8s 覆盖流程接管”)。
+2. 几分钟后 `k8s_deploy` 的旧集群清理执行 `kubeadm reset -f`。此时 containerd 仍是停的,CRI socket 不可达
+   → reset 只能删 `/etc/kubernetes` 等文件,**无法停止/删除旧容器**;输出又被 `2>/dev/null || true` 丢弃。
+3. 旧容器进程挂在独立 shim 上(containerd.service `KillMode=process`),containerd/kubelet 都停了它们也活着,
+   继续占 6443/10257/10259。
+4. 清理脚本的成功判据只复核 **10250**。kubelet 刚被停,10250 必然空 → 把“容器还在跑”误报成“3 台成功”。
+5. kubespray 重启 containerd 后 `kubeadm init` 撞上 10257;旧 apiserver 还会因新 etcd 数据目录为空
+   (revision 从 215351 跳到 97)panic 退出,进一步印证旧控制面容器一直存活。
+
+**解法(2026-11-05 已落地)**
+- `reconcile-node-packages.sh` 的 `_repair`:卸载完成后 `systemctl start containerd`(**不拉 kubelet**,避免旧集群复活),
+  保证后续 `kubeadm reset` 的 CRI 可用。
+- `cubestack-offline.sh` 的 `reset_kubernetes_if_needed`:
+  - reset 前 `systemctl start containerd` 并等待 `/run/containerd/containerd.sock`;
+  - `kubeadm reset -f` 的输出与返回码不再静默丢弃(`[kubeadm-reset]` 前缀打日志);
+  - reset 后 `crictl pods -q | xargs -r crictl rmp -f` + `crictl ps -aq | xargs -r crictl rm -f` 兜底清孤儿容器;
+  - 复核端口从“只有 10250”扩到 **6443/10250/10257/10259**,仍被占则按 pid `kill -9`,最后复检不空才失败;
+  - 残留探测也识别 6443/10257/10259(处理“只有旧容器、痕迹文件已被删”的节点)。
+
+**验证**
+```bash
+bash deployments/scripts/tools/tests/test-reset-cleanup.sh          # 载荷单参数/引号/语法 + 顺序/兜底/端口判据
+bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh
+bash deployments/scripts/tools/check-modules.sh
+```
+
+**实机验证(2026-11-05 10:08, 三台 master 覆盖重装)**
+- 清理阶段: `✅ 清理完成: 3 台成功(6443/10250/10257/10259 均已确认让出)`;
+- kubespray: `Kubeadm | Initialize first control plane node (1st try) --- 7.63s` 首次成功,
+  `Joining control plane node to the cluster (1st try)` 成功, `PLAY RECAP` 三台 `failed=0`;
+- 集群: 3 节点 `Ready control-plane v1.35.8`;kube-system 的 apiserver/controller-manager/scheduler/
+  calico-node/coredns 全部 Running;10257/10259/6443/10250 均由**新**控制面进程持有。
+- 期间唯一一次踩坑: 清理载荷新增的 `printf '%s\n'`/`sed 's/.../'` 用了单引号, 而远端脚本本身
+  由单引号包裹 → 内层 `bash -c` 被截断报 `syntax error: unexpected end of file`;`bash -n` 无法发现
+  (改写后的命令仍语法合法)。已改用双引号, 并在 `test-reset-cleanup.sh` 增加
+  **“载荷只能有外层一对单引号” + 内层脚本单独 `bash -n`** 两道围栏。
+
+**相关命令**
+```bash
+# 现场确认(三台 master)
+sudo ss -lntp | grep -E ':(6443|10250|10257|10259)\b'
+sudo crictl ps -a | grep -E 'kube-(apiserver|controller-manager|scheduler)'
+# 紧急手工兜底(新版脚本已内置同等动作)
+sudo systemctl start containerd
+sudo crictl pods -q | xargs -r sudo crictl rmp -f
+sudo crictl ps -aq | xargs -r sudo crictl rm -f
+```
+
+---
+
 ## 五、存储 / CephFS
 
 ### 1. CephFS 宿主机挂载(cephfs_mount): 模块报成功但节点没有挂载 / 反复叠加挂载 / 卸载后挂载残留

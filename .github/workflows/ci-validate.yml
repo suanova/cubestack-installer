@@ -122,6 +122,12 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh
 
+      # 旧集群清理: kubeadm reset 依赖 CRI + crictl 兜底 + 控制面端口复核
+      - name: 旧集群清理回归(reset-cleanup)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-reset-cleanup.sh
+
       # cubestack_operator 更新/滚动: 两模式 Always / digest 注解 / IMAGE_TAG 生效
       - name: cubestack_operator 更新行为回归
         run: |

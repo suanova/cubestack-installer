@@ -114,12 +114,19 @@ for _t in "$@"; do
     umount -l "${_t}" 2>/dev/null || umount -f "${_t}" 2>/dev/null || true
 done
 sync -f 2>/dev/null || sync 2>/dev/null || true
+# ★ 成功路径也必须恢复 containerd(2026-11-05 实机):
+#   后续 k8s 覆盖流程的 `kubeadm reset -f` 是**通过 CRI** 停止/删除旧静态 Pod 容器的。
+#   containerd 停着时 reset 只能删文件, 旧容器(shim 存活)继续占 6443/10257/10259
+#   → kubespray 随后报 `[ERROR Port-10257]: Port 10257 is in use` 中断部署。
+#   只拉起 containerd, **不拉 kubelet** —— 避免旧集群在清理前被重新拉起。
+systemctl start containerd 2>/dev/null || true
 exit 0
 REPAIR
 )"
 # 修复未成功时恢复服务(2026-11-04, CodeRabbit): _repair 先停了 kubelet/containerd,
 #   若重探仍失败, preflight 会 exit 1; 必须把它们重新拉起, 否则节点被留在"服务已停"的
-#   不可用状态, 只能等人工处理。仅在重探仍异常时执行(成功路径由后续 k8s 覆盖流程接管)。
+#   不可用状态, 只能等人工处理。仅在重探仍异常时执行(成功路径由 _repair 恢复 containerd、
+#   kubelet 留给后续 k8s 覆盖流程)。
 _restore="$(cat <<'RESTORE'
 systemctl start containerd kubelet 2>/dev/null || true
 exit 0

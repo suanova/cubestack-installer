@@ -598,6 +598,13 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   (用 `sync -f`/fsync); ⑤ 远端 `jsonpath` 含 `?(...)` 时要保证引号送达远端(Ready 判断建议
   `--no-headers | awk '{print $2}'`); ⑥ 零节点验证必须硬失败。离线回归:
   `bash deployments/scripts/tools/tests/test-cephfs-mount.sh`。
+- **⚠ CRI 依赖(2026-11-05 实机)**: `node_pkgs` 的自动修复会 `systemctl stop kubelet containerd`,
+  而后续 `kubeadm reset -f` **通过 CRI** 才能停旧静态 Pod 容器。containerd 停着时 reset 只删文件,
+  旧 kube-controller-manager/kube-scheduler 继续占 10257/10259 → `kubeadm init` preflight 失败。
+  现已: `_repair` 成功路径 `systemctl start containerd`; reset 前确保 containerd + 等待 socket;
+  reset 后 `crictl pods -q | xargs -r crictl rmp -f` / `crictl ps -aq | xargs -r crictl rm -f` 兜底;
+  复核端口覆盖 **6443/10250/10257/10259**(不能只查 10250 —— kubelet 一停它必空, 会误报成功)。
+  回归: `bash deployments/scripts/tools/tests/test-reset-cleanup.sh`;详见 `docs/troubleshooting.md` 四.9。
 - **常用命令**:
   ```bash
   sudo ./deploy-cluster.sh --steps ceph,ceph_csi          # 部署(或 CEPH_ENABLED=true+CEPH_CSI_ENABLED=true 随全量)
