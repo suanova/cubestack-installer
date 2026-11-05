@@ -481,6 +481,11 @@ _n_unknown="$(grep -cF '_scan_unknown' "${ENGINE}" || true)"
 chk "⑪i 扫描 rc 单独判定" "1" "$([ "${_n_unknown:-0}" -ge 1 ] && echo 1 || echo 0)"
 chk "⑪j 未确认/残留时函数返回非 0" "1" \
     "$(grep -cF '[ "${_scan_unknown}" -eq 0 ] && [ "${_leftover}" -eq 0 ]' "${ENGINE}")"
+# CodeRabbit: ceph_csi uninstall 会删外部接入声明 → 挂载清理必须在组件循环之前
+_ln_um="$(grep -nF 'unmount_node_ceph_mounts' "${ENGINE}" | grep -v '()' | head -1 | cut -d: -f1)"
+_ln_loop="$(grep -nF "while IFS=\$'\\t' read -r _key _src _rel" "${ENGINE}" | head -1 | cut -d: -f1)"
+chk "⑪k 挂载清理在组件卸载循环之前" "1" \
+    "$([ -n "${_ln_um}" ] && [ -n "${_ln_loop}" ] && [ "${_ln_um}" -lt "${_ln_loop}" ] && echo 1 || echo 0)"
 
 echo "== ⑫ ceph_csi: external 模式只删接入声明, 不碰外部 Ceph 数据 =="
 CSI="${REPO_ROOT}/deployments/scripts/modules/03_addon/03_ceph_csi.sh"

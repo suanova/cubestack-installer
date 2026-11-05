@@ -300,6 +300,14 @@ PY
         fi
         init_remote_kubectl || { err "集群不可达(SSH 初始化失败), 无法执行卸载"; exit 1; }
         SSH "${K} get ns ${CM_NS} >/dev/null 2>&1" || { err "集群不可达(远端 kubectl 探测失败), 无法执行卸载"; exit 1; }
+        # ★ 外部 Ceph(2026-11-05): **必须在任何组件卸载之前**先摘节点 CSI 挂载 ——
+        #   ceph_csi 的 uninstall 会删除外部 CephCluster/接入声明; 删除后再摘挂载可能
+        #   触发 jbd2/rbd D 状态(本清理要防的正是这个顺序)。内部 Ceph 的同类清理在
+        #   ceph 模块/cubestack-offline reset 前置里做。
+        if [ "${CEPH_MODE:-internal}" = "external" ]; then
+            unmount_node_ceph_mounts \
+                || warn "  (有节点未能确认/卸净 Ceph/RBD 挂载; 后续 reset/重启兜底)"
+        fi
         _n_ok=0; _n_fail=0
         while IFS=$'\t' read -r _key _src _rel; do
             [ -n "${_key}" ] || continue
@@ -308,12 +316,6 @@ PY
             #   cubestack_operator, cephfs_mount 等全部被静默跳过)。
             if run_component "${_key}" "${_rel}" </dev/null; then _n_ok=$((_n_ok + 1)); else _n_fail=$((_n_fail + 1)); fi
         done <<< "${_order}"
-        # ★ 外部 Ceph(2026-11-05): 删旧集群资源前先摘节点 CSI 挂载, 避免 jbd2/rbd D 状态。
-        #   内部 Ceph 的同类清理在 ceph 模块/cubestack-offline reset 前置里做。
-        if [ "${CEPH_MODE:-internal}" = "external" ]; then
-            unmount_node_ceph_mounts \
-                || warn "  (有节点未能确认/卸净 Ceph/RBD 挂载; 后续 reset/重启兜底)"
-        fi
         echo ""
         say "优雅卸载完成: 成功 ${_n_ok} 个, 失败/跳过 ${_n_fail} 个"
         if [ "${_n_fail}" -gt 0 ]; then
