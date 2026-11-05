@@ -6,7 +6,7 @@
 #       备料 —— 错误会一路传到集群。本脚本在**不联网**的前提下把关:
 #   ① 清单能被解析, 所有 ${VAR} 都能展开(变量未声明/为空 → 报错)
 #   ② 每条 ref 全限定(带注册域), 且能推出合法 Harbor 目标路径
-#   ③ 无重复 ref(同一镜像声明两次 → 同步两遍)
+#   ③ 无真重复 ref(同一镜像落到同一 tar 才算重复; 同名 ref 落到不同 tar 是故意的多消费者物化)
 #   ④ group 能推出离线目录路径(硬判); 目录/README 是否就位只做提示(④b, warn, 不影响退出码)
 #   ⑤ [--kubespray] k8s-base 组与 tools/offline/trim-offline-files.sh 的 PRELOAD_IMAGE_PATTERNS
 #      交叉核对 —— 两者不一致会导致镜像被裁掉(真实事故类型: 清单加了镜像却被 trim 删除)
@@ -85,13 +85,38 @@ done < "${ENTRIES}"
 [ "${N_BAD_MIRROR}" = "0" ] && ok "② 全部可推出 Harbor 目标路径"
 
 # ---------- ③ 重复 ref ----------
+# 同一上游 ref 声明多次**只有一种合法情形**: 为了不同消费者物化成**不同的 tar 文件名**
+# (例: k8s-base 组的 `docker.io/library/nginx:<api-tag>` 派生名给节点预加载/API 本地代理,
+#  nginx 组的历史短名 `nginx.tar` 给 verify 后端)。此时同步两次是幂等的, 落盘互不覆盖。
+# 落盘路径相同(含第三列相同)才是真重复: 同步两遍 + 后写覆盖前写。
 DUPS="$(cut -f2 "${ENTRIES}" | sort | uniq -d)"
 if [ -n "${DUPS}" ]; then
-    ck "③ 存在重复 ref(同一镜像声明多次):"
-    printf '     %s\n' ${DUPS}
+    DUP_BAD=""
+    while IFS= read -r _ref; do
+        [ -n "${_ref}" ] || continue
+        _paths=""
+        while IFS=$'\t' read -r _g _r _n; do
+            [ "${_r}" = "${_ref}" ] || continue
+            _paths="${_paths}$(image_tar_path "${_g}" "${_r}" "${_n:-}")"$'\n'
+        done < "${ENTRIES}"
+        _cnt="$(printf '%s' "${_paths}" | sed '/^$/d' | wc -l)"
+        _uniq="$(printf '%s' "${_paths}" | sed '/^$/d' | sort -u | wc -l)"
+        if [ "${_cnt}" -lt 2 ] || [ "${_uniq}" -ne "${_cnt}" ]; then
+            DUP_BAD="${DUP_BAD}${_ref}"$'\n'
+        else
+            say "  ③ 允许重复 ref(同一镜像, 不同落盘 tar): ${_ref}"
+        fi
+    done <<< "${DUPS}"
+    if [ -n "${DUP_BAD}" ]; then
+        ck "③ 存在真重复 ref(同一镜像落到同一 tar, 会同步两遍并互相覆盖):"
+        printf '     %s\n' ${DUP_BAD}
+    else
+        ok "③ 无真重复 ref(同名 ref 均落在不同 tar)"
+    fi
 else
     ok "③ 无重复 ref"
 fi
+unset DUPS DUP_BAD _ref _paths _g _r _n _cnt _uniq 2>/dev/null || true
 
 # ---------- ④ group 目录(硬判: 拼得出路径) ----------
 N_DIR=0

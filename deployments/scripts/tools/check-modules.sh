@@ -795,7 +795,7 @@ unset _t _tp _tout 2>/dev/null || true
 #   METRICS_SERVER_VERSION → metrics_server_version
 #   CPA_VERSION            → dnsautoscaler_version(上游镜像 tag 为 v{{ ... }})
 #   API_LB_NGINX_IMAGE_TAG → nginx_image_tag(节点侧 API 本地代理静态 Pod; 上游是**带形态的全值**,
-#                            不能用 v 前缀规则改写 —— 1.30.1-alpine 是一整个 tag)
+#                            不能用 v 前缀规则改写 —— 1.30.6-alpine 是一整个 tag)
 #   kube_major 一律由**本文件自己的 K8S_VERSION 钉值**推出(1.35.8 → '1.35'), 故钉子换线时
 #   其余 7 项的期望值会跟着换线, 而不是静默沿用旧线。
 # ⑯-B(裁定 R23): LOCAL_VOLUME_PROVISIONER_ENABLED / NFD_ENABLED 在 cluster.conf.example 里

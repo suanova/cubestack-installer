@@ -59,12 +59,12 @@ Harbor `mirrors/**` 还没同步 1.35 线(所以 `harbor-save-images.sh` 暂时�
 | k8s-base | `registry.k8s.io/coredns/coredns:v1.12.4` | `…_coredns_coredns_v1.12.4.tar` |
 | k8s-base | `registry.k8s.io/metrics-server/metrics-server:v0.9.0` | `…` |
 | k8s-base | `registry.k8s.io/cpa/cluster-proportional-autoscaler:v1.10.3` | `…` |
-| k8s-base | `quay.io/coreos/etcd:v3.6.14` | `quay.io_coreos_etcd_v3.6.14.tar` |
+| k8s-base | `quay.io/coreos/etcd:v3.6.16` | `quay.io_coreos_etcd_v3.6.16.tar` |
 | k8s-base | `quay.io/calico/cni:v3.31.7` | `quay.io_calico_cni_v3.31.7.tar` |
 | k8s-base | `quay.io/calico/node:v3.31.7` | `…` |
 | k8s-base | `quay.io/calico/kube-controllers:v3.31.7` | `…` |
-| k8s-base | `ghcr.io/kube-vip/kube-vip:v1.0.3` | `ghcr.io_kube-vip_kube-vip_v1.0.3.tar` |
-| k8s-base | `docker.io/library/nginx:1.30.1-alpine` | `docker.io_library_nginx_1.30.1-alpine.tar` |
+| k8s-base | `ghcr.io/kube-vip/kube-vip:v1.3.1` | `ghcr.io_kube-vip_kube-vip_v1.3.1.tar` |
+| k8s-base | `docker.io/library/nginx:1.30.6-alpine` | `docker.io_library_nginx_1.30.6-alpine.tar` |
 | multus | `ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick` | `multus/ghcr.io_k8snetworkplumbingwg_multus-cni_v4.2.2-thick.tar` |
 | netshoot | `docker.io/nicolaka/netshoot:latest` | `netshoot/docker.io_nicolaka_netshoot_latest.tar` |
 | (lws) | `registry.k8s.io/lws/lws:v0.10.0` | `cubestack-operator/registry.k8s.io_lws_lws_v0.10.0.tar`(仅平台 operator 的 CR 下发 `lws` 组件时需要; 独立 LWS 模块已于 2026-10-15 下线, 该 tar 随 cubestack-operator 组管理) |
@@ -73,7 +73,7 @@ Harbor `mirrors/**` 还没同步 1.35 线(所以 `harbor-save-images.sh` 暂时�
 | 组 | ref | 说明 |
 |---|---|---|
 | k8s-base | `registry.k8s.io/sig-storage/local-volume-provisioner:v2.10.0` | 只有 `LOCAL_VOLUME_PROVISIONER_ENABLED=true` 才需要 |
-| k8s-base | `registry.k8s.io/nfd/node-feature-discovery:v0.19.0` | 只有 `NFD_ENABLED=true` 才需要 |
+| k8s-base | `registry.k8s.io/nfd/node-feature-discovery:v0.20.1` | 只有 `NFD_ENABLED=true` 才需要 |
 
 > ⚠ **multus 那条是硬门禁**:盘上现有的 `multus/multus-cni.tar` 内容实测仍是 `snapshot-thick`,
 > 而模块已改成**内容校验** → 名称/内容不符会**响亮拒绝**。必须产出 `v4.2.2-thick` 的新 tar(名字按上表)。

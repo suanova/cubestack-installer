@@ -895,7 +895,7 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
 
 - **允许变化**：`CUBESTACK_OPERATOR_IMAGE_TAG`、`CUBESTACK_OPERATOR_CHART_VERSION`、`CUBESTACK_CLI_IMAGE`；
 - **允许忽略并告警**：`DEV_LAB_*`、`METAX_*`、`NVIDIA_*`、`RDMA_IMAGE_TAG`、`MULTUS_IMAGE_TAG`、
-  `NGINX_TAG`（树内保持旧值；这些组要升级需完整 `release-publish.sh`）；
+  `NGINX_TAG`（这些组要升级需完整 `release-publish.sh`）；
 - **其他 key 变化**（KUBESPRAY_VERSION/RELEASE_GROUPS/上游版本等）→ 失败；
 - `stale 清理`：只扫 selected subdir 的 maxdepth=1，删除不在该 subdir 全量 tsv 行里的旧
   `*.tar`/`*.tar.gz` 及 `.digest`；chart 目录只保留 `CUBESTACK_OPERATOR_CHART_VERSION`

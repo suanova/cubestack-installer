@@ -258,11 +258,11 @@ multus_image_tag: "v{{ multus_version }}"
 external_openstack_cloud_controller_image_repo: "{{ kube_image_repo }}/provider-os/openstack-cloud-controller-manager"
 external_openstack_cloud_controller_image_tag: "v1.35.0"
 
-kube_vip_version: 1.0.3
+kube_vip_version: 1.3.1
 kube_vip_image_repo: "{{ github_image_repo }}/kube-vip/kube-vip{{ '-iptables' if kube_vip_lb_fwdmethod == 'masquerade' else '' }}"
 kube_vip_image_tag: "v{{ kube_vip_version }}"
 nginx_image_repo: "{{ docker_image_repo }}/library/nginx"
-nginx_image_tag: 1.30.1-alpine
+nginx_image_tag: 1.30.6-alpine
 haproxy_image_repo: "{{ docker_image_repo }}/library/haproxy"
 haproxy_image_tag: 3.2.19-alpine
 
@@ -367,7 +367,7 @@ metallb_controller_image_repo: "{{ quay_image_repo }}/metallb/controller"
 metallb_version: 0.13.9
 metallb_image_tag: "v{{ metallb_version }}"
 
-node_feature_discovery_version: 0.19.0
+node_feature_discovery_version: 0.20.1
 node_feature_discovery_image_repo: "{{ kube_image_repo }}/nfd/node-feature-discovery"
 node_feature_discovery_image_tag: "v{{ node_feature_discovery_version }}"
 

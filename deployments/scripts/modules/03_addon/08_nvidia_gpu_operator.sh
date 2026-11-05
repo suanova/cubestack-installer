@@ -26,7 +26,7 @@
 #   · chart: vendored 副本恒用(cubestack-addon/nvidia-gpu-operator/<tgz>+digest 边车);
 #     NVIDIA_GPU_OPERATOR_CHART_SYNC=auto 探测 nvcr.io 可达 → online 比对刷新 / offline 纯本地。
 #   · NFD: cluster.conf NFD_ENABLED=true(kubespray 已布 NFD)时自动 nfd.enabled=false;
-#     否则 operator 自带 NFD(v0.19.0, 镜像在本集内)。
+#     否则 operator 自带 NFD(v0.19.0, chart v26.7.2 内置; 与全局 NFD_VERSION 无关, 勿跟着抬)。
 #   · 验证: sudo ./deploy-cluster.sh --steps verify_nvidia_gpu。
 #   · 本次设计边界(如实标注): 无 NVIDIA 卡集群走"快路径"(组件级就绪); 端到端(cuda-vectoradd)需真卡环境;
 #     预编译不支持 vGPU/GDS、混 OS 不适用(门禁报错); 禁用组件(vGPU/DRA/sandbox 等)未纳入离线

@@ -1,0 +1,62 @@
+# patch: 22-extra-playbooks-version-sync.patch
+# 目标: extra_playbooks/roles/kubespray_defaults/{defaults/main/download.yml,vars/main/checksums.yml}
+# 加入: 2026-11-05
+# 原因: 交叉核对发现 extra_playbooks/roles 下是 upstream 的另一份 roles 副本, 被
+#       extra_playbooks/upgrade-only-k8s.yml 使用; 它仍停留在旧版本表(LVP 2.5.0、etcd 3.6.14、
+#       nginx 1.30.1-alpine、kube-vip 1.0.3、NFD 0.19.0), 与主树/档案/发布定义漂移。
+#       本补丁把该副本同步到与主树一致的值, 避免升级 playbook 走旧表。
+# 上游吸收判据: extra_playbooks 副本的上述 5 项与主树同值(上游后续删除该重复副本或自动同步即退休)
+# 上游化: 不提 PR(上游副本一致性, 本项目版本钉)
+# ------------------------------------------------------------
+--- a/extra_playbooks/roles/kubespray_defaults/defaults/main/download.yml
++++ b/extra_playbooks/roles/kubespray_defaults/defaults/main/download.yml
+@@ -258,11 +258,11 @@
+ external_openstack_cloud_controller_image_repo: "{{ kube_image_repo }}/provider-os/openstack-cloud-controller-manager"
+ external_openstack_cloud_controller_image_tag: "v1.35.0"
+ 
+-kube_vip_version: 1.0.3
++kube_vip_version: 1.3.1
+ kube_vip_image_repo: "{{ github_image_repo }}/kube-vip/kube-vip{{ '-iptables' if kube_vip_lb_fwdmethod == 'masquerade' else '' }}"
+ kube_vip_image_tag: "v{{ kube_vip_version }}"
+ nginx_image_repo: "{{ docker_image_repo }}/library/nginx"
+-nginx_image_tag: 1.30.1-alpine
++nginx_image_tag: 1.30.6-alpine
+ haproxy_image_repo: "{{ docker_image_repo }}/library/haproxy"
+ haproxy_image_tag: 3.2.19-alpine
+ 
+@@ -296,7 +296,7 @@
+ metrics_server_version: "0.9.0"
+ metrics_server_image_repo: "{{ kube_image_repo }}/metrics-server/metrics-server"
+ metrics_server_image_tag: "v{{ metrics_server_version }}"
+-local_volume_provisioner_version: "2.5.0"
++local_volume_provisioner_version: "2.10.0"
+ local_volume_provisioner_image_repo: "{{ kube_image_repo }}/sig-storage/local-volume-provisioner"
+ local_volume_provisioner_image_tag: "v{{ local_volume_provisioner_version }}"
+ local_path_provisioner_version: "0.0.37"
+@@ -367,7 +367,7 @@
+ metallb_version: 0.13.9
+ metallb_image_tag: "v{{ metallb_version }}"
+ 
+-node_feature_discovery_version: 0.19.0
++node_feature_discovery_version: 0.20.1
+ node_feature_discovery_image_repo: "{{ kube_image_repo }}/nfd/node-feature-discovery"
+ node_feature_discovery_image_tag: "v{{ node_feature_discovery_version }}"
+ 
+--- a/extra_playbooks/roles/kubespray_defaults/vars/main/checksums.yml
++++ b/extra_playbooks/roles/kubespray_defaults/vars/main/checksums.yml
+@@ -381,6 +381,7 @@
+     1.34.0: sha256:7201ba36f44187f408a036c4a545e2a3cd12943b1297092687bb66c9a1a9fed6
+ etcd_binary_checksums:
+   arm64:
++    3.6.16: sha256:ad756ff27ba21e3488cfb84d00f3f4ad8d9b60a93e20f5be5b230a4aab1dc053
+     3.6.14: sha256:fa1b80565ee6fc2df1ae6f57a508b221f3ecc7d591c317c581cd8281b0842b3e
+     3.6.13: sha256:5ab53ff70301fa9d782fa4b59fdfc1fae49ffdf427a0afb3cd313a93449800fc
+     3.6.12: sha256:147afc710e164fa342ad8561bcca8903f3913bd9fb9ae0c83c857b1d868189cc
+@@ -425,6 +426,7 @@
+     3.5.7: sha256:1a35314900da7db006b198dd917e923459b462128101736c63a3cda57ecdbf51
+     3.5.6: sha256:888e25c9c94702ac1254c7655709b44bb3711ebaabd3cb05439f3dd1f2b51a87
+   amd64:
++    3.6.16: sha256:c8c0d96d8292ef085deabbf735e9561d3d396768e4d606df005aa25964f21911
+     3.6.14: sha256:ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
+     3.6.13: sha256:b4928654aed84d90952620c7144555e4186d795e1e7414e65fe0cf6265fd0465
+     3.6.12: sha256:d2564bb50b58e52fbaf3bde4a9561a1d04e20cdc761f795580e4d615d5d41355

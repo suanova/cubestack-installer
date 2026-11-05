@@ -258,7 +258,7 @@ if ! is_cluster_live; then
 fi
 
 # 镜像必须已在各节点 —— 离线方案的硬前提
-_KV_IMAGE="${KUBE_VIP_IMAGE_REPO:-ghcr.io/kube-vip/kube-vip}:${KUBE_VIP_VERSION:-v1.0.3}"
+_KV_IMAGE="${KUBE_VIP_IMAGE_REPO:-ghcr.io/kube-vip/kube-vip}:${KUBE_VIP_VERSION:-v1.3.1}"
 _MISSING=()
 for _ip in "${_MIP[@]}"; do
     _ssh "${_ip}" "sudo ctr -n k8s.io i ls -q 2>/dev/null | grep -qF '${_KV_IMAGE}'" || _MISSING+=("${_ip}")

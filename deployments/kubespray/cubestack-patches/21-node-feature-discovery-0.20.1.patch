@@ -1,0 +1,21 @@
+# patch: 21-node-feature-discovery-0.20.1.patch
+# 目标: roles/kubespray_defaults/defaults/main/download.yml
+# 加入: 2026-11-05
+# 原因: NFD 从 0.19.0 抬到 0.20.1(修 GO-2026-6809 / CVE-2026-111943, 0.20.1 为 0.20 维护版,
+#       无公开 API 变更)。上游 v0.20.1 的 master/worker/gc/topology-updater 清单与 v0.19.0
+#       仅镜像 tag 不同, kubespray v2.32.0 的模板参数继续兼容。NFD addon 默认关闭;
+#       images.manifest 的 k8s-base 组与 PRELOAD_IMAGE_PATTERNS 已登记该镜像。
+# 上游吸收判据: download.yml 的 node_feature_discovery_version >= 0.20.1(换树自带新值即退休)
+# 上游化: 不提 PR(本地版本钉)
+# ------------------------------------------------------------
+--- a/roles/kubespray_defaults/defaults/main/download.yml
++++ b/roles/kubespray_defaults/defaults/main/download.yml
+@@ -367,7 +367,7 @@
+ metallb_version: 0.13.9
+ metallb_image_tag: "v{{ metallb_version }}"
+ 
+-node_feature_discovery_version: 0.19.0
++node_feature_discovery_version: 0.20.1
+ node_feature_discovery_image_repo: "{{ kube_image_repo }}/nfd/node-feature-discovery"
+ node_feature_discovery_image_tag: "v{{ node_feature_discovery_version }}"
+ 

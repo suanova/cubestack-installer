@@ -223,7 +223,7 @@ DEV_LAB_MACA_TAG=3.9.0.12-py310-torch2.4-v2.0.0-rc2
 DEV_LAB_CUDA_TAG=26.08-v2.0.0-rc2
 RDMA_IMAGE_TAG=v1.5.4
 MULTUS_IMAGE_TAG=v4.2.2-thick
-NGINX_TAG=1.27
+NGINX_TAG=1.30.6-alpine
 RELEASE_GROUPS="kubespray cubestack-operator"
 EOF
     cp "${REL_DIR}/release.env" "${REMOTE_OFF}/release.env"

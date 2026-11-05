@@ -19,7 +19,7 @@ NVIDIA GPU Operator(英伟达官方)的**离线镜像 tar**(组件镜像 + 预�
 | 运行时组件 | `k8s/container-toolkit` · `k8s-device-plugin`(v26 起含 GFD) · `k8s/dcgm-exporter` · `cloud-native/k8s-mig-manager` · `cloud-native/k8s-driver-manager` |
 | 预编译驱动 | `nvcr.io/nvidia/driver:${NVIDIA_GPU_DRIVER_BRANCH}-${NVIDIA_GPU_DRIVER_PRECOMPILED_KERNEL}-ubuntu22.04` |
 | 验证样例 | `k8s/cuda-sample:vectoradd-cuda12.5.0-ubuntu22.04` |
-| NFD | `registry.k8s.io/nfd/node-feature-discovery:v0.19.0`(**清单登记在 k8s-base 组, 避免重复; tar 收入本目录**) |
+| NFD | `registry.k8s.io/nfd/node-feature-discovery:v0.19.0`(**chart v26.7.2 内置版本, 与全局 `NFD_VERSION` 无关; 上游 ref 登记在 k8s-base 组, tar 收入本目录**) |
 | 边缘组件(保守备料) | `k8s-cc-manager` · `nvidia-sandbox-device-plugin` · `vgpu-device-manager` · `kubevirt-gpu-device-plugin` |
 
 ## 其他通道 / 取源口径(2026-10-14 用户口径: Harbor 为唯一镜像源)

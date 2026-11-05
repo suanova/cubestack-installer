@@ -258,11 +258,11 @@ multus_image_tag: "v{{ multus_version }}"
 external_openstack_cloud_controller_image_repo: "{{ kube_image_repo }}/provider-os/openstack-cloud-controller-manager"
 external_openstack_cloud_controller_image_tag: "v1.35.0"
 
-kube_vip_version: 1.0.3
+kube_vip_version: 1.3.1
 kube_vip_image_repo: "{{ github_image_repo }}/kube-vip/kube-vip{{ '-iptables' if kube_vip_lb_fwdmethod == 'masquerade' else '' }}"
 kube_vip_image_tag: "v{{ kube_vip_version }}"
 nginx_image_repo: "{{ docker_image_repo }}/library/nginx"
-nginx_image_tag: 1.30.1-alpine
+nginx_image_tag: 1.30.6-alpine
 haproxy_image_repo: "{{ docker_image_repo }}/library/haproxy"
 haproxy_image_tag: 3.2.19-alpine
 
@@ -296,7 +296,7 @@ registry_image_tag: "{{ registry_version }}"
 metrics_server_version: "0.9.0"
 metrics_server_image_repo: "{{ kube_image_repo }}/metrics-server/metrics-server"
 metrics_server_image_tag: "v{{ metrics_server_version }}"
-local_volume_provisioner_version: "2.5.0"
+local_volume_provisioner_version: "2.10.0"
 local_volume_provisioner_image_repo: "{{ kube_image_repo }}/sig-storage/local-volume-provisioner"
 local_volume_provisioner_image_tag: "v{{ local_volume_provisioner_version }}"
 local_path_provisioner_version: "0.0.37"
@@ -367,7 +367,7 @@ metallb_controller_image_repo: "{{ quay_image_repo }}/metallb/controller"
 metallb_version: 0.13.9
 metallb_image_tag: "v{{ metallb_version }}"
 
-node_feature_discovery_version: 0.19.0
+node_feature_discovery_version: 0.20.1
 node_feature_discovery_image_repo: "{{ kube_image_repo }}/nfd/node-feature-discovery"
 node_feature_discovery_image_tag: "v{{ node_feature_discovery_version }}"
 

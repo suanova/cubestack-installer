@@ -12,7 +12,7 @@
 - 每条改动的"原因 / 上游吸收判据 / 上游化"三项写在 **patch 文件头的注释块**里(本 README 的表格是摘要,
   以 patch 头为准);判据用于升级时跑"这个补丁是否已被上游吸收、可以退休"的检查(设计 §3.5)。
 
-## 补丁清单(17 处)
+## 补丁清单(21 处)
 
 | 补丁 | 目标文件 | 一句话原因(丢了会怎样) | 上游吸收判据 | 上游化 |
 |---|---|---|---|---|
@@ -35,6 +35,11 @@
 | `16-registry-nodeport-leak-wait.patch` | `roles/kubernetes-apps/registry/tasks/main.yml` | 固定 NodePort(默认 31148)可能被 apiserver 判为"已分配但无 Service 持有"(上次部署/重置遗留的泄漏分配, repair 控制器约 6min 才清理)⇒ apply 报 `provided port is already allocated`、role 中断、PVC 未创建、registry Pod Pending(2026-11-03 实机: 11:59 标记泄漏, 12:05 清理, apply 在 12:02);修复: apply 前 `--dry-run=server` 探测, 仅对 already allocated 等待(默认 60×10s, `registry_nodeport_repair_retries/_delay` 可调) | 上游 registry role 在 apply 前自带 NodePort 泄漏分配等待, 或不再固定 `registry_service_nodeport` | 建议提 PR(固定 NodePort 的幂等重放健壮性; 上游默认 ClusterIP 不受影响) |
 
 | `17-local-volume-provisioner-2.10.0.patch` | `roles/kubespray_defaults/defaults/main/download.yml` | 树内 v2.32.0 仍钉 LVP 2.5.0(Debian 11 + Go 1.17, 18 Critical/151 High); 抬到上游 v2.10.0(Go 1.26.6, 修 CVE-2026-56854/56855/84304), 使钉子与树表继续同值; addon 默认关闭, 仅离线包预载 | `local_volume_provisioner_version` >= 2.10.0 | 不提 PR(本地版本钉; 换树 `--check-retired` 判定) |
+| `18-etcd-3.6.16.patch` | `roles/kubespray_defaults/vars/main/checksums.yml` | etcd 3.6.14 → **3.6.16**(2026-11 CVE 修复)。`etcd_version` 由 `etcd_binary_checksums` 首键推导, 树表封顶 3.6.14 ⇒ 不补表则 ⑯/⑱ 红 + 二进制 checksum 查表缺失; 补 amd64/arm64 两行插表首 | `etcd_binary_checksums` 出现 >=3.6.16 条目 | 不提 PR(本地版本钉; 换树 `--check-retired` 判定) |
+| `19-nginx-1.30.6-alpine.patch` | `roles/kubespray_defaults/defaults/main/download.yml` | API 本地代理 nginx 1.30.1-alpine → **1.30.6-alpine**(2026-11 CVE 修复); 必须与 `API_LB_NGINX_IMAGE_TAG` 逐字一致 | `nginx_image_tag` >= 1.30.6-alpine | 不提 PR(本地版本钉) |
+| `20-kube-vip-1.3.1.patch` | `roles/kubespray_defaults/defaults/main/download.yml` | kube-vip 1.0.3 → **1.3.1**(2026-11 CVE 修复; v1.3.1 为 v1.3.0 重发版)。唯一 Breaking 是 shared VIP Cluster Service, 本项目 `kube_vip_services_enabled=false` 不受影响 | `kube_vip_version` >= 1.3.1 | 不提 PR(本地版本钉) |
+| `21-node-feature-discovery-0.20.1.patch` | `roles/kubespray_defaults/defaults/main/download.yml` | NFD 0.19.0 → **0.20.1**(GO-2026-6809 / CVE-2026-111943); v0.20.1 清单与 v0.19.0 仅镜像 tag 不同, 模板参数兼容 | `node_feature_discovery_version` >= 0.20.1 | 不提 PR(本地版本钉) |
+| `22-extra-playbooks-version-sync.patch` | `extra_playbooks/roles/kubespray_defaults/{defaults/main/download.yml,vars/main/checksums.yml}` | 交叉核对发现 `extra_playbooks/roles` 副本(供 `upgrade-only-k8s.yml`)仍停在旧表(LVP 2.5.0 / etcd 3.6.14 / nginx 1.30.1 / kube-vip 1.0.3 / NFD 0.19.0), 与主树漂移; 同步到主树值 | 副本上述 5 项与主树同值 | 不提 PR(上游副本一致性) |
 
 ### 已退休(1 处,别再加回来)
 
@@ -44,11 +49,12 @@
 (注意:这不是"上游吸收", 是上游删除了整段逻辑)。教训:目标文件消失时 `--check-retired` 只会报 KEEP
 (反打不上 ≠ 上游未吸收), 退休必须人工确认。
 
-> 本目录 16 个补丁 = 换树时固化的 7 个(spec §2.2 表的第 4、5、7(=原手工项)、8、9、10、11 行;
+> 本目录 21 个补丁 = 换树时固化的 7 个(spec §2.2 表的第 4、5、7(=原手工项)、8、9、10、11 行;
 > **第 6 行(补丁 03)已退休**,见上)+ 换树后实机部署暴露的 3 个(前缀 `09`–`11`,与 spec §2.2 行号无关)
 > + 后续实机/覆盖安装暴露的 5 个(`12`–`16`: coredns resolv.conf、reset 跳过 calico 检查、
-> calico 3.32.2 校验表/RBAC、registry 固定 NodePort 泄漏等待)+ CVE 抬版 1 个(`17`:
-> local-volume-provisioner 2.5.0 → 2.10.0)。
+> calico 3.32.2 校验表/RBAC、registry 固定 NodePort 泄漏等待)+ CVE 抬版 6 个(`17`–`22`:
+> LVP 2.5.0 → 2.10.0、etcd 3.6.14 → 3.6.16、nginx 1.30.1 → 1.30.6、kube-vip 1.0.3 → 1.3.1、
+> NFD 0.19.0 → 0.20.1、extra_playbooks 副本同步)。
 
 ## 不在本目录的 3 处改动(别重复两套)
 

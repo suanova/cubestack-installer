@@ -2,7 +2,7 @@
 
 nginx 的**离线镜像 tar**(内置 registry 的 nginx 副本源 / verify 模块的测试后端)。
 
-- 镜像: `docker.io/library/nginx:${NGINX_TAG}`(默认 `1.27`)
+- 镜像: `docker.io/library/nginx:${NGINX_TAG}`(默认 `1.30.6-alpine`)
 - tar 名: **`nginx.tar`** —— 清单第 3 列的"历史短名"覆盖,不能改成 `<repo>_<tag>.tar`:
   `lib-common.sh` 的 `ensure_registry_nginx()` 按**字面文件名**读取
 - 版本真相: `cluster.conf` 的 `NGINX_TAG`
@@ -13,8 +13,8 @@ nginx 的**离线镜像 tar**(内置 registry 的 nginx 副本源 / verify 模�
   sudo ./deployments/scripts/tools/images/harbor-save-images.sh --group nginx
 
   # 或直连 Docker Hub 自存
-  sudo docker pull nginx:1.27
-  sudo docker save nginx:1.27 -o deployments/offline-files/nginx/nginx.tar
+  sudo docker pull nginx:1.30.6-alpine
+  sudo docker save nginx:1.30.6-alpine -o deployments/offline-files/nginx/nginx.tar
   ```
 
 - 谁消费: `lib-common.sh` 的 `ensure_registry_nginx()`(被 verify 模块调用,如

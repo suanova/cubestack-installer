@@ -1,0 +1,21 @@
+# patch: 19-nginx-1.30.6-alpine.patch
+# 目标: roles/kubespray_defaults/defaults/main/download.yml
+# 加入: 2026-11-05
+# 原因: API 本地代理(kubespray nginx-proxy 静态 Pod)镜像从 1.30.1-alpine 抬到 1.30.6-alpine
+#       (2026-11 CVE 修复)。该 tag 同时是 images.manifest 的 API_LB_NGINX_IMAGE_TAG 与
+#       verify 测试后端 NGINX_TAG 的取值, 必须与树内 nginx_image_tag 逐字一致, 否则离线集群
+#       预加载/拉取不到镜像(check-modules ⑯ 断言)。
+# 上游吸收判据: download.yml 的 nginx_image_tag >= 1.30.6-alpine(换树自带新值即退休)
+# 上游化: 不提 PR(本地版本钉)
+# ------------------------------------------------------------
+--- a/roles/kubespray_defaults/defaults/main/download.yml
++++ b/roles/kubespray_defaults/defaults/main/download.yml
+@@ -262,7 +262,7 @@
+ kube_vip_image_repo: "{{ github_image_repo }}/kube-vip/kube-vip{{ '-iptables' if kube_vip_lb_fwdmethod == 'masquerade' else '' }}"
+ kube_vip_image_tag: "v{{ kube_vip_version }}"
+ nginx_image_repo: "{{ docker_image_repo }}/library/nginx"
+-nginx_image_tag: 1.30.1-alpine
++nginx_image_tag: 1.30.6-alpine
+ haproxy_image_repo: "{{ docker_image_repo }}/library/haproxy"
+ haproxy_image_tag: 3.2.19-alpine
+ 

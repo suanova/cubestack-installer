@@ -112,8 +112,8 @@ INGRESS_NGINX_ENABLED="${INGRESS_NGINX_ENABLED:-false}" # ingress-nginx(HTTP 入
 DASHBOARD_ENABLED="${DASHBOARD_ENABLED:-false}"         # Kubernetes dashboard
 CERT_MANAGER_ENABLED="${CERT_MANAGER_ENABLED:-false}"   # cert-manager(证书签发, 部分 webhook 组件依赖)
 GATEWAY_API_ENABLED="${GATEWAY_API_ENABLED:-false}"     # Gateway API CRDs
-LOCAL_VOLUME_PROVISIONER_ENABLED="${LOCAL_VOLUME_PROVISIONER_ENABLED:-false}" # kubespray addon: 本地卷静态供给(2.5.0); 默认关, 需要时置 true
-NFD_ENABLED="${NFD_ENABLED:-false}"                     # kubespray addon: node-feature-discovery(0.19.0); 默认关, 需要时置 true
+LOCAL_VOLUME_PROVISIONER_ENABLED="${LOCAL_VOLUME_PROVISIONER_ENABLED:-false}" # kubespray addon: 本地卷静态供给(2.10.0); 默认关, 需要时置 true
+NFD_ENABLED="${NFD_ENABLED:-false}"                     # kubespray addon: node-feature-discovery(0.20.1); 默认关, 需要时置 true
 # (基座细节: K8s 版本/镜像钉子/CIDR/containerd/CNI/hosts → defaults ★版本节 / §2.x)
 
 # ---- 集群基础设施开关(阶段三) ----

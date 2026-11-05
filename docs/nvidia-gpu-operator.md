@@ -54,6 +54,36 @@ sudo ./deploy-cluster.sh --steps verify_nvidia_gpu
 `mirrors/nvcr.io/**` → 各组件 repository 覆盖为集群 registry(节点不访问外网)→ helm 安装
 → 活体 CR 自检/纠偏 → GPU 探测与 `nvidia.com/gpu` 可调度性检查。
 
+### 3.1 用独立 NFD(0.20.1)替代 operator chart 自带的 NFD(0.19.0)
+
+**可以，仓库已内置这条路径。** 两种模式二选一，不要同时启用两套 NFD：
+
+| 模式 | 开关 | NFD 版本 | 说明 |
+|---|---|---|---|
+| operator 自带(默认) | `NFD_ENABLED=false` | **v0.19.0**(chart v26.7.2 内置，与全局 `NFD_VERSION` 无关) | `nfd.enabled=true`，NFD 由 operator 子 chart 管理 |
+| 集群级独立 NFD | `NFD_ENABLED=true` | **v0.20.1**(`NFD_VERSION`) | kubespray addon 部署；模块自动 `nfd.enabled=false` |
+
+切换步骤：
+
+```bash
+# 1) cluster.conf 设 NFD_ENABLED=true(NFD_VERSION 默认已是 0.20.1)
+echo 'NFD_ENABLED=true' >> deployments/config/cluster.conf
+# 2) 重跑 k8s_deploy 安装/升级独立 NFD(kubespray addon, 不是本仓库模块)
+sudo ./deploy-cluster.sh --steps k8s_deploy
+kubectl -n node-feature-discovery get ds,pods        # 确认 nfd-worker/ nfd-master Ready
+# 3) 重跑 GPU operator: 模块检测到 NFD_ENABLED=true → 自动 --set nfd.enabled=false
+sudo ./deploy-cluster.sh --steps nvidia_gpu_operator
+kubectl -n gpu-operator get ds                       # 不应再有 operator 自带的 NFD
+```
+
+注意：
+- 独立 NFD 镜像 `registry.k8s.io/nfd/node-feature-discovery:v0.20.1` 在 `k8s-base` 组，已列入
+  `PRELOAD_IMAGE_PATTERNS`；离线发布树 2.0.1 已补齐该 tar。
+- 从“operator 自带”切到“集群级”时，helm upgrade 会把子 chart 的 NFD 资源移除；若旧 CRD/Namespace
+  仍有残留，先 `kubectl get crd | grep nfd` / `kubectl -n gpu-operator get ds` 确认，避免两套 NFD
+  同时 watch 节点。
+- `NFD_ENABLED=true` 是**集群级**开关：它会让所有启用 NFD 的部署（包括非 GPU 集群）都安装 NFD addon。
+
 ## 4. 在线安装
 
 ```bash

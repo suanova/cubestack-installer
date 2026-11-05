@@ -24,9 +24,9 @@ kubespray 基座的**离线资产**(二进制 / 系统包 / 节点预加载镜�
 | `packages/` · `*.deb` | 离线系统包(lvm2、rsync 等) |
 
 **本版本(随 kubespray v2.32 换代,1.32 线 → 1.35 线)**:`kubelet/kubectl/kubeadm 1.35.8`、
-`etcd 3.6.14`、`cni-plugins 1.9.1`、`calicoctl 3.31.7`、`containerd 2.3.5`、`crictl 1.35.0`、`runc 1.4.3`、
-`helm 3.22.0`、`nerdctl 2.3.5`;镜像侧 K8s 1.35.8 / calico 3.31.7 / coredns 1.12.4 / pause 3.10.1 /
-metrics-server 0.9.0 / local-path v0.0.37 / nginx 1.30.1-alpine / kube-vip v1.0.3 / metallb 0.13.9。
+`etcd 3.6.16`、`cni-plugins 1.9.1`、`calicoctl 3.32.2`、`containerd 2.3.5`、`crictl 1.35.0`、`runc 1.4.3`、
+`helm 3.22.0`、`nerdctl 2.3.5`;镜像侧 K8s 1.35.8 / calico 3.32.2 / coredns 1.12.4 / pause 3.10.1 /
+metrics-server 0.9.0 / local-path v0.0.37 / nginx 1.30.6-alpine / kube-vip v1.3.1 / metallb 0.13.9。
 逐件校验:`sha256` 对 kubespray 树 `checksums.yml`(二进制)、层解压内容对 `config.diff_ids`(镜像)。
 
 **1.32 线旧件去哪了**(多处保留, 便于回退与本地临时版本):
@@ -70,7 +70,7 @@ kube-vip 在 `kubeadm init` **之前**就要起来并绑上 VIP。镜像若没�
 
 ## nginx(节点侧 API 本地代理静态 Pod)—— 为什么它必须在这里
 
-`docker.io/library/nginx:${API_LB_NGINX_IMAGE_TAG}`(当前 `1.30.1-alpine`)支撑 kubespray 原生的
+`docker.io/library/nginx:${API_LB_NGINX_IMAGE_TAG}`(当前 `1.30.6-alpine`)支撑 kubespray 原生的
 **每节点本地 API 代理**: 节点上的 nginx-proxy 静态 Pod 监听本机 `127.0.0.1:6443`, 把 kubelet /
 kube-proxy 的 API 流量转发到全部 master —— 于是"节点侧 API 出口"不再依赖任何一台具体 master
 (见 [`../../../docs/api-ha/`](../../../docs/api-ha/))。上游开关是 kubespray `all.yml` 的
@@ -95,7 +95,7 @@ kubespray cluster.yml
 |---|---|
 | 上游 ref | `docker.io/library/nginx:${API_LB_NGINX_IMAGE_TAG}` |
 | 版本变量 | `API_LB_NGINX_IMAGE_TAG`(`cluster.conf` / `.example` 的镜像版本节) |
-| 离线 tar | `images/docker.io_library_nginx_1.30.1-alpine.tar`(按上游 ref 派生: `/`→`_`, `:`→`_`) |
+| 离线 tar | `images/docker.io_library_nginx_1.30.6-alpine.tar`(按上游 ref 派生: `/`→`_`, `:`→`_`) |
 | 清单条目 | `images.manifest` 的 `k8s-base` 组, **不带第 3 列**(用派生名) |
 | 预加载模式 | `PRELOAD_IMAGE_PATTERNS` 里的 `library_nginx`(见下方⚠) |
 
@@ -111,23 +111,23 @@ sudo ./deployments/scripts/tools/images/harbor-save-images.sh         --group k8
 > 命中, 两个 `nginx` 镜像互不干扰。第 3 列是"历史短名"镜像的覆盖名, 用了就走不到派生名。
 >
 > ⚠ 版本必须与 kubespray `roles/kubespray_defaults/defaults/main/download.yml` 的
-> `nginx_image_tag` 一致(当前 `1.30.1-alpine`; `extra_playbooks/` 下另有一份同名副本, 当前同值)。
+> `nginx_image_tag` 一致(当前 `1.30.6-alpine`; `extra_playbooks/` 下另有一份同名副本, 由 `cubestack-patches/22-extra-playbooks-version-sync.patch` 保持同值)。
 > 两处不同值 = 节点预加载的 tag 与静态 Pod 实际拉取的 tag 不是同一个, 离线环境直接拉不到。
 > 改 `API_LB_NGINX_IMAGE_TAG` 时两边一起改。
 
 ## LVP / NFD(kubespray addon,默认关)
 
 两个 kubespray 原生 addon 的镜像:`registry.k8s.io/sig-storage/local-volume-provisioner:v2.10.0`
-(开关 `LOCAL_VOLUME_PROVISIONER_ENABLED`)与 `registry.k8s.io/nfd/node-feature-discovery:v0.19.0`
-(开关 `NFD_ENABLED`,`v2.10.0` / `v0.19.0` 为当前展开值)。两个开关在 `cluster.conf` 里**默认 `false`**
+(开关 `LOCAL_VOLUME_PROVISIONER_ENABLED`)与 `registry.k8s.io/nfd/node-feature-discovery:v0.20.1`
+(开关 `NFD_ENABLED`,`v2.10.0` / `v0.20.1` 为当前展开值)。两个开关在 `cluster.conf` 里**默认 `false`**
 —— 本目录已把镜像备好、清单与预载 token 已登记,将来要用只需把开关置 `true`(再重跑 `k8s_deploy`
 阶段),不必再改仓库。
 
 | 项 | 值 |
 |---|---|
-| 上游 ref | `registry.k8s.io/sig-storage/local-volume-provisioner:v${LOCAL_VOLUME_PROVISIONER_VERSION}` / `registry.k8s.io/nfd/node-feature-discovery:v${NFD_VERSION}`(当前展开 = `v2.10.0` / `v0.19.0`) |
-| 版本变量 | `LOCAL_VOLUME_PROVISIONER_VERSION` / `NFD_VERSION`(= 本树 `roles/kubespray_defaults/defaults/main/download.yml` 值; LVP 由 `cubestack-patches/17-local-volume-provisioner-2.10.0.patch` 抬到 2.10.0) |
-| 离线 tar | `images/registry.k8s.io_sig-storage_local-volume-provisioner_v2.10.0.tar`、`images/registry.k8s.io_nfd_node-feature-discovery_v0.19.0.tar`(按上游 ref 派生: `/`→`_`, `:`→`_`) |
+| 上游 ref | `registry.k8s.io/sig-storage/local-volume-provisioner:v${LOCAL_VOLUME_PROVISIONER_VERSION}` / `registry.k8s.io/nfd/node-feature-discovery:v${NFD_VERSION}`(当前展开 = `v2.10.0` / `v0.20.1`) |
+| 版本变量 | `LOCAL_VOLUME_PROVISIONER_VERSION` / `NFD_VERSION`(= 本树 `roles/kubespray_defaults/defaults/main/download.yml` 值; LVP 由 `cubestack-patches/17-local-volume-provisioner-2.10.0.patch` 抬到 2.10.0; NFD 由 `cubestack-patches/21-node-feature-discovery-0.20.1.patch` 抬到 0.20.1) |
+| 离线 tar | `images/registry.k8s.io_sig-storage_local-volume-provisioner_v2.10.0.tar`、`images/registry.k8s.io_nfd_node-feature-discovery_v0.20.1.tar`(按上游 ref 派生: `/`→`_`, `:`→`_`) |
 | 清单条目 | `images.manifest` 的 `k8s-base` 组, **不带第 3 列**(用派生名) |
 | 预加载模式 | `PRELOAD_IMAGE_PATTERNS` 里的 `local-volume-provisioner` / `node-feature-discovery` |
 
@@ -144,9 +144,9 @@ sudo ./deployments/scripts/tools/images/harbor-save-images         --group k8s-b
 > **版本只有一处真相**(`cluster.conf` 的版本变量),升级只改那一处,清单/Harbor/离线 tar
 > 全部跟随(改完重走 Harbor 同步 → 离线 tar → `trim-offline-files.sh` 备料)。
 >
-> ⚠ **现状(2026-09-28)**:`local-volume-provisioner:v2.10.0` tar **已就位**;
-> `nfd/node-feature-discovery:v0.19.0` 的 tar **仍缺**(联网机那批下载件里没有、Harbor mirrors 也还没同步 1.35 线)
-> —— 由于 `NFD_ENABLED` 默认 `false`,默认部署不受影响;要用 NFD 前必须先补这张 tar。
+> ✅ **现状(2026-11-05)**:`local-volume-provisioner:v2.10.0` 与
+> `nfd/node-feature-discovery:v0.20.1` 的 tar 均已就位(发布树 2.0.1 同批补齐)。
+> `NFD_ENABLED` 默认仍为 `false`;要用 NFD 时置 `true` 并重跑 `k8s_deploy` 即可。
 
 ## 谁消费
 

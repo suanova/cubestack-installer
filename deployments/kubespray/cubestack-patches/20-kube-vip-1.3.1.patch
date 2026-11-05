@@ -1,0 +1,22 @@
+# patch: 20-kube-vip-1.3.1.patch
+# 目标: roles/kubespray_defaults/defaults/main/download.yml
+# 加入: 2026-11-05
+# 原因: kube-vip 从 1.0.3 抬到 1.3.1(2026-11 CVE 修复)。kube_vip_image_tag = "v{{ kube_vip_version }}"，
+#       所以 KUBE_VIP_VERSION 必须同步为 v1.3.1。v1.3.1 是 v1.3.0 的重发版(修正二进制内
+#       Release.Version); v1.3.0 唯一 Breaking 是 shared VIP Cluster Service 限制, 本项目
+#       kube_vip_services_enabled=false / kube_vip_lb_enable=false, 不受影响。清单模板对
+#       >=0.9.0 已发 vip_subnet, 1.3.1 继续适用。
+# 上游吸收判据: download.yml 的 kube_vip_version >= 1.3.1(换树自带新值即退休)
+# 上游化: 不提 PR(本地版本钉)
+# ------------------------------------------------------------
+--- a/roles/kubespray_defaults/defaults/main/download.yml
++++ b/roles/kubespray_defaults/defaults/main/download.yml
+@@ -258,7 +258,7 @@
+ external_openstack_cloud_controller_image_repo: "{{ kube_image_repo }}/provider-os/openstack-cloud-controller-manager"
+ external_openstack_cloud_controller_image_tag: "v1.35.0"
+ 
+-kube_vip_version: 1.0.3
++kube_vip_version: 1.3.1
+ kube_vip_image_repo: "{{ github_image_repo }}/kube-vip/kube-vip{{ '-iptables' if kube_vip_lb_fwdmethod == 'masquerade' else '' }}"
+ kube_vip_image_tag: "v{{ kube_vip_version }}"
+ nginx_image_repo: "{{ docker_image_repo }}/library/nginx"
