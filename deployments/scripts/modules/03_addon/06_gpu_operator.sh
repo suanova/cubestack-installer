@@ -355,6 +355,9 @@ for t in "${_TARS[@]:-}"; do
     _PUSHED=$((_PUSHED+1))
 done
 [ "${_PUSHED}" -gt 0 ] || { err "METAX_OFFLINE_DIR=${METAX_OFFLINE_DIR} / METAX_IMAGE_DIR=${METAX_IMAGE_DIR} 未找到匹配 ${METAX_TAR_PATTERN} 的 tar(可用 metax-save-images.sh 生成, 或改 METAX_TAR_PATTERN)"; exit 1; }
+for _c in ${METAX_IMAGE_COMPONENTS}; do
+    _reg_has_tag "${_c}" "${METAX_VERSION}" || { err "缺少核心组件镜像 ${_c}:${METAX_VERSION}(检查离线 tar 是否完整)"; exit 1; }
+done
 
 # MACA + 驱动镜像: registry 已有 → 本地 docker → 离线 tar, 逐级尝试
 push_extra() {   # <comp> <源镜像>  (如 maca cr.metax-tech.com/public-library/maca:<tag>)
