@@ -117,17 +117,17 @@ sudo ./deployments/scripts/tools/images/harbor-save-images.sh         --group k8
 
 ## LVP / NFD(kubespray addon,默认关)
 
-两个 kubespray 原生 addon 的镜像:`registry.k8s.io/sig-storage/local-volume-provisioner:v2.5.0`
+两个 kubespray 原生 addon 的镜像:`registry.k8s.io/sig-storage/local-volume-provisioner:v2.10.0`
 (开关 `LOCAL_VOLUME_PROVISIONER_ENABLED`)与 `registry.k8s.io/nfd/node-feature-discovery:v0.19.0`
-(开关 `NFD_ENABLED`,`v2.5.0` / `v0.19.0` 为当前展开值)。两个开关在 `cluster.conf` 里**默认 `false`**
+(开关 `NFD_ENABLED`,`v2.10.0` / `v0.19.0` 为当前展开值)。两个开关在 `cluster.conf` 里**默认 `false`**
 —— 本目录已把镜像备好、清单与预载 token 已登记,将来要用只需把开关置 `true`(再重跑 `k8s_deploy`
 阶段),不必再改仓库。
 
 | 项 | 值 |
 |---|---|
-| 上游 ref | `registry.k8s.io/sig-storage/local-volume-provisioner:v${LOCAL_VOLUME_PROVISIONER_VERSION}` / `registry.k8s.io/nfd/node-feature-discovery:v${NFD_VERSION}`(当前展开 = `v2.5.0` / `v0.19.0`) |
-| 版本变量 | `LOCAL_VOLUME_PROVISIONER_VERSION` / `NFD_VERSION`(= kubespray v2.32 表值;须与上游 `roles/kubespray_defaults/defaults/main/download.yml` 同值) |
-| 离线 tar | `images/registry.k8s.io_sig-storage_local-volume-provisioner_v2.5.0.tar`、`images/registry.k8s.io_nfd_node-feature-discovery_v0.19.0.tar`(按上游 ref 派生: `/`→`_`, `:`→`_`) |
+| 上游 ref | `registry.k8s.io/sig-storage/local-volume-provisioner:v${LOCAL_VOLUME_PROVISIONER_VERSION}` / `registry.k8s.io/nfd/node-feature-discovery:v${NFD_VERSION}`(当前展开 = `v2.10.0` / `v0.19.0`) |
+| 版本变量 | `LOCAL_VOLUME_PROVISIONER_VERSION` / `NFD_VERSION`(= 本树 `roles/kubespray_defaults/defaults/main/download.yml` 值; LVP 由 `cubestack-patches/17-local-volume-provisioner-2.10.0.patch` 抬到 2.10.0) |
+| 离线 tar | `images/registry.k8s.io_sig-storage_local-volume-provisioner_v2.10.0.tar`、`images/registry.k8s.io_nfd_node-feature-discovery_v0.19.0.tar`(按上游 ref 派生: `/`→`_`, `:`→`_`) |
 | 清单条目 | `images.manifest` 的 `k8s-base` 组, **不带第 3 列**(用派生名) |
 | 预加载模式 | `PRELOAD_IMAGE_PATTERNS` 里的 `local-volume-provisioner` / `node-feature-discovery` |
 
@@ -144,7 +144,7 @@ sudo ./deployments/scripts/tools/images/harbor-save-images         --group k8s-b
 > **版本只有一处真相**(`cluster.conf` 的版本变量),升级只改那一处,清单/Harbor/离线 tar
 > 全部跟随(改完重走 Harbor 同步 → 离线 tar → `trim-offline-files.sh` 备料)。
 >
-> ⚠ **现状(2026-09-28)**:`local-volume-provisioner:v2.5.0` tar **已就位**;
+> ⚠ **现状(2026-09-28)**:`local-volume-provisioner:v2.10.0` tar **已就位**;
 > `nfd/node-feature-discovery:v0.19.0` 的 tar **仍缺**(联网机那批下载件里没有、Harbor mirrors 也还没同步 1.35 线)
 > —— 由于 `NFD_ENABLED` 默认 `false`,默认部署不受影响;要用 NFD 前必须先补这张 tar。
 
