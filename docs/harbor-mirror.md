@@ -120,7 +120,7 @@
   (例外: `k8s-base` 与 `ceph` → `offline-files/kubespray/images/`, 因为节点走 kubespray 预加载);
 - 第 2 列 ref 支持 `${VAR}` 占位, **变量取值来自 `cluster.conf`**
   (CI 上没有 `cluster.conf` 时自动回退 `cluster.conf.example` 的内置默认值);
-- 第 3 列可选, 仅用于"历史短名"镜像(`busybox.tar` / `nginx.tar` —— 既有模块按字面文件名读取),
+- 第 3 列可选, 仅用于"历史短名"镜像(`busybox.tar` —— 既有模块按字面文件名读取; `nginx.tar` 已移除),
   这类 tar 不能按 ref 改名。
 
 ### 加一个新镜像要改哪里

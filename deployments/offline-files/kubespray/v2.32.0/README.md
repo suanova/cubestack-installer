@@ -105,10 +105,10 @@ bash ./deployments/scripts/tools/images/harbor-save-images.sh --list  --group k8
 sudo ./deployments/scripts/tools/images/harbor-save-images.sh         --group k8s-base
 ```
 
-> ⚠ **不要**给它加第 3 列短名(如 `nginx.tar`)。预加载的匹配是"文件名包含模式", 而 `nginx`
-> 组另有 `offline-files/nginx/nginx.tar`(给 verify 模块当 HTTP 测试后端, 见
-> `lib-common.sh` 的 `ensure_registry_nginx`)—— 派生的全限定名只被本组的 `library_nginx`
-> 命中, 两个 `nginx` 镜像互不干扰。第 3 列是"历史短名"镜像的覆盖名, 用了就走不到派生名。
+> ⚠ **不要**给它加第 3 列短名。预加载的匹配是"文件名包含模式", 派生的全限定名
+> (`docker.io_library_nginx_<tag>.tar`)只被本组的 `library_nginx` 命中；verify 模块的
+> `ensure_registry_nginx` 也复用同一 tar（已支持 `*nginx*.tar`），独立的
+> `offline-files/nginx/nginx.tar` 已移除。第 3 列是"历史短名"镜像的覆盖名, 用了就走不到派生名。
 >
 > ⚠ 版本必须与 kubespray `roles/kubespray_defaults/defaults/main/download.yml` 的
 > `nginx_image_tag` 一致(当前 `1.30.1-alpine`; `extra_playbooks/` 下另有一份同名副本, 当前同值)。

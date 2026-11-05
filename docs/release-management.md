@@ -116,12 +116,12 @@ LOCAL_REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}}"
  -> registry.k8s.io_sig-storage_csi-provisioner_v6.3.0.tar
 ```
 
-少数历史短名由清单第 3 列锁死：`busybox.tar`、`nginx.tar`。模块按**文件名**解析目标 ref
+少数历史短名由清单第 3 列锁死：`busybox.tar`（`nginx.tar` 已移除：verify 复用 k8s-base 的 nginx tar）。模块按**文件名**解析目标 ref
 （`25_cubestack_operator.sh` 的组件推送逻辑），所以：
 
 - **不要改 tar 命名规则**；
 - 版本化发布时，自研镜像文件名里必须带版本（如 `..._2.0.0.tar`），模块才能解析出 `:2.0.0`；
-- `busybox.tar` / `nginx.tar` 这种固定名，放进**版本目录内部**即可，不会与 dev 目录冲突。
+- `busybox.tar` 这种固定名，放进**版本目录内部**即可，不会与 dev 目录冲突。
 
 ### 1.4 现有离线取件工具
 
@@ -189,7 +189,7 @@ cubestack-installer/                     # MinIO 桶根
 
 - 部署模块只认 `OFFLINE_FILES_ROOT/<group>/<tar>`，完整树让 `OFFLINE_FILES_ROOT` 一次切换即可，
   **模块业务逻辑零改动**（仅 §4.1 的 2 处路径兜底）；
-- `busybox.tar` / `nginx.tar` 等固定名文件在版本目录内部隔离，不会互相覆盖；
+- `busybox.tar` 等固定名文件在版本目录内部隔离，不会互相覆盖；
 - 发布树自包含，回滚只需切版本号，不依赖 dev 目录当时的状态；
 - 代价是 MinIO 存储按版本重复。控制方式见 §2.3。
 
@@ -473,9 +473,8 @@ fi
 **配套的 3 处硬编码路径**（不处理会在 release 模式下回落到 dev 目录）：
 
 ```bash
-# lib-common.sh: ensure_registry_nginx 的搜索路径增加发布树
-find_offline_tar ... "${REPO_ROOT}/deployments/offline-files/nginx" \
-                     "${OFFLINE_FILES_ROOT}/nginx" \
+# lib-common.sh: ensure_registry_nginx 优先复用 k8s-base 的 nginx tar（glob 用 *nginx*.tar）
+find_offline_tar ... "${OFFLINE_FILES_ROOT}/nginx" \
                      "${LOCAL_REPO_DIR}/images"
 
 # 02_ceph.sh:485 lvm2 离线包预检
@@ -779,7 +778,7 @@ release 模式默认用 `mc mirror --overwrite --remove` 精确镜像版本目�
 | 第三方组件 | `mirrors/<上游ref>:<版本>` | 按上游 ref（`/`、`:` → `_`） | `<REG>/mirrors/<上游ref>` |
 | dev-lab | `suanova/{cpu,maca,cuda}-pytorch:2.0.0` | `..._2.0.0.tar` | `<REG>/suanova/...` |
 | model-collection | `suanova/sglang:<上游tag>` / `suanova/vllm-metax:<上游tag>` | 按 `model-collection/image-list.tsv` | `<REG>/suanova/...` |
-| 固定短名 | `mirrors/...` | `busybox.tar` / `nginx.tar` | 按模块字面名读取 |
+| 固定短名 | `mirrors/...` | `busybox.tar` | 按模块字面名读取 |
 | CLI 镜像 | `suanova/cubestack-installer-cli:2.0.0` | `cubestack-installer-cli-v2.0.0.tar`（`<版本>/` 下） | 部署机 `docker load` |
 
 `release-images.tsv` 示例：
@@ -895,7 +894,7 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
 
 - **允许变化**：`CUBESTACK_OPERATOR_IMAGE_TAG`、`CUBESTACK_OPERATOR_CHART_VERSION`、`CUBESTACK_CLI_IMAGE`；
 - **允许忽略并告警**：`DEV_LAB_*`、`METAX_*`、`NVIDIA_*`、`RDMA_IMAGE_TAG`、`MULTUS_IMAGE_TAG`、
-  `NGINX_TAG`（树内保持旧值；这些组要升级需完整 `release-publish.sh`）；
+  `NGINX_TAG`（仅 2.0.0 保留；2.0.1 已移除，verify 复用 k8s-base 的 nginx tar；这些组要升级需完整 `release-publish.sh`）；
 - **其他 key 变化**（KUBESPRAY_VERSION/RELEASE_GROUPS/上游版本等）→ 失败；
 - `stale 清理`：只扫 selected subdir 的 maxdepth=1，删除不在该 subdir 全量 tsv 行里的旧
   `*.tar`/`*.tar.gz` 及 `.digest`；chart 目录只保留 `CUBESTACK_OPERATOR_CHART_VERSION`

@@ -28,7 +28,7 @@
 #     configList 全部条目, 逐个资源逐个节点检查 allocatable。
 #   · **离线可用(硬要求)**: ④ 的测试 pod 镜像**不碰 docker.io、也不依赖节点 containerd 预载** ——
 #     统一用 lib-common 的 ensure_registry_nginx 把 nginx 推进**集群内置 registry**
-#     (来源: 本地 docker daemon → deployments/offline-files/nginx/nginx.tar; 在线源仅在
+#     (来源: 本地 docker daemon → k8s-base 的 API 本地代理 nginx tar; 在线源仅在
 #     VERIFY_IMAGE_ONLINE=true 时启用, 离线部署默认禁止), pod 再从内置 registry 拉取。
 #     故 REQUIRES 带上 k8s_registry。
 #   · **验证边界(如实标注)**: ④⑤ 证明的是"扩展资源可被调度 + 设备插件 Allocate 的字符设备
@@ -189,7 +189,7 @@ if [ "${_FOUND}" = "1" ]; then
     say "  ④ 创建测试 pod ${TEST_NS}/${TEST_POD} 申请 RDMA 设备资源(${_RES_PICK})并等待 Running..."
     # 镜像(离线硬要求): ensure_registry_nginx 把 nginx 推进**集群内置 registry**(不碰 docker.io,
     #   也不依赖节点 containerd 预载), pod 从内置 registry 拉取; 来源 = 本地 docker →
-    #   offline-files/nginx/nginx.tar →(仅 VERIFY_IMAGE_ONLINE=true)在线。故纯离线环境同样可用。
+    #   k8s-base 的 API 本地代理 nginx tar →(仅 VERIFY_IMAGE_ONLINE=true)在线。故纯离线环境同样可用。
     TEST_IMAGE="$(ensure_registry_nginx)" || exit 1
     LOCAL_YAML="$(mktemp)"
     cat > "${LOCAL_YAML}" <<YAML
