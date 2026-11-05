@@ -30,9 +30,9 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: 'MinIO release 目录 (如 2.0.0)'
+        description: 'MinIO release 目录 (如 2.0.1)'
         required: false
-        default: '2.0.0'
+        default: '2.0.1'
       component:
         description: 'components.tsv 组件 (CSV; all/platform/publish/cli/bmc/...)'
         required: false
@@ -83,7 +83,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE: ${{ github.event.client_payload.release || github.event.inputs.release || '2.0.0' }}
+  RELEASE: ${{ github.event.client_payload.release || github.event.inputs.release || '2.0.1' }}
   COMPONENT: ${{ github.event.client_payload.component || github.event.inputs.component || 'all' }}
   TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag || '' }}
   SOURCE_REPO: ${{ github.event.client_payload.source_repo || github.event.inputs.source_repo || '' }}
