@@ -6,7 +6,7 @@
 
 - 模块: `deployments/scripts/modules/03_addon/35_netshoot.sh`(key `netshoot`)
 - 镜像: `harbor.isuanova.com/suanova/netshoot-rdma:<immutable-tag>`(public)
-  - 构建/推送: `.github/workflows/build-netshoot-rdma.yml`(手工触发)
+  - 构建/推送: `.github/workflows/build-netshoot-rdma.yml`(自动推 channel; 发布 tag 手动触发)
   - 本地构建: `make netshoot-rdma NETSHOOT_RDMA_TAG=<tag> [NETSHOOT_RDMA_PUSH=1]`
   - tar: 由 release 打包或开源在线安装从 public Harbor 物化到 `offline-files/netshoot/`
 - 默认命名空间 `default`,pod 名 `cubestack-netshoot`(固定名,便于 exec)
@@ -75,9 +75,12 @@ ib_write_bw -d mlx5_0 -a                 # 带宽实测(对端要同步起 ib_wr
 
 ### 4.1 CI(发布通道, 推荐)
 
-`.github/workflows/build-netshoot-rdma.yml` 手工触发, 输入不可变 `tag`(如 `26.04.17`
-或 `26.04.17-r2`), 构建 + 自检后推送 `harbor.isuanova.com/suanova/netshoot-rdma:<tag>`。
-该镜像是 release base pin 和开源在线物化的共同来源; 不要用 `latest`。
+- Dockerfile / `VERSION_LINE` / Makefile 变化: 自动构建并推送
+  `harbor.isuanova.com/suanova/netshoot-rdma:<VERSION_LINE>-latest`(移动 tag, 仅开发通道)。
+- 手工 `workflow_dispatch`: 输入不可变 `tag`(如 `26.04.17` 或 `26.04.17-r2`),
+  构建 + 自检后推送该 tag; 已存在则拒绝覆盖。
+
+release base pin 和开源在线物化必须使用不可变 tag + digest, 不能用 channel tag。
 
 ### 4.2 本地/联网机构建
 

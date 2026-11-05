@@ -80,3 +80,7 @@ sudo ./deploy-cluster.sh --with-cubestack
    - 正式发布使用不可变版本 tag（如 `2.1.0`），并优先按 digest 引用。
    这样 2.1 的 base 更新不会影响尚未发布的 2.0.1 CLI 构建。
 5. **不可变 tag 不覆盖**：版本 tag 已存在时构建失败，要求换版本或显式处理。
+6. **CLI 镜像不写入 `versions/base.yaml`**：它不是集群工作负载。release 在
+   发布锁/模板里记录 `cli: {image, digest}`，按 digest 拉取并打包成
+   `cubestack-installer-cli.tar`；`<VERSION_LINE>-latest` 只是解析 digest 前的
+   开发通道指针，不能直接作为发布身份。

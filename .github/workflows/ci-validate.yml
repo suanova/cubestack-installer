@@ -88,6 +88,12 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-install-online.sh
 
+      # netshoot-rdma digest pin updater
+      - name: netshoot pin 更新回归(netshoot-published)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-netshoot-pin.sh
+
       # mirror-updated(base scope): 只在 baseline 引用的镜像变化时更新 mirror pin
       - name: mirror pin 接收回归(mirror-updated)
         run: |
