@@ -1,10 +1,10 @@
 # =====================================================================
-# Dockerfile-cli-base — CubeStack CLI 容器的**基础层**(系统 + 工具链, 极少变)
+# images/installer-cli-base/Dockerfile — CubeStack CLI 容器的**基础层**(系统 + 工具链, 极少变)
 # ---------------------------------------------------------------------
 # 设计(2026-09-30, 用户口径): **镜像分两层**
 #   ① 本文件 = base 镜像: ubuntu:22.04 + apt 系统工具 + python3.11 + ansible(requirements.txt)
 #      + mc。**只在"新增 package / 工具 或 依赖版本变化"时重建**(构建慢, 需要联网装 apt/pip)。
-#   ② Dockerfile-cli(代码层): `FROM <base>` + **只 copy deployments/skills 代码** —— 日常
+#   ② images/installer-cli/Dockerfile(代码层): `FROM <base>` + **只 copy deployments/skills 代码** —— 日常
 #      "改了部署脚本要出新镜像"走这一层, 秒级~分钟级, 且**层数不累积**(每次都基于同一个 base,
 #      而不是叠在上一版镜像上)。
 #

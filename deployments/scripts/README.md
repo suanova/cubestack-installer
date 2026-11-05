@@ -114,7 +114,7 @@ deployments/scripts/
 │   ├── node/                  #   节点: gen-ssh-key.sh / setup-passwordless.sh / prepare-workers.sh
 │   │                         #        setup-ntp.sh / sync-hosts.sh / sync-ca*.sh / rebootstrap*.sh
 │   ├── k8s/                   #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
-│   ├── images/                #   镜像工具: nvidia-chart-images.sh(chart 反推镜像) / netshoot-rdma.Dockerfile
+│   ├── images/                #   镜像工具: nvidia-chart-images.sh(chart 反推镜像); netshoot Dockerfile 在仓库根 images/netshoot-rdma/
 │   ├── offline/               #   离线完整性: verify-offline-files(校验) / build-verifier(.pyz 构建) / sync-to-container(开发同步)
 │   └── lb/                    #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 └── README.md                  # 本文件

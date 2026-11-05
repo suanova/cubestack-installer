@@ -1943,11 +1943,11 @@ bash deployments/scripts/tools/tests/test-cephfs-mount.sh            # ⑪: 旧 
 - 全新安装后 Calico RBAC 等 14 个补丁未生效(可能表现为 calico-node 0/1、非 hostNetwork Pod 访问 ClusterIP 失败、coredns forward 异常等)。
 
 **根因**
-`Dockerfile-cli-base` 已声明安装 `patch`，但 Harbor 上的 `cubestack-installer-cli-base:latest` 是旧构建(2026-09-30)，镜像里实际没有 `/usr/bin/patch`；代码层 CLI 镜像继承旧 base，补丁层检测失败后**降级跳过**而不是报错。
+`images/installer-cli-base/Dockerfile` 已声明安装 `patch`，但 Harbor 上的 `cubestack-installer-cli-base:latest` 是旧构建(2026-09-30)，镜像里实际没有 `/usr/bin/patch`；代码层 CLI 镜像继承旧 base，补丁层检测失败后**降级跳过**而不是报错。
 
 **解法(已根治)**
-- `Dockerfile-cli-base` 增加构建期断言 `command -v patch && patch --version`；
-- `Dockerfile-cli` 最终校验链增加 `command -v patch`；
+- `images/installer-cli-base/Dockerfile` 增加构建期断言 `command -v patch && patch --version`；
+- `images/installer-cli/Dockerfile` 最终校验链增加 `command -v patch`；
 - `rebuild-cli-image.yml` 构建后实际运行镜像校验 `patch`，并在 `ci-validate.yml` 加静态门禁；
 - 发布前/重建 base：
   ```bash

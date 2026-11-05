@@ -29,8 +29,8 @@ on:
       - 'versions/**'
 
       - 'skills/**'
-      - 'Dockerfile-cli'
-      - 'Dockerfile-cli-base'
+      - 'images/installer-cli/**'
+      - 'images/installer-cli-base/**'
       - '.dockerignore'
       - '.github/workflows/rebuild-cli-image.yml'
   workflow_dispatch:

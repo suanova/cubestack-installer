@@ -208,24 +208,24 @@ echo "== ⑩ CLI 镜像契约: 只含 deployments/ 代码(静态断言, 防回�
 # 用户口径 2026-09-30: 离线二进制不打进 CLI 镜像; kubectl/helm/skopeo 由容器运行期从挂载的
 # 版本目录挂 PATH。以下三条是这条契约的**可执行**形式(改坏任何一条, 部署容器会静默少工具)。
 # 代码层只有一个 Dockerfile; 工具链必须在 **base** 层(用户口径 2026-09-30)
-for _df in Dockerfile-cli; do
+for _df in images/installer-cli/Dockerfile; do
     chk "${_df}(代码层)不得打工具二进制" "无" "$(grep -qE '^COPY bin/' "${REPO_ROOT}/${_df}" && echo 有 || echo 无)"
     chk "${_df} 已安装运行期工具链钩子" "有" "$(grep -q '/etc/profile.d/50-cubestack-tools.sh' "${REPO_ROOT}/${_df}" && echo 有 || echo 无)"
     chk "${_df} 不跑 pip(依赖属 base)" "无" "$(grep -q 'pip install' "${REPO_ROOT}/${_df}" && echo 有 || echo 无)"
 done
 for _t in kubectl skopeo yq mc helm-archive.tar.gz; do
-    chk "base 层打进 ${_t}" "有" "$(grep -q "COPY bin/${_t}" "${REPO_ROOT}/Dockerfile-cli-base" && echo 有 || echo 无)"
+    chk "base 层打进 ${_t}" "有" "$(grep -q "COPY bin/${_t}" "${REPO_ROOT}/images/installer-cli-base/Dockerfile" && echo 有 || echo 无)"
 done
 chk "钩子源文件在位" "有" "$([ -f "${REPO_ROOT}/deployments/scripts/tools/docker/cli-toolchain-from-offline.sh" ] && echo 有 || echo 无)"
 # mc 是**唯一例外**: 必须打进镜像(拉离线文件的引导工具, 不能被挂载提供; 上游 URL 已 410 Gone)
-chk "base 层打进 mc(COPY bin/mc)" "有" "$(grep -q '^COPY bin/mc' "${REPO_ROOT}/Dockerfile-cli-base" && echo 有 || echo 无)"
+chk "base 层打进 mc(COPY bin/mc)" "有" "$(grep -q '^COPY bin/mc' "${REPO_ROOT}/images/installer-cli-base/Dockerfile" && echo 有 || echo 无)"
 # 只禁"下载命令"(注释里保留 410 说明是有意的, 别把注释也判成违规)
-chk "base 层不再用已失效的 dl.min.io 下载" "无" "$(grep -qE '(wget|curl)[^#]*dl\.min\.io' "${REPO_ROOT}/Dockerfile-cli-base" && echo 有 || echo 无)"
+chk "base 层不再用已失效的 dl.min.io 下载" "无" "$(grep -qE '(wget|curl)[^#]*dl\.min\.io' "${REPO_ROOT}/images/installer-cli-base/Dockerfile" && echo 有 || echo 无)"
 chk "构建工具会把 mc 拷进上下文(离线件/宿主机)" "有" "$(grep -q 'offline-files/os/mc-' "${REPO_ROOT}/deployments/scripts/tools/docker/build-cli-context.sh" && echo 有 || echo 无)"
 # 两层结构(2026-09-30): base(系统/工具链) + 代码层(FROM base);代码层不再 FROM 上一版 latest ⇒ 层数不累积
-chk "存在 base 层 Dockerfile" "有" "$([ -f "${REPO_ROOT}/Dockerfile-cli-base" ] && echo 有 || echo 无)"
-chk "Dockerfile-cli FROM base 层(而非上一版 latest)" "有" "$(grep -q '^FROM ${CLI_BASE_TAG}' "${REPO_ROOT}/Dockerfile-cli" && echo 有 || echo 无)"
-chk "incremental Dockerfile 已并入(不该还在)" "无" "$([ -f "${REPO_ROOT}/Dockerfile-cli-incremental" ] && echo 有 || echo 无)"
+chk "存在 base 层 Dockerfile" "有" "$([ -f "${REPO_ROOT}/images/installer-cli-base/Dockerfile" ] && echo 有 || echo 无)"
+chk "installer-cli Dockerfile FROM base 层(而非上一版 latest)" "有" "$(grep -q '^FROM ${CLI_BASE_TAG}' "${REPO_ROOT}/images/installer-cli/Dockerfile" && echo 有 || echo 无)"
+chk "incremental Dockerfile 已并入(不该还在)" "无" "$([ -f "${REPO_ROOT}/images/installer-cli/Dockerfile-incremental" ] && echo 有 || echo 无)"
 # .dockerignore 必须挡住版本目录整层与物化树(否则整仓上下文构建会把 GB 级离线件打进镜像)
 for _pat in 'deployments/offline-files/kubespray/\*/' 'deployments/kubespray/versions'; do
     if grep -qE "^${_pat}" "${REPO_ROOT}/.dockerignore"; then

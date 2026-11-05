@@ -33,12 +33,12 @@
 #       sudo ./build-cli-context.sh --build --engine podman    # 用 podman 构建(docker/podman 都支持)
 # 容器引擎: 默认自动探测(docker 优先, 无 docker 用 podman);可用 --engine docker|podman 或
 #   CONTAINER_ENGINE 环境变量指定。podman 构建统一 `--format docker`(清单格式与 Makefile 一致)。
-# ★ 两层结构(2026-09-30): base(Dockerfile-cli-base: 系统+工具链+ansible+mc)极少变;
+# ★ 两层结构(2026-09-30): base(images/installer-cli-base/Dockerfile: 系统+工具链+ansible+mc)极少变;
 #   --build / --incremental 都只做**代码层**(FROM base + copy deployments)⇒ 快, 且**层数不累积**。
 #       sudo ./build-cli-context.sh --output /tmp/cli-ctx
 # 构建(手动): 生成后执行(引擎按需替换 docker / podman; podman 要加 --format docker)
-#       sudo docker build -f Dockerfile-cli -t harbor.isuanova.com/suanova/cubestack-installer-cli:latest deployments/cli-context/
-#       sudo podman build --format docker -f Dockerfile-cli -t harbor.isuanova.com/suanova/cubestack-installer-cli:latest deployments/cli-context/
+#       sudo docker build -f images/installer-cli/Dockerfile -t harbor.isuanova.com/suanova/cubestack-installer-cli:latest deployments/cli-context/
+#       sudo podman build --format docker -f images/installer-cli/Dockerfile -t harbor.isuanova.com/suanova/cubestack-installer-cli:latest deployments/cli-context/
 # 说明: cli-context/ 为生成目录(gitignore), 每次构建前重新生成即可保证与源码一致。
 # ============================================================
 set -euo pipefail
@@ -53,7 +53,7 @@ BASE_IMAGE="ubuntu:22.04"
 # ⚠ 命名空间**有意不同**(用户口径 2026-09-30): base 在 cubestack 项目, 代码层镜像在 suanova 项目
 #   —— 两个项目各自的推送权限不同, 不要"顺手统一"改成一个。
 CLI_BASE_TAG="harbor.isuanova.com/cubestack/cubestack-installer-cli-base:latest"
-CLI_BASE_DOCKERFILE="${REPO_ROOT}/Dockerfile-cli-base"
+CLI_BASE_DOCKERFILE="${REPO_ROOT}/images/installer-cli-base/Dockerfile"
 INC_BASE_IMAGE="${CLI_BASE_TAG}"
 OS_TAR="${REPO_ROOT}/deployments/offline-files/os/ubuntu-22.04.tar"
 DO_BUILD=0
@@ -91,16 +91,17 @@ say "生成 CLI 镜像构建上下文 → ${OUT}"
 rm -rf "${OUT}"
 mkdir -p "${OUT}/deployments"
 
-# ---------------- 同步 Dockerfile-cli(-base)/ .dockerignore(构建上下文 = 仓库根 Dockerfile) ----------------
-# 构建统一以仓库根的 Dockerfile 为唯一事实来源: 先拷进上下文(便于 --output 独立上下文/离线),
-# 后面 docker build 用 -f "${OUT}/<Dockerfile>", 保证构建与最新 Dockerfile 一致。
-# .dockerignore 同理; 根目录缺失时(如只拷出 deployments)回退用上下文内默认。
-cp "${REPO_ROOT}/Dockerfile-cli" "${OUT}/Dockerfile-cli"
-[ -f "${CLI_BASE_DOCKERFILE}" ] && cp "${CLI_BASE_DOCKERFILE}" "${OUT}/Dockerfile-cli-base"
+# ---------------- 同步 images/ 下的 Dockerfile / .dockerignore ----------------
+# 构建统一以 images/ 下的 Dockerfile 为唯一事实来源: 先按原相对路径拷进上下文
+# (便于 --output 独立上下文/离线), 后面 docker build 用 -f "${OUT}/images/...",
+# 保证构建与最新 Dockerfile 一致。.dockerignore 同理; 缺失时用上下文内默认。
+mkdir -p "${OUT}/images/installer-cli" "${OUT}/images/installer-cli-base"
+cp "${REPO_ROOT}/images/installer-cli/Dockerfile" "${OUT}/images/installer-cli/Dockerfile"
+[ -f "${CLI_BASE_DOCKERFILE}" ] && cp "${CLI_BASE_DOCKERFILE}" "${OUT}/images/installer-cli-base/Dockerfile"
 # 代码层只有一个 Dockerfile(--incremental 已并入, 2026-09-30); base 层单独同步(见上)
 [ -f "${REPO_ROOT}/.dockerignore" ] && cp "${REPO_ROOT}/.dockerignore" "${OUT}/.dockerignore" \
     || touch "${OUT}/.dockerignore"
-ok "已同步 Dockerfile-cli / Dockerfile-cli-base / .dockerignore → ${OUT}"
+ok "已同步 images/installer-cli / images/installer-cli-base / .dockerignore → ${OUT}"
 
 # ---------------- 部署代码/配置模板(全量同步, 仅排除离线大文件与运行时凭据) ----------------
 say "同步整个 deployments/(排除 offline-files 大文件与运行时凭据) ..."
@@ -151,7 +152,7 @@ ok "  校验器就位: verify-offline-files.sh + .pyz"
 # 来源优先级: 离线**版本目录** offline-files/kubespray/<版本>/(首选) → 宿主机 command -v(兜底)。
 # 文件名统一成**固定名**(bin/kubectl / bin/skopeo / bin/yq / bin/helm-archive.tar.gz / bin/mc),
 # 这样 Dockerfile 里不出现版本号 ⇒ 升级工具只换离线件+重建 base, 不用改 Dockerfile。
-# ⚠ staging 只在 --base(要构建 base 层)时执行(2026-10-09 修): bin/ 只被 Dockerfile-cli-base
+# ⚠ staging 只在 --base(要构建 base 层)时执行(2026-10-09 修): bin/ 只被 images/installer-cli-base/Dockerfile
 #   COPY; 代码层构建(--build, FROM 既有 base)不需要它。旧实现无条件 staging ⇒ 构建机缺工具/缺
 #   离线 helm 包时直接 exit 1, 把本不需要任何工具的代码层构建也挡死(假失败)。
 if [ "${DO_BASE}" = "1" ]; then
@@ -253,9 +254,9 @@ if [ "${DO_BUILD}" = "1" ]; then
                 exit 1
             fi
         fi
-        [ -f "${OUT}/Dockerfile-cli-base" ] || { err "上下文缺 Dockerfile-cli-base(仓库里没有 ${CLI_BASE_DOCKERFILE}?)"; exit 1; }
+        [ -f "${OUT}/images/installer-cli-base/Dockerfile" ] || { err "上下文缺 installer-cli-base Dockerfile(仓库里没有 ${CLI_BASE_DOCKERFILE}?)"; exit 1; }
         say "构建 base 层(系统+工具链; 需要联网 apt/pip) → ${CLI_BASE_TAG} ..."
-        ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f "${OUT}/Dockerfile-cli-base" -t "${CLI_BASE_TAG}" "${OUT}" \
+        ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f "${OUT}/images/installer-cli-base/Dockerfile" -t "${CLI_BASE_TAG}" "${OUT}" \
             || { err "base 构建失败"; exit 1; }
         # 层数只用于展示: history 对不存在的镜像返回非 0, pipefail 下会中止整轮构建
         _base_layers="$(${ENGINE} history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l || true)"
@@ -272,7 +273,7 @@ if [ "${DO_BUILD}" = "1" ]; then
     fi
     # 代码层只有一个 Dockerfile(2026-09-30): 工具/依赖都在 base, 本层只 copy deployments+skills。
     # --incremental 保留为**别名**(历史用法兼容), 行为与 --build 相同。
-    _df="Dockerfile-cli"
+    _df="images/installer-cli/Dockerfile"
     # 层数只用于展示: 全新机器上没有 latest, history 返回非 0, pipefail 下会中止整轮构建
     _base_layers="$(${ENGINE} history --no-trunc "${CLI_BASE_TAG}" 2>/dev/null | tail -n +2 | wc -l || true)"
     _cur_layers="$(${ENGINE} history --no-trunc "${IMAGE}" 2>/dev/null | tail -n +2 | wc -l || true)"
@@ -293,9 +294,9 @@ if [ "${DO_BUILD}" = "1" ]; then
     fi
 else
     echo "  构建镜像(全量, 基础 ubuntu:22.04):"
-    echo "    sudo ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f Dockerfile-cli -t ${IMAGE} ${OUT}"
+    echo "    sudo ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f ${OUT}/images/installer-cli/Dockerfile -t ${IMAGE} ${OUT}"
     echo "  构建镜像(增量, 基础 Harbor latest):"
-    echo "    sudo ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f Dockerfile-cli -t ${IMAGE} ${OUT}   # --incremental 同此(已并入)"
+    echo "    sudo ${ENGINE} build "${ENGINE_FMT_ARGS[@]}" -f ${OUT}/images/installer-cli/Dockerfile -t ${IMAGE} ${OUT}   # --incremental 同此(已并入)"
     echo "  推送:"
     echo "    sudo ${ENGINE} push ${IMAGE}"
 fi

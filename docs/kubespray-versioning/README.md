@@ -173,8 +173,8 @@ operator **不搞批量搬迁**;凡要"按版本选"的组件,按同一套四条
 
 | 层 | Dockerfile | 内容 | 何时重建 |
 |---|---|---|---|
-| **base** | `Dockerfile-cli-base` | ubuntu 22.04 + apt 系统包 + python3.11 + ansible(requirements.txt)+ **工具链 kubectl / helm / skopeo / yq / mc**(取自离线版本目录, 文件名固定) | **只在新增 package/工具或依赖版本变化时**(`--base`; 需联网 apt/pip, 约 10 分钟) |
-| **代码层** | `Dockerfile-cli`(**唯一**; `--incremental` 是它的别名) | `FROM <base>` + **只 copy `deployments/`+`skills`** + 运行期工具链钩子 + 自检(不跑 apt/pip) | 日常改了部署脚本就重建(`--build`; 秒级) |
+| **base** | `images/installer-cli-base/Dockerfile` | ubuntu 22.04 + apt 系统包 + python3.11 + ansible(requirements.txt)+ **工具链 kubectl / helm / skopeo / yq / mc**(取自离线版本目录, 文件名固定) | **只在新增 package/工具或依赖版本变化时**(`--base`; 需联网 apt/pip, 约 10 分钟) |
+| **代码层** | `images/installer-cli/Dockerfile`(**唯一**; `--incremental` 是它的别名) | `FROM <base>` + **只 copy `deployments/`+`skills`** + 运行期工具链钩子 + 自检(不跑 apt/pip) | 日常改了部署脚本就重建(`--build`; 秒级) |
 
 > ⚠ **工具链必须打进 base**(2026-09-30 用户口径 + 实测事故):早期版本把 kubectl/helm/skopeo 交给
 > "运行期钩子从挂载目录补",但钩子**只在登录 shell 生效** ⇒ `docker exec … bash` 或脚本里的

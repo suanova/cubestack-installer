@@ -16,12 +16,12 @@
 # VCS 元数据(不入镜像, 常规做法)
 .git
 
-# ---------- Dockerfile-cli 专用: offline-files 大文件排除 ----------
+# ---------- installer-cli 镜像 专用: offline-files 大文件排除 ----------
 # (CLI 镜像只含源码 + 少量 CLI 二进制; 海量离线镜像/VM 经卷挂载或
 #  版本树(外部打包流程物化)
 # 注意: dockerignore 与 gitignore 不同——没有 '!' 取反/重新包含, 排除即排除。
 # 因此无法"先排除整个 offline-files/ 再单独放行 kubectl/helm/skopeo",
-# 改为逐项排除每个子目录/镜像/OS 大件, 保留 Dockerfile-cli 拷贝的 3 个轻量
+# 改为逐项排除每个子目录/镜像/OS 大件, 保留 installer-cli 镜像 拷贝的 3 个轻量
 # CLI 二进制(kubectl/helm/skopeo)进构建上下文。
 # 注意: 下面的归档/镜像规则须先列 helm 白名单(helm tarball 是唯一要打进的
 # 压缩包), 其余 *.tar.gz / *.tgz / *.tar / *.tar.xz 全部排除。
@@ -48,7 +48,7 @@ deployments/offline-files/kubespray/nerdctl-*.tar.gz
 deployments/offline-files/kubespray/youki-*.tar.gz
 deployments/offline-files/kubespray/cni-plugins-*.tgz
 deployments/offline-files/kubespray/*.deb
-# kubespray 根目录裸二进制/清单: 仅保留 Dockerfile-cli 用到的 3 个 CLI(kubectl/helm/skopeo),
+# kubespray 根目录裸二进制/清单: 仅保留 installer-cli 镜像 用到的 3 个 CLI(kubectl/helm/skopeo),
 # 其余(节点侧 kubelet/kubeadm/runc/crun/gvisor/calicoctl/yq 等, 由 kubespray 分发到节点, 不入 CLI 镜像)
 deployments/offline-files/kubespray/calicoctl-*
 deployments/offline-files/kubespray/crun-*

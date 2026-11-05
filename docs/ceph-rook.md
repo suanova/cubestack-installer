@@ -183,10 +183,10 @@ bash deployments/scripts/tools/k8s/ceph-expose-external.sh show     # 当前暴�
 bash deployments/scripts/tools/k8s/ceph-expose-external.sh status   # 5 层自检:
 #    [1/5] mon 网络可达(集群外 TCP) [2/5] 认证用户(profile caps) [3/5] 外部资源(pool/fs/app tag)
 #    [4/5] fsid+CephFS [5/5] 外部客户端协议级测试(模拟 ceph-csi-operator 从集群外连接:
-#    mon msgr 握手 + cephx 认证 + rbd ls/create/rm 写路径; 客户端=Dockerfile-cli 预装 ceph-common)
+#    mon msgr 握手 + cephx 认证 + rbd ls/create/rm 写路径; 客户端=images/installer-cli/Dockerfile 预装 ceph-common)
 sudo ./deploy-cluster.sh --steps verify_ceph                        # ⑨ 自动跑 status(含 [5/5])
 ```
-> Dockerfile-cli 已预装 `ceph-common`(部署容器内自带 ceph/rbd 客户端); 旧容器未重建时
+> images/installer-cli/Dockerfile 已预装 `ceph-common`(部署容器内自带 ceph/rbd 客户端); 旧容器未重建时
 > [5/5] 自动回退为 toolbox 内经外部端点测试(连接路径经 kube-proxy DNAT, 与外部一致)。
 
 **接入方集群**(目标集群, 消费本集群 Ceph): `cluster.conf` 设 `CEPH_MODE=external` +

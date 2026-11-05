@@ -25,10 +25,8 @@
 - 离线集群按设计不带软件源 → RDMA 工具**必须构建期装好**(实测某集群 pod 能连 apk 源,
   但离线交付不能依赖这点)。
 
-于是有了 `deployments/scripts/tools/images/netshoot-rdma.Dockerfile`(两阶段构建)+
+于是有了 `images/netshoot-rdma/Dockerfile`(两阶段构建)+
 `make netshoot-rdma` target 和 CI workflow。构建与踩坑见 §4。
-
-> TODO(layout): 后续把 Dockerfile 统一挪到 `images/netshoot-rdma/Dockerfile`。
 
 ## 2. 部署与使用
 

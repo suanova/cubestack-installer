@@ -1,8 +1,5 @@
 SHELL := /bin/bash
 
-# TODO(layout): move installer-cli and netshoot-rdma Dockerfiles under images/
-# in a follow-up repository-layout PR.
-
 .PHONY: help netshoot-rdma
 
 help: ## 显示帮助
@@ -14,11 +11,9 @@ help: ## 显示帮助
 #   make netshoot-rdma NETSHOOT_RDMA_TAG=26.04.17
 #   make netshoot-rdma NETSHOOT_RDMA_TAG=26.04.17 NETSHOOT_RDMA_PUSH=1
 #
-# TODO(layout): move the Dockerfile to images/netshoot-rdma/Dockerfile in a
-# follow-up repository-layout PR.
 # ---------------------------------------------------------------------------
 NETSHOOT_RDMA_IMAGE ?= harbor.isuanova.com/suanova/netshoot-rdma
-NETSHOOT_RDMA_DOCKERFILE ?= deployments/scripts/tools/images/netshoot-rdma.Dockerfile
+NETSHOOT_RDMA_DOCKERFILE ?= images/netshoot-rdma/Dockerfile
 NETSHOOT_RDMA_BASE_IMAGE ?= nicolaka/netshoot:latest
 NETSHOOT_RDMA_TAG ?=
 NETSHOOT_RDMA_PERFTEST_VERSION ?=

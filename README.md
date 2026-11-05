@@ -93,8 +93,10 @@ versions/
   os/                       # 节点前置包体检清单
 docs/                       # 设计、运行、排障文档
 skills/                     # 维护者技能文档
-Dockerfile-cli              # CLI 镜像（代码层）
-Dockerfile-cli-base         # CLI 镜像（基础层）
+images/
+  installer-cli/            # CLI 镜像（代码层）Dockerfile
+  installer-cli-base/       # CLI 镜像（基础层）Dockerfile
+  netshoot-rdma/            # RDMA 诊断镜像 Dockerfile
 Makefile                    # 辅助构建目标（netshoot-rdma 等）
 ```
 
