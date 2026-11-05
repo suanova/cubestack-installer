@@ -5,16 +5,17 @@ name: Build netshoot-rdma image
 #   - cubestack-release: pinned as a base image and packaged into the version tree
 #   - cubestack-installer open-source online install: materialized from public Harbor
 #
-# The tag is immutable: content changes must use a new tag (for example
-# 26.04.17-r2). This workflow never overwrites an existing tag.
+# Automatic runs (Dockerfile / VERSION_LINE / Makefile changes) push the moving
+# <VERSION_LINE>-latest channel tag. Manual runs push the immutable tag you
+# provide (for example 26.04.17-r2) and never overwrite it.
 
 on:
-  # Dockerfile changes are build-only (no push): the tag must be chosen
-  # explicitly because tags are immutable.
   push:
     branches: [main, release-2.1]
     paths:
       - 'images/netshoot-rdma/**'
+      - 'VERSION_LINE'
+      - 'Makefile'
   workflow_dispatch:
     inputs:
       tag:
@@ -53,25 +54,36 @@ jobs:
       # TODO: pin this to an immutable base tag/digest once the public mirror
       # catalog carries a pinned netshoot base.
       BASE_IMAGE: ${{ vars.NETSHOOT_RDMA_BASE_IMAGE || 'nicolaka/netshoot:latest' }}
-      IMAGE_TAG_INPUT: ${{ github.event_name == 'push' && format('ci-{0}', github.sha) || inputs.tag }}
+      IMAGE_TAG_INPUT: ${{ inputs.tag }}
       PERFTEST_INPUT: ${{ github.event_name == 'push' && (vars.NETSHOOT_RDMA_PERFTEST_VERSION || '26.04.17') || inputs.perftest_version }}
-      PUSH_INPUT: ${{ github.event_name == 'push' && 'false' || inputs.push }}
+      PUSH_INPUT: ${{ github.event_name == 'push' && 'true' || inputs.push }}
       APK_MIRROR_INPUT: ${{ github.event_name == 'push' && '' || inputs.apk_mirror }}
+      IS_CHANNEL: ${{ github.event_name == 'push' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Validate inputs
+      - name: Resolve tag and validate
         run: |
           set -euo pipefail
-          tag="${IMAGE_TAG_INPUT}"
+          if [ "${IS_CHANNEL}" = "true" ]; then
+            line="$(tr -d '[:space:]' < VERSION_LINE)"
+            case "${line}" in
+              [0-9]*.[0-9]*) ;;
+              *) echo "::error::invalid VERSION_LINE: '${line}'"; exit 1 ;;
+            esac
+            tag="${line}-latest"
+            perftest="${PERFTEST_INPUT}"
+          else
+            tag="${IMAGE_TAG_INPUT}"
+            perftest="${PERFTEST_INPUT:-${tag%-r*}}"
+          fi
           [[ "${tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] \
             || { echo "::error::invalid image tag: '${tag}'"; exit 1; }
           [[ "${tag,,}" != "latest" ]] \
             || { echo "::error::'latest' is not allowed"; exit 1; }
-          perftest="${PERFTEST_INPUT:-${tag%-r*}}"
           [[ "${perftest}" =~ ^[0-9A-Za-z._-]+$ ]] \
             || { echo "::error::invalid perftest version: '${perftest}'"; exit 1; }
           if [ -n "${APK_MIRROR_INPUT}" ] && [[ ! "${APK_MIRROR_INPUT}" =~ ^https://[^[:space:]]+$ ]]; then
@@ -80,6 +92,7 @@ jobs:
           fi
           echo "IMAGE_TAG=${tag}" >>"${GITHUB_ENV}"
           echo "PERFTEST_VERSION=${perftest}" >>"${GITHUB_ENV}"
+          echo "resolved tag=${tag} perftest=${perftest} channel=${IS_CHANNEL}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Login to Harbor
         if: env.PUSH_INPUT == 'true'
@@ -91,8 +104,8 @@ jobs:
           fi
           echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_HOST}" -u "${HARBOR_USER}" --password-stdin
 
-      - name: Ensure tag is new
-        if: env.PUSH_INPUT == 'true'
+      - name: Ensure immutable tag is new
+        if: env.PUSH_INPUT == 'true' && env.IS_CHANNEL != 'true'
         run: |
           set -euo pipefail
           if docker manifest inspect "${IMAGE}:${IMAGE_TAG}" >/dev/null 2>&1; then
