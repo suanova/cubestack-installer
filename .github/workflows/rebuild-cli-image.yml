@@ -2,7 +2,7 @@ name: Rebuild installer CLI image
 
 # ============================================================================
 # 部署代码变更后重建 CLI 镜像。
-#   · push main → :latest(开发通道)
+#   · push main/release-X.Y → :<VERSION_LINE>-latest(开发通道)
 #   · workflow_dispatch + version → 额外推送 :<version>(发布通道; 外部打包流程
 #     按 Harbor 中的镜像 digest 取 CLI tar)
 #
@@ -12,6 +12,7 @@ name: Rebuild installer CLI image
 #
 # 按改动选择重建哪一层:
 #   · images/installer-cli-base/** 变化 → 重建 base + 代码层，并推两个镜像
+#   · 版本线由仓库根 VERSION_LINE 决定；release-X.Y 分支必须与文件一致
 #   · images/installer-cli/** 或代码输入变化 → 只重建代码层
 #   · 代码层永远基于当前 base；base 变了必须连带重建代码层
 #
@@ -34,6 +35,7 @@ on:
       - 'versions/**'
 
       - 'skills/**'
+      - 'VERSION_LINE'
       - 'images/installer-cli/**'
       - 'images/installer-cli-base/**'
       - '.dockerignore'
@@ -41,7 +43,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '推送的 CLI 镜像版本(如 2.1.0; 留空=只推 :latest)'
+        description: '推送的 CLI 镜像版本(如 2.1.0; 留空=只推 <VERSION_LINE>-latest)'
         required: false
         default: ''
       force_base:
@@ -69,9 +71,6 @@ jobs:
       HARBOR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
       HARBOR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
       IMAGE_VERSION: ${{ github.event.inputs.version || '' }}
-      # main keeps the 2.0 :latest channel; release-2.1 uses its own moving tag
-      # so a 2.1 base can never break a 2.0.1 build.
-      CLI_CHANNEL: ${{ github.ref_name == 'main' && 'latest' || '2.1-latest' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,8 +95,10 @@ jobs:
             build_base=false
             build_cli=false
             grep -qE '^images/installer-cli-base/' <<<"${changed}" && build_base=true
+            # A new version line needs a base for the new channel.
+            grep -qE '^VERSION_LINE$' <<<"${changed}" && build_base=true
             grep -qE '^images/installer-cli/' <<<"${changed}" && build_cli=true
-            grep -qE '^(deployments/scripts/|deployments/kubespray/|deployments/cubestack-addon/|deployments/config/|versions/|skills/|\.dockerignore$)' <<<"${changed}" \
+            grep -qE '^(deployments/scripts/|deployments/kubespray/|deployments/cubestack-addon/|deployments/config/|versions/|skills/|VERSION_LINE$|\.dockerignore$)' <<<"${changed}" \
               && build_cli=true
             # A base change is useless without rebuilding the code layer on top.
             [ "${build_base}" = "true" ] && build_cli=true
@@ -117,6 +118,26 @@ jobs:
             fi
           done
           [ "${missing}" = "0" ] || exit 1
+
+      - name: Resolve version line
+        run: |
+          set -euo pipefail
+          line="$(tr -d '[:space:]' < VERSION_LINE)"
+          case "${line}" in
+            [0-9]*.[0-9]*) ;;
+            *) echo "::error::invalid VERSION_LINE: '${line}'"; exit 1 ;;
+          esac
+          case "${GITHUB_REF_NAME}" in
+            release-*)
+              if [ "${GITHUB_REF_NAME}" != "release-${line}" ]; then
+                echo "::error::VERSION_LINE=${line} does not match ${GITHUB_REF_NAME}"
+                exit 1
+              fi
+              ;;
+          esac
+          echo "VERSION_LINE=${line}" >> "${GITHUB_ENV}"
+          echo "CLI_CHANNEL=${line}-latest" >> "${GITHUB_ENV}"
+          echo "version line=${line} channel=${line}-latest" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Resolve target image
         run: |

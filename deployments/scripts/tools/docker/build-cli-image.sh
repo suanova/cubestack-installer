@@ -26,12 +26,24 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 
-IMAGE="${CLI_IMAGE:-harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest}"
+# The channel comes from the repo's VERSION_LINE, so a branch cut only changes
+# one file. Releases still use immutable X.Y.Z tags on top of the channel.
+VERSION_LINE_FILE="${REPO_ROOT}/VERSION_LINE"
+VERSION_LINE="${VERSION_LINE:-}"
+if [ -z "${VERSION_LINE}" ]; then
+    [ -f "${VERSION_LINE_FILE}" ] || { err "VERSION_LINE not found: ${VERSION_LINE_FILE}"; exit 1; }
+    VERSION_LINE="$(tr -d '[:space:]' < "${VERSION_LINE_FILE}")"
+fi
+case "${VERSION_LINE}" in
+    [0-9]*.[0-9]*) ;;
+    *) err "invalid VERSION_LINE: ${VERSION_LINE}"; exit 1 ;;
+esac
+CHANNEL="${CLI_CHANNEL:-${VERSION_LINE}-latest}"
+IMAGE="${CLI_IMAGE:-harbor.isuanova.com/suanova/cubestack-installer-cli:${CHANNEL}}"
 BASE_IMAGE="ubuntu:22.04"
 # Namespaces intentionally differ: base is pushed to cubestack, the code image
-# to suanova (separate push permissions). The 2.1 channel never overwrites
-# :latest, which release-2.0 still uses.
-BASE_TAG="${CLI_BASE_TAG:-harbor.isuanova.com/cubestack/cubestack-installer-cli-base:2.1-latest}"
+# to suanova (separate push permissions).
+BASE_TAG="${CLI_BASE_TAG:-harbor.isuanova.com/cubestack/cubestack-installer-cli-base:${CHANNEL}}"
 BASE_DOCKERFILE="${REPO_ROOT}/images/installer-cli-base/Dockerfile"
 CODE_DOCKERFILE="${REPO_ROOT}/images/installer-cli/Dockerfile"
 REQUIREMENTS="${REPO_ROOT}/deployments/kubespray/kubespray/requirements.txt"

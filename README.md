@@ -60,7 +60,8 @@ cp deployments/config/cluster.conf.example deployments/config/cluster.conf
 harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
 ```
 
-2.1 分支使用 `:2.1-latest`，不覆盖 2.0.x 仍在使用的 `:latest`。
+镜像 tag 由仓库根 `VERSION_LINE` 派生（当前 `2.1` → `:2.1-latest`），
+不覆盖 2.0.x 仍在使用的 `:latest`。
 
 构建/推送：
 

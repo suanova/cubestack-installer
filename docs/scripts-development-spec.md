@@ -19,6 +19,7 @@
 | **幂等可重跑** | 模块尽可能幂等;可重复模块(REPEAT=1)每次执行且不写断点状态 |
 | **断点续跑** | 每模块完成写状态(`config/.deploy.state`);失败后修复重跑自动跳过已完成模块(`--fresh` 清状态) |
 | **构建自包含** | 镜像构建输入只来自仓库或网络:不读构建机 `PATH`/`offline-files/`/`bin/`;网络下载必须 pinned version + sha256 |
+| **版本线单一来源** | 仓库根 `VERSION_LINE=X.Y` 决定镜像 channel tag `<X.Y>-latest`;`release-X.Y` 分支必须与文件一致 |
 
 ### 1.2 目录结构
 

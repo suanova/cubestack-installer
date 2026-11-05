@@ -32,8 +32,8 @@
 #       纯裸金属离线部署(kubespray + operator)无需额外特权。
 # =====================================================================
 
-# base 镜像(系统+工具链层): 默认走 Harbor; 本地/离线场景由 build-cli-image.sh 传 --build-arg 覆盖
-ARG CLI_BASE_TAG=harbor.isuanova.com/cubestack/cubestack-installer-cli-base:2.1-latest
+# base 镜像(系统+工具链层): 必须由 build-cli-image.sh 按 VERSION_LINE 传 --build-arg
+ARG CLI_BASE_TAG
 FROM ${CLI_BASE_TAG}
 
 # ---------- 运行期工具链钩子(登录 shell 把挂载版本目录里的 kubectl/helm/skopeo 补到 PATH) ----------

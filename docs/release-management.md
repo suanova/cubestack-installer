@@ -74,8 +74,9 @@ sudo ./deploy-cluster.sh --with-cubestack
 3. **base 变化必须连带重建代码层**：代码层永远 `FROM` 一个固定 base；base
    重建后必须重建并推送代码层，否则镜像内容与 Dockerfile 不一致。
 4. **镜像 tag 按发布线隔离**：
-   - `main` / `release-2.0`：沿用 `:latest`；
-   - `release-2.1`：base 和 CLI 使用 `:2.1-latest`，**不覆盖 `:latest`**；
+   - 仓库根 `VERSION_LINE=X.Y` 是版本线的唯一来源；
+   - CI 派生 `<X.Y>-latest`（如 `2.1-latest`），不再使用全局 `latest`；
+   - `release-X.Y` 分支的 `VERSION_LINE` 必须是 `X.Y`，CI 会校验；
    - 正式发布使用不可变版本 tag（如 `2.1.0`），并优先按 digest 引用。
    这样 2.1 的 base 更新不会影响尚未发布的 2.0.1 CLI 构建。
 5. **不可变 tag 不覆盖**：版本 tag 已存在时构建失败，要求换版本或显式处理。
