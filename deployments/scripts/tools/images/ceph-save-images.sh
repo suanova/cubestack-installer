@@ -18,7 +18,7 @@
 #   quay.io/cephcsi/cephcsi:v3.18.1                 CSI 驱动
 #   registry.k8s.io/sig-storage/csi-*               CSI sidecar(provisioner/attacher/resizer/snapshotter/registrar/snapshot-metadata)
 #   quay.io/csiaddons/k8s-sidecar:v0.15.1           csiaddons sidecar
-#   registry.k8s.io/sig-storage/snapshot-controller:v8.0.1
+#   registry.k8s.io/sig-storage/snapshot-controller:v8.7.0
 #   ubuntu:22.04                                    (通用工具/验证镜像)
 #   nginx:1.27                                      (通用工具/验证镜像)
 # 下载方式: ① 本地 docker 已有 → save; ② docker pull → save; ③ skopeo 兜底。
@@ -74,7 +74,7 @@ registry.k8s.io/sig-storage/csi-snapshotter:v8.6.0
 registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.18.0
 registry.k8s.io/sig-storage/csi-snapshot-metadata:v1.1.0
 quay.io/csiaddons/k8s-sidecar:v0.15.1
-registry.k8s.io/sig-storage/snapshot-controller:v8.0.1
+registry.k8s.io/sig-storage/snapshot-controller:v8.7.0
 ubuntu:22.04
 nginx:1.27"
 fi
