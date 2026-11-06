@@ -12,11 +12,19 @@ cp deployments/config/cluster.conf.example deployments/config/cluster.conf
 vim deployments/config/cluster.conf        # 填写 NODES / 密码 / MetalLB 等
 
 sudo ./deployments/scripts/install-online.sh
+
+# 可选：带 dev-lab 镜像；检查/要求 MetaX 厂商物料
+sudo ./deployments/scripts/install-online.sh --with-dev-lab
+sudo ./deployments/scripts/install-online.sh --check-materials
+sudo ./deployments/scripts/install-online.sh --with-metax
 ```
 
 在线安装从 public Harbor 物化 `versions/base.yaml` 中声明的镜像，并在安装时下载
-k8s 二进制。节点前置包（lvm2/chrony/curl 等）由 OS 镜像/运维预装；installer 只做
-只读体检，默认 warn-only。
+k8s 二进制。镜像目录按 `versions/base.yaml` 的 `mirror` pin 拉取，不在脚本里写死分支。
+节点前置包（lvm2/chrony/curl 等）由 OS 镜像/运维预装；installer 只做只读体检，默认
+warn-only。
+
+在线安装主机需要：`python3` + PyYAML、`jq`、`skopeo`、`curl`。
 
 ### 商业/离线版本树
 

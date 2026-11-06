@@ -83,4 +83,44 @@ out="$(cd "${ROOT}" && CLUSTER_CONF="${CONF}" \
 grep -q "pre-check passed" <<<"${out}" || fail "enabled pre-check dry-run did not pass"
 pass "install-online can enable the blocking prerequisite pre-check"
 
+# The mirror index URL comes from the baseline pin, not a hardcoded main ref.
+mkdir -p "${TMP}/bin" "${TMP}/offline"
+cat > "${TMP}/bin/curl" <<'EOF'
+#!/bin/bash
+url="" out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        -*) shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+printf '%s\n' "${url}" >> "${CURL_LOG:?}"
+printf '{"schema":1,"images":[]}\n' > "${out:?}"
+EOF
+chmod +x "${TMP}/bin/curl"
+out="$(cd "${ROOT}" && env -u CUBESTACK_MIRROR_INDEX -u CUBESTACK_MIRROR_INDEX_URL \
+    CLUSTER_CONF="${CONF}" CURL_LOG="${TMP}/curl.log" PATH="${TMP}/bin:${PATH}" \
+    bash "${SCRIPTS}/install-online.sh" \
+    --offline-root "${TMP}/offline" --no-materialize --dry-run --no-check-os-packages 2>&1)"
+grep -q "mirror index pinned by baseline:" <<<"${out}" || fail "pinned index message missing"
+grep -q "zhujian7/container-image-mirror/1c16e009c25eee53567ba61657ad65386e26b193/index.json" \
+    "${TMP}/curl.log" || fail "mirror index was not fetched from the baseline pin"
+[ ! -e "${TMP}/offline/mirror" ] || fail "dry-run persisted the mirror index"
+pass "install-online fetches the mirror index at the baseline pin"
+
+# The baseline is authoritative: a profile/cluster override must fail loudly.
+sed 's/K8S_VERSION: v1.35.8/K8S_VERSION: v9.9.9/' "${ROOT}/versions/base.yaml" > "${TMP}/base-bad.yaml"
+if out="$(cd "${ROOT}" && CLUSTER_CONF="${CONF}" \
+    bash "${SCRIPTS}/install-online.sh" \
+    --baseline "${TMP}/base-bad.yaml" --index "${TMP}/index.json" \
+    --no-materialize --dry-run --no-check-os-packages 2>&1)"; then
+    fail "baseline/profile mismatch was accepted"
+fi
+grep -q "baseline env and effective config disagree" <<<"${out}" \
+    || fail "baseline/profile mismatch did not explain the failure"
+grep -q "K8S_VERSION: baseline=v9.9.9" <<<"${out}" \
+    || fail "baseline/profile mismatch did not name the key"
+pass "install-online rejects profile overrides that disagree with the baseline"
+
 echo "all install-online tests passed"

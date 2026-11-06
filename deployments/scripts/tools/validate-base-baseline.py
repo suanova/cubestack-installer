@@ -166,6 +166,59 @@ def main() -> int:
         if not re.match(r"^[0-7]{4}$", mode):
             errors.append(f"{where}: mode must be 4 octal digits")
 
+    materials = baseline.get("materials") or []
+    material_keys: set[str] = set()
+    material_paths: set[str] = set()
+    for idx, item in enumerate(materials):
+        where = f"materials[{idx}]"
+        key = str(item.get("key", "")).strip()
+        if not key:
+            errors.append(f"{where}: key is required")
+        elif key in material_keys:
+            errors.append(f"{where}: duplicate key {key!r}")
+        else:
+            material_keys.add(key)
+        if not str(item.get("module", "")).strip():
+            errors.append(f"{where}: module is required")
+        version = str(item.get("version", "")).strip()
+        file_name = str(item.get("file", "")).strip()
+        dest = str(item.get("dest", "")).strip()
+        for field, value in (("version", version), ("file", file_name), ("dest", dest)):
+            if not value:
+                errors.append(f"{where}: {field} is required")
+                continue
+            for var in VAR_RE.findall(value):
+                if var not in known_vars:
+                    errors.append(f"{where}: unknown variable ${{{var}}} in {field}")
+        if "/" in file_name or file_name in (".", ".."):
+            errors.append(f"{where}: file must be a plain filename")
+        if dest.startswith("/") or ".." in Path(dest).parts:
+            errors.append(f"{where}: dest must be a relative path without '..'")
+        if dest and file_name:
+            rel = str(Path(dest) / file_name)
+            if rel in material_paths or rel in file_paths:
+                errors.append(f"{where}: duplicate material path {rel!r}")
+            else:
+                material_paths.add(rel)
+        source = item.get("source") or {}
+        kind = str(source.get("type", "")).strip()
+        if kind == "vendor-portal":
+            if not str(source.get("provider", "")).strip():
+                errors.append(f"{where}: vendor-portal source requires provider")
+        elif kind == "url":
+            if not str(source.get("url", "")).strip():
+                errors.append(f"{where}: url source requires url")
+        elif kind == "local":
+            if not str(source.get("path", "")).strip():
+                errors.append(f"{where}: local source requires path")
+        else:
+            errors.append(f"{where}: source.type must be vendor-portal|url|local")
+        if "optional" in item and not isinstance(item.get("optional"), bool):
+            errors.append(f"{where}: optional must be a boolean")
+        digest = str(item.get("digest", "")).strip()
+        if digest and not re.match(r"^sha256:[0-9a-f]{64}$", digest):
+            errors.append(f"{where}: invalid digest {digest!r}")
+
     images = baseline.get("images") or []
     if not images:
         errors.append("images[] must contain at least one entry")
@@ -191,8 +244,15 @@ def main() -> int:
             catalog_ids.add(catalog_id)
             if not re.match(r"^[a-z0-9-]+/[a-z0-9][a-z0-9._-]*$", catalog_id):
                 errors.append(f"{where}: catalog_id must look like <category>/<name> (got {catalog_id!r})")
-        if source_ref and not source_ref.startswith("harbor.isuanova.com/"):
-            errors.append(f"{where}: source_ref must be a public Harbor ref, got {source_ref!r}")
+        if source_ref:
+            if not source_ref.startswith("harbor.isuanova.com/"):
+                errors.append(f"{where}: source_ref must be a public Harbor ref, got {source_ref!r}")
+            # source_ref has no catalog entry; the digest is the only pin.
+            digest = str(img.get("digest", "")).strip()
+            if not re.match(r"^sha256:[0-9a-f]{64}$", digest):
+                errors.append(f"{where}: source_ref requires a sha256 digest")
+        if "optional" in img and not isinstance(img.get("optional"), bool):
+            errors.append(f"{where}: optional must be a boolean")
         version = str(img.get("version", "")).strip()
         if not version:
             errors.append(f"{where}: version is required")

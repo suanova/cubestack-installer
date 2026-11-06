@@ -52,7 +52,10 @@ images:
 - `mirror` 固定 mirror catalog 的 repo/commit/index；base 镜像的 digest 必须以该
   commit 的 `index.json` 为准，避免漂移。
 - `catalog_id` 指向 mirror catalog（`container-image-mirror/index.json` 的 `id`）；
-  自建公开镜像（如 netshoot-rdma）用 `source_ref` 指向 public `suanova/**`，两者互斥。
+  自建公开镜像用 `source_ref` 指向 public `suanova/**`，两者互斥。`source_ref`
+  必须同时写 `digest`（镜像没有 catalog 条目，digest 是唯一的钉）。
+- `optional: true` 的镜像默认不在线物化（`--with-dev-lab` 才会带上），但商业 base
+  打包会包含它们。dev-lab 的三个镜像目前走这个开关。
 - `version` 可以是 `${VAR}` 或字面量；变量必须在 `cluster.defaults.conf` /
   profile 里有定义。禁止 `latest`。
 - `dest` / `tar` 里的 `${VAR}` 由安装器解析；`tar` 决定物化后的文件名，模块 35 等
@@ -64,6 +67,12 @@ images:
   k8s 运行时配置等不属于 OS 包安装。
 - K8s 二进制（kubelet/kubeadm/kubectl/crictl/CNI 等）仍由 installer 准备；商业离线版由
   商业 base 的 `files[]` 打包。
+
+## 物料清单
+
+`materials:` 记录无法从公共 registry 拉取的厂商制品（当前为 MetaX 资源包/镜像包/
+驱动包）。开源用户按 `source.portal` 自行下载，商业打包在 overlay 里用同一个 key
+提供本地来源。字段与流程见 [`materials.md`](materials.md)。
 
 ## 节点前置包体检清单
 

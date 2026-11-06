@@ -103,6 +103,7 @@ def resolve_image(image: dict, catalog: dict[str, dict], env: dict[str, str],
         "dest": dest,
         "tar": tar,
         "path": safe_join(dest, tar, where),
+        "optional": bool(image.get("optional", False)),
     }
 
     if catalog_id:
@@ -143,12 +144,15 @@ def resolve_image(image: dict, catalog: dict[str, dict], env: dict[str, str],
     else:
         if not source_ref.startswith("harbor.isuanova.com/"):
             fail(f"{where} ({key}): source_ref must be a public Harbor ref: {source_ref}")
+        digest = str(image.get("digest", "")).strip()
+        if not DIGEST_RE.match(digest):
+            fail(f"{where} ({key}): source_ref requires a sha256 digest")
         resolved.update({
             "source_ref": source_ref,
             "source": source_ref,
             "target": source_ref,
-            "digest": None,
-            "ref": f"{source_ref}:{version}",
+            "digest": digest,
+            "ref": f"{source_ref}@{digest}",
             "repo_tag": f"{source_ref}:{version}",
         })
 

@@ -8,7 +8,7 @@
 - 镜像: `harbor.isuanova.com/suanova/netshoot-rdma:<immutable-tag>`(public)
   - 构建/推送: `.github/workflows/build-netshoot-rdma.yml`(自动推 channel; 发布 tag 手动触发)
   - 本地构建: `make netshoot-rdma NETSHOOT_RDMA_TAG=<tag> [NETSHOOT_RDMA_PUSH=1]`
-  - tar: 由 release 打包或开源在线安装从 public Harbor 物化到 `offline-files/netshoot/`
+  - tar: 镜像发布后把 digest 写回 `versions/base.yaml`，才由 release 打包或开源在线安装物化到 `offline-files/netshoot/`
 - 默认命名空间 `default`,pod 名 `cubestack-netshoot`(固定名,便于 exec)
 
 ---

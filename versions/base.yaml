@@ -24,6 +24,9 @@ env:
   CSI_PROVISIONER_VERSION: v6.2.0
   CSI_RESIZER_VERSION: v2.1.0
   CSI_SNAPSHOTTER_VERSION: v8.5.0
+  DEV_LAB_CPU_TAG: py310-torch2.4
+  DEV_LAB_CUDA_TAG: '26.08'
+  DEV_LAB_MACA_TAG: 3.9.0.12-py310-torch2.4
   DNS_NODE_CACHE_VERSION: 1.25.0
   ETCD_VERSION: v3.6.14
   K8S_VERSION: v1.35.8
@@ -32,6 +35,8 @@ env:
   LOCAL_PATH_VERSION: v0.0.37
   LOCAL_VOLUME_PROVISIONER_VERSION: 2.5.0
   METALLB_VERSION: v0.13.9
+  METAX_DRIVER_VERSION: 3.8.1.6-amd64
+  METAX_VERSION: 0.15.3
   METRICS_SERVER_VERSION: v0.9.0
   MULTUS_IMAGE_TAG: v4.2.2-thick
   NFD_VERSION: 0.19.0
@@ -45,6 +50,43 @@ env:
   ROOK_VERSION: v1.20.2
   SNAPSHOT_CONTROLLER_VERSION: v8.0.1
   NETSHOOT_RDMA_VERSION: 2.1-latest
+# Vendor artifacts that cannot be fetched from a public registry. Each entry is
+# an index item: the open-source flow points users at the vendor portal, and the
+# commercial packaging overlay supplies a local source for the same key.
+materials:
+- key: metax:gpu-k8s-package
+  module: gpu_operator
+  version: ${METAX_VERSION}
+  file: metax-gpu-k8s-package.${METAX_VERSION}.tar.gz
+  dest: offline-files/metax-gpu
+  optional: true
+  source:
+    type: vendor-portal
+    provider: metax
+    portal: https://metax-tech.com
+    account_required: true
+- key: metax:k8s-images
+  module: gpu_operator
+  version: ${METAX_VERSION}
+  file: metax-k8s-images.${METAX_VERSION}.run
+  dest: offline-files/metax-gpu
+  optional: true
+  source:
+    type: vendor-portal
+    provider: metax
+    portal: https://metax-tech.com
+    account_required: true
+- key: metax:k8s-driver-image
+  module: gpu_operator
+  version: ${METAX_DRIVER_VERSION}
+  file: metax-k8s-driver-image.${METAX_DRIVER_VERSION}.run
+  dest: offline-files/metax-gpu
+  optional: true
+  source:
+    type: vendor-portal
+    provider: metax
+    portal: https://metax-tech.com
+    account_required: true
 os:
 - family: debian
   id: ubuntu
@@ -240,6 +282,27 @@ images:
   digest: sha256:e127c799c3f1a5ae49d8557211aec2fca8660bbff69184af16a9c34743487729
   dest: offline-files/netshoot
   tar: netshoot-rdma-2.1-latest.tar
+  optional: true
+- key: dev-lab:harbor.isuanova.com/suanova/cpu-pytorch
+  source_ref: harbor.isuanova.com/suanova/cpu-pytorch
+  version: ${DEV_LAB_CPU_TAG}
+  digest: sha256:1b0b71c5040cd19f7c56c54823fe315c0f65fdcfe801653f7c423ee45eacb043
+  dest: offline-files/dev-lab
+  tar: harbor.isuanova.com_suanova_cpu-pytorch_${DEV_LAB_CPU_TAG}.tar
+  optional: true
+- key: dev-lab:harbor.isuanova.com/suanova/maca-pytorch
+  source_ref: harbor.isuanova.com/suanova/maca-pytorch
+  version: ${DEV_LAB_MACA_TAG}
+  digest: sha256:06a9211a4951f3de38eddb747d66436e02cbc12cd29627e018bdd6fb80d54b64
+  dest: offline-files/dev-lab
+  tar: harbor.isuanova.com_suanova_maca-pytorch_${DEV_LAB_MACA_TAG}.tar
+  optional: true
+- key: dev-lab:harbor.isuanova.com/suanova/cuda-pytorch
+  source_ref: harbor.isuanova.com/suanova/cuda-pytorch
+  version: ${DEV_LAB_CUDA_TAG}
+  digest: sha256:d4f9efadf9dcc1d49528b9abdccc3e627590e4986b06e616aafef32494162cda
+  dest: offline-files/dev-lab
+  tar: harbor.isuanova.com_suanova_cuda-pytorch_${DEV_LAB_CUDA_TAG}.tar
   optional: true
 - key: nvidia-gpu-operator:nvcr.io/nvidia/gpu-operator
   catalog_id: gpu/gpu-operator
