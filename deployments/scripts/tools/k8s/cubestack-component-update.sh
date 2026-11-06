@@ -147,7 +147,15 @@ _values_json=""
 if [ -n "${CUBESTACK_COMPONENT_VALUES_FILE:-}" ]; then
     [ -f "${CUBESTACK_COMPONENT_VALUES_FILE}" ] \
         || { err "CUBESTACK_COMPONENT_VALUES_FILE 不存在: ${CUBESTACK_COMPONENT_VALUES_FILE}"; exit 1; }
-    _values_json="$(python3 - "${CUBESTACK_COMPONENT_VALUES_FILE}" "${CUBESTACK_COMPONENT_VALUES_KEY:-}" <<'PY'
+    # CLI 容器里 python3(3.10) 没有 PyYAML; ansible 的 python3.11 有。
+    # 优先找一个能 import yaml 的解释器, 否则退回 JSON 解析(纯 JSON values 仍可用)。
+    _values_py="python3"
+    if ! "${_values_py}" -c 'import yaml' >/dev/null 2>&1; then
+        if command -v python3.11 >/dev/null 2>&1 && python3.11 -c 'import yaml' >/dev/null 2>&1; then
+            _values_py="python3.11"
+        fi
+    fi
+    _values_json="$("${_values_py}" - "${CUBESTACK_COMPONENT_VALUES_FILE}" "${CUBESTACK_COMPONENT_VALUES_KEY:-}" <<'PY'
 import json, sys
 path, key = sys.argv[1], sys.argv[2]
 try:
@@ -170,7 +178,7 @@ if key:
     data = cur
 print(json.dumps(data or {}, separators=(",", ":")))
 PY
-)" || { err "解析 values 文件失败(需 PyYAML 或 JSON; 或 CUBESTACK_COMPONENT_VALUES_KEY 路径无效): ${CUBESTACK_COMPONENT_VALUES_FILE}"; exit 1; }
+)" || { err "解析 values 文件失败(需 PyYAML(可经 python3.11)或 JSON; 或 CUBESTACK_COMPONENT_VALUES_KEY 路径无效): ${CUBESTACK_COMPONENT_VALUES_FILE}"; exit 1; }
 fi
 _pull_policy="${CUBESTACK_COMPONENT_PULL_POLICY:-}"
 if [ -z "${_pull_policy}" ] && [ "${_third}" = "1" ]; then

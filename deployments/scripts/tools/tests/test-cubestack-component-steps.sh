@@ -88,7 +88,7 @@ echo "== ②b values 点路径提取 =="
 cat > "${TMP}/lws-cr.json" <<'EOF'
 {"clusterCR":{"spec":{"components":{"lws":{"values":{"resources":{"requests":{"cpu":"200m","memory":"1Gi"}}}}}}}}
 EOF
-awk '/^[[:space:]]*_values_json="\$\(python3 - /{f=1; next} f && /^PY$/{exit} f' "${TOOL}" > "${TMP}/extract-values.py"
+awk '/^[[:space:]]*_values_json="\$\(/{f=1; next} f && /^PY$/{exit} f' "${TOOL}" > "${TMP}/extract-values.py"
 [ -s "${TMP}/extract-values.py" ] || { echo "  FAIL 未能从工具中提取 values 解析块"; fail=1; }
 _out="$(python3 "${TMP}/extract-values.py" "${TMP}/lws-cr.json" 'clusterCR.spec.components.lws.values' 2>&1)"
 chk "按点路径提取 values" '{"resources":{"requests":{"cpu":"200m","memory":"1Gi"}}}' "${_out}"
