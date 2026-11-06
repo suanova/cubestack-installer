@@ -14,8 +14,8 @@ name: Rebuild installer CLI image
 # 触发: push 到 main/release-2.0(部署代码/脚本/模板) 或 workflow_dispatch 手动重建
 #
 # 一次性配置 (repo Settings):
-#   Secrets: HARBOR_MIRROR_PASSWORD, MINIO_HOSTNAME, MINIO_USERNAME, MINIO_PASSWORD
-#   Vars:    HARBOR_MIRROR_USER, HARBOR_MIRROR_REGISTRY, HARBOR_MIRROR_INSECURE,
+#   Secrets: CI_BOT_PASSWORD, MINIO_HOSTNAME, MINIO_USERNAME, MINIO_PASSWORD
+#   Vars:    CI_BOT_NAME, HARBOR_MIRROR_REGISTRY, HARBOR_MIRROR_INSECURE,
 #            MINIO_BUCKET, MINIO_REMOTE_DIR, MINIO_INSECURE
 # ============================================================================
 
@@ -63,8 +63,8 @@ jobs:
     timeout-minutes: 90
     env:
       HARBOR_HOST: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
-      HARBOR_USER: ${{ vars.HARBOR_MIRROR_USER || secrets.HARBOR_MIRROR_USER }}
-      HARBOR_PASSWORD: ${{ secrets.HARBOR_MIRROR_PASSWORD }}
+      HARBOR_USER: ${{ vars.CI_BOT_NAME }}
+      HARBOR_PASSWORD: ${{ secrets.CI_BOT_PASSWORD }}
       HARBOR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
       IMAGE_VERSION: ${{ github.event.inputs.version || '' }}
       MINIO_ENDPOINT: ${{ secrets.MINIO_HOSTNAME }}
