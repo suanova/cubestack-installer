@@ -19,7 +19,8 @@ def main():
     ap = argparse.ArgumentParser(
         prog="verify-offline-files.sh",
         description="offline-files 完整性校验器。默认 --level quick(仅结构检查, 会明确提示); "
-                    "full 做全量 sha256 + 镜像 depth 校验; quick 下可加 --deep。",
+                    "full 做全量 sha256 + 镜像 depth 校验(full 默认 deep, --no-deep 可关闭深度解压); "
+                    "quick 下可加 --deep。",
         epilog="退出码: 0=通过 1=完整性失败 2=用法/环境错误",
     )
     default_root = os.path.normpath(os.path.join(
@@ -43,6 +44,8 @@ def main():
                     help="校验级别; 默认 quick(仅结构检查); full=全量 sha256+镜像深度校验; auto 走校验戳")
     ap.add_argument("--deep", action="store_true",
                     help="quick 下也强制深度解压(镜像 layer digest/大 gz CRC); full 已默认 deep")
+    ap.add_argument("--no-deep", action="store_true",
+                    help="full 不做深度解压(仍做全量 sha256 + 结构检查); 需配合 --level full|auto")
     ap.add_argument("--deep-log", default="",
                     help="深度校验逐 layer 明细日志(默认: TMPDIR/cubestack-verify-deep-*.log)")
     ap.add_argument("--seal", action="store_true", help="生成/更新 SHA256SUMS + SIZES")
@@ -71,6 +74,12 @@ def main():
         args.level = "quick"
     if args.deep and args.level == "metadata":
         print("❌ --deep 需要 --level quick|full|auto(metadata 不做结构检查)", file=sys.stderr)
+        return 2
+    if args.deep and args.no_deep:
+        print("❌ --deep 与 --no-deep 互斥", file=sys.stderr)
+        return 2
+    if args.no_deep and args.level not in ("full", "auto"):
+        print("❌ --no-deep 需要 --level full|auto", file=sys.stderr)
         return 2
 
     if args.version:
@@ -128,8 +137,9 @@ def main():
                 ctx.level = "auto"
                 return emit(ctx, args)
             level = "full"
-    if level == "full":
-        # full 必须能证明镜像可 load: 逐 layer digest + 大 tar.gz 深度检查
+    if level == "full" and not args.no_deep:
+        # full 默认要能证明镜像可 load: 逐 layer digest + 大 tar.gz 深度检查;
+        # --no-deep 只做全量 sha256 + 结构检查(大包只由 sha256 覆盖, 不深度解压)。
         ctx.deep = True
         args.deep = True
     ctx.level = level

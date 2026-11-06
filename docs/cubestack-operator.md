@@ -199,12 +199,14 @@ Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator�
 | tar 内镜像 | registry 目标路径 | CR 侧字段 |
 |---|---|---|
 | `harbor.isuanova.com/suanova/<name>:tag`(自研) | `<REG>/suanova/<name>:tag` | `spec.global.imageRegistry`(注入 `<REG>`) |
+| `harbor.isuanova.com/suanova-private/<name>:tag`(私有, 如 cubestack-docs) | `<REG>/suanova-private/<name>:tag` | 同上(operator 把 cubestackDocs 组件镜像重写为 `<global.imageRegistry>/suanova-private/…`) |
 | `<上游ref>`(docker.io/quay.io/ghcr.io/registry.k8s.io…) | `<REG>/mirrors/<上游ref>` | `spec.global.externalImageRegistryPrefix` |
 
 - **目标 ref 以 tar 文件名为权威**(文件名 = 上游 ref 的 `/`/`:` → `_`), tar 内 RepoTags 仅作尾部校验
   —— 早期 tar 的 RepoTags 可能是短式(缺 docker.io 域), 按它推会与节点拉取路径不一致(实机 not found)。
-- 组件镜像集与 operator 镜像内 `assets/charts` 的**渲染对账**而来(37 个 tar, 2026-10-16 起按平台
-  组件分入子目录): 见 `offline-files/cubestack-operator/README.md`(结构表 / 维护方法 / 单独推送流程)。
+- 组件镜像集与 operator 镜像内 `assets/charts` 的**渲染对账**而来(38 个 tar, 2026-10-16 起按平台
+  组件分入子目录; 2026-11-03 增补 `docs/` = cubestack-docs 文档站): 见
+  `offline-files/cubestack-operator/README.md`(结构表 / 维护方法 / 单独推送流程)。
 - **单独推送**(更新某一个 operator 后只灌它的镜像): `CUBESTACK_OPERATOR_COMPONENTS="<组件名>"`
   环境变量, 如 `sudo CUBESTACK_OPERATOR_COMPONENTS="cubepilot" ./deploy-cluster.sh --steps cubestack_operator`
   (组件名不存在会报错并列出可用子目录)。
@@ -367,6 +369,8 @@ sudo ./deploy-cluster.sh --steps lws
 sudo ./deploy-cluster.sh --steps cube-pilot
 
 # 指定版本 / 组件 values / pullPolicy
+# 默认 lws 已读取 lws-cr-values.yaml；这里的 /path/lws-values.yaml 是扁平组件 values，
+# 用户显式覆盖 VALUES_FILE 时不按 VALUES_KEY 提取，除非同时指定 KEY。
 sudo CUBESTACK_COMPONENT_VERSION=0.11.0 \
      CUBESTACK_COMPONENT_VALUES_FILE=/path/lws-values.yaml \
      CUBESTACK_COMPONENT_PULL_POLICY=Always \
@@ -384,6 +388,7 @@ sudo CUBESTACK_COMPONENT_RESTART=0 ./deploy-cluster.sh --steps prometheus
 | `CUBESTACK_COMPONENT_ENABLED` | `true/false`: 覆盖 CR `spec.components.<key>.enabled` |
 | `CUBESTACK_COMPONENT_BUNDLES` | `model-bundles` 专用: 逗号分隔 bundle 名列表 → CR `spec.bundles` |
 | `CUBESTACK_COMPONENT_VALUES_FILE` | 该组件的 values（YAML/JSON 的**组件 values 映射**），merge 到 CR |
+| `CUBESTACK_COMPONENT_VALUES_KEY` | 可选: 从 `VALUES_FILE` 按点路径提取子映射（lws 默认 `clusterCR.spec.components.lws.values`） |
 | `CUBESTACK_COMPONENT_PULL_POLICY` | 第三方组件 `values.image.pullPolicy`（默认 `Always`） |
 | `CUBESTACK_COMPONENT_RESTART` | `1`(默认)=rollout restart 组件 Deployment / `0`=不重启 |
 | `CUBESTACK_OPERATOR_OFFLINE_DIR` | 离线 tar 根目录; chart 在其 `charts/` 下(默认 `offline-files/cubestack-operator`) |
