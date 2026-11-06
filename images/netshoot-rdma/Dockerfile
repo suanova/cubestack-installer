@@ -19,7 +19,7 @@ ARG APK_MIRROR=""
 
 # ---------- stage 1: 编译 perftest(产物装进 /out, 再整棵拷进 runtime 阶段) ----------
 FROM ${BASE_IMAGE} AS builder
-ARG PERFTEST_VERSION
+ARG PERFTEST_VERSION=26.04.17
 ARG APK_MIRROR
 # 换源(仅当显式给了 APK_MIRROR): 主/社区两个仓库都指向该镜像的 v3.24 分支
 RUN if [ -n "${APK_MIRROR}" ]; then \
@@ -48,11 +48,13 @@ RUN apk add --no-cache build-base autoconf automake libtool pkgconf linux-header
 
 # ---------- stage 2: 运行时 = netshoot 原样 + rdma-core + perftest 二进制 ----------
 FROM ${BASE_IMAGE}
-ARG PERFTEST_VERSION
+ARG PERFTEST_VERSION=26.04.17
 LABEL org.opencontainers.image.title="netshoot-rdma" \
       org.opencontainers.image.description="CubeStack RDMA diagnostics: netshoot + rdma-core(ibv_*) + perftest(ib_write_bw/ib_read_bw...)" \
       org.opencontainers.image.version="${PERFTEST_VERSION}" \
-      org.opencontainers.image.source="https://github.com/nicolaka/netshoot"
+      org.opencontainers.image.source="https://github.com/nicolaka/netshoot" \
+      io.cubestack.component="netshoot-rdma" \
+      io.cubestack.netshoot.perftest-version="${PERFTEST_VERSION}"
 # perftest 运行期依赖 pciutils-libs(configure 要求 pciutils 头; 二进制动态链 libpci)
 # ⚠ iproute2-rdma 必须显式装: Alpine 的 iproute2 拆包仅含 iproute2-minimal/-ss/-tc,
 #   **不含 /sbin/rdma** —— 缺它时容器里 `rdma link show` 报 command not found, 会被误判成

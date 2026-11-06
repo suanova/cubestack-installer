@@ -83,7 +83,7 @@ NS="${NETSHOOT_NAMESPACE:-default}"
 POD="${NETSHOOT_POD_NAME:-cubestack-netshoot}"
 CM_NAME="${NETSHOOT_POD_NAME:-cubestack-netshoot}-diag"
 SAVE_DIR="${NETSHOOT_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/netshoot}"
-TAG="${NETSHOOT_RDMA_VERSION:-26.04.17}"          # 自建镜像 tag(= perftest 版本, 见构建脚本)
+TAG="${NETSHOOT_RDMA_VERSION:-2.1-latest}"       # 自建镜像 tag(开发线 channel; release/base env 会覆盖)
 BASE_TAR="${NETSHOOT_BASE_TAR:-${REPO_ROOT}/deployments/offline-files/os/netshoot.tar}"   # 回退用的原始 netshoot
 RDMA_RES="${NETSHOOT_RDMA_RESOURCE:-${RDMA_IB_RESOURCE:-rdma/ib_shared_devices}}"        # 与 10_rdma by-link 的 IB 池一致
 # push 用直连端点(与 10_rdma/gpu_operator 一致): nodeport→master:REGISTRY_NODEPORT / metallb→VIP:5000

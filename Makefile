@@ -27,7 +27,9 @@ netshoot-rdma: ## 构建 RDMA 诊断镜像（可选 push）
 		''|*[!0-9A-Za-z._-]*|latest) echo "error: NETSHOOT_RDMA_TAG is required and must not be latest: '$$tag'" >&2; exit 1 ;; \
 	esac; \
 	perftest="$(NETSHOOT_RDMA_PERFTEST_VERSION)"; \
-	[ -n "$$perftest" ] || perftest="$${tag%-r*}"; \
+	if [ -z "$$perftest" ]; then \
+		perftest="$$(sed -n 's/^ARG PERFTEST_VERSION=//p' images/netshoot-rdma/Dockerfile | head -1)"; \
+	fi; \
 	image="$(NETSHOOT_RDMA_IMAGE)"; \
 	ref="$${image}:$$tag"; \
 	dockerfile="$(NETSHOOT_RDMA_DOCKERFILE)"; \
