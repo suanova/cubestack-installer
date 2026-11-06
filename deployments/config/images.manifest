@@ -17,7 +17,7 @@
 #     ⇒ **升级版本只改 cluster.conf 一处**, 本文件与 CI/Harbor 自动跟随。
 #   · ref 必须**全限定**(带注册域), 短名(busybox/nginx)一律补 docker.io/library/。
 #   · 第 3 列用于"历史短名"镜像: 既有模块按字面文件名读取(如 22_verify_registry_storage.sh
-#     读 busybox.tar、ensure_registry_nginx 读 nginx.tar), 这类 tar 不能按 ref 改名。
+#     读 busybox.tar、ensure_registry_nginx 复用 k8s-base 的 nginx 派生名), 这类 tar 不能按 ref 改名。
 #
 # ── Harbor 目标路径规则(唯一规则, 见 lib-image-manifest.sh 的 image_mirror_ref) ──
 #     mirrors/<注册域>/<仓库路径>:<tag>         上游注册域 ≠ Harbor 时
@@ -84,16 +84,10 @@ k8s-base  docker.io/rancher/local-path-provisioner:${LOCAL_PATH_VERSION}
 # ⚠ busybox 用第 3 列锁死文件名: 22_verify_registry_storage.sh 按字面 "busybox.tar" 读取
 k8s-base  docker.io/library/busybox:${BUSYBOX_TAG}   busybox.tar
 
-# API 本地代理(kubespray nginx-proxy 静态 Pod)用; tag 必须与 kubespray download.yml 的 nginx_image_tag 一致
+# API 本地代理(kubespray nginx-proxy 静态 Pod)用; 同时被 verify 模块的 ensure_registry_nginx
+# 复用为测试后端。tag 必须与 kubespray download.yml 的 nginx_image_tag 一致。
+# 独立 nginx 组已移除(2.0.0/2.0.1 的 RELEASE_GROUPS 均不含 nginx), 该镜像只在 k8s-base 登记。
 k8s-base  docker.io/library/nginx:${API_LB_NGINX_IMAGE_TAG}
-
-# ------------------------------------------------------------
-# [group: nginx] verify 模块测试后端(统一 HTTP 测试服务)
-#   目录: deployments/offline-files/nginx/
-#   ⚠ 文件名锁死 "nginx.tar": lib-common 的 ensure_registry_nginx 按 nginx*.tar 查找并推入
-#     内置 registry 供 verify 模块当测试后端用(不依赖 docker.io, 也不靠节点预载)。
-# ------------------------------------------------------------
-nginx  docker.io/library/nginx:${NGINX_TAG}   nginx.tar
 
 # ------------------------------------------------------------
 # [group: ceph] Rook + Ceph(internal 模式; CEPH_ENABLED / CEPH_CSI_ENABLED)

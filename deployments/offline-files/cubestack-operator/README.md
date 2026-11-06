@@ -18,6 +18,7 @@ CubeStack 平台 Operator **及其平台组件**的离线资产(2026-10-08 起�
 | `bmc/` | bmc-oem-exporter + idrac-exporter(+`.digest` 边车) | `exporters.bmc` |
 | `cubepilot/` | cubepilot api/openclaw/operator/web(+`.digest` 边车) | `cubepilot` |
 | `portal/` | cubestack-ui + opstree redis 家族(redis/operator/sentinel/exporter) | `cubestackPortal` |
+| `docs/` | cubestack-docs(产品文档静态站 nginx; 私有项目 suanova-private, 钉 `v2.0.1`) | `cubestackDocs` |
 | `observability/` | 非镜像资产: `helm/`(bmc-exporter chart)/ `dashboards/` / `recording-rules/` / `MANIFEST.txt` | `observability` |
 
 映射权威 = chart `values.yaml` 的 `spec.components` + 各组件 legacy README(2026-10-16 对账);
@@ -94,7 +95,7 @@ bash deployments/scripts/tools/images/cubestack-platform-sync.sh \
 
 ## 保鲜管道: Harbor → 离线 tar → MinIO(定时同步, 2026-10-16)
 
-- **清单(单一事实源)**: 本目录 `image-list.tsv`(37 行; CI/本地/服务器共用)。
+- **清单(单一事实源)**: 本目录 `image-list.tsv`(38 行; CI/本地/服务器共用)。
 - **工具**(`deployments/scripts/tools/images/`):
   - `cubestack-platform-save-images.sh`: 逐镜像 `sha256(skopeo --raw)` digest 比对(== `docker pull`
     的 Digest, 零层拉取)→ 变化才 `skopeo copy`(强制单架构 amd64)重写 tar 与 `.digest` 边车;

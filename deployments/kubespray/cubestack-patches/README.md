@@ -12,7 +12,7 @@
 - 每条改动的"原因 / 上游吸收判据 / 上游化"三项写在 **patch 文件头的注释块**里(本 README 的表格是摘要,
   以 patch 头为准);判据用于升级时跑"这个补丁是否已被上游吸收、可以退休"的检查(设计 §3.5)。
 
-## 补丁清单(15 处)
+## 补丁清单(17 处)
 
 | 补丁 | 目标文件 | 一句话原因(丢了会怎样) | 上游吸收判据 | 上游化 |
 |---|---|---|---|---|
@@ -32,6 +32,9 @@
 | `14-calico-3.32.2-checksums.patch` | `roles/kubespray_defaults/vars/main/checksums.yml` | calico 3.31.7→**v3.32.2** 升级的校验值缺口: 树表封顶 3.31.7, pin 到 3.32.2 后 calicoctl 二进制与 kdd-crds 的 sha256 查表缺失 → 下载环节未定义中断(且 check.yml 的 supported-versions 断言按 crds 键拦停)。补 3 行(calicoctl amd64/arm64 + crds no_arch), **插在各表首**保持"首键=默认=最新"语义(⑯/⑱ 断言免改)。⚠ 仅 3.32 线可用 —— v3.33.0 上游单镜像改造(calico/cni 与 kube-controllers 停发), 见下文说明 | 两表出现 >=3.32.2 条目(换树自带新版表即退休) | 不提 PR(本地版本钉; 换树时由 --check-retired 判定) |
 
 | `15-calico-3.32.2-rbac.patch` | `roles/network_plugin/calico/templates/calico-cr.yml.j2` + `roles/kubernetes-apps/policy_controller/calico/templates/calico-kube-cr.yml.j2` | calico **3.32.2** 自带 ClusterRole 的规则缺口按上游逐字补齐: ① `calico-node` 缺 `policy.networking.k8s.io/clusternetworkpolicies` 与 `kubevirt.io/virtualmachineinstancemigrations` ⇒ felix 视为 datastore 故障(403≠404)、resync 永不完成 ⇒ **calico-node 全节点 0/1 ⇒ 一切非 hostNetwork pod 访问 ClusterIP 全断**(2026-10-15 实机: local-path crash → registry-pvc 不 Bound → `k8s_registry` 600s 超时, 部署中断); ② `calico-kube-controllers` 缺 `kubecontrollersconfigurations/status`(子资源独立授权) + `apps/daemonsets`\|`deployments` + `apiextensions/customresourcedefinitions` + `apiregistration/apiservices` + 4 个 `crd.projectcalico.org` 策略资源(实机 policy-name-migrator 逐条 403 暴露); ③ cni-plugin/kube-controllers 的 kubevirt 读权限对齐(防 kubevirt 环境同类 403) | kubespray 模板出现 `clusternetworkpolicies` / `virtualmachineinstancemigrations` / `kubecontrollersconfigurations/status` 规则 | 建议提 PR(模板应与所 pin 的 calico 版本自带 RBAC 对齐; 上游 v2.32.0 按旧版 calico 写死) |
+| `16-registry-nodeport-leak-wait.patch` | `roles/kubernetes-apps/registry/tasks/main.yml` | 固定 NodePort(默认 31148)可能被 apiserver 判为"已分配但无 Service 持有"(上次部署/重置遗留的泄漏分配, repair 控制器约 6min 才清理)⇒ apply 报 `provided port is already allocated`、role 中断、PVC 未创建、registry Pod Pending(2026-11-03 实机: 11:59 标记泄漏, 12:05 清理, apply 在 12:02);修复: apply 前 `--dry-run=server` 探测, 仅对 already allocated 等待(默认 60×10s, `registry_nodeport_repair_retries/_delay` 可调) | 上游 registry role 在 apply 前自带 NodePort 泄漏分配等待, 或不再固定 `registry_service_nodeport` | 建议提 PR(固定 NodePort 的幂等重放健壮性; 上游默认 ClusterIP 不受影响) |
+
+| `17-local-volume-provisioner-2.10.0.patch` | `roles/kubespray_defaults/defaults/main/download.yml` | 树内 v2.32.0 仍钉 LVP 2.5.0(Debian 11 + Go 1.17, 18 Critical/151 High); 抬到上游 v2.10.0(Go 1.26.6, 修 CVE-2026-56854/56855/84304), 使钉子与树表继续同值; addon 默认关闭, 仅离线包预载 | `local_volume_provisioner_version` >= 2.10.0 | 不提 PR(本地版本钉; 换树 `--check-retired` 判定) |
 
 ### 已退休(1 处,别再加回来)
 
@@ -41,9 +44,11 @@
 (注意:这不是"上游吸收", 是上游删除了整段逻辑)。教训:目标文件消失时 `--check-retired` 只会报 KEEP
 (反打不上 ≠ 上游未吸收), 退休必须人工确认。
 
-> 本目录 14 个补丁 = 换树时固化的 7 个(spec §2.2 表的第 4、5、7(=原手工项)、8、9、10、11 行;
+> 本目录 16 个补丁 = 换树时固化的 7 个(spec §2.2 表的第 4、5、7(=原手工项)、8、9、10、11 行;
 > **第 6 行(补丁 03)已退休**,见上)+ 换树后实机部署暴露的 3 个(前缀 `09`–`11`,与 spec §2.2 行号无关)
-> + 覆盖安装暴露的 1 个(`13`, 2026-10-15: reset 被 calico 一致性检查拦停)。
+> + 后续实机/覆盖安装暴露的 5 个(`12`–`16`: coredns resolv.conf、reset 跳过 calico 检查、
+> calico 3.32.2 校验表/RBAC、registry 固定 NodePort 泄漏等待)+ CVE 抬版 1 个(`17`:
+> local-volume-provisioner 2.5.0 → 2.10.0)。
 
 ## 不在本目录的 3 处改动(别重复两套)
 
