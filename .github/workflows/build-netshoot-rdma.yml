@@ -88,6 +88,10 @@ jobs:
             || { echo "::error::invalid image tag: '${tag}'"; exit 1; }
           [[ "${tag,,}" != "latest" ]] \
             || { echo "::error::'latest' is not allowed"; exit 1; }
+          case "${tag}" in
+            *-latest) channel=true ;;
+            *) channel="${IS_CHANNEL}" ;;
+          esac
           [[ "${perftest}" =~ ^[0-9A-Za-z._-]+$ ]] \
             || { echo "::error::invalid perftest version: '${perftest}'"; exit 1; }
           if [ -n "${APK_MIRROR_INPUT}" ] && [[ ! "${APK_MIRROR_INPUT}" =~ ^https://[^[:space:]]+$ ]]; then
@@ -96,8 +100,9 @@ jobs:
           fi
           echo "IMAGE_TAG=${tag}" >>"${GITHUB_ENV}"
           echo "PERFTEST_VERSION=${perftest}" >>"${GITHUB_ENV}"
+          echo "IS_CHANNEL=${channel}" >>"${GITHUB_ENV}"
           echo "tag=${tag}" >>"${GITHUB_OUTPUT}"
-          echo "resolved tag=${tag} perftest=${perftest} channel=${IS_CHANNEL}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "resolved tag=${tag} perftest=${perftest} channel=${channel}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Login to Harbor
         if: env.PUSH_INPUT == 'true'
@@ -127,7 +132,7 @@ jobs:
             NETSHOOT_RDMA_BASE_IMAGE="${BASE_IMAGE}" \
             NETSHOOT_RDMA_PERFTEST_VERSION="${PERFTEST_VERSION}" \
             NETSHOOT_RDMA_APK_MIRROR="${APK_MIRROR_INPUT}" \
-            NETSHOOT_RDMA_PUSH="${PUSH_INPUT}"
+            NETSHOOT_RDMA_PUSH="${PUSH_INPUT}" 2>&1 | tee "${RUNNER_TEMP}/netshoot-build.log"
 
       - name: Verify pushed digest
         id: digest
@@ -135,8 +140,15 @@ jobs:
         run: |
           set -euo pipefail
           ref="${IMAGE}:${IMAGE_TAG}"
+          # RepoDigests drops the tag: compare against the repository only.
+          repo="${ref%:*}"
           digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${ref}" \
-            | awk -F@ -v r="${ref}" '$1==r {print $2; exit}')"
+            | awk -F@ -v r="${repo}" '$1==r {print $2; exit}')"
+          if [ -z "${digest}" ]; then
+            # Fallback for engines that do not populate RepoDigests.
+            digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' \
+              "${RUNNER_TEMP}/netshoot-build.log" | tail -1)"
+          fi
           [[ -n "${digest}" ]] || { echo "::error::cannot resolve pushed digest for ${ref}"; exit 1; }
           echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
           {
