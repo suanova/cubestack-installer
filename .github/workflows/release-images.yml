@@ -1,0 +1,205 @@
+name: Release images
+
+# Manual-only GA image build. Channel builds stay in rebuild-cli-image.yml and
+# build-netshoot-rdma.yml; this workflow adds the immutable product-version
+# tags and opens the netshoot base.yaml pin PR.
+#
+# Required configuration:
+#   Vars:    CI_BOT_NAME, HARBOR_MIRROR_REGISTRY (optional)
+#   Secrets: CI_BOT_PASSWORD
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Product version (e.g. 2.1.0)'
+        required: true
+      force_base:
+        description: 'Build the CLI base layer (uncheck to reuse the existing version tag)'
+        type: boolean
+        default: true
+      perftest_version:
+        description: 'perftest version (default: Dockerfile ARG)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-images
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and push release images
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 120
+    env:
+      HARBOR_HOST: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
+      HARBOR_USER: ${{ vars.CI_BOT_NAME }}
+      HARBOR_PASSWORD: ${{ secrets.CI_BOT_PASSWORD }}
+      VERSION: ${{ inputs.version }}
+      FORCE_BASE: ${{ inputs.force_base }}
+      PERFTEST_INPUT: ${{ inputs.perftest_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Validate version
+        run: |
+          set -euo pipefail
+          [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] \
+            || { echo "::error::invalid version: ${VERSION}"; exit 1; }
+          line="$(tr -d '[:space:]' < VERSION_LINE)"
+          [ "${VERSION%.*}" = "${line}" ] \
+            || { echo "::error::version ${VERSION} does not belong to line ${line}"; exit 1; }
+          channel="${line}-latest"
+          perftest="${PERFTEST_INPUT}"
+          if [ -z "${perftest}" ]; then
+            perftest="$(sed -n 's/^ARG PERFTEST_VERSION=//p' images/netshoot-rdma/Dockerfile | head -1)"
+          fi
+          [[ "${perftest}" =~ ^[0-9A-Za-z._-]+$ ]] \
+            || { echo "::error::invalid perftest version: ${perftest}"; exit 1; }
+          {
+            echo "CHANNEL=${channel}"
+            echo "PERFTEST_VERSION=${perftest}"
+            echo "CLI_BASE_TAG=${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:${VERSION}"
+            echo "CLI_IMAGE=${HARBOR_HOST}/suanova/cubestack-installer-cli:${VERSION}"
+          } >> "${GITHUB_ENV}"
+          echo "version=${VERSION} line=${line} perftest=${perftest}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Login to Harbor
+        run: |
+          set -euo pipefail
+          [ -n "${HARBOR_USER:-}" ] && [ -n "${HARBOR_PASSWORD:-}" ] \
+            || { echo "::error::vars.CI_BOT_NAME / secrets.CI_BOT_PASSWORD are required"; exit 1; }
+          echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_HOST}" -u "${HARBOR_USER}" --password-stdin
+
+      - name: Check immutable tags
+        run: |
+          set -euo pipefail
+          refs=(
+            "${HARBOR_HOST}/suanova/cubestack-installer-cli:${VERSION}"
+            "${HARBOR_HOST}/suanova/netshoot-rdma:${VERSION}"
+          )
+          if [ "${FORCE_BASE}" = "true" ]; then
+            refs+=("${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:${VERSION}")
+          else
+            docker manifest inspect "${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:${VERSION}" >/dev/null 2>&1 \
+              || { echo "::error::base ${VERSION} does not exist and force_base=false"; exit 1; }
+          fi
+          for ref in "${refs[@]}"; do
+            if docker manifest inspect "${ref}" >/dev/null 2>&1; then
+              echo "::error::immutable tag already exists: ${ref}"
+              exit 1
+            fi
+          done
+
+      - name: Build CLI images
+        run: |
+          set -euo pipefail
+          if [ "${FORCE_BASE}" = "true" ]; then
+            bash deployments/scripts/tools/docker/build-cli-image.sh --base --engine docker
+          else
+            docker pull "${CLI_BASE_TAG}"
+            bash deployments/scripts/tools/docker/build-cli-image.sh --build --engine docker
+          fi
+
+      - name: Push CLI images
+        run: |
+          set -euo pipefail
+          digest_of() {
+            local ref="$1" log="$2" repo digest
+            repo="${ref%:*}"
+            digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${ref}" \
+              | awk -F@ -v r="${repo}" '$1==r {print $2; exit}')"
+            if [ -z "${digest}" ] && [ -f "${log}" ]; then
+              digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' "${log}" | tail -1)"
+            fi
+            printf '%s' "${digest}"
+          }
+          for kind in base cli; do
+            if [ "${kind}" = "base" ]; then ref="${CLI_BASE_TAG}"; else ref="${CLI_IMAGE}"; fi
+            log="${RUNNER_TEMP}/${kind}-push.log"
+            if [ "${kind}" = "base" ] && [ "${FORCE_BASE}" != "true" ]; then
+              # The base version already exists; only refresh the channel tag.
+              digest="$(digest_of "${ref}" "${log}")"
+            else
+              docker push "${ref}" 2>&1 | tee "${log}"
+              digest="$(digest_of "${ref}" "${log}")"
+            fi
+            [ -n "${digest}" ] || { echo "::error::cannot resolve ${ref} digest"; exit 1; }
+            channel_ref="${ref%:*}:${CHANNEL}"
+            docker tag "${ref}" "${channel_ref}"
+            docker push "${channel_ref}"
+            if [ "${kind}" = "base" ]; then echo "CLI_BASE_DIGEST=${digest}" >> "${GITHUB_ENV}";
+            else echo "CLI_DIGEST=${digest}" >> "${GITHUB_ENV}"; fi
+          done
+
+      - name: Build and push netshoot
+        run: |
+          set -euo pipefail
+          image="${HARBOR_HOST}/suanova/netshoot-rdma"
+          log="${RUNNER_TEMP}/netshoot-push.log"
+          make netshoot-rdma \
+            NETSHOOT_RDMA_IMAGE="${image}" \
+            NETSHOOT_RDMA_TAG="${VERSION}" \
+            NETSHOOT_RDMA_PERFTEST_VERSION="${PERFTEST_VERSION}" \
+            NETSHOOT_RDMA_PUSH=1 2>&1 | tee "${log}"
+          ref="${image}:${VERSION}"
+          repo="${ref%:*}"
+          digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${ref}" \
+            | awk -F@ -v r="${repo}" '$1==r {print $2; exit}')"
+          if [ -z "${digest}" ] && [ -f "${log}" ]; then
+            digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' "${log}" | tail -1)"
+          fi
+          [ -n "${digest}" ] || { echo "::error::cannot resolve ${ref} digest"; exit 1; }
+          channel_ref="${image}:${CHANNEL}"
+          docker tag "${ref}" "${channel_ref}"
+          docker push "${channel_ref}"
+          echo "NETSHOOT_DIGEST=${digest}" >> "${GITHUB_ENV}"
+          {
+            echo "### release images ${VERSION}"
+            echo ""
+            echo "- cli-base: \`${CLI_BASE_TAG}\`"
+            echo "- cli-base digest: \`${CLI_BASE_DIGEST}\`"
+            echo "- cli: \`${CLI_IMAGE}\`"
+            echo "- cli digest: \`${CLI_DIGEST}\`"
+            echo "- netshoot: \`${ref}\`"
+            echo "- netshoot digest: \`${digest}\`"
+            echo "- channel: \`${CHANNEL}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open netshoot base.yaml PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 deployments/scripts/tools/online/update-netshoot-pin.py \
+            --root . \
+            --image "${HARBOR_HOST}/suanova/netshoot-rdma" \
+            --tag "${VERSION}" \
+            --digest "${NETSHOOT_DIGEST}"
+          if git diff --quiet -- versions/base.yaml; then
+            echo "base.yaml unchanged"
+            exit 0
+          fi
+          branch="bot/release-images-${VERSION}"
+          git config user.name suanova-bot
+          git config user.email bot@isuanova.com
+          git checkout -b "${branch}"
+          git add versions/base.yaml
+          git commit -s -m "chore(netshoot): pin ${VERSION}"
+          git push -f origin "${branch}"
+          if [ "$(gh pr list --head "${branch}" --json number --jq length)" != "0" ]; then
+            echo "PR already exists for ${branch}"
+          else
+            gh pr create --base "${GITHUB_REF_NAME}" --head "${branch}" \
+              --title "chore(netshoot): pin ${VERSION}" \
+              --body "Release images workflow pinned netshoot ${VERSION} (${NETSHOOT_DIGEST})."
+          fi

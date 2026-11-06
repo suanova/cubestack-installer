@@ -64,6 +64,16 @@ sudo ./deploy-cluster.sh --with-cubestack
 第三方镜像的 Harbor 同步由 `container-image-mirror` 仓库负责；
 本仓库不再维护镜像清单或同步流水线。
 
+## 正式版镜像
+
+`release-images.yml` 是唯一的正式版镜像入口（手动、`environment: release`）：
+
+- 输入 `version`（如 `2.1.0`）；
+- 构建并推送 CLI base、CLI、netshoot 三个产品版本 tag；
+- 同时刷新 `<line>-latest` channel；
+- 自动开一个更新 `versions/base.yaml` netshoot pin 的 PR；
+- CLI 镜像不进 `base.yaml`，release 通过 `--cli-image` 解析 digest。
+
 ## 镜像构建原则
 
 1. **构建输入只来自仓库或网络**：不读取构建机的 `PATH`、`offline-files/`、

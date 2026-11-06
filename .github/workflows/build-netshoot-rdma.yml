@@ -82,7 +82,10 @@ jobs:
             perftest="${PERFTEST_INPUT}"
           else
             tag="${IMAGE_TAG_INPUT}"
-            perftest="${PERFTEST_INPUT:-${tag%-r*}}"
+            perftest="${PERFTEST_INPUT}"
+            if [ -z "${perftest}" ]; then
+              perftest="$(sed -n 's/^ARG PERFTEST_VERSION=//p' images/netshoot-rdma/Dockerfile | head -1)"
+            fi
           fi
           [[ "${tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] \
             || { echo "::error::invalid image tag: '${tag}'"; exit 1; }

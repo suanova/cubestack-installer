@@ -77,17 +77,20 @@ ib_write_bw -d mlx5_0 -a                 # 带宽实测(对端要同步起 ib_wr
 
 - Dockerfile / `VERSION_LINE` / Makefile 变化: 自动构建并推送
   `harbor.isuanova.com/suanova/netshoot-rdma:<VERSION_LINE>-latest`(移动 tag, 仅开发通道)。
-- 手工 `workflow_dispatch`: 输入不可变 `tag`(如 `26.04.17` 或 `26.04.17-r2`),
-  构建 + 自检后推送该 tag; 已存在则拒绝覆盖。
+- 正式版由 `release-images.yml` 统一推送产品版本 tag(如 `2.1.0`)；
+  perftest 版本固定在 Dockerfile 的 `ARG PERFTEST_VERSION` 并写入 label
+  `io.cubestack.netshoot.perftest-version`，不再出现在 tag 里。
+- 手工 `workflow_dispatch` 仍然可用；tag 已存在则拒绝覆盖。
 
 release base pin 和开源在线物化必须使用不可变 tag + digest, 不能用 channel tag。
 
 ### 4.2 本地/联网机构建
 
 ```bash
-make netshoot-rdma NETSHOOT_RDMA_TAG=26.04.17
-make netshoot-rdma NETSHOOT_RDMA_TAG=26.04.17 NETSHOOT_RDMA_PUSH=1
-make netshoot-rdma NETSHOOT_RDMA_TAG=26.04.17-r2 \
+make netshoot-rdma NETSHOOT_RDMA_TAG=2.1.0
+make netshoot-rdma NETSHOOT_RDMA_TAG=2.1.0 NETSHOOT_RDMA_PUSH=1
+make netshoot-rdma NETSHOOT_RDMA_TAG=2.1.1 \
+  NETSHOOT_RDMA_PERFTEST_VERSION=26.04.17 \
   NETSHOOT_RDMA_APK_MIRROR=https://mirrors.aliyun.com/alpine
 ```
 
@@ -121,14 +124,16 @@ Makefile 流程：
 | `error: '_SC_LEVEL1_DCACHE_LINESIZE' undeclared` | 该常量是 glibc 扩展, **musl 没有** | Dockerfile 里 `sed` 替换为常量 64(仅用于缓冲区对齐, 不影响测量) |
 | 下载 perftest 源码 SSL 断流 | 到 GitHub 的 TLS 间歇性失败 | Makefile 3 次重试 |
 
-升级 perftest: 改 `cluster.conf` 的 `NETSHOOT_RDMA_VERSION`(= 镜像 tag = perftest 版本)后重新构建并 push。
+升级 perftest: 改 Dockerfile 的 `ARG PERFTEST_VERSION`（并 bump 产品版本 tag）后重新构建并 push。
 
 > ⚠ **改了镜像内容(加包/打补丁)必须换新 tag** —— 同 tag 重建到不了集群: 模块 35 见 registry
 > 已有同名 tag 会**跳过推送**, 且 pod `imagePullPolicy: IfNotPresent` 会命中节点旧缓存。
-> 约定 `<perftest 版本>-r<N>`(如 `26.04.17-r2`):
+> 约定：镜像 tag 使用产品版本（如 `2.1.0` / `2.1.1`），内容变化就 bump tag；
+> perftest 版本只记录在 Dockerfile ARG/label 里。
 > ```bash
-> make netshoot-rdma NETSHOOT_RDMA_TAG=26.04.17-r2 NETSHOOT_RDMA_PUSH=1
-> # 再把 cluster.conf 的 NETSHOOT_RDMA_VERSION 改成 26.04.17-r2, 重跑 --steps netshoot
+> make netshoot-rdma NETSHOOT_RDMA_TAG=2.1.1 NETSHOOT_RDMA_PERFTEST_VERSION=26.04.17 \
+>   NETSHOOT_RDMA_PUSH=1
+> # 再把 cluster.conf/版本树的 NETSHOOT_RDMA_VERSION 改成 2.1.1, 重跑 --steps netshoot
 > ```
 
 ## 5. 容器里怎么看 RDMA 设备(设备视图)
