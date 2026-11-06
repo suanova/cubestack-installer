@@ -58,7 +58,7 @@ netshoot-rdma: ## 构建 RDMA 诊断镜像（可选 push）
 	echo "==> container self-check"; \
 	docker run --rm "$$ref" sh -c 'set -e; missing=""; for b in ibv_devices ibv_devinfo ib_write_bw ib_write_lat ib_read_bw tcpdump ip ss ethtool mtr ping nslookup; do command -v "$$b" >/dev/null 2>&1 || missing="$$missing $$b"; done; [ -z "$$missing" ] || { echo "MISSING:$$missing"; exit 1; }'; \
 	if [ "$$push" = "1" ]; then \
-		if docker manifest inspect "$$ref" >/dev/null 2>&1; then \
+		if [ "$${ref##*-}" != "latest" ] && docker manifest inspect "$$ref" >/dev/null 2>&1; then \
 			echo "error: tag already exists, refusing to overwrite: $$ref" >&2; exit 1; \
 		fi; \
 		echo "==> docker push $$ref"; \
