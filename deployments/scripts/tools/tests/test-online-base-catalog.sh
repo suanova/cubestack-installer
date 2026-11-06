@@ -71,7 +71,6 @@ cat > "${TMP}/index.json" <<'EOF'
     {
       "id": "kubernetes/kube-apiserver",
       "name": "kube-apiserver",
-      "scope": "base",
       "source": "registry.k8s.io/kube-apiserver",
       "target": "harbor.isuanova.com/mirrors/registry.k8s.io/kube-apiserver",
       "versions": [
@@ -100,12 +99,12 @@ fi
 grep -q "not in catalog" "${TMP}/err" || fail "resolver: missing-tag error not reported"
 pass "resolver rejects an unknown tag"
 
-sed 's/"scope": "base"/"scope": "platform"/' "${TMP}/index.json" > "${TMP}/bad-scope.json"
-if python3 "${ONLINE}/lib-base-catalog.py" --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/bad-scope.json" >/dev/null 2>"${TMP}/err"; then
-    fail "resolver: non-base scope should fail"
+sed 's#kubernetes/kube-apiserver#kubernetes/does-not-exist#' "${TMP}/index.json" > "${TMP}/bad-id.json"
+if python3 "${ONLINE}/lib-base-catalog.py" --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/bad-id.json" >/dev/null 2>"${TMP}/err"; then
+    fail "resolver: missing catalog id should fail"
 fi
-grep -q "scope must be 'base'" "${TMP}/err" || fail "resolver: scope error not reported"
-pass "resolver rejects a non-base catalog entry"
+grep -q "catalog_id not found" "${TMP}/err" || fail "resolver: missing-id error not reported"
+pass "resolver rejects a missing catalog id"
 
 sed 's/v1.35.8/${NOPE}/' "${TMP}/baseline/versions/base.yaml" > "${TMP}/bad-var.yaml"
 if python3 "${ONLINE}/lib-base-catalog.py" --baseline "${TMP}/bad-var.yaml" --index "${TMP}/index.json" >/dev/null 2>"${TMP}/err"; then

@@ -36,10 +36,10 @@ EOF
 
 cat > "${TMP}/old.json" <<'EOF'
 {"schema": 1, "images": [
-  {"id": "kubernetes/pause", "scope": "base", "source": "registry.k8s.io/pause",
+  {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
    "target": "harbor.isuanova.com/mirrors/registry.k8s.io/pause",
    "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
-  {"id": "kubernetes/other", "scope": "base", "source": "registry.k8s.io/other",
+  {"id": "kubernetes/other", "source": "registry.k8s.io/other",
    "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
    "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"}]}
 ]}
@@ -48,10 +48,10 @@ EOF
 cp "${TMP}/old.json" "${TMP}/same.json"
 cat > "${TMP}/changed.json" <<'EOF'
 {"schema": 1, "images": [
-  {"id": "kubernetes/pause", "scope": "base", "source": "registry.k8s.io/pause",
+  {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
    "target": "harbor.isuanova.com/mirrors/registry.k8s.io/pause",
    "versions": [{"tag": "3.10.1", "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"}]},
-  {"id": "kubernetes/other", "scope": "base", "source": "registry.k8s.io/other",
+  {"id": "kubernetes/other", "source": "registry.k8s.io/other",
    "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
    "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"}]}
 ]}
@@ -63,6 +63,25 @@ out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
 grep -q "unchanged" <<<"${out}" || fail "same index should be unchanged"
 grep -q "commit: aaaaa" "${TMP}/versions/base.yaml" || fail "unchanged should not rewrite pin"
 pass "no referenced base change -> no update"
+
+cat > "${TMP}/added.json" <<'EOF'
+{"schema": 1, "images": [
+  {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
+   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/pause",
+   "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
+  {"id": "kubernetes/other", "source": "registry.k8s.io/other",
+   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
+   "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+                {"tag": "v2", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}]}
+]}
+EOF
+
+out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
+    --commit 1212121212121212121212121212121212121212 \
+    --index "${TMP}/added.json" --old-index "${TMP}/old.json")"
+grep -q "unchanged" <<<"${out}" || fail "unreferenced tag addition should be unchanged"
+grep -q "commit: aaaaa" "${TMP}/versions/base.yaml" || fail "unreferenced tag addition rewrote the pin"
+pass "unreferenced tag addition does not move the pin"
 
 python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
     --commit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
@@ -82,7 +101,7 @@ pass "dry-run leaves the baseline untouched"
 
 cat > "${TMP}/missing.json" <<'EOF'
 {"schema": 1, "images": [
-  {"id": "kubernetes/other", "scope": "base", "source": "registry.k8s.io/other",
+  {"id": "kubernetes/other", "source": "registry.k8s.io/other",
    "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
    "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"}]}
 ]}
