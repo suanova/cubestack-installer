@@ -69,6 +69,8 @@ sudo ./deploy-cluster.sh --with-cubestack
 `release-images.yml` 是唯一的正式版镜像入口（手动、`environment: release`）：
 
 - 输入 `version`（如 `2.1.0`）；
+- `dry_run=true` 时只构建并校验镜像，不登录 Harbor、不 push、不打 tag、不改
+  `versions/base.yaml`；适用于发布前验证构建链路；
 - 构建并推送 CLI base、CLI、netshoot 三个产品版本 tag；
 - 同时刷新 `<line>-latest` channel；
 - 自动开一个更新 `versions/base.yaml` netshoot pin 的 PR；
