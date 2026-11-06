@@ -879,7 +879,7 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
   → 拉取/构建所有源 (镜像/chart/CLI) —— 失败在写 marker 前退出, 发布树仍可用
   → 写 <release>/_REFRESH_PENDING
   → 删除 offline-files/_SUCCESS
-  → 上传 tar → .digest; stale tar 清理; chart; CLI tar
+  → 上传 tar → .digest; stale tar/chart 清理; chart; CLI tar
   → release.env; release.json; SHA256SUMS
   → 远端逐文件 sha256 校验
   → 写 _CLI_IMAGE_DIGEST(并回读校验)
@@ -890,8 +890,10 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
 - **允许忽略并告警**：`DEV_LAB_*`、`METAX_*`、`NVIDIA_*`、`RDMA_IMAGE_TAG`、`MULTUS_IMAGE_TAG`、
   `NGINX_TAG`（树内保持旧值；这些组要升级需完整 `release-publish.sh`）；
 - **其他 key 变化**（KUBESPRAY_VERSION/RELEASE_GROUPS/上游版本等）→ 失败；
-- `stale tar 清理`：只扫 selected subdir 的 maxdepth=1，删除不在该 subdir 全量 tsv 行里的旧
-  `*.tar`/`*.tar.gz` 及 `.digest`；`README.md`/`observability/`/`charts/` 保留；`--keep-stale` 关闭；
+- `stale 清理`：只扫 selected subdir 的 maxdepth=1，删除不在该 subdir 全量 tsv 行里的旧
+  `*.tar`/`*.tar.gz` 及 `.digest`；chart 目录只保留 `CUBESTACK_OPERATOR_CHART_VERSION`
+  对应的 `<chart>-<版本>.tgz` + `.digest`，旧版本一并删除；`README.md`/`observability/`
+  保留；`--keep-stale` 关闭；
 - **CLI tar**：在 `<release>/` 下，不进 `SHA256SUMS`；`release.json.cli_tar_sha256/cli_tar_size`
   校验；同 tag 内容变化由 `_CLI_IMAGE_DIGEST` 和 `release.json.cli_image_digest` 发现。
   `--component cli --cli-tar <tar> --cli-image-digest sha256:...` 是 CLI-only 模式：只更新

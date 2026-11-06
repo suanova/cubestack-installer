@@ -18,7 +18,8 @@
 #                              [--dry-run] [--no-verify-remote]
 #
 #   --force   staging 非空时清空重建
-#   --resume  staging 非空时复用(已完成的镜像 tar/边车跳过, 只补齐缺失项; 适合中断续跑)
+#   --resume  staging 非空时复用(已完成的镜像 tar/边车跳过, 只补齐缺失项; 适合中断续跑;
+#             旧版本 operator chart 会在复制时清理, 发布树只保留当前版本)
 #
 # 数据源:
 #   deployments/releases/<版本>/release.env       版本变量(发布树真相)
@@ -35,6 +36,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 IMAGES_DIR="${REPO_ROOT}/deployments/scripts/tools/images"
+# shellcheck source=../../lib-common.sh
+. "${REPO_ROOT}/deployments/scripts/lib-common.sh"
 OFFLINE_DIR=""   # 由 --source-dir 设置(默认仓库 dev offline-files)
 MINIO_CONF="${MINIO_CONF:-${REPO_ROOT}/deployments/config/minio.conf}"
 
@@ -192,8 +195,12 @@ _copy_chart() {
         err "  helm pull ${CUBESTACK_OPERATOR_CHART_REF:-oci://harbor.isuanova.com/suanova-private/cubestack-operator-chart} --version ${CUBESTACK_OPERATOR_CHART_VERSION:-${RELEASE}} -d ${OFFLINE_DIR}/cubestack-operator/charts"
         exit 1
     fi
-    mkdir -p "${STAGE_TREE}/cubestack-operator/charts"
-    cp -a "${src}" "${STAGE_TREE}/cubestack-operator/charts/"
+    local dst="${STAGE_TREE}/cubestack-operator/charts"
+    mkdir -p "${dst}"
+    # --resume 复用 staging 时可能残留旧版本 chart; 发布树只允许当前版本.
+    prune_operator_chart_dir "${dst}" "${CHART_NAME}" "${CHART_TGZ}" >/dev/null \
+        || { err "清理旧版本 chart 失败: ${dst}"; exit 1; }
+    cp -a "${src}" "${dst}/"
     if [ -f "${src}.digest" ]; then
         cp -a "${src}.digest" "${STAGE_TREE}/cubestack-operator/charts/"
     fi
@@ -417,6 +424,11 @@ _verify() {
         || { err "缺少 operator chart: ${STAGE_TREE}/cubestack-operator/charts/${CHART_TGZ}"; exit 1; }
     [ -f "${STAGE_TREE}/cubestack-operator/charts/${CHART_TGZ}.digest" ] \
         || warn "缺少 chart digest 边车: ${CHART_TGZ}.digest(离线可用, 在线比对会失效)"
+    local chart_extras
+    chart_extras="$(operator_chart_dir_extras "${STAGE_TREE}/cubestack-operator/charts" \
+        "${CHART_NAME}" "${CHART_TGZ}")"
+    [ -z "${chart_extras}" ] \
+        || { err "发布树含非当前版本 chart: $(printf '%s' "${chart_extras}" | tr '\n' ' ')(只允许 ${CHART_TGZ})"; exit 1; }
     # chart 内 Chart.yaml 的 version 必须与 release.env 的 CHART_VERSION 一致
     # (release.env 可省略 CHART_VERSION: 默认按发布版本 <RELEASE> 校验/命名)
     local chart_yaml chart_ver _want_chart_ver
