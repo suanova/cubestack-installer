@@ -563,7 +563,7 @@ if [ "${CR_ENABLED}" = "true" ]; then
     fi
     EXTRA_CR_VALUES_ARG=( "${_CR_VALUES[@]}" )
 fi
-# 默认 LWS values(master placement + CPU request 200m; 不设 limits)
+# 默认 LWS values(master placement + CPU request 200m / memory 200Mi; 不设 limits)
 _LWS_CR_VALUES="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator/lws-cr-values.yaml"
 if [ -f "${_LWS_CR_VALUES}" ]; then
     _EXTRA_VALUES+=( -f "${_LWS_CR_VALUES}" )
