@@ -140,8 +140,15 @@ jobs:
         run: |
           set -euo pipefail
           ref="${IMAGE}:${IMAGE_TAG}"
-          digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' \
-            "${RUNNER_TEMP}/netshoot-build.log" | tail -1)"
+          # RepoDigests drops the tag: compare against the repository only.
+          repo="${ref%:*}"
+          digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${ref}" \
+            | awk -F@ -v r="${repo}" '$1==r {print $2; exit}')"
+          if [ -z "${digest}" ]; then
+            # Fallback for engines that do not populate RepoDigests.
+            digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' \
+              "${RUNNER_TEMP}/netshoot-build.log" | tail -1)"
+          fi
           [[ -n "${digest}" ]] || { echo "::error::cannot resolve pushed digest for ${ref}"; exit 1; }
           echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
           {
