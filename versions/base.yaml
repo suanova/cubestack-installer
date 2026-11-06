@@ -9,12 +9,7 @@ mirror:
   repo: suanova/container-image-mirror
   commit: 350051845414c9e6a621aca402c27b74c4d7ef64
   path: index.json
-# Keys marked "kubespray-managed" are pinned by the vendored kubespray tree
-# (download.yml/checksums.yml and the v2.32.0 profile). Upgrade those by moving
-# the tree/profile to a newer kubespray release, not by editing the tag here
-# alone; check-modules asserts that the baseline and the tree agree.
 env:
-  API_LB_NGINX_IMAGE_TAG: 1.30.1-alpine  # kubespray-managed: nginx_image_tag
   CALICO_VERSION: v3.32.2
   CEPHCSI_VERSION: v3.18.1
   CEPH_CSI_OPERATOR_VERSION: v1.1.0
@@ -31,18 +26,13 @@ env:
   DEV_LAB_CUDA_TAG: '26.08'
   DEV_LAB_MACA_TAG: 3.9.0.12-py310-torch2.4
   DNS_NODE_CACHE_VERSION: 1.25.0
-  ETCD_VERSION: v3.6.14  # kubespray-managed: etcd_supported_versions/checksums
   K8S_VERSION: v1.35.8
   KUBESPRAY_VERSION: v2.32.0
-  KUBE_VIP_VERSION: v1.0.3  # kubespray-managed: kube_vip_version
   LOCAL_PATH_VERSION: v0.0.37
-  LOCAL_VOLUME_PROVISIONER_VERSION: 2.5.0  # kubespray-managed: local_volume_provisioner_version
   METALLB_VERSION: v0.13.9
   METAX_DRIVER_VERSION: 3.8.1.6-amd64
   METAX_VERSION: 0.15.3
-  METRICS_SERVER_VERSION: v0.9.0  # kubespray-managed: metrics_server_version
   MULTUS_IMAGE_TAG: v4.2.2-thick
-  NFD_VERSION: 0.19.0  # kubespray-managed: node_feature_discovery_version
   NGINX_TAG: '1.27'
   NVIDIA_GPU_DRIVER_BRANCH: '595'
   NVIDIA_GPU_DRIVER_PRECOMPILED_KERNEL: 5.15.0-186-generic
@@ -53,6 +43,17 @@ env:
   ROOK_VERSION: v1.21.1
   SNAPSHOT_CONTROLLER_VERSION: v8.7.0
   NETSHOOT_RDMA_VERSION: 2.1-latest
+
+  # kubespray-managed: pinned by the vendored kubespray v2.32.0 tree
+  # (download.yml/checksums.yml and the version profile). Upgrade them by moving
+  # the tree/profile to a newer kubespray release, not by editing the tag here;
+  # check-modules asserts that the baseline and the tree agree.
+  API_LB_NGINX_IMAGE_TAG: 1.30.1-alpine
+  ETCD_VERSION: v3.6.14
+  KUBE_VIP_VERSION: v1.0.3
+  LOCAL_VOLUME_PROVISIONER_VERSION: 2.5.0
+  METRICS_SERVER_VERSION: v0.9.0
+  NFD_VERSION: 0.19.0
 # Vendor artifacts that cannot be fetched from a public registry. Each entry is
 # an index item: the open-source flow points users at the vendor portal, and the
 # commercial packaging overlay supplies a local source for the same key.
