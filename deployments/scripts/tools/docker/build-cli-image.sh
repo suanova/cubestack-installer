@@ -4,7 +4,7 @@
 # ------------------------------------------------------------
 # Two layers:
 #   · base = images/installer-cli-base/Dockerfile (system + toolchain + ansible)
-#   · code = images/installer-cli/Dockerfile (FROM base + deployments/skills/versions)
+#   · code = images/installer-cli/Dockerfile (FROM base + deployments/versions)
 #
 # Build inputs are only the repository itself or the network:
 #   · code layer: the repository root is the build context; .dockerignore keeps

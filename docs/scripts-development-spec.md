@@ -257,7 +257,7 @@ operator 模块与 NVIDIA GPU operator 模块均调用它 —— 新模块**应�
 > 完整 DESC/文件/依赖用 `--list-steps --verbose`);
 > `sudo ./deploy-cluster.sh --steps <key>` 可单独执行(--steps 精确模式: 只跑指定的模块 + REQUIRES 依赖, 不带出默认启用的其他 operator)。
 >
-> ⭐ 专项可执行流程见 `skills/cubestack-add-module/SKILL.md`(历史事故警示 + 测试用例)。
+> ⭐ 专项可执行流程见 `.claude/skills/cubestack-add-module/SKILL.md`(历史事故警示 + 测试用例)。
 
 ### 4.1 未实现组件的伪代码占位(推荐)
 
