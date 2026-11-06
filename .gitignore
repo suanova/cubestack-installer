@@ -89,8 +89,6 @@ deployments/kubespray/versions/
 # cubestack-operator chart 已迁移到
 #   offline-files/cubestack-operator/charts/(现有分层规则已忽略 *.tgz, 放行 charts/README.md)。
 # 旧 cubestack-addon 路径不再参与解析; 保留以下 ignore 规则防止本机残留被误提交, 旧文件可手工删除。
-deployments/cubestack-addon/cubestack-operator/*.tgz
-deployments/cubestack-addon/cubestack-operator/*.tgz.digest
 
 # 本地凭据禁词表(check-secrets.sh 用; 严禁入库)
 deployments/config/secret-blocklist.txt

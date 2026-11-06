@@ -7,7 +7,7 @@ description: CubeStack 部署脚本开发规范技能。当需要编写、修改
 
 本技能指导在 **CubeStackInstaller 仓库** 的 `deployments/scripts/` 下编写、修改、新增部署脚本。遵循本规范可保证:**模块化、可插拔、单一配置源、修改一个模块不影响其他模块、无需重写全部脚本**。
 
-> ⭐ **新增部署模块的专项流程技能: `skills/cubestack-add-module/SKILL.md`**(8 步流程 + 历史事故警示 + 测试用例)。本技能 = 通用规范速查,两者配合使用,内容已同步(2026-09-04 架构重构)。
+> ⭐ **新增部署模块的专项流程技能: `.claude/skills/cubestack-add-module/SKILL.md`**(8 步流程 + 历史事故警示 + 测试用例)。本技能 = 通用规范速查,两者配合使用,内容已同步(2026-09-04 架构重构)。
 
 ## 何时使用本技能
 
@@ -116,7 +116,7 @@ load_config
 
 ## 新增模块标准流程(8 步)
 
-> ⭐ **新增部署模块的专项可执行流程见 `skills/cubestack-add-module/SKILL.md`**(含历史事故警示与测试用例),本表为速览。
+> ⭐ **新增部署模块的专项可执行流程见 `.claude/skills/cubestack-add-module/SKILL.md`**(含历史事故警示与测试用例),本表为速览。
 
 1. **建文件**: `modules/<阶段>/NN_category_action.sh`(序号取当前阶段最大 +1; 03_addon 自研组件从 20 起)
 2. **写元数据头**: 按上面模板填写 MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE, 需要依赖顺序时加 `REQUIRES`(引用必须存在、不可成环)
@@ -374,12 +374,12 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
     (含 VM=宿主机物理 IP / 全裸金属=第一个 master IP, load_config + sync-kubespray-config), 不是节点处理判断。
 - 新增脚本解析 NODES 一律用 `node_parse "${line}"`, 不要再用 `IFS=, read -r role hostname ip mac ...`。
 
-## 离线部署容器(Dockerfile-cli)与离线文件
+## 离线部署容器(images/installer-cli/Dockerfile)与离线文件
 
-- **Dockerfile-cli**: 打包 kubespray 源码 + deployments 目录 + 工具链(ansible/helm/skopeo/mc/kubectl/sshpass/virsh),
+- **images/installer-cli/Dockerfile**: 打包 kubespray 源码 + deployments 目录 + 工具链(ansible/helm/skopeo/mc/kubectl/sshpass/virsh),
   **不含离线镜像与 binary**(`.dockerignore` 排除 offline-files(含 virtual-machine)/inventory)。构建运行:
   ```bash
-  docker build -f Dockerfile-cli -t cubestack-cli .
+  sudo ./deployments/scripts/tools/docker/build-cli-image.sh --build
   docker run --rm -it --network host \
     -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
     -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
@@ -603,45 +603,18 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s
   ```
 
-## Harbor 统一镜像源(镜像清单 / 同步 / 备料, 详见 docs/harbor-mirror.md)
+## 镜像来源(2026-11 起)
 
-- **唯一数据源**: `deployments/config/images.manifest`, 格式 `<group> <上游ref> [tar文件名覆盖]`;
-  ref 用 `${VAR}` 引用 **cluster.defaults.conf** 的版本变量(CI 上回退 defaults/example 默认值)
-  ⇒ **升级只改 cluster.conf §3.3 一处**, 全链跟随。
-- **group → 目录**: 默认 `offline-files/<group>/`; 例外 `k8s-base`/`ceph` → `offline-files/kubespray/images/`
-  (节点预加载走 kubespray)。
-- **Harbor 路径规则**(唯一): `mirrors/<上游注册域>/<仓库路径>:<tag>`; 上游就是本 Harbor 时去掉域名前缀
-  (`harbor.isuanova.com/metax/x` → `mirrors/metax/x`)。**保留注册域是有意的** —— 上游 ref 是 Harbor 路径的
-  后缀, 因此 tar 按上游 ref 命名(`<repo>_<tag>.tar`)可与既有模块的通配查找**零改动**兼容。
-- **三个工具**(`tools/images/`):
-  ```bash
-  harbor-sync-images.sh          # 上游 → Harbor(CI/联网机; 自动建项目; 增量比 digest)
-  harbor-save-images.sh          # Harbor → offline-files/<group>/*.tar(联网机)
-  check-image-manifest.sh        # 静态校验; --kubespray 交叉核对; --harbor 漂移报告
-  ```
-- **默认不镜像"上游就是本台 Harbor"的组**(metax-gpu 11 / cubestack-operator 1): 它们本就在本台 Harbor 上,
-  部署模块直接从原项目拉(metax 项目 / suanova-private), 再镜像只多占存储且升级要重跑。
-  判据是**推导**的(注册域 == HARBOR_MIRROR_REGISTRY), 不是硬编码名单; 要副本用 `--include-same-harbor`。
-  ⚠ **取离线 tar 时对这些组要回到原始 ref**:`harbor-save-images.sh` 已内建同源分支
-  (2026-09-30 修, 此前会去拉**根本不存在的** `mirrors/<路径>` 而失败)—— 私有项目(如 suanova-private)
-  需在该工具里配好凭据(`HARBOR_MIRROR_USER/PASSWORD` 即可)。
-- **CI**: `.github/workflows/sync-images-to-harbor.yml`(push 清单 / 手动 / 每周定时);
-  凭据走 GitHub **Secrets**(`HARBOR_MIRROR_USER` / `HARBOR_MIRROR_PASSWORD`, 密码必须放 Secret)。
-  ⚠ 设密钥: `gh secret set NAME`(**省略 `--body`** 才读 stdin); `--body -` 会把字面量 `-` 存进去。
-  ⚠ 凭证自检**别回显密码长度** —— public 仓库的 Actions 日志公开可见。
-- 实测(2026-09-18): 全量同步 43min → 新同步 43 / digest 未变跳过 4 / 失败 0; 47 个镜像零漂移。
-- ⚠ **5 个静默坑**(详见 troubleshooting §四.3): skopeo 默认 auth 文件路径不可读(显式设 `REGISTRY_AUTH_FILE`);
-  `inspect` 用 `--tls-verify` 而 `copy` 用 `--src-tls-verify`(传错被 `2>/dev/null` 吞成"幂等失效");
-  Harbor API repository 名要**双重 URL 编码** `%252F` 且不含项目前缀;
-  `docker-archive:<file>` 末尾**必须带 `:<ref>`** 否则 RepoTags 为空;
-  Harbor **项目**必须预建(仓库才自动建), 建项目需登录。
-- **大镜像 push 加速(dev_lab / model_images)**: 幂等必须比 **config digest**(push 会重压缩层,
-  manifest/layer digest 会变; 老逻辑比 manifest digest 会每轮重推 130G); 另用
-  `--image-parallel-copies`(层并行)、`--dest-precompute-digests`(跳过已有层)、base-first
-  有界跨镜像并行; 配置 `IMAGE_PUSH_*`, 详见 `docs/image-push-optimization.md`。
-  ⚠ skopeo 1.16.1 的 `--dest-compress-level/--dest-compress-format` 对 `docker://` 推送不生效。
-- ⚠ **加镜像时别忘了同步 `tools/offline/trim-offline-files.sh` 的 `PRELOAD_IMAGE_PATTERNS`**
-  (k8s-base 组), 否则备料后被 trim 静默删掉 —— 用 `check-image-manifest.sh --kubespray` 兜底。
+installer **不再维护 `images.manifest`、镜像同步工具或 Harbor 备料脚本**。
+
+- 第三方镜像:`container-image-mirror` 的 `images/*.yaml`(tag + digest + scope)；
+- 公共 base 镜像:`versions/base.yaml` 的 `images[]`(`catalog_id` 或 `source_ref + digest`)；
+- 私有镜像:release 的 `overlays/base-private.yaml`；
+- 离线 tar:由版本树/在线物化生成，不入库；模块用 `find_offline_tar` 消费。
+
+详见 `docs/scripts-development-spec.md` §2.5。升级镜像是一次可评审的
+`container-image-mirror` PR + `versions/base.yaml` PR。
+
 ## 版本目录(离线资产按版本组织,2026-09-30 起)
 
 离线件按 **`offline-files/<组件>/<版本>/`** 组织(版本名 = 上游 tag 全名);kubespray 另有版本档案
@@ -654,7 +627,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   即 `LOCAL_REPO_DIR`)。**禁止**再写字面量 `offline-files/kubespray/<文件>`;
   自派生版本的写法见 `lib-image-manifest.sh` 的 `_kubespray_version()`(不 source lib-common 的脚本用)。
 - **本地临时版本**:打 `LOCAL_ONLY`(上传工具自动跳过;`--prune` 需显式 `--force-full-prune`)。
-- **新增/迁移"按版本选"的组件**四条一起改:① 资产目录 ② 版本开关变量 ③ `images.manifest` 落点
+- **新增/迁移"按版本选"的组件**四条一起改:① 资产目录 ② 版本开关变量 ③ `versions/base.yaml` 镜像条目
   ④ `trim-offline-files.sh` 只清选定版本(`--version`)。
 - **CLI 镜像 = base(工具链 kubectl/helm/skopeo/yq, 取自离线版本目录)+ 代码层(`deployments/`)**;
   运行期钩子(`deployments/scripts/tools/docker/cli-toolchain-from-offline.sh`)只做"缺才补"兜底

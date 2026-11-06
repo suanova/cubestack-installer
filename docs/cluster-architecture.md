@@ -2,7 +2,7 @@
 
 > 记录**当下实际部署**的 Kubernetes 集群、网络架构、各 operator 的设计与部署步骤, 以及历史方案的**限制**(避免将来重蹈覆辙)。
 > 与 `troubleshooting.md`(问题排查)互补; 本文件是"架构为什么是这样"的权威说明。
-> 新增 operator 时, 按 `skills/cubestack-operator-onboarding/SKILL.md` 的标准流程更新脚本与本文件。
+> 新增 operator 时, 按 `.claude/skills/cubestack-operator-onboarding/SKILL.md` 的标准流程更新脚本与本文件。
 
 ---
 
@@ -130,7 +130,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 | **CubeStack Operator** | 平台自研组件的编排者: 一个 `CubeStackCluster` CR 描述整个平台, operator 按组件目录(catalog)渲染 chart 并 apply, 管理健康与卸载 | 独立 helm chart 安装(**本地 vendored 副本**恒用, 在线只用于比对刷新); chart 渲染动态提取镜像 → 推入集群内置 registry → 节点只从那里拉; 滚动 `:latest` 用 digest 注解触发滚动 + `Always` 拉取; CRD 每次预 apply(helm 的 `crds/` 只在不存在时装) | 平台组件统一由 CR 声明式管理(装卸/健康集中一处); 离线可部署(镜像入内置 registry, 部署不访问 Harbor) | `CUBESTACK_OPERATOR_ENABLED=true` / `--steps cubestack_operator` + 见 `docs/cubestack-operator.md` |
 
 > 详细部署/开关见 `cluster.conf` 组件开关段与 `deployments/scripts/modules/`。
-> 后续新增 operator 按 `skills/cubestack-operator-onboarding/SKILL.md` 流程添加并更新本表。
+> 后续新增 operator 按 `.claude/skills/cubestack-operator-onboarding/SKILL.md` 流程添加并更新本表。
 
 ### 5.2 MetaX GPU Operator 架构与原理(沐曦 GPU 识别 / 调度)
 
@@ -219,7 +219,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --enable <组件>          # 只写
 
 ## 7. 新增 operator 的标准流程
 
-新增/替换 operator 必须走 `skills/cubestack-operator-onboarding/SKILL.md`:
+新增/替换 operator 必须走 `.claude/skills/cubestack-operator-onboarding/SKILL.md`:
 1. 按现有模块模型写 `deployments/scripts/modules/<PHASE>/NN_<name>.sh`(元数据头 + TOGGLE);
 2. 配置进 `cluster.conf`, 由 sync 脚本同步;
 3. 写 `verify_<name>.sh` 端到端验证(参考 `21_verify_metallb.sh`);

@@ -34,7 +34,6 @@ on:
       - 'deployments/config/**'
       - 'versions/**'
 
-      - 'skills/**'
       - 'VERSION_LINE'
       - 'images/installer-cli/**'
       - 'images/installer-cli-base/**'
@@ -98,7 +97,7 @@ jobs:
             # A new version line needs a base for the new channel.
             grep -qE '^VERSION_LINE$' <<<"${changed}" && build_base=true
             grep -qE '^images/installer-cli/' <<<"${changed}" && build_cli=true
-            grep -qE '^(deployments/scripts/|deployments/kubespray/|deployments/cubestack-addon/|deployments/config/|versions/|skills/|VERSION_LINE$|\.dockerignore$)' <<<"${changed}" \
+            grep -qE '^(deployments/scripts/|deployments/kubespray/|deployments/cubestack-addon/|deployments/config/|versions/|VERSION_LINE$|\.dockerignore$)' <<<"${changed}" \
               && build_cli=true
             # A base change is useless without rebuilding the code layer on top.
             [ "${build_base}" = "true" ] && build_cli=true

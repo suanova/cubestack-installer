@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------
 # 两层结构(2026-09-30, 用户口径):
 #   ① base 层 = images/installer-cli-base/Dockerfile(系统 + 工具链 + ansible + mc;极少变, 见该文件头)
-#   ② **本文件** = 代码层: `FROM <base>` + 只 copy deployments/skills 代码 + 依赖对齐 + 自检
+#   ② **本文件** = 代码层: `FROM <base>` + 只 copy deployments/versions 代码 + 依赖对齐 + 自检
 #      ⇒ 日常"改了部署脚本要出新镜像"就走这里, 飞快, 且**层数不累积**(每次基于同一个 base,
 #        而不是叠在上一版镜像上 —— 旧做法实测累积到 590 层会撞内核 overlay 挂载上限)。
 #
@@ -13,7 +13,7 @@
 #     sudo ./deployments/scripts/tools/docker/build-cli-image.sh --base      # 仅在系统/工具/依赖变化时重建 base
 # ---------------------------------------------------------------------
 # 镜像内容契约(用户口径): **只含 deployments/ 代码**
-#   · kubespray 源码(deployments/kubespray/kubespray)+ 全部部署脚本 + cubestack-addon + skills
+#   · kubespray 源码(deployments/kubespray/kubespray)+ 全部部署脚本 + cubestack-addon
 #   · 工具链(ansible / mc / kubectl / helm / skopeo / yq)与系统包**全部继承自 base**(不打进本层)
 #   · 运行期钩子 /etc/profile.d/50-cubestack-tools.sh 仍会 COPY(挂载目录里有**别的版本**时可补/覆盖)
 #   · 离线镜像 tar(20G+)不进镜像, 体积可控、无密钥泄漏
@@ -43,9 +43,8 @@ RUN chmod 0644 /etc/profile.d/50-cubestack-tools.sh
 
 # ---------- 拷贝源码(先清空再拷入: base/上层可能含旧源码, 避免已删除的文件残留) ----------
 WORKDIR ${REPO_ROOT}
-RUN rm -rf ${REPO_ROOT}/deployments ${REPO_ROOT}/skills 2>/dev/null || true
+RUN rm -rf ${REPO_ROOT}/deployments 2>/dev/null || true
 COPY deployments ${REPO_ROOT}/deployments
-COPY skills ${REPO_ROOT}/skills
 COPY versions ${REPO_ROOT}/versions
 
 # ⚠ 本层**只放部署代码**(用户口径 2026-09-30): 系统工具/package/ansible 依赖全在 base 层;

@@ -1,7 +1,7 @@
 # CubeStack 部署 Troubleshooting 手册
 
 > **规范(强制)**:每次解决完一个部署/运行问题,**找到真正的 root cause**,按下面的模板把「症状 → 根因 → 解法 → 验证」更新到本文件(新增一个条目),保持按问题类型分组。这样同类问题下次直接命中根因,不用重新排查。
-> 新增条目同时把新知识点/命令沉淀到 `skills/cubestack-deploy-scripts/SKILL.md` 的相应章节。
+> 新增条目同时把新知识点/命令沉淀到 `.claude/skills/cubestack-deploy-scripts/SKILL.md` 的相应章节。
 >
 > **2.1 变更**: installer 不再安装/修复节点 OS 包。历史条目中的 `install-worker-packages.sh`、
 > `reconcile-node-packages.sh`、`fetch-lvm-packages.sh`、`install-packages.yml` 已删除；
