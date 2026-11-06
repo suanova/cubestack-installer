@@ -224,8 +224,9 @@ jobs:
           # "digest: sha256:..."。RepoDigests 作为兼容兜底(部分 Docker 版本)。
           digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' "${push_log}" | tail -1)"
           if [ -z "${digest}" ]; then
+            repo="${IMAGE%:*}"
             digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}" \
-              | awk -F@ -v ref="${IMAGE}" '$1==ref {print $2; exit}')"
+              | awk -F@ -v ref="${repo}" '$1==ref {print $2; exit}')"
           fi
           [ -n "${digest}" ] || { echo "::error::无法解析 ${IMAGE} 的 registry digest"; exit 1; }
           echo "CLI_IMAGE_DIGEST=${digest}" >> "${GITHUB_ENV}"

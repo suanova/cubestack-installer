@@ -63,7 +63,8 @@ netshoot-rdma: ## 构建 RDMA 诊断镜像（可选 push）
 		fi; \
 		echo "==> docker push $$ref"; \
 		docker push "$$ref"; \
-		digest="$$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$$ref" | awk -F@ -v r="$$ref" '$$1==r {print $$2; exit}')"; \
+		repo="$${ref%:*}"; \
+		digest="$$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$$ref" | awk -F@ -v r="$$repo" '$$1==r {print $$2; exit}')"; \
 		[ -n "$$digest" ] && echo "pushed: $$ref@$$digest" || echo "pushed: $$ref"; \
 	fi; \
 	echo "done: $$ref"
