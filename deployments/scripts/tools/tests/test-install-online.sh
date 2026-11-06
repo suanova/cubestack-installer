@@ -104,7 +104,9 @@ out="$(cd "${ROOT}" && env -u CUBESTACK_MIRROR_INDEX -u CUBESTACK_MIRROR_INDEX_U
     bash "${SCRIPTS}/install-online.sh" \
     --offline-root "${TMP}/offline" --no-materialize --dry-run --no-check-os-packages 2>&1)"
 grep -q "mirror index pinned by baseline:" <<<"${out}" || fail "pinned index message missing"
-grep -q "zhujian7/container-image-mirror/1c16e009c25eee53567ba61657ad65386e26b193/index.json" \
+mirror_repo="$(sed -n 's/^  repo: //p' "${ROOT}/versions/base.yaml" | head -1)"
+mirror_commit="$(sed -n 's/^  commit: //p' "${ROOT}/versions/base.yaml" | head -1)"
+grep -q "${mirror_repo}/${mirror_commit}/index.json" \
     "${TMP}/curl.log" || fail "mirror index was not fetched from the baseline pin"
 [ ! -e "${TMP}/offline/mirror" ] || fail "dry-run persisted the mirror index"
 pass "install-online fetches the mirror index at the baseline pin"
