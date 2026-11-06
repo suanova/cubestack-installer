@@ -40,8 +40,8 @@ cuberouter	harbor.isuanova.com_suanova_cuberouter_latest.tar		harbor.isuanova.co
 portal	harbor.isuanova.com_suanova_cubestack-ui_latest.tar		harbor.isuanova.com/suanova/cubestack-ui:latest
 portal	quay.io_oliver006_redis_exporter_v1.97.0.tar	harbor.isuanova.com/mirrors/quay.io/oliver006/redis_exporter:v1.97.0	quay.io/oliver006/redis_exporter:v1.97.0
 portal	quay.io_opstree_redis-operator_v0.26.0.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-operator:v0.26.0	quay.io/opstree/redis-operator:v0.26.0
-portal	quay.io_opstree_redis-sentinel_v7.0.15.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-sentinel:v7.0.15	quay.io/opstree/redis-sentinel:v7.0.15
-portal	quay.io_opstree_redis_v7.0.15.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis:v7.0.15	quay.io/opstree/redis:v7.0.15
+portal	quay.io_opstree_redis-sentinel_v7.4.11.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis-sentinel:v7.4.11	quay.io/opstree/redis-sentinel:v7.4.11
+portal	quay.io_opstree_redis_v7.4.11.tar	harbor.isuanova.com/mirrors/quay.io/opstree/redis:v7.4.11	quay.io/opstree/redis:v7.4.11
 # prometheus-windows-exporter 0.31.8 仅提供 windows/amd64(见 OCI index); 本部署目标为 Linux 节点,
 # 其 DaemonSet 为 0 副本, 镜像不参与 Linux 离线集合。将来若加入 Windows 节点, 需用
 # `skopeo copy --override-os windows --override-arch amd64` 单独保存, 不能套用本清单的 linux/amd64 流程。
