@@ -1,5 +1,8 @@
-# LWS 的 CubeStackCluster CR values(operator chart 全量部署使用)
-# 与同目录 lws-values.yaml 保持同值, 只是多一层 clusterCR.spec.components.lws.values 包装。
+# LWS 的唯一 values 源(CubeStackCluster CR 形态)。
+#   · 全量部署: 25_cubestack_operator.sh 用 helm -f 应用本文件到 operator chart
+#   · 单组件更新: 40_cubestack_lws.sh 按 CUBESTACK_COMPONENT_VALUES_KEY 取出
+#     clusterCR.spec.components.lws.values 后 patch CR
+#   · 本仓不再维护扁平的 lws-values.yaml(官方 helm install 路径不在本项目范围)
 #   · 只调度到 control-plane(master)节点(nodeSelector + tolerations)
 #   · CPU request 200m; 不设置 limits
 #   · memory request 保持上游默认 1Gi

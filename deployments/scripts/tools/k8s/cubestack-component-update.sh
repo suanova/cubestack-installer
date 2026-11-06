@@ -17,6 +17,8 @@
 # 环境变量(都可选):
 #   CUBESTACK_COMPONENT_VERSION       覆盖 CR spec.components.<key>.version
 #   CUBESTACK_COMPONENT_VALUES_FILE   组件 values(YAML/JSON), 合并到 CR spec.components.<key>.values
+#   CUBESTACK_COMPONENT_VALUES_KEY    可选: 从 values 文件按点路径提取子映射后再合并
+#                                     (例如 lws 用 clusterCR.spec.components.lws.values)
 #   CUBESTACK_COMPONENT_PULL_POLICY   第三方组件 image.pullPolicy(默认 Always; 自研组件由 CR global 管)
 #   CUBESTACK_COMPONENT_ENABLED       true/false: 覆盖 CR spec.components.<key>.enabled
 #   CUBESTACK_COMPONENT_BUNDLES       model-bundles 专用: 逗号分隔的 bundle 名列表 → spec.bundles
@@ -145,18 +147,30 @@ _values_json=""
 if [ -n "${CUBESTACK_COMPONENT_VALUES_FILE:-}" ]; then
     [ -f "${CUBESTACK_COMPONENT_VALUES_FILE}" ] \
         || { err "CUBESTACK_COMPONENT_VALUES_FILE 不存在: ${CUBESTACK_COMPONENT_VALUES_FILE}"; exit 1; }
-    _values_json="$(python3 - "${CUBESTACK_COMPONENT_VALUES_FILE}" <<'PY'
+    _values_json="$(python3 - "${CUBESTACK_COMPONENT_VALUES_FILE}" "${CUBESTACK_COMPONENT_VALUES_KEY:-}" <<'PY'
 import json, sys
+path, key = sys.argv[1], sys.argv[2]
 try:
     import yaml
-    with open(sys.argv[1]) as f:
+    with open(path) as f:
         data = yaml.safe_load(f)
 except ImportError:
-    with open(sys.argv[1]) as f:
+    with open(path) as f:
         data = json.load(f)
+if key:
+    cur = data
+    for part in key.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            print(f"values 路径不存在: {key} (缺 {part})", file=sys.stderr)
+            sys.exit(2)
+        cur = cur[part]
+    if not isinstance(cur, dict):
+        print(f"values 路径不是映射: {key}", file=sys.stderr)
+        sys.exit(2)
+    data = cur
 print(json.dumps(data or {}, separators=(",", ":")))
 PY
-)" || { err "解析 values 文件失败(需 PyYAML 或 JSON): ${CUBESTACK_COMPONENT_VALUES_FILE}"; exit 1; }
+)" || { err "解析 values 文件失败(需 PyYAML 或 JSON; 或 CUBESTACK_COMPONENT_VALUES_KEY 路径无效): ${CUBESTACK_COMPONENT_VALUES_FILE}"; exit 1; }
 fi
 _pull_policy="${CUBESTACK_COMPONENT_PULL_POLICY:-}"
 if [ -z "${_pull_policy}" ] && [ "${_third}" = "1" ]; then

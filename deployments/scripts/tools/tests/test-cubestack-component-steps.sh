@@ -73,11 +73,29 @@ chk_contains "rollout restart 不吞 while stdin" 'rollout restart deploy/${_dn}
 chk_contains "RWO 单卷策略守护" 'ensure_rwo_deployments_recreate "${NS}" "cubestack.io/component=${_catalog}"' "${TOOL}"
 chk_contains "enabled 覆盖" "CUBESTACK_COMPONENT_ENABLED" "${TOOL}"
 chk_contains "model-bundles 列表覆盖" "CUBESTACK_COMPONENT_BUNDLES" "${TOOL}"
+chk_contains "values 点路径提取" "CUBESTACK_COMPONENT_VALUES_KEY" "${TOOL}"
+chk_contains "lws 默认使用 CR values" "lws-cr-values.yaml" "${MODDIR}/40_cubestack_lws.sh"
+chk_contains "lws 默认提取 CR values 路径" "CUBESTACK_COMPONENT_VALUES_KEY:=clusterCR.spec.components.lws.values" "${MODDIR}/40_cubestack_lws.sh"
+chk_not_contains "lws 不再引用扁平 values" "lws-values.yaml" "${MODDIR}/40_cubestack_lws.sh"
 # 非注释行不得出现 helm upgrade / 调用 operator 模块
 if grep -vE '^[[:space:]]*#' "${TOOL}" | grep -qE '(^|[[:space:]])helm[[:space:]]+upgrade|25_cubestack_operator\.sh'; then
     echo "  FAIL 工具不得执行 helm upgrade 或调用 25_cubestack_operator.sh"; fail=1
 else
     echo "  ok  工具不执行 helm upgrade / 不调用 operator 模块"
+fi
+
+echo "== ②b values 点路径提取 =="
+cat > "${TMP}/lws-cr.json" <<'EOF'
+{"clusterCR":{"spec":{"components":{"lws":{"values":{"resources":{"requests":{"cpu":"200m","memory":"1Gi"}}}}}}}}
+EOF
+awk '/^[[:space:]]*_values_json="\$\(python3 - /{f=1; next} f && /^PY$/{exit} f' "${TOOL}" > "${TMP}/extract-values.py"
+[ -s "${TMP}/extract-values.py" ] || { echo "  FAIL 未能从工具中提取 values 解析块"; fail=1; }
+_out="$(python3 "${TMP}/extract-values.py" "${TMP}/lws-cr.json" 'clusterCR.spec.components.lws.values' 2>&1)"
+chk "按点路径提取 values" '{"resources":{"requests":{"cpu":"200m","memory":"1Gi"}}}' "${_out}"
+if python3 "${TMP}/extract-values.py" "${TMP}/lws-cr.json" 'clusterCR.spec.missing' >/dev/null 2>&1; then
+    echo "  FAIL 不存在的 values 路径应失败"; fail=1
+else
+    echo "  ok  不存在的 values 路径会失败"
 fi
 
 echo "== ③ 调度计划: --steps lws / --steps cube-pilot =="
