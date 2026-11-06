@@ -220,13 +220,14 @@ jobs:
             docker push "${CLI_IMAGE}"
           fi
           docker push "${IMAGE}" 2>&1 | tee "${push_log}"
-          # registry digest 是 Harbor/MinIO 一致性的锚点; docker push 最后一行含
-          # "digest: sha256:..."。RepoDigests 作为兼容兜底(部分 Docker 版本)。
-          digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' "${push_log}" | tail -1)"
+          # Prefer RepoDigests (structured); fall back to the docker push log
+          # for engines that do not populate it. RepoDigests drops the tag.
+          repo="${IMAGE%:*}"
+          digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}" \
+            | awk -F@ -v ref="${repo}" '$1==ref {print $2; exit}')"
           if [ -z "${digest}" ]; then
-            repo="${IMAGE%:*}"
-            digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}" \
-              | awk -F@ -v ref="${repo}" '$1==ref {print $2; exit}')"
+            # Fallback for engines that do not populate RepoDigests.
+            digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' "${push_log}" | tail -1)"
           fi
           [ -n "${digest}" ] || { echo "::error::无法解析 ${IMAGE} 的 registry digest"; exit 1; }
           echo "CLI_IMAGE_DIGEST=${digest}" >> "${GITHUB_ENV}"
