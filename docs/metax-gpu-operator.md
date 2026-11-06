@@ -49,20 +49,20 @@ containerd 置以下键后, 容器创建时按容器 runAsUser/runAsGroup 对设
 > 来源: [沐曦软件中心](https://metax-tech.com) 登录后 → 下载 → 软件栈 / 镜像。账号与命令以官网最新为准。
 > 全部文件放入 **`deployments/offline-files/metax-gpu/`**(即 `METAX_OFFLINE_DIR`; 已 gitignore, 不入库)。
 
-### 1.1 核心资源包(必下)
+### 1.1 核心镜像 tar(必须)
 
-| 文件 | 来源 | 说明 |
+用 `tools/images/metax-save-images.sh` 在联网机生成, 共 11 个核心组件镜像 tar
+(`gpu-label` / `gpu-device` / `gpu-aware` / `topo-master` / `topo-worker` /
+`operator-controller` / `container-runtime` / `driver-manager` / `gpu-scheduler` /
+`driver-image` / `maca`)。
+
+> run 模式已移除: 不再需要 `metax-gpu-k8s-package.<ver>.tar.gz` /
+> `metax-k8s-images.<ver>.run` / `metax-k8s-driver-image.<ver>.run`。
+
+### 1.2 SDK / 驱动镜像(按需)
+
+| 镜像 | 来源 | 说明 |
 |---|---|---|
-| `metax-gpu-k8s-package.<ver>.tar.gz` | 软件中心 → 云平台工具 → metax-gpu-k8s | 内含 `metax-k8s-images.<ver>.run` + helm charts; **仅 run 模式需要** |
-| `metax-k8s-images.<ver>.run` | 上述包内(或单独) | Makeself 自解压, 内嵌 11 个核心组件镜像的 .xz; **run 模式**用 `ctr load` 加载推送 |
-
-> ⚠ **默认 tar 模式不需要上述两个文件**(直接加载离线 tar 镜像), 但建议备齐以便切换 run 模式。
-
-### 1.2 驱动 / SDK(按需)
-
-| 文件/镜像 | 来源 | 说明 |
-|---|---|---|
-| `metax-k8s-driver-image.<ver>-x86_64.run` | 软件中心 → 驱动 | 内核驱动包(可选; PreferHost 用宿主机驱动则不需要) |
 | `cr.metax-tech.com/public-library/maca:<tag>` | 软件中心 → 镜像 → MXMACA | MXMACA SDK 镜像(需 `docker login cr.metax-tech.com`); GPU 任务必需 |
 | `cr.metax-tech.com/public-cloud-release/driver-image:<ver>` | 软件中心 → 镜像 → Cloud-Tools | 容器化驱动镜像(PreferCloud 才需要) |
 
@@ -86,12 +86,9 @@ sudo ./deployments/scripts/tools/images/metax-save-images.sh
 ```
 deployments/
 ├── cubestack-addon/metax-gpu-operator/metax-operator/   # 修复后的 helm chart(已修 3 处 bug, 直接 helm 安装; 入库)
-├── offline-files/metax-gpu/               # 镜像 tar + 资源包/.run 等大文件(gitignore, 不入库)
-│   ├── <image>_<tag>.tar                  # metax-save-images.sh 生成的 27 个 tar
-│   ├── metax-gpu-k8s-package.<ver>.tar.gz
-│   ├── metax-k8s-images.<ver>.run
-│   ├── metax-k8s-driver-image.<ver>.run
-│   └── metax-operator-<ver>.tgz / metax-gpu-extensions-<ver>.tgz
+├── offline-files/metax-gpu/               # 镜像 tar(gitignore, 不入库)
+│   ├── <image>_<tag>.tar                  # metax-save-images.sh 生成的核心镜像 tar
+│   └── metax-operator-<ver>.tgz           # chart 源(可选; 模块用 cubestack-addon 的 vendored chart)
 └── scripts/
     ├── modules/03_addon/06_gpu_operator.sh       # 部署模块(默认 tar 加载)
     ├── modules/03_addon/23_verify_metax_gpu.sh   # 验证模块(--steps verify 自动纳入)
@@ -111,9 +108,8 @@ deployments/
 GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 总开关, **默认 true**(见 cluster.conf.example:139)→ 全量(--with-cubestack)即部署; 也可 --steps gpu_operator 立即部署
 METAX_VERSION="${METAX_VERSION:-0.15.3}"                 # 版本(决定包名/镜像 tag/Chart)
 METAX_OFFLINE_DIR="${METAX_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/metax-gpu}"
-METAX_PKG_DIR="${METAX_PKG_DIR:-${METAX_OFFLINE_DIR}}"   # 大文件(.run/资源包)所在目录
+METAX_PKG_DIR="${METAX_PKG_DIR:-${METAX_OFFLINE_DIR}}"   # 离线工作目录(chart/work)
 METAX_CHART_DIR="${METAX_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/metax-gpu-operator/metax-operator}"  # 修复版 chart
-METAX_IMAGE_MODE="${METAX_IMAGE_MODE:-tar}"             # tar(默认, 加载离线 tar) | run(.run 内嵌镜像)
 METAX_IMAGE_DIR="${METAX_IMAGE_DIR:-${LOCAL_REPO_DIR}/images}"   # 额外 tar 目录(可配)
 METAX_TAR_PATTERN="${METAX_TAR_PATTERN:-metax}"         # tar 匹配文件名
 METAX_SAVE_PATTERN="${METAX_SAVE_PATTERN:-^harbor\.isuanova\.com/metax/}"  # 保存源仓库
@@ -125,7 +121,7 @@ METAX_CLUSTER_TYPE="${METAX_CLUSTER_TYPE:-k8s}"          # 必须 k8s(防 operat
 METAX_DRIVER_DEPLOY_POLICY="${METAX_DRIVER_DEPLOY_POLICY:-PreferHost}"  # 默认 PreferHost(用节点已装驱动; PreferCloud 会尝试卸载宿主驱动, 卸载失败 CrashLoop)
 METAX_DRIVER_VERSION="${METAX_DRIVER_VERSION:-3.8.1.6-amd64}"   # 需与本地镜像/tar 匹配
 METAX_MACA_IMAGE="${METAX_MACA_IMAGE:-maca:3.8.1.2-ubuntu22.04-amd64}"  # MXMACA SDK 镜像(最新 3.8)
-METAX_IMAGE_COMPONENTS="..."   # 核心组件列表(run 模式 / 列表打印用)
+METAX_IMAGE_COMPONENTS="..."   # 核心组件列表(列表打印用)
 ```
 
 ---
@@ -147,12 +143,11 @@ sudo ./deploy-cluster.sh --with-cubestack   # 全量: 基座 + cluster.conf 中�
    下载 master 的 admin.conf 合并进 `~/.kube/config`(宿主 helm/kubectl 可访问集群)、校验 registry/集群可达。
 2. **确认资源**: 修复版 chart(`METAX_CHART_DIR`) + 镜像加载源。
 3. **加载镜像 → 集群 registry**:
-   - `tar`(默认): 从 `METAX_OFFLINE_DIR` 逐 tar `skopeo docker-archive → registry.cubestack.io:5000/metax/...`;
+   - 从 `METAX_OFFLINE_DIR` 逐 tar `skopeo docker-archive → registry.cubestack.io:5000/metax/...`;
      **只推当前 operator 需要的版本**(maca 只推 `METAX_MACA_IMAGE`、driver 只推 `METAX_DRIVER_VERSION`,
      核心组件只推本机架构的 `METAX_VERSION`; 其他版本如 maca 3.8.0.11/3.8.1.2、driver 3.2.1.12、  <!-- secret-scan: allow(驱动/软件版本号) -->
      operator-bundle/catalog 均跳过);
      核心组件去架构后缀(`0.15.3-amd64 → 0.15.3`), 跳过非本机架构; maca/driver 原样。
-   - `run`: `.run ctr load` + 逐组件 `ctr tag + push --plain-http`(规避 .run 自带 push 的 flag 顺序 bug)。
 4. **清理残留**(CR/CRD/命名空间/default 旧资源/集群级 ClusterRole) → **helm upgrade --install**(修复版 chart)。
 5. **等待就绪 + 验证**:
    - **先逐节点 `mx-smi` 检测 GPU**(`sudo mx-smi | grep "Attached GPUs"`, 检测放在镜像推送前):
@@ -203,9 +198,8 @@ GPU 任务测试(参考沐曦官方文档 §5, 需 maca 镜像就绪): 建 gpu-t
 | operator CrashLoop 探测 OpenShift API | 未设 `cluster.type=k8s` / 无 ClusterOperator CR | chart 修复(openshift.deploy 默认 false) + `--set cluster.type=k8s` |
 | helm 拒绝安装 | 历史 kubectl apply 留下的资源无 Helm 标签 | 模块每次重部署先清理(含集群级 ClusterRole/RoleBinding) |
 | skopeo `docker-daemon:` 报 API 版本过旧 | 此 docker 版本 | 改 `docker save` 成 tar + `skopeo docker-archive` 推送 |
-| `.run push --plain-http` 报错 | 工具把 flag 置于镜像 ref 之后 | 模块用 `.run ctr load` + 自行 `ctr push --plain-http`(flag 在前) |
 | 宿主机 `registry.cubestack.io`/`k8s-api` 连不通 | /etc/hosts 残留旧 IP(192.0.2.37) 或 DNAT 被旧规则遮蔽 | 模块每次部署修正 /etc/hosts 指向正确 IP |
-| 镜像不在 .run 包内(driver/maca) | 需单独推送 | 本地 docker(`docker save`+skopeo) / 离线 tar / 在线, 逐级尝试; 模块已实现 |
+| 镜像不在核心组件 tar 内(driver/maca) | 需单独推送 | 本地 docker(`docker save`+skopeo) / 离线 tar, 逐级尝试; 模块已实现 |
 | master 无 `gpu.installed` 标签 | metax DS 无 control-plane 容忍, 调度不到 master | 部署时 mx-smi 检测到 GPU 的 master 自动移除污点+uncordon(见 §4.5) |
 
 > 更多通用故障见 `docs/troubleshooting.md`。

@@ -1,6 +1,6 @@
 # offline-files/metax-gpu/
 
-沐曦(MetaX)GPU Operator 的**离线镜像 tar** + **GPU 资源包**。
+沐曦(MetaX)GPU Operator 的**离线镜像 tar**。
 
 镜像共 11 个,全部来自本台 Harbor 的 `metax/` 项目(`${METAX_HARBOR}/${METAX_PROJECT}/…`,默认 `harbor.isuanova.com/metax/`):
 
@@ -20,10 +20,9 @@
   sudo ./deployments/scripts/tools/images/metax-load-images.sh    # 部署机侧载入
   ```
 
-- 本目录还放 **GPU 资源包**: `metax-gpu-k8s-package.${METAX_VERSION}.tar.gz`(文件名变量 `METAX_PKG_TGZ`)
-- 谁消费: `modules/03_addon/06_gpu_operator.sh`(`METAX_IMAGE_MODE=tar` 时从本目录取 tar)
+- 谁消费: `modules/03_addon/06_gpu_operator.sh`(从本目录取离线 tar)
 - 与清单的关系: 本组上游就是本台 Harbor,`harbor-sync-images.sh` **默认不把它镜像到 `mirrors/**`**
   (判据是推导的: 注册域 == `HARBOR_MIRROR_REGISTRY`);真需要那份副本用 `--include-same-harbor`
-- 升级: 改 `METAX_VERSION` / `METAX_DRIVER_VERSION` / `METAX_MACA_IMAGE` → 重拉镜像与资源包 → `--steps gpu_operator`
+- 升级: 改 `METAX_VERSION` / `METAX_DRIVER_VERSION` / `METAX_MACA_IMAGE` → 重拉镜像 → `--steps gpu_operator`
 
 > ⚠ 本目录下的 `*.tar` / `*.tar.gz` 已在 `.gitignore` 中忽略(制品不入库); 只有本 README 受版本控制。
