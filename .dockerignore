@@ -28,7 +28,6 @@ deployments/config/.deploy.state
 deployments/config/.deploy.state.lock
 deployments/config/secret-blocklist.txt
 deployments/*@*/
-deployments/cli-context/
 deployments/scripts/.modules-merged.*
 offline-releases/
 
