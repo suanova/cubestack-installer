@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Bump the mirror catalog pin in versions/base.yaml.
 
-Only opens a change when a catalog entry referenced by the baseline changed
-(digest/tag/source/target). Platform-only catalog changes are ignored.
+Only opens a change when a (catalog_id, tag) referenced by the baseline
+changes. Other products or release lines adding versions must not move this
+pin.
 """
 
 from __future__ import annotations
@@ -35,39 +36,69 @@ def load_index(path: Path | None, repo: str, commit: str,
     return fetch_json(repo, commit, index_path)
 
 
-def base_entries(index: dict) -> dict[str, dict]:
+ENV_RE = re.compile(r"\$\{(\w+)\}")
+
+
+def expand(value: str, env: dict[str, str]) -> str:
+    return ENV_RE.sub(lambda m: env.get(m.group(1), m.group(0)), str(value))
+
+
+def catalog_entries(index: dict) -> dict[str, dict]:
     entries = {}
     for entry in index.get("images") or []:
-        if entry.get("scope") != "base":
-            continue
         image_id = str(entry.get("id", "")).strip()
         if image_id:
             entries[image_id] = entry
     return entries
 
 
-def normalized(entry: dict) -> dict:
-    versions = sorted(
-        (str(v.get("tag", "")), str(v.get("digest", "")),
-         tuple(sorted(v.get("platforms") or [])))
-        for v in entry.get("versions") or []
-    )
-    return {
-        "source": entry.get("source"),
-        "target": entry.get("target"),
-        "versions": versions,
-    }
+def version_fingerprint(entry: dict, tag: str) -> tuple | None:
+    for version in entry.get("versions") or []:
+        if str(version.get("tag", "")) == tag:
+            return (
+                str(version.get("digest", "")),
+                tuple(sorted(version.get("platforms") or [])),
+            )
+    return None
 
 
-def changed_ids(old: dict, new: dict, referenced: set[str]) -> list[str]:
-    old_base = base_entries(old)
-    new_base = base_entries(new)
+def referenced_versions(baseline: dict) -> dict[str, set[str]]:
+    env = {str(k): str(v) for k, v in (baseline.get("env") or {}).items()}
+    kubespray = str((baseline.get("kubespray") or {}).get("version", "")).strip()
+    if kubespray:
+        env.setdefault("KUBESPRAY_VERSION", kubespray)
+    referenced: dict[str, set[str]] = {}
+    for image in baseline.get("images") or []:
+        image_id = str(image.get("catalog_id", "")).strip()
+        if not image_id:
+            continue
+        tag = expand(str(image.get("version", "")), env).strip()
+        if not tag:
+            die(f"baseline image {image_id}: empty version")
+        referenced.setdefault(image_id, set()).add(tag)
+    return referenced
+
+
+def changed_ids(old: dict, new: dict,
+                referenced: dict[str, set[str]]) -> list[str]:
+    old_entries = catalog_entries(old)
+    new_entries = catalog_entries(new)
     changed = []
-    for image_id in sorted(referenced):
-        if image_id not in old_base or image_id not in new_base:
+    for image_id, tags in sorted(referenced.items()):
+        if image_id not in old_entries or image_id not in new_entries:
             die(f"catalog id missing from an index: {image_id}")
-        if normalized(old_base[image_id]) != normalized(new_base[image_id]):
-            changed.append(image_id)
+        old_entry = old_entries[image_id]
+        new_entry = new_entries[image_id]
+        for tag in sorted(tags):
+            new_fp = version_fingerprint(new_entry, tag)
+            if new_fp is None:
+                die(f"catalog tag missing from new index: {image_id}:{tag}")
+            old_fp = version_fingerprint(old_entry, tag)
+            old_ref = (old_entry.get("source"), old_entry.get("target"), old_fp)
+            new_ref = (new_entry.get("source"), new_entry.get("target"), new_fp)
+            if old_ref != new_ref:
+                changed.append(image_id)
+                break
     return changed
 
 
@@ -135,14 +166,10 @@ def main() -> int:
 
     old = load_index(args.old_index, old_repo, old_commit, old_path)
     new = load_index(args.index, args.repo, args.commit, args.index_path)
-    referenced = {
-        str(image["catalog_id"])
-        for image in baseline.get("images") or []
-        if image.get("catalog_id")
-    }
+    referenced = referenced_versions(baseline)
     changed = changed_ids(old, new, referenced)
     if not changed:
-        print("unchanged (no referenced base catalog changes)")
+        print("unchanged (no referenced tags changed)")
         return 0
 
     print("changed ids: " + ", ".join(changed))

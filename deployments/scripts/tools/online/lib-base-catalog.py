@@ -110,9 +110,6 @@ def resolve_image(image: dict, catalog: dict[str, dict], env: dict[str, str],
         entry = catalog.get(catalog_id)
         if entry is None:
             fail(f"{where} ({key}): catalog_id not found in index: {catalog_id}")
-        scope = str(entry.get("scope", "")).strip()
-        if scope != "base":
-            fail(f"{where} ({key}): catalog scope must be 'base', got {scope!r}")
         source = str(entry.get("source", "")).strip()
         target = str(entry.get("target", "")).strip()
         if not source or not target:
