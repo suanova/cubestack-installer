@@ -120,7 +120,7 @@ chk "③ 登记 seq 降序判别(multus seq5 先于 registry seq2)" "1" "$(print
   { n++; if ($1=="multus") a=n; if ($1=="k8s_registry") b=n }
   END { print (a>0 && b>0 && a<b) ? 1 : 0 }')"
 chk "③ metallb 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'metallb')"
-chk "③ ceph_csi 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'ceph_csi')"
+chk "③ ceph_csi 有 UNINSTALL → 进拆序" "1" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'ceph_csi')"
 chk "③ 探测降级组(netshoot)在登记组之后" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
   { n++; if ($1=="cubestack_operator") a=n; if ($1=="netshoot") b=n }
   END { print (a>0 && b>0 && b>a) ? 1 : 0 }')"
@@ -456,5 +456,46 @@ chk "⑨c 不存在旧写法 local key=... rel=... mod=...\${rel}" "0" \
 echo "== ⑩ 静态围栏: run_component 不得吞掉 while 的 here-string =="
 chk "⑩a run_component 调用带 </dev/null" "1" \
     "$(grep -cF 'run_component "${_key}" "${_rel}" </dev/null' "${ENGINE}")"
+
+echo "== ⑪ 外部 Ceph: 覆盖前先卸节点 /var/lib/kubelet Ceph/RBD 挂载 =="
+chk "⑪a unmount_node_ceph_mounts 已定义" "1" \
+    "$(grep -cF 'unmount_node_ceph_mounts()' "${ENGINE}")"
+chk "⑪b 仅 external 模式调用(内部由 ceph/reset 兜底)" "1" \
+    "$(grep -cF 'if [ "${CEPH_MODE:-internal}" = "external" ]; then' "${ENGINE}")"
+_n_call="$(grep -cF 'unmount_node_ceph_mounts' "${ENGINE}" || true)"
+chk "⑪c 函数+调用已接线" "1" "$([ "${_n_call:-0}" -ge 2 ] && echo 1 || echo 0)"
+_n_kubelib="$(grep -cF 'findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet' "${ENGINE}" || true)"
+chk "⑪d 只处理 /var/lib/kubelet 下的 CSI 挂载" "1" "$([ "${_n_kubelib:-0}" -ge 1 ] && echo 1 || echo 0)"
+# CodeRabbit: all_node_ips 输出单行空格分隔(带尾随空格), mapfile 只会得到 1 个元素。
+_n_ips="$(libfn 'read -r -a a <<< "$(all_node_ips)"; echo "${#a[@]}"')"
+chk "⑪e all_node_ips 空格分隔被拆成 3 个" "3" "${_n_ips}"
+chk "⑪f 使用 read -a 拆分(不是 mapfile 单行)" "1" \
+    "$(grep -cF 'read -r -a _ips <<< "$(all_node_ips' "${ENGINE}")"
+# CodeRabbit: SSH 登录用户常为 ubuntu, umount 需 root; 必须走 sudo(且 -n 防密码提示挂起)
+chk "⑪g 远程 umount 经 sudo -n 提权" "1" \
+    "$(grep -cF 'timeout 10 sudo -n umount -l' "${ENGINE}")"
+# CodeRabbit: SSH 失败/超时输出为空, 不能误报“无残留”; rc 必须单独判定
+chk "⑪h SSH 失败明确告警(不判无残留)" "1" \
+    "$(grep -cF '无法确认 Ceph/RBD 挂载状态' "${ENGINE}")"
+_n_unknown="$(grep -cF '_scan_unknown' "${ENGINE}" || true)"
+chk "⑪i 扫描 rc 单独判定" "1" "$([ "${_n_unknown:-0}" -ge 1 ] && echo 1 || echo 0)"
+chk "⑪j 未确认/残留时函数返回非 0" "1" \
+    "$(grep -cF '[ "${_scan_unknown}" -eq 0 ] && [ "${_leftover}" -eq 0 ]' "${ENGINE}")"
+# CodeRabbit: ceph_csi uninstall 会删外部接入声明 → 挂载清理必须在组件循环之前
+_ln_um="$(grep -nF 'unmount_node_ceph_mounts' "${ENGINE}" | grep -v '()' | head -1 | cut -d: -f1)"
+_ln_loop="$(grep -nF "while IFS=\$'\\t' read -r _key _src _rel" "${ENGINE}" | head -1 | cut -d: -f1)"
+chk "⑪k 挂载清理在组件卸载循环之前" "1" \
+    "$([ -n "${_ln_um}" ] && [ -n "${_ln_loop}" ] && [ "${_ln_um}" -lt "${_ln_loop}" ] && echo 1 || echo 0)"
+
+echo "== ⑫ ceph_csi: external 模式只删接入声明, 不碰外部 Ceph 数据 =="
+CSI="${REPO_ROOT}/deployments/scripts/modules/03_addon/03_ceph_csi.sh"
+chk "⑫a UNINSTALL 声明" "1" "$(grep -cF '# UNINSTALL: 1' "${CSI}")"
+_n_ext="$(grep -cF 'if [ "${CEPH_MODE:-internal}" = "external" ]; then' "${CSI}" || true)"
+chk "⑫b external 分支" "1" "$([ "${_n_ext:-0}" -ge 1 ] && echo 1 || echo 0)"
+chk "⑫c 删除外部接入声明(CephCluster rook-ceph-external)" "1" \
+    "$(grep -cF 'delete cephcluster rook-ceph-external' "${CSI}")"
+chk "⑫d 删除本模块 StorageClass" "1" "$(grep -cF 'delete storageclass' "${CSI}")"
+chk "⑫e 不调用 ceph-cleanup(外部 Ceph 数据非本安装器资产)" "0" \
+    "$(grep -cF 'ceph-cleanup.sh' "${CSI}" || true)"
 
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }

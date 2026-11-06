@@ -622,13 +622,6 @@ Error response from daemon: client version 1.22 is too old. Minimum supported AP
 docker save <img> -o /tmp/x.tar && skopeo copy docker-archive:/tmp/x.tar docker://registry.cubestack.io:5000/metax/<name>:<tag> --dest-tls-verify=false --dest-no-creds
 ```
 
-#### 3.4 `metax-k8s-images.<ver>.run push` 报 `ctr: image "--plain-http": not found`
-
-**根因** 工具的 ctr 分支把 `--plain-http` 放在镜像 ref **之后**(`push <ref> --plain-http`), 新版 ctr 把 flag 当镜像名。
-
-**解法(根治)** 不用工具自带 push: `.run ctr load` 把内嵌镜像加载进宿主 ctr, 再逐组件
-`ctr -n k8s.io images tag <src> registry.cubestack.io:5000/metax/<comp>:<ver>` + `ctr -n k8s.io images push --plain-http <dst>`(flag 在前)。
-
 #### 3.5 宿主机 curl `registry.cubestack.io:5000` / helm 连 `k8s-api.cubestack.io` 失败(EOF / no route to host)
 
 **根因** 宿主机 /etc/hosts 残留旧 IP(如 `192.0.2.37` = 宿主机自身)或 DNAT 被历史规则遮蔽(两条规则指向 10.244.2.100 与 192.168.100.130, 旧规则先命中)。
@@ -647,9 +640,9 @@ k8s-api.cubestack.io → API_ENTRY_IP(kube-vip 已绑 → VIP; 否则第一个 m
 
 #### 3.6 driver / maca 镜像拉不到(`ErrImagePull: ... not found`)
 
-**根因** `driver-image` 与 `maca` **不在** `metax-k8s-images.<ver>.run` 包内, 需单独推送; 即使 PreferHost 驱动 DS 的 init 容器也要拉 `driver-image`(解包内核模块)。
+**根因** `driver-image` 与 `maca` 不在核心组件 tar 集合内, 需单独推送; 即使 PreferHost 驱动 DS 的 init 容器也要拉 `driver-image`(解包内核模块)。
 
-**解法(根治)** 模块 `push_extra` 按 本地 docker(`docker save`+skopeo) → 离线 tar(METAX_OFFLINE_DIR) → 在线 逐级推送; `METAX_DRIVER_VERSION` 须与本地可用镜像匹配(如 `3.8.1.6-amd64`)。
+**解法(根治)** 模块 `push_extra` 按 本地 docker(`docker save`+skopeo) → 离线 tar(METAX_OFFLINE_DIR) 逐级推送; `METAX_DRIVER_VERSION` 须与本地可用镜像匹配(如 `3.8.1.6-amd64`)。
 
 #### 3.7 master 节点没有 `metax-tech.com/gpu.installed` 标签 / GPU 用不上
 
@@ -1394,8 +1387,10 @@ bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh # ⑨ ser
 已有 Pod 仍 Running, 部署汇总看起来正常, 直到下一次 DNS 组件变更/节点重启才爆发(整集群 DNS 失效)。
 
 **根因:**
-1. `NODE_POOL_ENABLED` / `NODE_POOL_MASTER_CORDON` 默认都是 `true`, `53_node_pool` 在 addon
-   末尾把**所有** master cordon —— 无 worker 时这就是集群里仅有的可调度节点;
+1. (2026-10-27 口径, 已于 2026-11-02 调整) `NODE_POOL_ENABLED` / `NODE_POOL_MASTER_CORDON`
+   当时默认都是 `true`, `53_node_pool` 在 addon 末尾把**所有** master cordon —— 无 worker 时
+   这就是集群里仅有的可调度节点; 当前默认已改为 `NODE_POOL_MASTER_CORDON=false` +
+   `NODE_POOL_MASTER_SCHEDULABLE=true`(master 可调度);
 2. kubespray 模板的 CoreDNS/dns-autoscaler 只容忍
    `node-role.kubernetes.io/control-plane:NoSchedule`, **没有**
    `node.kubernetes.io/unschedulable:NoSchedule`(scheduler `NodeUnschedulable` 插件检查的隐式
@@ -1416,6 +1411,110 @@ bash deployments/scripts/tools/tests/test-node-pool.sh   # ⑧⑨⑩: 跳过 cor
 ```
 边界: "CoreDNS 不带 unschedulable 容忍 → Pending" 机制已在容器 d 验证(见 `docs/node-pool.md`
 关键机制); 本修复由离线回归覆盖, 尚未在真实单节点集群跑全量部署复验。
+
+---
+
+### 14. 【2026-11-03 实机】`Registry | Apply manifests` 报 `nodePort 31148: provided port is already allocated`(apiserver 泄漏分配尚未 repair)
+
+**症状:** 部署在 kubespray `kubernetes-apps/registry` 的 `Registry | Apply manifests` 中断:
+
+```
+The Service "registry" is invalid: spec.ports[0].nodePort: Invalid value: 31148: provided port is already allocated
+```
+
+`PLAY RECAP` failed=1; 随后 registry Pod `Pending`, 事件 `persistentvolumeclaim "registry-pvc" not found`
+(role 在 Apply manifests 处中断, 后面的 PVC 任务没有执行)。但集群里**没有任何 Service 占用 31148**
+(`kubectl get svc -A` 只有 kubernetes/coredns/metrics-server)。
+
+**根因:** kube-apiserver 的 NodePort 分配器在 etcd `/registry/ranges/servicenodeports` 中保留了
+上一次 registry Service 的分配(上次部署/集群重置遗留)。新 apiserver 启动时会把它判定为"泄漏",
+但 repair 控制器按周期清理。实机 master01 apiserver 日志:
+
+```
+11:59:11 repair.go:201 "the node port 31148 may have leaked: flagging for later clean up"
+12:02:13 registry apply → provided port is already allocated
+12:05:11 repair.go:214 "the node port 31148 appears to have leaked: cleaning up"
+```
+
+即 **apply 落在"已标记泄漏、尚未清理"的 ~6 分钟窗口内**。role 中断导致 `registry-pvc` 未创建,
+registry Pod 一直 Pending —— 不是端口真的被别的 Service 占用。
+
+**解法(已落地):** 补丁 `deployments/kubespray/cubestack-patches/16-registry-nodeport-leak-wait.patch`:
+registry apply 前先用 `kubectl apply --dry-run=server` 探测 registry-svc; 仅当错误为
+`already allocated` 时等待 repair 控制器清理(默认 60×10s, 可用
+`registry_nodeport_repair_retries` / `registry_nodeport_repair_delay` 调整), 其他错误(命名空间不存在 /
+API 不可达等)立即放行, 由真正的 apply 给出权威报错。repair 一次清理全部泄漏端口, 因此也会顺带
+恢复 ingress-nginx 等固定 NodePort。
+
+**验证:**
+```bash
+bash deployments/kubespray/cubestack-patch-apply.sh --check   # 16 号补丁在位(rc=0)
+# 现网确认端口无持有者(repair 清理后)
+sudo kubectl get svc -A -o wide
+```
+本次实机 12:05 已由 repair 清理, 端口可正常分配; 完整重跑部署留待用户执行(未在本次修复中重跑)。
+
+**当前失败集群的处理:** 不需要 `--fresh`; `k8s_deploy` 失败未写成功状态, repair 清理后直接重跑
+`deploy-cluster.sh` 即可(补丁会在 kubespray 运行前自动重放)。
+
+**关联修复(预防性):** 同轮排查发现 `05_k8s_registry` 会等 registry Pod Ready, 而 registry RS
+没有 control-plane toleration; 移除污点的 `node_pool` 是模块 53(排在 05 之后)。纯 master / 多 master
+无 worker 集群在 NodePort 修好后仍会卡在 registry 600s 超时。已在 `06_k8s_deploy.sh` kubespray
+成功后、addon 之前提前调用 `node-pool.sh --apply`(临时 `NODE_POOL_MASTER_CORDON=false`, 只去污点;
+cordon/placement 仍由 53 执行)。该预防修复基于静态分析 + 现网节点污点状态, 未做端到端复验。
+
+**`--fresh` 入口预检:** `06_k8s_deploy.sh` 在 kubespray 前调用
+`tools/k8s/nodeport-leak-preflight.sh`(只读 `kubectl apply --dry-run=server`)：端口无 Service
+持有但报 `already allocated` 时等待 repair 清理(默认最多 600s，`NODEPORT_LEAK_WAIT_SECONDS` /
+`NODEPORT_LEAK_WAIT_INTERVAL` 可调)。因此 `--fresh` / 重跑会自己收敛，不需要人工等待；超时也不阻断，
+由 registry role 内的补丁兜底。离线回归：`bash deployments/scripts/tools/tests/test-nodeport-leak-preflight.sh`。
+
+---
+
+### 15. 【2026-11-03 实机】`ceph` 模块 900s 超时 / CephCluster `Progressing`: 旧 local-path registry 数据撑爆根盘 → DiskPressure → mon-c canary Pending
+
+**症状:** `--fresh` 重装走到 `02_ceph` 时，`[7/8] 等待 Ceph 集群就绪` 直到 900s 仍
+`phase=Progressing`；收尾巡检显示:
+
+```
+kube-system/registry-949fn                              Pending
+rook-ceph/rook-ceph-mon-c-canary-7f7cc4cffb-...         Pending
+```
+
+`kubectl get nodes` 中某台 master 带 `node.kubernetes.io/disk-pressure:NoSchedule`；
+`kubectl -n rook-ceph get events` 里 mon-c canary:
+
+```
+1 node(s) had untolerated taint(s), 2 node(s) didn't have free ports ...
+```
+
+**根因:** 节点根盘被**上一套集群**的 local-path registry 数据占满:
+`/opt/local-path-provisioner/pvc-<旧UID>_kube-system_registry-pvc`(实机 master03 上 **65G**，
+根盘 84G/97G=86%)。当前 `kubectl get pv` 为空、唯一的 `registry-pvc` 是 ceph-block(UID 不同)，
+旧目录无 PV/PVC 引用、无挂载/无进程打开 ⇒ 纯孤儿数据。kubelet 因可用空间低于阈值打
+`disk-pressure` 污点；mon-c 需要落在 master03(另外两台 hostNetwork 的 mon 端口已占用)，
+被污点挡住 ⇒ 3 个 mon 起不来 ⇒ CephCluster 永远 Ready 不了 ⇒ ceph 模块 900s 超时。
+
+**解法(已落地):**
+1. **一次性清理**(本次已执行): 删除该孤儿目录后根盘 84G→19G(78G 可用)，kubelet 下个周期清除
+   `disk-pressure` 污点，mon-c 可调度;
+2. **代码修复**: `05_k8s_registry.sh` 的卸载(覆盖安装)分支新增
+   `_cleanup_orphan_registry_localpath`：仅当新 `REGISTRY_STORAGE_CLASS` **不是 local-path**、
+   目录 UID **不被当前任何 PV/PVC 引用**、且**未被挂载**时，逐节点删除
+   `/opt/local-path-provisioner/pvc-*_kube-system_registry-pvc`。因此下次 `--fresh`/覆盖安装
+   会自动清掉旧数据，避免同类 DiskPressure。
+
+**验证:**
+```bash
+# 清理前(实机)
+df -h /                                  # /dev/vda1 84G used / 14G avail
+kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}: {.spec.taints}{"\n"}{end}'
+# 清理后
+df -h /                                  # 19G used / 78G avail
+kubectl get node <master03> -o jsonpath='{.spec.taints}'   # 等 kubelet 清除 disk-pressure
+kubectl -n rook-ceph get pods -l app=rook-ceph-mon -o wide
+```
+清理与磁盘释放已实机验证；`--fresh` 全流程复跑待用户执行(本次仅修到 Ceph 就绪前)。
 
 ---
 
@@ -1748,6 +1847,24 @@ ubuntu@10.6.7.135: Permission denied (publickey,password).
 - `tools/node/setup-passwordless.sh`: 先验证密钥; 密钥不通才尝试密码; 密码被拒 / 网络不通分别给出明确诊断; 任一用户失败则非零退出。`01_k8s_passwordless.sh` 据此**中止部署**(后续模块都依赖免密 SSH), 不再谎报"完成"。
 - `tools/node/reconcile-node-packages.sh`: 前置探测按退出码分类 —— `255` → SSH 认证/网络失败(给密码/公钥指引, **不提示重启**); `2`/`124` → Ceph/RBD 僵尸态(才给重启指引); 其他 → 探测执行失败。
 - `deploy-cluster.sh` 的异常退出钩子先探测 SSH, 不通则跳过 Ceph 消费者恢复(不再在失败日志末尾刷两条 `Permission denied`)。
+- `tools/node/reconcile-node-packages.sh`(2026-11-05, CodeRabbit): 控制器侧 `NODE_PKGS_ALLOW_DSTATE=1`
+  (覆盖安装口径)现在通过 `--allow-dstate` 传给远端安装器, 远端 D 状态门禁跟随同一策略继续;
+  存在 D 状态时**不做**挂载健康探测/自动卸载(挂载可能正被僵尸进程引用), `fuser` 超时仍硬失败。
+- external Ceph 覆盖(2026-11-05 实机): `cluster-teardown.sh` 在删除旧集群资源前, 先卸载各节点
+  `/var/lib/kubelet` 下的 Ceph/RBD CSI 挂载(只 external 模式; 宿主机 `/mnt/cephfs/models` 保留)。
+  否则旧 RBD 卷被删后 `jbd2/rbdX` 进入不可中断 D 状态, 下次 `node_pkgs` 的 `fuser` 必然超时、
+  只能重启节点。另: 所有 `kubectl delete ns` 加 `timeout 30 ... --wait=false`,
+  避免 namespace finalizer 让删除无限等待(2026-11-05 实机卡 9 分钟)。
+- external Ceph **只有 CSI operator**(无集群内 CephCluster)的卸载(2026-11-05): `ceph_csi` 现在
+  有独立 uninstall 分支 —— 只删本模块的 StorageClass + 外部**接入声明**
+  (`CephCluster rook-ceph-external` / `CephConnection` / `ClientProfile`); 外部 Ceph 的
+  pool/filesystem 是外部资产, **绝不删除**。`02_ceph.sh` 的 `--delete-cluster` 已按
+  `spec.external.enable=true` 跳过 external CephCluster, 与 internal 集群的销毁方式区分。
+- external Ceph MON 是 **msgr2-only NodePort**(如 3300)时(2026-11-05 实机): 内核 ceph 客户端
+  默认用 v1 连接, `dmesg` 反复报 `libceph: mon0 ... socket closed (con state V1_BANNER)`,
+  宿主机挂载报 `mount error: no mds (Metadata Server) is up`。`07_cephfs_mount.sh` 现在
+  在 external 模式给挂载选项加 `ms_mode=prefer-secure`(优先 msgr2、回退 v1; 兼容 external
+  v1/v2 与 internal)。
 
 **验证:**
 ```bash
@@ -1788,6 +1905,117 @@ sudo ./deploy-cluster.sh --steps k8s_passwordless   # 修正密码后先单跑�
 bash deployments/scripts/tools/tests/test-cephfs-mount.sh   # ①b 计划不含 cephfs_mount; ②b/②c 不预检/不发 SSH
 # 手工核对计划(Ceph 全关应看不到 ceph/ceph_csi/cephfs_mount):
 CLUSTER_CONF=<ceph-off.conf> ./deployments/scripts/deploy-cluster.sh --list | grep 本次执行模块
+```
+
+---
+
+### 8. 【2026-11-04】换版本取件时 104 GiB 全量重传(本地大部分文件并未变化)；另一种情况是同大小内容变化被静默跳过
+
+**症状:** `fetch-offline-from-minio.sh --release <新版本>` 的预检写着"本次下载约需 2.0 GiB",
+实际却把整个 `offline-files/`(104 GiB / 300 文件)重下一遍(267 MiB/s ≈ 6.5 分钟);
+换回同一版本再跑则很快。反过来, 如果去掉 `--overwrite`, 一个"大小相同但内容被改坏"的本地文件
+又会被 `mc mirror` 静默跳过 —— 两种行为都不能接受。
+
+**根因:**
+1. `lib-offline-fetch.sh` 的 CLEAN 分支用 `mc mirror --overwrite --remove`;
+   mc 的跳过条件是 **本地文件比远端对象更新**(mtime 严格更大)。`--overwrite` 连"相等"档也重传,
+   并且 **mc 不比对内容**(实测: 同大小改 1 字节, plain mirror 直接跳过)。
+2. MinIO 的 `Last-Modified` 由服务端分配、**不可写**: 用 `mc mirror --preserve` 整树复制出来的
+   新版本目录, 所有对象 mtime 都变成复制时间(实测 2.0.0=2026-10-23, 2.0.1 副本=2026-11-04)
+   ⇒ 本地(旧版本下载的)文件永远"更旧" ⇒ 100% 重传。`--preserve` 救不了(只带自定义 metadata)。
+3. 脚本的"本次下载约需"按 `远端总量 − 本地目录大小` 估算(≈2 GiB), 属于增量假设;
+   与 `--overwrite` 的实际行为自相矛盾, 所以提示与结果差 50 倍。
+
+**解法(已落地, 内容寻址增量):**
+- 新增 `deployments/scripts/tools/offline/manifest-plan.py`(纯计算, 可离线单测):
+  以远端 `offline-files/SHA256SUMS` 为**唯一判据**, 产出 `fetch`/`delete` 计划;
+  哈希缓存 `.cubestack-hashes.json` 以 `(size, mtime_ns)` 命中, 未变化的文件不重读。
+- `lib-offline-fetch.sh` 新增 `_manifest_transfer`: 先取 SHA256SUMS → 只 `mc cp` 缺失/哈希不符的文件
+  → 删除清单外多余文件(保留 `.cubestack-*`、CLI tar 与 `SHA256SUMS/_SUCCESS/SIZES`) → 刷新缓存;
+  `SHA256SUMS/_SUCCESS/SIZES` 不在清单内, 必须**显式同取**。
+- 安全兜底: 清单不可用/非法(rc=3)时回退旧的整树 mirror; 下载后仍跑全量 sha256;
+  `--full` 可强制旧行为(排障/强刷)。
+- 版本身份: 校验以**树内 `release.env` 的 `RELEASE_VERSION`** 为准。整树复制出的版本目录
+  (如 MinIO `2.0.1` 里仍是 2.0.0 的元数据, 待 CI 覆盖)不再误报
+  `release=2.0.0 != 2.0.1`, 但会打印醒目告警。
+- ⚠ 配套纪律: **改动清单内任何文件后, 必须同步更新 `SHA256SUMS` 对应行并重绑 `_SUCCESS.sha256sums`**
+  (本次就出现过 `VERSION.profile` 改了内容但清单未更新 → 每次取件都重下该文件、全量校验失败)。
+
+**验证(2026-11-04 实测, `--release 2.0.1 --dest /data/offline-files`):**
+```bash
+# 已是最新: 1.9s / 下载 0 个(旧行为: 6.5min / 104 GiB)
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release 2.0.1 --dest /data/offline-files --yes --no-verify
+# 删 1 个文件 → 只下 1 个, sha 与清单一致; 放 1 个多余文件 → 只删 1 个
+# 全量校验(以树内 release=2.0.0 为准)通过
+./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release 2.0.1 --dest /data/offline-files --verify-only
+bash deployments/scripts/tools/tests/test-offline-incremental-plan.sh         # 计划器回归
+bash deployments/scripts/tools/tests/test-release-mode.sh                     # fetch/校验回归
+```
+
+---
+
+### 9. 【2026-11-05 实机】旧控制面容器没删干净: `kubeadm init` 报 `[ERROR Port-10257]: Port 10257 is in use`(清理阶段误报"3 台成功")
+
+**症状**
+- 覆盖安装跑到 `kubernetes/control-plane : Kubeadm | Initialize first control plane node`,preflight 失败:
+  `[ERROR Port-10257]: Port 10257 is in use`(retry 也失败,因为 retry 的 `--ignore-preflight-errors` 只含 `Port-10250`)。
+- 清理阶段日志却是 `✅ 清理完成: 3 台成功(10250 均已确认让出)`。
+- 现场 `ss -lntp` 显示旧静态 Pod 容器仍在跑:master01 `kube-controller-manager` 占 10257;
+  master02 `kube-scheduler` 占 10259(即使 master01 修好,join 也会因 10259 失败)。
+
+**根因(证据链)**
+1. `node_pkgs` 探测到 `/mnt/cephfs/models` 读不出,自动修复脚本
+   `deployments/scripts/tools/node/reconcile-node-packages.sh` 执行
+   `systemctl stop kubelet containerd` 后 lazy umount;**修复成功路径只 `exit 0`,不重启 containerd**
+   (注释假设“由后续 k8s 覆盖流程接管”)。
+2. 几分钟后 `k8s_deploy` 的旧集群清理执行 `kubeadm reset -f`。此时 containerd 仍是停的,CRI socket 不可达
+   → reset 只能删 `/etc/kubernetes` 等文件,**无法停止/删除旧容器**;输出又被 `2>/dev/null || true` 丢弃。
+3. 旧容器进程挂在独立 shim 上(containerd.service `KillMode=process`),containerd/kubelet 都停了它们也活着,
+   继续占 6443/10257/10259。
+4. 清理脚本的成功判据只复核 **10250**。kubelet 刚被停,10250 必然空 → 把“容器还在跑”误报成“3 台成功”。
+5. kubespray 重启 containerd 后 `kubeadm init` 撞上 10257;旧 apiserver 还会因新 etcd 数据目录为空
+   (revision 从 215351 跳到 97)panic 退出,进一步印证旧控制面容器一直存活。
+
+**解法(2026-11-05 已落地)**
+- `reconcile-node-packages.sh` 的 `_repair`:卸载完成后 `systemctl start containerd`(**不拉 kubelet**,避免旧集群复活),
+  保证后续 `kubeadm reset` 的 CRI 可用。
+- `cubestack-offline.sh` 的 `reset_kubernetes_if_needed`:
+  - reset 前 `systemctl start containerd` 并等待 `/run/containerd/containerd.sock`;
+  - `kubeadm reset -f` 的输出与返回码不再静默丢弃(`[kubeadm-reset]` 前缀打日志);
+  - reset 后 `crictl pods -q | xargs -r crictl rmp -f` + `crictl ps -aq | xargs -r crictl rm -f` 兜底清孤儿容器;
+  - 复核端口从“只有 10250”扩到 **6443/10250/10257/10259**;仍被占时**只对确认的旧 Kubernetes 组件**
+    (经 `/proc/<pid>/exe` 判定为 `kube-apiserver`/`kube-controller-manager`/`kube-scheduler`/`kubelet`)
+    发信号,未确认的监听者绝不 kill —— 打印端口/pid/进程名后走 `PORT_BUSY` 失败路径
+    (契约:不误杀同名 nginx/其它集群;CodeRabbit 2026-11-05);最后复检不空才失败。
+  - 残留探测也识别 6443/10257/10259(处理“只有旧容器、痕迹文件已被删”的节点)。
+
+**验证**
+```bash
+bash deployments/scripts/tools/tests/test-reset-cleanup.sh          # 载荷单参数/引号/语法 + 顺序/兜底/端口判据
+bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh
+bash deployments/scripts/tools/check-modules.sh
+```
+
+**实机验证(2026-11-05 10:08, 三台 master 覆盖重装)**
+- 清理阶段: `✅ 清理完成: 3 台成功(6443/10250/10257/10259 均已确认让出)`;
+- kubespray: `Kubeadm | Initialize first control plane node (1st try) --- 7.63s` 首次成功,
+  `Joining control plane node to the cluster (1st try)` 成功, `PLAY RECAP` 三台 `failed=0`;
+- 集群: 3 节点 `Ready control-plane v1.35.8`;kube-system 的 apiserver/controller-manager/scheduler/
+  calico-node/coredns 全部 Running;10257/10259/6443/10250 均由**新**控制面进程持有。
+- 期间唯一一次踩坑: 清理载荷新增的 `printf '%s\n'`/`sed 's/.../'` 用了单引号, 而远端脚本本身
+  由单引号包裹 → 内层 `bash -c` 被截断报 `syntax error: unexpected end of file`;`bash -n` 无法发现
+  (改写后的命令仍语法合法)。已改用双引号, 并在 `test-reset-cleanup.sh` 增加
+  **“载荷只能有外层一对单引号” + 内层脚本单独 `bash -n`** 两道围栏。
+
+**相关命令**
+```bash
+# 现场确认(三台 master)
+sudo ss -lntp | grep -E ':(6443|10250|10257|10259)\b'
+sudo crictl ps -a | grep -E 'kube-(apiserver|controller-manager|scheduler)'
+# 紧急手工兜底(新版脚本已内置同等动作)
+sudo systemctl start containerd
+sudo crictl pods -q | xargs -r sudo crictl rmp -f
+sudo crictl ps -aq | xargs -r sudo crictl rm -f
 ```
 
 ---
@@ -1846,6 +2074,40 @@ bash deployments/scripts/tools/tests/test-cephfs-mount.sh
 **相关命令**: `kubectl -n rook-ceph logs ds/cephfs-models-mount --tail=50`;
 `findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,SOURCE`;
 `kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph auth get client.cubestack-cephfs-models`.
+
+### 1b. 【2026-11-02 实机】cephfs_mount 随机中断: rollout 报完成但单节点 `NOT_MOUNTED:ext4`(首次挂载竞态)
+
+**症状**
+- Secret/DaemonSet 均成功, 日志打印 `DaemonSet 已滚动完成`;
+- 逐节点校验仅 1 台失败(本次 worker03, 10.193.78.115):
+  `NOT_MOUNTED:ext4: cubestack-k8s-worker03(...)`, 模块退出 1、整个部署中断;
+- 失败后数十秒~数分钟在节点实测挂载完全正常; `dmesg` 时间线:
+  `ceph: loaded (mds proto 32)` → 约 5s 后 `libceph: mon0 ... session established` /
+  `client... fsid ...`(挂载在容器启动后约 5s 才完成)。
+
+**根因(校验竞态, 非节点/凭据/网络问题)**
+1. `04-host-mount-daemonset.yaml` 的 mounter 是**常驻循环**容器, 原先没有 readinessProbe:
+   kubelet 在进程启动瞬间即判 Ready, `kubectl rollout status ds` 在 `mount -t ceph` 完成前
+   就返回"已滚动完成";
+2. `07_cephfs_mount.sh` 的逐节点校验原先**只执行一次、无重试**; 全新节点首次挂载要
+   `modprobe ceph` + 建 mon 会话(约 5s+, 新节点/新集群更明显), 排在后面的节点恰好落在
+   窗口内 → `findmnt` 读到 hostPath 自身的 ext4 → 误报 `NOT_MOUNTED:ext4`。
+
+**解法(已落地)**
+- DaemonSet mounter 增加 `readinessProbe`: 仅当目标路径最上层 `fstype=ceph`
+  (只读挂载还要含 `ro`)才 Ready ⇒ `rollout status` 成功即代表每台节点真实挂载;
+- 逐节点校验改为**有界重试**: `CEPHFS_MOUNT_VERIFY_TIMEOUT`(默认 90s) 内按
+  `CEPHFS_MOUNT_VERIFY_INTERVAL`(默认 5s) 轮询, 只有持续失败才判节点异常;
+- DaemonSet rollout 超时改为可配 `CEPHFS_MOUNT_ROLLOUT_TIMEOUT`(默认 300s), 大集群
+  逐台首次挂载不会被 180s 截断。
+
+**验证**
+```bash
+bash deployments/scripts/tools/tests/test-cephfs-mount.sh   # ⑭ 首次竞态重试后成功; ⑮ 持续失败才报错
+# 现场核对: rollout 完成时各节点应已挂载(而不是等 30 分钟后再看)
+kubectl -n rook-ceph rollout status ds/cephfs-models-mount
+ssh <node> "findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,OPTIONS | tail -1"
+```
 
 ### 2. 【2026-10-19 实机】cubepilot-api 更新后永久 Pending: RWO PVC + RollingUpdate → Multi-Attach
 

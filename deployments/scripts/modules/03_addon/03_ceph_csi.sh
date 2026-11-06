@@ -8,6 +8,7 @@
 # REPEAT: 0
 # TOGGLE: CEPH_CSI_ENABLED
 # REQUIRES: ceph k8s_deploy
+# UNINSTALL: 1
 # 说明:
 #   · 断点续跑: REPEAT:0 → 成功后写状态; --fresh 重装。
 #   · 前置: Ceph 模块(02_ceph)已就绪(rook operator + CephCluster HEALTH_OK; external 模式=operator/csi-operator)。
@@ -43,6 +44,29 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# ---- 卸载(external-aware, 2026-11-05) ----
+# internal(集群自带 CephCluster): 只删本模块创建的 StorageClass; CephBlockPool/CephFilesystem/
+#   CephObjectStore/CephCluster 由 ceph 模块的 ceph-cleanup --delete-cluster 销毁。
+# external(只有 ceph-csi-operator, 无集群内 CephCluster): 删 StorageClass + 外部**接入声明**
+#   (CephCluster rook-ceph-external / CephConnection / ClientProfile);
+#   **绝不删除外部 Ceph 的 pool/filesystem** —— 它们是外部集群资产, 不归本安装器管理。
+if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+    init_remote_kubectl || exit 0
+    CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
+    say "  ceph_csi: 卸载 StorageClass/外部接入(不触碰外部 Ceph 数据)..."
+    for _sc in ceph-block ceph-rbd-ephemeral ceph-rbd-ephemeral-immediate \
+               ceph-rbd-durable cephfs-ephemeral cephfs-durable rook-ceph-bucket; do
+        SSH "timeout 30 ${K} delete storageclass ${_sc} --ignore-not-found --wait=false >/dev/null 2>&1" </dev/null || true
+    done
+    if [ "${CEPH_MODE:-internal}" = "external" ]; then
+        # CephConnection/ClientProfile 是外部接入声明; 删除后外部 Ceph 本体与数据不变。
+        SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete cephcluster rook-ceph-external --ignore-not-found --wait=false >/dev/null 2>&1" </dev/null || true
+        SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete cephconnection ceph-connection --ignore-not-found --wait=false >/dev/null 2>&1" </dev/null || true
+        SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete clientprofile ceph-connection --ignore-not-found --wait=false >/dev/null 2>&1" </dev/null || true
+    fi
+    exit 0
+fi
 
 # ---- 开关 ----
 [ "${CEPH_CSI_ENABLED:-false}" = "true" ] || { say "CEPH_CSI_ENABLED=false, 跳过 Ceph CSI"; exit 0; }

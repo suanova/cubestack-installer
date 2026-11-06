@@ -17,6 +17,8 @@
 #   ⑪ 预清理按 mds_namespace 判 FS: 旧 FS/缺少 mds_namespace → lazy umount; 匹配 → 保留复用
 #   ⑫ external 挂载 env 只覆盖 user、key 来自其它来源 → 拒绝混配(同名/成对仍接受)
 #   ⑬ cordon 节点(Ready,SchedulingDisabled)仍参与逐节点挂载校验
+#   ⑭ 首次挂载竞态: 指定节点前 N 次读到 ext4 → 有界重试后成功
+#   ⑮ 持续失败: 超过重试窗口才判定节点异常(非 0)
 # 隔离: CLUSTER_CONF=临时配置 + PATH 前置假 ssh(纯离线; 无集群/无网络)
 # 用法: bash deployments/scripts/tools/tests/test-cephfs-mount.sh
 # ============================================================
@@ -255,7 +257,18 @@ case "${cmd}" in
         elif [ "${FAKE_CORDONED:-0}" = "1" ]; then echo "node Ready,SchedulingDisabled <none> 1m v1.35.8"
         else echo "node Ready <none> 1m v1.35.8"; fi ;;
     *"CEPH_UNMOUNT_OK"*) echo "CEPH_UNMOUNT_OK" ;;
-    *"echo CEPH_MOUNT_OK"*) echo "CEPH_MOUNT_OK" ;;
+    *"echo CEPH_MOUNT_OK"*)
+        # 2026-11-02: 模拟"首次挂载竞态" —— 指定节点前 N 次校验返回 NOT_MOUNTED,
+        # 之后才返回 CEPH_MOUNT_OK(用于验证模块的有界重试)。
+        if [ -n "${FAKE_MNT_DELAY_HOST:-}" ] && [ "${host#*@}" = "${FAKE_MNT_DELAY_HOST}" ]; then
+            _cf="${FAKE_MNT_DELAY_DIR:?}/${host#*@}.cnt"
+            _n=0; [ -f "${_cf}" ] && _n="$(cat "${_cf}")"
+            _n=$((_n + 1)); printf '%s\n' "${_n}" > "${_cf}"
+            if [ "${_n}" -lt "${FAKE_MNT_DELAY_COUNT:-2}" ]; then
+                echo "NOT_MOUNTED:ext4"; exit 0
+            fi
+        fi
+        echo "CEPH_MOUNT_OK" ;;
     *"-o FSTYPE"*)
         if [ "${FAKE_MNT_STUB:-0}" = "1" ]; then
             h="${host#*@}"
@@ -291,6 +304,13 @@ run_module() {  # run_module <mode> [conf] → 退出码; 输出在 $TMP/run-<mo
         export CLUSTER_CONF="${conf}"
         export FAKE_SSH_LOG="${TMP}/ssh-${mode}.log"
         export FAKE_APPLY_LOG="${TMP}/apply-${mode}.log"
+        # 2026-11-02: 挂载校验有界重试 —— 测试里用短窗口, 避免失败用例拖 90s。
+        export CEPHFS_MOUNT_ROLLOUT_TIMEOUT="${CEPHFS_MOUNT_ROLLOUT_TIMEOUT:-5}"
+        export CEPHFS_MOUNT_VERIFY_TIMEOUT="${CEPHFS_MOUNT_VERIFY_TIMEOUT:-5}"
+        export CEPHFS_MOUNT_VERIFY_INTERVAL="${CEPHFS_MOUNT_VERIFY_INTERVAL:-0}"
+        export FAKE_MNT_DELAY_HOST="${FAKE_MNT_DELAY_HOST:-}"
+        export FAKE_MNT_DELAY_DIR="${FAKE_MNT_DELAY_DIR:-}"
+        export FAKE_MNT_DELAY_COUNT="${FAKE_MNT_DELAY_COUNT:-2}"
         : > "${FAKE_SSH_LOG}"; : > "${FAKE_APPLY_LOG}"
         case "${mode}" in
             uninstall|uninstall-external) CUBESTACK_MODULE_ACTION=uninstall bash "${MODULE}" ;;
@@ -331,6 +351,18 @@ chk_contains "ceph-cleanup 拒绝 external" "外部 Ceph 不是本安装器资�
 [ -f "${MANIFEST}" ] && chk_contains "仅按 fstype 判断是否已挂载" 'findmnt -n -o FSTYPE -T "${TARGET}"' "${MANIFEST}"
 [ -f "${MANIFEST}" ] && chk_contains "挂载栈取最上层" 'findmnt -n -o FSTYPE -T "${TARGET}" 2>/dev/null | tail -1' "${MANIFEST}"
 [ -f "${MANIFEST}" ] && chk_not_contains "不得用 mountpoint 判外部挂载" 'if mountpoint -q "${TARGET}" 2>/dev/null; then' "${MANIFEST}"
+# 2026-11-02 实机竞态: rollout status 曾在 mount -t ceph 完成前返回; mounter 必须有
+# readinessProbe(目标路径真实 fstype=ceph, 只读时含 ro), rollout 完成才代表挂载完成。
+[ -f "${MANIFEST}" ] && chk_contains "mounter readinessProbe" "readinessProbe:" "${MANIFEST}"
+[ -f "${MANIFEST}" ] && chk_contains "readiness 判 fstype=ceph" '[ "${fstype}" = "ceph" ]' "${MANIFEST}"
+[ -f "${MANIFEST}" ] && chk_contains "readiness 校验只读 ro" '*,ro,*)' "${MANIFEST}"
+# 逐节点校验必须有界重试(首次挂载 modprobe + mon 会话约 5s, 单次校验会误报 NOT_MOUNTED)。
+[ -f "${MODULE}" ] && chk_contains "逐节点校验有界重试超时" 'CEPHFS_MOUNT_VERIFY_TIMEOUT' "${MODULE}"
+[ -f "${MODULE}" ] && chk_contains "逐节点校验重试间隔" 'CEPHFS_MOUNT_VERIFY_INTERVAL' "${MODULE}"
+[ -f "${MODULE}" ] && chk_contains "逐节点校验 deadline" '_deadline=' "${MODULE}"
+[ -f "${DEFAULTS}" ] && chk_contains "校验超时默认 90s" 'CEPHFS_MOUNT_VERIFY_TIMEOUT="${CEPHFS_MOUNT_VERIFY_TIMEOUT:-90}"' "${DEFAULTS}"
+[ -f "${DEFAULTS}" ] && chk_contains "校验间隔默认 5s" 'CEPHFS_MOUNT_VERIFY_INTERVAL="${CEPHFS_MOUNT_VERIFY_INTERVAL:-5}"' "${DEFAULTS}"
+[ -f "${DEFAULTS}" ] && chk_contains "rollout 超时可配" 'CEPHFS_MOUNT_ROLLOUT_TIMEOUT="${CEPHFS_MOUNT_ROLLOUT_TIMEOUT:-300}"' "${DEFAULTS}"
 [ -f "${MODULE}" ] && chk_contains "验证也取最上层" "findmnt -n -o FSTYPE -T '\${CEPHFS_MOUNT_PATH}' 2>/dev/null | tail -1" "${MODULE}"
 [ -f "${MODULE}" ] && chk_contains "逐节点 SSH 有硬超时" "timeout 30 ssh" "${MODULE}"
 if [ -f "${MODULE}" ] && grep -qx 'sync' "${MODULE}"; then
@@ -469,6 +501,10 @@ chk_contains "只读标志写入 DaemonSet" 'CEPHFS_READ_ONLY' "${APPLY_RO}"
 chk_contains "只读值为 true" 'value: "true"' "${APPLY_RO}"
 chk_contains "专用 env 覆盖挂载路径" 'path: /mnt/cephfs/ro-env' "${APPLY_RO}"
 chk_contains "只读挂载选项" 'MOUNT_OPTS' "${APPLY_RO}"
+# 2026-11-05 实机: external MON 是 msgr2-only NodePort, 内核默认 v1 → V1_BANNER → no mds
+chk_contains "模板含 ms_mode 占位符" '__MS_MODE__' "${MANIFEST}"
+chk_contains "external 启用 prefer-secure" 'ms_mode=prefer-secure' "${MODULE}"
+chk_contains "模块替换 ms_mode 占位符" 's|__MS_MODE__|' "${MODULE}"
 chk_contains "只读不创建子目录" 'read-only 模式: 不创建子目录' "${APPLY_RO}"
 chk_contains "验证区分只读" 'NOT_READONLY' "${MODULE}"
 chk_contains "只读用 ls 验证" "timeout 10 ls" "${MODULE}"
@@ -547,6 +583,27 @@ rc="$(run_module cordoned)"
 chk "cordoned 退出码" "0" "${rc}"
 chk_contains "cordoned master 挂载 OK" "m1(10.0.0.1) 挂载 OK" "${TMP}/run-cordoned.out"
 chk_not_contains "不误判非 Ready" "非 Ready" "${TMP}/run-cordoned.out"
+
+echo "== ⑭ 首次挂载竞态: worker03 前 2 次读到 ext4, 有界重试后成功 =="
+_DELAY_DIR="${TMP}/delay-mnt"; rm -rf "${_DELAY_DIR}"; mkdir -p "${_DELAY_DIR}"
+rc="$(FAKE_MNT_DELAY_HOST=10.0.0.11 FAKE_MNT_DELAY_DIR="${_DELAY_DIR}" FAKE_MNT_DELAY_COUNT=3 \
+      CEPHFS_MOUNT_VERIFY_TIMEOUT=10 CEPHFS_MOUNT_VERIFY_INTERVAL=0 \
+      run_module delayed-mount)"
+chk "delayed 退出码 0" "0" "${rc}"
+chk_contains "delayed 重试后成功" "挂载 OK(重试 3 次后)" "${TMP}/run-delayed-mount.out"
+chk_contains "delayed 首次失败有提示" "尚未就绪(第 1 次: NOT_MOUNTED:ext4)" "${TMP}/run-delayed-mount.out"
+chk "delayed 目标节点校验 3 次" "3" "$(grep -c 'root@10.0.0.11.*echo CEPH_MOUNT_OK' "${TMP}/ssh-delayed-mount.log")"
+# 未设置延迟的节点仍应第一次成功(不能被全局重试拖慢/误报)
+chk_contains "其他节点一次通过" "m1(10.0.0.1) 挂载 OK" "${TMP}/run-delayed-mount.out"
+
+echo "== ⑮ 首次挂载持续失败: 有界窗口后判定节点异常 =="
+_DELAY_DIR2="${TMP}/delay-fail"; rm -rf "${_DELAY_DIR2}"; mkdir -p "${_DELAY_DIR2}"
+rc="$(FAKE_MNT_DELAY_HOST=10.0.0.11 FAKE_MNT_DELAY_DIR="${_DELAY_DIR2}" FAKE_MNT_DELAY_COUNT=9999 \
+      CEPHFS_MOUNT_VERIFY_TIMEOUT=1 CEPHFS_MOUNT_VERIFY_INTERVAL=1 \
+      run_module delayed-fail)"
+chk "delayed-fail 退出码 1" "1" "${rc}"
+chk_contains "delayed-fail 点名节点持续失败" "w1(10.0.0.11) 持续 1s 校验失败" "${TMP}/run-delayed-fail.out"
+chk_contains "delayed-fail 汇总失败节点" "以下节点未通过 /mnt/cephfs/models 挂载校验" "${TMP}/run-delayed-fail.out"
 
 echo "== ⑦ 零节点验证必须失败(不得假成功) =="
 rc="$(run_module notready)"

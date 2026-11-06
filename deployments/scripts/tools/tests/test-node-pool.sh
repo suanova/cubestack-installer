@@ -91,6 +91,9 @@ case "$cmd" in
         elif [[ "$*" == *".spec.unschedulable"* ]]; then
             if [ "${FAKE_UNSCHED_READ_FAIL:-0}" = "1" ] && [ "${h}" = "w1" ]; then exit 1; fi
             cat "${st}/${h}.unschedulable" 2>/dev/null || true
+        elif [[ "$*" == *".spec.taints"* ]]; then
+            if [ "${FAKE_TAINTS_READ_FAIL:-0}" = "1" ] && [ "${h}" = "m1" ]; then exit 1; fi
+            cat "${st}/${h}.taints" 2>/dev/null || true
         elif [[ "$*" == *".metadata.annotations"* ]]; then
             ann=""; [ -s "${st}/${h}.annotations" ] && ann="$(sed 's/^/"/; s/=/":"/; s/$/"/' "${st}/${h}.annotations" | paste -sd, -)"
             echo "{${ann}}"
@@ -117,6 +120,14 @@ case "$cmd" in
         h="${args[1]:-}"; echo true > "${st}/${h}.unschedulable"; echo "node/${h} cordoned" ;;
     uncordon)
         h="${args[1]:-}"; echo false > "${st}/${h}.unschedulable"; echo "node/${h} uncordoned" ;;
+    taint)
+        h="${args[2]:-}"; f="${st}/${h}.taints"; touch "$f"
+        for spec in "${args[@]:3}"; do
+            # 只实现 key-[=value:effect] 的移除形态(工具实际只用 key-)
+            key="${spec%%[=:]*}"; key="${key%-}"
+            grep -v "^${key}[=:]" "$f" > "${f}.tmp" || true; mv "${f}.tmp" "$f"
+        done
+        echo "node/${h} tainted" ;;
     *) : ;;
 esac
 exit 0
@@ -173,6 +184,7 @@ _run() {   # _run <env...> -- <tool args...>
 }
 _label() { cat "${TMP}/state/$1.labels" 2>/dev/null || true; }
 _unsched() { cat "${TMP}/state/$1.unschedulable" 2>/dev/null || true; }
+_taints() { cat "${TMP}/state/$1.taints" 2>/dev/null || true; }
 _ann() { cat "${TMP}/state/$1.annotations" 2>/dev/null || true; }
 
 echo "== ① apply: master 标签 + cordon + annotation; worker 不动 =="
@@ -393,6 +405,32 @@ chk "⑰ map 形态: 相似 key" "1" "$(_owned_rc 'map[example.cubestack.io/node
 chk "⑰ map 形态: 非首项相似 key" "1" "$(_owned_rc 'map[a:b example.cubestack.io/node-pool-cordoned-by-installer:true]')"
 chk "⑰ JSON 形态: 本工具 key" "0" "$(_owned_rc '{"cubestack.io/node-pool-cordoned-by-installer":"true"}')"
 chk "⑰ JSON 形态: 相似 key" "1" "$(_owned_rc '{"example.cubestack.io/node-pool-cordoned-by-installer":"true"}')"
+
+echo "== ⑱ master 默认可调度: 幂等移除 control-plane/master 污点, 保留其他污点 =="
+_reset
+printf '%s\n' \
+    'node-role.kubernetes.io/control-plane:NoSchedule' \
+    'node-role.kubernetes.io/master:NoSchedule' \
+    'dedicated=foo:NoSchedule' > "${TMP}/state/m1.taints"
+out="$(_run -- --apply)"
+chk "⑱ 退出码 0" "0" "$?"
+chk_not_contains "⑱ m1 已无 control-plane 污点" "control-plane" "$(_taints m1)"
+chk_not_contains "⑱ m1 已无 master 污点" "node-role.kubernetes.io/master" "$(_taints m1)"
+chk_contains "⑱ 保留自定义污点" "dedicated=foo:NoSchedule" "$(_taints m1)"
+chk_contains "⑱ 输出点名移除 control-plane" "已移除 node-role.kubernetes.io/control-plane" "${out}"
+
+echo "== ⑲ check: 残留 master 污点即漂移 =="
+printf '%s\n' 'node-role.kubernetes.io/control-plane:NoSchedule' > "${TMP}/state/m1.taints"
+out="$(_run -- --check)"
+chk "⑲ check 漂移非 0" "1" "$?"
+chk_contains "⑲ 点名污点" "control-plane" "${out}"
+
+echo "== ⑳ NODE_POOL_MASTER_SCHEDULABLE=false: 保留 kubespray 默认污点 =="
+out="$(_run NODE_POOL_MASTER_SCHEDULABLE=false -- --apply)"
+chk "⑳ 退出码 0" "0" "$?"
+chk_contains "⑳ m1 污点保留" "control-plane" "$(_taints m1)"
+out="$(_run NODE_POOL_MASTER_SCHEDULABLE=false -- --check)"
+chk "⑳ check 不把污点当漂移" "0" "$?"
 
 echo ""
 if [ "${fail}" = "0" ]; then
