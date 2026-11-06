@@ -74,6 +74,8 @@ chk_contains "RWO 单卷策略守护" 'ensure_rwo_deployments_recreate "${NS}" "
 chk_contains "enabled 覆盖" "CUBESTACK_COMPONENT_ENABLED" "${TOOL}"
 chk_contains "model-bundles 列表覆盖" "CUBESTACK_COMPONENT_BUNDLES" "${TOOL}"
 chk_contains "values 点路径提取" "CUBESTACK_COMPONENT_VALUES_KEY" "${TOOL}"
+chk_contains "null 值从 merge patch 剔除" "strip_null_keys" "${TOOL}"
+chk_contains "null 值走 JSON Patch" "--type=json" "${TOOL}"
 chk_contains "lws 默认使用 CR values" "lws-cr-values.yaml" "${MODDIR}/40_cubestack_lws.sh"
 chk_contains "lws 默认提取 CR values 路径" "CUBESTACK_COMPONENT_VALUES_KEY:=clusterCR.spec.components.lws.values" "${MODDIR}/40_cubestack_lws.sh"
 chk_not_contains "lws 不再引用扁平 values" "lws-values.yaml" "${MODDIR}/40_cubestack_lws.sh"
@@ -97,6 +99,18 @@ if python3 "${TMP}/extract-values.py" "${TMP}/lws-cr.json" 'clusterCR.spec.missi
 else
     echo "  ok  不存在的 values 路径会失败"
 fi
+
+echo "== ②c values null → JSON Patch =="
+awk '/^_patch_json="\$\(python3 - /{f=1; next} f && /^PY$/{exit} f' "${TOOL}" > "${TMP}/patch-values.py"
+[ -s "${TMP}/patch-values.py" ] || { echo "  FAIL 未能从工具中提取 patch 生成块"; fail=1; }
+_patch_out="$(python3 "${TMP}/patch-values.py" lws "" \
+    '{"resources":{"requests":null},"nodeSelector":{"node-role.kubernetes.io/control-plane":""}}' \
+    "" "" "" 2>&1)"
+chk "merge patch 剔除 null 键" "false" "$(printf '%s' "${_patch_out}" | jq -r '.merge.spec.components.lws.values | has("resources")')"
+chk "merge patch 保留非 null 键" "true" "$(printf '%s' "${_patch_out}" | jq -r '.merge.spec.components.lws.values | has("nodeSelector")')"
+chk "JSON Patch 写入 null" \
+    '{"op":"add","path":"/spec/components/lws/values/resources","value":{"requests":null}}' \
+    "$(printf '%s' "${_patch_out}" | jq -c '.ops[0]')"
 
 echo "== ③ 调度计划: --steps lws / --steps cube-pilot =="
 cat > "${TMP}/cluster.conf" <<'EOF'

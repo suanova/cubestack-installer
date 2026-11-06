@@ -22,7 +22,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-# 默认 LWS values: master placement; 不覆盖 CPU/memory requests(使用上游 chart 默认)。
+# 默认 LWS values: master placement + 显式清空 requests(覆盖上游 chart 默认 1 CPU/1Gi)。
 # 统一使用 CR 形态的 lws-cr-values.yaml(全量部署与单组件更新同源, 不再维护扁平副本)。
 # 可用 CUBESTACK_COMPONENT_VALUES_FILE 覆盖(覆盖后默认不按 KEY 提取, 除非同时显式设置 KEY)。
 if [ -z "${CUBESTACK_COMPONENT_VALUES_FILE:-}" ]; then

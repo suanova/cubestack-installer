@@ -563,7 +563,7 @@ if [ "${CR_ENABLED}" = "true" ]; then
     fi
     EXTRA_CR_VALUES_ARG=( "${_CR_VALUES[@]}" )
 fi
-# 默认 LWS values(master placement; 不覆盖 CPU/memory requests, 使用上游 chart 默认)
+# 默认 LWS values(master placement + 显式清空 requests; 覆盖上游 chart 默认 1 CPU/1Gi)
 _LWS_CR_VALUES="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator/lws-cr-values.yaml"
 if [ -f "${_LWS_CR_VALUES}" ]; then
     _EXTRA_VALUES+=( -f "${_LWS_CR_VALUES}" )

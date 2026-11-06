@@ -19,6 +19,8 @@
 #   CUBESTACK_COMPONENT_VALUES_FILE   组件 values(YAML/JSON), 合并到 CR spec.components.<key>.values
 #   CUBESTACK_COMPONENT_VALUES_KEY    可选: 从 values 文件按点路径提取子映射后再合并
 #                                     (例如 lws 用 clusterCR.spec.components.lws.values)
+#                                     values 中的 null 会通过 JSON Patch 写入(merge patch 会把
+#                                     null 当删除, 导致回落 chart 默认); 含 null 的顶层键整体替换
 #   CUBESTACK_COMPONENT_PULL_POLICY   第三方组件 image.pullPolicy(默认 Always; 自研组件由 CR global 管)
 #   CUBESTACK_COMPONENT_ENABLED       true/false: 覆盖 CR spec.components.<key>.enabled
 #   CUBESTACK_COMPONENT_BUNDLES       model-bundles 专用: 逗号分隔的 bundle 名列表 → spec.bundles
@@ -187,7 +189,35 @@ fi
 _patch_json="$(python3 - "${_cr}" "${_ver}" "${_values_json}" "${_pull_policy}" "${_enabled}" "${_bundles}" <<'PY'
 import json, sys
 cr, ver, vals, pol, enabled, bundles = sys.argv[1:7]
+
+def strip_null_keys(v):
+    """Drop dict keys whose value is None; drop dicts left empty only by nulls."""
+    if isinstance(v, dict):
+        out = {}
+        for k, x in v.items():
+            if x is None:
+                continue
+            y = strip_null_keys(x)
+            if isinstance(x, dict) and x and not y:
+                continue
+            out[k] = y
+        return out
+    return v
+
+def has_null(v):
+    if v is None:
+        return True
+    if isinstance(v, dict):
+        return any(has_null(x) for x in v.values())
+    if isinstance(v, list):
+        return any(has_null(x) for x in v)
+    return False
+
+def ptr(s):
+    return str(s).replace("~", "~0").replace("/", "~1")
+
 comp = {}
+ops = []
 if ver:
     comp["version"] = ver
 if enabled != "":
@@ -198,7 +228,12 @@ if vals:
     except Exception:
         v = {}
     if isinstance(v, dict) and v:
-        comp["values"] = v
+        # merge patch 无法表达 null(会被当作删除), 含 null 的顶层键改用 JSON Patch
+        # 整体 add; 其余键仍走 merge patch。{} 用于确保 values 父路径存在。
+        comp["values"] = strip_null_keys(v)
+        for k, val in v.items():
+            if has_null(val):
+                ops.append({"op": "add", "path": f"/spec/components/{ptr(cr)}/values/{ptr(k)}", "value": val})
 if pol:
     v = comp.setdefault("values", {})
     img = v.get("image")
@@ -209,16 +244,26 @@ if pol:
 out = {"spec": {"components": {cr: comp}}}
 if bundles and cr == "modelBundles":
     out["spec"]["bundles"] = [x.strip() for x in bundles.split(",") if x.strip()]
-print(json.dumps(out, separators=(",", ":")))
+print(json.dumps({"merge": out, "ops": ops}, separators=(",", ":")))
 PY
 )"
-if [ "${_patch_json}" != '{"spec":{"components":{}}}' ] && [ -n "${_ver}${_values_json}${_pull_policy}${_enabled}${_bundles}" ]; then
+_patch_merge="$(printf '%s' "${_patch_json}" | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["merge"],separators=(",",":")))')"
+_patch_ops="$(printf '%s' "${_patch_json}" | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["ops"],separators=(",",":")))')"
+if [ -n "${_ver}${_values_json}${_pull_policy}${_enabled}${_bundles}" ]; then
     say "  patch CR: spec.components.${_cr}(version=${_ver:-<不变>}, enabled=${_enabled:-<不变>}, values=$([ -n "${_values_json}" ] && echo 有 || echo 无), pullPolicy=${_pull_policy:-<不变>}$([ -n "${_bundles}" ] && echo ", bundles=${_bundles}" || true))"
-    printf '%s' "${_patch_json}" | ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+    printf '%s' "${_patch_merge}" | ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
         "${FIRST_MASTER_USER}@${FIRST_MASTER}" \
         "${K} -n ${NS} patch csc ${CR_NAME} --type=merge --patch-file=/dev/stdin" >/dev/null \
         || { err "patch CR 失败(检查 CRD 字段/operator 状态)"; exit 1; }
+    if [ "${_patch_ops}" != "[]" ]; then
+        # merge patch 会把 null 当删除; 含 null 的顶层键用 JSON Patch 显式写回。
+        printf '%s' "${_patch_ops}" | ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+            "${FIRST_MASTER_USER}@${FIRST_MASTER}" \
+            "${K} -n ${NS} patch csc ${CR_NAME} --type=json --patch-file=/dev/stdin" >/dev/null \
+            || { err "patch CR null values 失败(检查 CRD 字段/operator 状态)"; exit 1; }
+    fi
     if [ "${_third}" = "1" ] && [ -n "${_pull_policy}" ]; then
         warn "  已尝试 patch ${_catalog} 的 values.image.pullPolicy=${_pull_policy}; 若该 chart 不使用该路径, 请用 CUBESTACK_COMPONENT_VALUES_FILE 指定正确 values"
     fi
