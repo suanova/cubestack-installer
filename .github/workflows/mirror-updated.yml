@@ -3,6 +3,10 @@ name: Mirror pin update (2.1)
 # Thin receiver on the default branch. GitHub only delivers
 # repository_dispatch to workflows registered here; the real baseline update
 # runs from the 2.1 release branch.
+#
+# TODO(2.1): temporary shim. release-2.1 cannot merge to main yet, and
+# repository_dispatch only reaches workflows on the default branch. Once the
+# 2.1 branch is merged into main, delete this file and keep the normal receiver.
 
 on:
   repository_dispatch:
