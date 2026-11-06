@@ -398,7 +398,15 @@ push_extra() {   # <comp> <源镜像>  (如 maca cr.metax-tech.com/public-librar
     warn "  ${comp} 镜像未就绪(本地 docker / 离线 tar 均无)。请先 docker pull ${src} 或放离线 tar 到 ${METAX_IMAGE_DIR}"
     if [ "${comp}" = "maca" ] ||
        { [ "${comp}" = "driver-image" ] && [ "${METAX_DRIVER_DEPLOY_POLICY}" = "PreferCloud" ]; }; then
-        err "  ${comp} 镜像缺失, 中止安装"; exit 1
+        # 已确认无沐曦 GPU(HAS_GPU_NODE=0 且 mx-smi 状态明确)时, MACA/driver 不参与
+        # no-GPU 快速路径(只等 operator + gpu-label), 缺镜像不应阻塞安装。
+        # 有沐曦 GPU 或 mx-smi 状态未知时保持保守, 仍然硬失败。
+        if [ "${HAS_GPU_NODE}" = "1" ] || [ "${METAX_UNKNOWN}" = "1" ]; then
+            err "  ${comp} 镜像缺失, 中止安装"; exit 1
+        fi
+        warn "  ${comp} 镜像缺失: 已确认当前集群无沐曦 GPU, 继续安装(operator/gpu-label 不依赖该镜像)"
+        warn "  后续新增沐曦 GPU 节点前, 必须先补 ${comp} 镜像(离线 tar 放 ${METAX_OFFLINE_DIR})再重跑 --steps gpu_operator"
+        return 0
     fi
     return 0
 }
