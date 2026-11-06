@@ -116,7 +116,7 @@ API_EXTERNAL_ADDR 非空 ────────────────→ ext
 | 3 | `deployments/scripts/tools/k8s/sync-kubespray-config.sh` | 入口的**唯一写入者**：按模式写/摘 `loadbalancer_apiserver`；写 `loadbalancer_apiserver_localhost` + `_type`；入口地址进 `supplementary_addresses_in_ssl_keys`；`kube_vip_address` 继续写（喂 SAN） | `API_LOCAL_LB_ENABLED=true` ⇒ **必须删掉** `loadbalancer_apiserver` 块，否则假修复 |
 | 4 | `deployments/scripts/modules/02_k8s/10_api_local_lb.sh`（**新**） | `TOGGLE: API_LOCAL_LB_ENABLED`、`DEFAULT: 1`、`REQUIRES: k8s_deploy`。启用态：断言各 worker 静态 Pod + `127.0.0.1:6443` + `kubelet.conf` server，并**收敛节点 `/etc/hosts` 域名行**；关闭态：**清理 `nginx-proxy.yml`**（上游不删）+ 收敛 hosts | `DEFAULT: 1` 与 kube-vip 模块同因：关掉开关时必须有东西去清理 |
 | 5 | `deployments/scripts/modules/02_k8s/11_verify_api_ha.sh`（**新**） | 断言 ①–⑦（**七项**：本地代理容器 / kubelet.conf / hosts 域名行 / Service 端点 / 证书 SAN）+ 黑洞演练（演练步骤见 [05-operations.md](05-operations.md) §6） | 无 TOGGLE，仅 `--steps` 显式触发（同 `08_verify_kube_vip.sh` 的理由） |
-| 6 | `deployments/config/images.manifest`<br>`cluster.conf` 预加载<br>`deployments/offline-files/kubespray/` | 登记 `docker.io/library/nginx:1.30.1-alpine`；`PRELOAD_IMAGE_PATTERNS` 加 `library_nginx`；tar 放 **kubespray 镜像集**（不要放 `offline-files/nginx/`，那里文件名被 `ensure_registry_nginx` 锁死） | 不补 = 静态 Pod `ImagePullBackOff` |
+| 6 | `deployments/config/images.manifest`<br>`cluster.conf` 预加载<br>`deployments/offline-files/kubespray/` | 登记 `docker.io/library/nginx:1.30.1-alpine`；`PRELOAD_IMAGE_PATTERNS` 加 `library_nginx`；tar 放 **kubespray 镜像集**（verify 模块复用同一 tar；`ensure_registry_nginx` 已支持 `*nginx*.tar`，不再维护 `offline-files/nginx/nginx.tar`） | 不补 = 静态 Pod `ImagePullBackOff` |
 | 7 | `deployments/scripts/tools/check-modules.sh` | 新增第 ⑬ 项：开关组合合法性 + `all.yml` 收敛状态断言 | 与既有 ⑪ 并列 |
 | 8 | `deployments/kubespray/cubestack-offline.sh` | `update_loadbalancer_all_yml()` 跟随新模式（不再无条件写 address） | 它是 `all.yml` 的**第二个写入者**，必须同步 |
 | 9 | `deployments/scripts/tools/lb/setup-api-expose.sh` | DNAT 加白名单：入口为 VIP/外部地址时**不得**加 DNAT（当前会误加并劫持到首 master） | 现状 `:85-90` 判据是 `API_IP != FIRST_MASTER`，VIP 会命中等号右边 |
@@ -165,8 +165,9 @@ API_EXTERNAL_ADDR 非空 ────────────────→ ext
 #   GitHub Actions 同步镜像 → Harbor(mirrors 项目) → 离线机从 Harbor 拉 → 存 tar 到 offline-files
 ```
 落位：`deployments/offline-files/kubespray/images/`（kubespray 镜像集），
-**不要放 `offline-files/nginx/`** —— 那里的 `nginx*.tar` 被 `lib-common.sh` 的 `ensure_registry_nginx`
-锁死为 verify 模块的测试后端（`nginx:1.27`，`cluster.conf:671`），混用会破坏既有链路。
+**verify 模块复用同一 tar**：`lib-common.sh` 的 `ensure_registry_nginx` 已支持 `*nginx*.tar`，
+会优先从 `kubespray/<版本>/images/` 找到本 tar；独立的 `offline-files/nginx/nginx.tar` 与
+`NGINX_TAG` 已在 2.0.1 移除。
 
 **验证**：`gunzip -c <tar> | head` 或 `tar -xOf <tar> manifest.json` 确认 ref 与 tag；
 各节点 `sudo ctr -n k8s.io images ls | grep nginx`。

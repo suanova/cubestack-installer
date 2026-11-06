@@ -318,9 +318,8 @@ spec:
 | nginx 版 | `docker.io/library/nginx:1.30.1-alpine` | ✅ **2026-09-28 已补齐**（登记 `images.manifest` + `PRELOAD_IMAGE_PATTERNS` 加 `library_nginx`）。**原缺口**：`PRELOAD_IMAGE_PATTERNS` 不含 nginx；`offline-files/kubespray/images/nginx_1.27.tar` 的 tag 是 `1.27`，**对不上** |
 | haproxy 版 | `docker.io/library/haproxy:3.1.3-alpine` | ❌ 同上，完全缺失 |
 
-`offline-files/nginx/nginx.tar` **不能**直接复用：那是 verify 模块的测试后端镜像
-（`NGINX_TAG=1.27`，`cluster.conf:671`），且文件名被 `lib-common.sh` 的 `ensure_registry_nginx`
-锁死为 `nginx*.tar`（`images.manifest:84`）—— 放错目录或改名都会影响既有链路。
+`offline-files/nginx/nginx.tar` 已在 2.0.1 移除：verify 模块通过 `ensure_registry_nginx`
+（已支持 `*nginx*.tar`）复用本 tar，`NGINX_TAG` 不再需要；放错目录或改名仍会影响既有链路。
 
 **正确做法**：LB 用的 nginx 镜像登记进 `offline-files/kubespray/` 的 kubespray 镜像集，
 并把 `library_nginx` 加进 `PRELOAD_IMAGE_PATTERNS`。不补的后果是**响亮的**
