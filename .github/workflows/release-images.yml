@@ -56,7 +56,8 @@ jobs:
           [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] \
             || { echo "::error::invalid version: ${VERSION}"; exit 1; }
           line="$(tr -d '[:space:]' < VERSION_LINE)"
-          [ "${VERSION%.*}" = "${line}" ] \
+          core="${VERSION%%-*}"
+          [ "${core%.*}" = "${line}" ] \
             || { echo "::error::version ${VERSION} does not belong to line ${line}"; exit 1; }
           channel="${line}-latest"
           perftest="${PERFTEST_INPUT}"
