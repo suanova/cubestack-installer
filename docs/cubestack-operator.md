@@ -369,6 +369,8 @@ sudo ./deploy-cluster.sh --steps lws
 sudo ./deploy-cluster.sh --steps cube-pilot
 
 # 指定版本 / 组件 values / pullPolicy
+# 默认 lws 已读取 lws-cr-values.yaml；这里的 /path/lws-values.yaml 是扁平组件 values，
+# 用户显式覆盖 VALUES_FILE 时不按 VALUES_KEY 提取，除非同时指定 KEY。
 sudo CUBESTACK_COMPONENT_VERSION=0.11.0 \
      CUBESTACK_COMPONENT_VALUES_FILE=/path/lws-values.yaml \
      CUBESTACK_COMPONENT_PULL_POLICY=Always \
@@ -386,6 +388,7 @@ sudo CUBESTACK_COMPONENT_RESTART=0 ./deploy-cluster.sh --steps prometheus
 | `CUBESTACK_COMPONENT_ENABLED` | `true/false`: 覆盖 CR `spec.components.<key>.enabled` |
 | `CUBESTACK_COMPONENT_BUNDLES` | `model-bundles` 专用: 逗号分隔 bundle 名列表 → CR `spec.bundles` |
 | `CUBESTACK_COMPONENT_VALUES_FILE` | 该组件的 values（YAML/JSON 的**组件 values 映射**），merge 到 CR |
+| `CUBESTACK_COMPONENT_VALUES_KEY` | 可选: 从 `VALUES_FILE` 按点路径提取子映射（lws 默认 `clusterCR.spec.components.lws.values`） |
 | `CUBESTACK_COMPONENT_PULL_POLICY` | 第三方组件 `values.image.pullPolicy`（默认 `Always`） |
 | `CUBESTACK_COMPONENT_RESTART` | `1`(默认)=rollout restart 组件 Deployment / `0`=不重启 |
 | `CUBESTACK_OPERATOR_OFFLINE_DIR` | 离线 tar 根目录; chart 在其 `charts/` 下(默认 `offline-files/cubestack-operator`) |

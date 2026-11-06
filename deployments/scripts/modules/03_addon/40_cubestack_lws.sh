@@ -11,6 +11,7 @@
 #     (REPEAT:1 不会被断点状态跳过)。运行时由工具校验 CubeStackCluster CR 已存在。
 #   · 更新逻辑: tools/k8s/cubestack-component-update.sh(只推该组件 tar + patch CR + 滚动该组件 Deployment)。
 #   · 可选环境变量: CUBESTACK_COMPONENT_VERSION / CUBESTACK_COMPONENT_VALUES_FILE /
+#     CUBESTACK_COMPONENT_VALUES_KEY /
 #     CUBESTACK_COMPONENT_PULL_POLICY / CUBESTACK_COMPONENT_RESTART(见工具头注释)。
 # 数据源: cluster.conf (CUBESTACK_OPERATOR_* / REGISTRY_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps lws
@@ -20,4 +21,17 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+
+# 默认 LWS values: master placement + 显式清空 requests(覆盖上游 chart 默认 1 CPU/1Gi)。
+# 统一使用 CR 形态的 lws-cr-values.yaml(全量部署与单组件更新同源, 不再维护扁平副本)。
+# 可用 CUBESTACK_COMPONENT_VALUES_FILE 覆盖(覆盖后默认不按 KEY 提取, 除非同时显式设置 KEY)。
+if [ -z "${CUBESTACK_COMPONENT_VALUES_FILE:-}" ]; then
+    CUBESTACK_COMPONENT_VALUES_FILE="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator/lws-cr-values.yaml"
+    : "${CUBESTACK_COMPONENT_VALUES_KEY:=clusterCR.spec.components.lws.values}"
+fi
+export CUBESTACK_COMPONENT_VALUES_FILE
+if [ -n "${CUBESTACK_COMPONENT_VALUES_KEY:-}" ]; then
+    export CUBESTACK_COMPONENT_VALUES_KEY
+fi
+
 bash "${SCRIPT_DIR}/tools/k8s/cubestack-component-update.sh" "lws"

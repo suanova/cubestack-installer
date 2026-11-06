@@ -25,8 +25,8 @@
 | `kubectl` | 集群操作/验证 | 版本与集群匹配（v1.32） |
 | `helm` | 组件安装（gpu_operator 等） | v3+ |
 | `docker` | 镜像 save/load（离线 tar、本地镜像推送） | 版本≥20，API v1.44+ |
-| `nerdctl` | 备用容器工具（可选，metax .run nerdctl 模式） | 可选 |
-| `ctr` / `containerd` | metax .run 镜像加载、registry 操作 | containerd CLI |
+| `nerdctl` | 备用容器工具（可选） | 可选 |
+| `ctr` / `containerd` | registry/镜像操作 | containerd CLI |
 | `podman` | 备用容器工具（可选） | 可选 |
 | `skopeo` | **离线 tar → 集群 registry 推送**（核心） | 需支持 docker-archive |
 

@@ -2,7 +2,7 @@
 # ============================================================
 # metax-save-images.sh — 把沐曦(MetaX)镜像从本地 docker docker save 成 tar 到离线目录
 # 用途: 在已有这些镜像的机器(在线/内网)上把镜像导出为 tar, 供离线环境用
-#       gpu-operator 模块 tar 模式(METAX_IMAGE_MODE=tar) / metax-load-images.sh 从该目录加载。
+#       gpu-operator 模块(离线 tar 模式) / metax-load-images.sh 从该目录加载。
 # 数据源: cluster.conf (METAX_OFFLINE_DIR / METAX_SAVE_PATTERN / METAX_SAVE_EXCLUDE)
 # 枚举范围: 本地 docker 中匹配 METAX_SAVE_PATTERN 的镜像, 跳过 METAX_SAVE_EXCLUDE(默认 sglang)与 digest 引用。
 #   源仓库默认 harbor.isuanova.com/metax(内网 Harbor); 也可选 cr.metax-tech.com/cloud(沐曦官方仓库,
@@ -51,4 +51,4 @@ done
 echo "---------------------------------------------"
 ok "保存完成: 新增 ${count} 个, 跳过 ${skip} 个(已存在/排除), 目录: ${METAX_OFFLINE_DIR}"
 du -sh "${METAX_OFFLINE_DIR}" 2>/dev/null | awk '{print "  总大小: "$1}'
-echo "  加载:  metax-load-images.sh(本目录) 或 gpu-operator 模块 METAX_IMAGE_MODE=tar"
+echo "  加载:  metax-load-images.sh(本目录) 或 gpu-operator 模块(离线 tar)"

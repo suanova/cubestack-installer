@@ -563,9 +563,14 @@ if [ "${CR_ENABLED}" = "true" ]; then
     fi
     EXTRA_CR_VALUES_ARG=( "${_CR_VALUES[@]}" )
 fi
+# 默认 LWS values(master placement + 显式清空 requests; 覆盖上游 chart 默认 1 CPU/1Gi)
+_LWS_CR_VALUES="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator/lws-cr-values.yaml"
+if [ -f "${_LWS_CR_VALUES}" ]; then
+    _EXTRA_VALUES+=( -f "${_LWS_CR_VALUES}" )
+fi
 if [ -n "${CR_VALUES_FILE}" ]; then
     [ -f "${CR_VALUES_FILE}" ] || { err "CUBESTACK_OPERATOR_CR_VALUES_FILE 不存在: ${CR_VALUES_FILE}"; exit 1; }
-    _EXTRA_VALUES=( -f "${CR_VALUES_FILE}" )
+    _EXTRA_VALUES+=( -f "${CR_VALUES_FILE}" )
 fi
 
 SRC_IMAGES=()

@@ -679,8 +679,9 @@ prune_operator_chart_dir() {   # <charts-dir> <chart-name> <keep-tgz-basename>; 
 # 幂等确保 nginx 已推送进集群内置 registry, echo 出 **K8s 可见镜像 ref**(调用方在 $(...) 捕获,
 # 故本函数进度消息一律走 stderr, 与 find_offline_tar 的 warn >&2 同理), pod 直接走集群 registry
 # 拉取(离线可用, 不依赖节点状态)。
-# 来源: ① 本地 docker daemon → ② 离线 tar(deployments/offline-files/nginx/nginx.tar 优先,
-#       也兼容 LOCAL_REPO_DIR/images) → ③ 在线(仅 VERIFY_IMAGE_ONLINE=true, 离线部署默认禁止)。
+# 来源: ① 本地 docker daemon → ② 离线 tar(**复用 k8s-base 的 API 本地代理 nginx**:
+#       `<offline-files>/kubespray/<ver>/images/docker.io_library_nginx_<tag>.tar`;
+#       兼容旧的 `offline-files/nginx/nginx.tar`) → ③ 在线(仅 VERIFY_IMAGE_ONLINE=true)。
 # 用法: TEST_IMAGE="$(ensure_registry_nginx)" || exit 1   # 默认 tag=latest; 可 ensure_registry_nginx <tag>
 # 依赖: load_config 已执行(REGISTRY_* / LOCAL_REPO_DIR / OFFLINE_FILES_DIR / REPO_ROOT); 推送需 skopeo。
 ensure_registry_nginx() {
@@ -707,7 +708,7 @@ ensure_registry_nginx() {
     fi
     # ① 本地 docker daemon(仅 dev 模式快路径; release 模式必须走发布树, 避免掩盖缺失的离线件)
     if [ -z "${CUBESTACK_RELEASE:-}" ]; then
-        src="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '(/|^)nginx:(latest|[0-9.]+)$' | head -1 || true)"
+        src="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '(/|^)nginx:(latest|[0-9.]+(-alpine)?)$' | head -1 || true)"
         if [ -n "${src}" ]; then
             echo "  [nginx] 从本地 docker 推送: ${src}" >&2
             _tmp="$(mktemp)"
@@ -718,15 +719,15 @@ ensure_registry_nginx() {
             rm -f "${_tmp}"; echo "  [nginx] 本地 docker 推送失败, 尝试离线 tar..." >&2
         fi
     fi
-    # ② 离线 tar: suffix 用 "nginx:latest"(无前导 /——find_offline_tar 的前导 / 约定只匹配带
-    # registry 前缀的全格式, 库镜像短格式如 "nginx:latest" 会漏; glob nginx*.tar 已限定候选)。
-    # find_offline_tar 是 endswith 语义, 版本化 tag(nginx:1.31.4)不命中, 下方按内容兜底。
-    _t="$(find_offline_tar "nginx:latest" "nginx*.tar" "${_nginx_dirs[@]}")" || _t=""
+    # ② 离线 tar: 优先复用 k8s-base 的 API 本地代理镜像(派生名
+    # `docker.io_library_nginx_<tag>.tar`); 兼容旧的 `nginx.tar`。glob 用 `*nginx*.tar`
+    # 才能匹配派生名; find_offline_tar 是 endswith 语义, 版本化 tag 不命中时按内容兜底。
+    _t="$(find_offline_tar "nginx:latest" "*nginx*.tar" "${_nginx_dirs[@]}")" || _t=""
     if [ -z "${_t}" ]; then
         # 兜底: 版本化 tag(如 nginx:1.31.4)按内容匹配(含 "nginx:" 即接受)
         for _d in "${_nginx_dirs[@]}"; do
             [ -d "${_d}" ] || continue
-            for _f in "${_d}"/nginx*.tar; do
+            for _f in "${_d}"/*nginx*.tar; do
                 [ -f "${_f}" ] || continue
                 case "$(tar_first_image_tag "${_f}")" in
                     *"nginx:"*) _t="${_f}"; break 2 ;;
@@ -750,8 +751,9 @@ ensure_registry_nginx() {
         echo "  [nginx] 在线拉取失败" >&2
     fi
     err "集群 registry 无 nginx(${ref}), 测试后端无法拉起。请任选其一:"
-    err "  ① 准备离线 nginx 镜像 tar 放到 ${REPO_ROOT}/deployments/offline-files/nginx/nginx.tar(联网机: sudo docker pull nginx:latest && sudo docker save nginx:latest -o .../nginx.tar, 拷到部署机);"
-    err "     release 模式请放到 ${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx/nginx.tar;"
+    err "  ① 确认离线树里有 k8s-base 的 API 本地代理 nginx tar:"
+    err "     ${LOCAL_REPO_DIR:-<offline>/kubespray/<ver>}/images/docker.io_library_nginx_${API_LB_NGINX_IMAGE_TAG:-1.30.1-alpine}.tar"
+    err "     (release 模式 = ${OFFLINE_FILES_ROOT:-...}/kubespray/<ver>/images/; 也兼容旧的 offline-files/nginx/nginx.tar)"
     err "  ② 部署机本地 docker 有 nginx:latest(sudo docker pull nginx:latest);"
     err "  ③ 允许在线拉取: VERIFY_IMAGE_ONLINE=true 重跑"
     return 1
