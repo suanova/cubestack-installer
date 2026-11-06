@@ -2,7 +2,7 @@
 # ============================================================
 # cubestack-platform-save-images.sh — 平台镜像保鲜: Harbor/上游 → 离线 tar(digest 幂等)
 # ------------------------------------------------------------
-# 数据源(单一事实源): offline-files/cubestack-operator/image-list.tsv(37 行: 本体+平台组件)
+# 数据源(单一事实源): offline-files/cubestack-operator/image-list.tsv(38 行: 本体+平台组件)
 # 行为(逐行):
 #   ① 取远端 manifest 摘要: sha256(skopeo inspect --raw docker://<pull_ref>)
 #      —— 与 `docker pull` 的 Digest 等价(2026-10-16 公开/私有双实测), 零层拉取;

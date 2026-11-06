@@ -1,0 +1,76 @@
+# patch: 16-registry-nodeport-leak-wait.patch
+# 目标: roles/kubernetes-apps/registry/tasks/main.yml
+# 加入: 2026-11-03
+# 原因: registry 使用固定 NodePort(REGISTRY_NODEPORT, 默认 31148)。kube-apiserver 的
+#   NodePort 分配器可能把它判定为"已分配但无 Service 持有"(上次部署/集群重置遗留的泄漏分配;
+#   repair 控制器按 ~6min 周期清理)。此时 apply 会直接失败:
+#     The Service "registry" is invalid: spec.ports[0].nodePort: Invalid value: 31148: provided port is already allocated
+#   ⇒ kubernetes-apps/registry role 在 Apply manifests 处中断 ⇒ 后续 PVC 任务不执行
+#   ⇒ registry Pod Pending("persistentvolumeclaim registry-pvc not found") ⇒ k8s_deploy 失败。
+#   实机 2026-11-03: apiserver 11:59 标记端口泄漏, 12:05 才清理; registry apply 落在 12:02 窗口内。
+#   修复: apply 前用 `kubectl apply --dry-run=server` 探测; 仅当错误确为 already allocated 时
+#   等待 repair 控制器清理(默认 60×10s, 可用 registry_nodeport_repair_retries/_delay 覆盖),
+#   其他错误(命名空间尚不存在/API 不可达等)立即放行, 由真正的 apply 给出权威报错。
+#   repair 控制器一次会清理全部泄漏端口, 因此等待 registry 端口也会让后续 ingress-nginx 等
+#   固定 NodePort 恢复可分配。
+# 上游吸收判据: 上游 registry role 在 apply 前自带 NodePort 可用性/泄漏分配等待,
+#   或上游不再使用固定的 registry_service_nodeport。
+# 上游化: 建议提 PR(固定 NodePort 的幂等重放健壮性); 上游默认 registry_service_type=ClusterIP 不受影响。
+# ------------------------------------------------------------
+--- a/roles/kubernetes-apps/registry/tasks/main.yml
++++ b/roles/kubernetes-apps/registry/tasks/main.yml
+@@ -59,6 +59,54 @@
+   register: registry_manifests
+   when: inventory_hostname == groups['kube_control_plane'][0]
+ 
++# ★ cubestack 补丁(16): 固定 NodePort 可能被 apiserver 的 NodePort 分配器判为
++#   "已分配但无 Service 持有"(上次部署/集群重置遗留的泄漏分配; repair 控制器按周期清理)。
++#   直接 apply 会得到 "provided port is already allocated" 并让整个 role 中断
++#   (PVC 来不及创建 → registry Pod Pending → k8s_deploy 失败, 实机 2026-11-03)。
++#   这里先用 server-side dry-run 探测: 只在错误确为 already allocated 时等待 repair 控制器;
++#   其他错误(命名空间不存在/API 不可达等)立即放行, 由真正的 apply 给出权威报错。
++- name: Registry | Probe fixed NodePort (detect leaked allocation)
++  command: >-
++    {{ bin_dir }}/kubectl --namespace={{ registry_namespace }}
++    apply --dry-run=server --filename={{ kube_config_dir }}/addons/registry/registry-svc.yml
++  register: registry_nodeport_probe
++  changed_when: false
++  failed_when: false
++  when:
++    - inventory_hostname == groups['kube_control_plane'][0]
++    - registry_service_type == "NodePort"
++
++- name: Registry | Warn about leaked NodePort allocation
++  debug:
++    msg: >-
++      NodePort {{ registry_service_nodeport }} 被判定为已分配, 但当前没有 Service 持有它
++      (通常是上次部署/重置遗留的泄漏分配; apiserver 的 repair 控制器会清理)。
++      最多等待 {{ registry_nodeport_repair_retries | default(60) }} 次 ×
++      {{ registry_nodeport_repair_delay | default(10) }}s 后继续。
++  when:
++    - inventory_hostname == groups['kube_control_plane'][0]
++    - registry_service_type == "NodePort"
++    - (registry_nodeport_probe.rc | default(0)) != 0
++    - "'already allocated' in (registry_nodeport_probe.stderr | default(''))"
++
++- name: Registry | Wait for leaked NodePort allocation to be repaired
++  command: >-
++    {{ bin_dir }}/kubectl --namespace={{ registry_namespace }}
++    apply --dry-run=server --filename={{ kube_config_dir }}/addons/registry/registry-svc.yml
++  register: registry_nodeport_wait
++  until: >-
++    registry_nodeport_wait.rc == 0
++    or 'already allocated' not in (registry_nodeport_wait.stderr | default(''))
++  retries: "{{ registry_nodeport_repair_retries | default(60) }}"
++  delay: "{{ registry_nodeport_repair_delay | default(10) }}"
++  changed_when: false
++  failed_when: (registry_nodeport_wait.rc | default(0)) != 0
++  when:
++    - inventory_hostname == groups['kube_control_plane'][0]
++    - registry_service_type == "NodePort"
++    - (registry_nodeport_probe.rc | default(0)) != 0
++    - "'already allocated' in (registry_nodeport_probe.stderr | default(''))"
++
+ - name: Registry | Apply manifests
+   kube:
+     name: "{{ item.item.name }}"
