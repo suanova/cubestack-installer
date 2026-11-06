@@ -4,16 +4,12 @@
 #     clusterCR.spec.components.lws.values 后 patch CR
 #   · 本仓不再维护扁平的 lws-values.yaml(官方 helm install 路径不在本项目范围)
 #   · 只调度到 control-plane(master)节点(nodeSelector + tolerations)
-#   · CPU request 200m; memory request 200Mi; 不设置 limits
+#   · 不设置 CPU/memory requests(使用上游 LWS chart 默认值, 不设置 limits)
 clusterCR:
   spec:
     components:
       lws:
         values:
-          resources:
-            requests:
-              cpu: 200m
-              memory: 200Mi
           nodeSelector:
             node-role.kubernetes.io/control-plane: ""
           tolerations:
