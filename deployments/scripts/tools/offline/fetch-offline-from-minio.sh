@@ -24,10 +24,15 @@
 #   · 断点续传/重试: mc mirror 按对象 --retry + 整命令重试(--retry N, 默认 3);
 #     --resume 先校验本地树, 部分文件用 mc cat --offset 续传后按清单 sha 校验,
 #     失败再完整重下; 本地已完整则直接退出; --repair 重下坏文件;
-#   · 精确清理(release/flat 默认): 用 mc mirror --overwrite --remove 让本地树与 MinIO 一致,
-#     删除本地多余文件; 默认 30s 红色倒计时(--clean-countdown N / --yes 跳过);
+#   · 精确清理(release/flat 默认): **内容寻址增量** —— 以远端 offline-files/SHA256SUMS 为判据,
+#     只重下"缺失/哈希不符"的文件, 并删除本地多余文件(与对象 mtime/ETag 无关);
+#     哈希缓存 .cubestack-hashes.json 避免每次重读整棵树; --full 回退旧的整树 mc mirror;
+#     默认 30s 红色倒计时(--clean-countdown N / --yes 跳过);
 #     非交互环境无 --yes 时中止; --no-clean 保留本地多余文件; .cubestack-* 始终保留。
 #   · 结果提示: 容器内就绪提示; 宿主机打印容器挂载命令 + 直跑 OFFLINE_FILES_DIR 指引。
+#   · 校验级别: 下载完成 / --verify-only 默认执行 full 校验(全量 sha256 + 结构检查),
+#     不做 deep 深度校验(镜像 layer digest / 大包完整解压, 大版本可能耗时数十分钟);
+#     校验通过后会打印"建议单独执行深度校验"的完整命令(见 docs/offline-files-integrity.md)。
 # 用法(容器内已 root, 无需 sudo):
 #   ./fetch-offline-from-minio.sh                                 # 默认: 下载部署必需子目录(排除 virtual-machine)
 #   ./fetch-offline-from-minio.sh --sub virtual-machine           # 按需拉 VM 镜像(仅创建虚拟机时)
@@ -46,31 +51,40 @@
 #   ./fetch-offline-from-minio.sh --sub ceph,cubestack-operator/lws   # 多值(逗号分隔, 或重复给 --sub)
 #   ./fetch-offline-from-minio.sh --list --sub cubestack-operator  # 列出其下全部组件名(无需登录 MinIO 控制台)
 #   ./fetch-offline-from-minio.sh --list-releases                  # 列出桶根可用发布版本
-#   ./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/cubestack-installer
-#                                                                  # 取发布版本到 <dest>/2.0.0/
-#   ./fetch-offline-from-minio.sh --release 2.0.0 --verify-only --dest /data/cubestack-installer
-#                                                                  # 只校验已下载的发布版本
+#   ./fetch-offline-from-minio.sh --release 2.0.0                   # 默认 flat: 平铺到 deployments/offline-files
+#   ./fetch-offline-from-minio.sh --release 2.0.0 --dest /data/offline-files   # 指定 offline-files 根(仍 flat)
+#   ./fetch-offline-from-minio.sh --release 2.0.0 --no-flat --dest /data/cubestack-installer
+#                                                                  # 版本目录布局: <dest>/2.0.0/
+#   ./fetch-offline-from-minio.sh --release 2.0.0 --no-flat --verify-only --dest /data/cubestack-installer
+#                                                                  # 只校验已下载的发布版本(full, 非 deep)
+#   # 深度校验(镜像 layer digest/大包解压)建议单独执行(flat 用 --layout flat, 树根=offline-files 根):
+#   #   ./deployments/scripts/tools/offline/verify-offline-files.sh \
+#   #       --root /opt/cubestack-installer/deployments/offline-files --layout flat \
+#   #       --release 2.0.0 --level full --deep
 #   ./fetch-offline-from-minio.sh --release 2.0.0 --no-verify      # 跳过 sha256(调试用)
 #   ./fetch-offline-from-minio.sh --release 2.0.0 --resume          # 断点续传(失败后重跑)
 #   ./fetch-offline-from-minio.sh --release 2.0.0 --retry 5 --retry-delay 5  # 重试策略
 #   ./fetch-offline-from-minio.sh --release 2.0.0 --no-clean       # 不删除本地多余文件
 #   ./fetch-offline-from-minio.sh --release 2.0.0 --clean-countdown 30  # 30s 倒计时
-#   ./fetch-offline-from-minio.sh --release 2.0.0 --flat --dest /opt/cubestack-installer/deployments/offline-files
-#                                                                  # flat: 把 <版本>/offline-files 平铺到 offline-files 根
 #   · --release <版本>: 远端 = <bucket>/<版本>/{offline-files/,cubestack-installer-cli-v<版本>.tar},
 #     旧布局的 cubestack-installer-cli.tar 仅做兼容读取;
-#     本地 = <本地桶根>/<版本>/; 本地桶根优先 --dest > CUBESTACK_RELEASE_ROOT >
-#     ${REPO_ROOT}/offline-releases。⚠ release 模式下 --dest 表示**本地桶根**
-#     (包含 <版本>/ 与 offline-files/), 与 --sub 的 --dest(offline-files 根)语义不同。
+#     默认 **flat**: 把 <版本>/offline-files/ 平铺到 offline-files 根
+#     (默认 ${REPO_ROOT}/deployments/offline-files, 可用 --dest 覆盖; CLI tar 不在 flat 模式下载);
+#     --no-flat 时本地 = <本地桶根>/<版本>/, 桶根优先 --dest > CUBESTACK_RELEASE_ROOT >
+#     ${REPO_ROOT}/offline-releases。⚠ --no-flat 下 --dest 表示**本地桶根**
+#     (包含 <版本>/ 与 offline-files/), 与 flat/--sub 的 --dest(offline-files 根)语义不同。
 #   · --verify-only: 只校验本地已下载的树, **不需要 mc/MinIO 配置**(纯本地, 不联网);
 #   · --resume: 下载前先 full 校验本地树(**先于 MinIO 连接**; 完整则直接退出, 远端不可达也不影响);
 #     不完整时连接 MinIO, 部分文件按 offset 续传并校验 sha, 失败/不完整再正常下载并最终全量校验。
 #     下载命令默认重试 3 次(--retry/--retry-delay)。
-#   · --clean/--no-clean: release/flat 默认精确清理(删除本地多余文件); dev/--sub 需显式 --clean;
+#   · --clean/--no-clean: release/flat 默认精确同步(增量下载 + 删除本地多余文件); dev/--sub 需显式 --clean;
 #     非交互环境必须加 --yes, 否则中止; .cubestack-* (校验戳/清单备份) 保留。
-#   · --flat(仅配合 --release): 不建 <版本>/ 目录, 把远端的 <版本>/offline-files/ 内容
-#     平铺到 --dest(默认 deployments/offline-files); release.env 随资产一起落地,
-#     load_config 会自动识别 release flat 模式。CLI tar 不在 flat 模式下载。
+#   · --full: 跳过内容寻址增量, 回退 `mc mirror --overwrite --remove` 整树重传(排障/强刷用)。
+#   · --flat / --no-flat(仅配合 --release): release **默认 flat** —— 不建 <版本>/ 目录,
+#     把远端的 <版本>/offline-files/ 内容平铺到 offline-files 根(默认 deployments/offline-files);
+#     release.env 随资产一起落地, load_config 会自动识别 release flat 模式。
+#     --no-flat 保留版本目录布局(<本地桶根>/<版本>/offline-files + CLI tar)。
+#     CLI tar 不在 flat 模式下载。
 # 数据源: config/minio.conf(独立 MinIO 配置, 模板 minio.conf.example)或 MINIO_* 环境变量;
 #         刻意不依赖 cluster.conf / lib-common.sh —— 本脚本是部署【前置】的下载工具,
 #         下载离线文件时集群配置往往还不存在, 不应要求先配好集群。
@@ -132,9 +146,11 @@ REPAIR_DONE=0
 _RESUME_REPAIR=0                    # --resume: 本地校验失败, 待远端就绪后修复
 RELEASE_MODE=0
 FLAT=0
+FLAT_SET=""                         # ""=未指定(release 默认 flat) | yes=--flat | no=--no-flat
 CLEAN_MODE="auto"                     # auto|yes|no; auto = release/flat 默认清理
 CLEAN_COUNTDOWN="${CLEAN_COUNTDOWN:-30}"  # 清理倒计时秒数(--yes 跳过)
 CLEAN=0
+FULL_FETCH=0                          # --full: 跳过内容寻址增量, 回退整树 mc mirror(排障用)
 FETCH_RETRY="${FETCH_RETRY:-3}"
 FETCH_RETRY_DELAY="${FETCH_RETRY_DELAY:-3}"
 _CLEAN_STASH=""
@@ -174,12 +190,15 @@ _print_help() {
     echo ""
     echo "════ 发布版本(桶根 <版本>/offline-files + <版本>/cubestack-installer-cli-v<版本>.tar)════"
     echo "  --list-releases                       列出桶根可用版本"
-    echo "  --release 2.0.0 --dest <本地桶根>     取版本到 <本地桶根>/2.0.0/"
-    echo "  --release 2.0.0 --verify-only ...     只校验已下载版本(sha256 + CLI tar)"
+    echo "  --release 2.0.0                       默认 flat: 平铺到 deployments/offline-files"
+    echo "  --release 2.0.0 --dest <offline-files根>  指定 flat 下载目录(仍是平铺)"
+    echo "  --release 2.0.0 --no-flat --dest <本地桶根>  版本目录布局: <本地桶根>/2.0.0/"
+    echo "  --release 2.0.0 --verify-only ...     只校验已下载版本(full, 非 deep)"
     echo "  --release 2.0.0 --repair ...          校验失败时只重下坏文件(最多 1 轮)"
     echo "  --release 2.0.0 --resume ...          断点续传: 校验本地树, 部分文件用 offset 续传"
     echo "  --release 2.0.0 --no-verify ...       跳过 sha256(调试用)"
-    echo "  --release 2.0.0 --clean ...           精确镜像: 覆盖并删除本地多余文件"
+    echo "  --release 2.0.0 --clean ...           精确同步: 增量下载 + 删除本地多余文件"
+    echo "  --release 2.0.0 --full ...            回退旧行为: 整树 mc mirror 全量重传(排障用)"
     echo "  --release 2.0.0 --no-clean ...        保留本地多余文件(默认 release/flat 清理)"
     echo "  --clean-countdown N                   清理倒计时秒数(默认 30; --yes 跳过)"
     echo "  --retry N                             下载失败重试次数(默认 3)"
@@ -197,7 +216,8 @@ while [ $# -gt 0 ]; do
         -y|--yes) YES=1; shift ;;
         --kubespray-version) KUBESPRAY_VERSION_ARG="$2"; shift 2 ;;
         --release) RELEASE_ARG="$2"; shift 2 ;;
-        --flat) FLAT=1; shift ;;
+        --flat) [ "${FLAT_SET}" = "no" ] && { err "--flat 与 --no-flat 互斥"; exit 1; }; FLAT_SET=yes; FLAT=1; shift ;;
+        --no-flat) [ "${FLAT_SET}" = "yes" ] && { err "--flat 与 --no-flat 互斥"; exit 1; }; FLAT_SET=no; FLAT=0; shift ;;
         --list-releases) LIST_RELEASES=1; shift ;;
         --verify-only) VERIFY_ONLY=1; shift ;;
         --no-verify) NO_VERIFY=1; shift ;;
@@ -205,11 +225,12 @@ while [ $# -gt 0 ]; do
         --resume) RESUME=1; shift ;;
         --clean) CLEAN_MODE=yes; shift ;;
         --no-clean) CLEAN_MODE=no; shift ;;
+        --full) FULL_FETCH=1; shift ;;
         --clean-countdown) CLEAN_COUNTDOWN="${2:?--clean-countdown 需要秒数}"; shift 2 ;;
         --retry) FETCH_RETRY="${2:?--retry 需要次数}"; shift 2 ;;
         --retry-delay) FETCH_RETRY_DELAY="${2:?--retry-delay 需要秒数}"; shift 2 ;;
         -h|--help) _print_help; exit 0 ;;
-        *) err "未知参数: $1(可用 --dest/--sub/--release/--list-releases/--verify-only/--no-verify/--repair/--clean/--no-clean/--clean-countdown/--kubespray-version/--min-free/--auto/--force/--all/--list/--flat/-y)"; exit 1 ;;
+        *) err "未知参数: $1(可用 --dest/--sub/--release/--list-releases/--verify-only/--no-verify/--repair/--clean/--no-clean/--full/--clean-countdown/--kubespray-version/--min-free/--auto/--force/--all/--list/--flat/--no-flat/-y)"; exit 1 ;;
     esac
 done
 # --release 与 --sub/--all/--kubespray-version 互斥; --verify-only/--no-verify 只用于 release
@@ -218,8 +239,13 @@ if [ -n "${RELEASE_ARG}" ]; then
     [ "${ALL}" = "1" ] && { err "--release 与 --all 互斥"; exit 1; }
     [ -n "${KUBESPRAY_VERSION_ARG}" ] && { err "--release 与 --kubespray-version 互斥"; exit 1; }
 fi
+[ -n "${FLAT_SET}" ] && [ -z "${RELEASE_ARG}" ] && { err "--flat/--no-flat 需要配合 --release <版本>"; exit 1; }
+# release 默认 flat: 把 <版本>/offline-files 平铺到 offline-files 根(默认 deployments/offline-files);
+# 显式 --no-flat 才保留 <本地桶根>/<版本>/ 的版本目录布局。
+if [ -n "${RELEASE_ARG}" ] && [ -z "${FLAT_SET}" ]; then
+    FLAT=1
+fi
 [ "${VERIFY_ONLY}" = "1" ] && [ -z "${RELEASE_ARG}" ] && { err "--verify-only 需要配合 --release <版本>"; exit 1; }
-[ "${FLAT}" = "1" ] && [ -z "${RELEASE_ARG}" ] && { err "--flat 需要配合 --release <版本>(平铺到 offline-files 根)"; exit 1; }
 [ "${NO_VERIFY}" = "1" ] && [ -z "${RELEASE_ARG}" ] && { err "--no-verify 需要配合 --release <版本>"; exit 1; }
 [ "${REPAIR}" = "1" ] && [ -z "${RELEASE_ARG}" ] && { err "--repair 需要配合 --release <版本>"; exit 1; }
 [ "${REPAIR}" = "1" ] && [ "${NO_VERIFY}" = "1" ] && { err "--repair 与 --no-verify 互斥"; exit 1; }
@@ -805,20 +831,27 @@ else
         [ -n "${s}" ] || continue
         if [ "${RELEASE_MODE}" = "1" ] && [ "${FLAT}" = "1" ]; then
             if [ "${CLEAN}" = "1" ]; then
-                say "精确镜像(清理多余) ${SRC_ROOT}/${s}/ → ${DST_ROOT}/ ..."
+                say "增量镜像(只下变更 + 清理多余) ${SRC_ROOT}/${s}/ → ${DST_ROOT}/ ..."
             else
                 say "平铺复制 ${SRC_ROOT}/${s}/ → ${DST_ROOT}/ ..."
             fi
-            _transfer "${SRC_ROOT}/${s}" "${DST_ROOT}" 0 \
+            _transfer "${SRC_ROOT}/${s}" "${DST_ROOT}" 0 "" \
                 || { err "平铺复制 ${s} 失败(检查网络/磁盘空间)"; exit 1; }
         elif [ "${RELEASE_MODE}" = "1" ]; then
-            # 默认 mc cp --recursive(按对象名精确复制); --clean 时用 mirror --remove 清理多余。
+            # 默认 mc cp --recursive(按对象名精确复制); --clean 时走 SHA256SUMS 增量 + 清理多余。
             if [ "${CLEAN}" = "1" ]; then
-                say "精确镜像(清理多余) ${SRC_ROOT}/${s}/ → ${DST_ROOT}/${s}/ ..."
+                say "增量镜像(只下变更 + 清理多余) ${SRC_ROOT}/${s}/ → ${DST_ROOT}/${s}/ ..."
             else
                 say "复制(精确对象) ${SRC_ROOT}/${s}/ → ${DST_ROOT}/${s}/ ..."
             fi
-            _transfer "${SRC_ROOT}/${s}" "${DST_ROOT}/${s}" 1 \
+            # 清单路径以 offline-files/ 为根, 所以增量 prefix = s 相对 offline-files 的子路径
+            # (版本目录布局下 s=offline-files → prefix 为空; 将来若支持子目录下载也正确)。
+            _pfx=""
+            case "${s}" in
+                offline-files|"") _pfx="" ;;
+                offline-files/*) _pfx="${s#offline-files/}/" ;;
+            esac
+            _transfer "${SRC_ROOT}/${s}" "${DST_ROOT}/${s}" 1 "${_pfx}" \
                 || { err "复制 ${s} 失败(检查网络/磁盘空间)"; exit 1; }
         else
             say "同步 ${SRC_ROOT}/${s}/ → ${DST_ROOT}/${s}/ ..."

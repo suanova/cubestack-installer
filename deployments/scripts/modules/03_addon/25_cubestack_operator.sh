@@ -103,8 +103,8 @@ EOS
         if SSH "${K} get ns ${_ns} --no-headers >/dev/null 2>&1"; then
             warn "  ${_ns} 仍 Terminating → 清 namespace finalizer 强制终结"
             printf '%s' '{"spec":{"finalizers":[]}}' \
-                | SSH "${K} patch ns ${_ns} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1 || true
-            SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 </dev/null >/dev/null 2>&1 || true
+                | SSH "${K} patch ns ${_ns} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
+            SSH "timeout 30 ${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
         else
             ok "  ${_ns} 已删除"
         fi
@@ -260,7 +260,7 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     #   强制删 ns 会把仍带 finalizer 的对象孤儿化(重装 --create-namespace 后可能复活);
     #   CRD 删除同理会把残留 CR 链式卡死(重装的 [5/6] CRD apply 也会撞上 Terminating CRD)。
     SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
-    SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "timeout 30 ${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
     for _crd in $( (SSH "${K} get crd -o name 2>/dev/null") | grep -i cubestack || true); do
         # ★ 2026-10-23 C 集群实机: 组件控制器先被删后, CRD 下残留 CR(如 devenvironment/test)
         #   的 finalizer 无人摘 → delete crd 卡在 customresourcecleanup 上无限等待。
@@ -471,7 +471,7 @@ if [ ! -f "${CHART_TGZ}" ]; then
         unset _cands
     fi
     err "    离线包: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub cubestack-operator"
-    [ -n "${CUBESTACK_RELEASE:-}" ] && err "    发布版本: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --dest ${CUBESTACK_RELEASE_ROOT:-<本地桶根>}"
+    [ -n "${CUBESTACK_RELEASE:-}" ] && err "    发布版本: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --no-flat --dest ${CUBESTACK_RELEASE_ROOT:-<本地桶根>}"
     err "    在线/手工: helm pull ${CHART_REF} --version ${CHART_VER} -d ${PRIMARY_CHART_DIR}"
     err "              并把 helm 输出的 Digest: 写入 ${CHART_BASENAME}.digest(不要用 sha256sum)"
     exit 1
@@ -563,9 +563,14 @@ if [ "${CR_ENABLED}" = "true" ]; then
     fi
     EXTRA_CR_VALUES_ARG=( "${_CR_VALUES[@]}" )
 fi
+# 默认 LWS values(master placement + 显式清空 requests; 覆盖上游 chart 默认 1 CPU/1Gi)
+_LWS_CR_VALUES="${REPO_ROOT}/deployments/cubestack-addon/cubestack-operator/lws-cr-values.yaml"
+if [ -f "${_LWS_CR_VALUES}" ]; then
+    _EXTRA_VALUES+=( -f "${_LWS_CR_VALUES}" )
+fi
 if [ -n "${CR_VALUES_FILE}" ]; then
     [ -f "${CR_VALUES_FILE}" ] || { err "CUBESTACK_OPERATOR_CR_VALUES_FILE 不存在: ${CR_VALUES_FILE}"; exit 1; }
-    _EXTRA_VALUES=( -f "${CR_VALUES_FILE}" )
+    _EXTRA_VALUES+=( -f "${CR_VALUES_FILE}" )
 fi
 
 SRC_IMAGES=()
@@ -709,12 +714,15 @@ done
 # assets/charts 的渲染对账而来, 清单与维护方法见 offline-files/cubestack-operator/README.md)。
 # ★ 2026-10-16 目录分类: 组件 tar 按平台组件分子目录(offline-files/cubestack-operator/<组件>/,
 #   组件名 = CR spec.components 的键: lws / envoy-gateway / controller-manager / prometheus /
-#   perses / cuberouter / bmc / cubepilot / portal); **顶层** = operator 本体镜像;
+#   perses / cuberouter / bmc / cubepilot / portal / docs); **顶层** = operator 本体镜像;
 #   **charts/** = operator helm chart(.tgz), 不是平台组件, 扫描时显式跳过。
 #   过滤: CUBESTACK_OPERATOR_COMPONENTS="cubepilot,prometheus" → 只推列出的组件子目录
 #   (更新某个 operator 后单独推送其镜像的入口; 组件名不存在会 err 并列出可用目录)。
 # 目标映射(与 [3/6] 的 CR 两条前缀注入一一对应):
 #   自研 harbor.isuanova.com/suanova/<name>:tag  → <REG>/suanova/<name>:tag (imageRegistry)
+#   私有 harbor.isuanova.com/suanova-private/<name>:tag → <REG>/suanova-private/<name>:tag
+#     (operator 会把 cubestackDocs 组件的镜像重写为 <global.imageRegistry>/suanova-private/…,
+#      见 CRD spec.components.cubestackDocs; 漏掉这一支会被推到 <REG>/mirrors/harbor.isuanova.com/…)
 #   第三方 <上游ref>(docker.io/quay.io/ghcr.io…) → <REG>/mirrors/<上游ref> (externalImageRegistryPrefix)
 # 幂等: config digest(内容)比对 —— docker-archive 的 manifest digest 与 registry 不可比,
 #       用它会每次重推(见 _content_digest)。失败即 err —— CR 模式缺组件镜像=组件将 ImagePullBackOff。
@@ -768,7 +776,7 @@ if [ "${CR_ENABLED}" = "true" ]; then
             esac
         fi
         case "${_src_ref}" in
-            "${HARBOR_HOST}"/suanova/*|"${HARBOR_HOST}"/mirrors/*) _dst_path="${_src_ref#${HARBOR_HOST}/}" ;;
+            "${HARBOR_HOST}"/suanova/*|"${HARBOR_HOST}"/suanova-private/*|"${HARBOR_HOST}"/mirrors/*) _dst_path="${_src_ref#${HARBOR_HOST}/}" ;;
             *) _dst_path="mirrors/${_src_ref}" ;;
         esac
         _PLATFORM_REFS+=("${REG_BASE}/${_dst_path}")

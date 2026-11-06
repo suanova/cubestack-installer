@@ -8,9 +8,11 @@
 import io
 import json
 import os
+import re
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stderr, redirect_stdout
@@ -19,7 +21,7 @@ from unittest import mock
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "deployments", "scripts", "tools", "offline"))
 
-from verifier import archive, fsutil, manifest, seal, selftest, stamp  # noqa: E402
+from verifier import archive, fsutil, hashing, manifest, seal, selftest, stamp  # noqa: E402
 from verifier.context import Ctx  # noqa: E402
 from verifier.layout import detect_layout  # noqa: E402
 from verifier.report import emit  # noqa: E402
@@ -148,6 +150,49 @@ class StampSealTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(d, "SHA256SUMS")))
             self.assertTrue(os.path.isfile(os.path.join(d, "SIZES")))
             self.assertTrue(os.path.isfile(os.path.join(d, "_SUCCESS")))
+
+
+class HashingTests(unittest.TestCase):
+    def test_sha256_file_reports_bytes_read(self):
+        # 进度回调按 chunk 累加, 总量必须等于文件大小(连续读数才能算出真实吞吐/ETA)
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "big.bin")
+            with open(p, "wb") as f:
+                f.write(b"x" * (3 * 1024 * 1024 + 17))
+            seen = []
+            got = fsutil.sha256_file(p, progress=seen.append)
+            self.assertEqual(sum(seen), os.path.getsize(p))
+            self.assertEqual(got, _sha(p))
+
+    def test_heartbeat_prints_while_one_slow_file_is_in_flight(self):
+        # 回归(2026-11-03 实机): 单文件哈希 134s 期间一行进度都不打 —— 因为心跳只在
+        # "某个 future 完成"时才检查。这里用慢速 sha256 桩复现: 必须有 >=2 行进行中进度,
+        # 且头部不再给出与实测矛盾的事前秒数。
+        with tempfile.TemporaryDirectory() as d:
+            rel = "big.tar"
+            path = os.path.join(d, rel)
+            with open(path, "wb") as f:
+                f.write(b"y" * (1024 * 1024))
+            sums = {rel: _sha(path)}
+
+            def slow_sha(_path, progress=None):
+                for _ in range(20):
+                    time.sleep(0.02)
+                    if progress is not None:
+                        progress(64 * 1024)
+                return sums[rel]
+
+            args = Namespace(jobs=1, cli_tar=None, release="", require_cli_tar=False,
+                             layout="flat", skip_missing=False)
+            err = io.StringIO()
+            with mock.patch.object(hashing, "sha256_file", side_effect=slow_sha), \
+                    mock.patch.object(hashing, "HEARTBEAT_SEC", 0.05), \
+                    redirect_stderr(err):
+                hashing.check_full(Ctx(), d, sums, args)
+            out = err.getvalue()
+            self.assertNotIn("预计约", out)
+            self.assertGreaterEqual(len(re.findall(r"sha256 0/1 \(", out)), 2, out)
+            self.assertIn("sha256 1/1", out)
 
 
 class ReportTests(unittest.TestCase):
