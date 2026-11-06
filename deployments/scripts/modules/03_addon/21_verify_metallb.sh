@@ -52,7 +52,7 @@ TEST_NAME="verify-lb"
 cleanup() {
     # 先强制清 namespace finalizers(上一轮残留的 Terminating ns 会挂起删除, 自愈后再删)
     SSH "${K} patch namespace ${TEST_NS} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
-    SSH "${K} delete namespace ${TEST_NS} --ignore-not-found=true --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "timeout 30 ${K} delete namespace ${TEST_NS} --ignore-not-found=true --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
 }
 
 # VIP 是否在池内(支持 起止区间 / CIDR / 单地址)

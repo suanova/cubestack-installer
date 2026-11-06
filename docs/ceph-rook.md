@@ -606,6 +606,13 @@ Ceph 全关时不会排进部署计划);单独执行: `sudo ./deploy-cluster.sh 
 - 子目录不存在时(rw 模式)自动临时挂 FS 根 → `mkdir` + `chmod`(默认 `0777`)→ 再挂子目录;
   只读模式(`CEPHFS_MOUNT_READ_ONLY=true`)不创建, 要求子目录已存在并在日志中明确提示;
 - 容器循环自愈: 手动 umount / Ceph 短暂不可用 → 最多 30s 后自动重挂;
+- **readinessProbe = 真实挂载态**(2026-11-02): mounter 常驻循环, 无探针时 kubelet 在进程
+  启动瞬间即判 Ready, `rollout status` 会在 `mount -t ceph` 完成前返回成功(实机 worker03
+  首次挂载竞态)。现在 readiness 仅当目标路径最上层 `fstype=ceph`(只读时含 `ro`)才通过,
+  `DaemonSet 已滚动完成` 即代表每台节点目标路径已真实挂载;
+- 逐节点校验**有界重试**(2026-11-02): 首次挂载需 `modprobe ceph` + 建 mon 会话(全新节点
+  约 5s+), 单次 SSH 校验会在窗口内读到 ext4 误报 `NOT_MOUNTED`。模块按
+  `CEPHFS_MOUNT_VERIFY_TIMEOUT` / `CEPHFS_MOUNT_VERIFY_INTERVAL` 轮询, 持续失败才判异常;
 - 是否已挂载按 **fstype=ceph** 判断(hostPath 在容器里本身是 bind mount, 不能据此拒绝挂载);
   同一路径的挂载栈取最上层(`findmnt -T | tail -1`), 避免重复叠加。
 
@@ -621,6 +628,9 @@ Ceph 全关时不会排进部署计划);单独执行: `sudo ./deploy-cluster.sh 
 | `CEPHFS_MOUNT_IMAGE` | 空(自动取 cephfs CSI nodeplugin 镜像) | 运行镜像 |
 | `CEPHFS_MOUNT_ENV_FILE` | 空(自动探测 `deployments/config/external-cephfs.env`) | external 挂载专用 env(**该文件出现的变量优先**) |
 | `CEPHFS_MOUNT_READ_ONLY` | `false` | `true`=`mount -o ro`;不创建子目录;验证只读+`ls` |
+| `CEPHFS_MOUNT_ROLLOUT_TIMEOUT` | `300` | 秒;等 DaemonSet readiness(真实挂载)的总时长 |
+| `CEPHFS_MOUNT_VERIFY_TIMEOUT` | `90` | 秒;单节点逐次 SSH 校验的有界重试窗口 |
+| `CEPHFS_MOUNT_VERIFY_INTERVAL` | `5` | 秒;逐节点校验重试间隔 |
 
 **凭据**:
 - internal: 模块用 toolbox 创建专用用户 `client.<CEPHFS_MOUNT_USER>`:
@@ -685,6 +695,8 @@ CEPH_MODE=external CEPHFS_MOUNT_ENABLED=true \
 **验证**:
 ```bash
 sudo ./deploy-cluster.sh --steps cephfs_mount        # 部署 + 逐节点真实写读探针(只读模式则 ro+ls)
+# rollout status 成功 = 各节点 mounter readiness 通过(目标路径最上层 fstype=ceph)
+# 首次挂载较慢/大集群: 调 CEPHFS_MOUNT_ROLLOUT_TIMEOUT / CEPHFS_MOUNT_VERIFY_TIMEOUT / _INTERVAL
 ssh <node> 'findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,SOURCE,OPTIONS'
 # 只读模式应看到 ro、mds_namespace=<FS>; touch 预期 Read-only file system
 kubectl -n rook-ceph get ds cephfs-models-mount

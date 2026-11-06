@@ -48,12 +48,15 @@ cmd="$*"
 printf '%s\t%s\n' "${host}" "${cmd}" >> "${FAKE_SSH_LOG:-/dev/null}"
 case "${cmd}" in
     *"findmnt -t ceph,rbd"*)
-        case "${FAKE_WEDGED:-1}" in
-            1) echo "ceph/rbd-mount: /mnt/cephfs/models ceph (mons unreachable)"; exit 2 ;;
+        case "${FAKE_WEDGED:-0}" in
+            0) exit 0 ;;                                                  # 干净节点(无输出)
+            1) echo "repair-needed: /mnt/cephfs/models"; exit 0 ;;        # 逐挂载确认读不出 → 仅卸载该挂载
             2) echo "active-ceph-ok: /mnt/cephfs/models ceph"; echo "active-rbd-ok: 2"; exit 0 ;;
-            3) echo "auto-repair-needed: /mnt/cephfs/models"; exit 0 ;;
+            3) echo "d-state-unrelated: 123 D rsync -a /data"; exit 0 ;;  # 非存储 D 状态 → 不修复
             4) echo "ubuntu@10.0.0.1: Permission denied (publickey,password)." >&2; exit 255 ;;
             5) echo "ssh: connect to host 10.0.0.1 port 22: Connection timed out" >&2; exit 255 ;;
+            6) echo "d-state-storage: 123 D dpkg --configure -a"; exit 0 ;;   # D 状态+存储 → 不自动卸载
+            7) exit 124 ;;                                                # 探测超时
             *) exit 0 ;;
         esac ;;
     *) exit 0 ;;
@@ -81,13 +84,56 @@ run_tool() {  # run_tool <wedged 0|1> → stdout/stderr 在 $TMP/out
     echo $?
 }
 
-echo "== ① 残留节点: 必须在 scp/装包前失败 =="
+echo "== ① 存储不健康(逐挂载确认): 仅卸载确认挂载, 仍不健康则失败 =="
 rc="$(run_tool 1)"
 chk "退出码" "1" "${rc}"
 chk_contains "给出重启指引" "重启" "${TMP}/out-1"
-chk_contains "点名 ceph/rbd 残留" "ceph/rbd-mount" "${TMP}/out-1"
+chk_contains "点名存储不健康" "存储不健康" "${TMP}/out-1"
 chk "未执行 scp(未分发离线包)" "0" "$(wc -l < "${TMP}/scp-1.log")"
-chk "前置探测已执行" "1" "$(grep -c 'findmnt -t ceph,rbd' "${TMP}/ssh-1.log")"
+# 初探 + 修复后重探 = 2 次 findmnt 探测
+chk "自动修复后重探(初探+重探=2)" "2" "$(grep -c 'findmnt -t ceph,rbd' "${TMP}/ssh-1.log")"
+# 2026-11-04 (CodeRabbit): 只卸载"逐挂载检查确认读不出"的挂载(作为参数传入), 不碰健康卷
+chk_contains "仅卸载确认挂载(传入参数)" "sudo bash -s -- /mnt/cephfs/models" "${TMP}/ssh-1.log"
+# 修复未清除时恢复 kubelet/containerd(restore 命令以 "sudo bash -s" 结尾, 无参数)
+chk "修复失败后恢复服务" "1" "$(grep -cE 'sudo bash -s$' "${TMP}/ssh-1.log")"
+
+echo "== ①b 非存储 D 状态(rsync): 不触发修复, 继续装包 =="
+rc="$(run_tool 3)"
+chk "退出码" "0" "${rc}"
+chk "执行了 scp(不阻断)" "1" "$(wc -l < "${TMP}/scp-3.log")"
+chk_contains "日志点名非存储 D 状态" "非存储 D 状态" "${TMP}/out-3"
+chk_not_contains "未触发卸载" "sudo bash -s --" "${TMP}/ssh-3.log"
+
+echo "== ①c D 状态 + 存储挂载: 默认忽略并继续(覆盖安装口径), 不自动卸载 =="
+rc="$(run_tool 6)"
+chk "退出码" "0" "${rc}"
+chk "执行了 scp(不阻断)" "1" "$(wc -l < "${TMP}/scp-6.log")"
+chk_not_contains "未自动卸载" "sudo bash -s --" "${TMP}/ssh-6.log"
+chk_contains "日志点名已忽略" "已忽略" "${TMP}/out-6"
+# CodeRabbit 2026-11-05: 控制器放行 D 状态时, 远端安装器必须收到同一策略
+chk_contains "远端安装器收到 --allow-dstate" "--allow-dstate" "${TMP}/ssh-6.log"
+
+echo "== ①c2 NODE_PKGS_ALLOW_DSTATE=0: 恢复硬失败(旧行为) =="
+(
+    export PATH="${TMP}/bin:${PATH}"
+    export CLUSTER_CONF="${TMP}/cluster.conf"
+    export OFFLINE_FILES_ROOT="${TMP}/offline"
+    export FAKE_SSH_LOG="${TMP}/ssh-6s.log"
+    export FAKE_SCP_LOG="${TMP}/scp-6s.log"
+    export FAKE_WEDGED=6
+    export NODE_PKGS_ALLOW_DSTATE=0
+    : > "${FAKE_SSH_LOG}"; : > "${FAKE_SCP_LOG}"
+    bash "${TOOL}" --ip 10.0.0.1 --user root
+) > "${TMP}/out-6s" 2>&1
+chk "strict 退出码" "1" "$?"
+chk "strict 未执行 scp" "0" "$(wc -l < "${TMP}/scp-6s.log")"
+chk_contains "strict 提示需重启" "重启" "${TMP}/out-6s"
+
+echo "== ①d 探测超时: 不自动修复, 失败 =="
+rc="$(run_tool 7)"
+chk "退出码" "1" "${rc}"
+chk "未执行 scp" "0" "$(wc -l < "${TMP}/scp-7.log")"
+chk_not_contains "未自动卸载" "sudo bash -s --" "${TMP}/ssh-7.log"
 
 echo "== ② 干净节点: 前置探测通过并进入装包 =="
 rc="$(run_tool 0)"
@@ -102,11 +148,7 @@ chk "执行了 scp" "1" "$(wc -l < "${TMP}/scp-2.log")"
 chk "执行了远端装包脚本" "1" "$(grep -c 'sudo bash /tmp/cubestack-debs/' "${TMP}/ssh-2.log")"
 chk_contains "日志点名活动 Ceph/RBD" "活动 Ceph/RBD 健康" "${TMP}/out-2"
 
-echo "== ②c 挂载不健康但未卡死: 控制器放行, 远端自动修复 =="
-rc="$(run_tool 3)"
-chk "退出码" "0" "${rc}"
-chk "执行了 scp(自动修复在远端进行)" "1" "$(wc -l < "${TMP}/scp-3.log")"
-chk_contains "日志点名自动卸载/解映射" "自动卸载/解映射" "${TMP}/out-3"
+echo "== ②c (已并入 ①b: 非存储 D 状态不阻断; 存储不健康在 ① 验证) =="
 
 echo "== ②d SSH 认证失败(密码/公钥被拒): 必须报 SSH, 不得误导为 Ceph/RBD/重启 =="
 rc="$(run_tool 4)"
@@ -140,7 +182,13 @@ chk_contains "D 状态匹配 rbd/ceph" "rbd|ceph" "${TMP}/remote.sh"
 chk_contains "自动卸载挂载" "umount -l" "${TMP}/remote.sh"
 chk_contains "自动解映射 rbd" "rbd unmap" "${TMP}/remote.sh"
 chk_contains "自动修复前停 kubelet/containerd" "systemctl stop kubelet containerd" "${TMP}/remote.sh"
-chk_contains "仅僵尸态提示重启" "D 状态/fuser 超时" "${TMP}/remote.sh"
+# CodeRabbit 2026-11-05: 远端 D-state 门禁必须跟随控制器策略; fuser 超时仍硬失败;
+# D 状态存在时不做挂载健康探测/自动卸载(避免误卸正被僵尸进程引用的挂载)
+chk_contains "远端接受 --allow-dstate" "--allow-dstate" "${TMP}/remote.sh"
+chk_contains "远端读取 ALLOW_DSTATE" "ALLOW_DSTATE" "${TMP}/remote.sh"
+chk_contains "D 状态时跳过挂载修复" "_skip_ceph_repair" "${TMP}/remote.sh"
+chk_contains "fuser 超时仍硬失败" "fuser /var/lib/dpkg/lock-frontend 超时" "${TMP}/remote.sh"
+chk_contains "仅僵尸态提示重启" "节点存在 D 状态进程" "${TMP}/remote.sh"
 chk_contains "活动健康挂载放行" "活动 Ceph/RBD(健康" "${TMP}/remote.sh"
 # 2026-10-19 实机: 逐包 apt-get install 导致 systemd/udev 版本组混合(libudev1 3.22 +
 #   systemd/libsystemd0 3.21), 每轮 --fresh 都告警。必须整批交给 apt 求解。
@@ -150,6 +198,8 @@ chk_contains "整批失败才逐包兜底" "整批安装失败" "${TMP}/remote.s
 echo "== ④ 远端装包超时 =="
 chk_contains "RECONCILE_SSH_TIMEOUT" "RECONCILE_SSH_TIMEOUT" "${TOOL}"
 chk_contains "调用被 timeout 包裹" "timeout \"\${RECONCILE_SSH_TIMEOUT}\" ssh" "${TOOL}"
+# all_node_ips 是单行空格分隔 → 回退路径必须按空白拆分, 不能 read 一行当单 IP
+chk_contains "all_node_ips 回退按空白拆分" 'for ip in $(all_node_ips)' "${TOOL}"
 
 echo "== ⑤ worker 装包: Breaks ↔ 同版本 cohort =="
 TOOL2="${REPO_ROOT}/deployments/scripts/tools/node/install-worker-packages.sh"

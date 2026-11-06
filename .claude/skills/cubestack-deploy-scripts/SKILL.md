@@ -387,6 +387,9 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   # 容器内: cd /opt/cubestack-installer && sudo ./deployments/scripts/deploy-cluster.sh
   ```
 - **离线文件下载**: `tools/offline/fetch-offline-from-minio.sh` 用 mc 从 MinIO 同步到 `OFFLINE_FILES_DIR`(--sub 支持嵌套/多值, 可细化到 `cubestack-operator/<组件>`; `--help` 打印全部可用子目录; 旧名 fetch-offline-files.sh 为兼容薄壳)
+  - **release/flat 默认走"内容寻址增量"**(2026-11-04): 以远端 `offline-files/SHA256SUMS` 为判据, 只下缺失/哈希不符的文件并删除多余文件, 与对象 mtime 无关(`mc mirror --overwrite` 会整树重传 —— 见 troubleshooting 四.8); 计划器 `tools/offline/manifest-plan.py`(纯计算, 有 `test-offline-incremental-plan.sh` 回归); `--full` 回退旧整树 mirror。
+  - ⚠ 改动清单内文件后必须同步 `SHA256SUMS` 行 + 重绑 `_SUCCESS.sha256sums`, 否则增量会反复重下且全量校验失败。
+  - 版本目录是整树复制时(如 `2.0.1` 内仍是 2.0.0 元数据), 校验按树内 `release.env` 的 `RELEASE_VERSION` 执行并告警, 不误判失败。
   (默认 `deployments/offline-files`); 配置 `MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY/BUCKET/REMOTE_DIR`。
 - **离线文件缺失检查**: `lib-common.sh` 的 `check_offline_files`(deploy-cluster.sh 启动时调用), 缺失时输出
   **红底醒目提示**并给出准备指引(不阻断)。部署前务必保证 `${LOCAL_REPO_DIR}` 下有
@@ -595,6 +598,13 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   (用 `sync -f`/fsync); ⑤ 远端 `jsonpath` 含 `?(...)` 时要保证引号送达远端(Ready 判断建议
   `--no-headers | awk '{print $2}'`); ⑥ 零节点验证必须硬失败。离线回归:
   `bash deployments/scripts/tools/tests/test-cephfs-mount.sh`。
+- **⚠ CRI 依赖(2026-11-05 实机)**: `node_pkgs` 的自动修复会 `systemctl stop kubelet containerd`,
+  而后续 `kubeadm reset -f` **通过 CRI** 才能停旧静态 Pod 容器。containerd 停着时 reset 只删文件,
+  旧 kube-controller-manager/kube-scheduler 继续占 10257/10259 → `kubeadm init` preflight 失败。
+  现已: `_repair` 成功路径 `systemctl start containerd`; reset 前确保 containerd + 等待 socket;
+  reset 后 `crictl pods -q | xargs -r crictl rmp -f` / `crictl ps -aq | xargs -r crictl rm -f` 兜底;
+  复核端口覆盖 **6443/10250/10257/10259**(不能只查 10250 —— kubelet 一停它必空, 会误报成功)。
+  回归: `bash deployments/scripts/tools/tests/test-reset-cleanup.sh`;详见 `docs/troubleshooting.md` 四.9。
 - **常用命令**:
   ```bash
   sudo ./deploy-cluster.sh --steps ceph,ceph_csi          # 部署(或 CEPH_ENABLED=true+CEPH_CSI_ENABLED=true 随全量)

@@ -63,6 +63,33 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
+          # ★ 2026-11-02 修复"rollout 完成但宿主机尚未挂载"的竞态:
+          #   容器是常驻循环, 没有 readiness 时 kubelet 在进程启动瞬间就判 Ready,
+          #   `kubectl rollout status ds` 会在 mount -t ceph 完成前返回成功。
+          #   这里把 Ready 定义为"目标路径最上层 fstype=ceph(+ 只读时含 ro)" ——
+          #   即容器内 mounted_ok 的判定口径; rollout 完成才代表每台节点真实挂载。
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  TARGET="${CEPHFS_TARGET}"
+                  fstype="$(findmnt -n -o FSTYPE -T "${TARGET}" 2>/dev/null | tail -1 | tr -d '[:space:]')"
+                  [ "${fstype}" = "ceph" ] || { echo "target=${TARGET} fstype=${fstype:-<none>} (not ceph)"; exit 1; }
+                  if [ "${CEPHFS_READ_ONLY:-false}" = "true" ]; then
+                    opts="$(findmnt -n -o OPTIONS -T "${TARGET}" 2>/dev/null | tail -1 || true)"
+                    case ",${opts}," in
+                      *,ro,*) ;;
+                      *) echo "target=${TARGET} not read-only"; exit 1 ;;
+                    esac
+                  fi
+                  exit 0
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 1
+            successThreshold: 1
           env:
             - name: CEPH_MON_ADDRS
               value: "__MON_ADDRS__"
@@ -98,7 +125,7 @@ spec:
               printf '%s' "${CEPH_KEY}" > "${KEYFILE}"
               chmod 600 "${KEYFILE}"
               mkdir -p "${ROOT_TMP}"
-              MOUNT_OPTS="name=${CEPH_USER},secretfile=${KEYFILE},noatime"
+              MOUNT_OPTS="name=${CEPH_USER},secretfile=${KEYFILE},noatime__MS_MODE__"
               # external 集群可能有多个 FS(如 cephfs + cubestack-ext-fs), 必须显式选 FS;
               # 不指定 mds_namespace 时内核客户端会挂默认 FS(通常 cephfs), 与 CEPHFS_NAME 可能不一致。
               [ -n "${CEPHFS_NAME}" ] && MOUNT_OPTS="${MOUNT_OPTS},mds_namespace=${CEPHFS_NAME}"

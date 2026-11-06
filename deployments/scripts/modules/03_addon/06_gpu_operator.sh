@@ -12,11 +12,9 @@
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态, 重跑部署自动跳过(不重复重装); --fresh 清状态后重装。
 #     (幂等的就绪检查类模块(metallb/local_path/k8s_registry)用 REPEAT:1 每次执行)
 #   · 版本不硬编码: 全部版本/路径由 cluster.conf METAX_* 配置派生, 升级只改 METAX_VERSION。
-#   · 镜像加载两种方式(METAX_IMAGE_MODE, 默认 auto):
-#       run = 用包内 metax-k8s-images.<ver>.run 内嵌镜像直接 push(无需预存 tar, 离线可用;
-#             本机容器运行时用 ctr, 支持 --plain-http 免 daemon 配置)
-#       tar = 从 METAX_OFFLINE_DIR(默认 offline-files/metax-gpu)加载离线 tar 逐镜像 skopeo
-#             推送到集群内置 registry(需先用 tools/images/metax-save-images.sh 在联网机生成 tar)
+#   · 镜像加载方式: 从 METAX_OFFLINE_DIR(默认 offline-files/metax-gpu)加载离线 tar,
+#     逐镜像 skopeo 推送到集群内置 registry
+#     (需先用 tools/images/metax-save-images.sh 在联网机生成 tar)。
 #   · 镜像目标: 集群内置 registry 的 METAX_REGISTRY(默认 registry.cubestack.io:5000/metax);
 #     模块自动把宿主机 /etc/hosts 的 registry.cubestack.io/k8s-api 解析到正确 IP(registry VIP / API 入口,
 #     不留 192.0.2.37 这类过期条目), 宿主机即可按域名 push 与 helm 连集群(外部机器同理改 /etc/hosts)。
@@ -53,7 +51,7 @@ _metax_cleanup_residual() {
     # 共享助手: 先摘残留 CR 的 finalizer 再有界删除(防 CRD 卡在 customresourcecleanup; 2026-10-23)
     delete_crd_with_finalizer_cleanup clusteroperators.gpu.metax-tech.com
     SSH "${K} patch ns ${_mns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
-    SSH "${K} delete ns ${_mns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "timeout 30 ${K} delete ns ${_mns} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
     # 清理集群级残留(ClusterRole/RoleBinding 无命名空间资源; 无 Helm 标签时 helm 无法接管 → 必须删掉)
     for _cr in $(SSH "${K} get clusterrole -o name 2>/dev/null" | grep -i 'metax' || true); do
         SSH "${K} delete ${_cr} --ignore-not-found >/dev/null 2>&1" || true
@@ -109,7 +107,7 @@ if [ "${METAX_LIST_IMAGES:-false}" = "true" ]; then
     }
     echo "=============================================="
     echo "沐曦 GPU Operator 所需镜像(版本 v${METAX_VERSION}, 目标仓库 ${METAX_REGISTRY})"
-    echo "  核心组件(内嵌于 metax-k8s-images.${METAX_VERSION}.run, run 方式无需手动 save; tar 方式用 .run dump 生成):"
+    echo "  核心组件(离线 tar, 由 metax-save-images.sh 生成):"
     for c in ${METAX_IMAGE_COMPONENTS}; do
         echo "    cr.metax-tech.com/cloud/${c}:${METAX_VERSION}"
     done
@@ -128,11 +126,8 @@ fi
 init_remote_kubectl || exit 1
 
 # ---------------- 派生变量(全部来自 cluster.conf, 无硬编码) ----------------
-PKG_TGZ="${METAX_PKG_DIR}/${METAX_PKG_TGZ}"
-RUN_TOOL="${METAX_PKG_DIR}/metax-k8s-images.${METAX_VERSION}.run"
-CHART_TGZ="${METAX_PKG_DIR}/metax-operator-${METAX_VERSION}.tgz"
-CHART_DIR="${METAX_CHART_DIR:-${METAX_PKG_DIR}/metax-operator}"   # 修复后的 chart 目录(直接 helm 安装, 不重新解包)
-WORK_DIR="${METAX_PKG_DIR}/_work"
+CHART_DIR="${METAX_CHART_DIR:-${REPO_ROOT}/deployments/cubestack-addon/metax-gpu-operator/metax-operator}"   # 修复后的 chart 目录(直接 helm 安装)
+WORK_DIR="${METAX_PKG_DIR:-${METAX_OFFLINE_DIR}}/_work"
 RENDER_YAML="${WORK_DIR}/metax-render.yaml"
 REGISTRY_BASE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}"    # 集群内置 registry(registry.cubestack.io:5000, 节点/chart/宿主统一用域名)
 # 推送到集群 registry 用直连端点(绕开宿主 DNAT 转发, 大镜像/大 blob 传输更稳, 避免 broken pipe):
@@ -176,7 +171,6 @@ _reg_has_tag() {   # <comp> <ver>
 # ---------------- 前置检查 ----------------
 say "检查沐曦 GPU Operator 前置条件..."
 [ -d "${CHART_DIR}" ] || { err "修复后的 helm chart 目录不存在: ${CHART_DIR}(应放在 deployments/cubestack-addon/metax-gpu-operator/metax-operator)"; exit 1; }
-[ -f "${PKG_TGZ}" ] || warn "未找到资源包 ${PKG_TGZ}(tar 模式不需要; run 模式需 metax-k8s-images.*.run 在 METAX_PKG_DIR)"
 command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); 请先安装 Helm"; exit 1; }
 command -v skopeo >/dev/null 2>&1 || { warn "未找到 skopeo(tar 模式推送将不可用)"; }
 # skopeo 所需最小 trust policy 已在 lib-common.sh source 时自动生成(ensure_skopeo_policy)
@@ -274,7 +268,6 @@ fi
 say "[1/5] 确认资源: 修复后的 helm chart + 镜像加载源 ..."
 [ -f "${CHART_DIR}/Chart.yaml" ] || { err "修复后的 helm chart 不存在: ${CHART_DIR}(应放在 deployments/cubestack-addon/metax-gpu-operator/metax-operator)"; exit 1; }
 mkdir -p "${WORK_DIR}"
-[ -x "${RUN_TOOL}" ] || warn "未找到 ${RUN_TOOL}(tar 模式不需要; run 模式需在 METAX_PKG_DIR 放置 metax-k8s-images.*.run)"
 
 # 修复官方 chart 的已知 bug(幂等; 修正后 helm install 才正确):
 #   ① deployment 模板缺显式 namespace → 补 .Release.Namespace
@@ -311,88 +304,62 @@ PY
 }
 # chart 为修复版(cubestack-addon/metax-gpu-operator/metax-operator), 幂等补丁兜底(重新解包/未修复场景自动修复)
 _patch_chart
-ok "资源就绪: chart=${CHART_DIR}(已修复) + 镜像加载方式=${METAX_IMAGE_MODE:-tar}"
+ok "资源就绪: chart=${CHART_DIR}(已修复) + 镜像加载方式=tar"
 
 # ---------------- 2. 镜像推送 ----------------
 # 大 blob(如 maca 5.5G)推送前先应用宿主 TCP 调优, 缓解 "connection reset by peer"(幂等, 失败不阻塞)
 bash "${SCRIPT_DIR}/tools/node/net-tune.sh" >/dev/null 2>&1 \
     && say "  已应用宿主 TCP 网络调优(tools/node/net-tune.sh)" || true
-# 模式判定(auto: 有 .run 用 run, 否则 tar)
-_MODE="${METAX_IMAGE_MODE:-auto}"
-[ "${_MODE}" = "auto" ] && { [ -x "${RUN_TOOL}" ] && _MODE="run" || _MODE="tar"; }
-say "[2/5] 推送沐曦镜像 → ${METAX_REGISTRY}(方式: ${_MODE}) ..."
+say "[2/5] 推送沐曦镜像 → ${METAX_REGISTRY}(方式: tar) ..."
 
 _PUSHED=0
-if [ "${_MODE}" = "run" ]; then
-    # run 方式: .run 把内嵌镜像 load 进宿主 ctr(离线), 再逐组件打标推送到 ${METAX_REGISTRY}(域名, 宿主 /etc/hosts 已解析到 VIP)。
-    # 注: 不用 .run 自带的 push(其 --plain-http 置于镜像 ref 之后, 新版 ctr 会当作镜像名报错),
-    #     由本脚本 tag + ctr push --plain-http(flag 在前)完成。
-    say "  用 .run 加载内嵌镜像到宿主 ctr ..."
-    ( cd "${METAX_PKG_DIR}" && "${RUN_TOOL}" ctr load ) \
-        || { err "metax-k8s-images load 失败(检查宿主机 containerd 是否运行)"; exit 1; }
-    ARCH="$(uname -m)"; case "${ARCH}" in x86_64|amd64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) ARCH=amd64;; esac
-    say "  逐组件推送(arch=${ARCH}, 目标=${METAX_REGISTRY}) ..."
-    while IFS= read -r _img; do
-        [ -n "${_img}" ] || continue
-        case "${_img}" in
-            cr.metax-tech.com/cloud/*:${METAX_VERSION}-${ARCH})
-                _comp="${_img#cr.metax-tech.com/cloud/}"; _comp="${_comp%:${METAX_VERSION}-${ARCH}}"
-                _dst="${PUSH_REGISTRY}/${_comp}:${METAX_VERSION}"
-                sudo ctr -n k8s.io images tag "${_img}" "${_dst}" >/dev/null 2>&1 || true
-                sudo ctr -n k8s.io images push --plain-http "${_dst}" >/dev/null 2>&1 \
-                    || { err "推送失败 ${_dst}(检查: 宿主机能否达 ${REGISTRY_BASE}、registry 磁盘空间)"; exit 1; }
-                ok "  ${_comp}:${METAX_VERSION} ✓"
-                _PUSHED=$((_PUSHED+1))
-                ;;
-        esac
-    done < <(sudo ctr -n k8s.io images ls -q 2>/dev/null | grep 'cr.metax-tech.com/cloud/' || true)
-    [ "${_PUSHED}" -gt 0 ] || { err "ctr 中未找到 cr.metax-tech.com/cloud/*:${METAX_VERSION}-${ARCH} 镜像(.run load 未生效?)"; exit 1; }
-else
-    # tar 方式: 从 METAX_OFFLINE_DIR(优先)/METAX_IMAGE_DIR 找匹配 tar, 逐镜像 skopeo 推送到集群内置 registry
-    ARCH="$(uname -m)"; case "${ARCH}" in x86_64|amd64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) ARCH=amd64;; esac
-    shopt -s nullglob
-    _TARS=("${METAX_OFFLINE_DIR}"/*.tar "${METAX_IMAGE_DIR}"/*.tar)
-    shopt -u nullglob
-    for t in "${_TARS[@]:-}"; do
-        [ -f "${t}" ] || continue
-        case "$(basename "${t}")" in *"${METAX_TAR_PATTERN}"*) ;; *) continue ;; esac
-        src="$(tar_first_image_tag "${t}")"
-        [ -n "${src}" ] || { warn "  跳过 $(basename "${t}"): 无法读取源镜像名(manifest.json)"; continue; }
-        comp="${src%%:*}"; comp="${comp##*/}"     # .../cloud/gpu-label → gpu-label
-        ver="${src##*:}"
-        # 只推当前 gpu operator 需要的版本: maca/driver 只推配置版本, 核心组件只推本机架构的 METAX_VERSION
-        case "${comp}" in
-            maca)
-                [ "${ver}" = "${METAX_MACA_IMAGE#*:}" ] || { say "  跳过非当前所需 ${comp}:${ver}"; continue; }
-                ;;
-            driver-image)
-                [ "${ver}" = "${METAX_DRIVER_VERSION}" ] || { say "  跳过非当前所需 ${comp}:${ver}"; continue; }
-                ;;
-            *)
-                case "${ver}" in
-                    ${METAX_VERSION}-${ARCH}|${METAX_VERSION}) ;;
-                    *) say "  跳过非当前所需 ${comp}:${ver}"; continue ;;
-                esac
-                ;;
-        esac
-        # 核心组件镜像带架构后缀(如 0.15.3-amd64 / 0.15.3-arm64): 单 arch 集群只推本机架构, 并去掉后缀
-        # (chart 引用的是无后缀 ref: metax/gpu-label:0.15.3); maca/driver 的版本后缀是 tag 一部分, 不处理。
-        case "${ver}" in
-            ${METAX_VERSION}-amd64|${METAX_VERSION}-arm64)
-                _arch="${ver##*-}"
-                [ "${_arch}" = "${ARCH}" ] || { say "  跳过非本机架构 ${comp}:${ver}"; continue; }
-                ver="${METAX_VERSION}"
-                ;;
-        esac
-        say "  推 ${comp}:${ver} ← $(basename "${t}")"
-        _push_skopeo "docker-archive:${t}" "docker://${PUSH_REGISTRY}/${comp}:${ver}" \
-            || { err "推送失败(3 次重试后) ${t} → ${PUSH_REGISTRY}/${comp}:${ver}"; exit 1; }
-        _PUSHED=$((_PUSHED+1))
-    done
-    [ "${_PUSHED}" -gt 0 ] || { err "METAX_OFFLINE_DIR=${METAX_OFFLINE_DIR} / METAX_IMAGE_DIR=${METAX_IMAGE_DIR} 未找到匹配 ${METAX_TAR_PATTERN} 的 tar(可用 metax-save-images.sh 生成, 或改 METAX_TAR_PATTERN)"; exit 1; }
-fi
+# tar 方式: 从 METAX_OFFLINE_DIR(优先)/METAX_IMAGE_DIR 找匹配 tar, 逐镜像 skopeo 推送到集群内置 registry
+ARCH="$(uname -m)"; case "${ARCH}" in x86_64|amd64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) ARCH=amd64;; esac
+shopt -s nullglob
+_TARS=("${METAX_OFFLINE_DIR}"/*.tar "${METAX_IMAGE_DIR}"/*.tar)
+shopt -u nullglob
+for t in "${_TARS[@]:-}"; do
+    [ -f "${t}" ] || continue
+    case "$(basename "${t}")" in *"${METAX_TAR_PATTERN}"*) ;; *) continue ;; esac
+    src="$(tar_first_image_tag "${t}")"
+    [ -n "${src}" ] || { warn "  跳过 $(basename "${t}"): 无法读取源镜像名(manifest.json)"; continue; }
+    comp="${src%%:*}"; comp="${comp##*/}"     # .../cloud/gpu-label → gpu-label
+    ver="${src##*:}"
+    # 只推当前 gpu operator 需要的版本: maca/driver 只推配置版本, 核心组件只推本机架构的 METAX_VERSION
+    case "${comp}" in
+        maca)
+            [ "${ver}" = "${METAX_MACA_IMAGE#*:}" ] || { say "  跳过非当前所需 ${comp}:${ver}"; continue; }
+            ;;
+        driver-image)
+            [ "${ver}" = "${METAX_DRIVER_VERSION}" ] || { say "  跳过非当前所需 ${comp}:${ver}"; continue; }
+            ;;
+        *)
+            case "${ver}" in
+                ${METAX_VERSION}-${ARCH}|${METAX_VERSION}) ;;
+                *) say "  跳过非当前所需 ${comp}:${ver}"; continue ;;
+            esac
+            ;;
+    esac
+    # 核心组件镜像带架构后缀(如 0.15.3-amd64 / 0.15.3-arm64): 单 arch 集群只推本机架构, 并去掉后缀
+    # (chart 引用的是无后缀 ref: metax/gpu-label:0.15.3); maca/driver 的版本后缀是 tag 一部分, 不处理。
+    case "${ver}" in
+        ${METAX_VERSION}-amd64|${METAX_VERSION}-arm64)
+            _arch="${ver##*-}"
+            [ "${_arch}" = "${ARCH}" ] || { say "  跳过非本机架构 ${comp}:${ver}"; continue; }
+            ver="${METAX_VERSION}"
+            ;;
+    esac
+    say "  推 ${comp}:${ver} ← $(basename "${t}")"
+    _push_skopeo "docker-archive:${t}" "docker://${PUSH_REGISTRY}/${comp}:${ver}" \
+        || { err "推送失败(3 次重试后) ${t} → ${PUSH_REGISTRY}/${comp}:${ver}"; exit 1; }
+    _PUSHED=$((_PUSHED+1))
+done
+[ "${_PUSHED}" -gt 0 ] || { err "METAX_OFFLINE_DIR=${METAX_OFFLINE_DIR} / METAX_IMAGE_DIR=${METAX_IMAGE_DIR} 未找到匹配 ${METAX_TAR_PATTERN} 的 tar(可用 metax-save-images.sh 生成, 或改 METAX_TAR_PATTERN)"; exit 1; }
+for _c in ${METAX_IMAGE_COMPONENTS}; do
+    _reg_has_tag "${_c}" "${METAX_VERSION}" || { err "缺少核心组件镜像 ${_c}:${METAX_VERSION}(检查离线 tar 是否完整)"; exit 1; }
+done
 
-# MACA + 驱动镜像(不在 .run 包内): registry 已有 → 本地 docker → 离线 tar → 在线, 逐级尝试
+# MACA + 驱动镜像: registry 已有 → 本地 docker → 离线 tar, 逐级尝试
 push_extra() {   # <comp> <源镜像>  (如 maca cr.metax-tech.com/public-library/maca:<tag>)
     local comp="$1" src="$2" t found="" docker_src=""
     # ⓪ registry 已有该 tag → 跳过(避免重复推送大镜像); 只有确认不存在才走下方 docker/tar/在线重试链
@@ -428,25 +395,23 @@ push_extra() {   # <comp> <源镜像>  (如 maca cr.metax-tech.com/public-librar
             && { ok "  ${comp} 已就绪(离线 tar)"; return 0; }
         warn "  ${comp} tar 推送失败, 尝试在线..."
     fi
-    # ③ 在线 skopeo(需 cr.metax-tech.com 可访问/有凭据)
-    if [ "${_MODE}" = "run" ]; then
-        say "  尝试在线拉取推送 ${src} → ${PUSH_REGISTRY}/${comp}:${src##*:}"
-        if _push_skopeo "docker://${src}" "docker://${PUSH_REGISTRY}/${comp}:${src##*:}" 2>/dev/null; then
-            ok "  ${comp} 已在线就绪"; return 0
+    warn "  ${comp} 镜像未就绪(本地 docker / 离线 tar 均无)。请先 docker pull ${src} 或放离线 tar 到 ${METAX_IMAGE_DIR}"
+    if [ "${comp}" = "maca" ] ||
+       { [ "${comp}" = "driver-image" ] && [ "${METAX_DRIVER_DEPLOY_POLICY}" = "PreferCloud" ]; }; then
+        # 已确认无沐曦 GPU(HAS_GPU_NODE=0 且 mx-smi 状态明确)时, MACA/driver 不参与
+        # no-GPU 快速路径(只等 operator + gpu-label), 缺镜像不应阻塞安装。
+        # 有沐曦 GPU 或 mx-smi 状态未知时保持保守, 仍然硬失败。
+        if [ "${HAS_GPU_NODE}" = "1" ] || [ "${METAX_UNKNOWN}" = "1" ]; then
+            err "  ${comp} 镜像缺失, 中止安装"; exit 1
         fi
+        warn "  ${comp} 镜像缺失: 已确认当前集群无沐曦 GPU, 继续安装(operator/gpu-label 不依赖该镜像)"
+        warn "  后续新增沐曦 GPU 节点前, 必须先补 ${comp} 镜像(离线 tar 放 ${METAX_OFFLINE_DIR})再重跑 --steps gpu_operator"
+        return 0
     fi
-    warn "  ${comp} 镜像未就绪(本地 docker/tar 均无且在线不可达)。请先 docker pull ${src} 或放离线 tar 到 ${METAX_IMAGE_DIR}"
     return 0
 }
 push_extra "maca" "cr.metax-tech.com/public-library/${METAX_MACA_IMAGE}"
 push_extra "driver-image" "cr.metax-tech.com/public-cloud-release/driver-image:${METAX_DRIVER_VERSION}"
-# 兼容独立驱动包 metax-k8s-driver-image.*.run
-DRV_RUN="$(ls "${METAX_PKG_DIR}"/metax-k8s-driver-image*.run 2>/dev/null | head -1 || true)"
-if [ -n "${DRV_RUN}" ] && [ "${_MODE}" = "run" ]; then
-    say "  发现驱动包 ${DRV_RUN}, 执行 push ..."
-    ( cd "${METAX_PKG_DIR}" && "${DRV_RUN}" ctr push "${METAX_REGISTRY}" -- --plain-http ) 2>/dev/null \
-        && ok "  驱动包镜像已推送" || warn "  驱动包推送失败(忽略, 可改 METAX_DRIVER_DEPLOY_POLICY=PreferHost 用宿主机驱动)"
-fi
 ok "镜像推送完成(共推送 ${_PUSHED} 个组件镜像 → ${METAX_REGISTRY})"
 
 # ---------------- 3. 获取集群版本 ----------------

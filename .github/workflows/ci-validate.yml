@@ -122,6 +122,12 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh
 
+      # 旧集群清理: kubeadm reset 依赖 CRI + crictl 兜底 + 控制面端口复核
+      - name: 旧集群清理回归(reset-cleanup)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-reset-cleanup.sh
+
       # cubestack_operator 更新/滚动: 两模式 Always / digest 注解 / IMAGE_TAG 生效
       - name: cubestack_operator 更新行为回归
         run: |
@@ -145,6 +151,18 @@ jobs:
         run: |
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-verify-offline-files.sh
+
+      # 离线增量下载计划: 内容寻址(同大小变更/多余文件/prefix/缓存/非法清单回退)
+      - name: 离线增量下载计划回归(manifest-plan)
+        run: |
+          set -euo pipefail
+          # 该测试与 manifest-plan/lib-offline-fetch 同属离线工具回迁分支;
+          # 部分回迁分支尚未包含时跳过, 合并后的完整树仍会执行。
+          if [ ! -f deployments/scripts/tools/tests/test-offline-incremental-plan.sh ]; then
+            echo "跳过: 当前分支未包含 test-offline-incremental-plan.sh"
+            exit 0
+          fi
+          bash deployments/scripts/tools/tests/test-offline-incremental-plan.sh
 
       # verifier pyz 必须与 verifier/ 源码一致(防止改了源码忘重建)
       - name: 校验器源码/pyz 一致性
