@@ -22,6 +22,10 @@ on:
         description: 'perftest version (default: Dockerfile ARG)'
         required: false
         default: ''
+      dry_run:
+        description: 'Build and verify locally; do not push, tag or open a PR'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -44,6 +48,7 @@ jobs:
       VERSION: ${{ inputs.version }}
       FORCE_BASE: ${{ inputs.force_base }}
       PERFTEST_INPUT: ${{ inputs.perftest_version }}
+      DRY_RUN: ${{ inputs.dry_run }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,6 +80,7 @@ jobs:
           echo "version=${VERSION} line=${line} perftest=${perftest}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Login to Harbor
+        if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
           [ -n "${HARBOR_USER:-}" ] && [ -n "${HARBOR_PASSWORD:-}" ] \
@@ -82,6 +88,7 @@ jobs:
           echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_HOST}" -u "${HARBOR_USER}" --password-stdin
 
       - name: Check immutable tags
+        if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
           refs=(
@@ -104,7 +111,7 @@ jobs:
       - name: Build CLI images
         run: |
           set -euo pipefail
-          if [ "${FORCE_BASE}" = "true" ]; then
+          if [ "${DRY_RUN}" = "true" ] || [ "${FORCE_BASE}" = "true" ]; then
             bash deployments/scripts/tools/docker/build-cli-image.sh --base --engine docker
           else
             docker pull "${CLI_BASE_TAG}"
@@ -112,6 +119,7 @@ jobs:
           fi
 
       - name: Push CLI images
+        if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
           digest_of() {
@@ -147,12 +155,18 @@ jobs:
           set -euo pipefail
           image="${HARBOR_HOST}/suanova/netshoot-rdma"
           log="${RUNNER_TEMP}/netshoot-push.log"
+          push=1
+          [ "${DRY_RUN}" = "true" ] && push=0
           make netshoot-rdma \
             NETSHOOT_RDMA_IMAGE="${image}" \
             NETSHOOT_RDMA_TAG="${VERSION}" \
             NETSHOOT_RDMA_PERFTEST_VERSION="${PERFTEST_VERSION}" \
-            NETSHOOT_RDMA_PUSH=1 2>&1 | tee "${log}"
+            NETSHOOT_RDMA_PUSH="${push}" 2>&1 | tee "${log}"
           ref="${image}:${VERSION}"
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "netshoot built locally (dry run)"
+            exit 0
+          fi
           repo="${ref%:*}"
           digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${ref}" \
             | awk -F@ -v r="${repo}" '$1==r {print $2; exit}')"
@@ -176,7 +190,19 @@ jobs:
             echo "- channel: \`${CHANNEL}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Verify local images (dry run)
+        if: env.DRY_RUN == 'true'
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint bash "${CLI_IMAGE}" -lc \
+            'patch --version | head -1; for t in kubectl helm skopeo yq mc; do command -v "$t"; done'
+          docker run --rm --entrypoint sh "${HARBOR_HOST}/suanova/netshoot-rdma:${VERSION}" -c \
+            'for t in ibv_devices ibv_devinfo ib_write_bw rdma tcpdump; do command -v "$t"; done'
+          docker image inspect --format '{{json .Config.Labels}}' \
+            "${HARBOR_HOST}/suanova/netshoot-rdma:${VERSION}"
+
       - name: Open netshoot base.yaml PR
+        if: env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
