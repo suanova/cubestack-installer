@@ -303,7 +303,7 @@ images:
 - key: netshoot:netshoot-rdma
   source_ref: harbor.isuanova.com/suanova/netshoot-rdma
   version: 2.1-latest
-  digest: sha256:e127c799c3f1a5ae49d8557211aec2fca8660bbff69184af16a9c34743487729
+  digest: sha256:ba126da9f32ce69bd39b8ea20c059c7eb683dbf5c4cc9ff18d8186e2c756a656
   dest: offline-files/netshoot
   tar: netshoot-rdma-2.1-latest.tar
   optional: true
