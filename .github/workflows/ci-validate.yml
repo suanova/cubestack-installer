@@ -24,7 +24,7 @@ on:
   push:
     # release-2.0 维护分支: cherry-pick / 直接提交到该分支时, 必须走与 main 相同的
     # 静态校验 + release 模式回归(发布树路径派生/取件/命名契约)。
-    branches: [main, release-2.0]
+    branches: [main, release-2.0, release-2.1]
   workflow_dispatch:
 
 permissions:
@@ -75,6 +75,11 @@ jobs:
           set -euo pipefail
           python3 -m pip install --quiet --disable-pip-version-check pyyaml
           python3 deployments/scripts/tools/validate-base-baseline.py
+
+      - name: 版本派生文件同步校验(make check-versions)
+        run: |
+          set -euo pipefail
+          make check-versions
 
       # 在线安装基础工具: catalog 解析 / 镜像物化 / OS 包预检(不安装)
       - name: 在线安装工具回归(base catalog/materialize/precheck)

@@ -1,9 +1,17 @@
 SHELL := /bin/bash
 
-.PHONY: help netshoot-rdma
+.PHONY: help netshoot-rdma sync-versions check-versions
 
 help: ## 显示帮助
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+
+sync-versions: ## 从 versions/base.yaml 重新生成版本派生文件
+	@python3 -c 'import yaml' 2>/dev/null || { echo "error: PyYAML required (pip3 install pyyaml)" >&2; exit 2; }
+	@python3 deployments/scripts/tools/k8s/sync-versions.py --root .
+
+check-versions: ## 校验版本派生文件与 versions/base.yaml 一致（CI）
+	@python3 -c 'import yaml' 2>/dev/null || { echo "error: PyYAML required (pip3 install pyyaml)" >&2; exit 2; }
+	@python3 deployments/scripts/tools/k8s/sync-versions.py --root . --check
 
 # ---------------------------------------------------------------------------
 # netshoot-rdma: RDMA diagnostic image. Build and optionally push it.
