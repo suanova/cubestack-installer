@@ -140,6 +140,10 @@ deployments/offline-files/                     ← OFFLINE_FILES_ROOT(git 只跟
 
 ### 3.2 版本档案(profile)
 
+`deployments/config/profiles/v2.32.0.profile` 现在由
+`deployments/scripts/tools/k8s/sync-versions.py` 从 `versions/base.yaml` 生成；
+`make check-versions` 会拒绝手改或过期的档案。非当前库版本的 profile 仍按树表值校验。
+
 **入库档案**:`deployments/config/profiles/<版本>.profile`(纯文本,shell 可 source,语法同 cluster.conf 片段)。
 字段 = 该版本**全部"版本面"变量**:
 

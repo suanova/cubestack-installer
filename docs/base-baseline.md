@@ -46,9 +46,17 @@ images:
 要点：
 
 - `key` 全局唯一，格式 `<group>:<source>`。
-- `env` 是**公共版本值的唯一来源**：镜像的 `version`/`dest`/`tar` 通过 `${VAR}` 引用它；
-  在线安装启动时会先加载这份 env，再交给 `load_config`。`cluster.defaults.conf`/profile
-  只补私有/派生值，不再定义这些公共版本。
+- `env` 是**受管版本值的唯一来源**：镜像的 `version`/`dest`/`tar` 通过 `${VAR}` 引用它；
+  在线安装启动时会先加载这份 env，再交给 `load_config`。
+- `display_only` 列出**没有受支持 override 路径**的版本（kubespray/vendored manifest
+  硬编码的 CSI、Rook、CSI-operator、snapshot 等）。它们保留在 `env` 里用于展示和
+  离线镜像，但 CI 会断言它们与真实源文件一致；升级必须改源文件，不能只改这里。
+- `checksums` 保存受管二进制制品的校验和（当前为 etcd、calicoctl、calico CRDS）。
+- `make sync-versions` 从 `versions/base.yaml` 生成：
+  - `deployments/config/cluster.defaults.conf` 的 generated block
+  - `deployments/config/profiles/v2.32.0.profile`
+  - `deployments/kubespray/inventory/.../k8s-versions.yml`
+  CI 用 `make check-versions` 拒绝过期的生成文件。
 - `mirror` 固定 mirror catalog 的 repo/commit/index；base 镜像的 digest 必须以该
   commit 的 `index.json` 为准，避免漂移。
 - `catalog_id` 指向 mirror catalog（`container-image-mirror/index.json` 的 `id`）；
@@ -106,15 +114,19 @@ packages:
 
 1. 第三方镜像先改 `container-image-mirror` 的 `images/*.yaml`（tag + digest），合并后
    产生新的 `index.json`；
-2. 在 `versions/base.yaml` 改 `version`（或新增镜像条目），保持 `catalog_id` 不变；
-3. 改节点前置包体检清单时更新对应的 `.lock`；
-4. 本地校验：
+2. 在 `versions/base.yaml` 改受管版本的 `env` 值（或新增镜像条目），保持 `catalog_id`
+   不变；`display_only` 里的版本不能在这里改，必须改对应的 kubespray/vendored 源文件；
+3. 二进制制品版本变化时同步更新 `checksums`；
+4. 运行 `make sync-versions` 更新 derived 文件；
+5. 改节点前置包体检清单时更新对应的 `.lock`；
+6. 本地校验：
 
    ```bash
+   make check-versions
    python3 deployments/scripts/tools/validate-base-baseline.py
    ```
 
-5. 提交到 installer；商业打包侧按自己的节奏更新基线 commit 并重建 base pin，
+7. 提交到 installer；商业打包侧按自己的节奏更新基线 commit 并重建 base pin，
    公开 installer 不依赖下游流程。
 
 ## K8s 二进制包
