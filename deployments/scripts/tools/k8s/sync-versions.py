@@ -305,6 +305,8 @@ def write_atomic(path: Path, text: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--write", action="store_true",
+                        help="rewrite generated files (default)")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--write-inventory", type=Path)
     parser.add_argument("--print-env", action="store_true")
