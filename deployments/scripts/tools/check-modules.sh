@@ -761,7 +761,7 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-ceph-data-disks.sh \
            test-metallb-pool-check.sh test-ceph-cluster-detect.sh \
            test-multus-iface-detect.sh test-devlab-tar-select.sh \
-           test-nodeport-leak-preflight.sh; do
+           test-nodeport-leak-preflight.sh test-sync-versions.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
     if [ ! -f "${_tp}" ]; then
         ck_fail "⑮ 离线套件缺失: ${_tp#${REPO_ROOT}/}(⑮ 的回归证据没了)"
@@ -853,8 +853,13 @@ KSD_PINS=(
     "CPA_VERSION:dnsautoscaler_version"
     "ETCD_VERSION:etcd_version"
     "CALICO_VERSION:calico_version"
+    "METALLB_VERSION:metallb_version"
+    "KUBE_VIP_VERSION:kube_vip_version"
+    "REGISTRY_IMAGE_TAG:registry_version"
+    "LOCAL_PATH_VERSION:local_path_provisioner_version"
     "LOCAL_VOLUME_PROVISIONER_VERSION:local_volume_provisioner_version"
     "NFD_VERSION:node_feature_discovery_version"
+    "API_LB_NGINX_IMAGE_TAG:nginx_image_tag"
 )
 KSD_INV_YML="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/all/k8s-versions.yml"
 if [ ! -f "${KSD_INV_YML}" ]; then
@@ -867,6 +872,19 @@ fi
 if [ ! -f "${KSD_DL}" ] || [ ! -f "${KSD_CK}" ] || [ ! -f "${KSD_VM}" ]; then
     warn "  跳过 ⑯(未找到 vendored 版本表 ${KSD_ROLE#${REPO_ROOT}/})"
 else
+    # 版本派生文件必须与 versions/base.yaml 一致(生成器是唯一写入者)。
+    _kv_out="$(mktemp)"
+    if ! python3 "${REPO_ROOT}/deployments/scripts/tools/k8s/sync-versions.py" \
+        --root "${REPO_ROOT}" --check >"${_kv_out}" 2>&1; then
+        ck_fail "⑯ 版本派生文件与 versions/base.yaml 不一致" \
+            "      → 修法: make sync-versions 并提交生成的 defaults/profile/inventory" \
+            "      → $(head -6 "${_kv_out}" | tr '\n' ' ')"
+        KSD_BAD=1
+    else
+        say "  ⑯ 版本派生文件与 versions/base.yaml 一致"
+    fi
+    rm -f "${_kv_out}"
+
     # 钉子来源文件(2026-10-15 版本变量下沉后): cluster.defaults.conf(入库, **必查**) +
     #   cluster.conf(**仅当它自己声明了 K8S_VERSION 时**才查 —— 正常不再声明; 用户覆盖/手工钉钉子时声明)
     KSD_CONFS=("${CONF_DEFAULTS}")
@@ -899,55 +917,24 @@ else
             KSD_BAD=1; continue
         fi
 
-        # ---- 其余 7 项: 与上游解析结果逐字一致(kube_major 取自本文件的 K8S_VERSION) ----
-        _want_calico="$(_ksd_first_key calicoctl_binary_checksums amd64)"
-        _want_etcd="$(_ksd_etcd "${_major}")"
-        _want_coredns="$(_ksd_inline "${KSD_DL}" coredns_supported_versions "${_major}")"
-        _want_pause="$(_ksd_inline "${KSD_VM}" pod_infra_supported_versions "${_major}")"
-        _want_ndc="$(_ksd_scalar "${KSD_DL}" nodelocaldns_version)"
-        _want_metrics="$(_ksd_scalar "${KSD_DL}" metrics_server_version)"
-        _want_cpa="$(_ksd_scalar "${KSD_DL}" dnsautoscaler_version)"
-        _want_nginx="$(_ksd_scalar "${KSD_DL}" nginx_image_tag)"
-        # LVP / NFD(2026-09-28 评审 I4): 这两个钉子是 v2.32 支新加的(README 明写"须与上游同值"),
-        # 却零断言 —— 上游同一文件里的标量, 取法与 metrics_server 完全一致(*_image_tag 由 *_version 拼)。
-        _want_lvp="$(_ksd_scalar "${KSD_DL}" local_volume_provisioner_version)"
-        _want_nfd="$(_ksd_scalar "${KSD_DL}" node_feature_discovery_version)"
-        if [ -z "${_want_calico}" ] || [ -z "${_want_etcd}" ] || [ -z "${_want_coredns}" ] || \
-           [ -z "${_want_pause}" ] || [ -z "${_want_ndc}" ] || [ -z "${_want_metrics}" ] || \
-           [ -z "${_want_cpa}" ] || [ -z "${_want_nginx}" ] || [ -z "${_want_lvp}" ] || [ -z "${_want_nfd}" ]; then
-            ck_fail "⑯ ${_cn}: 解析不出上游期望值(K8S_VERSION=${_k8s} → kube_major=${_major})" \
-                "      → 树内表可能没有 ${_major} 这一线(如 1.33 在 v2.32 表里就不可用); 请改用表内线"
-            KSD_BAD=1; continue
+        # ---- 其余版本项: 由 sync-versions.py 保证 base.yaml → 派生文件闭环 ----
+        # 树内默认值不再要求与钉子相等: 部署由生成的 group_vars 覆盖。只保留
+        # kubespray 无法通过 group_vars 覆盖的硬约束(CALICO CRDS 表成员)。
+        _calico="$(_ksd_conf_value "${_cf}" CALICO_VERSION)"
+        _calico_bare="${_calico#v}"
+        if [ -n "${_calico_bare}" ] && \
+           ! awk -v v="${_calico_bare}" '
+               /^calico_crds_checksums:/ { s=1; next }
+               /^[a-zA-Z_]+_checksums:/ { s=0 }
+               s && $0 ~ ("^[[:space:]]+" v ":") { found=1 }
+               END { exit(found ? 0 : 1) }
+           ' "${KSD_CK}"; then
+            ck_fail "⑯ ${_cn}: CALICO_VERSION=${_calico} 不在 calico_crds_checksums 表内" \
+                "      → 该表是角色 vars, group_vars 无法覆盖; 修法: 给树加 checksum patch 或改用表内版本"
+            KSD_BAD=1
+        else
+            say "  ${_cn}: CALICO_VERSION=${_calico} 在 calico_crds_checksums 表内"
         fi
-
-        # 比较: 只判"我方钉值 == 上游表值", **v 前缀等价**(我方钉子可带/不带 v; 上游变量侧不带 v,
-        #   镜像 tag 侧另有 'v' 前缀 —— 由发布侧保证, 本项不做形态断言)
-        _ksd_cmp() {   # <变量> <上游期望> <上游出处>
-            local got
-            got="$(_ksd_conf_value "${_cf}" "$1")"
-            if [ -z "${got}" ]; then
-                ck_fail "⑯ ${_cn}: 取不到 $1 的钉值(未声明/写法解不出)"
-                KSD_BAD=1; return 0
-            fi
-            if [ "${got#v}" = "$2" ]; then
-                say "  ${_cn}: $1=${got} == 上游 $2"
-            else
-                ck_fail "⑯ ${_cn}: $1='${got}' 与上游表值不符(上游='$2')" \
-                    "      → 上游出处: $3" \
-                    "      → 修法: 把 cluster.conf 与 cluster.conf.example 的 $1 都改成 '$2'(v 前缀按现有写法保留/去掉均可)"
-                KSD_BAD=1
-            fi
-        }
-        _ksd_cmp CALICO_VERSION       "${_want_calico}"  "calicoctl_binary_checksums['amd64'] 首键(calico_version)"
-        _ksd_cmp ETCD_VERSION         "${_want_etcd}"    "etcd_supported_versions['${_major}'] → etcd_binary_checksums"
-        _ksd_cmp COREDNS_VERSION      "${_want_coredns}" "coredns_supported_versions['${_major}']"
-        _ksd_cmp PAUSE_VERSION        "${_want_pause}"   "pod_infra_supported_versions['${_major}'](pod_infra_version)"
-        _ksd_cmp DNS_NODE_CACHE_VERSION "${_want_ndc}"   "nodelocaldns_version"
-        _ksd_cmp METRICS_SERVER_VERSION "${_want_metrics}" "metrics_server_version"
-        _ksd_cmp CPA_VERSION          "${_want_cpa}"     "dnsautoscaler_version(cluster-proportional-autoscaler)"
-        _ksd_cmp API_LB_NGINX_IMAGE_TAG "${_want_nginx}" "nginx_image_tag(download.yml:265, 节点侧 API 本地代理静态 Pod)"
-        _ksd_cmp LOCAL_VOLUME_PROVISIONER_VERSION "${_want_lvp}" "local_volume_provisioner_version(download.yml:299)"
-        _ksd_cmp NFD_VERSION          "${_want_nfd}"   "node_feature_discovery_version(download.yml:370)"
 
         # ---- ⑯-C 写入者闭环: inventory 的 10 个版本键 == 本 conf 的钉子(逐键点名) ----
         # 这一节回答的是"部署真会用这些钉子吗" —— 见文件头 ⑯-C 说明。取不到钉子侧时**不重复报**
@@ -1086,6 +1073,12 @@ if [ -d "${VD_PROFILES_DIR}" ]; then
             ck_fail "⑱ ${_pv}: K8S_VERSION=${_pk8s} 不在该版本树 kubelet_checksums 表内" \
                 "      → 表内可选项: $(kb_tables_kubelet_list "${_pck}" | tr '\n' ' ')"
             VD_BAD=1
+        elif [ "${_pv}" = "${VD_TREE_VER}" ]; then
+            # Base profile is generated from versions/base.yaml; ⑯ already
+            # proves it matches the source. Tree-table equality no longer
+            # applies once versions are overridden via group_vars.
+            say "  ⑱ ${_pv}: base profile 由 sync-versions.py 生成; 跳过树表逐值比较"
+            ok "  ⑱ 档案 ${_pv} 为生成档案"
         else
             _pmajor="${_pk8s#v}"; _pmajor="${_pmajor%.*}"
             _vd_cmp() {   # <键> <上游期望> <出处>

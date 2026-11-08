@@ -6,50 +6,74 @@ kubespray:
     repo: suanova/cubestack-installer
     path: deployments/kubespray/kubespray
 mirror:
-  # TODO: switch to suanova/container-image-mirror after the mirror PR merges.
-  repo: zhujian7/container-image-mirror
-  commit: 1c16e009c25eee53567ba61657ad65386e26b193
+  repo: suanova/container-image-mirror
+  commit: 56a26e12cf9018daccf40b53ffe7a4fc3e6c773f
   path: index.json
 env:
-  API_LB_NGINX_IMAGE_TAG: 1.30.1-alpine
+  API_LB_NGINX_IMAGE_TAG: 1.30.6-alpine
   CALICO_VERSION: v3.32.2
-  CEPHCSI_VERSION: v3.17.0
-  CEPH_CSI_OPERATOR_VERSION: v1.0.4
   CEPH_VERSION: v20.2.2
   COREDNS_VERSION: v1.12.4
   CPA_VERSION: v1.10.3
-  CSIADDONS_SIDECAR_VERSION: v0.14.0
-  CSI_ATTACHER_VERSION: v4.12.0
-  CSI_NODE_DRIVER_REGISTRAR_VERSION: v2.17.0
-  CSI_PROVISIONER_VERSION: v6.2.0
-  CSI_RESIZER_VERSION: v2.1.0
-  CSI_SNAPSHOTTER_VERSION: v8.5.0
   DEV_LAB_CPU_TAG: py310-torch2.4
   DEV_LAB_CUDA_TAG: '26.08'
   DEV_LAB_MACA_TAG: 3.9.0.12-py310-torch2.4
   DNS_NODE_CACHE_VERSION: 1.25.0
-  ETCD_VERSION: v3.6.14
+  ETCD_VERSION: v3.6.16
   K8S_VERSION: v1.35.8
   KUBESPRAY_VERSION: v2.32.0
-  KUBE_VIP_VERSION: v1.0.3
+  KUBE_VIP_VERSION: v1.3.1
   LOCAL_PATH_VERSION: v0.0.37
-  LOCAL_VOLUME_PROVISIONER_VERSION: 2.5.0
+  LOCAL_VOLUME_PROVISIONER_VERSION: 2.10.0
   METALLB_VERSION: v0.13.9
   METAX_DRIVER_VERSION: 3.8.1.6-amd64
   METAX_VERSION: 0.15.3
-  METRICS_SERVER_VERSION: v0.9.0
+  METRICS_SERVER_VERSION: v0.9.1
   MULTUS_IMAGE_TAG: v4.2.2-thick
-  NFD_VERSION: 0.19.0
-  NGINX_TAG: '1.27'
+  NFD_VERSION: 0.20.1
   NVIDIA_GPU_DRIVER_BRANCH: '595'
   NVIDIA_GPU_DRIVER_PRECOMPILED_KERNEL: 5.15.0-186-generic
   NVIDIA_GPU_OPERATOR_VERSION: v26.7.2
   PAUSE_VERSION: 3.10.1
   RDMA_IMAGE_TAG: v1.5.4
   REGISTRY_IMAGE_TAG: 2.8.1
-  ROOK_VERSION: v1.20.2
-  SNAPSHOT_CONTROLLER_VERSION: v8.0.1
   NETSHOOT_RDMA_VERSION: 2.1-latest
+  CEPHCSI_VERSION: v3.17.0
+  CEPH_CSI_OPERATOR_VERSION: v1.0.4
+  CSIADDONS_SIDECAR_VERSION: v0.14.0
+  CSI_ATTACHER_VERSION: v4.5.1
+  CSI_NODE_DRIVER_REGISTRAR_VERSION: v2.4.0
+  CSI_PROVISIONER_VERSION: v4.0.1
+  CSI_RESIZER_VERSION: v1.10.1
+  CSI_SNAPSHOTTER_VERSION: v7.0.2
+  NGINX_TAG: '1.27'
+  ROOK_VERSION: v1.20.2
+  SNAPSHOT_CONTROLLER_VERSION: v7.0.2
+
+# No supported override path: CI locks these to the vendored source.
+display_only:
+  - CEPHCSI_VERSION
+  - CEPH_CSI_OPERATOR_VERSION
+  - CSIADDONS_SIDECAR_VERSION
+  - CSI_ATTACHER_VERSION
+  - CSI_NODE_DRIVER_REGISTRAR_VERSION
+  - CSI_PROVISIONER_VERSION
+  - CSI_RESIZER_VERSION
+  - CSI_SNAPSHOTTER_VERSION
+  - NGINX_TAG
+  - ROOK_VERSION
+  - SNAPSHOT_CONTROLLER_VERSION
+
+# Checksums for managed binary artifacts. CubeStack deploys amd64.
+checksums:
+  etcd:
+    amd64: sha256:c8c0d96d8292ef085deabbf735e9561d3d396768e4d606df005aa25964f21911
+    arm64: sha256:ad756ff27ba21e3488cfb84d00f3f4ad8d9b60a93e20f5be5b230a4aab1dc053
+  calicoctl:
+    amd64: sha256:fd2ebfc94e63ed34e924cbb8dcdcf3ffc8b264098e58d87069abd46ada2e103a
+    arm64: sha256:9235f55386cfd96e2f55393e997efec7768049cf2379a8dffa07e724890a4691
+  calico_crds:
+    no_arch: sha256:3f62456ede5360c773e007011992c0081b8b6c442f7c9ce66a9f51a2f5d9dbcd
 # Vendor artifacts that cannot be fetched from a public registry. Each entry is
 # an index item: the open-source flow points users at the vendor portal, and the
 # commercial packaging overlay supplies a local source for the same key.

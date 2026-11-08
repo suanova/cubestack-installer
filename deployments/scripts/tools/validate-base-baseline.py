@@ -84,6 +84,35 @@ def main() -> int:
             errors.append(f"env: {key} must not be empty")
     known_vars = {str(k) for k in env}
 
+    display = baseline.get("display_only") or []
+    if not isinstance(display, list):
+        errors.append("display_only must be a list")
+        display = []
+    for key in display:
+        if str(key) not in env:
+            errors.append(f"display_only: {key} is not in env")
+    if str(env.get("KUBESPRAY_VERSION", "")) != str(kubespray.get("version", "")):
+        errors.append("env.KUBESPRAY_VERSION must equal kubespray.version")
+
+    checksums = baseline.get("checksums") or {}
+    if not isinstance(checksums, dict):
+        errors.append("checksums must be a mapping")
+        checksums = {}
+    digest_re = re.compile(r"^sha256:[0-9a-f]{64}$")
+    for component, arches in checksums.items():
+        if not isinstance(arches, dict) or not arches:
+            errors.append(f"checksums.{component} must be a non-empty mapping")
+            continue
+        for arch, digest in arches.items():
+            if not digest_re.match(str(digest)):
+                errors.append(f"checksums.{component}.{arch}: invalid sha256 digest")
+    for component in ("etcd", "calicoctl"):
+        for arch in ("amd64", "arm64"):
+            if not ((checksums.get(component) or {}).get(arch)):
+                errors.append(f"checksums.{component}.{arch} is required")
+    if not (checksums.get("calico_crds") or {}).get("no_arch"):
+        errors.append("checksums.calico_crds.no_arch is required")
+
     os_entries = baseline.get("os") or []
     if not os_entries:
         errors.append("os[] must contain at least one entry")
