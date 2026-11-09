@@ -22,12 +22,15 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: mirror-updated-base
+  # One group per catalog commit: different commits must not replace each
+  # other's pending run; the stale-commit guard rejects older ones.
+  group: mirror-updated-base-${{ github.event.client_payload.catalog_commit || github.event.inputs.catalog_commit }}
   cancel-in-progress: false
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       BASE_BRANCH: ${{ vars.CUBESTACK_BASELINE_BRANCH || 'release-2.1' }}
       MIRROR_REPO: ${{ vars.MIRROR_REPO || 'suanova/container-image-mirror' }}
@@ -43,10 +46,24 @@ jobs:
         with:
           ref: ${{ env.BASE_BRANCH }}
 
+      - name: Reject stale catalog commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current="$(awk '/^mirror:/{m=1;next} m&&/^  commit:/{print $2; exit}' versions/base.yaml)"
+          [ -n "${current}" ] || { echo "::error::versions/base.yaml has no mirror.commit"; exit 1; }
+          [ "${current}" = "${COMMIT}" ] && exit 0
+          status="$(gh api "repos/${MIRROR_REPO}/compare/${current}...${COMMIT}" --jq .status)"
+          case "${status}" in
+            ahead|identical) ;;
+            *) echo "::error::stale catalog commit ${COMMIT} (${status} relative to ${current})"; exit 1 ;;
+          esac
+
       - name: Fetch catalog
         run: |
           set -euo pipefail
-          curl -fsSL \
+          curl -fsSL --max-time 30 --retry 3 --retry-delay 2 \
             "https://raw.githubusercontent.com/${MIRROR_REPO}/${COMMIT}/index.json" \
             -o "${RUNNER_TEMP}/mirror-index.json"
 
@@ -59,9 +76,21 @@ jobs:
             --commit "${COMMIT}" \
             --index "${RUNNER_TEMP}/mirror-index.json"
 
+      - name: Create GitHub App token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack-installer
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Open pull request
         uses: peter-evans/create-pull-request@v6
         with:
+          token: ${{ steps.app.outputs.token }}
           base: ${{ env.BASE_BRANCH }}
           branch: chore/mirror-${{ env.COMMIT }}
           delete-branch: true
