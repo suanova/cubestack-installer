@@ -787,11 +787,12 @@ release 模式默认用 `mc mirror --overwrite --remove` 精确镜像版本目�
 # subdir	file	pull_ref	save_ref
 .	harbor.isuanova.com_suanova-private_cubestack-operator_2.0.0.tar	harbor.isuanova.com/suanova-private/cubestack-operator:2.0.0	harbor.isuanova.com/suanova-private/cubestack-operator:2.0.0
 controller-manager	harbor.isuanova.com_suanova_cubestack-controller-manager_2.0.0.tar	harbor.isuanova.com/suanova/cubestack-controller-manager:2.0.0	harbor.isuanova.com/suanova/cubestack-controller-manager:2.0.0
-envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ratelimit:0482748e	docker.io/envoyproxy/ratelimit:0482748e
+envoy-gateway	docker.io_envoyproxy_ratelimit_5ae0682e.tar	harbor.isuanova.com/mirrors/docker.io/envoyproxy/ratelimit:5ae0682e	docker.io/envoyproxy/ratelimit:5ae0682e
 ```
 
 > `pull_ref` 是 Harbor 实际拉取地址；`save_ref` 是写进 tar RepoTags、供部署模块解析的目标 ref。
-> 二者可以不同（例如 bmc/idrac 从 `suanova-private` 拉、按 `suanova/...` 保存），现有工具已支持。
+> 二者可以不同（例如第三方镜像从 Harbor `mirrors/` 拉取、按上游坐标保存；bmc/idrac 则拉取与保存都在
+> `suanova-private/…`，与 operator 渲染的目标一致），现有工具已支持。
 
 ### 6.4 发布脚本的硬性约束
 
@@ -824,7 +825,7 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
 **数据源（release 定义是唯一真相）**：
 
 - `deployments/releases/<release>/release.env`：operator tag、chart version、CLI image；
-- `deployments/releases/<release>/release-images.tsv`：37 个镜像的 subdir/file/pull/save；
+- `deployments/releases/<release>/release-images.tsv`：38 个镜像的 subdir/file/pull/save；
 - `deployments/releases/<release>/components.tsv`：component → 来源仓库/子目录：
 
   ```text
@@ -837,13 +838,13 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_0482748e.tar	harbor.isuanova.com/mi
   portal-image         suanova/cubestack              portal
   cubepilot            suanova/cubepilot              cubepilot
   cuberouter           suanova/cuberouter             cuberouter
-  platform             -                              . bmc controller-manager cubepilot cuberouter portal
+  platform             -                              . bmc controller-manager cubepilot cuberouter portal docs
   all                  -                              *
-  release-first-party  -                              . controller-manager cubepilot cuberouter portal
+  release-first-party  -                              . controller-manager cubepilot cuberouter portal docs
   ```
 
-- `*` = 全部 37 行（含第三方依赖）；`-` = 仅 chart；`platform` = first-party 子目录。
-- `release-first-party` = 上游统一 tag 的全部 first-party 镜像，**不含 `bmc`**（bmc 按 commit SHA 固定）。
+- `*` = 全部 38 行（含第三方依赖）；`-` = 仅 chart；`platform` = first-party 子目录。
+- `release-first-party` = 上游统一 tag 的全部 first-party 镜像，**不含 `bmc`**（bmc 随 operator 发布 tag，但 release-sync-images 跳过其统一 tag 校验）。
 
 **触发方式**：
 

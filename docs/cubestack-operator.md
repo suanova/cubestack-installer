@@ -222,13 +222,13 @@ Harbor(suanova-private) ──harbor-save-images.sh --group cubestack-operator�
   - `ModelVersion` 的权重是 hostPath(`/mnt/cephfs/models/...`), 节点上必须已存在对应权重。
 - **imagePullSecrets 注入为空**: 集群 registry 匿名可拉; 留默认值(harbor-credentials)而 Secret
   不存在会让所有组件 ImagePullBackOff。
-- **镜像清单与 chart 同步(2026-10-19)**: `offline-files/cubestack-operator/image-list.tsv` 是
-  平台镜像保鲜管道的**单一事实源**。gateway-helm v1.9.2 使用 `gateway:v1.9.2` +
-  `envoy:distroless-v1.39.1` + `ratelimit:0482748e`; ai-gateway v1.2.0 使用
+- **镜像清单与 chart 同步(2026-11, operator v2.0.1)**: `offline-files/cubestack-operator/image-list.tsv` 是
+  平台镜像保鲜管道的**单一事实源**。gateway-helm v1.9.3 使用 `gateway:v1.9.3` +
+  `envoy:distroless-v1.39.5` + `ratelimit:5ae0682e`; ai-gateway v1.2.0 使用
   `ai-gateway-controller:v1.2.0` + `ai-gateway-extproc:v1.2.0`。**升级 operator/chart 后必须同步
   刷新清单并重跑 `cubestack-platform-save-images.sh`**, 否则离线集群会在 certgen/ratelimit 等
   非主容器处 ImagePullBackOff(`registry.cubestack.io:5000/...: not found`)。
-  - `ratelimit:0482748e` 是 v1.9.2 chart 的默认 tag(旧 `8fe6ea42` 只适用于 v1.9.1), 已入清单;
+  - `ratelimit:5ae0682e` 是 v1.9.3 chart 的默认 tag(旧 `0482748e` 只适用于 v1.9.2), 已入清单;
     它非默认拉起, 仅配置 `RateLimitPolicy` 时使用。
   - `prometheus-windows-exporter:0.31.8` 只有 `windows/amd64` 清单, Linux 节点不调度, **不进入**
     Linux 离线 tar 集合; 将来加 Windows 节点时需单独用 `--override-os windows` 保存。

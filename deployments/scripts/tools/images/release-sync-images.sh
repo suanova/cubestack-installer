@@ -9,7 +9,7 @@
 #
 # 设计边界:
 #   · 只写 <bucket>/<release>/; 不碰 dev offline-files/;
-#   · 只刷新 cubestack-operator 集合(37 个镜像) + operator chart + CLI tar;
+#   · 只刷新 cubestack-operator 集合(38 个镜像) + operator chart + CLI tar;
 #     dev-lab/model-collection/kubespray 等仍走完整 release-publish.sh;
 #   · 刷新期间删除 _SUCCESS: fetch 会明确失败而不是拿半套树;
 #   · 失败保留 <release>/_REFRESH_PENDING 且无 _SUCCESS, 下次同 scope/all 重跑修复;
