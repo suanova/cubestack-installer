@@ -145,7 +145,8 @@ ok "  校验器就位: verify-offline-files.sh + .pyz"
 # ---------------- CLI 工具链: 拷进构建上下文 bin/(base 层用) ----------------
 # 用户口径(2026-09-30): **常用且版本固定的工具全部打进 base 镜像**(不再靠运行期挂载补)。
 # 来源优先级: 离线**版本目录** offline-files/kubespray/<版本>/(首选) → 宿主机 command -v(兜底)。
-# 文件名统一成**固定名**(bin/kubectl / bin/skopeo / bin/yq / bin/helm-archive.tar.gz / bin/mc),
+# 文件名统一成**固定名**(bin/kubectl / bin/skopeo / bin/yq / bin/helm / bin/mc),
+# helm 在上下文里已解包并 strip(不再放 helm-archive.tar.gz, 省掉 tar 层)。
 # 这样 Dockerfile 里不出现版本号 ⇒ 升级工具只换离线件+重建 base, 不用改 Dockerfile。
 # ⚠ staging 只在 --base(要构建 base 层)时执行(2026-10-09 修): bin/ 只被 Dockerfile-cli-base
 #   COPY; 代码层构建(--build, FROM 既有 base)不需要它。旧实现无条件 staging ⇒ 构建机缺工具/缺
@@ -172,14 +173,16 @@ if [ "${DO_BASE}" = "1" ]; then
     _tool_one kubectl kubectl || exit 1
     _tool_one skopeo  skopeo  || exit 1
     _tool_one yq      yq      || exit 1
-    # helm: 压缩包形态(Dockerfile 里解包), 固定名 helm-archive.tar.gz
+    # helm: 构建上下文直接放解压后的二进制(省掉 tar 层); Dockerfile COPY bin/helm
     _helm_src=""
     [ -n "${_KV_DIR}" ] && _helm_src="$(ls "${_KV_DIR}"helm-*.tar.gz 2>/dev/null | head -1 || true)"
     if [ -n "${_helm_src}" ]; then
-        cp "${_helm_src}" "${OUT}/bin/helm-archive.tar.gz"
-        ok "  helm-archive.tar.gz ← ${_helm_src#${REPO_ROOT}/}"
+        rm -f "${OUT}/bin/helm" "${OUT}/bin/helm-archive.tar.gz"
+        tar -xzf "${_helm_src}" -C "${OUT}/bin" --strip-components=1 linux-amd64/helm \
+            || { err "解包 helm 失败: ${_helm_src}"; exit 1; }
+        ok "  helm ← ${_helm_src#${REPO_ROOT}/}"
     else
-        err "找不到 helm-*.tar.gz(离线版本目录里没有; 联网下载留待补) —— base 构建会在 COPY bin/helm-archive.tar.gz 处失败"
+        err "找不到 helm-*.tar.gz(离线版本目录里没有; 联网下载留待补) —— base 构建会在 COPY bin/helm 处失败"
         exit 1
     fi
     # mc(MinIO Client)—— **唯一必须内置的引导工具**:
@@ -229,6 +232,21 @@ if [ "${DO_BASE}" = "1" ]; then
         || [ "$(od -An -tx1 -j18 -N2 "${OUT}/bin/mc" | tr -d ' \n')" != "${_MC_MACHINE}" ]; then
         err "mc 二进制架构与 ${MC_ARCH} 不符: ${_mc_src}"
         exit 1
+    fi
+
+    # 阶段一瘦身: strip 大体积静态二进制, 直接减小实际 COPY 进镜像的文件(后置 strip 不会减小已有层)。
+    # strip 失败不阻塞(保留原二进制), 由 Dockerfile 的 --version 门禁兜底。
+    if command -v strip >/dev/null 2>&1; then
+        for _b in kubectl skopeo yq mc helm; do
+            [ -f "${OUT}/bin/${_b}" ] || continue
+            if strip --strip-all "${OUT}/bin/${_b}" 2>/dev/null; then
+                ok "  strip ${_b}"
+            else
+                warn "  strip ${_b} 失败(保留原二进制)"
+            fi
+        done
+    else
+        warn "宿主机无 strip, 跳过二进制瘦身(可 apt-get install binutils)"
     fi
 else
     say "跳过 CLI 工具链 staging(bin/ 仅 base 层构建的输入; 本次未请求 --base)"

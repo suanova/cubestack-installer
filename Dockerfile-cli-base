@@ -26,6 +26,7 @@ FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive \
     REPO_ROOT=/opt/cubestack-installer \
     PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
     LANG=C.UTF-8 \
     TZ=Asia/Shanghai
 
@@ -46,10 +47,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client sshpass rsync iputils-ping iptables dnsutils \
         netcat-openbsd patch \
         python3 python3-pip python3-venv \
-        libvirt-clients vim gnupg software-properties-common \
+        libvirt-clients vim gnupg sudo \
         iproute2 kmod systemd procps bridge-utils chrony \
         moreutils \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
+              /usr/share/doc/* /usr/share/man/* /usr/share/locale/*
 
 # 构建期门禁(2026-10-25): patch 是 kubespray 补丁层(cubestack-offline.sh)的必需工具。
 # 缺失时补丁层会**静默跳过**, 导致 Calico RBAC / coredns / metallb 等补丁不生效。
@@ -62,12 +64,27 @@ RUN command -v patch >/dev/null && patch --version | head -1
 # 这里只装一个 python3.11 并让 **ansible 走它**(pip 的 console script 带 3.11 shebang, 落在 /usr/local/bin,
 # 先于 /usr/bin 命中);系统 python3 保持 3.10 不动 ⇒ python3-libvirt 等按 3.10 编译的扩展不受影响。
 # (jammy universe 里那个 python3.11 是 3.11.0~rc1 的 RC 版, 不适合跑生产 ansible, 故走 deadsnakes 的 3.11.16。)
+COPY deployments/kubespray/kubespray/requirements.txt /tmp/kubespray-requirements.txt
 RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends python3.11 python3.11-venv python3.11-dev \
     && python3.11 -m ensurepip --upgrade \
-    && rm -rf /var/lib/apt/lists/* \
-    && python3.11 -V
+    && python3.11 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && python3.11 -m pip download -d /tmp/pipcache -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && python3.11 -m pip install --no-index --no-compile --find-links=/tmp/pipcache -r /tmp/kubespray-requirements.txt \
+    && python3.11 -m pip install --no-index --no-compile --find-links=/tmp/pipcache -r /tmp/kubespray-requirements.txt \
+    && rm -rf /tmp/pipcache /tmp/kubespray-requirements.txt \
+    && find /usr/local/lib/python3.11 /usr/lib/python3.11 -type d -name __pycache__ -prune -exec rm -rf {} + \
+    && find /usr/local/lib/python3.11 -type f -name '*.pyc' -delete \
+    && rm -rf /usr/local/lib/python3.11/dist-packages/pip /usr/local/lib/python3.11/dist-packages/pip-*.dist-info \
+              /usr/local/lib/python3.11/dist-packages/ansible_test /usr/local/lib/python3.11/dist-packages/ansible_test-*.dist-info \
+    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.11 \
+    && apt-get purge -y python3.11-dev libpython3.11-dev software-properties-common \
+    && apt-get autoremove -y \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
+              /usr/share/doc/* /usr/share/man/* /usr/share/locale/* \
+    && ansible --version 2>/dev/null | head -1
 
 # ---------- CLI 工具链(kubectl / helm / skopeo / yq)---------- 
 # ⚠ 2026-09-30 用户口径修订: **常用且版本固定的工具全部打进 base 镜像**(不再靠运行期挂载补)——
@@ -78,10 +95,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends software-proper
 COPY bin/kubectl /usr/local/bin/kubectl
 RUN chmod +x /usr/local/bin/kubectl && kubectl version --client 2>/dev/null | head -1
 
-COPY bin/helm-archive.tar.gz /tmp/helm.tar.gz
-RUN tar xzf /tmp/helm.tar.gz -C /tmp \
-    && mv /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/linux-amd64 /tmp/helm.tar.gz \
-    && helm version --short
+COPY bin/helm /usr/local/bin/helm
+RUN chmod +x /usr/local/bin/helm && helm version --short
 
 COPY bin/skopeo /usr/local/bin/skopeo
 RUN chmod +x /usr/local/bin/skopeo && skopeo --version
@@ -99,20 +114,10 @@ RUN chmod +x /usr/local/bin/yq && yq --version
 COPY bin/mc /usr/local/bin/mc
 RUN chmod +x /usr/local/bin/mc && mc --version
 
-# ---------- kubespray Python 依赖(ansible 等; 构建时下载 wheel 缓存, 运行时离线安装) ----------
-# ① 构建机联网时(清华源) pip download 拉 wheel 到 /tmp/pipcache;
-# ② pip install --no-index 全程走本地缓存, 容器内零联网;
-# ③ 复用安装(第二次 --no-index 空跑, 确保幂等/完整), 然后清缓存并校验 ansible。
-# ⚠ 必须用 python3.11(见上一步): 系统 python3=3.10 装不了 ansible 12.3.0。
-# ⚠ requirements.txt 来自构建上下文(deployments/kubespray/kubespray/requirements.txt); 代码层
-#   构建时会按**最新**的 requirements.txt 再对齐一次(依赖变化时不用重建 base)。
-COPY deployments/kubespray/kubespray/requirements.txt /tmp/kubespray-requirements.txt
-RUN python3.11 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    && python3.11 -m pip download -d /tmp/pipcache -r /tmp/kubespray-requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    && python3.11 -m pip install --no-index --find-links=/tmp/pipcache -r /tmp/kubespray-requirements.txt \
-    && python3.11 -m pip install --no-index --find-links=/tmp/pipcache -r /tmp/kubespray-requirements.txt \
-    && rm -rf /tmp/pipcache /tmp/kubespray-requirements.txt \
-    && ansible --version 2>/dev/null | head -1
+# ---------- kubespray Python 依赖(ansible 等) ----------
+# 已在上面 Python 3.11 的同一条 RUN 中安装、清理并校验(避免 pip 层保留 pycache/pip 缓存)。
+
+WORKDIR ${REPO_ROOT}
 
 WORKDIR ${REPO_ROOT}
 CMD ["/bin/bash"]
