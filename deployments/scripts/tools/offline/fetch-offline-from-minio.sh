@@ -183,7 +183,7 @@ _print_help() {
         awk -F'\t' '!/^#/ && $1 != "." && NF {print $1}' "${_list}" | sort -u | tr '\n' ' ' | fold -s -w 96 | sed 's/^/      /'
         echo ""
     else
-        echo "    组件子目录: lws envoy-gateway controller-manager prometheus perses cuberouter bmc cubepilot portal"
+        echo "    组件子目录: lws envoy-gateway controller-manager prometheus perses cuberouter bmc cubepilot portal docs"
     fi
     echo "  示例: ./fetch-offline-from-minio.sh --sub cubestack-operator/portal   # 只取某个平台组件"
     echo "        ./fetch-offline-from-minio.sh --sub cubestack-operator          # 取镜像 tar + chart"

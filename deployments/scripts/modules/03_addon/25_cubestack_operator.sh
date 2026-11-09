@@ -1006,9 +1006,9 @@ if [ "${CR_ENABLED}" = "true" ]; then
         say "    已注入 ${REG_BASE}(自研)+ ${REG_BASE}/mirrors(第三方)—— 节点不访问 Harbor。"
         say "    CR 默认值: ${_BUNDLES_STATE_MSG}。"
         say "    覆盖: CUBESTACK_OPERATOR_CR_VALUES_FILE; 开关: CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED。"
-        if [ ! -f "${OFFLINE_DIR}/docker.io_envoyproxy_ratelimit_0482748e.tar" ] \
-            && [ ! -f "${OFFLINE_DIR}/envoy-gateway/docker.io_envoyproxy_ratelimit_0482748e.tar" ]; then
-            warn "    已知缺口: docker.io/envoyproxy/ratelimit:0482748e 未备料(gateway-helm v1.9.2 的 chart 默认 tag; 本网络到 docker.io 不通) —— 默认不拉起(仅配 RateLimitPolicy 时用); 补料: 从 Harbor mirrors 拉取或按 image-list.tsv 刷新 ${OFFLINE_DIR}/envoy-gateway/"
+        if [ ! -f "${OFFLINE_DIR}/docker.io_envoyproxy_ratelimit_5ae0682e.tar" ] \
+            && [ ! -f "${OFFLINE_DIR}/envoy-gateway/docker.io_envoyproxy_ratelimit_5ae0682e.tar" ]; then
+            warn "    已知缺口: docker.io/envoyproxy/ratelimit:5ae0682e 未备料(gateway-helm v1.9.3 的 chart 默认 tag; 本网络到 docker.io 不通) —— 默认不拉起(仅配 RateLimitPolicy 时用); 补料: 从 Harbor mirrors 拉取或按 image-list.tsv 刷新 ${OFFLINE_DIR}/envoy-gateway/"
         fi
     fi
 fi

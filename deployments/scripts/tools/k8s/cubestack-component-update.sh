@@ -111,7 +111,7 @@ if [ -d "${COMP_DIR}" ]; then
             esac
         fi
         case "${_src_ref}" in
-            "${HARBOR_HOST}"/suanova/*|"${HARBOR_HOST}"/mirrors/*) _dst_path="${_src_ref#${HARBOR_HOST}/}" ;;
+            "${HARBOR_HOST}"/suanova/*|"${HARBOR_HOST}"/suanova-private/*|"${HARBOR_HOST}"/mirrors/*) _dst_path="${_src_ref#${HARBOR_HOST}/}" ;;
             *) _dst_path="mirrors/${_src_ref}" ;;
         esac
         _dst="docker://${REG_DIRECT}/${_dst_path}"

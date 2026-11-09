@@ -9,15 +9,15 @@ CubeStack 平台 Operator **及其平台组件**的离线资产(2026-10-08 起�
 |---|---|---|
 | `<上游ref>.tar`(**顶层**) | **operator 本体**(滚动 tag; `harbor-save-images.sh --group cubestack-operator` 生成) | —(operator 自身) |
 | `charts/` | **operator helm chart** + `.tgz.digest` 边车; 随离线包分发, 不入 git | —(不是平台组件) |
-| `lws/` | LWS 控制器 | `lws` |
-| `envoy-gateway/` | envoy 控制面/数据面/envoy-distroless + ratelimit + AI 网关 ×2(共 5; gateway v1.9.2 / envoy distroless-v1.39.1 / ai-gateway v1.2.0 / ratelimit 0482748e) | `envoyGateway`(+`aiGateway`) |
+| `lws/` | LWS 控制器(v1.0.0) | `lws` |
+| `envoy-gateway/` | envoy 控制面/数据面/envoy-distroless + ratelimit + AI 网关 ×2(共 5; gateway v1.9.3 / envoy distroless-v1.39.5 / ai-gateway v1.2.0 / ratelimit 5ae0682e) | `envoyGateway`(+`aiGateway`) |
 | `controller-manager/` | cubestack-controller-manager | `cubestackControllerManager` |
 | `prometheus/` | 监控栈 11 件: prometheus-operator(+config-reloader)/prometheus/alertmanager/node-exporter/kube-state-metrics/kube-rbac-proxy/thanos/grafana/k8s-sidecar(quay)/kube-webhook-certgen | `prometheus` |
 | `perses/` | perses + perses-operator + k8s-sidecar(docker.io) | `perses` |
 | `cuberouter/` | cuberouter + cnpg(cloudnative-pg + postgresql) | `cuberouter` |
 | `bmc/` | bmc-oem-exporter + idrac-exporter(+`.digest` 边车) | `exporters.bmc` |
 | `cubepilot/` | cubepilot api/openclaw/operator/web(+`.digest` 边车) | `cubepilot` |
-| `portal/` | cubestack-ui + opstree redis 家族(redis/operator/sentinel/exporter) | `cubestackPortal` |
+| `portal/` | cubestack-ui + opstree redis(redis/operator/sentinel) + oliver006 redis-exporter | `cubestackPortal` |
 | `docs/` | cubestack-docs(产品文档静态站 nginx; 私有项目 suanova-private, 钉 `v2.0.1`) | `cubestackDocs` |
 | `observability/` | 非镜像资产: `helm/`(bmc-exporter chart)/ `dashboards/` / `recording-rules/` / `MANIFEST.txt` | `observability` |
 
@@ -82,9 +82,9 @@ bash deployments/scripts/tools/images/cubestack-platform-sync.sh \
 
 | 类别 | 拉取源 | 说明 |
 |---|---|---|
-| 自研(滚动 `:latest`) | `harbor.isuanova.com/suanova/<name>` | ⚠ **bmc-oem-exporter / idrac-exporter 已迁至 `suanova-private` 项目**; tar 文件名仍按部署口径 `suanova/…` 命名(目标 `<REG>/suanova/<name>` 不变, RepoTags 保存时同步重打) |
+| 自研(滚动 `:latest`) | `harbor.isuanova.com/suanova/<name>` | bmc-oem-exporter / idrac-exporter 在 `suanova-private` 项目: 拉取与保存(**tar 文件名**、`<REG>` 目标路径)均按 `suanova-private/…` 约定, 与 operator 渲染的 `<REG>/suanova-private/<name>:<tag>` 一致 |
 | 第三方(钉版本) | `harbor.isuanova.com/mirrors/<上游ref>` | docker.io 本网络不通, 恒经 mirrors |
-| 例外(2026-10-19 校准) | 见右 | `gateway:v1.9.2` / `ai-gateway-controller:v1.2.0` / `ai-gateway-extproc:v1.2.0` / `envoy:distroless-v1.39.1` 均从 Harbor mirrors 拉取;**ratelimit 必须用 gateway-helm v1.9.2 的 chart 默认 tag `0482748e`**(旧 `8fe6ea42` 只在 v1.9.1 时代);`windows-exporter:0.31.8` 只有 `windows/amd64`, Linux 节点不调度, **不进入** Linux 离线集合 |
+| 例外(2026-11 校准) | 见右 | `gateway:v1.9.3` / `ai-gateway-controller:v1.2.0` / `ai-gateway-extproc:v1.2.0` / `envoy:distroless-v1.39.5` 均从 Harbor mirrors 拉取;**ratelimit 必须用 gateway-helm v1.9.3 的 chart 默认 tag `5ae0682e`**(旧 `0482748e` 只在 v1.9.2 时代);`windows-exporter:0.31.8` 只有 `windows/amd64`, Linux 节点不调度, **不进入** Linux 离线集合 |
 
 刷新规程(零层拉取比对, 仅变化才替换):
 
@@ -160,6 +160,11 @@ bash deployments/scripts/tools/images/cubestack-platform-sync.sh \
 - **2026-10-21 chart 迁移**: operator chart 从 CLI 镜像(`cubestack-addon/cubestack-operator/`)
   移到本目录 `charts/`, 与镜像 tar 同包分发; `.tgz`/`.digest` 不入 git, 由
   `cubestack-platform-sync.sh --collection cubestack-operator` 上传 MinIO。
+- **2026-11 release-2.0 对齐(operator v2.0.1)**: 按 operator `release-2.0`(tag v2.0.1)
+  实际渲染同步:`perses:v0.55.1`、`lws:v1.0.0`、`gateway:v1.9.3` / `envoy:distroless-v1.39.5` /
+  `ratelimit:5ae0682e`(gateway-helm v1.9.3)、`redis-exporter` 改用
+  `quay.io/oliver006/redis_exporter:v1.97.0`; cnpg/postgresql/redis 保持 1.30.1 /
+  16.15-system-trixie / v7.4.11。release 树的自研组件统一 `v2.0.1`。
 
 > ⚠ 本目录下的 `*.tar` / `*.digest` / `*.tgz` / `*.tgz.digest` 已在 `.gitignore` 中忽略(不入库);
 > 受版本控制的是本 README、`image-list.tsv` 与 `charts/README.md`。

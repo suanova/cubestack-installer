@@ -67,7 +67,7 @@ Harbor `mirrors/**` 还没同步 1.35 线(所以 `harbor-save-images.sh` 暂时�
 | k8s-base | `docker.io/library/nginx:1.30.1-alpine` | `docker.io_library_nginx_1.30.1-alpine.tar` |
 | multus | `ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick` | `multus/ghcr.io_k8snetworkplumbingwg_multus-cni_v4.2.2-thick.tar` |
 | netshoot | `docker.io/nicolaka/netshoot:latest` | `netshoot/docker.io_nicolaka_netshoot_latest.tar` |
-| (lws) | `registry.k8s.io/lws/lws:v0.10.0` | `cubestack-operator/registry.k8s.io_lws_lws_v0.10.0.tar`(仅平台 operator 的 CR 下发 `lws` 组件时需要; 独立 LWS 模块已于 2026-10-15 下线, 该 tar 随 cubestack-operator 组管理) |
+| (lws) | `registry.k8s.io/lws/lws:v1.0.0` | `cubestack-operator/registry.k8s.io_lws_lws_v1.0.0.tar`(仅平台 operator 的 CR 下发 `lws` 组件时需要; 独立 LWS 模块已于 2026-10-15 下线, 该 tar 随 cubestack-operator 组管理) |
 
 **按开关(默认关 → 不急)**
 | 组 | ref | 说明 |
