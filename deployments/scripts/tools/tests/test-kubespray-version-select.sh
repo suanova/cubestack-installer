@@ -237,9 +237,13 @@ for _df in Dockerfile-cli; do
     chk "${_df} 已安装运行期工具链钩子" "有" "$(grep -q '/etc/profile.d/50-cubestack-tools.sh' "${REPO_ROOT}/${_df}" && echo 有 || echo 无)"
     chk "${_df} 不跑 pip(依赖属 base)" "无" "$(grep -q 'pip install' "${REPO_ROOT}/${_df}" && echo 有 || echo 无)"
 done
-for _t in kubectl skopeo yq mc helm-archive.tar.gz; do
+for _t in kubectl skopeo yq mc helm; do
     chk "base 层打进 ${_t}" "有" "$(grep -q "COPY bin/${_t}" "${REPO_ROOT}/Dockerfile-cli-base" && echo 有 || echo 无)"
 done
+chk "构建工具解包 helm 到 bin/helm(不再打 tar 层)" "有" \
+    "$(grep -q 'tar -xzf.*--strip-components=1.*linux-amd64/helm' "${REPO_ROOT}/deployments/scripts/tools/docker/build-cli-context.sh" && echo 有 || echo 无)"
+chk "base 层不再 COPY helm tar" "无" \
+    "$(grep -q 'COPY bin/helm-archive' "${REPO_ROOT}/Dockerfile-cli-base" && echo 有 || echo 无)"
 chk "钩子源文件在位" "有" "$([ -f "${REPO_ROOT}/deployments/scripts/tools/docker/cli-toolchain-from-offline.sh" ] && echo 有 || echo 无)"
 # mc 是**唯一例外**: 必须打进镜像(拉离线文件的引导工具, 不能被挂载提供; 上游 URL 已 410 Gone)
 chk "base 层打进 mc(COPY bin/mc)" "有" "$(grep -q '^COPY bin/mc' "${REPO_ROOT}/Dockerfile-cli-base" && echo 有 || echo 无)"
