@@ -145,7 +145,8 @@ ok "  校验器就位: verify-offline-files.sh + .pyz"
 # ---------------- CLI 工具链: 拷进构建上下文 bin/(base 层用) ----------------
 # 用户口径(2026-09-30): **常用且版本固定的工具全部打进 base 镜像**(不再靠运行期挂载补)。
 # 来源优先级: 离线**版本目录** offline-files/kubespray/<版本>/(首选) → 宿主机 command -v(兜底)。
-# 文件名统一成**固定名**(bin/kubectl / bin/skopeo / bin/yq / bin/helm-archive.tar.gz / bin/mc),
+# 文件名统一成**固定名**(bin/kubectl / bin/skopeo / bin/yq / bin/helm / bin/mc),
+# helm 在上下文里已解包并 strip(不再放 helm-archive.tar.gz, 省掉 tar 层)。
 # 这样 Dockerfile 里不出现版本号 ⇒ 升级工具只换离线件+重建 base, 不用改 Dockerfile。
 # ⚠ staging 只在 --base(要构建 base 层)时执行(2026-10-09 修): bin/ 只被 Dockerfile-cli-base
 #   COPY; 代码层构建(--build, FROM 既有 base)不需要它。旧实现无条件 staging ⇒ 构建机缺工具/缺
