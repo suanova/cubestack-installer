@@ -2,7 +2,9 @@ name: Release images (2.1)
 
 # Temporary dispatcher on the default branch. GitHub only registers
 # workflow_dispatch on the default branch; the real build lives on
-# release-2.1. Delete this file once 2.1 is merged into main.
+# release-2.1.
+#
+# TODO(2.1): delete this file once release-2.1 is merged into main.
 
 on:
   workflow_dispatch:
