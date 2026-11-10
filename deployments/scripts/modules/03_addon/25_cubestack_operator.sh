@@ -763,16 +763,29 @@ if [ "${CR_ENABLED}" = "true" ]; then
         #   tar RepoTags 可能是**短式**(如 envoyproxy/gateway, 缺 docker.io 域)⇒ 按它推会把
         #   镜像放到 <REG>/mirrors/envoyproxy/gateway, 而节点按 CR 引用拉
         #   <REG>/mirrors/docker.io/envoyproxy/gateway ⇒ not found(2026-10-08 实机踩到)。
-        #   解析: <域>_<路径段…>_<tag> ⇒ 域/路径(段内 _ → /):tag; RepoTags 仅作**尾部校验**。
+        #   解析: <域>_<路径段…>_<tag> ⇒ 域/路径(段内 _ → /):tag。
+        #   ⚠ 例外(2026-11): 仓库路径本身含 '_'(如 quay.io/oliver006/redis_exporter)时,
+        #     上面的 _→/ 规则会把路径拆错; 此时若 tar 内 RepoTags 是**全限定 ref**
+        #     (首段含 '.' 或 ':'), 以 RepoTags 为准(其 tag 仍须与文件名尾段一致)。
         _base="$(basename "${_tarfile}" .tar)"
         _domain="${_base%%_*}"
         _tag="${_base##*_}"
         _mid="${_base%_*}"; _mid="${_mid#*_}"
-        _src_ref="${_domain}/$(printf '%s' "${_mid}" | tr '_' '/')${_tag:+:${_tag}}"
+        _src_ref_from_name="${_domain}/$(printf '%s' "${_mid}" | tr '_' '/')${_tag:+:${_tag}}"
+        _src_ref="${_src_ref_from_name}"
         if [ -n "${_tra}" ]; then
-            case "${_tra}" in
-                *"${_src_ref#*/}") : ;;   # RepoTags 尾部(去域)与文件名解析一致
-                *) warn "  $(basename "${_tarfile}") 文件名解析(${_src_ref})与 RepoTags(${_tra})不符, 跳过"; continue ;;
+            _tra_domain="${_tra%%/*}"
+            case "${_tra_domain}" in
+                *.*|*:*)   # 全限定 ref: 以 RepoTags 为准(修正路径含 '_' 的误拆)
+                    case "${_tra}" in
+                        *":${_tag}") _src_ref="${_tra}" ;;
+                        *) warn "  $(basename "${_tarfile}") 文件名解析(${_src_ref_from_name})与 RepoTags(${_tra})不符, 跳过"; continue ;;
+                    esac ;;
+                *)         # 短式 RepoTags: 只作尾部校验(保持原有防回归)
+                    case "${_tra}" in
+                        *"${_src_ref_from_name#*/}") : ;;
+                        *) warn "  $(basename "${_tarfile}") 文件名解析(${_src_ref_from_name})与 RepoTags(${_tra})不符, 跳过"; continue ;;
+                    esac ;;
             esac
         fi
         case "${_src_ref}" in
