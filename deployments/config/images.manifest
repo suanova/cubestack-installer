@@ -207,7 +207,7 @@ cubestack-platform  docker.io/envoyproxy/envoy:distroless-v1.39.5
 cubestack-platform  docker.io/envoyproxy/gateway:v1.9.3
 cubestack-platform  docker.io/envoyproxy/ai-gateway-controller:v1.2.0
 cubestack-platform  docker.io/envoyproxy/ai-gateway-extproc:v1.2.0
-cubestack-platform  quay.io/thanos/thanos:v0.42.4
+cubestack-platform  quay.io/thanos/thanos:v0.42.5
 cubestack-platform  quay.io/oliver006/redis_exporter:v1.97.0
 cubestack-platform  registry.k8s.io/lws/lws:v1.0.0
 cubestack-platform  ghcr.io/prometheus-community/windows-exporter:0.31.8
