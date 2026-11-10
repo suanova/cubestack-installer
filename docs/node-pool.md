@@ -187,9 +187,11 @@ sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worke
   - `components.cubestackPortal.values`
   - `components.envoyGateway.values.deployment.pod`（Envoy Gateway 控制面；chart 的 Pod
     调度字段在 `deployment.pod.*`，不是 `deployment.envoyGateway.*`）
+  - `components.aiGateway.values.controller`（AI Gateway 控制器；chart 的调度字段在
+    `controller.*`。operator catalog 固定安装在 `ai-gateway-system`）
   对应 `nodeSelector: node-role.kubernetes.io/control-plane=""` + control-plane/unschedulable
   tolerations ⇒ **创建 Deployment 时即钉 master**，不依赖部署末尾 patch。
-- 其余平台组件（ai-gateway、cuberouter、monitoring 等）仍由
+- 其余平台组件（cuberouter、monitoring 等）仍由
   `cubestack-placement.sh` 在 node_pool 模块末尾兜底 patch（lws 由
   `lws-cr-values.yaml` 在创建时下发）。
 - **没有**设置 `CubeStackCluster.spec.global.nodeSelector/tolerations`——它是全局注入，

@@ -814,11 +814,11 @@ trap '_cleanup; rm -rf "${_WORK}"' EXIT
 
 # 节点池(2026-10-27): operator pod 自身钉 master + 容忍 control-plane/unschedulable。
 # 平台组件：cubepilot-api/operator、cubestack-controller-manager、cubestack-portal、
-# envoy-gateway 等 **组件 chart 原生支持 nodeSelector/tolerations**，这里通过 CubeStackCluster
-# 的 components.<name>.values 在**创建 Deployment 时**就下发（不依赖部署末尾 patch）。
-# 其余平台组件(ai-gateway/lws/cuberouter/monitoring)仍由 node_pool 模块的
-# cubestack-placement.sh 兜底（lws 另由 lws-cr-values.yaml 下发）；**不使用** CR
-# spec.global 的 placement 字段 —— 它会注入到所有组件(含 model bundle 推理负载)。
+# envoy-gateway、ai-gateway 等 **组件 chart 原生支持 nodeSelector/tolerations**，这里通过
+# CubeStackCluster 的 components.<name>.values 在**创建 Deployment 时**就下发（不依赖部署末尾 patch）。
+# 其余平台组件(cuberouter/monitoring)仍由 node_pool 模块的 cubestack-placement.sh 兜底
+# （lws 另由 lws-cr-values.yaml 下发）；**不使用** CR spec.global 的 placement 字段 ——
+# 它会注入到所有组件(含 model bundle 推理负载)。
 if [ "${NODE_POOL_CUBESTACK_PLACEMENT:-true}" = "true" ]; then
     _NODE_POOL_VALUES="${_WORK}/node-pool-values.yaml"
     cat > "${_NODE_POOL_VALUES}" <<'EOF'
@@ -908,6 +908,21 @@ clusterCR:
                 - key: node.kubernetes.io/unschedulable
                   operator: Exists
                   effect: NoSchedule
+      # Envoy AI Gateway 控制器：ai-gateway-helm 的调度字段在 controller.*
+      # (与 envoy-gateway 的 deployment.pod.* 不同)。安装命名空间由 operator catalog
+      # 固定为 ai-gateway-system。
+      aiGateway:
+        values:
+          controller:
+            nodeSelector:
+              node-role.kubernetes.io/control-plane: ""
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node.kubernetes.io/unschedulable
+                operator: Exists
+                effect: NoSchedule
 EOF
     _EXTRA_VALUES+=( -f "${_NODE_POOL_VALUES}" )
 fi
