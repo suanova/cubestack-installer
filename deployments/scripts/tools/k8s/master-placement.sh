@@ -3,7 +3,8 @@
 # master-placement.sh — 系统/平台组件 master placement(节点池 cordon 前置)
 # ------------------------------------------------------------
 # 目标(2026-10-27): master 保持 Unschedulable=True 时, CoreDNS/metrics-server/
-#   dns-autoscaler/calico-kube-controllers/registry/MetalLB controller 仍能调度到 master。
+#   dns-autoscaler/calico-kube-controllers/registry/MetalLB controller/ceph-csi
+#   controller-manager 仍能调度到 master。
 #   做法: 给这些 Deployment/ReplicaSet 的 PodTemplate 加
 #     nodeSelector: node-role.kubernetes.io/control-plane: ""
 #     tolerations:  control-plane:NoSchedule + node.kubernetes.io/unschedulable:NoSchedule
@@ -54,6 +55,12 @@ _MASTER_WORKLOADS=(
     "deploy|kube-system|calico-kube-controllers"
     "rs|kube-system|registry"
     "deploy|metallb-system|controller"
+    # Ceph CSI 控制器(ceph-csi-operator 自身, 不是 Driver 调和的 ctrlplugin)。
+    # 03_ceph_csi.sh 安装后已 patch 一次; 这里再做**部署末尾的最终收敛**, 覆盖
+    #   · ceph_csi 未单独执行(只跑 ceph)或顺序变化;
+    #   · 旧集群升级前 controller-manager 已在 worker 上运行;
+    #   · 其它模块/apply 重新渲染 PodTemplate 后丢失 placement。
+    "deploy|${CEPH_NAMESPACE:-rook-ceph}|ceph-csi-controller-manager"
 )
 _MASTER_DS=(
     "ds|metallb-system|speaker"

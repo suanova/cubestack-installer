@@ -148,6 +148,9 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
 - `kube-system/deploy/calico-kube-controllers`
 - `kube-system/rs/registry`（registry 是 kubespray 的裸 ReplicaSet）
 - `metallb-system/deploy/controller`
+- `rook-ceph/deploy/ceph-csi-controller-manager`（ceph-csi-operator 自身；命名空间跟随 `CEPH_NAMESPACE`。
+  `03_ceph_csi.sh` 安装后已 patch 一次，这里在部署末尾再收敛一次，覆盖只跑 `ceph`、旧集群升级或
+  PodTemplate 被重新渲染的情况）
 
 `metallb-system/ds/speaker` 是 DaemonSet，只补 toleration（必须全节点，含 cordon master）。
 `NODE_POOL_PLATFORM_PLACEMENT=true`（默认）时开启该步骤；设为 `false` 可保持系统组件不受本工具影响

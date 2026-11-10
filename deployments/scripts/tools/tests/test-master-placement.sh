@@ -41,7 +41,7 @@ if [ -f "${TOOL}" ]; then
     chk_contains "remove" "--remove" "${src}"
 
     echo "== ② workload 覆盖 =="
-    for w in coredns metrics-server dns-autoscaler calico-kube-controllers registry; do
+    for w in coredns metrics-server dns-autoscaler calico-kube-controllers registry ceph-csi-controller-manager; do
         chk_contains "workload ${w}" "${w}" "${src}"
     done
     chk_contains "metallb controller" "metallb-system" "${src}"
@@ -106,6 +106,7 @@ if [ -f "${TOOL}" ]; then
     chk_contains "registry pod recreate" "delete pod -l k8s-app=registry" "${log}"
     chk_contains "apply patch metallb controller" "patch deploy controller" "${log}"
     chk_contains "apply patch metallb speaker" "patch ds speaker" "${log}"
+    chk_contains "apply patch ceph-csi controller-manager" "patch deploy ceph-csi-controller-manager" "${log}"
     chk_contains "apply toleration" "node.kubernetes.io/unschedulable" "${log}"
 else
     echo "  FAIL 无法执行 apply(tool missing)"; fail=1
@@ -192,11 +193,11 @@ cat > "${TMP}/json-sel/registry.json" <<'EOF'
 {"spec":{"template":{"spec":{}}}}
 EOF
 # 每个 workload 都有显式 fixture(不再依赖隐式缺省):
-#   json-none = 6 个 workload 全为"无 selector"; json-sel 其余 4 个同样无 selector。
-for _w in coredns metrics-server dns-autoscaler calico-kube-controllers registry controller; do
+#   json-none = 全部 workload 均为"无 selector"; json-sel 其余 workload 同样无 selector。
+for _w in coredns metrics-server dns-autoscaler calico-kube-controllers registry controller ceph-csi-controller-manager; do
     printf '%s\n' '{"spec":{"template":{"spec":{}}}}' > "${TMP}/json-none/${_w}.json"
 done
-for _w in metrics-server dns-autoscaler calico-kube-controllers controller; do
+for _w in metrics-server dns-autoscaler calico-kube-controllers controller ceph-csi-controller-manager; do
     printf '%s\n' '{"spec":{"template":{"spec":{}}}}' > "${TMP}/json-sel/${_w}.json"
 done
 run_remove() {   # <json dir> → 输出; ssh 日志在 $TMP/ssh-remove.log
