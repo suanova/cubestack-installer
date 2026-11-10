@@ -186,18 +186,20 @@ jobs:
             echo "base.yaml unchanged"
             exit 0
           fi
-          short="${DIGEST#sha256:}"
-          branch="bot/netshoot-${TAG}-${short:0:12}"
+          branch="bot/netshoot-${TAG}-pin"
           git config user.name suanova-bot
           git config user.email bot@isuanova.com
           git checkout -b "${branch}"
           git add versions/base.yaml
           git commit -s -m "chore(netshoot): pin ${TAG} (${DIGEST:0:19})"
           git push -f origin "${branch}"
-          if [ "$(gh pr list --head "${branch}" --json number --jq length)" != "0" ]; then
-            echo "PR already exists for ${branch}"
+          title="chore(netshoot): pin ${TAG}"
+          body="Automated digest update from the netshoot-rdma workflow: ${IMAGE}:${TAG}@${DIGEST}"
+          pr="$(gh pr list --head "${branch}" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "${pr}" ]; then
+            gh pr edit "${pr}" --title "${title}" --body "${body}"
+            echo "updated PR #${pr} for ${branch}"
           else
             gh pr create --base "${GITHUB_REF_NAME}" --head "${branch}" \
-              --title "chore(netshoot): pin ${TAG}" \
-              --body "Automated digest update from the netshoot-rdma workflow: ${IMAGE}:${TAG}@${DIGEST}"
+              --title "${title}" --body "${body}"
           fi
