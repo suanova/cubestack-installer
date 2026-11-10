@@ -109,3 +109,6 @@ HGGC slicing shim、MIG、NFD、Kueue）。CubeStack 当前只吸收其关键点
 - 严重 ECC/XID 健康判定。
 
 不引入 GPUStack Operator/slicing shim，保持 fallback 轻量。
+
+> 四种方案的完整对比、ACK 镜像拆解证据、GPUStack/LJ-RuntimeKit 的详细分析见
+> [`t-head-ppu-solutions.md`](t-head-ppu-solutions.md)。
