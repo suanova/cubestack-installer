@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ppu-smoke
+  labels:
+    app.kubernetes.io/name: ppu-smoke
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: ppu-smoke
+      image: ubuntu:24.04
+      command:
+        - /bin/sh
+        - -c
+        - >
+          export LD_LIBRARY_PATH=/usr/local/PPU_SDK/lib:/usr/local/PPU_SDK/lib64;
+          /usr/local/PPU_SDK/bin/ppu-smi -L
+      resources:
+        limits:
+          alibabacloud.com/ppu: "1"
+      volumeMounts:
+        - name: ppu-sdk
+          mountPath: /usr/local/PPU_SDK
+          readOnly: true
+  volumes:
+    - name: ppu-sdk
+      hostPath:
+        path: /usr/local/PPU_SDK
+        type: Directory
