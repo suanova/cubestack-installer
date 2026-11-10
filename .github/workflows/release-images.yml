@@ -1,0 +1,41 @@
+name: Release images (2.1)
+
+# Temporary dispatcher on the default branch. GitHub only registers
+# workflow_dispatch on the default branch; the real build lives on
+# release-2.1.
+#
+# TODO(2.1): delete this file once release-2.1 is merged into main.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Product version (e.g. 2.1.0)'
+        required: true
+      force_base:
+        description: 'Build the CLI base layer'
+        type: boolean
+        default: true
+      perftest_version:
+        description: 'perftest version (default: Dockerfile ARG)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Build and verify locally; do not push, tag or open a PR'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    uses: suanova/cubestack-installer/.github/workflows/release-images.yml@release-2.1
+    with:
+      version: ${{ inputs.version }}
+      force_base: ${{ inputs.force_base }}
+      perftest_version: ${{ inputs.perftest_version }}
+      dry_run: ${{ inputs.dry_run }}
+      source_ref: release-2.1
+    secrets: inherit
