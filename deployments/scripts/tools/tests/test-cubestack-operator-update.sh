@@ -356,7 +356,7 @@ chk_contains "CR values unschedulable toleration" 'node.kubernetes.io/unschedula
 chk_contains "defaults NODE_POOL_ENABLED=true" 'NODE_POOL_ENABLED="${NODE_POOL_ENABLED:-true}"' "${DEFAULTS}"
 chk_contains "defaults NODE_POOL_MASTER_CORDON=false" 'NODE_POOL_MASTER_CORDON="${NODE_POOL_MASTER_CORDON:-false}"' "${DEFAULTS}"
 chk_contains "defaults NODE_POOL_MASTER_SCHEDULABLE=true" 'NODE_POOL_MASTER_SCHEDULABLE="${NODE_POOL_MASTER_SCHEDULABLE:-true}"' "${DEFAULTS}"
-chk_contains "defaults NODE_POOL_PLATFORM_PLACEMENT=false" 'NODE_POOL_PLATFORM_PLACEMENT="${NODE_POOL_PLATFORM_PLACEMENT:-false}"' "${DEFAULTS}"
+chk_contains "defaults NODE_POOL_PLATFORM_PLACEMENT=true" 'NODE_POOL_PLATFORM_PLACEMENT="${NODE_POOL_PLATFORM_PLACEMENT:-true}"' "${DEFAULTS}"
 chk_contains "defaults NODE_POOL_CUBESTACK_PLACEMENT=true" 'NODE_POOL_CUBESTACK_PLACEMENT="${NODE_POOL_CUBESTACK_PLACEMENT:-true}"' "${DEFAULTS}"
 
 echo "== ⑮ uninstall: 清 operator ns 内残留 CR finalizer =="

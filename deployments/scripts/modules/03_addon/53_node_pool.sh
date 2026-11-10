@@ -19,7 +19,9 @@
 #         (patch 前先给 RWO PVC 的 Deployment 设 Recreate，避免 Multi-Attach)；
 #         25_cubestack_operator.sh 还会通过 CubeStackCluster components.<name>.values 在创建
 #         cubepilot-api/operator、controller-manager、portal 时直接下发 master placement。
-#       - NODE_POOL_PLATFORM_PLACEMENT=false(默认): 不动 CoreDNS/metrics/registry/MetalLB 等系统组件。
+#       - NODE_POOL_PLATFORM_PLACEMENT=true(默认): 给 CoreDNS/metrics-server/dns-autoscaler/
+#         calico-kube-controllers/registry/MetalLB 等系统组件加 master placement。
+#         设 false 可只钉 CubeStack 平台组件、不动系统组件。
 #   · 无可用 worker 安全护栏(2026-10-28): 没有 **Ready 且未 cordon** 的 worker(单节点
 #     all-in-one / 纯 master 集群, 或配置的 worker 全部 NotReady/已 cordon)时,
 #     node-pool.sh 自动**跳过 cordon**, master 保持可调度 ——

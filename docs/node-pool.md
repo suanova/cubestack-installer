@@ -2,7 +2,8 @@
 
 > 2026-11-02 起**默认口径**：master 默认 **可调度** —— 不 cordon，且由 `node_pool` 模块移除
 > kubespray 默认给 control-plane 打的 `node-role.kubernetes.io/control-plane:NoSchedule`
-> 污点；CubeStack operator/平台组件仍通过 nodeSelector + toleration 钉到 master。设置
+> 污点；系统控制面组件（CoreDNS/metrics-server/registry/MetalLB 等）与 CubeStack
+> operator/平台组件仍通过 nodeSelector + toleration 钉到 master。设置
 > `NODE_POOL_MASTER_CORDON=true` 可改为 cordon 隔离；设置
 > `NODE_POOL_MASTER_SCHEDULABLE=false` 可保留 kubespray 默认污点（不可调度但也不 cordon）。
 > GPU worker 隔离在后续阶段补充。
@@ -94,7 +95,7 @@ sudo ./deployments/scripts/tools/node/node-pool.sh --apply --only <master-hostna
   （apply/check 会实际查询 worker 的 STATUS 与 `spec.unschedulable`，逐个告警不可用原因）。
 - **原因**：kubespray 的 CoreDNS / dns-autoscaler 模板只容忍
   `node-role.kubernetes.io/control-plane:NoSchedule`，**没有** `node.kubernetes.io/unschedulable`
-  容忍；默认 `NODE_POOL_PLATFORM_PLACEMENT=false` 也不会给它们补。集群里所有节点都被 cordon 后，
+  容忍；`NODE_POOL_PLATFORM_PLACEMENT` 设为 `false` 时也不会给它们补。集群里所有节点都被 cordon 后，
   DNS 组件滚动、扩缩容或节点重启后新 Pod 会**永久 Pending**——单节点集群等于整集群 DNS 失效。
 - **与单节点 play 一致**：`patch-playbooks/cubestack-single-node.yml` 在只有 1 个 control-plane 时
   会 uncordon 并移除污点；本工具不会再把它 cordon 回去。
@@ -118,7 +119,7 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
 - `DEFAULT: 0`、`TOGGLE: NODE_POOL_ENABLED`（默认 **true**）⇒ 随全量部署在 addon 末尾（文件 53）执行；
 - `REQUIRES: k8s_deploy`：集群必须先存在；已部署集群上 `k8s_deploy` 状态 done 时不会重跑；
 - 执行顺序：先 `cubestack-placement.sh --apply` 给平台组件加 master placement（
-  `NODE_POOL_PLATFORM_PLACEMENT=true` 时再跑 `master-placement.sh`），最后打 master 标签/
+  `NODE_POOL_PLATFORM_PLACEMENT=true`（默认）时再跑 `master-placement.sh`），最后打 master 标签/
   按需 cordon；
 - **k8s 阶段提前收敛(2026-11-03)**：`06_k8s_deploy.sh` 在 kubespray 成功后、addon 之前会调用
   `tools/node/node-pool.sh --apply`（临时强制 `NODE_POOL_MASTER_CORDON=false`）只做
@@ -149,7 +150,8 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
 - `metallb-system/deploy/controller`
 
 `metallb-system/ds/speaker` 是 DaemonSet，只补 toleration（必须全节点，含 cordon master）。
-`NODE_POOL_PLATFORM_PLACEMENT=true` 可开启该步骤（默认 false：不动系统组件）。
+`NODE_POOL_PLATFORM_PLACEMENT=true`（默认）时开启该步骤；设为 `false` 可保持系统组件不受本工具影响
+（只钉 CubeStack 平台组件）。
 
 > ⚠ kubespray 重跑 `k8s_deploy` 会按 addons.yml 重新渲染这些 Deployment；之后需重跑
 > `--steps node_pool` 重新应用。`--remove` 只移除本工具加的 master nodeSelector，
@@ -197,7 +199,7 @@ sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worke
 | `NODE_POOL_MASTER_LABEL` | `node-pool=control-plane` | master 标签 |
 | `NODE_POOL_MASTER_CORDON` | `false` | master 是否 cordon（默认 false=可调度；true=cordon；**无可用 worker 时自动跳过 cordon**） |
 | `NODE_POOL_MASTER_SCHEDULABLE` | `true` | 是否移除 master 的 control-plane/master NoSchedule 污点（默认 true=可调度；false=保留 kubespray 默认污点） |
-| `NODE_POOL_PLATFORM_PLACEMENT` | `false` | 是否把 CoreDNS/metrics/registry/MetalLB 等系统组件也钉 master |
+| `NODE_POOL_PLATFORM_PLACEMENT` | `true` | 是否把 CoreDNS/metrics/registry/MetalLB 等系统组件也钉 master（`false`=只钉 CubeStack 平台组件） |
 | `NODE_POOL_CUBESTACK_PLACEMENT` | `true` | CubeStack operator/平台组件钉 master（含 chart values 透传） |
 | `NODE_POOL_GPU_LABEL` | `node-pool=gpu` | 阶段二使用 |
 | `NODE_POOL_GPU_TAINT` | `dedicated=gpu:NoSchedule` | 阶段二使用 |

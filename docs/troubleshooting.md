@@ -1394,7 +1394,8 @@ bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh # ⑨ ser
 2. kubespray 模板的 CoreDNS/dns-autoscaler 只容忍
    `node-role.kubernetes.io/control-plane:NoSchedule`, **没有**
    `node.kubernetes.io/unschedulable:NoSchedule`(scheduler `NodeUnschedulable` 插件检查的隐式
-   taint); 默认 `NODE_POOL_PLATFORM_PLACEMENT=false` 也不跑 `master-placement.sh` 补容忍;
+   taint); `NODE_POOL_PLATFORM_PLACEMENT` 设为 `false` 时也不会跑 `master-placement.sh` 补容忍
+   （默认已改为 `true`，即部署时会给这些系统组件补 master placement）；
 3. `patch-playbooks/cubestack-single-node.yml` 在部署早期特意 uncordon 单 control-plane,
    随后被 node_pool 又 cordon 回去。
 
