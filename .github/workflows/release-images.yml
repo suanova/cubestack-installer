@@ -27,6 +27,31 @@ on:
         type: boolean
         default: false
 
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      force_base:
+        required: false
+        type: boolean
+        default: true
+      perftest_version:
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        required: false
+        type: boolean
+        default: false
+      source_ref:
+        required: false
+        type: string
+        default: 'release-2.1'
+    secrets:
+      CI_BOT_PASSWORD:
+        required: true
+
 permissions:
   contents: write
   pull-requests: write
@@ -49,11 +74,12 @@ jobs:
       FORCE_BASE: ${{ inputs.force_base }}
       PERFTEST_INPUT: ${{ inputs.perftest_version }}
       DRY_RUN: ${{ inputs.dry_run }}
+      SOURCE_REF: ${{ inputs.source_ref || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ env.SOURCE_REF }}
 
       - name: Validate version
         run: |
@@ -226,7 +252,7 @@ jobs:
           if [ "$(gh pr list --head "${branch}" --json number --jq length)" != "0" ]; then
             echo "PR already exists for ${branch}"
           else
-            gh pr create --base "${GITHUB_REF_NAME}" --head "${branch}" \
+            gh pr create --base "${SOURCE_REF}" --head "${branch}" \
               --title "chore(netshoot): pin ${VERSION}" \
               --body "Release images workflow pinned netshoot ${VERSION} (${NETSHOOT_DIGEST})."
           fi
