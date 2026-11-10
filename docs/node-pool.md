@@ -185,10 +185,13 @@ sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worke
   - `components.cubepilot.values.operator/api/web`
   - `components.cubestackControllerManager.values`
   - `components.cubestackPortal.values`
+  - `components.envoyGateway.values.deployment.pod`（Envoy Gateway 控制面；chart 的 Pod
+    调度字段在 `deployment.pod.*`，不是 `deployment.envoyGateway.*`）
   对应 `nodeSelector: node-role.kubernetes.io/control-plane=""` + control-plane/unschedulable
   tolerations ⇒ **创建 Deployment 时即钉 master**，不依赖部署末尾 patch。
-- 其余平台组件（Envoy 控制器、ai-gateway、lws、cuberouter、monitoring 等）仍由
-  `cubestack-placement.sh` 在 node_pool 模块末尾兜底 patch。
+- 其余平台组件（ai-gateway、cuberouter、monitoring 等）仍由
+  `cubestack-placement.sh` 在 node_pool 模块末尾兜底 patch（lws 由
+  `lws-cr-values.yaml` 在创建时下发）。
 - **没有**设置 `CubeStackCluster.spec.global.nodeSelector/tolerations`——它是全局注入，
   可能把 model bundle 推理负载也钉到 master；平台组件用 component values/直接 patch，
   GPU 阶段再单独处理 bundle。

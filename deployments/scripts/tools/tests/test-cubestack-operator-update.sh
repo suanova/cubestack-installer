@@ -345,9 +345,11 @@ echo "== ⑭ 默认平台组件 master placement(chart values 透传, 不改组�
 # 2026-10-27: cubepilot-api/operator、controller-manager、portal 的 chart 已原生支持
 # nodeSelector/tolerations；operator 模块通过 CubeStackCluster components.<name>.values
 # 在创建 Deployment 时下发，不依赖 node_pool 模块的末尾 patch。
-for k in 'cubepilot:' 'cubestackControllerManager:' 'cubestackPortal:'; do
+for k in 'cubepilot:' 'cubestackControllerManager:' 'cubestackPortal:' 'envoyGateway:'; do
     chk_contains "CR component ${k}" "$(printf '      %s' "${k}")" "${MOD}"
 done
+# envoy-gateway 的 Pod 调度在 deployment.pod.*（写 deployment.envoyGateway.* 会静默不生效）
+chk_contains "envoyGateway native pod placement path" "$(printf '      envoyGateway:\n        values:\n          deployment:\n            pod:')" "${MOD}"
 for k in 'operator:' 'api:' 'web:'; do
     chk_contains "cubepilot subcomponent ${k}" "$(printf '          %s' "${k}")" "${MOD}"
 done
