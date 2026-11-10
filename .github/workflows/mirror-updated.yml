@@ -37,10 +37,16 @@ jobs:
       COMMIT: ${{ github.event.client_payload.catalog_commit || github.event.inputs.catalog_commit }}
     steps:
       - name: Validate payload
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "${COMMIT}" =~ ^[0-9a-f]{7,40}$ ]] \
             || { echo "::error::invalid catalog_commit: '${COMMIT}'"; exit 1; }
+          resolved="$(gh api "repos/${MIRROR_REPO}/commits/${COMMIT}" --jq .sha)"
+          [[ "${resolved}" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::cannot resolve catalog commit: ${COMMIT}"; exit 1; }
+          echo "COMMIT=${resolved}" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
         with:
@@ -51,7 +57,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          current="$(awk '/^mirror:/{m=1;next} m&&/^  commit:/{print $2; exit}' versions/base.yaml)"
+          pin_commit() {
+            sed -n '/^mirror:/,/^[^ ]/s/^  commit:[[:space:]]*//p' "$1" \
+              | head -1 \
+              | sed 's/[[:space:]]*#.*//' \
+              | tr -d "\"'" \
+              | xargs
+          }
+          git fetch --quiet origin "${BASE_BRANCH}"
+          git reset --hard "origin/${BASE_BRANCH}"
+          current="$(pin_commit versions/base.yaml)"
           [ -n "${current}" ] || { echo "::error::versions/base.yaml has no mirror.commit"; exit 1; }
           [ "${current}" = "${COMMIT}" ] && exit 0
           status="$(gh api "repos/${MIRROR_REPO}/compare/${current}...${COMMIT}" --jq .status)"
@@ -76,8 +91,38 @@ jobs:
             --commit "${COMMIT}" \
             --index "${RUNNER_TEMP}/mirror-index.json"
 
+      - name: Recheck freshness before publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pin_commit() {
+            sed -n '/^mirror:/,/^[^ ]/s/^  commit:[[:space:]]*//p' "$1" \
+              | head -1 \
+              | sed 's/[[:space:]]*#.*//' \
+              | tr -d "\"'" \
+              | xargs
+          }
+          git fetch --quiet origin "${BASE_BRANCH}"
+          git show "origin/${BASE_BRANCH}:versions/base.yaml" \
+            > "${RUNNER_TEMP}/live-base.yaml"
+          live="$(pin_commit "${RUNNER_TEMP}/live-base.yaml")"
+          [ -n "${live}" ] || { echo "::error::live baseline has no mirror.commit"; exit 1; }
+          if [ "${live}" = "${COMMIT}" ]; then
+            exit 0
+          fi
+          status="$(gh api "repos/${MIRROR_REPO}/compare/${live}...${COMMIT}" --jq .status)"
+          case "${status}" in
+            ahead|identical) ;;
+            *)
+              echo "::notice::base advanced to ${live}; skipping stale ${COMMIT} (${status})"
+              echo "SKIP_PUBLISH=1" >> "$GITHUB_ENV"
+              ;;
+          esac
+
       - name: Create GitHub App token
         id: app
+        if: env.SKIP_PUBLISH != '1'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
@@ -88,6 +133,7 @@ jobs:
           permission-pull-requests: write
 
       - name: Open pull request
+        if: env.SKIP_PUBLISH != '1'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ steps.app.outputs.token }}
