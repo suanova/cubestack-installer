@@ -20,5 +20,5 @@ cubepilot	suanova/cubepilot	cubepilot	CubePilot
 cuberouter	suanova/cuberouter	cuberouter	cuberouter(含 CNPG 依赖)
 platform	-	. bmc controller-manager cubepilot cuberouter portal docs	全部 first-party 平台镜像
 cli	-	cli	仅 CLI tar 原地刷新(需 --cli-tar/--cli-image-digest)
-all	-	*	全部 38 个镜像(含第三方依赖)
+all	-	*	全部 37 个镜像(含第三方依赖)
 release-first-party	-	. controller-manager cubepilot cuberouter portal docs	全部 first-party 镜像(上游统一 tag)
