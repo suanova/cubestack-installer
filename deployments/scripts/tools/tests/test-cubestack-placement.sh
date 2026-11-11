@@ -55,7 +55,13 @@ if [ -f "${TOOL}" ]; then
     chk_contains "apply/check 查询失败按失败处理" "_require_exists" "${src}"
     chk_contains "unpatch 只删 installer key(CR)" '"nodeSelector":{"node-role.kubernetes.io/control-plane":null}' "${src}"
     chk_contains "unpatch 只删 installer key(CNPG affinity)" '"affinity":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}}' "${src}"
+    chk_contains "unpatch 只删 installer key(sentinel)" '"sentinel":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}}' "${src}"
     chk_contains "sentinel 复用 PVC 守护" "_pvc_guard_prefix" "${src}"
+    chk_contains "CR 组件 values 回滚" "_cb_clear_cr_component_placement" "${src}"
+    chk_contains "组件 values 覆盖 cubepilot" '("cubepilot", "values", "operator", "nodeSelector")' "${src}"
+    chk_contains "组件 values 覆盖 kube-state-metrics" '("prometheus", "values", "kube-state-metrics", "nodeSelector")' "${src}"
+    chk_contains "CR patch 合并现有 tolerations" "_patch_cr_placement" "${src}"
+    chk_not_contains "不再使用静态 CR patch" "_CR_PATCH=" "${src}"
 
     echo "== ④ 不碰数据面/推理 =="
     # workload 列表不应包含 envoy-envoy-gateway-system- / sglang / vllm / model
@@ -78,6 +84,7 @@ printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}"
 # CR 多副本 PVC 前缀查询: 必须返回合法 JSON(空列表), 否则按"查询失败"保守跳过。
 case "${cmd}" in
     *"get pvc -o json"*) echo '{"items":[]}' ;;
+    *" -o json"*) echo '{"spec":{}}' ;;
 esac
 exit 0
 FAKE
@@ -275,6 +282,136 @@ log="$(cat "${TMP}/redisbind.log")"
 chk "⑩ worker-bound 跳过不阻断" "0" "${rc}"
 chk_not_contains "⑩ Redis 数据副本不 patch" "patch redisreplications.redis.redis.opstreelabs.in" "${log}"
 chk_contains "⑩ sentinel 同步跳过" "cuberouter-redis sentinel] PVC cuberouter-redis-0@w1" "${out}"
+
+echo "== ⑪ remove 清理 CubeStackCluster 内持久化的组件 placement =="
+mkdir -p "${TMP}/bin-csc"
+: > "${TMP}/csc-patch.json"
+cat > "${TMP}/bin-csc/ssh" <<'FAKE'
+#!/bin/bash
+cmd="$*"
+case "${cmd}" in
+    *"get csc -o json"*)
+        echo '{"items":[{"metadata":{"name":"cubestack"},"spec":{"components":{"cubepilot":{"values":{"operator":{"nodeSelector":{"node-role.kubernetes.io/control-plane":"","user-selector":"keep"}}}},"prometheus":{"values":{"grafana":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""}}}}}}}]}' ;;
+    *"patch csc "*) cat > "${FAKE_PATCH_STDIN:?}"; exit 0 ;;
+    *" -o json"*) echo '{"spec":{}}' ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-csc/ssh"
+out="$(
+    (
+        export PATH="${TMP}/bin-csc:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        export FAKE_PATCH_STDIN="${TMP}/csc-patch.json"
+        bash "${TOOL}" --remove
+    ) 2>&1
+)"; rc=$?
+patch_json="$(cat "${TMP}/csc-patch.json")"
+chk "⑪ remove 退出码 0" "0" "${rc}"
+chk_contains "⑪ 已清理 CR 组件 placement" "已移除 CR 内组件 master nodeSelector" "${out}"
+chk_contains "⑪ patch 只删 control-plane key" '"node-role.kubernetes.io/control-plane":null' "${patch_json}"
+chk_contains "⑪ patch 覆盖 cubepilot" '"cubepilot"' "${patch_json}"
+chk_contains "⑪ patch 覆盖 grafana" '"grafana"' "${patch_json}"
+chk_not_contains "⑪ 不动用户自定义 selector" 'user-selector' "${patch_json}"
+
+echo "== ⑫ apply 合并现有 tolerations(不得整体替换) =="
+mkdir -p "${TMP}/bin-tol"
+: > "${TMP}/tol.log"
+cat > "${TMP}/bin-tol/ssh" <<'FAKE'
+#!/bin/bash
+cmd="$*"
+case "${cmd}" in
+    *"get pvc -o json"*) echo '{"items":[]}' ;;
+    *" patch "*) printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}" ;;
+    *" -o json"*) echo '{"spec":{"nodeSelector":{"user-selector":"keep"},"tolerations":[{"key":"dedicated","operator":"Equal","value":"gpu","effect":"NoSchedule"}]}}' ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-tol/ssh"
+printf '#!/bin/bash\nexit 0\n' > "${TMP}/bin-tol/sleep"; chmod +x "${TMP}/bin-tol/sleep"
+out="$(
+    (
+        export PATH="${TMP}/bin-tol:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        export FAKE_SSH_LOG="${TMP}/tol.log"
+        bash "${TOOL}" --apply
+    ) 2>&1
+)"; rc=$?
+cr_patch="$(grep -m1 'patch prometheuses.monitoring.coreos.com' "${TMP}/tol.log" || true)"
+chk "⑫ apply 退出码 0" "0" "${rc}"
+chk_contains "⑫ CR patch 保留已有 toleration" '"key":"dedicated"' "${cr_patch}"
+chk_contains "⑫ CR patch 含 control-plane toleration" '"key":"node-role.kubernetes.io/control-plane"' "${cr_patch}"
+chk_contains "⑫ CR patch 含 unschedulable toleration" '"key":"node.kubernetes.io/unschedulable"' "${cr_patch}"
+chk_not_contains "⑫ CR patch 不再整体替换 tolerations" '"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]' "${cr_patch}"
+
+echo "== ⑬ remove 只删 installer 的 selector key(保留用户自定义) =="
+mkdir -p "${TMP}/bin-unpatch"
+: > "${TMP}/unpatch.log"
+cat > "${TMP}/bin-unpatch/ssh" <<'FAKE'
+#!/bin/bash
+cmd="$*"
+case "${cmd}" in
+    *" patch "*) printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}" ;;
+    *"get prometheuses.monitoring.coreos.com"*" -o json"*)
+        echo '{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":"","user-selector":"keep"},"tolerations":[{"key":"user-taint","operator":"Exists","effect":"NoSchedule"}]}}' ;;
+    *"get clusters.postgresql.cnpg.io"*" -o json"*)
+        echo '{"spec":{"affinity":{"nodeSelector":{"node-role.kubernetes.io/control-plane":"","gpu-pool":"keep"}}}}' ;;
+    *"get redisreplications"*" -o json"*)
+        echo '{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":"","redis-user":"keep"},"sentinel":{"nodeSelector":{"node-role.kubernetes.io/control-plane":"","sent-user":"keep"}}}}' ;;
+    *" -o json"*) echo '{"spec":{}}' ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-unpatch/ssh"
+out="$(
+    (
+        export PATH="${TMP}/bin-unpatch:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        export FAKE_SSH_LOG="${TMP}/unpatch.log"
+        bash "${TOOL}" --remove
+    ) 2>&1
+)"; rc=$?
+log="$(cat "${TMP}/unpatch.log")"
+prom_rm="$(printf '%s\n' "${log}" | grep -m1 'patch prometheuses.monitoring.coreos.com' || true)"
+cnpg_rm="$(printf '%s\n' "${log}" | grep -m1 'patch clusters.postgresql.cnpg.io' || true)"
+sent_rm="$(printf '%s\n' "${log}" | grep 'patch redisreplications' | tail -1 || true)"
+chk "⑬ remove 退出码 0" "0" "${rc}"
+chk_contains "⑬ CR unpatch 只删 control-plane key" '{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}}}' "${prom_rm}"
+chk_not_contains "⑬ CR unpatch 不含用户 selector" 'user-selector' "${prom_rm}"
+chk_contains "⑬ CNPG unpatch 只删 control-plane key" '{"spec":{"affinity":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}}}}' "${cnpg_rm}"
+chk_not_contains "⑬ CNPG unpatch 不含用户 selector" 'gpu-pool' "${cnpg_rm}"
+chk_contains "⑬ sentinel unpatch 只删 control-plane key" '{"spec":{"sentinel":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}}}}' "${sent_rm}"
+chk_not_contains "⑬ sentinel unpatch 不含用户 selector" 'sent-user' "${sent_rm}"
+
+echo "== ⑭ check 查询失败不得当成'不存在' =="
+mkdir -p "${TMP}/bin-checkfail"
+cat > "${TMP}/bin-checkfail/ssh" <<'FAKE'
+#!/bin/bash
+cmd="$*"
+case "${cmd}" in
+    *"get deploy cubestack-operator"*) echo "Error from server: connection refused" >&2; exit 1 ;;
+    *" -o json"*) echo '{"spec":{}}' ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-checkfail/ssh"
+out="$(
+    (
+        export PATH="${TMP}/bin-checkfail:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        bash "${TOOL}" --check
+    ) 2>&1
+)"; rc=$?
+chk "⑭ check 存在性查询失败退出码" "1" "${rc}"
+chk_contains "⑭ 报 check 查询失败" "check 查询失败" "${out}"
 
 echo ""
 if [ "${fail}" = "0" ]; then

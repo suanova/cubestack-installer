@@ -23,7 +23,8 @@
 # 用法:
 #   sudo ./cubestack-placement.sh --apply
 #   sudo ./cubestack-placement.sh --check
-#   sudo ./cubestack-placement.sh --remove
+#   sudo ./cubestack-placement.sh --remove   # 同时清理 CubeStackCluster components.*.values
+#                                            # 中持久化的 master nodeSelector(防调和/升级恢复)
 # ============================================================
 set -euo pipefail
 
@@ -96,14 +97,14 @@ _CB_CRS_SENTINEL=(
 _PATCH='{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}}}'
 _UNPATCH='{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}}}}}'
 # CRD 的 merge patch 只能走 --type=merge(strategic 不适用于自定义资源)。
+# ⚠ apply 不能再用静态 CR patch: JSON merge patch 对数组是**整体替换**, 只含 installer
+#   两条 toleration 的 patch 会删掉用户为其它污点设置的条目 → Pod 可能 Pending。
+#   现由 _patch_cr_placement 读取现有 tolerations 后合并(2026-11-11 CodeRabbit)。
 # unpatch 只删本工具写入的 key, 保留 CR 上其它用户自定义 nodeSelector 条目。
-_CR_PATCH='{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}'
 _CR_UNPATCH='{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}}}'
-_CR_AFFINITY_PATCH='{"spec":{"affinity":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}}'
 # 只清本工具写入的 nodeSelector key; CNPG 的 affinity 还含 podAntiAffinityType 等字段,
 # merge patch 会保留它们, 也不会删除用户自定义的其它 selector。
 _CR_AFFINITY_UNPATCH='{"spec":{"affinity":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}}}}'
-_CR_SENTINEL_PATCH='{"spec":{"sentinel":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}}'
 _CR_SENTINEL_UNPATCH='{"spec":{"sentinel":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}}}}'
 
 # 三态存在性探测: 0=存在; 1=不存在; 2=查询失败(API/RBAC/SSH)。
@@ -124,6 +125,51 @@ _exists() {   # <type> <ns> <name>
 }
 _patch_one() { SSH "${K} -n $2 patch $1 $3 --type=strategic -p '$4'" >/dev/null 2>&1; }
 _patch_cr_one() { SSH "${K} -n $2 patch $1 $3 --type=merge -p '$4'" >/dev/null 2>&1; }
+
+# 合并式 CR placement patch: 读取现有 tolerations, 保留用户条目后追加 installer 的两条。
+# JSON merge patch 对数组是整体替换 —— 直接下发静态 patch 会删掉用户为其它污点设置的
+# toleration, 使调和出的 Pod 在新污点下 Pending(2026-11-11 CodeRabbit)。
+# <path>: spec | spec.affinity | spec.sentinel(期望的 nodeSelector 所在层级)。
+_patch_cr_placement() {   # <type> <ns> <name> <path> <ok-label>
+    local _type="$1" _ns="$2" _name="$3" _path="$4" _label="$5" _json _patch
+    _json="$(SSH "${K}" -n "${_ns}" get "${_type}" "${_name}" -o json 2>/dev/null)" || {
+        err "  [${_ns}/${_type}/${_name}] 读取 CR 失败, 无法安全合并 tolerations"; FAILED=1; return 1; }
+    _patch="$(printf '%s' "${_json}" | PATHNAME="${_path}" python3 -c '
+import json, os, sys
+KEY = "node-role.kubernetes.io/control-plane"
+INSTALLER = [
+    {"key": KEY, "operator": "Exists", "effect": "NoSchedule"},
+    {"key": "node.kubernetes.io/unschedulable", "operator": "Exists", "effect": "NoSchedule"},
+]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+cur = d
+root = {}
+node = root
+for k in os.environ["PATHNAME"].split("."):
+    cur = cur.get(k) if isinstance(cur, dict) else None
+    node = node.setdefault(k, {})
+raw = cur.get("tolerations") if isinstance(cur, dict) else None
+tols = [t for t in raw if isinstance(t, dict)] if isinstance(raw, list) else []
+seen = {(t.get("key"), t.get("operator"), t.get("effect")) for t in tols}
+for t in INSTALLER:
+    sig = (t["key"], t["operator"], t["effect"])
+    if sig not in seen:
+        tols.append(t)
+        seen.add(sig)
+node["nodeSelector"] = {KEY: ""}
+node["tolerations"] = tols
+print(json.dumps(root, separators=(",", ":")))
+' 2>/dev/null)" || {
+        err "  [${_ns}/${_type}/${_name}] 解析 CR 失败, 未 patch"; FAILED=1; return 1; }
+    if _patch_cr_one "${_type}" "${_ns}" "${_name}" "${_patch}"; then
+        ok "  [${_ns}/${_type}/${_name}] ${_label}"
+    else
+        err "  [${_ns}/${_type}/${_name}] patch 失败"; FAILED=1; return 1
+    fi
+}
 
 # CR 的 spec 是否带 master nodeSelector: 0=带; 1=不带; 2=读取/解析失败。
 _has_master_selector_cr() {   # <type> <ns> <name>
@@ -354,6 +400,82 @@ sys.exit(0 if ok else 1)
     ok "  [${_ns}/${_type}/${_name}] placement OK"
 }
 
+# 清理 CubeStackCluster 内由 25_cubestack_operator.sh 持久化的组件 placement。
+# 背景(2026-11-11 CodeRabbit): 只 patch 工作负载/CR 不够 —— components.<name>.values 里
+#   仍存着 master nodeSelector, 后续组件调和/升级会把它重新带回。这里只删除 installer
+#   写入的 control-plane key, 保留用户自定义 selector 与全部 tolerations(与 patch 回滚口径一致)。
+_cb_clear_cr_component_placement() {
+    local _ns="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
+    local _json _rc=0 _msg _out _name _patch
+    _json="$(SSH "${K}" -n "${_ns}" get csc -o json 2>/dev/null)" || _rc=$?
+    if [ "${_rc}" -ne 0 ]; then
+        _msg="$(SSH "${K}" -n "${_ns}" get csc -o json 2>&1 >/dev/null)" || true
+        case "${_msg}" in
+            *NotFound*|*"not found"*|*"doesn't have a resource type"*)
+                say "  [${_ns}/csc] 不存在, 跳过 CR 组件 placement 回滚"; return 0 ;;
+            *)
+                err "  [${_ns}/csc] 查询失败, 未清理 CR 内组件 placement: $(printf '%s' "${_msg}" | tail -1)"
+                FAILED=1; return 1 ;;
+        esac
+    fi
+    _out="$(printf '%s' "${_json}" | python3 -c '
+import json, sys
+
+KEY = "node-role.kubernetes.io/control-plane"
+PATHS = [
+    ("cubepilot", "values", "operator", "nodeSelector"),
+    ("cubepilot", "values", "api", "nodeSelector"),
+    ("cubepilot", "values", "web", "nodeSelector"),
+    ("cubestackControllerManager", "values", "nodeSelector"),
+    ("cubestackPortal", "values", "nodeSelector"),
+    ("envoyGateway", "values", "deployment", "pod", "nodeSelector"),
+    ("aiGateway", "values", "controller", "nodeSelector"),
+    ("prometheus", "values", "prometheusOperator", "nodeSelector"),
+    ("prometheus", "values", "prometheus", "prometheusSpec", "nodeSelector"),
+    ("prometheus", "values", "alertmanager", "alertmanagerSpec", "nodeSelector"),
+    ("prometheus", "values", "grafana", "nodeSelector"),
+    ("prometheus", "values", "kube-state-metrics", "nodeSelector"),
+    ("perses", "values", "manager", "nodeSelector"),
+]
+try:
+    items = json.load(sys.stdin).get("items") or []
+except Exception:
+    sys.exit(2)
+if not items:
+    sys.exit(0)
+cr = items[0]
+patch = {}
+for path in PATHS:
+    cur = cr.get("spec") or {}
+    ok = True
+    for k in ("components",) + path:
+        if not isinstance(cur, dict) or k not in cur:
+            ok = False
+            break
+        cur = cur[k]
+    if not ok or not isinstance(cur, dict) or KEY not in cur:
+        continue
+    node = patch
+    for k in ("spec", "components") + path:
+        node = node.setdefault(k, {})
+    node[KEY] = None
+print(json.dumps({"name": (cr.get("metadata") or {}).get("name", ""), "patch": patch}))
+' 2>/dev/null)" || {
+        err "  [${_ns}/csc] 解析失败, 未清理 CR 内组件 placement"; FAILED=1; return 1; }
+    [ -n "${_out}" ] || { say "  [${_ns}/csc] 不存在, 跳过 CR 组件 placement 回滚"; return 0; }
+    _name="$(printf '%s' "${_out}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))' 2>/dev/null || true)"
+    _patch="$(printf '%s' "${_out}" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("patch") or {}, separators=(",",":")))' 2>/dev/null || true)"
+    [ -n "${_name}" ] || { say "  [${_ns}/csc] 不存在, 跳过 CR 组件 placement 回滚"; return 0; }
+    if [ -z "${_patch}" ] || [ "${_patch}" = "{}" ]; then
+        say "  [${_ns}/csc/${_name}] 无 master 组件 placement, 跳过"; return 0
+    fi
+    if printf '%s' "${_patch}" | SSH "${K} -n ${_ns} patch csc ${_name} --type=merge --patch-file=/dev/stdin" >/dev/null 2>&1; then
+        ok "  [${_ns}/csc/${_name}] 已移除 CR 内组件 master nodeSelector(保留其他 key/tolerations)"
+    else
+        err "  [${_ns}/csc/${_name}] 清理 CR 组件 placement 失败"; FAILED=1
+    fi
+}
+
 FAILED=0
 case "${ACTION}" in
     apply)
@@ -392,11 +514,8 @@ case "${ACTION}" in
             elif [ -n "${_pvcp}" ]; then
                 _pvc_guard_prefix "${_n}" "${_pvcp}" "${_n}/${_t}/${_name}" || continue
             fi
-            if _patch_cr_one "${_t}" "${_n}" "${_name}" "${_CR_PATCH}"; then
-                ok "  [${_n}/${_t}/${_name}] 已加 master nodeSelector + tolerations(CR)"
-            else
-                err "  [${_n}/${_t}/${_name}] patch 失败"; FAILED=1
-            fi
+            _patch_cr_placement "${_t}" "${_n}" "${_name}" "spec" \
+                "已加 master nodeSelector + tolerations(CR, 保留已有 tolerations)" || true
         done
         say "CubeStack operator/平台组件 master placement(CNPG Cluster spec.affinity) ..."
         for _w in "${_CB_CRS_AFFINITY[@]}"; do
@@ -407,11 +526,8 @@ case "${ACTION}" in
             if [ -n "${_pvcp}" ]; then
                 _pvc_guard_prefix "${_n}" "${_pvcp}" "${_n}/${_t}/${_name}" || continue
             fi
-            if _patch_cr_one "${_t}" "${_n}" "${_name}" "${_CR_AFFINITY_PATCH}"; then
-                ok "  [${_n}/${_t}/${_name}] 已加 master affinity.nodeSelector + tolerations(CNPG)"
-            else
-                err "  [${_n}/${_t}/${_name}] patch 失败"; FAILED=1
-            fi
+            _patch_cr_placement "${_t}" "${_n}" "${_name}" "spec.affinity" \
+                "已加 master affinity.nodeSelector + tolerations(CNPG, 保留已有 tolerations)" || true
         done
         say "CubeStack operator/平台组件 master placement(RedisReplication sentinel) ..."
         for _w in "${_CB_CRS_SENTINEL[@]}"; do
@@ -424,11 +540,8 @@ case "${ACTION}" in
             if [ -n "${_pvcp}" ]; then
                 _pvc_guard_prefix "${_n}" "${_pvcp}" "${_n}/${_t}/${_name} sentinel" || continue
             fi
-            if _patch_cr_one "${_t}" "${_n}" "${_name}" "${_CR_SENTINEL_PATCH}"; then
-                ok "  [${_n}/${_t}/${_name}] 已加 master sentinel.nodeSelector + tolerations"
-            else
-                err "  [${_n}/${_t}/${_name}] sentinel patch 失败"; FAILED=1
-            fi
+            _patch_cr_placement "${_t}" "${_n}" "${_name}" "spec.sentinel" \
+                "已加 master sentinel.nodeSelector + tolerations(保留已有 tolerations)" || true
         done
         ;;
     check)
@@ -533,6 +646,8 @@ case "${ACTION}" in
                 err "  [${_n}/${_t}/${_name}] remove patch 失败"; FAILED=1
             fi
         done
+        # 最后清 CR components.<name>.values 里持久化的 master selector, 防止后续调和/升级恢复。
+        _cb_clear_cr_component_placement
         ;;
 esac
 
