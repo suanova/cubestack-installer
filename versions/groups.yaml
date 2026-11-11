@@ -1,0 +1,45 @@
+schema: 1
+
+# Public base groups. A key must look like <group>:<source>; the group is the
+# stable logical category, not a Harbor namespace and not a release package.
+groups:
+  k8s-base:
+    description: Kubernetes base images
+    consumer: k8s
+    kind: image
+  ceph:
+    description: Ceph/Rook/CSI images
+    consumer: ceph
+    kind: image
+  multus:
+    description: Multus CNI
+    consumer: multus
+    kind: image
+  rdma:
+    description: RDMA shared device plugin
+    consumer: rdma
+    kind: image
+  nginx:
+    description: API load-balancer nginx
+    consumer: nginx
+    kind: image
+  netshoot:
+    description: netshoot-rdma debug image
+    consumer: netshoot
+    kind: image
+  dev-lab:
+    description: dev-lab pytorch images
+    consumer: dev-lab
+    kind: image
+  nvidia-gpu-operator:
+    description: NVIDIA GPU Operator images
+    consumer: nvidia-gpu-operator
+    kind: image
+  k8s:
+    description: kubespray tree and k8s binaries
+    consumer: k8s
+    kind: file
+  metax:
+    description: MetaX vendor materials
+    consumer: gpu_operator
+    kind: material
