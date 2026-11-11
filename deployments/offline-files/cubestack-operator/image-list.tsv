@@ -5,7 +5,6 @@
 #   · 滚动 tag(latest): 本体与 cluster.conf 的 CUBESTACK_OPERATOR_IMAGE_TAG 联动, 改 tag 需同步改本表
 # 校验: tools/images/cubestack-platform-save-images.sh --list-check
 .	harbor.isuanova.com_suanova-private_cubestack-operator_latest.tar		harbor.isuanova.com/suanova-private/cubestack-operator:latest
-perses	docker.io_kiwigrid_k8s-sidecar_2.11.2.tar	harbor.isuanova.com/mirrors/docker.io/kiwigrid/k8s-sidecar:2.11.2	docker.io/kiwigrid/k8s-sidecar:2.11.2
 perses	docker.io_persesdev_perses-operator_v0.5.0.tar	harbor.isuanova.com/mirrors/docker.io/persesdev/perses-operator:v0.5.0	docker.io/persesdev/perses-operator:v0.5.0
 perses	docker.io_persesdev_perses_v0.55.1.tar	harbor.isuanova.com/mirrors/docker.io/persesdev/perses:v0.55.1	docker.io/persesdev/perses:v0.55.1
 prometheus	docker.io_grafana_grafana_13.3.0-distroless.tar	harbor.isuanova.com/mirrors/docker.io/grafana/grafana:13.3.0-distroless	docker.io/grafana/grafana:13.3.0-distroless

@@ -13,7 +13,7 @@ CubeStack 平台 Operator **及其平台组件**的离线资产(2026-10-08 起�
 | `envoy-gateway/` | envoy 控制面/数据面/envoy-distroless + ratelimit + AI 网关 ×2(共 5; gateway v1.9.3 / envoy distroless-v1.39.5 / ai-gateway v1.2.0 / ratelimit 5ae0682e) | `envoyGateway`(+`aiGateway`) |
 | `controller-manager/` | cubestack-controller-manager | `cubestackControllerManager` |
 | `prometheus/` | 监控栈 11 件: prometheus-operator(+config-reloader)/prometheus/alertmanager/node-exporter/kube-state-metrics/kube-rbac-proxy/thanos/grafana/k8s-sidecar(quay)/kube-webhook-certgen | `prometheus` |
-| `perses/` | perses + perses-operator + k8s-sidecar(docker.io) | `perses` |
+| `perses/` | perses + perses-operator | `perses` |
 | `cuberouter/` | cuberouter + cnpg(cloudnative-pg + postgresql) | `cuberouter` |
 | `bmc/` | bmc-oem-exporter + idrac-exporter(+`.digest` 边车) | `exporters.bmc` |
 | `cubepilot/` | cubepilot api/openclaw/operator/web(+`.digest` 边车) | `cubepilot` |

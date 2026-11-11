@@ -825,7 +825,7 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_5ae0682e.tar	harbor.isuanova.com/mi
 **数据源（release 定义是唯一真相）**：
 
 - `deployments/releases/<release>/release.env`：operator tag、chart version、CLI image；
-- `deployments/releases/<release>/release-images.tsv`：38 个镜像的 subdir/file/pull/save；
+- `deployments/releases/<release>/release-images.tsv`：镜像行的 subdir/file/pull/save；
 - `deployments/releases/<release>/components.tsv`：component → 来源仓库/子目录：
 
   ```text
@@ -843,7 +843,7 @@ envoy-gateway	docker.io_envoyproxy_ratelimit_5ae0682e.tar	harbor.isuanova.com/mi
   release-first-party  -                              . controller-manager cubepilot cuberouter portal docs
   ```
 
-- `*` = 全部 38 行（含第三方依赖）；`-` = 仅 chart；`platform` = first-party 子目录。
+- `*` = release-images.tsv 的全部行（含第三方依赖）；`-` = 仅 chart；`platform` = first-party 子目录。
 - `release-first-party` = 上游统一 tag 的全部 first-party 镜像，**不含 `bmc`**（bmc 随 operator 发布 tag，但 release-sync-images 跳过其统一 tag 校验）。
 
 **触发方式**：
