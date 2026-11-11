@@ -416,6 +416,54 @@ clear_operator_ns_cr_finalizers cubestack-system
 chk "清除 AgentInstance finalizer" "1" "$(count_of x 'agentinstance.ai.cubestack.io/admin-cubepilot' "${_patch_log}")"
 chk "未触碰 pods finalizer" "0" "$(count_of x 'pods' "${_patch_log}")"
 
+echo "== ⑯ monitoring chart values 的 PVC 绑定守卫 =="
+# 升级时若 Prometheus/Alertmanager 的 local-path PVC 已绑 worker, chart values 里的
+# master nodeSelector 会让新 Pod 直接 Pending(34_node_pool 的守护来不及生效)。
+sed -n '/^_cb_mon_pvc_allows_master() {/,/^}/p' "${MOD}" > "${TMP}/fn-mon-pvc.sh"
+chk "⑯ 守卫函数已定义" "1" "$([ -s "${TMP}/fn-mon-pvc.sh" ] && echo 1 || echo 0)"
+chk_contains "⑯ prometheus values 有守卫标记" "__CB_PLACEMENT_PROMETHEUS__" "${MOD}"
+chk_contains "⑯ alertmanager values 有守卫标记" "__CB_PLACEMENT_ALERTMANAGER__" "${MOD}"
+chk_contains "⑯ 无 Pod 时按 PVC 前缀兜底" "get pvc -o name" "${MOD}"
+cat > "${TMP}/mon-guard-run.sh" <<'EOS'
+#!/bin/bash
+set -uo pipefail
+# shellcheck disable=SC1090
+source "${FN_MON:?}"
+K="sudo kubectl"
+warn() { :; }
+placement_pod_pvcs() { [ -n "${POD_PVCS:-}" ] && echo "${POD_PVCS}"; }
+placement_pvc_worker_bound() {
+    case "${PV_BOUND:-1}" in
+        0) return 0 ;;   # worker 绑定
+        2) return 2 ;;   # 无法确认
+        *) return 1 ;;   # 安全
+    esac
+}
+SSH() {
+    case "${MODE:-podok}" in
+        pod404)
+            case "$*" in
+                *"get pod"*) echo 'Error from server (NotFound): pods "p" not found' >&2; return 1 ;;
+                *"get pvc -o name"*) printf 'persistentvolumeclaim/prometheus-x-db-0\n' ;;
+            esac ;;
+        apifail)
+            case "$*" in
+                *"get pod"*) echo "Error from server: connection refused" >&2; return 1 ;;
+            esac ;;
+        *) : ;;
+    esac
+    return 0
+}
+_cb_mon_pvc_allows_master "p" "prometheus"
+EOS
+chmod +x "${TMP}/mon-guard-run.sh"
+_run_mon() { FN_MON="${TMP}/fn-mon-pvc.sh" POD_PVCS="${2:-prom-db}" MODE="${3:-podok}" PV_BOUND="$1" bash "${TMP}/mon-guard-run.sh"; }
+rc=0; _run_mon 0 || rc=$?; chk "⑯ worker 绑定 → 不下发" "1" "${rc}"
+rc=0; _run_mon 1 || rc=$?; chk "⑯ 安全绑定 → 下发" "0" "${rc}"
+rc=0; _run_mon 2 || rc=$?; chk "⑯ 绑定未知 → 保守不下发" "1" "${rc}"
+rc=0; _run_mon 0 "" pod404 || rc=$?; chk "⑯ Pod 不存在但 PVC 绑 worker → 不下发" "1" "${rc}"
+rc=0; _run_mon 1 "" apifail || rc=$?; chk "⑯ 查询失败 → 保守不下发" "1" "${rc}"
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-cubestack-operator-update: 全部通过"

@@ -821,6 +821,37 @@ trap '_cleanup; rm -rf "${_WORK}"' EXIT
 # 没有 values 注入路径 → placement 直接 patch 其 CR spec)；
 # **不使用** CR spec.global 的 placement 字段 ——
 # 它会注入到所有组件(含 model bundle 推理负载)。
+#
+# 升级场景的监控 PVC 守护(2026-11-11 CodeRabbit): chart values 里的 master nodeSelector
+# 会在 operator 调和时**立即**生效; 若 Prometheus/Alertmanager 的 local-path PVC 已绑在
+# worker, 34_node_pool 的 PVC 守护来不及阻止 → 新 Pod volume node affinity conflict Pending。
+# 返回 0=可以钉 master(无 PVC / 无 hostname 亲和 / master 绑定); 1=不钉(worker 绑定或无法确认)。
+_cb_mon_pvc_allows_master() {   # <pod-name> <pvc-name-substring>
+    local _pod="$1" _hint="$2" _pod_json _pvc_list _msg _pvcs _rc=0
+    _pod_json="$(SSH "${K}" -n monitoring get pod "${_pod}" -o json 2>/dev/null)" || _rc=$?
+    if [ "${_rc}" -eq 0 ]; then
+        _pvcs="$(printf '%s' "${_pod_json}" | placement_pod_pvcs || true)"
+    else
+        _msg="$(SSH "${K}" -n monitoring get pod "${_pod}" -o json 2>&1 >/dev/null)" || true
+        case "${_msg}" in
+            *NotFound*|*"not found"*)
+                # Pod 尚未创建(或已缩容): 按 PVC 名前缀查已有卷
+                _pvc_list="$(SSH "${K}" -n monitoring get pvc -o name 2>/dev/null)" || {
+                    warn "  monitoring: 无法读取 PVC 列表, 保守不下发 master placement"; return 1; }
+                _pvcs="$(printf '%s\n' "${_pvc_list}" | sed 's#.*/##' | grep -F "${_hint}" || true)"
+                ;;
+            *) warn "  monitoring: 无法读取 ${_pod} 绑定信息, 保守不下发 master placement"; return 1 ;;
+        esac
+    fi
+    [ -n "${_pvcs}" ] || return 0
+    _rc=0
+    placement_pvc_worker_bound monitoring ${_pvcs} >/dev/null || _rc=$?
+    case "${_rc}" in
+        0) warn "  monitoring: 已有 PVC 绑定 worker, 不下发 master placement(${_hint})"; return 1 ;;
+        2) warn "  monitoring: PVC 绑定状态无法确认, 保守不下发 master placement(${_hint})"; return 1 ;;
+        *) return 0 ;;
+    esac
+}
 if [ "${NODE_POOL_CUBESTACK_PLACEMENT:-true}" = "true" ]; then
     _NODE_POOL_VALUES="${_WORK}/node-pool-values.yaml"
     cat > "${_NODE_POOL_VALUES}" <<'EOF'
@@ -942,8 +973,10 @@ clusterCR:
                 effect: NoSchedule
           prometheus:
             prometheusSpec:
+              # __CB_PLACEMENT_PROMETHEUS__ (已有 worker local-path PVC 时整段删除)
               nodeSelector:
                 node-role.kubernetes.io/control-plane: ""
+              # __CB_PLACEMENT_PROMETHEUS_END__
               tolerations:
                 - key: node-role.kubernetes.io/control-plane
                   operator: Exists
@@ -953,8 +986,10 @@ clusterCR:
                   effect: NoSchedule
           alertmanager:
             alertmanagerSpec:
+              # __CB_PLACEMENT_ALERTMANAGER__ (已有 worker local-path PVC 时整段删除)
               nodeSelector:
                 node-role.kubernetes.io/control-plane: ""
+              # __CB_PLACEMENT_ALERTMANAGER_END__
               tolerations:
                 - key: node-role.kubernetes.io/control-plane
                   operator: Exists
@@ -996,6 +1031,16 @@ clusterCR:
                 operator: Exists
                 effect: NoSchedule
 EOF
+    # 升级场景: 已有 Prometheus/Alertmanager PVC 若绑在 worker, 从 values 中删掉对应
+    # master nodeSelector(tolerations 保留); 其余组件不受影响。
+    _mon_prom_ok=1; _mon_am_ok=1
+    _cb_mon_pvc_allows_master "prometheus-kube-prometheus-kube-prome-prometheus-0" \
+        "prometheus-kube-prometheus-kube-prome-prometheus" || _mon_prom_ok=0
+    _cb_mon_pvc_allows_master "alertmanager-kube-prometheus-kube-prome-alertmanager-0" \
+        "alertmanager-kube-prometheus-kube-prome-alertmanager" || _mon_am_ok=0
+    [ "${_mon_prom_ok}" = "1" ] || sed -i '/__CB_PLACEMENT_PROMETHEUS__/,/__CB_PLACEMENT_PROMETHEUS_END__/d' "${_NODE_POOL_VALUES}"
+    [ "${_mon_am_ok}" = "1" ] || sed -i '/__CB_PLACEMENT_ALERTMANAGER__/,/__CB_PLACEMENT_ALERTMANAGER_END__/d' "${_NODE_POOL_VALUES}"
+    unset _mon_prom_ok _mon_am_ok
     _EXTRA_VALUES+=( -f "${_NODE_POOL_VALUES}" )
 fi
 
