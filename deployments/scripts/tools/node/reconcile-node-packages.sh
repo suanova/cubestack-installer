@@ -274,8 +274,10 @@ APT=( -o "Dir::Cache::archives=${D}" --no-download -y --no-install-recommends
 #   报"fuser 超时"而掩盖真正的 D 状态进程。现在先识别 D 状态并 exit 2 给出根因;
 #   不再运行 fuser/apt, 避免制造第二个 D 状态。D 状态只能清来源或 reboot -f。
 _ceph_mnts="$(timeout 5 findmnt -t ceph,rbd -n -o TARGET,FSTYPE 2>/dev/null | head -5 || true)"
+# 同一误匹配规则(CodeRabbit 2026-11-11): 排除 rsync —— 它只是命令名含 "sync",
+# 普通 I/O 的 D 状态不应触发下面的硬失败/存储恢复指引。
 _stuck="$(timeout 5 ps -eo pid,stat,etime,cmd 2>/dev/null \
-    | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|sync|fuser/' | head -3 || true)"
+    | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|sync|fuser/ && $0 !~ /rsync/' | head -3 || true)"
 _n_rbd="$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ' || true)"
 # ★ 2026-11-11: D 状态检查必须在 fuser **之前**。旧顺序先跑 `timeout 5 fuser ...`:
 #   节点上已有 rbd remove D 状态时, fuser 遍历 /proc 撞上卡死挂载/设备, 自己也进 D 态,

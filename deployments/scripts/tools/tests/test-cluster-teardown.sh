@@ -408,7 +408,11 @@ case "${_args}" in
     *)            _ip="" ;;
 esac
 case "${_args}" in
-    *"test -f /etc/kubernetes/admin.conf"*) exit 255 ;;
+    # 2026-11-11 起 ceph-rbd-cleanup 在 PV 列表不可读时 fail-closed(跳过清理)。
+    # 这里模拟 master 有 kubeconfig 且 PV 查询成功(空列表), 让清洁流程可继续;
+    # SHIM_PV_FAIL=1 用于验证 fail-closed 分支。
+    *"test -f /etc/kubernetes/admin.conf"*) exit 0 ;;
+    *"get pv -o jsonpath"*) [ "${SHIM_PV_FAIL:-0}" = "1" ] && exit 255; exit 0 ;;
 esac
 [ "${_ip}" = "10.0.0.2" ] && exit 255          # .2 模拟全程不可达
 case "${_args}" in
@@ -443,6 +447,10 @@ chk "⑧f 清单含 .1 与 .2" "1" "$(printf '%s' "${OUT8}" | grep -c '10.0.0.1 
 OUT8B="$(_run_rbd 2)"
 chk "⑧g 真实残留=2 走'仍有 N 个'分支(不误给硬复位外的结论)" "1" "$(printf '%s' "${OUT8B}" | grep -cF '仍有 2 个内核 rbd 映射**' || true)"
 chk "⑧g 非零残留节点不做模块卸载" "0" "$(printf '%s' "${OUT8B}" | grep -c 'rbd/libceph 模块已卸载' || true)"
+# PV 列表不可读时必须 fail-closed: 不能把"查不到在用卷"当成"全部都是孤儿"。
+OUT8C="$(SHIM_PV_FAIL=1 _run_rbd fail)"
+chk "⑧h PV 查询失败 → 跳过清理(fail-closed)" "1" "$(printf '%s' "${OUT8C}" | grep -c '跳过清理' || true)"
+chk "⑧h PV 查询失败仍不宣称清零" "0" "$(printf '%s' "${OUT8C}" | grep -c '全部节点内核 rbd 侧已清零' || true)"
 
 echo "== ⑨ 静态围栏: run_component 不得在同一 local 语句内引用 rel =="
 RC_DECL="$(grep -A8 '^run_component()' "${ENGINE}" 2>/dev/null || true)"
