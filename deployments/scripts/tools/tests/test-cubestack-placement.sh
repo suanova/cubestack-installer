@@ -52,6 +52,10 @@ if [ -f "${TOOL}" ]; then
     chk_contains "unschedulable toleration" "node.kubernetes.io/unschedulable" "${src}"
     chk_contains "patch 前先给 RWO Deployment 设 Recreate" 'ensure_rwo_deployments_recreate' "${src}"
     chk_contains "local-path PVC 守护" "placement_pvc_worker_bound" "${src}"
+    chk_contains "apply/check 查询失败按失败处理" "_require_exists" "${src}"
+    chk_contains "unpatch 只删 installer key(CR)" '"nodeSelector":{"node-role.kubernetes.io/control-plane":null}' "${src}"
+    chk_contains "unpatch 只删 installer key(CNPG affinity)" '"affinity":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}}' "${src}"
+    chk_contains "sentinel 复用 PVC 守护" "_pvc_guard_prefix" "${src}"
 
     echo "== ④ 不碰数据面/推理 =="
     # workload 列表不应包含 envoy-envoy-gateway-system- / sglang / vllm / model
@@ -71,9 +75,15 @@ for a in "$@"; do
     if [ "${seen}" = "0" ]; then case "$a" in *@*) seen=1 ;; esac; else cmd="${cmd}${cmd:+ }${a}"; fi
 done
 printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}"
+# CR 多副本 PVC 前缀查询: 必须返回合法 JSON(空列表), 否则按"查询失败"保守跳过。
+case "${cmd}" in
+    *"get pvc -o json"*) echo '{"items":[]}' ;;
+esac
 exit 0
 FAKE
 chmod +x "${TMP}/bin/ssh"
+# RWO 守卫在查不到目标时会 sleep 5 重试; 测试里不需要真实等待。
+printf '#!/bin/bash\nexit 0\n' > "${TMP}/bin/sleep"; chmod +x "${TMP}/bin/sleep"
 cat > "${TMP}/cluster.conf" <<'EOF'
 NODES=(
   "master,m1,10.0.0.1,root,-"
@@ -178,6 +188,7 @@ esac
 exit 0
 FAKE
 chmod +x "${TMP}/bin-getfail/ssh"
+printf '#!/bin/bash\nexit 0\n' > "${TMP}/bin-getfail/sleep"; chmod +x "${TMP}/bin-getfail/sleep"
 out="$(
     (
         export PATH="${TMP}/bin-getfail:${PATH}"
@@ -189,6 +200,81 @@ out="$(
 )"; rc=$?
 chk "⑦ 存在性查询失败退出码" "1" "${rc}"
 chk_contains "⑦ 报 remove 查询失败" "remove 查询失败" "${out}"
+
+echo "== ⑧ apply 查询失败不得当成'不存在' =="
+# API/RBAC 抖动时 _exists 返回 2; 旧实现 `if ! _exists` 会静默跳过 patch 并退出 0。
+out="$(
+    (
+        export PATH="${TMP}/bin-getfail:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        bash "${TOOL}" --apply
+    ) 2>&1
+)"; rc=$?
+chk "⑧ apply 存在性查询失败退出码" "1" "${rc}"
+chk_contains "⑧ 报 apply 查询失败" "apply 查询失败" "${out}"
+
+echo "== ⑨ PVC 绑定查询失败 → 不当作'无绑定'放行 =="
+mkdir -p "${TMP}/bin-pvcfail"
+cat > "${TMP}/bin-pvcfail/ssh" <<'FAKE'
+#!/bin/bash
+cmd="$*"
+case "${cmd}" in
+    *"get pvc"*) echo "Error from server: connection refused" >&2; exit 1 ;;
+    *"get deploy cubestack-operator -o json"*)
+        echo '{"kind":"Deployment","spec":{"template":{"spec":{"volumes":[{"persistentVolumeClaim":{"claimName":"data-pvc"}}]}}}}' ;;
+    *" -o json"*) echo '{"spec":{"template":{"spec":{}}}}' ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-pvcfail/ssh"
+printf '#!/bin/bash\nexit 0\n' > "${TMP}/bin-pvcfail/sleep"; chmod +x "${TMP}/bin-pvcfail/sleep"
+out="$(
+    (
+        export PATH="${TMP}/bin-pvcfail:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        bash "${TOOL}" --apply
+    ) 2>&1
+)"; rc=$?
+chk "⑨ PVC 绑定查询失败退出码" "1" "${rc}"
+chk_contains "⑨ 报无法确认 PVC 绑定" "无法确认 PVC 绑定" "${out}"
+
+echo "== ⑩ Redis 卷绑 worker → sentinel 同步跳过 =="
+mkdir -p "${TMP}/bin-redisbind"
+: > "${TMP}/redisbind.log"
+cat > "${TMP}/bin-redisbind/ssh" <<'FAKE'
+#!/bin/bash
+cmd="$*"
+case "${cmd}" in
+    *"get pvc -o json"*) echo '{"items":[{"metadata":{"name":"cuberouter-redis-0"}}]}' ;;
+    *"get pvc cuberouter-redis-0 -o jsonpath"*) echo "pv-redis" ;;
+    *"get pv pv-redis -o json"*) echo '{"spec":{"nodeAffinity":{"required":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","values":["w1"]}]}]}}}}' ;;
+    *"get node w1 -o json"*) echo '{"metadata":{"labels":{"kubernetes.io/hostname":"w1"}}}' ;;
+    *" get pod "*" -o json"*) echo '{"kind":"Pod","metadata":{"name":"x"},"spec":{"volumes":[]}}' ;;
+    *" patch "*) printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}" ;;
+    *" -o json"*) echo '{"spec":{"template":{"spec":{}}}}' ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-redisbind/ssh"
+printf '#!/bin/bash\nexit 0\n' > "${TMP}/bin-redisbind/sleep"; chmod +x "${TMP}/bin-redisbind/sleep"
+out="$(
+    (
+        export PATH="${TMP}/bin-redisbind:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        export FAKE_SSH_LOG="${TMP}/redisbind.log"
+        bash "${TOOL}" --apply
+    ) 2>&1
+)"; rc=$?
+log="$(cat "${TMP}/redisbind.log")"
+chk "⑩ worker-bound 跳过不阻断" "0" "${rc}"
+chk_not_contains "⑩ Redis 数据副本不 patch" "patch redisreplications.redis.redis.opstreelabs.in" "${log}"
+chk_contains "⑩ sentinel 同步跳过" "cuberouter-redis sentinel] PVC cuberouter-redis-0@w1" "${out}"
 
 echo ""
 if [ "${fail}" = "0" ]; then

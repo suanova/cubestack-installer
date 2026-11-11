@@ -188,8 +188,13 @@ case "${ACTION}" in
             # registry 尤其会阻断后续 dev_lab/model_images 的镜像 push。跳过并交给人工迁移。
             _pvcs="$( (SSH "${K}" -n "${_n}" get "${_t}" "${_name}" -o json 2>/dev/null) | placement_pod_pvcs || true )"
             if [ -n "${_pvcs}" ]; then
-                if _bound="$(placement_pvc_worker_bound "${_n}" ${_pvcs})"; then
+                _bound_rc=0
+                _bound="$(placement_pvc_worker_bound "${_n}" ${_pvcs})" || _bound_rc=$?
+                if [ "${_bound_rc}" -eq 0 ]; then
                     warn "  [${_n}/${_t}/${_name}] PVC ${_bound} 绑定在 worker(local-path), 跳过 placement(否则 Pending; 需共享存储或重建 PVC)"
+                    continue
+                elif [ "${_bound_rc}" -eq 2 ]; then
+                    err "  [${_n}/${_t}/${_name}] 无法确认 PVC 绑定(查询失败), 跳过 placement(避免 Pending/误迁移)"; FAILED=1
                     continue
                 fi
             fi

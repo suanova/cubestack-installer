@@ -3007,34 +3007,54 @@ for v in s.get("volumes") or []:
 }
 
 # PVC 绑定的节点(local-path PV 的 hostname nodeAffinity); 无 nodeAffinity 输出空。
+# 返回: 0=成功(PVC 未绑定则无输出); 2=PVC/PV 查询或解析失败 —— 调用方必须按"未知"处理,
+#       不能当成"没有 nodeAffinity"(否则会把无法确认的卷误判为可安全迁移)。
 placement_pvc_bound_node() {   # <ns> <pvc>
-    local ns="$1" pvc="$2" pv=""
-    pv="$( (SSH "${K}" -n "${ns}" get pvc "${pvc}" -o jsonpath='{.spec.volumeName}' 2>/dev/null) || true )"
+    local ns="$1" pvc="$2" pv="" _json _out _msg _rc=0
+    _out="$(SSH "${K}" -n "${ns}" get pvc "${pvc}" -o jsonpath='{.spec.volumeName}' 2>/dev/null)" || _rc=$?
+    if [ "${_rc}" -ne 0 ]; then
+        # 失败时单独取 stderr 分类(成功路径不受 kubectl 告警输出污染)
+        _msg="$(SSH "${K}" -n "${ns}" get pvc "${pvc}" -o jsonpath='{.spec.volumeName}' 2>&1 >/dev/null)" || true
+        case "${_msg}" in
+            *NotFound*|*"not found"*) return 0 ;;   # PVC 确认不存在 → 无绑定约束
+            *) return 2 ;;
+        esac
+    fi
+    pv="${_out}"
     [ -n "${pv}" ] || return 0
-    (SSH "${K}" get pv "${pv}" -o json 2>/dev/null) | python3 -c '
+    _json="$(SSH "${K}" get pv "${pv}" -o json 2>/dev/null)" || return 2
+    if ! printf '%s' "${_json}" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
+    sys.exit(2)
 terms = (((d.get("spec") or {}).get("nodeAffinity") or {}).get("required") or {}).get("nodeSelectorTerms") or []
 for t in terms:
     for e in t.get("matchExpressions") or []:
         if e.get("key") == "kubernetes.io/hostname" and e.get("values"):
             print(e["values"][0]); sys.exit(0)
-' 2>/dev/null || true
+' 2>/dev/null; then
+        return 2
+    fi
 }
 
+# 返回: 0=有 PVC 绑在非 master(输出 pvc@node); 1=确认没有; 2=查询失败(无法判断)。
 placement_pvc_worker_bound() {   # <ns> <pvc>...
     local ns="$1"; shift
-    local pvc node out
+    local pvc node out _rc
     for pvc in "$@"; do
         [ -n "${pvc}" ] || continue
-        node="$(placement_pvc_bound_node "${ns}" "${pvc}")"
+        _rc=0
+        node="$(placement_pvc_bound_node "${ns}" "${pvc}")" || _rc=$?
+        [ "${_rc}" -eq 2 ] && return 2
         [ -n "${node}" ] || continue
-        out="$( (SSH "${K}" get node "${node}" -o json 2>/dev/null) || true )"
-        [ -n "${out}" ] || continue   # 读不到节点信息 → 不阻断(交给人判断)
-        if printf '%s' "${out}" | python3 -c '
+        _rc=0
+        out="$(SSH "${K}" get node "${node}" -o json 2>/dev/null)" || _rc=$?
+        [ "${_rc}" -eq 0 ] || return 2
+        [ -n "${out}" ] || return 2
+        _rc=0
+        printf '%s' "${out}" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -3042,10 +3062,12 @@ except Exception:
     sys.exit(2)
 labels = (d.get("metadata") or {}).get("labels") or {}
 sys.exit(0 if "node-role.kubernetes.io/control-plane" not in labels else 1)
-'; then
-            printf '%s@%s\n' "${pvc}" "${node}"
-            return 0
-        fi
+' || _rc=$?
+        case "${_rc}" in
+            0) printf '%s@%s\n' "${pvc}" "${node}"; return 0 ;;
+            1) continue ;;   # master 绑定 → 继续看其它 PVC
+            *) return 2 ;;
+        esac
     done
     return 1
 }
