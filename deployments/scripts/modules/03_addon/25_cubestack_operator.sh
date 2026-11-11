@@ -827,10 +827,13 @@ trap '_cleanup; rm -rf "${_WORK}"' EXIT
 # worker, 34_node_pool 的 PVC 守护来不及阻止 → 新 Pod volume node affinity conflict Pending。
 # 返回 0=可以钉 master(无 PVC / 无 hostname 亲和 / master 绑定); 1=不钉(worker 绑定或无法确认)。
 _cb_mon_pvc_allows_master() {   # <pod-name> <pvc-name-substring>
-    local _pod="$1" _hint="$2" _pod_json _pvc_list _msg _pvcs _rc=0
+    local _pod="$1" _hint="$2" _pod_json _pvc_list _msg _pvcs _rc=0 _prc=0
     _pod_json="$(SSH "${K}" -n monitoring get pod "${_pod}" -o json 2>/dev/null)" || _rc=$?
     if [ "${_rc}" -eq 0 ]; then
-        _pvcs="$(printf '%s' "${_pod_json}" | placement_pod_pvcs || true)"
+        _pvcs="$(printf '%s' "${_pod_json}" | placement_pod_pvcs)" || _prc=$?
+        if [ "${_prc}" -eq 2 ]; then
+            warn "  monitoring: ${_pod} JSON 解析失败, 保守不下发 master placement"; return 1
+        fi
     else
         _msg="$(SSH "${K}" -n monitoring get pod "${_pod}" -o json 2>&1 >/dev/null)" || true
         case "${_msg}" in

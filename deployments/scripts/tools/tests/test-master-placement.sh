@@ -77,6 +77,7 @@ for a in "$@"; do
 done
 printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}"
 case "${cmd}" in
+    *" -o json"*) echo '{}' ;;
     *"delete pod"*) [ "${FAKE_DELETE_FAIL:-0}" = "1" ] && exit 1 ;;
 esac
 exit 0
@@ -361,6 +362,34 @@ out="$(
 chk "⑩ 绑定不可读退出码 1" "1" "${rc}"
 chk_contains "⑩ 报无法确认 PVC 绑定" "无法确认 PVC 绑定" "${out}"
 chk_not_contains "⑩ registry 不被 patch" "patch rs registry" "$(cat "${TMP}/ssh-pvfail.log")"
+
+echo "== ⑪ 工作负载 JSON 读取失败 → 跳过并失败 =="
+mkdir -p "${TMP}/bin-objfail"
+: > "${TMP}/ssh-objfail.log"
+cat > "${TMP}/bin-objfail/ssh" <<'FAKE'
+#!/bin/bash
+cmd="$*"
+printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}"
+case "${cmd}" in
+    *"get rs registry -o json"*) echo "Error from server: connection refused" >&2; exit 1 ;;
+    *" -o json"*) echo '{}' ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-objfail/ssh"
+out="$(
+    (
+        export PATH="${TMP}/bin-objfail:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        export FAKE_SSH_LOG="${TMP}/ssh-objfail.log"
+        bash "${TOOL}" --apply
+    ) 2>&1
+)"; rc=$?
+chk "⑪ 对象 JSON 读取失败退出码 1" "1" "${rc}"
+chk_contains "⑪ 报读取对象失败" "读取对象失败" "${out}"
+chk_not_contains "⑪ registry 不被 patch" "patch rs registry" "$(cat "${TMP}/ssh-objfail.log")"
 
 echo ""
 if [ "${fail}" = "0" ]; then

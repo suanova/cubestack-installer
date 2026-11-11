@@ -186,7 +186,22 @@ case "${ACTION}" in
             fi
             # local-path 等 nodeAffinity PV: PVC 已绑 worker 时钉 master 会 Pending,
             # registry 尤其会阻断后续 dev_lab/model_images 的镜像 push。跳过并交给人工迁移。
-            _pvcs="$( (SSH "${K}" -n "${_n}" get "${_t}" "${_name}" -o json 2>/dev/null) | placement_pod_pvcs || true )"
+            # 对象读取/解析失败必须按"未知"处理, 不能当成"无 PVC"继续 patch。
+            _obj_rc=0
+            _obj_json="$(SSH "${K}" -n "${_n}" get "${_t}" "${_name}" -o json 2>/dev/null)" || _obj_rc=$?
+            if [ "${_obj_rc}" -ne 0 ]; then
+                _obj_msg="$(SSH "${K}" -n "${_n}" get "${_t}" "${_name}" -o json 2>&1 >/dev/null)" || true
+                case "${_obj_msg}" in
+                    *NotFound*|*"not found"*) say "  [${_n}/${_t}/${_name}] 对象已消失, 跳过"; continue ;;
+                    *) err "  [${_n}/${_t}/${_name}] 读取对象失败, 跳过 placement: $(printf '%s' "${_obj_msg}" | tail -1)"
+                       FAILED=1; continue ;;
+                esac
+            fi
+            _pvcs_rc=0
+            _pvcs="$(printf '%s' "${_obj_json}" | placement_pod_pvcs)" || _pvcs_rc=$?
+            if [ "${_pvcs_rc}" -eq 2 ]; then
+                err "  [${_n}/${_t}/${_name}] 对象 JSON 解析失败, 跳过 placement"; FAILED=1; continue
+            fi
             if [ -n "${_pvcs}" ]; then
                 _bound_rc=0
                 _bound="$(placement_pvc_worker_bound "${_n}" ${_pvcs})" || _bound_rc=$?

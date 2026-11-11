@@ -2985,13 +2985,14 @@ for item in data.get("items", []):
 # 用法: placement_pod_pvcs < Pod/Deployment/ReplicaSet JSON(stdin)> → 每行一个 PVC 名
 #       placement_pvc_worker_bound <ns> <pvc>... → 0=有 PVC 绑在非 master(输出 pvc@node);
 #         1=确认没有; 2=查询失败(未知, 调用方必须按跳过/失败处理)
+# 返回: 0=解析成功(可能无 PVC); 2=JSON 读取/解析失败(调用方不得当成"无 PVC")
 placement_pod_pvcs() {
     python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
+    sys.exit(2)
 s = d.get("spec") or {}
 kind = d.get("kind", "")
 podname = (d.get("metadata") or {}).get("name", "")
@@ -3004,7 +3005,7 @@ for v in s.get("volumes") or []:
         # StatefulSet Pod 的 volumes 引用卷模板名, 实际 PVC 是 <claim>-<pod>。
         if kind == "Pod" and podname:
             print(c + "-" + podname)
-' 2>/dev/null || true
+' 2>/dev/null
 }
 
 # PVC 绑定的节点(local-path PV 的 hostname nodeAffinity); 无 nodeAffinity 输出空。

@@ -413,6 +413,65 @@ out="$(
 chk "⑭ check 存在性查询失败退出码" "1" "${rc}"
 chk_contains "⑭ 报 check 查询失败" "check 查询失败" "${out}"
 
+echo "== ⑮ 工作负载 JSON 读取失败 → 跳过并失败 =="
+mkdir -p "${TMP}/bin-objfail"
+cat > "${TMP}/bin-objfail/ssh" <<'FAKE'
+#!/bin/bash
+cmd="$*"
+case "${cmd}" in
+    *"get deploy cubestack-operator -o json"*) echo "Error from server: connection refused" >&2; exit 1 ;;
+    *"get pvc -o json"*) echo '{"items":[]}' ;;
+    *" -o json"*) echo '{"spec":{}}' ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-objfail/ssh"
+out="$(
+    (
+        export PATH="${TMP}/bin-objfail:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        bash "${TOOL}" --apply
+    ) 2>&1
+)"; rc=$?
+chk "⑮ 对象 JSON 读取失败退出码" "1" "${rc}"
+chk_contains "⑮ 报读取对象失败" "读取对象失败" "${out}"
+
+echo "== ⑯ Pod 不存在但 PVC 仍绑 worker → 跳过 =="
+mkdir -p "${TMP}/bin-podgone"
+: > "${TMP}/podgone.log"
+cat > "${TMP}/bin-podgone/ssh" <<'FAKE'
+#!/bin/bash
+cmd="$*"
+case "${cmd}" in
+    *"get pod prometheus-kube-prometheus-kube-prome-prometheus-0 -o json"*)
+        echo 'Error from server (NotFound): pods "prometheus-kube-prometheus-kube-prome-prometheus-0" not found' >&2; exit 1 ;;
+    *"get pvc -o json"*) echo '{"items":[{"metadata":{"name":"prometheus-kube-prometheus-kube-prome-prometheus-db-0"}}]}' ;;
+    *"get pvc prometheus-kube-prometheus-kube-prome-prometheus-db-0 -o jsonpath"*) echo "pv-prom" ;;
+    *"get pv pv-prom -o json"*) echo '{"spec":{"nodeAffinity":{"required":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","values":["w1"]}]}]}}}}' ;;
+    *"get node w1 -o json"*) echo '{"metadata":{"labels":{"kubernetes.io/hostname":"w1"}}}' ;;
+    *" patch "*) printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}" ;;
+    *" -o json"*) echo '{"spec":{}}' ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-podgone/ssh"
+out="$(
+    (
+        export PATH="${TMP}/bin-podgone:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        export FAKE_SSH_LOG="${TMP}/podgone.log"
+        bash "${TOOL}" --apply
+    ) 2>&1
+)"; rc=$?
+pod_log="$(cat "${TMP}/podgone.log")"
+chk "⑯ Pod 不存在 + worker PVC 跳过不阻断" "0" "${rc}"
+chk_contains "⑯ 告警点名 worker 绑定" "绑定在 worker" "${out}"
+chk_not_contains "⑯ Prometheus 不被 patch" "patch prometheuses.monitoring.coreos.com" "${pod_log}"
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-cubestack-placement: 全部通过"

@@ -70,12 +70,13 @@ _CB_WORKLOADS=(
 
 # <resource>|<namespace>|<name>|<pod>|<pvc-prefix> —— operator 从 CR 调和的 StatefulSet。
 # 直接 patch CR(而不是 STS 模板), 否则 operator 下一次调理会把模板覆盖回去。
-# 第 4 列 = 现有 Pod 名(单 Pod 场景); 第 5 列 = PVC 名前缀(多副本场景);
-# 二者都用于 placement 前检查 local-path PV 是否已绑在 worker, 二选一。
+# 第 4 列 = 现有 Pod 名(优先用它读实际 PVC); 第 5 列 = PVC 名前缀:
+#   · 多副本场景(Redis)没有固定 Pod 名, 直接用前缀;
+#   · 单 Pod 场景在 Pod 不存在(升级缩容/尚未创建)时按前缀回查已有 PVC, 防止漏掉 worker 绑定。
 _CB_CRS=(
-    "prometheuses.monitoring.coreos.com|monitoring|kube-prometheus-kube-prome-prometheus|prometheus-kube-prometheus-kube-prome-prometheus-0|"
-    "alertmanagers.monitoring.coreos.com|monitoring|kube-prometheus-kube-prome-alertmanager|alertmanager-kube-prometheus-kube-prome-alertmanager-0|"
-    "perses.perses.dev|monitoring|perses|perses-0|"
+    "prometheuses.monitoring.coreos.com|monitoring|kube-prometheus-kube-prome-prometheus|prometheus-kube-prometheus-kube-prome-prometheus-0|prometheus-kube-prometheus-kube-prome-prometheus"
+    "alertmanagers.monitoring.coreos.com|monitoring|kube-prometheus-kube-prome-alertmanager|alertmanager-kube-prometheus-kube-prome-alertmanager-0|alertmanager-kube-prometheus-kube-prome-alertmanager"
+    "perses.perses.dev|monitoring|perses|perses-0|perses"
     # RedisReplication 的 Redis/Sentinel pods 都由这个 CR 调和; 3 副本/3 sentinel 的
     # PVC 前缀都是 cuberouter-redis-。
     "redisreplications.redis.redis.opstreelabs.in|cuberouter|cuberouter-redis||cuberouter-redis-"
@@ -222,33 +223,81 @@ _require_exists() {   # <phase> <type> <ns> <name>
     esac
 }
 
-# local-path 等 nodeAffinity PV 守护: 0=可以 placement; 1=已跳过(已打印原因)。
-# 无法确认 PVC/PV/节点绑定时保守跳过并置 FAILED —— 不把"查不到"当成"安全"。
-# <label> 只用于日志; json 为工作负载/CR Pod 的 -o json 输出。
-_pvc_guard_json() {   # <ns> <label> <object-json>
-    local _pvcs _bound _rc=0
-    _pvcs="$(printf '%s' "$3" | placement_pod_pvcs || true)"
-    [ -n "${_pvcs}" ] || return 0
-    _bound="$(placement_pvc_worker_bound "$1" ${_pvcs})" || _rc=$?
+# 读取对象 JSON: stdout=JSON; 0=成功; 1=确认不存在; 2=查询/解析失败。
+_GET_JSON_ERR=""
+_get_json() {   # <type> <ns> <name>
+    local _type="$1" _ns="$2" _name="$3" _out _rc=0 _msg
+    _GET_JSON_ERR=""
+    _out="$(SSH "${K}" -n "${_ns}" get "${_type}" "${_name}" -o json 2>/dev/null)" || _rc=$?
+    if [ "${_rc}" -ne 0 ]; then
+        _msg="$(SSH "${K}" -n "${_ns}" get "${_type}" "${_name}" -o json 2>&1 >/dev/null)" || true
+        case "${_msg}" in
+            *NotFound*|*"not found"*|*"doesn't have a resource type"*) return 1 ;;
+            *) _GET_JSON_ERR="$(printf '%s' "${_msg}" | tail -1)"; return 2 ;;
+        esac
+    fi
+    if ! printf '%s' "${_out}" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if isinstance(d, dict) else 1)' 2>/dev/null; then
+        _GET_JSON_ERR="JSON 解析失败"; return 2
+    fi
+    printf '%s' "${_out}"
+    return 0
+}
+
+# PVC 守护(已拿到 PVC 名列表): 0=可以 placement; 1=已跳过(已打印原因)。
+_pvc_guard_pvcs() {   # <ns> <label> <pvc...>
+    local _ns="$1" _label="$2"; shift 2
+    [ "$#" -gt 0 ] || return 0
+    local _bound _rc=0
+    _bound="$(placement_pvc_worker_bound "${_ns}" "$@")" || _rc=$?
     case "${_rc}" in
-        0) warn "  [$2] PVC ${_bound} 绑定在 worker(local-path), 跳过 placement(否则 Pending; 需共享存储或重建 PVC)"; return 1 ;;
-        2) err "  [$2] 无法确认 PVC 绑定(查询失败), 跳过 placement(避免 Pending/误迁移)"; FAILED=1; return 1 ;;
+        0) warn "  [${_label}] PVC ${_bound} 绑定在 worker(local-path), 跳过 placement(否则 Pending; 需共享存储或重建 PVC)"; return 1 ;;
+        2) err "  [${_label}] 无法确认 PVC 绑定(查询失败), 跳过 placement(避免 Pending/误迁移)"; FAILED=1; return 1 ;;
     esac
     return 0
 }
 
+# 对象级 PVC 守护: 读取对象 JSON 后再判断绑定。
+# 0=可以 placement; 1=已跳过(原因已打印; FAILED 可能已置位)。
+# <fallback-prefix>: 对象(Pod)不存在时按 PVC 名前缀回查已有卷; 为空则跳过(无法确认绑定)。
+_pvc_guard_object() {   # <type> <ns> <name> <label> [fallback-pvc-prefix]
+    local _type="$1" _ns="$2" _name="$3" _label="$4" _prefix="${5:-}"
+    local _json _rc=0 _pvcs _prc=0
+    _json="$(_get_json "${_type}" "${_ns}" "${_name}")" || _rc=$?
+    case "${_rc}" in
+        0) : ;;
+        1)
+            if [ -z "${_prefix}" ]; then
+                say "  [${_label}] 对象不存在且无 PVC 前缀可回查, 跳过 placement"; return 1
+            fi
+            _pvcs="$(_cr_pvcs_by_prefix "${_ns}" "${_prefix}")" || _prc=$?
+            if [ "${_prc}" -eq 2 ]; then
+                err "  [${_label}] 对象不存在且 PVC 列表查询失败, 跳过 placement"; FAILED=1; return 1
+            fi
+            [ -n "${_pvcs}" ] || return 0
+            _pvc_guard_pvcs "${_ns}" "${_label}" ${_pvcs} || return 1
+            return 0
+            ;;
+        *)
+            err "  [${_label}] 读取对象失败, 跳过 placement: ${_GET_JSON_ERR:-未知错误}"; FAILED=1; return 1
+            ;;
+    esac
+    _pvcs="$(printf '%s' "${_json}" | placement_pod_pvcs)" || _prc=$?
+    if [ "${_prc}" -eq 2 ]; then
+        err "  [${_label}] 对象 JSON 解析失败, 跳过 placement"; FAILED=1; return 1
+    fi
+    [ -n "${_pvcs}" ] || return 0
+    _pvc_guard_pvcs "${_ns}" "${_label}" ${_pvcs} || return 1
+    return 0
+}
+
 _pvc_guard_prefix() {   # <ns> <pvc-prefix> <label>
-    local _pvcs _bound _rc=0
+    local _pvcs _rc=0
     _pvcs="$(_cr_pvcs_by_prefix "$1" "$2")" || _rc=$?
     if [ "${_rc}" -eq 2 ]; then
         err "  [$3] 无法列出 PVC(查询失败), 跳过 placement(避免 Pending/误迁移)"; FAILED=1; return 1
     fi
     [ -n "${_pvcs}" ] || return 0
-    _bound="$(placement_pvc_worker_bound "$1" ${_pvcs})" || _rc=$?
-    case "${_rc}" in
-        0) warn "  [$3] PVC ${_bound} 绑定在 worker(local-path), 跳过 placement(否则 Pending; 需共享存储或重建 PVC)"; return 1 ;;
-        2) err "  [$3] 无法确认 PVC 绑定(查询失败), 跳过 placement(避免 Pending/误迁移)"; FAILED=1; return 1 ;;
-    esac
+    _pvc_guard_pvcs "$1" "$3" ${_pvcs} || return 1
     return 0
 }
 
@@ -493,9 +542,8 @@ case "${ACTION}" in
                 continue
             fi
             # local-path 等 nodeAffinity PV: PVC 已绑 worker 时钉 master 会 Pending。
-            # 无法确认绑定时 guard 保守跳过并置 FAILED(不把"查不到"当成安全)。
-            _obj_json="$( (SSH "${K}" -n "${_n}" get "${_t}" "${_name}" -o json 2>/dev/null) || true )"
-            _pvc_guard_json "${_n}" "${_n}/${_t}/${_name}" "${_obj_json}" || continue
+            # 对象读取/解析失败 → 跳过并置 FAILED(不把"查不到"当成无 PVC)。
+            _pvc_guard_object "${_t}" "${_n}" "${_name}" "${_n}/${_t}/${_name}" || continue
             if _patch_one "${_t}" "${_n}" "${_name}" "${_PATCH}"; then
                 ok "  [${_n}/${_t}/${_name}] 已加 master nodeSelector + tolerations"
             else
@@ -509,8 +557,9 @@ case "${ACTION}" in
                 continue
             fi
             if [ -n "${_pod}" ]; then
-                _obj_json="$( (SSH "${K}" -n "${_n}" get pod "${_pod}" -o json 2>/dev/null) || true )"
-                _pvc_guard_json "${_n}" "${_n}/${_t}/${_name}" "${_obj_json}" || continue
+                # Pod 存在时读实际 PVC; Pod 不存在(升级缩容/尚未创建)时按前缀回查已有 PVC,
+                # 避免漏掉仍绑在 worker 的 local-path 卷(否则新 Pod Pending)。
+                _pvc_guard_object pod "${_n}" "${_pod}" "${_n}/${_t}/${_name}" "${_pvcp}" || continue
             elif [ -n "${_pvcp}" ]; then
                 _pvc_guard_prefix "${_n}" "${_pvcp}" "${_n}/${_t}/${_name}" || continue
             fi

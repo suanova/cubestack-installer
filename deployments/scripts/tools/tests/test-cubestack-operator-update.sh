@@ -431,7 +431,10 @@ set -uo pipefail
 source "${FN_MON:?}"
 K="sudo kubectl"
 warn() { :; }
-placement_pod_pvcs() { [ -n "${POD_PVCS:-}" ] && echo "${POD_PVCS}"; }
+placement_pod_pvcs() {
+    [ "${POD_PVCS:-}" = "PARSE_FAIL" ] && return 2
+    [ -n "${POD_PVCS:-}" ] && echo "${POD_PVCS}"
+}
 placement_pvc_worker_bound() {
     case "${PV_BOUND:-1}" in
         0) return 0 ;;   # worker 绑定
@@ -463,6 +466,7 @@ rc=0; _run_mon 1 || rc=$?; chk "⑯ 安全绑定 → 下发" "0" "${rc}"
 rc=0; _run_mon 2 || rc=$?; chk "⑯ 绑定未知 → 保守不下发" "1" "${rc}"
 rc=0; _run_mon 0 "" pod404 || rc=$?; chk "⑯ Pod 不存在但 PVC 绑 worker → 不下发" "1" "${rc}"
 rc=0; _run_mon 1 "" apifail || rc=$?; chk "⑯ 查询失败 → 保守不下发" "1" "${rc}"
+rc=0; _run_mon 1 "PARSE_FAIL" podok || rc=$?; chk "⑯ Pod JSON 解析失败 → 保守不下发" "1" "${rc}"
 
 echo ""
 if [ "${fail}" = "0" ]; then
