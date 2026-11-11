@@ -332,6 +332,36 @@ chk_contains "⑨ 其他系统组件仍 patch" "patch deploy coredns" "$(cat "${
 chk_contains "⑨ 告警点名 PVC@worker" "PVC registry-pvc@w1" "${out}"
 chk_contains "⑨ 说明跳过 placement" "跳过 placement" "${out}"
 
+echo "== ⑩ PVC 绑定不可读 → 跳过并失败(不当作无绑定) =="
+mkdir -p "${TMP}/bin-pvfail"
+cat > "${TMP}/bin-pvfail/ssh" <<'FAKE'
+#!/bin/bash
+cmd="$*"
+printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}"
+case "${cmd}" in
+    *"get rs registry -o json"*)
+        echo '{"spec":{"template":{"spec":{"volumes":[{"name":"registry-pvc","persistentVolumeClaim":{"claimName":"registry-pvc"}}]}}}}' ;;
+    *"get pvc registry-pvc"*) echo "Error from server: connection refused" >&2; exit 1 ;;
+    *" -o json"*) echo '{}' ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-pvfail/ssh"
+: > "${TMP}/ssh-pvfail.log"
+out="$(
+    (
+        export PATH="${TMP}/bin-pvfail:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        export FAKE_SSH_LOG="${TMP}/ssh-pvfail.log"
+        bash "${TOOL}" --apply
+    ) 2>&1
+)"; rc=$?
+chk "⑩ 绑定不可读退出码 1" "1" "${rc}"
+chk_contains "⑩ 报无法确认 PVC 绑定" "无法确认 PVC 绑定" "${out}"
+chk_not_contains "⑩ registry 不被 patch" "patch rs registry" "$(cat "${TMP}/ssh-pvfail.log")"
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-master-placement: 全部通过"

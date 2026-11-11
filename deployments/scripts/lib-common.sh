@@ -2983,7 +2983,8 @@ for item in data.get("items", []):
 #   Pending。把 placement 提前到 dev_lab/model_images 之前时, registry 尤其不能这样中断
 #   (后续镜像 push 全依赖它)。调用方在 apply 前用本组函数判断并跳过 + 告警。
 # 用法: placement_pod_pvcs < Pod/Deployment/ReplicaSet JSON(stdin)> → 每行一个 PVC 名
-#       placement_pvc_worker_bound <ns> <pvc>... → 0=有 PVC 绑在非 master(输出 pvc@node)
+#       placement_pvc_worker_bound <ns> <pvc>... → 0=有 PVC 绑在非 master(输出 pvc@node);
+#         1=确认没有; 2=查询失败(未知, 调用方必须按跳过/失败处理)
 placement_pod_pvcs() {
     python3 -c '
 import json, sys
