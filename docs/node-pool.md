@@ -131,11 +131,17 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
   cordon 与平台 placement 仍由本模块在 `dev_lab`/`model_images` 之前按配置执行（幂等重跑）。
 - **异步组件等待**：operator 创建组件 Deployment 是异步的；apply 前按
   `NODE_POOL_PLACEMENT_WAIT_SECONDS`（默认 180s）等待 CR 中 enabled 组件的 Deployment 出现，
-  避免首次 placement 因对象尚未创建而跳过。
+  避免首次 placement 因对象尚未创建而跳过。等待期间每次 Deployment 查询都按“剩余预算 /
+  待查对象数”设置 `--request-timeout` 与远端 `timeout`，单次 API 卡死不会拖过整体上限；
+  `0` 表示只查一轮。
 - **local-path PVC 守护**：placement 前检查工作负载 PVC 的 PV `nodeAffinity`；若 PVC 已绑定在
   worker（local-path 无共享存储），钉 master 会让新 Pod `volume node affinity conflict` Pending，
   因此跳过该工作负载并告警（需共享存储或重建 PVC）。Ceph-on（ceph-block/cephfs）无此问题；
   该守护同时避免 registry 在 `dev_lab`/`model_images` 之前被钉到 master 后阻断镜像 push。
+  监控组件的 **chart values** 也受守护：`25_cubestack_operator.sh` 生成
+  `clusterCR.spec.components.prometheus.values` 前会检查已有 Prometheus/Alertmanager PVC
+  绑定；PVC 已绑 worker 或状态无法确认时，不下发对应的 master nodeSelector（tolerations
+  保留），避免 operator 先于 34_node_pool 把 STS 改成 master 导致 Pending。
 - `remove` 先 uncordon，再移除 master nodeSelector。**回滚不看当前 placement 开关**：
   应用后把 `NODE_POOL_CUBESTACK_PLACEMENT`/`NODE_POOL_PLATFORM_PLACEMENT` 改成 false
   再执行 remove，仍会清掉本工具施加的 nodeSelector（与 cordon 的 ownership 口径一致）。
@@ -144,7 +150,10 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
   PodTemplate 读取/JSON 解析失败都会让 remove **非 0 退出**，不会被当作"对象不存在/
   无 selector"静默跳过。移除 patch 失败**不再降级为告警**：
   任一 placement 回滚失败都会让工具与 `node_pool` 的 remove **非 0 退出**，避免把残留
-  selector 当成功。
+  selector 当成功。`cubestack-placement.sh --remove` 还会清理 `CubeStackCluster`
+  `spec.components.<name>.values` 中由 `25_cubestack_operator.sh` 持久化的 master
+  nodeSelector（只删 `node-role.kubernetes.io/control-plane` 键，保留用户自定义 selector
+  与 tolerations），避免后续组件调和/升级把 placement 重新带回。
 
 ### 系统组件 master placement(阶段二 B-1)
 

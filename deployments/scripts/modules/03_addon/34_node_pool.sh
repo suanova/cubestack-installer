@@ -128,11 +128,21 @@ for k, v in m.items():
     [ -n "${_expected}" ] || return 0
     say "等待平台组件 Deployment 出现(最多 ${_wait_s}s)..."
     _deadline=$(( $(date +%s) + _wait_s ))
+    _n_expected=0
+    for _item in ${_expected}; do _n_expected=$(( _n_expected + 1 )); done
+    [ "${_n_expected}" -ge 1 ] || _n_expected=1
     while :; do
+        # 单次查询预算 = 剩余时间 / 待查对象数(至少 1s)。远端 kubectl 没有默认请求超时,
+        # 必须同时用 --request-timeout 和远端 timeout 兜底 —— SSH ConnectTimeout 只约束
+        # 连接建立, 不约束远端命令; 否则一次 API 卡死会拖过整个 NODE_POOL_PLACEMENT_WAIT_SECONDS。
+        _remain=$(( _deadline - $(date +%s) ))
+        _q=$(( _remain / _n_expected ))
+        [ "${_q}" -ge 1 ] || _q=1
         _missing=""
         for _item in ${_expected}; do
             _dns="${_item%%/*}"; _dname="${_item##*/}"
-            SSH "${K}" -n "${_dns}" get deploy "${_dname}" >/dev/null 2>&1 </dev/null \
+            SSH "timeout ${_q} ${K}" --request-timeout="${_q}s" -n "${_dns}" get deploy "${_dname}" \
+                >/dev/null 2>&1 </dev/null \
                 || _missing="${_missing} ${_item}"
         done
         if [ -z "${_missing}" ]; then

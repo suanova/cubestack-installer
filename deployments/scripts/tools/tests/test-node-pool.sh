@@ -432,6 +432,43 @@ chk_contains "⑳ m1 污点保留" "control-plane" "$(_taints m1)"
 out="$(_run NODE_POOL_MASTER_SCHEDULABLE=false -- --check)"
 chk "⑳ check 不把污点当漂移" "0" "$?"
 
+echo "== ㉑ 等待循环: 单次 Deployment 查询受预算约束 =="
+# 远端 kubectl 默认无请求超时; 必须按剩余预算给每次查询设 --request-timeout + timeout,
+# 否则一次 API 卡死会拖过 NODE_POOL_PLACEMENT_WAIT_SECONDS(CodeRabbit 2026-11-11)。
+MOD_WAIT="${REPO_ROOT}/deployments/scripts/modules/03_addon/34_node_pool.sh"
+mod_src="$(cat "${MOD_WAIT}")"
+chk_contains "㉑ 按剩余预算分配单查询超时" '_remain / _n_expected' "${mod_src}"
+sed -n '/^_wait_for_platform_deployments() {/,/^case "${_ACTION}" in/p' "${MOD_WAIT}" | sed '$d' > "${TMP}/fn-wait.sh"
+chk "㉑ 函数已提取" "1" "$([ -s "${TMP}/fn-wait.sh" ] && echo 1 || echo 0)"
+cat > "${TMP}/wait-run.sh" <<'EOS'
+#!/bin/bash
+set -uo pipefail
+# shellcheck disable=SC1090
+source "${FN_WAIT:?}"
+K="sudo kubectl"; CUBESTACK_OPERATOR_NAMESPACE="cubestack-system"
+NODE_POOL_PLACEMENT_WAIT_SECONDS="${WAIT_S:-0}"
+say(){ :; }
+warn(){ echo "WARN:$*" >&2; }
+SSH(){
+    printf '%s\n' "$*" >> "${SSH_LOG:?}"
+    case "$*" in
+        *"get csc -o json"*) echo '{"items":[{"spec":{"components":{"cubepilot":{"enabled":true}}}}]}' ;;
+        *"get deploy"*) return "${DEPLOY_RC:-0}" ;;
+    esac
+    return 0
+}
+_wait_for_platform_deployments
+EOS
+chmod +x "${TMP}/wait-run.sh"
+: > "${TMP}/wait.log"
+FN_WAIT="${TMP}/fn-wait.sh" WAIT_S=0 DEPLOY_RC=0 SSH_LOG="${TMP}/wait.log" bash "${TMP}/wait-run.sh" >/dev/null 2>&1
+wait_log="$(cat "${TMP}/wait.log")"
+chk_contains "㉑ 查询带远端 timeout" "timeout 1 sudo kubectl" "${wait_log}"
+chk_contains "㉑ 查询带 request-timeout" "--request-timeout=1s" "${wait_log}"
+: > "${TMP}/wait.log"
+wait_out="$(FN_WAIT="${TMP}/fn-wait.sh" WAIT_S=0 DEPLOY_RC=1 SSH_LOG="${TMP}/wait.log" bash "${TMP}/wait-run.sh" 2>&1)"
+chk_contains "㉑ 0s 预算仍只查一轮并按时返回" "等待超时" "${wait_out}"
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-node-pool: 全部通过"
