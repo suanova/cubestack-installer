@@ -25,6 +25,14 @@ TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 fail=0
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }
 chk_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  ok  $1"; else echo "  FAIL $1: [$3] 未包含 [$2]"; fail=1; fi; }
+# grep -F 把模式里的换行当作"多个备选模式"(任一命中即可), 不能验证多行片段连续出现。
+chk_block() {   # <msg> <多行连续片段> <file>
+    if python3 -c 'import sys; sys.exit(0 if sys.argv[1] in open(sys.argv[2], encoding="utf-8", errors="replace").read() else 1)' "$2" "$3" 2>/dev/null; then
+        echo "  ok  $1"
+    else
+        echo "  FAIL $1: [$3] 未包含连续片段 [$2]"; fail=1
+    fi
+}
 chk_not_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  FAIL $1: [$3] 不应包含 [$2]"; fail=1; else echo "  ok  $1"; fi; }
 count_of() { grep -cF -- "$2" "$3" 2>/dev/null || true; }
 
@@ -349,9 +357,9 @@ for k in 'cubepilot:' 'cubestackControllerManager:' 'cubestackPortal:' 'envoyGat
     chk_contains "CR component ${k}" "$(printf '      %s' "${k}")" "${MOD}"
 done
 # envoy-gateway 的 Pod 调度在 deployment.pod.*（写 deployment.envoyGateway.* 会静默不生效）
-chk_contains "envoyGateway native pod placement path" "$(printf '      envoyGateway:\n        values:\n          deployment:\n            pod:')" "${MOD}"
+chk_block "envoyGateway native pod placement path" "$(printf '      envoyGateway:\n        values:\n          deployment:\n            pod:')" "${MOD}"
 # ai-gateway-helm 的 Pod 调度在 controller.*
-chk_contains "aiGateway native pod placement path" "$(printf '      aiGateway:\n        values:\n          controller:')" "${MOD}"
+chk_block "aiGateway native pod placement path" "$(printf '      aiGateway:\n        values:\n          controller:')" "${MOD}"
 for k in 'operator:' 'api:' 'web:'; do
     chk_contains "cubepilot subcomponent ${k}" "$(printf '          %s' "${k}")" "${MOD}"
 done
