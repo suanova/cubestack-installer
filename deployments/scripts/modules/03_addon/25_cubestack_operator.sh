@@ -816,8 +816,10 @@ trap '_cleanup; rm -rf "${_WORK}"' EXIT
 # 平台组件：cubepilot-api/operator、cubestack-controller-manager、cubestack-portal、
 # envoy-gateway、ai-gateway 等 **组件 chart 原生支持 nodeSelector/tolerations**，这里通过
 # CubeStackCluster 的 components.<name>.values 在**创建 Deployment 时**就下发（不依赖部署末尾 patch）。
-# 其余平台组件(cuberouter/monitoring)仍由 node_pool 模块的 cubestack-placement.sh 兜底
-# （lws 另由 lws-cr-values.yaml 下发）；**不使用** CR spec.global 的 placement 字段 ——
+# 其余平台组件(cuberouter)仍由 node_pool 模块的 cubestack-placement.sh 兜底
+# (monitoring/Perses 这里已尽量在创建时下发；Perses server 是 observability 资产,
+# 没有 values 注入路径 → placement 直接 patch 其 CR spec)；
+# **不使用** CR spec.global 的 placement 字段 ——
 # 它会注入到所有组件(含 model bundle 推理负载)。
 if [ "${NODE_POOL_CUBESTACK_PLACEMENT:-true}" = "true" ]; then
     _NODE_POOL_VALUES="${_WORK}/node-pool-values.yaml"
@@ -893,7 +895,7 @@ clusterCR:
               effect: NoSchedule
       # Envoy Gateway 控制面：gateway-helm 的 Pod 调度字段在 deployment.pod.*
       # (deployment.envoyGateway.* 只是容器设置，写错会静默不生效)。
-      # 在创建 Deployment 时下发，避免 node_pool 末尾 patch 与 operator 异步创建/
+      # 在创建 Deployment 时下发，避免 node_pool 兜底 patch 与 operator 异步创建/
       # 后续调和之间的竞态（实机: controller 已存在但 patch 时还没创建 → 留在 worker）。
       envoyGateway:
         values:
@@ -914,6 +916,76 @@ clusterCR:
       aiGateway:
         values:
           controller:
+            nodeSelector:
+              node-role.kubernetes.io/control-plane: ""
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node.kubernetes.io/unschedulable
+                operator: Exists
+                effect: NoSchedule
+      # Prometheus(kube-prometheus-stack)：Prometheus/Alertmanager 的 STS 由 CR 调和,
+      # 调度字段在 *.prometheusSpec / *.alertmanagerSpec; 其余是 chart 自身的 Deployment。
+      # ★ 不写 prometheus-node-exporter：它是 DaemonSet, 必须覆盖全节点。
+      prometheus:
+        values:
+          prometheusOperator:
+            nodeSelector:
+              node-role.kubernetes.io/control-plane: ""
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node.kubernetes.io/unschedulable
+                operator: Exists
+                effect: NoSchedule
+          prometheus:
+            prometheusSpec:
+              nodeSelector:
+                node-role.kubernetes.io/control-plane: ""
+              tolerations:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: Exists
+                  effect: NoSchedule
+                - key: node.kubernetes.io/unschedulable
+                  operator: Exists
+                  effect: NoSchedule
+          alertmanager:
+            alertmanagerSpec:
+              nodeSelector:
+                node-role.kubernetes.io/control-plane: ""
+              tolerations:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: Exists
+                  effect: NoSchedule
+                - key: node.kubernetes.io/unschedulable
+                  operator: Exists
+                  effect: NoSchedule
+          grafana:
+            nodeSelector:
+              node-role.kubernetes.io/control-plane: ""
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node.kubernetes.io/unschedulable
+                operator: Exists
+                effect: NoSchedule
+          kube-state-metrics:
+            nodeSelector:
+              node-role.kubernetes.io/control-plane: ""
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node.kubernetes.io/unschedulable
+                operator: Exists
+                effect: NoSchedule
+      # Perses operator manager；Perses server CR 见 cubestack-placement.sh 的 CR patch。
+      perses:
+        values:
+          manager:
             nodeSelector:
               node-role.kubernetes.io/control-plane: ""
             tolerations:

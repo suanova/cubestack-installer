@@ -20,15 +20,21 @@
 #         25_cubestack_operator.sh 还会通过 CubeStackCluster components.<name>.values 在创建
 #         cubepilot-api/operator、controller-manager、portal 时直接下发 master placement。
 #       - NODE_POOL_PLATFORM_PLACEMENT=true(默认): 给 CoreDNS/metrics-server/dns-autoscaler/
-#         calico-kube-controllers/registry/MetalLB 等系统组件加 master placement。
+#         calico-kube-controllers/registry/MetalLB/local-path-provisioner/MetaX operator
+#         等系统组件加 master placement。
 #         设 false 可只钉 CubeStack 平台组件、不动系统组件。
+#       - 由 CR 调和的 StatefulSet(Prometheus/Alertmanager/Perses)通过 patch CR spec 下发。
+#   · 执行时机(2026-11-10): 本模块排在 **34**, 在 dev_lab/model_images(vllm/sglang 大镜像
+#     push)之前完成 placement; 组件 Deployment 由 operator 异步创建, 因此 apply 前会做
+#     有界等待(NODE_POOL_PLACEMENT_WAIT_SECONDS, 默认 180s), 避免"组件还没出现 → 跳过 →
+#     留在 worker"。
 #   · 无可用 worker 安全护栏(2026-10-28): 没有 **Ready 且未 cordon** 的 worker(单节点
 #     all-in-one / 纯 master 集群, 或配置的 worker 全部 NotReady/已 cordon)时,
 #     node-pool.sh 自动**跳过 cordon**, master 保持可调度 ——
 #     否则 CoreDNS/dns-autoscaler(不带 node.kubernetes.io/unschedulable 容忍)滚动/重启
 #     后会永久 Pending, 单节点集群将失去 DNS; 单节点 play 的 uncordon 也不会被撤销。
 #     有 worker 时才按 NODE_POOL_MASTER_CORDON 执行。
-#   · NODE_POOL_ENABLED 默认 true ⇒ 随全量部署在 addon 末尾(本文件 53)执行；也可手动:
+#   · NODE_POOL_ENABLED 默认 true ⇒ 随全量部署在 dev_lab/model_images 之前(本文件 34)执行；也可手动:
 #       sudo ./deploy-cluster.sh --steps node_pool
 #       sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool   # 回滚
 #       (变量必须经 env 传给 root: sudo 默认 env_reset 会清掉 "VAR=... sudo" 前置赋值)
@@ -79,8 +85,72 @@ if [ "${NODE_POOL_ENABLED:-false}" != "true" ]; then
     exit 0
 fi
 
+# operator 异步创建平台组件: placement 前先有界等待目标 Deployment 出现。
+# 只等待 CR 中 enabled 的组件, 禁用的组件不会拖满超时; 等待失败不阻断(后续可重跑收敛)。
+_wait_for_platform_deployments() {
+    local _ns="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
+    local _cr_json _expected _deadline _missing _item _dns _dname _wait_s
+    _wait_s="${NODE_POOL_PLACEMENT_WAIT_SECONDS:-180}"
+    case "${_wait_s}" in ''|*[!0-9]*) _wait_s=180 ;; esac
+    _cr_json="$(SSH "${K}" -n "${_ns}" get csc -o json 2>/dev/null || true)"
+    case "${_cr_json}" in
+        ""|*"NotFound"*|*"not found"*|*"Unable to connect"*) return 0 ;;
+    esac
+    _expected="$(printf '%s' "${_cr_json}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+items = d.get("items") if isinstance(d, dict) and isinstance(d.get("items"), list) else [d]
+if not items:
+    sys.exit(0)
+c = (items[0].get("spec") or {}).get("components") or {}
+m = {
+    "cubepilot": ["cubestack-system/cubepilot-operator", "cubestack-system/cubepilot-api"],
+    "cubestackControllerManager": ["cubestack-system/cubestack-controller-manager"],
+    "cubestackPortal": ["cubestack-system/cubestack-portal"],
+    "cubestackDocs": ["cubestack-system/cubestack-docs"],
+    "lws": ["lws-system/lws-controller-manager"],
+    "envoyGateway": ["envoy-gateway-system/envoy-gateway"],
+    "aiGateway": ["ai-gateway-system/ai-gateway-controller"],
+    "cuberouter": ["cuberouter/cuberouter"],
+    "prometheus": ["monitoring/kube-prometheus-kube-prome-operator",
+                   "monitoring/kube-prometheus-grafana",
+                   "monitoring/kube-prometheus-kube-state-metrics"],
+    "perses": ["monitoring/perses-operator-controller-manager"],
+}
+for k, v in m.items():
+    if (c.get(k) or {}).get("enabled"):
+        for x in v:
+            print(x)
+')" || return 0
+    [ -n "${_expected}" ] || return 0
+    say "等待平台组件 Deployment 出现(最多 ${_wait_s}s)..."
+    _deadline=$(( $(date +%s) + _wait_s ))
+    while :; do
+        _missing=""
+        for _item in ${_expected}; do
+            _dns="${_item%%/*}"; _dname="${_item##*/}"
+            SSH "${K}" -n "${_dns}" get deploy "${_dname}" >/dev/null 2>&1 </dev/null \
+                || _missing="${_missing} ${_item}"
+        done
+        if [ -z "${_missing}" ]; then
+            say "平台组件 Deployment 已出现, 开始 placement"
+            return 0
+        fi
+        if [ "$(date +%s)" -ge "${_deadline}" ]; then
+            warn "等待超时(仍缺失:${_missing}); 继续 placement, 缺失项可重跑 --steps node_pool 收敛"
+            return 0
+        fi
+        sleep 5
+    done
+}
+
 case "${_ACTION}" in
     apply)
+        init_remote_kubectl || exit 1
+        _wait_for_platform_deployments
         if [ "${NODE_POOL_PLATFORM_PLACEMENT:-true}" = "true" ]; then
             say "系统组件 master placement(CoreDNS/metrics/registry/MetalLB 等)..."
             bash "${SCRIPT_DIR}/tools/k8s/master-placement.sh" --apply

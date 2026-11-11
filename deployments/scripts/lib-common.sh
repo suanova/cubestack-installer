@@ -2977,6 +2977,79 @@ for item in data.get("items", []):
     return "${rc}"
 }
 
+# ---------------- placement 前的 PVC 亲和性守护 ----------------
+# 背景(2026-11-10): local-path 等 PV 带 kubernetes.io/hostname nodeAffinity。若 PVC 已
+#   绑定在 worker, 把工作负载钉到 master 后新 Pod 会因 volume node affinity conflict
+#   Pending。把 placement 提前到 dev_lab/model_images 之前时, registry 尤其不能这样中断
+#   (后续镜像 push 全依赖它)。调用方在 apply 前用本组函数判断并跳过 + 告警。
+# 用法: placement_pod_pvcs < Pod/Deployment/ReplicaSet JSON(stdin)> → 每行一个 PVC 名
+#       placement_pvc_worker_bound <ns> <pvc>... → 0=有 PVC 绑在非 master(输出 pvc@node)
+placement_pod_pvcs() {
+    python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+s = d.get("spec") or {}
+kind = d.get("kind", "")
+podname = (d.get("metadata") or {}).get("name", "")
+if "template" in s:
+    s = (s.get("template") or {}).get("spec") or {}
+for v in s.get("volumes") or []:
+    c = (v.get("persistentVolumeClaim") or {}).get("claimName")
+    if c:
+        print(c)
+        # StatefulSet Pod 的 volumes 引用卷模板名, 实际 PVC 是 <claim>-<pod>。
+        if kind == "Pod" and podname:
+            print(c + "-" + podname)
+' 2>/dev/null || true
+}
+
+# PVC 绑定的节点(local-path PV 的 hostname nodeAffinity); 无 nodeAffinity 输出空。
+placement_pvc_bound_node() {   # <ns> <pvc>
+    local ns="$1" pvc="$2" pv=""
+    pv="$( (SSH "${K}" -n "${ns}" get pvc "${pvc}" -o jsonpath='{.spec.volumeName}' 2>/dev/null) || true )"
+    [ -n "${pv}" ] || return 0
+    (SSH "${K}" get pv "${pv}" -o json 2>/dev/null) | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+terms = (((d.get("spec") or {}).get("nodeAffinity") or {}).get("required") or {}).get("nodeSelectorTerms") or []
+for t in terms:
+    for e in t.get("matchExpressions") or []:
+        if e.get("key") == "kubernetes.io/hostname" and e.get("values"):
+            print(e["values"][0]); sys.exit(0)
+' 2>/dev/null || true
+}
+
+placement_pvc_worker_bound() {   # <ns> <pvc>...
+    local ns="$1"; shift
+    local pvc node out
+    for pvc in "$@"; do
+        [ -n "${pvc}" ] || continue
+        node="$(placement_pvc_bound_node "${ns}" "${pvc}")"
+        [ -n "${node}" ] || continue
+        out="$( (SSH "${K}" get node "${node}" -o json 2>/dev/null) || true )"
+        [ -n "${out}" ] || continue   # 读不到节点信息 → 不阻断(交给人判断)
+        if printf '%s' "${out}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+labels = (d.get("metadata") or {}).get("labels") or {}
+sys.exit(0 if "node-role.kubernetes.io/control-plane" not in labels else 1)
+'; then
+            printf '%s@%s\n' "${pvc}" "${node}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ---------------- 停消费者前的副本数登记 / 恢复(2026-10-13, CodeRabbit 评审修订) ----------------
 # 背景: 覆盖预检/优雅卸载会 scale 0 Ceph 卷消费者(registry / cubestack-operator, 消灭在飞
 #   IO), 02_ceph.sh 7.9 事后恢复; 整轮**异常退出**(失败/Ctrl-C)时由 deploy-cluster.sh 的

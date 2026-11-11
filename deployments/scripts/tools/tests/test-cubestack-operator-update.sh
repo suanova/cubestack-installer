@@ -344,7 +344,7 @@ chk_contains "Deployment 副本数纠偏" 'scale deploy ${_DEP_NAME} --replicas=
 echo "== ⑭ 默认平台组件 master placement(chart values 透传, 不改组件 chart) =="
 # 2026-10-27: cubepilot-api/operator、controller-manager、portal 的 chart 已原生支持
 # nodeSelector/tolerations；operator 模块通过 CubeStackCluster components.<name>.values
-# 在创建 Deployment 时下发，不依赖 node_pool 模块的末尾 patch。
+# 在创建 Deployment 时下发，不依赖 node_pool 的兜底 patch。
 for k in 'cubepilot:' 'cubestackControllerManager:' 'cubestackPortal:' 'envoyGateway:' 'aiGateway:'; do
     chk_contains "CR component ${k}" "$(printf '      %s' "${k}")" "${MOD}"
 done

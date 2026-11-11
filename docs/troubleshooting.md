@@ -1388,7 +1388,7 @@ bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh # ⑨ ser
 
 **根因:**
 1. (2026-10-27 口径, 已于 2026-11-02 调整) `NODE_POOL_ENABLED` / `NODE_POOL_MASTER_CORDON`
-   当时默认都是 `true`, `53_node_pool` 在 addon 末尾把**所有** master cordon —— 无 worker 时
+   当时默认都是 `true`, `node_pool` 在 addon 末尾把**所有** master cordon —— 无 worker 时
    这就是集群里仅有的可调度节点; 当前默认已改为 `NODE_POOL_MASTER_CORDON=false` +
    `NODE_POOL_MASTER_SCHEDULABLE=true`(master 可调度);
 2. kubespray 模板的 CoreDNS/dns-autoscaler 只容忍
@@ -1459,10 +1459,10 @@ sudo kubectl get svc -A -o wide
 `deploy-cluster.sh` 即可(补丁会在 kubespray 运行前自动重放)。
 
 **关联修复(预防性):** 同轮排查发现 `05_k8s_registry` 会等 registry Pod Ready, 而 registry RS
-没有 control-plane toleration; 移除污点的 `node_pool` 是模块 53(排在 05 之后)。纯 master / 多 master
+没有 control-plane toleration; 移除污点的 `node_pool` 是模块 34(排在 05 之后)。纯 master / 多 master
 无 worker 集群在 NodePort 修好后仍会卡在 registry 600s 超时。已在 `06_k8s_deploy.sh` kubespray
 成功后、addon 之前提前调用 `node-pool.sh --apply`(临时 `NODE_POOL_MASTER_CORDON=false`, 只去污点;
-cordon/placement 仍由 53 执行)。该预防修复基于静态分析 + 现网节点污点状态, 未做端到端复验。
+cordon/placement 仍由 34 执行)。该预防修复基于静态分析 + 现网节点污点状态, 未做端到端复验。
 
 **`--fresh` 入口预检:** `06_k8s_deploy.sh` 在 kubespray 前调用
 `tools/k8s/nodeport-leak-preflight.sh`(只读 `kubectl apply --dry-run=server`)：端口无 Service

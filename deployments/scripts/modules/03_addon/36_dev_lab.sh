@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # MODULE: dev_lab
-# DESC: 开发镜像(cpu/maca/cuda 家族)离线 tar → 集群内置 registry(**排在全部部署模块末位**; 默认 push, config-digest 幂等 + 层/镜像并行)
+# DESC: 开发镜像(cpu/maca/cuda 家族)离线 tar → 集群内置 registry(**排在 node_pool/平台组件之后、大镜像 push 末端**; 默认 push, config-digest 幂等 + 层/镜像并行)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
@@ -31,9 +31,9 @@
 #     首个镜像 base-first、其余有界并行; 配置 IMAGE_PUSH_*; 详见 docs/image-push-optimization.md。
 #   · 默认启用 = 默认 push: DEV_LAB_ENABLED 默认 true(见 cluster.conf.example 顶部开关区)
 #     ⇒ 每次默认部署自动把 tar 推入集群 registry; 跳过: --skip dev_lab 或 DEV_LAB_ENABLED=false。
-#   · 顺序(2026-10-13 用户口径): 模块文件排在 03_addon **末位 36**(全部 operator/组件/验证之后)
-#     —— 开发镜像无任何依赖(全仓无消费者, 已核对)⇒ ≈21G 的大推送不占用关键链路时间,
-#     前面的组件/验证先完成先验收; 覆盖安装"反序卸载"时 dev_lab 无卸载动作, 顺序变化无副作用。
+#   · 顺序(2026-10-13 用户口径): 模块文件排在 36; node_pool(34, 平台 placement)先完成,
+#     再进入本模块的大镜像 push ⇒ 关键调度配置不等待 ≈21G 推送; 覆盖安装"反序卸载"时
+#     dev_lab 无卸载动作, 顺序变化无副作用。
 # 数据源: cluster.conf (DEV_LAB_* / REGISTRY_* / IMAGE_PUSH_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps dev_lab
 # ============================================================

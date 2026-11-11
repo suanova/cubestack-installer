@@ -41,7 +41,7 @@ if [ -f "${TOOL}" ]; then
     chk_contains "remove" "--remove" "${src}"
 
     echo "== ② workload 覆盖 =="
-    for w in coredns metrics-server dns-autoscaler calico-kube-controllers registry ceph-csi-controller-manager; do
+    for w in coredns metrics-server dns-autoscaler calico-kube-controllers registry ceph-csi-controller-manager local-path-provisioner metax-gpu-operator-metax-operator; do
         chk_contains "workload ${w}" "${w}" "${src}"
     done
     chk_contains "metallb controller" "metallb-system" "${src}"
@@ -107,6 +107,8 @@ if [ -f "${TOOL}" ]; then
     chk_contains "apply patch metallb controller" "patch deploy controller" "${log}"
     chk_contains "apply patch metallb speaker" "patch ds speaker" "${log}"
     chk_contains "apply patch ceph-csi controller-manager" "patch deploy ceph-csi-controller-manager" "${log}"
+    chk_contains "apply patch local-path-provisioner" "patch deploy local-path-provisioner" "${log}"
+    chk_contains "apply patch metax operator" "patch deploy metax-gpu-operator-metax-operator" "${log}"
     chk_contains "apply toleration" "node.kubernetes.io/unschedulable" "${log}"
 else
     echo "  FAIL 无法执行 apply(tool missing)"; fail=1
@@ -194,10 +196,10 @@ cat > "${TMP}/json-sel/registry.json" <<'EOF'
 EOF
 # 每个 workload 都有显式 fixture(不再依赖隐式缺省):
 #   json-none = 全部 workload 均为"无 selector"; json-sel 其余 workload 同样无 selector。
-for _w in coredns metrics-server dns-autoscaler calico-kube-controllers registry controller ceph-csi-controller-manager; do
+for _w in coredns metrics-server dns-autoscaler calico-kube-controllers registry controller ceph-csi-controller-manager local-path-provisioner metax-gpu-operator-metax-operator; do
     printf '%s\n' '{"spec":{"template":{"spec":{}}}}' > "${TMP}/json-none/${_w}.json"
 done
-for _w in metrics-server dns-autoscaler calico-kube-controllers controller ceph-csi-controller-manager; do
+for _w in metrics-server dns-autoscaler calico-kube-controllers controller ceph-csi-controller-manager local-path-provisioner metax-gpu-operator-metax-operator; do
     printf '%s\n' '{"spec":{"template":{"spec":{}}}}' > "${TMP}/json-sel/${_w}.json"
 done
 run_remove() {   # <json dir> → 输出; ssh 日志在 $TMP/ssh-remove.log
@@ -288,6 +290,47 @@ out="$(
 chk "⑧ delete Pod 失败退出码非 0" "1" "${rc}"
 chk_contains "⑧ 报删除旧 Pod 失败" "删除旧 Pod 失败" "${out}"
 chk_not_contains "⑧ 不误报已删除" "已删除旧 Pod" "${out}"
+
+echo "== ⑨ local-path PVC 守护: registry 的 PV 已绑 worker 时跳过, 不阻断镜像 push =="
+mkdir -p "${TMP}/bin-pv"
+cat > "${TMP}/bin-pv/ssh" <<'FAKE'
+#!/bin/bash
+cmd="$*"
+printf '%s\n' "${cmd}" >> "${FAKE_SSH_LOG:?}"
+case "${cmd}" in
+    *"get rs registry -o json"*)
+        cat <<'JSON'
+{"spec":{"template":{"spec":{"volumes":[{"name":"registry-pvc","persistentVolumeClaim":{"claimName":"registry-pvc"}}]}}}}
+JSON
+        ;;
+    *"get pvc registry-pvc"*) echo "pv-worker" ;;
+    *"get pv pv-worker -o json"*)
+        cat <<'JSON'
+{"spec":{"nodeAffinity":{"required":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["w1"]}]}]}}}}
+JSON
+        ;;
+    *"get node w1 -o json"*) echo '{"metadata":{"labels":{"kubernetes.io/hostname":"w1"}}}' ;;
+    *" -o json"*) echo '{}' ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin-pv/ssh"
+: > "${TMP}/ssh-pv.log"
+out="$(
+    (
+        export PATH="${TMP}/bin-pv:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf" CLUSTER_DEFAULTS_CONF="${TMP}/defaults.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline" CUBESTACK_RELEASE_AUTO=false
+        export SSH_KEY_DIR="${TMP}/keys" SSH_KEY_NAME="fake_key"
+        export FAKE_SSH_LOG="${TMP}/ssh-pv.log"
+        bash "${TOOL}" --apply
+    ) 2>&1
+)"; rc=$?
+chk "⑨ 退出码 0(守护跳过不阻断)" "0" "${rc}"
+chk_not_contains "⑨ registry 不被 patch" "patch rs registry" "$(cat "${TMP}/ssh-pv.log")"
+chk_contains "⑨ 其他系统组件仍 patch" "patch deploy coredns" "$(cat "${TMP}/ssh-pv.log")"
+chk_contains "⑨ 告警点名 PVC@worker" "PVC registry-pvc@w1" "${out}"
+chk_contains "⑨ 说明跳过 placement" "跳过 placement" "${out}"
 
 echo ""
 if [ "${fail}" = "0" ]; then

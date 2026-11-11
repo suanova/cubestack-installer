@@ -277,10 +277,10 @@ ok "kubespray 集群部署完成"
 #   (roles/kubernetes-apps/registry/templates/registry-rs.yml.j2 无 tolerations), 在纯
 #   master(无 worker)或 master 仍带 control-plane:NoSchedule 的集群上会一直 Pending;
 #   而 05_k8s_registry 会等待 pod Ready(默认 600s)⇒ 超时失败。负责移除污点的 node_pool
-#   模块序号是 53, 排在 registry(05)之后, 来不及。
+#   模块序号是 34, 排在 registry(05)之后, 来不及。
 #   这里在 k8s 阶段结束时先做一次"仅可调度收敛"(幂等): 临时强制 CORDON=false, 只移除
 #   control-plane/master 污点(是否移除仍由 NODE_POOL_MASTER_SCHEDULABLE 决定);
-#   cordon 与平台 placement 仍由 53_node_pool 在 addon 末尾按配置执行。
+#   cordon 与平台 placement 仍由 34_node_pool 在 dev_lab/model_images 之前按配置执行。
 if [ "${NODE_POOL_ENABLED:-true}" = "true" ] || [ "${NODE_POOL_ENABLED:-true}" = "1" ]; then
     say "master 可调度收敛(k8s 阶段提前; 仅移除污点, 不在此阶段 cordon)..."
     NODE_POOL_MASTER_CORDON=false \

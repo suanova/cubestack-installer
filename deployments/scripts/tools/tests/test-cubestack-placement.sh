@@ -37,14 +37,18 @@ if [ -f "${TOOL}" ]; then
     for w in cubestack-operator cubestack-controller-manager cubepilot-api cubepilot-operator cubestack-portal; do
         chk_contains "workload ${w}" "${w}" "${src}"
     done
-    for w in envoy-gateway ai-gateway-controller lws-controller-manager cuberouter kube-prometheus-kube-prome-operator perses-operator-controller-manager; do
+    for w in envoy-gateway ai-gateway-controller lws-controller-manager cuberouter kube-prometheus-kube-prome-operator perses-operator-controller-manager cubestack-docs; do
         chk_contains "workload ${w}" "${w}" "${src}"
+    done
+    for w in prometheuses.monitoring.coreos.com alertmanagers.monitoring.coreos.com perses.perses.dev; do
+        chk_contains "CR workload ${w}" "${w}" "${src}"
     done
 
     echo "== ③ placement =="
     chk_contains "control-plane selector" "node-role.kubernetes.io/control-plane" "${src}"
     chk_contains "unschedulable toleration" "node.kubernetes.io/unschedulable" "${src}"
     chk_contains "patch 前先给 RWO Deployment 设 Recreate" 'ensure_rwo_deployments_recreate' "${src}"
+    chk_contains "local-path PVC 守护" "placement_pvc_worker_bound" "${src}"
 
     echo "== ④ 不碰数据面/推理 =="
     # workload 列表不应包含 envoy-envoy-gateway-system- / sglang / vllm / model
@@ -84,9 +88,13 @@ if [ -f "${TOOL}" ]; then
         bash "${TOOL}" --apply
     ) >/dev/null 2>&1
     log="$(cat "${TMP}/ssh.log")"
-    for w in cubestack-operator cubestack-controller-manager cubepilot-api cubepilot-operator cubestack-portal envoy-gateway ai-gateway-controller lws-controller-manager cuberouter kube-prometheus-kube-prome-operator perses-operator-controller-manager; do
+    for w in cubestack-operator cubestack-controller-manager cubepilot-api cubepilot-operator cubestack-portal envoy-gateway ai-gateway-controller lws-controller-manager cuberouter kube-prometheus-kube-prome-operator perses-operator-controller-manager cubestack-docs; do
         chk_contains "apply patch ${w}" "patch deploy ${w}" "${log}"
     done
+    chk_contains "apply patch prometheus CR" "patch prometheuses.monitoring.coreos.com" "${log}"
+    chk_contains "apply patch alertmanager CR" "patch alertmanagers.monitoring.coreos.com" "${log}"
+    chk_contains "apply patch perses CR" "patch perses.perses.dev" "${log}"
+    chk_contains "CR use merge patch" "--type=merge" "${log}"
     chk_contains "apply toleration" "node.kubernetes.io/unschedulable" "${log}"
     chk_not_contains "no data-plane proxy patch" "patch deploy envoy-envoy-gateway-system-" "${log}"
 else
@@ -101,6 +109,8 @@ cat > "${TMP}/bin-check/ssh" <<'FAKE'
 #!/bin/bash
 cmd="$*"
 case "${cmd}" in
+    *"perses.perses.dev"*|*"prometheuses.monitoring.coreos.com"*|*"alertmanagers.monitoring.coreos.com"*)
+        echo "Error from server (NotFound): custom resource not found" >&2; exit 1 ;;
     *" -o json"*) cat "${FAKE_DEPLOY_JSON:?}" ;;
 esac
 exit 0

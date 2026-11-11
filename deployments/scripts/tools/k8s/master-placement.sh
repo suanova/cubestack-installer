@@ -4,7 +4,7 @@
 # ------------------------------------------------------------
 # 目标(2026-10-27): master 保持 Unschedulable=True 时, CoreDNS/metrics-server/
 #   dns-autoscaler/calico-kube-controllers/registry/MetalLB controller/ceph-csi
-#   controller-manager 仍能调度到 master。
+#   controller-manager/local-path-provisioner/MetaX operator 仍能调度到 master。
 #   做法: 给这些 Deployment/ReplicaSet 的 PodTemplate 加
 #     nodeSelector: node-role.kubernetes.io/control-plane: ""
 #     tolerations:  control-plane:NoSchedule + node.kubernetes.io/unschedulable:NoSchedule
@@ -12,7 +12,8 @@
 #
 # 注意:
 #   · kubespray 下次 k8s_deploy 会按 addons.yml 重新渲染这些 Deployment; 本工具需在
-#     k8s_deploy 之后执行(node_pool 模块在 addon 末尾调用), 或重跑 --steps node_pool。
+#     k8s_deploy 之后执行(node_pool 模块在 dev_lab/model_images 之前调用), 或重跑
+#     --steps node_pool。
 #   · registry 是裸 ReplicaSet: 模板变更不会自动替换现有 Pod, apply/remove 都会删旧 Pod
 #     让其按新模板重建; **删除失败会报错并非 0 退出**(否则"已删除"是假成功)。
 #   · --remove 只移除本工具加的 master nodeSelector; tolerations 保留(无害, 避免
@@ -61,6 +62,10 @@ _MASTER_WORKLOADS=(
     #   · 旧集群升级前 controller-manager 已在 worker 上运行;
     #   · 其它模块/apply 重新渲染 PodTemplate 后丢失 placement。
     "deploy|${CEPH_NAMESPACE:-rook-ceph}|ceph-csi-controller-manager"
+    # 存储 addon / GPU operator 控制器: 非 DaemonSet, 默认同样落 master。
+    # Ceph 启用时 local-path 不安装、GPU operator 关闭时 metax 不存在 → 工具按"不存在"跳过。
+    "deploy|local-path-storage|local-path-provisioner"
+    "deploy|metax-operator|metax-gpu-operator-metax-operator"
 )
 _MASTER_DS=(
     "ds|metallb-system|speaker"
@@ -178,6 +183,15 @@ case "${ACTION}" in
             if ! _exists "${_t}" "${_n}" "${_name}"; then
                 say "  [${_n}/${_t}/${_name}] 不存在, 跳过"
                 continue
+            fi
+            # local-path 等 nodeAffinity PV: PVC 已绑 worker 时钉 master 会 Pending,
+            # registry 尤其会阻断后续 dev_lab/model_images 的镜像 push。跳过并交给人工迁移。
+            _pvcs="$( (SSH "${K}" -n "${_n}" get "${_t}" "${_name}" -o json 2>/dev/null) | placement_pod_pvcs || true )"
+            if [ -n "${_pvcs}" ]; then
+                if _bound="$(placement_pvc_worker_bound "${_n}" ${_pvcs})"; then
+                    warn "  [${_n}/${_t}/${_name}] PVC ${_bound} 绑定在 worker(local-path), 跳过 placement(否则 Pending; 需共享存储或重建 PVC)"
+                    continue
+                fi
             fi
             if _patch_one "${_t}" "${_n}" "${_name}" "${_PATCH}"; then
                 ok "  [${_n}/${_t}/${_name}] 已加 master nodeSelector + tolerations"

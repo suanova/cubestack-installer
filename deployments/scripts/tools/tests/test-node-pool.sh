@@ -293,8 +293,8 @@ chk_contains "点名 m1" "m1" "${out}"
 chk_contains "说明被 cordon" "cordon" "${out}"
 
 echo "== ⑪ 模块 remove 分支: placement 回滚不受当前开关影响 =="
-MODULE53="${REPO_ROOT}/deployments/scripts/modules/03_addon/53_node_pool.sh"
-_rm_block="$(sed -n '/^if \[ "\${_ACTION}" = "remove" \]; then$/,/^    exit 0$/p' "${MODULE53}")"
+MODULE34="${REPO_ROOT}/deployments/scripts/modules/03_addon/34_node_pool.sh"
+_rm_block="$(sed -n '/^if \[ "\${_ACTION}" = "remove" \]; then$/,/^    exit 0$/p' "${MODULE34}")"
 [ -n "${_rm_block}" ] && echo "  ok  remove 分支已提取" || { echo "  FAIL 未提取到 remove 分支"; fail=1; }
 chk_contains "调用 cubestack-placement --remove" 'cubestack-placement.sh" --remove' "${_rm_block}"
 chk_contains "调用 master-placement --remove" 'master-placement.sh" --remove' "${_rm_block}"
