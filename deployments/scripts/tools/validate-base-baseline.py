@@ -34,6 +34,21 @@ def load_yaml(path: Path) -> dict:
     return data
 
 
+def key_group(key: str) -> str:
+    group, sep, _ = str(key).partition(":")
+    return group if sep else ""
+
+
+def check_group(errors: list[str], where: str, key: str, groups: set[str]) -> None:
+    if not groups:
+        return
+    group = key_group(key)
+    if not group:
+        errors.append(f"{where}: key must look like <group>:<source> (got {key!r})")
+    elif group not in groups:
+        errors.append(f"{where}: group {group!r} is not in versions/groups.yaml")
+
+
 def defaults_keys(path: Path) -> set[str]:
     keys: set[str] = set()
     if not path.is_file():
@@ -52,13 +67,32 @@ def main() -> int:
     ap.add_argument("--defaults", type=Path, default=None)
     ap.add_argument("--mirror-index", type=Path, default=None,
                     help="optional container-image-mirror index.json for catalog checks")
+    ap.add_argument("--groups", type=Path, default=None,
+                    help="optional group allow-list (default: versions/groups.yaml)")
     args = ap.parse_args()
     root = args.root
     baseline_path = args.baseline or root / "versions/base.yaml"
     defaults_path = args.defaults or root / "deployments/config/cluster.defaults.conf"
+    groups_path = args.groups or root / "versions/groups.yaml"
 
     errors: list[str] = []
     baseline = load_yaml(baseline_path)
+    groups: set[str] = set()
+    if groups_path.is_file():
+        group_data = load_yaml(groups_path)
+        if group_data.get("schema") != 1:
+            errors.append(f"{groups_path}: schema must be 1")
+        raw_groups = group_data.get("groups") or {}
+        if not isinstance(raw_groups, dict) or not raw_groups:
+            errors.append(f"{groups_path}: groups must be a non-empty mapping")
+        else:
+            for name, meta in raw_groups.items():
+                if not re.match(r"^[a-z0-9][a-z0-9._/-]*$", str(name)):
+                    errors.append(f"{groups_path}: invalid group {name!r}")
+                kind = str((meta or {}).get("kind", "")).strip()
+                if kind not in ("image", "file", "material"):
+                    errors.append(f"{groups_path}: {name}.kind must be image|file|material")
+                groups.add(str(name))
     if baseline.get("schema") != 1:
         errors.append("schema must be 1")
 
@@ -162,6 +196,7 @@ def main() -> int:
             errors.append(f"{where}: duplicate key {key!r}")
         else:
             file_keys.add(key)
+        check_group(errors, where, key, groups)
         if not path:
             errors.append(f"{where}: path is required")
         elif path in file_paths:
@@ -207,6 +242,7 @@ def main() -> int:
             errors.append(f"{where}: duplicate key {key!r}")
         else:
             material_keys.add(key)
+        check_group(errors, where, key, groups)
         if not str(item.get("module", "")).strip():
             errors.append(f"{where}: module is required")
         version = str(item.get("version", "")).strip()
@@ -265,6 +301,7 @@ def main() -> int:
             keys.add(key)
         if not KEY_RE.match(key):
             errors.append(f"{where}: key must look like <group>:<source> (got {key!r})")
+        check_group(errors, where, key, groups)
         catalog_id = str(img.get("catalog_id", "")).strip()
         source_ref = str(img.get("source_ref", "")).strip()
         if bool(catalog_id) == bool(source_ref):
