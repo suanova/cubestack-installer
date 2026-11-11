@@ -223,8 +223,8 @@ chk "base 层不再 COPY 本地 bin/" "无" "$(grep -qE '^COPY bin/' "${REPO_ROO
 _vl="${REPO_ROOT}/VERSION_LINE"
 chk "VERSION_LINE 文件在位" "有" "$([ -f "${_vl}" ] && echo 有 || echo 无)"
 chk "VERSION_LINE 格式 X.Y" "有" "$(grep -Eq '^[0-9]+\.[0-9]+$' "${_vl}" 2>/dev/null && echo 有 || echo 无)"
-chk "构建脚本读取 VERSION_LINE" "有" "$(grep -q 'VERSION_LINE_FILE' "${REPO_ROOT}/deployments/scripts/tools/docker/build-cli-image.sh" && echo 有 || echo 无)"
-chk "CLI workflow 校验 release 分支与版本线" "有" "$(grep -q 'does not match' "${REPO_ROOT}/.github/workflows/rebuild-cli-image.yml" && echo 有 || echo 无)"
+chk "构建脚本按 sha 构建 CLI" "有" "$(grep -q 'CLI_TAG="sha-' "${REPO_ROOT}/deployments/scripts/tools/docker/build-cli-image.sh" && echo 有 || echo 无)"
+chk "CLI workflow 推 sha-<commit> tag" "有" "$(grep -q 'sha-${GITHUB_SHA::7}' "${REPO_ROOT}/.github/workflows/rebuild-cli-image.yml" && echo 有 || echo 无)"
 chk "CLI Dockerfile 不写死 channel tag" "无" "$(grep -qE 'cli-base:[0-9]+\.[0-9]+-latest' "${REPO_ROOT}/images/installer-cli/Dockerfile" && echo 有 || echo 无)"
 chk "钩子源文件在位" "有" "$([ -f "${REPO_ROOT}/deployments/scripts/tools/docker/cli-toolchain-from-offline.sh" ] && echo 有 || echo 无)"
 # 两层结构(2026-09-30): base(系统/工具链) + 代码层(FROM base);代码层不再 FROM 上一版 latest ⇒ 层数不累积
