@@ -1229,6 +1229,8 @@ rm -f "${LOCAL_CR}"
     CLUSTER_OK=0
     _CEPH_TUNED=0   # 阈值预调优标记(第一次 phase=Ready 时设, 避免 clock skew 卡等待)
     _CEPH_OSD_RETRIED=0   # 0-OSD 自愈一次性标记(见下方 2026-10-14 修复)
+    _OSD_SHORT_STREAK=0   # OSD 不足连续观测次数(仅在 OSD 数不再增加时累加)
+    _OSD_LAST_N=0         # 上一轮观测到的 OSD 数(用于识别仍在启动)
     for i in $(seq 1 90); do
         _ph="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
         if [ "${_ph}" = "Ready" ]; then
@@ -1287,16 +1289,55 @@ rm -f "${LOCAL_CR}"
                 CLUSTER_OK=1
                 break
             fi
-            # 明确识别 TOO_FEW_OSDS: 不空等 900s, 直接给出根因/处置
+            # ★ 2026-11-11(CodeRabbit): OSD 是逐个起来的 —— 新建 3-OSD 集群在第一个 OSD
+            #   in 时 ceph 就会报 "1 < osd_pool_default_size 3"(TOO_FEW_OSDS), 此时其余
+            #   prepare 可能仍在进行。旧逻辑首次观测即 exit 1, 会把正常启动误判为永久不足。
+            #   现在: OSD 数仍在增加 → 重置计数继续等; 只有"连续 >=60s 无增长 + 已无
+            #   prepare 在跑"才提前失败, 否则继续轮询(最长仍受 900s 上限约束)。
+            _osd_short=0
             if [ "${_osd_n:-0}" -ge 1 ] 2>/dev/null && [ "${_osd_n:-0}" -lt "${_pool_n}" ] 2>/dev/null \
                 && printf '%s' "${_CEPH_SUM}" | grep -qE 'TOO_FEW_OSDS|OSD count [0-9]+ < osd_pool_default_size'; then
-                err "  Ceph 只有 ${_osd_n} 个 OSD < 池副本数 ${_pool_n}(osd_pool_default_size): 集群不会 HEALTH_OK"
-                err "  常见根因: 某存储节点 DiskPressure/taint → Rook 跳过该节点 OSD(mon 也可能被驱逐)"
-                err "  核对: kubectl -n ${CEPH_NAMESPACE} get pods -o wide; kubectl -n ${CEPH_NAMESPACE} logs deploy/rook-ceph-operator | grep -E 'skipping creation of OSDs|placement settings do not match'"
-                err "  处置(二选一):"
-                err "    ① 释放/清理该节点根盘后重跑 --steps ceph(推荐, 恢复 ${_pool_n} 副本);"
-                err "    ② 明确接受 ${_osd_n} 副本: cluster.conf 设 CEPH_POOL_REPLICAS=${_osd_n} CEPH_POOL_MIN_SIZE=1 后重跑"
-                exit 1
+                _osd_short=1
+            fi
+            if [ "${_osd_n:-0}" -gt "${_OSD_LAST_N:-0}" ] 2>/dev/null; then
+                _OSD_LAST_N="${_osd_n:-0}"
+                _OSD_SHORT_STREAK=0
+            elif [ "${_osd_short}" = "1" ]; then
+                _OSD_SHORT_STREAK=$(( ${_OSD_SHORT_STREAK:-0} + 1 ))
+            else
+                _OSD_SHORT_STREAK=0
+            fi
+            if [ "${_osd_short}" = "1" ] && [ "${_OSD_SHORT_STREAK:-0}" -ge 6 ]; then
+                _prep_rc=0
+                _prep_json="$(SSH "${K}" -n ${CEPH_NAMESPACE} get pods -o json 2>/dev/null)" || _prep_rc=$?
+                if [ "${_prep_rc}" -ne 0 ]; then
+                    say "  OSD 不足(${_osd_n}/${_pool_n})但无法读取 prepare 状态(查询失败), 继续等待"
+                else
+                    _prep_busy="$(printf '%s' "${_prep_json}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for p in d.get("items", []):
+    n = (p.get("metadata") or {}).get("name", "")
+    ph = (p.get("status") or {}).get("phase", "")
+    if "osd-prepare" in n and ph in ("Pending", "Running"):
+        print(n)
+' || true)"
+                    if [ -n "${_prep_busy}" ]; then
+                        say "  OSD 不足(${_osd_n}/${_pool_n})但 prepare 仍在进行(${_prep_busy%%$'\n'*}); 继续等待"
+                    else
+                        err "  Ceph 只有 ${_osd_n} 个 OSD < 池副本数 ${_pool_n}(osd_pool_default_size): 集群不会 HEALTH_OK"
+                        err "  已连续 ${_OSD_SHORT_STREAK} 轮(约 $(( _OSD_SHORT_STREAK * 10 ))s)无增长且无 prepare 在跑"
+                        err "  常见根因: 某存储节点 DiskPressure/taint → Rook 跳过该节点 OSD(mon 也可能被驱逐)"
+                        err "  核对: kubectl -n ${CEPH_NAMESPACE} get pods -o wide; kubectl -n ${CEPH_NAMESPACE} logs deploy/rook-ceph-operator | grep -E 'skipping creation of OSDs|placement settings do not match'"
+                        err "  处置(二选一):"
+                        err "    ① 释放/清理该节点根盘后重跑 --steps ceph(推荐, 恢复 ${_pool_n} 副本);"
+                        err "    ② 明确接受 ${_osd_n} 副本: cluster.conf 设 CEPH_POOL_REPLICAS=${_osd_n} CEPH_POOL_MIN_SIZE=1 后重跑"
+                        exit 1
+                    fi
+                fi
             fi
             if [ "${i}" -eq 1 ] || [ $((i % 3)) -eq 0 ]; then
                 # 同上: 每个 grep 都带 `|| true`(set -e + pipefail 下无匹配会致命; 这几行只在
@@ -1417,6 +1458,25 @@ rm -f "${LOCAL_CR}"
         # 真实偏差由 chrony 持续收敛(见 setup-ntp.sh makestep 1 1 秒级对齐)。)
         say "  设置 mon clock skew 阈值=1.5s(默认 0.05s 过严, VM 初始偏差 0.5~1.2s 实测)..."
         SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set mon mon_clock_drift_allowed 1.5 >/dev/null 2>&1" || true
+        # ★ 池副本配置同样兜底(CodeRabbit 2026-11-11): 等待循环里 toolbox 若始终不可用,
+        #   _CEPH_TUNED 会保持 0。不能带着 Ceph 默认 osd_pool_default_size=3 继续 —— 少 OSD
+        #   集群会持续 TOO_FEW_OSDS/降级。两项都成功才完成; 仍失败则硬失败, 不再静默继续。
+        _pool_tuned=0
+        if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
+            ceph config set global osd_pool_default_size ${CEPH_POOL_REPLICAS} >/dev/null 2>&1"; then
+            if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
+                ceph config set global osd_pool_default_min_size ${CEPH_POOL_MIN_SIZE} >/dev/null 2>&1"; then
+                _pool_tuned=1
+            fi
+        fi
+        if [ "${_pool_tuned}" = "1" ]; then
+            _CEPH_TUNED=1
+        else
+            err "  Ceph 池副本配置未能应用(size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE}); 不继续"
+            err "        默认 size=3 会让少 OSD 集群持续降级; 处置: 确认 toolbox 可用后重跑 --steps ceph"
+            err "        排查: kubectl -n ${CEPH_NAMESPACE} get deploy rook-ceph-tools; kubectl -n ${CEPH_NAMESPACE} logs deploy/rook-ceph-tools --tail=50"
+            exit 1
+        fi
     fi
     # ★ 清残留 clock skew 告警(2026-09-05 事故): 时间已同步但 ceph 仍报 MON_CLOCK_SKEW ——
     #   chrony 收敛前记录的 skew 被 mon 缓存, timecheck 不会自动重采样刷新(恒定值如 1.233s)。

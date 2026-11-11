@@ -710,13 +710,36 @@ for d in /sys/bus/rbd/devices/*; do
     # ★ 2026-11-11: 设备在用/有在飞 IO 时绝不写 sysfs —— 否则内核写永久 D 态,
     #   dpkg/fuser 被拖死, 只能重启。holders / open fd / inflight / host mount 任一命中都跳过。
     _busy=0
-    [ -n "$(ls -A /sys/block/rbd${_rid}/holders 2>/dev/null)" ] && _busy=1
-    if timeout 5 ls -l /proc/[0-9]*/fd 2>/dev/null | grep -qE "/dev/rbd${_rid}([^0-9]|$)"; then _busy=1; fi
-    _inf="$(cat /sys/block/rbd${_rid}/inflight 2>/dev/null)"
-    if [ -n "$_inf" ] && ! printf '%s\n' "$_inf" | grep -qE '^[[:space:]]*0[[:space:]]+0[[:space:]]*$'; then _busy=1; fi
-    findmnt -rn -S /dev/rbd${_rid} >/dev/null 2>&1 && _busy=1
+    # 每个探针都要区分"确认空闲"与"读取失败"：任一探针失败 = 未知 → 按忙处理,
+    # 只有全部成功且均未命中才允许 sysfs remove(CodeRabbit 2026-11-11)。
+    _h_rc=0
+    _h="$(ls -A /sys/block/rbd${_rid}/holders 2>/dev/null)" || _h_rc=$?
+    if [ "${_h_rc}" -ne 0 ] || [ -n "${_h}" ]; then
+        _busy=1
+    fi
+    _fd_rc=0
+    _fd_out="$(timeout 5 ls -l /proc/[0-9]*/fd 2>/dev/null)" || _fd_rc=$?
+    if [ "${_fd_rc}" -ne 0 ]; then
+        _busy=1
+    elif printf '%s\n' "${_fd_out}" | grep -qE "/dev/rbd${_rid}([^0-9]|$)"; then
+        _busy=1
+    fi
+    _inf_rc=0
+    _inf="$(cat /sys/block/rbd${_rid}/inflight 2>/dev/null)" || _inf_rc=$?
+    if [ "${_inf_rc}" -ne 0 ] || [ -z "${_inf}" ]; then
+        _busy=1
+    elif ! printf '%s\n' "${_inf}" | grep -qE '^[[:space:]]*0[[:space:]]+0[[:space:]]*$'; then
+        _busy=1
+    fi
+    _fm_rc=0
+    _fm_err="$(findmnt -rn -S /dev/rbd${_rid} 2>&1 >/dev/null)" || _fm_rc=$?
+    if [ "${_fm_rc}" -eq 0 ]; then
+        _busy=1
+    elif [ "${_fm_rc}" -ne 1 ] || [ -n "${_fm_err}" ]; then
+        _busy=1   # findmnt 查询失败(非"确认无挂载")→ 未知
+    fi
     if [ "$_busy" = "1" ]; then
-        echo "  保留 rbd${_rid}(在用/有在飞 IO, 不 unmap; 避免内核 D 状态)"
+        echo "  保留 rbd${_rid}(在用/有在飞 IO 或状态无法确认, 不 unmap; 避免内核 D 状态)"
         continue
     fi
     setsid bash -c "echo ${_rid} > /sys/bus/rbd/remove_single_major 2>/dev/null || echo ${_rid} > /sys/bus/rbd/remove 2>/dev/null" >/dev/null 2>&1 &

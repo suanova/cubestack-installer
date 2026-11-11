@@ -93,12 +93,23 @@ _rbd_device_busy() {   # <ip> <id>
         "$(ssh_user_for_ip "${ip}")@${ip}" \
         "sudo bash -c '
             [ -d /sys/bus/rbd/devices/${id} ] || exit 1
-            [ -n \"\$(ls -A /sys/block/rbd${id}/holders 2>/dev/null)\" ] && exit 0
-            if timeout 5 ls -l /proc/[0-9]*/fd 2>/dev/null | grep -qE \"/dev/rbd${id}([^0-9]|\$)\"; then exit 0; fi
-            _inf=\$(cat /sys/block/rbd${id}/inflight 2>/dev/null)
-            if [ -n \"\${_inf}\" ] && ! printf \"%s\\n\" \"\${_inf}\" | grep -qE \"^[[:space:]]*0[[:space:]]+0[[:space:]]*$\"; then exit 0; fi
-            findmnt -rn -S /dev/rbd${id} >/dev/null 2>&1 && exit 0
-            exit 1
+            _h_rc=0
+            _h=\$(ls -A /sys/block/rbd${id}/holders 2>/dev/null) || _h_rc=\$?
+            [ \${_h_rc} -eq 0 ] || exit 2
+            [ -n \"\${_h}\" ] && exit 0
+            _fd_rc=0
+            _fd_out=\$(timeout 5 ls -l /proc/[0-9]*/fd 2>/dev/null) || _fd_rc=\$?
+            [ \${_fd_rc} -eq 0 ] || exit 2
+            if printf \"%s\\n\" \"\${_fd_out}\" | grep -qE \"/dev/rbd${id}([^0-9]|\$)\"; then exit 0; fi
+            _inf_rc=0
+            _inf=\$(cat /sys/block/rbd${id}/inflight 2>/dev/null) || _inf_rc=\$?
+            [ \${_inf_rc} -eq 0 ] && [ -n \"\${_inf}\" ] || exit 2
+            if ! printf \"%s\\n\" \"\${_inf}\" | grep -qE \"^[[:space:]]*0[[:space:]]+0[[:space:]]*$\"; then exit 0; fi
+            _fm_rc=0
+            _fm_err=\$(findmnt -rn -S /dev/rbd${id} 2>&1 >/dev/null) || _fm_rc=\$?
+            [ \${_fm_rc} -eq 0 ] && exit 0
+            [ \${_fm_rc} -eq 1 ] && [ -z \"\${_fm_err}\" ] && exit 1
+            exit 2
         '" >/dev/null 2>&1 || rc=$?
     case "${rc}" in
         0) return 0 ;;   # busy
