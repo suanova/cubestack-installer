@@ -53,7 +53,7 @@ images:
     version: "26.04.17"
     digest: "sha256:4444444444444444444444444444444444444444444444444444444444444444"
     dest: "offline-files/netshoot"
-    tar: "netshoot-rdma-26.04.17.tar"
+    tar: "netshoot-rdma.tar"
   - key: "dev-lab:harbor.isuanova.com/suanova/cpu-pytorch"
     source_ref: "harbor.isuanova.com/suanova/cpu-pytorch"
     version: "py310-torch2.4"
@@ -151,7 +151,7 @@ PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
     --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/index.json" \
     --offline-root "${TMP}/offline" >"${TMP}/mat.out"
 [ -s "${TMP}/offline/kubespray/v2.32.0/images/registry.k8s.io_kube-apiserver_v1.35.8.tar" ] || fail "materializer: missing catalog tar"
-[ -s "${TMP}/offline/netshoot/netshoot-rdma-26.04.17.tar" ] || fail "materializer: missing source_ref tar"
+[ -s "${TMP}/offline/netshoot/netshoot-rdma.tar" ] || fail "materializer: missing source_ref tar"
 [ ! -e "${TMP}/offline/dev-lab" ] || fail "materializer: optional image should be skipped by default"
 grep -q "copied=2" "${TMP}/mat.out" || fail "materializer: unexpected summary"
 grep -q "optional-skipped=1" "${TMP}/mat.out" || fail "materializer: optional skip not reported"

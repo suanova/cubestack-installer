@@ -31,7 +31,7 @@ def entry_lines(image: str, tag: str, digest: str) -> list[str]:
         f"  version: {tag}\n",
         f"  digest: {digest}\n",
         "  dest: offline-files/netshoot\n",
-        f"  tar: netshoot-rdma-{tag}.tar\n",
+        "  tar: netshoot-rdma.tar\n",
         "  optional: true\n",
     ]
 

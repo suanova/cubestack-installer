@@ -26,24 +26,14 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 
-# The channel comes from the repo's VERSION_LINE, so a branch cut only changes
-# one file. Releases still use immutable X.Y.Z tags on top of the channel.
-VERSION_LINE_FILE="${REPO_ROOT}/VERSION_LINE"
-VERSION_LINE="${VERSION_LINE:-}"
-if [ -z "${VERSION_LINE}" ]; then
-    [ -f "${VERSION_LINE_FILE}" ] || { err "VERSION_LINE not found: ${VERSION_LINE_FILE}"; exit 1; }
-    VERSION_LINE="$(tr -d '[:space:]' < "${VERSION_LINE_FILE}")"
-fi
-case "${VERSION_LINE}" in
-    [0-9]*.[0-9]*) ;;
-    *) err "invalid VERSION_LINE: ${VERSION_LINE}"; exit 1 ;;
-esac
-CHANNEL="${CLI_CHANNEL:-${VERSION_LINE}-latest}"
-IMAGE="${CLI_IMAGE:-harbor.isuanova.com/suanova/cubestack-installer-cli:${CHANNEL}}"
+# The code image is identified by sha-<commit>. The base image is identified by
+# the last commit that changed images/installer-cli-base, so code-only builds
+# reuse the same base layer.
+CLI_TAG="sha-$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
+BASE_COMMIT="$(git -C "${REPO_ROOT}" log -1 --format=%h -- images/installer-cli-base)"
+IMAGE="${CLI_IMAGE:-harbor.isuanova.com/suanova/cubestack-installer-cli:${CLI_TAG}}"
 BASE_IMAGE="ubuntu:22.04"
-# Namespaces intentionally differ: base is pushed to cubestack, the code image
-# to suanova (separate push permissions).
-BASE_TAG="${CLI_BASE_TAG:-harbor.isuanova.com/cubestack/cubestack-installer-cli-base:${CHANNEL}}"
+BASE_TAG="${CLI_BASE_TAG:-harbor.isuanova.com/suanova/cubestack-installer-cli-base:sha-${BASE_COMMIT}}"
 BASE_DOCKERFILE="${REPO_ROOT}/images/installer-cli-base/Dockerfile"
 CODE_DOCKERFILE="${REPO_ROOT}/images/installer-cli/Dockerfile"
 REQUIREMENTS="${REPO_ROOT}/deployments/kubespray/kubespray/requirements.txt"
