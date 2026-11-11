@@ -147,7 +147,7 @@ jobs:
           esac
           image="${HARBOR_HOST}/suanova/cubestack-installer-cli:${tag}"
           channel_image="${HARBOR_HOST}/suanova/cubestack-installer-cli:${CLI_CHANNEL}"
-          base_image="${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:${CLI_CHANNEL}"
+          base_image="${HARBOR_HOST}/suanova/cubestack-installer-cli-base:${CLI_CHANNEL}"
           {
             echo "IMAGE=${image}"
             echo "CLI_IMAGE=${channel_image}"
@@ -169,11 +169,26 @@ jobs:
           set -euo pipefail
           echo "${HARBOR_SECRET}" | docker login "${HARBOR_HOST}" -u "${HARBOR_USERNAME}" --password-stdin
 
+      - name: Check CLI base availability
+        id: base
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.changes.outputs.build_base }}" = "true" ]; then
+            echo "needs_base=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if docker manifest inspect "${CLI_BASE_TAG}" >/dev/null 2>&1; then
+            echo "needs_base=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::warning::CLI base ${CLI_BASE_TAG} missing; building it"
+            echo "needs_base=true" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Build CLI image
         if: steps.changes.outputs.build_cli == 'true'
         run: |
           set -euo pipefail
-          if [ "${{ steps.changes.outputs.build_base }}" = "true" ]; then
+          if [ "${{ steps.changes.outputs.build_base }}" = "true" ] || [ "${{ steps.base.outputs.needs_base }}" = "true" ]; then
             bash deployments/scripts/tools/docker/build-cli-image.sh --base --engine docker
           else
             bash deployments/scripts/tools/docker/build-cli-image.sh --build --engine docker
@@ -192,12 +207,12 @@ jobs:
             'command -v patch >/dev/null && patch --version | head -1'
 
       - name: Push base image
-        if: steps.changes.outputs.build_base == 'true'
+        if: steps.changes.outputs.build_base == 'true' || steps.base.outputs.needs_base == 'true'
         run: |
           set -euo pipefail
           version_tag=""
           if [ -n "${IMAGE_VERSION}" ]; then
-            version_tag="${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:${IMAGE_VERSION}"
+            version_tag="${HARBOR_HOST}/suanova/cubestack-installer-cli-base:${IMAGE_VERSION}"
             if docker manifest inspect "${version_tag}" >/dev/null 2>&1; then
               echo "::error::immutable base tag already exists: ${version_tag}"
               exit 1

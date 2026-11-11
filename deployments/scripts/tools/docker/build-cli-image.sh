@@ -41,9 +41,8 @@ esac
 CHANNEL="${CLI_CHANNEL:-${VERSION_LINE}-latest}"
 IMAGE="${CLI_IMAGE:-harbor.isuanova.com/suanova/cubestack-installer-cli:${CHANNEL}}"
 BASE_IMAGE="ubuntu:22.04"
-# Namespaces intentionally differ: base is pushed to cubestack, the code image
-# to suanova (separate push permissions).
-BASE_TAG="${CLI_BASE_TAG:-harbor.isuanova.com/cubestack/cubestack-installer-cli-base:${CHANNEL}}"
+# CLI base and code image both live under suanova; CI already has push rights.
+BASE_TAG="${CLI_BASE_TAG:-harbor.isuanova.com/suanova/cubestack-installer-cli-base:${CHANNEL}}"
 BASE_DOCKERFILE="${REPO_ROOT}/images/installer-cli-base/Dockerfile"
 CODE_DOCKERFILE="${REPO_ROOT}/images/installer-cli/Dockerfile"
 REQUIREMENTS="${REPO_ROOT}/deployments/kubespray/kubespray/requirements.txt"

@@ -66,7 +66,7 @@ sudo ./deploy-cluster.sh --with-cubestack
 
 ## 正式版镜像
 
-`release-images.yml` 是唯一的正式版镜像入口（手动、`environment: release`）：
+`release-images.yml` 是唯一的正式版镜像入口（手动触发）：
 
 - 输入 `version`（如 `2.1.0`）；
 - `dry_run=true` 时只构建并校验镜像，不登录 Harbor、不 push、不打 tag、不改

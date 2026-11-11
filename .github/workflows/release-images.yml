@@ -64,7 +64,6 @@ jobs:
   release:
     name: Build and push release images
     runs-on: ubuntu-latest
-    environment: release
     timeout-minutes: 120
     env:
       HARBOR_HOST: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
@@ -86,11 +85,6 @@ jobs:
           set -euo pipefail
           [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] \
             || { echo "::error::invalid version: ${VERSION}"; exit 1; }
-          line="$(tr -d '[:space:]' < VERSION_LINE)"
-          core="${VERSION%%-*}"
-          [ "${core%.*}" = "${line}" ] \
-            || { echo "::error::version ${VERSION} does not belong to line ${line}"; exit 1; }
-          channel="${line}-latest"
           perftest="${PERFTEST_INPUT}"
           if [ -z "${perftest}" ]; then
             perftest="$(sed -n 's/^ARG PERFTEST_VERSION=//p' images/netshoot-rdma/Dockerfile | head -1)"
@@ -98,12 +92,11 @@ jobs:
           [[ "${perftest}" =~ ^[0-9A-Za-z._-]+$ ]] \
             || { echo "::error::invalid perftest version: ${perftest}"; exit 1; }
           {
-            echo "CHANNEL=${channel}"
             echo "PERFTEST_VERSION=${perftest}"
-            echo "CLI_BASE_TAG=${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:${VERSION}"
+            echo "CLI_BASE_TAG=${HARBOR_HOST}/suanova/cubestack-installer-cli-base:${VERSION}"
             echo "CLI_IMAGE=${HARBOR_HOST}/suanova/cubestack-installer-cli:${VERSION}"
           } >> "${GITHUB_ENV}"
-          echo "version=${VERSION} line=${line} perftest=${perftest}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "version=${VERSION} perftest=${perftest}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Login to Harbor
         if: env.DRY_RUN != 'true'
@@ -122,9 +115,9 @@ jobs:
             "${HARBOR_HOST}/suanova/netshoot-rdma:${VERSION}"
           )
           if [ "${FORCE_BASE}" = "true" ]; then
-            refs+=("${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:${VERSION}")
+            refs+=("${HARBOR_HOST}/suanova/cubestack-installer-cli-base:${VERSION}")
           else
-            docker manifest inspect "${HARBOR_HOST}/cubestack/cubestack-installer-cli-base:${VERSION}" >/dev/null 2>&1 \
+            docker manifest inspect "${HARBOR_HOST}/suanova/cubestack-installer-cli-base:${VERSION}" >/dev/null 2>&1 \
               || { echo "::error::base ${VERSION} does not exist and force_base=false"; exit 1; }
           fi
           for ref in "${refs[@]}"; do
@@ -162,16 +155,13 @@ jobs:
             if [ "${kind}" = "base" ]; then ref="${CLI_BASE_TAG}"; else ref="${CLI_IMAGE}"; fi
             log="${RUNNER_TEMP}/${kind}-push.log"
             if [ "${kind}" = "base" ] && [ "${FORCE_BASE}" != "true" ]; then
-              # The base version already exists; only refresh the channel tag.
+              # The base version already exists; only refresh the product tag.
               digest="$(digest_of "${ref}" "${log}")"
             else
               docker push "${ref}" 2>&1 | tee "${log}"
               digest="$(digest_of "${ref}" "${log}")"
             fi
             [ -n "${digest}" ] || { echo "::error::cannot resolve ${ref} digest"; exit 1; }
-            channel_ref="${ref%:*}:${CHANNEL}"
-            docker tag "${ref}" "${channel_ref}"
-            docker push "${channel_ref}"
             if [ "${kind}" = "base" ]; then echo "CLI_BASE_DIGEST=${digest}" >> "${GITHUB_ENV}";
             else echo "CLI_DIGEST=${digest}" >> "${GITHUB_ENV}"; fi
           done
@@ -200,9 +190,6 @@ jobs:
             digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' "${log}" | tail -1)"
           fi
           [ -n "${digest}" ] || { echo "::error::cannot resolve ${ref} digest"; exit 1; }
-          channel_ref="${image}:${CHANNEL}"
-          docker tag "${ref}" "${channel_ref}"
-          docker push "${channel_ref}"
           echo "NETSHOOT_DIGEST=${digest}" >> "${GITHUB_ENV}"
           {
             echo "### release images ${VERSION}"
@@ -213,7 +200,6 @@ jobs:
             echo "- cli digest: \`${CLI_DIGEST}\`"
             echo "- netshoot: \`${ref}\`"
             echo "- netshoot digest: \`${digest}\`"
-            echo "- channel: \`${CHANNEL}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify local images (dry run)
