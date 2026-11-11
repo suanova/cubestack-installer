@@ -305,7 +305,7 @@ images:
   version: 2.1-latest
   digest: sha256:e127c799c3f1a5ae49d8557211aec2fca8660bbff69184af16a9c34743487729
   dest: offline-files/netshoot
-  tar: netshoot-rdma-2.1-latest.tar
+  tar: netshoot-rdma.tar
   optional: true
 - key: dev-lab:harbor.isuanova.com/suanova/cpu-pytorch
   source_ref: harbor.isuanova.com/suanova/cpu-pytorch

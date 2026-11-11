@@ -2,9 +2,9 @@ name: Rebuild installer CLI image
 
 # ============================================================================
 # 部署代码变更后重建 CLI 镜像。
-#   · push main/release-X.Y → :<VERSION_LINE>-latest(开发通道)
-#   · workflow_dispatch + version → 额外推送 :<version>(发布通道; 外部打包流程
-#     按 Harbor 中的镜像 digest 取 CLI tar)
+#   · 每次代码合并 → cubestack-installer-cli:sha-<commit>
+#   · CLI base 层按 images/installer-cli-base 的最后一个 commit 打 sha-<commit>
+#   · release 按 cli.commit 找 sha，并 retag 产品 tag
 #
 # operator chart 由外部版本树随包分发, 不再打进 CLI 镜像。
 #
@@ -12,7 +12,6 @@ name: Rebuild installer CLI image
 #
 # 按改动选择重建哪一层:
 #   · images/installer-cli-base/** 变化 → 重建 base + 代码层，并推两个镜像
-#   · 版本线由仓库根 VERSION_LINE 决定；release-X.Y 分支必须与文件一致
 #   · images/installer-cli/** 或代码输入变化 → 只重建代码层
 #   · 代码层永远基于当前 base；base 变了必须连带重建代码层
 #
@@ -34,17 +33,12 @@ on:
       - 'deployments/config/**'
       - 'versions/**'
 
-      - 'VERSION_LINE'
       - 'images/installer-cli/**'
       - 'images/installer-cli-base/**'
       - '.dockerignore'
       - '.github/workflows/rebuild-cli-image.yml'
   workflow_dispatch:
     inputs:
-      version:
-        description: '推送的 CLI 镜像版本(如 2.1.0; 留空=只推 <VERSION_LINE>-latest)'
-        required: false
-        default: ''
       force_base:
         description: '强制重建 base 层（base 变了会自动触发）'
         required: false
@@ -69,7 +63,6 @@ jobs:
       HARBOR_USER: ${{ vars.CI_BOT_NAME }}
       HARBOR_PASSWORD: ${{ secrets.CI_BOT_PASSWORD }}
       HARBOR_INSECURE: ${{ vars.HARBOR_MIRROR_INSECURE || 'false' }}
-      IMAGE_VERSION: ${{ github.event.inputs.version || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -94,10 +87,8 @@ jobs:
             build_base=false
             build_cli=false
             grep -qE '^images/installer-cli-base/' <<<"${changed}" && build_base=true
-            # A new version line needs a base for the new channel.
-            grep -qE '^VERSION_LINE$' <<<"${changed}" && build_base=true
             grep -qE '^images/installer-cli/' <<<"${changed}" && build_cli=true
-            grep -qE '^(deployments/scripts/|deployments/kubespray/|deployments/cubestack-addon/|deployments/config/|versions/|VERSION_LINE$|\.dockerignore$)' <<<"${changed}" \
+            grep -qE '^(deployments/scripts/|deployments/kubespray/|deployments/cubestack-addon/|deployments/config/|versions/|\.dockerignore$)' <<<"${changed}" \
               && build_cli=true
             # A base change is useless without rebuilding the code layer on top.
             [ "${build_base}" = "true" ] && build_cli=true
@@ -118,42 +109,20 @@ jobs:
           done
           [ "${missing}" = "0" ] || exit 1
 
-      - name: Resolve version line
+      - name: Resolve target images
         run: |
           set -euo pipefail
-          line="$(tr -d '[:space:]' < VERSION_LINE)"
-          case "${line}" in
-            [0-9]*.[0-9]*) ;;
-            *) echo "::error::invalid VERSION_LINE: '${line}'"; exit 1 ;;
-          esac
-          case "${GITHUB_REF_NAME}" in
-            release-*)
-              if [ "${GITHUB_REF_NAME}" != "release-${line}" ]; then
-                echo "::error::VERSION_LINE=${line} does not match ${GITHUB_REF_NAME}"
-                exit 1
-              fi
-              ;;
-          esac
-          echo "VERSION_LINE=${line}" >> "${GITHUB_ENV}"
-          echo "CLI_CHANNEL=${line}-latest" >> "${GITHUB_ENV}"
-          echo "version line=${line} channel=${line}-latest" | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Resolve target image
-        run: |
-          set -euo pipefail
-          tag="${IMAGE_VERSION:-${CLI_CHANNEL}}"
-          case "${tag}" in
-            ''|*[!0-9A-Za-z._-]*) echo "::error::invalid version: ${tag}"; exit 1 ;;
-          esac
+          tag="sha-${GITHUB_SHA::7}"
+          base_commit="$(git log -1 --format=%h -- images/installer-cli-base)"
+          [ -n "${base_commit}" ] || { echo "::error::cannot resolve CLI base commit"; exit 1; }
           image="${HARBOR_HOST}/suanova/cubestack-installer-cli:${tag}"
-          channel_image="${HARBOR_HOST}/suanova/cubestack-installer-cli:${CLI_CHANNEL}"
-          base_image="${HARBOR_HOST}/suanova/cubestack-installer-cli-base:${CLI_CHANNEL}"
+          base_image="${HARBOR_HOST}/suanova/cubestack-installer-cli-base:sha-${base_commit}"
           {
             echo "IMAGE=${image}"
-            echo "CLI_IMAGE=${channel_image}"
+            echo "CLI_IMAGE=${image}"
             echo "CLI_BASE_TAG=${base_image}"
           } >> "${GITHUB_ENV}"
-          echo "channel=${CLI_CHANNEL} image=${image} base=${base_image}" | tee -a "${GITHUB_STEP_SUMMARY}"
+          echo "image=${image} base=${base_image}" | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Reclaim disk space
         run: |
@@ -193,10 +162,6 @@ jobs:
           else
             bash deployments/scripts/tools/docker/build-cli-image.sh --build --engine docker
           fi
-          # build-cli-image.sh builds the channel tag; add the version tag on top.
-          if [ "${IMAGE}" != "${CLI_IMAGE}" ]; then
-            docker tag "${CLI_IMAGE}" "${IMAGE}"
-          fi
 
       - name: Verify required tools are baked into image
         if: steps.changes.outputs.build_cli == 'true'
@@ -210,29 +175,13 @@ jobs:
         if: steps.changes.outputs.build_base == 'true' || steps.base.outputs.needs_base == 'true'
         run: |
           set -euo pipefail
-          version_tag=""
-          if [ -n "${IMAGE_VERSION}" ]; then
-            version_tag="${HARBOR_HOST}/suanova/cubestack-installer-cli-base:${IMAGE_VERSION}"
-            if docker manifest inspect "${version_tag}" >/dev/null 2>&1; then
-              echo "::error::immutable base tag already exists: ${version_tag}"
-              exit 1
-            fi
-          fi
           docker push "${CLI_BASE_TAG}"
-          if [ -n "${version_tag}" ]; then
-            docker tag "${CLI_BASE_TAG}" "${version_tag}"
-            docker push "${version_tag}"
-            echo "pushed immutable base: ${version_tag}" | tee -a "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Push image
         if: steps.changes.outputs.build_cli == 'true'
         run: |
           set -euo pipefail
           push_log="${RUNNER_TEMP}/docker-push.log"
-          if [ "${CLI_IMAGE}" != "${IMAGE}" ]; then
-            docker push "${CLI_IMAGE}"
-          fi
           docker push "${IMAGE}" 2>&1 | tee "${push_log}"
           # Prefer RepoDigests (structured); fall back to the docker push log
           # for engines that do not populate it. RepoDigests drops the tag.

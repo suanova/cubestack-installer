@@ -5,16 +5,15 @@ name: Build netshoot-rdma image
 #   - cubestack-release: pinned as a base image and packaged into the version tree
 #   - cubestack-installer open-source online install: materialized from public Harbor
 #
-# Automatic runs (Dockerfile / VERSION_LINE / Makefile changes) push the moving
-# <VERSION_LINE>-latest channel tag. Manual runs push the immutable tag you
-# provide (for example 26.04.17-r2) and never overwrite it.
+# Automatic runs (Dockerfile / Makefile changes) push sha-<commit> and update
+# versions/base.yaml. Manual runs push the immutable tag you provide and never
+# overwrite it.
 
 on:
   push:
     branches: [main, release-2.1]
     paths:
       - 'images/netshoot-rdma/**'
-      - 'VERSION_LINE'
       - 'Makefile'
   workflow_dispatch:
     inputs:
@@ -61,7 +60,7 @@ jobs:
       PERFTEST_INPUT: ${{ github.event_name == 'push' && (vars.NETSHOOT_RDMA_PERFTEST_VERSION || '26.04.17') || inputs.perftest_version }}
       PUSH_INPUT: ${{ github.event_name == 'push' && 'true' || inputs.push }}
       APK_MIRROR_INPUT: ${{ github.event_name == 'push' && '' || inputs.apk_mirror }}
-      IS_CHANNEL: ${{ github.event_name == 'push' }}
+      IS_CHANNEL: 'false'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -72,13 +71,8 @@ jobs:
         id: tag
         run: |
           set -euo pipefail
-          if [ "${IS_CHANNEL}" = "true" ]; then
-            line="$(tr -d '[:space:]' < VERSION_LINE)"
-            case "${line}" in
-              [0-9]*.[0-9]*) ;;
-              *) echo "::error::invalid VERSION_LINE: '${line}'"; exit 1 ;;
-            esac
-            tag="${line}-latest"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            tag="sha-${GITHUB_SHA::7}"
             perftest="${PERFTEST_INPUT}"
           else
             tag="${IMAGE_TAG_INPUT}"
@@ -92,8 +86,7 @@ jobs:
           [[ "${tag,,}" != "latest" ]] \
             || { echo "::error::'latest' is not allowed"; exit 1; }
           case "${tag}" in
-            *-latest) channel=true ;;
-            *) channel="${IS_CHANNEL}" ;;
+            *-latest) echo "::error::channel tags are not allowed: ${tag}"; exit 1 ;;
           esac
           [[ "${perftest}" =~ ^[0-9A-Za-z._-]+$ ]] \
             || { echo "::error::invalid perftest version: '${perftest}'"; exit 1; }
@@ -103,9 +96,8 @@ jobs:
           fi
           echo "IMAGE_TAG=${tag}" >>"${GITHUB_ENV}"
           echo "PERFTEST_VERSION=${perftest}" >>"${GITHUB_ENV}"
-          echo "IS_CHANNEL=${channel}" >>"${GITHUB_ENV}"
           echo "tag=${tag}" >>"${GITHUB_OUTPUT}"
-          echo "resolved tag=${tag} perftest=${perftest} channel=${channel}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "resolved tag=${tag} perftest=${perftest}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Login to Harbor
         if: env.PUSH_INPUT == 'true'

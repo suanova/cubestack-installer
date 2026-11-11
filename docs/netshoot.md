@@ -75,10 +75,12 @@ ib_write_bw -d mlx5_0 -a                 # 带宽实测(对端要同步起 ib_wr
 
 ### 4.1 CI(发布通道, 推荐)
 
-- Dockerfile / `VERSION_LINE` / Makefile 变化: 自动构建并推送
-  `harbor.isuanova.com/suanova/netshoot-rdma:<VERSION_LINE>-latest`(移动 tag, 仅开发通道)。
-- 正式版由 `release-images.yml` 统一推送产品版本 tag(如 `2.1.0`)；
-  perftest 版本固定在 Dockerfile 的 `ARG PERFTEST_VERSION` 并写入 label
+- Dockerfile / Makefile 变化: 自动构建并推送
+  `harbor.isuanova.com/suanova/netshoot-rdma:sha-<commit>`，并开 PR 更新
+  `versions/base.yaml` 的 version + digest；tar 使用中性名 `netshoot-rdma.tar`。
+- 正式版产品 tag（`<product>` + `cs-<product>`）由 `cubestack-release` 的
+  `release` 从 base lock digest 创建，不在 installer 侧构建。
+- perftest 版本固定在 Dockerfile 的 `ARG PERFTEST_VERSION` 并写入 label
   `io.cubestack.netshoot.perftest-version`，不再出现在 tag 里。
 - 手工 `workflow_dispatch` 仍然可用；tag 已存在则拒绝覆盖。
 

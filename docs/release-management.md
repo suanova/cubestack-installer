@@ -66,15 +66,14 @@ sudo ./deploy-cluster.sh --with-cubestack
 
 ## 正式版镜像
 
-`release-images.yml` 是唯一的正式版镜像入口（手动触发）：
+2.1 起没有单独的 `release-images` 入口：
 
-- 输入 `version`（如 `2.1.0`）；
-- `dry_run=true` 时只构建并校验镜像，不登录 Harbor、不 push、不打 tag、不改
-  `versions/base.yaml`；适用于发布前验证构建链路；
-- 构建并推送 CLI base、CLI、netshoot 三个产品版本 tag；
-- 同时刷新 `<line>-latest` channel；
-- 自动开一个更新 `versions/base.yaml` netshoot pin 的 PR；
-- CLI 镜像不进 `base.yaml`，release 通过 `--cli-image` 解析 digest。
+- installer 每次代码合并构建 `cubestack-installer-cli:sha-<commit>`；
+- netshoot 源码变化时构建 `netshoot-rdma:sha-<commit>`，并开 PR 更新
+  `versions/base.yaml` 的 version + digest，tar 使用中性名 `netshoot-rdma.tar`；
+- release 按 `cli.commit` 找到 CLI sha，按 base lock 的 netshoot digest 创建
+  产品 tag（`<product>` + `cs-<product>`）；
+- CLI 镜像不进 `base.yaml`。
 
 ## 镜像构建原则
 
@@ -85,14 +84,13 @@ sudo ./deploy-cluster.sh --with-cubestack
    Dockerfile 的 `ARG` 里。
 3. **base 变化必须连带重建代码层**：代码层永远 `FROM` 一个固定 base；base
    重建后必须重建并推送代码层，否则镜像内容与 Dockerfile 不一致。
-4. **镜像 tag 按发布线隔离**：
-   - 仓库根 `VERSION_LINE=X.Y` 是版本线的唯一来源；
-   - CI 派生 `<X.Y>-latest`（如 `2.1-latest`），不再使用全局 `latest`；
-   - `release-X.Y` 分支的 `VERSION_LINE` 必须是 `X.Y`，CI 会校验；
-   - 正式发布使用不可变版本 tag（如 `2.1.0`），并优先按 digest 引用。
-   这样 2.1 的 base 更新不会影响尚未发布的 2.0.1 CLI 构建。
+4. **镜像 tag 按构建身份隔离**：
+   - CLI/netshoot dev 只推 `sha-<commit>`；
+   - CLI base 按 `images/installer-cli-base` 的 commit 推 `sha-<commit>`；
+   - 不再使用 `<line>-latest` 或 channel；
+   - release 从 digest 创建产品 tag。
 5. **不可变 tag 不覆盖**：版本 tag 已存在时构建失败，要求换版本或显式处理。
 6. **CLI 镜像不写入 `versions/base.yaml`**：它不是集群工作负载。release 在
-   发布锁/模板里记录 `cli: {image, digest}`，按 digest 拉取并打包成
-   `cubestack-installer-cli.tar`；`<VERSION_LINE>-latest` 只是解析 digest 前的
-   开发通道指针，不能直接作为发布身份。
+   发布锁/模板里记录 `cli: {image, digest, commit}`，按 commit 找
+   `sha-<commit>`、按 digest 拉取并打包成 `cubestack-installer-cli.tar`；
+   不使用 `<line>-latest` 或 channel。
