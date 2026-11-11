@@ -375,6 +375,33 @@ _HAS_DISK=0
 for _hn in "${CEPH_NODE_HOSTS[@]}"; do [ -n "${NODE_DISKS[${_hn}]:-}" ] && _HAS_DISK=1; done
 [ "${_HAS_DISK}" = "1" ] || { err "所有存储节点均未指定/检测到裸盘; 请显式设 CEPH_DATA_DISKS(\"hostname:盘名,盘名\", 或省略 hostname 应用到全部节点)或先为节点附加数据盘"; exit 1; }
 
+# 每个存储节点都必须有盘: 否则该节点不会创建 OSD, 且旧 7a 清理循环会因
+# NODE_DISKS[无盘节点] 未定义在 set -u 下直接 unbound variable(2026-11-11 实机:
+# master01 .190 无数据盘, 盘在 worker01 .36; OSD 只剩 master02/03 → 2 OSD < 副本 3)。
+# 这里在清盘前 fail-fast, 并给出"换 CEPH_NODES / 挂盘 / 少副本"三条处置。
+_DISK_NODES=0
+_NO_DISK_NODES=()
+for _hn in "${CEPH_NODE_HOSTS[@]}"; do
+    if [ -n "${NODE_DISKS[${_hn}]:-}" ]; then
+        _DISK_NODES=$((_DISK_NODES + 1))
+    else
+        _NO_DISK_NODES+=("${_hn}")
+    fi
+done
+if [ "${#_NO_DISK_NODES[@]}" -gt 0 ]; then
+    warn "存储节点无可用裸盘: ${_NO_DISK_NODES[*]}(不会创建 OSD)"
+    warn "  若并非预期: 检查 NODES 的 hostname/IP 映射, 确认数据盘已挂到存储节点(VM_DATA_DISKS>0)"
+fi
+if [ "${_DISK_NODES}" -lt "${CEPH_POOL_REPLICAS}" ]; then
+    err "可用 OSD 节点 ${_DISK_NODES} < CEPH_POOL_REPLICAS ${CEPH_POOL_REPLICAS}: 无法创建足够 OSD(HEALTH_OK 不可达)"
+    err "  处置(三选一):"
+    err "    ① 给无盘存储节点挂数据盘后重跑;"
+    err "    ② 用 CEPH_NODES 指定有盘的节点(如 CEPH_NODES=\"node1,node2,node3\");"
+    err "    ③ 明确接受少副本: cluster.conf 设 CEPH_POOL_REPLICAS=${_DISK_NODES} CEPH_POOL_MIN_SIZE=1"
+    exit 1
+fi
+unset _DISK_NODES _NO_DISK_NODES _hn
+
 # ---------------- 2.5) 存储节点磁盘压力/陈旧 local-path 数据预检 ----------------
 # 2026-11-11 实机根因: 节点从 worker 复用为 master 后, /opt/local-path-provisioner 下残留
 # 上个集群的 registry/cuberouter PV 数据(66G), 根盘 free 15G < kubelet eviction 阈值 15.58G
@@ -944,6 +971,12 @@ else
                     [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
                 done
                 [ -n "${_ip}" ] || continue
+                # 无盘存储节点: 该节点不会创建 OSD, 7a-② 无盘可擦; 直接跳过。
+                # (旧代码在 set -u 下展开 NODE_DISKS[无盘节点] 会 unbound variable 中断部署)
+                if [ -z "${NODE_DISKS[${_hn}]:-}" ]; then
+                    warn "  ${_hn}: 无可用裸盘, 跳过 7a-② 擦除(不会创建 OSD)"
+                    continue
+                fi
                 for _d in ${NODE_DISKS[${_hn}]//,/ }; do
                     say "  wipe ${_hn} ${_d}(官方 zap-device 清 label 副本 + 头/分区表/尾, 逐处校验)..."
                     # ⚠ 2026-10-13 实机修复: 内层 `bash -c` 是**独立子壳** —— 外层 `bash -s` 里

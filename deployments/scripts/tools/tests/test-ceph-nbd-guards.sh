@@ -19,6 +19,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 CEPH="${REPO_ROOT}/deployments/scripts/modules/03_addon/02_ceph.sh"
 EXPOSE="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-expose-external.sh"
 CLEANUP="${MODULE_UNDER_TEST:-${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-cleanup.sh}"
+RBDC="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-rbd-cleanup.sh"
+RECON="${REPO_ROOT}/deployments/scripts/tools/node/reconcile-node-packages.sh"
 fail=0
 chk_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  ok  $1"; else echo "  FAIL $1: [$3] 未包含 [$2]"; fail=1; fi; }
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }
@@ -44,6 +46,11 @@ chk_contains "陈旧 local-path 清理开关" "CEPH_CLEAN_STALE_LOCAL_PATH" "${C
 chk_contains "根盘空间阈值" "CEPH_NODE_MIN_FREE_GB" "${CEPH}"
 chk_contains "OSD 数不足立即失败" "Ceph 只有" "${CEPH}"
 chk_contains "toolbox 等待可配" "CEPH_TOOLBOX_WAIT_SECONDS" "${CEPH}"
+chk_contains "无盘存储节点 fail-fast" "可用 OSD 节点" "${CEPH}"
+chk_contains "7a-② 跳过无盘节点" "无可用裸盘, 跳过 7a-②" "${CEPH}"
+chk_contains "rbd cleanup busy guard" "_rbd_device_busy" "${RBDC}"
+chk_contains "ceph-cleanup busy guard" "在用/有在飞 IO" "${CLEANUP}"
+chk_contains "node_pkgs D-state before fuser" "不运行 fuser/apt" "${RECON}"
 chk_contains "Ready 但 OSD=0 判定" "Ceph 集群 Ready 但 OSD=0" "${CEPH}"
 chk_contains "给出 nbd 根因提示" "ceph-volume inventory" "${CEPH}"
 chk_contains "OSD=0 分支 exit 1" 'exit 1' "${CEPH}"

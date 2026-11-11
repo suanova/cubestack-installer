@@ -707,6 +707,18 @@ for d in /sys/bus/rbd/devices/*; do
     RBD_N=$((RBD_N+1))
     _rid="$(basename "$d")"; _rid="${_rid#rbd}"
     echo "残留 rbd 映射: $(cat $d/name 2>/dev/null) (pool=$(cat $d/pool 2>/dev/null), id=${_rid})"
+    # ★ 2026-11-11: 设备在用/有在飞 IO 时绝不写 sysfs —— 否则内核写永久 D 态,
+    #   dpkg/fuser 被拖死, 只能重启。holders / open fd / inflight / host mount 任一命中都跳过。
+    _busy=0
+    [ -n "$(ls -A /sys/block/rbd${_rid}/holders 2>/dev/null)" ] && _busy=1
+    if timeout 5 ls -l /proc/[0-9]*/fd 2>/dev/null | grep -qE "/dev/rbd${_rid}([^0-9]|$)"; then _busy=1; fi
+    _inf="$(cat /sys/block/rbd${_rid}/inflight 2>/dev/null)"
+    if [ -n "$_inf" ] && ! printf '%s\n' "$_inf" | grep -qE '^[[:space:]]*0[[:space:]]+0[[:space:]]*$'; then _busy=1; fi
+    findmnt -rn -S /dev/rbd${_rid} >/dev/null 2>&1 && _busy=1
+    if [ "$_busy" = "1" ]; then
+        echo "  保留 rbd${_rid}(在用/有在飞 IO, 不 unmap; 避免内核 D 状态)"
+        continue
+    fi
     setsid bash -c "echo ${_rid} > /sys/bus/rbd/remove_single_major 2>/dev/null || echo ${_rid} > /sys/bus/rbd/remove 2>/dev/null" >/dev/null 2>&1 &
 done
 if [ "$RBD_N" -gt 0 ]; then
