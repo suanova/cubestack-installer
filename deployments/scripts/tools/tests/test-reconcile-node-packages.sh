@@ -210,6 +210,20 @@ chk_contains "cohort 一并加入待装集合" "同版本 cohort 升级(版本" 
 chk "Breaks 算子解析支持 << / >>(实机 udev Breaks 曾是 < 误判)" "2" \
     "$(grep -cF '([<>]{1,2}=?|=)' "${TOOL2}")"
 
+echo "== ⑥ D 状态过滤: 只按可执行名排除 rsync =="
+chk_contains "过滤按可执行名(comm)" "ps -eo pid,stat,etime,comm,args" "${TOOL}"
+chk_contains "排除 rsync/rsyncd 可执行名" '$4 !~ /^rsync/' "${TOOL}"
+printf '%s\n' \
+    '123 D 00:01 dpkg --unpack /var/cache/rsync/foo.deb' \
+    '124 D 00:01 rsync -a /src /dst' \
+    '125 D 00:01 ceph-osd' \
+    '126 D 00:01 rsyncd' \
+    | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|sync|fuser/ && $4 !~ /^rsync/' > "${TMP}/filtered"
+chk_contains "dpkg 参数含 rsync 仍被检测" "dpkg --unpack" "${TMP}/filtered"
+chk_contains "ceph-osd 被检测" "ceph-osd" "${TMP}/filtered"
+chk_not_contains "rsync 自身被排除" "rsync -a" "${TMP}/filtered"
+chk_not_contains "rsyncd 被排除" "rsyncd" "${TMP}/filtered"
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-reconcile-node-packages: 全部通过"

@@ -83,8 +83,9 @@ SSH_OPTS=(-i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKn
 NODE_PKGS_ALLOW_DSTATE="${NODE_PKGS_ALLOW_DSTATE:-1}"
 _probe="$(cat <<'PROBE'
 ceph_mnts=$(timeout 5 findmnt -t ceph,rbd -n -o TARGET,FSTYPE 2>/dev/null | head -5)
-# D 状态进程(ps 只读 /proc, 不触碰挂载); 排除 rsync 等仅因含 "sync" 而误匹配的进程。
-stuck=$(timeout 5 ps -eo pid,stat,etime,cmd 2>/dev/null | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|fuser/ && $0 !~ /rsync/' | head -3)
+# D 状态进程(ps 只读 /proc, 不触碰挂载); 按**可执行名**排除 rsync(rsyncd),
+# 不能按整行过滤 —— 否则 `dpkg --unpack /…/rsync/…deb` 这类参数含 rsync 的目标进程会被漏掉。
+stuck=$(timeout 5 ps -eo pid,stat,etime,comm,args 2>/dev/null | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|fuser/ && $4 !~ /^rsync/' | head -3)
 n_rbd=$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ')
 # ★ 修复的唯一判据 = 逐挂载健康检查: 只有读不出(ls 失败)的 ceph/rbd 挂载才算"存储不健康"。
 #   不能把任意 D 状态进程当作存储不健康(2026-11-04 CodeRabbit) —— 否则会卸载/解映射正在使用的健康卷。
@@ -274,10 +275,10 @@ APT=( -o "Dir::Cache::archives=${D}" --no-download -y --no-install-recommends
 #   报"fuser 超时"而掩盖真正的 D 状态进程。现在先识别 D 状态并 exit 2 给出根因;
 #   不再运行 fuser/apt, 避免制造第二个 D 状态。D 状态只能清来源或 reboot -f。
 _ceph_mnts="$(timeout 5 findmnt -t ceph,rbd -n -o TARGET,FSTYPE 2>/dev/null | head -5 || true)"
-# 同一误匹配规则(CodeRabbit 2026-11-11): 排除 rsync —— 它只是命令名含 "sync",
-# 普通 I/O 的 D 状态不应触发下面的硬失败/存储恢复指引。
-_stuck="$(timeout 5 ps -eo pid,stat,etime,cmd 2>/dev/null \
-    | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|sync|fuser/ && $0 !~ /rsync/' | head -3 || true)"
+# 同一误匹配规则(CodeRabbit 2026-11-11): 只按可执行名排除 rsync/rsyncd ——
+# 不能按整行过滤, 否则参数里含 "rsync" 的 dpkg/ceph 进程会被漏掉。
+_stuck="$(timeout 5 ps -eo pid,stat,etime,comm,args 2>/dev/null \
+    | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|sync|fuser/ && $4 !~ /^rsync/' | head -3 || true)"
 _n_rbd="$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ' || true)"
 # ★ 2026-11-11: D 状态检查必须在 fuser **之前**。旧顺序先跑 `timeout 5 fuser ...`:
 #   节点上已有 rbd remove D 状态时, fuser 遍历 /proc 撞上卡死挂载/设备, 自己也进 D 态,
