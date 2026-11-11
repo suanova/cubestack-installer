@@ -186,17 +186,25 @@ nodeSelector + control-plane/unschedulable tolerations：
   `kube-prometheus-kube-state-metrics`、`perses-operator-controller-manager`
 - `cubestack-system`：`cubestack-docs`（资产型组件，无 chart values 注入路径）
 
-另外直接 patch 以下 operator 调和 CR 的 `spec.nodeSelector/tolerations`（不直接改 STS 模板，
-否则下次调和会被覆盖）：
+另外直接 patch 以下 operator 调和 CR 的 placement（不直接改 STS 模板，否则下次调和会被覆盖）：
 
-- `monitoring`：`prometheuses.monitoring.coreos.com/kube-prometheus-kube-prome-prometheus`
-- `monitoring`：`alertmanagers.monitoring.coreos.com/kube-prometheus-kube-prome-alertmanager`
-- `monitoring`：`perses.perses.dev/perses`
+- `monitoring`：`prometheuses.monitoring.coreos.com/kube-prometheus-kube-prome-prometheus`（`spec.nodeSelector/tolerations`）
+- `monitoring`：`alertmanagers.monitoring.coreos.com/kube-prometheus-kube-prome-alertmanager`（`spec.nodeSelector/tolerations`）
+- `monitoring`：`perses.perses.dev/perses`（`spec.nodeSelector/tolerations`）
+- `cuberouter`：`redisreplications.redis.redis.opstreelabs.in/cuberouter-redis`（`spec.nodeSelector/tolerations`
+  用于 Redis 数据副本；Sentinel 使用独立的 `spec.sentinel.nodeSelector/tolerations`，必须一起下发，
+  否则 Sentinel STS 不会继承 Redis 的 selector）
+- `cuberouter`：`clusters.postgresql.cnpg.io/cuberouter-postgres`（CNPG 调度字段在
+  `spec.affinity.nodeSelector/tolerations`，不是 `spec.nodeSelector`）
+
+> 多副本 CR（Redis/Sentinel、CNPG、Prometheus/Alertmanager）在 apply 前按 **PVC 名前缀** 检查
+> PV `nodeAffinity`：若 PVC 已绑在 worker（local-path），跳过并告警，避免 Pending。
+> Ceph RBD/CephFS 等共享存储没有节点亲和性，可正常滚动到 master。
 
 **明确不动**：Envoy Gateway 数据面 proxy Deployment（`envoy-envoy-gateway-system-*`）、
 sglang/vllm/model bundle 推理负载、任何 DaemonSet；也不直接 patch DaemonSet/StatefulSet
-（Prometheus/Alertmanager/Perses 通过上面的 CR patch 下发）。GPU worker 隔离在后续阶段单独做。
-`NODE_POOL_CUBESTACK_PLACEMENT=false` 可关闭。
+（Prometheus/Alertmanager/Perses、RedisReplication、CNPG 通过上面的 CR patch 下发）。
+GPU worker 隔离在后续阶段单独做。`NODE_POOL_CUBESTACK_PLACEMENT=false` 可关闭。
 
 - operator 自身的 chart 安装也加了 `nodeSelector`/`tolerations`（`25_cubestack_operator.sh`），
   新建/重装时 operator pod 直接落 master。

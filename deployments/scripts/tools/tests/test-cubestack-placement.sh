@@ -40,9 +40,12 @@ if [ -f "${TOOL}" ]; then
     for w in envoy-gateway ai-gateway-controller lws-controller-manager cuberouter kube-prometheus-kube-prome-operator perses-operator-controller-manager cubestack-docs; do
         chk_contains "workload ${w}" "${w}" "${src}"
     done
-    for w in prometheuses.monitoring.coreos.com alertmanagers.monitoring.coreos.com perses.perses.dev; do
+    for w in prometheuses.monitoring.coreos.com alertmanagers.monitoring.coreos.com perses.perses.dev redisreplications.redis.redis.opstreelabs.in clusters.postgresql.cnpg.io; do
         chk_contains "CR workload ${w}" "${w}" "${src}"
     done
+    chk_contains "CNPG affinity list" "_CB_CRS_AFFINITY" "${src}"
+    chk_contains "Redis sentinel list" "_CB_CRS_SENTINEL" "${src}"
+    chk_contains "Sentinel nodeSelector path" "spec.sentinel.nodeSelector" "${src}"
 
     echo "== ③ placement =="
     chk_contains "control-plane selector" "node-role.kubernetes.io/control-plane" "${src}"
@@ -94,6 +97,10 @@ if [ -f "${TOOL}" ]; then
     chk_contains "apply patch prometheus CR" "patch prometheuses.monitoring.coreos.com" "${log}"
     chk_contains "apply patch alertmanager CR" "patch alertmanagers.monitoring.coreos.com" "${log}"
     chk_contains "apply patch perses CR" "patch perses.perses.dev" "${log}"
+    chk_contains "apply patch redis replication CR" "patch redisreplications.redis.redis.opstreelabs.in" "${log}"
+    chk_contains "apply patch CNPG cluster" "patch clusters.postgresql.cnpg.io" "${log}"
+    chk_contains "CNPG use affinity patch" "affinity" "${log}"
+    chk_contains "Redis sentinel patch" "sentinel" "${log}"
     chk_contains "CR use merge patch" "--type=merge" "${log}"
     chk_contains "apply toleration" "node.kubernetes.io/unschedulable" "${log}"
     chk_not_contains "no data-plane proxy patch" "patch deploy envoy-envoy-gateway-system-" "${log}"
@@ -109,7 +116,7 @@ cat > "${TMP}/bin-check/ssh" <<'FAKE'
 #!/bin/bash
 cmd="$*"
 case "${cmd}" in
-    *"perses.perses.dev"*|*"prometheuses.monitoring.coreos.com"*|*"alertmanagers.monitoring.coreos.com"*)
+    *"perses.perses.dev"*|*"prometheuses.monitoring.coreos.com"*|*"alertmanagers.monitoring.coreos.com"*|*"redisreplications.redis.redis.opstreelabs.in"*|*"clusters.postgresql.cnpg.io"*)
         echo "Error from server (NotFound): custom resource not found" >&2; exit 1 ;;
     *" -o json"*) cat "${FAKE_DEPLOY_JSON:?}" ;;
 esac

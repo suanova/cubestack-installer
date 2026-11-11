@@ -5,8 +5,10 @@
 # 目标(2026-10-27): master cordon 后, CubeStack operator 及其平台组件仍能调度到 master。
 #   处理两类对象:
 #     · Deployment(控制面/门户/监控/网关控制器/文档站): 直接 patch PodTemplate;
-#     · 由 operator 从 CR 调和的 StatefulSet(Prometheus/Alertmanager/Perses):
-#       直接 patch CR 的 spec.nodeSelector/tolerations, operator 会复制到工作负载。
+#     · 由 operator 从 CR 调和的 StatefulSet/Deployment(Prometheus/Alertmanager/Perses/
+#       RedisReplication/CNPG Cluster):
+#       直接 patch CR 的 nodeSelector/tolerations; CNPG 的调度字段在 spec.affinity 下;
+#       RedisReplication 的 Sentinel 走独立的 spec.sentinel.nodeSelector/tolerations。
 #   不碰:
 #     · Envoy Gateway 数据面 proxy Deployment(envoy-envoy-gateway-system-*)
 #     · model bundle / sglang / vllm 推理负载(GPU 阶段处理)
@@ -65,13 +67,29 @@ _CB_WORKLOADS=(
     "deploy|cubestack-system|cubestack-docs"              # 资产型组件, 无 values 注入路径
 )
 
-# <resource>|<namespace>|<name>|<pod> —— operator 从 CR 调和的 StatefulSet。
+# <resource>|<namespace>|<name>|<pod>|<pvc-prefix> —— operator 从 CR 调和的 StatefulSet。
 # 直接 patch CR(而不是 STS 模板), 否则 operator 下一次调理会把模板覆盖回去。
-# 第 4 列 = 现有 Pod 名, 用于 placement 前检查 local-path PV 是否已绑在 worker。
+# 第 4 列 = 现有 Pod 名(单 Pod 场景); 第 5 列 = PVC 名前缀(多副本场景);
+# 二者都用于 placement 前检查 local-path PV 是否已绑在 worker, 二选一。
 _CB_CRS=(
-    "prometheuses.monitoring.coreos.com|monitoring|kube-prometheus-kube-prome-prometheus|prometheus-kube-prometheus-kube-prome-prometheus-0"
-    "alertmanagers.monitoring.coreos.com|monitoring|kube-prometheus-kube-prome-alertmanager|alertmanager-kube-prometheus-kube-prome-alertmanager-0"
-    "perses.perses.dev|monitoring|perses|perses-0"
+    "prometheuses.monitoring.coreos.com|monitoring|kube-prometheus-kube-prome-prometheus|prometheus-kube-prometheus-kube-prome-prometheus-0|"
+    "alertmanagers.monitoring.coreos.com|monitoring|kube-prometheus-kube-prome-alertmanager|alertmanager-kube-prometheus-kube-prome-alertmanager-0|"
+    "perses.perses.dev|monitoring|perses|perses-0|"
+    # RedisReplication 的 Redis/Sentinel pods 都由这个 CR 调和; 3 副本/3 sentinel 的
+    # PVC 前缀都是 cuberouter-redis-。
+    "redisreplications.redis.redis.opstreelabs.in|cuberouter|cuberouter-redis||cuberouter-redis-"
+)
+
+# CNPG Cluster 的调度字段在 spec.affinity.nodeSelector/tolerations(不是 spec.nodeSelector)。
+# <resource>|<namespace>|<name>|<pvc-prefix>
+_CB_CRS_AFFINITY=(
+    "clusters.postgresql.cnpg.io|cuberouter|cuberouter-postgres|cuberouter-postgres-"
+)
+
+# RedisReplication 的 Sentinel STS **不继承** spec.nodeSelector; 它有独立的
+# spec.sentinel.nodeSelector/tolerations(CRD 已确认)。不补这一层时 sentinel 会留在 worker。
+_CB_CRS_SENTINEL=(
+    "redisreplications.redis.redis.opstreelabs.in|cuberouter|cuberouter-redis"
 )
 
 _PATCH='{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}}}'
@@ -79,6 +97,11 @@ _UNPATCH='{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/
 # CRD 的 merge patch 只能走 --type=merge(strategic 不适用于自定义资源)。
 _CR_PATCH='{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}'
 _CR_UNPATCH='{"spec":{"nodeSelector":null}}'
+_CR_AFFINITY_PATCH='{"spec":{"affinity":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}}'
+# 只清 nodeSelector; CNPG 的 affinity 还含 podAntiAffinityType, merge patch 保留它。
+_CR_AFFINITY_UNPATCH='{"spec":{"affinity":{"nodeSelector":null}}}'
+_CR_SENTINEL_PATCH='{"spec":{"sentinel":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]}}}'
+_CR_SENTINEL_UNPATCH='{"spec":{"sentinel":{"nodeSelector":null}}}'
 
 # 三态存在性探测: 0=存在; 1=不存在; 2=查询失败(API/RBAC/SSH)。
 # ★ remove 必须区分"不存在"与"查不到"(2026-10-28 CodeRabbit): 查询失败时跳过循环会让
@@ -112,6 +135,110 @@ except Exception:
     sys.exit(2)
 sys.exit(0 if "node-role.kubernetes.io/control-plane" in sel else 1)
 '
+}
+
+# 按 PVC 名前缀列出当前集群的 PVC(多副本 StatefulSet 的 local-path 守护)。
+_cr_pvcs_by_prefix() {   # <ns> <prefix>
+    (SSH "${K}" -n "$1" get pvc -o json 2>/dev/null) | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+p = sys.argv[1]
+for i in d.get("items", []):
+    n = (i.get("metadata") or {}).get("name", "")
+    if n.startswith(p):
+        print(n)
+' "$2"
+}
+
+# CNPG Cluster 的 spec.affinity.nodeSelector 是否带 master: 0=带; 1=不带; 2=读取/解析失败。
+_has_master_selector_cr_affinity() {   # <type> <ns> <name>
+    local _out _rc=0
+    _out="$(SSH "${K}" -n $2 get $1 $3 -o json 2>/dev/null)" || _rc=$?
+    [ "${_rc}" -eq 0 ] || return 2
+    printf '%s' "${_out}" | python3 -c '
+import json, sys
+try:
+    aff = json.load(sys.stdin)["spec"].get("affinity") or {}
+    sel = aff.get("nodeSelector") or {}
+except Exception:
+    sys.exit(2)
+sys.exit(0 if "node-role.kubernetes.io/control-plane" in sel else 1)
+'
+}
+
+_check_cr_affinity() {   # <type> <ns> <name>
+    local _type="$1" _ns="$2" _name="$3" _json
+    if ! _exists "${_type}" "${_ns}" "${_name}"; then
+        say "  [${_ns}/${_type}/${_name}] 不存在, 跳过"; return 0
+    fi
+    _json="$(SSH "${K}" -n ${_ns} get ${_type} ${_name} -o json 2>/dev/null || true)"
+    if ! printf '%s' "${_json}" | python3 -c '
+import json, sys
+try:
+    aff = json.load(sys.stdin)["spec"].get("affinity") or {}
+except Exception:
+    sys.exit(1)
+sel = aff.get("nodeSelector") or {}
+tols = aff.get("tolerations") or []
+ok = sel.get("node-role.kubernetes.io/control-plane") == "" and any(
+    t.get("key") == "node-role.kubernetes.io/control-plane" and t.get("effect") == "NoSchedule"
+    for t in tols
+) and any(
+    t.get("key") == "node.kubernetes.io/unschedulable" and t.get("effect") == "NoSchedule"
+    for t in tols
+)
+sys.exit(0 if ok else 1)
+'; then
+        err "  [${_ns}/${_type}/${_name}] placement 不完整(需 spec.affinity.nodeSelector + control-plane/unschedulable tolerations)"; return 1
+    fi
+    ok "  [${_ns}/${_type}/${_name}] placement OK"
+}
+
+# RedisReplication sentinel 的 spec.sentinel.nodeSelector 是否带 master: 0=带; 1=不带; 2=读取/解析失败。
+_has_master_selector_cr_sentinel() {   # <type> <ns> <name>
+    local _out _rc=0
+    _out="$(SSH "${K}" -n $2 get $1 $3 -o json 2>/dev/null)" || _rc=$?
+    [ "${_rc}" -eq 0 ] || return 2
+    printf '%s' "${_out}" | python3 -c '
+import json, sys
+try:
+    sent = json.load(sys.stdin)["spec"].get("sentinel") or {}
+    sel = sent.get("nodeSelector") or {}
+except Exception:
+    sys.exit(2)
+sys.exit(0 if "node-role.kubernetes.io/control-plane" in sel else 1)
+'
+}
+
+_check_cr_sentinel() {   # <type> <ns> <name>
+    local _type="$1" _ns="$2" _name="$3" _json
+    if ! _exists "${_type}" "${_ns}" "${_name}"; then
+        say "  [${_ns}/${_type}/${_name}] 不存在, 跳过"; return 0
+    fi
+    _json="$(SSH "${K}" -n ${_ns} get ${_type} ${_name} -o json 2>/dev/null || true)"
+    if ! printf '%s' "${_json}" | python3 -c '
+import json, sys
+try:
+    sent = json.load(sys.stdin)["spec"].get("sentinel") or {}
+except Exception:
+    sys.exit(1)
+sel = sent.get("nodeSelector") or {}
+tols = sent.get("tolerations") or []
+ok = sel.get("node-role.kubernetes.io/control-plane") == "" and any(
+    t.get("key") == "node-role.kubernetes.io/control-plane" and t.get("effect") == "NoSchedule"
+    for t in tols
+) and any(
+    t.get("key") == "node.kubernetes.io/unschedulable" and t.get("effect") == "NoSchedule"
+    for t in tols
+)
+sys.exit(0 if ok else 1)
+'; then
+        err "  [${_ns}/${_type}/${_name}] sentinel placement 不完整(需 spec.sentinel.nodeSelector + control-plane/unschedulable tolerations)"; return 1
+    fi
+    ok "  [${_ns}/${_type}/${_name}] sentinel placement OK"
 }
 
 _check_one() {
@@ -202,12 +329,20 @@ case "${ACTION}" in
         done
         say "CubeStack operator/平台组件 master placement(CR 调和的 StatefulSet) ..."
         for _w in "${_CB_CRS[@]}"; do
-            IFS='|' read -r _t _n _name _pod <<< "${_w}"
+            IFS='|' read -r _t _n _name _pod _pvcp <<< "${_w}"
             if ! _exists "${_t}" "${_n}" "${_name}"; then
                 say "  [${_n}/${_t}/${_name}] 不存在, 跳过"; continue
             fi
             if [ -n "${_pod}" ]; then
                 _pvcs="$( (SSH "${K}" -n "${_n}" get pod "${_pod}" -o json 2>/dev/null) | placement_pod_pvcs || true )"
+                if [ -n "${_pvcs}" ]; then
+                    if _bound="$(placement_pvc_worker_bound "${_n}" ${_pvcs})"; then
+                        warn "  [${_n}/${_t}/${_name}] PVC ${_bound} 绑定在 worker(local-path), 跳过 placement(否则 Pending; 需共享存储或重建 PVC)"
+                        continue
+                    fi
+                fi
+            elif [ -n "${_pvcp}" ]; then
+                _pvcs="$(_cr_pvcs_by_prefix "${_n}" "${_pvcp}")"
                 if [ -n "${_pvcs}" ]; then
                     if _bound="$(placement_pvc_worker_bound "${_n}" ${_pvcs})"; then
                         warn "  [${_n}/${_t}/${_name}] PVC ${_bound} 绑定在 worker(local-path), 跳过 placement(否则 Pending; 需共享存储或重建 PVC)"
@@ -221,6 +356,39 @@ case "${ACTION}" in
                 err "  [${_n}/${_t}/${_name}] patch 失败"; FAILED=1
             fi
         done
+        say "CubeStack operator/平台组件 master placement(CNPG Cluster spec.affinity) ..."
+        for _w in "${_CB_CRS_AFFINITY[@]}"; do
+            IFS='|' read -r _t _n _name _pvcp <<< "${_w}"
+            if ! _exists "${_t}" "${_n}" "${_name}"; then
+                say "  [${_n}/${_t}/${_name}] 不存在, 跳过"; continue
+            fi
+            if [ -n "${_pvcp}" ]; then
+                _pvcs="$(_cr_pvcs_by_prefix "${_n}" "${_pvcp}")"
+                if [ -n "${_pvcs}" ]; then
+                    if _bound="$(placement_pvc_worker_bound "${_n}" ${_pvcs})"; then
+                        warn "  [${_n}/${_t}/${_name}] PVC ${_bound} 绑定在 worker(local-path), 跳过 placement(否则 Pending; 需共享存储或重建 PVC)"
+                        continue
+                    fi
+                fi
+            fi
+            if _patch_cr_one "${_t}" "${_n}" "${_name}" "${_CR_AFFINITY_PATCH}"; then
+                ok "  [${_n}/${_t}/${_name}] 已加 master affinity.nodeSelector + tolerations(CNPG)"
+            else
+                err "  [${_n}/${_t}/${_name}] patch 失败"; FAILED=1
+            fi
+        done
+        say "CubeStack operator/平台组件 master placement(RedisReplication sentinel) ..."
+        for _w in "${_CB_CRS_SENTINEL[@]}"; do
+            IFS='|' read -r _t _n _name <<< "${_w}"
+            if ! _exists "${_t}" "${_n}" "${_name}"; then
+                say "  [${_n}/${_t}/${_name}] 不存在, 跳过"; continue
+            fi
+            if _patch_cr_one "${_t}" "${_n}" "${_name}" "${_CR_SENTINEL_PATCH}"; then
+                ok "  [${_n}/${_t}/${_name}] 已加 master sentinel.nodeSelector + tolerations"
+            else
+                err "  [${_n}/${_t}/${_name}] sentinel patch 失败"; FAILED=1
+            fi
+        done
         ;;
     check)
         say "校验 CubeStack operator/平台组件 master placement ..."
@@ -229,8 +397,16 @@ case "${ACTION}" in
             _check_one "${_t}" "${_n}" "${_name}" || FAILED=1
         done
         for _w in "${_CB_CRS[@]}"; do
-            IFS='|' read -r _t _n _name _pod <<< "${_w}"
+            IFS='|' read -r _t _n _name _pod _pvcp <<< "${_w}"
             _check_cr "${_t}" "${_n}" "${_name}" || FAILED=1
+        done
+        for _w in "${_CB_CRS_AFFINITY[@]}"; do
+            IFS='|' read -r _t _n _name _pvcp <<< "${_w}"
+            _check_cr_affinity "${_t}" "${_n}" "${_name}" || FAILED=1
+        done
+        for _w in "${_CB_CRS_SENTINEL[@]}"; do
+            IFS='|' read -r _t _n _name <<< "${_w}"
+            _check_cr_sentinel "${_t}" "${_n}" "${_name}" || FAILED=1
         done
         ;;
     remove)
@@ -251,7 +427,7 @@ case "${ACTION}" in
             fi
         done
         for _w in "${_CB_CRS[@]}"; do
-            IFS='|' read -r _t _n _name _pod <<< "${_w}"
+            IFS='|' read -r _t _n _name _pod _pvcp <<< "${_w}"
             _ex=0; _exists "${_t}" "${_n}" "${_name}" || _ex=$?
             if [ "${_ex}" -eq 2 ]; then
                 err "  [${_n}/${_t}/${_name}] remove 查询失败, 未清理(可能残留 master selector): ${_EXISTS_ERR:-未知错误}"; FAILED=1; continue
@@ -268,6 +444,50 @@ case "${ACTION}" in
             fi
             if _patch_cr_one "${_t}" "${_n}" "${_name}" "${_CR_UNPATCH}"; then
                 ok "  [${_n}/${_t}/${_name}] 已移除 master nodeSelector(CR)"
+            else
+                err "  [${_n}/${_t}/${_name}] remove patch 失败"; FAILED=1
+            fi
+        done
+        for _w in "${_CB_CRS_AFFINITY[@]}"; do
+            IFS='|' read -r _t _n _name _pvcp <<< "${_w}"
+            _ex=0; _exists "${_t}" "${_n}" "${_name}" || _ex=$?
+            if [ "${_ex}" -eq 2 ]; then
+                err "  [${_n}/${_t}/${_name}] remove 查询失败, 未清理(可能残留 master selector): ${_EXISTS_ERR:-未知错误}"; FAILED=1; continue
+            fi
+            if [ "${_ex}" -ne 0 ]; then
+                say "  [${_n}/${_t}/${_name}] 不存在, 跳过"; continue
+            fi
+            _sel_rc=0
+            _has_master_selector_cr_affinity "${_t}" "${_n}" "${_name}" || _sel_rc=$?
+            if [ "${_sel_rc}" -eq 2 ]; then
+                err "  [${_n}/${_t}/${_name}] 读取 CR spec.affinity 失败, 无法确认 master nodeSelector"; FAILED=1; continue
+            elif [ "${_sel_rc}" -eq 1 ]; then
+                say "  [${_n}/${_t}/${_name}] 无 master affinity.nodeSelector, 跳过"; continue
+            fi
+            if _patch_cr_one "${_t}" "${_n}" "${_name}" "${_CR_AFFINITY_UNPATCH}"; then
+                ok "  [${_n}/${_t}/${_name}] 已移除 master affinity.nodeSelector(CNPG)"
+            else
+                err "  [${_n}/${_t}/${_name}] remove patch 失败"; FAILED=1
+            fi
+        done
+        for _w in "${_CB_CRS_SENTINEL[@]}"; do
+            IFS='|' read -r _t _n _name <<< "${_w}"
+            _ex=0; _exists "${_t}" "${_n}" "${_name}" || _ex=$?
+            if [ "${_ex}" -eq 2 ]; then
+                err "  [${_n}/${_t}/${_name}] remove 查询失败, 未清理(可能残留 master selector): ${_EXISTS_ERR:-未知错误}"; FAILED=1; continue
+            fi
+            if [ "${_ex}" -ne 0 ]; then
+                say "  [${_n}/${_t}/${_name}] 不存在, 跳过"; continue
+            fi
+            _sel_rc=0
+            _has_master_selector_cr_sentinel "${_t}" "${_n}" "${_name}" || _sel_rc=$?
+            if [ "${_sel_rc}" -eq 2 ]; then
+                err "  [${_n}/${_t}/${_name}] 读取 CR spec.sentinel 失败, 无法确认 master nodeSelector"; FAILED=1; continue
+            elif [ "${_sel_rc}" -eq 1 ]; then
+                say "  [${_n}/${_t}/${_name}] 无 master sentinel.nodeSelector, 跳过"; continue
+            fi
+            if _patch_cr_one "${_t}" "${_n}" "${_name}" "${_CR_SENTINEL_UNPATCH}"; then
+                ok "  [${_n}/${_t}/${_name}] 已移除 master sentinel.nodeSelector"
             else
                 err "  [${_n}/${_t}/${_name}] remove patch 失败"; FAILED=1
             fi
