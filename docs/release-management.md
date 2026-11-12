@@ -46,6 +46,23 @@ sudo ./deploy-cluster.sh --with-cubestack
 `load_config` 会读取 `release.env`，并把所有 `offline-files/<组件>` 路径重定向到版本树。
 切回 dev 模式：移除 `release.env`，或设 `CUBESTACK_RELEASE_AUTO="false"`。
 
+## 包选择
+
+2.1 完整包在 `release.yaml:packages[]` 里列出 payload 包。installer 只读本地
+release 树，不访问 private release repo / MinIO / Harbor：
+
+```bash
+python3 deployments/scripts/tools/offline/release-packages.py \
+  --root <release-tree> --with models,dev-lab \
+  --write-tree <release-tree>/tree.selected.tsv
+```
+
+- required 包总是选中；
+- optional 包用 `--with` 选择，`--with all` 选全部；
+- 每个选中的包都校验本地文件 sha256 和 size；
+- 输出过滤后的 `tree.tsv`，只包含选中 package 的行；
+- 没有 `packages[]` 的旧树输出 `legacy`，继续使用完整树。
+
 ## 完整性
 
 - `release.env` 在 `source` 前用 `SHA256SUMS` 预校验；
