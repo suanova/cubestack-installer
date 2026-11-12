@@ -903,6 +903,39 @@ for i in $(seq 1 18); do
 done
 [ "${OP_OK:-0}" -ge 1 ] 2>/dev/null || { warn "  rook operator 未就绪(检查 kubectl -n rook-ceph get pods)"; }
 ok "  Rook operator 已部署"
+# ★ 2026-11-12: 官方 offline manifest(common.yaml)的 RBAC 不含 monitoring.coreos.com ——
+#   即使 CR 开了 monitoring.enabled, Rook 也无权限创建 ServiceMonitor/PrometheusRule,
+#   结果 mgr(9283)/ceph-exporter(9926) 指标已暴露但 Prometheus 无抓取目标, Grafana Ceph 面板 No data。
+#   用独立 ClusterRole/Binding 授权(不改 vendored manifest —— rook-fetch-manifests.sh 重新拉取会覆盖)。
+say "  应用 Rook 监控 RBAC(monitoring.coreos.com)..."
+if cat <<EOF | SSH "${K} apply -f -" >/dev/null 2>&1
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rook-ceph-monitoring
+rules:
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "prometheusrules"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rook-ceph-monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rook-ceph-monitoring
+subjects:
+  - kind: ServiceAccount
+    name: rook-ceph-system
+    namespace: ${CEPH_NAMESPACE}
+EOF
+then
+    ok "  Rook 监控 RBAC 已就绪"
+else
+    warn "  Rook 监控 RBAC 应用失败(ServiceMonitor 可能无法创建; 检查 RBAC)"
+fi
 _patch_rook_operator_placement
 SSH "${K} -n ${CEPH_NAMESPACE} rollout status deploy/rook-ceph-operator --timeout=180s" >/dev/null 2>&1 \
     || warn "  Rook operator patch 后 180s 内未 Ready(检查 master 标签/taint 与 operator pod 事件)"
@@ -1119,6 +1152,8 @@ else
     echo "  dashboard:"
     echo "    enabled: ${CEPH_DASHBOARD_ENABLED:-true}"
     echo "    ssl: true"
+    echo "  monitoring:"
+    echo "    enabled: true"
     echo "  network:"
     echo "    provider: \"\""
     # ★ hostNetwork(2026-09-09): CEPH_HOST_NETWORK=true(默认)时, mon/osd/mgr 直接监听节点 IP;

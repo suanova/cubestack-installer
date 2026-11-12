@@ -167,6 +167,20 @@ case "${_ACTION}" in
     apply)
         init_remote_kubectl || exit 1
         _wait_for_platform_deployments
+        # Rook 监控: ceph 模块先于 kube-prometheus-stack 安装, 创建 CephCluster 时
+        # ServiceMonitor CRD 可能尚不存在。监控组件就绪后给 CR 打一次注解触发 Rook 重新调和,
+        # 生成 mgr/ceph-exporter 的 ServiceMonitor(否则 Grafana Ceph 面板全部 No data)。
+        _ceph_ns="${CEPH_NAMESPACE:-rook-ceph}"
+        if SSH "${K}" get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1 \
+            && SSH "${K}" -n "${_ceph_ns}" get cephcluster rook-ceph >/dev/null 2>&1; then
+            if SSH "${K}" -n "${_ceph_ns}" annotate cephcluster rook-ceph \
+                    "cubestack.io/monitoring-recheck=$(date +%s)" --overwrite >/dev/null 2>&1; then
+                say "  Rook 监控: 已触发 CephCluster 重新调和(生成 ServiceMonitor)"
+            else
+                warn "  Rook 监控: 触发 CephCluster 重新调和失败"
+            fi
+        fi
+        unset _ceph_ns
         if [ "${NODE_POOL_PLATFORM_PLACEMENT:-true}" = "true" ]; then
             say "系统组件 master placement(CoreDNS/metrics/registry/MetalLB 等)..."
             bash "${SCRIPT_DIR}/tools/k8s/master-placement.sh" --apply

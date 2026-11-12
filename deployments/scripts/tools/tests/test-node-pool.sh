@@ -441,6 +441,8 @@ chk_contains "㉑ 读取 CSC status" "get csc -o json" "${mod_src}"
 chk_contains "㉑ 使用 status.components" "status.components" "${mod_src}"
 chk_not_contains "㉑ 不再枚举 Deployment 名单" "_n_expected" "${mod_src}"
 chk_contains "㉑ 校验 status 对应当前 generation" "observedGeneration" "${mod_src}"
+chk_contains "㉑ Rook 监控重新调和注解" "monitoring-recheck" "${mod_src}"
+chk_contains "㉑ 等待 ServiceMonitor CRD" "servicemonitors.monitoring.coreos.com" "${mod_src}"
 sed -n '/^_wait_for_platform_deployments() {/,/^case "${_ACTION}" in/p' "${MOD_WAIT}" | sed '$d' > "${TMP}/fn-wait.sh"
 chk "㉑ 函数已提取" "1" "$([ -s "${TMP}/fn-wait.sh" ] && echo 1 || echo 0)"
 cat > "${TMP}/wait-run.sh" <<'EOS'
