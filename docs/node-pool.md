@@ -2,7 +2,8 @@
 
 > 2026-11-02 起**默认口径**：master 默认 **可调度** —— 不 cordon，且由 `node_pool` 模块移除
 > kubespray 默认给 control-plane 打的 `node-role.kubernetes.io/control-plane:NoSchedule`
-> 污点；CubeStack operator/平台组件仍通过 nodeSelector + toleration 钉到 master。设置
+> 污点；系统控制面组件（CoreDNS/metrics-server/registry/MetalLB 等）与 CubeStack
+> operator/平台组件仍通过 nodeSelector + toleration 钉到 master。设置
 > `NODE_POOL_MASTER_CORDON=true` 可改为 cordon 隔离；设置
 > `NODE_POOL_MASTER_SCHEDULABLE=false` 可保留 kubespray 默认污点（不可调度但也不 cordon）。
 > GPU worker 隔离在后续阶段补充。
@@ -94,7 +95,7 @@ sudo ./deployments/scripts/tools/node/node-pool.sh --apply --only <master-hostna
   （apply/check 会实际查询 worker 的 STATUS 与 `spec.unschedulable`，逐个告警不可用原因）。
 - **原因**：kubespray 的 CoreDNS / dns-autoscaler 模板只容忍
   `node-role.kubernetes.io/control-plane:NoSchedule`，**没有** `node.kubernetes.io/unschedulable`
-  容忍；默认 `NODE_POOL_PLATFORM_PLACEMENT=false` 也不会给它们补。集群里所有节点都被 cordon 后，
+  容忍；`NODE_POOL_PLATFORM_PLACEMENT` 设为 `false` 时也不会给它们补。集群里所有节点都被 cordon 后，
   DNS 组件滚动、扩缩容或节点重启后新 Pod 会**永久 Pending**——单节点集群等于整集群 DNS 失效。
 - **与单节点 play 一致**：`patch-playbooks/cubestack-single-node.yml` 在只有 1 个 control-plane 时
   会 uncordon 并移除污点；本工具不会再把它 cordon 回去。
@@ -105,7 +106,8 @@ sudo ./deployments/scripts/tools/node/node-pool.sh --apply --only <master-hostna
 
 ### 模块
 
-`deployments/scripts/modules/03_addon/53_node_pool.sh`
+`deployments/scripts/modules/03_addon/34_node_pool.sh`（排在 `dev_lab`/`model_images`
+之前执行，placement 先于 vllm/sglang 大镜像 push 完成）
 
 ```bash
 # 默认已随全量部署执行(NODE_POOL_ENABLED=true)；也可手动单跑
@@ -115,17 +117,31 @@ sudo ./deploy-cluster.sh --steps node_pool
 sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
 ```
 
-- `DEFAULT: 0`、`TOGGLE: NODE_POOL_ENABLED`（默认 **true**）⇒ 随全量部署在 addon 末尾（文件 53）执行；
+- `DEFAULT: 0`、`TOGGLE: NODE_POOL_ENABLED`（默认 **true**）⇒ 随全量部署在 `dev_lab`/
+  `model_images`（vllm/sglang 大镜像 push）**之前**（文件 34）执行；
 - `REQUIRES: k8s_deploy`：集群必须先存在；已部署集群上 `k8s_deploy` 状态 done 时不会重跑；
 - 执行顺序：先 `cubestack-placement.sh --apply` 给平台组件加 master placement（
-  `NODE_POOL_PLATFORM_PLACEMENT=true` 时再跑 `master-placement.sh`），最后打 master 标签/
+  `NODE_POOL_PLATFORM_PLACEMENT=true`（默认）时再跑 `master-placement.sh`），最后打 master 标签/
   按需 cordon；
 - **k8s 阶段提前收敛(2026-11-03)**：`06_k8s_deploy.sh` 在 kubespray 成功后、addon 之前会调用
   `tools/node/node-pool.sh --apply`（临时强制 `NODE_POOL_MASTER_CORDON=false`）只做
   "master 可调度"（移除 control-plane/master 污点 + 加 master 标签）。原因：kubespray 的
   registry ReplicaSet 没有 control-plane toleration，而 `05_k8s_registry` 会等它 Ready；
-  纯 master / 多 master 无 worker 集群若等到本模块（53）才去污点，registry 会先 600s 超时。
-  cordon 与平台 placement 仍由本模块在 addon 末尾按配置执行（幂等重跑）。
+  纯 master / 多 master 无 worker 集群若等到本模块（34）才去污点，registry 会先 600s 超时。
+  cordon 与平台 placement 仍由本模块在 `dev_lab`/`model_images` 之前按配置执行（幂等重跑）。
+- **异步组件等待**：组件由 operator 异步安装；apply 前按
+  `NODE_POOL_PLACEMENT_WAIT_SECONDS`（默认 180s）读取 `CubeStackCluster.status`
+  （`conditions.Ready` / `components[].phase`）等待状态收敛，避免首次 placement 因对象尚未
+  创建而跳过；`Degraded`/`Failed` 也视为安装结束，不空等。等待期间每次状态查询都按剩余预算
+  设置 `--request-timeout` 与远端 `timeout`，单次 API 卡死不会拖过整体上限；`0` 表示只查一轮。
+- **local-path PVC 守护**：placement 前检查工作负载 PVC 的 PV `nodeAffinity`；若 PVC 已绑定在
+  worker（local-path 无共享存储），钉 master 会让新 Pod `volume node affinity conflict` Pending，
+  因此跳过该工作负载并告警（需共享存储或重建 PVC）。Ceph-on（ceph-block/cephfs）无此问题；
+  该守护同时避免 registry 在 `dev_lab`/`model_images` 之前被钉到 master 后阻断镜像 push。
+  监控组件的 **chart values** 也受守护：`25_cubestack_operator.sh` 生成
+  `clusterCR.spec.components.prometheus.values` 前会检查已有 Prometheus/Alertmanager PVC
+  绑定；PVC 已绑 worker 或状态无法确认时，不下发对应的 master nodeSelector（tolerations
+  保留），避免 operator 先于 34_node_pool 把 STS 改成 master 导致 Pending。
 - `remove` 先 uncordon，再移除 master nodeSelector。**回滚不看当前 placement 开关**：
   应用后把 `NODE_POOL_CUBESTACK_PLACEMENT`/`NODE_POOL_PLATFORM_PLACEMENT` 改成 false
   再执行 remove，仍会清掉本工具施加的 nodeSelector（与 cordon 的 ownership 口径一致）。
@@ -134,7 +150,10 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
   PodTemplate 读取/JSON 解析失败都会让 remove **非 0 退出**，不会被当作"对象不存在/
   无 selector"静默跳过。移除 patch 失败**不再降级为告警**：
   任一 placement 回滚失败都会让工具与 `node_pool` 的 remove **非 0 退出**，避免把残留
-  selector 当成功。
+  selector 当成功。`cubestack-placement.sh --remove` 还会清理 `CubeStackCluster`
+  `spec.global` 中安装器注入的 nodeSelector/tolerations（以及旧版本写入的
+  `components.<name>.values`），只删除 installer 的 key/toleration，保留用户自定义条目，
+  避免后续组件调和/升级把 placement 重新带回。
 
 ### 系统组件 master placement(阶段二 B-1)
 
@@ -147,9 +166,15 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
 - `kube-system/deploy/calico-kube-controllers`
 - `kube-system/rs/registry`（registry 是 kubespray 的裸 ReplicaSet）
 - `metallb-system/deploy/controller`
+- `rook-ceph/deploy/ceph-csi-controller-manager`（ceph-csi-operator 自身；命名空间跟随 `CEPH_NAMESPACE`。
+  `03_ceph_csi.sh` 安装后已 patch 一次，这里在部署末尾再收敛一次，覆盖只跑 `ceph`、旧集群升级或
+  PodTemplate 被重新渲染的情况）
+- `local-path-storage/deploy/local-path-provisioner`（Ceph 启用时不安装 → 不存在则跳过）
+- `metax-operator/deploy/metax-gpu-operator-metax-operator`（GPU operator 关闭时不存在 → 跳过）
 
 `metallb-system/ds/speaker` 是 DaemonSet，只补 toleration（必须全节点，含 cordon master）。
-`NODE_POOL_PLATFORM_PLACEMENT=true` 可开启该步骤（默认 false：不动系统组件）。
+`NODE_POOL_PLATFORM_PLACEMENT=true`（默认）时开启该步骤；设为 `false` 可保持系统组件不受本工具影响
+（只钉 CubeStack 平台组件）。
 
 > ⚠ kubespray 重跑 `k8s_deploy` 会按 addons.yml 重新渲染这些 Deployment；之后需重跑
 > `--steps node_pool` 重新应用。`--remove` 只移除本工具加的 master nodeSelector，
@@ -168,25 +193,51 @@ nodeSelector + control-plane/unschedulable tolerations：
 - `cuberouter`：`cuberouter`、`cuberouter-cloudnative-pg`、`redis-operator`
 - `monitoring`：`kube-prometheus-grafana`、`kube-prometheus-kube-prome-operator`、
   `kube-prometheus-kube-state-metrics`、`perses-operator-controller-manager`
+- `cubestack-system`：`cubestack-docs`（资产型组件，无 chart values 注入路径）
+
+另外直接 patch 以下 operator 调和 CR 的 placement（不直接改 STS 模板，否则下次调和会被覆盖）：
+
+- `monitoring`：`prometheuses.monitoring.coreos.com/kube-prometheus-kube-prome-prometheus`（`spec.nodeSelector/tolerations`）
+- `monitoring`：`alertmanagers.monitoring.coreos.com/kube-prometheus-kube-prome-alertmanager`（`spec.nodeSelector/tolerations`）
+- `monitoring`：`perses.perses.dev/perses`（`spec.nodeSelector/tolerations`）
+- `cuberouter`：`redisreplications.redis.redis.opstreelabs.in/cuberouter-redis`（`spec.nodeSelector/tolerations`
+  用于 Redis 数据副本；Sentinel 使用独立的 `spec.sentinel.nodeSelector/tolerations`，必须一起下发，
+  否则 Sentinel STS 不会继承 Redis 的 selector）
+- `cuberouter`：`clusters.postgresql.cnpg.io/cuberouter-postgres`（CNPG 调度字段在
+  `spec.affinity.nodeSelector/tolerations`，不是 `spec.nodeSelector`）
+
+> 多副本 CR（Redis/Sentinel、CNPG、Prometheus/Alertmanager）在 apply 前按 **PVC 名前缀** 检查
+> PV `nodeAffinity`：若 PVC 已绑在 worker（local-path），跳过并告警，避免 Pending。
+> Ceph RBD/CephFS 等共享存储没有节点亲和性，可正常滚动到 master。
 
 **明确不动**：Envoy Gateway 数据面 proxy Deployment（`envoy-envoy-gateway-system-*`）、
-sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worker 隔离在后续阶段单独做。
-`NODE_POOL_CUBESTACK_PLACEMENT=false` 可关闭。
+sglang/vllm/model bundle 推理负载、任何 DaemonSet；也不直接 patch DaemonSet/StatefulSet
+（Prometheus/Alertmanager/Perses、RedisReplication、CNPG 通过上面的 CR patch 下发）。
+GPU worker 隔离在后续阶段单独做。`NODE_POOL_CUBESTACK_PLACEMENT=false` 可关闭。
 
 - operator 自身的 chart 安装也加了 `nodeSelector`/`tolerations`（`25_cubestack_operator.sh`），
   新建/重装时 operator pod 直接落 master。
-- **默认通过 chart 透传**：`25_cubestack_operator.sh` 在 `NODE_POOL_CUBESTACK_PLACEMENT=true`
-  时生成 values 文件，把以下组件值传给 CubeStackCluster（组件 chart 已原生支持，无需改 chart）：
-  - `components.cubepilot.values.operator/api/web`
-  - `components.cubestackControllerManager.values`
-  - `components.cubestackPortal.values`
-  对应 `nodeSelector: node-role.kubernetes.io/control-plane=""` + control-plane/unschedulable
-  tolerations ⇒ **创建 Deployment 时即钉 master**，不依赖部署末尾 patch。
-- 其余平台组件（Envoy 控制器、ai-gateway、lws、cuberouter、monitoring 等）仍由
-  `cubestack-placement.sh` 在 node_pool 模块末尾兜底 patch。
-- **没有**设置 `CubeStackCluster.spec.global.nodeSelector/tolerations`——它是全局注入，
-  可能把 model bundle 推理负载也钉到 master；平台组件用 component values/直接 patch，
-  GPU 阶段再单独处理 bundle。
+- **默认通过 CR `spec.global` 注入**（2026-11-12）：`25_cubestack_operator.sh` 在
+  `NODE_POOL_CUBESTACK_PLACEMENT=true` 时给 CubeStackCluster 设置
+  `spec.global.nodeSelector` + `spec.global.tolerations`，operator 在**创建每个组件工作负载时**
+  统一下发；新组件自动覆盖，不再逐组件写 values。
+  - **构建门禁**：只有所选 operator 镜像的内容（config）digest 在
+    `CUBESTACK_OPERATOR_GLOBAL_PLACEMENT_DIGESTS` 内才下发 global（默认包含 2026-11-12 的
+    `454590af…` 构建，内容 digest `sha256:74ead8…`）。旧构建或无法识别的构建会跳过 global
+    并告警，由本模块的 PVC 守护逐组件兜底。`CUBESTACK_OPERATOR_GLOBAL_PLACEMENT=auto|true|false`
+    控制策略（默认 auto）。升级 operator 后需把新构建的内容 digest 追加到 allowlist。
+  - **PVC 门禁**：扫描 `cubestack-system` / `cuberouter` / `monitoring` 下所有已存在的 PVC
+    （含 cuberouter 的 `app-data`/`app-logs`、`cubepilot-api-data`、Prometheus/Alertmanager/Perses
+    以及 CNPG/Redis 卷）。任一 PVC 已绑 worker（local-path）或绑定无法确认时**不下发** global，
+    改由本模块的 `cubestack-placement.sh` 按组件 PVC 守护兜底，避免 Pending。
+- 其余场景（cuberouter、Perses server 等）仍由 `cubestack-placement.sh` 兜底 patch；
+  Perses server CR 没有 values 注入路径，直接 patch CR spec（lws 由 `lws-cr-values.yaml`
+  在创建时下发）。
+- **执行时机**：`34_node_pool` 排在 `dev_lab` / `model_images`（vllm/sglang 大镜像 push）之前；
+  apply 前按 `NODE_POOL_PLACEMENT_WAIT_SECONDS` 读取 `CubeStackCluster.status` 等待组件状态
+  收敛（不再硬编码 Deployment 名单），避免首次 patch 因对象尚未出现而跳过。
+- `--remove` 会清理 `spec.global.nodeSelector/tolerations` 中 installer 写入的条目（保留用户
+  自定义 key/toleration），并兼容清理旧版本写入的 `components.<name>.values`。
 
 ### 配置（cluster.defaults.conf §2.8）
 
@@ -197,8 +248,11 @@ sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worke
 | `NODE_POOL_MASTER_LABEL` | `node-pool=control-plane` | master 标签 |
 | `NODE_POOL_MASTER_CORDON` | `false` | master 是否 cordon（默认 false=可调度；true=cordon；**无可用 worker 时自动跳过 cordon**） |
 | `NODE_POOL_MASTER_SCHEDULABLE` | `true` | 是否移除 master 的 control-plane/master NoSchedule 污点（默认 true=可调度；false=保留 kubespray 默认污点） |
-| `NODE_POOL_PLATFORM_PLACEMENT` | `false` | 是否把 CoreDNS/metrics/registry/MetalLB 等系统组件也钉 master |
-| `NODE_POOL_CUBESTACK_PLACEMENT` | `true` | CubeStack operator/平台组件钉 master（含 chart values 透传） |
+| `NODE_POOL_PLATFORM_PLACEMENT` | `true` | 是否把 CoreDNS/metrics/registry/MetalLB 等系统组件也钉 master（`false`=只钉 CubeStack 平台组件） |
+| `NODE_POOL_CUBESTACK_PLACEMENT` | `true` | CubeStack operator/平台组件钉 master（CR `spec.global` 注入；监控 PVC 例外时回退 patch） |
+| `CUBESTACK_OPERATOR_GLOBAL_PLACEMENT` | `auto` | `auto`=仅 allowlist 内构建下发 global / `true`=强制 / `false`=禁用 |
+| `CUBESTACK_OPERATOR_GLOBAL_PLACEMENT_DIGESTS` | `sha256:74ead8…` | 含 DaemonSet 排除的 operator 内容（config）digest 白名单（逗号分隔） |
+| `NODE_POOL_PLACEMENT_WAIT_SECONDS` | `180` | placement 前等待 `CubeStackCluster.status` 组件状态收敛的上限（0=只查一次） |
 | `NODE_POOL_GPU_LABEL` | `node-pool=gpu` | 阶段二使用 |
 | `NODE_POOL_GPU_TAINT` | `dedicated=gpu:NoSchedule` | 阶段二使用 |
 | `NODE_POOL_GPU_NODES` | 空 | 阶段二使用（hostname 列表） |

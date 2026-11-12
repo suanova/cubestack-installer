@@ -293,8 +293,8 @@ chk_contains "点名 m1" "m1" "${out}"
 chk_contains "说明被 cordon" "cordon" "${out}"
 
 echo "== ⑪ 模块 remove 分支: placement 回滚不受当前开关影响 =="
-MODULE53="${REPO_ROOT}/deployments/scripts/modules/03_addon/53_node_pool.sh"
-_rm_block="$(sed -n '/^if \[ "\${_ACTION}" = "remove" \]; then$/,/^    exit 0$/p' "${MODULE53}")"
+MODULE34="${REPO_ROOT}/deployments/scripts/modules/03_addon/34_node_pool.sh"
+_rm_block="$(sed -n '/^if \[ "\${_ACTION}" = "remove" \]; then$/,/^    exit 0$/p' "${MODULE34}")"
 [ -n "${_rm_block}" ] && echo "  ok  remove 分支已提取" || { echo "  FAIL 未提取到 remove 分支"; fail=1; }
 chk_contains "调用 cubestack-placement --remove" 'cubestack-placement.sh" --remove' "${_rm_block}"
 chk_contains "调用 master-placement --remove" 'master-placement.sh" --remove' "${_rm_block}"
@@ -431,6 +431,56 @@ chk "⑳ 退出码 0" "0" "$?"
 chk_contains "⑳ m1 污点保留" "control-plane" "$(_taints m1)"
 out="$(_run NODE_POOL_MASTER_SCHEDULABLE=false -- --check)"
 chk "⑳ check 不把污点当漂移" "0" "$?"
+
+echo "== ㉑ 等待循环: 以 CSC status 为准 + 单次查询受预算约束 =="
+# 不再硬编码 Deployment 名单, 直接读 CubeStackCluster.status(operator 维护的组件状态);
+# 远端 kubectl 默认无请求超时, 查询仍按剩余预算设 --request-timeout + timeout。
+MOD_WAIT="${REPO_ROOT}/deployments/scripts/modules/03_addon/34_node_pool.sh"
+mod_src="$(cat "${MOD_WAIT}")"
+chk_contains "㉑ 读取 CSC status" "get csc -o json" "${mod_src}"
+chk_contains "㉑ 使用 status.components" "status.components" "${mod_src}"
+chk_not_contains "㉑ 不再枚举 Deployment 名单" "_n_expected" "${mod_src}"
+chk_contains "㉑ 校验 status 对应当前 generation" "observedGeneration" "${mod_src}"
+sed -n '/^_wait_for_platform_deployments() {/,/^case "${_ACTION}" in/p' "${MOD_WAIT}" | sed '$d' > "${TMP}/fn-wait.sh"
+chk "㉑ 函数已提取" "1" "$([ -s "${TMP}/fn-wait.sh" ] && echo 1 || echo 0)"
+cat > "${TMP}/wait-run.sh" <<'EOS'
+#!/bin/bash
+set -uo pipefail
+# shellcheck disable=SC1090
+source "${FN_WAIT:?}"
+K="sudo kubectl"; CUBESTACK_OPERATOR_NAMESPACE="cubestack-system"
+NODE_POOL_PLACEMENT_WAIT_SECONDS="${WAIT_S:-0}"
+say(){ :; }
+warn(){ echo "WARN:$*" >&2; }
+SSH(){
+    printf '%s\n' "$*" >> "${SSH_LOG:?}"
+    case "$*" in
+        *"get csc -o json"*)
+            if [ "${STALE_GEN:-0}" = "1" ]; then
+                echo '{"items":[{"metadata":{"generation":2},"spec":{"components":{"cubepilot":{"enabled":true}}},"status":{"observedGeneration":1,"conditions":[{"type":"Ready","status":"True"}],"components":[{"name":"cubepilot","phase":"Ready"}]}}]}'
+            elif [ "${STATUS_READY:-1}" = "1" ]; then
+                echo '{"items":[{"metadata":{"generation":1},"spec":{"components":{"cubepilot":{"enabled":true}}},"status":{"observedGeneration":1,"conditions":[{"type":"Ready","status":"True"}],"components":[{"name":"cubepilot","phase":"Ready"}]}}]}'
+            else
+                echo '{"items":[{"metadata":{"generation":1},"spec":{"components":{"cubepilot":{"enabled":true}}},"status":{"observedGeneration":1,"conditions":[{"type":"Ready","status":"False","reason":"Installing"}],"components":[{"name":"cubepilot","phase":"Installing"}]}}]}'
+            fi ;;
+    esac
+    return 0
+}
+_wait_for_platform_deployments
+EOS
+chmod +x "${TMP}/wait-run.sh"
+: > "${TMP}/wait.log"
+FN_WAIT="${TMP}/fn-wait.sh" WAIT_S=0 STATUS_READY=1 SSH_LOG="${TMP}/wait.log" bash "${TMP}/wait-run.sh" >/dev/null 2>&1
+wait_log="$(cat "${TMP}/wait.log")"
+chk_contains "㉑ 查询带远端 timeout" "timeout 1 sudo kubectl" "${wait_log}"
+chk_contains "㉑ 查询带 request-timeout" "--request-timeout=1s" "${wait_log}"
+: > "${TMP}/wait.log"
+wait_out="$(FN_WAIT="${TMP}/fn-wait.sh" WAIT_S=0 STATUS_READY=0 SSH_LOG="${TMP}/wait.log" bash "${TMP}/wait-run.sh" 2>&1)"
+chk_contains "㉑ 未就绪时 0s 预算仍只查一轮并按时返回" "等待超时" "${wait_out}"
+: > "${TMP}/wait.log"
+wait_out="$(FN_WAIT="${TMP}/fn-wait.sh" WAIT_S=0 STALE_GEN=1 SSH_LOG="${TMP}/wait.log" bash "${TMP}/wait-run.sh" 2>&1)"
+chk_contains "㉑ 旧 generation 的 Ready 不被采纳" "等待超时" "${wait_out}"
+chk_not_contains "㉑ 旧 generation 不立即开始 placement" "状态已收敛" "${wait_out}"
 
 echo ""
 if [ "${fail}" = "0" ]; then

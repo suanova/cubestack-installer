@@ -45,13 +45,22 @@ fi
 if SSH "test -f ${KC_REMOTE}" 2>/dev/null; then
     _KC_REMOTE="sudo kubectl --kubeconfig=${KC_REMOTE}"
 fi
+_KEEP_QUERY_OK=0
 if [ -n "${_KC}" ]; then
-    _img="$( (kubectl --kubeconfig="${KC}" get pv -o jsonpath='{range .items[*]}{.spec.csi.volumeAttributes.imageName} ' 2>/dev/null || true) )"
-    [ -n "${_img}" ] && KEEP_VOLS="${KEEP_VOLS:+${KEEP_VOLS},}${_img}"
+    if _img="$(kubectl --kubeconfig="${KC}" get pv -o jsonpath='{range .items[*]}{.spec.csi.volumeAttributes.imageName} ' 2>/dev/null)"; then
+        _KEEP_QUERY_OK=1
+        [ -n "${_img}" ] && KEEP_VOLS="${KEEP_VOLS:+${KEEP_VOLS},}${_img}"
+    fi
 fi
-if [ -z "${KEEP_VOLS}" ] && [ -n "${_KC_REMOTE}" ]; then
-    _img="$( (SSH "${_KC_REMOTE} get pv -o jsonpath={.items[*].spec.csi.volumeAttributes.imageName} 2>/dev/null" || true) )"
-    [ -n "${_img}" ] && KEEP_VOLS="${KEEP_VOLS:+${KEEP_VOLS},}${_img// /,}"
+if [ "${_KEEP_QUERY_OK}" != "1" ] && [ -n "${_KC_REMOTE}" ]; then
+    if _img="$(SSH "${_KC_REMOTE} get pv -o jsonpath={.items[*].spec.csi.volumeAttributes.imageName}" 2>/dev/null)"; then
+        _KEEP_QUERY_OK=1
+        [ -n "${_img}" ] && KEEP_VOLS="${KEEP_VOLS:+${KEEP_VOLS},}${_img// /,}"
+    fi
+fi
+if [ "${_KEEP_QUERY_OK}" != "1" ] && [ "${LIST_ONLY}" != "1" ]; then
+    warn "无法读取当前 PV/PVC(集群 API 不可达) —— 无法证明 rbd 映射是孤儿, 跳过清理(避免误 unmap 在用卷造成 D 状态)"
+    exit 0
 fi
 say "需保留的卷: ${KEEP_VOLS:-<无(将清理全部 rbd 映射)>}"
 [ -n "${KEEP_VOLS}" ] && say "  (可用 KEEP_VOLUME=xxx,yyy 额外保留)"
@@ -71,6 +80,42 @@ list_maps() {   # <ip>
     local ip="$1"
     ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${ip}")@${ip}" \
         "for d in /sys/bus/rbd/devices/*; do [ -e \"\$d\" ] || continue; echo \"\$(basename \$d) \$(cat \$d/name 2>/dev/null) \$(cat \$d/pool 2>/dev/null)\"; done" 2>/dev/null
+}
+
+# 0=在用/有在飞 IO(绝不能 unmap); 1=确认空闲; 2=查询失败(保守按忙处理)。
+# 旧逻辑只看宿主机 `mount | grep /dev/rbdX`; CSI RBD 卷通常在 pod/CSI nodeplugin 的
+# namespace 里被 open, 宿主 mount 看不到 → 对在用卷执行 sysfs remove → 内核写永久 D 态
+# (2026-11-11 实机: .190/.36 的 `bash -c echo N > /sys/bus/rbd/remove...` 卡住, dpkg/fuser 被拖死, 只能重启)。
+# 这里同时检查 holders / open fd / inflight / host mount; 任意命中都视为忙。
+_rbd_device_busy() {   # <ip> <id>
+    local ip="$1" id="$2" rc=0
+    ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "$(ssh_user_for_ip "${ip}")@${ip}" \
+        "sudo bash -c '
+            [ -d /sys/bus/rbd/devices/${id} ] || exit 1
+            _h_rc=0
+            _h=\$(ls -A /sys/block/rbd${id}/holders 2>/dev/null) || _h_rc=\$?
+            [ \${_h_rc} -eq 0 ] || exit 2
+            [ -n \"\${_h}\" ] && exit 0
+            _fd_rc=0
+            _fd_out=\$(timeout 5 ls -l /proc/[0-9]*/fd 2>/dev/null) || _fd_rc=\$?
+            [ \${_fd_rc} -eq 0 ] || exit 2
+            if printf \"%s\\n\" \"\${_fd_out}\" | grep -qE \"/dev/rbd${id}([^0-9]|\$)\"; then exit 0; fi
+            _inf_rc=0
+            _inf=\$(cat /sys/block/rbd${id}/inflight 2>/dev/null) || _inf_rc=\$?
+            [ \${_inf_rc} -eq 0 ] && [ -n \"\${_inf}\" ] || exit 2
+            if ! printf \"%s\\n\" \"\${_inf}\" | grep -qE \"^[[:space:]]*0[[:space:]]+0[[:space:]]*$\"; then exit 0; fi
+            _fm_rc=0
+            _fm_err=\$(findmnt -rn -S /dev/rbd${id} 2>&1 >/dev/null) || _fm_rc=\$?
+            [ \${_fm_rc} -eq 0 ] && exit 0
+            [ \${_fm_rc} -eq 1 ] && [ -z \"\${_fm_err}\" ] && exit 1
+            exit 2
+        '" >/dev/null 2>&1 || rc=$?
+    case "${rc}" in
+        0) return 0 ;;   # busy
+        1) return 1 ;;   # idle
+        *) return 2 ;;    # unknown
+    esac
 }
 
 # 清理单个节点
@@ -95,15 +140,25 @@ cleanup_node() {   # <ip>
             ok "    保留 ${name}(在用卷, id=${id})"
             continue
         fi
+        # ★ 2026-11-11: 先证明设备空闲; 在用/有在飞 IO 的映射**绝不**写 sysfs。
+        _busy_rc=0
+        _rbd_device_busy "${ip}" "${id}" || _busy_rc=$?
+        if [ "${LIST_ONLY}" = "1" ]; then
+            echo "    [映射] ${name}(id=${id}, pool=${pool}, busy=${_busy_rc})"
+            continue
+        fi
+        if [ "${_busy_rc}" -eq 0 ]; then
+            warn "    保留 ${name}(id=${id}): 设备在用/有在飞 IO, 跳过 unmap(避免内核 D 状态)"
+            continue
+        elif [ "${_busy_rc}" -eq 2 ]; then
+            warn "    ${name}(id=${id}): 设备忙状态无法确认, 跳过 unmap(保守)"
+            continue
+        fi
         # 该映射是否有有效挂载(kubelet 引用)
         # ★ 2026-09-24: 原来这条 ssh 被**写了两遍**(先判断、再把同一条命令塞进 `mounted="$(...)"`,
         #   且赋值处在 `A && B` 的末位 —— B 失败时 set -e 会直接结束脚本)。合并成一次取值 + `|| true`。
         mounted="$(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${ip}")@${ip}" \
             "mount | grep -qE '[[:space:]]/dev/rbd${id}[[:space:]]' && echo yes || echo no" 2>/dev/null || true)"
-        if [ "${LIST_ONLY}" = "1" ]; then
-            echo "    [残留] ${name}(id=${id}, pool=${pool}, mounted=${mounted:-?})"
-            continue
-        fi
         # 卸载挂载点(仅当 kubelet 挂载引用且设备被占用; 残留挂载点安全卸载)
         if [ "${mounted}" = "yes" ]; then
             # ⚠ 卸载改**惰性(setsid umount -l)且后台化、不等待**(2026-10-10): 后端已死时正规
@@ -112,6 +167,13 @@ cleanup_node() {   # <ip>
             timeout 30 ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "$(ssh_user_for_ip "${ip}")@${ip}" \
                 "sudo bash -c 'mount | grep /dev/rbd${id} | while read -r _d _on m _rest; do setsid umount -l \"\$m\" >/dev/null 2>&1 & done' ; echo 卸载已发起（惰性后台, 不等待）" 2>/dev/null || true
             warn "    ${name}(id=${id}): 已发起惰性卸载(后台)"
+        fi
+        # ★ 2026-11-11: 惰性卸载后再次确认空闲; 仍忙/未知则绝不写 sysfs(否则 D 态)。
+        _busy_rc=0
+        _rbd_device_busy "${ip}" "${id}" || _busy_rc=$?
+        if [ "${_busy_rc}" -ne 1 ]; then
+            warn "    ${name}(id=${id}): 卸载后设备仍忙/未知(busy_rc=${_busy_rc}), 跳过 unmap(避免内核 D 状态)"
+            continue
         fi
         # unmap(经 sysfs, 设备节点缺失也有效)
         # 两套 sysfs remove 接口均接收设备 ID(rbd0 → 0); 按序尝试。

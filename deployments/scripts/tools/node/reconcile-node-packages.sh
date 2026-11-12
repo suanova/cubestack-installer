@@ -83,8 +83,9 @@ SSH_OPTS=(-i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKn
 NODE_PKGS_ALLOW_DSTATE="${NODE_PKGS_ALLOW_DSTATE:-1}"
 _probe="$(cat <<'PROBE'
 ceph_mnts=$(timeout 5 findmnt -t ceph,rbd -n -o TARGET,FSTYPE 2>/dev/null | head -5)
-# D 状态进程(ps 只读 /proc, 不触碰挂载); 排除 rsync 等仅因含 "sync" 而误匹配的进程。
-stuck=$(timeout 5 ps -eo pid,stat,etime,cmd 2>/dev/null | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|fuser/ && $0 !~ /rsync/' | head -3)
+# D 状态进程(ps 只读 /proc, 不触碰挂载); 按**可执行名**排除 rsync(rsyncd),
+# 不能按整行过滤 —— 否则 `dpkg --unpack /…/rsync/…deb` 这类参数含 rsync 的目标进程会被漏掉。
+stuck=$(timeout 5 ps -eo pid,stat,etime,comm,args 2>/dev/null | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|fuser/ && $4 !~ /^rsync(d)?$/' | head -3)
 n_rbd=$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ')
 # ★ 修复的唯一判据 = 逐挂载健康检查: 只有读不出(ls 失败)的 ceph/rbd 挂载才算"存储不健康"。
 #   不能把任意 D 状态进程当作存储不健康(2026-11-04 CodeRabbit) —— 否则会卸载/解映射正在使用的健康卷。
@@ -114,7 +115,11 @@ for _t in "$@"; do
     [ -n "${_t}" ] || continue
     umount -l "${_t}" 2>/dev/null || umount -f "${_t}" 2>/dev/null || true
 done
-sync -f 2>/dev/null || sync 2>/dev/null || true
+# ★ 2026-11-11: **不要**在修复路径执行 sync / sync -f。
+#   对已死的 CephFS/RBD 后端, sync 会撞上卡死挂载进入不可中断 D 状态
+#   (实机 .241: `sync -f`/`sync` 卡 3~5 小时, SIGKILL 无效, 只能 reboot)。
+#   lazy umount 已足以把挂载从命名空间脱开; 包对账不需要全局 sync。
+# sync -f 2>/dev/null || sync 2>/dev/null || true
 # ★ 成功路径也必须恢复 containerd(2026-11-05 实机):
 #   后续 k8s 覆盖流程的 `kubeadm reset -f` 是**通过 CRI** 停止/删除旧静态 Pod 容器的。
 #   containerd 停着时 reset 只能删文件, 旧容器(shim 存活)继续占 6443/10257/10259
@@ -265,14 +270,27 @@ APT=( -o "Dir::Cache::archives=${D}" --no-download -y --no-install-recommends
 #   · D 状态进程 / fuser 超时 = 僵尸态, SIGKILL 无效 → **只有这种情况**才提示重启;
 #   · 挂载不健康但未卡死 → 自动 stop kubelet/containerd + umount -l/-f + rbd unmap;
 #   · 活动且健康的 Ceph/RBD(当前集群正在用) → 不动, 直接继续。
-# ★ 2026-11-05 (CodeRabbit): 远端门禁必须跟随控制器侧的 NODE_PKGS_ALLOW_DSTATE
-#   （覆盖安装策略）——控制器放行 D 状态时，远端不能无条件 exit 2；但 fuser 超时
-#   （无法判断锁持有者）仍必须硬失败。D 状态存在时**不做**挂载健康探测/自动卸载
-#   （挂载可能正被僵尸进程引用，卸载不安全）。
+# ★ 2026-11-11: D 状态是硬环境阻塞。fuser/apt 在 D 状态存在时必须跳过:
+#   旧顺序先跑 fuser, fuser 会撞上卡死挂载/设备并自己进 D 态(timeout 杀不掉),
+#   报"fuser 超时"而掩盖真正的 D 状态进程。现在先识别 D 状态并 exit 2 给出根因;
+#   不再运行 fuser/apt, 避免制造第二个 D 状态。D 状态只能清来源或 reboot -f。
 _ceph_mnts="$(timeout 5 findmnt -t ceph,rbd -n -o TARGET,FSTYPE 2>/dev/null | head -5 || true)"
-_stuck="$(timeout 5 ps -eo pid,stat,etime,cmd 2>/dev/null \
-    | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|sync|fuser/' | head -3 || true)"
+# 同一误匹配规则(CodeRabbit 2026-11-11): 只按可执行名排除 rsync/rsyncd ——
+# 不能按整行过滤, 否则参数里含 "rsync" 的 dpkg/ceph 进程会被漏掉。
+_stuck="$(timeout 5 ps -eo pid,stat,etime,comm,args 2>/dev/null \
+    | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|sync|fuser/ && $4 !~ /^rsync(d)?$/' | head -3 || true)"
 _n_rbd="$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ' || true)"
+# ★ 2026-11-11: D 状态检查必须在 fuser **之前**。旧顺序先跑 `timeout 5 fuser ...`:
+#   节点上已有 rbd remove D 状态时, fuser 遍历 /proc 撞上卡死挂载/设备, 自己也进 D 态,
+#   timeout 杀不掉 → 报"fuser 超时(僵尸态)"并失败。这里先识别 D 状态并直接给出根因;
+#   不再运行 fuser/apt, 避免制造第二个 D 状态进程。D 状态只能清来源或 reboot -f。
+_skip_ceph_repair=0
+if [ -n "${_stuck}" ]; then
+    echo "         ❌ 节点存在 D 状态进程(僵尸态; 不运行 fuser/apt, 避免再产生 D 状态):"
+    echo "${_stuck}" | sed 's/^/            D 状态进程: /'
+    echo "            处置: 清理 D 状态来源后重试(若是 ceph-rbd-cleanup 的 sysfs remove 卡死, 需 reboot -f)"
+    exit 2
+fi
 timeout 5 fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1
 _frc=$?
 if [ "${_frc}" -eq 124 ]; then
@@ -281,21 +299,6 @@ if [ "${_frc}" -eq 124 ]; then
     echo "                  ② systemctl reboot -f   # 跳过卡死的 ceph 卸载"
     echo "                  ③ 重启后再重跑本模块"
     exit 2
-fi
-_skip_ceph_repair=0
-if [ -n "${_stuck}" ]; then
-    if [ "${ALLOW_DSTATE}" = "1" ]; then
-        echo "         ⚠ 存在 D 状态进程(覆盖安装策略: 忽略并继续, 不自动卸载):"
-        echo "${_stuck}" | sed 's/^/            D 状态进程: /'
-        _skip_ceph_repair=1
-    else
-        echo "         ❌ 节点存在 D 状态进程(僵尸态, 无法自动修复, 必须重启):"
-        echo "${_stuck}" | sed 's/^/            D 状态进程: /'
-        echo "            处置: ① systemctl stop kubelet containerd"
-        echo "                  ② systemctl reboot -f   # 跳过卡死的 ceph 卸载"
-        echo "                  ③ 重启后再重跑本模块"
-        exit 2
-    fi
 fi
 _ceph_bad=""
 if [ -n "${_ceph_mnts}" ] && [ "${_skip_ceph_repair}" = "0" ]; then

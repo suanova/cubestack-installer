@@ -28,8 +28,8 @@
 #     all-in-one、纯 master 集群, 或配置的 worker 全部 NotReady/已 cordon), 即使
 #     NODE_POOL_MASTER_CORDON=true 也**跳过 cordon**:
 #       - CoreDNS/dns-autoscaler 的 kubespray 模板只容忍 control-plane:NoSchedule,
-#         没有 node.kubernetes.io/unschedulable 容忍; NODE_POOL_PLATFORM_PLACEMENT=false
-#         (默认)也不会补 ⇒ 全部节点 cordon 后, DNS 组件滚动/重启会永久 Pending;
+#         没有 node.kubernetes.io/unschedulable 容忍; NODE_POOL_PLATFORM_PLACEMENT
+#         设为 false 时不会补 ⇒ 全部节点 cordon 后, DNS 组件滚动/重启会永久 Pending;
 #       - 单节点 play(cubestack-single-node.yml)特意 uncordon 的唯一 master 不会被再次 cordon;
 #       - --apply 会回滚**本工具此前创建**的 cordon(ownership annotation 判定);
 #       - --check 在该拓扑下期望 master 可调度, 被 cordon 即报漂移。

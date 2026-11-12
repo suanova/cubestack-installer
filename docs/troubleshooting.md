@@ -1388,13 +1388,14 @@ bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh # ⑨ ser
 
 **根因:**
 1. (2026-10-27 口径, 已于 2026-11-02 调整) `NODE_POOL_ENABLED` / `NODE_POOL_MASTER_CORDON`
-   当时默认都是 `true`, `53_node_pool` 在 addon 末尾把**所有** master cordon —— 无 worker 时
+   当时默认都是 `true`, `node_pool` 在 addon 末尾把**所有** master cordon —— 无 worker 时
    这就是集群里仅有的可调度节点; 当前默认已改为 `NODE_POOL_MASTER_CORDON=false` +
    `NODE_POOL_MASTER_SCHEDULABLE=true`(master 可调度);
 2. kubespray 模板的 CoreDNS/dns-autoscaler 只容忍
    `node-role.kubernetes.io/control-plane:NoSchedule`, **没有**
    `node.kubernetes.io/unschedulable:NoSchedule`(scheduler `NodeUnschedulable` 插件检查的隐式
-   taint); 默认 `NODE_POOL_PLATFORM_PLACEMENT=false` 也不跑 `master-placement.sh` 补容忍;
+   taint); `NODE_POOL_PLATFORM_PLACEMENT` 设为 `false` 时也不会跑 `master-placement.sh` 补容忍
+   （默认已改为 `true`，即部署时会给这些系统组件补 master placement）；
 3. `patch-playbooks/cubestack-single-node.yml` 在部署早期特意 uncordon 单 control-plane,
    随后被 node_pool 又 cordon 回去。
 
@@ -1458,10 +1459,10 @@ sudo kubectl get svc -A -o wide
 `deploy-cluster.sh` 即可(补丁会在 kubespray 运行前自动重放)。
 
 **关联修复(预防性):** 同轮排查发现 `05_k8s_registry` 会等 registry Pod Ready, 而 registry RS
-没有 control-plane toleration; 移除污点的 `node_pool` 是模块 53(排在 05 之后)。纯 master / 多 master
+没有 control-plane toleration; 移除污点的 `node_pool` 是模块 34(排在 05 之后)。纯 master / 多 master
 无 worker 集群在 NodePort 修好后仍会卡在 registry 600s 超时。已在 `06_k8s_deploy.sh` kubespray
 成功后、addon 之前提前调用 `node-pool.sh --apply`(临时 `NODE_POOL_MASTER_CORDON=false`, 只去污点;
-cordon/placement 仍由 53 执行)。该预防修复基于静态分析 + 现网节点污点状态, 未做端到端复验。
+cordon/placement 仍由 34 执行)。该预防修复基于静态分析 + 现网节点污点状态, 未做端到端复验。
 
 **`--fresh` 入口预检:** `06_k8s_deploy.sh` 在 kubespray 前调用
 `tools/k8s/nodeport-leak-preflight.sh`(只读 `kubectl apply --dry-run=server`)：端口无 Service
@@ -1515,6 +1516,35 @@ kubectl get node <master03> -o jsonpath='{.spec.taints}'   # 等 kubelet 清除 
 kubectl -n rook-ceph get pods -l app=rook-ceph-mon -o wide
 ```
 清理与磁盘释放已实机验证；`--fresh` 全流程复跑待用户执行(本次仅修到 Ceph 就绪前)。
+
+**2026-11-11 复发与根因补全:**
+- 复发原因: 上面的 05 清理只挂在 **uninstall** 分支; `--fresh`/覆盖安装不会经过它 →
+  master03 上 65G 孤儿 registry 目录仍在, 根盘 15G free < kubelet 驱逐阈值 → DiskPressure。
+- 同轮补全的根因: Rook 的 mon/osd placement 不含 `node.kubernetes.io/disk-pressure:NoSchedule`;
+  master03 被 taint 后 mon-c 被驱逐、Rook 日志出现
+  `skipping creation of OSDs on nodes [master03]: placement settings do not match` → 只有 2 OSD;
+  `osd_pool_default_size=3` → `HEALTH_WARN TOO_FEW_OSDS`;
+  旧 02 模块只要求 `HEALTH_OK && OSD>0`, 会短暂接受 2 OSD 的瞬时 HEALTH_OK, 后续
+  clock-skew/daemon 滚动等待再空等 600s。
+- 2026-11-11 脚本修复:
+  1. `02_ceph.sh` 新增 `[1.5/8]` 存储节点预检: 根盘 free(`CEPH_NODE_MIN_FREE_GB`, 默认 20GiB)、
+     DiskPressure taint、`/opt/local-path-provisioner/pvc-*` 孤儿目录(按当前 PV/PVC UID +
+     mount 判定); 默认 `CEPH_CLEAN_STALE_LOCAL_PATH=true` 自动清理孤儿目录并等待 taint 清除;
+     设 false 则明确失败并给出处置。
+  2. 就绪判据改为 `HEALTH_OK && OSD 数 >= CEPH_POOL_REPLICAS`; 识别 `TOO_FEW_OSDS` 立即失败,
+     提示释放节点或少副本场景显式设 `CEPH_POOL_REPLICAS=2 CEPH_POOL_MIN_SIZE=1`, 不再空等 900s。
+  3. 预调优同步 `osd_pool_default_size/min_size = CEPH_POOL_REPLICAS/MIN_SIZE`;
+     toolbox 等待改为 `CEPH_TOOLBOX_WAIT_SECONDS`(默认 300s, 冷启动镜像约 2min)。
+  4. `05_k8s_registry.sh` 的孤儿 registry 清理也接到 install/`--fresh` 路径(不再只在 uninstall 分支)。
+- 验证命令:
+  ```bash
+  kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s      # TOO_FEW_OSDS
+  kubectl get node <master03> -o jsonpath='{.spec.taints}'          # disk-pressure
+  ssh <master03> 'df -h /; sudo du -sh /opt/local-path-provisioner'
+  kubectl -n rook-ceph logs deploy/rook-ceph-operator | grep 'placement settings do not match'
+  ```
+  下一轮 `--steps ceph` 的 `[1.5/8]` 预检应先清理孤儿目录、等待 taint 清除, 再进入 Ceph 部署;
+  `[7/8]` 应在 OSD 数不足时立即给出根因而不是等 900s。
 
 ---
 

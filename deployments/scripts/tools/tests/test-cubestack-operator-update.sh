@@ -25,6 +25,14 @@ TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 fail=0
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }
 chk_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  ok  $1"; else echo "  FAIL $1: [$3] 未包含 [$2]"; fail=1; fi; }
+# grep -F 把模式里的换行当作"多个备选模式"(任一命中即可), 不能验证多行片段连续出现。
+chk_block() {   # <msg> <多行连续片段> <file>
+    if python3 -c 'import sys; sys.exit(0 if sys.argv[1] in open(sys.argv[2], encoding="utf-8", errors="replace").read() else 1)' "$2" "$3" 2>/dev/null; then
+        echo "  ok  $1"
+    else
+        echo "  FAIL $1: [$3] 未包含连续片段 [$2]"; fail=1
+    fi
+}
 chk_not_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  FAIL $1: [$3] 不应包含 [$2]"; fail=1; else echo "  ok  $1"; fi; }
 count_of() { grep -cF -- "$2" "$3" 2>/dev/null || true; }
 
@@ -341,22 +349,23 @@ chk_contains "HA 例外: lws 保持单副本(CPU)" 'clusterCR.spec.components.lw
 chk_contains "活体 CR 组件 HA 例外纠偏" 'CR 组件 HA 例外已收敛' "${MOD}"
 chk_contains "Deployment 副本数纠偏" 'scale deploy ${_DEP_NAME} --replicas=${OP_REPLICAS}' "${MOD}"
 
-echo "== ⑭ 默认平台组件 master placement(chart values 透传, 不改组件 chart) =="
-# 2026-10-27: cubepilot-api/operator、controller-manager、portal 的 chart 已原生支持
-# nodeSelector/tolerations；operator 模块通过 CubeStackCluster components.<name>.values
-# 在创建 Deployment 时下发，不依赖 node_pool 模块的末尾 patch。
-for k in 'cubepilot:' 'cubestackControllerManager:' 'cubestackPortal:'; do
-    chk_contains "CR component ${k}" "$(printf '      %s' "${k}")" "${MOD}"
-done
-for k in 'operator:' 'api:' 'web:'; do
-    chk_contains "cubepilot subcomponent ${k}" "$(printf '          %s' "${k}")" "${MOD}"
-done
-chk_contains "CR values nodeSelector" 'node-role.kubernetes.io/control-plane: ""' "${MOD}"
-chk_contains "CR values unschedulable toleration" 'node.kubernetes.io/unschedulable' "${MOD}"
+echo "== ⑭ 平台组件 master placement(CR spec.global 注入, 不再逐组件) =="
+# 2026-11-12: 统一通过 CubeStackCluster.spec.global.nodeSelector/tolerations 注入;
+# 新版 operator 对 DaemonSet 不做注入(node-exporter 等全节点组件不受影响)。
+# 监控 PVC 已绑 worker/无法确认时不下发 global, 由 node_pool 的 PVC 守护逐组件兜底。
+chk_contains "CR global nodeSelector" 'clusterCR.spec.global.nodeSelector={"node-role.kubernetes.io/control-plane":""}' "${MOD}"
+chk_contains "CR global tolerations" 'clusterCR.spec.global.tolerations=[' "${MOD}"
+chk_contains "monitoring PVC 守卫决定是否注入" '_cb_mon_pvc_allows_master' "${MOD}"
+chk_contains "global 注入日志" '通过 CR spec.global 注入' "${MOD}"
+chk_not_contains "不再写 cubepilot values" 'clusterCR.spec.components.cubepilot' "${MOD}"
+chk_not_contains "不再写 envoyGateway values" 'clusterCR.spec.components.envoyGateway' "${MOD}"
+chk_not_contains "不再写 aiGateway values" 'clusterCR.spec.components.aiGateway' "${MOD}"
+chk_not_contains "不再写 prometheus values" 'clusterCR.spec.components.prometheus' "${MOD}"
+chk_not_contains "不再写 perses values" 'clusterCR.spec.components.perses' "${MOD}"
 chk_contains "defaults NODE_POOL_ENABLED=true" 'NODE_POOL_ENABLED="${NODE_POOL_ENABLED:-true}"' "${DEFAULTS}"
 chk_contains "defaults NODE_POOL_MASTER_CORDON=false" 'NODE_POOL_MASTER_CORDON="${NODE_POOL_MASTER_CORDON:-false}"' "${DEFAULTS}"
 chk_contains "defaults NODE_POOL_MASTER_SCHEDULABLE=true" 'NODE_POOL_MASTER_SCHEDULABLE="${NODE_POOL_MASTER_SCHEDULABLE:-true}"' "${DEFAULTS}"
-chk_contains "defaults NODE_POOL_PLATFORM_PLACEMENT=false" 'NODE_POOL_PLATFORM_PLACEMENT="${NODE_POOL_PLATFORM_PLACEMENT:-false}"' "${DEFAULTS}"
+chk_contains "defaults NODE_POOL_PLATFORM_PLACEMENT=true" 'NODE_POOL_PLATFORM_PLACEMENT="${NODE_POOL_PLATFORM_PLACEMENT:-true}"' "${DEFAULTS}"
 chk_contains "defaults NODE_POOL_CUBESTACK_PLACEMENT=true" 'NODE_POOL_CUBESTACK_PLACEMENT="${NODE_POOL_CUBESTACK_PLACEMENT:-true}"' "${DEFAULTS}"
 
 echo "== ⑮ uninstall: 清 operator ns 内残留 CR finalizer =="
@@ -403,6 +412,110 @@ source "${TMP}/fn-finalizers.sh"
 clear_operator_ns_cr_finalizers cubestack-system
 chk "清除 AgentInstance finalizer" "1" "$(count_of x 'agentinstance.ai.cubestack.io/admin-cubepilot' "${_patch_log}")"
 chk "未触碰 pods finalizer" "0" "$(count_of x 'pods' "${_patch_log}")"
+
+echo "== ⑯ monitoring chart values 的 PVC 绑定守卫 =="
+# 升级时若 Prometheus/Alertmanager 的 local-path PVC 已绑 worker, chart values 里的
+# master nodeSelector 会让新 Pod 直接 Pending(34_node_pool 的守护来不及生效)。
+sed -n '/^_cb_mon_pvc_allows_master() {/,/^}/p' "${MOD}" > "${TMP}/fn-mon-pvc.sh"
+chk "⑯ 守卫函数已定义" "1" "$([ -s "${TMP}/fn-mon-pvc.sh" ] && echo 1 || echo 0)"
+chk_contains "⑯ 监控 PVC 守卫接入 global 注入" '_mon_prom_ok' "${MOD}"
+chk_contains "⑯ PVC 例外时不下发 global" "不下发 global placement" "${MOD}"
+chk_contains "⑯ 无 Pod 时按 PVC 前缀兜底" "get pvc -o name" "${MOD}"
+cat > "${TMP}/mon-guard-run.sh" <<'EOS'
+#!/bin/bash
+set -uo pipefail
+# shellcheck disable=SC1090
+source "${FN_MON:?}"
+K="sudo kubectl"
+warn() { :; }
+placement_pod_pvcs() {
+    [ "${POD_PVCS:-}" = "PARSE_FAIL" ] && return 2
+    [ -n "${POD_PVCS:-}" ] && echo "${POD_PVCS}"
+}
+placement_pvc_worker_bound() {
+    case "${PV_BOUND:-1}" in
+        0) return 0 ;;   # worker 绑定
+        2) return 2 ;;   # 无法确认
+        *) return 1 ;;   # 安全
+    esac
+}
+SSH() {
+    case "${MODE:-podok}" in
+        pod404)
+            case "$*" in
+                *"get pod"*) echo 'Error from server (NotFound): pods "p" not found' >&2; return 1 ;;
+                *"get pvc -o name"*) printf 'persistentvolumeclaim/prometheus-x-db-0\n' ;;
+            esac ;;
+        apifail)
+            case "$*" in
+                *"get pod"*) echo "Error from server: connection refused" >&2; return 1 ;;
+            esac ;;
+        *) : ;;
+    esac
+    return 0
+}
+_cb_mon_pvc_allows_master "p" "prometheus"
+EOS
+chmod +x "${TMP}/mon-guard-run.sh"
+_run_mon() { FN_MON="${TMP}/fn-mon-pvc.sh" POD_PVCS="${2:-prom-db}" MODE="${3:-podok}" PV_BOUND="$1" bash "${TMP}/mon-guard-run.sh"; }
+rc=0; _run_mon 0 || rc=$?; chk "⑯ worker 绑定 → 不下发" "1" "${rc}"
+rc=0; _run_mon 1 || rc=$?; chk "⑯ 安全绑定 → 下发" "0" "${rc}"
+rc=0; _run_mon 2 || rc=$?; chk "⑯ 绑定未知 → 保守不下发" "1" "${rc}"
+rc=0; _run_mon 0 "" pod404 || rc=$?; chk "⑯ Pod 不存在但 PVC 绑 worker → 不下发" "1" "${rc}"
+rc=0; _run_mon 1 "" apifail || rc=$?; chk "⑯ 查询失败 → 保守不下发" "1" "${rc}"
+rc=0; _run_mon 1 "PARSE_FAIL" podok || rc=$?; chk "⑯ Pod JSON 解析失败 → 保守不下发" "1" "${rc}"
+
+echo "== ⑰ global placement 按 operator 构建身份门禁 =="
+# 只有内容(config) digest 在 allowlist 内的构建才下发 spec.global(该构建含 DaemonSet 排除)。
+sed -n '/^_operator_global_placement_ok() {/,/^}/p' "${MOD}" > "${TMP}/fn-gp.sh"
+chk "⑰ 门禁函数已定义" "1" "$([ -s "${TMP}/fn-gp.sh" ] && echo 1 || echo 0)"
+chk_contains "⑰ 采集 operator 内容 digest" '_OPERATOR_CONTENT_DIGEST' "${MOD}"
+chk_contains "⑰ 未知构建跳过 global" "构建未确认支持 global" "${MOD}"
+chk_contains "⑰ defaults 默认 auto" 'CUBESTACK_OPERATOR_GLOBAL_PLACEMENT="${CUBESTACK_OPERATOR_GLOBAL_PLACEMENT:-auto}"' "${DEFAULTS}"
+chk_contains "⑰ defaults 已知构建 digest" 'sha256:74ead8' "${DEFAULTS}"
+_gp_rc() { ( source "${TMP}/fn-gp.sh"; _operator_global_placement_ok "$1" "$2" "$3" ); echo $?; }
+chk "⑰ auto + allowlist 内 digest → 允许" "0" "$(_gp_rc auto sha256:good sha256:old,sha256:good)"
+chk "⑰ auto + 旧构建 digest → 跳过" "1" "$(_gp_rc auto sha256:old sha256:good)"
+chk "⑰ auto + 未知 digest → 跳过" "1" "$(_gp_rc auto "" sha256:good)"
+chk "⑰ true 强制允许" "0" "$(_gp_rc true "" "")"
+chk "⑰ false 禁止" "1" "$(_gp_rc false sha256:good sha256:good)"
+chk "⑰ 非法 mode → 跳过" "1" "$(_gp_rc bogus sha256:good sha256:good)"
+
+echo "== ⑱ global placement 检查 cubestack-system/cuberouter/monitoring 全部 PVC =="
+# cuberouter 的 app-data/app-logs、cubepilot-api-data、CNPG/Redis 等卷同样不能跨节点;
+# global 字段无法按组件剔除, 任一 PVC 绑 worker/无法确认时整批不下发。
+chk_contains "⑱ 通用 PVC 守护" "_cb_global_pvc_allows_master" "${MOD}"
+chk_contains "⑱ 覆盖 cuberouter 命名空间" "cubestack-system cuberouter monitoring" "${MOD}"
+sed -n '/^_cb_global_pvc_allows_master() {/,/^}/p' "${MOD}" > "${TMP}/fn-gp-pvc.sh"
+chk "⑱ 函数已定义" "1" "$([ -s "${TMP}/fn-gp-pvc.sh" ] && echo 1 || echo 0)"
+cat > "${TMP}/gp-pvc-run.sh" <<'EOS'
+#!/bin/bash
+set -uo pipefail
+_CB_GLOBAL_PVC_NAMESPACES=(cubestack-system cuberouter monitoring)
+# shellcheck disable=SC1090
+source "${FN_GP_PVC:?}"
+K="sudo kubectl"
+warn(){ :; }
+SSH(){
+    case "${MODE:-ok}" in
+        fail)
+            case "$*" in *"get pvc -o name"*) echo "Error from server: connection refused" >&2; return 1;; esac ;;
+        nsfail)
+            case "$*" in *"get pvc -o name"*) echo 'Error from server (NotFound): namespaces "x" not found' >&2; return 1;; esac ;;
+    esac
+    case "$*" in *"get pvc -o name"*) printf 'persistentvolumeclaim/app-data\npersistentvolumeclaim/app-logs\n';; esac
+    return 0
+}
+placement_pvc_worker_bound(){ case "${BOUND:-1}" in 0) return 0;; 2) return 2;; *) return 1;; esac; }
+_cb_global_pvc_allows_master
+EOS
+chmod +x "${TMP}/gp-pvc-run.sh"
+_gp_pvc() { FN_GP_PVC="${TMP}/fn-gp-pvc.sh" MODE="${2:-ok}" BOUND="$1" bash "${TMP}/gp-pvc-run.sh"; }
+rc=0; _gp_pvc 0 || rc=$?; chk "⑱ worker 绑定 → 不下发" "1" "${rc}"
+rc=0; _gp_pvc 1 || rc=$?; chk "⑱ 全部安全 → 下发" "0" "${rc}"
+rc=0; _gp_pvc 2 || rc=$?; chk "⑱ 绑定未知 → 不下发" "1" "${rc}"
+rc=0; _gp_pvc 1 fail || rc=$?; chk "⑱ PVC 列表查询失败 → 不下发" "1" "${rc}"
+rc=0; _gp_pvc 1 nsfail || rc=$?; chk "⑱ 命名空间不存在 → 跳过" "0" "${rc}"
 
 echo ""
 if [ "${fail}" = "0" ]; then

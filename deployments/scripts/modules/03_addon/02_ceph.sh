@@ -193,6 +193,17 @@ CEPH_MON_COUNT="${CEPH_MON_COUNT:-3}"
 CEPH_MGR_COUNT="${CEPH_MGR_COUNT:-2}"
 CEPH_POOL_REPLICAS="${CEPH_POOL_REPLICAS:-3}"
 CEPH_POOL_MIN_SIZE="${CEPH_POOL_MIN_SIZE:-2}"
+# 池副本参数必须先校验再参与判断: REPLICAS=0 会让"OSD 数 < 副本数"恒为假, 放行 0-OSD 集群;
+# MIN_SIZE>REPLICAS 是无效组合(Ceph 要求 1 <= min_size <= size)。
+case "${CEPH_POOL_REPLICAS}" in ''|*[!0-9]*) err "CEPH_POOL_REPLICAS 必须是正整数: '${CEPH_POOL_REPLICAS}'"; exit 1 ;; esac
+[ "${CEPH_POOL_REPLICAS}" -ge 1 ] || { err "CEPH_POOL_REPLICAS 必须 >=1(当前 ${CEPH_POOL_REPLICAS})"; exit 1; }
+case "${CEPH_POOL_MIN_SIZE}" in ''|*[!0-9]*) err "CEPH_POOL_MIN_SIZE 必须是正整数: '${CEPH_POOL_MIN_SIZE}'"; exit 1 ;; esac
+[ "${CEPH_POOL_MIN_SIZE}" -ge 1 ] || { err "CEPH_POOL_MIN_SIZE 必须 >=1(当前 ${CEPH_POOL_MIN_SIZE})"; exit 1; }
+[ "${CEPH_POOL_MIN_SIZE}" -le "${CEPH_POOL_REPLICAS}" ] || {
+    err "CEPH_POOL_MIN_SIZE(${CEPH_POOL_MIN_SIZE}) 不能大于 CEPH_POOL_REPLICAS(${CEPH_POOL_REPLICAS})"; exit 1; }
+CEPH_NODE_MIN_FREE_GB="${CEPH_NODE_MIN_FREE_GB:-20}"          # 存储节点根盘最小可用空间(GiB); 低于此值/有 DiskPressure 时预检失败
+CEPH_CLEAN_STALE_LOCAL_PATH="${CEPH_CLEAN_STALE_LOCAL_PATH:-true}"  # true(默认)=预检时清理当前集群未引用且未挂载的 /opt/local-path-provisioner/pvc-*(旧集群残留); false=只告警并失败
+CEPH_TOOLBOX_WAIT_SECONDS="${CEPH_TOOLBOX_WAIT_SECONDS:-300}" # toolbox ceph CLI 可用等待上限(秒)
 CEPH_OSD_MEMORY_TARGET="${CEPH_OSD_MEMORY_TARGET:-12}"
 CEPH_NODE_LABEL="${CEPH_NODE_LABEL:-ceph-storage=rook-ceph}"
 LABEL_KEY="${CEPH_NODE_LABEL%%=*}"
@@ -371,6 +382,220 @@ fi
 _HAS_DISK=0
 for _hn in "${CEPH_NODE_HOSTS[@]}"; do [ -n "${NODE_DISKS[${_hn}]:-}" ] && _HAS_DISK=1; done
 [ "${_HAS_DISK}" = "1" ] || { err "所有存储节点均未指定/检测到裸盘; 请显式设 CEPH_DATA_DISKS(\"hostname:盘名,盘名\", 或省略 hostname 应用到全部节点)或先为节点附加数据盘"; exit 1; }
+
+# 每个存储节点都必须有盘: 否则该节点不会创建 OSD, 且旧 7a 清理循环会因
+# NODE_DISKS[无盘节点] 未定义在 set -u 下直接 unbound variable(2026-11-11 实机:
+# master01 .190 无数据盘, 盘在 worker01 .36; OSD 只剩 master02/03 → 2 OSD < 副本 3)。
+# 这里在清盘前 fail-fast, 并给出"换 CEPH_NODES / 挂盘 / 少副本"三条处置。
+_DISK_NODES=0
+_NO_DISK_NODES=()
+for _hn in "${CEPH_NODE_HOSTS[@]}"; do
+    if [ -n "${NODE_DISKS[${_hn}]:-}" ]; then
+        _DISK_NODES=$((_DISK_NODES + 1))
+    else
+        _NO_DISK_NODES+=("${_hn}")
+    fi
+done
+if [ "${#_NO_DISK_NODES[@]}" -gt 0 ]; then
+    warn "存储节点无可用裸盘: ${_NO_DISK_NODES[*]}(不会创建 OSD)"
+    warn "  若并非预期: 检查 NODES 的 hostname/IP 映射, 确认数据盘已挂到存储节点(VM_DATA_DISKS>0)"
+fi
+if [ "${_DISK_NODES}" -lt "${CEPH_POOL_REPLICAS}" ]; then
+    err "可用 OSD 节点 ${_DISK_NODES} < CEPH_POOL_REPLICAS ${CEPH_POOL_REPLICAS}: 无法创建足够 OSD(HEALTH_OK 不可达)"
+    err "  处置(三选一):"
+    err "    ① 给无盘存储节点挂数据盘后重跑;"
+    err "    ② 用 CEPH_NODES 指定有盘的节点(如 CEPH_NODES=\"node1,node2,node3\");"
+    err "    ③ 明确接受少副本: cluster.conf 设 CEPH_POOL_REPLICAS=${_DISK_NODES} CEPH_POOL_MIN_SIZE=1"
+    exit 1
+fi
+unset _DISK_NODES _NO_DISK_NODES _hn
+
+# ---------------- 2.5) 存储节点磁盘压力/陈旧 local-path 数据预检 ----------------
+# 2026-11-11 实机根因: 节点从 worker 复用为 master 后, /opt/local-path-provisioner 下残留
+# 上个集群的 registry/cuberouter PV 数据(66G), 根盘 free 15G < kubelet eviction 阈值 15.58G
+# → node.kubernetes.io/disk-pressure:NoSchedule。Rook 的 mon/osd placement 没有该 toleration:
+#   · mon-c 被驱逐/Pending(hostNetwork, 只能回同节点);
+#   · Rook 日志 "skipping creation of OSDs on nodes [master03]: placement settings do not match"
+#     → master03 没有 OSD → 2 OSD < osd_pool_default_size=3 → HEALTH_WARN(TOO_FEW_OSDS)。
+# 旧脚本只等 900s HEALTH_OK, 必然超时/误判。这里在部署前明确检查并给出可执行处置。
+_ceph_node_free_gb() {   # <ip> <user> → 根文件系统可用 GiB(一位小数); 2=无法读取
+    local _mb _rc=0
+    _mb="$(node_ssh "$1" "$2" "df -Pm / | tail -1 | tr -s ' ' | cut -d' ' -f4" 2>/dev/null)" || _rc=$?
+    [ "${_rc}" -eq 0 ] || return 2
+    case "${_mb}" in ''|*[!0-9]*) return 2 ;; esac
+    awk -v m="${_mb}" 'BEGIN{printf "%.1f", m/1024}'
+}
+
+_ceph_node_has_disk_pressure() {   # <hostname> → 0=有 DiskPressure/taint; 1=无; 2=读取/解析失败
+    local _js _rc=0 _prc=0
+    _js="$(SSH "${K}" get node "$1" -o json 2>/dev/null)" || _rc=$?
+    [ "${_rc}" -eq 0 ] || return 2
+    [ -n "${_js}" ] || return 2
+    printf '%s' "${_js}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+conds = (d.get("status") or {}).get("conditions") or []
+taints = (d.get("spec") or {}).get("taints") or []
+dp = any(c.get("type") == "DiskPressure" and c.get("status") == "True" for c in conds)
+tp = any(t.get("key") == "node.kubernetes.io/disk-pressure" for t in taints)
+sys.exit(0 if (dp or tp) else 1)
+' || _prc=$?
+    case "${_prc}" in
+        0|1) return "${_prc}" ;;
+        *) return 2 ;;
+    esac
+}
+
+_ceph_stale_local_path_is_current() {   # <pvc-uid_ns_name basename> → 0=当前集群同 UID PVC 仍存在; 1=确认不存在; 2=查询失败
+    local _b="$1" _uid _ns _name _cur _msg _rc=0
+    _b="${_b#pvc-}"
+    IFS='_' read -r _uid _ns _name <<< "${_b}"
+    [ -n "${_uid}" ] && [ -n "${_ns}" ] && [ -n "${_name}" ] || return 1
+    _cur="$(SSH "${K}" -n "${_ns}" get pvc "${_name}" -o jsonpath='{.metadata.uid}' 2>/dev/null)" || _rc=$?
+    if [ "${_rc}" -ne 0 ]; then
+        # 失败时单独取 stderr 分类(成功路径不受 kubectl 告警输出污染)
+        _msg="$(SSH "${K}" -n "${_ns}" get pvc "${_name}" -o jsonpath='{.metadata.uid}' 2>&1 >/dev/null)" || true
+        case "${_msg}" in
+            *NotFound*|*"not found"*) return 1 ;;   # 确认不存在 → 属于旧集群残留
+            *) return 2 ;;                          # API/RBAC/SSH 失败 → 无法判断
+        esac
+    fi
+    [ "${_cur}" = "${_uid}" ]
+}
+
+_ceph_storage_node_preflight() {
+    local _hn _ip _user _free _min_gb _clean _pf_fail=0 _raw _sz _dir _stale_mb _stale_list
+    local _cur_rc _free_rc _dp_rc
+    _min_gb="${CEPH_NODE_MIN_FREE_GB:-20}"
+    case "${_min_gb}" in ''|*[!0-9]*) _min_gb=20 ;; esac
+    _clean="${CEPH_CLEAN_STALE_LOCAL_PATH:-true}"
+    say "[1.5/8] 存储节点预检: 根盘空间 / DiskPressure / 陈旧 local-path 数据 ..."
+    for _hn in "${CEPH_NODE_HOSTS[@]}"; do
+        _ip=""
+        _user="${SSH_USER:-ubuntu}"
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            node_parse "${line}"
+            [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; _user="${NODE_USER}"; break; }
+        done
+        if [ -z "${_ip}" ]; then
+            err "  ${_hn}: 在 NODES 中找不到该主机, 无法执行存储预检"
+            err "        检查 CEPH_NODES/CEPH_NODE_ROLE 与 NODES 的 hostname 是否一致"
+            _pf_fail=1
+            continue
+        fi
+        _free=""
+        _free_rc=0
+        _free="$(_ceph_node_free_gb "${_ip}" "${_user}")" || _free_rc=$?
+        if [ "${_free_rc}" -ne 0 ]; then
+            err "  ${_hn}: 无法读取根盘可用空间(df 失败/SSH 异常), 不能确认空间充足"
+            _pf_fail=1
+            continue
+        fi
+        _stale_mb=0
+        _stale_list=""
+        # du -sm 输出 "MB<TAB>path"; 只处理上个集群残留(当前集群无同 UID PVC)
+        _raw="$(node_ssh "${_ip}" "${_user}" "timeout 60 sudo du -sm /opt/local-path-provisioner/pvc-*" 2>/dev/null || true)"
+        while IFS=$'\t' read -r _sz _dir; do
+            [ -n "${_dir}" ] || continue
+            case "${_sz}" in ''|*[!0-9]*) _sz=0 ;; esac
+            _cur_rc=0
+            _ceph_stale_local_path_is_current "$(basename "${_dir}")" || _cur_rc=$?
+            if [ "${_cur_rc}" -eq 2 ]; then
+                err "  ${_hn}: 无法确认 ${_dir} 是否属于当前集群(PVC 查询失败), 跳过清理"
+                _pf_fail=1
+                continue
+            elif [ "${_cur_rc}" -eq 0 ]; then
+                continue
+            fi
+            _stale_mb=$((_stale_mb + _sz))
+            _stale_list="${_stale_list}${_stale_list:+, }${_dir}(${_sz}MB)"
+        done <<< "${_raw}"
+        if [ "${_stale_mb}" -gt 0 ]; then
+            if [ "${_clean}" = "true" ]; then
+                warn "  ${_hn}: 发现 ${_stale_mb}MB 陈旧 local-path 数据, CEPH_CLEAN_STALE_LOCAL_PATH=true → 删除 ..."
+                while IFS=$'\t' read -r _sz _dir; do
+                    [ -n "${_dir}" ] || continue
+                    _cur_rc=0
+                    _ceph_stale_local_path_is_current "$(basename "${_dir}")" || _cur_rc=$?
+                    if [ "${_cur_rc}" -eq 2 ]; then
+                        err "    ${_hn}: 无法确认 ${_dir} 的 PVC 状态(查询失败), 跳过删除"
+                        _pf_fail=1
+                        continue
+                    elif [ "${_cur_rc}" -eq 0 ]; then
+                        continue
+                    fi
+                    # 安全门: 仍被挂载的目录绝不删除(可能是当前/外部正在使用的卷)
+                    if node_ssh "${_ip}" "${_user}" "mount | command grep -qF '${_dir}'" >/dev/null 2>&1; then
+                        warn "    ${_hn}: ${_dir} 仍被挂载, 跳过(不清理)"
+                        continue
+                    fi
+                    node_ssh "${_ip}" "${_user}" "sudo rm -rf --one-file-system -- '${_dir}'" >/dev/null 2>&1 \
+                        || warn "    ${_hn}: 删除失败 ${_dir}(可能被进程占用; 重启节点后重试)"
+                done <<< "${_raw}"
+                _free_rc=0
+                _free="$(_ceph_node_free_gb "${_ip}" "${_user}")" || _free_rc=$?
+                if [ "${_free_rc}" -ne 0 ]; then
+                    err "  ${_hn}: 清理后无法读取根盘可用空间(df 失败/SSH 异常)"
+                    _pf_fail=1
+                    continue
+                fi
+            else
+                err "  ${_hn}: 根盘有 ${_stale_mb}MB 陈旧 local-path 数据(上个集群残留): ${_stale_list}"
+                err "        当前集群没有同 UID 的 PVC; 它会占用根盘并触发 kubelet DiskPressure → mon 被驱逐、OSD 被跳过"
+                err "        处置: 设 CEPH_CLEAN_STALE_LOCAL_PATH=true 重跑 --steps ceph 自动删除,"
+                err "              或手工清理: ssh <node> 'sudo rm -rf /opt/local-path-provisioner/pvc-*' (先确认无在用 PVC)"
+                _pf_fail=1
+            fi
+        fi
+        # 清理后 kubelet 需要一点时间撤 DiskPressure taint; 有界等待
+        _dp_rc=0
+        _ceph_node_has_disk_pressure "${_hn}" || _dp_rc=$?
+        if [ "${_dp_rc}" -eq 2 ]; then
+            err "  ${_hn}: 无法读取节点 DiskPressure 状态(API/SSH 查询失败), 不能确认可调度"
+            _pf_fail=1
+            continue
+        elif [ "${_dp_rc}" -eq 0 ]; then
+            for _w in $(seq 1 24); do
+                _dp_rc=0
+                _ceph_node_has_disk_pressure "${_hn}" || _dp_rc=$?
+                [ "${_dp_rc}" -eq 0 ] || break
+                sleep 5
+            done
+            if [ "${_dp_rc}" -eq 2 ]; then
+                err "  ${_hn}: 等待期间无法读取节点 DiskPressure 状态"
+                _pf_fail=1
+                continue
+            fi
+        fi
+        if [ "${_dp_rc}" -eq 0 ]; then
+            err "  ${_hn}: 仍有 DiskPressure taint(node.kubernetes.io/disk-pressure)"
+            err "        处理: 释放根盘空间后重跑; 排查: ssh <node> 'df -h /; sudo du -sh /opt/local-path-provisioner /var/lib/containerd /var/log'"
+            _pf_fail=1
+        elif [ -n "${_free}" ] && awk -v f="${_free}" -v m="${_min_gb}" 'BEGIN{exit !(f < m)}'; then
+            err "  ${_hn}: 根盘可用 ${_free}GiB < 阈值 ${_min_gb}GiB(CEPH_NODE_MIN_FREE_GB)"
+            err "        处理: 清理陈旧 local-path / containerd / 日志, 或扩大磁盘; 释放后重跑"
+            _pf_fail=1
+        else
+            ok "  ${_hn}: 根盘可用 ${_free:-?}GiB, 无 DiskPressure"
+        fi
+    done
+    if [ "${_pf_fail}" = "1" ]; then
+        err "Ceph 部署前预检失败: 存储节点磁盘压力/空间不足; 不进入 Ceph 部署(避免 mon 被驱逐/OSD 被跳过/HEALTH_WARN 白等)"
+        exit 1
+    fi
+    ok "存储节点预检通过"
+}
+if [ "${_CEPH_SKIP_CLUSTER:-0}" != "1" ]; then
+    _ceph_storage_node_preflight
+    if [ "${CEPH_PREFLIGHT_ONLY:-false}" = "true" ]; then
+        ok "CEPH_PREFLIGHT_ONLY=true → 预检完成, 跳过后续部署"
+        exit 0
+    fi
+fi
 
 # ---------------- 3) 醒目提醒 + sleep(防覆盖磁盘 double-check) ----------------
 say "[2/8] 部署前安全确认 ..."
@@ -816,6 +1041,12 @@ else
                     [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
                 done
                 [ -n "${_ip}" ] || continue
+                # 无盘存储节点: 该节点不会创建 OSD, 7a-② 无盘可擦; 直接跳过。
+                # (旧代码在 set -u 下展开 NODE_DISKS[无盘节点] 会 unbound variable 中断部署)
+                if [ -z "${NODE_DISKS[${_hn}]:-}" ]; then
+                    warn "  ${_hn}: 无可用裸盘, 跳过 7a-② 擦除(不会创建 OSD)"
+                    continue
+                fi
                 for _d in ${NODE_DISKS[${_hn}]//,/ }; do
                     say "  wipe ${_hn} ${_d}(官方 zap-device 清 label 副本 + 头/分区表/尾, 逐处校验)..."
                     # ⚠ 2026-10-13 实机修复: 内层 `bash -c` 是**独立子壳** —— 外层 `bash -s` 里
@@ -977,16 +1208,19 @@ rm -f "${LOCAL_CR}"
     #   "phase=Ready 即 toolbox 可用" 假设才成立。
     say "  重启 toolbox 并确认 ceph CLI 可用(旧集群 keyring 不会自动刷新)..."
     SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-tools >/dev/null 2>&1" || true
+    _tb_wait="${CEPH_TOOLBOX_WAIT_SECONDS:-300}"
+    case "${_tb_wait}" in ''|*[!0-9]*) _tb_wait=300 ;; esac
+    _tb_tries=$(( _tb_wait / 5 )); [ "${_tb_tries}" -ge 1 ] || _tb_tries=1
     _TB_OK=0
-    for _ti in $(seq 1 24); do
+    for _ti in $(seq 1 "${_tb_tries}"); do
         if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s >/dev/null 2>&1"; then
             _TB_OK=1; break
         fi
         sleep 5
     done
     [ "${_TB_OK}" = "1" ] && ok "  toolbox ceph CLI 可用" \
-        || warn "  toolbox 120s 内 ceph -s 仍不可用(集群仍会继续等待; 状态行可能显示 health=unknown) —— 可手工: kubectl -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-tools"
-    unset _TB_OK _ti
+        || warn "  toolbox ${_tb_wait}s 内 ceph -s 仍不可用(集群仍会继续等待; 状态行可能显示 health=unknown) —— 可手工: kubectl -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-tools"
+    unset _TB_OK _ti _tb_wait _tb_tries
 
     # 等待 CephCluster Ready + HEALTH_OK(最长 900s; 备份恢复认领旧 OSD 数据比新建更慢)
     # 每 10s 轮询; Ready 后经 toolbox 执行 ceph -s 提取关键行(health/mon/osd/pgs),
@@ -995,6 +1229,8 @@ rm -f "${LOCAL_CR}"
     CLUSTER_OK=0
     _CEPH_TUNED=0   # 阈值预调优标记(第一次 phase=Ready 时设, 避免 clock skew 卡等待)
     _CEPH_OSD_RETRIED=0   # 0-OSD 自愈一次性标记(见下方 2026-10-14 修复)
+    _OSD_SHORT_STREAK=0   # OSD 不足连续观测次数(仅在 OSD 数不再增加时累加)
+    _OSD_LAST_N=0         # 上一轮观测到的 OSD 数(用于识别仍在启动)
     for i in $(seq 1 90); do
         _ph="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster rook-ceph -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
         if [ "${_ph}" = "Ready" ]; then
@@ -1009,7 +1245,24 @@ rm -f "${LOCAL_CR}"
                     ceph config set mon mon_clock_drift_allowed 1.5 >/dev/null 2>&1" || true
                 SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
                     ceph config set osd osd_memory_target $((CEPH_OSD_MEMORY_TARGET * 1024 * 1024 * 1024)) >/dev/null 2>&1" || true
-                _CEPH_TUNED=1
+                # 池默认副本数跟随 CEPH_POOL_REPLICAS: 2-OSD 小集群需显式设 2, 否则 Ceph 默认
+                # osd_pool_default_size=3 → 恒 HEALTH_WARN(TOO_FEW_OSDS)。min_size 同步。
+                # ★ 只有两项都真正生效才置 _CEPH_TUNED=1: toolbox 在 phase=Ready 瞬间可能尚不可用,
+                #   旧实现在失败时也标记已调优 → 2 副本集群停在默认 size=3, 白等 900s 才告警
+                #   (CodeRabbit 2026-11-11)。未生效则保持 0, 下一轮重试。
+                _pool_tuned=0
+                if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
+                    ceph config set global osd_pool_default_size ${CEPH_POOL_REPLICAS} >/dev/null 2>&1"; then
+                    if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
+                        ceph config set global osd_pool_default_min_size ${CEPH_POOL_MIN_SIZE} >/dev/null 2>&1"; then
+                        _pool_tuned=1
+                    fi
+                fi
+                if [ "${_pool_tuned}" = "1" ]; then
+                    _CEPH_TUNED=1
+                else
+                    warn "  池副本配置(size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE})未生效, 下一轮重试 ..."
+                fi
             fi
             _CEPH_SUM="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null" || true) )"
             # ★★ 2026-09-24 事故修复(部署中断的直接原因): 下面每个 grep 都必须带 `|| true`。
@@ -1026,10 +1279,65 @@ rm -f "${LOCAL_CR}"
             #   短暂 HEALTH_OK(此时还没有 PG/OSD 状态)。旧逻辑据此提前放行 → 实际 0 OSD,
             #   继而 registry PVC 永久 Pending / rbd ls 挂起 / 整轮 --fresh 失败。
             #   就绪判据必须是 HEALTH_OK **且 OSD>0**。
-            if [ "${_hl}" = "HEALTH_OK" ] && [ "${_osd_n:-0}" -gt 0 ] 2>/dev/null; then
-                ok "  Ceph 集群 HEALTH_OK(${_osd_n} OSD)"
+            # 就绪判据: HEALTH_OK 且 OSD 数 >= 配置的池副本数(CEPH_POOL_REPLICAS)。
+            # 旧判据只要求 OSD>0: Rook 在 OSD 刚 in、尚未更新 health 的瞬间可能短暂 HEALTH_OK,
+            # 随后因 "OSD count 2 < osd_pool_default_size 3" 变 HEALTH_WARN, 旧逻辑提前放行,
+            # 后面的 clock-skew/daemon 滚动等待再空等 600s(2026-11-11 实机)。
+            _pool_n="${CEPH_POOL_REPLICAS:-3}"
+            if [ "${_hl}" = "HEALTH_OK" ] && [ "${_osd_n:-0}" -ge "${_pool_n}" ] 2>/dev/null; then
+                ok "  Ceph 集群 HEALTH_OK(${_osd_n} OSD, pool size ${_pool_n})"
                 CLUSTER_OK=1
                 break
+            fi
+            # ★ 2026-11-11(CodeRabbit): OSD 是逐个起来的 —— 新建 3-OSD 集群在第一个 OSD
+            #   in 时 ceph 就会报 "1 < osd_pool_default_size 3"(TOO_FEW_OSDS), 此时其余
+            #   prepare 可能仍在进行。旧逻辑首次观测即 exit 1, 会把正常启动误判为永久不足。
+            #   现在: OSD 数仍在增加 → 重置计数继续等; 只有"连续 >=60s 无增长 + 已无
+            #   prepare 在跑"才提前失败, 否则继续轮询(最长仍受 900s 上限约束)。
+            _osd_short=0
+            if [ "${_osd_n:-0}" -ge 1 ] 2>/dev/null && [ "${_osd_n:-0}" -lt "${_pool_n}" ] 2>/dev/null \
+                && printf '%s' "${_CEPH_SUM}" | grep -qE 'TOO_FEW_OSDS|OSD count [0-9]+ < osd_pool_default_size'; then
+                _osd_short=1
+            fi
+            if [ "${_osd_n:-0}" -gt "${_OSD_LAST_N:-0}" ] 2>/dev/null; then
+                _OSD_LAST_N="${_osd_n:-0}"
+                _OSD_SHORT_STREAK=0
+            elif [ "${_osd_short}" = "1" ]; then
+                _OSD_SHORT_STREAK=$(( ${_OSD_SHORT_STREAK:-0} + 1 ))
+            else
+                _OSD_SHORT_STREAK=0
+            fi
+            if [ "${_osd_short}" = "1" ] && [ "${_OSD_SHORT_STREAK:-0}" -ge 6 ]; then
+                _prep_rc=0
+                _prep_json="$(SSH "${K}" -n ${CEPH_NAMESPACE} get pods -o json 2>/dev/null)" || _prep_rc=$?
+                if [ "${_prep_rc}" -ne 0 ]; then
+                    say "  OSD 不足(${_osd_n}/${_pool_n})但无法读取 prepare 状态(查询失败), 继续等待"
+                else
+                    _prep_busy="$(printf '%s' "${_prep_json}" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for p in d.get("items", []):
+    n = (p.get("metadata") or {}).get("name", "")
+    ph = (p.get("status") or {}).get("phase", "")
+    if "osd-prepare" in n and ph in ("Pending", "Running"):
+        print(n)
+' || true)"
+                    if [ -n "${_prep_busy}" ]; then
+                        say "  OSD 不足(${_osd_n}/${_pool_n})但 prepare 仍在进行(${_prep_busy%%$'\n'*}); 继续等待"
+                    else
+                        err "  Ceph 只有 ${_osd_n} 个 OSD < 池副本数 ${_pool_n}(osd_pool_default_size): 集群不会 HEALTH_OK"
+                        err "  已连续 ${_OSD_SHORT_STREAK} 轮(约 $(( _OSD_SHORT_STREAK * 10 ))s)无增长且无 prepare 在跑"
+                        err "  常见根因: 某存储节点 DiskPressure/taint → Rook 跳过该节点 OSD(mon 也可能被驱逐)"
+                        err "  核对: kubectl -n ${CEPH_NAMESPACE} get pods -o wide; kubectl -n ${CEPH_NAMESPACE} logs deploy/rook-ceph-operator | grep -E 'skipping creation of OSDs|placement settings do not match'"
+                        err "  处置(二选一):"
+                        err "    ① 释放/清理该节点根盘后重跑 --steps ceph(推荐, 恢复 ${_pool_n} 副本);"
+                        err "    ② 明确接受 ${_osd_n} 副本: cluster.conf 设 CEPH_POOL_REPLICAS=${_osd_n} CEPH_POOL_MIN_SIZE=1 后重跑"
+                        exit 1
+                    fi
+                fi
             fi
             if [ "${i}" -eq 1 ] || [ $((i % 3)) -eq 0 ]; then
                 # 同上: 每个 grep 都带 `|| true`(set -e + pipefail 下无匹配会致命; 这几行只在
@@ -1150,6 +1458,25 @@ rm -f "${LOCAL_CR}"
         # 真实偏差由 chrony 持续收敛(见 setup-ntp.sh makestep 1 1 秒级对齐)。)
         say "  设置 mon clock skew 阈值=1.5s(默认 0.05s 过严, VM 初始偏差 0.5~1.2s 实测)..."
         SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set mon mon_clock_drift_allowed 1.5 >/dev/null 2>&1" || true
+        # ★ 池副本配置同样兜底(CodeRabbit 2026-11-11): 等待循环里 toolbox 若始终不可用,
+        #   _CEPH_TUNED 会保持 0。不能带着 Ceph 默认 osd_pool_default_size=3 继续 —— 少 OSD
+        #   集群会持续 TOO_FEW_OSDS/降级。两项都成功才完成; 仍失败则硬失败, 不再静默继续。
+        _pool_tuned=0
+        if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
+            ceph config set global osd_pool_default_size ${CEPH_POOL_REPLICAS} >/dev/null 2>&1"; then
+            if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
+                ceph config set global osd_pool_default_min_size ${CEPH_POOL_MIN_SIZE} >/dev/null 2>&1"; then
+                _pool_tuned=1
+            fi
+        fi
+        if [ "${_pool_tuned}" = "1" ]; then
+            _CEPH_TUNED=1
+        else
+            err "  Ceph 池副本配置未能应用(size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE}); 不继续"
+            err "        默认 size=3 会让少 OSD 集群持续降级; 处置: 确认 toolbox 可用后重跑 --steps ceph"
+            err "        排查: kubectl -n ${CEPH_NAMESPACE} get deploy rook-ceph-tools; kubectl -n ${CEPH_NAMESPACE} logs deploy/rook-ceph-tools --tail=50"
+            exit 1
+        fi
     fi
     # ★ 清残留 clock skew 告警(2026-09-05 事故): 时间已同步但 ceph 仍报 MON_CLOCK_SKEW ——
     #   chrony 收敛前记录的 skew 被 mon 缓存, timecheck 不会自动重采样刷新(恒定值如 1.233s)。

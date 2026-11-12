@@ -133,6 +133,18 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     exit 0
 fi
 
+# ★ 2026-11-11 复发修复: --fresh/覆盖安装**不经过**上面的 uninstall 分支, 旧 local-path
+#   registry 目录不会被清。实机: master03 上残留 65G pvc-*_kube-system_registry-pvc,
+#   根盘 15G free < kubelet 驱逐阈值 → DiskPressure → mon-c 被驱逐、该节点 OSD 被 Rook 跳过
+#   → 2 OSD < osd_pool_default_size=3 → Ceph 永远 HEALTH_WARN(TOO_FEW_OSDS)。
+#   安装路径也做同一安全清理(仅当新 registry 后端不是 local-path; UID/挂载检查在函数内)。
+#   注: Ceph 在 02 模块先于本模块运行, 该清理对 Ceph 已太晚; 02_ceph 的存储节点预检
+#   (CEPH_CLEAN_STALE_LOCAL_PATH, 默认 true)会在 Ceph 部署前做同类清理。
+if [ "${REGISTRY_STORAGE_CLASS:-local-path}" != "local-path" ]; then
+    init_remote_kubectl || exit 1
+    _cleanup_orphan_registry_localpath
+fi
+
 # 开关: 默认不部署, REGISTRY_ENABLED=1/true 或 --steps/--enable 显式启用
 if [ "${REGISTRY_ENABLED:-0}" != "1" ] && [ "${REGISTRY_ENABLED:-false}" != "true" ]; then
     say "跳过内置 registry(集群内 registry 默认不部署, 配置 REGISTRY_ENABLED=true 可启用)"
