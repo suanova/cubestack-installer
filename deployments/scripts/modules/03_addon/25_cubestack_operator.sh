@@ -334,6 +334,41 @@ REG_BASE="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT:-5000}"
 REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-5000}}"
 _EXTRA_VALUES=()          # 额外 values 文件(-f)
 _CR_VALUES=()             # clusterCR 相关 --set
+
+# 升级场景的监控 PVC 守护(2026-11-11 CodeRabbit): chart values 里的 master nodeSelector
+# 会在 operator 调和时**立即**生效; 若 Prometheus/Alertmanager 的 local-path PVC 已绑在
+# worker, 34_node_pool 的 PVC 守护来不及阻止 → 新 Pod volume node affinity conflict Pending。
+# 返回 0=可以钉 master(无 PVC / 无 hostname 亲和 / master 绑定); 1=不钉(worker 绑定或无法确认)。
+_cb_mon_pvc_allows_master() {   # <pod-name> <pvc-name-substring>
+    local _pod="$1" _hint="$2" _pod_json _pvc_list _msg _pvcs _rc=0 _prc=0
+    _pod_json="$(SSH "${K}" -n monitoring get pod "${_pod}" -o json 2>/dev/null)" || _rc=$?
+    if [ "${_rc}" -eq 0 ]; then
+        _pvcs="$(printf '%s' "${_pod_json}" | placement_pod_pvcs)" || _prc=$?
+        if [ "${_prc}" -eq 2 ]; then
+            warn "  monitoring: ${_pod} JSON 解析失败, 保守不下发 master placement"; return 1
+        fi
+    else
+        _msg="$(SSH "${K}" -n monitoring get pod "${_pod}" -o json 2>&1 >/dev/null)" || true
+        case "${_msg}" in
+            *NotFound*|*"not found"*)
+                # Pod 尚未创建(或已缩容): 按 PVC 名前缀查已有卷
+                _pvc_list="$(SSH "${K}" -n monitoring get pvc -o name 2>/dev/null)" || {
+                    warn "  monitoring: 无法读取 PVC 列表, 保守不下发 master placement"; return 1; }
+                _pvcs="$(printf '%s\n' "${_pvc_list}" | sed 's#.*/##' | grep -F "${_hint}" || true)"
+                ;;
+            *) warn "  monitoring: 无法读取 ${_pod} 绑定信息, 保守不下发 master placement"; return 1 ;;
+        esac
+    fi
+    [ -n "${_pvcs}" ] || return 0
+    _rc=0
+    placement_pvc_worker_bound monitoring ${_pvcs} >/dev/null || _rc=$?
+    case "${_rc}" in
+        0) warn "  monitoring: 已有 PVC 绑定 worker, 不下发 master placement(${_hint})"; return 1 ;;
+        2) warn "  monitoring: PVC 绑定状态无法确认, 保守不下发 master placement(${_hint})"; return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 # 两模式共用的基础 values: 空=chart 默认 tag; 非空=显式/release 默认 tag。
 _BASE_SET_ARGS=( "${_TAG_SET_ARGS[@]}" )
 
@@ -546,6 +581,29 @@ if [ "${CR_ENABLED}" = "true" ]; then
             --set "clusterCR.spec.global.imagePullPolicy=Always"
         )
     fi
+    # 平台组件 placement: 统一走 CubeStackCluster.spec.global 注入(创建时生效, 新组件自动覆盖)。
+    # ⚠ 依赖 operator 构建包含 "global 注入排除 DaemonSet"(2026-11-12 的 454590af… 及之后);
+    #   旧构建会把 node-exporter 等全节点 DaemonSet 也钉到 master。全局字段无法按组件剔除 ——
+    #   监控 PVC 已绑 worker/无法确认时不注入, 交由 node_pool 的 PVC 守护逐组件兜底,
+    #   避免 Prometheus/Alertmanager Pending。
+    if [ "${NODE_POOL_CUBESTACK_PLACEMENT:-true}" = "true" ]; then
+        _mon_prom_ok=1; _mon_am_ok=1
+        _cb_mon_pvc_allows_master "prometheus-kube-prometheus-kube-prome-prometheus-0" \
+            "prometheus-kube-prometheus-kube-prome-prometheus" || _mon_prom_ok=0
+        _cb_mon_pvc_allows_master "alertmanager-kube-prometheus-kube-prome-alertmanager-0" \
+            "alertmanager-kube-prometheus-kube-prome-alertmanager" || _mon_am_ok=0
+        if [ "${_mon_prom_ok}" = "1" ] && [ "${_mon_am_ok}" = "1" ]; then
+            _CR_VALUES+=(
+                --set-json 'clusterCR.spec.global.nodeSelector={"node-role.kubernetes.io/control-plane":""}'
+                --set-json 'clusterCR.spec.global.tolerations=[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]'
+            )
+            say "  平台组件 placement: 通过 CR spec.global 注入"
+        else
+            warn "  监控 PVC 已绑 worker/无法确认 → 不下发 global placement; 由 node_pool 的 PVC 守护兜底"
+        fi
+        unset _mon_prom_ok _mon_am_ok
+    fi
+
     # 模型 bundles 开关(2026-10-20 用户口径; 单步 --steps cubestack_operator 与全量部署共用):
     #   CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED 默认 true = **不覆盖** chart 默认的
     #   spec.bundles(全部 8 个) / components.modelBundles(开启), 推理目录开箱可用;
@@ -813,48 +871,9 @@ _WORK="$(mktemp -d)"
 trap '_cleanup; rm -rf "${_WORK}"' EXIT
 
 # 节点池(2026-10-27): operator pod 自身钉 master + 容忍 control-plane/unschedulable。
-# 平台组件：cubepilot-api/operator、cubestack-controller-manager、cubestack-portal、
-# envoy-gateway、ai-gateway 等 **组件 chart 原生支持 nodeSelector/tolerations**，这里通过
-# CubeStackCluster 的 components.<name>.values 在**创建 Deployment 时**就下发（不依赖部署末尾 patch）。
-# 其余平台组件(cuberouter)仍由 node_pool 模块的 cubestack-placement.sh 兜底
-# (monitoring/Perses 这里已尽量在创建时下发；Perses server 是 observability 资产,
-# 没有 values 注入路径 → placement 直接 patch 其 CR spec)；
-# **不使用** CR spec.global 的 placement 字段 ——
-# 它会注入到所有组件(含 model bundle 推理负载)。
-#
-# 升级场景的监控 PVC 守护(2026-11-11 CodeRabbit): chart values 里的 master nodeSelector
-# 会在 operator 调和时**立即**生效; 若 Prometheus/Alertmanager 的 local-path PVC 已绑在
-# worker, 34_node_pool 的 PVC 守护来不及阻止 → 新 Pod volume node affinity conflict Pending。
-# 返回 0=可以钉 master(无 PVC / 无 hostname 亲和 / master 绑定); 1=不钉(worker 绑定或无法确认)。
-_cb_mon_pvc_allows_master() {   # <pod-name> <pvc-name-substring>
-    local _pod="$1" _hint="$2" _pod_json _pvc_list _msg _pvcs _rc=0 _prc=0
-    _pod_json="$(SSH "${K}" -n monitoring get pod "${_pod}" -o json 2>/dev/null)" || _rc=$?
-    if [ "${_rc}" -eq 0 ]; then
-        _pvcs="$(printf '%s' "${_pod_json}" | placement_pod_pvcs)" || _prc=$?
-        if [ "${_prc}" -eq 2 ]; then
-            warn "  monitoring: ${_pod} JSON 解析失败, 保守不下发 master placement"; return 1
-        fi
-    else
-        _msg="$(SSH "${K}" -n monitoring get pod "${_pod}" -o json 2>&1 >/dev/null)" || true
-        case "${_msg}" in
-            *NotFound*|*"not found"*)
-                # Pod 尚未创建(或已缩容): 按 PVC 名前缀查已有卷
-                _pvc_list="$(SSH "${K}" -n monitoring get pvc -o name 2>/dev/null)" || {
-                    warn "  monitoring: 无法读取 PVC 列表, 保守不下发 master placement"; return 1; }
-                _pvcs="$(printf '%s\n' "${_pvc_list}" | sed 's#.*/##' | grep -F "${_hint}" || true)"
-                ;;
-            *) warn "  monitoring: 无法读取 ${_pod} 绑定信息, 保守不下发 master placement"; return 1 ;;
-        esac
-    fi
-    [ -n "${_pvcs}" ] || return 0
-    _rc=0
-    placement_pvc_worker_bound monitoring ${_pvcs} >/dev/null || _rc=$?
-    case "${_rc}" in
-        0) warn "  monitoring: 已有 PVC 绑定 worker, 不下发 master placement(${_hint})"; return 1 ;;
-        2) warn "  monitoring: PVC 绑定状态无法确认, 保守不下发 master placement(${_hint})"; return 1 ;;
-        *) return 0 ;;
-    esac
-}
+# 平台组件的 placement 统一走 CubeStackCluster.spec.global(见 [3/6] 的 _CR_VALUES),
+# 不再逐组件写 values —— 创建时即生效, 新组件自动覆盖; 监控 PVC 例外时不下发 global,
+# 由 node_pool 的 PVC 守护逐组件兜底。
 if [ "${NODE_POOL_CUBESTACK_PLACEMENT:-true}" = "true" ]; then
     _NODE_POOL_VALUES="${_WORK}/node-pool-values.yaml"
     cat > "${_NODE_POOL_VALUES}" <<'EOF'
@@ -867,183 +886,7 @@ tolerations:
   - key: node.kubernetes.io/unschedulable
     operator: Exists
     effect: NoSchedule
-
-# 平台组件：通过 component values 传给各自 chart（chart 已原生支持）。
-# cubepilot-chart: operator/api/web；controller-manager/portal chart: 顶层。
-clusterCR:
-  spec:
-    components:
-      cubepilot:
-        values:
-          operator:
-            nodeSelector:
-              node-role.kubernetes.io/control-plane: ""
-            tolerations:
-              - key: node-role.kubernetes.io/control-plane
-                operator: Exists
-                effect: NoSchedule
-              - key: node.kubernetes.io/unschedulable
-                operator: Exists
-                effect: NoSchedule
-          api:
-            nodeSelector:
-              node-role.kubernetes.io/control-plane: ""
-            tolerations:
-              - key: node-role.kubernetes.io/control-plane
-                operator: Exists
-                effect: NoSchedule
-              - key: node.kubernetes.io/unschedulable
-                operator: Exists
-                effect: NoSchedule
-          web:
-            nodeSelector:
-              node-role.kubernetes.io/control-plane: ""
-            tolerations:
-              - key: node-role.kubernetes.io/control-plane
-                operator: Exists
-                effect: NoSchedule
-              - key: node.kubernetes.io/unschedulable
-                operator: Exists
-                effect: NoSchedule
-      cubestackControllerManager:
-        values:
-          nodeSelector:
-            node-role.kubernetes.io/control-plane: ""
-          tolerations:
-            - key: node-role.kubernetes.io/control-plane
-              operator: Exists
-              effect: NoSchedule
-            - key: node.kubernetes.io/unschedulable
-              operator: Exists
-              effect: NoSchedule
-      cubestackPortal:
-        values:
-          nodeSelector:
-            node-role.kubernetes.io/control-plane: ""
-          tolerations:
-            - key: node-role.kubernetes.io/control-plane
-              operator: Exists
-              effect: NoSchedule
-            - key: node.kubernetes.io/unschedulable
-              operator: Exists
-              effect: NoSchedule
-      # Envoy Gateway 控制面：gateway-helm 的 Pod 调度字段在 deployment.pod.*
-      # (deployment.envoyGateway.* 只是容器设置，写错会静默不生效)。
-      # 在创建 Deployment 时下发，避免 node_pool 兜底 patch 与 operator 异步创建/
-      # 后续调和之间的竞态（实机: controller 已存在但 patch 时还没创建 → 留在 worker）。
-      envoyGateway:
-        values:
-          deployment:
-            pod:
-              nodeSelector:
-                node-role.kubernetes.io/control-plane: ""
-              tolerations:
-                - key: node-role.kubernetes.io/control-plane
-                  operator: Exists
-                  effect: NoSchedule
-                - key: node.kubernetes.io/unschedulable
-                  operator: Exists
-                  effect: NoSchedule
-      # Envoy AI Gateway 控制器：ai-gateway-helm 的调度字段在 controller.*
-      # (与 envoy-gateway 的 deployment.pod.* 不同)。安装命名空间由 operator catalog
-      # 固定为 ai-gateway-system。
-      aiGateway:
-        values:
-          controller:
-            nodeSelector:
-              node-role.kubernetes.io/control-plane: ""
-            tolerations:
-              - key: node-role.kubernetes.io/control-plane
-                operator: Exists
-                effect: NoSchedule
-              - key: node.kubernetes.io/unschedulable
-                operator: Exists
-                effect: NoSchedule
-      # Prometheus(kube-prometheus-stack)：Prometheus/Alertmanager 的 STS 由 CR 调和,
-      # 调度字段在 *.prometheusSpec / *.alertmanagerSpec; 其余是 chart 自身的 Deployment。
-      # ★ 不写 prometheus-node-exporter：它是 DaemonSet, 必须覆盖全节点。
-      prometheus:
-        values:
-          prometheusOperator:
-            nodeSelector:
-              node-role.kubernetes.io/control-plane: ""
-            tolerations:
-              - key: node-role.kubernetes.io/control-plane
-                operator: Exists
-                effect: NoSchedule
-              - key: node.kubernetes.io/unschedulable
-                operator: Exists
-                effect: NoSchedule
-          prometheus:
-            prometheusSpec:
-              # __CB_PLACEMENT_PROMETHEUS__ (已有 worker local-path PVC 时整段删除)
-              nodeSelector:
-                node-role.kubernetes.io/control-plane: ""
-              # __CB_PLACEMENT_PROMETHEUS_END__
-              tolerations:
-                - key: node-role.kubernetes.io/control-plane
-                  operator: Exists
-                  effect: NoSchedule
-                - key: node.kubernetes.io/unschedulable
-                  operator: Exists
-                  effect: NoSchedule
-          alertmanager:
-            alertmanagerSpec:
-              # __CB_PLACEMENT_ALERTMANAGER__ (已有 worker local-path PVC 时整段删除)
-              nodeSelector:
-                node-role.kubernetes.io/control-plane: ""
-              # __CB_PLACEMENT_ALERTMANAGER_END__
-              tolerations:
-                - key: node-role.kubernetes.io/control-plane
-                  operator: Exists
-                  effect: NoSchedule
-                - key: node.kubernetes.io/unschedulable
-                  operator: Exists
-                  effect: NoSchedule
-          grafana:
-            nodeSelector:
-              node-role.kubernetes.io/control-plane: ""
-            tolerations:
-              - key: node-role.kubernetes.io/control-plane
-                operator: Exists
-                effect: NoSchedule
-              - key: node.kubernetes.io/unschedulable
-                operator: Exists
-                effect: NoSchedule
-          kube-state-metrics:
-            nodeSelector:
-              node-role.kubernetes.io/control-plane: ""
-            tolerations:
-              - key: node-role.kubernetes.io/control-plane
-                operator: Exists
-                effect: NoSchedule
-              - key: node.kubernetes.io/unschedulable
-                operator: Exists
-                effect: NoSchedule
-      # Perses operator manager；Perses server CR 见 cubestack-placement.sh 的 CR patch。
-      perses:
-        values:
-          manager:
-            nodeSelector:
-              node-role.kubernetes.io/control-plane: ""
-            tolerations:
-              - key: node-role.kubernetes.io/control-plane
-                operator: Exists
-                effect: NoSchedule
-              - key: node.kubernetes.io/unschedulable
-                operator: Exists
-                effect: NoSchedule
 EOF
-    # 升级场景: 已有 Prometheus/Alertmanager PVC 若绑在 worker, 从 values 中删掉对应
-    # master nodeSelector(tolerations 保留); 其余组件不受影响。
-    _mon_prom_ok=1; _mon_am_ok=1
-    _cb_mon_pvc_allows_master "prometheus-kube-prometheus-kube-prome-prometheus-0" \
-        "prometheus-kube-prometheus-kube-prome-prometheus" || _mon_prom_ok=0
-    _cb_mon_pvc_allows_master "alertmanager-kube-prometheus-kube-prome-alertmanager-0" \
-        "alertmanager-kube-prometheus-kube-prome-alertmanager" || _mon_am_ok=0
-    [ "${_mon_prom_ok}" = "1" ] || sed -i '/__CB_PLACEMENT_PROMETHEUS__/,/__CB_PLACEMENT_PROMETHEUS_END__/d' "${_NODE_POOL_VALUES}"
-    [ "${_mon_am_ok}" = "1" ] || sed -i '/__CB_PLACEMENT_ALERTMANAGER__/,/__CB_PLACEMENT_ALERTMANAGER_END__/d' "${_NODE_POOL_VALUES}"
-    unset _mon_prom_ok _mon_am_ok
     _EXTRA_VALUES+=( -f "${_NODE_POOL_VALUES}" )
 fi
 

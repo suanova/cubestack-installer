@@ -349,22 +349,19 @@ chk_contains "HA 例外: lws 保持单副本(CPU)" 'clusterCR.spec.components.lw
 chk_contains "活体 CR 组件 HA 例外纠偏" 'CR 组件 HA 例外已收敛' "${MOD}"
 chk_contains "Deployment 副本数纠偏" 'scale deploy ${_DEP_NAME} --replicas=${OP_REPLICAS}' "${MOD}"
 
-echo "== ⑭ 默认平台组件 master placement(chart values 透传, 不改组件 chart) =="
-# 2026-10-27: cubepilot-api/operator、controller-manager、portal 的 chart 已原生支持
-# nodeSelector/tolerations；operator 模块通过 CubeStackCluster components.<name>.values
-# 在创建 Deployment 时下发，不依赖 node_pool 的兜底 patch。
-for k in 'cubepilot:' 'cubestackControllerManager:' 'cubestackPortal:' 'envoyGateway:' 'aiGateway:'; do
-    chk_contains "CR component ${k}" "$(printf '      %s' "${k}")" "${MOD}"
-done
-# envoy-gateway 的 Pod 调度在 deployment.pod.*（写 deployment.envoyGateway.* 会静默不生效）
-chk_block "envoyGateway native pod placement path" "$(printf '      envoyGateway:\n        values:\n          deployment:\n            pod:')" "${MOD}"
-# ai-gateway-helm 的 Pod 调度在 controller.*
-chk_block "aiGateway native pod placement path" "$(printf '      aiGateway:\n        values:\n          controller:')" "${MOD}"
-for k in 'operator:' 'api:' 'web:'; do
-    chk_contains "cubepilot subcomponent ${k}" "$(printf '          %s' "${k}")" "${MOD}"
-done
-chk_contains "CR values nodeSelector" 'node-role.kubernetes.io/control-plane: ""' "${MOD}"
-chk_contains "CR values unschedulable toleration" 'node.kubernetes.io/unschedulable' "${MOD}"
+echo "== ⑭ 平台组件 master placement(CR spec.global 注入, 不再逐组件) =="
+# 2026-11-12: 统一通过 CubeStackCluster.spec.global.nodeSelector/tolerations 注入;
+# 新版 operator 对 DaemonSet 不做注入(node-exporter 等全节点组件不受影响)。
+# 监控 PVC 已绑 worker/无法确认时不下发 global, 由 node_pool 的 PVC 守护逐组件兜底。
+chk_contains "CR global nodeSelector" 'clusterCR.spec.global.nodeSelector={"node-role.kubernetes.io/control-plane":""}' "${MOD}"
+chk_contains "CR global tolerations" 'clusterCR.spec.global.tolerations=[' "${MOD}"
+chk_contains "monitoring PVC 守卫决定是否注入" '_cb_mon_pvc_allows_master' "${MOD}"
+chk_contains "global 注入日志" '通过 CR spec.global 注入' "${MOD}"
+chk_not_contains "不再写 cubepilot values" 'clusterCR.spec.components.cubepilot' "${MOD}"
+chk_not_contains "不再写 envoyGateway values" 'clusterCR.spec.components.envoyGateway' "${MOD}"
+chk_not_contains "不再写 aiGateway values" 'clusterCR.spec.components.aiGateway' "${MOD}"
+chk_not_contains "不再写 prometheus values" 'clusterCR.spec.components.prometheus' "${MOD}"
+chk_not_contains "不再写 perses values" 'clusterCR.spec.components.perses' "${MOD}"
 chk_contains "defaults NODE_POOL_ENABLED=true" 'NODE_POOL_ENABLED="${NODE_POOL_ENABLED:-true}"' "${DEFAULTS}"
 chk_contains "defaults NODE_POOL_MASTER_CORDON=false" 'NODE_POOL_MASTER_CORDON="${NODE_POOL_MASTER_CORDON:-false}"' "${DEFAULTS}"
 chk_contains "defaults NODE_POOL_MASTER_SCHEDULABLE=true" 'NODE_POOL_MASTER_SCHEDULABLE="${NODE_POOL_MASTER_SCHEDULABLE:-true}"' "${DEFAULTS}"
@@ -421,8 +418,8 @@ echo "== ⑯ monitoring chart values 的 PVC 绑定守卫 =="
 # master nodeSelector 会让新 Pod 直接 Pending(34_node_pool 的守护来不及生效)。
 sed -n '/^_cb_mon_pvc_allows_master() {/,/^}/p' "${MOD}" > "${TMP}/fn-mon-pvc.sh"
 chk "⑯ 守卫函数已定义" "1" "$([ -s "${TMP}/fn-mon-pvc.sh" ] && echo 1 || echo 0)"
-chk_contains "⑯ prometheus values 有守卫标记" "__CB_PLACEMENT_PROMETHEUS__" "${MOD}"
-chk_contains "⑯ alertmanager values 有守卫标记" "__CB_PLACEMENT_ALERTMANAGER__" "${MOD}"
+chk_contains "⑯ 监控 PVC 守卫接入 global 注入" '_mon_prom_ok' "${MOD}"
+chk_contains "⑯ PVC 例外时不下发 global" "不下发 global placement" "${MOD}"
 chk_contains "⑯ 无 Pod 时按 PVC 前缀兜底" "get pvc -o name" "${MOD}"
 cat > "${TMP}/mon-guard-run.sh" <<'EOS'
 #!/bin/bash
