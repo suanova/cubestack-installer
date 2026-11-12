@@ -85,7 +85,7 @@ _probe="$(cat <<'PROBE'
 ceph_mnts=$(timeout 5 findmnt -t ceph,rbd -n -o TARGET,FSTYPE 2>/dev/null | head -5)
 # D 状态进程(ps 只读 /proc, 不触碰挂载); 按**可执行名**排除 rsync(rsyncd),
 # 不能按整行过滤 —— 否则 `dpkg --unpack /…/rsync/…deb` 这类参数含 rsync 的目标进程会被漏掉。
-stuck=$(timeout 5 ps -eo pid,stat,etime,comm,args 2>/dev/null | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|fuser/ && $4 !~ /^rsync/' | head -3)
+stuck=$(timeout 5 ps -eo pid,stat,etime,comm,args 2>/dev/null | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|fuser/ && $4 !~ /^rsync(d)?$/' | head -3)
 n_rbd=$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ')
 # ★ 修复的唯一判据 = 逐挂载健康检查: 只有读不出(ls 失败)的 ceph/rbd 挂载才算"存储不健康"。
 #   不能把任意 D 状态进程当作存储不健康(2026-11-04 CodeRabbit) —— 否则会卸载/解映射正在使用的健康卷。
@@ -278,7 +278,7 @@ _ceph_mnts="$(timeout 5 findmnt -t ceph,rbd -n -o TARGET,FSTYPE 2>/dev/null | he
 # 同一误匹配规则(CodeRabbit 2026-11-11): 只按可执行名排除 rsync/rsyncd ——
 # 不能按整行过滤, 否则参数里含 "rsync" 的 dpkg/ceph 进程会被漏掉。
 _stuck="$(timeout 5 ps -eo pid,stat,etime,comm,args 2>/dev/null \
-    | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|sync|fuser/ && $4 !~ /^rsync/' | head -3 || true)"
+    | awk '$2 ~ /^D/ && /rbd|ceph|mdadm|initramfs|dpkg|sync|fuser/ && $4 !~ /^rsync(d)?$/' | head -3 || true)"
 _n_rbd="$(ls -1 /sys/bus/rbd/devices 2>/dev/null | wc -l | tr -d ' ' || true)"
 # ★ 2026-11-11: D 状态检查必须在 fuser **之前**。旧顺序先跑 `timeout 5 fuser ...`:
 #   节点上已有 rbd remove D 状态时, fuser 遍历 /proc 撞上卡死挂载/设备, 自己也进 D 态,
