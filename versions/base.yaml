@@ -310,7 +310,7 @@ images:
 - key: dev-lab:harbor.isuanova.com/suanova/cpu-pytorch
   source_ref: harbor.isuanova.com/suanova/cpu-pytorch
   version: ${DEV_LAB_CPU_TAG}
-  digest: sha256:70cde6e5bd74bb7576706862478a50d950e2c37aafd349cf43d7875bc248a905
+  digest: sha256:f51bef4c716fc748305028de8b12162d581f2157083a9953b9ff4e9072b55729
   dest: offline-files/dev-lab
   tar: cpu-pytorch.tar
   optional: true
