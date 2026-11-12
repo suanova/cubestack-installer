@@ -38,6 +38,10 @@ installer 只读这棵树，不关心它由哪种打包流程生成。
 sudo ./deploy-cluster.sh --release 2.1.0
 # 等价于 cluster.conf: CUBESTACK_RELEASE="2.1.0"（+ 可选 CUBESTACK_RELEASE_ROOT）
 
+# 2.1 完整包: 如果 <root>/<ver>/cubestack-<ver>.meta.tar.zst 存在,
+# deploy 会先解包 meta + 选中的 payload 包, 再走 release 模式。
+sudo ./deploy-cluster.sh --release 2.1.0 --with-packages models,dev-lab
+
 # 方式二：直接把版本树的 offline-files/ 挂到默认位置
 #   deployments/offline-files/release.env 存在即自动进入 release 模式
 sudo ./deploy-cluster.sh --with-cubestack
