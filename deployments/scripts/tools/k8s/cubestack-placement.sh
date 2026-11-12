@@ -23,8 +23,8 @@
 # 用法:
 #   sudo ./cubestack-placement.sh --apply
 #   sudo ./cubestack-placement.sh --check
-#   sudo ./cubestack-placement.sh --remove   # 同时清理 CubeStackCluster components.*.values
-#                                            # 中持久化的 master nodeSelector(防调和/升级恢复)
+#   sudo ./cubestack-placement.sh --remove   # 同时清理 CubeStackCluster spec.global /
+#                                            # components.*.values 中持久化的 master placement
 # ============================================================
 set -euo pipefail
 
@@ -450,9 +450,10 @@ sys.exit(0 if ok else 1)
 }
 
 # 清理 CubeStackCluster 内由 25_cubestack_operator.sh 持久化的组件 placement。
-# 背景(2026-11-11 CodeRabbit): 只 patch 工作负载/CR 不够 —— components.<name>.values 里
-#   仍存着 master nodeSelector, 后续组件调和/升级会把它重新带回。这里只删除 installer
-#   写入的 control-plane key, 保留用户自定义 selector 与全部 tolerations(与 patch 回滚口径一致)。
+# 背景(2026-11-11 CodeRabbit): 只 patch 工作负载/CR 不够 —— 持久化的调度字段会让后续
+# 组件调和/升级重新带回。当前安装器用 spec.global 注入(2026-11-12), 这里同时清理
+# spec.global.nodeSelector/tolerations; components.<name>.values 的清理保留作旧版本兼容。
+# 只删除 installer 写入的 key / toleration, 保留用户自定义条目(与 patch 回滚口径一致)。
 _cb_clear_cr_component_placement() {
     local _ns="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
     local _json _rc=0 _msg _out _name _patch
@@ -508,6 +509,26 @@ for path in PATHS:
     for k in ("spec", "components") + path:
         node = node.setdefault(k, {})
     node[KEY] = None
+# spec.global: 当前安装器的注入位置(2026-11-12); 只删 installer 条目, 保留用户键。
+INSTALLER = [
+    {"key": KEY, "operator": "Exists", "effect": "NoSchedule"},
+    {"key": "node.kubernetes.io/unschedulable", "operator": "Exists", "effect": "NoSchedule"},
+]
+INST_SIG = {(t["key"], t["operator"], t["effect"]) for t in INSTALLER}
+glob = (cr.get("spec") or {}).get("global")
+if isinstance(glob, dict):
+    gsel = glob.get("nodeSelector")
+    if isinstance(gsel, dict) and KEY in gsel:
+        patch.setdefault("spec", {}).setdefault("global", {}).setdefault("nodeSelector", {})[KEY] = None
+    gtols = glob.get("tolerations")
+    if isinstance(gtols, list):
+        sigs = {(t.get("key"), t.get("operator"), t.get("effect"))
+                for t in gtols if isinstance(t, dict)}
+        if sigs & INST_SIG:
+            kept = [t for t in gtols
+                    if not (isinstance(t, dict) and
+                            (t.get("key"), t.get("operator"), t.get("effect")) in INST_SIG)]
+            patch.setdefault("spec", {}).setdefault("global", {})["tolerations"] = kept
 print(json.dumps({"name": (cr.get("metadata") or {}).get("name", ""), "patch": patch}))
 ' 2>/dev/null)" || {
         err "  [${_ns}/csc] 解析失败, 未清理 CR 内组件 placement"; FAILED=1; return 1; }

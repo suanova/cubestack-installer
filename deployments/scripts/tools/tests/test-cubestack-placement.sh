@@ -291,7 +291,7 @@ cat > "${TMP}/bin-csc/ssh" <<'FAKE'
 cmd="$*"
 case "${cmd}" in
     *"get csc -o json"*)
-        echo '{"items":[{"metadata":{"name":"cubestack"},"spec":{"components":{"cubepilot":{"values":{"operator":{"nodeSelector":{"node-role.kubernetes.io/control-plane":"","user-selector":"keep"}}}},"prometheus":{"values":{"grafana":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""}}}}}}}]}' ;;
+        echo '{"items":[{"metadata":{"name":"cubestack"},"spec":{"global":{"nodeSelector":{"node-role.kubernetes.io/control-plane":"","user-global":"keep"},"tolerations":[{"key":"user-global","operator":"Exists","effect":"NoSchedule"},{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]},"components":{"cubepilot":{"values":{"operator":{"nodeSelector":{"node-role.kubernetes.io/control-plane":"","user-selector":"keep"}}}},"prometheus":{"values":{"grafana":{"nodeSelector":{"node-role.kubernetes.io/control-plane":""}}}}}}}]}' ;;
     *"patch csc "*) cat > "${FAKE_PATCH_STDIN:?}"; exit 0 ;;
     *" -o json"*) echo '{"spec":{}}' ;;
 esac
@@ -315,6 +315,9 @@ chk_contains "⑪ patch 只删 control-plane key" '"node-role.kubernetes.io/cont
 chk_contains "⑪ patch 覆盖 cubepilot" '"cubepilot"' "${patch_json}"
 chk_contains "⑪ patch 覆盖 grafana" '"grafana"' "${patch_json}"
 chk_not_contains "⑪ 不动用户自定义 selector" 'user-selector' "${patch_json}"
+chk_contains "⑪ patch 清理 global selector key" '"global":{"nodeSelector":{"node-role.kubernetes.io/control-plane":null}' "${patch_json}"
+chk_contains "⑪ global 保留用户 toleration" '"key":"user-global"' "${patch_json}"
+chk_not_contains "⑪ global 移除 installer toleration" '"key":"node.kubernetes.io/unschedulable"' "${patch_json}"
 
 echo "== ⑫ apply 合并现有 tolerations(不得整体替换) =="
 mkdir -p "${TMP}/bin-tol"
