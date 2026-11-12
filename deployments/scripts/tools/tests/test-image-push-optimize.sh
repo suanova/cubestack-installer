@@ -120,6 +120,12 @@ chk_contains "36 使用并行 runner" "parallel_run" "${M36}"
 chk_contains "37 使用并行 runner" "parallel_run" "${M37}"
 chk_contains "36 初始化 push 参数" "image_push_args_init" "${M36}"
 chk_contains "37 初始化 push 参数" "image_push_args_init" "${M37}"
+chk_contains "37 拒绝覆盖内容不同的已有 tag" "拒绝覆盖" "${M37}"
+if grep -qF '不相等即推送' "${M37}"; then
+    echo "  FAIL 37 仍保留无条件推送逻辑"; fail=1
+else
+    echo "  ok  37 不再无条件推送"
+fi
 
 echo "== ⑥ 默认值声明 =="
 chk_contains "默认层级并发" 'IMAGE_PUSH_PARALLEL_LAYERS="${IMAGE_PUSH_PARALLEL_LAYERS:-4}"' "${DEFAULTS}"
