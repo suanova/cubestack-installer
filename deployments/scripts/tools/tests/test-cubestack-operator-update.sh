@@ -465,6 +465,58 @@ rc=0; _run_mon 0 "" pod404 || rc=$?; chk "⑯ Pod 不存在但 PVC 绑 worker �
 rc=0; _run_mon 1 "" apifail || rc=$?; chk "⑯ 查询失败 → 保守不下发" "1" "${rc}"
 rc=0; _run_mon 1 "PARSE_FAIL" podok || rc=$?; chk "⑯ Pod JSON 解析失败 → 保守不下发" "1" "${rc}"
 
+echo "== ⑰ global placement 按 operator 构建身份门禁 =="
+# 只有内容(config) digest 在 allowlist 内的构建才下发 spec.global(该构建含 DaemonSet 排除)。
+sed -n '/^_operator_global_placement_ok() {/,/^}/p' "${MOD}" > "${TMP}/fn-gp.sh"
+chk "⑰ 门禁函数已定义" "1" "$([ -s "${TMP}/fn-gp.sh" ] && echo 1 || echo 0)"
+chk_contains "⑰ 采集 operator 内容 digest" '_OPERATOR_CONTENT_DIGEST' "${MOD}"
+chk_contains "⑰ 未知构建跳过 global" "构建未确认支持 global" "${MOD}"
+chk_contains "⑰ defaults 默认 auto" 'CUBESTACK_OPERATOR_GLOBAL_PLACEMENT="${CUBESTACK_OPERATOR_GLOBAL_PLACEMENT:-auto}"' "${DEFAULTS}"
+chk_contains "⑰ defaults 已知构建 digest" 'sha256:74ead8' "${DEFAULTS}"
+_gp_rc() { ( source "${TMP}/fn-gp.sh"; _operator_global_placement_ok "$1" "$2" "$3" ); echo $?; }
+chk "⑰ auto + allowlist 内 digest → 允许" "0" "$(_gp_rc auto sha256:good sha256:old,sha256:good)"
+chk "⑰ auto + 旧构建 digest → 跳过" "1" "$(_gp_rc auto sha256:old sha256:good)"
+chk "⑰ auto + 未知 digest → 跳过" "1" "$(_gp_rc auto "" sha256:good)"
+chk "⑰ true 强制允许" "0" "$(_gp_rc true "" "")"
+chk "⑰ false 禁止" "1" "$(_gp_rc false sha256:good sha256:good)"
+chk "⑰ 非法 mode → 跳过" "1" "$(_gp_rc bogus sha256:good sha256:good)"
+
+echo "== ⑱ global placement 检查 cubestack-system/cuberouter/monitoring 全部 PVC =="
+# cuberouter 的 app-data/app-logs、cubepilot-api-data、CNPG/Redis 等卷同样不能跨节点;
+# global 字段无法按组件剔除, 任一 PVC 绑 worker/无法确认时整批不下发。
+chk_contains "⑱ 通用 PVC 守护" "_cb_global_pvc_allows_master" "${MOD}"
+chk_contains "⑱ 覆盖 cuberouter 命名空间" "cubestack-system cuberouter monitoring" "${MOD}"
+sed -n '/^_cb_global_pvc_allows_master() {/,/^}/p' "${MOD}" > "${TMP}/fn-gp-pvc.sh"
+chk "⑱ 函数已定义" "1" "$([ -s "${TMP}/fn-gp-pvc.sh" ] && echo 1 || echo 0)"
+cat > "${TMP}/gp-pvc-run.sh" <<'EOS'
+#!/bin/bash
+set -uo pipefail
+_CB_GLOBAL_PVC_NAMESPACES=(cubestack-system cuberouter monitoring)
+# shellcheck disable=SC1090
+source "${FN_GP_PVC:?}"
+K="sudo kubectl"
+warn(){ :; }
+SSH(){
+    case "${MODE:-ok}" in
+        fail)
+            case "$*" in *"get pvc -o name"*) echo "Error from server: connection refused" >&2; return 1;; esac ;;
+        nsfail)
+            case "$*" in *"get pvc -o name"*) echo 'Error from server (NotFound): namespaces "x" not found' >&2; return 1;; esac ;;
+    esac
+    case "$*" in *"get pvc -o name"*) printf 'persistentvolumeclaim/app-data\npersistentvolumeclaim/app-logs\n';; esac
+    return 0
+}
+placement_pvc_worker_bound(){ case "${BOUND:-1}" in 0) return 0;; 2) return 2;; *) return 1;; esac; }
+_cb_global_pvc_allows_master
+EOS
+chmod +x "${TMP}/gp-pvc-run.sh"
+_gp_pvc() { FN_GP_PVC="${TMP}/fn-gp-pvc.sh" MODE="${2:-ok}" BOUND="$1" bash "${TMP}/gp-pvc-run.sh"; }
+rc=0; _gp_pvc 0 || rc=$?; chk "⑱ worker 绑定 → 不下发" "1" "${rc}"
+rc=0; _gp_pvc 1 || rc=$?; chk "⑱ 全部安全 → 下发" "0" "${rc}"
+rc=0; _gp_pvc 2 || rc=$?; chk "⑱ 绑定未知 → 不下发" "1" "${rc}"
+rc=0; _gp_pvc 1 fail || rc=$?; chk "⑱ PVC 列表查询失败 → 不下发" "1" "${rc}"
+rc=0; _gp_pvc 1 nsfail || rc=$?; chk "⑱ 命名空间不存在 → 跳过" "0" "${rc}"
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-cubestack-operator-update: 全部通过"

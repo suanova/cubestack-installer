@@ -335,6 +335,21 @@ REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_POR
 _EXTRA_VALUES=()          # 额外 values 文件(-f)
 _CR_VALUES=()             # clusterCR 相关 --set
 
+# global placement 的构建门禁: 0=允许(所选 operator 构建已确认包含 DaemonSet 排除), 1=不允许。
+_operator_global_placement_ok() {   # <mode> <content-digest> <allowlist>
+    local mode="$1" digest="$2" list="$3" d
+    case "${mode}" in
+        true)  return 0 ;;
+        false) return 1 ;;
+        auto|"")
+            for d in ${list//,/ }; do
+                [ -n "${d}" ] && [ "${digest}" = "${d}" ] && return 0
+            done
+            return 1 ;;
+        *) return 1 ;;
+    esac
+}
+
 # 升级场景的监控 PVC 守护(2026-11-11 CodeRabbit): chart values 里的 master nodeSelector
 # 会在 operator 调和时**立即**生效; 若 Prometheus/Alertmanager 的 local-path PVC 已绑在
 # worker, 34_node_pool 的 PVC 守护来不及阻止 → 新 Pod volume node affinity conflict Pending。
@@ -367,6 +382,36 @@ _cb_mon_pvc_allows_master() {   # <pod-name> <pvc-name-substring>
         2) warn "  monitoring: PVC 绑定状态无法确认, 保守不下发 master placement(${_hint})"; return 1 ;;
         *) return 0 ;;
     esac
+}
+
+# global placement 的通用 PVC 守护: spec.global 会作用于所有平台组件, 任一组件 PVC 已绑
+# worker(local-path)或无法确认时都不能下发 —— 包括 cuberouter 的 app-data/app-logs、
+# cubepilot-api-data、Prometheus/Alertmanager/Perses 以及 CR 管理的 CNPG/Redis 卷。
+# 直接按命名空间扫描已存在的 PVC, 不依赖组件/卷名清单。
+# 返回 0=可以下发 global; 1=不下发(已告警)。
+_CB_GLOBAL_PVC_NAMESPACES=(cubestack-system cuberouter monitoring)
+_cb_global_pvc_allows_master() {
+    local _ns _out _rc _msg _names _bound _prc
+    for _ns in "${_CB_GLOBAL_PVC_NAMESPACES[@]}"; do
+        _rc=0
+        _out="$(SSH "${K}" -n "${_ns}" get pvc -o name 2>/dev/null)" || _rc=$?
+        if [ "${_rc}" -ne 0 ]; then
+            _msg="$(SSH "${K}" -n "${_ns}" get pvc -o name 2>&1 >/dev/null)" || true
+            case "${_msg}" in
+                *NotFound*|*"not found"*|*"No resources found"*) continue ;;
+                *) warn "  ${_ns}: 无法读取 PVC 列表, 不下发 global placement"; return 1 ;;
+            esac
+        fi
+        _names="$(printf '%s\n' "${_out}" | sed 's#.*/##' | grep -v '^$' || true)"
+        [ -n "${_names}" ] || continue
+        _prc=0
+        _bound="$(placement_pvc_worker_bound "${_ns}" ${_names})" || _prc=$?
+        case "${_prc}" in
+            0) warn "  ${_ns}: PVC ${_bound} 绑定 worker, 不下发 global placement"; return 1 ;;
+            2) warn "  ${_ns}: PVC 绑定状态无法确认, 不下发 global placement"; return 1 ;;
+        esac
+    done
+    return 0
 }
 
 # 两模式共用的基础 values: 空=chart 默认 tag; 非空=显式/release 默认 tag。
@@ -581,29 +626,6 @@ if [ "${CR_ENABLED}" = "true" ]; then
             --set "clusterCR.spec.global.imagePullPolicy=Always"
         )
     fi
-    # 平台组件 placement: 统一走 CubeStackCluster.spec.global 注入(创建时生效, 新组件自动覆盖)。
-    # ⚠ 依赖 operator 构建包含 "global 注入排除 DaemonSet"(2026-11-12 的 454590af… 及之后);
-    #   旧构建会把 node-exporter 等全节点 DaemonSet 也钉到 master。全局字段无法按组件剔除 ——
-    #   监控 PVC 已绑 worker/无法确认时不注入, 交由 node_pool 的 PVC 守护逐组件兜底,
-    #   避免 Prometheus/Alertmanager Pending。
-    if [ "${NODE_POOL_CUBESTACK_PLACEMENT:-true}" = "true" ]; then
-        _mon_prom_ok=1; _mon_am_ok=1
-        _cb_mon_pvc_allows_master "prometheus-kube-prometheus-kube-prome-prometheus-0" \
-            "prometheus-kube-prometheus-kube-prome-prometheus" || _mon_prom_ok=0
-        _cb_mon_pvc_allows_master "alertmanager-kube-prometheus-kube-prome-alertmanager-0" \
-            "alertmanager-kube-prometheus-kube-prome-alertmanager" || _mon_am_ok=0
-        if [ "${_mon_prom_ok}" = "1" ] && [ "${_mon_am_ok}" = "1" ]; then
-            _CR_VALUES+=(
-                --set-json 'clusterCR.spec.global.nodeSelector={"node-role.kubernetes.io/control-plane":""}'
-                --set-json 'clusterCR.spec.global.tolerations=[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]'
-            )
-            say "  平台组件 placement: 通过 CR spec.global 注入"
-        else
-            warn "  监控 PVC 已绑 worker/无法确认 → 不下发 global placement; 由 node_pool 的 PVC 守护兜底"
-        fi
-        unset _mon_prom_ok _mon_am_ok
-    fi
-
     # 模型 bundles 开关(2026-10-20 用户口径; 单步 --steps cubestack_operator 与全量部署共用):
     #   CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED 默认 true = **不覆盖** chart 默认的
     #   spec.bundles(全部 8 个) / components.modelBundles(开启), 推理目录开箱可用;
@@ -671,6 +693,7 @@ if [ -n "${CUBESTACK_RELEASE:-}" ]; then
 fi
 say "  operator 镜像: ${_OP_IMAGE}"
 _OPERATOR_DIGEST=""
+_OPERATOR_CONTENT_DIGEST=""
 
 if [ "${ONLINE_DEPLOY}" = "true" ]; then
     # 在线部署: 不推集群 registry —— 镜像按 chart 定义从 ${HARBOR_HOST} 直接拉([6/6] 不覆盖
@@ -679,6 +702,7 @@ if [ "${ONLINE_DEPLOY}" = "true" ]; then
     # 在线模式也要取 operator digest 写 podAnnotations: 仅 Always 不会重启运行中的旧 pod,
     # 同 :latest 新镜像必须靠模板注解变化触发滚动(2026-10-19 修复)。
     _OPERATOR_DIGEST="$(_digest "docker://${_OP_IMAGE}")"
+    _OPERATOR_CONTENT_DIGEST="$(_content_digest "docker://${_OP_IMAGE}")"
     [ -n "${_OPERATOR_DIGEST}" ] \
         || warn "  在线模式未取到 operator 镜像 digest(检查 Harbor 凭据/网络); 将用 rollout restart 兜底"
 else
@@ -761,6 +785,7 @@ for _img in "${SRC_IMAGES[@]}"; do
     # 精确采集 operator 镜像的 target digest(用于 podAnnotations); 多镜像 chart 时不能用最后一个。
     if [ "${_img}" = "${_OP_IMAGE}" ]; then
         _OPERATOR_DIGEST="${_d_dst}"
+        _OPERATOR_CONTENT_DIGEST="${_c_src}"
     fi
     TARGET_REFS+=("${_dst_ref}")
 done
@@ -862,6 +887,37 @@ fi
 _reroll_stuck_pods ${TARGET_REFS[@]+"${TARGET_REFS[@]}"} ${_PLATFORM_REFS[@]+"${_PLATFORM_REFS[@]}"}
 
 fi   # 结束 ONLINE_DEPLOY!=true 的离线推送块([4/6]+[4b/6])
+
+# ---------------- [4c/6] 平台组件 global placement(按 operator 构建身份门禁) ----------------
+# 只有确认所选 operator 镜像包含 "global 注入排除 DaemonSet" 才下发 spec.global;
+# 旧构建会把 node-exporter 等全节点 DaemonSet 钉到 master。构建身份 = 内容(config) digest。
+if [ "${CR_ENABLED}" = "true" ] && [ "${NODE_POOL_CUBESTACK_PLACEMENT:-true}" = "true" ]; then
+    _GP_MODE="${CUBESTACK_OPERATOR_GLOBAL_PLACEMENT:-auto}"
+    if _operator_global_placement_ok "${_GP_MODE}" "${_OPERATOR_CONTENT_DIGEST:-}" \
+            "${CUBESTACK_OPERATOR_GLOBAL_PLACEMENT_DIGESTS:-}"; then
+        _mon_prom_ok=1; _mon_am_ok=1
+        _cb_mon_pvc_allows_master "prometheus-kube-prometheus-kube-prome-prometheus-0" \
+            "prometheus-kube-prometheus-kube-prome-prometheus" || _mon_prom_ok=0
+        _cb_mon_pvc_allows_master "alertmanager-kube-prometheus-kube-prome-alertmanager-0" \
+            "alertmanager-kube-prometheus-kube-prome-alertmanager" || _mon_am_ok=0
+        if [ "${_mon_prom_ok}" = "1" ] && [ "${_mon_am_ok}" = "1" ] \
+            && _cb_global_pvc_allows_master; then
+            EXTRA_CR_VALUES_ARG+=(
+                --set-json 'clusterCR.spec.global.nodeSelector={"node-role.kubernetes.io/control-plane":""}'
+                --set-json 'clusterCR.spec.global.tolerations=[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}]'
+            )
+            say "  平台组件 placement: 通过 CR spec.global 注入(operator digest ${_OPERATOR_CONTENT_DIGEST:0:19}...)"
+        else
+            warn "  PVC 绑定不允许 global placement(worker 绑定/无法确认); 由 node_pool 的 PVC 守护兜底"
+        fi
+        unset _mon_prom_ok _mon_am_ok
+    else
+        warn "  operator 构建未确认支持 global 注入排除 DaemonSet(digest=${_OPERATOR_CONTENT_DIGEST:-未知}, mode=${_GP_MODE})"
+        warn "  → 跳过 global placement; 由 node_pool 的 PVC 守护逐组件兜底"
+        warn "  → 升级 operator 后把新构建的内容 digest 加入 CUBESTACK_OPERATOR_GLOBAL_PLACEMENT_DIGESTS"
+    fi
+    unset _GP_MODE
+fi
 
 # ---------------- [5/6] CRD 预应用(helm 的 crds/ 只在"CRD 不存在"时装) ----------------
 # README 明确: 已装过 operator 的集群升级前必须先 apply 新 CRD, 否则旧 CRD 会剪掉新字段。

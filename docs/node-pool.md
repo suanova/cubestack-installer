@@ -221,11 +221,15 @@ GPU worker 隔离在后续阶段单独做。`NODE_POOL_CUBESTACK_PLACEMENT=false
   `NODE_POOL_CUBESTACK_PLACEMENT=true` 时给 CubeStackCluster 设置
   `spec.global.nodeSelector` + `spec.global.tolerations`，operator 在**创建每个组件工作负载时**
   统一下发；新组件自动覆盖，不再逐组件写 values。
-  - 依赖 operator 构建包含“global 注入排除 DaemonSet”（2026-11-12 的 `454590af…` 及之后）。
-    旧构建会把 `prometheus-node-exporter` 等 DaemonSet 也钉到 master，导致 worker 指标丢失。
-  - **监控 PVC 例外**：若 Prometheus/Alertmanager 的 local-path PVC 已绑 worker（或无法确认），
-    全局字段无法只剔除这两个组件，此时**不下发** global，改由本模块的
-    `cubestack-placement.sh` 按组件 PVC 守护兜底。
+  - **构建门禁**：只有所选 operator 镜像的内容（config）digest 在
+    `CUBESTACK_OPERATOR_GLOBAL_PLACEMENT_DIGESTS` 内才下发 global（默认包含 2026-11-12 的
+    `454590af…` 构建，内容 digest `sha256:74ead8…`）。旧构建或无法识别的构建会跳过 global
+    并告警，由本模块的 PVC 守护逐组件兜底。`CUBESTACK_OPERATOR_GLOBAL_PLACEMENT=auto|true|false`
+    控制策略（默认 auto）。升级 operator 后需把新构建的内容 digest 追加到 allowlist。
+  - **PVC 门禁**：扫描 `cubestack-system` / `cuberouter` / `monitoring` 下所有已存在的 PVC
+    （含 cuberouter 的 `app-data`/`app-logs`、`cubepilot-api-data`、Prometheus/Alertmanager/Perses
+    以及 CNPG/Redis 卷）。任一 PVC 已绑 worker（local-path）或绑定无法确认时**不下发** global，
+    改由本模块的 `cubestack-placement.sh` 按组件 PVC 守护兜底，避免 Pending。
 - 其余场景（cuberouter、Perses server 等）仍由 `cubestack-placement.sh` 兜底 patch；
   Perses server CR 没有 values 注入路径，直接 patch CR spec（lws 由 `lws-cr-values.yaml`
   在创建时下发）。
@@ -246,6 +250,8 @@ GPU worker 隔离在后续阶段单独做。`NODE_POOL_CUBESTACK_PLACEMENT=false
 | `NODE_POOL_MASTER_SCHEDULABLE` | `true` | 是否移除 master 的 control-plane/master NoSchedule 污点（默认 true=可调度；false=保留 kubespray 默认污点） |
 | `NODE_POOL_PLATFORM_PLACEMENT` | `true` | 是否把 CoreDNS/metrics/registry/MetalLB 等系统组件也钉 master（`false`=只钉 CubeStack 平台组件） |
 | `NODE_POOL_CUBESTACK_PLACEMENT` | `true` | CubeStack operator/平台组件钉 master（CR `spec.global` 注入；监控 PVC 例外时回退 patch） |
+| `CUBESTACK_OPERATOR_GLOBAL_PLACEMENT` | `auto` | `auto`=仅 allowlist 内构建下发 global / `true`=强制 / `false`=禁用 |
+| `CUBESTACK_OPERATOR_GLOBAL_PLACEMENT_DIGESTS` | `sha256:74ead8…` | 含 DaemonSet 排除的 operator 内容（config）digest 白名单（逗号分隔） |
 | `NODE_POOL_PLACEMENT_WAIT_SECONDS` | `180` | placement 前等待 `CubeStackCluster.status` 组件状态收敛的上限（0=只查一次） |
 | `NODE_POOL_GPU_LABEL` | `node-pool=gpu` | 阶段二使用 |
 | `NODE_POOL_GPU_TAINT` | `dedicated=gpu:NoSchedule` | 阶段二使用 |
