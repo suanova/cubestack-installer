@@ -176,6 +176,16 @@ pass "materializer is idempotent"
 grep -q "pre-check passed" "${TMP}/pre.out" || fail "pre-check: local pass missing"
 pass "pre-check passes when packages exist"
 
+# Release trees place base.yaml at <tree>/base/base.yaml and do not carry
+# versions/; the lock must resolve from the installer checkout.
+mkdir -p "${TMP}/release/base"
+sed 's|versions/os/test.lock|versions/os/ubuntu-22.04.lock|' \
+    "${TMP}/baseline/versions/base.yaml" > "${TMP}/release/base/base.yaml"
+"${ONLINE}/check-os-packages.sh" --baseline "${TMP}/release/base/base.yaml" --dry-run \
+    >"${TMP}/pre-release.out" \
+    || fail "pre-check: release layout could not resolve packages_check"
+pass "pre-check resolves packages_check from the installer checkout"
+
 cat > "${TMP}/baseline/versions/os/test.lock" <<'EOF'
 schema: 1
 family: debian
