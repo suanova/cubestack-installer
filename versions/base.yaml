@@ -15,9 +15,9 @@ env:
   CEPH_VERSION: v20.2.2
   COREDNS_VERSION: v1.12.4
   CPA_VERSION: v1.10.3
-  DEV_LAB_CPU_TAG: py310-torch2.4-86a326f
-  DEV_LAB_CUDA_TAG: 26.08-86a326f
-  DEV_LAB_MACA_TAG: 3.9.0.12-py310-torch2.4-86a326f
+  DEV_LAB_CPU_TAG: py312-torch2.6-aecfb08
+  DEV_LAB_CUDA_TAG: 26.10-aecfb08
+  DEV_LAB_MACA_TAG: 3.8.5.2-py312-torch2.8-aecfb08
   DNS_NODE_CACHE_VERSION: 1.25.0
   ETCD_VERSION: v3.6.16
   K8S_VERSION: v1.35.8
@@ -310,21 +310,21 @@ images:
 - key: dev-lab:harbor.isuanova.com/suanova/cpu-pytorch
   source_ref: harbor.isuanova.com/suanova/cpu-pytorch
   version: ${DEV_LAB_CPU_TAG}
-  digest: sha256:f51bef4c716fc748305028de8b12162d581f2157083a9953b9ff4e9072b55729
+  digest: sha256:bb7910311cdc2f2b93853498791bf0d06fc5b25d876282a26311027746112622
   dest: offline-files/dev-lab
   tar: cpu-pytorch.tar
   optional: true
 - key: dev-lab:harbor.isuanova.com/suanova/maca-pytorch
   source_ref: harbor.isuanova.com/suanova/maca-pytorch
   version: ${DEV_LAB_MACA_TAG}
-  digest: sha256:f1831169bd24340b4f55338401210849c1c1c730173bc2cf19056b76e549136d
+  digest: sha256:95d38bd6c316202295be4df6f64531f7b632fd004d028fbadc79492ba78eb417
   dest: offline-files/dev-lab
   tar: maca-pytorch.tar
   optional: true
 - key: dev-lab:harbor.isuanova.com/suanova/cuda-pytorch
   source_ref: harbor.isuanova.com/suanova/cuda-pytorch
   version: ${DEV_LAB_CUDA_TAG}
-  digest: sha256:6b29792a65697aafe13fda5bacfaa4113b34ca659cf03857ced725c054721101
+  digest: sha256:21499a9d13a2f0026bc5794c850e17fe2dfa3b1eeed984238f2b3b0ffef351f5
   dest: offline-files/dev-lab
   tar: cuda-pytorch.tar
   optional: true
