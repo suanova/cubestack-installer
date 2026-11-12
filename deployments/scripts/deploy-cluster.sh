@@ -139,6 +139,7 @@ $(_component_meta_list stub)
   --release <版本>      使用已物化的版本树(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
                         版本变量以目录内 release.env 为准; 也可直接挂载版本树的 offline-files/
                         例: --release 2.1.0; 等价于 cluster.conf 的 CUBESTACK_RELEASE="2.1.0"
+  --with-packages <列表>  可选包(如 models,dev-lab,vendor); 若版本树有 meta tar, 安装前先解包
   --verify-offline[=auto|quick|full|off]
                         离线文件完整性校验强度(默认 quick: 结构/覆盖率, 不做整树深度;
                         auto = 全量部署首次 full+校验戳; full = 强制深度)。
@@ -182,6 +183,7 @@ STEPS_ARG=""; SKIP_ARG=""; ENABLE_ARG=""; PHASE_ARG=""; ENABLE_PERSIST_ARG=""
 SCALE_ONLY=0
 ONLY_HOSTS=""
 RELEASE_ARG=""
+RELEASE_PACKAGES_ARG=""
 VERIFY_OFFLINE_ARG=""
 NO_VERIFY_OFFLINE=0
 while [ $# -gt 0 ]; do
@@ -213,6 +215,7 @@ while [ $# -gt 0 ]; do
         # --release = 本次使用已物化的版本树(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
         #   须在 load_config 之前 export(load_config 读的是环境变量)
         --release)  RELEASE_ARG="${2:?--release 需要版本号(如 2.1.0)}"; shift 2 ;;
+        --with-packages) RELEASE_PACKAGES_ARG="${2:?--with-packages 需要包列表}"; shift 2 ;;
         # 离线文件完整性门禁: 默认 auto(首次 full, 之后走校验戳); 可强制 quick/full/off。
         --verify-offline) VERIFY_OFFLINE_ARG="auto"; shift ;;
         --verify-offline=) err "--verify-offline 需要取值(auto|quick|full|off)"; exit 1 ;;
@@ -236,6 +239,22 @@ fi
 if [ -n "${RELEASE_ARG:-}" ]; then
     export CUBESTACK_RELEASE="${RELEASE_ARG}"
     vlog "  --release ${RELEASE_ARG} → CUBESTACK_RELEASE(本机 cluster.conf 不变)"
+    # 2.1 完整包: 本地 meta + payload 先解包成 release 树。只消费本地文件。
+    _rel_root="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
+    _rel_dir="${_rel_root}/${RELEASE_ARG}"
+    _meta="${_rel_dir}/cubestack-${RELEASE_ARG}.meta.tar.zst"
+    if [ -f "${_meta}" ] && [ ! -f "${_rel_dir}/offline-files/release.env" ]; then
+        _tool="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tools/offline/release-packages.py"
+        _args=(--root "${_rel_dir}" --meta "${_meta}"
+               --meta-dir "${_rel_dir}/offline-files" --extract --seal)
+        if [ -n "${RELEASE_PACKAGES_ARG:-}" ]; then
+            _args+=(--with "${RELEASE_PACKAGES_ARG}")
+        fi
+        vlog "  解包本地 release 包: ${_meta}"
+        python3 "${_tool}" "${_args[@]}"
+        unset _args
+    fi
+    unset _rel_root _rel_dir _meta _tool
 fi
 # 展开 --only 中的 group 名: NODE_GROUP_<name> 定义在 cluster.conf 中
 if [ -n "${ONLY_HOSTS}" ]; then
