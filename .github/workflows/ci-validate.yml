@@ -150,6 +150,12 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-image-push-optimize.sh
 
+      # digest 推送助手: 输出 repo@digest / 内容幂等 / 参数校验
+      - name: digest 推送助手回归(push_image_digest)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-push-image-digest.sh
+
       # 额外私有模块目录: 默认行为不变 / 合并发现 / 重复文件与 key 拒绝
       - name: 额外私有模块目录回归(extra modules dirs)
         run: |
