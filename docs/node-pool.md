@@ -237,9 +237,9 @@ GPU worker 隔离在后续阶段单独做。`NODE_POOL_CUBESTACK_PLACEMENT=false
   apply 前按 `NODE_POOL_PLACEMENT_WAIT_SECONDS` 读取 `CubeStackCluster.status` 等待组件状态
   收敛（不再硬编码 Deployment 名单），避免首次 patch 因对象尚未出现而跳过。
 - **Ceph 监控重检**：监控组件就绪后，若 `servicemonitors.monitoring.coreos.com` 与
-  `rook-ceph` CephCluster 均存在，会给 CR 打 `cubestack.io/monitoring-recheck` 注解，触发
-  Rook 重新调和并生成 mgr/exporter 的 ServiceMonitor（Ceph 模块先于 kube-prometheus-stack
-  安装，创建 CR 时 CRD 可能尚未就绪）。
+  `rook-ceph` CephCluster 均存在但 ServiceMonitor 缺失，会重启 `rook-ceph-operator`
+  （CephCluster 更新谓词忽略纯 annotation，重启才会重新调和），并有界等待/确认
+  `rook-ceph-exporter`（或 `rook-ceph-mgr`）ServiceMonitor 生成。
 - `--remove` 会清理 `spec.global.nodeSelector/tolerations` 中 installer 写入的条目（保留用户
   自定义 key/toleration），并兼容清理旧版本写入的 `components.<name>.values`。
 

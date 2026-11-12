@@ -168,17 +168,40 @@ case "${_ACTION}" in
         init_remote_kubectl || exit 1
         _wait_for_platform_deployments
         # Rook 监控: ceph 模块先于 kube-prometheus-stack 安装, 创建 CephCluster 时
-        # ServiceMonitor CRD 可能尚不存在。监控组件就绪后给 CR 打一次注解触发 Rook 重新调和,
-        # 生成 mgr/ceph-exporter 的 ServiceMonitor(否则 Grafana Ceph 面板全部 No data)。
+        # ServiceMonitor CRD 可能尚不存在。CephCluster 的更新谓词**忽略纯 annotation 变更**,
+        # 所以不能靠打注解触发调和 —— 必须在 CRD 就绪后重启 Rook operator(启动时重新调和
+        # 所有 CephCluster), 并确认 ServiceMonitor 已生成。仅在缺失时重启, 避免每次打断。
         _ceph_ns="${CEPH_NAMESPACE:-rook-ceph}"
-        if SSH "${K}" get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1 \
-            && SSH "${K}" -n "${_ceph_ns}" get cephcluster rook-ceph >/dev/null 2>&1; then
-            if SSH "${K}" -n "${_ceph_ns}" annotate cephcluster rook-ceph \
-                    "cubestack.io/monitoring-recheck=$(date +%s)" --overwrite >/dev/null 2>&1; then
-                say "  Rook 监控: 已触发 CephCluster 重新调和(生成 ServiceMonitor)"
+        if SSH "timeout 10 ${K}" get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1 \
+            && SSH "timeout 10 ${K}" -n "${_ceph_ns}" get cephcluster rook-ceph >/dev/null 2>&1 \
+            && SSH "timeout 10 ${K}" -n "${_ceph_ns}" get deploy rook-ceph-operator >/dev/null 2>&1; then
+            _sm_now="$(SSH "timeout 10 ${K}" -n "${_ceph_ns}" get servicemonitor -o name --ignore-not-found 2>/dev/null || true)"
+            # `-o name` 实际输出带 group: servicemonitor.monitoring.coreos.com/<name>。
+            if printf '%s\n' "${_sm_now}" | grep -qE 'rook-ceph-(exporter|mgr)'; then
+                say "  Rook 监控: ServiceMonitor 已存在, 跳过 operator 重启"
             else
-                warn "  Rook 监控: 触发 CephCluster 重新调和失败"
+                say "  Rook 监控: 缺少 ServiceMonitor, 重启 rook-ceph-operator 触发调和..."
+                if SSH "timeout 60 ${K}" -n "${_ceph_ns}" rollout restart deploy/rook-ceph-operator >/dev/null 2>&1; then
+                    SSH "timeout 180 ${K}" -n "${_ceph_ns}" rollout status deploy/rook-ceph-operator --timeout=150s >/dev/null 2>&1 || true
+                    _sm_ok=0
+                    for _i in $(seq 1 24); do
+                        _sm_now="$(SSH "timeout 10 ${K}" -n "${_ceph_ns}" get servicemonitor -o name --ignore-not-found 2>/dev/null || true)"
+                        if printf '%s\n' "${_sm_now}" | grep -qE 'rook-ceph-(exporter|mgr)'; then
+                            _sm_ok=1; break
+                        fi
+                        sleep 5
+                    done
+                    if [ "${_sm_ok}" = "1" ]; then
+                        ok "  Rook 监控: ServiceMonitor 已生成"
+                    else
+                        warn "  Rook 监控: operator 重启后 120s 内未生成 ServiceMonitor; 检查 kubectl -n ${_ceph_ns} get servicemonitor,prometheusrule 与 operator 日志"
+                    fi
+                    unset _sm_ok
+                else
+                    warn "  Rook 监控: 重启 rook-ceph-operator 失败"
+                fi
             fi
+            unset _sm_now
         fi
         unset _ceph_ns
         if [ "${NODE_POOL_PLATFORM_PLACEMENT:-true}" = "true" ]; then
