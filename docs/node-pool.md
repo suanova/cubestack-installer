@@ -129,11 +129,11 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
   registry ReplicaSet 没有 control-plane toleration，而 `05_k8s_registry` 会等它 Ready；
   纯 master / 多 master 无 worker 集群若等到本模块（34）才去污点，registry 会先 600s 超时。
   cordon 与平台 placement 仍由本模块在 `dev_lab`/`model_images` 之前按配置执行（幂等重跑）。
-- **异步组件等待**：operator 创建组件 Deployment 是异步的；apply 前按
-  `NODE_POOL_PLACEMENT_WAIT_SECONDS`（默认 180s）等待 CR 中 enabled 组件的 Deployment 出现，
-  避免首次 placement 因对象尚未创建而跳过。等待期间每次 Deployment 查询都按“剩余预算 /
-  待查对象数”设置 `--request-timeout` 与远端 `timeout`，单次 API 卡死不会拖过整体上限；
-  `0` 表示只查一轮。
+- **异步组件等待**：组件由 operator 异步安装；apply 前按
+  `NODE_POOL_PLACEMENT_WAIT_SECONDS`（默认 180s）读取 `CubeStackCluster.status`
+  （`conditions.Ready` / `components[].phase`）等待状态收敛，避免首次 placement 因对象尚未
+  创建而跳过；`Degraded`/`Failed` 也视为安装结束，不空等。等待期间每次状态查询都按剩余预算
+  设置 `--request-timeout` 与远端 `timeout`，单次 API 卡死不会拖过整体上限；`0` 表示只查一轮。
 - **local-path PVC 守护**：placement 前检查工作负载 PVC 的 PV `nodeAffinity`；若 PVC 已绑定在
   worker（local-path 无共享存储），钉 master 会让新 Pod `volume node affinity conflict` Pending，
   因此跳过该工作负载并告警（需共享存储或重建 PVC）。Ceph-on（ceph-block/cephfs）无此问题；
@@ -235,8 +235,8 @@ GPU worker 隔离在后续阶段单独做。`NODE_POOL_CUBESTACK_PLACEMENT=false
 - 其余平台组件（cuberouter 等）仍由 `cubestack-placement.sh` 兜底 patch；Perses server CR
   没有 values 注入路径，也由该脚本直接 patch CR spec（lws 由 `lws-cr-values.yaml` 在创建时下发）。
 - **执行时机**：`34_node_pool` 排在 `dev_lab` / `model_images`（vllm/sglang 大镜像 push）之前；
-  apply 前按 `NODE_POOL_PLACEMENT_WAIT_SECONDS` 有界等待 operator 异步创建的 Deployment，
-  避免首次 patch 因对象尚未出现而跳过。
+  apply 前按 `NODE_POOL_PLACEMENT_WAIT_SECONDS` 读取 `CubeStackCluster.status` 等待组件状态
+  收敛（不再硬编码 Deployment 名单），避免首次 patch 因对象尚未出现而跳过。
 - **没有**设置 `CubeStackCluster.spec.global.nodeSelector/tolerations`——它是全局注入，
   可能把 model bundle 推理负载也钉到 master；平台组件用 component values/直接 patch，
   GPU 阶段再单独处理 bundle。
@@ -252,7 +252,7 @@ GPU worker 隔离在后续阶段单独做。`NODE_POOL_CUBESTACK_PLACEMENT=false
 | `NODE_POOL_MASTER_SCHEDULABLE` | `true` | 是否移除 master 的 control-plane/master NoSchedule 污点（默认 true=可调度；false=保留 kubespray 默认污点） |
 | `NODE_POOL_PLATFORM_PLACEMENT` | `true` | 是否把 CoreDNS/metrics/registry/MetalLB 等系统组件也钉 master（`false`=只钉 CubeStack 平台组件） |
 | `NODE_POOL_CUBESTACK_PLACEMENT` | `true` | CubeStack operator/平台组件钉 master（含 chart values 透传） |
-| `NODE_POOL_PLACEMENT_WAIT_SECONDS` | `180` | placement 前等待 operator 异步创建 Deployment 的上限（0=只查一次） |
+| `NODE_POOL_PLACEMENT_WAIT_SECONDS` | `180` | placement 前等待 `CubeStackCluster.status` 组件状态收敛的上限（0=只查一次） |
 | `NODE_POOL_GPU_LABEL` | `node-pool=gpu` | 阶段二使用 |
 | `NODE_POOL_GPU_TAINT` | `dedicated=gpu:NoSchedule` | 阶段二使用 |
 | `NODE_POOL_GPU_NODES` | 空 | 阶段二使用（hostname 列表） |

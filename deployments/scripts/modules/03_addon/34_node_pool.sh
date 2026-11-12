@@ -25,9 +25,9 @@
 #         设 false 可只钉 CubeStack 平台组件、不动系统组件。
 #       - 由 CR 调和的 StatefulSet(Prometheus/Alertmanager/Perses)通过 patch CR spec 下发。
 #   · 执行时机(2026-11-10): 本模块排在 **34**, 在 dev_lab/model_images(vllm/sglang 大镜像
-#     push)之前完成 placement; 组件 Deployment 由 operator 异步创建, 因此 apply 前会做
-#     有界等待(NODE_POOL_PLACEMENT_WAIT_SECONDS, 默认 180s), 避免"组件还没出现 → 跳过 →
-#     留在 worker"。
+#     push)之前完成 placement; 组件由 operator 异步安装, 因此 apply 前按
+#     NODE_POOL_PLACEMENT_WAIT_SECONDS(默认 180s)等待 CubeStackCluster.status 中的组件状态收敛,
+#     避免"组件还没出现 → 跳过 → 留在 worker"。
 #   · 无可用 worker 安全护栏(2026-10-28): 没有 **Ready 且未 cordon** 的 worker(单节点
 #     all-in-one / 纯 master 集群, 或配置的 worker 全部 NotReady/已 cordon)时,
 #     node-pool.sh 自动**跳过 cordon**, master 保持可调度 ——
@@ -85,72 +85,66 @@ if [ "${NODE_POOL_ENABLED:-false}" != "true" ]; then
     exit 0
 fi
 
-# operator 异步创建平台组件: placement 前先有界等待目标 Deployment 出现。
-# 只等待 CR 中 enabled 的组件, 禁用的组件不会拖满超时; 等待失败不阻断(后续可重跑收敛)。
+# operator 异步创建平台组件: placement 前有界等待 CubeStackCluster.status 收敛。
+# 直接读 CR 的 status.components/conditions(组件状态由 operator 维护), 不再硬编码
+# Deployment 名单 —— 新组件自动覆盖, 也不会漏掉 DaemonSet/多工作负载组件。
+# 超时/查询失败不阻断(后续可重跑收敛)。
 _wait_for_platform_deployments() {
     local _ns="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
-    local _cr_json _expected _deadline _missing _item _dns _dname _wait_s
+    local _wait_s _deadline _remain _q _rc _json _msg _state
     _wait_s="${NODE_POOL_PLACEMENT_WAIT_SECONDS:-180}"
     case "${_wait_s}" in ''|*[!0-9]*) _wait_s=180 ;; esac
-    _cr_json="$(SSH "${K}" -n "${_ns}" get csc -o json 2>/dev/null || true)"
-    case "${_cr_json}" in
-        ""|*"NotFound"*|*"not found"*|*"Unable to connect"*) return 0 ;;
-    esac
-    _expected="$(printf '%s' "${_cr_json}" | python3 -c '
+    say "等待平台组件状态收敛(以 CubeStackCluster.status 为准, 最多 ${_wait_s}s)..."
+    _deadline=$(( $(date +%s) + _wait_s ))
+    while :; do
+        _remain=$(( _deadline - $(date +%s) ))
+        _q="${_remain}"; [ "${_q}" -ge 1 ] || _q=1
+        # 单次查询也受预算约束: 远端 kubectl 无默认请求超时, 同时用 timeout + --request-timeout。
+        _rc=0
+        _json="$(SSH "timeout ${_q} ${K}" --request-timeout="${_q}s" -n "${_ns}" get csc -o json 2>/dev/null)" || _rc=$?
+        if [ "${_rc}" -ne 0 ]; then
+            _msg="$(SSH "timeout ${_q} ${K}" --request-timeout="${_q}s" -n "${_ns}" get csc -o json 2>&1 >/dev/null)" || true
+            case "${_msg}" in
+                *NotFound*|*"not found"*|*"doesn't have a resource type"*)
+                    return 0 ;;   # 无 CR / CRD 未装 → 无平台组件可等
+                *)
+                    warn "  读取 CubeStackCluster.status 失败(rc=${_rc}), 继续 placement: $(printf '%s' "${_msg}" | tail -1)"
+                    return 0 ;;
+            esac
+        fi
+        _state="$(printf '%s' "${_json}" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
+    sys.exit(2)
 items = d.get("items") if isinstance(d, dict) and isinstance(d.get("items"), list) else [d]
 if not items:
-    sys.exit(0)
-c = (items[0].get("spec") or {}).get("components") or {}
-m = {
-    "cubepilot": ["cubestack-system/cubepilot-operator", "cubestack-system/cubepilot-api"],
-    "cubestackControllerManager": ["cubestack-system/cubestack-controller-manager"],
-    "cubestackPortal": ["cubestack-system/cubestack-portal"],
-    "cubestackDocs": ["cubestack-system/cubestack-docs"],
-    "lws": ["lws-system/lws-controller-manager"],
-    "envoyGateway": ["envoy-gateway-system/envoy-gateway"],
-    "aiGateway": ["ai-gateway-system/ai-gateway-controller"],
-    "cuberouter": ["cuberouter/cuberouter"],
-    "prometheus": ["monitoring/kube-prometheus-kube-prome-operator",
-                   "monitoring/kube-prometheus-grafana",
-                   "monitoring/kube-prometheus-kube-state-metrics"],
-    "perses": ["monitoring/perses-operator-controller-manager"],
-}
-for k, v in m.items():
-    if (c.get(k) or {}).get("enabled"):
-        for x in v:
-            print(x)
-')" || return 0
-    [ -n "${_expected}" ] || return 0
-    say "等待平台组件 Deployment 出现(最多 ${_wait_s}s)..."
-    _deadline=$(( $(date +%s) + _wait_s ))
-    _n_expected=0
-    for _item in ${_expected}; do _n_expected=$(( _n_expected + 1 )); done
-    [ "${_n_expected}" -ge 1 ] || _n_expected=1
-    while :; do
-        # 单次查询预算 = 剩余时间 / 待查对象数(至少 1s)。远端 kubectl 没有默认请求超时,
-        # 必须同时用 --request-timeout 和远端 timeout 兜底 —— SSH ConnectTimeout 只约束
-        # 连接建立, 不约束远端命令; 否则一次 API 卡死会拖过整个 NODE_POOL_PLACEMENT_WAIT_SECONDS。
-        _remain=$(( _deadline - $(date +%s) ))
-        _q=$(( _remain / _n_expected ))
-        [ "${_q}" -ge 1 ] || _q=1
-        _missing=""
-        for _item in ${_expected}; do
-            _dns="${_item%%/*}"; _dname="${_item##*/}"
-            SSH "timeout ${_q} ${K}" --request-timeout="${_q}s" -n "${_dns}" get deploy "${_dname}" \
-                >/dev/null 2>&1 </dev/null \
-                || _missing="${_missing} ${_item}"
-        done
-        if [ -z "${_missing}" ]; then
-            say "平台组件 Deployment 已出现, 开始 placement"
-            return 0
-        fi
+    print("READY"); sys.exit(0)
+cr = items[0]
+st = cr.get("status") or {}
+ready = ""
+for c in st.get("conditions") or []:
+    if c.get("type") == "Ready":
+        ready = c.get("status", ""); break
+comps = st.get("components") or []
+TERMINAL = ("ready", "degraded", "failed")
+pending = ["%s=%s" % (c.get("name", "?"), c.get("phase", "<无>"))
+           for c in comps if str(c.get("phase", "")).lower() not in TERMINAL]
+if ready == "True":
+    print("READY"); sys.exit(0)
+if comps and not pending:
+    # 所有已上报组件都已到终态(Degraded/Failed 也算安装结束; 继续 placement 由后续步骤暴露问题)
+    print("READY"); sys.exit(0)
+if not comps:
+    print("PENDING:status.components 尚未生成"); sys.exit(0)
+print("PENDING:" + " ".join(pending))
+' 2>/dev/null)" || { warn "  解析 CubeStackCluster.status 失败, 继续 placement"; return 0; }
+        case "${_state}" in
+            READY) say "平台组件状态已收敛, 开始 placement"; return 0 ;;
+        esac
         if [ "$(date +%s)" -ge "${_deadline}" ]; then
-            warn "等待超时(仍缺失:${_missing}); 继续 placement, 缺失项可重跑 --steps node_pool 收敛"
+            warn "等待超时(${_wait_s}s, ${_state#PENDING:}); 继续 placement, 可重跑 --steps node_pool 收敛"
             return 0
         fi
         sleep 5
