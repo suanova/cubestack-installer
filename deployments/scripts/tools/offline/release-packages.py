@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,6 +36,27 @@ def sha256(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _safe_tar_listing(path: Path) -> list[str]:
+    result = subprocess.run(
+        ["tar", "--zstd", "-tf", str(path)], check=True,
+        text=True, capture_output=True,
+    )
+    names = [line for line in result.stdout.splitlines() if line]
+    for name in names:
+        if name.startswith("/") or ".." in Path(name).parts:
+            die(f"{path}: unsafe archive path {name!r}")
+    return names
+
+
+def extract_tar_zst(path: Path, dest: Path) -> None:
+    _safe_tar_listing(path)
+    dest.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["tar", "--zstd", "-xf", str(path), "-C", str(dest)],
+        check=True,
+    )
+
+
 def load_yaml(path: Path) -> dict:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -46,6 +68,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", type=Path, required=True,
                     help="local release tree root")
+    ap.add_argument("--meta", type=Path,
+                    help="meta tar.zst to extract into --meta-dir")
+    ap.add_argument("--meta-dir", type=Path,
+                    help="meta extraction dir (default: <root>/offline-files)")
+    ap.add_argument("--extract", action="store_true",
+                    help="extract selected payload packages into --root")
+    ap.add_argument("--seal", action="store_true",
+                    help="reseal the filtered tree with verify-offline-files.sh")
     ap.add_argument("--with", dest="with_packages", default="",
                     help="optional packages: comma-separated names or 'all'")
     ap.add_argument("--verify-only", action="store_true",
@@ -57,7 +87,16 @@ def main() -> int:
     args = ap.parse_args()
 
     root = args.root
-    manifest_path = root / "release.yaml"
+    meta_dir = args.meta_dir or (root / "offline-files" if args.meta else root)
+    if args.meta:
+        sidecar = Path(str(args.meta) + ".sha256")
+        if sidecar.is_file():
+            want = sidecar.read_text(encoding="utf-8").split()[0]
+            got = sha256(args.meta).removeprefix("sha256:")
+            if want != got:
+                die(f"meta sha256 mismatch: expected {want}, got {got}")
+        extract_tar_zst(args.meta, meta_dir)
+    manifest_path = meta_dir / "release.yaml"
     if not manifest_path.is_file():
         die(f"missing release.yaml: {manifest_path}")
     manifest = load_yaml(manifest_path)
@@ -111,8 +150,13 @@ def main() -> int:
         if size not in (None, 0) and path.stat().st_size != int(size):
             die(f"package {name}: size mismatch")
 
-    tree_path = root / "tree.tsv"
-    if tree_path.is_file() and (args.write_tree or not args.verify_only):
+    if args.extract:
+        for name in sorted(selected):
+            item = by_name[name]
+            rel = str(item["path"])
+            extract_tar_zst(root / rel, root)
+    tree_path = meta_dir / "tree.tsv"
+    if tree_path.is_file() and (args.write_tree or not args.verify_only or args.extract):
         lines = tree_path.read_text(encoding="utf-8").splitlines()
         header = lines[0].split("\t") if lines else []
         if "package" not in header:
@@ -128,13 +172,26 @@ def main() -> int:
                 die(f"tree.tsv row has unknown package: {package}")
             if package in selected:
                 rows.append(values)
-        if args.write_tree:
-            args.write_tree.parent.mkdir(parents=True, exist_ok=True)
-            with args.write_tree.open("w", encoding="utf-8") as fh:
+        target_tree = args.write_tree or (
+            tree_path if args.extract else None
+        )
+        if target_tree:
+            target_tree.parent.mkdir(parents=True, exist_ok=True)
+            with target_tree.open("w", encoding="utf-8") as fh:
                 fh.write("\t".join(header) + "\n")
                 for values in rows:
                     fh.write("\t".join(values) + "\n")
-            print(f"selected={len(rows)} tree={args.write_tree}")
+            if args.extract and target_tree == tree_path and args.seal:
+                verifier = (
+                    Path(__file__).resolve().parents[1]
+                    / "offline" / "verify-offline-files.sh"
+                )
+                subprocess.run(
+                    ["bash", str(verifier), "--root", str(meta_dir),
+                     "--seal", "--force", "--update-success"],
+                    check=True,
+                )
+            print(f"selected={len(rows)} tree={target_tree}")
         else:
             print(f"selected={len(rows)} packages={','.join(sorted(selected))}")
     elif args.list:
