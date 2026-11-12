@@ -49,7 +49,7 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required"
 
 # Resolve the check manifest from the baseline. Output: group<TAB>package<TAB>version
 PACKAGES="$(
-python3 - "${BASELINE}" "${GROUP}" <<'PY'
+python3 - "${BASELINE}" "${GROUP}" "${REPO_ROOT}" <<'PY'
 import sys
 from pathlib import Path
 try:
@@ -63,7 +63,13 @@ if not entries:
 entry = entries[0]
 lock = Path(entry.get("packages_check", ""))
 if not lock.is_absolute():
-    lock = Path(sys.argv[1]).resolve().parent.parent / lock
+    # Release trees carry base.yaml but not the installer's versions/ tree;
+    # fall back to the checkout/image copy of the lock file.
+    candidates = [
+        Path(sys.argv[1]).resolve().parent.parent / lock,
+        Path(sys.argv[3]) / lock,
+    ]
+    lock = next((c for c in candidates if c.is_file()), candidates[0])
 if not lock.is_file():
     sys.exit(f"packages_check not found: {lock}")
 data = yaml.safe_load(lock.read_text(encoding="utf-8"))
