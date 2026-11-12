@@ -94,15 +94,27 @@ PUSH_REPO="${REG_DIRECT}/netshoot"
 # ---- [1/4] 选镜像 tar(自建优先, 原始 netshoot 回退) ----
 say "[1/4] 选择诊断镜像 tar(自建优先; 目录 ${SAVE_DIR})..."
 USING_RDMA_IMG=1
-TAR_FILE="$(find_offline_tar "/netshoot-rdma:${TAG}" "netshoot-rdma-*.tar" "${SAVE_DIR}" 2>/dev/null || true)"
+# release 树用中性名 netshoot-rdma.tar; 开发树可能仍带 tag 后缀。
+_netshoot_find_tar() {  # <save_dir> <tag>
+    local sd="$1" tag="$2" cand src
+    for cand in "${sd}/netshoot-rdma.tar" "${sd}/netshoot-rdma-${tag}.tar"; do
+        [ -f "${cand}" ] || continue
+        src="$(tar_first_image_tag "${cand}")"
+        if [ -z "${src}" ] || [ "${src##*:}" = "${tag}" ]; then
+            printf '%s\n' "${cand}"; return 0
+        fi
+    done
+    find_offline_tar "/netshoot-rdma:${tag}" "netshoot-rdma-*.tar" "${sd}" 2>/dev/null || true
+}
+TAR_FILE="$(_netshoot_find_tar "${SAVE_DIR}" "${TAG}")"
 if [ -z "${TAR_FILE}" ]; then
     # tag 不匹配(如换过 perftest 版本)时, 只要目录里有任意自建 tar 就用最新的那个
-    _latest="$(ls -t "${SAVE_DIR}"/netshoot-rdma-*.tar 2>/dev/null | head -1 || true)"
+    _latest="$(ls -t "${SAVE_DIR}"/netshoot-rdma.tar "${SAVE_DIR}"/netshoot-rdma-*.tar 2>/dev/null | head -1 || true)"
     if [ -n "${_latest}" ]; then
         TAR_FILE="${_latest}"
         case "$(basename "${TAR_FILE}")" in
             *"${TAG}"*) : ;;   # 文件名就是目标版本(只是 tar 内容标签与查找后缀不同) → 不吵
-            *) warn "  未找到 netshoot-rdma-${TAG}.tar, 使用目录内最新: $(basename "${TAR_FILE}")" ;;
+            *) warn "  未找到 netshoot-rdma:${TAG} 的 tar, 使用目录内最新: $(basename "${TAR_FILE}")" ;;
         esac
     fi
 fi
@@ -116,7 +128,7 @@ if [ -z "${TAR_FILE}" ]; then
     TAR_FILE="${BASE_TAR}"
     TAG="$(tar_first_image_tag "${TAR_FILE}")"; TAG="${TAG##*:}"
     [ -n "${TAG}" ] || TAG="latest"
-    warn "  未找到自建镜像 tar(netshoot-rdma-*.tar in ${SAVE_DIR})→ 回退原始 netshoot(${TAR_FILE##*/})"
+    warn "  未找到自建镜像 tar(netshoot-rdma.tar 或 netshoot-rdma-*.tar in ${SAVE_DIR})→ 回退原始 netshoot(${TAR_FILE##*/})"
     warn "  ⚠ 回退版**没有 ibv_*/perftest**; 要 RDMA 诊断: 用 release/开源安装物化 netshoot-rdma tar 后重跑本模块"
 else
     ok "  自建镜像 tar: ${TAR_FILE}"

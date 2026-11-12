@@ -50,6 +50,7 @@ init_remote_kubectl || exit 1
 # ---------------- 派生变量(全部来自 cluster.conf / load_config, 无硬编码) ----------------
 SAVE_DIR="${DEV_LAB_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/dev-lab}"
 # per-image tag: 发布版本三家 tag 命名不一致, 不能共用一个 DEV_LAB_IMAGE_TAG。
+# release 树用中性 tar 名; 开发树仍可能是 <img>-<tag>.tar。
 _devlab_tag() {
     case "$1" in
         cpu-pytorch)  echo "${DEV_LAB_CPU_TAG:-${DEV_LAB_IMAGE_TAG:-latest}}" ;;
@@ -57,6 +58,13 @@ _devlab_tag() {
         cuda-pytorch) echo "${DEV_LAB_CUDA_TAG:-${DEV_LAB_IMAGE_TAG:-latest}}" ;;
         *)            echo "${DEV_LAB_IMAGE_TAG:-latest}" ;;
     esac
+}
+_devlab_find_tar() {  # <img> <tag> <dir>
+    local img="$1" tag="$2" sd="$3" cand
+    for cand in "${sd}/${img}.tar" "${sd}/${img}-${tag}.tar"; do
+        [ -f "${cand}" ] && { printf '%s\n' "${cand}"; return 0; }
+    done
+    find_offline_tar "${img}:${tag}" "*.tar" "${sd}" 2>/dev/null || true
 }
 HARBOR_HOST="harbor.isuanova.com"                        # 上游注册域
 # 集群内置 registry 双端点(与 multus/rdma/gpu 同款): REG_DIRECT=推送直连, REG_BASE=节点引用
@@ -128,7 +136,7 @@ _devlab_push_one() {
     _tag="$(_devlab_tag "${_img}")"
     # 离线 tar 顶层平铺: accelerator 家族镜像不再按模式/家族分子目录
     _sd="${SAVE_DIR}"
-    _tar="$(find_offline_tar "${_img}:${_tag}" "*.tar" "${_sd}" 2>/dev/null || true)"
+    _tar="$(_devlab_find_tar "${_img}" "${_tag}" "${_sd}")"
     # 精确内容匹配失败时, 只接受**定义过**的旧后缀(见 _devlab_find_legacy_tar);
     # 0 个/多个匹配都不猜: 分别按"缺 tar"/"歧义"记 miss, 由结尾汇总告警。
     if [ -z "${_tar}" ] && [ -d "${_sd}" ]; then
