@@ -49,7 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv python3-yaml \
         libvirt-clients vim gnupg software-properties-common \
         iproute2 kmod systemd procps bridge-utils chrony \
-        moreutils \
+        moreutils zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # 构建期门禁(2026-10-25): patch 是 kubespray 补丁层(cubestack-offline.sh)的必需工具。
