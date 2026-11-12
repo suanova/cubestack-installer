@@ -429,6 +429,67 @@ print((d.get("config") or {}).get("digest", ""))
 ' 2>/dev/null || true
 }
 
+# Top-level digest of a registry ref (manifest or index). image_digest_raw is for
+# content comparison; use this one for repo@digest references.
+# Usage: d="$(image_manifest_digest docker://repo:tag)"
+image_manifest_digest() {
+    local ref="$1" digest=""
+    digest="$(skopeo inspect --format '{{.Digest}}' \
+        --tls-verify=false --no-creds "${ref}" 2>/dev/null || true)"
+    [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || return 0
+    printf '%s\n' "${digest}"
+}
+
+# Push an image and print its digest-pinned reference (repo@sha256:...).
+# <anchor> only keeps the manifest reachable and makes retries idempotent;
+# callers must consume the printed digest, never the anchor tag.
+# Usage: ref="$(push_image_digest <src> <repo> <anchor> [skopeo copy args...])"
+push_image_digest() {
+    local src="${1:-}" repo="${2:-}" anchor="${3:-}"
+    shift "$(( $# < 3 ? $# : 3 ))"
+    repo="${repo#docker://}"
+    if [ -z "${src}" ] || [ -z "${repo}" ] || [ -z "${anchor}" ]; then
+        err "push_image_digest: src/repo/anchor 不能为空"
+        return 1
+    fi
+    case "${repo}" in
+        *"@"*|*" "*) err "push_image_digest: repo 不能带 digest/tag: ${repo}"; return 1 ;;
+    esac
+    case "${repo##*/}" in
+        *:*) err "push_image_digest: repo 不能带 tag: ${repo}"; return 1 ;;
+    esac
+    case "${anchor}" in
+        latest|*-latest) err "push_image_digest: 不允许 channel tag: ${anchor}"; return 1 ;;
+    esac
+    [[ "${anchor}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] \
+        || { err "push_image_digest: 非法 tag: ${anchor}"; return 1; }
+
+    local dst="docker://${repo}:${anchor}" need_push=1
+    local src_cfg dst_cfg
+    src_cfg="$(image_config_digest_raw "${src}")"
+    dst_cfg="$(image_config_digest_raw "${dst}")"
+    if [ -n "${src_cfg}" ] && [ "${src_cfg}" = "${dst_cfg}" ]; then
+        need_push=0
+    elif [ -z "${src_cfg}" ] || [ -z "${dst_cfg}" ]; then
+        # Multi-arch index or unreadable config: fall back to manifest digest.
+        local src_manifest dst_manifest
+        src_manifest="$(image_digest_raw "${src}")"
+        dst_manifest="$(image_digest_raw "${dst}")"
+        [ -n "${src_manifest}" ] && [ "${src_manifest}" = "${dst_manifest}" ] && need_push=0
+    fi
+    if [ "${need_push}" = "1" ]; then
+        push_image_skopeo "${src}" "${dst}" "$@" \
+            || { err "push_image_digest: 推送失败 ${repo}:${anchor}"; return 1; }
+    else
+        vlog "push_image_digest: 内容未变, 跳过推送 ${repo}:${anchor}"
+    fi
+
+    local digest
+    digest="$(image_manifest_digest "${dst}")"
+    [ -n "${digest}" ] || { err "push_image_digest: 无法解析目标 digest ${repo}:${anchor}"; return 1; }
+    printf '%s@%s\n' "${repo}" "${digest}"
+}
+
 find_offline_tar() {
     local suffix="$1" glob="$2"; shift 2
     local d t src
