@@ -123,6 +123,18 @@ if not items:
     print("READY"); sys.exit(0)
 cr = items[0]
 st = cr.get("status") or {}
+def _int(v):
+    try:
+        return int(v)
+    except Exception:
+        return None
+gen = _int((cr.get("metadata") or {}).get("generation"))
+obs = _int(st.get("observedGeneration"))
+# 只有 status 对应当前 generation 才可信: 升级/改 spec 后旧 status 仍可能是上一次调和的
+# Ready=True / 全部终态, 直接放行会让新组件尚未创建就被跳过(留在 worker)。
+if gen is not None and (obs is None or obs < gen):
+    print("PENDING:status 尚未对应当前 generation(observed=%s < %s)" % (obs, gen))
+    sys.exit(0)
 ready = ""
 for c in st.get("conditions") or []:
     if c.get("type") == "Ready":

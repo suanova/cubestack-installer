@@ -440,6 +440,7 @@ mod_src="$(cat "${MOD_WAIT}")"
 chk_contains "㉑ 读取 CSC status" "get csc -o json" "${mod_src}"
 chk_contains "㉑ 使用 status.components" "status.components" "${mod_src}"
 chk_not_contains "㉑ 不再枚举 Deployment 名单" "_n_expected" "${mod_src}"
+chk_contains "㉑ 校验 status 对应当前 generation" "observedGeneration" "${mod_src}"
 sed -n '/^_wait_for_platform_deployments() {/,/^case "${_ACTION}" in/p' "${MOD_WAIT}" | sed '$d' > "${TMP}/fn-wait.sh"
 chk "㉑ 函数已提取" "1" "$([ -s "${TMP}/fn-wait.sh" ] && echo 1 || echo 0)"
 cat > "${TMP}/wait-run.sh" <<'EOS'
@@ -452,11 +453,12 @@ NODE_POOL_PLACEMENT_WAIT_SECONDS="${WAIT_S:-0}"
 say(){ :; }
 warn(){ echo "WARN:$*" >&2; }
 SSH(){
-    printf '%s
-' "$*" >> "${SSH_LOG:?}"
+    printf '%s\n' "$*" >> "${SSH_LOG:?}"
     case "$*" in
         *"get csc -o json"*)
-            if [ "${STATUS_READY:-1}" = "1" ]; then
+            if [ "${STALE_GEN:-0}" = "1" ]; then
+                echo '{"items":[{"metadata":{"generation":2},"spec":{"components":{"cubepilot":{"enabled":true}}},"status":{"observedGeneration":1,"conditions":[{"type":"Ready","status":"True"}],"components":[{"name":"cubepilot","phase":"Ready"}]}}]}'
+            elif [ "${STATUS_READY:-1}" = "1" ]; then
                 echo '{"items":[{"metadata":{"generation":1},"spec":{"components":{"cubepilot":{"enabled":true}}},"status":{"observedGeneration":1,"conditions":[{"type":"Ready","status":"True"}],"components":[{"name":"cubepilot","phase":"Ready"}]}}]}'
             else
                 echo '{"items":[{"metadata":{"generation":1},"spec":{"components":{"cubepilot":{"enabled":true}}},"status":{"observedGeneration":1,"conditions":[{"type":"Ready","status":"False","reason":"Installing"}],"components":[{"name":"cubepilot","phase":"Installing"}]}}]}'
@@ -475,6 +477,10 @@ chk_contains "㉑ 查询带 request-timeout" "--request-timeout=1s" "${wait_log}
 : > "${TMP}/wait.log"
 wait_out="$(FN_WAIT="${TMP}/fn-wait.sh" WAIT_S=0 STATUS_READY=0 SSH_LOG="${TMP}/wait.log" bash "${TMP}/wait-run.sh" 2>&1)"
 chk_contains "㉑ 未就绪时 0s 预算仍只查一轮并按时返回" "等待超时" "${wait_out}"
+: > "${TMP}/wait.log"
+wait_out="$(FN_WAIT="${TMP}/fn-wait.sh" WAIT_S=0 STALE_GEN=1 SSH_LOG="${TMP}/wait.log" bash "${TMP}/wait-run.sh" 2>&1)"
+chk_contains "㉑ 旧 generation 的 Ready 不被采纳" "等待超时" "${wait_out}"
+chk_not_contains "㉑ 旧 generation 不立即开始 placement" "状态已收敛" "${wait_out}"
 
 echo ""
 if [ "${fail}" = "0" ]; then
