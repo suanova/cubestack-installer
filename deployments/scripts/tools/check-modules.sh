@@ -761,6 +761,7 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-ceph-data-disks.sh \
            test-metallb-pool-check.sh test-ceph-cluster-detect.sh \
            test-multus-iface-detect.sh test-devlab-tar-select.sh \
+           test-devlab-tar-name.sh test-netshoot-tar-select.sh \
            test-nodeport-leak-preflight.sh test-sync-versions.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
     if [ ! -f "${_tp}" ]; then
