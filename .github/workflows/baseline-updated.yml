@@ -25,14 +25,14 @@ jobs:
   dispatch:
     runs-on: ubuntu-latest
     env:
-      RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
-      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      RELEASE_APP_ID: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
       RELEASE_REPO: ${{ vars.CUBESTACK_RELEASE_REPO || 'suanova/cubestack-release' }}
     steps:
       - name: Skip dispatch when the release GitHub App is not configured
         if: env.RELEASE_APP_ID == '' || env.RELEASE_APP_PRIVATE_KEY == ''
         run: |
-          echo "::warning::RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY are not configured; skipping baseline-updated dispatch"
+          echo "::warning::SUANOVA_BOT_CLIENT_ID / SUANOVA_BOT_APP_PRIVATE_KEY are not configured; skipping baseline-updated dispatch"
 
       - name: Create GitHub App token
         id: app
