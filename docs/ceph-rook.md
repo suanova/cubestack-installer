@@ -505,15 +505,16 @@ kubectl get sc ceph-block                                        # StorageClass
 
 ## 6.1 监控(Prometheus / Grafana)
 
-`02_ceph.sh` 生成的 CephCluster CR 固定开启 `spec.monitoring.enabled=true`。注意三点：
+`02_ceph.sh` 生成的 CephCluster CR **初始** `spec.monitoring.enabled=false`；等监控组件就绪后，
+由 **cubestack-operator 侧**把 CR patch 成 `true`（cubestack-installer 不执行 patch）。注意三点：
 
 1. **RBAC**：官方离线 manifest(`common.yaml`)不含 `monitoring.coreos.com` 权限。所以模块额外
    apply 独立 `ClusterRole/ClusterRoleBinding rook-ceph-monitoring`，绑定
    `rook-ceph/rook-ceph-system` ServiceAccount；否则 Rook 无法创建 ServiceMonitor/PrometheusRule。
 2. **CRD 时序**：ceph 模块先于 kube-prometheus-stack 安装，创建 CR 时 ServiceMonitor CRD 可能
-   还不存在。CephCluster 的更新谓词忽略纯 annotation 变更，因此 `34_node_pool.sh` 在监控组件
-   就绪且 ServiceMonitor 缺失时**重启 `rook-ceph-operator`**（启动时重新调和所有 CephCluster），
-   并有界等待/确认 ServiceMonitor 生成后才报告成功。
+   还不存在，所以初始保持 `enabled=false`。`34_node_pool.sh` 只做**只读检查**：CRD 与
+   CephCluster 存在时打印 ServiceMonitor 是否已生成；patch `monitoring.enabled=true` 与
+   ServiceMonitor 的创建由 cubestack-operator 侧负责，installer 不 patch、不重启 operator。
 3. **验证**：
    ```bash
    kubectl -n rook-ceph get servicemonitor,prometheusrule        # 至少 rook-ceph-exporter

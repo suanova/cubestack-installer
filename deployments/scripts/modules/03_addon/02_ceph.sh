@@ -1153,7 +1153,11 @@ else
     echo "    enabled: ${CEPH_DASHBOARD_ENABLED:-true}"
     echo "    ssl: true"
     echo "  monitoring:"
-    echo "    enabled: true"
+    # ★ 2026-11-13: 初始保持 false —— Ceph 模块先于 kube-prometheus-stack 安装,
+    #   此时 ServiceMonitor CRD 可能还不存在; 等监控组件就绪后由 cubestack-operator
+    #   侧 patch CephCluster 的 spec.monitoring.enabled=true, Rook 再创建 ServiceMonitor。
+    #   cubestack-installer 不执行该 patch。不要在这里写 true: CRD 未就绪时会失败。
+    echo "    enabled: false"
     echo "  network:"
     echo "    provider: \"\""
     # ★ hostNetwork(2026-09-09): CEPH_HOST_NETWORK=true(默认)时, mon/osd/mgr 直接监听节点 IP;
