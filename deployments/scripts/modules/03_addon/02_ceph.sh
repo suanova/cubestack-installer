@@ -903,6 +903,39 @@ for i in $(seq 1 18); do
 done
 [ "${OP_OK:-0}" -ge 1 ] 2>/dev/null || { warn "  rook operator 未就绪(检查 kubectl -n rook-ceph get pods)"; }
 ok "  Rook operator 已部署"
+# ★ 2026-11-12: 官方 offline manifest(common.yaml)的 RBAC 不含 monitoring.coreos.com ——
+#   即使 CR 开了 monitoring.enabled, Rook 也无权限创建 ServiceMonitor/PrometheusRule,
+#   结果 mgr(9283)/ceph-exporter(9926) 指标已暴露但 Prometheus 无抓取目标, Grafana Ceph 面板 No data。
+#   用独立 ClusterRole/Binding 授权(不改 vendored manifest —— rook-fetch-manifests.sh 重新拉取会覆盖)。
+say "  应用 Rook 监控 RBAC(monitoring.coreos.com)..."
+if cat <<EOF | SSH "${K} apply -f -" >/dev/null 2>&1
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rook-ceph-monitoring
+rules:
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "prometheusrules"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rook-ceph-monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rook-ceph-monitoring
+subjects:
+  - kind: ServiceAccount
+    name: rook-ceph-system
+    namespace: ${CEPH_NAMESPACE}
+EOF
+then
+    ok "  Rook 监控 RBAC 已就绪"
+else
+    warn "  Rook 监控 RBAC 应用失败(ServiceMonitor 可能无法创建; 检查 RBAC)"
+fi
 _patch_rook_operator_placement
 SSH "${K} -n ${CEPH_NAMESPACE} rollout status deploy/rook-ceph-operator --timeout=180s" >/dev/null 2>&1 \
     || warn "  Rook operator patch 后 180s 内未 Ready(检查 master 标签/taint 与 operator pod 事件)"
@@ -1095,6 +1128,12 @@ else
     #   分支里, 曾导致"apply 完 CR 直接宣布完成(集群仍在 Progressing), ceph_csi 一进来就报错打断部署"。
     say "[6/8] 生成并应用 CephCluster CR(mon=${CEPH_MON_COUNT}, 副本=${CEPH_POOL_REPLICAS}/${CEPH_POOL_MIN_SIZE})..."
     LOCAL_CR="$(mktemp)"
+    # ★ 2026-11-13(CodeRabbit): 重跑必须保留 live 值 —— cubestack-operator 会把
+    #   spec.monitoring.enabled patch 成 true; 这里若硬编码 false, apply 会把它覆盖回去
+    #   (尤其是从旧清单迁移、last-applied 里是 false/true 的场景)。
+    #   新装/CR 不存在/读取失败 → 空 → 默认 false; 只在 live 明确为 true 时保留 true。
+    _CEPH_MONITORING_ENABLED="$( (SSH "timeout 10 ${K}" -n "${CEPH_NAMESPACE}" get cephcluster rook-ceph -o jsonpath='{.spec.monitoring.enabled}' 2>/dev/null) || true)"
+    [ "${_CEPH_MONITORING_ENABLED}" = "true" ] || _CEPH_MONITORING_ENABLED="false"
 {
     echo "apiVersion: ceph.rook.io/v1"
     echo "kind: CephCluster"
@@ -1119,6 +1158,12 @@ else
     echo "  dashboard:"
     echo "    enabled: ${CEPH_DASHBOARD_ENABLED:-true}"
     echo "    ssl: true"
+    echo "  monitoring:"
+    # ★ 2026-11-13: 新装时初始 false —— Ceph 模块先于 kube-prometheus-stack 安装,
+    #   此时 ServiceMonitor CRD 可能还不存在; 等监控组件就绪后由 cubestack-operator
+    #   侧 patch CephCluster 的 spec.monitoring.enabled=true, Rook 再创建 ServiceMonitor。
+    #   cubestack-installer 不执行该 patch。重跑时保留上面的 live 值, 不覆盖 operator 的 true。
+    echo "    enabled: ${_CEPH_MONITORING_ENABLED}"
     echo "  network:"
     echo "    provider: \"\""
     # ★ hostNetwork(2026-09-09): CEPH_HOST_NETWORK=true(默认)时, mon/osd/mgr 直接监听节点 IP;
@@ -1172,6 +1217,7 @@ else
         done
     done
 } > "${LOCAL_CR}"
+unset _CEPH_MONITORING_ENABLED
 SSH "sudo rm -f /tmp/cephcluster.yaml" >/dev/null 2>&1 || true   # 清陈旧目标(fs.protected_regular: 他人遗留文件会让 scp 被拒)
 scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
     "${LOCAL_CR}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/cephcluster.yaml" >/dev/null 2>&1

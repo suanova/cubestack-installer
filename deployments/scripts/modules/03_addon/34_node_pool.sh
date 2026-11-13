@@ -167,6 +167,22 @@ case "${_ACTION}" in
     apply)
         init_remote_kubectl || exit 1
         _wait_for_platform_deployments
+        # Rook 监控: monitoring.enabled 的 patch 由 cubestack-operator 侧负责
+        # (ceph 模块初始置 false, 避免 ServiceMonitor CRD 未就绪时 Rook 调和失败)。
+        # cubestack-installer 这里只做只读检查: 不 patch CephCluster, 不重启 operator。
+        _ceph_ns="${CEPH_NAMESPACE:-rook-ceph}"
+        if SSH "timeout 10 ${K}" get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1 \
+            && SSH "timeout 10 ${K}" -n "${_ceph_ns}" get cephcluster rook-ceph >/dev/null 2>&1; then
+            _sm_now="$(SSH "timeout 10 ${K}" -n "${_ceph_ns}" get servicemonitor -o name --ignore-not-found 2>/dev/null || true)"
+            # `-o name` 实际输出带 group: servicemonitor.monitoring.coreos.com/<name>。
+            if printf '%s\n' "${_sm_now}" | grep -qE 'rook-ceph-(exporter|mgr)'; then
+                say "  Rook 监控: ServiceMonitor 已存在(monitoring.enabled 由 cubestack-operator 侧开启)"
+            else
+                warn "  Rook 监控: 尚未生成 ServiceMonitor; monitoring.enabled 的 patch 由 cubestack-operator 侧负责, 本模块不执行 patch"
+            fi
+            unset _sm_now
+        fi
+        unset _ceph_ns
         if [ "${NODE_POOL_PLATFORM_PLACEMENT:-true}" = "true" ]; then
             say "系统组件 master placement(CoreDNS/metrics/registry/MetalLB 等)..."
             bash "${SCRIPT_DIR}/tools/k8s/master-placement.sh" --apply

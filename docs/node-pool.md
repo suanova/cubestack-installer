@@ -236,6 +236,10 @@ GPU worker 隔离在后续阶段单独做。`NODE_POOL_CUBESTACK_PLACEMENT=false
 - **执行时机**：`34_node_pool` 排在 `dev_lab` / `model_images`（vllm/sglang 大镜像 push）之前；
   apply 前按 `NODE_POOL_PLACEMENT_WAIT_SECONDS` 读取 `CubeStackCluster.status` 等待组件状态
   收敛（不再硬编码 Deployment 名单），避免首次 patch 因对象尚未出现而跳过。
+- **Ceph 监控只读检查**：监控组件就绪且 `servicemonitors.monitoring.coreos.com` CRD 存在时，
+  若 `rook-ceph` CephCluster 存在，只打印 `rook-ceph-exporter`/`rook-ceph-mgr` ServiceMonitor
+  是否已生成。`spec.monitoring.enabled=true` 的 patch 由 **cubestack-operator 侧**负责，
+  installer 不执行 patch、不重启 Rook operator。
 - `--remove` 会清理 `spec.global.nodeSelector/tolerations` 中 installer 写入的条目（保留用户
   自定义 key/toleration），并兼容清理旧版本写入的 `components.<name>.values`。
 
