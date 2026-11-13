@@ -1128,6 +1128,12 @@ else
     #   分支里, 曾导致"apply 完 CR 直接宣布完成(集群仍在 Progressing), ceph_csi 一进来就报错打断部署"。
     say "[6/8] 生成并应用 CephCluster CR(mon=${CEPH_MON_COUNT}, 副本=${CEPH_POOL_REPLICAS}/${CEPH_POOL_MIN_SIZE})..."
     LOCAL_CR="$(mktemp)"
+    # ★ 2026-11-13(CodeRabbit): 重跑必须保留 live 值 —— cubestack-operator 会把
+    #   spec.monitoring.enabled patch 成 true; 这里若硬编码 false, apply 会把它覆盖回去
+    #   (尤其是从旧清单迁移、last-applied 里是 false/true 的场景)。
+    #   新装/CR 不存在/读取失败 → 空 → 默认 false; 只在 live 明确为 true 时保留 true。
+    _CEPH_MONITORING_ENABLED="$( (SSH "timeout 10 ${K}" -n "${CEPH_NAMESPACE}" get cephcluster rook-ceph -o jsonpath='{.spec.monitoring.enabled}' 2>/dev/null) || true)"
+    [ "${_CEPH_MONITORING_ENABLED}" = "true" ] || _CEPH_MONITORING_ENABLED="false"
 {
     echo "apiVersion: ceph.rook.io/v1"
     echo "kind: CephCluster"
@@ -1153,11 +1159,11 @@ else
     echo "    enabled: ${CEPH_DASHBOARD_ENABLED:-true}"
     echo "    ssl: true"
     echo "  monitoring:"
-    # ★ 2026-11-13: 初始保持 false —— Ceph 模块先于 kube-prometheus-stack 安装,
+    # ★ 2026-11-13: 新装时初始 false —— Ceph 模块先于 kube-prometheus-stack 安装,
     #   此时 ServiceMonitor CRD 可能还不存在; 等监控组件就绪后由 cubestack-operator
     #   侧 patch CephCluster 的 spec.monitoring.enabled=true, Rook 再创建 ServiceMonitor。
-    #   cubestack-installer 不执行该 patch。不要在这里写 true: CRD 未就绪时会失败。
-    echo "    enabled: false"
+    #   cubestack-installer 不执行该 patch。重跑时保留上面的 live 值, 不覆盖 operator 的 true。
+    echo "    enabled: ${_CEPH_MONITORING_ENABLED}"
     echo "  network:"
     echo "    provider: \"\""
     # ★ hostNetwork(2026-09-09): CEPH_HOST_NETWORK=true(默认)时, mon/osd/mgr 直接监听节点 IP;
@@ -1211,6 +1217,7 @@ else
         done
     done
 } > "${LOCAL_CR}"
+unset _CEPH_MONITORING_ENABLED
 SSH "sudo rm -f /tmp/cephcluster.yaml" >/dev/null 2>&1 || true   # 清陈旧目标(fs.protected_regular: 他人遗留文件会让 scp 被拒)
 scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
     "${LOCAL_CR}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/cephcluster.yaml" >/dev/null 2>&1

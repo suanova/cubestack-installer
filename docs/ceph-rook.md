@@ -512,7 +512,9 @@ kubectl get sc ceph-block                                        # StorageClass
    apply 独立 `ClusterRole/ClusterRoleBinding rook-ceph-monitoring`，绑定
    `rook-ceph/rook-ceph-system` ServiceAccount；否则 Rook 无法创建 ServiceMonitor/PrometheusRule。
 2. **CRD 时序**：ceph 模块先于 kube-prometheus-stack 安装，创建 CR 时 ServiceMonitor CRD 可能
-   还不存在，所以初始保持 `enabled=false`。`34_node_pool.sh` 只做**只读检查**：CRD 与
+   还不存在，所以**新装**时初始保持 `enabled=false`。重跑时 `02_ceph.sh` 会先读取 live 的
+   `spec.monitoring.enabled` 并原样写回（读不到或非 `true` 才默认 `false`），避免覆盖
+   cubestack-operator 已经 patch 成的 `true`。`34_node_pool.sh` 只做**只读检查**：CRD 与
    CephCluster 存在时打印 ServiceMonitor 是否已生成；patch `monitoring.enabled=true` 与
    ServiceMonitor 的创建由 cubestack-operator 侧负责，installer 不 patch、不重启 operator。
 3. **验证**：
