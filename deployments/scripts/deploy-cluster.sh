@@ -173,6 +173,9 @@ $(_component_meta_list stub)
 
 ★ 提示: sudo ./deployments/scripts/deploy-cluster.sh --list-steps
         模块全清单(启用状态/依赖/序号/执行阶段) —— 选模块、看开关、排依赖, 都从这条命令开始
+
+  ⚠ 本页只列本 installer 内置的模块。版本树(--release)附带的模块要装好版本树后才能读到,
+    它们不会出现在 --help 里, 请用 --list-steps 查看完整清单。
 EOF
     exit 0
 }
@@ -275,6 +278,13 @@ export ONLY_HOSTS
 
 # ---------------- 配置加载 + 模块解析 ----------------
 load_config
+# 版本树里的私有模块只在 load_config 之后才知道位置。首次 discover_modules 发生在参数
+# 解析之前, 那时额外目录还不存在, 所以这里重新合并 + 重新发现。公共版本没有额外目录,
+# 这次调用是空操作。
+if [ -n "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ]; then
+    cs_merge_modules_dirs
+    discover_modules
+fi
 
 # ---------------- 离线文件完整性门禁(2026-10-28) ----------------
 # 默认 quick: 结构/覆盖率校验(不算 sha256/镜像层); 需要强校验设 auto 或 full

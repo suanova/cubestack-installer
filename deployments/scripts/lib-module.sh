@@ -55,15 +55,42 @@ MODULES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/modules"
 # discovery and execution paths stay unchanged. The merged root sits next to
 # modules/ so modules keep resolving ../../lib-common.sh and ../../tools/.
 # Child processes reuse the exported merged root.
-if [ -n "${CUBESTACK_MODULES_MERGED:-}" ]; then
-    [ -d "${CUBESTACK_MODULES_MERGED}" ] || {
-        echo "error: merged modules dir missing: ${CUBESTACK_MODULES_MERGED}" >&2
-        exit 1
-    }
-    MODULES_DIR="${CUBESTACK_MODULES_MERGED}"
-elif [ -n "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ]; then
-    _cs_scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    _cs_merged="$(mktemp -d "${_cs_scripts_dir}/.modules-merged.XXXXXX")" || {
+#
+# Callable more than once: --release resolves the version tree only after
+# load_config has run, which is long after this library was sourced and the
+# first discovery happened. deploy-cluster.sh calls it again once
+# CUBESTACK_EXTRA_MODULES_DIRS is final; calling it with an unchanged source is
+# a no-op, so the second call costs nothing when there is no version tree.
+cs_merge_modules_dirs() {
+    local _cs_base="${CS_BASE_MODULES_DIR:-${MODULES_DIR}}"
+    local _cs_want="${CUBESTACK_EXTRA_MODULES_DIRS:-}"
+    local _cs_self_dir
+    _cs_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    # 已按同一来源合并过 → 复用。子进程(cluster-teardown 等)靠这条: 父进程导出了
+    # CUBESTACK_MODULES_MERGED + _FROM, 它不该重建, 也不该删父进程的合并根。
+    if [ -n "${CUBESTACK_MODULES_MERGED:-}" ] \
+       && [ "${CUBESTACK_MODULES_MERGED_FROM:-}" = "${_cs_want}" ]; then
+        [ -d "${CUBESTACK_MODULES_MERGED}" ] || {
+            echo "error: merged modules dir missing: ${CUBESTACK_MODULES_MERGED}" >&2
+            exit 1
+        }
+        MODULES_DIR="${CUBESTACK_MODULES_MERGED}"
+        return 0
+    fi
+
+    # 来源变了(首次为空 → load_config 之后变成版本树 modules/): 丢掉旧合并根, 从基座
+    # 重来, 否则新根会把旧根再链一遍形成自我嵌套。只删自己创建的那种目录。
+    if [ -n "${CUBESTACK_MODULES_MERGED:-}" ]; then
+        case "${CUBESTACK_MODULES_MERGED}" in
+            "${_cs_self_dir}"/.modules-merged.*) rm -rf "${CUBESTACK_MODULES_MERGED}" 2>/dev/null || true ;;
+            *) echo "error: refusing to rebuild foreign merged dir: ${CUBESTACK_MODULES_MERGED}" >&2; exit 1 ;;
+        esac
+        unset CUBESTACK_MODULES_MERGED CUBESTACK_MODULES_MERGED_FROM
+    fi
+    MODULES_DIR="${_cs_base}"
+    [ -n "${_cs_want}" ] || return 0
+    _cs_merged="$(mktemp -d "${_cs_self_dir}/.modules-merged.XXXXXX")" || {
         echo "error: failed to create temporary modules dir" >&2
         exit 1
     }
@@ -110,9 +137,16 @@ elif [ -n "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ]; then
     done < <(printf '%s\n' "${CUBESTACK_EXTRA_MODULES_DIRS}" | tr ':' '\n')
     MODULES_DIR="${_cs_merged}"
     export CUBESTACK_MODULES_MERGED="${_cs_merged}"
+    export CUBESTACK_MODULES_MERGED_FROM="${_cs_want}"
     unset -f _cs_link_phase
-    unset _cs_merged _cs_phase_dir _cs_phase_dirs _cs_root _cs_scripts_dir
-fi
+    unset _cs_merged _cs_phase_dir _cs_phase_dirs _cs_root
+}
+
+# The base modules root, kept so a second merge starts from it rather than from
+# an already-merged temporary dir (which would link the temporary tree back into
+# itself).
+CS_BASE_MODULES_DIR="${MODULES_DIR}"
+cs_merge_modules_dirs
 
 # ---------------- 旧 key → 新 key 别名(向后兼容) ----------------
 declare -A MODULE_ALIAS=(
@@ -566,7 +600,13 @@ _print_module_line() {
 
 print_steps() {
     local _verbose="${LIST_VERBOSE:-0}" _phase i key _k _list
-    local _comp_keys=" lws envoy_gateway ai_gateway cubestack_controller_manager model_bundles prometheus perses bmc metax cuberouter cubepilot cubestack_portal observability "
+    # 组件级更新模块从实际发现的模块里派生, 不写死组件名(见 _component_update_keys)。
+    # 两侧都留空格: 下面的匹配是同风格的 *" ${key} "*, 末尾项不能漏掉尾部空格。
+    local _comp_keys="" _k_comp
+    while IFS= read -r _k_comp; do
+        [ -n "${_k_comp}" ] && _comp_keys="${_comp_keys} ${_k_comp}"
+    done < <(_component_update_keys)
+    [ -n "${_comp_keys}" ] && _comp_keys="${_comp_keys} "
     say "==== 部署模块列表(自动发现) ===="
     if [ "${_verbose}" = "1" ]; then
         echo "  模式: --verbose(完整 DESC / 文件 / 依赖)"
@@ -585,16 +625,20 @@ print_steps() {
             _print_module_line "${i}" "${_verbose}"
         done
     done
-    echo ""
-    echo -e "  \033[36m[平台组件级更新]\033[0m  --steps <key>(operator/CR 已就绪; 默认全量部署仍由 cubestack_operator 负责)"
-    if [ "${_verbose}" = "1" ]; then
-        for i in "${!MODULE_KEY[@]}"; do
-            case "${_comp_keys}" in *" ${MODULE_KEY[$i]} "*) _print_module_line "${i}" 1 ;; esac
-        done
-    else
-        _list=""
-        for _k in ${_comp_keys}; do _list="${_list:+${_list}  }${_k}"; done
-        printf '%s\n' "${_list}" | fold -s -w 104 | sed 's/^/    /'
+    # 组件级更新段只在该版本树确实带了这类模块时出现 —— 开源版本没有它们, 也不该
+    # 看到别人的组件名(以及一串并不存在的 --steps 值)。
+    if [ -n "${_comp_keys}" ]; then
+        echo ""
+        echo -e "  \033[36m[平台组件级更新]\033[0m  --steps <key>(operator/CR 已就绪; 默认全量部署仍由 cubestack_operator 负责)"
+        if [ "${_verbose}" = "1" ]; then
+            for i in "${!MODULE_KEY[@]}"; do
+                case "${_comp_keys}" in *" ${MODULE_KEY[$i]} "*) _print_module_line "${i}" 1 ;; esac
+            done
+        else
+            _list=""
+            for _k in ${_comp_keys}; do _list="${_list:+${_list}  }${_k}"; done
+            printf '%s\n' "${_list}" | fold -s -w 104 | sed 's/^/    /'
+        fi
     fi
     echo ""
     echo -e "  \033[36m[验证模块]\033[0m  --steps verify(全部) / --steps verify_<组件>(单个)"
@@ -618,6 +662,39 @@ _verify_meta_list() {
         [[ "${MODULE_KEY[$i]}" == verify_* ]] && out="${out} ${MODULE_KEY[$i]}"
     done
     echo "${out# }"
+}
+
+# ---------------- 模块来源(公共内置 vs 版本树附带的私有模块) ----------------
+# 版本树里的私有模块通过 CUBESTACK_EXTRA_MODULES_DIRS 软链进合并根。判定"来自额外目录"
+# 必须看**真实路径**, 不能看文件名或模块名 —— 名字是别人的事实, 写进公共 installer 就会
+# 在每个开源版本里泄漏一份(以及列出一堆并不存在的 --steps)。公开 tree 没有额外目录,
+# 这个判定恒为假, 于是相关展示整段消失。
+_module_is_extra() {   # <index>; 来自额外目录返回 0
+    local i="$1" f tgt
+    f="${MODULES_DIR}/${MODULE_SCRIPT[$i]}"
+    [ -L "${f}" ] || return 1
+    tgt="$(readlink -f "${f}" 2>/dev/null)" || return 1
+    [ -n "${tgt}" ] || return 1
+    case "${tgt}" in
+        "${CS_BASE_MODULES_DIR:-${MODULES_DIR}}/"*) return 1 ;;
+    esac
+    return 0
+}
+
+# 平台组件级更新模块: 只更新已装组件、不建集群的模块(operator/CR 就绪后单独跑)。
+# 判定: addon 阶段 + 无 TOGGLE(有开关的是 operator 本体, 归主列表) + 非 verify + 非基座
+# + **来自额外目录**。最后一条是关键: 开源版没有这类模块, 这段展示整体不出现。
+_component_update_keys() {
+    local i key
+    for i in "${!MODULE_KEY[@]}"; do
+        key="${MODULE_KEY[$i]}"
+        [[ "${key}" == verify_* || "${key}" == k8s_scale ]] && continue
+        case " ${BASE_MODULES[*]} " in *" ${key} "*) continue ;; esac
+        [ "${MODULE_PHASE[$i]:-}" = "addon" ] || continue
+        [ -n "${MODULE_TOGGLE[$i]:-}" ] && continue
+        _module_is_extra "${i}" || continue
+        printf '%s\n' "${key}"
+    done
 }
 
 # ---------------- 基座重跑提示(覆盖安装可见化; **不拦停**) ----------------

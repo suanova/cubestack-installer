@@ -926,7 +926,18 @@ load_config() {
                NETSHOOT_SAVE_DIR NETSHOOT_BASE_TAR DEV_LAB_SAVE_DIR \
                MODEL_IMAGES_SAVE_DIR CEPH_IMAGE_DIR
         vlog "release 模式生效: ${CUBESTACK_RELEASE}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
-        unset _rel_root _layout _auto_rel_env _auto_ver
+        # 版本树里可能带私有模块: 布局固定为 <版本树根>/{offline-files/, modules/}。
+        # 这里只把位置告诉模块框架, 是否真正发现/执行由 lib-module.sh 决定。
+        # 公共版本没有 modules/, 因此什么都不发生。
+        if [ -z "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ]; then
+            _release_modules_dir="$(dirname "${OFFLINE_FILES_ROOT}")/modules"
+            if [ -d "${_release_modules_dir}" ]; then
+                CUBESTACK_EXTRA_MODULES_DIRS="${_release_modules_dir}"
+                export CUBESTACK_EXTRA_MODULES_DIRS
+                vlog "发现版本树私有模块: ${_release_modules_dir}"
+            fi
+        fi
+        unset _rel_root _layout _auto_rel_env _auto_ver _release_modules_dir
     fi
     # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
     # (档案 > cluster.conf > cluster.defaults.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
