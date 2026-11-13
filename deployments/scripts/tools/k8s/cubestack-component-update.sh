@@ -170,7 +170,9 @@ fi
 # ①c model-bundles: operator 镜像不含归档, 刷新 ConfigMap 并让 CR 指向它
 _bundle_cm=""
 if [ "${_cr}" = "modelBundles" ]; then
-    _bundle_archive="${OFFLINE_DIR}/model-collection/model-collection-bundles.tgz"
+    # 与 OFFLINE_DIR(offline-files/cubestack-operator)同级: release 的
+    # components/model-collection.yaml 把归档落在 offline-files/model-collection/。
+    _bundle_archive="${OFFLINE_FILES_ROOT:-${OFFLINE_DIR}/..}/model-collection/model-collection-bundles.tgz"
     if [ -f "${_bundle_archive}" ]; then
         _bundle_cm="$(ensure_model_bundles_configmap "${_bundle_archive}" "${NS}")" \
             || { err "model bundle ConfigMap 写入失败"; exit 1; }

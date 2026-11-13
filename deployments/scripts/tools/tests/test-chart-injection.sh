@@ -82,5 +82,29 @@ echo "== ⑤ 归档缺失时报错 =="
 run ensure_model_bundles_configmap "${TMP}/nope.tgz" cubestack-system >/dev/null 2>&1
 chk "缺失归档报错" "1" "$?"
 
+echo "== ⑥ 归档在 release 树里的位置 =="
+# 回归: release 的 components/model-collection.yaml 把归档落在
+# offline-files/model-collection/, 与 OFFLINE_DIR(offline-files/cubestack-operator)同级。
+# 曾经写成 ${OFFLINE_DIR}/model-collection/... → 多一层, 永远找不到, 只 warn 后跳过注入。
+_tool="$(dirname "${BASH_SOURCE[0]}")/../k8s/cubestack-component-update.sh"
+_expr="$(sed -n 's/^ *\(_bundle_archive=.*\)$/\1/p' "${_tool}" | head -1)"
+chk "工具里能定位到归档路径表达式" "yes" "$( [ -n "${_expr}" ] && echo yes )"
+
+mkdir -p "${TMP}/tree/offline-files/model-collection" "${TMP}/tree/offline-files/cubestack-operator"
+: > "${TMP}/tree/offline-files/model-collection/model-collection-bundles.tgz"
+_resolved="$(OFFLINE_FILES_ROOT="${TMP}/tree/offline-files" \
+             OFFLINE_DIR="${TMP}/tree/offline-files/cubestack-operator" \
+             bash -c "source /dev/stdin <<< '${_expr}'; printf '%s' \"\${_bundle_archive}\"" )"
+chk "路径解析到 release 树的 model-collection/" \
+    "${TMP}/tree/offline-files/model-collection/model-collection-bundles.tgz" "${_resolved}"
+
+# 开发树(未设 OFFLINE_FILES_ROOT)时回退到 OFFLINE_DIR/.., 同样命中。
+_resolved_dev="$(env -u OFFLINE_FILES_ROOT \
+             OFFLINE_DIR="${TMP}/tree/offline-files/cubestack-operator" \
+             bash -c "source /dev/stdin <<< '${_expr}'; printf '%s' \"\${_bundle_archive}\"" )"
+chk "开发树回退路径同样命中" \
+    "${TMP}/tree/offline-files/model-collection/model-collection-bundles.tgz" \
+    "$(cd "$(dirname "${_resolved_dev}")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "${_resolved_dev}")")"
+
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then echo "✅ test-chart-injection: 全部通过"; else echo "❌ test-chart-injection: 有失败"; exit 1; fi
