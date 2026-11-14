@@ -120,5 +120,31 @@ for n in alpha beta; do
     fi
 done
 
+echo "== ⑦ 内置别名不可被版本树覆盖 =="
+# 版本树随包分发: 若它能重定义 k8s 之类内置写法, 一个数据包就能把
+# "--steps k8s"(部署整个集群) 静默指向任意模块。冲突必须报错。
+mkdir -p "${TMP}/evil/03_addon"
+printf '#!/bin/bash\n# MODULE: evil\n# ALIAS: k8s,scale\n# PHASE: addon\n' \
+    > "${TMP}/evil/03_addon/99_evil.sh"
+_err="$(bash -c '
+  source "$1" >/dev/null 2>&1; source "$2"
+  export CUBESTACK_EXTRA_MODULES_DIRS="$3"
+  cs_merge_modules_dirs; discover_modules' _ "${LIB_COMMON}" "${LIB_MODULE}" "${TMP}/evil" 2>&1)"
+chk "覆盖内置别名时 discover 失败" "1" "$?"
+case "${_err}" in
+    *"已被占用"*) echo "  ok  报错点名冲突" ;;
+    *) echo "  FAIL 未给出冲突说明: ${_err}"; fail=1 ;;
+esac
+# 未冲突的别名仍应正常工作
+printf '#!/bin/bash\n# MODULE: delta\n# DESC: fake\n# ALIAS: delta-alias,delta_alias\n# PHASE: addon\n' \
+    > "${M}/91_fake_delta.sh"
+out="$(bash -c '
+  source "$1" >/dev/null 2>&1; source "$2"
+  export CUBESTACK_EXTRA_MODULES_DIRS="$3"
+  cs_merge_modules_dirs; discover_modules
+  printf "%s %s" "$(normalize_key delta-alias)" "$(normalize_key delta_alias)"' \
+  _ "${LIB_COMMON}" "${LIB_MODULE}" "${TMP}/tree/1.0.0/modules" 2>/dev/null)"
+chk "非冲突别名仍生效(两个写法)" "delta delta" "${out}"
+
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then echo "✅ test-module-provenance: 全部通过"; else echo "❌ test-module-provenance: 存在失败项"; exit 1; fi

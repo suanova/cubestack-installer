@@ -47,7 +47,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-common.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-module.sh"
 
 # 先发现模块(help 需动态展示 verify_* 列表, 新增 verify step 后 --help 自动更新)
-discover_modules
+discover_modules || exit 1
 
 # ---------------- 帮助 ----------------
 usage() {
@@ -283,7 +283,7 @@ load_config
 # 这次调用是空操作。
 if [ -n "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ]; then
     cs_merge_modules_dirs
-    discover_modules
+    discover_modules || exit 1
 fi
 
 # ---------------- 离线文件完整性门禁(2026-10-28) ----------------

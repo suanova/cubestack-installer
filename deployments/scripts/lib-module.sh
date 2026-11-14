@@ -262,8 +262,15 @@ discover_modules() {
         MODULE_TOGGLE+=("$(module_meta "${f}" TOGGLE)")
         MODULE_REQUIRES+=("$(module_meta "${f}" REQUIRES)")
         # 模块自声明的 --steps 别名(`# ALIAS: a,b`): 便利写法跟着拥有它的模块走。
+        # 内置别名**不可被覆盖**: 版本树随包分发, 允许它重定义 `k8s` 之类的既有写法就等于
+        # 让一个数据包把 `--steps k8s`(部署整个集群) 静默指向任意模块。冲突直接报错。
         for _alias_one in $(module_meta "${f}" ALIAS | tr ',' ' '); do
             [ -n "${_alias_one}" ] || continue
+            if [ -n "${MODULE_ALIAS[${_alias_one}]:-}" ]; then
+                err "模块 ${key} 声明的别名 '${_alias_one}' 已被占用(→ ${MODULE_ALIAS[${_alias_one}]})"
+                err "  内置别名不可覆盖; 请为该模块换一个别名"
+                return 1
+            fi
             MODULE_ALIAS["${_alias_one}"]="${key}"
             CS_DYNAMIC_ALIASES+=("${_alias_one}")
         done
