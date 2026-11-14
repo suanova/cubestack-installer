@@ -926,7 +926,18 @@ load_config() {
                NETSHOOT_SAVE_DIR NETSHOOT_BASE_TAR DEV_LAB_SAVE_DIR \
                MODEL_IMAGES_SAVE_DIR CEPH_IMAGE_DIR
         vlog "release 模式生效: ${CUBESTACK_RELEASE}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
-        unset _rel_root _layout _auto_rel_env _auto_ver
+        # 版本树里可能带私有模块: 布局固定为 <版本树根>/{offline-files/, modules/}。
+        # 这里只把位置告诉模块框架, 是否真正发现/执行由 lib-module.sh 决定。
+        # 公共版本没有 modules/, 因此什么都不发生。
+        if [ -z "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ]; then
+            _release_modules_dir="$(dirname "${OFFLINE_FILES_ROOT}")/modules"
+            if [ -d "${_release_modules_dir}" ]; then
+                CUBESTACK_EXTRA_MODULES_DIRS="${_release_modules_dir}"
+                export CUBESTACK_EXTRA_MODULES_DIRS
+                vlog "发现版本树私有模块: ${_release_modules_dir}"
+            fi
+        fi
+        unset _rel_root _layout _auto_rel_env _auto_ver _release_modules_dir
     fi
     # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
     # (档案 > cluster.conf > cluster.defaults.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
@@ -2981,4 +2992,136 @@ addon_stub() {
     done
     say "◼ [${key}] 占位流程执行完毕(如需真实安装, 请按 TODO 实现模块逻辑)"
     return 0
+}
+# ============================================================
+# 平台组件 chart 注入(2.1 起 operator 镜像不再内嵌组件 chart)
+# ============================================================
+# 背景: 2.0 的 operator 把 first-party chart 与 model bundle 一起 embed 进镜像, 因此离线集群
+#   不需要组件 chart 的独立投递。2.1 起 operator 只保留机制(见 cubestack-operator 的
+#   docs/content-injection.md), 内容由 installer 投递:
+#     · chart → 集群内置 registry; CR spec.components.<key>.version 告诉 operator 用哪个版本
+#     · model bundle → ConfigMap; CR spec.components.modelBundles.bundleArchive 引用它
+# 设计不变式: chart 的 OCI tag 必须等于 Chart.yaml 的 version(组件 CI 与 release 校验同一条)。
+
+# chart_archive_name_version <tgz>  →  "<chart-name>\t<version>"
+# 读 archive 内顶层目录的 Chart.yaml。解析失败输出空行(调用方 err)。
+chart_archive_name_version() {
+    local tgz="$1" top name version
+    [ -f "${tgz}" ] || return 1
+    top="$(tar -tzf "${tgz}" 2>/dev/null | head -1 | cut -d/ -f1)"
+    [ -n "${top}" ] || return 1
+    name="$(tar -xOf "${tgz}" "${top}/Chart.yaml" 2>/dev/null | awk -F': *' '/^name:/{print $2; exit}')"
+    version="$(tar -xOf "${tgz}" "${top}/Chart.yaml" 2>/dev/null | awk -F': *' '/^version:/{print $2; exit}')"
+    [ -n "${name}" ] && [ -n "${version}" ] || return 1
+    printf '%s\t%s\n' "${name}" "${version}"
+}
+
+# chart_cr_key <chart-name>  →  CR 组件键(spec.components.<key>); 非 CR 组件(operator 自身)输出空。
+# 与 cubestack-component-update.sh 的组件映射表保持一致。
+chart_cr_key() {
+    case "$1" in
+        cubepilot-chart)                   echo "cubepilot" ;;
+        cuberouter-chart)                  echo "cuberouter" ;;
+        cubestack-controller-manager-chart) echo "cubestackControllerManager" ;;
+        cubestack-portal-chart)            echo "cubestackPortal" ;;
+        cubestack-operator-chart)          echo "" ;;   # operator 自己由 helm 安装
+        *)                                 echo "" ;;
+    esac
+}
+
+# push_chart_archive <tgz> [reg_direct]
+# 推送单个组件 chart 到 <reg>/suanova/<chart-name>:<Chart.yaml version>, 输出该版本。
+# 幂等: tag 已存在即跳过(设计不变式: chart tag 不可变, 换内容必须 bump Chart.yaml version)。
+push_chart_archive() {
+    local tgz="$1"
+    local reg_direct="${2:-${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-5000}}}"
+    local _nv _name _ver
+
+    command -v helm >/dev/null 2>&1 || { err "缺少 helm: 推送组件 chart 需要 helm(见 CLI 镜像工具链)"; return 1; }
+    _nv="$(chart_archive_name_version "${tgz}")" \
+        || { err "  无法解析 chart 元数据: $(basename "${tgz}")"; return 1; }
+    _name="${_nv%%$'\t'*}"; _ver="${_nv#*$'\t'}"
+
+    if curl -fsS -o /dev/null "http://${reg_direct}/v2/suanova/${_name}/manifests/${_ver}" 2>/dev/null; then
+        vlog "  chart ${_name}:${_ver} 已存在, 跳过推送"
+    else
+        if ! helm push "${tgz}" "oci://${reg_direct}/suanova" --plain-http >/dev/null 2>&1; then
+            err "  chart 推送失败: ${_name}:${_ver}(源 $(basename "${tgz}"))"
+            err "  → 集群内置 registry 需支持 OCI artifact(helm push); 检查 registry 版本/磁盘"
+            return 1
+        fi
+        ok "  chart 已推送: ${_name}:${_ver}"
+    fi
+    printf '%s\n' "${_ver}"
+}
+
+# push_platform_charts <offline_charts_dir>
+# 把离线树里的组件 chart 全部推到集群内置 registry, 并把 "CR键<TAB>版本" 打到 stdout。
+# 目标路径与镜像一致: <REG>/suanova/<chart-name>:<Chart.yaml version>
+#   — CR 的 global.imageRegistry 对 oci.ref 做同一段改写(operator 侧 applyChartRegistry),
+#     所以 chart 与镜像共用一套路径规则。
+# 失败即 err: 缺 chart = 对应组件拉不到 chart, 装出来是 Degraded。
+push_platform_charts() {
+    local dir="$1"
+    local pushed=0
+    local _tgz _nv _name _ver _key
+
+    [ -d "${dir}" ] || { warn "  组件 chart 目录不存在: ${dir}(跳过)"; return 0; }
+    for _tgz in "${dir}"/*.tgz; do
+        [ -f "${_tgz}" ] || continue
+        case "$(basename "${_tgz}")" in
+            *-operator-chart*.tgz) continue ;;   # operator 自己的 chart 由 helm 直接装, 不进 registry
+        esac
+        _nv="$(chart_archive_name_version "${_tgz}")" \
+            || { err "  无法解析 chart 元数据: $(basename "${_tgz}")"; return 1; }
+        _name="${_nv%%$'\t'*}"; _ver="${_nv#*$'\t'}"
+        _key="$(chart_cr_key "${_name}")"
+        [ -n "${_key}" ] || { warn "  chart ${_name} 没有对应的 CR 组件(跳过; 新增组件请同步 chart_cr_key)"; continue; }
+        push_chart_archive "${_tgz}" >/dev/null || return 1
+        printf '%s\t%s\n' "${_key}" "${_ver}"
+        pushed=$((pushed + 1))
+    done
+    vlog "  组件 chart 已就绪: ${pushed} 个(已存在的按同名 tag 跳过)"
+    return 0
+}
+
+# ensure_model_bundles_configmap <offline_bundle_tgz> <namespace>
+# 把 release 树的 model bundle 归档写成 ConfigMap, 输出 ConfigMap 名。
+# 名字带归档 digest(前 12 位): 新归档=新 ConfigMap, CR diff 可见; 同时 digest 进
+# operator 的 config hash, 原地改内容也会重新 apply。
+# ConfigMap 上限(etcd 单对象 ~1MiB): 超出时明确报错, 而不是让 operator 悄悄少装 bundle。
+ensure_model_bundles_configmap() {
+    local archive="$1" ns="${2:-cubestack-system}"
+    local digest name b64 size
+
+    [ -f "${archive}" ] || { err "  model bundle 归档不存在: ${archive}"; return 1; }
+    size="$(stat -c%s "${archive}" 2>/dev/null || echo 0)"
+    if [ "${size}" -gt 950000 ]; then
+        err "  model bundle 归档 ${size} 字节, 超过 ConfigMap 单对象上限(~1MiB)"
+        err "  → 需要拆分 bundle 归档(payload 化)后再注入; 当前不能静默丢弃"
+        return 1
+    fi
+    digest="$(sha256sum "${archive}" | cut -c1-12)"
+    name="cubestack-model-bundles-${digest}"
+    b64="$(base64 -w0 "${archive}" 2>/dev/null || base64 "${archive}" | tr -d '\n')"
+
+    if SSH "${K}" -n "${ns}" apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${name}
+  namespace: ${ns}
+  labels:
+    app.kubernetes.io/managed-by: cubestack-installer
+    cubestack.io/component: model-bundles
+binaryData:
+  model-bundles.tgz: ${b64}
+EOF
+    then
+        ok "  model bundle ConfigMap 已就绪: ${ns}/${name}(digest ${digest})"
+        printf '%s\n' "${name}"
+    else
+        err "  ConfigMap 写入失败: ${ns}/${name}(检查 kubectl/命名空间/体积)"
+        return 1
+    fi
 }

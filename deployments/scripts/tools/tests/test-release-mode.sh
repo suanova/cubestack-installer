@@ -109,6 +109,33 @@ err="$(rc_of CUBESTACK_RELEASE=9.9.4 CUBESTACK_RELEASE_ROOT="${TMP}/bad3")"; rc=
 chk "release.env 哈希不符退出码 1" "1" "${rc}"
 chk_contains "release.env 哈希不符提示" "release.env 校验失败" "${err}"
 
+# ---------------- ⑦ 版本树附带的模块自动发现 ----------------
+# 布局固定: <版本树根>/{offline-files/, modules/}。installer 自身不含私有模块,
+# 这里只验"位置被正确交给模块框架", 不涉及任何具体模块名。
+echo "== ⑦ 版本树模块自动发现 =="
+mkdir -p "${TMP}/rel/9.9.3/offline-files" "${TMP}/rel/9.9.3/modules/03_addon"
+printf 'RELEASE_VERSION=9.9.3\nKUBESPRAY_VERSION=v2.32.0\n' > "${TMP}/rel/9.9.3/offline-files/release.env"
+printf '#!/bin/bash\n# MODULE: tree_mod\n# DESC: tree module\n# PHASE: addon\n' \
+    > "${TMP}/rel/9.9.3/modules/03_addon/99_tree_mod.sh"
+out="$(run_load CUBESTACK_RELEASE=9.9.3 CUBESTACK_RELEASE_ROOT="${TMP}/rel")"
+# run_load 只打印固定变量; 用独立断言直接取 CUBESTACK_EXTRA_MODULES_DIRS
+extra="$(env CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_RELEASE=9.9.3 CUBESTACK_RELEASE_ROOT="${TMP}/rel" \
+    bash -c 'source "$1"; load_config; printf "%s" "${CUBESTACK_EXTRA_MODULES_DIRS:-}"' _ "${LIB}" 2>/dev/null)"
+chk "版本树 modules/ 被交给模块框架" "${TMP}/rel/9.9.3/modules" "${extra}"
+
+# 没有 modules/ 的版本树(公共形态): 不得凭空设置, 否则会指向不存在的目录。
+mkdir -p "${TMP}/rel2/9.9.2/offline-files"
+printf 'RELEASE_VERSION=9.9.2\nKUBESPRAY_VERSION=v2.32.0\n' > "${TMP}/rel2/9.9.2/offline-files/release.env"
+extra="$(env CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_RELEASE=9.9.2 CUBESTACK_RELEASE_ROOT="${TMP}/rel2" \
+    bash -c 'source "$1"; load_config; printf "%s" "${CUBESTACK_EXTRA_MODULES_DIRS:-}"' _ "${LIB}" 2>/dev/null)"
+chk "公共版本树不设置额外模块目录" "" "${extra}"
+
+# 调用方显式指定时以调用方为准(调试/非常规布局)。
+extra="$(env CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_RELEASE=9.9.3 CUBESTACK_RELEASE_ROOT="${TMP}/rel" \
+    CUBESTACK_EXTRA_MODULES_DIRS=/custom/modules \
+    bash -c 'source "$1"; load_config; printf "%s" "${CUBESTACK_EXTRA_MODULES_DIRS:-}"' _ "${LIB}" 2>/dev/null)"
+chk "显式指定优先于自动发现" "/custom/modules" "${extra}"
+
 if [ "${fail}" = "0" ]; then
     echo "✅ test-release-mode: 全部通过"
 else

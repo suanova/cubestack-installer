@@ -55,6 +55,20 @@ chk_not "child reuses merged root" "-1" "${out}"
 out="$(bash -c 'CUBESTACK_EXTRA_MODULES_DIRS="$1"; source "$2" >/dev/null 2>&1; source "$3"; discover_modules; module_index test_extra' _ "${TMP}/extra/03_addon" "${LIB_COMMON}" "${LIB_MODULE}")"
 chk_not "extra phase dir discovers module" "-1" "${out}"
 
+# 重复合并(load_config 之后路径才确定, 同一进程会合并两次): 幂等, 不自我嵌套。
+first="$(bash -c 'CUBESTACK_EXTRA_MODULES_DIRS="$1"; source "$2" >/dev/null 2>&1; source "$3"; discover_modules; a=$(module_index test_extra); cs_merge_modules_dirs; discover_modules; b=$(module_index test_extra); printf "%s %s %s" "${a}" "${b}" "${#MODULE_KEY[@]}"' _ "${TMP}/extra" "${LIB_COMMON}" "${LIB_MODULE}")"
+chk "重复合并后模块仍在且总数不变" "${first%% *} ${first%% *} ${first##* }" "${first}"
+merged2="$(bash -c 'CUBESTACK_EXTRA_MODULES_DIRS="$1"; source "$2" >/dev/null 2>&1; source "$3"; cs_merge_modules_dirs; cs_merge_modules_dirs; echo "${MODULES_DIR}"' _ "${TMP}/extra" "${LIB_COMMON}" "${LIB_MODULE}")"
+if [ -L "${merged2}/03_addon/99_test_extra.sh" ]; then
+    echo "  ok  二次合并的软链仍指向源文件"
+else
+    echo "  FAIL 二次合并后软链丢失"; fail=1
+fi
+case "$(readlink -f "${merged2}/03_addon/99_test_extra.sh")" in
+    "${TMP}/extra/"*) echo "  ok  二次合并没有自我嵌套" ;;
+    *) echo "  FAIL 二次合并指向了错误位置: $(readlink -f "${merged2}/03_addon/99_test_extra.sh")"; fail=1 ;;
+esac
+
 # Duplicate file name must fail during merge.
 mkdir -p "${TMP}/dupfile/03_addon"
 cat > "${TMP}/dupfile/03_addon/02_ceph.sh" <<'EOF'

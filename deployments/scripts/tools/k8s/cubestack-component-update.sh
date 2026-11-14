@@ -11,11 +11,15 @@
 #   ① 校验 CubeStackCluster CR 存在(operator 已装; 否则提示先跑 --steps cubestack_operator)
 #   ② 只推送 offline-files/cubestack-operator/<组件>/ 下该组件的镜像 tar
 #      (config-digest 幂等 + IMAGE_PUSH_* 层并行/precompute; 不碰 operator 镜像)
-#   ③ 可选 patch CR spec.components.<key>.version / values
+#   ②b 2.1 起: 推该组件的 chart(offline-files/cubestack-operator/charts/<name>-chart.tgz)到
+#      集群 registry, 版本取 Chart.yaml version(operator 镜像不再内嵌自研组件 chart);
+#      model_bundles 另外把归档写成 ConfigMap 并让 CR 的 bundleArchive 指向它
+#   ③ 可选 patch CR spec.components.<key>.version / values / bundleArchive
 #   ④ 按 label cubestack.io/component=<组件> 找到组件 Deployment 并 rollout restart,
 #      确保新 Pod 真的从集群 registry/Harbor 重新拉取
 # 环境变量(都可选):
 #   CUBESTACK_COMPONENT_VERSION       覆盖 CR spec.components.<key>.version
+#                                     (默认取发布树 chart 的 Chart.yaml version)
 #   CUBESTACK_COMPONENT_VALUES_FILE   组件 values(YAML/JSON), 合并到 CR spec.components.<key>.values
 #   CUBESTACK_COMPONENT_PULL_POLICY   第三方组件 image.pullPolicy(默认 Always; 自研组件由 CR global 管)
 #   CUBESTACK_COMPONENT_ENABLED       true/false: 覆盖 CR spec.components.<key>.enabled
@@ -137,8 +141,48 @@ if [ "${_n_tar}" -eq 0 ]; then
     say "  ${COMP_DIR} 下没有镜像 tar —— 该组件为 assets/CR-only 更新(不推镜像)"
 fi
 
+# ①b 组件 chart: 推集群 registry + 记下版本(2.1: operator 镜像不再内嵌 chart)
+#   chart 与镜像同源同布局: <REG>/suanova/<chart-name>:<Chart.yaml version>; CR 的
+#   global.imageRegistry 会把 operator 的 oci.ref 改写到同一路径。
+#   版本优先级: CUBESTACK_COMPONENT_VERSION(显式) > 发布树 chart 的 Chart.yaml version。
+_chart_ver=""
+for _ct in "${OFFLINE_DIR}"/charts/*.tgz; do
+    [ -f "${_ct}" ] || continue
+    case "$(basename "${_ct}")" in *-operator-chart*.tgz) continue ;; esac
+    _cnv="$(chart_archive_name_version "${_ct}")" || continue
+    _cname="${_cnv%%$'\t'*}"; _cver="${_cnv#*$'\t'}"
+    [ "$(chart_cr_key "${_cname}")" = "${_cr}" ] || continue
+    if push_chart_archive "${_ct}" >/dev/null; then
+        _chart_ver="${_cver}"
+        say "  组件 chart 就绪: ${_cname}:${_cver}"
+    else
+        err "组件 chart 推送失败: ${_cname}:${_cver}"
+        exit 1
+    fi
+    break
+done
+if [ -z "${_chart_ver}" ] && [ -z "${CUBESTACK_COMPONENT_VERSION:-}" ]; then
+    case "${_third}" in
+        0) vlog "  ${OFFLINE_DIR}/charts 下没有 ${_catalog} 的 chart(该组件可能无 chart 或未打包)" ;;
+    esac
+fi
+
+# ①c model-bundles: operator 镜像不含归档, 刷新 ConfigMap 并让 CR 指向它
+_bundle_cm=""
+if [ "${_cr}" = "modelBundles" ]; then
+    # 与 OFFLINE_DIR(offline-files/cubestack-operator)同级: release 的
+    # components/model-collection.yaml 把归档落在 offline-files/model-collection/。
+    _bundle_archive="${OFFLINE_FILES_ROOT:-${OFFLINE_DIR}/..}/model-collection/model-collection-bundles.tgz"
+    if [ -f "${_bundle_archive}" ]; then
+        _bundle_cm="$(ensure_model_bundles_configmap "${_bundle_archive}" "${NS}")" \
+            || { err "model bundle ConfigMap 写入失败"; exit 1; }
+    else
+        warn "  未找到 model bundle 归档: ${_bundle_archive}(CR 的 bundleArchive 保持原值)"
+    fi
+fi
+
 # ② 可选 CR patch: version / values / 第三方 pullPolicy
-_ver="${CUBESTACK_COMPONENT_VERSION:-}"
+_ver="${CUBESTACK_COMPONENT_VERSION:-${_chart_ver}}"
 _enabled="${CUBESTACK_COMPONENT_ENABLED:-}"
 _bundles="${CUBESTACK_COMPONENT_BUNDLES:-}"
 _values_json=""
@@ -162,9 +206,9 @@ _pull_policy="${CUBESTACK_COMPONENT_PULL_POLICY:-}"
 if [ -z "${_pull_policy}" ] && [ "${_third}" = "1" ]; then
     _pull_policy="Always"   # 第三方组件不受 CR global.imagePullPolicy 影响; 默认尝试 Always
 fi
-_patch_json="$(python3 - "${_cr}" "${_ver}" "${_values_json}" "${_pull_policy}" "${_enabled}" "${_bundles}" <<'PY'
+_patch_json="$(python3 - "${_cr}" "${_ver}" "${_values_json}" "${_pull_policy}" "${_enabled}" "${_bundles}" "${_bundle_cm}" <<'PY'
 import json, sys
-cr, ver, vals, pol, enabled, bundles = sys.argv[1:7]
+cr, ver, vals, pol, enabled, bundles, bundle_cm = sys.argv[1:8]
 comp = {}
 if ver:
     comp["version"] = ver
@@ -187,10 +231,12 @@ if pol:
 out = {"spec": {"components": {cr: comp}}}
 if bundles and cr == "modelBundles":
     out["spec"]["bundles"] = [x.strip() for x in bundles.split(",") if x.strip()]
+if bundle_cm and cr == "modelBundles":
+    comp.setdefault("bundleArchive", {})["name"] = bundle_cm
 print(json.dumps(out, separators=(",", ":")))
 PY
 )"
-if [ "${_patch_json}" != '{"spec":{"components":{}}}' ] && [ -n "${_ver}${_values_json}${_pull_policy}${_enabled}${_bundles}" ]; then
+if [ "${_patch_json}" != '{"spec":{"components":{}}}' ] && [ -n "${_ver}${_values_json}${_pull_policy}${_enabled}${_bundles}${_bundle_cm}" ]; then
     say "  patch CR: spec.components.${_cr}(version=${_ver:-<不变>}, enabled=${_enabled:-<不变>}, values=$([ -n "${_values_json}" ] && echo 有 || echo 无), pullPolicy=${_pull_policy:-<不变>}$([ -n "${_bundles}" ] && echo ", bundles=${_bundles}" || true))"
     printf '%s' "${_patch_json}" | ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
