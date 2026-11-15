@@ -10,15 +10,10 @@
 # 说明:
 #   · 默认口径(2026-11-02): master 默认 **可调度** —— 不 cordon, 且移除 kubespray 默认
 #     给 control-plane 打的 node-role.kubernetes.io/control-plane:NoSchedule 污点;
-#     CubeStack operator/平台组件仍通过 nodeSelector + toleration 钉到 master。
 #     设 NODE_POOL_MASTER_CORDON=true 可改为 cordon 隔离;
 #     设 NODE_POOL_MASTER_SCHEDULABLE=false 可保留 kubespray 默认污点。
 #     Pod 侧仍带 node.kubernetes.io/unschedulable:NoSchedule + control-plane toleration。
-#   · 本模块 = 平台 placement(先) + master 标签/污点/cordon(后)：
-#       - NODE_POOL_CUBESTACK_PLACEMENT=true(默认): cubestack-placement.sh 兜底 patch 平台 Deployment
-#         (patch 前先给 RWO PVC 的 Deployment 设 Recreate，避免 Multi-Attach)；
-#         平台 operator 模块还会通过 CubeStackCluster components.<name>.values 在创建
-#         cubepilot-api/operator、controller-manager、portal 时直接下发 master placement。
+#   · 本模块 = 系统组件 placement(可选, 先) + master 标签/污点/cordon(后)：
 #       - NODE_POOL_PLATFORM_PLACEMENT=false(默认): 不动 CoreDNS/metrics/registry/MetalLB 等系统组件。
 #   · 无可用 worker 安全护栏(2026-10-28): 没有 **Ready 且未 cordon** 的 worker(单节点
 #     all-in-one / 纯 master 集群, 或配置的 worker 全部 NotReady/已 cordon)时,
@@ -30,10 +25,10 @@
 #       sudo ./deploy-cluster.sh --steps node_pool
 #       sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool   # 回滚
 #       (变量必须经 env 传给 root: sudo 默认 env_reset 会清掉 "VAR=... sudo" 前置赋值)
-#   · remove 不看当前 NODE_POOL_MASTER_CORDON / NODE_POOL_CUBESTACK_PLACEMENT /
-#     NODE_POOL_PLATFORM_PLACEMENT：应用后把开关改成 false 再回滚, 同样会清掉本工具
-#     施加的 cordon 与 master nodeSelector(幂等; 不存在的对象/未施加的 selector 跳过)。
-#     placement 移除失败会使回滚**非 0 退出**(不再降级为告警), 由调用方如实看到残留。
+#   · remove 不看当前 NODE_POOL_MASTER_CORDON / NODE_POOL_PLATFORM_PLACEMENT：
+#     应用后把开关改成 false 再回滚, 同样会清掉本工具施加的 cordon 与 master nodeSelector
+#     (幂等; 不存在的对象/未施加的 selector 跳过)。placement 移除失败会使回滚**非 0 退出**
+#     (不再降级为告警), 由调用方如实看到残留。
 #   · cordon 由本工具创建时会打 ownership annotation; remove 只回滚自己创建的 cordon,
 #     不会误删用户/其他工具预先设置的 cordon。remove **不还原**已移除的 master 污点
 #     (可调度是默认策略; 需要恢复污点请手工 kubectl taint)。
@@ -54,7 +49,7 @@ esac
 
 # remove 分支必须在 TOGGLE 检查之前: 即使开关已关, 也要能回滚节点标签/cordon。
 if [ "${_ACTION}" = "remove" ]; then
-    say "节点池回滚(master 标签/cordon + placement)..."
+    say "节点池回滚(master 标签/cordon + 系统组件 placement)..."
     bash "${SCRIPT_DIR}/tools/node/node-pool.sh" --remove
     # ★ 2026-10-28: placement 回滚**不看当前 placement 开关** —— 应用时开关可能是 true,
     #   之后被改成 false; 只回滚"当前仍为 true"的项会留下 nodeSelector 残留(与 cordon 的
@@ -63,7 +58,6 @@ if [ "${_ACTION}" = "remove" ]; then
     #   删 registry Pod, 从未应用过 placement 时不会扰动 registry。
     #   ★ 失败必须向上传播(2026-10-28): 回滚没清干净时不能报成功, 否则调度器拒绝重跑。
     _rm_failed=0
-    bash "${SCRIPT_DIR}/tools/k8s/cubestack-placement.sh" --remove || _rm_failed=1
     bash "${SCRIPT_DIR}/tools/k8s/master-placement.sh" --remove || _rm_failed=1
     if [ "${_rm_failed}" -ne 0 ]; then
         err "节点池回滚: placement 移除存在失败项, 请人工核对残留 nodeSelector"
@@ -73,7 +67,7 @@ if [ "${_ACTION}" = "remove" ]; then
 fi
 
 if [ "${NODE_POOL_ENABLED:-false}" != "true" ]; then
-    say "NODE_POOL_ENABLED=false, 跳过节点池隔离(平台 placement 配置完成后再启用)"
+    say "NODE_POOL_ENABLED=false, 跳过节点池隔离"
     exit 0
 fi
 
@@ -83,10 +77,6 @@ case "${_ACTION}" in
             say "系统组件 master placement(CoreDNS/metrics/registry/MetalLB 等)..."
             bash "${SCRIPT_DIR}/tools/k8s/master-placement.sh" --apply
         fi
-        if [ "${NODE_POOL_CUBESTACK_PLACEMENT:-true}" = "true" ]; then
-            say "CubeStack operator/平台组件 master placement ..."
-            bash "${SCRIPT_DIR}/tools/k8s/cubestack-placement.sh" --apply
-        fi
         say "节点池隔离: master 打标签/按配置 cordon(无 worker 集群自动保持可调度)..."
         bash "${SCRIPT_DIR}/tools/node/node-pool.sh" --apply
         ;;
@@ -94,10 +84,6 @@ case "${_ACTION}" in
         if [ "${NODE_POOL_PLATFORM_PLACEMENT:-true}" = "true" ]; then
             say "校验系统组件 master placement..."
             bash "${SCRIPT_DIR}/tools/k8s/master-placement.sh" --check
-        fi
-        if [ "${NODE_POOL_CUBESTACK_PLACEMENT:-true}" = "true" ]; then
-            say "校验 CubeStack operator/平台组件 master placement..."
-            bash "${SCRIPT_DIR}/tools/k8s/cubestack-placement.sh" --check
         fi
         say "节点池隔离: 校验 master 标签/cordon..."
         bash "${SCRIPT_DIR}/tools/node/node-pool.sh" --check

@@ -18,7 +18,7 @@
   Ceph / operator / 平台组件通过 nodeSelector + toleration 钉到 master；设
   `NODE_POOL_MASTER_CORDON=true` 可切回 cordon 隔离（Pod 侧 toleration 保留，
   便于随时切换）。
-- **GPU worker**：纯 GPU 节点，只允许 sglang/vllm 推理与 GPU 驱动/设备插件等必要 Pod；
+- **GPU worker**：纯 GPU 节点，只允许 GPU 推理负载与 GPU 驱动/设备插件等必要 Pod；
   系统 DaemonSet 例外。
 - 允许临时维护时对 master `cordon/drain`，不破坏平台组件的重调度。
 
@@ -125,9 +125,9 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
   "master 可调度"（移除 control-plane/master 污点 + 加 master 标签）。原因：kubespray 的
   registry ReplicaSet 没有 control-plane toleration，而 `05_k8s_registry` 会等它 Ready；
   纯 master / 多 master 无 worker 集群若等到本模块（53）才去污点，registry 会先 600s 超时。
-  cordon 与平台 placement 仍由本模块在 addon 末尾按配置执行（幂等重跑）。
+  cordon 与系统组件 placement 仍由本模块在 addon 末尾按配置执行（幂等重跑）。
 - `remove` 先 uncordon，再移除 master nodeSelector。**回滚不看当前 placement 开关**：
-  应用后把 `NODE_POOL_CUBESTACK_PLACEMENT`/`NODE_POOL_PLATFORM_PLACEMENT` 改成 false
+  应用后把 `NODE_POOL_PLATFORM_PLACEMENT` 改成 false
   再执行 remove，仍会清掉本工具施加的 nodeSelector（与 cordon 的 ownership 口径一致）。
   `master-placement.sh --remove` 只处理**当前确实带** master selector 的对象——从未应用过
   placement 时不会 patch，也不会重建 registry Pod。存在性查询失败（API/RBAC/SSH）或
@@ -155,38 +155,16 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
 > `--steps node_pool` 重新应用。`--remove` 只移除本工具加的 master nodeSelector，
 > tolerations 保留（避免 control-plane taint 下的组件 Pending）。
 
-### CubeStack operator/平台组件 master placement(阶段二 B-2)
+### 平台组件 master placement（阶段二 B-2，由版本树提供）
 
-`deployments/scripts/tools/k8s/cubestack-placement.sh` 给以下 Deployment 加 master
-nodeSelector + control-plane/unschedulable tolerations：
+平台组件（operator 及其托管的各组 Deployment）的 master placement 不在本仓库：
+它依赖平台的组件清单与 CR 约定，属于随版本树分发的私有模块。
 
-- `cubestack-system`：`cubestack-operator`、`cubestack-controller-manager`、`cubepilot-api`、
-  `cubepilot-operator`、`cubestack-portal`
-- `envoy-gateway-system`：`envoy-gateway` 控制器
-- `ai-gateway-system`：`ai-gateway-controller`
-- `lws-system`：`lws-controller-manager`
-- `cuberouter`：`cuberouter`、`cuberouter-cloudnative-pg`、`redis-operator`
-- `monitoring`：`kube-prometheus-grafana`、`kube-prometheus-kube-prome-operator`、
-  `kube-prometheus-kube-state-metrics`、`perses-operator-controller-manager`
-
-**明确不动**：Envoy Gateway 数据面 proxy Deployment（`envoy-envoy-gateway-system-*`）、
-sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worker 隔离在后续阶段单独做。
-`NODE_POOL_CUBESTACK_PLACEMENT=false` 可关闭。
-
-- operator 自身的 chart 安装也加了 `nodeSelector`/`tolerations`（平台 operator 模块），
-  新建/重装时 operator pod 直接落 master。
-- **默认通过 chart 透传**：平台 operator 模块在 `NODE_POOL_CUBESTACK_PLACEMENT=true`
-  时生成 values 文件，把以下组件值传给 CubeStackCluster（组件 chart 已原生支持，无需改 chart）：
-  - `components.cubepilot.values.operator/api/web`
-  - `components.cubestackControllerManager.values`
-  - `components.cubestackPortal.values`
-  对应 `nodeSelector: node-role.kubernetes.io/control-plane=""` + control-plane/unschedulable
-  tolerations ⇒ **创建 Deployment 时即钉 master**，不依赖部署末尾 patch。
-- 其余平台组件（Envoy 控制器、ai-gateway、lws、cuberouter、monitoring 等）仍由
-  `cubestack-placement.sh` 在 node_pool 模块末尾兜底 patch。
-- **没有**设置 `CubeStackCluster.spec.global.nodeSelector/tolerations`——它是全局注入，
-  可能把 model bundle 推理负载也钉到 master；平台组件用 component values/直接 patch，
-  GPU 阶段再单独处理 bundle。
+- 版本树提供 `modules/03_addon/54_platform_placement.sh` 与它调用的工具；
+  `--release` 模式下自动发现并随全量部署执行，也可 `--steps platform_placement` 单跑。
+- 关闭方式由版本树说明（在其模块的 `TOGGLE` 里声明），公共 installer 不定义该开关。
+- 公共版本没有这些对象，因此本模块不会做任何平台 placement —— 这是正确的：开源版
+  的组件是手工 `helm install` 的，本仓库不管理它们。
 
 ### 配置（cluster.defaults.conf §2.8）
 
@@ -198,7 +176,6 @@ sglang/vllm/model bundle 推理负载、任何 DaemonSet/StatefulSet。GPU worke
 | `NODE_POOL_MASTER_CORDON` | `false` | master 是否 cordon（默认 false=可调度；true=cordon；**无可用 worker 时自动跳过 cordon**） |
 | `NODE_POOL_MASTER_SCHEDULABLE` | `true` | 是否移除 master 的 control-plane/master NoSchedule 污点（默认 true=可调度；false=保留 kubespray 默认污点） |
 | `NODE_POOL_PLATFORM_PLACEMENT` | `false` | 是否把 CoreDNS/metrics/registry/MetalLB 等系统组件也钉 master |
-| `NODE_POOL_CUBESTACK_PLACEMENT` | `true` | CubeStack operator/平台组件钉 master（含 chart values 透传） |
 | `NODE_POOL_GPU_LABEL` | `node-pool=gpu` | 阶段二使用 |
 | `NODE_POOL_GPU_TAINT` | `dedicated=gpu:NoSchedule` | 阶段二使用 |
 | `NODE_POOL_GPU_NODES` | 空 | 阶段二使用（hostname 列表） |
@@ -232,12 +209,10 @@ bash deployments/scripts/tools/check-modules.sh
    - Ceph mon/osd/mgr 的 `placement` 增加 unschedulable toleration；
    - Rook operator、ceph-csi operator/controller、nodeplugin；
    - registry、CoreDNS、metrics-server、dns-autoscaler；
-   - MetalLB controller nodeSelector；
-   - cubestack operator chart values / CubeStackCluster 按组件 placement，
-     避免把 sglang/vllm 也钉到 master。
+   - MetalLB controller nodeSelector。
 2. **GPU worker 隔离**：
    - GPU 节点打 `node-pool=gpu` + `dedicated=gpu:NoSchedule`；
-   - sglang/vllm 加 GPU taint toleration + nodeSelector；
+   - GPU 推理负载加 GPU taint toleration + nodeSelector；
    - GPU driver/device-plugin/NFD/RDMA DaemonSet 加 GPU taint toleration；
    - 系统 DaemonSet 保持 `operator: Exists` 全节点覆盖。
 3. 在真实多 master + GPU worker 集群验证：

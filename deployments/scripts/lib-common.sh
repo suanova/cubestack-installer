@@ -10,6 +10,10 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"          # deployments/scripts/ → 根目录
 
+# 本库位置交给外部工具: 版本树附带的模块/工具(source 本库)可以据此再定位这里的原语,
+# 而不必复制一份、也不必猜相对路径。installer 只提供通用能力, 具体业务脚本在调用方。
+export CUBESTACK_SCRIPTS_DIR="${SCRIPT_DIR}"
+
 # 离线文件校验器定位/自举(不依赖本库, 供 deploy/fetch/cubestack-offline 共用)
 # shellcheck source=tools/offline/lib-offline-verify.sh
 source "${SCRIPT_DIR}/tools/offline/lib-offline-verify.sh"
@@ -926,7 +930,21 @@ load_config() {
                NETSHOOT_SAVE_DIR NETSHOOT_BASE_TAR DEV_LAB_SAVE_DIR \
                MODEL_IMAGES_SAVE_DIR CEPH_IMAGE_DIR
         vlog "release 模式生效: ${CUBESTACK_RELEASE}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
-        unset _rel_root _layout _auto_rel_env _auto_ver
+        # 版本树里可能带私有模块: 布局固定为 <版本树根>/{offline-files/, modules/}。
+        # 这里只把位置告诉模块框架, 是否真正发现/执行由 lib-module.sh 决定。
+        # 公共版本没有 modules/, 因此什么都不发生。
+        _release_modules_dir="$(dirname "${OFFLINE_FILES_ROOT}")/modules"
+        if [ -d "${_release_modules_dir}" ]; then
+            # 追加而不是覆盖: 调用方可能已指定额外的模块目录(调试/非常规布局), 两者都该
+            # 生效 —— 否则"设了变量"会静默让版本树的模块整体消失, 那是最难排查的失败。
+            case ":${CUBESTACK_EXTRA_MODULES_DIRS:-}:" in
+                *":${_release_modules_dir}:"*) : ;;   # 已在列表里
+                *) CUBESTACK_EXTRA_MODULES_DIRS="${CUBESTACK_EXTRA_MODULES_DIRS:+${CUBESTACK_EXTRA_MODULES_DIRS}:}${_release_modules_dir}"
+                   export CUBESTACK_EXTRA_MODULES_DIRS
+                   vlog "发现版本树私有模块: ${_release_modules_dir}" ;;
+            esac
+        fi
+        unset _rel_root _layout _auto_rel_env _auto_ver _release_modules_dir
     fi
     # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
     # (档案 > cluster.conf > cluster.defaults.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
@@ -2825,7 +2843,7 @@ EOF
 }
 
 # ---------------- RWO 单卷 Deployment 的更新策略守护 ----------------
-# 背景(2026-10-19 实机): cubepilot-api 把单个 ReadWriteOnce PVC 挂在 Deployment 上,
+# 背景(2026-10-19 实机): 某个组件把单个 ReadWriteOnce PVC 挂在 Deployment 上,
 #   默认 strategy=RollingUpdate + maxSurge>0 会**先**起新 Pod; 新 Pod 调度到另一节点后
 #   无法挂载同一 RWO 卷(attachdetach 报 Multi-Attach, 卷仍被旧 Pod 占用), 而 maxUnavailable
 #   又阻止旧 Pod 先退出 → Deployment 永久卡住(1 个旧 Pod Running + 1 个新 Pod ContainerCreating)。

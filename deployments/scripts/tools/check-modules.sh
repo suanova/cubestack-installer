@@ -585,22 +585,6 @@ else
     ck_fail "缺少 tests/test-master-placement.sh(本回归必须接线, 防'写了没人跑')"
 fi
 
-# ---------- ⑫g CubeStack operator/平台组件 master placement 回归(2026-10-27) ----------
-# operator/controller-manager/cubepilot/portal/envoy 控制器/ai-gateway/lws/cuberouter/monitoring
-# 上 master; 明确不碰 Envoy 数据面 proxy 与 sglang/vllm 模型推理负载(GPU 阶段单独处理)。
-_CBPLACE_SH="${SCRIPT_DIR}/tests/test-cubestack-placement.sh"
-if [ -f "${_CBPLACE_SH}" ]; then
-    if _CBPLACE_OUT="$(bash "${_CBPLACE_SH}" 2>&1)"; then
-        ok "  CubeStack operator/平台组件 placement 回归通过"
-    else
-        printf '%s\n' "${_CBPLACE_OUT}" | sed 's/^/    /'
-        ck_fail "CubeStack operator/平台组件 placement 回归未通过(详见上方失败项)"
-    fi
-    unset _CBPLACE_OUT
-else
-    ck_fail "缺少 tests/test-cubestack-placement.sh(本回归必须接线, 防'写了没人跑')"
-fi
-
 # ---------- ⑬ API 入口: 本地代理语义与 all.yml 的自洽 ----------
 # 背景: kubespray 的 kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支
 #   **优先于** localhost 分支 —— 只要 all.yml 里还有**未注释**的 loadbalancer_apiserver 块,
@@ -760,7 +744,7 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-deploy-config-guard.sh test-k8s-ntp.sh test-cephfs-mount.sh \
            test-ceph-data-disks.sh \
            test-metallb-pool-check.sh test-ceph-cluster-detect.sh \
-           test-multus-iface-detect.sh test-devlab-tar-select.sh \
+           test-multus-iface-detect.sh \
            test-devlab-tar-name.sh test-netshoot-tar-select.sh \
            test-nodeport-leak-preflight.sh test-sync-versions.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"

@@ -155,7 +155,9 @@ deployments/scripts/
 
 **向后兼容**:旧模块名(`net`/`ssh_key`/`vm`/`ssh_passwordless`/`worker_bm`/`hosts`/`inventory`/`ntp`/`k8s`/`scale`)由 `lib-module.sh` 的 `MODULE_ALIAS` 自动映射,旧用法 `--steps vm,k8s` 仍然有效。
 
-**额外私有模块目录**:`CUBESTACK_EXTRA_MODULES_DIRS` 可指定冒号分隔的目录,每个目录结构同 `modules/`(例如版本目录中的 `modules/`)。设置后框架把内置模块和这些目录合并到临时模块根再发现/执行;未设置时行为与原来完全一致。重复的模块文件名或 `MODULE` key 会直接报错。
+**额外模块目录**:`CUBESTACK_EXTRA_MODULES_DIRS` 可指定冒号分隔的目录,每个目录结构同 `modules/`。设置后框架把内置模块和这些目录合并到临时模块根再发现/执行;未设置时行为与原来完全一致。重复的模块文件名或 `MODULE` key 会直接报错。
+
+`--release` 模式下**无需手工设置**:`load_config` 解析出发布树根之后,会自动把 `<版本树根>/modules/`(与 `offline-files/` 同级)交给该机制;目录不存在则什么都不发生。显式设置的环境变量优先。`--list-steps` 的「平台组件级更新」段只列真正来自这些目录的模块,因此开源版本不会出现任何私有组件名;`--help` 在版本树加载前打印,其中不含这类模块,以 `--list-steps` 为准。
 
 项目根目录 `scripts/` 下仅保留 roadmap 生成脚本；部署脚本统一在 `deployments/scripts/`。
 
@@ -534,7 +536,7 @@ export OFFLINE_FILES_ROOT=<root>/2.1.0/offline-files
 ```
 
 - **完整性**: `release.env` 先经 `SHA256SUMS` 预校验, 再用 `verify-offline-files.sh` 校验整树;
-- **模块**: 平台模块由版本树的 `modules/` 提供(通过 `CUBESTACK_EXTRA_MODULES_DIRS` 合并);
+- **模块**: 平台模块由版本树的 `modules/` 提供,`--release` 会自动发现并合并(见上文「额外模块目录」);
 - **不再提供**: MinIO 拉取/推送/trim 工具与旧 `--release` 布局。
 
 ### 5.14 容器化部署(补充说明)
