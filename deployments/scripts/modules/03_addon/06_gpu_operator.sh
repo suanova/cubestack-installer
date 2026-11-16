@@ -91,7 +91,12 @@ _metax_cleanup_residual() {
     # 超时/传输失败视为未知并继续重试(不能提前结束等待)。
     local _wn_end=$((SECONDS + 60)) _st=2
     while [ "${SECONDS}" -lt "${_wn_end}" ]; do
-        _metax_ns_probe "${_mns}"; _st=$?
+        # 必须在 if 里取状态: set -e 下裸调用返回 1/2 会直接退出模块
+        if _metax_ns_probe "${_mns}"; then
+            _st=0
+        else
+            _st=$?
+        fi
         [ "${_st}" = "0" ] && break
         sleep 3
     done
