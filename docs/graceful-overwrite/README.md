@@ -61,11 +61,11 @@ multus / rdma_shared_dev_plugin / cubestack_operator / netshoot)∪ 登记中的
 ```bash
 bash deployments/scripts/tools/k8s/cluster-teardown.sh --list        # 只读: 登记表 + 计划拆序(不做任何卸载)
 bash deployments/scripts/tools/k8s/cluster-teardown.sh --list --raw  # 同上, TSV 机读(key/来源/脚本; 离线夹具用)
-bash deployments/scripts/tools/k8s/cluster-teardown.sh --uninstall   # 执行(交互终端: 询问 yes/no, 回答 yes 才开始)
-bash deployments/scripts/tools/k8s/cluster-teardown.sh --uninstall --yes   # 免确认(等效 CUBESTACK_ASSUME_YES=1)
+bash deployments/scripts/tools/k8s/cluster-teardown.sh --uninstall   # 执行(交互终端: 30s 倒计时后开始, Ctrl-C 可中止)
+bash deployments/scripts/tools/k8s/cluster-teardown.sh --uninstall --yes   # 免倒计时(等效 CUBESTACK_ASSUME_YES=1)
 ```
 
-- 可调环境变量: `TEARDOWN_CONFIRM_SLEEP`(0=跳过确认; 非 0=询问 yes/no, 变量名保留兼容)、
+- 可调环境变量: `TEARDOWN_CONFIRM_SLEEP`(交互确认倒计时, 默认 **30** 秒)、
   `TEARDOWN_COMPONENT_TIMEOUT`(单组件超时, 默认 **600** 秒)。
 - 测试钩子(离线夹具): `CUBESTACK_TEARDOWN_TEST_INVENTORY=<file>` 以本地 JSON 代替读集群
   (文件不存在 = 空登记); 该模式下 `--uninstall` **仅打印计划, 不实际执行**。

@@ -602,15 +602,15 @@ deployments/offline-files/
 ./fetch-offline-from-minio.sh --release 2.0.0 --no-flat --verify-only \
     --dest /data/cubestack-installer
 
-# 精确同步(默认: release/flat 覆盖并删除本地多余文件; 交互 yes/no 确认)
+# 精确同步(默认: release/flat 覆盖并删除本地多余文件; 30s 倒计时)
 ./fetch-offline-from-minio.sh --release 2.0.0
 # 下载失败后断点续传(先校验本地, 部分文件按 offset 续传, 完整则跳过下载)
 ./fetch-offline-from-minio.sh --release 2.0.0 --resume
 # 调整下载重试(默认 3 次, 间隔 3s)
 ./fetch-offline-from-minio.sh --release 2.0.0 --retry 5 --retry-delay 5
-# 保留本地多余文件 / 跳过清理确认(兼容旧参数: 0=跳过, 非 0=询问 yes/no)
+# 保留本地多余文件 / 调整倒计时
 ./fetch-offline-from-minio.sh --release 2.0.0 --no-clean
-./fetch-offline-from-minio.sh --release 2.0.0 --clean-countdown 0
+./fetch-offline-from-minio.sh --release 2.0.0 --clean-countdown 30
 
 # 列出 MinIO 上可用版本（桶根下除 offline-files/ 外的版本目录）
 ./fetch-offline-from-minio.sh --list-releases
@@ -666,12 +666,11 @@ release 模式默认用 `mc mirror --overwrite --remove` 精确镜像版本目�
 > 设置同一路径（`load_config` 只读 cluster.conf/defaults/环境，不读 minio.conf）。
 >
 > release/flat 模式默认**精确清理**：`mc mirror --overwrite --remove` 会让本地
-> `offline-files` 与 MinIO 一致，删除本地多余文件。执行前会询问 yes/no
-> （`--clean-countdown 0` 跳过确认，`--yes` 跳过），回答 no 中止；非交互环境没有
-> `--yes`（或 `--clean-countdown 0`）会直接中止。`--no-clean` 保留本地多余文件（此时完整性校验会因
-> “磁盘存在但清单未登记”失败，仅建议调试用）。树根 `.cubestack-*`（校验戳/清单备份）
-> 始终保留；嵌套元数据按普通文件处理（远端清单未登记即清理）；远端未提供 `SIZES` 时
-> 会删除本地旧 `SIZES`，避免旧清单与当前 `SHA256SUMS` 集合不一致。
+> `offline-files` 与 MinIO 一致，删除本地多余文件。执行前有 30 秒红色倒计时
+> （`--clean-countdown N` 调整，`--yes` 跳过），`Ctrl-C` 中止；非交互环境没有
+> `--yes` 会直接中止。`--no-clean` 保留本地多余文件（此时完整性校验会因
+> “磁盘存在但清单未登记”失败，仅建议调试用）。`.cubestack-*`（校验戳/清单备份）
+> 始终保留。
 
 改动集中在参数解析、源根切换和下载后校验，约 60 行；`--sub` 的现有行为不变，
 `DEFAULT_EXCLUDE_SUBS` 也无需改动（版本目录在 `offline-files/` 之外）。

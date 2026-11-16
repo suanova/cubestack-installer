@@ -16,7 +16,7 @@
 > 1. kube_vip_* 变量写入 **`addons.yml`**, 不是 `k8s-cluster.yml`(那里没这个块, `addons.yml` 有 kubespray 自带模板)
 > 2. 两阶段**对新建集群同样必需** —— `/etc/hosts` 写在 preinstall 角色, kube-vip 在 etcd 之后, 差约 10 分钟
 > 3. `advertise-address` 必须写成 **Jinja 表达式**(按节点取值), 写回具体 IP 会抵消修复
-> 4. 切换确认的 yes/no 提示放在 **`06_k8s_deploy.sh`**, 不能放 sync 脚本(其 stdout 被重定向到 /dev/null)
+> 4. 切换确认的倒计时放在 **`06_k8s_deploy.sh`**, 不能放 sync 脚本(其 stdout 被重定向到 /dev/null)
 >
 > **⚠ 实机验收推翻的两处预估**(详见第 17.3 节):
 > - 漂移实测 **1–2 秒**,不是预估的 5–10 秒(kube-vip 退出时主动释放租约,不必等租约过期)
@@ -421,8 +421,8 @@ kube_apiserver_extra_args:
 ### 7.3 阶段二的显式确认
 
 阶段二只在**同时满足**「VIP 已 bound」+「用户显式确认」时执行。确认方式复用
-`02_k8s/06_k8s_deploy.sh` 已有的 **yes/no 确认**机制(红底提示后必须输入 yes 才继续),
-回答 no 或 Ctrl-C 可中止。
+`02_k8s/06_k8s_deploy.sh` 已有的 **30 秒倒计时**机制(memory 记录: "sleep 30 倒计时供
+人工确认/修改"),倒计时期间 Ctrl-C 可中止,走完即视为确认。
 
 这样既满足 D2 的"存量需显式重跑才切",也不会因为一次无关的全量重跑而意外触发切换。
 
@@ -536,7 +536,7 @@ worker 角色),masters 只能通过全量 `k8s_deploy` 加入,而全量运行会
 |---|------|--------|------|
 | R1 | kubespray 上游对 kube-vip **零 CI 覆盖**(`grep -rn "kube_vip\|kube-vip" test-infra/ tests/` → 零命中) | 高 | 实机验证不可省略;第 12 节第 0 步先证伪 |
 | ~~R2~~ | ~~**bootstrap 时序链未经证实**: `kube-vip.manifest.j2:126-127` 的 hostPath **没有 `type: FileOrCreate`**,而首控制面节点在 `kubeadm init` 之前 `/etc/kubernetes/super-admin.conf` **不存在**(kubespray 对首个 CP 恰好选中该路径,见 `kube-vip.yml:26-31`)。整条链依赖 kube-vip 在拿不到 kubeconfig 时仍抢到 VIP~~ **→ 已消除(2026-09-22)** | ~~高~~ 无 | 单一写入者改造关掉了 kubespray 那次写入(见第 18 节): 不再有任何东西在 `kubeadm init` **之前**写 manifest,也就不再有任何东西在 init 之前需要 VIP。原描述保留以便对照 —— hostPath 确实没有 `FileOrCreate`,但该路径已不再被走到。**⚠ 2026-09-28 收编后这条"已消除"重新失效** —— 上游又开始在 `kubeadm init` 之前写 manifest,该链重新被走到;暴露面与实测边界见 [第 19.6 节](#196-一条被收编重新打开的风险原-r2) |
-| R3 | 切换瞬间全节点 apiserver 重启 + 证书重签 | 中 | 两阶段(第 7 节)把风险隔离在阶段二,且有 yes/no 确认窗口 |
+| R3 | 切换瞬间全节点 apiserver 重启 + 证书重签 | 中 | 两阶段(第 7 节)把风险隔离在阶段二,且有倒计时确认窗口 |
 | R4 | kube-vip 自动检测选错网卡(多网卡节点) | 中 | 提供 `KUBE_VIP_INTERFACE` 显式覆盖;verify ④ 把它变成可检测问题 |
 | R5 | ARP 模式的网络前提(交换机 ARP/ICMP 策略、DHCP snooping、DHCP 保留段) | 中 | `cluster.conf` 3.1 节已为 MetalLB 写明同类要求,可直接复用;VIP 必须排除在 DHCP 池外 |
 | R6 | 云环境免费 ARP 不可用 | 低 | 本方案面向裸金属 / VM 集群。BGP 模式(kubespray 亦支持:`kube_vip_bgp_*`)**预留但不实现** |
@@ -561,7 +561,7 @@ worker 角色),masters 只能通过全量 `k8s_deploy` 加入,而全量运行会
 第 2 步  VIP 推导    lib-common.sh 新增推导函数(ICMP + 6443 双探; 与 METALLB_POOL 隔离)
 第 3 步  核心改动    cubestack-offline.sh 改动 A(address 按阶段取值)
 第 4 步  单点修复    cubestack-offline.sh 改动 B(advertise-address 按节点)⚠ 正则需同步改
-第 5 步  两阶段      阶段判定 + fail-closed 护栏 + yes/no 确认(第 7 节)
+第 5 步  两阶段      阶段判定 + fail-closed 护栏 + 30s 倒计时确认(第 7 节)
 第 6 步  离线资产    镜像登记 + tar + preload 集(第 8 节)
 第 7 步  静态校验    check-modules.sh 第 ⑪ 项
 第 8 步  验证模块    02_k8s/08_verify_kube_vip.sh(六项含漂移演练)
@@ -596,7 +596,7 @@ worker 角色),masters 只能通过全量 `k8s_deploy` 加入,而全量运行会
 | 1 | kube_vip_* 写 `k8s-cluster.yml` | 写 **`addons.yml`** | `addons.yml:209` 有 kubespray 自带的 `# Kube VIP` 模板; `k8s-cluster.yml` 里没有 |
 | 2 | 两阶段是"存量集群"的事 | ~~新建集群同样必需~~ → **2026-09-28 更正: 存量仍必需,全新集群在本地代理模式下不再需要人工确认** | 依据已变: hosts 行由本仓库 `03_k8s_hosts.sh` 写(上游 preinstall 的 `0090-etchosts.yml` 在 v2.32 树已不存在),而节点侧改走各节点本地代理后**不再依赖 hosts 行** ⇒ 只有外部/管理客户端受影响,部署期间无人使用 ⇒ `06_k8s_deploy` 的确认门只在"入口原本指向别处"时才触发。存量集群切换 VIP 仍是两阶段(见 §7) |
 | 3 | `advertise-address` 改 Jinja 表达式 | 同左, 但加了**整行字符串断言** | 写回具体 IP 会静默抵消修复; 用 `grep -qF` 断言整行, 已是目标值则完全不动 |
-| 4 | 确认提示放 sync 脚本 | 移到 **`06_k8s_deploy.sh`** | `06_k8s_deploy.sh:70` 把 sync 的 stdout 重定向到 `/dev/null` —— 放 sync 里用户看不见提示, 还会一直等输入 |
+| 4 | 倒计时确认放 sync 脚本 | 移到 **`06_k8s_deploy.sh`** | `06_k8s_deploy.sh:70` 把 sync 的 stdout 重定向到 `/dev/null` —— 放 sync 里用户看不见提示, 还会白等 30 秒 |
 
 ### 14.2 实施中新发现的问题(原设计未覆盖)
 
@@ -622,7 +622,7 @@ worker 角色),masters 只能通过全量 `k8s_deploy` 加入,而全量运行会
 | `deployments/config/cluster.conf` + `.example` | 新增 `KUBE_VIP_ENABLED` / `K8S_API_VIP` / `KUBE_VIP_INTERFACE` / `KUBE_VIP_VERSION`; preload 集合加 `kube-vip` |
 | `deployments/scripts/lib-common.sh` | 新增 `metallb_pool_contains` / `all_node_ips` / `master_hosts` / `bool_is_true` / `kube_vip_validate_config` / `kube_vip_derive` / `kube_vip_current_entry` / `kube_vip_is_bound` / `kube_vip_resolve_target` / `nonnumeric_entry` / `update_kube_vip_addons_yml` / `update_advertise_address_yml` |
 | `deployments/scripts/tools/k8s/sync-kubespray-config.sh` | 阶段判定入口; `address` 按阶段写; `advertise-address` 改幂等修复; addons.yml kube-vip 块同步 |
-| `deployments/scripts/modules/02_k8s/06_k8s_deploy.sh` | 阶段二切换确认门(红底提示 + yes/no 确认 + `KUBE_VIP_SWITCH_CONFIRMED`); 入口指向 VIP 但探测不到绑定时的失联告警 |
+| `deployments/scripts/modules/02_k8s/06_k8s_deploy.sh` | 阶段二切换确认门(红底提示 + 30s 倒计时 + `KUBE_VIP_SWITCH_CONFIRMED`); 入口指向 VIP 但探测不到绑定时的失联告警 |
 | `deployments/kubespray/cubestack-offline.sh` | 入口地址改为读 all.yml; `advertise-address` 同步改幂等修复; preload 默认集合加 `kube-vip` |
 | `deployments/scripts/modules/02_k8s/08_verify_kube_vip.sh` | **新增** verify 模块(六项含漂移演练, 输出实测耗时) |
 | `deployments/scripts/tools/check-modules.sh` | 新增第 ⑪ 项静态校验 |
@@ -650,7 +650,7 @@ bash ./deployments/scripts/tools/images/harbor-save-images.sh --list --group k8s
 
 1. **先在存量集群跑一次**(`--steps k8s_deploy`)—— 观察是否停在**阶段一**(入口仍指 master01, 零影响)
 2. 跑 `--steps verify_kube_vip` —— ①~⑤ 应通过; ⑥ 漂移演练会实测切换耗时并输出数字
-3. 若 ⑥ 通过, 再跑一次 `--steps k8s_deploy` —— 这次应弹出**阶段二切换确认**(红底 + 输入 yes 继续)
+3. 若 ⑥ 通过, 再跑一次 `--steps k8s_deploy` —— 这次应弹出**阶段二切换确认**(红底 + 30s 倒计时)
 4. 切换后再跑 `--steps verify_kube_vip` —— ⑤ 应显示 EndpointSlice 含全部 master
 5. 全程关注第 11 节 R1/R2 两个风险项的实际表现
 
@@ -899,7 +899,7 @@ kube-vip 退出时会**主动释放租约**(而非等租约自然过期),故切�
 > `k8s-api.cubestack.io` 都指向 `192.168.100.147`,`ss` 里对外连接也全部落在 `192.168.100.147:6443`。
 > kube-vip 在 `.154` 上正常持有 VIP `192.168.100.139` 并能漂移,但**没有任何客户端使用它**。
 > 也就是说:**"API 入口"目前仍是 master01 单点,高可用尚未实际生效**。
-> 要生效需按第 7 节**显式**跑一次全量 `k8s_deploy`(探测到 VIP 已 bound → 阶段二 + yes/no 确认)
+> 要生效需按第 7 节**显式**跑一次全量 `k8s_deploy`(探测到 VIP 已 bound → 阶段二 + 30s 倒计时确认)
 > ——那一步会触发证书 SAN 重签与各节点 apiserver 重启,应在维护窗口做。
 > **在此之前讨论"要不要开控制面负载均衡"没有意义** —— VIP 上都还没有流量。
 

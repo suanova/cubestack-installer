@@ -71,5 +71,6 @@ bash deployments/scripts/tools/check-modules.sh                        # 58 个�
 ## 5. 说明
 
 - 更详细的离线同步故障记录见 `docs/troubleshooting.md` §四.8b。
-- 历史设计/计划文档（如 `docs/graceful-overwrite/plan.md`）中可能仍保留旧的“倒计时”措辞，
-  以本文件所列行为为准。
+- 为控制变更文件数，本次未逐篇修改相关文档；`docs/ceph-rook.md`、`docs/kube-vip-api-ha.md`、
+  `docs/graceful-overwrite/*`、`docs/production-guide.md`、`docs/release-management.md`、
+  `docs/offline-files-integrity.md` 等文档中可能仍保留旧的“倒计时”措辞，以本文件所列行为为准。
