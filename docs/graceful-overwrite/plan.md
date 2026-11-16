@@ -14,7 +14,7 @@
 
 - **提交不带 `Co-Authored-By` trailer**（用户明确要求，见记忆 no-coauthor-trailer）。
 - 全部注释/提交信息用中文；提交信息格式 `feat(graceful-overwrite): ...` 等（见各任务）。
-- 仓库根 `REPO_ROOT=/home/supperadm/cubestack-installer`，当前分支 `integrated-cubestack-operator`。所有命令在仓库根执行。
+- 仓库根 `REPO_ROOT=/home/supperadm/cubestack-installer`，当时的开发分支。所有命令在仓库根执行。
 - **不得破坏既有行为**：`ceph-cleanup.sh --delete-cluster` 语义不变；`check-modules.sh` 既有 18 项必须保持全绿；`--fresh` 现有语义（清状态）不变。
 - 模块卸载分支**必须放在该模块 TOGGLE 跳过检查之前**（开关关闭时也要能卸载旧组件）。
 - 卸载段内**自带** `init_remote_kubectl` 与所需变量派生（不依赖安装路径的变量块）；幂等（`--ignore-not-found` / 存在性检查）、有界（不用无限等待）、**告警不中止**。
@@ -599,103 +599,12 @@ git add deployments/scripts/modules/03_addon/06_gpu_operator.sh
 git commit -m "feat(graceful-overwrite): gpu_operator 卸载段(残留清理提为函数, 安装/卸载共用) + 登记"
 ```
 
-### Task 7: 模块组 E —— cubestack_operator 卸载段 + 登记
+### Task 7: 模块组 E —— 平台 operator 卸载段 + 登记
 
-**Files:**
-- Modify: `deployments/scripts/modules/03_addon/25_cubestack_operator.sh`
-
-**Interfaces:**
-- Consumes: `record_installed_component`（Task 1）；`helm`、`sync_kubeconfig`。
-- Produces: 登记键 `cubestack_operator`；卸载段（删 clusterCR 级联 → helm uninstall → ns/CRD 残留清理）。
-
-- [ ] **Step 1: 头部元数据 + 卸载分支**
-
-头部加 `# UNINSTALL: 1`（`# TOGGLE: CUBESTACK_OPERATOR_ENABLED` 行后）。
-
-`load_config`（第 41 行）之后、`CUBESTACK_OPERATOR_ENABLED` 检查（第 44 行）**之前**插入：
-
-```bash
-# 卸载分支(优雅覆盖): ① 删平台实例 CR(clusterCR) → operator 级联优雅收掉 9 个平台组件
-#   (含 ceph PVC 消费者, 等在飞 IO 收敛) ② helm uninstall operator(尽力; 需宿主机 kubeconfig)
-#   ③ 命名空间/CRD 残留清理。⚠ 位于 TOGGLE 检查之前。
-if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
-    init_remote_kubectl || exit 1
-    _ns="${CUBESTACK_OPERATOR_NAMESPACE:-cubestack-system}"
-    _rel="${CUBESTACK_OPERATOR_RELEASE:-cubestack-operator}"
-    _have=0
-    SSH "${K} -n ${_ns} get deploy ${_rel} --no-headers >/dev/null 2>&1" && _have=1
-    SSH "${K} -n ${_ns} get csc --no-headers >/dev/null 2>&1" && _have=1
-    SSH "${K} get ns ${_ns} >/dev/null 2>&1" && _have=1
-    if [ "${_have}" = "0" ]; then
-        say "  cubestack-operator 不存在, 跳过"
-        exit 0
-    fi
-    # ① 删平台实例 CR(级联收组件: 先 CR 后 operator —— CR 的 finalizer 需要 operator 活着处理)
-    _crs="$( (SSH "${K} -n ${_ns} get csc -o name 2>/dev/null") || true)"
-    if [ -n "${_crs}" ]; then
-        say "  ① 删除平台实例 CR(级联收组件)..."
-        while IFS= read -r _cr; do
-            [ -n "${_cr}" ] && SSH "${K} -n ${_ns} delete "${_cr}" --wait=false >/dev/null 2>&1" || true
-        done <<< "${_crs}"
-        # 有界等待组件收敛(≤120s; 不收敛告警继续, 不阻塞)
-        for _wi in $(seq 1 12); do
-            _nleft=0
-            while IFS= read -r _pl; do
-                [ -n "${_pl}" ] || continue
-                case "${_pl}" in *" Running "*|*" Completed "*) ;; *) _nleft=$((_nleft+1)) ;; esac
-            done <<< "$( (SSH "${K} -n ${_ns} get pods --no-headers 2>/dev/null") || true )"
-            [ "${_nleft}" = "0" ] && break
-            sleep 10
-        done
-        [ "${_nleft}" = "0" ] || warn "  平台组件未在 120s 内全部退出(${_nleft} 个仍在) —— 继续"
-    fi
-    # ② helm uninstall operator(尽力)
-    if command -v helm >/dev/null 2>&1 && sync_kubeconfig >/dev/null 2>&1; then
-        say "  ② helm uninstall ${_rel}(ns=${_ns})..."
-        helm uninstall "${_rel}" -n "${_ns}" --wait --timeout 180s >/dev/null 2>&1 \
-            || warn "  helm uninstall 未完成(残留由命名空间清理兜底)"
-    else
-        warn "  helm 不可用 / kubeconfig 同步失败 → 跳过 helm uninstall"
-    fi
-    # ③ 命名空间 / CRD 残留清理(幂等; CRD 随 K8s 覆盖也会消亡, 这里完整卸载顺手清)
-    SSH "${K} patch ns ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
-    SSH "${K} delete ns ${_ns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
-    for _crd in $( (SSH "${K} get crd -o name 2>/dev/null") | grep -i cubestack || true); do
-        SSH "${K} delete ${_crd} --ignore-not-found >/dev/null 2>&1" || true
-    done
-    ok "  cubestack-operator 已卸载(CR 级联 + helm uninstall + 残留清理)"
-    exit 0
-fi
-```
-
-⚠ `patch ns ... '{\"metadata\":...}'` 写法照抄本仓库既有模块（如 06/07 的同类行），不要改写引号。
-
-- [ ] **Step 2: 登记**
-
-文件末尾（第 418 行 `状态查看: ...` echo 之后）追加：
-
-```bash
-# 优雅覆盖登记(仅安装路径到达此处; 本模块 REPEAT:1, 重跑只更新 lastSeenAt, seq 保持首装序)
-record_installed_component "cubestack_operator"
-```
-
-- [ ] **Step 3: 验证**
-
-Run:
-```bash
-bash -n deployments/scripts/modules/03_addon/25_cubestack_operator.sh && bash deployments/scripts/tools/check-modules.sh --quiet && echo CHECK_OK
-grep -n "CUBESTACK_MODULE_ACTION\|UNINSTALL: 1" deployments/scripts/modules/03_addon/25_cubestack_operator.sh
-```
-Expected: `CUBESTACK_MODULE_ACTION` 行号 < `CUBESTACK_OPERATOR_ENABLED` 判断行号（44）；check 全绿。
-
-- [ ] **Step 4: 提交**
-
-```bash
-git add deployments/scripts/modules/03_addon/25_cubestack_operator.sh
-git commit -m "feat(graceful-overwrite): cubestack_operator 卸载段(clusterCR 级联 + helm uninstall + 残留清理) + 登记"
-```
-
----
+> 该模块不在本仓（随版本树分发），其卸载段与登记在版本树侧实现。
+> 本仓的覆盖编排（`cluster-teardown.sh` + 登记 ConfigMap）对版本树模块一视同仁：
+> 只要模块声明 `# UNINSTALL: 1` 并实现 `CUBESTACK_MODULE_ACTION=uninstall` 分支，
+> 就会被反序卸载。
 
 ### Task 8: 模块组 F —— ceph 卸载段 + ceph/ceph_csi 登记
 
@@ -1049,19 +958,19 @@ cat > "${INV}" <<'EOF'
  {"key":"k8s_registry","seq":2,"status":"done"},
  {"key":"ceph","seq":3,"status":"done"},
  {"key":"multus","seq":5,"status":"done"},
- {"key":"cubestack_operator","seq":9,"status":"done"}
+ {"key":"example_operator","seq":9,"status":"done"}
 ]}
 EOF
 ORDER="$(CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_TEARDOWN_TEST_INVENTORY="${INV}" bash "${ENGINE}" --list --raw 2>/dev/null)"
 chk "③ ceph 压轴(最后一行)" "ceph" "$(printf '%s\n' "${ORDER}" | tail -1 | cut -f1)"
-chk "③ 登记 seq 降序生效(operator 在 ceph 前)" "cubestack_operator" "$(printf '%s\n' "${ORDER}" | sed -n '1p' | cut -f1)"
+chk "③ 登记 seq 降序生效(seq9 在 ceph 前)" "example_operator" "$(printf '%s\n' "${ORDER}" | sed -n '1p' | cut -f1)"
 chk "③ 登记 seq 降序判别(multus seq5 先于 registry seq2)" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
   { n++; if ($1=="multus") a=n; if ($1=="k8s_registry") b=n }
   END { print (a>0 && b>0 && a<b) ? 1 : 0 }')"
 chk "③ metallb 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'metallb')"
 chk "③ ceph_csi 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'ceph_csi')"
 chk "③ 探测降级组(netshoot)在登记组之后" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
-  { n++; if ($1=="cubestack_operator") a=n; if ($1=="netshoot") b=n }
+  { n++; if ($1=="example_operator") a=n; if ($1=="netshoot") b=n }
   END { print (a>0 && b>0 && b>a) ? 1 : 0 }')"
 chk "③ netshoot 来源=probe" "probe" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '$1=="netshoot"{print $2}')"
 
@@ -1306,13 +1215,13 @@ Expected: 全部 19 项通过。
 # 反证(证明 ⑲ 真会红; 三臂各验一次; 每臂用 git restore 还原, 不要用 /tmp 备份):
 # 臂A(缺分支): 把 25 模块里的 CUBESTACK_MODULE_ACTION 子串替换掉
 #   ⚠ 只加后缀改名无效 —— 检查用子串 grep, 后缀会保留子串; 必须去掉子串本身
-sed -i 's/CUBESTACK_MODULE_ACTION/ACTION_XMARK/g' deployments/scripts/modules/03_addon/25_cubestack_operator.sh
+sed -i 's/CUBESTACK_MODULE_ACTION/ACTION_XMARK/g' deployments/scripts/modules/03_addon/07_gpu_lws.sh
 bash deployments/scripts/tools/check-modules.sh --quiet; RC_A=$?   # 期望非 0 且含 "声明 UNINSTALL 但无 CUBESTACK_MODULE_ACTION 卸载分支"
-git restore deployments/scripts/modules/03_addon/25_cubestack_operator.sh
+git restore deployments/scripts/modules/03_addon/07_gpu_lws.sh
 # 臂B(次序): 在 25 模块卸载分支行之前插入一行 TOGGLE 判断(bash -n 仍过)
-sed -i '/CUBESTACK_MODULE_ACTION:-install/ i [ "${CUBESTACK_OPERATOR_ENABLED:-false}" = "true" ] || true' deployments/scripts/modules/03_addon/25_cubestack_operator.sh
+sed -i '/CUBESTACK_MODULE_ACTION:-install/ i [ "${GPU_OPERATOR_ENABLED:-false}" = "true" ] || true' deployments/scripts/modules/03_addon/06_gpu_operator.sh
 bash deployments/scripts/tools/check-modules.sh --quiet; RC_B=$?   # 期望非 0 且含 "必须在 TOGGLE 判断(行 ...)之前"
-git restore deployments/scripts/modules/03_addon/25_cubestack_operator.sh
+git restore deployments/scripts/modules/03_addon/07_gpu_lws.sh
 # 臂C(夹具接线, 防"写了没人跑"): 临时改夹具断言
 sed -i 's/chk "④ 退出码 0" "0"/chk "④ 退出码 0" "9"/' deployments/scripts/tools/tests/test-cluster-teardown.sh
 bash deployments/scripts/tools/check-modules.sh --quiet; RC_C=$?   # 期望非 0 且含 "夹具测试失败"

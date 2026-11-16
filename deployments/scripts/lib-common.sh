@@ -542,8 +542,7 @@ find_offline_tar() {
 # deployments/cubestack-addon/<组件>/ 下有一份随 git 分发的离线副本**(.tgz 或解包源码目录),
 # 且**安装一律用这份本地副本** —— 线上拉到的东西不直接装。缺了它, 私服/上游一抖动就装不上
 # (曾有模块就是这样: 回退代码写好了, 却压根没有可回退的文件)。
-# 窄例外: cubestack-operator 的 chart 随离线包分发(offline-files/cubestack-operator/charts/*.tgz),
-#   tgz/digest 不入 git, 由内网同步机上传播; 本助手通过传入路径自然支持, 不另开分支。
+# (离线 tar 类的大文件不入 git, 由内网同步机上传播; 本助手通过传入路径自然支持, 不另开分支。)
 #
 # 本助手把"本地副本就绪"这件事收敛到一处:
 #   online : helm pull 到临时目录 → 取远端 digest, 与 <tgz>.digest 边车比对
@@ -631,13 +630,11 @@ helm_chart_ensure() {
 }
 
 # ---------------- operator 镜像 tag 决策(helm 用) ----------------
-# 原则(2026-10-22 用户口径): 默认**完全跟随 chart / operator 自带版本**;
-#   installer 只保留一个显式逃生口, 且**只覆盖 cubestack-operator 自身的镜像 tag**,
-#   绝不覆盖 operator 内 catalog 定义的其他组件(平台 operator/服务)版本。
+# 原则(2026-10-22 用户口径): 默认**完全跟随 chart 自带版本**;
+#   installer 只保留一个显式逃生口, 且**只覆盖 operator 自身的镜像 tag**。
 #   - 未设 CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE → 输出空 → helm 用 chart 自带
 #     (Chart.yaml appVersion / values.image.tag);
 #   - 设了 override → 只传 --set image.tag=<tag> 给 operator chart。
-# CUBESTACK_OPERATOR_IMAGE_TAG 仅用于镜像清单/发布树登记, 不参与 helm 覆盖。
 operator_image_tag_for_helm() {
     # ⚠ 必须恒返回 0: 调用方是 `x="$(operator_image_tag_for_helm ...)"` + set -e,
     #   空 override 时若返回 1 会让整个模块静默退出(2026-10-22 实机)。
@@ -1312,24 +1309,6 @@ master_ips() {
     done
     return 0
 }
-
-# CubeStack operator HA 拓扑(2026-10-27 用户口径):
-#   master >= 3 → "<n> 2 true"  (operator replicas=2; CubeStackCluster.spec.global.ha.enabled=true)
-#   master < 3  → "<n> 1 false" (单 master/两 master 一律 non-HA; replicas=1)
-# 输出 "<master_count> <replicas> <ha_enabled>"。
-# ⚠ node_parse/master_ips 会写 NODE_* 全局量 —— 本函数内部在命令替换子 shell 中统计, 不污染调用方。
-cubestack_operator_ha_profile() {
-    local _n
-    _n="$(master_ips | wc -w | tr -d '[:space:]')"
-    case "${_n}" in ''|*[!0-9]*) _n=0 ;; esac
-    if [ "${_n}" -ge 3 ]; then
-        printf '%s 2 true\n' "${_n}"
-    else
-        printf '%s 1 false\n' "${_n}"
-    fi
-    return 0
-}
-
 
 # 收集全部节点 IP(空格分隔; 供 VIP 冲突判定复用)
 all_node_ips() {

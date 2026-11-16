@@ -1275,78 +1275,6 @@ ssh <node> 'sudo systemctl disable --now rke2-agent'
 ssh <node> 'sudo /usr/local/bin/rke2-killall.sh'
 ```
 
-### 5. `--steps cubestack_operator` 报成功, 但 operator 仍跑旧镜像(在线/离线)
-
-**症状**: `sudo ./deploy-cluster.sh --steps cubestack_operator` 执行完成、`helm` 与 `rollout status`
-都成功; 但 `kubectl -n cubestack-system get deploy cubestack-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`
-仍是 `:latest`, Pod AGE 没变; 即使 `imagePullPolicy=Always` 也不生效。
-
-**根因**:
-- `Always` 只在**新建 Pod** 时重新解析 tag; 运行中的旧 Pod 不会因为 `Always` 自动重启;
-- `helm upgrade --install` 在 chart/values 渲染结果没变时(同 `:latest` tag)不会改 Pod 模板 → 不触发滚动;
-- 旧代码只有离线模式写 `podAnnotations.cubestack.io/image-digest`; 在线模式没有 digest 注解;
-- `CUBESTACK_OPERATOR_IMAGE_TAG` 没有真正进入 helm 渲染/安装参数, 只依赖 chart 默认 tag。
-
-**解法(2026-10-19 已落地)**:
-- 离线/在线**都**把 **operator 镜像 digest** 写进 `podAnnotations.cubestack.io/image-digest`
-  (digest 变 → Pod 模板变 → 自动滚动);
-- 在线模式取不到 Harbor digest 时, helm 后自动 `rollout restart deployment/${RELEASE}` 兜底;
-- `image.tag=${IMG_TAG}` 同时进入 chart 渲染与 helm 安装参数
-  (2026-10-22 起改为: **仅显式** `CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE` 才传 `image.tag`, 默认由 chart 自带);
-- 离线 operator 与 CR 组件 `imagePullPolicy` 都改为 **Always**(每次新建 Pod 从集群 registry 重新解析);
-- `CUBESTACK_OPERATOR_IMAGE_PULL_POLICY` 保留兼容但不再生效(强制 Always)。
-
-**验证**:
-```bash
-kubectl -n cubestack-system get deploy cubestack-operator \
-  -o jsonpath='{.spec.template.metadata.annotations}{"\n"}'
-kubectl -n cubestack-system get pods -o wide
-# 更新镜像/ chart 后重跑 --steps, Pod AGE 应变化; 内容未变则 digest 注解不变、不重启
-```
-详见 `docs/cubestack-operator.md` §1.1 / §3.6。
-
-### 6. 【2026-10-19 事故】`verify_cubestack_operator` 的冒烟 CR 删掉了真实 `lws-system` 命名空间
-
-**症状**
-- `kubectl -n lws-system get pods` 只有 `lws-controller-manager`, 且 `CrashLoopBackOff`;
-  `describe` 报 `configmap "lws-manager-config" not found` / `secret "lws-webhook-server-cert" not found`;
-- 日志 `Unauthorized` + `the server has asked for the client to provide credentials`;
-- 命名空间里 **没有** `lws-controller-manager` ServiceAccount、ConfigMap、Secret、ClusterRole/Binding;
-- 但主 CR `kubectl -n cubestack-system get csc cubestack` 的 `status.components` 仍显示 `lws=Ready`。
-
-**根因(逐项证据)**
-1. 平台 operator 验证模块的冒烟 CR 只写了 `deletePolicy: uninstall`, **省略了
-   `spec.components`**。operator 对省略的组件会继承 catalog/chart 默认值; 新版 chart 默认启用
-   `lws/envoyGateway/...` ⇒ 冒烟 CR 实际管理了真实组件;
-2. 验证结束 trap 删除冒烟 CR, `deletePolicy=uninstall` 触发组件卸载; operator 日志明确:
-   `uninstall deleted component namespace {"CubeStackCluster": {"name":"verify-csc"}, "component": "lws",
-   "namespace": "lws-system"}` —— 把**主 CR 正在使用的共享命名空间**整个删了;
-3. operator 的组件状态按 **desired hash** 比较; 资源被外部删除但 hash 未变时不会重新 apply
-   (没有 drift detection) ⇒ 主 CR 状态继续显示 `lws=Ready`, 不会自愈。
-
-**修复(2026-10-19 已落地)**
-- 冒烟 CR 显式写**全部** components `enabled: false`(含 `exporters.bmc/metax`)、`bundles: []`,
-  并把 `deletePolicy` 改为 **`retain`**(双保险; CRD 默认也是 retain);
-- 清理前增加护栏: 读取冒烟 CR 的 `spec.components`, 只要发现任何 `enabled: true` 就中止,
-  不执行卸载路径;
-- 平台 operator 回归测试增加静态断言(不能出现 `deletePolicy: uninstall`、
-  每个组件 key 必须在冒烟 CR 中显式禁用)。
-
-**恢复被误删的组件**(脚本修复后)
-```bash
-# 强制 operator 重新 apply: 把 lws 关掉再打开(改变 desired hash)
-kubectl -n cubestack-system patch csc cubestack --type=merge \
-  -p '{"spec":{"components":{"lws":{"enabled":false}}}}'
-kubectl -n cubestack-system patch csc cubestack --type=merge \
-  -p '{"spec":{"components":{"lws":{"enabled":true}}}}'
-# 等待 SA/ConfigMap/Secret/Deployment 重建 + Pod Running + CR phase=Ready
-kubectl -n lws-system get sa,cm,secret,deploy,pod
-kubectl -n cubestack-system get csc cubestack \
-  -o jsonpath='{range .status.components[?(@.name=="lws")]}{.phase}{end}'
-```
-**验证**: 重新执行 `--steps verify_cubestack_operator`; 结束后 `lws-system` 的 SA/CM/Secret
-必须仍在, Pod 仍 Running, 冒烟 CR 已被清理。
-
 ### 12. 【2026-10-22】`SERVICE_EXPOSE_MODE=nodeport` 但 Envoy Gateway 公网 Service 仍是 `LoadBalancer/<pending>`, Web UI 打印私有 ClusterIP
 
 **症状:** 部署汇总显示 NodePort 模式, 但:
@@ -1359,22 +1287,21 @@ CubeStack Web UI (MetalLB): http://10.233.54.28/
 
 `10.233.54.28` 是私有网关 `cubestack-ai-private` 的 **ClusterIP**, 只能集群内访问。
 
-**根因:**
-1. `CubeStackCluster.spec.global.serviceExposeMode` 只作用于 operator 自己渲染的 Service;
-   Envoy Gateway 公网数据面 Service 由 **EnvoyProxy** 决定, 未指定时默认 `LoadBalancer`;
-2. 公网 Gateway 没有 `spec.infrastructure.parametersRef` → 使用默认 EnvoyProxy → LoadBalancer;
-3. `cubestack-ui-url.sh` 把 Gateway 的 `status.addresses` 一律当作 LoadBalancer 地址,
-   于是把私有网关的 ClusterIP 标成了 "MetalLB"。
+**根因(本仓能管的部分):**
+- Envoy Gateway 公网数据面 Service 的类型由 **EnvoyProxy** 决定, 未指定时默认
+  `LoadBalancer`——在 MetalLB 集群上会停在 `<pending>`;
+- `cubestack-ui-url.sh` 把 Gateway 的 `status.addresses` 一律当作 LoadBalancer 地址,
+  于是把私有网关的 ClusterIP 标成了 "MetalLB"。
 
-**解法(已落地):**
-- 平台 operator 模块: 显式把 `SERVICE_EXPOSE_MODE` 写入 CR
-  `spec.global.serviceExposeMode`(`nodeport|loadbalancer`), 并对已有 CR 纠偏;
-- operator 就绪后调用 `ensure_envoy_gateway_service_type`(lib-common): 创建/更新
-  `EnvoyProxy/cubestack-proxy`(`envoyService.type=NodePort|LoadBalancer`)并挂到公网
-  `Gateway/cubestack-gateway` 的 `spec.infrastructure.parametersRef`;
+**解法(本仓已落地):**
 - `cubestack-ui-url.sh`: 只把 LoadBalancer 的地址当 MetalLB; NodePort 用节点 IP + nodePort;
   ClusterIP 不再输出为 Web UI 地址;
-- `--steps cubestack_operator` / `--steps envoy_gateway` 每次都会幂等重挂。
+- `ensure_envoy_gateway_service_type`(`lib-common.sh`): 创建/更新 `EnvoyProxy`
+  (`envoyService.type=NodePort|LoadBalancer`)并挂到公网 Gateway 的
+  `spec.infrastructure.parametersRef`, 使数据面 Service 类型与 `SERVICE_EXPOSE_MODE` 对齐。
+
+**平台 operator 侧:** CR `spec.global.serviceExposeMode` 的写入与纠偏由版本树的模块负责,
+不在本仓。
 
 **验证:**
 ```bash
@@ -1867,45 +1794,35 @@ kubectl -n rook-ceph rollout status ds/cephfs-models-mount
 ssh <node> "findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,OPTIONS | tail -1"
 ```
 
-### 2. 【2026-10-19 实机】cubepilot-api 更新后永久 Pending: RWO PVC + RollingUpdate → Multi-Attach
+### 2. 【2026-10-19 实机】挂 RWO PVC 的 Deployment 更新后永久 Pending: RollingUpdate → Multi-Attach
 
 **症状**
-- `kubectl -n cubestack-system describe pod cubepilot-api-<new>` 一直 `ContainerCreating`;
-  Events: `Multi-Attach error for volume "pvc-..." Volume is already used by pod(s) cubepilot-api-<old>`;
-- 同一个 Deployment 下**两个 ReplicaSet 各 1 个 Pod**: 旧 Pod `Running`(另一个节点), 新 Pod
-  `Pending`; `status.conditions` 出现 `ProgressDeadlineExceeded`;
-- `kubectl get deploy cubepilot-api -o jsonpath='{.spec.strategy}'` 是默认的
-  `RollingUpdate{maxSurge:25%,maxUnavailable:25%}`。
+- Deployment 滚动时新 Pod 一直 `ContainerCreating`;
+- Events: `Multi-Attach error for volume "pvc-..." Volume is already used by pod(s) <old>`;
+- 旧 Pod 仍在 Running, 新旧互相卡死。
 
 **根因**
-`cubepilot-api` 使用**单个 `ReadWriteOnce` PVC**。`maxSurge>0` 会先创建新 Pod; 新 Pod 被调度到
-另一节点后, RBD 卷仍 attach 在旧 Pod 所在节点, 无法同时挂载(`Multi-Attach`); 而
-`maxUnavailable` 取整后为 0, Deployment 又不会先停旧 Pod → 新旧 Pod 互相卡死。
+Deployment 引用**单个 `ReadWriteOnce` PVC** 时, 默认 `strategy: RollingUpdate` + `maxSurge>0`
+会**先**创建新 Pod; 新 Pod 被调度到另一节点后无法挂同一块 RWO 卷(卷仍被旧 Pod 占用), 而
+`maxUnavailable` 取整后为 0, Deployment 又不会先停旧 Pod → 互相卡死。
 这是 Kubernetes 对 RWO 卷 + RollingUpdate 的经典冲突, 与镜像/网络无关。
 
-**解法(脚本已根治)**
-- `lib-common.sh` 新增 `ensure_rwo_deployments_recreate <ns> [selector] [wait]`:
+**解法(本仓已根治)**
+- `lib-common.sh` 的 `ensure_rwo_deployments_recreate <ns> [selector] [wait]`:
   解析 Deployment + PVC, 只把**引用 RWO PVC** 且策略非 Recreate 的 Deployment merge-patch 成
   `strategy: {type: Recreate}`(无 PVC/RWX 的组件不动; 幂等)。
-- 平台 operator 模块在创建组件后自动执行(等待上界
-  `CUBESTACK_OPERATOR_RWO_STRATEGY_WAIT_SECONDS`, 默认 60s)。
-- 平台组件的 `rollout restart` 之前执行同样的纠正,
-  纠正失败会中止滚动(避免把组件滚进 Multi-Attach)。
-- 手工即时修复(本次实机已执行, 旧 Pod 30s 内退出、新 Pod 40s 内 Running):
+- 调用点: 组件安装后、以及组件 `rollout restart` 之前。纠正失败会中止滚动
+  (避免把组件滚进 Multi-Attach)。
+- 手工即时修复(对任意受影响的 Deployment 通用):
   ```bash
-  kubectl -n cubestack-system patch deploy cubepilot-api --type=merge \
+  NS=<namespace>; DEPLOY=<deployment>
+  kubectl -n "$NS" patch deploy "$DEPLOY" --type=merge \
     -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
-  kubectl -n cubestack-system rollout status deploy/cubepilot-api --timeout=180s
+  kubectl -n "$NS" rollout status deploy/"$DEPLOY" --timeout=180s
   ```
-- 验证: `kubectl -n cubestack-system get rs -l app=cubepilot-api` 旧 RS 应为 0;
-  `kubectl -n cubestack-system get pod -l app=cubepilot-api -o wide` 只应有一个 Running;
-  `kubectl -n cubestack-system get pvc cubepilot-api-data -o jsonpath='{.spec.accessModes}'`
-  确认为 `["ReadWriteOnce"]`。
+- 验证: 旧 RS 应为 0; Pod 只应有一个 Running; PVC 的 `accessModes` 确认为 `["ReadWriteOnce"]`。
 
-**注意**: operator 的 server-side apply 不渲染 `strategy` 字段, 因此本 patch 不会被下一轮
-调谐覆盖; 若上游 chart 将来显式加入 `strategy`, 需要上游改成 `Recreate` 或提供 values 开关,
-届时本守护会因 `strategy.type != Recreate` 继续纠正。
-
+**注意**: server-side apply 不渲染 `strategy` 字段, 因此该 patch 不会被下一轮 reconcile 覆盖。
 ### 3. 【2026-10-28】更换 `CEPHFS_FS` 后部署报成功, 但宿主机读到的仍是旧文件系统
 
 **症状:** 修改 `CEPHFS_FS`/`CEPHFS_FS_NAME`(或换 external 提供方 FS)后重跑 cephfs_mount,
@@ -1962,7 +1879,7 @@ bash deployments/scripts/tools/tests/test-cephfs-mount.sh            # ⑪: 旧 
 
 **症状**
 - 新 Pod 长时间 `ContainerCreating`，Events 只有 `Pulling image "registry.cubestack.io:5000/..."`
-  且数分钟无进展(2026-10-25 实测: operator / CNPG postgres init / cuberouter 在 node-3 卡 5min+)；
+  且数分钟无进展(2026-10-25 实测: 多个组件的 Pod 在 node-3 上各卡 5min+)；
 - 从节点 `curl http://<master>:31148/v2/` 与 manifest 都是毫秒级，registry 本身正常。
 
 **根因**

@@ -10,7 +10,7 @@
 | 目标环境 | **全离线为主**, 在线为开关(对齐 `ONLINE_DEPLOY_*` 范式) | 用户确认 |
 | 驱动策略 | **预编译驱动容器**(`usePrecompiled=true`, 分支 595) | NGC 实测覆盖 `595-5.15.0-186-generic-ubuntu22.04`; air-gap 官方推荐路径; 用户确认 |
 | 架构方案 | **独立新模块** `08_nvidia_gpu_operator.sh` + `28_verify_nvidia_gpu.sh`(不改沐曦 06 模块) | 仓库隔离原则; 用户确认 |
-| Online 语义 | 按 chart 定义(nvcr.io)直拉; `NVIDIA_GPU_OPERATOR_ONLINE_IMAGE_BASE` 可切 Harbor mirrors | 与 cubestack-operator 在线口径对齐 |
+| Online 语义 | 按 chart 定义(nvcr.io)直拉; `NVIDIA_GPU_OPERATOR_ONLINE_IMAGE_BASE` 可切 Harbor mirrors | 与本仓其他 operator 模块的在线口径一致 |
 | NFD 处置 | 默认 operator 自带(v0.19.0, 与仓库 NFD_VERSION 同版); `NFD_ENABLED=true` 时自动让位 | 避免叠加两套 NFD |
 | driver-toolkit(OpenShift DTK) | 不适用(vanilla K8s 无接线); "预编译容器"即 vanilla 世界的等价物 | values 仅 `openshift:false`; 官方文档 |
 

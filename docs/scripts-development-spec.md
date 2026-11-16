@@ -139,11 +139,6 @@ load_config
 **凡安装 helm chart 的模块,其 chart 必须有一份 vendored 在 `deployments/cubestack-addon/<组件>/`
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
-**窄例外**:`cubestack-operator` 的 chart 随离线包分发,放在
-`deployments/offline-files/cubestack-operator/charts/`(与组件镜像 tar 同集合),`.tgz`/`.digest`
-不入 git,由内网同步机上传 MinIO。该例外需满足:模块显式引用该目录、目录下 `README.md` 被 git 跟踪;
-`check-modules.sh` ⑩ 按此识别。
-
 模板(定位/安装 chart 的模块):`deployments/scripts/modules/03_addon/02_ceph.sh` 与
 `06_gpu_operator.sh` 展示了 chart 路径定位与 `helm upgrade --install` 的完整写法。
 
@@ -196,7 +191,6 @@ operator 模块与 NVIDIA GPU operator 模块均调用它 —— 新模块**应�
 > 必然漂移。
 
 > 与 §2.4 的分工:chart 通常是**随 git 入仓**的 vendored 副本(`cubestack-addon/`);
-> operator chart 是文档化的例外,随离线包(`offline-files/cubestack-operator/charts/`)分发。
 > 镜像 tar 是**不入仓**的大文件(只登记 + 备料,`offline-files/`)。
 > 共同点:**首次就把资产放到约定目录**,不许靠部署过程自动落盘。
 
