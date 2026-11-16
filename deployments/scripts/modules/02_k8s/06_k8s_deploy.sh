@@ -148,6 +148,10 @@ if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
             echo -e "\033[41m\033[97m================================================================\033[0m"
             confirm_yes_no "确认将 API 入口切换到 VIP ${_KV_VIP}?" 1 \
                 || { err "已取消 kube-vip API 入口切换 → 部署中止"; exit 1; }
+            # CodeRabbit Major: 确认后、导出切换标志前再校验 cluster.conf。
+            # 等待输入期间若改了 K8S_API_VIP, 随后的 sync 会重新 load_config 并推导出
+            # 未经确认的新 VIP; 这里与首个确认门同口径, 检测到漂移直接中止。
+            _conf_guard
             printf "\r%s\n" "$(printf '\033[0m  ✅ 已确认切换                          ')"
             export KUBE_VIP_SWITCH_CONFIRMED=1
             # 重新跑 sync: 这次带上确认标志, 才会把入口真正切到 VIP
