@@ -1794,45 +1794,35 @@ kubectl -n rook-ceph rollout status ds/cephfs-models-mount
 ssh <node> "findmnt -T /mnt/cephfs/models -o TARGET,FSTYPE,OPTIONS | tail -1"
 ```
 
-### 2. 【2026-10-19 实机】cubepilot-api 更新后永久 Pending: RWO PVC + RollingUpdate → Multi-Attach
+### 2. 【2026-10-19 实机】挂 RWO PVC 的 Deployment 更新后永久 Pending: RollingUpdate → Multi-Attach
 
 **症状**
-- `kubectl -n cubestack-system describe pod cubepilot-api-<new>` 一直 `ContainerCreating`;
-  Events: `Multi-Attach error for volume "pvc-..." Volume is already used by pod(s) cubepilot-api-<old>`;
-- 同一个 Deployment 下**两个 ReplicaSet 各 1 个 Pod**: 旧 Pod `Running`(另一个节点), 新 Pod
-  `Pending`; `status.conditions` 出现 `ProgressDeadlineExceeded`;
-- `kubectl get deploy cubepilot-api -o jsonpath='{.spec.strategy}'` 是默认的
-  `RollingUpdate{maxSurge:25%,maxUnavailable:25%}`。
+- Deployment 滚动时新 Pod 一直 `ContainerCreating`;
+- Events: `Multi-Attach error for volume "pvc-..." Volume is already used by pod(s) <old>`;
+- 旧 Pod 仍在 Running, 新旧互相卡死。
 
 **根因**
-`cubepilot-api` 使用**单个 `ReadWriteOnce` PVC**。`maxSurge>0` 会先创建新 Pod; 新 Pod 被调度到
-另一节点后, RBD 卷仍 attach 在旧 Pod 所在节点, 无法同时挂载(`Multi-Attach`); 而
-`maxUnavailable` 取整后为 0, Deployment 又不会先停旧 Pod → 新旧 Pod 互相卡死。
+Deployment 引用**单个 `ReadWriteOnce` PVC** 时, 默认 `strategy: RollingUpdate` + `maxSurge>0`
+会**先**创建新 Pod; 新 Pod 被调度到另一节点后无法挂同一块 RWO 卷(卷仍被旧 Pod 占用), 而
+`maxUnavailable` 取整后为 0, Deployment 又不会先停旧 Pod → 互相卡死。
 这是 Kubernetes 对 RWO 卷 + RollingUpdate 的经典冲突, 与镜像/网络无关。
 
-**解法(脚本已根治)**
-- `lib-common.sh` 新增 `ensure_rwo_deployments_recreate <ns> [selector] [wait]`:
+**解法(本仓已根治)**
+- `lib-common.sh` 的 `ensure_rwo_deployments_recreate <ns> [selector] [wait]`:
   解析 Deployment + PVC, 只把**引用 RWO PVC** 且策略非 Recreate 的 Deployment merge-patch 成
   `strategy: {type: Recreate}`(无 PVC/RWX 的组件不动; 幂等)。
-- 平台 operator 模块在创建组件后自动执行(等待上界
-  `CUBESTACK_OPERATOR_RWO_STRATEGY_WAIT_SECONDS`, 默认 60s)。
-- 平台组件的 `rollout restart` 之前执行同样的纠正,
-  纠正失败会中止滚动(避免把组件滚进 Multi-Attach)。
-- 手工即时修复(本次实机已执行, 旧 Pod 30s 内退出、新 Pod 40s 内 Running):
+- 调用点: 组件安装后、以及组件 `rollout restart` 之前。纠正失败会中止滚动
+  (避免把组件滚进 Multi-Attach)。
+- 手工即时修复(对任意受影响的 Deployment 通用):
   ```bash
-  kubectl -n cubestack-system patch deploy cubepilot-api --type=merge \
+  NS=<namespace>; DEPLOY=<deployment>
+  kubectl -n "$NS" patch deploy "$DEPLOY" --type=merge \
     -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
-  kubectl -n cubestack-system rollout status deploy/cubepilot-api --timeout=180s
+  kubectl -n "$NS" rollout status deploy/"$DEPLOY" --timeout=180s
   ```
-- 验证: `kubectl -n cubestack-system get rs -l app=cubepilot-api` 旧 RS 应为 0;
-  `kubectl -n cubestack-system get pod -l app=cubepilot-api -o wide` 只应有一个 Running;
-  `kubectl -n cubestack-system get pvc cubepilot-api-data -o jsonpath='{.spec.accessModes}'`
-  确认为 `["ReadWriteOnce"]`。
+- 验证: 旧 RS 应为 0; Pod 只应有一个 Running; PVC 的 `accessModes` 确认为 `["ReadWriteOnce"]`。
 
-**注意**: operator 的 server-side apply 不渲染 `strategy` 字段, 因此本 patch 不会被下一轮
-调谐覆盖; 若上游 chart 将来显式加入 `strategy`, 需要上游改成 `Recreate` 或提供 values 开关,
-届时本守护会因 `strategy.type != Recreate` 继续纠正。
-
+**注意**: server-side apply 不渲染 `strategy` 字段, 因此该 patch 不会被下一轮 reconcile 覆盖。
 ### 3. 【2026-10-28】更换 `CEPHFS_FS` 后部署报成功, 但宿主机读到的仍是旧文件系统
 
 **症状:** 修改 `CEPHFS_FS`/`CEPHFS_FS_NAME`(或换 external 提供方 FS)后重跑 cephfs_mount,
@@ -1889,7 +1879,7 @@ bash deployments/scripts/tools/tests/test-cephfs-mount.sh            # ⑪: 旧 
 
 **症状**
 - 新 Pod 长时间 `ContainerCreating`，Events 只有 `Pulling image "registry.cubestack.io:5000/..."`
-  且数分钟无进展(2026-10-25 实测: operator / CNPG postgres init / cuberouter 在 node-3 卡 5min+)；
+  且数分钟无进展(2026-10-25 实测: 多个组件的 Pod 在 node-3 上各卡 5min+)；
 - 从节点 `curl http://<master>:31148/v2/` 与 manifest 都是毫秒级，registry 本身正常。
 
 **根因**

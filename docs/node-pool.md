@@ -2,7 +2,7 @@
 
 > 2026-11-02 起**默认口径**：master 默认 **可调度** —— 不 cordon，且由 `node_pool` 模块移除
 > kubespray 默认给 control-plane 打的 `node-role.kubernetes.io/control-plane:NoSchedule`
-> 污点；CubeStack operator/平台组件仍通过 nodeSelector + toleration 钉到 master。设置
+> 污点；系统组件可选用 nodeSelector + toleration 钉到 master。设置
 > `NODE_POOL_MASTER_CORDON=true` 可改为 cordon 隔离；设置
 > `NODE_POOL_MASTER_SCHEDULABLE=false` 可保留 kubespray 默认污点（不可调度但也不 cordon）。
 > GPU worker 隔离在后续阶段补充。
@@ -15,12 +15,12 @@
 ## 目标
 
 - **master**：默认 **可调度**（不 cordon、无 control-plane/master 污点），
-  Ceph / operator / 平台组件通过 nodeSelector + toleration 钉到 master；设
+  Ceph 与系统组件通过 nodeSelector + toleration 钉到 master；设
   `NODE_POOL_MASTER_CORDON=true` 可切回 cordon 隔离（Pod 侧 toleration 保留，
   便于随时切换）。
 - **GPU worker**：纯 GPU 节点，只允许 GPU 推理负载与 GPU 驱动/设备插件等必要 Pod；
   系统 DaemonSet 例外。
-- 允许临时维护时对 master `cordon/drain`，不破坏平台组件的重调度。
+- 允许临时维护时对 master `cordon/drain`，不破坏已有 Pod 的重调度。
 
 ## 关键机制（已实机验证，k8s v1.35.8）
 
@@ -117,8 +117,8 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
 
 - `DEFAULT: 0`、`TOGGLE: NODE_POOL_ENABLED`（默认 **true**）⇒ 随全量部署在 addon 末尾（文件 53）执行；
 - `REQUIRES: k8s_deploy`：集群必须先存在；已部署集群上 `k8s_deploy` 状态 done 时不会重跑；
-- 执行顺序：先 `cubestack-placement.sh --apply` 给平台组件加 master placement（
-  `NODE_POOL_PLATFORM_PLACEMENT=true` 时再跑 `master-placement.sh`），最后打 master 标签/
+- 执行顺序：`NODE_POOL_PLATFORM_PLACEMENT=true` 时先跑 `master-placement.sh --apply`
+  给系统组件(CoreDNS/metrics/registry/MetalLB)加 master placement，最后打 master 标签/
   按需 cordon；
 - **k8s 阶段提前收敛(2026-11-03)**：`06_k8s_deploy.sh` 在 kubespray 成功后、addon 之前会调用
   `tools/node/node-pool.sh --apply`（临时强制 `NODE_POOL_MASTER_CORDON=false`）只做
@@ -154,17 +154,6 @@ sudo env NODE_POOL_ACTION=remove ./deploy-cluster.sh --steps node_pool
 > ⚠ kubespray 重跑 `k8s_deploy` 会按 addons.yml 重新渲染这些 Deployment；之后需重跑
 > `--steps node_pool` 重新应用。`--remove` 只移除本工具加的 master nodeSelector，
 > tolerations 保留（避免 control-plane taint 下的组件 Pending）。
-
-### 平台组件 master placement（阶段二 B-2，由版本树提供）
-
-平台组件（operator 及其托管的各组 Deployment）的 master placement 不在本仓库：
-它依赖平台的组件清单与 CR 约定，属于随版本树分发的私有模块。
-
-- 版本树提供 `modules/03_addon/54_platform_placement.sh` 与它调用的工具；
-  `--release` 模式下自动发现并随全量部署执行，也可 `--steps platform_placement` 单跑。
-- 关闭方式由版本树说明（在其模块的 `TOGGLE` 里声明），公共 installer 不定义该开关。
-- 公共版本没有这些对象，因此本模块不会做任何平台 placement —— 这是正确的：开源版
-  的组件是手工 `helm install` 的，本仓库不管理它们。
 
 ### 配置（cluster.defaults.conf §2.8）
 
@@ -205,7 +194,7 @@ bash deployments/scripts/tools/check-modules.sh
 
 ## 后续阶段（待做）
 
-1. **平台组件 placement 加固**（master 侧）：
+1. **系统组件 placement 加固**（master 侧）：
    - Ceph mon/osd/mgr 的 `placement` 增加 unschedulable toleration；
    - Rook operator、ceph-csi operator/controller、nodeplugin；
    - registry、CoreDNS、metrics-server、dns-autoscaler；
