@@ -54,27 +54,30 @@ _metax_cleanup_residual() {
     # 控制器已卸载: 显式摘 finalizer, 否则 CR 永远 Terminating, 后续 ns/CRD 删除也被拖住。
     SSH "timeout 30 ${K} -n ${_mns} patch clusteroperator cluster-operator --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
     # 有界等待 CR 真正消失(最多 20s; 摘 finalizer 后通常立即完成)
-    local _wc=0
-    while [ "${_wc}" -lt 20 ]; do
-        SSH "${K} -n ${_mns} get clusteroperator cluster-operator >/dev/null 2>&1" || break
-        sleep 2; _wc=$((_wc + 2))
+    # CodeRabbit: 用 SECONDS 截止时间, 并给远端 kubectl 加 timeout —— 仅累计 sleep
+    # 时, 一次卡住的 SSH/kubectl 会让"20s 上限"失效。
+    local _wc_end=$((SECONDS + 20))
+    while [ "${SECONDS}" -lt "${_wc_end}" ]; do
+        SSH "timeout 10 ${K} -n ${_mns} get clusteroperator cluster-operator >/dev/null 2>&1" || break
+        sleep 2
     done
-    unset _wc
+    unset _wc_end
     # 共享助手: 先摘残留 CR 的 finalizer 再有界删除(防 CRD 卡在 customresourcecleanup; 2026-10-23)
     delete_crd_with_finalizer_cleanup clusteroperators.gpu.metax-tech.com
     SSH "${K} patch ns ${_mns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
     SSH "timeout 30 ${K} delete ns ${_mns} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
     # 有界等待命名空间真正消失(最多 60s): 摘掉 CR finalizer 后通常几秒完成;
     # 不等待就立刻 helm upgrade --create-namespace 会撞上 Terminating namespace(安装失败)。
-    local _wn=0
-    while [ "${_wn}" -lt 60 ]; do
-        SSH "${K} get ns ${_mns} >/dev/null 2>&1" || break
-        sleep 3; _wn=$((_wn + 3))
+    # 同上: SECONDS 截止 + 远端 kubectl timeout, 避免单次探针阻塞突破 60s 上限。
+    local _wn_end=$((SECONDS + 60))
+    while [ "${SECONDS}" -lt "${_wn_end}" ]; do
+        SSH "timeout 10 ${K} get ns ${_mns} >/dev/null 2>&1" || break
+        sleep 3
     done
-    if SSH "${K} get ns ${_mns} >/dev/null 2>&1"; then
+    if SSH "timeout 10 ${K} get ns ${_mns} >/dev/null 2>&1"; then
         warn "  ${_mns} 在 60s 内未删除(继续; helm --create-namespace 失败时需手工清理残留 finalizer)"
     fi
-    unset _wn
+    unset _wn_end
     # 清理集群级残留(ClusterRole/RoleBinding 无命名空间资源; 无 Helm 标签时 helm 无法接管 → 必须删掉)
     for _cr in $(SSH "${K} get clusterrole -o name 2>/dev/null" | grep -i 'metax' || true); do
         SSH "${K} delete ${_cr} --ignore-not-found >/dev/null 2>&1" || true
