@@ -210,7 +210,7 @@ verify-offline-files.sh [OPTIONS]
    - `--deep` 强制对全部 `.tar.gz`/`.tgz` 完整解压校验(慢, 用于大包结构确认);
    - 普通 `*.gz`(非 tar.gz): ≤阈值或 `--deep` 时用 gzip 解压验证 CRC/ISIZE; quick 超阈值只查魔数/页脚;
    - chart(tgz)无论大小都必须含 `Chart.yaml`; **只严格校验 `release.env` 指定的**
-     `cubestack-operator-chart-<CUBESTACK_OPERATOR_CHART_VERSION>.tgz`(必须存在且
+     `<chart>-<version>.tgz`(必须存在且
      `Chart.yaml.version` 一致); `charts/` 下其他版本只 warning(陈旧文件)。
 4. **二进制**:
    - `kubespray/<ver>/` 顶层可执行文件、`*.run`: ELF 魔数或 `#!` shebang + 可执行位;

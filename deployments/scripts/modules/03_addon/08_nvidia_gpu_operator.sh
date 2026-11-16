@@ -17,7 +17,7 @@
 #     NGC 预编译覆盖列表; 本模块对有卡节点做**内核白名单门禁**, 不覆盖即 fail-fast 并给出补拉指令)。
 #     usePrecompiled 在 v26.7.2 标注 tech-preview(仅 ubuntu22.04) —— 真机验收必须确认
 #     driver DaemonSet Ready + nvidia-smi; 退路(自制带包驱动镜像)见 docs/nvidia-gpu-operator.md。
-#   · 离线 / 在线模式(2026-10-14, 对标 ONLINE_DEPLOY_CUBESTACK_OPERATOR 口径):
+#   · 离线 / 在线模式(2026-10-14):
 #       false(默认/离线): 镜像集 = chart 渲染提取(tools/images/nvidia-chart-images.sh, 唯一来源)
 #             + 预编译驱动镜像(逐内核) → 从离线 tar 推入集群内置 registry 的 mirrors/nvcr.io/**
 #             → 各组件 repository 覆盖为集群 registry(节点只从 registry 拉);

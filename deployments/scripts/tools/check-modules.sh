@@ -288,9 +288,9 @@ while IFS= read -r -d '' f; do
         fi
         [ "${hit}" = "1" ] && break
     done <<< "${cands}"
-    # 离线包分发的窄例外(仅 cubestack-operator): 集合的 charts/ 存在且 README 被 git 跟踪
-    # ⇒ 视为合法落点。本地 tgz 不入 git, CI 干净 checkout 不要求它存在(部署前由 fetch/同步机备料)。
-    # 用 CUBESTACK_OPERATOR_CHART_DIR 作为门禁, 避免其它模块因为引用了某个 offline-files 目录而误判。
+    # 离线包分发的窄例外: 集合的 charts/ 存在且 README 被 git 跟踪 ⇒ 视为合法落点。
+    # 本地 tgz 不入 git, CI 干净 checkout 不要求它存在(部署前由 fetch/同步机备料)。
+    # 门禁变量名见下面的 grep; 本仓已无模块命中, 保留是为了版本树模块被就地检出时仍能通过。
     _bundle=0
     if [ "${hit}" = "0" ] && grep -q 'CUBESTACK_OPERATOR_CHART_DIR' "$f"; then
         while IFS= read -r oc; do

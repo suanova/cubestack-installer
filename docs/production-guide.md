@@ -68,7 +68,7 @@ kubectl get nodes                                # 容器内已配好集群访�
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  业务/平台应用        GPU 推理 · 队列调度(Kueue) · 自研模块(cubestack_operator)      │
+│  业务/平台应用        GPU 推理 · 队列调度(Kueue)                                  │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  Operator / Addon     沐曦 GPU Operator · Rook-Ceph(CSI) · MetalLB ·       │
 │                       Multus · RDMA Device Plugin · registry · netshoot   │
