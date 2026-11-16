@@ -789,7 +789,7 @@ git commit -m "feat(graceful-overwrite): ceph 卸载段(活态判定 + PRE_CLEAN
 **Interfaces:**
 - Consumes: lib-common（`load_config`/`init_remote_kubectl`/`SSH`/`K`/`err`/`warn`/`ok`/`say`/`SCRIPT_DIR`）+ lib-module（`discover_modules`/`module_meta`/`MODULES_DIR`/`MODULE_KEY`/`MODULE_SCRIPT`）。
 - Produces（给 Task 10/11/12 与运维使用）：
-  - CLI：`--list [--raw]`、`--uninstall [--yes]`；`--yes` 或 env `CUBESTACK_ASSUME_YES=1` 免确认；env `CUBESTACK_TEARDOWN_TEST_INVENTORY=<file>` = 离线夹具（`--uninstall` 变为只打印不执行）；env `TEARDOWN_CONFIRM_SLEEP`（0=跳过确认；非 0=询问 yes/no）、`TEARDOWN_COMPONENT_TIMEOUT`（默认 600）。
+  - CLI：`--list [--raw]`、`--uninstall [--yes]`；`--yes` 或 env `CUBESTACK_ASSUME_YES=1` 免倒计时；env `CUBESTACK_TEARDOWN_TEST_INVENTORY=<file>` = 离线夹具（`--uninstall` 变为只打印不执行）；env `TEARDOWN_CONFIRM_SLEEP`（默认 30）、`TEARDOWN_COMPONENT_TIMEOUT`（默认 600）。
   - 拆序规则：登记 seq 降序 → 未登记 UNINSTALL 组件按模块文件序反排插后 → `ceph` 强制压轴。
   - 组件调用协议：`CUBESTACK_MODULE_ACTION=uninstall timeout -k 15 <T> bash <模块脚本>`；成功后把登记内该组件标 `status=uninstalled`（仅非夹具模式）。
 
@@ -806,7 +806,7 @@ git commit -m "feat(graceful-overwrite): ceph 卸载段(活态判定 + PRE_CLEAN
 #   · 失败/超时 → 告警不中止(后续 ceph 安全序与 kubeadm reset 兜底); 收尾汇总。
 # 用法:
 #   cluster-teardown.sh --list               # 只读: 打印登记表 + 计划拆序(--raw 输出 TSV 供测试)
-#   cluster-teardown.sh --uninstall [--yes]  # 执行反序优雅卸载(--yes / CUBESTACK_ASSUME_YES=1 免确认)
+#   cluster-teardown.sh --uninstall [--yes]  # 执行反序优雅卸载(--yes / CUBESTACK_ASSUME_YES=1 免倒计时)
 #   · 非交互且未 --yes → 跳过卸载并醒目警告(节点旧集群 reset 前置会再次要求 --yes);
 #   · 测试钩子: CUBESTACK_TEARDOWN_TEST_INVENTORY=<file> 以夹具 JSON 代替读集群(离线夹具用)。
 # 数据源: cluster.conf (NODES 等) + 集群内 ConfigMap cubestack-install-record(kube-system)
@@ -1008,12 +1008,10 @@ PY
         fi
         if [ "${ASSUME_YES}" != "1" ]; then
             if [ -t 0 ]; then
-                say "将逐个调用以上组件的卸载逻辑(存在性检查→优雅停→卸载)。请确认后继续"
-                if [ "${CONFIRM_SLEEP}" -gt 0 ] 2>/dev/null; then
-                    confirm_yes_no "确认立即开始优雅卸载?" 1 \
-                        || { err "已取消优雅卸载 → 中止覆盖流程"; exit 1; }
-                fi
-                printf "  %s\n" "开始卸载..."
+                say "将逐个调用以上组件的卸载逻辑(存在性检查→优雅停→卸载)。${CONFIRM_SLEEP}s 后继续(Ctrl-C 中止)..."
+                _c="${CONFIRM_SLEEP}"
+                while [ "${_c}" -gt 0 ]; do printf "\r  ⏳ %2d 秒" "${_c}"; sleep 1; _c=$((_c - 1)); done
+                printf "\r  %s\n" "开始卸载..."
             else
                 warn "非交互且未 --yes: 跳过优雅卸载(继续覆盖流程; 节点旧集群 reset 前置会再次要求 --yes)"
                 exit 0
@@ -1145,7 +1143,7 @@ fi
 ```
      · **优雅覆盖**(2026-10-11): K8s 覆盖实际将执行且集群可达时, 会先读集群内安装登记
        (ConfigMap cubestack-install-record)按首装序**反序优雅卸载**已装组件(先停消费者/CR 级联/
-       helm uninstall, 再动 Ceph, 最后 K8s 覆盖) —— 非暴力重置。交互 yes/no 确认 TEARDOWN_CONFIRM_SLEEP
+       helm uninstall, 再动 Ceph, 最后 K8s 覆盖) —— 非暴力重置。倒计时 TEARDOWN_CONFIRM_SLEEP
        (默认 30s)可 Ctrl-C; --yes 免交互。手动查看: tools/k8s/cluster-teardown.sh --list
        设计: docs/graceful-overwrite/design.md
 ```
@@ -1378,8 +1376,8 @@ ceph 安全序, **最后** K8s 覆盖 —— 取代"暴力卸载+覆盖"。
 
 ## 手动使用
 bash deployments/scripts/tools/k8s/cluster-teardown.sh --list      # 只看: 登记表 + 计划拆序
-bash deployments/scripts/tools/k8s/cluster-teardown.sh --uninstall # 手动执行(交互询问 yes/no)
-... --uninstall --yes                                              # 免确认
+bash deployments/scripts/tools/k8s/cluster-teardown.sh --uninstall # 手动执行(30s 倒计时)
+... --uninstall --yes                                              # 免倒计时
 
 ## Ceph 的两种卸载深度
 - CEPH_PRE_CLEANUP_EXISTING=true(默认): 完整安全序(停消费者→unmap→删集群, 数据销毁);

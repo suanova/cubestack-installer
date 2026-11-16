@@ -21,7 +21,7 @@ kubespray 于是按【升级】处理,撞两道**上游硬闸**:
 ## 1. 已实现的"覆盖安装"路径(供对照)
 
 ```bash
-# ① 清掉节点上的旧集群(不可恢复: etcd 数据 / 工作负载全删; 交互需回答 yes / 必须 --yes)
+# ① 清掉节点上的旧集群(不可恢复: etcd 数据 / 工作负载全删; 有 10s 可中断倒计时 + 必须 --yes)
 cd /opt/cubestack-installer/deployments/kubespray && sudo ./cubestack-offline.sh reset <集群名> --yes
 # ② 正常全量部署(etcd 以钉值 v3.6.14 全新安装, 不经过任何"升级"路径)
 #    在部署容器里跑 deploy-cluster.sh 即可

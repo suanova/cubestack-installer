@@ -153,7 +153,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 - 裸盘策略: `tools/k8s/ceph-detect-disks.sh` **分类**各节点磁盘(`free` 空闲裸盘 / `ceph` 上次 Ceph
   占用 / `inuse` 在用 / `mixed` 混合, 判定实现 `ceph-disk-classify.py`), CR 的 per-node devices
   取 `free ∪ ceph`(精确盘名防误选); `inuse`/`mixed` 既不写入 CR 也不清理。
-  部署前红底确认(**按分类分组 + 判定证据**)并询问 yes/no(输入 yes 才继续)防覆盖。
+  部署前红底确认(**按分类分组 + 判定证据**) + sleep 60s 防覆盖。
 - 高可用: `size=3 + failureDomain=host + min_size=2 + mon.count=3`, 单主机故障池仍可写。
 - 离线: 镜像(`offline-files/ceph`)经 ctr import(保持原始 ref); lvm2 由
   `offline-files/kubespray/packages` 离线 .deb 安装; VM 测试盘 = create-vms.sh 附加的 3×200GB 裸盘。
