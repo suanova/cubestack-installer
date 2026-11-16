@@ -42,6 +42,10 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
+# 远端调用薄包装: 不读 stdin(< /dev/null), 避免在循环/here-string 中吞掉调用方输入。
+# lib-common 未提供该包装, 本模块本地定义(与 tools/k8s/ceph-cleanup.sh 同口径)。
+SSH_N() { SSH "$@" </dev/null; }
+
 # 清理 metax operator 残留(CR / CRD / 命名空间 / default 旧资源 / 集群级 RBAC)。
 # 安装路径(重装前清场)与卸载段(cluster-teardown)共用同一序列, 幂等。
 _metax_cleanup_residual() {
@@ -58,7 +62,7 @@ _metax_cleanup_residual() {
     # 时, 一次卡住的 SSH/kubectl 会让"20s 上限"失效。
     local _wc_end=$((SECONDS + 20))
     while [ "${SECONDS}" -lt "${_wc_end}" ]; do
-        SSH "timeout 10 ${K} -n ${_mns} get clusteroperator cluster-operator >/dev/null 2>&1" || break
+        SSH_N "timeout 10 ${K} -n ${_mns} get clusteroperator cluster-operator >/dev/null 2>&1" || break
         sleep 2
     done
     unset _wc_end
@@ -71,10 +75,10 @@ _metax_cleanup_residual() {
     # 同上: SECONDS 截止 + 远端 kubectl timeout, 避免单次探针阻塞突破 60s 上限。
     local _wn_end=$((SECONDS + 60))
     while [ "${SECONDS}" -lt "${_wn_end}" ]; do
-        SSH "timeout 10 ${K} get ns ${_mns} >/dev/null 2>&1" || break
+        SSH_N "timeout 10 ${K} get ns ${_mns} >/dev/null 2>&1" || break
         sleep 3
     done
-    if SSH "timeout 10 ${K} get ns ${_mns} >/dev/null 2>&1"; then
+    if SSH_N "timeout 10 ${K} get ns ${_mns} >/dev/null 2>&1"; then
         warn "  ${_mns} 在 60s 内未删除(继续; helm --create-namespace 失败时需手工清理残留 finalizer)"
     fi
     unset _wn_end
