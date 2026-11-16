@@ -114,7 +114,7 @@ fi
 
 - **CLI**：
   - `--list`：只读——读登记 + 打印登记表与计划拆序（无实时探测副作用）。
-  - `--uninstall [--yes]`：执行反序卸载（`--yes`/`CUBESTACK_ASSUME_YES=1` 免倒计时确认）。
+  - `--uninstall [--yes]`：执行反序卸载（`--yes`/`CUBESTACK_ASSUME_YES=1` 免 yes/no 确认）。
   - 测试钩子：`CUBESTACK_TEARDOWN_TEST_INVENTORY=<file>` 以夹具 JSON 代替读集群（供夹具测试）。
 - **候选集** = 全部声明 `# UNINSTALL: 1` 的模块 ∪ 登记中的组件（漏网记录告警跳过）。
 - **拆序规则**（精确）：
@@ -130,8 +130,8 @@ fi
   （审计 + 中途中断可幂等重跑）。
 - **失败处理**：单组件失败/超时 → 告警不中止（后续 ceph ⓪ 与 kubeadm reset 兜底；"覆盖必成功"
   口径不变），结尾汇总"卸了/跳了/失败了"。
-- **确认交互**：`--uninstall` 在终端交互时打印拆序清单并倒计时 `TEARDOWN_CONFIRM_SLEEP`
-  （默认 30s）；非交互且未 `--yes` → **跳过拆解并醒目警告**（后续 reset 前置自身会再次要求
+- **确认交互**：`--uninstall` 在终端交互时打印拆序清单并询问 yes/no
+  （`TEARDOWN_CONFIRM_SLEEP=0` 可跳过，变量名保留兼容）；非交互且未 `--yes` → **跳过拆解并醒目警告**（后续 reset 前置自身会再次要求
   `--yes`，闸门一致）；登记为空且无候选存在 → 快速空跑，不弹确认。
 
 ### 3.4 deploy-cluster.sh 接线（两个挂点）
@@ -140,9 +140,9 @@ fi
   （--fresh 清状态后天然成立；新容器无状态文件也成立；断点续跑已完成则不触发）。
 - **挂点 A**（`print_plan` 之后、ceph 预检块之前）：密钥已在（同容器重跑场景）→ 条件
   `_OVERWRITE_PENDING && cluster_exists` → 调引擎 `--uninstall`（`CUBESTACK_ASSUME_YES=1` 时
-  透传 `--yes`，免倒计时）→
+  透传 `--yes`，免确认）→
   `export CUBESTACK_TEARDOWN_DONE=1`。此后 ceph 预检块自然看到"无 CephCluster"（其删除分支
-  空转），倒计时/磁盘分类照常服务"新装"确认；**Ceph 清理天然排在 operator 之后**，顺序正确。
+  空转），确认/磁盘分类照常服务"新装"确认；**Ceph 清理天然排在 operator 之后**，顺序正确。
 - **挂点 B**（lib-module.sh `run_module` 执行 k8s_deploy 之前，与 `notify_base_redeploy` 同位）：
   场景 = 新容器（挂点 A 时还没有 SSH 密钥、探测不到集群）→ 此刻密钥已由前序模块
   （vm_sshkey/k8s_passwordless）装好 → 条件 `!CUBESTACK_TEARDOWN_DONE && cluster_exists` →

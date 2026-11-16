@@ -362,7 +362,7 @@ VIP 就位 ≠ 入口已切。**存量集群**必须按两阶段走,因为切换
 |---|---|---|
 | **阶段一** | `--steps kube_vip`(或全量):kube-vip 起来、VIP 绑到某台 master,**入口地址仍是第一台 master** | 无 |
 | (人工确认) | 观察 `verify_kube_vip` 六项全过 | 无 |
-| **阶段二** | 确认切换(部署时给出倒计时窗口,写入 `KUBE_VIP_SWITCH_CONFIRMED=1`)→ 域名解析与 `loadbalancer_apiserver.address` 切到 VIP → 全节点 apiserver/kubelet 重载 | **秒级抖动**(客户端改道) |
+| **阶段二** | 确认切换(部署时询问 yes/no,写入 `KUBE_VIP_SWITCH_CONFIRMED=1`)→ 域名解析与 `loadbalancer_apiserver.address` 切到 VIP → 全节点 apiserver/kubelet 重载 | **秒级抖动**(客户端改道) |
 
 > **全新安装**不需要人工确认:安装时集群还不存在,节点侧又走本地代理(§1.2 ③),部署期间没有人需要 VIP。
 > 【代码】`06_k8s_deploy.sh` 的确认门只在"入口原本指向别处"时才触发。
@@ -408,7 +408,7 @@ CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-true}"  # ← 置 true:供给层(池 + Sto
 | 存储节点 | `CEPH_NODES` / `CEPH_NODE_ROLE` / `CEPH_NODE_LABEL` | 空 / `master` / `ceph-storage=rook-ceph` | `CEPH_NODES` 非空则**优先级最高且不做角色过滤**;否则按角色从 `NODES` 里选。⚠ 存储节点数 < `CEPH_MIN_NODES`(默认 **3**)→ **不创建 CephCluster**(只 warn 不中断,表现为"静默没装") |
 | master 可调度 | `CEPH_ENABLE_MASTER_SCHEDULE` | `true` | 存储节点是 master 时,master 上默认带 `NoSchedule` 污点 → 模块**自动摘掉**(幂等);恢复:`kubectl taint nodes <master> node-role.kubernetes.io/control-plane=:NoSchedule` |
 | 用哪些盘 | `CEPH_DATA_DISK_POLICY` / `CEPH_DATA_DISKS` / `CEPH_DETECT_EXCLUDE` | `auto` / 空 / `^(sda\|sr0\|vda\|nbd[0-9]+)$` | `auto` 自动检测(**`free` ∪ `ceph`**,`inuse`/`mixed` 既不进 CR 也不清理);`explicit` 手工指定:`"node1:/dev/vdb,/dev/vdc;node2:/dev/vdb"` |
-| 部署前确认 | `CEPH_CONFIRM_SLEEP` | `60` | 红底列出"各节点磁盘按类分组 + 判定证据"并 sleep 供人工复核(生产别设 0) |
+| 部署前确认 | `CEPH_CONFIRM_SLEEP` | `60` | 红底列出"各节点磁盘按类分组 + 判定证据"并询问 yes/no,输入 yes 才继续(生产别设 0) |
 | mon / mgr | `CEPH_MON_COUNT` / `CEPH_MGR_COUNT` | 3 / 2 | mon 必须奇数且 `allowMultiplePerNode=false`;mgr=2 是 active+standby(**单 mgr 是滚动单点**) |
 | 副本 | `CEPH_POOL_REPLICAS` / `CEPH_POOL_MIN_SIZE` | 3 / 2 | 故障域 = **host**;`min_size=2` 保证宕一台主机池仍可写 |
 | OSD 内存 | `CEPH_OSD_MEMORY_TARGET` | 12(GiB) | 大盘(7TB 级)默认值;小盘可调小省内存 |

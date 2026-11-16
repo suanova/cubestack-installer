@@ -38,7 +38,7 @@ CLUSTER_DEFAULTS_CONF="${CLUSTER_DEFAULTS_CONF:-${REPO_ROOT}/deployments/config/
 export CLUSTER_DEFAULTS_CONF
 
 # ---------------- 配置漂移门禁工具(2026-10-26) ----------------
-# k8s_deploy 在启动时一次性 load_config; 若用户在 30s 倒计时/长时间 kubespray 运行期间
+# k8s_deploy 在启动时一次性 load_config; 若用户在确认/长时间 kubespray 运行期间
 # 修改 cluster.conf, 后续 addon 模块会重新 load_config 看到新值, 而 addons.yml 仍是旧值
 # (实机: nodeport→metallb, addons metallb_enabled=false → metallb 模块失败).
 # 这两个 helper 供 k8s_deploy/metallb 门禁复用; 只读, 不修改配置.
@@ -245,6 +245,47 @@ say()  { local m="→  $*"; echo -e "\033[36m${m}\033[0m"; _log_file "${m}"; }
 ok()   { local m="✅ $*"; echo -e "\033[32m${m}\033[0m"; _log_file "${m}"; }
 warn() { local m="⚠  $*"; echo -e "\033[33m${m}\033[0m"; _log_file "${m}"; }
 err()  { local m="【错误】$*"; echo -e "\033[31m${m}\033[0m" >&2; _log_file "${m}"; }
+
+# ---------------- 交互确认(yes/no) ----------------
+# 替代旧的 sleep 倒计时: 不再"等 N 秒自动继续", 交互终端必须人工输入 yes 才继续。
+# 用法: confirm_yes_no "<要确认的事>" [非交互环境默认: 1=继续(旧倒计时语义), 0=中止]
+# 返回: 0=继续; 1=拒绝/无法确认
+#   · 交互终端: 循环提示, 只接受 yes/y/是 或 no/n/否(空输入/非法输入重新询问);
+#   · 非交互: CUBESTACK_ASSUME_YES=1(即 deploy-cluster --yes)→ 继续;
+#             否则按 noninteractive_default; 默认 1=继续并告警(保持旧无人值守语义),
+#             需要"非交互必须显式确认"的调用方传 0(返回 1 由调用方 exit)。
+#   · Ctrl-C / stdin EOF → 按拒绝处理(返回 1)。
+confirm_yes_no() {
+    local _msg="$1" _nonint_default="${2:-1}" _ans _norm
+    if [ "${CUBESTACK_ASSUME_YES:-0}" = "1" ]; then
+        say "已开启 --yes/自动确认 → 继续: ${_msg}"
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        if [ "${_nonint_default}" = "1" ]; then
+            warn "非交互环境: ${_msg} → 自动继续(旧倒计时语义; 需要人工确认请在交互终端运行)"
+            return 0
+        fi
+        err "非交互环境且未确认: ${_msg} → 中止"
+        err "  确认要继续请加 --yes, 或设置 CUBESTACK_ASSUME_YES=1"
+        return 1
+    fi
+    while true; do
+        printf '\033[41m\033[97m  ❓ %s —— 请输入 yes 继续 / no 中止: \033[0m' "${_msg}"
+        if ! read -r _ans; then
+            printf '\n'
+            err "未读取到确认输入 → 中止"
+            return 1
+        fi
+        _norm="$(printf '%s' "${_ans}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        case "${_norm}" in
+            yes|y|是) return 0 ;;
+            no|n|否)  return 1 ;;
+            *) printf '  ⚠ 请输入 yes 或 no(收到: %s)\n' "${_ans:-<空>}" ;;
+        esac
+    done
+}
+
 # ⚠ vlog 必须走 stderr —— 它是诊断输出, 而 "$(...)" 命令替换**只捕获 stdout**。
 #   历史事故(2026-09-22 实机): kube_vip_resolve_target 内部的 vlog 走了 stdout,
 #   于是 api_addr="$(kube_vip_resolve_target)" 抓到 "[DEBUG] …\n<master01>" 两行,
@@ -1378,7 +1419,7 @@ kube_vip_validate_config() {
 #   一旦它在读不到时伪造出一个值, 这两处安全判定都会 fail-open —— 要回退请下沉到 kube_vip_derive:
 #     · modules/02_k8s/09_kube_vip.sh#kube_vip_cleanup 清理护栏: 入口"非空且非节点 IP"即拒绝清理,
 #       伪造值会让"明明没有入口"的集群永远清不掉 kube-vip(而它给的解法在本地代理模式下也走不通)
-#     · modules/02_k8s/06_k8s_deploy.sh 阶段二切换确认门: _KV_OLD==_KV_VIP 会**静默跳过**红底倒计时
+#     · modules/02_k8s/06_k8s_deploy.sh 阶段二切换确认门: _KV_OLD==_KV_VIP 会**静默跳过**红底确认
 # 用法: cur="$(kube_vip_current_entry)"   (无库存/读不到时输出空串)
 kube_vip_current_entry() {
     local all_yml="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}/group_vars/all/all.yml"

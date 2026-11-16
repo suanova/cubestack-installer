@@ -27,7 +27,7 @@
 #   · 精确清理(release/flat 默认): **内容寻址增量** —— 以远端 offline-files/SHA256SUMS 为判据,
 #     只重下"缺失/哈希不符"的文件, 并删除本地多余文件(与对象 mtime/ETag 无关);
 #     哈希缓存 .cubestack-hashes.json 避免每次重读整棵树; --full 回退旧的整树 mc mirror;
-#     默认 30s 红色倒计时(--clean-countdown N / --yes 跳过);
+#     默认交互 yes/no 确认(--clean-countdown 0 / --yes 跳过);
 #     非交互环境无 --yes 时中止; --no-clean 保留本地多余文件; .cubestack-* 始终保留。
 #   · 结果提示: 容器内就绪提示; 宿主机打印容器挂载命令 + 直跑 OFFLINE_FILES_DIR 指引。
 #   · 校验级别: 下载完成 / --verify-only 默认执行 full 校验(全量 sha256 + 结构检查),
@@ -65,7 +65,7 @@
 #   ./fetch-offline-from-minio.sh --release 2.0.0 --resume          # 断点续传(失败后重跑)
 #   ./fetch-offline-from-minio.sh --release 2.0.0 --retry 5 --retry-delay 5  # 重试策略
 #   ./fetch-offline-from-minio.sh --release 2.0.0 --no-clean       # 不删除本地多余文件
-#   ./fetch-offline-from-minio.sh --release 2.0.0 --clean-countdown 30  # 30s 倒计时
+#   ./fetch-offline-from-minio.sh --release 2.0.0 --clean-countdown 0  # 跳过清理确认(兼容旧参数)
 #   · --release <版本>: 远端 = <bucket>/<版本>/{offline-files/,cubestack-installer-cli-v<版本>.tar},
 #     旧布局的 cubestack-installer-cli.tar 仅做兼容读取;
 #     默认 **flat**: 把 <版本>/offline-files/ 平铺到 offline-files 根
@@ -78,7 +78,7 @@
 #     不完整时连接 MinIO, 部分文件按 offset 续传并校验 sha, 失败/不完整再正常下载并最终全量校验。
 #     下载命令默认重试 3 次(--retry/--retry-delay)。
 #   · --clean/--no-clean: release/flat 默认精确同步(增量下载 + 删除本地多余文件); dev/--sub 需显式 --clean;
-#     非交互环境必须加 --yes, 否则中止; .cubestack-* (校验戳/清单备份) 保留。
+#     非交互环境必须加 --yes(或 --clean-countdown 0), 否则中止; .cubestack-* (校验戳/清单备份) 保留。
 #   · --full: 跳过内容寻址增量, 回退 `mc mirror --overwrite --remove` 整树重传(排障/强刷用)。
 #   · --flat / --no-flat(仅配合 --release): release **默认 flat** —— 不建 <版本>/ 目录,
 #     把远端的 <版本>/offline-files/ 内容平铺到 offline-files 根(默认 deployments/offline-files);
@@ -148,7 +148,7 @@ RELEASE_MODE=0
 FLAT=0
 FLAT_SET=""                         # ""=未指定(release 默认 flat) | yes=--flat | no=--no-flat
 CLEAN_MODE="auto"                     # auto|yes|no; auto = release/flat 默认清理
-CLEAN_COUNTDOWN="${CLEAN_COUNTDOWN:-30}"  # 清理倒计时秒数(--yes 跳过)
+CLEAN_COUNTDOWN="${CLEAN_COUNTDOWN:-30}"  # 兼容开关: 0=跳过清理确认; 非 0=交互询问 yes/no(不再等待)
 CLEAN=0
 FULL_FETCH=0                          # --full: 跳过内容寻址增量, 回退整树 mc mirror(排障用)
 FETCH_RETRY="${FETCH_RETRY:-3}"
@@ -200,7 +200,7 @@ _print_help() {
     echo "  --release 2.0.0 --clean ...           精确同步: 增量下载 + 删除本地多余文件"
     echo "  --release 2.0.0 --full ...            回退旧行为: 整树 mc mirror 全量重传(排障用)"
     echo "  --release 2.0.0 --no-clean ...        保留本地多余文件(默认 release/flat 清理)"
-    echo "  --clean-countdown N                   清理倒计时秒数(默认 30; --yes 跳过)"
+    echo "  --clean-countdown N                   兼容旧参数: 0=跳过清理确认; 非 0=交互询问 yes/no(不再等待)"
     echo "  --retry N                             下载失败重试次数(默认 3)"
     echo "  --retry-delay N                       重试间隔秒数(默认 3)"
 }
@@ -255,8 +255,8 @@ fi
 [ "${RESUME}" = "1" ] && [ "${NO_VERIFY}" = "1" ] && { err "--resume 不能与 --no-verify 同用(续传后必须校验)"; exit 1; }
 case "${CLEAN_COUNTDOWN}" in ''|*[!0-9]*) err "--clean-countdown 必须是非负整数: ${CLEAN_COUNTDOWN}"; exit 1 ;; esac
 # 有效数字(去前导零)超过 18 位时, 10# 归一后仍会超出 bash 64 位有符号范围而回绕:
-# ≥2^63 变负数 → 倒计时被当成 0 直接执行; ≥2^64 变余数 → 倒计时长度错误。
-# 随后的清理是 mc mirror --remove(删除不可逆), 必须在这里拒绝而不是依赖溢出后的值。
+# ≥2^63 变负数 → 被当成 0 跳过确认直接执行; 随后的清理是 mc mirror --remove(删除不可逆),
+# 必须在这里拒绝而不是依赖溢出后的值。
 _cd_digits="${CLEAN_COUNTDOWN#"${CLEAN_COUNTDOWN%%[!0]*}"}"
 [ "${#_cd_digits}" -le 18 ] || { err "--clean-countdown 超出范围(最多 18 位有效数字): ${CLEAN_COUNTDOWN}"; exit 1; }
 unset _cd_digits
@@ -807,8 +807,8 @@ case "${CLEAN_MODE}" in
     auto) if [ "${RELEASE_MODE}" = "1" ]; then CLEAN=1; else CLEAN=0; fi ;;
 esac
 if [ "${CLEAN}" = "1" ]; then
-    if [ "${YES}" != "1" ] && [ ! -t 0 ]; then
-        err "精确清理需要交互确认: 非交互环境请加 --yes(或 --no-clean 保留本地多余文件)"
+    if [ "${YES}" != "1" ] && [ "${CLEAN_COUNTDOWN:-0}" -gt 0 ] 2>/dev/null && [ ! -t 0 ]; then
+        err "精确清理需要交互确认: 非交互环境请加 --yes(或 --clean-countdown 0 / --no-clean)"
         exit 1
     fi
     if [ "${RELEASE_MODE}" = "1" ] && [ "${FLAT}" = "1" ]; then
@@ -818,7 +818,7 @@ if [ "${CLEAN}" = "1" ]; then
     else
         _clean_desc="${DST_ROOT}(仅本次选中的子目录)"
     fi
-    _clean_warning "${_clean_desc}"
+    _clean_warning "${_clean_desc}" || { err "已取消精确清理(未删除任何文件)"; exit 1; }
     unset _clean_desc
 fi
 

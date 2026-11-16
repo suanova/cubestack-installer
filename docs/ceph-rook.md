@@ -26,7 +26,7 @@
 | toolbox | `rook-ceph-tools` 也 patch 上同一 nodeSelector | 它只是 CLI pod, 但同样属于"ceph 组件只在存储节点"的约定(实测 Rook reconcile 不会回滚该 patch) |
 | 存储节点选择 | `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master**) + node label(`CEPH_NODE_LABEL`, 默认 `ceph-storage=rook-ceph`) | 只调度到指定的存储节点(**默认只装在 master 节点**) |
 | 裸盘 | **自动分类**磁盘(`tools/k8s/ceph-detect-disks.sh`, 判定见 §4) | CR 取 `free ∪ ceph`(空闲 + 上次 Ceph 占用); `inuse`(在用)/`mixed`(混合)不选不清理; 精确盘名, 不用正则, 防误选 |
-| 安全确认 | 部署前红底列出"节点+裸盘", **sleep 60s**(`CEPH_CONFIRM_SLEEP`) | 防覆盖系统盘/在用盘(CI 可 `CEPH_CONFIRM_SLEEP=0`); **k8s 部署阶段**(`k8s_deploy`)也预检一次 |
+| 安全确认 | 部署前红底列出"节点+裸盘", **询问 yes/no**(`CEPH_CONFIRM_SLEEP`; 输入 yes 才继续) | 防覆盖系统盘/在用盘(CI/无人值守可 `CEPH_CONFIRM_SLEEP=0` 跳过); **k8s 部署阶段**(`k8s_deploy`)也预检一次 |
 | 镜像 | 离线 tar → `ctr -n k8s.io import --no-unpack` | 保持原始 ref, 无需改 manifest; 多架构需 `--platform linux/amd64` 单架构拉取 |
 | lvm2 | 离线 `.deb`(`offline-files/kubespray/packages`) | 重启后 Rook OSD 逻辑卷需 lvm 激活; **k8s 部署阶段由 install-packages.yml 自动安装**(见 §2) |
 | registry 后端 | `REGISTRY_STORAGE_CLASS=ceph-block` | registry PVC 走 ceph RBD, **替代 local-path**(ceph 模块排在 registry 之前; 可 `LOCAL_PATH_ENABLED=false` 彻底不装 local-path) |
@@ -74,7 +74,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps ceph,ceph_csi
 ```
 
 `02_ceph.sh` 流程: ① 确定存储节点(ceph_storage_hosts: CEPH_NODES 显式 > CEPH_NODE_ROLE, 默认 master) ② 逐节点自动检测裸盘
-③ **红底确认 + sleep CEPH_CONFIRM_SLEEP(60s)** double-check 节点与盘名
+③ **红底确认 + 询问 yes/no**(`CEPH_CONFIRM_SLEEP`; 输入 yes 才继续) double-check 节点与盘名
 ④ 节点准备(modprobe rbd 持久化 + lvm2 离线安装 + 打 label `ceph-storage=rook-ceph`)
 ⑤ `ceph-sync-images.sh` 同步镜像到存储节点并 `ctr import`
 ⑥ apply rook crds/common/csi-operator/operator, 等 operator Ready
@@ -116,8 +116,8 @@ REGISTRY_STORAGE_CLASS=ceph-block                  # registry 走外部 ceph-blo
 - `03_ceph_csi.sh` 创建 `CephConnection` + `rook-csi-rbd-*` secret + `StorageClass ceph-block`
   (pool/认证指向外部), 跳过集群内 pool/cephfs/rgw 创建
 - `deploy-cluster.sh` 预检跳过裸盘/已有集群清理, 但会在**K8s 集群部署开始前**红底列出外部连接参数
-  (external-ceph.env / monitors / pool / user)并倒计时确认(`CEPH_ENV_CONFIRM_SLEEP`, 默认 60s;
-  未配置 monitors 会红底强调"ceph_csi 将报错", 供部署前 Ctrl-C 修正 —— 2026-09-11)
+  (external-ceph.env / monitors / pool / user)并询问 yes/no(`CEPH_ENV_CONFIRM_SLEEP`;
+  未配置 monitors 会红底强调"ceph_csi 将报错", 供部署前回答 no 修正 —— 2026-09-11)
 - registry 等下游继续用 `ceph-block` SC(无需改动)
 
 **兼容旧配置**: 仅设了旧变量 `CEPH_EXTERNAL_MONITORS`(旧外部开关)会自动视为 `external`,
@@ -272,10 +272,10 @@ CEPH_EXTERNAL_ENV_FILE=""         # 留空 = 自动探测默认目录 deployment
 **部署前检测(2026-09-11 起在 deploy-cluster.sh, K8s 集群部署开始前)**: `CEPH_MODE=external` 时
 检查 env 文件(默认目录 `deployments/config/external-ceph.env` 或 `CEPH_EXTERNAL_ENV_FILE`)——
 存在则显示其真实 monitors/user 并提示"将走官方导入路径"; **未检测到(且 `CEPH_MONITORS` 未填)→
-红底强调 "ceph_csi 模块将报错" + 倒计时**(默认 60s, `CEPH_ENV_CONFIRM_SLEEP` 可调/CI 设 0):
-"请先放置 external-ceph.env, 或 cluster.conf 设 CEPH_MONITORS/CEPH_KEYRING"。倒计时期间可
-Ctrl-C 修正配置再重跑, 不必等整轮 K8s 部署跑完才发现(02_ceph 模块仍保留同款告警,
-但 deploy-cluster 已确认过时不再重复倒计时)。
+红底强调 "ceph_csi 模块将报错" + yes/no 确认**(`CEPH_ENV_CONFIRM_SLEEP=0` 可跳过):
+"请先放置 external-ceph.env, 或 cluster.conf 设 CEPH_MONITORS/CEPH_KEYRING"。可回答 no
+中止并修正配置再重跑, 不必等整轮 K8s 部署跑完才发现(02_ceph 模块仍保留同款告警,
+但 deploy-cluster 已确认过时不再重复确认)。
 
 `03_ceph_csi.sh` 检测到 env 文件后全自动完成(无需任何手工 kubectl):
 
@@ -306,7 +306,7 @@ Ctrl-C 修正配置再重跑, 不必等整轮 K8s 部署跑完才发现(02_ceph 
 ##### 路径二: 手填(存量兼容)
 
 `CEPH_EXTERNAL_ENV_FILE` 未设且默认目录也无 env 文件时走原路径(ceph-csi-operator
-`CephConnection`/`ClientProfile`, 02 模块会先倒计时警告)。打开 B 的 `cluster.conf`,
+`CephConnection`/`ClientProfile`, 02 模块会先询问 yes/no 警告)。打开 B 的 `cluster.conf`,
 把 A 导出的 `external-ceph-self-define-access.conf` 关键值拷入下述字段(只改这些):
 
 ```bash
