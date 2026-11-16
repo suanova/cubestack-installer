@@ -46,6 +46,21 @@ load_config
 # lib-common 未提供该包装, 本模块本地定义(与 tools/k8s/ceph-cleanup.sh 同口径)。
 SSH_N() { SSH "$@" </dev/null; }
 
+# 探测 metax 命名空间状态, 区分"确认不存在"与"探针失败":
+#   0=确认已不存在(kubectl NotFound); 1=仍然存在; 2=无法确认(超时/传输/其它错误)
+# ⚠ 不能把 timeout/SSH 失败当成"已删除" —— 否则会在 namespace 仍 Terminating 时
+#   提前继续 helm --create-namespace, 安装失败(CodeRabbit)。
+_metax_ns_probe() {   # <ns>
+    local ns="$1" out
+    if out="$(SSH_N "timeout 10 ${K} get ns ${ns} -o name 2>&1" 2>&1)"; then
+        return 1
+    fi
+    case "${out}" in
+        *"(NotFound)"*) return 0 ;;
+        *) return 2 ;;
+    esac
+}
+
 # 清理 metax operator 残留(CR / CRD / 命名空间 / default 旧资源 / 集群级 RBAC)。
 # 安装路径(重装前清场)与卸载段(cluster-teardown)共用同一序列, 幂等。
 _metax_cleanup_residual() {
@@ -72,16 +87,20 @@ _metax_cleanup_residual() {
     SSH "timeout 30 ${K} delete ns ${_mns} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
     # 有界等待命名空间真正消失(最多 60s): 摘掉 CR finalizer 后通常几秒完成;
     # 不等待就立刻 helm upgrade --create-namespace 会撞上 Terminating namespace(安装失败)。
-    # 同上: SECONDS 截止 + 远端 kubectl timeout, 避免单次探针阻塞突破 60s 上限。
-    local _wn_end=$((SECONDS + 60))
+    # 同上: SECONDS 截止 + 远端 kubectl timeout; 仅 NotFound 才算"已删除",
+    # 超时/传输失败视为未知并继续重试(不能提前结束等待)。
+    local _wn_end=$((SECONDS + 60)) _st=2
     while [ "${SECONDS}" -lt "${_wn_end}" ]; do
-        SSH_N "timeout 10 ${K} get ns ${_mns} >/dev/null 2>&1" || break
+        _metax_ns_probe "${_mns}"; _st=$?
+        [ "${_st}" = "0" ] && break
         sleep 3
     done
-    if SSH_N "timeout 10 ${K} get ns ${_mns} >/dev/null 2>&1"; then
+    if [ "${_st}" = "1" ]; then
         warn "  ${_mns} 在 60s 内未删除(继续; helm --create-namespace 失败时需手工清理残留 finalizer)"
+    elif [ "${_st}" = "2" ]; then
+        warn "  ${_mns} 状态无法确认(探针超时/传输失败), 继续; helm --create-namespace 失败时需手工清理残留 finalizer"
     fi
-    unset _wn_end
+    unset _wn_end _st
     # 清理集群级残留(ClusterRole/RoleBinding 无命名空间资源; 无 Helm 标签时 helm 无法接管 → 必须删掉)
     for _cr in $(SSH "${K} get clusterrole -o name 2>/dev/null" | grep -i 'metax' || true); do
         SSH "${K} delete ${_cr} --ignore-not-found >/dev/null 2>&1" || true
