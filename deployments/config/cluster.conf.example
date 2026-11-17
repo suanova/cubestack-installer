@@ -118,7 +118,7 @@ KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # 虚拟机能力(占位
 LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(占位; 见 4.5)
 MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多网卡(见 4.7)
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(见 4.8)
-MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sglang×2/vllm-metax ≈33G)随部署推入内置 registry(排在 dev_lab 之后 = 最后; --skip model_images 跳过; 见 offline-files/model-collection/README.md)
+MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sglang×2/vllm-metax ≈33G)随部署推入内置 registry(排在平台组件之后 = 最后; --skip model_images 跳过; 见 offline-files/model-collection/README.md)
 
 # ---- 节点组(可选; 配合 --only <组名> 使用) ----
 # 示例(按需取消注释并改值):
@@ -129,7 +129,7 @@ MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sgl
 # 其余全部在 **cluster.defaults.conf**(load_config 自动加载; 覆盖时在本文件写同名变量):
 #   ★ 版本基线/镜像钉子/PRELOAD | API 入口细节
 #   §1 宿主机/SSH/API 域名/Harbor | §2 离线路径+MinIO/NTP/CIDR/CNI/containerd/hosts
-#   §3 MetalLB/Registry/镜像源 | §4 沐曦/Ceph/平台 Operator/Multus/NVIDIA/RDMA/netshoot/dev-lab
+#   §3 MetalLB/Registry/镜像源 | §4 沐曦/Ceph/平台 Operator/Multus/NVIDIA/RDMA/netshoot
 # 加载优先级: 环境变量 > cluster.conf > cluster.defaults.conf
 # ════════════════════════════════════════════════════════════
 
