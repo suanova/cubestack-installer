@@ -1984,6 +1984,45 @@ bash deployments/scripts/tools/tests/test-release-mode.sh                     # 
 
 ---
 
+### 8b. 【2026-11-16 实机】MinIO 精确同步反复校验失败: 远端无 SIZES → 本地旧 SIZES 永远不删; 嵌套 `_upstream-*/SHA256SUMS` 被当元数据豁免
+
+**症状:** `fetch-offline-from-minio.sh --release 2.0.1` 显示"删除 119 个"后, 全量校验仍失败:
+- `kubespray/_upstream-release-2.32.1/SHA256SUMS: 磁盘存在但清单未登记`
+- `SIZES: SIZES 与 SHA256SUMS 路径集合不一致`
+- `cubestack-operator/..._v2.0.1.tar: 文件大小不符 (期望 35775488 实际 77898752)`
+  (及其 `.digest` 期望 72 实际 71)
+反复重跑同步/`--repair` 都不收敛, 部署门禁因此中止。
+
+**根因:**
+1. **远端发布 2.0.1 没有 `SIZES`**(`release-publish.sh` 只生成 `SHA256SUMS` + `_SUCCESS`)。
+   旧 `_manifest_transfer` 对 `_SUCCESS/SIZES` 用 `mc cp ... || true`, 远端缺失被当成"忽略"
+   ⇒ 本地上一版本(2.0.0)的 `SIZES` 一直留着; 校验器会读根 `SIZES` 并与新 `SHA256SUMS`
+   比路径集合, 于是报 `sizes_set`; 旧 `SIZES` 里的 2.0.0 文件大小又叠加出一串
+   `size_mismatch`(实机 tar 实际 77,898,752 B ≈ 74.3 MiB, 与远端 `mc ls` 的 74 MiB 一致;
+   `.digest` 实际 71 B, 也与远端 71 B 一致 —— 是被旧 SIZES 的期望值误报, 非文件损坏)。
+2. `manifest-plan.py` 的元数据豁免按**basename**判断, `SHA256SUMS/SIZES/_SUCCESS` 在**任意深度**
+   都免删 ⇒ 本地残留 `kubespray/_upstream-release-2.32.1/SHA256SUMS` 永远不会进入 delete 计划,
+   而校验器只豁免**树根**元数据(`fsutil.is_meta`), 于是每次报 `extra_file`。
+
+**解法(已落地):**
+- `manifest-plan.py`: 元数据/`.cubestack-*`/CLI tar 豁免改为**仅树根**(`rel` 不含 `/`);
+  嵌套同名文件不在远端清单内 ⇒ `delete`。嵌套 `.cubestack-*` 目录也不再整体跳过。
+- `lib-offline-fetch.sh`: 新增 `_sync_meta_file`, `_SUCCESS/SIZES` 按远端实际状态同步 ——
+  存在则覆盖, 不存在则**删除本地旧副本**, `mc stat` 无法确认(网络/权限)时保留并告警;
+  `--repair` 的元数据分支复用同一逻辑(不再直接跳过元数据项)。
+- 效果: 同步后本地树与远端清单/元数据完全一致; 二次同步 `下载 0 个, 删除 0 个`。
+
+**验证:**
+```bash
+bash deployments/scripts/tools/tests/test-offline-incremental-plan.sh  # 嵌套元数据进 delete
+bash deployments/scripts/tools/tests/test-release-mode.sh              # 旧 SIZES 清理 + 二次同步幂等
+# 实机小样: 远端无 SIZES 时, _sync_meta_file 会删除本地 SIZES, _SUCCESS 正常覆盖
+```
+> 若发布方希望 quick 校验能检测大文件截断, 应在 `release-publish.sh stage` 生成并上传 `SIZES`
+> (校验器本身允许其缺失, 只是 quick 无法做截断检测)。
+
+---
+
 ### 9. 【2026-11-05 实机】旧控制面容器没删干净: `kubeadm init` 报 `[ERROR Port-10257]: Port 10257 is in use`(清理阶段误报"3 台成功")
 
 **症状**
@@ -2379,7 +2418,7 @@ scope 的 component 或 `all` 重跑。刷新期间不要手工删 marker。
 - kubespray 部署完成，但 addon 阶段 `01_metallb.sh` 报 `未找到 metallb-system 命名空间`；
 - `addons.yml` 里 `metallb_enabled: false`，而 `cluster.conf` 当前是
   `SERVICE_EXPOSE_MODE=metallb` / `METALLB_ENABLED=true`；
-- 常见于 `k8s_deploy` 的 30s 倒计时或 kubespray 长时间运行期间修改了 `SERVICE_EXPOSE_MODE`。
+- 常见于 `k8s_deploy` 的确认等待或 kubespray 长时间运行期间修改了 `SERVICE_EXPOSE_MODE`。
 
 **根因**
 `k8s_deploy` 在入口一次性 `load_config`，随后用旧变量生成 inventory/addons.yml 并跑 kubespray；
@@ -2388,7 +2427,7 @@ scope 的 component 或 `all` 重跑。刷新期间不要手工删 marker。
 
 **脚本门禁（2026-10-26 已根治）**
 - `lib-common.sh` 新增 `config_fingerprint` / `addons_metallb_enabled`；
-- `06_k8s_deploy.sh` 在启动时记录 cluster.conf 指纹，**倒计时后和 kubespray 完成后各校验一次**；
+- `06_k8s_deploy.sh` 在启动时记录 cluster.conf 指纹，**确认后和 kubespray 完成后各校验一次**；
   检测到变更直接中止，并提示重新运行，避免半新半旧；
 - `01_metallb.sh` 在连集群前校验 `addons.yml metallb_enabled/metallb_speaker_enabled`；
   不一致时直接给出根因和修复命令，不再只报“未找到命名空间”。

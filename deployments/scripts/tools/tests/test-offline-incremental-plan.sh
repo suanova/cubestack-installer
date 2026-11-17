@@ -3,7 +3,8 @@
 # test-offline-incremental-plan.sh — 离线增量下载计划(manifest-plan.py)回归
 #
 # 覆盖: 缺失→fetch / 一致→不下载 / 同大小内容变化→必须重下(旧 mc mirror 会漏) /
-#       多余文件→delete / prefix 过滤 / 哈希缓存命中 / 非法清单与穿越路径→rc=3
+#       多余文件→delete / prefix 过滤 / 哈希缓存命中 / 非法清单与穿越路径→rc=3 /
+#       嵌套元数据(如 _upstream-*/SHA256SUMS)不算豁免项 → 必须 delete(幂等)
 # 用法: bash deployments/scripts/tools/tests/test-offline-incremental-plan.sh
 # ============================================================
 set -uo pipefail
@@ -87,6 +88,25 @@ python3 "${PLANNER}" --manifest "${TMP}/sums" --root "${ROOT}" --cache "${TMP}/c
 chk "控制字符路径未被写成 delete" "0" "$(grep -c '^delete' "${TMP}/p8.tsv" || true)"
 chk "已提示跳过(含控制字符)" "2" "$(grep -c '跳过含控制字符' "${TMP}/e8.log" || true)"
 rm -f "${ROOT}/os/tab"$'\t'"evil" "${ROOT}/os/nl"$'\n'"evil"
+
+echo "[9] 嵌套元数据不是豁免项(只豁免树根) → 本地残留必须清理";
+mkdir -p "${ROOT}/kubespray/_upstream-release-2.32.1" "${ROOT}/kubespray/.cubestack-nested"
+printf 'x\n' > "${ROOT}/kubespray/_upstream-release-2.32.1/SHA256SUMS"
+printf 'x\n' > "${ROOT}/kubespray/_upstream-release-2.32.1/SIZES"
+printf 'x\n' > "${ROOT}/kubespray/.cubestack-nested/_SUCCESS"
+printf 'x\n' > "${ROOT}/SIZES"
+printf 'x\n' > "${ROOT}/_SUCCESS"
+plan_run "${TMP}/p9.tsv" >"${TMP}/s9.json"
+chk "嵌套 SHA256SUMS 进入 delete" "1" \
+    "$(awk -F'\t' '$1=="delete" && $2=="kubespray/_upstream-release-2.32.1/SHA256SUMS"{n++} END{print n+0}' "${TMP}/p9.tsv")"
+chk "嵌套 SIZES 进入 delete" "1" \
+    "$(awk -F'\t' '$1=="delete" && $2=="kubespray/_upstream-release-2.32.1/SIZES"{n++} END{print n+0}' "${TMP}/p9.tsv")"
+chk "嵌套 .cubestack 目录内文件进入 delete" "1" \
+    "$(awk -F'\t' '$1=="delete" && $2=="kubespray/.cubestack-nested/_SUCCESS"{n++} END{print n+0}' "${TMP}/p9.tsv")"
+chk "树根元数据仍豁免" "0" \
+    "$(awk -F'\t' '$1=="delete" && ($2=="SIZES" || $2=="_SUCCESS" || $2=="SHA256SUMS"){n++} END{print n+0}' "${TMP}/p9.tsv")"
+rm -rf "${ROOT}/kubespray/_upstream-release-2.32.1" "${ROOT}/kubespray/.cubestack-nested"
+rm -f "${ROOT}/SIZES" "${ROOT}/_SUCCESS"
 
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then

@@ -86,13 +86,27 @@ PY
         || qbase="${TMPDIR:-/var/tmp}/cubestack-repair/${RELEASE_ARG}/${ts}"
     mkdir -p "${qbase}" || return 1
     local rc=0 n_fixed=0
+    local _lroot
+    if [ "${FLAT}" = "1" ]; then _lroot="${DST_ROOT}"; else _lroot="${DST_ROOT}/offline-files"; fi
     for rel in "${bad[@]}"; do
         rel="${rel#./}"
-        # 元数据项由校验器 --seal --update-success 重建, 不在 SHA256SUMS 内, 不能用 mc cp 修复;
-        # 截断文件会让 _SUCCESS.bytes 校验失败, 若不跳过会先撞上它而放弃后续文件(2026-10-29 实测)。
+        # 元数据项按**远端实际状态**修复(与增量同步同口径):
+        #   SHA256SUMS 必取远端; _SUCCESS/SIZES 远端有则覆盖、无则删本地过期副本。
+        # 旧实现直接跳过元数据项 → 上一版本残留的 SIZES 永远修不掉, --repair 反复失败(2026-11)。
         case "${rel}" in
-            _SUCCESS|SHA256SUMS|SIZES)
-                warn "  跳过元数据项: ${rel}(由 verify --seal --update-success 重建)"
+            SHA256SUMS)
+                if _mc_retry mc cp "${SRC_ROOT}/offline-files/SHA256SUMS" "${_lroot}/SHA256SUMS" >/dev/null 2>&1; then
+                    n_fixed=$((n_fixed + 1))
+                else
+                    warn "  修复 SHA256SUMS 失败: ${_lroot}/SHA256SUMS"; rc=1
+                fi
+                continue ;;
+            _SUCCESS|SIZES)
+                if _sync_meta_file "${SRC_ROOT}/offline-files" "${_lroot}" "${rel}"; then
+                    n_fixed=$((n_fixed + 1))
+                else
+                    rc=1
+                fi
                 continue ;;
         esac
         case "${rel}" in
@@ -244,6 +258,29 @@ _remote_size() {   # <remote>
         'import json,sys; print(json.load(sys.stdin).get("size",""))' 2>/dev/null || true
 }
 
+# 按远端实际状态同步一个可选元数据文件(_SUCCESS / SIZES):
+#   · 远端存在 → 覆盖本地;
+#   · 远端不存在 → 删除本地旧副本(否则上一版本的 SIZES 会与当前 SHA256SUMS 集合不一致,
+#     反复同步/校验永远无法收敛 —— 2026-11 实机 release 2.0.1 无 SIZES);
+#   · 无法确认(网络/权限) → 保留本地副本并告警, 不因一次抖动误删。
+# 返回: 0=已同步或已清理; 1=失败(调用方可决定是否致命)
+_sync_meta_file() {   # <src_offline_base> <local_root> <name>
+    local src="$1" root="$2" m="$3" st
+    if st="$(mc stat "${src}/${m}" 2>&1)"; then
+        _mc_retry mc cp "${src}/${m}" "${root}/${m}" >/dev/null 2>&1 \
+            || { warn "  下载 ${m} 失败(保留本地副本): ${root}/${m}"; return 1; }
+        return 0
+    fi
+    if printf '%s' "${st}" | grep -qi 'does not exist'; then
+        if [ -e "${root}/${m}" ]; then
+            rm -f "${root}/${m}" && say "  远端无 ${m}, 已删除本地过期副本"
+        fi
+        return 0
+    fi
+    warn "  无法确认远端 ${m}(保留本地副本): ${st##*$'\n'}"
+    return 1
+}
+
 _expected_sha() {   # <SHA256SUMS> <rel>
     local sums="$1" rel="$2" p out
     for p in "./${rel}" "${rel}" "*./${rel}" "*${rel}"; do
@@ -283,29 +320,37 @@ _clean_end() {
     _CLEAN_STASH=""
     _CLEAN_DST=""
 }
-_clean_warning() {   # <desc>
-    # 10#: --clean-countdown 允许前导零(如 08), 但 bash 的 $(( )) 与 printf %d 会把
-    # 08 当非法八进制(非 $((10#...)) 方式在 set -e 下会直接中止脚本), 故这里先归一为十进制。
-    local desc="$1" i=$((10#${CLEAN_COUNTDOWN:-0}))
+_clean_warning() {   # <desc>  → 返回 0=继续, 1=用户拒绝
+    # 10#: --clean-countdown 保留为兼容开关(0=跳过确认), 但不再等待秒数。
+    # 08 这类前导零仍按十进制归一, 避免 $(( )) 把 08 当非法八进制在 set -e 下中止脚本。
+    local desc="$1" i=$((10#${CLEAN_COUNTDOWN:-0})) _ans _norm
     echo -e "\033[41m\033[97m================================================================\033[0m"
     echo -e "\033[41m\033[97m ⚠ 精确同步: 只重下缺失/内容不符的文件, 并删除本地多余文件\033[0m"
     echo -e "\033[41m\033[97m   目标: ${desc}\033[0m"
     echo -e "\033[41m\033[97m   .cubestack-* (校验戳/清单备份) 会保留; 其他清理不可恢复\033[0m"
     echo -e "\033[41m\033[97m================================================================\033[0m"
     if [ "${YES}" = "1" ]; then
-        echo "  --yes: 跳过倒计时"
+        echo "  --yes: 跳过确认"
         return 0
     fi
     if [ "${i}" -le 0 ]; then
-        echo "  倒计时 0: 立即执行"
+        echo "  --clean-countdown 0: 跳过确认"
         return 0
     fi
-    while [ "${i}" -gt 0 ]; do
-        printf "\r  %2d 秒后开始( Ctrl-C 中止 )" "${i}"
-        sleep 1
-        i=$((i - 1))
+    while true; do
+        printf '\033[41m\033[97m  ❓ 确认执行上述精确清理(不可恢复)? [Y/n] \033[0m'
+        if ! read -r _ans; then
+            printf '\n'
+            err "未读取到确认输入 → 中止"
+            return 1
+        fi
+        _norm="$(printf '%s' "${_ans}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        case "${_norm}" in
+            ""|yes|y|是) printf '  开始执行...\n'; return 0 ;;
+            no|n|否)     return 1 ;;
+            *) printf '  ⚠ 请输入 Y 或 n(直接回车=Y; 收到: %s)\n' "${_ans:-<空>}" ;;
+        esac
     done
-    printf "\r  开始执行...                    \n"
 }
 # ---------------- 8c. 内容寻址增量传输(方案 A, 2026-11-04) ----------------
 # 判据 = 远端 offline-files/SHA256SUMS 的内容哈希, 与对象 mtime/ETag 无关:
@@ -384,13 +429,15 @@ _manifest_transfer() {   # <src_offline_base> <local_tree_root> <prefix>
             --cache "${cache}" --out /dev/null --hash-list "${fetched}" >/dev/null 2>&1 || true
     fi
 
-    # 元数据文件不在清单内(SHA256SUMS/_SUCCESS/SIZES), 必须显式同取:
-    #   SHA256SUMS 直接用已下载的那份; 其余存在则复制(缺失/老发布树没有时忽略)。
+    # 元数据文件不在清单内(SHA256SUMS/_SUCCESS/SIZES), 必须按**远端实际状态**同步。
+    # 旧实现把缺失当"忽略", 于是上一版本残留的 SIZES 会一直留在树上:
+    #   release 2.0.1 不生成 SIZES, 但本地 2.0.0 的 SIZES 仍在 → 校验器报
+    #   "SIZES 与 SHA256SUMS 路径集合不一致" + 旧文件大小不符, 反复同步也无法收敛(2026-11 实机)。
     local m
     cp -f "${manifest}" "${root}/SHA256SUMS" 2>/dev/null \
         || warn "  写入本地 SHA256SUMS 失败: ${root}/SHA256SUMS"
     for m in _SUCCESS SIZES; do
-        mc cp "${src}/${m}" "${root}/${m}" >/dev/null 2>&1 || true
+        _sync_meta_file "${src}" "${root}" "${m}" || true
     done
 
     say "  增量结果: 下载 ${n_fetch} 个, 删除 ${n_del} 个, 未变更 $(printf '%s' "${summary}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("kept",0))' 2>/dev/null || echo '?') 个"

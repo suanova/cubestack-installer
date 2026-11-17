@@ -88,6 +88,34 @@ warn()      { local m="[WARN] $*";  echo -e "${YELLOW}${m}${NC}"; _log_file "${m
 err()       { local m="[ERROR] $*"; echo -e "${RED}${m}${NC}" >&2; _log_file "${m}"; exit 1; }
 highlight() { local m=">>> $*";     echo -e "${CYAN}${m}${NC}"; _log_file "${m}"; }
 
+# 交互确认(替代旧的 sleep 倒计时): Linux 惯例 <问题>? [Y/n] —— 直接回车=继续, 显式 n/no 才中止; EOF 中止。
+# 非交互环境默认自动继续(保持旧无人值守语义); CUBESTACK_ASSUME_YES=1(deploy-cluster --yes)自动 yes。
+# 用法: confirm_yes_no_offline "<要确认的事>"  → 0=继续, 1=拒绝
+confirm_yes_no_offline() {
+    local msg="$1" ans norm
+    if [ "${CUBESTACK_ASSUME_YES:-0}" = "1" ]; then
+        log "已开启自动确认(CUBESTACK_ASSUME_YES=1) → 继续: ${msg}"
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        warn "非交互环境: ${msg} → 自动继续(旧倒计时语义; 需要人工确认请在交互终端运行)"
+        return 0
+    fi
+    while true; do
+        printf '\033[41m\033[97m  ❓ %s [Y/n] \033[0m' "${msg}"
+        if ! read -r ans; then
+            echo ""
+            err "未读取到确认输入 → 中止"
+        fi
+        norm="$(printf '%s' "${ans}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        case "${norm}" in
+            ""|yes|y|是) return 0 ;;
+            no|n|否)     return 1 ;;
+            *) printf '  ⚠ 请输入 Y 或 n(直接回车=Y; 收到: %s)\n' "${ans:-<空>}" ;;
+        esac
+    done
+}
+
 # 写文件: 内嵌内容为权威 —— 缺失则生成; 存在但内容不同则覆盖(2026-10-08)。
 # 背景: 旧的"仅缺失才生成"模式在内容演进后**永不更新**(实机: 老树 install-packages.yml 缺
 #   os/packages 新路径修复, 靠人肉 docker cp 补; 树文件丢失走兜底重建时还会生成旧内容)。
@@ -1797,7 +1825,7 @@ update_loadbalancer_all_yml() {
     [ "${#master_ips[@]}" -gt 0 ] || { warn "hosts.yml 中无 master 节点(kube_control_plane), 跳过同步"; return 0; }
 
     # API 入口: **以 sync-kubespray-config.sh 已写入 all.yml 的值为准**, 不在本脚本重新判定阶段。
-    # 原因: 阶段判定含 SSH 探测与用户确认(倒计时), 只能有一处权威实现; 本脚本若自己算一遍,
+    # 原因: 阶段判定含 SSH 探测与用户确认(yes/no), 只能有一处权威实现; 本脚本若自己算一遍,
     # 会用不同值把 sync 的写法顶掉(本函数在 kubespray 启动前还会再跑一次)。
     # 正常路径下 06_k8s_deploy.sh 已先调用 sync, all.yml 的值就是本次要用的入口(阶段一=master01 /
     # 阶段二=VIP); 仅在直连本脚本时 all.yml 可能未就绪, 此时按第一阶段回退。
@@ -2057,7 +2085,7 @@ print("%s|%s|%s" % (
         fi
 
         if grep -qx "YES" <<< "${probe}"; then
-            # 详情行(第 3 行)用于点名"到底占了什么", 让 60 秒倒计时可判断
+            # 详情行(第 3 行)用于点名"到底占了什么", 让确认提示可判断
             local pdet
             pdet=$(sed -n '3p' <<< "${probe}")
             log "  → [${node}](${host}) 检测到旧 Kubernetes 残留/占用${pdet:+ [${pdet}]}"
@@ -2072,24 +2100,19 @@ print("%s|%s|%s" % (
         return 0
     fi
 
-    # 检测到残留 → 醒目警告 + sleep 60
+    # 检测到残留 → 醒目警告 + [Y/n] 确认(直接回车=清理; 不再 sleep 60 秒)
     echo ""
     highlight "╔══════════════════════════════════════════════════════════╗"
     highlight "║   ⚠️  检测到节点上已有 Kubernetes 部署! ⚠️                 ║"
     highlight "║                                                          ║"
-    highlight "║  将在 60 秒后自动让出这些节点(kubelet API 端口 10250)     ║"
+    highlight "║  将清理并让出这些节点(kubelet API 端口 10250)             ║"
     highlight "║  含第三方发行版(RKE2/k3s/microK8s): 只 stop + disable     ║"
     highlight "║  其数据目录(/var/lib/rancher 等)保留, 不卸载不删除        ║"
-    highlight "║  如需中断, 请按 Ctrl+C 退出                              ║"
+    highlight "║  确认清理? [Y/n](回车=Y; n 中止; Ctrl+C 退出)            ║"
     highlight "╚══════════════════════════════════════════════════════════╝"
     echo ""
-    local countdown=60
-    while [ "${countdown}" -gt 0 ]; do
-        printf "\r  ⏳ 倒计时 %3d 秒后自动清理并继续部署..." "${countdown}"
-        sleep 1
-        countdown=$((countdown - 1))
-    done
-    printf "\r  ✅ 继续部署...                          \n"
+    confirm_yes_no_offline "确认清理上述节点上的旧 Kubernetes 状态并继续部署?" \
+        || { err "已取消: 旧 Kubernetes 状态未清理 → 中止部署"; }
     echo ""
 
     # 执行清理: 先让出控制面/ kubelet 端口(第三方发行版 stop+disable) → 确保 CRI 可用
@@ -2764,7 +2787,7 @@ LIMIT_FLAG=""
 #
 # ⚠ 会**永久删除**(节点由 inventory 决定): etcd 数据目录 / /etc/kubernetes /
 #   kubelet·containerd 的配置与 cri 容器、Pod(= 该集群的工作负载与 etcd 数据全部丢失)。
-#   故必须显式 `--yes`, 且留 10 秒可中断的倒计时。
+#   故必须显式 `--yes`(不再有等待倒计时)。
 # ============================================================
 cmd_reset() {
     [ "${RESET_YES:-0}" = "1" ] || {
@@ -2789,12 +2812,7 @@ cmd_reset() {
     echo "    · etcd 数据目录(/var/lib/etcd)+ etcd/kubelet/containerd 服务与配置"
     echo "    · /etc/kubernetes(证书、kubeconfig、静态 Pod 清单)"
     echo "    · 全部 CRI 容器与 Pod —— 该集群工作负载一并消失, 不可恢复"
-    local _t=10
-    while [ "${_t}" -gt 0 ]; do
-        printf '\r    ⚠ %d 秒后开始(ctrl-c 可取消)...' "${_t}"
-        sleep 1; _t=$((_t - 1))
-    done
-    printf '\r\033[K'
+    # 旧的 10 秒倒计时已移除: 本命令必须显式 --yes 才走到这里, --yes 本身即确认。
 
     # ⚠ 不要给 reset.yml 传 `-e @${INVENTORY_DIR}/group_vars/all/offline.yml`:
     #   offline.yml 本就位于 inventory 旁边的 group_vars/all/, 已作为 group_vars 自动加载;

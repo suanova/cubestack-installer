@@ -375,8 +375,8 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   (lvm2 .deb → `offline-files/kubespray/packages`, OSD 重启需 lvm 激活逻辑卷)。
 - **节点选择**: `CEPH_NODES`(显式, 优先)或 `CEPH_NODE_ROLE`(**默认 master**)→ 唯一实现为 lib-common 的 `ceph_storage_hosts()`; 模块自动打 label `CEPH_NODE_LABEL`(默认 `ceph-storage=rook-ceph`)。
 - **裸盘自动检测(防覆盖)**: `tools/k8s/ceph-detect-disks.sh` 判定"未使用裸盘"(无分区/格式化/挂载/LVM 且非系统盘)
-  → 生成 CephCluster CR 的 per-node devices(精确盘名)。部署前**红底列出节点+盘并 sleep CEPH_CONFIRM_SLEEP(60s)**
-  double-check; CI 可 `CEPH_CONFIRM_SLEEP=0`。
+  → 生成 CephCluster CR 的 per-node devices(精确盘名)。部署前**红底列出节点+盘并询问 yes/no**
+  double-check(输入 yes 才继续; CI 可 `CEPH_CONFIRM_SLEEP=0` 跳过)。
 - **镜像同步**: `tools/images/ceph-sync-images.sh`(复制 tar 到全部节点 + `ctr -n k8s.io images import --no-unpack`)。
 - **VM 测试盘**: `vm-nodes.conf` 的 `VM_DATA_DISKS=3/VM_DATA_DISK_SIZE=200` → 每台 VM 附加 3×200GB 裸盘(Guest `/dev/vdb~`),
   由 `tools/vm/create-vms.sh` 创建时自动附加。

@@ -11,7 +11,7 @@
 #   · 失败/超时 → 告警不中止(后续 ceph 安全序与 kubeadm reset 兜底); 收尾汇总。
 # 用法:
 #   cluster-teardown.sh --list               # 只读: 打印登记表 + 计划拆序(--raw 输出 TSV 供测试)
-#   cluster-teardown.sh --uninstall [--yes]  # 执行反序优雅卸载(--yes / CUBESTACK_ASSUME_YES=1 免倒计时)
+#   cluster-teardown.sh --uninstall [--yes]  # 执行反序优雅卸载(--yes / CUBESTACK_ASSUME_YES=1 免确认)
 #   · 非交互且未 --yes → 跳过卸载并醒目警告(节点旧集群 reset 前置会再次要求 --yes);
 #   · 测试钩子: CUBESTACK_TEARDOWN_TEST_INVENTORY=<file> 以夹具 JSON 代替读集群(离线夹具用)。
 # 数据源: cluster.conf (NODES 等) + 集群内 ConfigMap cubestack-install-record(kube-system)
@@ -32,7 +32,7 @@ CM_NAME="cubestack-install-record"
 COMPONENT_TIMEOUT="${TEARDOWN_COMPONENT_TIMEOUT:-600}"
 # Ceph 卸载要等 Rook 擦 9 块 OSD 盘 + MDS/RGW 收尾, 600s 不够; 单独给 1800s 上界。
 CEPH_TEARDOWN_TIMEOUT="${CEPH_TEARDOWN_TIMEOUT:-1800}"
-CONFIRM_SLEEP="${TEARDOWN_CONFIRM_SLEEP:-30}"
+CONFIRM_SLEEP="${TEARDOWN_CONFIRM_SLEEP:-30}"   # 0=跳过确认; 非 0=询问 [Y/n](变量名保留兼容, 不再等待)
 TEST_INV="${CUBESTACK_TEARDOWN_TEST_INVENTORY:-}"
 
 ACTION=""; ASSUME_YES="${CUBESTACK_ASSUME_YES:-0}"; RAW=0
@@ -289,10 +289,13 @@ PY
         fi
         if [ "${ASSUME_YES}" != "1" ]; then
             if [ -t 0 ]; then
-                say "将逐个调用以上组件的卸载逻辑(存在性检查→优雅停→卸载)。${CONFIRM_SLEEP}s 后继续(Ctrl-C 中止)..."
-                _c="${CONFIRM_SLEEP}"
-                while [ "${_c}" -gt 0 ]; do printf "\r  ⏳ %2d 秒" "${_c}"; sleep 1; _c=$((_c - 1)); done
-                printf "\r  %s\n" "开始卸载..."
+                say "将逐个调用以上组件的卸载逻辑(存在性检查→优雅停→卸载)。请确认后继续"
+                # TEARDOWN_CONFIRM_SLEEP 变量保留兼容: 0=跳过确认, 非 0(默认)=询问 [Y/n]
+                if [ "${CONFIRM_SLEEP}" -gt 0 ] 2>/dev/null; then
+                    confirm_yes_no "确认立即开始优雅卸载?" 1 \
+                        || { err "已取消优雅卸载 → 中止覆盖流程"; exit 1; }
+                fi
+                printf "  %s\n" "开始卸载..."
             else
                 warn "非交互且未 --yes: 跳过优雅卸载(继续覆盖流程; 节点旧集群 reset 前置会再次要求 --yes)"
                 exit 0

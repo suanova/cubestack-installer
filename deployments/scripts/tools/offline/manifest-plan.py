@@ -123,13 +123,20 @@ def normalize_prefix(prefix):
     return f"{p}/" if p else ""
 
 
-def _is_meta_name(name):
-    # 元数据/校验戳不属于清单登记范围(校验器 META_NAMES 同口径); CLI tar 在 release 布局下
-    # 位于树根, 不能被 flat 清理误删。
-    return (name in ("SHA256SUMS", "SIZES", "_SUCCESS")
-            or name.startswith(".cubestack-")
-            or name == "cubestack-installer-cli.tar"
-            or (name.startswith("cubestack-installer-cli-") and name.endswith(".tar")))
+def _is_meta_rel(rel):
+    """只豁免**树根**的元数据/校验戳/CLI tar(与校验器 fsutil.is_meta 同口径)。
+
+    嵌套目录里的 SHA256SUMS/SIZES/_SUCCESS/.cubestack-* 不是发布元数据:
+    若远端清单未登记, 它们就是本地多余文件, 必须清理 —— 否则校验器会报
+    `磁盘存在但清单未登记`, 重复执行永远无法收敛(2026-11 实机: 残留的
+    kubespray/_upstream-release-2.32.1/SHA256SUMS 导致每次校验都失败)。
+    """
+    if "/" in rel:
+        return False
+    return (rel in ("SHA256SUMS", "SIZES", "_SUCCESS")
+            or rel.startswith(".cubestack-")
+            or rel == "cubestack-installer-cli.tar"
+            or (rel.startswith("cubestack-installer-cli-") and rel.endswith(".tar")))
 
 
 def plan(entries, root, prefix, cache):
@@ -167,17 +174,19 @@ def plan(entries, root, prefix, cache):
             plan_rows.append(("fetch", rel))
             fetch_bytes += size
 
-    # 删除远端已不存在的本地文件(只扫 prefix 范围; .cubestack-* / CLI tar 豁免)
+    # 删除远端已不存在的本地文件(只扫 prefix 范围; 仅树根 .cubestack-*/元数据豁免)
     scan_root = os.path.join(root, prefix) if prefix else root
     if os.path.isdir(scan_root):
         for dirpath, dirnames, filenames in os.walk(scan_root):
-            dirnames[:] = [d for d in dirnames if not d.startswith(".cubestack-")]
             base = os.path.relpath(dirpath, root).replace(os.sep, "/")
             if base == ".":
                 base = ""
+            # 只有树根的 .cubestack-* 备份/校验戳目录豁免; 嵌套同名目录按普通目录处理
+            dirnames[:] = [d for d in dirnames
+                           if not (base == "" and d.startswith(".cubestack-"))]
             for name in filenames:
                 rel = f"{base}/{name}" if base else name
-                if rel in entries or _is_meta_name(name):
+                if rel in entries or _is_meta_rel(rel):
                     continue
                 # 防 TSV 注入: 本地文件名可含换行/Tab, 直接写进计划会多出一行
                 # (消费方按行 rm -f -- "${root}/${rel}"), 可能删到树外; ".." 组件同理。

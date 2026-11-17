@@ -5,8 +5,9 @@
 #   ① load_config: CUBESTACK_RELEASE 派生 OFFLINE_FILES_ROOT + 11 个目录变量
 #   ② 缺少 release.env 时硬失败(退出码 1)
 #   ②b CUBESTACK_RELEASE 格式校验(拒绝 ../、绝对路径、空白/元字符; 不误杀合法版本名)
-#   ③ fetch-offline-from-minio.sh --release: 下载布局/SHA256SUMS/带版本 CLI tar 校验
-#   ④ --verify-only 通过; 篡改文件后失败
+#   ③ fetch-offline-from-minio.sh --release: 下载布局/SHA256SUMS/带版本 CLI tar 校验;
+#      幂等: 二次同步零下载零删除; 远端无 SIZES → 清理本地旧 SIZES; 嵌套元数据清理
+#   ④ --verify-only 通过; 篡改文件后失败; --repair 修复坏文件并清理旧 SIZES
 #   ⑤ --list-releases 输出可用版本
 #   ⑤b 旧布局(无版本名 CLI tar)向后兼容
 #   ⑥ release 定义静态约束(无 :latest)
@@ -189,6 +190,11 @@ case "${cmd}" in
             case "$1" in --json) _json=1; shift ;; --*) shift ;; *) break ;; esac
         done
         _src="$(p "${1:?}")"
+        # 与真实 mc 一致: 对象不存在 → 非 0 + "Object does not exist"
+        if [ ! -e "${_src}" ]; then
+            echo "Unable to stat \`$1\`. Object does not exist." >&2
+            exit 1
+        fi
         _sz="$(stat -c %s "${_src}" 2>/dev/null || echo 0)"
         if [ "${_json}" = "1" ]; then printf '{"size":%s}\n' "${_sz}"; else printf '%s\n' "${_sz}"; fi ;;
     cat)
@@ -216,6 +222,12 @@ export FAKE_MC_LOG="${TMP}/mc-calls.log"
 mkdir -p "${TMP}/local/2.0.0/offline-files/.cubestack-manifest-backup"
 printf 'extra\n' > "${TMP}/local/2.0.0/offline-files/extra.txt"
 printf 'keep\n' > "${TMP}/local/2.0.0/offline-files/.cubestack-manifest-backup/keep.txt"
+# 幂等回归(2026-11 实机): 上一版本残留的 SIZES / 嵌套元数据必须被远端状态清理。
+# 远端 2.0.0 fixture 没有 SIZES → 本地旧 SIZES 应删除; _upstream-release 目录不在清单 → 整段删除。
+printf '999  ./old\n' > "${TMP}/local/2.0.0/offline-files/SIZES"
+mkdir -p "${TMP}/local/2.0.0/offline-files/kubespray/_upstream-release-2.32.1"
+printf 'stale\n' > "${TMP}/local/2.0.0/offline-files/kubespray/_upstream-release-2.32.1/SHA256SUMS"
+printf 'stale\n' > "${TMP}/local/2.0.0/offline-files/kubespray/_upstream-release-2.32.1/notes.txt"
 # mc 重试 helper: 前两次失败, 第三次成功 / 全部失败
 awk '/^_mc_retry\(\)/,/^}/' "${REPO_ROOT}/deployments/scripts/tools/offline/lib-offline-fetch.sh" > "${TMP}/mcretry.sh"
 warn() { :; }
@@ -233,10 +245,17 @@ bash "${FETCH}" --release 2.0.0 --no-flat --dest "${TMP}/local" --yes >/dev/null
 chk "fetch --release 退出码" "0" "$?"
 chk "clean 删除多余文件" "0" "$([ -e "${TMP}/local/2.0.0/offline-files/extra.txt" ] && echo 1 || echo 0)"
 chk "clean 保留 .cubestack-*" "keep" "$(cat "${TMP}/local/2.0.0/offline-files/.cubestack-manifest-backup/keep.txt" 2>/dev/null)"
+chk "远端无 SIZES → 本地过期 SIZES 被清理" "0" "$([ -e "${TMP}/local/2.0.0/offline-files/SIZES" ] && echo 1 || echo 0)"
+chk "嵌套 _upstream-release 元数据被清理" "0" "$([ -e "${TMP}/local/2.0.0/offline-files/kubespray/_upstream-release-2.32.1" ] && echo 1 || echo 0)"
 chk "发布树落盘" "hello" "$(cat "${TMP}/local/2.0.0/offline-files/ceph/test.txt" 2>/dev/null)"
 chk "CLI tar 落盘(带版本名)" "cli-tar-bytes" "$(cat "${TMP}/local/2.0.0/cubestack-installer-cli-v2.0.0.tar" 2>/dev/null)"
 chk "不再生成旧名 CLI tar" "0" "$([ -e "${TMP}/local/2.0.0/cubestack-installer-cli.tar" ] && echo 1 || echo 0)"
 chk "release 取件走增量(不做整树 mirror)" "0" "$( [ -f "${TMP}/mc-calls.log" ] && grep -c '^mirror-remove' "${TMP}/mc-calls.log" || echo 0 )"
+
+# 幂等: 同一发布再同步一次 → 零下载/零删除(本地树已与远端清单一致)
+out2="$(bash "${FETCH}" --release 2.0.0 --no-flat --dest "${TMP}/local" --yes 2>&1)"; rc=$?
+chk "二次同步退出码" "0" "${rc}"
+chk_contains "二次同步零下载零删除" "下载 0 个, 删除 0 个" "${out2}"
 
 # --clean-countdown 必须是数字
 out="$(bash "${FETCH}" --clean-countdown abc 2>&1)"; rc=$?
@@ -252,21 +271,53 @@ bash "${FETCH}" --retry 9223372036854775807 --list >/dev/null 2>&1
 chk "retry 上限内接受" "0" "$?"
 
 # --clean-countdown 前导零必须按十进制解析(bash 算术/printf 会把 08 当非法八进制)
-# 单测 _clean_warning: sleep 打桩(不真等 8 秒), 断言倒计时完整跑完、脚本不中止。
-out="$(bash -c '
+# 单测 _clean_warning: 交互 [Y/n] 确认 —— 直接回车/yes 继续, no 返回非零。
+out="$(printf 'yes\n' | bash -c '
     set -euo pipefail
     source "$1"
     CLEAN_COUNTDOWN=08 YES=0
-    sleep() { :; }
     _clean_warning "test-dir"
-    echo "COUNTDOWN_OK"
+    echo "CONFIRM_OK"
 ' _ "${REPO_ROOT}/deployments/scripts/tools/offline/lib-offline-fetch.sh" 2>&1)"
 rc=$?
 chk "clean-countdown 前导零(08)不中止" "0" "${rc}"
-chk_contains "前导零倒计时完整结束" "COUNTDOWN_OK" "${out}"
+chk_contains "输入 yes 后继续" "CONFIRM_OK" "${out}"
+printf 'no\n' | bash -c '
+    set -euo pipefail
+    source "$1"
+    CLEAN_COUNTDOWN=08 YES=0
+    _clean_warning "test-dir"
+' _ "${REPO_ROOT}/deployments/scripts/tools/offline/lib-offline-fetch.sh" >/dev/null 2>&1
+chk "输入 no 返回非零(调用方中止)" "1" "$?"
+out="$(printf 'maybe\nyes\n' | bash -c '
+    set -euo pipefail
+    source "$1"
+    CLEAN_COUNTDOWN=08 YES=0
+    _clean_warning "test-dir"
+    echo "CONFIRM_OK"
+' _ "${REPO_ROOT}/deployments/scripts/tools/offline/lib-offline-fetch.sh" 2>&1)"
+chk_contains "非法输入重新询问 Y/n" "请输入 Y 或 n" "${out}"
+chk_contains "非法输入后 yes 仍继续" "CONFIRM_OK" "${out}"
+out="$(printf '\n' | bash -c '
+    set -euo pipefail
+    source "$1"
+    CLEAN_COUNTDOWN=08 YES=0
+    _clean_warning "test-dir"
+    echo "CONFIRM_OK"
+' _ "${REPO_ROOT}/deployments/scripts/tools/offline/lib-offline-fetch.sh" 2>&1)"
+chk "直接回车默认继续" "0" "$?"
+chk_contains "直接回车后继续" "CONFIRM_OK" "${out}"
+out="$(CLEAN_COUNTDOWN=0 YES=0 bash -c '
+    set -euo pipefail
+    source "$1"
+    _clean_warning "test-dir"
+    echo "SKIP_OK"
+' _ "${REPO_ROOT}/deployments/scripts/tools/offline/lib-offline-fetch.sh" </dev/null 2>&1)"
+chk "clean-countdown 0 跳过确认" "0" "$?"
+chk_contains "clean-countdown 0 不读取 stdin" "SKIP_OK" "${out}"
 
-# --clean-countdown 有效数字超过 18 位必须拒绝: bash 64 位算术会回绕(≥2^63 变负 →
-# 倒计时被当成 0 立即执行, 随后是不可逆的 mc mirror --remove); 前导零不计入位数。
+# 有效数字超过 18 位必须拒绝: bash 64 位算术会回绕(≥2^63 变负 → 被当成 0 跳过确认
+# 直接执行, 随后是不可逆的 mc mirror --remove); 前导零不计入位数。
 for _v in 9223372036854775808 18446744073709551616 1000000000000000000; do
     out="$(bash "${FETCH}" --clean-countdown "${_v}" --list 2>&1)"; rc=$?
     chk "clean-countdown 19 位拒绝(${_v})" "1" "${rc}"
@@ -391,6 +442,8 @@ rc=$?
 chk "verify-only 跳过空间预检退出码" "0" "${rc}"
 chk_contains "verify-only 提示跳过空间预检" "跳过下载磁盘空间预检" "${out}"
 printf 'tampered\n' >> "${TMP}/local/2.0.0/offline-files/ceph/test.txt"
+# 旧版本残留 SIZES(远端 2.0.0 fixture 没有)也必须能被 --repair 清理, 否则校验永远失败
+printf '999  ./old-path\n' > "${TMP}/local/2.0.0/offline-files/SIZES"
 out="$(bash "${FETCH}" --release 2.0.0 --no-flat --verify-only --dest "${TMP}/local" 2>&1)"
 rc=$?
 chk "篡改后 verify-only 失败" "1" "${rc}"
@@ -399,6 +452,7 @@ chk_contains "失败提示 --repair" "--repair" "${out}"
 bash "${FETCH}" --release 2.0.0 --no-flat --repair --dest "${TMP}/local" --yes >/dev/null 2>&1
 chk "repair 退出码" "0" "$?"
 chk "repair 恢复文件" "hello" "$(cat "${TMP}/local/2.0.0/offline-files/ceph/test.txt" 2>/dev/null)"
+chk "repair 清理本地过期 SIZES" "0" "$([ -e "${TMP}/local/2.0.0/offline-files/SIZES" ] && echo 1 || echo 0)"
 bash "${FETCH}" --release 2.0.0 --no-flat --verify-only --dest "${TMP}/local" >/dev/null 2>&1
 chk "repair 后 verify-only 通过" "0" "$?"
 # _SUCCESS 绑定损坏也可 --repair(从远端重取)

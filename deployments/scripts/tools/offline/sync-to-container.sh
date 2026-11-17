@@ -159,7 +159,7 @@ docker exec "${CONTAINER}" bash -c '
       esac
   done
   echo "  06_k8s_deploy.sh Ceph 预检:"; grep -c "Ceph 部署前确认" '"${CT}"/deployments/scripts/modules/02_k8s/06_k8s_deploy.sh' || true
-  echo "  deploy-cluster 开始前倒计时:"; grep -c "部署开始前最后确认存储节点/裸盘" '"${CT}"/deployments/scripts/deploy-cluster.sh' || true
+  echo "  deploy-cluster 开始前确认:"; grep -c "部署开始前最后确认存储节点/裸盘" '"${CT}"/deployments/scripts/deploy-cluster.sh' || true
   echo "  02_ceph.sh 显式盘:"; grep -c "CEPH_DATA_DISKS" '"${CT}"/deployments/scripts/modules/03_addon/02_ceph.sh' || true
   echo "  detect 分类器引用: $(grep -c "ceph-disk-classify.py" '"${CT}"/deployments/scripts/tools/k8s/ceph-detect-disks.sh' || true) 处; 分类器文件: $(test -f '"${CT}"/deployments/scripts/tools/k8s/ceph-disk-classify.py' && echo 在 || echo 缺失)"
   echo "  cleanup --wipe-disks: $(grep -c "wipe-disks" '"${CT}"/deployments/scripts/tools/k8s/ceph-cleanup.sh' || true) 处"

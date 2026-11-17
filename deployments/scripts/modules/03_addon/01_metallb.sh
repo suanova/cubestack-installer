@@ -31,7 +31,7 @@ load_config
     && { say "SERVICE_EXPOSE_MODE=nodeport(自动关闭 MetalLB), 跳过 metallb 就绪检查"; exit 0; }
 
 # addons.yml 与 cluster.conf 一致性门禁(2026-10-26 实机):
-# k8s_deploy 入口一次性 load_config; 若用户在倒计时/kubespray 运行期间改了 cluster.conf,
+# k8s_deploy 入口一次性 load_config; 若用户在确认/kubespray 运行期间改了 cluster.conf,
 # k8s_deploy 仍按旧配置生成 addons.yml, 而本模块重新加载后看到新值 → 直接报“未找到
 # metallb-system”, 根因被掩盖。这里先给出可操作的明确错误, 不再让用户猜 addons.yml。
 _ADDONS_YML="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME}}/group_vars/k8s_cluster/addons.yml"
