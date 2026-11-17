@@ -102,7 +102,7 @@ python3 deployments/scripts/tools/online/lib-base-catalog.py --index <index.json
 ## optional
 
 `optional: true` 表示默认不物化，例如 netshoot。商业 release 可以按
-package/profile 选择是否带上；开源在线安装只有显式开关才物化。dev-lab 已迁到 release。
+package/profile 选择是否带上；开源在线安装只有显式开关才物化。dev-lab 镜像不再属于公共 base。
 
 ## materials 与 os
 
