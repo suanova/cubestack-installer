@@ -393,19 +393,13 @@ if ! printf '%s' "${MON_ADDRS}" | grep -qE '^[A-Za-z0-9._-]+:[0-9]+(,[A-Za-z0-9.
 fi
 ok "  mon 地址: ${MON_ADDRS}"
 
-# ★ external 的 MON 通常是 msgr2-only 的 NodePort(如 3300); 内核客户端默认用 v1,
-#   会以 "V1_BANNER socket closed" 反复重连 → mount 报 no mds is up。
-#   ms_mode=prefer-secure: 优先 msgr2、回退 v1 —— 兼容 external v1/v2 与 internal。
-MS_MODE_OPT=""
-[ "${CEPH_MODE}" = "external" ] && MS_MODE_OPT=",ms_mode=prefer-secure"
-
 # ---------------- 镜像 ----------------
 IMAGE="${CEPHFS_MOUNT_IMAGE}"
 if [ -z "${IMAGE}" ]; then
     IMAGE="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" get ds rook-ceph.cephfs.csi.ceph.com-nodeplugin \
         -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null) || true )"
 fi
-[ -n "${IMAGE}" ] || IMAGE="quay.io/cephcsi/cephcsi:${CEPHCSI_VERSION:-v3.18.1}"
+[ -n "${IMAGE}" ] || IMAGE="quay.io/cephcsi/cephcsi:${CEPHCSI_VERSION:-v3.17.0}"
 if ! printf '%s' "${IMAGE}" | grep -qE '^[A-Za-z0-9._/@:-]+$'; then
     err "镜像引用非法: '${IMAGE}'"; exit 1
 fi
@@ -531,7 +525,6 @@ DS_YAML="$(sed \
     -e "s|__USER__|${CEPH_USER_NAME}|g" \
     -e "s|__SECRET__|${CEPHFS_MOUNT_SECRET}|g" \
     -e "s|__MON_ADDRS__|${MON_ADDRS}|g" \
-    -e "s|__MS_MODE__|${MS_MODE_OPT}|g" \
     -e "s|__FS_NAME__|${CEPHFS_FS_NAME}|g" \
     -e "s|__SUBDIR__|${CEPHFS_MOUNT_SUBDIR}|g" \
     -e "s|__DIR_MODE__|${CEPHFS_MOUNT_DIR_MODE}|g" \

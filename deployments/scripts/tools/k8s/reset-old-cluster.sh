@@ -17,7 +17,7 @@
 # 用法:
 #   reset-old-cluster.sh --dry-run          # 只检测+打印计划(默认; 不做任何改动)
 #   reset-old-cluster.sh --yes              # 检测到残留就**执行** reset(非交互/自动化用)
-#   reset-old-cluster.sh                    # 交互: 检测到残留时询问 [Y/n](n=中止)
+#   reset-old-cluster.sh                    # 交互: 检测到残留时 15s 倒计时(ctrl-c 可中止)
 # 退出码: 0=无需处理或已处理; 1=有残留但未处理(未给 --yes 且非交互); 2=探测不到(未知)
 # ============================================================
 set -uo pipefail
@@ -102,14 +102,18 @@ if [ "${DRY}" = "1" ]; then
     say "(--dry-run: 只报告, 不做任何改动。要执行: 本工具加 --yes, 或照上面手跑 reset)"
     exit 0
 fi
-if [ "${YES}" != "1" ] && [ "${CUBESTACK_ASSUME_YES:-0}" != "1" ]; then
+if [ "${YES}" != "1" ]; then
     if [ ! -t 0 ]; then
         err "非交互环境且未给 --yes —— 拒绝执行 reset(避免无人值守时误清集群)"
         err "  确认要覆盖安装时: 本工具加 --yes, 或用 deploy-cluster.sh --yes"
         exit 1
     fi
-    confirm_yes_no "确认清除上述旧集群残留并执行 reset(不可恢复)?" 0 \
-        || { err "已取消: 旧集群残留未清除 → 部署中止"; exit 1; }
+    _t=15
+    while [ "${_t}" -gt 0 ]; do
+        printf '\r    ⚠ %d 秒后开始清除(ctrl-c 可中止)...' "${_t}"
+        sleep 1; _t=$((_t - 1))
+    done
+    printf '\r\033[K'
 fi
 
 OFFLINE_SCRIPT="${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"

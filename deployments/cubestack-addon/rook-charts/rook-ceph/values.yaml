@@ -6,8 +6,8 @@ image:
   # -- Image
   repository: docker.io/rook/ceph
   # -- Image tag
-  # @default -- `v1.21.0-beta.0`
-  tag: v1.21.1
+  # @default -- `master`
+  tag: v1.20.2
   # -- Image pull policy
   pullPolicy: IfNotPresent
 
@@ -94,52 +94,47 @@ csi:
   # -- When true, install the ceph-csi-operator subchart (see Chart.yaml `condition`).
   installCsiOperator: true
 
-  # CSI container images are managed by the ceph-csi-operator. Empty defaults
-  # allow the operator to use its built-in images. Set the repository and tag
-  # to override, values are rendered into the image configmap.
-  # See the Custom Images documentation for details.
-
   cephcsi:
     # -- Ceph CSI image repository
-    repository: ""
+    repository: quay.io/cephcsi/cephcsi
     # -- Ceph CSI image tag
-    tag: ""
+    tag: v3.17.0
 
   registrar:
     # -- Kubernetes CSI registrar image repository
-    repository: ""
+    repository: registry.k8s.io/sig-storage/csi-node-driver-registrar
     # -- Registrar image tag
-    tag: ""
+    tag: v2.17.0
 
   provisioner:
     # -- Kubernetes CSI provisioner image repository
-    repository: ""
+    repository: registry.k8s.io/sig-storage/csi-provisioner
     # -- Provisioner image tag
-    tag: ""
+    tag: v6.2.0
 
   snapshotter:
     # -- Kubernetes CSI snapshotter image repository
-    repository: ""
+    repository: registry.k8s.io/sig-storage/csi-snapshotter
     # -- Snapshotter image tag
-    tag: ""
+    tag: v8.5.0
 
   attacher:
     # -- Kubernetes CSI Attacher image repository
-    repository: ""
+    repository: registry.k8s.io/sig-storage/csi-attacher
     # -- Attacher image tag
-    tag: ""
+    tag: v4.12.0
 
   resizer:
     # -- Kubernetes CSI resizer image repository
-    repository: ""
+    repository: registry.k8s.io/sig-storage/csi-resizer
     # -- Resizer image tag
-    tag: ""
+    tag: v2.1.0
 
   csiAddons:
     # -- CSIAddons sidecar image repository
-    repository: ""
+    repository: quay.io/csiaddons/k8s-sidecar
     # -- CSIAddons sidecar image tag
-    tag: ""
+    tag: v0.14.0
 
   serviceMonitor:
     # -- Enable ServiceMonitor for CSI metrics

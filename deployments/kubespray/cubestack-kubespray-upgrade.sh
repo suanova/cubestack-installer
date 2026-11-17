@@ -31,10 +31,10 @@
 #   与 .venv 实测值比对, 过旧即**停住**(rc=2)—— ansible 大版本换了(如 2.16 → 2.19), 必须依新
 #   requirements.txt 重建 venv, 否则陈旧 venv 会顶掉 CLI 镜像的新 ansible, 部署第一个 play 硬失败。
 #   保留 patch-playbooks 的理由: 它是**我们自持的注入 play**(cubestack-registry / single-node /
-#   cni-restart / preload / install-packages), **不是上游文件** —— 上游任何版本都不带它。
+#   cni-restart / preload), **不是上游文件** —— 上游任何版本都不带它。
 #   cubestack-offline.sh 的 ensure_*_play 只在**文件缺失时**从内置副本重建(且 registry /
 #   single-node 两个 play 连内置副本都没有, 见 ensure_registry_play), 故换树丢掉它 = 注入内容
-#   退化为脚本内置的旧版(实测 install-packages.yml 的内置副本比树内副本旧), 必须原样保留。
+#   退化为脚本内置的旧版, 必须原样保留。
 #   保留粒度 = 只保 `inventory/local`(Ruling 15): 树内 `inventory/sample` 是**上游模板**
 #   (新集群种子, 见 cubestack-offline.sh:191-192 的 cp -rn), 必须随新树刷新; 本仓库的实盘
 #   inventory 在**树外** `deployments/kubespray/inventory/cubestack-cluster`, 不在这里。
@@ -406,7 +406,7 @@ cat <<EOF
      - 本次核验用的 k8s 钉子 = ${K8S_REQ}(来源: ${K8S_FROM})${K8S_HINT}
      - check-modules 的版本一致性断言(⑯)落地后会自动报差异
   2) 渲染器对拍(SOP 8): 自持 manifest 渲染器 vs 新树模板(kube-vip 等)
-  3) 离线缺口(SOP 8): images.manifest 新镜像 / offline-files 备料(k8s_deploy 前必须补齐)
+  3) 离线缺口(SOP 8): 版本树 offline-files/ 备料(k8s_deploy 前必须补齐)
   4) 回归(SOP 8): 静态检查 + 补丁 --check + 树 diff + 实机
      - 树 diff:  diff -rq --no-dereference ${TREE} ${TREE_SRC}     # --no-dereference: 树内相对符号链接(指向 inventory/)不跟着展开
        (预期只剩: ${N_PATCH} 个补丁的目标文件(清单见 cubestack-patches/README.md)+ 保留的 inventory/local + 剔除的顶层点文件)

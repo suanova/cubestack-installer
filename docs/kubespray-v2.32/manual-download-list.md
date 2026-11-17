@@ -25,8 +25,8 @@
 - 旧 1.32 线 **30 个文件**移到 `/data/offline-superseded-20260928/`(不是删除,可回滚)。
 
 校验:镜像 tar 47 个 + multus 2 个,完整性(全量读)/身份(RepoTags)/自洽性(index→manifest→blob)全过。
-连带:`cluster.conf`(+`.example`)的 `LOCAL_PATH_VERSION` v0.0.24 → **v0.0.37**;`Dockerfile-cli` 与
-`build-cli-context.sh` 引用的 kubectl/helm 旧件名同步换代(否则删旧件后 CLI 镜像构建会缺文件)。
+连带:`cluster.conf`(+`.example`)的 `LOCAL_PATH_VERSION` v0.0.24 → **v0.0.37**;`images/installer-cli/Dockerfile` 与
+`build-cli-image.sh` 引用的 kubectl/helm 旧件名同步换代(否则删旧件后 CLI 镜像构建会缺文件)。
 
 **仍缺**:`nfd/node-feature-discovery:v0.19.0` 的 tar(NFD 默认关 ⇒ 默认部署不需要);
 Harbor `mirrors/**` 还没同步 1.35 线(所以 `harbor-save-images.sh` 暂时拉不到新件 —— 这也是本次
@@ -36,7 +36,7 @@ Harbor `mirrors/**` 还没同步 1.35 线(所以 `harbor-save-images.sh` 暂时�
 
 | # | 前置 | 不做的后果 |
 |---|---|---|
-| 1 | **重建 CLI 镜像**(树内 `requirements.txt` 已是 `ansible==12.3.0`;⚠ 还需 **Python ≥3.11** —— 22.04 自带 3.10 装不了 ansible 12,已改为装 deadsnakes python3.11,见 `Dockerfile-cli` 对应段) | 第一个 play 撞 ansible 版本门(要 ≥2.19 <2.20);或 pip 直接 `Requires-Python >=3.11` 报错 |
+| 1 | **重建 CLI 镜像**(树内 `requirements.txt` 已是 `ansible==12.3.0`;⚠ 还需 **Python ≥3.11** —— 22.04 自带 3.10 装不了 ansible 12,已改为装 deadsnakes python3.11,见 `images/installer-cli/Dockerfile` 对应段) | 第一个 play 撞 ansible 版本门(要 ≥2.19 <2.20);或 pip 直接 `Requires-Python >=3.11` 报错 |
 | 2 | 新镜像**同步到 Harbor**(CI `sync-images-to-harbor.yml`;本支未在 main 上 → 用 `gh workflow run sync-images-to-harbor.yml -r feat/kubespray-v2.32 -f groups=k8s-base,multus,netshoot`) | 第 3 步无从取 |
 | 3 | ~~在**能连 Harbor 的机器**跑 `harbor-save-images.sh`(增量,只补缺的)~~ **已用另一条路解决**:联网机直连上游下载 → 2026-09-28 换代已把必需件全部落到仓库(见上方状态块);Harbor 同步仍待做(仅供 `harbor-save-images.sh` 后续增量用) | 原后果:镜像 tar 全是 1.32 线旧件,Pod 拉镜像失败 |
 | 4 | **容器侧**:新树+补丁层进容器(容器内跑 `cubestack-kubespray-upgrade.sh v2.32.0` 或重建镜像)+ 容器内 `cluster.conf` **补 8 个版本钉子**(值 = 本文件 §1 的 1.35 线) | 容器仍用 v2.28 树;或缺钉子 → sync fail-loud 停在 `k8s_inventory`(有意) |
@@ -67,12 +67,12 @@ Harbor `mirrors/**` 还没同步 1.35 线(所以 `harbor-save-images.sh` 暂时�
 | k8s-base | `docker.io/library/nginx:1.30.1-alpine` | `docker.io_library_nginx_1.30.1-alpine.tar` |
 | multus | `ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.2-thick` | `multus/ghcr.io_k8snetworkplumbingwg_multus-cni_v4.2.2-thick.tar` |
 | netshoot | `docker.io/nicolaka/netshoot:latest` | `netshoot/docker.io_nicolaka_netshoot_latest.tar` |
-| (lws) | `registry.k8s.io/lws/lws:v0.10.0` | `cubestack-operator/registry.k8s.io_lws_lws_v0.10.0.tar`(仅平台 operator 的 CR 下发 `lws` 组件时需要; 独立 LWS 模块已于 2026-10-15 下线, 该 tar 随 cubestack-operator 组管理) |
+| (lws) | `registry.k8s.io/lws/lws:v0.10.0` | 由版本树按需备料(独立 LWS 模块已于 2026-10-15 下线) |
 
 **按开关(默认关 → 不急)**
 | 组 | ref | 说明 |
 |---|---|---|
-| k8s-base | `registry.k8s.io/sig-storage/local-volume-provisioner:v2.10.0` | 只有 `LOCAL_VOLUME_PROVISIONER_ENABLED=true` 才需要 |
+| k8s-base | `registry.k8s.io/sig-storage/local-volume-provisioner:v2.5.0` | 只有 `LOCAL_VOLUME_PROVISIONER_ENABLED=true` 才需要 |
 | k8s-base | `registry.k8s.io/nfd/node-feature-discovery:v0.19.0` | 只有 `NFD_ENABLED=true` 才需要 |
 
 > ⚠ **multus 那条是硬门禁**:盘上现有的 `multus/multus-cni.tar` 内容实测仍是 `snapshot-thick`,

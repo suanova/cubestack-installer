@@ -28,7 +28,7 @@
 #      C) **写入者闭环**: inventory 的 group_vars/all/k8s-versions.yml 里 10 个 kubespray 版本变量
 #         确实存在且 == cluster.conf 的钉子(写入者 = tools/k8s/sync-kubespray-config.sh 3.2 节)
 #      A 只证"钉子自洽"(== 表值), C 才证"部署真会用钉子"; 缺 C 时删掉写入节/改错值照样全绿。
-#   ⑰ 凭据卫生: 含密钥的"生成物"(external-ceph 导出 / minio.conf / cluster.conf)必须**未被 git 跟踪**
+#   ⑰ 凭据卫生: 含密钥的"生成物"(external-ceph 导出 / cluster.conf)必须**未被 git 跟踪**
 #      且被 .gitignore 覆盖 —— ⚠ 忽略规则对**已跟踪**文件无效, "看着封堵了"≠"封堵了"
 #   ⑱ 版本目录 ↔ 档案闭合: 入库档案逐版本 ↔ 其树表值; 在场版本目录的 VERSION.profile ↔ 入库档案、
 #      tree.tar.gz 指纹、关键二进制与 K8S_VERSION 匹配、LOCAL_ONLY 语义自洽(无目录则跳过)
@@ -288,9 +288,9 @@ while IFS= read -r -d '' f; do
         fi
         [ "${hit}" = "1" ] && break
     done <<< "${cands}"
-    # 离线包分发的窄例外(仅 cubestack-operator): 集合的 charts/ 存在且 README 被 git 跟踪
-    # ⇒ 视为合法落点。本地 tgz 不入 git, CI 干净 checkout 不要求它存在(部署前由 fetch/同步机备料)。
-    # 用 CUBESTACK_OPERATOR_CHART_DIR 作为门禁, 避免其它模块因为引用了某个 offline-files 目录而误判。
+    # 离线包分发的窄例外: 集合的 charts/ 存在且 README 被 git 跟踪 ⇒ 视为合法落点。
+    # 本地 tgz 不入 git, CI 干净 checkout 不要求它存在(部署前由 fetch/同步机备料)。
+    # 门禁变量名见下面的 grep; 本仓已无模块命中, 保留是为了版本树模块被就地检出时仍能通过。
     _bundle=0
     if [ "${hit}" = "0" ] && grep -q 'CUBESTACK_OPERATOR_CHART_DIR' "$f"; then
         while IFS= read -r oc; do
@@ -585,22 +585,6 @@ else
     ck_fail "缺少 tests/test-master-placement.sh(本回归必须接线, 防'写了没人跑')"
 fi
 
-# ---------- ⑫g CubeStack operator/平台组件 master placement 回归(2026-10-27) ----------
-# operator/controller-manager/cubepilot/portal/envoy 控制器/ai-gateway/lws/cuberouter/monitoring
-# 上 master; 明确不碰 Envoy 数据面 proxy 与 sglang/vllm 模型推理负载(GPU 阶段单独处理)。
-_CBPLACE_SH="${SCRIPT_DIR}/tests/test-cubestack-placement.sh"
-if [ -f "${_CBPLACE_SH}" ]; then
-    if _CBPLACE_OUT="$(bash "${_CBPLACE_SH}" 2>&1)"; then
-        ok "  CubeStack operator/平台组件 placement 回归通过"
-    else
-        printf '%s\n' "${_CBPLACE_OUT}" | sed 's/^/    /'
-        ck_fail "CubeStack operator/平台组件 placement 回归未通过(详见上方失败项)"
-    fi
-    unset _CBPLACE_OUT
-else
-    ck_fail "缺少 tests/test-cubestack-placement.sh(本回归必须接线, 防'写了没人跑')"
-fi
-
 # ---------- ⑬ API 入口: 本地代理语义与 all.yml 的自洽 ----------
 # 背景: kubespray 的 kube_apiserver_endpoint 模板里 `loadbalancer_apiserver is defined` 分支
 #   **优先于** localhost 分支 —— 只要 all.yml 里还有**未注释**的 loadbalancer_apiserver 块,
@@ -643,12 +627,11 @@ fi
 # 不变量(Global Constraints): 同一份模式串必须在**四处逐字节一致** ——
 #   ① deployments/config/cluster.conf                             本地部署配置(未纳入 git, 含密码)
 #   ② deployments/config/cluster.conf.example                     模板(随 git 分发; CI 上唯一在场的那份)
-#   ③ deployments/scripts/tools/offline/trim-offline-files.sh:41  备料时**真正执行** trim 用的默认值
 #   ④ deployments/kubespray/cubestack-offline.sh               standalone 直跑预加载脚本时的内置兜底
 #      (该文件里有两条赋值: 上面那条是环境变量透传, 底下 elif 分支里的才是内置默认模式串 ——
 #       断言取后者, 见 _preload_patterns 的说明)
-# 为什么必须有这一条: 既有 CI 只覆盖「trim ↔ images.manifest」一对(check-image-manifest.sh ⑤),
-#   漂移若只发生在 ①/②, CI 照样通过 → 联网机备料后镜像**仍被静默 trim 掉**(装了却没有镜像)。
+# 为什么必须有这一条: 漂移若只发生在 ①/②, CI 照样通过 → 打包侧按错误清单备料,
+#   部署时**镜像缺失**(装了却没有镜像)。
 # 比较的是**模式串本身**(各处变量名可能不同), 不是整行; 引号/行尾注释等写法差异先归一化掉。
 # 注: 第 ④ 份曾长期陈旧(缺 library_nginx 等条目), 2026-09-28 Task 7 已补齐并与前三分逐字节相同,
 #     故自本轮起纳入断言(此前注释写的"有意不纳入"已过期)。
@@ -677,10 +660,9 @@ PRELOAD_BAD=0; PRELOAD_N=0
 PRELOAD_PATHS=(
     "${REPO_ROOT}/deployments/config/cluster.conf"
     "${CONF_DEFAULTS}"
-    "${REPO_ROOT}/deployments/scripts/tools/offline/trim-offline-files.sh"
     "${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
 )
-PRELOAD_NAMES=( cluster.conf cluster.defaults.conf trim-offline-files.sh cubestack-offline.sh )
+PRELOAD_NAMES=( cluster.conf cluster.defaults.conf cubestack-offline.sh )
 PRELOAD_VALS=(); PRELOAD_SEEN=()
 for _i in "${!PRELOAD_PATHS[@]}"; do
     _p="${PRELOAD_PATHS[$_i]}"; _n="${PRELOAD_NAMES[$_i]}"
@@ -689,7 +671,7 @@ for _i in "${!PRELOAD_PATHS[@]}"; do
         continue
     fi
     # cluster.conf **未声明**该键(2026-10-15 PRELOAD 下沉 cluster.defaults.conf 后属正常) → 跳过;
-    #   ⚠ 只对这一份可选副本放宽 —— 另三份(defaults/trim/offline)缺声明仍是硬失败(真回归)。
+    #   ⚠ 只对这一份可选副本放宽 —— 另两份(defaults/offline)缺声明仍是硬失败(真回归)。
     if [ "${_n}" = "cluster.conf" ] && ! grep -qE '^[[:space:]]*PRELOAD_IMAGE_PATTERNS=' "${_p}" 2>/dev/null; then
         say "  cluster.conf: 未声明 PRELOAD_IMAGE_PATTERNS(已下沉 cluster.defaults.conf), 跳过该副本"
         continue
@@ -755,15 +737,16 @@ fi
 #   (补丁层 / 收编映射 / 入口模式 / 本地代理)现在每轮 check-modules 都会跑到。
 for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-api-entry-mode.sh test-api-local-lb.sh test-sync-api-entry.sh \
-           test-kubespray-version-select.sh test-deb-install-lib.sh \
+           test-kubespray-version-select.sh \
            test-ssh-user.sh test-k8s-passwordless.sh test-gpu-vendor-probe.sh \
            test-nvidia-host-driver.sh test-inventory-ssh-user-precedence.sh \
-           test-node-hosts-sync.sh test-release-sync-images.sh \
+           test-node-hosts-sync.sh \
            test-deploy-config-guard.sh test-k8s-ntp.sh test-cephfs-mount.sh \
-           test-chrony-offline-debs.sh test-ceph-data-disks.sh \
+           test-ceph-data-disks.sh \
            test-metallb-pool-check.sh test-ceph-cluster-detect.sh \
-           test-multus-iface-detect.sh test-devlab-tar-select.sh \
-           test-nodeport-leak-preflight.sh; do
+           test-multus-iface-detect.sh \
+           test-netshoot-tar-select.sh \
+           test-nodeport-leak-preflight.sh test-sync-versions.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
     if [ ! -f "${_tp}" ]; then
         ck_fail "⑮ 离线套件缺失: ${_tp#${REPO_ROOT}/}(⑮ 的回归证据没了)"
@@ -777,7 +760,7 @@ unset _t _tp _tout 2>/dev/null || true
 
 # ---------- ⑯ k8s 基座钉子闭环: A 钉子 vs 树内表值 / B 无模块开关键 / C 写入者(inventory) ----------
 # 为什么必须有 A: cluster.conf 的"k8s 基座组"是**显式钉子**(离线 tar / Harbor 同步需要确定的
-#   ref —— images.manifest 直接以 ${VAR} 引用它们), 而它们的真值在 vendored kubespray 的版本表里。
+#   ref —— cluster.defaults.conf 的版本钉子), 而它们的真值在 vendored kubespray 的版本表里。
 #   两边漂移时**部署期才发现**: 表里没有该补丁 / addon 版本与表不符 → 离线集群拉不到镜像。
 #   人工抄表必然出错(版本靠人记), 所以这里每次跑 check 都**从树内表机械重算一遍**期望值。
 #   ⚠ 与 ⑪-C 同原则: **不写死任何期望值** —— 换树/换钉子后本项自动给出新的期望值。
@@ -805,7 +788,8 @@ unset _t _tp _tout 2>/dev/null || true
 #   被写进 inventory**。在此之前那 8 个变量在 vendored 树之外**没有任何写入者**, 于是部署按
 #   **树内默认**解析(ansible 实测 kube_version=1.36.4 / coredns=1.14.2 / pod_infra=3.10.2),
 #   与我们钉的 1.35 线**不是同一套** → 离线 tar 与部署期要的镜像不符, download/validate 阶段
-#   响亮失败(与 images.manifest:49 的"必须与 kubespray 实际解析出的版本一致"自相矛盾)。
+#   响亮失败(与
+#   "必须与 kubespray 实际解析出的版本一致"的钉子口径自相矛盾)。
 #   写入者已落地 = tools/k8s/sync-kubespray-config.sh 3.2 节(group_vars/all/k8s-versions.yml),
 #   C 断言其产物与钉子逐键一致 —— 删掉写入节 / 手工改错值 / 换了 conf 忘跑 sync 都会被点名。
 say "[16/19] k8s 基座钉子闭环(A 树内表值 / B 无模块开关 / C inventory 写入者) ..."
@@ -854,8 +838,13 @@ KSD_PINS=(
     "CPA_VERSION:dnsautoscaler_version"
     "ETCD_VERSION:etcd_version"
     "CALICO_VERSION:calico_version"
+    "METALLB_VERSION:metallb_version"
+    "KUBE_VIP_VERSION:kube_vip_version"
+    "REGISTRY_IMAGE_TAG:registry_version"
+    "LOCAL_PATH_VERSION:local_path_provisioner_version"
     "LOCAL_VOLUME_PROVISIONER_VERSION:local_volume_provisioner_version"
     "NFD_VERSION:node_feature_discovery_version"
+    "API_LB_NGINX_IMAGE_TAG:nginx_image_tag"
 )
 KSD_INV_YML="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster/group_vars/all/k8s-versions.yml"
 if [ ! -f "${KSD_INV_YML}" ]; then
@@ -868,6 +857,19 @@ fi
 if [ ! -f "${KSD_DL}" ] || [ ! -f "${KSD_CK}" ] || [ ! -f "${KSD_VM}" ]; then
     warn "  跳过 ⑯(未找到 vendored 版本表 ${KSD_ROLE#${REPO_ROOT}/})"
 else
+    # 版本派生文件必须与 versions/base.yaml 一致(生成器是唯一写入者)。
+    _kv_out="$(mktemp)"
+    if ! python3 "${REPO_ROOT}/deployments/scripts/tools/k8s/sync-versions.py" \
+        --root "${REPO_ROOT}" --check >"${_kv_out}" 2>&1; then
+        ck_fail "⑯ 版本派生文件与 versions/base.yaml 不一致" \
+            "      → 修法: make sync-versions 并提交生成的 defaults/profile/inventory" \
+            "      → $(head -6 "${_kv_out}" | tr '\n' ' ')"
+        KSD_BAD=1
+    else
+        say "  ⑯ 版本派生文件与 versions/base.yaml 一致"
+    fi
+    rm -f "${_kv_out}"
+
     # 钉子来源文件(2026-10-15 版本变量下沉后): cluster.defaults.conf(入库, **必查**) +
     #   cluster.conf(**仅当它自己声明了 K8S_VERSION 时**才查 —— 正常不再声明; 用户覆盖/手工钉钉子时声明)
     KSD_CONFS=("${CONF_DEFAULTS}")
@@ -900,55 +902,24 @@ else
             KSD_BAD=1; continue
         fi
 
-        # ---- 其余 7 项: 与上游解析结果逐字一致(kube_major 取自本文件的 K8S_VERSION) ----
-        _want_calico="$(_ksd_first_key calicoctl_binary_checksums amd64)"
-        _want_etcd="$(_ksd_etcd "${_major}")"
-        _want_coredns="$(_ksd_inline "${KSD_DL}" coredns_supported_versions "${_major}")"
-        _want_pause="$(_ksd_inline "${KSD_VM}" pod_infra_supported_versions "${_major}")"
-        _want_ndc="$(_ksd_scalar "${KSD_DL}" nodelocaldns_version)"
-        _want_metrics="$(_ksd_scalar "${KSD_DL}" metrics_server_version)"
-        _want_cpa="$(_ksd_scalar "${KSD_DL}" dnsautoscaler_version)"
-        _want_nginx="$(_ksd_scalar "${KSD_DL}" nginx_image_tag)"
-        # LVP / NFD(2026-09-28 评审 I4): 这两个钉子是 v2.32 支新加的(README 明写"须与上游同值"),
-        # 却零断言 —— 上游同一文件里的标量, 取法与 metrics_server 完全一致(*_image_tag 由 *_version 拼)。
-        _want_lvp="$(_ksd_scalar "${KSD_DL}" local_volume_provisioner_version)"
-        _want_nfd="$(_ksd_scalar "${KSD_DL}" node_feature_discovery_version)"
-        if [ -z "${_want_calico}" ] || [ -z "${_want_etcd}" ] || [ -z "${_want_coredns}" ] || \
-           [ -z "${_want_pause}" ] || [ -z "${_want_ndc}" ] || [ -z "${_want_metrics}" ] || \
-           [ -z "${_want_cpa}" ] || [ -z "${_want_nginx}" ] || [ -z "${_want_lvp}" ] || [ -z "${_want_nfd}" ]; then
-            ck_fail "⑯ ${_cn}: 解析不出上游期望值(K8S_VERSION=${_k8s} → kube_major=${_major})" \
-                "      → 树内表可能没有 ${_major} 这一线(如 1.33 在 v2.32 表里就不可用); 请改用表内线"
-            KSD_BAD=1; continue
+        # ---- 其余版本项: 由 sync-versions.py 保证 base.yaml → 派生文件闭环 ----
+        # 树内默认值不再要求与钉子相等: 部署由生成的 group_vars 覆盖。只保留
+        # kubespray 无法通过 group_vars 覆盖的硬约束(CALICO CRDS 表成员)。
+        _calico="$(_ksd_conf_value "${_cf}" CALICO_VERSION)"
+        _calico_bare="${_calico#v}"
+        if [ -n "${_calico_bare}" ] && \
+           ! awk -v v="${_calico_bare}" '
+               /^calico_crds_checksums:/ { s=1; next }
+               /^[a-zA-Z_]+_checksums:/ { s=0 }
+               s && $0 ~ ("^[[:space:]]+" v ":") { found=1 }
+               END { exit(found ? 0 : 1) }
+           ' "${KSD_CK}"; then
+            ck_fail "⑯ ${_cn}: CALICO_VERSION=${_calico} 不在 calico_crds_checksums 表内" \
+                "      → 该表是角色 vars, group_vars 无法覆盖; 修法: 给树加 checksum patch 或改用表内版本"
+            KSD_BAD=1
+        else
+            say "  ${_cn}: CALICO_VERSION=${_calico} 在 calico_crds_checksums 表内"
         fi
-
-        # 比较: 只判"我方钉值 == 上游表值", **v 前缀等价**(我方钉子可带/不带 v; 上游变量侧不带 v,
-        #   镜像 tag 侧另有 'v' 前缀 —— 那是 images.manifest 的职责, 本项不做形态断言)
-        _ksd_cmp() {   # <变量> <上游期望> <上游出处>
-            local got
-            got="$(_ksd_conf_value "${_cf}" "$1")"
-            if [ -z "${got}" ]; then
-                ck_fail "⑯ ${_cn}: 取不到 $1 的钉值(未声明/写法解不出)"
-                KSD_BAD=1; return 0
-            fi
-            if [ "${got#v}" = "$2" ]; then
-                say "  ${_cn}: $1=${got} == 上游 $2"
-            else
-                ck_fail "⑯ ${_cn}: $1='${got}' 与上游表值不符(上游='$2')" \
-                    "      → 上游出处: $3" \
-                    "      → 修法: 把 cluster.conf 与 cluster.conf.example 的 $1 都改成 '$2'(v 前缀按现有写法保留/去掉均可)"
-                KSD_BAD=1
-            fi
-        }
-        _ksd_cmp CALICO_VERSION       "${_want_calico}"  "calicoctl_binary_checksums['amd64'] 首键(calico_version)"
-        _ksd_cmp ETCD_VERSION         "${_want_etcd}"    "etcd_supported_versions['${_major}'] → etcd_binary_checksums"
-        _ksd_cmp COREDNS_VERSION      "${_want_coredns}" "coredns_supported_versions['${_major}']"
-        _ksd_cmp PAUSE_VERSION        "${_want_pause}"   "pod_infra_supported_versions['${_major}'](pod_infra_version)"
-        _ksd_cmp DNS_NODE_CACHE_VERSION "${_want_ndc}"   "nodelocaldns_version"
-        _ksd_cmp METRICS_SERVER_VERSION "${_want_metrics}" "metrics_server_version"
-        _ksd_cmp CPA_VERSION          "${_want_cpa}"     "dnsautoscaler_version(cluster-proportional-autoscaler)"
-        _ksd_cmp API_LB_NGINX_IMAGE_TAG "${_want_nginx}" "nginx_image_tag(download.yml:265, 节点侧 API 本地代理静态 Pod)"
-        _ksd_cmp LOCAL_VOLUME_PROVISIONER_VERSION "${_want_lvp}" "local_volume_provisioner_version(download.yml:299)"
-        _ksd_cmp NFD_VERSION          "${_want_nfd}"   "node_feature_discovery_version(download.yml:370)"
 
         # ---- ⑯-C 写入者闭环: inventory 的 10 个版本键 == 本 conf 的钉子(逐键点名) ----
         # 这一节回答的是"部署真会用这些钉子吗" —— 见文件头 ⑯-C 说明。取不到钉子侧时**不重复报**
@@ -969,7 +940,7 @@ else
                     KSD_BAD=1
                 elif [ "${_got#v}" != "${_pin#v}" ]; then
                     ck_fail "⑯-C ${_cn}: ${_kv}='${_got}' 与钉子 ${_pv}='${_pin}' 不符" \
-                        "      → 部署用的是 inventory 里的 '${_got}'(不是钉子), 与离线 tar / images.manifest 对不上" \
+                        "      → 部署用的是 inventory 里的 '${_got}'(不是钉子), 与离线 tar / 版本树对不上" \
                         "      → 修法: 重跑 sync-kubespray-config.sh(写入节会按 cluster.conf 覆盖); 勿手改该文件"
                     KSD_BAD=1
                 else
@@ -1010,7 +981,6 @@ _GIT=(git -C "${REPO_ROOT}")
 _SECRET_PATHS=(
     deployments/config/external-ceph-self-define-access.conf   # 生成器写出三个真 keyring
     deployments/config/external-ceph.env                       # Rook 官方导出(mon/CSI/RGW 用户密钥)
-    deployments/config/minio.conf                              # 含 MinIO 密钥
     deployments/config/cluster.conf                            # 含全部集群密码
 )
 for _p in "${_SECRET_PATHS[@]}"; do
@@ -1088,6 +1058,12 @@ if [ -d "${VD_PROFILES_DIR}" ]; then
             ck_fail "⑱ ${_pv}: K8S_VERSION=${_pk8s} 不在该版本树 kubelet_checksums 表内" \
                 "      → 表内可选项: $(kb_tables_kubelet_list "${_pck}" | tr '\n' ' ')"
             VD_BAD=1
+        elif [ "${_pv}" = "${VD_TREE_VER}" ]; then
+            # Base profile is generated from versions/base.yaml; ⑯ already
+            # proves it matches the source. Tree-table equality no longer
+            # applies once versions are overridden via group_vars.
+            say "  ⑱ ${_pv}: base profile 由 sync-versions.py 生成; 跳过树表逐值比较"
+            ok "  ⑱ 档案 ${_pv} 为生成档案"
         else
             _pmajor="${_pk8s#v}"; _pmajor="${_pmajor%.*}"
             _vd_cmp() {   # <键> <上游期望> <出处>

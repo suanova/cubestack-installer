@@ -4,7 +4,7 @@
 # 覆盖:
 #   ① config_fingerprint: 注释变更不触发, 变量变更触发
 #   ② addons_metallb_enabled: true/false/missing
-#   ③ k8s_deploy 模块包含确认后/部署后的配置漂移门禁
+#   ③ k8s_deploy 模块包含倒计时后/部署后的配置漂移门禁
 #   ④ metallb 模块包含 addons↔cluster.conf 不一致的显式报错与修复指引
 # 隔离: 仅临时文件, 不连集群/不读真实配置.
 # ============================================================
@@ -47,7 +47,7 @@ chk "missing file" "missing" "$(bash -c 'source "$1" >/dev/null 2>&1; addons_met
 echo "== ③ k8s_deploy 配置漂移门禁 =="
 k8s_txt="$(cat "${K8S}" 2>/dev/null)"
 chk_contains "记录启动指纹" "_CONF_FP_START" "${k8s_txt}"
-chk_contains "确认后/部署后调用门禁" "_conf_guard" "${k8s_txt}"
+chk_contains "倒计时后/部署后调用门禁" "_conf_guard" "${k8s_txt}"
 chk "门禁至少 3 处(定义+2 调用)" "1" "$([ "$(printf '%s' "${k8s_txt}" | command grep -c '_conf_guard')" -ge 3 ] && echo 1 || echo 0)"
 chk_contains "中止提示重跑 k8s_deploy" "steps k8s_deploy --fresh" "${k8s_txt}"
 

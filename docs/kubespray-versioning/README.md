@@ -151,7 +151,7 @@ operator **不搞批量搬迁**;凡要"按版本选"的组件,按同一套四条
 ## 8. CLI 镜像契约变更(2026-09-30)
 
 **契约(最终口径)**:CLI 镜像 = **base 层**(系统 + ansible + 工具链 kubectl/helm/skopeo/yq/mc,
-取自离线版本目录、文件名固定)+ **代码层**(`deployments/` + `skills`, `FROM` base)。
+按 pinned version + sha256 从上游下载)+ **代码层**(`deployments/` + `skills`, `FROM` base)。
 "工具链必须打进 base"的原因(实测事故: 非登录 shell 也要有)见下面「两层镜像结构」。
 
 - 运行期钩子(`/etc/profile.d/50-cubestack-tools.sh`, 源文件
@@ -159,22 +159,23 @@ operator **不搞批量搬迁**;凡要"按版本选"的组件,按同一套四条
   工具已在 PATH 即跳过、不覆盖;只在工具缺失时(如旧 base)从挂载的版本目录补齐。
   部署流程仍用 `bash -lc`(既有文档口径; 工具已在 base, 不再强依赖登录 shell)。
 - ⚠ **`mc` 特别之处:必须打进镜像、不能被挂载提供**。它是**引导工具** —— 容器正是靠它去 MinIO 拉离线文件,
-  那份文件还没下来之前没有任何可挂载的东西能提供 mc(先有鸡还是先有蛋)。取法由
-  `build-cli-context.sh` 决定:**`offline-files/os/mc-*` 离线件(首选)→ 官方新地址联网下载(兜底)
-  → 宿主机 mc(再兜底)→ 报错**。
+  那份文件还没下来之前没有任何可挂载的东西能提供 mc(先有鸡还是先有蛋)。由
+  `images/installer-cli-base/Dockerfile` 直接从 MinIO 官方归档 URL 下载,版本和 sha256
+  都钉在 Dockerfile 的 `ARG` 里。
   ⚠ **官方下载路径会烂**:老路径 `https://dl.min.io/client/mc/release/linux-amd64/mc` 已 **410 Gone**,
   新路径带 `/aistor/` 前缀(`https://dl.min.io/aistor/mc/release/linux-<arch>/mc`, 2026-09-30 实测 200)
-  —— 这正是"首选离线件"的理由;升级 mc 的完整步骤见 `offline-files/os/README.md`。
-- 构建上下文 `build-cli-context.sh`:排除 `kubespray/versions/`(物化树不进镜像);工具链**仅在
-  `--base` 时** staged 进 `bin/`(供 base 层 `COPY`, 含 mc 的离线件回退链)—— 代码层构建跳过
-  staging, 无工具的机器也能重建代码层。代码部分实测 ~87M。
+  —— 所以 Dockerfile 使用**带版本号的归档 URL**,不使用会漂移的 `latest` 路径。
+- 构建上下文:代码层**直接以仓库根为上下文**,`.dockerignore` 排除 `kubespray/versions/`、
+  `offline-files/` 与运行期凭据;base 层只需要临时目录里的 `requirements.txt`,工具链在
+  Dockerfile 里下载,不再生成持久化 `cli-context/`,也不读取构建机的 PATH/离线件。
+  代码部分实测 ~87M。
 
 ### 两层镜像结构(2026-09-30, 用户口径; 根治层数累积)
 
 | 层 | Dockerfile | 内容 | 何时重建 |
 |---|---|---|---|
-| **base** | `Dockerfile-cli-base` | ubuntu 22.04 + apt 系统包 + python3.11 + ansible(requirements.txt)+ **工具链 kubectl / helm / skopeo / yq / mc**(取自离线版本目录, 文件名固定) | **只在新增 package/工具或依赖版本变化时**(`--base`; 需联网 apt/pip, 约 10 分钟) |
-| **代码层** | `Dockerfile-cli`(**唯一**; `--incremental` 是它的别名) | `FROM <base>` + **只 copy `deployments/`+`skills`** + 运行期工具链钩子 + 自检(不跑 apt/pip) | 日常改了部署脚本就重建(`--build`; 秒级) |
+| **base** | `images/installer-cli-base/Dockerfile` | ubuntu 22.04 + apt 系统包 + python3.11 + ansible(requirements.txt)+ **工具链 kubectl / helm / skopeo / yq / mc**(pinned version + sha256 从上游下载) | **只在新增 package/工具或依赖版本变化时**(`--base`; 需联网 apt/pip, 约 10 分钟) |
+| **代码层** | `images/installer-cli/Dockerfile`(**唯一**; `--incremental` 是它的别名) | `FROM <base>` + **只 copy `deployments/`+`skills`** + 运行期工具链钩子 + 自检(不跑 apt/pip) | 日常改了部署脚本就重建(`--build`; 秒级) |
 
 > ⚠ **工具链必须打进 base**(2026-09-30 用户口径 + 实测事故):早期版本把 kubectl/helm/skopeo 交给
 > "运行期钩子从挂载目录补",但钩子**只在登录 shell 生效** ⇒ `docker exec … bash` 或脚本里的
@@ -183,10 +184,10 @@ operator **不搞批量搬迁**;凡要"按版本选"的组件,按同一套四条
 > ——实际角色 = 兼容未内置工具的旧 base)。
 
 ```bash
-sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base       # 仅系统/工具/依赖变化时
-sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build      # 日常: 代码层(自动取 base)
-sudo ./deployments/scripts/tools/docker/build-cli-context.sh --build --incremental   # 同 --build(历史别名)
-sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base --push  # base 也要推 Harbor(别人才拉得到)
+sudo ./deployments/scripts/tools/docker/build-cli-image.sh --base       # 仅系统/工具/依赖变化时
+sudo ./deployments/scripts/tools/docker/build-cli-image.sh --build      # 日常: 代码层(自动取 base)
+sudo ./deployments/scripts/tools/docker/build-cli-image.sh --build --incremental   # 同 --build(历史别名)
+sudo ./deployments/scripts/tools/docker/build-cli-image.sh --base --push  # base 也要推 Harbor(别人才拉得到)
 ```
 
 **容器引擎**:`docker` 与 **`podman` 都支持** —— 默认自动探测(docker 优先, 没有则 podman),
@@ -198,7 +199,7 @@ sudo ./deployments/scripts/tools/docker/build-cli-context.sh --base --push  # ba
 而 containerd overlayfs 把全部祖先层拼进 `lowerdir`,选项字符串超过内核 `PAGE_SIZE`(4096B)⇒
 buildkit 在**任意 RUN 步**报 `mount source: "overlay" ... invalid argument`。现在代码层每次
 `FROM <固定的 base>`,层数是**常数**(base 层数 + 2~3)⇒ 该问题从结构上消失。
-(脚本仍保留层数显示与 `INCREMENTAL_MAX_LAYERS` 守卫作为兜底观察。)
+(旧脚本的 `INCREMENTAL_MAX_LAYERS` 守卫已移除:代码层永远 `FROM` 固定 base,不再从上一版镜像增量。)
 
 ### ⚠ 旧的"增量层数累积"问题(2026-09-30 实测, 保留作为历史与判据)
 
@@ -213,9 +214,8 @@ mount source: "overlay", ... err: invalid argument
 实测 `2026-09-24` 镜像 **443 层** → `latest` **590 层**(590 层的 lowerdir ≈4020 字节, 已贴着上限)。
 
 **处置**:
-- `build-cli-context.sh` 现在有**层数守卫**:基础镜像层数 > `INCREMENTAL_MAX_LAYERS`(默认 300)时
-  直接拒绝增量并提示改全量;
-- **定期做一次全量构建**(基础 ubuntu:22.04 只有几层 ⇒ 层数归零):`sudo ./build-cli-context.sh --build`;
+- 代码层固定 `FROM` 同一个 base,不再在上一版镜像上叠加;
+- 需要完全重建时用 `--base`,基础 `ubuntu:22.04` 只有几层;
 - 看到的报错若是 `invalid argument` + 层数几百, 就是本问题, 不要往 Dockerfile 里找。
 
 ---

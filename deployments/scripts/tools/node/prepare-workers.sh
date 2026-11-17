@@ -3,7 +3,7 @@
 # 批量准备物理 GPU worker 节点(master VM 外的裸金属)
 # 对每台 worker:
 #   1. 用节点密码(NODES 第5字段显式密码或默认 SSH_DEFAULT_PASSWORD)注入 SSH 公钥(免密)
-#   2. 安装离线 .deb 包(iputils-ping/rsync/iptables/curl/ca-certificates)
+#   2. 检查节点前置包是否存在(不安装; 由 OS 镜像/运维预装)
 #   3. 推送 /etc/hosts 节点解析(k8s-api.cubestack.io + 全节点)
 # 用法: sudo ./prepare-workers.sh [--only <hostname>]
 # 数据源: deployments/config/cluster.conf
@@ -86,9 +86,11 @@ for line in "${NODES[@]:-}"; do
         "sed -i '/cubestack-cluster/d' ~/.ssh/authorized_keys 2>/dev/null; echo '${CSPUBKEY}' >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys" 2>/dev/null \
         && ok "cubestack_k8s 公钥已就绪" || warn "cubestack_k8s 公钥注入失败"
 
-    # 2. 安装离线包(用 root id_rsa)
-    say "安装离线包..."
-    ROOT_SSH=1 bash "${SCRIPT_DIR}/tools/node/install-worker-packages.sh" "${NODE_IP}" "${NODE_USER}" || warn "离线包安装失败"
+    # 2. 节点前置包检查(不安装; 缺包由运维按清单处理)
+    say "检查节点前置包..."
+    bash "${SCRIPT_DIR}/tools/online/check-os-packages.sh" \
+        --baseline "${REPO_ROOT}/versions/base.yaml" \
+        --hosts "${NODE_USER}@${NODE_IP}" --key "${SSH_KEY}" --warn-only || true
 
     # 3. 推送 /etc/hosts
     say "更新 /etc/hosts ..."

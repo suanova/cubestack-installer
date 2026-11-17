@@ -1,28 +1,27 @@
 #!/bin/bash
 # ============================================================
 # MODULE: model_images
-# DESC: 模型推理镜像(sglang / vllm-metax, 来源 suanova/model-collection 仓库)离线 tar → 集群内置 registry(排在 dev_lab 之后; 默认 push, config-digest 幂等 + 层/镜像并行)
+# DESC: 模型推理镜像(sglang / vllm-metax, 由外部版本树提供)离线 tar → 集群内置 registry(排在 dev_lab 之后; 默认 push, config-digest 幂等 + 层/镜像并行)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: MODEL_IMAGES_ENABLED
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
-#   · 镜像集 = offline-files/model-collection/image-list.tsv(单一事实源; 3 件 ≈33G:
+#   · 镜像集 = 版本树的 offline-files/model-collection/image-list.tsv(由打包流程生成; 3 件 ≈33G:
 #     suanova/sglang ×2(0.5.14 py312 主版本 + v0.5.12-glm5-rc4 py310) + suanova/vllm-metax ×1(0.27.0 py312);
 #     2026-10-29 sglang 更新, vllm 不变)。
 #   · 离线 tar: deployments/offline-files/model-collection/{sglang,vllm}/(子目录; .tar 与 .tar.gz 均可);
 #     缺某个 tar → 该镜像 warn 跳过(不阻断部署), 结尾汇总(不伪装成功)。
 #   · 目标 ref: <集群 registry>/<ref 去注册域后的路径>(suanova/… 原样保路径, 与 dev_lab 同款映射)。
-#   · 幂等: 目标 digest == 源 digest → 跳过(比 digest 防重建漂移, 不只看 tag)。
-#     ★ 2026-10-19 修正: 改比 **config digest**(push 会重压缩层, manifest/layer digest 会变;
-#       config blob digest 稳定), 否则每轮部署都会重推。
+#   · tag 不可变: 目标 tag 已存在且内容不同 → 失败, 不覆盖(运行时按 tag 拉取)。
+#   · 幂等: 由 config digest(回退 manifest digest)判断, 内容未变不重推。
 #   · 加速: 层并行(--image-parallel-copies)+ 跳过已有层(--dest-precompute-digests)+
 #     首个镜像 base-first、其余有界并行; 配置 IMAGE_PUSH_*; 详见 docs/image-push-optimization.md。
 #   · 默认启用 = 默认 push(MODEL_IMAGES_ENABLED 默认 true); 跳过: --skip model_images 或置 false。
-#   · 顺序(2026-10-16 用户口径): **部署完集群、全部 operator 与 node_pool 平台 placement 之后**
-#     才 push —— 模块文件排 37(dev_lab=36 之后)⇒ ≈33G 的大推送不占用关键链路时间,
-#     前面的组件/placement 先完成先验收; 覆盖安装反序卸载时本模块无卸载动作(registry 镜像随集群/registry 覆盖消亡)。
+#   · 顺序(2026-10-16 用户口径): **部署完集群与全部 operator 之后**才 push —— 模块文件排 37
+#     (dev_lab=36 之后)⇒ ≈33G 的大推送不占用关键链路时间, 前面组件先完成先验收;
+#     覆盖安装反序卸载时本模块无卸载动作(registry 镜像随集群/registry 覆盖消亡)。
 # 数据源: cluster.conf (MODEL_IMAGES_* / REGISTRY_* / IMAGE_PUSH_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps model_images
 # ============================================================
@@ -48,11 +47,11 @@ REG_BASE="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT:-5000}"
 say "模型推理镜像 → 集群内置 registry(源 ${SAVE_DIR})..."
 if [ ! -d "${SAVE_DIR}" ]; then
     warn "离线目录不存在: ${SAVE_DIR}"
-    warn "  备料: 联网机 docker pull/save(见 ${SAVE_DIR}/README.md), 或经 Harbor→MinIO 保鲜管道同步"
+    warn "  请检查版本树是否包含 offline-files/model-collection/(由外部打包流程物化)"
     exit 0
 fi
 if [ ! -f "${LIST}" ]; then
-    warn "镜像清单缺失: ${LIST}(跳过; 见目录 README)"
+    warn "镜像清单缺失: ${LIST}(跳过; 请检查版本树的 image-list.tsv)"
     exit 0
 fi
 
@@ -93,24 +92,38 @@ _model_push_one() {
     _path="${_save#"${HARBOR_HOST}"/}"
     _dst="docker://${REG_DIRECT}/${_path}"
     _dst_ref="${REG_BASE}/${_path}"
-    # 幂等(2026-10-19 修正): 优先比 **config digest** —— push 会重新压缩层, manifest/layer
-    # digest 会变(实测), 但 config blob digest 稳定; 老逻辑比 manifest digest 会每次重推。
+    # 幂等(2026-10-19): 优先比 **config digest** —— push 会重新压缩层, manifest/layer
+    # digest 会变(实测), 但 config blob digest 稳定。tag-runtime 下目标已存在且内容
+    # 不同必须失败, 不能覆盖(否则运行时 tag 静默漂移)。
     _c_dst="$(image_config_digest_raw "${_dst}")"
     _c_src="$(image_config_digest_raw "docker-archive:${_tar}")"
-    if [ -n "${_c_dst}" ] && [ "${_c_dst}" = "${_c_src}" ]; then
-        printf 'skip\t%s: 内容未变(config digest %s...), 跳过推送\n' "${_path}" "${_c_dst:0:19}" \
-            > "${PUSH_RESULT_DIR}/${_idx}.result"
+    if [ -n "${_c_dst}" ] && [ -n "${_c_src}" ]; then
+        if [ "${_c_dst}" = "${_c_src}" ]; then
+            printf 'skip\t%s: 内容未变(config digest %s...), 跳过推送\n' "${_path}" "${_c_dst:0:19}" \
+                > "${PUSH_RESULT_DIR}/${_idx}.result"
+            return 0
+        fi
+        printf 'fail\t%s: 目标 tag 已存在但内容不同(config digest %s... != %s...), 拒绝覆盖\n' \
+            "${_path}" "${_c_dst:0:19}" "${_c_src:0:19}" > "${PUSH_RESULT_DIR}/${_idx}.result"
         return 0
     fi
-    # 多架构/取不到 config digest 时回退 manifest digest(保守: 不相等即推送)
-    if [ -z "${_c_dst}" ] || [ -z "${_c_src}" ]; then
-        _d_dst="$(image_digest_raw "${_dst}")"
-        _d_src="$(image_digest_raw "docker-archive:${_tar}")"
-        if [ -n "${_d_dst}" ] && [ "${_d_dst}" = "${_d_src}" ]; then
+    # 多架构/取不到 config digest 时回退 manifest digest; 目标已存在但无法证明一致也拒绝覆盖。
+    _d_dst="$(image_digest_raw "${_dst}")"
+    _d_src="$(image_digest_raw "docker-archive:${_tar}")"
+    if [ -n "${_d_dst}" ] && [ -n "${_d_src}" ]; then
+        if [ "${_d_dst}" = "${_d_src}" ]; then
             printf 'skip\t%s: 内容未变(manifest digest %s...), 跳过推送\n' "${_path}" "${_d_dst:0:19}" \
                 > "${PUSH_RESULT_DIR}/${_idx}.result"
             return 0
         fi
+        printf 'fail\t%s: 目标 tag 已存在但内容不同(manifest digest %s... != %s...), 拒绝覆盖\n' \
+            "${_path}" "${_d_dst:0:19}" "${_d_src:0:19}" > "${PUSH_RESULT_DIR}/${_idx}.result"
+        return 0
+    fi
+    if [ -n "${_c_dst}" ] || [ -n "${_d_dst}" ]; then
+        printf 'fail\t%s: 目标 tag 已存在但无法确认内容一致, 拒绝覆盖\n' "${_path}" \
+            > "${PUSH_RESULT_DIR}/${_idx}.result"
+        return 0
     fi
     _t0="$(date +%s)"
     say "  [${_path}] 开始推送(源 $(basename "${_tar}"), 层并发 ${IMAGE_PUSH_PARALLEL_LAYERS:-4})..."

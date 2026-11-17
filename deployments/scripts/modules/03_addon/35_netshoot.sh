@@ -12,9 +12,9 @@
 #   · 定位: 集群里**常驻一台"网络工具箱"** —— kubectl exec 进去就能用 tcpdump / ip / ss / ethtool /
 #     mtr / ping / nslookup 排障; 镜像里额外装了 rdma-core(ibv_devices/ibv_devinfo)与
 #     perftest(ib_write_bw/ib_read_bw...), 用于 RDMA(IB/RoCE)链路诊断与带宽/时延实测。
-#   · 镜像(离线): 自建镜像 tar 由**联网机** tools/images/netshoot-rdma-build.sh 生成
-#     (netshoot-rdma.Dockerfile: netshoot + rdma-core + 源码编译 perftest —— Alpine 无 perftest 包);
-#     放到 ${NETSHOOT_SAVE_DIR}(默认 deployments/offline-files/netshoot/)→ 本模块推入集群内置 registry。
+#   · 镜像: `make netshoot-rdma` / CI 构建并 push public Harbor;
+#     release 打包或开源在线安装再从 Harbor 物化成 tar, 放到 ${NETSHOOT_SAVE_DIR}
+#     (默认 deployments/offline-files/netshoot/) → 本模块推入集群内置 registry。
 #     ⚠ 自建 tar 缺失时**回退**用离线包里的原始 netshoot(netshoot.tar): pod 照样能起, 但
 #       **没有 ibv_*/perftest**(会有醒目告警) —— 总比"诊断工具起不来"强。
 #   · ★ RDMA 资源**自动降级**: 只有集群节点真的注册了 ${NETSHOOT_RDMA_RESOURCE}(默认
@@ -83,7 +83,7 @@ NS="${NETSHOOT_NAMESPACE:-default}"
 POD="${NETSHOOT_POD_NAME:-cubestack-netshoot}"
 CM_NAME="${NETSHOOT_POD_NAME:-cubestack-netshoot}-diag"
 SAVE_DIR="${NETSHOOT_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/netshoot}"
-TAG="${NETSHOOT_RDMA_VERSION:-26.04.17}"          # 自建镜像 tag(= perftest 版本, 见构建脚本)
+TAG="${NETSHOOT_RDMA_VERSION:-2.1-latest}"       # 自建镜像 tag(开发线 channel; release/base env 会覆盖)
 BASE_TAR="${NETSHOOT_BASE_TAR:-${REPO_ROOT}/deployments/offline-files/os/netshoot.tar}"   # 回退用的原始 netshoot
 RDMA_RES="${NETSHOOT_RDMA_RESOURCE:-${RDMA_IB_RESOURCE:-rdma/ib_shared_devices}}"        # 与 10_rdma by-link 的 IB 池一致
 # push 用直连端点(与 10_rdma/gpu_operator 一致): nodeport→master:REGISTRY_NODEPORT / metallb→VIP:5000
@@ -94,15 +94,27 @@ PUSH_REPO="${REG_DIRECT}/netshoot"
 # ---- [1/4] 选镜像 tar(自建优先, 原始 netshoot 回退) ----
 say "[1/4] 选择诊断镜像 tar(自建优先; 目录 ${SAVE_DIR})..."
 USING_RDMA_IMG=1
-TAR_FILE="$(find_offline_tar "/netshoot-rdma:${TAG}" "netshoot-rdma-*.tar" "${SAVE_DIR}" 2>/dev/null || true)"
+# release 树用中性名 netshoot-rdma.tar; 开发树可能仍带 tag 后缀。
+_netshoot_find_tar() {  # <save_dir> <tag>
+    local sd="$1" tag="$2" cand src
+    for cand in "${sd}/netshoot-rdma.tar" "${sd}/netshoot-rdma-${tag}.tar"; do
+        [ -f "${cand}" ] || continue
+        src="$(tar_first_image_tag "${cand}")"
+        if [ -z "${src}" ] || [ "${src##*:}" = "${tag}" ]; then
+            printf '%s\n' "${cand}"; return 0
+        fi
+    done
+    find_offline_tar "/netshoot-rdma:${tag}" "netshoot-rdma-*.tar" "${sd}" 2>/dev/null || true
+}
+TAR_FILE="$(_netshoot_find_tar "${SAVE_DIR}" "${TAG}")"
 if [ -z "${TAR_FILE}" ]; then
     # tag 不匹配(如换过 perftest 版本)时, 只要目录里有任意自建 tar 就用最新的那个
-    _latest="$(ls -t "${SAVE_DIR}"/netshoot-rdma-*.tar 2>/dev/null | head -1 || true)"
+    _latest="$(ls -t "${SAVE_DIR}"/netshoot-rdma.tar "${SAVE_DIR}"/netshoot-rdma-*.tar 2>/dev/null | head -1 || true)"
     if [ -n "${_latest}" ]; then
         TAR_FILE="${_latest}"
         case "$(basename "${TAR_FILE}")" in
             *"${TAG}"*) : ;;   # 文件名就是目标版本(只是 tar 内容标签与查找后缀不同) → 不吵
-            *) warn "  未找到 netshoot-rdma-${TAG}.tar, 使用目录内最新: $(basename "${TAR_FILE}")" ;;
+            *) warn "  未找到 netshoot-rdma:${TAG} 的 tar, 使用目录内最新: $(basename "${TAR_FILE}")" ;;
         esac
     fi
 fi
@@ -111,13 +123,13 @@ if [ -z "${TAR_FILE}" ]; then
     USING_RDMA_IMG=0
     IMG_NAME="netshoot"
     [ -f "${BASE_TAR}" ] || { err "自建镜像 tar 与回退 tar 都没有:"; \
-        err "  ① 自建(推荐, 含 ibv_*/perftest): 联网机跑 tools/images/netshoot-rdma-build.sh → tar 放到 ${SAVE_DIR}/"; \
+        err "  ① 用 release 打包或开源在线安装从 Harbor 物化 netshoot-rdma 到 ${SAVE_DIR}/"; \
         err "  ② 或放原始 netshoot 到 ${BASE_TAR}(无 ibv_*/perftest)"; exit 1; }
     TAR_FILE="${BASE_TAR}"
     TAG="$(tar_first_image_tag "${TAR_FILE}")"; TAG="${TAG##*:}"
     [ -n "${TAG}" ] || TAG="latest"
-    warn "  未找到自建镜像 tar(netshoot-rdma-*.tar in ${SAVE_DIR})→ 回退原始 netshoot(${TAR_FILE##*/})"
-    warn "  ⚠ 回退版**没有 ibv_*/perftest**; 要 RDMA 诊断: 联网机跑 tools/images/netshoot-rdma-build.sh 后重跑本模块"
+    warn "  未找到自建镜像 tar(netshoot-rdma.tar 或 netshoot-rdma-*.tar in ${SAVE_DIR})→ 回退原始 netshoot(${TAR_FILE##*/})"
+    warn "  ⚠ 回退版**没有 ibv_*/perftest**; 要 RDMA 诊断: 用 release/开源安装物化 netshoot-rdma tar 后重跑本模块"
 else
     ok "  自建镜像 tar: ${TAR_FILE}"
 fi

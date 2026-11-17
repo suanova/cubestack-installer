@@ -248,7 +248,7 @@ case "${cmd}" in
     *"get cephcluster"*) echo "Ready" ;;
     *"get cephfilesystem"*) echo "Ready" ;;
     *"get cm rook-ceph-mon-endpoints"*) echo "a=10.0.0.5:6789,b=10.0.0.6:6789,c=10.0.0.7:6789" ;;
-    *"get ds rook-ceph.cephfs.csi.ceph.com-nodeplugin"*) echo "quay.io/cephcsi/cephcsi:v3.18.1" ;;
+    *"get ds rook-ceph.cephfs.csi.ceph.com-nodeplugin"*) echo "quay.io/cephcsi/cephcsi:v3.17.0" ;;
     *"ceph auth get-or-create"*) echo "[client.cubestack-cephfs-models]" ;;
     *"ceph auth print-key"*) echo "AQBTestKey1234567890abcdef==" ;;
     *"rollout status"*) echo 'daemon set "cephfs-models-mount" successfully rolled out' ;;
@@ -416,7 +416,7 @@ chk_contains "mountPropagation" "mountPropagation: Bidirectional" "${APPLY1}"
 chk_contains "宿主目标路径" "path: /mnt/cephfs/models" "${APPLY1}"
 chk_contains "mon 归一化" "10.0.0.5:6789,10.0.0.6:6789,10.0.0.7:6789" "${APPLY1}"
 chk_contains "CephFS 子目录挂载" ':/${SUBDIR}' "${APPLY1}"
-chk_contains "镜像自动取 CSI" "quay.io/cephcsi/cephcsi:v3.18.1" "${APPLY1}"
+chk_contains "镜像自动取 CSI" "quay.io/cephcsi/cephcsi:v3.17.0" "${APPLY1}"
 chk_not_contains "不把 key 放明文环境变量" "AQBTestKey1234567890abcdef==" <(grep -v '^  key:' "${APPLY1}" || true)
 chk_contains "创建专用 cephx 用户" "get-or-create client.cubestack-cephfs-models" "${TMP}/ssh-install1.log"
 
@@ -501,10 +501,6 @@ chk_contains "只读标志写入 DaemonSet" 'CEPHFS_READ_ONLY' "${APPLY_RO}"
 chk_contains "只读值为 true" 'value: "true"' "${APPLY_RO}"
 chk_contains "专用 env 覆盖挂载路径" 'path: /mnt/cephfs/ro-env' "${APPLY_RO}"
 chk_contains "只读挂载选项" 'MOUNT_OPTS' "${APPLY_RO}"
-# 2026-11-05 实机: external MON 是 msgr2-only NodePort, 内核默认 v1 → V1_BANNER → no mds
-chk_contains "模板含 ms_mode 占位符" '__MS_MODE__' "${MANIFEST}"
-chk_contains "external 启用 prefer-secure" 'ms_mode=prefer-secure' "${MODULE}"
-chk_contains "模块替换 ms_mode 占位符" 's|__MS_MODE__|' "${MODULE}"
 chk_contains "只读不创建子目录" 'read-only 模式: 不创建子目录' "${APPLY_RO}"
 chk_contains "验证区分只读" 'NOT_READONLY' "${MODULE}"
 chk_contains "只读用 ls 验证" "timeout 10 ls" "${MODULE}"

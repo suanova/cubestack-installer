@@ -17,7 +17,7 @@
 #              k8s_deploy(默认关) k8s_scale(默认关)
 #   addon 阶段: gpu_operator k8s_registry ceph ceph_csi ceph_backup
 #              keycloak kueue kubevirt lustre_csi   (01~19 中间件, 默认关)
-#              20 起为自研模块(cubestack_operator 25_…, 见 4.6b)
+#              20 起序号预留给外部提供的自研模块
 #   验证:      verify_<组件>(自动发现; --steps verify 不指定 operator 默认执行全部 verify_*)
 #   运维:      ceph_backup(Ceph 备份/恢复, 默认关, --steps ceph_backup 单独执行)
 #
@@ -47,7 +47,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-common.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-module.sh"
 
 # 先发现模块(help 需动态展示 verify_* 列表, 新增 verify step 后 --help 自动更新)
-discover_modules
+discover_modules || exit 1
 
 # ---------------- 帮助 ----------------
 usage() {
@@ -68,10 +68,7 @@ usage() {
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           cephfs_mount(CephFS → 每台节点 /mnt/cephfs/models, 默认随 CEPHFS_ENABLED)
           local_path(可选) k8s_registry 组件(全部可单独部署的组件见下方"组件单独部署"清单)
-          自研: cubestack_operator(平台 Operator, 见 4.6b); model_images(模型推理镜像 sglang/vllm-metax, 排最后; 见 offline-files/model-collection/README.md)
-          组件级更新(operator 已就绪后单独更新某个平台组件, 不重跑 cubestack_operator):
-            lws / envoy_gateway / ai_gateway / cubestack_controller_manager / model_bundles /
-            prometheus / perses / bmc / metax / cuberouter / cubepilot / cubestack_portal / observability
+          model_images(模型推理镜像 sglang/vllm-metax, 排最后; 由版本树提供)
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
@@ -96,28 +93,23 @@ $(_component_meta_list stub)
                                                             # (目标集群**已存在**时同样是覆盖重装; 支持断点续跑)
   ② 清状态重来:        sudo ./deploy-cluster.sh --fresh        # = ① 且**先清断点状态**(REPEAT:0 的模块强制重跑)
      · 覆盖安装遇到节点上的**旧集群残留**(跨小版本 / 旧 etcd 二进制)时, k8s_deploy 前置会自动清除它
-       (交互 [Y/n] 确认, 输入 n 可中止; 加 --yes 免交互 —— 无人值守务必显式给)。原地升级未实现, 见 docs/cluster-upgrade-path.md
+       (交互 15s 倒计时可中止; 加 --yes 免交互 —— 无人值守务必显式给)。原地升级未实现, 见 docs/cluster-upgrade-path.md
      · **优雅覆盖**(2026-10-11): K8s 覆盖实际将执行且集群可达时, 会先读集群内安装登记
        (ConfigMap cubestack-install-record)按首装序**反序优雅卸载**已装组件(先停消费者/CR 级联/
-       helm uninstall, 再动 Ceph, 最后 K8s 覆盖) —— 非暴力重置。交互 [Y/n] 确认
-       (TEARDOWN_CONFIRM_SLEEP=0 跳过); --yes 免交互。手动查看: tools/k8s/cluster-teardown.sh --list
+       helm uninstall, 再动 Ceph, 最后 K8s 覆盖) —— 非暴力重置。倒计时 TEARDOWN_CONFIRM_SLEEP
+       (默认 30s)可 Ctrl-C; --yes 免交互。手动查看: tools/k8s/cluster-teardown.sh --list
        设计: docs/graceful-overwrite/design.md
   ③ 单独装组件:        sudo ./deploy-cluster.sh --steps ceph         # 只装该组件(不动基座; 集群接入自动处理)
   · state 文件 deployments/config/.deploy.state 只记录"本机装到哪一步": 全新容器没有它是正常的(等价①)。
   · ⚠ ①/② 是**重装集群**的路: 节点上已有的旧 K8s 会被 kubeadm reset(既有防线: kubespray 侧检测到残留时
-    醒目警告 + [Y/n] 确认(Ctrl-C 可中止); 集群已存在时部署也会打印醒目提示)。
+    醒目警告 + 60s 倒计时, 期间 Ctrl-C 可中止; 集群已存在时部署也会打印醒目提示)。
     只想装组件、**不动集群** → 用 ③(--steps <组件> 的计划里不含 k8s_deploy/metallb/registry 等基座)。
   · 前提: 容器里挂载 cluster.conf(含 NODES 的 IP/用户/密码)与 deployments/offline-files
     (镜像 tar 不入镜像; 见 README §容器化 CLI 的 docker run 挂载示例)。
 
 注:
-  · 镜像统一镜像源(Harbor): 全部上游镜像声明在 deployments/config/images.manifest,
-    先经 CI 同步到 harbor.isuanova.com/mirrors/**, 再由工具拉成离线 tar 供各模块推入内置
-    registry(集群无需访问公网)。三个工具(tools/images/):
-      harbor-sync-images.sh      上游 → Harbor(CI/联网机; 项目不存在自动创建)
-      harbor-save-images.sh      Harbor → offline-files/<group>/*.tar(联网机)
-      check-image-manifest.sh    清单静态校验(+ --kubespray 交叉核对 / --harbor 漂移报告)
-    升级组件版本只改 cluster.defaults.conf 的「镜像版本」节一处, 全链自动跟随。详见 docs/harbor-mirror.md。
+  · 第三方镜像由 container-image-mirror 仓库统一同步到 harbor.isuanova.com/mirrors/**;
+    安装侧只使用版本树里的离线 tar, 不直接访问上游 registry。
   · cluster.conf 的 NODES(5字段: role,hostname,ip,ssh_user,ssh_password)不区分虚拟机/裸金属;
     ssh_user 写 "-" = 跟随全局 SSH_USER(cluster.conf, root|ubuntu, 默认 ubuntu —— 切换安装用户
     只改 SSH_USER 一处); 显式写用户名 = 该节点覆盖(与全局不一致时部署启动会点名告警)。
@@ -144,16 +136,16 @@ $(_component_meta_list stub)
                         例: --profile v2.32.0; none = 不用档案(全部按 cluster.conf)
                         **不指定 = 部署最新版本**(max(仓库树, 有档案的版本目录); 本地临时版本须显式选)
                         见 docs/kubespray-versioning/
-  --release <版本>      使用离线发布版本目录(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
-                        版本变量以目录内 release.env 为准; 取件见 fetch-offline-from-minio.sh --release
-                        例: --release 2.0.0; 等价于 cluster.conf 的 CUBESTACK_RELEASE="2.0.0"
+  --release <版本>      使用已物化的版本树(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
+                        版本变量以目录内 release.env 为准; 也可直接挂载版本树的 offline-files/
+                        例: --release 2.1.0; 等价于 cluster.conf 的 CUBESTACK_RELEASE="2.1.0"
+  --with-packages <列表>  可选包(如 models,dev-lab,vendor); 若版本树有 meta tar, 安装前先解包
   --verify-offline[=auto|quick|full|off]
                         离线文件完整性校验强度(默认 quick: 结构/覆盖率, 不做整树深度;
                         auto = 全量部署首次 full+校验戳; full = 强制深度)。
                         失败会在任何模块执行前停止。
   --no-verify-offline   跳过离线文件完整性校验(逃生口; 会打印醒目提示)
   --fresh, --refresh    默认流程 + **先清断点状态**(REPEAT:0 的模块强制重跑; 见"三种使用方式"②)
-  --yes, -y             免交互: 所有 [Y/n] 确认自动回答 Y(无人值守/CI 必须显式给)
   --list                仅打印集群规划(只读)
   --list-steps          列出全部模块(分组紧凑展示; 加 --verbose 看完整 DESC/文件/依赖)
   --help, -h            显示本帮助
@@ -165,10 +157,8 @@ $(_component_meta_list stub)
   sudo ./deploy-cluster.sh --enable ceph            # 只把 CEPH_ENABLED=true 写入 cluster.conf(不部署)
   sudo ./deploy-cluster.sh --steps ceph            # 单独装/重跑 Ceph(不动基座; 接入自动处理)
   sudo ./deploy-cluster.sh --steps cephfs_mount    # 把 CephFS models 挂到每台节点 /mnt/cephfs/models
-  sudo ./deploy-cluster.sh --steps lws             # 只更新平台组件 lws(operator 已就绪; 不重跑 cubestack_operator)
-  sudo ./deploy-cluster.sh --steps cube-pilot      # 只更新 cubepilot(连字符别名)
   sudo ./deploy-cluster.sh --steps ceph --fresh     # 同上, 且清断点状态(REPEAT:0 模块重跑用)
-  sudo ./deploy-cluster.sh --release 2.0.0          # 使用 2.0.0 离线发布版本目录(<root>/2.0.0/offline-files)
+  sudo ./deploy-cluster.sh --release 2.1.0          # 使用 2.1.0 版本树(<root>/2.1.0/offline-files)
   sudo ./deploy-cluster.sh --steps verify_ceph      # 只验证 Ceph(operator/CSI + ceph -s + RBD 块 I/O)
   sudo ./deploy-cluster.sh --with-scale             # 扩容: 仅 k8s_scale(先登录 master 核对集群→diff 新节点→只动新节点)
   sudo ./deploy-cluster.sh --with-scale --only worker02   # 扩容指定节点(--only 也先经集群核对)
@@ -183,6 +173,9 @@ $(_component_meta_list stub)
 
 ★ 提示: sudo ./deployments/scripts/deploy-cluster.sh --list-steps
         模块全清单(启用状态/依赖/序号/执行阶段) —— 选模块、看开关、排依赖, 都从这条命令开始
+
+  ⚠ 本页只列本 installer 内置的模块。版本树(--release)附带的模块要装好版本树后才能读到,
+    它们不会出现在 --help 里, 请用 --list-steps 查看完整清单。
 EOF
     exit 0
 }
@@ -193,14 +186,14 @@ STEPS_ARG=""; SKIP_ARG=""; ENABLE_ARG=""; PHASE_ARG=""; ENABLE_PERSIST_ARG=""
 SCALE_ONLY=0
 ONLY_HOSTS=""
 RELEASE_ARG=""
+RELEASE_PACKAGES_ARG=""
 VERIFY_OFFLINE_ARG=""
 NO_VERIFY_OFFLINE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --fresh|--refresh) FRESH=1; shift ;;
-        # --yes = 免交互确认: 导出 CUBESTACK_ASSUME_YES=1 让所有 [Y/n] 确认自动 Y
-        #   (含"旧集群残留 → 自动 reset"、Ceph 节点/裸盘、k8s_deploy 配置确认等)。
-        #   不给 --yes 时: 交互终端逐个询问 [Y/n]; 非交互环境 reset 类确认**拒绝执行**(避免无人值守误清集群)。
+        # --yes = 覆盖安装时免交互确认(透传给"旧集群残留 → 自动 reset"那一步; 见 k8s_deploy 前置)。
+        #   不给 --yes 时: 交互终端仍有 15s 倒计时; 非交互环境**拒绝自动 reset**(避免无人值守误清集群)。
         --yes|-y) ASSUME_YES=1; shift ;;
         --list)     LIST=1; shift ;;
         --list-steps) LIST_STEPS=1; shift ;;
@@ -222,9 +215,10 @@ while [ $# -gt 0 ]; do
         #   须在 load_config 之前 export —— load_config 读的是环境变量
         #   (none = 禁用档案, 全部按 cluster.conf)
         --profile)  PROFILE_ARG="${2:?--profile 需要版本名(如 v2.32.0; none=禁用档案)}"; shift 2 ;;
-        # --release = 本次使用离线发布版本目录(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
+        # --release = 本次使用已物化的版本树(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
         #   须在 load_config 之前 export(load_config 读的是环境变量)
-        --release)  RELEASE_ARG="${2:?--release 需要版本号(如 2.0.0)}"; shift 2 ;;
+        --release)  RELEASE_ARG="${2:?--release 需要版本号(如 2.1.0)}"; shift 2 ;;
+        --with-packages) RELEASE_PACKAGES_ARG="${2:?--with-packages 需要包列表}"; shift 2 ;;
         # 离线文件完整性门禁: 默认 auto(首次 full, 之后走校验戳); 可强制 quick/full/off。
         --verify-offline) VERIFY_OFFLINE_ARG="auto"; shift ;;
         --verify-offline=) err "--verify-offline 需要取值(auto|quick|full|off)"; exit 1 ;;
@@ -248,6 +242,22 @@ fi
 if [ -n "${RELEASE_ARG:-}" ]; then
     export CUBESTACK_RELEASE="${RELEASE_ARG}"
     vlog "  --release ${RELEASE_ARG} → CUBESTACK_RELEASE(本机 cluster.conf 不变)"
+    # 2.1 完整包: 本地 meta + payload 先解包成 release 树。只消费本地文件。
+    _rel_root="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
+    _rel_dir="${_rel_root}/${RELEASE_ARG}"
+    _meta="${_rel_dir}/cubestack-${RELEASE_ARG}.meta.tar.zst"
+    if [ -f "${_meta}" ] && [ ! -f "${_rel_dir}/offline-files/release.env" ]; then
+        _tool="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tools/offline/release-packages.py"
+        _args=(--root "${_rel_dir}" --meta "${_meta}"
+               --meta-dir "${_rel_dir}/offline-files" --extract --seal)
+        if [ -n "${RELEASE_PACKAGES_ARG:-}" ]; then
+            _args+=(--with "${RELEASE_PACKAGES_ARG}")
+        fi
+        vlog "  解包本地 release 包: ${_meta}"
+        python3 "${_tool}" "${_args[@]}"
+        unset _args
+    fi
+    unset _rel_root _rel_dir _meta _tool
 fi
 # 展开 --only 中的 group 名: NODE_GROUP_<name> 定义在 cluster.conf 中
 if [ -n "${ONLY_HOSTS}" ]; then
@@ -268,10 +278,17 @@ export ONLY_HOSTS
 
 # ---------------- 配置加载 + 模块解析 ----------------
 load_config
+# 版本树里的私有模块只在 load_config 之后才知道位置。首次 discover_modules 发生在参数
+# 解析之前, 那时额外目录还不存在, 所以这里重新合并 + 重新发现。公共版本没有额外目录,
+# 这次调用是空操作。
+if [ -n "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ]; then
+    cs_merge_modules_dirs
+    discover_modules || exit 1
+fi
 
 # ---------------- 离线文件完整性门禁(2026-10-28) ----------------
 # 默认 quick: 结构/覆盖率校验(不算 sha256/镜像层); 需要强校验设 auto 或 full
-# (auto = release/flat/sealed 首次 full, 之后走校验戳; 未 seal 开发树自动降级 quick)。
+# (auto = release/sealed 首次 full, 之后走校验戳; 未 seal 开发树自动降级 quick)。
 # 跳过: 只读列表 / 纯 verify_* 步骤 / 仅 --enable 写配置(不实际部署)。
 _verify_skip=0
 if [ "${LIST_STEPS}" = "1" ] || [ "${LIST}" = "1" ]; then
@@ -305,7 +322,7 @@ if [ "${_verify_skip}" = "0" ]; then
 fi
 unset _verify_skip _all_verify _s 2>/dev/null || true
 
-# 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 见 tools/offline/fetch-offline-from-minio.sh --help 全部子目录)
+# 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 版本树由外部打包流程提供)
 # 只读列表/计划不检查(否则列表里会混入与展示无关的离线文件告警)
 if [ "${LIST_STEPS}" != "1" ] && [ "${LIST}" != "1" ]; then
     check_offline_files
@@ -433,9 +450,8 @@ if [ "${LIST_STEPS}" = "1" ]; then print_steps; exit 0; fi
 if [ "${LIST}" = "1" ]; then print_plan; exit 0; fi
 
 [ "${FRESH}" = "1" ] && { clear_state; say "已清除断点续跑状态(--fresh)" ; }
-# --yes: 导出 CUBESTACK_ASSUME_YES=1 → lib-common 的 confirm_yes_no 全部自动 Y
-#   (旧集群 reset 等自身 --yes 参数另由调用链显式透传)
-[ "${ASSUME_YES}" = "1" ] && { export CUBESTACK_ASSUME_YES=1; say "已开启免交互确认(--yes): 所有 [Y/n] 确认将自动继续"; }
+# --yes 透传给下游(k8s_deploy 前置的"旧集群残留 → 自动 reset"); 见 tools/k8s/reset-old-cluster.sh
+[ "${ASSUME_YES}" = "1" ] && { export CUBESTACK_ASSUME_YES=1; say "已开启免交互确认(--yes): 覆盖安装时旧集群残留将**自动**清除"; }
 
 need_root() { [ "$(id -u)" -eq 0 ] || { err "需要 root 权限,请执行: sudo $0"; exit 1; }; }
 need_root
@@ -443,7 +459,7 @@ need_root
 # ★ 覆盖安装可见化(实现见 lib-module.sh notify_base_redeploy; --list/--list-steps 只读路径不探测集群,
 #   改由 print_plan 打印提示行)。**只提示、不拦停** —— 默认全量运行 = 覆盖安装(2026-09-17 定案):
 #   目标集群已存在时照常重装, 只把"会发生什么"打出来(节点旧 K8s 会被 kubeadm reset; 该步骤自带 60s
-#   交互 [Y/n] 确认可 n/Ctrl-C 中止)。只想装组件不动集群 → --steps <组件>(计划里不含基座)。
+#   倒计时可 Ctrl-C)。只想装组件不动集群 → --steps <组件>(计划里不含基座)。
 #   ⚠ 可靠判定点在 run_module(执行 k8s_deploy 之前): 新容器此处可能**还没有 SSH 密钥** →
 #   cluster_exists 判不出集群; 而 vm_sshkey/k8s_passwordless 恰好排在 k8s_deploy 之前, 到那时才可探测。
 notify_base_redeploy
@@ -535,7 +551,7 @@ if [ "$(get_state k8s_deploy)" != "done" ]; then
         _te_args=()
         [ "${ASSUME_YES}" = "1" ] && _te_args=(--yes)
         say "检测到集群已存在且本次将覆盖重装 → 先执行「优雅覆盖」: 按安装登记反序卸载已装组件"
-        say "  (设计顺序: 优雅卸载先于下方 Ceph 确认执行)"
+        say "  (设计顺序: 优雅卸载先于下方 Ceph 确认倒计时执行)"
         # 计划感知(I1): 引擎据此跳过"非本次计划"的拆除(尤其不含 ceph 时保留 Ceph 集群/OSD 数据)
         export CUBESTACK_TEARDOWN_PLAN_STEPS="${RUN_STEPS[*]:-}"
         bash "${SCRIPT_DIR}/tools/k8s/cluster-teardown.sh" --uninstall "${_te_args[@]}" \
@@ -545,11 +561,11 @@ if [ "$(get_state k8s_deploy)" != "done" ]; then
     unset _OVERWRITE_PENDING
 fi
 
-# ⚠ Ceph 部署前强制确认([Y/n], 防覆盖磁盘 double-check 的兜底):
-#   print_plan 的红底提醒无确认(纯提示); 02_ceph 模块内部的确认在 k8s 部署之后,
-#   k8s_deploy 已被断点标记 done 跳过时会丢失 —— 这里在**真正开始部署前**再确认一次:
+# ⚠ Ceph 部署前强制确认(倒计时, 防覆盖磁盘 double-check 的兜底):
+#   print_plan 的红底提醒无倒计时(纯提示); 02_ceph 模块内部的倒计时在 k8s 部署之后,
+#   k8s_deploy 已被断点标记 done 跳过时会丢失 —— 这里在**真正开始部署前**再打断一次:
 #   Ceph 启用(CEPH_ENABLED 或 CEPH_CSI_ENABLED)且本次会执行 ceph 相关模块(k8s_deploy 或 ceph)时,
-#   交互询问 [Y/n](CEPH_CONFIRM_SLEEP=0 跳过; 变量名保留兼容, 不再等待秒数)供人工 double-check 存储节点/裸盘。
+#   sleep 倒计时 CEPH_CONFIRM_SLEEP(默认 60s, 设 0 跳过)供人工 double-check 存储节点/裸盘。
 if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
     # ★ CEPH_FALLBACK_TO_LOCALPATH=true 时, 先检测 ceph 安装条件; 不足 → 自动回退 local-path
     #   (REGISTRY_STORAGE_CLASS=local-path + LOCAL_PATH_ENABLED=true + 跳过 ceph 模块)。
@@ -573,7 +589,7 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
     fi
     # ★ 2026-09-09(用户要求): internal 模式存储节点数 < CEPH_MIN_NODES(默认 3)时,
     #   跳过 Ceph 集群部署 —— mon 法定人数不足, 02_ceph 本就不会创建 CephCluster;
-    #   此处提前跳过裸盘确认横幅/确认/已有集群清理, registry 后端回退 local-path
+    #   此处提前跳过裸盘确认横幅/倒计时/已有集群清理, registry 后端回退 local-path
     #   (与 CEPH_FALLBACK_TO_LOCALPATH 同款翻转), ceph/ceph_csi 模块运行时按
     #   TOGGLE=false 自行跳过, 部署不中断。
     if [ "${CEPH_MODE:-internal}" != "external" ]; then
@@ -582,7 +598,7 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
             echo ""
             echo -e "\033[43m\033[30m================================================================================\033[0m"
             echo -e "\033[43m\033[30m ⚠⚠⚠  存储节点 ${_CN} 台 < CEPH_MIN_NODES=${CEPH_MIN_NODES:-3} → 跳过 Ceph 集群部署 ⚠⚠⚠\033[0m"
-            echo -e "\033[43m\033[30m   mon 法定人数不足, 不创建 CephCluster(无裸盘覆盖风险, 跳过确认)   \033[0m"
+            echo -e "\033[43m\033[30m   mon 法定人数不足, 不创建 CephCluster(无裸盘覆盖风险, 跳过确认倒计时)   \033[0m"
             echo -e "\033[43m\033[30m   registry 后端回退 local-path; ceph/ceph_csi 模块本次跳过               \033[0m"
             echo -e "\033[43m\033[30m   如需 Ceph: ① 存储节点增至 ≥${CEPH_MIN_NODES:-3} 台; 或 ② CEPH_MODE=external 接入外部 Ceph\033[0m"
             echo -e "\033[43m\033[30m================================================================================\033[0m"
@@ -597,10 +613,10 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
     fi
     # ★ CEPH_MODE=external(由 load_config 归一化): 接入外部已有 Ceph, 不涉及本地裸盘/
     #   覆盖确认 —— 跳过存储节点/裸盘检测、已有 CephCluster 清理, 仅提示外部连接。
-    # ★ 2026-09-11(用户要求): external 模式部署前**[Y/n] 确认**(与 internal 裸盘确认对称)——
+    # ★ 2026-09-11(用户要求): external 模式部署前**倒计时确认**(与 internal 裸盘确认对称)——
     #   在 K8s 集群部署**开始前**检查 external-ceph.env / CEPH_MONITORS 并供人工核对;
-    #   02_ceph 模块内的确认在 k8s_deploy 之后(太晚), 未配置时等整个集群装完才发现
-    #   ceph_csi 报错, 浪费整轮部署。此处未配置 → 红底强调"将报错", 供用户输入 n 中止修正。
+    #   02_ceph 模块内的倒计时在 k8s_deploy 之后(太晚), 未配置时等整个集群装完才发现
+    #   ceph_csi 报错, 浪费整轮部署。此处未配置 → 红底强调"将报错", 供用户 Ctrl-C 修正。
     if [ "${CEPH_MODE:-internal}" = "external" ]; then
         _EXT_ENV_FILE="${CEPH_EXTERNAL_ENV_FILE:-${REPO_ROOT}/deployments/config/external-ceph.env}"
         _EXT_MONS="${CEPH_MONITORS:-}"
@@ -626,23 +642,25 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
             echo -e "\033[41m\033[97m   不执行裸盘检测/覆盖确认; 由 ceph_csi 模块经 CephConnection 连外部集群  \033[0m"
         fi
         echo -e "\033[41m\033[97m================================================================================\033[0m"
-        # ★ 部署前确认(与 internal 裸盘确认对称): 供人工核对外部连接参数;
-        #   CEPH_ENV_CONFIRM_SLEEP(默认 60s, 设 0 跳过)现为兼容开关: 非 0 时询问 [Y/n](不再等待)。
-        #   monitors 未配置 → 红底强调"将失败"。
+        # ★ 倒计时确认(与 internal 裸盘确认对称): 部署前供人工核对外部连接参数;
+        #   CEPH_ENV_CONFIRM_SLEEP(默认 60s, 设 0 跳过)。monitors 未配置 → 红底强调"将失败"。
         _env_cs="${CEPH_ENV_CONFIRM_SLEEP:-60}"
         if [ -z "${_EXT_MONS}" ]; then
-            say "⚠ external-ceph.env / CEPH_MONITORS 未配置 → ceph_csi 模块将报错; 请输入 n 中止并修正连接配置后重跑"
+            say "⚠ external-ceph.env / CEPH_MONITORS 未配置 → ceph_csi 模块将报错; 建议 Ctrl-C 修正连接配置后重跑(或等待倒计时继续)"
         else
-            say "Ceph(external)已启用: 请核对上方外部连接参数(有误输入 n 中止; CEPH_ENV_CONFIRM_SLEEP=0 可跳过)..."
+            say "Ceph(external)已启用: sleep ${_env_cs}s 供核对上方外部连接参数(CEPH_ENV_CONFIRM_SLEEP=0 可跳过)..."
         fi
         if [ "${_env_cs}" -gt 0 ] 2>/dev/null; then
-            confirm_yes_no "已核对上方外部 Ceph 连接参数, 继续部署?" 1 \
-                || { err "已取消部署(external Ceph 连接参数未确认)"; exit 1; }
+            for _c in $(seq "${_env_cs}" -1 1); do
+                printf "\r%s" "$(printf '\033[41m\033[97m  ⏳ 倒计时 %d 秒继续(请核对上方外部 Ceph 连接参数, 有误 Ctrl-C)      \033[0m' "${_c}")"
+                sleep 1
+            done
+            printf "\r%s\n" "$(printf '\033[0m  %s             ')"
         else
-            say "CEPH_ENV_CONFIRM_SLEEP=0, 跳过确认(请务必已人工核对上方外部连接参数)"
+            say "CEPH_ENV_CONFIRM_SLEEP=0, 跳过等待(请务必已人工核对上方外部连接参数)"
         fi
-        unset _env_cs
-        export CEPH_EXT_ENV_CONFIRMED=1   # 02_ceph 模块识别"deploy-cluster 已确认过" → 跳过其重复确认
+        unset _c _env_cs
+        export CEPH_EXT_ENV_CONFIRMED=1   # 02_ceph 模块识别"deploy-cluster 已确认过" → 跳过其重复倒计时
         unset _EXT_ENV_FILE _EXT_MONS _EXT_USER _EXT_ENV_MONS _EXT_ENV_USER
     elif [ "${_CEPH_SKIP_SMALL:-0}" = "1" ]; then
         :   # 存储节点数 < CEPH_MIN_NODES: 上方已打印跳过横幅, 不弹确认/不做已有集群清理
@@ -764,7 +782,7 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         echo -e "\033[41m\033[97m   auto 自动分类磁盘 = 空闲裸盘 + 上次 Ceph 占用盘(后者覆盖安装会清空复用)\033[0m"
         echo -e "\033[41m\033[97m   在用盘(挂载中/非 ceph 文件系统/非 ceph LVM/系统盘)与混合盘一律不选不清理\033[0m"
         echo -e "\033[41m\033[97m   判定证据见各盘下方(判定按强证据, 不做猜测); 显式用 CEPH_DATA_DISKS 可指定盘\033[0m"
-        echo -e "\033[41m\033[97m   有误请输入 n 中止, 修正 ${CLUSTER_CONF} 后重跑                    \033[0m"
+        echo -e "\033[41m\033[97m   有误请 Ctrl-C 中止, 修正 ${CLUSTER_CONF} 后重跑                    \033[0m"
         echo -e "\033[41m\033[97m================================================================================\033[0m"
 
         # ★ 检测已有 CephCluster(覆盖 K8s 重装时决定"清理销毁"还是"保留数据"):
@@ -801,11 +819,16 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         fi
 
         if [ "${_ceph_cs}" -gt 0 ] 2>/dev/null; then
-            say "Ceph 已启用: 请核对上方节点/裸盘(有误输入 n 中止; CEPH_CONFIRM_SLEEP=0 可跳过)..."
-            confirm_yes_no "已核对上方 Ceph 存储节点/裸盘, 继续部署?" 1 \
-                || { err "已取消部署(Ceph 存储节点/裸盘未确认)"; exit 1; }
+            say "Ceph 已启用: sleep ${_ceph_cs}s 供核对上方节点/裸盘(CEPH_CONFIRM_SLEEP=0 可跳过)..."
+            for _c in $(seq "${_ceph_cs}" -1 1); do
+                printf "\r%s" "$(printf '\033[41m\033[97m  ⏳ 倒计时 %d 秒继续(请核对上方 Ceph 存储节点/裸盘, 有误 Ctrl-C)      \033[0m' "${_c}")"
+                sleep 1
+            done
+            printf "\r%s\n" "$(printf '\033[0m  %s             ')"
+            printf "\r%s\n" "$(printf '\033[0m  %s             ')"
+            unset _c
         else
-            say "CEPH_CONFIRM_SLEEP=0, 跳过确认(请务必已人工核对上方节点/裸盘)"
+            say "CEPH_CONFIRM_SLEEP=0, 跳过等待(请务必已人工核对上方节点/裸盘)"
         fi
 
         # 已有 CephCluster 且显式允许销毁 → 覆盖 k8s 前卸载旧 Ceph(OSD 数据销毁)

@@ -6,7 +6,6 @@ name: Validate scripts & manifests
 #   job scripts    ① 全仓 shell 语法(`bash -n`, 按 git 清单逐个过)
 #                  ② check-modules.sh 全 19 项(模块元数据/依赖拓扑/helm 离线副本/
 #                     kubespray 补丁在位/5 个离线回归套件/版本钉子闭环/凭据卫生)
-#                  ③ images.manifest ↔ kubespray 交叉校验
 #   job manifests  ④ 仓库自有 YAML 清单解析(check-manifests.sh)
 #
 # 为什么是这两支脚本: check-modules.sh / check-manifests.sh 本身就是"开发期 + CI"两用的
@@ -15,7 +14,6 @@ name: Validate scripts & manifests
 #
 #   bash deployments/scripts/tools/check-modules.sh \
 #     && bash deployments/scripts/tools/check-manifests.sh \
-#     && bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray
 #
 # 这里只做**静态**验证: 语法/元数据/依赖/清单/补丁在位。集群侧的真实功能验证仍是各模块的
 # verify_* 与 tools/k8s/verify-*.sh(需真集群), 不在本工作流范围内。
@@ -26,7 +24,7 @@ on:
   push:
     # release-2.0 维护分支: cherry-pick / 直接提交到该分支时, 必须走与 main 相同的
     # 静态校验 + release 模式回归(发布树路径派生/取件/命名契约)。
-    branches: [main, release-2.0]
+    branches: [main, release-2.0, release-2.1]
   workflow_dispatch:
 
 permissions:
@@ -72,6 +70,47 @@ jobs:
             exit 1
           fi
 
+      - name: 公共 base 基线校验(versions/base.yaml)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml
+          python3 deployments/scripts/tools/validate-base-baseline.py
+
+      - name: 版本派生文件同步校验(make check-versions)
+        run: |
+          set -euo pipefail
+          make check-versions
+
+      # 在线安装基础工具: catalog 解析 / 镜像物化 / OS 包预检(不安装)
+      - name: 在线安装工具回归(base catalog/materialize/precheck)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-online-base-catalog.sh
+
+      # 在线安装入口与 online 模式门禁: 预取/跳过 OS 包安装/预检可选
+      - name: 在线安装流程回归(install-online)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-install-online.sh
+
+      # netshoot-rdma digest pin updater
+      - name: netshoot pin 更新回归(netshoot-published)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-netshoot-pin.sh
+
+      # 物料清单: 缺失/校验和/告警模式
+      - name: 物料清单预检回归(materials)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-materials.sh
+
+      # mirror-updated(base scope): 只在 baseline 引用的镜像变化时更新 mirror pin
+      - name: mirror pin 接收回归(mirror-updated)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-mirror-pin.sh
+
       - name: 模块静态校验(check-modules.sh 全 19 项)
         run: |
           set -uo pipefail
@@ -93,11 +132,6 @@ jobs:
             exit 1
           fi
 
-      - name: 镜像清单校验(images.manifest ↔ kubespray)
-        run: |
-          set -euo pipefail
-          bash deployments/scripts/tools/images/check-image-manifest.sh --kubespray
-
       # CephFS 宿主机挂载(cephfs_mount)离线桩式回归: 门禁/渲染/全节点验证/幂等/卸载/零节点硬失败
       - name: CephFS 宿主机挂载离线回归(cephfs_mount)
         run: |
@@ -116,29 +150,17 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-image-push-optimize.sh
 
-      # 节点包对账的"卡死前检测": ceph/rbd 残留必须重启 / fuser 超时 / 前置探测
-      - name: 节点包对账卡死前检测回归(reconcile-node-packages)
+      # digest 推送助手: 输出 repo@digest / 内容幂等 / 参数校验
+      - name: digest 推送助手回归(push_image_digest)
         run: |
           set -euo pipefail
-          bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh
+          bash deployments/scripts/tools/tests/test-push-image-digest.sh
 
-      # 旧集群清理: kubeadm reset 依赖 CRI + crictl 兜底 + 控制面端口复核
-      - name: 旧集群清理回归(reset-cleanup)
+      # 额外私有模块目录: 默认行为不变 / 合并发现 / 重复文件与 key 拒绝
+      - name: 额外私有模块目录回归(extra modules dirs)
         run: |
           set -euo pipefail
-          bash deployments/scripts/tools/tests/test-reset-cleanup.sh
-
-      # cubestack_operator 更新/滚动: 两模式 Always / digest 注解 / IMAGE_TAG 生效
-      - name: cubestack_operator 更新行为回归
-        run: |
-          set -euo pipefail
-          bash deployments/scripts/tools/tests/test-cubestack-operator-update.sh
-
-      # 平台组件级 step: --steps lws/cube-pilot 只更新指定组件, 不重跑 cubestack_operator
-      - name: 平台组件级 step 回归(cubestack components)
-        run: |
-          set -euo pipefail
-          bash deployments/scripts/tools/tests/test-cubestack-component-steps.sh
+          bash deployments/scripts/tools/tests/test-extra-modules-dirs.sh
 
       # release 模式: load_config 路径派生 / fetch --release 下载+校验 / release 定义静态约束
       - name: 发布版本模式回归(release mode)
@@ -151,12 +173,6 @@ jobs:
         run: |
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-verify-offline-files.sh
-
-      # 离线增量下载计划: 内容寻址(同大小变更/多余文件/prefix/缓存/非法清单回退)
-      - name: 离线增量下载计划回归(manifest-plan)
-        run: |
-          set -euo pipefail
-          bash deployments/scripts/tools/tests/test-offline-incremental-plan.sh
 
       # verifier pyz 必须与 verifier/ 源码一致(防止改了源码忘重建)
       - name: 校验器源码/pyz 一致性
@@ -189,12 +205,6 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-offline-tree-check.sh
 
-      # release-2.0 组件镜像原地刷新: fake mc + fixture, 覆盖 tar/chart/CLI/SHA256SUMS/_SUCCESS
-      - name: release-2.0 组件镜像同步回归(release sync)
-        run: |
-          set -euo pipefail
-          bash deployments/scripts/tools/tests/test-release-sync-images.sh
-
       # k8s_deploy 期间改 cluster.conf 导致 addons.yml/后续模块配置漂移的门禁回归
       - name: 部署配置漂移门禁回归(config guard)
         run: |
@@ -206,10 +216,10 @@ jobs:
       - name: CLI 镜像必需工具(patch)静态门禁
         run: |
           set -euo pipefail
-          command grep -qE '^[[:space:]]*netcat-openbsd patch' Dockerfile-cli-base \
-            || { echo "::error::Dockerfile-cli-base 未安装 patch"; exit 1; }
-          command grep -q 'command -v patch' Dockerfile-cli \
-            || { echo "::error::Dockerfile-cli 缺少 patch 构建期断言"; exit 1; }
+          command grep -qE '^[[:space:]]*netcat-openbsd patch' images/installer-cli-base/Dockerfile \
+            || { echo "::error::installer-cli-base Dockerfile 未安装 patch"; exit 1; }
+          command grep -q 'command -v patch' images/installer-cli/Dockerfile \
+            || { echo "::error::installer-cli Dockerfile 缺少 patch 构建期断言"; exit 1; }
 
       # CubeStack Web UI 地址发现(Envoy Gateway/HTTPRoute/Service 解析, 假 kubectl 夹具)
       - name: CubeStack Web UI 地址发现回归(cubestack-ui-url)

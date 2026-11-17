@@ -204,56 +204,33 @@ env "${_vd2[@]}" bash "${REPO_ROOT}/deployments/kubespray/cubestack-version-dir.
 chk "verify 对 new 出来的目录 → rc!=0(images/ 空, 如实报缺)" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
 rm -rf "${_src}" "${_ro2}"
 
-echo "== ⑨ 离线链路: sync 源目录/本地临时排除; trim 版本范围; fetch 参数校验 =="
-_ro3="$(mktemp -d)"; mkdir -p "${_ro3}/kubespray/v9.9.9/images" "${_ro3}/kubespray/v9.9.8/images"
-printf 'LOCAL_ONLY\n' > "${_ro3}/kubespray/v9.9.9/LOCAL_ONLY"
-touch "${_ro3}/kubespray/v9.9.9/images/a.tar" "${_ro3}/kubespray/v9.9.8/images/b.tar"
-sout="$(OFFLINE_FILES_ROOT="${_ro3}" bash "${REPO_ROOT}/deployments/scripts/tools/offline/sync-to-minio.sh" --plan-versions 2>/dev/null)"
-chk "sync 源目录 = offline-files 真根(哨兵回归护栏)" "${_ro3}" \
-    "$(printf '%s\n' "${sout}" | awk -F': ' '/^源目录:/{print $2}')"
-printf '%s\n' "${sout}" | grep -q '将跳过.*v9.9.9' && chk "sync 跳过 LOCAL_ONLY 版本" 1 1 || chk "sync 跳过 LOCAL_ONLY 版本" 1 0
-printf '%s\n' "${sout}" | grep -q '将上传: kubespray/v9.9.8' && chk "sync 计划上传在库版本" 1 1 || chk "sync 计划上传在库版本" 1 0
-sout2="$(OFFLINE_FILES_DIR=/mnt/x bash "${REPO_ROOT}/deployments/scripts/tools/offline/sync-to-minio.sh" --plan-versions 2>/dev/null)"
-chk "显式 OFFLINE_FILES_DIR(旧用法)仍生效" "/mnt/x" \
-    "$(printf '%s\n' "${sout2}" | awk -F': ' '/^源目录:/{print $2}')"
-rc=0; OFFLINE_FILES_ROOT="${_ro3}" bash "${REPO_ROOT}/deployments/scripts/tools/offline/sync-to-minio.sh" --prune >/dev/null 2>&1 || rc=$?
-chk "--prune 无 --force-full-prune → 拒绝(多版本互删保护)" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
-tout="$(OFFLINE_FILES_ROOT="${_ro3}" bash "${REPO_ROOT}/deployments/scripts/tools/offline/trim-offline-files.sh" --dry-run --version v9.9.8 2>/dev/null)"
-printf '%s\n' "${tout}" | grep -q 'v9.9.9' && chk "trim 声明其它版本不触碰" 1 1 || chk "trim 声明其它版本不触碰" 1 0
-rc=0; OFFLINE_FILES_ROOT="${_ro3}" bash "${REPO_ROOT}/deployments/scripts/tools/offline/trim-offline-files.sh" --dry-run --version v7.7.7 >/dev/null 2>&1 || rc=$?
-chk "trim 对不存在版本 → 拒绝" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
-rc=0; bash "${REPO_ROOT}/deployments/scripts/tools/offline/fetch-offline-from-minio.sh" --kubespray-version v9.9.9 --sub kubespray/v9.9.9 >/dev/null 2>&1 || rc=$?
-chk "fetch --kubespray-version 与 --sub 互斥 → 拒绝" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
-rc=0; bash "${REPO_ROOT}/deployments/scripts/tools/offline/fetch-offline-from-minio.sh" --sub /etc >/dev/null 2>&1 || rc=$?
-chk "fetch --sub 绝对路径 → 拒绝" 1 "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
-rm -rf "${_ro3}"
-
 echo "== ⑩ CLI 镜像契约: 只含 deployments/ 代码(静态断言, 防回归) =="
-# 用户口径 2026-09-30: 离线二进制不打进 CLI 镜像; kubectl/helm/skopeo 由容器运行期从挂载的
-# 版本目录挂 PATH。以下三条是这条契约的**可执行**形式(改坏任何一条, 部署容器会静默少工具)。
-# 代码层只有一个 Dockerfile; 工具链必须在 **base** 层(用户口径 2026-09-30)
-for _df in Dockerfile-cli; do
+# 代码层不打工具二进制; 工具链固定在 base 层, 且只从网络按 pinned version +
+# sha256 下载(不依赖构建机的 PATH / offline-files)。
+for _df in images/installer-cli/Dockerfile; do
     chk "${_df}(代码层)不得打工具二进制" "无" "$(grep -qE '^COPY bin/' "${REPO_ROOT}/${_df}" && echo 有 || echo 无)"
     chk "${_df} 已安装运行期工具链钩子" "有" "$(grep -q '/etc/profile.d/50-cubestack-tools.sh' "${REPO_ROOT}/${_df}" && echo 有 || echo 无)"
     chk "${_df} 不跑 pip(依赖属 base)" "无" "$(grep -q 'pip install' "${REPO_ROOT}/${_df}" && echo 有 || echo 无)"
 done
-for _t in kubectl skopeo yq mc helm; do
-    chk "base 层打进 ${_t}" "有" "$(grep -q "COPY bin/${_t}" "${REPO_ROOT}/Dockerfile-cli-base" && echo 有 || echo 无)"
+for _pair in kubectl:dl.k8s.io helm:get.helm.sh skopeo:lework/skopeo-binary yq:mikefarah/yq mc:dl.min.io/aistor; do
+    _tool="${_pair%%:*}"
+    _url="${_pair#*:}"
+    chk "base 层从 ${_url} 下载 ${_tool}" "有" "$(grep -q "${_url}" "${REPO_ROOT}/images/installer-cli-base/Dockerfile" && echo 有 || echo 无)"
 done
-chk "构建工具解包 helm 到 bin/helm(不再打 tar 层)" "有" \
-    "$(grep -q 'tar -xzf.*--strip-components=1.*linux-amd64/helm' "${REPO_ROOT}/deployments/scripts/tools/docker/build-cli-context.sh" && echo 有 || echo 无)"
-chk "base 层不再 COPY helm tar" "无" \
-    "$(grep -q 'COPY bin/helm-archive' "${REPO_ROOT}/Dockerfile-cli-base" && echo 有 || echo 无)"
+chk "base 层每次下载都校验 sha256" "有" "$([ "$(grep -c 'sha256sum -c -' "${REPO_ROOT}/images/installer-cli-base/Dockerfile")" -ge 5 ] && echo 有 || echo 无)"
+chk "base 层不再 COPY 本地 bin/" "无" "$(grep -qE '^COPY bin/' "${REPO_ROOT}/images/installer-cli-base/Dockerfile" && echo 有 || echo 无)"
+# 版本线: channel tag 由根目录 VERSION_LINE 派生, 不在 Dockerfile/CI 写死
+_vl="${REPO_ROOT}/VERSION_LINE"
+chk "VERSION_LINE 文件在位" "有" "$([ -f "${_vl}" ] && echo 有 || echo 无)"
+chk "VERSION_LINE 格式 X.Y" "有" "$(grep -Eq '^[0-9]+\.[0-9]+$' "${_vl}" 2>/dev/null && echo 有 || echo 无)"
+chk "构建脚本按 sha 构建 CLI" "有" "$(grep -q 'CLI_TAG="sha-' "${REPO_ROOT}/deployments/scripts/tools/docker/build-cli-image.sh" && echo 有 || echo 无)"
+chk "CLI workflow 推 sha-<commit> tag" "有" "$(grep -q 'sha-${GITHUB_SHA::7}' "${REPO_ROOT}/.github/workflows/rebuild-cli-image.yml" && echo 有 || echo 无)"
+chk "CLI Dockerfile 不写死 channel tag" "无" "$(grep -qE 'cli-base:[0-9]+\.[0-9]+-latest' "${REPO_ROOT}/images/installer-cli/Dockerfile" && echo 有 || echo 无)"
 chk "钩子源文件在位" "有" "$([ -f "${REPO_ROOT}/deployments/scripts/tools/docker/cli-toolchain-from-offline.sh" ] && echo 有 || echo 无)"
-# mc 是**唯一例外**: 必须打进镜像(拉离线文件的引导工具, 不能被挂载提供; 上游 URL 已 410 Gone)
-chk "base 层打进 mc(COPY bin/mc)" "有" "$(grep -q '^COPY bin/mc' "${REPO_ROOT}/Dockerfile-cli-base" && echo 有 || echo 无)"
-# 只禁"下载命令"(注释里保留 410 说明是有意的, 别把注释也判成违规)
-chk "base 层不再用已失效的 dl.min.io 下载" "无" "$(grep -qE '(wget|curl)[^#]*dl\.min\.io' "${REPO_ROOT}/Dockerfile-cli-base" && echo 有 || echo 无)"
-chk "构建工具会把 mc 拷进上下文(离线件/宿主机)" "有" "$(grep -q 'offline-files/os/mc-' "${REPO_ROOT}/deployments/scripts/tools/docker/build-cli-context.sh" && echo 有 || echo 无)"
 # 两层结构(2026-09-30): base(系统/工具链) + 代码层(FROM base);代码层不再 FROM 上一版 latest ⇒ 层数不累积
-chk "存在 base 层 Dockerfile" "有" "$([ -f "${REPO_ROOT}/Dockerfile-cli-base" ] && echo 有 || echo 无)"
-chk "Dockerfile-cli FROM base 层(而非上一版 latest)" "有" "$(grep -q '^FROM ${CLI_BASE_TAG}' "${REPO_ROOT}/Dockerfile-cli" && echo 有 || echo 无)"
-chk "incremental Dockerfile 已并入(不该还在)" "无" "$([ -f "${REPO_ROOT}/Dockerfile-cli-incremental" ] && echo 有 || echo 无)"
+chk "存在 base 层 Dockerfile" "有" "$([ -f "${REPO_ROOT}/images/installer-cli-base/Dockerfile" ] && echo 有 || echo 无)"
+chk "installer-cli Dockerfile FROM base 层(而非上一版 latest)" "有" "$(grep -q '^FROM ${CLI_BASE_TAG}' "${REPO_ROOT}/images/installer-cli/Dockerfile" && echo 有 || echo 无)"
+chk "incremental Dockerfile 已并入(不该还在)" "无" "$([ -f "${REPO_ROOT}/images/installer-cli/Dockerfile-incremental" ] && echo 有 || echo 无)"
 # .dockerignore 必须挡住版本目录整层与物化树(否则整仓上下文构建会把 GB 级离线件打进镜像)
 for _pat in 'deployments/offline-files/kubespray/\*/' 'deployments/kubespray/versions'; do
     if grep -qE "^${_pat}" "${REPO_ROOT}/.dockerignore"; then
@@ -262,23 +239,6 @@ for _pat in 'deployments/offline-files/kubespray/\*/' 'deployments/kubespray/ver
         chk ".dockerignore 含 ${_pat}" "有" "无"
     fi
 done
-
-echo "== ⑫ 节点系统包链路(2026-09-30 事故的防回归) =="
-# 事故: install-packages 的 play 只跑 kube_node(worker) ⇒ **master 从未拿到离线 .deb**,
-# 而 master 上 curl 只在这条 play 里发 ⇒ 探针拿到空串被误判成网络故障。以下四条锁死修复。
-_PLAY="${REPO_ROOT}/deployments/kubespray/kubespray/patch-playbooks/install-packages.yml"
-chk "play 覆盖 master(hosts 含 kube_control_plane)" "有" "$(grep -q 'hosts: kube_node:kube_control_plane' "${_PLAY}" && echo 有 || echo 无)"
-chk "play 的 required_packages 含 curl" "有" "$(grep -qE '^\s+- curl$' "${_PLAY}" && echo 有 || echo 无)"
-# ⚠ 2026-10-08: 节点 .deb 统一收敛到 offline-files/os/packages(版本无关 OS 层);
-#   原断言钉的是 <版本目录>/packages/(旧布局), repair/ 已并入主目录 —— 此处改钉新位置。
-# ⚠ 这些 .deb 属 gitignored 离线件: 干净 checkout/CI/未备料机**主包集为空**, 无从断言 ⇒ 跳过
-#   (与 check-modules ⑱ "无在场版本目录(纯 checkout/未备料)⇒ 跳过" 同口径; 备料机上仍必查 ——
-#   2026-10-09 CI 首跑踩: 无条件断言在 runner 上恒红)。
-if ls ${REPO_ROOT}/deployments/offline-files/os/packages/*.deb >/dev/null 2>&1; then
-    chk "curl 的 .deb 在 os/packages 主包集里(repair 已并入, 不再按版本目录)" "有" "$(ls ${REPO_ROOT}/deployments/offline-files/os/packages/curl_*.deb >/dev/null 2>&1 && echo 有 || echo 无)"
-else
-    echo "  skip curl .deb 主包集断言(os/packages 未备料 —— 纯 checkout/CI 属正常)"
-fi
 
 echo "== ⑪ 默认版本 = 最新(用户口径); 本地临时版本不进默认; 目录副本回退 =="
 # 带夹具根的探针(OFFLINE_FILES_ROOT 指向夹具, 用于"版本目录自带档案副本"的回退路径)

@@ -1,0 +1,197 @@
+name: Build netshoot-rdma image
+
+# Builds the RDMA-enabled netshoot diagnostic image and optionally pushes it to
+# the public Harbor project. The image is consumed by:
+#   - cubestack-release: pinned as a base image and packaged into the version tree
+#   - cubestack-installer open-source online install: materialized from public Harbor
+#
+# Automatic runs (Dockerfile / Makefile changes) push sha-<commit> and update
+# versions/base.yaml. Manual runs push the immutable tag you provide and never
+# overwrite it.
+
+on:
+  push:
+    branches: [main, release-2.1]
+    paths:
+      - 'images/netshoot-rdma/**'
+      - 'Makefile'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Immutable image tag (e.g. 26.04.17 or 26.04.17-r2)'
+        required: true
+      perftest_version:
+        description: 'perftest source version (default: tag without -rN suffix)'
+        required: false
+        default: ''
+      push:
+        description: 'Push to Harbor (uncheck for build-only validation)'
+        type: boolean
+        default: true
+      apk_mirror:
+        description: 'Optional apk mirror (e.g. https://mirrors.aliyun.com/alpine)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: netshoot-rdma-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build netshoot-rdma
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      digest: ${{ steps.digest.outputs.digest }}
+    env:
+      HARBOR_HOST: ${{ vars.HARBOR_MIRROR_REGISTRY || 'harbor.isuanova.com' }}
+      HARBOR_USER: ${{ vars.CI_BOT_NAME }}
+      HARBOR_PASSWORD: ${{ secrets.CI_BOT_PASSWORD }}
+      IMAGE: ${{ vars.NETSHOOT_RDMA_IMAGE || 'harbor.isuanova.com/suanova/netshoot-rdma' }}
+      # TODO: pin this to an immutable base tag/digest once the public mirror
+      # catalog carries a pinned netshoot base.
+      BASE_IMAGE: ${{ vars.NETSHOOT_RDMA_BASE_IMAGE || 'nicolaka/netshoot:latest' }}
+      IMAGE_TAG_INPUT: ${{ inputs.tag }}
+      PERFTEST_INPUT: ${{ github.event_name == 'push' && (vars.NETSHOOT_RDMA_PERFTEST_VERSION || '26.04.17') || inputs.perftest_version }}
+      PUSH_INPUT: ${{ github.event_name == 'push' && 'true' || inputs.push }}
+      APK_MIRROR_INPUT: ${{ github.event_name == 'push' && '' || inputs.apk_mirror }}
+      IS_CHANNEL: 'false'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve tag and validate
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            tag="sha-${GITHUB_SHA::7}"
+            perftest="${PERFTEST_INPUT}"
+          else
+            tag="${IMAGE_TAG_INPUT}"
+            perftest="${PERFTEST_INPUT}"
+            if [ -z "${perftest}" ]; then
+              perftest="$(sed -n 's/^ARG PERFTEST_VERSION=//p' images/netshoot-rdma/Dockerfile | head -1)"
+            fi
+          fi
+          [[ "${tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] \
+            || { echo "::error::invalid image tag: '${tag}'"; exit 1; }
+          [[ "${tag,,}" != "latest" ]] \
+            || { echo "::error::'latest' is not allowed"; exit 1; }
+          case "${tag}" in
+            *-latest) echo "::error::channel tags are not allowed: ${tag}"; exit 1 ;;
+          esac
+          [[ "${perftest}" =~ ^[0-9A-Za-z._-]+$ ]] \
+            || { echo "::error::invalid perftest version: '${perftest}'"; exit 1; }
+          if [ -n "${APK_MIRROR_INPUT}" ] && [[ ! "${APK_MIRROR_INPUT}" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "::error::apk_mirror must be an https URL"
+            exit 1
+          fi
+          echo "IMAGE_TAG=${tag}" >>"${GITHUB_ENV}"
+          echo "PERFTEST_VERSION=${perftest}" >>"${GITHUB_ENV}"
+          echo "tag=${tag}" >>"${GITHUB_OUTPUT}"
+          echo "resolved tag=${tag} perftest=${perftest}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Login to Harbor
+        if: env.PUSH_INPUT == 'true'
+        run: |
+          set -euo pipefail
+          if [[ -z "${HARBOR_USER:-}" || -z "${HARBOR_PASSWORD:-}" ]]; then
+            echo "::error::vars.CI_BOT_NAME / secrets.CI_BOT_PASSWORD are required to push"
+            exit 1
+          fi
+          echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_HOST}" -u "${HARBOR_USER}" --password-stdin
+
+      - name: Ensure immutable tag is new
+        if: env.PUSH_INPUT == 'true' && env.IS_CHANNEL != 'true'
+        run: |
+          set -euo pipefail
+          if docker manifest inspect "${IMAGE}:${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "::error::tag already exists, refusing to overwrite: ${IMAGE}:${IMAGE_TAG}"
+            exit 1
+          fi
+
+      - name: Build, self-check and optionally push
+        run: |
+          set -euo pipefail
+          make netshoot-rdma \
+            NETSHOOT_RDMA_IMAGE="${IMAGE}" \
+            NETSHOOT_RDMA_TAG="${IMAGE_TAG}" \
+            NETSHOOT_RDMA_BASE_IMAGE="${BASE_IMAGE}" \
+            NETSHOOT_RDMA_PERFTEST_VERSION="${PERFTEST_VERSION}" \
+            NETSHOOT_RDMA_APK_MIRROR="${APK_MIRROR_INPUT}" \
+            NETSHOOT_RDMA_PUSH="${PUSH_INPUT}" 2>&1 | tee "${RUNNER_TEMP}/netshoot-build.log"
+
+      - name: Verify pushed digest
+        id: digest
+        if: env.PUSH_INPUT == 'true'
+        run: |
+          set -euo pipefail
+          ref="${IMAGE}:${IMAGE_TAG}"
+          # RepoDigests drops the tag: compare against the repository only.
+          repo="${ref%:*}"
+          digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${ref}" \
+            | awk -F@ -v r="${repo}" '$1==r {print $2; exit}')"
+          if [ -z "${digest}" ]; then
+            # Fallback for engines that do not populate RepoDigests.
+            digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' \
+              "${RUNNER_TEMP}/netshoot-build.log" | tail -1)"
+          fi
+          [[ -n "${digest}" ]] || { echo "::error::cannot resolve pushed digest for ${ref}"; exit 1; }
+          echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "### netshoot-rdma pushed"
+            echo ""
+            echo "\`${ref}@${digest}\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  update-baseline:
+    name: Update versions/base.yaml
+    needs: build
+    if: needs.build.outputs.digest != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - name: Update netshoot pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ vars.NETSHOOT_RDMA_IMAGE || 'harbor.isuanova.com/suanova/netshoot-rdma' }}
+          TAG: ${{ needs.build.outputs.tag }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          python3 deployments/scripts/tools/online/update-netshoot-pin.py \
+            --root . --image "${IMAGE}" --tag "${TAG}" --digest "${DIGEST}"
+          if git diff --quiet -- versions/base.yaml; then
+            echo "base.yaml unchanged"
+            exit 0
+          fi
+          branch="bot/netshoot-${TAG}-pin"
+          git config user.name suanova-bot
+          git config user.email bot@isuanova.com
+          git checkout -b "${branch}"
+          git add versions/base.yaml
+          git commit -s -m "chore(netshoot): pin ${TAG} (${DIGEST:0:19})"
+          git push -f origin "${branch}"
+          title="chore(netshoot): pin ${TAG}"
+          body="Automated digest update from the netshoot-rdma workflow: ${IMAGE}:${TAG}@${DIGEST}"
+          pr="$(gh pr list --head "${branch}" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "${pr}" ]; then
+            gh pr edit "${pr}" --title "${title}" --body "${body}"
+            echo "updated PR #${pr} for ${branch}"
+          else
+            gh pr create --base "${GITHUB_REF_NAME}" --head "${branch}" \
+              --title "${title}" --body "${body}"
+          fi

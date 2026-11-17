@@ -65,7 +65,7 @@ K8S_VERSION=v1.35.8 bash deployments/kubespray/cubestack-kubespray-upgrade.sh v2
    · **CLI 镜像**:`python3 -m pip install -r requirements.txt` 直接失败
      (`Ignored … 12.3.0 Requires-Python >=3.11` / `No matching distribution found`);
      修法是镜像里装 `python3.11`(deadsnakes;jammy universe 那个是 3.11.0~rc1 的 RC 版)并让 ansible 走它,
-     见 `Dockerfile-cli-base` 的 "Python 3.11(deadsnakes)" 段(2026-09-30 起 python3.11/ansible 都在 base 层)。
+     见 `images/installer-cli-base/Dockerfile` 的 "Python 3.11(deadsnakes)" 段(2026-09-30 起 python3.11/ansible 都在 base 层)。
    · **裸机路径**:`ensure_venv` 已改为**优先挑 `python3.12`/`python3.11`**(挑不到才回退 `python3`),
      宿主需先装一个 ≥3.11 的解释器;`.venv_wheels/` 缓存也要用 3.11 重出(cp311 的 cryptography/bcrypt)。
    ⇒ 升级前先跑 `grep -m1 '^ansible==' <新树>/requirements.txt` 并核对它的 `Requires-Python`。
@@ -317,7 +317,7 @@ bash deployments/scripts/tools/check-modules.sh
 | 补丁 | `bash deployments/kubespray/cubestack-patch-apply.sh --check` | rc=0(全部在位) |
 | 树 | 见 §1.4 的 `diff -rq --no-dereference …`(**须在 `deployments/kubespray` 目录内跑**,过滤器才生效) | 14 行 = 7 行 `Files … differ`(= 全部补丁目标文件)+ 1 行 `inventory/local/group_vars`(目录 vs 符号链接,已知项)+ 6 行目标树独有的顶层点文件(剔除项) |
 | ~~渲染器~~ | ~~自持 manifest 渲染器 vs 新树模板对拍(如 kube-vip)~~ **已废止(2026-09-28 收编)**: kube-vip 清单由上游自己渲染 ⇒ 无对拍对象;改由实机套件验收 —— `--steps verify_kube_vip`(含漂移演练)+ `verify_api_ha` | kube-vip Pod Running / VIP 唯一绑定 / healthz 通过 |
-| 离线 | `images.manifest` 新镜像 / `offline-files/` 备料 | 缺口清单为空 |
+| 离线 | 版本树 `offline-files/` 备料 | 缺口清单为空 |
 | 实机 | 全新集群全量部署 | 部署成功 |
 
 > 注:升级入口 [8/8] 的输出里引用的 `docs/kubespray-upgrade.md §8` 指的就是**本节**(脚本定稿时本文档尚未编号;本文档的章节编号以本文件为准)。

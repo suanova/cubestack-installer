@@ -51,6 +51,112 @@
 
 MODULES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/modules"
 
+# Merge extra module roots (colon-separated) into a temporary modules root so
+# discovery and execution paths stay unchanged. The merged root sits next to
+# modules/ so modules keep resolving ../../lib-common.sh and ../../tools/.
+# Child processes reuse the exported merged root.
+#
+# Callable more than once: --release resolves the version tree only after
+# load_config has run, which is long after this library was sourced and the
+# first discovery happened. deploy-cluster.sh calls it again once
+# CUBESTACK_EXTRA_MODULES_DIRS is final; calling it with an unchanged source is
+# a no-op, so the second call costs nothing when there is no version tree.
+cs_merge_modules_dirs() {
+    local _cs_base="${CS_BASE_MODULES_DIR:-${MODULES_DIR}}"
+    local _cs_want="${CUBESTACK_EXTRA_MODULES_DIRS:-}"
+    local _cs_self_dir
+    _cs_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    # 已按同一来源合并过 → 复用。子进程(cluster-teardown 等)靠这条: 父进程导出了
+    # CUBESTACK_MODULES_MERGED + _FROM, 它不该重建, 也不该删父进程的合并根。
+    if [ -n "${CUBESTACK_MODULES_MERGED:-}" ] \
+       && [ "${CUBESTACK_MODULES_MERGED_FROM:-}" = "${_cs_want}" ]; then
+        [ -d "${CUBESTACK_MODULES_MERGED}" ] || {
+            echo "error: merged modules dir missing: ${CUBESTACK_MODULES_MERGED}" >&2
+            exit 1
+        }
+        MODULES_DIR="${CUBESTACK_MODULES_MERGED}"
+        return 0
+    fi
+
+    # 来源变了(首次为空 → load_config 之后变成版本树 modules/): 丢掉旧合并根, 从基座
+    # 重来, 否则新根会把旧根再链一遍形成自我嵌套。
+    # 只删**本进程**创建的: 合并根可能由父进程建好后导出给子进程, 子进程的 $$ 不同 ——
+    # 若它走到这里(说明 EXTRA_MODULES_DIRS 被改过), 删掉父进程的目录会破坏父进程状态。
+    if [ -n "${CUBESTACK_MODULES_MERGED:-}" ]; then
+        if [ "${CUBESTACK_MODULES_MERGED_OWNER:-}" = "$$" ]; then
+            case "${CUBESTACK_MODULES_MERGED}" in
+                "${_cs_self_dir}"/.modules-merged.*) rm -rf "${CUBESTACK_MODULES_MERGED}" 2>/dev/null || true ;;
+                *) echo "error: merged dir is not where we created it: ${CUBESTACK_MODULES_MERGED}" >&2; exit 1 ;;
+            esac
+        else
+            echo "error: merged modules dir belongs to another process (owner=${CUBESTACK_MODULES_MERGED_OWNER:-unknown}, me=$$)" >&2
+            echo "       CUBESTACK_EXTRA_MODULES_DIRS changed under a shared merged root" >&2
+            exit 1
+        fi
+        unset CUBESTACK_MODULES_MERGED CUBESTACK_MODULES_MERGED_FROM CUBESTACK_MODULES_MERGED_OWNER
+    fi
+    MODULES_DIR="${_cs_base}"
+    [ -n "${_cs_want}" ] || return 0
+    _cs_merged="$(mktemp -d "${_cs_self_dir}/.modules-merged.XXXXXX")" || {
+        echo "error: failed to create temporary modules dir" >&2
+        exit 1
+    }
+    _cs_link_phase() {
+        local phase_dir="$1" phase f base
+        phase="$(basename "${phase_dir}")"
+        mkdir -p "${_cs_merged}/${phase}"
+        for f in "${phase_dir}"/[0-9][0-9]_*.sh; do
+            [ -f "${f}" ] || continue
+            base="$(basename "${f}")"
+            if [ -e "${_cs_merged}/${phase}/${base}" ] || [ -L "${_cs_merged}/${phase}/${base}" ]; then
+                echo "error: duplicate module file: ${phase}/${base} (${f})" >&2
+                exit 1
+            fi
+            ln -s "${f}" "${_cs_merged}/${phase}/${base}"
+        done
+    }
+    for _cs_phase_dir in "${MODULES_DIR}"/[0-9][0-9]_*; do
+        [ -d "${_cs_phase_dir}" ] && _cs_link_phase "${_cs_phase_dir}"
+    done
+    while IFS= read -r _cs_root; do
+        [ -n "${_cs_root}" ] || continue
+        [ -d "${_cs_root}" ] || {
+            echo "error: extra modules dir not found: ${_cs_root}" >&2
+            exit 1
+        }
+        _cs_root="$(cd "${_cs_root}" && pwd)" || {
+            echo "error: cannot resolve extra modules dir: ${_cs_root}" >&2
+            exit 1
+        }
+        _cs_phase_dirs=("${_cs_root}"/[0-9][0-9]_*)
+        if [ ! -d "${_cs_phase_dirs[0]}" ]; then
+            case "$(basename "${_cs_root}")" in
+                [0-9][0-9]_*) _cs_phase_dirs=("${_cs_root}") ;;
+                *)
+                    echo "error: extra modules dir has no NN_* phase dir: ${_cs_root}" >&2
+                    exit 1
+                    ;;
+            esac
+        fi
+        for _cs_phase_dir in "${_cs_phase_dirs[@]}"; do
+            [ -d "${_cs_phase_dir}" ] && _cs_link_phase "${_cs_phase_dir}"
+        done
+    done < <(printf '%s\n' "${CUBESTACK_EXTRA_MODULES_DIRS}" | tr ':' '\n')
+    MODULES_DIR="${_cs_merged}"
+    export CUBESTACK_MODULES_MERGED="${_cs_merged}"
+    export CUBESTACK_MODULES_MERGED_FROM="${_cs_want}"
+    export CUBESTACK_MODULES_MERGED_OWNER="$$"
+    unset -f _cs_link_phase
+    unset _cs_merged _cs_phase_dir _cs_phase_dirs _cs_root
+}
+
+# The base modules root, kept so a second merge starts from it rather than from
+# an already-merged temporary dir (which would link the temporary tree back into
+# itself).
+CS_BASE_MODULES_DIR="${MODULES_DIR}"
+cs_merge_modules_dirs
+
 # ---------------- 旧 key → 新 key 别名(向后兼容) ----------------
 declare -A MODULE_ALIAS=(
     [net]=vm_network
@@ -64,17 +170,12 @@ declare -A MODULE_ALIAS=(
     [k8s]=k8s_deploy
     [scale]=k8s_scale
     [gpu_operator]=gpu_operator
-    # CubeStack 平台组件级更新 step 的连字符别名(--steps cube-pilot / envoy-gateway ...)
-    [cube-pilot]=cubepilot
-    [cube_pilot]=cubepilot
-    [envoy-gateway]=envoy_gateway
-    [ai-gateway]=ai_gateway
-    [cubestack-controller-manager]=cubestack_controller_manager
-    [controller_manager]=cubestack_controller_manager
-    [model-bundles]=model_bundles
-    [cubestack-portal]=cubestack_portal
-    [portal]=cubestack_portal
 )
+
+# 组件级的便利别名由模块**自声明**: 模块文件里写 `# ALIAS: <alias>,<alias>`。
+# 这样版本树带来的模块能带着自己的写法, 而公共 installer 不必列出别人的组件名
+# —— 写在这里等于在每个开源版本里附一份并不存在的 --steps 清单。见 discover_modules。
+declare -a CS_DYNAMIC_ALIASES=()
 
 # 归一化模块 key(旧别名 → 新 key; 未知 key 原样返回)
 normalize_key() {
@@ -137,7 +238,13 @@ module_meta() {
 #   MODULE_DEFAULT / MODULE_REPEAT / MODULE_PHASE / MODULE_TOGGLE / MODULE_REQUIRES
 discover_modules() {
     MODULE_KEY=(); MODULE_DESC=(); MODULE_SCRIPT=(); MODULE_DEFAULT=(); MODULE_REPEAT=(); MODULE_PHASE=(); MODULE_TOGGLE=(); MODULE_REQUIRES=()
-    local f dir base key rel
+    local f dir base key rel _dups _alias_one
+    # 上一轮注册的模块自声明别名先撤掉: 同一进程内合并根可能更换(--release 在
+    # load_config 之后才确定), 残留的别名会指向已不存在的模块。
+    for _alias_one in ${CS_DYNAMIC_ALIASES[@]+"${CS_DYNAMIC_ALIASES[@]}"}; do
+        unset "MODULE_ALIAS[${_alias_one}]"
+    done
+    CS_DYNAMIC_ALIASES=()
     # 遍历 modules/NN_*/NN_*.sh(两级), 按路径字典序 = 目录序号+文件序号 排序
     for f in "${MODULES_DIR}"/[0-9][0-9]_*/[0-9][0-9]_*.sh; do
         [ -f "${f}" ] || continue
@@ -154,7 +261,25 @@ discover_modules() {
         MODULE_PHASE+=("$(module_meta "${f}" PHASE)")
         MODULE_TOGGLE+=("$(module_meta "${f}" TOGGLE)")
         MODULE_REQUIRES+=("$(module_meta "${f}" REQUIRES)")
+        # 模块自声明的 --steps 别名(`# ALIAS: a,b`): 便利写法跟着拥有它的模块走。
+        # 内置别名**不可被覆盖**: 版本树随包分发, 允许它重定义 `k8s` 之类的既有写法就等于
+        # 让一个数据包把 `--steps k8s`(部署整个集群) 静默指向任意模块。冲突直接报错。
+        for _alias_one in $(module_meta "${f}" ALIAS | tr ',' ' '); do
+            [ -n "${_alias_one}" ] || continue
+            if [ -n "${MODULE_ALIAS[${_alias_one}]:-}" ]; then
+                err "模块 ${key} 声明的别名 '${_alias_one}' 已被占用(→ ${MODULE_ALIAS[${_alias_one}]})"
+                err "  内置别名不可覆盖; 请为该模块换一个别名"
+                return 1
+            fi
+            MODULE_ALIAS["${_alias_one}"]="${key}"
+            CS_DYNAMIC_ALIASES+=("${_alias_one}")
+        done
     done
+    _dups="$(printf '%s\n' "${MODULE_KEY[@]}" | sort | uniq -d)"
+    if [ -n "${_dups}" ]; then
+        err "duplicate module key(s): ${_dups//$'\n'/, }"
+        return 1
+    fi
     # ★ operator 自动派生: 有 TOGGLE 且不在基座集合(BASE_MODULES)即 operator。
     #   新增 operator 模块写 TOGGLE 即自动纳入 --steps 精确调度, 无需改本文件。
     OPERATOR_MODULES=()
@@ -498,7 +623,13 @@ _print_module_line() {
 
 print_steps() {
     local _verbose="${LIST_VERBOSE:-0}" _phase i key _k _list
-    local _comp_keys=" lws envoy_gateway ai_gateway cubestack_controller_manager model_bundles prometheus perses bmc metax cuberouter cubepilot cubestack_portal observability "
+    # 组件级更新模块从实际发现的模块里派生, 不写死组件名(见 _component_update_keys)。
+    # 两侧都留空格: 下面的匹配是同风格的 *" ${key} "*, 末尾项不能漏掉尾部空格。
+    local _comp_keys="" _k_comp
+    while IFS= read -r _k_comp; do
+        [ -n "${_k_comp}" ] && _comp_keys="${_comp_keys} ${_k_comp}"
+    done < <(_component_update_keys)
+    [ -n "${_comp_keys}" ] && _comp_keys="${_comp_keys} "
     say "==== 部署模块列表(自动发现) ===="
     if [ "${_verbose}" = "1" ]; then
         echo "  模式: --verbose(完整 DESC / 文件 / 依赖)"
@@ -517,16 +648,20 @@ print_steps() {
             _print_module_line "${i}" "${_verbose}"
         done
     done
-    echo ""
-    echo -e "  \033[36m[平台组件级更新]\033[0m  --steps <key>(operator/CR 已就绪; 默认全量部署仍由 cubestack_operator 负责)"
-    if [ "${_verbose}" = "1" ]; then
-        for i in "${!MODULE_KEY[@]}"; do
-            case "${_comp_keys}" in *" ${MODULE_KEY[$i]} "*) _print_module_line "${i}" 1 ;; esac
-        done
-    else
-        _list=""
-        for _k in ${_comp_keys}; do _list="${_list:+${_list}  }${_k}"; done
-        printf '%s\n' "${_list}" | fold -s -w 104 | sed 's/^/    /'
+    # 组件级更新段只在该版本树确实带了这类模块时出现: 公共版本没有它们, 也就不该列出
+    # 一串并不存在的 --steps 值。
+    if [ -n "${_comp_keys}" ]; then
+        echo ""
+        echo -e "  \033[36m[组件级更新]\033[0m  --steps <key>(单独更新某个已装组件; 默认全量部署仍由对应模块负责)"
+        if [ "${_verbose}" = "1" ]; then
+            for i in "${!MODULE_KEY[@]}"; do
+                case "${_comp_keys}" in *" ${MODULE_KEY[$i]} "*) _print_module_line "${i}" 1 ;; esac
+            done
+        else
+            _list=""
+            for _k in ${_comp_keys}; do _list="${_list:+${_list}  }${_k}"; done
+            printf '%s\n' "${_list}" | fold -s -w 104 | sed 's/^/    /'
+        fi
     fi
     echo ""
     echo -e "  \033[36m[验证模块]\033[0m  --steps verify(全部) / --steps verify_<组件>(单个)"
@@ -552,6 +687,39 @@ _verify_meta_list() {
     echo "${out# }"
 }
 
+# ---------------- 模块来源(公共内置 vs 版本树附带的私有模块) ----------------
+# 版本树里的私有模块通过 CUBESTACK_EXTRA_MODULES_DIRS 软链进合并根。判定"来自额外目录"
+# 必须看**真实路径**, 不能看文件名或模块名 —— 名字是别人的事实, 写进公共 installer 就会
+# 在每个开源版本里泄漏一份(以及列出一堆并不存在的 --steps)。公开 tree 没有额外目录,
+# 这个判定恒为假, 于是相关展示整段消失。
+_module_is_extra() {   # <index>; 来自额外目录返回 0
+    local i="$1" f tgt
+    f="${MODULES_DIR}/${MODULE_SCRIPT[$i]}"
+    [ -L "${f}" ] || return 1
+    tgt="$(readlink -f "${f}" 2>/dev/null)" || return 1
+    [ -n "${tgt}" ] || return 1
+    case "${tgt}" in
+        "${CS_BASE_MODULES_DIR:-${MODULES_DIR}}/"*) return 1 ;;
+    esac
+    return 0
+}
+
+# 组件级更新模块: 只更新已装组件、不建集群的模块(基座就绪后单独跑)。
+# 判定: addon 阶段 + 无 TOGGLE(有开关的是 operator 本体, 归主列表) + 非 verify + 非基座
+# + **来自额外目录**。最后一条是关键: 开源版没有这类模块, 这段展示整体不出现。
+_component_update_keys() {
+    local i key
+    for i in "${!MODULE_KEY[@]}"; do
+        key="${MODULE_KEY[$i]}"
+        [[ "${key}" == verify_* || "${key}" == k8s_scale ]] && continue
+        case " ${BASE_MODULES[*]} " in *" ${key} "*) continue ;; esac
+        [ "${MODULE_PHASE[$i]:-}" = "addon" ] || continue
+        [ -n "${MODULE_TOGGLE[$i]:-}" ] && continue
+        _module_is_extra "${i}" || continue
+        printf '%s\n' "${key}"
+    done
+}
+
 # ---------------- 基座重跑提示(覆盖安装可见化; **不拦停**) ----------------
 # 定案(2026-09-17): **默认全量运行 = 覆盖安装** —— 新 installer 容器对着已有集群跑
 #   ./deploy-cluster.sh 本来就是"重装集群"的正常用法, 不做拦截。本组函数只做一件事:
@@ -562,7 +730,7 @@ _verify_meta_list() {
 #     该事故已被当天的单组件模式**结构性消除**(证据: `--list --steps ceph` 的计划里没有
 #     k8s_deploy), 拦停反而挡住了正常的覆盖重装(实机: 新容器默认部署被拦在 k8s_deploy) → 改提示。
 #   · 覆盖重装本身仍有既有防线(kubespray 侧, 见 deployments/kubespray/cubestack-offline.sh):
-#     检测旧 K8s 残留 → 醒目警告 + [Y/n] 确认(Ctrl-C 可中止) → kubeadm reset。
+#     检测旧 K8s 残留 → 醒目警告 + 60s 倒计时(Ctrl-C 可中止) → kubeadm reset。
 #
 # cluster_exists(): 只读探测, 无副作用(不建目录、不写 kubeconfig)。
 #   SSH_KEY 存在 + 首个 master 可达 + 远端 kubectl 能列出节点 → 视为"集群已存在"。
@@ -591,7 +759,7 @@ notify_base_redeploy() {
     cluster_exists || return 0                           # 探测不到(首装/无密钥/网络不通) → 保持安静
     _REDEPLOY_NOTED=1
     warn "检测到集群已存在 → 本次为「覆盖安装」(默认语义): k8s_deploy 会重跑 kubespray"
-    warn "  节点上已有的旧 K8s 状态会被 kubeadm reset —— 该步骤会醒目警告并询问 [Y/n](Ctrl-C 可中止)"
+    warn "  节点上已有的旧 K8s 状态会被 kubeadm reset —— 该步骤自带 60s 醒目倒计时, 期间 Ctrl-C 可中止"
     warn "  只想装某个组件、不动集群: sudo $0 --steps <组件>(如 --steps ceph; 计划里不含基座)"
 }
 
@@ -788,15 +956,15 @@ print_plan() {
         echo "    [${NODE_ROLE}] ${NODE_HOSTNAME}  ${NODE_IP}  (user=${NODE_USER})"
     done
     # Ceph 启用提示(精简一行; 部署开始前由 deploy-cluster.sh 红底列出 节点+裸盘(internal)
-    # 或外部连接参数(external)并询问 [Y/n], 避免两处重复 —— 此处仅供 --list 只读场景知悉
-    # ceph 将启用, 不执行检测/确认)
+    # 或外部连接参数(external)并倒计时确认, 避免两处重复 —— 此处仅供 --list 只读场景知悉
+    # ceph 将启用, 不执行检测/倒计时)
     if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
         if [ "${CEPH_MODE:-internal}" = "external" ]; then
-            echo "  ⚠ Ceph 启用(CEPH_MODE=external 接入外部 Ceph); 部署开始前会红底列出外部连接参数并询问 [Y/n]"
-            echo "    CEPH_ENV_CONFIRM_SLEEP=0 跳过确认(核对 external-ceph.env / CEPH_MONITORS; --list 仅提示)"
+            echo "  ⚠ Ceph 启用(CEPH_MODE=external 接入外部 Ceph); 部署开始前会红底列出外部连接参数并倒计时"
+            echo "    ${CEPH_ENV_CONFIRM_SLEEP:-60}s 确认(核对 external-ceph.env / CEPH_MONITORS; --list 仅提示, 部署时才有倒计时)"
         else
-            echo "  ⚠ CEPH_ENABLED=true → Ceph(ceph/ceph_csi)将启用; 部署开始前会红底列出存储节点+磁盘分类并询问 [Y/n]"
-            echo "    CEPH_CONFIRM_SLEEP=0 跳过确认(空闲/上次 Ceph 占用/在用/混合 分类 + 判定证据, 防覆盖在用盘)"
+            echo "  ⚠ CEPH_ENABLED=true → Ceph(ceph/ceph_csi)将启用; 部署开始前会红底列出存储节点+磁盘分类并倒计时"
+            echo "    ${CEPH_CONFIRM_SLEEP:-60}s 确认(空闲/上次 Ceph 占用/在用/混合 分类 + 判定证据, 防覆盖在用盘)"
         fi
     fi
     echo "---------------------------------------------"

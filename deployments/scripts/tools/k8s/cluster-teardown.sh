@@ -11,7 +11,7 @@
 #   · 失败/超时 → 告警不中止(后续 ceph 安全序与 kubeadm reset 兜底); 收尾汇总。
 # 用法:
 #   cluster-teardown.sh --list               # 只读: 打印登记表 + 计划拆序(--raw 输出 TSV 供测试)
-#   cluster-teardown.sh --uninstall [--yes]  # 执行反序优雅卸载(--yes / CUBESTACK_ASSUME_YES=1 免确认)
+#   cluster-teardown.sh --uninstall [--yes]  # 执行反序优雅卸载(--yes / CUBESTACK_ASSUME_YES=1 免倒计时)
 #   · 非交互且未 --yes → 跳过卸载并醒目警告(节点旧集群 reset 前置会再次要求 --yes);
 #   · 测试钩子: CUBESTACK_TEARDOWN_TEST_INVENTORY=<file> 以夹具 JSON 代替读集群(离线夹具用)。
 # 数据源: cluster.conf (NODES 等) + 集群内 ConfigMap cubestack-install-record(kube-system)
@@ -32,7 +32,7 @@ CM_NAME="cubestack-install-record"
 COMPONENT_TIMEOUT="${TEARDOWN_COMPONENT_TIMEOUT:-600}"
 # Ceph 卸载要等 Rook 擦 9 块 OSD 盘 + MDS/RGW 收尾, 600s 不够; 单独给 1800s 上界。
 CEPH_TEARDOWN_TIMEOUT="${CEPH_TEARDOWN_TIMEOUT:-1800}"
-CONFIRM_SLEEP="${TEARDOWN_CONFIRM_SLEEP:-30}"   # 0=跳过确认; 非 0=询问 [Y/n](变量名保留兼容, 不再等待)
+CONFIRM_SLEEP="${TEARDOWN_CONFIRM_SLEEP:-30}"
 TEST_INV="${CUBESTACK_TEARDOWN_TEST_INVENTORY:-}"
 
 ACTION=""; ASSUME_YES="${CUBESTACK_ASSUME_YES:-0}"; RAW=0
@@ -156,57 +156,11 @@ print(json.dumps(cm))
         || warn "  登记状态更新失败: ${key}(不影响卸载)"
 }
 
-# 外部 Ceph 覆盖前, 先卸载各节点 /var/lib/kubelet 下的 Ceph/RBD 挂载。
-# 为什么(2026-11-05 实机): 旧集群的 RBD 卷被删/后端失效后, 节点上的 jbd2/rbdX
-#   线程会进入不可中断 D 状态; 下次 node_pkgs 的 fuser 必然超时, 只能重启节点。
-#   外部 Ceph 模式下后端由外部集群提供、不会被本集群销毁 —— 删旧资源前先摘挂载,
-#   即可安全复用, 不需要每次覆盖都重启节点。
-# 只处理 /var/lib/kubelet 下的 CSI 挂载; 宿主机 /mnt/cephfs/models 是外部资源, 保留。
-unmount_node_ceph_mounts() {
-    local _key _ips _ip _u _left
-    _key="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
-    # all_node_ips 输出是**单行空格分隔**(带尾随空格); read -a 按空白拆分, 单节点/多节点都正确。
-    _ips=(); read -r -a _ips <<< "$(all_node_ips 2>/dev/null || true)"
-    [ "${#_ips[@]}" -gt 0 ] || return 0
-    say "  预清理节点 Ceph/RBD CSI 挂载(避免后端删除后 jbd2 D 状态)..."
-    local _scan_unknown=0 _leftover=0 _rc=0
-    for _ip in "${_ips[@]}"; do
-        [ -n "${_ip}" ] || continue
-        _u="$(ssh_user_for_ip "${_ip}")"
-        _rc=0
-        _left="$(timeout 60 ssh -n -i "${_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_u}@${_ip}" "
-                for _m in \$(findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
-                    | awk '\$3 ~ /ceph/ || \$2 ~ /^\\/dev\\/rbd/ {print \$1}' | tac); do
-                    timeout 10 sudo -n umount -l \"\${_m}\" 2>/dev/null || true
-                done
-                for _i in 1 2 3 4 5 6 7 8 9 10; do
-                    findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
-                        | awk '\$3 ~ /ceph/ || \$2 ~ /^\\/dev\\/rbd/ {print \$1}' | grep -q . || break
-                    sleep 1
-                done
-                findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet 2>/dev/null \
-                    | awk '\$3 ~ /ceph/ || \$2 ~ /^\\/dev\\/rbd/ {print \$1}' | head -5
-            " 2>/dev/null)" || _rc=$?
-        if [ "${_rc}" -ne 0 ]; then
-            # SSH 失败/超时(255/124)时输出为空; 绝不能当成“无残留”放行。
-            warn "  ${_ip}: 无法确认 Ceph/RBD 挂载状态(SSH rc=${_rc}: 超时/不可达) —— 不判定为无残留"
-            _scan_unknown=1
-        elif [ -n "${_left}" ]; then
-            warn "  ${_ip}: 仍有 Ceph/RBD 挂载未卸净(后续 reset/重启兜底): $(printf '%s' "${_left}" | tr '\n' ' ')"
-            _leftover=1
-        else
-            say "  ${_ip}: 无残留 Ceph/RBD CSI 挂载"
-        fi
-    done
-    [ "${_scan_unknown}" -eq 0 ] && [ "${_leftover}" -eq 0 ]
-}
-
 run_component() {   # <key> <script_rel>  → 0=卸了; 1=失败/超时
     local key="$1" rel="$2"
     # ⚠ 不能与上一行合并成一条 local: bash 在**同一 local 语句**里按旧作用域求值 RHS,
     #   set -u 下 ${rel} 会报 "unbound variable"(2026-10-19 实机: 优雅卸载在第一个组件
-    #   cubestack_operator 就中断, 后续 cephfs_mount 未卸载 → CephFS 挂载残留)。
+    #   就中断, 后续 cephfs_mount 未卸载 → CephFS 挂载残留)。
     local mod="${MODULES_DIR}/${rel}"
     [ -f "${mod}" ] || { warn "  模块脚本缺失: ${mod}(跳过 ${key})"; return 1; }
     say "  ▶ 卸载 ${key}(${rel})"
@@ -289,13 +243,10 @@ PY
         fi
         if [ "${ASSUME_YES}" != "1" ]; then
             if [ -t 0 ]; then
-                say "将逐个调用以上组件的卸载逻辑(存在性检查→优雅停→卸载)。请确认后继续"
-                # TEARDOWN_CONFIRM_SLEEP 变量保留兼容: 0=跳过确认, 非 0(默认)=询问 [Y/n]
-                if [ "${CONFIRM_SLEEP}" -gt 0 ] 2>/dev/null; then
-                    confirm_yes_no "确认立即开始优雅卸载?" 1 \
-                        || { err "已取消优雅卸载 → 中止覆盖流程"; exit 1; }
-                fi
-                printf "  %s\n" "开始卸载..."
+                say "将逐个调用以上组件的卸载逻辑(存在性检查→优雅停→卸载)。${CONFIRM_SLEEP}s 后继续(Ctrl-C 中止)..."
+                _c="${CONFIRM_SLEEP}"
+                while [ "${_c}" -gt 0 ]; do printf "\r  ⏳ %2d 秒" "${_c}"; sleep 1; _c=$((_c - 1)); done
+                printf "\r  %s\n" "开始卸载..."
             else
                 warn "非交互且未 --yes: 跳过优雅卸载(继续覆盖流程; 节点旧集群 reset 前置会再次要求 --yes)"
                 exit 0
@@ -303,20 +254,12 @@ PY
         fi
         init_remote_kubectl || { err "集群不可达(SSH 初始化失败), 无法执行卸载"; exit 1; }
         SSH "${K} get ns ${CM_NS} >/dev/null 2>&1" || { err "集群不可达(远端 kubectl 探测失败), 无法执行卸载"; exit 1; }
-        # ★ 外部 Ceph(2026-11-05): **必须在任何组件卸载之前**先摘节点 CSI 挂载 ——
-        #   ceph_csi 的 uninstall 会删除外部 CephCluster/接入声明; 删除后再摘挂载可能
-        #   触发 jbd2/rbd D 状态(本清理要防的正是这个顺序)。内部 Ceph 的同类清理在
-        #   ceph 模块/cubestack-offline reset 前置里做。
-        if [ "${CEPH_MODE:-internal}" = "external" ]; then
-            unmount_node_ceph_mounts \
-                || warn "  (有节点未能确认/卸净 Ceph/RBD 挂载; 后续 reset/重启兜底)"
-        fi
         _n_ok=0; _n_fail=0
         while IFS=$'\t' read -r _key _src _rel; do
             [ -n "${_key}" ] || continue
             # ⚠ 必须 </dev/null: run_component 内部的 ssh/helm 会读 stdin, 否则吞掉
             #   这里的 here-string, 循环只执行第一个组件(2026-10-19 实机: 只卸了
-            #   cubestack_operator, cephfs_mount 等全部被静默跳过)。
+            #   第一个组件, cephfs_mount 等全部被静默跳过)。
             if run_component "${_key}" "${_rel}" </dev/null; then _n_ok=$((_n_ok + 1)); else _n_fail=$((_n_fail + 1)); fi
         done <<< "${_order}"
         echo ""

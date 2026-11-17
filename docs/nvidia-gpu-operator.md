@@ -33,14 +33,10 @@
 ## 3. 离线安装(默认, full air-gap)
 
 ```bash
-# ① 镜像同步到 Harbor(GitHub Action, 2026-10-14 用户口径: Harbor 为唯一镜像源):
-#    push 本变更后, .github/workflows/sync-images-to-harbor.yml 自动全量同步(清单驱动, 新组随车);
-#    也可手动触发(workflow_dispatch) groups=nvidia-gpu-operator 定向同步。
-#    目标: harbor.isuanova.com/mirrors/nvcr.io/** 与 mirrors/registry.k8s.io/nfd/**(NFD)。
-# ② 从 Harbor save 离线 tar(联网机; **Harbor 优先、上游回退**; skopeo 直拉, 免 root/docker):
-sudo ./deployments/scripts/tools/images/nvidia-save-images.sh
-#    → deployments/offline-files/nvidia-gpu-operator/*.tar(约 3.4GB, 驱动占大头; 含内核覆盖预检)
-#    等价通用通道: tools/images/harbor-save-images.sh --group nvidia-gpu-operator(纯 Harbor; 不含 NFD)
+# ① 第三方镜像由 container-image-mirror 同步到 Harbor:
+#    images/gpu.yaml 声明 nvcr.io/** 与 registry.k8s.io/nfd/**(NFD)。
+# ② 离线 tar 由版本树提供(约 3.4GB, 驱动占大头; 含内核覆盖预检):
+ls <root>/<version>/offline-files/nvidia-gpu-operator/*.tar
 
 # ③ 离线环境: 开启开关并部署
 sudo ./deploy-cluster.sh --enable nvidia_gpu_operator    # 写入 cluster.conf(下次全量生效)
@@ -79,7 +75,7 @@ vendored 副本; 离线机自动纯本地。升级手册见 chart 目录 `CUBEST
 三条纪律:
 
 1. **内核覆盖预检(仅无宿主驱动的节点)**: 这些节点的内核必须恰在 NGC 预编译列表(NGC 随 Ubuntu 内核更新陆续构建)。
-   备料侧: `nvidia-save-images.sh` 内置存在性预检(不存在即报错并给出查询命令);
+   备料侧: 外部打包流程在物化版本树前做存在性预检;
    部署侧: 模块对**需要容器驱动**的有卡节点 `uname -r` 做白名单门禁(fail-fast + 补拉指令)。
    速查: `skopeo list-tags docker://nvcr.io/nvidia/driver | grep '"595-'`。
 2. **内核升级 = 一次变更**: 升级节点内核前, 先确认新内核有对应预编译镜像 → 补拉 tar → 更新
@@ -147,6 +143,6 @@ vendored 副本; 离线机自动纯本地。升级手册见 chart 目录 `CUBEST
 ## 10. 升级流程(运维)
 
 1. `CUBSTACK.md` 拉新 chart + 更新 digest 边车 + 改 `NVIDIA_GPU_OPERATOR_VERSION`;
-2. `nvidia-save-images.sh` 重备镜像; 核对新 chart 的组件 tag 变更(images.manifest 同步);
+2. 在 container-image-mirror 更新对应 nvcr 镜像 tag/digest; 重新物化版本树;
 3. `--steps nvidia_gpu_operator` 重跑(REPEAT:0 → 先 `--fresh` 或删 `nvidia_gpu_operator` 状态);
 4. `--steps verify_nvidia_gpu` 复核。

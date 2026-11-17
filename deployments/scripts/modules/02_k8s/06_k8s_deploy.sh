@@ -5,9 +5,9 @@
 # PHASE: k8s
 # DEFAULT: 1
 # REPEAT: 0
-# REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs node_net_guard
-#   · node_pkgs(12_node_pkgs.sh): 节点系统包对账 —— 必须在 kubespray 之前(它的 bootstrap_os →
-#     system_packages 遇到 apt 依赖图破损会直接失败; 实测 2026-09-28 libudev1/udev 配对被打断)。
+# REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs node_net_guard k8s_asset_prefetch
+#   · node_pkgs(12_node_pkgs.sh): 节点前置包只读检查 —— 必须在 kubespray 之前,
+#     让缺包尽早暴露; installer 不安装/修复 OS 包。
 #     ⚠ 序号 12 > 06 排不到前面 ⇒ 靠这行 REQUIRES 定序(与 kube_vip 当年同一手法)。
 # 说明: 调用 cubestack-offline.sh install; 透传 cluster.conf 中 PRELOAD_IMAGE_PATTERNS
 #   · 基座恒随全量部署(默认 / --with-k8s / --with-cubestack 都包含), 故 DEFAULT:1、无 TOGGLE ——
@@ -20,7 +20,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-# 配置漂移门禁(2026-10-26): 本模块在入口一次性 load_config; 若用户在确认/长时间
+# 配置漂移门禁(2026-10-26): 本模块在入口一次性 load_config; 若用户在倒计时/长时间
 # kubespray 运行期间修改 cluster.conf, 已加载变量不会重读, 但后续 addon 模块会重新加载。
 # 实机事故: k8s_deploy 按 nodeport 生成 addons.yml, 用户改为 metallb 后 metallb 模块
 # 看到新值但集群没有 metallb-system → 部署中断。检测到变更直接中止, 避免半新半旧。
@@ -35,7 +35,7 @@ _conf_guard() {
 }
 
 # ⚠ 部署 kubespray 前醒目提示当前服务暴露方式(nodeport / metallb)+ 各自注意事项,
-# ([Y/n] 确认供人工核对/修改), 与原有 METALLB_POOL 提示合并为统一提醒。
+# (sleep 30 倒计时供人工确认/修改), 与原有 METALLB_POOL 提示合并为统一提醒。
 #   nodeport → 未部署 MetalLB, 提示入口/端口范围/单节点风险等;
 #   metallb  → 提示地址池要求(METALLB_POOL)与池管理注意事项。
 _EXPOSE_MODE="$(echo "${SERVICE_EXPOSE_MODE:-metallb}" | tr '[:upper:]' '[:lower:]')"
@@ -68,14 +68,18 @@ else
     echo -e "\033[41m\033[97m  如需修改: ${CLUSTER_CONF} 的 METALLB_POOL / SERVICE_EXPOSE_MODE 行\033[0m"
 fi
 echo -e "\033[41m\033[97m================================================================\033[0m"
-echo -e "\033[33m  ⚠ 确认期间修改 ${CLUSTER_CONF} 会被检测到并中止本次部署, 需重新运行 \033[0m"
-# 交互确认(两种模式统一): [Y/n] 直接回车默认继续, n/EOF 中止。
-confirm_yes_no "已核对当前暴露模式/配置, 继续部署 kubespray?" 1 \
-    || { err "已取消 kubespray 部署"; exit 1; }
+echo -e "\033[33m  ⚠ 倒计时/部署期间修改 ${CLUSTER_CONF} 会被检测到并中止本次部署, 需重新运行 \033[0m"
+# 倒计时(单行刷新, 两种模式统一, 30s)
+for _c in $(seq 30 -1 1); do
+    printf "\r%s" "$(printf '\033[41m\033[97m  ⏳ 倒计时 %d 秒继续        \033[0m' "${_c}")"
+    sleep 1
+done
+printf "\r%s\n" "$(printf '\033[0m  %s             ')"
+printf "\r%s\n" "$(printf '\033[0m  %s             ')"
 _conf_guard
 unset _EXPOSE_MODE
 
-# ⚠ Ceph 部署前确认已由 deploy-cluster.sh 在调度前统一执行(红底列出 节点+裸盘 并询问 [Y/n]
+# ⚠ Ceph 部署前确认已由 deploy-cluster.sh 在调度前统一执行(红底列出 节点+裸盘 并倒计时
 #   CEPH_CONFIRM_SLEEP)——这里不再重复, 避免同一确认出现两次; 02_ceph 模块 apply CR 前仍保留最终确认。
 
 # 部署前强制重新生成 inventory(hosts.yml + group_vars 均由当前 cluster.conf 派生):
@@ -123,18 +127,18 @@ fi
 unset _CALICO_SRC_ON _CALICO_SRC_RAW
 
 # ---------------- kube-vip: 阶段二的切换确认(必须在模块里做, 不能在 sync 里) ----------------
-# sync 的 stdout 上面被重定向到 /dev/null, 把确认提示放 sync 里用户看不见还会一直等输入。
-# 流程: 模块判阶段 → 需要切换则红底提示 + [Y/n] 确认 → 确认后 export 标志 → sync 才真正切入口。
+# sync 的 stdout 上面被重定向到 /dev/null, 把倒计时放 sync 里用户看不见还会白等 30 秒。
+# 流程: 模块判阶段 → 需要切换则红底提示 + 倒计时 → 确认后 export 标志 → sync 才真正切入口。
 if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
     _KV_VIP="$(kube_vip_derive 2>/dev/null || true)"
     _KV_OLD="$(kube_vip_current_entry)"
     # 阶段二 = VIP 已真实绑在某台 master 上(与 sync 里的判定同一口径)
     # ⚠ 还要求 _KV_OLD 非空:**没有旧入口就没有可保护的切换**。本地代理模式下 all.yml 的
     #   loadbalancer_apiserver 块恒为注释(摘块正是该模式的本体, 见 docs/api-ha/04-decision.md D7)
-    #   → _KV_OLD 恒空 → 若不拦, 每次运行都会误判"要切换": 既白弹红底确认, 又会 export
+    #   → _KV_OLD 恒空 → 若不拦, 每次运行都会误判"要切换": 既白弹 30 秒红底倒计时, 又会 export
     #   KUBE_VIP_SWITCH_CONFIRMED=1 让 sync 重跑(历史上那次重跑会重新推导 VIP → 每次部署漂一次,
     #   已由 lib-common 的 kube_vip_derive 第 2 步修复)。取舍: 本地代理 + 首装 路径不再弹
-    #   确认 —— 该架构下节点侧已免疫, 且全新安装的 VIP 绑定即目标态(存量迁移不在本项目范围)。
+    #   倒计时 —— 该架构下节点侧已免疫, 且全新安装的 VIP 绑定即目标态(存量迁移不在本项目范围)。
     if [ -n "${_KV_VIP}" ] && kube_vip_is_bound "${_KV_VIP}" && [ -n "${_KV_OLD}" ]; then
         if [ "${_KV_OLD}" != "${_KV_VIP}" ]; then
             echo ""
@@ -144,14 +148,12 @@ if [ "${KUBE_VIP_ENABLED:-false}" = "true" ]; then
             echo -e "\033[41m\033[97m   VIP ${_KV_VIP} 已绑定, 切换后全集群经 VIP 访问 API Server;\033[0m"
             echo -e "\033[41m\033[97m   会重签证书 SAN 并重启各节点 apiserver。\033[0m"
             echo -e "\033[41m\033[97m   回滚: docs/kube-vip-api-ha.md 7.4 节\033[0m"
-            echo -e "\033[41m\033[97m   输入 n 可中止(不改动入口)\033[0m"
+            echo -e "\033[41m\033[97m   30 秒内 Ctrl-C 可中止\033[0m"
             echo -e "\033[41m\033[97m================================================================\033[0m"
-            confirm_yes_no "确认将 API 入口切换到 VIP ${_KV_VIP}?" 1 \
-                || { err "已取消 kube-vip API 入口切换 → 部署中止"; exit 1; }
-            # CodeRabbit Major: 确认后、导出切换标志前再校验 cluster.conf。
-            # 等待输入期间若改了 K8S_API_VIP, 随后的 sync 会重新 load_config 并推导出
-            # 未经确认的新 VIP; 这里与首个确认门同口径, 检测到漂移直接中止。
-            _conf_guard
+            for _c in $(seq 30 -1 1); do
+                printf "\r%s" "$(printf '\033[41m\033[97m  ⏳ 切换倒计时 %d 秒继续        \033[0m' "${_c}")"
+                sleep 1
+            done
             printf "\r%s\n" "$(printf '\033[0m  ✅ 已确认切换                          ')"
             export KUBE_VIP_SWITCH_CONFIRMED=1
             # 重新跑 sync: 这次带上确认标志, 才会把入口真正切到 VIP
@@ -219,7 +221,7 @@ fi
 #   不处理的后果(2026-09-28 实测): kubespray 按【升级】处理, 跑 6 分钟后才在 etcd 关卡硬失败 ——
 #   ① etcd 版本闸读的是 **etcd 二进制 --version**(install_host.yml:24)⇒ 只删数据留二进制照样拦;
 #   ② kubeadm 不允许跨小版本(1.32→1.35)。
-#   工具行为: 无残留 → 直接过; 有残留 → 打印将清除什么 → 交互 [Y/n] 确认 / 非交互必须 --yes
+#   工具行为: 无残留 → 直接过; 有残留 → 打印将清除什么 → 交互 15s 倒计时 / 非交互必须 --yes
 #   (deploy-cluster.sh --yes 会导出 CUBESTACK_ASSUME_YES=1 透传到这) → 执行 reset → 继续部署。
 _pre_args=()
 [ "${CUBESTACK_ASSUME_YES:-0}" = "1" ] && _pre_args=(--yes)
@@ -275,10 +277,10 @@ ok "kubespray 集群部署完成"
 #   (roles/kubernetes-apps/registry/templates/registry-rs.yml.j2 无 tolerations), 在纯
 #   master(无 worker)或 master 仍带 control-plane:NoSchedule 的集群上会一直 Pending;
 #   而 05_k8s_registry 会等待 pod Ready(默认 600s)⇒ 超时失败。负责移除污点的 node_pool
-#   模块序号是 34, 排在 registry(05)之后, 来不及。
+#   模块序号是 53, 排在 registry(05)之后, 来不及。
 #   这里在 k8s 阶段结束时先做一次"仅可调度收敛"(幂等): 临时强制 CORDON=false, 只移除
 #   control-plane/master 污点(是否移除仍由 NODE_POOL_MASTER_SCHEDULABLE 决定);
-#   cordon 与平台 placement 仍由 34_node_pool 在 dev_lab/model_images 之前按配置执行。
+#   cordon 与平台 placement 仍由 53_node_pool 在 addon 末尾按配置执行。
 if [ "${NODE_POOL_ENABLED:-true}" = "true" ] || [ "${NODE_POOL_ENABLED:-true}" = "1" ]; then
     say "master 可调度收敛(k8s 阶段提前; 仅移除污点, 不在此阶段 cordon)..."
     NODE_POOL_MASTER_CORDON=false \
