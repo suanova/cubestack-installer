@@ -8,12 +8,15 @@
 #         主机密钥校验(2026-11-17 CodeRabbit): 不再 no + /dev/null。
 #         · 持久 known_hosts: ${PRE_INSTALL_SSH_KNOWN_HOSTS:-${SSH_KEY_DIR}/cubestack_known_hosts}
 #           —— 密钥探测 accept-new(首次记录, 之后换钥拒绝);
-#         · 密码回退恒 StrictHostKeyChecking=yes, 且只向**本次运行前**已在 known_hosts 中
-#           受信的节点发送密码 —— 不接受本次未认证探测刚记录的 key 作为信任来源;
-#           未受信 → 关键项失败, 给出人工核对指纹 + ssh-keyscan 的处置, 绝不把密码发给
-#           首次见到/身份未验证的主机。
+#         · 密码回退恒 StrictHostKeyChecking=yes, 且使用**独立的密码认证 known_hosts**
+#           ${PRE_INSTALL_SSH_PASSWORD_KNOWN_HOSTS:-${SSH_KEY_DIR}/cubestack_known_hosts_password}
+#           —— 该文件只由人工核对节点指纹后写入, 本工具**从不自动写入**;
+#           密钥探测 accept-new 学到的 key 即使出现/持久化在第一个文件里, 也不能授权密码回退
+#           (防止"冒充者拒绝密钥认证却先被 accept-new 记录 → 下次重试把密码发给冒充者");
+#           未受信 → 关键项失败, 给出人工核对指纹 + 写入该文件的处置。
 #         可覆盖: PRE_INSTALL_SSH_HOST_KEY_CHECKING(accept-new|yes, 默认 accept-new)
 #                 PRE_INSTALL_SSH_KNOWN_HOSTS(默认 ${SSH_KEY_DIR}/cubestack_known_hosts)
+#                 PRE_INSTALL_SSH_PASSWORD_KNOWN_HOSTS(默认 ${SSH_KEY_DIR}/cubestack_known_hosts_password)
 #   · sudo: 非 root 用户要求 sudo -n 可用; root 用户要求节点存在 sudo
 #           (与 modules/02_k8s/01_k8s_passwordless.sh 同一口径)
 #   · chronyd: NTP_ENABLED≠0 时要求 chronyd 已安装/运行;
@@ -102,11 +105,14 @@ case "${SSH_HKC}" in
         ;;
 esac
 SSH_KNOWN_HOSTS="${PRE_INSTALL_SSH_KNOWN_HOSTS:-${SSH_KEY_DIR:-${HOME}/.ssh}/cubestack_known_hosts}"
-mkdir -p "$(dirname "${SSH_KNOWN_HOSTS}")" 2>/dev/null || true
+# 密码认证专用 known_hosts: 只放人工核对指纹后批准的 key; 本工具从不自动写入
+# (accept-new 学到的 key 不能授权密码回退, 否则失败的密钥探测会把冒充者 key 持久化)。
+SSH_PW_KNOWN_HOSTS="${PRE_INSTALL_SSH_PASSWORD_KNOWN_HOSTS:-${SSH_KEY_DIR:-${HOME}/.ssh}/cubestack_known_hosts_password}"
+mkdir -p "$(dirname "${SSH_KNOWN_HOSTS}")" "$(dirname "${SSH_PW_KNOWN_HOSTS}")" 2>/dev/null || true
 SSH_BASE_OPTS=(-i "${SSH_KEY}" -F /dev/null -o IdentitiesOnly=yes -o LogLevel=ERROR
     -o StrictHostKeyChecking="${SSH_HKC}" -o UserKnownHostsFile="${SSH_KNOWN_HOSTS}" -o ConnectTimeout=8)
 SSH_PW_OPTS=(-F /dev/null -o LogLevel=ERROR -o StrictHostKeyChecking=yes
-    -o UserKnownHostsFile="${SSH_KNOWN_HOSTS}"
+    -o UserKnownHostsFile="${SSH_PW_KNOWN_HOSTS}"
     -o ConnectTimeout=8 -o PreferredAuthentications=password -o PubkeyAuthentication=no
     -o NumberOfPasswordPrompts=1)
 
@@ -115,11 +121,11 @@ AUTH=""
 _key_ok() {
     ssh "${SSH_BASE_OPTS[@]}" -o BatchMode=yes "${NODE_USER}@${NODE_IP}" true 2>/dev/null
 }
-# 本次运行开始前, 该节点 host key 是否已在持久 known_hosts 中受信。
-# 密码回退只认这个结果(而不是本次密钥探测刚写入的 key)。
+# 本次运行开始前, 该节点 host key 是否已在**密码认证专用** known_hosts 中受信。
+# 只认人工批准的文件; 密钥探测 accept-new 自动学到的 key(SSH_KNOWN_HOSTS)不能授权密码回退。
 _host_key_pretrusted() {
-    [ -s "${SSH_KNOWN_HOSTS}" ] \
-        && ssh-keygen -F "${NODE_IP}" -f "${SSH_KNOWN_HOSTS}" >/dev/null 2>&1
+    [ -s "${SSH_PW_KNOWN_HOSTS}" ] \
+        && ssh-keygen -F "${NODE_IP}" -f "${SSH_PW_KNOWN_HOSTS}" >/dev/null 2>&1
 }
 _pw_ok() {
     SSHPASS="${NODE_PW}" sshpass -e ssh "${SSH_PW_OPTS[@]}" "${NODE_USER}@${NODE_IP}" true 2>/dev/null
@@ -184,9 +190,9 @@ for _line in "${NODES[@]:-}"; do
         _pass "  SSH: 部署密钥免密可用"
     elif [ -n "${NODE_PW}" ]; then
         if [ "${HOST_KEY_PRETRUSTED}" != "1" ]; then
-            _crit "  SSH: 免密不可用; 密码回退已阻止 —— 节点 ${NODE_IP} 的 host key 未在 ${SSH_KNOWN_HOSTS} 中预先受信"
-            _crit "    不接受本次未认证密钥探测/首次 TOFU 作为信任来源; 处置: 人工核对节点指纹后执行"
-            _crit "    ssh-keyscan -H ${NODE_IP} >> ${SSH_KNOWN_HOSTS}(或先配置 SSH 免密)"
+            _crit "  SSH: 免密不可用; 密码回退已阻止 —— 节点 ${NODE_IP} 的 host key 未在密码认证 known_hosts 中人工批准"
+            _crit "    文件: ${SSH_PW_KNOWN_HOSTS}(密钥探测自动学到的 ${SSH_KNOWN_HOSTS} 不能授权密码回退)"
+            _crit "    处置: 人工核对节点指纹后执行 ssh-keyscan -H ${NODE_IP} >> ${SSH_PW_KNOWN_HOSTS}(或先配置 SSH 免密)"
             continue
         fi
         if ! command -v sshpass >/dev/null 2>&1; then
