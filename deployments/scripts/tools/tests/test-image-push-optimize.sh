@@ -6,14 +6,13 @@
 #   ② image_push_args_init: 默认参数(层级并发/precompute/retry)与非法值降级
 #   ③ push_image_skopeo: 额外参数原样透传给 skopeo copy
 #   ④ parallel_run: 有界并发(max=2 时 4 个任务的最大并发恰为 2)
-#   ⑤ 36_dev_lab / 37_model_images 已接入 config-digest 幂等 + 并行 runner
+#   ⑤ 37_model_images 已接入 config-digest 幂等 + 并行 runner
 #   ⑥ cluster.defaults.conf 默认值声明
 # 隔离: CLUSTER_CONF=临时配置 + PATH 前置假 skopeo(纯离线)
 # 用法: bash deployments/scripts/tools/tests/test-image-push-optimize.sh
 # ============================================================
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-M36="${REPO_ROOT}/deployments/scripts/modules/03_addon/36_dev_lab.sh"
 M37="${REPO_ROOT}/deployments/scripts/modules/03_addon/37_model_images.sh"
 LIB="${REPO_ROOT}/deployments/scripts/lib-common.sh"
 DEFAULTS="${REPO_ROOT}/deployments/config/cluster.defaults.conf"
@@ -114,11 +113,8 @@ chk "最大并发=2" "2" "$(cat "${MAX_FILE}")"
 chk "4 个任务全部执行" "4" "$(sort -u "${DONE_FILE}" | wc -l)"
 
 echo "== ⑤ 模块接入 =="
-chk_contains "36 使用 config digest 幂等" "image_config_digest_raw" "${M36}"
 chk_contains "37 使用 config digest 幂等" "image_config_digest_raw" "${M37}"
-chk_contains "36 使用并行 runner" "parallel_run" "${M36}"
 chk_contains "37 使用并行 runner" "parallel_run" "${M37}"
-chk_contains "36 初始化 push 参数" "image_push_args_init" "${M36}"
 chk_contains "37 初始化 push 参数" "image_push_args_init" "${M37}"
 chk_contains "37 拒绝覆盖内容不同的已有 tag" "拒绝覆盖" "${M37}"
 if grep -qF '不相等即推送' "${M37}"; then

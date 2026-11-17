@@ -23,7 +23,7 @@ MATERIALIZE=1
 FORCE_INDEX=0
 CHECK_OS_MODE="warn"
 DRY_RUN=0
-WITH_DEV_LAB=0
+INCLUDE_OPTIONAL=0
 WITH_METAX=0
 CHECK_MATERIALS=0
 PROFILE_ARG=""
@@ -57,7 +57,7 @@ Online options:
   --index PATH             local mirror index.json (skips the pinned download)
   --offline-root PATH      offline-files root (default: from cluster config)
   --no-materialize         skip image materialization
-  --with-dev-lab           also materialize the optional dev-lab images
+  --include-optional       also materialize optional base images (for example netshoot)
   --with-metax             require MetaX vendor materials and enable GPU operator
   --check-materials        report missing vendor materials (warn only)
   --require-materials      fail when a declared vendor material is missing
@@ -82,7 +82,7 @@ while [ $# -gt 0 ]; do
         --index) INDEX="${2:?--index needs a path}"; INDEX_IS_EXPLICIT=1; shift 2 ;;
         --offline-root) OFFLINE_ROOT="${2:?--offline-root needs a path}"; shift 2 ;;
         --no-materialize) MATERIALIZE=0; shift ;;
-        --with-dev-lab) WITH_DEV_LAB=1; shift ;;
+        --include-optional) INCLUDE_OPTIONAL=1; shift ;;
         --with-metax) WITH_METAX=1; CHECK_MATERIALS=2; shift ;;
         --check-materials) CHECK_MATERIALS=1; shift ;;
         --require-materials) CHECK_MATERIALS=2; shift ;;
@@ -200,7 +200,7 @@ fi
 
 if [ "${MATERIALIZE}" = "1" ]; then
     args=(--baseline "${BASELINE}" --index "${INDEX}" --offline-root "${OFFLINE_ROOT}")
-    [ "${WITH_DEV_LAB}" = "1" ] && args+=(--include-optional)
+    [ "${INCLUDE_OPTIONAL}" = "1" ] && args+=(--include-optional)
     if [ "${DRY_RUN}" = "1" ]; then
         args+=(--dry-run)
     fi
@@ -258,11 +258,6 @@ export CUBESTACK_OS_CHECK_DONE=1
 export CUBESTACK_ONLINE=1
 export CUBESTACK_OPERATOR_ENABLED=false
 [ "${WITH_METAX}" = "1" ] && export GPU_OPERATOR_ENABLED=true
-if [ "${WITH_DEV_LAB}" = "1" ]; then
-    export DEV_LAB_ENABLED=true
-else
-    export DEV_LAB_ENABLED=false
-fi
 export MODEL_IMAGES_ENABLED=false
 
 say "starting deploy-cluster.sh (online mode)"

@@ -27,9 +27,9 @@ files         # k8s 二进制等文件
 例如：
 
 ```yaml
-- key: dev-lab:harbor.isuanova.com/suanova/cuda-pytorch
-  source_ref: harbor.isuanova.com/suanova/cuda-pytorch
-  version: 26.10-<commit>
+- key: netshoot:netshoot-rdma
+  source_ref: harbor.isuanova.com/suanova/netshoot-rdma
+  version: sha-<commit>
   digest: sha256:...
 ```
 
@@ -48,7 +48,6 @@ files         # k8s 二进制等文件
 | `rdma` | RDMA plugin | image |
 | `nginx` | API LB nginx | image |
 | `netshoot` | netshoot-rdma | image |
-| `dev-lab` | dev-lab pytorch | image |
 | `nvidia-gpu-operator` | NVIDIA GPU Operator | image |
 | `k8s` | kubespray 树/k8s 二进制 | file |
 | `metax` | MetaX 厂商物料 | material |
@@ -74,13 +73,13 @@ files         # k8s 二进制等文件
 自研镜像用 `source_ref + digest`：
 
 ```yaml
-- key: dev-lab:harbor.isuanova.com/suanova/cpu-pytorch
-  source_ref: harbor.isuanova.com/suanova/cpu-pytorch
-  version: py310-torch2.4
+- key: netshoot:netshoot-rdma
+  source_ref: harbor.isuanova.com/suanova/netshoot-rdma
+  version: sha-<commit>
   digest: sha256:...
-  dest: offline-files/dev-lab
+  dest: offline-files/netshoot
   optional: true
-  tar: <中性名>
+  tar: netshoot-rdma.tar
 ```
 
 `catalog_id` 和 `source_ref` 必须二选一；`source_ref` 必须带 sha256 digest。
@@ -102,7 +101,7 @@ python3 deployments/scripts/tools/online/lib-base-catalog.py --index <index.json
 
 ## optional
 
-`optional: true` 表示默认不物化，例如 dev-lab/netshoot。商业 release 可以按
+`optional: true` 表示默认不物化，例如 netshoot。商业 release 可以按
 package/profile 选择是否带上；开源在线安装只有显式开关才物化。
 
 ## materials 与 os
@@ -115,9 +114,7 @@ package/profile 选择是否带上；开源在线安装只有显式开关才物�
 
 - 不使用 `latest` / channel；
 - 自研镜像 tar 名去 tag，用 digest/中性名；
-- dev-lab 增加显式 `tag + digest`，dev tag 为 `<prefix>-<commit>`；
 - netshoot 改为 `sha-<commit>` + 中性 `netshoot-rdma.tar`；
-- release overlay 只覆盖 dev-lab 的运行时 tag，不重复镜像定义。
 
 ## 常见错误
 

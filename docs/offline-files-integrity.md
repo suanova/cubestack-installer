@@ -205,7 +205,7 @@ air-gapped 环境建议 `OFFLINE_VERIFY_ONLINE_INSTALL=never`，或确保使用 
 - `.digest` 边车是 registry manifest digest，不是 tar 的 sha256，安装侧不作为
   tar 哈希使用；发布侧 provenance（tar ↔ Harbor）在 P1。
 - `SHA256SUMS` 无签名；P0 只防损坏/误拷，不防恶意替换（P1 可选 minisign/GPG）。
-- `dev-lab`/`model_images` 的“缺包/推送失败只 warn”行为在 P1 处理。
+- `model_images` 的“缺包/推送失败只 warn”行为在 P1 处理。
 
 ## 11. 实现结构与维护（模块化）
 

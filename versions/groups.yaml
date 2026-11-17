@@ -27,10 +27,6 @@ groups:
     description: netshoot-rdma debug image
     consumer: netshoot
     kind: image
-  dev-lab:
-    description: dev-lab pytorch images
-    consumer: dev-lab
-    kind: image
   nvidia-gpu-operator:
     description: NVIDIA GPU Operator images
     consumer: nvidia-gpu-operator
