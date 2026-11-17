@@ -48,7 +48,6 @@ files         # k8s 二进制等文件
 | `rdma` | RDMA plugin | image |
 | `nginx` | API LB nginx | image |
 | `netshoot` | netshoot-rdma | image |
-| `dev-lab` | legacy dev-lab pytorch (base-2026.10 only) | image |
 | `nvidia-gpu-operator` | NVIDIA GPU Operator | image |
 | `k8s` | kubespray 树/k8s 二进制 | file |
 | `metax` | MetaX 厂商物料 | material |
@@ -103,8 +102,7 @@ python3 deployments/scripts/tools/online/lib-base-catalog.py --index <index.json
 ## optional
 
 `optional: true` 表示默认不物化，例如 netshoot。商业 release 可以按
-package/profile 选择是否带上；开源在线安装只有显式开关才物化。dev-lab 已迁到 release，
-不再出现在 base。
+package/profile 选择是否带上；开源在线安装只有显式开关才物化。dev-lab 已迁到 release。
 
 ## materials 与 os
 
