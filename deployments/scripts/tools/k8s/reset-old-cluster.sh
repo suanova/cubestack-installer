@@ -17,7 +17,7 @@
 # 用法:
 #   reset-old-cluster.sh --dry-run          # 只检测+打印计划(默认; 不做任何改动)
 #   reset-old-cluster.sh --yes              # 检测到残留就**执行** reset(非交互/自动化用)
-#   reset-old-cluster.sh                    # 交互: 检测到残留时询问 yes/no(no=中止)
+#   reset-old-cluster.sh                    # 交互: 检测到残留时询问 [Y/n](n=中止)
 # 退出码: 0=无需处理或已处理; 1=有残留但未处理(未给 --yes 且非交互); 2=探测不到(未知)
 # ============================================================
 set -uo pipefail

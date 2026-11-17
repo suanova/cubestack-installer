@@ -32,7 +32,7 @@ CM_NAME="cubestack-install-record"
 COMPONENT_TIMEOUT="${TEARDOWN_COMPONENT_TIMEOUT:-600}"
 # Ceph 卸载要等 Rook 擦 9 块 OSD 盘 + MDS/RGW 收尾, 600s 不够; 单独给 1800s 上界。
 CEPH_TEARDOWN_TIMEOUT="${CEPH_TEARDOWN_TIMEOUT:-1800}"
-CONFIRM_SLEEP="${TEARDOWN_CONFIRM_SLEEP:-30}"   # 0=跳过确认; 非 0=询问 yes/no(变量名保留兼容, 不再等待)
+CONFIRM_SLEEP="${TEARDOWN_CONFIRM_SLEEP:-30}"   # 0=跳过确认; 非 0=询问 [Y/n](变量名保留兼容, 不再等待)
 TEST_INV="${CUBESTACK_TEARDOWN_TEST_INVENTORY:-}"
 
 ACTION=""; ASSUME_YES="${CUBESTACK_ASSUME_YES:-0}"; RAW=0
@@ -290,7 +290,7 @@ PY
         if [ "${ASSUME_YES}" != "1" ]; then
             if [ -t 0 ]; then
                 say "将逐个调用以上组件的卸载逻辑(存在性检查→优雅停→卸载)。请确认后继续"
-                # TEARDOWN_CONFIRM_SLEEP 变量保留兼容: 0=跳过确认, 非 0(默认)=询问 yes/no
+                # TEARDOWN_CONFIRM_SLEEP 变量保留兼容: 0=跳过确认, 非 0(默认)=询问 [Y/n]
                 if [ "${CONFIRM_SLEEP}" -gt 0 ] 2>/dev/null; then
                     confirm_yes_no "确认立即开始优雅卸载?" 1 \
                         || { err "已取消优雅卸载 → 中止覆盖流程"; exit 1; }

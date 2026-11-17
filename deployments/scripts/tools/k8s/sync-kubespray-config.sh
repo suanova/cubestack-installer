@@ -78,7 +78,7 @@ API_ENTRY_PHASE="$(api_entry_phase)"
 # 阶段二的切换门(确认动作在**调用方**完成, 本脚本只执行)。
 # ⚠ 本脚本的 stdout 会被 06_k8s_deploy.sh 重定向到 /dev/null(见该模块第 70 行), 所以
 #   任何确认提示放在这里用户都看不见, 还会白等。故约定:
-#     · 调用方(06_k8s_deploy.sh)负责判阶段 + 提示 + yes/no 确认, 确认后 export KUBE_VIP_SWITCH_CONFIRMED=1
+#     · 调用方(06_k8s_deploy.sh)负责判阶段 + 提示 + [Y/n] 确认, 确认后 export KUBE_VIP_SWITCH_CONFIRMED=1
 #     · 本脚本见到该标志才做切换; 未见且入口尚未指向 VIP 则按阶段一(写 master01)—— fail-closed, 绝不自行切换
 #     · 直接手工运行本脚本时若尚未确认, 会明确提示需要什么才能切换
 #   ⚠ 护栏必须在**判定之后**再跑(旧版放在判定之前, 用的是一个还没算出来的阶段)。
@@ -88,7 +88,7 @@ API_ENTRY_PHASE="$(api_entry_phase)"
 #   只对旧基线成立, 不再适用。
 if [ "${API_ENTRY_PHASE}" = "2" ] && [ "${_KV_OLD_ADDR}" != "${_KV_VIP}" ] && [ "${KUBE_VIP_SWITCH_CONFIRMED:-0}" != "1" ]; then
     warn "VIP ${_KV_VIP} 已就位, 但尚未获得切换确认 → 本次仍按阶段一处理(入口保持 ${_KV_OLD_ADDR})"
-    warn "如需切换: 走 06_k8s_deploy.sh(会给出 yes/no 确认); 或 export KUBE_VIP_SWITCH_CONFIRMED=1 后重跑本脚本"
+    warn "如需切换: 走 06_k8s_deploy.sh(会给出 [Y/n] 确认); 或 export KUBE_VIP_SWITCH_CONFIRMED=1 后重跑本脚本"
     API_ENTRY_PHASE=1
     _KV_NEW_ADDR="$(first_master_ip)" || exit 1     # 降级 = 阶段一: 入口回到第一个 master
 fi

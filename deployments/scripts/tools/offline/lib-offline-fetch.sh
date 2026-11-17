@@ -338,7 +338,7 @@ _clean_warning() {   # <desc>  → 返回 0=继续, 1=用户拒绝
         return 0
     fi
     while true; do
-        printf '\033[41m\033[97m  ❓ 确认执行上述精确清理(不可恢复)? 请输入 yes 继续 / no 中止: \033[0m'
+        printf '\033[41m\033[97m  ❓ 确认执行上述精确清理(不可恢复)? [Y/n] \033[0m'
         if ! read -r _ans; then
             printf '\n'
             err "未读取到确认输入 → 中止"
@@ -346,9 +346,9 @@ _clean_warning() {   # <desc>  → 返回 0=继续, 1=用户拒绝
         fi
         _norm="$(printf '%s' "${_ans}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
         case "${_norm}" in
-            yes|y|是) printf '  开始执行...\n'; return 0 ;;
-            no|n|否)  return 1 ;;
-            *) printf '  ⚠ 请输入 yes 或 no(收到: %s)\n' "${_ans:-<空>}" ;;
+            ""|yes|y|是) printf '  开始执行...\n'; return 0 ;;
+            no|n|否)     return 1 ;;
+            *) printf '  ⚠ 请输入 Y 或 n(直接回车=Y; 收到: %s)\n' "${_ans:-<空>}" ;;
         esac
     done
 }

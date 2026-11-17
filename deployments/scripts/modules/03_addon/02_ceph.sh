@@ -29,8 +29,8 @@
 #     mixed(同盘既有 ceph 又有别的数据)一律不进 CR、不清理。
 #     VM 集群请确保 VM 附加数据盘(默认 3×200GB, VM_DATA_DISKS)。
 #   · 安全确认(需求 2): 应用 CR 前红底醒目列出"将使用的节点 + 各节点磁盘按类分组
-#     (空闲 / 上次 Ceph 占用 / 在用 / 混合)+ 判定证据", 并询问 **yes/no(CEPH_CONFIRM_SLEEP 变量
-#     保留兼容: 默认 60→询问, 设 0 跳过)** 供人工 double-check; 输入 yes 才继续。
+#     (空闲 / 上次 Ceph 占用 / 在用 / 混合)+ 判定证据", 并询问 **[Y/n](CEPH_CONFIRM_SLEEP 变量
+#     保留兼容: 默认 60→询问, 设 0 跳过)** 供人工 double-check; 直接回车/Y 才继续。
 #   · 节点准备: 每台存储节点加载并持久化 rbd 内核模块; 确保 lvm2
 #     (离线 .deb 由 tools/offline/fetch-lvm-packages.sh 放到 offline-files/os/packages,
 #     本模块部署前预检"离线包就绪 或 节点已在线装 lvm", 缺失硬失败; 部署时自动从该目录安装)。
@@ -239,7 +239,7 @@ if [ "${CEPH_MODE:-internal}" = "external" ]; then
     _CEPH_SKIP_CLUSTER=1
     # ★ 2026-09-10: external-ceph.env 检测 + 警告(部署前提示, 目标"一次性部署成功")
     #   · CEPH_EXTERNAL_ENV_FILE 未显式设置时探测默认目录 deployments/config/external-ceph.env;
-    #   · 文件缺失 → 红底警告 + yes/no 确认(CEPH_ENV_CONFIRM_SLEEP=0 可跳过)——
+    #   · 文件缺失 → 红底警告 + [Y/n] 确认(CEPH_ENV_CONFIRM_SLEEP=0 可跳过)——
     #     未检测到该文件, 部署可能失败(官方导入路径硬依赖; 手填路径不受影响但无健康上报/对象存储)。
     _EXT_ENV_FILE="${CEPH_EXTERNAL_ENV_FILE:-${REPO_ROOT}/deployments/config/external-ceph.env}"
     if [ -n "${CEPH_EXTERNAL_ENV_FILE:-}" ] || [ -f "${_EXT_ENV_FILE}" ]; then
@@ -638,12 +638,12 @@ echo -e "\033[41m\033[97m ⚠ 确认要点: ① 盘名与节点一一对应正�
 echo -e "\033[41m\033[97m   ② 「上次 Ceph 占用」的盘会被**清空数据**后复用(覆盖安装, 全新 fsid)\033[0m"
 echo -e "\033[41m\033[97m      保留旧数据请设 CEPH_PRE_CLEANUP_EXISTING=false(交 Rook 认领)   \033[0m"
 echo -e "\033[41m\033[97m   ③ 「在用盘/混合盘」永远不动(人工确认要清请用 ceph-cleanup.sh)     \033[0m"
-echo -e "\033[41m\033[97m   ④ CEPH_NODES 是你想部署的节点; 核对无误请输入 yes 继续          \033[0m"
-echo -e "\033[41m\033[97m   有误请回答 no 中止, 修正后重跑                                    \033[0m"
+echo -e "\033[41m\033[97m   ④ CEPH_NODES 是你想部署的节点; 核对无误请直接回车/Y 继续       \033[0m"
+echo -e "\033[41m\033[97m   有误请输入 n 中止, 修正后重跑                                     \033[0m"
 echo -e "\033[41m\033[97m================================================================================\033[0m"
 echo ""
 if [ "${CEPH_CONFIRM_SLEEP:-60}" -gt 0 ] 2>/dev/null; then
-    say "请核对上方 Ceph 存储节点/裸盘(有误回答 no 中止; CEPH_CONFIRM_SLEEP=0 可跳过)..."
+    say "请核对上方 Ceph 存储节点/裸盘(有误输入 n 中止; CEPH_CONFIRM_SLEEP=0 可跳过)..."
     confirm_yes_no "已核对上方 Ceph 存储节点/裸盘, 继续部署?" 1 \
         || { err "已取消部署(Ceph 存储节点/裸盘未确认)"; exit 1; }
 else

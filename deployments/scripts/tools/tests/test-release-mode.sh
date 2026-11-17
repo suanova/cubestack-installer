@@ -271,7 +271,7 @@ bash "${FETCH}" --retry 9223372036854775807 --list >/dev/null 2>&1
 chk "retry 上限内接受" "0" "$?"
 
 # --clean-countdown 前导零必须按十进制解析(bash 算术/printf 会把 08 当非法八进制)
-# 单测 _clean_warning: 交互 yes/no 确认 —— 输入 yes 才继续, 输入 no 返回非零。
+# 单测 _clean_warning: 交互 [Y/n] 确认 —— 直接回车/yes 继续, no 返回非零。
 out="$(printf 'yes\n' | bash -c '
     set -euo pipefail
     source "$1"
@@ -296,8 +296,17 @@ out="$(printf 'maybe\nyes\n' | bash -c '
     _clean_warning "test-dir"
     echo "CONFIRM_OK"
 ' _ "${REPO_ROOT}/deployments/scripts/tools/offline/lib-offline-fetch.sh" 2>&1)"
-chk_contains "非法输入重新询问 yes/no" "请输入 yes 或 no" "${out}"
+chk_contains "非法输入重新询问 Y/n" "请输入 Y 或 n" "${out}"
 chk_contains "非法输入后 yes 仍继续" "CONFIRM_OK" "${out}"
+out="$(printf '\n' | bash -c '
+    set -euo pipefail
+    source "$1"
+    CLEAN_COUNTDOWN=08 YES=0
+    _clean_warning "test-dir"
+    echo "CONFIRM_OK"
+' _ "${REPO_ROOT}/deployments/scripts/tools/offline/lib-offline-fetch.sh" 2>&1)"
+chk "直接回车默认继续" "0" "$?"
+chk_contains "直接回车后继续" "CONFIRM_OK" "${out}"
 out="$(CLEAN_COUNTDOWN=0 YES=0 bash -c '
     set -euo pipefail
     source "$1"

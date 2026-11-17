@@ -246,11 +246,11 @@ ok()   { local m="✅ $*"; echo -e "\033[32m${m}\033[0m"; _log_file "${m}"; }
 warn() { local m="⚠  $*"; echo -e "\033[33m${m}\033[0m"; _log_file "${m}"; }
 err()  { local m="【错误】$*"; echo -e "\033[31m${m}\033[0m" >&2; _log_file "${m}"; }
 
-# ---------------- 交互确认(yes/no) ----------------
-# 替代旧的 sleep 倒计时: 不再"等 N 秒自动继续", 交互终端必须人工输入 yes 才继续。
+# ---------------- 交互确认([Y/n]) ----------------
+# 替代旧的 sleep 倒计时: 不再"等 N 秒自动继续", 交互终端遵循 Linux 惯例 [Y/n]。
 # 用法: confirm_yes_no "<要确认的事>" [非交互环境默认: 1=继续(旧倒计时语义), 0=中止]
 # 返回: 0=继续; 1=拒绝/无法确认
-#   · 交互终端: 循环提示, 只接受 yes/y/是 或 no/n/否(空输入/非法输入重新询问);
+#   · 交互终端: 循环提示, 直接回车或 yes/y/是 = 继续; no/n/否 = 中止(非法输入重新询问);
 #   · 非交互: CUBESTACK_ASSUME_YES=1(即 deploy-cluster --yes)→ 继续;
 #             否则按 noninteractive_default; 默认 1=继续并告警(保持旧无人值守语义),
 #             需要"非交互必须显式确认"的调用方传 0(返回 1 由调用方 exit)。
@@ -271,7 +271,7 @@ confirm_yes_no() {
         return 1
     fi
     while true; do
-        printf '\033[41m\033[97m  ❓ %s —— 请输入 yes 继续 / no 中止: \033[0m' "${_msg}"
+        printf '\033[41m\033[97m  ❓ %s [Y/n] \033[0m' "${_msg}"
         if ! read -r _ans; then
             printf '\n'
             err "未读取到确认输入 → 中止"
@@ -279,9 +279,9 @@ confirm_yes_no() {
         fi
         _norm="$(printf '%s' "${_ans}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
         case "${_norm}" in
-            yes|y|是) return 0 ;;
-            no|n|否)  return 1 ;;
-            *) printf '  ⚠ 请输入 yes 或 no(收到: %s)\n' "${_ans:-<空>}" ;;
+            ""|yes|y|是) return 0 ;;
+            no|n|否)     return 1 ;;
+            *) printf '  ⚠ 请输入 Y 或 n(直接回车=Y; 收到: %s)\n' "${_ans:-<空>}" ;;
         esac
     done
 }

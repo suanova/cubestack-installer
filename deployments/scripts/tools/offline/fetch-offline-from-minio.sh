@@ -27,7 +27,7 @@
 #   · 精确清理(release/flat 默认): **内容寻址增量** —— 以远端 offline-files/SHA256SUMS 为判据,
 #     只重下"缺失/哈希不符"的文件, 并删除本地多余文件(与对象 mtime/ETag 无关);
 #     哈希缓存 .cubestack-hashes.json 避免每次重读整棵树; --full 回退旧的整树 mc mirror;
-#     默认交互 yes/no 确认(--clean-countdown 0 / --yes 跳过);
+#     默认交互 [Y/n] 确认(--clean-countdown 0 / --yes 跳过);
 #     非交互环境无 --yes 时中止; --no-clean 保留本地多余文件; .cubestack-* 始终保留。
 #   · 结果提示: 容器内就绪提示; 宿主机打印容器挂载命令 + 直跑 OFFLINE_FILES_DIR 指引。
 #   · 校验级别: 下载完成 / --verify-only 默认执行 full 校验(全量 sha256 + 结构检查),
@@ -148,7 +148,7 @@ RELEASE_MODE=0
 FLAT=0
 FLAT_SET=""                         # ""=未指定(release 默认 flat) | yes=--flat | no=--no-flat
 CLEAN_MODE="auto"                     # auto|yes|no; auto = release/flat 默认清理
-CLEAN_COUNTDOWN="${CLEAN_COUNTDOWN:-30}"  # 兼容开关: 0=跳过清理确认; 非 0=交互询问 yes/no(不再等待)
+CLEAN_COUNTDOWN="${CLEAN_COUNTDOWN:-30}"  # 兼容开关: 0=跳过清理确认; 非 0=交互询问 [Y/n](不再等待)
 CLEAN=0
 FULL_FETCH=0                          # --full: 跳过内容寻址增量, 回退整树 mc mirror(排障用)
 FETCH_RETRY="${FETCH_RETRY:-3}"
@@ -200,7 +200,7 @@ _print_help() {
     echo "  --release 2.0.0 --clean ...           精确同步: 增量下载 + 删除本地多余文件"
     echo "  --release 2.0.0 --full ...            回退旧行为: 整树 mc mirror 全量重传(排障用)"
     echo "  --release 2.0.0 --no-clean ...        保留本地多余文件(默认 release/flat 清理)"
-    echo "  --clean-countdown N                   兼容旧参数: 0=跳过清理确认; 非 0=交互询问 yes/no(不再等待)"
+    echo "  --clean-countdown N                   兼容旧参数: 0=跳过清理确认; 非 0=交互询问 [Y/n](不再等待)"
     echo "  --retry N                             下载失败重试次数(默认 3)"
     echo "  --retry-delay N                       重试间隔秒数(默认 3)"
 }
