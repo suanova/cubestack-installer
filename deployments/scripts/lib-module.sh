@@ -523,8 +523,17 @@ resolve_run_steps() {
             case "${_keep_explicit}" in *" ${_k5} "*) _kept+=("${_k5}") ;; esac
         done
         RUN_STEPS=("${_kept[@]}")
-        if [ "${_keep_pre_install_check}" = "1" ] && [ "${_had_pre_install_check}" = "1" ] \
-           && [ "${_precheck_skipped}" = "0" ]; then
+        # ★ 用户显式 --skip pre_install_check 优先: REQUIRES 闭包可能把它重新拉回
+        #   (k8s_deploy 依赖它), 精确模式过滤又会因"显式点名"保留 —— 在最终计划里强制剔除。
+        #   未 skip 时保持原行为: 显式 --steps k8s_deploy 仍保留该只读就绪门。
+        if [ "${_precheck_skipped}" = "1" ] && [ "${#RUN_STEPS[@]}" -gt 0 ]; then
+            local _kept_pre=() _k6
+            for _k6 in "${RUN_STEPS[@]}"; do
+                [ "${_k6}" = "pre_install_check" ] || _kept_pre+=("${_k6}")
+            done
+            RUN_STEPS=("${_kept_pre[@]}")
+            unset _kept_pre _k6
+        elif [ "${_keep_pre_install_check}" = "1" ] && [ "${_had_pre_install_check}" = "1" ]; then
             local _found_precheck=0
             for _k5 in "${RUN_STEPS[@]:-}"; do
                 [ "${_k5}" = "pre_install_check" ] && _found_precheck=1
