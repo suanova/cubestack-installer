@@ -20,7 +20,7 @@ kubeadm reset 兜底 —— 与"覆盖安装必成功"口径一致。
 - **写入**: 各模块在**安装成功点**调用 `record_installed_component "<key>"`
   (`deployments/scripts/lib-common.sh`); **写失败仅告警, 绝不影响部署**(覆盖时自会走探测降级)。
 - **登记点(11 处)**: metallb / local_path / ceph / ceph_csi / k8s_registry / gpu_operator /
-  nvidia_gpu_operator / dev_lab / multus / rdma_shared_dev_plugin / netshoot。
+  nvidia_gpu_operator / multus / rdma_shared_dev_plugin / netshoot。
 - **查看**: `bash deployments/scripts/tools/k8s/cluster-teardown.sh --list`
 
 ## 反序卸载规则(设计 §3.3)
