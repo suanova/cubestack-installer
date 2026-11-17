@@ -85,7 +85,7 @@ kubectl get nodes                                # 容器内已配好集群访�
 | 段 | 模块 | 说明 |
 |---|---|---|
 | `env` | `vm_network` · `vm_sshkey` · `vm_create` · `harbor` | 宿主机与外部 LB 的**前置准备**(虚拟机场景才需要;裸金属一般只用到 SSH 密钥) |
-| `k8s` | `k8s_passwordless` → `k8s_workerbm` → `k8s_hosts` → `k8s_inventory` → `k8s_ntp` → **`k8s_deploy`** → `kube_vip` → `api_local_lb` → `k8s_scale` + 两个 verify | 集群基座与 API 入口 |
+| `k8s` | `k8s_passwordless` → `k8s_workerbm` → `k8s_hosts` → `k8s_inventory` → `k8s_ntp` → `pre_install_check` → **`k8s_deploy`** → `kube_vip` → `api_local_lb` → `k8s_scale` + 两个 verify | 集群基座与 API 入口 |
 | `addon` | `metallb` → `ceph` → `ceph_csi` → `local_path` → `registry` → `gpu_operator` → `rdma_shared_dev_plugin` → … + 各 verify | 集群能力与 operator |
 
 **两个易错点**(【代码】有护栏,但要知道):

@@ -5,10 +5,19 @@
 # PHASE: k8s
 # DEFAULT: 1
 # REPEAT: 0
-# REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs node_net_guard k8s_asset_prefetch
+# REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs pre_install_check node_net_guard k8s_asset_prefetch
 #   · node_pkgs(12_node_pkgs.sh): 节点前置包只读检查 —— 必须在 kubespray 之前,
 #     让缺包尽早暴露; installer 不安装/修复 OS 包。
 #     ⚠ 序号 12 > 06 排不到前面 ⇒ 靠这行 REQUIRES 定序(与 kube_vip 当年同一手法)。
+#   · k8s_workerbm(02_k8s_workerbm.sh): worker 节点连通性检查(不安装 OS 包);
+#     靠本行 REQUIRES 定序到 kubespray 之前。
+#   · pre_install_check(14_pre_install_check.sh): 安装前环境检查(SSH/sudo/chronyd/资源),
+#     同样靠 REQUIRES 定序到 kubespray 之前; deploy-cluster 会提前到优雅卸载之前执行。
+#   · 显式 --steps k8s_deploy: 框架会**保留本模块声明的 pre_install_check**(只读就绪门),
+#     不会因单组件模式的基座过滤而跳过; 其余基座(可选步骤)仍按单组件模式过滤。
+#     pre_install_check 的 SSH 前置由 deploy-cluster.sh 的 ensure_node_ssh_access 在所有预检前完成;
+#     显式 --skip pre_install_check 可跳过。
+#   · k8s_asset_prefetch: 离线资产预取, 同样在 kubespray 之前。
 # 说明: 调用 cubestack-offline.sh install; 透传 cluster.conf 中 PRELOAD_IMAGE_PATTERNS
 #   · 基座恒随全量部署(默认 / --with-k8s / --with-cubestack 都包含), 故 DEFAULT:1、无 TOGGLE ——
 #     原 K8S_ENABLED 开关已于 2026-10-16 移除(它不控制任何调度路径: 全量路径本就强制带上基座,

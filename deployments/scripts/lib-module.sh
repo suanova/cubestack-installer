@@ -170,6 +170,9 @@ declare -A MODULE_ALIAS=(
     [k8s]=k8s_deploy
     [scale]=k8s_scale
     [gpu_operator]=gpu_operator
+    # 安装前环境检查(--steps pre-install-check 兼容用户习惯的连字符写法)
+    [pre-install-check]=pre_install_check
+    [preinstall_check]=pre_install_check
 )
 
 # 组件级的便利别名由模块**自声明**: 模块文件里写 `# ALIAS: <alias>,<alias>`。
@@ -440,7 +443,7 @@ resolve_run_steps() {
     #   `--steps ceph_csi`(补建 SC/FS/RGW)会因闭包拉入 ceph 而重跑 ceph 模块,
     #   ceph 内部"已有集群+PRE_CLEANUP→删旧建新"会误删现有集群。
     if [ "${_steps_precise}" = "1" ]; then
-        local _added=1 _k3 _i3 _d3 _f3 _k4
+        local _added=1 _k3 _i3 _d3 _f3 _k4 _t3 _dep_explicit
         while [ "${_added}" = "1" ]; do
             _added=0
             for _k3 in "${RUN_STEPS[@]}"; do
@@ -452,6 +455,22 @@ resolve_run_steps() {
                     _d3i="$(module_index "${_d3}")"
                     if [ "${MODULE_REPEAT[$_d3i]:-0}" != "1" ] && [ "$(get_state "${_d3}")" = "done" ]; then
                         continue
+                    fi
+                    # ★ 2026-11-17(CodeRabbit): 默认关闭的**基座阶段**(env/k8s)依赖, 若未被
+                    #   显式 --steps/--enable 点名, 不通过闭包拉入执行 —— 避免显式步骤被临时
+                    #   塞入未启用的可选基座步骤(以及被导出 TOGGLE=true)。排序边仍保留在
+                    #   REQUIRES: 两者都被调度时 topo 排序照常生效; addon 阶段硬依赖
+                    #   (如 ceph_csi→ceph)不受影响。
+                    if ! module_default_on "${_d3i}"; then
+                        case "${MODULE_PHASE[$_d3i]:-}" in
+                            env|k8s)
+                                _dep_explicit=0
+                                for _t3 in ${steps_arg//,/ } ${enable_arg//,/}; do
+                                    [ "$(normalize_key "${_t3}")" = "${_d3}" ] && { _dep_explicit=1; break; }
+                                done
+                                [ "${_dep_explicit}" = "1" ] || continue
+                                ;;
+                        esac
                     fi
                     _f3=0
                     for _k4 in "${RUN_STEPS[@]}"; do [ "${_k4}" = "${_d3}" ] && _f3=1; done
@@ -470,8 +489,28 @@ resolve_run_steps() {
     #   注入公钥 → 从首个 master 取 admin.conf 到本地), 见 ensure_cluster_access。
     #   ⇒ 因此这里**不再**把 k8s_deploy/metallb/k8s_registry/vm_sshkey/k8s_passwordless 排进计划。
     if [ "${_steps_precise}" = "1" ] && [ "${#RUN_STEPS[@]}" -gt 0 ]; then
-        local _keep_explicit=" ${steps_arg//,/ } ${enable_arg//,/ } "
-        local _kept=() _k5 _i5 _is_base
+        # 显式集合按**归一化 key** 构造 —— 否则连字符/旧别名(如 pre-install-check→pre_install_check、
+        # ntp→k8s_ntp)与 RUN_STEPS 里的新 key 对不上, 会被下面的基座过滤误删。
+        local _keep_explicit=" " _s5
+        for _s5 in ${steps_arg//,/ } ${enable_arg//,/ }; do
+            [ -z "${_s5}" ] || _keep_explicit+="$(normalize_key "${_s5}") "
+        done
+        local _kept=() _k5 _i5 _is_base _s6
+        # ★ 显式 --steps k8s_deploy 必须保留其声明的 pre_install_check 就绪检查依赖:
+        #   否则单组件过滤会把它当"基座"删掉, kubespray 在未做关键项检查的情况下运行。
+        #   只保留 pre_install_check(不把 node_pkgs/k8s_workerbm 等可选装包步骤拉回);
+        #   SSH 前置由 deploy-cluster.sh 的 ensure_node_ssh_access 在所有预检前完成。
+        #   用户显式 --skip pre_install_check 时尊重跳过。
+        local _keep_pre_install_check=0 _had_pre_install_check=0 _precheck_skipped=0
+        case " ${_keep_explicit} " in
+            *" k8s_deploy "*) _keep_pre_install_check=1 ;;
+        esac
+        for _s6 in ${skip_arg//,/}; do
+            [ "$(normalize_key "${_s6}")" = "pre_install_check" ] && _precheck_skipped=1
+        done
+        for _k5 in "${RUN_STEPS[@]}"; do
+            [ "${_k5}" = "pre_install_check" ] && _had_pre_install_check=1
+        done
         for _k5 in "${RUN_STEPS[@]}"; do
             [ -z "${_k5}" ] && continue
             _i5="$(module_index "${_k5}")"
@@ -484,7 +523,26 @@ resolve_run_steps() {
             case "${_keep_explicit}" in *" ${_k5} "*) _kept+=("${_k5}") ;; esac
         done
         RUN_STEPS=("${_kept[@]}")
-        unset _kept _k5 _i5 _is_base _keep_explicit
+        # ★ 用户显式 --skip pre_install_check 优先: REQUIRES 闭包可能把它重新拉回
+        #   (k8s_deploy 依赖它), 精确模式过滤又会因"显式点名"保留 —— 在最终计划里强制剔除。
+        #   未 skip 时保持原行为: 显式 --steps k8s_deploy 仍保留该只读就绪门。
+        if [ "${_precheck_skipped}" = "1" ] && [ "${#RUN_STEPS[@]}" -gt 0 ]; then
+            local _kept_pre=() _k6
+            for _k6 in "${RUN_STEPS[@]}"; do
+                [ "${_k6}" = "pre_install_check" ] || _kept_pre+=("${_k6}")
+            done
+            RUN_STEPS=("${_kept_pre[@]}")
+            unset _kept_pre _k6
+        elif [ "${_keep_pre_install_check}" = "1" ] && [ "${_had_pre_install_check}" = "1" ]; then
+            local _found_precheck=0
+            for _k5 in "${RUN_STEPS[@]:-}"; do
+                [ "${_k5}" = "pre_install_check" ] && _found_precheck=1
+            done
+            [ "${_found_precheck}" = "1" ] || RUN_STEPS+=(pre_install_check)
+            unset _found_precheck
+        fi
+        unset _kept _k5 _i5 _is_base _keep_explicit _keep_pre_install_check \
+              _had_pre_install_check _precheck_skipped _s6
     fi
 
     # ★ 稳定拓扑排序(REQUIRES): 依赖者排在被依赖者之后; 无依赖约束的模块保持原(文件)顺序。
@@ -799,8 +857,8 @@ plan_warn_base_redeploy() {
 # 目标(2026-09-17 用户定案): 全新的 installer 容器只有 cluster.conf 的 NODES(IP/用户/密码) 时,
 #   `--steps <组件>` 也要能把组件直接装到**已存在**的集群上:
 #     ① 本地已有可用 kubeconfig(能 kubectl get nodes) → 直接用, 不动集群;
-#     ② 否则按密码引导: 生成密钥对(vm_sshkey) → 用密码注入公钥(k8s_passwordless)
-#        → sync_kubeconfig 从首个 master 取 admin.conf 到本地 ~/.kube/config。
+#     ② 否则按密码引导: SSH 免密就绪(ensure_node_ssh_access: 优先复用可用 id_rsa,
+#        否则生成/注入项目密钥) → sync_kubeconfig 从首个 master 取 admin.conf 到本地 ~/.kube/config。
 #   两步都幂等(已有密钥/公钥则无副作用); 返回 1 = 接入失败(调用方应退出并提示查 NODES)。
 ensure_cluster_access() {
     if command -v kubectl >/dev/null 2>&1 \
@@ -808,9 +866,12 @@ ensure_cluster_access() {
         say "集群接入: 本地 kubeconfig 可用 → 直接使用(跳过接入引导)"
         return 0
     fi
-    say "集群接入: 本地无法访问集群 → 走接入引导(密码注入公钥 + 从首个 master 取 admin.conf)"
-    run_module vm_sshkey || { err "集群接入: 生成 SSH 密钥对失败"; return 1; }
-    run_module k8s_passwordless || { err "集群接入: 注入公钥失败(检查 cluster.conf NODES 的用户名/密码/网络)"; return 1; }
+    say "集群接入: 本地无法访问集群 → 走接入引导(SSH 免密就绪 + 从首个 master 取 admin.conf)"
+    if [ "${NODE_SSH_READY:-0}" = "1" ]; then
+        say "集群接入: SSH 免密已在安装前阶段就绪 → 跳过重复配置"
+    else
+        ensure_node_ssh_access || { err "集群接入: SSH 免密就绪失败(检查 cluster.conf NODES 的用户名/密码/网络)"; return 1; }
+    fi
     sync_kubeconfig || { err "集群接入: 取回 admin.conf 失败(检查首个 master 是否可达、集群是否正常)"; return 1; }
     say "集群接入: kubeconfig 就绪(${HOME}/.kube/config)"
     return 0
@@ -943,8 +1004,11 @@ warn_unhealthy_pods() {
 
 print_plan() {
     say "==== 集群规划(配置: ${CLUSTER_CONF}) ===="
-    echo "  网络模式: ${NET_MODE:-bridge}   虚拟机网段: ${VM_SUBNET:-10.244.0.0/16}   物理Worker: ${PHYS_WORKER_NET:-192.168.100.0/24}"
-    echo "  SSH密钥: ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}   默认密码: ${SSH_DEFAULT_PASSWORD:-<未配置>}"
+    echo "  网络模式: ${NET_MODE:-bridge}   物理Worker: ${PHYS_WORKER_NET:-192.168.100.0/24}"
+    local _pw_state="<未配置>"
+    [ -n "${SSH_DEFAULT_PASSWORD:-}" ] && _pw_state="<已配置>"
+    echo "  SSH密钥: ${SSH_KEY_NAME:-cubestack_k8s}   默认密码: ${_pw_state}"
+    unset _pw_state
     echo "  本次执行模块: ${RUN_STEPS[*]:-<空>}"
     print_undeployed_summary
     plan_warn_base_redeploy

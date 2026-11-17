@@ -8,6 +8,8 @@
 # 说明: 主程序不判断虚拟机/裸金属 — 对 cluster.conf NODES 中全部节点执行公钥注入
 #       (密码 = 节点独立密码或默认 SSH_DEFAULT_PASSWORD); 支持 --only 过滤
 #       节点用户为 root 时附 sudo 存在性预检(root 安装模式; 缺 sudo 明确报错并给指引)
+#   · 2026-11-17: deploy-cluster 已在所有安装预检之前调用 ensure_node_ssh_access 统一就绪
+#     (优先复用可用 id_rsa, 否则生成/注入项目密钥); 本模块保留为幂等兜底/单独执行入口。
 # ============================================================
 set -euo pipefail
 
