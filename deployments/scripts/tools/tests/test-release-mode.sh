@@ -27,7 +27,7 @@ EOF
 
 run_load() {  # run_load <env...> —— 输出 OFFLINE_FILES_ROOT 等关键变量
     env CLUSTER_CONF="${TMP}/cluster.conf" "$@" \
-        bash -c 'source "$1"; load_config; printf "%s\n" "$CUBESTACK_RELEASE" "$OFFLINE_FILES_ROOT" "$CUBESTACK_RELEASE_ROOT" "$CUBESTACK_OPERATOR_OFFLINE_DIR" "$DEV_LAB_SAVE_DIR" "$MODEL_IMAGES_SAVE_DIR" "$CEPH_IMAGE_DIR" "$NETSHOOT_BASE_TAR"' _ "${LIB}" 2>/dev/null
+        bash -c 'source "$1"; load_config; printf "%s\n" "$CUBESTACK_RELEASE" "$OFFLINE_FILES_ROOT" "$CUBESTACK_RELEASE_ROOT" "$CUBESTACK_OPERATOR_OFFLINE_DIR" "$MODEL_IMAGES_SAVE_DIR" "$CEPH_IMAGE_DIR" "$NETSHOOT_BASE_TAR"' _ "${LIB}" 2>/dev/null
 }
 rc_of() {  # rc_of <env...> —— 只取退出码/错误输出
     env CLUSTER_CONF="${TMP}/cluster.conf" "$@" \
@@ -46,10 +46,9 @@ chk "release 版本" "9.9.9" "$(printf '%s\n' "${out}" | sed -n '1p')"
 chk "OFFLINE_FILES_ROOT" "${TMP}/rel/9.9.9/offline-files" "$(printf '%s\n' "${out}" | sed -n '2p')"
 chk "CUBESTACK_RELEASE_ROOT 保留" "${TMP}/rel" "$(printf '%s\n' "${out}" | sed -n '3p')"
 chk "operator 目录重定向" "${TMP}/rel/9.9.9/offline-files/cubestack-operator" "$(printf '%s\n' "${out}" | sed -n '4p')"
-chk "dev-lab 目录重定向" "${TMP}/rel/9.9.9/offline-files/dev-lab" "$(printf '%s\n' "${out}" | sed -n '5p')"
-chk "model-collection 目录重定向" "${TMP}/rel/9.9.9/offline-files/model-collection" "$(printf '%s\n' "${out}" | sed -n '6p')"
-chk "ceph 镜像目录重定向" "${TMP}/rel/9.9.9/offline-files/kubespray/v2.32.0/images" "$(printf '%s\n' "${out}" | sed -n '7p')"
-chk "netshoot 回退 tar 重定向" "${TMP}/rel/9.9.9/offline-files/os/netshoot.tar" "$(printf '%s\n' "${out}" | sed -n '8p')"
+chk "model-collection 目录重定向" "${TMP}/rel/9.9.9/offline-files/model-collection" "$(printf '%s\n' "${out}" | sed -n '5p')"
+chk "ceph 镜像目录重定向" "${TMP}/rel/9.9.9/offline-files/kubespray/v2.32.0/images" "$(printf '%s\n' "${out}" | sed -n '6p')"
+chk "netshoot 回退 tar 重定向" "${TMP}/rel/9.9.9/offline-files/os/netshoot.tar" "$(printf '%s\n' "${out}" | sed -n '7p')"
 
 # ---------------- ② 直接挂载 offline-files ----------------
 mkdir -p "${TMP}/auto"

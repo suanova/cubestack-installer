@@ -62,8 +62,8 @@ images:
 - `catalog_id` 指向 mirror catalog（`container-image-mirror/index.json` 的 `id`）；
   自建公开镜像用 `source_ref` 指向 public `suanova/**`，两者互斥。`source_ref`
   必须同时写 `digest`（镜像没有 catalog 条目，digest 是唯一的钉）。
-- `optional: true` 的镜像默认不在线物化（`--with-dev-lab` 才会带上），但商业 base
-  打包会包含它们。dev-lab 的三个镜像目前走这个开关。
+- `optional: true` 的镜像默认不在线物化（`--include-optional` 才会带上）；dev-lab 已迁到
+  release，不再属于 base。
 - `version` 可以是 `${VAR}` 或字面量；变量必须在 `cluster.defaults.conf` /
   profile 里有定义。禁止 `latest`。
 - `dest` / `tar` 里的 `${VAR}` 由安装器解析；`tar` 决定物化后的文件名，模块 35 等
