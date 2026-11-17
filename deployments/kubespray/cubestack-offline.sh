@@ -88,7 +88,7 @@ warn()      { local m="[WARN] $*";  echo -e "${YELLOW}${m}${NC}"; _log_file "${m
 err()       { local m="[ERROR] $*"; echo -e "${RED}${m}${NC}" >&2; _log_file "${m}"; exit 1; }
 highlight() { local m=">>> $*";     echo -e "${CYAN}${m}${NC}"; _log_file "${m}"; }
 
-# 交互确认(替代旧的 sleep 倒计时): 交互终端必须输入 yes 才继续; no/EOF 中止。
+# 交互确认(替代旧的 sleep 倒计时): Linux 惯例 <问题>? [Y/n] —— 直接回车=继续, 显式 n/no 才中止; EOF 中止。
 # 非交互环境默认自动继续(保持旧无人值守语义); CUBESTACK_ASSUME_YES=1(deploy-cluster --yes)自动 yes。
 # 用法: confirm_yes_no_offline "<要确认的事>"  → 0=继续, 1=拒绝
 confirm_yes_no_offline() {
@@ -102,16 +102,16 @@ confirm_yes_no_offline() {
         return 0
     fi
     while true; do
-        printf '\033[41m\033[97m  ❓ %s —— 请输入 yes 继续 / no 中止: \033[0m' "${msg}"
+        printf '\033[41m\033[97m  ❓ %s [Y/n] \033[0m' "${msg}"
         if ! read -r ans; then
             echo ""
             err "未读取到确认输入 → 中止"
         fi
         norm="$(printf '%s' "${ans}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
         case "${norm}" in
-            yes|y|是) return 0 ;;
-            no|n|否)  return 1 ;;
-            *) printf '  ⚠ 请输入 yes 或 no(收到: %s)\n' "${ans:-<空>}" ;;
+            ""|yes|y|是) return 0 ;;
+            no|n|否)     return 1 ;;
+            *) printf '  ⚠ 请输入 Y 或 n(直接回车=Y; 收到: %s)\n' "${ans:-<空>}" ;;
         esac
     done
 }
@@ -2100,7 +2100,7 @@ print("%s|%s|%s" % (
         return 0
     fi
 
-    # 检测到残留 → 醒目警告 + yes/no 确认(输入 yes 才清理; 不再 sleep 60 秒)
+    # 检测到残留 → 醒目警告 + [Y/n] 确认(直接回车=清理; 不再 sleep 60 秒)
     echo ""
     highlight "╔══════════════════════════════════════════════════════════╗"
     highlight "║   ⚠️  检测到节点上已有 Kubernetes 部署! ⚠️                 ║"
@@ -2108,7 +2108,7 @@ print("%s|%s|%s" % (
     highlight "║  将清理并让出这些节点(kubelet API 端口 10250)             ║"
     highlight "║  含第三方发行版(RKE2/k3s/microK8s): 只 stop + disable     ║"
     highlight "║  其数据目录(/var/lib/rancher 等)保留, 不卸载不删除        ║"
-    highlight "║  确认请输入 yes; 回答 no 或 Ctrl+C 退出                   ║"
+    highlight "║  确认清理? [Y/n](回车=Y; n 中止; Ctrl+C 退出)            ║"
     highlight "╚══════════════════════════════════════════════════════════╝"
     echo ""
     confirm_yes_no_offline "确认清理上述节点上的旧 Kubernetes 状态并继续部署?" \
