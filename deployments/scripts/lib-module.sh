@@ -443,7 +443,7 @@ resolve_run_steps() {
     #   `--steps ceph_csi`(补建 SC/FS/RGW)会因闭包拉入 ceph 而重跑 ceph 模块,
     #   ceph 内部"已有集群+PRE_CLEANUP→删旧建新"会误删现有集群。
     if [ "${_steps_precise}" = "1" ]; then
-        local _added=1 _k3 _i3 _d3 _f3 _k4
+        local _added=1 _k3 _i3 _d3 _f3 _k4 _t3 _dep_explicit
         while [ "${_added}" = "1" ]; do
             _added=0
             for _k3 in "${RUN_STEPS[@]}"; do
@@ -455,6 +455,22 @@ resolve_run_steps() {
                     _d3i="$(module_index "${_d3}")"
                     if [ "${MODULE_REPEAT[$_d3i]:-0}" != "1" ] && [ "$(get_state "${_d3}")" = "done" ]; then
                         continue
+                    fi
+                    # ★ 2026-11-17(CodeRabbit): 默认关闭的**基座阶段**(env/k8s)依赖, 若未被
+                    #   显式 --steps/--enable 点名, 不通过闭包拉入执行 —— 避免显式步骤被临时
+                    #   塞入未启用的可选基座步骤(以及被导出 TOGGLE=true)。排序边仍保留在
+                    #   REQUIRES: 两者都被调度时 topo 排序照常生效; addon 阶段硬依赖
+                    #   (如 ceph_csi→ceph)不受影响。
+                    if ! module_default_on "${_d3i}"; then
+                        case "${MODULE_PHASE[$_d3i]:-}" in
+                            env|k8s)
+                                _dep_explicit=0
+                                for _t3 in ${steps_arg//,/ } ${enable_arg//,/}; do
+                                    [ "$(normalize_key "${_t3}")" = "${_d3}" ] && { _dep_explicit=1; break; }
+                                done
+                                [ "${_dep_explicit}" = "1" ] || continue
+                                ;;
+                        esac
                     fi
                     _f3=0
                     for _k4 in "${RUN_STEPS[@]}"; do [ "${_k4}" = "${_d3}" ] && _f3=1; done
@@ -479,7 +495,22 @@ resolve_run_steps() {
         for _s5 in ${steps_arg//,/ } ${enable_arg//,/ }; do
             [ -z "${_s5}" ] || _keep_explicit+="$(normalize_key "${_s5}") "
         done
-        local _kept=() _k5 _i5 _is_base
+        local _kept=() _k5 _i5 _is_base _s6
+        # ★ 显式 --steps k8s_deploy 必须保留其声明的 pre_install_check 就绪检查依赖:
+        #   否则单组件过滤会把它当"基座"删掉, kubespray 在未做关键项检查的情况下运行。
+        #   只保留 pre_install_check(不把 node_pkgs/k8s_workerbm 等可选装包步骤拉回);
+        #   SSH 前置由 deploy-cluster.sh 的 ensure_node_ssh_access 在所有预检前完成。
+        #   用户显式 --skip pre_install_check 时尊重跳过。
+        local _keep_pre_install_check=0 _had_pre_install_check=0 _precheck_skipped=0
+        case " ${_keep_explicit} " in
+            *" k8s_deploy "*) _keep_pre_install_check=1 ;;
+        esac
+        for _s6 in ${skip_arg//,/}; do
+            [ "$(normalize_key "${_s6}")" = "pre_install_check" ] && _precheck_skipped=1
+        done
+        for _k5 in "${RUN_STEPS[@]}"; do
+            [ "${_k5}" = "pre_install_check" ] && _had_pre_install_check=1
+        done
         for _k5 in "${RUN_STEPS[@]}"; do
             [ -z "${_k5}" ] && continue
             _i5="$(module_index "${_k5}")"
@@ -492,7 +523,17 @@ resolve_run_steps() {
             case "${_keep_explicit}" in *" ${_k5} "*) _kept+=("${_k5}") ;; esac
         done
         RUN_STEPS=("${_kept[@]}")
-        unset _kept _k5 _i5 _is_base _keep_explicit
+        if [ "${_keep_pre_install_check}" = "1" ] && [ "${_had_pre_install_check}" = "1" ] \
+           && [ "${_precheck_skipped}" = "0" ]; then
+            local _found_precheck=0
+            for _k5 in "${RUN_STEPS[@]:-}"; do
+                [ "${_k5}" = "pre_install_check" ] && _found_precheck=1
+            done
+            [ "${_found_precheck}" = "1" ] || RUN_STEPS+=(pre_install_check)
+            unset _found_precheck
+        fi
+        unset _kept _k5 _i5 _is_base _keep_explicit _keep_pre_install_check \
+              _had_pre_install_check _precheck_skipped _s6
     fi
 
     # ★ 稳定拓扑排序(REQUIRES): 依赖者排在被依赖者之后; 无依赖约束的模块保持原(文件)顺序。

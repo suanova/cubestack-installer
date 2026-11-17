@@ -1179,6 +1179,19 @@ load_config() {
     export REGISTRY_STORAGE_CLASS LOCAL_PATH_ENABLED
     # 虚拟机配置(独立于 cluster.conf): source vm-nodes.conf 提供 VM 创建/网络变量
     vm_conf_load
+    # ★ 运行时 SSH 密钥覆盖(2026-11-17 CodeRabbit): ensure_node_ssh_access 选中 id_rsa 后,
+    #   若 cluster.conf 里存在**字面量** SSH_KEY_NAME="cubestack_k8s", 子工具每次 load_config
+    #   都会把 exported 的值覆盖回去 → 子工具仍用 cubestack_k8s, 只有 id_rsa 授权时会失败。
+    #   这里在配置加载**完成后**应用独立的运行时覆盖变量, 保证子工具使用已验证的密钥,
+    #   同时不修改 cluster.conf 的配置值(用户仍可看到原始配置)。
+    if [ -n "${CUBESTACK_SSH_KEY_DIR:-}" ]; then
+        SSH_KEY_DIR="${CUBESTACK_SSH_KEY_DIR}"
+        export SSH_KEY_DIR
+    fi
+    if [ -n "${CUBESTACK_SSH_KEY_NAME:-}" ]; then
+        SSH_KEY_NAME="${CUBESTACK_SSH_KEY_NAME}"
+        export SSH_KEY_NAME
+    fi
 }
 
 # ---------------- Ceph 安装条件检测(供回退判定) ----------------
@@ -1267,7 +1280,8 @@ ssh_port_open() { timeout 3 bash -c "echo > /dev/tcp/$1/22" 2>/dev/null; }
 #   · 显式自定义 SSH_KEY_DIR / SSH_KEY_NAME 时**不做** id_rsa 自动探测(自定义配置优先);
 #   · id_rsa 存在但未覆盖全部节点时**不会**注入它的公钥 —— 避免动用户个人密钥,
 #     按当前方式回退到项目密钥;
-#   · 成功后就地 export SSH_KEY_DIR/SSH_KEY_NAME, 后续所有工具/模块自动跟随。
+#   · 成功后就地 export SSH_KEY_DIR/SSH_KEY_NAME, 并设置 CUBESTACK_SSH_KEY_* 运行时覆盖
+#     (子工具 load_config 完成后应用, 防 cluster.conf 字面量把它覆盖回项目密钥)。
 # 返回: 0=全部节点免密就绪; 1=存在无法免密且无密码可注入的节点(调用方应在预检前中止)
 ensure_node_ssh_access() {
     local default_dir="${HOME}/.ssh" default_name="cubestack_k8s"
@@ -1303,6 +1317,10 @@ ensure_node_ssh_access() {
             SSH_KEY_DIR="${default_dir}"
             SSH_KEY_NAME="id_rsa"
             export SSH_KEY_DIR SSH_KEY_NAME
+            # 运行时覆盖: 子工具 load_config 完成后再应用(防 cluster.conf 字面量覆盖回项目密钥)
+            CUBESTACK_SSH_KEY_DIR="${default_dir}"
+            CUBESTACK_SSH_KEY_NAME="id_rsa"
+            export CUBESTACK_SSH_KEY_DIR CUBESTACK_SSH_KEY_NAME
             key_label="${SSH_KEY_NAME}"
             for line in "${NODES[@]:-}"; do
                 [ -z "${line}" ] && continue
@@ -1321,6 +1339,10 @@ ensure_node_ssh_access() {
     SSH_KEY_DIR="${key_dir}"
     SSH_KEY_NAME="${key_name}"
     export SSH_KEY_DIR SSH_KEY_NAME
+    # 运行时覆盖: 与父进程实际选用的密钥保持一致(子工具 load_config 后应用)
+    CUBESTACK_SSH_KEY_DIR="${key_dir}"
+    CUBESTACK_SSH_KEY_NAME="${key_name}"
+    export CUBESTACK_SSH_KEY_DIR CUBESTACK_SSH_KEY_NAME
     key="${SSH_KEY_DIR}/${SSH_KEY_NAME}"
     key_label="${SSH_KEY_NAME}"   # 日志只展示 key 文件名, 不展示完整路径/密码/公钥内容
     say "SSH 免密登录配置: 使用密钥 ${key_label}(${reason})"

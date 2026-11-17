@@ -13,6 +13,10 @@
 #     靠本行 REQUIRES 定序到 kubespray 之前。
 #   · pre_install_check(14_pre_install_check.sh): 安装前环境检查(SSH/sudo/chronyd/资源),
 #     同样靠 REQUIRES 定序到 kubespray 之前; deploy-cluster 会提前到优雅卸载之前执行。
+#   · 显式 --steps k8s_deploy: 框架会**保留本模块声明的 pre_install_check**(只读就绪门),
+#     不会因单组件模式的基座过滤而跳过; 其余基座(可选步骤)仍按单组件模式过滤。
+#     pre_install_check 的 SSH 前置由 deploy-cluster.sh 的 ensure_node_ssh_access 在所有预检前完成;
+#     显式 --skip pre_install_check 可跳过。
 #   · k8s_asset_prefetch: 离线资产预取, 同样在 kubespray 之前。
 # 说明: 调用 cubestack-offline.sh install; 透传 cluster.conf 中 PRELOAD_IMAGE_PATTERNS
 #   · 基座恒随全量部署(默认 / --with-k8s / --with-cubestack 都包含), 故 DEFAULT:1、无 TOGGLE ——

@@ -7,7 +7,10 @@
 #   · SSH: 部署密钥免密可用; 密钥不通时用节点密码回退验证(只验证, 不写配置)
 #   · sudo: 非 root 用户要求 sudo -n 可用; root 用户要求节点存在 sudo
 #           (与 modules/02_k8s/01_k8s_passwordless.sh 同一口径)
-#   · chronyd: NTP_ENABLED≠0 时要求 chronyd 已安装/运行/偏差 ≤ NTP_MAX_OFFSET_MS;
+#   · chronyd: NTP_ENABLED≠0 时要求 chronyd 已安装/运行;
+#              客户端/有上游的权威还要求 Leap status 已同步且偏差 ≤ NTP_MAX_OFFSET_MS;
+#              本地权威(首 master, local stratum, 无 NTP_SERVER/NTP_UPSTREAM)只要求服务运行
+#              (它本身就是时间源, setup-ntp.sh 以 stratum 10 作为就绪判据);
 #              无 chrony 的节点允许 systemd-timesyncd 回退(已启用且已同步)
 #              (单节点集群与 NTP_ENABLED=0 一样跳过同步检查)
 #   · 资源容量: CPU 核数、内存、/var/lib 可用空间
@@ -103,12 +106,12 @@ _remote_probe() {
 
 # ---------------- 节点清单 / 单节点判定 ----------------
 [ -n "${NODES[*]:-}" ] || { err "cluster.conf NODES 为空"; exit 1; }
-MASTER_CNT=0; WORKER_CNT=0
+MASTER_CNT=0; WORKER_CNT=0; FIRST_MASTER_IP=""
 for _line in "${NODES[@]:-}"; do
     [ -z "${_line}" ] && continue
     node_parse "${_line}"
     case "${NODE_ROLE}" in
-        master) MASTER_CNT=$((MASTER_CNT + 1)) ;;
+        master) MASTER_CNT=$((MASTER_CNT + 1)); [ -z "${FIRST_MASTER_IP}" ] && FIRST_MASTER_IP="${NODE_IP}" ;;
         worker) WORKER_CNT=$((WORKER_CNT + 1)) ;;
     esac
 done
@@ -253,12 +256,29 @@ REMOTE
         else
             if [ "${CHRONY_ACTIVE}" != "active" ]; then
                 _crit "  chronyd: 服务未运行(state=${CHRONY_ACTIVE:-unknown}; systemctl start chrony)"
-            elif [ -z "${CHRONY_OFFSET_MS}" ]; then
-                _crit "  chronyd: 服务在运行但无法读取 chronyc 偏差(Leap=${CHRONY_LEAP:-unknown}; 未同步/无可用源, 检查 chronyc tracking)"
-            elif awk -v o="${CHRONY_OFFSET_MS}" -v m="${NTP_MAX_OFFSET_MS}" 'BEGIN{exit !(o + 0 > m + 0)}'; then
-                _crit "  chronyd: 偏差 ${CHRONY_OFFSET_MS}ms > 阈值 ${NTP_MAX_OFFSET_MS}ms"
+            elif [ -z "${NTP_SERVER:-}" ] && [ -z "${NTP_UPSTREAM:-}" ] \
+                 && [ "${NODE_IP}" = "${FIRST_MASTER_IP}" ]; then
+                # 本地权威(首 master, local stratum, 无上游): 它本身就是时间源,
+                # 不要求自身处于 Normal/可跟踪状态; setup-ntp.sh 以 stratum 10 作为就绪判据。
+                _pass "  chronyd: 本地权威(无上游, local stratum)服务运行中; 跳过 Leap/偏差检查"
             else
-                _pass "  chronyd: 服务运行中, 偏差 ${CHRONY_OFFSET_MS}ms ≤ ${NTP_MAX_OFFSET_MS}ms"
+                # 客户端/有上游的权威: 必须先确认已同步(Leap status),
+                # 否则 "Not synchronised + 很小的 System time" 会被误判为通过。
+                _leap_lc="$(printf '%s' "${CHRONY_LEAP:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+                if [ -z "${_leap_lc}" ]; then
+                    _crit "  chronyd: 无法读取 Leap status(chronyc tracking 无输出/权限不足)"
+                elif [ "${_leap_lc}" = "notsynchronised" ] || [ "${_leap_lc}" = "notsynchronized" ]; then
+                    _crit "  chronyd: 未同步(Leap status=${CHRONY_LEAP}); 检查 chronyc sources/tracking"
+                elif [ "${_leap_lc}" != "normal" ] \
+                     && [ "${_leap_lc}" != "insertsecond" ] && [ "${_leap_lc}" != "deletesecond" ]; then
+                    _crit "  chronyd: Leap status=${CHRONY_LEAP} 不是已同步状态"
+                elif [ -z "${CHRONY_OFFSET_MS}" ]; then
+                    _crit "  chronyd: 服务在运行但无法读取 chronyc 偏差(Leap=${CHRONY_LEAP:-unknown}; 检查 chronyc tracking)"
+                elif awk -v o="${CHRONY_OFFSET_MS}" -v m="${NTP_MAX_OFFSET_MS}" 'BEGIN{exit !(o + 0 > m + 0)}'; then
+                    _crit "  chronyd: 偏差 ${CHRONY_OFFSET_MS}ms > 阈值 ${NTP_MAX_OFFSET_MS}ms"
+                else
+                    _pass "  chronyd: 服务运行中, Leap=${CHRONY_LEAP}, 偏差 ${CHRONY_OFFSET_MS}ms ≤ ${NTP_MAX_OFFSET_MS}ms"
+                fi
             fi
             case "${CHRONY_ENABLED}" in
                 enabled|enabled-runtime) : ;;

@@ -78,6 +78,8 @@ usage() {
   · 命令: sudo ./deploy-cluster.sh --steps <组件>          # 例: --steps ceph
   · 只装该组件: 不跑基座(k8s_deploy/metallb/local_path/k8s_registry)与环境准备模块;
     组件自身依赖仍会带上(如 ceph_csi → ceph)。
+  · 例外: --steps k8s_deploy 会保留只读的 pre_install_check 就绪检查(关键项失败即中止,
+    且在优雅卸载之前执行); 显式 --skip pre_install_check 可跳过。
   · 集群接入自动处理: 本地 kubeconfig 能用(kubectl get nodes 通)→ 直接用, 不动集群;
     否则用 cluster.conf NODES 的 IP/用户名/密码引导: 生成密钥对 → 注入公钥 →
     从首个 master 取 admin.conf 到本地 ~/.kube/config。之后组件模块自己完成
@@ -471,21 +473,33 @@ say "完整部署日志: ${LOG_FILE}"
 #   预检时还没有密钥, 只能回退节点密码并打印 "SSH 密钥不存在" 的误导性提示。
 #   · 默认配置下优先复用已可用的 ~/.ssh/id_rsa; 否则生成/复用项目密钥并密码注入;
 #   · 覆盖 NODES 全部节点(--only 只影响后续模块);
+#   · **仅当计划包含 k8s 阶段节点步骤或 ceph/ceph_csi 时触发**:
+#     API-only 组件(--steps cubepilot 等 addon 组件)保留 ensure_cluster_access 的
+#     kubeconfig-first 路径, 不再被"某台节点不可达/无密码"挡住;
 #   · 纯 verify 步骤跳过(仅验证通常已有 kubeconfig, 不强制节点密码)。
 _need_early_ssh=0
 if [ "${#RUN_STEPS[@]}" -gt 0 ]; then
-    _need_early_ssh=1
-    _has_non_verify=0
     for _k in "${RUN_STEPS[@]:-}"; do
-        case "${_k}" in verify_*) ;; *) _has_non_verify=1 ;; esac
+        # 纯 verify 模块不强制节点 SSH
+        case "${_k}" in verify_*) continue ;; esac
+        _idx="$(module_index "${_k}")"
+        # k8s 阶段 = 节点准备/集群基座(k8s_passwordless/hosts/inventory/ntp/node_pkgs/
+        # pre_install_check/k8s_deploy/k8s_scale ...)
+        if [ "${_idx}" -ge 0 ] && [ "${MODULE_PHASE[$_idx]:-}" = "k8s" ]; then
+            _need_early_ssh=1
+            break
+        fi
+        # Ceph 预检(磁盘检测)需要节点 SSH, 即使 ceph 属 addon 阶段
+        case " ceph ceph_csi " in
+            *" ${_k} "*) _need_early_ssh=1; break ;;
+        esac
     done
-    [ "${_has_non_verify}" = "0" ] && _need_early_ssh=0
 fi
 if [ "${_need_early_ssh}" = "1" ]; then
     say "==== 安装前准备: SSH 免密登录(NODES 全部节点, 早于所有预检) ===="
     ensure_node_ssh_access || exit 1
 fi
-unset _need_early_ssh _has_non_verify _k
+unset _need_early_ssh _idx _k
 
 # ★ 覆盖安装可见化(实现见 lib-module.sh notify_base_redeploy; --list/--list-steps 只读路径不探测集群,
 #   改由 print_plan 打印提示行)。**只提示、不拦停** —— 默认全量运行 = 覆盖安装(2026-09-17 定案):
@@ -578,6 +592,24 @@ if [ "${_early_ntp}" = "1" ]; then
     CUBESTACK_EARLY_NTP_DONE=1   # 仅本进程: 模块循环据此跳过重复执行(不导出, scale 直接调用不受影响)
 fi
 unset _early_ntp _k
+
+# ★ 安装前就绪检查(2026-11-17 CodeRabbit): 必须在优雅卸载/覆盖安装之前 ——
+#   否则 pre_install_check 在模块循环里失败时, 现有组件已被 cluster-teardown 拆除。
+#   只在计划包含 pre_install_check 时触发; 放在 NTP 阶段之后(检查 chronyd 的真实状态)。
+#   本模块为只读检查, 节点已运行集群时结果与模块循环内一致。
+_early_pre_check=0
+for _k in "${RUN_STEPS[@]:-}"; do
+    [ "${_k}" = "pre_install_check" ] && { _early_pre_check=1; break; }
+done
+if [ "${_early_pre_check}" = "1" ]; then
+    say "==== 安装前就绪检查(早于优雅卸载/覆盖安装) ===="
+    run_module pre_install_check || {
+        err "安装前就绪检查失败 → 中止覆盖流程(现有组件尚未卸载)"
+        exit 1
+    }
+    CUBESTACK_EARLY_PRE_CHECK_DONE=1   # 仅本进程: 模块循环据此跳过重复执行
+fi
+unset _early_pre_check _k
 
 # ★ 优雅覆盖(2026-10-11 用户口径, 设计 docs/graceful-overwrite/): K8s 覆盖**实际将发生**时
 #   (RUN_STEPS 含 k8s_deploy 且实际状态非 done —— --fresh 清状态后天然成立), 且集群可达时:
@@ -924,6 +956,10 @@ for key in "${RUN_STEPS[@]:-}"; do
     # 安装前 NTP 阶段已执行过的步骤, 循环里跳过(避免重复同步; 不影响 scale 模块的直接调用)。
     if [ "${CUBESTACK_EARLY_NTP_DONE:-0}" = "1" ] && [ "${key}" = "k8s_ntp" ]; then
         say "[${key}] 已在安装前 NTP 阶段完成, 跳过重复执行"
+        continue
+    fi
+    if [ "${CUBESTACK_EARLY_PRE_CHECK_DONE:-0}" = "1" ] && [ "${key}" = "pre_install_check" ]; then
+        say "[${key}] 已在安装前就绪检查阶段完成, 跳过重复执行"
         continue
     fi
     run_module "${key}" || { FAILED=1; break; }

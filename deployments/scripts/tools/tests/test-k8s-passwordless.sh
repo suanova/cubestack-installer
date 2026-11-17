@@ -119,13 +119,18 @@ run_ensure() {
 #!/bin/bash
 set -euo pipefail
 source "${REPO_ROOT}/deployments/scripts/lib-common.sh"
+# lib-common.sh 会把 HOME 重置为真实用户 home(见其顶部 REAL_HOME 逻辑), 覆盖测试的临时 HOME;
+# 必须在 load_config / ensure_node_ssh_access 之前重新导出, 否则会读取真实 ~/.ssh。
+export HOME="${home}"
 load_config
 ensure_node_ssh_access
+# 子工具重新 load_config 后必须仍使用运行时选中的密钥(防 cluster.conf 字面量覆盖)
+echo "CHILD_KEY=\$(LOG_VERBOSE=0 bash -c 'source "${REPO_ROOT}/deployments/scripts/lib-common.sh"; load_config >/dev/null 2>&1; echo "\$SSH_KEY_NAME"')"
 EOF
     (
         export HOME="${home}"
         export PATH="${TMP}/bin:${PATH}"
-        export CLUSTER_CONF="${TMP}/cluster.conf"
+        export CLUSTER_CONF="${RUN_ENSURE_CONF:-${TMP}/cluster.conf}"
         unset SSH_KEY_DIR SSH_KEY_NAME
         export FAKE_EXPECT_KEY="${home}/.ssh/cubestack_k8s"
         export FAKE_SSH_LOG="${TMP}/ensure-ssh-${tag}.log"
@@ -182,6 +187,19 @@ chk_contains "复用默认密钥" "复用默认密钥" "${TMP}/out-ensure-idrsa"
 chk_contains "日志给出 key" "id_rsa" "${TMP}/out-ensure-idrsa"
 chk "未尝试密码注入" "0" "$(_count "${TMP}/ensure-sshpass-idrsa.log")"
 chk "未生成项目密钥" "1" "$([ -f "${TMP}/home-idrsa/.ssh/cubestack_k8s" ] && echo 0 || echo 1)"
+
+echo "== ④b cluster.conf 字面量 SSH_KEY_NAME 不覆盖运行时 id_rsa =="
+cat > "${TMP}/cluster-literal.conf" <<'EOF'
+NODES=("master,m1,10.0.0.1,root,wrongpass")
+SSH_USER="root"
+SSH_DEFAULT_PASSWORD="wrongpass"
+SSH_KEY_NAME="cubestack_k8s"
+KUBESPRAY_PROFILE="none"
+EOF
+rc="$(RUN_ENSURE_CONF="${TMP}/cluster-literal.conf" run_ensure literal 1 FAKE_KEY_OK=1 FAKE_PW_OK=0)"
+chk "退出码 0" "0" "${rc}"
+chk_contains "父进程复用 id_rsa" "复用默认密钥" "${TMP}/out-ensure-literal"
+chk_contains "子工具重新 load_config 后仍用 id_rsa" "CHILD_KEY=id_rsa" "${TMP}/out-ensure-literal"
 
 echo "== ⑤ ensure_node_ssh_access: id_rsa 未覆盖全节点 → 项目密钥 + 密码注入 =="
 rc="$(run_ensure fallback 1 FAKE_KEY_OK=0 FAKE_PW_OK=1)"

@@ -16,7 +16,8 @@
 #   添加新节点并单独执行 sudo ./deployments/scripts/tools/vm/create-vms.sh, 再执行本模块扩容。
 #   本模块只做集群侧准备(全部幂等):
 #     登录首个 master 核对实际集群节点 → diff 出未加入集群的节点(worker 与控制平面 master 均纳入)
-#     → 仅对新节点: SSH 免密 / worker 离线装包 / NTP 时间同步 / /etc/hosts + registry certs.d
+#     → 仅对新节点: SSH 免密 / worker 连通性检查 / 包只读检查 / NTP 时间同步 / **安装前环境检查**
+#       / /etc/hosts + registry certs.d
 #     → 重生成 inventory(新节点进 new_node 组) → kubespray 离线扩容
 #       (纯 worker: scale.yml --limit new_node; 含 master: 封装层自动切**全量 cluster.yml** ——
 #        上游 docs/operations/nodes.md 明确: 加 control plane 不能用 scale.yml)
@@ -269,6 +270,16 @@ bash "${SCRIPT_DIR}/modules/02_k8s/01_k8s_passwordless.sh" # 仅新节点注入�
 bash "${SCRIPT_DIR}/modules/02_k8s/02_k8s_workerbm.sh"     # 仅新 worker 连通性检查
 bash "${SCRIPT_DIR}/modules/02_k8s/12_node_pkgs.sh"        # 仅新节点前置包检查(不安装)
 bash "${SCRIPT_DIR}/modules/02_k8s/05_k8s_ntp.sh"          # NTP: 首 master chrony 权威(无过滤, 照常配置)+ 新节点同步/校验
+
+# ★ 2026-11-17(CodeRabbit): 新节点在进入 inventory/join 之前执行与全量部署同口径的
+#   pre_install_check(SSH/sudo/chronyd/CPU/内存/磁盘; 只检查 NEW_NODE_HOSTS; 关键项失败即中止)。
+#   放在 SSH 免密 + NTP **之后**: 该检查要求密钥已注入且 chronyd 已同步(与全量流程
+#   NTP → pre_install_check 一致); 放在 01/05 之前会把"待安装 NTP"的健康新节点误判为关键失败。
+bash "${SCRIPT_DIR}/modules/02_k8s/14_pre_install_check.sh" || {
+    unset ONLY_HOSTS
+    err "新节点安装前环境检查失败 → 中止扩容(尚未进入 inventory/kubespray)"
+    exit 1
+}
 unset ONLY_HOSTS
 bash "${SCRIPT_DIR}/modules/02_k8s/03_k8s_hosts.sh"        # 节点侧 hostname→IP(所有 NODES, 无条件) + 部署机 hosts(默认关)
 ok "环境就绪(新节点可 SSH, 时间已同步)"

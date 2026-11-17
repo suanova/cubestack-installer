@@ -516,6 +516,11 @@ NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"        # 节点-权威偏差阈�
 
 `modules/02_k8s/14_pre_install_check.sh`(默认启用、可重复)在 kubespray **真正安装之前**对 `NODES` 中全部 master/worker 做只读体检;逻辑在 `tools/node/pre-install-check.sh`,可单独运行:
 
+> **2026-11-17(CodeRabbit)**: 默认全量部署中, 本模块在 **NTP 之后、优雅卸载/覆盖安装之前**提前执行;
+> 关键项失败会中止, 现有组件不会被 `cluster-teardown.sh --uninstall` 拆除。模块循环会跳过重复执行。
+> `--steps k8s_deploy` 精确模式也会保留本检查(显式 `--skip pre_install_check` 可跳过)。
+> 扩容时 `07_k8s_scale.sh` 也会在 SSH 免密/NTP 之后、inventory/join 之前只对新节点执行本检查。
+
 ```bash
 bash ./scripts/tools/node/pre-install-check.sh --check            # 检查全部节点
 bash ./scripts/tools/node/pre-install-check.sh --check --only worker02
@@ -524,7 +529,7 @@ sudo ./scripts/deploy-cluster.sh --skip pre_install_check ...     # 明确跳过
 
 检查项与分级:
 
-- **关键项(失败即中止,退出码 1)**:SSH 免密/密码均不可达、非 root 无免密 sudo(root 无 sudo)、`NTP_ENABLED≠0` 时 chronyd 未安装/未运行/偏差 > `NTP_MAX_OFFSET_MS`(无 chrony 的节点按项目口径允许 `systemd-timesyncd` 回退,但需 active + 已同步)、CPU < `PRE_INSTALL_MIN_CPU`、内存 < `PRE_INSTALL_MIN_MEM_MB`、`/var/lib` 可用 < `PRE_INSTALL_MIN_DISK_GB`。
+- **关键项(失败即中止,退出码 1)**:SSH 免密/密码均不可达、非 root 无免密 sudo(root 无 sudo)、`NTP_ENABLED≠0` 时 chronyd 未安装/未运行/Leap status 未同步(`Not synchronised`)/偏差 > `NTP_MAX_OFFSET_MS`(本地权威: 首 master 且无 `NTP_SERVER`/`NTP_UPSTREAM`, 只要求服务运行; 无 chrony 的节点按项目口径允许 `systemd-timesyncd` 回退,但需 active + 已同步)、CPU < `PRE_INSTALL_MIN_CPU`、内存 < `PRE_INSTALL_MIN_MEM_MB`、`/var/lib` 可用 < `PRE_INSTALL_MIN_DISK_GB`。
 - **建议项(只告警)**:master 内存 < `PRE_INSTALL_MASTER_MIN_MEM_MB`、`/var/lib` 可用 < `PRE_INSTALL_RECOMMENDED_DISK_GB`、chronyd 未开机自启、SSH 仅密码回退可用。
 - **跳过条件**:单节点集群(1 master / 0 worker)或 `NTP_ENABLED=0` 时,chronyd 同步检查自动跳过(建议项)。
 - 阈值默认值见 `cluster.defaults.conf` §2.2b,可在 `cluster.conf` 写同名变量覆盖。
