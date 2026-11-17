@@ -35,23 +35,32 @@ env:
   RDMA_IMAGE_TAG: v1.5.4
   REGISTRY_IMAGE_TAG: 2.8.1
   NETSHOOT_RDMA_VERSION: sha-ea1b33c
-  CEPHCSI_VERSION: v3.17.0
-  CEPH_CSI_OPERATOR_VERSION: v1.0.4
-  CSIADDONS_SIDECAR_VERSION: v0.14.0
+  CEPHCSI_VERSION: v3.18.1
+  CEPH_CSI_OPERATOR_VERSION: v1.1.0
+  CSIADDONS_SIDECAR_VERSION: v0.15.1
+  # Kubespray-managed CSI sidecars stay at the v2.32.0 supported set.
   CSI_ATTACHER_VERSION: v4.5.1
   CSI_NODE_DRIVER_REGISTRAR_VERSION: v2.4.0
   CSI_PROVISIONER_VERSION: v4.0.1
   CSI_RESIZER_VERSION: v1.10.1
   CSI_SNAPSHOTTER_VERSION: v7.0.2
-  NGINX_TAG: '1.27'
-  ROOK_VERSION: v1.20.2
   SNAPSHOT_CONTROLLER_VERSION: v7.0.2
+  # Rook 1.21.1's csi-operator defaults; packaged as separate images so we
+  # never force a newer version onto kubespray's own CSI knobs.
+  ROOK_CSI_ATTACHER_VERSION: v4.13.0
+  ROOK_CSI_NODE_DRIVER_REGISTRAR_VERSION: v2.18.0
+  ROOK_CSI_PROVISIONER_VERSION: v6.3.0
+  ROOK_CSI_RESIZER_VERSION: v2.2.1
+  ROOK_CSI_SNAPSHOTTER_VERSION: v8.6.0
+  CSI_SNAPSHOT_METADATA_VERSION: v1.1.0
+  NGINX_TAG: '1.27'
+  ROOK_VERSION: v1.21.1
 
 # No supported override path: CI locks these to the vendored source.
+# CEPHCSI_VERSION / CSIADDONS_SIDECAR_VERSION are managed: ceph-csi-operator 1.1.0
+# selects them from its built-in defaults, so there is no vendored source to lock.
 display_only:
-  - CEPHCSI_VERSION
   - CEPH_CSI_OPERATOR_VERSION
-  - CSIADDONS_SIDECAR_VERSION
   - CSI_ATTACHER_VERSION
   - CSI_NODE_DRIVER_REGISTRAR_VERSION
   - CSI_PROVISIONER_VERSION
@@ -282,6 +291,39 @@ images:
   version: ${CSI_SNAPSHOTTER_VERSION}
   dest: offline-files/kubespray/${KUBESPRAY_VERSION}/images
   tar: registry.k8s.io_sig-storage_csi-snapshotter_${CSI_SNAPSHOTTER_VERSION}.tar
+# Rook-managed CSI sidecars: ceph-csi-operator 1.1.0 pulls these tags by default.
+# They are packaged alongside kubespray's own (older) sidecar images; kubespray
+# is never asked to run a version it does not ship.
+- key: ceph:rook/registry.k8s.io/sig-storage/csi-attacher
+  catalog_id: storage/csi-attacher
+  version: ${ROOK_CSI_ATTACHER_VERSION}
+  dest: offline-files/kubespray/${KUBESPRAY_VERSION}/images
+  tar: registry.k8s.io_sig-storage_csi-attacher_${ROOK_CSI_ATTACHER_VERSION}.tar
+- key: ceph:rook/registry.k8s.io/sig-storage/csi-node-driver-registrar
+  catalog_id: storage/csi-node-driver-registrar
+  version: ${ROOK_CSI_NODE_DRIVER_REGISTRAR_VERSION}
+  dest: offline-files/kubespray/${KUBESPRAY_VERSION}/images
+  tar: registry.k8s.io_sig-storage_csi-node-driver-registrar_${ROOK_CSI_NODE_DRIVER_REGISTRAR_VERSION}.tar
+- key: ceph:rook/registry.k8s.io/sig-storage/csi-provisioner
+  catalog_id: storage/csi-provisioner
+  version: ${ROOK_CSI_PROVISIONER_VERSION}
+  dest: offline-files/kubespray/${KUBESPRAY_VERSION}/images
+  tar: registry.k8s.io_sig-storage_csi-provisioner_${ROOK_CSI_PROVISIONER_VERSION}.tar
+- key: ceph:rook/registry.k8s.io/sig-storage/csi-resizer
+  catalog_id: storage/csi-resizer
+  version: ${ROOK_CSI_RESIZER_VERSION}
+  dest: offline-files/kubespray/${KUBESPRAY_VERSION}/images
+  tar: registry.k8s.io_sig-storage_csi-resizer_${ROOK_CSI_RESIZER_VERSION}.tar
+- key: ceph:rook/registry.k8s.io/sig-storage/csi-snapshotter
+  catalog_id: storage/csi-snapshotter
+  version: ${ROOK_CSI_SNAPSHOTTER_VERSION}
+  dest: offline-files/kubespray/${KUBESPRAY_VERSION}/images
+  tar: registry.k8s.io_sig-storage_csi-snapshotter_${ROOK_CSI_SNAPSHOTTER_VERSION}.tar
+- key: ceph:registry.k8s.io/sig-storage/csi-snapshot-metadata
+  catalog_id: storage/csi-snapshot-metadata
+  version: ${CSI_SNAPSHOT_METADATA_VERSION}
+  dest: offline-files/kubespray/${KUBESPRAY_VERSION}/images
+  tar: registry.k8s.io_sig-storage_csi-snapshot-metadata_${CSI_SNAPSHOT_METADATA_VERSION}.tar
 - key: ceph:registry.k8s.io/sig-storage/snapshot-controller
   catalog_id: storage/snapshot-controller
   version: ${SNAPSHOT_CONTROLLER_VERSION}

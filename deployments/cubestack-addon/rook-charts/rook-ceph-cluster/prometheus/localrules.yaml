@@ -566,7 +566,8 @@ groups:
         annotations:
           description: "Pool '{{ $labels.name }}' will be full in less than 5 days assuming the average fill-up rate of the past 48 hours."
           summary: "Pool growth rate may soon exceed capacity on cluster {{ $labels.cluster }}"
-        expr: "(predict_linear(ceph_pool_percent_used[2d], 3600 * 24 * 5) * on(cluster,pool_id, instance) group_right() ceph_pool_metadata) >= 95"
+        expr: "(predict_linear(avg by (cluster,pool_id) (ceph_pool_percent_used)[2d:], 3600 * 24 * 5) * on(cluster,pool_id) group_right() avg by (cluster,pool_id, name) (ceph_pool_metadata)) >= 0.95"
+        for: "1h"
         labels:
           oid: "1.3.6.1.4.1.50495.1.2.1.9.2"
           severity: "warning"
@@ -833,7 +834,7 @@ groups:
         annotations:
           description: "Typically, high CPU may indicate degraded performance. Consider increasing the number of reactor cores"
           summary: "CPU used by {{ $labels.instance }} NVMe-oF Gateway is high on cluster {{ $labels.cluster }}"
-        expr: "label_replace(avg by(instance, cluster) (rate(ceph_nvmeof_reactor_seconds_total{mode=\"busy\"}[1m])),\"instance\",\"$1\",\"instance\",\"(.*):.*\") > 80.00"
+        expr: "100 * label_replace(avg by(instance, cluster) (rate(ceph_nvmeof_reactor_seconds_total{mode=\"busy\"}[1m])),\"instance\",\"$1\",\"instance\",\"(.*):.*\") > 80.00"
         for: "10m"
         labels:
           severity: "warning"

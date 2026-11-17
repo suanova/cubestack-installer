@@ -560,7 +560,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   sudo ./deployments/scripts/tools/images/nvidia-save-images.sh [--list]    # 联网机备料
   ```
 
-## Ceph / Rook 部署速查(Rook v1.20.2 + Ceph v20.2.2, 详见 docs/ceph-rook.md)
+## Ceph / Rook 部署速查(Rook v1.21.1 + Ceph v20.2.2, 详见 docs/ceph-rook.md)
 
 - **定位**: 高可用分布式存储(块 RBD; 可选 CephFS/RGW)。生产设计 `size=3 + failureDomain=host + min_size=2 + mon=3`。
 - **离线三件套(联网机)**: `tools/k8s/rook-fetch-manifests.sh`(rook manifest → `cubestack-addon/rook/`)、

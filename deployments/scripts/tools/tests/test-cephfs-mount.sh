@@ -248,7 +248,7 @@ case "${cmd}" in
     *"get cephcluster"*) echo "Ready" ;;
     *"get cephfilesystem"*) echo "Ready" ;;
     *"get cm rook-ceph-mon-endpoints"*) echo "a=10.0.0.5:6789,b=10.0.0.6:6789,c=10.0.0.7:6789" ;;
-    *"get ds rook-ceph.cephfs.csi.ceph.com-nodeplugin"*) echo "quay.io/cephcsi/cephcsi:v3.17.0" ;;
+    *"get ds rook-ceph.cephfs.csi.ceph.com-nodeplugin"*) echo "quay.io/cephcsi/cephcsi:v3.18.1" ;;
     *"ceph auth get-or-create"*) echo "[client.cubestack-cephfs-models]" ;;
     *"ceph auth print-key"*) echo "AQBTestKey1234567890abcdef==" ;;
     *"rollout status"*) echo 'daemon set "cephfs-models-mount" successfully rolled out' ;;
@@ -416,7 +416,7 @@ chk_contains "mountPropagation" "mountPropagation: Bidirectional" "${APPLY1}"
 chk_contains "宿主目标路径" "path: /mnt/cephfs/models" "${APPLY1}"
 chk_contains "mon 归一化" "10.0.0.5:6789,10.0.0.6:6789,10.0.0.7:6789" "${APPLY1}"
 chk_contains "CephFS 子目录挂载" ':/${SUBDIR}' "${APPLY1}"
-chk_contains "镜像自动取 CSI" "quay.io/cephcsi/cephcsi:v3.17.0" "${APPLY1}"
+chk_contains "镜像自动取 CSI" "quay.io/cephcsi/cephcsi:v3.18.1" "${APPLY1}"
 chk_not_contains "不把 key 放明文环境变量" "AQBTestKey1234567890abcdef==" <(grep -v '^  key:' "${APPLY1}" || true)
 chk_contains "创建专用 cephx 用户" "get-or-create client.cubestack-cephfs-models" "${TMP}/ssh-install1.log"
 
