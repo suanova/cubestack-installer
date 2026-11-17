@@ -19,6 +19,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 CEPH="${REPO_ROOT}/deployments/scripts/modules/03_addon/02_ceph.sh"
 EXPOSE="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-expose-external.sh"
 CLEANUP="${MODULE_UNDER_TEST:-${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-cleanup.sh}"
+RBDC="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-rbd-cleanup.sh"
 fail=0
 chk_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  ok  $1"; else echo "  FAIL $1: [$3] 未包含 [$2]"; fail=1; fi; }
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }
@@ -108,6 +109,20 @@ chk "external 查询失败置 _CEPH_ABORT_WIPE" "1" \
     "$(printf '%s\n' "${_ext_q_block}" | grep -cF '_CEPH_ABORT_WIPE=1' || true)"
 chk "CRD 不存在仍视为无集群(不误拦)" "1" \
     "$(printf '%s\n' "${_ext_q_block}" | grep -cF "doesn't have a resource type" || true)"
+
+echo "== ⑤ RBD 清理前必须证明设备空闲(2026-11-11 D 态事故) =="
+chk_contains "rbd-cleanup 忙闲探测" "_rbd_device_busy" "${RBDC}"
+chk_contains "ceph-cleanup 保留在用/在飞 IO 设备" "在用/有在飞 IO" "${CLEANUP}"
+chk_contains "rbd-cleanup 保留在飞 IO 设备" "设备在用/有在飞 IO" "${RBDC}"
+chk_contains "rbd-cleanup 无法确认 PV 时跳过清理" "无法证明 rbd 映射是孤儿" "${RBDC}"
+chk_contains "ceph-cleanup 记录 holders 读取状态" "_h_rc" "${CLEANUP}"
+chk_contains "ceph-cleanup 记录 open fd 读取状态" "_fd_rc" "${CLEANUP}"
+chk_contains "ceph-cleanup 记录 inflight 读取状态" "_inf_rc" "${CLEANUP}"
+chk_contains "ceph-cleanup 记录 findmnt 错误" "_fm_err" "${CLEANUP}"
+chk_contains "rbd-cleanup 记录 holders 读取状态" "_h_rc" "${RBDC}"
+chk_contains "rbd-cleanup 记录 open fd 读取状态" "_fd_rc" "${RBDC}"
+chk_contains "rbd-cleanup 记录 inflight 读取状态" "_inf_rc" "${RBDC}"
+chk_contains "rbd-cleanup 记录 findmnt 错误" "_fm_err" "${RBDC}"
 
 echo ""
 if [ "${fail}" = "0" ]; then
