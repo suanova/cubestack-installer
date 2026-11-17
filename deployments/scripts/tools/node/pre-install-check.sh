@@ -5,6 +5,15 @@
 # 检查对象: cluster.conf NODES 中的 master/worker(支持 --only / ONLY_HOSTS 过滤)
 # 检查项:
 #   · SSH: 部署密钥免密可用; 密钥不通时用节点密码回退验证(只验证, 不写配置)
+#         主机密钥校验(2026-11-17 CodeRabbit): 不再 no + /dev/null。
+#         · 持久 known_hosts: ${PRE_INSTALL_SSH_KNOWN_HOSTS:-${SSH_KEY_DIR}/cubestack_known_hosts}
+#           —— 密钥探测 accept-new(首次记录, 之后换钥拒绝);
+#         · 密码回退恒 StrictHostKeyChecking=yes, 且只向**本次运行前**已在 known_hosts 中
+#           受信的节点发送密码 —— 不接受本次未认证探测刚记录的 key 作为信任来源;
+#           未受信 → 关键项失败, 给出人工核对指纹 + ssh-keyscan 的处置, 绝不把密码发给
+#           首次见到/身份未验证的主机。
+#         可覆盖: PRE_INSTALL_SSH_HOST_KEY_CHECKING(accept-new|yes, 默认 accept-new)
+#                 PRE_INSTALL_SSH_KNOWN_HOSTS(默认 ${SSH_KEY_DIR}/cubestack_known_hosts)
 #   · sudo: 非 root 用户要求 sudo -n 可用; root 用户要求节点存在 sudo
 #           (与 modules/02_k8s/01_k8s_passwordless.sh 同一口径)
 #   · chronyd: NTP_ENABLED≠0 时要求 chronyd 已安装/运行;
@@ -81,9 +90,23 @@ esac
 
 # ---------------- SSH 连接口径(与 setup-passwordless.sh 一致) ----------------
 SSH_KEY="${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+# 主机密钥策略(与 node-net-guard.sh 同口径; 本工具的**密码回退**更严格):
+#   · 密钥探测: accept-new(首次记录、之后换钥拒绝) 或 yes(仅接受已预置 key);
+#   · 密码回退: 恒 yes —— 只向已受信 host key 发送密码, 不接受首次 TOFU/未认证探测。
+SSH_HKC="${PRE_INSTALL_SSH_HOST_KEY_CHECKING:-accept-new}"
+case "${SSH_HKC}" in
+    accept-new|yes) : ;;
+    *)
+        err "PRE_INSTALL_SSH_HOST_KEY_CHECKING 非法: '${SSH_HKC}'(accept-new|yes)"
+        exit 1
+        ;;
+esac
+SSH_KNOWN_HOSTS="${PRE_INSTALL_SSH_KNOWN_HOSTS:-${SSH_KEY_DIR:-${HOME}/.ssh}/cubestack_known_hosts}"
+mkdir -p "$(dirname "${SSH_KNOWN_HOSTS}")" 2>/dev/null || true
 SSH_BASE_OPTS=(-i "${SSH_KEY}" -F /dev/null -o IdentitiesOnly=yes -o LogLevel=ERROR
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8)
-SSH_PW_OPTS=(-F /dev/null -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    -o StrictHostKeyChecking="${SSH_HKC}" -o UserKnownHostsFile="${SSH_KNOWN_HOSTS}" -o ConnectTimeout=8)
+SSH_PW_OPTS=(-F /dev/null -o LogLevel=ERROR -o StrictHostKeyChecking=yes
+    -o UserKnownHostsFile="${SSH_KNOWN_HOSTS}"
     -o ConnectTimeout=8 -o PreferredAuthentications=password -o PubkeyAuthentication=no
     -o NumberOfPasswordPrompts=1)
 
@@ -91,6 +114,12 @@ SSH_PW_OPTS=(-F /dev/null -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserK
 AUTH=""
 _key_ok() {
     ssh "${SSH_BASE_OPTS[@]}" -o BatchMode=yes "${NODE_USER}@${NODE_IP}" true 2>/dev/null
+}
+# 本次运行开始前, 该节点 host key 是否已在持久 known_hosts 中受信。
+# 密码回退只认这个结果(而不是本次密钥探测刚写入的 key)。
+_host_key_pretrusted() {
+    [ -s "${SSH_KNOWN_HOSTS}" ] \
+        && ssh-keygen -F "${NODE_IP}" -f "${SSH_KNOWN_HOSTS}" >/dev/null 2>&1
 }
 _pw_ok() {
     SSHPASS="${NODE_PW}" sshpass -e ssh "${SSH_PW_OPTS[@]}" "${NODE_USER}@${NODE_IP}" true 2>/dev/null
@@ -147,20 +176,28 @@ for _line in "${NODES[@]:-}"; do
     echo ""
     say "节点: ${_label}"
 
-    # ---- ① SSH: 密钥优先, 密码回退 ----
+    # ---- ① SSH: 密钥优先, 密码回退(密码只发给本次运行前已受信 host key 的节点) ----
+    HOST_KEY_PRETRUSTED=0
+    _host_key_pretrusted && HOST_KEY_PRETRUSTED=1
     if [ -f "${SSH_KEY}" ] && _key_ok; then
         AUTH="key"
         _pass "  SSH: 部署密钥免密可用"
     elif [ -n "${NODE_PW}" ]; then
+        if [ "${HOST_KEY_PRETRUSTED}" != "1" ]; then
+            _crit "  SSH: 免密不可用; 密码回退已阻止 —— 节点 ${NODE_IP} 的 host key 未在 ${SSH_KNOWN_HOSTS} 中预先受信"
+            _crit "    不接受本次未认证密钥探测/首次 TOFU 作为信任来源; 处置: 人工核对节点指纹后执行"
+            _crit "    ssh-keyscan -H ${NODE_IP} >> ${SSH_KNOWN_HOSTS}(或先配置 SSH 免密)"
+            continue
+        fi
         if ! command -v sshpass >/dev/null 2>&1; then
             _crit "  SSH: 免密不可用, 且缺少 sshpass 无法用密码回退(安装: apt-get install -y sshpass)"
             continue
         fi
         if _pw_ok; then
             AUTH="pw"
-            _adv "  SSH: 可达但免密未配置(密码回退可用; k8s_passwordless 会在安装前补齐密钥)"
+            _adv "  SSH: 可达但免密未配置(host key 已受信, 密码回退可用; k8s_passwordless 会在安装前补齐密钥)"
         else
-            _crit "  SSH: 不可达或认证失败(密钥 ${SSH_KEY} + 节点密码均失败)"
+            _crit "  SSH: 不可达或认证失败(host key 已受信; 密钥 ${SSH_KEY} + 节点密码均失败)"
             continue
         fi
     else
