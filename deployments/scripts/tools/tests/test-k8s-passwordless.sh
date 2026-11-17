@@ -192,7 +192,7 @@ echo "== ④b cluster.conf 字面量 SSH_KEY_NAME 不覆盖运行时 id_rsa =="
 cat > "${TMP}/cluster-literal.conf" <<'EOF'
 NODES=("master,m1,10.0.0.1,root,wrongpass")
 SSH_USER="root"
-SSH_DEFAULT_PASSWORD="wrongpass"
+SSH_DEFAULT_PASSWORD="wrongpass"  # secret-scan: allow(测试桩假密码, 非真实凭据)
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
 EOF
@@ -207,7 +207,7 @@ chk "退出码 0" "0" "${rc}"
 chk_contains "配置完成" "SSH 免密登录设置成功" "${TMP}/out-ensure-fallback"
 chk_contains "使用项目密钥" "cubestack_k8s" "${TMP}/out-ensure-fallback"
 chk_contains "逐节点成功提示" "免密设置成功" "${TMP}/out-ensure-fallback"
-chk_not_contains "日志不打印密码" "password=wrongpass" "${TMP}/out-ensure-fallback"
+chk_not_contains "日志不打印密码" "password=wrongpass" "${TMP}/out-ensure-fallback"  # secret-scan: allow(断言字面量, 非真实凭据)
 chk "尝试过密码注入" "1" "$(_count "${TMP}/ensure-sshpass-fallback.log")"
 
 echo "== ⑥ ensure_node_ssh_access: 显式自定义密钥优先, 不探测 id_rsa =="
