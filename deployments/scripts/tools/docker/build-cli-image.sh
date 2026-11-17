@@ -124,6 +124,12 @@ if [ "${DO_BUILD}" = "1" ]; then
             ok "pushed: ${push_image}"
         done
     fi
+    # 当前构建流程以仓库根为上下文，不再需要持久化 cli-context/；
+    # 构建成功后清理旧流程/历史遗留的临时上下文。
+    if [ -d "${REPO_ROOT}/deployments/cli-context" ]; then
+        say "cleaning legacy build context: deployments/cli-context"
+        rm -rf "${REPO_ROOT}/deployments/cli-context"
+    fi
 else
     echo "Manual builds:"
     echo "  code: sudo ${ENGINE} build ${ENGINE_FMT_ARGS[*]} -f ${CODE_DOCKERFILE} --build-arg CLI_BASE_TAG=${BASE_TAG} -t ${IMAGE} ${REPO_ROOT}"

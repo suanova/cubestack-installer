@@ -36,6 +36,30 @@ sudo ./deployments/scripts/deploy-cluster.sh --release 2.1.0
 版本树由 release 打包，包含镜像 tar、chart、k8s 资产、modules 和校验文件。
 installer 只消费本地树，不访问 MinIO/Harbor。
 
+版本树的 `modules/` 必须与 `offline-files/` **同级**；容器运行时要同时挂载两者
+（见 [CLI 容器](#cli-容器)）：
+
+```text
+<版本树根>/
+  offline-files/     → /opt/cubestack-installer/deployments/offline-files
+  modules/           → /opt/cubestack-installer/deployments/modules   (只读)
+  cubestack-installer-cli.tar
+```
+
+若使用 `cubestack-installer/latest` 的 CI store 布局获取本地文件：
+
+```bash
+python3 deployments/scripts/tools/offline/offline-sync.py apply --yes --with-install-tree
+```
+
+它会物化：
+
+```text
+/data/offline-files/                 # offline-files 内容
+/data/modules/                       # 平台私有 modules（与 offline-files 同级）
+/data/cubestack-installer-cli.tar    # CLI 镜像 tar
+```
+
 ### 直接部署
 
 ```bash
@@ -78,17 +102,39 @@ sudo ./deployments/scripts/tools/docker/build-cli-image.sh --build
 sudo ./deployments/scripts/tools/docker/build-cli-image.sh --push
 ```
 
-运行：
+运行（**双挂载**：offline-files + 平台私有 modules）：
 
 ```bash
+# 离线文件根与 modules 必须同级；按实际路径调整
+OFFLINE_ROOT=/data/offline-files
+MODULES_DIR=/data/modules
+
 sudo docker run --rm -it --network host \
-  -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
+  -v "${OFFLINE_ROOT}":/opt/cubestack-installer/deployments/offline-files \
+  -v "${MODULES_DIR}":/opt/cubestack-installer/deployments/modules:ro \
   -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
   -v $HOME/.ssh:/root/.ssh \
   harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
 ```
 
 容器内已是 root，直接运行部署脚本。离线文件挂载复用，不进入镜像。
+
+**为什么要挂 `modules/`**：installer 在 release 模式下把
+`dirname(OFFLINE_FILES_ROOT)/modules` 作为私有平台模块目录
+（`cubestack_operator`、`dev_lab`、`model_images`、`lws`、`envoy_gateway`、
+`ai_gateway`、`prometheus`、`perses`、`bmc`、`metax`、`cuberouter` 等）。
+只挂 `offline-files/` 时这些模块不会出现在 `--list-steps` 中。
+
+> 若镜像本身已内置这些模块（`deployments/scripts/modules/03_addon/` 里能看到
+> `25_/26_/40_..52_`），**不要**再挂 `modules/`，否则会报
+> `duplicate module file`。可先检查：
+>
+> ```bash
+> docker exec cubestack-install-a ls /opt/cubestack-installer/deployments/scripts/modules/03_addon \
+>   | grep -E '^(25|26|40|4[1-9]|5[0-2])_'
+> ```
+>
+> 无输出 → 需要双挂载；有输出 → 单挂载 `offline-files/` 即可。
 
 ## 目录
 
@@ -99,6 +145,7 @@ deployments/
   kubespray/                # kubespray 树、inventory、离线安装入口
   config/                   # cluster.conf 模板和默认值
   offline-files/            # 本地离线件（gitignore，由版本树/物化生成）
+  modules/                  # 平台私有模块（版本树提供；与 offline-files 同级，运行时挂载）
 versions/
   base.yaml                 # 公共 base 版本真源
   os/                       # 节点前置包体检清单
