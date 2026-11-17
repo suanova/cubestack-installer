@@ -80,6 +80,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # This entrypoint lives on main after the 2.1 merge; the 2.0 release
+          # definitions and scripts live on release-2.0.
+          ref: release-2.0
           persist-credentials: false
       - name: Resolve
         id: resolve
