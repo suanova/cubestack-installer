@@ -2619,9 +2619,15 @@ case "${COMMAND}" in
     install)
         # 整个安装过程所有日志(含 ansible): 同时显示终端 + 写入日志文件
         # 每次执行前清理旧日志: 旧文件可能被上次 root/sudo 运行占用导致 tee 写失败(Permission denied),
-        # 非 root 时用 sudo 删除; start_log_tee 仍作为最终兜底(回退 HOME 日志/仅终端), 不中断安装
-        LOG_FILE="/tmp/${CLUSTER_NAME}-install.log"
-        [ -e "${LOG_FILE}" ] && { rm -f "${LOG_FILE}" 2>/dev/null || sudo rm -f "${LOG_FILE}" 2>/dev/null || true; }
+        # 非 root 时用 sudo 删除; start_log_tee 仍作为最终兜底(回退 HOME 日志/仅终端), 不中断安装。
+        # ⚠ 由 deploy-cluster 调用时 LOG_FILE 已是同一路径且已写入 SSH 免密/预检段 ——
+        #   此时**不清理**, 保持全流程日志连续(standalone 运行才清理旧文件)。
+        _install_log="/tmp/${CLUSTER_NAME}-install.log"
+        if [ "${LOG_FILE:-}" != "${_install_log}" ]; then
+            [ -e "${_install_log}" ] && { rm -f "${_install_log}" 2>/dev/null || sudo rm -f "${_install_log}" 2>/dev/null || true; }
+        fi
+        LOG_FILE="${_install_log}"
+        unset _install_log
         start_log_tee "${LOG_FILE}"
         cmd_install
         ;;

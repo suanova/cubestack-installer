@@ -109,6 +109,34 @@ run_module() {  # run_module <tag> [VAR=value ...] → 退出码; 输出在 $TMP
     echo $?
 }
 
+# ensure_node_ssh_access 测试: <tag> <是否有 ~/.ssh/id_rsa: 0|1> [VAR=value ...]
+run_ensure() {
+    local tag="$1" with_id="$2"; shift 2
+    local home="${TMP}/home-${tag}"
+    mkdir -p "${home}/.ssh"
+    [ "${with_id}" = "1" ] && : > "${home}/.ssh/id_rsa"
+    cat > "${TMP}/run-ensure-${tag}.sh" <<EOF
+#!/bin/bash
+set -euo pipefail
+source "${REPO_ROOT}/deployments/scripts/lib-common.sh"
+load_config
+ensure_node_ssh_access
+EOF
+    (
+        export HOME="${home}"
+        export PATH="${TMP}/bin:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf"
+        unset SSH_KEY_DIR SSH_KEY_NAME
+        export FAKE_EXPECT_KEY="${home}/.ssh/cubestack_k8s"
+        export FAKE_SSH_LOG="${TMP}/ensure-ssh-${tag}.log"
+        export FAKE_SSHPASS_LOG="${TMP}/ensure-sshpass-${tag}.log"
+        export FAKE_KEY_MARK="${TMP}/ensure-key-ok-${tag}"
+        : > "${FAKE_SSH_LOG}"; : > "${FAKE_SSHPASS_LOG}"
+        env "$@" bash "${TMP}/run-ensure-${tag}.sh"
+    ) > "${TMP}/out-ensure-${tag}" 2>&1
+    echo $?
+}
+
 echo "== ① 密钥不通 + 密码错误: 必须在本模块明确失败 =="
 rc="$(run_module authfail FAKE_KEY_OK=0 FAKE_PW_OK=0)"
 chk "退出码非零(部署不得继续)" "1" "${rc}"
@@ -146,6 +174,29 @@ rc="$(run_module pwok FAKE_KEY_OK=0 FAKE_PW_OK=1)"
 chk "退出码 0" "0" "${rc}"
 chk_contains "报告免密登录成功" "免密登录" "${TMP}/out-pwok"
 chk_not_contains "不报失败" "密码认证失败" "${TMP}/out-pwok"
+
+echo "== ④ ensure_node_ssh_access: 已可用的默认 id_rsa 直接复用 =="
+rc="$(run_ensure idrsa 1 FAKE_KEY_OK=1 FAKE_PW_OK=0)"
+chk "退出码 0" "0" "${rc}"
+chk_contains "复用默认密钥" "复用默认密钥" "${TMP}/out-ensure-idrsa"
+chk_contains "日志给出 key" "id_rsa" "${TMP}/out-ensure-idrsa"
+chk "未尝试密码注入" "0" "$(_count "${TMP}/ensure-sshpass-idrsa.log")"
+chk "未生成项目密钥" "1" "$([ -f "${TMP}/home-idrsa/.ssh/cubestack_k8s" ] && echo 0 || echo 1)"
+
+echo "== ⑤ ensure_node_ssh_access: id_rsa 未覆盖全节点 → 项目密钥 + 密码注入 =="
+rc="$(run_ensure fallback 1 FAKE_KEY_OK=0 FAKE_PW_OK=1)"
+chk "退出码 0" "0" "${rc}"
+chk_contains "配置完成" "SSH 免密登录设置成功" "${TMP}/out-ensure-fallback"
+chk_contains "使用项目密钥" "cubestack_k8s" "${TMP}/out-ensure-fallback"
+chk_contains "逐节点成功提示" "免密设置成功" "${TMP}/out-ensure-fallback"
+chk_not_contains "日志不打印密码" "password=wrongpass" "${TMP}/out-ensure-fallback"
+chk "尝试过密码注入" "1" "$(_count "${TMP}/ensure-sshpass-fallback.log")"
+
+echo "== ⑥ ensure_node_ssh_access: 显式自定义密钥优先, 不探测 id_rsa =="
+rc="$(run_ensure custom 1 FAKE_KEY_OK=1 FAKE_PW_OK=1 SSH_KEY_NAME=custom)"
+chk "退出码 0" "0" "${rc}"
+chk_contains "使用自定义密钥" "custom" "${TMP}/out-ensure-custom"
+chk_not_contains "未复用 id_rsa" "复用默认密钥" "${TMP}/out-ensure-custom"
 
 echo ""
 if [ "${fail}" = "0" ]; then

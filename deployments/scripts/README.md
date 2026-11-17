@@ -278,6 +278,17 @@ sudo ./scripts/tools/node/setup-ntp.sh --check
 用配置的默认密码(`SSH_DEFAULT_PASSWORD`)注入公钥到目标主机 `~/.ssh/authorized_keys`,随后验证纯密钥登录。要求:已执行 `gen-ssh-key.sh`;目标允许 SSH 密码登录。
 工具会**先验证密钥是否已可用**(幂等重跑时不再要求密码);密钥不通才回退密码。密码被拒 / 网络不通会明确区分并**非零退出**(`k8s_passwordless` 模块据此中止部署, 不再"告警后继续")。
 
+### 5.3.1 部署时的提前 SSH 就绪
+
+`deploy-cluster.sh` 在**所有安装预检之前**(包括 Ceph 磁盘检测)统一调用 `ensure_node_ssh_access`, 对 `NODES` 全部节点:
+
+- 默认配置(`SSH_KEY_DIR=~/.ssh`, `SSH_KEY_NAME=cubestack_k8s`)下先探测 `~/.ssh/id_rsa`; **仅当它对全部节点已可免密登录**时直接复用, 不生成新密钥、不改节点;
+- 否则按现有方式生成/复用 `cubestack_k8s`, 逐节点用 NODES 密码注入公钥;
+- 显式自定义 `SSH_KEY_DIR` / `SSH_KEY_NAME` 时**自定义优先**, 不自动探测 `id_rsa`;
+- 日志会逐节点打印当前使用的 key 文件名(不打印密码/公钥), 成功/失败都会明确输出, 失败则在预检前中止。
+
+这样 Ceph 预检不会再出现"SSH 密钥不存在, 将尝试节点密码认证"的提示。
+
 ### 5.4 gen-inventory.sh —— kubespray inventory
 
 ```bash
@@ -461,6 +472,10 @@ REGISTRY_NODEPORT="31148"            # nodeport 模式的固定 NodePort
 
 kubeadm / etcd 对节点间时钟偏差敏感,若节点时间不一致会导致证书校验、心跳、日志时间线等故障。`modules/02_k8s/05_k8s_ntp.sh` 位于 k8s 阶段**部署模块之前**,为默认启用的可重复模块,一键部署与扩容时自动执行。
 
+> **2026-11-17(2.1 口径)**: installer **不安装 OS 包** —— chrony 由节点黄金镜像/运维预装。
+> `k8s_ntp` **只负责同步**(必需步骤); 权威缺 chrony 或客户端既无 chrony 也无 `systemd-timesyncd` → **硬失败**并给安装指引。
+> 全量部署时 NTP 同步会在 **SSH 免密之后、Ceph/其他 operator 卸载/安装之前**先执行(见 `deploy-cluster.sh` 的“安装前 NTP 阶段”)。
+
 原理与机制:
 
 - **权威时间源 = 第一个 master(默认)**:`setup-ntp.sh` 在首 master 配置 chrony 服务端(`local stratum 10`,无公网上游时以本机时钟兜底,离线友好);**不再用宿主机(installer 节点)作权威** —— 部署机可能在 NAT 后/跨网段,节点无法可靠访问。`NTP_SERVER` 显式指定时为首 master 之外的权威服务器(此时首 master 作为普通客户端)。
@@ -638,9 +653,9 @@ k8s-dns-node-cache metrics-server pause"
 sudo ./scripts/deploy-cluster.sh --with-k8s
 ```
 
-该命令自动完成:
+该命令自动完成(SSH 免密会在最前面统一就绪, 可能复用已有 `~/.ssh/id_rsa`, 见 5.3.1):
 1. `setup-vm-network.sh` 初始化 privbr0 网桥 + SNAT
-2. `gen-ssh-key.sh` 生成 SSH 密钥
+2. `gen-ssh-key.sh` 生成 SSH 密钥(仅在需要项目密钥时)
 3. 按 NODES 创建 master/worker 虚拟机(基础镜像已由 `create-vm-template.sh` 预制 kubespray 所需包, 创建 VM 不安装任何组件, 离线环境安全)
 4. `setup-passwordless.sh` 注入公钥
 5. 检查 worker 节点前置包是否已安装（installer 不安装 OS 包）

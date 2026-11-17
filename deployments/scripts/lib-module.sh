@@ -807,8 +807,8 @@ plan_warn_base_redeploy() {
 # 目标(2026-09-17 用户定案): 全新的 installer 容器只有 cluster.conf 的 NODES(IP/用户/密码) 时,
 #   `--steps <组件>` 也要能把组件直接装到**已存在**的集群上:
 #     ① 本地已有可用 kubeconfig(能 kubectl get nodes) → 直接用, 不动集群;
-#     ② 否则按密码引导: 生成密钥对(vm_sshkey) → 用密码注入公钥(k8s_passwordless)
-#        → sync_kubeconfig 从首个 master 取 admin.conf 到本地 ~/.kube/config。
+#     ② 否则按密码引导: SSH 免密就绪(ensure_node_ssh_access: 优先复用可用 id_rsa,
+#        否则生成/注入项目密钥) → sync_kubeconfig 从首个 master 取 admin.conf 到本地 ~/.kube/config。
 #   两步都幂等(已有密钥/公钥则无副作用); 返回 1 = 接入失败(调用方应退出并提示查 NODES)。
 ensure_cluster_access() {
     if command -v kubectl >/dev/null 2>&1 \
@@ -816,9 +816,12 @@ ensure_cluster_access() {
         say "集群接入: 本地 kubeconfig 可用 → 直接使用(跳过接入引导)"
         return 0
     fi
-    say "集群接入: 本地无法访问集群 → 走接入引导(密码注入公钥 + 从首个 master 取 admin.conf)"
-    run_module vm_sshkey || { err "集群接入: 生成 SSH 密钥对失败"; return 1; }
-    run_module k8s_passwordless || { err "集群接入: 注入公钥失败(检查 cluster.conf NODES 的用户名/密码/网络)"; return 1; }
+    say "集群接入: 本地无法访问集群 → 走接入引导(SSH 免密就绪 + 从首个 master 取 admin.conf)"
+    if [ "${NODE_SSH_READY:-0}" = "1" ]; then
+        say "集群接入: SSH 免密已在安装前阶段就绪 → 跳过重复配置"
+    else
+        ensure_node_ssh_access || { err "集群接入: SSH 免密就绪失败(检查 cluster.conf NODES 的用户名/密码/网络)"; return 1; }
+    fi
     sync_kubeconfig || { err "集群接入: 取回 admin.conf 失败(检查首个 master 是否可达、集群是否正常)"; return 1; }
     say "集群接入: kubeconfig 就绪(${HOME}/.kube/config)"
     return 0
@@ -951,8 +954,11 @@ warn_unhealthy_pods() {
 
 print_plan() {
     say "==== 集群规划(配置: ${CLUSTER_CONF}) ===="
-    echo "  网络模式: ${NET_MODE:-bridge}   虚拟机网段: ${VM_SUBNET:-10.244.0.0/16}   物理Worker: ${PHYS_WORKER_NET:-192.168.100.0/24}"
-    echo "  SSH密钥: ${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}   默认密码: ${SSH_DEFAULT_PASSWORD:-<未配置>}"
+    echo "  网络模式: ${NET_MODE:-bridge}   物理Worker: ${PHYS_WORKER_NET:-192.168.100.0/24}"
+    local _pw_state="<未配置>"
+    [ -n "${SSH_DEFAULT_PASSWORD:-}" ] && _pw_state="<已配置>"
+    echo "  SSH密钥: ${SSH_KEY_NAME:-cubestack_k8s}   默认密码: ${_pw_state}"
+    unset _pw_state
     echo "  本次执行模块: ${RUN_STEPS[*]:-<空>}"
     print_undeployed_summary
     plan_warn_base_redeploy

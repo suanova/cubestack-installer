@@ -1256,6 +1256,104 @@ node_matches() {
 # SSH 端口探测(免认证,仅确认就绪)
 ssh_port_open() { timeout 3 bash -c "echo > /dev/tcp/$1/22" 2>/dev/null; }
 
+# ---------------- SSH 免密提前就绪(任何安装预检之前) ----------------
+# 用户口径(2026-11-17):
+#   ① 若已能免密登录, 优先复用用户默认 ~/.ssh/id_rsa —— 仅当 SSH_KEY_DIR/SSH_KEY_NAME
+#      仍是默认值(~/.ssh + cubestack_k8s)且 id_rsa 对 NODES **全部节点**验证通过;
+#   ② 否则按现有方式: 生成/复用项目密钥(cubestack_k8s), 逐节点密码注入公钥;
+#   ③ 必须在 Ceph 磁盘检测等安装预检之前完成, 且覆盖 NODES 全部节点
+#      (--only 只影响后续模块, 不影响本次就绪检查)。
+# 说明:
+#   · 显式自定义 SSH_KEY_DIR / SSH_KEY_NAME 时**不做** id_rsa 自动探测(自定义配置优先);
+#   · id_rsa 存在但未覆盖全部节点时**不会**注入它的公钥 —— 避免动用户个人密钥,
+#     按当前方式回退到项目密钥;
+#   · 成功后就地 export SSH_KEY_DIR/SSH_KEY_NAME, 后续所有工具/模块自动跟随。
+# 返回: 0=全部节点免密就绪; 1=存在无法免密且无密码可注入的节点(调用方应在预检前中止)
+ensure_node_ssh_access() {
+    local default_dir="${HOME}/.ssh" default_name="cubestack_k8s"
+    local key_dir key_name key key_label reason explicit=0 line host ip user pw failed=0 all_ok=1 _out
+
+    [ -n "${NODES[*]:-}" ] || { err "cluster.conf NODES 为空, 无法配置 SSH 免密"; return 1; }
+
+    key_dir="${SSH_KEY_DIR:-${default_dir}}"
+    key_name="${SSH_KEY_NAME:-${default_name}}"
+    # 非默认 dir/name = 显式自定义 → 自定义优先, 不探测 id_rsa
+    [ "${key_dir}" != "${default_dir}" ] && explicit=1
+    [ "${key_name}" != "${default_name}" ] && explicit=1
+    reason="未检测到默认 ~/.ssh/id_rsa"
+    [ "${explicit}" = "1" ] && reason="使用显式自定义密钥配置(SSH_KEY_DIR/SSH_KEY_NAME)"
+    [ "${explicit}" = "0" ] && [ -f "${default_dir}/id_rsa" ] && reason="默认 ~/.ssh/id_rsa 未覆盖全部节点"
+
+    # ① 默认 ~/.ssh/id_rsa 已可免密 → 全节点复用, 不改动任何节点
+    if [ "${explicit}" = "0" ] && [ -f "${default_dir}/id_rsa" ]; then
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            node_parse "${line}"
+            case "${NODE_ROLE}" in master|worker) ;; *) continue ;; esac
+            [ -n "${NODE_IP}" ] || continue
+            if ! ssh -i "${default_dir}/id_rsa" -F /dev/null -o IdentitiesOnly=yes \
+                    -o BatchMode=yes -o StrictHostKeyChecking=no \
+                    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+                    "${NODE_USER}@${NODE_IP}" true 2>/dev/null; then
+                all_ok=0
+                break
+            fi
+        done
+        if [ "${all_ok}" = "1" ]; then
+            SSH_KEY_DIR="${default_dir}"
+            SSH_KEY_NAME="id_rsa"
+            export SSH_KEY_DIR SSH_KEY_NAME
+            key_label="${SSH_KEY_NAME}"
+            for line in "${NODES[@]:-}"; do
+                [ -z "${line}" ] && continue
+                node_parse "${line}"
+                case "${NODE_ROLE}" in master|worker) ;; *) continue ;; esac
+                [ -n "${NODE_IP}" ] || continue
+                ok "  ${NODE_HOSTNAME:-${NODE_IP}}(${NODE_IP}, user=${NODE_USER}) 免密设置成功(key: ${key_label}, 复用默认密钥)"
+            done
+            ok "SSH 免密登录设置成功(NODES 全部节点; key: ${key_label})"
+            NODE_SSH_READY=1   # 供同进程的 ensure_cluster_access 跳过重复配置
+            return 0
+        fi
+    fi
+
+    # ② 项目/自定义密钥: 生成(幂等) + 逐节点密钥验证/密码注入
+    SSH_KEY_DIR="${key_dir}"
+    SSH_KEY_NAME="${key_name}"
+    export SSH_KEY_DIR SSH_KEY_NAME
+    key="${SSH_KEY_DIR}/${SSH_KEY_NAME}"
+    key_label="${SSH_KEY_NAME}"   # 日志只展示 key 文件名, 不展示完整路径/密码/公钥内容
+    say "SSH 免密登录配置: 使用密钥 ${key_label}(${reason})"
+    LOG_VERBOSE=0 bash "${REPO_ROOT}/deployments/scripts/tools/node/gen-ssh-key.sh" --quiet \
+        || { err "生成 SSH 密钥失败: ${key}"; return 1; }
+
+    for line in "${NODES[@]:-}"; do
+        [ -z "${line}" ] && continue
+        node_parse "${line}"
+        case "${NODE_ROLE}" in master|worker) ;; *) continue ;; esac
+        [ -n "${NODE_IP}" ] || continue
+        host="${NODE_HOSTNAME:-${NODE_IP}}"; ip="${NODE_IP}"; user="${NODE_USER}"; pw="${NODE_PW:-}"
+        say "  ${host}(${ip}, user=${user}) 配置免密 ..."
+        # 捕获工具输出: 成功时只打印本节点成功提示(不显示 key/密码/公钥内容), 失败时展开诊断。
+        if _out="$(LOG_VERBOSE=0 SSH_DEFAULT_PASSWORD="${pw}" \
+            bash "${REPO_ROOT}/deployments/scripts/tools/node/setup-passwordless.sh" "${ip}" "${user}" 2>&1)"; then
+            ok "  ${host}(${ip}, user=${user}) 免密设置成功(key: ${key_label})"
+        else
+            err "  SSH 免密配置失败: ${host}(${ip}, user=${user})"
+            printf '%s\n' "${_out}" | sed 's/^/    /' >&2
+            failed=1
+        fi
+    done
+    if [ "${failed}" -ne 0 ]; then
+        err "SSH 免密未全部就绪 —— 已在安装预检之前中止"
+        err "  处置: 核对 cluster.conf NODES 的密码 / sshd 密码登录开关, 或预先配置好 ~/.ssh/id_rsa"
+        return 1
+    fi
+    ok "SSH 免密登录设置成功(NODES 全部节点; key: ${key_label})"
+    NODE_SSH_READY=1   # 供同进程的 ensure_cluster_access 跳过重复配置
+    return 0
+}
+
 # ---------------- IP / CIDR 工具 ----------------
 ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24) + (b<<16) + (c<<8) + d )); }
 int2ip() { local n=$1; echo "$(( (n>>24)&255 )).$(( (n>>16)&255 )).$(( (n>>8)&255 )).$(( n&255 ))"; }

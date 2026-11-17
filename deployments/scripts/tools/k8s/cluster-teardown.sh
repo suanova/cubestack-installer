@@ -12,6 +12,7 @@
 # 用法:
 #   cluster-teardown.sh --list               # 只读: 打印登记表 + 计划拆序(--raw 输出 TSV 供测试)
 #   cluster-teardown.sh --uninstall [--yes]  # 执行反序优雅卸载(--yes / CUBESTACK_ASSUME_YES=1 免确认)
+#   · 交互确认回答 n → 退出码 3(调用方据此中止整个覆盖流程, 不再继续 Ceph 确认/部署);
 #   · 非交互且未 --yes → 跳过卸载并醒目警告(节点旧集群 reset 前置会再次要求 --yes);
 #   · 测试钩子: CUBESTACK_TEARDOWN_TEST_INVENTORY=<file> 以夹具 JSON 代替读集群(离线夹具用)。
 # 数据源: cluster.conf (NODES 等) + 集群内 ConfigMap cubestack-install-record(kube-system)
@@ -293,7 +294,7 @@ PY
                 # TEARDOWN_CONFIRM_SLEEP 变量保留兼容: 0=跳过确认, 非 0(默认)=询问 [Y/n]
                 if [ "${CONFIRM_SLEEP}" -gt 0 ] 2>/dev/null; then
                     confirm_yes_no "确认立即开始优雅卸载?" 1 \
-                        || { err "已取消优雅卸载 → 中止覆盖流程"; exit 1; }
+                        || { err "已取消优雅卸载 → 中止覆盖流程"; exit 3; }   # 3=用户取消(调用方据此整体中止)
                 fi
                 printf "  %s\n" "开始卸载..."
             else
