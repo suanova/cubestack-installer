@@ -1,14 +1,14 @@
-# 大镜像 push 加速(dev_lab / model-collection)
+# 大镜像 push 加速(model-collection)
 
-> 适用: `36_dev_lab.sh`(6 镜像 ≈44G)、`37_model_images.sh`(3 镜像 ≈33G)把离线 tar 推入
+> 适用: `37_model_images.sh`(3 镜像 ≈33G)把离线 tar 推入
 > 集群内置 registry。本文记录瓶颈、已落地的优化、配置旋钮与 benchmark 方法。
-> 相关: `docs/harbor-mirror.md`(镜像保鲜管道)、`docs/ceph-rook.md`(registry 后端)。
+> 相关: `container-image-mirror`(镜像同步)、`docs/ceph-rook.md`(registry 后端)。
 
 ## 1. 瓶颈(实测)
 
 | 现象 | 证据 |
 |---|---|
-| 串行推镜像 | 两个模块按 `IMAGES`/`image-list.tsv` 逐镜像 `skopeo copy`,前一个完成才推下一个 |
+| 串行推镜像 | 模块按 `image-list.tsv` 逐镜像 `skopeo copy`,前一个完成才推下一个 |
 | 层串行 | `push_image_skopeo` 未传 `--image-parallel-copies`,skopeo 默认并发层数很低 |
 | **幂等失效** | 源 docker-archive 的层是**未压缩 tar**;skopeo push 时重新 gzip(本地实测源层 81MB → 目标 31.8MB),**manifest/layer digest 全变**;老逻辑比较 manifest digest → 每次部署都判定"内容变了"并重推 |
 | 无 precompute | 未用 `--dest-precompute-digests`,sglang 变体共享的 base 层可能被重复上传 |
@@ -22,7 +22,7 @@
 1. **config-digest 幂等**(`lib-common.sh::image_config_digest_raw`)
    - 内容未变直接跳过;多架构/取不到时回退 manifest digest(保守推送)。
    - 这一项避免每轮重复推送 130G。
-2. **层并行**: `push_image_skopeo` 支持透传参数;两个模块默认
+2. **层并行**: `push_image_skopeo` 支持透传参数;模块 37 默认
    `--image-parallel-copies ${IMAGE_PUSH_PARALLEL_LAYERS:-4}`。
 3. **跳过已有层**: 默认 `--dest-precompute-digests`,registry 已有的 blob 不再上传。
 4. **有限跨镜像并行 + base-first**:
@@ -85,7 +85,7 @@ sudo IMAGE_PUSH_PARALLEL_LAYERS=4 IMAGE_PUSH_PARALLEL_IMAGES=2 \
 - **registry HTTP timeout**: distribution 默认 `http.timeout` 可能截断超长 blob 上传
   (慢链路 + 10G 层);出问题时可把 `http.timeout` 调大(需改 registry 配置并重启);
 - **直接节点预载**: 若目标只是"节点能拉到镜像",用 `ctr -n k8s.io images import` 直接导入
-  各节点(参考 `tools/images/ceph-sync-images.sh`)通常比 registry push 更快,但绕过 registry
+  各节点(把 tar 直接分发到节点 `ctr import`)通常比 registry push 更快,但绕过 registry
   的集中管理与 GC;
 - **验证边界**: 本文的 skopeo 行为数据来自本地 `registry:2.8.1` + `nginx.tar` 实测;
   集群当前不可用,端到端加速比需在集群恢复后按 §4 复测。

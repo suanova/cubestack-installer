@@ -63,33 +63,21 @@ CEPH_MODE="${CEPH_MODE:-internal}"          # internal(默认, 集群内) | exte
 # → Ceph 子能力开关(CEPHFS_ENABLED / CEPH_RGW_ENABLED / CEPH_DASHBOARD_ENABLED)与 CEPH_FALLBACK_TO_LOCALPATH
 #   见 cluster.defaults.conf §4.3b
 
-# ---- CUBESTACK_OPERATOR(平台 Operator: 凭据 + 版本 + 开关; 其余参数见 cluster.defaults.conf §4.6b) ----
+# ---- 平台 Operator(由版本树提供) ----
+# 平台 operator 及其组件的模块、chart、镜像清单都随版本树(--release)分发; 本仓不含它们。
+# 下面两个凭据仍在这里, 因为可能由操作者按环境填写; 其余 operator 参数由版本树的模块自带。
 #   ⚠ 凭据卫生: 默认值一律留空 —— 真实用户名/密码只填在 cluster.conf(已 gitignore), 不得写进本模板。
+CUBESTACK_OPERATOR_ENABLED="${CUBESTACK_OPERATOR_ENABLED:-true}"  # 默认启用(chart 随版本树分发)
 CUBESTACK_OPERATOR_HARBOR_USER="${CUBESTACK_OPERATOR_HARBOR_USER:-}"
 CUBESTACK_OPERATOR_HARBOR_PASSWORD="${CUBESTACK_OPERATOR_HARBOR_PASSWORD:-}"
-CUBESTACK_OPERATOR_ENABLED="${CUBESTACK_OPERATOR_ENABLED:-true}"  # 默认启用; chart 随离线包 + 镜像入内置 registry
-CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED="${CUBESTACK_OPERATOR_CLUSTER_CR_ENABLED:-true}"  # 打开会一并下发平台组件镜像(离线需另行备齐)
-ONLINE_DEPLOY_CUBESTACK_OPERATOR="${ONLINE_DEPLOY_CUBESTACK_OPERATOR:-false}"  # 平台 Operator 镜像来源: false=离线(tar→内置 registry; 默认) / true=在线(按 chart 定义从 Harbor 直拉)
-# (NVIDIA 的 ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR 在下方"附加组件开关"区; 两者均于 2026-10-16 挪入主文件)
-# 版本基线(2026-10-23 口径): chart 1.0.0-latest + 离线 chart + operator 跟随 chart 自带版本 + 保留 model bundles
-#   IMAGE_TAG_OVERRIDE 留空=跟随 chart(逃生口, 仅必要时填具体版本); MODEL_BUNDLES_ENABLED=true=保留 chart 的 8 个 bundle
-CUBESTACK_OPERATOR_CHART_VERSION="${CUBESTACK_OPERATOR_CHART_VERSION:-1.0.0-latest}"          # chart 版本期望值; release 模式优先按 Chart.yaml 发现
-CUBESTACK_OPERATOR_CHART_SYNC="${CUBESTACK_OPERATOR_CHART_SYNC:-offline}"                     # auto|online|offline(offline=不联网刷新, 恒用本地副本)
-CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE="${CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE:-}"            # 留空=跟随 chart 自带版本; 仅必要时填 tag(只覆盖 operator 自身镜像)
-CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED="${CUBESTACK_OPERATOR_MODEL_BUNDLES_ENABLED:-true}"  # true=保留 chart 的 8 个 bundle; false=清空 bundles/关 modelBundles
 
-# ---- 发布版本(可选; 详见 docs/release-management.md) ----
-# 推荐：无需在此配置。把 release 树的 offline-files 平铺到 deployments/offline-files 后，
-# load_config 会自动读取其中的 release.env(RELEASE_VERSION/版本变量)，并按 flat 布局部署。
-# 切回 latest 时如 release.env 仍在，可设 CUBESTACK_RELEASE_AUTO="false" 强制 dev 模式。
-# 也可显式: CUBESTACK_RELEASE="2.0.0" + CUBESTACK_RELEASE_LAYOUT="flat" (或 --release 2.0.0)。
-# 版本树模式(默认 tree)使用 <CUBESTACK_RELEASE_ROOT>/2.0.0/offline-files/release.env；
-# 取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release 2.0.0 --dest <本地桶根>
-#
-# 若希望发布资产平铺在标准 deployments/offline-files(不建 <root>/<版本>/offline-files 版本树):
-# CUBESTACK_RELEASE="2.0.0"
-# CUBESTACK_RELEASE_LAYOUT="flat"
-# (flat 模式优先读 deployments/offline-files/release.env)
+# ---- 发布版本(可选) ----
+# 推荐: 直接把版本树的 offline-files/ 挂到 deployments/offline-files;
+# load_config 会读取其中的 release.env 并自动进入 release 模式。
+# 或显式指定版本: CUBESTACK_RELEASE="2.1.0"(--release 2.1.0),
+#   默认从 <CUBESTACK_RELEASE_ROOT>/2.1.0/offline-files/release.env 读取。
+# 切回 dev 模式: 移除 release.env, 或设 CUBESTACK_RELEASE_AUTO="false"。
+# 版本树由外部打包流程物化, 安装侧不再负责下载/打包。
 
 # ---- Harbor(集群外仓库; HARBOR_ENABLED 为预留模块开关, HARBOR_MIRROR_* 为镜像源凭据) ----
 HARBOR_ENABLED="${HARBOR_ENABLED:-false}"               # Harbor 外部镜像仓库(预留, 见 defaults §1.7)
@@ -130,8 +118,7 @@ KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # 虚拟机能力(占位
 LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(占位; 见 4.5)
 MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多网卡(见 4.7)
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(见 4.8)
-DEV_LAB_ENABLED="${DEV_LAB_ENABLED:-true}"              # 开发镜像随部署推入内置 registry(大推送排在末位; --skip dev_lab 跳过; 见 4.9)
-MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sglang×2/vllm-metax ≈33G)随部署推入内置 registry(排在 dev_lab 之后 = 最后; --skip model_images 跳过; 见 offline-files/model-collection/README.md)
+MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sglang×2/vllm-metax ≈33G)随部署推入内置 registry(排在平台组件之后 = 最后; --skip model_images 跳过; 见 offline-files/model-collection/README.md)
 
 # ---- 节点组(可选; 配合 --only <组名> 使用) ----
 # 示例(按需取消注释并改值):
@@ -142,7 +129,7 @@ MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sgl
 # 其余全部在 **cluster.defaults.conf**(load_config 自动加载; 覆盖时在本文件写同名变量):
 #   ★ 版本基线/镜像钉子/PRELOAD | API 入口细节
 #   §1 宿主机/SSH/API 域名/Harbor | §2 离线路径+MinIO/NTP/CIDR/CNI/containerd/hosts
-#   §3 MetalLB/Registry/镜像源 | §4 沐曦/Ceph/平台 Operator/Multus/NVIDIA/RDMA/netshoot/dev-lab
+#   §3 MetalLB/Registry/镜像源 | §4 沐曦/Ceph/平台 Operator/Multus/NVIDIA/RDMA/netshoot
 # 加载优先级: 环境变量 > cluster.conf > cluster.defaults.conf
 # ════════════════════════════════════════════════════════════
 

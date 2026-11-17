@@ -28,7 +28,7 @@
 | 裸盘 | **自动分类**磁盘(`tools/k8s/ceph-detect-disks.sh`, 判定见 §4) | CR 取 `free ∪ ceph`(空闲 + 上次 Ceph 占用); `inuse`(在用)/`mixed`(混合)不选不清理; 精确盘名, 不用正则, 防误选 |
 | 安全确认 | 部署前红底列出"节点+裸盘", **sleep 60s**(`CEPH_CONFIRM_SLEEP`) | 防覆盖系统盘/在用盘(CI 可 `CEPH_CONFIRM_SLEEP=0`); **k8s 部署阶段**(`k8s_deploy`)也预检一次 |
 | 镜像 | 离线 tar → `ctr -n k8s.io import --no-unpack` | 保持原始 ref, 无需改 manifest; 多架构需 `--platform linux/amd64` 单架构拉取 |
-| lvm2 | 离线 `.deb`(`offline-files/kubespray/packages`) | 重启后 Rook OSD 逻辑卷需 lvm 激活; **k8s 部署阶段由 install-packages.yml 自动安装**(见 §2) |
+| lvm2 | OS 镜像/运维预装 | 重启后 Rook OSD 逻辑卷需 lvm 激活; **installer 只检查, 不安装**(缺失时 `02_ceph` 硬失败) |
 | registry 后端 | `REGISTRY_STORAGE_CLASS=ceph-block` | registry PVC 走 ceph RBD, **替代 local-path**(ceph 模块排在 registry 之前; 可 `LOCAL_PATH_ENABLED=false` 彻底不装 local-path) |
 
 ## 2. 前置离线物料(联网机准备, 部署机离线)
@@ -36,24 +36,17 @@
 | 物料 | 工具 | 落到 |
 |---|---|---|
 | Rook manifests(crds/common/csi-operator/operator/toolbox) | `tools/k8s/rook-fetch-manifests.sh`(ROOK_VERSION=v1.21.1) | `deployments/cubestack-addon/rook/` |
-| Ceph 镜像 tar(13 个) | `tools/images/ceph-save-images.sh` | `deployments/offline-files/kubespray/images/`(与 kubespray 镜像同目录, 不再用独立 offline-files/ceph) |
-| lvm2 + 依赖 `.deb` | `tools/offline/fetch-lvm-packages.sh` | `deployments/offline-files/kubespray/packages/`(✅ 已就绪: 11 个 lvm 家族 .deb) |
+| Ceph 镜像 tar(13 个) | 版本树 / `container-image-mirror` 同步 Harbor | `offline-files/kubespray/<版本>/images/`(与 kubespray 镜像同目录) |
 | VM 数据盘 | `vm-nodes.conf` 的 `VM_DATA_DISKS=3`/`VM_DATA_DISK_SIZE=200` | 每台 VM 附加 3×200GB 裸盘(Guest: `/dev/vdb~vdX`) |
 
 ```
 # 联网机一次性:
 sudo ./deployments/scripts/tools/k8s/rook-fetch-manifests.sh
-sudo ./deployments/scripts/tools/images/ceph-save-images.sh      # 默认输出仓库内 offline-files/kubespray/images(与 k8s 镜像同目录); 独立拷到联网机任意目录也可运行
-sudo ./deployments/scripts/tools/offline/fetch-lvm-packages.sh   # ⚠ 必须先于 ceph 部署: 生成 lvm2 全家桶 .deb
 ```
 
-> **lvm2 离线包(fetch-lvm-packages.sh)**: 用 `apt-get download` 显式拉取 lvm2 + 依赖
-> (dmsetup/dmeventd/thin-provisioning-tools/libdevmapper*/liblvm2cmd2.03/libaio1/libudev1/libreadline8/libedit2,
-> 共 11 个)——不用 `--download-only`(本机已装 lvm2 会 0 upgraded 什么都不下载)。
-> 每次重跑幂等(已存在跳过)。
-> **lvm 部署前预检(02_ceph 模块)**: 部署 ceph 集群前硬校验"packages/ 含 lvm2_*.deb **或** 存储节点已在线装 lvm",
-> 均不满足 → 红底硬失败并指引先跑 fetch-lvm-packages.sh —— 杜绝"OSD 因缺 lvm 无法激活"的隐性失败;
-> 部署中按节点检测 lvm2, 缺失时从 packages/ 自动 dpkg -i。
+> **lvm2 由节点 OS 镜像/运维预装**: 2.1 起 installer 不下载、不安装 `lvm2` 及其依赖。
+> 部署前用 `tools/online/check-os-packages.sh` 检查存储节点是否有 lvm2；
+> `02_ceph` 在缺 lvm2 时直接失败，避免"OSD 因缺 lvm 无法激活"的隐性失败。
 
 ## 3. 启用与部署顺序
 
@@ -76,7 +69,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps ceph,ceph_csi
 `02_ceph.sh` 流程: ① 确定存储节点(ceph_storage_hosts: CEPH_NODES 显式 > CEPH_NODE_ROLE, 默认 master) ② 逐节点自动检测裸盘
 ③ **红底确认 + sleep CEPH_CONFIRM_SLEEP(60s)** double-check 节点与盘名
 ④ 节点准备(modprobe rbd 持久化 + lvm2 离线安装 + 打 label `ceph-storage=rook-ceph`)
-⑤ `ceph-sync-images.sh` 同步镜像到存储节点并 `ctr import`
+⑤ 把版本树里的镜像 tar 同步到存储节点并 `ctr import`
 ⑥ apply rook crds/common/csi-operator/operator, 等 operator Ready
 ⑦ 生成 CephCluster CR(mon=3 / mgr=2, storage.nodes[].devices=检测盘, mon·osd·**mgr** 各自按
    label 钉存储节点)并 apply, 等 `cephcluster phase=Ready` + `ceph -s HEALTH_OK`(最长 900s)
@@ -190,10 +183,10 @@ bash deployments/scripts/tools/k8s/ceph-expose-external.sh show     # 当前暴�
 bash deployments/scripts/tools/k8s/ceph-expose-external.sh status   # 5 层自检:
 #    [1/5] mon 网络可达(集群外 TCP) [2/5] 认证用户(profile caps) [3/5] 外部资源(pool/fs/app tag)
 #    [4/5] fsid+CephFS [5/5] 外部客户端协议级测试(模拟 ceph-csi-operator 从集群外连接:
-#    mon msgr 握手 + cephx 认证 + rbd ls/create/rm 写路径; 客户端=Dockerfile-cli 预装 ceph-common)
+#    mon msgr 握手 + cephx 认证 + rbd ls/create/rm 写路径; 客户端=images/installer-cli/Dockerfile 预装 ceph-common)
 sudo ./deploy-cluster.sh --steps verify_ceph                        # ⑨ 自动跑 status(含 [5/5])
 ```
-> Dockerfile-cli 已预装 `ceph-common`(部署容器内自带 ceph/rbd 客户端); 旧容器未重建时
+> images/installer-cli/Dockerfile 已预装 `ceph-common`(部署容器内自带 ceph/rbd 客户端); 旧容器未重建时
 > [5/5] 自动回退为 toolbox 内经外部端点测试(连接路径经 kube-proxy DNAT, 与外部一致)。
 
 **接入方集群**(目标集群, 消费本集群 Ceph): `cluster.conf` 设 `CEPH_MODE=external` +
@@ -474,13 +467,13 @@ Rook 官方 import 流程 —— 消费者侧 apply `cluster-external.yaml`(`Cep
 这类名字里恰好带 ceph 的无关卷), 也不用 `dmsetup remove_all`(那会拆掉本节点所有 dm 映射)。
 这段现在跑在**默认部署流程**(02_ceph.sh 7a)里, 所以作用域必须严格。
 
-## 5. 手动(参考)安装要点 —— Rook v1.21
+## 5. 手动(参考)安装要点 —— Rook v1.20
 
 若不用模块而要手工验证(在线/已有 manifest), 参考官方步骤:
 ```bash
 kubectl create -f rook/deploy/examples/crds.yaml
 kubectl create -f rook/deploy/examples/common.yaml
-kubectl create -f rook/deploy/examples/csi-operator.yaml    # ⚠ v1.21 必须
+kubectl create -f rook/deploy/examples/csi-operator.yaml    # ⚠ v1.20 必须
 kubectl create -f rook/deploy/examples/operator.yaml
 # 等 operator + ceph-csi-controller Running → 创建 CephCluster(mon=3/size=3)…
 ```
@@ -502,29 +495,6 @@ kubectl -n rook-ceph get cephcluster,cephblockpool               # Ready
 kubectl get sc ceph-block                                        # StorageClass
 # 冒烟: 建 PVC(storageClassName: ceph-block, volumeMode: Block)→ dd 读写
 ```
-
-## 6.1 监控(Prometheus / Grafana)
-
-`02_ceph.sh` 生成的 CephCluster CR **初始** `spec.monitoring.enabled=false`；等监控组件就绪后，
-由 **cubestack-operator 侧**把 CR patch 成 `true`（cubestack-installer 不执行 patch）。注意三点：
-
-1. **RBAC**：官方离线 manifest(`common.yaml`)不含 `monitoring.coreos.com` 权限。所以模块额外
-   apply 独立 `ClusterRole/ClusterRoleBinding rook-ceph-monitoring`，绑定
-   `rook-ceph/rook-ceph-system` ServiceAccount；否则 Rook 无法创建 ServiceMonitor/PrometheusRule。
-2. **CRD 时序**：ceph 模块先于 kube-prometheus-stack 安装，创建 CR 时 ServiceMonitor CRD 可能
-   还不存在，所以**新装**时初始保持 `enabled=false`。重跑时 `02_ceph.sh` 会先读取 live 的
-   `spec.monitoring.enabled` 并原样写回（读不到或非 `true` 才默认 `false`），避免覆盖
-   cubestack-operator 已经 patch 成的 `true`。`34_node_pool.sh` 只做**只读检查**：CRD 与
-   CephCluster 存在时打印 ServiceMonitor 是否已生成；patch `monitoring.enabled=true` 与
-   ServiceMonitor 的创建由 cubestack-operator 侧负责，installer 不 patch、不重启 operator。
-3. **验证**：
-   ```bash
-   kubectl -n rook-ceph get servicemonitor,prometheusrule        # 至少 rook-ceph-exporter
-   # Prometheus 目标(health=up) + ceph_* 指标
-   kubectl -n monitoring get --raw \
-     "/api/v1/namespaces/monitoring/services/kube-prometheus-kube-prome-prometheus:9090/proxy/api/v1/query?query=count({__name__=~%22ceph_.*%22})"
-   ```
-   Grafana「Ceph Cluster」(uid `tbO9LAiZK`) 面板应恢复数据。
 
 ## 7. 卸载 / 重装(清盘)
 
@@ -565,7 +535,7 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 
 - OSD 一直 Prepare/CrashLoop: 裸盘残留文件系统签名 → wipefs/sgdisk 清理; 或 lvm2 缺失(重启后逻辑卷无法激活)。
 - 镜像 ImagePullBackOff: 未 ctr import 或 import 多架构 tar 报 digest → 用 `--platform linux/amd64` 单架构 + `--no-unpack`;
-  或 tar 残缺(如 quay.io/ceph/ceph:v20.2.2 仅 7.6KB 的 index-only 产物)→ 删掉该 tar 重跑 ceph-save-images.sh(已自动校验 <10MB 判残)。
+  或 tar 残缺(如 quay.io/ceph/ceph:v20.2.2 仅 7.6KB 的 index-only 产物)→ 重新物化版本树(打包侧会校验 tar 完整性)。
 - HEALTH_WARN clock skew: 存储节点时钟 → chrony 对齐(仓库 NTP 模块)。
 - registry PVC Pending: 等 `ceph-block` SC 由 03_ceph_csi 创建后自动绑定。
 - mon/osd 未调度到目标节点: 检查节点 label `ceph-storage=rook-ceph` 与 CEPH_NODES。
@@ -575,9 +545,7 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 `deployments/cubestack-addon/rook/`(manifests + CUBESTACK.md)、`02_ceph.sh`、`03_ceph_csi.sh`、
 `tools/k8s/ceph-detect-disks.sh`、`tools/k8s/ceph-disk-classify.py`(分类判定唯一实现)、
 `tools/k8s/ceph-cleanup.sh`(`--list`/`--wipe-disks`/`--all`/`--wipe-node`)、
-`tools/images/ceph-save-images.sh`、`tools/images/ceph-sync-images.sh`、
-`tools/offline/fetch-lvm-packages.sh`、`tools/k8s/rook-fetch-manifests.sh`、cluster.conf `CEPH_*` 配置段、
-`patch-playbooks/install-packages.yml`(lvm2 离线安装, cubestack-offline.sh 自动挂载)。
+`tools/k8s/rook-fetch-manifests.sh`、cluster.conf `CEPH_*` 配置段。
 
 > 更完整的手工操作手册(池播种/PG 调优/CephFS/RGW/快照/风险)见参考设计文档(按 Rook v1.21.1 官方 + 生产实践编写)。
 
@@ -733,10 +701,9 @@ bash deployments/scripts/tools/tests/test-cephfs-mount.sh   # 离线桩式回归
 **保留 CephFS 内数据与宿主机空目录**。
 
 > ⚠ **非优雅拆除**: 若旧集群直接消失/未执行本模块 uninstall, 宿主机 `/mnt/cephfs/models` 的 ceph
-> 挂载会残留; mons 不可达时它会卡死 `fuser`/apt(`node_pkgs` 在首节点永久 pending)。
+> 挂载会残留; mons 不可达时它会卡死 `fuser`/其他系统操作。
 > 重装前必须重启节点(`systemctl stop kubelet containerd; systemctl reboot -f`);
-> `tools/node/reconcile-node-packages.sh` 会在装包前检测并给出重启指引(详见
-> `docs/node-package-repair.md` R3)。
+> installer 不再做节点包对账, 部署前请自行确认残留挂载已清理。
 
 > ⚠ mon 地址在 apply 时写入 DaemonSet(来自 `rook-ceph-mon-endpoints`);Rook 更新该 ConfigMap 后,
 > 重跑 `--steps cephfs_mount` 即可刷新(mon 地址在 hostNetwork 模式下通常稳定为节点 IP)。

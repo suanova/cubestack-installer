@@ -6,7 +6,7 @@
 - **脚本开发规范**(模块命名/元数据/新增模块流程):见 [`docs/scripts-development-spec.md`](../docs/scripts-development-spec.md)
 - **P1/P2/P3 全阶段组件规划与进度追踪**:见 [`docs/cluster-components-plan.md`](../docs/cluster-components-plan.md)
 - **kubespray 离线工具**(多集群):见 [`deployments/kubespray/README.md`](kubespray/README.md)
-- **CLI 容器(可选)**: [`Dockerfile-cli`](../Dockerfile-cli) 打包 kubespray 源码 + 部署脚本 + 工具链
+- **CLI 容器(可选)**: [`images/installer-cli/Dockerfile`](../images/installer-cli/Dockerfile) 打包 kubespray 源码 + 部署脚本 + 工具链
   (ansible/helm/skopeo/mc/kubectl 等, 不含离线镜像/binary), 可在容器内直接离线安装。
   运行(仓库根目录执行, 挂载离线文件/配置/SSH 密钥, `--network host` 必须):
   ```bash
@@ -138,7 +138,7 @@ deployments/
 │   ├── tools/                    # ★ 工具脚本(模块的底层实现, 按领域分目录)
 │   │   ├── vm/                   #   虚拟机: create-libvirt-vm.sh / create-vm-template.sh / register-vm.sh
 │   │   ├── net/                  #   网络: setup-vm-network.sh / verify / teardown / setup-libvirt-nat.sh
-│   │   ├── node/                 #   节点: gen-ssh-key.sh / setup-passwordless.sh / install-worker-packages.sh / setup-ntp.sh 等
+│   │   ├── node/                 #   节点: gen-ssh-key.sh / setup-passwordless.sh / setup-ntp.sh 等
 │   │   ├── k8s/                  #   inventory/配置: gen-inventory.sh / sync-kubespray-config.sh / sync-addons-config.sh
 │   │   └── lb/                   #   负载均衡/registry: sync-haproxy.sh / deploy-registry.sh / setup-registry-expose.sh
 │   └── README.md                 # 脚本调用手册 + 使用案例
@@ -222,7 +222,7 @@ deployments/offline-files/
 
 - **生成方式**:联网机执行 `./deployments/kubespray/cubestack-offline.sh download`(读取 inventory group_vars 决定下载哪些镜像/文件),产物即离线仓库。
 - **预加载机制**:`inventory/<cluster>/preload-images.lst`(由 `PRELOAD_IMAGE_PATTERNS` 过滤生成)指定部署时同步到节点 containerd 的最小镜像集合;离线部署时节点镜像拉取不依赖公网。
-- **MinIO 分发**:源机器 `tools/offline/sync-to-minio.sh` 把本地 offline-files 增量同步到 MinIO(`mc mirror --overwrite`);部署机 `tools/offline/fetch-offline-from-minio.sh` 拉取(默认排除 virtual-machine,按需 `--sub virtual-machine`/`--all`);冗余清理见 `tools/offline/trim-offline-files.sh`。
+- **分发**:版本树(含 offline-files)由外部打包流程物化并交付; 安装侧不直连 MinIO。
 
 ### 5.2 虚拟机基础镜像(offline-files/virtual-machine/)
 

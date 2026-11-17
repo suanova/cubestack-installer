@@ -7,7 +7,7 @@
 #   它们随离线件一起挂在 /opt/cubestack-installer/deployments/offline-files/(版本目录)——
 #   本脚本在登录 shell 启动时幂等地建软链, 把工具补回 PATH。
 #
-# 安装方式: 由 Dockerfile-cli 拷到 /etc/profile.d/50-cubestack-tools.sh
+# 安装方式: 由 images/installer-cli/Dockerfile 拷到 /etc/profile.d/50-cubestack-tools.sh
 # ⚠ 只在**登录 shell**(bash -l / bash -lc)里生效 —— 部署流程文档用的就是 `bash -lc`
 #   (见 deployments/scripts/README.md); 非登录 shell 下请显式 source /etc/profile 或 bash -lc。
 # ⚠ 本文件会被 **source**(不是执行): 不得 exit, 不得用 bash 专有语法。

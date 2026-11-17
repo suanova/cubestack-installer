@@ -5,9 +5,9 @@
 # PHASE: k8s
 # DEFAULT: 1
 # REPEAT: 0
-# REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs node_net_guard
-#   · node_pkgs(12_node_pkgs.sh): 节点系统包对账 —— 必须在 kubespray 之前(它的 bootstrap_os →
-#     system_packages 遇到 apt 依赖图破损会直接失败; 实测 2026-09-28 libudev1/udev 配对被打断)。
+# REQUIRES: k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs node_net_guard k8s_asset_prefetch
+#   · node_pkgs(12_node_pkgs.sh): 节点前置包只读检查 —— 必须在 kubespray 之前,
+#     让缺包尽早暴露; installer 不安装/修复 OS 包。
 #     ⚠ 序号 12 > 06 排不到前面 ⇒ 靠这行 REQUIRES 定序(与 kube_vip 当年同一手法)。
 # 说明: 调用 cubestack-offline.sh install; 透传 cluster.conf 中 PRELOAD_IMAGE_PATTERNS
 #   · 基座恒随全量部署(默认 / --with-k8s / --with-cubestack 都包含), 故 DEFAULT:1、无 TOGGLE ——
@@ -275,10 +275,10 @@ ok "kubespray 集群部署完成"
 #   (roles/kubernetes-apps/registry/templates/registry-rs.yml.j2 无 tolerations), 在纯
 #   master(无 worker)或 master 仍带 control-plane:NoSchedule 的集群上会一直 Pending;
 #   而 05_k8s_registry 会等待 pod Ready(默认 600s)⇒ 超时失败。负责移除污点的 node_pool
-#   模块序号是 34, 排在 registry(05)之后, 来不及。
+#   模块序号是 53, 排在 registry(05)之后, 来不及。
 #   这里在 k8s 阶段结束时先做一次"仅可调度收敛"(幂等): 临时强制 CORDON=false, 只移除
 #   control-plane/master 污点(是否移除仍由 NODE_POOL_MASTER_SCHEDULABLE 决定);
-#   cordon 与平台 placement 仍由 34_node_pool 在 dev_lab/model_images 之前按配置执行。
+#   cordon 与平台 placement 仍由 53_node_pool 在 addon 末尾按配置执行。
 if [ "${NODE_POOL_ENABLED:-true}" = "true" ] || [ "${NODE_POOL_ENABLED:-true}" = "1" ]; then
     say "master 可调度收敛(k8s 阶段提前; 仅移除污点, 不在此阶段 cordon)..."
     NODE_POOL_MASTER_CORDON=false \

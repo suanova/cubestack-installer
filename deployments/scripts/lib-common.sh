@@ -10,6 +10,10 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"          # deployments/scripts/ → 根目录
 
+# 本库位置交给外部工具: 版本树附带的模块/工具(source 本库)可以据此再定位这里的原语,
+# 而不必复制一份、也不必猜相对路径。installer 只提供通用能力, 具体业务脚本在调用方。
+export CUBESTACK_SCRIPTS_DIR="${SCRIPT_DIR}"
+
 # 离线文件校验器定位/自举(不依赖本库, 供 deploy/fetch/cubestack-offline 共用)
 # shellcheck source=tools/offline/lib-offline-verify.sh
 source "${SCRIPT_DIR}/tools/offline/lib-offline-verify.sh"
@@ -38,7 +42,7 @@ CLUSTER_DEFAULTS_CONF="${CLUSTER_DEFAULTS_CONF:-${REPO_ROOT}/deployments/config/
 export CLUSTER_DEFAULTS_CONF
 
 # ---------------- 配置漂移门禁工具(2026-10-26) ----------------
-# k8s_deploy 在启动时一次性 load_config; 若用户在确认/长时间 kubespray 运行期间
+# k8s_deploy 在启动时一次性 load_config; 若用户在 30s 倒计时/长时间 kubespray 运行期间
 # 修改 cluster.conf, 后续 addon 模块会重新 load_config 看到新值, 而 addons.yml 仍是旧值
 # (实机: nodeport→metallb, addons metallb_enabled=false → metallb 模块失败).
 # 这两个 helper 供 k8s_deploy/metallb 门禁复用; 只读, 不修改配置.
@@ -247,14 +251,9 @@ warn() { local m="⚠  $*"; echo -e "\033[33m${m}\033[0m"; _log_file "${m}"; }
 err()  { local m="【错误】$*"; echo -e "\033[31m${m}\033[0m" >&2; _log_file "${m}"; }
 
 # ---------------- 交互确认([Y/n]) ----------------
-# 替代旧的 sleep 倒计时: 不再"等 N 秒自动继续", 交互终端遵循 Linux 惯例 [Y/n]。
+# 替代旧的 sleep 倒计时: 交互终端遵循 Linux 惯例 [Y/n]。
 # 用法: confirm_yes_no "<要确认的事>" [非交互环境默认: 1=继续(旧倒计时语义), 0=中止]
 # 返回: 0=继续; 1=拒绝/无法确认
-#   · 交互终端: 循环提示, 直接回车或 yes/y/是 = 继续; no/n/否 = 中止(非法输入重新询问);
-#   · 非交互: CUBESTACK_ASSUME_YES=1(即 deploy-cluster --yes)→ 继续;
-#             否则按 noninteractive_default; 默认 1=继续并告警(保持旧无人值守语义),
-#             需要"非交互必须显式确认"的调用方传 0(返回 1 由调用方 exit)。
-#   · Ctrl-C / stdin EOF → 按拒绝处理(返回 1)。
 confirm_yes_no() {
     local _msg="$1" _nonint_default="${2:-1}" _ans _norm
     if [ "${CUBESTACK_ASSUME_YES:-0}" = "1" ]; then
@@ -342,7 +341,7 @@ ensure_skopeo_policy
 skopeo_require() {
     command -v skopeo >/dev/null 2>&1 && return 0
     err "未找到 skopeo(推送镜像到集群内置 registry 必需)。请安装 skopeo, 或使用项目 CLI 镜像"
-    err "  (tools/docker/build-cli-context.sh 内置 skopeo-1.16.1-amd64)"
+    err "  (tools/docker/build-cli-image.sh 内置 skopeo-1.16.1-amd64)"
     exit 1
 }
 
@@ -470,6 +469,67 @@ print((d.get("config") or {}).get("digest", ""))
 ' 2>/dev/null || true
 }
 
+# Top-level digest of a registry ref (manifest or index). image_digest_raw is for
+# content comparison; use this one for repo@digest references.
+# Usage: d="$(image_manifest_digest docker://repo:tag)"
+image_manifest_digest() {
+    local ref="$1" digest=""
+    digest="$(skopeo inspect --format '{{.Digest}}' \
+        --tls-verify=false --no-creds "${ref}" 2>/dev/null || true)"
+    [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || return 0
+    printf '%s\n' "${digest}"
+}
+
+# Push an image and print its digest-pinned reference (repo@sha256:...).
+# <anchor> only keeps the manifest reachable and makes retries idempotent;
+# callers must consume the printed digest, never the anchor tag.
+# Usage: ref="$(push_image_digest <src> <repo> <anchor> [skopeo copy args...])"
+push_image_digest() {
+    local src="${1:-}" repo="${2:-}" anchor="${3:-}"
+    shift "$(( $# < 3 ? $# : 3 ))"
+    repo="${repo#docker://}"
+    if [ -z "${src}" ] || [ -z "${repo}" ] || [ -z "${anchor}" ]; then
+        err "push_image_digest: src/repo/anchor 不能为空"
+        return 1
+    fi
+    case "${repo}" in
+        *"@"*|*" "*) err "push_image_digest: repo 不能带 digest/tag: ${repo}"; return 1 ;;
+    esac
+    case "${repo##*/}" in
+        *:*) err "push_image_digest: repo 不能带 tag: ${repo}"; return 1 ;;
+    esac
+    case "${anchor}" in
+        latest|*-latest) err "push_image_digest: 不允许 channel tag: ${anchor}"; return 1 ;;
+    esac
+    [[ "${anchor}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] \
+        || { err "push_image_digest: 非法 tag: ${anchor}"; return 1; }
+
+    local dst="docker://${repo}:${anchor}" need_push=1
+    local src_cfg dst_cfg
+    src_cfg="$(image_config_digest_raw "${src}")"
+    dst_cfg="$(image_config_digest_raw "${dst}")"
+    if [ -n "${src_cfg}" ] && [ "${src_cfg}" = "${dst_cfg}" ]; then
+        need_push=0
+    elif [ -z "${src_cfg}" ] || [ -z "${dst_cfg}" ]; then
+        # Multi-arch index or unreadable config: fall back to manifest digest.
+        local src_manifest dst_manifest
+        src_manifest="$(image_digest_raw "${src}")"
+        dst_manifest="$(image_digest_raw "${dst}")"
+        [ -n "${src_manifest}" ] && [ "${src_manifest}" = "${dst_manifest}" ] && need_push=0
+    fi
+    if [ "${need_push}" = "1" ]; then
+        push_image_skopeo "${src}" "${dst}" "$@" \
+            || { err "push_image_digest: 推送失败 ${repo}:${anchor}"; return 1; }
+    else
+        vlog "push_image_digest: 内容未变, 跳过推送 ${repo}:${anchor}"
+    fi
+
+    local digest
+    digest="$(image_manifest_digest "${dst}")"
+    [ -n "${digest}" ] || { err "push_image_digest: 无法解析目标 digest ${repo}:${anchor}"; return 1; }
+    printf '%s@%s\n' "${repo}" "${digest}"
+}
+
 find_offline_tar() {
     local suffix="$1" glob="$2"; shift 2
     local d t src
@@ -499,7 +559,7 @@ find_offline_tar() {
         # ★ 2026-10-12: .tar.gz 支持(大件就地 gzip 省盘)—— **文件名匹配, 不做内容检查**:
         #   · gzip 不可反向寻址, 而 docker-archive 的 manifest.json 在**归档末尾**
         #     ⇒ 任何内容检查 = 整卷解压(11G 级 ~90s/次, 逐镜像调用不可承受; 实测);
-        #   · tar 文件名是权威(上游 ref 的 /,: → _; 同 25_cubestack_operator 的实践),
+        #   · tar 文件名是权威(上游 ref 的 /,: → _; 平台模块同此约定),
         #     内容校验由生产侧(harbor-save)与 plain .tar 路径(可随机寻址, 毫秒级)承担。
         #   文件名形如 <域>_<路径(段内 _)>_<tag>.tar.gz —— 归一化 suffix 后做尾部匹配。
         _ns="$(printf '%s' "${suffix}" | tr '/:' '__')"
@@ -518,8 +578,7 @@ find_offline_tar() {
 # deployments/cubestack-addon/<组件>/ 下有一份随 git 分发的离线副本**(.tgz 或解包源码目录),
 # 且**安装一律用这份本地副本** —— 线上拉到的东西不直接装。缺了它, 私服/上游一抖动就装不上
 # (曾有模块就是这样: 回退代码写好了, 却压根没有可回退的文件)。
-# 窄例外: cubestack-operator 的 chart 随离线包分发(offline-files/cubestack-operator/charts/*.tgz),
-#   tgz/digest 不入 git, 由内网同步机上传播; 本助手通过传入路径自然支持, 不另开分支。
+# (离线 tar 类的大文件不入 git, 由内网同步机上传播; 本助手通过传入路径自然支持, 不另开分支。)
 #
 # 本助手把"本地副本就绪"这件事收敛到一处:
 #   online : helm pull 到临时目录 → 取远端 digest, 与 <tgz>.digest 边车比对
@@ -580,9 +639,7 @@ helm_chart_ensure() {
                     [ -n "${rdig}" ] && printf '%s' "${rdig}" > "${dgfile}"
                     case "${tgz}" in
                         */deployments/offline-files/*)
-                            warn "    ⚠ 已更新离线包本地副本(该 tgz 不入 git); 请在内网同步机执行" >&2
-                            warn "      cubestack-platform-sync.sh --collection cubestack-operator --no-pull-state" >&2
-                            warn "      (或 sync-to-minio.sh)上传 MinIO, 否则其他部署机拿不到" >&2 ;;
+                            warn "    ⚠ 已更新离线包本地副本(该 tgz 不入 git); 部署包请由外部打包流程重新物化" >&2 ;;
                         *)
                             warn "    ⚠ 该文件是仓库内的 vendored 副本, 请 git add/commit 固化; 不提交则下次部署又回到旧版本" >&2 ;;
                     esac
@@ -598,12 +655,8 @@ helm_chart_ensure() {
     if [ ! -f "${tgz}" ]; then
         err "  ${comp} 离线 chart 缺失: ${tgz}"
         case "${tgz}" in
-            */deployments/offline-files/*)
-                # chart 在 <collection>/charts/ 下; --sub 需要的是 collection 名, 不是 charts
-                _coll="$(basename "$(dirname "$(dirname "${tgz}")")")"
-                err "    获取(离线包): ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --sub ${_coll}" ;;
             */offline-files/*)
-                err "    获取(发布版本): ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE:-<版本>} --no-flat --dest <本地桶根>" ;;
+                err "    该 chart 应由外部打包流程随版本树提供; 请检查版本树是否完整或重新物化" ;;
         esac
         err "    获取(在线/手工): helm pull ${ref}${repo:+ --repo ${repo}} --version ${version} -d $(dirname "${tgz}")"
         err "          并把 helm 输出的 Digest: 写入 $(basename "${tgz}").digest(不要用 sha256sum); tgz 不入 git"
@@ -613,13 +666,11 @@ helm_chart_ensure() {
 }
 
 # ---------------- operator 镜像 tag 决策(helm 用) ----------------
-# 原则(2026-10-22 用户口径): 默认**完全跟随 chart / operator 自带版本**;
-#   installer 只保留一个显式逃生口, 且**只覆盖 cubestack-operator 自身的镜像 tag**,
-#   绝不覆盖 operator 内 catalog 定义的其他组件(平台 operator/服务)版本。
+# 原则(2026-10-22 用户口径): 默认**完全跟随 chart 自带版本**;
+#   installer 只保留一个显式逃生口, 且**只覆盖 operator 自身的镜像 tag**。
 #   - 未设 CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE → 输出空 → helm 用 chart 自带
 #     (Chart.yaml appVersion / values.image.tag);
 #   - 设了 override → 只传 --set image.tag=<tag> 给 operator chart。
-# CUBESTACK_OPERATOR_IMAGE_TAG 仅用于镜像清单/发布树登记, 不参与 helm 覆盖。
 operator_image_tag_for_helm() {
     # ⚠ 必须恒返回 0: 调用方是 `x="$(operator_image_tag_for_helm ...)"` + set -e,
     #   空 override 时若返回 1 会让整个模块静默退出(2026-10-22 实机)。
@@ -637,7 +688,7 @@ operator_image_tag_for_helm() {
 #   ③ 目录中只有一个 <name>-*.tgz → 用它(版本以 chart 自身为准)
 #   ④ 否则返回 1(调用方列出候选并报错)
 # 输出(stdout): "<tgz路径>\t<chart版本>"
-# 说明: 只读 tar, 不联网; 供 25_cubestack_operator.sh / release-publish.sh 共用。
+# 说明: 只读 tar, 不联网; 供 installer 模块与打包工具共用。
 operator_chart_version() {
     local _tgz="$1" _y
     _y="$(tar -tzf "${_tgz}" 2>/dev/null | command grep -E '/Chart.yaml$' | head -1 || true)"
@@ -720,9 +771,8 @@ prune_operator_chart_dir() {   # <charts-dir> <chart-name> <keep-tgz-basename>; 
 # 幂等确保 nginx 已推送进集群内置 registry, echo 出 **K8s 可见镜像 ref**(调用方在 $(...) 捕获,
 # 故本函数进度消息一律走 stderr, 与 find_offline_tar 的 warn >&2 同理), pod 直接走集群 registry
 # 拉取(离线可用, 不依赖节点状态)。
-# 来源: ① 本地 docker daemon → ② 离线 tar(**复用 k8s-base 的 API 本地代理 nginx**:
-#       `<offline-files>/kubespray/<ver>/images/docker.io_library_nginx_<tag>.tar`;
-#       兼容旧的 `offline-files/nginx/nginx.tar`) → ③ 在线(仅 VERIFY_IMAGE_ONLINE=true)。
+# 来源: ① 本地 docker daemon → ② 离线 tar(deployments/offline-files/nginx/nginx.tar 优先,
+#       也兼容 LOCAL_REPO_DIR/images) → ③ 在线(仅 VERIFY_IMAGE_ONLINE=true, 离线部署默认禁止)。
 # 用法: TEST_IMAGE="$(ensure_registry_nginx)" || exit 1   # 默认 tag=latest; 可 ensure_registry_nginx <tag>
 # 依赖: load_config 已执行(REGISTRY_* / LOCAL_REPO_DIR / OFFLINE_FILES_DIR / REPO_ROOT); 推送需 skopeo。
 ensure_registry_nginx() {
@@ -749,7 +799,7 @@ ensure_registry_nginx() {
     fi
     # ① 本地 docker daemon(仅 dev 模式快路径; release 模式必须走发布树, 避免掩盖缺失的离线件)
     if [ -z "${CUBESTACK_RELEASE:-}" ]; then
-        src="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '(/|^)nginx:(latest|[0-9.]+(-alpine)?)$' | head -1 || true)"
+        src="$(sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '(/|^)nginx:(latest|[0-9.]+)$' | head -1 || true)"
         if [ -n "${src}" ]; then
             echo "  [nginx] 从本地 docker 推送: ${src}" >&2
             _tmp="$(mktemp)"
@@ -760,15 +810,15 @@ ensure_registry_nginx() {
             rm -f "${_tmp}"; echo "  [nginx] 本地 docker 推送失败, 尝试离线 tar..." >&2
         fi
     fi
-    # ② 离线 tar: 优先复用 k8s-base 的 API 本地代理镜像(派生名
-    # `docker.io_library_nginx_<tag>.tar`); 兼容旧的 `nginx.tar`。glob 用 `*nginx*.tar`
-    # 才能匹配派生名; find_offline_tar 是 endswith 语义, 版本化 tag 不命中时按内容兜底。
-    _t="$(find_offline_tar "nginx:latest" "*nginx*.tar" "${_nginx_dirs[@]}")" || _t=""
+    # ② 离线 tar: suffix 用 "nginx:latest"(无前导 /——find_offline_tar 的前导 / 约定只匹配带
+    # registry 前缀的全格式, 库镜像短格式如 "nginx:latest" 会漏; glob nginx*.tar 已限定候选)。
+    # find_offline_tar 是 endswith 语义, 版本化 tag(nginx:1.31.4)不命中, 下方按内容兜底。
+    _t="$(find_offline_tar "nginx:latest" "nginx*.tar" "${_nginx_dirs[@]}")" || _t=""
     if [ -z "${_t}" ]; then
         # 兜底: 版本化 tag(如 nginx:1.31.4)按内容匹配(含 "nginx:" 即接受)
         for _d in "${_nginx_dirs[@]}"; do
             [ -d "${_d}" ] || continue
-            for _f in "${_d}"/*nginx*.tar; do
+            for _f in "${_d}"/nginx*.tar; do
                 [ -f "${_f}" ] || continue
                 case "$(tar_first_image_tag "${_f}")" in
                     *"nginx:"*) _t="${_f}"; break 2 ;;
@@ -792,9 +842,8 @@ ensure_registry_nginx() {
         echo "  [nginx] 在线拉取失败" >&2
     fi
     err "集群 registry 无 nginx(${ref}), 测试后端无法拉起。请任选其一:"
-    err "  ① 确认离线树里有 k8s-base 的 API 本地代理 nginx tar:"
-    err "     ${LOCAL_REPO_DIR:-<offline>/kubespray/<ver>}/images/docker.io_library_nginx_${API_LB_NGINX_IMAGE_TAG:-1.30.1-alpine}.tar"
-    err "     (release 模式 = ${OFFLINE_FILES_ROOT:-...}/kubespray/<ver>/images/; 也兼容旧的 offline-files/nginx/nginx.tar)"
+    err "  ① 准备离线 nginx 镜像 tar 放到 ${REPO_ROOT}/deployments/offline-files/nginx/nginx.tar(联网机: sudo docker pull nginx:latest && sudo docker save nginx:latest -o .../nginx.tar, 拷到部署机);"
+    err "     release 模式请放到 ${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/nginx/nginx.tar;"
     err "  ② 部署机本地 docker 有 nginx:latest(sudo docker pull nginx:latest);"
     err "  ③ 允许在线拉取: VERIFY_IMAGE_ONLINE=true 重跑"
     return 1
@@ -854,92 +903,49 @@ load_config() {
     #   (赋值放在 sudo **之后**)或直接写进 cluster.conf(推荐)。
     SSH_USER="${SSH_USER:-ubuntu}"
     export SSH_USER
-    # ---- release 模式(2026-10-21): 版本目录 + release.env ----
-    # 本地桶根与 MinIO 同构: <root>/<版本>/{offline-files,cubestack-installer-cli-v<版本>.tar}
-    # release.env 提供版本变量, 必须在 kubespray 版本档案块之前加载(才能接管 KUBESPRAY_VERSION)。
+    # ---- release 模式: 消费外部打包流程物化好的版本树 ----
+    # 版本树结构: <root>/<版本>/{offline-files/, modules/} + cubestack-installer-cli.tar。
+    # 也支持直接把版本树的 offline-files/ 挂到 OFFLINE_FILES_ROOT(自动探测其 release.env)。
     OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
-    # 自动检测(2026-10-26): flat offline 根存在 release.env 时, 直接以它为准进入 release
-    # 模式, 不需要 cluster.conf 再写 CUBESTACK_RELEASE / LAYOUT; 版本也取自 release.env。
     _auto_rel_env="${OFFLINE_FILES_ROOT}/release.env"
     if [ "${CUBESTACK_RELEASE_AUTO:-true}" = "true" ] \
        && [ -z "${CUBESTACK_RELEASE:-}" ] && [ -f "${_auto_rel_env}" ]; then
-        _auto_ver="$(sed -nE 's/^RELEASE_VERSION=([^[:space:]#]+).*/\1/p' "${_auto_rel_env}" | head -1)"
+        _auto_ver="$(sed -nE 's/^RELEASE_VERSION=([^[:space:]#]+).*$/\1/p' "${_auto_rel_env}" | head -1)"
         [ -n "${_auto_ver}" ] || { err "自动检测到 ${_auto_rel_env}, 但缺少 RELEASE_VERSION"; exit 1; }
         CUBESTACK_RELEASE="${_auto_ver}"
-        [ -n "${CUBESTACK_RELEASE_LAYOUT:-}" ] || CUBESTACK_RELEASE_LAYOUT="flat"
-        vlog "自动检测 release.env: ${_auto_rel_env} → release=${CUBESTACK_RELEASE} layout=${CUBESTACK_RELEASE_LAYOUT}"
+        vlog "自动检测 release.env: ${_auto_rel_env} → release=${CUBESTACK_RELEASE}"
     fi
     if [ -n "${CUBESTACK_RELEASE:-}" ]; then
-        # 版本名参与路径(<root>/<版本>/offline-files)并 source 其中的 release.env:
-        # 只允许字母数字开头 + 字母数字/点/下划线/连字符, 拒绝 ../、绝对路径、空白与
-        # shell 元字符 —— 防止 --release / cluster.conf 的值把 source 引到发布根之外
-        # (路径穿越 + 任意脚本执行; 2026-10-23 CodeRabbit)。
+        # 版本名参与路径并用于 source release.env; 只允许安全字符, 防止路径穿越/任意脚本执行。
         if ! [[ "${CUBESTACK_RELEASE}" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
             err "CUBESTACK_RELEASE 格式非法: '${CUBESTACK_RELEASE}'(只允许字母数字开头, 后接字母数字/点/下划线/连字符)"
             exit 1
         fi
-        # 未显式指定 layout: 有版本树(root 非空且存在)用 tree; 否则 flat offline 有 release.env
-        # 用 flat; 都没有用 tree(保持旧报错路径, 提示取件)。
-        if [ -z "${CUBESTACK_RELEASE_LAYOUT:-}" ]; then
-            if [ -n "${CUBESTACK_RELEASE_ROOT:-}" ] \
-               && [ -f "${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files/release.env" ]; then
-                CUBESTACK_RELEASE_LAYOUT="tree"
-            elif [ -f "${OFFLINE_FILES_ROOT}/release.env" ]; then
-                CUBESTACK_RELEASE_LAYOUT="flat"
-            else
-                CUBESTACK_RELEASE_LAYOUT="tree"
-            fi
-        fi
-        _layout="${CUBESTACK_RELEASE_LAYOUT}"
         CUBESTACK_RELEASE_ROOT="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
-        case "${_layout}" in
-            tree)
-                _rel_root="${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files"
-                if [ ! -f "${_rel_root}/release.env" ]; then
-                    err "未找到发布版本 ${CUBESTACK_RELEASE}: ${_rel_root}/release.env"
-                    err "  先取件: ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh --release ${CUBESTACK_RELEASE} --no-flat --dest ${CUBESTACK_RELEASE_ROOT}"
-                    exit 1
-                fi
-                ;;
-            flat)
-                # flat: 资产平铺在 OFFLINE_FILES_ROOT; 优先用其中的 release.env(用户口径:
-                # 部署以 release.env 为主), 没有时回退仓库内发布定义。
-                if [ -f "${OFFLINE_FILES_ROOT}/release.env" ]; then
-                    _rel_root="${OFFLINE_FILES_ROOT}"
-                else
-                    _rel_root="${REPO_ROOT}/deployments/releases/${CUBESTACK_RELEASE}"
-                fi
-                if [ ! -f "${_rel_root}/release.env" ]; then
-                    err "未找到 release.env: ${OFFLINE_FILES_ROOT}/release.env 或 ${REPO_ROOT}/deployments/releases/${CUBESTACK_RELEASE}/release.env(flat 模式)"
-                    exit 1
-                fi
-                CUBESTACK_RELEASE_ROOT=""
-                ;;
-            *)
-                err "CUBESTACK_RELEASE_LAYOUT 仅支持 tree|flat(当前=${_layout})"
-                exit 1
-                ;;
-        esac
-        # shellcheck disable=SC1090
-        # 损坏的 release.env 不允许被 root 执行(存在 SHA256SUMS 时强制; 无清单只警告)
-        if ! verify_release_env_precheck "${_rel_root}"; then
+        if [ -f "${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files/release.env" ]; then
+            OFFLINE_FILES_ROOT="${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files"
+        elif [ -f "${OFFLINE_FILES_ROOT}/release.env" ]; then
+            # 直接挂载版本树的 offline-files/ —— 不需要版本子目录。
+            CUBESTACK_RELEASE_ROOT=""
+        else
+            err "未找到发布版本 ${CUBESTACK_RELEASE}: 需要以下之一"
+            err "  · ${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files/release.env(版本树)"
+            err "  · 或直接把版本树的 offline-files/ 挂到 ${OFFLINE_FILES_ROOT}"
             exit 1
         fi
-        source "${_rel_root}/release.env"
+        if ! verify_release_env_precheck "${OFFLINE_FILES_ROOT}"; then
+            exit 1
+        fi
+        source "${OFFLINE_FILES_ROOT}/release.env"
         if [ "${RELEASE_VERSION:-}" != "${CUBESTACK_RELEASE}" ]; then
             err "release.env 版本不符: RELEASE_VERSION=${RELEASE_VERSION:-<空>} CUBESTACK_RELEASE=${CUBESTACK_RELEASE}"
             exit 1
         fi
         if [ -z "${KUBESPRAY_VERSION:-}" ]; then
-            err "release.env 缺少 KUBESPRAY_VERSION(${_rel_root}/release.env)"
+            err "release.env 缺少 KUBESPRAY_VERSION(${OFFLINE_FILES_ROOT}/release.env)"
             exit 1
         fi
-        if [ "${_layout}" = "flat" ]; then
-            OFFLINE_FILES_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
-        else
-            OFFLINE_FILES_ROOT="${_rel_root}"
-        fi
-        # 这些变量默认写死指向 dev offline-files; release 模式统一重定向到发布根。
+        # 这些变量默认写死指向 dev offline-files; release 模式统一重定向到版本树。
         METAX_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/metax-gpu"
         METAX_PKG_DIR="${METAX_OFFLINE_DIR}"
         CUBESTACK_OPERATOR_OFFLINE_DIR="${OFFLINE_FILES_ROOT}/cubestack-operator"
@@ -948,16 +954,29 @@ load_config() {
         RDMA_SAVE_DIR="${OFFLINE_FILES_ROOT}/rdma"
         NETSHOOT_SAVE_DIR="${OFFLINE_FILES_ROOT}/netshoot"
         NETSHOOT_BASE_TAR="${OFFLINE_FILES_ROOT}/os/netshoot.tar"
-        DEV_LAB_SAVE_DIR="${OFFLINE_FILES_ROOT}/dev-lab"
         MODEL_IMAGES_SAVE_DIR="${OFFLINE_FILES_ROOT}/model-collection"
         CEPH_IMAGE_DIR="${OFFLINE_FILES_ROOT}/kubespray/${KUBESPRAY_VERSION}/images"
-        export CUBESTACK_RELEASE_LAYOUT CUBESTACK_RELEASE_ROOT METAX_OFFLINE_DIR METAX_PKG_DIR \
+        export CUBESTACK_RELEASE_ROOT METAX_OFFLINE_DIR METAX_PKG_DIR \
                CUBESTACK_OPERATOR_OFFLINE_DIR MULTUS_SAVE_DIR \
                NVIDIA_GPU_OPERATOR_OFFLINE_DIR RDMA_SAVE_DIR \
-               NETSHOOT_SAVE_DIR NETSHOOT_BASE_TAR DEV_LAB_SAVE_DIR \
+               NETSHOOT_SAVE_DIR NETSHOOT_BASE_TAR \
                MODEL_IMAGES_SAVE_DIR CEPH_IMAGE_DIR
-        vlog "release 模式生效: ${CUBESTACK_RELEASE} layout=${_layout}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
-        unset _rel_root _layout _auto_rel_env _auto_ver
+        vlog "release 模式生效: ${CUBESTACK_RELEASE}(OFFLINE_FILES_ROOT=${OFFLINE_FILES_ROOT})"
+        # 版本树里可能带私有模块: 布局固定为 <版本树根>/{offline-files/, modules/}。
+        # 这里只把位置告诉模块框架, 是否真正发现/执行由 lib-module.sh 决定。
+        # 公共版本没有 modules/, 因此什么都不发生。
+        _release_modules_dir="$(dirname "${OFFLINE_FILES_ROOT}")/modules"
+        if [ -d "${_release_modules_dir}" ]; then
+            # 追加而不是覆盖: 调用方可能已指定额外的模块目录(调试/非常规布局), 两者都该
+            # 生效 —— 否则"设了变量"会静默让版本树的模块整体消失, 那是最难排查的失败。
+            case ":${CUBESTACK_EXTRA_MODULES_DIRS:-}:" in
+                *":${_release_modules_dir}:"*) : ;;   # 已在列表里
+                *) CUBESTACK_EXTRA_MODULES_DIRS="${CUBESTACK_EXTRA_MODULES_DIRS:+${CUBESTACK_EXTRA_MODULES_DIRS}:}${_release_modules_dir}"
+                   export CUBESTACK_EXTRA_MODULES_DIRS
+                   vlog "发现版本树私有模块: ${_release_modules_dir}" ;;
+            esac
+        fi
+        unset _rel_root _layout _auto_rel_env _auto_ver _release_modules_dir
     fi
     # 版本档案接管(2026-09-30): 选定 KUBESPRAY_PROFILE 后, 该版本的**版本面变量**以档案为准
     # (档案 > cluster.conf > cluster.defaults.conf; 见 docs/kubespray-versioning/design.md §3.2 —— 否则 --profile v2.28.0
@@ -1326,24 +1345,6 @@ master_ips() {
     return 0
 }
 
-# CubeStack operator HA 拓扑(2026-10-27 用户口径):
-#   master >= 3 → "<n> 2 true"  (operator replicas=2; CubeStackCluster.spec.global.ha.enabled=true)
-#   master < 3  → "<n> 1 false" (单 master/两 master 一律 non-HA; replicas=1)
-# 输出 "<master_count> <replicas> <ha_enabled>"。
-# ⚠ node_parse/master_ips 会写 NODE_* 全局量 —— 本函数内部在命令替换子 shell 中统计, 不污染调用方。
-cubestack_operator_ha_profile() {
-    local _n
-    _n="$(master_ips | wc -w | tr -d '[:space:]')"
-    case "${_n}" in ''|*[!0-9]*) _n=0 ;; esac
-    if [ "${_n}" -ge 3 ]; then
-        printf '%s 2 true\n' "${_n}"
-    else
-        printf '%s 1 false\n' "${_n}"
-    fi
-    return 0
-}
-
-
 # 收集全部节点 IP(空格分隔; 供 VIP 冲突判定复用)
 all_node_ips() {
     local line
@@ -1419,7 +1420,7 @@ kube_vip_validate_config() {
 #   一旦它在读不到时伪造出一个值, 这两处安全判定都会 fail-open —— 要回退请下沉到 kube_vip_derive:
 #     · modules/02_k8s/09_kube_vip.sh#kube_vip_cleanup 清理护栏: 入口"非空且非节点 IP"即拒绝清理,
 #       伪造值会让"明明没有入口"的集群永远清不掉 kube-vip(而它给的解法在本地代理模式下也走不通)
-#     · modules/02_k8s/06_k8s_deploy.sh 阶段二切换确认门: _KV_OLD==_KV_VIP 会**静默跳过**红底确认
+#     · modules/02_k8s/06_k8s_deploy.sh 阶段二切换确认门: _KV_OLD==_KV_VIP 会**静默跳过**红底倒计时
 # 用法: cur="$(kube_vip_current_entry)"   (无库存/读不到时输出空串)
 kube_vip_current_entry() {
     local all_yml="${KUBESPRAY_INV_DIR:-${REPO_ROOT}/deployments/kubespray/inventory/cubestack-cluster}/group_vars/all/all.yml"
@@ -2111,102 +2112,6 @@ unset _sp _sp_ok _si
 WIPELIB
 }
 
-# ---------------- 离线 deb 安装原语(共享; 2026-10-14 三轮实机事故重构, P0) ----------------
-# 背景: "离线装 deb" 多处各写一份, 口径漂移 ⇒ 同类坑换文件复发(10-07 timesyncd 互斥守卫只进
-#   reconcile; 10-14 chrony 直装只进 setup-ntp)。本区收口为**单一实现**, 三条硬口径:
-#   ① 走 **dpkg 直装**: apt 对任何操作先做全局依赖检查, 节点"预先破损态"(半装包/版本错位)下
-#      直接拒绝 —— 连纯本地事务也拒(10-14 实机: 节点三处破损, chrony 永远装不上);
-#   ② **已装即跳(任何版本)**: 只补缺、不升级 —— 把较旧系统库升级会打断既有版本钉
-#      (10-14 实机: 闭包的 libtinfo6 .3 打断本机 libncurses6=.2 ⇒ 新全局缺口);
-#   ③ **互斥提供者声明表**: time-daemon 系(chrony/timesyncd/openntpd/ntp)只允许一个提供者,
-#      装载前按表预卸(10-14 实机: dpkg 报 conflicting packages 拒装 chrony)。
-#   ④ 批量 dpkg -i 一包失败**逐包隔离重试**(不连坐); ⑤ 输出全程保留(禁止 >/dev/null 吞)。
-# ⚠ 禁令(10-14 实机血证): **禁止**在破损态节点上自动跑 `apt-get --fix-broken install` ——
-#   它"修复"的手段是移除/改版(曾击穿 .203 的 sshd), 且离线时拿不到缺件 = 纯风险零收益。
-# 互斥表(单一事实来源; 远程双胞胎 _pkg_conflict_providers 见 deb_install_remote_lib,
-#   ⚠ 两处必须同步 —— tools/tests/test-deb-install-lib.sh 会断言两侧一致)
-pkg_conflict_providers() {   # <包名> → 输出其互斥提供者(空格分隔; 无 → 空)
-    case "$1" in
-        chrony|systemd-timesyncd|openntpd|ntp)
-            echo "chrony openntpd ntp systemd-timesyncd" | tr ' ' '\n' | grep -vx "$1" | tr '\n' ' ' ;;
-        *) : ;;
-    esac
-}
-
-# 节点侧安装原语(文本经 SSH stdin 送往节点; 与 bluestore_wipe_remote_lib 同机制)。
-# 用法: { deb_install_remote_lib; printf '\ninstall_debs_offline %s %s\n' "<deb目录>" "<关注包...>"; } | ssh <节点> "sudo bash -s"
-#   install_debs_offline <deb目录> [关注包...]: 预卸互斥 → 已装即跳过 → 批量 dpkg → 失败逐包隔离;
-#   返回值恒 0, 由调用方按"关注包命令/状态"断言(如 command -v chronyd 或 assert_pkgs_ready)。
-deb_install_remote_lib() {
-    cat <<'DEBLIB'
-# 互斥提供者表(⚠ 与 lib-common::pkg_conflict_providers 同步; 夹具断言两侧一致)
-_pkg_conflict_providers() {
-    case "$1" in
-        chrony|systemd-timesyncd|openntpd|ntp)
-            echo "chrony openntpd ntp systemd-timesyncd" | tr ' ' '\n' | grep -vx "$1" | tr '\n' ' ' ;;
-        *) : ;;
-    esac
-}
-
-# 安装一批离线 deb: 只补缺失、预卸互斥、失败逐包隔离、输出全程保留。
-# 用法: install_debs_offline <deb目录> [关注包...]
-install_debs_offline() {
-    local d="$1"; shift
-    local want="$*"
-    local dlog=/tmp/cubestack-deb-install.log p c f pk list="" n_skip=0
-    : >"${dlog}"
-    # ① 预卸互斥提供者(对每个"关注包": 其提供者已装且不在同名关注列表 → 卸)
-    for p in ${want}; do
-        for c in $(_pkg_conflict_providers "${p}"); do
-            case " ${want} " in *" ${c} "*) continue ;; esac
-            if dpkg-query -W -f='${Status}' "${c}" 2>/dev/null | grep -q "install ok installed"; then
-                echo "  [deb-install] 预卸互斥包 ${c}(与待装 ${p} 冲突, dpkg 级直卸)"
-                dpkg --purge "${c}" >>"${dlog}" 2>&1 || true
-            fi
-        done
-    done
-    # ② 过滤: 已装即跳(任何版本); 只补缺, 不升级(防打断既有版本钉)
-    for f in "${d}"/*.deb; do
-        [ -f "${f}" ] || continue
-        pk="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
-        [ -n "${pk}" ] || continue
-        if [ -n "$(dpkg-query -W -f='${Status}' "${pk}" 2>/dev/null | grep -o 'install ok installed' || true)" ]; then
-            n_skip=$((n_skip + 1)); continue
-        fi
-        list="${list} ${f}"
-    done
-    if [ -z "${list}" ]; then
-        echo "  [deb-install] 全部已装(跳过 ${n_skip} 个), 无需安装"
-        return 0
-    fi
-    # ③ 批量 dpkg -i; 失败 → 逐包隔离(一个坏包不连坐好包)
-    # shellcheck disable=SC2086
-    if dpkg -i ${list} >>"${dlog}" 2>&1; then
-        echo "  [deb-install] dpkg 直装成功(跳过已装 ${n_skip}; 安装 $(echo ${list} | wc -w) 个)"
-        return 0
-    fi
-    echo "  [deb-install] 批量安装部分失败, 逐包隔离重试(明细: ${dlog}):"
-    local ok_n=0 fail_n=0
-    for f in ${list}; do
-        if dpkg -i "${f}" >>"${dlog}" 2>&1; then ok_n=$((ok_n + 1)); else fail_n=$((fail_n + 1)); fi
-    done
-    echo "  [deb-install] 隔离结果: 成功 ${ok_n} / 失败 ${fail_n}"
-    [ "${fail_n}" -gt 0 ] && tail -8 "${dlog}" | sed 's/^/      /'
-    return 0
-}
-
-# 断言关注包全部处于已装态(install_debs_offline 之后调用; 任一缺失 → 非 0)
-assert_pkgs_ready() {
-    local p
-    for p in "$@"; do
-        dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "install ok installed" \
-            || { echo "PKG-MISSING:${p}"; return 1; }
-    done
-    return 0
-}
-DEBLIB
-}
-
 # ---------------- 共用 MetalLB VIP 的约定(多服务共用一个 IP、不同端口) ----------------
 # 默认关闭: 共用 VIP 需要**每个共用方**都带同一个 sharing key 注解, MetalLB 才肯把同一地址
 # 分给多个 Service。约定集中在这里, 是因为它必须**三处完全一致**, 分散写必有一处漂移:
@@ -2665,10 +2570,10 @@ check_offline_files() {
         echo ""
         echo -e "\033[41m\033[97m================================================================\033[0m"
         echo -e "\033[41m\033[97m ⚠⚠⚠  离线文件缺失: ${OFFLINE_FILES_DIR:-<未配置>} 为空或不存在  ⚠⚠⚠\033[0m"
-        echo -e "\033[41m\033[97m  离线安装需要 binary 与镜像, 请先准备离线文件:                     \033[0m"
-        echo -e "\033[41m\033[97m   ① 内网/联网机从 MinIO 下载:                                    \033[0m"
-        echo -e "\033[41m\033[97m      sudo ./deployments/scripts/tools/offline/fetch-offline-from-minio.sh\033[0m"
-        echo -e "\033[41m\033[97m   ② 或手工拷贝离线文件到 ${OFFLINE_FILES_DIR:-deployments/offline-files}/   \033[0m"
+        echo -e "\033[41m\033[97m  离线安装需要版本树(binary + 镜像), 请先挂载/拷贝:                  \033[0m"
+        echo -e "\033[41m\033[97m   ① 版本树由外部打包流程物化, 挂载其 offline-files/ 到:            \033[0m"
+        echo -e "\033[41m\033[97m      ${OFFLINE_FILES_DIR:-deployments/offline-files}/                                    \033[0m"
+        echo -e "\033[41m\033[97m   ② 或指定版本树根: --release <版本> / CUBESTACK_RELEASE_ROOT        \033[0m"
         echo -e "\033[41m\033[97m   ③ kubespray 离线资源位于 ${LOCAL_REPO_DIR:-offline-files/kubespray}/    \033[0m"
         echo -e "\033[41m\033[97m      (镜像 images/ + 二进制 + packages/ 系统包)                    \033[0m"
         echo -e "\033[41m\033[97m================================================================\033[0m"
@@ -2952,7 +2857,7 @@ EOF
 }
 
 # ---------------- RWO 单卷 Deployment 的更新策略守护 ----------------
-# 背景(2026-10-19 实机): cubepilot-api 把单个 ReadWriteOnce PVC 挂在 Deployment 上,
+# 背景(2026-10-19 实机): 某个组件把单个 ReadWriteOnce PVC 挂在 Deployment 上,
 #   默认 strategy=RollingUpdate + maxSurge>0 会**先**起新 Pod; 新 Pod 调度到另一节点后
 #   无法挂载同一 RWO 卷(attachdetach 报 Multi-Attach, 卷仍被旧 Pod 占用), 而 maxUnavailable
 #   又阻止旧 Pod 先退出 → Deployment 永久卡住(1 个旧 Pod Running + 1 个新 Pod ContainerCreating)。
@@ -3016,103 +2921,6 @@ for item in data.get("items", []):
         fi
     done <<< "${targets}"
     return "${rc}"
-}
-
-# ---------------- placement 前的 PVC 亲和性守护 ----------------
-# 背景(2026-11-10): local-path 等 PV 带 kubernetes.io/hostname nodeAffinity。若 PVC 已
-#   绑定在 worker, 把工作负载钉到 master 后新 Pod 会因 volume node affinity conflict
-#   Pending。把 placement 提前到 dev_lab/model_images 之前时, registry 尤其不能这样中断
-#   (后续镜像 push 全依赖它)。调用方在 apply 前用本组函数判断并跳过 + 告警。
-# 用法: placement_pod_pvcs < Pod/Deployment/ReplicaSet JSON(stdin)> → 每行一个 PVC 名
-#       placement_pvc_worker_bound <ns> <pvc>... → 0=有 PVC 绑在非 master(输出 pvc@node);
-#         1=确认没有; 2=查询失败(未知, 调用方必须按跳过/失败处理)
-# 返回: 0=解析成功(可能无 PVC); 2=JSON 读取/解析失败(调用方不得当成"无 PVC")
-placement_pod_pvcs() {
-    python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(2)
-s = d.get("spec") or {}
-kind = d.get("kind", "")
-podname = (d.get("metadata") or {}).get("name", "")
-if "template" in s:
-    s = (s.get("template") or {}).get("spec") or {}
-for v in s.get("volumes") or []:
-    c = (v.get("persistentVolumeClaim") or {}).get("claimName")
-    if c:
-        print(c)
-        # StatefulSet Pod 的 volumes 引用卷模板名, 实际 PVC 是 <claim>-<pod>。
-        if kind == "Pod" and podname:
-            print(c + "-" + podname)
-' 2>/dev/null
-}
-
-# PVC 绑定的节点(local-path PV 的 hostname nodeAffinity); 无 nodeAffinity 输出空。
-# 返回: 0=成功(PVC 未绑定则无输出); 2=PVC/PV 查询或解析失败 —— 调用方必须按"未知"处理,
-#       不能当成"没有 nodeAffinity"(否则会把无法确认的卷误判为可安全迁移)。
-placement_pvc_bound_node() {   # <ns> <pvc>
-    local ns="$1" pvc="$2" pv="" _json _out _msg _rc=0
-    _out="$(SSH "${K}" -n "${ns}" get pvc "${pvc}" -o jsonpath='{.spec.volumeName}' 2>/dev/null)" || _rc=$?
-    if [ "${_rc}" -ne 0 ]; then
-        # 失败时单独取 stderr 分类(成功路径不受 kubectl 告警输出污染)
-        _msg="$(SSH "${K}" -n "${ns}" get pvc "${pvc}" -o jsonpath='{.spec.volumeName}' 2>&1 >/dev/null)" || true
-        case "${_msg}" in
-            *NotFound*|*"not found"*) return 0 ;;   # PVC 确认不存在 → 无绑定约束
-            *) return 2 ;;
-        esac
-    fi
-    pv="${_out}"
-    [ -n "${pv}" ] || return 0
-    _json="$(SSH "${K}" get pv "${pv}" -o json 2>/dev/null)" || return 2
-    if ! printf '%s' "${_json}" | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(2)
-terms = (((d.get("spec") or {}).get("nodeAffinity") or {}).get("required") or {}).get("nodeSelectorTerms") or []
-for t in terms:
-    for e in t.get("matchExpressions") or []:
-        if e.get("key") == "kubernetes.io/hostname" and e.get("values"):
-            print(e["values"][0]); sys.exit(0)
-' 2>/dev/null; then
-        return 2
-    fi
-}
-
-# 返回: 0=有 PVC 绑在非 master(输出 pvc@node); 1=确认没有; 2=查询失败(无法判断)。
-placement_pvc_worker_bound() {   # <ns> <pvc>...
-    local ns="$1"; shift
-    local pvc node out _rc
-    for pvc in "$@"; do
-        [ -n "${pvc}" ] || continue
-        _rc=0
-        node="$(placement_pvc_bound_node "${ns}" "${pvc}")" || _rc=$?
-        [ "${_rc}" -eq 2 ] && return 2
-        [ -n "${node}" ] || continue
-        _rc=0
-        out="$(SSH "${K}" get node "${node}" -o json 2>/dev/null)" || _rc=$?
-        [ "${_rc}" -eq 0 ] || return 2
-        [ -n "${out}" ] || return 2
-        _rc=0
-        printf '%s' "${out}" | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(2)
-labels = (d.get("metadata") or {}).get("labels") or {}
-sys.exit(0 if "node-role.kubernetes.io/control-plane" not in labels else 1)
-' || _rc=$?
-        case "${_rc}" in
-            0) printf '%s@%s\n' "${pvc}" "${node}"; return 0 ;;
-            1) continue ;;   # master 绑定 → 继续看其它 PVC
-            *) return 2 ;;
-        esac
-    done
-    return 1
 }
 
 # ---------------- 停消费者前的副本数登记 / 恢复(2026-10-13, CodeRabbit 评审修订) ----------------

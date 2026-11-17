@@ -31,10 +31,9 @@
 #   · 安全确认(需求 2): 应用 CR 前红底醒目列出"将使用的节点 + 各节点磁盘按类分组
 #     (空闲 / 上次 Ceph 占用 / 在用 / 混合)+ 判定证据", 并询问 **[Y/n](CEPH_CONFIRM_SLEEP 变量
 #     保留兼容: 默认 60→询问, 设 0 跳过)** 供人工 double-check; 直接回车/Y 才继续。
-#   · 节点准备: 每台存储节点加载并持久化 rbd 内核模块; 确保 lvm2
-#     (离线 .deb 由 tools/offline/fetch-lvm-packages.sh 放到 offline-files/os/packages,
-#     本模块部署前预检"离线包就绪 或 节点已在线装 lvm", 缺失硬失败; 部署时自动从该目录安装)。
-#   · 离线镜像(需求 5): tools/images/ceph-save-images.sh(联网机下载到 offline-files/kubespray/images,
+#   · 节点准备: 每台存储节点加载并持久化 rbd 内核模块; 检查 lvm2 是否存在
+#     (由 OS 镜像/运维预装; installer 不安装 OS 包, 缺失直接失败)。
+#   · 离线镜像(需求 5): 版本树的 offline-files/kubespray/<版本>/images/,
 #     与 kubespray 镜像同目录) → k8s 阶段由 cluster.yml 内置预加载 play 统一同步到节点并 ctr import。
 #   · registry 后端(需求 6): REGISTRY_STORAGE_CLASS=ceph-block(见 docs/ceph-rook.md)时,
 #     registry 的 PVC 改走 ceph RBD(替代 local-path); 模块设计顺序在 registry 配置之前。
@@ -273,36 +272,8 @@ fi
     exit 1
 }
 
-# 前置: lvm2 离线包就绪(需求: 先准备 lvm 离线包, 再在部署 ceph 前安装)。
-#   离线包来源: offline-files/os/packages(lvm2_*.deb + 依赖, 版本无关 OS 层), 由联网机
-#   tools/offline/fetch-lvm-packages.sh 生成。存储节点缺 lvm 且无离线包 → 硬失败,
-#   避免"看起来部署成功、OSD 因无 lvm 无法激活"的隐性失败(比 warn 更早暴露)。
-_LVM_DEB_PRESENT=0
-for _p in "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"/os/packages/lvm2_*.deb \
-          "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"/os/packages/lvm2_*.rpm; do
-    [ -f "${_p}" ] && _LVM_DEB_PRESENT=1
-done
-if [ "${_LVM_DEB_PRESENT}" = "0" ]; then
-    say "检查存储节点 lvm2 是否已在线安装(离线包未就绪时以此兜底)..."
-    _ALL_HAS_LVM=1
-    for _hn in "${CEPH_NODE_HOSTS[@]}"; do
-        _ip=""
-        for line in "${NODES[@]:-}"; do
-            [ -z "${line}" ] && continue
-            node_parse "${line}"
-            [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
-        done
-        [ -n "${_ip}" ] || continue
-        node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1 || _ALL_HAS_LVM=0
-    done
-    if [ "${_ALL_HAS_LVM}" = "0" ]; then
-        err "lvm2 离线包未就绪且存储节点未安装 lvm —— 无法离线部署 Rook OSD(重启后逻辑卷需 lvm 激活)"
-        err "  请先在**联网机**执行: sudo ./deployments/scripts/tools/offline/fetch-lvm-packages.sh"
-        err "  生成 lvm2_*.deb → ${REPO_ROOT}/deployments/offline-files/os/packages/, 再重跑本模块"
-        exit 1
-    fi
-    warn "  lvm2 离线包未就绪, 但存储节点已在线安装 lvm, 继续(重启后逻辑卷激活依赖已满足)"
-fi
+# 前置: lvm2 由 OS 镜像/运维预装; installer 只检查, 不安装。
+#   存储节点缺 lvm2 时在下方 4b 硬失败, 避免"看起来部署成功、OSD 因无 lvm 无法激活"。
 
 # ★ external 模式(CEPH_MODE=external): 不涉及本地裸盘/覆盖确认, 跳过裸盘选择与安全确认段;
 #   仅 internal(集群内 Rook-Ceph)需要。operator/csi-operator 部署仍执行(供 CephConnection 使用)。
@@ -689,7 +660,7 @@ fi
 fi
 
 # ---------------- 4) 存储节点准备(rbd 模块 + lvm2 + node label) ----------------
-say "[3/8] 存储节点准备(rbd 内核模块 / lvm2 离线安装 / node label)..."
+say "[3/8] 存储节点准备(rbd 内核模块 / lvm2 检查 / node label)..."
 _CEPH_NBD_FAIL=0
 for _hn in "${CEPH_NODE_HOSTS[@]}"; do
     _ip=""; _user="${SSH_USER:-ubuntu}"
@@ -714,21 +685,12 @@ for _hn in "${CEPH_NODE_HOSTS[@]}"; do
             _CEPH_NBD_FAIL=1 ;;
         *)       : ;;
     esac
-    # 4b. lvm2: 检测缺失 → 从离线 packages 安装(install-worker-packages.sh 含 offline-files/os/packages)
+    # 4b. lvm2: 只检查, 不安装(OS 包由节点镜像/运维负责)
     if ! node_ssh "${_ip}" "${_user}" "command -v lvm >/dev/null 2>&1 && lvm version >/dev/null 2>&1" >/dev/null 2>&1; then
-        say "    lvm2 缺失, 从离线 .deb 安装(packages 目录, 由 fetch-lvm-packages.sh 生成)..."
-        if [ -d "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages" ] && \
-            bash "${SCRIPT_DIR}/tools/node/install-worker-packages.sh" "${_ip}" "${_user}" >/dev/null 2>&1; then
-            node_ssh "${_ip}" "${_user}" "command -v lvm >/dev/null 2>&1" >/dev/null 2>&1 \
-                && ok "    lvm2 已安装(离线包)" || err "    packages 无 lvm2 或安装失败 —— lvm2 离线包未就绪且节点无 lvm, 部署 OSD 必失败"
-        else
-            # 前置 lvm 预检已保证"离线包存在 或 节点已在线装 lvm", 走到这里 = 前置被绕过/包缺失
-            err "    lvm2 离线安装失败(install-worker-packages.sh 退出非 0)。请联网机先跑 tools/offline/fetch-lvm-packages.sh 生成 lvm2_*.deb, 重跑本模块"
-            exit 1
-        fi
-    else
-        ok "    lvm2 已就绪"
+        err "存储节点 ${_ip} 缺少 lvm2；请先在节点安装 lvm2（installer 不安装 OS 包）"
+        exit 1
     fi
+    ok "    lvm2 已就绪"
     # 4c. node label(选择部署节点)
     SSH "${K} label node ${_hn} ${CEPH_NODE_LABEL} --overwrite >/dev/null 2>&1" \
         && ok "    node label 已打: ${CEPH_NODE_LABEL}" \
@@ -748,7 +710,7 @@ fi
 # ★ 镜像已由 k8s 阶段预加载 play(cluster.yml 内置)随 kubespray 镜像一起同步到全部节点并
 #   ctr import(见 cubestack-offline.sh resolve_preload_image_files: CEPH_ENABLED=true 时把
 #   CEPH_IMAGE_DIR 的 *.tar 追加进 preload-images.lst)。此处不再重复同步, 只做就绪校验,
-#   并给离线环境明确指引(缺失时 warn + 提供 ceph-sync-images.sh 手工补救, 不阻断)。
+#   并给离线环境明确指引(缺失时 warn 并提示检查版本树, 不阻断)。
 say "[4/8] 校验 ceph 离线镜像已预加载到节点(ctr -n k8s.io images ls)..."
 # 源目录 CEPH_IMAGE_DIR 可能已删除(镜像已并入 k8s 阶段 images/ 预加载, 源目录仅为保存副本):
 # 目录存在才逐节点校验缺失; 不存在则跳过校验(节点镜像由 k8s 阶段保证, 无需源目录)。
@@ -773,7 +735,7 @@ if [ -d "${CEPH_IMAGE_DIR}" ] && ls "${CEPH_IMAGE_DIR}"/*.tar >/dev/null 2>&1; t
     done
     if [ "${#_MISSING[@]}" -gt 0 ]; then
         warn "  以下节点未检测到 ceph 镜像: ${_MISSING[*]} —— 可能预加载未覆盖(k8s 阶段 CEPH_ENABLED 需 true); 手工补救:"
-        warn "    bash ${SCRIPT_DIR}/tools/images/ceph-sync-images.sh --node ${_MISSING[0]}"
+        warn "    请检查版本树的 offline-files/kubespray/<版本>/images/ 是否完整"
         warn "    或在 cluster.conf 设 CEPH_ENABLED=true 后重跑 k8s_deploy 阶段(全量覆盖安装: ./deploy-cluster.sh --fresh)"
     fi
 else
@@ -894,10 +856,8 @@ for i in $(seq 1 18); do
 done
 [ "${OP_OK:-0}" -ge 1 ] 2>/dev/null || { warn "  rook operator 未就绪(检查 kubectl -n rook-ceph get pods)"; }
 ok "  Rook operator 已部署"
-# ★ 2026-11-12: 官方 offline manifest(common.yaml)的 RBAC 不含 monitoring.coreos.com ——
-#   即使 CR 开了 monitoring.enabled, Rook 也无权限创建 ServiceMonitor/PrometheusRule,
-#   结果 mgr(9283)/ceph-exporter(9926) 指标已暴露但 Prometheus 无抓取目标, Grafana Ceph 面板 No data。
-#   用独立 ClusterRole/Binding 授权(不改 vendored manifest —— rook-fetch-manifests.sh 重新拉取会覆盖)。
+# 官方 offline manifest 的 RBAC 不含 monitoring.coreos.com; 没有这条授权,
+# Rook 即使被 operator patch 了 monitoring.enabled=true 也创建不了 ServiceMonitor。
 say "  应用 Rook 监控 RBAC(monitoring.coreos.com)..."
 if cat <<EOF | SSH "${K} apply -f -" >/dev/null 2>&1
 apiVersion: rbac.authorization.k8s.io/v1
@@ -1119,12 +1079,6 @@ else
     #   分支里, 曾导致"apply 完 CR 直接宣布完成(集群仍在 Progressing), ceph_csi 一进来就报错打断部署"。
     say "[6/8] 生成并应用 CephCluster CR(mon=${CEPH_MON_COUNT}, 副本=${CEPH_POOL_REPLICAS}/${CEPH_POOL_MIN_SIZE})..."
     LOCAL_CR="$(mktemp)"
-    # ★ 2026-11-13(CodeRabbit): 重跑必须保留 live 值 —— cubestack-operator 会把
-    #   spec.monitoring.enabled patch 成 true; 这里若硬编码 false, apply 会把它覆盖回去
-    #   (尤其是从旧清单迁移、last-applied 里是 false/true 的场景)。
-    #   新装/CR 不存在/读取失败 → 空 → 默认 false; 只在 live 明确为 true 时保留 true。
-    _CEPH_MONITORING_ENABLED="$( (SSH "timeout 10 ${K}" -n "${CEPH_NAMESPACE}" get cephcluster rook-ceph -o jsonpath='{.spec.monitoring.enabled}' 2>/dev/null) || true)"
-    [ "${_CEPH_MONITORING_ENABLED}" = "true" ] || _CEPH_MONITORING_ENABLED="false"
 {
     echo "apiVersion: ceph.rook.io/v1"
     echo "kind: CephCluster"
@@ -1149,12 +1103,6 @@ else
     echo "  dashboard:"
     echo "    enabled: ${CEPH_DASHBOARD_ENABLED:-true}"
     echo "    ssl: true"
-    echo "  monitoring:"
-    # ★ 2026-11-13: 新装时初始 false —— Ceph 模块先于 kube-prometheus-stack 安装,
-    #   此时 ServiceMonitor CRD 可能还不存在; 等监控组件就绪后由 cubestack-operator
-    #   侧 patch CephCluster 的 spec.monitoring.enabled=true, Rook 再创建 ServiceMonitor。
-    #   cubestack-installer 不执行该 patch。重跑时保留上面的 live 值, 不覆盖 operator 的 true。
-    echo "    enabled: ${_CEPH_MONITORING_ENABLED}"
     echo "  network:"
     echo "    provider: \"\""
     # ★ hostNetwork(2026-09-09): CEPH_HOST_NETWORK=true(默认)时, mon/osd/mgr 直接监听节点 IP;
@@ -1208,7 +1156,6 @@ else
         done
     done
 } > "${LOCAL_CR}"
-unset _CEPH_MONITORING_ENABLED
 SSH "sudo rm -f /tmp/cephcluster.yaml" >/dev/null 2>&1 || true   # 清陈旧目标(fs.protected_regular: 他人遗留文件会让 scp 被拒)
 scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
     "${LOCAL_CR}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/cephcluster.yaml" >/dev/null 2>&1

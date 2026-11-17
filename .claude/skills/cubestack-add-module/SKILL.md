@@ -1,14 +1,14 @@
 ---
 name: cubestack-add-module
-description: CubeStackInstaller 新增部署模块的端到端标准流程技能。当用户要在 deployments/scripts/modules/ 下新增一个部署模块(中间件/自研组件/存储插件/verify 验证模块)、把 addon_stub 占位模块实现为真实逻辑、或修改模块元数据时使用。适用触发语:"新增模块"、"加一个 operator"、"新组件怎么接入"、"实现 XX 占位模块"、"模块报 unbound variable"、"模块没被调度"。本技能强制:init_remote_kubectl 统一初始化、REQUIRES 依赖声明、chart 入 cubestack-addon/ 且镜像登记 images.manifest + 首建 offline-files/ 目录、check-modules.sh 静态校验、--steps 精确模式验证、同步到部署容器。
+description: CubeStackInstaller 新增部署模块的端到端标准流程技能。当用户要在 deployments/scripts/modules/ 下新增一个部署模块(中间件/自研组件/存储插件/verify 验证模块)、把 addon_stub 占位模块实现为真实逻辑、或修改模块元数据时使用。适用触发语:"新增模块"、"加一个 operator"、"新组件怎么接入"、"实现 XX 占位模块"、"模块报 unbound variable"、"模块没被调度"。本技能强制:init_remote_kubectl 统一初始化、REQUIRES 依赖声明、chart 入 cubestack-addon/、镜像登记到 versions/base.yaml 或 mirror catalog、check-modules.sh 静态校验、--steps 精确模式验证、同步到部署容器。
 ---
 
 # CubeStackInstaller 新增部署模块标准流程
 
 在 **CubeStackInstaller 仓库**(`/home/supperadm/cubestack-installer`)的 `deployments/scripts/modules/` 下新增/修改部署模块时,严格按本流程执行。目标:**新模块不破坏既有功能** —— 每条规则都源自真实事故(见"历史事故警示")。
 
-> 完整开发规范(模块设计/目录/工具脚本约定)见仓库内 `docs/scripts-development-spec.md`(§2.4 chart 离线副本、§2.5 镜像离线登记)与 `.claude/skills/cubestack-deploy-scripts/SKILL.md`,本技能是它的"新增模块"专项可执行流程,两者配合使用。
-> ⚠ `skills/` 下的同名副本是**过时分叉**(内容与 `.claude/skills/` 不同且含错误规则),一律以 `.claude/skills/` 为准。
+> 完整开发规范(模块设计/目录/工具脚本约定)见仓库内 `docs/scripts-development-spec.md`(§2.4 chart 离线副本、§2.5 镜像来源)与 `.claude/skills/cubestack-deploy-scripts/SKILL.md`,本技能是它的"新增模块"专项可执行流程,两者配合使用。
+> ⚠ 根目录 `skills/` 已删除；本技能只有 `.claude/skills/` 这一份。
 
 ## 历史事故警示(为什么这些规则是强制的)
 
@@ -19,7 +19,7 @@ description: CubeStackInstaller 新增部署模块的端到端标准流程技能
 | 新模块插错序号 → registry 在 local_path 前执行 | 模块顺序全靠文件名序号,无依赖声明 | **规则 3: REQUIRES 声明依赖,拓扑排序保证顺序** |
 | 两个 deploy-cluster.sh 并发跑互相覆盖状态文件 | 无并发锁 | **规则 6: flock 已在入口生效,提醒用户不要并发** |
 | 私服抖动时组件装不上,"回退本地 chart" 空转 | 回退代码**写了**,但仓库里压根没有那份离线 chart —— 从没被提交过 | **规则 7: chart 离线副本必须 vendored 进 `cubestack-addon/<组件>/` 并随 git 分发** |
-| 文档/脚本里写着 `offline-files/<组>/`,机器上目录却不存在(清单里登记了 group, 却没人建目录) | 新模块只"登记/写路径",没人负责首次建目录、放 README、把镜像列进清单 | **规则 8: 镜像登记 `images.manifest` + 首建 `offline-files/<group>/`(带 README)** |
+| 文档/脚本里写着 `offline-files/<组>/`,机器上目录却不存在(清单里登记了 group, 却没人建目录) | 新模块只"登记/写路径",没人负责首次建目录、放 README、把镜像列进清单 | **规则 8: 第三方镜像登记到 mirror catalog，公共 base 镜像登记到 `versions/base.yaml`** |
 
 ## 新增模块 8 步标准流程
 
@@ -87,9 +87,9 @@ init_remote_kubectl || exit 1
   做法见 §步骤 3.1;漏了会被 `check-modules.sh` 第 ⑩ 项拦下。
   **窄例外**: `cubestack-operator` 的 chart 随离线包放在 `offline-files/cubestack-operator/charts/`,
   `.tgz`/`.digest` 不入 git;新组件不要照抄这个例外,除非同样由内网同步同步到 MinIO。
-- ⚠ **镜像必须登记 + 首建离线目录(规则 8,强制)**: 模块要拉的镜像登记到 `deployments/config/images.manifest`
-  (`group` = 组件名),并建 `deployments/offline-files/<group>/`(**带 README.md**,否则空目录进不了 git)。
-  做法见 §步骤 3.2。漏了不会有脚本报错,只在离线部署时表现为"镜像没在离线包里"。
+- ⚠ **镜像来源登记(规则 8,强制)**: 第三方镜像加到 `container-image-mirror`；
+  公共 base 镜像登记到 `versions/base.yaml`(`catalog_id` 或 `source_ref + digest`)。
+  做法见 §步骤 3.2。不要新增 installer 内的镜像清单。
 - ⚠ **不要在自己的模块里创建 Gateway / HTTPRoute**(2026-09-18 起): 网关与路由统一由**专门的网关模块**创建,
   组件模块只装组件;对外入口在模块末尾给 port-forward 指引即可。也不要假设平台网关一定存在
   (原 `33_cubestack_gateway.sh` 及其 `cubestack-addon/gateway/` 已移除,新网关模块待落地)
@@ -120,31 +120,23 @@ init_remote_kubectl || exit 1
 6. **自检**:`bash deployments/scripts/tools/check-modules.sh` 第 ⑩ 项必须过。想确认它真会拦,
    把刚放的 chart 临时挪走再跑一次 —— 应该报 `找不到 vendored chart`。
 
-### 步骤 3.2:镜像离线登记 + 目录(只要模块拉镜像就必须做)
+### 步骤 3.2:镜像来源登记(只要模块拉镜像就必须做)
 
-> 完整规范见 `docs/scripts-development-spec.md` §2.5。与 3.1 的分工:chart **入 git**,
-> 镜像 tar **不入 git**(只登记 + 备料),但**目录和清单第一次就得建好**。
+> 2026-11 起 installer 不再维护 `images.manifest` / 镜像同步工具。
+> 镜像的版本和 digest 只存在于两个公共来源 + 一个私有 overlay。
 
-1. **登记清单**:`deployments/config/images.manifest` 追加 `<group>  <上游全限定 ref>` 行,
-   `group` 取**组件名**(与 `cubestack-addon/<组件>/`、模块 key 对齐)。ref 必须全限定
-   (短名补 `docker.io/library/`),版本写 `${VAR}` 占位,不要写死 tag。
-2. **版本变量**:`XXX_IMAGE_VERSION` 放 `cluster.defaults.conf` 的「镜像版本钉子(★ 升级入口)」节
-   —— 升级只改这一处,清单 / CI / 离线包自动跟随。
-3. **建目录 + README(最容易漏)**:`deployments/offline-files/<group>/README.md`,照抄
-   `offline-files/rdma/README.md`。⚠ **空目录 git 存不下,`.gitignore` 也只放行
-   `offline-files/*/README.md`(版本目录内是 `offline-files/*/*/README.md`, 两行缺一不可 —
-   少了"放行二级目录本身"那行, 版本目录的 README 会静默从 git 消失)** —— 不写 README,新目录
-   提交后会消失(用 `check-image-manifest.sh` 的 ④b 项兜底: 它会列出"清单里有 group、却没有目录/README"的项)。
-   ⚠ **版本层(2026-09-30 起)**:若该组件的离线资产要**按版本选**, 资产放
-   `offline-files/<group>/<版本>/`(版本名 = 上游 tag 全名), 并四条一起改(资产目录 / 版本开关 /
-   `images.manifest` 落点 / `trim-offline-files.sh --version`); 规程见
-   [`docs/kubespray-versioning/README.md`](docs/kubespray-versioning/README.md) §5。
-4. **备料 tar**:`sudo ./deployments/scripts/tools/images/harbor-save-images.sh --group <组>`
-   (从 Harbor 拉到该组目录,目录不存在会自动补建)。这是**联网机**上的动作,不要在部署机上现拉。
-5. **自检**:`bash deployments/scripts/tools/images/check-image-manifest.sh`
-   (格式/变量/重复;加 `--harbor` 额外比对 Harbor 漂移)。
-6. **特例**:上游就是本台 Harbor 的组(`metax-gpu`)**默认不镜像**,但仍要登记
-   —— 清单同时是"本仓库用到哪些镜像"的登记簿。
+1. **第三方镜像**:先改 `container-image-mirror` 的 `images/*.yaml`
+   (`source` / `target` / `tag` / `digest`)，合并后产生新的 `index.json`。
+2. **公共 base 镜像**:在 `versions/base.yaml.images[]` 里登记
+   - 第三方镜像:`catalog_id` + `version`；
+   - 自建公开镜像:`source_ref` + `digest`；
+   - 版本变量放 `env`。
+3. **私有镜像**:不进 public baseline，由 release 的 `overlays/base-private.yaml` 提供。
+4. **离线 tar**:由版本树或在线物化生成，不入库；模块用 `find_offline_tar` 按约定命名消费。
+5. **校验**:`python3 deployments/scripts/tools/validate-base-baseline.py`；
+   release 侧 `verify` / `fetch-base-sources` 再校验。
+
+不要新增 installer 内的镜像清单或同步脚本。
 
 ### 步骤 4:静态校验(合入前强制)
 
@@ -235,7 +227,7 @@ fi
 - [ ] 新配置变量已在 cluster.conf.example 声明
 - [ ] **(装 chart 的模块)chart 已 vendored 到 `cubestack-addon/<组件>/`,tgz 形态附了 `.digest` 边车,且已 `git add`**
 - [ ] **(装 chart 的模块)安装走 `helm_chart_ensure`,恒用本地副本;本地副本缺失时 `err` 退出并给获取方法**
-- [ ] **(拉镜像的模块)镜像已登记 `config/images.manifest`,`group` = 组件名,版本用 cluster.conf 变量占位**
+- [ ] **(拉镜像的模块)镜像已登记到 mirror catalog 或 `versions/base.yaml`，并带 digest/版本**
 - [ ] **(拉镜像的模块)`deployments/offline-files/<group>/README.md` 已建并 `git add`(空目录/无 README 的目录提交后会消失;tar 不入库)**
 - [ ] `bash deployments/scripts/tools/images/check-image-manifest.sh` 通过(改过清单时)
 - [ ] `bash deployments/scripts/tools/check-modules.sh` exit 0(第 ⑩ 项会拦住缺失的离线副本)

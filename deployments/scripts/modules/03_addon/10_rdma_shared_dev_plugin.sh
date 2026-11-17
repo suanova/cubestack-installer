@@ -40,7 +40,7 @@
 #   · 前置条件: 节点已装 Mellanox RDMA 网卡(ConnectX)+ MLNX_OFED/ib_core 驱动, ibstat/rdma link show
 #     可见 HCA; K8s kubelet Device Plugin 特性默认开启。插件 DaemonSet 全节点跑, 无 HCA 节点空转不报错(自探测)。
 #   · 数据面隔离(可选): 与 Multus CNI(模块 09_multus)配合, 基于 RDMA 网卡(master)再建 macvlan NAD 给 Pod 独立业务 IP。
-#   · 离线镜像: deployments/offline-files/rdma/(联网机 tools/images/rdma-save-images.sh 生成 tar)→ 推送到
+#   · 离线镜像: 版本树的 offline-files/rdma/ → 推送到
 #     集群内置 registry(目标 mellanox/k8s-rdma-shared-dev-plugin, 保 repo 路径去注册域)。
 #   · manifest: ConfigMap + DaemonSet 由模块 heredoc 生成(镜像行重写为镜像副本 ref; 源不落盘)。
 #   · 区别于 SR-IOV: 本插件用于 PF(Physical Function)共享; 若开 SR-IOV(VF)应改用 k8s-sriov-network-device-plugin。
@@ -153,7 +153,7 @@ _to_json_list() {
 
 # ---- [1/4] 校验离线镜像 tar ----
 say "[1/4] 校验 RDMA 插件离线镜像 tar..."
-[ -d "${SAVE_DIR}" ] || { err "离线镜像目录缺失: ${SAVE_DIR}(联网机: sudo bash deployments/scripts/tools/images/rdma-save-images.sh)"; exit 1; }
+[ -d "${SAVE_DIR}" ] || { err "离线镜像目录缺失: ${SAVE_DIR}(由版本树提供; 第三方镜像见 container-image-mirror)"; exit 1; }
 TAR_FILE="$(find_offline_tar "k8s-rdma-shared-dev-plugin:${IMG_TAG}" "*.tar" "${SAVE_DIR}")" || TAR_FILE=""
 if [ -z "${TAR_FILE}" ]; then
     # 兜底: 按内容匹配(兼容改名/版本风格差异, 如 tar 内 tag 无 v 前缀)
@@ -164,7 +164,7 @@ if [ -z "${TAR_FILE}" ]; then
         esac
     done
 fi
-[ -n "${TAR_FILE}" ] || { err "未找到 k8s-rdma-shared-dev-plugin 离线 tar(应含 ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:${IMG_TAG}); 请先在联网机跑 rdma-save-images.sh 生成并放入 ${SAVE_DIR}"; exit 1; }
+[ -n "${TAR_FILE}" ] || { err "未找到 k8s-rdma-shared-dev-plugin 离线 tar(应含 ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:${IMG_TAG}); 请检查版本树是否包含该 tar 并放入 ${SAVE_DIR}"; exit 1; }
 # ★ 以 tar 内实际 tag 为准(兼容 1.4.0 / v1.4.0 风格差异): 从 tar 内容解析真实镜像 ref, 派生 IMG_TAG
 _TAR_SRC="$(tar_first_image_tag "${TAR_FILE}")"
 [ -n "${_TAR_SRC}" ] || { err "无法从 tar 解析镜像 ref(内容损坏?): ${TAR_FILE}"; exit 1; }

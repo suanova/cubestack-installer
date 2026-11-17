@@ -106,4 +106,4 @@ metadata:
 
 ## 注册与维护
 
-本技能位于 `.claude/skills/task-memory-resume/SKILL.md`；仓库内另有一份副本 `skills/task-memory-resume/SKILL.md`。修改时两份必须一起改（`cp` 后比对 md5），否则下次启动加载的仍是旧版本。
+本技能位于 `.claude/skills/task-memory-resume/SKILL.md`，是仓库内唯一副本。

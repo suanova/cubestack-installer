@@ -17,7 +17,7 @@
 #              k8s_deploy(默认关) k8s_scale(默认关)
 #   addon 阶段: gpu_operator k8s_registry ceph ceph_csi ceph_backup
 #              keycloak kueue kubevirt lustre_csi   (01~19 中间件, 默认关)
-#              20 起为自研模块(cubestack_operator 25_…, 见 4.6b)
+#              20 起序号预留给外部提供的自研模块
 #   验证:      verify_<组件>(自动发现; --steps verify 不指定 operator 默认执行全部 verify_*)
 #   运维:      ceph_backup(Ceph 备份/恢复, 默认关, --steps ceph_backup 单独执行)
 #
@@ -47,7 +47,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-common.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-module.sh"
 
 # 先发现模块(help 需动态展示 verify_* 列表, 新增 verify step 后 --help 自动更新)
-discover_modules
+discover_modules || exit 1
 
 # ---------------- 帮助 ----------------
 usage() {
@@ -68,10 +68,7 @@ usage() {
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           cephfs_mount(CephFS → 每台节点 /mnt/cephfs/models, 默认随 CEPHFS_ENABLED)
           local_path(可选) k8s_registry 组件(全部可单独部署的组件见下方"组件单独部署"清单)
-          自研: cubestack_operator(平台 Operator, 见 4.6b); model_images(模型推理镜像 sglang/vllm-metax, 排最后; 见 offline-files/model-collection/README.md)
-          组件级更新(operator 已就绪后单独更新某个平台组件, 不重跑 cubestack_operator):
-            lws / envoy_gateway / ai_gateway / cubestack_controller_manager / model_bundles /
-            prometheus / perses / bmc / metax / cuberouter / cubepilot / cubestack_portal / observability
+          model_images(模型推理镜像 sglang/vllm-metax, 排最后; 由版本树提供)
   验证(自动发现, 新增 verify step 后本段自动更新):
           --steps verify = 执行全部验证模块: $(_verify_meta_list)
           --steps verify_<组件> = 只验证指定组件(如 verify_metallb / verify_registry_storage)
@@ -111,13 +108,8 @@ $(_component_meta_list stub)
     (镜像 tar 不入镜像; 见 README §容器化 CLI 的 docker run 挂载示例)。
 
 注:
-  · 镜像统一镜像源(Harbor): 全部上游镜像声明在 deployments/config/images.manifest,
-    先经 CI 同步到 harbor.isuanova.com/mirrors/**, 再由工具拉成离线 tar 供各模块推入内置
-    registry(集群无需访问公网)。三个工具(tools/images/):
-      harbor-sync-images.sh      上游 → Harbor(CI/联网机; 项目不存在自动创建)
-      harbor-save-images.sh      Harbor → offline-files/<group>/*.tar(联网机)
-      check-image-manifest.sh    清单静态校验(+ --kubespray 交叉核对 / --harbor 漂移报告)
-    升级组件版本只改 cluster.defaults.conf 的「镜像版本」节一处, 全链自动跟随。详见 docs/harbor-mirror.md。
+  · 第三方镜像由 container-image-mirror 仓库统一同步到 harbor.isuanova.com/mirrors/**;
+    安装侧只使用版本树里的离线 tar, 不直接访问上游 registry。
   · cluster.conf 的 NODES(5字段: role,hostname,ip,ssh_user,ssh_password)不区分虚拟机/裸金属;
     ssh_user 写 "-" = 跟随全局 SSH_USER(cluster.conf, root|ubuntu, 默认 ubuntu —— 切换安装用户
     只改 SSH_USER 一处); 显式写用户名 = 该节点覆盖(与全局不一致时部署启动会点名告警)。
@@ -144,9 +136,10 @@ $(_component_meta_list stub)
                         例: --profile v2.32.0; none = 不用档案(全部按 cluster.conf)
                         **不指定 = 部署最新版本**(max(仓库树, 有档案的版本目录); 本地临时版本须显式选)
                         见 docs/kubespray-versioning/
-  --release <版本>      使用离线发布版本目录(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
-                        版本变量以目录内 release.env 为准; 取件见 fetch-offline-from-minio.sh --release
-                        例: --release 2.0.0; 等价于 cluster.conf 的 CUBESTACK_RELEASE="2.0.0"
+  --release <版本>      使用已物化的版本树(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
+                        版本变量以目录内 release.env 为准; 也可直接挂载版本树的 offline-files/
+                        例: --release 2.1.0; 等价于 cluster.conf 的 CUBESTACK_RELEASE="2.1.0"
+  --with-packages <列表>  可选包(如 models,dev-lab,vendor); 若版本树有 meta tar, 安装前先解包
   --verify-offline[=auto|quick|full|off]
                         离线文件完整性校验强度(默认 quick: 结构/覆盖率, 不做整树深度;
                         auto = 全量部署首次 full+校验戳; full = 强制深度)。
@@ -165,10 +158,8 @@ $(_component_meta_list stub)
   sudo ./deploy-cluster.sh --enable ceph            # 只把 CEPH_ENABLED=true 写入 cluster.conf(不部署)
   sudo ./deploy-cluster.sh --steps ceph            # 单独装/重跑 Ceph(不动基座; 接入自动处理)
   sudo ./deploy-cluster.sh --steps cephfs_mount    # 把 CephFS models 挂到每台节点 /mnt/cephfs/models
-  sudo ./deploy-cluster.sh --steps lws             # 只更新平台组件 lws(operator 已就绪; 不重跑 cubestack_operator)
-  sudo ./deploy-cluster.sh --steps cube-pilot      # 只更新 cubepilot(连字符别名)
   sudo ./deploy-cluster.sh --steps ceph --fresh     # 同上, 且清断点状态(REPEAT:0 模块重跑用)
-  sudo ./deploy-cluster.sh --release 2.0.0          # 使用 2.0.0 离线发布版本目录(<root>/2.0.0/offline-files)
+  sudo ./deploy-cluster.sh --release 2.1.0          # 使用 2.1.0 版本树(<root>/2.1.0/offline-files)
   sudo ./deploy-cluster.sh --steps verify_ceph      # 只验证 Ceph(operator/CSI + ceph -s + RBD 块 I/O)
   sudo ./deploy-cluster.sh --with-scale             # 扩容: 仅 k8s_scale(先登录 master 核对集群→diff 新节点→只动新节点)
   sudo ./deploy-cluster.sh --with-scale --only worker02   # 扩容指定节点(--only 也先经集群核对)
@@ -183,6 +174,9 @@ $(_component_meta_list stub)
 
 ★ 提示: sudo ./deployments/scripts/deploy-cluster.sh --list-steps
         模块全清单(启用状态/依赖/序号/执行阶段) —— 选模块、看开关、排依赖, 都从这条命令开始
+
+  ⚠ 本页只列本 installer 内置的模块。版本树(--release)附带的模块要装好版本树后才能读到,
+    它们不会出现在 --help 里, 请用 --list-steps 查看完整清单。
 EOF
     exit 0
 }
@@ -193,6 +187,7 @@ STEPS_ARG=""; SKIP_ARG=""; ENABLE_ARG=""; PHASE_ARG=""; ENABLE_PERSIST_ARG=""
 SCALE_ONLY=0
 ONLY_HOSTS=""
 RELEASE_ARG=""
+RELEASE_PACKAGES_ARG=""
 VERIFY_OFFLINE_ARG=""
 NO_VERIFY_OFFLINE=0
 while [ $# -gt 0 ]; do
@@ -222,9 +217,10 @@ while [ $# -gt 0 ]; do
         #   须在 load_config 之前 export —— load_config 读的是环境变量
         #   (none = 禁用档案, 全部按 cluster.conf)
         --profile)  PROFILE_ARG="${2:?--profile 需要版本名(如 v2.32.0; none=禁用档案)}"; shift 2 ;;
-        # --release = 本次使用离线发布版本目录(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
+        # --release = 本次使用已物化的版本树(<CUBESTACK_RELEASE_ROOT>/<版本>/offline-files);
         #   须在 load_config 之前 export(load_config 读的是环境变量)
-        --release)  RELEASE_ARG="${2:?--release 需要版本号(如 2.0.0)}"; shift 2 ;;
+        --release)  RELEASE_ARG="${2:?--release 需要版本号(如 2.1.0)}"; shift 2 ;;
+        --with-packages) RELEASE_PACKAGES_ARG="${2:?--with-packages 需要包列表}"; shift 2 ;;
         # 离线文件完整性门禁: 默认 auto(首次 full, 之后走校验戳); 可强制 quick/full/off。
         --verify-offline) VERIFY_OFFLINE_ARG="auto"; shift ;;
         --verify-offline=) err "--verify-offline 需要取值(auto|quick|full|off)"; exit 1 ;;
@@ -248,6 +244,22 @@ fi
 if [ -n "${RELEASE_ARG:-}" ]; then
     export CUBESTACK_RELEASE="${RELEASE_ARG}"
     vlog "  --release ${RELEASE_ARG} → CUBESTACK_RELEASE(本机 cluster.conf 不变)"
+    # 2.1 完整包: 本地 meta + payload 先解包成 release 树。只消费本地文件。
+    _rel_root="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
+    _rel_dir="${_rel_root}/${RELEASE_ARG}"
+    _meta="${_rel_dir}/cubestack-${RELEASE_ARG}.meta.tar.zst"
+    if [ -f "${_meta}" ] && [ ! -f "${_rel_dir}/offline-files/release.env" ]; then
+        _tool="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tools/offline/release-packages.py"
+        _args=(--root "${_rel_dir}" --meta "${_meta}"
+               --meta-dir "${_rel_dir}/offline-files" --extract --seal)
+        if [ -n "${RELEASE_PACKAGES_ARG:-}" ]; then
+            _args+=(--with "${RELEASE_PACKAGES_ARG}")
+        fi
+        vlog "  解包本地 release 包: ${_meta}"
+        python3 "${_tool}" "${_args[@]}"
+        unset _args
+    fi
+    unset _rel_root _rel_dir _meta _tool
 fi
 # 展开 --only 中的 group 名: NODE_GROUP_<name> 定义在 cluster.conf 中
 if [ -n "${ONLY_HOSTS}" ]; then
@@ -268,10 +280,17 @@ export ONLY_HOSTS
 
 # ---------------- 配置加载 + 模块解析 ----------------
 load_config
+# 版本树里的私有模块只在 load_config 之后才知道位置。首次 discover_modules 发生在参数
+# 解析之前, 那时额外目录还不存在, 所以这里重新合并 + 重新发现。公共版本没有额外目录,
+# 这次调用是空操作。
+if [ -n "${CUBESTACK_EXTRA_MODULES_DIRS:-}" ]; then
+    cs_merge_modules_dirs
+    discover_modules || exit 1
+fi
 
 # ---------------- 离线文件完整性门禁(2026-10-28) ----------------
 # 默认 quick: 结构/覆盖率校验(不算 sha256/镜像层); 需要强校验设 auto 或 full
-# (auto = release/flat/sealed 首次 full, 之后走校验戳; 未 seal 开发树自动降级 quick)。
+# (auto = release/sealed 首次 full, 之后走校验戳; 未 seal 开发树自动降级 quick)。
 # 跳过: 只读列表 / 纯 verify_* 步骤 / 仅 --enable 写配置(不实际部署)。
 _verify_skip=0
 if [ "${LIST_STEPS}" = "1" ] || [ "${LIST}" = "1" ]; then
@@ -305,7 +324,7 @@ if [ "${_verify_skip}" = "0" ]; then
 fi
 unset _verify_skip _all_verify _s 2>/dev/null || true
 
-# 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 见 tools/offline/fetch-offline-from-minio.sh --help 全部子目录)
+# 离线文件就绪检查(缺失 → 醒目提示, 不阻断; 部署前请先准备, 版本树由外部打包流程提供)
 # 只读列表/计划不检查(否则列表里会混入与展示无关的离线文件告警)
 if [ "${LIST_STEPS}" != "1" ] && [ "${LIST}" != "1" ]; then
     check_offline_files

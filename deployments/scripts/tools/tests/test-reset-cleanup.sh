@@ -14,13 +14,11 @@
 #   ④ kubeadm reset 输出不再被静默丢弃
 #   ⑤ 复核端口覆盖 6443/10250/10257/10259, 且仍被占时按 pid 强杀兜底
 #   ⑥ 残留探测本身也能发现“只有旧控制面容器、没有痕迹文件”的节点
-#   ⑦ node_pkgs 的 Ceph 修复(成功路径)恢复 containerd
 # 用法: bash deployments/scripts/tools/tests/test-reset-cleanup.sh
 # ============================================================
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 OFFLINE="${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
-RECONCILE="${REPO_ROOT}/deployments/scripts/tools/node/reconcile-node-packages.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 fail=0
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }
@@ -132,13 +130,6 @@ if bash -n "${TMP}/probe-payload.sh" 2>"${TMP}/probe.syntax"; then
 else
     echo "  FAIL 探测载荷语法错误:"; sed 's/^/      /' "${TMP}/probe.syntax"; fail=1
 fi
-
-echo "== ⑦ node_pkgs Ceph 修复成功路径恢复 containerd =="
-sed -n "/<<'REPAIR'/,/^REPAIR$/p" "${RECONCILE}" > "${TMP}/repair.sh"
-[ -s "${TMP}/repair.sh" ] && echo "  ok  _repair 载荷已提取" || { echo "  FAIL _repair 提取为空"; fail=1; }
-chk_contains "修复仍先停 kubelet/containerd" "systemctl stop kubelet containerd" "${TMP}/repair.sh"
-chk_contains "成功路径恢复 containerd" "systemctl start containerd" "${TMP}/repair.sh"
-chk_not_contains "成功路径不拉起旧 kubelet" "systemctl start containerd kubelet" "${TMP}/repair.sh"
 
 echo ""
 if [ "${fail}" = "0" ]; then

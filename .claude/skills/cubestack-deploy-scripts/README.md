@@ -5,7 +5,7 @@
 ## 目录结构
 
 ```
-skills/cubestack-deploy-scripts/
+.claude/skills/cubestack-deploy-scripts/
 ├── SKILL.md                      # 技能主文件(规范核心 + 操作指引)
 └── reference/                    # 附属参考文档(SKILL.md 通过相对路径引用)
     ├── scripts-development-spec.md   # 完整开发规范(详版)
@@ -16,7 +16,7 @@ skills/cubestack-deploy-scripts/
 
 ### Claude Code(Anthropic 官方)
 
-Claude Code 默认从 `./skills/<skill-name>/SKILL.md` 发现项目级技能(或通过 settings 配置的额外目录)。用法:
+Claude Code 默认从 `.claude/skills/<skill-name>/SKILL.md` 发现项目级技能(或通过 settings 配置的额外目录)。用法:
 
 ```bash
 # 在项目根目录运行, 技能自动可用
@@ -34,7 +34,7 @@ claude
 在 `.cursor/rules/` 或项目规则中引用本文件:
 
 ```text
-@skills/cubestack-deploy-scripts/SKILL.md
+@.claude/skills/cubestack-deploy-scripts/SKILL.md
 ```
 
 或直接把 `SKILL.md` 内容并入规则文件。
@@ -42,7 +42,7 @@ claude
 ### 其他 Agent(Copilot / 自定义)
 
 - **GitHub Copilot**: 将 `SKILL.md` 内容加入 `.github/copilot-instructions.md`,或在提示中引用。
-- **通用 LLM 工具**: 把 `SKILL.md` + `reference/` 两个文件作为上下文提供给模型,或直接说"请阅读 skills/cubestack-deploy-scripts/SKILL.md 并遵循其规范"。
+- **通用 LLM 工具**: 把 `SKILL.md` + `reference/` 两个文件作为上下文提供给模型,或直接说"请阅读 .claude/skills/cubestack-deploy-scripts/SKILL.md 并遵循其规范"。
 
 ## 核心规则速记(供工具在无完整文档时使用)
 

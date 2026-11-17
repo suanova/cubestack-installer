@@ -81,7 +81,7 @@
 
 `.dockerignore:40-64`(逐一列扁平文件名的硬清单)、`tools/node/reconcile-node-packages.sh:54-55`、
 `modules/03_addon/02_ceph.sh:163-164`(lvm2 通配)、`modules/03_addon/22_verify_registry_storage.sh:74`
-(字面 `busybox.tar`)、`tools/offline/sync-to-container.sh:158`、`tools/docker/build-cli-context.sh:97`。
+(字面 `busybox.tar`)、`tools/offline/sync-to-container.sh:158`、`tools/docker/build-cli-image.sh:97`。
 
 ### 2.5 布局探针用"目录名"判定
 
@@ -139,6 +139,10 @@ deployments/offline-files/                     ← OFFLINE_FILES_ROOT(git 只跟
   本次只登记规范,不迁移(D7)。
 
 ### 3.2 版本档案(profile)
+
+`deployments/config/profiles/v2.32.0.profile` 现在由
+`deployments/scripts/tools/k8s/sync-versions.py` 从 `versions/base.yaml` 生成；
+`make check-versions` 会拒绝手改或过期的档案。非当前库版本的 profile 仍按树表值校验。
 
 **入库档案**:`deployments/config/profiles/<版本>.profile`(纯文本,shell 可 source,语法同 cluster.conf 片段)。
 字段 = 该版本**全部"版本面"变量**:

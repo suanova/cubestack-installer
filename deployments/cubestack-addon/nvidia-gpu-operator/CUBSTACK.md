@@ -6,7 +6,7 @@
 - **用途**: `08_nvidia_gpu_operator.sh` 部署**恒用**本副本;在线模式仅用它比对刷新
   (见 `helm_chart_ensure`, chart 升级手册见 `deployments/scripts/modules/03_addon/08_nvidia_gpu_operator.sh` 头注释)。
 - **镜像集**: 由 `deployments/scripts/tools/images/nvidia-chart-images.sh` 从渲染产物提取(唯一来源);
-  备料用 `deployments/scripts/tools/images/nvidia-save-images.sh`。
+  离线 tar 由版本树的 `offline-files/nvidia-gpu-operator/` 提供。
 
 ## 升级到新版本(示例: v26.8.0)
 
@@ -17,7 +17,7 @@ helm pull oci://nvcr.io/nvidia/cloud-native-charts/gpu-operator --version v26.8.
 # ② ⚠ OCI chart 的 Digest 是 manifest 摘要, **不能**自己 sha256sum —— 只能从 pull 输出抄:
 helm pull oci://nvcr.io/nvidia/cloud-native-charts/gpu-operator --version v26.8.0 2>&1 \
     | sed -n 's/^Digest:[[:space:]]*//p' | tr -d '\n' > gpu-operator-v26.8.0.tgz.digest
-# ③ 更新 cluster.conf 的 NVIDIA_GPU_OPERATOR_VERSION; 用 nvidia-save-images.sh 重备镜像; 
+# ③ 更新 cluster.conf 的 NVIDIA_GPU_OPERATOR_VERSION; 在 container-image-mirror 更新镜像 tag/digest;
 # ④ 提交 tgz + .digest 边车(不提交 = 下次部署又回到旧版)。
 ```
 

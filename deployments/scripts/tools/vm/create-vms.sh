@@ -44,7 +44,7 @@ echo "→ 更新完 NODES 后会自动校验 cluster.conf 合法性。"
 #   ② vm-nodes.conf 的虚拟机变量(经 vm_conf_load 加载);
 #   ③ cluster.conf 的 SSH_DEFAULT_PASSWORD(把 NODES 密码 "-" 归一化用)。
 # 因此【不调用 load_config()】: 它会派生整套集群部署变量(API_IP / REGISTRY_IP / REGISTRY_DIRECT /
-# NTP / MINIO_*...), 与创建虚拟机无关; 且本脚本刚把 cluster.conf 的 NODES 清空, load_config
+# NTP / 组件开关...), 与创建虚拟机无关; 且本脚本刚把 cluster.conf 的 NODES 清空, load_config
 # 在 set -e 下会因 first_master_ip 失败(空 NODES)而中途退出 → 卡死 VM 创建(历史 bug)。
 # 子脚本(create-libvirt-vm.sh / setup-vm-network.sh)各自独立 load_config, 不受影响。
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"

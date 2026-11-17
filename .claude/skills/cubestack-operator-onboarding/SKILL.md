@@ -104,7 +104,7 @@ XXX_IP="${XXX_IP:-192.168.100.140}"         # 需要的外部 IP/端口从配置
 |---|---|
 | `docs/cluster-architecture.md` | §5 operator 表加一行(作用/架构原理/为何采用/部署入口) |
 | `docs/troubleshooting.md` | 按模板加条目: 症状 → 根因 → 解法(根治) → 验证 → 相关命令; 根因以证据为准 |
-| `skills/cubestack-deploy-scripts/SKILL.md` | 沉淀新命令/知识点到相应章节 |
+| `.claude/skills/cubestack-deploy-scripts/SKILL.md` | 沉淀新命令/知识点到相应章节 |
 | `README.md`(如有组件清单) | 组件列表补充 |
 
 > 规范: 只有**真正端到端验证过**的方案才能写进文档作为"解法", 未验证必须如实标注边界。

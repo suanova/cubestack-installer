@@ -14,7 +14,7 @@
    无人知晓。
 2. **顺序颠倒的拆除**：kubeadm reset 直接推平一切；Ceph 由部署预检块调 `ceph-cleanup.sh
    --delete-cluster`（含 2026-10-10 新增的 ⓪ 停卷消费者 + 官方安全序），但**其他 operator
-   （cubestack-operator/metax GPU/multus/rdma…）没人先停**——它们持有的资源、在飞 IO、
+   （带控制器的组件: metax GPU/multus/rdma 等）没人先停**——它们持有的资源、在飞 IO、
    级联控制器，正是 10-09 挂死事故的同类风险面。
 3. 2026-10-10 事故链的教训已经证明：覆盖安装必须"先停消费者 → 再动 ceph → 再动 K8s"，
    而这个顺序目前只对 ceph PVC 的消费者**部分**实现（⓪ 泛化扫描兜底），且发生在 ceph 删除时刻，
@@ -64,9 +64,9 @@
     首装序——"按安装顺序反序"的正确语义），只更新 `lastSeenAt`/`status`。
   - 幂等；**任何失败仅 warn，绝不阻断安装**（登记是增强，不是依赖）。`K` 未初始化时直接跳过。
 - **调用点**：各模块在**安装成功点**显式调用（不用框架自动钩子——模块自我跳过 TOGGLE=false /
-  ceph 存储节点不足等情形不落登记，语义精确）。约 10 处：`01_metallb`、`04_local_path`、
+  ceph 存储节点不足等情形不落登记，语义精确）。约 9 处：`01_metallb`、`04_local_path`、
   `05_k8s_registry`、`02_ceph`、`03_ceph_csi`、`06_gpu_operator`、`09_multus`、
-  `10_rdma_shared_dev_plugin`、`25_cubestack_operator`、`35_netshoot`。
+  `10_rdma_shared_dev_plugin`、`35_netshoot`。
 - 登记内容 = "operator"广义集（本安装器部署进集群的全部组件，含 kubespray addon 类基座）。
   用户手工 kubectl 部署的第三方负载不在登记内（ceph 消费者兜底仍由 ceph-cleanup ⓪ 泛化扫描覆盖）。
 
@@ -89,12 +89,11 @@ fi
 
 | 组件 | 卸载动作 | 备注 |
 |---|---|---|
-| cubestack_operator | 删 clusterCR（operator 级联优雅收掉 9 个平台组件）→ **有界等待 csc CR 本体终结（finalizer 完成的契约信号；非 Pod 计数）** → `helm uninstall` operator → 清残留 CRD/命名空间 | 先 CR 后 operator：CR 的 finalizer 需要 operator 活着处理。⚠ 2026-10-13(CodeRabbit): 等待门原先用 Pod 计数(Running 视为已收敛→首轮即放行, 等于没等); CR 未终结则**保留 operator(不 helm uninstall)** + **跳过** ns finalizer 清除/强制删 ns/CRD 清理(防 force-finalize 孤儿对象在重装后复活)并**非 0 退出**(引擎不标 uninstalled) |
 | gpu_operator (metax) | 复用现有"清理残留"序列（提为函数，安装/卸载共用）：删 clusteroperator CR → helm uninstall → 删 CRD/ClusterRole/ns/default 旧资源 | 现安装路径 376-390 行就是这套 |
 | multus | 删 vendored manifest 资源（DS/CRD/RBAC）+ 本模块创建的示例 NAD | |
 | rdma_shared_dev_plugin | 删 DS + ConfigMap | RDMA_NAMESPACE 可配 |
 | netshoot | 删 Pod + CM | |
-| ceph（含 ceph_csi） | 调 `ceph-cleanup.sh`：`CEPH_PRE_CLEANUP_EXISTING=true`（默认）→ **完整安全序: 停消费者 → 删 Bound ceph PVC(触发 unmap) → 删 nodeplugin → 销毁集群与磁盘数据**；`false`（恢复/认领路径）→ **保留模式(--keep-pvcs): 只停消费者; PVC、nodeplugin、集群、OSD 与卷数据全部保留** | ceph 模块的卸载段是唯一真实动作方；ceph_csi 不设卸载段（SC 等对象随覆盖消亡），仅登记。⓪ 停消费者对 registry(`rs/registry`) / cubestack-operator 停机前登记原副本数(注解 `cubestack.io/pre-stop-replicas`), 02_ceph.sh 7.9 按登记值恢复(2026-10-13, CodeRabbit: 仅恢复被本工具停过且带标记的对象) |
+| ceph（含 ceph_csi） | 调 `ceph-cleanup.sh`：`CEPH_PRE_CLEANUP_EXISTING=true`（默认）→ **完整安全序: 停消费者 → 删 Bound ceph PVC(触发 unmap) → 删 nodeplugin → 销毁集群与磁盘数据**；`false`（恢复/认领路径）→ **保留模式(--keep-pvcs): 只停消费者; PVC、nodeplugin、集群、OSD 与卷数据全部保留** | ceph 模块的卸载段是唯一真实动作方；ceph_csi 不设卸载段（SC 等对象随覆盖消亡），仅登记。⓪ 停消费者对 registry(`rs/registry`) 及平台 operator 停机前登记原副本数(注解 `cubestack.io/pre-stop-replicas`), 02_ceph.sh 7.9 按登记值恢复(2026-10-13, CodeRabbit: 仅恢复被本工具停过且带标记的对象); 平台 operator 未安装时该步为 no-op |
 | k8s_registry | 只优雅停机（对 **`rs/registry`(kubespray 建的裸 ReplicaSet, 非 Deployment)** scale 0；停机前以注解 `cubestack.io/pre-stop-replicas` 登记原副本数；registry-pvc 受保护不动；K8s 重装由 kubespray apply 自带恢复，K8s 保留路径由 02_ceph.sh 7.9 按登记值恢复） | ⚠ 2026-10-13 修订: 旧代码操作 `deploy registry` 从未命中(实机即 RS), 停机/恢复全部静默空转 |
 | metallb / local_path | 无动作（kubespray 资产，随 K8s 覆盖消亡；登记仅作信息） | |
 

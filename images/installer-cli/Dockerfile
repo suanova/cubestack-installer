@@ -1,0 +1,74 @@
+# =====================================================================
+# images/installer-cli/Dockerfile — CubeStack 离线部署 CLI 容器(**代码层**)
+# ---------------------------------------------------------------------
+# 两层结构(2026-09-30, 用户口径):
+#   ① base 层 = images/installer-cli-base/Dockerfile(系统 + 工具链 + ansible + mc;极少变, 见该文件头)
+#   ② **本文件** = 代码层: `FROM <base>` + 只 copy deployments/versions 代码 + 依赖对齐 + 自检
+#      ⇒ 日常"改了部署脚本要出新镜像"就走这里, 飞快, 且**层数不累积**(每次基于同一个 base,
+#        而不是叠在上一版镜像上 —— 旧做法实测累积到 590 层会撞内核 overlay 挂载上限)。
+#
+# ★ 构建方式(统一入口; 会先自动准备 base: 本地有就用, 没有就拉 Harbor, 再没有就提示 --base):
+#     sudo ./deployments/scripts/tools/docker/build-cli-image.sh --build     # 生成上下文 + 构建代码层
+#     sudo ./deployments/scripts/tools/docker/build-cli-image.sh --build --incremental   # 别名(等价)
+#     sudo ./deployments/scripts/tools/docker/build-cli-image.sh --base      # 仅在系统/工具/依赖变化时重建 base
+# ---------------------------------------------------------------------
+# 镜像内容契约(用户口径): **只含 deployments/ 代码**
+#   · kubespray 源码(deployments/kubespray/kubespray)+ 全部部署脚本 + cubestack-addon
+#   · 工具链(ansible / mc / kubectl / helm / skopeo / yq)与系统包**全部继承自 base**(不打进本层)
+#   · 运行期钩子 /etc/profile.d/50-cubestack-tools.sh 仍会 COPY(挂载目录里有**别的版本**时可补/覆盖)
+#   · 离线镜像 tar(20G+)不进镜像, 体积可控、无密钥泄漏
+# ---------------------------------------------------------------------
+# 运行(推荐, 挂载离线文件/配置/SSH 密钥):
+#   docker run --rm -it --network host \
+#     -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
+#     -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
+#     -v $HOME/.ssh:/root/.ssh \
+#     cubestack-cli
+#   容器内:
+#     cd /opt/cubestack-installer
+#     ./deployments/scripts/deploy-cluster.sh          # 默认 = --with-cluster(全量, 最新版本)
+#     版本树(offline-files/ + modules/)由外部打包流程物化后挂载进容器
+# 说明: 宿主机需要 libvirt 时(创建虚拟机), 建议 --privileged 或挂载 /var/run/libvirt;
+#       纯裸金属离线部署(kubespray + operator)无需额外特权。
+# =====================================================================
+
+# base 镜像(系统+工具链层): 必须由 build-cli-image.sh 按 VERSION_LINE 传 --build-arg
+ARG CLI_BASE_TAG
+FROM ${CLI_BASE_TAG}
+
+# ---------- 运行期工具链钩子(登录 shell 把挂载版本目录里的 kubectl/helm/skopeo 补到 PATH) ----------
+# 放在**代码层**(它是随仓库演进的部署代码; base 里不放, 免得改一次钩子就要重建 base)
+COPY deployments/scripts/tools/docker/cli-toolchain-from-offline.sh /etc/profile.d/50-cubestack-tools.sh
+RUN chmod 0644 /etc/profile.d/50-cubestack-tools.sh
+
+# ---------- 拷贝源码(先清空再拷入: base/上层可能含旧源码, 避免已删除的文件残留) ----------
+WORKDIR ${REPO_ROOT}
+RUN rm -rf ${REPO_ROOT}/deployments 2>/dev/null || true
+COPY deployments ${REPO_ROOT}/deployments
+COPY versions ${REPO_ROOT}/versions
+
+# ⚠ 本层**只放部署代码**(用户口径 2026-09-30): 系统工具/package/ansible 依赖全在 base 层;
+#   requirements.txt 变了(新增 python 依赖)请**重建 base**: --base。
+
+# 校验关键路径就位
+# ⚠ 两个配置模板必须随镜像分发(2026-10-15 用户口径): cluster.conf.example(主文件模板: 必改项+
+#   开关+凭据)与 cluster.defaults.conf(高级/默认值层, load_config 自动加载) —— 容器内 `cp example→conf`
+#   与"高级变量有效值"都依赖它们; 缺失会静默退化成内置兜底(难排查)。构建期即断言, 缺失直接失败。
+RUN test -f ${REPO_ROOT}/deployments/scripts/deploy-cluster.sh \
+ && test -d ${REPO_ROOT}/deployments/kubespray/kubespray \
+ && test -d ${REPO_ROOT}/deployments/cubestack-addon \
+ && test -f ${REPO_ROOT}/deployments/config/cluster.conf.example \
+ && test -f ${REPO_ROOT}/deployments/config/cluster.defaults.conf \
+ && command -v patch >/dev/null
+
+# 离线文件完整性校验器(2026-10-28): 必须随镜像分发; 缺失/不可执行/无法运行直接构建失败
+RUN test -x ${REPO_ROOT}/deployments/scripts/tools/offline/verify-offline-files.sh \
+ && test -f ${REPO_ROOT}/deployments/scripts/tools/offline/verify-offline-files.pyz \
+ && ${REPO_ROOT}/deployments/scripts/tools/offline/verify-offline-files.sh --version \
+ && ln -sf ${REPO_ROOT}/deployments/scripts/tools/offline/verify-offline-files.sh \
+           /usr/local/bin/cubestack-verify-offline
+
+WORKDIR ${REPO_ROOT}
+# 默认进入交互式 bash(docker run -it 即可; 不要再设 ENTRYPOINT= bash,
+# 否则与 CMD 拼接成 "/bin/bash /bin/bash" 报 cannot execute binary file)
+CMD ["/bin/bash"]

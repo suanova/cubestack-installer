@@ -10,7 +10,7 @@
 #      + cubestack-ext-cephfs-node(node 角色, 2026-09-10 Bug A 分用户: meta+data 池 rw)
 #   ④ 导出:   external-ceph-self-define-access.conf(FSID/MONs/双用户 key/pool/fs 名, 拷贝到目标集群即可; 2026-09-11 由 ceph-external-access.conf 改名)
 #   ⑤ 自检:   status 5 层, 含**外部客户端协议级测试**(mon 握手 + cephx 认证 + RBD API,
-#              模拟 ceph-csi-operator 从集群外连接; 客户端=Dockerfile-cli 预装 ceph-common)
+#              模拟 ceph-csi-operator 从集群外连接; 客户端=images/installer-cli/Dockerfile 预装 ceph-common)
 # 实现要点:
 #   · mon/RGW 新建独立 *-external svc(不碰 Rook 自管 ClusterIP svc —— operator 会调和回滚)
 #   · nodePort 自动分配(30000-32767; 显式 6789 超 kube-apiserver 端口范围会失败)
@@ -610,7 +610,7 @@ show_main() {
 
 # ════════════════════════════ status(5 层) ════════════════════════════
 # [5/5] 外部客户端协议级测试: 模拟 ceph-csi-operator 从集群外连接
-#   · 客户端 = 部署机/容器本地 ceph/rbd(Dockerfile-cli 已预装 ceph-common),
+#   · 客户端 = 部署机/容器本地 ceph/rbd(images/installer-cli/Dockerfile 已预装 ceph-common),
 #     连接外部端点(NodePort=master:端口 / LB=VIP:6789)→ 与 csi-operator 完全相同路径
 #   · 验证: mon msgr 握手 + cephx 认证(外部用户 keyring)+ RBD API 访问(ls + create/rm 探测)
 #   · 本地无 ceph 二进制时回退: toolbox 内经外部端点(连接路径经 kube-proxy DNAT, 一致)
@@ -634,7 +634,7 @@ status_ext_test() {
     chmod 600 "${keyfile}"
 
     if command -v ceph >/dev/null 2>&1 && command -v rbd >/dev/null 2>&1; then
-        say "   客户端: 本地 ceph/rbd(Dockerfile-cli 预装 ceph-common, 部署机=集群外)✓"
+        say "   客户端: 本地 ceph/rbd(images/installer-cli/Dockerfile 预装 ceph-common, 部署机=集群外)✓"
         # ① mon 握手 + cephx 认证: ceph -s
         if timeout 30 ceph -m "${eps}" -n "client.${EXT_USER}" --keyring "${keyfile}" -s > /tmp/ceph-ext-status.out 2>&1; then
             grep -qE 'HEALTH_(OK|WARN|ERR)' /tmp/ceph-ext-status.out \
@@ -659,7 +659,7 @@ status_ext_test() {
         fi
     else
         # 回退: toolbox 内经外部端点(base64 传递 keyring, 避免引号嵌套)
-        say "   客户端: toolbox 经外部端点(本地无 ceph 二进制 —— 建议重建 Dockerfile-cli 预装 ceph-common)"
+        say "   客户端: toolbox 经外部端点(本地无 ceph 二进制 —— 建议重建 images/installer-cli/Dockerfile 预装 ceph-common)"
         _KF_B64="$(base64 -w0 "${keyfile}")"
         SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- bash -c 'echo ${_KF_B64} | base64 -d > /tmp/ext.keyring'"
         if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- timeout 30 ceph -m ${eps} -n client.${EXT_USER} --keyring /tmp/ext.keyring -s" > /tmp/ceph-ext-status.out 2>&1; then
