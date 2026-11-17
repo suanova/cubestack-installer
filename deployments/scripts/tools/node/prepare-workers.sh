@@ -17,17 +17,26 @@ load_config
 ONLY=""
 [ "${1:-}" = "--only" ] && ONLY="${2:-}"
 
-# SSH 密钥: 优先 root 默认 id_rsa(物理 worker 已预配 root 免密), 回退 cubestack_k8s
+# SSH 密钥: 优先 root 默认 id_rsa(物理 worker 已预配 root 免密), 回退当前选中密钥(SSH_KEY_NAME)
 SSH_KEY_DIR="${SSH_KEY_DIR:-${REAL_HOME}/.ssh}"
 SSH_KEY_NAME="${SSH_KEY_NAME:-cubestack_k8s}"
+# 当前选中密钥(由 ensure_node_ssh_access / cluster.conf 决定; id_rsa 复用路径下为 id_rsa,
+# kubespray inventory 也用同一把 —— 见 gen-inventory.sh 的 ansible_ssh_private_key_file)
+SEL_KEY="${SSH_KEY_DIR}/${SSH_KEY_NAME}"
+SEL_SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+    case "${SEL_KEY}" in /root/*) SEL_SUDO="sudo" ;; esac
+fi
 if [ -f /root/.ssh/id_rsa ]; then
-    SSH_KEY="/root/.ssh/id_rsa"
-    SSH_SUDO="sudo"    # 读 root 密钥需 sudo
+    PRIMARY_KEY="/root/.ssh/id_rsa"
+    PRIMARY_SUDO="sudo"    # 读 root 密钥需 sudo
     vlog "worker 登录密钥: /root/.ssh/id_rsa (root)"
 else
-    SSH_KEY="${SSH_KEY_DIR}/${SSH_KEY_NAME}"
-    SSH_SUDO=""
+    PRIMARY_KEY="${SEL_KEY}"
+    PRIMARY_SUDO="${SEL_SUDO}"
 fi
+SSH_KEY="${PRIMARY_KEY}"
+SSH_SUDO="${PRIMARY_SUDO}"
 KEY_PUB="${SSH_KEY}.pub"
 SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
@@ -58,10 +67,23 @@ for line in "${NODES[@]:-}"; do
 
     COUNT=$((COUNT + 1))
     say "── [${NODE_HOSTNAME}](${NODE_IP}) ──"
+    # 每节点复位为主登录密钥(上个节点可能临时切到过选中密钥)
+    SSH_KEY="${PRIMARY_KEY}"
+    SSH_SUDO="${PRIMARY_SUDO}"
+    SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
-    # 1. 免密检测(root id_rsa) → 并确保 cubestack_k8s 公钥已在 authorized_keys
+    # 1. 免密检测(root id_rsa / 当前选中密钥) → 并确保选中密钥公钥已在 authorized_keys
     if ${SSH_SUDO} timeout 5 ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" 'true' >/dev/null 2>&1; then
         ok "root id_rsa 免密登录 OK"
+    elif [ "${SEL_KEY}" != "${SSH_KEY}" ] && [ -f "${SEL_KEY}" ] \
+         && ${SEL_SUDO} timeout 5 ssh -i "${SEL_KEY}" -o BatchMode=yes \
+                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+                "${NODE_USER}@${NODE_IP}" 'true' >/dev/null 2>&1; then
+        # 节点只授权了选中密钥(id_rsa / 自定义) → 切到该密钥, 不再走密码回退
+        SSH_KEY="${SEL_KEY}"
+        SSH_SUDO="${SEL_SUDO}"
+        SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        ok "选中密钥 ${SSH_KEY_NAME} 免密登录 OK"
     else
         # root id_rsa 免密失败: 尝试密码注入 root id_rsa 公钥
         PWD="${NODE_PW:-}"
@@ -77,14 +99,23 @@ for line in "${NODES[@]:-}"; do
             && ok "root 公钥已注入" || { warn "公钥注入失败,跳过 ${NODE_HOSTNAME}"; continue; }
     fi
 
-    # 1b. 确保 cubestack_k8s 公钥在 authorized_keys(kubespray 统一用此密钥连接)
-    #     先删除旧的 cubestack-cluster 行(grep -F 会因注释误判存在), 再追加正确公钥
-    say "注入 cubestack_k8s 公钥(幂等)..."
-    CSPUBKEY="$(cat "${SSH_KEY_DIR}/${SSH_KEY_NAME}.pub" 2>/dev/null || true)"
-    [ -n "${CSPUBKEY}" ] || { err "本机公钥 ${SSH_KEY_DIR}/${SSH_KEY_NAME}.pub 读不到(先跑 gen-ssh-key/vm_sshkey)"; exit 1; }
-    ${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" \
-        "sed -i '/cubestack-cluster/d' ~/.ssh/authorized_keys 2>/dev/null; echo '${CSPUBKEY}' >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys" 2>/dev/null \
-        && ok "cubestack_k8s 公钥已就绪" || warn "cubestack_k8s 公钥注入失败"
+    # 1b. 确保**当前选中密钥**(SSH_KEY_NAME; 默认 cubestack_k8s, id_rsa 复用路径下为 id_rsa)
+    #     已在 authorized_keys(kubespray inventory 用同一把密钥连接)。
+    #     · 选中密钥已能免密登录 → 无需注入(它本就被 ensure_node_ssh_access 验证过);
+    #     · .pub 缺失时从私钥导出(ssh-keygen -y), 不再因"只授权了 id_rsa/没有 id_rsa.pub"而中止。
+    if [ -f "${SEL_KEY}" ] && ${SEL_SUDO} timeout 5 ssh -i "${SEL_KEY}" \
+            -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=5 "${NODE_USER}@${NODE_IP}" 'true' >/dev/null 2>&1; then
+        ok "${SSH_KEY_NAME} 免密已可用, 跳过公钥注入"
+    else
+        CSPUBKEY="$(${SEL_SUDO} cat "${SEL_KEY}.pub" 2>/dev/null \
+            || ${SEL_SUDO} ssh-keygen -y -f "${SEL_KEY}" 2>/dev/null || true)"
+        [ -n "${CSPUBKEY}" ] || { err "无法读取/导出选中密钥公钥: ${SEL_KEY}(先跑 gen-ssh-key/vm_sshkey)"; exit 1; }
+        say "注入 ${SSH_KEY_NAME} 公钥(幂等)..."
+        ${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes "${NODE_USER}@${NODE_IP}" \
+            "sed -i '/cubestack-cluster/d' ~/.ssh/authorized_keys 2>/dev/null; echo '${CSPUBKEY}' >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys" 2>/dev/null \
+            && ok "${SSH_KEY_NAME} 公钥已就绪" || warn "${SSH_KEY_NAME} 公钥注入失败"
+    fi
 
     # 2. 节点前置包检查(不安装; 缺包由运维按清单处理)
     say "检查节点前置包..."
