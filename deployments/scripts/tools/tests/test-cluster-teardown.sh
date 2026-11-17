@@ -309,10 +309,11 @@ case "${_args}" in
     *)            _ip="" ;;
 esac
 case "${_args}" in
-    *"test -f /etc/kubernetes/admin.conf"*) exit 255 ;;
+    *"test -f /etc/kubernetes/admin.conf"*) exit 0 ;;
 esac
 [ "${_ip}" = "10.0.0.2" ] && exit 255          # .2 模拟全程不可达
 case "${_args}" in
+    *"holders"*) exit 1 ;;                     # _rbd_device_busy: 确认设备空闲
     *"for d in /sys/bus/rbd/devices"*)         # list_maps: .1 有一个可清映射
         [ "${_ip}" = "10.0.0.1" ] && printf '0 testimg rbd\n'
         exit 0 ;;
