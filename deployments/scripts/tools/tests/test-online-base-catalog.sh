@@ -54,12 +54,12 @@ images:
     digest: "sha256:4444444444444444444444444444444444444444444444444444444444444444"
     dest: "offline-files/netshoot"
     tar: "netshoot-rdma.tar"
-  - key: "dev-lab:harbor.isuanova.com/suanova/cpu-pytorch"
-    source_ref: "harbor.isuanova.com/suanova/cpu-pytorch"
-    version: "py310-torch2.4"
+  - key: "optional:demo"
+    source_ref: "harbor.isuanova.com/suanova/optional-demo"
+    version: "v1.0.0"
     digest: "sha256:5555555555555555555555555555555555555555555555555555555555555555"
-    dest: "offline-files/dev-lab"
-    tar: "harbor.isuanova.com_suanova_cpu-pytorch_py310-torch2.4.tar"
+    dest: "offline-files/optional"
+    tar: "harbor.isuanova.com_suanova_optional-demo_v1.0.0.tar"
     optional: true
 EOF
 
@@ -152,7 +152,7 @@ PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
     --offline-root "${TMP}/offline" >"${TMP}/mat.out"
 [ -s "${TMP}/offline/kubespray/v2.32.0/images/registry.k8s.io_kube-apiserver_v1.35.8.tar" ] || fail "materializer: missing catalog tar"
 [ -s "${TMP}/offline/netshoot/netshoot-rdma.tar" ] || fail "materializer: missing source_ref tar"
-[ ! -e "${TMP}/offline/dev-lab" ] || fail "materializer: optional image should be skipped by default"
+[ ! -e "${TMP}/offline/optional" ] || fail "materializer: optional image should be skipped by default"
 grep -q "copied=2" "${TMP}/mat.out" || fail "materializer: unexpected summary"
 grep -q "optional-skipped=1" "${TMP}/mat.out" || fail "materializer: optional skip not reported"
 pass "materializer writes catalog/source_ref tars and skips optional images"
@@ -160,7 +160,7 @@ pass "materializer writes catalog/source_ref tars and skips optional images"
 PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
     --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/index.json" \
     --offline-root "${TMP}/offline" --include-optional >"${TMP}/mat-opt.out"
-[ -s "${TMP}/offline/dev-lab/harbor.isuanova.com_suanova_cpu-pytorch_py310-torch2.4.tar" ] \
+[ -s "${TMP}/offline/optional/harbor.isuanova.com_suanova_optional-demo_v1.0.0.tar" ] \
     || fail "materializer: optional image not written with --include-optional"
 grep -q "copied=1 skipped=2" "${TMP}/mat-opt.out" || fail "materializer: optional include summary"
 pass "materializer includes optional images on request"
