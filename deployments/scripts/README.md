@@ -81,7 +81,7 @@ deployments/scripts/
 │   │   └── 04_harbor.sh       #     Harbor 镜像仓库(集群外私有仓库, 部署前就绪)
 │   ├── 02_k8s/                #   阶段二: 离线部署 kubespray(不依赖 VM/裸金属)
 │   │   ├── 01_k8s_passwordless.sh  # SSH 免密
-│   │   ├── 02_k8s_workerbm.sh      # worker 节点离线装包(全部 worker)
+│   │   ├── 02_k8s_workerbm.sh      # worker 节点连通性检查(不安装 OS 包; 包由 OS 镜像预装)
 │   │   ├── 03_k8s_hosts.sh         # 更新 /etc/hosts
 │   │   ├── 04_k8s_inventory.sh     # 生成 inventory + 同步配置
 │   │   ├── 05_k8s_ntp.sh           # NTP 时间同步
@@ -92,7 +92,11 @@ deployments/scripts/
 │   │   │                           #   =false 清理并校验无残留; DEFAULT:1 常驻全量运行; 见 docs/kube-vip-api-ha.md 第 18 节)
 │   │   ├── 10_api_local_lb.sh      # 节点侧 API 本地代理(kubespray nginx-proxy 静态 Pod): 断言就位 +
 │   │   │                           #   /etc/hosts 域名行收敛 + 关闭时清理残留; 默认开, 见 docs/api-ha/
-│   │   └── 11_verify_api_ha.sh     # 验证 API 入口高可用(七项; --steps verify_api_ha)
+│   │   ├── 11_verify_api_ha.sh     # 验证 API 入口高可用(七项; --steps verify_api_ha)
+│   │   ├── 12_node_pkgs.sh         # 节点前置包只读检查(warn-only; installer 不安装 OS 包)
+│   │   ├── 13_node_net_guard.sh    # 节点源策略路由/Calico rpfilter 冲突预检(默认只检查)
+│   │   ├── 14_pre_install_check.sh # 安装前环境检查(SSH/sudo/chronyd/资源容量; 关键项失败即中止)
+│   │   └── 15_k8s_asset_prefetch.sh # 离线资产预取(kubespray 之前)
 │   └── 03_addon/              #   阶段三: 附加组件(集群部署后; 01~19 中间件, 20 起自研)
 │       ├── 01_metallb.sh      #    MetalLB 负载均衡(基座, METALLB_ENABLED)
 │       ├── 02_ceph.sh         #    Rook-Ceph 存储集群(P1-6, CEPH_ENABLED; 自动检测裸盘+node label+离线镜像, 见 docs/ceph-rook.md)
@@ -493,6 +497,23 @@ NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"        # 节点-权威偏差阈�
 > - 新 VM 从黄金镜像快照出来时,时钟停在镜像制作时间 → apply 步骤的硬对齐 + `makestep` 会自动修正,校验不通过会中止部署提示修复。
 > - 时间同步只校时钟,不修改时区(VM 已默认 Asia/Shanghai)。
 
+### 5.8.3 安装前环境检查(14_pre_install_check / pre-install-check.sh)
+
+`modules/02_k8s/14_pre_install_check.sh`(默认启用、可重复)在 kubespray **真正安装之前**对 `NODES` 中全部 master/worker 做只读体检;逻辑在 `tools/node/pre-install-check.sh`,可单独运行:
+
+```bash
+bash ./scripts/tools/node/pre-install-check.sh --check            # 检查全部节点
+bash ./scripts/tools/node/pre-install-check.sh --check --only worker02
+sudo ./scripts/deploy-cluster.sh --skip pre_install_check ...     # 明确跳过本步
+```
+
+检查项与分级:
+
+- **关键项(失败即中止,退出码 1)**:SSH 免密/密码均不可达、非 root 无免密 sudo(root 无 sudo)、`NTP_ENABLED≠0` 时 chronyd 未安装/未运行/偏差 > `NTP_MAX_OFFSET_MS`(无 chrony 的节点按项目口径允许 `systemd-timesyncd` 回退,但需 active + 已同步)、CPU < `PRE_INSTALL_MIN_CPU`、内存 < `PRE_INSTALL_MIN_MEM_MB`、`/var/lib` 可用 < `PRE_INSTALL_MIN_DISK_GB`。
+- **建议项(只告警)**:master 内存 < `PRE_INSTALL_MASTER_MIN_MEM_MB`、`/var/lib` 可用 < `PRE_INSTALL_RECOMMENDED_DISK_GB`、chronyd 未开机自启、SSH 仅密码回退可用。
+- **跳过条件**:单节点集群(1 master / 0 worker)或 `NTP_ENABLED=0` 时,chronyd 同步检查自动跳过(建议项)。
+- 阈值默认值见 `cluster.defaults.conf` §2.2b,可在 `cluster.conf` 写同名变量覆盖。
+
 ### 5.9 register-vm.sh —— 注册已存在 VM
 
 VM 已通过其他方式创建时,用此脚本将其注册到 `cluster.conf` 的 NODES:
@@ -613,7 +634,7 @@ k8s-dns-node-cache metrics-server pause"
 ### 8.3 一键部署(推荐)
 
 ```bash
-# 全流程: 宿主网络 → SSH密钥 → master/worker VM 创建+注册 → 免密 → inventory → 时间同步 → kubespray 离线部署
+# 全流程: 宿主网络 → SSH密钥 → master/worker VM 创建+注册 → 免密 → inventory → 时间同步 → 安装前环境检查 → kubespray 离线部署
 sudo ./scripts/deploy-cluster.sh --with-k8s
 ```
 
@@ -625,7 +646,8 @@ sudo ./scripts/deploy-cluster.sh --with-k8s
 5. 检查 worker 节点前置包是否已安装（installer 不安装 OS 包）
 6. `gen-inventory.sh` + `sync-kubespray-config.sh` 生成 inventory 与配置
 7. `setup-ntp.sh`(modules/02_k8s/05_k8s_ntp)同步各节点时间到权威(首 master), 校验偏差 ≤ `NTP_MAX_OFFSET_MS`(在 kubespray 之前)
-8. `cubestack-offline.sh install` 执行 kubespray 离线部署
+8. `pre-install-check.sh`(modules/02_k8s/14_pre_install_check)只读检查 SSH/sudo/chronyd/资源容量; 关键项失败即中止
+9. `cubestack-offline.sh install` 执行 kubespray 离线部署
 
 ### 8.4 分步部署(可精细控制)
 

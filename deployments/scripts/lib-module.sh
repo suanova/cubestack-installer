@@ -170,6 +170,9 @@ declare -A MODULE_ALIAS=(
     [k8s]=k8s_deploy
     [scale]=k8s_scale
     [gpu_operator]=gpu_operator
+    # 安装前环境检查(--steps pre-install-check 兼容用户习惯的连字符写法)
+    [pre-install-check]=pre_install_check
+    [preinstall_check]=pre_install_check
 )
 
 # 组件级的便利别名由模块**自声明**: 模块文件里写 `# ALIAS: <alias>,<alias>`。
@@ -470,7 +473,12 @@ resolve_run_steps() {
     #   注入公钥 → 从首个 master 取 admin.conf 到本地), 见 ensure_cluster_access。
     #   ⇒ 因此这里**不再**把 k8s_deploy/metallb/k8s_registry/vm_sshkey/k8s_passwordless 排进计划。
     if [ "${_steps_precise}" = "1" ] && [ "${#RUN_STEPS[@]}" -gt 0 ]; then
-        local _keep_explicit=" ${steps_arg//,/ } ${enable_arg//,/ } "
+        # 显式集合按**归一化 key** 构造 —— 否则连字符/旧别名(如 pre-install-check→pre_install_check、
+        # ntp→k8s_ntp)与 RUN_STEPS 里的新 key 对不上, 会被下面的基座过滤误删。
+        local _keep_explicit=" " _s5
+        for _s5 in ${steps_arg//,/ } ${enable_arg//,/ }; do
+            [ -z "${_s5}" ] || _keep_explicit+="$(normalize_key "${_s5}") "
+        done
         local _kept=() _k5 _i5 _is_base
         for _k5 in "${RUN_STEPS[@]}"; do
             [ -z "${_k5}" ] && continue

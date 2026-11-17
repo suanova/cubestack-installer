@@ -13,15 +13,16 @@
 #
 # 模块(stages):
 #   env 阶段:  vm_network vm_sshkey vm_create harbor
-#   k8s 阶段:  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp
-#              k8s_deploy(默认关) k8s_scale(默认关)
+#   k8s 阶段:  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp pre_install_check
+#              node_pkgs node_net_guard k8s_asset_prefetch
+#              k8s_deploy(基座, 恒随全量部署) k8s_scale(默认关)
 #   addon 阶段: gpu_operator k8s_registry ceph ceph_csi ceph_backup
 #              keycloak kueue kubevirt lustre_csi   (01~19 中间件, 默认关)
 #              20 起序号预留给外部提供的自研模块
 #   验证:      verify_<组件>(自动发现; --steps verify 不指定 operator 默认执行全部 verify_*)
 #   运维:      ceph_backup(Ceph 备份/恢复, 默认关, --steps ceph_backup 单独执行)
 #
-# vm / k8s_passwordless / k8s_workerbm / k8s_hosts / k8s_inventory 为可重复(幂等)模块。
+# vm / k8s_passwordless / k8s_workerbm / k8s_hosts / k8s_inventory / pre_install_check 为可重复(幂等)模块。
 # 断点续跑: 每模块完成后写入状态文件; --fresh 清状态重跑。
 #
 # 用法:
@@ -63,7 +64,7 @@ usage() {
 阶段目录与模块(自动发现):
   01_env  vm_network vm_sshkey vm_create harbor
           (默认执行 vm_sshkey; vm_network 默认关 — 宿主网络初始化改由 tools/vm/create-vms.sh 创建 VM 时自动执行; vm_create 默认关 — 虚拟机创建由 tools/vm/create-vms.sh 独立执行)
-  02_k8s  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp node_pkgs node_net_guard  (默认执行)
+  02_k8s  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp pre_install_check node_pkgs node_net_guard k8s_asset_prefetch  (默认执行)
           k8s_deploy(基座, 恒随全量部署)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           cephfs_mount(CephFS → 每台节点 /mnt/cephfs/models, 默认随 CEPHFS_ENABLED)
@@ -514,10 +515,11 @@ unset _has_ceph_step _has_k8s_step
 #     其余是建集群本身的前置)。对**全部请求步骤都属于这一类**的情形, 接入改为**尽力而为**: 能接上就接,
 #     接不上只提示不拦停 —— 否则 `--steps node_pkgs` 在一台集群尚未起来的机器上永远跑不动(实机 2026-09-29)。
 #     只要请求里**有任何一个**需要集群的步骤, 仍走原来的硬门(exit 1)。
-PRE_CLUSTER_STEPS="node_pkgs k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp"
+PRE_CLUSTER_STEPS="node_pkgs pre_install_check k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp"
 if [ -n "${STEPS_ARG}" ]; then
     _all_pre=1
     for _s in ${STEPS_ARG//,/ }; do
+        _s="$(normalize_key "${_s}")"
         case " ${PRE_CLUSTER_STEPS} " in
             *" ${_s} "*) ;;
             *) _all_pre=0 ;;
