@@ -575,7 +575,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   判定实现在同目录 `ceph-disk-classify.py`(纯函数, 可离线单测) —— 改判定口径只改这一处。
   ⚠ 有 LVM 签名但认不出归属时判 `inuse`(**宁可不擦**); `nbd*` 恒 `inuse`(可能是 rbd-nbd 映射, 擦它会写穿 RBD 卷)。
   清理走 `tools/k8s/ceph-cleanup.sh --list`(只读计划)/`--wipe-disks`/`--all`, 显式 `--wipe-node` 默认拒清 `inuse`/`mixed` 盘。
-  部署前**红底按四类分组 + 判定证据列出节点与盘, sleep CEPH_CONFIRM_SLEEP(60s)** double-check; CI 可 `CEPH_CONFIRM_SLEEP=0`。
+  部署前**红底按四类分组 + 判定证据列出节点与盘, 询问 yes/no(CEPH_CONFIRM_SLEEP=0 可跳过)** double-check。
 - **镜像同步**: `tools/images/ceph-sync-images.sh`(复制 tar 到全部节点 + `ctr -n k8s.io images import --no-unpack`)。
 - **清理恢复状态**: 停机方(ceph-cleanup.sh ⓪ / 05_k8s_registry 卸载分支)在 scale 0 前给对象打注解 `cubestack.io/pre-stop-replicas=原副本数`(stop_mark_replicas, 仅首次不覆盖); 恢复方(02_ceph.sh 7.9 成功路径 + deploy-cluster.sh 异常退出 EXIT 钩子, 共用 stop_restore_known_consumers)**只恢复带注解的对象**并清除注解, 无注解=从未停机一律不动。⚠ registry 是 kubespray 建的**裸 ReplicaSet**(`rs/registry`, 非 Deployment), operator 是 Deployment。
 - **Operator 卸载守卫**: 删除平台实例后, 保留 operator 等待 `csc` 删除(120s 有界); CR 仍在或查询失败时报告未完成, 跳过 helm uninstall、namespace finalizer patch / 强制删除及 CRD 清理。Pod Running / Completed 不能证明 finalizer 已完成。

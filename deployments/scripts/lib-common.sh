@@ -249,6 +249,42 @@ say()  { local m="→  $*"; echo -e "\033[36m${m}\033[0m"; _log_file "${m}"; }
 ok()   { local m="✅ $*"; echo -e "\033[32m${m}\033[0m"; _log_file "${m}"; }
 warn() { local m="⚠  $*"; echo -e "\033[33m${m}\033[0m"; _log_file "${m}"; }
 err()  { local m="【错误】$*"; echo -e "\033[31m${m}\033[0m" >&2; _log_file "${m}"; }
+
+# ---------------- 交互确认([Y/n]) ----------------
+# 替代旧的 sleep 倒计时: 交互终端遵循 Linux 惯例 [Y/n]。
+# 用法: confirm_yes_no "<要确认的事>" [非交互环境默认: 1=继续(旧倒计时语义), 0=中止]
+# 返回: 0=继续; 1=拒绝/无法确认
+confirm_yes_no() {
+    local _msg="$1" _nonint_default="${2:-1}" _ans _norm
+    if [ "${CUBESTACK_ASSUME_YES:-0}" = "1" ]; then
+        say "已开启 --yes/自动确认 → 继续: ${_msg}"
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        if [ "${_nonint_default}" = "1" ]; then
+            warn "非交互环境: ${_msg} → 自动继续(旧倒计时语义; 需要人工确认请在交互终端运行)"
+            return 0
+        fi
+        err "非交互环境且未确认: ${_msg} → 中止"
+        err "  确认要继续请加 --yes, 或设置 CUBESTACK_ASSUME_YES=1"
+        return 1
+    fi
+    while true; do
+        printf '\033[41m\033[97m  ❓ %s [Y/n] \033[0m' "${_msg}"
+        if ! read -r _ans; then
+            printf '\n'
+            err "未读取到确认输入 → 中止"
+            return 1
+        fi
+        _norm="$(printf '%s' "${_ans}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        case "${_norm}" in
+            ""|yes|y|是) return 0 ;;
+            no|n|否)     return 1 ;;
+            *) printf '  ⚠ 请输入 Y 或 n(直接回车=Y; 收到: %s)\n' "${_ans:-<空>}" ;;
+        esac
+    done
+}
+
 # ⚠ vlog 必须走 stderr —— 它是诊断输出, 而 "$(...)" 命令替换**只捕获 stdout**。
 #   历史事故(2026-09-22 实机): kube_vip_resolve_target 内部的 vlog 走了 stdout,
 #   于是 api_addr="$(kube_vip_resolve_target)" 抓到 "[DEBUG] …\n<master01>" 两行,

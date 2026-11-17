@@ -29,8 +29,8 @@
 #     mixed(同盘既有 ceph 又有别的数据)一律不进 CR、不清理。
 #     VM 集群请确保 VM 附加数据盘(默认 3×200GB, VM_DATA_DISKS)。
 #   · 安全确认(需求 2): 应用 CR 前红底醒目列出"将使用的节点 + 各节点磁盘按类分组
-#     (空闲 / 上次 Ceph 占用 / 在用 / 混合)+ 判定证据", **sleep CEPH_CONFIRM_SLEEP(默认 60)s**
-#     供人工 double-check; 核对无误自动继续。CI 可 CEPH_CONFIRM_SLEEP=0 跳过。
+#     (空闲 / 上次 Ceph 占用 / 在用 / 混合)+ 判定证据", 并询问 **[Y/n](CEPH_CONFIRM_SLEEP 变量
+#     保留兼容: 默认 60→询问, 设 0 跳过)** 供人工 double-check; 直接回车/Y 才继续。
 #   · 节点准备: 每台存储节点加载并持久化 rbd 内核模块; 检查 lvm2 是否存在
 #     (由 OS 镜像/运维预装; installer 不安装 OS 包, 缺失直接失败)。
 #   · 离线镜像(需求 5): 版本树的 offline-files/kubespray/<版本>/images/,
@@ -225,9 +225,9 @@ _CEPH_SKIP_CLUSTER=0
 if [ "${CEPH_MODE:-internal}" = "external" ]; then
     say "CEPH_MODE=external → 不创建集群内 CephCluster(由 ceph_csi 模块接入外部 Ceph: ${CEPH_MONITORS:-<未配置>})"
     _CEPH_SKIP_CLUSTER=1
-    # ★ 2026-09-10: external-ceph.env 检测 + 倒计时警告(部署前提示, 目标"一次性部署成功")
+    # ★ 2026-09-10: external-ceph.env 检测 + 警告(部署前提示, 目标"一次性部署成功")
     #   · CEPH_EXTERNAL_ENV_FILE 未显式设置时探测默认目录 deployments/config/external-ceph.env;
-    #   · 文件缺失 → 红底倒计时(CEPH_ENV_CONFIRM_SLEEP, 默认 60s, CI 可设 0 跳过)——
+    #   · 文件缺失 → 红底警告 + [Y/n] 确认(CEPH_ENV_CONFIRM_SLEEP=0 可跳过)——
     #     未检测到该文件, 部署可能失败(官方导入路径硬依赖; 手填路径不受影响但无健康上报/对象存储)。
     _EXT_ENV_FILE="${CEPH_EXTERNAL_ENV_FILE:-${REPO_ROOT}/deployments/config/external-ceph.env}"
     if [ -n "${CEPH_EXTERNAL_ENV_FILE:-}" ] || [ -f "${_EXT_ENV_FILE}" ]; then
@@ -237,18 +237,15 @@ if [ "${CEPH_MODE:-internal}" = "external" ]; then
         warn "  ⚠ 未检测到 external-ceph.env(默认路径: ${_EXT_ENV_FILE})"
         warn "    请先把提供方导出的 external-ceph.env 放到该路径(A 侧部署完自动导出; 或手工拷贝)"
         warn "    没有该文件, ceph_csi 外部接入可能部署失败(官方导入路径硬依赖; 手填 CEPH_MONITORS 等仍可用但无健康上报)"
-        # ★ 2026-09-11: deploy-cluster.sh 部署开始前已倒计时确认过(CEPH_EXT_ENV_CONFIRMED=1)时
-        #   不重复倒计时(仅保留告警), 避免整轮部署中 60s 等待出现两次; 单独 --steps ceph 仍会提示。
+        # ★ 2026-09-11: deploy-cluster.sh 部署开始前已确认过(CEPH_EXT_ENV_CONFIRMED=1)时
+        #   不重复确认(仅保留告警), 避免整轮部署中同一确认出现两次; 单独 --steps ceph 仍会提示。
         if [ "${CEPH_EXT_ENV_CONFIRMED:-0}" != "1" ]; then
             _ENV_SLEEP="${CEPH_ENV_CONFIRM_SLEEP:-60}"
             if [ "${_ENV_SLEEP}" -gt 0 ] 2>/dev/null; then
-                for _eci in $(seq "${_ENV_SLEEP}" -1 1); do
-                    printf '\r\033[31m  %3ds 后继续(放入文件后按 Ctrl-C 重启, 或等待倒计时结束)...\033[0m' "${_eci}"
-                    sleep 1
-                done
-                echo ""
+                confirm_yes_no "未检测到 external-ceph.env, 仍要继续部署(建议先放好文件后重跑)?" 1 \
+                    || { err "已取消: 请先放入 external-ceph.env 或配置 CEPH_MONITORS 后重跑"; exit 1; }
             fi
-            unset _eci
+            unset _ENV_SLEEP
         fi
     fi
     unset _EXT_ENV_FILE _ENV_SLEEP
@@ -387,22 +384,16 @@ echo -e "\033[41m\033[97m ⚠ 确认要点: ① 盘名与节点一一对应正�
 echo -e "\033[41m\033[97m   ② 「上次 Ceph 占用」的盘会被**清空数据**后复用(覆盖安装, 全新 fsid)\033[0m"
 echo -e "\033[41m\033[97m      保留旧数据请设 CEPH_PRE_CLEANUP_EXISTING=false(交 Rook 认领)   \033[0m"
 echo -e "\033[41m\033[97m   ③ 「在用盘/混合盘」永远不动(人工确认要清请用 ceph-cleanup.sh)     \033[0m"
-echo -e "\033[41m\033[97m   ④ CEPH_NODES 是你想部署的节点; 核对无误将自动继续                 \033[0m"
-echo -e "\033[41m\033[97m   有误请 Ctrl-C 中止修正后重跑                                      \033[0m"
+echo -e "\033[41m\033[97m   ④ CEPH_NODES 是你想部署的节点; 核对无误请直接回车/Y 继续       \033[0m"
+echo -e "\033[41m\033[97m   有误请输入 n 中止, 修正后重跑                                     \033[0m"
 echo -e "\033[41m\033[97m================================================================================\033[0m"
 echo ""
 if [ "${CEPH_CONFIRM_SLEEP:-60}" -gt 0 ] 2>/dev/null; then
-    say "sleep ${CEPH_CONFIRM_SLEEP}s 供核对(CI 可设 CEPH_CONFIRM_SLEEP=0 跳过)..."
-    # 逐秒刷新倒计时(单行, 红底), 与 k8s_deploy 部署前倒计时一致 —— 之前静默等待看不到进度
-    for _c in $(seq "${CEPH_CONFIRM_SLEEP}" -1 1); do
-        printf "\r%s" "$(printf '\033[41m\033[97m  ⏳ 倒计时 %d 秒继续(请核对上方 Ceph 存储节点/裸盘)      \033[0m' "${_c}")"
-        sleep 1
-    done
-    printf "\r%s\n" "$(printf '\033[0m  %s             ')"
-    printf "\r%s\n" "$(printf '\033[0m  %s             ')"
-    unset _c
+    say "请核对上方 Ceph 存储节点/裸盘(有误输入 n 中止; CEPH_CONFIRM_SLEEP=0 可跳过)..."
+    confirm_yes_no "已核对上方 Ceph 存储节点/裸盘, 继续部署?" 1 \
+        || { err "已取消部署(Ceph 存储节点/裸盘未确认)"; exit 1; }
 else
-    say "CEPH_CONFIRM_SLEEP=0, 跳过等待(请务必已人工核对上方节点/裸盘)"
+    say "CEPH_CONFIRM_SLEEP=0, 跳过确认(请务必已人工核对上方节点/裸盘)"
 fi
 
 # ---------------- 3.5) 让 master 节点可调度(默认) ----------------
@@ -634,6 +625,37 @@ for i in $(seq 1 18); do
 done
 [ "${OP_OK:-0}" -ge 1 ] 2>/dev/null || { warn "  rook operator 未就绪(检查 kubectl -n rook-ceph get pods)"; }
 ok "  Rook operator 已部署"
+# 官方 offline manifest 的 RBAC 不含 monitoring.coreos.com; 没有这条授权,
+# Rook 即使被 operator patch 了 monitoring.enabled=true 也创建不了 ServiceMonitor。
+say "  应用 Rook 监控 RBAC(monitoring.coreos.com)..."
+if cat <<EOF | SSH "${K} apply -f -" >/dev/null 2>&1
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rook-ceph-monitoring
+rules:
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "prometheusrules"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rook-ceph-monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rook-ceph-monitoring
+subjects:
+  - kind: ServiceAccount
+    name: rook-ceph-system
+    namespace: ${CEPH_NAMESPACE}
+EOF
+then
+    ok "  Rook 监控 RBAC 已就绪"
+else
+    warn "  Rook 监控 RBAC 应用失败(ServiceMonitor 可能无法创建; 检查 RBAC)"
+fi
 _patch_rook_operator_placement
 SSH "${K} -n ${CEPH_NAMESPACE} rollout status deploy/rook-ceph-operator --timeout=180s" >/dev/null 2>&1 \
     || warn "  Rook operator patch 后 180s 内未 Ready(检查 master 标签/taint 与 operator pod 事件)"

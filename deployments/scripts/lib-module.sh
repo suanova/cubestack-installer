@@ -730,7 +730,7 @@ _component_update_keys() {
 #     该事故已被当天的单组件模式**结构性消除**(证据: `--list --steps ceph` 的计划里没有
 #     k8s_deploy), 拦停反而挡住了正常的覆盖重装(实机: 新容器默认部署被拦在 k8s_deploy) → 改提示。
 #   · 覆盖重装本身仍有既有防线(kubespray 侧, 见 deployments/kubespray/cubestack-offline.sh):
-#     检测旧 K8s 残留 → 醒目警告 + 60s 倒计时(Ctrl-C 可中止) → kubeadm reset。
+#     检测旧 K8s 残留 → 醒目警告 + [Y/n] 确认(Ctrl-C 可中止) → kubeadm reset。
 #
 # cluster_exists(): 只读探测, 无副作用(不建目录、不写 kubeconfig)。
 #   SSH_KEY 存在 + 首个 master 可达 + 远端 kubectl 能列出节点 → 视为"集群已存在"。
@@ -759,7 +759,7 @@ notify_base_redeploy() {
     cluster_exists || return 0                           # 探测不到(首装/无密钥/网络不通) → 保持安静
     _REDEPLOY_NOTED=1
     warn "检测到集群已存在 → 本次为「覆盖安装」(默认语义): k8s_deploy 会重跑 kubespray"
-    warn "  节点上已有的旧 K8s 状态会被 kubeadm reset —— 该步骤自带 60s 醒目倒计时, 期间 Ctrl-C 可中止"
+    warn "  节点上已有的旧 K8s 状态会被 kubeadm reset —— 该步骤会醒目警告并询问 [Y/n](Ctrl-C 可中止)"
     warn "  只想装某个组件、不动集群: sudo $0 --steps <组件>(如 --steps ceph; 计划里不含基座)"
 }
 
@@ -956,15 +956,15 @@ print_plan() {
         echo "    [${NODE_ROLE}] ${NODE_HOSTNAME}  ${NODE_IP}  (user=${NODE_USER})"
     done
     # Ceph 启用提示(精简一行; 部署开始前由 deploy-cluster.sh 红底列出 节点+裸盘(internal)
-    # 或外部连接参数(external)并倒计时确认, 避免两处重复 —— 此处仅供 --list 只读场景知悉
-    # ceph 将启用, 不执行检测/倒计时)
+    # 或外部连接参数(external)并询问 [Y/n], 避免两处重复 —— 此处仅供 --list 只读场景知悉
+    # ceph 将启用, 不执行检测/确认)
     if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
         if [ "${CEPH_MODE:-internal}" = "external" ]; then
-            echo "  ⚠ Ceph 启用(CEPH_MODE=external 接入外部 Ceph); 部署开始前会红底列出外部连接参数并倒计时"
-            echo "    ${CEPH_ENV_CONFIRM_SLEEP:-60}s 确认(核对 external-ceph.env / CEPH_MONITORS; --list 仅提示, 部署时才有倒计时)"
+            echo "  ⚠ Ceph 启用(CEPH_MODE=external 接入外部 Ceph); 部署开始前会红底列出外部连接参数并询问 [Y/n]"
+            echo "    CEPH_ENV_CONFIRM_SLEEP=0 跳过确认(核对 external-ceph.env / CEPH_MONITORS; --list 仅提示)"
         else
-            echo "  ⚠ CEPH_ENABLED=true → Ceph(ceph/ceph_csi)将启用; 部署开始前会红底列出存储节点+磁盘分类并倒计时"
-            echo "    ${CEPH_CONFIRM_SLEEP:-60}s 确认(空闲/上次 Ceph 占用/在用/混合 分类 + 判定证据, 防覆盖在用盘)"
+            echo "  ⚠ CEPH_ENABLED=true → Ceph(ceph/ceph_csi)将启用; 部署开始前会红底列出存储节点+磁盘分类并询问 [Y/n]"
+            echo "    CEPH_CONFIRM_SLEEP=0 跳过确认(空闲/上次 Ceph 占用/在用/混合 分类 + 判定证据, 防覆盖在用盘)"
         fi
     fi
     echo "---------------------------------------------"

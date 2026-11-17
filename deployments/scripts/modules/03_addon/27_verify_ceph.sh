@@ -42,7 +42,7 @@ cleanup() {
     SSH "${K} -n ${TEST_NS} delete pod ${TEST_POD} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
     SSH "${K} -n ${TEST_NS} delete pvc ${TEST_PVC} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
     SSH "${K} patch namespace ${TEST_NS} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
-    SSH "${K} delete namespace ${TEST_NS} --ignore-not-found=true --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "timeout 30 ${K} delete namespace ${TEST_NS} --ignore-not-found=true --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
 }
 trap cleanup EXIT
 

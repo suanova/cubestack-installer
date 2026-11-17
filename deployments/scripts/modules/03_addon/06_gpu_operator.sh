@@ -44,16 +44,70 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
+# 远端调用薄包装: 不读 stdin(< /dev/null), 避免在循环/here-string 中吞掉调用方输入。
+# lib-common 未提供该包装, 本模块本地定义(与 tools/k8s/ceph-cleanup.sh 同口径)。
+SSH_N() { SSH "$@" </dev/null; }
+
+# 探测 metax 命名空间状态, 区分"确认不存在"与"探针失败":
+#   0=确认已不存在(kubectl NotFound); 1=仍然存在; 2=无法确认(超时/传输/其它错误)
+# ⚠ 不能把 timeout/SSH 失败当成"已删除" —— 否则会在 namespace 仍 Terminating 时
+#   提前继续 helm --create-namespace, 安装失败(CodeRabbit)。
+_metax_ns_probe() {   # <ns>
+    local ns="$1" out
+    if out="$(SSH_N "timeout 10 ${K} get ns ${ns} -o name 2>&1" 2>&1)"; then
+        return 1
+    fi
+    case "${out}" in
+        *"(NotFound)"*) return 0 ;;
+        *) return 2 ;;
+    esac
+}
+
 # 清理 metax operator 残留(CR / CRD / 命名空间 / default 旧资源 / 集群级 RBAC)。
 # 安装路径(重装前清场)与卸载段(cluster-teardown)共用同一序列, 幂等。
 _metax_cleanup_residual() {
     local _mns="${METAX_NAMESPACE:-metax-operator}" _mrel="${METAX_RELEASE_NAME:-metax-gpu-operator}"
     say "  清理残留(CR / CRD / ${_mns} 命名空间 / default 旧资源)..."
-    SSH "${K} delete clusteroperator -n ${_mns} cluster-operator --ignore-not-found >/dev/null 2>&1" || true
+    # ★ 2026-11-16 实机: 这里**必须 --wait=false**。ClusterOperator 带 operator finalizer,
+    #   而 helm uninstall 后 operator 已不在 → finalizer 无人摘; kubectl delete 默认 wait=true
+    #   会一直等 CR 消失, 把组件清理拖到 600s 超时(现象: 卡在 ssh delete ... cluster-operator)。
+    SSH "timeout 30 ${K} delete clusteroperator -n ${_mns} cluster-operator --ignore-not-found --wait=false >/dev/null 2>&1" || true
+    # 控制器已卸载: 显式摘 finalizer, 否则 CR 永远 Terminating, 后续 ns/CRD 删除也被拖住。
+    SSH "timeout 30 ${K} -n ${_mns} patch clusteroperator cluster-operator --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
+    # 有界等待 CR 真正消失(最多 20s; 摘 finalizer 后通常立即完成)
+    # CodeRabbit: 用 SECONDS 截止时间, 并给远端 kubectl 加 timeout —— 仅累计 sleep
+    # 时, 一次卡住的 SSH/kubectl 会让"20s 上限"失效。
+    local _wc_end=$((SECONDS + 20))
+    while [ "${SECONDS}" -lt "${_wc_end}" ]; do
+        SSH_N "timeout 10 ${K} -n ${_mns} get clusteroperator cluster-operator >/dev/null 2>&1" || break
+        sleep 2
+    done
+    unset _wc_end
     # 共享助手: 先摘残留 CR 的 finalizer 再有界删除(防 CRD 卡在 customresourcecleanup; 2026-10-23)
     delete_crd_with_finalizer_cleanup clusteroperators.gpu.metax-tech.com
     SSH "${K} patch ns ${_mns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
-    SSH "${K} delete ns ${_mns} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "timeout 30 ${K} delete ns ${_mns} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
+    # 有界等待命名空间真正消失(最多 60s): 摘掉 CR finalizer 后通常几秒完成;
+    # 不等待就立刻 helm upgrade --create-namespace 会撞上 Terminating namespace(安装失败)。
+    # 同上: SECONDS 截止 + 远端 kubectl timeout; 仅 NotFound 才算"已删除",
+    # 超时/传输失败视为未知并继续重试(不能提前结束等待)。
+    local _wn_end=$((SECONDS + 60)) _st=2
+    while [ "${SECONDS}" -lt "${_wn_end}" ]; do
+        # 必须在 if 里取状态: set -e 下裸调用返回 1/2 会直接退出模块
+        if _metax_ns_probe "${_mns}"; then
+            _st=0
+        else
+            _st=$?
+        fi
+        [ "${_st}" = "0" ] && break
+        sleep 3
+    done
+    if [ "${_st}" = "1" ]; then
+        warn "  ${_mns} 在 60s 内未删除(继续; helm --create-namespace 失败时需手工清理残留 finalizer)"
+    elif [ "${_st}" = "2" ]; then
+        warn "  ${_mns} 状态无法确认(探针超时/传输失败), 继续; helm --create-namespace 失败时需手工清理残留 finalizer"
+    fi
+    unset _wn_end _st
     # 清理集群级残留(ClusterRole/RoleBinding 无命名空间资源; 无 Helm 标签时 helm 无法接管 → 必须删掉)
     for _cr in $(SSH "${K} get clusterrole -o name 2>/dev/null" | grep -i 'metax' || true); do
         SSH "${K} delete ${_cr} --ignore-not-found >/dev/null 2>&1" || true

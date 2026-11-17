@@ -77,7 +77,7 @@ TAR="${LOCAL_REPO_DIR}/images/busybox.tar"
 cleanup() {
     [ -n "${FIRST_MASTER:-}" ] || return 0
     SSH "${K} patch namespace ${TEST_NS} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
-    SSH "${K} delete namespace ${TEST_NS} --ignore-not-found=true --force --grace-period=0 >/dev/null 2>&1" || true
+    SSH "timeout 30 ${K} delete namespace ${TEST_NS} --ignore-not-found=true --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
     # 测试镜像: 本集群 registry 默认未开启 API delete(返回 405), 无法自动删除 tag/blob;
     # 测试 tag 体积小(busybox 约 2M)且不影响使用, 保留在 registry 中, 见末尾说明。
     rm -f "/tmp/${TEST_NS}-"*.yaml 2>/dev/null || true

@@ -24,7 +24,7 @@ jobs:
   update:
     runs-on: ubuntu-latest
     env:
-      BASE_BRANCH: ${{ vars.CUBESTACK_BASELINE_BRANCH || 'release-2.1' }}
+      BASE_BRANCH: ${{ vars.CUBESTACK_BASELINE_BRANCH || 'main' }}
       MIRROR_REPO: ${{ vars.MIRROR_REPO || 'suanova/container-image-mirror' }}
     steps:
       - uses: actions/checkout@v4
