@@ -34,7 +34,7 @@ env:
   PAUSE_VERSION: 3.10.1
   RDMA_IMAGE_TAG: v1.5.4
   REGISTRY_IMAGE_TAG: 2.8.1
-  NETSHOOT_RDMA_VERSION: sha-ea1b33c
+  NETSHOOT_RDMA_VERSION: sha-96ced0d
   CEPHCSI_VERSION: v3.18.1
   CEPH_CSI_OPERATOR_VERSION: v1.1.0
   CSIADDONS_SIDECAR_VERSION: v0.15.1
@@ -341,8 +341,8 @@ images:
   tar: ghcr.io_mellanox_k8s-rdma-shared-dev-plugin_${RDMA_IMAGE_TAG}.tar
 - key: netshoot:netshoot-rdma
   source_ref: harbor.isuanova.com/suanova/netshoot-rdma
-  version: sha-ea1b33c
-  digest: sha256:3584b7ce127d46d808d18fb3b0d6c02872e2322b1f4f9b52d5299956b60fced0
+  version: sha-96ced0d
+  digest: sha256:33b5ac77fcd8f5b693e1b2c20a979d72404fc9382a0bf53dede7cd0709831b59
   dest: offline-files/netshoot
   tar: netshoot-rdma.tar
   optional: true
