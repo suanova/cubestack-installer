@@ -88,7 +88,7 @@ jobs:
             build_cli=false
             grep -qE '^images/installer-cli-base/' <<<"${changed}" && build_base=true
             grep -qE '^images/installer-cli/' <<<"${changed}" && build_cli=true
-            grep -qE '^(deployments/scripts/|deployments/kubespray/|deployments/cubestack-addon/|deployments/config/|versions/|\.dockerignore$)' <<<"${changed}" \
+            grep -qE '^(deployments/scripts/|deployments/kubespray/|deployments/cubestack-addon/|deployments/config/|versions/|\.dockerignore$|\.github/workflows/rebuild-cli-image\.yml$)' <<<"${changed}" \
               && build_cli=true
             # A base change is useless without rebuilding the code layer on top.
             [ "${build_base}" = "true" ] && build_cli=true
@@ -195,3 +195,56 @@ jobs:
           [ -n "${digest}" ] || { echo "::error::无法解析 ${IMAGE} 的 registry digest"; exit 1; }
           echo "CLI_IMAGE_DIGEST=${digest}" >> "${GITHUB_ENV}"
           echo "pushed ${IMAGE} (${digest})" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Check release App
+        id: release-app-config
+        if: steps.changes.outputs.build_cli == 'true'
+        env:
+          APP_ID: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          APP_KEY: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "${APP_ID}" ] && [ -n "${APP_KEY}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::SUANOVA_BOT_CLIENT_ID / SUANOVA_BOT_APP_PRIVATE_KEY are not configured; skipping cli-built dispatch"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release App token
+        id: release-app
+        if: steps.changes.outputs.build_cli == 'true' && steps.release-app-config.outputs.configured == 'true'
+        env:
+          APP_ID: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          APP_KEY: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ env.APP_ID }}
+          private-key: ${{ env.APP_KEY }}
+          owner: suanova
+          repositories: cubestack-release
+
+      - name: Dispatch cli-built
+        if: steps.changes.outputs.build_cli == 'true'
+        env:
+          GH_TOKEN: ${{ steps.release-app.outputs.token }}
+          RELEASE_REPO: ${{ vars.CUBESTACK_RELEASE_REPO || 'suanova/cubestack-release' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::release App is not configured; skipping cli-built dispatch"
+            exit 0
+          fi
+          line="$(tr -d '[:space:]' < VERSION_LINE)"
+          image_repo="${IMAGE%:*}"
+          payload=$(jq -n \
+            --arg commit "$GITHUB_SHA" \
+            --arg digest "$CLI_IMAGE_DIGEST" \
+            --arg image "$image_repo" \
+            --arg line "$line" \
+            --arg ref "$GITHUB_REF_NAME" \
+            '{event_type: "cli-built",
+              client_payload: {cli_commit: $commit, cli_digest: $digest,
+                               cli_image: $image, line: $line, ref: $ref}}')
+          printf '%s' "$payload" \
+            | gh api --method POST "repos/${RELEASE_REPO}/dispatches" --input -
+          echo "dispatched cli-built to ${RELEASE_REPO} for ${GITHUB_SHA} (${line})"
