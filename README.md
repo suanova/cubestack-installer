@@ -134,14 +134,14 @@ sudo docker run --rm -it --network host \
 > 文件名；只有镜像包含版本树的全部模块时才用单挂载：
 >
 > ```bash
-> # 版本树 modules/03_addon 的模块清单
-> ( cd "${MODULES_DIR}/03_addon" && find . -maxdepth 1 -type f -name '*.sh' -printf '%f\n' | sort ) \
->   > /tmp/release-modules.txt
-> # 镜像内置 deployments/scripts/modules/03_addon 的模块清单
+> # 版本树 modules/<NN_*> 的模块清单（保留相对 phase 路径）
+> ( cd "${MODULES_DIR}" && find . -mindepth 2 -maxdepth 2 -type f -name '*.sh' \
+>     -path './[0-9][0-9]_*/*' -printf '%P\n' | sort ) > /tmp/release-modules.txt
+> # 镜像内置 deployments/scripts/modules/<NN_*> 的模块清单
 > docker run --rm --entrypoint sh <cli-image> -c \
->   'cd /opt/cubestack-installer/deployments/scripts/modules/03_addon && find . -maxdepth 1 -type f -name "*.sh" -printf "%f\n" | sort' \
+>   'cd /opt/cubestack-installer/deployments/scripts/modules && find . -mindepth 2 -maxdepth 2 -type f -name "*.sh" -path "./[0-9][0-9]_*/*" -printf "%P\n" | sort' \
 >   > /tmp/image-modules.txt
-> # 版本树有、镜像没有的模块
+> # 版本树有、镜像没有的模块（按相对 phase 路径比较）
 > comm -23 /tmp/release-modules.txt /tmp/image-modules.txt
 > ```
 >
