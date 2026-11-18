@@ -203,7 +203,7 @@ fi
 if [ "${MATERIALIZE}" = "1" ]; then
     args=(--baseline "${BASELINE}" --index "${INDEX}" --offline-root "${OFFLINE_ROOT}")
     [ "${INCLUDE_OPTIONAL}" = "1" ] && args+=(--include-optional)
-    for group in "${INCLUDE_GROUPS[@]}"; do
+    for group in ${INCLUDE_GROUPS[@]+"${INCLUDE_GROUPS[@]}"}; do
         args+=(--include-group "${group}")
     done
     if [ "${DRY_RUN}" = "1" ]; then
