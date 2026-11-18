@@ -89,6 +89,11 @@ HARBOR_MIRROR_PASSWORD="${HARBOR_MIRROR_PASSWORD:-}"          # Harbor 密码/to
 #     基座 k8s_deploy 恒随全量部署; 扩容 k8s_scale 仅经命令行触发(--with-scale / --steps k8s_scale)。
 #     原 K8S_ENABLED / K8S_SCALE_ENABLED 已于 2026-10-16 移除(旧配置残留该行无副作用)。
 NTP_ENABLED="${NTP_ENABLED:-1}"                         # 节点时间同步(0=跳过, 不推荐; 见 defaults §2.2)
+# ---- 节点系统包(可选离线安装; 默认关) ----
+# 默认值见 cluster.defaults.conf §2.2c(NODE_PKGS_ENABLED / WORKER_PKGS_ENABLED = false)。
+# 启用: 在本文件写 NODE_PKGS_ENABLED=true / WORKER_PKGS_ENABLED=true,
+#   或用 --enable node_pkgs|k8s_workerbm / --steps node_pkgs|k8s_workerbm。
+#   .deb 来源: offline-files/os/packages/*.deb(需自行预置)。
 # 本地代理(kubespray nginx-proxy 静态 Pod: 每节点 127.0.0.1:6443 → 全部 master; 与"外部入口"正交):
 #   摘掉 all.yml 的 loadbalancer_apiserver 块实现节点就近出口; kubelet 侧故障切换 ~1s。
 #   细节(实现类型/别名/外部 LB 地址)见 defaults【API 入口细节】节

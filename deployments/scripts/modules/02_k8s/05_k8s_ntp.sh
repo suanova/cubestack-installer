@@ -8,7 +8,7 @@
 # REQUIRES: k8s_passwordless
 # 说明:
 #   · NTP 同步是**必需步骤**, 在 k8s_deploy 之前执行, 防止 etcd/kubeadm 时间敏感故障。
-#   · 本模块只做同步(调用 setup-ntp.sh apply): installer **不安装 OS 包** —— chrony 由节点
+#   · 本模块只做同步(调用 setup-ntp.sh apply): installer **默认不安装 OS 包** —— chrony 由节点
 #     黄金镜像/运维预装(2.1 口径)。
 #   · 权威缺 chrony, 或客户端既无 chrony 也无 systemd-timesyncd → 硬失败并给出安装指引
 #     (不会静默跳过; 符合"NTP 同步必须"的约束)。

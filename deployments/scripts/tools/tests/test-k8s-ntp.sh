@@ -13,7 +13,7 @@
 #   ③ clock_offset: 权威自身无上游时直接返回 0, 不再 SSH 自测吃噪声
 #   ④ clock_offset: chrony 不可用/未同步时回退 SSH date(仍能返回数值)
 #   ⑤ 权威 stratum 硬失败、SYNC-OK/FAIL、apply 检查 SYNC-OK 静态围栏
-#   ⑥ workerbm 只做连通性检查, 不再安装 OS 包
+#   ⑥ workerbm 装包为 opt-in: 默认关闭, 仅 WORKER_PKGS_ENABLED=true 时调用装包脚本
 # 用法: bash deployments/scripts/tools/tests/test-k8s-ntp.sh
 # ============================================================
 set -uo pipefail
@@ -144,8 +144,10 @@ chk "node_cmd 不再裸跑 command -v chronyc(避免 sudo builtin)" "0" \
 chk "chronyc 存在性检查至少 3 处 bash -c" "1" \
     "$([ "$(command grep -c "bash -c 'command -v chronyc" "${SETUP}" 2>/dev/null || true)" -ge 3 ] && echo 1 || echo 0)"
 
-echo "== ⑥ workerbm 只做连通性检查 =="
-chk "workerbm 不再调用装包脚本" "0" "$(command grep -c 'install-worker-packages' "${WORKERBM}" 2>/dev/null || true)"
+echo "== ⑥ workerbm 装包 opt-in =="
+chk_contains "workerbm 装包脚本引用" "install-worker-packages" "$(cat "${WORKERBM}")"
+chk_contains "workerbm 默认关闭自检" "WORKER_PKGS_ENABLED=false" "$(cat "${WORKERBM}")"
+chk_contains "workerbm TOGGLE 声明" "TOGGLE: WORKER_PKGS_ENABLED" "$(cat "${WORKERBM}")"
 chk_contains "workerbm 连通性检查" "连通性检查" "$(cat "${WORKERBM}")"
 
 echo "---------------------------------------------"

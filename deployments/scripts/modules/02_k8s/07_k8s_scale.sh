@@ -258,17 +258,20 @@ if [ -n "${_scale_cp_list}" ]; then
 fi
 unset _scale_cp_list
 
-# ── 1. 环境准备: 仅对【新节点】执行(SSH 免密 + 连通性/包检查 + NTP 时间同步) ──
+# ── 1. 环境准备: 仅对【新节点】执行(SSH 免密 + 可选离线装包 + NTP 时间同步) ──
 # ★ 通过 ONLY_HOSTS 限定子模块只处理新节点 —— 扩容绝不重复向已有节点上传/装包
 #   (k8s_passwordless / k8s_workerbm / node_pkgs / k8s_ntp 内部均按 node_matches 过滤)
+#   ⚠ k8s_workerbm / node_pkgs 默认关(2026-11-18): 默认只由 pre_install_check 做只读检查;
+#     需要给新节点装离线 .deb 时置 WORKER_PKGS_ENABLED=true / NODE_PKGS_ENABLED=true
+#     (模块内自检, 直接调用同样生效)。
 #   虚拟机创建由 tools/vm/create-vms.sh 独立执行(不经过主程序): 新 VM 请先在
 #   tools/vm/vm-nodes.conf 添加并单独执行 sudo ./deployments/scripts/tools/vm/create-vms.sh
-say "[1/3] 环境准备(SSH 免密 / 节点连通性 + 包检查 / NTP, 仅新节点: ${NEW_NODE_HOSTS}) ..."
+say "[1/3] 环境准备(SSH 免密 / 连通性检查 / 可选离线装包 / NTP, 仅新节点: ${NEW_NODE_HOSTS}) ..."
 bash "${SCRIPT_DIR}/modules/01_env/02_vm_sshkey.sh"        # 生成密钥(全局幂等)
 export ONLY_HOSTS="${NEW_NODE_HOSTS}"
 bash "${SCRIPT_DIR}/modules/02_k8s/01_k8s_passwordless.sh" # 仅新节点注入公钥
-bash "${SCRIPT_DIR}/modules/02_k8s/02_k8s_workerbm.sh"     # 仅新 worker 连通性检查
-bash "${SCRIPT_DIR}/modules/02_k8s/12_node_pkgs.sh"        # 仅新节点前置包检查(不安装)
+bash "${SCRIPT_DIR}/modules/02_k8s/02_k8s_workerbm.sh"     # 仅新 worker 离线装包(受 WORKER_PKGS_ENABLED 控制; 默认跳过)
+bash "${SCRIPT_DIR}/modules/02_k8s/12_node_pkgs.sh"        # 仅新节点系统包对账(受 NODE_PKGS_ENABLED 控制; 默认跳过)
 bash "${SCRIPT_DIR}/modules/02_k8s/05_k8s_ntp.sh"          # NTP: 首 master chrony 权威(无过滤, 照常配置)+ 新节点同步/校验
 
 # ★ 2026-11-17(CodeRabbit): 新节点在进入 inventory/join 之前执行与全量部署同口径的

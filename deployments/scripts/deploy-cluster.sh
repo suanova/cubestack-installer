@@ -64,7 +64,9 @@ usage() {
 阶段目录与模块(自动发现):
   01_env  vm_network vm_sshkey vm_create harbor
           (默认执行 vm_sshkey; vm_network 默认关 — 宿主网络初始化改由 tools/vm/create-vms.sh 创建 VM 时自动执行; vm_create 默认关 — 虚拟机创建由 tools/vm/create-vms.sh 独立执行)
-  02_k8s  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp pre_install_check node_pkgs node_net_guard k8s_asset_prefetch  (默认执行)
+  02_k8s  k8s_passwordless k8s_hosts k8s_inventory k8s_ntp pre_install_check node_net_guard k8s_asset_prefetch  (默认执行)
+          k8s_workerbm(默认关, WORKER_PKGS_ENABLED=true / --steps k8s_workerbm 启用离线装包)
+          node_pkgs(默认关, NODE_PKGS_ENABLED=true / --steps node_pkgs 启用离线 .deb 对账)
           k8s_deploy(基座, 恒随全量部署)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           cephfs_mount(CephFS → 每台节点 /mnt/cephfs/models, 默认随 CEPHFS_ENABLED)

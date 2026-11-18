@@ -31,24 +31,29 @@ out="$(CLUSTER_CONF="${CONF}" CUBESTACK_ONLINE=0 \
 grep -q "非在线模式" <<<"${out}" || fail "offline asset prefetch did not exit"
 pass "asset prefetch is a no-op offline"
 
-# node_pkgs skips when the online entry point already ran the pre-check.
-out="$(CLUSTER_CONF="${CONF}" CUBESTACK_OS_CHECK_DONE=1 \
-    bash "${SCRIPTS}/modules/02_k8s/12_node_pkgs.sh" 2>&1)"
-grep -q "已由在线安装预检" <<<"${out}" || fail "node_pkgs online pre-check guard missing"
-pass "node package check is skipped after the online pre-check"
+# OS package installation is opt-in: default off, no installer invoked.
+out="$(CLUSTER_CONF="${CONF}" bash "${SCRIPTS}/modules/02_k8s/12_node_pkgs.sh" 2>&1)"
+grep -q "NODE_PKGS_ENABLED=false" <<<"${out}" || fail "node_pkgs default-off guard missing"
+grep -qE 'reconcile-node-packages' <<<"${out}" && fail "node_pkgs ran the installer while disabled"
+pass "node package install is opt-in (default off)"
 
-# Modules must not fall back to the deleted OS package installers.
-for f in "${SCRIPTS}/modules/02_k8s/02_k8s_workerbm.sh" \
-         "${SCRIPTS}/modules/02_k8s/12_node_pkgs.sh"; do
-    if grep -qE 'install-worker-packages|reconcile-node-packages' "${f}"; then
-        fail "OS package installer reference remains: ${f}"
-    fi
+out="$(CLUSTER_CONF="${CONF}" bash "${SCRIPTS}/modules/02_k8s/02_k8s_workerbm.sh" 2>&1)"
+grep -q "WORKER_PKGS_ENABLED=false" <<<"${out}" || fail "k8s_workerbm default-off guard missing"
+grep -qE 'install-worker-packages' <<<"${out}" && fail "k8s_workerbm ran the installer while disabled"
+pass "worker package install is opt-in (default off)"
+
+# The opt-in installers are restored and wired to their module switches.
+for f in "${SCRIPTS}/tools/node/install-worker-packages.sh" \
+         "${SCRIPTS}/tools/node/reconcile-node-packages.sh"; do
+    [ -x "${f}" ] || fail "missing OS package installer: ${f}"
 done
-[ ! -e "${SCRIPTS}/tools/node/install-worker-packages.sh" ] \
-    || fail "install-worker-packages.sh still exists"
-[ ! -e "${SCRIPTS}/tools/node/reconcile-node-packages.sh" ] \
-    || fail "reconcile-node-packages.sh still exists"
-pass "OS package installers are gone"
+grep -q 'TOGGLE: NODE_PKGS_ENABLED' "${SCRIPTS}/modules/02_k8s/12_node_pkgs.sh" \
+    || fail "node_pkgs TOGGLE missing"
+grep -q 'TOGGLE: WORKER_PKGS_ENABLED' "${SCRIPTS}/modules/02_k8s/02_k8s_workerbm.sh" \
+    || fail "k8s_workerbm TOGGLE missing"
+grep -q 'CUBESTACK_OS_CHECK_DONE' "${SCRIPTS}/modules/02_k8s/14_pre_install_check.sh" \
+    || fail "pre_install_check online pre-check guard missing"
+pass "OS package installers are opt-in and wired to their switches"
 
 # The online entry point must not install OS packages.
 if grep -nE '(^|[^#])\b(apt-get[[:space:]]+install|dpkg[[:space:]]+-i)\b' \
