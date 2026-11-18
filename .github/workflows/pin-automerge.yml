@@ -95,6 +95,18 @@ jobs:
             exit 1
           fi
 
+          for ref in "${merge_base}" "${EXPECTED_SHA}"; do
+            tree="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${ref}" --jq .tree.sha)"
+            for p in versions/base.yaml deployments/config/cluster.defaults.conf; do
+              mode="$(gh api "repos/${GITHUB_REPOSITORY}/git/trees/${tree}?recursive=1" \
+                | jq -r --arg p "${p}" '.tree[] | select(.path == $p) | "\(.mode) \(.type)"')"
+              if [ "${mode}" != "100644 blob" ]; then
+                echo "unexpected tree entry for ${p} at ${ref}: ${mode}"
+                exit 1
+              fi
+            done
+          done
+
           gh api "repos/${GITHUB_REPOSITORY}/contents/versions/base.yaml?ref=${merge_base}" \
             -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/base-base.yaml"
           gh api "repos/${GITHUB_REPOSITORY}/contents/versions/base.yaml?ref=${EXPECTED_SHA}" \
@@ -182,9 +194,19 @@ jobs:
               sys.exit("cluster.defaults.conf does not carry the pin")
           PY
 
+          current_base="$(gh pr view "${pr}" --json baseRefName --jq .baseRefName)"
+          if [ "${current_base}" != "${BASE_REF}" ]; then
+            echo "PR #${pr} base is ${current_base}, expected ${BASE_REF}; refusing"
+            exit 0
+          fi
           title="$(gh pr view "${pr}" --json title --jq .title)"
           # Another pin PR may land between validate and this merge; retry.
           for attempt in 1 2 3; do
+            current_base="$(gh pr view "${pr}" --json baseRefName --jq .baseRefName 2>/dev/null || true)"
+            if [ "${current_base}" != "${BASE_REF}" ]; then
+              echo "PR #${pr} base moved to ${current_base}; expected ${BASE_REF}"
+              exit 0
+            fi
             if out="$(gh pr merge "${pr}" --squash --delete-branch \
                 --match-head-commit "${EXPECTED_SHA}" \
                 --subject "${title}" \
