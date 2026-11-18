@@ -1,0 +1,138 @@
+name: pin-automerge
+
+# Merge the netshoot pin PR once validate passes. The bot app is a ruleset
+# bypass actor (pull_request mode), so the version-only pin can land without a
+# human approval; the checks below keep it to the bot's own PR.
+
+on:
+  workflow_run:
+    workflows: ["Validate scripts & manifests"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'bot/netshoot-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Create an installation token for the bot
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack-installer
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Merge the netshoot pin PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          pr="$(gh pr list --head "${BRANCH}" --state open \
+            --json number --jq '.[0].number // empty')"
+          if [ -z "${pr}" ]; then
+            echo "no open pin PR for ${BRANCH}"
+            exit 0
+          fi
+
+          author="$(gh pr view "${pr}" --json author --jq .author.login)"
+          case "${author}" in
+            app/github-actions|app/suanova-bot) ;;
+            *) echo "PR #${pr} is not bot-authored (${author})"; exit 0 ;;
+          esac
+
+          files="$(gh pr view "${pr}" --json files --jq '.files[].path')"
+          for f in ${files}; do
+            [ "${f}" = "versions/base.yaml" ] \
+              || { echo "unexpected file in pin PR: ${f}"; exit 1; }
+          done
+
+          head="$(gh pr view "${pr}" --json headRefOid --jq .headRefOid)"
+          if [ "${head}" != "${EXPECTED_SHA}" ]; then
+            echo "PR #${pr} moved to ${head}; waiting for its own run"
+            exit 0
+          fi
+
+          # Compare the two trees without the netshoot pin fields: everything
+          # else must be byte-identical.
+          base_sha="$(gh pr view "${pr}" --json baseRefOid --jq .baseRefOid)"
+          gh api "repos/${GITHUB_REPOSITORY}/contents/versions/base.yaml?ref=${base_sha}" \
+            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/base.yaml"
+          gh api "repos/${GITHUB_REPOSITORY}/contents/versions/base.yaml?ref=${EXPECTED_SHA}" \
+            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/head.yaml"
+          python3 -c 'import yaml' 2>/dev/null \
+            || python3 -m pip install --quiet --break-system-packages pyyaml
+          python3 - "${RUNNER_TEMP}/base.yaml" "${RUNNER_TEMP}/head.yaml" <<'PY'
+          import sys
+          import yaml
+
+          def load(path):
+              with open(path) as f:
+                  return yaml.safe_load(f)
+
+          base, head = load(sys.argv[1]), load(sys.argv[2])
+
+          def has_pin(doc):
+              env = doc.get("env") or {}
+              images = doc.get("images") or []
+              return ("NETSHOOT_RDMA_VERSION" in env and
+                      any(e.get("key") == "netshoot:netshoot-rdma" for e in images))
+
+          def strip(doc):
+              doc = dict(doc)
+              env = dict(doc.get("env") or {})
+              env.pop("NETSHOOT_RDMA_VERSION", None)
+              doc["env"] = env
+              images = []
+              for entry in doc.get("images") or []:
+                  entry = dict(entry)
+                  if entry.get("key") == "netshoot:netshoot-rdma":
+                      entry.pop("version", None)
+                      entry.pop("digest", None)
+                  images.append(entry)
+              doc["images"] = images
+              return doc
+
+          if not has_pin(base) or not has_pin(head):
+              print("pin PR is missing the netshoot pin")
+              sys.exit(1)
+          if strip(base) != strip(head):
+              print("pin PR changes more than the netshoot version/digest")
+              sys.exit(1)
+          PY
+
+          title="$(gh pr view "${pr}" --json title --jq .title)"
+          # Another pin PR may land between validate and this merge; retry.
+          for attempt in 1 2 3; do
+            if out="$(gh pr merge "${pr}" --squash --delete-branch \
+                --match-head-commit "${EXPECTED_SHA}" \
+                --subject "${title}" \
+                --body "Signed-off-by: suanova-bot <bot@isuanova.com>" 2>&1)"; then
+              exit 0
+            fi
+            printf '%s\n' "${out}"
+            new_head="$(gh pr view "${pr}" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
+            if [ "${new_head}" != "${EXPECTED_SHA}" ]; then
+              echo "PR #${pr} head moved to ${new_head}; leaving it for its own run"
+              exit 0
+            fi
+            if ! printf '%s' "${out}" | grep -qi 'base branch was modified'; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::could not merge pin PR #${pr} after retries"
+          exit 1
