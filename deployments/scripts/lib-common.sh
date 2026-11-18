@@ -2232,6 +2232,84 @@ unset _sp _sp_ok _si
 WIPELIB
 }
 
+# ---------------- 节点离线 deb 安装原语(专用安装集, 如 os/packages/chrony) ----------------
+# 2.1 的普通装包步骤只处理 os/packages 顶层对账集; chrony 等**专用安装集**放在子目录,
+# 由 NTP 模块按需离线安装。这里恢复 2.0 的远端安装原语(互斥预卸/已装即跳/逐包隔离)。
+# ⚠ 禁止在破损态节点自动跑 `apt-get --fix-broken install`(会移除/改版系统包; 离线时纯风险)。
+pkg_conflict_providers() {   # <包名> → 输出其互斥提供者(空格分隔; 无 → 空)
+    case "$1" in
+        chrony|systemd-timesyncd|openntpd|ntp)
+            echo "chrony openntpd ntp systemd-timesyncd" | tr ' ' '\n' | grep -vx "$1" | tr '\n' ' ' ;;
+        *) : ;;
+    esac
+}
+
+# 节点侧安装原语(文本随远程脚本一起执行; install_debs_offline <deb目录> <关注包...>)。
+deb_install_remote_lib() {
+    cat <<'DEBLIB'
+# 互斥提供者表(⚠ 与 lib-common::pkg_conflict_providers 同步)
+_pkg_conflict_providers() {
+    case "$1" in
+        chrony|systemd-timesyncd|openntpd|ntp)
+            echo "chrony openntpd ntp systemd-timesyncd" | tr ' ' '\n' | grep -vx "$1" | tr '\n' ' ' ;;
+        *) : ;;
+    esac
+}
+
+# 安装一批离线 deb: 预卸互斥 → 已装即跳过 → 批量 dpkg → 失败逐包隔离。
+install_debs_offline() {
+    local d="$1"; shift
+    local want="$*"
+    local dlog=/tmp/cubestack-deb-install.log p c f pk list="" n_skip=0
+    : >"${dlog}"
+    for p in ${want}; do
+        for c in $(_pkg_conflict_providers "${p}"); do
+            case " ${want} " in *" ${c} "*) continue ;; esac
+            if dpkg-query -W -f='${Status}' "${c}" 2>/dev/null | grep -q "install ok installed"; then
+                echo "  [deb-install] 预卸互斥包 ${c}(与待装 ${p} 冲突, dpkg 级直卸)"
+                dpkg --purge "${c}" >>"${dlog}" 2>&1 || true
+            fi
+        done
+    done
+    for f in "${d}"/*.deb; do
+        [ -f "${f}" ] || continue
+        pk="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
+        [ -n "${pk}" ] || continue
+        if [ -n "$(dpkg-query -W -f='${Status}' "${pk}" 2>/dev/null | grep -o 'install ok installed' || true)" ]; then
+            n_skip=$((n_skip + 1)); continue
+        fi
+        list="${list} ${f}"
+    done
+    if [ -z "${list}" ]; then
+        echo "  [deb-install] 全部已装(跳过 ${n_skip} 个), 无需安装"
+        return 0
+    fi
+    # shellcheck disable=SC2086
+    if dpkg -i ${list} >>"${dlog}" 2>&1; then
+        echo "  [deb-install] dpkg 直装成功(跳过已装 ${n_skip}; 安装 $(echo ${list} | wc -w) 个)"
+        return 0
+    fi
+    echo "  [deb-install] 批量安装部分失败, 逐包隔离重试(明细: ${dlog}):"
+    local ok_n=0 fail_n=0
+    for f in ${list}; do
+        if dpkg -i "${f}" >>"${dlog}" 2>&1; then ok_n=$((ok_n + 1)); else fail_n=$((fail_n + 1)); fi
+    done
+    echo "  [deb-install] 隔离结果: 成功 ${ok_n} / 失败 ${fail_n}"
+    [ "${fail_n}" -gt 0 ] && tail -8 "${dlog}" | sed 's/^/      /'
+    return 0
+}
+
+assert_pkgs_ready() {
+    local p
+    for p in "$@"; do
+        dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "install ok installed" \
+            || { echo "PKG-MISSING:${p}"; return 1; }
+    done
+    return 0
+}
+DEBLIB
+}
+
 # ---------------- 共用 MetalLB VIP 的约定(多服务共用一个 IP、不同端口) ----------------
 # 默认关闭: 共用 VIP 需要**每个共用方**都带同一个 sharing key 注解, MetalLB 才肯把同一地址
 # 分给多个 Service。约定集中在这里, 是因为它必须**三处完全一致**, 分散写必有一处漂移:

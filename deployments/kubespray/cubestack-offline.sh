@@ -1061,6 +1061,30 @@ _gen_preload_play() {
         executable: /bin/bash
       changed_when: false
       when: preload_image_files | length > 0
+
+    - name: Preload | Retag mirrored images to upstream names
+      # 离线 tar 里的镜像名是 harbor.isuanova.com/mirrors/<上游>/<仓库>;
+      # kubeadm 的 imageRepository 仍是上游(registry.k8s.io/quay.io/docker.io/ghcr.io),
+      # 不 retag 时 kubeadm preflight 会尝试联网拉取并超时(离线安装失败)。
+      shell: |
+        set -euo pipefail
+        changed=0
+        for img in $(ctr -n k8s.io images list -q 2>/dev/null | grep '/mirrors/' || true); do
+          case "$img" in
+            */mirrors/*) upstream="${img#*/mirrors/}" ;;
+            *) continue ;;
+          esac
+          [ -n "$upstream" ] || continue
+          if ! ctr -n k8s.io images list -q 2>/dev/null | grep -qx "$upstream"; then
+            ctr -n k8s.io images tag "$img" "$upstream" >/dev/null 2>&1 || true
+            changed=$((changed + 1))
+          fi
+        done
+        echo "  retag: ${changed} 个镜像已补上游 tag"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: preload_image_files | length > 0
 PRELOAD_EOF
 }
 
