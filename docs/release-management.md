@@ -64,6 +64,8 @@ installer 只消费已经组装好的安装树。full package（meta + payload +
 
 - `--with` / `--all` 在组装时选择 optional 包；
 - 输出 `offline-files/`、`cubestack-installer-cli.tar`、`modules/`；
+- 如果交付包已经放在 `<root>/<version>`，先把它移到 `<root>/<version>.package`，
+  再按上面的命令组装回 `<root>/<version>`；installer 只读后者；
 - 检测到只有 meta、没有 `offline-files/release.env` 时，`deploy-cluster.sh` 直接
   失败并提示先运行 `fetch-offline.sh`。
 
