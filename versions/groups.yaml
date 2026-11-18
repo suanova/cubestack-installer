@@ -31,6 +31,10 @@ groups:
     description: NVIDIA GPU Operator images
     consumer: nvidia-gpu-operator
     kind: image
+  metax-gpu-operator:
+    description: MetaX GPU Operator images
+    consumer: gpu_operator
+    kind: image
   k8s:
     description: kubespray tree and k8s binaries
     consumer: k8s
