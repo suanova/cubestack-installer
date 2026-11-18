@@ -196,6 +196,23 @@ jobs:
           echo "CLI_IMAGE_DIGEST=${digest}" >> "${GITHUB_ENV}"
           echo "pushed ${IMAGE} (${digest})" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Resolve release target
+        id: release-target
+        if: steps.changes.outputs.build_cli == 'true'
+        env:
+          RELEASE_REPO: ${{ vars.CUBESTACK_RELEASE_REPO || 'suanova/cubestack-release' }}
+        run: |
+          set -euo pipefail
+          owner="${RELEASE_REPO%%/*}"
+          repo="${RELEASE_REPO##*/}"
+          if [ -z "${owner}" ] || [ -z "${repo}" ] || [ "${owner}" = "${RELEASE_REPO}" ]; then
+            echo "::error::CUBESTACK_RELEASE_REPO must be <owner>/<repo>: ${RELEASE_REPO}"
+            exit 1
+          fi
+          echo "owner=${owner}" >> "$GITHUB_OUTPUT"
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+          echo "target=${RELEASE_REPO}" >> "$GITHUB_OUTPUT"
+
       - name: Check release App
         id: release-app-config
         if: steps.changes.outputs.build_cli == 'true'
@@ -220,14 +237,15 @@ jobs:
         with:
           app-id: ${{ env.APP_ID }}
           private-key: ${{ env.APP_KEY }}
-          owner: suanova
-          repositories: cubestack-release
+          owner: ${{ steps.release-target.outputs.owner }}
+          repositories: ${{ steps.release-target.outputs.repo }}
+          permission-contents: write
 
       - name: Dispatch cli-built
         if: steps.changes.outputs.build_cli == 'true'
         env:
           GH_TOKEN: ${{ steps.release-app.outputs.token }}
-          RELEASE_REPO: ${{ vars.CUBESTACK_RELEASE_REPO || 'suanova/cubestack-release' }}
+          RELEASE_REPO: ${{ steps.release-target.outputs.target }}
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
