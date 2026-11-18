@@ -33,18 +33,29 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
+      - name: Check out the pin
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
       - name: Merge the netshoot pin PR
         shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH: ${{ github.event.workflow_run.head_branch }}
+          BASE_REF: ${{ github.event.workflow_run.pull_requests[0].base.ref }}
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          pr="$(gh pr list --head "${BRANCH}" --state open \
+          if [ -z "${BASE_REF}" ]; then
+            echo "no pull request base for ${BRANCH}; skipping"
+            exit 0
+          fi
+          pr="$(gh pr list --head "${BRANCH}" --base "${BASE_REF}" --state open \
             --json number --jq '.[0].number // empty')"
           if [ -z "${pr}" ]; then
-            echo "no open pin PR for ${BRANCH}"
+            echo "no open pin PR for ${BRANCH} -> ${BASE_REF}"
             exit 0
           fi
 
@@ -54,10 +65,13 @@ jobs:
             *) echo "PR #${pr} is not bot-authored (${author})"; exit 0 ;;
           esac
 
+          allowed="versions/base.yaml deployments/config/cluster.defaults.conf deployments/config/profiles/v2.32.0.profile deployments/kubespray/inventory/cubestack-cluster/group_vars/all/k8s-versions.yml"
           files="$(gh pr view "${pr}" --json files --jq '.files[].path')"
           for f in ${files}; do
-            [ "${f}" = "versions/base.yaml" ] \
-              || { echo "unexpected file in pin PR: ${f}"; exit 1; }
+            case " ${allowed} " in
+              *" ${f} "*) ;;
+              *) echo "unexpected file in pin PR: ${f}"; exit 1 ;;
+            esac
           done
 
           head="$(gh pr view "${pr}" --json headRefOid --jq .headRefOid)"
@@ -65,6 +79,11 @@ jobs:
             echo "PR #${pr} moved to ${head}; waiting for its own run"
             exit 0
           fi
+
+          # The checked-out pin must leave the derived version files in sync.
+          python3 -c 'import yaml' 2>/dev/null \
+            || python3 -m pip install --quiet --break-system-packages pyyaml
+          make check-versions
 
           # Compare the two trees without the netshoot pin fields: everything
           # else must be byte-identical.
@@ -76,6 +95,7 @@ jobs:
           python3 -c 'import yaml' 2>/dev/null \
             || python3 -m pip install --quiet --break-system-packages pyyaml
           python3 - "${RUNNER_TEMP}/base.yaml" "${RUNNER_TEMP}/head.yaml" <<'PY'
+          import re
           import sys
           import yaml
 
@@ -111,6 +131,16 @@ jobs:
               sys.exit(1)
           if strip(base) != strip(head):
               print("pin PR changes more than the netshoot version/digest")
+              sys.exit(1)
+
+          env_tag = str((head.get("env") or {}).get("NETSHOOT_RDMA_VERSION") or "")
+          entry = next(e for e in head.get("images") or []
+                       if e.get("key") == "netshoot:netshoot-rdma")
+          if entry.get("version") != env_tag:
+              print("netshoot version does not match NETSHOOT_RDMA_VERSION")
+              sys.exit(1)
+          if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(entry.get("digest") or "")):
+              print("invalid netshoot digest")
               sys.exit(1)
           PY
 

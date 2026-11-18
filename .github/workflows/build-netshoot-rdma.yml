@@ -178,11 +178,18 @@ jobs:
             echo "base.yaml unchanged"
             exit 0
           fi
-          branch="bot/netshoot-${TAG}-pin"
+          # Keep the derived version files in step with the pin, or
+          # `make check-versions` fails on the PR.
+          make sync-versions
+          # The base is in the branch name: main and release-2.1 must not share
+          # one pin branch.
+          branch="bot/netshoot-${GITHUB_REF_NAME}-${TAG}-pin"
           git config user.name suanova-bot
           git config user.email bot@isuanova.com
           git checkout -b "${branch}"
-          git add versions/base.yaml
+          git add versions/base.yaml deployments/config/cluster.defaults.conf \
+            deployments/config/profiles/v2.32.0.profile \
+            deployments/kubespray/inventory/cubestack-cluster/group_vars/all/k8s-versions.yml
           git commit -s -m "chore(netshoot): pin ${TAG} (${DIGEST:0:19})"
           git push -f origin "${branch}"
           title="chore(netshoot): pin ${TAG}"
