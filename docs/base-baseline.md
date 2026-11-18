@@ -64,7 +64,9 @@ images:
   必须同时写 `digest`（镜像没有 catalog 条目，digest 是唯一的钉）。
   MetaX GPU operator 镜像是已评审的 `source_ref` 例外：mirror index 不维护其
   vendor digest，升级 `METAX_VERSION` 时必须同步更新 digest。
-- `optional: true` 的镜像默认不在线物化（`--include-optional` 才会带上）。
+- `optional: true` 的镜像默认不在线物化（`--include-optional` 才会带上）；
+  `install-online.sh --with-metax` 还会通过 `--include-group metax-gpu-operator`
+  物化 MetaX GPU operator 镜像。
 - `version` 可以是 `${VAR}` 或字面量；变量必须在 `cluster.defaults.conf` /
   profile 里有定义。禁止 `latest`。
 - `dest` / `tar` 里的 `${VAR}` 由安装器解析；`tar` 决定物化后的文件名，模块 35 等

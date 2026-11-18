@@ -173,6 +173,26 @@ grep -q "copied=2" "${TMP}/mat.out" || fail "materializer: unexpected summary"
 grep -q "optional-skipped=1" "${TMP}/mat.out" || fail "materializer: optional skip not reported"
 pass "materializer writes catalog/source_ref tars and skips optional images"
 
+# --include-group selects optional images from one key group only
+PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
+    --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/index.json" \
+    --offline-root "${TMP}/offline-group" --include-group optional >"${TMP}/mat-group.out"
+[ -s "${TMP}/offline-group/optional/harbor.isuanova.com_suanova_optional-demo_v1.0.0.tar" ] \
+    || fail "materializer: --include-group did not include the optional group"
+grep -q "copied=3" "${TMP}/mat-group.out" \
+    || fail "materializer: --include-group summary mismatch"
+pass "materializer includes an optional group on request"
+
+PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
+    --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/index.json" \
+    --offline-root "${TMP}/offline-group2" --include-group metax-gpu-operator \
+    >"${TMP}/mat-group2.out"
+[ ! -e "${TMP}/offline-group2/optional" ] \
+    || fail "materializer: non-matching group included optional image"
+grep -q "optional-skipped=1" "${TMP}/mat-group2.out" \
+    || fail "materializer: non-matching group did not skip optional"
+pass "materializer skips optional groups that were not requested"
+
 PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
     --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/index.json" \
     --offline-root "${TMP}/offline" --include-optional >"${TMP}/mat-opt.out"

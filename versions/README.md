@@ -108,8 +108,12 @@ python3 deployments/scripts/tools/online/lib-base-catalog.py --index <index.json
 
 ## optional
 
-`optional: true` 表示默认不物化，例如 netshoot。商业 release 可以按
-package/profile 选择是否带上；开源在线安装只有显式开关才物化。
+`optional: true` 表示默认不物化，例如 netshoot 和 MetaX GPU operator 镜像。
+商业 release 可以按 package/profile 选择是否带上；开源在线安装只有显式开关才物化。
+
+MetaX 的 11 个镜像属于 `metax-gpu-operator` 组：`install-online.sh --with-metax`
+会通过 `--include-group metax-gpu-operator` 物化它们；`--include-optional` 包含
+所有 optional 镜像。
 
 ## materials 与 os
 

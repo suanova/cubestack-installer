@@ -16,6 +16,8 @@ set -euo pipefail
 #   --offline-root PATH   offline-files root (default: <repo>/deployments/offline-files)
 #   --force               rebuild tars that already exist
 #   --include-optional    also materialize images marked optional: true
+#   --include-group NAME  materialize optional images from key group <NAME>
+#                         (repeatable; e.g. metax-gpu-operator)
 #   --dry-run             print the skopeo commands without running them
 #   --continue-on-error   keep going when one image fails; exit non-zero at the end
 
@@ -27,6 +29,7 @@ OFFLINE_ROOT="${REPO_ROOT}/deployments/offline-files"
 FORCE=0
 DRY_RUN=0
 INCLUDE_OPTIONAL=0
+INCLUDE_GROUPS=()
 CONTINUE_ON_ERROR=0
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -39,9 +42,10 @@ while [ $# -gt 0 ]; do
         --offline-root) OFFLINE_ROOT="${2:?--offline-root needs a path}"; shift 2 ;;
         --force) FORCE=1; shift ;;
         --include-optional) INCLUDE_OPTIONAL=1; shift ;;
+        --include-group) INCLUDE_GROUPS+=("${2:?--include-group needs a value}"); shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --continue-on-error) CONTINUE_ON_ERROR=1; shift ;;
-        --help|-h) sed -n '2,20p' "$0"; exit 0 ;;
+        --help|-h) sed -n '2,23p' "$0"; exit 0 ;;
         *) die "unknown option: $1" ;;
     esac
 done
@@ -70,13 +74,23 @@ skipped_optional=0
 
 while IFS= read -r item; do
     [ -n "${item}" ] || continue
+    key="$(jq -r '.key' <<<"${item}")"
     if [ "$(jq -r '.optional // false' <<<"${item}")" = "true" ] \
         && [ "${INCLUDE_OPTIONAL}" != "1" ]; then
-        skipped_optional=$((skipped_optional + 1))
-        continue
+        group="${key%%:*}"
+        include_group=0
+        for g in "${INCLUDE_GROUPS[@]}"; do
+            if [ "${g}" = "${group}" ]; then
+                include_group=1
+                break
+            fi
+        done
+        if [ "${include_group}" != "1" ]; then
+            skipped_optional=$((skipped_optional + 1))
+            continue
+        fi
     fi
     total=$((total + 1))
-    key="$(jq -r '.key' <<<"${item}")"
     path="$(jq -r '.path' <<<"${item}")"
     ref="$(jq -r '.ref' <<<"${item}")"
     repo_tag="$(jq -r '.repo_tag' <<<"${item}")"

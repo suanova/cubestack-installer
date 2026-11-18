@@ -24,6 +24,7 @@ FORCE_INDEX=0
 CHECK_OS_MODE="warn"
 DRY_RUN=0
 INCLUDE_OPTIONAL=0
+INCLUDE_GROUPS=()
 WITH_METAX=0
 CHECK_MATERIALS=0
 PROFILE_ARG=""
@@ -58,7 +59,8 @@ Online options:
   --offline-root PATH      offline-files root (default: from cluster config)
   --no-materialize         skip image materialization
   --include-optional       also materialize optional base images (for example netshoot)
-  --with-metax             require MetaX vendor materials and enable GPU operator
+  --with-metax             require MetaX vendor materials, materialize MetaX
+                           images, and enable GPU operator
   --check-materials        report missing vendor materials (warn only)
   --require-materials      fail when a declared vendor material is missing
   --force-index            re-download the mirror index
@@ -83,7 +85,7 @@ while [ $# -gt 0 ]; do
         --offline-root) OFFLINE_ROOT="${2:?--offline-root needs a path}"; shift 2 ;;
         --no-materialize) MATERIALIZE=0; shift ;;
         --include-optional) INCLUDE_OPTIONAL=1; shift ;;
-        --with-metax) WITH_METAX=1; CHECK_MATERIALS=2; shift ;;
+        --with-metax) WITH_METAX=1; CHECK_MATERIALS=2; INCLUDE_GROUPS+=("metax-gpu-operator"); shift ;;
         --check-materials) CHECK_MATERIALS=1; shift ;;
         --require-materials) CHECK_MATERIALS=2; shift ;;
         --force-index) FORCE_INDEX=1; shift ;;
@@ -201,6 +203,9 @@ fi
 if [ "${MATERIALIZE}" = "1" ]; then
     args=(--baseline "${BASELINE}" --index "${INDEX}" --offline-root "${OFFLINE_ROOT}")
     [ "${INCLUDE_OPTIONAL}" = "1" ] && args+=(--include-optional)
+    for group in "${INCLUDE_GROUPS[@]}"; do
+        args+=(--include-group "${group}")
+    done
     if [ "${DRY_RUN}" = "1" ]; then
         args+=(--dry-run)
     fi

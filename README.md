@@ -13,7 +13,7 @@ vim deployments/config/cluster.conf        # 填写 NODES / 密码 / MetalLB 等
 
 sudo ./deployments/scripts/install-online.sh
 
-# 可选：物化 optional base 镜像（例如 netshoot）；检查/要求 MetaX 厂商物料
+# 可选：物化 optional base 镜像（例如 netshoot）；检查/要求 MetaX 厂商物料并物化 MetaX 镜像
 sudo ./deployments/scripts/install-online.sh --include-optional
 sudo ./deployments/scripts/install-online.sh --check-materials
 sudo ./deployments/scripts/install-online.sh --with-metax
