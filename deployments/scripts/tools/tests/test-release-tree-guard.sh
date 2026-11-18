@@ -35,6 +35,11 @@ mkdir -p "${TMP}/plain/2.1.0"
 if out="$(bash "${GUARD}" "${TMP}/plain" "2.1.0" 2>&1)"; then rc=0; else rc=$?; fi
 chk "退出码" "0" "${rc}"
 
+echo "== ④ 非法版本名 =="
+if out="$(bash "${GUARD}" "${TMP}/plain" ".." 2>&1)"; then rc=0; else rc=$?; fi
+chk "退出码" "2" "${rc}"
+chk_contains "提示非法版本" "invalid release version" "${out}"
+
 if [ "${fail}" = "0" ]; then
     echo "✅ test-release-tree-guard: 全部通过"
 else

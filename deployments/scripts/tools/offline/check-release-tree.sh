@@ -7,7 +7,7 @@ ROOT="${1:?usage: check-release-tree.sh <release-root> <version>}"
 VERSION="${2:?usage: check-release-tree.sh <release-root> <version>}"
 
 case "${VERSION}" in
-    ""|.*|*[!A-Za-z0-9._-]*) echo "ERROR: invalid release version: ${VERSION}" >&2; exit 2 ;;
+    ""|.*|*/*|*..*|*[!A-Za-z0-9._-]*) echo "ERROR: invalid release version: ${VERSION}" >&2; exit 2 ;;
 esac
 
 DIR="${ROOT}/${VERSION}"
