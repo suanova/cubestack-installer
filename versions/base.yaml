@@ -474,7 +474,7 @@ images:
 - key: metax-gpu-operator:cr.metax-tech.com/cloud/driver-image
   source_ref: harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/driver-image
   version: ${METAX_DRIVER_VERSION}
-  digest: sha256:99207c91567d61b7f47378843f1366ce655e88744a81f700fced8973e251b4f6
+  digest: sha256:d604dcabdeeb2709848170d4c696e1579e3ed3d6edb2645cba657fc38a0607a7
   dest: offline-files/metax-gpu
   tar: harbor.isuanova.com_metax_driver-image_${METAX_DRIVER_VERSION}.tar
 # K8s binaries bundle (kubelet/kubeadm/kubectl/crictl/CNI/containerd/runc/etcd).
