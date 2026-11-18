@@ -86,7 +86,7 @@ checksums:
 materials:
 - key: metax:gpu-k8s-package
   module: gpu_operator
-  version: ${METAX_VERSION}
+  version: ${METAX_VERSION}-amd64
   file: metax-gpu-k8s-package.${METAX_VERSION}.tar.gz
   dest: offline-files/metax-gpu
   optional: true
@@ -97,7 +97,7 @@ materials:
     account_required: true
 - key: metax:k8s-images
   module: gpu_operator
-  version: ${METAX_VERSION}
+  version: ${METAX_VERSION}-amd64
   file: metax-k8s-images.${METAX_VERSION}.run
   dest: offline-files/metax-gpu
   optional: true
@@ -406,61 +406,62 @@ images:
   version: v1.6.0
   dest: offline-files/nvidia-gpu-operator
   tar: nvcr.io_nvidia_kubevirt-gpu-device-plugin_v1.6.0.tar
-# MetaX GPU operator images. The mirror stores the amd64 single manifest under
-# the upstream tag (0.15.3), not an -amd64 tag; digests below are the target
-# manifest digests at harbor.isuanova.com/mirrors/cr.metax-tech.com/...
+# MetaX GPU operator images. The mirror carries both 0.15.3 and 0.15.3-amd64
+# (same amd64 manifest); use the -amd64 tag to match the release overlay.
+# Digests are the actual amd64 manifest digests in
+# harbor.isuanova.com/mirrors/cr.metax-tech.com/...
 - key: metax-gpu-operator:cr.metax-tech.com/cloud/gpu-label
   source_ref: harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/gpu-label
-  version: ${METAX_VERSION}
-  digest: sha256:0128003f84bc48a5660217112dc1197b79d73a6a9172cbaa7cac288ca163e6ed
+  version: ${METAX_VERSION}-amd64
+  digest: sha256:f30ba541cbb98a0dd628f7b449ab54c4ccab36298fdfbbe19effb7b4ec5df5f7
   dest: offline-files/metax-gpu
   tar: harbor.isuanova.com_metax_gpu-label_${METAX_VERSION}-amd64.tar
 - key: metax-gpu-operator:cr.metax-tech.com/cloud/gpu-device
   source_ref: harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/gpu-device
-  version: ${METAX_VERSION}
-  digest: sha256:e89358f1f0b4c9d21c3d3e2308f87410211ed2668476b17ab4c40f9f0ad2a4d1
+  version: ${METAX_VERSION}-amd64
+  digest: sha256:551cf1b147a4fbf6526a3fadd0f7cf94d3182a288b4f046dc40de5750b14567a
   dest: offline-files/metax-gpu
   tar: harbor.isuanova.com_metax_gpu-device_${METAX_VERSION}-amd64.tar
 - key: metax-gpu-operator:cr.metax-tech.com/cloud/gpu-aware
   source_ref: harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/gpu-aware
-  version: ${METAX_VERSION}
-  digest: sha256:e8664124fe8bb491c650f96422e1fc79bf32347cdb9b3e8b663bb2a06351cac2
+  version: ${METAX_VERSION}-amd64
+  digest: sha256:676cfa6bc5a1c5c33aaf257228e179c54adc644a6b049421371534618e6fb0e4
   dest: offline-files/metax-gpu
   tar: harbor.isuanova.com_metax_gpu-aware_${METAX_VERSION}-amd64.tar
 - key: metax-gpu-operator:cr.metax-tech.com/cloud/topo-master
   source_ref: harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/topo-master
-  version: ${METAX_VERSION}
-  digest: sha256:2ff682c512680b950e75e0c0a87f266c981f765e830b9d123e48db468835ea63
+  version: ${METAX_VERSION}-amd64
+  digest: sha256:da9dac9111126878c8ecc5c88160b251f0fed86d6df08bc74085109d3a2f585b
   dest: offline-files/metax-gpu
   tar: harbor.isuanova.com_metax_topo-master_${METAX_VERSION}-amd64.tar
 - key: metax-gpu-operator:cr.metax-tech.com/cloud/topo-worker
   source_ref: harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/topo-worker
-  version: ${METAX_VERSION}
-  digest: sha256:a91ec8af6c6816bdf9ba261aa11bb344717b90296d3cf87062352b0531bdd38c
+  version: ${METAX_VERSION}-amd64
+  digest: sha256:7855e79d1254e8c09b3153a11df2cf502cca242e3d46881f2c172ac3c13072ab
   dest: offline-files/metax-gpu
   tar: harbor.isuanova.com_metax_topo-worker_${METAX_VERSION}-amd64.tar
 - key: metax-gpu-operator:cr.metax-tech.com/cloud/operator-controller
   source_ref: harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/operator-controller
-  version: ${METAX_VERSION}
-  digest: sha256:cd7b381c1467f490d6cfca841c9fe7eb788b1d00f3e8885050614824882a458a
+  version: ${METAX_VERSION}-amd64
+  digest: sha256:27f8d801a14e77ac1839575e938d9440a591b311ac93d48de748c13e4ef37613
   dest: offline-files/metax-gpu
   tar: harbor.isuanova.com_metax_operator-controller_${METAX_VERSION}-amd64.tar
 - key: metax-gpu-operator:cr.metax-tech.com/cloud/container-runtime
   source_ref: harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/container-runtime
-  version: ${METAX_VERSION}
-  digest: sha256:4dc15ce450f9e56fda8b5fdb07481f895c407616830f8910d08a2d7bafd4f56b
+  version: ${METAX_VERSION}-amd64
+  digest: sha256:777181d813dc1b44c3799819e9f9ac000e5ac6f66f823cb988900cd3285328e3
   dest: offline-files/metax-gpu
   tar: harbor.isuanova.com_metax_container-runtime_${METAX_VERSION}-amd64.tar
 - key: metax-gpu-operator:cr.metax-tech.com/cloud/driver-manager
   source_ref: harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/driver-manager
-  version: ${METAX_VERSION}
-  digest: sha256:754301b512e92a97b83d53015e8fec17a733b95a2b528fd874f5ae0b40856201
+  version: ${METAX_VERSION}-amd64
+  digest: sha256:d55e6d5d8b6e1f74df3d7a61a7e8e90df3f9c4337ce881a99259e27fdd740daa
   dest: offline-files/metax-gpu
   tar: harbor.isuanova.com_metax_driver-manager_${METAX_VERSION}-amd64.tar
 - key: metax-gpu-operator:cr.metax-tech.com/cloud/gpu-scheduler
   source_ref: harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/gpu-scheduler
-  version: ${METAX_VERSION}
-  digest: sha256:45f19ad32f49ff4b57e2d33db31ff9c09c26f9829b3e9b6ccdc8ddabccf1f67a
+  version: ${METAX_VERSION}-amd64
+  digest: sha256:7fcb37749550fbac2e1f71272040cb3ac8f04968d27e30ab2cf9825a60633692
   dest: offline-files/metax-gpu
   tar: harbor.isuanova.com_metax_gpu-scheduler_${METAX_VERSION}-amd64.tar
 - key: metax-gpu-operator:cr.metax-tech.com/public-library/maca
