@@ -90,20 +90,46 @@ sudo ./deployments/scripts/tools/docker/build-cli-image.sh --push
 
 运行：
 
-**版本树包含 `modules/`（商业/私有发布）时用双挂载：**
+**版本树包含 `modules/`：按完整 phase 路径比较，只挂载镜像缺失的模块**
 
 ```bash
-# 离线文件根与 modules 必须同级；按实际路径调整
 OFFLINE_ROOT=/data/offline-files
 MODULES_DIR=/data/modules
+EXTRA_MODULES=/tmp/cubestack-modules-extra
+CLI_IMAGE=harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
+
 [ -d "${MODULES_DIR}" ] || { echo "modules not found: ${MODULES_DIR}"; exit 1; }
+
+# 1) 版本树 modules/<NN_*> 的模块清单（保留相对 phase 路径）
+( cd "${MODULES_DIR}" && find . -mindepth 2 -maxdepth 2 -type f -name '*.sh' \
+    -path './[0-9][0-9]_*/*' -printf '%P\n' | sort ) > /tmp/release-modules.txt
+# 2) 镜像内置 deployments/scripts/modules/<NN_*> 的模块清单
+docker run --rm --entrypoint sh "${CLI_IMAGE}" -c \
+  'cd /opt/cubestack-installer/deployments/scripts/modules && find . -mindepth 2 -maxdepth 2 -type f -name "*.sh" -path "./[0-9][0-9]_*/*" -printf "%P\n" | sort' \
+  > /tmp/image-modules.txt
+# 3) 版本树有、镜像没有的模块
+comm -23 /tmp/release-modules.txt /tmp/image-modules.txt > /tmp/release-only-modules.txt
+
+# 4) 只把缺失模块复制到独立 overlay；镜像已有的同名模块不进入
+rm -rf "${EXTRA_MODULES}"
+while IFS= read -r rel; do
+  mkdir -p "${EXTRA_MODULES}/$(dirname "${rel}")"
+  cp -a "${MODULES_DIR}/${rel}" "${EXTRA_MODULES}/${rel}"
+done < /tmp/release-only-modules.txt
+
+# 5) 有缺失模块才双挂载；没有则只挂 offline-files
+if [ -s /tmp/release-only-modules.txt ]; then
+  MODULES_MOUNT=(-v "${EXTRA_MODULES}":/opt/cubestack-installer/deployments/modules:ro)
+else
+  MODULES_MOUNT=()
+fi
 
 sudo docker run --rm -it --network host \
   -v "${OFFLINE_ROOT}":/opt/cubestack-installer/deployments/offline-files \
-  -v "${MODULES_DIR}":/opt/cubestack-installer/deployments/modules:ro \
+  "${MODULES_MOUNT[@]}" \
   -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
   -v $HOME/.ssh:/root/.ssh \
-  harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
+  "${CLI_IMAGE}"
 ```
 
 **公开 release 没有 `modules/` 时只用单挂载：**
@@ -130,23 +156,10 @@ sudo docker run --rm -it --network host \
 `ai_gateway`、`prometheus`、`perses`、`bmc`、`metax`、`cuberouter` 等）。
 只挂 `offline-files/` 时这些模块不会出现在 `--list-steps` 中。
 
-> 若镜像本身可能已内置这些模块，先比较**完整**的模块文件集合，而不是只看单个
-> 文件名；只有镜像包含版本树的全部模块时才用单挂载：
->
-> ```bash
-> # 版本树 modules/<NN_*> 的模块清单（保留相对 phase 路径）
-> ( cd "${MODULES_DIR}" && find . -mindepth 2 -maxdepth 2 -type f -name '*.sh' \
->     -path './[0-9][0-9]_*/*' -printf '%P\n' | sort ) > /tmp/release-modules.txt
-> # 镜像内置 deployments/scripts/modules/<NN_*> 的模块清单
-> docker run --rm --entrypoint sh <cli-image> -c \
->   'cd /opt/cubestack-installer/deployments/scripts/modules && find . -mindepth 2 -maxdepth 2 -type f -name "*.sh" -path "./[0-9][0-9]_*/*" -printf "%P\n" | sort' \
->   > /tmp/image-modules.txt
-> # 版本树有、镜像没有的模块（按相对 phase 路径比较）
-> comm -23 /tmp/release-modules.txt /tmp/image-modules.txt
-> ```
->
-> - 无输出（镜像已包含版本树全部模块）→ 单挂载 `offline-files/`；
-> - 有输出（存在镜像缺失的模块）→ 双挂载 `offline-files/` + `modules/`。
+> **重叠规则**：同一 phase 下与镜像同名的 release 模块**不会**进入
+> `${EXTRA_MODULES}` overlay，以镜像内置版本为准。`cs_merge_modules_dirs` 先链接
+> 镜像模块，遇到同名文件会直接报 `duplicate module file` 并退出；若 release 需要
+> 覆盖镜像模块，必须改名或重建镜像，不能通过挂载同名文件实现。
 
 ## 目录
 
