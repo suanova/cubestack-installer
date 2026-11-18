@@ -142,6 +142,23 @@ extra="$(env CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_RELEASE=9.9.3 CUBESTAC
     bash -c 'source "$1"; load_config; printf "%s" "${CUBESTACK_EXTRA_MODULES_DIRS:-}"' _ "${LIB}" 2>/dev/null)"
 chk "已包含时不重复追加" "/custom/one:${TMP}/rel/9.9.3/modules" "${extra}"
 
+# ---------------- ⑧ 未组装的 full package ----------------
+# meta-only 目录必须提示 fetch-offline.sh；直接挂载的 offline-files 优先于它。
+echo "== ⑧ 未组装的 full package =="
+mkdir -p "${TMP}/pkg/9.9.1"
+: > "${TMP}/pkg/9.9.1/cubestack-9.9.1.meta.tar.zst"
+err="$(rc_of CUBESTACK_RELEASE=9.9.1 CUBESTACK_RELEASE_ROOT="${TMP}/pkg")"; rc=$?
+chk "meta-only 退出码" "1" "${rc}"
+chk_contains "meta-only 提示 fetch-offline.sh" "fetch-offline.sh" "${err}"
+
+mkdir -p "${TMP}/mounted"
+printf 'RELEASE_VERSION=9.9.1\nKUBESPRAY_VERSION=v2.32.0\n' > "${TMP}/mounted/release.env"
+( cd "${TMP}/mounted" && sha256sum release.env > SHA256SUMS )
+out="$(run_load CUBESTACK_RELEASE=9.9.1 CUBESTACK_RELEASE_ROOT="${TMP}/pkg" \
+    OFFLINE_FILES_ROOT="${TMP}/mounted")"
+chk "直接挂载优先: release 版本" "9.9.1" "$(printf '%s\n' "${out}" | sed -n '1p')"
+chk "直接挂载优先: offline root" "${TMP}/mounted" "$(printf '%s\n' "${out}" | sed -n '2p')"
+
 if [ "${fail}" = "0" ]; then
     echo "✅ test-release-mode: 全部通过"
 else

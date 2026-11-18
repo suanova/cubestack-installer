@@ -14,10 +14,11 @@ DIR="${ROOT}/${VERSION}"
 META="${DIR}/cubestack-${VERSION}.meta.tar.zst"
 
 if [ -f "${META}" ] && [ ! -f "${DIR}/offline-files/release.env" ]; then
+    dir_q="$(printf '%q' "${DIR}")"
     cat >&2 <<EOF
 ERROR: 检测到未组装的 full package: ${META}
 installer 不再自动解包。请先执行：
-  fetch-offline.sh --package-dir ${DIR} --dest ${DIR} --no-download
+  fetch-offline.sh --package-dir ${dir_q} --dest ${dir_q} --no-download
 （或在联网机器上用 --source s3://... 下载后拷贝过来）
 EOF
     exit 3

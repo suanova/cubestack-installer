@@ -7,7 +7,7 @@
 #   ② 只有 meta tar 的 full package 直接失败, 并提示 fetch-offline.sh
 #   ③ 既无 meta 也无 release.env 的目录交给后续现有检查
 # ============================================================
-set -uo pipefail
+set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 GUARD="${ROOT}/deployments/scripts/tools/offline/check-release-tree.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
@@ -17,21 +17,22 @@ chk_contains() { if [[ "$3" == *"$2"* ]]; then echo "  ok  $1"; else echo "  FAI
 
 mkdir -p "${TMP}/good/2.1.0/offline-files"
 printf 'RELEASE_VERSION=2.1.0\n' > "${TMP}/good/2.1.0/offline-files/release.env"
-echo "== ① 已组装版本树 =="
-out="$(bash "${GUARD}" "${TMP}/good" "2.1.0" 2>&1)"; rc=$?
+: > "${TMP}/good/2.1.0/cubestack-2.1.0.meta.tar.zst"
+echo "== ① 已组装版本树(保留 meta) =="
+if out="$(bash "${GUARD}" "${TMP}/good" "2.1.0" 2>&1)"; then rc=0; else rc=$?; fi
 chk "退出码" "0" "${rc}"
 
 echo "== ② 未组装 full package =="
 mkdir -p "${TMP}/bad/2.1.0"
 : > "${TMP}/bad/2.1.0/cubestack-2.1.0.meta.tar.zst"
-out="$(bash "${GUARD}" "${TMP}/bad" "2.1.0" 2>&1)"; rc=$?
+if out="$(bash "${GUARD}" "${TMP}/bad" "2.1.0" 2>&1)"; then rc=0; else rc=$?; fi
 chk "退出码" "3" "${rc}"
 chk_contains "提示 fetch-offline.sh" "fetch-offline.sh" "${out}"
 chk_contains "给出 package-dir" "--package-dir" "${out}"
 
 echo "== ③ 普通目录 =="
 mkdir -p "${TMP}/plain/2.1.0"
-out="$(bash "${GUARD}" "${TMP}/plain" "2.1.0" 2>&1)"; rc=$?
+if out="$(bash "${GUARD}" "${TMP}/plain" "2.1.0" 2>&1)"; then rc=0; else rc=$?; fi
 chk "退出码" "0" "${rc}"
 
 if [ "${fail}" = "0" ]; then

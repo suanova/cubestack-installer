@@ -244,11 +244,6 @@ fi
 if [ -n "${RELEASE_ARG:-}" ]; then
     export CUBESTACK_RELEASE="${RELEASE_ARG}"
     vlog "  --release ${RELEASE_ARG} → CUBESTACK_RELEASE(本机 cluster.conf 不变)"
-    # 交付树必须由 fetch-offline.sh 组装；installer 不再解包 meta/payload。
-    _rel_root="${CUBESTACK_RELEASE_ROOT:-${REPO_ROOT}/offline-releases}"
-    _guard="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tools/offline/check-release-tree.sh"
-    bash "${_guard}" "${_rel_root}" "${RELEASE_ARG}"
-    unset _rel_root _guard
 fi
 # 展开 --only 中的 group 名: NODE_GROUP_<name> 定义在 cluster.conf 中
 if [ -n "${ONLY_HOSTS}" ]; then

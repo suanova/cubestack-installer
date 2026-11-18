@@ -928,6 +928,9 @@ load_config() {
             # 直接挂载版本树的 offline-files/ —— 不需要版本子目录。
             CUBESTACK_RELEASE_ROOT=""
         else
+            _guard="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tools/offline/check-release-tree.sh"
+            bash "${_guard}" "${CUBESTACK_RELEASE_ROOT}" "${CUBESTACK_RELEASE}" || exit 1
+            unset _guard
             err "未找到发布版本 ${CUBESTACK_RELEASE}: 需要以下之一"
             err "  · ${CUBESTACK_RELEASE_ROOT}/${CUBESTACK_RELEASE}/offline-files/release.env(版本树)"
             err "  · 或直接把版本树的 offline-files/ 挂到 ${OFFLINE_FILES_ROOT}"
