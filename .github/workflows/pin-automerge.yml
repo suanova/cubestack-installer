@@ -2,7 +2,8 @@ name: pin-automerge
 
 # Merge the netshoot pin PR once validate passes. The bot app is a ruleset
 # bypass actor (pull_request mode), so the version-only pin can land without a
-# human approval; the checks below keep it to the bot's own PR.
+# human approval. This job never checks out the PR head: its content is read
+# through the API, and the validate workflow already ran make check-versions.
 
 on:
   workflow_run:
@@ -33,16 +34,11 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - name: Check out the pin
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-          persist-credentials: false
-
       - name: Merge the netshoot pin PR
         shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
           BRANCH: ${{ github.event.workflow_run.head_branch }}
           BASE_REF: ${{ github.event.workflow_run.pull_requests[0].base.ref }}
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -61,18 +57,9 @@ jobs:
 
           author="$(gh pr view "${pr}" --json author --jq .author.login)"
           case "${author}" in
-            app/github-actions|app/suanova-bot) ;;
+            app/suanova-bot|app/github-actions) ;;
             *) echo "PR #${pr} is not bot-authored (${author})"; exit 0 ;;
           esac
-
-          allowed="versions/base.yaml deployments/config/cluster.defaults.conf deployments/config/profiles/v2.32.0.profile deployments/kubespray/inventory/cubestack-cluster/group_vars/all/k8s-versions.yml"
-          files="$(gh pr view "${pr}" --json files --jq '.files[].path')"
-          for f in ${files}; do
-            case " ${allowed} " in
-              *" ${f} "*) ;;
-              *) echo "unexpected file in pin PR: ${f}"; exit 1 ;;
-            esac
-          done
 
           head="$(gh pr view "${pr}" --json headRefOid --jq .headRefOid)"
           if [ "${head}" != "${EXPECTED_SHA}" ]; then
@@ -80,30 +67,57 @@ jobs:
             exit 0
           fi
 
-          # The checked-out pin must leave the derived version files in sync.
-          python3 -c 'import yaml' 2>/dev/null \
-            || python3 -m pip install --quiet --break-system-packages pyyaml
-          make check-versions
+          # The file set and the base file come from the exact validated head
+          # and its merge base, not from the moving base tip. The privileged
+          # job never executes the PR's code.
+          base_tip="$(gh pr view "${pr}" --json baseRefOid --jq .baseRefOid)"
+          compare="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${base_tip}...${EXPECTED_SHA}")"
+          merge_base="$(printf '%s' "$compare" | jq -r '.merge_base_commit.sha // empty')"
+          if [ -z "${merge_base}" ]; then
+            echo "::error::cannot resolve the merge base for PR #${pr}"
+            exit 1
+          fi
+          changed_count="$(printf '%s' "$compare" | jq '.files | length')"
+          if [ "${changed_count}" -lt 1 ]; then
+            echo "pin PR #${pr} has no changed files; skipping"
+            exit 0
+          fi
+          if [ "${changed_count}" -gt 2 ]; then
+            echo "pin PR #${pr} changes ${changed_count} files; refusing"
+            exit 1
+          fi
+          allowed=(versions/base.yaml deployments/config/cluster.defaults.conf)
+          while IFS= read -r f; do
+            ok=0
+            for a in "${allowed[@]}"; do
+              [ "${f}" = "${a}" ] && ok=1
+            done
+            [ "${ok}" = 1 ] || { echo "unexpected file in pin PR: ${f}"; exit 1; }
+          done < <(printf '%s' "$compare" | jq -r '.files[].filename')
 
-          # Compare the two trees without the netshoot pin fields: everything
-          # else must be byte-identical.
-          base_sha="$(gh pr view "${pr}" --json baseRefOid --jq .baseRefOid)"
-          gh api "repos/${GITHUB_REPOSITORY}/contents/versions/base.yaml?ref=${base_sha}" \
-            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/base.yaml"
+          gh api "repos/${GITHUB_REPOSITORY}/contents/versions/base.yaml?ref=${merge_base}" \
+            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/base-base.yaml"
           gh api "repos/${GITHUB_REPOSITORY}/contents/versions/base.yaml?ref=${EXPECTED_SHA}" \
-            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/head.yaml"
+            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/head-base.yaml"
+          gh api "repos/${GITHUB_REPOSITORY}/contents/deployments/config/cluster.defaults.conf?ref=${merge_base}" \
+            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/base-defaults.conf"
+          gh api "repos/${GITHUB_REPOSITORY}/contents/deployments/config/cluster.defaults.conf?ref=${EXPECTED_SHA}" \
+            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/head-defaults.conf"
+
           python3 -c 'import yaml' 2>/dev/null \
             || python3 -m pip install --quiet --break-system-packages pyyaml
-          python3 - "${RUNNER_TEMP}/base.yaml" "${RUNNER_TEMP}/head.yaml" <<'PY'
+          python3 - "${RUNNER_TEMP}" <<'PY'
           import re
           import sys
+          from pathlib import Path
+
           import yaml
 
-          def load(path):
-              with open(path) as f:
-                  return yaml.safe_load(f)
-
-          base, head = load(sys.argv[1]), load(sys.argv[2])
+          tmp = Path(sys.argv[1])
+          base_text = (tmp / "base-base.yaml").read_text()
+          head_text = (tmp / "head-base.yaml").read_text()
+          base_doc = yaml.safe_load(base_text)
+          head_doc = yaml.safe_load(head_text)
 
           def has_pin(doc):
               env = doc.get("env") or {}
@@ -111,37 +125,45 @@ jobs:
               return ("NETSHOOT_RDMA_VERSION" in env and
                       any(e.get("key") == "netshoot:netshoot-rdma" for e in images))
 
-          def strip(doc):
-              doc = dict(doc)
-              env = dict(doc.get("env") or {})
-              env.pop("NETSHOOT_RDMA_VERSION", None)
-              doc["env"] = env
-              images = []
-              for entry in doc.get("images") or []:
-                  entry = dict(entry)
-                  if entry.get("key") == "netshoot:netshoot-rdma":
-                      entry.pop("version", None)
-                      entry.pop("digest", None)
-                  images.append(entry)
-              doc["images"] = images
-              return doc
+          def mask_base(text):
+              out = []
+              in_netshoot = False
+              for line in text.splitlines():
+                  line = re.sub(r'^(\s*NETSHOOT_RDMA_VERSION:\s*).*$', r'\1<MASK>', line)
+                  if re.match(r'^\s*-\s*key:\s*netshoot:netshoot-rdma\s*$', line):
+                      in_netshoot = True
+                  elif re.match(r'^\s*-\s*key:\s*', line):
+                      in_netshoot = False
+                  if in_netshoot and re.match(r'^\s*(version|digest):', line):
+                      line = line.split(":")[0] + ": <MASK>"
+                  out.append(line)
+              return "\n".join(out)
 
-          if not has_pin(base) or not has_pin(head):
-              print("pin PR is missing the netshoot pin")
-              sys.exit(1)
-          if strip(base) != strip(head):
-              print("pin PR changes more than the netshoot version/digest")
-              sys.exit(1)
+          def mask_defaults(text):
+              return re.sub(
+                  r'(NETSHOOT_RDMA_VERSION="\$\{NETSHOOT_RDMA_VERSION:-)[^}]*(\}")',
+                  r'\1<MASK>\2', text)
 
-          env_tag = str((head.get("env") or {}).get("NETSHOOT_RDMA_VERSION") or "")
-          entry = next(e for e in head.get("images") or []
+          if not has_pin(base_doc) or not has_pin(head_doc):
+              sys.exit("pin PR is missing the netshoot pin")
+          if mask_base(base_text) != mask_base(head_text):
+              sys.exit("versions/base.yaml changes outside the netshoot pin")
+          if mask_defaults((tmp / "base-defaults.conf").read_text()) != \
+                  mask_defaults((tmp / "head-defaults.conf").read_text()):
+              sys.exit("cluster.defaults.conf changes outside the netshoot pin")
+
+          env_tag = str((head_doc.get("env") or {}).get("NETSHOOT_RDMA_VERSION") or "")
+          entry = next(e for e in head_doc.get("images") or []
                        if e.get("key") == "netshoot:netshoot-rdma")
           if entry.get("version") != env_tag:
-              print("netshoot version does not match NETSHOOT_RDMA_VERSION")
-              sys.exit(1)
+              sys.exit("netshoot version does not match NETSHOOT_RDMA_VERSION")
           if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(entry.get("digest") or "")):
-              print("invalid netshoot digest")
-              sys.exit(1)
+              sys.exit("invalid netshoot digest")
+          pinned = re.search(
+              r'NETSHOOT_RDMA_VERSION="\$\{NETSHOOT_RDMA_VERSION:-([^}]*)\}"',
+              (tmp / "head-defaults.conf").read_text())
+          if not pinned or pinned.group(1) != env_tag:
+              sys.exit("cluster.defaults.conf does not carry the pin")
           PY
 
           title="$(gh pr view "${pr}" --json title --jq .title)"
@@ -154,7 +176,10 @@ jobs:
               exit 0
             fi
             printf '%s\n' "${out}"
-            new_head="$(gh pr view "${pr}" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
+            if ! new_head="$(gh pr view "${pr}" --json headRefOid --jq .headRefOid 2>/dev/null)"; then
+              echo "::error::cannot read PR #${pr} head after a merge failure"
+              exit 1
+            fi
             if [ "${new_head}" != "${EXPECTED_SHA}" ]; then
               echo "PR #${pr} head moved to ${new_head}; leaving it for its own run"
               exit 0
