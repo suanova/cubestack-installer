@@ -38,9 +38,9 @@ installer 只读这棵树，不关心它由哪种打包流程生成。
 sudo ./deploy-cluster.sh --release 2.1.0
 # 等价于 cluster.conf: CUBESTACK_RELEASE="2.1.0"（+ 可选 CUBESTACK_RELEASE_ROOT）
 
-# 2.1 完整包: 如果 <root>/<ver>/cubestack-<ver>.meta.tar.zst 存在,
-# deploy 会先解包 meta + 选中的 payload 包, 再走 release 模式。
-sudo ./deploy-cluster.sh --release 2.1.0 --with-packages models,dev-lab
+# 2.1 完整包: installer 不再解包。先在任何机器上用交付脚本组装：
+#   fetch-offline.sh --package-dir <pkg> --dest <root>/<ver> --no-download
+sudo ./deploy-cluster.sh --release 2.1.0
 
 # 方式二：直接把版本树的 offline-files/ 挂到默认位置
 #   deployments/offline-files/release.env 存在即自动进入 release 模式
@@ -50,24 +50,22 @@ sudo ./deploy-cluster.sh --with-cubestack
 `load_config` 会读取 `release.env`，并把所有 `offline-files/<组件>` 路径重定向到版本树。
 切回 dev 模式：移除 `release.env`，或设 `CUBESTACK_RELEASE_AUTO="false"`。
 
-## 包选择
+## full package 组装
 
-2.1 完整包在 `release.yaml:packages[]` 里列出 payload 包。installer 只读本地
-release 树，不访问 private release repo / MinIO / Harbor：
+installer 只消费已经组装好的安装树。full package（meta + payload + `packages.tsv`）
+必须先由 release 仓库发布的 `fetch-offline.sh` 组装：
 
 ```bash
-python3 deployments/scripts/tools/offline/release-packages.py \
-  --root <release-tree> --with models,dev-lab \
-  --meta <release-tree>/cubestack-<ver>.meta.tar.zst \
-  --extract --seal
+./fetch-offline.sh \
+  --package-dir <release-tree> \
+  --dest <release-tree> \
+  --no-download --verify
 ```
 
-- required 包总是选中；
-- optional 包用 `--with` 选择，`--with all` 选全部；
-- 每个选中的包都校验本地文件 sha256 和 size；
-- `--meta` 解包 meta tar，`--extract` 解包选中 payload，`--seal` 重新封存过滤后的 tree；
-- 输出过滤后的 `tree.tsv`，只包含选中 package 的行；
-- 没有 `packages[]` 的旧树输出 `legacy`，继续使用完整树。
+- `--with` / `--all` 在组装时选择 optional 包；
+- 输出 `offline-files/`、`cubestack-installer-cli.tar`、`modules/`；
+- 检测到只有 meta、没有 `offline-files/release.env` 时，`deploy-cluster.sh` 直接
+  失败并提示先运行 `fetch-offline.sh`。
 
 ## 完整性
 
@@ -75,7 +73,8 @@ python3 deployments/scripts/tools/offline/release-packages.py \
 - 部署前门禁调用 `verify-offline-files.sh` 校验整树（`_SUCCESS` 绑定、清单、哈希）；
 - 版本树不完整时直接失败，不会静默降级。
 
-回归：`bash deployments/scripts/tools/tests/test-release-mode.sh`
+回归：`bash deployments/scripts/tools/tests/test-release-mode.sh`、
+`bash deployments/scripts/tools/tests/test-release-tree-guard.sh`
 
 ## 本仓库不再负责
 
