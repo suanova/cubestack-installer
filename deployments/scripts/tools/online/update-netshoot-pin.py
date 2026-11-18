@@ -8,6 +8,7 @@ image block textually instead of round-tripping the whole YAML document.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -28,8 +29,8 @@ def entry_lines(image: str, tag: str, digest: str) -> list[str]:
     return [
         f"- key: {KEY}\n",
         f"  source_ref: {image}\n",
-        f"  version: {tag}\n",
-        f"  digest: {digest}\n",
+        f"  version: {json.dumps(tag)}\n",
+        f"  digest: {json.dumps(digest)}\n",
         "  dest: offline-files/netshoot\n",
         "  tar: netshoot-rdma.tar\n",
         "  optional: true\n",
@@ -50,12 +51,12 @@ def update_env(text: str, tag: str) -> tuple[str, bool]:
     needle = "  NETSHOOT_RDMA_VERSION:"
     for i in range(env + 1, end):
         if lines[i].startswith(needle):
-            newline = f"  NETSHOOT_RDMA_VERSION: {tag}\n"
+            newline = f"  NETSHOOT_RDMA_VERSION: {json.dumps(tag)}\n"
             if lines[i] == newline:
                 return text, False
             lines[i] = newline
             return "".join(lines), True
-    lines.insert(end, f"  NETSHOOT_RDMA_VERSION: {tag}\n")
+    lines.insert(end, f"  NETSHOOT_RDMA_VERSION: {json.dumps(tag)}\n")
     return "".join(lines), True
 
 

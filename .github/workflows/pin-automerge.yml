@@ -1,0 +1,231 @@
+name: pin-automerge
+
+# Merge the netshoot pin PR once validate passes. The bot app is a ruleset
+# bypass actor (pull_request mode), so the version-only pin can land without a
+# human approval. This job never checks out the PR head: its content is read
+# through the API, and the validate workflow already ran make check-versions.
+
+on:
+  workflow_run:
+    workflows: ["Validate scripts & manifests"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'bot/netshoot-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Create an installation token for the bot
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack-installer
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Merge the netshoot pin PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          BASE_REF: ${{ github.event.workflow_run.pull_requests[0].base.ref }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_REF}" ]; then
+            echo "no pull request base for ${BRANCH}; skipping"
+            exit 0
+          fi
+          pr="$(gh pr list --head "${BRANCH}" --base "${BASE_REF}" --state open \
+            --json number --jq '.[0].number // empty')"
+          if [ -z "${pr}" ]; then
+            echo "no open pin PR for ${BRANCH} -> ${BASE_REF}"
+            exit 0
+          fi
+
+          author="$(gh pr view "${pr}" --json author --jq .author.login)"
+          case "${author}" in
+            app/suanova-bot|app/github-actions) ;;
+            *) echo "PR #${pr} is not bot-authored (${author})"; exit 0 ;;
+          esac
+
+          head="$(gh pr view "${pr}" --json headRefOid --jq .headRefOid)"
+          if [ "${head}" != "${EXPECTED_SHA}" ]; then
+            echo "PR #${pr} moved to ${head}; waiting for its own run"
+            exit 0
+          fi
+
+          # The file set and the base file come from the exact validated head
+          # and its merge base, not from the moving base tip. The privileged
+          # job never executes the PR's code.
+          base_tip="$(gh pr view "${pr}" --json baseRefOid --jq .baseRefOid)"
+          compare="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${base_tip}...${EXPECTED_SHA}")"
+          merge_base="$(printf '%s' "$compare" | jq -r '.merge_base_commit.sha // empty')"
+          if [ -z "${merge_base}" ]; then
+            echo "::error::cannot resolve the merge base for PR #${pr}"
+            exit 1
+          fi
+          changed_count="$(printf '%s' "$compare" | jq '.files | length')"
+          if [ "${changed_count}" -lt 1 ]; then
+            echo "pin PR #${pr} has no changed files; skipping"
+            exit 0
+          fi
+          if [ "${changed_count}" -gt 2 ]; then
+            echo "pin PR #${pr} changes ${changed_count} files; refusing"
+            exit 1
+          fi
+          if ! printf '%s' "$compare" | jq -e '
+              all(.files[];
+                .filename == "versions/base.yaml" or
+                .filename == "deployments/config/cluster.defaults.conf")
+            ' > /dev/null; then
+            echo "unexpected file in pin PR"
+            exit 1
+          fi
+
+          for ref in "${merge_base}" "${EXPECTED_SHA}"; do
+            tree="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${ref}" --jq .tree.sha)"
+            for p in versions/base.yaml deployments/config/cluster.defaults.conf; do
+              mode="$(gh api "repos/${GITHUB_REPOSITORY}/git/trees/${tree}?recursive=1" \
+                | jq -r --arg p "${p}" '.tree[] | select(.path == $p) | "\(.mode) \(.type)"')"
+              if [ "${mode}" != "100644 blob" ]; then
+                echo "unexpected tree entry for ${p} at ${ref}: ${mode}"
+                exit 1
+              fi
+            done
+          done
+
+          gh api "repos/${GITHUB_REPOSITORY}/contents/versions/base.yaml?ref=${merge_base}" \
+            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/base-base.yaml"
+          gh api "repos/${GITHUB_REPOSITORY}/contents/versions/base.yaml?ref=${EXPECTED_SHA}" \
+            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/head-base.yaml"
+          gh api "repos/${GITHUB_REPOSITORY}/contents/deployments/config/cluster.defaults.conf?ref=${merge_base}" \
+            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/base-defaults.conf"
+          gh api "repos/${GITHUB_REPOSITORY}/contents/deployments/config/cluster.defaults.conf?ref=${EXPECTED_SHA}" \
+            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/head-defaults.conf"
+
+          python3 -c 'import yaml' 2>/dev/null \
+            || python3 -m pip install --quiet --break-system-packages pyyaml
+          python3 - "${RUNNER_TEMP}" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          tmp = Path(sys.argv[1])
+
+          def read_bytes(path):
+              return path.read_bytes().decode()
+
+          base_text = read_bytes(tmp / "base-base.yaml")
+          head_text = read_bytes(tmp / "head-base.yaml")
+          base_defaults = read_bytes(tmp / "base-defaults.conf")
+          head_defaults = read_bytes(tmp / "head-defaults.conf")
+          base_doc = yaml.safe_load(base_text)
+          head_doc = yaml.safe_load(head_text)
+
+          def has_pin(doc):
+              env = doc.get("env") or {}
+              images = doc.get("images") or []
+              return ("NETSHOOT_RDMA_VERSION" in env and
+                      any(e.get("key") == "netshoot:netshoot-rdma" for e in images))
+
+          def mask_base(text):
+              out = []
+              in_netshoot = False
+              for line in text.splitlines(keepends=True):
+                  line = re.sub(
+                      r'^(\s*NETSHOOT_RDMA_VERSION:\s*)(\S+)(.*)$',
+                      r'\1<MASK>\3', line)
+                  key = line.rstrip("\r\n")
+                  if re.match(r'^\s*-\s*key:\s*netshoot:netshoot-rdma\s*$', key):
+                      in_netshoot = True
+                  elif re.match(r'^\s*-\s*key:\s*', key):
+                      in_netshoot = False
+                  if in_netshoot:
+                      line = re.sub(
+                          r'^(\s*(?:version|digest):\s*)(\S+)(.*)$',
+                          r'\1<MASK>\3', line)
+                  out.append(line)
+              return "".join(out)
+
+          def mask_defaults(text):
+              return re.sub(
+                  r'(?m)^(NETSHOOT_RDMA_VERSION="\$\{NETSHOOT_RDMA_VERSION:-)[^}]*(\}")',
+                  r'\1<MASK>\2', text)
+
+          def default_pins(text):
+              return re.findall(
+                  r'(?m)^NETSHOOT_RDMA_VERSION="\$\{NETSHOOT_RDMA_VERSION:-([^}]*)\}"',
+                  text)
+
+          if not has_pin(base_doc) or not has_pin(head_doc):
+              sys.exit("pin PR is missing the netshoot pin")
+          if mask_base(base_text) != mask_base(head_text):
+              sys.exit("versions/base.yaml changes outside the netshoot pin")
+          if mask_defaults(base_defaults) != mask_defaults(head_defaults):
+              sys.exit("cluster.defaults.conf changes outside the netshoot pin")
+
+          env_tag = str((head_doc.get("env") or {}).get("NETSHOOT_RDMA_VERSION") or "")
+          entry = next(e for e in head_doc.get("images") or []
+                       if e.get("key") == "netshoot:netshoot-rdma")
+          if entry.get("version") != env_tag:
+              sys.exit("netshoot version does not match NETSHOOT_RDMA_VERSION")
+          if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(entry.get("digest") or "")):
+              sys.exit("invalid netshoot digest")
+          base_pins = default_pins(base_defaults)
+          head_pins = default_pins(head_defaults)
+          if len(base_pins) != 1 or len(head_pins) != 1:
+              sys.exit("cluster.defaults.conf must contain exactly one netshoot pin")
+          if head_pins[0] != env_tag:
+              sys.exit("cluster.defaults.conf does not carry the pin")
+          PY
+
+          current_base="$(gh pr view "${pr}" --json baseRefName --jq .baseRefName)"
+          if [ "${current_base}" != "${BASE_REF}" ]; then
+            echo "PR #${pr} base is ${current_base}, expected ${BASE_REF}; refusing"
+            exit 0
+          fi
+          title="$(gh pr view "${pr}" --json title --jq .title)"
+          # Another pin PR may land between validate and this merge; retry.
+          for attempt in 1 2 3; do
+            current_base="$(gh pr view "${pr}" --json baseRefName --jq .baseRefName 2>/dev/null || true)"
+            if [ "${current_base}" != "${BASE_REF}" ]; then
+              echo "PR #${pr} base moved to ${current_base}; expected ${BASE_REF}"
+              exit 0
+            fi
+            if out="$(gh pr merge "${pr}" --squash --delete-branch \
+                --match-head-commit "${EXPECTED_SHA}" \
+                --subject "${title}" \
+                --body "Signed-off-by: suanova-bot <bot@isuanova.com>" 2>&1)"; then
+              exit 0
+            fi
+            printf '%s\n' "${out}"
+            if ! new_head="$(gh pr view "${pr}" --json headRefOid --jq .headRefOid 2>/dev/null)"; then
+              echo "::error::cannot read PR #${pr} head after a merge failure"
+              exit 1
+            fi
+            if [ "${new_head}" != "${EXPECTED_SHA}" ]; then
+              echo "PR #${pr} head moved to ${new_head}; leaving it for its own run"
+              exit 0
+            fi
+            if ! printf '%s' "${out}" | grep -qi 'base branch was modified'; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::could not merge pin PR #${pr} after retries"
+          exit 1

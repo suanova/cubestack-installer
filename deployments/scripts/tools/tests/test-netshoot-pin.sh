@@ -34,9 +34,9 @@ out="$(python3 "${TOOL}" --root "${TMP}" \
     --tag 2.1-latest --digest "${D1}")"
 [ "${out}" = "changed" ] || fail "first update should change"
 grep -q 'key: netshoot:netshoot-rdma' "${TMP}/versions/base.yaml" || fail "entry not inserted"
-grep -q 'version: 2.1-latest' "${TMP}/versions/base.yaml" || fail "tag not written"
-grep -q "digest: ${D1}" "${TMP}/versions/base.yaml" || fail "digest not written"
-grep -q 'NETSHOOT_RDMA_VERSION: 2.1-latest' "${TMP}/versions/base.yaml" || fail "env tag not written"
+grep -q 'version: "2.1-latest"' "${TMP}/versions/base.yaml" || fail "tag not written"
+grep -q "digest: \"${D1}\"" "${TMP}/versions/base.yaml" || fail "digest not written"
+grep -q 'NETSHOOT_RDMA_VERSION: "2.1-latest"' "${TMP}/versions/base.yaml" || fail "env tag not written"
 grep -q 'keep this comment' "${TMP}/versions/base.yaml" || fail "comment was lost"
 pass "inserts the pin and env without rewriting comments"
 
@@ -51,10 +51,25 @@ pass "same digest is idempotent"
 python3 "${TOOL}" --root "${TMP}" \
     --image harbor.isuanova.com/suanova/netshoot-rdma \
     --tag 26.04.17-r2 --digest "${D2}" >/dev/null
-grep -q 'version: 26.04.17-r2' "${TMP}/versions/base.yaml" || fail "tag not updated"
-grep -q "digest: ${D2}" "${TMP}/versions/base.yaml" || fail "digest not updated"
-grep -q 'NETSHOOT_RDMA_VERSION: 26.04.17-r2' "${TMP}/versions/base.yaml" || fail "env tag not updated"
+grep -q 'version: "26.04.17-r2"' "${TMP}/versions/base.yaml" || fail "tag not updated"
+grep -q "digest: \"${D2}\"" "${TMP}/versions/base.yaml" || fail "digest not updated"
+grep -q 'NETSHOOT_RDMA_VERSION: "26.04.17-r2"' "${TMP}/versions/base.yaml" || fail "env tag not updated"
 pass "updates tag, digest and env in place"
+
+python3 "${TOOL}" --root "${TMP}" \
+    --image harbor.isuanova.com/suanova/netshoot-rdma \
+    --tag 123 --digest "${D1}" >/dev/null
+grep -q 'version: "123"' "${TMP}/versions/base.yaml" || fail "numeric tag not quoted"
+grep -q 'NETSHOOT_RDMA_VERSION: "123"' "${TMP}/versions/base.yaml" || fail "numeric env tag not quoted"
+python3 - "${TMP}/versions/base.yaml" <<'PY'
+import sys
+import yaml
+data = yaml.safe_load(open(sys.argv[1]))
+entry = next(e for e in data["images"] if e.get("key") == "netshoot:netshoot-rdma")
+assert isinstance(entry["version"], str) and entry["version"] == "123"
+assert isinstance(data["env"]["NETSHOOT_RDMA_VERSION"], str)
+PY
+pass "numeric tags stay strings"
 
 if python3 "${TOOL}" --root "${TMP}" \
     --image harbor.isuanova.com/suanova/netshoot-rdma \

@@ -164,9 +164,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.ref_name }}
+          # The push below must use the app token, not the checkout's
+          # GITHUB_TOKEN; otherwise updates do not trigger synchronize.
+          persist-credentials: false
+      - name: Create an installation token for the bot
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack-installer
+          permission-contents: write
+          permission-pull-requests: write
       - name: Update netshoot pin
         env:
-          GH_TOKEN: ${{ github.token }}
+          # The app token, not GITHUB_TOKEN: a PR opened by GITHUB_TOKEN does
+          # not start pull_request workflows, so the pin-automerge would never
+          # see it.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           IMAGE: ${{ vars.NETSHOOT_RDMA_IMAGE || 'harbor.isuanova.com/suanova/netshoot-rdma' }}
           TAG: ${{ needs.build.outputs.tag }}
           DIGEST: ${{ needs.build.outputs.digest }}
@@ -178,12 +194,19 @@ jobs:
             echo "base.yaml unchanged"
             exit 0
           fi
-          branch="bot/netshoot-${TAG}-pin"
+          # Keep the derived version files in step with the pin, or
+          # `make check-versions` fails on the PR.
+          make sync-versions
+          # The base is in the branch name: main and release-2.1 must not share
+          # one pin branch.
+          branch="bot/netshoot-${GITHUB_REF_NAME}-${TAG}-pin"
           git config user.name suanova-bot
           git config user.email bot@isuanova.com
           git checkout -b "${branch}"
-          git add versions/base.yaml
+          git add versions/base.yaml deployments/config/cluster.defaults.conf
           git commit -s -m "chore(netshoot): pin ${TAG} (${DIGEST:0:19})"
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push -f origin "${branch}"
           title="chore(netshoot): pin ${TAG}"
           body="Automated digest update from the netshoot-rdma workflow: ${IMAGE}:${TAG}@${DIGEST}"
