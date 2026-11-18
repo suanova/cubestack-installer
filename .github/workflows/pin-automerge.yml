@@ -86,14 +86,14 @@ jobs:
             echo "pin PR #${pr} changes ${changed_count} files; refusing"
             exit 1
           fi
-          allowed=(versions/base.yaml deployments/config/cluster.defaults.conf)
-          while IFS= read -r f; do
-            ok=0
-            for a in "${allowed[@]}"; do
-              [ "${f}" = "${a}" ] && ok=1
-            done
-            [ "${ok}" = 1 ] || { echo "unexpected file in pin PR: ${f}"; exit 1; }
-          done < <(printf '%s' "$compare" | jq -r '.files[].filename')
+          if ! printf '%s' "$compare" | jq -e '
+              all(.files[];
+                .filename == "versions/base.yaml" or
+                .filename == "deployments/config/cluster.defaults.conf")
+            ' > /dev/null; then
+            echo "unexpected file in pin PR"
+            exit 1
+          fi
 
           gh api "repos/${GITHUB_REPOSITORY}/contents/versions/base.yaml?ref=${merge_base}" \
             -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/base-base.yaml"
@@ -114,8 +114,14 @@ jobs:
           import yaml
 
           tmp = Path(sys.argv[1])
-          base_text = (tmp / "base-base.yaml").read_text()
-          head_text = (tmp / "head-base.yaml").read_text()
+
+          def read_bytes(path):
+              return path.read_bytes().decode()
+
+          base_text = read_bytes(tmp / "base-base.yaml")
+          head_text = read_bytes(tmp / "head-base.yaml")
+          base_defaults = read_bytes(tmp / "base-defaults.conf")
+          head_defaults = read_bytes(tmp / "head-defaults.conf")
           base_doc = yaml.safe_load(base_text)
           head_doc = yaml.safe_load(head_text)
 
@@ -128,16 +134,21 @@ jobs:
           def mask_base(text):
               out = []
               in_netshoot = False
-              for line in text.splitlines():
-                  line = re.sub(r'^(\s*NETSHOOT_RDMA_VERSION:\s*).*$', r'\1<MASK>', line)
-                  if re.match(r'^\s*-\s*key:\s*netshoot:netshoot-rdma\s*$', line):
+              for line in text.splitlines(keepends=True):
+                  line = re.sub(
+                      r'^(\s*NETSHOOT_RDMA_VERSION:\s*)(\S+)(.*)$',
+                      r'\1<MASK>\3', line)
+                  key = line.rstrip("\r\n")
+                  if re.match(r'^\s*-\s*key:\s*netshoot:netshoot-rdma\s*$', key):
                       in_netshoot = True
-                  elif re.match(r'^\s*-\s*key:\s*', line):
+                  elif re.match(r'^\s*-\s*key:\s*', key):
                       in_netshoot = False
-                  if in_netshoot and re.match(r'^\s*(version|digest):', line):
-                      line = line.split(":")[0] + ": <MASK>"
+                  if in_netshoot:
+                      line = re.sub(
+                          r'^(\s*(?:version|digest):\s*)(\S+)(.*)$',
+                          r'\1<MASK>\3', line)
                   out.append(line)
-              return "\n".join(out)
+              return "".join(out)
 
           def mask_defaults(text):
               return re.sub(
@@ -148,8 +159,7 @@ jobs:
               sys.exit("pin PR is missing the netshoot pin")
           if mask_base(base_text) != mask_base(head_text):
               sys.exit("versions/base.yaml changes outside the netshoot pin")
-          if mask_defaults((tmp / "base-defaults.conf").read_text()) != \
-                  mask_defaults((tmp / "head-defaults.conf").read_text()):
+          if mask_defaults(base_defaults) != mask_defaults(head_defaults):
               sys.exit("cluster.defaults.conf changes outside the netshoot pin")
 
           env_tag = str((head_doc.get("env") or {}).get("NETSHOOT_RDMA_VERSION") or "")
@@ -161,7 +171,7 @@ jobs:
               sys.exit("invalid netshoot digest")
           pinned = re.search(
               r'NETSHOOT_RDMA_VERSION="\$\{NETSHOOT_RDMA_VERSION:-([^}]*)\}"',
-              (tmp / "head-defaults.conf").read_text())
+              head_defaults)
           if not pinned or pinned.group(1) != env_tag:
               sys.exit("cluster.defaults.conf does not carry the pin")
           PY
