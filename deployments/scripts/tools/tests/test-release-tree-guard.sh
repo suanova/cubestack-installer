@@ -29,6 +29,8 @@ if out="$(bash "${GUARD}" "${TMP}/bad" "2.1.0" 2>&1)"; then rc=0; else rc=$?; fi
 chk "退出码" "3" "${rc}"
 chk_contains "提示 fetch-offline.sh" "fetch-offline.sh" "${out}"
 chk_contains "给出 package-dir" "--package-dir" "${out}"
+chk_contains "给出独立 dest" "--dest" "${out}"
+chk_contains "dest 不与 package-dir 相同" ".assembled" "${out}"
 
 echo "== ③ 普通目录 =="
 mkdir -p "${TMP}/plain/2.1.0"

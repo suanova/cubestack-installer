@@ -58,7 +58,7 @@ installer 只消费已经组装好的安装树。full package（meta + payload +
 ```bash
 ./fetch-offline.sh \
   --package-dir <release-tree> \
-  --dest <release-tree> \
+  --dest /data/cubestack/<version> \
   --no-download --verify
 ```
 
