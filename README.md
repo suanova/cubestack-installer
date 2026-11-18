@@ -88,12 +88,15 @@ sudo ./deployments/scripts/tools/docker/build-cli-image.sh --build
 sudo ./deployments/scripts/tools/docker/build-cli-image.sh --push
 ```
 
-运行（**双挂载**：offline-files + 平台私有 modules）：
+运行：
+
+**版本树包含 `modules/`（商业/私有发布）时用双挂载：**
 
 ```bash
 # 离线文件根与 modules 必须同级；按实际路径调整
 OFFLINE_ROOT=/data/offline-files
 MODULES_DIR=/data/modules
+[ -d "${MODULES_DIR}" ] || { echo "modules not found: ${MODULES_DIR}"; exit 1; }
 
 sudo docker run --rm -it --network host \
   -v "${OFFLINE_ROOT}":/opt/cubestack-installer/deployments/offline-files \
@@ -102,6 +105,22 @@ sudo docker run --rm -it --network host \
   -v $HOME/.ssh:/root/.ssh \
   harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
 ```
+
+**公开 release 没有 `modules/` 时只用单挂载：**
+
+```bash
+OFFLINE_ROOT=/data/offline-files
+
+sudo docker run --rm -it --network host \
+  -v "${OFFLINE_ROOT}":/opt/cubestack-installer/deployments/offline-files \
+  -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
+  -v $HOME/.ssh:/root/.ssh \
+  harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
+```
+
+> 不要对不存在的 `modules/` 目录执行 `docker -v`：Docker 会在宿主机创建空目录，
+> release 模式会把它当成已挂载的 modules 目录，`cs_merge_modules_dirs` 因其中没有
+> `NN_*` 阶段而退出。
 
 容器内已是 root，直接运行部署脚本。离线文件挂载复用，不进入镜像。
 
