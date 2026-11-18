@@ -152,8 +152,13 @@ jobs:
 
           def mask_defaults(text):
               return re.sub(
-                  r'(NETSHOOT_RDMA_VERSION="\$\{NETSHOOT_RDMA_VERSION:-)[^}]*(\}")',
+                  r'(?m)^(NETSHOOT_RDMA_VERSION="\$\{NETSHOOT_RDMA_VERSION:-)[^}]*(\}")',
                   r'\1<MASK>\2', text)
+
+          def default_pins(text):
+              return re.findall(
+                  r'(?m)^NETSHOOT_RDMA_VERSION="\$\{NETSHOOT_RDMA_VERSION:-([^}]*)\}"',
+                  text)
 
           if not has_pin(base_doc) or not has_pin(head_doc):
               sys.exit("pin PR is missing the netshoot pin")
@@ -169,10 +174,11 @@ jobs:
               sys.exit("netshoot version does not match NETSHOOT_RDMA_VERSION")
           if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(entry.get("digest") or "")):
               sys.exit("invalid netshoot digest")
-          pinned = re.search(
-              r'NETSHOOT_RDMA_VERSION="\$\{NETSHOOT_RDMA_VERSION:-([^}]*)\}"',
-              head_defaults)
-          if not pinned or pinned.group(1) != env_tag:
+          base_pins = default_pins(base_defaults)
+          head_pins = default_pins(head_defaults)
+          if len(base_pins) != 1 or len(head_pins) != 1:
+              sys.exit("cluster.defaults.conf must contain exactly one netshoot pin")
+          if head_pins[0] != env_tag:
               sys.exit("cluster.defaults.conf does not carry the pin")
           PY
 
