@@ -46,20 +46,6 @@ installer 只消费本地树，不访问 MinIO/Harbor。
   cubestack-installer-cli.tar
 ```
 
-若使用 `cubestack-installer/latest` 的 CI store 布局获取本地文件：
-
-```bash
-python3 deployments/scripts/tools/offline/offline-sync.py apply --yes --with-install-tree
-```
-
-它会物化：
-
-```text
-/data/offline-files/                 # offline-files 内容
-/data/modules/                       # 平台私有 modules（与 offline-files 同级）
-/data/cubestack-installer-cli.tar    # CLI 镜像 tar
-```
-
 ### 直接部署
 
 ```bash
