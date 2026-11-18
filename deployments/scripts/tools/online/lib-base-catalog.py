@@ -6,6 +6,10 @@ Harbor reference. It expands ${VAR} from the environment (cluster defaults,
 profile, deployment env), looks up the mirror catalog, and emits a deterministic
 JSON plan for the materializer.
 
+The materializer filters unselected optional images before calling this
+resolver. Calling this script directly validates the full catalog (including
+optional images), which is the maintainer check.
+
 OS packages are intentionally absent: they are a pre-install check, not a
 download/install input.
 """

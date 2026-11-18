@@ -24,7 +24,7 @@
 #    运行期钩子只在工具缺失时从挂载的版本目录补齐、不覆盖(见 docs/kubespray-versioning/README.md §8);
 #    部署流程仍用 bash -lc(既有口径))
 # ① 拉取 CLI 镜像(CI 每次合并构建 sha-<commit>; release 版本树用 release.env 的 CUBESTACK_CLI_IMAGE)
-CLI_IMAGE=harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>
+CLI_IMAGE="harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>"
 docker pull "${CLI_IMAGE}"
 
 # ② 宿主机准备大磁盘离线目录(离线文件较大, 建议 ≥50GiB 空闲; 多集群可共用同一份)

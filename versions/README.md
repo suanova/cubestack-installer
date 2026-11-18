@@ -87,8 +87,8 @@ files         # k8s 二进制等文件
 
 MetaX GPU operator 镜像使用 `catalog_id: metax/metax-<name>`；mirror 的
 `images/metax.yaml` 已钉 amd64 digest，`catalog_id + version` 从 `index.json`
-解析。升级 `METAX_VERSION` 时同步更新 mirror 的 manifest/index，再更新本文件的
-`mirror.commit`。
+解析。升级 `METAX_VERSION` 时同步更新 mirror 的 manifest/index，再更新
+`versions/base.yaml` 的 `mirror.commit`。
 
 ## 升级版本
 

@@ -96,10 +96,12 @@ sudo ./deployments/scripts/tools/docker/build-cli-image.sh --push
 **版本树包含 `modules/`：按完整 phase 路径比较，只挂载镜像缺失的模块**
 
 ```bash
+set -euo pipefail
+
 OFFLINE_ROOT=/data/offline-files
 MODULES_DIR=/data/modules
 EXTRA_MODULES=/tmp/cubestack-modules-extra
-CLI_IMAGE=harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>
+CLI_IMAGE="harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>"
 
 [ -d "${MODULES_DIR}" ] || { echo "modules not found: ${MODULES_DIR}"; exit 1; }
 
@@ -107,7 +109,8 @@ CLI_IMAGE=harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>
 ( cd "${MODULES_DIR}" && find . -mindepth 2 -maxdepth 2 -type f -name '*.sh' \
     -path './[0-9][0-9]_*/*' -printf '%P\n' | sort ) > /tmp/release-modules.txt
 # 2) 镜像内置 deployments/scripts/modules/<NN_*> 的模块清单
-docker run --rm --entrypoint sh "${CLI_IMAGE}" -c \
+#    与最终启动命令使用同样的 Docker 访问方式；set -e 保证清单失败即中止
+sudo docker run --rm --entrypoint sh "${CLI_IMAGE}" -c \
   'cd /opt/cubestack-installer/deployments/scripts/modules && find . -mindepth 2 -maxdepth 2 -type f -name "*.sh" -path "./[0-9][0-9]_*/*" -printf "%P\n" | sort' \
   > /tmp/image-modules.txt
 # 3) 版本树有、镜像没有的模块
@@ -129,7 +132,7 @@ fi
 
 sudo docker run --rm -it --network host \
   -v "${OFFLINE_ROOT}":/opt/cubestack-installer/deployments/offline-files \
-  "${MODULES_MOUNT[@]}" \
+  ${MODULES_MOUNT[@]+"${MODULES_MOUNT[@]}"} \
   -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
   -v $HOME/.ssh:/root/.ssh \
   "${CLI_IMAGE}"
@@ -139,7 +142,7 @@ sudo docker run --rm -it --network host \
 
 ```bash
 OFFLINE_ROOT=/data/offline-files
-CLI_IMAGE=harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>
+CLI_IMAGE="harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>"
 
 sudo docker run --rm -it --network host \
   -v "${OFFLINE_ROOT}":/opt/cubestack-installer/deployments/offline-files \

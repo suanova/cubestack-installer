@@ -207,6 +207,54 @@ PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
 grep -q "skipped=2" "${TMP}/mat2.out" || fail "materializer: idempotent skip failed"
 pass "materializer is idempotent"
 
+# ---- optional filter runs before catalog resolution ----
+# An unselected optional image with a tag missing from the pinned index must
+# not block base materialization; selecting it must still fail on the tag.
+cp "${TMP}/baseline/versions/base.yaml" "${TMP}/metax-baseline.yaml"
+cat >> "${TMP}/metax-baseline.yaml" <<'EOF'
+  - key: "metax-gpu-operator:cr.metax-tech.com/cloud/gpu-label"
+    catalog_id: "metax/metax-gpu-label"
+    version: "0.15.4-amd64"
+    dest: "offline-files/metax-gpu"
+    tar: "harbor.isuanova.com_metax_gpu-label_0.15.4-amd64.tar"
+    optional: true
+EOF
+jq '.images += [{
+  "id": "metax/metax-gpu-label",
+  "name": "metax-gpu-label",
+  "source": "harbor.isuanova.com/metax/gpu-label",
+  "target": "harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/gpu-label",
+  "versions": [{"tag": "0.15.3-amd64",
+                "digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+                "platforms": ["linux/amd64"]}]
+}]' "${TMP}/index.json" > "${TMP}/metax-index.json"
+
+PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
+    --baseline "${TMP}/metax-baseline.yaml" --index "${TMP}/metax-index.json" \
+    --offline-root "${TMP}/offline-metax" >"${TMP}/mat-metax.out"
+[ ! -e "${TMP}/offline-metax/metax-gpu" ] \
+    || fail "materializer: unselected optional image was materialized"
+grep -q "optional-skipped=2" "${TMP}/mat-metax.out" \
+    || fail "materializer: unselected MetaX optional not counted"
+pass "materializer filters unselected optional images before resolution"
+
+if python3 "${ONLINE}/lib-base-catalog.py" \
+    --baseline "${TMP}/metax-baseline.yaml" --index "${TMP}/metax-index.json" \
+    >/dev/null 2>"${TMP}/err"; then
+    fail "resolver: full-catalog validation missed a missing optional tag"
+fi
+grep -q "not in catalog" "${TMP}/err" \
+    || fail "resolver: missing optional tag error not reported"
+pass "resolver keeps full-catalog validation for maintainers"
+
+if PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
+    --baseline "${TMP}/metax-baseline.yaml" --index "${TMP}/metax-index.json" \
+    --offline-root "${TMP}/offline-metax" --include-group metax-gpu-operator \
+    >"${TMP}/mat-metax-group.out" 2>&1; then
+    fail "materializer: selected optional image with missing tag should fail"
+fi
+pass "materializer validates selected optional images"
+
 # ---- OS pre-check ----
 "${ONLINE}/check-os-packages.sh" --baseline "${TMP}/baseline/versions/base.yaml" >"${TMP}/pre.out"
 grep -q "pre-check passed" "${TMP}/pre.out" || fail "pre-check: local pass missing"
