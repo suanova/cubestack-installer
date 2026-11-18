@@ -32,7 +32,7 @@
 #       纯裸金属离线部署(kubespray + operator)无需额外特权。
 # =====================================================================
 
-# base 镜像(系统+工具链层): 必须由 build-cli-image.sh 按 VERSION_LINE 传 --build-arg
+# base 镜像(系统+工具链层): 由 build-cli-image.sh 按 CLI base commit 传 --build-arg CLI_BASE_TAG
 ARG CLI_BASE_TAG
 FROM ${CLI_BASE_TAG}
 

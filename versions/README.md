@@ -58,7 +58,7 @@ files         # k8s 二进制等文件
 
 ## images
 
-第三方镜像优先用 `catalog_id`（MetaX GPU operator 是唯一已评审例外，见下）：
+第三方镜像用 `catalog_id`：
 
 ```yaml
 - key: k8s-base:registry.k8s.io/pause
@@ -85,11 +85,10 @@ files         # k8s 二进制等文件
 
 `catalog_id` 和 `source_ref` 必须二选一；`source_ref` 必须带 sha256 digest。
 
-**MetaX GPU operator 例外**：这些 vendor 镜像在 mirrors 上以 amd64 单 manifest
-发布，mirror index 不维护它们的 digest，因此使用 `source_ref + version + digest`。
-`digest` 是 `version` 对应 target tag 的 manifest digest；升级 `METAX_VERSION`
-时必须同步更新 digest，二者是同一版本的不可分割标识。其他第三方镜像不得使用
-该例外，仍必须用 `catalog_id`。
+MetaX GPU operator 镜像使用 `catalog_id: metax/metax-<name>`；mirror 的
+`images/metax.yaml` 已钉 amd64 digest，`catalog_id + version` 从 `index.json`
+解析。升级 `METAX_VERSION` 时同步更新 mirror 的 manifest/index，再更新本文件的
+`mirror.commit`。
 
 ## 升级版本
 

@@ -72,14 +72,17 @@ cp deployments/config/cluster.conf.example deployments/config/cluster.conf
 
 ## CLI 容器
 
-镜像：
+镜像（CI 每次合并构建 `sha-<commit>`；release 版本树以 `release.env` 的
+`CUBESTACK_CLI_IMAGE` digest 为准）：
 
 ```text
-harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
+harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>
 ```
 
-镜像 tag 由仓库根 `VERSION_LINE` 派生（当前 `2.1` → `:2.1-latest`），
-不覆盖 2.0.x 仍在使用的 `:latest`。
+`sha-<commit>` 由 `rebuild-cli-image.yml` 以合并提交的短 SHA 生成；本地
+`build-cli-image.sh` 默认也使用 `sha-$(git rev-parse --short HEAD)`。
+不存在 CLI 的 `<line>-latest` 通道；release 直接使用版本树 `release.env` 里的
+`CUBESTACK_CLI_IMAGE`（`@sha256:...`）。
 
 构建/推送：
 
@@ -96,7 +99,7 @@ sudo ./deployments/scripts/tools/docker/build-cli-image.sh --push
 OFFLINE_ROOT=/data/offline-files
 MODULES_DIR=/data/modules
 EXTRA_MODULES=/tmp/cubestack-modules-extra
-CLI_IMAGE=harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
+CLI_IMAGE=harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>
 
 [ -d "${MODULES_DIR}" ] || { echo "modules not found: ${MODULES_DIR}"; exit 1; }
 
@@ -136,12 +139,13 @@ sudo docker run --rm -it --network host \
 
 ```bash
 OFFLINE_ROOT=/data/offline-files
+CLI_IMAGE=harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>
 
 sudo docker run --rm -it --network host \
   -v "${OFFLINE_ROOT}":/opt/cubestack-installer/deployments/offline-files \
   -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
   -v $HOME/.ssh:/root/.ssh \
-  harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
+  "${CLI_IMAGE}"
 ```
 
 > 不要对不存在的 `modules/` 目录执行 `docker -v`：Docker 会在宿主机创建空目录，
