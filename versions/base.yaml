@@ -409,7 +409,8 @@ images:
 # MetaX GPU operator images. The mirror carries both 0.15.3 and 0.15.3-amd64
 # (same amd64 manifest); use the -amd64 tag to match the release overlay.
 # Digests are the actual amd64 manifest digests in
-# harbor.isuanova.com/mirrors/cr.metax-tech.com/...
+# harbor.isuanova.com/mirrors/cr.metax-tech.com/...; when bumping
+# METAX_VERSION, update the matching digest in the same commit.
 - key: metax-gpu-operator:cr.metax-tech.com/cloud/gpu-label
   source_ref: harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/gpu-label
   version: ${METAX_VERSION}-amd64

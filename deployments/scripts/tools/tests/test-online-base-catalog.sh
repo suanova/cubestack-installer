@@ -27,6 +27,7 @@ mirror:
   path: index.json
 env:
   KUBESPRAY_VERSION: v2.32.0
+  TEST_VERSION: v1.35.8
   UNUSED: x
 checksums:
   etcd:
@@ -101,6 +102,21 @@ PLAN="$(python3 "${ONLINE}/lib-base-catalog.py" \
 [ "$(jq -r '.images[1].ref' <<<"${PLAN}")" = "harbor.isuanova.com/suanova/netshoot-rdma@sha256:4444444444444444444444444444444444444444444444444444444444444444" ] || fail "resolver: bad source_ref ref"
 [ "$(jq -r '.images[2].optional' <<<"${PLAN}")" = "true" ] || fail "resolver: optional flag lost"
 pass "resolver maps catalog and source_ref entries"
+
+# standalone materialization: use baseline env when the process does not export
+# the version, but keep an explicit process value authoritative
+sed 's/version: "v1.35.8"/version: "${TEST_VERSION}"/' \
+    "${TMP}/baseline/versions/base.yaml" > "${TMP}/env-fallback.yaml"
+env -u TEST_VERSION python3 "${ONLINE}/lib-base-catalog.py" \
+    --baseline "${TMP}/env-fallback.yaml" --index "${TMP}/index.json" \
+    > "${TMP}/plan-env-fallback.json"
+[ "$(jq -r '.images[0].version' "${TMP}/plan-env-fallback.json")" = "v1.35.8" ] \
+    || fail "resolver: baseline env fallback failed"
+TEST_VERSION=v9.9.9 python3 "${ONLINE}/lib-base-catalog.py" \
+    --baseline "${TMP}/env-fallback.yaml" --index "${TMP}/index.json" \
+    >/dev/null 2>"${TMP}/err" && fail "resolver: explicit env override not applied"
+grep -q "not in catalog" "${TMP}/err" || fail "resolver: explicit env override error not reported"
+pass "resolver falls back to baseline env and honors explicit overrides"
 
 sed 's/v1.35.8/v9.9.9/' "${TMP}/baseline/versions/base.yaml" > "${TMP}/bad-tag.yaml"
 if python3 "${ONLINE}/lib-base-catalog.py" --baseline "${TMP}/bad-tag.yaml" --index "${TMP}/index.json" >/dev/null 2>"${TMP}/err"; then

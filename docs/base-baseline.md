@@ -62,6 +62,8 @@ images:
 - `catalog_id` 指向 mirror catalog（`container-image-mirror/index.json` 的 `id`）；
   自建公开镜像用 `source_ref` 指向 public `suanova/**`，两者互斥。`source_ref`
   必须同时写 `digest`（镜像没有 catalog 条目，digest 是唯一的钉）。
+  MetaX GPU operator 镜像是已评审的 `source_ref` 例外：mirror index 不维护其
+  vendor digest，升级 `METAX_VERSION` 时必须同步更新 digest。
 - `optional: true` 的镜像默认不在线物化（`--include-optional` 才会带上）。
 - `version` 可以是 `${VAR}` 或字面量；变量必须在 `cluster.defaults.conf` /
   profile 里有定义。禁止 `latest`。

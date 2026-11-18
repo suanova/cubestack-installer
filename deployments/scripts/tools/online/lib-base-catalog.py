@@ -172,7 +172,11 @@ def main() -> int:
     if not kubespray_version:
         fail(f"{args.baseline}: kubespray.version is required")
 
-    env = dict(os.environ)
+    # Defaults come from the baseline env so standalone materialization works;
+    # explicit non-empty process env still wins and is validated by expand().
+    env = {str(k): str(v) for k, v in (baseline.get("env") or {}).items()}
+    env.update({str(k): str(v) for k, v in os.environ.items()
+                if str(v) != ""})
     if not env.get("KUBESPRAY_VERSION"):
         env["KUBESPRAY_VERSION"] = kubespray_version
 

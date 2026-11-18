@@ -111,16 +111,23 @@ sudo docker run --rm -it --network host \
 `ai_gateway`、`prometheus`、`perses`、`bmc`、`metax`、`cuberouter` 等）。
 只挂 `offline-files/` 时这些模块不会出现在 `--list-steps` 中。
 
-> 若镜像本身已内置这些模块（`deployments/scripts/modules/03_addon/` 里能看到
-> `25_/26_/40_..52_`），**不要**再挂 `modules/`，否则会报
-> `duplicate module file`。可先检查：
+> 若镜像本身可能已内置这些模块，先比较**完整**的模块文件集合，而不是只看单个
+> 文件名；只有镜像包含版本树的全部模块时才用单挂载：
 >
 > ```bash
-> docker exec cubestack-install-a ls /opt/cubestack-installer/deployments/scripts/modules/03_addon \
->   | grep -E '^(25|26|40|4[1-9]|5[0-2])_'
+> # 版本树 modules/03_addon 的模块清单
+> ( cd "${MODULES_DIR}/03_addon" && find . -maxdepth 1 -type f -name '*.sh' -printf '%f\n' | sort ) \
+>   > /tmp/release-modules.txt
+> # 镜像内置 deployments/scripts/modules/03_addon 的模块清单
+> docker run --rm --entrypoint sh <cli-image> -c \
+>   'cd /opt/cubestack-installer/deployments/scripts/modules/03_addon && find . -maxdepth 1 -type f -name "*.sh" -printf "%f\n" | sort' \
+>   > /tmp/image-modules.txt
+> # 版本树有、镜像没有的模块
+> comm -23 /tmp/release-modules.txt /tmp/image-modules.txt
 > ```
 >
-> 无输出 → 需要双挂载；有输出 → 单挂载 `offline-files/` 即可。
+> - 无输出（镜像已包含版本树全部模块）→ 单挂载 `offline-files/`；
+> - 有输出（存在镜像缺失的模块）→ 双挂载 `offline-files/` + `modules/`。
 
 ## 目录
 
