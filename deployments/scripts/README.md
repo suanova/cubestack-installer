@@ -580,9 +580,11 @@ CHRONY_PKGS_ENABLED="true"   # chrony 专用安装集(os/packages/chrony; tools/
 `CUBESTACK_FRESH_NODE=1`（或直接调用工具时 `--fresh-node`）；kubelet 未运行只是额外条件，
 **不是** fresh 判据——维护中的已加入 worker 不会被误 purge。同时要求 kubelet 状态**可确认安全**
 （`inactive` 或单元不存在）；`systemctl` 无法给出状态（空输出/无响应）时跳过清理并报告。
-未声明 fresh 时，远端修复段与
-收尾的 `apt-get install -f` 都以 `--no-remove` 运行，破损包清理也会跳过
-`containerd`/`containerd.io`/`runc`——修复流程同样不会移除容器运行时包。
+**移除许可与 fresh 声明分离**：只有"显式声明 fresh **且** kubelet 状态可确认安全"时，远端
+修复段与收尾的 `apt-get install -f` 才允许移除包；否则一律以 `--no-remove` 运行，破损包清理
+也会跳过 `containerd`/`containerd.io`/`runc`——单凭 `--fresh-node` 或 kubelet 状态未知都不会
+放开移除，修复流程同样不会移除容器运行时包。收尾 `apt-get install -f` 的退出码会回传：失败即令
+本次装包失败（`/tmp/packages` 仍会清理），不会再误报安装完成。
 `chrony_pkgs` 只从 `offline-files/os/packages/chrony/` 装包（不配置 NTP），并先于必选的
 `k8s_ntp` 同步执行；默认关闭时 `k8s_ntp` 假设 chrony 已由 OS 镜像预装。
 

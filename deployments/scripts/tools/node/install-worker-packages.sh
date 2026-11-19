@@ -15,11 +15,14 @@
 #   · 修复半装: 安装前 dpkg --configure -a + apt-get install -f; 失败再探测半装包清理;
 #     修复后**重新探测**状态并重跑依赖/Breaks 校验(apt -f 可能移除已装依赖, 不能用旧结论装包)
 #   · 清除系统容器包: 仅当调用方**显式声明 fresh 节点**(--fresh-node 或
-#     CUBESTACK_FRESH_NODE=1)且 kubelet 未运行时 purge containerd/containerd.io/runc ——
-#     否则 kubespray runc role `apt-get remove runc` 会撞上系统 containerd 的 Depends 冲突;
+#     CUBESTACK_FRESH_NODE=1)且 kubelet 状态确认安全(inactive/无单元)时 purge
+#     containerd/containerd.io/runc —— 否则 kubespray runc role `apt-get remove runc`
+#     会撞上系统 containerd 的 Depends 冲突;
 #     (**在远端探测/选包之前执行**, 保证依赖预检看到的是 purge 后的真实状态;)
 #     ⚠ kubelet inactive **不是** fresh 判据: 维护中的已加入 worker 也会停 kubelet,
 #       无显式声明时绝不能 purge 其运行时(2026-11-19 CodeRabbit).
+#     ⚠ repair/收尾的 apt -f 是否允许移除包用**独立许可**(ALLOW_REMOVE = fresh 声明 +
+#       kubelet 安全哨兵); 单纯 --fresh-node 或探测失败不放开移除运行时(2026-11-19).
 #   · 失败不再掩盖: 远端 shell 启用 pipefail, dpkg 退出码显式捕获; 失败 → err 退出
 # ============================================================
 set -euo pipefail
@@ -164,6 +167,10 @@ _dep_planned_prov_ok() { # <虚拟名> <op> <要求版本>
 #   会毁掉节点运行时与已 join 的状态(2026-11-19 CodeRabbit).
 #   显式声明后还要求 kubelet 状态**可确认安全**(inactive/单元不存在)才 purge;
 #   systemctl 无响应/输出为空等未知状态一律跳过并报告(2026-11-19 CodeRabbit).
+# ⚠ "移除许可"(ALLOW_REMOVE)与 fresh 声明分离: 只有"已声明 fresh **且** 远端回传
+#   CUBESTACK_KUBELET_SAFE=1"才置 1; repair/收尾的 apt -f 与破损清理都只看该许可,
+#   不会再因为单纯的 --fresh-node 而放开移除运行时包(2026-11-19 CodeRabbit).
+ALLOW_REMOVE=0
 if [ "${FRESH_NODE}" = "1" ]; then
     say "检查 fresh 节点系统容器包(containerd/containerd.io/runc)..."
     PRE_PURGE_LOG="$(mktemp)"
@@ -179,6 +186,8 @@ case "${_kstate}" in
     inactive|unknown)
         echo "--- [pre] 已声明 fresh 且 kubelet 状态=${_kstate}: 清理系统容器包(containerd/containerd.io/runc) ---"
         apt-get purge -y containerd containerd.io runc 2>&1 | tail -5
+        # 移除许可哨兵: 控制器只凭这一行判定 repair/收尾是否允许 apt 移除包
+        echo "CUBESTACK_KUBELET_SAFE=1"
         ;;
     *)
         if [ -z "${_kstate}" ]; then
@@ -196,6 +205,11 @@ PRE_PURGE
         tail -5 "${PRE_PURGE_LOG}" | sed 's/^/      /' >&2
     elif [ -s "${PRE_PURGE_LOG}" ]; then
         tail -3 "${PRE_PURGE_LOG}" | sed 's/^/    /'
+    fi
+    if grep -q '^CUBESTACK_KUBELET_SAFE=1$' "${PRE_PURGE_LOG}" 2>/dev/null; then
+        ALLOW_REMOVE=1
+    else
+        warn "  已声明 fresh 但 kubelet 状态未确认安全(inactive/无单元): repair/收尾保持 --no-remove(不移除运行时包)"
     fi
     rm -f "${PRE_PURGE_LOG}"
     unset PRE_PURGE_LOG PRE_PURGE_PAYLOAD
@@ -903,15 +917,16 @@ fi
 # ── 远端修复段(幂等): 修半装 + apt 依赖修复 ──
 REMOTE_FIX="$(mktemp)"
 {
-    echo "FRESH_NODE=${FRESH_NODE}"
+    echo "ALLOW_REMOVE=${ALLOW_REMOVE}"
     cat <<'FIX_EOF'
 #!/bin/bash
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-# ⚠ 未声明 fresh 的节点(joined worker): 修复只允许"装/配置", 不允许移除任何包 ——
-#   apt-get install -f 为解依赖可能摘掉 containerd/containerd.io/runc(运行时),
-#   会把维护中的已加入 worker 毁掉。fresh 模式才放开移除。
+# ⚠ 移除许可 ALLOW_REMOVE **不等于** fresh 声明: 只有"显式声明 fresh 且 kubelet 状态
+#   确认安全(inactive/无单元)"才由控制器置 1。未获得许可(含 systemctl 无响应)时:
+#   apt-get install -f 一律 --no-remove, 破损包清理也跳过运行时包 —— 防止为解依赖把
+#   半配置的 containerd/containerd.io/runc 移除掉(2026-11-19 CodeRabbit)。
 _apt_keep=""
-[ "${FRESH_NODE:-0}" = "1" ] || _apt_keep="--no-remove"
+[ "${ALLOW_REMOVE:-0}" = "1" ] || _apt_keep="--no-remove"
 echo "--- [fix] dpkg --configure -a ---"
 dpkg --configure -a 2>&1 | tail -5 || true
 echo "--- [fix] apt-get install -f -y ---"
@@ -921,11 +936,11 @@ BROKEN="$(dpkg-query -W -f='${db:Status-Abbrev}|${Package}\n' 2>/dev/null | grep
 if [ -n "${BROKEN}" ]; then
     echo "--- [fix] 破损包清理: ${BROKEN} ---"
     for bp in ${BROKEN}; do
-        # 未声明 fresh: 容器运行时包只跳过移除(joined worker 的 containerd/runc 不能动)
-        if [ "${FRESH_NODE:-0}" != "1" ]; then
+        # 未获得移除许可: 容器运行时包只跳过移除(joined worker 的 containerd/runc 不能动)
+        if [ "${ALLOW_REMOVE:-0}" != "1" ]; then
             case "${bp}" in
                 containerd|containerd.io|runc)
-                    echo "[fix] 跳过移除运行时包 ${bp}(未声明 fresh 节点; 保持已加入 worker 的运行时)"
+                    echo "[fix] 跳过移除运行时包 ${bp}(未获得移除许可; 保持节点运行时)"
                     continue ;;
             esac
         fi
@@ -1120,12 +1135,23 @@ rm -f "${INSTALL_LOG}"
 unset _install_rc
 
 # ── 安装后: apt -f 收尾修复 + 清理临时包目录 ──
-# 收尾的 apt-get install -f 同样不能在未声明 fresh 的节点移除运行时包(与修复段同一口径)
+# 收尾的 apt-get install -f 与修复段同一许可口径: 未获得移除许可(fresh+kubelet 安全)时 --no-remove
+# ⚠ 退出码必须回传(2026-11-19 CodeRabbit): dpkg -i 成功 ≠ 依赖图闭合 —— 非 fresh 节点上
+#   --no-remove 可能让 apt 在需要移除包时中止。远端在 tail 管道**之外**记录 apt 退出码
+#   (不依赖远端 pipefail/PIPESTATUS, 兼容任意登录 shell), 清理 /tmp/packages 后 exit 该码;
+#   SSH 失败或该码非零 → 本机失败退出, 不得继续打印"安装完成".
 _apt_keep=""
-[ "${FRESH_NODE}" = "1" ] || _apt_keep="--no-remove"
+[ "${ALLOW_REMOVE}" = "1" ] || _apt_keep="--no-remove"
+_settle_rc=0
 ${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" \
-    "sudo apt-get install -f -y --no-install-recommends ${_apt_keep} 2>&1 | tail -5; sudo rm -rf /tmp/packages" 2>/dev/null || true
-unset _apt_keep
+    "_log=\$(mktemp); sudo apt-get install -f -y --no-install-recommends ${_apt_keep} >\"\$_log\" 2>&1; _rc=\$?; tail -5 \"\$_log\"; rm -f \"\$_log\"; sudo rm -rf /tmp/packages; exit \$_rc" 2>/dev/null || _settle_rc=$?
+unset _apt_keep ALLOW_REMOVE
+if [ "${_settle_rc}" -ne 0 ]; then
+    err "apt -f 收尾修复失败(节点 ${IP}, 退出码 ${_settle_rc}); 依赖图未确认闭合, 不报告安装完成"
+    err "  请检查节点 apt/dpkg 状态(悬空依赖/半装包)后重跑; 本次装包仍视为失败"
+    exit 1
+fi
+unset _settle_rc
 
 _skipped="${DEP_SKIPPED[*]:-} ${BREAKS_SKIPPED[*]:-}"
 if [ -n "${_skipped// /}" ]; then

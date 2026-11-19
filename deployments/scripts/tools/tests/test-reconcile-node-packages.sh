@@ -291,8 +291,22 @@ chk_contains "worker 恢复失败返回非零" "_restore_rc" "${TOOL2}"
 chk_contains "worker 调用方区分恢复失败" "dpkg -i 已完成, 但恢复" "${TOOL2}"
 # 2026-11-19 CodeRabbit: 非 fresh 节点(joined worker)的 repair/收尾 apt -f 不得移除运行时包
 chk_contains "worker repair 非 fresh 禁止 apt 移除" "--no-remove" "${TOOL2}"
-chk_contains "worker repair 注入 fresh 声明" 'FRESH_NODE=${FRESH_NODE}' "${TOOL2}"
+chk_contains "worker repair 注入移除许可" 'ALLOW_REMOVE=${ALLOW_REMOVE}' "${TOOL2}"
 chk_contains "worker repair 跳过运行时破损清理" "跳过移除运行时包" "${TOOL2}"
+# 2026-11-19 CodeRabbit: 移除许可必须是 fresh 声明 + kubelet 安全哨兵, 不能只看声明
+chk_contains "worker 移除许可需 kubelet 安全哨兵" "CUBESTACK_KUBELET_SAFE=1" "${TOOL2}"
+chk_not_contains "worker repair 不再注入 fresh 声明" 'echo "FRESH_NODE=${FRESH_NODE}"' "${TOOL2}"
+# 修复段与收尾段都必须只看移除许可(不是 fresh 声明), 默认拒绝移除
+chk_contains "worker repair 按移除许可决定 no-remove" '[ "${ALLOW_REMOVE:-0}" = "1" ] || _apt_keep="--no-remove"' "${TOOL2}"
+chk_contains "worker 收尾按移除许可决定 no-remove" '[ "${ALLOW_REMOVE}" = "1" ] || _apt_keep="--no-remove"' "${TOOL2}"
+chk_contains "worker 移除许可默认关闭" "ALLOW_REMOVE=0" "${TOOL2}"
+chk_not_contains "worker 不再以 fresh 声明放开移除" '"${FRESH_NODE:-0}" = "1"' "${TOOL2}"
+# 2026-11-19 CodeRabbit: 收尾 apt -f 的退出码必须回传 —— tail 管道与 || true 不得吞掉失败
+chk_contains "worker 收尾捕获远端退出码" "_settle_rc" "${TOOL2}"
+chk_contains "worker 收尾远端保留 apt 退出码" 'exit \$_rc' "${TOOL2}"
+chk_contains "worker 收尾仍清理暂存目录" "sudo rm -rf /tmp/packages; exit" "${TOOL2}"
+chk_contains "worker 收尾失败必须中止" "apt -f 收尾修复失败" "${TOOL2}"
+chk_not_contains "worker 收尾不再无条件忽略失败" 'tail -5; sudo rm -rf /tmp/packages" 2>/dev/null || true' "${TOOL2}"
 chk_contains "worker repair 破损状态容错尾随空格" '[[:space:]]*\|' "${TOOL2}"
 # 2026-11-19 CodeRabbit: kubelet 状态未知(空输出/systemctl 无响应)不得当作"未运行"而 purge
 chk_contains "worker purge 要求已知安全状态" "_kstate" "${TOOL2}"
