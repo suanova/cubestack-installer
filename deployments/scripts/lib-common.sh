@@ -710,11 +710,12 @@ operator_chart_version() {
 
 resolve_operator_chart_tgz() {   # <dir> <chart-name> [desired-version] [release-version]
     local _dir="$1" _name="$2" _desired="${3:-}" _release="${4:-}"
-    local _files=() _f _v _hit="" _ver="" _ng=0
+    local _files=() _versioned=() _f _v _hit="" _ver="" _ng=0
     [ -d "${_dir}" ] || return 1
     shopt -q nullglob && _ng=1
     shopt -s nullglob
-    _files=("${_dir}/${_name}-"*.tgz)
+    _versioned=("${_dir}/${_name}-"*.tgz)
+    _files=("${_versioned[@]}")
     if [ -f "${_dir}/${_name}.tgz" ]; then
         _files+=("${_dir}/${_name}.tgz")
     fi
@@ -737,16 +738,27 @@ resolve_operator_chart_tgz() {   # <dir> <chart-name> [desired-version] [release
             fi
         done
     fi
-    if [ -z "${_hit}" ] && [ "${#_files[@]}" -eq 1 ]; then
+    # 兜底只在非 release 模式生效: release 树必须按 release.env 的版本命中,
+    # 不能把唯一一份版本不符的 chart 猜着装上(那是 verifier 应拦下的错误)。
+    if [ -z "${_hit}" ] && [ -z "${_release}" ] && [ "${#_files[@]}" -eq 1 ]; then
         _hit="${_files[0]}"
+    fi
+    # 兼容"带版本号 chart + 无版本号残留"的 dev/过渡树: 取唯一的带版本号 chart。
+    if [ -z "${_hit}" ] && [ -z "${_release}" ] && [ "${#_versioned[@]}" -eq 1 ] \
+       && [ "${#_files[@]}" -gt 1 ]; then
+        _hit="${_versioned[0]}"
     fi
     [ -n "${_hit}" ] || return 1
 
     _ver="$(operator_chart_version "${_hit}")"
     if [ -z "${_ver}" ]; then
-        _ver="$(basename "${_hit}")"
-        _ver="${_ver#${_name}-}"
-        _ver="${_ver%.tgz}"
+        # 只有带版本号的文件名才能反推版本; <name>.tgz 反推出来是 chart 名, 不是版本。
+        case "$(basename "${_hit}")" in
+            "${_name}-"*.tgz)
+                _ver="$(basename "${_hit}")"
+                _ver="${_ver#${_name}-}"
+                _ver="${_ver%.tgz}" ;;
+        esac
     fi
     printf '%s\t%s\n' "${_hit}" "${_ver}"
 }

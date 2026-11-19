@@ -9,15 +9,24 @@ import tarfile
 
 from .constants import GZ_DEEP_MAX, DATA_EXTS, KNOWN_BINS
 from .context import fail, warn, deep_log
-from .fsutil import norm_rel, parse_env, sha256_file
+from .fsutil import clean_value, norm_rel, parse_env, sha256_file
 
 # release 树的 operator chart 位置与名字: 文件名不带版本号, 版本只在 Chart.yaml。
 OPERATOR_CHART_NAME = "cubestack-operator-chart"
 OPERATOR_CHART_DIR = "cubestack-operator/charts"
 
 
-def is_operator_chart_rel(rel):
-    return f"/{norm_rel(rel)}".startswith(f"/{OPERATOR_CHART_DIR}/")
+def operator_chart_rel(rel):
+    """cubestack-operator/charts/ 顶层、文件名以 operator chart 名开头的 .tgz。
+
+    只认顶层, 与 module 25 的 resolve_operator_chart_tgz 一致; 子目录里的备份
+    chart 不会被部署, 不能用来通过校验。
+    """
+    rel = norm_rel(rel)
+    name = os.path.basename(rel)
+    return (os.path.dirname(rel) == OPERATOR_CHART_DIR
+            and name.startswith(OPERATOR_CHART_NAME)
+            and name.endswith(".tgz"))
 
 
 def operator_chart_want_version(root):
@@ -25,6 +34,7 @@ def operator_chart_want_version(root):
     if not os.path.isfile(env_path):
         return ""
     return parse_env(env_path).get("CUBESTACK_OPERATOR_CHART_VERSION", "")
+
 
 def tar_member_names(tf):
     names = set()
@@ -198,22 +208,8 @@ def check_compressed(ctx, path, rel):
             if chart_like and not chart_rel:
                 fail(ctx, rel, "chart_invalid", "chart 缺少 Chart.yaml")
                 return False
-            # release 树的 chart 文件名不带版本号(tree.tsv 不重命名制品), 版本只在
-            # Chart.yaml 里。只对 operator chart 套 CUBESTACK_OPERATOR_CHART_VERSION,
-            # 同目录的 cubepilot/cuberouter 等组件 chart 有各自的版本(issue #183)。
-            if chart_rel and is_operator_chart_rel(rel):
-                want = operator_chart_want_version(ctx.root)
-                if want:
-                    chart = read_chart_yaml(path)
-                    if chart.get("name") == OPERATOR_CHART_NAME:
-                        got = chart.get("version", "")
-                        if not got:
-                            fail(ctx, rel, "chart_invalid", "operator chart 缺少 Chart.yaml version")
-                            return False
-                        if got != want:
-                            fail(ctx, rel, "chart_invalid",
-                                 f"Chart.yaml version={got} != {want}")
-                            return False
+            # operator chart 的版本一致性由 check_operator_chart_presence 统一判断
+            # (需要看整个 charts/ 目录, 且同目录其他组件 chart 有各自的版本)。
         except Exception as exc:
             fail(ctx, rel, "gzip_invalid", f"gzip/tar 解析失败: {exc}")
             return False
@@ -259,7 +255,8 @@ def read_chart_yaml(path):
     """读 chart 顶层 Chart.yaml 的根级键值(verifier 只用标准库, 不引入 PyYAML)。
 
     - 只取层级最浅的 Chart.yaml, 避免子 chart 的清单抢先;
-    - 只取根级(无缩进)键, 嵌套键(如 dependencies[].version)不覆盖;
+    - 根级 = 全文最小缩进那一层(兼容整份文档统一缩进的合法 YAML),
+      更深层的键(如 dependencies[].version)不覆盖;
     - 去掉值尾部的 YAML 行内注释和引号。
     """
     best = None
@@ -274,15 +271,19 @@ def read_chart_yaml(path):
                     best, best_depth = m, depth
             if best is not None:
                 text = tf.extractfile(best).read().decode("utf-8", "replace")
+                lines = [ln for ln in text.splitlines()
+                         if ln.strip() and not ln.lstrip().startswith("#")]
+                if not lines:
+                    return {}
+                root_indent = min(len(ln) - len(ln.lstrip(" ")) for ln in lines)
                 out = {}
-                for line in text.splitlines():
-                    if not line or line[0] in " \t" or line.lstrip().startswith("#"):
+                for line in lines:
+                    if len(line) - len(line.lstrip(" ")) != root_indent:
                         continue
                     if ":" not in line:
                         continue
                     k, v = line.split(":", 1)
-                    v = v.split(" #", 1)[0].strip().strip('"').strip("'")
-                    out[k.strip()] = v
+                    out[k.strip()] = clean_value(v)
                 return out
     except Exception:
         pass
@@ -318,24 +319,44 @@ def check_operator_chart_presence(ctx, root):
         return
     # 不能因为 cubestack-operator/charts/ 目录不存在就跳过: release.env 声明了 chart 版本,
     # 部署就必须用到它(module 25 缺 chart 直接 err), 目录整体缺失同样是"缺少该 chart"。
-    # 文件名不参与判断: 扫描目录里的 tgz, 读 Chart.yaml 的 name/version(issue #183)。
-    seen = []
+    #
+    # 文件名不参与版本判断(issue #183): 只看目录顶层的 operator chart tgz, 读 Chart.yaml。
+    # 同名目录里其他组件 chart(cubepilot/cuberouter/...)不在这里判断。
+    matched = []
+    stale = []
+    bad_name = []
     for rel in ctx.files:
-        if not is_operator_chart_rel(rel) or not rel.lower().endswith(".tgz"):
+        if not operator_chart_rel(rel):
             continue
         path = os.path.join(root, rel)
         if not os.path.isfile(path):
             continue
         chart = read_chart_yaml(path)
-        if chart.get("name") != OPERATOR_CHART_NAME:
-            continue
+        name = chart.get("name", "")
         ver = chart.get("version", "")
-        if ver == want:
-            return
-        seen.append(f"{os.path.basename(rel)}={ver or '<missing version>'}")
-    if seen:
+        if name and name != OPERATOR_CHART_NAME:
+            # 文件名冒充 operator chart, 内容却不是: module 25 会按文件名优先命中它,
+            # 这正是需要在校验阶段拦下的情况。
+            bad_name.append(f"{os.path.basename(rel)}(Chart.yaml name={name})")
+        elif ver == want:
+            matched.append(rel)
+        else:
+            stale.append(f"{os.path.basename(rel)}={ver or '<missing version>'}")
+    if bad_name:
         fail(ctx, OPERATOR_CHART_DIR, "chart_invalid",
-             f"release.env 要求 {OPERATOR_CHART_NAME} version={want}, 树内实际: {', '.join(seen)}")
+             f"operator chart 文件名与 Chart.yaml name 不符: {', '.join(bad_name)}")
+        ctx.checks["structure"] = "fail"
+        return
+    if matched:
+        # 文档约定: 已有匹配版本的 chart 时, 其他版本的 operator chart 只是陈旧残留,
+        # 只 warning(陈旧文件), 不阻断安装(docs/offline-files-integrity.md)。
+        for item in stale:
+            warn(ctx, f"{OPERATOR_CHART_DIR}/{item}: 非 release.env 指定的 operator chart 版本 "
+                      f"{want}(陈旧文件, 可删除)")
+        return
+    if stale:
+        fail(ctx, OPERATOR_CHART_DIR, "chart_invalid",
+             f"release.env 要求 {OPERATOR_CHART_NAME} version={want}, 树内实际: {', '.join(stale)}")
     else:
         fail(ctx, f"{OPERATOR_CHART_DIR}/<{OPERATOR_CHART_NAME}>.tgz", "chart_missing",
              f"release.env 要求 CUBESTACK_OPERATOR_CHART_VERSION={want}, 但树内缺少该 chart")

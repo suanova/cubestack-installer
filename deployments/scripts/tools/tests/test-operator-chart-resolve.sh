@@ -85,4 +85,24 @@ tar -C "${TMP}/ordered-src" -czf "${TMP}/ordered.tgz" \
     cubestack-operator-chart/charts/sub/Chart.yaml cubestack-operator-chart/Chart.yaml
 chk "取最浅 Chart.yaml" "${WANT}" "$(operator_chart_version "${TMP}/ordered.tgz")"
 
+echo "== ⑪ release 模式不做单候选兜底 =="
+mkdir -p "${TMP}/release-wrong"
+mk_chart "${TMP}/release-wrong/cubestack-operator-chart.tgz" "2.0.0"
+out="$(resolve_operator_chart_tgz "${TMP}/release-wrong" cubestack-operator-chart "${WANT}" "2.1.0")" || out=""
+chk "版本不符时不猜" "" "${out}"
+
+echo "== ⑫ dev 混合候选保留旧行为 =="
+mkdir -p "${TMP}/mixed"
+mk_chart "${TMP}/mixed/cubestack-operator-chart-1.0.0-latest.tgz" "1.0.0-latest"
+mk_chart "${TMP}/mixed/cubestack-operator-chart.tgz" "${WANT}"
+out="$(resolve_operator_chart_tgz "${TMP}/mixed" cubestack-operator-chart "" "")" || out=""
+chk "取唯一的带版本号 chart" "${TMP}/mixed/cubestack-operator-chart-1.0.0-latest.tgz"$'\t'"1.0.0-latest" "${out}"
+
+echo "== ⑬ 无版本号且读不到 version 时不伪造版本 =="
+mkdir -p "${TMP}/noversion-src" "${TMP}/noversion"
+printf 'not a chart\n' > "${TMP}/noversion-src/README"
+tar -C "${TMP}/noversion-src" -czf "${TMP}/noversion/cubestack-operator-chart.tgz" .
+out="$(resolve_operator_chart_tgz "${TMP}/noversion" cubestack-operator-chart "" "")" || out=""
+chk "版本留空, 不回退成 chart 名" "${TMP}/noversion/cubestack-operator-chart.tgz"$'\t' "${out}"
+
 [ "${fail}" = "0" ] && echo "✅ operator chart 定位回归通过" || { echo "❌ operator chart 定位回归失败"; exit 1; }

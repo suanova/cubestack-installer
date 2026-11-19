@@ -291,6 +291,19 @@ tar -C "${TMP}/chartsrc" -czf "${TMP}/chart/cubestack-operator/charts/cubepilot-
 mk_manifests "${TMP}/chart"
 chk "其他组件 chart 不受 operator 版本约束" "0" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
 chk "不再按文件名报陈旧" "0" "$(grep -c '陈旧文件' "${TMP}/out" 2>/dev/null || true)"
+# 同名目录里的旧版 operator chart(版本不符)只是陈旧残留: 已有匹配版本时 warning, 不阻断
+printf 'apiVersion: v2\nname: cubestack-operator-chart\nversion: 8.8.8\n' > "${TMP}/chartsrc/Chart.yaml"
+tar -C "${TMP}/chartsrc" -czf "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-8.8.8.tgz" .
+mk_manifests "${TMP}/chart"
+chk "旧版 operator chart 仅警告" "0" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
+chk_contains "点名陈旧 chart" "陈旧文件" "$(cat "${TMP}/out")"
+# 文件名冒充 operator chart、Chart.yaml name 却是别的: module 会按文件名抢占, 必须失败
+printf 'apiVersion: v2\nname: not-the-operator-chart\nversion: 9.9.9\n' > "${TMP}/chartsrc/Chart.yaml"
+tar -C "${TMP}/chartsrc" -czf "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-9.9.9.tgz" .
+mk_manifests "${TMP}/chart"
+chk "文件名与 Chart.yaml name 不符失败" "1" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
+rm -f "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-8.8.8.tgz" \
+      "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-9.9.9.tgz"
 # operator chart 版本不符(文件名仍无版本号)必须失败
 printf 'apiVersion: v2\nname: cubestack-operator-chart\nversion: 1.0.0\n' > "${TMP}/chartsrc/Chart.yaml"
 tar -C "${TMP}/chartsrc" -czf "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart.tgz" .

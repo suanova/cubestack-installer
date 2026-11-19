@@ -162,13 +162,12 @@ class OperatorChartTests(unittest.TestCase):
     def test_operator_chart_version_mismatch_fails(self):
         with tempfile.TemporaryDirectory() as d:
             rel = "cubestack-operator/charts/cubestack-operator-chart.tgz"
-            path = self._make_chart(d, "cubestack-operator-chart.tgz", version="2.0.0")
+            self._make_chart(d, "cubestack-operator-chart.tgz", version="2.0.0")
             with open(os.path.join(d, "release.env"), "w", encoding="utf-8") as f:
                 f.write("CUBESTACK_OPERATOR_CHART_VERSION=2.1.0\n")
             ctx = self._ctx(d, [rel])
-            self.assertFalse(archive.check_compressed(ctx, path, rel))
             archive.check_operator_chart_presence(ctx, d)
-            self.assertTrue(ctx.failures)
+            self.assertTrue(any(f["kind"] == "chart_invalid" for f in ctx.failures))
 
     def test_other_component_chart_not_bound_to_operator_version(self):
         with tempfile.TemporaryDirectory() as d:
@@ -205,10 +204,10 @@ class OperatorChartTests(unittest.TestCase):
         return out
 
     def test_chart_yaml_strips_inline_comments_and_nested_keys(self):
-        # 根级 name 带行内注释、version 带引号, 后面再出现嵌套 version:
+        # 根级 name 带行内注释(制表符分隔)、version 带引号, 后面再出现嵌套 version:
         # 解析必须只取根级键并去掉注释/引号, 否则会把可用的 chart 判成缺失。
         manifest = (
-            "name: cubestack-operator-chart # platform operator\n"
+            "name: cubestack-operator-chart\t# platform operator\n"
             'version: "2.1.0"\n'
             "dependencies:\n"
             "  - name: sub\n"
@@ -223,6 +222,65 @@ class OperatorChartTests(unittest.TestCase):
             self.assertTrue(archive.check_compressed(ctx, path, rel))
             archive.check_operator_chart_presence(ctx, d)
             self.assertEqual(ctx.failures, [])
+
+    def test_uniformly_indented_chart_yaml_is_accepted(self):
+        manifest = (
+            "  apiVersion: v2\n"
+            "  name: cubestack-operator-chart\n"
+            "  version: 2.1.0\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            rel = "cubestack-operator/charts/cubestack-operator-chart.tgz"
+            self._make_chart_with_manifest(d, "cubestack-operator-chart.tgz", manifest)
+            with open(os.path.join(d, "release.env"), "w", encoding="utf-8") as f:
+                f.write("CUBESTACK_OPERATOR_CHART_VERSION=2.1.0\n")
+            ctx = self._ctx(d, [rel])
+            archive.check_operator_chart_presence(ctx, d)
+            self.assertEqual(ctx.failures, [])
+
+    def test_stale_extra_operator_chart_only_warns(self):
+        # 文档约定: 已有匹配版本时, 其他版本的 operator chart 只是陈旧残留。
+        with tempfile.TemporaryDirectory() as d:
+            cur = "cubestack-operator/charts/cubestack-operator-chart.tgz"
+            old = "cubestack-operator/charts/cubestack-operator-chart-2.0.0.tgz"
+            self._make_chart(d, "cubestack-operator-chart.tgz", version="2.1.0")
+            self._make_chart(d, "cubestack-operator-chart-2.0.0.tgz", version="2.0.0")
+            with open(os.path.join(d, "release.env"), "w", encoding="utf-8") as f:
+                f.write("CUBESTACK_OPERATOR_CHART_VERSION=2.1.0\n")
+            ctx = self._ctx(d, [cur, old])
+            archive.check_operator_chart_presence(ctx, d)
+            self.assertEqual(ctx.failures, [])
+            self.assertTrue(any("陈旧文件" in w for w in ctx.warnings))
+
+    def test_chart_name_mismatch_fails(self):
+        # 文件名冒充 operator chart, 内容却是别的 chart: module 会按文件名优先命中它。
+        with tempfile.TemporaryDirectory() as d:
+            rel = "cubestack-operator/charts/cubestack-operator-chart.tgz"
+            self._make_chart(d, "cubestack-operator-chart.tgz",
+                             name="other-chart", version="2.1.0")
+            with open(os.path.join(d, "release.env"), "w", encoding="utf-8") as f:
+                f.write("CUBESTACK_OPERATOR_CHART_VERSION=2.1.0\n")
+            ctx = self._ctx(d, [rel])
+            archive.check_operator_chart_presence(ctx, d)
+            self.assertTrue(any(f["kind"] == "chart_invalid" for f in ctx.failures))
+
+    def test_nested_charts_dir_not_accepted(self):
+        # module 只扫 charts/ 顶层, 子目录里的备份 chart 不能用来通过校验。
+        with tempfile.TemporaryDirectory() as d:
+            rel = "cubestack-operator/charts/backup/cubestack-operator-chart.tgz"
+            out = os.path.join(d, "cubestack-operator", "charts", "backup")
+            os.makedirs(out)
+            src = os.path.join(d, "src")
+            os.makedirs(src)
+            with open(os.path.join(src, "Chart.yaml"), "w", encoding="utf-8") as f:
+                f.write("name: cubestack-operator-chart\nversion: 2.1.0\n")
+            with tarfile.open(os.path.join(out, "cubestack-operator-chart.tgz"), "w:gz") as tf:
+                tf.add(os.path.join(src, "Chart.yaml"), arcname="Chart.yaml")
+            with open(os.path.join(d, "release.env"), "w", encoding="utf-8") as f:
+                f.write("CUBESTACK_OPERATOR_CHART_VERSION=2.1.0\n")
+            ctx = self._ctx(d, [rel])
+            archive.check_operator_chart_presence(ctx, d)
+            self.assertTrue(any(f["kind"] == "chart_missing" for f in ctx.failures))
 
 
 class StampSealTests(unittest.TestCase):
