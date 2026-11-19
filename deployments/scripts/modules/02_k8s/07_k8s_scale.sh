@@ -264,6 +264,9 @@ unset _scale_cp_list
 #   ⚠ k8s_workerbm / chrony_pkgs / node_pkgs 默认关(2026-11-18~19): 默认只由 pre_install_check
 #     做只读检查; 需要给新节点装离线 .deb 时置 WORKER_PKGS_ENABLED=true /
 #     CHRONY_PKGS_ENABLED=true / NODE_PKGS_ENABLED=true(模块内自检, 直接调用同样生效)。
+#   ⚠ 新节点若需清理系统 containerd/containerd.io/runc, 还必须显式 CUBESTACK_FRESH_NODE=1
+#     (透传到 install-worker-packages.sh); kubelet 未运行不是判据 —— 复用/维护中的机器
+#     可能停着 kubelet, 误 purge 会毁掉节点运行时(2026-11-19 CodeRabbit)。
 #   ⚠ chrony_pkgs(可选装包)必须排在 k8s_ntp 之前: NTP 同步只假设 chrony 已存在, 不装包。
 #   虚拟机创建由 tools/vm/create-vms.sh 独立执行(不经过主程序): 新 VM 请先在
 #   tools/vm/vm-nodes.conf 添加并单独执行 sudo ./deployments/scripts/tools/vm/create-vms.sh

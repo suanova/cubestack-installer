@@ -13,6 +13,10 @@
 #     OS 包。默认的 SSH/sudo/资源检查由 pre_install_check 覆盖。
 #   · 启用三选一: cluster.conf 置 WORKER_PKGS_ENABLED=true / --enable k8s_workerbm /
 #     --steps k8s_workerbm。启用后从 offline-files/os/packages 取 .deb 安装。
+#   · fresh 节点清理(系统 containerd/containerd.io/runc)默认不做 —— 需调用方**显式声明**
+#     fresh: 运行时置 CUBESTACK_FRESH_NODE=1(env 会透传到 install-worker-packages.sh),
+#     或直接调用工具时传 --fresh-node。kubelet 未运行**不是**判据(维护中的已 join worker
+#     会误 purge 运行时; 2026-11-19 CodeRabbit)。
 #   · 开关在模块内自检(而非只靠调度): k8s_scale 扩容时会**直接调用本脚本**给新 worker
 #     装包, 也必须受同一开关控制。
 # ============================================================

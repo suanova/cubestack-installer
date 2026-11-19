@@ -205,6 +205,9 @@ chk_contains "调用被 timeout 包裹" "timeout \"\${RECONCILE_SSH_TIMEOUT}\" s
 chk_contains "inventory 目标按 ONLY_HOSTS 过滤" 'node_matches "${_hn}"' "${TOOL}"
 chk_contains "NODES 回退按 ONLY_HOSTS 过滤" 'node_matches "${NODE_HOSTNAME}"' "${TOOL}"
 chk_not_contains "不再无过滤使用 all_node_ips" 'for ip in $(all_node_ips)' "${TOOL}"
+# 2026-11-19 CodeRabbit: initramfs 配置恢复失败时必须保留备份并提示路径(不能 cp 失败仍 rm)
+chk_contains "reconcile 恢复失败保留备份" "备份保留在" "${TOOL}"
+chk_contains "reconcile 备份失败不做无备份修改" "不做无备份的修改" "${TOOL}"
 
 echo "== ⑤ worker 装包: Breaks ↔ 同版本 cohort =="
 TOOL2="${REPO_ROOT}/deployments/scripts/tools/node/install-worker-packages.sh"
@@ -235,6 +238,43 @@ else
     echo "  FAIL worker fresh purge 顺序: purge=${_purge_ln:-空} probe=${_probe_ln:-空}"; fail=1
 fi
 unset _purge_ln _probe_ln
+# 2026-11-19 CodeRabbit: 系统容器包 purge 必须由调用方**显式声明 fresh** 才允许;
+# kubelet inactive 不能单独作为判据(维护中的已 join worker 会被误 purge).
+chk_contains "worker fresh purge 需显式声明(env)" "CUBESTACK_FRESH_NODE" "${TOOL2}"
+chk_contains "worker fresh purge 支持 --fresh-node" "--fresh-node" "${TOOL2}"
+chk_contains "worker 未声明 fresh 即跳过清理" "未声明 fresh 节点" "${TOOL2}"
+chk_contains "worker purge 受显式 fresh 开关控制" 'if [ "${FRESH_NODE}" = "1" ]; then' "${TOOL2}"
+# 2026-11-19 CodeRabbit: 探测失败不能被 `|| true` 当成空清单(会把已装包当未装,
+# 用离线旧版本覆盖重装); 探测输出必须有完成哨兵, 失败要重试/中止.
+chk_contains "worker 探测失败不得继续选包" "拒绝在空/残缺清单上继续选包" "${TOOL2}"
+chk_contains "worker 探测输出要求完成哨兵" "probe_done=1" "${TOOL2}"
+chk_contains "worker 探测失败重试" "包清单探测失败(第" "${TOOL2}"
+# 2026-11-19 CodeRabbit: 依赖备选要按具体包名或 Provides 虚拟名解析
+# (版本化 Provides 才满足带版本依赖; 已装/待装/离线候选三侧都要算提供者)
+chk_contains "worker 依赖解析虚拟提供者" "_dep_planned_prov_ok" "${TOOL2}"
+chk_contains "worker 探测采集已装 Provides" "prov|" "${TOOL2}"
+chk_contains "worker 虚拟依赖离线候选" "_dep_prov_deb" "${TOOL2}"
+# 2026-11-19 CodeRabbit: 依赖解析未收敛(振荡/轮次耗尽)不得带着残缺计划进入复制/安装
+chk_contains "worker 依赖振荡必须失败" "依赖解析出现振荡" "${TOOL2}"
+chk_contains "worker 依赖轮次耗尽必须失败" "依赖解析在 10 轮内未收敛" "${TOOL2}"
+chk_contains "worker Breaks 轮次耗尽必须失败" "Breaks 复核在 10 轮内未收敛" "${TOOL2}"
+# 2026-11-19 CodeRabbit: 依赖/时间提供者/Breaks 三步互相影响 → 外层 fixpoint 反复校验;
+# 被裁剪移除的包禁止由依赖解析回加(否则"加回→再裁剪"振荡)
+chk_contains "worker 计划裁剪外层 fixpoint" "_prune_plan_once" "${TOOL2}"
+chk_contains "worker 裁剪移除包禁止回加" "_plan_blocked" "${TOOL2}"
+chk_contains "worker 计划 fixpoint 不收敛必须失败" "计划裁剪在 10 轮内未收敛" "${TOOL2}"
+# 2026-11-19 CodeRabbit: 远端修复(apt-get install -f)可能移除已装依赖/改版本 →
+# 修复后必须重新探测状态并重跑 Depends/Breaks, 探测失败直接停止(不得用旧结论进入 staging)
+chk_contains "worker 探测可重复调用" "_probe_remote" "${TOOL2}"
+chk_contains "worker 状态解析可重复调用" "_parse_probe" "${TOOL2}"
+chk_contains "worker 修复后重新探测" "修复后重新探测包状态并复核计划" "${TOOL2}"
+chk_contains "worker 修复后重跑计划 fixpoint" "_plan_fixpoint" "${TOOL2}"
+# 2026-11-19 CodeRabbit: "修复成功"不等于跳过的包已装上 —— repair-only 成功路径
+# 也必须执行 DEP_SKIPPED/BREAKS_SKIPPED 检查(不能在这里静默 exit 0)
+chk_contains "worker 修复成功路径仍报告跳过" "修复成功 ≠ 跳过的包已装上" "${TOOL2}"
+# 2026-11-19 CodeRabbit: 同一 initramfs 备份/恢复缺陷(install payload 内联版)一并加固
+chk_contains "worker 恢复失败保留备份" "备份保留在" "${TOOL2}"
+chk_contains "worker 备份失败不做无备份修改" "不做无备份的修改" "${TOOL2}"
 chk_contains "worker 复制双失败即退出" "离线包复制失败(rsync/scp 均失败)" "${TOOL2}"
 chk_contains "worker 复制后核对大小" "离线包复制不完整" "${TOOL2}"
 chk_contains "worker 安装前校验暂存集" "未成功复制到" "${TOOL2}"
@@ -289,6 +329,54 @@ else
     echo "  FAIL ONLY_HOSTS 未设置: 全量节点未被处理"; fail=1
 fi
 unset _rc
+
+echo "== ⑧ ONLY_HOSTS: inventory 过期地址不得覆盖 NODES 现地址 =="
+# 2026-11-19 CodeRabbit: 扩容时 hosts.yml 还是扩容前的(同一 hostname 可能挂着旧 IP),
+# 而 hosts.yml 要到流程稍后才重建 —— 必须只对 NODES 指定的地址分发/对账。
+_INV_TEST_DIR="${REPO_ROOT}/deployments/kubespray/inventory/cubestack-staleinv-$$"
+mkdir -p "${_INV_TEST_DIR}"
+trap 'rm -rf "${TMP}" "${_INV_TEST_DIR}"' EXIT
+cat > "${_INV_TEST_DIR}/hosts.yml" <<'EOF'
+all:
+  children:
+    kube_node:
+      hosts:
+        w1:
+          ansible_host: 10.0.0.9
+        w2:
+          ansible_host: 10.0.0.2
+EOF
+cat > "${TMP}/cluster-stale.conf" <<EOF
+NODES=("worker,w1,10.0.0.1,root,-" "worker,w2,10.0.0.2,root,-")
+SSH_USER="root"
+KUBESPRAY_PROFILE="none"
+CLUSTER_NAME="$(basename "${_INV_TEST_DIR}")"
+EOF
+run_stale() {  # run_stale <only_hosts>
+    local only="$1"
+    (
+        export PATH="${TMP}/bin:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster-stale.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline"
+        export ONLY_HOSTS="${only}"
+        export FAKE_SSH_LOG="${TMP}/ssh-stale.log"
+        export FAKE_SCP_LOG="${TMP}/scp-stale.log"
+        : > "${FAKE_SSH_LOG}"; : > "${FAKE_SCP_LOG}"
+        bash "${TOOL}" --dry-run
+    ) > "${TMP}/out-stale" 2>&1
+    echo $?
+}
+_rc="$(run_stale "w1")"
+chk "inventory 旧地址: 退出码" "0" "${_rc}"
+chk "inventory 旧地址: 未触碰 10.0.0.9" "0" "$(grep -c '10.0.0.9' "${TMP}/ssh-stale.log" 2>/dev/null || true)"
+if grep -q '10.0.0.1' "${TMP}/ssh-stale.log" 2>/dev/null; then
+    echo "  ok  inventory 旧地址: 使用 NODES 现地址 10.0.0.1"
+else
+    echo "  FAIL inventory 旧地址: 未处理 10.0.0.1"; fail=1
+fi
+chk_contains "inventory 旧地址: 明确告警" "跳过 inventory 过期地址" "${TMP}/out-stale"
+unset _rc
+rm -rf "${_INV_TEST_DIR}"
 
 echo ""
 if [ "${fail}" = "0" ]; then

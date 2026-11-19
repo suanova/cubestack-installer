@@ -47,10 +47,29 @@ if [ "${#IPS[@]}" -eq 0 ]; then
     #   显式 --ip 仍视为调用方精确指定, 不受 ONLY_HOSTS 过滤。
     _only="${ONLY_HOSTS:-}"
     _hosts="${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME:-cubestack-cluster}/hosts.yml"
+    # ONLY_HOSTS(扩容)场景: 地址以 cluster.conf NODES 为准 —— 扩容时 hosts.yml 还是**扩容前**
+    # 生成的(同一 hostname 可能是旧 IP), 而 hosts.yml 要到流程稍后才重建。若把 inventory 的
+    # 过期地址也收进来, .deb 会被分发/对账到旧机器。这里先建 NODES 的 hostname→IP 映射,
+    # inventory 中与 NODES 冲突的地址一律跳过(不跳过则两条都会被 IP 去重逻辑保留)。
+    declare -A _nodes_ip=()
+    if [ -n "${_only}" ]; then
+        for _line in "${NODES[@]:-}"; do
+            [ -z "${_line}" ] && continue
+            node_parse "${_line}"
+            [ -n "${NODE_IP}" ] || continue
+            node_matches "${NODE_HOSTNAME}" || continue
+            [ -n "${_nodes_ip[${NODE_HOSTNAME}]:-}" ] || _nodes_ip["${NODE_HOSTNAME}"]="${NODE_IP}"
+        done
+    fi
     if [ -f "${_hosts}" ]; then
         while IFS=$'\t' read -r _hn _ip; do
             [ -n "${_ip}" ] || continue
             node_matches "${_hn}" || continue
+            if [ -n "${_only}" ] && [ -n "${_nodes_ip[${_hn}]:-}" ] \
+               && [ "${_nodes_ip[${_hn}]}" != "${_ip}" ]; then
+                warn "  跳过 inventory 过期地址: ${_hn} -> ${_ip}(NODES 现地址 ${_nodes_ip[${_hn}]}; hosts.yml 将在扩容流程中重建)"
+                continue
+            fi
             IPS+=("${_ip}")
         done < <(awk '
             /^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*$/ {
@@ -79,7 +98,7 @@ if [ "${#IPS[@]}" -eq 0 ]; then
         done
         unset _line _x _dup
     fi
-    unset _hn _ip _only
+    unset _hn _ip _only _nodes_ip
 fi
 [ "${#IPS[@]}" -gt 0 ] || { err "没有目标节点(cluster.conf NODES 为空?)"; exit 1; }
 
@@ -409,17 +428,34 @@ echo "   [2/4] 修复破损依赖(计划见下, 由 apt 求解器决定先摘谁
 #    patch-playbooks/install-packages.yml 早已这样防(update_initramfs=no 装完恢复); 本工具同样处理。
 _ir_conf=/etc/initramfs-tools/update-initramfs.conf
 _ir_bak=""
-if [ "${DRY}" = "0" ] && [ -f "${_ir_conf}" ] && ! grep -qE '^[[:space:]]*update_initramfs[[:space:]]*=[[:space:]]*no' "${_ir_conf}"; then
-    _ir_bak="$(mktemp)"; cp -a "${_ir_conf}" "${_ir_bak}"
-    if grep -qE '^[[:space:]]*update_initramfs=' "${_ir_conf}"; then
-        sed -i -E 's|^[[:space:]]*update_initramfs=.*|update_initramfs=no|' "${_ir_conf}"
+# 恢复 initramfs 配置(正常收尾与 EXIT trap 共用): **只有拷回成功才删除备份** ——
+# 拷回失败时必须保留备份并提示人工路径, 否则节点会停在 update_initramfs=no 且没有任何
+# 可恢复的原配置(2026-11-19 CodeRabbit)。
+_ir_restore() {
+    [ -n "${_ir_bak}" ] && [ -f "${_ir_bak}" ] || return 0
+    if cp -a "${_ir_bak}" "${_ir_conf}"; then
+        rm -f "${_ir_bak}"
     else
-        echo 'update_initramfs=no' >> "${_ir_conf}"
+        echo "         ⚠ 恢复 ${_ir_conf} 失败; 备份保留在 ${_ir_bak} —— 请人工 cp 回该文件(节点当前仍是 update_initramfs=no)"
     fi
-    echo "         已临时禁用 initramfs 重建(规避 rbd/mdadm 扫描卡死链)"
-    _ir_restore() { [ -n "${_ir_bak}" ] && [ -f "${_ir_bak}" ] && { cp -a "${_ir_bak}" "${_ir_conf}"; rm -f "${_ir_bak}"; }; }
-    trap _ir_restore EXIT
-    trap 'exit 143' HUP INT TERM
+}
+if [ "${DRY}" = "0" ] && [ -f "${_ir_conf}" ] && ! grep -qE '^[[:space:]]*update_initramfs[[:space:]]*=[[:space:]]*no' "${_ir_conf}"; then
+    _ir_bak="$(mktemp)"
+    # ⚠ 备份失败时**不得**继续修改: 否则后续"恢复"会把空 mktemp 文件拷回去
+    if cp -a "${_ir_conf}" "${_ir_bak}"; then
+        if grep -qE '^[[:space:]]*update_initramfs=' "${_ir_conf}"; then
+            sed -i -E 's|^[[:space:]]*update_initramfs=.*|update_initramfs=no|' "${_ir_conf}"
+        else
+            echo 'update_initramfs=no' >> "${_ir_conf}"
+        fi
+        echo "         已临时禁用 initramfs 重建(规避 rbd/mdadm 扫描卡死链)"
+        # 提前退出(如 [1/4]-[3/4] 发现不健康)也必须恢复配置 → EXIT trap 兜底
+        trap _ir_restore EXIT
+        trap 'exit 143' HUP INT TERM
+    else
+        rm -f "${_ir_bak}"; _ir_bak=""
+        echo "         ⚠ 备份 ${_ir_conf} 失败 → 跳过临时禁用 initramfs 重建(不做无备份的修改)"
+    fi
 fi
 # ② 标准急救: 把"已解包但未配置"的半装包配置完(实测 2026-09-28: 3.33 因历史上的块设备卡死被中断,
 #    留下一串 Conf 状态的包 ⇒ 只跑 apt -f install 修不掉, 必须先 dpkg --configure -a)
@@ -477,7 +513,8 @@ if [ "${DRY}" = "0" ] && [ "${#_TO_DEBS[@]}" -gt 0 ]; then
 fi
 
 echo "   [4/4] 复核 apt 依赖图:"
-if [ -n "${_ir_bak}" ] && [ -f "${_ir_bak}" ]; then cp -a "${_ir_bak}" "${_ir_conf}"; rm -f "${_ir_bak}"; fi
+# 正常收尾恢复配置(失败会保留备份并提示; EXIT trap 也会兜底再试一次)
+_ir_restore || true
 if apt-get check >/dev/null 2>&1; then echo "         ✅ 健康"; exit 0; fi
 echo "         ❌ 仍不健康:"; apt-get check 2>&1 | sed -n '/E:/p' | head -4 | sed 's/^/            /'
 exit 1

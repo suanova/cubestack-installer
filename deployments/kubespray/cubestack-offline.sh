@@ -1070,22 +1070,34 @@ _gen_preload_play() {
         set -euo pipefail
         changed=0
         failed=0
-        for img in $(ctr -n k8s.io images list -q 2>/dev/null | grep '/mirrors/' || true); do
+        # 镜像列表只取一次; 上游 tag 是否存在用 bash 内建匹配判断, 不走 grep 管道:
+        # grep -q 命中首个匹配即退出, ctr 仍有输出时收到 SIGPIPE(141), pipefail 下
+        # 整条管道判失败, 已存在的上游 tag 会被误判为缺失而重复 tag; 部分 grep 实现
+        # (如 ugrep)即使去掉 -q, 输出重定向到 /dev/null 时同样提前退出。
+        all_images="$(ctr -n k8s.io images list -q 2>/dev/null || true)"
+        known_images=$'\n'"${all_images}"$'\n'
+        for img in ${all_images}; do
           case "$img" in
             */mirrors/*) upstream="${img#*/mirrors/}" ;;
             *) continue ;;
           esac
           [ -n "$upstream" ] || continue
-          if ! ctr -n k8s.io images list -q 2>/dev/null | grep -qx "$upstream"; then
-            # 失败必须让本 task 失败: 只推了 mirrors/ 形态的离线归档若缺上游 tag,
-            # kubeadm preflight 仍会联网拉取并超时; || true 会把缺口伪装成"已补 tag"。
-            if ctr -n k8s.io images tag "$img" "$upstream" >/dev/null 2>&1; then
-              changed=$((changed + 1))
-            else
-              echo "  ✗ retag 失败: ${img} -> ${upstream}" >&2
-              failed=$((failed + 1))
-            fi
-          fi
+          case "${known_images}" in
+            *$'\n'"${upstream}"$'\n'*) ;;  # 上游 tag 已存在
+            *)
+              # 失败必须让本 task 失败: 只推了 mirrors/ 形态的离线归档若缺上游 tag,
+              # kubeadm preflight 仍会联网拉取并超时; || true 会把缺口伪装成"已补 tag"。
+              if ctr -n k8s.io images tag "$img" "$upstream" >/dev/null 2>&1; then
+                changed=$((changed + 1))
+                # 同步进已知集合: 不同的 mirrors/ 前缀可能映射到同一上游 tag,
+                # 再对该目标 tag 会因 already exists 失败(旧实现靠每次重新 list 规避)。
+                known_images="${known_images}"$'\n'"${upstream}"$'\n'
+              else
+                echo "  ✗ retag 失败: ${img} -> ${upstream}" >&2
+                failed=$((failed + 1))
+              fi
+              ;;
+          esac
         done
         echo "  retag: ${changed} 个镜像已补上游 tag"
         if [ "${failed}" -ne 0 ]; then

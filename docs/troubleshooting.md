@@ -8,6 +8,8 @@
 > 需要 installer 直接安装离线 `.deb` 时，显式置 `NODE_PKGS_ENABLED=true` /
 > `WORKER_PKGS_ENABLED=true`（工具 `reconcile-node-packages.sh` /
 > `install-worker-packages.sh` 已恢复，默认关闭）。
+> `install-worker-packages.sh` 的 fresh 节点清理（系统 `containerd`/`containerd.io`/`runc`）
+> 默认不做，需显式声明 `CUBESTACK_FRESH_NODE=1`（或 `--fresh-node`）；kubelet 未运行不是判据。
 > chrony 专用安装集（`offline-files/os/packages/chrony/`）用独立可选模块
 > `CHRONY_PKGS_ENABLED=true` / `--steps chrony_pkgs` 安装；**装包可选、NTP 同步必选**，
 > `k8s_ntp` 只做同步并假设 chrony 已存在。

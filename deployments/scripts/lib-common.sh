@@ -2256,24 +2256,74 @@ _pkg_conflict_providers() {
     esac
 }
 
-# 离线依赖闭包预检: 每个待装 deb 的 Pre-Depends/Depends 必须能由
-# "已装包 ∪ 本目录 deb" 满足（包名级；版本约束仍由 dpkg 兜底）。
-_deb_set_missing() { # <deb目录> <deb文件...>
-    local d="$1"; shift
-    local avail inst f p deps grp alt dn ok missing=""
+# 版本比较(dpkg 语义): op 为空 = 无版本约束
+_deb_ver_ok() { # <op> <要求版本> <实际版本>
+    [ -z "$1" ] && return 0
+    [ -n "$3" ] || return 1
+    dpkg --compare-versions "$3" "$1" "$2" 2>/dev/null
+}
+
+# 解析 Provides 字段 → 记录行 "prov<TAB>包名<TAB>版本"(无版本 Provides 版本列为空)。
+# dpkg 语义: 无版本 Provides 不满足带版本约束的依赖。
+_deb_emit_provides() { # <provides 字段>
+    local e n v
+    printf '%s\n' "$1" | tr ',' '\n' | while IFS= read -r e; do
+        e="$(printf '%s' "$e" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+        [ -n "$e" ] || continue
+        case "$e" in
+            *'('*)
+                n="${e%%(*}"; v="${e#*(}"; v="${v%%)*}"
+                n="$(printf '%s' "$n" | tr -d '[:space:]')"
+                v="$(printf '%s' "$v" | tr -d '[:space:]')"
+                v="${v#=}"; v="$(printf '%s' "$v" | tr -d '[:space:]')"
+                printf 'prov\t%s\t%s\n' "$n" "$v" ;;
+            *)
+                printf 'prov\t%s\t\n' "$e" ;;
+        esac
+    done
+}
+
+# 记录集(已装包 ∪ 随包 deb)中是否有满足版本约束的备选提供者
+_deb_alt_ok() { # <记录文件> <包名> <op> <要求版本>
+    local f="$1" want="$2" op="$3" req="$4" kind n v
+    while IFS=$'\t' read -r kind n v; do
+        [ "$n" = "$want" ] || continue
+        if [ "$kind" = "pkg" ]; then
+            _deb_ver_ok "$op" "$req" "$v" && return 0
+        elif [ -z "$op" ]; then
+            return 0
+        elif [ -n "$v" ] && _deb_ver_ok "$op" "$req" "$v"; then
+            return 0
+        fi
+    done < "$f"
+    return 1
+}
+
+# 离线依赖闭包预检(版本感知): 每个待装 deb 的 Pre-Depends/Depends 备选必须有一个由
+# "已装包 ∪ 本批次待装 deb"以**满足版本约束**的方式提供(包名与 Provides 均按 dpkg 语义)。
+# ⚠ 提供者只算本批次待装 deb: install_debs_offline 会跳过"包名已装"的 deb(不看版本),
+#   目录里存在但不在待装列表的 deb 不会被安装, 不能当作版本提供者。
+# 本检查在预卸互斥提供者之前执行: 依赖缺失/版本不满足时直接拒绝, 不会先卸掉
+# 当前时间提供者再被 dpkg 打回(半替换窗口)。
+_deb_set_missing() { # <待装 deb 文件...>
+    local avail inst f p deps grp alt dn op req inner ok missing=""
     local -a _groups _alts
     avail="$(mktemp)"; inst="$(mktemp)"
     {
-        for f in "${d}"/*.deb; do
+        for f in "$@"; do
             [ -f "${f}" ] || continue
-            dpkg-deb -f "${f}" Package 2>/dev/null || true
-            dpkg-deb -f "${f}" Provides 2>/dev/null | tr ',' '\n' \
-                | sed -E 's/^[[:space:]]*([^ (]+).*/\1/' | sed '/^$/d' || true
+            p="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
+            [ -n "${p}" ] && printf 'pkg\t%s\t%s\n' "${p}" \
+                "$(dpkg-deb -f "${f}" Version 2>/dev/null || true)"
+            _deb_emit_provides "$(dpkg-deb -f "${f}" Provides 2>/dev/null || true)"
         done
-    } | sort -u > "${avail}" || true
-    dpkg-query -W -f='${Package}\n${Provides}\n' 2>/dev/null \
-        | tr ',' '\n' | sed -E 's/^[[:space:]]*([^ (]+).*/\1/' | sed '/^$/d' \
-        | sort -u > "${inst}" || true
+    } > "${avail}" || true
+    dpkg-query -W -f='${Status}\t${Package}\t${Version}\t${Provides}\n' 2>/dev/null \
+        | while IFS=$'\t' read -r _st _p _v _pv; do
+            [ "${_st}" = "install ok installed" ] || continue
+            printf 'pkg\t%s\t%s\n' "${_p}" "${_v}"
+            _deb_emit_provides "${_pv}"
+        done > "${inst}" || true
     for f in "$@"; do
         [ -f "${f}" ] || continue
         p="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
@@ -2286,7 +2336,17 @@ _deb_set_missing() { # <deb目录> <deb文件...>
                 IFS='|' read -ra _alts <<< "${grp}"
                 for alt in "${_alts[@]}"; do
                     dn="$(printf '%s' "${alt}" | sed -E 's/^[[:space:]]*([A-Za-z0-9+.-]+).*/\1/')"
-                    if grep -qxF "${dn}" "${avail}" || grep -qxF "${dn}" "${inst}"; then
+                    op=""; req=""
+                    case "${alt}" in
+                        *'('*)
+                            inner="${alt#*(}"; inner="${inner%%)*}"
+                            inner="$(printf '%s' "${inner}" | tr -d '[:space:]')"
+                            op="$(printf '%s' "${inner}" | sed -E 's/^([<>=]+).*/\1/')"
+                            req="${inner#"${op}"}"
+                            ;;
+                    esac
+                    if _deb_alt_ok "${avail}" "${dn}" "${op}" "${req}" \
+                       || _deb_alt_ok "${inst}" "${dn}" "${op}" "${req}"; then
                         ok=1; break
                     fi
                 done
@@ -2296,14 +2356,16 @@ _deb_set_missing() { # <deb目录> <deb文件...>
     done
     rm -f "${avail}" "${inst}"
     if [ -n "${missing}" ]; then
-        echo "  [deb-install] 离线依赖不完整(未安装也未随包提供):${missing}" >&2
+        echo "  [deb-install] 离线依赖不完整(已装/随包均无满足版本约束的提供者):${missing}" >&2
         return 1
     fi
     return 0
 }
 
 # 预卸前备份互斥时间提供者: 回滚 deb + 全部 conffiles。
-# 回滚 deb 优先取与已装版本一致的（${d}/rollback/、${d}/、apt archives）。
+# 回滚 deb **必须与已装版本一致**（${d}/rollback/、${d}/、apt archives 任一来源）:
+# 不同版本的归档不能把节点恢复到原状态(且可能依赖离线集里没有的旧依赖),
+# 与"回滚包缺失"同等对待 —— 预卸前拒绝, 不进入半替换窗口。
 _time_daemon_backup() { # <提供者包名> <deb目录> <备份根>
     local c="$1" d="$2" root="$3"
     local dir="${root}/${c}" f deb="" ver
@@ -2315,10 +2377,9 @@ _time_daemon_backup() { # <提供者包名> <deb目录> <备份根>
         if [ -n "${ver}" ] && [ "$(dpkg-deb -f "${f}" Version 2>/dev/null || true)" = "${ver}" ]; then
             deb="${f}"; break
         fi
-        [ -n "${deb}" ] || deb="${f}"
     done
     if [ -z "${deb}" ]; then
-        echo "  [deb-install] 未找到 ${c} 的回滚 deb(需放 ${d}/rollback/ 或 /var/cache/apt/archives); 拒绝预卸" >&2
+        echo "  [deb-install] 未找到 ${c} 与已装版本(${ver:-未知})一致的回滚 deb(需放 ${d}/rollback/、${d}/ 或 /var/cache/apt/archives); 拒绝预卸" >&2
         return 1
     fi
     cp -a "${deb}" "${dir}/rollback.deb" || return 1
@@ -2367,11 +2428,22 @@ _time_daemon_restore() { # <提供者包名> <备份根>
 }
 
 # 安装一批离线 deb: 预检依赖 → 备份/预卸互斥 → 批量 dpkg → 失败逐包隔离 → 必要时回滚。
+# 并发安全(2026-11-19): 同一节点可能被并发触发(重跑/多入口同时下发), 替换流程绝不能交错
+# —— 节点级 flock 串行化(等待上限 600s); 回滚目录按**本次运行**私有(mktemp -d),
+# 不再共享 /tmp/cubestack-time-daemon-rollback, 防止另一运行 reset 掉本运行的备份;
+# 成功后清理私有目录, 失败保留现场(回滚 deb/配置)供人工复核。
 install_debs_offline() {
+    (
+        flock -w 600 9 || { echo "  [deb-install] 等待装包锁超时(另一进程正在本节点装包)" >&2; exit 1; }
+        _install_debs_offline_impl "$@"
+    ) 9>"/tmp/cubestack-deb-install.lock"
+}
+
+_install_debs_offline_impl() {
     local d="$1"; shift
     local want="$*"
     local dlog=/tmp/cubestack-deb-install.log p c f pk list="" n_skip=0
-    local rollback_root=/tmp/cubestack-time-daemon-rollback
+    local rollback_root=""
     local target_ok=1 _has=0 _seen=0 _pc=""
     local -a purge_providers=()
     : >"${dlog}"
@@ -2402,7 +2474,7 @@ install_debs_offline() {
         fi
     done
     # shellcheck disable=SC2086
-    _deb_set_missing "${d}" ${list} || return 1
+    _deb_set_missing ${list} || return 1
     # 3) 预卸前备份将被替换的互斥提供者(回滚包+配置文件); 任一缺失则拒绝预卸。
     for p in ${want}; do
         dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "install ok installed" && continue
@@ -2414,6 +2486,10 @@ install_debs_offline() {
                 [ "${_pc}" = "${c}" ] && { _seen=1; break; }
             done
             [ "${_seen}" = "1" ] && continue
+            # 本次运行私有的回滚目录(懒创建): 并发/重跑不会互相清掉备份
+            if [ -z "${rollback_root}" ]; then
+                rollback_root="$(mktemp -d /tmp/cubestack-time-daemon-rollback.XXXXXX)" || return 1
+            fi
             _time_daemon_backup "${c}" "${d}" "${rollback_root}" || return 1
             purge_providers+=("${c}")
         done
@@ -2425,6 +2501,7 @@ install_debs_offline() {
             echo "  [deb-install] 预卸 ${c} 失败; 中止安装(未安装 ${want})" >&2
             tail -8 "${dlog}" | sed 's/^/      /' >&2
             _time_daemon_restore "${c}" "${rollback_root}" || true
+            echo "  [deb-install] 回滚现场保留: ${rollback_root}(回滚 deb/配置未删除)" >&2
             return 1
         fi
     done
@@ -2436,6 +2513,7 @@ install_debs_offline() {
         # 目标包未就绪时继续走逐包修复, 不能提前报成功.
         if assert_pkgs_ready ${want}; then
             echo "  [deb-install] dpkg 直装成功(跳过已装 ${n_skip}; 安装 $(echo ${list} | wc -w) 个)"
+            [ -n "${rollback_root}" ] && rm -rf "${rollback_root}"
             return 0
         fi
         echo "  [deb-install] dpkg 返回成功但目标包未就绪(半装); 进入逐包修复..." >&2
@@ -2462,7 +2540,13 @@ install_debs_offline() {
         done
     fi
     [ "${fail_n}" -gt 0 ] && tail -8 "${dlog}" | sed 's/^/      /'
-    [ "${target_ok}" = "1" ] && [ "${fail_n}" -eq 0 ] && return 0
+    if [ "${target_ok}" = "1" ] && [ "${fail_n}" -eq 0 ]; then
+        [ -n "${rollback_root}" ] && rm -rf "${rollback_root}"
+        return 0
+    fi
+    if [ -n "${rollback_root}" ]; then
+        echo "  [deb-install] 回滚现场保留: ${rollback_root}(回滚 deb/配置未删除)" >&2
+    fi
     return 1
 }
 
