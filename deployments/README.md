@@ -17,6 +17,7 @@
     harbor.isuanova.com/suanova/cubestack-installer-cli:latest
   ```
   进容器后 `cd /opt/cubestack-installer && ./deployments/scripts/deploy-cluster.sh`;完整说明见根 `README.md` §十四「容器化部署(Docker)」。
+  密钥已存在时可只读挂载(`:ro`);首次安装需生成密钥时要挂可写目录。
 
 > ⚠ **节点格式(新)**: cluster.conf 的 NODES 为 **5 字段**(`role,hostname,ip,ssh_user,ssh_password`, 不区分虚拟机/裸金属;
 > 密码 `-` = 默认 `SSH_DEFAULT_PASSWORD`)。需要**创建虚拟机**的节点在

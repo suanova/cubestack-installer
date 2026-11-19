@@ -275,7 +275,8 @@ KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"      # 留空=kube-vip 自动检测
 > ⚠ **判据是"VIP 已绑",不等于阶段二的人工确认。** 也就是说 VIP 一绑上,部署侧写的域名就会切到
 > VIP,而 kubespray 侧(`loadbalancer_apiserver.address`)仍要等 `KUBE_VIP_SWITCH_CONFIRMED=1`。
 > 在"已绑但未确认"这个窗口里两边**不一致**:此刻 VIP 确实在服务,部署侧先切不影响可用性,但
-> 若希望两边严格同步,就别在那个窗口里跑 `03_k8s_hosts`(`UPDATE_ETC_HOSTS=0`,默认即不跑)。
+> 若希望两边严格同步,就别在那个窗口里跑 `03_k8s_hosts`。注意 `UPDATE_ETC_HOSTS` 只控制
+> **部署机**侧的写入; 节点侧 API 域名同步始终执行, 把它设成 0 并不能阻止节点先切到 VIP。
 >
 > ⚠ **`API_IP` 与 `API_ENTRY_IP` 不可互换。** `API_IP` 是"能通 NodePort 的**节点** IP":
 > registry 的 containerd mirror 用 `http://${API_IP}:${REGISTRY_NODEPORT}`、`setup-api-expose`

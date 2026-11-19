@@ -2159,6 +2159,56 @@ node_password() {
     if [ -n "${pw}" ] && [ "${pw}" != "-" ]; then echo "${pw}"; else node_default_pw "$1"; fi
 }
 
+# ---------------- 拓扑判定(共享) ----------------
+# 单节点 all-in-one = cluster.conf NODES 原始清单里恰好 1 个 master 且 0 个 worker。
+# ⚠ 按 **NODES 原始清单**计数, 不看 gen-inventory 的 INV_ROLES/INV_EXCLUDE 过滤结果 ——
+#   cluster.conf 声明单机就是单节点; 分阶段把未来 worker 先写进 NODES 的场景不在判定内。
+# 单节点没有跨节点 HA 语义(副本 2 + required anti-affinity 会留下永远 Pending 的第二个副本),
+# 调用方据此把单副本/无 HA 设为默认。
+#
+# node_parse 会写 NODE_* 全局变量, 故计数在**子 shell** 内完成 —— 本函数直接调用也不会
+# 污染调用方已经解析好的 NODE_* 状态。
+# 用法: is_single_node_topology && ...
+node_role_count() {   # <master|worker> → 节点数
+    local role="$1"
+    (
+        local line n=0
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            node_parse "${line}"
+            [ "${NODE_ROLE}" = "${role}" ] && n=$((n + 1))
+        done
+        printf '%s' "${n}"
+    )
+}
+
+is_single_node_topology() {
+    [ "$(node_role_count master)" -eq 1 ] && [ "$(node_role_count worker)" -eq 0 ]
+}
+
+# 部署机自身是否就是 NODES 中的一台节点(单节点安装 / 在 master 上就地部署)。
+# 判据: hostname 与 NODES hostname 相同, 或本机某个 IP 与 NODES IP 相同。
+# 用途: 部署机本身是节点时, 它的 /etc/hosts 同时是节点解析的一部分 ——
+#   API_DOMAIN 必须可解析, 否则 kubeadm 之后创建 bootstrap token 会 no such host
+#   (单节点安装实机事故, 见 03_k8s_hosts.sh 顶部注释)。
+# 注意: 容器安装(--network host)下 hostname -I 仍是宿主 IP, 判据同样成立。
+deploy_host_is_node() {
+    (
+        local line hn ips
+        hn="$(hostname 2>/dev/null || true)"
+        ips=" $(hostname -I 2>/dev/null || true) "
+        for line in "${NODES[@]:-}"; do
+            [ -z "${line}" ] && continue
+            node_parse "${line}"
+            [ -n "${hn}" ] && [ "${NODE_HOSTNAME}" = "${hn}" ] && return 0
+            # NODE_IP 必须非空: 空 IP 时下面的通配（"  " 两个空格）会匹配任意主机。
+            [ -n "${NODE_IP}" ] || continue
+            case "${ips}" in *" ${NODE_IP} "*) return 0 ;; esac
+        done
+        return 1
+    )
+}
+
 # ---------------- Ceph 存储节点选择(唯一实现) ----------------
 # ⚠ 这段逻辑**曾在本仓库散落 5 处各写一遍**(02_ceph.sh / lib-common 的预检 / deploy-cluster.sh
 #   两处 / ceph-cleanup.sh), 改一处漏一处就会出现"预检说 3 台、真装却装到别的节点"这类不一致。
@@ -2436,18 +2486,51 @@ wait_registry_ready() {
 #   做"删旧行→原地覆盖写"; 非容器环境(宿主机/节点, 未必有 sponge)回退
 #   "sed 过滤 → 临时文件 + cat 覆盖写"(同样不 rename, bind-mount 与普通 FS 都安全)。
 #   两种分支都是先删该域名【所有】旧行, 再追加当前 IP 一行。
+# 删除 hosts 中"某个字段**完整等于** <域名>"的字段; 同一行的其它 hostname/别名与注释保留,
+# 只有整行 hostname 都被删空时才丢弃该行。
+# ★ 不能再用 sed "/${dom}/d" 的子串匹配: 节点 hostname 是 'k8s' 时会把刚写的
+#   k8s-api.cubestack.io 行一起删掉; 而整行删除会连带丢掉同行其它别名(CodeRabbit 2026-11-19)。
+# 用法: _hosts_filter_domain <domain> < /etc/hosts > filtered
+_hosts_filter_domain() {
+    awk -v d="$1" '
+        /^[[:space:]]*(#|$)/ { print; next }
+        {
+            out = $1
+            kept = 0
+            for (i = 2; i <= NF; i++) {
+                if ($i ~ /^#/) {
+                    for (j = i; j <= NF; j++) out = out " " $j
+                    break
+                }
+                if ($i == d) continue
+                out = out " " $i
+                kept = 1
+            }
+            if (kept) print out
+        }'
+}
+
 ensure_hosts_entry() {
     local ip="$1" dom="$2"
     [ -n "${ip}" ] && [ -n "${dom}" ] || return 0
     local t="/etc/hosts.$$"
     if command -v sponge >/dev/null 2>&1; then
-        sed "/${dom}/d" /etc/hosts | sponge /etc/hosts 2>/dev/null || return 0
+        _hosts_filter_domain "${dom}" < /etc/hosts | sponge /etc/hosts 2>/dev/null || return 0
     else
-        sed "/${dom}/d" /etc/hosts > "${t}" 2>/dev/null || return 0
+        _hosts_filter_domain "${dom}" < /etc/hosts > "${t}" 2>/dev/null || return 0
         cat "${t}" > /etc/hosts 2>/dev/null || { rm -f "${t}"; return 0; }
         rm -f "${t}"
     fi
     printf '%s %s\n' "${ip}" "${dom}" >> /etc/hosts 2>/dev/null || true
+}
+
+# 取域名解析到的 IPv4(优先 ahostsv4, 避免 AAAA 记录抢先让 getent hosts 返回 IPv6;
+# 不支持 ahostsv4 的系统回退 getent hosts)。解析不到输出空。
+# 用法: ip="$(resolve_host_ipv4 <domain>)"
+resolve_host_ipv4() {
+    local dom="$1"
+    [ -n "${dom}" ] || return 0
+    { getent ahostsv4 "${dom}" 2>/dev/null || getent hosts "${dom}" 2>/dev/null; } | awk '{print $1; exit}'
 }
 
 # 幂等追加【整块】宿主机 hosts 条目(与 ensure_hosts_entry 同套防重复理念, 适用于多行块):
@@ -2504,6 +2587,20 @@ sync_nodes_hosts_remote() {
         entries+=("${NODE_IP} ${NODE_HOSTNAME}")
         targets+=("${NODE_HOSTNAME}|${NODE_IP}|${NODE_USER}|${NODE_PW}")
     done
+    # ★ issue #187: API/registry 域名也写到**每个节点**, 而不只是部署机。
+    #   kubeadm join / bootstrap token 在节点上执行, 节点 /etc/hosts 缺 API_DOMAIN 会
+    #   `lookup k8s-api.cubestack.io: no such host`; 容器安装(--network host)时部署机的
+    #   /etc/hosts 是容器私有 bind-mount, 写不到节点, 只能靠这里远端写入。
+    #   入口地址用 api_entry_addr(): 显式外部 LB(API_EXTERNAL_ADDR) > 已绑 VIP > 首个 master,
+    #   与 10_api_local_lb / 07_k8s_scale 的"节点域名行指向当前入口"口径一致。
+    if [ -n "${API_DOMAIN:-}" ]; then
+        _api_entry="$(api_entry_addr 2>/dev/null || true)"
+        [ -n "${_api_entry}" ] && entries+=("${_api_entry} ${API_DOMAIN}")
+    fi
+    if [ -n "${REGISTRY_DOMAIN:-}" ] && [ -n "${REGISTRY_IP:-}" ]; then
+        entries+=("${REGISTRY_IP} ${REGISTRY_DOMAIN}")
+    fi
+    unset _api_entry
     if [ "${#entries[@]}" -eq 0 ]; then
         warn "  NODES 无可同步的 hostname/IP, 跳过节点侧 /etc/hosts"
         return 0
@@ -2561,7 +2658,7 @@ EOS
         err "  → 修复 SSH/免密后重跑; 否则 hostNetwork Pod 可能无法按 hostname 解析对端(回退 127.0.0.1)"
         return 1
     fi
-    ok "  节点侧 /etc/hosts 同步完成(${#entries[@]} 个 hostname → ${#targets[@]} 个节点)"
+    ok "  节点侧 /etc/hosts 同步完成(${#entries[@]} 个 hostname/域名 → ${#targets[@]} 个节点)"
     return 0
 }
 

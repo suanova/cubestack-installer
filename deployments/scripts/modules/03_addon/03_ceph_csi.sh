@@ -96,9 +96,46 @@ _CEPH_SL_VAL="${_CEPH_STORAGE_LABEL#*=}"
 
 # 前置: 集群内 CephCluster 已 Ready; 若无集群内 CephCluster 但配置了外部 monitors →
 # 走"外部 Ceph 连接"模式(由 csi-operator 连外部, 跳过 rbd-pool/集群资源创建)。
-_PH="$( (SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster --no-headers 2>/dev/null" || true) )"
+#
+# ★ issue #194(重试幂等): **只有 internal 集群名 rook-ceph 才算"集群内 Ceph"**。
+#   外部接入 CR 名是 rook-ceph-external; 旧逻辑 `get cephcluster --no-headers` 把任何 CR
+#   都当成 internal, 于是 external 安装只要失败重试一次就会进入内部等待分支, 却固定查询
+#   不存在的 cephcluster rook-ceph → phase 恒空 → 600s 后失败。clean install 不触发。
+#   rook-ceph 自身 spec.external.enable=true 时也按 external 处理(外部 CR 复用了内部名)。
+# 用法: _ceph_cluster_kind → internal|external|none; 分类查询失败返回 2(不误判为 internal)
+_ceph_cluster_kind() {
+    local _list _ok=0 _try _name _ext
+    # 一次查询同时取 name + external 标志(custom-columns 无引号/转义坑):
+    #   · 查询失败(SSH/API/RBAC)与"CR 确实不存在"必须区分 —— 旧写法 `|| true` 把两者都变成空,
+    #     CEPH_MODE=external 时会把实际存在的 internal rook-ceph 误判为 external(或反过来让
+    #     external CR 进入 600s 内部等待)。重试 3 次仍失败就显式返回 2。
+    for _try in 1 2 3; do
+        if _list="$( SSH "${K} -n ${CEPH_NAMESPACE} get cephcluster -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers 2>/dev/null" </dev/null )"; then
+            _ok=1; break
+        fi
+        [ "${_try}" -lt 3 ] && sleep 2 || true
+    done
+    if [ "${_ok}" != "1" ]; then
+        err "  无法查询 CephCluster 列表(连续 3 次失败)"
+        err "  排查: kubectl -n ${CEPH_NAMESPACE} get cephcluster; 检查 API/RBAC"
+        return 2
+    fi
+    while read -r _name _ext; do
+        [ "${_name}" = "rook-ceph" ] || continue
+        if [ "${_ext}" = "true" ]; then printf 'external'; else printf 'internal'; fi
+        return 0
+    done <<< "${_list}"
+    # 确认不存在 internal rook-ceph 后的配置回退
+    if [ "${CEPH_MODE:-internal}" = "external" ]; then printf 'external'; return 0; fi
+    printf 'none'
+}
+
+if ! _CEPH_KIND="$(_ceph_cluster_kind)"; then
+    exit 1
+fi
 _CEPH_EXTERNAL=0
-if [ -n "${_PH}" ]; then
+case "${_CEPH_KIND}" in
+internal)
     # CephCluster 存在但未 Ready: Progressing 是"首次建集群 / 备份 fsid 认领旧 OSD 数据"期间的
     # 正常瞬态(mon 逐个拉起 → mgr → OSD 认领, 恢复路径可达 10+ 分钟)。02_ceph 模块在备份恢复
     # 路径下也可能提前返回(集群仍在收敛) → 此处等待 Ready(最长 600s)而非立即失败,
@@ -119,14 +156,18 @@ if [ -n "${_PH}" ]; then
         exit 1
     fi
     unset _CLUSTER_READY
-elif [ "${CEPH_MODE:-internal}" = "external" ]; then
+    ;;
+external)
     _CEPH_EXTERNAL=1
-    say "  无集群内 CephCluster, CEPH_MODE=external → 外部 Ceph 连接模式(monitors=${CEPH_MONITORS:-<未配置>})"
-else
+    say "  无集群内 CephCluster(或 rook-ceph 为 external) → 外部 Ceph 连接模式(monitors=${CEPH_MONITORS:-<外部 env 文件>})"
+    ;;
+*)
     warn "  集群内无 CephCluster 且 CEPH_MODE!=external —— 无法创建 Ceph StorageClass"
     warn "  请先: ① 部署集群内 ceph(节点≥3, CEPH_MODE=internal); 或 ② cluster.conf 设 CEPH_MODE=external + CEPH_MONITORS 连接外部 Ceph"
     exit 1
-fi
+    ;;
+esac
+unset _CEPH_KIND
 
 # ★ 存储供给层 YAML 从 rook/{rbd,cephfs,rgw}/ 目录文件读取(§7 资源设计, 单一事实来源),
 #   经 sed 替换模板变量 __NAMESPACE__/__REPLICAS__/__MIN_SIZE__/__STORAGE_LABEL_*__ 后 apply。

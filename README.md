@@ -155,6 +155,11 @@ sudo docker run --rm -it --network host \
 > release 模式会把它当成已挂载的 modules 目录，`cs_merge_modules_dirs` 因其中没有
 > `NN_*` 阶段而退出。
 
+> **SSH key 挂载**：只读挂载（`-v $HOME/.ssh:/root/.ssh:ro`）要求**私钥和公钥都已存在**；
+> 只读文件系统上 installer 无法补写公钥。缺少 `.pub` 时先在宿主机执行
+> `ssh-keygen -y -f <私钥> > <私钥>.pub`，或改用可写目录挂载。**首次安装仍需生成密钥时**
+> 要挂可写目录（如 `-v $PWD/.ssh:/root/.ssh`），否则会在 `gen-ssh-key.sh` 处明确报错。
+
 容器内已是 root，直接运行部署脚本。离线文件挂载复用，不进入镜像。
 
 **为什么要挂 `modules/`**：installer 在 release 模式下把
