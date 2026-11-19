@@ -43,6 +43,35 @@ _conf_guard() {
     exit 1
 }
 
+# ★ 部署前门禁(issue #187): kubeadm 的 bootstrap token 在**首个 control-plane 节点**上执行,
+#   所以校验的是**那台节点**的 /etc/hosts, 而不是部署机 —— 容器安装(--network host)时
+#   部署机 /etc/hosts 是容器私有 bind-mount, 在本机 grep 到域名不代表节点能解析。
+#   k8s_hosts 已把 API/registry 域名写进各节点; 这里只做只读校验:
+#     · 查到解析结果且与当前入口地址一致 → 通过;
+#     · SSH 通但解析不到/解析到别的地址 → 立即中止, 给出修法(否则会在 kubeadm 阶段失败);
+#     · SSH 不通 → 不拦停(交给 kubespray 暴露真实连通性问题)。
+if init_remote_kubectl >/dev/null 2>&1; then
+    _want_entry="$(api_entry_addr 2>/dev/null || true)"
+    _remote_ip="$( (SSH "{ getent ahostsv4 ${API_DOMAIN} 2>/dev/null || getent hosts ${API_DOMAIN} 2>/dev/null; } | awk '{print \$1; exit}'" </dev/null 2>/dev/null) || true )"
+    if [ -n "${_remote_ip}" ]; then
+        if [ -n "${_want_entry}" ] && [ "${_remote_ip}" != "${_want_entry}" ]; then
+            err "首个 master 解析 ${API_DOMAIN} → ${_remote_ip}, 期望 ${_want_entry}(旧行残留或外部 DNS 优先)"
+            err "  修法: 重跑 hosts 模块: sudo ./deployments/scripts/deploy-cluster.sh --steps k8s_hosts"
+            err "        或手工在该节点写入: ${_want_entry} ${API_DOMAIN}"
+            exit 1
+        fi
+    elif [ "$( (SSH "echo alive" </dev/null 2>/dev/null) || true )" = "alive" ]; then
+        err "首个 master 无法解析 API_DOMAIN=${API_DOMAIN} —— kubeadm token 经该域名访问 API"
+        err "  修法: cluster.conf 设 UPDATE_ETC_HOSTS=auto|1 后重跑 hosts 模块:"
+        err "        sudo ./deployments/scripts/deploy-cluster.sh --steps k8s_hosts"
+        err "  或手工写入: echo '${_want_entry:-<API入口IP>} ${API_DOMAIN}' | sudo tee -a /etc/hosts"
+        exit 1
+    else
+        warn "  无法 SSH 到首个 master, 跳过 API_DOMAIN 解析预检(kubespray 会暴露真实连通性问题)"
+    fi
+    unset _want_entry _remote_ip
+fi
+
 # ⚠ 部署 kubespray 前醒目提示当前服务暴露方式(nodeport / metallb)+ 各自注意事项,
 # ([Y/n] 确认供人工核对/修改), 与原有 METALLB_POOL 提示合并为统一提醒。
 #   nodeport → 未部署 MetalLB, 提示入口/端口范围/单节点风险等;
