@@ -417,6 +417,9 @@ if [ "${DRY}" = "0" ] && [ -f "${_ir_conf}" ] && ! grep -qE '^[[:space:]]*update
         echo 'update_initramfs=no' >> "${_ir_conf}"
     fi
     echo "         已临时禁用 initramfs 重建(规避 rbd/mdadm 扫描卡死链)"
+    _ir_restore() { [ -n "${_ir_bak}" ] && [ -f "${_ir_bak}" ] && { cp -a "${_ir_bak}" "${_ir_conf}"; rm -f "${_ir_bak}"; }; }
+    trap _ir_restore EXIT
+    trap 'exit 143' HUP INT TERM
 fi
 # ② 标准急救: 把"已解包但未配置"的半装包配置完(实测 2026-09-28: 3.33 因历史上的块设备卡死被中断,
 #    留下一串 Conf 状态的包 ⇒ 只跑 apt -f install 修不掉, 必须先 dpkg --configure -a)
