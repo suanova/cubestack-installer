@@ -1,9 +1,10 @@
 name: pin-automerge
 
-# Merge the netshoot pin PR once validate passes. The bot app is a ruleset
-# bypass actor (pull_request mode), so the version-only pin can land without a
-# human approval. This job never checks out the PR head: its content is read
-# through the API, and the validate workflow already ran make check-versions.
+# Merge bot pin PRs once validate passes: the netshoot pin and the mirror
+# catalog pin. The bot app is a ruleset bypass actor (pull_request mode), so a
+# version-only pin can land without a human approval. This job never checks out
+# the PR head: its content is read through the API, and the validate workflow
+# already ran the repository checks.
 
 on:
   workflow_run:
@@ -19,7 +20,8 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
-      startsWith(github.event.workflow_run.head_branch, 'bot/netshoot-')
+      (startsWith(github.event.workflow_run.head_branch, 'bot/netshoot-') ||
+       startsWith(github.event.workflow_run.head_branch, 'chore/mirror'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -35,6 +37,7 @@ jobs:
           permission-pull-requests: write
 
       - name: Merge the netshoot pin PR
+        if: startsWith(github.event.workflow_run.head_branch, 'bot/netshoot-')
         shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -193,6 +196,124 @@ jobs:
           if head_pins[0] != env_tag:
               sys.exit("cluster.defaults.conf does not carry the pin")
           PY
+
+          current_base="$(gh pr view "${pr}" --json baseRefName --jq .baseRefName)"
+          if [ "${current_base}" != "${BASE_REF}" ]; then
+            echo "PR #${pr} base is ${current_base}, expected ${BASE_REF}; refusing"
+            exit 0
+          fi
+          title="$(gh pr view "${pr}" --json title --jq .title)"
+          # Another pin PR may land between validate and this merge; retry.
+          for attempt in 1 2 3; do
+            current_base="$(gh pr view "${pr}" --json baseRefName --jq .baseRefName 2>/dev/null || true)"
+            if [ "${current_base}" != "${BASE_REF}" ]; then
+              echo "PR #${pr} base moved to ${current_base}; expected ${BASE_REF}"
+              exit 0
+            fi
+            if out="$(gh pr merge "${pr}" --squash --delete-branch \
+                --match-head-commit "${EXPECTED_SHA}" \
+                --subject "${title}" \
+                --body "Signed-off-by: suanova-bot <bot@isuanova.com>" 2>&1)"; then
+              exit 0
+            fi
+            printf '%s\n' "${out}"
+            if ! new_head="$(gh pr view "${pr}" --json headRefOid --jq .headRefOid 2>/dev/null)"; then
+              echo "::error::cannot read PR #${pr} head after a merge failure"
+              exit 1
+            fi
+            if [ "${new_head}" != "${EXPECTED_SHA}" ]; then
+              echo "PR #${pr} head moved to ${new_head}; leaving it for its own run"
+              exit 0
+            fi
+            if ! printf '%s' "${out}" | grep -qi 'base branch was modified'; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::could not merge pin PR #${pr} after retries"
+          exit 1
+
+      - name: Check out the trusted default branch
+        if: startsWith(github.event.workflow_run.head_branch, 'chore/mirror')
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Merge the mirror pin PR
+        if: startsWith(github.event.workflow_run.head_branch, 'chore/mirror')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          BASE_REF: ${{ github.event.workflow_run.pull_requests[0].base.ref }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_REF}" ]; then
+            echo "no pull request base for ${BRANCH}; skipping"
+            exit 0
+          fi
+          pr="$(gh pr list --head "${BRANCH}" --base "${BASE_REF}" --state open \
+            --json number --jq '.[0].number // empty')"
+          if [ -z "${pr}" ]; then
+            echo "no open mirror pin PR for ${BRANCH} -> ${BASE_REF}"
+            exit 0
+          fi
+
+          author="$(gh pr view "${pr}" --json author --jq .author.login)"
+          case "${author}" in
+            app/suanova-bot|app/github-actions) ;;
+            *) echo "PR #${pr} is not bot-authored (${author})"; exit 0 ;;
+          esac
+
+          head="$(gh pr view "${pr}" --json headRefOid --jq .headRefOid)"
+          if [ "${head}" != "${EXPECTED_SHA}" ]; then
+            echo "PR #${pr} moved to ${head}; waiting for its own run"
+            exit 0
+          fi
+
+          # Read both sides through the API: the privileged job never runs the
+          # PR's code, and the merge base keeps unrelated base moves out.
+          base_tip="$(gh pr view "${pr}" --json baseRefOid --jq .baseRefOid)"
+          compare="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${base_tip}...${EXPECTED_SHA}")"
+          merge_base="$(printf '%s' "$compare" | jq -r '.merge_base_commit.sha // empty')"
+          if [ -z "${merge_base}" ]; then
+            echo "::error::cannot resolve the merge base for PR #${pr}"
+            exit 1
+          fi
+          changed_count="$(printf '%s' "$compare" | jq '.files | length')"
+          if [ "${changed_count}" -ne 1 ]; then
+            echo "mirror pin PR #${pr} changes ${changed_count} files; refusing"
+            exit 1
+          fi
+          if ! printf '%s' "$compare" | jq -e '
+              all(.files[]; .filename == "versions/base.yaml")
+            ' > /dev/null; then
+            echo "unexpected file in mirror pin PR"
+            exit 1
+          fi
+
+          for ref in "${merge_base}" "${EXPECTED_SHA}"; do
+            tree="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${ref}" --jq .tree.sha)"
+            mode="$(gh api "repos/${GITHUB_REPOSITORY}/git/trees/${tree}?recursive=1" \
+              | jq -r '.tree[] | select(.path == "versions/base.yaml") | "\(.mode) \(.type)"')"
+            if [ "${mode}" != "100644 blob" ]; then
+              echo "unexpected tree entry for versions/base.yaml at ${ref}: ${mode}"
+              exit 1
+            fi
+          done
+
+          gh api "repos/${GITHUB_REPOSITORY}/contents/versions/base.yaml?ref=${merge_base}" \
+            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/mirror-base.yaml"
+          gh api "repos/${GITHUB_REPOSITORY}/contents/versions/base.yaml?ref=${EXPECTED_SHA}" \
+            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/mirror-head.yaml"
+
+          python3 -c 'import yaml' 2>/dev/null \
+            || python3 -m pip install --quiet --break-system-packages pyyaml
+          python3 deployments/scripts/tools/online/check-mirror-pin-diff.py \
+            "${RUNNER_TEMP}/mirror-base.yaml" "${RUNNER_TEMP}/mirror-head.yaml"
 
           current_base="$(gh pr view "${pr}" --json baseRefName --jq .baseRefName)"
           if [ "${current_base}" != "${BASE_REF}" ]; then
