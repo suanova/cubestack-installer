@@ -21,8 +21,11 @@ sudo ./deployments/scripts/install-online.sh --with-metax
 
 在线安装从 public Harbor 物化 `versions/base.yaml` 中声明的镜像，并在安装时下载
 k8s 二进制。镜像目录按 `versions/base.yaml` 的 `mirror` pin 拉取，不在脚本里写死分支。
-节点前置包（lvm2/chrony/curl 等）由 OS 镜像/运维预装；installer 只做只读体检，默认
-warn-only。
+节点前置包（lvm2/chrony/curl 等）由 OS 镜像/运维预装；installer 默认只做只读体检
+（warn-only），不安装 OS 包。需要离线安装时，在 cluster.conf 置
+`NODE_PKGS_ENABLED=true` / `WORKER_PKGS_ENABLED=true`（`.deb` 放
+`offline-files/os/packages/`）；chrony 专用安装集（`offline-files/os/packages/chrony/`）
+可用独立可选模块 `CHRONY_PKGS_ENABLED=true` 安装 —— 装包可选，NTP 同步（`k8s_ntp`）始终必选。
 
 在线安装主机需要：`python3` + PyYAML、`jq`、`skopeo`、`curl`。
 

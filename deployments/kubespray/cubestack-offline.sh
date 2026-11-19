@@ -1068,6 +1068,57 @@ _gen_preload_play() {
         executable: /bin/bash
       changed_when: false
       when: preload_image_files | length > 0
+
+    - name: Preload | Retag mirrored images to upstream names
+      # 离线 tar 里的镜像名是 harbor.isuanova.com/mirrors/<上游>/<仓库>;
+      # kubeadm 的 imageRepository 仍是上游(registry.k8s.io/quay.io/docker.io/ghcr.io),
+      # 不 retag 时 kubeadm preflight 会尝试联网拉取并超时(离线安装失败)。
+      shell: |
+        set -euo pipefail
+        changed=0
+        failed=0
+        # 镜像列表只取一次; 上游 tag 是否存在用 bash 内建匹配判断, 不走 grep 管道:
+        # grep -q 命中首个匹配即退出, ctr 仍有输出时收到 SIGPIPE(141), pipefail 下
+        # 整条管道判失败, 已存在的上游 tag 会被误判为缺失而重复 tag; 部分 grep 实现
+        # (如 ugrep)即使去掉 -q, 输出重定向到 /dev/null 时同样提前退出。
+        # ⚠ 列表失败必须让本 task 失败(不能用 `|| true`/`2>/dev/null` 吞掉):
+        #   containerd 不可用时空列表会让循环什么都不做, 却输出"retag: 0 个"假装成功,
+        #   上游 tag 实际缺失 → kubeadm preflight 联网拉取超时。set -e 下此命令失败
+        #   即中止 task, ctr 的错误原样保留在任务输出里。
+        all_images="$(ctr -n k8s.io images list -q)"
+        known_images=$'\n'"${all_images}"$'\n'
+        for img in ${all_images}; do
+          case "$img" in
+            */mirrors/*) upstream="${img#*/mirrors/}" ;;
+            *) continue ;;
+          esac
+          [ -n "$upstream" ] || continue
+          case "${known_images}" in
+            *$'\n'"${upstream}"$'\n'*) ;;  # 上游 tag 已存在
+            *)
+              # 失败必须让本 task 失败: 只推了 mirrors/ 形态的离线归档若缺上游 tag,
+              # kubeadm preflight 仍会联网拉取并超时; || true 会把缺口伪装成"已补 tag"。
+              if ctr -n k8s.io images tag "$img" "$upstream" >/dev/null 2>&1; then
+                changed=$((changed + 1))
+                # 同步进已知集合: 不同的 mirrors/ 前缀可能映射到同一上游 tag,
+                # 再对该目标 tag 会因 already exists 失败(旧实现靠每次重新 list 规避)。
+                known_images="${known_images}"$'\n'"${upstream}"$'\n'
+              else
+                echo "  ✗ retag 失败: ${img} -> ${upstream}" >&2
+                failed=$((failed + 1))
+              fi
+              ;;
+          esac
+        done
+        echo "  retag: ${changed} 个镜像已补上游 tag"
+        if [ "${failed}" -ne 0 ]; then
+          echo "  retag: ${failed} 个镜像补上游 tag 失败; 修复后重跑本 play(上游 tag 未写入)" >&2
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: preload_image_files | length > 0
 PRELOAD_EOF
 }
 

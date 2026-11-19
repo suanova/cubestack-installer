@@ -13,7 +13,9 @@
 #   ③ clock_offset: 权威自身无上游时直接返回 0, 不再 SSH 自测吃噪声
 #   ④ clock_offset: chrony 不可用/未同步时回退 SSH date(仍能返回数值)
 #   ⑤ 权威 stratum 硬失败、SYNC-OK/FAIL、apply 检查 SYNC-OK 静态围栏
-#   ⑥ workerbm 只做连通性检查, 不再安装 OS 包
+#   ⑥ workerbm 装包为 opt-in: 默认关闭, 仅 WORKER_PKGS_ENABLED=true 时调用装包脚本
+#   ⑦ 装包与同步解耦(2026-11-19): setup-ntp 不再内嵌 chrony/OS 装包;
+#      首 master 缺 chrony 硬失败并指向可选模块 chrony_pkgs
 # 用法: bash deployments/scripts/tools/tests/test-k8s-ntp.sh
 # ============================================================
 set -uo pipefail
@@ -135,7 +137,15 @@ chk_contains "apply 检查 SYNC-OK" "grep -q 'SYNC-OK'" "$(cat "${SETUP}")"
 chk_contains "节点 sudo 前置" "node_sudo_ready" "$(cat "${SETUP}")"
 chk_contains "偏差非数字防御" '=~ ^-?[0-9]+$' "$(cat "${SETUP}")"
 chk_contains "clock_offset 诊断走 stderr" '回退 SSH date 测量(受 SSH/负载延迟影响)" >&2' "$(cat "${SETUP}")"
-chk_contains "缺 chrony 时不安装 OS 包" "CHRONY-NOT-INSTALLED" "$(cat "${SETUP}")"
+chk_contains "客户端缺 chrony 时回退 timesyncd" "CHRONY-NOT-INSTALLED" "$(cat "${SETUP}")"
+# 2026-11-19 用户口径: 装包与 NTP 同步解耦 —— k8s_ntp 不再内嵌任何 OS 装包;
+#   chrony 由可选模块 chrony_pkgs 负责, 首 master 缺 chrony 时硬失败并给启用指引。
+chk_contains "首 master 缺 chrony 硬失败" "CHRONY-NOT-INSTALLED" "$(cat "${SETUP}")"
+chk_contains "首 master 缺 chrony 指向可选装包模块" "CHRONY_PKGS_ENABLED" "$(cat "${SETUP}")"
+chk_contains "首 master 缺 chrony 指向 --steps chrony_pkgs" "--steps chrony_pkgs" "$(cat "${SETUP}")"
+chk_not_contains "NTP 模块不内嵌离线装包" "install_debs_offline" "$(cat "${SETUP}")"
+chk_not_contains "NTP 模块不引用 chrony 专用安装集" "os/packages/chrony" "$(cat "${SETUP}")"
+chk_not_contains "NTP 模块不内嵌 deb 安装原语" "deb_install_remote_lib" "$(cat "${SETUP}")"
 chk_contains "无守护进程标记" "NO-TIME-DAEMON" "$(cat "${SETUP}")"
 chk_contains "SYNC-OK 要求 DAEMON_OK" 'DAEMON_OK}" = "1"' "$(cat "${SETUP}")"
 chk_contains "daemon precheck 整链 bash -c(避免 sudo builtin)" "bash -c 'command -v chronyc" "$(cat "${SETUP}")"
@@ -144,9 +154,13 @@ chk "node_cmd 不再裸跑 command -v chronyc(避免 sudo builtin)" "0" \
 chk "chronyc 存在性检查至少 3 处 bash -c" "1" \
     "$([ "$(command grep -c "bash -c 'command -v chronyc" "${SETUP}" 2>/dev/null || true)" -ge 3 ] && echo 1 || echo 0)"
 
-echo "== ⑥ workerbm 只做连通性检查 =="
-chk "workerbm 不再调用装包脚本" "0" "$(command grep -c 'install-worker-packages' "${WORKERBM}" 2>/dev/null || true)"
+echo "== ⑥ workerbm 装包 opt-in =="
+chk_contains "workerbm 装包脚本引用" "install-worker-packages" "$(cat "${WORKERBM}")"
+chk_contains "workerbm 默认关闭自检" "WORKER_PKGS_ENABLED=false" "$(cat "${WORKERBM}")"
+chk_contains "workerbm TOGGLE 声明" "TOGGLE: WORKER_PKGS_ENABLED" "$(cat "${WORKERBM}")"
 chk_contains "workerbm 连通性检查" "连通性检查" "$(cat "${WORKERBM}")"
+grep -A3 'PKG_FAIL.*-ne 0' "${WORKERBM}" > "${TMP}/worker-fail.txt" 2>/dev/null || true
+chk_contains "workerbm 装包失败分支 exit 1" "exit 1" "$(cat "${TMP}/worker-fail.txt")"
 
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then echo "✅ test-k8s-ntp: 全部通过"; else echo "❌ test-k8s-ntp: 有失败"; fi

@@ -93,6 +93,18 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-install-online.sh
 
+      # 节点离线包对账工具(opt-in): D 状态探测/SSH 认证分类/自动修复
+      - name: 节点包对账工具回归(reconcile-node-packages)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh
+
+      # chrony 可选装包与 NTP 同步解耦(opt-in): 默认关闭/幂等/调度顺序
+      - name: chrony 可选装包回归(chrony-pkgs)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-chrony-pkgs.sh
+
       # netshoot-rdma digest pin updater
       - name: netshoot pin 更新回归(netshoot-published)
         run: |

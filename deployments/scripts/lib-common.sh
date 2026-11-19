@@ -2389,6 +2389,507 @@ unset _sp _sp_ok _si
 WIPELIB
 }
 
+# ---------------- 节点离线 deb 安装原语(专用安装集, 如 os/packages/chrony) ----------------
+# 2.1 的普通装包步骤只处理 os/packages 顶层对账集; chrony 等**专用安装集**放在子目录,
+# 由 NTP 模块按需离线安装。这里恢复 2.0 的远端安装原语(互斥预卸/已装即跳/逐包隔离)。
+# ⚠ 禁止在破损态节点自动跑 `apt-get --fix-broken install`(会移除/改版系统包; 离线时纯风险)。
+pkg_conflict_providers() {   # <包名> → 输出其互斥提供者(空格分隔; 无 → 空)
+    case "$1" in
+        chrony|systemd-timesyncd|openntpd|ntp)
+            echo "chrony openntpd ntp systemd-timesyncd" | tr ' ' '\n' | grep -vx "$1" | tr '\n' ' ' ;;
+        *) : ;;
+    esac
+}
+
+# 节点侧安装原语(文本随远程脚本一起执行; install_debs_offline <deb目录> <关注包...>)。
+deb_install_remote_lib() {
+    cat <<'DEBLIB'
+# 节点级装包工作目录: root 独占(0700), 存放 flock 锁文件与安装明细日志。
+# ⚠ 不能放 /tmp(世界可写): 预置 FIFO 会让 open 阻塞在 600s 锁等待之外; 预置符号链接
+#   会让 root 的 open/truncate 写到任意文件; 预置目录会让 open 直接失败(2026-11-19 CodeRabbit).
+_DEB_WORK_DIR=/run/cubestack-deb-install
+
+# 互斥提供者表(⚠ 与 lib-common::pkg_conflict_providers 同步)
+_pkg_conflict_providers() {
+    case "$1" in
+        chrony|systemd-timesyncd|openntpd|ntp)
+            echo "chrony openntpd ntp systemd-timesyncd" | tr ' ' '\n' | grep -vx "$1" | tr '\n' ' ' ;;
+        *) : ;;
+    esac
+}
+
+# 版本比较(dpkg 语义): op 为空 = 无版本约束
+_deb_ver_ok() { # <op> <要求版本> <实际版本>
+    [ -z "$1" ] && return 0
+    [ -n "$3" ] || return 1
+    dpkg --compare-versions "$3" "$1" "$2" 2>/dev/null
+}
+
+# 解析 Provides 字段 → 记录行 "prov<TAB>包名<TAB>版本"(无版本 Provides 版本列为空)。
+# dpkg 语义: 无版本 Provides 不满足带版本约束的依赖。
+_deb_emit_provides() { # <provides 字段>
+    local e n v
+    printf '%s\n' "$1" | tr ',' '\n' | while IFS= read -r e; do
+        e="$(printf '%s' "$e" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+        [ -n "$e" ] || continue
+        case "$e" in
+            *'('*)
+                n="${e%%(*}"; v="${e#*(}"; v="${v%%)*}"
+                n="$(printf '%s' "$n" | tr -d '[:space:]')"
+                v="$(printf '%s' "$v" | tr -d '[:space:]')"
+                v="${v#=}"; v="$(printf '%s' "$v" | tr -d '[:space:]')"
+                printf 'prov\t%s\t%s\n' "$n" "$v" ;;
+            *)
+                printf 'prov\t%s\t\n' "$e" ;;
+        esac
+    done
+}
+
+# 记录集(已装包 ∪ 随包 deb)中是否有满足版本约束的备选提供者
+_deb_alt_ok() { # <记录文件> <包名> <op> <要求版本>
+    local f="$1" want="$2" op="$3" req="$4" kind n v
+    while IFS=$'\t' read -r kind n v; do
+        [ "$n" = "$want" ] || continue
+        if [ "$kind" = "pkg" ]; then
+            _deb_ver_ok "$op" "$req" "$v" && return 0
+        elif [ -z "$op" ]; then
+            return 0
+        elif [ -n "$v" ] && _deb_ver_ok "$op" "$req" "$v"; then
+            return 0
+        fi
+    done < "$f"
+    return 1
+}
+
+# 离线依赖闭包预检(版本感知): 每个待装 deb 的 Pre-Depends/Depends 备选必须有一个由
+# "已装包 ∪ 本批次待装 deb"以**满足版本约束**的方式提供(包名与 Provides 均按 dpkg 语义)。
+# ⚠ 提供者只算本批次待装 deb: install_debs_offline 会跳过"包名已装"的 deb(不看版本),
+#   目录里存在但不在待装列表的 deb 不会被安装, 不能当作版本提供者。
+# ⚠ 已装侧排除 `_DEB_PURGE_EXCLUDE` 里列出的包: 它们是本次会被**预卸**的互斥提供者
+#   (如 systemd-timesyncd), 不能用来满足依赖 —— 否则预检通过、purge 之后依赖悬空。
+# 本检查在预卸互斥提供者之前执行: 依赖缺失/版本不满足时直接拒绝, 不会先卸掉
+# 当前时间提供者再被 dpkg 打回(半替换窗口)。
+_deb_set_missing() { # <待装 deb 文件...>
+    local avail inst f p deps grp alt dn op req inner ok missing=""
+    local -a _groups _alts
+    avail="$(mktemp)"; inst="$(mktemp)"
+    {
+        for f in "$@"; do
+            [ -f "${f}" ] || continue
+            p="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
+            [ -n "${p}" ] && printf 'pkg\t%s\t%s\n' "${p}" \
+                "$(dpkg-deb -f "${f}" Version 2>/dev/null || true)"
+            _deb_emit_provides "$(dpkg-deb -f "${f}" Provides 2>/dev/null || true)"
+        done
+    } > "${avail}" || true
+    dpkg-query -W -f='${Status}\t${Package}\t${Version}\t${Provides}\n' 2>/dev/null \
+        | while IFS=$'\t' read -r _st _p _v _pv; do
+            [ "${_st}" = "install ok installed" ] || continue
+            # 即将被预卸的互斥提供者不能算"可用已装"(其 Provides 也一并排除)
+            case " ${_DEB_PURGE_EXCLUDE:-} " in
+                *" ${_p} "*) continue ;;
+            esac
+            printf 'pkg\t%s\t%s\n' "${_p}" "${_v}"
+            _deb_emit_provides "${_pv}"
+        done > "${inst}" || true
+    for f in "$@"; do
+        [ -f "${f}" ] || continue
+        p="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
+        deps="$(dpkg-deb -f "${f}" Pre-Depends 2>/dev/null || true),$(dpkg-deb -f "${f}" Depends 2>/dev/null || true)"
+        deps="$(printf '%s' "${deps}" | tr '\n' ',')"
+        while IFS=',' read -ra _groups; do
+            for grp in "${_groups[@]}"; do
+                [ -n "${grp// /}" ] || continue
+                ok=0
+                IFS='|' read -ra _alts <<< "${grp}"
+                for alt in "${_alts[@]}"; do
+                    dn="$(printf '%s' "${alt}" | sed -E 's/^[[:space:]]*([A-Za-z0-9+.-]+).*/\1/')"
+                    op=""; req=""
+                    case "${alt}" in
+                        *'('*)
+                            inner="${alt#*(}"; inner="${inner%%)*}"
+                            inner="$(printf '%s' "${inner}" | tr -d '[:space:]')"
+                            op="$(printf '%s' "${inner}" | sed -E 's/^([<>=]+).*/\1/')"
+                            req="${inner#"${op}"}"
+                            ;;
+                    esac
+                    if _deb_alt_ok "${avail}" "${dn}" "${op}" "${req}" \
+                       || _deb_alt_ok "${inst}" "${dn}" "${op}" "${req}"; then
+                        ok=1; break
+                    fi
+                done
+                [ "${ok}" = "1" ] || missing="${missing} ${p}->${grp}"
+            done
+        done <<< "${deps}"
+    done
+    rm -f "${avail}" "${inst}"
+    if [ -n "${missing}" ]; then
+        echo "  [deb-install] 离线依赖不完整(已装/随包均无满足版本约束的提供者):${missing}" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Pre-Depends 安装顺序校验/重排: Pre-Depends 在 **unpack 时**就必须就绪, 只能由
+# "已装包(排除本次将预卸的互斥提供者) ∪ 排在前面的同批 deb"满足。Depends 可以在
+# 后续 configure 阶段补齐, 不受本顺序限制。stdout 输出空格分隔的安装顺序;
+# 某组找不到可用提供者或出现循环依赖 → 返回 1(调用方在预卸之前中止)。
+_deb_pre_depends_order() { # <deb文件...>
+    local f p deps grp alt dn op req inner missing=""
+    local n i j k k2 _sat _prov
+    local -a _debs=("$@")
+    local -a _groups _alts _prov_files=() _ef=() _et=() _indeg=() _emitted=() _done=()
+    local _tmp _inst
+    n=${#_debs[@]}
+    _tmp="$(mktemp -d)"
+    _inst="${_tmp}/inst"
+    : > "${_inst}"
+    for ((i=0; i<n; i++)); do
+        f="${_debs[$i]}"
+        _prov_files+=("${_tmp}/avail.$i")
+        : > "${_prov_files[$i]}"
+        p="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
+        [ -n "${p}" ] && printf 'pkg\t%s\t%s\n' "${p}" \
+            "$(dpkg-deb -f "${f}" Version 2>/dev/null || true)" > "${_prov_files[$i]}"
+        _deb_emit_provides "$(dpkg-deb -f "${f}" Provides 2>/dev/null || true)" >> "${_prov_files[$i]}"
+    done
+    dpkg-query -W -f='${Status}\t${Package}\t${Version}\t${Provides}\n' 2>/dev/null \
+        | while IFS=$'\t' read -r _st _p _v _pv; do
+            [ "${_st}" = "install ok installed" ] || continue
+            case " ${_DEB_PURGE_EXCLUDE:-} " in
+                *" ${_p} "*) continue ;;
+            esac
+            printf 'pkg\t%s\t%s\n' "${_p}" "${_v}"
+            _deb_emit_provides "${_pv}"
+        done > "${_inst}" || true
+    for ((i=0; i<n; i++)); do
+        f="${_debs[$i]}"
+        deps="$(dpkg-deb -f "${f}" Pre-Depends 2>/dev/null || true)"
+        [ -n "${deps}" ] || continue
+        deps="$(printf '%s' "${deps}" | tr '\n' ',')"
+        p="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
+        while IFS=',' read -ra _groups; do
+            for grp in "${_groups[@]}"; do
+                [ -n "${grp// /}" ] || continue
+                IFS='|' read -ra _alts <<< "${grp}"
+                # ① 已装(排除预卸)满足 → 无需调整顺序
+                _sat=0
+                for alt in "${_alts[@]}"; do
+                    dn="$(printf '%s' "${alt}" | sed -E 's/^[[:space:]]*([A-Za-z0-9+.-]+).*/\1/')"
+                    op=""; req=""
+                    case "${alt}" in
+                        *'('*)
+                            inner="${alt#*(}"; inner="${inner%%)*}"
+                            inner="$(printf '%s' "${inner}" | tr -d '[:space:]')"
+                            op="$(printf '%s' "${inner}" | sed -E 's/^([<>=]+).*/\1/')"
+                            req="${inner#"${op}"}"
+                            ;;
+                    esac
+                    if _deb_alt_ok "${_inst}" "${dn}" "${op}" "${req}"; then _sat=1; break; fi
+                done
+                [ "${_sat}" = "1" ] && continue
+                # ② 必须来自同批 deb: 选一个满足的提供者并加边 provider→i
+                _prov=-1
+                for alt in "${_alts[@]}"; do
+                    dn="$(printf '%s' "${alt}" | sed -E 's/^[[:space:]]*([A-Za-z0-9+.-]+).*/\1/')"
+                    op=""; req=""
+                    case "${alt}" in
+                        *'('*)
+                            inner="${alt#*(}"; inner="${inner%%)*}"
+                            inner="$(printf '%s' "${inner}" | tr -d '[:space:]')"
+                            op="$(printf '%s' "${inner}" | sed -E 's/^([<>=]+).*/\1/')"
+                            req="${inner#"${op}"}"
+                            ;;
+                    esac
+                    for ((j=0; j<n; j++)); do
+                        [ "${j}" -eq "${i}" ] && continue
+                        if _deb_alt_ok "${_prov_files[$j]}" "${dn}" "${op}" "${req}"; then
+                            _prov=$j; break 2
+                        fi
+                    done
+                done
+                if [ "${_prov}" -lt 0 ]; then
+                    missing="${missing} ${p}->${grp}"
+                else
+                    _ef+=("${_prov}"); _et+=("${i}")
+                fi
+            done
+        done <<< "${deps}"
+    done
+    if [ -n "${missing}" ]; then
+        echo "  [deb-install] Pre-Depends 无可用提供者(已装/随包):${missing}" >&2
+        rm -rf "${_tmp}"
+        return 1
+    fi
+    # Kahn 稳定拓扑排序(每次取下标最小的入度 0 节点, 尽量保持原顺序)
+    for ((i=0; i<n; i++)); do _indeg[i]=0; _done[i]=0; done
+    if [ "${#_et[@]}" -gt 0 ]; then
+        for k in "${!_et[@]}"; do
+            i="${_et[$k]}"
+            _indeg[i]=$((_indeg[i] + 1))
+        done
+    fi
+    for ((k=0; k<n; k++)); do
+        i=-1
+        for ((j=0; j<n; j++)); do
+            [ "${_done[$j]}" = "1" ] && continue
+            [ "${_indeg[$j]}" -eq 0 ] && { i=$j; break; }
+        done
+        if [ "${i}" -lt 0 ]; then
+            echo "  [deb-install] Pre-Depends 存在循环依赖, 无法确定安全安装顺序(拒绝预卸)" >&2
+            rm -rf "${_tmp}"
+            return 1
+        fi
+        _done[i]=1
+        _emitted+=("${_debs[$i]}")
+        if [ "${#_ef[@]}" -gt 0 ]; then
+            for k2 in "${!_ef[@]}"; do
+                if [ "${_ef[$k2]}" = "${i}" ]; then
+                    j="${_et[$k2]}"
+                    _indeg[j]=$((_indeg[j] - 1))
+                fi
+            done
+        fi
+    done
+    printf '%s\n' "${_emitted[*]}"
+    rm -rf "${_tmp}"
+    return 0
+}
+
+# 预卸前备份互斥时间提供者: 回滚 deb + 全部 conffiles。
+# 回滚 deb **必须与已装版本一致**（${d}/rollback/、${d}/、apt archives 任一来源）:
+# 不同版本的归档不能把节点恢复到原状态(且可能依赖离线集里没有的旧依赖),
+# 与"回滚包缺失"同等对待 —— 预卸前拒绝, 不进入半替换窗口。
+_time_daemon_backup() { # <提供者包名> <deb目录> <备份根>
+    local c="$1" d="$2" root="$3"
+    local dir="${root}/${c}" f deb="" ver
+    rm -rf "${dir}"; mkdir -p "${dir}/conffiles"
+    ver="$(dpkg-query -W -f='${Version}' "${c}" 2>/dev/null || true)"
+    for f in "${d}/rollback/${c}_"*.deb "${d}/${c}_"*.deb \
+             /var/cache/apt/archives/"${c}_"*.deb; do
+        [ -f "${f}" ] || continue
+        if [ -n "${ver}" ] && [ "$(dpkg-deb -f "${f}" Version 2>/dev/null || true)" = "${ver}" ]; then
+            deb="${f}"; break
+        fi
+    done
+    if [ -z "${deb}" ]; then
+        echo "  [deb-install] 未找到 ${c} 与已装版本(${ver:-未知})一致的回滚 deb(需放 ${d}/rollback/、${d}/ 或 /var/cache/apt/archives); 拒绝预卸" >&2
+        return 1
+    fi
+    cp -a "${deb}" "${dir}/rollback.deb" || return 1
+    dpkg-query -W -f='${Conffiles}' "${c}" 2>/dev/null > "${dir}/conffiles.list" || true
+    while read -r f _; do
+        [ -n "${f}" ] || continue
+        [ -f "${f}" ] || continue
+        mkdir -p "${dir}/conffiles$(dirname "${f}")"
+        cp -a "${f}" "${dir}/conffiles${f}" || return 1
+    done < "${dir}/conffiles.list"
+    echo "  [deb-install] 已备份 ${c} 回滚包($(basename "${deb}"))与 $(wc -l < "${dir}/conffiles.list" | tr -d ' ') 个配置文件"
+    return 0
+}
+
+# 替换失败时恢复旧时间提供者: 重装回滚 deb → 回填 conffiles → 启动服务。
+_time_daemon_restore() { # <提供者包名> <备份根>
+    local c="$1" root="$2"
+    local dir="${root}/${c}" f
+    local log="${_DEB_WORK_DIR}/install.log"
+    if [ ! -f "${dir}/rollback.deb" ]; then
+        echo "  [deb-install] 缺少 ${c} 回滚包, 无法恢复" >&2
+        return 1
+    fi
+    dpkg --purge "${c}" >>"${log}" 2>&1 || true
+    if ! dpkg -i --force-confold "${dir}/rollback.deb" >>"${log}" 2>&1; then
+        echo "  [deb-install] 恢复 ${c} 失败(回滚包: ${dir}/rollback.deb)" >&2
+        tail -8 "${log}" | sed 's/^/      /' >&2
+        return 1
+    fi
+    if [ -f "${dir}/conffiles.list" ]; then
+        while read -r f _; do
+            [ -n "${f}" ] || continue
+            [ -f "${dir}/conffiles${f}" ] || continue
+            mkdir -p "$(dirname "${f}")"
+            cp -a "${dir}/conffiles${f}" "${f}" || true
+        done < "${dir}/conffiles.list"
+    fi
+    systemctl enable --now "${c}" >/dev/null 2>&1 \
+        || systemctl restart "${c}" >/dev/null 2>&1 || true
+    if systemctl is-active "${c}" >/dev/null 2>&1; then
+        echo "  [deb-install] 已恢复 ${c} 及配置(时间同步提供者已回滚)" >&2
+        return 0
+    fi
+    echo "  [deb-install] 已重装 ${c}, 但服务未 active; 请人工检查" >&2
+    return 1
+}
+
+# 安装一批离线 deb: 预检依赖 → 备份/预卸互斥 → 批量 dpkg → 失败逐包隔离 → 必要时回滚。
+# 并发安全(2026-11-19): 同一节点可能被并发触发(重跑/多入口同时下发), 替换流程绝不能交错
+# —— 节点级 flock 串行化(等待上限 600s); 锁文件与日志放在 root 独占目录 _DEB_WORK_DIR
+# (不用世界可写的 /tmp, 防 FIFO/符号链接/目录预置); 回滚目录按**本次运行**私有(mktemp -d),
+# 不再共享 /tmp/cubestack-time-daemon-rollback, 防止另一运行 reset 掉本运行的备份;
+# 成功后清理私有目录, 失败保留现场(回滚 deb/配置)供人工复核。
+install_debs_offline() {
+    # 锁目录: root 独占(0700)。创建失败/锁路径异常时直接失败, 绝不带着不可靠的锁继续。
+    if ! mkdir -p -m 0700 "${_DEB_WORK_DIR}" 2>/dev/null; then
+        echo "  [deb-install] 无法创建锁目录 ${_DEB_WORK_DIR}; 中止(无法串行化装包)" >&2
+        return 1
+    fi
+    chown root:root "${_DEB_WORK_DIR}" 2>/dev/null || true
+    chmod 0700 "${_DEB_WORK_DIR}" 2>/dev/null || true
+    # 锁文件必须是普通文件: FIFO 会让 open 永久阻塞(在 flock/600s 之外), 符号链接会写到别处,
+    # 目录会让 open 失败。异常残留一律拒绝并提示人工清理(不自动删除, 避免换 inode 竞态)。
+    if [ -L "${_DEB_WORK_DIR}/install.lock" ] \
+       || { [ -e "${_DEB_WORK_DIR}/install.lock" ] && [ ! -f "${_DEB_WORK_DIR}/install.lock" ]; }; then
+        echo "  [deb-install] 锁文件异常(非普通文件): ${_DEB_WORK_DIR}/install.lock; 请人工清理后重试" >&2
+        return 1
+    fi
+    (
+        flock -w 600 9 || { echo "  [deb-install] 等待装包锁超时(另一进程正在本节点装包)" >&2; exit 1; }
+        _install_debs_offline_impl "$@"
+    ) 9>"${_DEB_WORK_DIR}/install.lock"
+}
+
+_install_debs_offline_impl() {
+    local d="$1"; shift
+    local want="$*"
+    local dlog="${_DEB_WORK_DIR}/install.log" p c f pk list="" n_skip=0 ordered=""
+    local rollback_root=""
+    local target_ok=1 _has=0 _seen=0 _pc=""
+    local -a purge_providers=()
+    # 直接调用 impl(绕过 wrapper)时也保证工作目录存在; 失败则交给后续 open 报错
+    mkdir -p -m 0700 "${_DEB_WORK_DIR}" 2>/dev/null || true
+    : >"${dlog}"
+    # 1) 先算待装列表。全部已装 → 不预卸任何互斥包。
+    for f in "${d}"/*.deb; do
+        [ -f "${f}" ] || continue
+        pk="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
+        [ -n "${pk}" ] || continue
+        if [ -n "$(dpkg-query -W -f='${Status}' "${pk}" 2>/dev/null | grep -o 'install ok installed' || true)" ]; then
+            n_skip=$((n_skip + 1)); continue
+        fi
+        list="${list} ${f}"
+    done
+    if [ -z "${list}" ]; then
+        echo "  [deb-install] 全部已装(跳过 ${n_skip} 个), 无需安装"
+        return 0
+    fi
+    # 2) 预卸之前验证离线集: 关注包必须有 deb; 并先**只读**算出将被预卸的互斥提供者,
+    #    再从依赖预检的"已装提供者"里排除它们 —— 不能拿马上要被 purge 的包满足依赖
+    #    (例: 待装集里某包 Depends: systemd-timesyncd, 而它会为装 chrony 被预卸)。
+    for p in ${want}; do
+        if dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "install ok installed"; then
+            continue
+        fi
+        _has=0
+        for f in "${d}/${p}_"*.deb; do [ -f "${f}" ] && { _has=1; break; }; done
+        if [ "${_has}" != "1" ]; then
+            echo "  [deb-install] 离线集缺少 ${p} 的 deb; 中止(未预卸任何互斥包)" >&2
+            return 1
+        fi
+    done
+    # 预卸集合(只读判定, 不改节点): 与步骤 3 的备份/步骤 4 的 purge 使用同一份列表
+    for p in ${want}; do
+        dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "install ok installed" && continue
+        for c in $(_pkg_conflict_providers "${p}"); do
+            case " ${want} " in *" ${c} "*) continue ;; esac
+            dpkg-query -W -f='${Status}' "${c}" 2>/dev/null | grep -q "install ok installed" || continue
+            _seen=0
+            for _pc in ${purge_providers[@]+"${purge_providers[@]}"}; do
+                [ "${_pc}" = "${c}" ] && { _seen=1; break; }
+            done
+            [ "${_seen}" = "1" ] && continue
+            purge_providers+=("${c}")
+        done
+    done
+    # shellcheck disable=SC2086
+    _DEB_PURGE_EXCLUDE="${purge_providers[*]:-}"
+    if ! _deb_set_missing ${list}; then
+        unset _DEB_PURGE_EXCLUDE
+        return 1
+    fi
+    # Pre-Depends 必须在 **unpack 时**就绪: 只能由"已装(排除预卸) ∪ 排在前面的同批 deb"
+    # 满足。这里按该约束重排安装顺序(同批提供者提前); 无提供者/循环依赖 → 预卸前拒绝。
+    # (Depends 可延后到 configure 阶段补齐, 不要求顺序。)
+    if ! ordered="$(_deb_pre_depends_order ${list})"; then
+        unset _DEB_PURGE_EXCLUDE
+        return 1
+    fi
+    unset _DEB_PURGE_EXCLUDE
+    list="${ordered}"
+    # 3) 预卸前备份将被替换的互斥提供者(回滚包+配置文件); 任一缺失则拒绝预卸。
+    for c in ${purge_providers[@]+"${purge_providers[@]}"}; do
+        # 本次运行私有的回滚目录(懒创建): 并发/重跑不会互相清掉备份
+        if [ -z "${rollback_root}" ]; then
+            rollback_root="$(mktemp -d /tmp/cubestack-time-daemon-rollback.XXXXXX)" || return 1
+        fi
+        _time_daemon_backup "${c}" "${d}" "${rollback_root}" || return 1
+    done
+    # 4) 预卸互斥包(失败即中止; 未安装目标包)
+    for c in ${purge_providers[@]+"${purge_providers[@]}"}; do
+        echo "  [deb-install] 预卸互斥包 ${c}(与待装 ${want} 冲突, dpkg 级直卸)"
+        if ! dpkg --purge "${c}" >>"${dlog}" 2>&1; then
+            echo "  [deb-install] 预卸 ${c} 失败; 中止安装(未安装 ${want})" >&2
+            tail -8 "${dlog}" | sed 's/^/      /' >&2
+            _time_daemon_restore "${c}" "${rollback_root}" || true
+            echo "  [deb-install] 回滚现场保留: ${rollback_root}(回滚 deb/配置未删除)" >&2
+            return 1
+        fi
+    done
+    # 5) 批量安装
+    # shellcheck disable=SC2086
+    local ok_n=0 fail_n=0
+    if dpkg -i ${list} >>"${dlog}" 2>&1; then
+        # dpkg 返回 0 也不代表目标包已配置完成(postinst 失败可能留下 unpacked/half-configured);
+        # 目标包未就绪时继续走逐包修复, 不能提前报成功.
+        if assert_pkgs_ready ${want}; then
+            echo "  [deb-install] dpkg 直装成功(跳过已装 ${n_skip}; 安装 $(echo ${list} | wc -w) 个)"
+            [ -n "${rollback_root}" ] && rm -rf "${rollback_root}"
+            return 0
+        fi
+        echo "  [deb-install] dpkg 返回成功但目标包未就绪(半装); 进入逐包修复..." >&2
+    else
+        echo "  [deb-install] 批量安装部分失败, 逐包隔离重试(明细: ${dlog}):"
+    fi
+    for f in ${list}; do
+        if dpkg -i "${f}" >>"${dlog}" 2>&1; then ok_n=$((ok_n + 1)); else fail_n=$((fail_n + 1)); fi
+    done
+    echo "  [deb-install] 隔离结果: 成功 ${ok_n} / 失败 ${fail_n}"
+    # 6) 目标包未就绪且预卸过旧提供者 → 清理半装目标并回滚旧提供者
+    target_ok=1
+    for p in ${want}; do
+        dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "install ok installed" || target_ok=0
+    done
+    if [ "${target_ok}" != "1" ] && [ "${#purge_providers[@]}" -gt 0 ]; then
+        echo "  [deb-install] 替换失败, 回滚时间同步提供者: ${purge_providers[*]}" >&2
+        for p in ${want}; do
+            dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "install ok installed" \
+                || dpkg --purge --force-depends "${p}" >>"${dlog}" 2>&1 || true
+        done
+        for c in ${purge_providers[@]+"${purge_providers[@]}"}; do
+            _time_daemon_restore "${c}" "${rollback_root}" || true
+        done
+    fi
+    [ "${fail_n}" -gt 0 ] && tail -8 "${dlog}" | sed 's/^/      /'
+    if [ "${target_ok}" = "1" ] && [ "${fail_n}" -eq 0 ]; then
+        [ -n "${rollback_root}" ] && rm -rf "${rollback_root}"
+        return 0
+    fi
+    if [ -n "${rollback_root}" ]; then
+        echo "  [deb-install] 回滚现场保留: ${rollback_root}(回滚 deb/配置未删除)" >&2
+    fi
+    return 1
+}
+
+assert_pkgs_ready() {
+    local p
+    for p in "$@"; do
+        dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "install ok installed" \
+            || { echo "PKG-MISSING:${p}"; return 1; }
+    done
+    return 0
+}
+DEBLIB
+}
+
 # ---------------- 共用 MetalLB VIP 的约定(多服务共用一个 IP、不同端口) ----------------
 # 默认关闭: 共用 VIP 需要**每个共用方**都带同一个 sharing key 注解, MetalLB 才肯把同一地址
 # 分给多个 Service。约定集中在这里, 是因为它必须**三处完全一致**, 分散写必有一处漂移:

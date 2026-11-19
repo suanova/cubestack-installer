@@ -3,9 +3,16 @@
 > **规范(强制)**:每次解决完一个部署/运行问题,**找到真正的 root cause**,按下面的模板把「症状 → 根因 → 解法 → 验证」更新到本文件(新增一个条目),保持按问题类型分组。这样同类问题下次直接命中根因,不用重新排查。
 > 新增条目同时把新知识点/命令沉淀到 `.claude/skills/cubestack-deploy-scripts/SKILL.md` 的相应章节。
 >
-> **2.1 变更**: installer 不再安装/修复节点 OS 包。历史条目中的 `install-worker-packages.sh`、
-> `reconcile-node-packages.sh`、`fetch-lvm-packages.sh`、`install-packages.yml` 已删除；
-> 节点前置包由 OS 镜像/运维预装，installer 只做只读检查（`check-os-packages.sh`）。
+> **2.1 变更**: installer 默认不安装/修复节点 OS 包，只做只读检查
+> (`check-os-packages.sh`)。节点前置包由 OS 镜像/运维预装。
+> 需要 installer 直接安装离线 `.deb` 时，显式置 `NODE_PKGS_ENABLED=true` /
+> `WORKER_PKGS_ENABLED=true`（工具 `reconcile-node-packages.sh` /
+> `install-worker-packages.sh` 已恢复，默认关闭）。
+> `install-worker-packages.sh` 的 fresh 节点清理（系统 `containerd`/`containerd.io`/`runc`）
+> 默认不做，需显式声明 `CUBESTACK_FRESH_NODE=1`（或 `--fresh-node`）；kubelet 未运行不是判据。
+> chrony 专用安装集（`offline-files/os/packages/chrony/`）用独立可选模块
+> `CHRONY_PKGS_ENABLED=true` / `--steps chrony_pkgs` 安装；**装包可选、NTP 同步必选**，
+> `k8s_ntp` 只做同步并假设 chrony 已存在。
 
 ## 约定
 
@@ -431,12 +438,12 @@ sudo tcpdump -nei <网卡> '(arp or icmp) and host <对端IP>'
 - `setup-ntp.sh`:
   - `node_cmd` 对 **root 不再套 sudo**(消除 sudo/PAM/DNS 的数秒延迟); 新增 `node_sudo_ready` 前置,
     apply/verify 对非 root 且 sudo 不可用的节点直接点名失败。
-  - **客户端缺 chrony 时自动安装**: apply 把 offline-files 里的 chrony deb 推给缺 chrony 的节点,
-    远端脚本用 `install_debs_offline` 安装; 装不上才回退 `systemd-timesyncd`, 并校验其 active。
-    离线目录必须是**完整依赖闭包**(chrony + libpam/libaudit/libffi/libpcre2/zlib 等):
-    `deployments/scripts/tools/node/chrony-offline-debs.py --check <chrony目录>` 只读自检;
-    联网 Ubuntu 22.04 amd64 构建机用 `--fetch <chrony目录>` 补齐缺失 deb。
-    setup-ntp 在 apply 前会自动 check 并 warn; 严格离线可设 `NTP_REQUIRE_CHRONY_CLOSURE=1` 直接失败。
+  - ~~**客户端缺 chrony 时自动安装**~~(2026-10-26 旧行为; **2026-11-19 起撤销** ——
+    `setup-ntp.sh` 不再内嵌任何 OS 装包, 只做同步)。
+    当前口径: **装包可选、NTP 同步必选**。需要 installer 离线安装 chrony 时启用独立可选模块
+    `chrony_pkgs`(`CHRONY_PKGS_ENABLED=true` / `--steps chrony_pkgs`), 它只从
+    `offline-files/os/packages/chrony/` 装包且先于 NTP 执行; 首 master 缺 chrony 时
+    `k8s_ntp` 硬失败并提示启用该模块/由 OS 镜像预装; 客户端缺 chrony 回退 `systemd-timesyncd`。
   - `clock_offset` **优先 chrony 自身口径**: `System time` + `Leap status=Normal` + `^*` 源 `Reach>=1`;
     不可用时才回退 SSH `date`, 并用两个采样的中点做 RTT 补偿; 权威自身无上游时直接返回 0,
     不再 SSH 自测吃 0.2-0.6s 噪声。同时区分 `chrony 未安装` 与 `chrony 已安装但未选中源/Reach=0`。
@@ -710,7 +717,7 @@ grep METAX_DRIVER_DEPLOY_POLICY config/cluster.conf
 | mon/osd 未调度到目标节点 / 一直在 Pending | 节点缺 label 或 CEPH_NODES 与预期不符 | `kubectl get node --show-labels \| grep ceph-storage`; 模块自动打 `CEPH_NODE_LABEL`; 核对 CEPH_NODES |
 | 部署模块报"所有存储节点均未检测到裸盘" | VM 未附加数据盘 / 盘已被分区 | VM: `vm-nodes.conf` 设 `VM_DATA_DISKS=3 VM_DATA_DISK_SIZE=200` 后重建 VM; 裸金属: 挂新盘; 或显式 `CEPH_DATA_DISKS="node:/dev/vdb,…"` |
 | 显式 `CEPH_DATA_DISKS` 的三块盘**全显示在第一个节点**, 其余节点 `<未检测到>` | 节点之间误用**逗号**: `node0:/dev/vdb,node1:/dev/vdb,node2:/dev/vdb`; 解析器把 `node1:/dev/vdb` 当成 node0 的盘列表(逗号是同一节点多盘的分隔符) | **2026-10-26 已修**: 节点之间必须用**分号 `;`**, 逗号只用于同一节点的多块盘; 或全节点同盘直接写 `/dev/vdb`; 新增 `ceph_validate_explicit_config`(lib-common) 在解析前拒绝该写法, `02_ceph`/`deploy-cluster` 均已接入, 回归 `test-ceph-data-disks.sh` |
-| 预检显示全节点裸盘 `<未检测到>` 但节点 `lsblk` 确有裸盘(如 vdb/vdc/vdd) | `ceph-detect-disks.sh` 仅用 `ssh -i` 密钥认证: 全新环境 k8s_passwordless 未分发密钥 / 容器未挂载密钥 → 全部节点 SSH 失败; 且预检 `2>/dev/null` 吞掉"无法读取 lsblk"原因 | **2026-09-07 已修复**: 脚本密钥缺失不再硬退出, 新增**密码回退**(SSHPASS + NODES 第5字段密码, 与 setup-passwordless.sh 同款; 密钥优先、失败回退密码); 预检 stderr 透传显示真实原因。**2026-11-17 新增**: deploy-cluster 在任何预检之前调用 ensure_node_ssh_access(NODES 全部节点; 默认配置优先复用可用 ~/.ssh/id_rsa, 否则生成/注入项目密钥), Ceph 预检前密钥已就绪, 不再依赖密码回退。**2.1 口径: installer 不安装 OS 包** —— chrony 由节点镜像预装; `k8s_ntp` 只负责同步, 权威缺 chrony / 客户端无 chrony 且无 systemd-timesyncd 时硬失败。验证: `bash deployments/scripts/tools/k8s/ceph-detect-disks.sh -m` 应输出各节点 `/dev/vdb,...` |
+| 预检显示全节点裸盘 `<未检测到>` 但节点 `lsblk` 确有裸盘(如 vdb/vdc/vdd) | `ceph-detect-disks.sh` 仅用 `ssh -i` 密钥认证: 全新环境 k8s_passwordless 未分发密钥 / 容器未挂载密钥 → 全部节点 SSH 失败; 且预检 `2>/dev/null` 吞掉"无法读取 lsblk"原因 | **2026-09-07 已修复**: 脚本密钥缺失不再硬退出, 新增**密码回退**(SSHPASS + NODES 第5字段密码, 与 setup-passwordless.sh 同款; 密钥优先、失败回退密码); 预检 stderr 透传显示真实原因。**2026-11-17 新增**: deploy-cluster 在任何预检之前调用 ensure_node_ssh_access(NODES 全部节点; 默认配置优先复用可用 ~/.ssh/id_rsa, 否则生成/注入项目密钥), Ceph 预检前密钥已就绪, 不再依赖密码回退。**2.1 口径: installer 默认不安装 OS 包** —— chrony 由节点镜像预装; `k8s_ntp` 只负责同步, 权威缺 chrony / 客户端无 chrony 且无 systemd-timesyncd 时硬失败。验证: `bash deployments/scripts/tools/k8s/ceph-detect-disks.sh -m` 应输出各节点 `/dev/vdb,...` |
 | CephCluster 删不掉/卡 Terminating | 未设 cleanupPolicy | `kubectl -n rook-ceph patch cephcluster rook-ceph --type merge -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}'` 后再 delete |
 | **CEPH_MODE=external 部署卡在 ceph_csi [1/4] 等 CSI 插件 240s** / 未部署任何 ceph-csi-operator | ① ceph 模块**未被调度**: `TOGGLE: CEPH_ENABLED`(false)而模块自身 external 分支实际由 `CEPH_CSI_ENABLED` 放行 → rook operator/csi-operator 从未安装; ② 排序缺陷: 默认模式 `k8s_deploy` 由 enable 循环追加在 RUN_STEPS 末尾, `ceph_csi` 仅声明 `REQUIRES: ceph`(不在运行列表→视为满足)被拓扑排序**浮到 k8s_deploy 之前**, 直接 SSH 到未部署/未就绪集群; ③ k8s 阶段 ceph 镜像预加载仅看 `CEPH_ENABLED=true`, external 模式不预载 rook/csi 镜像 → 离线 operator ImagePullBackOff | **2026-09-08 已修复(3 处)**: ① `TOGGLE` 支持空格分隔多变量(OR), 02_ceph 改 `TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED` → external 模式自动调度装 operator/csi-operator(不建 CephCluster); ② 03_ceph_csi `REQUIRES: ceph k8s_deploy` → 永远排在 k8s_deploy 之后; ③ 06_k8s_deploy 传给 cubestack-offline.sh 的 CEPH_ENABLED 取派生值(CEPH_ENABLED 或 CEPH_CSI_ENABLED true 即 true) → external 模式也预载 rook/csi 镜像。**验证边界**: 调度层已复现验证(容器内 `--list` 顺序 = k8s_deploy→ceph→ceph_csi, 15 模块), check-modules 全绿; **未实机跑通全流程** |
 | 运行 `tools/offline/sync-to-container.sh` 后外部 Ceph 认证失败 | 旧版脚本第 2 步会把**本地 cluster.conf 整体 docker cp 进容器**, 本地占位 keyring(`<占位: 如 AQxxx==>`)覆盖容器内真实 key | **2026-09-08 已修复**: sync-to-container.sh **默认不推送 cluster.conf**(容器内保留真实 keyring, 仅显示当前 ceph 配置), 需要强制推送用 `SYNC_CONF=1`(推送前备份 .bak.ceph); 真实 key 只放 gitignore 的 `cluster.conf`(已验证被忽略, 可安全填写), 不要放 `cluster.conf.example` |
@@ -1701,6 +1708,50 @@ sudo ./deploy-cluster.sh --steps k8s_passwordless   # 修正密码后先单跑�
 bash deployments/scripts/tools/tests/test-cephfs-mount.sh   # ①b 计划不含 cephfs_mount; ②b/②c 不预检/不发 SSH
 # 手工核对计划(Ceph 全关应看不到 ceph/ceph_csi/cephfs_mount):
 CLUSTER_CONF=<ceph-off.conf> ./deployments/scripts/deploy-cluster.sh --list | grep 本次执行模块
+```
+
+### 8. 【2026-11-19】发布树 `kubespray/<ver>/binaries.tar.gz` 是目录 → `k8s_deploy` 预检报"未找到离线二进制文件"
+
+**症状:** 全量部署到 `k8s_deploy` 时预检失败:
+
+```
+>>> 预检集群 [cubestack-cluster]...
+[ERROR] 未找到离线二进制文件: /opt/cubestack-installer/deployments/offline-files/kubespray/v2.32.0
+```
+
+但目录里看起来"什么都有":
+
+```
+kubespray/v2.32.0/
+├── binaries.tar.gz/   # 实际是目录，kubelet/kubeadm 等都在里面
+├── images/
+└── tree.tar.gz/       # 实际是目录，里面是 kubespray/ 源码
+```
+
+**根因:** 发布打包把 `binaries.tar.gz` / `tree.tar.gz` 按"目录名"解出，而不是展开为
+`LOCAL_REPO_DIR` 顶层文件；`cubestack-offline.sh` 的 `cmd_check` 用
+`find "${LOCAL_REPO_DIR}" -maxdepth 1 -type f` 判断离线二进制，目录形态下结果为 0。
+`--verify-offline` quick 只做结构/覆盖率检查，所以前置门禁可能先通过，直到拆完旧集群才失败。
+
+**解法(已落地):**
+- `offline-sync.py` 的 `packages` 物化在 `_postprocess_packages` 中自动规范化:
+  `binaries.tar.gz/` → 版本目录顶层文件（安装必需）；
+  `tree.tar.gz/` **非安装必需**（部署用仓库/镜像内的源码树），保持原样，仅清 0 字节占位；
+  同时按需重写 `SHA256SUMS` / `SIZES` / `_SUCCESS`（内容未变的文件复用原 hash/size）。
+- 已有树就地修复（不重新下载）:
+  ```bash
+  python3 deployments/scripts/tools/offline/offline-sync.py normalize \
+    --local-root deployments/offline-files --yes
+  ```
+- 回归: `python3 -m unittest deployments/scripts/tools/tests/test_offline_sync_store.py -k Normalize -v`
+
+**验证:**
+```bash
+find deployments/offline-files/kubespray/v2.32.0 -maxdepth 1 -type f | head
+bash deployments/scripts/tools/offline/verify-offline-files.sh \
+  --root deployments/offline-files --level quick --no-color
+# k8s_deploy 预检(集群可不存在, ansible ping 只告警):
+bash deployments/kubespray/cubestack-offline.sh check cubestack-cluster
 ```
 
 ---
