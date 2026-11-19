@@ -159,6 +159,8 @@ chk_contains "workerbm 装包脚本引用" "install-worker-packages" "$(cat "${W
 chk_contains "workerbm 默认关闭自检" "WORKER_PKGS_ENABLED=false" "$(cat "${WORKERBM}")"
 chk_contains "workerbm TOGGLE 声明" "TOGGLE: WORKER_PKGS_ENABLED" "$(cat "${WORKERBM}")"
 chk_contains "workerbm 连通性检查" "连通性检查" "$(cat "${WORKERBM}")"
+grep -A3 'PKG_FAIL.*-ne 0' "${WORKERBM}" > "${TMP}/worker-fail.txt" 2>/dev/null || true
+chk_contains "workerbm 装包失败分支 exit 1" "exit 1" "$(cat "${TMP}/worker-fail.txt")"
 
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then echo "✅ test-k8s-ntp: 全部通过"; else echo "❌ test-k8s-ntp: 有失败"; fi

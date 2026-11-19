@@ -25,6 +25,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
 DEB_DIR="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages/chrony"
+PKG_ROOT="$(dirname "${DEB_DIR}")"
 if [ ! -d "${DEB_DIR}" ]; then
     err "未找到 chrony 专用安装集目录: ${DEB_DIR}"
     err "  本步骤是可选的(默认假设节点镜像已预装 chrony); 若需 installer 装包, 请把"
@@ -102,8 +103,9 @@ node_scp() {   # <local> <ip> <user> <pw> <remote_path>
 REMOTE_SCRIPT="/tmp/cubestack-chrony-install.sh"
 REMOTE_DEB_DIR="/tmp/cubestack-chrony-debs"
 SCRIPT_TMP="$(mktemp)"
+STAGE_TMP="$(mktemp -d)"
 TAR_TMP="$(mktemp -t cubestack-chrony-debs.XXXXXX.tar.gz)"
-trap 'rm -f "${SCRIPT_TMP}" "${TAR_TMP}"' EXIT
+trap 'rm -f "${SCRIPT_TMP}" "${TAR_TMP}"; rm -rf "${STAGE_TMP}"' EXIT
 
 {
     deb_install_remote_lib
@@ -118,18 +120,35 @@ if [ "${#_debs[@]}" -eq 0 ]; then
     echo "NO-DEBS: ${D}"
     exit 1
 fi
-install_debs_offline "${D}" chrony
-if command -v chronyd >/dev/null 2>&1 && command -v chronyc >/dev/null 2>&1; then
+if ! install_debs_offline "${D}" chrony; then
+    echo "CHRONY-INSTALL-FAILED: install_debs_offline 返回非零(明细: /tmp/cubestack-deb-install.log)"
+    tail -20 /tmp/cubestack-deb-install.log 2>/dev/null || true
+    exit 1
+fi
+if assert_pkgs_ready chrony && command -v chronyd >/dev/null 2>&1 && command -v chronyc >/dev/null 2>&1; then
     echo "CHRONY-READY:$(dpkg-query -W -f='${Version}' chrony 2>/dev/null || true)"
 else
-    echo "CHRONY-INSTALL-FAILED"
+    echo "CHRONY-INSTALL-FAILED: chrony 未处于 install ok installed(或缺少 chronyd/chronyc)"
     tail -20 /tmp/cubestack-deb-install.log 2>/dev/null || true
     exit 1
 fi
 EOF
 } > "${SCRIPT_TMP}"
 
-tar -C "${DEB_DIR}" -czf "${TAR_TMP}" .
+# 预卸 systemd-timesyncd 前必须能恢复它: 把顶层 os/packages 里的
+# time-daemon deb 一并放进 tar 的 rollback/ 子目录(远端 install_debs_offline
+# 只装顶层 *.deb, 不会把回滚包误当待装包).
+cp -a "${DEB_DIR}/." "${STAGE_TMP}/"
+mkdir -p "${STAGE_TMP}/rollback"
+_rb_n=0
+for _rb in "${PKG_ROOT}"/systemd-timesyncd_*.deb "${PKG_ROOT}"/openntpd_*.deb "${PKG_ROOT}"/ntp_*.deb; do
+    [ -f "${_rb}" ] || continue
+    cp -a "${_rb}" "${STAGE_TMP}/rollback/" && _rb_n=$((_rb_n + 1))
+done
+say "  时间同步回滚包: ${_rb_n} 个(rollback/, 仅替换失败时恢复)"
+[ "${_rb_n}" -gt 0 ] || warn "  未找到 time-daemon 回滚包; 节点若仍用 systemd-timesyncd, 远端将拒绝预卸(需把 timesyncd deb 放入 os/packages)"
+unset _rb_n _rb
+tar -C "${STAGE_TMP}" -czf "${TAR_TMP}" .
 
 # ---------------- 逐节点: 已装跳过 → 推送安装集 → 远端装包 ----------------
 FAIL=0
@@ -146,8 +165,8 @@ for e in "${NODE_ENTRIES[@]}"; do
         continue
     fi
     if node_cmd "${ip}" "${u}" "${pw}" \
-        "bash -c 'command -v chronyd >/dev/null 2>&1 && command -v chronyc >/dev/null 2>&1'" >/dev/null 2>&1; then
-        ok "  ${hn}(${ip}) 已安装 chrony, 跳过"
+        "bash -c \"dpkg-query -W -f='\${Status}' chrony 2>/dev/null | grep -q 'install ok installed' && command -v chronyd >/dev/null 2>&1 && command -v chronyc >/dev/null 2>&1\"" >/dev/null 2>&1; then
+        ok "  ${hn}(${ip}) 已安装 chrony(install ok installed), 跳过"
         continue
     fi
 

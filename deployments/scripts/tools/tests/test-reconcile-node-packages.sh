@@ -13,6 +13,8 @@
 #   ⑤ 远端装包调用带 RECONCILE_SSH_TIMEOUT
 #   ⑥ SSH 认证失败(密码/公钥被拒)/网络不可达: 必须报 SSH 问题, **不得**误导成
 #      "Ceph/RBD 残留 → 重启"(2026-10-22 用户实机: 密码错 → 提示重启节点)
+#   ⑦ 扩容 ONLY_HOSTS 过滤: 不传 --ip 时只处理 ONLY_HOSTS 匹配的新节点, 不碰已有节点;
+#      ONLY_HOSTS 未设置时保持全量行为(2026-11-19 CodeRabbit)
 # 隔离: 临时 cluster.conf + OFFLINE_FILES_ROOT + 假 ssh/scp(纯离线)
 # 用法: bash deployments/scripts/tools/tests/test-reconcile-node-packages.sh
 # ============================================================
@@ -199,7 +201,10 @@ echo "== ④ 远端装包超时 =="
 chk_contains "RECONCILE_SSH_TIMEOUT" "RECONCILE_SSH_TIMEOUT" "${TOOL}"
 chk_contains "调用被 timeout 包裹" "timeout \"\${RECONCILE_SSH_TIMEOUT}\" ssh" "${TOOL}"
 # all_node_ips 是单行空格分隔 → 回退路径必须按空白拆分, 不能 read 一行当单 IP
-chk_contains "all_node_ips 回退按空白拆分" 'for ip in $(all_node_ips)' "${TOOL}"
+# 2026-11-19: 回退改为遍历 NODES + node_matches, 扩容时必须按 ONLY_HOSTS 过滤。
+chk_contains "inventory 目标按 ONLY_HOSTS 过滤" 'node_matches "${_hn}"' "${TOOL}"
+chk_contains "NODES 回退按 ONLY_HOSTS 过滤" 'node_matches "${NODE_HOSTNAME}"' "${TOOL}"
+chk_not_contains "不再无过滤使用 all_node_ips" 'for ip in $(all_node_ips)' "${TOOL}"
 
 echo "== ⑤ worker 装包: Breaks ↔ 同版本 cohort =="
 TOOL2="${REPO_ROOT}/deployments/scripts/tools/node/install-worker-packages.sh"
@@ -209,6 +214,69 @@ chk_contains "离线无可升级版时跳过(不制造半装)" "离线集无该�
 chk_contains "cohort 一并加入待装集合" "同版本 cohort 升级(版本" "${TOOL2}"
 chk "Breaks 算子解析支持 << / >>(实机 udev Breaks 曾是 < 误判)" "2" \
     "$(grep -cF '([<>]{1,2}=?|=)' "${TOOL2}")"
+# 2026-11-19 CodeRabbit: rc(config-files)/半装状态不能被当成 usable installed
+chk_contains "worker 仅 ii 记为可用已装" 'ii) REMOTE_VER' "${TOOL2}"
+chk_contains "worker 归一化 Status-Abbrev 尾随空格" "tr -d '[:space:]'" "${TOOL2}"
+chk_contains "worker 跟踪仅剩配置(rc)" "REMOTE_CONFIG_ONLY" "${TOOL2}"
+chk_contains "worker 相关破损包参与修复" "BROKEN_RELEVANT" "${TOOL2}"
+chk_contains "worker 空计划前执行修复" "半装状态已执行修复" "${TOOL2}"
+chk_contains "worker 修复失败不报成功" "远端半装修复失败" "${TOOL2}"
+chk_contains "worker 待装时间提供者只保留一个" "本次只保留" "${TOOL2}"
+chk_contains "worker 已装时间提供者优先" "节点已装 \${_td_keep}" "${TOOL2}"
+# CodeRabbit 2026-11-19: fresh 节点 purge 必须在探测/选包之前, 否则 REMOTE_VER 会把
+# 已被 purge 的 runc/containerd 当成满足依赖.
+_purge_ln="$(grep -n 'apt-get purge -y containerd containerd.io runc' "${TOOL2}" 2>/dev/null | head -1 | cut -d: -f1)"
+_probe_ln="$(grep -n '探测节点' "${TOOL2}" 2>/dev/null | head -1 | cut -d: -f1)"
+if [ -n "${_purge_ln}" ] && [ -n "${_probe_ln}" ] && [ "${_purge_ln}" -lt "${_probe_ln}" ]; then
+    echo "  ok  worker fresh purge 在探测/选包之前(purge=${_purge_ln} probe=${_probe_ln})"
+else
+    echo "  FAIL worker fresh purge 顺序: purge=${_purge_ln:-空} probe=${_probe_ln:-空}"; fail=1
+fi
+unset _purge_ln _probe_ln
+chk_contains "worker 复制双失败即退出" "离线包复制失败(rsync/scp 均失败)" "${TOOL2}"
+chk_contains "worker 复制后核对大小" "离线包复制不完整" "${TOOL2}"
+chk_contains "worker 安装前校验暂存集" "未成功复制到" "${TOOL2}"
+
+echo "== ⑦ ONLY_HOSTS 过滤(扩容只动新节点) =="
+cat > "${TMP}/cluster-two.conf" <<'EOF'
+NODES=("worker,w1,10.0.0.1,root,-" "worker,w2,10.0.0.2,root,-")
+SSH_USER="root"
+KUBESPRAY_PROFILE="none"
+CLUSTER_NAME="no-such-cluster"
+EOF
+run_two() {  # run_two <only_hosts>
+    local only="$1"
+    (
+        export PATH="${TMP}/bin:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster-two.conf"
+        export OFFLINE_FILES_ROOT="${TMP}/offline"
+        export CLUSTER_NAME="no-such-cluster"
+        export ONLY_HOSTS="${only}"
+        export FAKE_SSH_LOG="${TMP}/ssh-two.log"
+        export FAKE_SCP_LOG="${TMP}/scp-two.log"
+        : > "${FAKE_SSH_LOG}"; : > "${FAKE_SCP_LOG}"
+        bash "${TOOL}"
+    ) > "${TMP}/out-two" 2>&1
+    echo $?
+}
+_rc="$(run_two "w1")"
+chk "ONLY_HOSTS=w1: 退出码" "0" "${_rc}"
+chk "ONLY_HOSTS=w1: 未触碰 10.0.0.2" "0" "$(grep -c '10.0.0.2' "${TMP}/ssh-two.log" 2>/dev/null || true)"
+chk "ONLY_HOSTS=w1: 未向 10.0.0.2 分发 deb" "0" "$(grep -c '10.0.0.2' "${TMP}/scp-two.log" 2>/dev/null || true)"
+if grep -q '10.0.0.1' "${TMP}/ssh-two.log" 2>/dev/null; then
+    echo "  ok  ONLY_HOSTS=w1: 处理 10.0.0.1"
+else
+    echo "  FAIL ONLY_HOSTS=w1: 未处理 10.0.0.1"; fail=1
+fi
+_rc="$(run_two "")"
+chk "ONLY_HOSTS 未设置: 退出码" "0" "${_rc}"
+if grep -q '10.0.0.1' "${TMP}/ssh-two.log" 2>/dev/null \
+   && grep -q '10.0.0.2' "${TMP}/ssh-two.log" 2>/dev/null; then
+    echo "  ok  ONLY_HOSTS 未设置: 全量节点仍被处理"
+else
+    echo "  FAIL ONLY_HOSTS 未设置: 全量节点未被处理"; fail=1
+fi
+unset _rc
 
 echo ""
 if [ "${fail}" = "0" ]; then

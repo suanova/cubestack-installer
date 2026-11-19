@@ -13,7 +13,8 @@
 #   · 依赖预检: deb 的 Depends 必须在"远端已装 ∪ 本次待装"内, 否则 skip(宁缺毋滥, 不破坏 apt)
 #   · 修复半装: 安装前 dpkg --configure -a + apt-get install -f; 失败再探测半装包清理
 #   · 清除系统容器包: kubelet 未运行(fresh 节点)时 purge containerd/containerd.io/runc ——
-#     否则 kubespray runc role `apt-get remove runc` 会撞上系统 containerd 的 Depends 冲突
+#     否则 kubespray runc role `apt-get remove runc` 会撞上系统 containerd 的 Depends 冲突;
+#     **在远端探测/选包之前执行**, 保证依赖预检看到的是 purge 后的真实状态
 #   · 失败不再掩盖: 远端 shell 启用 pipefail, dpkg 退出码显式捕获; 失败 → err 退出
 # ============================================================
 set -euo pipefail
@@ -82,12 +83,37 @@ deb_depends() {   # <deb路径> → Depends 原文(无 dpkg-deb 时为空=跳过
     fi
 }
 
+# ── fresh 节点准备: 必须在 inventory/选包之前清除系统容器包 ──
+# purge 会删除 runc/containerd; 若先探测再 purge, REMOTE_VER 会把已删的 runc 当成
+# 满足依赖, 随后 dpkg -i 失败. 因此这里先做破坏性清理, 再探测, 选包基于 purge 后状态.
+say "检查 fresh 节点系统容器包(containerd/containerd.io/runc)..."
+PRE_PURGE_LOG="$(mktemp)"
+PRE_PURGE_PAYLOAD="$(cat <<'PRE_PURGE'
+set -o pipefail
+if [ "$(systemctl is-active kubelet 2>/dev/null)" != "active" ]; then
+    echo "--- [pre] kubelet 未运行: 清理系统容器包(containerd/containerd.io/runc) ---"
+    apt-get purge -y containerd containerd.io runc 2>&1 | tail -5
+else
+    echo "--- [pre] kubelet active: 跳过系统容器包清理 ---"
+fi
+PRE_PURGE
+)"
+if ! ${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes -o ConnectTimeout=15 "${USER}@${IP}" \
+    "sudo bash -s" <<< "${PRE_PURGE_PAYLOAD}" > "${PRE_PURGE_LOG}" 2>&1; then
+    warn "fresh 节点系统容器包清理失败(继续; 后续按节点实际状态探测):"
+    tail -5 "${PRE_PURGE_LOG}" | sed 's/^/      /' >&2
+elif [ -s "${PRE_PURGE_LOG}" ]; then
+    tail -3 "${PRE_PURGE_LOG}" | sed 's/^/    /'
+fi
+rm -f "${PRE_PURGE_LOG}"
+
 # ── 远端探测: 已装包版本/状态 + kubelet 是否运行 ──
 REMOTE_PROBE="$(mktemp)"
 cat > "${REMOTE_PROBE}" <<'PROBE_EOF'
 #!/bin/bash
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-# 状态码: ii=正常安装; hi/iU/iF/iH=半装/解包未配置(破损, 需修复); 实际版本为空=未装
+# 状态码: ii=正常安装(唯一可用状态); rc=仅剩配置文件; hi/iU/iF/iH=半装/解包未配置;
+#   其他非 ii 状态(如有版本残留)一律不算已装, 不能用来跳过离线包或满足依赖。
 dpkg-query -W -f='pkg|${db:Status-Abbrev}|${Package}|${Version}\n' 2>/dev/null | grep -E '^pkg\|' || true
 echo "kubelet_running=$([ "$(systemctl is-active kubelet 2>/dev/null)" = "active" ] && echo 1 || echo 0)"
 PROBE_EOF
@@ -96,8 +122,9 @@ say "探测节点 ${IP} 已装包状态/版本 ..."
 probe_out="$(${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes -o ConnectTimeout=10 "${USER}@${IP}" "bash -s" < "${REMOTE_PROBE}" 2>/dev/null || true)"
 rm -f "${REMOTE_PROBE}"
 
-# 解析远端状态 → REMOTE_VER(包名→已装版本)/REMOTE_BROKEN(包名→破损状态码)/REMOTE_KUBELET
-declare -A REMOTE_VER REMOTE_BROKEN
+# 解析远端状态 → REMOTE_VER(仅 ii=可用已装)/REMOTE_BROKEN(非 ii 且有版本)/
+#   REMOTE_CONFIG_ONLY(rc=仅剩配置文件)/REMOTE_KUBELET
+declare -A REMOTE_VER REMOTE_BROKEN REMOTE_CONFIG_ONLY
 REMOTE_KUBELET=0
 while IFS= read -r rline; do
     [ -z "${rline}" ] && continue
@@ -105,9 +132,19 @@ while IFS= read -r rline; do
         kubelet_running=*) REMOTE_KUBELET="${rline#kubelet_running=}" ;;
         pkg\|*)
             rrest="${rline#pkg|}"; rst="${rrest%%|*}"; rrest="${rrest#*|}"
+            # dpkg-query 的 ${db:Status-Abbrev} 带尾随空格("ii "/"rc "); 归一化后再比较.
+            rst="$(printf '%s' "${rst}" | tr -d '[:space:]')"
             rname="${rrest%%|*}"; rver="${rrest#*|}"
-            REMOTE_VER["${rname}"]="${rver}"
-            case "${rst}" in ii) : ;; *) REMOTE_BROKEN["${rname}"]="${rst}" ;; esac
+            # 只有 ii(install ok installed) 才算可用已装; rc(config-files)/
+            # hi/iU/iF/iH 等状态不满足依赖, 也不能用来跳过离线包.
+            case "${rst}" in
+                ii) REMOTE_VER["${rname}"]="${rver}" ;;
+                *)
+                    if [ -n "${rver}" ]; then
+                        REMOTE_BROKEN["${rname}"]="${rst}"
+                        [ "${rst}" = "rc" ] && REMOTE_CONFIG_ONLY["${rname}"]=1
+                    fi ;;
+            esac
             ;;
     esac
 done <<< "${probe_out}"
@@ -118,10 +155,11 @@ done <<< "${probe_out}"
 #   ② 待装集合: 仅"未装"的 deb; 再校验其 Depends 能在(远端已装 ∪ 待装)内满足, 否则 skip + warn
 NEED_DEBS=()        # 待复制/安装的 deb 路径
 NEED_PKGS=()        # 对应包名
-declare -A NEED_SET
+declare -A NEED_SET DEB_PKG_SET
 for f in "${DEBS[@]}"; do
     pkg="$(deb_pkg_name "$f")"
     [ -n "${pkg}" ] || { warn "无法解析 deb 包名: $(basename "$f"), 跳过"; continue; }
+    DEB_PKG_SET["${pkg}"]=1
     # ★ 2026-10-14 重构(P0): 互斥提供者判定改为共享表(lib-common::pkg_conflict_providers,
     #   与节点侧 _pkg_conflict_providers 同步; 夹具断言两处一致)—— 不再手写单个包名。
     #   语义: 本工具只"补缺"; 若待装包的互斥提供者任一已装 → 跳过(保持节点既有口径 ——
@@ -136,8 +174,11 @@ for f in "${DEBS[@]}"; do
         continue
     fi
     if [ -n "${REMOTE_VER[${pkg}]:-}" ]; then
-        vlog "  [${pkg}] 已装 ${REMOTE_VER[${pkg}]}(离线包不重复装), 跳过"
+        vlog "  [${pkg}] 已正常安装 ${REMOTE_VER[${pkg}]}(离线包不重复装), 跳过"
         continue
+    fi
+    if [ -n "${REMOTE_BROKEN[${pkg}]:-}" ]; then
+        warn "  [${pkg}] 节点状态=${REMOTE_BROKEN[${pkg}]}(非 ii, 不算可用已装); 将重新安装/修复"
     fi
     NEED_DEBS+=("$f"); NEED_PKGS+=("${pkg}"); NEED_SET["${pkg}"]=1
 done
@@ -284,14 +325,72 @@ if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1; then
     done
 fi
 
-if [ "${#NEED_DEBS[@]}" -eq 0 ]; then
-    ok "节点 ${IP} 所需离线包均已安装(无需上传/装包)"
+# ── 时间提供者互斥(chrony / systemd-timesyncd / openntpd / ntp 只允许一个) ──
+# 已装提供者: 保留它, 移除待装集里的其他提供者(初始循环已按 REMOTE_VER 过滤, 这里兜底 cohort);
+# 未装提供者: 在待装集里按 chrony > systemd-timesyncd > openntpd > ntp 选一个,
+#   避免两个 provider 一起 dpkg -i 撞 "conflicts with time-daemon".
+_td_installed=""
+for _tdp in chrony systemd-timesyncd openntpd ntp; do
+    [ -n "${REMOTE_VER[${_tdp}]:-}" ] && { _td_installed="${_tdp}"; break; }
+done
+_td_keep=""
+if [ -n "${_td_installed}" ]; then
+    _td_keep="${_td_installed}"
+else
+    for _tdp in chrony systemd-timesyncd openntpd ntp; do
+        [ -n "${NEED_SET[${_tdp}]:-}" ] && { _td_keep="${_tdp}"; break; }
+    done
+fi
+if [ -n "${_td_keep}" ]; then
+    _kept_debs=(); _kept_pkgs=()
+    for i in "${!NEED_DEBS[@]}"; do
+        f="${NEED_DEBS[$i]}"; pkg="${NEED_PKGS[$i]}"
+        case "${pkg}" in
+            chrony|systemd-timesyncd|openntpd|ntp)
+                if [ "${pkg}" != "${_td_keep}" ]; then
+                    if [ -n "${_td_installed}" ]; then
+                        warn "  [${pkg}] 时间提供者互斥: 节点已装 ${_td_keep}; 跳过"
+                    else
+                        warn "  [${pkg}] 时间提供者互斥: 本次只保留 ${_td_keep}; 跳过"
+                    fi
+                    continue
+                fi ;;
+        esac
+        _kept_debs+=("$f"); _kept_pkgs+=("${pkg}")
+    done
+    NEED_DEBS=("${_kept_debs[@]}"); NEED_PKGS=("${_kept_pkgs[@]}")
+    NEED_SET=()
+    for _kp in "${NEED_PKGS[@]}"; do NEED_SET["${_kp}"]=1; done
+fi
+unset _td_installed _td_keep _tdp _kept_debs _kept_pkgs _kp i f pkg
+
+# 只关心"离线集里存在对应 deb"的破损包: 无关的 rc/半装包不应触发本工具的修复/告警.
+BROKEN_RELEVANT=()
+for _p in "${!REMOTE_BROKEN[@]}"; do
+    [ -n "${DEB_PKG_SET[${_p}]:-}" ] && BROKEN_RELEVANT+=("${_p}")
+done
+for _p in ${BROKEN_RELEVANT[@]+"${BROKEN_RELEVANT[@]}"}; do
+    [ -n "${NEED_SET[${_p}]:-}" ] && continue
+    if [ -n "${REMOTE_CONFIG_ONLY[${_p}]:-}" ]; then
+        warn "  [${_p}] 仅剩配置文件(rc), 但离线 deb 未进入安装计划(依赖/冲突); 无法自动重装"
+    else
+        warn "  [${_p}] 状态=${REMOTE_BROKEN[${_p}]}, 离线 deb 未进入安装计划; 已交远端 dpkg/apt 修复"
+    fi
+done
+unset _p
+
+if [ "${#NEED_DEBS[@]}" -eq 0 ] && [ "${#BROKEN_RELEVANT[@]}" -eq 0 ]; then
+    ok "节点 ${IP} 所需离线包均已正常安装(无需上传/装包)"
     exit 0
 fi
 
-say "待安装 ${#NEED_DEBS[@]} 个包: ${NEED_PKGS[*]}"
+if [ "${#NEED_DEBS[@]}" -gt 0 ]; then
+    say "待安装 ${#NEED_DEBS[@]} 个包: ${NEED_PKGS[*]}"
+else
+    say "离线集无需安装新包; 检测到 ${#BROKEN_RELEVANT[@]} 个半装/仅剩配置包, 执行远端修复 ..."
+fi
 
-# ── 远端修复段(幂等): 修半装 + apt 依赖修复 + 清理系统容器包(fresh 节点) ──
+# ── 远端修复段(幂等): 修半装 + apt 依赖修复 ──
 REMOTE_FIX="$(mktemp)"
 cat > "${REMOTE_FIX}" <<'FIX_EOF'
 #!/bin/bash
@@ -309,20 +408,28 @@ if [ -n "${BROKEN}" ]; then
     done
     apt-get install -f -y --no-install-recommends 2>&1 | tail -5 || true
 fi
-# fresh 节点(非集群成员, kubelet 未运行): 清除系统容器包, 消除 kubespray runc role 的 Depends 冲突
-if [ "$(systemctl is-active kubelet 2>/dev/null)" != "active" ]; then
-    echo "--- [fix] 清理系统容器包(containerd/containerd.io/runc) ---"
-    apt-get purge -y containerd containerd.io runc 2>&1 | tail -5 || true
-fi
 dpkg --audit 2>&1 | tail -5 || true
 FIX_EOF
 
-say "执行远端修复(半装/apt 依赖/系统容器包)..."
+say "执行远端修复(半装/apt 依赖)..."
+REPAIR_RC=0
 if ! ${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes -o ConnectTimeout=15 "${USER}@${IP}" \
     "sudo bash -s" < "${REMOTE_FIX}" 2>/dev/null; then
+    REPAIR_RC=1
     warn "远端修复部分失败(半装状态可能未完全清理; 继续尝试安装)"
 fi
 rm -f "${REMOTE_FIX}"
+
+# 没有待装包但存在相关的半装/仅剩配置(rc)状态: 远端修复已执行; 未进入安装计划的
+# 破损包已在上面告警(rc 需要可用 deb; hi/iU 交 dpkg/apt 修复).
+if [ "${#NEED_DEBS[@]}" -eq 0 ]; then
+    if [ "${REPAIR_RC}" -ne 0 ]; then
+        err "远端半装修复失败, 且本次无待安装离线包; 请检查节点 ${IP} 后重跑"
+        exit 1
+    fi
+    ok "节点 ${IP} 半装状态已执行修复(无待安装离线包)"
+    exit 0
+fi
 
 # ── 复制待装包到目标节点 ──
 # 重建目标目录(先清: /tmp 陈旧文件属主非本次用户时 scp/rsync 会被 fs.protected_regular 拒, root 也不例外)
@@ -330,9 +437,41 @@ ${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" "sudo rm -rf /tmp/packages && mkdir 
 say "复制 ${#NEED_DEBS[@]} 个离线包到 ${IP}:/tmp/packages/ ..."
 for f in "${NEED_DEBS[@]}"; do
     vlog "  复制: $(basename "$f")"
-    ${SSH_SUDO} rsync -e "ssh ${SSH_OPTS}" "$f" "${USER}@${IP}:/tmp/packages/" 2>/dev/null || \
-      ${SSH_SUDO} scp ${SSH_OPTS} "$f" "${USER}@${IP}:/tmp/packages/" 2>/dev/null || true
+    _copied=0
+    if ${SSH_SUDO} rsync -e "ssh ${SSH_OPTS}" "$f" "${USER}@${IP}:/tmp/packages/" 2>/dev/null; then
+        _copied=1
+    elif ${SSH_SUDO} scp ${SSH_OPTS} "$f" "${USER}@${IP}:/tmp/packages/" 2>/dev/null; then
+        _copied=1
+    fi
+    if [ "${_copied}" != "1" ]; then
+        err "离线包复制失败(rsync/scp 均失败): $(basename "$f")"
+        exit 1
+    fi
+    # 传输成功也要核对大小: 截断/半包不能进入 dpkg -i
+    _lsz="$(stat -c%s "$f" 2>/dev/null || true)"
+    _rsz="$(${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes -o ConnectTimeout=15 "${USER}@${IP}" \
+        "stat -c%s '/tmp/packages/$(basename "$f")'" 2>/dev/null || true)"
+    if [ -z "${_lsz}" ] || [ "${_rsz}" != "${_lsz}" ]; then
+        err "离线包复制不完整: $(basename "$f")(本地 ${_lsz:-?} / 远端 ${_rsz:-缺失})"
+        exit 1
+    fi
 done
+unset _copied _lsz _rsz f
+
+# dpkg -i 前校验远端暂存集完整: 防止"部分上传 + dpkg 装子集后仍报告全量成功"
+_expected_names=""
+for f in "${NEED_DEBS[@]}"; do _expected_names="${_expected_names} $(basename "$f")"; done
+_staged_names="$(${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes -o ConnectTimeout=15 "${USER}@${IP}" \
+    "ls -1 /tmp/packages" 2>/dev/null || true)"
+_missing_names=""
+for _bn in ${_expected_names}; do
+    grep -qxF -- "${_bn}" <<< "${_staged_names}" || _missing_names="${_missing_names} ${_bn}"
+done
+if [ -n "${_missing_names}" ]; then
+    err "以下离线包未成功复制到 ${IP}:/tmp/packages:${_missing_names}"
+    exit 1
+fi
+unset _expected_names _staged_names _missing_names _bn
 
 # ── 安装(dpkg -i; 远端 pipefail 保证 dpkg 失败不被 tail 管道吞掉, 失败显式中止) ──
 # ★ 2026-09-24 事故修复: 安装期间临时**禁用 initramfs 重建**, 装完恢复。

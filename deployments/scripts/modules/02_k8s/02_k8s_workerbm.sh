@@ -73,5 +73,6 @@ for line in "${NODES[@]:-}"; do
 done
 if [ "${PKG_FAIL}" -ne 0 ]; then
     err "worker 离线包安装存在失败节点; 修复后重跑 --steps k8s_workerbm"
+    exit 1
 fi
 ok "worker 节点离线包安装完成"

@@ -42,15 +42,44 @@ done
 if [ "${#IPS[@]}" -eq 0 ]; then
     # 目标节点来源**以 inventory 为准**(部署本身就是 inventory 驱动的; cluster.conf 的 NODES
     # 在容器里可能与实际不同/为空 —— 实测 2026-09-28)。取不到再回退 cluster.conf 的 NODES。
+    # ★ 扩容(k8s_scale)只设置 ONLY_HOSTS、不传 --ip: 必须按 ONLY_HOSTS 过滤, 否则会把
+    #   .deb 上传/apt 对账到已有节点(07_k8s_scale.sh 的注释明确要求只动新节点)。
+    #   显式 --ip 仍视为调用方精确指定, 不受 ONLY_HOSTS 过滤。
+    _only="${ONLY_HOSTS:-}"
     _hosts="${REPO_ROOT}/deployments/kubespray/inventory/${CLUSTER_NAME:-cubestack-cluster}/hosts.yml"
     if [ -f "${_hosts}" ]; then
-        while IFS= read -r ip; do [ -n "${ip}" ] && IPS+=("${ip}"); done \
-            < <(awk '/^[[:space:]]*ansible_host:/{print $2}' "${_hosts}" | sort -u)
+        while IFS=$'\t' read -r _hn _ip; do
+            [ -n "${_ip}" ] || continue
+            node_matches "${_hn}" || continue
+            IPS+=("${_ip}")
+        done < <(awk '
+            /^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*$/ {
+                hn=$1; sub(/:$/,"",hn); next
+            }
+            /^[[:space:]]*ansible_host:/ {
+                ip=$2; gsub(/"/,"",ip)
+                if (hn != "" && ip != "") print hn "\t" ip
+            }
+        ' "${_hosts}" | sort -u)
     fi
-    if [ "${#IPS[@]}" -eq 0 ]; then
-        # all_node_ips 输出单行空格分隔 → 按空白拆分(与 cluster-teardown 同口径)
-        for ip in $(all_node_ips); do [ -n "${ip}" ] && IPS+=("${ip}"); done
+    # ONLY_HOSTS 显式指定: 再从 NODES 补入(inventory 可能尚未包含扩容新节点),
+    # 仍由 node_matches 只保留匹配节点; ONLY_HOSTS 未设置时保持 inventory 全量行为,
+    # 仅当 inventory 完全取不到才回退 NODES。
+    if [ -n "${_only}" ] || [ "${#IPS[@]}" -eq 0 ]; then
+        for _line in "${NODES[@]:-}"; do
+            [ -z "${_line}" ] && continue
+            node_parse "${_line}"
+            [ -n "${NODE_IP}" ] || continue
+            node_matches "${NODE_HOSTNAME}" || continue
+            _dup=0
+            for _x in ${IPS[@]+"${IPS[@]}"}; do
+                [ "${_x}" = "${NODE_IP}" ] && { _dup=1; break; }
+            done
+            [ "${_dup}" = "0" ] && IPS+=("${NODE_IP}")
+        done
+        unset _line _x _dup
     fi
+    unset _hn _ip _only
 fi
 [ "${#IPS[@]}" -gt 0 ] || { err "没有目标节点(cluster.conf NODES 为空?)"; exit 1; }
 

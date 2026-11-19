@@ -16,6 +16,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 MODULE="${REPO_ROOT}/deployments/scripts/modules/02_k8s/00_chrony_pkgs.sh"
 TOOL="${REPO_ROOT}/deployments/scripts/tools/node/install-chrony-packages.sh"
+LIB="${REPO_ROOT}/deployments/scripts/lib-common.sh"
 DEPLOY="${REPO_ROOT}/deployments/scripts/deploy-cluster.sh"
 DEFAULTS="${REPO_ROOT}/deployments/config/cluster.defaults.conf"
 SCALE="${REPO_ROOT}/deployments/scripts/modules/02_k8s/07_k8s_scale.sh"
@@ -44,7 +45,17 @@ chk_not_contains "工具不写 /etc/chrony/chrony.conf" "/etc/chrony/chrony.conf
 chk_not_contains "工具不重启 chrony" "systemctl restart chrony" "${TOOL}"
 chk_contains "工具使用离线装包原语" "install_debs_offline" "${TOOL}"
 chk_contains "工具引用专用安装集" "os/packages/chrony" "${TOOL}"
-chk_contains "工具幂等跳过已装 chrony" "已安装 chrony, 跳过" "${TOOL}"
+chk_contains "工具幂等跳过已装 chrony" "已安装 chrony(install ok installed), 跳过" "${TOOL}"
+# 预卸 timesyncd 的安全门: 依赖预检 / 回滚包备份 / 失败恢复
+chk_contains "预卸前做离线依赖预检" "_deb_set_missing" "${LIB}"
+chk_contains "预卸前备份时间提供者" "_time_daemon_backup" "${LIB}"
+chk_contains "替换失败恢复时间提供者" "_time_daemon_restore" "${LIB}"
+chk_contains "工具收集回滚 deb" "rollback/" "${TOOL}"
+chk_contains "工具收集 timesyncd 回滚包" "systemd-timesyncd_*.deb" "${TOOL}"
+chk_contains "工具就绪前校验包状态" "assert_pkgs_ready chrony" "${TOOL}"
+chk_contains "工具跳过依据 dpkg 状态" "install ok installed" "${TOOL}"
+chk_contains "批量成功后校验目标包" 'assert_pkgs_ready ${want}' "${LIB}"
+chk_not_contains "预卸失败不再被 || true 吞掉" 'dpkg --purge "${c}" >>"${dlog}" 2>&1 || true' "${LIB}"
 
 # setup-ntp 侧不再内嵌装包(与 test-k8s-ntp 的围栏互补)
 SETUP="${REPO_ROOT}/deployments/scripts/tools/node/setup-ntp.sh"
@@ -123,7 +134,7 @@ run_tool() {  # run_tool <chrony_present 0|1> <ssh_down 0|1> <offline_root>
 
 rc="$(run_tool 1 0 "${TMP}/offline")"
 chk "已装 chrony: 退出码 0" "0" "${rc}"
-chk_contains "已装 chrony: 跳过提示" "已安装 chrony, 跳过" "${TMP}/out"
+chk_contains "已装 chrony: 跳过提示" "已安装 chrony(install ok installed), 跳过" "${TMP}/out"
 chk "已装 chrony: 不上传安装集" "0" "$(wc -l < "${TMP}/scp.log")"
 
 rc="$(run_tool 0 0 "${TMP}/offline")"

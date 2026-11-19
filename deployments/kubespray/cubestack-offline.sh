@@ -1069,6 +1069,7 @@ _gen_preload_play() {
       shell: |
         set -euo pipefail
         changed=0
+        failed=0
         for img in $(ctr -n k8s.io images list -q 2>/dev/null | grep '/mirrors/' || true); do
           case "$img" in
             */mirrors/*) upstream="${img#*/mirrors/}" ;;
@@ -1076,11 +1077,21 @@ _gen_preload_play() {
           esac
           [ -n "$upstream" ] || continue
           if ! ctr -n k8s.io images list -q 2>/dev/null | grep -qx "$upstream"; then
-            ctr -n k8s.io images tag "$img" "$upstream" >/dev/null 2>&1 || true
-            changed=$((changed + 1))
+            # 失败必须让本 task 失败: 只推了 mirrors/ 形态的离线归档若缺上游 tag,
+            # kubeadm preflight 仍会联网拉取并超时; || true 会把缺口伪装成"已补 tag"。
+            if ctr -n k8s.io images tag "$img" "$upstream" >/dev/null 2>&1; then
+              changed=$((changed + 1))
+            else
+              echo "  ✗ retag 失败: ${img} -> ${upstream}" >&2
+              failed=$((failed + 1))
+            fi
           fi
         done
         echo "  retag: ${changed} 个镜像已补上游 tag"
+        if [ "${failed}" -ne 0 ]; then
+          echo "  retag: ${failed} 个镜像补上游 tag 失败; 修复后重跑本 play(上游 tag 未写入)" >&2
+          exit 1
+        fi
       args:
         executable: /bin/bash
       changed_when: false
