@@ -657,6 +657,53 @@ else
     warn "未找到 ${ALL_YML},跳过 Pod 内 registry 解析(dns_etchosts)"
 fi
 
+# ---------------- 4.3 kubespray 镜像仓库前缀(镜像以 mirror 名提供时) ----------------
+# kubespray 的 Pod 清单、kubeadm imageRepository 和 download 缓存文件名都由
+# docker/quay/kube/github/gcr_image_repo 派生。镜像以 mirror 名提供时把这几项整体切到
+# mirror 前缀:清单、kubeadm 和缓存查找保持一致(镜像 tar 名与 RepoTag 同步由镜像源保证)。
+# 在线安装(镜像用上游名)或 HARBOR_MIRROR_ENABLED=false 时不写本块,kubespray 保持默认。
+_mirror_repos="$(harbor_mirror_base)"
+if [ -f "${ALL_YML}" ]; then
+    python3 - "${ALL_YML}" "${_mirror_repos}" <<'PYEOF'
+import sys
+path, base = sys.argv[1:3]
+B = '# >>> cubestack: kubespray image repositories (managed by sync-kubespray-config.sh) >>>'
+E = '# <<< cubestack: kubespray image repositories <<<'
+lines = open(path).read().split('\n')
+out, i = [], 0
+while i < len(lines):
+    if lines[i].strip() == B:
+        i += 1
+        while i < len(lines) and lines[i].strip() != E:
+            i += 1
+        i += 1
+        continue
+    out.append(lines[i]); i += 1
+if base:
+    while out and out[-1].strip() == '':
+        out.pop()
+    out += ['', B,
+            f'docker_image_repo: "{base}/docker.io"',
+            f'quay_image_repo: "{base}/quay.io"',
+            f'kube_image_repo: "{base}/registry.k8s.io"',
+            f'github_image_repo: "{base}/ghcr.io"',
+            f'gcr_image_repo: "{base}/gcr.io"',
+            E]
+result = '\n'.join(out)
+if not result.endswith('\n'):
+    result += '\n'
+open(path, 'w').write(result)
+PYEOF
+    if [ -n "${_mirror_repos}" ]; then
+        ok "已写入 kubespray 镜像仓库前缀 → ${_mirror_repos}/{docker.io,quay.io,registry.k8s.io,ghcr.io,gcr.io}"
+    else
+        say "镜像命名=$(cubestack_image_naming) → kubespray 镜像仓库保持默认(上游)"
+    fi
+else
+    warn "未找到 ${ALL_YML},跳过 kubespray 镜像仓库前缀同步"
+fi
+unset _mirror_repos
+
 # ---------------- 6. 更新 containerd.yml (含内置 registry 的 HTTP 信任配置) ----------------
 # kubespray 的 containerd_registries_mirrors 变量生成 config_path=certs.d/<host>/hosts.toml,
 # 让集群内节点 containerd 能直接拉取无 TLS 的 registry。用 python 幂等替换(去旧块再追加)。

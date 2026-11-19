@@ -418,20 +418,19 @@ reg_has_tag() {
     curl -s -m 6 "http://${REGISTRY_DIRECT:-${REGISTRY_BASE}}/v2/${path}/${repo}/tags/list" 2>/dev/null | grep -q "\"${ver}\""
 }
 
-# ---------------- 镜像源重写: 内置 registry 就绪前的 addon 直连预加载镜像 ----------------
-# 离线版本树里的镜像 tar 以 mirror 名打包(skopeo 写 RepoTags, 形如
-# <HARBOR_MIRROR_REGISTRY>/<HARBOR_MIRROR_PROJECT>/<上游全名>); ctr import 后 containerd 里
+# ---------------- 镜像源重写: 内置 registry 就绪前的 addon 直连本地镜像 ----------------
+# 镜像以 mirror 名提供时, tar 的 RepoTags 形如
+# <HARBOR_MIRROR_REGISTRY>/<HARBOR_MIRROR_PROJECT>/<上游全名>; ctr import 后 containerd 里
 # **只有 mirror 名**。内置 registry 起来之前的 addon(local-path / registry / rook-ceph 等)
-# 无法从它拉镜像, 只能命中 containerd 里预加载的 mirror 名 —— 所以这些 addon 的 image
-# 引用必须重写成 mirror 名; 继续写上游名(docker.io/...)在断网环境必然 ImagePullBackOff。
+# 无法从它拉镜像, 只能命中 containerd 里的 mirror 名 —— 所以这些 addon 的 image 引用
+# 必须重写成 mirror 名; 继续写上游名(docker.io/...)在断网环境必然 ImagePullBackOff。
 #
-# ⚠ 前提是 tar 的 RepoTags 确实是 mirror 名。两条物化路径的命名不同:
-#   · release / 离线版本树(cubestack-release fetch → skopeo docker-archive:<mirror-ref>)：mirror 名;
-#   · install-online.sh(tools/online/materialize-base-images.sh):docker-archive:<上游ref>：上游名。
-# 因此不能用 HARBOR_MIRROR_ENABLED 单独判定(它在 online 流程里仍为 true)。
+# ⚠ 是否重写取决于镜像以什么名字提供(不能只看 HARBOR_MIRROR_ENABLED):
+#   · mirror: tar 的 RepoTag 是 mirror 名(预置镜像树);
+#   · upstream: 在线安装物化时 tar 用上游名。
 # 用法: naming="$(cubestack_image_naming)"   # mirror | upstream
 #   CUBESTACK_IMAGE_NAMING=mirror|upstream 显式覆盖;
-#   未显式设置时:CUBESTACK_ONLINE=1 → upstream, 否则 mirror(release/离线)。
+#   未显式设置时:CUBESTACK_ONLINE=1 → upstream, 否则 mirror。
 cubestack_image_naming() {
     case "${CUBESTACK_IMAGE_NAMING:-}" in
         mirror|upstream) printf '%s' "${CUBESTACK_IMAGE_NAMING}"; return 0 ;;

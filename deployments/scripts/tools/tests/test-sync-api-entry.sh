@@ -299,39 +299,35 @@ chk "自定义 dns_etchosts: 用户内容保留" "1" "$(cnt '^  1\.2\.3\.4 user\
 chk "自定义 dns_etchosts: 不追加第二个键" "1" "$(cnt '^dns_etchosts:' "${A14}")"
 chk "自定义 dns_etchosts: 不写 registry 映射" "0" "$(cnt 'registry\.cubestack\.io$' "${A14}")"
 
-echo "== ⑬ addon 镜像源: 内置 registry 就绪前引用预加载的 mirror 名 =="
-D15="${TMP}/d15"; mk_inv "${D15}"; ADD15="${D15}/group_vars/k8s_cluster/addons.yml"
+echo "== ⑬ kubespray 镜像仓库前缀 + local-path helper(mirror 名提供时) =="
+D15="${TMP}/d15"; mk_inv "${D15}"; ALL15="${D15}/group_vars/all/all.yml"; ADD15="${D15}/group_vars/k8s_cluster/addons.yml"
 C19="${TMP}/c19"; mk_conf "${C19}" true 'KUBE_VIP_ENABLED=false'
 chk "mirror 开: 退出码 0" "0" "$(run_sync "${D15}" "${C19}"; echo $?)"
-chk "local-path Pod 镜像 = mirror 名" "1" \
-    "$(cnt '^local_path_provisioner_pod_image_repo: "harbor\.isuanova\.com/mirrors/docker\.io/rancher/local-path-provisioner"$' "${ADD15}")"
-chk "local-path Pod tag 与版本树一致" "1" "$(cnt '^local_path_provisioner_pod_image_tag: "v0\.0\.37"$' "${ADD15}")"
+chk "docker_image_repo ← mirror" "1" "$(cnt '^docker_image_repo: "harbor\.isuanova\.com/mirrors/docker\.io"$' "${ALL15}")"
+chk "quay_image_repo ← mirror" "1" "$(cnt '^quay_image_repo: "harbor\.isuanova\.com/mirrors/quay\.io"$' "${ALL15}")"
+chk "kube_image_repo ← mirror" "1" "$(cnt '^kube_image_repo: "harbor\.isuanova\.com/mirrors/registry\.k8s\.io"$' "${ALL15}")"
+chk "github_image_repo ← mirror" "1" "$(cnt '^github_image_repo: "harbor\.isuanova\.com/mirrors/ghcr\.io"$' "${ALL15}")"
+chk "gcr_image_repo ← mirror" "1" "$(cnt '^gcr_image_repo: "harbor\.isuanova\.com/mirrors/gcr\.io"$' "${ALL15}")"
 chk "helper 镜像 = mirror busybox" "1" \
     "$(cnt '^local_path_provisioner_helper_image_repo: "harbor\.isuanova\.com/mirrors/docker\.io/library/busybox"$' "${ADD15}")"
 chk "helper tag = BUSYBOX_TAG(非 latest)" "1" "$(cnt '^local_path_provisioner_helper_image_tag: "1\.38\.0"$' "${ADD15}")"
-chk "registry Pod 镜像 = mirror 名" "1" \
-    "$(cnt '^registry_pod_image_repo: "harbor\.isuanova\.com/mirrors/docker\.io/library/registry"$' "${ADD15}")"
-chk "registry Pod tag 与版本树一致" "1" "$(cnt '^registry_pod_image_tag: "2\.8\.1"$' "${ADD15}")"
-chk "nginx-proxy 镜像 = mirror 名" "1" \
-    "$(cnt '^nginx_pod_image_repo: "harbor\.isuanova\.com/mirrors/docker\.io/library/nginx"$' "${ADD15}")"
-chk "nginx-proxy tag 与版本树一致" "1" "$(cnt '^nginx_pod_image_tag: "1\.30\.6-alpine"$' "${ADD15}")"
-# download role 的缓存文件名来自 *_image_repo: 必须保持上游名(不能同步改成 mirror)
-chk "download 变量未被改成 mirror 名" "0" "$(cnt '^registry_image_repo: .*harbor' "${ADD15}")"
+chk "不再写 Pod 级覆盖变量" "0" "$(cnt '_pod_image_' "${ADD15}")"
+chk "重跑幂等(前缀块只有一份)" "1" "$(run_sync "${D15}" "${C19}"; cnt '^docker_image_repo:' "${ALL15}")"
 C20="${TMP}/c20"; mk_conf "${C20}" true 'KUBE_VIP_ENABLED=false' 'HARBOR_MIRROR_ENABLED=false'
 chk "mirror 关: 退出码 0" "0" "$(run_sync "${D15}" "${C20}"; echo $?)"
-chk "mirror 关: 无生效的 Pod 镜像覆盖" "0" "$(cnt '^registry_pod_image_repo:' "${ADD15}")"
-chk "mirror 关: helper 覆盖也不生效" "0" "$(cnt '^local_path_provisioner_helper_image_repo:' "${ADD15}")"
-chk "mirror 关: nginx 覆盖也不生效" "0" "$(cnt '^nginx_pod_image_repo:' "${ADD15}")"
-chk "mirror 开回来: 覆盖恢复" "1" "$(run_sync "${D15}" "${C19}"; cnt '^registry_pod_image_repo: .*harbor' "${ADD15}")"
-# online 安装的 tar 用上游 RepoTag → 不能渲染 mirror 名(否则 Pod 引用与 containerd 不符)
-D16="${TMP}/d16"; mk_inv "${D16}"; ADD16="${D16}/group_vars/k8s_cluster/addons.yml"
+chk "mirror 关: 无生效的仓库前缀" "0" "$(cnt '^docker_image_repo:' "${ALL15}")"
+chk "mirror 关: helper 覆盖不生效" "0" "$(cnt '^local_path_provisioner_helper_image_repo:' "${ADD15}")"
+# 在线安装物化的 tar 用上游名 → 不切换仓库前缀
+D16="${TMP}/d16"; mk_inv "${D16}"; ALL16="${D16}/group_vars/all/all.yml"; ADD16="${D16}/group_vars/k8s_cluster/addons.yml"
 C21="${TMP}/c21"; mk_conf "${C21}" true 'KUBE_VIP_ENABLED=false' 'CUBESTACK_ONLINE=1'
 chk "online: 退出码 0" "0" "$(run_sync "${D16}" "${C21}"; echo $?)"
-chk "online: 不写 Pod 镜像覆盖" "0" "$(cnt '^registry_pod_image_repo:' "${ADD16}")"
-chk "online: nginx 覆盖也不写" "0" "$(cnt '^nginx_pod_image_repo:' "${ADD16}")"
+chk "online: 不写仓库前缀" "0" "$(cnt '^docker_image_repo:' "${ALL16}")"
+chk "online: helper 覆盖也不写" "0" "$(cnt '^local_path_provisioner_helper_image_repo:' "${ADD16}")"
 C22="${TMP}/c22"; mk_conf "${C22}" true 'KUBE_VIP_ENABLED=false' 'CUBESTACK_ONLINE=1' 'CUBESTACK_IMAGE_NAMING=mirror'
-chk "online + 显式 mirror: 覆盖恢复(用于 --release 版本树)" "1" \
-    "$(run_sync "${D16}" "${C22}"; cnt '^registry_pod_image_repo: .*harbor' "${ADD16}")"
+chk "online + 显式 mirror: 仓库前缀恢复" "1" \
+    "$(run_sync "${D16}" "${C22}"; cnt '^docker_image_repo: .*harbor' "${ALL16}")"
+chk "online + 显式 mirror: helper 恢复" "1" \
+    "$(cnt '^local_path_provisioner_helper_image_repo: .*harbor' "${ADD16}")"
 # nodelocaldns 自指地址是可配置的: 自定义 NODELOCAL_DNS_IP 也要拦
 D17="${TMP}/d17"; mk_inv "${D17}"; C23="${TMP}/c23"
 mk_conf "${C23}" true 'KUBE_VIP_ENABLED=false' 'NODELOCAL_DNS_IP=169.254.20.10' 'UPSTREAM_DNS_SERVERS=169.254.20.10'
