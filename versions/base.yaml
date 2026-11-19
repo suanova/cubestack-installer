@@ -7,7 +7,7 @@ kubespray:
     path: deployments/kubespray/kubespray
 mirror:
   repo: suanova/container-image-mirror
-  commit: 664a379b079a53643e706438eae2a2709a464dac
+  commit: f2722c5a8cc34f720e22299e9d88e3badcd64bfc
   path: index.json
 env:
   API_LB_NGINX_IMAGE_TAG: 1.30.6-alpine
