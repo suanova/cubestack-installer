@@ -111,6 +111,12 @@ jobs:
           set -euo pipefail
           bash deployments/scripts/tools/tests/test-mirror-pin.sh
 
+      # pin-automerge: mirror pin PR 只允许移动 mirror.commit
+      - name: mirror pin 自动合并校验回归(pin-automerge)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-mirror-pin-diff.sh
+
       - name: 模块静态校验(check-modules.sh 全 19 项)
         run: |
           set -uo pipefail

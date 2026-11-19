@@ -60,10 +60,24 @@ jobs:
             --root . --repo "${MIRROR_REPO}" --commit "${COMMIT}" \
             --index "${RUNNER_TEMP}/mirror-index.json"
 
+      - name: Create an installation token for the bot
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack-installer
+          permission-contents: write
+          permission-pull-requests: write
+
+      # A GITHUB_TOKEN-created PR does not trigger pull_request workflows; the
+      # app token is what makes validate run without manual approval.
       - uses: peter-evans/create-pull-request@v6
         with:
+          token: ${{ steps.app-token.outputs.token }}
           base: ${{ env.BASE_BRANCH }}
-          branch: chore/mirror-${{ github.event.client_payload.catalog_commit }}
+          branch: chore/mirror-${{ env.BASE_BRANCH }}
           delete-branch: true
           title: "chore(base): bump mirror catalog pin"
           commit-message: "chore(base): bump mirror catalog pin"
