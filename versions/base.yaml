@@ -11,6 +11,7 @@ mirror:
   path: index.json
 env:
   API_LB_NGINX_IMAGE_TAG: 1.30.6-alpine
+  BUSYBOX_TAG: 1.38.0
   CALICO_VERSION: v3.32.2
   CEPH_VERSION: v20.2.2
   COREDNS_VERSION: v1.12.4
@@ -229,7 +230,7 @@ images:
   tar: docker.io_rancher_local-path-provisioner_${LOCAL_PATH_VERSION}.tar
 - key: k8s-base:docker.io/library/busybox
   catalog_id: kubernetes/busybox
-  version: 1.38.0
+  version: ${BUSYBOX_TAG}
   dest: offline-files/kubespray/${KUBESPRAY_VERSION}/images
   tar: busybox.tar
 - key: k8s-base:docker.io/library/nginx

@@ -68,7 +68,7 @@ data:
 {% endif %}
         }
         prometheus :9153
-{% set _upstream_dns = (upstream_dns_servers | default([])) | reject('match', '^(127\.|169\.254\.25\.10$)') | list %}
+{% set _upstream_dns = (upstream_dns_servers | default([])) | reject('match', '^127\.') | reject('equalto', nodelocaldns_ip | default('169.254.25.10')) | list %}
 {% if _upstream_dns | length > 0 %}
         forward . {{ _upstream_dns | join(' ') }} {
 {% else %}

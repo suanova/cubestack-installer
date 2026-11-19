@@ -133,7 +133,7 @@ else
     unset_key registry_pod_image_tag
     unset_key nginx_pod_image_repo
     unset_key nginx_pod_image_tag
-    say "HARBOR_MIRROR_ENABLED=false → addon 镜像源保持上游名(kubespray 默认)"
+    say "镜像命名=$(cubestack_image_naming) / HARBOR_MIRROR_ENABLED=${HARBOR_MIRROR_ENABLED:-true} → addon 镜像源保持上游名(kubespray 默认)"
 fi
 unset _mirror
 

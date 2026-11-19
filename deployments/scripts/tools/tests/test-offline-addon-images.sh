@@ -21,6 +21,7 @@ extract_fn() {   # extract_fn <函数名> <文件>  (函数体以列首 `}` 结�
     awk -v fn="$1" '$0 ~ "^" fn "\\(\\)" {f=1} f {print} f && /^}$/ {exit}' "$2"
 }
 
+eval "$(extract_fn cubestack_image_naming "${LIB}")"
 eval "$(extract_fn harbor_mirror_base "${LIB}")"
 eval "$(extract_fn mirror_image_ref "${LIB}")"
 eval "$(extract_fn mirror_rewrite_image_refs "${LIB}")"
@@ -31,6 +32,8 @@ TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 HARBOR_MIRROR_ENABLED=true
 HARBOR_MIRROR_REGISTRY=harbor.isuanova.com
 HARBOR_MIRROR_PROJECT=mirrors
+CUBESTACK_ONLINE=0
+CUBESTACK_IMAGE_NAMING=""
 
 echo "== ① mirror 前缀与引用重写 =="
 chk "harbor_mirror_base" "harbor.isuanova.com/mirrors" "$(harbor_mirror_base)"
@@ -47,6 +50,18 @@ chk "mirror 关闭 → harbor_mirror_base 为空" "" "$(harbor_mirror_base)"
 chk "mirror 关闭 → 引用原样" "docker.io/rook/ceph:v1.21.1" \
     "$(mirror_image_ref docker.io/rook/ceph:v1.21.1)"
 HARBOR_MIRROR_ENABLED=true
+# online 物化路径的 tar 用上游 RepoTag: 不能按 mirror 名渲染(否则 Pod 引用与 containerd 不符)
+CUBESTACK_ONLINE=1
+chk "online 自动 → naming=upstream" "upstream" "$(cubestack_image_naming)"
+chk "online 自动 → 不重写" "" "$(harbor_mirror_base)"
+chk "online 自动 → 引用保持上游名" "docker.io/library/busybox:1.38.0" \
+    "$(mirror_image_ref docker.io/library/busybox:1.38.0)"
+CUBESTACK_IMAGE_NAMING=mirror
+chk "显式 mirror 覆盖 online" "harbor.isuanova.com/mirrors" "$(harbor_mirror_base)"
+CUBESTACK_IMAGE_NAMING=upstream
+CUBESTACK_ONLINE=0
+chk "显式 upstream 覆盖离线" "" "$(harbor_mirror_base)"
+CUBESTACK_IMAGE_NAMING=""
 
 cat > "${TMP}/in.yaml" <<'EOF'
 spec:

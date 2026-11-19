@@ -199,8 +199,10 @@ mirror 名打包(`<harbor>/mirrors/<上游全名>`),离线 `ctr import` 后 cont
   **不要**改 `*_image_repo` —— download role 用同一变量推导缓存 tar 文件名,改了会 cache miss;
 - Rook/CSI 清单:应用前用 `mirror_rewrite_image_refs`(lib-common)把 `image:` 行重写到 mirror 名,
   csi-operator 的 ImageSet ConfigMap 用 `tools/k8s/render-csi-imageset.py` 钉到预加载镜像;
-- 统一走 `harbor_mirror_base` / `mirror_image_ref`,受 `HARBOR_MIRROR_ENABLED` 控制
-  (false = 直连上游,不动引用)。
+- 统一走 `harbor_mirror_base` / `mirror_image_ref`,受 `HARBOR_MIRROR_ENABLED` 与
+  `CUBESTACK_IMAGE_NAMING` 控制(mirror 关闭 / 命名=upstream 时不动引用)。命名默认自动判定:
+  `CUBESTACK_ONLINE=1`(install-online.sh 物化的 tar 用上游 RepoTag)→ upstream, 否则 mirror;
+  显式 `CUBESTACK_IMAGE_NAMING=mirror|upstream` 优先(如 online 流程挂载 `--release` 版本树)。
 
 > 与 §2.4 的分工:chart 通常是**随 git 入仓**的 vendored 副本(`cubestack-addon/`);
 > 镜像 tar 是**不入仓**的大文件(只登记 + 备料,`offline-files/`)。

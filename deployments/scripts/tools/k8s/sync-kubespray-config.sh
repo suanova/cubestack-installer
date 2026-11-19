@@ -216,20 +216,23 @@ if [ -f "${ALL_YML}" ]; then
     # 回环/自指地址必须拦下: 127.0.0.53 = 节点 stub(Pod 内无效); 169.254.25.10 = nodelocaldns 自己。
     # ⚠ 将来接入真实 DNS: cluster.conf 设 UPSTREAM_DNS_SERVERS="ip1 ip2"(空格分隔)后重跑本工具。
     _UDNS_VAL="${UPSTREAM_DNS_SERVERS:-223.5.5.5}"
+    # nodelocaldns 的自指地址是**可配置的**(NODELOCAL_DNS_IP, 见 k8s-cluster.yml 同步),
+    # 不能只认默认 169.254.25.10; 两个都拦(默认值 + 本集群实际值)。
+    _NDNS_IP="${NODELOCAL_DNS_IP:-169.254.25.10}"
     for _dns in ${_UDNS_VAL}; do
         case "${_dns}" in
             127.0.0.53)
                 err "UPSTREAM_DNS_SERVERS 含 127.0.0.53(systemd-resolved stub): Pod 内不可达, 会继续 SERVFAIL"
                 err "  改用真实上游(默认 223.5.5.5)或实际内网 DNS 后重跑本工具"
                 exit 1 ;;
-            169.254.25.10)
-                err "UPSTREAM_DNS_SERVERS 含 169.254.25.10(nodelocaldns 自己): 会形成自指回环"
+            169.254.25.10|"${_NDNS_IP}")
+                err "UPSTREAM_DNS_SERVERS 含 ${_dns}(nodelocaldns 自己): 会形成自指回环"
                 exit 1 ;;
             127.0.0.1)
                 warn "UPSTREAM_DNS_SERVERS 含 127.0.0.1(自指): 外部域名查询会失败(集群内域名不受影响)" ;;
         esac
     done
-    unset _dns
+    unset _dns _NDNS_IP
     if grep -qE '^upstream_dns_servers:' "${ALL_YML}" 2>/dev/null; then
         # 删除整个旧值(含缩进或不缩进的 block list), 保留相邻顶层配置。
         awk -v value="${_UDNS_VAL// /, }" '
@@ -629,26 +632,30 @@ open(path, 'w').write(result)
 PYEOF
 }
 
-_ETC_ON=0
-if [ "${REGISTRY_ENABLED:-0}" = "1" ] && [ -n "${REGISTRY_IP:-}" ]; then
-    case "$(echo "${REGISTRY_SERVICE_TYPE:-nodeport}" | tr '[:upper:]' '[:lower:]')" in
-        clusterip) : ;;   # 见上方注释: 不写 hosts
-        *) _ETC_ON=1 ;;
-    esac
-fi
-_ETC_RC=0
-_sync_registry_dns_etchosts "${ALL_YML}" "${_ETC_ON}" "${REGISTRY_IP:-}" "${REGISTRY_DOMAIN:-registry.cubestack.io}" || _ETC_RC=$?
-if [ "${_ETC_RC}" = "3" ]; then
-    warn "all.yml 已有用户自定义 dns_etchosts, 未写入 registry 域名映射(请手工加入 ${REGISTRY_IP:-<ip>} ${REGISTRY_DOMAIN:-registry.cubestack.io})"
-elif [ "${_ETC_RC}" != "0" ]; then
-    err "写入 all.yml dns_etchosts 失败(rc=${_ETC_RC})"
-    exit 1
-elif [ "${_ETC_ON}" = "1" ]; then
-    ok "已写入 Pod 内 registry 解析: ${REGISTRY_IP} ${REGISTRY_DOMAIN:-registry.cubestack.io}(coredns + nodelocaldns hosts)"
+if [ -f "${ALL_YML}" ]; then
+    _ETC_ON=0
+    if [ "${REGISTRY_ENABLED:-0}" = "1" ] && [ -n "${REGISTRY_IP:-}" ]; then
+        case "$(echo "${REGISTRY_SERVICE_TYPE:-nodeport}" | tr '[:upper:]' '[:lower:]')" in
+            clusterip) : ;;   # 见上方注释: 不写 hosts
+            *) _ETC_ON=1 ;;
+        esac
+    fi
+    _ETC_RC=0
+    _sync_registry_dns_etchosts "${ALL_YML}" "${_ETC_ON}" "${REGISTRY_IP:-}" "${REGISTRY_DOMAIN:-registry.cubestack.io}" || _ETC_RC=$?
+    if [ "${_ETC_RC}" = "3" ]; then
+        warn "all.yml 已有用户自定义 dns_etchosts, 未写入 registry 域名映射(请手工加入 ${REGISTRY_IP:-<ip>} ${REGISTRY_DOMAIN:-registry.cubestack.io})"
+    elif [ "${_ETC_RC}" != "0" ]; then
+        err "写入 all.yml dns_etchosts 失败(rc=${_ETC_RC})"
+        exit 1
+    elif [ "${_ETC_ON}" = "1" ]; then
+        ok "已写入 Pod 内 registry 解析: ${REGISTRY_IP} ${REGISTRY_DOMAIN:-registry.cubestack.io}(coredns + nodelocaldns hosts)"
+    else
+        say "  registry 未启用或为 ClusterIP 模式 → 不写 dns_etchosts"
+    fi
+    unset _ETC_ON _ETC_RC
 else
-    say "  registry 未启用或为 ClusterIP 模式 → 不写 dns_etchosts"
+    warn "未找到 ${ALL_YML},跳过 Pod 内 registry 解析(dns_etchosts)"
 fi
-unset _ETC_ON _ETC_RC
 
 # ---------------- 6. 更新 containerd.yml (含内置 registry 的 HTTP 信任配置) ----------------
 # kubespray 的 containerd_registries_mirrors 变量生成 config_path=certs.d/<host>/hosts.toml,

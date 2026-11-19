@@ -323,5 +323,19 @@ chk "mirror 关: 无生效的 Pod 镜像覆盖" "0" "$(cnt '^registry_pod_image_
 chk "mirror 关: helper 覆盖也不生效" "0" "$(cnt '^local_path_provisioner_helper_image_repo:' "${ADD15}")"
 chk "mirror 关: nginx 覆盖也不生效" "0" "$(cnt '^nginx_pod_image_repo:' "${ADD15}")"
 chk "mirror 开回来: 覆盖恢复" "1" "$(run_sync "${D15}" "${C19}"; cnt '^registry_pod_image_repo: .*harbor' "${ADD15}")"
+# online 安装的 tar 用上游 RepoTag → 不能渲染 mirror 名(否则 Pod 引用与 containerd 不符)
+D16="${TMP}/d16"; mk_inv "${D16}"; ADD16="${D16}/group_vars/k8s_cluster/addons.yml"
+C21="${TMP}/c21"; mk_conf "${C21}" true 'KUBE_VIP_ENABLED=false' 'CUBESTACK_ONLINE=1'
+chk "online: 退出码 0" "0" "$(run_sync "${D16}" "${C21}"; echo $?)"
+chk "online: 不写 Pod 镜像覆盖" "0" "$(cnt '^registry_pod_image_repo:' "${ADD16}")"
+chk "online: nginx 覆盖也不写" "0" "$(cnt '^nginx_pod_image_repo:' "${ADD16}")"
+C22="${TMP}/c22"; mk_conf "${C22}" true 'KUBE_VIP_ENABLED=false' 'CUBESTACK_ONLINE=1' 'CUBESTACK_IMAGE_NAMING=mirror'
+chk "online + 显式 mirror: 覆盖恢复(用于 --release 版本树)" "1" \
+    "$(run_sync "${D16}" "${C22}"; cnt '^registry_pod_image_repo: .*harbor' "${ADD16}")"
+# nodelocaldns 自指地址是可配置的: 自定义 NODELOCAL_DNS_IP 也要拦
+D17="${TMP}/d17"; mk_inv "${D17}"; C23="${TMP}/c23"
+mk_conf "${C23}" true 'KUBE_VIP_ENABLED=false' 'NODELOCAL_DNS_IP=169.254.20.10' 'UPSTREAM_DNS_SERVERS=169.254.20.10'
+chk "自定义 nodelocaldns 自指 → 非 0" "1" "$(run_sync "${D17}" "${C23}"; echo $?)"
+chk "自定义自指不写入" "0" "$(cnt '^upstream_dns_servers:' "${D17}/group_vars/all/all.yml")"
 
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }
