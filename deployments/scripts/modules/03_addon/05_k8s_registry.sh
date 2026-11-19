@@ -219,6 +219,66 @@ else
     exit 1
 fi
 
+# ---------------- Pod 内 registry 解析/访问自检(2026-11-19 实机) ----------------
+# 节点侧 /etc/hosts 只覆盖宿主机与 containerd; Pod 走 CoreDNS/nodelocaldns, 之前拿不到
+# registry 域名 → operator 拉 chart 报 `lookup registry.cubestack.io ... server misbehaving`。
+# 这里用预加载的 busybox(不联网)从 Pod 内真实解析域名并打 /v2/, 把"只有 operator 才暴露"
+# 的问题提前到 registry 模块收尾。nodeport 模式下 Pod 可达的是 NodePort(domain:31148),
+# 不是 Service 端口 5000 —— 探测端口按模式取, 避免自检假红。
+_DNS_IMAGE="$(mirror_image_ref "docker.io/library/busybox:${BUSYBOX_TAG:-1.38.0}")"
+_DNS_DOMAIN="${REGISTRY_DOMAIN:-registry.cubestack.io}"
+if [ "$(echo "${REGISTRY_SERVICE_TYPE:-nodeport}" | tr '[:upper:]' '[:lower:]')" = "nodeport" ]; then
+    _DNS_PORT="${REGISTRY_NODEPORT:-31148}"
+else
+    _DNS_PORT="${REGISTRY_PORT:-5000}"
+fi
+_DNS_POD="registry-dns-check-$$"
+say "  Pod 内自检: 解析 ${_DNS_DOMAIN} 并访问 http://${_DNS_DOMAIN}:${_DNS_PORT}/v2/ ..."
+rm -f "/tmp/${_DNS_POD}.yaml"
+cat > "/tmp/${_DNS_POD}.yaml" <<DNSYAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${_DNS_POD}
+  namespace: default
+spec:
+  restartPolicy: Never
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+  containers:
+    - name: check
+      image: ${_DNS_IMAGE}
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c", "set -e; nslookup ${_DNS_DOMAIN} >/dev/null; wget -q -T 5 -O /dev/null http://${_DNS_DOMAIN}:${_DNS_PORT}/v2/; echo OK"]
+DNSYAML
+scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 -q \
+    "/tmp/${_DNS_POD}.yaml" "${FIRST_MASTER_USER}@${FIRST_MASTER}:/tmp/${_DNS_POD}.yaml" \
+    && SSH "${K} apply -f /tmp/${_DNS_POD}.yaml" >/dev/null \
+    || { rm -f "/tmp/${_DNS_POD}.yaml"; err "  创建 DNS 自检 Pod 失败"; }
+rm -f "/tmp/${_DNS_POD}.yaml"
+_DNS_PHASE=""
+for _i in $(seq 1 24); do
+    _DNS_PHASE="$( (SSH "${K}" -n default get pod "${_DNS_POD}" -o jsonpath='{.status.phase}' 2>/dev/null) || true )"
+    if [ "${_DNS_PHASE}" = "Succeeded" ] || [ "${_DNS_PHASE}" = "Failed" ]; then
+        break
+    fi
+    sleep 5
+done
+_DNS_LOG="$( (SSH "${K}" -n default logs "${_DNS_POD}" 2>/dev/null) || true )"
+SSH "${K}" -n default delete pod "${_DNS_POD}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+if [ "${_DNS_PHASE}" = "Succeeded" ] && printf '%s' "${_DNS_LOG}" | grep -q OK; then
+    ok "  Pod 内解析并访问 registry 成功(${_DNS_DOMAIN}:${_DNS_PORT})"
+else
+    ( SSH "${K}" -n default describe pod "${_DNS_POD}" 2>/dev/null | grep -A8 'Events:' | tail -12 ) >&2 || true
+    err "  Pod 内无法解析/访问 registry(${_DNS_DOMAIN}:${_DNS_PORT}, phase=${_DNS_PHASE:-?}, log=${_DNS_LOG:-<空>})"
+    err "  排查: kubectl -n kube-system get cm coredns -o yaml | grep -A4 hosts(应含 ${REGISTRY_IP:-<ip>} ${_DNS_DOMAIN});"
+    err "        nodelocaldns 同理(inventory 的 dns_etchosts 由 sync-kubespray-config.sh 写入后 kubespray 渲染)"
+    exit 1
+fi
+unset _DNS_IMAGE _DNS_DOMAIN _DNS_PORT _DNS_POD _DNS_PHASE _DNS_LOG
+
 # ---------------- PVC 容量保障(存量集群幂等扩容; 2026-10-13 实机事故) ----------------
 # 事故链: kubespray registry_disk_size 默认仅 10Gi → dev_lab 的首个镜像(当时 ≈1.6G)推完后盘满,
 #   后续每个镜像(含 multus)的 blob 上传都被 registry 以 500 拒绝("no space left on device"),

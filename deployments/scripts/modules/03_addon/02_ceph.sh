@@ -743,16 +743,58 @@ else
 fi
 
 # ---------------- 6) 部署 Rook operator(crds → common → csi-operator → operator) ----------------
+# 离线镜像源: 版本树 tar 以 mirror 名打包, 预加载后 containerd 里只有 mirror 名。Rook/CSI 的
+# 上游清单写的是 docker.io/rook/ceph、quay.io/ceph/ceph、registry.k8s.io/... —— 断网环境直接
+# ImagePullBackOff。这里在**应用前**把清单渲染到临时目录并把 image 引用重写成 mirror 名;
+# HARBOR_MIRROR_ENABLED=false(直连上游)时保持原清单不动。
+# 同时把 csi-operator 的 ImageSet ConfigMap 从"空 = 内建上游镜像"钉到预加载镜像(含版本),
+# 否则 CSI 驱动 sidecar 仍会去 registry.k8s.io/quay.io 拉取(离线不可达)。
+_rook_stage_manifests() {
+    local dst="$1" f
+    mkdir -p "${dst}"
+    for f in crds.yaml common.yaml csi-operator.yaml operator.yaml toolbox.yaml; do
+        [ -f "${CEPH_ROOK_MANIFEST_DIR}/${f}" ] || continue
+        mirror_rewrite_image_refs "${CEPH_ROOK_MANIFEST_DIR}/${f}" "${dst}/${f}"
+    done
+    # toolbox 上游 tag 是浮动的 `v20`; 预加载的是钉死版本 CEPH_VERSION —— 统一到同一个 tag,
+    # 否则 toolbox Pod 会去拉不存在的 :v20。
+    if [ -f "${dst}/toolbox.yaml" ] && [ -n "${CEPH_VERSION:-}" ]; then
+        sed -i -E "s#(image:[[:space:]]*)${_CEPH_MIRROR_BASE}/quay\.io/ceph/ceph(:[^[:space:]]+)?#\1${_CEPH_MIRROR_BASE}/quay.io/ceph/ceph:${CEPH_VERSION}#" \
+            "${dst}/toolbox.yaml"
+    fi
+    # ImageSet 值格式 = 完整 repository:tag(ceph-csi-operator 文档); 版本取 versions/base.yaml
+    # 派生的 ROOK_CSI_* / CEPHCSI_VERSION / CSIADDONS_SIDECAR_VERSION(与树内预加载 tar 一致)。
+    python3 "${SCRIPT_DIR}/tools/k8s/render-csi-imageset.py" "${dst}/operator.yaml" "${_CEPH_MIRROR_BASE}" \
+        "provisioner=registry.k8s.io/sig-storage/csi-provisioner=${ROOK_CSI_PROVISIONER_VERSION:-}" \
+        "attacher=registry.k8s.io/sig-storage/csi-attacher=${ROOK_CSI_ATTACHER_VERSION:-}" \
+        "resizer=registry.k8s.io/sig-storage/csi-resizer=${ROOK_CSI_RESIZER_VERSION:-}" \
+        "snapshotter=registry.k8s.io/sig-storage/csi-snapshotter=${ROOK_CSI_SNAPSHOTTER_VERSION:-}" \
+        "registrar=registry.k8s.io/sig-storage/csi-node-driver-registrar=${ROOK_CSI_NODE_DRIVER_REGISTRAR_VERSION:-}" \
+        "snapshot-metadata=registry.k8s.io/sig-storage/csi-snapshot-metadata=${CSI_SNAPSHOT_METADATA_VERSION:-}" \
+        "plugin=quay.io/cephcsi/cephcsi=${CEPHCSI_VERSION:-}" \
+        "addons=quay.io/csiaddons/k8s-sidecar=${CSIADDONS_SIDECAR_VERSION:-}" \
+        || { err "渲染 csi-operator ImageSet 失败"; exit 1; }
+}
+
 say "[5/8] 部署 Rook operator(manifest: ${CEPH_ROOK_MANIFEST_DIR})..."
 REMOTE_DIR="/tmp/rook-manifests"
+_ROOK_MANIFEST_SRC="${CEPH_ROOK_MANIFEST_DIR}"
+_CEPH_MIRROR_BASE="$(harbor_mirror_base)"
+if [ -n "${_CEPH_MIRROR_BASE}" ]; then
+    _ROOK_MANIFEST_STAGE="$(mktemp -d)"
+    trap 'rm -rf "${_ROOK_MANIFEST_STAGE:-}"' EXIT
+    _rook_stage_manifests "${_ROOK_MANIFEST_STAGE}" || { err "渲染 Rook manifest(镜像源重写)失败"; exit 1; }
+    _ROOK_MANIFEST_SRC="${_ROOK_MANIFEST_STAGE}"
+    say "  Rook manifest 镜像引用 → ${_CEPH_MIRROR_BASE}/**(直连 containerd 预加载镜像)"
+fi
 # ★ 先建目录并立即 chown 给 SSH 用户: 此前 sudo mkdir 后目录属 root, 非 root 用户 scp 写不进去,
 #   5 个 manifest 全没拷过去 → apply crds.yaml 报 path does not exist(错误被 || true 吞掉)。
 #   ⚠ chown/scp 用**首个 master 的登录用户**(FIRST_MASTER_USER): root 部署=root, ubuntu 部署=ubuntu
 SSH "sudo rm -rf ${REMOTE_DIR} && sudo mkdir -p ${REMOTE_DIR} && sudo chown ${FIRST_MASTER_USER}:${FIRST_MASTER_USER} ${REMOTE_DIR}" >/dev/null 2>&1
 for f in crds.yaml common.yaml csi-operator.yaml operator.yaml toolbox.yaml; do
-    [ -f "${CEPH_ROOK_MANIFEST_DIR}/${f}" ] || { warn "  缺 manifest: ${f}(重跑 rook-fetch-manifests.sh)"; continue; }
+    [ -f "${_ROOK_MANIFEST_SRC}/${f}" ] || { warn "  缺 manifest: ${f}(重跑 rook-fetch-manifests.sh)"; continue; }
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q \
-        "${CEPH_ROOK_MANIFEST_DIR}/${f}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:${REMOTE_DIR}/${f}" \
+        "${_ROOK_MANIFEST_SRC}/${f}" "${FIRST_MASTER_USER}@${FIRST_MASTER}:${REMOTE_DIR}/${f}" \
         || { err "  scp ${f} 到 master 失败(检查 SSH 密钥/节点连通)"; exit 1; }
 done
 SSH "sudo chown -R \$(id -un) ${REMOTE_DIR}" >/dev/null 2>&1 || true
@@ -1087,7 +1129,7 @@ else
     echo "  namespace: ${CEPH_NAMESPACE}"
     echo "spec:"
     echo "  cephVersion:"
-    echo "    image: quay.io/ceph/ceph:${CEPH_VERSION}"
+    echo "    image: $(mirror_image_ref "quay.io/ceph/ceph:${CEPH_VERSION}")"
     echo "    allowUnsupported: false"
     echo "  dataDirHostPath: /var/lib/rook"
     echo "  mon:"

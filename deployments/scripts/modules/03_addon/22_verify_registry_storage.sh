@@ -152,11 +152,15 @@ if [ "${LOCALPATH_ON}" = "1" ]; then
         || { err "local-path-provisioner pod 未 Running"; exit 1; }
     ok "    StorageClass local-path(default) + provisioner Running"
 
-    # 测试镜像: registry 验证已 push 的 busybox; 未启用 registry 时用离线 busybox 拉取源(docker.io/library/busybox)
+    # 测试镜像: registry 验证已 push 的 busybox; 未启用 registry 时用**预加载的 mirror 名**
+    # (版本树 tar 只有 mirror tag; 上游 docker.io/library/busybox:latest 在断网环境拉不到,
+    #  tag 也必须与 base.yaml 的 BUSYBOX_TAG 一致)。
     if [ "${REGISTRY_ON}" = "1" ]; then
         TEST_IMAGE="${REGISTRY_DOMAIN}:${REGISTRY_PORT}/${PUSH_NS}/busybox:${TEST_TAG}"
+        TEST_PULL_POLICY="Always"
     else
-        TEST_IMAGE="docker.io/library/busybox:latest"
+        TEST_IMAGE="$(mirror_image_ref "docker.io/library/busybox:${BUSYBOX_TAG:-1.38.0}")"
+        TEST_PULL_POLICY="IfNotPresent"
     fi
 
     say "  ⑦ 创建 PVC(local-path) + pod1(${POD1}) 写入 marker 文件后退出..."
@@ -189,7 +193,7 @@ spec:
   containers:
   - name: writer
     image: ${TEST_IMAGE}
-    imagePullPolicy: Always
+    imagePullPolicy: ${TEST_PULL_POLICY}
     command: ["/bin/sh","-c","mkdir -p /mnt/data && echo '${TEST_MARKER}' > /mnt/data/marker.txt && cat /mnt/data/marker.txt"]
     volumeMounts:
     - name: data
@@ -243,7 +247,7 @@ spec:
   containers:
   - name: reader
     image: ${TEST_IMAGE}
-    imagePullPolicy: Always
+    imagePullPolicy: ${TEST_PULL_POLICY}
     command: ["/bin/sh","-c","cat /mnt/data/marker.txt"]
     volumeMounts:
     - name: data
