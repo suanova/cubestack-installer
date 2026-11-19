@@ -256,7 +256,12 @@ def check_gzip_only(ctx, path, rel):
     return True
 
 def read_chart_yaml(path):
-    """读 chart 顶层 Chart.yaml(子 chart 的更深路径不参与判断)。"""
+    """读 chart 顶层 Chart.yaml 的根级键值(verifier 只用标准库, 不引入 PyYAML)。
+
+    - 只取层级最浅的 Chart.yaml, 避免子 chart 的清单抢先;
+    - 只取根级(无缩进)键, 嵌套键(如 dependencies[].version)不覆盖;
+    - 去掉值尾部的 YAML 行内注释和引号。
+    """
     best = None
     best_depth = None
     try:
@@ -271,9 +276,13 @@ def read_chart_yaml(path):
                 text = tf.extractfile(best).read().decode("utf-8", "replace")
                 out = {}
                 for line in text.splitlines():
-                    if ":" in line and not line.lstrip().startswith("#"):
-                        k, v = line.split(":", 1)
-                        out[k.strip()] = v.strip().strip('"').strip("'")
+                    if not line or line[0] in " \t" or line.lstrip().startswith("#"):
+                        continue
+                    if ":" not in line:
+                        continue
+                    k, v = line.split(":", 1)
+                    v = v.split(" #", 1)[0].strip().strip('"').strip("'")
+                    out[k.strip()] = v
                 return out
     except Exception:
         pass

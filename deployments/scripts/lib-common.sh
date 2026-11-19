@@ -689,17 +689,23 @@ operator_image_tag_for_helm() {
 #   文件名可以是带版本号的 <name>-<ver>.tgz, 也可以是 release 树里的无版本号
 #   <name>.tgz —— 后者是常态: tree.tsv 不重命名制品, 版本只在 Chart.yaml(issue #183)。
 #   ① <name>-<desired>.tgz 存在 → 用它(desired 可空)
-#   ② release 模式(<release> 非空): 优先 <name>-<release>.tgz; 否则扫描候选文件,
-#      读取 Chart.yaml version, 匹配 <release> 或 <desired>; 唯一命中即用
+#   ② release 模式(<release> 非空)或指定了 desired: 优先 <name>-<release>.tgz /
+#      <name>-<desired>.tgz; 否则扫描候选文件, 读取 Chart.yaml 顶层 version, 匹配
+#      <release> 或 <desired>; 唯一命中即用
 #   ③ 目录中只有一个候选 → 用它(版本以 chart 自身为准)
 #   ④ 否则返回 1(调用方列出候选并报错)
 # 输出(stdout): "<tgz路径>\t<chart版本>"
 # 说明: 只读 tar, 不联网; 供 installer 模块与打包工具共用。
 operator_chart_version() {
     local _tgz="$1" _y
-    _y="$(tar -tzf "${_tgz}" 2>/dev/null | command grep -E '/Chart.yaml$' | head -1 || true)"
+    # 子 chart 也可能带 Chart.yaml; 取层级最浅的那份(= 父 chart 根清单)。
+    _y="$(tar -tzf "${_tgz}" 2>/dev/null \
+          | command grep -E '/Chart.yaml$' \
+          | awk -F/ '{print NF "\t" $0}' | sort -n -k1,1 | head -1 | cut -f2- || true)"
     [ -n "${_y}" ] || return 0
-    tar -xOf "${_tgz}" "${_y}" 2>/dev/null | awk '/^[[:space:]]*version:[[:space:]]*/{print $2; exit}'
+    # 只认根级 version(顶层无缩进), 去掉 YAML 引号。
+    tar -xOf "${_tgz}" "${_y}" 2>/dev/null \
+        | awk '/^version:[[:space:]]*/{print $2; exit}' | tr -d "\"'"
 }
 
 resolve_operator_chart_tgz() {   # <dir> <chart-name> [desired-version] [release-version]
@@ -720,10 +726,13 @@ resolve_operator_chart_tgz() {   # <dir> <chart-name> [desired-version] [release
         _hit="${_dir}/${_name}-${_release}.tgz"
     elif [ -n "${_desired}" ] && [ -f "${_dir}/${_name}-${_desired}.tgz" ]; then
         _hit="${_dir}/${_name}-${_desired}.tgz"
-    elif [ -n "${_release}" ]; then
+    elif [ -n "${_release}" ] || [ -n "${_desired}" ]; then
+        # 无版本号文件名无法从名字判断版本, 只能读 Chart.yaml。
+        # 每个比较都要求对应参数非空, 否则空 release/desired 会匹配空版本。
         for _f in "${_files[@]}"; do
             _v="$(operator_chart_version "${_f}")"
-            if [ "${_v}" = "${_release}" ] || { [ -n "${_desired}" ] && [ "${_v}" = "${_desired}" ]; }; then
+            if { [ -n "${_release}" ] && [ "${_v}" = "${_release}" ]; } \
+               || { [ -n "${_desired}" ] && [ "${_v}" = "${_desired}" ]; }; then
                 _hit="${_f}"; break
             fi
         done

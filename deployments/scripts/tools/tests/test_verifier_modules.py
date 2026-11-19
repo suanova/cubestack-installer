@@ -193,6 +193,37 @@ class OperatorChartTests(unittest.TestCase):
             archive.check_operator_chart_presence(ctx, d)
             self.assertTrue(any(f["kind"] == "chart_missing" for f in ctx.failures))
 
+    def _make_chart_with_manifest(self, root, filename, manifest):
+        d = os.path.join(root, "chart-src")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "Chart.yaml"), "w", encoding="utf-8") as f:
+            f.write(manifest)
+        out = os.path.join(root, "cubestack-operator", "charts", filename)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with tarfile.open(out, "w:gz") as tf:
+            tf.add(os.path.join(d, "Chart.yaml"), arcname="Chart.yaml")
+        return out
+
+    def test_chart_yaml_strips_inline_comments_and_nested_keys(self):
+        # 根级 name 带行内注释、version 带引号, 后面再出现嵌套 version:
+        # 解析必须只取根级键并去掉注释/引号, 否则会把可用的 chart 判成缺失。
+        manifest = (
+            "name: cubestack-operator-chart # platform operator\n"
+            'version: "2.1.0"\n'
+            "dependencies:\n"
+            "  - name: sub\n"
+            "    version: 0.0.0\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            rel = "cubestack-operator/charts/cubestack-operator-chart.tgz"
+            path = self._make_chart_with_manifest(d, "cubestack-operator-chart.tgz", manifest)
+            with open(os.path.join(d, "release.env"), "w", encoding="utf-8") as f:
+                f.write("CUBESTACK_OPERATOR_CHART_VERSION=2.1.0\n")
+            ctx = self._ctx(d, [rel])
+            self.assertTrue(archive.check_compressed(ctx, path, rel))
+            archive.check_operator_chart_presence(ctx, d)
+            self.assertEqual(ctx.failures, [])
+
 
 class StampSealTests(unittest.TestCase):
     def test_stamp_roundtrip(self):

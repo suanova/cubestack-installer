@@ -66,4 +66,23 @@ chk "override 最优先" "manual-tag" "$(operator_image_tag_for_helm "manual-tag
 chk "无 override 用 release 默认" "${WANT}" "$(operator_image_tag_for_helm "" "${WANT}")"
 chk "都为空回到 chart 默认" "" "$(operator_image_tag_for_helm "" "")"
 
+echo "== ⑧ 只给 desired(无 release)也扫描 Chart.yaml =="
+out="$(resolve_operator_chart_tgz "${TMP}/multi" cubestack-operator-chart "${WANT}")" || out=""
+chk "desired 命中无版本号 chart" "${TMP}/multi/cubestack-operator-chart.tgz"$'\t'"${WANT}" "${out}"
+
+echo "== ⑨ 引号与嵌套 version =="
+mkdir -p "${TMP}/quoted-src"
+printf 'name: cubestack-operator-chart\nversion: "%s"\ndependencies:\n  - name: sub\n    version: 0.0.0\n' \
+    "${WANT}" > "${TMP}/quoted-src/Chart.yaml"
+tar -C "${TMP}/quoted-src" -czf "${TMP}/quoted.tgz" .
+chk "去引号且忽略嵌套 version" "${WANT}" "$(operator_chart_version "${TMP}/quoted.tgz")"
+
+echo "== ⑩ 子 chart 清单在前时取父 chart =="
+mkdir -p "${TMP}/ordered-src/cubestack-operator-chart/charts/sub"
+printf 'name: sub\nversion: 9.9.9\n' > "${TMP}/ordered-src/cubestack-operator-chart/charts/sub/Chart.yaml"
+printf 'name: cubestack-operator-chart\nversion: %s\n' "${WANT}" > "${TMP}/ordered-src/cubestack-operator-chart/Chart.yaml"
+tar -C "${TMP}/ordered-src" -czf "${TMP}/ordered.tgz" \
+    cubestack-operator-chart/charts/sub/Chart.yaml cubestack-operator-chart/Chart.yaml
+chk "取最浅 Chart.yaml" "${WANT}" "$(operator_chart_version "${TMP}/ordered.tgz")"
+
 [ "${fail}" = "0" ] && echo "✅ operator chart 定位回归通过" || { echo "❌ operator chart 定位回归失败"; exit 1; }
