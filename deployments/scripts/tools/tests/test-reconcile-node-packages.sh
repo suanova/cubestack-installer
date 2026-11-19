@@ -212,8 +212,10 @@ chk_contains "解析 deb Breaks 字段" 'dpkg-deb -f "$f" Breaks' "${TOOL2}"
 chk_contains "Breaks 触发同版本 cohort 升级" "FORCE_COHORT" "${TOOL2}"
 chk_contains "离线无可升级版时跳过(不制造半装)" "离线集无该包升级版" "${TOOL2}"
 chk_contains "cohort 一并加入待装集合" "同版本 cohort 升级(版本" "${TOOL2}"
+_breaks_block="$(sed -n '/# ── ①b Breaks/,/# ② 依赖预检/p' "${TOOL2}")"
 chk "Breaks 算子解析支持 << / >>(实机 udev Breaks 曾是 < 误判)" "2" \
-    "$(grep -cF '([<>]{1,2}=?|=)' "${TOOL2}")"
+    "$(printf '%s\n' "${_breaks_block}" | grep -cF '([<>]{1,2}=?|=)')"
+unset _breaks_block
 # 2026-11-19 CodeRabbit: rc(config-files)/半装状态不能被当成 usable installed
 chk_contains "worker 仅 ii 记为可用已装" 'ii) REMOTE_VER' "${TOOL2}"
 chk_contains "worker 归一化 Status-Abbrev 尾随空格" "tr -d '[:space:]'" "${TOOL2}"
@@ -236,6 +238,16 @@ unset _purge_ln _probe_ln
 chk_contains "worker 复制双失败即退出" "离线包复制失败(rsync/scp 均失败)" "${TOOL2}"
 chk_contains "worker 复制后核对大小" "离线包复制不完整" "${TOOL2}"
 chk_contains "worker 安装前校验暂存集" "未成功复制到" "${TOOL2}"
+# 2026-11-19 CodeRabbit: Depends 必须校验版本约束, 不能只看包名
+chk_contains "worker 依赖版本比较" "_deb_ver_ok" "${TOOL2}"
+chk_contains "worker 版本不满足时选择升级" "_dep_ver_by_pkg" "${TOOL2}"
+chk_contains "worker 不做隐性降级" "只接受升级" "${TOOL2}"
+chk_contains "worker 依赖跳过必须非零退出" "DEP_SKIPPED[*]" "${TOOL2}"
+# 2026-11-19 CodeRabbit: 依赖裁剪后必须复核 Breaks(避免 cohort 升级被裁掉后冲突复现)
+chk_contains "worker Breaks 最终复核" "Breaks 与最终计划/已装版本冲突" "${TOOL2}"
+chk_contains "worker Breaks 复核移除触发包" "从本次安装计划移除" "${TOOL2}"
+chk_contains "worker Breaks 复核循环" "_br_round" "${TOOL2}"
+chk_contains "worker Breaks 冲突必须非零退出" "BREAKS_SKIPPED[*]" "${TOOL2}"
 
 echo "== ⑦ ONLY_HOSTS 过滤(扩容只动新节点) =="
 cat > "${TMP}/cluster-two.conf" <<'EOF'

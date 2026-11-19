@@ -83,6 +83,20 @@ deb_depends() {   # <deb路径> → Depends 原文(无 dpkg-deb 时为空=跳过
     fi
 }
 
+# Debian 版本约束比较(<version> <operator> <required>)
+# 支持 <<, <=, =, >=, >> 以及旧写法 <, >.
+_deb_ver_ok() {
+    [ -n "$1" ] || return 1
+    case "$2" in
+        "<<"|"<") dpkg --compare-versions "$1" lt "$3" ;;
+        "<=")     dpkg --compare-versions "$1" le "$3" ;;
+        "=")      dpkg --compare-versions "$1" eq "$3" ;;
+        ">=")     dpkg --compare-versions "$1" ge "$3" ;;
+        ">>"|">") dpkg --compare-versions "$1" gt "$3" ;;
+        *) return 0 ;;
+    esac
+}
+
 # ── fresh 节点准备: 必须在 inventory/选包之前清除系统容器包 ──
 # purge 会删除 runc/containerd; 若先探测再 purge, REMOTE_VER 会把已删的 runc 当成
 # 满足依赖, 随后 dpkg -i 失败. 因此这里先做破坏性清理, 再探测, 选包基于 purge 后状态.
@@ -155,6 +169,7 @@ done <<< "${probe_out}"
 #   ② 待装集合: 仅"未装"的 deb; 再校验其 Depends 能在(远端已装 ∪ 待装)内满足, 否则 skip + warn
 NEED_DEBS=()        # 待复制/安装的 deb 路径
 NEED_PKGS=()        # 对应包名
+DEP_SKIPPED=()      # 依赖不可满足而跳过的包(最终必须非零退出, 不能报告全量成功)
 declare -A NEED_SET DEB_PKG_SET
 for f in "${DEBS[@]}"; do
     pkg="$(deb_pkg_name "$f")"
@@ -279,19 +294,40 @@ if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1 && comman
 fi
 
 # ② 依赖预检(fixpoint 迭代剔除): Depends 逗号分组(每组内 | 为备选), 每组至少一个备选
-#    在(远端已装 ∪ 剩余待装)内 → 满足; 否则该 deb 剔除并告警。最多迭代 10 轮。
+#    在(远端已装 ∪ 剩余待装)内且**版本约束满足** → 满足; 否则该 deb 剔除并告警。
+#    已装版本不满足但离线集有满足约束的升级版 → 选择升级版加入待装集, 下一轮继续校验。
+#    最多迭代 10 轮。
 if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1; then
+    # 离线集内每个包的最高版本(用于选择满足 Depends 的升级版)
+    declare -A _dep_deb_by_pkg=() _dep_ver_by_pkg=()
+    for f in "${DEBS[@]}"; do
+        p="$(deb_pkg_name "$f")"; [ -n "$p" ] || continue
+        v="$(dpkg-deb -f "$f" Version 2>/dev/null || true)"; [ -n "$v" ] || continue
+        if [ -z "${_dep_ver_by_pkg[$p]:-}" ] \
+           || dpkg --compare-versions "$v" gt "${_dep_ver_by_pkg[$p]}"; then
+            _dep_deb_by_pkg["$p"]="$f"; _dep_ver_by_pkg["$p"]="$v"
+        fi
+    done
     _dep_round=0
     while [ "${_dep_round}" -lt 10 ]; do
         _dep_round=$((_dep_round + 1))
-        _kept_debs=(); _kept_pkgs=(); _dropped=0
-        declare -A _kept_set=()
+        _kept_debs=(); _kept_pkgs=(); _dropped=0; _added=0
+        declare -A _need_ver=()
+        # 本轮待装集内各包的最高版本
+        for i in "${!NEED_DEBS[@]}"; do
+            p="${NEED_PKGS[$i]}"
+            v="$(dpkg-deb -f "${NEED_DEBS[$i]}" Version 2>/dev/null || true)"
+            if [ -n "$v" ] && { [ -z "${_need_ver[$p]:-}" ] \
+               || dpkg --compare-versions "$v" gt "${_need_ver[$p]}"; }; then
+                _need_ver["$p"]="$v"
+            fi
+        done
         for i in "${!NEED_DEBS[@]}"; do
             f="${NEED_DEBS[$i]}"; pkg="${NEED_PKGS[$i]}"
             deps="$(deb_depends "$f")"
             # Depends 为空(无依赖或无法解析)→ 视为可装
             if [ -z "${deps}" ]; then
-                _kept_debs+=("$f"); _kept_pkgs+=("${pkg}"); _kept_set["${pkg}"]=1
+                _kept_debs+=("$f"); _kept_pkgs+=("${pkg}")
                 continue
             fi
             dep_ok=1; dep_miss=""
@@ -302,27 +338,85 @@ if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1; then
                     IFS='|' read -ra _alts <<< "${_grp}"
                     for _alt in "${_alts[@]}"; do
                         [ -z "${_alt}" ] && continue
-                        # 取备选包名: 去掉版本约束(括号)与架构后缀(:amd64)
+                        # 包名: 去掉版本约束(括号)与架构后缀(:amd64)
                         _dn="$(echo "${_alt}" | sed -E 's/^[[:space:]]*([A-Za-z0-9+.-]+).*/\1/')"
-                        if [ -n "${REMOTE_VER[${_dn}]:-}" ] || [ -n "${NEED_SET[${_dn}]:-}" ]; then
+                        # 版本约束(可空)
+                        _op="$(printf '%s' "${_alt}" | sed -nE 's/.*\(([<>]{1,2}=?|=)[[:space:]]*([^)]+)\).*/\1/p')"
+                        _dv="$(printf '%s' "${_alt}" | sed -nE 's/.*\(([<>]{1,2}=?|=)[[:space:]]*([^)]+)\).*/\2/p')"
+                        _dv="$(printf '%s' "${_dv}" | tr -d '[:space:]')"
+                        if [ -z "${_op}" ] || [ -z "${_dv}" ]; then
+                            # 无版本约束: 已装或本次待装(含升级)即可
+                            if [ -n "${REMOTE_VER[${_dn}]:-}" ] || [ -n "${NEED_SET[${_dn}]:-}" ]; then
+                                _grp_ok=1; break
+                            fi
+                            continue
+                        fi
+                        # 版本约束: 先看"将被保留"的版本(待装集优先于已装)
+                        if [ -n "${NEED_SET[${_dn}]:-}" ]; then
+                            _cur="${_need_ver[${_dn}]:-${REMOTE_VER[${_dn}]:-}}"
+                        else
+                            _cur="${REMOTE_VER[${_dn}]:-}"
+                        fi
+                        if _deb_ver_ok "${_cur}" "${_op}" "${_dv}"; then
                             _grp_ok=1; break
+                        fi
+                        # 当前版本不满足: 选择离线集中满足约束且高于当前版本的升级版
+                        _cand_v="${_dep_ver_by_pkg[${_dn}]:-}"
+                        if _deb_ver_ok "${_cand_v}" "${_op}" "${_dv}"; then
+                            _upgrade_ok=1
+                            if [ -n "${_cur}" ] \
+                               && ! dpkg --compare-versions "${_cand_v}" gt "${_cur}"; then
+                                _upgrade_ok=0   # 只接受升级, 不做隐性降级
+                            fi
+                            # 不能为满足依赖引入与已装/待装提供者冲突的包
+                            if [ "${_upgrade_ok}" = "1" ]; then
+                                _up_conflict=0
+                                for _ucp in $(pkg_conflict_providers "${_dn}"); do
+                                    [ -n "${REMOTE_VER[${_ucp}]:-}" ] && { _up_conflict=1; break; }
+                                    [ -n "${NEED_SET[${_ucp}]:-}" ] && { _up_conflict=1; break; }
+                                done
+                                if [ "${_up_conflict}" = "0" ]; then
+                                    _kept_debs+=("${_dep_deb_by_pkg[${_dn}]}")
+                                    _kept_pkgs+=("${_dn}")
+                                    NEED_SET["${_dn}"]=1
+                                    _need_ver["${_dn}"]="${_cand_v}"
+                                    _added=1
+                                    _grp_ok=1; break
+                                fi
+                            fi
                         fi
                     done
                     if [ "${_grp_ok}" != "1" ]; then dep_ok=0; dep_miss="${_grp}"; break; fi
                 done
             done <<< "${deps}"
             if [ "${dep_ok}" = "1" ]; then
-                _kept_debs+=("$f"); _kept_pkgs+=("${pkg}"); _kept_set["${pkg}"]=1
+                _kept_debs+=("$f"); _kept_pkgs+=("${pkg}")
             else
                 warn "  [${pkg}] 依赖不可满足(${dep_miss}), 本次跳过(不破坏 apt 状态)"
+                DEP_SKIPPED+=("${pkg}")
                 _dropped=1
             fi
         done
         NEED_DEBS=("${_kept_debs[@]}"); NEED_PKGS=("${_kept_pkgs[@]}")
         NEED_SET=()
         for _kp in "${NEED_PKGS[@]}"; do NEED_SET["${_kp}"]=1; done
-        [ "${_dropped}" = "0" ] && break   # 无剔除 → 稳定
+        [ "${_dropped}" = "0" ] && [ "${_added}" = "0" ] && break
     done
+    # 同一包可能因升级选择出现多版本: 只保留最高版本, 避免 dpkg -i 处理顺序不定
+    declare -A _best_deb=() _best_ver=()
+    for i in "${!NEED_DEBS[@]}"; do
+        p="${NEED_PKGS[$i]}"; f="${NEED_DEBS[$i]}"
+        v="$(dpkg-deb -f "$f" Version 2>/dev/null || true)"
+        if [ -z "${_best_deb[$p]:-}" ] || { [ -n "$v" ] \
+           && dpkg --compare-versions "$v" gt "${_best_ver[$p]:-0}"; }; then
+            _best_deb["$p"]="$f"; _best_ver["$p"]="${v:-${_best_ver[$p]:-0}}"
+        fi
+    done
+    NEED_DEBS=(); NEED_PKGS=(); NEED_SET=()
+    for p in "${!_best_deb[@]}"; do
+        NEED_DEBS+=("${_best_deb[$p]}"); NEED_PKGS+=("$p"); NEED_SET["$p"]=1
+    done
+    unset _dep_deb_by_pkg _dep_ver_by_pkg _kept_debs _kept_pkgs _need_ver _best_deb _best_ver
 fi
 
 # ── 时间提供者互斥(chrony / systemd-timesyncd / openntpd / ntp 只允许一个) ──
@@ -364,6 +458,82 @@ if [ -n "${_td_keep}" ]; then
 fi
 unset _td_installed _td_keep _tdp _kept_debs _kept_pkgs _kp i f pkg
 
+# ── Breaks 复核(依赖/提供者裁剪之后): 触发包不能依赖已被裁掉的 cohort 升级 ──
+# cohort 预检假设 b=2 会被装上; 若 b=2 后续被依赖预检/提供者选择剔除, 已装 b=1 仍在,
+# 触发包的 Breaks b (<< 2) 冲突会重新出现 —— 此时必须把触发包一起从计划移除。
+BREAKS_SKIPPED=()
+_br_round=0
+while [ "${_br_round}" -lt 10 ]; do
+    _br_round=$((_br_round + 1))
+    declare -A _br_need_ver=()
+    for i in "${!NEED_DEBS[@]}"; do
+        p="${NEED_PKGS[$i]}"
+        v="$(dpkg-deb -f "${NEED_DEBS[$i]}" Version 2>/dev/null || true)"
+        if [ -n "$v" ] && { [ -z "${_br_need_ver[$p]:-}" ] \
+           || dpkg --compare-versions "$v" gt "${_br_need_ver[$p]}"; }; then
+            _br_need_ver["$p"]="$v"
+        fi
+    done
+    _br_remove=(); _br_changed=0
+    for i in "${!NEED_DEBS[@]}"; do
+        f="${NEED_DEBS[$i]}"; pkg="${NEED_PKGS[$i]}"
+        _breaks="$(dpkg-deb -f "$f" Breaks 2>/dev/null || true)"
+        [ -n "${_breaks}" ] || continue
+        _bad=0; _bad_bn=""
+        while IFS=',' read -ra _bgroups; do
+            for _bgrp in "${_bgroups[@]}"; do
+                [ -n "${_bgrp// /}" ] || continue
+                _bn="$(printf '%s' "${_bgrp}" | sed -E 's/^[[:space:]]*([^ (]+).*/\1/')"
+                _op="$(printf '%s' "${_bgrp}" | sed -nE 's/.*\(([<>]{1,2}=?|=)[[:space:]]*([^)]+)\).*/\1/p')"
+                _bv="$(printf '%s' "${_bgrp}" | sed -nE 's/.*\(([<>]{1,2}=?|=)[[:space:]]*([^)]+)\).*/\2/p')"
+                _bv="$(printf '%s' "${_bv}" | tr -d '[:space:]')"
+                # 最终会留下的版本: 本次计划优先, 否则已装
+                if [ -n "${_br_need_ver[${_bn}]:-}" ]; then
+                    _final="${_br_need_ver[${_bn}]}"
+                else
+                    _final="${REMOTE_VER[${_bn}]:-}"
+                fi
+                [ -n "${_final}" ] || continue
+                if [ -z "${_op}" ] || [ -z "${_bv}" ]; then
+                    _bad=1; _bad_bn="${_bn}"; break
+                fi
+                if _deb_ver_ok "${_final}" "${_op}" "${_bv}"; then
+                    _bad=1; _bad_bn="${_bn}"; break
+                fi
+            done
+            [ "${_bad}" = "1" ] && break
+        done <<< "${_breaks}"
+        if [ "${_bad}" = "1" ]; then
+            warn "  [${pkg}] Breaks 与最终计划/已装版本冲突(${_bad_bn}: ${_final}); 从本次安装计划移除"
+            _br_remove+=("${pkg}")
+            _br_changed=1
+        fi
+    done
+    [ "${_br_changed}" = "0" ] && break
+    _kept_debs=(); _kept_pkgs=()
+    for i in "${!NEED_DEBS[@]}"; do
+        pkg="${NEED_PKGS[$i]}"
+        _skip=0
+        for _rp in ${_br_remove[@]+"${_br_remove[@]}"}; do
+            [ "${pkg}" = "${_rp}" ] && { _skip=1; break; }
+        done
+        [ "${_skip}" = "1" ] && continue
+        _kept_debs+=("${NEED_DEBS[$i]}"); _kept_pkgs+=("${pkg}")
+    done
+    for _rp in ${_br_remove[@]+"${_br_remove[@]}"}; do
+        _seen=0
+        for _sp in ${BREAKS_SKIPPED[@]+"${BREAKS_SKIPPED[@]}"}; do
+            [ "${_sp}" = "${_rp}" ] && { _seen=1; break; }
+        done
+        [ "${_seen}" = "1" ] || BREAKS_SKIPPED+=("${_rp}")
+    done
+    NEED_DEBS=("${_kept_debs[@]}"); NEED_PKGS=("${_kept_pkgs[@]}")
+    NEED_SET=()
+    for _kp in "${NEED_PKGS[@]}"; do NEED_SET["${_kp}"]=1; done
+done
+unset _br_need_ver _br_remove _br_changed _breaks _bn _op _bv _final _bad _bad_bn \
+      _kept_debs _kept_pkgs _rp _skip _seen _sp _kp i f pkg
+
 # 只关心"离线集里存在对应 deb"的破损包: 无关的 rc/半装包不应触发本工具的修复/告警.
 BROKEN_RELEVANT=()
 for _p in "${!REMOTE_BROKEN[@]}"; do
@@ -380,9 +550,15 @@ done
 unset _p
 
 if [ "${#NEED_DEBS[@]}" -eq 0 ] && [ "${#BROKEN_RELEVANT[@]}" -eq 0 ]; then
+    _skipped="${DEP_SKIPPED[*]:-} ${BREAKS_SKIPPED[*]:-}"
+    if [ -n "${_skipped// /}" ]; then
+        err "以下包未按本次计划安装(依赖不可满足/Breaks 冲突):${_skipped}"
+        exit 1
+    fi
     ok "节点 ${IP} 所需离线包均已正常安装(无需上传/装包)"
     exit 0
 fi
+unset _skipped
 
 if [ "${#NEED_DEBS[@]}" -gt 0 ]; then
     say "待安装 ${#NEED_DEBS[@]} 个包: ${NEED_PKGS[*]}"
@@ -525,5 +701,12 @@ rm -f "${INSTALL_LOG}"
 # ── 安装后: apt -f 收尾修复 + 清理临时包目录 ──
 ${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" \
     "sudo apt-get install -f -y --no-install-recommends 2>&1 | tail -5; sudo rm -rf /tmp/packages" 2>/dev/null || true
+
+_skipped="${DEP_SKIPPED[*]:-} ${BREAKS_SKIPPED[*]:-}"
+if [ -n "${_skipped// /}" ]; then
+    err "以下包未按本次计划安装(依赖不可满足/Breaks 冲突):${_skipped}"
+    exit 1
+fi
+unset _skipped
 
 ok "✅ ${IP} 离线包安装完成: ${NEED_PKGS[*]}"
