@@ -1074,7 +1074,11 @@ _gen_preload_play() {
         # grep -q 命中首个匹配即退出, ctr 仍有输出时收到 SIGPIPE(141), pipefail 下
         # 整条管道判失败, 已存在的上游 tag 会被误判为缺失而重复 tag; 部分 grep 实现
         # (如 ugrep)即使去掉 -q, 输出重定向到 /dev/null 时同样提前退出。
-        all_images="$(ctr -n k8s.io images list -q 2>/dev/null || true)"
+        # ⚠ 列表失败必须让本 task 失败(不能用 `|| true`/`2>/dev/null` 吞掉):
+        #   containerd 不可用时空列表会让循环什么都不做, 却输出"retag: 0 个"假装成功,
+        #   上游 tag 实际缺失 → kubeadm preflight 联网拉取超时。set -e 下此命令失败
+        #   即中止 task, ctr 的错误原样保留在任务输出里。
+        all_images="$(ctr -n k8s.io images list -q)"
         known_images=$'\n'"${all_images}"$'\n'
         for img in ${all_images}; do
           case "$img" in

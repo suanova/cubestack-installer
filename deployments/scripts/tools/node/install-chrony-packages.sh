@@ -121,15 +121,15 @@ if [ "${#_debs[@]}" -eq 0 ]; then
     exit 1
 fi
 if ! install_debs_offline "${D}" chrony; then
-    echo "CHRONY-INSTALL-FAILED: install_debs_offline 返回非零(明细: /tmp/cubestack-deb-install.log)"
-    tail -20 /tmp/cubestack-deb-install.log 2>/dev/null || true
+    echo "CHRONY-INSTALL-FAILED: install_debs_offline 返回非零(明细: ${_DEB_WORK_DIR}/install.log)"
+    tail -20 "${_DEB_WORK_DIR}/install.log" 2>/dev/null || true
     exit 1
 fi
 if assert_pkgs_ready chrony && command -v chronyd >/dev/null 2>&1 && command -v chronyc >/dev/null 2>&1; then
     echo "CHRONY-READY:$(dpkg-query -W -f='${Version}' chrony 2>/dev/null || true)"
 else
     echo "CHRONY-INSTALL-FAILED: chrony 未处于 install ok installed(或缺少 chronyd/chronyc)"
-    tail -20 /tmp/cubestack-deb-install.log 2>/dev/null || true
+    tail -20 "${_DEB_WORK_DIR}/install.log" 2>/dev/null || true
     exit 1
 fi
 EOF

@@ -2247,6 +2247,11 @@ pkg_conflict_providers() {   # <包名> → 输出其互斥提供者(空格分�
 # 节点侧安装原语(文本随远程脚本一起执行; install_debs_offline <deb目录> <关注包...>)。
 deb_install_remote_lib() {
     cat <<'DEBLIB'
+# 节点级装包工作目录: root 独占(0700), 存放 flock 锁文件与安装明细日志。
+# ⚠ 不能放 /tmp(世界可写): 预置 FIFO 会让 open 阻塞在 600s 锁等待之外; 预置符号链接
+#   会让 root 的 open/truncate 写到任意文件; 预置目录会让 open 直接失败(2026-11-19 CodeRabbit).
+_DEB_WORK_DIR=/run/cubestack-deb-install
+
 # 互斥提供者表(⚠ 与 lib-common::pkg_conflict_providers 同步)
 _pkg_conflict_providers() {
     case "$1" in
@@ -2303,6 +2308,8 @@ _deb_alt_ok() { # <记录文件> <包名> <op> <要求版本>
 # "已装包 ∪ 本批次待装 deb"以**满足版本约束**的方式提供(包名与 Provides 均按 dpkg 语义)。
 # ⚠ 提供者只算本批次待装 deb: install_debs_offline 会跳过"包名已装"的 deb(不看版本),
 #   目录里存在但不在待装列表的 deb 不会被安装, 不能当作版本提供者。
+# ⚠ 已装侧排除 `_DEB_PURGE_EXCLUDE` 里列出的包: 它们是本次会被**预卸**的互斥提供者
+#   (如 systemd-timesyncd), 不能用来满足依赖 —— 否则预检通过、purge 之后依赖悬空。
 # 本检查在预卸互斥提供者之前执行: 依赖缺失/版本不满足时直接拒绝, 不会先卸掉
 # 当前时间提供者再被 dpkg 打回(半替换窗口)。
 _deb_set_missing() { # <待装 deb 文件...>
@@ -2321,6 +2328,10 @@ _deb_set_missing() { # <待装 deb 文件...>
     dpkg-query -W -f='${Status}\t${Package}\t${Version}\t${Provides}\n' 2>/dev/null \
         | while IFS=$'\t' read -r _st _p _v _pv; do
             [ "${_st}" = "install ok installed" ] || continue
+            # 即将被预卸的互斥提供者不能算"可用已装"(其 Provides 也一并排除)
+            case " ${_DEB_PURGE_EXCLUDE:-} " in
+                *" ${_p} "*) continue ;;
+            esac
             printf 'pkg\t%s\t%s\n' "${_p}" "${_v}"
             _deb_emit_provides "${_pv}"
         done > "${inst}" || true
@@ -2362,6 +2373,132 @@ _deb_set_missing() { # <待装 deb 文件...>
     return 0
 }
 
+# Pre-Depends 安装顺序校验/重排: Pre-Depends 在 **unpack 时**就必须就绪, 只能由
+# "已装包(排除本次将预卸的互斥提供者) ∪ 排在前面的同批 deb"满足。Depends 可以在
+# 后续 configure 阶段补齐, 不受本顺序限制。stdout 输出空格分隔的安装顺序;
+# 某组找不到可用提供者或出现循环依赖 → 返回 1(调用方在预卸之前中止)。
+_deb_pre_depends_order() { # <deb文件...>
+    local f p deps grp alt dn op req inner missing=""
+    local n i j k k2 _sat _prov
+    local -a _debs=("$@")
+    local -a _groups _alts _prov_files=() _ef=() _et=() _indeg=() _emitted=() _done=()
+    local _tmp _inst
+    n=${#_debs[@]}
+    _tmp="$(mktemp -d)"
+    _inst="${_tmp}/inst"
+    : > "${_inst}"
+    for ((i=0; i<n; i++)); do
+        f="${_debs[$i]}"
+        _prov_files+=("${_tmp}/avail.$i")
+        : > "${_prov_files[$i]}"
+        p="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
+        [ -n "${p}" ] && printf 'pkg\t%s\t%s\n' "${p}" \
+            "$(dpkg-deb -f "${f}" Version 2>/dev/null || true)" > "${_prov_files[$i]}"
+        _deb_emit_provides "$(dpkg-deb -f "${f}" Provides 2>/dev/null || true)" >> "${_prov_files[$i]}"
+    done
+    dpkg-query -W -f='${Status}\t${Package}\t${Version}\t${Provides}\n' 2>/dev/null \
+        | while IFS=$'\t' read -r _st _p _v _pv; do
+            [ "${_st}" = "install ok installed" ] || continue
+            case " ${_DEB_PURGE_EXCLUDE:-} " in
+                *" ${_p} "*) continue ;;
+            esac
+            printf 'pkg\t%s\t%s\n' "${_p}" "${_v}"
+            _deb_emit_provides "${_pv}"
+        done > "${_inst}" || true
+    for ((i=0; i<n; i++)); do
+        f="${_debs[$i]}"
+        deps="$(dpkg-deb -f "${f}" Pre-Depends 2>/dev/null || true)"
+        [ -n "${deps}" ] || continue
+        deps="$(printf '%s' "${deps}" | tr '\n' ',')"
+        p="$(dpkg-deb -f "${f}" Package 2>/dev/null || true)"
+        while IFS=',' read -ra _groups; do
+            for grp in "${_groups[@]}"; do
+                [ -n "${grp// /}" ] || continue
+                IFS='|' read -ra _alts <<< "${grp}"
+                # ① 已装(排除预卸)满足 → 无需调整顺序
+                _sat=0
+                for alt in "${_alts[@]}"; do
+                    dn="$(printf '%s' "${alt}" | sed -E 's/^[[:space:]]*([A-Za-z0-9+.-]+).*/\1/')"
+                    op=""; req=""
+                    case "${alt}" in
+                        *'('*)
+                            inner="${alt#*(}"; inner="${inner%%)*}"
+                            inner="$(printf '%s' "${inner}" | tr -d '[:space:]')"
+                            op="$(printf '%s' "${inner}" | sed -E 's/^([<>=]+).*/\1/')"
+                            req="${inner#"${op}"}"
+                            ;;
+                    esac
+                    if _deb_alt_ok "${_inst}" "${dn}" "${op}" "${req}"; then _sat=1; break; fi
+                done
+                [ "${_sat}" = "1" ] && continue
+                # ② 必须来自同批 deb: 选一个满足的提供者并加边 provider→i
+                _prov=-1
+                for alt in "${_alts[@]}"; do
+                    dn="$(printf '%s' "${alt}" | sed -E 's/^[[:space:]]*([A-Za-z0-9+.-]+).*/\1/')"
+                    op=""; req=""
+                    case "${alt}" in
+                        *'('*)
+                            inner="${alt#*(}"; inner="${inner%%)*}"
+                            inner="$(printf '%s' "${inner}" | tr -d '[:space:]')"
+                            op="$(printf '%s' "${inner}" | sed -E 's/^([<>=]+).*/\1/')"
+                            req="${inner#"${op}"}"
+                            ;;
+                    esac
+                    for ((j=0; j<n; j++)); do
+                        [ "${j}" -eq "${i}" ] && continue
+                        if _deb_alt_ok "${_prov_files[$j]}" "${dn}" "${op}" "${req}"; then
+                            _prov=$j; break 2
+                        fi
+                    done
+                done
+                if [ "${_prov}" -lt 0 ]; then
+                    missing="${missing} ${p}->${grp}"
+                else
+                    _ef+=("${_prov}"); _et+=("${i}")
+                fi
+            done
+        done <<< "${deps}"
+    done
+    if [ -n "${missing}" ]; then
+        echo "  [deb-install] Pre-Depends 无可用提供者(已装/随包):${missing}" >&2
+        rm -rf "${_tmp}"
+        return 1
+    fi
+    # Kahn 稳定拓扑排序(每次取下标最小的入度 0 节点, 尽量保持原顺序)
+    for ((i=0; i<n; i++)); do _indeg[i]=0; _done[i]=0; done
+    if [ "${#_et[@]}" -gt 0 ]; then
+        for k in "${!_et[@]}"; do
+            i="${_et[$k]}"
+            _indeg[i]=$((_indeg[i] + 1))
+        done
+    fi
+    for ((k=0; k<n; k++)); do
+        i=-1
+        for ((j=0; j<n; j++)); do
+            [ "${_done[$j]}" = "1" ] && continue
+            [ "${_indeg[$j]}" -eq 0 ] && { i=$j; break; }
+        done
+        if [ "${i}" -lt 0 ]; then
+            echo "  [deb-install] Pre-Depends 存在循环依赖, 无法确定安全安装顺序(拒绝预卸)" >&2
+            rm -rf "${_tmp}"
+            return 1
+        fi
+        _done[i]=1
+        _emitted+=("${_debs[$i]}")
+        if [ "${#_ef[@]}" -gt 0 ]; then
+            for k2 in "${!_ef[@]}"; do
+                if [ "${_ef[$k2]}" = "${i}" ]; then
+                    j="${_et[$k2]}"
+                    _indeg[j]=$((_indeg[j] - 1))
+                fi
+            done
+        fi
+    done
+    printf '%s\n' "${_emitted[*]}"
+    rm -rf "${_tmp}"
+    return 0
+}
+
 # 预卸前备份互斥时间提供者: 回滚 deb + 全部 conffiles。
 # 回滚 deb **必须与已装版本一致**（${d}/rollback/、${d}/、apt archives 任一来源）:
 # 不同版本的归档不能把节点恢复到原状态(且可能依赖离线集里没有的旧依赖),
@@ -2398,7 +2535,7 @@ _time_daemon_backup() { # <提供者包名> <deb目录> <备份根>
 _time_daemon_restore() { # <提供者包名> <备份根>
     local c="$1" root="$2"
     local dir="${root}/${c}" f
-    local log=/tmp/cubestack-deb-install.log
+    local log="${_DEB_WORK_DIR}/install.log"
     if [ ! -f "${dir}/rollback.deb" ]; then
         echo "  [deb-install] 缺少 ${c} 回滚包, 无法恢复" >&2
         return 1
@@ -2429,23 +2566,40 @@ _time_daemon_restore() { # <提供者包名> <备份根>
 
 # 安装一批离线 deb: 预检依赖 → 备份/预卸互斥 → 批量 dpkg → 失败逐包隔离 → 必要时回滚。
 # 并发安全(2026-11-19): 同一节点可能被并发触发(重跑/多入口同时下发), 替换流程绝不能交错
-# —— 节点级 flock 串行化(等待上限 600s); 回滚目录按**本次运行**私有(mktemp -d),
+# —— 节点级 flock 串行化(等待上限 600s); 锁文件与日志放在 root 独占目录 _DEB_WORK_DIR
+# (不用世界可写的 /tmp, 防 FIFO/符号链接/目录预置); 回滚目录按**本次运行**私有(mktemp -d),
 # 不再共享 /tmp/cubestack-time-daemon-rollback, 防止另一运行 reset 掉本运行的备份;
 # 成功后清理私有目录, 失败保留现场(回滚 deb/配置)供人工复核。
 install_debs_offline() {
+    # 锁目录: root 独占(0700)。创建失败/锁路径异常时直接失败, 绝不带着不可靠的锁继续。
+    if ! mkdir -p -m 0700 "${_DEB_WORK_DIR}" 2>/dev/null; then
+        echo "  [deb-install] 无法创建锁目录 ${_DEB_WORK_DIR}; 中止(无法串行化装包)" >&2
+        return 1
+    fi
+    chown root:root "${_DEB_WORK_DIR}" 2>/dev/null || true
+    chmod 0700 "${_DEB_WORK_DIR}" 2>/dev/null || true
+    # 锁文件必须是普通文件: FIFO 会让 open 永久阻塞(在 flock/600s 之外), 符号链接会写到别处,
+    # 目录会让 open 失败。异常残留一律拒绝并提示人工清理(不自动删除, 避免换 inode 竞态)。
+    if [ -L "${_DEB_WORK_DIR}/install.lock" ] \
+       || { [ -e "${_DEB_WORK_DIR}/install.lock" ] && [ ! -f "${_DEB_WORK_DIR}/install.lock" ]; }; then
+        echo "  [deb-install] 锁文件异常(非普通文件): ${_DEB_WORK_DIR}/install.lock; 请人工清理后重试" >&2
+        return 1
+    fi
     (
         flock -w 600 9 || { echo "  [deb-install] 等待装包锁超时(另一进程正在本节点装包)" >&2; exit 1; }
         _install_debs_offline_impl "$@"
-    ) 9>"/tmp/cubestack-deb-install.lock"
+    ) 9>"${_DEB_WORK_DIR}/install.lock"
 }
 
 _install_debs_offline_impl() {
     local d="$1"; shift
     local want="$*"
-    local dlog=/tmp/cubestack-deb-install.log p c f pk list="" n_skip=0
+    local dlog="${_DEB_WORK_DIR}/install.log" p c f pk list="" n_skip=0 ordered=""
     local rollback_root=""
     local target_ok=1 _has=0 _seen=0 _pc=""
     local -a purge_providers=()
+    # 直接调用 impl(绕过 wrapper)时也保证工作目录存在; 失败则交给后续 open 报错
+    mkdir -p -m 0700 "${_DEB_WORK_DIR}" 2>/dev/null || true
     : >"${dlog}"
     # 1) 先算待装列表。全部已装 → 不预卸任何互斥包。
     for f in "${d}"/*.deb; do
@@ -2461,7 +2615,9 @@ _install_debs_offline_impl() {
         echo "  [deb-install] 全部已装(跳过 ${n_skip} 个), 无需安装"
         return 0
     fi
-    # 2) 预卸之前验证离线集: 关注包必须有 deb, 且依赖闭包完整。
+    # 2) 预卸之前验证离线集: 关注包必须有 deb; 并先**只读**算出将被预卸的互斥提供者,
+    #    再从依赖预检的"已装提供者"里排除它们 —— 不能拿马上要被 purge 的包满足依赖
+    #    (例: 待装集里某包 Depends: systemd-timesyncd, 而它会为装 chrony 被预卸)。
     for p in ${want}; do
         if dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "install ok installed"; then
             continue
@@ -2473,9 +2629,7 @@ _install_debs_offline_impl() {
             return 1
         fi
     done
-    # shellcheck disable=SC2086
-    _deb_set_missing ${list} || return 1
-    # 3) 预卸前备份将被替换的互斥提供者(回滚包+配置文件); 任一缺失则拒绝预卸。
+    # 预卸集合(只读判定, 不改节点): 与步骤 3 的备份/步骤 4 的 purge 使用同一份列表
     for p in ${want}; do
         dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "install ok installed" && continue
         for c in $(_pkg_conflict_providers "${p}"); do
@@ -2486,13 +2640,31 @@ _install_debs_offline_impl() {
                 [ "${_pc}" = "${c}" ] && { _seen=1; break; }
             done
             [ "${_seen}" = "1" ] && continue
-            # 本次运行私有的回滚目录(懒创建): 并发/重跑不会互相清掉备份
-            if [ -z "${rollback_root}" ]; then
-                rollback_root="$(mktemp -d /tmp/cubestack-time-daemon-rollback.XXXXXX)" || return 1
-            fi
-            _time_daemon_backup "${c}" "${d}" "${rollback_root}" || return 1
             purge_providers+=("${c}")
         done
+    done
+    # shellcheck disable=SC2086
+    _DEB_PURGE_EXCLUDE="${purge_providers[*]:-}"
+    if ! _deb_set_missing ${list}; then
+        unset _DEB_PURGE_EXCLUDE
+        return 1
+    fi
+    # Pre-Depends 必须在 **unpack 时**就绪: 只能由"已装(排除预卸) ∪ 排在前面的同批 deb"
+    # 满足。这里按该约束重排安装顺序(同批提供者提前); 无提供者/循环依赖 → 预卸前拒绝。
+    # (Depends 可延后到 configure 阶段补齐, 不要求顺序。)
+    if ! ordered="$(_deb_pre_depends_order ${list})"; then
+        unset _DEB_PURGE_EXCLUDE
+        return 1
+    fi
+    unset _DEB_PURGE_EXCLUDE
+    list="${ordered}"
+    # 3) 预卸前备份将被替换的互斥提供者(回滚包+配置文件); 任一缺失则拒绝预卸。
+    for c in ${purge_providers[@]+"${purge_providers[@]}"}; do
+        # 本次运行私有的回滚目录(懒创建): 并发/重跑不会互相清掉备份
+        if [ -z "${rollback_root}" ]; then
+            rollback_root="$(mktemp -d /tmp/cubestack-time-daemon-rollback.XXXXXX)" || return 1
+        fi
+        _time_daemon_backup "${c}" "${d}" "${rollback_root}" || return 1
     done
     # 4) 预卸互斥包(失败即中止; 未安装目标包)
     for c in ${purge_providers[@]+"${purge_providers[@]}"}; do
