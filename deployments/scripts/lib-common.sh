@@ -668,41 +668,57 @@ helm_chart_ensure() {
 # ---------------- operator 镜像 tag 决策(helm 用) ----------------
 # 原则(2026-10-22 用户口径): 默认**完全跟随 chart 自带版本**;
 #   installer 只保留一个显式逃生口, 且**只覆盖 operator 自身的镜像 tag**。
-#   - 未设 CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE → 输出空 → helm 用 chart 自带
-#     (Chart.yaml appVersion / values.image.tag);
-#   - 设了 override → 只传 --set image.tag=<tag> 给 operator chart。
+#   - 显式 CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE 非空 → 用它;
+#   - release 模式由模块传入 release.env / release.yaml 的 tag → 用它
+#     (release chart 的 appVersion=latest, 不传就渲染出 :latest, issue #190);
+#   - 两者都为空 → 输出空 → helm 用 chart 自带(appVersion / values.image.tag)。
+# 用法: operator_image_tag_for_helm <override> [release-default]
 operator_image_tag_for_helm() {
     # ⚠ 必须恒返回 0: 调用方是 `x="$(operator_image_tag_for_helm ...)"` + set -e,
     #   空 override 时若返回 1 会让整个模块静默退出(2026-10-22 实机)。
     if [ -n "${1:-}" ]; then
         printf '%s\n' "$1"
+    elif [ -n "${2:-}" ]; then
+        printf '%s\n' "$2"
     fi
     return 0
 }
 
 # ---------------- CubeStack operator chart 定位(release 版本无关) ----------------
 # 在目录中定位 operator chart, 不要求 installer 预先写死版本:
+#   文件名可以是带版本号的 <name>-<ver>.tgz, 也可以是 release 树里的无版本号
+#   <name>.tgz —— 后者是常态: tree.tsv 不重命名制品, 版本只在 Chart.yaml(issue #183)。
 #   ① <name>-<desired>.tgz 存在 → 用它(desired 可空)
-#   ② release 模式(<release> 非空): 优先 <name>-<release>.tgz; 否则扫描 <name>-*.tgz,
-#      读取 Chart.yaml version, 匹配 <release> 或 <desired>; 唯一命中即用
-#   ③ 目录中只有一个 <name>-*.tgz → 用它(版本以 chart 自身为准)
+#   ② release 模式(<release> 非空)或指定了 desired: 优先 <name>-<release>.tgz /
+#      <name>-<desired>.tgz; 否则扫描候选文件, 读取 Chart.yaml 顶层 version, 匹配
+#      <release> 或 <desired>; 唯一命中即用
+#   ③ 目录中只有一个候选 → 用它(版本以 chart 自身为准)
 #   ④ 否则返回 1(调用方列出候选并报错)
 # 输出(stdout): "<tgz路径>\t<chart版本>"
 # 说明: 只读 tar, 不联网; 供 installer 模块与打包工具共用。
 operator_chart_version() {
     local _tgz="$1" _y
-    _y="$(tar -tzf "${_tgz}" 2>/dev/null | command grep -E '/Chart.yaml$' | head -1 || true)"
+    # 子 chart 也可能带 Chart.yaml; 取层级最浅的那份(= 父 chart 根清单)。
+    _y="$(tar -tzf "${_tgz}" 2>/dev/null \
+          | command grep -E '/Chart.yaml$' \
+          | awk -F/ '{print NF "\t" $0}' | sort -n -k1,1 | head -1 | cut -f2- || true)"
     [ -n "${_y}" ] || return 0
-    tar -xOf "${_tgz}" "${_y}" 2>/dev/null | awk '/^[[:space:]]*version:[[:space:]]*/{print $2; exit}'
+    # 只认根级 version(顶层无缩进), 去掉 YAML 引号。
+    tar -xOf "${_tgz}" "${_y}" 2>/dev/null \
+        | awk '/^version:[[:space:]]*/{print $2; exit}' | tr -d "\"'"
 }
 
 resolve_operator_chart_tgz() {   # <dir> <chart-name> [desired-version] [release-version]
     local _dir="$1" _name="$2" _desired="${3:-}" _release="${4:-}"
-    local _files=() _f _v _hit="" _ver="" _ng=0
+    local _files=() _versioned=() _f _v _hit="" _ver="" _ng=0
     [ -d "${_dir}" ] || return 1
     shopt -q nullglob && _ng=1
     shopt -s nullglob
-    _files=("${_dir}/${_name}-"*.tgz)
+    _versioned=("${_dir}/${_name}-"*.tgz)
+    _files=("${_versioned[@]}")
+    if [ -f "${_dir}/${_name}.tgz" ]; then
+        _files+=("${_dir}/${_name}.tgz")
+    fi
     [ "${_ng}" = "1" ] || shopt -u nullglob
     [ "${#_files[@]}" -gt 0 ] || return 1
 
@@ -711,24 +727,38 @@ resolve_operator_chart_tgz() {   # <dir> <chart-name> [desired-version] [release
         _hit="${_dir}/${_name}-${_release}.tgz"
     elif [ -n "${_desired}" ] && [ -f "${_dir}/${_name}-${_desired}.tgz" ]; then
         _hit="${_dir}/${_name}-${_desired}.tgz"
-    elif [ -n "${_release}" ]; then
+    elif [ -n "${_release}" ] || [ -n "${_desired}" ]; then
+        # 无版本号文件名无法从名字判断版本, 只能读 Chart.yaml。
+        # 每个比较都要求对应参数非空, 否则空 release/desired 会匹配空版本。
         for _f in "${_files[@]}"; do
             _v="$(operator_chart_version "${_f}")"
-            if [ "${_v}" = "${_release}" ] || { [ -n "${_desired}" ] && [ "${_v}" = "${_desired}" ]; }; then
+            if { [ -n "${_release}" ] && [ "${_v}" = "${_release}" ]; } \
+               || { [ -n "${_desired}" ] && [ "${_v}" = "${_desired}" ]; }; then
                 _hit="${_f}"; break
             fi
         done
     fi
-    if [ -z "${_hit}" ] && [ "${#_files[@]}" -eq 1 ]; then
+    # 兜底只在非 release 模式生效: release 树必须按 release.env 的版本命中,
+    # 不能把唯一一份版本不符的 chart 猜着装上(那是 verifier 应拦下的错误)。
+    if [ -z "${_hit}" ] && [ -z "${_release}" ] && [ "${#_files[@]}" -eq 1 ]; then
         _hit="${_files[0]}"
+    fi
+    # 兼容"带版本号 chart + 无版本号残留"的 dev/过渡树: 取唯一的带版本号 chart。
+    if [ -z "${_hit}" ] && [ -z "${_release}" ] && [ "${#_versioned[@]}" -eq 1 ] \
+       && [ "${#_files[@]}" -gt 1 ]; then
+        _hit="${_versioned[0]}"
     fi
     [ -n "${_hit}" ] || return 1
 
     _ver="$(operator_chart_version "${_hit}")"
     if [ -z "${_ver}" ]; then
-        _ver="$(basename "${_hit}")"
-        _ver="${_ver#${_name}-}"
-        _ver="${_ver%.tgz}"
+        # 只有带版本号的文件名才能反推版本; <name>.tgz 反推出来是 chart 名, 不是版本。
+        case "$(basename "${_hit}")" in
+            "${_name}-"*.tgz)
+                _ver="$(basename "${_hit}")"
+                _ver="${_ver#${_name}-}"
+                _ver="${_ver%.tgz}" ;;
+        esac
     fi
     printf '%s\t%s\n' "${_hit}" "${_ver}"
 }
@@ -741,6 +771,12 @@ operator_chart_dir_extras() {   # <charts-dir> <chart-name> <keep-tgz-basename>
     shopt -q nullglob && _ng=1
     shopt -s nullglob
     local -a _files=("${_dir}/${_name}-"*.tgz "${_dir}/${_name}-"*.tgz.digest)
+    if [ -f "${_dir}/${_name}.tgz" ]; then
+        _files+=("${_dir}/${_name}.tgz")
+    fi
+    if [ -f "${_dir}/${_name}.tgz.digest" ]; then
+        _files+=("${_dir}/${_name}.tgz.digest")
+    fi
     [ "${_ng}" = "1" ] || shopt -u nullglob
     for _f in "${_files[@]}"; do
         _b="${_f##*/}"

@@ -1,7 +1,12 @@
 import hashlib
 import os
+import re
 
 from .constants import META_NAMES
+
+def clean_value(v):
+    """去掉值尾部的 YAML/env 行内注释(空白 + #)与包裹引号。"""
+    return re.split(r"\s+#", v.strip(), maxsplit=1)[0].strip().strip('"').strip("'")
 
 def norm_rel(p):
     p = p.replace("\\", "/")
@@ -44,7 +49,7 @@ def parse_env(path):
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            v = v.split(" #", 1)[0].strip().strip('"').strip("'")
+            v = clean_value(v)
             data[k.strip()] = v
     return data
 
