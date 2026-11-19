@@ -96,44 +96,21 @@ fi
 # 的声明大小(同一数据源 REGISTRY_DISK_SIZE, 两处默认值必须一致)。
 set_key registry_disk_size "\"${REGISTRY_DISK_SIZE:-200Gi}\""
 
-# ---- 镜像源: 先于内置 registry 就绪的 addon 必须引用预加载的 mirror 名 ----
-# 版本树的离线 tar 以 mirror 名(skopeo RepoTags)打包; ctr import 后 containerd 里只有 mirror 名。
-# local-path-provisioner / 它的 helper busybox / registry 自身都在内置 registry 之前启动,
-# 写上游名(docker.io/...)在断网环境必然 ImagePullBackOff(local-path helper 还会 120s 超时,
-# PVC 无法 Bound → registry 起不来)。helper 的 tag 必须与版本树一致, 不能沿用 kubespray 的 latest。
-# *_pod_image_* 是 cubestack 补丁 17 引入的"仅 Pod 引用"变量: download role 仍按上游 repo 推导
-# 缓存 tar 文件名(与版本树 tar 名一致), 因此不能直接改 *_image_repo —— 那会让 download 在
-# 离线环境去找不存在的 mirror 名 tar 并尝试联网拉取。
+# ---- local-path helper 镜像(原生 kubespray 变量) ----
+# helper busybox 不在 kubespray 的 download 列表里, 上游默认是 busybox:latest; 镜像以
+# mirror 名/版本钉提供时显式指定 repo+tag, 保证 Pod 命中本地镜像(不会因为 latest 去联网)。
+# 其余 addon 镜像由 kubespray 的镜像仓库前缀统一覆盖(见 sync-kubespray-config.sh)。
 _mirror="$(harbor_mirror_base)"
 if [ -n "${_mirror}" ]; then
-    set_key local_path_provisioner_pod_image_repo "\"${_mirror}/docker.io/rancher/local-path-provisioner\""
-    if [ -n "${LOCAL_PATH_VERSION:-}" ]; then
-        set_key local_path_provisioner_pod_image_tag "\"${LOCAL_PATH_VERSION}\""
-    fi
     set_key local_path_provisioner_helper_image_repo "\"${_mirror}/docker.io/library/busybox\""
     if [ -n "${BUSYBOX_TAG:-}" ]; then
         set_key local_path_provisioner_helper_image_tag "\"${BUSYBOX_TAG}\""
     fi
-    set_key registry_pod_image_repo "\"${_mirror}/docker.io/library/registry\""
-    if [ -n "${REGISTRY_IMAGE_TAG:-}" ]; then
-        set_key registry_pod_image_tag "\"${REGISTRY_IMAGE_TAG}\""
-    fi
-    # 节点侧 API 本地代理(nginx-proxy 静态 Pod)同样是 docker.io 镜像
-    set_key nginx_pod_image_repo "\"${_mirror}/docker.io/library/nginx\""
-    if [ -n "${API_LB_NGINX_IMAGE_TAG:-}" ]; then
-        set_key nginx_pod_image_tag "\"${API_LB_NGINX_IMAGE_TAG}\""
-    fi
-    ok "addon 镜像源已同步 → ${_mirror}(local-path/helper/registry 直连预加载镜像)"
+    ok "local-path helper 镜像源 → ${_mirror}/docker.io/library/busybox:${BUSYBOX_TAG:-?}"
 else
-    unset_key local_path_provisioner_pod_image_repo
-    unset_key local_path_provisioner_pod_image_tag
     unset_key local_path_provisioner_helper_image_repo
     unset_key local_path_provisioner_helper_image_tag
-    unset_key registry_pod_image_repo
-    unset_key registry_pod_image_tag
-    unset_key nginx_pod_image_repo
-    unset_key nginx_pod_image_tag
-    say "镜像命名=$(cubestack_image_naming) / HARBOR_MIRROR_ENABLED=${HARBOR_MIRROR_ENABLED:-true} → addon 镜像源保持上游名(kubespray 默认)"
+    say "镜像命名=$(cubestack_image_naming) → local-path helper 保持上游默认"
 fi
 unset _mirror
 

@@ -743,7 +743,7 @@ else
 fi
 
 # ---------------- 6) 部署 Rook operator(crds → common → csi-operator → operator) ----------------
-# 离线镜像源: 版本树 tar 以 mirror 名打包, 预加载后 containerd 里只有 mirror 名。Rook/CSI 的
+# 离线镜像源: 镜像以 mirror 名提供时, 预加载后 containerd 里只有 mirror 名。Rook/CSI 的
 # 上游清单写的是 docker.io/rook/ceph、quay.io/ceph/ceph、registry.k8s.io/... —— 断网环境直接
 # ImagePullBackOff。这里在**应用前**把清单渲染到临时目录并把 image 引用重写成 mirror 名;
 # HARBOR_MIRROR_ENABLED=false(直连上游)时保持原清单不动。

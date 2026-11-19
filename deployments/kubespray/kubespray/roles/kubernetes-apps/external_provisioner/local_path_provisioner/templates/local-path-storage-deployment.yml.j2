@@ -17,7 +17,7 @@ spec:
       serviceAccountName: local-path-provisioner-service-account
       containers:
       - name: local-path-provisioner
-        image: {{ local_path_provisioner_pod_image_repo | default(local_path_provisioner_image_repo) }}:{{ local_path_provisioner_pod_image_tag | default(local_path_provisioner_image_tag) }}
+        image: {{ local_path_provisioner_image_repo }}:{{ local_path_provisioner_image_tag }}
         imagePullPolicy: {{ k8s_image_pull_policy }}
         command:
         - local-path-provisioner

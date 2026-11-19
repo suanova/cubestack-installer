@@ -31,7 +31,7 @@ spec:
         runAsUser: 1000
       containers:
         - name: registry
-          image: {{ registry_pod_image_repo | default(registry_image_repo) }}:{{ registry_pod_image_tag | default(registry_image_tag) }}
+          image: {{ registry_image_repo }}:{{ registry_image_tag }}
           imagePullPolicy: {{ k8s_image_pull_policy }}
           command:
           - /bin/registry

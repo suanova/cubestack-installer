@@ -19,7 +19,7 @@ spec:
   priority: 2000001000
   containers:
   - name: nginx-proxy
-    image: {{ nginx_pod_image_repo | default(nginx_image_repo) }}:{{ nginx_pod_image_tag | default(nginx_image_tag) }}
+    image: {{ nginx_image_repo }}:{{ nginx_image_tag }}
     imagePullPolicy: {{ k8s_image_pull_policy }}
     resources:
       requests:
