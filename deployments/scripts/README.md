@@ -80,6 +80,7 @@ deployments/scripts/
 │   │   ├── 03_vm_create.sh    #     创建虚拟机(默认关, 由 tools/vm/create-vms.sh 独立执行)
 │   │   └── 04_harbor.sh       #     Harbor 镜像仓库(集群外私有仓库, 部署前就绪)
 │   ├── 02_k8s/                #   阶段二: 离线部署 kubespray(不依赖 VM/裸金属)
+│   │   ├── 00_chrony_pkgs.sh       # chrony 离线装包(可选, 默认关, CHRONY_PKGS_ENABLED=true 启用; 与 NTP 同步解耦, 在 NTP 之前执行)
 │   │   ├── 01_k8s_passwordless.sh  # SSH 免密
 │   │   ├── 02_k8s_workerbm.sh      # worker 节点离线装包(默认关, WORKER_PKGS_ENABLED=true 启用; 默认连通性检查由 pre_install_check 覆盖)
 │   │   ├── 03_k8s_hosts.sh         # 更新 /etc/hosts
@@ -472,10 +473,14 @@ REGISTRY_NODEPORT="31148"            # nodeport 模式的固定 NodePort
 
 kubeadm / etcd 对节点间时钟偏差敏感,若节点时间不一致会导致证书校验、心跳、日志时间线等故障。`modules/02_k8s/05_k8s_ntp.sh` 位于 k8s 阶段**部署模块之前**,为默认启用的可重复模块,一键部署与扩容时自动执行。
 
-> **2026-11-17(2.1 口径)**: installer **默认不安装 OS 包** —— chrony 由节点黄金镜像/运维预装
-> (仅当显式启用 `NODE_PKGS_ENABLED` / `WORKER_PKGS_ENABLED` 的离线装包时才由 installer 安装)。
-> `k8s_ntp` **只负责同步**(必需步骤); 权威缺 chrony 或客户端既无 chrony 也无 `systemd-timesyncd` → **硬失败**并给安装指引。
-> 全量部署时 NTP 同步会在 **SSH 免密之后、Ceph/其他 operator 卸载/安装之前**先执行(见 `deploy-cluster.sh` 的“安装前 NTP 阶段”)。
+> **2026-11-19(2.1 口径)**: installer **默认不安装 OS 包** —— chrony 由节点黄金镜像/运维预装。
+> **装包可选、NTP 同步必选, 二者解耦**: 需要 installer 离线安装 chrony 时启用独立可选模块
+> `chrony_pkgs`(`CHRONY_PKGS_ENABLED=true` / `--steps chrony_pkgs`, 只装
+> `offline-files/os/packages/chrony/`, 不写配置), 它在 NTP 之前执行;
+> `k8s_ntp` **只负责同步**并假设 chrony 已存在 —— 权威(首 master)缺 chrony → **硬失败**并提示
+> 启用 `chrony_pkgs`/预装; 客户端缺 chrony 回退 `systemd-timesyncd`。
+> 全量部署时 chrony 装包与 NTP 同步都在 **SSH 免密之后、Ceph/其他 operator 卸载/安装之前**执行
+> (见 `deploy-cluster.sh` 的“安装前可选装包阶段”与“安装前 NTP 阶段”)。
 
 原理与机制:
 
@@ -565,10 +570,14 @@ VM 已通过其他方式创建时,用此脚本将其注册到 `cluster.conf` 的
 # cluster.conf
 NODE_PKGS_ENABLED="true"     # 节点系统包对账(tools/node/reconcile-node-packages.sh)
 WORKER_PKGS_ENABLED="true"   # worker 离线装包(tools/node/install-worker-packages.sh)
-# 或: --enable node_pkgs / --steps node_pkgs; --enable k8s_workerbm / --steps k8s_workerbm
+CHRONY_PKGS_ENABLED="true"   # chrony 专用安装集(os/packages/chrony; tools/node/install-chrony-packages.sh)
+# 或: --enable node_pkgs / --steps node_pkgs; --enable k8s_workerbm / --steps k8s_workerbm;
+#     --enable chrony_pkgs / --steps chrony_pkgs
 ```
 
 `.deb` 来源为 `offline-files/os/packages/*.deb`（需自行预置）；开启后在 kubespray 之前执行。
+`chrony_pkgs` 只从 `offline-files/os/packages/chrony/` 装包（不配置 NTP），并先于必选的
+`k8s_ntp` 同步执行；默认关闭时 `k8s_ntp` 假设 chrony 已由 OS 镜像预装。
 
 ### 5.11 版本树(offline-files)消费
 

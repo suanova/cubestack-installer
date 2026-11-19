@@ -14,7 +14,7 @@
 # 模块(stages):
 #   env 阶段:  vm_network vm_sshkey vm_create harbor
 #   k8s 阶段:  k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp pre_install_check
-#              node_pkgs node_net_guard k8s_asset_prefetch
+#              chrony_pkgs node_pkgs node_net_guard k8s_asset_prefetch
 #              k8s_deploy(基座, 恒随全量部署) k8s_scale(默认关)
 #   addon 阶段: gpu_operator k8s_registry ceph ceph_csi ceph_backup
 #              keycloak kueue kubevirt lustre_csi   (01~19 中间件, 默认关)
@@ -22,7 +22,7 @@
 #   验证:      verify_<组件>(自动发现; --steps verify 不指定 operator 默认执行全部 verify_*)
 #   运维:      ceph_backup(Ceph 备份/恢复, 默认关, --steps ceph_backup 单独执行)
 #
-# vm / k8s_passwordless / k8s_workerbm / k8s_hosts / k8s_inventory / pre_install_check 为可重复(幂等)模块。
+# vm / k8s_passwordless / k8s_workerbm / chrony_pkgs / k8s_hosts / k8s_inventory / pre_install_check 为可重复(幂等)模块。
 # 断点续跑: 每模块完成后写入状态文件; --fresh 清状态重跑。
 #
 # 用法:
@@ -66,6 +66,7 @@ usage() {
           (默认执行 vm_sshkey; vm_network 默认关 — 宿主网络初始化改由 tools/vm/create-vms.sh 创建 VM 时自动执行; vm_create 默认关 — 虚拟机创建由 tools/vm/create-vms.sh 独立执行)
   02_k8s  k8s_passwordless k8s_hosts k8s_inventory k8s_ntp pre_install_check node_net_guard k8s_asset_prefetch  (默认执行)
           k8s_workerbm(默认关, WORKER_PKGS_ENABLED=true / --steps k8s_workerbm 启用离线装包)
+          chrony_pkgs(默认关, CHRONY_PKGS_ENABLED=true / --steps chrony_pkgs 启用 chrony 离线装包; 在 NTP 之前)
           node_pkgs(默认关, NODE_PKGS_ENABLED=true / --steps node_pkgs 启用离线 .deb 对账)
           k8s_deploy(基座, 恒随全量部署)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
@@ -558,7 +559,7 @@ unset _has_ceph_step _has_k8s_step
 #     其余是建集群本身的前置)。对**全部请求步骤都属于这一类**的情形, 接入改为**尽力而为**: 能接上就接,
 #     接不上只提示不拦停 —— 否则 `--steps node_pkgs` 在一台集群尚未起来的机器上永远跑不动(实机 2026-09-29)。
 #     只要请求里**有任何一个**需要集群的步骤, 仍走原来的硬门(exit 1)。
-PRE_CLUSTER_STEPS="node_pkgs pre_install_check k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp"
+PRE_CLUSTER_STEPS="chrony_pkgs node_pkgs pre_install_check k8s_passwordless k8s_workerbm k8s_hosts k8s_inventory k8s_ntp"
 if [ -n "${STEPS_ARG}" ]; then
     _all_pre=1
     for _s in ${STEPS_ARG//,/ }; do
@@ -577,6 +578,23 @@ if [ -n "${STEPS_ARG}" ]; then
 fi
 
 print_plan
+
+# ★ 安装前“可选 OS 装包”阶段(2026-11-19 用户口径): 装包可选、NTP 同步必选, 二者解耦。
+#   本阶段只处理声明了 TOGGLE 的节点装包模块中的 chrony_pkgs —— 必须在 NTP 之前:
+#   NTP 模块只做同步(假设 chrony 已存在/已由本阶段装好), 不再内嵌任何 OS 装包。
+#   · 默认关: 计划不含本模块时整段跳过, NTP 直接假设节点镜像已预装 chrony;
+#   · 启用后先装包, 再走下面的 NTP 阶段(客户端/权威都能用上 chrony);
+#   · 模块循环里的同名步骤据此跳过(幂等; 不重复上传/装包)。
+_early_chrony_pkgs=0
+for _k in "${RUN_STEPS[@]:-}"; do
+    [ "${_k}" = "chrony_pkgs" ] && { _early_chrony_pkgs=1; break; }
+done
+if [ "${_early_chrony_pkgs}" = "1" ]; then
+    say "==== 安装前可选装包阶段(chrony; 早于 NTP 同步) ===="
+    run_module chrony_pkgs || { err "chrony 离线装包失败(可选步骤; 修复后重跑 --steps chrony_pkgs)"; exit 1; }
+    CUBESTACK_EARLY_CHRONY_PKGS_DONE=1   # 仅本进程: 模块循环据此跳过重复执行
+fi
+unset _early_chrony_pkgs _k
 
 # ★ 安装前 NTP 阶段(2026-11-17 用户要求): 必须在 SSH 免密之后, 且早于 Ceph/其他 operator 的
 #   卸载/安装(下方优雅覆盖、Ceph 预检、模块循环)。只在本次计划包含 k8s_ntp 时触发
@@ -962,6 +980,10 @@ for key in "${RUN_STEPS[@]:-}"; do
     fi
     if [ "${CUBESTACK_EARLY_PRE_CHECK_DONE:-0}" = "1" ] && [ "${key}" = "pre_install_check" ]; then
         say "[${key}] 已在安装前就绪检查阶段完成, 跳过重复执行"
+        continue
+    fi
+    if [ "${CUBESTACK_EARLY_CHRONY_PKGS_DONE:-0}" = "1" ] && [ "${key}" = "chrony_pkgs" ]; then
+        say "[${key}] 已在安装前可选装包阶段完成, 跳过重复执行"
         continue
     fi
     run_module "${key}" || { FAILED=1; break; }

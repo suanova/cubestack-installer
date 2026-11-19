@@ -742,6 +742,7 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-nvidia-host-driver.sh test-inventory-ssh-user-precedence.sh \
            test-node-hosts-sync.sh \
            test-deploy-config-guard.sh test-k8s-ntp.sh test-cephfs-mount.sh \
+           test-chrony-pkgs.sh \
            test-ceph-data-disks.sh \
            test-metallb-pool-check.sh test-ceph-cluster-detect.sh \
            test-multus-iface-detect.sh \

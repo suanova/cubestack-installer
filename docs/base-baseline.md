@@ -73,6 +73,9 @@ images:
 - 需要 installer 直接安装离线 `.deb` 时，显式置 `NODE_PKGS_ENABLED=true` /
   `WORKER_PKGS_ENABLED=true`（`.deb` 放 `offline-files/os/packages/`）。默认关闭；
   公开在线安装不启用该路径。
+- chrony 专用安装集（`offline-files/os/packages/chrony/`）由**独立可选模块** `chrony_pkgs`
+  安装（`CHRONY_PKGS_ENABLED=true` / `--steps chrony_pkgs`）；装包与 NTP 同步解耦，
+  `k8s_ntp` 只做同步且为必选步骤（默认假设节点镜像已预装 chrony）。
 - 包安装后的配置与服务操作仍由 installer 负责：chrony 配置与同步、LVM/Ceph 准备、
   k8s 运行时配置等不属于 OS 包安装。
 - K8s 二进制（kubelet/kubeadm/kubectl/crictl/CNI 等）仍由 installer 准备；商业离线版由

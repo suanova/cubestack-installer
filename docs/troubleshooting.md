@@ -8,6 +8,9 @@
 > 需要 installer 直接安装离线 `.deb` 时，显式置 `NODE_PKGS_ENABLED=true` /
 > `WORKER_PKGS_ENABLED=true`（工具 `reconcile-node-packages.sh` /
 > `install-worker-packages.sh` 已恢复，默认关闭）。
+> chrony 专用安装集（`offline-files/os/packages/chrony/`）用独立可选模块
+> `CHRONY_PKGS_ENABLED=true` / `--steps chrony_pkgs` 安装；**装包可选、NTP 同步必选**，
+> `k8s_ntp` 只做同步并假设 chrony 已存在。
 
 ## 约定
 
@@ -433,12 +436,12 @@ sudo tcpdump -nei <网卡> '(arp or icmp) and host <对端IP>'
 - `setup-ntp.sh`:
   - `node_cmd` 对 **root 不再套 sudo**(消除 sudo/PAM/DNS 的数秒延迟); 新增 `node_sudo_ready` 前置,
     apply/verify 对非 root 且 sudo 不可用的节点直接点名失败。
-  - **客户端缺 chrony 时自动安装**: apply 把 offline-files 里的 chrony deb 推给缺 chrony 的节点,
-    远端脚本用 `install_debs_offline` 安装; 装不上才回退 `systemd-timesyncd`, 并校验其 active。
-    离线目录必须是**完整依赖闭包**(chrony + libpam/libaudit/libffi/libpcre2/zlib 等):
-    `deployments/scripts/tools/node/chrony-offline-debs.py --check <chrony目录>` 只读自检;
-    联网 Ubuntu 22.04 amd64 构建机用 `--fetch <chrony目录>` 补齐缺失 deb。
-    setup-ntp 在 apply 前会自动 check 并 warn; 严格离线可设 `NTP_REQUIRE_CHRONY_CLOSURE=1` 直接失败。
+  - ~~**客户端缺 chrony 时自动安装**~~(2026-10-26 旧行为; **2026-11-19 起撤销** ——
+    `setup-ntp.sh` 不再内嵌任何 OS 装包, 只做同步)。
+    当前口径: **装包可选、NTP 同步必选**。需要 installer 离线安装 chrony 时启用独立可选模块
+    `chrony_pkgs`(`CHRONY_PKGS_ENABLED=true` / `--steps chrony_pkgs`), 它只从
+    `offline-files/os/packages/chrony/` 装包且先于 NTP 执行; 首 master 缺 chrony 时
+    `k8s_ntp` 硬失败并提示启用该模块/由 OS 镜像预装; 客户端缺 chrony 回退 `systemd-timesyncd`。
   - `clock_offset` **优先 chrony 自身口径**: `System time` + `Leap status=Normal` + `^*` 源 `Reach>=1`;
     不可用时才回退 SSH `date`, 并用两个采样的中点做 RTT 补偿; 权威自身无上游时直接返回 0,
     不再 SSH 自测吃 0.2-0.6s 噪声。同时区分 `chrony 未安装` 与 `chrony 已安装但未选中源/Reach=0`。
@@ -1703,6 +1706,50 @@ sudo ./deploy-cluster.sh --steps k8s_passwordless   # 修正密码后先单跑�
 bash deployments/scripts/tools/tests/test-cephfs-mount.sh   # ①b 计划不含 cephfs_mount; ②b/②c 不预检/不发 SSH
 # 手工核对计划(Ceph 全关应看不到 ceph/ceph_csi/cephfs_mount):
 CLUSTER_CONF=<ceph-off.conf> ./deployments/scripts/deploy-cluster.sh --list | grep 本次执行模块
+```
+
+### 8. 【2026-11-19】发布树 `kubespray/<ver>/binaries.tar.gz` 是目录 → `k8s_deploy` 预检报"未找到离线二进制文件"
+
+**症状:** 全量部署到 `k8s_deploy` 时预检失败:
+
+```
+>>> 预检集群 [cubestack-cluster]...
+[ERROR] 未找到离线二进制文件: /opt/cubestack-installer/deployments/offline-files/kubespray/v2.32.0
+```
+
+但目录里看起来"什么都有":
+
+```
+kubespray/v2.32.0/
+├── binaries.tar.gz/   # 实际是目录，kubelet/kubeadm 等都在里面
+├── images/
+└── tree.tar.gz/       # 实际是目录，里面是 kubespray/ 源码
+```
+
+**根因:** 发布打包把 `binaries.tar.gz` / `tree.tar.gz` 按"目录名"解出，而不是展开为
+`LOCAL_REPO_DIR` 顶层文件；`cubestack-offline.sh` 的 `cmd_check` 用
+`find "${LOCAL_REPO_DIR}" -maxdepth 1 -type f` 判断离线二进制，目录形态下结果为 0。
+`--verify-offline` quick 只做结构/覆盖率检查，所以前置门禁可能先通过，直到拆完旧集群才失败。
+
+**解法(已落地):**
+- `offline-sync.py` 的 `packages` 物化在 `_postprocess_packages` 中自动规范化:
+  `binaries.tar.gz/` → 版本目录顶层文件（安装必需）；
+  `tree.tar.gz/` **非安装必需**（部署用仓库/镜像内的源码树），保持原样，仅清 0 字节占位；
+  同时按需重写 `SHA256SUMS` / `SIZES` / `_SUCCESS`（内容未变的文件复用原 hash/size）。
+- 已有树就地修复（不重新下载）:
+  ```bash
+  python3 deployments/scripts/tools/offline/offline-sync.py normalize \
+    --local-root deployments/offline-files --yes
+  ```
+- 回归: `python3 -m unittest deployments/scripts/tools/tests/test_offline_sync_store.py -k Normalize -v`
+
+**验证:**
+```bash
+find deployments/offline-files/kubespray/v2.32.0 -maxdepth 1 -type f | head
+bash deployments/scripts/tools/offline/verify-offline-files.sh \
+  --root deployments/offline-files --level quick --no-color
+# k8s_deploy 预检(集群可不存在, ansible ping 只告警):
+bash deployments/kubespray/cubestack-offline.sh check cubestack-cluster
 ```
 
 ---
