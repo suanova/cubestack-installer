@@ -52,6 +52,7 @@ if [ "${#IPS[@]}" -eq 0 ]; then
     # 过期地址也收进来, .deb 会被分发/对账到旧机器。这里先建 NODES 的 hostname→IP 映射,
     # inventory 中与 NODES 冲突的地址一律跳过(不跳过则两条都会被 IP 去重逻辑保留)。
     declare -A _nodes_ip=()
+    _nodes_match_ips=""
     if [ -n "${_only}" ]; then
         for _line in "${NODES[@]:-}"; do
             [ -z "${_line}" ] && continue
@@ -59,16 +60,35 @@ if [ "${#IPS[@]}" -eq 0 ]; then
             [ -n "${NODE_IP}" ] || continue
             node_matches "${NODE_HOSTNAME}" || continue
             [ -n "${_nodes_ip[${NODE_HOSTNAME}]:-}" ] || _nodes_ip["${NODE_HOSTNAME}"]="${NODE_IP}"
+            case " ${_nodes_match_ips} " in
+                *" ${NODE_IP} "*) ;;
+                *) _nodes_match_ips="${_nodes_match_ips:+${_nodes_match_ips} }${NODE_IP}" ;;
+            esac
         done
     fi
     if [ -f "${_hosts}" ]; then
         while IFS=$'\t' read -r _hn _ip; do
             [ -n "${_ip}" ] || continue
             node_matches "${_hn}" || continue
-            if [ -n "${_only}" ] && [ -n "${_nodes_ip[${_hn}]:-}" ] \
-               && [ "${_nodes_ip[${_hn}]}" != "${_ip}" ]; then
-                warn "  跳过 inventory 过期地址: ${_hn} -> ${_ip}(NODES 现地址 ${_nodes_ip[${_hn}]}; hosts.yml 将在扩容流程中重建)"
-                continue
+            if [ -n "${_only}" ]; then
+                if [ -n "${_nodes_ip[${_hn}]:-}" ]; then
+                    if [ "${_nodes_ip[${_hn}]}" != "${_ip}" ]; then
+                        warn "  跳过 inventory 过期地址: ${_hn} -> ${_ip}(NODES 现地址 ${_nodes_ip[${_hn}]}; hosts.yml 将在扩容流程中重建)"
+                        continue
+                    fi
+                elif [ -n "${_nodes_match_ips}" ]; then
+                    # 该 inventory 主机名不在 NODES 中, 但 selector 在 NODES 里匹配到了别的地址:
+                    # 本行不是 NODES 指认的那台主机(如 --only w1 同时匹配 old-w1/new-w1),
+                    # 其 inventory 地址可能是过期机器的 —— 一律不以它为准。
+                    _foreign=0
+                    for _nip in ${_nodes_match_ips}; do
+                        [ "${_nip}" = "${_ip}" ] || { _foreign=1; break; }
+                    done
+                    if [ "${_foreign}" = "1" ]; then
+                        warn "  跳过 inventory 行: ${_hn} -> ${_ip}(selector 在 NODES 中匹配的地址为 ${_nodes_match_ips}; 只认 NODES)"
+                        continue
+                    fi
+                fi
             fi
             IPS+=("${_ip}")
         done < <(awk '
@@ -98,7 +118,7 @@ if [ "${#IPS[@]}" -eq 0 ]; then
         done
         unset _line _x _dup
     fi
-    unset _hn _ip _only _nodes_ip
+    unset _hn _ip _only _nodes_ip _nodes_match_ips _nip _foreign
 fi
 [ "${#IPS[@]}" -gt 0 ] || { err "没有目标节点(cluster.conf NODES 为空?)"; exit 1; }
 
@@ -430,14 +450,15 @@ _ir_conf=/etc/initramfs-tools/update-initramfs.conf
 _ir_bak=""
 # 恢复 initramfs 配置(正常收尾与 EXIT trap 共用): **只有拷回成功才删除备份** ——
 # 拷回失败时必须保留备份并提示人工路径, 否则节点会停在 update_initramfs=no 且没有任何
-# 可恢复的原配置(2026-11-19 CodeRabbit)。
+# 可恢复的原配置; 同时**返回非零**, 调用方不得把本次对账报告为成功(2026-11-19 CodeRabbit)。
 _ir_restore() {
     [ -n "${_ir_bak}" ] && [ -f "${_ir_bak}" ] || return 0
     if cp -a "${_ir_bak}" "${_ir_conf}"; then
         rm -f "${_ir_bak}"
-    else
-        echo "         ⚠ 恢复 ${_ir_conf} 失败; 备份保留在 ${_ir_bak} —— 请人工 cp 回该文件(节点当前仍是 update_initramfs=no)"
+        return 0
     fi
+    echo "         ⚠ 恢复 ${_ir_conf} 失败; 备份保留在 ${_ir_bak} —— 请人工 cp 回该文件(节点当前仍是 update_initramfs=no)"
+    return 1
 }
 if [ "${DRY}" = "0" ] && [ -f "${_ir_conf}" ] && ! grep -qE '^[[:space:]]*update_initramfs[[:space:]]*=[[:space:]]*no' "${_ir_conf}"; then
     _ir_bak="$(mktemp)"
@@ -513,9 +534,17 @@ if [ "${DRY}" = "0" ] && [ "${#_TO_DEBS[@]}" -gt 0 ]; then
 fi
 
 echo "   [4/4] 复核 apt 依赖图:"
-# 正常收尾恢复配置(失败会保留备份并提示; EXIT trap 也会兜底再试一次)
-_ir_restore || true
-if apt-get check >/dev/null 2>&1; then echo "         ✅ 健康"; exit 0; fi
+# 正常收尾恢复配置; 恢复失败必须让本节点对账**失败**(节点仍是 update_initramfs=no),
+# 不能因为 apt 依赖图健康就报告成功(EXIT trap 仍会兜底重试, 备份保留)。
+_ir_rc=0
+_ir_restore || _ir_rc=$?
+if apt-get check >/dev/null 2>&1; then
+    if [ "${_ir_rc}" -ne 0 ]; then
+        echo "         ❌ apt 依赖图健康, 但 initramfs 配置恢复失败(节点仍为 update_initramfs=no; 备份路径见上) —— 拒绝报告成功" >&2
+        exit 1
+    fi
+    echo "         ✅ 健康"; exit 0
+fi
 echo "         ❌ 仍不健康:"; apt-get check 2>&1 | sed -n '/E:/p' | head -4 | sed 's/^/            /'
 exit 1
 REMOTE_EOF

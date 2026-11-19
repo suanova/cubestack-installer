@@ -208,6 +208,8 @@ chk_not_contains "不再无过滤使用 all_node_ips" 'for ip in $(all_node_ips)
 # 2026-11-19 CodeRabbit: initramfs 配置恢复失败时必须保留备份并提示路径(不能 cp 失败仍 rm)
 chk_contains "reconcile 恢复失败保留备份" "备份保留在" "${TOOL}"
 chk_contains "reconcile 备份失败不做无备份修改" "不做无备份的修改" "${TOOL}"
+# 2026-11-19 CodeRabbit: 恢复失败必须返回非零, 不能因 apt 健康就报告对账成功
+chk_contains "reconcile 恢复失败让对账失败" "拒绝报告成功" "${TOOL}"
 
 echo "== ⑤ worker 装包: Breaks ↔ 同版本 cohort =="
 TOOL2="${REPO_ROOT}/deployments/scripts/tools/node/install-worker-packages.sh"
@@ -253,7 +255,16 @@ chk_contains "worker 探测失败重试" "包清单探测失败(第" "${TOOL2}"
 # (版本化 Provides 才满足带版本依赖; 已装/待装/离线候选三侧都要算提供者)
 chk_contains "worker 依赖解析虚拟提供者" "_dep_planned_prov_ok" "${TOOL2}"
 chk_contains "worker 探测采集已装 Provides" "prov|" "${TOOL2}"
-chk_contains "worker 虚拟依赖离线候选" "_dep_prov_deb" "${TOOL2}"
+# 2026-11-19 CodeRabbit: 虚拟提供者候选必须保留全部版本(精确约束 `(=2)` 可命中较低提供版本)
+chk_contains "worker 虚拟候选保留全部版本" "_dep_prov_cands" "${TOOL2}"
+chk_not_contains "worker 不再只保留最高提供版本" "_dep_prov_deb" "${TOOL2}"
+# 2026-11-19 CodeRabbit: 依赖判定必须用"计划选中版本"的 Provides; 已装 metadata 仅对不被替换的包有效
+chk_contains "worker 已装 Provides 排除计划替换包" "skip_planned" "${TOOL2}"
+chk_contains "worker 计划 Provides 用选中版本" "_need_prov" "${TOOL2}"
+chk_not_contains "worker 不再聚合所有归档 Provides" "_off_prov_by_pkg" "${TOOL2}"
+# 2026-11-19 CodeRabbit: 修复后不能仅因"包已装"丢弃计划中的升级(可能仍需满足触发包 Breaks)
+chk_contains "worker 修复后按版本决定是否保留升级" "保留本次升级" "${TOOL2}"
+chk_contains "worker 修复后已装>=计划才移除" ">= 计划" "${TOOL2}"
 # 2026-11-19 CodeRabbit: 依赖解析未收敛(振荡/轮次耗尽)不得带着残缺计划进入复制/安装
 chk_contains "worker 依赖振荡必须失败" "依赖解析出现振荡" "${TOOL2}"
 chk_contains "worker 依赖轮次耗尽必须失败" "依赖解析在 10 轮内未收敛" "${TOOL2}"
@@ -275,6 +286,20 @@ chk_contains "worker 修复成功路径仍报告跳过" "修复成功 ≠ 跳过
 # 2026-11-19 CodeRabbit: 同一 initramfs 备份/恢复缺陷(install payload 内联版)一并加固
 chk_contains "worker 恢复失败保留备份" "备份保留在" "${TOOL2}"
 chk_contains "worker 备份失败不做无备份修改" "不做无备份的修改" "${TOOL2}"
+# 2026-11-19 CodeRabbit: initramfs 配置恢复失败必须让载荷/调用方非零(dpkg 失败码优先保留)
+chk_contains "worker 恢复失败返回非零" "_restore_rc" "${TOOL2}"
+chk_contains "worker 调用方区分恢复失败" "dpkg -i 已完成, 但恢复" "${TOOL2}"
+# 2026-11-19 CodeRabbit: 非 fresh 节点(joined worker)的 repair/收尾 apt -f 不得移除运行时包
+chk_contains "worker repair 非 fresh 禁止 apt 移除" "--no-remove" "${TOOL2}"
+chk_contains "worker repair 注入 fresh 声明" 'FRESH_NODE=${FRESH_NODE}' "${TOOL2}"
+chk_contains "worker repair 跳过运行时破损清理" "跳过移除运行时包" "${TOOL2}"
+chk_contains "worker repair 破损状态容错尾随空格" '[[:space:]]*\|' "${TOOL2}"
+# 2026-11-19 CodeRabbit: kubelet 状态未知(空输出/systemctl 无响应)不得当作"未运行"而 purge
+chk_contains "worker purge 要求已知安全状态" "_kstate" "${TOOL2}"
+chk_contains "worker 状态未知跳过并报告" "无法确定 kubelet 状态" "${TOOL2}"
+# 2026-11-19 CodeRabbit: 初始 cohort 创建早于 fixpoint 助手定义/状态初始化, 不得依赖它们
+chk_contains "worker 初始 cohort 独立于 fixpoint 状态" "初始 cohort 创建发生在任何裁剪/fixpoint 之前" "${TOOL2}"
+chk "worker 初始 cohort 不调用后定义的助手" "0" "$(grep -c '_plan_blocked "${p}"' "${TOOL2}" 2>/dev/null || true)"
 chk_contains "worker 复制双失败即退出" "离线包复制失败(rsync/scp 均失败)" "${TOOL2}"
 chk_contains "worker 复制后核对大小" "离线包复制不完整" "${TOOL2}"
 chk_contains "worker 安装前校验暂存集" "未成功复制到" "${TOOL2}"
@@ -345,6 +370,10 @@ all:
           ansible_host: 10.0.0.9
         w2:
           ansible_host: 10.0.0.2
+        old-w1:
+          ansible_host: 10.0.0.19
+        new-w1:
+          ansible_host: 10.0.0.1
 EOF
 cat > "${TMP}/cluster-stale.conf" <<EOF
 NODES=("worker,w1,10.0.0.1,root,-" "worker,w2,10.0.0.2,root,-")
@@ -375,6 +404,9 @@ else
     echo "  FAIL inventory 旧地址: 未处理 10.0.0.1"; fail=1
 fi
 chk_contains "inventory 旧地址: 明确告警" "跳过 inventory 过期地址" "${TMP}/out-stale"
+# 2026-11-19 CodeRabbit: 短 selector 同时匹配 old-w1/new-w1 时, 只认 NODES 指认的地址
+chk "短 selector: 未触碰 old-w1 旧地址 10.0.0.19" "0" "$(grep -c '10.0.0.19' "${TMP}/ssh-stale.log" 2>/dev/null || true)"
+chk_contains "短 selector: 非 NODES 匹配行被跳过" "跳过 inventory 行: old-w1" "${TMP}/out-stale"
 unset _rc
 rm -rf "${_INV_TEST_DIR}"
 

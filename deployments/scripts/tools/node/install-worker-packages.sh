@@ -118,11 +118,16 @@ _deb_ver_ok() {
 
 # 一组 Provides 提供者(记录行: 包名<TAB>提供版本)是否满足依赖备选。
 # dpkg 语义: 无版本 Provides 只满足无版本依赖; 带版本依赖要求版本化 Provides 且版本满足。
-_dep_prov_ok() { # <提供者记录> <op> <要求版本>
-    local vals="$1" op="$2" req="$3" pkg ver
+# skip_planned=1 时跳过"计划将替换/升级"的提供者: 它们的**已装** metadata 在安装后不再成立,
+# 必须改由 _dep_planned_prov_ok 用选中归档的 Provides 判定。
+_dep_prov_ok() { # <提供者记录> <op> <要求版本> [skip_planned=0|1]
+    local vals="$1" op="$2" req="$3" skip="${4:-0}" pkg ver
     [ -n "${vals}" ] || return 1
     while IFS=$'\t' read -r pkg ver; do
         [ -n "${pkg}" ] || continue
+        if [ "${skip}" = "1" ] && [ -n "${NEED_SET[${pkg}]:-}" ]; then
+            continue
+        fi
         if [ -z "${op}" ]; then
             return 0
         fi
@@ -132,20 +137,21 @@ _dep_prov_ok() { # <提供者记录> <op> <要求版本>
     return 1
 }
 
-# 本次待装集合里有满足约束的 Provides 吗(数据: _off_prov_by_pkg[包名]="虚拟名<TAB>版本";
-# 用 NEED_SET 判定"在计划内", 与具体包名检查同一口径, 且对同轮新加入的候选同样生效)
+# 本次待装集合里**选中版本**的 Provides 是否满足约束(数据: _need_prov[包名]="虚拟名<TAB>版本",
+# 每轮按该包待装 deb 中版本最高者构建; 候选加入时同步更新)。
+# ⚠ 不能用"该包所有归档"的 Provides: 可能匹配到不会被安装的版本(升级后能力可能被移除)。
 _dep_planned_prov_ok() { # <虚拟名> <op> <要求版本>
     local virt="$1" op="$2" req="$3" p _vn _vv
     [ "${#NEED_SET[@]}" -gt 0 ] || return 1
     for p in "${!NEED_SET[@]}"; do
-        [ -n "${_off_prov_by_pkg[$p]:-}" ] || continue
+        [ -n "${_need_prov[$p]:-}" ] || continue
         while IFS=$'\t' read -r _vn _vv; do
             [ "${_vn}" = "${virt}" ] || continue
             if [ -z "${op}" ]; then
                 return 0
             fi
             [ -n "${_vv}" ] && _deb_ver_ok "${_vv}" "${op}" "${req}" && return 0
-        done <<< "${_off_prov_by_pkg[$p]}"
+        done <<< "${_need_prov[$p]}"
     done
     return 1
 }
@@ -156,17 +162,32 @@ _dep_planned_prov_ok() { # <虚拟名> <op> <要求版本>
 # ⚠ 只有**调用方显式声明 fresh 节点**(--fresh-node / CUBESTACK_FRESH_NODE=1)才进入:
 #   kubelet inactive 不能作为判据 —— 维护中的已加入 worker 也会停 kubelet, 误 purge
 #   会毁掉节点运行时与已 join 的状态(2026-11-19 CodeRabbit).
+#   显式声明后还要求 kubelet 状态**可确认安全**(inactive/单元不存在)才 purge;
+#   systemctl 无响应/输出为空等未知状态一律跳过并报告(2026-11-19 CodeRabbit).
 if [ "${FRESH_NODE}" = "1" ]; then
     say "检查 fresh 节点系统容器包(containerd/containerd.io/runc)..."
     PRE_PURGE_LOG="$(mktemp)"
     PRE_PURGE_PAYLOAD="$(cat <<'PRE_PURGE'
 set -o pipefail
-if [ "$(systemctl is-active kubelet 2>/dev/null)" != "active" ]; then
-    echo "--- [pre] 已声明 fresh 且 kubelet 未运行: 清理系统容器包(containerd/containerd.io/runc) ---"
-    apt-get purge -y containerd containerd.io runc 2>&1 | tail -5
-else
-    echo "--- [pre] 已声明 fresh 但 kubelet active: 跳过系统容器包清理 ---"
-fi
+# ⚠ 只有**可确认的安全状态**才允许 purge:
+#   inactive / unknown(单元不存在, fresh 节点正常形态) → 可清理;
+#   active/activating/deactivating/reloading/failed 或**状态无法判定**(systemctl 不可用、
+#   service manager 无响应导致输出为空) → 一律跳过。空输出绝不能当作"kubelet 未运行",
+#   否则可能把运行中的 joined worker 运行时清掉(2026-11-19 CodeRabbit)。
+_kstate="$(systemctl is-active kubelet 2>/dev/null || true)"
+case "${_kstate}" in
+    inactive|unknown)
+        echo "--- [pre] 已声明 fresh 且 kubelet 状态=${_kstate}: 清理系统容器包(containerd/containerd.io/runc) ---"
+        apt-get purge -y containerd containerd.io runc 2>&1 | tail -5
+        ;;
+    *)
+        if [ -z "${_kstate}" ]; then
+            echo "--- [pre] ⚠ 无法确定 kubelet 状态(systemctl 不可用/无响应): 跳过系统容器包清理 ---" >&2
+            exit 1
+        fi
+        echo "--- [pre] 已声明 fresh 但 kubelet 状态=${_kstate}: 跳过系统容器包清理 ---"
+        ;;
+esac
 PRE_PURGE
 )"
     if ! ${SSH_SUDO} ssh ${SSH_OPTS} -o BatchMode=yes -o ConnectTimeout=15 "${USER}@${IP}" \
@@ -412,10 +433,12 @@ if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1 && comman
                     continue
                 fi
             fi
-            if [ -z "${NEED_SET[${p}]:-}" ] && ! _plan_blocked "${p}"; then
+            # 初始 cohort 创建发生在任何裁剪/fixpoint 之前, 此时不存在"已禁止回加"的包;
+            # 这里不能调用 _plan_blocked(它定义在后方)也不能碰 _plan_epoch(尚未初始化,
+            # set -u 下会直接中止)。blocked 语义只用于后续 fixpoint 的依赖解析。
+            if [ -z "${NEED_SET[${p}]:-}" ]; then
                 vlog "  [${p}] 同版本 cohort 升级(版本 ${v}) → 加入本次安装"
                 NEED_DEBS+=("$f"); NEED_PKGS+=("${p}"); NEED_SET["${p}"]=1
-                _plan_epoch=$((_plan_epoch + 1))
             fi
         done
     fi
@@ -456,17 +479,18 @@ _prune_plan_once() {
 # ② 依赖预检(fixpoint 迭代剔除): Depends 逗号分组(每组内 | 为备选), 每组至少一个备选
 #    在(远端已装 ∪ 剩余待装)内且**版本约束满足** → 满足; 否则该 deb 剔除并告警。
 #    备选按"具体包名"或"Provides 虚拟名"解析: 带版本依赖只认版本化 Provides 且版本满足
-#    (无版本 Provides 不满足带版本依赖, dpkg 语义); 已装包与离线集都要作为提供者。
+#    (无版本 Provides 不满足带版本依赖, dpkg 语义); 已装提供者**仅对计划不替换的包**有效,
+#    计划替换/升级的包按**选中归档**的 Provides 判定(升级可能移除旧版本提供的能力)。
 #    已装版本不满足但离线集有满足约束的升级版 → 选择升级版加入待装集, 下一轮继续校验。
 #    最多迭代 10 轮; 出现重复计划(振荡)立即失败; 10 轮仍未收敛也必须失败 ——
 #    绝不能带着未稳定的计划进入复制/安装(例: A 要求 B>=2, 离线 B=2 依赖缺失,
 #    每轮"加 B→删 B"交替, 旧实现会在第 10 轮留下 A 而不带 B)。
 if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1; then
     # 离线集内每个包的最高版本(用于选择满足 Depends 的升级版);
-    # 同时登记 Provides(虚拟包): _off_prov_by_pkg[包名] 供"本次待装"侧判定,
-    # _dep_prov_deb/_dep_prov_ver 记录每个虚拟名的版本化提供者(供离线候选选包).
-    declare -A _dep_deb_by_pkg=() _dep_ver_by_pkg=() _off_prov_by_pkg=() \
-               _dep_prov_deb=() _dep_prov_ver=() _dep_prov_pkg=() _dep_prov_pv=()
+    # 同时登记 Provides(虚拟包): _deb_prov_by_path[deb] 记录该**具体归档**的全部 Provides
+    # (供"计划选中版本"精确判定), _dep_prov_cands 保留**每个虚拟名的全部版本化提供者**
+    # (不能只留提供版本最高的一个: 依赖可能是精确版本 `(= 2)`, 更高的提供版本反而不满足)。
+    declare -A _dep_deb_by_pkg=() _dep_ver_by_pkg=() _dep_prov_cands=() _deb_prov_by_path=()
     for f in "${DEBS[@]}"; do
         p="$(deb_pkg_name "$f")"; [ -n "$p" ] || continue
         v="$(dpkg-deb -f "$f" Version 2>/dev/null || true)"; [ -n "$v" ] || continue
@@ -489,14 +513,10 @@ if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1; then
             esac
             _pn="$(printf '%s' "${_pn}" | tr -d '[:space:]')"
             [ -n "${_pn}" ] || continue
-            _off_prov_by_pkg["$p"]="${_off_prov_by_pkg[$p]:-}${_pn}"$'\t'"${_pv}"$'\n'
+            _deb_prov_by_path["$f"]="${_deb_prov_by_path[$f]:-}${_pn}"$'\t'"${_pv}"$'\n'
             # 无版本 Provides 不满足带版本依赖(dpkg 语义) → 候选只登记版本化 Provides
             [ -n "${_pv}" ] || continue
-            if [ -z "${_dep_prov_deb[${_pn}]:-}" ] \
-               || dpkg --compare-versions "${_pv}" gt "${_dep_prov_ver[${_pn}]}"; then
-                _dep_prov_deb["${_pn}"]="$f"; _dep_prov_ver["${_pn}"]="${_pv}"
-                _dep_prov_pkg["${_pn}"]="$p"; _dep_prov_pv["${_pn}"]="$v"
-            fi
+            _dep_prov_cands["${_pn}"]="${_dep_prov_cands[${_pn}]:-}${f}"$'\t'"${_pv}"$'\t'"${p}"$'\t'"${v}"$'\n'
         done
     done
     unset _provraw _pvents _pe _pn _pv
@@ -506,14 +526,16 @@ if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1; then
     while [ "${_dep_round}" -lt 10 ]; do
         _dep_round=$((_dep_round + 1))
         _kept_debs=(); _kept_pkgs=(); _dropped=0; _added=0
-        declare -A _need_ver=()
-        # 本轮待装集内各包的最高版本
+        declare -A _need_ver=() _need_prov=()
+        # 本轮待装集内各包的最高版本 + 该**版本对应归档**的 Provides
+        # (计划选中版本可能不再提供旧版本的能力 → 依赖判定必须用选中版本的 metadata)
         for i in "${!NEED_DEBS[@]}"; do
             p="${NEED_PKGS[$i]}"
             v="$(dpkg-deb -f "${NEED_DEBS[$i]}" Version 2>/dev/null || true)"
             if [ -n "$v" ] && { [ -z "${_need_ver[$p]:-}" ] \
                || dpkg --compare-versions "$v" gt "${_need_ver[$p]}"; }; then
                 _need_ver["$p"]="$v"
+                _need_prov["$p"]="${_deb_prov_by_path[${NEED_DEBS[$i]}]:-}"
             fi
         done
         for i in "${!NEED_DEBS[@]}"; do
@@ -541,7 +563,7 @@ if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1; then
                         if [ -z "${_op}" ] || [ -z "${_dv}" ]; then
                             # 无版本约束: 已装/本次待装(含升级)或任一 Provides 提供者即可
                             if [ -n "${REMOTE_VER[${_dn}]:-}" ] || [ -n "${NEED_SET[${_dn}]:-}" ] \
-                               || _dep_prov_ok "${REMOTE_PROV[${_dn}]:-}" "" "" \
+                               || _dep_prov_ok "${REMOTE_PROV[${_dn}]:-}" "" "" 1 \
                                || _dep_planned_prov_ok "${_dn}" "" ""; then
                                 _grp_ok=1; break
                             fi
@@ -558,7 +580,7 @@ if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1; then
                         fi
                         # 虚拟包(Provides): 只有版本化 Provides 且版本满足才算数
                         # (无版本 Provides 不满足带版本依赖, dpkg 语义; _dep_prov_ok 已强制)
-                        if _dep_prov_ok "${REMOTE_PROV[${_dn}]:-}" "${_op}" "${_dv}" \
+                        if _dep_prov_ok "${REMOTE_PROV[${_dn}]:-}" "${_op}" "${_dv}" 1 \
                            || _dep_planned_prov_ok "${_dn}" "${_op}" "${_dv}"; then
                             _grp_ok=1; break
                         fi
@@ -583,41 +605,50 @@ if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1; then
                                     _kept_pkgs+=("${_dn}")
                                     NEED_SET["${_dn}"]=1
                                     _need_ver["${_dn}"]="${_cand_v}"
+                                    _need_prov["${_dn}"]="${_deb_prov_by_path[${_dep_deb_by_pkg[${_dn}]}]:-}"
                                     _added=1
                                     _grp_ok=1; break
                                 fi
                             fi
                         fi
-                        # 虚拟依赖的离线候选: 版本化 Provides 满足约束的提供者 deb
-                        # (已装提供者未满足 → 只接受"未装"或"提供者包可升级"的情形;
-                        #  被裁剪阶段移除的提供者包不得重新加回)
-                        _pcand_deb="${_dep_prov_deb[${_dn}]:-}"
-                        _ppkg="${_dep_prov_pkg[${_dn}]:-}"
-                        _ppv="${_dep_prov_pv[${_dn}]:-}"
-                        if [ -n "${_pcand_deb}" ] && ! _plan_blocked "${_ppkg}" \
-                           && _deb_ver_ok "${_dep_prov_ver[${_dn}]:-}" "${_op}" "${_dv}"; then
-                            _upgrade_ok=1
-                            if [ -n "${NEED_SET[${_ppkg}]:-}" ]; then
-                                # 已在计划中却没通过上面的 planned 检查 → 不能靠重复加入绕过
-                                _upgrade_ok=0
-                            elif [ -n "${REMOTE_VER[${_ppkg}]:-}" ] \
-                               && ! dpkg --compare-versions "${_ppv}" gt "${REMOTE_VER[${_ppkg}]}"; then
-                                _upgrade_ok=0   # 已装且不是升级 → 不做降级/同版重装
-                            fi
-                            if [ "${_upgrade_ok}" = "1" ]; then
+                        # 虚拟依赖的离线候选: 每个虚拟名保留全部版本化 Provides, 逐个应用
+                        # "版本约束 + 升级(不降级/不重装同版) + 冲突"检查, 在通过者中选
+                        # **提供版本最高**的一个(精确约束 `(= 2)` 也能命中较低提供版本)。
+                        _sel_deb=""; _sel_pv=""; _sel_pkg=""; _sel_pvver=""
+                        if [ -n "${_dep_prov_cands[${_dn}]:-}" ]; then
+                            while IFS=$'\t' read -r _pcand_deb _pcand_pv _ppkg _ppv; do
+                                [ -n "${_pcand_deb}" ] || continue
+                                if _plan_blocked "${_ppkg}"; then continue; fi
+                                if ! _deb_ver_ok "${_pcand_pv}" "${_op}" "${_dv}"; then continue; fi
+                                if [ -n "${NEED_SET[${_ppkg}]:-}" ]; then
+                                    # 已在计划中却没通过上面的 planned 检查 → 不能靠重复加入绕过
+                                    continue
+                                fi
+                                if [ -n "${REMOTE_VER[${_ppkg}]:-}" ] \
+                                   && ! dpkg --compare-versions "${_ppv}" gt "${REMOTE_VER[${_ppkg}]}"; then
+                                    continue   # 已装且不是升级 → 不做降级/同版重装
+                                fi
                                 _up_conflict=0
                                 for _ucp in $(pkg_conflict_providers "${_ppkg}"); do
                                     [ -n "${REMOTE_VER[${_ucp}]:-}" ] && { _up_conflict=1; break; }
                                     [ -n "${NEED_SET[${_ucp}]:-}" ] && { _up_conflict=1; break; }
                                 done
-                                if [ "${_up_conflict}" = "0" ]; then
-                                    _kept_debs+=("${_pcand_deb}")
-                                    _kept_pkgs+=("${_ppkg}")
-                                    NEED_SET["${_ppkg}"]=1
-                                    _added=1
-                                    _grp_ok=1; break
+                                [ "${_up_conflict}" = "0" ] || continue
+                                if [ -z "${_sel_deb}" ] \
+                                   || dpkg --compare-versions "${_pcand_pv}" gt "${_sel_pv}"; then
+                                    _sel_deb="${_pcand_deb}"; _sel_pv="${_pcand_pv}"
+                                    _sel_pkg="${_ppkg}"; _sel_pvver="${_ppv}"
                                 fi
-                            fi
+                            done <<< "${_dep_prov_cands[${_dn}]}"
+                        fi
+                        if [ -n "${_sel_deb}" ]; then
+                            _kept_debs+=("${_sel_deb}")
+                            _kept_pkgs+=("${_sel_pkg}")
+                            NEED_SET["${_sel_pkg}"]=1
+                            _need_ver["${_sel_pkg}"]="${_sel_pvver}"
+                            _need_prov["${_sel_pkg}"]="${_deb_prov_by_path[${_sel_deb}]:-}"
+                            _added=1
+                            _grp_ok=1; break
                         fi
                     done
                     if [ "${_grp_ok}" != "1" ]; then dep_ok=0; dep_miss="${_grp}"; break; fi
@@ -671,9 +702,9 @@ if [ "${#NEED_DEBS[@]}" -gt 0 ] && command -v dpkg-deb >/dev/null 2>&1; then
     for p in "${!_best_deb[@]}"; do
         NEED_DEBS+=("${_best_deb[$p]}"); NEED_PKGS+=("$p"); NEED_SET["$p"]=1
     done
-    unset _dep_deb_by_pkg _dep_ver_by_pkg _off_prov_by_pkg _dep_prov_deb _dep_prov_ver \
-          _dep_prov_pkg _dep_prov_pv _pcand_deb _ppkg _ppv _kept_debs _kept_pkgs _need_ver \
-          _best_deb _best_ver _dep_stable _dep_seen_sigs _sig
+    unset _dep_deb_by_pkg _dep_ver_by_pkg _deb_prov_by_path _dep_prov_cands \
+          _pcand_deb _pcand_pv _ppkg _ppv _sel_deb _sel_pv _sel_pkg _sel_pvver \
+          _kept_debs _kept_pkgs _need_ver _need_prov _best_deb _best_ver _dep_stable _dep_seen_sigs _sig
 fi
 
 # ── 时间提供者互斥(chrony / systemd-timesyncd / openntpd / ntp 只允许一个) ──
@@ -871,24 +902,40 @@ fi
 
 # ── 远端修复段(幂等): 修半装 + apt 依赖修复 ──
 REMOTE_FIX="$(mktemp)"
-cat > "${REMOTE_FIX}" <<'FIX_EOF'
+{
+    echo "FRESH_NODE=${FRESH_NODE}"
+    cat <<'FIX_EOF'
 #!/bin/bash
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+# ⚠ 未声明 fresh 的节点(joined worker): 修复只允许"装/配置", 不允许移除任何包 ——
+#   apt-get install -f 为解依赖可能摘掉 containerd/containerd.io/runc(运行时),
+#   会把维护中的已加入 worker 毁掉。fresh 模式才放开移除。
+_apt_keep=""
+[ "${FRESH_NODE:-0}" = "1" ] || _apt_keep="--no-remove"
 echo "--- [fix] dpkg --configure -a ---"
 dpkg --configure -a 2>&1 | tail -5 || true
 echo "--- [fix] apt-get install -f -y ---"
-apt-get install -f -y --no-install-recommends 2>&1 | tail -8 || true
+apt-get install -f -y --no-install-recommends ${_apt_keep} 2>&1 | tail -8 || true
 # 半装包清理(apt -f 失败兜底): 破损包 force 移除, 再修
-BROKEN="$(dpkg-query -W -f='${db:Status-Abbrev}|${Package}\n' 2>/dev/null | grep -E '^(hi|iU|iF|iH)\|' | cut -d'|' -f2 || true)"
+BROKEN="$(dpkg-query -W -f='${db:Status-Abbrev}|${Package}\n' 2>/dev/null | grep -E '^(hi|iU|iF|iH)[[:space:]]*\|' | cut -d'|' -f2 || true)"
 if [ -n "${BROKEN}" ]; then
     echo "--- [fix] 破损包清理: ${BROKEN} ---"
     for bp in ${BROKEN}; do
+        # 未声明 fresh: 容器运行时包只跳过移除(joined worker 的 containerd/runc 不能动)
+        if [ "${FRESH_NODE:-0}" != "1" ]; then
+            case "${bp}" in
+                containerd|containerd.io|runc)
+                    echo "[fix] 跳过移除运行时包 ${bp}(未声明 fresh 节点; 保持已加入 worker 的运行时)"
+                    continue ;;
+            esac
+        fi
         dpkg --remove --force-remove-reinstreq --force-depends "${bp}" 2>&1 | tail -2 || true
     done
-    apt-get install -f -y --no-install-recommends 2>&1 | tail -5 || true
+    apt-get install -f -y --no-install-recommends ${_apt_keep} 2>&1 | tail -5 || true
 fi
 dpkg --audit 2>&1 | tail -5 || true
 FIX_EOF
+} > "${REMOTE_FIX}"
 
 say "执行远端修复(半装/apt 依赖)..."
 REPAIR_RC=0
@@ -910,20 +957,27 @@ if ! _probe_remote; then
     exit 1
 fi
 _parse_probe
-# 修复后已正常安装(ii)的待装包不再需要安装(与初始"已装即跳过"同口径)
+# 修复后已正常安装的待装包: 只有"已装 >= 计划版本"才说明修复已覆盖该包(不再需要安装);
+# 已装更旧时**必须保留计划里的升级** —— 典型是 cohort 升级 b=2 用来满足触发包的
+# `Breaks: b (<< 2)`: 修复若没动 b=1, 这里误删 b=2 会让随后的 Breaks 复核把触发包也剔掉。
 _kept_debs=(); _kept_pkgs=()
 for i in "${!NEED_DEBS[@]}"; do
     p="${NEED_PKGS[$i]}"
+    _pin_ver="$(dpkg-deb -f "${NEED_DEBS[$i]}" Version 2>/dev/null || true)"
     if [ -n "${REMOTE_VER[${p}]:-}" ]; then
-        vlog "  [${p}] 修复后已正常安装 ${REMOTE_VER[${p}]}, 从本次安装计划移除"
-        continue
+        if [ -n "${_pin_ver}" ] \
+           && dpkg --compare-versions "${REMOTE_VER[${p}]}" ge "${_pin_ver}"; then
+            vlog "  [${p}] 修复后已正常安装 ${REMOTE_VER[${p}]}(>= 计划 ${_pin_ver}), 从本次安装计划移除"
+            continue
+        fi
+        vlog "  [${p}] 修复后已装 ${REMOTE_VER[${p}]}(计划 ${_pin_ver:-未知}), 保留本次升级"
     fi
     _kept_debs+=("${NEED_DEBS[$i]}"); _kept_pkgs+=("${p}")
 done
 NEED_DEBS=("${_kept_debs[@]}"); NEED_PKGS=("${_kept_pkgs[@]}")
 NEED_SET=()
 for _kp in "${NEED_PKGS[@]}"; do NEED_SET["${_kp}"]=1; done
-unset _kept_debs _kept_pkgs _kp i p
+unset _kept_debs _kept_pkgs _kp i p _pin_ver
 # 依赖 + Breaks 按修复后状态整体重校验(PLAN_BLOCKED 跨调用保留, 不会回加已裁剪包)
 _plan_fixpoint
 
@@ -1023,34 +1077,55 @@ if [ "${n_rbd:-0}" -gt 0 ]; then
 fi
 dpkg -i /tmp/packages/*.deb </dev/null 2>&1 | tail -20
 _rc="${PIPESTATUS[0]}"
-# 只有拷回成功才删除备份; 失败保留备份并提示路径(节点仍停在 update_initramfs=no)
+# 只有拷回成功才删除备份; 失败保留备份并提示路径(节点仍停在 update_initramfs=no)。
+# ⚠ 恢复失败必须让载荷**非零退出**(专用码 3): 否则 dpkg 成功时调用方会误报"安装完成",
+#   而节点配置实际未恢复; dpkg 本身失败时保留其原始退出码(优先暴露安装失败)。
+_restore_rc=0
 if [ -n "${_bak}" ] && [ -f "${_bak}" ]; then
     if cp -a "${_bak}" "${_ir}"; then
         rm -f "${_bak}"
     else
-        echo "[install] ⚠ 恢复 ${_ir} 失败; 备份保留在 ${_bak} —— 请人工 cp 回该文件(当前仍是 update_initramfs=no)"
+        _restore_rc=3
+        echo "[install] ⚠ 恢复 ${_ir} 失败; 备份保留在 ${_bak} —— 请人工 cp 回该文件(当前仍是 update_initramfs=no)" >&2
     fi
 fi
-exit "${_rc}"
+if [ "${_rc}" -ne 0 ]; then
+    exit "${_rc}"
+fi
+exit "${_restore_rc}"
 PAYLOAD
 )"
 say "安装中 (dpkg -i, 失败将中止; 期间禁用 initramfs 重建) ..."
 INSTALL_LOG="$(mktemp)"
-if ! ${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" "sudo bash -s" <<< "${INSTALL_PAYLOAD}" \
-    > "${INSTALL_LOG}" 2>&1; then
-    err "dpkg -i 安装失败(节点 ${IP}), 日志:"
-    cat "${INSTALL_LOG}" >&2 || true
-    err "  可能原因: 离线包版本与节点系统不匹配 / 依赖缺失"
-    err "  修复动作(apt-get install -f / 半装清理)已执行过; 重跑本脚本会先清理半装再重试"
+_install_rc=0
+${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" "sudo bash -s" <<< "${INSTALL_PAYLOAD}" \
+    > "${INSTALL_LOG}" 2>&1 || _install_rc=$?
+if [ "${_install_rc}" -ne 0 ]; then
+    if [ "${_install_rc}" = "3" ]; then
+        # 载荷专用码 3 = dpkg 已完成但 initramfs 配置恢复失败(节点仍是 update_initramfs=no)
+        err "dpkg -i 已完成, 但恢复 /etc/initramfs-tools/update-initramfs.conf 失败(节点仍是 update_initramfs=no):"
+        cat "${INSTALL_LOG}" >&2 || true
+        err "  备份路径见上方日志; 请人工 cp 回该文件后重跑(未恢复前后续 initramfs 不会重建)"
+    else
+        err "dpkg -i 安装失败(节点 ${IP}), 日志:"
+        cat "${INSTALL_LOG}" >&2 || true
+        err "  可能原因: 离线包版本与节点系统不匹配 / 依赖缺失"
+        err "  修复动作(apt-get install -f / 半装清理)已执行过; 重跑本脚本会先清理半装再重试"
+    fi
     rm -f "${INSTALL_LOG}"
     exit 1
 fi
 cat "${INSTALL_LOG}" || true
 rm -f "${INSTALL_LOG}"
+unset _install_rc
 
 # ── 安装后: apt -f 收尾修复 + 清理临时包目录 ──
+# 收尾的 apt-get install -f 同样不能在未声明 fresh 的节点移除运行时包(与修复段同一口径)
+_apt_keep=""
+[ "${FRESH_NODE}" = "1" ] || _apt_keep="--no-remove"
 ${SSH_SUDO} ssh ${SSH_OPTS} "${USER}@${IP}" \
-    "sudo apt-get install -f -y --no-install-recommends 2>&1 | tail -5; sudo rm -rf /tmp/packages" 2>/dev/null || true
+    "sudo apt-get install -f -y --no-install-recommends ${_apt_keep} 2>&1 | tail -5; sudo rm -rf /tmp/packages" 2>/dev/null || true
+unset _apt_keep
 
 _skipped="${DEP_SKIPPED[*]:-} ${BREAKS_SKIPPED[*]:-}"
 if [ -n "${_skipped// /}" ]; then

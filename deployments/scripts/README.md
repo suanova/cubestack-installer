@@ -578,7 +578,11 @@ CHRONY_PKGS_ENABLED="true"   # chrony 专用安装集(os/packages/chrony; tools/
 `.deb` 来源为 `offline-files/os/packages/*.deb`（需自行预置）；开启后在 kubespray 之前执行。
 `k8s_workerbm` 的 fresh 节点清理（系统 `containerd`/`containerd.io`/`runc`）默认不做，需显式
 `CUBESTACK_FRESH_NODE=1`（或直接调用工具时 `--fresh-node`）；kubelet 未运行只是额外条件，
-**不是** fresh 判据——维护中的已加入 worker 不会被误 purge。
+**不是** fresh 判据——维护中的已加入 worker 不会被误 purge。同时要求 kubelet 状态**可确认安全**
+（`inactive` 或单元不存在）；`systemctl` 无法给出状态（空输出/无响应）时跳过清理并报告。
+未声明 fresh 时，远端修复段与
+收尾的 `apt-get install -f` 都以 `--no-remove` 运行，破损包清理也会跳过
+`containerd`/`containerd.io`/`runc`——修复流程同样不会移除容器运行时包。
 `chrony_pkgs` 只从 `offline-files/os/packages/chrony/` 装包（不配置 NTP），并先于必选的
 `k8s_ntp` 同步执行；默认关闭时 `k8s_ntp` 假设 chrony 已由 OS 镜像预装。
 
