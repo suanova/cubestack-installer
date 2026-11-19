@@ -666,6 +666,8 @@ volumeBindingMode: Immediate"
 # ════════════════════════════════════════════════════════════════════
 _ext_smoke() {
     local _rbd_sc="$1" _cephfs_sc="$2" _cephfs_on="$3"
+    # 预加载的 mirror 名 + 钉死 tag(版本树 tar 只有 mirror tag; 上游 busybox:latest 离线拉不到)
+    _SMOKE_IMAGE="$(mirror_image_ref "docker.io/library/busybox:${BUSYBOX_TAG:-1.38.0}")"
     say "  外部 Ceph provision 冒烟测试(RBD 1Gi scratch PVC + 真实写读, 最长 180s)..."
     SMOKE_YAML="apiVersion: v1
 kind: PersistentVolumeClaim
@@ -696,7 +698,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: writer
-      image: docker.io/library/busybox:latest
+      image: ${_SMOKE_IMAGE}
       imagePullPolicy: IfNotPresent
       command: [\"/bin/sh\", \"-c\"]
       args: [\"echo cubestack-smoke-ok > /mnt/probe.txt && sync && cat /mnt/probe.txt && rm /mnt/probe.txt\"]
@@ -771,7 +773,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: writer
-      image: docker.io/library/busybox:latest
+      image: ${_SMOKE_IMAGE}
       imagePullPolicy: IfNotPresent
       command: [\"/bin/sh\", \"-c\"]
       args: [\"echo cubestack-cephfs-smoke-ok > /mnt/probe.txt && sync && cat /mnt/probe.txt && rm /mnt/probe.txt\"]

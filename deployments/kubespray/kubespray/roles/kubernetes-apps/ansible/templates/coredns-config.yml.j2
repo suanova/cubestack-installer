@@ -68,7 +68,12 @@ data:
 {% endif %}
         }
         prometheus :9153
+{% set _upstream_dns = (upstream_dns_servers | default([])) | reject('match', '^127\.') | reject('equalto', nodelocaldns_ip | default('169.254.25.10')) | list %}
+{% if _upstream_dns | length > 0 %}
+        forward . {{ _upstream_dns | join(' ') }} {
+{% else %}
         forward . /etc/resolv.conf {
+{% endif %}
           prefer_udp
           max_concurrent 1000
 {% if dns_upstream_forward_extra_opts is defined %}

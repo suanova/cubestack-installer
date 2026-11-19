@@ -767,15 +767,21 @@ resolve_preload_image_files() {
         log "  同步集合: ${#PRELOAD_IMAGE_FILES[@]} 个镜像(最小集合: ${patterns[*]})"
     fi
 
-    # ★ Ceph 离线镜像纳入 k8s 阶段预加载(与 kubespray 镜像同机制): CEPH_ENABLED=true 时把
+    # ★ Ceph 离线镜像纳入 k8s 阶段预加载(与 kubespray 镜像同机制): Ceph 开启时把
     #   CEPH_IMAGE_DIR 的 *.tar(rook/ceph/cephcsi 等)一并写进 preload-images.lst,
     #   由 cluster.yml 内置预加载 play 同步到全部节点并 ctr import —— 替代 ceph 模块的
     #   镜像由版本树提供, 统一在 k8s 部署阶段同步到节点并 ctr import(需求)。
+    # ⚠ 2026-11-19: 条件从"仅 CEPH_ENABLED=true"放宽到 CEPH_CSI_ENABLED 也成立 ——
+    #   外部 Ceph 接入(CEPH_MODE=external)通常只开 CEPH_CSI_ENABLED, 而 rook operator /
+    #   csi-operator / ceph-csi 镜像同样是这些 tar; 漏预加载会让 ceph 模块 ImagePullBackOff。
     # ⚠ 必须用**真实复制(cp)**, 不用软链/硬链: 离线文件需经 mc mirror 上传 MinIO 再下载分发,
     #   软链会被当小链接文件上传(下载回来是坏文件), 硬链虽传真实内容但在对象存储中无链接语义。
     #   真实复制后 images/ 目录全是普通文件, mc mirror / rsync / preload 均安全。
     #   幂等: 已存在且大小一致 → 跳过; 内容变化 → 覆盖。
-    if [ "${CEPH_ENABLED:-false}" = "true" ]; then
+    _ceph_preload=0
+    case "${CEPH_ENABLED:-false}" in true|1|yes|on) _ceph_preload=1 ;; esac
+    case "${CEPH_CSI_ENABLED:-false}" in true|1|yes|on) _ceph_preload=1 ;; esac
+    if [ "${_ceph_preload}" = "1" ]; then
         # ① 源目录存在 → 真实复制到 images/(不依赖软链, mc mirror 安全)
         if [ -n "${CEPH_IMAGE_DIR:-}" ] && [ -d "${CEPH_IMAGE_DIR}" ]; then
             mkdir -p "${LOCAL_REPO_DIR}/images"
@@ -804,6 +810,7 @@ resolve_preload_image_files() {
         done
         [ "${#patterns[@]}" -gt 0 ] && log "  ceph 体系开启(CEPH_ENABLED=${CEPH_ENABLED:-false} CEPH_CSI_ENABLED=${CEPH_CSI_ENABLED:-false}) → ceph 镜像并入预加载清单(源 ${CEPH_IMAGE_DIR:-<无>} / images/ 兜底)"
     fi
+    unset _ceph_preload
 
     # 写入 inventory 目录: 每行一个 tar 文件名; 空文件表示无镜像可同步
     # (playbook 仅在清单文件不存在时才回退为全量同步)

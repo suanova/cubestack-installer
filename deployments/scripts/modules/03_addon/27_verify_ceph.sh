@@ -37,6 +37,8 @@ CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
 TEST_NS="verify-ceph-$$"     # 唯一命名空间(带 PID 后缀)
 TEST_PVC="verify-ceph-pvc"
 TEST_POD="verify-ceph-pod"
+# 预加载的 mirror 名 + 钉死 tag(版本树 tar 只有 mirror tag; 上游 busybox:latest 离线拉不到)
+TEST_IMAGE="$(mirror_image_ref "docker.io/library/busybox:${BUSYBOX_TAG:-1.38.0}")"
 
 cleanup() {
     SSH "${K} -n ${TEST_NS} delete pod ${TEST_POD} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
@@ -101,7 +103,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: test
-      image: docker.io/library/busybox:latest
+      image: ${TEST_IMAGE}
       imagePullPolicy: IfNotPresent
       command: ["/bin/sh", "-c"]
       args:
@@ -200,7 +202,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: test
-      image: docker.io/library/busybox:latest
+      image: ${TEST_IMAGE}
       imagePullPolicy: IfNotPresent
       command: ["/bin/sh", "-c"]
       args:

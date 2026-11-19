@@ -418,6 +418,70 @@ reg_has_tag() {
     curl -s -m 6 "http://${REGISTRY_DIRECT:-${REGISTRY_BASE}}/v2/${path}/${repo}/tags/list" 2>/dev/null | grep -q "\"${ver}\""
 }
 
+# ---------------- 镜像源重写: 内置 registry 就绪前的 addon 直连预加载镜像 ----------------
+# 离线版本树里的镜像 tar 以 mirror 名打包(skopeo 写 RepoTags, 形如
+# <HARBOR_MIRROR_REGISTRY>/<HARBOR_MIRROR_PROJECT>/<上游全名>); ctr import 后 containerd 里
+# **只有 mirror 名**。内置 registry 起来之前的 addon(local-path / registry / rook-ceph 等)
+# 无法从它拉镜像, 只能命中 containerd 里预加载的 mirror 名 —— 所以这些 addon 的 image
+# 引用必须重写成 mirror 名; 继续写上游名(docker.io/...)在断网环境必然 ImagePullBackOff。
+#
+# ⚠ 前提是 tar 的 RepoTags 确实是 mirror 名。两条物化路径的命名不同:
+#   · release / 离线版本树(cubestack-release fetch → skopeo docker-archive:<mirror-ref>)：mirror 名;
+#   · install-online.sh(tools/online/materialize-base-images.sh):docker-archive:<上游ref>：上游名。
+# 因此不能用 HARBOR_MIRROR_ENABLED 单独判定(它在 online 流程里仍为 true)。
+# 用法: naming="$(cubestack_image_naming)"   # mirror | upstream
+#   CUBESTACK_IMAGE_NAMING=mirror|upstream 显式覆盖;
+#   未显式设置时:CUBESTACK_ONLINE=1 → upstream, 否则 mirror(release/离线)。
+cubestack_image_naming() {
+    case "${CUBESTACK_IMAGE_NAMING:-}" in
+        mirror|upstream) printf '%s' "${CUBESTACK_IMAGE_NAMING}"; return 0 ;;
+    esac
+    if bool_is_true "${CUBESTACK_ONLINE:-0}"; then
+        printf 'upstream'
+    else
+        printf 'mirror'
+    fi
+}
+
+# 用法: base="$(harbor_mirror_base)"   # 空 = 不重写
+harbor_mirror_base() {
+    [ "$(cubestack_image_naming)" = "mirror" ] || return 0
+    bool_is_true "${HARBOR_MIRROR_ENABLED:-true}" || return 0
+    local reg="${HARBOR_MIRROR_REGISTRY:-harbor.isuanova.com}"
+    local proj="${HARBOR_MIRROR_PROJECT:-mirrors}"
+    [ -n "${reg}" ] && [ -n "${proj}" ] && printf '%s/%s' "${reg}" "${proj}"
+}
+
+# 用法: mirror_image_ref <上游全名[:tag]>  → <mirror base>/<上游全名[:tag]>
+#   已是 mirror 形态 / 非已知上游注册域 / mirror 关闭 → 原样输出(幂等, 可重复调用)
+mirror_image_ref() {
+    local ref="${1:-}" base host
+    [ -n "${ref}" ] || return 0
+    base="$(harbor_mirror_base)"
+    [ -n "${base}" ] || { printf '%s' "${ref}"; return 0; }
+    case "${ref}" in "${base}"/*) printf '%s' "${ref}"; return 0 ;; esac
+    host="${ref%%/*}"
+    case "${host}" in
+        docker.io|quay.io|ghcr.io|registry.k8s.io|gcr.io)
+            printf '%s/%s' "${base}" "${ref}" ;;
+        *) printf '%s' "${ref}" ;;
+    esac
+}
+
+# 把清单里 `image: <上游注册域>/...` 的值重写成 mirror 名, 其余内容逐字节保留。
+# 只匹配 YAML 字段 `image:`(可带 "- " 列表前缀/引号); CRD description 等文本里的示例不受影响。
+# mirror 关闭时原样复制。用法: mirror_rewrite_image_refs <src.yaml> <dst.yaml>
+mirror_rewrite_image_refs() {
+    local src="$1" dst="$2" base
+    base="$(harbor_mirror_base)"
+    if [ -z "${base}" ]; then
+        cp -f "${src}" "${dst}"
+        return 0
+    fi
+    sed -E "s#^([[:space:]]*(-[[:space:]]+)?image:[[:space:]]*[\"']?)(docker\.io|quay\.io|ghcr\.io|registry\.k8s\.io|gcr\.io)/#\1${base}/\3/#" \
+        "${src}" > "${dst}"
+}
+
 # 离线 tar 内容识别: 文件名 glob 快路径 + tar_first_image_tag 内容校验; glob 未命中时
 # 扫描全部 *.tar 按内容兜底(兼容改名/异常命名)。读不出内容时**信任 glob 不否决**,
 # 仅明确不匹配才跳过并告警。用法: find_offline_tar <ref后缀> <文件名glob> <dir...>
@@ -939,6 +1003,10 @@ load_config() {
     #   (赋值放在 sudo **之后**)或直接写进 cluster.conf(推荐)。
     SSH_USER="${SSH_USER:-ubuntu}"
     export SSH_USER
+    # 镜像 tar 命名(mirror|upstream)要被**子进程**消费(sync-kubespray → bash sync-addons-config.sh),
+    # cluster.conf/defaults 里 source 进来的值默认不导出 ⇒ 显式 export(lib-common 的
+    # cubestack_image_naming 负责空值时的自动判定, 见镜像源重写一节)。
+    export CUBESTACK_IMAGE_NAMING CUBESTACK_ONLINE
     # ---- release 模式: 消费外部打包流程物化好的版本树 ----
     # 版本树结构: <root>/<版本>/{offline-files/, modules/} + cubestack-installer-cli.tar。
     # 也支持直接把版本树的 offline-files/ 挂到 OFFLINE_FILES_ROOT(自动探测其 release.env)。

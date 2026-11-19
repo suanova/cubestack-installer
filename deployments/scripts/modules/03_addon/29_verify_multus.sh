@@ -34,7 +34,8 @@ NAD_NAME="${MULTUS_NAD_NAME:-multus-nad}"
 NAD_NS="${MULTUS_NAD_NAMESPACE:-kube-system}"
 TEST_NS="default"
 TEST_POD="multus-verify-sample"
-TEST_IMAGE="busybox"
+# 用**预加载的 mirror 名** + 钉死 tag(版本树 tar 只有 mirror tag; 上游 busybox:latest 离线拉不到)
+TEST_IMAGE="$(mirror_image_ref "docker.io/library/busybox:${BUSYBOX_TAG:-1.38.0}")"
 TEST_IMAGE_REF=""
 # 例: 模块 09_multus 建在 kube-system; 测试 pod 在 default, 注解需带 namespace 前缀
 NAD_ANNOTATION="${NAD_NS}/${NAD_NAME}"
@@ -90,7 +91,7 @@ spec:
   - name: ${TEST_POD}
     command: ["/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"]
     image: ${TEST_IMAGE}
-    # 离线节点已预载 busybox:latest; 默认 Always 会强制回 docker.io 拉取并超时(2026-10-25 实机)
+    # 用预加载的 mirror busybox(见 TEST_IMAGE); Always 会强制回上游拉取并超时(2026-10-25 实机)
     imagePullPolicy: IfNotPresent
 EOF
 _POD_RUNNING=0

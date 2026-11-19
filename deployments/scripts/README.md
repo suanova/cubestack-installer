@@ -398,6 +398,21 @@ curl -s http://registry.cubestack.io:5000/v2/            # 期望 {"repositories
 crictl pull registry.cubestack.io:5000/dev/myapp:v1.0.0  # 预拉到节点本地(可选, 拉取时不再联网)
 ```
 
+**Pod 内解析**:节点 `/etc/hosts` 只对宿主机/containerd 生效。`sync-kubespray-config.sh` 会把
+`dns_etchosts` 写成 `REGISTRY_IP REGISTRY_DOMAIN`(如 `10.244.2.100 registry.cubestack.io`),
+kubespray 会同时渲染进 **CoreDNS 和 nodelocaldns** 的 hosts 插件(带 fallthrough)——
+Pod 内 `nslookup registry.cubestack.io` 应直接命中,不需要再手工改 kube-system 的 ConfigMap。
+`05_k8s_registry` 收尾会用预加载的 busybox Pod 真跑一次「解析 + `GET /v2/`」自检。
+nodeport 模式下 Pod 可达的是 `REGISTRY_DOMAIN:<REGISTRY_NODEPORT>`(如 `:31148`),
+域名本身仍解析到首个 master IP。
+
+#### ①' ClusterDNS 上游(与 registry 解析无关,但同属 Pod DNS 链路)
+
+`UPSTREAM_DNS_SERVERS`(cluster.conf,默认 `223.5.5.5`)决定 nodelocaldns/CoreDNS 对
+**集群外域名**的上游。不要填节点 systemd-resolved 的 `127.0.0.53` stub(Pod 内不可达)或
+`169.254.25.10`(nodelocaldns 自己),sync 会直接拒绝;断网环境保留默认即可,
+集群内域名(含上面的 registry hosts 记录)不依赖上游可用性。
+
 #### ② 集群外 push / pull(docker / containerd)
 
 每个 push / pull 机一次性配置:

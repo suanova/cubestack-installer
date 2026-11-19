@@ -405,7 +405,7 @@ if [ -z "${IMAGE}" ]; then
     IMAGE="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" get ds rook-ceph.cephfs.csi.ceph.com-nodeplugin \
         -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null) || true )"
 fi
-[ -n "${IMAGE}" ] || IMAGE="quay.io/cephcsi/cephcsi:${CEPHCSI_VERSION:-v3.18.1}"
+[ -n "${IMAGE}" ] || IMAGE="$(mirror_image_ref "quay.io/cephcsi/cephcsi:${CEPHCSI_VERSION:-v3.18.1}")"
 if ! printf '%s' "${IMAGE}" | grep -qE '^[A-Za-z0-9._/@:-]+$'; then
     err "镜像引用非法: '${IMAGE}'"; exit 1
 fi

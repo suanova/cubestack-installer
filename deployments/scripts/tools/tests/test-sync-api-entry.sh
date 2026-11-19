@@ -261,4 +261,81 @@ chk "非法取值不写 inventory" "0" "$(cnt '^calico_use_default_route_src_ipa
 chk "部署门禁同样拒绝非法取值" "1" \
     "$(cnt 'CALICO_USE_DEFAULT_ROUTE_SRC_IPADDR 非法' "${REPO_ROOT}/deployments/scripts/modules/02_k8s/06_k8s_deploy.sh")"
 
+echo "== ⑪ upstream_dns_servers 默认改为真实上游(不继承 127.0.0.53) =="
+# 2026-11-19 实机: 节点 systemd-resolved 的 127.0.0.53 stub 在 Pod 内不可达 → 外部域名 SERVFAIL。
+# 默认用公共 DNS(223.5.5.5); 127.0.0.53(stub) / 169.254.25.10(nodelocaldns 自己)必须硬失败。
+D10="${TMP}/d10"; mk_inv "${D10}"; C13="${TMP}/c13"
+mk_conf "${C13}" true 'KUBE_VIP_ENABLED=false'
+chk "未显式配置时退出码 0" "0" "$(run_sync "${D10}" "${C13}"; echo $?)"
+chk "默认上游 = 223.5.5.5" "1" "$(cnt '^upstream_dns_servers: \[223\.5\.5\.5\]$' "${D10}/group_vars/all/all.yml")"
+D11="${TMP}/d11"; mk_inv "${D11}"; C14="${TMP}/c14"
+mk_conf "${C14}" true 'KUBE_VIP_ENABLED=false' 'UPSTREAM_DNS_SERVERS=127.0.0.53'
+chk "127.0.0.53 stub → 非 0" "1" "$(run_sync "${D11}" "${C14}"; echo $?)"
+chk "127.0.0.53 不写入" "0" "$(cnt '^upstream_dns_servers:' "${D11}/group_vars/all/all.yml")"
+D12="${TMP}/d12"; mk_inv "${D12}"; C15="${TMP}/c15"
+mk_conf "${C15}" true 'KUBE_VIP_ENABLED=false' 'UPSTREAM_DNS_SERVERS=169.254.25.10'
+chk "nodelocaldns 自指 → 非 0" "1" "$(run_sync "${D12}" "${C15}"; echo $?)"
+
+echo "== ⑫ Pod 内 registry 解析(dns_etchosts → coredns + nodelocaldns) =="
+D13="${TMP}/d13"; mk_inv "${D13}"; A13="${D13}/group_vars/all/all.yml"
+C16="${TMP}/c16"; mk_conf "${C16}" true 'KUBE_VIP_ENABLED=false' 'REGISTRY_ENABLED=1' 'REGISTRY_SERVICE_TYPE=nodeport'
+chk "nodeport: 退出码 0" "0" "$(run_sync "${D13}" "${C16}"; echo $?)"
+chk "nodeport: 写入 dns_etchosts 键" "1" "$(cnt '^dns_etchosts: |$' "${A13}")"
+chk "nodeport: 域名映射到首个 master" "1" "$(cnt '^  10\.0\.0\.1 registry\.cubestack\.io$' "${A13}")"
+chk "nodeport: 旧注释样例未被误写" "0" "$(cnt '^  1\.2\.3\.4 registry' "${A13}")"
+C17="${TMP}/c17"; mk_conf "${C17}" true 'KUBE_VIP_ENABLED=false' 'REGISTRY_ENABLED=1' 'REGISTRY_SERVICE_TYPE=loadbalancer' 'REGISTRY_IP=10.0.0.211'
+chk "loadbalancer: 退出码 0" "0" "$(run_sync "${D13}" "${C17}"; echo $?)"
+chk "loadbalancer: 域名映射到 VIP" "1" "$(cnt '^  10\.0\.0\.211 registry\.cubestack\.io$' "${A13}")"
+chk "loadbalancer: 旧 master 映射不残留" "0" "$(cnt '10\.0\.0\.1 registry\.cubestack\.io' "${A13}")"
+chk "loadbalancer: 只有一份 dns_etchosts" "1" "$(cnt '^dns_etchosts:' "${A13}")"
+C18="${TMP}/c18"; mk_conf "${C18}" true 'KUBE_VIP_ENABLED=false' 'REGISTRY_ENABLED=0'
+chk "关闭 registry: 退出码 0" "0" "$(run_sync "${D13}" "${C18}"; echo $?)"
+chk "关闭 registry: dns_etchosts 已移除" "0" "$(cnt '^dns_etchosts:' "${A13}")"
+# 用户自定义 dns_etchosts 必须保留(写同名键会造成 YAML 重复键, ansible 直接报错)
+D14="${TMP}/d14"; mk_inv "${D14}"; A14="${D14}/group_vars/all/all.yml"
+printf '\ndns_etchosts: |\n  1.2.3.4 user.example\n' >> "${A14}"
+chk "自定义 dns_etchosts: 退出码 0(告警不阻断)" "0" "$(run_sync "${D14}" "${C16}"; echo $?)"
+chk "自定义 dns_etchosts: 用户内容保留" "1" "$(cnt '^  1\.2\.3\.4 user\.example$' "${A14}")"
+chk "自定义 dns_etchosts: 不追加第二个键" "1" "$(cnt '^dns_etchosts:' "${A14}")"
+chk "自定义 dns_etchosts: 不写 registry 映射" "0" "$(cnt 'registry\.cubestack\.io$' "${A14}")"
+
+echo "== ⑬ addon 镜像源: 内置 registry 就绪前引用预加载的 mirror 名 =="
+D15="${TMP}/d15"; mk_inv "${D15}"; ADD15="${D15}/group_vars/k8s_cluster/addons.yml"
+C19="${TMP}/c19"; mk_conf "${C19}" true 'KUBE_VIP_ENABLED=false'
+chk "mirror 开: 退出码 0" "0" "$(run_sync "${D15}" "${C19}"; echo $?)"
+chk "local-path Pod 镜像 = mirror 名" "1" \
+    "$(cnt '^local_path_provisioner_pod_image_repo: "harbor\.isuanova\.com/mirrors/docker\.io/rancher/local-path-provisioner"$' "${ADD15}")"
+chk "local-path Pod tag 与版本树一致" "1" "$(cnt '^local_path_provisioner_pod_image_tag: "v0\.0\.37"$' "${ADD15}")"
+chk "helper 镜像 = mirror busybox" "1" \
+    "$(cnt '^local_path_provisioner_helper_image_repo: "harbor\.isuanova\.com/mirrors/docker\.io/library/busybox"$' "${ADD15}")"
+chk "helper tag = BUSYBOX_TAG(非 latest)" "1" "$(cnt '^local_path_provisioner_helper_image_tag: "1\.38\.0"$' "${ADD15}")"
+chk "registry Pod 镜像 = mirror 名" "1" \
+    "$(cnt '^registry_pod_image_repo: "harbor\.isuanova\.com/mirrors/docker\.io/library/registry"$' "${ADD15}")"
+chk "registry Pod tag 与版本树一致" "1" "$(cnt '^registry_pod_image_tag: "2\.8\.1"$' "${ADD15}")"
+chk "nginx-proxy 镜像 = mirror 名" "1" \
+    "$(cnt '^nginx_pod_image_repo: "harbor\.isuanova\.com/mirrors/docker\.io/library/nginx"$' "${ADD15}")"
+chk "nginx-proxy tag 与版本树一致" "1" "$(cnt '^nginx_pod_image_tag: "1\.30\.6-alpine"$' "${ADD15}")"
+# download role 的缓存文件名来自 *_image_repo: 必须保持上游名(不能同步改成 mirror)
+chk "download 变量未被改成 mirror 名" "0" "$(cnt '^registry_image_repo: .*harbor' "${ADD15}")"
+C20="${TMP}/c20"; mk_conf "${C20}" true 'KUBE_VIP_ENABLED=false' 'HARBOR_MIRROR_ENABLED=false'
+chk "mirror 关: 退出码 0" "0" "$(run_sync "${D15}" "${C20}"; echo $?)"
+chk "mirror 关: 无生效的 Pod 镜像覆盖" "0" "$(cnt '^registry_pod_image_repo:' "${ADD15}")"
+chk "mirror 关: helper 覆盖也不生效" "0" "$(cnt '^local_path_provisioner_helper_image_repo:' "${ADD15}")"
+chk "mirror 关: nginx 覆盖也不生效" "0" "$(cnt '^nginx_pod_image_repo:' "${ADD15}")"
+chk "mirror 开回来: 覆盖恢复" "1" "$(run_sync "${D15}" "${C19}"; cnt '^registry_pod_image_repo: .*harbor' "${ADD15}")"
+# online 安装的 tar 用上游 RepoTag → 不能渲染 mirror 名(否则 Pod 引用与 containerd 不符)
+D16="${TMP}/d16"; mk_inv "${D16}"; ADD16="${D16}/group_vars/k8s_cluster/addons.yml"
+C21="${TMP}/c21"; mk_conf "${C21}" true 'KUBE_VIP_ENABLED=false' 'CUBESTACK_ONLINE=1'
+chk "online: 退出码 0" "0" "$(run_sync "${D16}" "${C21}"; echo $?)"
+chk "online: 不写 Pod 镜像覆盖" "0" "$(cnt '^registry_pod_image_repo:' "${ADD16}")"
+chk "online: nginx 覆盖也不写" "0" "$(cnt '^nginx_pod_image_repo:' "${ADD16}")"
+C22="${TMP}/c22"; mk_conf "${C22}" true 'KUBE_VIP_ENABLED=false' 'CUBESTACK_ONLINE=1' 'CUBESTACK_IMAGE_NAMING=mirror'
+chk "online + 显式 mirror: 覆盖恢复(用于 --release 版本树)" "1" \
+    "$(run_sync "${D16}" "${C22}"; cnt '^registry_pod_image_repo: .*harbor' "${ADD16}")"
+# nodelocaldns 自指地址是可配置的: 自定义 NODELOCAL_DNS_IP 也要拦
+D17="${TMP}/d17"; mk_inv "${D17}"; C23="${TMP}/c23"
+mk_conf "${C23}" true 'KUBE_VIP_ENABLED=false' 'NODELOCAL_DNS_IP=169.254.20.10' 'UPSTREAM_DNS_SERVERS=169.254.20.10'
+chk "自定义 nodelocaldns 自指 → 非 0" "1" "$(run_sync "${D17}" "${C23}"; echo $?)"
+chk "自定义自指不写入" "0" "$(cnt '^upstream_dns_servers:' "${D17}/group_vars/all/all.yml")"
+
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }

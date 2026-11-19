@@ -12,7 +12,7 @@
 - 每条改动的"原因 / 上游吸收判据 / 上游化"三项写在 **patch 文件头的注释块**里(本 README 的表格是摘要,
   以 patch 头为准);判据用于升级时跑"这个补丁是否已被上游吸收、可以退休"的检查(设计 §3.5)。
 
-## 补丁清单(16 处)
+## 补丁清单(16 个活动补丁)
 
 | 补丁 | 目标文件 | 一句话原因(丢了会怎样) | 上游吸收判据 | 上游化 |
 |---|---|---|---|---|
@@ -27,12 +27,13 @@
 | `09-metallb-memberlist-secret.patch` | `roles/kubernetes-apps/metallb/tasks/main.yml` | v2.32 模板只**引用** `memberlist` Secret 而不创建 ⇒ speaker 全部 `CreateContainerConfigError`、池子分不到 VIP;补丁在 apply **之后**幂等创建(位置不能前挪: `metallb-system` 命名空间由那条 apply 创建) | 该目录下出现创建 memberlist Secret 的任务/清单 | **建议提 PR**(上游 v2.32 缺口的通用修复) |
 | `10-registry-conditional-bool.patch` | `roles/kubernetes-apps/registry/tasks/main.yml` | 四条 `when` 的 `X != none and X` 在 ansible-core ≥2.19 **必失败**("Conditionals must have a boolean result")⇒ 设了 `registry_storage_class` 就部署中断在 `k8s_deploy`;改为 `length > 0` 布尔安全写法(语义不变) | 该文件不再出现 `!= none and <变量>` 形态 | **建议提 PR**(v2.32 + ansible 2.19 组合下必现; 上游原样如此, 非我们的定制) |
 | `11-containerd-config-version.patch` | `roles/container-engine/containerd/templates/config.toml.j2` | 上游对 containerd ≥2.3 恒写 `version = 4`,而沐曦 container-runtime 只支持 ≤3 ⇒ `config version 4 is not support` CrashLoop;补丁加 `containerd_config_version` 覆盖分支(默认行为不变, 值由 `sync-kubespray-config.sh` 从 cluster.conf 写入) | 模板出现 `containerd_config_version`(或等价版本覆盖机制) | **不提 PR**(沐曦厂商约束, 非通用需求);待沐曦包支持 containerd 2.x 后删除本补丁 |
-| `12-coredns-forward-resolvconf.patch` | `roles/kubernetes-apps/ansible/templates/coredns-config.yml.j2` | coredns 的 forward 不再直指 `upstream_dns_servers`(本仓库该变量是"防回环哨兵"如 127.0.0.1 ⇒ 直指会渲染成 forward pod 自身 127.0.0.1:53 ⇒ loop 插件 FATAL 自杀, 实机 18+ 次 CrashLoop);恒用 `/etc/resolv.conf`(经 resolved→nodelocaldns 链, 两处消费解耦) | 该模板不再用 upstream_dns_servers 渲染 forward | 不提 PR(环境特化) |
+| `12-coredns-forward-resolvconf.patch` | `roles/kubernetes-apps/ansible/templates/coredns-config.yml.j2` | coredns 的 forward: 上游语义是 `upstream_dns_servers` 非空则直指。本补丁保留该语义, 但过滤"自指/回环"地址(127.* 与 nodelocaldns 自己的 169.254.25.10)—— 全部被过滤时退回 `/etc/resolv.conf`。2026-11-19 起 installer 默认上游改为 223.5.5.5(不再继承节点 127.0.0.53 stub), 旧哨兵写法(127.0.0.1)仍安全 | 上游对 upstream_dns_servers 自带"不得自指"防护 | 建议提 PR(通用健壮性) |
 | `13-skip-calico-checks-on-reset.patch` | `playbooks/reset.yml` + `roles/kubernetes/preinstall/tasks/main.yml` | 覆盖安装先 reset 旧集群: reset.yml 带 `tags:resolvconf` 引入 preinstall, 其 "Run calico checks" 会在活集群上做 "Check if inventory match current cluster configuration"(读现网 IPPool 与 inventory 比对)——旧集群网络模式与新配置不同(实机 2026-10-15: 旧 VXLAN/IPIP=Never vs 新 IPIP=Always)⇒ 断言必失败、reset 中断、覆盖安装卡死。修复: reset play 置 `cubestack_skip_calico_checks=true`(play 级 vars), calico 检查整体跳过; 安装/升级路径不带该变量 ⇒ 检查保留 | `reset.yml` 的 preinstall 调用不再触发 calico 一致性检查(或检查自带"仅安装期"守卫/能感知 reset 场景) | 建议提 PR(reset 不应被"旧集群 ≠ 新 inventory"拦停; 变量名需按上游口径调整) |
 | `14-calico-3.32.2-checksums.patch` | `roles/kubespray_defaults/vars/main/checksums.yml` | calico 3.31.7→**v3.32.2** 升级的校验值缺口: 树表封顶 3.31.7, pin 到 3.32.2 后 calicoctl 二进制与 kdd-crds 的 sha256 查表缺失 → 下载环节未定义中断(且 check.yml 的 supported-versions 断言按 crds 键拦停)。补 3 行(calicoctl amd64/arm64 + crds no_arch), **插在各表首**保持"首键=默认=最新"语义(⑯/⑱ 断言免改)。⚠ 仅 3.32 线可用 —— v3.33.0 上游单镜像改造(calico/cni 与 kube-controllers 停发), 见下文说明 | 两表出现 >=3.32.2 条目(换树自带新版表即退休) | 不提 PR(本地版本钉; 换树时由 --check-retired 判定) |
 
 | `15-calico-3.32.2-rbac.patch` | `roles/network_plugin/calico/templates/calico-cr.yml.j2` + `roles/kubernetes-apps/policy_controller/calico/templates/calico-kube-cr.yml.j2` | calico **3.32.2** 自带 ClusterRole 的规则缺口按上游逐字补齐: ① `calico-node` 缺 `policy.networking.k8s.io/clusternetworkpolicies` 与 `kubevirt.io/virtualmachineinstancemigrations` ⇒ felix 视为 datastore 故障(403≠404)、resync 永不完成 ⇒ **calico-node 全节点 0/1 ⇒ 一切非 hostNetwork pod 访问 ClusterIP 全断**(2026-10-15 实机: local-path crash → registry-pvc 不 Bound → `k8s_registry` 600s 超时, 部署中断); ② `calico-kube-controllers` 缺 `kubecontrollersconfigurations/status`(子资源独立授权) + `apps/daemonsets`\|`deployments` + `apiextensions/customresourcedefinitions` + `apiregistration/apiservices` + 4 个 `crd.projectcalico.org` 策略资源(实机 policy-name-migrator 逐条 403 暴露); ③ cni-plugin/kube-controllers 的 kubevirt 读权限对齐(防 kubevirt 环境同类 403) | kubespray 模板出现 `clusternetworkpolicies` / `virtualmachineinstancemigrations` / `kubecontrollersconfigurations/status` 规则 | 建议提 PR(模板应与所 pin 的 calico 版本自带 RBAC 对齐; 上游 v2.32.0 按旧版 calico 写死) |
 | `16-registry-nodeport-leak-wait.patch` | `roles/kubernetes-apps/registry/tasks/main.yml` | 固定 NodePort(默认 31148)可能被 apiserver 判为"已分配但无 Service 持有"(上次部署/重置遗留的泄漏分配, repair 控制器约 6min 才清理)⇒ apply 报 `provided port is already allocated`、role 中断、PVC 未创建、registry Pod Pending(2026-11-03 实机: 11:59 标记泄漏, 12:05 清理, apply 在 12:02);修复: apply 前 `--dry-run=server` 探测, 仅对 already allocated 等待(默认 60×10s, `registry_nodeport_repair_retries/_delay` 可调) | 上游 registry role 在 apply 前自带 NodePort 泄漏分配等待, 或不再固定 `registry_service_nodeport` | 建议提 PR(固定 NodePort 的幂等重放健壮性; 上游默认 ClusterIP 不受影响) |
+| `17-addon-pod-image-repo.patch` | `.../local_path_provisioner/templates/local-path-storage-deployment.yml.j2` + `.../registry/templates/registry-rs.yml.j2` + `roles/kubernetes/node/templates/manifests/nginx-proxy.manifest.j2` | local-path-provisioner / registry / nginx-proxy 的 Pod 镜像改用 `*_pod_image_repo/_tag`(默认回落上游 `*_image_repo`)。离线版本树 tar 的 RepoTags 是 mirror 名, 而这些 addon 先于内置 registry 启动, 只能命中 containerd 本地镜像; 写上游名在断网环境 ImagePullBackOff(local-path helper 120s 超时 → PVC 不 Bound → registry 起不来)。**不能**直接改 `*_image_repo`: download role 用同一变量推导缓存 tar 文件名, 版本树 tar 是上游命名 | 上游提供"镜像缓存名与 Pod 引用解耦"的机制 | 不提(CubeStack 离线 tar/mirror 约定) |
 
 ### 已退休(1 处,别再加回来)
 
@@ -42,10 +43,11 @@
 (注意:这不是"上游吸收", 是上游删除了整段逻辑)。教训:目标文件消失时 `--check-retired` 只会报 KEEP
 (反打不上 ≠ 上游未吸收), 退休必须人工确认。
 
-> 本目录 15 个补丁 = 换树时固化的 7 个(spec §2.2 表的第 4、5、7(=原手工项)、8、9、10、11 行;
+> 本目录 16 个补丁 = 换树时固化的 7 个(spec §2.2 表的第 4、5、7(=原手工项)、8、9、10、11 行;
 > **第 6 行(补丁 03)已退休**,见上)+ 换树后实机部署暴露的 3 个(前缀 `09`–`11`,与 spec §2.2 行号无关)
-> + 后续实机/覆盖安装暴露的 5 个(`12`–`16`: coredns resolv.conf、reset 跳过 calico 检查、
-> calico 3.32.2 校验表/RBAC、registry 固定 NodePort 泄漏等待)。
+> + 后续实机/覆盖安装暴露的 6 个(`12`–`17`: coredns forward、reset 跳过 calico 检查、
+> calico 3.32.2 校验表/RBAC、registry 固定 NodePort 泄漏等待、离线 addon 镜像源)。
+> (`17` = 2026-11-19 2.1.0 离线安装: local-path/registry 的 Pod 镜像引用必须命中预加载的 mirror 名)
 
 ## 不在本目录的 3 处改动(别重复两套)
 

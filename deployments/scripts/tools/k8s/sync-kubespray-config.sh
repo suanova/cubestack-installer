@@ -209,15 +209,30 @@ if [ -f "${ALL_YML}" ]; then
     # 块注释/恢复 + localhost + type —— 两条路径都要收敛, 保证文件形态与模式一致
     update_api_entry_all_yml "${ALL_YML}"
 
-    # —— upstream_dns_servers(2026-10-08 实机事故修复, 幂等)——
-    # 本环境**无外部 DNS**(节点到 1.1.1.1/网关/公共的 53 探测均超时); kubespray 该变量为空时
-    # nodelocaldns 渲染 `forward . /etc/resolv.conf` ⇒ 链条
-    #   nodelocaldns → 节点 resolv(stub 127.0.0.53) → systemd-resolved → 169.254.25.10(nodelocaldns 自己)
-    # 回环, coredns 的 loop 插件探测到后 FATAL 自杀(kube-system coredns CrashLoopBackOff)。
-    # 收敛为 127.0.0.1(节点 loopback 无 53 监听): 外部域名查询维持"失败"(与"无上游"环境语义一致),
-    # **不再回环**; cluster 域解析不受影响(pod → coredns 权威; 节点侧 → nodelocaldns → kube-dns)。
+    # —— upstream_dns_servers(2026-10-08 实机事故修复, 幂等; 2026-11-19 改为真实上游)——
+    # 节点用 systemd-resolved 时 /etc/resolv.conf 是 127.0.0.53 stub; CoreDNS(dnsPolicy=Default)
+    # 与 nodelocaldns 在 Pod 内看不到该监听 → 外部域名 SERVFAIL。旧实现配 127.0.0.1 当"防回环哨兵",
+    # 代价是外部域名必然失败; 现默认用 223.5.5.5(可在 cluster.conf 覆盖)。
+    # 回环/自指地址必须拦下: 127.0.0.53 = 节点 stub(Pod 内无效); 169.254.25.10 = nodelocaldns 自己。
     # ⚠ 将来接入真实 DNS: cluster.conf 设 UPSTREAM_DNS_SERVERS="ip1 ip2"(空格分隔)后重跑本工具。
-    _UDNS_VAL="${UPSTREAM_DNS_SERVERS:-127.0.0.1}"
+    _UDNS_VAL="${UPSTREAM_DNS_SERVERS:-223.5.5.5}"
+    # nodelocaldns 的自指地址是**可配置的**(NODELOCAL_DNS_IP, 见 k8s-cluster.yml 同步),
+    # 不能只认默认 169.254.25.10; 两个都拦(默认值 + 本集群实际值)。
+    _NDNS_IP="${NODELOCAL_DNS_IP:-169.254.25.10}"
+    for _dns in ${_UDNS_VAL}; do
+        case "${_dns}" in
+            127.0.0.53)
+                err "UPSTREAM_DNS_SERVERS 含 127.0.0.53(systemd-resolved stub): Pod 内不可达, 会继续 SERVFAIL"
+                err "  改用真实上游(默认 223.5.5.5)或实际内网 DNS 后重跑本工具"
+                exit 1 ;;
+            169.254.25.10|"${_NDNS_IP}")
+                err "UPSTREAM_DNS_SERVERS 含 ${_dns}(nodelocaldns 自己): 会形成自指回环"
+                exit 1 ;;
+            127.0.0.1)
+                warn "UPSTREAM_DNS_SERVERS 含 127.0.0.1(自指): 外部域名查询会失败(集群内域名不受影响)" ;;
+        esac
+    done
+    unset _dns _NDNS_IP
     if grep -qE '^upstream_dns_servers:' "${ALL_YML}" 2>/dev/null; then
         # 删除整个旧值(含缩进或不缩进的 block list), 保留相邻顶层配置。
         awk -v value="${_UDNS_VAL// /, }" '
@@ -230,10 +245,10 @@ if [ -f "${ALL_YML}" ]; then
             { in_value=0; print }
         ' "${ALL_YML}" > "${ALL_YML}.tmp"
         mv "${ALL_YML}.tmp" "${ALL_YML}"
-        say "  all.yml upstream_dns_servers → [${_UDNS_VAL// /, }](防 nodelocaldns↔resolved 回环)"
+        say "  all.yml upstream_dns_servers → [${_UDNS_VAL// /, }](真实上游, 不继承节点 resolv stub)"
     else
-        printf '\n# nodelocaldns 外部上游(本环境无外部 DNS → 127.0.0.1 防回环; 见 sync-kubespray-config.sh)\nupstream_dns_servers: [%s]\n' "${_UDNS_VAL// /, }" >> "${ALL_YML}"
-        say "  all.yml 已写入 upstream_dns_servers: [${_UDNS_VAL// /, }](防 nodelocaldns↔resolved 回环)"
+        printf '\n# nodelocaldns/CoreDNS 外部上游(默认公共 DNS; 防 systemd-resolved 127.0.0.53 stub)\nupstream_dns_servers: [%s]\n' "${_UDNS_VAL// /, }" >> "${ALL_YML}"
+        say "  all.yml 已写入 upstream_dns_servers: [${_UDNS_VAL// /, }](真实上游, 不继承节点 resolv stub)"
     fi
 
     # apiserver_loadbalancer_domain_name → 集群 API 域名
@@ -576,6 +591,70 @@ if [ -f "${ADDONS_YML}" ] && [ "${REGISTRY_ENABLED:-0}" = "1" ]; then
             ok "已同步 registry Service → LoadBalancer:${REGISTRY_IP}(允许共用 VIP: ${SHARED_VIP_ANNOTATION}=${SHARED_VIP_KEY})"
             ;;
     esac
+fi
+
+# ---------------- 4.2 Pod 内的内置 registry 解析(CoreDNS/nodelocaldns hosts) ----------------
+# 节点侧 /etc/hosts 只让宿主机/containerd 解析 registry 域名; **Pod 走 CoreDNS/nodelocaldns**,
+# 看不到节点 hosts ⇒ operator 拉 chart 报 `lookup registry.cubestack.io on 169.254.25.10:53:
+# server misbehaving`(2026-11-19 实机)。kubespray 的 dns_etchosts 会同时渲染进 coredns 与
+# nodelocaldns 的 hosts 插件(带 fallthrough, 不影响集群域/外部域), 是稳定的集群内解析来源。
+# 映射目标与节点侧一致: nodeport → 首个 master IP(NodePort 对 Pod 同样可达);
+# loadbalancer → MetalLB VIP(REGISTRY_IP)。ClusterIP 模式不写(实际 ClusterIP 部署前未知;
+# 该模式请改用 Service DNS)。
+_sync_registry_dns_etchosts() {   # <all.yml> <enabled 0|1> <ip> <domain>
+    python3 - "$1" "$2" "$3" "$4" <<'PYEOF'
+import re, sys
+path, enabled, ip, dom = sys.argv[1:5]
+B = '# >>> cubestack: internal registry host entry (managed by sync-kubespray-config.sh) >>>'
+E = '# <<< cubestack: internal registry host entry <<<'
+lines = open(path).read().split('\n')
+out, i = [], 0
+# ① 先摘掉上一次写入的整块(键 + 内容 + 标记)
+while i < len(lines):
+    if lines[i].strip() == B:
+        i += 1
+        while i < len(lines) and lines[i].strip() != E:
+            i += 1
+        i += 1   # 跳过结束标记
+        continue
+    out.append(lines[i]); i += 1
+if enabled == '1':
+    # 用户自定义的 dns_etchosts 必须保留: 再写一个同名键会造成 YAML 重复键(ansible 直接报错)
+    if any(re.match(r'^dns_etchosts:', l) for l in out):
+        sys.exit(3)
+    while out and out[-1].strip() == '':
+        out.pop()
+    out += ['', B, 'dns_etchosts: |', f'  {ip} {dom}', E]
+result = '\n'.join(out)
+if not result.endswith('\n'):
+    result += '\n'
+open(path, 'w').write(result)
+PYEOF
+}
+
+if [ -f "${ALL_YML}" ]; then
+    _ETC_ON=0
+    if [ "${REGISTRY_ENABLED:-0}" = "1" ] && [ -n "${REGISTRY_IP:-}" ]; then
+        case "$(echo "${REGISTRY_SERVICE_TYPE:-nodeport}" | tr '[:upper:]' '[:lower:]')" in
+            clusterip) : ;;   # 见上方注释: 不写 hosts
+            *) _ETC_ON=1 ;;
+        esac
+    fi
+    _ETC_RC=0
+    _sync_registry_dns_etchosts "${ALL_YML}" "${_ETC_ON}" "${REGISTRY_IP:-}" "${REGISTRY_DOMAIN:-registry.cubestack.io}" || _ETC_RC=$?
+    if [ "${_ETC_RC}" = "3" ]; then
+        warn "all.yml 已有用户自定义 dns_etchosts, 未写入 registry 域名映射(请手工加入 ${REGISTRY_IP:-<ip>} ${REGISTRY_DOMAIN:-registry.cubestack.io})"
+    elif [ "${_ETC_RC}" != "0" ]; then
+        err "写入 all.yml dns_etchosts 失败(rc=${_ETC_RC})"
+        exit 1
+    elif [ "${_ETC_ON}" = "1" ]; then
+        ok "已写入 Pod 内 registry 解析: ${REGISTRY_IP} ${REGISTRY_DOMAIN:-registry.cubestack.io}(coredns + nodelocaldns hosts)"
+    else
+        say "  registry 未启用或为 ClusterIP 模式 → 不写 dns_etchosts"
+    fi
+    unset _ETC_ON _ETC_RC
+else
+    warn "未找到 ${ALL_YML},跳过 Pod 内 registry 解析(dns_etchosts)"
 fi
 
 # ---------------- 6. 更新 containerd.yml (含内置 registry 的 HTTP 信任配置) ----------------

@@ -190,6 +190,20 @@ operator 模块与 NVIDIA GPU operator 模块均调用它 —— 新模块**应�
 > 为什么强制:版本树里的 tar 是唯一运行时输入;清单和同步都发生在发布侧,installer 重复维护
 > 必然漂移。
 
+**镜像引用必须与 tar 的 RepoTags 一致(内置 registry 就绪之前的 addon)。** 版本树的 tar 用
+mirror 名打包(`<harbor>/mirrors/<上游全名>`),离线 `ctr import` 后 containerd 里**只有 mirror 名**。
+运行在内置 registry 之前的组件(local-path-provisioner 及其 helper、registry 自身、nginx-proxy 本地代理、Rook/Ceph)
+如果仍写上游名(`docker.io/...`),断网环境必然 `ImagePullBackOff`。约定:
+
+- kubespray addon:用 `sync-addons-config.sh` 写入的 `*_pod_image_repo/_tag`(补丁 17);
+  **不要**改 `*_image_repo` —— download role 用同一变量推导缓存 tar 文件名,改了会 cache miss;
+- Rook/CSI 清单:应用前用 `mirror_rewrite_image_refs`(lib-common)把 `image:` 行重写到 mirror 名,
+  csi-operator 的 ImageSet ConfigMap 用 `tools/k8s/render-csi-imageset.py` 钉到预加载镜像;
+- 统一走 `harbor_mirror_base` / `mirror_image_ref`,受 `HARBOR_MIRROR_ENABLED` 与
+  `CUBESTACK_IMAGE_NAMING` 控制(mirror 关闭 / 命名=upstream 时不动引用)。命名默认自动判定:
+  `CUBESTACK_ONLINE=1`(install-online.sh 物化的 tar 用上游 RepoTag)→ upstream, 否则 mirror;
+  显式 `CUBESTACK_IMAGE_NAMING=mirror|upstream` 优先(如 online 流程挂载 `--release` 版本树)。
+
 > 与 §2.4 的分工:chart 通常是**随 git 入仓**的 vendored 副本(`cubestack-addon/`);
 > 镜像 tar 是**不入仓**的大文件(只登记 + 备料,`offline-files/`)。
 > 共同点:**首次就把资产放到约定目录**,不许靠部署过程自动落盘。
