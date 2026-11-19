@@ -27,6 +27,7 @@ mirror:
   path: index.json
 env:
   KUBESPRAY_VERSION: v2.32.0
+  TEST_VERSION: v1.35.8
   UNUSED: x
 checksums:
   etcd:
@@ -102,6 +103,21 @@ PLAN="$(python3 "${ONLINE}/lib-base-catalog.py" \
 [ "$(jq -r '.images[2].optional' <<<"${PLAN}")" = "true" ] || fail "resolver: optional flag lost"
 pass "resolver maps catalog and source_ref entries"
 
+# standalone materialization: use baseline env when the process does not export
+# the version, but keep an explicit process value authoritative
+sed 's/version: "v1.35.8"/version: "${TEST_VERSION}"/' \
+    "${TMP}/baseline/versions/base.yaml" > "${TMP}/env-fallback.yaml"
+env -u TEST_VERSION python3 "${ONLINE}/lib-base-catalog.py" \
+    --baseline "${TMP}/env-fallback.yaml" --index "${TMP}/index.json" \
+    > "${TMP}/plan-env-fallback.json"
+[ "$(jq -r '.images[0].version' "${TMP}/plan-env-fallback.json")" = "v1.35.8" ] \
+    || fail "resolver: baseline env fallback failed"
+TEST_VERSION=v9.9.9 python3 "${ONLINE}/lib-base-catalog.py" \
+    --baseline "${TMP}/env-fallback.yaml" --index "${TMP}/index.json" \
+    >/dev/null 2>"${TMP}/err" && fail "resolver: explicit env override not applied"
+grep -q "not in catalog" "${TMP}/err" || fail "resolver: explicit env override error not reported"
+pass "resolver falls back to baseline env and honors explicit overrides"
+
 sed 's/v1.35.8/v9.9.9/' "${TMP}/baseline/versions/base.yaml" > "${TMP}/bad-tag.yaml"
 if python3 "${ONLINE}/lib-base-catalog.py" --baseline "${TMP}/bad-tag.yaml" --index "${TMP}/index.json" >/dev/null 2>"${TMP}/err"; then
     fail "resolver: missing tag should fail"
@@ -157,6 +173,26 @@ grep -q "copied=2" "${TMP}/mat.out" || fail "materializer: unexpected summary"
 grep -q "optional-skipped=1" "${TMP}/mat.out" || fail "materializer: optional skip not reported"
 pass "materializer writes catalog/source_ref tars and skips optional images"
 
+# --include-group selects optional images from one key group only
+PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
+    --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/index.json" \
+    --offline-root "${TMP}/offline-group" --include-group optional >"${TMP}/mat-group.out"
+[ -s "${TMP}/offline-group/optional/harbor.isuanova.com_suanova_optional-demo_v1.0.0.tar" ] \
+    || fail "materializer: --include-group did not include the optional group"
+grep -q "copied=3" "${TMP}/mat-group.out" \
+    || fail "materializer: --include-group summary mismatch"
+pass "materializer includes an optional group on request"
+
+PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
+    --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/index.json" \
+    --offline-root "${TMP}/offline-group2" --include-group metax-gpu-operator \
+    >"${TMP}/mat-group2.out"
+[ ! -e "${TMP}/offline-group2/optional" ] \
+    || fail "materializer: non-matching group included optional image"
+grep -q "optional-skipped=1" "${TMP}/mat-group2.out" \
+    || fail "materializer: non-matching group did not skip optional"
+pass "materializer skips optional groups that were not requested"
+
 PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
     --baseline "${TMP}/baseline/versions/base.yaml" --index "${TMP}/index.json" \
     --offline-root "${TMP}/offline" --include-optional >"${TMP}/mat-opt.out"
@@ -170,6 +206,54 @@ PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
     --offline-root "${TMP}/offline" >"${TMP}/mat2.out"
 grep -q "skipped=2" "${TMP}/mat2.out" || fail "materializer: idempotent skip failed"
 pass "materializer is idempotent"
+
+# ---- optional filter runs before catalog resolution ----
+# An unselected optional image with a tag missing from the pinned index must
+# not block base materialization; selecting it must still fail on the tag.
+cp "${TMP}/baseline/versions/base.yaml" "${TMP}/metax-baseline.yaml"
+cat >> "${TMP}/metax-baseline.yaml" <<'EOF'
+  - key: "metax-gpu-operator:cr.metax-tech.com/cloud/gpu-label"
+    catalog_id: "metax/metax-gpu-label"
+    version: "0.15.4-amd64"
+    dest: "offline-files/metax-gpu"
+    tar: "harbor.isuanova.com_metax_gpu-label_0.15.4-amd64.tar"
+    optional: true
+EOF
+jq '.images += [{
+  "id": "metax/metax-gpu-label",
+  "name": "metax-gpu-label",
+  "source": "harbor.isuanova.com/metax/gpu-label",
+  "target": "harbor.isuanova.com/mirrors/cr.metax-tech.com/cloud/gpu-label",
+  "versions": [{"tag": "0.15.3-amd64",
+                "digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+                "platforms": ["linux/amd64"]}]
+}]' "${TMP}/index.json" > "${TMP}/metax-index.json"
+
+PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
+    --baseline "${TMP}/metax-baseline.yaml" --index "${TMP}/metax-index.json" \
+    --offline-root "${TMP}/offline-metax" >"${TMP}/mat-metax.out"
+[ ! -e "${TMP}/offline-metax/metax-gpu" ] \
+    || fail "materializer: unselected optional image was materialized"
+grep -q "optional-skipped=2" "${TMP}/mat-metax.out" \
+    || fail "materializer: unselected MetaX optional not counted"
+pass "materializer filters unselected optional images before resolution"
+
+if python3 "${ONLINE}/lib-base-catalog.py" \
+    --baseline "${TMP}/metax-baseline.yaml" --index "${TMP}/metax-index.json" \
+    >/dev/null 2>"${TMP}/err"; then
+    fail "resolver: full-catalog validation missed a missing optional tag"
+fi
+grep -q "not in catalog" "${TMP}/err" \
+    || fail "resolver: missing optional tag error not reported"
+pass "resolver keeps full-catalog validation for maintainers"
+
+if PATH="${TMP}/bin:${PATH}" "${ONLINE}/materialize-base-images.sh" \
+    --baseline "${TMP}/metax-baseline.yaml" --index "${TMP}/metax-index.json" \
+    --offline-root "${TMP}/offline-metax" --include-group metax-gpu-operator \
+    >"${TMP}/mat-metax-group.out" 2>&1; then
+    fail "materializer: selected optional image with missing tag should fail"
+fi
+pass "materializer validates selected optional images"
 
 # ---- OS pre-check ----
 "${ONLINE}/check-os-packages.sh" --baseline "${TMP}/baseline/versions/base.yaml" >"${TMP}/pre.out"

@@ -86,6 +86,10 @@ cluster.conf.backup
 # 物化版本树(由 cubestack-version-dir.sh materialize 生成; 见 docs/kubespray-versioning/)
 deployments/kubespray/versions/
 
+# CLI 镜像构建上下文(由 tools/docker/build-cli-context.sh 生成; 内含源码副本,
+# 每次构建前重新生成即可, 不入库)
+/deployments/cli-context/
+
 # cubestack-operator chart 已迁移到
 #   offline-files/cubestack-operator/charts/(现有分层规则已忽略 *.tgz, 放行 charts/README.md)。
 # 旧 cubestack-addon 路径不再参与解析; 保留以下 ignore 规则防止本机残留被误提交, 旧文件可手工删除。

@@ -13,7 +13,7 @@ vim deployments/config/cluster.conf        # 填写 NODES / 密码 / MetalLB 等
 
 sudo ./deployments/scripts/install-online.sh
 
-# 可选：物化 optional base 镜像（例如 netshoot）；检查/要求 MetaX 厂商物料
+# 可选：物化 optional base 镜像（例如 netshoot）；检查/要求 MetaX 厂商物料并物化 MetaX 镜像
 sudo ./deployments/scripts/install-online.sh --include-optional
 sudo ./deployments/scripts/install-online.sh --check-materials
 sudo ./deployments/scripts/install-online.sh --with-metax
@@ -35,6 +35,16 @@ sudo ./deployments/scripts/deploy-cluster.sh --release 2.1.0
 
 版本树由 release 打包，包含镜像 tar、chart、k8s 资产、modules 和校验文件。
 installer 只消费本地树，不访问 MinIO/Harbor。
+
+版本树的 `modules/` 必须与 `offline-files/` **同级**；容器运行时要同时挂载两者
+（见 [CLI 容器](#cli-容器)）：
+
+```text
+<版本树根>/
+  offline-files/     → /opt/cubestack-installer/deployments/offline-files
+  modules/           → /opt/cubestack-installer/deployments/modules   (只读)
+  cubestack-installer-cli.tar
+```
 
 ### 直接部署
 
@@ -62,14 +72,17 @@ cp deployments/config/cluster.conf.example deployments/config/cluster.conf
 
 ## CLI 容器
 
-镜像：
+镜像（CI 每次合并构建 `sha-<commit>`；release 版本树以 `release.env` 的
+`CUBESTACK_CLI_IMAGE` digest 为准）：
 
 ```text
-harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
+harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>
 ```
 
-镜像 tag 由仓库根 `VERSION_LINE` 派生（当前 `2.1` → `:2.1-latest`），
-不覆盖 2.0.x 仍在使用的 `:latest`。
+`sha-<commit>` 由 `rebuild-cli-image.yml` 以合并提交的短 SHA 生成；本地
+`build-cli-image.sh` 默认也使用 `sha-$(git rev-parse --short HEAD)`。
+不存在 CLI 的 `<line>-latest` 通道；release 直接使用版本树 `release.env` 里的
+`CUBESTACK_CLI_IMAGE`（`@sha256:...`）。
 
 构建/推送：
 
@@ -80,15 +93,80 @@ sudo ./deployments/scripts/tools/docker/build-cli-image.sh --push
 
 运行：
 
+**版本树包含 `modules/`：按完整 phase 路径比较，只挂载镜像缺失的模块**
+
 ```bash
+set -euo pipefail
+
+OFFLINE_ROOT=/data/offline-files
+MODULES_DIR=/data/modules
+EXTRA_MODULES=/tmp/cubestack-modules-extra
+CLI_IMAGE="harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>"
+
+[ -d "${MODULES_DIR}" ] || { echo "modules not found: ${MODULES_DIR}"; exit 1; }
+
+# 1) 版本树 modules/<NN_*> 的模块清单（保留相对 phase 路径）
+( cd "${MODULES_DIR}" && find . -mindepth 2 -maxdepth 2 -type f -name '*.sh' \
+    -path './[0-9][0-9]_*/*' -printf '%P\n' | sort ) > /tmp/release-modules.txt
+# 2) 镜像内置 deployments/scripts/modules/<NN_*> 的模块清单
+#    与最终启动命令使用同样的 Docker 访问方式；set -e 保证清单失败即中止
+sudo docker run --rm --entrypoint sh "${CLI_IMAGE}" -c \
+  'cd /opt/cubestack-installer/deployments/scripts/modules && find . -mindepth 2 -maxdepth 2 -type f -name "*.sh" -path "./[0-9][0-9]_*/*" -printf "%P\n" | sort' \
+  > /tmp/image-modules.txt
+# 3) 版本树有、镜像没有的模块
+comm -23 /tmp/release-modules.txt /tmp/image-modules.txt > /tmp/release-only-modules.txt
+
+# 4) 只把缺失模块复制到独立 overlay；镜像已有的同名模块不进入
+rm -rf "${EXTRA_MODULES}"
+while IFS= read -r rel; do
+  mkdir -p "${EXTRA_MODULES}/$(dirname "${rel}")"
+  cp -a "${MODULES_DIR}/${rel}" "${EXTRA_MODULES}/${rel}"
+done < /tmp/release-only-modules.txt
+
+# 5) 有缺失模块才双挂载；没有则只挂 offline-files
+if [ -s /tmp/release-only-modules.txt ]; then
+  MODULES_MOUNT=(-v "${EXTRA_MODULES}":/opt/cubestack-installer/deployments/modules:ro)
+else
+  MODULES_MOUNT=()
+fi
+
 sudo docker run --rm -it --network host \
-  -v $PWD/deployments/offline-files:/opt/cubestack-installer/deployments/offline-files \
+  -v "${OFFLINE_ROOT}":/opt/cubestack-installer/deployments/offline-files \
+  ${MODULES_MOUNT[@]+"${MODULES_MOUNT[@]}"} \
   -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
   -v $HOME/.ssh:/root/.ssh \
-  harbor.isuanova.com/suanova/cubestack-installer-cli:2.1-latest
+  "${CLI_IMAGE}"
 ```
 
+**公开 release 没有 `modules/` 时只用单挂载：**
+
+```bash
+OFFLINE_ROOT=/data/offline-files
+CLI_IMAGE="harbor.isuanova.com/suanova/cubestack-installer-cli:sha-<commit>"
+
+sudo docker run --rm -it --network host \
+  -v "${OFFLINE_ROOT}":/opt/cubestack-installer/deployments/offline-files \
+  -v $PWD/deployments/config/cluster.conf:/opt/cubestack-installer/deployments/config/cluster.conf \
+  -v $HOME/.ssh:/root/.ssh \
+  "${CLI_IMAGE}"
+```
+
+> 不要对不存在的 `modules/` 目录执行 `docker -v`：Docker 会在宿主机创建空目录，
+> release 模式会把它当成已挂载的 modules 目录，`cs_merge_modules_dirs` 因其中没有
+> `NN_*` 阶段而退出。
+
 容器内已是 root，直接运行部署脚本。离线文件挂载复用，不进入镜像。
+
+**为什么要挂 `modules/`**：installer 在 release 模式下把
+`dirname(OFFLINE_FILES_ROOT)/modules` 作为私有平台模块目录
+（`cubestack_operator`、`dev_lab`、`model_images`、`lws`、`envoy_gateway`、
+`ai_gateway`、`prometheus`、`perses`、`bmc`、`metax`、`cuberouter` 等）。
+只挂 `offline-files/` 时这些模块不会出现在 `--list-steps` 中。
+
+> **重叠规则**：同一 phase 下与镜像同名的 release 模块**不会**进入
+> `${EXTRA_MODULES}` overlay，以镜像内置版本为准。`cs_merge_modules_dirs` 先链接
+> 镜像模块，遇到同名文件会直接报 `duplicate module file` 并退出；若 release 需要
+> 覆盖镜像模块，必须改名或重建镜像，不能通过挂载同名文件实现。
 
 ## 目录
 
@@ -99,6 +177,7 @@ deployments/
   kubespray/                # kubespray 树、inventory、离线安装入口
   config/                   # cluster.conf 模板和默认值
   offline-files/            # 本地离线件（gitignore，由版本树/物化生成）
+  modules/                  # 平台私有模块（版本树提供；与 offline-files 同级，运行时挂载）
 versions/
   base.yaml                 # 公共 base 版本真源
   os/                       # 节点前置包体检清单

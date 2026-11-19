@@ -49,6 +49,7 @@ files         # k8s 二进制等文件
 | `nginx` | API LB nginx | image |
 | `netshoot` | netshoot-rdma | image |
 | `nvidia-gpu-operator` | NVIDIA GPU Operator | image |
+| `metax-gpu-operator` | MetaX GPU Operator 镜像 | image |
 | `k8s` | kubespray 树/k8s 二进制 | file |
 | `metax` | MetaX 厂商物料 | material |
 
@@ -84,6 +85,11 @@ files         # k8s 二进制等文件
 
 `catalog_id` 和 `source_ref` 必须二选一；`source_ref` 必须带 sha256 digest。
 
+MetaX GPU operator 镜像使用 `catalog_id: metax/metax-<name>`；mirror 的
+`images/metax.yaml` 已钉 amd64 digest，`catalog_id + version` 从 `index.json`
+解析。升级 `METAX_VERSION` 时同步更新 mirror 的 manifest/index，再更新
+`versions/base.yaml` 的 `mirror.commit`。
+
 ## 升级版本
 
 1. 改 `env` 里的版本变量；
@@ -101,8 +107,12 @@ python3 deployments/scripts/tools/online/lib-base-catalog.py --index <index.json
 
 ## optional
 
-`optional: true` 表示默认不物化，例如 netshoot。商业 release 可以按
-package/profile 选择是否带上；开源在线安装只有显式开关才物化。
+`optional: true` 表示默认不物化，例如 netshoot 和 MetaX GPU operator 镜像。
+商业 release 可以按 package/profile 选择是否带上；开源在线安装只有显式开关才物化。
+
+MetaX 的 11 个镜像属于 `metax-gpu-operator` 组：`install-online.sh --with-metax`
+会通过 `--include-group metax-gpu-operator` 物化它们；`--include-optional` 包含
+所有 optional 镜像。
 
 ## materials 与 os
 

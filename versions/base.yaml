@@ -7,7 +7,7 @@ kubespray:
     path: deployments/kubespray/kubespray
 mirror:
   repo: suanova/container-image-mirror
-  commit: 6ff5b600d0b1433ccecf02857891bbd37f66c3e7
+  commit: 664a379b079a53643e706438eae2a2709a464dac
   path: index.json
 env:
   API_LB_NGINX_IMAGE_TAG: 1.30.6-alpine
@@ -84,6 +84,7 @@ checksums:
 # an index item: the open-source flow points users at the vendor portal, and the
 # commercial packaging overlay supplies a local source for the same key.
 materials:
+# version 是厂商物料版本(0.15.3); -amd64 只用于镜像 tag, 不要加到物料版本。
 - key: metax:gpu-k8s-package
   module: gpu_operator
   version: ${METAX_VERSION}
@@ -406,6 +407,79 @@ images:
   version: v1.6.0
   dest: offline-files/nvidia-gpu-operator
   tar: nvcr.io_nvidia_kubevirt-gpu-device-plugin_v1.6.0.tar
+# MetaX GPU operator images. The mirror carries both 0.15.3 and 0.15.3-amd64
+# (same amd64 manifest); use the -amd64 tag to match the release overlay.
+# The mirror index carries the amd64 manifest digests; catalog_id + version
+# resolve them. When bumping METAX_VERSION, update the mirror manifest/index
+# in the same change so catalog_id resolution stays valid.
+# These images are optional: base-only online installs skip them; --with-metax
+# selects the metax-gpu-operator group.
+- key: metax-gpu-operator:cr.metax-tech.com/cloud/gpu-label
+  catalog_id: metax/metax-gpu-label
+  version: ${METAX_VERSION}-amd64
+  optional: true
+  dest: offline-files/metax-gpu
+  tar: harbor.isuanova.com_metax_gpu-label_${METAX_VERSION}-amd64.tar
+- key: metax-gpu-operator:cr.metax-tech.com/cloud/gpu-device
+  catalog_id: metax/metax-gpu-device
+  version: ${METAX_VERSION}-amd64
+  optional: true
+  dest: offline-files/metax-gpu
+  tar: harbor.isuanova.com_metax_gpu-device_${METAX_VERSION}-amd64.tar
+- key: metax-gpu-operator:cr.metax-tech.com/cloud/gpu-aware
+  catalog_id: metax/metax-gpu-aware
+  version: ${METAX_VERSION}-amd64
+  optional: true
+  dest: offline-files/metax-gpu
+  tar: harbor.isuanova.com_metax_gpu-aware_${METAX_VERSION}-amd64.tar
+- key: metax-gpu-operator:cr.metax-tech.com/cloud/topo-master
+  catalog_id: metax/metax-topo-master
+  version: ${METAX_VERSION}-amd64
+  optional: true
+  dest: offline-files/metax-gpu
+  tar: harbor.isuanova.com_metax_topo-master_${METAX_VERSION}-amd64.tar
+- key: metax-gpu-operator:cr.metax-tech.com/cloud/topo-worker
+  catalog_id: metax/metax-topo-worker
+  version: ${METAX_VERSION}-amd64
+  optional: true
+  dest: offline-files/metax-gpu
+  tar: harbor.isuanova.com_metax_topo-worker_${METAX_VERSION}-amd64.tar
+- key: metax-gpu-operator:cr.metax-tech.com/cloud/operator-controller
+  catalog_id: metax/metax-operator-controller
+  version: ${METAX_VERSION}-amd64
+  optional: true
+  dest: offline-files/metax-gpu
+  tar: harbor.isuanova.com_metax_operator-controller_${METAX_VERSION}-amd64.tar
+- key: metax-gpu-operator:cr.metax-tech.com/cloud/container-runtime
+  catalog_id: metax/metax-container-runtime
+  version: ${METAX_VERSION}-amd64
+  optional: true
+  dest: offline-files/metax-gpu
+  tar: harbor.isuanova.com_metax_container-runtime_${METAX_VERSION}-amd64.tar
+- key: metax-gpu-operator:cr.metax-tech.com/cloud/driver-manager
+  catalog_id: metax/metax-driver-manager
+  version: ${METAX_VERSION}-amd64
+  optional: true
+  dest: offline-files/metax-gpu
+  tar: harbor.isuanova.com_metax_driver-manager_${METAX_VERSION}-amd64.tar
+- key: metax-gpu-operator:cr.metax-tech.com/cloud/gpu-scheduler
+  catalog_id: metax/metax-gpu-scheduler
+  version: ${METAX_VERSION}-amd64
+  optional: true
+  dest: offline-files/metax-gpu
+  tar: harbor.isuanova.com_metax_gpu-scheduler_${METAX_VERSION}-amd64.tar
+- key: metax-gpu-operator:cr.metax-tech.com/public-library/maca
+  catalog_id: metax/metax-maca
+  version: 3.8.1.2-ubuntu22.04-amd64
+  optional: true
+  dest: offline-files/metax-gpu
+  tar: harbor.isuanova.com_metax_maca_3.8.1.2-ubuntu22.04-amd64.tar
+- key: metax-gpu-operator:cr.metax-tech.com/cloud/driver-image
+  catalog_id: metax/metax-driver-image
+  version: ${METAX_DRIVER_VERSION}
+  optional: true
+  dest: offline-files/metax-gpu
+  tar: harbor.isuanova.com_metax_driver-image_${METAX_DRIVER_VERSION}.tar
 # K8s binaries bundle (kubelet/kubeadm/kubectl/crictl/CNI/containerd/runc/etcd).
 # The source pins where/which version; release runs the installer's
 # build-k8s-binaries.sh at packaging time and does not depend on a GitHub

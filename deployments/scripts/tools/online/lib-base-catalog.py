@@ -6,6 +6,10 @@ Harbor reference. It expands ${VAR} from the environment (cluster defaults,
 profile, deployment env), looks up the mirror catalog, and emits a deterministic
 JSON plan for the materializer.
 
+The materializer filters unselected optional images before calling this
+resolver. Calling this script directly validates the full catalog (including
+optional images), which is the maintainer check.
+
 OS packages are intentionally absent: they are a pre-install check, not a
 download/install input.
 """
@@ -172,7 +176,11 @@ def main() -> int:
     if not kubespray_version:
         fail(f"{args.baseline}: kubespray.version is required")
 
-    env = dict(os.environ)
+    # Defaults come from the baseline env so standalone materialization works;
+    # explicit non-empty process env still wins and is validated by expand().
+    env = {str(k): str(v) for k, v in (baseline.get("env") or {}).items()}
+    env.update({str(k): str(v) for k, v in os.environ.items()
+                if str(v) != ""})
     if not env.get("KUBESPRAY_VERSION"):
         env["KUBESPRAY_VERSION"] = kubespray_version
 
