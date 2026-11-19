@@ -37,10 +37,11 @@ mk_release_tree() {   # <root> <ver>
     local root="$1" ver="$2"
     mkdir -p "${root}/${ver}/offline-files" \
              "${root}/${ver}/offline-files/cubestack-operator/charts" "${TMP}/chartsrc-${ver}"
-    # release.env 声明 CHART_VERSION=9.9.9 ⇒ 校验器要求树内必须有对应 chart
-    printf 'apiVersion: v2\nname: test\nversion: 9.9.9\n' > "${TMP}/chartsrc-${ver}/Chart.yaml"
+    # release.env 声明 CHART_VERSION=9.9.9 ⇒ 校验器要求树内必须有对应 chart。
+    # release 树的文件名不带版本号(tree.tsv 不重命名制品), 版本只在 Chart.yaml(issue #183)。
+    printf 'apiVersion: v2\nname: cubestack-operator-chart\nversion: 9.9.9\n' > "${TMP}/chartsrc-${ver}/Chart.yaml"
     tar -C "${TMP}/chartsrc-${ver}" -czf \
-        "${root}/${ver}/offline-files/cubestack-operator/charts/cubestack-operator-chart-9.9.9.tgz" .
+        "${root}/${ver}/offline-files/cubestack-operator/charts/cubestack-operator-chart.tgz" .
     printf 'RELEASE_VERSION=%s\nKUBESPRAY_VERSION=v9.9.9\nCUBESTACK_OPERATOR_CHART_VERSION=9.9.9\n' "${ver}" \
         > "${root}/${ver}/offline-files/release.env"
     printf 'x' > "${root}/${ver}/offline-files/a.txt"
@@ -278,22 +279,25 @@ chk "JSON 键完整" "0" "$?"
 
 echo "== ⑬ chart 校验 =="
 mkdir -p "${TMP}/chart/cubestack-operator/charts" "${TMP}/chartsrc"
-printf 'apiVersion: v2\nname: test\nversion: 9.9.9\n' > "${TMP}/chartsrc/Chart.yaml"
-tar -C "${TMP}/chartsrc" -czf "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-9.9.9.tgz" .
+# release 树布局: 文件名不带版本号, 版本只在 Chart.yaml(issue #183)
+printf 'apiVersion: v2\nname: cubestack-operator-chart\nversion: 9.9.9\n' > "${TMP}/chartsrc/Chart.yaml"
+tar -C "${TMP}/chartsrc" -czf "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart.tgz" .
 printf 'RELEASE_VERSION=9.9.9\nCUBESTACK_OPERATOR_CHART_VERSION=9.9.9\n' > "${TMP}/chart/release.env"
 mk_manifests "${TMP}/chart"
-chk "chart 版本一致通过" "0" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
-# 陈旧 chart(非 release.env 指定版本)只警告, 不失败
-printf 'apiVersion: v2\nname: test\nversion: 8.8.8\n' > "${TMP}/chartsrc/Chart.yaml"
-tar -C "${TMP}/chartsrc" -czf "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-8.8.8.tgz" .
+chk "无版本号 chart 按 Chart.yaml 版本通过" "0" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
+# 同目录其他组件 chart(cubepilot/cuberouter...)有各自版本, 不套 operator 版本, 也不报陈旧
+printf 'apiVersion: v2\nname: cubepilot-chart\nversion: 8.8.8\n' > "${TMP}/chartsrc/Chart.yaml"
+tar -C "${TMP}/chartsrc" -czf "${TMP}/chart/cubestack-operator/charts/cubepilot-chart.tgz" .
 mk_manifests "${TMP}/chart"
-chk "陈旧 chart 仅警告" "0" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
-rm -f "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-8.8.8.tgz"
-printf 'apiVersion: v2\nname: test\nversion: 1.0.0\n' > "${TMP}/chartsrc/Chart.yaml"
-tar -C "${TMP}/chartsrc" -czf "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-9.9.9.tgz" .
+chk "其他组件 chart 不受 operator 版本约束" "0" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
+chk "不再按文件名报陈旧" "0" "$(grep -c '陈旧文件' "${TMP}/out" 2>/dev/null || true)"
+# operator chart 版本不符(文件名仍无版本号)必须失败
+printf 'apiVersion: v2\nname: cubestack-operator-chart\nversion: 1.0.0\n' > "${TMP}/chartsrc/Chart.yaml"
+tar -C "${TMP}/chartsrc" -czf "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart.tgz" .
 mk_manifests "${TMP}/chart"
 chk "chart 版本不符失败" "1" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
-rm -f "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart-9.9.9.tgz"
+rm -f "${TMP}/chart/cubestack-operator/charts/cubestack-operator-chart.tgz" \
+      "${TMP}/chart/cubestack-operator/charts/cubepilot-chart.tgz"
 mk_manifests "${TMP}/chart"
 chk "指定 chart 缺失失败" "1" "$(run "${TOOL}" --root "${TMP}/chart" --level quick)"
 chk_contains "点名缺失 chart(stdout)" "缺少该 chart" "$(cat "${TMP}/out")"

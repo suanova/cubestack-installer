@@ -11,6 +11,21 @@ from .constants import GZ_DEEP_MAX, DATA_EXTS, KNOWN_BINS
 from .context import fail, warn, deep_log
 from .fsutil import norm_rel, parse_env, sha256_file
 
+# release 树的 operator chart 位置与名字: 文件名不带版本号, 版本只在 Chart.yaml。
+OPERATOR_CHART_NAME = "cubestack-operator-chart"
+OPERATOR_CHART_DIR = "cubestack-operator/charts"
+
+
+def is_operator_chart_rel(rel):
+    return f"/{norm_rel(rel)}".startswith(f"/{OPERATOR_CHART_DIR}/")
+
+
+def operator_chart_want_version(root):
+    env_path = os.path.join(root, "release.env")
+    if not os.path.isfile(env_path):
+        return ""
+    return parse_env(env_path).get("CUBESTACK_OPERATOR_CHART_VERSION", "")
+
 def tar_member_names(tf):
     names = set()
     members = {}
@@ -183,19 +198,22 @@ def check_compressed(ctx, path, rel):
             if chart_like and not chart_rel:
                 fail(ctx, rel, "chart_invalid", "chart 缺少 Chart.yaml")
                 return False
-            if chart_rel and "/cubestack-operator/charts/" in f"/{rel}" \
-               and os.path.isfile(os.path.join(ctx.root, "release.env")):
-                env = parse_env(os.path.join(ctx.root, "release.env"))
-                want = env.get("CUBESTACK_OPERATOR_CHART_VERSION", "")
-                expected = f"cubestack-operator-chart-{want}.tgz" if want else ""
-                if want and os.path.basename(rel) != expected:
-                    warn(ctx, f"{rel}: 非 release.env 指定的 chart 版本 {want}(陈旧文件, 可删除)")
-                elif want:
+            # release 树的 chart 文件名不带版本号(tree.tsv 不重命名制品), 版本只在
+            # Chart.yaml 里。只对 operator chart 套 CUBESTACK_OPERATOR_CHART_VERSION,
+            # 同目录的 cubepilot/cuberouter 等组件 chart 有各自的版本(issue #183)。
+            if chart_rel and is_operator_chart_rel(rel):
+                want = operator_chart_want_version(ctx.root)
+                if want:
                     chart = read_chart_yaml(path)
-                    if chart.get("version") and chart["version"] != want:
-                        fail(ctx, rel, "chart_invalid",
-                             f"Chart.yaml version={chart['version']} != {want}")
-                        return False
+                    if chart.get("name") == OPERATOR_CHART_NAME:
+                        got = chart.get("version", "")
+                        if not got:
+                            fail(ctx, rel, "chart_invalid", "operator chart 缺少 Chart.yaml version")
+                            return False
+                        if got != want:
+                            fail(ctx, rel, "chart_invalid",
+                                 f"Chart.yaml version={got} != {want}")
+                            return False
         except Exception as exc:
             fail(ctx, rel, "gzip_invalid", f"gzip/tar 解析失败: {exc}")
             return False
@@ -238,17 +256,25 @@ def check_gzip_only(ctx, path, rel):
     return True
 
 def read_chart_yaml(path):
+    """读 chart 顶层 Chart.yaml(子 chart 的更深路径不参与判断)。"""
+    best = None
+    best_depth = None
     try:
         with tarfile.open(path, "r:gz") as tf:
             for m in tf:
-                if os.path.basename(norm_rel(m.name)) == "Chart.yaml" and m.isfile():
-                    text = tf.extractfile(m).read().decode("utf-8", "replace")
-                    out = {}
-                    for line in text.splitlines():
-                        if ":" in line and not line.lstrip().startswith("#"):
-                            k, v = line.split(":", 1)
-                            out[k.strip()] = v.strip().strip('"').strip("'")
-                    return out
+                if os.path.basename(norm_rel(m.name)) != "Chart.yaml" or not m.isfile():
+                    continue
+                depth = norm_rel(m.name).count("/")
+                if best_depth is None or depth < best_depth:
+                    best, best_depth = m, depth
+            if best is not None:
+                text = tf.extractfile(best).read().decode("utf-8", "replace")
+                out = {}
+                for line in text.splitlines():
+                    if ":" in line and not line.lstrip().startswith("#"):
+                        k, v = line.split(":", 1)
+                        out[k.strip()] = v.strip().strip('"').strip("'")
+                return out
     except Exception:
         pass
     return {}
@@ -278,21 +304,33 @@ def check_elf_or_shebang(ctx, path, rel):
     return True
 
 def check_operator_chart_presence(ctx, root):
-    env_path = os.path.join(root, "release.env")
-    if not os.path.isfile(env_path):
-        return
-    env = parse_env(env_path)
-    want = env.get("CUBESTACK_OPERATOR_CHART_VERSION", "")
+    want = operator_chart_want_version(root)
     if not want:
         return
     # 不能因为 cubestack-operator/charts/ 目录不存在就跳过: release.env 声明了 chart 版本,
     # 部署就必须用到它(module 25 缺 chart 直接 err), 目录整体缺失同样是"缺少该 chart"。
-    expected = os.path.join("cubestack-operator", "charts",
-                            f"cubestack-operator-chart-{want}.tgz")
-    if expected not in ctx.files:
-        fail(ctx, expected, "chart_missing",
+    # 文件名不参与判断: 扫描目录里的 tgz, 读 Chart.yaml 的 name/version(issue #183)。
+    seen = []
+    for rel in ctx.files:
+        if not is_operator_chart_rel(rel) or not rel.lower().endswith(".tgz"):
+            continue
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            continue
+        chart = read_chart_yaml(path)
+        if chart.get("name") != OPERATOR_CHART_NAME:
+            continue
+        ver = chart.get("version", "")
+        if ver == want:
+            return
+        seen.append(f"{os.path.basename(rel)}={ver or '<missing version>'}")
+    if seen:
+        fail(ctx, OPERATOR_CHART_DIR, "chart_invalid",
+             f"release.env 要求 {OPERATOR_CHART_NAME} version={want}, 树内实际: {', '.join(seen)}")
+    else:
+        fail(ctx, f"{OPERATOR_CHART_DIR}/<{OPERATOR_CHART_NAME}>.tgz", "chart_missing",
              f"release.env 要求 CUBESTACK_OPERATOR_CHART_VERSION={want}, 但树内缺少该 chart")
-        ctx.checks["structure"] = "fail"
+    ctx.checks["structure"] = "fail"
 
 def check_structure(ctx, root, sums):
     ctx.checks["structure"] = "ok"

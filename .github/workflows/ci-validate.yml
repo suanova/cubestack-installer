@@ -198,6 +198,12 @@ jobs:
           PYTHONPATH=deployments/scripts/tools/offline \
             python3 -m unittest deployments/scripts/tools/tests/test_verifier_modules.py -v
 
+      # release 树 chart 文件名不带版本号: 定位必须按 Chart.yaml, 不能拼 <name>-<ver>.tgz
+      - name: operator chart 定位回归(operator chart resolve)
+        run: |
+          set -euo pipefail
+          bash deployments/scripts/tools/tests/test-operator-chart-resolve.sh
+
       # 校验器自举: 在线安装 3 次 / 固定 sha256 / 发布树引导校验
       - name: 校验器自举回归(verify tool install)
         run: |

@@ -668,24 +668,30 @@ helm_chart_ensure() {
 # ---------------- operator 镜像 tag 决策(helm 用) ----------------
 # 原则(2026-10-22 用户口径): 默认**完全跟随 chart 自带版本**;
 #   installer 只保留一个显式逃生口, 且**只覆盖 operator 自身的镜像 tag**。
-#   - 未设 CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE → 输出空 → helm 用 chart 自带
-#     (Chart.yaml appVersion / values.image.tag);
-#   - 设了 override → 只传 --set image.tag=<tag> 给 operator chart。
+#   - 显式 CUBESTACK_OPERATOR_IMAGE_TAG_OVERRIDE 非空 → 用它;
+#   - release 模式由模块传入 release.env / release.yaml 的 tag → 用它
+#     (release chart 的 appVersion=latest, 不传就渲染出 :latest, issue #190);
+#   - 两者都为空 → 输出空 → helm 用 chart 自带(appVersion / values.image.tag)。
+# 用法: operator_image_tag_for_helm <override> [release-default]
 operator_image_tag_for_helm() {
     # ⚠ 必须恒返回 0: 调用方是 `x="$(operator_image_tag_for_helm ...)"` + set -e,
     #   空 override 时若返回 1 会让整个模块静默退出(2026-10-22 实机)。
     if [ -n "${1:-}" ]; then
         printf '%s\n' "$1"
+    elif [ -n "${2:-}" ]; then
+        printf '%s\n' "$2"
     fi
     return 0
 }
 
 # ---------------- CubeStack operator chart 定位(release 版本无关) ----------------
 # 在目录中定位 operator chart, 不要求 installer 预先写死版本:
+#   文件名可以是带版本号的 <name>-<ver>.tgz, 也可以是 release 树里的无版本号
+#   <name>.tgz —— 后者是常态: tree.tsv 不重命名制品, 版本只在 Chart.yaml(issue #183)。
 #   ① <name>-<desired>.tgz 存在 → 用它(desired 可空)
-#   ② release 模式(<release> 非空): 优先 <name>-<release>.tgz; 否则扫描 <name>-*.tgz,
+#   ② release 模式(<release> 非空): 优先 <name>-<release>.tgz; 否则扫描候选文件,
 #      读取 Chart.yaml version, 匹配 <release> 或 <desired>; 唯一命中即用
-#   ③ 目录中只有一个 <name>-*.tgz → 用它(版本以 chart 自身为准)
+#   ③ 目录中只有一个候选 → 用它(版本以 chart 自身为准)
 #   ④ 否则返回 1(调用方列出候选并报错)
 # 输出(stdout): "<tgz路径>\t<chart版本>"
 # 说明: 只读 tar, 不联网; 供 installer 模块与打包工具共用。
@@ -703,6 +709,9 @@ resolve_operator_chart_tgz() {   # <dir> <chart-name> [desired-version] [release
     shopt -q nullglob && _ng=1
     shopt -s nullglob
     _files=("${_dir}/${_name}-"*.tgz)
+    if [ -f "${_dir}/${_name}.tgz" ]; then
+        _files+=("${_dir}/${_name}.tgz")
+    fi
     [ "${_ng}" = "1" ] || shopt -u nullglob
     [ "${#_files[@]}" -gt 0 ] || return 1
 
@@ -741,6 +750,12 @@ operator_chart_dir_extras() {   # <charts-dir> <chart-name> <keep-tgz-basename>
     shopt -q nullglob && _ng=1
     shopt -s nullglob
     local -a _files=("${_dir}/${_name}-"*.tgz "${_dir}/${_name}-"*.tgz.digest)
+    if [ -f "${_dir}/${_name}.tgz" ]; then
+        _files+=("${_dir}/${_name}.tgz")
+    fi
+    if [ -f "${_dir}/${_name}.tgz.digest" ]; then
+        _files+=("${_dir}/${_name}.tgz.digest")
+    fi
     [ "${_ng}" = "1" ] || shopt -u nullglob
     for _f in "${_files[@]}"; do
         _b="${_f##*/}"
