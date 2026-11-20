@@ -562,6 +562,7 @@ chk_not_contains "不再无条件 external 强制 prefer-secure" '[ "${CEPH_MODE
 chk_contains "非 6789-6799 端口自动 prefer-secure" 'CEPHFS_MS_MODE="prefer-secure"' "${MODULE}"
 chk_contains "679x 也按 msgr1 处理" '679[0-9]' "${MODULE}"
 chk_contains "预清理前停旧 mounter" '停止旧 mounter DaemonSet' "${MODULE}"
+chk_contains "mounter 退出无法确认时 fail-closed" '无法确认旧 mounter pods 已退出' "${MODULE}"
 chk_contains "预清理比较 ms_mode" 'ms_mode=' "${MODULE}"
 chk_contains "最终校验 ms_mode" 'WRONG_MS_MODE' "${MODULE}"
 chk_contains "DaemonSet 传递 MS_MODE" '__MS_MODE_VALUE__' "${MANIFEST}"
