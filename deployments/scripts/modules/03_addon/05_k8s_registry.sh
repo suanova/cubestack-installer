@@ -32,6 +32,11 @@
 #     (部署中途 resolved 动态文件瞬态) ⇒ coredns loop 插件探测打到 pod 内自己的 127.0.0.1:53 →
 #     误判回环 FATAL 无限重启; 本模块对"CrashLoopBackOff+plugin/loop"的 pod 重建一次即愈
 #     (新 sandbox 快照稳定后的文件; 实机双对照: 旧 sandbox 30 次崩溃 vs 新 pod 零重启)。
+#   · Pod 侧 registry 解析(nodeport, 2026-11-20 实机): 节点 containerd 经 certs.d 把
+#     <REGISTRY_DOMAIN>:5000 改写到 <master>:<NodePort>, 但 cubestack-operator 在 Pod 内直接
+#     拉 OCI chart, 不走 containerd → 打到未监听的 master:5000, 组件 Degraded。本模块在 registry
+#     就绪后把 CoreDNS/nodelocaldns 的 hosts 改指 Service ClusterIP(Pod 侧端口仍 5000);
+#     节点侧 /etc/hosts + containerd 仍用 NodePort, 镜像拉取路径不变。
 #   · 覆盖安装清理(2026-11-03 实机): 新 registry 后端不是 local-path 时, 卸载分支会清理旧集群
 #     遗留的 /opt/local-path-provisioner/pvc-*_kube-system_registry-pvc 孤儿目录(仅当无 PV/PVC
 #     引用且未挂载)。否则旧数据可能撑爆节点根盘 → kubelet DiskPressure → Ceph mon canary
@@ -219,32 +224,100 @@ else
     exit 1
 fi
 
-# ---------------- Pod 内 registry 解析/访问自检(2026-11-19 实机) ----------------
+# ---------------- nodeport 模式: Pod 侧 DNS 指向 registry Service ClusterIP ----------------
+# 背景(2026-11-20 实机, 容器 b): nodeport 暴露下节点 containerd 有
+#   certs.d/registry.cubestack.io:5000/hosts.toml(server=http://<master>:31148), 拉镜像正常;
+#   但 cubestack-operator 是在 **Pod 内**直接用 oci://<REGISTRY_DOMAIN>:5000/suanova/<chart>
+#   拉组件 chart, 不走 containerd 的 hosts.toml 改写。Pod 按 dns_etchosts 解析到首个 master IP
+#   的 5000, 而节点 5000 并未监听(只有 NodePort 31148) ⇒ cuberouter/cubepilot/
+#   cubestack-controller-manager 持续 Degraded("dial tcp <master>:5000: connection refused"),
+#   依赖它们的组件 Pod 不会创建; 镜像拉取链路本身不受影响, 所以症状只在 operator 侧出现。
+# 修复: 集群就绪后把 CoreDNS/nodelocaldns 的 hosts 里 registry 域名改指 **Service ClusterIP**
+#   (Service port 仍是 5000, Pod 内直连 ClusterIP:5000 实测可用)。节点侧 /etc/hosts +
+#   containerd certs.d 保持 NodePort(<master>:31148) 不变, 镜像拉取路径不动。
+#   ClusterIP 在 inventory 生成时未知, 所以只能在 registry 就绪后 patch。
+# 注: 后续 k8s_deploy 会用 dns_etchosts 重渲染成节点 IP; 全量部署中本模块在其后执行, 会再次纠正。
+_POD_DNS_EXPECT_IP=""
+_patch_registry_pod_dns() {
+    local _cip _cm _exists _cur _new _json
+    _cip="$( (SSH "${K}" -n kube-system get svc registry -o jsonpath='{.spec.clusterIP}' 2>/dev/null) || true )"
+    [ -n "${_cip}" ] || { warn "  未取到 registry Service ClusterIP, 跳过 Pod 侧 DNS 修正"; return 0; }
+    for _cm in coredns nodelocaldns; do
+        _exists="$( (SSH "${K}" -n kube-system get cm "${_cm}" --no-headers 2>/dev/null) || true )"
+        if [ -z "${_exists}" ]; then
+            if [ "${_cm}" = "coredns" ]; then
+                err "  未找到 kube-system/coredns ConfigMap, 无法修正 Pod 侧 registry 解析"
+                return 1
+            fi
+            warn "  未找到 kube-system/${_cm} ConfigMap(未启用 NodeLocalDNS?), 跳过"
+            continue
+        fi
+        # 保留用户/其它组件写入的行, 只替换解析到 registry 域名的行(按第 2 列判断)。
+        _cur="$( (SSH "${K}" -n kube-system get cm "${_cm}" -o jsonpath='{.data.hosts}' 2>/dev/null) || true )"
+        _new="$(printf '%s\n' "${_cur}" | python3 -c '
+import sys
+dom, ip = sys.argv[1], sys.argv[2]
+keep = []
+for line in sys.stdin.read().splitlines():
+    parts = line.split()
+    if not parts or (len(parts) >= 2 and parts[1] == dom):
+        continue
+    keep.append(line)
+keep.append("%s %s" % (ip, dom))
+print("\n".join(keep))
+' "${REGISTRY_DOMAIN:-registry.cubestack.io}" "${_cip}")" \
+            || { err "  解析 ${_cm} hosts 失败"; return 1; }
+        _json="$(printf '%s' "${_new}" | python3 -c 'import json,sys; print(json.dumps({"data":{"hosts":sys.stdin.read()+"\n"}}))')" \
+            || { err "  生成 ${_cm} patch 失败"; return 1; }
+        if printf '%s' "${_json}" | SSH "${K}" -n kube-system patch cm "${_cm}" --type merge --patch-file=/dev/stdin >/dev/null 2>&1; then
+            ok "  ${_cm}: registry 域名 → ${_cip}(Pod 侧端口 ${REGISTRY_PORT:-5000})"
+        else
+            err "  patch ${_cm} hosts 失败(operator 拉 chart 将不可用; 检查 CoreDNS/nodelocaldns)"
+            return 1
+        fi
+    done
+    _POD_DNS_EXPECT_IP="${_cip}"
+    return 0
+}
+
+_REG_TYPE_LC="$(echo "${REGISTRY_SERVICE_TYPE:-nodeport}" | tr '[:upper:]' '[:lower:]')"
+if [ "${_REG_TYPE_LC}" = "nodeport" ]; then
+    say "  nodeport 模式: 修正 Pod 侧 registry DNS → Service ClusterIP(节点侧仍用 NodePort ${REGISTRY_NODEPORT:-31148})..."
+    _patch_registry_pod_dns || exit 1
+fi
+
+# ---------------- Pod 内 registry 解析/访问自检(2026-11-19 实机; 2026-11-20 nodeport 修正) ----------------
 # 节点侧 /etc/hosts 只覆盖宿主机与 containerd; Pod 走 CoreDNS/nodelocaldns, 之前拿不到
 # registry 域名 → operator 拉 chart 报 `lookup registry.cubestack.io ... server misbehaving`。
 # 这里用预加载的 busybox(不联网)从 Pod 内真实解析域名并打通 HTTP, 把"只有 operator 才暴露"
-# 的问题提前到 registry 模块收尾。nodeport 模式下 Pod 可达的是 NodePort(domain:31148),
-# 不是 Service 端口 5000 —— 探测端口按模式取, 避免自检假红。
+# 的问题提前到 registry 模块收尾。
+# nodeport 模式(2026-11-20): 上方已把 Pod 侧 DNS 指向 Service ClusterIP, 因此自检走
+# **ClusterIP 的 Service 端口 5000**(而不是 NodePort 31148); 节点侧 NodePort 可达性由就绪
+# 等待的 _base curl 覆盖, 两条路径分别验证。
 _DNS_IMAGE="$(mirror_image_ref "docker.io/library/busybox:${BUSYBOX_TAG:-1.38.0}")"
 _DNS_DOMAIN="${REGISTRY_DOMAIN:-registry.cubestack.io}"
-if [ "$(echo "${REGISTRY_SERVICE_TYPE:-nodeport}" | tr '[:upper:]' '[:lower:]')" = "nodeport" ]; then
-    _DNS_PORT="${REGISTRY_NODEPORT:-31148}"
-else
+# nodeport: 上方已把 Pod 侧 DNS 指向 Service ClusterIP, 这里按 **Service 端口 5000** 自检;
+# 节点侧 NodePort(31148) 的可达性由上面的 _base curl 负责 —— 两条路径都要通。
+if [ "${_REG_TYPE_LC}" = "nodeport" ]; then
     _DNS_PORT="${REGISTRY_PORT:-5000}"
-fi
-# ClusterIP 模式: sync 不写 dns_etchosts(实际 ClusterIP 部署前未知) → 改验 Service DNS。
-# 该模式下 registry.cubestack.io 仍需外部解析(入口/operator 侧另行配置), 这里只证明
-# "Pod 能访问 registry", 避免把已知限制当成部署失败。
-if [ "$(echo "${REGISTRY_SERVICE_TYPE:-nodeport}" | tr '[:upper:]' '[:lower:]')" = "clusterip" ]; then
+    _DNS_EXPECT_IP="${_POD_DNS_EXPECT_IP}"
+elif [ "${_REG_TYPE_LC}" = "clusterip" ]; then
+    _DNS_PORT="${REGISTRY_PORT:-5000}"
+    # ClusterIP 模式: sync 不写 dns_etchosts(实际 ClusterIP 部署前未知) → 改验 Service DNS。
+    # 该模式下 registry.cubestack.io 仍需外部解析(入口/operator 侧另行配置), 这里只证明
+    # "Pod 能访问 registry", 避免把已知限制当成部署失败。
     _DNS_TARGET="registry.kube-system.svc.cluster.local"
     warn "  registry 为 ClusterIP 模式: 不写 dns_etchosts, Pod 内改用 Service DNS 自检"
+else
+    _DNS_PORT="${REGISTRY_PORT:-5000}"
+    _DNS_EXPECT_IP="${REGISTRY_IP:-}"
 fi
 _DNS_TARGET="${_DNS_TARGET:-${_DNS_DOMAIN}}"
 # 预加载镜像缺失时不再把自检变成硬依赖(用户可裁剪 PRELOAD_IMAGE_PATTERNS):
 # mirror 命名下没有该镜像 = 离线也拉不到, 给告警并跳过; 上游命名(online)允许 Pod 自行拉取。
 if [ -n "$(harbor_mirror_base)" ] && ! SSH "sudo ctr -n k8s.io images ls -q 2>/dev/null | grep -Fx '${_DNS_IMAGE}'" >/dev/null 2>&1; then
     warn "  节点 containerd 无 ${_DNS_IMAGE}(PRELOAD_IMAGE_PATTERNS 未含 busybox?) → 跳过 Pod 内 DNS 自检"
-    unset _DNS_IMAGE _DNS_DOMAIN _DNS_PORT _DNS_TARGET
+    unset _DNS_IMAGE _DNS_DOMAIN _DNS_PORT _DNS_TARGET _DNS_EXPECT_IP
 else
 _DNS_POD="registry-dns-check-$$"
 say "  Pod 内自检: 解析 ${_DNS_TARGET} 并访问 http://${_DNS_TARGET}:${_DNS_PORT}/v2/ ..."
@@ -270,7 +343,13 @@ spec:
         - -c
         - |
           set -e
-          nslookup ${_DNS_TARGET} >/dev/null
+          # CoreDNS/nodelocaldns 的 ConfigMap 投递到节点有延迟: 轮询到期望 IP 再访问。
+          for _i in \$(seq 1 60); do
+            _ip=\$(nslookup ${_DNS_TARGET} 2>/dev/null | sed -n 's/^Address:[[:space:]]*//p' | tail -1 | tr -d '[:space:]')
+            if [ -z "${_DNS_EXPECT_IP}" ] || [ "\$_ip" = "${_DNS_EXPECT_IP}" ]; then break; fi
+            sleep 2
+          done
+          nslookup ${_DNS_TARGET}
           printf 'GET /v2/ HTTP/1.0\r\n\r\n' | nc -w 5 ${_DNS_TARGET} ${_DNS_PORT} | head -n1 | grep -q 'HTTP/'
           echo OK
 DNSYAML
@@ -280,7 +359,7 @@ scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null 
     || { rm -f "/tmp/${_DNS_POD}.yaml"; err "  创建 DNS 自检 Pod 失败"; }
 rm -f "/tmp/${_DNS_POD}.yaml"
 _DNS_PHASE=""
-for _i in $(seq 1 24); do
+for _i in $(seq 1 40); do
     _DNS_PHASE="$( (SSH "${K}" -n default get pod "${_DNS_POD}" -o jsonpath='{.status.phase}' 2>/dev/null) || true )"
     if [ "${_DNS_PHASE}" = "Succeeded" ] || [ "${_DNS_PHASE}" = "Failed" ]; then
         break
@@ -294,11 +373,14 @@ if [ "${_DNS_PHASE}" = "Succeeded" ] && printf '%s' "${_DNS_LOG}" | grep -q OK; 
 else
     ( SSH "${K}" -n default describe pod "${_DNS_POD}" 2>/dev/null | grep -A8 'Events:' | tail -12 ) >&2 || true
     err "  Pod 内无法解析/访问 registry(${_DNS_TARGET}:${_DNS_PORT}, phase=${_DNS_PHASE:-?}, log=${_DNS_LOG:-<空>})"
-    err "  排查: kubectl -n kube-system get cm coredns -o yaml | grep -A4 hosts(应含 ${REGISTRY_IP:-<ip>} ${_DNS_DOMAIN});"
-    err "        nodelocaldns 同理(inventory 的 dns_etchosts 由 sync-kubespray-config.sh 写入后 kubespray 渲染)"
+    err "  排查: kubectl -n kube-system get cm coredns -o yaml | grep -A4 hosts(应含 ${_DNS_EXPECT_IP:-${REGISTRY_IP:-<ip>}} ${_DNS_DOMAIN});"
+    if [ "${_REG_TYPE_LC}" = "nodeport" ]; then
+        err "        nodeport 模式期望 Pod 侧解析到 Service ClusterIP ${_POD_DNS_EXPECT_IP:-<clusterIP>}, 并使用 Service 端口 ${_DNS_PORT}(节点侧仍走 NodePort ${REGISTRY_NODEPORT:-31148})"
+    fi
+    err "        nodelocaldns 同理(inventory 的 dns_etchosts 由 sync-kubespray-config.sh 写入后 kubespray 渲染; 本模块在其后 patch)"
     exit 1
 fi
-unset _DNS_IMAGE _DNS_DOMAIN _DNS_PORT _DNS_TARGET _DNS_POD _DNS_PHASE _DNS_LOG
+unset _DNS_IMAGE _DNS_DOMAIN _DNS_PORT _DNS_TARGET _DNS_POD _DNS_PHASE _DNS_LOG _DNS_EXPECT_IP _REG_TYPE_LC _POD_DNS_EXPECT_IP
 fi
 
 # ---------------- PVC 容量保障(存量集群幂等扩容; 2026-10-13 实机事故) ----------------

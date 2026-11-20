@@ -2042,3 +2042,77 @@ sudo ./deploy-cluster.sh
 - `kubectl get ns metallb-system` 存在，`kubectl -n metallb-system get pods` controller/speaker 1/1；
 - `kubectl get ipaddresspools.metallb.io -n metallb-system` 的池 == `METALLB_POOL`；
 - 重新运行部署不再出现配置漂移中止。
+
+### 7. 【2026-11-20 实机】nodeport registry: operator 拉 OCI chart 打到 master:5000(未监听) → cuberouter/cubepilot/controller-manager 一直 Degraded
+
+**症状**
+- `kubectl get pods -n cuberouter` 为空；`cubestack-system` 只有 operator/docs；
+- `kubectl get csc -A -o yaml` 的组件状态：`cuberouter` / `cubepilot` /
+  `cubestack-controller-manager` 为 `Degraded`，message 形如
+  `rendering component ... pulling oci://registry.cubestack.io:5000/suanova/<chart>:...:
+  ... dial tcp <master>:5000: connect: connection refused`；
+  `model-bundles` / `cubestack-portal` 为 `Pending`（等 controller-manager）；
+- 镜像拉取正常（`k8s_registry` 自检通过），只有 operator 的 chart 拉取失败。
+
+**根因**
+- registry 以 `REGISTRY_SERVICE_TYPE=nodeport` 暴露（Service `5000:31148`）；节点 containerd 有
+  `certs.d/registry.cubestack.io:5000/hosts.toml`（`server = http://<master>:31148`），所以
+  **镜像**拉取正常；
+- cubestack-operator 在 **Pod 内**直接拉 `oci://<REGISTRY_DOMAIN>:5000/suanova/<chart>`，
+  **不经过 containerd 的 hosts.toml 改写**；Pod 按 CoreDNS/nodelocaldns 的 `dns_etchosts`
+  解析到首个 master IP，但该节点只监听 NodePort 31148，5000 端口没有监听 → connection refused；
+- 受影响的正好是需要外部 OCI chart 的自研组件；lws / envoy-gateway / ai-gateway / prometheus /
+  perses 等嵌入或第三方 chart 不受影响；
+- `verify_cubestack_operator` 的冒烟 CR 显式禁用全部组件，只验证 operator/CRD/镜像来源，
+  不拉组件 chart，因此覆盖安装会“看起来成功”。
+
+**解法（2026-11-20 已落地，`05_k8s_registry.sh`）**
+nodeport 模式、registry 就绪后：
+1. 读取 `kube-system/registry` Service 的 `spec.clusterIP`；
+2. 把 CoreDNS 与 nodelocaldns 两个 ConfigMap 的 `hosts` 中 registry 域名行改为
+   `<clusterIP> <REGISTRY_DOMAIN>`（保留其它行，幂等 merge patch）；
+3. Pod 内 DNS 自检改为解析域名并访问 **ClusterIP:5000**（Service 端口），轮询等待 ConfigMap
+   投递到节点后再判定；
+节点侧 `/etc/hosts` + containerd certs.d 仍指向 `<master>:<NodePort>`，镜像拉取路径不变。
+全量部署中 `k8s_registry` 位于 `k8s_deploy` 之后，会纠正 `dns_etchosts` 重渲染成节点 IP 的问题。
+
+**验证**
+- 手工修复（等价命令）：
+  ```bash
+  CIP=$(kubectl -n kube-system get svc registry -o jsonpath='{.spec.clusterIP}')
+  kubectl -n kube-system patch cm coredns --type merge -p "{\"data\":{\"hosts\":\"$CIP registry.cubestack.io\\n\"}}"
+  kubectl -n kube-system patch cm nodelocaldns --type merge -p "{\"data\":{\"hosts\":\"$CIP registry.cubestack.io\\n\"}}"
+  ```
+  Pod 内 `nslookup registry.cubestack.io` 返回 ClusterIP；`wget http://registry.cubestack.io:5000/v2/`
+  返回 `{}`；约 1 分钟后 operator requeue，`csc` 五个组件全部 `Ready`，
+  `cuberouter` / `cubestack-controller-manager` / `cubepilot` Pod 启动（2026-11-20 容器 b 实测）。
+- 代码路径：容器 b 中重跑 `--steps k8s_registry`，日志出现
+  `coredns: registry 域名 → <clusterIP>`、`nodelocaldns: registry 域名 → <clusterIP>`、
+  `Pod 内解析并访问 registry 成功(registry.cubestack.io:5000)`（2026-11-20 实测）。
+- 覆盖安装（end-to-end）：`deploy-cluster.sh --fresh --yes` 的全量验证结果见下方“覆盖安装验证”小节。
+
+**相关命令**
+```bash
+kubectl get csc -A -o yaml | grep -A6 'name: cuberouter'
+kubectl -n kube-system get svc registry -o wide
+kubectl -n kube-system get cm coredns nodelocaldns \
+  -o jsonpath='{range .items[*]}{.metadata.name}: {.data.hosts}{"\n"}{end}'
+kubectl -n cubestack-system logs deploy/cubestack-operator --tail=100
+```
+
+**覆盖安装验证（2026-11-20，容器 b，已通过）**
+- `deploy-cluster.sh --fresh --yes` → `DEPLOY_RC=0`（全量覆盖安装）；
+- 部署日志（ClusterIP 为重装后重新分配的 `10.233.21.238`，证明模块运行时动态获取、未写死）：
+  ```
+  nodeport 模式: 修正 Pod 侧 registry DNS → Service ClusterIP(节点侧仍用 NodePort 31148)...
+  coredns: registry 域名 → 10.233.21.238(Pod 侧端口 5000)
+  nodelocaldns: registry 域名 → 10.233.21.238(Pod 侧端口 5000)
+  Pod 内解析并访问 registry 成功(registry.cubestack.io:5000)
+  ```
+- `csc` 中 `cuberouter` / `cubepilot` / `cubestack-controller-manager` / `model-bundles` /
+  `cubestack-portal` 全部 `Ready`；`cuberouter` 命名空间 13 个 Pod 全部 Running；
+- 节点 5/5 Ready、Ceph `HEALTH_OK`、`cubestack-operator` 2/2；
+- 遗留（与本问题无关，属宿主离线树缺件）：`lws` / `ai-gateway` / `prometheus` 栈 / `perses` /
+  `cubestack-docs` 共 11 个 Pod `ImagePullBackOff`，事件为
+  `registry.cubestack.io:5000/mirrors/...: not found`（registry 可达，是镜像未推入 registry），
+  需补齐 `/data/offline-files/cubestack-operator/<组件>/` 的镜像 tar。
