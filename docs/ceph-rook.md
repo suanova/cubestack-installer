@@ -82,6 +82,8 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps ceph,ceph_csi
 > ⚠ registry 用 ceph: kubespray 的 registry addon 在 k8s 阶段已创建 PVC(指定 storageClass)。
 > 设 `REGISTRY_STORAGE_CLASS=ceph-block` 后 PVC 会等待 `ceph-block` SC 出现自动绑定;
 > 若 registry 已用 local-path 建好 PVC, 删除旧 PVC(registry 重建)即可切到 ceph。
+> `--with-k8s` 只跑基座、会跳过 `ceph_csi`; 此时 registry 模块发现 `ceph-block` SC 不存在会立即
+> 失败, 先执行 `--steps ceph_csi` 再重跑(issue #206)。
 
 ### 3.1 双模式: 集群内 Rook-Ceph / 外部已有 Ceph(CEPH_MODE)
 
