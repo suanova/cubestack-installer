@@ -95,11 +95,12 @@ $(_component_meta_list stub)
   · 部署后验证: sudo ./deploy-cluster.sh --steps verify_<组件>
 
 三种使用方式(按场景选):
-  ① 全新集群/覆盖重装: sudo ./deploy-cluster.sh               # 默认 = 覆盖安装: k8s + cluster.conf 中启用的全部组件
-                                                            # (目标集群**已存在**时同样是覆盖重装; 支持断点续跑)
+  ① 全新集群:          sudo ./deploy-cluster.sh               # 默认 = k8s + cluster.conf 中启用的全部组件
   ② 清状态重来:        sudo ./deploy-cluster.sh --fresh        # = ① 且**先清断点状态**(REPEAT:0 的模块强制重跑)
+     · **已有集群上重装基座必须加 --fresh**(issue #205): 仅 --yes 不会授权 kubeadm reset, 运行会在
+       检测到现有集群时直接中止并提示; --steps <组件> 则不会包含基座。
      · 覆盖安装遇到节点上的**旧集群残留**(跨小版本 / 旧 etcd 二进制)时, k8s_deploy 前置会自动清除它
-       (交互 [Y/n] 确认, 输入 n 可中止; 加 --yes 免交互 —— 无人值守务必显式给)。原地升级未实现, 见 docs/cluster-upgrade-path.md
+       (交互 [Y/n] 确认, 输入 n 可中止; 在已加 --fresh 的前提下 --yes 可免交互)。原地升级未实现, 见 docs/cluster-upgrade-path.md
      · **优雅覆盖**(2026-10-11): K8s 覆盖实际将执行且集群可达时, 会先读集群内安装登记
        (ConfigMap cubestack-install-record)按首装序**反序优雅卸载**已装组件(先停消费者/CR 级联/
        helm uninstall, 再动 Ceph, 最后 K8s 覆盖) —— 非暴力重置。交互 [Y/n] 确认
@@ -107,8 +108,7 @@ $(_component_meta_list stub)
        设计: docs/graceful-overwrite/design.md
   ③ 单独装组件:        sudo ./deploy-cluster.sh --steps ceph         # 只装该组件(不动基座; 集群接入自动处理)
   · state 文件 deployments/config/.deploy.state 只记录"本机装到哪一步": 全新容器没有它是正常的(等价①)。
-  · ⚠ ①/② 是**重装集群**的路: 节点上已有的旧 K8s 会被 kubeadm reset(既有防线: kubespray 侧检测到残留时
-    醒目警告 + [Y/n] 确认(Ctrl-C 可中止); 集群已存在时部署也会打印醒目提示)。
+  · ⚠ ② 是**重装集群**的路: 节点上已有的旧 K8s 会被 kubeadm reset; 没有 --fresh 时直接中止。
     只想装组件、**不动集群** → 用 ③(--steps <组件> 的计划里不含 k8s_deploy/metallb/registry 等基座)。
   · 前提: 容器里挂载 cluster.conf(含 NODES 的 IP/用户/密码)与 deployments/offline-files
     (镜像 tar 不入镜像; 见 README §容器化 CLI 的 docker run 挂载示例)。
@@ -150,8 +150,10 @@ $(_component_meta_list stub)
                         auto = 全量部署首次 full+校验戳; full = 强制深度)。
                         失败会在任何模块执行前停止。
   --no-verify-offline   跳过离线文件完整性校验(逃生口; 会打印醒目提示)
-  --fresh, --refresh    默认流程 + **先清断点状态**(REPEAT:0 的模块强制重跑; 见"三种使用方式"②)
-  --yes, -y             免交互: 所有 [Y/n] 确认自动回答 Y(无人值守/CI 必须显式给)
+  --fresh, --refresh    默认流程 + **先清断点状态**(REPEAT:0 的模块强制重跑); 在已有集群上重装基座时
+                        这是唯一授权 kubeadm reset 的开关(见"三种使用方式"②)
+  --yes, -y             免交互: 所有 [Y/n] 确认自动回答 Y(无人值守/CI 必须显式给);
+                        不会授权在已有集群上重装基座 —— 交互 [Y/n] 同样不会，必须 --fresh
   --list                仅打印集群规划(只读)
   --list-steps          列出全部模块(分组紧凑展示; 加 --verbose 看完整 DESC/文件/依赖)
   --help, -h            显示本帮助
@@ -198,7 +200,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --fresh|--refresh) FRESH=1; shift ;;
         # --yes = 免交互确认: 导出 CUBESTACK_ASSUME_YES=1 让所有 [Y/n] 确认自动 Y
-        #   (含"旧集群残留 → 自动 reset"、Ceph 节点/裸盘、k8s_deploy 配置确认等)。
+        #   不含"在已有集群上重装基座": 那条路必须显式 --fresh(issue #205)。
         #   不给 --yes 时: 交互终端逐个询问 [Y/n]; 非交互环境 reset 类确认**拒绝执行**(避免无人值守误清集群)。
         --yes|-y) ASSUME_YES=1; shift ;;
         --list)     LIST=1; shift ;;
@@ -440,7 +442,7 @@ if [ "${LIST}" = "1" ]; then print_plan; exit 0; fi
 
 [ "${FRESH}" = "1" ] && { clear_state; say "已清除断点续跑状态(--fresh)" ; }
 # --yes: 导出 CUBESTACK_ASSUME_YES=1 → lib-common 的 confirm_yes_no 全部自动 Y
-#   (旧集群 reset 等自身 --yes 参数另由调用链显式透传)
+#   (已有集群上的基座重装不在此列: 必须显式 --fresh, 见 base_redeploy_needs_fresh)
 [ "${ASSUME_YES}" = "1" ] && { export CUBESTACK_ASSUME_YES=1; say "已开启免交互确认(--yes): 所有 [Y/n] 确认将自动继续"; }
 
 need_root() { [ "$(id -u)" -eq 0 ] || { err "需要 root 权限,请执行: sudo $0"; exit 1; }; }
@@ -486,11 +488,24 @@ fi
 unset _need_early_ssh _idx _k
 
 # ★ 覆盖安装可见化(实现见 lib-module.sh notify_base_redeploy; --list/--list-steps 只读路径不探测集群,
-#   改由 print_plan 打印提示行)。**只提示、不拦停** —— 默认全量运行 = 覆盖安装(2026-09-17 定案):
-#   目标集群已存在时照常重装, 只把"会发生什么"打出来(节点旧 K8s 会被 kubeadm reset; 该步骤自带 60s
-#   交互 [Y/n] 确认可 n/Ctrl-C 中止)。只想装组件不动集群 → --steps <组件>(计划里不含基座)。
+#   改由 print_plan 打印提示行)。默认全量运行 = 覆盖安装(2026-09-17 定案), 但**重装基座**必须
+#   显式 --fresh(issue #205): --yes 只授权免交互确认, 不能顺带清空现有集群。
 #   ⚠ 判定点: 上方 ensure_node_ssh_access 已在所有预检之前就绪 SSH 密钥 →
 #   此处 cluster_exists 可正常探测; run_module(执行 k8s_deploy 之前)的挂点 B 仍作为兜底。
+# reset 授权只在显式 --fresh 时成立: kubespray 侧据此拒绝 --yes 自动 reset(issue #205)。
+export CUBESTACK_RESET_GUARD=1
+if [ "${FRESH}" = "1" ]; then
+    export CUBESTACK_ALLOW_K8S_RESET=1
+else
+    unset CUBESTACK_ALLOW_K8S_RESET
+fi
+if base_redeploy_needs_fresh; then
+    err "检测到已有 Kubernetes 集群，但本次运行准备重新执行 k8s_deploy。"
+    err "继续会清理节点上的旧集群(kubeadm reset)，现有工作负载与数据会丢失。"
+    err "  · 确认要重装基座: 加 --fresh 重跑(清除断点状态并授权 reset)"
+    err "  · 只想安装/修复组件: 用 --steps <组件>(计划里不含 k8s_deploy)"
+    exit 1
+fi
 notify_base_redeploy
 
 # ★ Ceph 消费者异常退出兜底(2026-10-13, CodeRabbit): 覆盖预检/优雅卸载把 registry(kubespray
@@ -624,6 +639,11 @@ if [ "$(get_state k8s_deploy)" != "done" ]; then
     done
     unset _ok_k
     if [ "${_OVERWRITE_PENDING}" = "1" ] && cluster_exists; then
+        if [ "${FRESH}" != "1" ]; then
+            err "检测到已有集群，但本次运行没有 --fresh 授权; 拒绝覆盖卸载"
+            err "  · 确认重装基座: 加 --fresh 重跑"
+            exit 1
+        fi
         _te_args=()
         [ "${ASSUME_YES}" = "1" ] && _te_args=(--yes)
         say "检测到集群已存在且本次将覆盖重装 → 先执行「优雅覆盖」: 按安装登记反序卸载已装组件"

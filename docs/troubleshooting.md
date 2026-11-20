@@ -1396,8 +1396,9 @@ sudo kubectl get svc -A -o wide
 ```
 本次实机 12:05 已由 repair 清理, 端口可正常分配; 完整重跑部署留待用户执行(未在本次修复中重跑)。
 
-**当前失败集群的处理:** 不需要 `--fresh`; `k8s_deploy` 失败未写成功状态, repair 清理后直接重跑
-`deploy-cluster.sh` 即可(补丁会在 kubespray 运行前自动重放)。
+**当前失败集群的处理:** 需要显式 `--fresh`。`k8s_deploy` 失败未写成功状态，而集群/节点可能已有
+残留；没有 `--fresh` 时守卫会直接中止，避免误 reset 现有集群。确认重装基座用 `--fresh` 重跑；
+只想装/修组件用 `--steps <组件>`(计划不含基座)。补丁会在 kubespray 运行前自动重放。
 
 **关联修复(预防性):** 同轮排查发现 `05_k8s_registry` 会等 registry Pod Ready, 而 registry RS
 没有 control-plane toleration; 移除污点的 `node_pool` 是模块 53(排在 05 之后)。纯 master / 多 master
