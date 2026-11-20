@@ -302,6 +302,9 @@ fi
 # 等待的 _base curl 覆盖, 两条路径分别验证。
 _DNS_IMAGE="$(mirror_image_ref "docker.io/library/busybox:${BUSYBOX_TAG:-1.38.0}")"
 _DNS_DOMAIN="${REGISTRY_DOMAIN:-registry.cubestack.io}"
+# set -u: clusterip 分支不设置期望 IP; 先给空默认值, 避免下面未加引号的 heredoc
+# 展开 ${_DNS_EXPECT_IP} 时触发 unbound variable。nodeport/loadbalancer 分支会覆盖它。
+_DNS_EXPECT_IP=""
 # nodeport: 上方已把 Pod 侧 DNS 指向 Service ClusterIP, 这里按 **Service 端口 5000** 自检;
 # 节点侧 NodePort(31148) 的可达性由上面的 _base curl 负责 —— 两条路径都要通。
 if [ "${_REG_TYPE_LC}" = "nodeport" ]; then
