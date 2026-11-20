@@ -750,7 +750,7 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-multus-iface-detect.sh \
            test-netshoot-tar-select.sh \
            test-nodeport-leak-preflight.sh test-sync-versions.sh \
-           test-offline-addon-images.sh; do
+           test-offline-addon-images.sh test-k8s-registry-storage.sh; do
     _tp="${REPO_ROOT}/deployments/scripts/tools/tests/${_t}"
     if [ ! -f "${_tp}" ]; then
         ck_fail "⑮ 离线套件缺失: ${_tp#${REPO_ROOT}/}(⑮ 的回归证据没了)"

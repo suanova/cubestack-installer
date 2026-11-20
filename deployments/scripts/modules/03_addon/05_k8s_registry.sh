@@ -21,6 +21,8 @@
 #       · ceph-block → registry-pvc 在 k8s 阶段创建时 SC 尚未出现 → Pending; ceph_csi 模块
 #         创建 SC 后自动绑定(WaitForFirstConsumer)。本模块部署后**必须等待 PVC Bound + pod Ready**,
 #         否则后续 push 镜像的模块(gpu_operator/ceph/...)会 ImagePullBackOff 且难以定位。
+#         ⚠ --with-k8s 跳过 ceph_csi: 若 SC 仍不存在, 本模块立即失败并提示先跑 ceph_csi(issue #206),
+#         不再空等 REGISTRY_WAIT_SECONDS。
 #     ⚠ 顺序保证: addon 阶段按文件序号执行 metallb→ceph→ceph_csi→local_path→registry;
 #       ceph/ceph_csi 模块已内置"等集群 Ready / CSI 就绪"的等待。本模块额外等 registry 自身 Ready。
 #   · PVC 容量保障(2026-10-13 实机事故): kubespray 默认 registry_disk_size=10Gi, 连一轮 dev_lab
@@ -163,6 +165,22 @@ fi
 #   这些变量其他模块(metallb/ceph)在各自文件内定义, 不会跨模块可见 —— 必须在本文件定义,
 #   否则 set -u 下裸引用 unbound → 部署成功(registry 已部署)后模块崩溃(本次事故根因)。
 init_remote_kubectl || exit 1
+
+# ★ 后端 SC 必须已存在(issue #206): --with-k8s 只跑基座, 会跳过 ceph_csi; 若 registry
+#   用 ceph SC, PVC 会 Pending 到 REGISTRY_WAIT_SECONDS 超时。这里立即失败并给出恢复命令。
+#   已 Bound 的 PVC 不依赖 SC 继续存在, 跳过检查避免误伤存量集群。
+if [ -n "${REGISTRY_STORAGE_CLASS:-}" ] && [ "${REGISTRY_STORAGE_CLASS}" != "local-path" ]; then
+    _reg_pvc_phase="$(SSH "${K}" -n kube-system get pvc registry-pvc -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    if [ "${_reg_pvc_phase}" != "Bound" ] \
+        && ! SSH "${K}" get storageclass "${REGISTRY_STORAGE_CLASS}" >/dev/null 2>&1; then
+        err "registry 后端 StorageClass '${REGISTRY_STORAGE_CLASS}' 尚不存在, registry-pvc 会一直 Pending"
+        err "  external Ceph: 先运行 --steps ceph_csi(创建 CephConnection/StorageClass), 再重跑本模块"
+        err "  internal Ceph: 先运行 --steps ceph,ceph_csi"
+        err "  或把 REGISTRY_STORAGE_CLASS 改为 local-path"
+        exit 1
+    fi
+    unset _reg_pvc_phase
+fi
 bash "${SCRIPT_DIR}/tools/lb/deploy-registry.sh"
 
 # ---------------- 就绪等待(关键) ----------------
