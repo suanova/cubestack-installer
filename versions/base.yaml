@@ -7,7 +7,7 @@ kubespray:
     path: deployments/kubespray/kubespray
 mirror:
   repo: suanova/container-image-mirror
-  commit: f2722c5a8cc34f720e22299e9d88e3badcd64bfc
+  commit: 68004fd05822286864c9a2a9b02cedeb4243f3d8
   path: index.json
 env:
   API_LB_NGINX_IMAGE_TAG: 1.30.6-alpine
@@ -481,6 +481,13 @@ images:
   optional: true
   dest: offline-files/metax-gpu
   tar: harbor.isuanova.com_metax_driver-image_${METAX_DRIVER_VERSION}.tar
+- key: metax-gpu-operator:cr.metax-tech.com/cloud/mx-exporter
+  catalog_id: metax/metax-mx-exporter
+  version: ${METAX_VERSION}-amd64
+  optional: true
+  dest: offline-files/metax-gpu
+  tar: harbor.isuanova.com_metax_mx-exporter_${METAX_VERSION}-amd64.tar
+
 # K8s binaries bundle (kubelet/kubeadm/kubectl/crictl/CNI/containerd/runc/etcd).
 # The source pins where/which version; release runs the installer's
 # build-k8s-binaries.sh at packaging time and does not depend on a GitHub
