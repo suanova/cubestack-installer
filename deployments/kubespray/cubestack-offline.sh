@@ -1896,6 +1896,15 @@ print("%s|%s|%s" % (
     highlight "║  确认清理? [Y/n](回车=Y; n 中止; Ctrl+C 退出)            ║"
     highlight "╚══════════════════════════════════════════════════════════╝"
     echo ""
+    # issue #205: 已有集群上重装基座必须显式 --fresh; --yes 和交互 [Y/n] 都不授权。
+    # 仅 deploy-cluster --fresh 会导出 CUBESTACK_ALLOW_K8S_RESET; 独立
+    # `cubestack-offline.sh reset --yes` 不经过 deploy-cluster, 不受此限。
+    if [ "${scope}" != "new" ] \
+        && [ "${CUBESTACK_RESET_GUARD:-0}" = "1" ] && [ "${CUBESTACK_ALLOW_K8S_RESET:-0}" != "1" ]; then
+        err "检测到旧 Kubernetes 状态，但本次运行没有显式 --fresh 授权 reset"
+        err "  · 确认重装基座: 加 --fresh 重跑"
+        err "  · 只想安装/修复组件: 用 --steps <组件>"
+    fi
     confirm_yes_no_offline "确认清理上述节点上的旧 Kubernetes 状态并继续部署?" \
         || { err "已取消: 旧 Kubernetes 状态未清理 → 中止部署"; return 1; }
     echo ""
@@ -2576,6 +2585,12 @@ cmd_reset() {
         err "  原地升级**不走** reset —— 那是未实现的 feature, 设计见 docs/cluster-upgrade-path.md"
         exit 1
     }
+    # issue #205: 由 deploy-cluster 触发时必须同时有 --fresh 授权; 独立 reset --yes 不受影响。
+    if [ "${CUBESTACK_RESET_GUARD:-0}" = "1" ] && [ "${CUBESTACK_ALLOW_K8S_RESET:-0}" != "1" ]; then
+        err "reset 被 deploy-cluster 的重置守卫拒绝: 缺少 --fresh 授权"
+        err "  · 确认重装基座: 加 --fresh 重跑"
+        exit 1
+    fi
     ensure_venv
     # 补丁层保障(2026-10-15): reset 直接消费树内 playbook —— 补丁 13 正是 reset 路径的修复
     # (reset 被 calico 一致性检查拦停, 见 cubestack-patches/13-skip-calico-checks-on-reset.patch),

@@ -619,9 +619,20 @@ run_module() {
     #   计划阶段(deploy-cluster.sh)也提示过一次, 但那时新容器可能**还没有 SSH 密钥** →
     #   cluster_exists 判不出集群; 而接入引导(vm_sshkey/k8s_passwordless)恰好排在本模块之前,
     #   到这里密钥已装好、集群可探测 —— 新容器对着已有集群的场景在这里把"会发生什么"打出来。
-    #   ⚠ 只提示**不拦停**(默认全量运行 = 覆盖安装, 见 notify_base_redeploy 注释)。
-    [ "${key}" = "k8s_deploy" ] && notify_base_redeploy
-    [ "${key}" = "k8s_deploy" ] && teardown_before_overwrite
+    #   执行点再拦一次(issue #205): 预检时 cluster_exists 可能失败一次, 这里探测成功后仍须拦停;
+    #   --yes 不授权清空现有集群, 只有 --fresh 可以。
+    if [ "${key}" = "k8s_deploy" ] && base_redeploy_needs_fresh; then
+        err "检测到已有集群，重装基座需要 --fresh(--yes 不授权清空现有集群)"
+        return 1
+    fi
+    if [ "${key}" = "k8s_deploy" ] && ! notify_base_redeploy; then
+        err "检测到已有集群且没有 --fresh 授权 → 中止部署"
+        return 1
+    fi
+    if [ "${key}" = "k8s_deploy" ] && ! teardown_before_overwrite; then
+        err "优雅覆盖被拒绝/失败 → 中止部署"
+        return 1
+    fi
     say "[${key}] ${MODULE_DESC[$idx]:-${MODULE_SCRIPT[$idx]}} ..."
     say "  执行: ${script}"
     if bash "${script}"; then
@@ -816,9 +827,27 @@ notify_base_redeploy() {
     [ "$(get_state k8s_deploy)" = "done" ] && return 0   # 本机已装过 → 断点续跑会跳过 k8s_deploy
     cluster_exists || return 0                           # 探测不到(首装/无密钥/网络不通) → 保持安静
     _REDEPLOY_NOTED=1
-    warn "检测到集群已存在 → 本次为「覆盖安装」(默认语义): k8s_deploy 会重跑 kubespray"
-    warn "  节点上已有的旧 K8s 状态会被 kubeadm reset —— 该步骤会醒目警告并询问 [Y/n](Ctrl-C 可中止)"
-    warn "  只想装某个组件、不动集群: sudo $0 --steps <组件>(如 --steps ceph; 计划里不含基座)"
+    if [ "${FRESH:-0}" != "1" ]; then
+        warn "检测到集群已存在，但本次没有 --fresh 授权 → 拒绝重装基座"
+        warn "  · 确认重装: 加 --fresh 重跑"
+        warn "  · 只想装组件: sudo $0 --steps <组件>(计划里不含基座)"
+        return 1
+    fi
+    warn "检测到集群已存在 → 本次将重装基座: k8s_deploy 会重跑 kubespray 并 kubeadm reset 旧集群"
+    warn "  已通过 --fresh 显式授权"
+    return 0
+}
+
+# 已有集群上重跑 k8s_deploy 属于破坏性重装: --yes 只表示免交互确认, 不能顺带授权
+# kubeadm reset。返回 0 表示必须让用户显式加 --fresh 才继续(issue #205)。
+base_redeploy_needs_fresh() {
+    local _k _in=0
+    for _k in "${RUN_STEPS[@]:-}"; do [ "${_k}" = "k8s_deploy" ] && _in=1; done
+    [ "${_in}" = "1" ] || return 1                       # 计划里没有基座 → 不涉及
+    [ "$(get_state k8s_deploy 2>/dev/null || true)" = "done" ] && return 1
+    [ "${FRESH:-0}" = "1" ] && return 1
+    cluster_exists || return 1
+    return 0
 }
 
 # ---------------- 优雅覆盖挂点 B(执行 k8s_deploy 之前) ----------------
@@ -832,6 +861,11 @@ teardown_before_overwrite() {
     local _te="${SCRIPT_DIR}/tools/k8s/cluster-teardown.sh"
     [ -f "${_te}" ] || return 0
     cluster_exists || return 0
+    if [ "${FRESH:-0}" != "1" ]; then
+        err "检测到已有集群，但本次运行没有 --fresh 授权; 拒绝优雅卸载"
+        err "  · 确认重装基座: 加 --fresh 重跑"
+        return 1
+    fi
     warn "检测到集群已存在 → 先执行「优雅覆盖」: 按安装登记反序卸载已装组件(设计 docs/graceful-overwrite/)"
     # 计划感知(I1): 本函数在 deploy-cluster 进程内执行, RUN_STEPS 为全局; 引擎据此跳过
     # "非本次计划"的拆除(尤其不含 ceph 时保留 Ceph 集群/OSD 数据; 与覆盖预检 _RUN_CEPH 同源)
@@ -848,8 +882,8 @@ plan_warn_base_redeploy() {
     for _k in "${RUN_STEPS[@]:-}"; do [ "${_k}" = "k8s_deploy" ] && _in=1; done
     [ "${_in}" = "1" ] || return 0
     [ "$(get_state k8s_deploy)" = "done" ] && return 0
-    echo "  ℹ 本次含 k8s_deploy: 目标集群**已存在**时即为覆盖安装(重跑 kubespray; 部署时另打印醒目提示)"
-    echo "     不想动集群 → --steps <组件>(计划里不含基座); 还要清掉本机断点状态 → --fresh"
+    echo "  ℹ 本次含 k8s_deploy: 目标集群**已存在**时会被拦停(交互 [Y/n] 也不再授权); 重装基座必须显式 --fresh"
+    echo "     不想动集群 → --steps <组件>(计划里不含基座); 清空状态并授权 reset → --fresh"
     return 0
 }
 
