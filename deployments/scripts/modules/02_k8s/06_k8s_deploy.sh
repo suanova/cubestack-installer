@@ -284,20 +284,16 @@ say "执行 kubespray 离线部署 (via cubestack-offline.sh) ..."
 # 透传 cluster.conf 的预加载镜像集合; 仅当显式定义了该变量(含空串=全量同步)才传递,
 # 否则由 cubestack-offline.sh 回退内置默认最小集合
 # 离线文件路径: OFFLINE_FILES_DIR(全局切换根目录) + CUBESTACK_LOCAL_REPO_DIR(完整路径, 最高优先)
-# ★ ceph 体系 = CEPH_ENABLED(internal 自建 CephCluster)或 CEPH_CSI_ENABLED(external 接入外部 Ceph):
+# ★ ceph 体系 = CEPH_MODE=internal/external(2026-11-20 单一开关):
 #   external 模式同样需要 rook/csi operator 镜像预加载(02_ceph 只装 operator 不建 CephCluster),
-#   故传给 cubestack-offline.sh 的 CEPH_ENABLED 取派生值 —— 否则离线集群 operator ImagePullBackOff
-#   (cubestack-offline.sh 仅当 CEPH_ENABLED=true 才把 ceph 镜像并入 preload-images.lst)。
-_CEPH_SYSTEM_ON=false
-[ "${CEPH_ENABLED:-false}" = "true" ] && _CEPH_SYSTEM_ON=true
-[ "${CEPH_CSI_ENABLED:-false}" = "true" ] && _CEPH_SYSTEM_ON=true
+#   故把 CEPH_MODE 原值传给 cubestack-offline.sh —— 非 none 即把 ceph 镜像并入 preload-images.lst。
 OFFLINE_ENV=(
     "CUBESTACK_KUBESPRAY_DIR=${KUBESPRAY_DIR}"
     "CUBESTACK_INVENTORY_DIR=${KUBESPRAY_INV_DIR}"
     "CUBESTACK_BASE_DIR=${KUBESPRAY_BASE_DIR:-${REPO_ROOT}/deployments/kubespray}"
     "OFFLINE_FILES_DIR=${OFFLINE_FILES_DIR}"
     "CUBESTACK_LOCAL_REPO_DIR=${LOCAL_REPO_DIR}"
-    "CEPH_ENABLED=${_CEPH_SYSTEM_ON}"
+    "CEPH_MODE=${CEPH_MODE:-none}"
     "CEPH_IMAGE_DIR=${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}"
     # 节点 SSH 用户透传(root|ubuntu 单一旋钮): 修 cubestack-offline.sh 里 ansible ping -u 的
     # 写死默认(ubuntu) —— 否则 SSH_USER=root 的集群在该连通性检查处必然失败(2026-10-15)。

@@ -65,7 +65,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator
 - `NODES`：节点列表；裸金属必须手动填写；
 - `SSH_DEFAULT_PASSWORD` / 节点独立密码；
 - `METALLB_POOL`：裸金属必须填写节点同网段空闲地址；
-- 组件开关：`CEPH_ENABLED`、`MULTUS_ENABLED`、`RDMA_ENABLED`、`GPU_OPERATOR_ENABLED` 等。
+- 组件开关：`CEPH_MODE=none|external|internal`、`MULTUS_ENABLED`、`RDMA_ENABLED`、`GPU_OPERATOR_ENABLED` 等。
 
 首次使用先复制模板：
 

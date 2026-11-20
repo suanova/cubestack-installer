@@ -21,7 +21,7 @@
 #   # DEFAULT: <0|1>           是否默认启用(0=需 --enable / TOGGLE / --steps)
 #   # REPEAT: <0|1>            1=可重复执行(每次执行且不写断点状态)
 #   # TOGGLE: <VAR> [VAR2...]  (可选) cluster.conf 变量名, 值为 true 时自动启用;
-#                              空格分隔多变量=OR(任一 true 即启用, 如 ceph: CEPH_ENABLED CEPH_CSI_ENABLED)
+#                              空格分隔多变量=OR(任一命中即启用); 支持枚举写法 VAR=v1,v2(如 ceph: CEPH_MODE=internal,external)
 #   # REQUIRES: <k1> [k2...]   (可选) 依赖模块: 执行前须已完成的模块 key 列表。
 #                              框架在 resolve_run_steps 后做稳定拓扑排序(无依赖模块保持
 #                              文件顺序), 保证新模块声明依赖即自动排对顺序, 无需改序号;
@@ -33,7 +33,7 @@
 #   # PHASE: addon
 #   # DEFAULT: 0
 #   # REPEAT: 0
-#   # TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED
+#   # TOGGLE: CEPH_MODE=internal,external
 #   # REQUIRES: k8s_deploy
 #
 # 模块内访问远端 kubectl 的统一入口(★ 必读):
@@ -170,6 +170,8 @@ declare -A MODULE_ALIAS=(
     [k8s]=k8s_deploy
     [scale]=k8s_scale
     [gpu_operator]=gpu_operator
+    # Ceph 单节点由 ceph 模块按 CEPH_TOPOLOGY 自动分发; 别名让 --steps ceph_single 也可用
+    [ceph_single]=ceph
     # 安装前环境检查(--steps pre-install-check 兼容用户习惯的连字符写法)
     [pre-install-check]=pre_install_check
     [preinstall_check]=pre_install_check
@@ -309,19 +311,34 @@ module_index() {
     return 1
 }
 
-# 模块是否应默认启用: DEFAULT=1 或 TOGGLE 变量为 true/1/yes/on
-# TOGGLE 支持空格分隔多变量(OR 语义): 任一变量为 true → 启用。
-# 例: ceph 模块 `TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED` —— internal 自建靠 CEPH_ENABLED,
-#     external(接入外部 Ceph, CEPH_ENABLED=false)靠 CEPH_CSI_ENABLED 调度 ceph 装 operator/csi-operator。
+# 模块是否应默认启用: DEFAULT=1 或 TOGGLE 命中。
+# TOGGLE 支持空格分隔多变量(OR 语义): 任一变量命中 → 启用。
+# 两种写法:
+#   · 布尔: `TOGGLE: XXX_ENABLED` —— 值为 true/1/yes/on 时启用;
+#   · 枚举: `TOGGLE: CEPH_MODE=internal,external` —— 值(大小写不敏感)在逗号列表即启用。
+#     --enable 持久化时写列表**第一个值**(见 deploy-cluster.sh _enable_persist)。
+# 例: ceph 模块 `TOGGLE: CEPH_MODE=internal,external` —— none 不调度, 单/多节点由拓扑再分发。
 module_default_on() {
-    local i="$1" tgl val
+    local i="$1" tgl val _var _vals
     [ "${MODULE_DEFAULT[$i]:-0}" = "1" ] && return 0
     tgl="${MODULE_TOGGLE[$i]:-}"
     [ -n "${tgl}" ] || return 1
     for tgl in ${tgl}; do
-        val="${!tgl:-false}"
-        case "${val,,}" in
-            true|1|yes|on) return 0 ;;
+        case "${tgl}" in
+            *=*)
+                _var="${tgl%%=*}"
+                _vals="${tgl#*=}"
+                val="$(printf '%s' "${!_var:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+                case ",${_vals,,}," in
+                    *",${val},"*) return 0 ;;
+                esac
+                ;;
+            *)
+                val="${!tgl:-false}"
+                case "${val,,}" in
+                    true|1|yes|on) return 0 ;;
+                esac
+                ;;
         esac
     done
     return 1
@@ -968,9 +985,22 @@ print_undeployed_summary() {
         fi
         alloff=1; vars=""
         for k in ${tgl}; do
-            _v="${!k:-<未设置>}"
-            vars="${vars}${vars:+,}${k}=${_v}"
-            case "${_v}" in true|1|yes|on) alloff=0 ;; esac
+            case "${k}" in
+                *=*)
+                    # 枚举 TOGGLE: VAR=v1,v2
+                    _v="${k%%=*}"
+                    _v="${!_v:-<未设置>}"
+                    vars="${vars}${vars:+,}${k%%=*}=${_v}"
+                    case ",${k#*=}," in
+                        *",$(printf '%s' "${_v}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'),"*) alloff=0 ;;
+                    esac
+                    ;;
+                *)
+                    _v="${!k:-<未设置>}"
+                    vars="${vars}${vars:+,}${k}=${_v}"
+                    case "${_v}" in true|1|yes|on) alloff=0 ;; esac
+                    ;;
+            esac
         done
         if [ "${alloff}" = "1" ]; then
             script="${MODULES_DIR}/${MODULE_SCRIPT[$i]}"
@@ -1056,12 +1086,12 @@ print_plan() {
     # Ceph 启用提示(精简一行; 部署开始前由 deploy-cluster.sh 红底列出 节点+裸盘(internal)
     # 或外部连接参数(external)并询问 [Y/n], 避免两处重复 —— 此处仅供 --list 只读场景知悉
     # ceph 将启用, 不执行检测/确认)
-    if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
-        if [ "${CEPH_MODE:-internal}" = "external" ]; then
+    if [ "${CEPH_MODE:-none}" != "none" ]; then
+        if [ "${CEPH_MODE}" = "external" ]; then
             echo "  ⚠ Ceph 启用(CEPH_MODE=external 接入外部 Ceph); 部署开始前会红底列出外部连接参数并询问 [Y/n]"
             echo "    CEPH_ENV_CONFIRM_SLEEP=0 跳过确认(核对 external-ceph.env / CEPH_MONITORS; --list 仅提示)"
         else
-            echo "  ⚠ CEPH_ENABLED=true → Ceph(ceph/ceph_csi)将启用; 部署开始前会红底列出存储节点+磁盘分类并询问 [Y/n]"
+            echo "  ⚠ CEPH_MODE=${CEPH_MODE} → Ceph(ceph/ceph_csi)将启用; 部署开始前会红底列出存储节点+磁盘分类并询问 [Y/n]"
             echo "    CEPH_CONFIRM_SLEEP=0 跳过确认(空闲/上次 Ceph 占用/在用/混合 分类 + 判定证据, 防覆盖在用盘)"
         fi
     fi

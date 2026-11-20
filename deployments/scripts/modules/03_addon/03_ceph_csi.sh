@@ -6,7 +6,7 @@
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 0
-# TOGGLE: CEPH_CSI_ENABLED
+# TOGGLE: CEPH_MODE=internal,external
 # REQUIRES: ceph k8s_deploy
 # UNINSTALL: 1
 # 说明:
@@ -17,10 +17,10 @@
 #     运行列表时)会被拓扑排序浮到 k8s_deploy 之前(历史事故: ceph_csi 排在 k8s_deploy 前卡死)。
 #   · 设计: rook v1.21 中 CSI 由 csi-operator.yaml + operator 调和自动部署(ceph-csi-operator);
 #     本模块负责"存储供给层"(对齐 docs §7 资源设计):
-#     · CephBlockPool rbd-pool(3 副本/host 故障域/min_size 2)
+#     · CephBlockPool rbd-pool(多节点 3 副本/host; 单节点 1 副本/osd; 由拓扑渲染)
 #     · RBD StorageClass 三变体: ceph-rbd-ephemeral(WFFC/Delete, 默认) /
 #       ceph-rbd-ephemeral-immediate(Immediate/Delete) / ceph-rbd-durable(WFFC/Retain)
-#     · CEPHFS_ENABLED=true → CephFilesystem cephfs(activeCount 2/热备/防误删)+
+#     · CEPHFS_ENABLED=true → CephFilesystem cephfs(多节点 activeCount 2/热备; 单节点 1/无热备)+
 #       StorageClass cephfs-ephemeral(Delete/Immediate) / cephfs-durable(Retain/Immediate)
 #       + subvolume groups ephemeral/durable(§9.1 工作区/平台共享划分)
 #     · CEPH_RGW_ENABLED=true → CephObjectStore s3-store(preservePoolsOnDelete, min_size 2)
@@ -32,12 +32,12 @@
 #   · registry 后端(需求 6): 把 REGISTRY_STORAGE_CLASS 设为 ceph-block 后,
 #     registry 的 PVC 走 ceph RBD —— 本模块须在 registry 配置模块之前执行(设计顺序见 docs/ceph-rook.md)。
 #   · 参考: docs/ceph-rook.md
-# 数据源: cluster.conf (CEPH_CSI_ENABLED / CEPH_ENABLED / CEPH_* / CEPHFS_ENABLED / CEPH_RGW_ENABLED /
+# 数据源: cluster.conf (CEPH_MODE / CEPH_TOPOLOGY / CEPH_* / CEPHFS_ENABLED / CEPH_RGW_ENABLED /
 #         CEPH_EXTERNAL_EXPOSE / CEPH_EXTERNAL_EXPOSE_MODE / CEPH_RGW_EXPOSE_MODE /
 #         CEPH_EXTERNAL_PROVISION_SMOKE / SERVICE_EXPOSE_MODE / NODES;
 #         external CephFS 双角色: CEPHFS_USER/CEPHFS_KEYRING(provisioner) + CEPHFS_NODE_USER/
 #         CEPHFS_NODE_KEYRING(node, 2026-09-10 Bug A))
-# 用法:   sudo ./deploy-cluster.sh --enable ceph_csi  或  CEPH_CSI_ENABLED=true
+# 用法:   sudo ./deploy-cluster.sh --enable ceph_csi  或  cluster.conf 设 CEPH_MODE=internal/external
 # ============================================================
 set -euo pipefail
 
@@ -59,8 +59,12 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
                ceph-rbd-durable cephfs-ephemeral cephfs-durable rook-ceph-bucket; do
         SSH "timeout 30 ${K} delete storageclass ${_sc} --ignore-not-found --wait=false >/dev/null 2>&1" </dev/null || true
     done
-    if [ "${CEPH_MODE:-internal}" = "external" ]; then
-        # CephConnection/ClientProfile 是外部接入声明; 删除后外部 Ceph 本体与数据不变。
+    # 活态判定: 集群内存在 external CephCluster(或配置为 external)才清理接入声明;
+    # 内部集群 rook-ceph 由 ceph 模块的 ceph-cleanup 负责, 这里绝不触碰。
+    _cc_ext_live="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster \
+        -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers 2>/dev/null) || true )"
+    _cc_ext_live="$(printf '%s\n' "${_cc_ext_live}" | awk '$2=="true"{print $1}' | tr '\n' ' ')"
+    if [ -n "${_cc_ext_live}" ] || [ "${CEPH_MODE:-none}" = "external" ]; then
         SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete cephcluster rook-ceph-external --ignore-not-found --wait=false >/dev/null 2>&1" </dev/null || true
         SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete cephconnection ceph-connection --ignore-not-found --wait=false >/dev/null 2>&1" </dev/null || true
         SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete clientprofile ceph-connection --ignore-not-found --wait=false >/dev/null 2>&1" </dev/null || true
@@ -68,12 +72,12 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     exit 0
 fi
 
-# ---- 开关 ----
-[ "${CEPH_CSI_ENABLED:-false}" = "true" ] || { say "CEPH_CSI_ENABLED=false, 跳过 Ceph CSI"; exit 0; }
-# internal(自建 CephCluster)要求 CEPH_ENABLED=true; external(仅接入外部 Ceph)已由 CEPH_CSI_ENABLED=true 放行。
-if [ "${CEPH_MODE:-internal}" != "external" ] && [ "${CEPH_ENABLED:-false}" != "true" ]; then
-    say "CEPH_ENABLED=false, 跳过 Ceph CSI(无 Ceph 存储底座)"; exit 0;
-fi
+# ---- 开关(2026-11-20 单一开关 CEPH_MODE) ----
+case "${CEPH_MODE:-none}" in
+    none) say "CEPH_MODE=none, 跳过 Ceph CSI"; exit 0 ;;
+    internal|external) : ;;
+    *) err "CEPH_MODE 非法: '${CEPH_MODE}'"; exit 1 ;;
+esac
 
 init_remote_kubectl || exit 1
 
@@ -126,7 +130,7 @@ _ceph_cluster_kind() {
         return 0
     done <<< "${_list}"
     # 确认不存在 internal rook-ceph 后的配置回退
-    if [ "${CEPH_MODE:-internal}" = "external" ]; then printf 'external'; return 0; fi
+    if [ "${CEPH_MODE:-none}" = "external" ]; then printf 'external'; return 0; fi
     printf 'none'
 }
 
@@ -169,6 +173,29 @@ external)
 esac
 unset _CEPH_KIND
 
+# ★ 2026-11-20 拓扑化参数: internal 模式按 CEPH_TOPOLOGY 选择单/多节点 profile,
+#   渲染同一套 RBD/CephFS/RGW 资源(仅副本/故障域/MDS/RGW 数量不同):
+#   单节点 size=1/min_size=1/failureDomain=osd/requireSafeReplicaSize=false/
+#          MDS active=1/无热备/RGW=1
+#   多节点 size=3/min_size=2/failureDomain=host/requireSafeReplicaSize=true/
+#          MDS active=2/热备/RGW=2
+#   用户显式覆盖(CEPH_POOL_REPLICAS 等)由 ceph_apply_effective_spec 尊重并校验。
+if [ "${_CEPH_EXTERNAL}" = "0" ]; then
+    _csi_host_count="$(ceph_storage_host_count)"
+    if ! _csi_topo="$(ceph_topology_resolve "${CEPH_TOPOLOGY:-auto}" "${_csi_host_count}" "${CEPH_MIN_NODES:-3}")"; then
+        err "Ceph 拓扑不满足: ${_csi_topo}"
+        err "  可选: ① 调整 CEPH_NODES/CEPH_TOPOLOGY; ② CEPH_MODE=external 接入外部 Ceph"
+        exit 1
+    fi
+    ceph_apply_effective_spec "${_csi_topo}" || exit 1
+    CEPH_POOL_REPLICAS="${CEPH_EFF_POOL_REPLICAS}"
+    CEPH_POOL_MIN_SIZE="${CEPH_EFF_POOL_MIN_SIZE}"
+    # ceph-expose-external.sh 作为子进程消费(单节点 size=1 必须传下去, 否则外部专用池回退 3)
+    export CEPH_POOL_REPLICAS CEPH_POOL_MIN_SIZE
+    say "  存储供给拓扑=${_csi_topo}: size=${CEPH_EFF_POOL_REPLICAS}/${CEPH_EFF_POOL_MIN_SIZE} 故障域=${CEPH_EFF_FAILURE_DOMAIN} MDS=${CEPH_EFF_MDS_ACTIVE_COUNT} RGW=${CEPH_EFF_RGW_INSTANCES}"
+    unset _csi_host_count _csi_topo
+fi
+
 # ★ 存储供给层 YAML 从 rook/{rbd,cephfs,rgw}/ 目录文件读取(§7 资源设计, 单一事实来源),
 #   经 sed 替换模板变量 __NAMESPACE__/__REPLICAS__/__MIN_SIZE__/__STORAGE_LABEL_*__ 后 apply。
 #   __STORAGE_LABEL_KEY__ / __STORAGE_LABEL_VALUE__: MDS/RGW 的 nodeAffinity(钉在存储节点, 2026-09-29)。
@@ -180,6 +207,11 @@ _ceph_yaml_file() {   # <subdir/file.yaml> [<file2.yaml>...] → 各文件变量
         out="${out}$(sed -e "s|__NAMESPACE__|${CEPH_NAMESPACE}|g" \
             -e "s|__REPLICAS__|${CEPH_POOL_REPLICAS}|g" \
             -e "s|__MIN_SIZE__|${CEPH_POOL_MIN_SIZE}|g" \
+            -e "s|__FAILURE_DOMAIN__|${CEPH_EFF_FAILURE_DOMAIN:-host}|g" \
+            -e "s|__REQUIRE_SAFE_REPLICA_SIZE__|${CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE:-true}|g" \
+            -e "s|__MDS_ACTIVE_COUNT__|${CEPH_EFF_MDS_ACTIVE_COUNT:-2}|g" \
+            -e "s|__MDS_ACTIVE_STANDBY__|${CEPH_EFF_MDS_ACTIVE_STANDBY:-true}|g" \
+            -e "s|__RGW_INSTANCES__|${CEPH_EFF_RGW_INSTANCES:-2}|g" \
             -e "s|__STORAGE_LABEL_KEY__|${_CEPH_SL_KEY}|g" \
             -e "s|__STORAGE_LABEL_VALUE__|${_CEPH_SL_VAL}|g" "${base}/${f}")"$'\n---\n'
     done
@@ -851,7 +883,7 @@ spec:
     unset _SMOKE_OK _smoke SMOKE_YAML _rbd_sc _cephfs_sc _cephfs_on
 }
 
-say "[2/4] 创建 CephBlockPool rbd-pool(3 副本 / host 故障域 / min_size ${CEPH_POOL_MIN_SIZE})..."
+say "[2/4] 创建 CephBlockPool rbd-pool(${CEPH_EFF_POOL_REPLICAS:-${CEPH_POOL_REPLICAS:-3}} 副本 / ${CEPH_EFF_FAILURE_DOMAIN:-host} 故障域 / min_size ${CEPH_POOL_MIN_SIZE})..."
 # ★ 外部 Ceph 模式(无集群内 CephCluster): 经 ceph-csi-operator 的 CephConnection 连外部集群,
 #   不创建集群内 pool/fs(外部集群已有), 创建指向外部集群的 6 个默认 StorageClass
 #   (与集群内模式同名的 SC 集合, 供应用/平台无差别使用)。

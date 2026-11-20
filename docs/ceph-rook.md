@@ -50,10 +50,10 @@ sudo ./deployments/scripts/tools/k8s/rook-fetch-manifests.sh
 
 ## 3. 启用与部署顺序
 
-cluster.conf:
+cluster.conf(单一开关, 大小写不敏感):
 ```bash
-CEPH_ENABLED=true
-CEPH_CSI_ENABLED=true
+CEPH_MODE=internal                         # none=不装 | external=仅CSI接外部 | internal=集群内Ceph+CSI
+CEPH_TOPOLOGY=auto                         # auto=1台走单节点、>=3台走多节点 | single | multi
 # CEPH_NODES= "cubestack-k8s-master01,cubestack-k8s-worker01"  # 显式指定(优先); 留空则按 CEPH_NODE_ROLE 选, 默认 master
 # REGISTRY_STORAGE_CLASS=ceph-block        # registry 后端走 ceph(替代 local-path)
 # LOCAL_PATH_ENABLED=false                 # 建议: registry 走 ceph 后彻底不装 local-path
@@ -87,17 +87,16 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps ceph,ceph_csi
 
 ### 3.1 双模式: 集群内 Rook-Ceph / 外部已有 Ceph(CEPH_MODE)
 
-`CEPH_MODE` 统一开关二选一(默认 internal, 兼容旧配置自动迁移):
+`CEPH_MODE` 统一开关三选一(默认 `none`, 大小写不敏感; 兼容旧配置自动迁移):
 
 | 模式 | CEPH_MODE | 行为 |
 |---|---|---|
-| **集群内(默认, 现有实现)** | `internal` | 部署 CephCluster CR + 本地 OSD(裸盘检测/确认/15 OSD), registry 走集群内 ceph-block |
+| **关闭(默认)** | `none` | 不部署 Ceph 集群/CSI, registry 走 local-path |
+| **集群内(单/多节点)** | `internal` | 部署 CephCluster CR + 本地 OSD(裸盘检测/确认); 拓扑按 `CEPH_TOPOLOGY`(1 台=单节点, ≥3 台=多节点); registry 走集群内 ceph-block |
 | **外部接入** | `external` | **不创建集群内 CephCluster**, 02 仅部署 rook operator/csi-operator; 03 经 ceph-csi-operator 的 `CephConnection` 连外部已有 Ceph, 建指向外部的 `StorageClass ceph-block` |
 
 **external 模式配置**(cluster.conf):
 ```bash
-CEPH_ENABLED=true
-CEPH_CSI_ENABLED=true
 CEPH_MODE=external
 CEPH_MONITORS="192.168.100.21:6789,192.168.100.22:6789"   # 外部 Ceph monitors(必填)
 CEPH_POOL="rbd"                                    # 外部 RBD pool(外部集群已有)
@@ -207,8 +206,6 @@ sudo ./deploy-cluster.sh --steps verify_ceph                        # ⑨ 自动
 1. 打开 `cluster.conf`, 确认关键项:
    ```bash
    CEPH_MODE="internal"                        # 集群 A = 自建 Ceph
-   CEPH_ENABLED=true
-   CEPH_CSI_ENABLED=true
    CEPH_EXTERNAL_EXPOSE=true                # 默认开: 部署完自动对外暴露 + 导出配置
    CEPH_RGW_ENABLED=true                    # 可选: 需要 S3 时
    CEPHFS_ENABLED=true                      # 可选: 需要外部 CephFS 时(给 B 提供 cephfs-ephemeral/durable)
@@ -259,8 +256,6 @@ python3 create-external-cluster-resources.py --rbd-data-pool-name rbd-pool \
 
 ```bash
 CEPH_MODE=external
-CEPH_ENABLED=true                 # 让 02 部署 operator/csi-operator(03 官方导入的前提)
-CEPH_CSI_ENABLED=true
 CEPH_EXTERNAL_ENV_FILE=""         # 留空 = 自动探测默认目录 deployments/config/external-ceph.env
 ```
 
@@ -305,9 +300,7 @@ Ctrl-C 修正配置再重跑, 不必等整轮 K8s 部署跑完才发现(02_ceph 
 把 A 导出的 `external-ceph-self-define-access.conf` 关键值拷入下述字段(只改这些):
 
 ```bash
-CEPH_MODE=external                          # 切到外部接入
-CEPH_ENABLED=true                            # 让 02/03 模块运行(02 会 "仅部署 operator/csi-operator")
-CEPH_CSI_ENABLED=true
+CEPH_MODE=external                          # 切到外部接入(02 会 "仅部署 operator/csi-operator")
 # --- 以下来自集群 A 的 external-ceph-self-define-access.conf(按实际值替换) ---
 CEPH_MONITORS="10.244.1.31:30100,10.244.1.31:30101,10.244.1.31:30102"   # A 导出的 mon 端点(规律端口)
 CEPH_POOL="cubestack-ext-rbd-pool"          # pool 必须与 A 导出一致
@@ -553,17 +546,61 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 
 ### 3.2 条件不足自动回退 local-path(CEPH_FALLBACK_TO_LOCALPATH)
 
-`CEPH_ENABLED=true` 但实际不具备 ceph 安装条件时,默认**硬失败并提示**(防掩盖配置错误)。
-设 `CEPH_FALLBACK_TO_LOCALPATH=true` 可让部署**自动降级到 local-path 模式**:
+`CEPH_MODE=internal/external` 但实际不具备安装条件时,**默认回退 local-path**
+(`CEPH_FALLBACK_TO_LOCALPATH` 默认 `true`; 设 `false` 恢复硬失败):
 
-- 预检阶段检测条件(internal: rook manifest / 存储节点≥CEPH_MIN_NODES / 显式 CEPH_DATA_DISKS /
-  lvm2 离线包; external: CEPH_MONITORS + CEPH_KEYRING)
-- 不足 → 自动置 `REGISTRY_STORAGE_CLASS=local-path` + `LOCAL_PATH_ENABLED=true` + 跳过 ceph/ceph_csi
+- 预检阶段(在优雅覆盖/teardown **之前**)真实探测:
+  - internal: rook manifest / 拓扑节点数(单节点 1 台、多节点 ≥`CEPH_MIN_NODES`)/
+    逐节点 SSH 磁盘分类(空闲 ∪ 旧 Ceph 盘)/ lvm2 / 根盘可用空间
+  - external: `external-ceph.env` 必填项,或手填 `CEPH_MONITORS` + `CEPH_USER` + `CEPH_KEYRING`
+- 不足 → 红底横幅列出不满足项,本次运行置 `CEPH_MODE=none` +
+  `REGISTRY_STORAGE_CLASS=local-path` + `LOCAL_PATH_ENABLED=true`,
+  重新解析执行计划(移除 ceph 相关模块、纳入 local_path)
 - registry 等下游用 local-path 正常部署, 部署不中断
-- 条件备齐后: 设回 `CEPH_ENABLED=true` + `CEPH_FALLBACK_TO_LOCALPATH=false` 重跑即可
+- 条件备齐后: 把 cluster.conf 改回 `CEPH_MODE=internal`(或 external)重跑即可
 
 > ⚠ 回退在 k8s_deploy **之前**的预检阶段生效, 保证 local-path-provisioner 随 k8s 一起部署;
 > 若 k8s_deploy 已跑过(local-path 未装), 回退后需 `--fresh` 或手工补 local-path SC。
+> ⚠ 回退运行**不会**把旧 Ceph 集群当作计划内组件销毁(保护 OSD 数据)。
+
+### 3.5 单节点 Ceph(CEPH_TOPOLOGY=auto/single, 2026-11-20)
+
+`CEPH_MODE=internal` 时按 `CEPH_TOPOLOGY` 选择拓扑:
+
+| 存储节点数 | `auto` 结果 | 说明 |
+|---|---|---|
+| 1 | `single` | 自动 exec `tools/k8s/ceph-single-node.sh` |
+| ≥3 | `multi` | 原多节点流程(行为不变) |
+| 0 / 2 | 不满足 | 回退 local-path(默认); 2 台可用 `CEPH_NODES` 指定其中 1 台走单节点 |
+
+`single` 也可显式指定(必须恰好 1 台存储节点)。单节点使用独立入口脚本,但**复用同一套
+Rook 部署引擎**(`02_ceph.sh` 的 `ceph_engine_main`),不存在两份会漂移的逻辑;差异只在 profile:
+
+| 参数 | 单节点 | 多节点 |
+|---|---|---|
+| mon / mgr | 1 / 1 | 3 / 2 |
+| pool size / min_size | 1 / 1 | 3 / 2 |
+| failureDomain | **osd** | host |
+| requireSafeReplicaSize | false(size<3) | true |
+| CephFS MDS | activeCount=1, 无热备 | activeCount=2 + 热备 |
+| RGW instances | 1 | 2 |
+
+- 默认值可通过 `CEPH_MON_COUNT`(单节点强制 1)、`CEPH_MGR_COUNT`、`CEPH_POOL_REPLICAS`、
+  `CEPH_POOL_MIN_SIZE`、`CEPH_POOL_FAILURE_DOMAIN`、`CEPHFS_MDS_ACTIVE_COUNT`、
+  `CEPHFS_MDS_ACTIVE_STANDBY`、`CEPH_RGW_INSTANCES` 覆盖(留空=按拓扑 auto)。
+- 单节点 `size>1` 仅在本机有足够多块盘且 `failureDomain=osd` 时有效;引擎按**总磁盘数**校验。
+- StorageClass 与多节点完全一致(`ceph-rbd-ephemeral` 为默认 SC),平台/应用无感。
+- ⚠ 单节点是**降级拓扑**(无跨主机冗余);生产建议 3 节点起。
+- 优雅卸载/覆盖安装与多节点共用同一 live-state 安全序(`ceph-cleanup.sh --delete-cluster`)。
+- ⚠ 拓扑切换(单↔多)会走覆盖安装: 默认 `CEPH_PRE_CLEANUP_EXISTING=true` 删除旧集群并清盘;
+  想保留旧 OSD 数据认领, 设 `CEPH_PRE_CLEANUP_EXISTING=false` 并确保旧 mon secret 仍在。
+
+```bash
+# 单节点示例(cluster.conf)
+CEPH_MODE=internal
+CEPH_TOPOLOGY=auto        # 或 single
+CEPH_NODES="node1"        # 可选; 留空按 CEPH_NODE_ROLE(默认 master)
+```
 
 ## 9. 新设计指引(§9-§21, 存储资源已文件化)
 
@@ -589,7 +626,7 @@ kubectl delete -f deployments/cubestack-addon/rook/operator.yaml  # 完全卸载
 ### §12 CephFS 宿主机共享挂载(cephfs_mount, 默认随 CephFS 启用)
 把 CephFS 内子目录(默认 `models`)挂到**每台节点**的宿主机路径(默认 `/mnt/cephfs/models`),
 供宿主机进程与容器(hostPath)共享模型等大文件。模块 `03_addon/07_cephfs_mount.sh`,
-默认随 `CEPHFS_ENABLED=true` 启用(`CEPHFS_ENABLED` 本身默认跟随 `CEPH_CSI_ENABLED`,
+默认随 `CEPHFS_ENABLED=true` 启用(`CEPHFS_ENABLED` 默认 true, `CEPH_MODE=none` 时由 load_config 强制关闭,
 Ceph 全关时不会排进部署计划);单独执行: `sudo ./deploy-cluster.sh --steps cephfs_mount`。
 
 **实现方式**(节点无需安装 `ceph-common`):

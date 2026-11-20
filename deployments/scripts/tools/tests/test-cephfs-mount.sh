@@ -5,7 +5,7 @@
 #   ① 模块/清单/配置默认值存在且元数据合规
 #   ①b 调度: Ceph 全关时计划里**不得**出现 cephfs_mount(2026-10-22 用户实机)
 #   ② 门禁: CEPHFS_MOUNT_ENABLED=false → 跳过(不 apply)
-#   ②b Ceph 全关(CEPH_ENABLED/CEPH_CSI_ENABLED=false): 默认不启用、不预检、不发 SSH
+#   ②b Ceph 全关(CEPH_MODE=none): 默认不启用、不预检、不发 SSH
 #   ②c 门禁兜底: 即使 CEPHFS_MOUNT_ENABLED 被显式误开, Ceph 未部署也不得去预检
 #   ③ internal 模式渲染: mon 归一化 / Secret / DaemonSet 关键字段(privileged + 双向传播 + 目标路径)
 #   ④ 全节点真实验证命令覆盖(NODES 中每台都发 findmnt/探针)
@@ -43,8 +43,7 @@ NODES=(
 SSH_USER="root"
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="true"
-CEPH_CSI_ENABLED="true"
+CEPH_MODE="internal"
 CEPH_MODE="internal"
 CEPHFS_ENABLED="true"
 EOF
@@ -59,8 +58,7 @@ NODES=(
 SSH_USER="root"
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="false"
-CEPH_CSI_ENABLED="false"
+CEPH_MODE="none"
 EOF
 
 # 显式误开 CEPHFS_MOUNT_ENABLED、但 Ceph 未部署: 模块自身也必须兜底跳过。
@@ -71,8 +69,7 @@ NODES=(
 SSH_USER="root"
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="false"
-CEPH_CSI_ENABLED="false"
+CEPH_MODE="none"
 CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
 EOF
@@ -87,8 +84,7 @@ NODES=(
 SSH_USER="root"
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="false"
-CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
 CEPH_MODE="external"
 CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
@@ -115,8 +111,7 @@ NODES=(
 SSH_USER="root"
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="false"
-CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
 CEPH_MODE="external"
 CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
@@ -143,8 +138,7 @@ NODES=(
 SSH_USER="root"
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="false"
-CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
 CEPH_MODE="external"
 CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
@@ -168,8 +162,7 @@ NODES=(
 SSH_USER="root"
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="false"
-CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
 CEPH_MODE="external"
 CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
@@ -194,8 +187,7 @@ NODES=(
 SSH_USER="root"
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="false"
-CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
 CEPH_MODE="external"
 CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
@@ -214,8 +206,7 @@ NODES=(
 SSH_USER="root"
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="false"
-CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
 CEPH_MODE="external"
 CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
@@ -231,8 +222,7 @@ NODES=(
 SSH_USER="root"
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="false"
-CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
 CEPH_MODE="external"
 CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
@@ -254,8 +244,7 @@ NODES=(
 SSH_USER="root"
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="false"
-CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
 CEPH_MODE="external"
 CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
@@ -270,8 +259,7 @@ NODES=(
 SSH_USER="root"
 SSH_KEY_NAME="cubestack_k8s"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="false"
-CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
 CEPH_MODE="external"
 CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
@@ -394,8 +382,8 @@ chk_contains "ceph-cleanup 拒绝 external" "外部 Ceph 不是本安装器资�
 [ -f "${DEFAULTS}" ] && chk_contains "默认值 CEPHFS_MOUNT_PATH" 'CEPHFS_MOUNT_PATH="${CEPHFS_MOUNT_PATH:-/mnt/cephfs/models}"' "${DEFAULTS}"
 # 2026-10-22 用户实机: Ceph 两个总开关都 false, 计划里却仍有 cephfs_mount, 然后去预检
 # CephCluster 失败。默认值必须跟随 Ceph CSI, 不能无条件 true。
-[ -f "${DEFAULTS}" ] && chk_contains "CEPHFS_ENABLED 默认跟随 CEPH_CSI_ENABLED" 'CEPHFS_ENABLED="${CEPHFS_ENABLED:-${CEPH_CSI_ENABLED:-false}}"' "${DEFAULTS}"
-[ -f "${DEFAULTS}" ] && chk_contains "CEPH_RGW_ENABLED 默认跟随 CEPH_CSI_ENABLED" 'CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-${CEPH_CSI_ENABLED:-false}}"' "${DEFAULTS}"
+[ -f "${DEFAULTS}" ] && chk_contains "CEPHFS_ENABLED 默认开启(CEPH_MODE=none 时 load_config 强制 false)" 'CEPHFS_ENABLED="${CEPHFS_ENABLED:-true}"' "${DEFAULTS}"
+[ -f "${DEFAULTS}" ] && chk_contains "CEPH_RGW_ENABLED 默认开启(CEPH_MODE=none 时 load_config 强制 false)" 'CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-true}"' "${DEFAULTS}"
 [ -f "${DEFAULTS}" ] && chk_contains "CEPHFS_MOUNT_ENABLED 默认跟随 CEPHFS_ENABLED" 'CEPHFS_MOUNT_ENABLED="${CEPHFS_MOUNT_ENABLED:-${CEPHFS_ENABLED}}"' "${DEFAULTS}"
 [ -f "${DEFAULTS}" ] && chk_contains "只读挂载开关默认值" 'CEPHFS_MOUNT_READ_ONLY="${CEPHFS_MOUNT_READ_ONLY:-false}"' "${DEFAULTS}"
 [ -f "${DEFAULTS}" ] && chk_contains "挂载专用 env 文件开关" 'CEPHFS_MOUNT_ENV_FILE="${CEPHFS_MOUNT_ENV_FILE:-}"' "${DEFAULTS}"

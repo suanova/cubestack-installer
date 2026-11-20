@@ -125,7 +125,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 | **MetalLB** | 裸金属 LoadBalancer | Layer2: speaker 用 ARP 通告 VIP; controller 分配地址池 | 无云 LB 的裸金属/VM 环境标准方案; L2 通告与 IPIP 共存 | kubespray 内置 + `verify_metallb` 端到端验证 |
 | **metrics-server** | HPA 依赖的指标 | kubelet Summary API 聚合 | kubespray 标准组件, HPA 必需 | `METRICS_SERVER_ENABLED=true` |
 | **MetaX GPU Operator** | 沐曦 GPU 驱动/识别/调度 | helm chart + CRD(ClusterOperator)驱动组件 DaemonSet; 内置 registry 存放镜像 | 裸金属沐曦 GPU 必备; 离线 tar 加载 + helm 原生安装; master 有 GPU 时自动解除不可调度 | `GPU_OPERATOR_ENABLED=true` + 见 `docs/metax-gpu-operator.md` |
-| **Rook-Ceph** | 企业级分布式存储(块 RBD / 可选 CephFS / RGW) | Rook v1.21.1 operator + CephCluster(mon=3, host 故障域, 3 副本); OSD 用**自动分类出的可用盘**(`free ∪ ceph`, per-node devices); 节点经 label(`ceph-storage=rook-ceph`)选择 | 可承受节点故障的高可用存储(P1-6/7 刚需); 供 registry 等 PVC 后端(替代 local-path); 离线镜像 ctr import + lvm2 离线包 | `CEPH_ENABLED=true`/`CEPH_CSI_ENABLED=true` + `--steps ceph,ceph_csi` + 见 `docs/ceph-rook.md` |
+| **Rook-Ceph** | 企业级分布式存储(块 RBD / 可选 CephFS / RGW) | Rook v1.21.1 operator + CephCluster(多节点 mon=3, host 故障域, 3 副本; 单节点 mon=1/osd 故障域/1 副本); OSD 用**自动分类出的可用盘**(`free ∪ ceph`, per-node devices); 节点经 label(`ceph-storage=rook-ceph`)选择 | 可承受节点故障的高可用存储(P1-6/7 刚需); 供 registry 等 PVC 后端(替代 local-path); 离线镜像 ctr import + lvm2 离线包 | `CEPH_MODE=internal`(或 external 接外部 Ceph) + `--steps ceph,ceph_csi` + 见 `docs/ceph-rook.md` |
 
 > 详细部署/开关见 `cluster.conf` 组件开关段与 `deployments/scripts/modules/`。
 > 新增 operator 的步骤见 §7。

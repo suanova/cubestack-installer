@@ -272,6 +272,9 @@ PY
         if [ -n "${CUBESTACK_TEARDOWN_PLAN_STEPS:-}" ]; then
             _plan_ceph=0
             case " ${CUBESTACK_TEARDOWN_PLAN_STEPS//,/ } " in *" ceph "*) _plan_ceph=1 ;; esac
+            # ★ 2026-11-20 回退安全: Ceph 条件不足回退 local-path 时, 本次运行 CEPH_MODE=none,
+            #   即使 RUN_STEPS 里残留 ceph(显式 --steps)也不能销毁旧 Ceph 数据。
+            if [ "${CEPH_MODE:-none}" = "none" ]; then _plan_ceph=0; fi
             if [ "${_plan_ceph}" = "0" ]; then
                 _order="$(printf '%s\n' "${_order}" | awk -F'\t' '$1 != "ceph"')"
                 warn "本次计划不含 ceph → 跳过 Ceph 卸载(保留 Ceph 集群/OSD 数据; 与覆盖预检 _RUN_CEPH 语义一致)。如需销毁旧 Ceph: 把 ceph 纳入计划, 或手工 ceph-cleanup.sh --delete-cluster"

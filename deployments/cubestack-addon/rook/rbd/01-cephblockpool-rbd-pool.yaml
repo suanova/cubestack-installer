@@ -9,10 +9,10 @@ metadata:
   name: rbd-pool
   namespace: __NAMESPACE__
 spec:
-  failureDomain: host
+  failureDomain: __FAILURE_DOMAIN__   # multi=host; single=osd(单节点多盘)
   replicated:
     size: __REPLICAS__
-    requireSafeReplicaSize: true
+    requireSafeReplicaSize: __REQUIRE_SAFE_REPLICA_SIZE__   # size<3 必须 false(Rook 拒绝不安全副本)
   enableCrushUpdates: true
   parameters:
     min_size: "__MIN_SIZE__"

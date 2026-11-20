@@ -58,7 +58,7 @@
 |---|---|---|---|
 | P1-4 | Harbor 镜像仓库(**集群外私有仓库**, 环境准备阶段于宿主机就绪) | `HARBOR_ENABLED` | `01_env/04_harbor.sh` |
 | P1-5 | 沐曦 MetaX GPU Operator | `GPU_OPERATOR_ENABLED` | `03_addon/01_gpu_operator.sh` |
-| P1-6/7 | Ceph 存储集群 + Ceph CSI(RBD/RGW/CephFS) | `CEPH_ENABLED` / `CEPH_CSI_ENABLED` | `03_addon/06_ceph.sh` / `07_ceph_csi.sh` |
+| P1-6/7 | Ceph 存储集群 + Ceph CSI(RBD/RGW/CephFS) | `CEPH_MODE=internal\|external` | `03_addon/02_ceph.sh` / `03_ceph_csi.sh` |
 | P2-1 | Keycloak 统一认证 | `KEYCLOAK_ENABLED` | `03_addon/09_keycloak.sh` |
 | P2-2 | Kueue 队列治理(DEV-29) | `KUEUE_ENABLED` | `03_addon/10_kueue.sh` |
 | P2-3 | KubeVirt 虚拟机能力(DEV-35) | `KUBEVIRT_ENABLED` | `03_addon/11_kubevirt.sh` |
@@ -188,7 +188,7 @@ sudo bash deployments/scripts/modules/03_addon/05_harbor.sh
 sudo ./deployments/scripts/deploy-cluster.sh --with-scale
 ```
 
-**组件开关**(`cluster.conf` 中 `true/false`):`HARBOR_ENABLED` / `CEPH_ENABLED` / `CEPH_CSI_ENABLED` / `GPU_OPERATOR_ENABLED` / `KEYCLOAK_ENABLED` / `KUEUE_ENABLED` / `KUBEVIRT_ENABLED` / `LUSTRE_CSI_ENABLED` / `LOCAL_PATH_ENABLED`(默认 false) / `REGISTRY_ENABLED`(默认 0) 等(K8s 基座 `k8s_deploy` 恒随全量部署、扩容 `k8s_scale` 仅命令行触发, 均无开关)。
+**组件开关**(`cluster.conf` 中 `true/false`):`HARBOR_ENABLED` / `GPU_OPERATOR_ENABLED` / `KEYCLOAK_ENABLED` / `KUEUE_ENABLED` / `KUBEVIRT_ENABLED` / `LUSTRE_CSI_ENABLED` / `LOCAL_PATH_ENABLED`(默认 false) / `REGISTRY_ENABLED`(默认 0) 等; Ceph 用单一枚举开关 `CEPH_MODE=none|external|internal`(默认 none, 大小写不敏感)(K8s 基座 `k8s_deploy` 恒随全量部署、扩容 `k8s_scale` 仅命令行触发, 均无开关)。
 
 ---
 

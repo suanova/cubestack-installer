@@ -43,7 +43,7 @@
 #     遗留的 /opt/local-path-provisioner/pvc-*_kube-system_registry-pvc 孤儿目录(仅当无 PV/PVC
 #     引用且未挂载)。否则旧数据可能撑爆节点根盘 → kubelet DiskPressure → Ceph mon canary
 #     Pending → ceph 模块 900s 超时(实机 master03 65G)。
-# 数据源: cluster.conf (REGISTRY_DOMAIN / REGISTRY_IP / REGISTRY_PORT / REGISTRY_STORAGE_CLASS / REGISTRY_DISK_SIZE / CEPH_ENABLED / NODES)
+# 数据源: cluster.conf (REGISTRY_DOMAIN / REGISTRY_IP / REGISTRY_PORT / REGISTRY_STORAGE_CLASS / REGISTRY_DISK_SIZE / CEPH_MODE / NODES)
 # ============================================================
 set -euo pipefail
 
@@ -147,12 +147,12 @@ if [ "${REGISTRY_ENABLED:-0}" != "1" ] && [ "${REGISTRY_ENABLED:-false}" != "tru
 fi
 
 # 前置校验: registry 后端指定 ceph 但 Ceph 体系未启用 → PVC 永久 Pending, 直接中止给出指引
-# ceph 体系 = CEPH_ENABLED(internal 自建)或 CEPH_CSI_ENABLED(external 接入外部 Ceph), 任一 true 即可。
+# ceph 体系 = CEPH_MODE=internal/external(load_config 已归一化)。
 if [ -n "${REGISTRY_STORAGE_CLASS:-}" ] && [ "${REGISTRY_STORAGE_CLASS}" != "local-path" ] \
-    && [ "${CEPH_ENABLED:-false}" != "true" ] && [ "${CEPH_CSI_ENABLED:-false}" != "true" ]; then
-    err "REGISTRY_STORAGE_CLASS=${REGISTRY_STORAGE_CLASS} 但 Ceph 未启用(CEPH_ENABLED/CEPH_CSI_ENABLED 均非 true): registry 的 PVC 将永远 Pending"
-    err "  请任选其一: ① cluster.conf 设 CEPH_ENABLED=true(集群内自建, 需先准备 ceph 离线镜像/裸盘, 见 docs/ceph-rook.md);"
-    err "  ② CEPH_MODE=external + CEPH_CSI_ENABLED=true + CEPH_MONITORS/CEPH_KEYRING 接入外部 Ceph(见 docs/ceph-rook.md);"
+    && [ "${CEPH_MODE:-none}" = "none" ]; then
+    err "REGISTRY_STORAGE_CLASS=${REGISTRY_STORAGE_CLASS} 但 Ceph 未启用(CEPH_MODE=none): registry 的 PVC 将永远 Pending"
+    err "  请任选其一: ① cluster.conf 设 CEPH_MODE=internal(集群内自建, 需先准备 ceph 离线镜像/裸盘, 见 docs/ceph-rook.md);"
+    err "  ② CEPH_MODE=external + CEPH_MONITORS/CEPH_KEYRING 接入外部 Ceph(见 docs/ceph-rook.md);"
     err "  ③ 改回 REGISTRY_STORAGE_CLASS=local-path"
     exit 1
 fi

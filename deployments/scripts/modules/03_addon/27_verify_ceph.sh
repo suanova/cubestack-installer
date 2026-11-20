@@ -4,7 +4,7 @@
 # DESC: 端到端验证 Ceph(Rook)真正工作(非仅 pod running):
 #       ① Rook operator + ceph-csi Ready → ② CephCluster phase=Ready + ceph -s 无 HEALTH_ERR
 #       → ③ StorageClass ceph-block 存在 → ④ 建测试 RBD Block PVC + Pod dd 读写(真实 I/O)
-#       → ⑤ ceph osd 至少 3 up → ⑥ 清理(trap 兜底)
+#       → ⑤ ceph osd up(至少 1; 单节点 profile 为 1) → ⑥ 清理(trap 兜底)
 #       → ⑦ CephFS(RWX 文件 I/O, CEPHFS_ENABLED=true 时) → ⑧ RGW/S3(上传下载, CEPH_RGW_ENABLED=true 时)
 #       → ⑨ 对外暴露自检(mon/RGW *-external 可达 + 外部用户/pool, CEPH_EXTERNAL_EXPOSE=true 时)
 # PHASE: addon
@@ -12,13 +12,13 @@
 # REPEAT: 1
 # REQUIRES: ceph ceph_csi
 # 说明:
-#   · **验证模块不设 TOGGLE**(否则 CEPH_ENABLED=true 时会被安装流程自动启用);
+#   · **验证模块不设 TOGGLE**(否则 CEPH_MODE=internal/external 时会被安装流程自动启用);
 #     保持 DEFAULT:0, 仅由 --steps verify_ceph 在安装后单独执行。
-#   · 依赖: ceph 模块(02)与 ceph_csi 模块(03)已部署(CEPH_ENABLED=true / CEPH_CSI_ENABLED=true)。
+#   · 依赖: ceph 模块(02)与 ceph_csi 模块(03)已部署(CEPH_MODE=internal/external)。
 #   · ④ 用离线预加载 busybox 以 RBD 块设备(volumeMode: Block)dd 写入/读回,
 #     验证 CSI 供给 + 挂载 + 真实块 I/O; PVC storageClassName=ceph-block。
 #   · 参考: docs/ceph-rook.md §6(验证清单)
-# 数据源: cluster.conf (CEPH_ENABLED / CEPH_NAMESPACE / NODES / SSH_KEY_NAME)
+# 数据源: cluster.conf (CEPH_MODE / CEPH_NAMESPACE / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps verify_ceph
 # ============================================================
 set -euo pipefail
@@ -27,9 +27,14 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-# 开关检查: 未启用则跳过(不报错)
-[ "${CEPH_ENABLED:-false}" = "true" ] || { say "CEPH_ENABLED=false, 跳过 Ceph 验证"; exit 0; }
-[ "${CEPH_CSI_ENABLED:-false}" = "true" ] || { warn "CEPH_CSI_ENABLED=false(未建 StorageClass ceph-block); 仅验证 Ceph 集群本身"; }
+# 开关检查: CEPH_MODE=none/external 跳过(本模块验证的是**集群内** CephCluster rook-ceph;
+# external 模式没有该 CR, 沿用旧行为不在此验证)
+case "${CEPH_MODE:-none}" in
+    internal) : ;;
+    none)     say "CEPH_MODE=none, 跳过 Ceph 验证"; exit 0 ;;
+    external) say "CEPH_MODE=external(无集群内 CephCluster), 跳过 verify_ceph"; exit 0 ;;
+    *)        err "CEPH_MODE 非法: '${CEPH_MODE}'"; exit 1 ;;
+esac
 
 init_remote_kubectl || exit 1
 
@@ -69,7 +74,7 @@ grep -q 'HEALTH_OK' <<<"${CEPH_S}" && ok "    ceph -s HEALTH_OK ✓" || warn "  
 say "  ③ 检查 StorageClass ceph-block..."
 SC_OK="$( (SSH "${K} get sc ceph-block --no-headers 2>/dev/null" || true) )"
 [ -n "${SC_OK}" ] && ok "    StorageClass ceph-block 存在 ✓" \
-    || { warn "    StorageClass ceph-block 不存在(未部署模块 ceph_csi 或 CEPH_CSI_ENABLED=false); 跳过 ④ I/O 冒烟"; SC_OK=""; }
+    || { warn "    StorageClass ceph-block 不存在(未部署模块 ceph_csi 或 CEPH_MODE=none); 跳过 ④ I/O 冒烟"; SC_OK=""; }
 
 if [ -n "${SC_OK}" ]; then
     say "  ④ 创建测试 RBD Block PVC + Pod(busybox dd 真实块 I/O)..."
@@ -151,7 +156,7 @@ YAML
     fi
 fi
 
-say "  ⑥ OSD 检查(至少 3 up)..."
+say "  ⑥ OSD 检查(至少 1 up; 单节点=1, 多节点按实际 OSD)..."
 OSD_UP="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph osd tree 2>/dev/null" || true) | grep -c 'up' )"
 [ "${OSD_UP:-0}" -ge 1 ] && ok "    OSD up 节点/数量: ${OSD_UP}(ceph osd tree)" \
     || warn "    未检测到 up 的 OSD(ceph osd tree 无 up; 检查磁盘/lvm/镜像)"

@@ -386,17 +386,17 @@ ok "inventory 已更新"
 say "[3/3] 执行 kubespray 扩容 (via cubestack-offline.sh scale) ..."
 
 # ★ 2026-10-12(需求②): ceph 镜像随扩容预载到新节点 —— cubestack-offline 的预载清单仅当
-#   CEPH_ENABLED=true 才并入 ceph tar(rook/cephcsi 等), 而扩容路径此前从不传该变量
+#   CEPH_MODE!=none 才并入 ceph tar(rook/cephcsi 等), 而扩容路径此前从不传该变量
 #   → 新节点 ceph CSI nodeplugin ImagePullBackOff(2026-10-12 容器 d 实case)。
 #   取值 = conf 开关 OR 集群活态(rook-ceph 命名空间在即算 —— 覆盖 conf 关但集群跑着 ceph)。
-_CEPH_PRELOAD="false"
-if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
-    _CEPH_PRELOAD="true"
+_CEPH_PRELOAD_MODE="none"
+if [ "${CEPH_MODE:-none}" != "none" ]; then
+    _CEPH_PRELOAD_MODE="${CEPH_MODE}"
 elif [ -n "$(_cluster_has_rook_ceph)" ]; then
-    _CEPH_PRELOAD="true"
+    _CEPH_PRELOAD_MODE="internal"
     say "活态检测: 集群内 rook-ceph 在(conf 未开)→ ceph 镜像仍随本次扩容预载"
 fi
-if [ "${_CEPH_PRELOAD}" = "true" ]; then
+if [ "${_CEPH_PRELOAD_MODE}" != "none" ]; then
     say "ceph 镜像预载: 源 ${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}(新节点 containerd 就位后自动同步 + ctr import)"
 fi
 OFFLINE_ENV=(
@@ -405,8 +405,7 @@ OFFLINE_ENV=(
     "CUBESTACK_BASE_DIR=${KUBESPRAY_BASE_DIR:-${REPO_ROOT}/deployments/kubespray}"
     "OFFLINE_FILES_DIR=${OFFLINE_FILES_DIR}"
     "CUBESTACK_LOCAL_REPO_DIR=${LOCAL_REPO_DIR}"
-    "CEPH_ENABLED=${_CEPH_PRELOAD}"
-    "CEPH_CSI_ENABLED=${_CEPH_PRELOAD}"
+    "CEPH_MODE=${_CEPH_PRELOAD_MODE}"
     "CEPH_IMAGE_DIR=${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}"
     # 节点 SSH 用户透传(root|ubuntu 单一旋钮; 与 06_k8s_deploy 同口径 —— 修包装器里
     # ansible ping -u 的写死默认)

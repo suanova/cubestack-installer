@@ -57,11 +57,12 @@ K8S_API_VIP="${K8S_API_VIP:-}"                          # 留空=自动推导(�
 # → 网卡(KUBE_VIP_INTERFACE) / 进程级故障检测(KUBE_VIP_CP_DETECT) → cluster.defaults.conf【API 入口细节】节
 
 # ---- Ceph(存储底座 + 模式; 详细参数与凭据见 cluster.defaults.conf §4.3b) ----
-CEPH_ENABLED="${CEPH_ENABLED:-false}"                   # Ceph 存储底座(P1; 见 4.3)
-CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-false}"           # Ceph CSI RBD/RGW/CephFS(依赖 CEPH_ENABLED; 见 4.3)
-CEPH_MODE="${CEPH_MODE:-internal}"          # internal(默认, 集群内) | external(接入外部 Ceph)
-# → Ceph 子能力开关(CEPHFS_ENABLED / CEPH_RGW_ENABLED / CEPH_DASHBOARD_ENABLED)与 CEPH_FALLBACK_TO_LOCALPATH
-#   见 cluster.defaults.conf §4.3b
+# 唯一启停开关(大小写不敏感): none=不装 Ceph/CSI | external=仅 CSI 接外部 Ceph | internal=集群内 Ceph+CSI
+CEPH_MODE="${CEPH_MODE:-none}"
+# 拓扑(大小写不敏感): auto=存储节点 1 台走单节点、>=3 台走多节点 | single | multi
+CEPH_TOPOLOGY="${CEPH_TOPOLOGY:-auto}"
+# → 条件不足回退(CEPH_FALLBACK_TO_LOCALPATH, 默认 true)、子能力开关、凭据见 cluster.defaults.conf §4.3b
+
 
 # ---- 平台 Operator(由版本树提供) ----
 # 平台 operator 及其组件的模块、chart、镜像清单都随版本树(--release)分发; 本仓不含它们。

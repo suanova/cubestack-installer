@@ -13,8 +13,8 @@
 | 1 | Kubernetes(Kubespray部署) | 基于Kubespray完成集群部署,核心资源(StatefulSet/PVC/Service等)正常创建调度,集群基础环境稳定可用 | 0% | 未开始 | - |  |  | `modules/02_k8s/06_k8s_deploy.sh`(基座, 恒随全量部署) |
 | 4 | Docker Registry(Harbor) | 搭建可用镜像仓库,实现镜像推送、拉取、目录同步,保障集群业务镜像正常部署 | 0% | 未开始 | - |  |  | `modules/03_addon/05_harbor.sh` / `HARBOR_ENABLED`(集群外私有仓库,唯一方案) |
 | 5 | 沐曦MetaX GPU Operator | 完成GPU驱动部署、硬件识别、集群GPU资源调度,配套MetaX指标采集,保障GPU容器正常启动运行 | 100% | ✅ 已完成(2026-08-23) | - |  | 2026-08-23 | `modules/03_addon/06_gpu_operator.sh` / `GPU_OPERATOR_ENABLED`(详见 `docs/metax-gpu-operator.md`) |
-| 6 | Ceph 存储集群 | 完成Ceph底层存储集群部署、集群健康自检、存储池初始化,为上层CSI服务提供稳定存储底座 | 100% | ✅ 已完成(2026-09-06) | - |  | 2026-09-06 | `modules/03_addon/02_ceph.sh` / `CEPH_ENABLED`(Rook v1.21.1 + 自动检测裸盘 + node label) |
-| 7 | Ceph CSI(RBD/RGW/CephFS) | 部署CSI驱动,对接Ceph存储集群,实现三类存储卷正常创建、挂载、读写,集群StorageReady状态正常置位 | 100% | ✅ 已完成(2026-09-06) | - |  | 2026-09-06 | `modules/03_addon/03_ceph_csi.sh` / `CEPH_CSI_ENABLED` |
+| 6 | Ceph 存储集群 | 完成Ceph底层存储集群部署、集群健康自检、存储池初始化,为上层CSI服务提供稳定存储底座 | 100% | ✅ 已完成(2026-09-06) | - |  | 2026-09-06 | `modules/03_addon/02_ceph.sh` / `CEPH_MODE=internal`(Rook v1.21.1 + 自动检测裸盘 + node label) |
+| 7 | Ceph CSI(RBD/RGW/CephFS) | 部署CSI驱动,对接Ceph存储集群,实现三类存储卷正常创建、挂载、读写,集群StorageReady状态正常置位 | 100% | ✅ 已完成(2026-09-06) | - |  | 2026-09-06 | `modules/03_addon/03_ceph_csi.sh` / `CEPH_MODE` 自动调度 |
 
 **P1附属基础依赖(必过验收·极简核对):**
 
@@ -73,8 +73,8 @@
 | P1-1 | Kubernetes(Kubespray) | `02_k8s/06_k8s_deploy.sh` | 恒随全量部署(无开关) | ✅ 已实现 |
 | P1-4 | Docker Registry(Harbor) | `01_env/04_harbor.sh`(集群外私有仓库) | `HARBOR_ENABLED` | 🧩 伪代码占位 |
 | P1-5 | 沐曦 MetaX GPU Operator | `03_addon/06_gpu_operator.sh` | `GPU_OPERATOR_ENABLED` | ✅ 已完成(helm 原生安装 + 离线 tar 加载, 9 节点 69 GPU; 见 `docs/metax-gpu-operator.md`) |
-| P1-6 | Ceph 存储集群 | `03_addon/02_ceph.sh` | `CEPH_ENABLED` | ✅ 已完成(Rook v1.21.1 离线, 实机验证 HEALTH_OK 15 OSD; 见 `docs/ceph-rook.md`) |
-| P1-7 | Ceph CSI | `03_addon/03_ceph_csi.sh` | `CEPH_CSI_ENABLED` | ✅ 已完成(RBD/cephfs/rgw 三存储卷实测读写) |
+| P1-6 | Ceph 存储集群 | `03_addon/02_ceph.sh` | `CEPH_MODE=internal` | ✅ 已完成(Rook v1.21.1 离线, 实机验证 HEALTH_OK 15 OSD; 单节点自动 profile; 见 `docs/ceph-rook.md`) |
+| P1-7 | Ceph CSI | `03_addon/03_ceph_csi.sh` | `CEPH_MODE=internal\|external` | ✅ 已完成(RBD/cephfs/rgw 三存储卷实测读写; 单/多节点拓扑化渲染) |
 | P2-1 | Keycloak 统一认证 | `03_addon/08_keycloak.sh` | `KEYCLOAK_ENABLED` | 🧩 伪代码占位 |
 | P2-2 | Kueue 队列治理 | `03_addon/09_kueue.sh` | `KUEUE_ENABLED` | 🧩 伪代码占位 |
 | P2-3 | KubeVirt 虚拟机能力 | `03_addon/10_kubevirt.sh` | `KUBEVIRT_ENABLED` | 🧩 伪代码占位 |

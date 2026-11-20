@@ -94,7 +94,7 @@ modules/<NN_phase>/<NN>_<category>_<action>.sh
 # PHASE: addon                # 阶段: env | k8s | addon
 # DEFAULT: 0                  # 1=默认启用; 0=需 --enable / TOGGLE / --steps
 # REPEAT: 0                   # 1=可重复执行(每次执行且不写断点状态)
-# TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED   # (可选) cluster.conf 变量名(空格分隔多变量=OR), 值为 true/1 时自动启用
+# TOGGLE: CEPH_MODE=internal,external   # (可选) 布尔变量(空格分隔多变量=OR) 或枚举 VAR=v1,v2(值在列表即启用)
 # REQUIRES: k8s_deploy        # (可选) 依赖模块 key 列表(空格分隔), 执行前须已完成; 框架自动拓扑排序
 # UNINSTALL: 1                # (可选) 声明该模块可被 cluster-teardown 反序优雅卸载
 # 说明: <详细说明, 可选>

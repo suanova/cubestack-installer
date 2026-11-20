@@ -18,9 +18,9 @@
 | 控制面高可用 · 外部浮动 VIP | `KUBE_VIP_ENABLED` + `K8S_API_VIP` | **关**(需显式开) | §1.2 / §2.3 |
 | 对外负载均衡(LB Service) | `METALLB_ENABLED` + `METALLB_POOL` | 开 | §2.1 |
 | 服务暴露方式 | `SERVICE_EXPOSE_MODE` | `metallb`（生产默认；测试环境可显式设 `nodeport`） | §2.2 |
-| 分布式存储(Rook-Ceph) | `CEPH_ENABLED` / `CEPH_CSI_ENABLED` | 关(需显式开) | §3.1 |
-| 块存储 / 文件存储 / 对象存储(S3) | `CEPH_CSI_ENABLED` / `CEPHFS_ENABLED` / `CEPH_RGW_ENABLED` | 随 `CEPH_CSI_ENABLED` | §3.2–§3.4 |
-| 接入**外部已有** Ceph 集群 | `CEPH_MODE=external` + `external-ceph.env` | `internal` | §3.5 |
+| 分布式存储(Rook-Ceph) | `CEPH_MODE=internal` | 关(需显式开) | §3.1 |
+| 块存储 / 文件存储 / 对象存储(S3) | `CEPH_MODE` / `CEPHFS_ENABLED` / `CEPH_RGW_ENABLED` | 随 `CEPH_MODE` | §3.2–§3.4 |
+| 接入**外部已有** Ceph 集群 | `CEPH_MODE=external` + `external-ceph.env` | `none` | §3.5 |
 | RDMA 共享设备插件(IB/RoCE) | `RDMA_ENABLED` | **开** | §4 |
 | 沐曦(MetaX)GPU Operator | `GPU_OPERATOR_ENABLED` | **开** | §5 |
 
@@ -395,17 +395,18 @@ done | sort -u     # 只有 1 行 = 正常;多行 = 被多套集群共用
 
 ### 3.1 部署内部 Ceph 集群
 
-**开关组合**(`cluster.conf`;**两项默认都是关,要显式打开**):
+**开关**(`cluster.conf`;**默认 none, 要显式打开**):
 
 ```bash
-CEPH_ENABLED="${CEPH_ENABLED:-true}"          # ← 置 true:部署 Rook-Ceph 集群本体(CephCluster)
-CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-true}"  # ← 置 true:供给层(池 + StorageClass + 可选 CephFS/RGW)
+CEPH_MODE="internal"      # none=不装 | external=仅CSI接外部 Ceph | internal=集群内 Ceph+CSI
+CEPH_TOPOLOGY="auto"      # auto=存储节点 1 台走单节点、>=3 台走多节点 | single | multi
 ```
 
 | 决策项 | 配置键 | 默认 | 说明 |
 |---|---|---|---|
-| 模式 | `CEPH_MODE` | `internal` | **唯一开关**:`internal`(集群内自建)/ `external`(接入外部,见 §3.4) |
-| 存储节点 | `CEPH_NODES` / `CEPH_NODE_ROLE` / `CEPH_NODE_LABEL` | 空 / `master` / `ceph-storage=rook-ceph` | `CEPH_NODES` 非空则**优先级最高且不做角色过滤**;否则按角色从 `NODES` 里选。⚠ 存储节点数 < `CEPH_MIN_NODES`(默认 **3**)→ **不创建 CephCluster**(只 warn 不中断,表现为"静默没装") |
+| 模式 | `CEPH_MODE` | `none` | **唯一开关**(大小写不敏感):`none`(不装)/ `internal`(集群内自建)/ `external`(接入外部,见 §3.4) |
+| 拓扑 | `CEPH_TOPOLOGY` | `auto` | `auto`:存储节点 1 台→单节点 profile,≥3 台→多节点;2 台需用 `CEPH_NODES` 指定 1 台或调整 `CEPH_MIN_NODES` |
+| 存储节点 | `CEPH_NODES` / `CEPH_NODE_ROLE` / `CEPH_NODE_LABEL` | 空 / `master` / `ceph-storage=rook-ceph` | `CEPH_NODES` 非空则**优先级最高且不做角色过滤**;否则按角色从 `NODES` 里选。⚠ 多节点存储节点数 < `CEPH_MIN_NODES`(默认 **3**)→ 条件不足(默认回退 local-path) |
 | master 可调度 | `CEPH_ENABLE_MASTER_SCHEDULE` | `true` | 存储节点是 master 时,master 上默认带 `NoSchedule` 污点 → 模块**自动摘掉**(幂等);恢复:`kubectl taint nodes <master> node-role.kubernetes.io/control-plane=:NoSchedule` |
 | 用哪些盘 | `CEPH_DATA_DISK_POLICY` / `CEPH_DATA_DISKS` / `CEPH_DETECT_EXCLUDE` | `auto` / 空 / `^(sda\|sr0\|vda\|nbd[0-9]+)$` | `auto` 自动检测(**`free` ∪ `ceph`**,`inuse`/`mixed` 既不进 CR 也不清理);`explicit` 手工指定:`"node1:/dev/vdb,/dev/vdc;node2:/dev/vdb"` |
 | 部署前确认 | `CEPH_CONFIRM_SLEEP` | `60` | 红底列出"各节点磁盘按类分组 + 判定证据"并 sleep 供人工复核(生产别设 0) |
@@ -425,11 +426,11 @@ CEPH_CSI_ENABLED="${CEPH_CSI_ENABLED:-true}"  # ← 置 true:供给层(池 + Sto
 
 `verify_ceph` 九段断言:① Rook operator + ceph-csi Ready → ② `CephCluster phase=Ready` 且 `ceph -s` 无 `HEALTH_ERR` → ③ SC 存在 → ④ **RBD 块设备真实读写** → ⑤ ≥3 个 OSD up → ⑥ 清理兜底 → ⑦ **CephFS RWX 文件 I/O** → ⑧ **RGW/S3 上传下载** → ⑨ 对外暴露自检。
 
-**要开 CephFS / 对象存储**,打开后重跑 `ceph_csi`(两项默认跟随 `CEPH_CSI_ENABLED`;开启 CSI 时默认 true,Ceph 全关时不会启用):
+**要开 CephFS / 对象存储**,打开后重跑 `ceph_csi`(两项默认 true;`CEPH_MODE=none` 时 load_config 强制关闭):
 
 ```bash
-CEPHFS_ENABLED="${CEPHFS_ENABLED:-${CEPH_CSI_ENABLED:-false}}"   # RWX 共享文件系统(默认随 CSI)
-CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-${CEPH_CSI_ENABLED:-false}}" # S3 对象存储网关 RGW(默认随 CSI)
+CEPHFS_ENABLED="${CEPHFS_ENABLED:-true}"   # RWX 共享文件系统
+CEPH_RGW_ENABLED="${CEPH_RGW_ENABLED:-true}" # S3 对象存储网关 RGW
 ```
 
 > **CephFS 额外一步**:平台按 subvolume group 路由(`ephemeral` / `durable`),部署后补跑
@@ -489,7 +490,7 @@ kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph osd tree   # 【实机�
 ```
 
 > **内置 registry 的后端**:`REGISTRY_STORAGE_CLASS` 决定它走哪条 SC —— **默认自动跟随 Ceph**:
-> 启用了 Ceph(`CEPH_ENABLED` + `CEPH_CSI_ENABLED` 都为 true)时取 `ceph-block`(RBD 复制盘),否则取 `local-path`。
+> 启用了 Ceph(`CEPH_MODE=internal/external`)时取 `ceph-block`(RBD 复制盘),否则取 `local-path`。
 > 【实机】本环境 `registry-pvc` 10Gi 就绑在 `ceph-block`。
 > ⚠ 不要手工把它写成 `local-path`:Ceph 模式下 local-path provisioner 是**关的**(集群里没有该 SC),
 > registry PVC 会**永远 Pending**。要强制别的 SC 就显式赋值(优先级最高)。
@@ -567,10 +568,8 @@ aws --endpoint-url http://<节点IP>:<NodePort> s3 ls s3://demo/
 ```bash
 # 提供方(A 侧,内部模式):导出接入文件(含真实 keyring,永不入库)
 bash deployments/scripts/tools/k8s/ceph-expose-external.sh apply     # 生成 deployments/config/external-ceph.env
-# 消费方(B 侧):cluster.conf 只设三行
+# 消费方(B 侧):cluster.conf 只设两行
 CEPH_MODE=external
-CEPH_ENABLED=true                 # 让 02 部署 operator/csi-operator(官方导入的前提)
-CEPH_CSI_ENABLED=true
 CEPH_EXTERNAL_ENV_FILE=""         # 留空 = 自动探测 deployments/config/external-ceph.env
 ```
 B 侧检测到 env 文件后全自动:建 mon secret / CM + 4 个 CSI secret → apply `common-external.yaml` + `cluster-external.yaml` → 等 `CephCluster rook-ceph-external` **STATE=Connected** → **滚动重启 provisioner 并确认 `config.json` 已挂载** → 建 6 个 SC → 建 `CephObjectStore external-store` → 建 bucket SC + OBC → (可选,默认关)`CEPH_EXTERNAL_PROVISION_SMOKE=true` 跑数据面冒烟。
@@ -579,8 +578,6 @@ B 侧检测到 env 文件后全自动:建 mon secret / CM + 4 个 CSI secret →
 
 ```bash
 CEPH_MODE=external
-CEPH_ENABLED=true
-CEPH_CSI_ENABLED=true
 # --- 以下取自 A 的导出(按实际值替换; ⚠ 含真实 keyring, 该文件永不入库) ---
 CEPH_MONITORS="192.0.2.28:30100,192.0.2.29:30100,192.0.2.31:30100"   # A 导出的 mon 端点
 CEPH_POOL="cubestack-ext-rbd-pool"
@@ -944,8 +941,8 @@ kubectl -n metax-operator get ds -o custom-columns=NAME:.metadata.name,SEL:.spec
 | `METALLB_ENABLED` / `METALLB_POOL` | `true` / `192.0.2.237-238` | LB 地址池 |
 | `KUBE_VIP_ENABLED` / `K8S_API_VIP` | `true` / `192.0.2.239` | API 浮动 VIP |
 | `API_LOCAL_LB_ENABLED` | `true` | 节点侧本地代理 |
-| `CEPH_ENABLED` / `CEPH_CSI_ENABLED` | `true` / `true` | Ceph 底座 + 供给层 |
-| `CEPH_MODE` / `CEPH_NODE_ROLE` / `CEPH_MON_COUNT` | `internal` / `master` / `3` | 内部模式,存储节点=master,mon=3 |
+| `CEPH_MODE` / `CEPH_TOPOLOGY` | `internal` / `auto` | 内部模式 + 拓扑自动识别 |
+| `CEPH_NODE_ROLE` / `CEPH_MON_COUNT` | `master` / `3` | 存储节点=master,mon=3(单节点时 mon=1) |
 | `CEPHFS_ENABLED` / `CEPH_RGW_ENABLED` | `true` / `true` | 文件存储 + S3 |
 | `RDMA_ENABLED` / `RDMA_HCA_MODE` | `true` / `by-link` | RDMA 共享设备插件 |
 | `GPU_OPERATOR_ENABLED` / `CONTAINERD_CONFIG_VERSION` | `true` / `3` | 沐曦 GPU operator |

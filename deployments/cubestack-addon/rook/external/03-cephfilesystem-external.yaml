@@ -16,12 +16,12 @@ metadata:
   namespace: __NAMESPACE__
 spec:
   metadataPool:
-    replicated: { size: __REPLICAS__, requireSafeReplicaSize: true }
-    failureDomain: host
+    replicated: { size: __REPLICAS__, requireSafeReplicaSize: __REQUIRE_SAFE_REPLICA_SIZE__ }
+    failureDomain: __FAILURE_DOMAIN__
   dataPools:
     - name: __FS_DATA_POOL__
-      replicated: { size: __REPLICAS__, requireSafeReplicaSize: true }
-      failureDomain: host
+      replicated: { size: __REPLICAS__, requireSafeReplicaSize: __REQUIRE_SAFE_REPLICA_SIZE__ }
+      failureDomain: __FAILURE_DOMAIN__
   preservePoolsOnDelete: true
   metadataServer:
     activeCount: 1
