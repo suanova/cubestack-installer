@@ -101,4 +101,15 @@ chk_contains "可配置上限" 'CEPH_SINGLE_MAX_PG_PER_OSD' "$(cat "${CEPH_MOD}"
 chk_contains "默认值声明" 'CEPH_SINGLE_MAX_PG_PER_OSD="${CEPH_SINGLE_MAX_PG_PER_OSD:-500}"' \
     "$(cat "${REPO_ROOT}/deployments/config/cluster.defaults.conf")"
 
+echo "== ⑪ mon_list 解析 Rook v1.21 无前缀 CM(a=IP) =="
+sed -n '/^mon_list() {/,/^}$/p' "${EXPOSE}" > "${TMP}/mon_list.sh"
+out="$( ( set +u
+    SSH() { printf 'a=10.66.3.165:6789\n'; }
+    K=kubectl CEPH_NAMESPACE=rook-ceph
+    . "${TMP}/mon_list.sh"
+    mon_list | tr -d ' '
+) )"
+chk_contains "单节点解析为 a" "a" "${out}"
+chk_not_contains "不误回退 a b c" "b" "${out}"
+
 exit "${fail}"

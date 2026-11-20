@@ -154,7 +154,10 @@ _wait_vip() {
 mon_list() {
     local data ids
     data="$( ( SSH "${K} -n ${CEPH_NAMESPACE} get cm rook-ceph-mon-endpoints -o jsonpath='{.data.data}' 2>/dev/null" || true) )"
-    ids="$(echo "${data}" | tr ',' '\n' | sed -n 's/^rook-ceph-mon-\([a-z0-9]*\)=.*/\1/p' | tr '\n' ' ')"
+    # 兼容两种 CM 格式: `rook-ceph-mon-a=IP:6789` 与 Rook v1.21 实际的 `a=IP:6789`;
+    # 旧正则只认前者 → 单节点解析为空 → 回退 a b c, status 误报 mon-b/c 未暴露。
+    ids="$(echo "${data}" | tr ',' '\n' \
+        | sed -n 's/^\(rook-ceph-mon-\)\{0,1\}\([a-z0-9][a-z0-9]*\)=.*/\2/p' | tr '\n' ' ')"
     echo "${ids:-a b c}"
 }
 
