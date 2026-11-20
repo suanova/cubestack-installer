@@ -356,7 +356,7 @@ fi
 # ---------------- 开关/模式门禁 ----------------
 # 先判 CEPH_MODE=none(比 TOGGLE 更根本): 即使旧配置/误开把 CEPHFS_MOUNT_ENABLED 打开,
 # 也不得去预检一个不存在的 CephCluster。
-if [ "${CEPH_MODE:-none}" = "none" ]; then
+if [ "${CEPH_MODE:-internal}" = "none" ]; then
     say "Ceph 未启用(CEPH_MODE=none), 跳过 CephFS 宿主机挂载"
     exit 0
 fi
@@ -381,7 +381,7 @@ else
     # 兜底(2026-10-22 用户实机): Ceph 基座与 CSI 都未启用时, 即使本模块开关被旧配置/显式
     # 误开, 也不得继续 —— 否则会去预检一个根本不存在的 CephCluster, 把部署打断在一个
     # 与用户配置(CEPH_MODE=none)矛盾的模块上。external 模式走外部 Ceph, 不适用。
-    if [ "${CEPH_MODE:-none}" = "none" ]; then
+    if [ "${CEPH_MODE:-internal}" = "none" ]; then
         say "Ceph 未启用(CEPH_MODE=none), 跳过 CephFS 宿主机挂载"
         exit 0
     fi

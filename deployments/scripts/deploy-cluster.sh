@@ -519,7 +519,7 @@ _ceph_plan_relevant=0
 case " ${RUN_STEPS[*]:-} " in
     *" ceph "*|*" ceph_csi "*|*" k8s_deploy "*) _ceph_plan_relevant=1 ;;
 esac
-if [ "${_ceph_plan_relevant}" = "1" ] && [ "${CEPH_MODE:-none}" != "none" ]; then
+if [ "${_ceph_plan_relevant}" = "1" ] && [ "${CEPH_MODE:-internal}" != "none" ]; then
     _ceph_fb_rc=0
     ceph_apply_fallback_decision || _ceph_fb_rc=$?
     if [ "${_ceph_fb_rc}" = "1" ]; then
@@ -731,7 +731,7 @@ fi
 #   CEPH_MODE=internal/external 且本次会执行 ceph 相关模块(k8s_deploy 或 ceph)时,
 #   交互询问 [Y/n](CEPH_CONFIRM_SLEEP=0 跳过)供人工 double-check 存储节点/裸盘。
 #   (条件不足的回退已在更早的 ceph_apply_fallback_decision 处理; 这里只处理真正要装 Ceph 的情况)
-if [ "${CEPH_MODE:-none}" != "none" ]; then
+if [ "${CEPH_MODE:-internal}" != "none" ]; then
     # ★ CEPH_MODE=external(由 load_config 归一化): 接入外部已有 Ceph, 不涉及本地裸盘/
     #   覆盖确认 —— 跳过存储节点/裸盘检测、已有 CephCluster 清理, 仅提示外部连接。
     # ★ 2026-09-11(用户要求): external 模式部署前**[Y/n] 确认**(与 internal 裸盘确认对称)——
@@ -1065,7 +1065,7 @@ echo "  下一步: 扩容用 --with-scale; 立即部署单个用 --steps gpu_ope
 #   ⚠ 2026-09-11(用户要求): CEPH_MODE=external 时是**消费方**, 不导出自身接入配置 ——
 #   跳过整段(否则会误导打印"已导出 external-ceph.env"; 该文件是提供方拷来的真实文件,
 #   导出/覆盖会毁掉官方导入路径的输入)。
-if [ "${CEPH_MODE:-none}" = "internal" ] && [ -f "${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf" ]; then
+if [ "${CEPH_MODE:-internal}" = "internal" ] && [ -f "${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf" ]; then
     echo -e "${_C_BOLD}${_C_GREEN}★ 外部 ceph-csi operator 接入信息(完整配置在文件里):${_C_OFF}"
     echo "  配置路径: ${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf"
     echo "              拷贝到目标集群 cluster.conf 设 CEPH_MODE=external 即可接入;"

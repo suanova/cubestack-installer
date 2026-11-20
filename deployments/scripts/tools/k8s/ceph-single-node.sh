@@ -39,7 +39,7 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
 fi
 
 # ---- 模式门禁 ----
-case "${CEPH_MODE:-none}" in
+case "${CEPH_MODE:-internal}" in
     none)      say "CEPH_MODE=none, 跳过单节点 Ceph"; exit 0 ;;
     external)  say "CEPH_MODE=external → 不创建集群内 CephCluster(本脚本只负责单节点 internal)"; exit 0 ;;
     internal)  : ;;

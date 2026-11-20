@@ -113,4 +113,9 @@ chk_contains "单节点解析为 a" "a" "${out}"
 chk_not_contains "不误回退 a b c" "b" "${out}"
 chk_contains "status host-network 直连判定" 'host-network 直连' "$(cat "${EXPOSE}")"
 
+echo "== ⑫ 磁盘探测 stdout 纯净(防预检误回退) =="
+DETECT="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-detect-disks.sh"
+chk_contains "load_config 输出走 stderr" '{ load_config; } >&2' "$(cat "${DETECT}")"
+chk_contains "预检只解析本节点机器行" 'grep -E "^${_hn}:"' "$(cat "${REPO_ROOT}/deployments/scripts/lib-common.sh")"
+
 exit "${fail}"

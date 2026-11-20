@@ -1466,6 +1466,13 @@ load_config() {
         CEPH_USER="${CEPH_USER:-${CEPH_EXTERNAL_USER:-admin}}"
         CEPH_KEYRING="${CEPH_KEYRING:-${CEPH_EXTERNAL_KEYRING:-}}"
     fi
+    # ★ 2026-11-20 用户口径: 默认 CEPH_MODE=internal(不是 none)。
+    #   仅当配置**既未写 CEPH_MODE、也未出现任何旧开关**时才落到默认 internal;
+    #   旧配置显式写 CEPH_ENABLED=false+CEPH_CSI_ENABLED=false 仍映射 none(保持原意)。
+    if [ "${_ceph_mode_set}" = "0" ] && [ "${_ceph_legacy_seen}" = "0" ]; then
+        CEPH_MODE="internal"
+        _ceph_mode_set=1
+    fi
     ceph_normalize_ceph_vars
     _ceph_mode_raw="${CEPH_MODE:-}"
     if ! CEPH_MODE="$(ceph_resolve_mode "${_ceph_mode_raw}" "${CEPH_ENABLED:-false}" "${CEPH_CSI_ENABLED:-false}" "${_ceph_mode_set}")"; then
@@ -1579,10 +1586,10 @@ _ceph_host_ip() {   # <hostname> → stdout IP; 未找到返回 1
 }
 
 ceph_installable_check() {
-    local _probe=0 _miss="" _hn _ip _out _disk_nodes=0 _osd_total=0 _n _min_free _avail_kb _skip_disk=0
+    local _probe=0 _miss="" _hn _ip _out _out_line _disk_nodes=0 _osd_total=0 _n _min_free _avail_kb _skip_disk=0
     [ "${1:-}" = "--probe" ] && _probe=1
     # ---------------- external ----------------
-    if [ "${CEPH_MODE:-none}" = "external" ]; then
+    if [ "${CEPH_MODE:-internal}" = "external" ]; then
         local _env="${CEPH_EXTERNAL_ENV_FILE:-${REPO_ROOT}/deployments/config/external-ceph.env}"
         if [ -f "${_env}" ]; then
             local _k
@@ -1642,10 +1649,12 @@ ceph_installable_check() {
         if [ "${_skip_disk}" = "0" ]; then
             _out="$(timeout 60 bash "${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-detect-disks.sh" \
                         --node "${_hn}" -m 2>/dev/null || true)"
-            case "${_out}" in
+            # 只认本节点的机器行, 防任何诊断/弃用告警污染(2026-11-20 多节点误回退根因)
+            _out_line="$(printf '%s\n' "${_out}" | grep -E "^${_hn}:" | head -1 || true)"
+            case "${_out_line}" in
                 *":") : ;;                               # host:  = 无可用盘
                 *:?*)
-                    _n="$(printf '%s\n' "${_out}" | head -1 | awk -F: '{print split($2,a,",")}' || true)"
+                    _n="$(printf '%s\n' "${_out_line}" | head -1 | awk -F: '{print split($2,a,",")}' || true)"
                     case "${_n}" in ''|*[!0-9]*) _n=0 ;; esac
                     if [ "${_n}" -gt 0 ]; then
                         _disk_nodes=$((_disk_nodes + 1))
@@ -1685,7 +1694,7 @@ ceph_installable_check() {
 # 返回: 0=无需回退/条件具备; 10=已回退 local-path; 1=条件不足且回退关闭(硬失败)
 # 说明: 仅改**本次运行**的 CEPH_MODE/registry 后端, 不写回 cluster.conf。
 ceph_apply_fallback_decision() {
-    [ "${CEPH_MODE:-none}" != "none" ] || return 0
+    [ "${CEPH_MODE:-internal}" != "none" ] || return 0
     local _orig="${CEPH_MODE}" _miss="" _fallback _chk_rc=0
     _fallback="$(ceph_norm_bool "${CEPH_FALLBACK_TO_LOCALPATH:-true}")"
     _miss="$(ceph_installable_check --probe 2>/dev/null)" || _chk_rc=$?

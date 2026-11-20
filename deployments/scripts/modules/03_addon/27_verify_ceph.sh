@@ -29,7 +29,7 @@ load_config
 
 # 开关检查: CEPH_MODE=none/external 跳过(本模块验证的是**集群内** CephCluster rook-ceph;
 # external 模式没有该 CR, 沿用旧行为不在此验证)
-case "${CEPH_MODE:-none}" in
+case "${CEPH_MODE:-internal}" in
     internal) : ;;
     none)     say "CEPH_MODE=none, 跳过 Ceph 验证"; exit 0 ;;
     external) say "CEPH_MODE=external(无集群内 CephCluster), 跳过 verify_ceph"; exit 0 ;;

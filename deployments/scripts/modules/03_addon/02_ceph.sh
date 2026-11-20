@@ -232,7 +232,7 @@ _CEPH_SKIP_CLUSTER=0
 # ★ CEPH_MODE=external(外部 Ceph 接入) → 不创建集群内 CephCluster, 仅部署 operator/csi-operator,
 #   由 ceph_csi 模块经 CephConnection 连外部集群。兼容旧配置: 仅设 CEPH_EXTERNAL_MONITORS 时
 #   load_config 已把 CEPH_MODE 归一化为 external。
-if [ "${CEPH_MODE:-none}" = "external" ]; then
+if [ "${CEPH_MODE:-internal}" = "external" ]; then
     say "CEPH_MODE=external → 不创建集群内 CephCluster(由 ceph_csi 模块接入外部 Ceph: ${CEPH_MONITORS:-<未配置>})"
     _CEPH_SKIP_CLUSTER=1
     # ★ 2026-09-10: external-ceph.env 检测 + 警告(部署前提示, 目标"一次性部署成功")
@@ -276,7 +276,7 @@ fi
 
 # ★ external 模式(CEPH_MODE=external): 不涉及本地裸盘/覆盖确认, 跳过裸盘选择与安全确认段;
 #   仅 internal(集群内 Rook-Ceph)需要。operator/csi-operator 部署仍执行(供 CephConnection 使用)。
-if [ "${CEPH_MODE:-none}" != "external" ]; then
+if [ "${CEPH_MODE:-internal}" != "external" ]; then
 # 显式 CEPH_NODES/CEPH_DATA_DISKS 先做格式/节点名校验: 防止节点间误用逗号被静默解析成
 # "第一个节点拥有全部盘、其余节点无盘"(2026-10-26 实机)。
 ceph_validate_explicit_config || exit 1
@@ -1012,7 +1012,7 @@ fi
 
 # ★ 节点<3 → 跳过集群内 CephCluster 创建(mon 法定人数不足; csi-operator 仍按需安装, 可连外部 Ceph)
 if [ "${_CEPH_SKIP_CLUSTER}" = "1" ]; then
-    if [ "${CEPH_MODE:-none}" = "external" ]; then
+    if [ "${CEPH_MODE:-internal}" = "external" ]; then
         say "  CEPH_MODE=external → 不创建集群内 CephCluster(由 ceph_csi 模块经 CephConnection 接入外部 Ceph: ${CEPH_MONITORS:-<未配置>})"
         say "  operator/csi-operator 已部署; 等待 operator Ready(供 CephConnection/CSI 使用)..."
         _OP_OK=0
@@ -1632,7 +1632,7 @@ fi   # _CEPH_SKIP_CLUSTER=1 → 跳过集群内 CephCluster 创建
 _patch_ceph_daemon_placement
 # 存量 daemon 模板 patch 会触发滚动(mon/osd/mgr); 等 Ceph 恢复 HEALTH_OK 再继续, 避免
 # ceph_csi/registry 在恢复期创建卷。全新安装时模板已带 toleration → 上面跳过 → 无额外等待。
-if [ "${CEPH_MODE:-none}" = "internal" ] && [ "${_CEPH_SKIP_CLUSTER:-0}" = "0" ]; then
+if [ "${CEPH_MODE:-internal}" = "internal" ] && [ "${_CEPH_SKIP_CLUSTER:-0}" = "0" ]; then
     say "等待 Ceph daemon 滚动后恢复 HEALTH_OK(最长 600s)..."
     _HL_OK=0
     for _i in $(seq 1 60); do
@@ -1654,7 +1654,7 @@ stop_restore_known_consumers
 echo "---------------------------------------------"
 ok "Ceph 存储集群部署完成(Rook ${ROOK_VERSION:-v1.21.1} / Ceph ${CEPH_VERSION})"
 echo "  命名空间:    ${CEPH_NAMESPACE}"
-if [ "${CEPH_MODE:-none}" = "external" ]; then
+if [ "${CEPH_MODE:-internal}" = "external" ]; then
     echo "  模式:        CEPH_MODE=external(外部 Ceph, 无集群内 CephCluster)"
     echo "  外部连接:    monitors=${CEPH_MONITORS:-<未配置>}  pool=${CEPH_POOL:-rbd}  user=${CEPH_USER:-admin}"
     echo "  资源查看:    kubectl -n ${CEPH_NAMESPACE} get deploy,cephconnection,csi.ceph.io"
@@ -1681,7 +1681,7 @@ if [ "${CUBESTACK_CEPH_ENGINE_ONLY:-0}" != "1" ]; then
         ceph_engine_uninstall
         exit $?
     fi
-    case "${CEPH_MODE:-none}" in
+    case "${CEPH_MODE:-internal}" in
         none)
             say "CEPH_MODE=none, 跳过 Ceph"; exit 0 ;;
         internal|external) : ;;

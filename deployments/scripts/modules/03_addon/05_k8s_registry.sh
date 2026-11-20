@@ -149,7 +149,7 @@ fi
 # 前置校验: registry 后端指定 ceph 但 Ceph 体系未启用 → PVC 永久 Pending, 直接中止给出指引
 # ceph 体系 = CEPH_MODE=internal/external(load_config 已归一化)。
 if [ -n "${REGISTRY_STORAGE_CLASS:-}" ] && [ "${REGISTRY_STORAGE_CLASS}" != "local-path" ] \
-    && [ "${CEPH_MODE:-none}" = "none" ]; then
+    && [ "${CEPH_MODE:-internal}" = "none" ]; then
     err "REGISTRY_STORAGE_CLASS=${REGISTRY_STORAGE_CLASS} 但 Ceph 未启用(CEPH_MODE=none): registry 的 PVC 将永远 Pending"
     err "  请任选其一: ① cluster.conf 设 CEPH_MODE=internal(集群内自建, 需先准备 ceph 离线镜像/裸盘, 见 docs/ceph-rook.md);"
     err "  ② CEPH_MODE=external + CEPH_MONITORS/CEPH_KEYRING 接入外部 Ceph(见 docs/ceph-rook.md);"

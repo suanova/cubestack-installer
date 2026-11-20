@@ -412,6 +412,6 @@ chk "⑬a 回退在优雅覆盖/teardown 之前" "1" \
 chk "⑬b 回退后过滤 ceph 模块" "1" \
     "$(grep -cF 'ceph|ceph_csi|cephfs_mount) continue' "${DEPLOY}" | awk '{print ($1>=1)?1:0}')"
 chk "⑬c teardown 在 CEPH_MODE=none 时过滤 ceph" "1" \
-    "$(grep -cF 'CEPH_MODE:-none}" = "none"' "${TEARDOWN}" | awk '{print ($1>=1)?1:0}')"
+    "$(grep -cF 'CEPH_MODE:-internal}" = "none"' "${TEARDOWN}" | awk '{print ($1>=1)?1:0}')"
 
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }

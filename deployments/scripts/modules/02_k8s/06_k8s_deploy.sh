@@ -293,7 +293,7 @@ OFFLINE_ENV=(
     "CUBESTACK_BASE_DIR=${KUBESPRAY_BASE_DIR:-${REPO_ROOT}/deployments/kubespray}"
     "OFFLINE_FILES_DIR=${OFFLINE_FILES_DIR}"
     "CUBESTACK_LOCAL_REPO_DIR=${LOCAL_REPO_DIR}"
-    "CEPH_MODE=${CEPH_MODE:-none}"
+    "CEPH_MODE=${CEPH_MODE:-internal}"
     "CEPH_IMAGE_DIR=${CEPH_IMAGE_DIR:-${OFFLINE_FILES_DIR}/images}"
     # 节点 SSH 用户透传(root|ubuntu 单一旋钮): 修 cubestack-offline.sh 里 ansible ping -u 的
     # 写死默认(ubuntu) —— 否则 SSH_USER=root 的集群在该连通性检查处必然失败(2026-10-15)。

@@ -53,7 +53,7 @@ sudo ./deployments/scripts/tools/k8s/rook-fetch-manifests.sh            # 默认
 
 ## 项目集成
 
-- 部署入口: `modules/03_addon/02_ceph.sh`(cluster.conf `CEPH_MODE=internal`)+ `03_ceph_csi.sh`(同一开关自动调度)
+- 部署入口: `modules/03_addon/02_ceph.sh`(`CEPH_ENABLED=true`)+ `03_ceph_csi.sh`(`CEPH_CSI_ENABLED=true`)
 - 离线镜像: 版本树 `offline-files/kubespray/<版本>/images/` →
   k8s 部署阶段由 cluster.yml 内置预加载 play 统一同步到节点并 ctr import
 - 裸盘检测: `tools/k8s/ceph-detect-disks.sh`(分类: free 空闲 / ceph 上次 Ceph 占用 / inuse 在用 /

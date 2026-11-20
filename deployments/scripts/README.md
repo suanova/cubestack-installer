@@ -102,8 +102,8 @@ deployments/scripts/
 │   │   └── 15_k8s_asset_prefetch.sh # 离线资产预取(kubespray 之前)
 │   └── 03_addon/              #   阶段三: 附加组件(集群部署后; 01~19 中间件, 20 起自研)
 │       ├── 01_metallb.sh      #    MetalLB 负载均衡(基座, METALLB_ENABLED)
-│       ├── 02_ceph.sh         #    Rook-Ceph 存储集群(CEPH_MODE=internal/external; 单节点自动分发, 见 docs/ceph-rook.md)
-│       ├── 03_ceph_csi.sh     #    Ceph CSI: rbd-pool+StorageClass ceph-block, 可选 CephFS/RGW(按拓扑渲染)
+│       ├── 02_ceph.sh         #    Rook-Ceph 存储集群(P1-6, CEPH_ENABLED; 自动检测裸盘+node label+离线镜像, 见 docs/ceph-rook.md)
+│       ├── 03_ceph_csi.sh     #    Ceph CSI: rbd-pool+StorageClass ceph-block, 可选 CephFS/RGW(P1-7, CEPH_CSI_ENABLED)
 │       ├── 04_local_path.sh   #    local-path-provisioner 就绪检查(可选, LOCAL_PATH_ENABLED)
 │       ├── 05_k8s_registry.sh #    集群内内置 registry addon(REGISTRY_ENABLED; 后端可用 ceph-block 替代 local-path)
 │       ├── 06_gpu_operator.sh #    沐曦 GPU Operator(P1-5, GPU_OPERATOR_ENABLED)
@@ -150,7 +150,7 @@ deployments/scripts/
 # PHASE: addon                # 阶段: env / k8s / addon
 # DEFAULT: 0                  # 是否默认启用
 # REPEAT: 0                   # 1=可重复执行(不写断点状态)
-# TOGGLE: CEPH_MODE=internal,external   # (可选) 枚举写法: 值在列表即启用
+# TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED   # (可选) cluster.conf 变量, true 时自动启用
 ```
 
 **新增模块**:

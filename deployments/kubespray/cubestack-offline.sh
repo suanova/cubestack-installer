@@ -779,7 +779,7 @@ resolve_preload_image_files() {
     #   真实复制后 images/ 目录全是普通文件, mc mirror / rsync / preload 均安全。
     #   幂等: 已存在且大小一致 → 跳过; 内容变化 → 覆盖。
     _ceph_preload=0
-    case "$(printf '%s' "${CEPH_MODE:-none}" | tr '[:upper:]' '[:lower:]')" in
+    case "$(printf '%s' "${CEPH_MODE:-internal}" | tr '[:upper:]' '[:lower:]')" in
         internal|external) _ceph_preload=1 ;;
     esac
     if [ "${_ceph_preload}" = "1" ]; then
@@ -809,7 +809,7 @@ resolve_preload_image_files() {
             for _p in "${PRELOAD_IMAGE_FILES[@]:-}"; do [ "${_p}" = "${base}" ] && { _in=1; break; }; done
             [ "${_in}" = "0" ] && PRELOAD_IMAGE_FILES+=("${base}")
         done
-        [ "${#patterns[@]}" -gt 0 ] && log "  ceph 体系开启(CEPH_MODE=${CEPH_MODE:-none}) → ceph 镜像并入预加载清单(源 ${CEPH_IMAGE_DIR:-<无>} / images/ 兜底)"
+        [ "${#patterns[@]}" -gt 0 ] && log "  ceph 体系开启(CEPH_MODE=${CEPH_MODE:-internal}) → ceph 镜像并入预加载清单(源 ${CEPH_IMAGE_DIR:-<无>} / images/ 兜底)"
     fi
     unset _ceph_preload
 

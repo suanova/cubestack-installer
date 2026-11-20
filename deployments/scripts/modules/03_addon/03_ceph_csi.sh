@@ -64,7 +64,7 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     _cc_ext_live="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster \
         -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers 2>/dev/null) || true )"
     _cc_ext_live="$(printf '%s\n' "${_cc_ext_live}" | awk '$2=="true"{print $1}' | tr '\n' ' ')"
-    if [ -n "${_cc_ext_live}" ] || [ "${CEPH_MODE:-none}" = "external" ]; then
+    if [ -n "${_cc_ext_live}" ] || [ "${CEPH_MODE:-internal}" = "external" ]; then
         SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete cephcluster rook-ceph-external --ignore-not-found --wait=false >/dev/null 2>&1" </dev/null || true
         SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete cephconnection ceph-connection --ignore-not-found --wait=false >/dev/null 2>&1" </dev/null || true
         SSH "timeout 30 ${K} -n ${CEPH_NAMESPACE} delete clientprofile ceph-connection --ignore-not-found --wait=false >/dev/null 2>&1" </dev/null || true
@@ -73,7 +73,7 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
 fi
 
 # ---- 开关(2026-11-20 单一开关 CEPH_MODE) ----
-case "${CEPH_MODE:-none}" in
+case "${CEPH_MODE:-internal}" in
     none) say "CEPH_MODE=none, 跳过 Ceph CSI"; exit 0 ;;
     internal|external) : ;;
     *) err "CEPH_MODE 非法: '${CEPH_MODE}'"; exit 1 ;;
@@ -130,7 +130,7 @@ _ceph_cluster_kind() {
         return 0
     done <<< "${_list}"
     # 确认不存在 internal rook-ceph 后的配置回退
-    if [ "${CEPH_MODE:-none}" = "external" ]; then printf 'external'; return 0; fi
+    if [ "${CEPH_MODE:-internal}" = "external" ]; then printf 'external'; return 0; fi
     printf 'none'
 }
 

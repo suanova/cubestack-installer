@@ -390,7 +390,7 @@ say "[3/3] 执行 kubespray 扩容 (via cubestack-offline.sh scale) ..."
 #   → 新节点 ceph CSI nodeplugin ImagePullBackOff(2026-10-12 容器 d 实case)。
 #   取值 = conf 开关 OR 集群活态(rook-ceph 命名空间在即算 —— 覆盖 conf 关但集群跑着 ceph)。
 _CEPH_PRELOAD_MODE="none"
-if [ "${CEPH_MODE:-none}" != "none" ]; then
+if [ "${CEPH_MODE:-internal}" != "none" ]; then
     _CEPH_PRELOAD_MODE="${CEPH_MODE}"
 elif [ -n "$(_cluster_has_rook_ceph)" ]; then
     _CEPH_PRELOAD_MODE="internal"

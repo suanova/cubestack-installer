@@ -1086,7 +1086,7 @@ print_plan() {
     # Ceph 启用提示(精简一行; 部署开始前由 deploy-cluster.sh 红底列出 节点+裸盘(internal)
     # 或外部连接参数(external)并询问 [Y/n], 避免两处重复 —— 此处仅供 --list 只读场景知悉
     # ceph 将启用, 不执行检测/确认)
-    if [ "${CEPH_MODE:-none}" != "none" ]; then
+    if [ "${CEPH_MODE:-internal}" != "none" ]; then
         if [ "${CEPH_MODE}" = "external" ]; then
             echo "  ⚠ Ceph 启用(CEPH_MODE=external 接入外部 Ceph); 部署开始前会红底列出外部连接参数并询问 [Y/n]"
             echo "    CEPH_ENV_CONFIRM_SLEEP=0 跳过确认(核对 external-ceph.env / CEPH_MONITORS; --list 仅提示)"

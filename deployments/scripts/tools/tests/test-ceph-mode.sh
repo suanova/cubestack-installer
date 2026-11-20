@@ -73,4 +73,14 @@ out="$( ( set +u
     printf '%s|%s|%s\n' "${CEPH_MODE}" "${REGISTRY_STORAGE_CLASS}" "${LOCAL_PATH_ENABLED}" ) )"
 chk "external → ceph-block + local-path off" "${out}" "external|ceph-block|false"
 
+echo "== ⑧ 默认 CEPH_MODE=internal(未写任何 Ceph 开关) =="
+printf 'NODES=()\n' > "${tmp}/default.conf"
+out="$( ( set +u
+    CLUSTER_CONF="${tmp}/default.conf"
+    CLUSTER_DEFAULTS_CONF="${REPO_ROOT}/deployments/config/cluster.defaults.conf"
+    source "${REPO_ROOT}/deployments/scripts/lib-common.sh" >/dev/null 2>&1
+    load_config >/dev/null 2>&1
+    printf '%s|%s|%s\n' "${CEPH_MODE}" "${REGISTRY_STORAGE_CLASS}" "${LOCAL_PATH_ENABLED}" ) )"
+chk "默认 internal → ceph-block + local-path off" "${out}" "internal|ceph-block|false"
+
 exit "${fail}"

@@ -87,12 +87,12 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps ceph,ceph_csi
 
 ### 3.1 双模式: 集群内 Rook-Ceph / 外部已有 Ceph(CEPH_MODE)
 
-`CEPH_MODE` 统一开关三选一(默认 `none`, 大小写不敏感; 兼容旧配置自动迁移):
+`CEPH_MODE` 统一开关三选一(默认 `internal`, 大小写不敏感; 兼容旧配置自动迁移):
 
 | 模式 | CEPH_MODE | 行为 |
 |---|---|---|
-| **关闭(默认)** | `none` | 不部署 Ceph 集群/CSI, registry 走 local-path |
-| **集群内(单/多节点)** | `internal` | 部署 CephCluster CR + 本地 OSD(裸盘检测/确认); 拓扑按 `CEPH_TOPOLOGY`(1 台=单节点, ≥3 台=多节点); registry 走集群内 ceph-block |
+| **集群内(默认, 单/多节点)** | `internal` | 部署 CephCluster CR + 本地 OSD(裸盘检测/确认); 拓扑按 `CEPH_TOPOLOGY`(1 台=单节点, ≥3 台=多节点); registry 走集群内 ceph-block |
+| **关闭** | `none` | 不部署 Ceph 集群/CSI, registry 走 local-path |
 | **外部接入** | `external` | **不创建集群内 CephCluster**, 02 仅部署 rook operator/csi-operator; 03 经 ceph-csi-operator 的 `CephConnection` 连外部已有 Ceph, 建指向外部的 `StorageClass ceph-block` |
 
 **external 模式配置**(cluster.conf):

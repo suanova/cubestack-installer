@@ -58,7 +58,8 @@ K8S_API_VIP="${K8S_API_VIP:-}"                          # 留空=自动推导(�
 
 # ---- Ceph(存储底座 + 模式; 详细参数与凭据见 cluster.defaults.conf §4.3b) ----
 # 唯一启停开关(大小写不敏感): none=不装 Ceph/CSI | external=仅 CSI 接外部 Ceph | internal=集群内 Ceph+CSI
-CEPH_MODE="${CEPH_MODE:-none}"
+# 默认 internal: 条件不足时由 CEPH_FALLBACK_TO_LOCALPATH 自动回退 local-path
+CEPH_MODE="${CEPH_MODE:-internal}"
 # 拓扑(大小写不敏感): auto=存储节点 1 台走单节点、>=3 台走多节点 | single | multi
 CEPH_TOPOLOGY="${CEPH_TOPOLOGY:-auto}"
 # → 条件不足回退(CEPH_FALLBACK_TO_LOCALPATH, 默认 true)、子能力开关、凭据见 cluster.defaults.conf §4.3b

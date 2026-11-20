@@ -1683,9 +1683,6 @@ sudo ./deploy-cluster.sh --steps k8s_passwordless   # 修正密码后先单跑�
 
 ### 7. 【2026-10-22】`CEPH_ENABLED=false` + `CEPH_CSI_ENABLED=false` 仍执行 `cephfs_mount`: 子开关默认值未跟随 Ceph 总开关
 
-> **2026-11-20 更新**: 旧变量 `CEPH_ENABLED`/`CEPH_CSI_ENABLED` 已删除, 统一用 `CEPH_MODE=none|external|internal`;
-> 本条保留为历史根因记录, 当前配置请参考 `docs/ceph-rook.md` §3。
-
 **症状:** Ceph 两个总开关都是 `false`, 但部署计划里仍出现 `cephfs_mount`, 执行到:
 
 ```
