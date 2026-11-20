@@ -111,5 +111,6 @@ out="$( ( set +u
 ) )"
 chk_contains "单节点解析为 a" "a" "${out}"
 chk_not_contains "不误回退 a b c" "b" "${out}"
+chk_contains "status host-network 直连判定" 'host-network 直连' "$(cat "${EXPOSE}")"
 
 exit "${fail}"

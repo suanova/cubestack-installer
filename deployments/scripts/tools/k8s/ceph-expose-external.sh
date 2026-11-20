@@ -725,6 +725,17 @@ status_main() {
     say "[1/5] mon 网络可达性(集群外 TCP)..."
     for m in $(mon_list); do
         _svc="rook-ceph-mon-${m}-external"
+        if [ "${MODE}" = "host-network" ]; then
+            # host-network 模式**不创建** *-external Service, mon 直接监听节点 IP:6789;
+            # 旧逻辑按 Service 判 type → 单/多节点都会误报"未对外暴露".
+            _nip="$(_mon_ip "${m}" || true)"
+            if [ -n "${_nip}" ] && timeout 3 bash -c "echo > /dev/tcp/${_nip}/6789" 2>/dev/null; then
+                ok "  mon.${m}: ${_nip}:6789 可达(host-network 直连)"
+            else
+                warn "  mon.${m}: ${_nip:-<未解析到节点IP>}:6789 不可达(检查 mon 节点网络/端口)"
+            fi
+            continue
+        fi
         _T="$(_svc_type "${_svc}")"
         if [ "${_T}" = "NodePort" ]; then
             _NP="$(_svc_np "${_svc}")"
