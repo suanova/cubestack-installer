@@ -1261,6 +1261,50 @@ rm -f "${LOCAL_CR}"
         || warn "  toolbox ${_tb_wait}s 内 ceph -s 仍不可用(集群仍会继续等待; 状态行可能显示 health=unknown) —— 可手工: kubectl -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-tools"
     unset _TB_OK _ti _tb_wait _tb_tries
 
+    # ★ 2026-11-20 单节点/osd 故障域: Ceph 启动时 mgr 会用**默认 CRUSH 规则**(replicated_rule,
+    #   host 故障域)创建 `.mgr` 池。单节点只有 1 个 host, size>1 时该 PG 永远 undersized/
+    #   inactive → HEALTH_WARN, 且 MDS/外部 CephFilesystem 可能卡 creating(实机 10.66.3.165)。
+    #   这里在首次 phase=Ready 时确保 osd 域规则存在, 把它设为 osd_pool_default_crush_rule,
+    #   并纠正已存在的 `.mgr` 池; 后续默认池也走 osd 域。
+    _ceph_ensure_osd_crush_default() {
+        local _rules _rule_id
+        _rules="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            ceph osd crush rule ls 2>/dev/null) || true )"
+        if ! printf '%s\n' "${_rules}" | grep -qx 'cubestack-osd'; then
+            SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+                ceph osd crush rule create-replicated cubestack-osd default osd >/dev/null 2>&1 \
+                || return 1
+        fi
+        _rule_id="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            ceph osd crush rule dump cubestack-osd -f json 2>/dev/null) || true )"
+        _rule_id="$(printf '%s' "${_rule_id}" | sed -n 's/.*"rule_id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)"
+        [ -n "${_rule_id}" ] || return 1
+        SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            ceph config set global osd_pool_default_crush_rule "${_rule_id}" >/dev/null 2>&1 || return 1
+        if SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            ceph osd pool get .mgr size >/dev/null 2>&1; then
+            # ⚠ 实机: `osd pool set <pool> crush_rule <数字ID>` 报 "crush rule N does not exist";
+            #   用规则名才生效(2026-11-20)。osd_pool_default_crush_rule 仍用数字 ID(config 语义)。
+            SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+                ceph osd pool set .mgr crush_rule cubestack-osd >/dev/null 2>&1 \
+                || warn "  .mgr 池 crush_rule 纠正失败(可能 PG 仍 undersized; 检查 osd tree)"
+        fi
+        return 0
+    }
+
+    # ★ 2026-11-20 单节点 PG 上限: 单节点 3 OSD 上 18 个池(内部 RBD/CephFS + RGW + 外部池)
+    #   总 PG 345, size=3 时每 OSD 有效 PG=345 > Ceph 默认 mon_max_pg_per_osd=250 →
+    #   HEALTH_WARN "too many PGs per OSD"(实机 10.66.3.165)。单节点统一放宽到
+    #   CEPH_SINGLE_MAX_PG_PER_OSD(默认 500); 多节点保持 Ceph 默认。
+    _ceph_apply_single_node_pg_limit() {
+        local _max="${CEPH_SINGLE_MAX_PG_PER_OSD:-500}"
+        case "${_max}" in ''|*[!0-9]*) _max=500 ;; esac
+        [ "${CEPH_TOPOLOGY_EFFECTIVE:-}" = "single" ] || return 0
+        SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            ceph config set global mon_max_pg_per_osd "${_max}" >/dev/null 2>&1 || return 1
+        return 0
+    }
+
     # 等待 CephCluster Ready + HEALTH_OK(最长 900s; 备份恢复认领旧 OSD 数据比新建更慢)
     # 每 10s 轮询; Ready 后经 toolbox 执行 ceph -s 提取关键行(health/mon/osd/pgs),
     # 每 30s 打印一行状态到终端(= 完整部署日志 /tmp/cubestack-cluster-install.log), 便于观察收敛进度。
@@ -1298,9 +1342,15 @@ rm -f "${LOCAL_CR}"
                     fi
                 fi
                 if [ "${_pool_tuned}" = "1" ]; then
+                    _ceph_apply_single_node_pg_limit || _pool_tuned=0
+                fi
+                if [ "${_pool_tuned}" = "1" ] && [ "${CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd" ]; then
+                    _ceph_ensure_osd_crush_default || _pool_tuned=0
+                fi
+                if [ "${_pool_tuned}" = "1" ]; then
                     _CEPH_TUNED=1
                 else
-                    warn "  池副本配置(size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE})未生效, 下一轮重试 ..."
+                    warn "  池副本/CRUSH 配置(size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE}, fd=${CEPH_EFF_FAILURE_DOMAIN:-host})未生效, 下一轮重试 ..."
                 fi
             fi
             _CEPH_SUM="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null" || true) )"
@@ -1509,9 +1559,15 @@ for p in d.get("items", []):
             fi
         fi
         if [ "${_pool_tuned}" = "1" ]; then
+            _ceph_apply_single_node_pg_limit || _pool_tuned=0
+        fi
+        if [ "${_pool_tuned}" = "1" ] && [ "${CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd" ]; then
+            _ceph_ensure_osd_crush_default || _pool_tuned=0
+        fi
+        if [ "${_pool_tuned}" = "1" ]; then
             _CEPH_TUNED=1
         else
-            err "  Ceph 池副本配置未能应用(size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE}); 不继续"
+            err "  Ceph 池副本/CRUSH 配置未能应用(size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE}, fd=${CEPH_EFF_FAILURE_DOMAIN:-host}); 不继续"
             err "        默认 size=3 会让少 OSD 集群持续降级; 处置: 确认 toolbox 可用后重跑 --steps ceph"
             err "        排查: kubectl -n ${CEPH_NAMESPACE} get deploy rook-ceph-tools; kubectl -n ${CEPH_NAMESPACE} logs deploy/rook-ceph-tools --tail=50"
             exit 1

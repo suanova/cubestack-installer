@@ -75,4 +75,30 @@ chk_not_contains "无故障域占位" "__FAILURE_DOMAIN__" "${out}"
 chk_not_contains "无 MDS 占位" "__MDS_ACTIVE_COUNT__" "${out}"
 chk_not_contains "无 RGW 占位" "__RGW_INSTANCES__" "${out}"
 
+echo "== ⑦ 单节点外部池使用 osd 故障域 CRUSH 规则 =="
+EXPOSE="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-expose-external.sh"
+chk_contains "按 EFF 故障域选择规则" 'CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd"' "$(cat "${EXPOSE}")"
+chk_contains "创建 osd 规则" 'osd crush rule create-replicated "${_ext_rule}" default osd' "$(cat "${EXPOSE}")"
+chk_contains "RBD 池创建带规则" 'osd pool create "${EXT_RBD_POOL}" "${EXT_RBD_PG}" replicated "${_ext_rule}"' "$(cat "${EXPOSE}")"
+chk_contains "已有 FS 池纠正规则" 'osd pool set "${_fp_pool}" crush_rule "${_ext_rule}"' "$(cat "${EXPOSE}")"
+
+echo "== ⑧ 单节点默认池(.mgr)使用 osd 故障域规则 =="
+CEPH_MOD="${REPO_ROOT}/deployments/scripts/modules/03_addon/02_ceph.sh"
+chk_contains "按 EFF 故障域触发" 'CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd"' "$(cat "${CEPH_MOD}")"
+chk_contains "创建 cubestack-osd 规则" 'ceph osd crush rule create-replicated cubestack-osd default osd' "$(cat "${CEPH_MOD}")"
+chk_contains "设置默认 CRUSH 规则" 'osd_pool_default_crush_rule' "$(cat "${CEPH_MOD}")"
+chk_contains ".mgr 池纠正(按规则名)" 'ceph osd pool set .mgr crush_rule cubestack-osd' "$(cat "${CEPH_MOD}")"
+
+echo "== ⑨ verify_ceph 覆盖实际 SC 名与 host-network RGW =="
+VERIFY="${REPO_ROOT}/deployments/scripts/modules/03_addon/27_verify_ceph.sh"
+chk_contains "CephFS SC 回退列表" 'for _fsc in cephfs-ephemeral cephfs-durable cephfs' "$(cat "${VERIFY}")"
+chk_contains "PVC 使用选中的 SC" 'storageClassName: ${SC_FS}' "$(cat "${VERIFY}")"
+chk_contains "host-network RGW 端点" 'RGW host-network 端点' "$(cat "${VERIFY}")"
+
+echo "== ⑩ 单节点 PG 上限(多池小集群 HEALTH_WARN 防回归) =="
+chk_contains "单节点 PG 上限函数" 'mon_max_pg_per_osd' "$(cat "${CEPH_MOD}")"
+chk_contains "可配置上限" 'CEPH_SINGLE_MAX_PG_PER_OSD' "$(cat "${CEPH_MOD}")"
+chk_contains "默认值声明" 'CEPH_SINGLE_MAX_PG_PER_OSD="${CEPH_SINGLE_MAX_PG_PER_OSD:-500}"' \
+    "$(cat "${REPO_ROOT}/deployments/config/cluster.defaults.conf")"
+
 exit "${fail}"

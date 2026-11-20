@@ -311,9 +311,21 @@ _export_official_env() {
 # ════════════════════════════ apply ════════════════════════════
 apply_main() {
     # 有效副本数: 优先 03_ceph_csi 计算并导出的 EFF(单节点=1), 避免 cluster.conf 字面量覆盖
-    local _ext_repl _ext_min
+    local _ext_repl _ext_min _ext_rule=""
     _ext_repl="${CEPH_EFF_POOL_REPLICAS:-${CEPH_POOL_REPLICAS:-3}}"
     _ext_min="${CEPH_EFF_POOL_MIN_SIZE:-${CEPH_POOL_MIN_SIZE:-2}}"
+    # ★ 2026-11-20 单节点根因: CLI `osd pool create ... replicated` 不指定规则时用默认
+    #   replicated_rule(host 故障域)。单节点只有 1 个 host, size>1 时副本无法放置 →
+    #   PG 长期 undersized+peered, 外部 CephFilesystem 的 MDS 永久 creating。
+    #   有效故障域=osd 时先确保 osd 域规则存在, 创建/纠正池都用它(多节点 host 模式不变)。
+    if [ "${CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd" ]; then
+        _ext_rule="cubestack-ext-osd"
+        if ! _ceph_exec osd crush rule ls 2>/dev/null | grep -qx "${_ext_rule}"; then
+            _ceph_exec osd crush rule create-replicated "${_ext_rule}" default osd >/dev/null 2>&1 \
+                && ok "  已创建 CRUSH 规则 ${_ext_rule}(failureDomain=osd)" \
+                || warn "  创建 CRUSH 规则 ${_ext_rule} 失败(外部池副本可能无法放置)"
+        fi
+    fi
     say "==== Ceph 对外暴露 apply(模式=${MODE}, Service type=${SVC_TYPE:-host-network 直连}) ===="
 
     # ① 网络层: mon 对外端点
@@ -455,10 +467,19 @@ apply_main() {
     if _ceph_exec osd pool get "${EXT_RBD_POOL}" size >/dev/null 2>&1; then
         ok "  外部 RBD pool ${EXT_RBD_POOL} 已存在"
     else
-        _ceph_exec osd pool create "${EXT_RBD_POOL}" "${EXT_RBD_PG}" replicated \
-            && ok "  已创建外部 RBD pool ${EXT_RBD_POOL}(${EXT_RBD_PG} PG)" \
-            || warn "  外部 RBD pool 创建失败"
+        if [ -n "${_ext_rule}" ]; then
+            _ceph_exec osd pool create "${EXT_RBD_POOL}" "${EXT_RBD_PG}" replicated "${_ext_rule}" \
+                && ok "  已创建外部 RBD pool ${EXT_RBD_POOL}(${EXT_RBD_PG} PG, rule=${_ext_rule})" \
+                || warn "  外部 RBD pool 创建失败"
+        else
+            _ceph_exec osd pool create "${EXT_RBD_POOL}" "${EXT_RBD_PG}" replicated \
+                && ok "  已创建外部 RBD pool ${EXT_RBD_POOL}(${EXT_RBD_PG} PG)" \
+                || warn "  外部 RBD pool 创建失败"
+        fi
     fi
+    # 已存在池也要纠正规则(旧版本/单节点首跑可能用了默认 host 规则)
+    [ -n "${_ext_rule}" ] && { _ceph_exec osd pool set "${EXT_RBD_POOL}" crush_rule "${_ext_rule}" >/dev/null 2>&1 \
+        || warn "  ${EXT_RBD_POOL} crush_rule 切换到 ${_ext_rule} 失败"; }
     _ceph_exec osd pool set "${EXT_RBD_POOL}" size "${_ext_repl}" >/dev/null 2>&1 || true
     _ceph_exec osd pool set "${EXT_RBD_POOL}" min_size "${_ext_min}" >/dev/null 2>&1 || true
     if ! _ceph_exec osd pool application get "${EXT_RBD_POOL}" 2>/dev/null | grep -q "rbd"; then
@@ -473,9 +494,18 @@ apply_main() {
             if _ceph_exec osd pool get "${_fp_pool}" size >/dev/null 2>&1; then
                 ok "  CephFS pool ${_fp_pool} 已存在"
             else
-                _ceph_exec osd pool create "${_fp_pool}" "${_fp_pg}" replicated \
-                    && ok "  已创建 CephFS pool ${_fp_pool}(${_fp_pg} PG)" || warn "  CephFS pool ${_fp_pool} 创建失败"
+                if [ -n "${_ext_rule}" ]; then
+                    _ceph_exec osd pool create "${_fp_pool}" "${_fp_pg}" replicated "${_ext_rule}" \
+                        && ok "  已创建 CephFS pool ${_fp_pool}(${_fp_pg} PG, rule=${_ext_rule})" \
+                        || warn "  CephFS pool ${_fp_pool} 创建失败"
+                else
+                    _ceph_exec osd pool create "${_fp_pool}" "${_fp_pg}" replicated \
+                        && ok "  已创建 CephFS pool ${_fp_pool}(${_fp_pg} PG)" || warn "  CephFS pool ${_fp_pool} 创建失败"
+                fi
             fi
+            # 已存在池纠正规则(单节点首跑可能已用默认 host 规则; 切换会触发 PG 重映射)
+            [ -n "${_ext_rule}" ] && { _ceph_exec osd pool set "${_fp_pool}" crush_rule "${_ext_rule}" >/dev/null 2>&1 \
+                || warn "  ${_fp_pool} crush_rule 切换到 ${_ext_rule} 失败"; }
             _ceph_exec osd pool set "${_fp_pool}" size "${_ext_repl}" >/dev/null 2>&1 || true
             _ceph_exec osd pool set "${_fp_pool}" min_size "${_ext_min}" >/dev/null 2>&1 || true
             _ceph_exec osd pool application enable "${_fp_pool}" cephfs >/dev/null 2>&1 || true
