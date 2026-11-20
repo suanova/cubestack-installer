@@ -527,14 +527,20 @@ ok "  Secret 已就绪"
 if SSH "${K}" -n "${CEPH_NAMESPACE}" get ds "${CEPHFS_MOUNT_DS_NAME}" >/dev/null 2>&1; then
     say "停止旧 mounter DaemonSet ${CEPHFS_MOUNT_DS_NAME}(避免用旧 ms_mode 重挂)..."
     SSH "${K}" -n "${CEPH_NAMESPACE}" delete ds "${CEPHFS_MOUNT_DS_NAME}" --ignore-not-found --timeout=120s >/dev/null 2>&1 \
-        || warn "  删除旧 DaemonSet 失败/超时(继续; preclean 可能与其竞争)"
-    for _i in $(seq 1 24); do
-        _pods="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" get pods -l "app.kubernetes.io/name=${CEPHFS_MOUNT_DS_NAME}" --no-headers 2>/dev/null) || true )"
-        [ -z "${_pods}" ] && break
-        sleep 5
-    done
-    unset _pods _i
+        || { err "删除旧 mounter DaemonSet 失败/超时; 拒绝在旧容器可能存活时继续 umount"; exit 1; }
 fi
+# DaemonSet 不存在也要确认没有残留 Pod; 查询失败 ≠ 没有 Pod, 必须 fail-closed。
+_mounter_gone=0
+for _i in $(seq 1 24); do
+    if ! _pods="$(SSH "${K}" -n "${CEPH_NAMESPACE}" get pods -l "app.kubernetes.io/name=${CEPHFS_MOUNT_DS_NAME}" --no-headers 2>/dev/null)"; then
+        err "无法确认旧 mounter pods 已退出(kubectl 查询失败); 拒绝继续 preclean"
+        exit 1
+    fi
+    if [ -z "${_pods}" ]; then _mounter_gone=1; break; fi
+    sleep 5
+done
+[ "${_mounter_gone}" = "1" ] || { err "旧 mounter pods 在 120s 内未退出; 拒绝继续 preclean"; exit 1; }
+unset _pods _i _mounter_gone
 say "预检节点现有 CephFS 挂载(旧集群残留/FS/只读变更自动 lazy umount)..."
 _STALE_FAIL=0
 for _line in "${NODES[@]:-}"; do
