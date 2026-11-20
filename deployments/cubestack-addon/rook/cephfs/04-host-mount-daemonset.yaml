@@ -77,8 +77,13 @@ spec:
                   TARGET="${CEPHFS_TARGET}"
                   fstype="$(findmnt -n -o FSTYPE -T "${TARGET}" 2>/dev/null | tail -1 | tr -d '[:space:]')"
                   [ "${fstype}" = "ceph" ] || { echo "target=${TARGET} fstype=${fstype:-<none>} (not ceph)"; exit 1; }
+                  opts="$(findmnt -n -o OPTIONS -T "${TARGET}" 2>/dev/null | tail -1 || true)"
+                  ms=""
+                  case ",${opts}," in
+                    *,ms_mode=*) ms="${opts#*ms_mode=}"; ms="${ms%%,*}" ;;
+                  esac
+                  [ "${ms}" = "${CEPHFS_MS_MODE:-}" ] || { echo "target=${TARGET} ms_mode=${ms:-<none>} (want ${CEPHFS_MS_MODE:-<none>})"; exit 1; }
                   if [ "${CEPHFS_READ_ONLY:-false}" = "true" ]; then
-                    opts="$(findmnt -n -o OPTIONS -T "${TARGET}" 2>/dev/null | tail -1 || true)"
                     case ",${opts}," in
                       *,ro,*) ;;
                       *) echo "target=${TARGET} not read-only"; exit 1 ;;
@@ -103,6 +108,8 @@ spec:
               value: "__DIR_MODE__"
             - name: CEPHFS_READ_ONLY
               value: "__READ_ONLY__"
+            - name: CEPHFS_MS_MODE
+              value: "__MS_MODE_VALUE__"
             - name: CEPH_USER
               value: "__USER__"
             - name: CEPH_KEY
@@ -118,6 +125,7 @@ spec:
               SUBDIR="${CEPHFS_SUBDIR}"
               MODE="${CEPHFS_DIR_MODE}"
               READ_ONLY="${CEPHFS_READ_ONLY:-false}"
+              MS_MODE="${CEPHFS_MS_MODE:-}"
               KEYFILE=/tmp/cephfs-models.key
               ROOT_TMP=/tmp/cephfs-models-root
               log() { echo "[cephfs-models-mount] $*"; }
@@ -136,8 +144,11 @@ spec:
               #   必须取**最上层**(tail -1), 否则整段多行 != "ceph" → 误判未挂载并反复叠加挂载。
               mounted_ok() {
                 findmnt -n -o FSTYPE -T "${TARGET}" 2>/dev/null | tail -1 | tr -d '[:space:]' | grep -qx ceph || return 1
+                _o="$(findmnt -n -o OPTIONS -T "${TARGET}" 2>/dev/null | tail -1 || true)"
+                _ms=""
+                case ",${_o}," in *,ms_mode=*) _ms="${_o#*ms_mode=}"; _ms="${_ms%%,*}" ;; esac
+                [ "${_ms}" = "${MS_MODE}" ] || return 1
                 if [ "${READ_ONLY}" = "true" ]; then
-                  _o="$(findmnt -n -o OPTIONS -T "${TARGET}" 2>/dev/null | tail -1 || true)"
                   case ",${_o}," in *,ro,*) return 0 ;; *) return 1 ;; esac
                 fi
                 return 0

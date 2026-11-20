@@ -132,6 +132,7 @@ CEPHFS_NODE_USER="linux-host-ro"
 CEPHFS_NODE_KEYRING="AQBReadOnlyKey=="  # secret-scan: allow(fake test fixture)
 CEPHFS_MOUNT_READ_ONLY="true"
 CEPHFS_MOUNT_PATH="/mnt/cephfs/ro-env"
+CEPHFS_MS_MODE="prefer-secure"
 EOF
 cat > "${TMP}/cluster.conf.external-ro" <<'EOF'
 NODES=(
@@ -148,6 +149,58 @@ CEPH_MODE="external"
 CEPHFS_ENABLED="true"
 CEPHFS_MOUNT_ENABLED="true"
 CEPHFS_MOUNT_PATH="/mnt/cephfs/ro-conf"
+EOF
+
+# 2026-11-20: external mon 非 6789/6790(如 msgr2-only NodePort 3300)沿用旧的 prefer-secure
+cat > "${TMP}/external-cephfs.msgr2.env" <<'EOF'
+CEPH_MONITORS="10.0.0.5:3300"
+CEPHFS_FS="cephfs-msgr2"
+CEPHFS_NODE_USER="linux-host-ro"
+CEPHFS_NODE_KEYRING="AQBReadOnlyKey=="  # secret-scan: allow(fake test fixture)
+CEPHFS_MOUNT_PATH="/mnt/cephfs/msgr2"
+EOF
+cat > "${TMP}/cluster.conf.external-msgr2" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
+  "master,m2,10.0.0.2,root,-"
+  "worker,w1,10.0.0.11,root,-"
+)
+SSH_USER="root"
+SSH_KEY_NAME="cubestack_k8s"
+KUBESPRAY_PROFILE="none"
+CEPH_ENABLED="false"
+CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
+CEPHFS_ENABLED="true"
+CEPHFS_MOUNT_ENABLED="true"
+CEPHFS_MOUNT_PATH="/mnt/cephfs/msgr2-conf"
+EOF
+
+# 2026-11-20: 专用 env 的显式空值要能覆盖 cluster.conf/自动推断的 prefer-secure
+cat > "${TMP}/external-cephfs.clear.env" <<'EOF'
+CEPH_MONITORS="10.0.0.5:3300"
+CEPHFS_FS="cephfs-clear"
+CEPHFS_NODE_USER="linux-host-ro"
+CEPHFS_NODE_KEYRING="AQBReadOnlyKey=="  # secret-scan: allow(fake test fixture)
+CEPHFS_MOUNT_PATH="/mnt/cephfs/clear"
+CEPHFS_MS_MODE=""
+EOF
+cat > "${TMP}/cluster.conf.external-clear" <<'EOF'
+NODES=(
+  "master,m1,10.0.0.1,root,-"
+  "master,m2,10.0.0.2,root,-"
+  "worker,w1,10.0.0.11,root,-"
+)
+SSH_USER="root"
+SSH_KEY_NAME="cubestack_k8s"
+KUBESPRAY_PROFILE="none"
+CEPH_ENABLED="false"
+CEPH_CSI_ENABLED="true"
+CEPH_MODE="external"
+CEPHFS_ENABLED="true"
+CEPHFS_MOUNT_ENABLED="true"
+CEPHFS_MOUNT_PATH="/mnt/cephfs/clear-conf"
+CEPHFS_MS_MODE="prefer-secure"
 EOF
 
 # 2026-10-28: 凭据必须成对派生 —— 只显式给 node 用户名(与 CSI node secret 不同身份)时,
@@ -486,6 +539,7 @@ chk_contains "CephFS 名自动派生" 'cubestack-ext-fs' "${APPLY_ENV}"
 chk_contains "节点用户自动派生(含 generation 后缀)" 'csi-cephfs-node.1' "${APPLY_ENV}"
 chk_contains "节点 key 自动派生" 'AQBCsiNodeKey==' "${APPLY_ENV}"
 chk_not_contains "不用 healthchecker 兜底(有 CSI node secret 时)" 'healthchecker' "${APPLY_ENV}"
+chk_not_contains "未配置 CEPHFS_MS_MODE 时挂载选项不带 ms_mode" 'noatime,ms_mode=' "${APPLY_ENV}"
 
 echo "== ⑨ external 只读挂载(专用 external-cephfs.env + CEPHFS_MOUNT_READ_ONLY) =="
 export CEPHFS_MOUNT_ENV_FILE="${TMP}/external-cephfs.env"
@@ -501,13 +555,42 @@ chk_contains "只读标志写入 DaemonSet" 'CEPHFS_READ_ONLY' "${APPLY_RO}"
 chk_contains "只读值为 true" 'value: "true"' "${APPLY_RO}"
 chk_contains "专用 env 覆盖挂载路径" 'path: /mnt/cephfs/ro-env' "${APPLY_RO}"
 chk_contains "只读挂载选项" 'MOUNT_OPTS' "${APPLY_RO}"
-# 2026-11-05 实机: external MON 是 msgr2-only NodePort, 内核默认 v1 → V1_BANNER → no mds
+# 2026-11-20: ms_mode 不再无条件强开; 默认交给内核协商, 只有显式配置才写入
 chk_contains "模板含 ms_mode 占位符" '__MS_MODE__' "${MANIFEST}"
-chk_contains "external 启用 prefer-secure" 'ms_mode=prefer-secure' "${MODULE}"
+chk_contains "ms_mode 用可配变量" 'ms_mode=${CEPHFS_MS_MODE}' "${MODULE}"
+chk_not_contains "不再无条件 external 强制 prefer-secure" '[ "${CEPH_MODE}" = "external" ] && MS_MODE_OPT=",ms_mode=prefer-secure"' "${MODULE}"
+chk_contains "非 6789-6799 端口自动 prefer-secure" 'CEPHFS_MS_MODE="prefer-secure"' "${MODULE}"
+chk_contains "679x 也按 msgr1 处理" '679[0-9]' "${MODULE}"
+chk_contains "预清理前停旧 mounter" '停止旧 mounter DaemonSet' "${MODULE}"
+chk_contains "预清理比较 ms_mode" 'ms_mode=' "${MODULE}"
+chk_contains "最终校验 ms_mode" 'WRONG_MS_MODE' "${MODULE}"
+chk_contains "DaemonSet 传递 MS_MODE" '__MS_MODE_VALUE__' "${MANIFEST}"
+chk_contains "mounter 校验 MS_MODE" 'MS_MODE' "${MANIFEST}"
 chk_contains "模块替换 ms_mode 占位符" 's|__MS_MODE__|' "${MODULE}"
+chk_contains "显式 CEPHFS_MS_MODE 写入挂载选项" 'noatime,ms_mode=prefer-secure' "${APPLY_RO}"
 chk_contains "只读不创建子目录" 'read-only 模式: 不创建子目录' "${APPLY_RO}"
 chk_contains "验证区分只读" 'NOT_READONLY' "${MODULE}"
 chk_contains "只读用 ls 验证" "timeout 10 ls" "${MODULE}"
+
+echo "== ⑨b external msgr2-only mon(非 6789-6799) → 自动 prefer-secure =="
+export CEPHFS_MOUNT_ENV_FILE="${TMP}/external-cephfs.msgr2.env"
+unset CEPH_EXTERNAL_ENV_FILE
+rc="$(run_module external-msgr2 "${TMP}/cluster.conf.external-msgr2")"
+unset CEPHFS_MOUNT_ENV_FILE
+chk "external-msgr2 退出码" "0" "${rc}"
+APPLY_MSGR2="${TMP}/apply-external-msgr2.log"
+chk_contains "3300 mon 自动 prefer-secure" 'noatime,ms_mode=prefer-secure' "${APPLY_MSGR2}"
+chk_contains "msgr2 专用挂载路径" 'path: /mnt/cephfs/msgr2' "${APPLY_MSGR2}"
+
+echo "== ⑨c 专用 env 显式空值覆盖 cluster.conf 的 prefer-secure =="
+export CEPHFS_MOUNT_ENV_FILE="${TMP}/external-cephfs.clear.env"
+unset CEPH_EXTERNAL_ENV_FILE
+rc="$(run_module external-clear "${TMP}/cluster.conf.external-clear")"
+unset CEPHFS_MOUNT_ENV_FILE
+chk "external-clear 退出码" "0" "${rc}"
+APPLY_CLEAR="${TMP}/apply-external-clear.log"
+chk_not_contains "显式空值不传 ms_mode" 'noatime,ms_mode=' "${APPLY_CLEAR}"
+chk_contains "clear 专用挂载路径" 'path: /mnt/cephfs/clear' "${APPLY_CLEAR}"
 
 echo "== ⑩ external 凭据成对派生: 只显式给 user 时不得借用其他身份的 key =="
 export CEPH_EXTERNAL_ENV_FILE="${TMP}/external-ceph.env"
