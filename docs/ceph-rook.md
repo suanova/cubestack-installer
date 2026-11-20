@@ -618,6 +618,7 @@ Ceph 全关时不会排进部署计划);单独执行: `sudo ./deploy-cluster.sh 
 | `CEPHFS_MOUNT_USER` | `cubestack-cephfs-models` | internal 专用 cephx 用户 |
 | `CEPHFS_MOUNT_IMAGE` | 空(自动取 cephfs CSI nodeplugin 镜像) | 运行镜像 |
 | `CEPHFS_MOUNT_ENV_FILE` | 空(自动探测 `deployments/config/external-cephfs.env`) | external 挂载专用 env(**该文件出现的变量优先**) |
+| `CEPHFS_MS_MODE` | 空(内核默认连接模式; external 非 6789-6799 端口自动 `prefer-secure`) | 显式覆盖 msgr 模式; 6789-6799/msgr1 的 mon 不要设 |
 | `CEPHFS_MOUNT_READ_ONLY` | `false` | `true`=`mount -o ro`;不创建子目录;验证只读+`ls` |
 | `CEPHFS_MOUNT_ROLLOUT_TIMEOUT` | `300` | 秒;等 DaemonSet readiness(真实挂载)的总时长 |
 | `CEPHFS_MOUNT_VERIFY_TIMEOUT` | `90` | 秒;单节点逐次 SSH 校验的有界重试窗口 |
@@ -668,6 +669,9 @@ CEPH_MODE=external CEPHFS_MOUNT_ENABLED=true \
 - 只读模式不创建子目录: `CEPHFS_MOUNT_SUBDIR`(默认 `models`)必须已在 FS 内存在; 否则 DaemonSet
   日志会明确报"子目录不存在(只读模式不创建)", 请先在 CephFS 内建好。
 - 只读验证: `findmnt -o OPTIONS` 含 `ro` + `ls` 可读; 写操作由本地 VFS(`ro`)与提供方 caps 双重拦截。
+- ⚠ msgr 模式: 6789-6799 的 mon 不传 `ms_mode`, 使用内核默认连接模式(不是 `prefer-crc`); 其他端口沿用旧的
+  `prefer-secure`(msgr2-only/NodePort 场景)。需要强制时用 `CEPHFS_MS_MODE` 覆盖。对 6789/msgr1
+  的 mon 强行 prefer-secure 会 mount 挂住或报 `no mds is up`(2026-11-20 实测)。
 - 容器 d 实测(2026-10-27): `192.0.2.46:/models` 以 `ro,mds_namespace=cephfs` 挂载成功,
   `ls` 可见模型目录, `touch` 返回 `Read-only file system`。
 - ⚠ 常见错误(容器 d 实测): external 挂载用 `csi-cephfs-node`(漏 `CEPHX_KEY_GENERATION` 后缀)会报

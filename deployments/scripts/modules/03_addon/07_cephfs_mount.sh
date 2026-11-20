@@ -40,8 +40,8 @@
 #     保留 CephFS 内数据与宿主机空目录。REPEAT:1 → 每次部署重新 apply/验证(修正漂移)。
 #   · 回归: bash deployments/scripts/tools/tests/test-cephfs-mount.sh
 # 数据源: cluster.conf (CEPHFS_MOUNT_ENABLED / CEPHFS_MOUNT_* / CEPHFS_ENABLED / CEPH_MODE /
-#         CEPHFS_FS / CEPH_MONITORS / CEPHFS_NODE_USER / CEPHFS_NODE_KEYRING / CEPH_NAMESPACE /
-#         CEPH_EXTERNAL_ENV_FILE / CEPHFS_MOUNT_ENV_FILE / CEPHCSI_VERSION / NODES)
+#         CEPHFS_FS / CEPH_MONITORS / CEPHFS_NODE_USER / CEPHFS_NODE_KEYRING / CEPHFS_MS_MODE /
+#         CEPH_NAMESPACE / CEPH_EXTERNAL_ENV_FILE / CEPHFS_MOUNT_ENV_FILE / CEPHCSI_VERSION / NODES)
 # 用法:   sudo ./deploy-cluster.sh --steps cephfs_mount
 # ============================================================
 set -euo pipefail
@@ -80,6 +80,19 @@ _normalize_mons() {
     printf '%s' "${out}"
 }
 
+# 文件里是否**定义了**该变量(即使是空值); 用于允许显式空值覆盖 cluster.conf。
+_env_is_set() {
+    local _f="$1" _v="$2"
+    [ -f "${_f}" ] || return 1
+    (
+        unset "${_v}" 2>/dev/null || true
+        set +u
+        # shellcheck disable=SC1090
+        . "${_f}" >/dev/null 2>&1
+        [ "${!_v+x}" = "x" ]
+    )
+}
+
 # 在子 shell 中 source env 文件并取一个变量(不污染本模块全局变量)
 # ★ 必须先 unset 目标变量(2026-10-28): 子 shell 会继承父 shell 的同名变量, 文件未定义该
 #   变量时 ${!v} 会读到**父进程的值**, 让调用方误判"文件里出现了该变量"(凭据成对校验/覆盖
@@ -109,7 +122,15 @@ _load_external_cephfs_env() {
     _pre_key="${CEPHFS_NODE_KEYRING:-}"
     if [ -f "${_mount_env}" ]; then
         for _v in CEPH_MONITORS CEPHFS_FS CEPHFS_NODE_USER CEPHFS_NODE_KEYRING \
-                  CEPHFS_MOUNT_READ_ONLY CEPHFS_MOUNT_PATH CEPHFS_MOUNT_SUBDIR; do
+                  CEPHFS_MS_MODE CEPHFS_MOUNT_READ_ONLY CEPHFS_MOUNT_PATH CEPHFS_MOUNT_SUBDIR; do
+            # CEPHFS_MS_MODE 的显式空值有意义(清掉 cluster.conf 的 prefer-secure), 不能当未设置。
+            if [ "${_v}" = "CEPHFS_MS_MODE" ]; then
+                if _env_is_set "${_mount_env}" "${_v}"; then
+                    CEPHFS_MS_MODE="$(_env_get "${_mount_env}" "${_v}")"
+                    CEPHFS_MS_MODE_EXPLICIT=1
+                fi
+                continue
+            fi
             _val="$(_env_get "${_mount_env}" "${_v}")"
             [ -n "${_val}" ] || continue
             [ "${_v}" = "CEPHFS_NODE_KEYRING" ] && _mount_key_set=1
@@ -185,6 +206,11 @@ CEPHFS_MOUNT_ENV_FILE="${CEPHFS_MOUNT_ENV_FILE:-}"
 CEPHFS_FS="${CEPHFS_FS:-}"
 CEPHFS_NODE_USER="${CEPHFS_NODE_USER:-}"
 CEPHFS_NODE_KEYRING="${CEPHFS_NODE_KEYRING:-}"
+# 空 = 内核默认连接模式(不是 prefer-crc); 仅 msgr2-only 的 external mon 需要显式设值。
+# EXPLICIT 区分"未设置"和"显式空值"(后者用于清掉 cluster.conf 的 prefer-secure)。
+if [ -n "${CEPHFS_MS_MODE:-}" ]; then CEPHFS_MS_MODE_EXPLICIT=1; fi
+CEPHFS_MS_MODE="${CEPHFS_MS_MODE:-}"
+CEPHFS_MS_MODE_EXPLICIT="${CEPHFS_MS_MODE_EXPLICIT:-0}"
 CEPHFS_MOUNT_READ_ONLY="${CEPHFS_MOUNT_READ_ONLY:-false}"
 case "${CEPHFS_MOUNT_READ_ONLY,,}" in
     true|1|yes|on)   CEPHFS_MOUNT_READ_ONLY="true" ;;
@@ -329,6 +355,13 @@ fi
 
 # ---------------- 开关/模式门禁 ----------------
 [ "${CEPHFS_MOUNT_ENABLED}" = "true" ] || { say "CEPHFS_MOUNT_ENABLED=false, 跳过 CephFS 宿主机挂载"; exit 0; }
+# 只在真正执行挂载时校验; 卸载/关闭开关已在上方提前退出。
+case "${CEPHFS_MS_MODE}" in
+    ""|crc|secure|prefer-crc|prefer-secure) ;;
+    *)
+        err "CEPHFS_MS_MODE 非法: '${CEPHFS_MS_MODE}'(可用 crc/secure/prefer-crc/prefer-secure, 留空用内核默认)"
+        exit 1 ;;
+esac
 
 if [ "${CEPH_MODE}" = "external" ]; then
     CEPHFS_FS_NAME="${CEPHFS_FS:-}"
@@ -393,11 +426,25 @@ if ! printf '%s' "${MON_ADDRS}" | grep -qE '^[A-Za-z0-9._-]+:[0-9]+(,[A-Za-z0-9.
 fi
 ok "  mon 地址: ${MON_ADDRS}"
 
-# ★ external 的 MON 通常是 msgr2-only 的 NodePort(如 3300); 内核客户端默认用 v1,
-#   会以 "V1_BANNER socket closed" 反复重连 → mount 报 no mds is up。
-#   ms_mode=prefer-secure: 优先 msgr2、回退 v1 —— 兼容 external v1/v2 与 internal。
+# 内核默认连接模式(不是 prefer-crc)对 6789/msgr1 的 mon 也能工作。
+# external mon 端口是唯一可用线索: 6789/6790 按 msgr1 处理; 其他端口沿用旧的
+# msgr2-only 处理(prefer-secure), 避免 3300/NodePort 场景回归。显式 CEPHFS_MS_MODE 优先。
+if [ -z "${CEPHFS_MS_MODE}" ] && [ "${CEPHFS_MS_MODE_EXPLICIT:-0}" != "1" ] \
+    && [ "${CEPH_MODE}" = "external" ]; then
+    _msgr1=0
+    for _mon in ${MON_ADDRS//,/ }; do
+        case "${_mon##*:}" in
+            6789|679[0-9]) _msgr1=1; break ;;
+        esac
+    done
+    if [ "${_msgr1}" = "0" ]; then
+        CEPHFS_MS_MODE="prefer-secure"
+        say "  external mon 端口不属于 6789-6799 → 默认 ms_mode=prefer-secure(可用 CEPHFS_MS_MODE 覆盖)"
+    fi
+    unset _msgr1 _mon
+fi
 MS_MODE_OPT=""
-[ "${CEPH_MODE}" = "external" ] && MS_MODE_OPT=",ms_mode=prefer-secure"
+[ -n "${CEPHFS_MS_MODE}" ] && MS_MODE_OPT=",ms_mode=${CEPHFS_MS_MODE}"
 
 # ---------------- 镜像 ----------------
 IMAGE="${CEPHFS_MOUNT_IMAGE}"
@@ -475,6 +522,19 @@ ok "  Secret 已就绪"
 #   若不在这里处理, 旧 FS 的可读挂载会被一直复用, 脚本报新 FS 成功而消费者读的是旧数据。
 #   mds_namespace 由 DS 的 mount -o 传入, 内核 5.15 的 findmnt OPTIONS 可见(实机验证);
 #   缺失该选项同样按不匹配处理(不当作匹配)。
+# ★ 先停旧 mounter(2026-11-20 CodeRabbit): preclean umount 后旧容器会用旧参数重挂,
+#   导致模式切换失败或挂载叠加。删 DS 后宿主机的 ceph 挂载仍保留, 预检再决定复用/卸载。
+if SSH "${K}" -n "${CEPH_NAMESPACE}" get ds "${CEPHFS_MOUNT_DS_NAME}" >/dev/null 2>&1; then
+    say "停止旧 mounter DaemonSet ${CEPHFS_MOUNT_DS_NAME}(避免用旧 ms_mode 重挂)..."
+    SSH "${K}" -n "${CEPH_NAMESPACE}" delete ds "${CEPHFS_MOUNT_DS_NAME}" --ignore-not-found --timeout=120s >/dev/null 2>&1 \
+        || warn "  删除旧 DaemonSet 失败/超时(继续; preclean 可能与其竞争)"
+    for _i in $(seq 1 24); do
+        _pods="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" get pods -l "app.kubernetes.io/name=${CEPHFS_MOUNT_DS_NAME}" --no-headers 2>/dev/null) || true )"
+        [ -z "${_pods}" ] && break
+        sleep 5
+    done
+    unset _pods _i
+fi
 say "预检节点现有 CephFS 挂载(旧集群残留/FS/只读变更自动 lazy umount)..."
 _STALE_FAIL=0
 for _line in "${NODES[@]:-}"; do
@@ -493,8 +553,13 @@ for _line in "${NODES[@]:-}"; do
     case ",${_opts}," in
         *,mds_namespace=*) _mns="${_opts#*mds_namespace=}"; _mns="${_mns%%,*}" ;;
     esac
-    if [ "${_is_ro}" != "${CEPHFS_MOUNT_READ_ONLY}" ] || [ "${_mns}" != "${CEPHFS_FS_NAME}" ]; then
-        warn "  ${_host}(${_ip}) 现有 ceph 挂载 ro=${_is_ro}(期望 ${CEPHFS_MOUNT_READ_ONLY}), fs='${_mns:-<无 mds_namespace>}'(期望 ${CEPHFS_FS_NAME}) 不一致, lazy umount..."
+    _ms=""
+    case ",${_opts}," in
+        *,ms_mode=*) _ms="${_opts#*ms_mode=}"; _ms="${_ms%%,*}" ;;
+    esac
+    if [ "${_is_ro}" != "${CEPHFS_MOUNT_READ_ONLY}" ] || [ "${_mns}" != "${CEPHFS_FS_NAME}" ] \
+        || [ "${_ms}" != "${CEPHFS_MS_MODE}" ]; then
+        warn "  ${_host}(${_ip}) 现有 ceph 挂载 ro=${_is_ro}(期望 ${CEPHFS_MOUNT_READ_ONLY}), fs='${_mns:-<无 mds_namespace>}'(期望 ${CEPHFS_FS_NAME}), ms_mode='${_ms:-<无>}'(期望 ${CEPHFS_MS_MODE:-<无>}) 不一致, lazy umount..."
         _node_ssh "${_ip}" "timeout 20 sudo umount -l '${CEPHFS_MOUNT_PATH}' 2>/dev/null || timeout 20 sudo umount -f '${CEPHFS_MOUNT_PATH}' 2>/dev/null || true" || true
         _fs2="$(_node_ssh "${_ip}" "findmnt -n -o FSTYPE -T '${CEPHFS_MOUNT_PATH}' 2>/dev/null | tail -1 | tr -d '[:space:]'" 2>/dev/null || true)"
         if [ "${_fs2}" = "ceph" ]; then
@@ -532,6 +597,7 @@ DS_YAML="$(sed \
     -e "s|__SECRET__|${CEPHFS_MOUNT_SECRET}|g" \
     -e "s|__MON_ADDRS__|${MON_ADDRS}|g" \
     -e "s|__MS_MODE__|${MS_MODE_OPT}|g" \
+    -e "s|__MS_MODE_VALUE__|${CEPHFS_MS_MODE}|g" \
     -e "s|__FS_NAME__|${CEPHFS_FS_NAME}|g" \
     -e "s|__SUBDIR__|${CEPHFS_MOUNT_SUBDIR}|g" \
     -e "s|__DIR_MODE__|${CEPHFS_MOUNT_DIR_MODE}|g" \
@@ -603,6 +669,11 @@ case \",\${opts},\" in
     *,mds_namespace=*) mns=\"\${opts#*mds_namespace=}\"; mns=\"\${mns%%,*}\" ;;
 esac
 [ \"\${mns}\" = '${CEPHFS_FS_NAME}' ] || { echo \"WRONG_FS:期望 ${CEPHFS_FS_NAME}; opts=\${opts}\"; exit 4; }
+ms=\"\"
+case \",\${opts},\" in
+    *,ms_mode=*) ms=\"\${opts#*ms_mode=}\"; ms=\"\${ms%%,*}\" ;;
+esac
+[ \"\${ms}\" = '${CEPHFS_MS_MODE}' ] || { echo \"WRONG_MS_MODE:期望 ${CEPHFS_MS_MODE:-<无>}; opts=\${opts}\"; exit 5; }
 if [ '${CEPHFS_MOUNT_READ_ONLY}' = 'true' ]; then
     case \",\${opts},\" in
         *,ro,*) ;;
