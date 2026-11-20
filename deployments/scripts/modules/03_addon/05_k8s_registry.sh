@@ -253,7 +253,13 @@ _patch_registry_pod_dns() {
             continue
         fi
         # 保留用户/其它组件写入的行, 只替换解析到 registry 域名的行(按第 2 列判断)。
-        _cur="$( (SSH "${K}" -n kube-system get cm "${_cm}" -o jsonpath='{.data.hosts}' 2>/dev/null) || true )"
+        # ⚠ 失败关闭: 读取失败 ≠ 读到空内容。把 SSH/kubectl 失败当成空字符串会让后续
+        #   patch 用只有 registry 一行的新值覆盖掉其它 hosts 映射, 因此这里区分返回码:
+        #   读取成功但 .data.hosts 为空 → 允许继续; 读取失败 → 直接中止。
+        if ! _cur="$(SSH "${K}" -n kube-system get cm "${_cm}" -o jsonpath='{.data.hosts}' 2>/dev/null)"; then
+            err "  读取 kube-system/${_cm} 的 hosts 失败(无法确认现有映射, 拒绝覆盖)"
+            return 1
+        fi
         _new="$(printf '%s\n' "${_cur}" | python3 -c '
 import sys
 dom, ip = sys.argv[1], sys.argv[2]
