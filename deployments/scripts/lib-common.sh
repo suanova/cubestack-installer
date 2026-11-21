@@ -975,6 +975,180 @@ kubespray_latest_version() {
     } | sed '/^$/d' | sort -V | tail -1
 }
 
+# ---------------- Ceph 配置归一化(2026-11-20 单一开关 CEPH_MODE) ----------------
+# Ceph 只保留 CEPH_MODE=none|external|internal 一个启停开关:
+#   · none     = 不安装 Ceph 集群/CSI, registry 走 local-path;
+#   · external = 只安装 Rook operator/ceph-csi, 接入外部已有 Ceph;
+#   · internal = 集群内 Rook-Ceph + CSI。
+# 所有值大小写不敏感(NOne/None/NONE 等价), 布尔值统一归一化为 true/false。
+# 旧变量 CEPH_ENABLED/CEPH_CSI_ENABLED 仍被识别一次(自动映射 + 弃用告警), 随后 unset。
+ceph_norm_lower() { printf '%s' "${1:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'; }
+
+# 布尔归一化: 1/true/yes/y/on → true; 0/false/no/n/off/空 → false。
+# 未知值返回 false(调用方 ceph_normalize_ceph_vars 会告警)。
+ceph_norm_bool() {
+    case "$(ceph_norm_lower "${1:-}")" in
+        1|true|yes|y|on)     printf 'true' ;;
+        0|false|no|n|off|'') printf 'false' ;;
+        *)                   printf 'false' ;;
+    esac
+}
+
+# ceph_resolve_mode <mode> <legacy_enabled> <legacy_csi> <mode_was_set>
+# stdout: none|external|internal。mode 非法 → 返回 1。
+# mode_was_set=1 时 CEPH_MODE 权威; 否则按旧开关组合映射(兼容旧 cluster.conf):
+#   (true,true)→internal; (false,true)→external; (true,false)→internal; 其余→none。
+ceph_resolve_mode() {
+    local mode legacy_e legacy_c was_set
+    mode="$(ceph_norm_lower "${1:-}")"
+    legacy_e="$(ceph_norm_bool "${2:-false}")"
+    legacy_c="$(ceph_norm_bool "${3:-false}")"
+    was_set="${4:-0}"
+    if [ "${was_set}" = "1" ]; then
+        case "${mode}" in
+            none|external|internal) printf '%s' "${mode}"; return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    if [ "${legacy_e}" = "true" ] && [ "${legacy_c}" = "true" ]; then
+        printf 'internal'
+    elif [ "${legacy_c}" = "true" ]; then
+        printf 'external'
+    elif [ "${legacy_e}" = "true" ]; then
+        printf 'internal'
+    else
+        printf 'none'
+    fi
+}
+
+# 就地归一化所有 Ceph 布尔/枚举变量(当前 shell + export)。
+ceph_normalize_ceph_vars() {
+    local _v _val _norm _low
+    for _v in CEPH_FALLBACK_TO_LOCALPATH CEPHFS_ENABLED CEPH_RGW_ENABLED \
+              CEPH_DASHBOARD_ENABLED CEPH_HOST_NETWORK CEPH_ENABLE_MASTER_SCHEDULE \
+              CEPH_CLEAN_STALE_LOCAL_PATH CEPH_EXTERNAL_EXPOSE CEPHFS_MOUNT_ENABLED \
+              CEPHFS_MOUNT_READ_ONLY CEPH_EXTERNAL_PROVISION_SMOKE CEPH_PRE_CLEANUP_EXISTING \
+              CEPH_CLEANUP_ALLOW_EXTERNAL CEPHFS_MDS_ACTIVE_STANDBY; do
+        eval "_val=\"\${${_v}:-}\""
+        [ -n "${_val}" ] || continue
+        _low="$(ceph_norm_lower "${_val}")"
+        case "${_low}" in
+            true|false|1|0|yes|no|y|n|on|off) : ;;
+            *) warn "${_v}='${_val}' 不是布尔值(按 false 处理; 可用 true/false/1/0/yes/no/on/off)" ;;
+        esac
+        _norm="$(ceph_norm_bool "${_val}")"
+        printf -v "${_v}" '%s' "${_norm}"
+        export "${_v}"
+    done
+    for _v in CEPH_TOPOLOGY CEPH_DATA_DISK_POLICY CEPH_EXPOSE_MODE \
+              CEPH_EXTERNAL_EXPOSE_MODE CEPH_RGW_EXPOSE_MODE CEPH_POOL_FAILURE_DOMAIN; do
+        eval "_val=\"\${${_v}:-}\""
+        [ -n "${_val}" ] || continue
+        _norm="$(ceph_norm_lower "${_val}")"
+        printf -v "${_v}" '%s' "${_norm}"
+        export "${_v}"
+    done
+}
+
+# ---------------- Ceph 拓扑与有效参数(2026-11-20 单/多节点解耦) ----------------
+# ceph_topology_resolve <desired> <node_count> <min_nodes>
+#   stdout: single|multi|ineligible；原因写 stderr。返回 0=可部署, 1=不满足。
+#   auto: 1 台→single, >=min_nodes 台→multi, 0/2 台→ineligible(2 台需显式 CEPH_NODES 选 1 台或调整 min)。
+ceph_topology_resolve() {
+    local desired count min
+    desired="$(ceph_norm_lower "${1:-auto}")"
+    count="${2:-0}"; min="${3:-3}"
+    case "${count}" in ''|*[!0-9]*) count=0 ;; esac
+    case "${min}" in ''|*[!0-9]*) min=3 ;; esac
+    case "${desired}" in
+        single)
+            if [ "${count}" -eq 1 ]; then printf 'single'; return 0; fi
+            printf '单节点拓扑(CEPH_TOPOLOGY=single)要求存储节点恰好 1 台(当前 %s 台)\n' "${count}" >&2
+            printf 'ineligible'; return 1 ;;
+        multi)
+            if [ "${count}" -ge "${min}" ]; then printf 'multi'; return 0; fi
+            printf '多节点拓扑要求存储节点 >= %s 台(当前 %s 台)\n' "${min}" "${count}" >&2
+            printf 'ineligible'; return 1 ;;
+        auto)
+            if [ "${count}" -eq 1 ]; then printf 'single'; return 0; fi
+            if [ "${count}" -ge "${min}" ]; then printf 'multi'; return 0; fi
+            printf '存储节点 %s 台不满足 Ceph 拓扑: 1 台=单节点, >=%s 台=多节点(2 台请用 CEPH_NODES 指定 1 台或调整 CEPH_MIN_NODES)\n' \
+                "${count}" "${min}" >&2
+            printf 'ineligible'; return 1 ;;
+        *)
+            printf 'CEPH_TOPOLOGY 非法: %s(只允许 auto|single|multi)\n' "${desired}" >&2
+            printf 'ineligible'; return 1 ;;
+    esac
+}
+
+# 严格正整数校验(失败返回 1)
+ceph_require_pos_int() {  # <value> <name>
+    case "${1:-}" in ''|*[!0-9]*) err "${2} 必须是正整数: '${1:-}'"; return 1 ;; esac
+    [ "${1}" -ge 1 ] || { err "${2} 必须 >=1(当前 ${1})"; return 1; }
+}
+
+# ceph_apply_effective_spec <single|multi>
+# 依据拓扑与用户显式覆盖(CEPH_EXPLICIT_*)设置 CEPH_EFF_*:
+#   single: mon=1, mgr=1, size=1, min_size=1, failureDomain=osd,
+#           MDS active=1/standby=false, RGW=1
+#   multi : 沿用 CEPH_MON_COUNT/CEPH_MGR_COUNT/CEPH_POOL_REPLICAS/CEPH_POOL_MIN_SIZE 等
+# requireSafeReplicaSize: size>=3 → true(与多节点现状一致); size<3 → false(Rook 拒绝不安全副本)。
+ceph_apply_effective_spec() {
+    local topo
+    topo="$(ceph_norm_lower "${1:-multi}")"
+    case "${topo}" in
+        single|multi) : ;;
+        *) err "ceph_apply_effective_spec: 拓扑非法 '${topo}'(只允许 single|multi)"; return 1 ;;
+    esac
+    CEPH_TOPOLOGY_EFFECTIVE="${topo}"
+    if [ "${topo}" = "single" ]; then
+        CEPH_EFF_MON_COUNT=1
+        if [ "${CEPH_EXPLICIT_MGR:-0}" = "1" ]; then CEPH_EFF_MGR_COUNT="${CEPH_MGR_COUNT}"; else CEPH_EFF_MGR_COUNT=1; fi
+        if [ "${CEPH_EXPLICIT_REPLICAS:-0}" = "1" ]; then CEPH_EFF_POOL_REPLICAS="${CEPH_POOL_REPLICAS}"; else CEPH_EFF_POOL_REPLICAS=1; fi
+        if [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" = "1" ]; then CEPH_EFF_POOL_MIN_SIZE="${CEPH_POOL_MIN_SIZE}"; else CEPH_EFF_POOL_MIN_SIZE=1; fi
+        if [ "${CEPH_EXPLICIT_FAILURE_DOMAIN:-0}" = "1" ] && [ -n "${CEPH_POOL_FAILURE_DOMAIN:-}" ]; then
+            CEPH_EFF_FAILURE_DOMAIN="${CEPH_POOL_FAILURE_DOMAIN}"
+        else
+            CEPH_EFF_FAILURE_DOMAIN=osd
+        fi
+        if [ "${CEPH_EXPLICIT_MDS:-0}" = "1" ]; then CEPH_EFF_MDS_ACTIVE_COUNT="${CEPHFS_MDS_ACTIVE_COUNT}"; else CEPH_EFF_MDS_ACTIVE_COUNT=1; fi
+        if [ "${CEPH_EXPLICIT_MDS_STANDBY:-0}" = "1" ]; then CEPH_EFF_MDS_ACTIVE_STANDBY="${CEPHFS_MDS_ACTIVE_STANDBY}"; else CEPH_EFF_MDS_ACTIVE_STANDBY=false; fi
+        if [ "${CEPH_EXPLICIT_RGW:-0}" = "1" ]; then CEPH_EFF_RGW_INSTANCES="${CEPH_RGW_INSTANCES}"; else CEPH_EFF_RGW_INSTANCES=1; fi
+    else
+        CEPH_EFF_MON_COUNT="${CEPH_MON_COUNT:-3}"
+        CEPH_EFF_MGR_COUNT="${CEPH_MGR_COUNT:-2}"
+        CEPH_EFF_POOL_REPLICAS="${CEPH_POOL_REPLICAS:-3}"
+        CEPH_EFF_POOL_MIN_SIZE="${CEPH_POOL_MIN_SIZE:-2}"
+        CEPH_EFF_FAILURE_DOMAIN="${CEPH_POOL_FAILURE_DOMAIN:-host}"
+        if [ "${CEPH_EXPLICIT_MDS:-0}" = "1" ]; then CEPH_EFF_MDS_ACTIVE_COUNT="${CEPHFS_MDS_ACTIVE_COUNT}"; else CEPH_EFF_MDS_ACTIVE_COUNT=2; fi
+        if [ "${CEPH_EXPLICIT_MDS_STANDBY:-0}" = "1" ]; then CEPH_EFF_MDS_ACTIVE_STANDBY="${CEPHFS_MDS_ACTIVE_STANDBY}"; else CEPH_EFF_MDS_ACTIVE_STANDBY=true; fi
+        if [ "${CEPH_EXPLICIT_RGW:-0}" = "1" ]; then CEPH_EFF_RGW_INSTANCES="${CEPH_RGW_INSTANCES}"; else CEPH_EFF_RGW_INSTANCES=2; fi
+    fi
+    ceph_require_pos_int "${CEPH_EFF_MON_COUNT}" CEPH_MON_COUNT || return 1
+    ceph_require_pos_int "${CEPH_EFF_MGR_COUNT}" CEPH_MGR_COUNT || return 1
+    ceph_require_pos_int "${CEPH_EFF_POOL_REPLICAS}" CEPH_POOL_REPLICAS || return 1
+    ceph_require_pos_int "${CEPH_EFF_POOL_MIN_SIZE}" CEPH_POOL_MIN_SIZE || return 1
+    ceph_require_pos_int "${CEPH_EFF_MDS_ACTIVE_COUNT}" CEPHFS_MDS_ACTIVE_COUNT || return 1
+    ceph_require_pos_int "${CEPH_EFF_RGW_INSTANCES}" CEPH_RGW_INSTANCES || return 1
+    [ "${CEPH_EFF_POOL_MIN_SIZE}" -le "${CEPH_EFF_POOL_REPLICAS}" ] || {
+        err "CEPH_POOL_MIN_SIZE(${CEPH_EFF_POOL_MIN_SIZE}) 不能大于 CEPH_POOL_REPLICAS(${CEPH_EFF_POOL_REPLICAS})"
+        return 1
+    }
+    case "${CEPH_EFF_FAILURE_DOMAIN}" in
+        host|osd) : ;;
+        *) err "CEPH_POOL_FAILURE_DOMAIN 非法: '${CEPH_EFF_FAILURE_DOMAIN}'(只允许 host|osd)"; return 1 ;;
+    esac
+    if [ "${CEPH_EFF_POOL_REPLICAS}" -ge 3 ]; then
+        CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE=true
+    else
+        CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE=false
+    fi
+    export CEPH_TOPOLOGY_EFFECTIVE CEPH_EFF_MON_COUNT CEPH_EFF_MGR_COUNT \
+           CEPH_EFF_POOL_REPLICAS CEPH_EFF_POOL_MIN_SIZE CEPH_EFF_FAILURE_DOMAIN \
+           CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE CEPH_EFF_MDS_ACTIVE_COUNT \
+           CEPH_EFF_MDS_ACTIVE_STANDBY CEPH_EFF_RGW_INSTANCES
+}
+
 # ---------------- 统一配置加载 ----------------
 # 环境变量优先: 配置文件内使用 ${VAR:-default},已导出的环境变量不会被覆盖
 load_config() {
@@ -985,6 +1159,22 @@ load_config() {
         warn "未找到配置文件 ${CLUSTER_CONF},使用内置默认值"
         warn "建议: cp ${REPO_ROOT}/deployments/config/cluster.conf.example ${CLUSTER_CONF}"
     fi
+    # ★ 捕获 Ceph 显式覆盖标志(**必须在 defaults 之前**): defaults 会给这些变量填默认值,
+    #   之后无法区分"用户写了"还是"默认值"。单/多节点有效参数(CEPH_EFF_*)据此决定
+    #   是尊重用户覆盖, 还是采用拓扑 profile(单节点 size=1 等)。
+    #   幂等: 同一进程重复调用 load_config 时不再捕获(否则 defaults 值会被误判为显式覆盖)。
+    #   ⚠ defaults **必须每次加载**(子进程会继承本 guard 变量; 把 source defaults 放进
+    #     guard 里会让子进程跳过 defaults → BUSYBOX_TAG 等默认值丢失)。
+    if [ -z "${CUBESTACK_CEPH_EXPLICIT_CAPTURED:-}" ]; then
+        _ceph_pre_mon="${CEPH_MON_COUNT:-}"
+        _ceph_pre_mgr="${CEPH_MGR_COUNT:-}"
+        _ceph_pre_rep="${CEPH_POOL_REPLICAS:-}"
+        _ceph_pre_min="${CEPH_POOL_MIN_SIZE:-}"
+        _ceph_pre_fd="${CEPH_POOL_FAILURE_DOMAIN:-}"
+        _ceph_pre_mds="${CEPHFS_MDS_ACTIVE_COUNT:-}"
+        _ceph_pre_std="${CEPHFS_MDS_ACTIVE_STANDBY:-}"
+        _ceph_pre_rgw="${CEPH_RGW_INSTANCES:-}"
+    fi
     # 高级/默认值层(2026-10-15): **必须在 cluster.conf 之后**(见文件头 CLUSTER_DEFAULTS_CONF 注释
     # 的优先级: 环境变量 > cluster.conf > defaults)。全文件 ${VAR:-default} 自默认写法,
     # 只补未定义变量 ⇒ 用户在 cluster.conf 写的同名覆盖项天然生效。
@@ -994,6 +1184,21 @@ load_config() {
     else
         warn "未找到高级默认值层 ${CLUSTER_DEFAULTS_CONF}(部分高级变量将回退内置兜底; 该文件应随仓库分发)"
     fi
+    if [ -z "${CUBESTACK_CEPH_EXPLICIT_CAPTURED:-}" ]; then
+        [ -n "${_ceph_pre_mon:-}" ] && CEPH_EXPLICIT_MON=1 || CEPH_EXPLICIT_MON=0
+        [ -n "${_ceph_pre_mgr:-}" ] && CEPH_EXPLICIT_MGR=1 || CEPH_EXPLICIT_MGR=0
+        [ -n "${_ceph_pre_rep:-}" ] && CEPH_EXPLICIT_REPLICAS=1 || CEPH_EXPLICIT_REPLICAS=0
+        [ -n "${_ceph_pre_min:-}" ] && CEPH_EXPLICIT_MIN_SIZE=1 || CEPH_EXPLICIT_MIN_SIZE=0
+        [ -n "${_ceph_pre_fd:-}" ] && CEPH_EXPLICIT_FAILURE_DOMAIN=1 || CEPH_EXPLICIT_FAILURE_DOMAIN=0
+        [ -n "${_ceph_pre_mds:-}" ] && CEPH_EXPLICIT_MDS=1 || CEPH_EXPLICIT_MDS=0
+        [ -n "${_ceph_pre_std:-}" ] && CEPH_EXPLICIT_MDS_STANDBY=1 || CEPH_EXPLICIT_MDS_STANDBY=0
+        [ -n "${_ceph_pre_rgw:-}" ] && CEPH_EXPLICIT_RGW=1 || CEPH_EXPLICIT_RGW=0
+        export CEPH_EXPLICIT_MON CEPH_EXPLICIT_MGR CEPH_EXPLICIT_REPLICAS CEPH_EXPLICIT_MIN_SIZE \
+               CEPH_EXPLICIT_FAILURE_DOMAIN CEPH_EXPLICIT_MDS CEPH_EXPLICIT_MDS_STANDBY CEPH_EXPLICIT_RGW
+        CUBESTACK_CEPH_EXPLICIT_CAPTURED=1   # 仅当前 shell: 不 export(子进程需按自己的配置重新捕获)
+    fi
+    unset _ceph_pre_mon _ceph_pre_mgr _ceph_pre_rep _ceph_pre_min _ceph_pre_fd \
+          _ceph_pre_mds _ceph_pre_std _ceph_pre_rgw
     # 节点 SSH 用户(2026-10-15): 全局安装用户单一旋钮(root|ubuntu, 默认 ubuntu)——
     # 决定免密注入 / 即席 SSH / kubespray ansible_user 的口径。
     #   · NODES 每行第4字段写 "-"(或留空) → 跟随本值(node_parse 归一);
@@ -1237,50 +1442,113 @@ load_config() {
         REGISTRY_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP}:${REGISTRY_PORT:-5000}}"
     fi
     export REGISTRY_DIRECT
-    # ---------------- Ceph 模式统一归一化(2026-09-07 双模式) ----------------
-    # CEPH_MODE ∈ {internal, external}:
-    #   · internal(默认) = 集群内 Rook-Ceph, 部署 CephCluster CR(现有行为);
-    #   · external       = 不创建集群内 CephCluster, 由 ceph_csi 模块经 ceph-csi-operator
-    #                     的 CephConnection 接入外部已有 Ceph 集群。
-    # 兼容旧配置: 仅设了 CEPH_EXTERNAL_MONITORS(旧外部模式开关)→ 自动视为 external,
-    #   并把 CEPH_EXTERNAL_POOL/USER/KEYRING 迁移到新变量 CEPH_POOL/USER/KEYRING。
-    # 统一由本处归一化, 各模块只读 CEPH_MODE/CEPH_MONITORS/CEPH_POOL/CEPH_USER/CEPH_KEYRING。
-    if [ "${CEPH_MODE:-internal}" != "external" ]; then
-        if [ -n "${CEPH_EXTERNAL_MONITORS:-}" ]; then
-            CEPH_MODE="external"
-            CEPH_MONITORS="${CEPH_MONITORS:-${CEPH_EXTERNAL_MONITORS}}"
-            CEPH_POOL="${CEPH_POOL:-${CEPH_EXTERNAL_POOL:-rbd}}"
-            CEPH_USER="${CEPH_USER:-${CEPH_EXTERNAL_USER:-admin}}"
-            CEPH_KEYRING="${CEPH_KEYRING:-${CEPH_EXTERNAL_KEYRING:-}}"
+    # ---------------- Ceph 模式统一归一化(2026-11-20 单一开关 CEPH_MODE) ----------------
+    # CEPH_MODE ∈ {none, external, internal}(大小写不敏感):
+    #   · none     = 不安装 Ceph 集群/CSI, registry 走 local-path;
+    #   · external = 只装 Rook operator/ceph-csi, 经 CephConnection 接入外部已有 Ceph;
+    #   · internal = 集群内 Rook-Ceph(internal+单节点拓扑由 02_ceph 分发到单节点脚本)。
+    # 兼容旧配置:
+    #   · CEPH_ENABLED/CEPH_CSI_ENABLED → 自动映射为 CEPH_MODE 并告警, 随后 unset;
+    #   · 仅设了 CEPH_EXTERNAL_MONITORS(旧外部模式开关, 且无任何 CEPH_ENABLED/
+    #     CEPH_CSI_ENABLED)→ 自动视为 external, 并把 CEPH_EXTERNAL_* 迁移到
+    #     CEPH_MONITORS/POOL/USER/KEYRING(显式模式=external 时同样补缺)。
+    # 统一由本处归一化, 各模块只读 CEPH_MODE / CEPH_MONITORS / CEPH_POOL / CEPH_USER / CEPH_KEYRING。
+    _ceph_mode_set=0
+    [ -n "${CEPH_MODE+set}" ] && _ceph_mode_set=1
+    _ceph_legacy_seen=0
+    if [ -n "${CEPH_ENABLED+set}" ] || [ -n "${CEPH_CSI_ENABLED+set}" ]; then
+        _ceph_legacy_seen=1
+    fi
+    # 仅当既未写 CEPH_MODE、也未出现任何旧开关时, 才从旧 CEPH_EXTERNAL_MONITORS
+    # 推导 external; 旧开关显式 false/false + 残留 monitors 必须保持 none(尊重 opt-out)。
+    if [ "${_ceph_mode_set}" = "0" ] && [ "${_ceph_legacy_seen}" = "0" ] \
+        && [ -n "${CEPH_EXTERNAL_MONITORS:-}" ]; then
+        CEPH_MODE="external"
+        _ceph_mode_set=1
+    fi
+    # 连接字段迁移与模式推导解耦: 只要有效模式是 external(含显式 CEPH_MODE=external),
+    # 就把旧别名补进 canonical 字段; canonical 已显式赋值时不覆盖。
+    if [ "${_ceph_mode_set}" = "1" ] \
+        && [ "$(ceph_norm_lower "${CEPH_MODE:-}")" = "external" ]; then
+        CEPH_MONITORS="${CEPH_MONITORS:-${CEPH_EXTERNAL_MONITORS:-}}"
+        CEPH_POOL="${CEPH_POOL:-${CEPH_EXTERNAL_POOL:-rbd}}"
+        CEPH_USER="${CEPH_USER:-${CEPH_EXTERNAL_USER:-admin}}"
+        CEPH_KEYRING="${CEPH_KEYRING:-${CEPH_EXTERNAL_KEYRING:-}}"
+    fi
+    # ★ 2026-11-20 用户口径: 默认 CEPH_MODE=internal(不是 none)。
+    #   仅当配置**既未写 CEPH_MODE、也未出现任何旧开关**时才落到默认 internal;
+    #   旧配置显式写 CEPH_ENABLED=false+CEPH_CSI_ENABLED=false 仍映射 none(保持原意)。
+    if [ "${_ceph_mode_set}" = "0" ] && [ "${_ceph_legacy_seen}" = "0" ]; then
+        CEPH_MODE="internal"
+        _ceph_mode_set=1
+    fi
+    ceph_normalize_ceph_vars
+    _ceph_mode_raw="${CEPH_MODE:-}"
+    if ! CEPH_MODE="$(ceph_resolve_mode "${_ceph_mode_raw}" "${CEPH_ENABLED:-false}" "${CEPH_CSI_ENABLED:-false}" "${_ceph_mode_set}")"; then
+        err "CEPH_MODE 非法: '${_ceph_mode_raw}'(只允许 none|external|internal, 大小写不敏感)"
+        exit 1
+    fi
+    if [ "${_ceph_legacy_seen}" = "1" ]; then
+        if [ "${_ceph_mode_set}" = "1" ]; then
+            warn "CEPH_ENABLED/CEPH_CSI_ENABLED 已弃用并被忽略; 以 CEPH_MODE=${CEPH_MODE} 为准"
         else
-            CEPH_MODE="internal"
+            warn "CEPH_ENABLED/CEPH_CSI_ENABLED 已弃用; 已自动映射为 CEPH_MODE=${CEPH_MODE}"
+            if [ "$(ceph_norm_bool "${CEPH_ENABLED:-false}")" = "true" ] \
+                && [ "$(ceph_norm_bool "${CEPH_CSI_ENABLED:-false}")" != "true" ]; then
+                warn "  旧配置 CEPH_ENABLED=true + CEPH_CSI_ENABLED=false → internal: CSI 现在也会安装(单一开关语义)"
+            fi
+            warn "  请把 cluster.conf 改成只写 CEPH_MODE=none|external|internal"
         fi
     fi
-    # external 模式下统一兜底默认值(显式 CEPH_MODE=external 未设 CEPH_POOL/USER 时也生效)
+    unset CEPH_ENABLED CEPH_CSI_ENABLED _ceph_legacy_seen _ceph_mode_set _ceph_mode_raw
+    # ★ 回退标志(仅本次运行, deploy-cluster 导出): 即使 cluster.conf 字面量仍写
+    #   CEPH_MODE=internal / LOCAL_PATH_ENABLED=false, 子模块 load_config 也必须看到
+    #   本次运行的有效决定(否则回退只对父进程生效, local_path 模块仍被关掉)。
+    if [ "${CUBESTACK_CEPH_FALLBACK:-0}" = "1" ]; then
+        CEPH_MODE="none"
+    fi
+    # external/internal 统一兜底(显式 CEPH_MODE 未设 CEPH_POOL/USER 时也生效)
     CEPH_POOL="${CEPH_POOL:-rbd}"
     CEPH_USER="${CEPH_USER:-admin}"
-    export CEPH_MODE CEPH_MONITORS CEPH_POOL CEPH_USER CEPH_KEYRING
+    # none 模式: 强制关闭所有 Ceph 子能力(即使 cluster.conf 残留 true)
+    if [ "${CEPH_MODE}" = "none" ]; then
+        CEPHFS_ENABLED="false"
+        CEPH_RGW_ENABLED="false"
+        CEPHFS_MOUNT_ENABLED="false"
+    fi
+    export CEPH_MODE CEPH_MONITORS CEPH_POOL CEPH_USER CEPH_KEYRING \
+           CEPHFS_ENABLED CEPH_RGW_ENABLED CEPHFS_MOUNT_ENABLED
     # ---------------- local-path / ceph 二选一(互斥, 集中派生) ----------------
-    # 单一事实来源 = CEPH_ENABLED **或 CEPH_CSI_ENABLED**(任一 true 即视为 ceph 体系:
-    #   internal 自建 CephCluster / external 只接外部 Ceph 都算 ceph 底座):
-    #   · ceph 启用(任一 true) → registry 后端强制 ceph-block, 并关闭 local-path(ceph 替代 local-path,
-    #     不再安装 local-path-provisioner; addons.yml local_path_provisioner_enabled 同步为 false)。
-    #   · 都 false → 保持 local-path 为默认后端(默认)。
+    # 单一事实来源 = CEPH_MODE:
+    #   · internal/external → registry 后端强制 ceph-block, 并关闭 local-path(ceph 替代 local-path;
+    #     addons.yml local_path_provisioner_enabled 同步为 false)。
+    #   · none → registry 默认 local-path, local-path-provisioner 默认启用。
     # ⚠ 即使显式写了 REGISTRY_STORAGE_CLASS / LOCAL_PATH_ENABLED 也会被本规则覆盖(二选一, 不并存);
-    #   想用 local-path 就设 CEPH_ENABLED=false 且 CEPH_CSI_ENABLED=false。
-    # ★ CEPH_FALLBACK_TO_LOCALPATH=true 且检测到 ceph 安装条件不足(manifest/裸盘/lvm2/external 参数
-    #   缺失)时, deploy-cluster.sh 预检会把 CEPH_ENABLED 置 false → 此处自然走 local-path 分支,
-    #   无需额外逻辑。检测函数见 ceph_installable_check(下方)。
-    if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
+    #   想用 local-path 就设 CEPH_MODE=none。
+    # ★ CEPH_FALLBACK_TO_LOCALPATH 条件不足回退时, deploy-cluster.sh 预检把本次运行 CEPH_MODE 置 none
+    #   → 此处自然走 local-path 分支, 无需额外逻辑。检测函数见 ceph_installable_check(下方)。
+    if [ "${CEPH_MODE}" != "none" ]; then
         # 仅当 cluster.conf 显式写了冲突值时提醒(默认值 local-path/true 不算冲突, 避免每次 run 刷屏)
         if grep -qE '^[[:space:]]*REGISTRY_STORAGE_CLASS=.*(local-path)' "${CLUSTER_CONF}" 2>/dev/null; then
-            warn "Ceph 已启用(CEPH_ENABLED/CEPH_CSI_ENABLED) → REGISTRY_STORAGE_CLASS 强制 ceph-block(local-path 被替代)"
+            warn "CEPH_MODE=${CEPH_MODE} → REGISTRY_STORAGE_CLASS 强制 ceph-block(local-path 被替代)"
         fi
         if grep -qE '^[[:space:]]*LOCAL_PATH_ENABLED=(true|1|yes|on)' "${CLUSTER_CONF}" 2>/dev/null; then
-            warn "Ceph 已启用(CEPH_ENABLED/CEPH_CSI_ENABLED) → LOCAL_PATH_ENABLED 强制 false(local-path 与 ceph 二选一, 不再安装 local-path)"
+            warn "CEPH_MODE=${CEPH_MODE} → LOCAL_PATH_ENABLED 强制 false(local-path 与 ceph 二选一, 不再安装 local-path)"
         fi
         REGISTRY_STORAGE_CLASS="ceph-block"
         LOCAL_PATH_ENABLED="false"
+    else
+        LOCAL_PATH_ENABLED="${LOCAL_PATH_ENABLED:-true}"
+        [ -n "${REGISTRY_STORAGE_CLASS:-}" ] || REGISTRY_STORAGE_CLASS="local-path"
+    fi
+    # 回退运行: 无论 cluster.conf 字面量如何, 本次一律 local-path
+    if [ "${CUBESTACK_CEPH_FALLBACK:-0}" = "1" ]; then
+        CEPH_MODE="none"
+        CEPHFS_ENABLED="false"
+        CEPH_RGW_ENABLED="false"
+        CEPHFS_MOUNT_ENABLED="false"
+        REGISTRY_STORAGE_CLASS="local-path"
+        LOCAL_PATH_ENABLED="true"
     fi
     export REGISTRY_STORAGE_CLASS LOCAL_PATH_ENABLED
     # 虚拟机配置(独立于 cluster.conf): source vm-nodes.conf 提供 VM 创建/网络变量
@@ -1305,23 +1573,58 @@ load_config() {
 # CEPH_FALLBACK_TO_LOCALPATH=true 时决定是否回退到 local-path 模式。
 # 返回 0=具备(可装 ceph), 1=不具备(可回退); 不满足项输出到 stdout 供提示。
 # 判定(与 02_ceph.sh / 03_ceph_csi.sh 的前置校验一致):
-#   · external: CEPH_MONITORS 与 CEPH_KEYRING 必须非空; CEPH_USER 与 CEPH_KEYRING 必须成对
-#     (2026-09-10 Bug B: 只查 keyring 存在不校验 user 会让"用户不存在/key 不匹配"拖到部署后期
-#     才以 rados ret=-13 暴露 —— 这里做结构校验; 用户存在性/caps 的真实校验在 ceph_csi 模块
-#     的 preflight(见 03_ceph_csi.sh)与提供方 ceph-expose-external.sh status 5 层自检)
-#   · internal: rook manifest(operator.yaml/csi-operator.yaml)存在;
-#     存储节点数 ≥ CEPH_MIN_NODES; 至少一台节点有裸盘(CEPH_DATA_DISKS 显式 或
-#     自动检测到); lvm2 离线包或节点已装 lvm2(仅检查离线包目录, 不 SSH 探测)
+#   · external: external-ceph.env(或默认文件)含 FSID/MON_DATA/USERNAME/USER_SECRET;
+#     手填路径要求 CEPH_MONITORS/CEPH_USER/CEPH_KEYRING, CephFS 凭据成对。
+#   · internal: rook manifest(operator.yaml/csi-operator.yaml)存在; 拓扑节点数满足;
+#     --probe 时逐节点 SSH 探测: 可作 OSD 的盘(free ∪ ceph)、lvm2、根盘可用空间。
+#     CEPH_DATA_DISKS 显式指定时跳过磁盘探测(仍做格式/节点校验)。
+# ceph_preflight_node_ssh <ip> <remote-cmd>
+#   ⚠ ConnectTimeout 只约束建连/握手; 远端命令自身卡住(df/lvs hang)时调用方会一直等。
+#   用 wall-clock timeout 包住整条 SSH 命令, 超时按"探测失败"返回非 0, 由调用方走回退判定。
+CPH_SSH_TIMEOUT="${CEPH_PREFLIGHT_SSH_TIMEOUT:-20}"
+case "${CPH_SSH_TIMEOUT}" in ''|*[!0-9]*) CPH_SSH_TIMEOUT=20 ;; esac
+ceph_preflight_node_ssh() {   # <ip> <remote-cmd>
+    timeout "${CPH_SSH_TIMEOUT}" ssh -i "${SSH_KEY_DIR:-${HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}" \
+        -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=8 "$(ssh_user_for_ip "$1")@$1" "$2" </dev/null
+}
+
+_ceph_host_ip() {   # <hostname> → stdout IP; 未找到返回 1
+    local _hn="$1" _line
+    for _line in "${NODES[@]:-}"; do
+        [ -z "${_line}" ] && continue
+        node_parse "${_line}"
+        [ "${NODE_HOSTNAME}" = "${_hn}" ] && { printf '%s' "${NODE_IP}"; return 0; }
+    done
+    return 1
+}
+
 ceph_installable_check() {
-    local _miss=""
-    # external 模式: monitors + keyring(+ user 成对)
+    local _probe=0 _miss="" _hn _ip _out _out_line _disk_nodes=0 _osd_total=0 _n _min_free _avail_kb _skip_disk=0 _cephfs_eff="" _capacity="" _capacity_desc=""
+    [ "${1:-}" = "--probe" ] && _probe=1
+    # ---------------- external ----------------
     if [ "${CEPH_MODE:-internal}" = "external" ]; then
-        [ -n "${CEPH_MONITORS:-}" ] || _miss="${_miss} CEPH_MONITORS"
-        [ -n "${CEPH_KEYRING:-}" ] || _miss="${_miss} CEPH_KEYRING"
-        [ -n "${CEPH_USER:-}" ] || _miss="${_miss} CEPH_USER"
-        # CephFS 启用时 provisioner 凭据成对(node 可回退, 不强制)
-        if [ -n "${CEPHFS_FS:-}" ] && { [ -z "${CEPHFS_USER:-}" ] || [ -z "${CEPHFS_KEYRING:-}" ]; }; then
-            _miss="${_miss} CEPHFS_USER/CEPHFS_KEYRING(成对)"
+        local _env="${CEPH_EXTERNAL_ENV_FILE:-${REPO_ROOT}/deployments/config/external-ceph.env}"
+        if [ -f "${_env}" ]; then
+            local _k
+            for _k in ROOK_EXTERNAL_FSID ROOK_EXTERNAL_CEPH_MON_DATA \
+                      ROOK_EXTERNAL_USERNAME ROOK_EXTERNAL_USER_SECRET; do
+                grep -qE "^[[:space:]]*(export[[:space:]]+)?${_k}=." "${_env}" 2>/dev/null \
+                    || _miss="${_miss} ${_k}(env)"
+            done
+        else
+            [ -n "${CEPH_MONITORS:-}" ] || _miss="${_miss} CEPH_MONITORS"
+            [ -n "${CEPH_USER:-}" ]     || _miss="${_miss} CEPH_USER"
+            [ -n "${CEPH_KEYRING:-}" ]  || _miss="${_miss} CEPH_KEYRING"
+            # CephFS 启用时 provisioner 凭据成对(node 可回退, 不强制)。
+            # ⚠ 必须同时看有效开关: cluster.conf 保留 CEPHFS_FS 但 CEPHFS_ENABLED=false
+            #   (或 CEPH_EXTERNAL_CEPHFS=false)时, 不应因残留 FS 名误报缺凭据。
+            _cephfs_eff="$(ceph_norm_bool "${CEPHFS_ENABLED:-false}")"
+            [ "$(ceph_norm_bool "${CEPH_EXTERNAL_CEPHFS:-false}")" = "true" ] && _cephfs_eff=true
+            if [ "${_cephfs_eff}" = "true" ] && [ -n "${CEPHFS_FS:-}" ] \
+                && { [ -z "${CEPHFS_USER:-}" ] || [ -z "${CEPHFS_KEYRING:-}" ]; }; then
+                _miss="${_miss} CEPHFS_USER/CEPHFS_KEYRING(成对)"
+            fi
         fi
         if [ -n "${_miss}" ]; then
             echo "外部 Ceph 参数缺失/不成对:${_miss}"
@@ -1329,31 +1632,149 @@ ceph_installable_check() {
         fi
         return 0
     fi
-    # internal 模式: manifest + 存储节点数 + 裸盘 + lvm2 离线包
+    # ---------------- internal ----------------
     if [ ! -f "${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}/operator.yaml" ] \
         || [ ! -f "${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}/csi-operator.yaml" ]; then
         echo "Rook manifest 缺失(${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook})"
         return 1
     fi
-    # 存储节点数(与 02_ceph.sh 同源: 统一走 ceph_storage_hosts, 不再各写一遍)
-    local _cn
+    # 拓扑/节点数(与 02_ceph.sh 同源: 统一走 ceph_storage_hosts)
+    local _cn _topo _exp_host
     _cn="$(ceph_storage_host_count)"
-    if [ "${_cn}" -lt "${CEPH_MIN_NODES:-3}" ]; then
-        echo "存储节点 ${_cn} 台 < CEPH_MIN_NODES=${CEPH_MIN_NODES:-3}"
+    if ! _topo="$(ceph_topology_resolve "${CEPH_TOPOLOGY:-auto}" "${_cn}" "${CEPH_MIN_NODES:-3}" 2>/dev/null)"; then
+        echo "存储节点 ${_cn} 台不满足 CEPH_TOPOLOGY=${CEPH_TOPOLOGY:-auto}(单节点需 1 台, 多节点需 >=${CEPH_MIN_NODES:-3} 台)"
         return 1
     fi
-    # 裸盘(显式 CEPH_DATA_DISKS 非空即视为具备; 自动检测需 SSH, 预检阶段不探测 → 显式才判为具备)
-    if [ -z "${CEPH_DATA_DISKS:-}" ]; then
-        echo "未显式指定 CEPH_DATA_DISKS(自动检测需节点 SSH, 预检不探测)"
+    # 与 02_ceph.sh 同源的有效 profile: 预检也用 CEPH_EFF_*(单节点 size=1 等),
+    # 否则会把默认 size=3 当成单节点要求而误回退。
+    if ! ceph_apply_effective_spec "${_topo}" >/dev/null 2>&1; then
+        echo "Ceph 有效 profile 非法(检查 CEPH_MON_COUNT/CEPH_POOL_REPLICAS/CEPH_POOL_MIN_SIZE/CEPH_POOL_FAILURE_DOMAIN)"
         return 1
     fi
-    # lvm2 离线包(仅检查目录, 不 SSH)
-    if [ ! -d "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/packages" ] \
-        || ! ls "${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}/packages"/lvm2_*.deb >/dev/null 2>&1; then
-        echo "lvm2 离线包缺失(packages/ 无 lvm2_*.deb)"
+    # mon 放置: 与 02_ceph.sh 入口同一约束(allowMultiplePerNode=false, mon 数不能超过存储节点数)
+    if [ "${CEPH_EFF_MON_COUNT}" -gt "${_cn}" ]; then
+        echo "CEPH_MON_COUNT=${CEPH_EFF_MON_COUNT} > 存储节点 ${_cn} 台(mon 无法全部调度)"
+        return 1
+    fi
+    # 显式磁盘: 结构与节点名校验; 仍继续探测 lvm2/根盘(显式磁盘不代表节点已就绪)
+    if [ -n "${CEPH_DATA_DISKS:-}" ]; then
+        if ! ceph_validate_explicit_config >/dev/null 2>&1; then
+            echo "CEPH_DATA_DISKS 格式/节点校验失败"
+            return 1
+        fi
+        _skip_disk=1
+        # 显式磁盘跳过自动探测, 但单节点仍必须满足有效副本数的 OSD 数
+        # (引擎在 apply CephCluster 前会按磁盘数拒绝 size>盘数, 预检必须同口径)。
+        if [ "${_topo}" = "single" ]; then
+            _exp_host="$(ceph_storage_hosts | head -1)"
+            _osd_total="$(ceph_explicit_disk_count "${_exp_host}")"
+            [ "${_osd_total}" -ge "${CEPH_EFF_POOL_REPLICAS}" ] \
+                || { echo "单节点显式磁盘 ${_osd_total} < CEPH_POOL_REPLICAS=${CEPH_EFF_POOL_REPLICAS}(节点 ${_exp_host})"; return 1; }
+        fi
+    fi
+    if [ "${_probe}" != "1" ]; then
+        if [ "${_skip_disk}" = "1" ]; then return 0; fi
+        echo "未显式指定 CEPH_DATA_DISKS(自动检测需 --probe 节点 SSH 探测)"
+        return 1
+    fi
+    # 逐节点探测: 可作 OSD 的盘(free ∪ ceph, 显式磁盘时跳过) + lvm2 + 根盘可用空间
+    _min_free="${CEPH_NODE_MIN_FREE_GB:-20}"
+    case "${_min_free}" in ''|*[!0-9]*) _min_free=20 ;; esac
+    while IFS= read -r _hn; do
+        [ -n "${_hn}" ] || continue
+        _ip="$(_ceph_host_ip "${_hn}" || true)"
+        if [ -z "${_ip}" ]; then _miss="${_miss} 节点IP未找到@${_hn}"; continue; fi
+        if [ "${_skip_disk}" = "0" ]; then
+            _out="$(timeout 60 bash "${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-detect-disks.sh" \
+                        --node "${_hn}" -m 2>/dev/null || true)"
+            # 只认本节点的机器行, 防任何诊断/弃用告警污染(2026-11-20 多节点误回退根因)
+            _out_line="$(printf '%s\n' "${_out}" | grep -E "^${_hn}:" | head -1 || true)"
+            case "${_out_line}" in
+                *":") : ;;                               # host:  = 无可用盘
+                *:?*)
+                    _n="$(printf '%s\n' "${_out_line}" | head -1 | awk -F: '{print split($2,a,",")}' || true)"
+                    case "${_n}" in ''|*[!0-9]*) _n=0 ;; esac
+                    if [ "${_n}" -gt 0 ]; then
+                        _disk_nodes=$((_disk_nodes + 1))
+                        _osd_total=$((_osd_total + _n))
+                    fi
+                    ;;
+                *) _miss="${_miss} 磁盘探测失败@${_hn}" ;;
+            esac
+        fi
+        ceph_preflight_node_ssh "${_ip}" 'command -v lvs >/dev/null 2>&1 || [ -x /usr/sbin/lvs ] || [ -x /sbin/lvs ]' >/dev/null 2>&1 \
+            || _miss="${_miss} lvm2@${_hn}"
+        _avail_kb="$(ceph_preflight_node_ssh "${_ip}" "df -Pk / | awk 'NR==2{print \$4}'" 2>/dev/null || true)"
+        case "${_avail_kb}" in
+            ''|*[!0-9]*) _miss="${_miss} 根盘空间未知@${_hn}" ;;
+            *) [ "${_avail_kb}" -ge $(( _min_free * 1024 * 1024 )) ] \
+                   || _miss="${_miss} 根盘可用<${_min_free}GiB@${_hn}" ;;
+        esac
+    done < <(ceph_storage_hosts)
+    if [ "${_skip_disk}" = "0" ]; then
+        [ "${_disk_nodes}" -gt 0 ] || { echo "未检测到空闲/旧 Ceph 裸盘(或磁盘探测失败)"; return 1; }
+        if [ "${_topo}" = "multi" ]; then
+            # 容量必须按有效故障域计量: host 看有盘主机数, osd 看可用 OSD 总数
+            # (3 台主机、3 块盘分在 2 台 = osd 域可满足 3 副本, 不应按主机数误拒)。
+            if [ "${CEPH_EFF_FAILURE_DOMAIN:-host}" = "host" ]; then
+                _capacity="${_disk_nodes}"
+                _capacity_desc="有盘主机"
+            else
+                _capacity="${_osd_total}"
+                _capacity_desc="可用 OSD"
+            fi
+            [ "${_capacity}" -ge "${CEPH_EFF_POOL_REPLICAS}" ] \
+                || { echo "${_capacity_desc} ${_capacity} < CEPH_POOL_REPLICAS=${CEPH_EFF_POOL_REPLICAS}(故障域 ${CEPH_EFF_FAILURE_DOMAIN:-host})"; return 1; }
+        else
+            [ "${_osd_total}" -ge "${CEPH_EFF_POOL_REPLICAS}" ] \
+                || { echo "单节点可用盘 ${_osd_total} < CEPH_POOL_REPLICAS=${CEPH_EFF_POOL_REPLICAS}"; return 1; }
+        fi
+    fi
+    if [ -n "${_miss}" ]; then
+        echo "缺失:${_miss}"
         return 1
     fi
     return 0
+}
+
+# ceph_apply_fallback_decision
+# 返回: 0=无需回退/条件具备; 10=已回退 local-path; 1=条件不足且回退关闭(硬失败)
+# 说明: 仅改**本次运行**的 CEPH_MODE/registry 后端, 不写回 cluster.conf。
+ceph_apply_fallback_decision() {
+    [ "${CEPH_MODE:-internal}" != "none" ] || return 0
+    local _orig="${CEPH_MODE}" _miss="" _fallback _chk_rc=0
+    _fallback="$(ceph_norm_bool "${CEPH_FALLBACK_TO_LOCALPATH:-true}")"
+    _miss="$(ceph_installable_check --probe 2>/dev/null)" || _chk_rc=$?
+    # rc=0 才算具备; rc!=0 即使输出为空也按"条件不足"处理(防御探测函数漏输出)
+    [ "${_chk_rc}" = "0" ] && return 0
+    [ -n "${_miss}" ] || _miss="条件探测未通过(原因未知, 见上方日志)"
+    echo ""
+    echo -e "\033[41m\033[97m================================================================================\033[0m"
+    if [ "${_fallback}" = "true" ]; then
+        echo -e "\033[41m\033[97m ⚠⚠⚠  Ceph 安装条件不足 → 自动回退 local-path(CEPH_MODE=${_orig})  ⚠⚠⚠\033[0m"
+    else
+        echo -e "\033[41m\033[97m ⚠⚠⚠  Ceph 安装条件不足且 CEPH_FALLBACK_TO_LOCALPATH=false → 中止  ⚠⚠⚠\033[0m"
+    fi
+    echo -e "\033[41m\033[97m   不满足项: ${_miss}\033[0m"
+    if [ "${_fallback}" = "true" ]; then
+        echo -e "\033[41m\033[97m   本次运行改为: CEPH_MODE=none, registry 后端 local-path, 启用 local-path-provisioner\033[0m"
+        echo -e "\033[41m\033[97m   条件备齐后把 cluster.conf 改回 CEPH_MODE=${_orig} 重跑即可\033[0m"
+    fi
+    echo -e "\033[41m\033[97m================================================================================\033[0m"
+    if [ "${_fallback}" != "true" ]; then
+        err "Ceph 条件不足; 修复上述项, 或设 CEPH_FALLBACK_TO_LOCALPATH=true 允许回退"
+        return 1
+    fi
+    CEPH_MODE="none"
+    CEPHFS_ENABLED="false"
+    CEPH_RGW_ENABLED="false"
+    CEPHFS_MOUNT_ENABLED="false"
+    REGISTRY_STORAGE_CLASS="local-path"
+    LOCAL_PATH_ENABLED="true"
+    CUBESTACK_CEPH_FALLBACK=1
+    export CEPH_MODE CEPHFS_ENABLED CEPH_RGW_ENABLED CEPHFS_MOUNT_ENABLED \
+           REGISTRY_STORAGE_CLASS LOCAL_PATH_ENABLED CUBESTACK_CEPH_FALLBACK
+    return 10
 }
 
 # ---------------- 指定节点过滤(--only) ----------------
@@ -2222,10 +2643,16 @@ deploy_host_is_node() {
 # ⚠ 在**命令替换**中调用($(...)), 内部 node_parse 设的全局变量不会污染调用方 —— 这是有意的,
 #   避免把 NODE_* 全局态留在调用者的 shell 里。
 ceph_storage_hosts() {
-    local _h _line _role="${CEPH_NODE_ROLE:-master}"
+    local _h _line _role="${CEPH_NODE_ROLE:-master}" _seen=" "
+    # ★ 去重(2026-11-21 CodeRabbit): CEPH_NODES=node0,node0,node0 曾会被当成 3 台,
+    #   让拓扑误判为 multi、磁盘探测重复计数。同一 hostname 只输出一次, 3 个不同
+    #   hostname 仍按 3 台处理。这里去重而不是硬失败, 兼容历史配置的重复项。
     if [ -n "${CEPH_NODES:-}" ]; then
         for _h in ${CEPH_NODES//,/ }; do
-            [ -n "${_h}" ] && echo "${_h}"
+            [ -n "${_h}" ] || continue
+            case "${_seen}" in *" ${_h} "*) continue ;; esac
+            _seen="${_seen}${_h} "
+            echo "${_h}"
         done
         return 0
     fi
@@ -2234,6 +2661,8 @@ ceph_storage_hosts() {
         node_parse "${_line}"
         [ -n "${NODE_HOSTNAME}" ] || continue
         if [ "${_role}" = "all" ] || [ "${NODE_ROLE}" = "${_role}" ]; then
+            case "${_seen}" in *" ${NODE_HOSTNAME} "*) continue ;; esac
+            _seen="${_seen}${NODE_HOSTNAME} "
             echo "${NODE_HOSTNAME}"
         fi
     done
@@ -2298,6 +2727,29 @@ ceph_validate_explicit_config() {
         done <<< "${CEPH_DATA_DISKS}"
     fi
     return 0
+}
+
+# ceph_explicit_disk_count <hostname> → stdout: 该节点在 CEPH_DATA_DISKS 中显式列出的盘数。
+# 支持两种写法:
+#   · `/dev/vdb,/dev/vdc`                —— 全节点同盘, 对所有存储节点生效;
+#   · `node0:/dev/vdb;node1:/dev/vdc`    —— 按节点列出(节点间分号, 同节点多盘逗号)。
+ceph_explicit_disk_count() {
+    local _host="${1:-}" _grp _hn _ds _d _n=0
+    [ -n "${CEPH_DATA_DISKS:-}" ] || { echo 0; return 0; }
+    local -a _grps
+    while IFS=';' read -ra _grps; do
+        for _grp in "${_grps[@]:-}"; do
+            [ -n "${_grp}" ] || continue
+            _hn="${_grp%%:*}"; _ds="${_grp#*:}"
+            if [ "${_hn}" != "${_ds}" ] && [ "${_hn}" != "${_host}" ]; then
+                continue
+            fi
+            for _d in ${_ds//,/ }; do
+                [ -n "${_d}" ] && _n=$((_n + 1))
+            done
+        done
+    done <<< "${CEPH_DATA_DISKS}"
+    echo "${_n}"
 }
 
 # Ceph 存储节点数量(复用上面的选择规则; 供预检/提示用)

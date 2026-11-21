@@ -162,7 +162,8 @@ $(_component_meta_list stub)
   sudo ./deploy-cluster.sh                          # 默认 = --with-cubestack(全量部署)
   sudo ./deploy-cluster.sh --with-k8s              # 仅部署 kubespray 基座(k8s+metallb+local-path+registry)
   sudo ./deploy-cluster.sh --skip gpu_operator --fresh   # 覆盖安装但排除 gpu_operator(--fresh 清状态)
-  sudo ./deploy-cluster.sh --enable ceph            # 只把 CEPH_ENABLED=true 写入 cluster.conf(不部署)
+  sudo ./deploy-cluster.sh --enable ceph            # 只把 CEPH_MODE=internal 写入 cluster.conf(不部署)
+  sudo ./deploy-cluster.sh --steps ceph_single      # 等价 --steps ceph(按 CEPH_TOPOLOGY 自动分发单/多节点)
   sudo ./deploy-cluster.sh --steps ceph            # 单独装/重跑 Ceph(不动基座; 接入自动处理)
   sudo ./deploy-cluster.sh --steps cephfs_mount    # 把 CephFS models 挂到每台节点 /mnt/cephfs/models
   sudo ./deploy-cluster.sh --steps ceph --fresh     # 同上, 且清断点状态(REPEAT:0 模块重跑用)
@@ -328,14 +329,14 @@ fi
 # --enable k1,k2 = 只把模块开关写入 cluster.conf(持久化), 不立即部署。
 # 下次 --with-cubestack / 默认部署时按 cluster.conf 生效; 立即部署单个 operator 用 --steps k1,k2。
 _enable_persist() {   # <key,...>
-    local s nk idx tgl cur
+    local s nk idx tgl cur tgl_var tgl_val
     for s in ${1//,/ }; do
         [ -z "${s}" ] && continue
         nk="$(normalize_key "${s}")"
         idx="$(module_index "${nk}")"
         [ "${idx}" -ge 0 ] || { err "未知模块: ${s}(可用 --list-steps 查看)"; exit 1; }
         tgl="${MODULE_TOGGLE[$idx]:-}"
-        tgl="${tgl%% *}"   # TOGGLE 多变量(空格分隔=OR)时持久化第一个(如 ceph → CEPH_ENABLED)
+        tgl="${tgl%% *}"   # TOGGLE 多变量(空格分隔=OR)时持久化第一个
         if [ -z "${tgl}" ]; then
             # 无 TOGGLE 的模块: DEFAULT:1(如 k8s_deploy 基座)恒随全量部署, 本就没有可写开关;
             #   其余(verify_*/运维模块)只能 --steps 立即执行, 无开关可持久化。
@@ -346,19 +347,38 @@ _enable_persist() {   # <key,...>
             fi
             continue
         fi
-        # 当前生效值(load_config 已把 cluster.conf 读入环境; 兼容 ${VAR:-true} 默认写法)
-        cur="${!tgl:-false}"
-        case "${cur,,}" in
-            true|1|yes|on) ok "${tgl} 已是 true(${CLUSTER_CONF})"; continue ;;
+        # TOGGLE 两种形态:
+        #   布尔 `XXX_ENABLED`                → 写 XXX_ENABLED=true
+        #   枚举 `CEPH_MODE=internal,external` → 写 CEPH_MODE=<第一个值>(如 --enable ceph → internal)
+        tgl_var="${tgl%%=*}"
+        tgl_val=""
+        case "${tgl}" in
+            *=*)
+                tgl_val="${tgl#*=}"
+                tgl_val="${tgl_val%%,*}"
+                ;;
         esac
-        if grep -qE "^${tgl}=" "${CLUSTER_CONF}" 2>/dev/null; then
-            # 用 | 作 sed 分隔符(替换文本含 # 注释, 避开 # 分隔冲突)
-            sed -i -E "s|^${tgl}=.*|${tgl}=true   # --enable ${nk} 持久化|" "${CLUSTER_CONF}"
+        cur="${!tgl_var:-false}"
+        if [ -n "${tgl_val}" ]; then
+            # 枚举: 已在列表内(如 external)视为已启用, 不覆盖用户选择
+            case ",${tgl#*=}," in
+                *",$(printf '%s' "${cur}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'),"*)
+                    ok "${tgl_var}=${cur} 已启用(${CLUSTER_CONF})"; continue ;;
+            esac
         else
-            printf '%s=true   # --enable %s 持久化\n' "${tgl}" "${nk}" >> "${CLUSTER_CONF}"
+            case "${cur,,}" in
+                true|1|yes|on) ok "${tgl_var} 已是 true(${CLUSTER_CONF})"; continue ;;
+            esac
+            tgl_val="true"
         fi
-        export "${tgl}=true"   # 同步到当前环境(同一次调用内再 --enable 同一模块幂等跳过)
-        ok "已写入 ${CLUSTER_CONF}: ${tgl}=true(${nk})"
+        if grep -qE "^${tgl_var}=" "${CLUSTER_CONF}" 2>/dev/null; then
+            # 用 | 作 sed 分隔符(替换文本含 # 注释, 避开 # 分隔冲突)
+            sed -i -E "s|^${tgl_var}=.*|${tgl_var}=${tgl_val}   # --enable ${nk} 持久化|" "${CLUSTER_CONF}"
+        else
+            printf '%s=%s   # --enable %s 持久化\n' "${tgl_var}" "${tgl_val}" "${nk}" >> "${CLUSTER_CONF}"
+        fi
+        export "${tgl_var}=${tgl_val}"   # 同步到当前环境(同一次调用内再 --enable 同一模块幂等跳过)
+        ok "已写入 ${CLUSTER_CONF}: ${tgl_var}=${tgl_val}(${nk})"
         _ENABLE_PERSIST_WROTE=1
     done
 }
@@ -416,7 +436,10 @@ for i in "${!MODULE_KEY[@]}"; do
     tgl="${MODULE_TOGGLE[$i]:-}"
     [ -n "${tgl}" ] || continue
     module_default_on "${i}" && continue
-    tgl="${tgl%% *}"   # TOGGLE 多变量(空格分隔=OR)时取第一个导出(如 ceph → CEPH_ENABLED; external 模式 ceph 的 CEPH_CSI_ENABLED 由 ceph_csi 导出)
+    tgl="${tgl%% *}"   # TOGGLE 多变量(空格分隔=OR)时取第一个
+    # 枚举 TOGGLE(CEPH_MODE=internal,external)不在此自动开启: Ceph 是破坏性组件,
+    # --steps ceph 在 CEPH_MODE=none 时必须显式 --enable/改配置, 不能静默触发磁盘清理。
+    case "${tgl}" in *=*) continue ;; esac
     for k in "${RUN_STEPS[@]:-}"; do
         [ "${k}" = "${MODULE_KEY[$i]}" ] && { export "${tgl}=true"; break; }
     done
@@ -486,6 +509,43 @@ if [ "${_need_early_ssh}" = "1" ]; then
     ensure_node_ssh_access || exit 1
 fi
 unset _need_early_ssh _idx _k
+
+# ★ Ceph 安装条件预检 + 默认回退 local-path(2026-11-20):
+#   必须在**优雅覆盖/teardown 之前**执行 —— 否则回退后 RUN_STEPS 仍含 ceph,
+#   覆盖安装会把旧 Ceph 集群当成"计划内"销毁(数据事故)。回退后重新解析计划,
+#   移除 ceph/ceph_csi/cephfs_mount 并把 local_path 排进本次运行(registry 依赖它)。
+#   探测项: external 凭据/ env 文件; internal manifest + 拓扑节点数 + 裸盘/lvm2/根盘空间。
+_ceph_plan_relevant=0
+case " ${RUN_STEPS[*]:-} " in
+    *" ceph "*|*" ceph_csi "*|*" k8s_deploy "*) _ceph_plan_relevant=1 ;;
+esac
+if [ "${_ceph_plan_relevant}" = "1" ] && [ "${CEPH_MODE:-internal}" != "none" ]; then
+    _ceph_fb_rc=0
+    ceph_apply_fallback_decision || _ceph_fb_rc=$?
+    if [ "${_ceph_fb_rc}" = "1" ]; then
+        exit 1
+    fi
+    if [ "${_ceph_fb_rc}" = "10" ]; then
+        say "回退生效: 重新解析执行计划(移除 ceph 相关模块, 纳入 local_path)..."
+        resolve_run_steps "${STEPS_ARG}" "${SKIP_ARG}" "${ENABLE_ARG}" "${PHASE_ARG}" || exit 1
+        _ceph_kept=()
+        for _k in "${RUN_STEPS[@]:-}"; do
+            case "${_k}" in ceph|ceph_csi|cephfs_mount) continue ;; esac
+            _ceph_kept+=("${_k}")
+        done
+        RUN_STEPS=("${_ceph_kept[@]}")
+        unset _ceph_kept
+        # local-path 必须进本次计划(kubespray addon 安装 + 04_local_path 就绪检查);
+        # registry REQUIRES local_path, _topo_sort_requires 会把 local_path 排到 registry 之前。
+        case " ${RUN_STEPS[*]:-} " in
+            *" local_path "*) : ;;
+            *" k8s_deploy "*) RUN_STEPS+=(local_path); _topo_sort_requires || exit 1 ;;
+            *) say "本次计划不含 k8s_deploy: 已存在集群请手工确认 local-path-provisioner 已安装" ;;
+        esac
+    fi
+    unset _ceph_fb_rc
+fi
+unset _ceph_plan_relevant
 
 # ★ 覆盖安装可见化(实现见 lib-module.sh notify_base_redeploy; --list/--list-steps 只读路径不探测集群,
 #   改由 print_plan 打印提示行)。默认全量运行 = 覆盖安装(2026-09-17 定案), 但**重装基座**必须
@@ -668,53 +728,10 @@ fi
 # ⚠ Ceph 部署前强制确认([Y/n], 防覆盖磁盘 double-check 的兜底):
 #   print_plan 的红底提醒无确认(纯提示); 02_ceph 模块内部的确认在 k8s 部署之后,
 #   k8s_deploy 已被断点标记 done 跳过时会丢失 —— 这里在**真正开始部署前**再确认一次:
-#   Ceph 启用(CEPH_ENABLED 或 CEPH_CSI_ENABLED)且本次会执行 ceph 相关模块(k8s_deploy 或 ceph)时,
-#   交互询问 [Y/n](CEPH_CONFIRM_SLEEP=0 跳过; 变量名保留兼容, 不再等待秒数)供人工 double-check 存储节点/裸盘。
-if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "true" ]; then
-    # ★ CEPH_FALLBACK_TO_LOCALPATH=true 时, 先检测 ceph 安装条件; 不足 → 自动回退 local-path
-    #   (REGISTRY_STORAGE_CLASS=local-path + LOCAL_PATH_ENABLED=true + 跳过 ceph 模块)。
-    #   仅显式启用才回退(防掩盖配置错误); 默认 false = 保持硬失败并给出指引。
-    if [ "${CEPH_FALLBACK_TO_LOCALPATH:-false}" = "true" ]; then
-        _CEPH_MISS="$(ceph_installable_check)"
-        if [ -n "${_CEPH_MISS}" ]; then
-            echo -e "\033[41m\033[97m================================================================================\033[0m"
-            echo -e "\033[41m\033[97m ⚠⚠⚠  CEPH_FALLBACK_TO_LOCALPATH=true 且 Ceph 安装条件不足 → 自动回退 local-path ⚠⚠⚠\033[0m"
-            echo -e "\033[41m\033[97m   不满足项: ${_CEPH_MISS}\033[0m"
-            echo -e "\033[41m\033[97m   registry 后端改为 local-path(REGISTRY_STORAGE_CLASS=local-path), 启用 local-path-provisioner\033[0m"
-            echo -e "\033[41m\033[97m   ceph/ceph_csi 模块本次跳过; 条件备齐后设 CEPH_ENABLED=true + CEPH_FALLBACK_TO_LOCALPATH=false 重跑\033[0m"
-            echo -e "\033[41m\033[97m================================================================================\033[0m"
-            CEPH_ENABLED="false"
-            CEPH_CSI_ENABLED="false"
-            REGISTRY_STORAGE_CLASS="local-path"
-            LOCAL_PATH_ENABLED="true"
-            export CEPH_ENABLED CEPH_CSI_ENABLED REGISTRY_STORAGE_CLASS LOCAL_PATH_ENABLED
-        fi
-        unset _CEPH_MISS
-    fi
-    # ★ 2026-09-09(用户要求): internal 模式存储节点数 < CEPH_MIN_NODES(默认 3)时,
-    #   跳过 Ceph 集群部署 —— mon 法定人数不足, 02_ceph 本就不会创建 CephCluster;
-    #   此处提前跳过裸盘确认横幅/确认/已有集群清理, registry 后端回退 local-path
-    #   (与 CEPH_FALLBACK_TO_LOCALPATH 同款翻转), ceph/ceph_csi 模块运行时按
-    #   TOGGLE=false 自行跳过, 部署不中断。
-    if [ "${CEPH_MODE:-internal}" != "external" ]; then
-        _CN="$(ceph_storage_host_count)"
-        if [ "${_CN}" -lt "${CEPH_MIN_NODES:-3}" ]; then
-            echo ""
-            echo -e "\033[43m\033[30m================================================================================\033[0m"
-            echo -e "\033[43m\033[30m ⚠⚠⚠  存储节点 ${_CN} 台 < CEPH_MIN_NODES=${CEPH_MIN_NODES:-3} → 跳过 Ceph 集群部署 ⚠⚠⚠\033[0m"
-            echo -e "\033[43m\033[30m   mon 法定人数不足, 不创建 CephCluster(无裸盘覆盖风险, 跳过确认)   \033[0m"
-            echo -e "\033[43m\033[30m   registry 后端回退 local-path; ceph/ceph_csi 模块本次跳过               \033[0m"
-            echo -e "\033[43m\033[30m   如需 Ceph: ① 存储节点增至 ≥${CEPH_MIN_NODES:-3} 台; 或 ② CEPH_MODE=external 接入外部 Ceph\033[0m"
-            echo -e "\033[43m\033[30m================================================================================\033[0m"
-            CEPH_ENABLED="false"
-            CEPH_CSI_ENABLED="false"
-            REGISTRY_STORAGE_CLASS="local-path"
-            LOCAL_PATH_ENABLED="true"
-            export CEPH_ENABLED CEPH_CSI_ENABLED REGISTRY_STORAGE_CLASS LOCAL_PATH_ENABLED
-            _CEPH_SKIP_SMALL=1
-        fi
-        unset _CN
-    fi
+#   CEPH_MODE=internal/external 且本次会执行 ceph 相关模块(k8s_deploy 或 ceph)时,
+#   交互询问 [Y/n](CEPH_CONFIRM_SLEEP=0 跳过)供人工 double-check 存储节点/裸盘。
+#   (条件不足的回退已在更早的 ceph_apply_fallback_decision 处理; 这里只处理真正要装 Ceph 的情况)
+if [ "${CEPH_MODE:-internal}" != "none" ]; then
     # ★ CEPH_MODE=external(由 load_config 归一化): 接入外部已有 Ceph, 不涉及本地裸盘/
     #   覆盖确认 —— 跳过存储节点/裸盘检测、已有 CephCluster 清理, 仅提示外部连接。
     # ★ 2026-09-11(用户要求): external 模式部署前**[Y/n] 确认**(与 internal 裸盘确认对称)——
@@ -764,8 +781,6 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         unset _env_cs
         export CEPH_EXT_ENV_CONFIRMED=1   # 02_ceph 模块识别"deploy-cluster 已确认过" → 跳过其重复确认
         unset _EXT_ENV_FILE _EXT_MONS _EXT_USER _EXT_ENV_MONS _EXT_ENV_USER
-    elif [ "${_CEPH_SKIP_SMALL:-0}" = "1" ]; then
-        :   # 存储节点数 < CEPH_MIN_NODES: 上方已打印跳过横幅, 不弹确认/不做已有集群清理
     else
         _ceph_confirm_in=""
         for k in "${RUN_STEPS[@]:-}"; do
@@ -775,7 +790,7 @@ if [ "${CEPH_ENABLED:-false}" = "true" ] || [ "${CEPH_CSI_ENABLED:-false}" = "tr
         _ceph_cs="${CEPH_CONFIRM_SLEEP:-60}"
         echo ""
         echo -e "\033[41m\033[97m================================================================================\033[0m"
-        echo -e "\033[41m\033[97m ⚠⚠⚠  CEPH_ENABLED=true — 部署开始前最后确认存储节点/裸盘(避免覆盖磁盘) ⚠⚠⚠\033[0m"
+        echo -e "\033[41m\033[97m ⚠⚠⚠  CEPH_MODE=${CEPH_MODE} — 部署开始前最后确认存储节点/裸盘(避免覆盖磁盘) ⚠⚠⚠\033[0m"
         echo -e "\033[41m\033[97m   node label: ${CEPH_NODE_LABEL:-ceph-storage=rook-ceph}   裸盘策略: ${CEPH_DATA_DISK_POLICY:-auto}\033[0m"
         echo -e "\033[41m\033[97m   存储节点与将使用的裸盘(SSH 直连自动检测/或 CEPH_DATA_DISKS 显式):\033[0m"
         # 候选存储节点(hostname): 统一走 ceph_storage_hosts(CEPH_NODES 显式 > CEPH_NODE_ROLE)
@@ -1050,7 +1065,7 @@ echo "  下一步: 扩容用 --with-scale; 立即部署单个用 --steps gpu_ope
 #   ⚠ 2026-09-11(用户要求): CEPH_MODE=external 时是**消费方**, 不导出自身接入配置 ——
 #   跳过整段(否则会误导打印"已导出 external-ceph.env"; 该文件是提供方拷来的真实文件,
 #   导出/覆盖会毁掉官方导入路径的输入)。
-if [ "${CEPH_MODE:-internal}" != "external" ] && [ "${CEPH_ENABLED:-false}" = "true" ] && [ -f "${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf" ]; then
+if [ "${CEPH_MODE:-internal}" = "internal" ] && [ -f "${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf" ]; then
     echo -e "${_C_BOLD}${_C_GREEN}★ 外部 ceph-csi operator 接入信息(完整配置在文件里):${_C_OFF}"
     echo "  配置路径: ${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf"
     echo "              拷贝到目标集群 cluster.conf 设 CEPH_MODE=external 即可接入;"

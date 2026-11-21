@@ -170,8 +170,9 @@ if [ -f "${CONF_EXAMPLE}" ]; then
     while IFS= read -r -d '' f; do
         tgl="$(meta "$f" TOGGLE)"
         [ -n "${tgl}" ] || continue
-        # TOGGLE 支持空格分隔多变量(OR, 如 ceph: CEPH_ENABLED CEPH_CSI_ENABLED) → 逐个校验
+        # TOGGLE 支持空格分隔多变量(OR)与枚举写法 CEPH_MODE=internal,external → 逐个校验变量名
         for tv in ${tgl}; do
+            tv="${tv%%=*}"
             # 声明处 = cluster.conf.example(主文件) **或** cluster.defaults.conf(高级层)任一即可 ——
             #   2026-10-15 起子开关/细节开关陆续下沉 defaults; ⑦-b 保证两文件不重复声明。
             if ! grep -qE "${tv}=" "${CONF_EXAMPLE}" 2>/dev/null \
@@ -745,6 +746,12 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-base-redeploy-guard.sh \
            test-chrony-pkgs.sh \
            test-ceph-data-disks.sh \
+           test-ceph-mode.sh \
+           test-ceph-topology.sh \
+           test-ceph-fallback.sh \
+           test-ceph-single-node.sh \
+           test-ceph-csi-topology.sh \
+           test-module-toggle-enum.sh \
            test-metallb-pool-check.sh test-ceph-cluster-detect.sh \
            test-ceph-csi-cluster-kind.sh \
            test-gen-ssh-key-readonly.sh \

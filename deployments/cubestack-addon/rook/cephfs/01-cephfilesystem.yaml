@@ -11,17 +11,17 @@ metadata:
   namespace: __NAMESPACE__
 spec:
   metadataPool:
-    replicated: { size: __REPLICAS__, requireSafeReplicaSize: true }
-    failureDomain: host
+    replicated: { size: __REPLICAS__, requireSafeReplicaSize: __REQUIRE_SAFE_REPLICA_SIZE__ }
+    failureDomain: __FAILURE_DOMAIN__
   dataPools:
     - name: data0
-      replicated: { size: __REPLICAS__, requireSafeReplicaSize: true }
-      failureDomain: host
+      replicated: { size: __REPLICAS__, requireSafeReplicaSize: __REQUIRE_SAFE_REPLICA_SIZE__ }
+      failureDomain: __FAILURE_DOMAIN__
       parameters:
         compression_mode: none
   metadataServer:
-    activeCount: 2
-    activeStandby: true
+    activeCount: __MDS_ACTIVE_COUNT__
+    activeStandby: __MDS_ACTIVE_STANDBY__
     resources:
       requests:
         cpu: "250m"

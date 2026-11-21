@@ -26,8 +26,7 @@ NODES=(
 )
 SSH_USER="root"
 KUBESPRAY_PROFILE="none"
-CEPH_ENABLED="true"
-CEPH_CSI_ENABLED="true"
+CEPH_MODE="internal"
 CEPH_MODE="internal"
 CEPH_NODES="${nodes}"
 CEPH_DATA_DISK_POLICY="explicit"

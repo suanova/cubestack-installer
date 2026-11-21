@@ -34,6 +34,27 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+# ★ 2026-11-21 CodeRabbit: 独立 `apply` 不经过 03_ceph_csi, 不会继承它导出的 CEPH_EFF_*。
+#   这里用与预检/模块同一套拓扑探测(STORE_HOSTS + CEPH_TOPOLOGY)补齐有效 profile;
+#   父进程已导出 EFF 时保持不变。否则单节点会用多节点字面量(3 副本/host 域)。
+if [ -z "${CEPH_EFF_POOL_REPLICAS:-}" ]; then
+    _expose_topo=""
+    case "$(ceph_norm_lower "${CEPH_TOPOLOGY:-auto}")" in
+        single|multi) _expose_topo="${CEPH_TOPOLOGY}" ;;   # 显式拓扑优先(不因 NODES 缺失退回多节点)
+        *)
+            _expose_cn="$(ceph_storage_host_count)"
+            _expose_topo="$(ceph_topology_resolve "${CEPH_TOPOLOGY:-auto}" "${_expose_cn}" "${CEPH_MIN_NODES:-3}" 2>/dev/null)" || _expose_topo=""
+            ;;
+    esac
+    if [ -n "${_expose_topo}" ]; then
+        ceph_apply_effective_spec "${_expose_topo}" \
+            || { err "Ceph 有效 profile 计算失败(检查 CEPH_POOL_REPLICAS/MIN_SIZE/FAILURE_DOMAIN)"; exit 1; }
+        say "有效 Ceph profile: topology=${_expose_topo} size=${CEPH_EFF_POOL_REPLICAS} min_size=${CEPH_EFF_POOL_MIN_SIZE} failureDomain=${CEPH_EFF_FAILURE_DOMAIN}"
+    else
+        warn "无法从 NODES/CEPH_NODES 判定 Ceph 拓扑(${_expose_cn:-0} 台), 按多节点默认值继续"
+    fi
+    unset _expose_cn _expose_topo
+fi
 init_remote_kubectl || { err "init_remote_kubectl 失败"; exit 1; }
 
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
@@ -154,7 +175,10 @@ _wait_vip() {
 mon_list() {
     local data ids
     data="$( ( SSH "${K} -n ${CEPH_NAMESPACE} get cm rook-ceph-mon-endpoints -o jsonpath='{.data.data}' 2>/dev/null" || true) )"
-    ids="$(echo "${data}" | tr ',' '\n' | sed -n 's/^rook-ceph-mon-\([a-z0-9]*\)=.*/\1/p' | tr '\n' ' ')"
+    # 兼容两种 CM 格式: `rook-ceph-mon-a=IP:6789` 与 Rook v1.21 实际的 `a=IP:6789`;
+    # 旧正则只认前者 → 单节点解析为空 → 回退 a b c, status 误报 mon-b/c 未暴露。
+    ids="$(echo "${data}" | tr ',' '\n' \
+        | sed -n 's/^\(rook-ceph-mon-\)\{0,1\}\([a-z0-9][a-z0-9]*\)=.*/\2/p' | tr '\n' ' ')"
     echo "${ids:-a b c}"
 }
 
@@ -310,6 +334,32 @@ _export_official_env() {
 
 # ════════════════════════════ apply ════════════════════════════
 apply_main() {
+    # 有效副本数: 优先 03_ceph_csi 计算并导出的 EFF(单节点=1), 避免 cluster.conf 字面量覆盖
+    local _ext_repl _ext_min _ext_rule=""
+    _ext_repl="${CEPH_EFF_POOL_REPLICAS:-${CEPH_POOL_REPLICAS:-3}}"
+    _ext_min="${CEPH_EFF_POOL_MIN_SIZE:-${CEPH_POOL_MIN_SIZE:-2}}"
+    # ★ 2026-11-20 单节点根因: CLI `osd pool create ... replicated` 不指定规则时用默认
+    #   replicated_rule(host 故障域)。单节点只有 1 个 host, size>1 时副本无法放置 →
+    #   PG 长期 undersized+peered, 外部 CephFilesystem 的 MDS 永久 creating。
+    #   有效故障域=osd 时先确保 osd 域规则存在, 创建/纠正池都用它; host 模式显式用
+    #   cubestack-ext-host, 以便从单节点 osd 规则切换回 host 域(多节点默认语义不变)。
+    if [ "${CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd" ]; then
+        _ext_rule="cubestack-ext-osd"
+        if ! _ceph_exec osd crush rule ls 2>/dev/null | grep -qx "${_ext_rule}"; then
+            _ceph_exec osd crush rule create-replicated "${_ext_rule}" default osd >/dev/null 2>&1 \
+                && ok "  已创建 CRUSH 规则 ${_ext_rule}(failureDomain=osd)" \
+                || warn "  创建 CRUSH 规则 ${_ext_rule} 失败(外部池副本可能无法放置)"
+        fi
+    else
+        # ★ 2026-11-21 CodeRabbit: 单节点部署把外部池换到 cubestack-ext-osd 后, 后续多节点
+        #   运行必须显式切回 host 域规则; 只清空 _ext_rule 会保留 OSD 级放置(3 副本可能同主机)。
+        _ext_rule="cubestack-ext-host"
+        if ! _ceph_exec osd crush rule ls 2>/dev/null | grep -qx "${_ext_rule}"; then
+            _ceph_exec osd crush rule create-replicated "${_ext_rule}" default host >/dev/null 2>&1 \
+                && ok "  已创建 CRUSH 规则 ${_ext_rule}(failureDomain=host)" \
+                || warn "  创建 CRUSH 规则 ${_ext_rule} 失败(外部池副本可能无法跨主机放置)"
+        fi
+    fi
     say "==== Ceph 对外暴露 apply(模式=${MODE}, Service type=${SVC_TYPE:-host-network 直连}) ===="
 
     # ① 网络层: mon 对外端点
@@ -451,12 +501,21 @@ apply_main() {
     if _ceph_exec osd pool get "${EXT_RBD_POOL}" size >/dev/null 2>&1; then
         ok "  外部 RBD pool ${EXT_RBD_POOL} 已存在"
     else
-        _ceph_exec osd pool create "${EXT_RBD_POOL}" "${EXT_RBD_PG}" replicated \
-            && ok "  已创建外部 RBD pool ${EXT_RBD_POOL}(${EXT_RBD_PG} PG)" \
-            || warn "  外部 RBD pool 创建失败"
+        if [ -n "${_ext_rule}" ]; then
+            _ceph_exec osd pool create "${EXT_RBD_POOL}" "${EXT_RBD_PG}" replicated "${_ext_rule}" \
+                && ok "  已创建外部 RBD pool ${EXT_RBD_POOL}(${EXT_RBD_PG} PG, rule=${_ext_rule})" \
+                || warn "  外部 RBD pool 创建失败"
+        else
+            _ceph_exec osd pool create "${EXT_RBD_POOL}" "${EXT_RBD_PG}" replicated \
+                && ok "  已创建外部 RBD pool ${EXT_RBD_POOL}(${EXT_RBD_PG} PG)" \
+                || warn "  外部 RBD pool 创建失败"
+        fi
     fi
-    _ceph_exec osd pool set "${EXT_RBD_POOL}" size "${CEPH_POOL_REPLICAS:-3}" >/dev/null 2>&1 || true
-    _ceph_exec osd pool set "${EXT_RBD_POOL}" min_size "${CEPH_POOL_MIN_SIZE:-2}" >/dev/null 2>&1 || true
+    # 已存在池也要纠正规则(旧版本/单节点首跑可能用了默认 host 规则)
+    [ -n "${_ext_rule}" ] && { _ceph_exec osd pool set "${EXT_RBD_POOL}" crush_rule "${_ext_rule}" >/dev/null 2>&1 \
+        || warn "  ${EXT_RBD_POOL} crush_rule 切换到 ${_ext_rule} 失败"; }
+    _ceph_exec osd pool set "${EXT_RBD_POOL}" size "${_ext_repl}" >/dev/null 2>&1 || true
+    _ceph_exec osd pool set "${EXT_RBD_POOL}" min_size "${_ext_min}" >/dev/null 2>&1 || true
     if ! _ceph_exec osd pool application get "${EXT_RBD_POOL}" 2>/dev/null | grep -q "rbd"; then
         _ceph_exec osd pool application enable "${EXT_RBD_POOL}" rbd >/dev/null 2>&1 \
             && ok "  ${EXT_RBD_POOL} application=rbd" || warn "  ${EXT_RBD_POOL} application 设置失败"
@@ -469,11 +528,20 @@ apply_main() {
             if _ceph_exec osd pool get "${_fp_pool}" size >/dev/null 2>&1; then
                 ok "  CephFS pool ${_fp_pool} 已存在"
             else
-                _ceph_exec osd pool create "${_fp_pool}" "${_fp_pg}" replicated \
-                    && ok "  已创建 CephFS pool ${_fp_pool}(${_fp_pg} PG)" || warn "  CephFS pool ${_fp_pool} 创建失败"
+                if [ -n "${_ext_rule}" ]; then
+                    _ceph_exec osd pool create "${_fp_pool}" "${_fp_pg}" replicated "${_ext_rule}" \
+                        && ok "  已创建 CephFS pool ${_fp_pool}(${_fp_pg} PG, rule=${_ext_rule})" \
+                        || warn "  CephFS pool ${_fp_pool} 创建失败"
+                else
+                    _ceph_exec osd pool create "${_fp_pool}" "${_fp_pg}" replicated \
+                        && ok "  已创建 CephFS pool ${_fp_pool}(${_fp_pg} PG)" || warn "  CephFS pool ${_fp_pool} 创建失败"
+                fi
             fi
-            _ceph_exec osd pool set "${_fp_pool}" size "${CEPH_POOL_REPLICAS:-3}" >/dev/null 2>&1 || true
-            _ceph_exec osd pool set "${_fp_pool}" min_size "${CEPH_POOL_MIN_SIZE:-2}" >/dev/null 2>&1 || true
+            # 已存在池纠正规则(单节点首跑可能已用默认 host 规则; 切换会触发 PG 重映射)
+            [ -n "${_ext_rule}" ] && { _ceph_exec osd pool set "${_fp_pool}" crush_rule "${_ext_rule}" >/dev/null 2>&1 \
+                || warn "  ${_fp_pool} crush_rule 切换到 ${_ext_rule} 失败"; }
+            _ceph_exec osd pool set "${_fp_pool}" size "${_ext_repl}" >/dev/null 2>&1 || true
+            _ceph_exec osd pool set "${_fp_pool}" min_size "${_ext_min}" >/dev/null 2>&1 || true
             _ceph_exec osd pool application enable "${_fp_pool}" cephfs >/dev/null 2>&1 || true
         done
         # ★ 2026-09-09: 必须用 CephFilesystem CR 创建, 不能用 `ceph fs new` CLI ——
@@ -481,16 +549,24 @@ apply_main() {
         #   → 提供方 HEALTH_ERR, 消费方 CephFS SC 无法 provision。
         #   已存在同名 fs/pool(历史 CLI 建的)时 Rook 自动接管, 幂等。
         say "  apply CephFilesystem CR ${EXT_FS}(Rook 部署 MDS; 已存在同名 fs 则接管)..."
+        # 单节点/少副本: size<3 时 Rook 拒绝 requireSafeReplicaSize=true; 未传 EFF 时按副本数推导
+        _ext_rs="${CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE:-}"
+        if [ -z "${_ext_rs}" ]; then
+            if [ "${_ext_repl}" -ge 3 ]; then _ext_rs=true; else _ext_rs=false; fi
+        fi
         _FS_CR="$(sed -e "s|__NAMESPACE__|${CEPH_NAMESPACE}|g" \
             -e "s|__FS_NAME__|${EXT_FS}|g" \
             -e "s|__FS_META_POOL__|${EXT_FS_META}|g" \
             -e "s|__FS_DATA_POOL__|${EXT_FS_DATA}|g" \
-            -e "s|__REPLICAS__|${CEPH_POOL_REPLICAS:-3}|g" \
-            -e "s|__MIN_SIZE__|${CEPH_POOL_MIN_SIZE:-2}|g" \
+            -e "s|__REPLICAS__|${_ext_repl}|g" \
+            -e "s|__MIN_SIZE__|${_ext_min}|g" \
+            -e "s|__FAILURE_DOMAIN__|${CEPH_EFF_FAILURE_DOMAIN:-host}|g" \
+            -e "s|__REQUIRE_SAFE_REPLICA_SIZE__|${_ext_rs}|g" \
             -e "s|__STORAGE_LABEL_KEY__|${_SL_KEY}|g" \
             -e "s|__STORAGE_LABEL_VALUE__|${_SL_VAL}|g" \
             "${ROOK_DIR}/external/03-cephfilesystem-external.yaml")" \
             || { warn "  CephFilesystem CR 模板缺失: ${ROOK_DIR}/external/03-cephfilesystem-external.yaml"; unset _fp _fp_pool _fp_pg; return 0; }
+        unset _ext_rs
         printf '%s' "${_FS_CR}" | ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             "$(ssh_user_for_ip "${FIRST_MASTER}")@${FIRST_MASTER}" "sudo rm -f /tmp/ceph-ext-fs.yaml; cat > /tmp/ceph-ext-fs.yaml && ${K} apply -f /tmp/ceph-ext-fs.yaml && rm -f /tmp/ceph-ext-fs.yaml" \
             && ok "  CephFilesystem CR ${EXT_FS} 已 apply(Rook 部署 MDS)" \
@@ -680,6 +756,17 @@ status_main() {
     say "[1/5] mon 网络可达性(集群外 TCP)..."
     for m in $(mon_list); do
         _svc="rook-ceph-mon-${m}-external"
+        if [ "${MODE}" = "host-network" ]; then
+            # host-network 模式**不创建** *-external Service, mon 直接监听节点 IP:6789;
+            # 旧逻辑按 Service 判 type → 单/多节点都会误报"未对外暴露".
+            _nip="$(_mon_ip "${m}" || true)"
+            if [ -n "${_nip}" ] && timeout 3 bash -c "echo > /dev/tcp/${_nip}/6789" 2>/dev/null; then
+                ok "  mon.${m}: ${_nip}:6789 可达(host-network 直连)"
+            else
+                warn "  mon.${m}: ${_nip:-<未解析到节点IP>}:6789 不可达(检查 mon 节点网络/端口)"
+            fi
+            continue
+        fi
         _T="$(_svc_type "${_svc}")"
         if [ "${_T}" = "NodePort" ]; then
             _NP="$(_svc_np "${_svc}")"
