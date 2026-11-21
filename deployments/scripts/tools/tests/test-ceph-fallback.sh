@@ -34,6 +34,8 @@ EOF
 chk "env 完整" "$(run "CEPH_MODE=external CEPH_EXTERNAL_ENV_FILE='${TMP}/external-ceph.env' ceph_installable_check >/dev/null 2>&1; echo \$?")" "0"
 chk "env 缺失" "$(run "CEPH_MODE=external CEPH_EXTERNAL_ENV_FILE='${TMP}/missing.env' CEPH_MONITORS= ceph_installable_check >/dev/null 2>&1; echo \$?")" "1"
 chk "手填完整" "$(run "CEPH_MODE=external CEPH_EXTERNAL_ENV_FILE='${TMP}/missing.env' CEPH_MONITORS='192.0.2.1:6789' CEPH_USER=admin CEPH_KEYRING=k ceph_installable_check >/dev/null 2>&1; echo \$?")" "0"
+chk "CephFS 关闭时残留 FS 名不要求凭据" "$(run "CEPH_MODE=external CEPH_EXTERNAL_ENV_FILE='${TMP}/missing.env' CEPH_MONITORS='192.0.2.1:6789' CEPH_USER=admin CEPH_KEYRING=k CEPHFS_ENABLED=false CEPHFS_FS=retained-fs ceph_installable_check >/dev/null 2>&1; echo \$?")" "0"
+chk "CephFS 启用且缺凭据 → 不满足" "$(run "CEPH_MODE=external CEPH_EXTERNAL_ENV_FILE='${TMP}/missing.env' CEPH_MONITORS='192.0.2.1:6789' CEPH_USER=admin CEPH_KEYRING=k CEPHFS_ENABLED=true CEPHFS_FS=fs1 ceph_installable_check >/dev/null 2>&1; echo \$?")" "1"
 
 echo "== ② internal 单节点显式磁盘 =="
 chk "1 节点具备" "$(run "ceph_preflight_node_ssh() { case \"\$2\" in *df*) echo 104857600 ;; *) return 0 ;; esac; }; NODES=('master,n1,10.0.0.1,root,pw'); CEPH_MODE=internal CEPH_TOPOLOGY=auto CEPH_MIN_NODES=3 CEPH_DATA_DISKS='n1:/dev/vdb'; ceph_installable_check --probe >/dev/null 2>&1; echo \$?")" "0"
@@ -80,5 +82,23 @@ out="$( ( set +u
     load_config >/dev/null 2>&1
     printf "%s|%s|%s\n" "${CEPH_MODE}" "${REGISTRY_STORAGE_CLASS}" "${LOCAL_PATH_ENABLED}" ) )"
 chk "fallback 强制 none/local-path/true" "${out}" "none|local-path|true"
+
+echo "== ⑧ mon 放置预检(与 02_ceph 入口同口径) =="
+chk "3 节点 mon=4 拒绝" "$(run "NODES=('master,n1,10.0.0.1,root,pw' 'master,n2,10.0.0.2,root,pw' 'master,n3,10.0.0.3,root,pw'); CEPH_MODE=internal CEPH_MON_COUNT=4 CEPH_DATA_DISKS='n1:/dev/vdb;n2:/dev/vdb;n3:/dev/vdb'; ceph_installable_check >/dev/null 2>&1; echo \$?")" "1"
+chk "3 节点 mon=3 通过" "$(run "NODES=('master,n1,10.0.0.1,root,pw' 'master,n2,10.0.0.2,root,pw' 'master,n3,10.0.0.3,root,pw'); CEPH_MODE=internal CEPH_MON_COUNT=3 CEPH_DATA_DISKS='n1:/dev/vdb;n2:/dev/vdb;n3:/dev/vdb'; ceph_installable_check >/dev/null 2>&1; echo \$?")" "0"
+
+echo "== ⑨ 单节点显式磁盘数 vs 有效副本数 =="
+chk "单节点显式 1 盘 size=2 拒绝" "$(run "ceph_preflight_node_ssh() { case \"\$2\" in *df*) echo 104857600 ;; *) return 0 ;; esac; }; NODES=('master,n1,10.0.0.1,root,pw'); CEPH_MODE=internal CEPH_POOL_REPLICAS=2 CEPH_EXPLICIT_REPLICAS=1 CEPH_DATA_DISKS='n1:/dev/vdb'; ceph_installable_check --probe >/dev/null 2>&1; echo \$?")" "1"
+chk "单节点显式 2 盘 size=2 通过" "$(run "ceph_preflight_node_ssh() { case \"\$2\" in *df*) echo 104857600 ;; *) return 0 ;; esac; }; NODES=('master,n1,10.0.0.1,root,pw'); CEPH_MODE=internal CEPH_POOL_REPLICAS=2 CEPH_EXPLICIT_REPLICAS=1 CEPH_DATA_DISKS='n1:/dev/vdb,/dev/vdc'; ceph_installable_check --probe >/dev/null 2>&1; echo \$?")" "0"
+
+echo "== ⑩ 多节点容量按有效故障域计量 =="
+# 3 块盘分布在 2 台主机: osd 域满足 3 副本, host 域不满足
+_fd_stub='ceph_preflight_node_ssh() { case "$2" in *df*) echo 104857600 ;; *) return 0 ;; esac; }; timeout() { case "$*" in *ceph-detect-disks.sh*--node\ n1*) echo n1:/dev/vdb,/dev/vdc ;; *ceph-detect-disks.sh*--node\ n2*) echo n2:/dev/vdb ;; *ceph-detect-disks.sh*) echo n3: ;; *) return 0 ;; esac; }; NODES=("master,n1,10.0.0.1,root,pw" "master,n2,10.0.0.2,root,pw" "master,n3,10.0.0.3,root,pw"); CEPH_MODE=internal CEPH_TOPOLOGY=auto CEPH_POOL_REPLICAS=3 '
+chk "osd 故障域 3 OSD/2 主机通过" "$(run "${_fd_stub}CEPH_POOL_FAILURE_DOMAIN=osd; ceph_installable_check --probe >/dev/null 2>&1; echo \$?")" "0"
+chk "host 故障域 2 主机拒绝" "$(run "${_fd_stub}CEPH_POOL_FAILURE_DOMAIN=host; ceph_installable_check --probe >/dev/null 2>&1; echo \$?")" "1"
+
+echo "== ⑪ CEPH_NODES 重复主机去重(3 份同一主机不等于 3 台) =="
+chk "重复 3 次 → 1 台" "$(run 'CEPH_NODES=n1,n1,n1; ceph_storage_hosts | wc -l')" "1"
+chk "3 个不同 → 3 台" "$(run 'CEPH_NODES=n1,n2,n3; ceph_storage_hosts | wc -l')" "3"
 
 exit "${fail}"

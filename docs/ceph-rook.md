@@ -593,7 +593,10 @@ Rook 部署引擎**(`02_ceph.sh` 的 `ceph_engine_main`),不存在两份会漂�
 - ⚠ 单节点是**降级拓扑**(无跨主机冗余);生产建议 3 节点起。
 - 优雅卸载/覆盖安装与多节点共用同一 live-state 安全序(`ceph-cleanup.sh --delete-cluster`)。
 - ⚠ 拓扑切换(单↔多)会走覆盖安装: 默认 `CEPH_PRE_CLEANUP_EXISTING=true` 删除旧集群并清盘;
-  想保留旧 OSD 数据认领, 设 `CEPH_PRE_CLEANUP_EXISTING=false` 并确保旧 mon secret 仍在。
+  想保留旧 OSD 数据认领, 设 `CEPH_PRE_CLEANUP_EXISTING=false`, 并**同时保留旧 `rook-ceph-mon`
+  secret 与各节点 mon store(`/var/lib/rook/mon-*`)**。只保留 secret 不够: OSD 本地 bluestore
+  缓存的 osdmap epoch 高于新 mon, 缺 mon store 时 OSD 无法 boot。完整备份/恢复步骤见
+  `docs/ceph-backup-restore.md`(其中 mon store 恢复路径尚未做过端到端验证)。
 
 ```bash
 # 单节点示例(cluster.conf)

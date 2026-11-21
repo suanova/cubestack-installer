@@ -81,6 +81,9 @@ chk_contains "按 EFF 故障域选择规则" 'CEPH_EFF_FAILURE_DOMAIN:-host}" = 
 chk_contains "创建 osd 规则" 'osd crush rule create-replicated "${_ext_rule}" default osd' "$(cat "${EXPOSE}")"
 chk_contains "RBD 池创建带规则" 'osd pool create "${EXT_RBD_POOL}" "${EXT_RBD_PG}" replicated "${_ext_rule}"' "$(cat "${EXPOSE}")"
 chk_contains "已有 FS 池纠正规则" 'osd pool set "${_fp_pool}" crush_rule "${_ext_rule}"' "$(cat "${EXPOSE}")"
+chk_contains "host 模式创建 host 域规则" 'osd crush rule create-replicated "${_ext_rule}" default host' "$(cat "${EXPOSE}")"
+chk_contains "已有 RBD 池切换规则" 'osd pool set "${EXT_RBD_POOL}" crush_rule "${_ext_rule}"' "$(cat "${EXPOSE}")"
+chk_contains "独立 apply 补有效 profile" 'ceph_apply_effective_spec "${_expose_topo}"' "$(cat "${EXPOSE}")"
 
 echo "== ⑧ 单节点默认池(.mgr)使用 osd 故障域规则 =="
 CEPH_MOD="${REPO_ROOT}/deployments/scripts/modules/03_addon/02_ceph.sh"
@@ -88,6 +91,10 @@ chk_contains "按 EFF 故障域触发" 'CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd"'
 chk_contains "创建 cubestack-osd 规则" 'ceph osd crush rule create-replicated cubestack-osd default osd' "$(cat "${CEPH_MOD}")"
 chk_contains "设置默认 CRUSH 规则" 'osd_pool_default_crush_rule' "$(cat "${CEPH_MOD}")"
 chk_contains ".mgr 池纠正(按规则名)" 'ceph osd pool set .mgr crush_rule cubestack-osd' "$(cat "${CEPH_MOD}")"
+chk_contains ".mgr size 跟随有效副本数" 'osd pool set .mgr size "${CEPH_POOL_REPLICAS}"' "$(cat "${CEPH_MOD}")"
+chk_contains ".mgr min_size 跟随有效值" 'osd pool set .mgr min_size "${CEPH_POOL_MIN_SIZE}"' "$(cat "${CEPH_MOD}")"
+chk_contains ".mgr 纠正失败返回非 0(等待循环可重试)" \
+    'ceph osd pool set .mgr crush_rule cubestack-osd >/dev/null 2>&1 || return 1' "$(cat "${CEPH_MOD}")"
 
 echo "== ⑨ verify_ceph 覆盖实际 SC 名与 host-network RGW =="
 VERIFY="${REPO_ROOT}/deployments/scripts/modules/03_addon/27_verify_ceph.sh"
@@ -117,5 +124,38 @@ echo "== ⑫ 磁盘探测 stdout 纯净(防预检误回退) =="
 DETECT="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-detect-disks.sh"
 chk_contains "load_config 输出走 stderr" '{ load_config; } >&2' "$(cat "${DETECT}")"
 chk_contains "预检只解析本节点机器行" 'grep -E "^${_hn}:"' "$(cat "${REPO_ROOT}/deployments/scripts/lib-common.sh")"
+
+echo "== ⑬ .mgr 池纠正行为: 成功置 size/min_size, 失败返回非 0 =="
+sed -n '/_ceph_ensure_osd_crush_default() {/,/^    }$/p' "${CEPH_MOD}" > "${TMP}/mgr.sh"
+[ -s "${TMP}/mgr.sh" ] || { echo "  FAIL 无法抽取 _ceph_ensure_osd_crush_default"; fail=1; }
+# 成功路径(不注入失败点): 断言 size/min_size 调用与 size=1 确认参数
+out="$( ( set +u
+    warn() { :; }
+    K=kubectl CEPH_NAMESPACE=rook-ceph CEPH_POOL_REPLICAS=1 CEPH_POOL_MIN_SIZE=1
+    _calls=""
+    SSH() { _calls="${_calls}$*"$'\n'; case "$*" in
+        *'crush rule ls'*)  echo cubestack-osd ;;
+        *'crush rule dump'*) echo '{"rule_id":5}' ;;
+        *) return 0 ;;
+      esac; }
+    . "${TMP}/mgr.sh"
+    _ceph_ensure_osd_crush_default; echo "rc=$?"
+    printf '%s' "${_calls}" ) )"
+chk_contains "成功 rc=0" "rc=0" "${out}"
+chk_contains ".mgr 设 size 且 size=1 带确认参数" 'osd pool set .mgr size 1 --yes-i-really-mean-it' "${out}"
+chk_contains ".mgr 设 min_size" 'osd pool set .mgr min_size 1' "${out}"
+# 失败路径: .mgr crush_rule 设置失败 → 返回非 0, 让等待循环下一轮重试
+out="$( ( set +u
+    warn() { :; }
+    K=kubectl CEPH_NAMESPACE=rook-ceph CEPH_POOL_REPLICAS=1 CEPH_POOL_MIN_SIZE=1
+    SSH() { case "$*" in
+        *'crush rule ls'*)  echo cubestack-osd ;;
+        *'crush rule dump'*) echo '{"rule_id":5}' ;;
+        *'pool set .mgr crush_rule'*) return 1 ;;
+        *) return 0 ;;
+      esac; }
+    . "${TMP}/mgr.sh"
+    _ceph_ensure_osd_crush_default; echo "rc=$?" ) )"
+chk_contains ".mgr 规则失败 → rc=1" "rc=1" "${out}"
 
 exit "${fail}"

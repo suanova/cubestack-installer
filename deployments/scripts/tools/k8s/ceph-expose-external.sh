@@ -34,6 +34,27 @@ set -euo pipefail
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
+# ★ 2026-11-21 CodeRabbit: 独立 `apply` 不经过 03_ceph_csi, 不会继承它导出的 CEPH_EFF_*。
+#   这里用与预检/模块同一套拓扑探测(STORE_HOSTS + CEPH_TOPOLOGY)补齐有效 profile;
+#   父进程已导出 EFF 时保持不变。否则单节点会用多节点字面量(3 副本/host 域)。
+if [ -z "${CEPH_EFF_POOL_REPLICAS:-}" ]; then
+    _expose_topo=""
+    case "$(ceph_norm_lower "${CEPH_TOPOLOGY:-auto}")" in
+        single|multi) _expose_topo="${CEPH_TOPOLOGY}" ;;   # 显式拓扑优先(不因 NODES 缺失退回多节点)
+        *)
+            _expose_cn="$(ceph_storage_host_count)"
+            _expose_topo="$(ceph_topology_resolve "${CEPH_TOPOLOGY:-auto}" "${_expose_cn}" "${CEPH_MIN_NODES:-3}" 2>/dev/null)" || _expose_topo=""
+            ;;
+    esac
+    if [ -n "${_expose_topo}" ]; then
+        ceph_apply_effective_spec "${_expose_topo}" \
+            || { err "Ceph 有效 profile 计算失败(检查 CEPH_POOL_REPLICAS/MIN_SIZE/FAILURE_DOMAIN)"; exit 1; }
+        say "有效 Ceph profile: topology=${_expose_topo} size=${CEPH_EFF_POOL_REPLICAS} min_size=${CEPH_EFF_POOL_MIN_SIZE} failureDomain=${CEPH_EFF_FAILURE_DOMAIN}"
+    else
+        warn "无法从 NODES/CEPH_NODES 判定 Ceph 拓扑(${_expose_cn:-0} 台), 按多节点默认值继续"
+    fi
+    unset _expose_cn _expose_topo
+fi
 init_remote_kubectl || { err "init_remote_kubectl 失败"; exit 1; }
 
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
@@ -320,13 +341,23 @@ apply_main() {
     # ★ 2026-11-20 单节点根因: CLI `osd pool create ... replicated` 不指定规则时用默认
     #   replicated_rule(host 故障域)。单节点只有 1 个 host, size>1 时副本无法放置 →
     #   PG 长期 undersized+peered, 外部 CephFilesystem 的 MDS 永久 creating。
-    #   有效故障域=osd 时先确保 osd 域规则存在, 创建/纠正池都用它(多节点 host 模式不变)。
+    #   有效故障域=osd 时先确保 osd 域规则存在, 创建/纠正池都用它; host 模式显式用
+    #   cubestack-ext-host, 以便从单节点 osd 规则切换回 host 域(多节点默认语义不变)。
     if [ "${CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd" ]; then
         _ext_rule="cubestack-ext-osd"
         if ! _ceph_exec osd crush rule ls 2>/dev/null | grep -qx "${_ext_rule}"; then
             _ceph_exec osd crush rule create-replicated "${_ext_rule}" default osd >/dev/null 2>&1 \
                 && ok "  已创建 CRUSH 规则 ${_ext_rule}(failureDomain=osd)" \
                 || warn "  创建 CRUSH 规则 ${_ext_rule} 失败(外部池副本可能无法放置)"
+        fi
+    else
+        # ★ 2026-11-21 CodeRabbit: 单节点部署把外部池换到 cubestack-ext-osd 后, 后续多节点
+        #   运行必须显式切回 host 域规则; 只清空 _ext_rule 会保留 OSD 级放置(3 副本可能同主机)。
+        _ext_rule="cubestack-ext-host"
+        if ! _ceph_exec osd crush rule ls 2>/dev/null | grep -qx "${_ext_rule}"; then
+            _ceph_exec osd crush rule create-replicated "${_ext_rule}" default host >/dev/null 2>&1 \
+                && ok "  已创建 CRUSH 规则 ${_ext_rule}(failureDomain=host)" \
+                || warn "  创建 CRUSH 规则 ${_ext_rule} 失败(外部池副本可能无法跨主机放置)"
         fi
     fi
     say "==== Ceph 对外暴露 apply(模式=${MODE}, Service type=${SVC_TYPE:-host-network 直连}) ===="

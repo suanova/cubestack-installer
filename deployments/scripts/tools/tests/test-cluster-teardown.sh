@@ -362,8 +362,10 @@ chk "⑩a run_component 调用带 </dev/null" "1" \
 echo "== ⑪ 外部 Ceph: 覆盖前先卸节点 /var/lib/kubelet Ceph/RBD 挂载 =="
 chk "⑪a unmount_node_ceph_mounts 已定义" "1" \
     "$(grep -cF 'unmount_node_ceph_mounts()' "${ENGINE}")"
-chk "⑪b 仅 external 模式调用(内部由 ceph/reset 兜底)" "1" \
-    "$(grep -cF 'if [ "${CEPH_MODE:-internal}" = "external" ]; then' "${ENGINE}")"
+chk "⑪b external 模式仍触发挂载清理" "1" \
+    "$(grep -cF '[ "${CEPH_MODE:-internal}" = "external" ] && _need_detach=1' "${ENGINE}")"
+chk "⑪b2 外部接入对象存活时也触发清理(CEPH_MODE=none 回退场景)" "1" \
+    "$(grep -cF 'get cephcluster rook-ceph-external -o name' "${ENGINE}")"
 _n_call="$(grep -cF 'unmount_node_ceph_mounts' "${ENGINE}" || true)"
 chk "⑪c 函数+调用已接线" "1" "$([ "${_n_call:-0}" -ge 2 ] && echo 1 || echo 0)"
 _n_kubelib="$(grep -cF 'findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet' "${ENGINE}" || true)"

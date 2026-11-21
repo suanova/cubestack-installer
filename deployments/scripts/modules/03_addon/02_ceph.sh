@@ -1285,9 +1285,17 @@ rm -f "${LOCAL_CR}"
             ceph osd pool get .mgr size >/dev/null 2>&1; then
             # ⚠ 实机: `osd pool set <pool> crush_rule <数字ID>` 报 "crush rule N does not exist";
             #   用规则名才生效(2026-11-20)。osd_pool_default_crush_rule 仍用数字 ID(config 语义)。
+            # ⚠ 已存在的 .mgr 池不会跟随 osd_pool_default_size/min_size(那两项只影响后续新建池),
+            #   必须显式纠正 size/min_size; 否则单节点 size=3/min_size=2 时 PG 永远 inactive,
+            #   HEALTH_OK 等不到。任一项失败都返回非 0, 让等待循环下一轮重试(幂等)。
+            local _mgr_size_flag=""
+            [ "${CEPH_POOL_REPLICAS:-3}" -eq 1 ] && _mgr_size_flag="--yes-i-really-mean-it"
             SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
-                ceph osd pool set .mgr crush_rule cubestack-osd >/dev/null 2>&1 \
-                || warn "  .mgr 池 crush_rule 纠正失败(可能 PG 仍 undersized; 检查 osd tree)"
+                ceph osd pool set .mgr crush_rule cubestack-osd >/dev/null 2>&1 || return 1
+            SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+                ceph osd pool set .mgr size "${CEPH_POOL_REPLICAS}" ${_mgr_size_flag} >/dev/null 2>&1 || return 1
+            SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+                ceph osd pool set .mgr min_size "${CEPH_POOL_MIN_SIZE}" >/dev/null 2>&1 || return 1
         fi
         return 0
     }

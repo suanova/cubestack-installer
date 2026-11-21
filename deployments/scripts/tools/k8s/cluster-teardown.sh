@@ -311,10 +311,21 @@ PY
         #   ceph_csi 的 uninstall 会删除外部 CephCluster/接入声明; 删除后再摘挂载可能
         #   触发 jbd2/rbd D 状态(本清理要防的正是这个顺序)。内部 Ceph 的同类清理在
         #   ceph 模块/cubestack-offline reset 前置里做。
-        if [ "${CEPH_MODE:-internal}" = "external" ]; then
+        # ⚠ CEPH_MODE 只是触发条件之一: 回退运行会把本次 CEPH_MODE 置 none, 但 ceph_csi
+        #   卸载仍会删除存活的 CephCluster/cephconnection/clientprofile 等外部接入对象。
+        #   因此只要这些对象仍存在, 同样必须先摘挂载(保持 CEPH_MODE=external 原触发)。
+        _need_detach=0
+        [ "${CEPH_MODE:-internal}" = "external" ] && _need_detach=1
+        if [ "${_need_detach}" = "0" ]; then
+            _live_ext="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster rook-ceph-external -o name 2>/dev/null) || true )"
+            [ -n "${_live_ext}" ] || _live_ext="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" get cephconnection ceph-connection -o name 2>/dev/null) || true )"
+            [ -n "${_live_ext}" ] && _need_detach=1
+        fi
+        if [ "${_need_detach}" = "1" ]; then
             unmount_node_ceph_mounts \
                 || warn "  (有节点未能确认/卸净 Ceph/RBD 挂载; 后续 reset/重启兜底)"
         fi
+        unset _need_detach _live_ext
         _n_ok=0; _n_fail=0
         while IFS=$'\t' read -r _key _src _rel; do
             [ -n "${_key}" ] || continue

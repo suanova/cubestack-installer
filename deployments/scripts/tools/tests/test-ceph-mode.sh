@@ -83,4 +83,34 @@ out="$( ( set +u
     printf '%s|%s|%s\n' "${CEPH_MODE}" "${REGISTRY_STORAGE_CLASS}" "${LOCAL_PATH_ENABLED}" ) )"
 chk "默认 internal → ceph-block + local-path off" "${out}" "internal|ceph-block|false"
 
+echo "== ⑨ legacy false/false + 无 CEPH_MODE → none + local-path(registry 默认在模式解析后派生) =="
+printf 'NODES=()\nCEPH_ENABLED=false\nCEPH_CSI_ENABLED=false\n' > "${tmp}/legacy-off.conf"
+out="$( ( set +u
+    CLUSTER_CONF="${tmp}/legacy-off.conf"
+    CLUSTER_DEFAULTS_CONF="${REPO_ROOT}/deployments/config/cluster.defaults.conf"
+    source "${REPO_ROOT}/deployments/scripts/lib-common.sh" >/dev/null 2>&1
+    load_config >/dev/null 2>&1
+    printf '%s|%s|%s\n' "${CEPH_MODE}" "${REGISTRY_STORAGE_CLASS}" "${LOCAL_PATH_ENABLED}" ) )"
+chk "legacy off → none + local-path" "${out}" "none|local-path|true"
+
+echo "== ⑩ legacy false/false + 残留 CEPH_EXTERNAL_MONITORS → 仍 none(尊重显式 opt-out) =="
+printf 'NODES=()\nCEPH_ENABLED=false\nCEPH_CSI_ENABLED=false\nCEPH_EXTERNAL_MONITORS="192.0.2.1:6789"\n' > "${tmp}/legacy-off-mon.conf"
+out="$( ( set +u
+    CLUSTER_CONF="${tmp}/legacy-off-mon.conf"
+    CLUSTER_DEFAULTS_CONF="${REPO_ROOT}/deployments/config/cluster.defaults.conf"
+    source "${REPO_ROOT}/deployments/scripts/lib-common.sh" >/dev/null 2>&1
+    load_config >/dev/null 2>&1
+    printf '%s|%s\n' "${CEPH_MODE}" "${REGISTRY_STORAGE_CLASS}" ) )"
+chk "legacy off + monitors → 不推导 external" "${out}" "none|local-path"
+
+echo "== ⑪ 显式 external + 旧连接别名 → 补齐 canonical(不覆盖显式值) =="
+printf 'NODES=()\nCEPH_MODE=external\nCEPH_EXTERNAL_MONITORS="192.0.2.10:6789"\nCEPH_EXTERNAL_KEYRING="alias-key"\n' > "${tmp}/ext-alias.conf"
+out="$( ( set +u
+    CLUSTER_CONF="${tmp}/ext-alias.conf"
+    CLUSTER_DEFAULTS_CONF="${REPO_ROOT}/deployments/config/cluster.defaults.conf"
+    source "${REPO_ROOT}/deployments/scripts/lib-common.sh" >/dev/null 2>&1
+    load_config >/dev/null 2>&1
+    printf '%s|%s|%s\n' "${CEPH_MODE}" "${CEPH_MONITORS}" "${CEPH_KEYRING}" ) )"
+chk "显式 external 迁移别名" "${out}" "external|192.0.2.10:6789|alias-key"
+
 exit "${fail}"
