@@ -23,13 +23,16 @@ set -euo pipefail
 
 # shellcheck source=lib-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
-load_config
 
 # 人工可读诊断(say/warn)一律走 stderr: -m 机器可读模式下 stdout 只留 "hostname:/dev/x"
 # 机器行供上层模块(02_ceph.sh / k8s_deploy 预检)捕获 —— 否则模块捕获 stdout 时会把
 # "SSH 失败/无裸盘"等提示吞掉(屏幕上只剩 Python traceback, 不知为何失败)。
+# ⚠ 必须先于 load_config 定义, 且把 load_config 的 stdout 整体重定向到 stderr:
+#   否则旧变量弃用等 warn 会落到 stdout, 污染 -m 输出 → 上层误判“无可用裸盘”
+#   (2026-11-20 实机: 多节点预检因此错误回退 local-path)。
 say()  { printf '\033[36m→  %s\033[0m\n' "$*" >&2; }
 warn() { printf '\033[33m⚠  %s\033[0m\n' "$*" >&2; }
+{ load_config; } >&2
 
 MACHINE=0
 CLASSIFY=0

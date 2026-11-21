@@ -362,8 +362,10 @@ chk "⑩a run_component 调用带 </dev/null" "1" \
 echo "== ⑪ 外部 Ceph: 覆盖前先卸节点 /var/lib/kubelet Ceph/RBD 挂载 =="
 chk "⑪a unmount_node_ceph_mounts 已定义" "1" \
     "$(grep -cF 'unmount_node_ceph_mounts()' "${ENGINE}")"
-chk "⑪b 仅 external 模式调用(内部由 ceph/reset 兜底)" "1" \
-    "$(grep -cF 'if [ "${CEPH_MODE:-internal}" = "external" ]; then' "${ENGINE}")"
+chk "⑪b external 模式仍触发挂载清理" "1" \
+    "$(grep -cF '[ "${CEPH_MODE:-internal}" = "external" ] && _need_detach=1' "${ENGINE}")"
+chk "⑪b2 外部接入对象存活时也触发清理(CEPH_MODE=none 回退场景)" "1" \
+    "$(grep -cF 'get cephcluster rook-ceph-external -o name' "${ENGINE}")"
 _n_call="$(grep -cF 'unmount_node_ceph_mounts' "${ENGINE}" || true)"
 chk "⑪c 函数+调用已接线" "1" "$([ "${_n_call:-0}" -ge 2 ] && echo 1 || echo 0)"
 _n_kubelib="$(grep -cF 'findmnt -Rrn -o TARGET,SOURCE,FSTYPE /var/lib/kubelet' "${ENGINE}" || true)"
@@ -392,12 +394,26 @@ chk "⑪k 挂载清理在组件卸载循环之前" "1" \
 echo "== ⑫ ceph_csi: external 模式只删接入声明, 不碰外部 Ceph 数据 =="
 CSI="${REPO_ROOT}/deployments/scripts/modules/03_addon/03_ceph_csi.sh"
 chk "⑫a UNINSTALL 声明" "1" "$(grep -cF '# UNINSTALL: 1' "${CSI}")"
-_n_ext="$(grep -cF 'if [ "${CEPH_MODE:-internal}" = "external" ]; then' "${CSI}" || true)"
-chk "⑫b external 分支" "1" "$([ "${_n_ext:-0}" -ge 1 ] && echo 1 || echo 0)"
+# 2026-11-20: external 分支改为**活态判定**(存在 external CephCluster)或 CEPH_MODE=external;
+# 不再依赖旧变量 CEPH_ENABLED/CEPH_CSI_ENABLED。
+_n_ext="$(grep -cF '_cc_ext_live' "${CSI}" || true)"
+chk "⑫b external 活态分支" "1" "$([ "${_n_ext:-0}" -ge 1 ] && echo 1 || echo 0)"
 chk "⑫c 删除外部接入声明(CephCluster rook-ceph-external)" "1" \
     "$(grep -cF 'delete cephcluster rook-ceph-external' "${CSI}")"
 chk "⑫d 删除本模块 StorageClass" "1" "$(grep -cF 'delete storageclass' "${CSI}")"
 chk "⑫e 不调用 ceph-cleanup(外部 Ceph 数据非本安装器资产)" "0" \
     "$(grep -cF 'ceph-cleanup.sh' "${CSI}" || true)"
+
+echo "== ⑬ 回退 local-path 安全序(2026-11-20) =="
+DEPLOY="${REPO_ROOT}/deployments/scripts/deploy-cluster.sh"
+TEARDOWN="${REPO_ROOT}/deployments/scripts/tools/k8s/cluster-teardown.sh"
+_fb_line="$(grep -nF 'ceph_apply_fallback_decision' "${DEPLOY}" | head -1 | cut -d: -f1)"
+_te_line="$(grep -nF 'cluster-teardown.sh" --uninstall' "${DEPLOY}" | head -1 | cut -d: -f1)"
+chk "⑬a 回退在优雅覆盖/teardown 之前" "1" \
+    "$([ -n "${_fb_line}" ] && [ -n "${_te_line}" ] && [ "${_fb_line}" -lt "${_te_line}" ] && echo 1 || echo 0)"
+chk "⑬b 回退后过滤 ceph 模块" "1" \
+    "$(grep -cF 'ceph|ceph_csi|cephfs_mount) continue' "${DEPLOY}" | awk '{print ($1>=1)?1:0}')"
+chk "⑬c teardown 在 CEPH_MODE=none 时过滤 ceph" "1" \
+    "$(grep -cF 'CEPH_MODE:-internal}" = "none"' "${TEARDOWN}" | awk '{print ($1>=1)?1:0}')"
 
 [ "${fail}" = "0" ] && { echo "全部通过"; exit 0; } || { echo "有失败项"; exit 1; }

@@ -40,11 +40,15 @@ docker ps --filter "name=${CONTAINER}" --format '{{.Names}}' | grep -qx "${CONTA
 echo "── 0. 本地 cluster.conf(默认不推送, 不动 ceph 开关)──"
 [ -f "${LOCAL_CONF}" ] || { echo "【错误】本地配置不存在: ${LOCAL_CONF}"; exit 1; }
 if [ "${SYNC_CONF:-0}" = "1" ]; then
-    echo "  SYNC_CONF=1 → 启用 Ceph(仅翻两个开关行, 其余行不动) ..."
+    echo "  SYNC_CONF=1 → 启用 Ceph(CEPH_MODE=internal, 其余行不动) ..."
     cp "${LOCAL_CONF}" "${LOCAL_CONF}.bak.ceph"
-    sed -E 's|^(CEPH_ENABLED)="\$\{CEPH_ENABLED:-false\}".*|CEPH_ENABLED="\${CEPH_ENABLED:-true}"   # Ceph 存储底座(默认部署; sync-to-container)|; s|^(CEPH_CSI_ENABLED)="\$\{CEPH_CSI_ENABLED:-false\}".*|CEPH_CSI_ENABLED="\${CEPH_CSI_ENABLED:-true}"   # Ceph CSI(默认部署; sync-to-container)|' "${LOCAL_CONF}" > "${LOCAL_CONF}.tmp" \
-        && mv "${LOCAL_CONF}.tmp" "${LOCAL_CONF}"
-    grep -nE '^(CEPH_ENABLED|CEPH_CSI_ENABLED)=' "${LOCAL_CONF}" | sed 's/^/  /'
+    if grep -qE '^CEPH_MODE=' "${LOCAL_CONF}"; then
+        sed -E 's|^(CEPH_MODE)=.*|CEPH_MODE="\${CEPH_MODE:-internal}"   # Ceph 单一开关(sync-to-container 启用)|' \
+            "${LOCAL_CONF}" > "${LOCAL_CONF}.tmp" && mv "${LOCAL_CONF}.tmp" "${LOCAL_CONF}"
+    else
+        printf '%s\n' 'CEPH_MODE="${CEPH_MODE:-internal}"   # Ceph 单一开关(sync-to-container 启用)' >> "${LOCAL_CONF}"
+    fi
+    grep -nE '^CEPH_MODE=' "${LOCAL_CONF}" | sed 's/^/  /'
     echo "  原配置已备份到 ${LOCAL_CONF}.bak.ceph"
 else
     echo "  跳过(默认不推送 config, 保护容器内真实 keyring; 强制推送: SYNC_CONF=1)"
@@ -124,7 +128,7 @@ else
     #   就退 1/2, docker exec 把该退出码原样带回 → 整条管道非 0 → set -e 让脚本**死在步骤 2**,
     #   步骤 3/4/5 全都不执行(用户只看到标题后面空着, 还以为容器 conf 是空的)。信息性输出
     #   不该有终止权 → `|| echo` 兜住(与步骤 4 里那些 `|| echo`/`|| true` 同理)。
-    docker exec "${CONTAINER}" bash -c 'grep -nE "^(CEPH_MODE|CEPH_CSI_ENABLED|CEPH_MONITORS|CEPH_KEYRING|CEPHFS_KEYRING)=" '"${CT_CONF}" | sed 's/^/    /' || echo "    (未读到: 容器内 cluster.conf 缺失, 或其中没有这几个键)"
+    docker exec "${CONTAINER}" bash -c 'grep -nE "^(CEPH_MODE|CEPH_MONITORS|CEPH_KEYRING|CEPHFS_KEYRING|CEPH_TOPOLOGY)=" '"${CT_CONF}" | sed 's/^/    /' || echo "    (未读到: 容器内 cluster.conf 缺失, 或其中没有这几个键)"
 fi
 
 echo ""
@@ -134,7 +138,7 @@ docker exec "${CONTAINER}" bash -c 'rm -f /opt/cubestack-installer/deployments/c
 echo ""
 echo "── 4. 验证(容器内)──"
 docker exec "${CONTAINER}" bash -c '
-  echo "  cluster.conf 关键开关:"; grep -nE "^(CEPH_ENABLED|CEPH_CSI_ENABLED|KUBE_VIP_ENABLED)=" '"${CT_CONF}"' || echo "    (未显式写 = 走脚本内置默认)"
+  echo "  cluster.conf 关键开关:"; grep -nE "^(CEPH_MODE|CEPH_TOPOLOGY|KUBE_VIP_ENABLED)=" '"${CT_CONF}"' || echo "    (未显式写 = 走脚本内置默认)"
   # ★ 2026-09-24: 容器里的 cluster.conf 与宿主机那份**是两份文件**(本脚本默认不推送, 见步骤 2)。
   #   默认值改过以后(kube-vip 由默认开改为默认关), 容器里那份仍留旧值 → 重跑仍走开启态
   #   ——"改了没生效", 本仓库反复踩。这里把可疑值直接点出来, 不让用户自己猜。

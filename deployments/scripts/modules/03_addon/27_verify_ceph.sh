@@ -4,7 +4,7 @@
 # DESC: 端到端验证 Ceph(Rook)真正工作(非仅 pod running):
 #       ① Rook operator + ceph-csi Ready → ② CephCluster phase=Ready + ceph -s 无 HEALTH_ERR
 #       → ③ StorageClass ceph-block 存在 → ④ 建测试 RBD Block PVC + Pod dd 读写(真实 I/O)
-#       → ⑤ ceph osd 至少 3 up → ⑥ 清理(trap 兜底)
+#       → ⑤ ceph osd up(至少 1; 单节点 profile 为 1) → ⑥ 清理(trap 兜底)
 #       → ⑦ CephFS(RWX 文件 I/O, CEPHFS_ENABLED=true 时) → ⑧ RGW/S3(上传下载, CEPH_RGW_ENABLED=true 时)
 #       → ⑨ 对外暴露自检(mon/RGW *-external 可达 + 外部用户/pool, CEPH_EXTERNAL_EXPOSE=true 时)
 # PHASE: addon
@@ -12,13 +12,13 @@
 # REPEAT: 1
 # REQUIRES: ceph ceph_csi
 # 说明:
-#   · **验证模块不设 TOGGLE**(否则 CEPH_ENABLED=true 时会被安装流程自动启用);
+#   · **验证模块不设 TOGGLE**(否则 CEPH_MODE=internal/external 时会被安装流程自动启用);
 #     保持 DEFAULT:0, 仅由 --steps verify_ceph 在安装后单独执行。
-#   · 依赖: ceph 模块(02)与 ceph_csi 模块(03)已部署(CEPH_ENABLED=true / CEPH_CSI_ENABLED=true)。
+#   · 依赖: ceph 模块(02)与 ceph_csi 模块(03)已部署(CEPH_MODE=internal/external)。
 #   · ④ 用离线预加载 busybox 以 RBD 块设备(volumeMode: Block)dd 写入/读回,
 #     验证 CSI 供给 + 挂载 + 真实块 I/O; PVC storageClassName=ceph-block。
 #   · 参考: docs/ceph-rook.md §6(验证清单)
-# 数据源: cluster.conf (CEPH_ENABLED / CEPH_NAMESPACE / NODES / SSH_KEY_NAME)
+# 数据源: cluster.conf (CEPH_MODE / CEPH_NAMESPACE / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --steps verify_ceph
 # ============================================================
 set -euo pipefail
@@ -27,24 +27,37 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-# 开关检查: 未启用则跳过(不报错)
-[ "${CEPH_ENABLED:-false}" = "true" ] || { say "CEPH_ENABLED=false, 跳过 Ceph 验证"; exit 0; }
-[ "${CEPH_CSI_ENABLED:-false}" = "true" ] || { warn "CEPH_CSI_ENABLED=false(未建 StorageClass ceph-block); 仅验证 Ceph 集群本身"; }
+# 开关检查: CEPH_MODE=none/external 跳过(本模块验证的是**集群内** CephCluster rook-ceph;
+# external 模式没有该 CR, 沿用旧行为不在此验证)
+case "${CEPH_MODE:-internal}" in
+    internal) : ;;
+    none)     say "CEPH_MODE=none, 跳过 Ceph 验证"; exit 0 ;;
+    external) say "CEPH_MODE=external(无集群内 CephCluster), 跳过 verify_ceph"; exit 0 ;;
+    *)        err "CEPH_MODE 非法: '${CEPH_MODE}'"; exit 1 ;;
+esac
 
 init_remote_kubectl || exit 1
 
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
-TEST_NS="verify-ceph-$$"     # 唯一命名空间(带 PID 后缀)
+TEST_NS="verify-ceph-$$-$(date +%s)"     # 唯一命名空间(PID+时间戳, 防同 PID 残留)
+TEST_NS_FS="${TEST_NS}-fs"               # CephFS 独立命名空间(避免 RBD cleanup 的 terminating 竞态)
 TEST_PVC="verify-ceph-pvc"
 TEST_POD="verify-ceph-pod"
 # 预加载的 mirror 名 + 钉死 tag(版本树 tar 只有 mirror tag; 上游 busybox:latest 离线拉不到)
 TEST_IMAGE="$(mirror_image_ref "docker.io/library/busybox:${BUSYBOX_TAG:-1.38.0}")"
 
 cleanup() {
-    SSH "${K} -n ${TEST_NS} delete pod ${TEST_POD} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
-    SSH "${K} -n ${TEST_NS} delete pvc ${TEST_PVC} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
-    SSH "${K} patch namespace ${TEST_NS} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
-    SSH "timeout 30 ${K} delete namespace ${TEST_NS} --ignore-not-found=true --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
+    local _ns
+    for _ns in "${TEST_NS}" "${TEST_NS_FS:-}"; do
+        [ -n "${_ns}" ] || continue
+        SSH "${K} -n ${_ns} delete pod ${TEST_POD} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+        SSH "${K} -n ${_ns} delete pod verify-cephfs-pod --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+        SSH "${K} -n ${_ns} delete pvc ${TEST_PVC} --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+        SSH "${K} -n ${_ns} delete pvc verify-cephfs-pvc --ignore-not-found --force --grace-period=0 >/dev/null 2>&1" || true
+        SSH "${K} patch namespace ${_ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}' >/dev/null 2>&1" || true
+        SSH "timeout 30 ${K} delete namespace ${_ns} --ignore-not-found=true --force --grace-period=0 --wait=false >/dev/null 2>&1" </dev/null || true
+    done
+    unset _ns
 }
 trap cleanup EXIT
 
@@ -69,7 +82,7 @@ grep -q 'HEALTH_OK' <<<"${CEPH_S}" && ok "    ceph -s HEALTH_OK ✓" || warn "  
 say "  ③ 检查 StorageClass ceph-block..."
 SC_OK="$( (SSH "${K} get sc ceph-block --no-headers 2>/dev/null" || true) )"
 [ -n "${SC_OK}" ] && ok "    StorageClass ceph-block 存在 ✓" \
-    || { warn "    StorageClass ceph-block 不存在(未部署模块 ceph_csi 或 CEPH_CSI_ENABLED=false); 跳过 ④ I/O 冒烟"; SC_OK=""; }
+    || { warn "    StorageClass ceph-block 不存在(未部署模块 ceph_csi 或 CEPH_MODE=none); 跳过 ④ I/O 冒烟"; SC_OK=""; }
 
 if [ -n "${SC_OK}" ]; then
     say "  ④ 创建测试 RBD Block PVC + Pod(busybox dd 真实块 I/O)..."
@@ -151,7 +164,7 @@ YAML
     fi
 fi
 
-say "  ⑥ OSD 检查(至少 3 up)..."
+say "  ⑥ OSD 检查(至少 1 up; 单节点=1, 多节点按实际 OSD)..."
 OSD_UP="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph osd tree 2>/dev/null" || true) | grep -c 'up' )"
 [ "${OSD_UP:-0}" -ge 1 ] && ok "    OSD up 节点/数量: ${OSD_UP}(ceph osd tree)" \
     || warn "    未检测到 up 的 OSD(ceph osd tree 无 up; 检查磁盘/lvm/镜像)"
@@ -170,25 +183,30 @@ if [ "${CEPHFS_ENABLED:-false}" = "true" ]; then
         warn "    ceph fs ls 未找到 cephfs(未创建或 MDS 未就绪); 跳过 ⑦ 文件 I/O"
         FS_NAME=""
     fi
-    SC_FS="$( (SSH "${K} get sc cephfs --no-headers 2>/dev/null" || true) )"
+    # 2026-11-20: 实际 SC 集是 cephfs-ephemeral / cephfs-durable(默认) + 旧 cephfs;
+    # 旧代码只认 `cephfs`, 导致本仓库创建的 CephFS 永远跳过 RWX I/O 冒烟。
+    SC_FS=""
+    for _fsc in cephfs-ephemeral cephfs-durable cephfs; do
+        if SSH "${K} get sc ${_fsc} --no-headers >/dev/null 2>&1"; then SC_FS=${_fsc}; break; fi
+    done
+    unset _fsc
     if [ -n "${FS_NAME}" ] && [ -n "${SC_FS}" ]; then
-        say "    创建 CephFS RWX PVC + Pod(busybox 写文件/读回)..."
-        cleanup
+        say "    创建 CephFS RWX PVC + Pod(busybox 写文件/读回; SC=${SC_FS})..."
         LOCAL_FS="$(mktemp)"
         cat > "${LOCAL_FS}" <<YAML
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: ${TEST_NS}
+  name: ${TEST_NS_FS}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: verify-cephfs-pvc
-  namespace: ${TEST_NS}
+  namespace: ${TEST_NS_FS}
 spec:
   accessModes: [ReadWriteMany]
-  storageClassName: cephfs
+  storageClassName: ${SC_FS}
   resources:
     requests:
       storage: 1Gi
@@ -197,7 +215,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: verify-cephfs-pod
-  namespace: ${TEST_NS}
+  namespace: ${TEST_NS_FS}
 spec:
   restartPolicy: Never
   containers:
@@ -210,7 +228,8 @@ spec:
           set -e
           echo "=== CephFS file test ==="
           echo "cephfs-data-$(date +%s)" > /mnt/cephfs/test.txt
-          sync
+          # CephFS 上全局 sync 会挂住(需对目标文件系统 sync -f / fsync), 见 troubleshooting 五.1
+          sync -f /mnt/cephfs
           cat /mnt/cephfs/test.txt
           echo "=== SUCCESS ==="
       volumeMounts:
@@ -230,19 +249,19 @@ YAML
         rm -f "${LOCAL_FS}"
         FSPASS=0
         for i in $(seq 1 18); do
-            _st="$( (SSH "${K} -n ${TEST_NS} get pod verify-cephfs-pod -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
+            _st="$( (SSH "${K} -n ${TEST_NS_FS} get pod verify-cephfs-pod -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
             [ "${_st}" = "Succeeded" ] && { FSPASS=1; break; }
             [ "${_st}" = "Failed" ] && break
             sleep 10
         done
         if [ "${FSPASS}" = "1" ]; then
-            FSLOG="$( (SSH "${K} -n ${TEST_NS} logs verify-cephfs-pod 2>/dev/null" || true) )"
+            FSLOG="$( (SSH "${K} -n ${TEST_NS_FS} logs verify-cephfs-pod 2>/dev/null" || true) )"
             echo "${FSLOG}" | grep -q '=== SUCCESS ===' \
                 && ok "    CephFS RWX 写文件/读回成功(MDS + cephfs SC + 真实文件 I/O)✓" \
                 || warn "    CephFS Pod Succeeded 但未见 SUCCESS(日志见下, 不阻断):"
             [ -n "${FSLOG}" ] && echo "${FSLOG}" | tail -6 | sed 's/^/    /'
         else
-            err "    CephFS 测试 Pod 未成功(kubectl -n ${TEST_NS} get pvc,pod / describe)"
+            err "    CephFS 测试 Pod 未成功(kubectl -n ${TEST_NS_FS} get pvc,pod / describe)"
             exit 1
         fi
         cleanup
@@ -271,7 +290,23 @@ if [ "${CEPH_RGW_ENABLED:-false}" = "true" ]; then
             RGW_ENDPOINT="http://${RGW_VIP}:80"
             say "    RGW LoadBalancer VIP=${RGW_VIP} → ${RGW_ENDPOINT}"
         else
-            warn "    RGW 未对外暴露; 跳过 ⑧(设 CEPH_EXTERNAL_EXPOSE=true + SERVICE_EXPOSE_MODE=nodeport/metallb 后重跑 ceph_csi)"
+            # 2026-11-20: host-network 暴露模式(默认)没有 *-external Service, RGW Pod 直接
+            # 监听节点 IP:80; 旧逻辑把这种情况当成"未暴露"跳过 S3 冒烟(单节点/多节点均受影响)。
+            _rgw_mode="${CEPH_RGW_EXPOSE_MODE:-${CEPH_EXTERNAL_EXPOSE_MODE:-${CEPH_EXPOSE_MODE:-host-network}}}"
+            case "${_rgw_mode}" in
+                host-network|hostnetwork)
+                    if timeout 5 curl -s -o /dev/null "http://${FIRST_MASTER}:80/" 2>/dev/null; then
+                        RGW_ENDPOINT="http://${FIRST_MASTER}:80"
+                        say "    RGW host-network 端点=${RGW_ENDPOINT}(无 Service, 直连节点 IP:80)"
+                    else
+                        warn "    RGW host-network 端点 http://${FIRST_MASTER}:80/ 不可达; 跳过 ⑧"
+                    fi
+                    ;;
+                *)
+                    warn "    RGW 未对外暴露; 跳过 ⑧(设 CEPH_EXTERNAL_EXPOSE=true + SERVICE_EXPOSE_MODE=nodeport/metallb 后重跑 ceph_csi)"
+                    ;;
+            esac
+            unset _rgw_mode
         fi
         if [ -n "${RGW_ENDPOINT:-}" ]; then
             # ② 经 toolbox 创建测试用户取 AK/SK(独立脚本; 取最后两行非空凭据)

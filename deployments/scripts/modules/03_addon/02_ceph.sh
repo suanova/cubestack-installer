@@ -1,11 +1,12 @@
 #!/bin/bash
 # ============================================================
 # MODULE: ceph
-# DESC: 部署 Rook-Ceph 存储集群(CephCluster; 自动检测裸盘 + node label 选节点 + 离线镜像/包 + 安全确认)
+# DESC: 部署 Rook-Ceph 存储集群(CephCluster; 自动检测裸盘 + node label 选节点 + 离线镜像/包 + 安全确认);
+#       CEPH_MODE=internal 且单节点拓扑时自动分发到 ceph-single-node.sh(复用同一引擎)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 0
-# TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED
+# TOGGLE: CEPH_MODE=internal,external
 # UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_passwordless k8s_workerbm k8s_ntp
 # 说明:
@@ -39,9 +40,11 @@
 #     registry 的 PVC 改走 ceph RBD(替代 local-path); 模块设计顺序在 registry 配置之前。
 #   · 参考: docs/ceph-rook.md(Rook v1.21.1 / Ceph v20.2.2 生产设计: 3 副本 host 故障域 +
 #     3 mon + 2 mgr; mon/osd/mgr/toolbox 全部按 label 钉在存储节点)
-# 数据源: cluster.conf (CEPH_ENABLED / CEPH_NODES / CEPH_NODE_LABEL / CEPH_* / CEPH_IMAGE_DIR /
+# 数据源: cluster.conf (CEPH_MODE / CEPH_TOPOLOGY / CEPH_NODES / CEPH_NODE_LABEL / CEPH_* / CEPH_IMAGE_DIR /
 #                       CEPH_ROOK_MANIFEST_DIR / REGISTRY_STORAGE_CLASS / NODES / SSH_KEY_NAME)
-# 用法:   sudo ./deploy-cluster.sh --enable ceph  或  CEPH_ENABLED=true
+# 用法:   sudo ./deploy-cluster.sh --enable ceph  或  cluster.conf 设 CEPH_MODE=internal/external
+# 单节点: CEPH_MODE=internal + CEPH_TOPOLOGY=auto(存储节点 1 台)时自动 exec
+#         tools/k8s/ceph-single-node.sh(独立入口, 复用本文件 ceph_engine_main 引擎)。
 # ============================================================
 set -euo pipefail
 
@@ -55,7 +58,7 @@ load_config
 #   · 有 + CEPH_PRE_CLEANUP_EXISTING=true(默认) → 完整官方安全序(停消费者→unmap→销毁);
 #   · 有 + false(恢复/认领路径) → 保留模式(--keep-pvcs): 只停消费者, 不删 PVC/不 unmap, **保留数据**。
 # ⚠ 位于 TOGGLE 检查之前; ceph-cleanup.sh 自带 load_config/init。
-if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+ceph_engine_uninstall() {
     init_remote_kubectl || exit 1
     _cns="${CEPH_NAMESPACE:-rook-ceph}"
     _cc="$( (SSH "${K} -n ${_cns} get cephcluster --no-headers 2>/dev/null") || true)"
@@ -89,20 +92,16 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
             || warn "  ceph 停消费者未完全收敛(继续)"
     fi
     exit 0
-fi
+}
 
-# ---- 开关 ----
-# ★ TOGGLE = CEPH_ENABLED CEPH_CSI_ENABLED(任一 true 即调度本模块):
-#   · internal(自建 CephCluster)→ CEPH_ENABLED=true;
-#   · external(仅接入外部 Ceph)→ CEPH_ENABLED=false 但 CEPH_CSI_ENABLED=true 时仍调度本模块
-#     (02 只需部署 operator/csi-operator 供 03 使用, 不创建 CephCluster)。
-#   模块内部再按 CEPH_MODE 精确分流(下方开关检查)。
-if [ "${CEPH_MODE:-internal}" = "external" ]; then
-    [ "${CEPH_CSI_ENABLED:-false}" = "true" ] || { say "CEPH_CSI_ENABLED=false, 跳过 Ceph(external 模式需要 CSI 才运行)"; exit 0; }
-else
-    [ "${CEPH_ENABLED:-false}" = "true" ] || { say "CEPH_ENABLED=false, 跳过 Ceph"; exit 0; }
-fi
-
+# ---------------- 共享 Rook-Ceph 部署引擎 ----------------
+# 多节点(02 模块自身)与单节点(tools/k8s/ceph-single-node.sh)共用同一套引擎:
+#   · 单节点脚本设置 profile(mon=1/mgr=1/size=1/CEPH_MIN_NODES=1)后
+#     CUBESTACK_CEPH_ENGINE_ONLY=1 source 本文件, 再调用 ceph_engine_main;
+#   · 引擎只依赖 CEPH_MODE / CEPH_MON_COUNT / CEPH_MGR_COUNT / CEPH_POOL_REPLICAS /
+#     CEPH_MIN_NODES 等变量, 不假设节点数量 —— 单/多节点差异全部由调用方参数化,
+#     不存在两份会漂移的部署逻辑。
+ceph_engine_main() {
 init_remote_kubectl || exit 1
 
 # ★ 逐节点 SSH 公共函数(替代历史 4 处重复 NSSH() 定义): node_ssh <ip> <user> <cmd...>
@@ -368,7 +367,21 @@ if [ "${#_NO_DISK_NODES[@]}" -gt 0 ]; then
     warn "存储节点无可用裸盘: ${_NO_DISK_NODES[*]}(不会创建 OSD)"
     warn "  若并非预期: 检查 NODES 的 hostname/IP 映射, 确认数据盘已挂到存储节点(VM_DATA_DISKS>0)"
 fi
-if [ "${_DISK_NODES}" -lt "${CEPH_POOL_REPLICAS}" ]; then
+if [ "${CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd" ]; then
+    # 单节点/failureDomain=osd: 副本落在**本机多块盘**上 → 校验总磁盘数而非节点数。
+    _OSD_TOTAL=0
+    for _hn in "${CEPH_NODE_HOSTS[@]}"; do
+        [ -n "${NODE_DISKS[${_hn}]:-}" ] || continue
+        _nd="$(printf '%s' "${NODE_DISKS[${_hn}]}" | tr ',' '\n' | grep -c . || true)"
+        _OSD_TOTAL=$((_OSD_TOTAL + ${_nd:-0}))
+    done
+    if [ "${_OSD_TOTAL}" -lt "${CEPH_POOL_REPLICAS}" ]; then
+        err "可用 OSD 盘 ${_OSD_TOTAL} < CEPH_POOL_REPLICAS ${CEPH_POOL_REPLICAS}(failureDomain=osd): 无法创建足够 OSD"
+        err "  处置: ① 给存储节点挂更多数据盘; ② 降低 CEPH_POOL_REPLICAS; ③ 改用 CEPH_MODE=external"
+        exit 1
+    fi
+    unset _OSD_TOTAL _nd
+elif [ "${_DISK_NODES}" -lt "${CEPH_POOL_REPLICAS}" ]; then
     err "可用 OSD 节点 ${_DISK_NODES} < CEPH_POOL_REPLICAS ${CEPH_POOL_REPLICAS}: 无法创建足够 OSD(HEALTH_OK 不可达)"
     err "  处置(三选一):"
     err "    ① 给无盘存储节点挂数据盘后重跑;"
@@ -571,7 +584,7 @@ echo ""
 echo -e "\033[41m\033[97m================================================================================\033[0m"
 echo -e "\033[41m\033[97m ⚠⚠⚠  Ceph 集群部署确认(将使用以下节点与裸盘, 请仔细核对)      ⚠⚠⚠\033[0m"
 echo -e "\033[41m\033[97m   Rook ${ROOK_VERSION:-v1.21.1} / Ceph ${CEPH_VERSION} / mon=${CEPH_MON_COUNT} / mgr=${CEPH_MGR_COUNT}\033[0m"
-echo -e "\033[41m\033[97m   副本 size=${CEPH_POOL_REPLICAS} min_size=${CEPH_POOL_MIN_SIZE}(host 故障域)\033[0m"
+echo -e "\033[41m\033[97m   副本 size=${CEPH_POOL_REPLICAS} min_size=${CEPH_POOL_MIN_SIZE}(故障域 ${CEPH_EFF_FAILURE_DOMAIN:-host})\033[0m"
 echo -e "\033[41m\033[97m   存储节点 label: ${CEPH_NODE_LABEL}   命名空间: ${CEPH_NAMESPACE}\033[0m"
 # 确认屏用: 按分类逐行列出某节点的磁盘 + 证据(供人工核对到底动哪些盘)
 _show_node_class() {   # <hostname> <分类> <标题> <颜色码>
@@ -708,7 +721,7 @@ fi
 
 # ---------------- 5) Ceph 离线镜像就绪校验 ----------------
 # ★ 镜像已由 k8s 阶段预加载 play(cluster.yml 内置)随 kubespray 镜像一起同步到全部节点并
-#   ctr import(见 cubestack-offline.sh resolve_preload_image_files: CEPH_ENABLED=true 时把
+#   ctr import(见 cubestack-offline.sh resolve_preload_image_files: CEPH_MODE!=none 时把
 #   CEPH_IMAGE_DIR 的 *.tar 追加进 preload-images.lst)。此处不再重复同步, 只做就绪校验,
 #   并给离线环境明确指引(缺失时 warn 并提示检查版本树, 不阻断)。
 say "[4/8] 校验 ceph 离线镜像已预加载到节点(ctr -n k8s.io images ls)..."
@@ -734,9 +747,9 @@ if [ -d "${CEPH_IMAGE_DIR}" ] && ls "${CEPH_IMAGE_DIR}"/*.tar >/dev/null 2>&1; t
         fi
     done
     if [ "${#_MISSING[@]}" -gt 0 ]; then
-        warn "  以下节点未检测到 ceph 镜像: ${_MISSING[*]} —— 可能预加载未覆盖(k8s 阶段 CEPH_ENABLED 需 true); 手工补救:"
+        warn "  以下节点未检测到 ceph 镜像: ${_MISSING[*]} —— 可能预加载未覆盖(需 CEPH_MODE=internal); 手工补救:"
         warn "    请检查版本树的 offline-files/kubespray/<版本>/images/ 是否完整"
-        warn "    或在 cluster.conf 设 CEPH_ENABLED=true 后重跑 k8s_deploy 阶段(全量覆盖安装: ./deploy-cluster.sh --fresh)"
+        warn "    或确认 cluster.conf CEPH_MODE=internal 后重跑 k8s_deploy 阶段(全量覆盖安装: ./deploy-cluster.sh --fresh)"
     fi
 else
     say "  ${CEPH_IMAGE_DIR} 不存在或无镜像 tar(源目录可删除); 节点镜像由 k8s 阶段 images/ 预加载保证, 跳过校验"
@@ -1248,6 +1261,58 @@ rm -f "${LOCAL_CR}"
         || warn "  toolbox ${_tb_wait}s 内 ceph -s 仍不可用(集群仍会继续等待; 状态行可能显示 health=unknown) —— 可手工: kubectl -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-tools"
     unset _TB_OK _ti _tb_wait _tb_tries
 
+    # ★ 2026-11-20 单节点/osd 故障域: Ceph 启动时 mgr 会用**默认 CRUSH 规则**(replicated_rule,
+    #   host 故障域)创建 `.mgr` 池。单节点只有 1 个 host, size>1 时该 PG 永远 undersized/
+    #   inactive → HEALTH_WARN, 且 MDS/外部 CephFilesystem 可能卡 creating(实机 10.66.3.165)。
+    #   这里在首次 phase=Ready 时确保 osd 域规则存在, 把它设为 osd_pool_default_crush_rule,
+    #   并纠正已存在的 `.mgr` 池; 后续默认池也走 osd 域。
+    _ceph_ensure_osd_crush_default() {
+        local _rules _rule_id
+        _rules="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            ceph osd crush rule ls 2>/dev/null) || true )"
+        if ! printf '%s\n' "${_rules}" | grep -qx 'cubestack-osd'; then
+            SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+                ceph osd crush rule create-replicated cubestack-osd default osd >/dev/null 2>&1 \
+                || return 1
+        fi
+        _rule_id="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            ceph osd crush rule dump cubestack-osd -f json 2>/dev/null) || true )"
+        _rule_id="$(printf '%s' "${_rule_id}" | sed -n 's/.*"rule_id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)"
+        [ -n "${_rule_id}" ] || return 1
+        SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            ceph config set global osd_pool_default_crush_rule "${_rule_id}" >/dev/null 2>&1 || return 1
+        if SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            ceph osd pool get .mgr size >/dev/null 2>&1; then
+            # ⚠ 实机: `osd pool set <pool> crush_rule <数字ID>` 报 "crush rule N does not exist";
+            #   用规则名才生效(2026-11-20)。osd_pool_default_crush_rule 仍用数字 ID(config 语义)。
+            # ⚠ 已存在的 .mgr 池不会跟随 osd_pool_default_size/min_size(那两项只影响后续新建池),
+            #   必须显式纠正 size/min_size; 否则单节点 size=3/min_size=2 时 PG 永远 inactive,
+            #   HEALTH_OK 等不到。任一项失败都返回非 0, 让等待循环下一轮重试(幂等)。
+            local _mgr_size_flag=""
+            [ "${CEPH_POOL_REPLICAS:-3}" -eq 1 ] && _mgr_size_flag="--yes-i-really-mean-it"
+            SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+                ceph osd pool set .mgr crush_rule cubestack-osd >/dev/null 2>&1 || return 1
+            SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+                ceph osd pool set .mgr size "${CEPH_POOL_REPLICAS}" ${_mgr_size_flag} >/dev/null 2>&1 || return 1
+            SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+                ceph osd pool set .mgr min_size "${CEPH_POOL_MIN_SIZE}" >/dev/null 2>&1 || return 1
+        fi
+        return 0
+    }
+
+    # ★ 2026-11-20 单节点 PG 上限: 单节点 3 OSD 上 18 个池(内部 RBD/CephFS + RGW + 外部池)
+    #   总 PG 345, size=3 时每 OSD 有效 PG=345 > Ceph 默认 mon_max_pg_per_osd=250 →
+    #   HEALTH_WARN "too many PGs per OSD"(实机 10.66.3.165)。单节点统一放宽到
+    #   CEPH_SINGLE_MAX_PG_PER_OSD(默认 500); 多节点保持 Ceph 默认。
+    _ceph_apply_single_node_pg_limit() {
+        local _max="${CEPH_SINGLE_MAX_PG_PER_OSD:-500}"
+        case "${_max}" in ''|*[!0-9]*) _max=500 ;; esac
+        [ "${CEPH_TOPOLOGY_EFFECTIVE:-}" = "single" ] || return 0
+        SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            ceph config set global mon_max_pg_per_osd "${_max}" >/dev/null 2>&1 || return 1
+        return 0
+    }
+
     # 等待 CephCluster Ready + HEALTH_OK(最长 900s; 备份恢复认领旧 OSD 数据比新建更慢)
     # 每 10s 轮询; Ready 后经 toolbox 执行 ceph -s 提取关键行(health/mon/osd/pgs),
     # 每 30s 打印一行状态到终端(= 完整部署日志 /tmp/cubestack-cluster-install.log), 便于观察收敛进度。
@@ -1285,9 +1350,15 @@ rm -f "${LOCAL_CR}"
                     fi
                 fi
                 if [ "${_pool_tuned}" = "1" ]; then
+                    _ceph_apply_single_node_pg_limit || _pool_tuned=0
+                fi
+                if [ "${_pool_tuned}" = "1" ] && [ "${CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd" ]; then
+                    _ceph_ensure_osd_crush_default || _pool_tuned=0
+                fi
+                if [ "${_pool_tuned}" = "1" ]; then
                     _CEPH_TUNED=1
                 else
-                    warn "  池副本配置(size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE})未生效, 下一轮重试 ..."
+                    warn "  池副本/CRUSH 配置(size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE}, fd=${CEPH_EFF_FAILURE_DOMAIN:-host})未生效, 下一轮重试 ..."
                 fi
             fi
             _CEPH_SUM="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null" || true) )"
@@ -1496,9 +1567,15 @@ for p in d.get("items", []):
             fi
         fi
         if [ "${_pool_tuned}" = "1" ]; then
+            _ceph_apply_single_node_pg_limit || _pool_tuned=0
+        fi
+        if [ "${_pool_tuned}" = "1" ] && [ "${CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd" ]; then
+            _ceph_ensure_osd_crush_default || _pool_tuned=0
+        fi
+        if [ "${_pool_tuned}" = "1" ]; then
             _CEPH_TUNED=1
         else
-            err "  Ceph 池副本配置未能应用(size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE}); 不继续"
+            err "  Ceph 池副本/CRUSH 配置未能应用(size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE}, fd=${CEPH_EFF_FAILURE_DOMAIN:-host}); 不继续"
             err "        默认 size=3 会让少 OSD 集群持续降级; 处置: 确认 toolbox 可用后重跑 --steps ceph"
             err "        排查: kubectl -n ${CEPH_NAMESPACE} get deploy rook-ceph-tools; kubectl -n ${CEPH_NAMESPACE} logs deploy/rook-ceph-tools --tail=50"
             exit 1
@@ -1519,9 +1596,18 @@ for p in d.get("items", []):
         [ -n "${_ip3}" ] || continue
         node_ssh "${_ip3}" "$(ssh_user_for_ip "${_ip3}")" "sudo chronyc makestep >/dev/null 2>&1 || true; sudo chronyc -a makestep >/dev/null 2>&1 || true" || true
     done
-    # 重启 mon deployments 触发 timecheck 重新采样(Rook 会重建, quorum 短暂重建, 不影响存储)
-    SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-mon-a deploy/rook-ceph-mon-b deploy/rook-ceph-mon-c >/dev/null 2>&1" || true
-    SSH "${K} -n ${CEPH_NAMESPACE} rollout status deploy/rook-ceph-mon-a --timeout=120s >/dev/null 2>&1" || true
+    # 重启 mon deployments 触发 timecheck 重新采样(Rook 会重建, quorum 短暂重建, 不影响存储)。
+    # ★ 2026-11-20: 只重启**实际存在**的 mon(单节点只有 mon-a; 写死 a/b/c 会对不存在的
+    #   Deployment 报错并空等 rollout status)。
+    _MON_DEPLOYS="$(SSH "${K}" -n "${CEPH_NAMESPACE}" get deploy --no-headers \
+        -o custom-columns=NAME:.metadata.name 2>/dev/null | awk '/^rook-ceph-mon-/' || true)"
+    for _md in ${_MON_DEPLOYS}; do
+        SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/${_md} >/dev/null 2>&1" || true
+    done
+    for _md in ${_MON_DEPLOYS}; do
+        SSH "${K} -n ${CEPH_NAMESPACE} rollout status deploy/${_md} --timeout=120s >/dev/null 2>&1" || true
+    done
+    unset _MON_DEPLOYS _md
     # 重启后等 timecheck 重检(最多 60s)
     _SKEW_CLEAR=0
     for _i2 in $(seq 1 6); do
@@ -1554,7 +1640,7 @@ fi   # _CEPH_SKIP_CLUSTER=1 → 跳过集群内 CephCluster 创建
 _patch_ceph_daemon_placement
 # 存量 daemon 模板 patch 会触发滚动(mon/osd/mgr); 等 Ceph 恢复 HEALTH_OK 再继续, 避免
 # ceph_csi/registry 在恢复期创建卷。全新安装时模板已带 toleration → 上面跳过 → 无额外等待。
-if [ "${CEPH_MODE:-internal}" = "internal" ]; then
+if [ "${CEPH_MODE:-internal}" = "internal" ] && [ "${_CEPH_SKIP_CLUSTER:-0}" = "0" ]; then
     say "等待 Ceph daemon 滚动后恢复 HEALTH_OK(最长 600s)..."
     _HL_OK=0
     for _i in $(seq 1 60); do
@@ -1580,17 +1666,59 @@ if [ "${CEPH_MODE:-internal}" = "external" ]; then
     echo "  模式:        CEPH_MODE=external(外部 Ceph, 无集群内 CephCluster)"
     echo "  外部连接:    monitors=${CEPH_MONITORS:-<未配置>}  pool=${CEPH_POOL:-rbd}  user=${CEPH_USER:-admin}"
     echo "  资源查看:    kubectl -n ${CEPH_NAMESPACE} get deploy,cephconnection,csi.ceph.io"
-    echo "  下一步:      CEPH_CSI_ENABLED=true 部署模块 ceph_csi(创建 StorageClass ceph-block 指向外部 Ceph)"
+    echo "  下一步:      部署模块 ceph_csi(CEPH_MODE=${CEPH_MODE} 自动调度, 创建 StorageClass ceph-block 指向外部 Ceph)"
 else
     echo "  存储节点 label: ${CEPH_NODE_LABEL}"
     echo "  存储节点与裸盘:"
     for _hn in "${CEPH_NODE_HOSTS[@]}"; do echo "    ${_hn}: ${NODE_DISKS[${_hn}]:-<无>}"; done
     echo "  资源查看:    kubectl -n ${CEPH_NAMESPACE} get cephcluster,pods;  exec deploy/rook-ceph-tools -- ceph -s"
 fi
-echo "  下一步:      CEPH_CSI_ENABLED=true 部署模块 ceph_csi(创建 rbd-pool + StorageClass ceph-block)"
+echo "  下一步:      部署模块 ceph_csi(CEPH_MODE=${CEPH_MODE} 自动调度, 创建 rbd-pool + StorageClass ceph-block)"
 echo "  registry 后端: REGISTRY_STORAGE_CLASS=ceph-block 时 registry PVC 走 ceph RBD(替代 local-path)"
 echo "  使用文档:    docs/ceph-rook.md"
 echo "  卸载:        先删 CephCluster(cleanupPolicy yes-really-destroy-data), 见 docs/ceph-rook.md §卸载"
 
 # 优雅覆盖登记(到达此处=集群内 ceph 体系部署/`external 接入)成功)
 record_installed_component "ceph"
+}
+
+# ---------------- 模块入口: 卸载 / 模式门禁 / 单节点分发 / 多节点引擎 ----------------
+# CUBESTACK_CEPH_ENGINE_ONLY=1: 被单节点脚本 source 时只定义函数, 不执行入口逻辑。
+if [ "${CUBESTACK_CEPH_ENGINE_ONLY:-0}" != "1" ]; then
+    if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
+        ceph_engine_uninstall
+        exit $?
+    fi
+    case "${CEPH_MODE:-internal}" in
+        none)
+            say "CEPH_MODE=none, 跳过 Ceph"; exit 0 ;;
+        internal|external) : ;;
+        *)
+            err "CEPH_MODE 非法: '${CEPH_MODE}'(只允许 none|external|internal)"; exit 1 ;;
+    esac
+    # internal + 单节点拓扑 → 交给独立脚本(它复用本文件的引擎, 设置单节点 profile)。
+    if [ "${CEPH_MODE}" = "internal" ]; then
+        _entry_hosts=()
+        while IFS= read -r _h; do
+            [ -n "${_h}" ] && _entry_hosts+=("${_h}")
+        done < <(ceph_storage_hosts)
+        unset _h
+        if ! _entry_topo="$(ceph_topology_resolve "${CEPH_TOPOLOGY:-auto}" "${#_entry_hosts[@]}" "${CEPH_MIN_NODES:-3}")"; then
+            err "Ceph 拓扑不满足: ${_entry_topo}"
+            err "  可选: ① 调整 CEPH_NODES/CEPH_TOPOLOGY; ② CEPH_MODE=external 接入外部 Ceph; ③ CEPH_FALLBACK_TO_LOCALPATH=true 回退 local-path"
+            exit 1
+        fi
+        if [ "${_entry_topo}" = "single" ]; then
+            say "CEPH_TOPOLOGY=${CEPH_TOPOLOGY:-auto} → 单节点 Ceph(独立脚本, 复用同一部署引擎)"
+            exec bash "${SCRIPT_DIR}/tools/k8s/ceph-single-node.sh"
+        fi
+        ceph_apply_effective_spec multi || exit 1
+        if [ "${CEPH_EFF_MON_COUNT}" -gt "${#_entry_hosts[@]}" ]; then
+            err "CEPH_MON_COUNT=${CEPH_EFF_MON_COUNT} > 存储节点 ${#_entry_hosts[@]} 台(allowMultiplePerNode=false): mon 无法全部调度"
+            err "  处置: 降低 CEPH_MON_COUNT, 或增加 CEPH_NODES/调整 CEPH_TOPOLOGY"
+            exit 1
+        fi
+        unset _entry_hosts _entry_topo
+    fi
+    ceph_engine_main
+fi
