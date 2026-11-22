@@ -2,7 +2,9 @@
 # ============================================================
 # TOOL: install-os-packages (manual, NOT a deploy-cluster module)
 # DESC: 手动下载/安装 offline-files/os/packages/ubuntu-<版本> 下的节点 OS deb。
-#       默认排除 helm / nodejs 相关包（这些包由自动部署/其他模块负责）。
+#       默认排除 helm / nodejs 相关包（这些包由 NODE_PKGS_ENABLED 自动流程负责）。
+#       通用 OS 包默认假设操作系统镜像已存在；pre_install_check 缺失时提示运行本脚本。
+#       lock 文件(versions/os/*.lock)只用于安装前体检，本脚本不读它。
 #
 # 为什么是手动脚本:
 #   · 不接入 deploy-cluster.sh，不会被模块发现或自动调度；
@@ -209,12 +211,13 @@ install_pkgs() {
         say "  --skip-chrony: 跳过 chrony/chrony 专用集"
     fi
 
-    # 2) 顶层包对账安装（NODE_PKGS_EXCLUDE_PATTERNS 让 reconcile 跳过 helm/nodejs）。
+    # 2) 顶层包对账安装（--scope general 只装 os/packages/ubuntu-<ver> 的通用 OS 包;
+    #    helm/nodejs 由 NODE_PKGS_ENABLED 自动流程负责, 本脚本不安装）。
     local -a rec_args=()
     if [ "${DRY_RUN}" = "1" ]; then rec_args+=(--dry-run); fi
     if [ "${#ip_args[@]}" -gt 0 ]; then rec_args+=("${ip_args[@]}"); fi
     NODE_PKGS_EXCLUDE_PATTERNS="${EXCLUDE_PATTERNS}" OS_PACKAGES_VERSION="${OS_VER}" \
-        bash "${MANUAL_DIR}/../node/reconcile-node-packages.sh" "${rec_args[@]}"
+        bash "${MANUAL_DIR}/../node/reconcile-node-packages.sh" --scope general "${rec_args[@]}"
 
     ok "手动 OS 包安装完成（helm/nodejs 相关包未安装）"
 }

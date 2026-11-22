@@ -19,6 +19,11 @@
 #     systemd-timesyncd —— 二者 apt 互斥, 对账装 timesyncd 会把权威 NTP 服务端摘掉 ⇒ 05_k8s_ntp 失败。
 #
 # 用法: reconcile-node-packages.sh [--ip <IP>]... [--dry-run] [--user <u>]
+#        [--scope general|helm-nodejs|all]
+#        --scope 选择离线包范围(默认 all, 兼容旧行为):
+#          general     = os/packages/ubuntu-<VERSION_ID>(节点通用 OS 包; 手动脚本用)
+#          helm-nodejs = os/helm-nodejs(+ ubuntu-<VERSION_ID>; NODE_PKGS_ENABLED 自动安装用)
+#          all         = 两者都装(旧行为)
 #       不给 --ip = 对 cluster.conf NODES 里全部节点执行。
 # 退出码: 0=全部节点 apt 依赖图健康; 1=有节点仍不健康
 # ============================================================
@@ -30,15 +35,20 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
 # USER 留空 = 按节点逐个解析(ssh_user_for_ip: NODES 逐行覆盖 → 全局 SSH_USER), --user 显式覆盖全部
-DRY=0; USER=""; IPS=()
+DRY=0; USER=""; IPS=(); SCOPE="all"
 while [ $# -gt 0 ]; do
     case "$1" in
         --ip) IPS+=("${2:?--ip 需要地址}"); shift 2 ;;
         --user) USER="$2"; shift 2 ;;
         --dry-run) DRY=1; shift ;;
+        --scope) SCOPE="${2:?--scope 需要值}"; shift 2 ;;
         *) err "未知参数: $1"; exit 1 ;;
     esac
 done
+case "${SCOPE}" in
+    general|helm-nodejs|all) ;;
+    *) err "--scope 只支持 general|helm-nodejs|all(收到: ${SCOPE})"; exit 1 ;;
+esac
 if [ "${#IPS[@]}" -eq 0 ]; then
     # 目标节点来源**以 inventory 为准**(部署本身就是 inventory 驱动的; cluster.conf 的 NODES
     # 在容器里可能与实际不同/为空 —— 实测 2026-09-28)。取不到再回退 cluster.conf 的 NODES。
@@ -138,21 +148,38 @@ if [ -z "${_os_ver}" ] && [ "${#IPS[@]}" -gt 0 ]; then
     unset _det_key _det_user
 fi
 if [ -n "${_os_ver}" ] && [ -d "${_pkg_root}/ubuntu-${_os_ver}" ]; then
-    DEB_DIRS=("${_pkg_root}/ubuntu-${_os_ver}")
+    _general_dir="${_pkg_root}/ubuntu-${_os_ver}"
 else
-    DEB_DIRS=("${_pkg_root}")
+    _general_dir="${_pkg_root}"
 fi
-# helm/nodejs 单独目录（自动流程安装；手动脚本通过 NODE_PKGS_EXCLUDE_PATTERNS 跳过）
+# helm/nodejs 单独目录（NODE_PKGS_ENABLED 自动安装；手动脚本用 --scope general 跳过）
 #   helm 在根目录（静态、版本通用）；nodejs 在 ubuntu-<VERSION_ID>/（按目标 OS 适配）。
 _helm_dir="$(dirname "${_pkg_root}")/helm-nodejs"
-if [ -d "${_helm_dir}" ]; then
-    DEB_DIRS+=("${_helm_dir}")
-    if [ -d "${_helm_dir}/ubuntu-${_os_ver}" ]; then
-        DEB_DIRS+=("${_helm_dir}/ubuntu-${_os_ver}")
-    fi
-fi
-unset _helm_dir
-say "目标 OS=${_os_ver:-未知}; 离线包目录=${DEB_DIRS[*]}"
+DEB_DIRS=()
+case "${SCOPE}" in
+    general)
+        DEB_DIRS=("${_general_dir}")
+        ;;
+    helm-nodejs)
+        if [ -d "${_helm_dir}" ]; then
+            DEB_DIRS+=("${_helm_dir}")
+        fi
+        if [ -n "${_os_ver}" ] && [ -d "${_helm_dir}/ubuntu-${_os_ver}" ]; then
+            DEB_DIRS+=("${_helm_dir}/ubuntu-${_os_ver}")
+        fi
+        ;;
+    all)
+        DEB_DIRS=("${_general_dir}")
+        if [ -d "${_helm_dir}" ]; then
+            DEB_DIRS+=("${_helm_dir}")
+        fi
+        if [ -n "${_os_ver}" ] && [ -d "${_helm_dir}/ubuntu-${_os_ver}" ]; then
+            DEB_DIRS+=("${_helm_dir}/ubuntu-${_os_ver}")
+        fi
+        ;;
+esac
+say "目标 OS=${_os_ver:-未知}; 范围=${SCOPE}; 离线包目录=${DEB_DIRS[*]:-<空>}"
+unset _helm_dir _general_dir
 DEBS=()
 # NODE_PKGS_EXCLUDE_PATTERNS: 可选 basename glob 排除列表(空格/逗号分隔)。
 #   手动安装脚本用它排除 helm/nodejs 等由其他流程负责的包; 默认空 = 行为不变。

@@ -96,7 +96,7 @@ deployments/scripts/
 │   │   ├── 10_api_local_lb.sh      # 节点侧 API 本地代理(kubespray nginx-proxy 静态 Pod): 断言就位 +
 │   │   │                           #   /etc/hosts 域名行收敛 + 关闭时清理残留; 默认开, 见 docs/api-ha/
 │   │   ├── 11_verify_api_ha.sh     # 验证 API 入口高可用(七项; --steps verify_api_ha)
-│   │   ├── 12_node_pkgs.sh         # 节点系统包离线对账(默认关, NODE_PKGS_ENABLED=true 启用; 默认只由 14 做 warn-only 检查)
+│   │   ├── 12_node_pkgs.sh         # 节点 helm/nodejs 离线安装(默认关, NODE_PKGS_ENABLED=true 启用; 通用 OS 包只由 14 预检)
 │   │   ├── 13_node_net_guard.sh    # 节点源策略路由/Calico rpfilter 冲突预检(默认只检查)
 │   │   ├── 14_pre_install_check.sh # 安装前环境检查(SSH/sudo/chronyd/资源容量; 关键项失败即中止)
 │   │   └── 15_k8s_asset_prefetch.sh # 离线资产预取(kubespray 之前)
@@ -585,9 +585,11 @@ VM 已通过其他方式创建时,用此脚本将其注册到 `cluster.conf` 的
 
 ```bash
 # cluster.conf
-NODE_PKGS_ENABLED="true"     # 节点系统包对账(tools/node/reconcile-node-packages.sh)
+NODE_PKGS_ENABLED="true"     # 只安装 helm/nodejs(os/helm-nodejs); 通用 OS 包仍只预检
 WORKER_PKGS_ENABLED="true"   # worker 离线装包(tools/node/install-worker-packages.sh)
-CHRONY_PKGS_ENABLED="true"   # chrony 专用安装集(os/packages/chrony; tools/node/install-chrony-packages.sh)
+CHRONY_PKGS_ENABLED="true"   # chrony 专用安装集(os/packages/<ver>/chrony; tools/node/install-chrony-packages.sh)
+# 通用 OS 包缺失时(预检提示)用手动脚本:
+#   bash deployments/scripts/tools/manual/install-os-packages.sh --install
 # 或: --enable node_pkgs / --steps node_pkgs; --enable k8s_workerbm / --steps k8s_workerbm;
 #     --enable chrony_pkgs / --steps chrony_pkgs
 ```
@@ -769,7 +771,8 @@ CUBESTACK_KUBESPRAY_DIR=$PWD/kubespray \
 export SSHPASS='<worker密码>'
 sshpass -e ssh ubuntu@<workerIP> "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" < ~/.ssh/cubestack_k8s.pub
 
-# ② 确认节点前置包已安装（默认只检查；需要 offline .deb 安装时置 NODE_PKGS_ENABLED=true）
+# ② 确认节点前置包已安装（默认只检查；缺失时用手动脚本 install-os-packages.sh 安装；
+#    NODE_PKGS_ENABLED 仅负责 helm/nodejs，不安装这些通用 OS 包）
 ./scripts/tools/online/check-os-packages.sh \
   --baseline versions/base.yaml --hosts ubuntu@<workerIP> --warn-only
 

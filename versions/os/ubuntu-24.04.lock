@@ -2,6 +2,11 @@
 # Generated 2026-11-22 from the offline .deb set in offline-files/os/packages/ubuntu-24.04.
 # helm/nodejs packages are kept separately in offline-files/os/helm-nodejs/ and are
 # installed by the automatic flow, not by this pre-install package check.
+#
+# ⚠ CHECK-ONLY(仅预检, 不参与任何安装/下载):
+#   本清单只被 check-os-packages.sh / pre_install_check 读取, 用于验证节点是否已有这些包。
+#   NODE_PKGS_ENABLED 自动安装的范围**仅限 os/helm-nodejs**(helm/nodejs), 不包含本清单。
+#   缺包时请运行: deployments/scripts/tools/manual/install-os-packages.sh --install
 schema: 1
 family: debian
 id: ubuntu

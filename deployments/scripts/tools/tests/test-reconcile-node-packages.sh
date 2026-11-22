@@ -424,6 +424,42 @@ chk_contains "短 selector: 非 NODES 匹配行被跳过" "跳过 inventory 行:
 unset _rc
 rm -rf "${_INV_TEST_DIR}"
 
+echo "== ⑧ --scope: NODE_PKGS 只装 helm/nodejs, 手动脚本只装通用 OS 包 =="
+# 2026-11-22 用户口径: 通用 OS 包假设 OS 镜像已存在, 只由 pre_install_check 体检 +
+#   手动脚本安装; NODE_PKGS_ENABLED 自动安装范围仅 os/helm-nodejs。
+SCOPE_OFFLINE="${TMP}/scope-offline"
+mkdir -p "${SCOPE_OFFLINE}/os/packages/ubuntu-24.04" "${SCOPE_OFFLINE}/os/helm-nodejs/ubuntu-24.04"
+: > "${SCOPE_OFFLINE}/os/packages/ubuntu-24.04/general_1.0_amd64.deb"
+: > "${SCOPE_OFFLINE}/os/helm-nodejs/helm_4.2.0-1_amd64.deb"
+: > "${SCOPE_OFFLINE}/os/helm-nodejs/ubuntu-24.04/nodejs_18.19.1_amd64.deb"
+run_scope() {  # <scope>
+    local scope="$1"
+    (
+        export PATH="${TMP}/bin:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf"
+        export OFFLINE_FILES_ROOT="${SCOPE_OFFLINE}"
+        export OS_PACKAGES_VERSION="24.04"
+        export FAKE_SSH_LOG="${TMP}/ssh-scope-${scope}.log"
+        export FAKE_SCP_LOG="${TMP}/scp-scope-${scope}.log"
+        export FAKE_WEDGED=0
+        : > "${FAKE_SSH_LOG}"; : > "${FAKE_SCP_LOG}"
+        bash "${TOOL}" --ip 10.0.0.1 --user root --dry-run --scope "${scope}"
+    ) > "${TMP}/out-scope-${scope}" 2>&1
+}
+run_scope general
+chk_contains "scope general: 选择通用 OS 包目录" "范围=general" "${TMP}/out-scope-general"
+chk_contains "scope general: 只有 1 个通用包" "离线包: 1 个" "${TMP}/out-scope-general"
+run_scope helm-nodejs
+chk_contains "scope helm-nodejs: 选择 helm/nodejs 目录" "范围=helm-nodejs" "${TMP}/out-scope-helm-nodejs"
+chk_contains "scope helm-nodejs: 2 个包(helm+nodejs)" "离线包: 2 个" "${TMP}/out-scope-helm-nodejs"
+run_scope all
+chk_contains "scope all: 3 个包(兼容旧行为)" "离线包: 3 个" "${TMP}/out-scope-all"
+chk_contains "node_pkgs 只装 helm/nodejs" "--scope helm-nodejs" \
+    "${REPO_ROOT}/deployments/scripts/modules/02_k8s/12_node_pkgs.sh"
+chk_contains "手动脚本只装通用 OS 包" "--scope general" \
+    "${REPO_ROOT}/deployments/scripts/tools/manual/install-os-packages.sh"
+unset SCOPE_OFFLINE
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-reconcile-node-packages: 全部通过"

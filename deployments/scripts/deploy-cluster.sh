@@ -67,7 +67,7 @@ usage() {
   02_k8s  k8s_passwordless k8s_hosts k8s_inventory k8s_ntp pre_install_check node_net_guard k8s_asset_prefetch  (默认执行)
           k8s_workerbm(默认关, WORKER_PKGS_ENABLED=true / --steps k8s_workerbm 启用离线装包)
           chrony_pkgs(默认关, CHRONY_PKGS_ENABLED=true / --steps chrony_pkgs 启用 chrony 离线装包; 在 NTP 之前)
-          node_pkgs(默认关, NODE_PKGS_ENABLED=true / --steps node_pkgs 启用离线 .deb 对账)
+          node_pkgs(默认关, NODE_PKGS_ENABLED=true / --steps node_pkgs 启用 helm/nodejs 离线安装)
           k8s_deploy(基座, 恒随全量部署)  k8s_scale(默认关, --with-scale)
   03_addon 依赖顺序: metallb ceph ceph_csi(存储底座, 供 registry 等用 ceph 后端)
           cephfs_mount(CephFS → 每台节点 /mnt/cephfs/models, 默认随 CEPHFS_ENABLED)
@@ -611,7 +611,8 @@ unset _has_ceph_step _has_k8s_step
 #   本地 kubeconfig 可用则直接用; 否则用 cluster.conf NODES 的密码引导(生成密钥 → 注入公钥 →
 #   取 admin.conf 到本地)。全量部署/覆盖安装由各自的基座模块处理接入, 不走这里。
 #   ⚠ 例外 —— **"集群存在之前就该跑"的模块**(PRE_CLUSTER_STEPS): 它们的用途正是"集群还没起来时
-#     先把节点修好"(node_pkgs 修 apt 依赖图, 否则 kubespray 的 bootstrap_os → system_packages 必失败;
+#     先把节点修好"(node_pkgs 修 helm/nodejs 的 apt 依赖图, 否则 kubespray 的 bootstrap_os →
+#     system_packages 可能失败; 通用 OS 包由 pre_install_check 体检、缺失时用手动脚本安装;
 #     其余是建集群本身的前置)。对**全部请求步骤都属于这一类**的情形, 接入改为**尽力而为**: 能接上就接,
 #     接不上只提示不拦停 —— 否则 `--steps node_pkgs` 在一台集群尚未起来的机器上永远跑不动(实机 2026-09-29)。
 #     只要请求里**有任何一个**需要集群的步骤, 仍走原来的硬门(exit 1)。
