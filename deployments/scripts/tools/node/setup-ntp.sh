@@ -72,6 +72,11 @@ fi
 # 权威时间源 = 显式 NTP_SERVER, 否则第一个 master(不再用宿主机 HOST_PHYS_IP)
 NTP_AUTHORITY="${NTP_SERVER:-${FIRST_MASTER_IP}}"
 NTP_MAX_OFFSET_MS="${NTP_MAX_OFFSET_MS:-2000}"
+# ★ 2026-11-21(Ubuntu 24.04): 镜像可能不带 chrony。若首 master 的 systemd-timesyncd
+#   已 active 且已同步, 回退 timesyncd 模式: 首 master 继续作为校准基准, 客户端保留
+#   节点默认 NTP 上游(不再把首 master 当 NTP 服务器 —— timesyncd 不提供 123 服务)。
+NTP_TIMESYNCD_FALLBACK=0
+NTP_TIMESYNCD_SERVER="${NTP_SERVER:-${NTP_AUTHORITY}}"
 # ★ 2026-10-14: 节点→权威 IP 可达性预检开关(默认开)。仅"环境禁节点间 ICMP 但 NTP(UDP123) 可达"
 #   这类特殊口径才置 0(先人工确认再关); 关闭后回到旧行为(靠硬对齐兜底 + 偏差校验收尾)。
 NTP_REACH_CHECK="${NTP_REACH_CHECK:-1}"
@@ -184,6 +189,23 @@ master_chrony_setup() {
         [ "${ip}" = "${m_ip}" ] && { m_user="${u}"; m_pw="${pw}"; break; }
     done
     [ -n "${m_user:-}" ] || { warn "未找到第一个 master(${m_ip}) 连接信息, 跳过其 chrony 服务端配置"; return 0; }
+
+    # ★ 2026-11-21(Ubuntu 24.04): 首 master 未预装 chrony 时, 若 systemd-timesyncd 已
+    #   active 且已同步, 回退到 timesyncd 模式(不再硬失败)。首 master 仍作为时钟校准基准,
+    #   其他节点使用各自默认 NTP 上游; 若 timesyncd 也未就绪则明确失败。
+    if ! node_cmd "${m_ip}" "${m_user}" "${m_pw}" "bash -c 'command -v chronyd >/dev/null 2>&1'" >/dev/null 2>&1; then
+        if node_cmd "${m_ip}" "${m_user}" "${m_pw}" \
+            "bash -c 'systemctl is-active systemd-timesyncd >/dev/null 2>&1 && [ \"\$(timedatectl show -p NTPSynchronized --value 2>/dev/null)\" = yes ]'" >/dev/null 2>&1; then
+            warn "第一个 master ${m_ip} 未安装 chrony; systemd-timesyncd 已启用且已同步 → 回退 timesyncd 模式"
+            warn "  (首 master 仍作为时钟校准基准; 客户端不把首 master 当 NTP 服务器, 使用默认 NTP 上游)"
+            NTP_TIMESYNCD_FALLBACK=1
+            NTP_TIMESYNCD_SERVER=""
+            return 0
+        fi
+        err "第一个 master ${m_ip} 缺 chrony, 且 systemd-timesyncd 未处于 active+已同步状态"
+        err "  处置: ① 启用可选模块 chrony_pkgs(CHRONY_PKGS_ENABLED=true); 或 ② 确保节点 systemd-timesyncd 已同步后重跑"
+        exit 1
+    fi
 
     say "配置第一个 master ${m_ip} 为 NTP 权威服务端(local stratum + allow 集群网段) ..."
     # 权限前置: 非 root 用户必须 sudo 可用, 否则后面的 cp/systemctl/chronyc 全部静默失败,
@@ -332,6 +354,7 @@ cat <<'EOF'
 set -u
 MODE="${1:-apply}"
 SERVER="__AUTHORITY__"
+TIMESYNCD_SERVER="__TIMESYNCD_SERVER__"
 HOST_MS="${2:-0}"
 CHRONY_OK=0   # 1=chrony 已即时精调成功(跳过易引入误差的一次性 date 覆盖)
 DAEMON_OK=0   # 1=chrony 或 systemd-timesyncd 已 active(有持久时间服务)
@@ -378,7 +401,11 @@ CFG
         # ⚠ 幂等清理: 删除历史追加产生的重复 [Time] 段与 NTP 行(每次运行只保留一个干净 [Time]
         #   段 —— 旧实现只删 NTP= 不删 [Time], 累积几十个 [Time] 段后 timesyncd 变 Idle 不再同步)
         sed -i '/^\[Time\]/d; /^NTP=/d; /^FallbackNTP=/d' /etc/systemd/timesyncd.conf 2>/dev/null || true
-        printf '\n[Time]\nNTP=%s\n' "${SERVER}" >> /etc/systemd/timesyncd.conf
+        # fallback 模式(首 master 无 chrony, 不提供 123): TIMESYNCD_SERVER 为空 →
+        # 保留镜像/DHCP 默认 NTP 上游, 不要把首 master 写成 NTP 服务器。
+        if [ -n "${TIMESYNCD_SERVER}" ]; then
+            printf '\n[Time]\nNTP=%s\n' "${TIMESYNCD_SERVER}" >> /etc/systemd/timesyncd.conf
+        fi
         timedatectl set-ntp true >/dev/null 2>&1 || true
         systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || systemctl restart systemd-timesyncd >/dev/null 2>&1 || true
         if systemctl is-active systemd-timesyncd >/dev/null 2>&1; then
@@ -430,6 +457,8 @@ if [ -n "${NTP_UPSTREAM:-}" ]; then
 else
     sed -i "/__UPSTREAM_LINE__/d" "${NODE_SCRIPT}"
 fi
+# timesyncd 客户端 NTP 上游: 正常模式=首 master(或显式 NTP_SERVER); fallback 模式=空(保留默认上游)
+sed -i "s|__TIMESYNCD_SERVER__|${NTP_TIMESYNCD_SERVER}|g" "${NODE_SCRIPT}"
 
 # 读取单节点时钟偏差(优先 chrony 自身 offset; 回退 RTT 补偿的 SSH date)
 # 权威基准: 第一个 master(或显式 NTP_SERVER)的时钟, 不再用宿主机(installer)时钟。

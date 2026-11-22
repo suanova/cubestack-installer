@@ -9,7 +9,7 @@
 # REQUIRES: k8s_passwordless
 # 说明:
 #   · **与 NTP 同步解耦**(2026-11-19 用户口径): 本模块只从
-#     offline-files/os/packages/chrony 安装 chrony 包, 不写 chrony.conf、不启停 NTP 服务;
+#     offline-files/os/packages/ubuntu-<VERSION_ID>/chrony 安装 chrony 包, 不写 chrony.conf、不启停 NTP 服务;
 #     同步/权威/客户端配置由 k8s_ntp(setup-ntp.sh)负责, 且 NTP 同步是**必选**步骤。
 #   · **默认关**: NTP 同步假设节点黄金镜像/运维已预装 chrony; 需要 installer 装包时
 #     启用本模块(启用三选一: cluster.conf CHRONY_PKGS_ENABLED=true / --enable chrony_pkgs /

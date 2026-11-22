@@ -3,7 +3,7 @@
 # install-chrony-packages.sh —— 节点 chrony 离线装包(可选步骤)
 #
 # 设计边界(2026-11-19 用户口径):
-#   · 装包与 NTP 同步**解耦** —— 本工具只安装 offline-files/os/packages/chrony
+#   · 装包与 NTP 同步**解耦** —— 本工具只安装 offline-files/os/packages/ubuntu-<VERSION_ID>/chrony
 #     专用安装集, 不写 chrony.conf、不启停/配置 NTP 服务;
 #     同步(权威/客户端配置 + 偏差校验)由 k8s_ntp(tools/node/setup-ntp.sh)负责.
 #   · NTP 同步是**必选**步骤; 安装 OS 包是**可选**的: 默认假设节点黄金镜像
@@ -24,23 +24,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-DEB_DIR="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages/chrony"
-PKG_ROOT="$(dirname "${DEB_DIR}")"
-if [ ! -d "${DEB_DIR}" ]; then
-    err "未找到 chrony 专用安装集目录: ${DEB_DIR}"
-    err "  本步骤是可选的(默认假设节点镜像已预装 chrony); 若需 installer 装包, 请把"
-    err "  chrony 及依赖闭包 .deb 放入该目录, 或关闭本步骤(CHRONY_PKGS_ENABLED=false)"
-    exit 1
-fi
-shopt -s nullglob
-_chk_debs=("${DEB_DIR}"/*.deb)
-shopt -u nullglob
-if [ "${#_chk_debs[@]}" -eq 0 ]; then
-    err "chrony 安装集为空: ${DEB_DIR}(需要 chrony 及其依赖闭包 .deb)"
-    exit 1
-fi
-unset _chk_debs
-say "chrony 离线安装集: ${DEB_DIR}($(find "${DEB_DIR}" -maxdepth 1 -name '*.deb' | wc -l) 个 deb)"
+# 离线包目录在解析目标节点后按 OS 版本选择(见下方); 这里先不再固定到 os/packages/chrony。
 
 # ---------------- 目标节点 --ip 显式优先; 否则 NODES 全部(ONLY_HOSTS 过滤) ----------------
 IPS=()
@@ -98,6 +82,40 @@ node_scp() {   # <local> <ip> <user> <pw> <remote_path>
     SSHPASS="${pw}" sshpass -e scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=8 "$l" "${u}@${ip}:${r}"
 }
+
+# ---------------- 离线包目录: 按目标 OS 版本选择 ----------------
+# 新布局: <OFFLINE_FILES_ROOT>/os/packages/ubuntu-<VERSION_ID>/{*.deb,chrony/*.deb}
+# 旧布局兼容: <OFFLINE_FILES_ROOT>/os/packages/{*.deb,chrony/*.deb}
+# OS_PACKAGES_VERSION 可显式覆盖(如 cluster.conf); 未设置时从第一个目标节点读取 /etc/os-release。
+_pkg_root="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages"
+_os_ver="${OS_PACKAGES_VERSION:-}"
+if [ -z "${_os_ver}" ]; then
+    _e0="${NODE_ENTRIES[0]}"
+    _ip0="${_e0%%:*}"; _rest0="${_e0#*:}"; _u0="${_rest0%%:*}"; _rest0="${_rest0#*:}"; _pw0="${_rest0%%:*}"
+    _os_ver="$(node_cmd "${_ip0}" "${_u0}" "${_pw0}" "bash -c '. /etc/os-release; echo \"\$VERSION_ID\"'" 2>/dev/null | tr -d '\r' | head -1 || true)"
+fi
+if [ -n "${_os_ver}" ] && [ -d "${_pkg_root}/ubuntu-${_os_ver}" ]; then
+    PKG_ROOT="${_pkg_root}/ubuntu-${_os_ver}"
+else
+    PKG_ROOT="${_pkg_root}"   # 旧布局兼容
+fi
+DEB_DIR="${PKG_ROOT}/chrony"
+say "目标 OS=${_os_ver:-未知}; chrony 离线包根=${PKG_ROOT}"
+if [ ! -d "${DEB_DIR}" ]; then
+    err "未找到 chrony 专用安装集目录: ${DEB_DIR}"
+    err "  本步骤是可选的(默认假设节点镜像已预装 chrony); 若需 installer 装包, 请把"
+    err "  chrony 及依赖闭包 .deb 放入该目录, 或关闭本步骤(CHRONY_PKGS_ENABLED=false)"
+    exit 1
+fi
+shopt -s nullglob
+_chk_debs=("${DEB_DIR}"/*.deb)
+shopt -u nullglob
+if [ "${#_chk_debs[@]}" -eq 0 ]; then
+    err "chrony 安装集为空: ${DEB_DIR}(需要 chrony 及其依赖闭包 .deb)"
+    exit 1
+fi
+unset _chk_debs
+say "chrony 离线安装集: ${DEB_DIR}($(find "${DEB_DIR}" -maxdepth 1 -name '*.deb' | wc -l) 个 deb)"
 
 # ---------------- 远端安装脚本(只装包; 不写配置/不启停服务) ----------------
 REMOTE_SCRIPT="/tmp/cubestack-chrony-install.sh"

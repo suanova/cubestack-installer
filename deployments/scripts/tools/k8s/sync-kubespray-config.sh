@@ -188,6 +188,17 @@ update_api_entry_all_yml() {
 ALL_YML="${INV_DIR}/group_vars/all/all.yml"
 if [ -f "${ALL_YML}" ]; then
     say "更新 ${ALL_YML} ..."
+    # ★ Ubuntu 24.04 的 Python 是 3.12, 不存在 /usr/bin/python3.10; 22.04 的 /usr/bin/python3
+    #   也是 3.10。统一使用 /usr/bin/python3(两代都存在的稳定入口), 不再钉死 python3.10。
+    #   允许 cluster.conf / 环境变量 ANSIBLE_PYTHON_INTERPRETER 覆盖(进阶场景)。
+    _py_interp="${ANSIBLE_PYTHON_INTERPRETER:-/usr/bin/python3}"
+    if grep -q '^ansible_python_interpreter:' "${ALL_YML}"; then
+        sed -i -E "s|^ansible_python_interpreter:.*|ansible_python_interpreter: ${_py_interp}|" "${ALL_YML}"
+    else
+        printf 'ansible_python_interpreter: %s\n' "${_py_interp}" >> "${ALL_YML}"
+    fi
+    unset _py_interp
+    say "  ansible_python_interpreter → ${ANSIBLE_PYTHON_INTERPRETER:-/usr/bin/python3}(Ubuntu 22.04/24.04 通用)"
     # 防线: 入口地址一旦是"非数值字面量"(如手工填的 VIP 或 Jinja 表达式), 绝不能被我方的
     # sed 覆盖 —— 那会静默改掉真正生效的 API 入口。宁可停下让人确认。
     _prot="$(nonnumeric_entry "${ALL_YML}")"

@@ -1685,8 +1685,11 @@ ceph_installable_check() {
         _ip="$(_ceph_host_ip "${_hn}" || true)"
         if [ -z "${_ip}" ]; then _miss="${_miss} 节点IP未找到@${_hn}"; continue; fi
         if [ "${_skip_disk}" = "0" ]; then
+            # ⚠ </dev/null 必须加: ceph-detect-disks.sh 内部会调用 ssh, 而 ssh 默认读取 stdin;
+            #   否则第一次探测会吞掉 while 循环的剩余 host 列表, 只统计第一台 →
+            #   多节点被误判"有盘主机 1 < 副本数"并错误回退 local-path(2026-11-21 24.04 实机)。
             _out="$(timeout 60 bash "${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-detect-disks.sh" \
-                        --node "${_hn}" -m 2>/dev/null || true)"
+                        --node "${_hn}" -m 2>/dev/null </dev/null || true)"
             # 只认本节点的机器行, 防任何诊断/弃用告警污染(2026-11-20 多节点误回退根因)
             _out_line="$(printf '%s\n' "${_out}" | grep -E "^${_hn}:" | head -1 || true)"
             case "${_out_line}" in

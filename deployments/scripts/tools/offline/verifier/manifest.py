@@ -147,6 +147,13 @@ def check_metadata(ctx, root, layout, args):
             fail(ctx, rel, "missing_file", "文件不存在或已被删除(已跳过哈希)")
             ctx.checks["coverage"] = "fail"
     for rel in sorted(disk - listed):
+        # os/、base/ 是本地离线包/元数据目录: offline-sync 在物化 offline-packages 时
+        # 会保留它们, 且它们不属于 release SHA256SUMS 的 payload 清单(2026-11-21:
+        # Ubuntu 24.04 离线 deb 放入 offline-files/os/packages 后, 严格 extra_file
+        # 会把所有本地 deb 判为未登记并阻断部署)。这些目录按本地包集管理, 只告警。
+        if rel.startswith(("os/", "base/")):
+            warn(ctx, f"{rel}: 本地离线包/元数据目录, 不在 release SHA256SUMS 中, 跳过 extra_file 检查")
+            continue
         fail(ctx, rel, "extra_file", "磁盘存在但清单未登记")
         ctx.checks["coverage"] = "fail"
     for rel in sorted(disk & listed):

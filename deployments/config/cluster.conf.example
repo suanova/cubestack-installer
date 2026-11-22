@@ -95,8 +95,9 @@ NTP_ENABLED="${NTP_ENABLED:-1}"                         # 节点时间同步(0=�
 # 默认值见 cluster.defaults.conf §2.2c(NODE_PKGS_ENABLED / WORKER_PKGS_ENABLED / CHRONY_PKGS_ENABLED = false)。
 # 启用: 在本文件写 NODE_PKGS_ENABLED=true / WORKER_PKGS_ENABLED=true / CHRONY_PKGS_ENABLED=true,
 #   或用 --enable node_pkgs|k8s_workerbm|chrony_pkgs / --steps node_pkgs|k8s_workerbm|chrony_pkgs。
-#   .deb 来源: offline-files/os/packages/*.deb(需自行预置)。
-# ⚠ chrony_pkgs 只装包(offline-files/os/packages/chrony/), 不配置 NTP; NTP 同步(k8s_ntp)始终必选,
+#   .deb 来源: offline-files/os/packages/ubuntu-<VERSION_ID>/*.deb(旧布局 os/packages/*.deb 兼容)。
+#   目标 OS 版本默认从节点 /etc/os-release 读取, 可用 OS_PACKAGES_VERSION 显式覆盖。
+# ⚠ chrony_pkgs 只装包(offline-files/os/packages/ubuntu-<VERSION_ID>/chrony/), 不配置 NTP; NTP 同步(k8s_ntp)始终必选,
 #   默认假设节点镜像已预装 chrony。启用后装包阶段先于 NTP 执行。
 # 本地代理(kubespray nginx-proxy 静态 Pod: 每节点 127.0.0.1:6443 → 全部 master; 与"外部入口"正交):
 #   摘掉 all.yml 的 loadbalancer_apiserver 块实现节点就近出口; kubelet 侧故障切换 ~1s。

@@ -11,7 +11,7 @@
 #   · **默认关闭(2026-11-18)**: 节点前置包由 OS 黄金镜像/运维预装, 默认流程
 #     只由 pre_install_check 做 warn-only 存在性检查, installer 不安装 OS 包。
 #   · 启用三选一: cluster.conf 置 NODE_PKGS_ENABLED=true / --enable node_pkgs /
-#     --steps node_pkgs。启用后从 offline-files/os/packages 取 .deb 做 apt 对账。
+#     --steps node_pkgs。启用后从 offline-files/os/packages/ubuntu-<VERSION_ID> 取 .deb 做 apt 对账。
 #   · **必须在 k8s_deploy 之前**(见 06_k8s_deploy.sh 的 REQUIRES 显式声明本模块): kubespray 的
 #     bootstrap_os → system_packages 一旦遇到 apt 依赖图破损就**直接失败**, 且报错只提表象包。
 #     实测 2026-09-28: 离线 .deb 集把 libudev1 升到 3.22 而 udev 仍 3.12(严格依赖 `= 3.12`)

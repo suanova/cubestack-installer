@@ -12,7 +12,7 @@
 #   · **默认关闭(2026-11-18)**: 节点前置包由 OS 黄金镜像/运维预装, installer 不安装
 #     OS 包。默认的 SSH/sudo/资源检查由 pre_install_check 覆盖。
 #   · 启用三选一: cluster.conf 置 WORKER_PKGS_ENABLED=true / --enable k8s_workerbm /
-#     --steps k8s_workerbm。启用后从 offline-files/os/packages 取 .deb 安装。
+#     --steps k8s_workerbm。启用后从 offline-files/os/packages/ubuntu-<VERSION_ID> 取 .deb 安装。
 #   · fresh 节点清理(系统 containerd/containerd.io/runc)默认不做 —— 需调用方**显式声明**
 #     fresh: 运行时置 CUBESTACK_FRESH_NODE=1(env 会透传到 install-worker-packages.sh),
 #     或直接调用工具时传 --fresh-node。kubelet 未运行**不是**判据(维护中的已 join worker

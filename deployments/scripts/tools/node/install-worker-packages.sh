@@ -53,7 +53,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 离线文件根目录(全局变量, load_config 已派生); 包目录 = 当前集群离线资源目录
 OFFLINE_FILES_DIR="${OFFLINE_FILES_DIR:-${REPO_ROOT}/deployments/offline-files/kubespray}"
 REPO_DIR="${LOCAL_REPO_DIR:-${OFFLINE_FILES_DIR}/${CLUSTER_NAME:-cubestack-cluster}}"
-# 离线 .deb 包来源: 仓库根目录 + packages/ 子目录 + 共享 offline-files/os/packages(版本无关 OS 层,
+# 离线 .deb 包来源: 仓库根目录 + packages/ 子目录 + 共享 offline-files/os/packages/ubuntu-<VERSION_ID>(按目标 OS; 旧布局兼容,
 # 2026-10-08 起节点 .deb 统一收敛于此; 原 kubespray/<版本>/packages 已并入)
 PKG_DIRS=("${REPO_DIR}" "${REPO_DIR}/packages" "${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages")
 
@@ -68,6 +68,32 @@ else
     SSH_SUDO=""
 fi
 SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+# 按目标 OS 版本选择离线包目录:
+#   新布局 <OFFLINE_FILES_ROOT>/os/packages/ubuntu-<VERSION_ID>/*.deb;
+#   旧布局 <OFFLINE_FILES_ROOT>/os/packages/*.deb 兼容。
+#   OS_PACKAGES_VERSION 可覆盖; 未设置时读取目标节点 /etc/os-release。
+_pkg_root="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages"
+_os_ver="${OS_PACKAGES_VERSION:-}"
+if [ -z "${_os_ver}" ]; then
+    _os_ver="$(ssh ${SSH_OPTS} "${USER}@${IP}" \
+        "bash -c '. /etc/os-release; echo \"\$VERSION_ID\"'" 2>/dev/null | tr -d '\r' | head -1 || true)"
+fi
+if [ -n "${_os_ver}" ] && [ -d "${_pkg_root}/ubuntu-${_os_ver}" ]; then
+    PKG_DIRS=("${REPO_DIR}" "${REPO_DIR}/packages" "${_pkg_root}/ubuntu-${_os_ver}")
+else
+    PKG_DIRS=("${REPO_DIR}" "${REPO_DIR}/packages" "${_pkg_root}")
+fi
+# helm/nodejs 单独目录（同样供自动装包流程使用；helm 根目录 + 目标 OS 的 nodejs）
+_helm_dir="$(dirname "${_pkg_root}")/helm-nodejs"
+if [ -d "${_helm_dir}" ]; then
+    PKG_DIRS+=("${_helm_dir}")
+    if [ -d "${_helm_dir}/ubuntu-${_os_ver}" ]; then
+        PKG_DIRS+=("${_helm_dir}/ubuntu-${_os_ver}")
+    fi
+fi
+unset _helm_dir
+say "目标 OS=${_os_ver:-未知}; 离线包目录=${PKG_DIRS[*]}"
 
 # 收集所有存在的 .deb 包完整路径(按 basename 去重,优先仓库根目录)
 DEBS=()

@@ -122,15 +122,60 @@ if [ "${#IPS[@]}" -eq 0 ]; then
 fi
 [ "${#IPS[@]}" -gt 0 ] || { err "没有目标节点(cluster.conf NODES 为空?)"; exit 1; }
 
-# 离线 .deb 来源: offline-files/os/packages(版本无关 OS 层; 2026-10-08 起节点 .deb 统一收敛于此,
-# 原 <版本目录>/packages 与 packages/repair 已并入 —— 同名同版本去重; 版本目录不再放 .deb)
-# ⚠ 只扫该目录**顶层** *.deb: chrony 等"专用安装集"放子目录(如 os/packages/chrony/), 不做对账。
-DEB_DIRS=("${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages")
+# 离线 .deb 来源:
+#   新布局 <OFFLINE_FILES_ROOT>/os/packages/ubuntu-<VERSION_ID>/*.deb;
+#   旧布局 <OFFLINE_FILES_ROOT>/os/packages/*.deb 兼容。
+# OS 版本优先用 OS_PACKAGES_VERSION; 未设置时从第一个目标节点 /etc/os-release 读取。
+# ⚠ 只扫所选目录**顶层** *.deb: chrony 等"专用安装集"放子目录(如 <版本>/chrony/), 不做对账。
+_pkg_root="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages"
+_os_ver="${OS_PACKAGES_VERSION:-}"
+if [ -z "${_os_ver}" ] && [ "${#IPS[@]}" -gt 0 ]; then
+    _det_key="${SSH_KEY_DIR:-${REAL_HOME:-$HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    _det_user="${USER:-$(ssh_user_for_ip "${IPS[0]}")}"
+    _os_ver="$(ssh -i "${_det_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_det_user}@${IPS[0]}" \
+        "bash -c '. /etc/os-release; echo \"\$VERSION_ID\"'" 2>/dev/null | tr -d '\r' | head -1 || true)"
+    unset _det_key _det_user
+fi
+if [ -n "${_os_ver}" ] && [ -d "${_pkg_root}/ubuntu-${_os_ver}" ]; then
+    DEB_DIRS=("${_pkg_root}/ubuntu-${_os_ver}")
+else
+    DEB_DIRS=("${_pkg_root}")
+fi
+# helm/nodejs 单独目录（自动流程安装；手动脚本通过 NODE_PKGS_EXCLUDE_PATTERNS 跳过）
+#   helm 在根目录（静态、版本通用）；nodejs 在 ubuntu-<VERSION_ID>/（按目标 OS 适配）。
+_helm_dir="$(dirname "${_pkg_root}")/helm-nodejs"
+if [ -d "${_helm_dir}" ]; then
+    DEB_DIRS+=("${_helm_dir}")
+    if [ -d "${_helm_dir}/ubuntu-${_os_ver}" ]; then
+        DEB_DIRS+=("${_helm_dir}/ubuntu-${_os_ver}")
+    fi
+fi
+unset _helm_dir
+say "目标 OS=${_os_ver:-未知}; 离线包目录=${DEB_DIRS[*]}"
 DEBS=()
+# NODE_PKGS_EXCLUDE_PATTERNS: 可选 basename glob 排除列表(空格/逗号分隔)。
+#   手动安装脚本用它排除 helm/nodejs 等由其他流程负责的包; 默认空 = 行为不变。
+_excl_pats="${NODE_PKGS_EXCLUDE_PATTERNS:-}"
+if [ -n "${_excl_pats}" ]; then
+    say "排除离线包模式: ${_excl_pats}"
+fi
 for d in "${DEB_DIRS[@]}"; do
     [ -d "${d}" ] || continue
-    for f in "${d}"/*.deb; do [ -f "${f}" ] && DEBS+=("${f}"); done
+    for f in "${d}"/*.deb; do
+        [ -f "${f}" ] || continue
+        _base="$(basename "${f}")"
+        _skip=0
+        if [ -n "${_excl_pats}" ]; then
+            for _pat in ${_excl_pats//,/ }; do
+                case "${_base}" in ${_pat}) _skip=1; break ;; esac
+            done
+        fi
+        [ "${_skip}" = "1" ] && continue
+        DEBS+=("${f}")
+    done
 done
+unset _excl_pats _base _skip _pat 2>/dev/null || true
 [ "${#DEBS[@]}" -gt 0 ] || { err "离线目录下没有任何 .deb(${DEB_DIRS[*]})"; exit 1; }
 say "离线包: ${#DEBS[@]} 个; 目标节点: ${#IPS[@]} 个"
 
