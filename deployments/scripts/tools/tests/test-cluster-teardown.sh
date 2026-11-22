@@ -211,6 +211,11 @@ chk "⑤w 等待卷清理先于删 rbd nodeplugin" "1" \
     "$(awk '/wait_ceph_volumes_gone 120 0/{a=NR} /delete ds rook-ceph.rbd.csi.ceph.com-nodeplugin/{b=NR} END{print (a>0&&b>0&&a<b)?1:0}' "${SRC}/tools/k8s/ceph-cleanup.sh")"
 chk "⑤x 超时兜底清 ceph PV finalizer 后强删" "1" \
     "$(grep -cF 'patch pv ${_pv}' "${SRC}/tools/k8s/ceph-cleanup.sh")"
+# 2026-11-22 实机: PVC 只 delete --wait=false 不够 —— pvc-protection finalizer 不会自愈,
+#   PVC 永远 Terminating → VolumeAttachment 不消失 → 拒绝删 nodeplugin → 内核 rbd 残留,
+#   下次 kubespray 的 Ansible LVM facts(vgs) 扫到旧 rbd 永久 D 态。强制清理必须摘 PVC finalizer。
+chk "⑤x2 超时兜底清 ceph PVC finalizer 后强删" "1" \
+    "$(grep -cF 'patch pvc ${_p#*/}' "${SRC}/tools/k8s/ceph-cleanup.sh")"
 # 2026-10-19 实机: Ceph 0 OSD/不可达时依赖 CR 的 finalizer 卡死, Rook 拒绝删 CephCluster。
 chk "⑤y 依赖 CR 未终结时清 finalizer 强删" "1" \
     "$(grep -cF '依赖 CR 未在 120s 内终结' "${SRC}/tools/k8s/ceph-cleanup.sh")"
@@ -250,6 +255,29 @@ chk "⑤aa 强删循环执行全部对象(不止第一条)" "2" \
     "$(grep -c 'delete cephfilesystem' "${DEPLOG}" || true)"
 chk "⑤aa 两个对象都发出删除(cubestack-ext-fs/durable)" "1" \
     "$(grep -qF 'cubestack-ext-fs' "${DEPLOG}" && grep -qF 'durable' "${DEPLOG}" && echo 1 || echo 0)"
+# ⑤ab 行为回归(2026-11-22): 强清 PVC 循环必须对**每个**残留 PVC 都执行 delete + finalizer patch,
+#   不能被管道/SSH 吞掉 here-string 剩余行(否则只处理第一条, PVC 仍 Terminating)。
+PVCLOOP="${TMP}/pvc_loop.sh"; PVCLOG="${TMP}/pvc_loop.log"
+awk '/while IFS= read -r _p; do/ {f=1} f {print} f && /done <<< "\$\{_left_pvc\}"/ {exit}' \
+    "${SRC}/tools/k8s/ceph-cleanup.sh" > "${PVCLOOP}"
+cat > "${TMP}/pvc_harness.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+K="kubectl"
+SSH() {   # 真实 ssh 会读并转发本地 stdin; 非 tty 时模拟吞掉 here-string
+    if [ ! -t 0 ]; then cat >/dev/null; fi
+    printf '%s\n' "$*" >> "${PVCLOG}"
+}
+SSH_N() { SSH "$@" </dev/null; }
+_left_pvc=$'ns-a/pvc-one\nns-b/pvc-two\nns-c/pvc-three'
+source "${PVCLOOP}"
+EOF
+: > "${PVCLOG}"
+PVCLOG="${PVCLOG}" PVCLOOP="${PVCLOOP}" bash "${TMP}/pvc_harness.sh"
+chk "⑤ab 强清 PVC 循环: 3 个 PVC 都 delete" "3" "$(grep -c 'delete pvc' "${PVCLOG}" || true)"
+chk "⑤ab 强清 PVC 循环: 3 个 PVC 都清 finalizer" "3" "$(grep -c 'patch pvc' "${PVCLOG}" || true)"
+chk "⑤ab 强清 PVC 循环: 最后一个 PVC 未被吞" "1" \
+    "$(grep -qF 'pvc-three' "${PVCLOG}" && echo 1 || echo 0)"
 # ⑤m/⑤n 扫荡 python 行为夹具(从 ceph-cleanup.sh 提取首个 heredoc, 喂合成清单):
 #   裸 RS replicas=0(刚优雅停机, pod 尚在终结)→ 无动作; replicas=1 → delrs 原语义保留
 SWEEPPY="${TMP}/sweep.py"
