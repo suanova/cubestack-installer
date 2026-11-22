@@ -12,6 +12,11 @@
 # 用法(部署机/容器内, 需 SSH 密钥):
 #   bash ceph-rbd-cleanup.sh                 # 清理全部节点残留 rbd 映射
 #   bash ceph-rbd-cleanup.sh --list          # 只列出各节点 rbd 映射(不清理)
+#   bash ceph-rbd-cleanup.sh --skip-keep-query
+#       # 不查询 PV/PVC(集群 API 不可用/覆盖安装 reset 后), 只 unmap **空闲**设备;
+#       # 仍逐设备检查 holders/open fd/inflight/挂载, 忙/未知一律跳过
+#   bash ceph-rbd-cleanup.sh --skip-keep-query --fail-if-left
+#       # 同上, 但清理后仍有映射/状态未知 → 非零退出(kubespray 前守卫用)
 #   KEEP_VOLUME=<imageName> bash ...         # 额外保留某卷(逗号分隔)
 # 数据源: cluster.conf (NODES / SSH_KEY_NAME / SSH_USER) + kubeconfig
 # ============================================================
@@ -24,43 +29,59 @@ load_config
 init_remote_kubectl || { err "init_remote_kubectl 失败(cluster.conf NODES 无 master?)"; exit 1; }
 
 LIST_ONLY=0
-[ "${1:-}" = "--list" ] && LIST_ONLY=1
-
-# kubeconfig(供 kubectl 查 registry-pvc 卷名; 缺失则回退到 master 上 /etc/kubernetes/admin.conf)
-KC="${KUBECONFIG:-}"
-if [ -z "${KC}" ]; then
-    KC="/opt/cubestack-installer/deployments/kubespray/inventory/cubestack-cluster/artifacts/admin.conf"
-fi
-[ -f "${KC}" ] || KC=""
-KC_REMOTE="/etc/kubernetes/admin.conf"   # master 上固定路径(SSH 执行 kubectl 用)
+SKIP_KEEP_QUERY=0
+FAIL_IF_LEFT=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --list) LIST_ONLY=1; shift ;;
+        --skip-keep-query) SKIP_KEEP_QUERY=1; shift ;;
+        --fail-if-left) FAIL_IF_LEFT=1; shift ;;
+        -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) err "未知参数: $1(--help 查看用法)"; exit 1 ;;
+    esac
+done
 
 # 需要保留的卷名(在用): 集群内全部 PV 的 CSI imageName。
-#   本地有 kubeconfig 用本地; 否则经 SSH 用 master 的 /etc/kubernetes/admin.conf(sudo)。
 KEEP_VOLS="${KEEP_VOLUME:-}"
-_KC=""          # 本地 kubectl 前缀(容器/部署机)
-_KC_REMOTE=""   # SSH 远程 kubectl 前缀(master 上, sudo)
-if [ -n "${KC}" ] && [ -f "${KC}" ]; then
-    _KC="kubectl --kubeconfig=${KC}"
-fi
-if SSH "test -f ${KC_REMOTE}" 2>/dev/null; then
-    _KC_REMOTE="sudo kubectl --kubeconfig=${KC_REMOTE}"
-fi
-_KEEP_QUERY_OK=0
-if [ -n "${_KC}" ]; then
-    if _img="$(kubectl --kubeconfig="${KC}" get pv -o jsonpath='{range .items[*]}{.spec.csi.volumeAttributes.imageName} ' 2>/dev/null)"; then
-        _KEEP_QUERY_OK=1
-        [ -n "${_img}" ] && KEEP_VOLS="${KEEP_VOLS:+${KEEP_VOLS},}${_img}"
+if [ "${SKIP_KEEP_QUERY}" = "1" ]; then
+    # 2026-11-22: 覆盖安装/集群 API 已不可用时, 无法查询 PV。只按设备空闲状态清理
+    #   (holders/open fd/inflight/挂载任一命中都跳过), 不依赖 PV 列表。
+    _KEEP_QUERY_OK=1
+    warn "  --skip-keep-query: 不查询 PV/PVC(API 不可达/覆盖安装 reset 后); 只 unmap 空闲设备"
+else
+    # kubeconfig(供 kubectl 查 registry-pvc 卷名; 缺失则回退到 master 上 /etc/kubernetes/admin.conf)
+    #   本地有 kubeconfig 用本地; 否则经 SSH 用 master 的 /etc/kubernetes/admin.conf(sudo)。
+    KC="${KUBECONFIG:-}"
+    if [ -z "${KC}" ]; then
+        KC="/opt/cubestack-installer/deployments/kubespray/inventory/cubestack-cluster/artifacts/admin.conf"
     fi
-fi
-if [ "${_KEEP_QUERY_OK}" != "1" ] && [ -n "${_KC_REMOTE}" ]; then
-    if _img="$(SSH "${_KC_REMOTE} get pv -o jsonpath={.items[*].spec.csi.volumeAttributes.imageName}" 2>/dev/null)"; then
-        _KEEP_QUERY_OK=1
-        [ -n "${_img}" ] && KEEP_VOLS="${KEEP_VOLS:+${KEEP_VOLS},}${_img// /,}"
+    [ -f "${KC}" ] || KC=""
+    KC_REMOTE="/etc/kubernetes/admin.conf"   # master 上固定路径(SSH 执行 kubectl 用)
+    _KC=""          # 本地 kubectl 前缀(容器/部署机)
+    _KC_REMOTE=""   # SSH 远程 kubectl 前缀(master 上, sudo)
+    if [ -n "${KC}" ] && [ -f "${KC}" ]; then
+        _KC="kubectl --kubeconfig=${KC}"
     fi
-fi
-if [ "${_KEEP_QUERY_OK}" != "1" ] && [ "${LIST_ONLY}" != "1" ]; then
-    warn "无法读取当前 PV/PVC(集群 API 不可达) —— 无法证明 rbd 映射是孤儿, 跳过清理(避免误 unmap 在用卷造成 D 状态)"
-    exit 0
+    if SSH "test -f ${KC_REMOTE}" 2>/dev/null; then
+        _KC_REMOTE="sudo kubectl --kubeconfig=${KC_REMOTE}"
+    fi
+    _KEEP_QUERY_OK=0
+    if [ -n "${_KC}" ]; then
+        if _img="$(kubectl --kubeconfig="${KC}" get pv -o jsonpath='{range .items[*]}{.spec.csi.volumeAttributes.imageName} ' 2>/dev/null)"; then
+            _KEEP_QUERY_OK=1
+            [ -n "${_img}" ] && KEEP_VOLS="${KEEP_VOLS:+${KEEP_VOLS},}${_img}"
+        fi
+    fi
+    if [ "${_KEEP_QUERY_OK}" != "1" ] && [ -n "${_KC_REMOTE}" ]; then
+        if _img="$(SSH "${_KC_REMOTE} get pv -o jsonpath={.items[*].spec.csi.volumeAttributes.imageName}" 2>/dev/null)"; then
+            _KEEP_QUERY_OK=1
+            [ -n "${_img}" ] && KEEP_VOLS="${KEEP_VOLS:+${KEEP_VOLS},}${_img// /,}"
+        fi
+    fi
+    if [ "${_KEEP_QUERY_OK}" != "1" ] && [ "${LIST_ONLY}" != "1" ]; then
+        warn "无法读取当前 PV/PVC(集群 API 不可达) —— 无法证明 rbd 映射是孤儿, 跳过清理(避免误 unmap 在用卷造成 D 状态)"
+        exit 0
+    fi
 fi
 say "需保留的卷: ${KEEP_VOLS:-<无(将清理全部 rbd 映射)>}"
 [ -n "${KEEP_VOLS}" ] && say "  (可用 KEEP_VOLUME=xxx,yyy 额外保留)"
@@ -271,3 +292,12 @@ else
         fi
     fi
 fi
+# 2026-11-22: kubespray 前守卫。仍有映射/未知 → 非零退出, 避免 Ansible hardware
+#   facts 的 vgs 扫描旧 rbd 时永久 D 态(实机静默挂起 1 小时)。
+if [ "${FAIL_IF_LEFT}" = "1" ] && [ "${LIST_ONLY}" != "1" ]; then
+    if [ "${_TOTAL_LEFT:-0}" -ne 0 ] 2>/dev/null || [ "${_TOTAL_UNKNOWN:-0}" -ne 0 ] 2>/dev/null; then
+        err "内核 rbd 映射未清零(残留=${_TOTAL_LEFT:-0}, 未知节点=${_TOTAL_UNKNOWN:-0}) → 不能进入 kubespray(vgs 会永久 D 态)"
+        exit 1
+    fi
+fi
+exit 0

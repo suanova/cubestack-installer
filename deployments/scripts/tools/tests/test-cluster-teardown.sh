@@ -339,7 +339,7 @@ esac
 case "${_args}" in
     *"test -f /etc/kubernetes/admin.conf"*) exit 0 ;;
 esac
-[ "${_ip}" = "10.0.0.2" ] && exit 255          # .2 模拟全程不可达
+[ "${_ip}" = "10.0.0.2" ] && [ "${SHIM_REACHABLE2:-0}" != "1" ] && exit 255   # .2 默认模拟不可达
 case "${_args}" in
     *"holders"*) exit 1 ;;                     # _rbd_device_busy: 确认设备空闲
     *"for d in /sys/bus/rbd/devices"*)         # list_maps: .1 有一个可清映射
@@ -373,6 +373,23 @@ chk "⑧f 清单含 .1 与 .2" "1" "$(printf '%s' "${OUT8}" | grep -c '10.0.0.1 
 OUT8B="$(_run_rbd 2)"
 chk "⑧g 真实残留=2 走'仍有 N 个'分支(不误给硬复位外的结论)" "1" "$(printf '%s' "${OUT8B}" | grep -cF '仍有 2 个内核 rbd 映射**' || true)"
 chk "⑧g 非零残留节点不做模块卸载" "0" "$(printf '%s' "${OUT8B}" | grep -c 'rbd/libceph 模块已卸载' || true)"
+# 2026-11-22: kubespray 前守卫 —— reset 后旧 API 不可用, 必须能跳过 PV 查询只清空闲映射;
+#   仍有残留/未知时 --fail-if-left 非零退出, 避免 Ansible hardware facts 的 vgs 永久 D 态。
+_run_rbd_skip() {   # <left> [reachable2] → stdout; 退出码即工具退出码
+    SHIM_LEFT1="$1" SHIM_REACHABLE2="${2:-0}" CLUSTER_CONF="${TMP}/cluster.conf" KUBECONFIG="/nonexistent/nope" \
+        PATH="${R8}:${PATH}" bash "${RBDTOOL}" --skip-keep-query --fail-if-left 2>&1
+}
+OUT8C="$(_run_rbd_skip 1)"; rc8c=$?
+chk "⑧h --skip-keep-query 不依赖 PV 查询" "0" "$(printf '%s' "${OUT8C}" | grep -c '无法读取当前 PV/PVC' || true)"
+chk "⑧h --fail-if-left 有残留→非零" "1" "${rc8c}"
+chk "⑧h 有残留→提示 kubespray 守卫" "1" "$(printf '%s' "${OUT8C}" | grep -c '不能进入 kubespray' || true)"
+OUT8D="$(_run_rbd_skip 0 1)"; rc8d=$?
+chk "⑧h --fail-if-left 清零后成功" "0" "${rc8d}"
+OFFLINE_SH="${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
+chk "⑧i cubestack-offline install 调用 rbd 守卫" "1" \
+    "$(grep -cF -- '--skip-keep-query --fail-if-left' "${OFFLINE_SH}")"
+chk "⑧i 守卫在 kubespray 安装之前" "1" \
+    "$(awk '/--skip-keep-query --fail-if-left/{a=NR} /^cmd_install\(\)/{b=NR} /run_ansible_playbook "\$\{INSTALL_LOG\}" cluster.yml/{c=NR} END{print (a>b && b>0 && c>a)?1:0}' "${OFFLINE_SH}")"
 
 echo "== ⑨ 静态围栏: run_component 不得在同一 local 语句内引用 rel =="
 RC_DECL="$(grep -A8 '^run_component()' "${ENGINE}" 2>/dev/null || true)"
