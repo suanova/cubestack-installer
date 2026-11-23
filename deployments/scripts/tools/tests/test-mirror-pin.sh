@@ -37,10 +37,10 @@ EOF
 cat > "${TMP}/old.json" <<'EOF'
 {"schema": 1, "images": [
   {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/pause",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/pause",
    "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
   {"id": "kubernetes/other", "source": "registry.k8s.io/other",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/other",
    "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"}]}
 ]}
 EOF
@@ -49,10 +49,10 @@ cp "${TMP}/old.json" "${TMP}/same.json"
 cat > "${TMP}/changed.json" <<'EOF'
 {"schema": 1, "images": [
   {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/pause",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/pause",
    "versions": [{"tag": "3.10.1", "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"}]},
   {"id": "kubernetes/other", "source": "registry.k8s.io/other",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/other",
    "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"}]}
 ]}
 EOF
@@ -67,13 +67,13 @@ pass "no referenced base change -> no update"
 cat > "${TMP}/unreferenced-id.json" <<'EOF'
 {"schema": 1, "images": [
   {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/pause",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/pause",
    "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
   {"id": "kubernetes/other", "source": "registry.k8s.io/other",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/other",
    "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"}]},
   {"id": "kubernetes/unused", "source": "registry.k8s.io/unused",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/unused",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/unused",
    "versions": [{"tag": "v1", "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
                  "platforms": ["linux/amd64"]}]}
 ]}
@@ -89,10 +89,10 @@ pass "new tag on an unreferenced catalog id does not move the pin"
 cat > "${TMP}/nodigest.json" <<'EOF'
 {"schema": 1, "images": [
   {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/pause",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/pause",
    "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
   {"id": "kubernetes/other", "source": "registry.k8s.io/other",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/other",
    "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
                 {"tag": "v2"}]}
 ]}
@@ -108,10 +108,10 @@ pass "new tag without a digest does not move the pin"
 cat > "${TMP}/arm64.json" <<'EOF'
 {"schema": 1, "images": [
   {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/pause",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/pause",
    "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
   {"id": "kubernetes/other", "source": "registry.k8s.io/other",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/other",
    "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
                 {"tag": "v2", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
                  "platforms": ["linux/arm64"]}]}
@@ -128,10 +128,10 @@ pass "new tag without linux/amd64 does not move the pin"
 cat > "${TMP}/added.json" <<'EOF'
 {"schema": 1, "images": [
   {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/pause",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/pause",
    "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
   {"id": "kubernetes/other", "source": "registry.k8s.io/other",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/other",
    "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
                 {"tag": "v2", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
                  "platforms": ["linux/amd64"]}]}
@@ -164,7 +164,7 @@ pass "dry-run leaves the baseline untouched"
 cat > "${TMP}/missing.json" <<'EOF'
 {"schema": 1, "images": [
   {"id": "kubernetes/other", "source": "registry.k8s.io/other",
-   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/other",
    "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"}]}
 ]}
 EOF
