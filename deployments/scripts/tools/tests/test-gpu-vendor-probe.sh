@@ -79,6 +79,24 @@ echo "== ⑥ SSH 失败: 不判定纯 CPU =="
 chk "探测输出" "0 unknown" "$(_probe '0 0' 1)"
 _pure 0 unknown; chk_rc "纯 CPU 判定" "1" "$?"
 
+echo "== ⑦ 宿主驱动选择: PCI 状态未知必须回退容器驱动 =="
+MOD="${REPO_ROOT}/deployments/scripts/modules/03_addon/06_gpu_operator.sh"
+_DRV_BLOCK="$(sed -n '/_DRIVER_DEPLOY="\${METAX_DRIVER_DEPLOY:-auto}"/,/^esac$/p' "${MOD}")"
+[ -n "${_DRV_BLOCK}" ] || { echo "  FAIL 无法抽取驱动选择块"; fail=1; }
+_drv() {  # <has_gpu_node> <pci_no_driver> <pci_unknown>
+    (
+        set +u
+        HAS_GPU_NODE="$1" METAX_PCI_NO_DRIVER="$2" METAX_PCI_UNKNOWN="$3"
+        err() { :; }; ok() { :; }; say() { :; }; warn() { :; }
+        eval "${_DRV_BLOCK}"
+        printf '%s' "${_DRIVER_DEPLOY}"
+    )
+}
+chk "全部已知且 mx-smi 可用 → host 驱动" "false" "$(_drv 1 0 0)"
+chk "有 PCI 节点缺宿主驱动 → 容器驱动" "true" "$(_drv 1 1 0)"
+chk "任一节点 PCI 探测未知 → 容器驱动兜底" "true" "$(_drv 1 0 1)"
+chk "无 GPU 节点 → 容器驱动(原行为)" "true" "$(_drv 0 0 0)"
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-gpu-vendor-probe: 全部通过"

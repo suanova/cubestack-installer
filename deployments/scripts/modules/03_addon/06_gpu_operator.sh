@@ -34,8 +34,14 @@
 #     开关 CONTAINERD_DEVICE_OWNERSHIP 默认 true)。已运行容器需重建才生效 —— 详见该工具头注释。
 #   · 验证: tools/k8s/verify-metax-gpu.sh 或 --steps verify_metax_gpu(节点清单/汇总 + **非 root
 #     权限探针**: runAsUser:1000 真实 open 设备 + torch.cuda.is_available(), 不通过即 exit 1)。
+#   · 驱动部署方式(2026-11-23 Ubuntu 24.04 实机): METAX_DRIVER_DEPLOY=auto(默认) 时, 若
+#     **所有有沐曦 PCI 设备(vendor 0x9999)的节点** mx-smi 都可用(宿主驱动已安装且可用),
+#     则 driver.deploy=false, **不部署容器驱动**; driver-image(3.8.1.6/3.9.0.14)不含内核  # secret-scan: allow(驱动版本号)
+#     6.8.0-139-generic 的 kernel_module, driver-init.sh 会先 build_kernel_module 再启动
+#     driver-manager → 旧行为下 metax-driver 必然 CrashLoop。无 GPU 的 master 的 mx-smi
+#     不可用不参与该判断; 有 PCI 但 mx-smi 不可用的节点才需要容器驱动(镜像须含对应内核模块)。
 #   · 参考: Kubernetes 沐曦GPU Operator部署文档(metax-gpu-k8s 0.15.3, MXMACA 3.7.0.7)  # secret-scan: allow(MXMACA 版本号)
-# 数据源: cluster.conf (GPU_OPERATOR_ENABLED / METAX_* / REGISTRY_* / NODES / SSH_KEY_NAME)
+# 数据源: cluster.conf (GPU_OPERATOR_ENABLED / METAX_* / METAX_DRIVER_DEPLOY / REGISTRY_* / NODES / SSH_KEY_NAME)
 # 用法:   sudo ./deploy-cluster.sh --enable gpu_operator  或  GPU_OPERATOR_ENABLED=true
 # ============================================================
 set -euo pipefail
@@ -47,6 +53,22 @@ load_config
 # 远端调用薄包装: 不读 stdin(< /dev/null), 避免在循环/here-string 中吞掉调用方输入。
 # lib-common 未提供该包装, 本模块本地定义(与 tools/k8s/ceph-cleanup.sh 同口径)。
 SSH_N() { SSH "$@" </dev/null; }
+
+# 统计节点上的沐曦 PCI 设备数(不依赖驱动; vendor ID 0x9999)。
+# 用途: mx-smi 不可用时区分"无 GPU 的 master"(PCI=0, 不参与驱动决策)与
+#       "有卡但缺宿主驱动"(PCI>0 且 mx-smi unknown → 必须部署容器驱动)。
+_node_metax_pci_count() {   # <ip> [user]
+    local _ip="$1" _u="${2:-$(ssh_user_for_ip "$1")}" _n
+    _n="$(ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_u}@${_ip}" '
+        n=0
+        for f in /sys/bus/pci/devices/*/vendor; do
+            [ "$(cat "$f" 2>/dev/null)" = "0x9999" ] && n=$((n+1))
+        done
+        echo "$n"
+    ' 2>/dev/null || true)"
+    case "${_n}" in ''|*[!0-9]*) echo unknown ;; *) echo "${_n}" ;; esac
+}
 
 # 探测 metax 命名空间状态, 区分"确认不存在"与"探针失败":
 #   0=确认已不存在(kubectl NotFound); 1=仍然存在; 2=无法确认(超时/传输/其它错误)
@@ -276,25 +298,36 @@ ok "前置检查通过(registry=${REGISTRY_BASE}, API=${API_DOMAIN}→${API_ENTR
 #   · 有沐曦 GPU 节点 → 完整等待: 全部组件 DaemonSet Ready + 解除 master 污点 + allocatable 验证
 #   · 无沐曦 GPU(即使有 NVIDIA GPU) → 快速路径: 只等 metax-gpu-operator deployment 与
 #     metax-gpu-label DaemonSet Ready(不再等 driver/maca/gpu-device/scheduler/topo)
-say "检测集群 GPU 厂商(逐节点: NVIDIA PCI + 沐曦 mx-smi)..."
+say "检测集群 GPU 厂商(逐节点: NVIDIA PCI + 沐曦 mx-smi + 沐曦 PCI 0x9999)..."
 HAS_GPU_NODE="0"; GPU_BOARD_COUNT="0"
 HAS_NVIDIA_GPU="0"; METAX_UNKNOWN="0"
+METAX_PCI_NODES="0"; METAX_PCI_NO_DRIVER="0"; METAX_PCI_UNKNOWN="0"
 for _line in "${NODES[@]:-}"; do
     [ -z "${_line}" ] && continue
     node_parse "${_line}"
     [ -n "${NODE_IP}" ] || continue
     read -r _nv _mx <<< "$(node_gpu_probe "${NODE_IP}")"
     _nv="$(printf '%s' "${_nv:-0}" | tr -d '[:space:]' | grep -E '^[0-9]+$' || echo 0)"
+    _mxpci="$(_node_metax_pci_count "${NODE_IP}" "${NODE_USER}")"
+    if [ "${_mxpci}" = "unknown" ]; then
+        METAX_PCI_UNKNOWN="$((METAX_PCI_UNKNOWN + 1))"
+    elif [ "${_mxpci}" -gt 0 ] 2>/dev/null; then
+        METAX_PCI_NODES="$((METAX_PCI_NODES + 1))"
+    fi
     if [ "${_mx:-unknown}" != "unknown" ] && [ "${_mx:-0}" -gt 0 ] 2>/dev/null; then
         HAS_GPU_NODE="1"; GPU_BOARD_COUNT="$((GPU_BOARD_COUNT + _mx))"
-        ok "节点 ${NODE_HOSTNAME}(${NODE_IP}) 检测到 ${_mx} 张沐曦 GPU"
+        ok "节点 ${NODE_HOSTNAME}(${NODE_IP}) 检测到 ${_mx} 张沐曦 GPU(PCI ${_mxpci})"
     else
-        if [ "${_nv}" -gt 0 ] 2>/dev/null; then
+        if [ "${_mxpci}" != "unknown" ] && [ "${_mxpci:-0}" -gt 0 ] 2>/dev/null; then
+            # 有沐曦 PCI 设备但 mx-smi 不可用 = 缺宿主驱动 → 该节点需要容器驱动
+            METAX_PCI_NO_DRIVER="$((METAX_PCI_NO_DRIVER + 1))"
+            warn "节点 ${NODE_HOSTNAME}(${NODE_IP}) 有 ${_mxpci} 个沐曦 PCI 设备, 但 mx-smi 不可用(缺宿主驱动)"
+        elif [ "${_nv}" -gt 0 ] 2>/dev/null; then
             HAS_NVIDIA_GPU="1"
             say "节点 ${NODE_HOSTNAME}(${NODE_IP}) 无沐曦 GPU(检测到 ${_nv} 个 NVIDIA PCI 设备; 非纯 CPU)"
         elif [ "${_mx:-unknown}" = "unknown" ]; then
             METAX_UNKNOWN="1"
-            say "节点 ${NODE_HOSTNAME}(${NODE_IP}) 未检测到沐曦 GPU(mx-smi 不可用; 不判定为纯 CPU)"
+            say "节点 ${NODE_HOSTNAME}(${NODE_IP}) 无沐曦 PCI 设备(mx-smi 不可用; 不判定为纯 CPU)"
         else
             say "节点 ${NODE_HOSTNAME}(${NODE_IP}) 无沐曦 GPU"
         fi
@@ -308,6 +341,43 @@ elif [ "${METAX_UNKNOWN}" = "1" ]; then
     warn "集群未检测到沐曦 GPU(mx-smi 不可用, 状态未知): 采用快速路径; 不判定为纯 CPU"
 else
     warn "集群未检测到 NVIDIA/沐曦 GPU(纯 CPU): 采用快速路径, 仅等 operator + gpu-label Ready 即完成"
+fi
+
+# ---------------- 0.4 驱动部署方式(宿主驱动优先; 2026-11-23 Ubuntu 24.04 实机) ----------------
+# 根因: driver-image(3.8.1.6 / 3.9.0.14)均不含 Ubuntu 24.04 当前内核  # secret-scan: allow(驱动版本号)
+#   6.8.0-139-generic 的 kernel_module; driver-init.sh **先** build_kernel_module(拷贝
+#   metax.ko/mxgvm.ko)**再**启动 driver-manager → 即使节点已装并加载宿主驱动(3.9.1.33),  # secret-scan: allow(驱动版本号)
+#   metax-driver 仍 CrashLoopBackOff(pushd: .../6.8.0-139-generic: No such file)。
+# 修法: 所有"有沐曦 PCI 设备"的节点 mx-smi 都可用时 → driver.deploy=false ——
+#   CRD 支持 deploy 布尔量, operator 不再创建 metax-driver DS, 设备插件继续用宿主驱动。
+#   注意: master 通常无 GPU(PCI=0), 其 mx-smi 不可用**不**代表缺驱动; 只看有 PCI 的节点。
+#   有 PCI 但 mx-smi 不可用的节点才需要容器驱动(此时要求 driver-image 含对应内核模块)。
+#   任一节点 PCI 探测失败(METAX_PCI_UNKNOWN>0)时状态未知, 保留容器驱动兜底。
+_DRIVER_DEPLOY="${METAX_DRIVER_DEPLOY:-auto}"
+case "${_DRIVER_DEPLOY}" in
+    true|false) ;;
+    auto)
+        # 只有"所有有沐曦 PCI 的节点 mx-smi 都可用"才切宿主驱动; 任一节点 PCI 探测失败
+        # (状态未知)都必须保留容器驱动兜底, 否则可能把缺宿主驱动的节点误判为可用。
+        if [ "${HAS_GPU_NODE}" = "1" ] && [ "${METAX_PCI_NO_DRIVER}" = "0" ] \
+            && [ "${METAX_PCI_UNKNOWN}" = "0" ]; then
+            _DRIVER_DEPLOY="false"
+        else
+            _DRIVER_DEPLOY="true"
+        fi
+        ;;
+    *) err "METAX_DRIVER_DEPLOY=${_DRIVER_DEPLOY} 非法(可用 auto|true|false)"; exit 1 ;;
+esac
+if [ "${_DRIVER_DEPLOY}" = "false" ]; then
+    ok "宿主驱动可用(${METAX_PCI_NODES} 个有沐曦 PCI 的节点 mx-smi 正常) → driver.deploy=false, 不部署容器驱动"
+else
+    say "driver.deploy=true(需要容器驱动 driver-image:${METAX_DRIVER_VERSION})"
+    if [ "${METAX_PCI_NO_DRIVER}" -gt 0 ] 2>/dev/null; then
+        warn "  ${METAX_PCI_NO_DRIVER} 个有沐曦 PCI 的节点 mx-smi 不可用(缺宿主驱动)"
+        warn "  容器驱动镜像必须包含这些节点的内核模块, 否则 driver-init 会失败"
+    elif [ "${METAX_PCI_UNKNOWN}" -gt 0 ] 2>/dev/null; then
+        warn "  ${METAX_PCI_UNKNOWN} 个节点 PCI 探测失败, 无法确认宿主驱动状态"
+    fi
 fi
 
 # ---------------- 0.5 节点运行时前置: 设备属主(非 root 访问 GPU 必需) ----------------
@@ -493,13 +563,17 @@ push_extra() {   # <comp> <源镜像>  (如 maca cr.metax-tech.com/public-librar
     return 0
 }
 push_extra "maca" "cr.metax-tech.com/public-library/${METAX_MACA_IMAGE}"
-push_extra "driver-image" "cr.metax-tech.com/public-cloud-release/driver-image:${METAX_DRIVER_VERSION}"
-# 兼容独立驱动包 metax-k8s-driver-image.*.run
-DRV_RUN="$(ls "${METAX_PKG_DIR}"/metax-k8s-driver-image*.run 2>/dev/null | head -1 || true)"
-if [ -n "${DRV_RUN}" ] && [ "${_MODE}" = "run" ]; then
-    say "  发现驱动包 ${DRV_RUN}, 执行 push ..."
-    ( cd "${METAX_PKG_DIR}" && "${DRV_RUN}" ctr push "${METAX_REGISTRY}" -- --plain-http ) 2>/dev/null \
-        && ok "  驱动包镜像已推送" || warn "  驱动包推送失败(忽略, 可改 METAX_DRIVER_DEPLOY_POLICY=PreferHost 用宿主机驱动)"
+if [ "${_DRIVER_DEPLOY}" = "true" ]; then
+    push_extra "driver-image" "cr.metax-tech.com/public-cloud-release/driver-image:${METAX_DRIVER_VERSION}"
+    # 兼容独立驱动包 metax-k8s-driver-image.*.run
+    DRV_RUN="$(ls "${METAX_PKG_DIR}"/metax-k8s-driver-image*.run 2>/dev/null | head -1 || true)"
+    if [ -n "${DRV_RUN}" ] && [ "${_MODE}" = "run" ]; then
+        say "  发现驱动包 ${DRV_RUN}, 执行 push ..."
+        ( cd "${METAX_PKG_DIR}" && "${DRV_RUN}" ctr push "${METAX_REGISTRY}" -- --plain-http ) 2>/dev/null \
+            && ok "  驱动包镜像已推送" || warn "  驱动包推送失败(忽略, 可改 METAX_DRIVER_DEPLOY_POLICY=PreferHost 用宿主机驱动)"
+    fi
+else
+    say "  跳过 driver-image 推送(使用宿主驱动, driver.deploy=false)"
 fi
 ok "镜像推送完成(共推送 ${_PUSHED} 个组件镜像 → ${METAX_REGISTRY})"
 
@@ -522,6 +596,7 @@ helm upgrade --install "${METAX_RELEASE_NAME}" "${CHART_DIR}" \
     --set "registry=${METAX_REGISTRY}" \
     --set "cluster.type=${METAX_CLUSTER_TYPE}" \
     --set "cluster.version=${K8S_VERSION}" \
+    --set "driver.deploy=${_DRIVER_DEPLOY}" \
     --set "driver.deployPolicy=${METAX_DRIVER_DEPLOY_POLICY}" \
     --set "driver.payload.version=${METAX_DRIVER_VERSION}" \
     --set "maca.payload.registry=${METAX_REGISTRY}" \
@@ -557,6 +632,7 @@ fi
 # 条件解除 master 不可调度: 仅当宿主机用 mx-smi 检测到沐曦 GPU 卡的 master 才 uncordon(移除 control-plane/master 污点)。
 # 无沐曦 GPU 的 master 保持默认不可调度; 检测直接在节点上跑 mx-smi, 不依赖集群 label(避免"先有鸡还是蛋")。
 say "  检测 master 节点 GPU(mx-smi)并条件解除不可调度 ..."
+_MASTER_GPU_SEEN=0
 for _line in "${NODES[@]:-}"; do
     [ -z "${_line}" ] && continue
     node_parse "${_line}"
@@ -565,6 +641,7 @@ for _line in "${NODES[@]:-}"; do
         "$(ssh_user_for_ip "${NODE_IP}")@${NODE_IP}" "sudo mx-smi 2>/dev/null | grep 'Attached GPUs' | awk '{print \$NF}'" 2>/dev/null || echo 0)"
     _GPUCNT="$(echo "${_GPUCNT:-0}" | tr -d '[:space:]')"
     if [ "${_GPUCNT:-0}" -gt 0 ] 2>/dev/null; then
+        _MASTER_GPU_SEEN=1
         SSH "${K} taint nodes ${NODE_HOSTNAME} node-role.kubernetes.io/control-plane- >/dev/null 2>&1" || true
         SSH "${K} taint nodes ${NODE_HOSTNAME} node-role.kubernetes.io/master- >/dev/null 2>&1" || true
         SSH "${K} uncordon ${NODE_HOSTNAME} >/dev/null 2>&1" || true
@@ -573,7 +650,9 @@ for _line in "${NODES[@]:-}"; do
         say "  master ${NODE_HOSTNAME}(${NODE_IP}) 未检测到 GPU, 保持默认不可调度"
     fi
 done
-# 等 DS 调度到已解除的 master 并给有 GPU 的 master 打标(gpu-label 先跑)
+# 等 DS 调度到已解除的 master 并给有 GPU 的 master 打标(gpu-label 先跑)。
+# 无 master 有 GPU(常见: 卡只在 worker)时无需等待 —— 否则每次都白等 300s。
+if [ "${_MASTER_GPU_SEEN}" = "1" ]; then
 say "  等待 gpu-label 给有 GPU 的 master 打标(最长 300s)..."
 for _i in $(seq 1 60); do
     # 用标签选择器只取匹配节点名(轻量; 避免 `get nodes -o json` 在大集群(如 500 节点)返回巨大数据)
@@ -581,6 +660,10 @@ for _i in $(seq 1 60); do
     [ "${_GMASTERS:-0}" -ge 1 ] && { ok "  ${_GMASTERS} 个 master 已获得 gpu.installed 标签"; break; }
     sleep 5
 done
+else
+    say "  无 master 检测到 GPU, 跳过 master gpu-label 等待"
+fi
+unset _MASTER_GPU_SEEN
 
 # 验证节点 GPU allocatable(metax-tech.com/gpu)
 say "  验证节点 GPU 资源 allocatable ..."
@@ -626,6 +709,11 @@ else
 fi
 echo "  namespace:   ${METAX_NAMESPACE}"
 echo "  镜像仓库:    ${METAX_REGISTRY}"
+if [ "${_DRIVER_DEPLOY}" = "false" ]; then
+    echo "  驱动:        使用宿主驱动(driver.deploy=false, 未部署 metax-driver)"
+else
+    echo "  驱动:        容器驱动 driver-image:${METAX_DRIVER_VERSION}(driver.deploy=true)"
+fi
 echo "  资源查看:    kubectl get pods,ds -n ${METAX_NAMESPACE}"
 echo "  节点 GPU:    kubectl get nodes -o json | jq '.items[].status.allocatable | with_entries(select(.key|startswith(\"metax\")))'"
 echo "  GPU 任务测试: 参考文档 §5 gpu-task.yaml(vectorAdd), 需 MACA 镜像就绪"
@@ -662,6 +750,11 @@ else
 fi
 echo "  namespace:   ${METAX_NAMESPACE}"
 echo "  镜像仓库:    ${METAX_REGISTRY}"
+if [ "${_DRIVER_DEPLOY}" = "false" ]; then
+    echo "  驱动:        使用宿主驱动(driver.deploy=false, 未部署 metax-driver)"
+else
+    echo "  驱动:        容器驱动 driver-image:${METAX_DRIVER_VERSION}(driver.deploy=true)"
+fi
 echo "  资源查看:    kubectl get pods,ds -n ${METAX_NAMESPACE}"
 echo "  说明:       当前集群无沐曦 GPU 节点, 已跳过 driver/maca/device/scheduler 等 GPU 组件等待;"
 [ "${HAS_NVIDIA_GPU}" = "1" ] && echo "              检测到 NVIDIA GPU: 本集群不是纯 CPU 环境; 沐曦 GPU 资源仍不可用。"

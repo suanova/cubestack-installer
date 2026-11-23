@@ -87,7 +87,34 @@ if echo "${OUT}" | grep -q "GPU 识别节点数: 0 "; then
     say "权限探针: 跳过(集群无沐曦 GPU 节点)"
 else
     _PROBE_IMG="${METAX_PERM_PROBE_IMAGE:-${REGISTRY_DOMAIN:-registry.cubestack.io}:${REGISTRY_PORT:-5000}/suanova/maca-pytorch:${DEV_LAB_MACA_TAG:-${DEV_LAB_IMAGE_TAG:-latest}}}"
+
+    # 探针镜像必须已在集群 registry(节点不从 Harbor 拉; dev_lab 未推送时 Pod 会 Pending,
+    # 那是 ImagePull 问题, 不能误报成"设备无权限")。
+    _probe_path="${_PROBE_IMG#*/}"
+    _reg_direct="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-5000}}"
+    _probe_ok=0
+    if command -v skopeo >/dev/null 2>&1; then
+        skopeo inspect --tls-verify=false --no-creds "docker://${_reg_direct}/${_probe_path}" >/dev/null 2>&1 && _probe_ok=1
+    else
+        _probe_ok=1   # 无 skopeo 时交给 Pod 自己暴露真实原因
+    fi
+    if [ "${_probe_ok}" != "1" ]; then
+        if [ "${METAX_REQUIRE_PERM_PROBE:-false}" = "true" ]; then
+            err "  权限探针镜像不在集群 registry: ${_PROBE_IMG}"
+            err "    → 先 --steps dev_lab 推送 dev-lab 镜像, 或 METAX_PERM_PROBE_IMAGE 指定可用镜像"
+            exit 1
+        fi
+        warn "  权限探针镜像不在集群 registry: ${_PROBE_IMG}"
+        warn "  → 跳过非 root 权限探针(节点 GPU 识别已通过; 先 --steps dev_lab 推送镜像,"
+        warn "    或 METAX_PERM_PROBE_IMAGE 指定可达镜像; 强制要求设 METAX_REQUIRE_PERM_PROBE=true)"
+        exit 0
+    fi
     say "权限探针: runAsUser=1000 真实打开 /dev/mxcd + torch.cuda.is_available()(镜像 ${_PROBE_IMG})..."
+    # 首次拉 dev-lab maca-pytorch(约 9.3GB)可能 >3min; 默认给 600s, 避免把"还在拉镜像"误判为失败
+    _probe_timeout="${METAX_PERM_PROBE_TIMEOUT_SECONDS:-600}"
+    case "${_probe_timeout}" in ''|*[!0-9]*|0) _probe_timeout=600 ;; esac
+    _probe_tries=$(( _probe_timeout / 5 )); [ "${_probe_tries}" -ge 1 ] || _probe_tries=1
+    say "  探针等待上限: ${_probe_timeout}s(镜像首次拉取可能较慢)"
     SSH "${K} -n default delete pod metax-devperm-probe --ignore-not-found >/dev/null 2>&1" || true
     if SSH "${K} -n default apply -f - >/dev/null 2>&1" <<EOF
 apiVersion: v1
@@ -109,19 +136,51 @@ spec:
 EOF
     then
         _state=""
-        for _i in $(seq 1 36); do
+        _reason=""
+        for _i in $(seq 1 ${_probe_tries}); do
             _state="$( (SSH "${K} -n default get pod metax-devperm-probe -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
             case "${_state}" in Succeeded|Failed) break ;; esac
+            # 镜像拉取失败(Pending)不会自行恢复: 立即结束等待, 避免白等满超时;
+            # 是否放行由下方 ImagePullBackOff 分支按 METAX_REQUIRE_PERM_PROBE 决定。
+            _reason="$( (SSH "${K}" -n default get pod metax-devperm-probe -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null) || true )"
+            case "${_reason}" in ImagePullBackOff|ErrImagePull|InvalidImageName) break ;; esac
             sleep 5
         done
-        ( SSH "${K} -n default logs metax-devperm-probe 2>/dev/null" || true ) | sed 's/^/    /'
-        SSH "${K} -n default delete pod metax-devperm-probe --ignore-not-found >/dev/null 2>&1" || true
+        _reason="$( (SSH "${K}" -n default get pod metax-devperm-probe -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null) || true )"
+        _logs="$( (SSH "${K}" -n default logs metax-devperm-probe 2>/dev/null) || true )"
+        [ -n "${_logs}" ] && printf '%s\n' "${_logs}" | sed 's/^/    /'
         if [ "${_state}" = "Succeeded" ]; then
+            SSH "${K}" -n default delete pod metax-devperm-probe --ignore-not-found >/dev/null 2>&1 || true
             ok "  权限探针通过: 非 root 可真实打开 GPU 设备"
         else
-            err "  权限探针失败(${_state:-未结束}): 非 root 打不开 GPU 设备(资源分配了却无权限)!"
-            err "    → 检查节点 /etc/containerd/config.toml 的 device_ownership_from_security_context=true;"
-            err "      修复: bash deployments/scripts/tools/node/ensure-containerd-device-ownership.sh(改后需重建工作负载)"
+            ( SSH "${K}" -n default describe pod metax-devperm-probe 2>/dev/null || true ) | tail -25 | sed 's/^/    /'
+            SSH "${K}" -n default delete pod metax-devperm-probe --ignore-not-found >/dev/null 2>&1 || true
+            case "${_reason}" in
+                ImagePullBackOff|ErrImagePull|InvalidImageName)
+                    # 探针是可选的: 默认镜像不可达/自定义镜像拉取失败时只告警跳过,
+                    # 不能把"镜像不可用"误报成 GPU 权限失败; 显式要求时仍硬失败。
+                    if [ "${METAX_REQUIRE_PERM_PROBE:-false}" != "true" ]; then
+                        warn "  权限探针镜像不可用(${_reason}): ${_PROBE_IMG} → 跳过非 root 权限探针(节点 GPU 识别已通过)"
+                        exit 0
+                    fi
+                    err "  权限探针镜像拉取失败(${_reason}): ${_PROBE_IMG}"
+                    err "    → 先 --steps dev_lab 推送 dev-lab 镜像, 或 METAX_PERM_PROBE_IMAGE 指定可达镜像"
+                    ;;
+                "")
+                    if printf '%s' "${_logs}" | grep -qiE 'PermissionError|EACCES|Permission denied'; then
+                        err "  权限探针失败(${_state:-未结束}): 非 root 打不开 GPU 设备(资源分配了却无权限)!"
+                        err "    → 检查节点 /etc/containerd/config.toml 的 device_ownership_from_security_context=true;"
+                        err "      修复: bash deployments/scripts/tools/node/ensure-containerd-device-ownership.sh(改后需重建工作负载)"
+                    elif [ "${_state}" = "Failed" ]; then
+                        err "  权限探针失败(容器退出非 0): 见上方日志"
+                    else
+                        err "  权限探针未就绪(${_state:-超时}): 检查上方 Pod Events(调度/镜像/资源)"
+                    fi
+                    ;;
+                *)
+                    err "  权限探针失败(${_state}, reason=${_reason}): 见上方 Events/日志"
+                    ;;
+            esac
             exit 1
         fi
     else
