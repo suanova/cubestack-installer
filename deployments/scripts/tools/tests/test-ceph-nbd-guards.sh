@@ -20,6 +20,7 @@ CEPH="${REPO_ROOT}/deployments/scripts/modules/03_addon/02_ceph.sh"
 EXPOSE="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-expose-external.sh"
 CLEANUP="${MODULE_UNDER_TEST:-${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-cleanup.sh}"
 RBDC="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-rbd-cleanup.sh"
+TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 fail=0
 chk_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  ok  $1"; else echo "  FAIL $1: [$3] 未包含 [$2]"; fail=1; fi; }
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }
@@ -138,6 +139,63 @@ chk_contains "rbd-cleanup 记录 holders 读取状态" "_h_rc" "${RBDC}"
 chk_contains "rbd-cleanup 记录 open fd 读取状态" "_fd_rc" "${RBDC}"
 chk_contains "rbd-cleanup 记录 inflight 读取状态" "_inf_rc" "${RBDC}"
 chk_contains "rbd-cleanup 记录 findmnt 错误" "_fm_err" "${RBDC}"
+
+echo "== ⑥ inventory 驱动 + 精确设备节点清理(2026-11-23) =="
+chk_contains "rbd-cleanup 支持 --inventory" '--inventory) INVENTORY=' "${RBDC}"
+chk_contains "rbd-cleanup 解析 ansible-inventory" 'ansible-inventory -i "${INVENTORY}" --list' "${RBDC}"
+chk_contains "rbd-cleanup 使用 inventory 的 user/key" 'INVENTORY_TARGETS+=("${_i_ip}|${_i_user' "${RBDC}"
+chk_contains "只删已确认 unmap 的 id 设备节点" 'sudo rm -f /dev/rbd${id}' "${RBDC}"
+chk_not_contains "不再通配删除 /dev/rbd*" 'sudo rm -f /dev/rbd* 2>/dev/null' "${RBDC}"
+chk_contains "list 模式跳过 kubelet 目录清理" 'if [ "${LIST_ONLY}" != "1" ]; then' "${RBDC}"
+chk_contains "offline 守卫传 inventory" '--inventory "${INVENTORY_DIR}/hosts.yml"' "${REPO_ROOT}/deployments/kubespray/cubestack-offline.sh"
+
+echo "== ⑦ inventory 行为: 用 hosts.yml 的主机/用户, 且 --list 只读 =="
+mkdir -p "${TMP}/inv-bin"
+cat > "${TMP}/inv-bin/ansible-inventory" <<'FAKE'
+#!/bin/bash
+printf '%s
+' '{"_meta":{"hostvars":{"inv1":{"ansible_host":"10.9.9.9","ansible_user":"invuser","ansible_ssh_private_key_file":"/tmp/fake-key"}}},"kube_control_plane":{"hosts":["inv1"]},"kube_node":{"hosts":[]}}'
+FAKE
+cat > "${TMP}/inv-bin/ssh" <<'FAKE'
+#!/bin/bash
+printf '%s
+' "$*" >> "${FAKE_INV_SSH_LOG:?}"
+exit 0
+FAKE
+chmod +x "${TMP}/inv-bin/ansible-inventory" "${TMP}/inv-bin/ssh"
+cat > "${TMP}/inv-cluster.conf" <<'EOF'
+NODES=("worker,wrong,10.0.0.1,root,-")
+SSH_USER="root"
+KUBESPRAY_PROFILE="none"
+EOF
+cat > "${TMP}/hosts.yml" <<'EOF'
+all:
+  hosts:
+    inv1:
+      ansible_host: 10.9.9.9
+      ansible_user: invuser
+EOF
+: > "${TMP}/inv-ssh.log"
+out="$(PATH="${TMP}/inv-bin:${PATH}" CLUSTER_CONF="${TMP}/inv-cluster.conf"     FAKE_INV_SSH_LOG="${TMP}/inv-ssh.log"     bash "${RBDC}" --list --skip-keep-query --inventory "${TMP}/hosts.yml" 2>&1)"; rc=$?
+chk "inventory 模式退出码" "0" "${rc}"
+chk_contains "命中 inventory 主机" "invuser@10.9.9.9" "${TMP}/inv-ssh.log"
+if grep -qF 'root@10.0.0.1' "${TMP}/inv-ssh.log" 2>/dev/null; then
+    echo "  FAIL 不应触碰 cluster.conf 的主机"; fail=1
+else
+    echo "  ok  不触碰 cluster.conf 的主机"
+fi
+if grep -qE 'sudo rm -f|/var/lib/kubelet' "${TMP}/inv-ssh.log" 2>/dev/null; then
+    echo "  FAIL --list 不应写设备节点/kubelet 目录"; fail=1
+else
+    echo "  ok  --list 只读(无 rm/kubelet 目录清理)"
+fi
+# cluster.conf 缺失时, 只要 inventory 可用就必须继续(覆盖安装 reset 后常见)
+: > "${TMP}/inv-ssh.log"
+out2="$(PATH="${TMP}/inv-bin:${PATH}" CLUSTER_CONF="${TMP}/missing.conf" \
+    FAKE_INV_SSH_LOG="${TMP}/inv-ssh.log" \
+    bash "${RBDC}" --list --skip-keep-query --inventory "${TMP}/hosts.yml" 2>&1)"; rc2=$?
+chk "无 cluster.conf 仍可运行" "0" "${rc2}"
+chk_contains "无 cluster.conf 仍命中 inventory 主机" "invuser@10.9.9.9" "${TMP}/inv-ssh.log"
 
 echo ""
 if [ "${fail}" = "0" ]; then

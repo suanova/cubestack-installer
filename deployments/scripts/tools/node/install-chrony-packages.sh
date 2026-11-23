@@ -13,7 +13,7 @@
 #   · 安装集内 chrony 与 systemd-timesyncd 互斥: 复用 lib-common 的
 #     install_debs_offline(预卸互斥 → 已装即跳 → 批量 dpkg → 逐包隔离).
 #
-# 用法: bash install-chrony-packages.sh [--ip <IP>]...
+# 用法: bash install-chrony-packages.sh [--ip <IP>]... [--offline-root <dir>]
 #   --ip 可多次; 不给 = cluster.conf NODES 全部节点(受 ONLY_HOSTS 过滤)
 # 退出码: 0=全部目标节点 chronyd/chronyc 就绪; 1=有节点失败
 # 数据源: <OFFLINE_FILES_ROOT>/os/packages/chrony/*.deb
@@ -28,12 +28,20 @@ load_config
 
 # ---------------- 目标节点 --ip 显式优先; 否则 NODES 全部(ONLY_HOSTS 过滤) ----------------
 IPS=()
+_OFFLINE_ROOT_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --ip) IPS+=("${2:?--ip 需要地址}"); shift 2 ;;
+        --offline-root) _OFFLINE_ROOT_ARG="${2:?--offline-root 需要值}"; shift 2 ;;
         *) err "未知参数: $1"; exit 1 ;;
     esac
 done
+# 手动安装器已验证的离线根优先于 load_config 的 release/默认根。
+if [ -n "${_OFFLINE_ROOT_ARG}" ]; then
+    OFFLINE_FILES_ROOT="${_OFFLINE_ROOT_ARG}"
+    export OFFLINE_FILES_ROOT
+fi
+unset _OFFLINE_ROOT_ARG
 NODE_ENTRIES=()
 for line in "${NODES[@]:-}"; do
     [ -z "${line}" ] && continue

@@ -58,6 +58,9 @@ def check_metadata(ctx, root, layout, args):
     success_path = os.path.join(root, "_SUCCESS")
     success = {}
     has_sums = os.path.isfile(sums_path)
+    # 提前解析清单: _SUCCESS 的 files/bytes 绑定需要区分"release payload"与
+    # "本地离线包(os/、base/ 中未登记的文件)"。后解析会重复报 manifest 错误。
+    sums = parse_sha256sums(ctx, sums_path) if has_sums else {}
 
     # ---- _SUCCESS ----
     if os.path.isfile(success_path):
@@ -78,6 +81,13 @@ def check_metadata(ctx, root, layout, args):
             if actual != want_sizes:
                 fail(ctx, "_SUCCESS", "success_binding",
                      "sizes 与实际 SIZES 不符", want_sizes, actual)
+        # 与下方 extra_file 例外保持一致: os/、base/ 下未登记的文件是本地离线包/元数据,
+        # 不属于 release payload, 不计入 _SUCCESS 的 files/bytes 绑定。
+        _local_unlisted = {rel for rel in ctx.files
+                           if rel.startswith(("os/", "base/")) and rel not in sums}
+        _bind_files = len(ctx.files) - len(_local_unlisted)
+        _bind_bytes = ctx.total_bytes - sum(
+            os.stat(os.path.join(root, rel)).st_size for rel in _local_unlisted)
         for key, path in (("files", None), ("bytes", None)):
             # 用 key in success 而不是 success.get(key): 声明了 files=/bytes= 但值为空
             # 也必须走 int("") 报错, 不能当成"未提供"静默跳过计数校验。
@@ -88,20 +98,22 @@ def check_metadata(ctx, root, layout, args):
                     fail(ctx, "_SUCCESS", "success_binding",
                          f"{key}={success[key]} 不是整数")
                     continue
-                if key == "files" and want_n != len(ctx.files):
+                if key == "files" and want_n != _bind_files:
                     if getattr(args, "skip_missing", False):
-                        warn(ctx, f"_SUCCESS.files={want_n} != 当前 {len(ctx.files)}"
+                        warn(ctx, f"_SUCCESS.files={want_n} != 当前 {_bind_files}"
                                   "(缺失文件已跳过; 覆盖性检查为准)")
                     else:
                         fail(ctx, "_SUCCESS", "success_binding",
-                             f"files={want_n} != 实际 {len(ctx.files)}", want_n, len(ctx.files))
-                if key == "bytes" and want_n != ctx.total_bytes:
+                             f"files={want_n} != 实际 {_bind_files}(已排除本地 os/base 包)",
+                             want_n, _bind_files)
+                if key == "bytes" and want_n != _bind_bytes:
                     if getattr(args, "skip_missing", False):
-                        warn(ctx, f"_SUCCESS.bytes={want_n} != 当前 {ctx.total_bytes}"
+                        warn(ctx, f"_SUCCESS.bytes={want_n} != 当前 {_bind_bytes}"
                                   "(缺失文件已跳过; 覆盖性检查为准)")
                     else:
                         fail(ctx, "_SUCCESS", "success_binding",
-                             f"bytes={want_n} != 实际 {ctx.total_bytes}", want_n, ctx.total_bytes)
+                             f"bytes={want_n} != 实际 {_bind_bytes}(已排除本地 os/base 包)",
+                             want_n, _bind_bytes)
     elif layout == "release" and not args.staging:
         fail(ctx, "_SUCCESS", "success_missing", "release 布局缺少 _SUCCESS")
     elif args.require_success:
@@ -135,7 +147,6 @@ def check_metadata(ctx, root, layout, args):
         ctx.checks["metadata"] = "fail"
         return {}
 
-    sums = parse_sha256sums(ctx, sums_path)
     disk = set(ctx.files)
     listed = set(sums)
     for rel in sorted(listed - disk):

@@ -154,6 +154,15 @@ chk "node_cmd 不再裸跑 command -v chronyc(避免 sudo builtin)" "0" \
 chk "chronyc 存在性检查至少 3 处 bash -c" "1" \
     "$([ "$(command grep -c "bash -c 'command -v chronyc" "${SETUP}" 2>/dev/null || true)" -ge 3 ] && echo 1 || echo 0)"
 
+echo "== ⑤b fallback: 渲染时序 + chrony 客户端不指向 timesyncd master =="
+chk_contains "apply 在 fallback 判定后渲染客户端脚本" 'render_node_script "${_client_server}"' "$(cat "${SETUP}")"
+chk_contains "fallback 清空 chrony SERVER" '_client_server=""' "$(cat "${SETUP}")"
+chk_contains "fallback 清空 timesyncd 上游" 'NTP_TIMESYNCD_SERVER=""' "$(cat "${SETUP}")"
+chk_contains "--check 也渲染模板(不探测 master)" 'render_node_script "${NTP_AUTHORITY}"' "$(cat "${SETUP}")"
+chk_contains "生成脚本保留既有 chrony 上游" "保留节点既有的可用上游" "$(cat "${SETUP}")"
+chk_contains "fallback 分支确认守护进程" "systemctl is-active chrony" "$(cat "${SETUP}")"
+chk_not_contains "不再在生成后立即用旧默认值替换" 'sed -i "s|__AUTHORITY__|${NTP_AUTHORITY}|g" "${NODE_SCRIPT}"' "$(cat "${SETUP}")"
+
 echo "== ⑥ workerbm 自动装包已停用(OS 预装/手动) =="
 chk_contains "workerbm 停用提示" "已停用" "$(cat "${WORKERBM}")"
 chk_contains "workerbm 指向手动工具" "install-worker-packages" "$(cat "${WORKERBM}")"

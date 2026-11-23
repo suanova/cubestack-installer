@@ -18,7 +18,7 @@
 #   · **chrony/timesyncd 互斥护栏**(2026-10-07 事故): 节点已有 chrony(VM 黄金镜像)时跳过
 #     systemd-timesyncd —— 二者 apt 互斥, 对账装 timesyncd 会把权威 NTP 服务端摘掉 ⇒ 05_k8s_ntp 失败。
 #
-# 用法: reconcile-node-packages.sh [--ip <IP>]... [--dry-run] [--user <u>]
+# 用法: reconcile-node-packages.sh [--ip <IP>]... [--dry-run] [--user <u>] [--offline-root <dir>]
 #        [--scope general|helm-nodejs|all]
 #        --scope 选择离线包范围(默认 all, 兼容旧行为):
 #          general     = os/packages/ubuntu-<VERSION_ID>(节点通用 OS 包; 手动脚本用)
@@ -35,16 +35,23 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
 # USER 留空 = 按节点逐个解析(ssh_user_for_ip: NODES 逐行覆盖 → 全局 SSH_USER), --user 显式覆盖全部
-DRY=0; USER=""; IPS=(); SCOPE="all"
+DRY=0; USER=""; IPS=(); SCOPE="all"; _OFFLINE_ROOT_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --ip) IPS+=("${2:?--ip 需要地址}"); shift 2 ;;
         --user) USER="$2"; shift 2 ;;
         --dry-run) DRY=1; shift ;;
         --scope) SCOPE="${2:?--scope 需要值}"; shift 2 ;;
+        --offline-root) _OFFLINE_ROOT_ARG="${2:?--offline-root 需要值}"; shift 2 ;;
         *) err "未知参数: $1"; exit 1 ;;
     esac
 done
+# 手动安装器已验证的离线根优先于 load_config 的 release/默认根。
+if [ -n "${_OFFLINE_ROOT_ARG}" ]; then
+    OFFLINE_FILES_ROOT="${_OFFLINE_ROOT_ARG}"
+    export OFFLINE_FILES_ROOT
+fi
+unset _OFFLINE_ROOT_ARG
 case "${SCOPE}" in
     general|helm|all) ;;
     helm-nodejs) SCOPE="helm" ;;   # 兼容旧参数名(nodejs 已移除)

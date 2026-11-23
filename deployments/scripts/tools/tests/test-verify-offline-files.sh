@@ -139,6 +139,19 @@ printf 'sha256sums=%s\nsizes=%s\nfiles=\n' \
 chk "空 files= 拒绝" "1" "$(run "${TOOL}" --root "${TMP}/emptycount" --level metadata)"
 chk_contains "点名 files= 非整数" "files= 不是整数" "$(cat "${TMP}/out")"
 
+echo "== ⑥b 本地 os/base 包不计入 _SUCCESS files/bytes 绑定 =="
+mkdir -p "${TMP}/localpkg/os/packages/ubuntu-24.04"
+printf 'x' > "${TMP}/localpkg/a.txt"
+mk_manifests "${TMP}/localpkg"
+printf 'release=9.9.9\nsha256sums=%s\nsizes=%s\nfiles=1\nbytes=1\n' \
+    "$(sha256sum "${TMP}/localpkg/SHA256SUMS" | awk '{print $1}')" \
+    "$(sha256sum "${TMP}/localpkg/SIZES" | awk '{print $1}')" \
+    > "${TMP}/localpkg/_SUCCESS"
+printf 'local' > "${TMP}/localpkg/os/packages/ubuntu-24.04/local.deb"
+chk "未登记 os 包不破坏 _SUCCESS 绑定" "0" \
+    "$(run "${TOOL}" --root "${TMP}/localpkg" --layout release --release 9.9.9 --level metadata --fail-missing)"
+chk_contains "os 包按本地包例外告警" "本地离线包/元数据目录" "$(cat "${TMP}/out")"
+
 echo "== ⑦ 结构: 截断 tar / 空壳 docker-archive =="
 mkdir -p "${TMP}/st" "${TMP}/st_src" "${TMP}/st_shellsrc"
 printf 'layerdata' > "${TMP}/st_src/layer.tar"

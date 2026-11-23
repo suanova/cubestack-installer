@@ -45,6 +45,7 @@ chk_not_contains "工具不写 /etc/chrony/chrony.conf" "/etc/chrony/chrony.conf
 chk_not_contains "工具不重启 chrony" "systemctl restart chrony" "${TOOL}"
 chk_contains "工具使用离线装包原语" "install_debs_offline" "${TOOL}"
 chk_contains "工具引用专用安装集" "os/packages/chrony" "${TOOL}"
+chk_contains "工具支持 --offline-root(手动安装器已验证根)" "--offline-root) _OFFLINE_ROOT_ARG=" "${TOOL}"
 chk_contains "工具幂等跳过已装 chrony" "已安装 chrony(install ok installed), 跳过" "${TOOL}"
 # 预卸 timesyncd 的安全门: 依赖预检 / 回滚包备份 / 失败恢复
 chk_contains "预卸前做离线依赖预检" "_deb_set_missing" "${LIB}"

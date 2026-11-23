@@ -416,6 +416,14 @@ CFG
     if [ "${DAEMON_OK}" != "1" ]; then
         echo "NO-TIME-DAEMON(chrony 未安装/未启动, systemd-timesyncd 也未 active)"
     fi
+else
+    # fallback 模式(首 master 只有 timesyncd, 不提供 123): 不重写 chrony 配置,
+    # 保留节点既有的可用上游; 只确认有 active 的时间守护进程, 让收尾判定成立。
+    if systemctl is-active chrony >/dev/null 2>&1 || systemctl is-active chronyd >/dev/null 2>&1; then
+        DAEMON_OK=1
+    elif systemctl is-active systemd-timesyncd >/dev/null 2>&1; then
+        DAEMON_OK=1
+    fi
 fi
 
 # 一次性硬对齐: 仅当 chrony 未能即时精调(makestep 失败/无 chrony)时,
@@ -452,14 +460,18 @@ date +%s%3N
 EOF
 } > "${NODE_SCRIPT}"
 chmod +x "${NODE_SCRIPT}"
-sed -i "s|__AUTHORITY__|${NTP_AUTHORITY}|g" "${NODE_SCRIPT}"
-if [ -n "${NTP_UPSTREAM:-}" ]; then
-    sed -i "s|__UPSTREAM_LINE__|${NTP_UPSTREAM}|g" "${NODE_SCRIPT}"
-else
-    sed -i "/__UPSTREAM_LINE__/d" "${NODE_SCRIPT}"
-fi
-# timesyncd 客户端 NTP 上游: 正常模式=首 master(或显式 NTP_SERVER); fallback 模式=空(保留默认上游)
-sed -i "s|__TIMESYNCD_SERVER__|${NTP_TIMESYNCD_SERVER}|g" "${NODE_SCRIPT}"
+# 模板渲染: apply 必须等 master_chrony_setup 完成 fallback 判定后再调用(见主流程);
+# --check/--delete 不探测 master, 使用默认权威/上游。
+render_node_script() {  # <client-server> <timesyncd-server> <upstream>
+    local _srv="$1" _ts="$2" _up="$3"
+    sed -i "s|__AUTHORITY__|${_srv}|g" "${NODE_SCRIPT}"
+    if [ -n "${_up}" ]; then
+        sed -i "s|__UPSTREAM_LINE__|${_up}|g" "${NODE_SCRIPT}"
+    else
+        sed -i "/__UPSTREAM_LINE__/d" "${NODE_SCRIPT}"
+    fi
+    sed -i "s|__TIMESYNCD_SERVER__|${_ts}|g" "${NODE_SCRIPT}"
+}
 
 # 读取单节点时钟偏差(优先 chrony 自身 offset; 回退 RTT 补偿的 SSH date)
 # 权威基准: 第一个 master(或显式 NTP_SERVER)的时钟, 不再用宿主机(installer)时钟。
@@ -675,6 +687,7 @@ verify_clocks() {
 # ---------------- 主流程 ----------------
 case "${ACTION}" in
     --check)
+        render_node_script "${NTP_AUTHORITY}" "${NTP_TIMESYNCD_SERVER}" "${NTP_UPSTREAM:-}"
         verify_clocks || exit $?
         ;;
     --delete)
@@ -693,6 +706,15 @@ case "${ACTION}" in
         ;;
     apply)
         master_chrony_setup
+        # fallback(首 master 仅 timesyncd)时不能把 chrony 客户端指向它:
+        # 清空 SERVER 让节点保留既有 chrony 上游; timesyncd 客户端也保留默认上游。
+        _client_server="${NTP_AUTHORITY}"
+        if [ "${NTP_TIMESYNCD_FALLBACK}" = "1" ]; then
+            _client_server=""
+            NTP_TIMESYNCD_SERVER=""
+        fi
+        render_node_script "${_client_server}" "${NTP_TIMESYNCD_SERVER}" "${NTP_UPSTREAM:-}"
+        unset _client_server
         resolve_authority_creds
         say "下发并执行节点时间同步(chrony/timesyncd + 一次性硬对齐, 权威=${NTP_AUTHORITY}) ..."
         REACH_FAIL=""

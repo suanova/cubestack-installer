@@ -2093,9 +2093,14 @@ cmd_install() {
     _rbd_cleanup="${SCRIPT_DIR}/../scripts/tools/k8s/ceph-rbd-cleanup.sh"
     if [ -f "${_rbd_cleanup}" ]; then
         log "清理节点残留内核 rbd 映射(仅空闲; 防 Ansible vgs 扫描挂起)..."
-        if ! bash "${_rbd_cleanup}" --skip-keep-query --fail-if-left; then
+        # ★ 2026-11-23(CodeRabbit): 节点/用户/密钥以本次 hosts.yml 为准(与 reset/Kubespray
+        #   同源); cluster.conf 缺失或与其不一致时, 仍只清理实际安装目标。
+        _rbd_inv_args=()
+        [ -f "${INVENTORY_DIR}/hosts.yml" ] && _rbd_inv_args=(--inventory "${INVENTORY_DIR}/hosts.yml")
+        if ! bash "${_rbd_cleanup}" ${_rbd_inv_args[@]+"${_rbd_inv_args[@]}"} --skip-keep-query --fail-if-left; then
             err "残留内核 rbd 映射未清零(kubespray 的 vgs 会永久 D 态)。请对残留节点硬复位(sudo reboot -f)后重跑。"
         fi
+        unset _rbd_inv_args
         log "✅ 内核 rbd 映射已清零(无残留/无未知)"
     else
         warn "未找到 ${_rbd_cleanup}, 跳过 rbd 残留清理(若节点有旧 rbd 映射, kubespray 可能挂起)"

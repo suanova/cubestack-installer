@@ -27,6 +27,11 @@ chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$
 chk_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  ok  $1"; else echo "  FAIL $1: [$3] 未包含 [$2]"; fail=1; fi; }
 chk_not_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  FAIL $1: [$3] 不应包含 [$2]"; fail=1; else echo "  ok  $1"; fi; }
 
+# 手动安装器透传的离线根必须优先于 load_config 的默认/release 根
+grep -qF -- '--offline-root) _OFFLINE_ROOT_ARG=' "${TOOL}" \
+    && echo "  ok  支持 --offline-root" \
+    || { echo "  FAIL 缺少 --offline-root"; fail=1; }
+
 # 临时配置/离线目录
 cat > "${TMP}/cluster.conf" <<'EOF'
 NODES=("worker,w1,10.0.0.1,root,-")
