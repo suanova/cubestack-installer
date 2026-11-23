@@ -206,6 +206,8 @@ chk_contains "无 cluster.conf 仍命中 inventory 主机" "invuser@10.9.9.9" "$
 # 不能把 backup 等无关组也送进 cleanup_node(2026-11-23 CodeRabbit)。
 cat > "${TMP}/hosts-fallback.yml" <<'EOF'
 all:
+  vars:
+    ansible_user: root
   children:
     k8s_cluster:
       children:
@@ -213,8 +215,9 @@ all:
           hosts:
             cp1:
               ansible_host: 10.0.0.1
-              ansible_user: k8suser
         kube_node:
+          vars:
+            ansible_ssh_private_key_file: /tmp/group-key
           children:
             node_children:
               hosts:
@@ -232,8 +235,9 @@ out3="$(PATH="${TMP}/inv-bin:${PATH}" CLUSTER_CONF="${TMP}/missing.conf" \
     FAKE_INV_FAIL=1 FAKE_INV_SSH_LOG="${TMP}/inv-ssh.log" \
     bash "${RBDC}" --list --skip-keep-query --inventory "${TMP}/hosts-fallback.yml" 2>&1)"; rc3=$?
 chk "fallback 退出码" "0" "${rc3}"
-chk_contains "fallback 命中控制面" "k8suser@10.0.0.1" "${TMP}/inv-ssh.log"
-chk_contains "fallback 命中子组 worker" "k8suser@10.0.0.2" "${TMP}/inv-ssh.log"
+chk_contains "fallback 继承 all.vars 用户" "root@10.0.0.1" "${TMP}/inv-ssh.log"
+chk_contains "fallback host vars 覆盖组级用户" "k8suser@10.0.0.2" "${TMP}/inv-ssh.log"
+chk_contains "fallback 继承组级私钥" "-i /tmp/group-key" "${TMP}/inv-ssh.log"
 if grep -qF 'backuser@10.0.0.3' "${TMP}/inv-ssh.log" 2>/dev/null; then
     echo "  FAIL fallback 不应清理 backup 组"; fail=1
 else

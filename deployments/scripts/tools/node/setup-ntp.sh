@@ -417,13 +417,30 @@ CFG
         echo "NO-TIME-DAEMON(chrony 未安装/未启动, systemd-timesyncd 也未 active)"
     fi
 else
-    # fallback 模式(首 master 只有 timesyncd, 不提供 123): 不重写 chrony 配置,
-    # 保留节点既有的可用上游; 只确认有 active 的时间守护进程, 让收尾判定成立。
-    if systemctl is-active chrony >/dev/null 2>&1 || systemctl is-active chronyd >/dev/null 2>&1; then
-        DAEMON_OK=1
-    elif systemctl is-active systemd-timesyncd >/dev/null 2>&1; then
-        DAEMON_OK=1
+    # fallback 模式(首 master 只有 timesyncd, 不提供 123): 不重写任何上游配置;
+    # 但必须确保已安装的时间服务在运行 —— worker 有 chrony 但未启用时, 只 is-active
+    # 检查会误报 SYNC-FAIL。已 active 的服务保持不动。
+    _time_active=0
+    if systemctl is-active chrony >/dev/null 2>&1 \
+        || systemctl is-active chronyd >/dev/null 2>&1 \
+        || systemctl is-active systemd-timesyncd >/dev/null 2>&1; then
+        _time_active=1
+    else
+        if command -v chronyd >/dev/null 2>&1 || command -v chronyc >/dev/null 2>&1; then
+            systemctl enable --now chrony >/dev/null 2>&1 \
+                || systemctl enable --now chronyd >/dev/null 2>&1 || true
+        fi
+        if ! systemctl is-active chrony >/dev/null 2>&1 \
+            && ! systemctl is-active chronyd >/dev/null 2>&1; then
+            systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || true
+        fi
+        if systemctl is-active chrony >/dev/null 2>&1 \
+            || systemctl is-active chronyd >/dev/null 2>&1 \
+            || systemctl is-active systemd-timesyncd >/dev/null 2>&1; then
+            _time_active=1
+        fi
     fi
+    [ "${_time_active}" = "1" ] && DAEMON_OK=1
 fi
 
 # 一次性硬对齐: 仅当 chrony 未能即时精调(makestep 失败/无 chrony)时,

@@ -112,39 +112,37 @@ except Exception:
     sys.exit(0)
 if not isinstance(d, dict):
     sys.exit(0)
-groups = {}
-def register(name, g):
-    if not isinstance(g, dict):
+TARGETS = ("kube_node", "kube_control_plane")
+seen = {}
+seen_groups = set()
+all_vars = (d.get("all") or {}).get("vars") or {}
+def collect(name, g, inherited, in_target):
+    # 只收集 kube_node/kube_control_plane 及其子孙; 同时合并组级 vars
+    # (Ansible group vars 向下继承; host vars 覆盖组级值)。
+    if name in seen_groups or not isinstance(g, dict):
         return
-    # 同名组可能先在 all.children 里以空定义出现, 后续顶层真实定义覆盖空值。
-    if not groups.get(name):
-        groups[name] = g
+    seen_groups.add(name)
+    merged = dict(inherited)
+    gvars = g.get("vars") or {}
+    if isinstance(gvars, dict):
+        merged.update(gvars)
+    target = in_target or name in TARGETS
+    if target:
+        for h, hv in (g.get("hosts") or {}).items():
+            host_vars = dict(merged)
+            if isinstance(hv, dict):
+                host_vars.update(hv)
+            seen.setdefault(h, host_vars)
     children = g.get("children") or {}
     if isinstance(children, dict):
         for cname, cg in children.items():
-            register(cname, cg)
-# 先注册 all 及其嵌套子组, 再注册顶层组(覆盖空定义)。
+            collect(cname, cg, merged, target)
+# 从 all 走一遍覆盖嵌套组(继承 all.vars 与各层组 vars), 再补顶层独立组。
+collect("all", d.get("all") or {}, {}, False)
 for k, v in d.items():
-    register(k, v)
-seen = {}
-seen_groups = set()
-def add_group(name):
-    if name in seen_groups:
-        return
-    seen_groups.add(name)
-    g = groups.get(name) or {}
-    if not isinstance(g, dict):
-        return
-    for h, hv in (g.get("hosts") or {}).items():
-        hv = hv or {}
-        seen.setdefault(h, hv)
-    children = g.get("children") or []
-    if isinstance(children, dict):
-        children = list(children.keys())
-    for cname in children:
-        add_group(cname)
-for group in ("kube_node", "kube_control_plane"):
-    add_group(group)
+    if k == "all":
+        continue
+    collect(k, v, all_vars, False)
 for h, hv in seen.items():
     ip = hv.get("ansible_host") or h
     user = hv.get("ansible_user") or "ubuntu"
