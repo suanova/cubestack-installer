@@ -50,11 +50,13 @@ FAKE
 chmod +x "${TMP}/bin/ssh" "${TMP}/bin/bash"
 
 mkdir -p "${TMP}/offline/os/packages/ubuntu-22.04/chrony" \
-         "${TMP}/offline/os/packages/ubuntu-24.04/chrony"
+         "${TMP}/offline/os/packages/ubuntu-24.04/chrony" \
+         "${TMP}/offline/os/helm"
 : > "${TMP}/offline/os/packages/ubuntu-22.04/dummy.deb"
 : > "${TMP}/offline/os/packages/ubuntu-22.04/chrony/chrony.deb"
 : > "${TMP}/offline/os/packages/ubuntu-24.04/dummy.deb"
 : > "${TMP}/offline/os/packages/ubuntu-24.04/chrony/chrony.deb"
+: > "${TMP}/offline/os/helm/helm_fake.deb"
 mkdir -p "${TMP}/legacy/os/packages/chrony"
 : > "${TMP}/legacy/os/packages/dummy.deb"
 : > "${TMP}/legacy/os/packages/chrony/chrony.deb"
@@ -121,6 +123,17 @@ echo "== ⑤ 离线根传给子安装器 =="
 chk_contains "chrony 收到 --offline-root" "--offline-root ${TMP}/offline" "$(grep 'install-chrony-packages.sh' "${TMP}/mixed.log")"
 chk_contains "general 收到 --offline-root" "--offline-root ${TMP}/offline" "$(grep 'reconcile-node-packages.sh' "${TMP}/mixed.log")"
 chk_contains "chrony 环境根" "ENV OS=22.04 ROOT=${TMP}/offline" "$(cat "${TMP}/mixed.log")"
+
+echo "== ⑥ --with-helm 尊重 --ip(只装指定目标) =="
+rc="$(run_tool "${TMP}/mixed.conf" "${TMP}/offline" "${TMP}/helm-ip.log" --install --with-helm --ip 10.0.0.1)"
+chk "退出码" "0" "${rc}"
+_helm_call="$(grep -- '--scope helm' "${TMP}/helm-ip.log" || true)"
+chk_contains "helm 调用带 .1" "--ip 10.0.0.1" "${_helm_call}"
+if [[ "${_helm_call}" == *"--ip 10.0.0.2"* ]]; then
+    echo "  FAIL helm 不应带未选中的 .2"; fail=1
+else
+    echo "  ok  helm 不带未选中的 .2"
+fi
 
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then echo "✅ test-manual-os-packages: 全部通过"; else echo "❌ test-manual-os-packages: 有失败"; fi

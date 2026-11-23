@@ -357,10 +357,17 @@ install_pkgs() {
 
     # 可选节点 helm 与 OS 版本无关，先装一次（--with-helm 时）。
     if [ "${WITH_HELM}" = "1" ]; then
+        # 尊重 --ip: 只对本次选中的目标安装(否则 reconcile 会回退到 inventory 全量)。
+        local -a _helm_ip_args=()
+        local _he
+        for _he in ${TARGET_ENTRIES[@]+"${TARGET_ENTRIES[@]}"}; do
+            _helm_ip_args+=(--ip "${_he%%|*}")
+        done
         say "安装可选节点 helm ..."
         OFFLINE_FILES_ROOT="${OFFLINE_ROOT}" \
             bash "${MANUAL_DIR}/../node/reconcile-node-packages.sh" --scope helm \
-            --offline-root "${OFFLINE_ROOT}" ${rec_args[@]+"${rec_args[@]}"} || return 1
+            --offline-root "${OFFLINE_ROOT}" \
+            ${_helm_ip_args[@]+"${_helm_ip_args[@]}"} ${rec_args[@]+"${rec_args[@]}"} || return 1
     fi
 
     local _i _ver _ips _ip
