@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Bump the mirror catalog pin in versions/base.yaml.
 
-Only opens a change when a (catalog_id, tag) referenced by the baseline
-changes. Other products or release lines adding versions must not move this
-pin.
+Moves the pin when a referenced (catalog_id, tag) changes, or when a
+referenced catalog id gains a new usable tag. The pin only widens the set of
+resolvable tags; env versions are still selected by a human.
 """
 
 from __future__ import annotations
@@ -62,6 +62,29 @@ def version_fingerprint(entry: dict, tag: str) -> tuple | None:
     return None
 
 
+DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def usable_new_tags(old_entry: dict, new_entry: dict) -> list[str]:
+    """Tags added by the update that base can resolve to linux/amd64."""
+    old_tags = {
+        str(version.get("tag", ""))
+        for version in old_entry.get("versions") or []
+    }
+    usable = []
+    for version in new_entry.get("versions") or []:
+        tag = str(version.get("tag", "")).strip()
+        if not tag or tag in old_tags:
+            continue
+        if not DIGEST_RE.fullmatch(str(version.get("digest", "")).strip()):
+            continue
+        platforms = version.get("platforms") or []
+        if platforms and "linux/amd64" not in platforms:
+            continue
+        usable.append(tag)
+    return usable
+
+
 def referenced_versions(baseline: dict) -> dict[str, set[str]]:
     env = {str(k): str(v) for k, v in (baseline.get("env") or {}).items()}
     kubespray = str((baseline.get("kubespray") or {}).get("version", "")).strip()
@@ -89,6 +112,7 @@ def changed_ids(old: dict, new: dict,
             die(f"catalog id missing from an index: {image_id}")
         old_entry = old_entries[image_id]
         new_entry = new_entries[image_id]
+        changed_here = False
         for tag in sorted(tags):
             new_fp = version_fingerprint(new_entry, tag)
             if new_fp is None:
@@ -97,8 +121,15 @@ def changed_ids(old: dict, new: dict,
             old_ref = (old_entry.get("source"), old_entry.get("target"), old_fp)
             new_ref = (new_entry.get("source"), new_entry.get("target"), new_fp)
             if old_ref != new_ref:
-                changed.append(image_id)
+                changed_here = True
                 break
+        if changed_here:
+            changed.append(image_id)
+            continue
+        added = usable_new_tags(old_entry, new_entry)
+        if added:
+            print(f"{image_id}: new usable tag(s): {', '.join(sorted(added))}")
+            changed.append(image_id)
     return changed
 
 

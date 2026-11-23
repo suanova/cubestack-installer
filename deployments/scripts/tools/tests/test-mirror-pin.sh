@@ -64,6 +64,67 @@ grep -q "unchanged" <<<"${out}" || fail "same index should be unchanged"
 grep -q "commit: aaaaa" "${TMP}/versions/base.yaml" || fail "unchanged should not rewrite pin"
 pass "no referenced base change -> no update"
 
+cat > "${TMP}/unreferenced-id.json" <<'EOF'
+{"schema": 1, "images": [
+  {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
+   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/pause",
+   "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
+  {"id": "kubernetes/other", "source": "registry.k8s.io/other",
+   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
+   "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"}]},
+  {"id": "kubernetes/unused", "source": "registry.k8s.io/unused",
+   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/unused",
+   "versions": [{"tag": "v1", "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+                 "platforms": ["linux/amd64"]}]}
+]}
+EOF
+
+out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
+    --commit 1313131313131313131313131313131313131313 \
+    --index "${TMP}/unreferenced-id.json" --old-index "${TMP}/old.json")"
+grep -q "unchanged" <<<"${out}" || fail "unreferenced catalog id should be unchanged"
+grep -q "commit: aaaaa" "${TMP}/versions/base.yaml" || fail "unreferenced catalog id rewrote the pin"
+pass "new tag on an unreferenced catalog id does not move the pin"
+
+cat > "${TMP}/nodigest.json" <<'EOF'
+{"schema": 1, "images": [
+  {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
+   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/pause",
+   "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
+  {"id": "kubernetes/other", "source": "registry.k8s.io/other",
+   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
+   "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+                {"tag": "v2"}]}
+]}
+EOF
+
+out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
+    --commit 1414141414141414141414141414141414141414 \
+    --index "${TMP}/nodigest.json" --old-index "${TMP}/old.json")"
+grep -q "unchanged" <<<"${out}" || fail "new tag without a digest should be unchanged"
+grep -q "commit: aaaaa" "${TMP}/versions/base.yaml" || fail "new tag without a digest rewrote the pin"
+pass "new tag without a digest does not move the pin"
+
+cat > "${TMP}/arm64.json" <<'EOF'
+{"schema": 1, "images": [
+  {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
+   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/pause",
+   "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
+  {"id": "kubernetes/other", "source": "registry.k8s.io/other",
+   "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
+   "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+                {"tag": "v2", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+                 "platforms": ["linux/arm64"]}]}
+]}
+EOF
+
+out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
+    --commit 1515151515151515151515151515151515151515 \
+    --index "${TMP}/arm64.json" --old-index "${TMP}/old.json")"
+grep -q "unchanged" <<<"${out}" || fail "new tag without amd64 should be unchanged"
+grep -q "commit: aaaaa" "${TMP}/versions/base.yaml" || fail "new tag without amd64 rewrote the pin"
+pass "new tag without linux/amd64 does not move the pin"
+
 cat > "${TMP}/added.json" <<'EOF'
 {"schema": 1, "images": [
   {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
@@ -72,16 +133,17 @@ cat > "${TMP}/added.json" <<'EOF'
   {"id": "kubernetes/other", "source": "registry.k8s.io/other",
    "target": "harbor.isuanova.com/mirrors/registry.k8s.io/other",
    "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
-                {"tag": "v2", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}]}
+                {"tag": "v2", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+                 "platforms": ["linux/amd64"]}]}
 ]}
 EOF
 
 out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
     --commit 1212121212121212121212121212121212121212 \
     --index "${TMP}/added.json" --old-index "${TMP}/old.json")"
-grep -q "unchanged" <<<"${out}" || fail "unreferenced tag addition should be unchanged"
-grep -q "commit: aaaaa" "${TMP}/versions/base.yaml" || fail "unreferenced tag addition rewrote the pin"
-pass "unreferenced tag addition does not move the pin"
+grep -q "new usable tag" <<<"${out}" || fail "new usable tag should be reported"
+grep -q "commit: 1212" "${TMP}/versions/base.yaml" || fail "new usable tag did not bump the pin"
+pass "new usable tag on a referenced catalog id moves the pin"
 
 python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
     --commit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \

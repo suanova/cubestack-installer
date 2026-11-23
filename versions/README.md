@@ -87,13 +87,13 @@ files         # k8s 二进制等文件
 
 MetaX GPU operator 镜像使用 `catalog_id: metax/metax-<name>`；mirror 的
 `images/metax.yaml` 已钉 amd64 digest，`catalog_id + version` 从 `index.json`
-解析。升级 `METAX_VERSION` 时同步更新 mirror 的 manifest/index，再更新
-`versions/base.yaml` 的 `mirror.commit`。
+解析。升级 `METAX_VERSION` 时同步更新 mirror 的 manifest/index；pin 由
+`mirror-updated` 推进。
 
 ## 升级版本
 
 1. 改 `env` 里的版本变量；
-2. 确认 mirror 的 `catalog_id` 有该 tag（`mirror-updated` 只 bump mirror commit）；
+2. 确认 mirror 的 `catalog_id` 有该 tag，且已同步并补齐 digest；
 3. 运行校验：
 
 ```bash
@@ -103,7 +103,9 @@ python3 deployments/scripts/tools/online/lib-base-catalog.py --index <index.json
 
 4. 提交 PR，人工 review。
 
-`mirror-updated` 只更新 `mirror.commit`，不会自动升级版本；版本升级仍由人改 `env`。
+`mirror-updated` 会在被 `base.yaml` 引用的 catalog id 新增可用 tag（有
+sha256 digest 且支持 linux/amd64）时自动 bump `mirror.commit`；它不会修改
+`env`，版本选择仍由人决定。
 
 ## optional
 
