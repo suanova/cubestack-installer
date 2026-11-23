@@ -136,9 +136,14 @@ spec:
 EOF
     then
         _state=""
+        _reason=""
         for _i in $(seq 1 ${_probe_tries}); do
             _state="$( (SSH "${K} -n default get pod metax-devperm-probe -o jsonpath='{.status.phase}' 2>/dev/null" || true) )"
             case "${_state}" in Succeeded|Failed) break ;; esac
+            # 镜像拉取失败(Pending)不会自行恢复: 立即结束等待, 避免白等满超时;
+            # 是否放行由下方 ImagePullBackOff 分支按 METAX_REQUIRE_PERM_PROBE 决定。
+            _reason="$( (SSH "${K}" -n default get pod metax-devperm-probe -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null) || true )"
+            case "${_reason}" in ImagePullBackOff|ErrImagePull|InvalidImageName) break ;; esac
             sleep 5
         done
         _reason="$( (SSH "${K}" -n default get pod metax-devperm-probe -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null) || true )"
@@ -152,6 +157,12 @@ EOF
             SSH "${K}" -n default delete pod metax-devperm-probe --ignore-not-found >/dev/null 2>&1 || true
             case "${_reason}" in
                 ImagePullBackOff|ErrImagePull|InvalidImageName)
+                    # 探针是可选的: 默认镜像不可达/自定义镜像拉取失败时只告警跳过,
+                    # 不能把"镜像不可用"误报成 GPU 权限失败; 显式要求时仍硬失败。
+                    if [ "${METAX_REQUIRE_PERM_PROBE:-false}" != "true" ]; then
+                        warn "  权限探针镜像不可用(${_reason}): ${_PROBE_IMG} → 跳过非 root 权限探针(节点 GPU 识别已通过)"
+                        exit 0
+                    fi
                     err "  权限探针镜像拉取失败(${_reason}): ${_PROBE_IMG}"
                     err "    → 先 --steps dev_lab 推送 dev-lab 镜像, 或 METAX_PERM_PROBE_IMAGE 指定可达镜像"
                     ;;

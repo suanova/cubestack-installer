@@ -352,11 +352,15 @@ fi
 #   CRD 支持 deploy 布尔量, operator 不再创建 metax-driver DS, 设备插件继续用宿主驱动。
 #   注意: master 通常无 GPU(PCI=0), 其 mx-smi 不可用**不**代表缺驱动; 只看有 PCI 的节点。
 #   有 PCI 但 mx-smi 不可用的节点才需要容器驱动(此时要求 driver-image 含对应内核模块)。
+#   任一节点 PCI 探测失败(METAX_PCI_UNKNOWN>0)时状态未知, 保留容器驱动兜底。
 _DRIVER_DEPLOY="${METAX_DRIVER_DEPLOY:-auto}"
 case "${_DRIVER_DEPLOY}" in
     true|false) ;;
     auto)
-        if [ "${HAS_GPU_NODE}" = "1" ] && [ "${METAX_PCI_NO_DRIVER}" = "0" ]; then
+        # 只有"所有有沐曦 PCI 的节点 mx-smi 都可用"才切宿主驱动; 任一节点 PCI 探测失败
+        # (状态未知)都必须保留容器驱动兜底, 否则可能把缺宿主驱动的节点误判为可用。
+        if [ "${HAS_GPU_NODE}" = "1" ] && [ "${METAX_PCI_NO_DRIVER}" = "0" ] \
+            && [ "${METAX_PCI_UNKNOWN}" = "0" ]; then
             _DRIVER_DEPLOY="false"
         else
             _DRIVER_DEPLOY="true"
