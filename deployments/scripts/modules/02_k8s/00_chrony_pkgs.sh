@@ -1,21 +1,19 @@
 #!/bin/bash
 # ============================================================
 # MODULE: chrony_pkgs
-# DESC: 节点 chrony 离线装包(可选; 默认关, CHRONY_PKGS_ENABLED=true 启用)
+# DESC: 已停用(2026-11-23): 不再自动安装 chrony; 仅保留开关兼容
 # PHASE: k8s
 # DEFAULT: 0
 # REPEAT: 1
 # TOGGLE: CHRONY_PKGS_ENABLED
 # REQUIRES: k8s_passwordless
 # 说明:
-#   · **与 NTP 同步解耦**(2026-11-19 用户口径): 本模块只从
-#     offline-files/os/packages/chrony 安装 chrony 包, 不写 chrony.conf、不启停 NTP 服务;
-#     同步/权威/客户端配置由 k8s_ntp(setup-ntp.sh)负责, 且 NTP 同步是**必选**步骤。
-#   · **默认关**: NTP 同步假设节点黄金镜像/运维已预装 chrony; 需要 installer 装包时
-#     启用本模块(启用三选一: cluster.conf CHRONY_PKGS_ENABLED=true / --enable chrony_pkgs /
-#     --steps chrony_pkgs)。
-#   · 全量部署时在"安装前 NTP 阶段"之前执行(deploy-cluster.sh), 扩容时由 k8s_scale 先调用;
-#     逻辑全在 tools/node/install-chrony-packages.sh(可单独跑: bash <tool> [--ip <IP>])。
+#   · **2026-11-23 停用**: CHRONY_PKGS_ENABLED 不再触发任何安装。chrony 由节点
+#     OS 黄金镜像/运维预装; pre_install_check 只检查存在性。
+#   · 如需手动安装: `tools/manual/install-os-packages.sh`(默认含 chrony 专用集;
+#     也可单独运行旧工具 `tools/node/install-chrony-packages.sh`)。
+#   · 保留本模块与 TOGGLE 仅为兼容旧 cluster.conf 及 --steps/--enable 调用; 执行本模块
+#     只打印提示并 exit 0, 不改动节点。
 # ============================================================
 set -euo pipefail
 
@@ -23,12 +21,15 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
-# 开关自检(k8s_scale 直接调用本脚本时同样受控)
 case "$(printf '%s' "${CHRONY_PKGS_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')" in
-    true|1|yes|on) ;;
-    *) say "CHRONY_PKGS_ENABLED=false, 跳过 chrony 离线装包(默认假设节点镜像已预装 chrony; 需要时置 true 或 --steps chrony_pkgs)"; exit 0 ;;
+    true|1|yes|on)
+        say "CHRONY_PKGS_ENABLED=true 已停用: chrony 不再由 deploy-cluster 自动安装"
+        say "  请用 OS 镜像预装, 或运行: tools/manual/install-os-packages.sh(默认含 chrony)"
+        say "  旧工具仍可单独执行: tools/node/install-chrony-packages.sh"
+        exit 0
+        ;;
+    *)
+        say "CHRONY_PKGS_ENABLED=false, 跳过 chrony 离线装包(默认假设节点镜像已预装 chrony; 需要时用手动脚本)"
+        exit 0
+        ;;
 esac
-
-say "节点 chrony 离线装包(可选步骤; 只装包, 不配置 NTP 服务)..."
-bash "${SCRIPT_DIR}/tools/node/install-chrony-packages.sh"
-ok "节点 chrony 离线装包完成(后续 NTP 同步由 k8s_ntp 负责)"

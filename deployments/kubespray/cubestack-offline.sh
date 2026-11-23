@@ -2084,6 +2084,27 @@ cmd_install() {
     # join 阶段才报 [ERROR Port-10250], 报错点离真因隔了一整个 playbook(2026-09-23 事故)
     reset_kubernetes_if_needed all \
         || err "节点 10250 端口清理未通过(元凶见上方输出), 已中止部署"
+    # ★ 2026-11-22: reset 后、kubespray 之前清掉旧集群残留的内核 rbd 映射。
+    #   原因: Ansible 2.19 hardware facts 无条件执行 vgs(扫描所有块设备); 后端已死的
+    #   rbd 映射会让 vgs 永久 D 态(实机: 覆盖安装静默挂起 1 小时)。此时旧 K8s/CSI 已停,
+    #   映射应为空闲; 只 unmap **空闲**设备(holders/open fd/inflight/挂载任一命中都跳过),
+    #   清不掉则硬失败并给硬复位指引, 避免把问题拖进 kubespray。
+    #   注意: 不走 PV 查询(--skip-keep-query) —— reset 后旧 API 已不可用; 忙设备一律跳过。
+    _rbd_cleanup="${SCRIPT_DIR}/../scripts/tools/k8s/ceph-rbd-cleanup.sh"
+    if [ -f "${_rbd_cleanup}" ]; then
+        log "清理节点残留内核 rbd 映射(仅空闲; 防 Ansible vgs 扫描挂起)..."
+        # ★ 2026-11-23(CodeRabbit): 节点/用户/密钥以本次 hosts.yml 为准(与 reset/Kubespray
+        #   同源); cluster.conf 缺失或与其不一致时, 仍只清理实际安装目标。
+        _rbd_inv_args=()
+        [ -f "${INVENTORY_DIR}/hosts.yml" ] && _rbd_inv_args=(--inventory "${INVENTORY_DIR}/hosts.yml")
+        if ! bash "${_rbd_cleanup}" ${_rbd_inv_args[@]+"${_rbd_inv_args[@]}"} --skip-keep-query --fail-if-left; then
+            err "残留内核 rbd 映射未清零(kubespray 的 vgs 会永久 D 态)。请对残留节点硬复位(sudo reboot -f)后重跑。"
+        fi
+        unset _rbd_inv_args
+        log "✅ 内核 rbd 映射已清零(无残留/无未知)"
+    else
+        warn "未找到 ${_rbd_cleanup}, 跳过 rbd 残留清理(若节点有旧 rbd 映射, kubespray 可能挂起)"
+    fi
     log "注入离线安装变量..."
     # ⚠ 本文件位于 ${INVENTORY_DIR}/group_vars/all/offline.yml, **作为 group_vars 自动加载**;
     #   不要再给 ansible-playbook 加 `-e @${OFFLINE_VARS}`: extra vars 优先级高于 hosts.yml

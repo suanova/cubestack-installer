@@ -41,8 +41,10 @@ init_remote_kubectl || { err "init_remote_kubectl 失败(cluster.conf NODES 无 
 SSH_N() { SSH "$@" </dev/null; }
 
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
-# 强制清理语义(2026-10-20 CodeRabbit): `--wait=false` 只表示"发起删除、不陪等 finalizer",
-#   **不表示 CSI unmap 已完成**。发起强制删除后再有界复查; 仍残留则返回非零, 默认拒绝继续
+# 强制清理语义(2026-10-20 CodeRabbit; 2026-11-22 补 PVC finalizer): `--wait=false` 只表示
+#   "发起删除、不陪等 finalizer", **不表示 CSI unmap 已完成**。强制分支会像 PV 一样摘掉
+#   ceph PVC 的 finalizer(卡 Terminating 的 pvc-protection 不会自愈), 否则 VolumeAttachment
+#   永远不会消失。发起强制删除后再有界复查; 仍残留则返回非零, 默认拒绝继续
 #   删 rbd nodeplugin / CephCluster(防 2026-09-05 的"unmap 前删插件"内核映射残留事故)。
 #   CEPH_CLEANUP_FORCE_RECHECK_SECONDS: 强制删除后的复查窗口(默认 30s)
 #   CEPH_CLEANUP_CLUSTER_FORCE_GONE_SECONDS: 强制删 CephCluster 后的复查窗口(默认 60s)
@@ -67,7 +69,8 @@ node_cmd() {   # <ip> <user> <cmd...>
 #   "waiting for csi volume attachments ... to be cleaned up", CephCluster 永远 Deleting。
 #   下面统一: ①先收集动作再读 here-string；②所有循环内 SSH 用 SSH_N(本地 stdin=/dev/null, 见文首)；
 #   ③删完 PVC 后等待 PVC/PV 真正消失(CSI unmap 完成)再删 nodeplugin / CephCluster。
-#   ④强制清理(--wait=false)只发起删除、不陪等 finalizer; 之后有界复查 PVC/PV + ceph CSI
+#   ④强制清理(--wait=false)只发起删除、不陪等 finalizer, 且 ceph PVC/PV 都要摘 finalizer
+#     (PVC 卡 Terminating 会拖住 VolumeAttachment); 之后有界复查 PVC/PV + ceph CSI
 #     VolumeAttachment(attachment 状态才是 unmap 的可靠信号), 仍残留则返回非零,
 #     默认拒绝删 nodeplugin/CephCluster(CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1 可显式放行)。
 _list_ceph_pvcs() {   # <include_registry:0|1> → 每行 ns/name(仅 Bound/Lost 且 SC 含 ceph; Lost=PV 已被强删, 仍可能残留映射)
@@ -155,15 +158,22 @@ wait_ceph_volumes_gone() {   # <timeout_seconds> <include_registry:0|1>
         sleep 5
     done
     warn "  ceph 卷 ${_to}s 未清理干净: PVC=[$(printf '%s' "${_left_pvc}" | tr '\n' ' ')] PV=[$(printf '%s' "${_left_pv}" | tr '\n' ' ')] VA=[$(printf '%s' "${_left_va}" | tr '\n' ' ')] → 强制清理(数据随 Ceph 销毁)"
-    # 兜底: 再删一次 PVC; 仍残留的 ceph PV 清 finalizer 后强删(只碰 ceph CSI PV,
+    # 兜底: 再删一次 PVC; 仍残留的 ceph PVC/PV 清 finalizer 后强删(只碰 ceph CSI,
     #   provisioner 卡死时这是唯一让 Rook 继续删除的路径; 新部署会重建卷)。
     # ★ 2026-10-20 实机: `kubectl delete` 默认**等待对象消失**; PVC 的 pvc-protection /
     #   PV 的 external-provisioner+ pv-protection finalizer 在 provisioner 卡住时不会自行
     #   清除 → delete 无限阻塞(实测卡 7.5min+, 直到模块 1800s timeout)。强制清理必须
     #   `--wait=false` + 外层 timeout, 只发起删除、不陪等 finalizer。
+    # ★ 2026-11-22 实机: PVC 只 `delete --wait=false` 不够 —— 消费 Pod 卡 Terminating 时
+    #   pvc-protection finalizer 不会自行移除, PVC 永远 Terminating; external-attacher
+    #   的 VolumeAttachment 不消失 → 拒绝删 rbd nodeplugin → 内核 rbd 映射残留, 下一次
+    #   kubespray 的 Ansible LVM facts(vgs)扫描到旧 rbd 时永久 D 态。强制清理必须像 PV
+    #   一样把 PVC finalizer 也摘掉(这是"数据随 Ceph 销毁"的显式破坏性路径)。
     while IFS= read -r _p; do
         [ -n "${_p}" ] || continue
         SSH_N "timeout 30 ${K} -n ${_p%/*} delete pvc ${_p#*/} --ignore-not-found --force --grace-period=0 --wait=false >/dev/null 2>&1" || true
+        printf '%s' '{"metadata":{"finalizers":null}}' \
+            | SSH "timeout 30 ${K} -n ${_p%/*} patch pvc ${_p#*/} --type=merge --patch-file=/dev/stdin >/dev/null 2>&1" || true
     done <<< "${_left_pvc}"
     while IFS= read -r _pv; do
         [ -n "${_pv}" ] || continue

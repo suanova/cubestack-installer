@@ -18,7 +18,12 @@
 #   · **chrony/timesyncd 互斥护栏**(2026-10-07 事故): 节点已有 chrony(VM 黄金镜像)时跳过
 #     systemd-timesyncd —— 二者 apt 互斥, 对账装 timesyncd 会把权威 NTP 服务端摘掉 ⇒ 05_k8s_ntp 失败。
 #
-# 用法: reconcile-node-packages.sh [--ip <IP>]... [--dry-run] [--user <u>]
+# 用法: reconcile-node-packages.sh [--ip <IP>]... [--dry-run] [--user <u>] [--offline-root <dir>]
+#        [--scope general|helm-nodejs|all]
+#        --scope 选择离线包范围(默认 all, 兼容旧行为):
+#          general     = os/packages/ubuntu-<VERSION_ID>(节点通用 OS 包; 手动脚本用)
+#          helm        = 可选节点 helm(os/helm 根目录; 兼容旧 os/helm-nodejs 根目录)
+#          all         = 两者都装(旧行为)
 #       不给 --ip = 对 cluster.conf NODES 里全部节点执行。
 # 退出码: 0=全部节点 apt 依赖图健康; 1=有节点仍不健康
 # ============================================================
@@ -30,15 +35,28 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib-common.sh"
 load_config
 
 # USER 留空 = 按节点逐个解析(ssh_user_for_ip: NODES 逐行覆盖 → 全局 SSH_USER), --user 显式覆盖全部
-DRY=0; USER=""; IPS=()
+DRY=0; USER=""; IPS=(); SCOPE="all"; _OFFLINE_ROOT_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --ip) IPS+=("${2:?--ip 需要地址}"); shift 2 ;;
         --user) USER="$2"; shift 2 ;;
         --dry-run) DRY=1; shift ;;
+        --scope) SCOPE="${2:?--scope 需要值}"; shift 2 ;;
+        --offline-root) _OFFLINE_ROOT_ARG="${2:?--offline-root 需要值}"; shift 2 ;;
         *) err "未知参数: $1"; exit 1 ;;
     esac
 done
+# 手动安装器已验证的离线根优先于 load_config 的 release/默认根。
+if [ -n "${_OFFLINE_ROOT_ARG}" ]; then
+    OFFLINE_FILES_ROOT="${_OFFLINE_ROOT_ARG}"
+    export OFFLINE_FILES_ROOT
+fi
+unset _OFFLINE_ROOT_ARG
+case "${SCOPE}" in
+    general|helm|all) ;;
+    helm-nodejs) SCOPE="helm" ;;   # 兼容旧参数名(nodejs 已移除)
+    *) err "--scope 只支持 general|helm|all(收到: ${SCOPE})"; exit 1 ;;
+esac
 if [ "${#IPS[@]}" -eq 0 ]; then
     # 目标节点来源**以 inventory 为准**(部署本身就是 inventory 驱动的; cluster.conf 的 NODES
     # 在容器里可能与实际不同/为空 —— 实测 2026-09-28)。取不到再回退 cluster.conf 的 NODES。
@@ -122,15 +140,77 @@ if [ "${#IPS[@]}" -eq 0 ]; then
 fi
 [ "${#IPS[@]}" -gt 0 ] || { err "没有目标节点(cluster.conf NODES 为空?)"; exit 1; }
 
-# 离线 .deb 来源: offline-files/os/packages(版本无关 OS 层; 2026-10-08 起节点 .deb 统一收敛于此,
-# 原 <版本目录>/packages 与 packages/repair 已并入 —— 同名同版本去重; 版本目录不再放 .deb)
-# ⚠ 只扫该目录**顶层** *.deb: chrony 等"专用安装集"放子目录(如 os/packages/chrony/), 不做对账。
-DEB_DIRS=("${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages")
+# 离线 .deb 来源:
+#   新布局 <OFFLINE_FILES_ROOT>/os/packages/ubuntu-<VERSION_ID>/*.deb;
+#   旧布局 <OFFLINE_FILES_ROOT>/os/packages/*.deb 兼容。
+# OS 版本优先用 OS_PACKAGES_VERSION; 未设置时从第一个目标节点 /etc/os-release 读取。
+# ⚠ 只扫所选目录**顶层** *.deb: chrony 等"专用安装集"放子目录(如 <版本>/chrony/), 不做对账。
+_pkg_root="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}/os/packages"
+_os_ver="${OS_PACKAGES_VERSION:-}"
+if [ -z "${_os_ver}" ] && [ "${#IPS[@]}" -gt 0 ]; then
+    _det_key="${SSH_KEY_DIR:-${REAL_HOME:-$HOME}/.ssh}/${SSH_KEY_NAME:-cubestack_k8s}"
+    _det_user="${USER:-$(ssh_user_for_ip "${IPS[0]}")}"
+    _os_ver="$(ssh -i "${_det_key}" -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "${_det_user}@${IPS[0]}" \
+        "bash -c '. /etc/os-release; echo \"\$VERSION_ID\"'" 2>/dev/null | tr -d '\r' | head -1 || true)"
+    unset _det_key _det_user
+fi
+if [ -n "${_os_ver}" ] && [ -d "${_pkg_root}/ubuntu-${_os_ver}" ]; then
+    _general_dir="${_pkg_root}/ubuntu-${_os_ver}"
+else
+    _general_dir="${_pkg_root}"
+fi
+# 可选节点 helm 单独目录(仅手动装包; nodejs 已移除, 不再自动安装)
+#   新布局 os/helm; 兼容旧 os/helm-nodejs(只认根目录的 helm_*.deb, 旧 ubuntu-*/nodejs 不再扫描)。
+_helm_base="$(dirname "${_pkg_root}")"
+if [ -d "${_helm_base}/helm" ]; then
+    _helm_dir="${_helm_base}/helm"
+elif [ -d "${_helm_base}/helm-nodejs" ]; then
+    _helm_dir="${_helm_base}/helm-nodejs"
+else
+    _helm_dir="${_helm_base}/helm"
+fi
+DEB_DIRS=()
+case "${SCOPE}" in
+    general)
+        DEB_DIRS=("${_general_dir}")
+        ;;
+    helm)
+        if [ -d "${_helm_dir}" ]; then
+            DEB_DIRS=("${_helm_dir}")
+        fi
+        ;;
+    all)
+        DEB_DIRS=("${_general_dir}")
+        if [ -d "${_helm_dir}" ]; then
+            DEB_DIRS+=("${_helm_dir}")
+        fi
+        ;;
+esac
+say "目标 OS=${_os_ver:-未知}; 范围=${SCOPE}; 离线包目录=${DEB_DIRS[*]:-<空>}"
+unset _helm_base _helm_dir _general_dir
 DEBS=()
+# NODE_PKGS_EXCLUDE_PATTERNS: 可选 basename glob 排除列表(空格/逗号分隔; 调方可选过滤)。
+_excl_pats="${NODE_PKGS_EXCLUDE_PATTERNS:-}"
+if [ -n "${_excl_pats}" ]; then
+    say "排除离线包模式: ${_excl_pats}"
+fi
 for d in "${DEB_DIRS[@]}"; do
     [ -d "${d}" ] || continue
-    for f in "${d}"/*.deb; do [ -f "${f}" ] && DEBS+=("${f}"); done
+    for f in "${d}"/*.deb; do
+        [ -f "${f}" ] || continue
+        _base="$(basename "${f}")"
+        _skip=0
+        if [ -n "${_excl_pats}" ]; then
+            for _pat in ${_excl_pats//,/ }; do
+                case "${_base}" in ${_pat}) _skip=1; break ;; esac
+            done
+        fi
+        [ "${_skip}" = "1" ] && continue
+        DEBS+=("${f}")
+    done
 done
+unset _excl_pats _base _skip _pat 2>/dev/null || true
 [ "${#DEBS[@]}" -gt 0 ] || { err "离线目录下没有任何 .deb(${DEB_DIRS[*]})"; exit 1; }
 say "离线包: ${#DEBS[@]} 个; 目标节点: ${#IPS[@]} 个"
 

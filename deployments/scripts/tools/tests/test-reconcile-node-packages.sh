@@ -27,6 +27,11 @@ chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$
 chk_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  ok  $1"; else echo "  FAIL $1: [$3] 未包含 [$2]"; fail=1; fi; }
 chk_not_contains() { if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  FAIL $1: [$3] 不应包含 [$2]"; fail=1; else echo "  ok  $1"; fi; }
 
+# 手动安装器透传的离线根必须优先于 load_config 的默认/release 根
+grep -qF -- '--offline-root) _OFFLINE_ROOT_ARG=' "${TOOL}" \
+    && echo "  ok  支持 --offline-root" \
+    || { echo "  FAIL 缺少 --offline-root"; fail=1; }
+
 # 临时配置/离线目录
 cat > "${TMP}/cluster.conf" <<'EOF'
 NODES=("worker,w1,10.0.0.1,root,-")
@@ -423,6 +428,48 @@ chk "短 selector: 未触碰 old-w1 旧地址 10.0.0.19" "0" "$(grep -c '10.0.0.
 chk_contains "短 selector: 非 NODES 匹配行被跳过" "跳过 inventory 行: old-w1" "${TMP}/out-stale"
 unset _rc
 rm -rf "${_INV_TEST_DIR}"
+
+echo "== ⑧ --scope: 手动脚本装通用 OS 包; 可选 helm 只装根目录 helm =="
+# 2026-11-23 用户口径: 通用 OS 包只由 pre_install_check 体检 + 手动脚本安装;
+#   节点 helm 可选(manual --with-helm); nodejs 已移除, 不再扫描/安装。
+SCOPE_OFFLINE="${TMP}/scope-offline"
+mkdir -p "${SCOPE_OFFLINE}/os/packages/ubuntu-24.04" "${SCOPE_OFFLINE}/os/helm/ubuntu-24.04"
+: > "${SCOPE_OFFLINE}/os/packages/ubuntu-24.04/general_1.0_amd64.deb"
+: > "${SCOPE_OFFLINE}/os/helm/helm_4.2.0-1_amd64.deb"
+: > "${SCOPE_OFFLINE}/os/helm/ubuntu-24.04/nodejs_decoy_18.19.1_amd64.deb"   # 不应被扫描
+run_scope() {  # <scope>
+    local scope="$1"
+    (
+        export PATH="${TMP}/bin:${PATH}"
+        export CLUSTER_CONF="${TMP}/cluster.conf"
+        export OFFLINE_FILES_ROOT="${SCOPE_OFFLINE}"
+        export OS_PACKAGES_VERSION="24.04"
+        export FAKE_SSH_LOG="${TMP}/ssh-scope-${scope}.log"
+        export FAKE_SCP_LOG="${TMP}/scp-scope-${scope}.log"
+        export FAKE_WEDGED=0
+        : > "${FAKE_SSH_LOG}"; : > "${FAKE_SCP_LOG}"
+        bash "${TOOL}" --ip 10.0.0.1 --user root --dry-run --scope "${scope}"
+    ) > "${TMP}/out-scope-${scope}" 2>&1
+}
+run_scope general
+chk_contains "scope general: 选择通用 OS 包目录" "范围=general" "${TMP}/out-scope-general"
+chk_contains "scope general: 只有 1 个通用包" "离线包: 1 个" "${TMP}/out-scope-general"
+run_scope helm
+chk_contains "scope helm: 选择 helm 目录" "范围=helm" "${TMP}/out-scope-helm"
+chk_contains "scope helm: 只装根目录 helm(1 个)" "离线包: 1 个" "${TMP}/out-scope-helm"
+chk_not_contains "scope helm: 不扫描 nodejs 子目录" "nodejs_decoy" "${TMP}/out-scope-helm"
+run_scope all
+chk_contains "scope all: 2 个包(通用+helm)" "离线包: 2 个" "${TMP}/out-scope-all"
+chk_not_contains "scope all: 不扫描 nodejs 子目录" "nodejs_decoy" "${TMP}/out-scope-all"
+chk "node_pkgs 已停用(不调用自动安装)" "0" \
+    "$(grep -c 'reconcile-node-packages' "${REPO_ROOT}/deployments/scripts/modules/02_k8s/12_node_pkgs.sh" || true)"
+chk_contains "node_pkgs 停用提示" "已停用" \
+    "${REPO_ROOT}/deployments/scripts/modules/02_k8s/12_node_pkgs.sh"
+chk_contains "手动脚本支持可选 helm" "with-helm" \
+    "${REPO_ROOT}/deployments/scripts/tools/manual/install-os-packages.sh"
+chk_contains "手动脚本只装通用 OS 包" "--scope general" \
+    "${REPO_ROOT}/deployments/scripts/tools/manual/install-os-packages.sh"
+unset SCOPE_OFFLINE
 
 echo ""
 if [ "${fail}" = "0" ]; then

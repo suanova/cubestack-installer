@@ -72,11 +72,17 @@ images:
 - `dest` / `tar` 里的 `${VAR}` 由安装器解析；`tar` 决定物化后的文件名，模块 35 等
   依赖固定命名。
 - 节点前置包（OS 包管理器安装在每个 k8s node 上的依赖，如 lvm2/chrony/curl）默认
-  不由 installer 下载或安装；`packages_check` 指向安装前体检清单，installer 只验证
-  节点上是否已存在这些包，缺失时列清单告警或退出。
-- 需要 installer 直接安装离线 `.deb` 时，显式置 `NODE_PKGS_ENABLED=true` /
-  `WORKER_PKGS_ENABLED=true`（`.deb` 放 `offline-files/os/packages/`）。默认关闭；
-  公开在线安装不启用该路径。
+  由 OS 黄金镜像/运维预装，installer **不下载、不安装**；`packages_check` 指向的
+  `.lock` 是**仅预检**清单（不是安装清单），installer 只验证节点上是否已存在这些包，
+  缺失时列清单并提示运行手动脚本 `tools/manual/install-os-packages.sh`。
+- `NODE_PKGS_ENABLED` 已移除：installer **不自动安装通用 OS 包**。节点 helm 为可选项，
+  通过 `tools/manual/install-os-packages.sh --with-helm` 手动安装（`offline-files/os/helm/`，
+  旧 `os/helm-nodejs/` 兼容）；nodejs 已移除，不再安装。
+- `NODE_PKGS_ENABLED` / `WORKER_PKGS_ENABLED` / `CHRONY_PKGS_ENABLED` 均已停用
+  （2026-11-23）：置 `true` 也不会安装任何包，仅为兼容旧配置保留。所有 OS 包安装走
+  OS 镜像预装或手动脚本；worker 运行时如需手动安装用
+  `tools/node/install-worker-packages.sh`。
+- 公开在线安装不启用这些路径。
 - chrony 专用安装集（`offline-files/os/packages/chrony/`）由**独立可选模块** `chrony_pkgs`
   安装（`CHRONY_PKGS_ENABLED=true` / `--steps chrony_pkgs`）；装包与 NTP 同步解耦，
   `k8s_ntp` 只做同步且为必选步骤（默认假设节点镜像已预装 chrony）。
@@ -116,7 +122,9 @@ packages:
 - installer 只检查包是否存在；默认按包名检查，`--strict` 可额外校验版本。
 - 2.1 在线安装默认 `--warn-only`：缺包时列清单告警但不失败；`--check-os-packages`
   改为阻断，`--no-check-os-packages` 跳过。
-- 不下载 `.deb`、不执行 `apt-get install`；缺包时由运维按清单自行安装。
+- 不下载 `.deb`、不执行 `apt-get install`；缺包时按输出提示运行
+  `tools/manual/install-os-packages.sh --install`。节点 helm 可选
+  `--with-helm`（`os/helm/`），nodejs 不再安装。
 - 版本号仅作为已知良好参考，不参与默认检查。
 
 ## 更新流程

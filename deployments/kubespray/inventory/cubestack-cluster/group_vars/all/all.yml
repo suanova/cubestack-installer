@@ -160,7 +160,7 @@ unsafe_show_logs: false
 
 ## If enabled it will allow kubespray to attempt setup even if the distribution is not supported. For unsupported distributions this can lead to unexpected failures in some cases.
 allow_unsupported_distribution_setup: false
-ansible_python_interpreter: /usr/bin/python3.10
+ansible_python_interpreter: /usr/bin/python3
 
 # nodelocaldns 外部上游(本环境无外部 DNS → 127.0.0.1 防回环; 见 sync-kubespray-config.sh)
 upstream_dns_servers: [127.0.0.1]
