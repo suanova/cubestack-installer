@@ -67,8 +67,17 @@ except Exception:
     sys.exit(0)
 meta = (inv.get("_meta") or {}).get("hostvars") or {}
 seen = set()
-for group in ("kube_node", "kube_control_plane"):
-    for h in (inv.get(group) or {}).get("hosts") or []:
+seen_groups = set()
+def add_group(name):
+    # Ansible 2.19 --list: 组内既有直接 hosts, 也有 children 组(列表)。
+    # 只看直接 hosts 会漏掉子组里的 worker(且非空输出会跳过 YAML 递归兜底)。
+    if name in seen_groups:
+        return
+    seen_groups.add(name)
+    g = inv.get(name)
+    if not isinstance(g, dict):
+        return
+    for h in g.get("hosts") or []:
         if h in seen:
             continue
         seen.add(h)
@@ -77,6 +86,13 @@ for group in ("kube_node", "kube_control_plane"):
         user = hv.get("ansible_user") or "ubuntu"
         key = os.path.expanduser(hv.get("ansible_ssh_private_key_file") or "~/.ssh/cubestack_k8s")
         print("%s|%s|%s" % (ip, user, key))
+    children = g.get("children") or []
+    if isinstance(children, dict):
+        children = list(children.keys())
+    for child in children:
+        add_group(child)
+for group in ("kube_node", "kube_control_plane"):
+    add_group(group)
 ' 2>/dev/null || true)"
     fi
     if [ -z "${_inv_hosts}" ] && command -v python3 >/dev/null 2>&1; then

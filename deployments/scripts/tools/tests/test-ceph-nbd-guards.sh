@@ -144,6 +144,7 @@ echo "== ⑥ inventory 驱动 + 精确设备节点清理(2026-11-23) =="
 chk_contains "rbd-cleanup 支持 --inventory" '--inventory) INVENTORY=' "${RBDC}"
 chk_contains "rbd-cleanup 解析 ansible-inventory" 'ansible-inventory -i "${INVENTORY}" --list' "${RBDC}"
 chk_contains "rbd-cleanup 使用 inventory 的 user/key" 'INVENTORY_TARGETS+=("${_i_ip}|${_i_user' "${RBDC}"
+chk_contains "rbd-cleanup 递归 inventory children(Ansible 2.19)" "seen_groups" "${RBDC}"
 chk_contains "只删已确认 unmap 的 id 设备节点" 'sudo rm -f /dev/rbd${id}' "${RBDC}"
 chk_not_contains "不再通配删除 /dev/rbd*" 'sudo rm -f /dev/rbd* 2>/dev/null' "${RBDC}"
 chk_contains "list 模式跳过 kubelet 目录清理" 'if [ "${LIST_ONLY}" != "1" ]; then' "${RBDC}"
@@ -154,7 +155,7 @@ mkdir -p "${TMP}/inv-bin"
 cat > "${TMP}/inv-bin/ansible-inventory" <<'FAKE'
 #!/bin/bash
 printf '%s
-' '{"_meta":{"hostvars":{"inv1":{"ansible_host":"10.9.9.9","ansible_user":"invuser","ansible_ssh_private_key_file":"/tmp/fake-key"}}},"kube_control_plane":{"hosts":["inv1"]},"kube_node":{"hosts":[]}}'
+' '{"_meta":{"hostvars":{"inv1":{"ansible_host":"10.9.9.9","ansible_user":"invuser","ansible_ssh_private_key_file":"/tmp/fake-key"},"inv-child":{"ansible_host":"10.9.9.10","ansible_user":"invuser","ansible_ssh_private_key_file":"/tmp/fake-key"}}},"kube_control_plane":{"hosts":["inv1"]},"kube_node":{"children":["node_children"]},"node_children":{"hosts":["inv-child"]}}'
 FAKE
 cat > "${TMP}/inv-bin/ssh" <<'FAKE'
 #!/bin/bash
@@ -179,6 +180,7 @@ EOF
 out="$(PATH="${TMP}/inv-bin:${PATH}" CLUSTER_CONF="${TMP}/inv-cluster.conf"     FAKE_INV_SSH_LOG="${TMP}/inv-ssh.log"     bash "${RBDC}" --list --skip-keep-query --inventory "${TMP}/hosts.yml" 2>&1)"; rc=$?
 chk "inventory 模式退出码" "0" "${rc}"
 chk_contains "命中 inventory 主机" "invuser@10.9.9.9" "${TMP}/inv-ssh.log"
+chk_contains "命中子组 inventory 主机" "invuser@10.9.9.10" "${TMP}/inv-ssh.log"
 if grep -qF 'root@10.0.0.1' "${TMP}/inv-ssh.log" 2>/dev/null; then
     echo "  FAIL 不应触碰 cluster.conf 的主机"; fail=1
 else
