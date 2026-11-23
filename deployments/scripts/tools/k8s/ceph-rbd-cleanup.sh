@@ -115,18 +115,39 @@ if not isinstance(d, dict):
 TARGETS = ("kube_node", "kube_control_plane")
 seen = {}
 seen_groups = set()
+groups = {}
 all_vars = (d.get("all") or {}).get("vars") or {}
+def register(name, g):
+    # 同名组可能先在 children 里以空引用出现; 保留真实(非空)定义。
+    if not isinstance(g, dict):
+        return
+    if not groups.get(name):
+        groups[name] = g
+    children = g.get("children") or {}
+    if isinstance(children, dict):
+        for cname, cg in children.items():
+            register(cname, cg)
+for k, v in d.items():
+    register(k, v)
 def collect(name, g, inherited, in_target):
     # 只收集 kube_node/kube_control_plane 及其子孙; 同时合并组级 vars
     # (Ansible group vars 向下继承; host vars 覆盖组级值)。
-    if name in seen_groups or not isinstance(g, dict):
+    # ★ 2026-11-23(CodeRabbit): visited 状态按 (组名, 是否在目标范围) 记录 —— 一个组
+    #   可能先在 all 的非目标分支被访问(如 worker_pool), 之后才从 kube_node 的孩子
+    #   引用进入; 只按组名去重会让后者被误跳过, 漏掉 worker。
+    target = in_target or name in TARGETS
+    if (name, target) in seen_groups:
         return
-    seen_groups.add(name)
+    seen_groups.add((name, target))
+    # children 里的组可能只是空引用; 解析到它的独立定义。
+    if not isinstance(g, dict) or not g:
+        g = groups.get(name) or g
+    if not isinstance(g, dict):
+        return
     merged = dict(inherited)
     gvars = g.get("vars") or {}
     if isinstance(gvars, dict):
         merged.update(gvars)
-    target = in_target or name in TARGETS
     if target:
         for h, hv in (g.get("hosts") or {}).items():
             host_vars = dict(merged)

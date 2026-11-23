@@ -209,6 +209,11 @@ all:
   vars:
     ansible_user: root
   children:
+    worker_pool:
+      hosts:
+        worker1:
+          ansible_host: 10.0.0.2
+          ansible_user: k8suser
     k8s_cluster:
       children:
         kube_control_plane:
@@ -219,11 +224,7 @@ all:
           vars:
             ansible_ssh_private_key_file: /tmp/group-key
           children:
-            node_children:
-              hosts:
-                worker1:
-                  ansible_host: 10.0.0.2
-                  ansible_user: k8suser
+            worker_pool:
     backup:
       hosts:
         backup1:
