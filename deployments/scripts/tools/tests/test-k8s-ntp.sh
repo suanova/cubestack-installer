@@ -175,7 +175,7 @@ cat > "${TMP}/ntpbin/systemctl" <<'EOF'
 #!/bin/bash
 case "$1" in
     is-active) [ -f "${NTP_STATE_DIR}/$2.active" ]; exit $? ;;
-    enable) svc="${@: -1}"; touch "${NTP_STATE_DIR}/${svc}.active"; exit 0 ;;
+    enable) svc="${@: -1}"; : > "${NTP_STATE_DIR}/${svc}.active"; exit 0 ;;
 esac
 exit 0
 EOF
@@ -188,22 +188,22 @@ chmod +x "${TMP}/ntpbin/systemctl" "${TMP}/ntpbin/date"
 : > "${TMP}/ntpbin/chronyd"; chmod +x "${TMP}/ntpbin/chronyd"
 _ntp_ms=1700000000000
 mkdir -p "${TMP}/ntpstate-a"
-out_ntp="$(NTP_STATE_DIR="${TMP}/ntpstate-a" FAKE_NOW_MS="${_ntp_ms}" PATH="${TMP}/ntpbin:/usr/bin:/bin" \
-    bash "${NODESCRIPT}" apply "${_ntp_ms}" 2>&1)"
+out_ntp="$(NTP_STATE_DIR="${TMP}/ntpstate-a" FAKE_NOW_MS="${_ntp_ms}" PATH="${TMP}/ntpbin" \
+    /bin/bash "${NODESCRIPT}" apply "${_ntp_ms}" 2>&1)"
 chk_contains "fallback 启动 chrony 后 SYNC-OK" "SYNC-OK" "${out_ntp}"
 chk "fallback 已启动 chrony" "1" "$([ -f "${TMP}/ntpstate-a/chrony.active" ] && echo 1 || echo 0)"
 chk "fallback 未额外启动 timesyncd" "0" "$([ -f "${TMP}/ntpstate-a/systemd-timesyncd.active" ] && echo 1 || echo 0)"
 # 已 active 的 timesyncd 不被 chrony 启动覆盖
 mkdir -p "${TMP}/ntpstate-b"; : > "${TMP}/ntpstate-b/systemd-timesyncd.active"
-out_ntp2="$(NTP_STATE_DIR="${TMP}/ntpstate-b" FAKE_NOW_MS="${_ntp_ms}" PATH="${TMP}/ntpbin:/usr/bin:/bin" \
-    bash "${NODESCRIPT}" apply "${_ntp_ms}" 2>&1)"
+out_ntp2="$(NTP_STATE_DIR="${TMP}/ntpstate-b" FAKE_NOW_MS="${_ntp_ms}" PATH="${TMP}/ntpbin" \
+    /bin/bash "${NODESCRIPT}" apply "${_ntp_ms}" 2>&1)"
 chk_contains "active timesyncd 下仍 SYNC-OK" "SYNC-OK" "${out_ntp2}"
 chk "active timesyncd 不被覆盖" "0" "$([ -f "${TMP}/ntpstate-b/chrony.active" ] && echo 1 || echo 0)"
 # 无 chrony: 启动 timesyncd
 rm -f "${TMP}/ntpbin/chronyd"
 mkdir -p "${TMP}/ntpstate-c"
-out_ntp3="$(NTP_STATE_DIR="${TMP}/ntpstate-c" FAKE_NOW_MS="${_ntp_ms}" PATH="${TMP}/ntpbin:/usr/bin:/bin" \
-    bash "${NODESCRIPT}" apply "${_ntp_ms}" 2>&1)"
+out_ntp3="$(NTP_STATE_DIR="${TMP}/ntpstate-c" FAKE_NOW_MS="${_ntp_ms}" PATH="${TMP}/ntpbin" \
+    /bin/bash "${NODESCRIPT}" apply "${_ntp_ms}" 2>&1)"
 chk_contains "无 chrony 启动 timesyncd 后 SYNC-OK" "SYNC-OK" "${out_ntp3}"
 chk "无 chrony 启动 timesyncd" "1" "$([ -f "${TMP}/ntpstate-c/systemd-timesyncd.active" ] && echo 1 || echo 0)"
 
