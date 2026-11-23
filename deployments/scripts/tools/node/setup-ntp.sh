@@ -410,7 +410,16 @@ CFG
         timedatectl set-ntp true >/dev/null 2>&1 || true
         systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || systemctl restart systemd-timesyncd >/dev/null 2>&1 || true
         if systemctl is-active systemd-timesyncd >/dev/null 2>&1; then
-            DAEMON_OK=1
+            # 已 active 不等于已同步; 有界等待 NTPSynchronized=yes, 否则不算成功。
+            for _i in {1..30}; do
+                [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ] && break
+                /bin/sleep 1
+            done
+            if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; then
+                DAEMON_OK=1
+            else
+                echo "TIMESYNCD-NOT-SYNCHRONIZED(active but NTPSynchronized != yes)"
+            fi
         fi
     fi
     if [ "${DAEMON_OK}" != "1" ]; then
@@ -418,26 +427,46 @@ CFG
     fi
 else
     # fallback 模式(首 master 只有 timesyncd, 不提供 123): 不重写任何上游配置;
-    # 但必须确保已安装的时间服务在运行 —— worker 有 chrony 但未启用时, 只 is-active
-    # 检查会误报 SYNC-FAIL。已 active 的服务保持不动。
+    # 必须确保时间服务在运行且 **timesyncd 已同步** —— 只 is-active 或一次性 date -s
+    # 不能算 NTP 通过。chrony active 时由后续 verify_clocks 的 ^* 源检查负责。
     _time_active=0
+    _chrony_active=0
     if systemctl is-active chrony >/dev/null 2>&1 \
-        || systemctl is-active chronyd >/dev/null 2>&1 \
-        || systemctl is-active systemd-timesyncd >/dev/null 2>&1; then
+        || systemctl is-active chronyd >/dev/null 2>&1; then
+        _chrony_active=1
         _time_active=1
-    else
+    fi
+    if [ "${_chrony_active}" != "1" ] \
+        && systemctl is-active systemd-timesyncd >/dev/null 2>&1; then
+        if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; then
+            _time_active=1
+        else
+            echo "TIMESYNCD-NOT-SYNCHRONIZED(active but NTPSynchronized != yes)"
+        fi
+    fi
+    if [ "${_time_active}" != "1" ] && [ "${_chrony_active}" != "1" ] \
+        && ! systemctl is-active systemd-timesyncd >/dev/null 2>&1; then
         if command -v chronyd >/dev/null 2>&1 || command -v chronyc >/dev/null 2>&1; then
             systemctl enable --now chrony >/dev/null 2>&1 \
                 || systemctl enable --now chronyd >/dev/null 2>&1 || true
         fi
-        if ! systemctl is-active chrony >/dev/null 2>&1 \
-            && ! systemctl is-active chronyd >/dev/null 2>&1; then
-            systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || true
-        fi
         if systemctl is-active chrony >/dev/null 2>&1 \
-            || systemctl is-active chronyd >/dev/null 2>&1 \
-            || systemctl is-active systemd-timesyncd >/dev/null 2>&1; then
+            || systemctl is-active chronyd >/dev/null 2>&1; then
             _time_active=1
+        else
+            systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || true
+            if systemctl is-active systemd-timesyncd >/dev/null 2>&1; then
+                # timesyncd 启动后需要等它真正同步(NTPSynchronized=yes), 有界 30s。
+                for _i in {1..30}; do
+                    [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ] && break
+                    /bin/sleep 1
+                done
+                if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; then
+                    _time_active=1
+                else
+                    echo "TIMESYNCD-NOT-SYNCHRONIZED(started but NTPSynchronized != yes)"
+                fi
+            fi
         fi
     fi
     [ "${_time_active}" = "1" ] && DAEMON_OK=1
@@ -577,7 +606,7 @@ verify_clocks() {
     fi
     local FAIL=0 FAIL_LIST=""
     for e in "${NODE_ENTRIES[@]:-}"; do
-        local ip rest u pw hn
+        local ip rest u pw hn _chrony_live
         ip="${e%%:*}"; rest="${e#*:}"; u="${rest%%:*}"; rest="${rest#*:}"; pw="${rest%%:*}"; rest="${rest#*:}"; hn="${rest%%:*}"
         node_matches "${hn}" || continue
         if ! node_sudo_ready "${ip}" "${u}" "${pw}"; then
@@ -585,17 +614,29 @@ verify_clocks() {
             FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
             continue
         fi
-        # 没有 chrony 且 timesyncd 未运行 ⇒ 节点没有持久时间服务。
-        # 此时一次性 date -s 只能保证部署瞬间, 不能算 NTP 通过。
-        # ⚠ 必须用 bash -c 包住整条 `||` 链: node_cmd 对非 root 会前置 sudo,
-        #   而 `sudo command -v` 无法执行 shell 内建 → 所有节点被误判无守护进程
-        #   (2026-10-26 实机: apply 全部 SYNC-OK, verify 却全员报 NO daemon)。
-        if ! node_cmd "${ip}" "${u}" "${pw}" \
-            "bash -c 'command -v chronyc >/dev/null 2>&1 || systemctl is-active systemd-timesyncd >/dev/null 2>&1'" >/dev/null 2>&1; then
-            err "  ${hn}(${ip}) 无可用时间守护进程(chrony 未安装且 systemd-timesyncd 未运行)"
-            err "    修复: 在节点安装 chrony（installer 不安装 OS 包）, 或 systemctl enable --now systemd-timesyncd 后重跑"
-            FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
-            continue
+        # 时间服务判定: chrony active → 后续 ^* 源检查; 否则 timesyncd 必须 active **且已同步**
+        #   (NTPSynchronized=yes)。一次性 date -s / 小偏差不能单独算 NTP 通过。
+        # ⚠ bash -c 包住整条链: node_cmd 对非 root 会前置 sudo, `sudo command -v` 无法执行内建。
+        _chrony_live=0
+        if node_cmd "${ip}" "${u}" "${pw}" \
+            "bash -c 'systemctl is-active --quiet chrony || systemctl is-active --quiet chronyd'" >/dev/null 2>&1; then
+            _chrony_live=1
+        fi
+        if [ "${_chrony_live}" != "1" ]; then
+            if ! node_cmd "${ip}" "${u}" "${pw}" \
+                "bash -c 'systemctl is-active --quiet systemd-timesyncd'" >/dev/null 2>&1; then
+                err "  ${hn}(${ip}) 无可用时间守护进程(chrony 未运行且 systemd-timesyncd 未运行)"
+                err "    修复: 在节点安装 chrony（installer 不安装 OS 包）, 或 systemctl enable --now systemd-timesyncd 后重跑"
+                FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
+                continue
+            fi
+            if ! node_cmd "${ip}" "${u}" "${pw}" \
+                "bash -c '[ \"\$(timedatectl show -p NTPSynchronized --value 2>/dev/null)\" = yes ]'" >/dev/null 2>&1; then
+                err "  ${hn}(${ip}) systemd-timesyncd 未同步(NTPSynchronized != yes) —— 一次性 date/小偏差不能算 NTP 通过"
+                err "    修复: 检查 timesyncd 上游/DNS/网络, 待 timedatectl show 显示 NTPSynchronized=yes 后重跑"
+                FAIL=1; FAIL_LIST="${FAIL_LIST}${hn} "
+                continue
+            fi
         fi
         # ★ 2026-10-14: 节点→权威 IP 通路预检(与 apply 同一口径)。--check 模式由此获得明确诊断,
         #   不再把"无 IP 通路"呈现为"无法读取时钟"/"偏差超限"这类指向错误方向的报错。

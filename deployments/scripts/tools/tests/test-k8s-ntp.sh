@@ -151,8 +151,8 @@ chk_contains "SYNC-OK 要求 DAEMON_OK" 'DAEMON_OK}" = "1"' "$(cat "${SETUP}")"
 chk_contains "daemon precheck 整链 bash -c(避免 sudo builtin)" "bash -c 'command -v chronyc" "$(cat "${SETUP}")"
 chk "node_cmd 不再裸跑 command -v chronyc(避免 sudo builtin)" "0" \
     "$(command grep -c 'node_cmd .*"command -v chronyc' "${SETUP}" 2>/dev/null || true)"
-chk "chronyc 存在性检查至少 3 处 bash -c" "1" \
-    "$([ "$(command grep -c "bash -c 'command -v chronyc" "${SETUP}" 2>/dev/null || true)" -ge 3 ] && echo 1 || echo 0)"
+chk "chronyc 存在性检查至少 2 处 bash -c" "1" \
+    "$([ "$(command grep -c "bash -c 'command -v chronyc" "${SETUP}" 2>/dev/null || true)" -ge 2 ] && echo 1 || echo 0)"
 
 echo "== ⑤b fallback: 渲染时序 + chrony 客户端不指向 timesyncd master =="
 chk_contains "apply 在 fallback 判定后渲染客户端脚本" 'render_node_script "${_client_server}"' "$(cat "${SETUP}")"
@@ -162,9 +162,11 @@ chk_contains "--check 也渲染模板(不探测 master)" 'render_node_script "${
 chk_contains "生成脚本保留既有 chrony 上游" "不重写任何上游配置" "$(cat "${SETUP}")"
 chk_contains "fallback 启动已装 chrony" "systemctl enable --now chrony" "$(cat "${SETUP}")"
 chk_contains "fallback 启动 timesyncd 兜底" "systemctl enable --now systemd-timesyncd" "$(cat "${SETUP}")"
-chk_contains "fallback 保留已 active 服务" "已 active 的服务保持不动" "$(cat "${SETUP}")"
+chk_contains "fallback 要求 timesyncd 已同步" "timesyncd 已同步" "$(cat "${SETUP}")"
 chk_contains "fallback 分支确认守护进程" "systemctl is-active chrony" "$(cat "${SETUP}")"
 chk_contains "chrony 源检查要求 chrony active" "systemctl is-active --quiet chrony || systemctl is-active --quiet chronyd" "$(cat "${SETUP}")"
+chk_contains "verify: timesyncd 需 NTPSynchronized=yes" "NTPSynchronized --value" "$(cat "${SETUP}")"
+chk_contains "fallback timesyncd 未同步不置 DAEMON_OK" "TIMESYNCD-NOT-SYNCHRONIZED" "$(cat "${SETUP}")"
 chk_not_contains "不再在生成后立即用旧默认值替换" 'sed -i "s|__AUTHORITY__|${NTP_AUTHORITY}|g" "${NODE_SCRIPT}"' "$(cat "${SETUP}")"
 
 echo "== ⑤c fallback: 启动已装但未运行的时间服务(不改配置) =="
@@ -176,8 +178,18 @@ cat > "${TMP}/ntpbin/systemctl" <<'EOF'
 #!/bin/bash
 case "$1" in
     is-active) [ -f "${NTP_STATE_DIR}/$2.active" ]; exit $? ;;
-    enable) svc="${@: -1}"; : > "${NTP_STATE_DIR}/${svc}.active"; exit 0 ;;
+    enable) svc="${@: -1}"; : > "${NTP_STATE_DIR}/${svc}.active"
+            [ "${svc}" = "systemd-timesyncd" ] && : > "${NTP_STATE_DIR}/timesyncd-synced"
+            exit 0 ;;
 esac
+exit 0
+EOF
+cat > "${TMP}/ntpbin/timedatectl" <<'EOF'
+#!/bin/bash
+if [ "$1" = "show" ] && [ "$2" = "-p" ] && [ "$3" = "NTPSynchronized" ] && [ "$4" = "--value" ]; then
+    [ -f "${NTP_STATE_DIR}/timesyncd-synced" ] && echo yes || echo no
+    exit 0
+fi
 exit 0
 EOF
 cat > "${TMP}/ntpbin/date" <<'EOF'
@@ -185,7 +197,7 @@ cat > "${TMP}/ntpbin/date" <<'EOF'
 if [ "$1" = "+%s%3N" ] && [ -n "${FAKE_NOW_MS:-}" ]; then echo "${FAKE_NOW_MS}"; exit 0; fi
 exec /bin/date "$@"
 EOF
-chmod +x "${TMP}/ntpbin/systemctl" "${TMP}/ntpbin/date"
+chmod +x "${TMP}/ntpbin/systemctl" "${TMP}/ntpbin/timedatectl" "${TMP}/ntpbin/date"
 : > "${TMP}/ntpbin/chronyd"; chmod +x "${TMP}/ntpbin/chronyd"
 _ntp_ms=1700000000000
 mkdir -p "${TMP}/ntpstate-a"
@@ -194,8 +206,8 @@ out_ntp="$(NTP_STATE_DIR="${TMP}/ntpstate-a" FAKE_NOW_MS="${_ntp_ms}" PATH="${TM
 chk_contains "fallback 启动 chrony 后 SYNC-OK" "SYNC-OK" "${out_ntp}"
 chk "fallback 已启动 chrony" "1" "$([ -f "${TMP}/ntpstate-a/chrony.active" ] && echo 1 || echo 0)"
 chk "fallback 未额外启动 timesyncd" "0" "$([ -f "${TMP}/ntpstate-a/systemd-timesyncd.active" ] && echo 1 || echo 0)"
-# 已 active 的 timesyncd 不被 chrony 启动覆盖
-mkdir -p "${TMP}/ntpstate-b"; : > "${TMP}/ntpstate-b/systemd-timesyncd.active"
+# 已 active 的 timesyncd(且已同步)不被 chrony 启动覆盖
+mkdir -p "${TMP}/ntpstate-b"; : > "${TMP}/ntpstate-b/systemd-timesyncd.active"; : > "${TMP}/ntpstate-b/timesyncd-synced"
 out_ntp2="$(NTP_STATE_DIR="${TMP}/ntpstate-b" FAKE_NOW_MS="${_ntp_ms}" PATH="${TMP}/ntpbin" \
     /bin/bash "${NODESCRIPT}" apply "${_ntp_ms}" 2>&1)"
 chk_contains "active timesyncd 下仍 SYNC-OK" "SYNC-OK" "${out_ntp2}"
@@ -207,6 +219,17 @@ out_ntp3="$(NTP_STATE_DIR="${TMP}/ntpstate-c" FAKE_NOW_MS="${_ntp_ms}" PATH="${T
     /bin/bash "${NODESCRIPT}" apply "${_ntp_ms}" 2>&1)"
 chk_contains "无 chrony 启动 timesyncd 后 SYNC-OK" "SYNC-OK" "${out_ntp3}"
 chk "无 chrony 启动 timesyncd" "1" "$([ -f "${TMP}/ntpstate-c/systemd-timesyncd.active" ] && echo 1 || echo 0)"
+# timesyncd active 但未同步: 不得仅凭 active/一次性 date 报 SYNC-OK
+mkdir -p "${TMP}/ntpstate-d"; : > "${TMP}/ntpstate-d/systemd-timesyncd.active"
+out_ntp4="$(NTP_STATE_DIR="${TMP}/ntpstate-d" FAKE_NOW_MS="${_ntp_ms}" PATH="${TMP}/ntpbin" \
+    /bin/bash "${NODESCRIPT}" apply "${_ntp_ms}" 2>&1)"
+chk_contains "timesyncd 未同步给出明确提示" "TIMESYNCD-NOT-SYNCHRONIZED" "${out_ntp4}"
+if printf '%s' "${out_ntp4}" | command grep -q 'SYNC-OK'; then
+    echo "  FAIL timesyncd 未同步不应 SYNC-OK"; fail=1
+else
+    echo "  ok  timesyncd 未同步不报 SYNC-OK"
+fi
+chk "timesyncd 未同步不启动 chrony" "0" "$([ -f "${TMP}/ntpstate-d/chrony.active" ] && echo 1 || echo 0)"
 
 echo "== ⑥ workerbm 自动装包已停用(OS 预装/手动) =="
 chk_contains "workerbm 停用提示" "已停用" "$(cat "${WORKERBM}")"
