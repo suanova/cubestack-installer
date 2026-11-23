@@ -105,7 +105,9 @@ python3 deployments/scripts/tools/online/lib-base-catalog.py --index <index.json
 
 `mirror-updated` 会在被 `base.yaml` 引用的 catalog id 新增可用 tag（有
 sha256 digest 且支持 linux/amd64）时自动 bump `mirror.commit`；它不会修改
-`env`，版本选择仍由人决定。
+`env`，版本选择仍由人决定。新 tag 需要先等 mirror 同步并补齐 digest；如果
+pin PR 还没合并，先等它合并再提交只改 `env` 的 PR，避免 pinned index 里
+还没有该 tag 导致校验失败。
 
 ## optional
 

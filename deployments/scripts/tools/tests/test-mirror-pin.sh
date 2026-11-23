@@ -125,6 +125,45 @@ grep -q "unchanged" <<<"${out}" || fail "new tag without amd64 should be unchang
 grep -q "commit: aaaaa" "${TMP}/versions/base.yaml" || fail "new tag without amd64 rewrote the pin"
 pass "new tag without linux/amd64 does not move the pin"
 
+cat > "${TMP}/platforms-empty.json" <<'EOF'
+{"schema": 1, "images": [
+  {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/pause",
+   "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
+  {"id": "kubernetes/other", "source": "registry.k8s.io/other",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/other",
+   "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+                {"tag": "v2", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}]}
+]}
+EOF
+
+out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
+    --commit 1616161616161616161616161616161616161616 \
+    --index "${TMP}/platforms-empty.json" --old-index "${TMP}/old.json")"
+grep -q "new usable tag" <<<"${out}" || fail "new tag without a platforms list should be reported"
+grep -q "commit: 1616" "${TMP}/versions/base.yaml" || fail "new tag without a platforms list did not bump the pin"
+pass "new tag without a platforms list moves the pin"
+
+cat > "${TMP}/multiarch.json" <<'EOF'
+{"schema": 1, "images": [
+  {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/pause",
+   "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
+  {"id": "kubernetes/other", "source": "registry.k8s.io/other",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/other",
+   "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+                {"tag": "v2", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+                 "platforms": ["linux/arm64", "linux/amd64"]}]}
+]}
+EOF
+
+out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
+    --commit 1717171717171717171717171717171717171717 \
+    --index "${TMP}/multiarch.json" --old-index "${TMP}/old.json")"
+grep -q "new usable tag" <<<"${out}" || fail "multi-platform tag with amd64 should be reported"
+grep -q "commit: 1717" "${TMP}/versions/base.yaml" || fail "multi-platform tag with amd64 did not bump the pin"
+pass "multi-platform tag including linux/amd64 moves the pin"
+
 cat > "${TMP}/added.json" <<'EOF'
 {"schema": 1, "images": [
   {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
