@@ -97,6 +97,9 @@ for group in ("kube_node", "kube_control_plane"):
     fi
     if [ -z "${_inv_hosts}" ] && command -v python3 >/dev/null 2>&1; then
         # 无 ansible-inventory(或输出为空)时按 hosts.yml 结构直接解析。
+        # ★ 只解析 kube_node / kube_control_plane 及其子孙组 —— 不能把 inventory 里
+        #   所有组都当清理目标(例如单独的 backup 组), 否则 --skip-keep-query 会误清
+        #   非 K8s 主机上的空闲 rbd 映射。与 JSON 路径保持同一目标选择。
         _inv_hosts="$(python3 - "${INVENTORY}" <<'PY' 2>/dev/null || true
 import os, sys
 try:
@@ -107,19 +110,41 @@ try:
     d = yaml.safe_load(open(sys.argv[1])) or {}
 except Exception:
     sys.exit(0)
+if not isinstance(d, dict):
+    sys.exit(0)
+groups = {}
+def register(name, g):
+    if not isinstance(g, dict):
+        return
+    # 同名组可能先在 all.children 里以空定义出现, 后续顶层真实定义覆盖空值。
+    if not groups.get(name):
+        groups[name] = g
+    children = g.get("children") or {}
+    if isinstance(children, dict):
+        for cname, cg in children.items():
+            register(cname, cg)
+# 先注册 all 及其嵌套子组, 再注册顶层组(覆盖空定义)。
+for k, v in d.items():
+    register(k, v)
 seen = {}
-def add_group(g):
+seen_groups = set()
+def add_group(name):
+    if name in seen_groups:
+        return
+    seen_groups.add(name)
+    g = groups.get(name) or {}
     if not isinstance(g, dict):
         return
     for h, hv in (g.get("hosts") or {}).items():
         hv = hv or {}
         seen.setdefault(h, hv)
-    for c in (g.get("children") or {}).values():
-        add_group(c)
-add_group(d.get("all") or {})
-for k, v in d.items():
-    if k != "all":
-        add_group(v)
+    children = g.get("children") or []
+    if isinstance(children, dict):
+        children = list(children.keys())
+    for cname in children:
+        add_group(cname)
+for group in ("kube_node", "kube_control_plane"):
+    add_group(group)
 for h, hv in seen.items():
     ip = hv.get("ansible_host") or h
     user = hv.get("ansible_user") or "ubuntu"
