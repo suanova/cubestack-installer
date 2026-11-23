@@ -141,8 +141,8 @@ chk_contains "客户端缺 chrony 时回退 timesyncd" "CHRONY-NOT-INSTALLED" "$
 # 2026-11-19 用户口径: 装包与 NTP 同步解耦 —— k8s_ntp 不再内嵌任何 OS 装包;
 #   chrony 由可选模块 chrony_pkgs 负责, 首 master 缺 chrony 时硬失败并给启用指引。
 chk_contains "首 master 缺 chrony 硬失败" "CHRONY-NOT-INSTALLED" "$(cat "${SETUP}")"
-chk_contains "首 master 缺 chrony 指向可选装包模块" "CHRONY_PKGS_ENABLED" "$(cat "${SETUP}")"
-chk_contains "首 master 缺 chrony 指向 --steps chrony_pkgs" "--steps chrony_pkgs" "$(cat "${SETUP}")"
+chk_contains "首 master 缺 chrony 指向手动脚本" "install-os-packages.sh" "$(cat "${SETUP}")"
+chk_contains "旧 chrony_pkgs 标注已停用" "chrony_pkgs" "$(cat "${SETUP}")"
 chk_not_contains "NTP 模块不内嵌离线装包" "install_debs_offline" "$(cat "${SETUP}")"
 chk_not_contains "NTP 模块不引用 chrony 专用安装集" "os/packages/chrony" "$(cat "${SETUP}")"
 chk_not_contains "NTP 模块不内嵌 deb 安装原语" "deb_install_remote_lib" "$(cat "${SETUP}")"
@@ -154,13 +154,13 @@ chk "node_cmd 不再裸跑 command -v chronyc(避免 sudo builtin)" "0" \
 chk "chronyc 存在性检查至少 3 处 bash -c" "1" \
     "$([ "$(command grep -c "bash -c 'command -v chronyc" "${SETUP}" 2>/dev/null || true)" -ge 3 ] && echo 1 || echo 0)"
 
-echo "== ⑥ workerbm 装包 opt-in =="
-chk_contains "workerbm 装包脚本引用" "install-worker-packages" "$(cat "${WORKERBM}")"
+echo "== ⑥ workerbm 自动装包已停用(OS 预装/手动) =="
+chk_contains "workerbm 停用提示" "已停用" "$(cat "${WORKERBM}")"
+chk_contains "workerbm 指向手动工具" "install-worker-packages" "$(cat "${WORKERBM}")"
 chk_contains "workerbm 默认关闭自检" "WORKER_PKGS_ENABLED=false" "$(cat "${WORKERBM}")"
 chk_contains "workerbm TOGGLE 声明" "TOGGLE: WORKER_PKGS_ENABLED" "$(cat "${WORKERBM}")"
-chk_contains "workerbm 连通性检查" "连通性检查" "$(cat "${WORKERBM}")"
-grep -A3 'PKG_FAIL.*-ne 0' "${WORKERBM}" > "${TMP}/worker-fail.txt" 2>/dev/null || true
-chk_contains "workerbm 装包失败分支 exit 1" "exit 1" "$(cat "${TMP}/worker-fail.txt")"
+chk "workerbm 不再调用自动装包" "0" \
+    "$(command grep -c 'bash .*install-worker-packages' "${WORKERBM}" 2>/dev/null || true)"
 
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then echo "✅ test-k8s-ntp: 全部通过"; else echo "❌ test-k8s-ntp: 有失败"; fi

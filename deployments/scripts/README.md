@@ -82,9 +82,9 @@ deployments/scripts/
 │   │   ├── 03_vm_create.sh    #     创建虚拟机(默认关, 由 tools/vm/create-vms.sh 独立执行)
 │   │   └── 04_harbor.sh       #     Harbor 镜像仓库(集群外私有仓库, 部署前就绪)
 │   ├── 02_k8s/                #   阶段二: 离线部署 kubespray(不依赖 VM/裸金属)
-│   │   ├── 00_chrony_pkgs.sh       # chrony 离线装包(可选, 默认关, CHRONY_PKGS_ENABLED=true 启用; 与 NTP 同步解耦, 在 NTP 之前执行)
+│   │   ├── 00_chrony_pkgs.sh       # 已停用(2026-11-23): 不再自动安装 chrony; 手动或 OS 预装
 │   │   ├── 01_k8s_passwordless.sh  # SSH 免密
-│   │   ├── 02_k8s_workerbm.sh      # worker 节点离线装包(默认关, WORKER_PKGS_ENABLED=true 启用; 默认连通性检查由 pre_install_check 覆盖)
+│   │   ├── 02_k8s_workerbm.sh      # 已停用(2026-11-23): 不再自动安装 worker OS 包; 手动或 OS 预装
 │   │   ├── 03_k8s_hosts.sh         # 更新 /etc/hosts
 │   │   ├── 04_k8s_inventory.sh     # 生成 inventory + 同步配置
 │   │   ├── 05_k8s_ntp.sh           # NTP 时间同步
@@ -96,7 +96,6 @@ deployments/scripts/
 │   │   ├── 10_api_local_lb.sh      # 节点侧 API 本地代理(kubespray nginx-proxy 静态 Pod): 断言就位 +
 │   │   │                           #   /etc/hosts 域名行收敛 + 关闭时清理残留; 默认开, 见 docs/api-ha/
 │   │   ├── 11_verify_api_ha.sh     # 验证 API 入口高可用(七项; --steps verify_api_ha)
-│   │   ├── 12_node_pkgs.sh         # 节点系统包离线对账(默认关, NODE_PKGS_ENABLED=true 启用; 默认只由 14 做 warn-only 检查)
 │   │   ├── 13_node_net_guard.sh    # 节点源策略路由/Calico rpfilter 冲突预检(默认只检查)
 │   │   ├── 14_pre_install_check.sh # 安装前环境检查(SSH/sudo/chronyd/资源容量; 关键项失败即中止)
 │   │   └── 15_k8s_asset_prefetch.sh # 离线资产预取(kubespray 之前)
@@ -490,14 +489,12 @@ REGISTRY_NODEPORT="31148"            # nodeport 模式的固定 NodePort
 
 kubeadm / etcd 对节点间时钟偏差敏感,若节点时间不一致会导致证书校验、心跳、日志时间线等故障。`modules/02_k8s/05_k8s_ntp.sh` 位于 k8s 阶段**部署模块之前**,为默认启用的可重复模块,一键部署与扩容时自动执行。
 
-> **2026-11-19(2.1 口径)**: installer **默认不安装 OS 包** —— chrony 由节点黄金镜像/运维预装。
-> **装包可选、NTP 同步必选, 二者解耦**: 需要 installer 离线安装 chrony 时启用独立可选模块
-> `chrony_pkgs`(`CHRONY_PKGS_ENABLED=true` / `--steps chrony_pkgs`, 只装
-> `offline-files/os/packages/chrony/`, 不写配置), 它在 NTP 之前执行;
+> **2026-11-23**: installer **不安装 OS 包** —— chrony 由节点黄金镜像/运维预装, 或手动运行
+> `tools/manual/install-os-packages.sh`(默认含 chrony 专用集, 可 `--skip-chrony`)。
+> 旧可选模块 `chrony_pkgs`(`CHRONY_PKGS_ENABLED` / `--steps chrony_pkgs`)已停用。
 > `k8s_ntp` **只负责同步**并假设 chrony 已存在 —— 权威(首 master)缺 chrony → **硬失败**并提示
-> 启用 `chrony_pkgs`/预装; 客户端缺 chrony 回退 `systemd-timesyncd`。
-> 全量部署时 chrony 装包与 NTP 同步都在 **SSH 免密之后、Ceph/其他 operator 卸载/安装之前**执行
-> (见 `deploy-cluster.sh` 的“安装前可选装包阶段”与“安装前 NTP 阶段”)。
+> 手动安装/预装; 客户端缺 chrony 回退 `systemd-timesyncd`。
+> 全量部署的 NTP 阶段在 **SSH 免密之后、Ceph/其他 operator 卸载/安装之前**执行。
 
 原理与机制:
 
@@ -581,19 +578,19 @@ VM 已通过其他方式创建时,用此脚本将其注册到 `cluster.conf` 的
 
 缺包时按清单在节点上安装后重跑；`--warn-only` 只告警，`--check-os-packages` 阻断。
 
-需要 installer 直接安装离线 `.deb` 时显式开启（默认 `false`）：
+通用 OS 包与可选节点 helm 均为**手动安装**（不接入 deploy-cluster）：
 
 ```bash
-# cluster.conf
-NODE_PKGS_ENABLED="true"     # 节点系统包对账(tools/node/reconcile-node-packages.sh)
-WORKER_PKGS_ENABLED="true"   # worker 离线装包(tools/node/install-worker-packages.sh)
-CHRONY_PKGS_ENABLED="true"   # chrony 专用安装集(os/packages/chrony; tools/node/install-chrony-packages.sh)
-# 或: --enable node_pkgs / --steps node_pkgs; --enable k8s_workerbm / --steps k8s_workerbm;
-#     --enable chrony_pkgs / --steps chrony_pkgs
+./scripts/tools/manual/install-os-packages.sh --install
+./scripts/tools/manual/install-os-packages.sh --install --with-helm   # 额外安装节点 helm
 ```
 
-`.deb` 来源为 `offline-files/os/packages/*.deb`（需自行预置）；开启后在 kubespray 之前执行。
-`k8s_workerbm` 的 fresh 节点清理（系统 `containerd`/`containerd.io`/`runc`）默认不做，需显式
+⚠ `NODE_PKGS_ENABLED` / `WORKER_PKGS_ENABLED` / `CHRONY_PKGS_ENABLED` 已停用(2026-11-23)：
+置 `true` 也不会安装任何包，仅为兼容旧配置保留。worker 运行时如需手动安装：
+`tools/node/install-worker-packages.sh <IP> [user]`。
+
+`.deb` 来源为 `offline-files/os/packages/ubuntu-<VERSION_ID>/`（需自行预置）。
+`install-worker-packages.sh` 的 fresh 节点清理（系统 `containerd`/`containerd.io`/`runc`）默认不做，需显式
 `CUBESTACK_FRESH_NODE=1`（或直接调用工具时 `--fresh-node`）；kubelet 未运行只是额外条件，
 **不是** fresh 判据——维护中的已加入 worker 不会被误 purge。同时要求 kubelet 状态**可确认安全**
 （`inactive` 或单元不存在）；`systemctl` 无法给出状态（空输出/无响应）时跳过清理并报告。
@@ -711,7 +708,7 @@ sudo ./scripts/deploy-cluster.sh --with-k8s
 2. `gen-ssh-key.sh` 生成 SSH 密钥(仅在需要项目密钥时)
 3. 按 NODES 创建 master/worker 虚拟机(基础镜像已由 `create-vm-template.sh` 预制 kubespray 所需包, 创建 VM 不安装任何组件, 离线环境安全)
 4. `setup-passwordless.sh` 注入公钥
-5. 检查 worker 节点前置包（默认只检查；置 `WORKER_PKGS_ENABLED=true` 时离线装包）
+5. 检查 worker 节点前置包（默认只检查；缺失时用 manual 脚本或手动 worker 工具安装）
 6. `gen-inventory.sh` + `sync-kubespray-config.sh` 生成 inventory 与配置
 7. `setup-ntp.sh`(modules/02_k8s/05_k8s_ntp)同步各节点时间到权威(首 master), 校验偏差 ≤ `NTP_MAX_OFFSET_MS`(在 kubespray 之前)
 8. `pre-install-check.sh`(modules/02_k8s/14_pre_install_check)只读检查 SSH/sudo/chronyd/资源容量; 关键项失败即中止
@@ -769,7 +766,7 @@ CUBESTACK_KUBESPRAY_DIR=$PWD/kubespray \
 export SSHPASS='<worker密码>'
 sshpass -e ssh ubuntu@<workerIP> "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" < ~/.ssh/cubestack_k8s.pub
 
-# ② 确认节点前置包已安装（默认只检查；需要 offline .deb 安装时置 NODE_PKGS_ENABLED=true）
+# ② 确认节点前置包已安装（默认只检查；缺失时用 manual 脚本安装；节点 helm 可选 --with-helm）
 ./scripts/tools/online/check-os-packages.sh \
   --baseline versions/base.yaml --hosts ubuntu@<workerIP> --warn-only
 

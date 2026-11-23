@@ -22,7 +22,7 @@
 #        [--scope general|helm-nodejs|all]
 #        --scope 选择离线包范围(默认 all, 兼容旧行为):
 #          general     = os/packages/ubuntu-<VERSION_ID>(节点通用 OS 包; 手动脚本用)
-#          helm-nodejs = os/helm-nodejs(+ ubuntu-<VERSION_ID>; NODE_PKGS_ENABLED 自动安装用)
+#          helm        = 可选节点 helm(os/helm 根目录; 兼容旧 os/helm-nodejs 根目录)
 #          all         = 两者都装(旧行为)
 #       不给 --ip = 对 cluster.conf NODES 里全部节点执行。
 # 退出码: 0=全部节点 apt 依赖图健康; 1=有节点仍不健康
@@ -46,8 +46,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 case "${SCOPE}" in
-    general|helm-nodejs|all) ;;
-    *) err "--scope 只支持 general|helm-nodejs|all(收到: ${SCOPE})"; exit 1 ;;
+    general|helm|all) ;;
+    helm-nodejs) SCOPE="helm" ;;   # 兼容旧参数名(nodejs 已移除)
+    *) err "--scope 只支持 general|helm|all(收到: ${SCOPE})"; exit 1 ;;
 esac
 if [ "${#IPS[@]}" -eq 0 ]; then
     # 目标节点来源**以 inventory 为准**(部署本身就是 inventory 驱动的; cluster.conf 的 NODES
@@ -152,20 +153,24 @@ if [ -n "${_os_ver}" ] && [ -d "${_pkg_root}/ubuntu-${_os_ver}" ]; then
 else
     _general_dir="${_pkg_root}"
 fi
-# helm/nodejs 单独目录（NODE_PKGS_ENABLED 自动安装；手动脚本用 --scope general 跳过）
-#   helm 在根目录（静态、版本通用）；nodejs 在 ubuntu-<VERSION_ID>/（按目标 OS 适配）。
-_helm_dir="$(dirname "${_pkg_root}")/helm-nodejs"
+# 可选节点 helm 单独目录(仅手动装包; nodejs 已移除, 不再自动安装)
+#   新布局 os/helm; 兼容旧 os/helm-nodejs(只认根目录的 helm_*.deb, 旧 ubuntu-*/nodejs 不再扫描)。
+_helm_base="$(dirname "${_pkg_root}")"
+if [ -d "${_helm_base}/helm" ]; then
+    _helm_dir="${_helm_base}/helm"
+elif [ -d "${_helm_base}/helm-nodejs" ]; then
+    _helm_dir="${_helm_base}/helm-nodejs"
+else
+    _helm_dir="${_helm_base}/helm"
+fi
 DEB_DIRS=()
 case "${SCOPE}" in
     general)
         DEB_DIRS=("${_general_dir}")
         ;;
-    helm-nodejs)
+    helm)
         if [ -d "${_helm_dir}" ]; then
-            DEB_DIRS+=("${_helm_dir}")
-        fi
-        if [ -n "${_os_ver}" ] && [ -d "${_helm_dir}/ubuntu-${_os_ver}" ]; then
-            DEB_DIRS+=("${_helm_dir}/ubuntu-${_os_ver}")
+            DEB_DIRS=("${_helm_dir}")
         fi
         ;;
     all)
@@ -173,16 +178,12 @@ case "${SCOPE}" in
         if [ -d "${_helm_dir}" ]; then
             DEB_DIRS+=("${_helm_dir}")
         fi
-        if [ -n "${_os_ver}" ] && [ -d "${_helm_dir}/ubuntu-${_os_ver}" ]; then
-            DEB_DIRS+=("${_helm_dir}/ubuntu-${_os_ver}")
-        fi
         ;;
 esac
 say "目标 OS=${_os_ver:-未知}; 范围=${SCOPE}; 离线包目录=${DEB_DIRS[*]:-<空>}"
-unset _helm_dir _general_dir
+unset _helm_base _helm_dir _general_dir
 DEBS=()
-# NODE_PKGS_EXCLUDE_PATTERNS: 可选 basename glob 排除列表(空格/逗号分隔)。
-#   手动安装脚本用它排除 helm/nodejs 等由其他流程负责的包; 默认空 = 行为不变。
+# NODE_PKGS_EXCLUDE_PATTERNS: 可选 basename glob 排除列表(空格/逗号分隔; 调方可选过滤)。
 _excl_pats="${NODE_PKGS_EXCLUDE_PATTERNS:-}"
 if [ -n "${_excl_pats}" ]; then
     say "排除离线包模式: ${_excl_pats}"

@@ -424,14 +424,14 @@ chk_contains "短 selector: 非 NODES 匹配行被跳过" "跳过 inventory 行:
 unset _rc
 rm -rf "${_INV_TEST_DIR}"
 
-echo "== ⑧ --scope: NODE_PKGS 只装 helm/nodejs, 手动脚本只装通用 OS 包 =="
-# 2026-11-22 用户口径: 通用 OS 包假设 OS 镜像已存在, 只由 pre_install_check 体检 +
-#   手动脚本安装; NODE_PKGS_ENABLED 自动安装范围仅 os/helm-nodejs。
+echo "== ⑧ --scope: 手动脚本装通用 OS 包; 可选 helm 只装根目录 helm =="
+# 2026-11-23 用户口径: 通用 OS 包只由 pre_install_check 体检 + 手动脚本安装;
+#   节点 helm 可选(manual --with-helm); nodejs 已移除, 不再扫描/安装。
 SCOPE_OFFLINE="${TMP}/scope-offline"
-mkdir -p "${SCOPE_OFFLINE}/os/packages/ubuntu-24.04" "${SCOPE_OFFLINE}/os/helm-nodejs/ubuntu-24.04"
+mkdir -p "${SCOPE_OFFLINE}/os/packages/ubuntu-24.04" "${SCOPE_OFFLINE}/os/helm/ubuntu-24.04"
 : > "${SCOPE_OFFLINE}/os/packages/ubuntu-24.04/general_1.0_amd64.deb"
-: > "${SCOPE_OFFLINE}/os/helm-nodejs/helm_4.2.0-1_amd64.deb"
-: > "${SCOPE_OFFLINE}/os/helm-nodejs/ubuntu-24.04/nodejs_18.19.1_amd64.deb"
+: > "${SCOPE_OFFLINE}/os/helm/helm_4.2.0-1_amd64.deb"
+: > "${SCOPE_OFFLINE}/os/helm/ubuntu-24.04/nodejs_decoy_18.19.1_amd64.deb"   # 不应被扫描
 run_scope() {  # <scope>
     local scope="$1"
     (
@@ -449,13 +449,19 @@ run_scope() {  # <scope>
 run_scope general
 chk_contains "scope general: 选择通用 OS 包目录" "范围=general" "${TMP}/out-scope-general"
 chk_contains "scope general: 只有 1 个通用包" "离线包: 1 个" "${TMP}/out-scope-general"
-run_scope helm-nodejs
-chk_contains "scope helm-nodejs: 选择 helm/nodejs 目录" "范围=helm-nodejs" "${TMP}/out-scope-helm-nodejs"
-chk_contains "scope helm-nodejs: 2 个包(helm+nodejs)" "离线包: 2 个" "${TMP}/out-scope-helm-nodejs"
+run_scope helm
+chk_contains "scope helm: 选择 helm 目录" "范围=helm" "${TMP}/out-scope-helm"
+chk_contains "scope helm: 只装根目录 helm(1 个)" "离线包: 1 个" "${TMP}/out-scope-helm"
+chk_not_contains "scope helm: 不扫描 nodejs 子目录" "nodejs_decoy" "${TMP}/out-scope-helm"
 run_scope all
-chk_contains "scope all: 3 个包(兼容旧行为)" "离线包: 3 个" "${TMP}/out-scope-all"
-chk_contains "node_pkgs 只装 helm/nodejs" "--scope helm-nodejs" \
+chk_contains "scope all: 2 个包(通用+helm)" "离线包: 2 个" "${TMP}/out-scope-all"
+chk_not_contains "scope all: 不扫描 nodejs 子目录" "nodejs_decoy" "${TMP}/out-scope-all"
+chk "node_pkgs 已停用(不调用自动安装)" "0" \
+    "$(grep -c 'reconcile-node-packages' "${REPO_ROOT}/deployments/scripts/modules/02_k8s/12_node_pkgs.sh" || true)"
+chk_contains "node_pkgs 停用提示" "已停用" \
     "${REPO_ROOT}/deployments/scripts/modules/02_k8s/12_node_pkgs.sh"
+chk_contains "手动脚本支持可选 helm" "with-helm" \
+    "${REPO_ROOT}/deployments/scripts/tools/manual/install-os-packages.sh"
 chk_contains "手动脚本只装通用 OS 包" "--scope general" \
     "${REPO_ROOT}/deployments/scripts/tools/manual/install-os-packages.sh"
 unset SCOPE_OFFLINE

@@ -75,10 +75,13 @@ images:
   由 OS 黄金镜像/运维预装，installer **不下载、不安装**；`packages_check` 指向的
   `.lock` 是**仅预检**清单（不是安装清单），installer 只验证节点上是否已存在这些包，
   缺失时列清单并提示运行手动脚本 `tools/manual/install-os-packages.sh`。
-- `NODE_PKGS_ENABLED=true` 只自动安装 **helm/nodejs**（`offline-files/os/helm-nodejs/`）；
-  通用 `os/packages/ubuntu-<VERSION_ID>` **不自动安装**（缺失走手动脚本）。
-- `WORKER_PKGS_ENABLED=true` 仍用于 worker 离线包安装（`k8s_workerbm`，包含
-  `os/packages/ubuntu-<VERSION_ID>` 全集）；默认关闭。
+- `NODE_PKGS_ENABLED` 已移除：installer **不自动安装通用 OS 包**。节点 helm 为可选项，
+  通过 `tools/manual/install-os-packages.sh --with-helm` 手动安装（`offline-files/os/helm/`，
+  旧 `os/helm-nodejs/` 兼容）；nodejs 已移除，不再安装。
+- `NODE_PKGS_ENABLED` / `WORKER_PKGS_ENABLED` / `CHRONY_PKGS_ENABLED` 均已停用
+  （2026-11-23）：置 `true` 也不会安装任何包，仅为兼容旧配置保留。所有 OS 包安装走
+  OS 镜像预装或手动脚本；worker 运行时如需手动安装用
+  `tools/node/install-worker-packages.sh`。
 - 公开在线安装不启用这些路径。
 - chrony 专用安装集（`offline-files/os/packages/chrony/`）由**独立可选模块** `chrony_pkgs`
   安装（`CHRONY_PKGS_ENABLED=true` / `--steps chrony_pkgs`）；装包与 NTP 同步解耦，
@@ -120,8 +123,8 @@ packages:
 - 2.1 在线安装默认 `--warn-only`：缺包时列清单告警但不失败；`--check-os-packages`
   改为阻断，`--no-check-os-packages` 跳过。
 - 不下载 `.deb`、不执行 `apt-get install`；缺包时按输出提示运行
-  `tools/manual/install-os-packages.sh --install`。`NODE_PKGS_ENABLED` 只负责
-  helm/nodejs（`os/helm-nodejs`），**不安装本清单中的包**。
+  `tools/manual/install-os-packages.sh --install`。节点 helm 可选
+  `--with-helm`（`os/helm/`），nodejs 不再安装。
 - 版本号仅作为已知良好参考，不参与默认检查。
 
 ## 更新流程

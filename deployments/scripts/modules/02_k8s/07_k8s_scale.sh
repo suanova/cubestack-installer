@@ -262,9 +262,8 @@ unset _scale_cp_list
 # ★ 通过 ONLY_HOSTS 限定子模块只处理新节点 —— 扩容绝不重复向已有节点上传/装包
 #   (k8s_passwordless / k8s_workerbm / chrony_pkgs / node_pkgs / k8s_ntp 内部均按 node_matches 过滤)
 #   ⚠ k8s_workerbm / chrony_pkgs / node_pkgs 默认关(2026-11-18~19): 默认只由 pre_install_check
-#     做只读检查; NODE_PKGS_ENABLED=true 只给新节点装 helm/nodejs(os/helm-nodejs),
-#     通用 OS 包假设镜像已存在; WORKER_PKGS_ENABLED=true / CHRONY_PKGS_ENABLED=true
-#     分别装 worker 离线包 / chrony 专用集(模块内自检, 直接调用同样生效)。
+#     做只读检查; 需要给新节点装离线 .deb 时置 WORKER_PKGS_ENABLED=true /
+#     CHRONY_PKGS_ENABLED=true / NODE_PKGS_ENABLED=true(模块内自检, 直接调用同样生效)。
 #   ⚠ 新节点若需清理系统 containerd/containerd.io/runc, 还必须显式 CUBESTACK_FRESH_NODE=1
 #     (透传到 install-worker-packages.sh); kubelet 未运行不是判据 —— 复用/维护中的机器
 #     可能停着 kubelet, 误 purge 会毁掉节点运行时(2026-11-19 CodeRabbit)。
@@ -276,7 +275,7 @@ bash "${SCRIPT_DIR}/modules/01_env/02_vm_sshkey.sh"        # 生成密钥(全局
 export ONLY_HOSTS="${NEW_NODE_HOSTS}"
 bash "${SCRIPT_DIR}/modules/02_k8s/01_k8s_passwordless.sh" # 仅新节点注入公钥
 bash "${SCRIPT_DIR}/modules/02_k8s/02_k8s_workerbm.sh"     # 仅新 worker 离线装包(受 WORKER_PKGS_ENABLED 控制; 默认跳过)
-bash "${SCRIPT_DIR}/modules/02_k8s/12_node_pkgs.sh"        # 仅新节点 helm/nodejs 安装(受 NODE_PKGS_ENABLED 控制; 默认跳过)
+bash "${SCRIPT_DIR}/modules/02_k8s/12_node_pkgs.sh"        # 仅新节点系统包对账(受 NODE_PKGS_ENABLED 控制; 默认跳过)
 bash "${SCRIPT_DIR}/modules/02_k8s/00_chrony_pkgs.sh"      # 仅新节点 chrony 离线装包(受 CHRONY_PKGS_ENABLED 控制; 默认跳过; 必须在 NTP 之前)
 bash "${SCRIPT_DIR}/modules/02_k8s/05_k8s_ntp.sh"          # NTP: 首 master chrony 权威(无过滤, 照常配置)+ 新节点同步/校验
 

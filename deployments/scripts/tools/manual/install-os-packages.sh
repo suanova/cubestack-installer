@@ -2,7 +2,8 @@
 # ============================================================
 # TOOL: install-os-packages (manual, NOT a deploy-cluster module)
 # DESC: 手动下载/安装 offline-files/os/packages/ubuntu-<版本> 下的节点 OS deb。
-#       默认排除 helm / nodejs 相关包（这些包由 NODE_PKGS_ENABLED 自动流程负责）。
+#       默认安装通用 OS 包 + chrony 专用集；--with-helm 额外安装**可选节点 helm**。
+#       nodejs 不再由 installer 安装（已移除）。
 #       通用 OS 包默认假设操作系统镜像已存在；pre_install_check 缺失时提示运行本脚本。
 #       lock 文件(versions/os/*.lock)只用于安装前体检，本脚本不读它。
 #
@@ -14,15 +15,18 @@
 #   MinIO: <alias>/<prefix>/ubuntu-<版本>/{*.deb,chrony/*.deb}
 #   本地 : ${OFFLINE_FILES_ROOT}/os/packages/ubuntu-<版本>/{*.deb,chrony/*.deb}
 #   旧布局兼容: ${OFFLINE_FILES_ROOT}/os/packages/{*.deb,chrony/*.deb}
+#   可选 helm: ${OFFLINE_FILES_ROOT}/os/helm/helm_*.deb（旧布局 os/helm-nodejs/ 兼容）
 #
 # 用法:
 #   ./install-os-packages.sh                 # 默认 = --install（本地缺包时提示下载）
 #   ./install-os-packages.sh --layout [--os-version 24.04]
 #   ./install-os-packages.sh --download [--os-version 24.04] [--mc-alias minio] [--mc-prefix ...]
 #   ./install-os-packages.sh --install  [--os-version 24.04] [--ip 10.66.3.162] [--dry-run]
+#   ./install-os-packages.sh --install --with-helm ...   # 额外安装可选节点 helm
 #   ./install-os-packages.sh --download --install ...
 #
-#   --exclude "helm* nodejs* libnode* node-*"   安装时排除的 deb basename glob（默认）
+#   --with-helm                                额外安装可选节点 helm（os/helm/helm_*.deb）
+#   --exclude "pattern ..."                    安装时排除的 deb basename glob（可选）
 #   --skip-chrony                              不安装 chrony/ 专用集
 #
 # 数据源: 本地 offline-files/os/packages + MinIO（mc）；NODES/SSH 来自 cluster.conf。
@@ -40,7 +44,8 @@ MC_ALIAS="${MC_ALIAS:-minio}"
 MC_PREFIX="${MC_PREFIX:-cubestack-installer/release-store/vendor/os/packages}"
 OFFLINE_ROOT="${OFFLINE_FILES_ROOT:-${REPO_ROOT}/deployments/offline-files}"
 OS_VER="${OS_PACKAGES_VERSION:-}"
-EXCLUDE_PATTERNS="${NODE_PKGS_EXCLUDE_PATTERNS:-helm* nodejs* libnode* node-*}"
+EXCLUDE_PATTERNS="${NODE_PKGS_EXCLUDE_PATTERNS:-}"
+WITH_HELM=0
 WITH_CHRONY=1
 DRY_RUN=0
 DO_DOWNLOAD=0
@@ -49,7 +54,7 @@ DO_LAYOUT=0
 ACTION_SET=0
 IPS=()
 
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,31p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # 默认 OS 版本（未显式指定时取 versions/base.yaml 的 os.version）
 _base_os_version() {
@@ -76,6 +81,7 @@ while [ $# -gt 0 ]; do
         --mc-alias) MC_ALIAS="${2:?--mc-alias 需要值}"; shift 2 ;;
         --mc-prefix) MC_PREFIX="${2:?--mc-prefix 需要值}"; shift 2 ;;
         --exclude) EXCLUDE_PATTERNS="${2:?--exclude 需要值}"; shift 2 ;;
+        --with-helm) WITH_HELM=1; shift ;;
         --skip-chrony) WITH_CHRONY=0; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --ip) IPS+=("${2:?--ip 需要地址}"); shift 2 ;;
@@ -95,9 +101,12 @@ fi
 PKG_DIR="${OFFLINE_ROOT}/os/packages/ubuntu-${OS_VER}"
 CHRONY_DIR="${PKG_DIR}/chrony"
 MC_SRC="${MC_ALIAS}/${MC_PREFIX}/ubuntu-${OS_VER}"
-# helm/nodejs 单独目录: 位于 os/ 下，由自动流程使用；本手动脚本不安装。
-HELM_NODEJS_DIR="${OFFLINE_ROOT}/os/helm-nodejs"
-HELM_NODEJS_MC="${MC_ALIAS}/$(dirname "${MC_PREFIX}")/helm-nodejs"
+# 可选节点 helm 目录: 新布局 os/helm; 旧布局 os/helm-nodejs 兼容(只装根目录 helm_*.deb)。
+HELM_DIR="${OFFLINE_ROOT}/os/helm"
+if [ ! -d "${HELM_DIR}" ] && [ -d "${OFFLINE_ROOT}/os/helm-nodejs" ]; then
+    HELM_DIR="${OFFLINE_ROOT}/os/helm-nodejs"
+fi
+HELM_MC_BASE="${MC_ALIAS}/$(dirname "${MC_PREFIX}")"
 
 print_layout() {
     say "==== 手动 OS 包布局（不接入 deploy-cluster.sh） ===="
@@ -105,26 +114,23 @@ print_layout() {
     echo "  本地目标:  ${PKG_DIR}/"
     echo "             ├── *.deb        # 节点通用包（本脚本安装）"
     echo "             └── chrony/*.deb # chrony 专用安装集（含 timesyncd 回滚包）"
-    echo "  自动流程目录 (本脚本不安装): ${HELM_NODEJS_DIR}/"
-    echo "             ├── helm_*.deb                 # helm（静态、版本通用）"
-    echo "             └── ubuntu-<版本>/nodejs_*.deb # 目标 OS 适配的 nodejs（自动流程安装）"
-    echo "             （alternate-* 为备用包, 不自动安装）"
-    echo "  旧布局兼容: ${OFFLINE_ROOT}/os/packages/{*.deb,chrony/*.deb}"
+    echo "  可选 helm: ${HELM_DIR}/helm_*.deb（--with-helm 安装）"
+    echo "  旧布局兼容: ${OFFLINE_ROOT}/os/packages/{*.deb,chrony/*.deb}；helm 旧目录 os/helm-nodejs/"
     echo
-    echo "  下载（mc，含 helm/nodejs 自动流程目录）:"
+    echo "  下载（mc）:"
     echo "    mc cp --recursive '${MC_SRC}/' '${PKG_DIR}/'"
-    echo "    mc cp --recursive '${HELM_NODEJS_MC}/' '${HELM_NODEJS_DIR}/'"
+    echo "    mc cp --recursive '${HELM_MC_BASE}/helm/' '${HELM_DIR}/'    # 旧布局用 helm-nodejs/"
     echo "  上传（如果 MinIO 尚无该版本目录）:"
     echo "    mc cp --recursive '${PKG_DIR}/' '${MC_ALIAS}/${MC_PREFIX}/ubuntu-${OS_VER}/'"
-    echo "    mc cp --recursive '${HELM_NODEJS_DIR}/' '${HELM_NODEJS_MC}/'"
-    echo "  手动安装（默认动作）:"
+    echo "    mc cp --recursive '${HELM_DIR}/' '${HELM_MC_BASE}/helm/'"
+    echo "  手动安装（默认动作，不含 helm）:"
     echo "    $0 --os-version ${OS_VER} [--ip <节点IP> ...]"
-    echo "    # 等价于 $0 --install --os-version ${OS_VER} ..."
+    echo "  额外安装可选节点 helm:"
+    echo "    $0 --install --with-helm --os-version ${OS_VER} [--ip <节点IP> ...]"
     echo
-    echo "  安装排除模式: ${EXCLUDE_PATTERNS}"
-    echo "  （helm/nodejs 相关包保留给自动流程；如需全部安装请显式 --exclude ''）"
-    echo "  提示: 手动模式请在 cluster.conf 关闭 NODE_PKGS_ENABLED / CHRONY_PKGS_ENABLED，"
-    echo "        否则 deploy-cluster.sh 仍会自动装包。"
+    echo "  安装排除模式: ${EXCLUDE_PATTERNS:-<无>}"
+    echo "  提示: 手动模式请在 cluster.conf 关闭 CHRONY_PKGS_ENABLED，"
+    echo "        否则 deploy-cluster.sh 仍会自动装 chrony 包。"
 }
 
 download_pkgs() {
@@ -140,19 +146,26 @@ download_pkgs() {
     mkdir -p "${PKG_DIR}"
     mc cp --recursive "${MC_SRC}/" "${PKG_DIR}/" >/dev/null
     ok "已下载: $(find "${PKG_DIR}" -maxdepth 1 -name '*.deb' | wc -l) 个顶层 deb, $(find "${CHRONY_DIR}" -maxdepth 1 -name '*.deb' 2>/dev/null | wc -l) 个 chrony deb"
-    # helm/nodejs 自动流程目录: 下载但不安装
-    if mc ls "${HELM_NODEJS_MC}/" >/dev/null 2>&1; then
-        mkdir -p "${HELM_NODEJS_DIR}"
-        mc cp --recursive "${HELM_NODEJS_MC}/" "${HELM_NODEJS_DIR}/" >/dev/null
-        say "已下载 helm/nodejs 自动流程目录: ${HELM_NODEJS_DIR}"
-    else
-        warn "MinIO 未找到 ${HELM_NODEJS_MC}/，跳过 helm/nodejs 目录"
+    # 可选节点 helm(只安装根目录 helm_*.deb; nodejs 已移除, 不再下载/安装)
+    local _helm_mc=""
+    if mc ls "${HELM_MC_BASE}/helm/" >/dev/null 2>&1; then
+        _helm_mc="${HELM_MC_BASE}/helm"
+    elif mc ls "${HELM_MC_BASE}/helm-nodejs/" >/dev/null 2>&1; then
+        _helm_mc="${HELM_MC_BASE}/helm-nodejs"
     fi
+    if [ -n "${_helm_mc}" ]; then
+        mkdir -p "${HELM_DIR}"
+        mc cp --recursive "${_helm_mc}/" "${HELM_DIR}/" >/dev/null
+        say "已下载可选节点 helm: ${HELM_DIR}(root helm_*.deb: $(find "${HELM_DIR}" -maxdepth 1 -name 'helm_*.deb' | wc -l) 个)"
+    else
+        warn "MinIO 未找到 ${HELM_MC_BASE}/{helm,helm-nodejs}/，跳过 helm"
+    fi
+    unset _helm_mc
 }
 
 # 检查本地是否具备可安装的 OS 包；缺失时打印包名/MinIO 路径/下载命令并返回 1。
 check_local_pkgs() {
-    local _f _base _pat _skip _miss=0 _have_top=0 _have_chrony=0
+    local _f _base _pat _skip _miss=0 _have_top=0 _have_chrony=0 _have_helm=0
     if [ -d "${PKG_DIR}" ]; then
         for _f in "${PKG_DIR}"/*.deb; do
             [ -f "${_f}" ] || continue
@@ -173,15 +186,21 @@ check_local_pkgs() {
         fi
         [ "${_have_chrony}" = "1" ] || { _miss=1; err "本地缺少 chrony 专用安装集: ${CHRONY_DIR}/*.deb"; }
     fi
+    if [ "${WITH_HELM}" = "1" ]; then
+        for _f in "${HELM_DIR}"/helm_*.deb; do
+            [ -f "${_f}" ] && { _have_helm=1; break; }
+        done
+        [ "${_have_helm}" = "1" ] || { _miss=1; err "本地缺少可选节点 helm: ${HELM_DIR}/helm_*.deb"; }
+    fi
     if [ "${_miss}" = "1" ]; then
         echo
         say "请从 MinIO 下载对应离线包："
         echo "  离线包名称: ubuntu-${OS_VER}（系统包） + chrony（专用安装集）"
         echo "  MinIO 路径: ${MC_ALIAS}:${MC_PREFIX}/ubuntu-${OS_VER}/"
-        echo "  helm/nodejs: ${HELM_NODEJS_MC}/（自动流程用，本脚本不安装）"
+        echo "  可选 helm: ${HELM_MC_BASE}/{helm,helm-nodejs}/（仅 --with-helm 时安装）"
         echo "  下载命令:"
         echo "    mc cp --recursive '${MC_SRC}/' '${PKG_DIR}/'"
-        echo "    mc cp --recursive '${HELM_NODEJS_MC}/' '${HELM_NODEJS_DIR}/'"
+        echo "    mc cp --recursive '${HELM_MC_BASE}/helm/' '${HELM_DIR}/'"
         echo "  或直接执行:"
         echo "    $0 --download --os-version ${OS_VER}"
         return 1
@@ -191,12 +210,18 @@ check_local_pkgs() {
 
 install_pkgs() {
     check_local_pkgs || return 1
-    local -a ip_args=()
+    local -a ip_args=() rec_args=()
     local _ip
     for _ip in "${IPS[@]}"; do ip_args+=(--ip "${_ip}"); done
+    if [ "${DRY_RUN}" = "1" ]; then rec_args+=(--dry-run); fi
+    if [ "${#ip_args[@]}" -gt 0 ]; then rec_args+=("${ip_args[@]}"); fi
     say "手动安装 OS 包: 版本=${OS_VER}, 目录=${PKG_DIR}"
-    say "  排除模式: ${EXCLUDE_PATTERNS}（helm/nodejs 相关包不安装）"
-    say "  helm/nodejs 自动流程目录: ${HELM_NODEJS_DIR}（本脚本不安装）"
+    if [ -n "${EXCLUDE_PATTERNS}" ]; then
+        say "  排除模式: ${EXCLUDE_PATTERNS}"
+    fi
+    if [ "${WITH_HELM}" = "1" ]; then
+        say "  可选节点 helm: ${HELM_DIR}(--with-helm)"
+    fi
 
     # 1) chrony 专用集优先：安装 chrony 后再对账顶层，避免先装 systemd-timesyncd 再被 chrony 预卸。
     if [ "${WITH_CHRONY}" = "1" ]; then
@@ -211,15 +236,24 @@ install_pkgs() {
         say "  --skip-chrony: 跳过 chrony/chrony 专用集"
     fi
 
-    # 2) 顶层包对账安装（--scope general 只装 os/packages/ubuntu-<ver> 的通用 OS 包;
-    #    helm/nodejs 由 NODE_PKGS_ENABLED 自动流程负责, 本脚本不安装）。
-    local -a rec_args=()
-    if [ "${DRY_RUN}" = "1" ]; then rec_args+=(--dry-run); fi
-    if [ "${#ip_args[@]}" -gt 0 ]; then rec_args+=("${ip_args[@]}"); fi
+    # 2) 可选节点 helm(仅 --with-helm; 只装 os/helm 根目录 helm_*.deb)
+    if [ "${WITH_HELM}" = "1" ]; then
+        say "  安装可选节点 helm ..."
+        OS_PACKAGES_VERSION="${OS_VER}" \
+            bash "${MANUAL_DIR}/../node/reconcile-node-packages.sh" --scope helm "${rec_args[@]}"
+    else
+        say "  未指定 --with-helm: 跳过节点 helm"
+    fi
+
+    # 3) 顶层包对账安装（--scope general 只装 os/packages/ubuntu-<ver> 的通用 OS 包）。
     NODE_PKGS_EXCLUDE_PATTERNS="${EXCLUDE_PATTERNS}" OS_PACKAGES_VERSION="${OS_VER}" \
         bash "${MANUAL_DIR}/../node/reconcile-node-packages.sh" --scope general "${rec_args[@]}"
 
-    ok "手动 OS 包安装完成（helm/nodejs 相关包未安装）"
+    if [ "${WITH_HELM}" = "1" ]; then
+        ok "手动 OS 包安装完成（含可选节点 helm）"
+    else
+        ok "手动 OS 包安装完成（节点 helm 未安装；需要时加 --with-helm）"
+    fi
 }
 
 if [ "${DO_LAYOUT}" = "1" ]; then

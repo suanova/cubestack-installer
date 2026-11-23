@@ -84,15 +84,7 @@ if [ -n "${_os_ver}" ] && [ -d "${_pkg_root}/ubuntu-${_os_ver}" ]; then
 else
     PKG_DIRS=("${REPO_DIR}" "${REPO_DIR}/packages" "${_pkg_root}")
 fi
-# helm/nodejs 单独目录（同样供自动装包流程使用；helm 根目录 + 目标 OS 的 nodejs）
-_helm_dir="$(dirname "${_pkg_root}")/helm-nodejs"
-if [ -d "${_helm_dir}" ]; then
-    PKG_DIRS+=("${_helm_dir}")
-    if [ -d "${_helm_dir}/ubuntu-${_os_ver}" ]; then
-        PKG_DIRS+=("${_helm_dir}/ubuntu-${_os_ver}")
-    fi
-fi
-unset _helm_dir
+# 可选节点 helm / nodejs 不再由自动流程安装(helm 走 manual --with-helm; nodejs 已移除)。
 say "目标 OS=${_os_ver:-未知}; 离线包目录=${PKG_DIRS[*]}"
 
 # 收集所有存在的 .deb 包完整路径(按 basename 去重,优先仓库根目录)

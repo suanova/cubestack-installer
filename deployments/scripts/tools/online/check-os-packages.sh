@@ -174,14 +174,14 @@ if [ "${failed}" -ne 0 ]; then
         echo "The installer does not install general OS packages; prepare them in the OS image" >&2
         echo "or run the manual installer on the deployment host:" >&2
         echo "  bash ${REPO_ROOT}/deployments/scripts/tools/manual/install-os-packages.sh --install" >&2
-        echo "  (NODE_PKGS_ENABLED only installs helm/nodejs from os/helm-nodejs)" >&2
+        echo "  (optional node helm: add --with-helm; nodejs is no longer installed)" >&2
         exit 0
     fi
     echo "Node prerequisite package pre-check failed. Install the missing packages" >&2
     echo "on the nodes listed above, then rerun. The installer does not install" >&2
     echo "general OS packages; run the manual installer on the deployment host:" >&2
     echo "  bash ${REPO_ROOT}/deployments/scripts/tools/manual/install-os-packages.sh --install" >&2
-    echo "  (NODE_PKGS_ENABLED only installs helm/nodejs from os/helm-nodejs)" >&2
+    echo "  (optional node helm: add --with-helm; nodejs is no longer installed)" >&2
     exit 1
 fi
 say "Node prerequisite package pre-check passed"

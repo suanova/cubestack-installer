@@ -13,8 +13,8 @@
 #     节点前置包存在性(warn-only)。关键项任一失败 → 非零退出, 部署在 kubespray 之前中止;
 #     建议项只告警。
 #   · 前置包默认**只检查不安装**; 通用 OS 包缺失时按提示运行
-#     tools/manual/install-os-packages.sh。node_pkgs(NODE_PKGS_ENABLED=true)
-#     只负责 helm/nodejs; k8s_workerbm(WORKER_PKGS_ENABLED=true) 负责 worker 离线包。
+#     tools/manual/install-os-packages.sh。k8s_workerbm(WORKER_PKGS_ENABLED=true)
+#     负责 worker 离线包; 节点 helm 为可选项(manual --with-helm), nodejs 不再安装。
 #   · 定序: k8s_deploy 的 REQUIRES 显式声明本模块, 保证在真正安装之前执行
 #     (14 > 06, 与 node_pkgs 同一手法: 序号不足以定序, 补 REQUIRES)。
 #   · 2026-11-17(CodeRabbit): deploy-cluster 在**优雅卸载/覆盖安装之前**提前执行本模块
@@ -34,7 +34,7 @@ bash "${SCRIPT_DIR}/tools/node/pre-install-check.sh" --check
 
 # 节点前置包存在性检查(warn-only; 通用 OS 包默认由 OS 镜像提供, 不自动安装)。
 # 缺失时按输出提示运行 tools/manual/install-os-packages.sh 手动安装;
-# node_pkgs(NODE_PKGS_ENABLED=true)只负责 helm/nodejs(os/helm-nodejs)。
+# 节点 helm 为可选项(同脚本 --with-helm), nodejs 不再安装。
 if [ "${CUBESTACK_OS_CHECK_DONE:-0}" = "1" ]; then
     say "节点前置包已由在线安装预检，跳过复检"
 else
@@ -53,7 +53,7 @@ else
         if [ -n "${SSH_DEFAULT_PASSWORD:-}" ]; then
             check_args+=(--password "${SSH_DEFAULT_PASSWORD}")
         fi
-        say "节点前置包检查(warn-only; 通用 OS 包不自动安装, 缺失时用手动脚本)..."
+        say "节点前置包检查(warn-only; 通用 OS 包不自动安装, 缺失时用手动脚本; helm 可选 --with-helm)..."
         bash "${SCRIPT_DIR}/tools/online/check-os-packages.sh" "${check_args[@]}"
     fi
 fi

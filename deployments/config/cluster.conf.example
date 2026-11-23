@@ -91,17 +91,14 @@ HARBOR_MIRROR_PASSWORD="${HARBOR_MIRROR_PASSWORD:-}"          # Harbor 密码/to
 #     基座 k8s_deploy 恒随全量部署; 扩容 k8s_scale 仅经命令行触发(--with-scale / --steps k8s_scale)。
 #     原 K8S_ENABLED / K8S_SCALE_ENABLED 已于 2026-10-16 移除(旧配置残留该行无副作用)。
 NTP_ENABLED="${NTP_ENABLED:-1}"                         # 节点时间同步(0=跳过, 不推荐; 见 defaults §2.2)
-# ---- 节点 OS 包(可选; 默认关) ----
-# 默认值见 cluster.defaults.conf §2.2c(NODE_PKGS_ENABLED / WORKER_PKGS_ENABLED / CHRONY_PKGS_ENABLED = false)。
-# 通用 OS 包: 假设 OS 镜像已预装; 缺失时 pre_install_check 提示运行
-#   tools/manual/install-os-packages.sh(versions/os/*.lock 仅用于该预检, 不参与安装)。
-# NODE_PKGS_ENABLED=true 只安装 helm/nodejs(offline-files/os/helm-nodejs/);
-# WORKER_PKGS_ENABLED=true 安装 worker 离线包(含 os/packages/ubuntu-<VERSION_ID>)。
-# 启用: 在本文件写 NODE_PKGS_ENABLED=true / WORKER_PKGS_ENABLED=true / CHRONY_PKGS_ENABLED=true,
-#   或用 --enable node_pkgs|k8s_workerbm|chrony_pkgs / --steps node_pkgs|k8s_workerbm|chrony_pkgs。
-#   目标 OS 版本默认从节点 /etc/os-release 读取, 可用 OS_PACKAGES_VERSION 显式覆盖。
-# ⚠ chrony_pkgs 只装包(offline-files/os/packages/ubuntu-<VERSION_ID>/chrony/), 不配置 NTP; NTP 同步(k8s_ntp)始终必选,
-#   默认假设节点镜像已预装 chrony。启用后装包阶段先于 NTP 执行。
+# ---- 节点 OS 包(手动安装; 默认不自动装包) ----
+# 默认值见 cluster.defaults.conf §2.2c(NODE_PKGS_ENABLED / WORKER_PKGS_ENABLED / CHRONY_PKGS_ENABLED)。
+# ⚠ 三个开关均已停用(2026-11-23): 置 true 也不会安装任何包; 仅为兼容旧配置保留。
+# 通用 OS 包/chrony/可选 helm 统一走手动脚本:
+#   tools/manual/install-os-packages.sh [--with-helm]   # 默认含 chrony 专用集
+# worker 运行时如需手动安装: tools/node/install-worker-packages.sh <IP> [user]
+# pre_install_check 只做存在性检查(versions/os/*.lock 仅用于该预检, 不参与安装)。
+# 目标 OS 版本默认从节点 /etc/os-release 读取, 可用 OS_PACKAGES_VERSION 显式覆盖。
 # 本地代理(kubespray nginx-proxy 静态 Pod: 每节点 127.0.0.1:6443 → 全部 master; 与"外部入口"正交):
 #   摘掉 all.yml 的 loadbalancer_apiserver 块实现节点就近出口; kubelet 侧故障切换 ~1s。
 #   细节(实现类型/别名/外部 LB 地址)见 defaults【API 入口细节】节

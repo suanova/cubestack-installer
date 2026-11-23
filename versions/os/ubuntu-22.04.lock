@@ -5,8 +5,8 @@
 #
 # ⚠ CHECK-ONLY(仅预检, 不参与任何安装/下载):
 #   本清单只被 check-os-packages.sh / pre_install_check 读取, 用于验证节点是否已有这些包。
-#   NODE_PKGS_ENABLED 自动安装的范围**仅限 os/helm-nodejs**(helm/nodejs), 不包含本清单。
-#   缺包时请运行: deployments/scripts/tools/manual/install-os-packages.sh --install
+#   通用 OS 包/可选节点 helm 请用手动脚本: tools/manual/install-os-packages.sh [--with-helm]。
+#   nodejs 已移除, 不再安装。
 schema: 1
 family: debian
 id: ubuntu
