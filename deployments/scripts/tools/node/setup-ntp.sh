@@ -672,7 +672,7 @@ verify_clocks() {
             #   缺 allow 时客户端永远 ^?(Reach 0), 只有一次性 makestep 兜底, 后续漂移无收敛。
             #   客户端若是 chrony 且权威为首 master, 校验 sources 里权威源的 Reach(期望 377)。
             if [ "${ip}" != "${NTP_AUTHORITY}" ] && node_cmd "${ip}" "${u}" "${pw}" \
-                "bash -c 'command -v chronyc >/dev/null 2>&1'" 2>/dev/null; then
+                "bash -c 'command -v chronyc >/dev/null 2>&1 && { systemctl is-active --quiet chrony || systemctl is-active --quiet chronyd; }'" 2>/dev/null; then
                 # Reach 是 `chronyc sources` 的第 5 列(1=^*, 2=源, 3=stratum, 4=poll, 5=reach);
                 # 旧实现取 $6(LastRx), 阈值判断没有意义 —— 这里修正为 $5。
                 _reach="$(node_cmd "${ip}" "${u}" "${pw}" \

@@ -164,6 +164,7 @@ chk_contains "fallback 启动已装 chrony" "systemctl enable --now chrony" "$(c
 chk_contains "fallback 启动 timesyncd 兜底" "systemctl enable --now systemd-timesyncd" "$(cat "${SETUP}")"
 chk_contains "fallback 保留已 active 服务" "已 active 的服务保持不动" "$(cat "${SETUP}")"
 chk_contains "fallback 分支确认守护进程" "systemctl is-active chrony" "$(cat "${SETUP}")"
+chk_contains "chrony 源检查要求 chrony active" "systemctl is-active --quiet chrony || systemctl is-active --quiet chronyd" "$(cat "${SETUP}")"
 chk_not_contains "不再在生成后立即用旧默认值替换" 'sed -i "s|__AUTHORITY__|${NTP_AUTHORITY}|g" "${NODE_SCRIPT}"' "$(cat "${SETUP}")"
 
 echo "== ⑤c fallback: 启动已装但未运行的时间服务(不改配置) =="
