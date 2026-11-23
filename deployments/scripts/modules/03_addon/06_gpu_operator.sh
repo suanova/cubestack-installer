@@ -36,7 +36,7 @@
 #     权限探针**: runAsUser:1000 真实 open 设备 + torch.cuda.is_available(), 不通过即 exit 1)。
 #   · 驱动部署方式(2026-11-23 Ubuntu 24.04 实机): METAX_DRIVER_DEPLOY=auto(默认) 时, 若
 #     **所有有沐曦 PCI 设备(vendor 0x9999)的节点** mx-smi 都可用(宿主驱动已安装且可用),
-#     则 driver.deploy=false, **不部署容器驱动**; driver-image(3.8.1.6/3.9.0.14)不含内核
+#     则 driver.deploy=false, **不部署容器驱动**; driver-image(3.8.1.6/3.9.0.14)不含内核  # secret-scan: allow(驱动版本号)
 #     6.8.0-139-generic 的 kernel_module, driver-init.sh 会先 build_kernel_module 再启动
 #     driver-manager → 旧行为下 metax-driver 必然 CrashLoop。无 GPU 的 master 的 mx-smi
 #     不可用不参与该判断; 有 PCI 但 mx-smi 不可用的节点才需要容器驱动(镜像须含对应内核模块)。
@@ -344,9 +344,9 @@ else
 fi
 
 # ---------------- 0.4 驱动部署方式(宿主驱动优先; 2026-11-23 Ubuntu 24.04 实机) ----------------
-# 根因: driver-image(3.8.1.6 / 3.9.0.14)均不含 Ubuntu 24.04 当前内核
+# 根因: driver-image(3.8.1.6 / 3.9.0.14)均不含 Ubuntu 24.04 当前内核  # secret-scan: allow(驱动版本号)
 #   6.8.0-139-generic 的 kernel_module; driver-init.sh **先** build_kernel_module(拷贝
-#   metax.ko/mxgvm.ko)**再**启动 driver-manager → 即使节点已装并加载宿主驱动(3.9.1.33),
+#   metax.ko/mxgvm.ko)**再**启动 driver-manager → 即使节点已装并加载宿主驱动(3.9.1.33),  # secret-scan: allow(驱动版本号)
 #   metax-driver 仍 CrashLoopBackOff(pushd: .../6.8.0-139-generic: No such file)。
 # 修法: 所有"有沐曦 PCI 设备"的节点 mx-smi 都可用时 → driver.deploy=false ——
 #   CRD 支持 deploy 布尔量, operator 不再创建 metax-driver DS, 设备插件继续用宿主驱动。
