@@ -2,7 +2,7 @@
 """Bump the mirror catalog pin in versions/base.yaml.
 
 Moves the pin when a referenced (catalog_id, tag) changes, or when a
-referenced catalog id gains a new usable tag. The pin only widens the set of
+referenced catalog id gains a newly usable tag. The pin only widens the set of
 resolvable tags; env versions are still selected by a human.
 """
 
@@ -65,21 +65,26 @@ def version_fingerprint(entry: dict, tag: str) -> tuple | None:
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
-def usable_new_tags(old_entry: dict, new_entry: dict) -> list[str]:
-    """Tags added by the update that base can resolve to linux/amd64."""
-    old_tags = {
-        str(version.get("tag", ""))
+def usable_version(version: dict) -> bool:
+    if not DIGEST_RE.fullmatch(str(version.get("digest", "")).strip()):
+        return False
+    platforms = version.get("platforms") or []
+    return not platforms or "linux/amd64" in platforms
+
+
+def newly_usable_tags(old_entry: dict, new_entry: dict) -> list[str]:
+    """Tags base can resolve now that it could not resolve before."""
+    old_versions = {
+        str(version.get("tag", "")).strip(): version
         for version in old_entry.get("versions") or []
     }
     usable = []
     for version in new_entry.get("versions") or []:
         tag = str(version.get("tag", "")).strip()
-        if not tag or tag in old_tags:
+        if not tag or not usable_version(version):
             continue
-        if not DIGEST_RE.fullmatch(str(version.get("digest", "")).strip()):
-            continue
-        platforms = version.get("platforms") or []
-        if platforms and "linux/amd64" not in platforms:
+        old_version = old_versions.get(tag)
+        if old_version is not None and usable_version(old_version):
             continue
         usable.append(tag)
     return usable
@@ -126,9 +131,9 @@ def changed_ids(old: dict, new: dict,
         if changed_here:
             changed.append(image_id)
             continue
-        added = usable_new_tags(old_entry, new_entry)
+        added = newly_usable_tags(old_entry, new_entry)
         if added:
-            print(f"{image_id}: new usable tag(s): {', '.join(sorted(added))}")
+            print(f"{image_id}: newly usable tag(s): {', '.join(sorted(added))}")
             changed.append(image_id)
     return changed
 

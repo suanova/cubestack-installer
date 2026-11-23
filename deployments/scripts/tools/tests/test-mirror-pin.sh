@@ -140,7 +140,7 @@ EOF
 out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
     --commit 1616161616161616161616161616161616161616 \
     --index "${TMP}/platforms-empty.json" --old-index "${TMP}/old.json")"
-grep -q "new usable tag" <<<"${out}" || fail "new tag without a platforms list should be reported"
+grep -q "newly usable tag" <<<"${out}" || fail "new tag without a platforms list should be reported"
 grep -q "commit: 1616" "${TMP}/versions/base.yaml" || fail "new tag without a platforms list did not bump the pin"
 pass "new tag without a platforms list moves the pin"
 
@@ -160,7 +160,7 @@ EOF
 out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
     --commit 1717171717171717171717171717171717171717 \
     --index "${TMP}/multiarch.json" --old-index "${TMP}/old.json")"
-grep -q "new usable tag" <<<"${out}" || fail "multi-platform tag with amd64 should be reported"
+grep -q "newly usable tag" <<<"${out}" || fail "multi-platform tag with amd64 should be reported"
 grep -q "commit: 1717" "${TMP}/versions/base.yaml" || fail "multi-platform tag with amd64 did not bump the pin"
 pass "multi-platform tag including linux/amd64 moves the pin"
 
@@ -180,9 +180,68 @@ EOF
 out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
     --commit 1212121212121212121212121212121212121212 \
     --index "${TMP}/added.json" --old-index "${TMP}/old.json")"
-grep -q "new usable tag" <<<"${out}" || fail "new usable tag should be reported"
+grep -q "newly usable tag" <<<"${out}" || fail "new usable tag should be reported"
 grep -q "commit: 1212" "${TMP}/versions/base.yaml" || fail "new usable tag did not bump the pin"
 pass "new usable tag on a referenced catalog id moves the pin"
+
+cat > "${TMP}/old-nodigest.json" <<'EOF'
+{"schema": 1, "images": [
+  {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/pause",
+   "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
+  {"id": "kubernetes/other", "source": "registry.k8s.io/other",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/other",
+   "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+                {"tag": "v2"}]}
+]}
+EOF
+
+out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
+    --commit 1818181818181818181818181818181818181818 \
+    --index "${TMP}/added.json" --old-index "${TMP}/old-nodigest.json")"
+grep -q "newly usable tag" <<<"${out}" || fail "tag gaining a digest should be reported"
+grep -q "commit: 1818" "${TMP}/versions/base.yaml" || fail "tag gaining a digest did not bump the pin"
+pass "tag becomes usable when its digest appears"
+
+cat > "${TMP}/old-arm64.json" <<'EOF'
+{"schema": 1, "images": [
+  {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/pause",
+   "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
+  {"id": "kubernetes/other", "source": "registry.k8s.io/other",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/other",
+   "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+                {"tag": "v2", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+                 "platforms": ["linux/arm64"]}]}
+]}
+EOF
+
+out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
+    --commit 1919191919191919191919191919191919191919 \
+    --index "${TMP}/multiarch.json" --old-index "${TMP}/old-arm64.json")"
+grep -q "newly usable tag" <<<"${out}" || fail "tag gaining amd64 should be reported"
+grep -q "commit: 1919" "${TMP}/versions/base.yaml" || fail "tag gaining amd64 did not bump the pin"
+pass "tag becomes usable when linux/amd64 appears"
+
+cat > "${TMP}/old-usable.json" <<'EOF'
+{"schema": 1, "images": [
+  {"id": "kubernetes/pause", "source": "registry.k8s.io/pause",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/pause",
+   "versions": [{"tag": "3.10.1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}]},
+  {"id": "kubernetes/other", "source": "registry.k8s.io/other",
+   "target": "harbor.example.com/mirrors/registry.k8s.io/other",
+   "versions": [{"tag": "v1", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+                {"tag": "v2", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+                 "platforms": ["linux/amd64"]}]}
+]}
+EOF
+
+out="$(python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
+    --commit 2020202020202020202020202020202020202020 \
+    --index "${TMP}/added.json" --old-index "${TMP}/old-usable.json")"
+grep -q "unchanged" <<<"${out}" || fail "already usable tag should be unchanged"
+grep -q "commit: 1919" "${TMP}/versions/base.yaml" || fail "already usable tag rewrote the pin"
+pass "already usable tag with the same digest stays put"
 
 python3 "${TOOL}" --root "${TMP}" --repo suanova/container-image-mirror \
     --commit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
