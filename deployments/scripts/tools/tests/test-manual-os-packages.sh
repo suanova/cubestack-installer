@@ -48,6 +48,21 @@ esac
 exec /bin/bash "$@"
 FAKE
 chmod +x "${TMP}/bin/ssh" "${TMP}/bin/bash"
+# 假 mc: ls 成功; cp 可按 FAKE_MC_FAIL=main|helm 模拟传输失败。
+cat > "${TMP}/bin/mc" <<'FAKE'
+#!/bin/bash
+case "$1" in
+    ls) exit 0 ;;
+    cp)
+        case "$*" in
+            *helm*|*helm-nodejs*) [ "${FAKE_MC_FAIL:-}" = "helm" ] && exit 1 ;;
+            *) [ "${FAKE_MC_FAIL:-}" = "main" ] && exit 1 ;;
+        esac
+        exit 0 ;;
+esac
+exit 0
+FAKE
+chmod +x "${TMP}/bin/mc"
 
 mkdir -p "${TMP}/offline/os/packages/ubuntu-22.04/chrony" \
          "${TMP}/offline/os/packages/ubuntu-24.04/chrony" \
@@ -133,6 +148,22 @@ if [[ "${_helm_call}" == *"--ip 10.0.0.2"* ]]; then
     echo "  FAIL helm 不应带未选中的 .2"; fail=1
 else
     echo "  ok  helm 不带未选中的 .2"
+fi
+
+echo "== ⑦ --download 失败必须非零(函数在 || 中 errexit 失效) =="
+rc="$(FAKE_MC_FAIL=main run_tool "${TMP}/mixed.conf" "${TMP}/offline" "${TMP}/dl-main.log" --download --os-version 24.04)"
+chk "主包下载失败退出码" "1" "${rc}"
+if grep -qF '已下载:' "${TMP}/out" 2>/dev/null; then
+    echo "  FAIL 主包下载失败仍打印成功"; fail=1
+else
+    echo "  ok  主包下载失败不打印成功"
+fi
+rc="$(FAKE_MC_FAIL=helm run_tool "${TMP}/mixed.conf" "${TMP}/offline" "${TMP}/dl-helm.log" --download --os-version 24.04)"
+chk "helm 下载失败退出码" "1" "${rc}"
+if grep -qF '已下载可选节点 helm' "${TMP}/out" 2>/dev/null; then
+    echo "  FAIL helm 下载失败仍打印成功"; fail=1
+else
+    echo "  ok  helm 下载失败不打印成功"
 fi
 
 echo "---------------------------------------------"

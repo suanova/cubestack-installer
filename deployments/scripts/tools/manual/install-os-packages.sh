@@ -273,8 +273,11 @@ download_pkgs() {
         return 1
     fi
     say "从 MinIO 下载 ${MC_SRC}/ → ${PKG_DIR}/ ..."
-    mkdir -p "${PKG_DIR}"
-    mc cp --recursive "${MC_SRC}/" "${PKG_DIR}/" >/dev/null
+    # ★ 2026-11-23(CodeRabbit): download_pkgs 被 `|| exit 1` 调用时 bash 会关闭函数内
+    #   errexit; 必须对目录创建/传输显式 return 1, 否则 mc cp 失败仍会打印"已下载"并 exit 0。
+    mkdir -p "${PKG_DIR}" || { err "创建目录失败: ${PKG_DIR}"; return 1; }
+    mc cp --recursive "${MC_SRC}/" "${PKG_DIR}/" >/dev/null \
+        || { err "下载失败: ${MC_SRC}/ → ${PKG_DIR}/"; return 1; }
     ok "已下载: $(find "${PKG_DIR}" -maxdepth 1 -name '*.deb' | wc -l) 个顶层 deb, $(find "${CHRONY_DIR}" -maxdepth 1 -name '*.deb' 2>/dev/null | wc -l) 个 chrony deb"
     # 可选节点 helm 只需下载一次（旧布局 os/helm-nodejs 兼容; nodejs 已移除）
     if [ "${_HELM_DL_DONE}" = "0" ]; then
@@ -285,8 +288,9 @@ download_pkgs() {
             _helm_mc="${HELM_MC_BASE}/helm-nodejs"
         fi
         if [ -n "${_helm_mc}" ]; then
-            mkdir -p "${HELM_DIR}"
-            mc cp --recursive "${_helm_mc}/" "${HELM_DIR}/" >/dev/null
+            mkdir -p "${HELM_DIR}" || { err "创建目录失败: ${HELM_DIR}"; return 1; }
+            mc cp --recursive "${_helm_mc}/" "${HELM_DIR}/" >/dev/null \
+                || { err "helm 下载失败: ${_helm_mc}/ → ${HELM_DIR}/"; return 1; }
             say "已下载可选节点 helm: ${HELM_DIR}(root helm_*.deb: $(find "${HELM_DIR}" -maxdepth 1 -name 'helm_*.deb' | wc -l) 个)"
         else
             warn "MinIO 未找到 ${HELM_MC_BASE}/{helm,helm-nodejs}/，跳过 helm"
