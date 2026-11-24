@@ -1054,6 +1054,7 @@ else
         #      → 0 OSD(★ 2026-09-24 实机事故根因, 详见 lib-common.sh 的 bluestore_wipe_remote_lib)。
         if [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
             _WIPE_FAIL=""
+            _WIPE_SKIP_NODES=""
             # 7a-① 标准 Ceph 清除步骤(停进程 → 解 LVM/VG/dm-mapper → wipefs/分区表/bluestore 签名 →
             #   清 /var/lib/rook 等残留), 默认只作用于**被判为 Ceph 占用/空闲**的盘 —— 工具自带护栏,
             #   在用盘/混合盘默认不碰; 显式 CEPH_DATA_DISKS + CEPH_WIPE_FORCE=true 时才允许越过
@@ -1082,8 +1083,16 @@ else
                 if [ "${_CEPH_WIPE_FORCE_ON}" = "1" ] && [ -n "${CEPH_DATA_DISKS:-}" ]; then
                     _cleanup_args+=(--force)
                 fi
-                timeout 900 bash "${TOOLS_K8S}/ceph-cleanup.sh" "${_cleanup_args[@]}" \
-                    || warn "    ${_hn}: 标准清除未全部成功(见上方输出); 继续走下面的签名擦除兜底"
+                _cleanup_rc=0
+                timeout 900 bash "${TOOLS_K8S}/ceph-cleanup.sh" "${_cleanup_args[@]}" || _cleanup_rc=$?
+                if [ "${_cleanup_rc}" -eq 2 ]; then
+                    # 分类护栏拒绝/无法分类: 未擦任何盘。7a-② 不得兜底, 否则会绕过护栏
+                    # 对 inuse/mixed/未知盘执行 wipefs + dd(2026-11-24 CodeRabbit)。
+                    warn "    ${_hn}: 标准清除被分类护栏拒绝(未擦任何盘); 跳过 7a-② 兜底擦除"
+                    _WIPE_SKIP_NODES="${_WIPE_SKIP_NODES} ${_hn}"
+                elif [ "${_cleanup_rc}" -ne 0 ]; then
+                    warn "    ${_hn}: 标准清除未全部成功(见上方输出); 继续走下面的签名擦除兜底"
+                fi
             done
             # 7a-② 逐盘彻底擦除兜底(★ 2026-09-24 事故修复: 这里原来手写 dd 只擦
             #   头 64MB/1GB/size÷20/size÷2/尾 64MB, 与 Ceph v20 **实际**的 label 副本位置
@@ -1095,6 +1104,9 @@ else
             #   bluestore_wipe_remote_lib(官方 zap-device 读 label 自带 locations, 版本无关 +
             #   候选偏移 dd 兜底 + 逐处校验; ceph-cleanup.sh 用的是同一份), 校验不过即失败。
             for _hn in "${CEPH_NODE_HOSTS[@]}"; do
+                case " ${_WIPE_SKIP_NODES:-} " in
+                    *" ${_hn} "*) warn "  ${_hn}: 7a-① 分类护栏拒绝, 跳过 7a-② 兜底擦除"; continue ;;
+                esac
                 _ip=""
                 for line in "${NODES[@]:-}"; do
                     [ -z "${line}" ] && continue

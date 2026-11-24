@@ -256,9 +256,17 @@ else
     echo "  FAIL force 未限制为显式 CEPH_DATA_DISKS"; fail=1
 fi
 chk_contains "无显式盘时忽略 force 并告警" "CEPH_DATA_DISKS 未显式配置" "${CEPH}"
+chk_contains "护栏拒绝时返回 2(不擦任何盘)" "拒绝整批(不会擦任何盘)" "${CLEANUP}"
+chk_contains "护栏拒绝时 cleanup 返回 2" 'return 2' "${CLEANUP}"
+chk_contains "模块识别 rc=2 并跳过 7a-②" '"${_cleanup_rc}" -eq 2' "${CEPH}"
+chk_contains "模块维护 7a-② 跳过节点列表" "_WIPE_SKIP_NODES" "${CEPH}"
+chk_contains "7a-② 跳过护栏拒绝节点" "7a-① 分类护栏拒绝, 跳过 7a-② 兜底擦除" "${CEPH}"
 chk_contains "显式盘名规范化(模块)" "ceph_norm_dev" "${CEPH}"
 chk_contains "盘名规范化(清理工具)" "ceph_norm_dev" "${CLEANUP}"
 chk_contains "清理工具拒绝非法盘名" "非法盘名" "${CLEANUP}"
+chk_contains "live cluster guard 函数" "_live_cluster_guard" "${CLEANUP}"
+chk_contains "wipe-node 前调用 live guard" '_live_cluster_guard || exit 1' "${CLEANUP}"
+chk_contains "live guard 显式放行开关" "CEPH_CLEANUP_ALLOW_LIVE" "${CLEANUP}"
 
 echo ""
 if [ "${fail}" = "0" ]; then

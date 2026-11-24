@@ -84,7 +84,8 @@ _num() {  # <value> <default> → 正整数或默认值
 _mem_gib() {  # <MB> → GiB(向上取整)
     local m
     m="$(_num "${1:-}" 0)"
-    echo $(( (m + 1023) / 1024 ))
+    # 10#: 强制十进制 —— 允许 032000/032768 这类带前导零的覆盖值(否则 bash 按八进制解析)
+    echo $(( (10#${m} + 1023) / 1024 ))
 }
 MIN_CPU="$(_num "${PRE_INSTALL_MIN_CPU:-}" 4)"
 MIN_MEM_MB="$(_num "${PRE_INSTALL_MIN_MEM_MB:-}" 16384)"
