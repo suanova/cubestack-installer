@@ -127,17 +127,24 @@ check_host() {
     fi
 
     local ssh_opts=(-i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8)
-    if printf '%s\n' "${REMOTE_SCRIPT}" | ssh "${ssh_opts[@]}" -o BatchMode=yes "${user}@${ip}" "bash -s" 2>/dev/null; then
+    # Capture the first attempt's output: a non-zero exit from the remote script
+    # (missing packages -> rc=1) must not be mistaken for an SSH auth failure,
+    # otherwise the password fallback reruns the check and prints the list twice.
+    # ssh(1) exits 255 only when ssh itself fails; it passes the remote command's
+    # exit status through otherwise.
+    out="$(printf '%s\n' "${REMOTE_SCRIPT}" | ssh "${ssh_opts[@]}" -o BatchMode=yes "${user}@${ip}" "bash -s" 2>/dev/null)" || rc=$?
+    if [ "${rc}" -ne 255 ]; then
+        [ -n "${out}" ] && printf '%s\n' "${out}"
+        return "${rc}"
+    fi
+
+    if [ -n "${SSH_PASSWORD}" ] && command -v sshpass >/dev/null 2>&1; then
         rc=0
-    else
-        rc=$?
-        if [ -n "${SSH_PASSWORD}" ] && command -v sshpass >/dev/null 2>&1; then
-            out="$(printf '%s\n' "${REMOTE_SCRIPT}" | SSHPASS="${SSH_PASSWORD}" sshpass -e ssh \
-                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-                -o ConnectTimeout=8 "${user}@${ip}" "bash -s" 2>/dev/null)" || rc=$?
-            [ -n "${out}" ] && printf '%s\n' "${out}"
-        fi
+        out="$(printf '%s\n' "${REMOTE_SCRIPT}" | SSHPASS="${SSH_PASSWORD}" sshpass -e ssh \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+            -o ConnectTimeout=8 "${user}@${ip}" "bash -s" 2>/dev/null)" || rc=$?
+        [ -n "${out}" ] && printf '%s\n' "${out}"
     fi
     return "${rc}"
 }

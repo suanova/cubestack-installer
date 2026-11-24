@@ -326,4 +326,68 @@ PATH="${TMP}/bin:${PATH}" "${ONLINE}/check-os-packages.sh" \
 grep -q "pre-check passed" "${TMP}/pre.out" || fail "pre-check: remote pass missing"
 pass "pre-check runs the embedded script over ssh"
 
+# A remote script exiting non-zero (missing packages) is not an SSH failure:
+# the password fallback must not rerun the check and print the list twice.
+cat > "${TMP}/baseline/versions/os/test.lock" <<'EOF'
+schema: 1
+family: debian
+id: ubuntu
+version: "22.04"
+packages:
+  reconcile:
+    definitely-not-a-real-package: "1"
+EOF
+cat > "${TMP}/bin/ssh" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "${SSH_TEST_LOG:?}"
+exec bash -s
+EOF
+cat > "${TMP}/bin/sshpass" <<'EOF'
+#!/bin/bash
+printf 'SSHPASS\n' >> "${SSH_TEST_LOG:?}"
+shift  # drop -e, then run the wrapped ssh command
+exec "$@"
+EOF
+chmod +x "${TMP}/bin/ssh" "${TMP}/bin/sshpass"
+: > "${TMP}/ssh.log"
+rc=0
+out="$(SSH_TEST_LOG="${TMP}/ssh.log" PATH="${TMP}/bin:${PATH}" "${ONLINE}/check-os-packages.sh" \
+    --baseline "${TMP}/baseline/versions/base.yaml" --hosts root@10.0.0.1 --password secret 2>&1)" || rc=$?
+[ "${rc}" -ne 0 ] || fail "pre-check: missing package over ssh should fail"
+[ "$(grep -c 'MISSING definitely-not-a-real-package' <<<"${out}")" = "1" ] \
+    || fail "pre-check: missing-package output was duplicated"
+if grep -q SSHPASS "${TMP}/ssh.log"; then
+    fail "pre-check: password fallback retried after a remote non-zero exit"
+fi
+pass "pre-check does not retry with password on a remote non-zero exit"
+
+# ssh exiting 255 means ssh itself failed; the password fallback still applies.
+cat > "${TMP}/baseline/versions/os/test.lock" <<'EOF'
+schema: 1
+family: debian
+id: ubuntu
+version: "22.04"
+packages:
+  reconcile:
+    bash: "1"
+EOF
+cat > "${TMP}/bin/ssh" <<'EOF'
+#!/bin/bash
+for arg in "$@"; do
+    if [ "${arg}" = "BatchMode=yes" ]; then
+        exit 255  # simulate key auth / connection failure
+    fi
+done
+exec bash -s
+EOF
+chmod +x "${TMP}/bin/ssh"
+: > "${TMP}/ssh.log"
+rc=0
+out="$(SSH_TEST_LOG="${TMP}/ssh.log" PATH="${TMP}/bin:${PATH}" "${ONLINE}/check-os-packages.sh" \
+    --baseline "${TMP}/baseline/versions/base.yaml" --hosts root@10.0.0.1 --password secret 2>&1)" || rc=$?
+[ "${rc}" -eq 0 ] || fail "pre-check: password fallback did not recover from an ssh failure"
+grep -q SSHPASS "${TMP}/ssh.log" || fail "pre-check: password fallback was not attempted"
+grep -q "pre-check passed" <<<"${out}" || fail "pre-check: remote pass missing after password fallback"
+pass "pre-check falls back to password only when ssh itself fails"
+
 echo "all online tool tests passed"
