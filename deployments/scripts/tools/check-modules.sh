@@ -752,6 +752,7 @@ for _t in test-kubespray-patches.sh test-update-kube-vip-addons.sh \
            test-ceph-single-node.sh \
            test-ceph-csi-topology.sh \
            test-module-toggle-enum.sh \
+           test-module-requires-skip.sh \
            test-metallb-pool-check.sh test-ceph-cluster-detect.sh \
            test-ceph-csi-cluster-kind.sh \
            test-gen-ssh-key-readonly.sh \

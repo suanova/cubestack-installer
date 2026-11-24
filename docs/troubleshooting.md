@@ -1464,6 +1464,41 @@ kubectl -n rook-ceph get pods -l app=rook-ceph-mon -o wide
 
 ---
 
+### 16. 【2026-11-24 实机】multus 部署失败: registry 未就绪 —— `--skip k8s_registry` 静默留下"依赖已被跳过"的计划
+
+**症状:** 全量部署带 `--skip k8s_registry`(例如为了先避开 ceph-block SC 尚未创建的 registry 检查)时,
+`multus` 模块在 `[2/4] 推送 Multus 镜像` 处等待 `http://<master>:31148/v2/` **约 60s** 后失败:
+`集群内置 registry ... 30s 内不可达`; 部署在 multus 中断。`registry-pvc` 此时仍 Pending,
+几十分钟后才 Bound / registry pod 才 Running。
+
+**根因:** `09_multus.sh` 头部声明 `REQUIRES: k8s_deploy k8s_registry`, 但默认模式(`--with-k8s`/全量)
+的 REQUIRES 只用于**排序**, 不会把依赖拉回计划。`--skip k8s_registry` 把它从 RUN_STEPS 删除后,
+multus 仍被调度 → 推镜像时 registry 未配置/未就绪; multus 自己的等待只有 30 次 × 2s = 60s,
+而 `k8s_registry` 模块会等待 `REGISTRY_WAIT_SECONDS`(默认 600s)并配置 containerd/CoreDNS,
+首次 ceph-block PVC 供给远超 60s。**不是 multus 等待时间单独的问题, 而是计划本身无效。**
+
+**根治(2026-11-24):** `lib-module.sh` 的 `resolve_run_steps` 在拓扑排序前增加计划期校验:
+只要计划中某模块的**默认启用** REQUIRES 依赖被用户 `--skip` 且未完成(done 且非 REPEAT),
+直接报错并清空 RUN_STEPS:
+```
+模块 multus 依赖 k8s_registry, 但 k8s_registry 被 --skip 排除且未完成
+  不能跳过被依赖的模块: 同时 --skip multus, 或不要跳过 k8s_registry
+```
+例外: `pre_install_check`(帮助允许显式 skip)与 `local_path`/`metallb`(registry 可走
+ceph-block/nodeport 的可选基座依赖)不触发; 默认关闭的可选依赖保持旧语义。
+回归: `deployments/scripts/tools/tests/test-module-requires-skip.sh`(已接入 check-modules ⑮)。
+
+**处置:** 不要 `--skip k8s_registry` 而保留 multus/rdma/netshoot/gpu/keycloak/kueue/kubevirt/
+model_images 等推镜像组件; 要跳过 registry 就同时 `--skip multus,...`。已失败的现场可补跑:
+```bash
+sudo ./deploy-cluster.sh --steps k8s_registry --yes
+sudo ./deploy-cluster.sh --steps multus --yes
+```
+
+**验证:** `test-module-requires-skip.sh` 全绿; `deploy-cluster.sh --list --skip k8s_registry`
+(且 MULTUS_ENABLED=true/REGISTRY_ENABLED=1)现在退出 1 并点名 multus/k8s_registry;
+`--skip k8s_registry,multus` 退出 0。
+
 ## 四、离线部署
 
 ### 1. 【单机/重装】`Drain node` → `Remove-node | List nodes` 报 `error: stat /etc/kubernetes/admin.conf: no such file or directory`
