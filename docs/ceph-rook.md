@@ -457,6 +457,11 @@ Rook 官方 import 流程 —— 消费者侧 apply `cluster-external.yaml`(`Cep
 (只清 `ceph` 类盘)/ `--all`(先删 CephCluster 再清)。显式指定盘时 `--wipe-node <ip> --disks "..."`
 默认会**拒绝**被判为 `inuse`/`mixed` 的盘, 需 `--force` 才越过。
 
+> 部署模块 7a 的标准清理同样默认拒绝 `inuse`/`mixed`; 显式 `CEPH_DATA_DISKS` +
+> `CEPH_WIPE_FORCE=true`(cluster.conf/defaults)时才会给 `ceph-cleanup.sh` 传 `--force`
+> (仅确认盘上数据可销毁时使用)。盘名支持裸名或 `/dev/<name>`, 尾部 `/` 会自动规范化;
+> 显式盘仍会在 7a-② 做 bluestore label 残留校验, 校验失败即中止部署(不再带残留进入 CR)。
+
 清盘步骤里的 LVM/dm 解除**按盘收敛**: 只 `lvremove/vgremove` **目标盘上** PV 所属的 VG, 只拆
 **目标盘之上**的 dm/crypt 层 —— 不按名字正则扫全节点(`... | grep ceph` 会误伤 `data-vg/cephbackup`
 这类名字里恰好带 ceph 的无关卷), 也不用 `dmsetup remove_all`(那会拆掉本节点所有 dm 映射)。

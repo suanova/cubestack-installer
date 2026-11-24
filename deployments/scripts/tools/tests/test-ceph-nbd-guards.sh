@@ -245,6 +245,15 @@ else
     echo "  ok  fallback 不清理 backup 组"
 fi
 
+echo "== ⑤ 擦盘健壮性: 变量初始化/盘名规范化/force 开关(2026-11-24) =="
+chk_contains "_WIPE_FAIL 已初始化" '_WIPE_FAIL=""' "${CEPH}"
+chk_contains "擦盘失败硬中止(不再 unbound)" "以下磁盘 bluestore 擦除校验失败" "${CEPH}"
+chk_contains "CEPH_WIPE_FORCE 开关" "CEPH_WIPE_FORCE" "${CEPH}"
+chk_contains "force 透传给 ceph-cleanup" '_cleanup_args+=(--force)' "${CEPH}"
+chk_contains "显式盘名规范化(模块)" "ceph_norm_dev" "${CEPH}"
+chk_contains "盘名规范化(清理工具)" "ceph_norm_dev" "${CLEANUP}"
+chk_contains "清理工具拒绝非法盘名" "非法盘名" "${CLEANUP}"
+
 echo ""
 if [ "${fail}" = "0" ]; then
     echo "✅ test-ceph-nbd-guards: 全部通过"

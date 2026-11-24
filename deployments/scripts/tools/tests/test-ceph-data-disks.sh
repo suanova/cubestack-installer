@@ -72,6 +72,27 @@ c="${TMP}/nodes-ok.conf"; make_conf "$c" "node0,node1,node2" "/dev/vdb"
 out="$(run_validate "$c")"; rc=$?
 chk "裸 hostname 退出码" "0" "${rc}"
 
+echo "== ⑦ 盘名规范化(ceph_norm_dev) =="
+norm_dev() { bash -c 'source "$1"; ceph_norm_dev "$2"' _ "${LIB}" "$1" 2>/dev/null; }
+chk "尾部斜杠" "$(norm_dev '/dev/nvme0n1/')" "/dev/nvme0n1"
+chk "裸名补 /dev/" "$(norm_dev 'nvme0n1')" "/dev/nvme0n1"
+chk "多重尾部斜杠" "$(norm_dev '/dev/nvme0n1//')" "/dev/nvme0n1"
+norm_dev '/dev/foo/bar' >/dev/null 2>&1; chk "路径名拒绝" "$?" "1"
+norm_dev '' >/dev/null 2>&1; chk "空值拒绝" "$?" "1"
+norm_dev '/dev/nvme 0n1' >/dev/null 2>&1; chk "空格拒绝" "$?" "1"
+
+echo "== ⑧ 合法: 盘名尾部斜杠(解析时规范化) =="
+c="${TMP}/slash.conf"; make_conf "$c" "node0,node1,node2" \
+    "node0:/dev/nvme0n1/;node1:/dev/nvme0n1/;node2:/dev/nvme0n1/"
+out="$(run_validate "$c")"; rc=$?
+chk "尾斜杠校验退出码" "0" "${rc}"
+
+echo "== ⑨ 非法: 盘名含路径分隔符 =="
+c="${TMP}/baddev.conf"; make_conf "$c" "node0,node1,node2" "node0:/dev/foo/bar"
+out="$(run_validate "$c")"; rc=$?
+chk "路径盘名退出码非 0" "1" "${rc}"
+chk_contains "提示非法盘名" "非法" "${out}"
+
 echo "---------------------------------------------"
 if [ "${fail}" = "0" ]; then echo "✅ test-ceph-data-disks: 全部通过"; else echo "❌ test-ceph-data-disks: 有失败"; fi
 exit "${fail}"

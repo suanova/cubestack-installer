@@ -644,6 +644,14 @@ delete_cluster() {
 # ---------------- ② 清理单个节点磁盘(物理擦除, 幂等) ----------------
 wipe_node() {   # <ip> <disks: "/dev/vdb,/dev/vdc"> [user]
     local ip="$1" disks="$2" user="${3:-${SSH_USER:-ubuntu}}"
+    local _d _dn _norm=""
+    # 入口统一规范化: 兼容 /dev/nvme0n1/、nvme0n1 等写法; 非法名直接拒绝(避免"设备不存在"静默跳过)
+    for _d in ${disks//,/ }; do
+        _dn="$(ceph_norm_dev "${_d}")" \
+            || { warn "  ${ip}: 非法盘名 ${_d}(只支持 /dev/<name>)"; return 1; }
+        _norm="${_norm:+${_norm},}${_dn}"
+    done
+    disks="${_norm}"
     [ -n "${disks}" ] || { warn "  ${ip}: 无盘列表, 跳过"; return 1; }
     say "  清理 ${ip} 磁盘到原始状态(LVM/dm-mapper/签名/分区表/bluestore 标签)..."
     local script
@@ -925,24 +933,29 @@ wipe_ceph_disks_all_nodes() {
 # 直接落实"不覆盖其他使用方式的磁盘": 擦盘前逐块查分类, 判为 inuse/mixed/未知的一律拒擦,
 # 要用 --force 才越过(此时会先把证据打印出来, 让人看清楚自己越过了什么)。
 wipe_node_guarded() {   # <ip> <disks>
-    local ip="$1" disks="$2" hn tsv _d _cls _ev
+    local ip="$1" disks="$2" hn tsv _d _dn _cls _ev
     local allowed=() refused=() unknown=()
 
     hn="$(_hostname_of_ip "${ip}" || true)"
     if [ -z "${hn}" ]; then
         warn "  ${ip} 不在 cluster.conf NODES 里 → 无法分类, 需 --force 才擦"
-        for _d in ${disks//,/ }; do unknown+=("/dev/${_d#/dev/}"); done
+        for _d in ${disks//,/ }; do
+            _dn="$(ceph_norm_dev "${_d}")" \
+                || { warn "  ${_d} — 非法盘名(只支持 /dev/<name>), 已跳过"; continue; }
+            unknown+=("${_dn}")
+        done
     else
         tsv="$(classify_all_hosts)" || { err "磁盘分类失败(SSH 不可达?)"; exit 1; }
         for _d in ${disks//,/ }; do
-            _d="/dev/${_d#/dev/}"
-            _cls="$(awk -F'\t' -v h="${hn}" -v dev="${_d}" '$1==h && $2==dev {print $3}' <<< "${tsv}")"
-            _ev="$(awk -F'\t' -v h="${hn}" -v dev="${_d}" '$1==h && $2==dev {print $4}' <<< "${tsv}")"
+            _dn="$(ceph_norm_dev "${_d}")" \
+                || { warn "  ${_d} — 非法盘名(只支持 /dev/<name>), 已跳过"; continue; }
+            _cls="$(awk -F'\t' -v h="${hn}" -v dev="${_dn}" '$1==h && $2==dev {print $3}' <<< "${tsv}")"
+            _ev="$(awk -F'\t' -v h="${hn}" -v dev="${_dn}" '$1==h && $2==dev {print $4}' <<< "${tsv}")"
             case "${_cls}" in
-                ceph) allowed+=("${_d}");  say "  ♻  ${_d} — 上次 Ceph 占用, 允许清理(${_ev})" ;;
-                free) allowed+=("${_d}");  say "  ✅ ${_d} — 空闲盘(清理无害)" ;;
-                "")   unknown+=("${_d}");  warn "  ⚠  ${_d} — 未在 lsblk 中找到该设备(盘名写错/节点不可达?)" ;;
-                *)    refused+=("${_d}");  warn "  ⛔ ${_d} — 判为 ${_cls}, 拒绝清理: ${_ev}" ;;
+                ceph) allowed+=("${_dn}");  say "  ♻  ${_dn} — 上次 Ceph 占用, 允许清理(${_ev})" ;;
+                free) allowed+=("${_dn}");  say "  ✅ ${_dn} — 空闲盘(清理无害)" ;;
+                "")   unknown+=("${_dn}");  warn "  ⚠  ${_dn} — 未在 lsblk 中找到该设备(盘名写错/节点不可达?)" ;;
+                *)    refused+=("${_dn}");  warn "  ⛔ ${_dn} — 判为 ${_cls}, 拒绝清理: ${_ev}" ;;
             esac
         done
     fi

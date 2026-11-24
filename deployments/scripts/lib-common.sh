@@ -2672,6 +2672,20 @@ ceph_storage_hosts() {
     return 0
 }
 
+# 规范化 Ceph 磁盘设备名: 兼容裸名(nvme0n1)、/dev/ 前缀、尾部斜杠(/dev/nvme0n1/)。
+# 返回: stdout=/dev/<name>; 1=空值或非法字符(路径分隔符/空格/通配符等)。
+# 背景(2026-11-24 实机): CEPH_DATA_DISKS 写成 /dev/nvme0n1/ 时, lsblk/bluestore wipe 按
+#   "设备不存在"处理 → 擦盘失败; 统一在解析入口收敛, 避免各调用点各写一份。
+ceph_norm_dev() {
+    local d="${1:-}"
+    d="${d#/dev/}"
+    while [ "${d%/}" != "${d}" ]; do d="${d%/}"; done
+    case "${d}" in
+        ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    printf '/dev/%s\n' "${d}"
+}
+
 # 校验显式 Ceph 节点/裸盘配置(CEPH_NODES / CEPH_DATA_DISKS)。
 # 目的: 防止 "node0:/dev/vdb,node1:/dev/vdb,node2:/dev/vdb" 这种**节点间用逗号**的写法
 # 被解析器静默当成 node0 的三块盘(2026-10-26 实机: 三块盘全显示在第一个节点, 另外两台
@@ -2725,6 +2739,8 @@ ceph_validate_explicit_config() {
                     case "${_d}" in
                         *:*) err "CEPH_DATA_DISKS 磁盘项含 ':' (${_d}); 节点之间请用分号 ;, 不要用逗号"; return 1 ;;
                     esac
+                    ceph_norm_dev "${_d}" >/dev/null \
+                        || { err "CEPH_DATA_DISKS 磁盘项非法: ${_d}(只支持 /dev/<name>, 不允许路径/空格/通配符)"; return 1; }
                 done
             done
         done <<< "${CEPH_DATA_DISKS}"
