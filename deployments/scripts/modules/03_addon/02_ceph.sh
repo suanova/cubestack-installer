@@ -1086,9 +1086,10 @@ else
                 _cleanup_rc=0
                 timeout 900 bash "${TOOLS_K8S}/ceph-cleanup.sh" "${_cleanup_args[@]}" || _cleanup_rc=$?
                 if [ "${_cleanup_rc}" -eq 2 ]; then
-                    # 分类护栏拒绝/无法分类: 未擦任何盘。7a-② 不得兜底, 否则会绕过护栏
-                    # 对 inuse/mixed/未知盘执行 wipefs + dd(2026-11-24 CodeRabbit)。
-                    warn "    ${_hn}: 标准清除被分类护栏拒绝(未擦任何盘); 跳过 7a-② 兜底擦除"
+                    # 分类/存活集群护栏拒绝或无法确认: 未擦任何盘。7a-② 不得兜底,
+                    # 否则会绕过护栏对 inuse/mixed/未知盘或存活集群 OSD 执行 wipefs + dd
+                    # (2026-11-24 CodeRabbit)。
+                    warn "    ${_hn}: 标准清除被分类/存活集群护栏拒绝(未擦任何盘); 跳过 7a-② 兜底擦除"
                     _WIPE_SKIP_NODES="${_WIPE_SKIP_NODES} ${_hn}"
                 elif [ "${_cleanup_rc}" -ne 0 ]; then
                     warn "    ${_hn}: 标准清除未全部成功(见上方输出); 继续走下面的签名擦除兜底"

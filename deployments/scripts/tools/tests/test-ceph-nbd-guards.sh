@@ -265,8 +265,33 @@ chk_contains "显式盘名规范化(模块)" "ceph_norm_dev" "${CEPH}"
 chk_contains "盘名规范化(清理工具)" "ceph_norm_dev" "${CLEANUP}"
 chk_contains "清理工具拒绝非法盘名" "非法盘名" "${CLEANUP}"
 chk_contains "live cluster guard 函数" "_live_cluster_guard" "${CLEANUP}"
-chk_contains "wipe-node 前调用 live guard" '_live_cluster_guard || exit 1' "${CLEANUP}"
+chk_contains "wipe-node 前调用 live guard" '_live_cluster_guard || exit $?' "${CLEANUP}"
 chk_contains "live guard 显式放行开关" "CEPH_CLEANUP_ALLOW_LIVE" "${CLEANUP}"
+
+echo "== ⑧ live guard 拒绝返回 2(模块据此跳过 7a-②) =="
+_LIVE_BLOCK="$(sed -n '/^_live_cluster_guard() {/,/^}$/p' "${CLEANUP}")"
+[ -n "${_LIVE_BLOCK}" ] || { echo "  FAIL 无法抽取 _live_cluster_guard"; fail=1; }
+_guard_rc() {  # <allow_live> <rows|FAIL>
+    (
+        set +u
+        CEPH_CLEANUP_ALLOW_LIVE="$1"; CEPH_NAMESPACE=rook-ceph; K=kubectl
+        FAKE_GUARD_ROWS="$2"; FAKE_GUARD_MODE=rows
+        [ "$2" = "FAIL" ] && { FAKE_GUARD_MODE=FAIL; FAKE_GUARD_ROWS=""; }
+        err() { :; }
+        SSH_N() {
+            [ "${FAKE_GUARD_MODE}" = "FAIL" ] && return 1
+            printf '%s\n' "${FAKE_GUARD_ROWS}"
+        }
+        eval "${_LIVE_BLOCK}"
+        _live_cluster_guard
+        echo $?
+    )
+}
+chk "显式放行 → 0" "0" "$(_guard_rc 1 '')"
+chk "无 CephCluster → 0" "0" "$(_guard_rc 0 '')"
+chk "external CR 不算存活 → 0" "0" "$(_guard_rc 0 'rook-ceph-external true')"
+chk "internal 存活 → 拒绝 2" "2" "$(_guard_rc 0 'rook-ceph false')"
+chk "查询失败 → 拒绝 2" "2" "$(_guard_rc 0 'FAIL')"
 
 echo ""
 if [ "${fail}" = "0" ]; then

@@ -44,18 +44,20 @@ SSH_N() { SSH "$@" </dev/null; }
 #   live OSD 盘判为 ceph(允许清理) → 直接 wipefs/dd, 同时清 /var/lib/rook 导致同节点 OSD/mon
 #   失联。擦盘前强制确认集群内没有 internal CephCluster(external CR 不算本安装器资产);
 #   显式放行: CEPH_CLEANUP_ALLOW_LIVE=1(仅确认要销毁整个集群时使用)。
+# 返回: 0=无存活 internal CephCluster; 2=拒绝(查询失败或仍有 internal 集群, 未擦任何盘)。
+#   ⚠ 必须是 2: 部署模块把 1 当"擦除执行失败"并继续 7a-②, 会绕过本护栏擦活集群 OSD。
 _live_cluster_guard() {
     [ "${CEPH_CLEANUP_ALLOW_LIVE:-0}" = "1" ] && return 0
     local rows internal
     if ! rows="$(SSH_N "timeout 30 ${K} -n ${CEPH_NAMESPACE} get cephcluster -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers" 2>/dev/null)"; then
         err "无法确认集群内是否仍有 CephCluster(查询失败); 拒绝擦盘(CEPH_CLEANUP_ALLOW_LIVE=1 可强制)"
-        return 1
+        return 2
     fi
     internal="$(printf '%s\n' "${rows}" | awk '$2!="true"{print $1}' | tr '\n' ' ')"
     if [ -n "${internal// /}" ]; then
         err "集群内仍有 internal CephCluster: ${internal}; 拒绝擦盘(--wipe-node/--wipe-disks)"
         err "  处置: 先 --delete-cluster/--all 销毁集群; 或确认要强擦时设 CEPH_CLEANUP_ALLOW_LIVE=1"
-        return 1
+        return 2
     fi
     return 0
 }
@@ -1025,7 +1027,7 @@ usage() {
 说明: 判定"哪些盘是 Ceph 盘"由 ceph-disk-classify.py 统一给出(强证据: bluestore 签名 /
       ceph 分区 GUID 或分区名 / ceph-* LVM 卷); 挂载中、非 ceph 文件系统、非 ceph LVM、
       系统盘一律不碰。混合盘(同盘既有 Ceph 又有别的数据)只报告, 需人工处理。
-退出码(--wipe-node): 0=成功; 1=擦除执行失败; 2=分类护栏拒绝/无法分类(未擦任何盘)
+退出码(--wipe-node): 0=成功; 1=擦除执行失败; 2=分类/存活集群护栏拒绝或无法确认(未擦任何盘)
 环境变量:
   CEPH_CLEANUP_FORCE_RECHECK_SECONDS=30   # 强制删除后的复查窗口(秒); 仍残留则拒绝继续
   CEPH_CLEANUP_CLUSTER_FORCE_GONE_SECONDS=60  # 强制删 CephCluster 后的复查窗口(秒); 仍存在则失败
@@ -1055,12 +1057,14 @@ case "${ACTION}" in
     #   (集群保留时无需 unmap; 删集群路径必须先 unmap, 否则回到 09-05 事故路径)
     delete-cluster) KEEP_PVCS=0; delete_cluster ;;
     stop-consumers) stop_consumers ;;
-    wipe-disks)     _live_cluster_guard || exit 1; wipe_ceph_disks_all_nodes ;;
+    wipe-disks)     _live_cluster_guard || exit $?; wipe_ceph_disks_all_nodes ;;
     all)            KEEP_PVCS=0; cleanup_all ;;
     wipe-node)
         [ -n "${WIPE_IP}" ] && [ -n "${WIPE_DISKS}" ] \
             || { err "用法: $0 --wipe-node <ip> --disks \"/dev/vdb,/dev/vdc\" [--force]"; exit 1; }
-        _live_cluster_guard || exit 1
+        # 存活集群护栏拒绝必须返回 2: 部署模块把 1 当"擦除执行失败"并继续 7a-②,
+        # 那会在存活集群的 OSD 盘上做破坏性擦除; 2 才触发模块的 fallback-skip。
+        _live_cluster_guard || exit $?
         wipe_node_guarded "${WIPE_IP}" "${WIPE_DISKS}" ;;
     *) usage; exit 1 ;;
 esac
