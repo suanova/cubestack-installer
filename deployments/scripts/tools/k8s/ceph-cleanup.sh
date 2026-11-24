@@ -40,6 +40,28 @@ init_remote_kubectl || { err "init_remote_kubectl 失败(cluster.conf NODES 无 
 #   SSH_N(本地 stdin 恒为 /dev/null); 需要喂 stdin 的(printf | SSH patch)保持原样。
 SSH_N() { SSH "$@" </dev/null; }
 
+# ★ 2026-11-24 实机事故: --wipe-node 打到**正在运行的 internal CephCluster** 时, 分类器会把
+#   live OSD 盘判为 ceph(允许清理) → 直接 wipefs/dd, 同时清 /var/lib/rook 导致同节点 OSD/mon
+#   失联。擦盘前强制确认集群内没有 internal CephCluster(external CR 不算本安装器资产);
+#   显式放行: CEPH_CLEANUP_ALLOW_LIVE=1(仅确认要销毁整个集群时使用)。
+# 返回: 0=无存活 internal CephCluster; 2=拒绝(查询失败或仍有 internal 集群, 未擦任何盘)。
+#   ⚠ 必须是 2: 部署模块把 1 当"擦除执行失败"并继续 7a-②, 会绕过本护栏擦活集群 OSD。
+_live_cluster_guard() {
+    [ "${CEPH_CLEANUP_ALLOW_LIVE:-0}" = "1" ] && return 0
+    local rows internal
+    if ! rows="$(SSH_N "timeout 30 ${K} -n ${CEPH_NAMESPACE} get cephcluster -o custom-columns=NAME:.metadata.name,EXT:.spec.external.enable --no-headers" 2>/dev/null)"; then
+        err "无法确认集群内是否仍有 CephCluster(查询失败); 拒绝擦盘(CEPH_CLEANUP_ALLOW_LIVE=1 可强制)"
+        return 2
+    fi
+    internal="$(printf '%s\n' "${rows}" | awk '$2!="true"{print $1}' | tr '\n' ' ')"
+    if [ -n "${internal// /}" ]; then
+        err "集群内仍有 internal CephCluster: ${internal}; 拒绝擦盘(--wipe-node/--wipe-disks)"
+        err "  处置: 先 --delete-cluster/--all 销毁集群; 或确认要强擦时设 CEPH_CLEANUP_ALLOW_LIVE=1"
+        return 2
+    fi
+    return 0
+}
+
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
 # 强制清理语义(2026-10-20 CodeRabbit; 2026-11-22 补 PVC finalizer): `--wait=false` 只表示
 #   "发起删除、不陪等 finalizer", **不表示 CSI unmap 已完成**。强制分支会像 PV 一样摘掉
@@ -644,6 +666,14 @@ delete_cluster() {
 # ---------------- ② 清理单个节点磁盘(物理擦除, 幂等) ----------------
 wipe_node() {   # <ip> <disks: "/dev/vdb,/dev/vdc"> [user]
     local ip="$1" disks="$2" user="${3:-${SSH_USER:-ubuntu}}"
+    local _d _dn _norm=""
+    # 入口统一规范化: 兼容 /dev/nvme0n1/、nvme0n1 等写法; 非法名直接拒绝(避免"设备不存在"静默跳过)
+    for _d in ${disks//,/ }; do
+        _dn="$(ceph_norm_dev "${_d}")" \
+            || { warn "  ${ip}: 非法盘名 ${_d}(只支持 /dev/<name>)"; return 1; }
+        _norm="${_norm:+${_norm},}${_dn}"
+    done
+    disks="${_norm}"
     [ -n "${disks}" ] || { warn "  ${ip}: 无盘列表, 跳过"; return 1; }
     say "  清理 ${ip} 磁盘到原始状态(LVM/dm-mapper/签名/分区表/bluestore 标签)..."
     local script
@@ -924,25 +954,31 @@ wipe_ceph_disks_all_nodes() {
 # ---------------- ⑤ 显式清指定节点的指定盘(带分类护栏) ----------------
 # 直接落实"不覆盖其他使用方式的磁盘": 擦盘前逐块查分类, 判为 inuse/mixed/未知的一律拒擦,
 # 要用 --force 才越过(此时会先把证据打印出来, 让人看清楚自己越过了什么)。
+# 返回: 0=成功; 1=擦除执行失败; 2=护栏拒绝/无法分类(未擦任何盘, 调用方不得再走兜底擦除)。
 wipe_node_guarded() {   # <ip> <disks>
-    local ip="$1" disks="$2" hn tsv _d _cls _ev
+    local ip="$1" disks="$2" hn tsv _d _dn _cls _ev
     local allowed=() refused=() unknown=()
 
     hn="$(_hostname_of_ip "${ip}" || true)"
     if [ -z "${hn}" ]; then
         warn "  ${ip} 不在 cluster.conf NODES 里 → 无法分类, 需 --force 才擦"
-        for _d in ${disks//,/ }; do unknown+=("/dev/${_d#/dev/}"); done
-    else
-        tsv="$(classify_all_hosts)" || { err "磁盘分类失败(SSH 不可达?)"; exit 1; }
         for _d in ${disks//,/ }; do
-            _d="/dev/${_d#/dev/}"
-            _cls="$(awk -F'\t' -v h="${hn}" -v dev="${_d}" '$1==h && $2==dev {print $3}' <<< "${tsv}")"
-            _ev="$(awk -F'\t' -v h="${hn}" -v dev="${_d}" '$1==h && $2==dev {print $4}' <<< "${tsv}")"
+            _dn="$(ceph_norm_dev "${_d}")" \
+                || { warn "  ${_d} — 非法盘名(只支持 /dev/<name>), 拒绝整批(不会擦任何盘)"; return 2; }
+            unknown+=("${_dn}")
+        done
+    else
+        tsv="$(classify_all_hosts)" || { err "磁盘分类失败(SSH 不可达?)"; return 2; }
+        for _d in ${disks//,/ }; do
+            _dn="$(ceph_norm_dev "${_d}")" \
+                || { warn "  ${_d} — 非法盘名(只支持 /dev/<name>), 拒绝整批(不会擦任何盘)"; return 2; }
+            _cls="$(awk -F'\t' -v h="${hn}" -v dev="${_dn}" '$1==h && $2==dev {print $3}' <<< "${tsv}")"
+            _ev="$(awk -F'\t' -v h="${hn}" -v dev="${_dn}" '$1==h && $2==dev {print $4}' <<< "${tsv}")"
             case "${_cls}" in
-                ceph) allowed+=("${_d}");  say "  ♻  ${_d} — 上次 Ceph 占用, 允许清理(${_ev})" ;;
-                free) allowed+=("${_d}");  say "  ✅ ${_d} — 空闲盘(清理无害)" ;;
-                "")   unknown+=("${_d}");  warn "  ⚠  ${_d} — 未在 lsblk 中找到该设备(盘名写错/节点不可达?)" ;;
-                *)    refused+=("${_d}");  warn "  ⛔ ${_d} — 判为 ${_cls}, 拒绝清理: ${_ev}" ;;
+                ceph) allowed+=("${_dn}");  say "  ♻  ${_dn} — 上次 Ceph 占用, 允许清理(${_ev})" ;;
+                free) allowed+=("${_dn}");  say "  ✅ ${_dn} — 空闲盘(清理无害)" ;;
+                "")   unknown+=("${_dn}");  warn "  ⚠  ${_dn} — 未在 lsblk 中找到该设备(盘名写错/节点不可达?)" ;;
+                *)    refused+=("${_dn}");  warn "  ⛔ ${_dn} — 判为 ${_cls}, 拒绝清理: ${_ev}" ;;
             esac
         done
     fi
@@ -958,11 +994,11 @@ wipe_node_guarded() {   # <ip> <disks>
         else
             # fail-fast: 一块盘不放行就整批不动 —— 破坏性操作用"部分执行"会让现场更难判断
             warn "本次未清理任何磁盘。确认要销毁上述盘上数据请加 --force 重跑本命令"
-            return 1
+            return 2
         fi
     fi
 
-    [ "${#allowed[@]}" -gt 0 ] || { warn "  无可清理的磁盘"; return 1; }
+    [ "${#allowed[@]}" -gt 0 ] || { warn "  无可清理的磁盘"; return 2; }
     local _joined _user="${SSH_USER:-ubuntu}"
     _joined="$(IFS=,; printf '%s' "${allowed[*]}")"
     # 用户按 NODES 第4字段每节点不同时, 这里必须用该节点自己的用户(否则认证失败)
@@ -991,10 +1027,12 @@ usage() {
 说明: 判定"哪些盘是 Ceph 盘"由 ceph-disk-classify.py 统一给出(强证据: bluestore 签名 /
       ceph 分区 GUID 或分区名 / ceph-* LVM 卷); 挂载中、非 ceph 文件系统、非 ceph LVM、
       系统盘一律不碰。混合盘(同盘既有 Ceph 又有别的数据)只报告, 需人工处理。
+退出码(--wipe-node): 0=成功; 1=擦除执行失败; 2=分类/存活集群护栏拒绝或无法确认(未擦任何盘)
 环境变量:
   CEPH_CLEANUP_FORCE_RECHECK_SECONDS=30   # 强制删除后的复查窗口(秒); 仍残留则拒绝继续
   CEPH_CLEANUP_CLUSTER_FORCE_GONE_SECONDS=60  # 强制删 CephCluster 后的复查窗口(秒); 仍存在则失败
   CEPH_CLEANUP_ALLOW_UNSAFE_UNMAP=1       # 危险: 卷未确认清理时仍继续删 nodeplugin/CephCluster/擦盘
+  CEPH_CLEANUP_ALLOW_LIVE=1               # 危险: 集群内仍有 internal CephCluster 时仍允许 --wipe-node/--wipe-disks
 USAGE
 }
 while [ $# -gt 0 ]; do
@@ -1019,11 +1057,14 @@ case "${ACTION}" in
     #   (集群保留时无需 unmap; 删集群路径必须先 unmap, 否则回到 09-05 事故路径)
     delete-cluster) KEEP_PVCS=0; delete_cluster ;;
     stop-consumers) stop_consumers ;;
-    wipe-disks)     wipe_ceph_disks_all_nodes ;;
+    wipe-disks)     _live_cluster_guard || exit $?; wipe_ceph_disks_all_nodes ;;
     all)            KEEP_PVCS=0; cleanup_all ;;
     wipe-node)
         [ -n "${WIPE_IP}" ] && [ -n "${WIPE_DISKS}" ] \
             || { err "用法: $0 --wipe-node <ip> --disks \"/dev/vdb,/dev/vdc\" [--force]"; exit 1; }
+        # 存活集群护栏拒绝必须返回 2: 部署模块把 1 当"擦除执行失败"并继续 7a-②,
+        # 那会在存活集群的 OSD 盘上做破坏性擦除; 2 才触发模块的 fallback-skip。
+        _live_cluster_guard || exit $?
         wipe_node_guarded "${WIPE_IP}" "${WIPE_DISKS}" ;;
     *) usage; exit 1 ;;
 esac

@@ -29,16 +29,17 @@
 #
 # 分级(2026-11-17 用户口径):
 #   关键项(SSH/sudo/chronyd/CPU/内存/磁盘下限)任一失败 → 退出码 1(模块随之中止部署)
-#   建议项(master 内存推荐值 / 磁盘推荐值 / chronyd 开机自启 / 密码回退)只告警
+#   建议项(CPU/内存推荐值 / 磁盘推荐值 / chronyd 开机自启 / 密码回退)只告警
 #
 # 用法:
 #   ./pre-install-check.sh [--check] [--only <host>]
 #   ./pre-install-check.sh --help
 # 数据源: deployments/config/cluster.conf + cluster.defaults.conf
 # 可覆盖阈值(写在 cluster.conf 或环境变量):
-#   PRE_INSTALL_MIN_CPU(默认 2)          PRE_INSTALL_MIN_MEM_MB(默认 2048)
-#   PRE_INSTALL_MASTER_MIN_MEM_MB(默认 4096, 建议)
+#   PRE_INSTALL_MIN_CPU(默认 4)          PRE_INSTALL_MIN_MEM_MB(默认 16384)
+#   PRE_INSTALL_RECOMMENDED_CPU(默认 8)  PRE_INSTALL_RECOMMENDED_MEM_MB(默认 32768, 建议)
 #   PRE_INSTALL_MIN_DISK_GB(默认 10)     PRE_INSTALL_RECOMMENDED_DISK_GB(默认 20, 建议)
+#   内存判定按 GiB 向上取整(标称 16/32GiB 的节点 MemTotal 通常约 15.9/31.9GiB, 仍视为满足)。
 # ============================================================
 set -euo pipefail
 
@@ -78,9 +79,20 @@ _num() {  # <value> <default> → 正整数或默认值
     local v="${1:-}" d="$2"
     [[ "${v}" =~ ^[0-9]+$ ]] && echo "${v}" || echo "${d}"
 }
-MIN_CPU="$(_num "${PRE_INSTALL_MIN_CPU:-}" 2)"
-MIN_MEM_MB="$(_num "${PRE_INSTALL_MIN_MEM_MB:-}" 2048)"
-MASTER_MIN_MEM_MB="$(_num "${PRE_INSTALL_MASTER_MIN_MEM_MB:-}" 4096)"
+# 内存按 GiB 向上取整比较: 标称 16/32GiB 的节点 MemTotal 通常略低于
+# 16384/32768MiB(内核/固件保留), 直接按 MiB 比较会把标称容量误判为不足。
+_mem_gib() {  # <MB> → GiB(向上取整)
+    local m
+    m="$(_num "${1:-}" 0)"
+    # 10#: 强制十进制 —— 允许 032000/032768 这类带前导零的覆盖值(否则 bash 按八进制解析)
+    echo $(( (10#${m} + 1023) / 1024 ))
+}
+MIN_CPU="$(_num "${PRE_INSTALL_MIN_CPU:-}" 4)"
+MIN_MEM_MB="$(_num "${PRE_INSTALL_MIN_MEM_MB:-}" 16384)"
+REC_CPU="$(_num "${PRE_INSTALL_RECOMMENDED_CPU:-}" 8)"
+REC_MEM_MB="$(_num "${PRE_INSTALL_RECOMMENDED_MEM_MB:-${PRE_INSTALL_MASTER_MIN_MEM_MB:-}}" 32768)"
+MIN_MEM_GIB="$(_mem_gib "${MIN_MEM_MB}")"
+REC_MEM_GIB="$(_mem_gib "${REC_MEM_MB}")"
 MIN_DISK_GB="$(_num "${PRE_INSTALL_MIN_DISK_GB:-}" 10)"
 REC_DISK_GB="$(_num "${PRE_INSTALL_RECOMMENDED_DISK_GB:-}" 20)"
 NTP_MAX_OFFSET_MS="$(_num "${NTP_MAX_OFFSET_MS:-}" 2000)"
@@ -168,7 +180,7 @@ _crit() { err "$*"; CRIT=$((CRIT + 1)); }
 _adv()  { warn "$*";  ADV=$((ADV + 1)); }
 _pass() { ok "$*"; }
 
-say "安装前环境检查(SSH/sudo/chronyd/资源容量; 阈值: CPU≥${MIN_CPU}核, 内存≥${MIN_MEM_MB}MB, /var/lib≥${MIN_DISK_GB}GB) ..."
+say "安装前环境检查(SSH/sudo/chronyd/资源容量; 阈值: CPU≥${MIN_CPU}核, 内存≥${MIN_MEM_MB}MB, /var/lib≥${MIN_DISK_GB}GB; 建议 CPU≥${REC_CPU}核, 内存≥${REC_MEM_MB}MB) ..."
 
 for _line in "${NODES[@]:-}"; do
     [ -z "${_line}" ] && continue
@@ -263,6 +275,7 @@ REMOTE
     _get() { printf '%s\n' "${_out}" | sed -n "s/^$1=//p" | head -1; }
     CPU="$(_get CPU)";        CPU="${CPU:-0}"
     MEM_MB="$(_get MEM_MB)";  MEM_MB="${MEM_MB:-0}"
+    MEM_GIB="$(_mem_gib "${MEM_MB}")"
     DISK_GB="$(_get DISK_GB)"; DISK_GB="${DISK_GB:-0}"
     CHRONYD_BIN="$(_get CHRONYD_BIN)"
     CHRONY_ACTIVE="$(_get CHRONY_ACTIVE)"
@@ -335,17 +348,18 @@ REMOTE
     # ---- ⑤ 资源容量 ----
     if [ "${CPU}" -lt "${MIN_CPU}" ] 2>/dev/null; then
         _crit "  CPU: ${CPU} 核 < 最低要求 ${MIN_CPU} 核"
+    elif [ "${CPU}" -lt "${REC_CPU}" ] 2>/dev/null; then
+        _adv "  CPU: ${CPU} 核 < 建议 ${REC_CPU} 核"
     else
         _pass "  CPU: ${CPU} 核"
     fi
 
-    if [ "${MEM_MB}" -lt "${MIN_MEM_MB}" ] 2>/dev/null; then
-        _crit "  内存: ${MEM_MB}MB < 最低要求 ${MIN_MEM_MB}MB"
+    if [ "${MEM_GIB}" -lt "${MIN_MEM_GIB}" ] 2>/dev/null; then
+        _crit "  内存: ${MEM_MB}MB(约 ${MEM_GIB}GiB) < 最低要求 ${MIN_MEM_MB}MB(${MIN_MEM_GIB}GiB)"
+    elif [ "${MEM_GIB}" -lt "${REC_MEM_GIB}" ] 2>/dev/null; then
+        _adv "  内存: ${MEM_MB}MB(约 ${MEM_GIB}GiB) < 建议 ${REC_MEM_MB}MB(${REC_MEM_GIB}GiB)"
     else
-        _pass "  内存: ${MEM_MB}MB"
-    fi
-    if [ "${NODE_ROLE}" = "master" ] && [ "${MEM_MB}" -lt "${MASTER_MIN_MEM_MB}" ] 2>/dev/null; then
-        _adv "  内存: master 建议 ≥ ${MASTER_MIN_MEM_MB}MB(当前 ${MEM_MB}MB)"
+        _pass "  内存: ${MEM_MB}MB(约 ${MEM_GIB}GiB)"
     fi
 
     if [ "${DISK_GB}" -lt "${MIN_DISK_GB}" ] 2>/dev/null; then

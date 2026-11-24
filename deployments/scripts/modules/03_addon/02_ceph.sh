@@ -28,6 +28,8 @@
 #     ceph 分区 GUID 或分区名 / ceph-* LVM 卷)生成 CephCluster CR 的 per-node devices ——
 #     精确盘名而非正则, 避免误选; inuse(挂载/非 ceph 文件系统/非 ceph LVM/系统盘)与
 #     mixed(同盘既有 ceph 又有别的数据)一律不进 CR、不清理。
+#     显式 CEPH_DATA_DISKS 指定 + CEPH_WIPE_FORCE=true 时, 7a 标准清理才允许越过 inuse/mixed
+#     护栏(操作者确认盘上数据可销毁); 盘名支持裸名或 /dev/<name>, 尾部斜杠会自动规范化。
 #     VM 集群请确保 VM 附加数据盘(默认 3×200GB, VM_DATA_DISKS)。
 #   · 安全确认(需求 2): 应用 CR 前红底醒目列出"将使用的节点 + 各节点磁盘按类分组
 #     (空闲 / 上次 Ceph 占用 / 在用 / 混合)+ 判定证据", 并询问 **[Y/n](CEPH_CONFIRM_SLEEP 变量
@@ -300,9 +302,10 @@ if [ -n "${CEPH_DATA_DISKS:-}" ]; then
             _hn="${_g%%:*}"; _ds="${_g#*:}"
             [ -z "${_hn}" ] || [ "${_hn}" = "${_ds}" ] && { _ALL_DISKS="${_ALL_DISKS:+${_ALL_DISKS};}${_g}"; continue; }
             _norm=""
-            for _d in ${_ds//,/ }; do            # 盘名补 /dev/ 前缀(兼容裸名)
-                _d="/dev/${_d#/dev/}"
-                _norm="${_norm:+${_norm},}${_d}"
+            for _d in ${_ds//,/ }; do            # 盘名规范化: 裸名补 /dev/, 去尾部斜杠
+                _dn="$(ceph_norm_dev "${_d}")" \
+                    || { err "CEPH_DATA_DISKS 非法盘名: ${_d}(节点 ${_hn})"; exit 1; }
+                _norm="${_norm:+${_norm},}${_dn}"
             done
             NODE_DISKS["${_hn}"]="${_norm}"
         done
@@ -315,8 +318,9 @@ if [ -n "${CEPH_DATA_DISKS:-}" ]; then
             [ -z "${_hn}" ] || [ "${_hn}" = "${_ds}" ] || continue
             _norm=""
             for _d in ${_ds//,/ }; do
-                _d="/dev/${_d#/dev/}"
-                _norm="${_norm:+${_norm},}${_d}"
+                _dn="$(ceph_norm_dev "${_d}")" \
+                    || { err "CEPH_DATA_DISKS 非法盘名: ${_d}(全节点条目)"; exit 1; }
+                _norm="${_norm:+${_norm},}${_dn}"
             done
             for _h2 in "${CEPH_NODE_HOSTS[@]}"; do
                 [ -n "${NODE_DISKS[${_h2}]:-}" ] || NODE_DISKS["${_h2}"]="${_norm}"
@@ -339,6 +343,9 @@ else
     fi
     while IFS=$'\t' read -r _hn _dev _cls _ev; do
         [ -n "${_hn}" ] && [ -n "${_dev}" ] || continue
+        _dn="$(ceph_norm_dev "${_dev}")" \
+            || { warn "  自动检测返回非法盘名, 已忽略: ${_hn} ${_dev}"; continue; }
+        _dev="${_dn}"
         NODE_TSV["${_hn}"]="${NODE_TSV[${_hn}]:-}${_dev}"$'\t'"${_cls}"$'\t'"${_ev}"$'\n'
         case "${_cls}" in
             free|ceph)  NODE_DISKS["${_hn}"]="${NODE_DISKS[${_hn}]:-}${NODE_DISKS[${_hn}]:+,}${_dev}" ;;
@@ -621,7 +628,7 @@ done
 echo -e "\033[41m\033[97m ⚠ 确认要点: ① 盘名与节点一一对应正确(不会覆盖系统盘/在用盘)        \033[0m"
 echo -e "\033[41m\033[97m   ② 「上次 Ceph 占用」的盘会被**清空数据**后复用(覆盖安装, 全新 fsid)\033[0m"
 echo -e "\033[41m\033[97m      保留旧数据请设 CEPH_PRE_CLEANUP_EXISTING=false(交 Rook 认领)   \033[0m"
-echo -e "\033[41m\033[97m   ③ 「在用盘/混合盘」永远不动(人工确认要清请用 ceph-cleanup.sh)     \033[0m"
+echo -e "\033[41m\033[97m   ③ 「在用盘/混合盘」默认不动(显式盘 + CEPH_WIPE_FORCE=true 才越过护栏) \033[0m"
 echo -e "\033[41m\033[97m   ④ CEPH_NODES 是你想部署的节点; 核对无误请直接回车/Y 继续       \033[0m"
 echo -e "\033[41m\033[97m   有误请输入 n 中止, 修正后重跑                                     \033[0m"
 echo -e "\033[41m\033[97m================================================================================\033[0m"
@@ -1046,11 +1053,23 @@ else
         #      "label 真没了"的保证; 只擦头尾会漏 locations → ceph-volume 仍报 "already prepared"
         #      → 0 OSD(★ 2026-09-24 实机事故根因, 详见 lib-common.sh 的 bluestore_wipe_remote_lib)。
         if [ "${_CEPH_PRE_CLEANUP}" = "1" ]; then
+            _WIPE_FAIL=""
+            _WIPE_SKIP_NODES=""
             # 7a-① 标准 Ceph 清除步骤(停进程 → 解 LVM/VG/dm-mapper → wipefs/分区表/bluestore 签名 →
-            #   清 /var/lib/rook 等残留), 只作用于**被判为 Ceph 占用**的盘 —— 工具自带护栏,
-            #   在用盘/混合盘一律不碰。旧版 7a 只有下面的 dd 擦除, 于是残留在盘上的 ceph VG/LV
-            #   没人解绑 → Rook/osd-prepare 认到旧 LVM 元数据报 "already prepared" / 0 OSD。
+            #   清 /var/lib/rook 等残留), 默认只作用于**被判为 Ceph 占用/空闲**的盘 —— 工具自带护栏,
+            #   在用盘/混合盘默认不碰; 显式 CEPH_DATA_DISKS + CEPH_WIPE_FORCE=true 时才允许越过
+            #   (操作者已确认盘上数据可销毁)。旧版 7a 只有下面的 dd 擦除, 于是残留在盘上的 ceph
+            #   VG/LV 没人解绑 → Rook/osd-prepare 认到旧 LVM 元数据报 "already prepared" / 0 OSD。
             say "  7a) 标准清除上次 Ceph 占用的磁盘(停进程/解 LVM/dm/签名/分区表; tools/k8s/ceph-cleanup.sh)..."
+            # --force 只允许作用于**显式指定**的盘(CEPH_DATA_DISKS 非空): 自动选盘在部署中途
+            # 仍可能被 cleanup 重新分类为 inuse/mixed, 不应被该开关越过。
+            _CEPH_WIPE_FORCE_ON=0
+            case "$(printf '%s' "${CEPH_WIPE_FORCE:-false}" | tr '[:upper:]' '[:lower:]')" in
+                1|true|yes|on) _CEPH_WIPE_FORCE_ON=1 ;;
+            esac
+            if [ "${_CEPH_WIPE_FORCE_ON}" = "1" ] && [ -z "${CEPH_DATA_DISKS:-}" ]; then
+                warn "  CEPH_WIPE_FORCE 已开启但 CEPH_DATA_DISKS 未显式配置 → 自动选盘不加 --force(仅显式盘允许越过护栏)"
+            fi
             for _hn in "${CEPH_NODE_HOSTS[@]}"; do
                 [ -n "${NODE_DISKS[${_hn}]:-}" ] || continue
                 _ip=""
@@ -1060,8 +1079,21 @@ else
                     [ "${NODE_HOSTNAME}" = "${_hn}" ] && { _ip="${NODE_IP}"; break; }
                 done
                 [ -n "${_ip}" ] || continue
-                timeout 900 bash "${TOOLS_K8S}/ceph-cleanup.sh" --wipe-node "${_ip}" --disks "${NODE_DISKS[${_hn}]}" \
-                    || warn "    ${_hn}: 标准清除未全部成功(见上方输出); 继续走下面的签名擦除兜底"
+                _cleanup_args=(--wipe-node "${_ip}" --disks "${NODE_DISKS[${_hn}]}")
+                if [ "${_CEPH_WIPE_FORCE_ON}" = "1" ] && [ -n "${CEPH_DATA_DISKS:-}" ]; then
+                    _cleanup_args+=(--force)
+                fi
+                _cleanup_rc=0
+                timeout 900 bash "${TOOLS_K8S}/ceph-cleanup.sh" "${_cleanup_args[@]}" || _cleanup_rc=$?
+                if [ "${_cleanup_rc}" -eq 2 ]; then
+                    # 分类/存活集群护栏拒绝或无法确认: 未擦任何盘。7a-② 不得兜底,
+                    # 否则会绕过护栏对 inuse/mixed/未知盘或存活集群 OSD 执行 wipefs + dd
+                    # (2026-11-24 CodeRabbit)。
+                    warn "    ${_hn}: 标准清除被分类/存活集群护栏拒绝(未擦任何盘); 跳过 7a-② 兜底擦除"
+                    _WIPE_SKIP_NODES="${_WIPE_SKIP_NODES} ${_hn}"
+                elif [ "${_cleanup_rc}" -ne 0 ]; then
+                    warn "    ${_hn}: 标准清除未全部成功(见上方输出); 继续走下面的签名擦除兜底"
+                fi
             done
             # 7a-② 逐盘彻底擦除兜底(★ 2026-09-24 事故修复: 这里原来手写 dd 只擦
             #   头 64MB/1GB/size÷20/size÷2/尾 64MB, 与 Ceph v20 **实际**的 label 副本位置
@@ -1073,6 +1105,9 @@ else
             #   bluestore_wipe_remote_lib(官方 zap-device 读 label 自带 locations, 版本无关 +
             #   候选偏移 dd 兜底 + 逐处校验; ceph-cleanup.sh 用的是同一份), 校验不过即失败。
             for _hn in "${CEPH_NODE_HOSTS[@]}"; do
+                case " ${_WIPE_SKIP_NODES:-} " in
+                    *" ${_hn} "*) warn "  ${_hn}: 7a-① 分类护栏拒绝, 跳过 7a-② 兜底擦除"; continue ;;
+                esac
                 _ip=""
                 for line in "${NODES[@]:-}"; do
                     [ -z "${line}" ] && continue
@@ -1102,6 +1137,11 @@ else
                 node_ssh "${_ip}" "$(ssh_user_for_ip "${_ip}")" "ls /dev/rbd* >/dev/null 2>&1 && { sudo rm -f /dev/rbd* && echo '  残留 rbd 设备节点已删(/dev/rbd*)'; } || true" \
                     | grep -v '^$' || true
             done
+            if [ -n "${_WIPE_FAIL}" ]; then
+                err "7a) 以下磁盘 bluestore 擦除校验失败:${_WIPE_FAIL}"
+                err "     继续部署会导致 0 OSD/部分 OSD; 请按上方残留偏移修复后重跑"
+                exit 1
+            fi
         fi
 
         # --- 7b) 清理 /var/lib/rook 残留(mon store + osd 元数据 + config/keyring) ---
