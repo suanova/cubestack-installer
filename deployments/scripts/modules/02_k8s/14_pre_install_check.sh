@@ -20,8 +20,9 @@
 #   · 2026-11-17(CodeRabbit): deploy-cluster 在**优雅卸载/覆盖安装之前**提前执行本模块
 #     (若在计划中); 关键项失败会中止, 现有组件不会被 cluster-teardown 拆除。
 #     模块循环会跳过重复执行。只读检查, 节点已运行集群时结果与循环内一致。
-#   · 阈值: PRE_INSTALL_MIN_CPU / PRE_INSTALL_MIN_MEM_MB / PRE_INSTALL_MASTER_MIN_MEM_MB /
-#     PRE_INSTALL_MIN_DISK_GB / PRE_INSTALL_RECOMMENDED_DISK_GB(见 cluster.defaults.conf §2.2b)。
+#   · 阈值: PRE_INSTALL_MIN_CPU / PRE_INSTALL_MIN_MEM_MB / PRE_INSTALL_RECOMMENDED_CPU /
+#     PRE_INSTALL_RECOMMENDED_MEM_MB / PRE_INSTALL_MIN_DISK_GB / PRE_INSTALL_RECOMMENDED_DISK_GB
+#     (见 cluster.defaults.conf §2.2b)。
 # ============================================================
 set -euo pipefail
 
