@@ -250,6 +250,12 @@ chk_contains "_WIPE_FAIL 已初始化" '_WIPE_FAIL=""' "${CEPH}"
 chk_contains "擦盘失败硬中止(不再 unbound)" "以下磁盘 bluestore 擦除校验失败" "${CEPH}"
 chk_contains "CEPH_WIPE_FORCE 开关" "CEPH_WIPE_FORCE" "${CEPH}"
 chk_contains "force 透传给 ceph-cleanup" '_cleanup_args+=(--force)' "${CEPH}"
+if grep -B3 -F '_cleanup_args+=(--force)' "${CEPH}" | grep -qF 'CEPH_DATA_DISKS'; then
+    echo "  ok  force 仅在显式 CEPH_DATA_DISKS 时启用"
+else
+    echo "  FAIL force 未限制为显式 CEPH_DATA_DISKS"; fail=1
+fi
+chk_contains "无显式盘时忽略 force 并告警" "CEPH_DATA_DISKS 未显式配置" "${CEPH}"
 chk_contains "显式盘名规范化(模块)" "ceph_norm_dev" "${CEPH}"
 chk_contains "盘名规范化(清理工具)" "ceph_norm_dev" "${CLEANUP}"
 chk_contains "清理工具拒绝非法盘名" "非法盘名" "${CLEANUP}"

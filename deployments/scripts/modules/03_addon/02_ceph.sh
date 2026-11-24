@@ -1060,6 +1060,15 @@ else
             #   (操作者已确认盘上数据可销毁)。旧版 7a 只有下面的 dd 擦除, 于是残留在盘上的 ceph
             #   VG/LV 没人解绑 → Rook/osd-prepare 认到旧 LVM 元数据报 "already prepared" / 0 OSD。
             say "  7a) 标准清除上次 Ceph 占用的磁盘(停进程/解 LVM/dm/签名/分区表; tools/k8s/ceph-cleanup.sh)..."
+            # --force 只允许作用于**显式指定**的盘(CEPH_DATA_DISKS 非空): 自动选盘在部署中途
+            # 仍可能被 cleanup 重新分类为 inuse/mixed, 不应被该开关越过。
+            _CEPH_WIPE_FORCE_ON=0
+            case "$(printf '%s' "${CEPH_WIPE_FORCE:-false}" | tr '[:upper:]' '[:lower:]')" in
+                1|true|yes|on) _CEPH_WIPE_FORCE_ON=1 ;;
+            esac
+            if [ "${_CEPH_WIPE_FORCE_ON}" = "1" ] && [ -z "${CEPH_DATA_DISKS:-}" ]; then
+                warn "  CEPH_WIPE_FORCE 已开启但 CEPH_DATA_DISKS 未显式配置 → 自动选盘不加 --force(仅显式盘允许越过护栏)"
+            fi
             for _hn in "${CEPH_NODE_HOSTS[@]}"; do
                 [ -n "${NODE_DISKS[${_hn}]:-}" ] || continue
                 _ip=""
@@ -1070,9 +1079,9 @@ else
                 done
                 [ -n "${_ip}" ] || continue
                 _cleanup_args=(--wipe-node "${_ip}" --disks "${NODE_DISKS[${_hn}]}")
-                case "$(printf '%s' "${CEPH_WIPE_FORCE:-false}" | tr '[:upper:]' '[:lower:]')" in
-                    1|true|yes|on) _cleanup_args+=(--force) ;;
-                esac
+                if [ "${_CEPH_WIPE_FORCE_ON}" = "1" ] && [ -n "${CEPH_DATA_DISKS:-}" ]; then
+                    _cleanup_args+=(--force)
+                fi
                 timeout 900 bash "${TOOLS_K8S}/ceph-cleanup.sh" "${_cleanup_args[@]}" \
                     || warn "    ${_hn}: 标准清除未全部成功(见上方输出); 继续走下面的签名擦除兜底"
             done
