@@ -46,7 +46,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: ppu-device-plugin
-          image: @@IMAGE@@
+          image: "@@IMAGE@@"
           imagePullPolicy: IfNotPresent
           command:
             - /usr/bin/ppu-device-plugin
