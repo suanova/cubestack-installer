@@ -876,6 +876,7 @@ _patch_rook_operator_placement() {
 # 节点池 cordon 后这些 daemon 重启会 Pending, 因此对存量 Deployment 直接补 toleration(幂等)。
 _patch_ceph_daemon_placement() {
     local _d _list _tols _cur _cmd
+    _CEPH_PLACEMENT_PATCHED=0
     _tols='{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node.kubernetes.io/unschedulable","operator":"Exists","effect":"NoSchedule"}'
     _list="$(SSH "${K}" -n ${CEPH_NAMESPACE} get deploy --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)"
     for _d in $(printf '%s\n' "${_list}" | awk '/^rook-ceph-(mon|mgr|osd)-/ {print $1}'); do
@@ -887,6 +888,7 @@ _patch_ceph_daemon_placement() {
         _cmd="${K} -n ${CEPH_NAMESPACE} patch deploy ${_d} --type=strategic -p '{\"spec\":{\"template\":{\"spec\":{\"tolerations\":[${_tols}]}}}}'"
         if SSH "${_cmd}" >/dev/null 2>&1; then
             ok "  ${_d} placement 已收敛(control-plane+unschedulable)"
+            _CEPH_PLACEMENT_PATCHED=1
         else
             warn "  ${_d} placement patch 失败(不阻断; 检查 RBAC)"
         fi
@@ -1185,6 +1187,18 @@ else
     echo "    image: $(mirror_image_ref "quay.io/ceph/ceph:${CEPH_VERSION}")"
     echo "    allowUnsupported: false"
     echo "  dataDirHostPath: /var/lib/rook"
+    # ★ 2026-11-27 优化(optimize-single-ceph): 把"创建期就该正确"的全局配置放进 CR,
+    #   由 Rook 在 mon/mgr 启动时下发, 避免 mgr 先用默认值(host 故障域/size=3/0.05s)
+    #   创建内部池(.mgr 等)后, 再靠 [7/8] 的 post-Ready 修补触发 PG 重收敛 —— 单节点上
+    #   这一步会让 HEALTH_OK 迟迟不出现。pool size/min_size 与 CEPH_POOL_* 保持一致。
+    echo "  cephConfig:"
+    echo "    global:"
+    echo "      mon_clock_drift_allowed: \"1.5\""
+    echo "      osd_pool_default_size: \"${CEPH_POOL_REPLICAS}\""
+    echo "      osd_pool_default_min_size: \"${CEPH_POOL_MIN_SIZE}\""
+    if [ "${CEPH_TOPOLOGY_EFFECTIVE:-}" = "single" ]; then
+        echo "      mon_max_pg_per_osd: \"${CEPH_SINGLE_MAX_PG_PER_OSD:-500}\""
+    fi
     echo "  mon:"
     echo "    count: ${CEPH_MON_COUNT}"
     echo "    allowMultiplePerNode: false"
@@ -1259,6 +1273,12 @@ SSH "rm -f /tmp/cephcluster.yaml" >/dev/null 2>&1 || true   # 用完即删(2026-
 rm -f "${LOCAL_CR}"
 
     # toolbox(ceph CLI; 供 [7/8] 就绪检查与调优使用)
+    # ★ 2026-11-27 优化(optimize-single-ceph): 记录 apply 前是否已有 toolbox。
+    #   全新安装时 Deployment 尚不存在, 新 Pod 天然挂载**当前** keyring, 无需再 rollout
+    #   restart(旧代码无条件重启, 单节点上要多等一次 Pod 重建/就绪); 只有上一轮已存在的
+    #   旧 Pod 才需要重启刷新 keyring。
+    _TB_EXISTED=0
+    SSH "${K} -n ${CEPH_NAMESPACE} get deploy rook-ceph-tools >/dev/null 2>&1" && _TB_EXISTED=1
     say "  部署 toolbox(ceph CLI)..."
     # ★ toolbox.yaml 官方 manifest 写的是浮动 tag ceph:v20, 而离线 tar 保存的是精确版本
     #   v20.2.2(节点 containerd 无 v20 这个 tag) → ImagePullBackOff。apply 前统一改写为 CEPH_VERSION。
@@ -1285,21 +1305,25 @@ rm -f "${LOCAL_CR}"
     #   空输出把 grep 管道打成非 0 → set -e 当场中断部署(就是本轮中断的直接原因)。
     #   重启让 Pod 重新挂载新 keyring, 并在此显式确认 ceph -s 可执行 —— 后面 [7/8] 的
     #   "phase=Ready 即 toolbox 可用" 假设才成立。
-    say "  重启 toolbox 并确认 ceph CLI 可用(旧集群 keyring 不会自动刷新)..."
-    SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-tools >/dev/null 2>&1" || true
+    if [ "${_TB_EXISTED}" = "1" ]; then
+        say "  重启已有 toolbox(刷新旧集群 keyring)并确认 ceph CLI 可用..."
+        SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-tools >/dev/null 2>&1" || true
+    else
+        say "  全新 toolbox(无需重启), 等待 ceph CLI 可用..."
+    fi
     _tb_wait="${CEPH_TOOLBOX_WAIT_SECONDS:-300}"
     case "${_tb_wait}" in ''|*[!0-9]*) _tb_wait=300 ;; esac
     _tb_tries=$(( _tb_wait / 5 )); [ "${_tb_tries}" -ge 1 ] || _tb_tries=1
     _TB_OK=0
     for _ti in $(seq 1 "${_tb_tries}"); do
-        if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s >/dev/null 2>&1"; then
+        if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- timeout 10 ceph -s >/dev/null 2>&1"; then
             _TB_OK=1; break
         fi
         sleep 5
     done
     [ "${_TB_OK}" = "1" ] && ok "  toolbox ceph CLI 可用" \
         || warn "  toolbox ${_tb_wait}s 内 ceph -s 仍不可用(集群仍会继续等待; 状态行可能显示 health=unknown) —— 可手工: kubectl -n ${CEPH_NAMESPACE} rollout restart deploy/rook-ceph-tools"
-    unset _TB_OK _ti _tb_wait _tb_tries
+    unset _TB_OK _ti _tb_wait _tb_tries _TB_EXISTED
 
     # ★ 2026-11-20 单节点/osd 故障域: Ceph 启动时 mgr 会用**默认 CRUSH 规则**(replicated_rule,
     #   host 故障域)创建 `.mgr` 池。单节点只有 1 个 host, size>1 时该 PG 永远 undersized/
@@ -1309,20 +1333,20 @@ rm -f "${LOCAL_CR}"
     _ceph_ensure_osd_crush_default() {
         local _rules _rule_id
         _rules="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
-            ceph osd crush rule ls 2>/dev/null) || true )"
+            timeout 15 ceph osd crush rule ls 2>/dev/null) || true )"
         if ! printf '%s\n' "${_rules}" | grep -qx 'cubestack-osd'; then
             SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
-                ceph osd crush rule create-replicated cubestack-osd default osd >/dev/null 2>&1 \
+                timeout 15 ceph osd crush rule create-replicated cubestack-osd default osd >/dev/null 2>&1 \
                 || return 1
         fi
         _rule_id="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
-            ceph osd crush rule dump cubestack-osd -f json 2>/dev/null) || true )"
+            timeout 15 ceph osd crush rule dump cubestack-osd -f json 2>/dev/null) || true )"
         _rule_id="$(printf '%s' "${_rule_id}" | sed -n 's/.*"rule_id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)"
         [ -n "${_rule_id}" ] || return 1
         SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
-            ceph config set global osd_pool_default_crush_rule "${_rule_id}" >/dev/null 2>&1 || return 1
+            timeout 15 ceph config set global osd_pool_default_crush_rule "${_rule_id}" >/dev/null 2>&1 || return 1
         if SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
-            ceph osd pool get .mgr size >/dev/null 2>&1; then
+            timeout 15 ceph osd pool get .mgr size >/dev/null 2>&1; then
             # ⚠ 实机: `osd pool set <pool> crush_rule <数字ID>` 报 "crush rule N does not exist";
             #   用规则名才生效(2026-11-20)。osd_pool_default_crush_rule 仍用数字 ID(config 语义)。
             # ⚠ 已存在的 .mgr 池不会跟随 osd_pool_default_size/min_size(那两项只影响后续新建池),
@@ -1331,11 +1355,11 @@ rm -f "${LOCAL_CR}"
             local _mgr_size_flag=""
             [ "${CEPH_POOL_REPLICAS:-3}" -eq 1 ] && _mgr_size_flag="--yes-i-really-mean-it"
             SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
-                ceph osd pool set .mgr crush_rule cubestack-osd >/dev/null 2>&1 || return 1
+                timeout 15 ceph osd pool set .mgr crush_rule cubestack-osd >/dev/null 2>&1 || return 1
             SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
-                ceph osd pool set .mgr size "${CEPH_POOL_REPLICAS}" ${_mgr_size_flag} >/dev/null 2>&1 || return 1
+                timeout 15 ceph osd pool set .mgr size "${CEPH_POOL_REPLICAS}" ${_mgr_size_flag} >/dev/null 2>&1 || return 1
             SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
-                ceph osd pool set .mgr min_size "${CEPH_POOL_MIN_SIZE}" >/dev/null 2>&1 || return 1
+                timeout 15 ceph osd pool set .mgr min_size "${CEPH_POOL_MIN_SIZE}" >/dev/null 2>&1 || return 1
         fi
         return 0
     }
@@ -1349,7 +1373,7 @@ rm -f "${LOCAL_CR}"
         case "${_max}" in ''|*[!0-9]*) _max=500 ;; esac
         [ "${CEPH_TOPOLOGY_EFFECTIVE:-}" = "single" ] || return 0
         SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
-            ceph config set global mon_max_pg_per_osd "${_max}" >/dev/null 2>&1 || return 1
+            timeout 15 ceph config set global mon_max_pg_per_osd "${_max}" >/dev/null 2>&1 || return 1
         return 0
     }
 
@@ -1373,9 +1397,9 @@ rm -f "${LOCAL_CR}"
             if [ "${_CEPH_TUNED:-0}" = "0" ]; then
                 say "  预调优: mon clock skew 阈值 → 1.5s(在等待前设置, 避免 clock skew 卡 900s)..."
                 SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
-                    ceph config set mon mon_clock_drift_allowed 1.5 >/dev/null 2>&1" || true
+                    timeout 15 ceph config set mon mon_clock_drift_allowed 1.5 >/dev/null 2>&1" || true
                 SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
-                    ceph config set osd osd_memory_target $((CEPH_OSD_MEMORY_TARGET * 1024 * 1024 * 1024)) >/dev/null 2>&1" || true
+                    timeout 15 ceph config set osd osd_memory_target $((CEPH_OSD_MEMORY_TARGET * 1024 * 1024 * 1024)) >/dev/null 2>&1" || true
                 # 池默认副本数跟随 CEPH_POOL_REPLICAS: 2-OSD 小集群需显式设 2, 否则 Ceph 默认
                 # osd_pool_default_size=3 → 恒 HEALTH_WARN(TOO_FEW_OSDS)。min_size 同步。
                 # ★ 只有两项都真正生效才置 _CEPH_TUNED=1: toolbox 在 phase=Ready 瞬间可能尚不可用,
@@ -1383,9 +1407,9 @@ rm -f "${LOCAL_CR}"
                 #   (CodeRabbit 2026-11-11)。未生效则保持 0, 下一轮重试。
                 _pool_tuned=0
                 if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
-                    ceph config set global osd_pool_default_size ${CEPH_POOL_REPLICAS} >/dev/null 2>&1"; then
+                    timeout 15 ceph config set global osd_pool_default_size ${CEPH_POOL_REPLICAS} >/dev/null 2>&1"; then
                     if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
-                        ceph config set global osd_pool_default_min_size ${CEPH_POOL_MIN_SIZE} >/dev/null 2>&1"; then
+                        timeout 15 ceph config set global osd_pool_default_min_size ${CEPH_POOL_MIN_SIZE} >/dev/null 2>&1"; then
                         _pool_tuned=1
                     fi
                 fi
@@ -1401,7 +1425,7 @@ rm -f "${LOCAL_CR}"
                     warn "  池副本/CRUSH 配置(size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE}, fd=${CEPH_EFF_FAILURE_DOMAIN:-host})未生效, 下一轮重试 ..."
                 fi
             fi
-            _CEPH_SUM="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null" || true) )"
+            _CEPH_SUM="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- timeout 15 ceph -s 2>/dev/null" || true) )"
             # ★★ 2026-09-24 事故修复(部署中断的直接原因): 下面每个 grep 都必须带 `|| true`。
             #   本脚本是 `set -euo pipefail`: grep 无匹配 → 管道整体非 0 → `_hl="$(...)"` 这个
             #   **赋值语句**也返回非 0 → set -e 当场终止模块(退出码 1), 日志上就是
@@ -1588,21 +1612,21 @@ for p in d.get("items", []):
     # 预调优(_CEPH_TUNED=1), 这里仅兜底(集群超时未 Ready 等极端场景才重复设置, 幂等无害)。
     if [ "${_CEPH_TUNED:-0}" = "0" ]; then
         say "  设置 OSD osd_memory_target=${CEPH_OSD_MEMORY_TARGET}GiB(经 toolbox)..."
-        SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set osd osd_memory_target $((CEPH_OSD_MEMORY_TARGET * 1024 * 1024 * 1024)) >/dev/null 2>&1" || true
+        SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- timeout 15 ceph config set osd osd_memory_target $((CEPH_OSD_MEMORY_TARGET * 1024 * 1024 * 1024)) >/dev/null 2>&1" || true
         # 放宽 mon 时钟偏差告警阈值(默认 0.05s 太严: NTP 同步后节点偏差仍可能 0.2~0.5s → 恒 HEALTH_WARN;
         # 2026-09-05 实测: 新 VM 时钟初始偏差可达 0.5~1.2s, chrony 收敛前会超 0.5s 阈值 → 恒 WARN。
         # 设 1.5s 消除误报(≤1.5s 对 Ceph 安全: mon 心跳/租约毫秒级, 1.5s 不影响 quorum);
         # 真实偏差由 chrony 持续收敛(见 setup-ntp.sh makestep 1 1 秒级对齐)。)
         say "  设置 mon clock skew 阈值=1.5s(默认 0.05s 过严, VM 初始偏差 0.5~1.2s 实测)..."
-        SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph config set mon mon_clock_drift_allowed 1.5 >/dev/null 2>&1" || true
+        SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- timeout 15 ceph config set mon mon_clock_drift_allowed 1.5 >/dev/null 2>&1" || true
         # ★ 池副本配置同样兜底(CodeRabbit 2026-11-11): 等待循环里 toolbox 若始终不可用,
         #   _CEPH_TUNED 会保持 0。不能带着 Ceph 默认 osd_pool_default_size=3 继续 —— 少 OSD
         #   集群会持续 TOO_FEW_OSDS/降级。两项都成功才完成; 仍失败则硬失败, 不再静默继续。
         _pool_tuned=0
         if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
-            ceph config set global osd_pool_default_size ${CEPH_POOL_REPLICAS} >/dev/null 2>&1"; then
+            timeout 15 ceph config set global osd_pool_default_size ${CEPH_POOL_REPLICAS} >/dev/null 2>&1"; then
             if SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- \
-                ceph config set global osd_pool_default_min_size ${CEPH_POOL_MIN_SIZE} >/dev/null 2>&1"; then
+                timeout 15 ceph config set global osd_pool_default_min_size ${CEPH_POOL_MIN_SIZE} >/dev/null 2>&1"; then
                 _pool_tuned=1
             fi
         fi
@@ -1624,41 +1648,62 @@ for p in d.get("items", []):
     # ★ 清残留 clock skew 告警(2026-09-05 事故): 时间已同步但 ceph 仍报 MON_CLOCK_SKEW ——
     #   chrony 收敛前记录的 skew 被 mon 缓存, timecheck 不会自动重采样刷新(恒定值如 1.233s)。
     #   消除方法: ① 全节点 chronyc makestep 硬对齐 ② 重启 mon deployments 触发 timecheck 重检。
-    #   此前脚本只放宽阈值, 但偏差超过新阈值时仍 WARN; 现追加主动 makestep + 重启 mon, 让 HEALTH_OK 可达。
-    say "  清 mon clock skew 残留告警(chronyc makestep + 重启 mon 触发 timecheck 重检)..."
-    for _hn3 in "${CEPH_NODE_HOSTS[@]}"; do
-        _ip3=""
-        for line in "${NODES[@]:-}"; do
-            [ -z "${line}" ] && continue
-            node_parse "${line}"
-            [ "${NODE_HOSTNAME}" = "${_hn3}" ] && { _ip3="${NODE_IP}"; break; }
-        done
-        [ -n "${_ip3}" ] || continue
-        node_ssh "${_ip3}" "$(ssh_user_for_ip "${_ip3}")" "sudo chronyc makestep >/dev/null 2>&1 || true; sudo chronyc -a makestep >/dev/null 2>&1 || true" || true
-    done
-    # 重启 mon deployments 触发 timecheck 重新采样(Rook 会重建, quorum 短暂重建, 不影响存储)。
-    # ★ 2026-11-20: 只重启**实际存在**的 mon(单节点只有 mon-a; 写死 a/b/c 会对不存在的
-    #   Deployment 报错并空等 rollout status)。
-    _MON_DEPLOYS="$(SSH "${K}" -n "${CEPH_NAMESPACE}" get deploy --no-headers \
-        -o custom-columns=NAME:.metadata.name 2>/dev/null | awk '/^rook-ceph-mon-/' || true)"
-    for _md in ${_MON_DEPLOYS}; do
-        SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/${_md} >/dev/null 2>&1" || true
-    done
-    for _md in ${_MON_DEPLOYS}; do
-        SSH "${K} -n ${CEPH_NAMESPACE} rollout status deploy/${_md} --timeout=120s >/dev/null 2>&1" || true
-    done
-    unset _MON_DEPLOYS _md
-    # 重启后等 timecheck 重检(最多 60s)
-    _SKEW_CLEAR=0
-    for _i2 in $(seq 1 6); do
-        _hl2="$( (SSH "${K} -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null" || true) | grep -oE 'HEALTH_(OK|WARN)' | head -1 || true)"
-        [ "${_hl2}" = "HEALTH_OK" ] && { _SKEW_CLEAR=1; break; }
-        sleep 10
-    done
-    if [ "${_SKEW_CLEAR}" = "1" ]; then
-        ok "  Ceph 集群 HEALTH_OK(clock skew 已清除)"
+    # ★ 2026-11-27 优化(optimize-single-ceph): 旧实现**无条件**重启全部 mon —— 即使 [7/8]
+    #   已经拿到 HEALTH_OK。单节点只有 1 个 mon, 重启 = quorum 完全中断 + 健康重新收敛,
+    #   会让"健康检查"看起来非常慢(明明已经 OK, 又被自己重启成 WARN 再等)。现在:
+    #     · HEALTH_OK → 直接跳过(没有任何 clock skew 告警可清);
+    #     · 仅在 ceph health detail 确实含 MON_CLOCK_SKEW 时才 makestep + 重启 mon;
+    #     · 所有 ceph 查询加 timeout, 防 mon 卡死时 exec 永久阻塞整个等待循环。
+    if [ "${CLUSTER_OK:-0}" = "1" ]; then
+        ok "  Ceph 已 HEALTH_OK → 跳过 clock skew 清理与 mon 重启(避免单节点 quorum 重建)"
     else
-        warn "  clock skew 未完全清除(可手工: 全节点 chronyc makestep 后 kubectl -n rook-ceph rollout restart deploy/rook-ceph-mon-a)"
+        say "  清 mon clock skew 残留告警(chronyc makestep + 必要时重启 mon)..."
+        for _hn3 in "${CEPH_NODE_HOSTS[@]}"; do
+            _ip3=""
+            for line in "${NODES[@]:-}"; do
+                [ -z "${line}" ] && continue
+                node_parse "${line}"
+                [ "${NODE_HOSTNAME}" = "${_hn3}" ] && { _ip3="${NODE_IP}"; break; }
+            done
+            [ -n "${_ip3}" ] || continue
+            node_ssh "${_ip3}" "$(ssh_user_for_ip "${_ip3}")" "sudo chronyc makestep >/dev/null 2>&1 || true; sudo chronyc -a makestep >/dev/null 2>&1 || true" || true
+        done
+        # 只在确有 MON_CLOCK_SKEW 时重启 mon; 其它 WARN(如 PG_DEGRADED/OSD_DOWN)重启 mon
+        # 不会改善, 反而制造一次 quorum 重建 → 跳过。
+        _need_mon_restart=0
+        _hd="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            timeout 15 ceph health detail 2>/dev/null) || true )"
+        printf '%s\n' "${_hd}" | grep -q 'MON_CLOCK_SKEW' && _need_mon_restart=1
+        if [ "${_need_mon_restart}" = "1" ]; then
+            # 重启 mon deployments 触发 timecheck 重新采样(Rook 会重建, quorum 短暂重建, 不影响存储)。
+            # ★ 2026-11-20: 只重启**实际存在**的 mon(单节点只有 mon-a; 写死 a/b/c 会对不存在的
+            #   Deployment 报错并空等 rollout status)。
+            _MON_DEPLOYS="$(SSH "${K}" -n "${CEPH_NAMESPACE}" get deploy --no-headers \
+                -o custom-columns=NAME:.metadata.name 2>/dev/null | awk '/^rook-ceph-mon-/' || true)"
+            for _md in ${_MON_DEPLOYS}; do
+                SSH "${K} -n ${CEPH_NAMESPACE} rollout restart deploy/${_md} >/dev/null 2>&1" || true
+            done
+            for _md in ${_MON_DEPLOYS}; do
+                SSH "${K} -n ${CEPH_NAMESPACE} rollout status deploy/${_md} --timeout=120s >/dev/null 2>&1" || true
+            done
+            unset _MON_DEPLOYS _md
+            # 重启后等 timecheck 重检(最多 60s)
+            _SKEW_CLEAR=0
+            for _i2 in $(seq 1 6); do
+                _hl2="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+                    timeout 15 ceph -s 2>/dev/null || true) | grep -oE 'HEALTH_(OK|WARN)' | head -1 || true)"
+                [ "${_hl2}" = "HEALTH_OK" ] && { _SKEW_CLEAR=1; break; }
+                sleep 10
+            done
+            if [ "${_SKEW_CLEAR}" = "1" ]; then
+                ok "  Ceph 集群 HEALTH_OK(clock skew 已清除)"
+            else
+                warn "  clock skew 未完全清除(可手工: 全节点 chronyc makestep 后 kubectl -n rook-ceph rollout restart deploy/rook-ceph-mon-a)"
+            fi
+        else
+            warn "  Ceph 未 HEALTH_OK 但 health detail 无 MON_CLOCK_SKEW → 跳过 mon 重启(重启不会改善当前告警)"
+        fi
+        unset _need_mon_restart _hd _i2 _hl2 _SKEW_CLEAR 2>/dev/null || true
     fi
 fi   # _CEPH_SKIP_CLUSTER=1 → 跳过集群内 CephCluster 创建
 
@@ -1681,21 +1726,29 @@ _patch_ceph_daemon_placement
 # 存量 daemon 模板 patch 会触发滚动(mon/osd/mgr); 等 Ceph 恢复 HEALTH_OK 再继续, 避免
 # ceph_csi/registry 在恢复期创建卷。全新安装时模板已带 toleration → 上面跳过 → 无额外等待。
 if [ "${CEPH_MODE:-internal}" = "internal" ] && [ "${_CEPH_SKIP_CLUSTER:-0}" = "0" ]; then
-    say "等待 Ceph daemon 滚动后恢复 HEALTH_OK(最长 600s)..."
-    _HL_OK=0
-    for _i in $(seq 1 60); do
-        _hl="$(SSH "${K}" -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- ceph -s 2>/dev/null || true)"
-        _hl="$(printf '%s\n' "${_hl}" | grep -oE 'HEALTH_(OK|WARN|ERR)' | head -1 || true)"
-        [ "${_hl}" = "HEALTH_OK" ] && { _HL_OK=1; break; }
-        sleep 10
-    done
-    if [ "${_HL_OK}" = "1" ]; then
-        ok "  Ceph daemon 滚动后 HEALTH_OK"
+    # ★ 2026-11-27 优化(optimize-single-ceph): 只有真的 patch 了 daemon 模板(会触发
+    #   mon/mgr/osd 滚动)才需要等健康恢复; 全新安装模板已带 toleration → 无滚动 →
+    #   跳过这段等待(单节点上它是又一圈"健康检查"空转)。
+    if [ "${_CEPH_PLACEMENT_PATCHED:-0}" = "1" ]; then
+        say "等待 Ceph daemon 滚动后恢复 HEALTH_OK(最长 600s)..."
+        _HL_OK=0
+        for _i in $(seq 1 60); do
+            _hl="$(SSH "${K}" -n ${CEPH_NAMESPACE} exec deploy/rook-ceph-tools -- timeout 15 ceph -s 2>/dev/null || true)"
+            _hl="$(printf '%s\n' "${_hl}" | grep -oE 'HEALTH_(OK|WARN|ERR)' | head -1 || true)"
+            [ "${_hl}" = "HEALTH_OK" ] && { _HL_OK=1; break; }
+            sleep 10
+        done
+        if [ "${_HL_OK}" = "1" ]; then
+            ok "  Ceph daemon 滚动后 HEALTH_OK"
+        else
+            warn "  Ceph daemon 滚动后未 HEALTH_OK(继续; 部署后用 ceph -s 复查)"
+        fi
+        unset _HL_OK _hl _i
     else
-        warn "  Ceph daemon 滚动后未 HEALTH_OK(继续; 部署后用 ceph -s 复查)"
+        say "  Ceph daemon placement 无需变更 → 跳过滚动后健康等待"
     fi
-    unset _HL_OK _hl _i
 fi
+unset _CEPH_PLACEMENT_PATCHED 2>/dev/null || true
 stop_restore_known_consumers
 
 # ---------------- 8) 汇总 ----------------
