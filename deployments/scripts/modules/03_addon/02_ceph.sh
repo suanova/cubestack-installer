@@ -374,20 +374,44 @@ if [ "${#_NO_DISK_NODES[@]}" -gt 0 ]; then
     warn "存储节点无可用裸盘: ${_NO_DISK_NODES[*]}(不会创建 OSD)"
     warn "  若并非预期: 检查 NODES 的 hostname/IP 映射, 确认数据盘已挂到存储节点(VM_DATA_DISKS>0)"
 fi
+# 统计可用 OSD 盘总数(自动副本参数与容量校验共用)
+_OSD_TOTAL=0
+for _hn in "${CEPH_NODE_HOSTS[@]}"; do
+    [ -n "${NODE_DISKS[${_hn}]:-}" ] || continue
+    _nd="$(printf '%s' "${NODE_DISKS[${_hn}]}" | tr ',' '\n' | grep -c . || true)"
+    _OSD_TOTAL=$((_OSD_TOTAL + ${_nd:-0}))
+done
+# ★ 2026-11-27 自动池参数(用户目标: 尽量不手配副本):
+#   - single: 按**可用 OSD 盘数**取 size=min(3,盘数), min_size=max(1,size-1), fd=osd
+#     (3 盘→3/2, 2 盘→2/1, 1 盘→1/1);
+#   - multi : 按**有盘存储主机数**取 size=min(3,主机数), min_size=max(1,size-1), fd=host;
+#   - 用户显式 CEPH_POOL_REPLICAS/MIN_SIZE/FAILURE_DOMAIN 的项保持不变。
+_auto_topo="${CEPH_TOPOLOGY_EFFECTIVE:-multi}"
+if [ "${CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd" ]; then
+    _auto_cap="${_OSD_TOTAL}"
+else
+    _auto_cap="${_DISK_NODES}"
+fi
+if [ "${CEPH_EXPLICIT_REPLICAS:-0}" != "1" ] || [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" != "1" ] \
+   || [ "${CEPH_EXPLICIT_FAILURE_DOMAIN:-0}" != "1" ]; then
+    if ceph_auto_pool_profile "${_auto_topo}" "${_auto_cap}"; then
+        CEPH_POOL_REPLICAS="${CEPH_EFF_POOL_REPLICAS}"
+        CEPH_POOL_MIN_SIZE="${CEPH_EFF_POOL_MIN_SIZE}"
+        export CEPH_POOL_REPLICAS CEPH_POOL_MIN_SIZE
+        say "  自动池参数: size=${CEPH_POOL_REPLICAS}/min_size=${CEPH_POOL_MIN_SIZE} 故障域=${CEPH_EFF_FAILURE_DOMAIN:-?}(依据 ${_auto_cap} 个$([ "${_auto_topo}" = "single" ] && echo "OSD 盘" || echo "有盘主机"); 显式设置项优先)"
+    else
+        err "  自动池参数计算失败(拓扑=${_auto_topo}, 可用资源=${_auto_cap}); 检查 CEPH_POOL_REPLICAS/MIN_SIZE/FAILURE_DOMAIN"
+        err "  处置: 显式设置合法的 CEPH_POOL_REPLICAS/CEPH_POOL_MIN_SIZE, 或给存储节点增加数据盘"
+        exit 1
+    fi
+fi
 if [ "${CEPH_EFF_FAILURE_DOMAIN:-host}" = "osd" ]; then
     # 单节点/failureDomain=osd: 副本落在**本机多块盘**上 → 校验总磁盘数而非节点数。
-    _OSD_TOTAL=0
-    for _hn in "${CEPH_NODE_HOSTS[@]}"; do
-        [ -n "${NODE_DISKS[${_hn}]:-}" ] || continue
-        _nd="$(printf '%s' "${NODE_DISKS[${_hn}]}" | tr ',' '\n' | grep -c . || true)"
-        _OSD_TOTAL=$((_OSD_TOTAL + ${_nd:-0}))
-    done
     if [ "${_OSD_TOTAL}" -lt "${CEPH_POOL_REPLICAS}" ]; then
         err "可用 OSD 盘 ${_OSD_TOTAL} < CEPH_POOL_REPLICAS ${CEPH_POOL_REPLICAS}(failureDomain=osd): 无法创建足够 OSD"
         err "  处置: ① 给存储节点挂更多数据盘; ② 降低 CEPH_POOL_REPLICAS; ③ 改用 CEPH_MODE=external"
         exit 1
     fi
-    unset _OSD_TOTAL _nd
 elif [ "${_DISK_NODES}" -lt "${CEPH_POOL_REPLICAS}" ]; then
     err "可用 OSD 节点 ${_DISK_NODES} < CEPH_POOL_REPLICAS ${CEPH_POOL_REPLICAS}: 无法创建足够 OSD(HEALTH_OK 不可达)"
     err "  处置(三选一):"
@@ -396,7 +420,7 @@ elif [ "${_DISK_NODES}" -lt "${CEPH_POOL_REPLICAS}" ]; then
     err "    ③ 明确接受少副本: cluster.conf 设 CEPH_POOL_REPLICAS=${_DISK_NODES} CEPH_POOL_MIN_SIZE=1"
     exit 1
 fi
-unset _DISK_NODES _NO_DISK_NODES _hn
+unset _DISK_NODES _NO_DISK_NODES _hn _OSD_TOTAL _nd _auto_topo _auto_cap
 
 # ---------------- 2.5) 存储节点磁盘压力/陈旧 local-path 数据预检 ----------------
 # 2026-11-11 实机根因: 节点从 worker 复用为 master 后, /opt/local-path-provisioner 下残留
@@ -1382,6 +1406,7 @@ rm -f "${LOCAL_CR}"
     # 每 30s 打印一行状态到终端(= 完整部署日志 /tmp/cubestack-cluster-install.log), 便于观察收敛进度。
     say "[7/8] 等待 Ceph 集群就绪(最长 900s, ceph -s HEALTH_OK)..."
     CLUSTER_OK=0
+    CLUSTER_EXPECTED_WARN=0   # 单盘无冗余(size=1)时 POOL_NO_REDUNDANCY 属预期, 视为可用
     _CEPH_TUNED=0   # 阈值预调优标记(第一次 phase=Ready 时设, 避免 clock skew 卡等待)
     _CEPH_OSD_RETRIED=0   # 0-OSD 自愈一次性标记(见下方 2026-10-14 修复)
     _OSD_SHORT_STREAK=0   # OSD 不足连续观测次数(仅在 OSD 数不再增加时累加)
@@ -1445,9 +1470,29 @@ rm -f "${LOCAL_CR}"
             # 随后因 "OSD count 2 < osd_pool_default_size 3" 变 HEALTH_WARN, 旧逻辑提前放行,
             # 后面的 clock-skew/daemon 滚动等待再空等 600s(2026-11-11 实机)。
             _pool_n="${CEPH_POOL_REPLICAS:-3}"
+            # ★ 2026-11-27(单盘场景): size=1 时 Ceph **必然**报
+            #   HEALTH_WARN: POOL_NO_REDUNDANCY (N pool(s) have no replicas configured) ——
+            #   单盘物理上无法有冗余, 该告警不会自行消失。旧逻辑会白等 900s 后降级继续。
+            #   这里在已调优且没有其他告警时, 把"仅 POOL_NO_REDUNDANCY"视为预期可用。
+            _expected_warn=0
+            if [ "${_hl}" = "HEALTH_WARN" ] && [ "${_CEPH_TUNED:-0}" = "1" ] \
+               && [ "${_pool_n}" -eq 1 ] 2>/dev/null; then
+                _health_detail="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+                    timeout 15 ceph health detail 2>/dev/null) || true )"
+                if printf '%s' "${_health_detail}" | grep -q 'POOL_NO_REDUNDANCY\|no replicas configured'; then
+                    _other_warn="$(printf '%s\n' "${_health_detail}" \
+                        | grep -E '^\[(WRN|ERR)\]' | grep -v 'POOL_NO_REDUNDANCY' || true)"
+                    [ -z "${_other_warn}" ] && _expected_warn=1
+                fi
+            fi
             if [ "${_hl}" = "HEALTH_OK" ] && [ "${_osd_n:-0}" -ge "${_pool_n}" ] 2>/dev/null; then
                 ok "  Ceph 集群 HEALTH_OK(${_osd_n} OSD, pool size ${_pool_n})"
                 CLUSTER_OK=1
+                break
+            elif [ "${_expected_warn}" = "1" ]; then
+                warn "  Ceph 可用: HEALTH_WARN(POOL_NO_REDUNDANCY) 属单盘无冗余拓扑预期(不再等待 900s)"
+                CLUSTER_OK=1
+                CLUSTER_EXPECTED_WARN=1
                 break
             fi
             # ★ 2026-11-11(CodeRabbit): OSD 是逐个起来的 —— 新建 3-OSD 集群在第一个 OSD
@@ -1549,7 +1594,11 @@ for p in d.get("items", []):
         sleep 10
     done
     if [ "${CLUSTER_OK}" = "1" ]; then
-        ok "  Ceph 集群 HEALTH_OK"
+        if [ "${CLUSTER_EXPECTED_WARN:-0}" = "1" ]; then
+            warn "  Ceph 集群可用(HEALTH_WARN: POOL_NO_REDUNDANCY, 单盘无冗余属预期)"
+        else
+            ok "  Ceph 集群 HEALTH_OK"
+        fi
     else
         # 区分失败性质: Ready 但 HEALTH_WARN(如个别 OSD down)→ 可用, 警告继续;
         # 未 Ready(Progressing/Error)→ 硬失败 —— 否则 ceph_csi 模块必然报"未 Ready"且信息不如这里明确
@@ -1655,7 +1704,11 @@ for p in d.get("items", []):
     #     · 仅在 ceph health detail 确实含 MON_CLOCK_SKEW 时才 makestep + 重启 mon;
     #     · 所有 ceph 查询加 timeout, 防 mon 卡死时 exec 永久阻塞整个等待循环。
     if [ "${CLUSTER_OK:-0}" = "1" ]; then
-        ok "  Ceph 已 HEALTH_OK → 跳过 clock skew 清理与 mon 重启(避免单节点 quorum 重建)"
+        if [ "${CLUSTER_EXPECTED_WARN:-0}" = "1" ]; then
+            ok "  Ceph 已可用(仅 POOL_NO_REDUNDANCY 预期告警) → 跳过 clock skew 清理与 mon 重启"
+        else
+            ok "  Ceph 已 HEALTH_OK → 跳过 clock skew 清理与 mon 重启(避免单节点 quorum 重建)"
+        fi
     else
         say "  清 mon clock skew 残留告警(chronyc makestep + 必要时重启 mon)..."
         for _hn3 in "${CEPH_NODE_HOSTS[@]}"; do

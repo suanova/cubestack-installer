@@ -77,7 +77,13 @@ if grep -q 'HEALTH_ERR' <<<"${CEPH_S}"; then
     exit 1
 fi
 echo "${CEPH_S}" | grep -E 'HEALTH_(OK|WARN)|osd:' | head -3 | sed 's/^/    /'
-grep -q 'HEALTH_OK' <<<"${CEPH_S}" && ok "    ceph -s HEALTH_OK ✓" || warn "    ceph -s 当前 ${CEPH_S##*HEALTH_} (HEALTH_WARN 可接受, 若有 ERR 会失败)"
+if grep -q 'HEALTH_OK' <<<"${CEPH_S}"; then
+    ok "    ceph -s HEALTH_OK ✓"
+elif grep -q 'POOL_NO_REDUNDANCY' <<<"${CEPH_S}"; then
+    warn "    ceph -s HEALTH_WARN(POOL_NO_REDUNDANCY): 单盘无冗余属预期(size=1), 继续验证"
+else
+    warn "    ceph -s 当前 ${CEPH_S##*HEALTH_} (HEALTH_WARN 可接受, 若有 ERR 会失败)"
+fi
 
 say "  ③ 检查 StorageClass ceph-block..."
 SC_OK="$( (SSH "${K} get sc ceph-block --no-headers 2>/dev/null" || true) )"

@@ -188,6 +188,52 @@ if [ "${_CEPH_EXTERNAL}" = "0" ]; then
         exit 1
     fi
     ceph_apply_effective_spec "${_csi_topo}" || exit 1
+    # ★ 2026-11-27 自动副本参数对齐: 02_ceph 会按单节点可用盘数/多节点有盘主机数
+    #   自动选择 size/min_size 并写入集群配置。本模块在独立进程运行, 默认 profile 仍是
+    #   单节点 1/1; 若不显式指定副本, 这里读取**集群实际生效的** osd_pool_default_size/
+    #   min_size, 保证 CephBlockPool/StorageClass 与集群一致(用户显式设置的项优先)。
+    if [ "${CEPH_EXPLICIT_REPLICAS:-0}" != "1" ] || [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" != "1" ]; then
+        _cs_size="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            timeout 15 ceph config get osd osd_pool_default_size 2>/dev/null) || true )"
+        _cs_min="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            timeout 15 ceph config get osd osd_pool_default_min_size 2>/dev/null) || true )"
+        _cs_size="$(printf '%s' "${_cs_size}" | tr -d '[:space:]')"
+        _cs_min="$(printf '%s' "${_cs_min}" | tr -d '[:space:]')"
+        case "${_cs_size}" in ''|*[!0-9]*) _cs_size="" ;; esac
+        case "${_cs_min}" in ''|*[!0-9]*) _cs_min="" ;; esac
+        if [ -n "${_cs_size}" ]; then
+            [ "${CEPH_EXPLICIT_REPLICAS:-0}" = "1" ] || CEPH_EFF_POOL_REPLICAS="${_cs_size}"
+        fi
+        if [ -n "${_cs_min}" ]; then
+            [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" = "1" ] || CEPH_EFF_POOL_MIN_SIZE="${_cs_min}"
+        fi
+        if [ -z "${_cs_size}" ] || [ -z "${_cs_min}" ]; then
+            # 读取失败时退回"实测 OSD 数/有盘主机数"的自动 profile
+            _cs_osd_n="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+                timeout 15 ceph osd ls 2>/dev/null) || true )"
+            _cs_osd_n="$(printf '%s\n' "${_cs_osd_n}" | grep -c . || true)"
+            if [ "${_cs_osd_n:-0}" -ge 1 ] 2>/dev/null; then
+                if [ "${_csi_topo}" = "single" ]; then _cs_cap="${_cs_osd_n}"; else _cs_cap="${_csi_host_count}"; fi
+                ceph_auto_pool_profile "${_csi_topo}" "${_cs_cap}" || true
+            fi
+        fi
+        case "${CEPH_EFF_POOL_REPLICAS:-}" in ''|*[!0-9]*) : ;; *)
+            case "${CEPH_EFF_POOL_MIN_SIZE:-}" in ''|*[!0-9]*) : ;; *)
+                [ "${CEPH_EFF_POOL_MIN_SIZE}" -le "${CEPH_EFF_POOL_REPLICAS}" ] \
+                    || { err "Ceph 自动副本参数非法: size=${CEPH_EFF_POOL_REPLICAS} min_size=${CEPH_EFF_POOL_MIN_SIZE}"; exit 1; }
+            esac
+        esac
+        # requireSafeReplicaSize 跟随最终 size(单节点 size1/2 → false; 3 副本 → true)
+        case "${CEPH_EFF_POOL_REPLICAS:-}" in ''|*[!0-9]*) : ;; *)
+            if [ "${CEPH_EFF_POOL_REPLICAS}" -ge 3 ]; then
+                CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE=true
+            else
+                CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE=false
+            fi
+            export CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE ;;
+        esac
+        unset _cs_size _cs_min _cs_osd_n _cs_cap
+    fi
     CEPH_POOL_REPLICAS="${CEPH_EFF_POOL_REPLICAS}"
     CEPH_POOL_MIN_SIZE="${CEPH_EFF_POOL_MIN_SIZE}"
     # ceph-expose-external.sh 作为子进程消费(单节点 size=1 必须传下去, 否则外部专用池回退 3)

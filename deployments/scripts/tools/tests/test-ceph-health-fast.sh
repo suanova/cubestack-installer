@@ -36,7 +36,13 @@ chk_contains "跳过提示" '跳过 clock skew 清理与 mon 重启'
 chk_contains "仅在确有 MON_CLOCK_SKEW 时重启" "MON_CLOCK_SKEW"
 chk_contains "clock skew 检测分支" 'if [ "${_need_mon_restart}" = "1" ]; then'
 
-echo "== ③ ceph 查询必须有 timeout(防 mon 卡死阻塞等待循环) =="
+echo "== ③ 单盘 size=1 的 POOL_NO_REDUNDANCY 预期告警 =="
+chk_contains "识别 POOL_NO_REDUNDANCY" "POOL_NO_REDUNDANCY"
+chk_contains "预期告警标记" "CLUSTER_EXPECTED_WARN=1"
+chk_contains "仅无其它 WRN 才放行" '_other_warn'
+chk_contains "预期告警提示" '单盘无冗余属预期'
+
+echo "== ④ ceph 查询必须有 timeout(防 mon 卡死阻塞等待循环) =="
 missing="$(python3 - "$MOD" <<'PY'
 import re, sys
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
@@ -62,18 +68,18 @@ PY
 )"
 if [ -z "${missing}" ]; then echo "  ok  所有 ceph exec 查询均带 timeout"; else echo "  FAIL 缺少 timeout 的行: ${missing}"; fail=1; fi
 
-echo "== ④ CephCluster CR 提前下发关键配置 =="
+echo "== ⑤ CephCluster CR 提前下发关键配置 =="
 chk_contains "CR 含 cephConfig" 'echo "  cephConfig:"'
 chk_contains "提前下发 mon clock 阈值" 'mon_clock_drift_allowed'
 chk_contains "提前下发 pool size" 'osd_pool_default_size'
 chk_contains "单节点 PG 上限" 'mon_max_pg_per_osd'
 
-echo "== ⑤ daemon 滚动等待仅在 placement patch 后 =="
+echo "== ⑥ daemon 滚动等待仅在 placement patch 后 =="
 chk_contains "记录 placement 是否 patch" '_CEPH_PLACEMENT_PATCHED=1'
 chk_contains "条件等待" 'if [ "${_CEPH_PLACEMENT_PATCHED:-0}" = "1" ]; then'
 chk_contains "无变更跳过提示" '无需变更 → 跳过滚动后健康等待'
 
-echo "== ⑥ 旧实现反证(仅在指定 CEPH_MODULE 时) =="
+echo "== ⑦ 旧实现反证(仅在指定 CEPH_MODULE 时) =="
 if [ -n "${CEPH_MODULE:-}" ]; then
     # 旧实现应至少缺少上述某项; 本测试已按新实现断言, 旧文件必然失败。
     echo "  (当前 MOD=${MOD})"

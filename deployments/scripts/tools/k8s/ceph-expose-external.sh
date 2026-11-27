@@ -58,6 +58,35 @@ fi
 init_remote_kubectl || { err "init_remote_kubectl 失败"; exit 1; }
 
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
+# ★ 2026-11-27 自动副本参数对齐(standalone apply): 独立执行时不知道 02_ceph 按盘数/主机数
+#   选出的 size/min_size。若用户未显式设置, 读取运行中集群的实际 osd_pool_default_*,
+#   避免单节点用默认 1/1 或多节点用 3/2 与集群不一致。
+if [ "${CEPH_MODE:-internal}" = "internal" ] \
+   && { [ "${CEPH_EXPLICIT_REPLICAS:-0}" != "1" ] || [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" != "1" ]; }; then
+    if SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster rook-ceph >/dev/null 2>&1; then
+        _ex_size="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            timeout 15 ceph config get osd osd_pool_default_size 2>/dev/null) || true )"
+        _ex_min="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            timeout 15 ceph config get osd osd_pool_default_min_size 2>/dev/null) || true )"
+        _ex_size="$(printf '%s' "${_ex_size}" | tr -d '[:space:]')"
+        _ex_min="$(printf '%s' "${_ex_min}" | tr -d '[:space:]')"
+        case "${_ex_size}" in ''|*[!0-9]*) : ;; *)
+            [ "${CEPH_EXPLICIT_REPLICAS:-0}" = "1" ] || CEPH_EFF_POOL_REPLICAS="${_ex_size}" ;;
+        esac
+        case "${_ex_min}" in ''|*[!0-9]*) : ;; *)
+            [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" = "1" ] || CEPH_EFF_POOL_MIN_SIZE="${_ex_min}" ;;
+        esac
+        case "${CEPH_EFF_POOL_REPLICAS:-}" in ''|*[!0-9]*) : ;; *)
+            if [ "${CEPH_EFF_POOL_REPLICAS}" -ge 3 ]; then
+                CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE=true
+            else
+                CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE=false
+            fi ;;
+        esac
+        export CEPH_EFF_POOL_REPLICAS CEPH_EFF_POOL_MIN_SIZE CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE
+        unset _ex_size _ex_min
+    fi
+fi
 EXPORT_CONF="${CEPH_EXTERNAL_CONF:-${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf}"
 ROOK_DIR="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}"
 # ---- 外部专用资源/用户(2026-09-07 完整预定义; 对齐"外部 ceph-csi-operator 连接所需全部信息") ----
