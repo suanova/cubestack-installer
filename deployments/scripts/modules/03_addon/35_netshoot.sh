@@ -86,7 +86,7 @@ SAVE_DIR="${NETSHOOT_SAVE_DIR:-${REPO_ROOT}/deployments/offline-files/netshoot}"
 TAG="${NETSHOOT_RDMA_VERSION:-2.1-latest}"       # 自建镜像 tag(开发线 channel; release/base env 会覆盖)
 BASE_TAR="${NETSHOOT_BASE_TAR:-${REPO_ROOT}/deployments/offline-files/os/netshoot.tar}"   # 回退用的原始 netshoot
 RDMA_RES="${NETSHOOT_RDMA_RESOURCE:-${RDMA_IB_RESOURCE:-rdma/ib_shared_devices}}"        # 与 10_rdma by-link 的 IB 池一致
-# push 用直连端点(与 10_rdma/gpu_operator 一致): nodeport→master:REGISTRY_NODEPORT / metallb→VIP:5000
+# push 用直连端点(与 10_rdma/metax_gpu 一致): nodeport→master:REGISTRY_NODEPORT / metallb→VIP:5000
 REG_DIRECT="${REGISTRY_DIRECT:-${REGISTRY_IP:-$(first_master_ip)}:${REGISTRY_PORT:-5000}}"
 REG_BASE="${REGISTRY_DOMAIN:-${REGISTRY_IP}}:${REGISTRY_PORT:-5000}"   # 节点按域名拉取
 PUSH_REPO="${REG_DIRECT}/netshoot"

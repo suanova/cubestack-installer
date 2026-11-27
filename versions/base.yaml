@@ -87,7 +87,7 @@ checksums:
 materials:
 # version 是厂商物料版本(0.15.3); -amd64 只用于镜像 tag, 不要加到物料版本。
 - key: metax:gpu-k8s-package
-  module: gpu_operator
+  module: metax_gpu
   version: ${METAX_VERSION}
   file: metax-gpu-k8s-package.${METAX_VERSION}.tar.gz
   dest: offline-files/metax-gpu
@@ -98,7 +98,7 @@ materials:
     portal: https://metax-tech.com
     account_required: true
 - key: metax:k8s-images
-  module: gpu_operator
+  module: metax_gpu
   version: ${METAX_VERSION}
   file: metax-k8s-images.${METAX_VERSION}.run
   dest: offline-files/metax-gpu
@@ -109,7 +109,7 @@ materials:
     portal: https://metax-tech.com
     account_required: true
 - key: metax:k8s-driver-image
-  module: gpu_operator
+  module: metax_gpu
   version: ${METAX_DRIVER_VERSION}
   file: metax-k8s-driver-image.${METAX_DRIVER_VERSION}.run
   dest: offline-files/metax-gpu

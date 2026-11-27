@@ -17,7 +17,7 @@ env:
   METAX_VERSION: "0.15.3"
 materials:
   - key: metax:k8s-images
-    module: gpu_operator
+    module: metax_gpu
     version: ${METAX_VERSION}
     file: metax-k8s-images.${METAX_VERSION}.run
     dest: offline-files/metax-gpu

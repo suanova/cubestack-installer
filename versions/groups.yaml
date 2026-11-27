@@ -33,7 +33,7 @@ groups:
     kind: image
   metax-gpu-operator:
     description: MetaX GPU Operator images
-    consumer: gpu_operator
+    consumer: metax_gpu
     kind: image
   k8s:
     description: kubespray tree and k8s binaries
@@ -41,5 +41,5 @@ groups:
     kind: file
   metax:
     description: MetaX vendor materials
-    consumer: gpu_operator
+    consumer: metax_gpu
     kind: material

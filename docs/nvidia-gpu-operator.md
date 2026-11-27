@@ -1,6 +1,6 @@
 # NVIDIA GPU Operator 部署指南(在线 / 离线)
 
-> 模块: `modules/03_addon/08_nvidia_gpu_operator.sh` + `28_verify_nvidia_gpu.sh`(2026-10-14 新增)
+> 模块: `modules/03_addon/08_nvidia_gpu.sh` + `28_verify_nvidia_gpu.sh`(2026-10-14 新增)
 > 版本基线: GPU Operator **v26.7.2**(chart vendored:`deployments/cubestack-addon/nvidia-gpu-operator/`)、
 > 驱动分支 **595**、内核 **5.15.0-186-generic**(与金标镜像一致)。
 > 支持面: **Ubuntu 22.04 x86_64**(预编译驱动限制; 其它 OS 会被告警拦截, 见"驱动策略")。
@@ -39,8 +39,8 @@
 ls <root>/<version>/offline-files/nvidia-gpu-operator/*.tar
 
 # ③ 离线环境: 开启开关并部署
-sudo ./deploy-cluster.sh --enable nvidia_gpu_operator    # 写入 cluster.conf(下次全量生效)
-sudo ./deploy-cluster.sh --steps nvidia_gpu_operator     # 或立即单跑
+sudo ./deploy-cluster.sh --enable nvidia_gpu    # 启用并立即部署(同时写 cluster.conf)
+sudo ./deploy-cluster.sh --steps nvidia_gpu     # 或立即单跑
 
 # ④ 端到端验证
 sudo ./deploy-cluster.sh --steps verify_nvidia_gpu
@@ -57,7 +57,7 @@ sudo ./deploy-cluster.sh --steps verify_nvidia_gpu
 #   镜像按 chart 定义从 nvcr.io 直拉(不推集群 registry);
 #   若集群只可达 Harbor 镜像(CI 已同步 mirrors/nvcr.io/**):
 #     NVIDIA_GPU_OPERATOR_ONLINE_IMAGE_BASE="harbor.isuanova.com/mirrors"
-sudo ./deploy-cluster.sh --steps nvidia_gpu_operator
+sudo ./deploy-cluster.sh --steps nvidia_gpu
 ```
 
 chart 刷新: `NVIDIA_GPU_OPERATOR_CHART_SYNC=auto`(默认)探测 nvcr.io 可达 → 比对 digest 刷新
@@ -144,5 +144,5 @@ vendored 副本; 离线机自动纯本地。升级手册见 chart 目录 `CUBEST
 
 1. `CUBSTACK.md` 拉新 chart + 更新 digest 边车 + 改 `NVIDIA_GPU_OPERATOR_VERSION`;
 2. 在 container-image-mirror 更新对应 nvcr 镜像 tag/digest; 重新物化版本树;
-3. `--steps nvidia_gpu_operator` 重跑(REPEAT:0 → 先 `--fresh` 或删 `nvidia_gpu_operator` 状态);
+3. `--steps nvidia_gpu` 重跑(REPEAT:0 → 先 `--fresh` 或删 `nvidia_gpu` 状态);
 4. `--steps verify_nvidia_gpu` 复核。

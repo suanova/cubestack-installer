@@ -19,7 +19,7 @@
 # ⚠ 生效时机: 属主在**容器创建时**写入 —— 已运行的容器保持旧属主, 需重建工作负载
 #   (kubectl rollout restart / 重删 Pod)才生效; 本工具会打印该提示。
 # ⚠ 厂商安装器共存: mx-ctk-installer 等守护进程可能重写 config.toml(实机见 mtime 被改) ——
-#   每次部署(gpu_operator 模块)会重跑本工具兜底; 怀疑被改时手工重跑本工具即可。
+#   每次部署(metax_gpu 模块)会重跑本工具兜底; 怀疑被改时手工重跑本工具即可。
 # 用法:
 #   sudo ./ensure-containerd-device-ownership.sh                  # NODES 中 GPU 节点
 #   sudo ./ensure-containerd-device-ownership.sh 192.0.2.13 192.0.2.48   # 指定 IP

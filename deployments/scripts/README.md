@@ -105,7 +105,8 @@ deployments/scripts/
 │       ├── 03_ceph_csi.sh     #    Ceph CSI: rbd-pool+StorageClass ceph-block, 可选 CephFS/RGW(P1-7, CEPH_CSI_ENABLED)
 │       ├── 04_local_path.sh   #    local-path-provisioner 就绪检查(可选, LOCAL_PATH_ENABLED)
 │       ├── 05_k8s_registry.sh #    集群内内置 registry addon(REGISTRY_ENABLED; 后端可用 ceph-block 替代 local-path)
-│       ├── 06_gpu_operator.sh #    沐曦 GPU Operator(P1-5, GPU_OPERATOR_ENABLED)
+│       ├── 06_metax_gpu.sh    #    沐曦 GPU Operator(P1-5, METAX_GPU_ENABLED; 旧名 GPU_OPERATOR_ENABLED 兼容)
+│       ├── 08_nvidia_gpu.sh   #    NVIDIA GPU Operator(NVIDIA_GPU_OPERATOR_ENABLED)
 │       ├── 11_keycloak.sh     #    Keycloak 统一认证(P2-1, KEYCLOAK_ENABLED)
 │       ├── 12_kueue.sh        #    Kueue 队列治理(P2-2 DEV-29, KUEUE_ENABLED)
 │       ├── 13_kubevirt.sh     #    KubeVirt 虚拟机能力(P2-3 DEV-35, KUBEVIRT_ENABLED)
@@ -248,14 +249,14 @@ sudo ./scripts/deploy-cluster.sh --steps vm,k8s        # 只运行指定模块(�
 sudo ./scripts/deploy-cluster.sh --skip hosts          # 跳过某模块
 sudo ./scripts/deploy-cluster.sh --skip net --with-k8s  # 全裸金属:跳过网络模块, 部署 k8s
 sudo ./scripts/deploy-cluster.sh --phase k8s           # 仅运行 k8s 阶段
-sudo ./scripts/deploy-cluster.sh --enable gpu_operator,ceph  # 启用默认关闭模块
+sudo ./scripts/deploy-cluster.sh --enable metax_gpu,ceph  # 启用并立即部署(同时写配置)
 sudo ./scripts/deploy-cluster.sh --only <host>         # 仅处理指定节点(可多次)
 sudo ./scripts/deploy-cluster.sh --list-steps          # 查看全部模块(自动发现)
 sudo ./scripts/deploy-cluster.sh --list                # 仅打印集群规划(只读)
 sudo ./scripts/deploy-cluster.sh --fresh               # 清断点续跑状态重跑
 ```
 
-流程按 `modules/*.sh` 文件序号自动发现并执行;每模块完成自动保存状态(断点续跑)。默认(无参数)= `--with-cubestack`:宿主机网络(按需) → SSH密钥 → SSH免密(全部节点)→ worker离线装包 → /etc/hosts(可选) → inventory → **NTP 时间同步(在 k8s 前)** → kubespray 部署 → 基座 + 启用的 operator。**虚拟机创建由 `tools/vm/create-vms.sh` 独立执行, 主程序不判断节点类型**。gpu_operator 默认启用;其余 operator 默认关,按需 `--enable`/`--steps`/`--phase` 或 cluster.conf 开关启用。
+流程按 `modules/*.sh` 文件序号自动发现并执行;每模块完成自动保存状态(断点续跑)。默认(无参数)= `--with-cubestack`:宿主机网络(按需) → SSH密钥 → SSH免密(全部节点)→ worker离线装包 → /etc/hosts(可选) → inventory → **NTP 时间同步(在 k8s 前)** → kubespray 部署 → 基座 + 启用的 operator。**虚拟机创建由 `tools/vm/create-vms.sh` 独立执行, 主程序不判断节点类型**。metax_gpu 默认启用;其余 operator 默认关,按需 `--enable`/`--steps`/`--phase` 或 cluster.conf 开关启用。
 
 随时可只检查节点时钟偏差(只读, 不写任何东西):
 

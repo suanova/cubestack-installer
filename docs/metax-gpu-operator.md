@@ -30,7 +30,7 @@ containerd 置以下键后, 容器创建时按容器 runAsUser/runAsGroup 对设
 
 - **本仓库自动落地**: ① 声明式 —— `sync-kubespray-config.sh` 写 `containerd_extra_runtime_args`
   (kubespray v2.32 原生变量, 官方默认注释的第一个示例就是本键)⇒ 重装/新节点天然带上;
-  ② 存量节点 —— `gpu_operator` 模块每轮调用
+  ② 存量节点 —— `metax_gpu` 模块每轮调用
   `tools/node/ensure-containerd-device-ownership.sh` 即时落地(幂等; 仅在键变化时重启 containerd)。
   开关: `cluster.conf` 的 `CONTAINERD_DEVICE_OWNERSHIP`(默认 true)。
 - **生效时机**: 属主在**容器创建时**写入 —— 已有容器保持旧属主, **需重建工作负载**
@@ -79,7 +79,7 @@ ls <root>/<version>/offline-files/metax-gpu/    # 约 27 个 tar(19G)
 ```
 
 共 **27 个(约 19G)**, 含: 核心组件(10 个 × amd64/arm64)、maca(3 个版本)、driver-image(2 个版本)、operator-bundle/catalog。
-也可用 `METAX_LIST_IMAGES=true bash modules/03_addon/06_gpu_operator.sh` 打印所需镜像的 `docker pull/save` 命令。
+也可用 `METAX_LIST_IMAGES=true bash modules/03_addon/06_metax_gpu.sh` 打印所需镜像的 `docker pull/save` 命令。
 
 ---
 
@@ -95,7 +95,7 @@ deployments/
 │   ├── metax-k8s-driver-image.<ver>.run
 │   └── metax-operator-<ver>.tgz / metax-gpu-extensions-<ver>.tgz
 └── scripts/
-    ├── modules/03_addon/06_gpu_operator.sh       # 部署模块(默认 tar 加载)
+    ├── modules/03_addon/06_metax_gpu.sh       # 部署模块(默认 tar 加载)
     ├── modules/03_addon/23_verify_metax_gpu.sh   # 验证模块(--steps verify 自动纳入)
     └── tools/k8s/verify-metax-gpu.sh             # 节点 GPU 识别验证脚本(含非 root 权限探针)
     └── tools/node/ensure-containerd-device-ownership.sh  # 设备属主前置(非 root GPU 必需; 幂等)
@@ -108,7 +108,8 @@ deployments/
 > 已加入 `cluster.conf` 与 `cluster.conf.example`。关键项:
 
 ```bash
-GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 总开关, **默认 true**(见 cluster.conf.example:139)→ 全量(--with-cubestack)即部署; 也可 --steps gpu_operator 立即部署
+METAX_GPU_ENABLED="${METAX_GPU_ENABLED:-${GPU_OPERATOR_ENABLED:-true}}"    # 总开关(新名), **默认 true**(见 cluster.conf.example); 旧名 GPU_OPERATOR_ENABLED 仍识别
+# 命令与模块统一用 metax_gpu(旧别名 gpu_operator 兼容): 全量/--steps/--enable 均可
 METAX_VERSION="${METAX_VERSION:-0.15.3}"                 # 版本(决定包名/镜像 tag/Chart)
 METAX_OFFLINE_DIR="${METAX_OFFLINE_DIR:-${REPO_ROOT}/deployments/offline-files/metax-gpu}"
 METAX_PKG_DIR="${METAX_PKG_DIR:-${METAX_OFFLINE_DIR}}"   # 大文件(.run/资源包)所在目录
@@ -133,13 +134,13 @@ METAX_IMAGE_COMPONENTS="..."   # 核心组件列表(run 模式 / 列表打印用
 ## 4. 部署流程
 
 ```bash
-sudo ./deploy-cluster.sh --with-cubestack   # 全量: 基座 + cluster.conf 中已启用的 operator(本集群 GPU_OPERATOR_ENABLED=true → 部署 gpu_operator)
-# 或单独(立即部署): sudo ./deploy-cluster.sh --steps gpu_operator   # 只部署 gpu_operator(自动带基座)
-# 或预启用(只写配置, 不部署): sudo ./deploy-cluster.sh --enable gpu_operator   # 下次 --with-cubestack 生效
+sudo ./deploy-cluster.sh --with-cubestack   # 全量: 基座 + cluster.conf 中已启用的 operator(本集群 METAX_GPU_ENABLED=true → 部署 metax_gpu)
+# 或单独(精确): sudo ./deploy-cluster.sh --steps metax_gpu   # 只部署 metax_gpu + 其依赖
+# 或启用并部署: sudo ./deploy-cluster.sh --enable metax_gpu   # 默认全量 + metax_gpu(同时写配置)
 ```
 
 > **断点续跑**: 本模块 `REPEAT:0` —— 安装成功写状态, 重跑部署自动跳过(不重复重装);
-> 要重装用 `--fresh`(清所有断点状态, 从零部署)。`--steps gpu_operator` 可单独执行。
+> 要重装用 `--fresh`(清所有断点状态, 从零部署)。`--steps metax_gpu` 可单独执行。
 
 模块自动完成(默认 tar 模式):
 
@@ -218,9 +219,9 @@ GPU 任务测试(参考沐曦官方文档 §5, 需 maca 镜像就绪): 建 gpu-t
 # 检查版本树里的 metax 镜像
 ls <root>/<version>/offline-files/metax-gpu/*.tar
 # 打印所需镜像的 pull/save 命令
-METAX_LIST_IMAGES=true bash deployments/scripts/modules/03_addon/06_gpu_operator.sh
+METAX_LIST_IMAGES=true bash deployments/scripts/modules/03_addon/06_metax_gpu.sh
 # 部署 / 验证
-sudo ./deploy-cluster.sh --steps gpu_operator
+sudo ./deploy-cluster.sh --steps metax_gpu
 sudo ./deploy-cluster.sh --steps verify_metax_gpu
 # 设备属主前置(§0.1; 对 GPU 节点幂等执行, 键变化才重启 containerd; 改后需重建工作负载生效)
 sudo ./deployments/scripts/tools/node/ensure-containerd-device-ownership.sh

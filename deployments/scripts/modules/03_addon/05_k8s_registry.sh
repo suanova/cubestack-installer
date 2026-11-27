@@ -20,7 +20,7 @@
 #       · local-path(默认)→ k8s 阶段 local-path SC 已存在, PVC 即时绑定;
 #       · ceph-block → registry-pvc 在 k8s 阶段创建时 SC 尚未出现 → Pending; ceph_csi 模块
 #         创建 SC 后自动绑定(WaitForFirstConsumer)。本模块部署后**必须等待 PVC Bound + pod Ready**,
-#         否则后续 push 镜像的模块(gpu_operator/ceph/...)会 ImagePullBackOff 且难以定位。
+#         否则后续 push 镜像的模块(metax_gpu/ceph/...)会 ImagePullBackOff 且难以定位。
 #         ⚠ --with-k8s 跳过 ceph_csi: 若 SC 仍不存在, 本模块立即失败并提示先跑 ceph_csi(issue #206),
 #         不再空等 REGISTRY_WAIT_SECONDS。
 #     ⚠ 顺序保证: addon 阶段按文件序号执行 metallb→ceph→ceph_csi→local_path→registry;
@@ -184,7 +184,7 @@ fi
 bash "${SCRIPT_DIR}/tools/lb/deploy-registry.sh"
 
 # ---------------- 就绪等待(关键) ----------------
-# registry pod 就绪前, 后续 push 镜像的模块(gpu_operator/ceph/...)会 ImagePullBackOff 且难定位。
+# registry pod 就绪前, 后续 push 镜像的模块(metax_gpu/ceph/...)会 ImagePullBackOff 且难定位。
 # ceph-block 后端: registry-pvc 在 k8s 阶段创建时 SC 未出现 → Pending, ceph_csi 模块创建
 # ceph-block SC 后(WaitForFirstConsumer)由首个消费者触发 RBD 卷创建/挂载, 需要额外时间。
 # 就绪判定(任一层不可跳): ① PVC 已 Bound ② registry pod 1/1 Running ③ registry Service 暴露且 /v2/ 可达。

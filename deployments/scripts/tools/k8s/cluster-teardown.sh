@@ -73,16 +73,28 @@ print(json.dumps(rec, ensure_ascii=False))
 }
 
 # ---------------- 拆序 ----------------
+# 模块自声明别名 → 模块 key(兼容改名前的登记/旧命令; 如 nvidia_gpu_operator→nvidia_gpu)
+_record_alias_pairs() {
+    local _a
+    for _a in "${!MODULE_ALIAS[@]}"; do
+        printf '%s\t%s\n' "${_a}" "${MODULE_ALIAS[$_a]}"
+    done
+}
+
 # <inventory_json_file> → stdout: <key>\t<record|probe>\t<模块相对路径>(按拆序)
 compute_order() {   # <inventory_json_file>
-    local invf="$1" _mf _i _un
+    local invf="$1" _mf _af _i _un
     _mf="$(mktemp)"
+    _af="$(mktemp)"
     for _i in "${!MODULE_KEY[@]}"; do
         _un="$(module_meta "${MODULES_DIR}/${MODULE_SCRIPT[$_i]}" UNINSTALL)"
         [ "${_un}" = "1" ] || continue
         printf '%s\t%s\n' "${MODULE_KEY[$_i]}" "${MODULE_SCRIPT[$_i]}" >> "${_mf}"
     done
-    python3 - "${_mf}" "${invf}" <<'PY'
+    # 旧模块 key → 新 key(模块自声明别名): 存量集群登记里的旧名(如 nvidia_gpu_operator)
+    # 必须能匹配到改名后的模块, 否则会掉进"探测降级"组、丢掉登记的首装序。
+    _record_alias_pairs > "${_af}"
+    python3 - "${_mf}" "${invf}" "${_af}" <<'PY'
 import json, sys
 mods = {}   # key -> script(插入序 = 模块文件序)
 for line in open(sys.argv[1]):
@@ -92,10 +104,18 @@ try:
     rec = json.load(open(sys.argv[2]))
 except Exception:
     rec = {}
+aliases = {}
+for line in open(sys.argv[3]):
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) == 2:
+        aliases[parts[0]] = parts[1]
 comps = {}
 for c in (rec.get("components") or []):
     if isinstance(c, dict) and c.get("key"):
-        comps[c["key"]] = c
+        key = aliases.get(c["key"], c["key"])
+        # 新旧键同时存在时保留 seq 较大者(同一组件, 取更完整的登记)
+        if key not in comps or c.get("seq", 0) > comps[key].get("seq", 0):
+            comps[key] = c
 # 主序: 有登记 seq 的按 seq 降序; 次序: 其余 UNINSTALL 模块按文件序反排; ceph 强制压轴
 recorded = [k for k in mods if k in comps and isinstance(comps[k].get("seq"), int)]
 recorded.sort(key=lambda k: comps[k]["seq"], reverse=True)
@@ -107,12 +127,17 @@ if "ceph" in seq:
 for k in seq:
     print("%s\t%s\t%s" % (k, "record" if k in recorded else "probe", mods[k]))
 PY
-    rm -f "${_mf}"
+    rm -f "${_mf}" "${_af}"
 }
 
 print_inventory() {   # <inventory_json_file>(全部登记组件; 含无卸载动作的 base 组件 — 仅信息)
-    python3 - "$1" <<'PY'
-import json, sys
+    ALIAS_PAIRS="$(_record_alias_pairs)" python3 - "$1" <<'PY'
+import json, os, sys
+aliases = {}
+for line in os.environ.get("ALIAS_PAIRS", "").splitlines():
+    parts = line.split("\t")
+    if len(parts) == 2:
+        aliases[parts[0]] = parts[1]
 try:
     rec = json.load(open(sys.argv[1]))
 except Exception:
@@ -121,8 +146,9 @@ comps = rec.get("components") or []
 if not comps:
     print("  <登记为空: 无记录组件(存量集群将走全量探测降级路径)>")
 for c in sorted(comps, key=lambda c: c.get("seq", 0)):
+    key = aliases.get(c.get("key"), c.get("key"))
     print("  seq=%-3s %-24s 首装=%s  状态=%s" % (
-        c.get("seq", "?"), c.get("key", "?"),
+        c.get("seq", "?"), key,
         c.get("firstInstalledAt", "?"), c.get("status", "?")))
 PY
 }
@@ -139,16 +165,23 @@ mark_uninstalled() {   # <key>
     local key="$1" j new
     j="$( (SSH "${K} -n ${CM_NS} get cm ${CM_NAME} -o json 2>/dev/null") || true)"
     [ -n "${j}" ] || return 0
-    new="$(printf '%s' "${j}" | KEY="${key}" python3 -c '
+    new="$(printf '%s' "${j}" | KEY="${key}" ALIAS_PAIRS="$(_record_alias_pairs)" python3 -c '
 import json, os, sys
 key = os.environ["KEY"]
+aliases = {}
+for line in os.environ.get("ALIAS_PAIRS", "").splitlines():
+    parts = line.split("\t")
+    if len(parts) == 2:
+        aliases[parts[0]] = parts[1]
 cm = json.load(sys.stdin)
 try:
     rec = json.loads((cm.get("data") or {}).get("record.json") or "{}")
 except Exception:
     rec = {}
 for c in (rec.get("components") or []):
-    if isinstance(c, dict) and c.get("key") == key:
+    # 改名前的登记旧名也要能命中, 并顺手把登记键迁移到新名
+    if isinstance(c, dict) and aliases.get(c.get("key"), c.get("key")) == key:
+        c["key"] = key
         c["status"] = "uninstalled"
 cm.setdefault("data", {})["record.json"] = json.dumps(rec, ensure_ascii=False)
 print(json.dumps(cm))

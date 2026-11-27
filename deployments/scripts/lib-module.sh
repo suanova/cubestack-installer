@@ -169,7 +169,8 @@ declare -A MODULE_ALIAS=(
     [ntp]=k8s_ntp
     [k8s]=k8s_deploy
     [scale]=k8s_scale
-    [gpu_operator]=gpu_operator
+    # GPU operator 旧名兼容(2026-11-27 品牌化): gpu_operator→metax_gpu 由模块自声明 ALIAS;
+    # 旧 nvidia_gpu_operator→nvidia_gpu 同理。此处不再写死, 避免与模块自声明冲突。
     # Ceph 单节点由 ceph 模块按 CEPH_TOPOLOGY 自动分发; 别名让 --steps ceph_single 也可用
     [ceph_single]=ceph
     # 安装前环境检查(--steps pre-install-check 兼容用户习惯的连字符写法)
@@ -190,9 +191,9 @@ normalize_key() {
 
 # ---------------- operator 模块(显式调度用, 自动派生) ----------------
 # --steps 显式命名了任一 operator 时, 只部署被指定的 operator(+基座 env/k8s/metallb/local_path/k8s_registry),
-# 剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps ceph 时不部署 gpu_operator);
+# 剔除"默认启用但未显式指定"的 operator(如 METAX_GPU_ENABLED=true 但 --steps ceph 时不部署 metax_gpu);
 # 未命名任何 operator(纯默认 / --with-k8s / --with-cubestack)时, 全部默认启用的 operator 照常部署。
-# (--enable 只写 cluster.conf, 不经过本处; 见 deploy-cluster.sh)
+# (--enable 由 deploy-cluster.sh 转成 enable_arg 传入本函数; 与 --with-* 同一入口)
 #
 # ★ 自动派生规则(无需手工维护列表): operator = 有 TOGGLE 的模块 - 基座模块。
 #   新增 operator 模块只需在头部写 # TOGGLE: XXX_ENABLED, 自动进入精确调度;
@@ -311,6 +312,23 @@ module_index() {
     return 1
 }
 
+# 模块 key 改名后的**断点状态兼容**: 新 key 无记录时回退读旧 key。
+# 场景(2026-11-27): gpu_operator→metax_gpu / nvidia_gpu_operator→nvidia_gpu。
+# 只影响 REPEAT:0 的断点续跑判定; --fresh 清状态后自然不再需要。
+declare -A MODULE_STATE_LEGACY=(
+    [metax_gpu]=gpu_operator
+    [nvidia_gpu]=nvidia_gpu_operator
+)
+module_get_state() {   # <key> → stdout(空=无记录)
+    local key="$1" v old
+    v="$(get_state "${key}")"
+    if [ -z "${v}" ]; then
+        old="${MODULE_STATE_LEGACY[${key}]:-}"
+        [ -n "${old}" ] && v="$(get_state "${old}")"
+    fi
+    printf '%s' "${v}"
+}
+
 # 模块是否应默认启用: DEFAULT=1 或 TOGGLE 命中。
 # TOGGLE 支持空格分隔多变量(OR 语义): 任一变量命中 → 启用。
 # 两种写法:
@@ -345,14 +363,14 @@ module_default_on() {
 }
 
 # ---------------- 运行步骤解析 ----------------
-# 优先级: --steps(立即部署, 自动带基座) > 默认启用 + --with-xxx - --skip
+# 优先级: --steps(立即部署, 精确模式) > 默认启用 + --with-xxx - --skip
 # 注意:
 #   · --steps 精确模式: 只跑指定的模块 + 其 REQUIRES 闭包依赖, **不再带出默认启用的 operator**
-#     (曾因 --steps local_path,k8s_registry 意外带出 gpu_operator 而误部署); 基座模块
+#     (曾因 --steps local_path,k8s_registry 意外带出 metax_gpu 而误部署); 基座模块
 #     (env/k8s 阶段 + metallb/local_path/k8s_registry)不受影响, 仍按默认启用参与。
 #   · --steps 显式命名 operator 时, 同样只部署被指定的 operator(+基座), 见 OPERATOR_MODULES 说明。
 #   · --steps verify 保持精确: 只跑全部验证模块, 不拉基座。
-#   · --enable 不在本函数生效(只写 cluster.conf, 见 deploy-cluster.sh)。
+#   · --enable 组件由调用方并入 enable_arg(启用+立即部署), 顶层语义见 deploy-cluster.sh。
 # 结果写入全局 RUN_STEPS(先按模块文件顺序 + REQUIRES 闭包, 再做稳定拓扑排序)
 # 用法: resolve_run_steps <steps> <skip> <enable> [phase_filter]
 #   --steps <组件> 走"单组件安装模式": 只跑该组件 + 其非基座依赖(见函数内 ★ 注释)。
@@ -422,21 +440,25 @@ resolve_run_steps() {
     for s in ${skip_arg//,/ }; do
         [ -z "${s}" ] && continue
         nk="$(normalize_key "${s}")"
+        # 拼写错误必须报错: 静默忽略会让用户以为组件已关闭, 实际仍随默认计划部署。
+        module_index "${nk}" >/dev/null 2>&1 || { err "未知模块(--skip): ${s}(可用 --list-steps 查看)"; return 1; }
         local comp=() k2
         for k2 in "${RUN_STEPS[@]}"; do [ "${k2}" != "${nk}" ] && comp+=("${k2}"); done
         RUN_STEPS=("${comp[@]}")
     done
 
     # ★ operator 显式调度: --steps 显式命名了 operator 时, 只保留被指定的 operator(+基座),
-    #   剔除"默认启用但未显式指定"的 operator(如 GPU_OPERATOR_ENABLED=true 但 --steps ceph 时不部署 gpu_operator)。
+    #   剔除"默认启用但未显式指定"的 operator(如 METAX_GPU_ENABLED=true 但 --steps ceph 时不部署 metax_gpu)。
     #   未命名任何 operator(纯默认 / --with-k8s / --with-cubestack)时保持原行为: 全部默认启用的 operator 照常部署。
+    #   ★ 2026-11-27: --enable 也会把组件写进 enable_arg(启用+立即部署), 但 --enable 单独使用时
+    #     仍是"全量 + 这些组件" —— 只有 --steps 精确模式才剔除未指定的默认 operator。
     declare -A _op_keep=()
     for s in ${enable_arg//,/ }; do
         [ -z "${s}" ] && continue
         nk="$(normalize_key "${s}")"
         for _op in "${OPERATOR_MODULES[@]}"; do [ "${nk}" = "${_op}" ] && _op_keep["${_op}"]=1; done
     done
-    if [ "${#_op_keep[@]}" -gt 0 ] || [ "${_steps_precise}" = "1" ]; then
+    if [ "${_steps_precise}" = "1" ]; then
         # ★ --steps 精确模式且未命名任何 operator → 剔除全部默认启用的 operator(本次只跑指定的 + 基座)
         local _kept=() _k2 _is_op=0
         for _k2 in "${RUN_STEPS[@]}"; do
@@ -470,7 +492,7 @@ resolve_run_steps() {
                     module_index "${_d3}" >/dev/null 2>&1 || { err "模块 ${_k3} 的 REQUIRES 引用了未知模块: ${_d3}"; return 1; }
                     # 依赖已完成(状态 done, REPEAT!=1)→ 视为满足, 不拉入执行(防重跑破坏型模块)
                     _d3i="$(module_index "${_d3}")"
-                    if [ "${MODULE_REPEAT[$_d3i]:-0}" != "1" ] && [ "$(get_state "${_d3}")" = "done" ]; then
+                    if [ "${MODULE_REPEAT[$_d3i]:-0}" != "1" ] && [ "$(module_get_state "${_d3}")" = "done" ]; then
                         continue
                     fi
                     # ★ 2026-11-17(CodeRabbit): 默认关闭的**基座阶段**(env/k8s)依赖, 若未被
@@ -625,7 +647,7 @@ run_module() {
     repeat="${MODULE_REPEAT[$idx]:-0}"
 
     # 断点续跑: 已完成则跳过(可重复执行模块除外)
-    if [ "${repeat}" != "1" ] && [ "$(get_state "${key}")" = "done" ]; then
+    if [ "${repeat}" != "1" ] && [ "$(module_get_state "${key}")" = "done" ]; then
         say "[${key}] 已完成,跳过(--fresh 清状态可重跑)"
         return 0
     fi
@@ -677,17 +699,51 @@ sys.stdout.write("".join(out))
 ' "$2"
 }
 
+# 模块自声明别名(--steps/--enable/--skip 的兼容写法; 如 gpu_operator→metax_gpu)。
+# 只取模块 `# ALIAS:` 声明的动态别名, 不含 lib-module 内置的历史 key 别名。
+_module_aliases() {   # <index> → 空格分隔别名
+    local key="${MODULE_KEY[$1]}" a out=""
+    for a in ${CS_DYNAMIC_ALIASES[@]+"${CS_DYNAMIC_ALIASES[@]}"}; do
+        [ "${MODULE_ALIAS[$a]:-}" = "${key}" ] && out="${out}${out:+,}${a}"
+    done
+    printf '%s' "${out}"
+}
+
+# 模块是否伪代码占位(addon_stub)
+_module_is_stub() {   # <index>
+    grep -q "addon_stub " "${MODULES_DIR}/${MODULE_SCRIPT[$1]}" 2>/dev/null
+}
+
+# TOGGLE 变量=当前值 的可读展示(空格分隔多个变量; OR 语义)
+_module_toggle_values() {   # <index> → "VAR=value VAR2=value"
+    local tgl="${MODULE_TOGGLE[$1]:-}" v vn out=""
+    for v in ${tgl}; do
+        if [[ "${v}" == *=* ]]; then
+            vn="${v%%=*}"
+        else
+            vn="${v}"
+        fi
+        out="${out}${out:+, }${vn}=${!vn:-<未设置>}"
+    done
+    printf '%s' "${out}"
+}
+
 # 单行模块展示(compact: 状态简写/短 DESC; verbose: 完整 DESC/文件/依赖)
 _print_module_line() {
     local i="$1" verbose="${2:-0}"
     local key="${MODULE_KEY[$i]}" desc="${MODULE_DESC[$i]:-}" state rep="" deps="${MODULE_REQUIRES[$i]:-}"
-    local tgl="${MODULE_TOGGLE[$i]:-}" script="${MODULE_SCRIPT[$i]:-}" n=0 d
+    local tgl="${MODULE_TOGGLE[$i]:-}" script="${MODULE_SCRIPT[$i]:-}" n=0 d alias
+    local stub="" onoff
+    _module_is_stub "${i}" && stub=" *"
+    alias="$(_module_aliases "${i}")"
+    [ -n "${alias}" ] && desc="${desc}  [别名:${alias}]"
+    [ -n "${stub}" ] && desc="${desc}${stub}"
     if [ -n "${tgl}" ]; then
+        if module_default_on "${i}"; then onoff="on"; else onoff="off"; fi
         if [ "${verbose}" = "1" ]; then
-            n=$(printf '%s\n' "${tgl}" | wc -w)
-            if [ "${n}" -gt 1 ]; then state="toggle:${tgl%% *}(+$((n-1)))"; else state="toggle:${tgl}"; fi
+            state="toggle:$(_module_toggle_values "${i}")"
         else
-            state="toggle"
+            state="toggle(${onoff})"
         fi
     elif [ "${MODULE_DEFAULT[$i]:-0}" = "1" ]; then
         state="on"
@@ -701,10 +757,34 @@ _print_module_line() {
         desc="$(_truncate_display "${desc}" 72)"
     fi
     if [ "${verbose}" = "1" ]; then
-        printf "  %-31s %-34s %-4s %s  (%s)%s\n" "${key}" "${state}" "${rep}" "${desc}" "${script}" "${deps:+  依赖:${deps}}"
+        printf "  %-31s %-54s %-4s %s  (%s)%s\n" "${key}" "${state}" "${rep}" "${desc}" "${script}" "${deps:+  依赖:${deps}}"
     else
-        printf "  %-31s %-8s %-4s %s\n" "${key}" "${state}" "${rep}" "${desc}"
+        printf "  %-31s %-14s %-4s %s\n" "${key}" "${state}" "${rep}" "${desc}"
     fi
+}
+
+# 可启用组件汇总: --enable/--skip 可控制的组件全集。
+#   · 全部 TOGGLE 模块(含基座内的 metallb/local_path/k8s_registry 等);
+#   · addon 阶段无开关的运维模块(ceph_backup 等)标注"仅 --steps";
+#   · 状态按当前 cluster.conf 计算(on/off), 伪代码占位追加 *。
+_print_enableable_components() {
+    local i key tgl state alias vars stub
+    for i in "${!MODULE_KEY[@]}"; do
+        key="${MODULE_KEY[$i]}"
+        [[ "${key}" == verify_* || "${key}" == k8s_scale ]] && continue
+        tgl="${MODULE_TOGGLE[$i]:-}"
+        if [ -z "${tgl}" ]; then
+            [ "${MODULE_PHASE[$i]:-}" = "addon" ] || continue
+            printf "    %-24s %-9s %s\n" "${key}" "仅--steps" "--enable 不适用(无 cluster.conf 开关)"
+            continue
+        fi
+        if module_default_on "${i}"; then state="on"; else state="off"; fi
+        stub=""
+        _module_is_stub "${i}" && { stub=" *"; state="${state}${stub}"; }
+        alias="$(_module_aliases "${i}")"
+        vars="$(_module_toggle_values "${i}")"
+        printf "    %-24s %-9s %-54s%s\n" "${key}" "${state}" "${vars}" "${alias:+  别名:${alias}}"
+    done
 }
 
 print_steps() {
@@ -718,9 +798,9 @@ print_steps() {
     [ -n "${_comp_keys}" ] && _comp_keys="${_comp_keys} "
     say "==== 部署模块列表(自动发现) ===="
     if [ "${_verbose}" = "1" ]; then
-        echo "  模式: --verbose(完整 DESC / 文件 / 依赖)"
+        echo "  模式: --verbose(完整 DESC / 开关变量=当前值 / 别名 / 文件 / 依赖)"
     else
-        echo "  图例: on=默认启用  off=默认关闭  toggle=由 cluster.conf 开关  ↻=可重复执行  ←N=依赖数"
+        echo "  图例: on=默认启用  off=默认关闭  toggle(on/off)=由 cluster.conf 开关  *=伪代码占位  ↻=可重复执行  ←N=依赖数"
         echo "        完整说明: --list-steps --verbose"
     fi
     for _phase in env k8s addon; do
@@ -758,10 +838,13 @@ print_steps() {
     else
         _verify_meta_list | fold -s -w 104 | sed 's/^/    /'
     fi
+    echo ""
+    echo -e "  \033[36m[可启用组件]\033[0m  --enable/--skip 参数全集(状态按当前 cluster.conf; * = 伪代码占位)"
+    _print_enableable_components
     echo "---------------------------------------------"
     echo "  --steps k1,k2  只跑指定模块   --skip k1,k2  跳过模块   --phase env|k8s|addon"
-    echo "  --enable k     持久启用(写 cluster.conf)   --steps verify  全部验证"
-    echo "  --list-steps --verbose  完整 DESC / 文件 / 依赖"
+    echo "  --enable k1,k2  启用并立即部署(同时写 cluster.conf)   --steps verify  全部验证"
+    echo "  --list-steps --verbose  完整 DESC / 开关变量 / 别名 / 文件 / 依赖"
 }
 
 # 输出全部 verify_* 模块名(逗号分隔; 供 help/list 动态展示)
@@ -841,7 +924,7 @@ notify_base_redeploy() {
     local _k _in=0
     for _k in "${RUN_STEPS[@]:-}"; do [ "${_k}" = "k8s_deploy" ] && _in=1; done
     [ "${_in}" = "1" ] || return 0                       # 计划里没有 k8s_deploy → 不涉及
-    [ "$(get_state k8s_deploy)" = "done" ] && return 0   # 本机已装过 → 断点续跑会跳过 k8s_deploy
+    [ "$(module_get_state k8s_deploy)" = "done" ] && return 0   # 本机已装过 → 断点续跑会跳过 k8s_deploy
     cluster_exists || return 0                           # 探测不到(首装/无密钥/网络不通) → 保持安静
     _REDEPLOY_NOTED=1
     if [ "${FRESH:-0}" != "1" ]; then
@@ -861,7 +944,7 @@ base_redeploy_needs_fresh() {
     local _k _in=0
     for _k in "${RUN_STEPS[@]:-}"; do [ "${_k}" = "k8s_deploy" ] && _in=1; done
     [ "${_in}" = "1" ] || return 1                       # 计划里没有基座 → 不涉及
-    [ "$(get_state k8s_deploy 2>/dev/null || true)" = "done" ] && return 1
+    [ "$(module_get_state k8s_deploy 2>/dev/null || true)" = "done" ] && return 1
     [ "${FRESH:-0}" = "1" ] && return 1
     cluster_exists || return 1
     return 0
@@ -874,7 +957,7 @@ base_redeploy_needs_fresh() {
 # 恒返回 0(不拦停); 失败仅警告 —— 后续 ceph 安全序与 kubeadm reset 兜底。
 teardown_before_overwrite() {
     [ "${CUBESTACK_TEARDOWN_DONE:-0}" = "1" ] && return 0
-    [ "$(get_state k8s_deploy)" = "done" ] && return 0   # 断点续跑完成 → 不会执行 → 不涉及(冗余防御)
+    [ "$(module_get_state k8s_deploy)" = "done" ] && return 0   # 断点续跑完成 → 不会执行 → 不涉及(冗余防御)
     local _te="${SCRIPT_DIR}/tools/k8s/cluster-teardown.sh"
     [ -f "${_te}" ] || return 0
     cluster_exists || return 0
@@ -898,7 +981,7 @@ plan_warn_base_redeploy() {
     local _k _in=0
     for _k in "${RUN_STEPS[@]:-}"; do [ "${_k}" = "k8s_deploy" ] && _in=1; done
     [ "${_in}" = "1" ] || return 0
-    [ "$(get_state k8s_deploy)" = "done" ] && return 0
+    [ "$(module_get_state k8s_deploy)" = "done" ] && return 0
     echo "  ℹ 本次含 k8s_deploy: 目标集群**已存在**时会被拦停(交互 [Y/n] 也不再授权); 重装基座必须显式 --fresh"
     echo "     不想动集群 → --steps <组件>(计划里不含基座); 清空状态并授权 reset → --fresh"
     return 0
@@ -934,7 +1017,7 @@ ensure_cluster_access() {
 #   无 TOGGLE 的 addon 模块(如 ceph_backup 运维模块)也列出 —— 它们同样用 --steps <key> 单独执行,
 #   只是没有 cluster.conf 开关(env/k8s 阶段模块属基座, 见 help 的"阶段目录与模块"段)。
 _component_meta_list() {
-    local want="${1:-implemented}" i key tgl script is_stub
+    local want="${1:-implemented}" i key tgl script is_stub alias key_disp
     for i in "${!MODULE_KEY[@]}"; do
         key="${MODULE_KEY[$i]}"
         [[ "${key}" == verify_* || "${key}" == k8s_scale ]] && continue
@@ -945,13 +1028,15 @@ _component_meta_list() {
             [ "$(module_meta "${MODULES_DIR}/${MODULE_SCRIPT[$i]}" PHASE)" = "addon" ] || continue
             tgl="(无开关: 运维类, 直接 --steps)"
         fi
+        alias="$(_module_aliases "${i}")"
+        key_disp="${key}${alias:+ (别名:${alias})}"
         script="${MODULES_DIR}/${MODULE_SCRIPT[$i]}"
         is_stub=0
         grep -q "addon_stub" "${script}" 2>/dev/null && is_stub=1
         if [ "${want}" = "stub" ]; then
-            [ "${is_stub}" = "1" ] && printf "      %-22s %s\n" "${key}" "${tgl}"
+            [ "${is_stub}" = "1" ] && printf "      %-40s %s\n" "${key_disp}" "${tgl}"
         else
-            [ "${is_stub}" = "0" ] && printf "      %-22s %s\n" "${key}" "${tgl}"
+            [ "${is_stub}" = "0" ] && printf "      %-40s %s\n" "${key_disp}" "${tgl}"
         fi
     done
 }
@@ -1025,7 +1110,7 @@ print_undeployed_summary() {
         echo "  ℹ 单组件安装模式(--steps): 只跑指定组件 + 其非基座依赖; 基座类(k8s_deploy/metallb/local_path/k8s_registry 等)按设计未纳入"
     if [ -n "${_off}" ]; then
         echo "  ⚠ 本次未部署的组件(开关关闭, 打开即部署): ${_off}"
-        echo "     ↳ 立即单跑: --steps <组件名>(如 --steps keycloak); 持久启用: --enable <组件名>"
+        echo "     ↳ 立即单跑: --steps <组件名>(如 --steps keycloak); 启用并部署: --enable <组件名>"
     fi
     [ -n "${_idle}" ] && echo "  ⚠ 开关已开但本次未调度(如 --steps 精确模式/--skip/阶段过滤): ${_idle}"
     [ -n "${_stub}" ] && echo "  ○ 规划中未实现(伪代码占位, 打开开关也只有伪代码流程): ${_stub}"

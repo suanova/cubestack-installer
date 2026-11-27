@@ -80,7 +80,7 @@ chk "探测输出" "0 unknown" "$(_probe '0 0' 1)"
 _pure 0 unknown; chk_rc "纯 CPU 判定" "1" "$?"
 
 echo "== ⑦ 宿主驱动选择: PCI 状态未知必须回退容器驱动 =="
-MOD="${REPO_ROOT}/deployments/scripts/modules/03_addon/06_gpu_operator.sh"
+MOD="${REPO_ROOT}/deployments/scripts/modules/03_addon/06_metax_gpu.sh"
 _DRV_BLOCK="$(sed -n '/_DRIVER_DEPLOY="\${METAX_DRIVER_DEPLOY:-auto}"/,/^esac$/p' "${MOD}")"
 [ -n "${_DRV_BLOCK}" ] || { echo "  FAIL 无法抽取驱动选择块"; fail=1; }
 _drv() {  # <has_gpu_node> <pci_no_driver> <pci_unknown>

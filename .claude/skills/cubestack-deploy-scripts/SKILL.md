@@ -216,11 +216,11 @@ trap '清理测试资源' EXIT
 - 变量写法一律 `VAR="${VAR:-default}"`
 - **`cluster.conf` 为主, 职责三分**(所有 operator 统一遵守):
   - **全量部署**: `--with-cubestack`/默认 = 基座 + cluster.conf 中已启用的**全部** operator; `--with-k8s` = 仅基座(跳过全部 operator)。
-  - **预启用(写配置)**: `--enable X` = 只把 `XXX_ENABLED=true` 写入 cluster.conf, **不部署**; 下次全量部署生效。
-  - **立即部署单个**: `--steps X` = 部署被指定的 X(自动带基座, 只部署被指定的 operator); `--steps verify` = 只跑验证模块。
+  - **启用并部署**: `--enable X` = 把 `XXX_ENABLED=true` 写入 cluster.conf(持久化)**并立即部署**; 单独执行 = 默认全量 + 该组件; `--enable X --list` 只读预览。
+  - **立即部署单个**: `--steps X` = 只部署被指定的 X(精确模式: X + 其依赖, 不重跑基座); `--steps verify` = 只跑验证模块。
   - **排除**: `--skip X` = 全量部署时剔除。
   - 新增 operator **无需改任何列表**: operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)= operator), 写 TOGGLE 即自动进入 --steps/--enable 调度。
-- 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`MODEL_IMAGES_ENABLED`(默认true, sglang/vllm ≈33G 排在平台组件之后推送)、`GPU_OPERATOR_ENABLED`(默认true,已实现)、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`
+- 常用开关(见 `config/cluster.conf.example` 完整列表): `SERVICE_EXPOSE_MODE`(**nodeport**=默认, NodePort, 自动关 MetalLB+registry/ingress 切 NodePort / **metallb**=生产, LoadBalancer VIP)、`REGISTRY_ENABLED`(默认0,集群内registry不部署)、`HARBOR_ENABLED`、`METALLB_ENABLED`、`LOCAL_PATH_ENABLED`(默认false)、`MODEL_IMAGES_ENABLED`(默认true, sglang/vllm ≈33G 排在平台组件之后推送)、`METAX_GPU_ENABLED`(默认true,已实现)、`CEPH_ENABLED`、`CEPH_CSI_ENABLED`、`KEYCLOAK_ENABLED`、`KUEUE_ENABLED`、`KUBEVIRT_ENABLED`、`LUSTRE_CSI_ENABLED`
 - 新增配置项流程: ① cluster.conf.example 加带注释默认声明 → ② 脚本引用 → ③ 如需同步 kubespray group_vars, 在 `tools/k8s/sync-kubespray-config.sh` / `tools/k8s/sync-addons-config.sh` 加同步逻辑
 
 ## 模块体内规范
@@ -320,9 +320,9 @@ local src="${REPO_ROOT}/${rel}"
 ```bash
 sudo ./deployments/scripts/deploy-cluster.sh                    # 默认 = --with-cubestack(全量: 基座 + cluster.conf 启用的全部 operator)
 sudo ./deployments/scripts/deploy-cluster.sh --with-k8s --fresh # 仅 kubespray 基座(k8s+metallb+local-path+registry), 不含 operator
-sudo ./deployments/scripts/deploy-cluster.sh --skip gpu_operator   # 全量但排除某个 operator
-sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_operator  # 立即部署单个 operator(自动带基座, 只部署指定的)
-sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator # 只写 cluster.conf 预启用(不部署, 下次全量生效)
+sudo ./deployments/scripts/deploy-cluster.sh --skip metax_gpu   # 全量但排除某个 operator
+sudo ./deployments/scripts/deploy-cluster.sh --steps metax_gpu  # 只装该组件(精确模式; 不重跑基座)
+sudo ./deployments/scripts/deploy-cluster.sh --enable metax_gpu # 启用并立即部署(同时写 cluster.conf)
 sudo ./deployments/scripts/deploy-cluster.sh --steps lws            # 平台组件级更新(operator/CR 已就绪; 不重跑 cubestack_operator)
 sudo ./deployments/scripts/deploy-cluster.sh --steps cube-pilot     # 同上, 连字符别名
 sudo ./deployments/scripts/deploy-cluster.sh --phase addon          # 仅 addon 阶段
@@ -434,7 +434,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 ## 断点续跑(REPEAT 语义, 重要)
 
 - **`REPEAT: 0`(可断点续跑)**: 安装成功后写状态文件, 重跑部署自动**跳过已完成模块**(断点继续, 不从头开始);
-  用 **`--fresh` 清空所有状态**后从零重装。适用:**重型安装模块**(k8s_deploy / gpu_operator 等)。
+  用 **`--fresh` 清空所有状态**后从零重装。适用:**重型安装模块**(k8s_deploy / metax_gpu 等)。
 - **`REPEAT: 1`(每次执行)**: 不写状态, 每次部署都执行。适用:**幂等快速检查**(metallb / local_path /
   k8s_registry / verify_* 等)。
 - 状态文件: `deployments/config/.deploy.state`; 命令 `--fresh` / `--refresh` = `clear_state`。
@@ -530,11 +530,11 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
 - **master 有 GPU 时**: 用 `sudo mx-smi | grep "Attached GPUs"` 检测, 检测到的 master 自动移除 control-plane 污点并 uncordon。
 - **常用命令**:
   ```bash
-  sudo ./deploy-cluster.sh --steps gpu_operator            # 立即部署(自动带基座, 只部署指定的)
+  sudo ./deploy-cluster.sh --steps metax_gpu            # 只装该组件(精确模式; 不重跑基座)
   sudo ./deploy-cluster.sh --steps verify_metax_gpu          # 验证 GPU 识别(或 --steps verify)
   sudo ./deployments/scripts/tools/images/metax-save-images.sh   # 保存镜像 → 离线 tar
   sudo ./deployments/scripts/tools/images/metax-load-images.sh   # 加载 tar → 集群 registry(手动)
-  METAX_LIST_IMAGES=true bash modules/03_addon/04_gpu_operator.sh   # 打印所需镜像 pull/save 命令
+  METAX_LIST_IMAGES=true bash modules/03_addon/06_metax_gpu.sh   # 打印所需镜像 pull/save 命令
   ```
 
 ## NVIDIA GPU Operator 部署速查(英伟达; 2026-10-14 新增)
@@ -553,10 +553,10 @@ sudo ./deployments/scripts/deploy-cluster.sh --list-steps           # 查看全�
   由 operator 运行期组合 —— 只用 `grep image:` 抓完整 ref 会漏; v26 起 **GFD 已并入 device-plugin 镜像**。
 - **常用命令**:
   ```bash
-  sudo ./deploy-cluster.sh --enable nvidia_gpu_operator       # 写入开关(下次全量生效)
-  sudo ./deploy-cluster.sh --steps nvidia_gpu_operator        # 立即部署
+  sudo ./deploy-cluster.sh --enable nvidia_gpu       # 启用并立即部署(同时写 cluster.conf)
+  sudo ./deploy-cluster.sh --steps nvidia_gpu        # 立即部署
   sudo ./deploy-cluster.sh --steps verify_nvidia_gpu          # 端到端验证(无卡=组件级边界)
-  NVIDIA_LIST_IMAGES=true bash modules/03_addon/08_nvidia_gpu_operator.sh   # 打印备料清单(不部署)
+  NVIDIA_LIST_IMAGES=true bash modules/03_addon/08_nvidia_gpu.sh   # 打印备料清单(不部署)
   sudo ./deployments/scripts/tools/images/nvidia-save-images.sh [--list]    # 联网机备料
   ```
 

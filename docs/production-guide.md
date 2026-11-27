@@ -22,7 +22,7 @@
 | 块存储 / 文件存储 / 对象存储(S3) | `CEPH_CSI_ENABLED` / `CEPHFS_ENABLED` / `CEPH_RGW_ENABLED` | 随 `CEPH_CSI_ENABLED` | §3.2–§3.4 |
 | 接入**外部已有** Ceph 集群 | `CEPH_MODE=external` + `external-ceph.env` | `internal` | §3.5 |
 | RDMA 共享设备插件(IB/RoCE) | `RDMA_ENABLED` | **开** | §4 |
-| 沐曦(MetaX)GPU Operator | `GPU_OPERATOR_ENABLED` | **开** | §5 |
+| 沐曦(MetaX)GPU Operator | `METAX_GPU_ENABLED` | **开** | §5 |
 
 ### 0.2 本指南覆盖的 5 个"怎么配"
 
@@ -86,7 +86,7 @@ kubectl get nodes                                # 容器内已配好集群访�
 |---|---|---|
 | `env` | `vm_network` · `vm_sshkey` · `vm_create` · `harbor` | 宿主机与外部 LB 的**前置准备**(虚拟机场景才需要;裸金属一般只用到 SSH 密钥) |
 | `k8s` | `k8s_passwordless` → `k8s_workerbm` → `k8s_hosts` → `k8s_inventory` → `k8s_ntp` → `pre_install_check` → **`k8s_deploy`** → `kube_vip` → `api_local_lb` → `k8s_scale` + 两个 verify | 集群基座与 API 入口 |
-| `addon` | `metallb` → `ceph` → `ceph_csi` → `local_path` → `registry` → `gpu_operator` → `rdma_shared_dev_plugin` → … + 各 verify | 集群能力与 operator |
+| `addon` | `metallb` → `ceph` → `ceph_csi` → `local_path` → `registry` → `metax_gpu` → `rdma_shared_dev_plugin` → … + 各 verify | 集群能力与 operator |
 
 **两个易错点**(【代码】有护栏,但要知道):
 
@@ -838,15 +838,15 @@ metax-operator (Deployment, 带 master 容忍+偏好亲和)
 
 ```bash
 # cluster.conf(默认即为推荐值)
-GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"     # 默认开:全量部署即装 GPU
+METAX_GPU_ENABLED="${METAX_GPU_ENABLED:-${GPU_OPERATOR_ENABLED:-true}}"  # 默认开; 旧名 GPU_OPERATOR_ENABLED 仍识别
 CONTAINERD_CONFIG_VERSION="${CONTAINERD_CONFIG_VERSION:-3}"
 METAX_CLUSTER_TYPE="${METAX_CLUSTER_TYPE:-k8s}"
 METAX_DRIVER_DEPLOY_POLICY="${METAX_DRIVER_DEPLOY_POLICY:-PreferHost}"
 
 # 部署
-sudo ./deploy-cluster.sh --steps gpu_operator      # 只装 GPU(基座会自动补齐)
+sudo ./deploy-cluster.sh --steps metax_gpu      # 只装 GPU(精确模式; 不重跑基座)
 sudo ./deploy-cluster.sh --with-cubestack          # 或随全量部署一起
-sudo ./deploy-cluster.sh --enable gpu_operator     # 或只写开关,下次全量生效
+sudo ./deploy-cluster.sh --enable metax_gpu     # 或启用并立即部署(同时写配置)
 
 # 验证
 sudo ./deploy-cluster.sh --steps verify_metax_gpu
@@ -948,7 +948,7 @@ kubectl -n metax-operator get ds -o custom-columns=NAME:.metadata.name,SEL:.spec
 | `CEPH_MODE` / `CEPH_NODE_ROLE` / `CEPH_MON_COUNT` | `internal` / `master` / `3` | 内部模式,存储节点=master,mon=3 |
 | `CEPHFS_ENABLED` / `CEPH_RGW_ENABLED` | `true` / `true` | 文件存储 + S3 |
 | `RDMA_ENABLED` / `RDMA_HCA_MODE` | `true` / `by-link` | RDMA 共享设备插件 |
-| `GPU_OPERATOR_ENABLED` / `CONTAINERD_CONFIG_VERSION` | `true` / `3` | 沐曦 GPU operator |
+| `METAX_GPU_ENABLED` / `CONTAINERD_CONFIG_VERSION` | `true` / `3` | 沐曦 GPU operator |
 | `NFD_ENABLED` | `false` | 未启用的可选能力 |
 
 ### 6.2 一页验证命令(交付/验收时照跑)

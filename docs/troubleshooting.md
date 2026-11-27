@@ -154,7 +154,7 @@ echo x | nc -u <节点IP> 8472
 
 - **该 fabric 第二形态: MetalLB VIP 的跨段投递也会时通时断(2026-10-14 实机)**: 部署机 → `192.0.2.221:5000`
   (registry VIP)死(连 ICMP 都回不可达), 而同 registry 的 NodePort(`<master>:30492`)与集群内节点侧 VIP
-  均正常 —— 同一天曾正常工作半小时后变死。**缓解已落**: `08_nvidia_gpu_operator.sh` 的 registry 端点
+  均正常 —— 同一天曾正常工作半小时后变死。**缓解已落**: `08_nvidia_gpu.sh` 的 registry 端点
   **自适应降级**(VIP 探测不通 → 查 svc 实际 nodePort → 推送/预检全程走它); 其余模块同类需求可照搬
   (更好归宿 = 下沉 lib-common 的 REGISTRY_DIRECT 派生, 待排)。
 
@@ -1992,7 +1992,7 @@ spec 被 admission 拒绝。helm 可能先把 CR 的 `global.imageRegistry` 改�
 - 模块自检只判断 `startswith(目标base)`，双前缀值也以目标 base 开头 → 自检假绿。
 
 **根因**
-`08_nvidia_gpu_operator.sh` 的 CR 纠偏旧逻辑是"值不以目标 base 开头就 `base + "/" + 原值`"；
+`08_nvidia_gpu.sh` 的 CR 纠偏旧逻辑是"值不以目标 base 开头就 `base + "/" + 原值`"；
 从 Harbor 在线切回内置 registry 时，原值已带 `harbor.isuanova.com/mirrors/`，再拼一次就叠加成双前缀。
 
 **解法(已根治)**
@@ -2002,7 +2002,7 @@ spec 被 admission 拒绝。helm 可能先把 CR 的 `global.imageRegistry` 改�
 - 手工修复:
   ```bash
   kubectl get clusterpolicy cluster-policy -o yaml | grep repository:   # 确认双前缀
-  ./deployments/scripts/deploy-cluster.sh --steps nvidia_gpu_operator   # 重新纠偏
+  ./deployments/scripts/deploy-cluster.sh --steps nvidia_gpu   # 重新纠偏
   kubectl get clusterpolicy cluster-policy -o yaml | grep repository: | head
   # 期望 registry.cubestack.io:5000/mirrors/nvcr.io/nvidia/...
   ```

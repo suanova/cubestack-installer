@@ -82,6 +82,11 @@ modules/<NN_phase>/<NN>_<category>_<action>.sh
 
 示例:`modules/01_env/01_vm_network.sh`、`modules/02_k8s/06_k8s_deploy.sh`、`modules/03_addon/09_multus.sh`。
 
+> ★ **GPU Operator 命名(2026-11-27)**:统一 `<vendor>_gpu` —— `metax_gpu` / `nvidia_gpu`,
+> 未来厂商用 `amd_gpu` / `t_head_gpu`。**不要**再写 `gpu_operator`(只指沐曦, 已造成歧义)或
+> `<vendor>_gpu_operator`(过长)。旧名用模块自声明 `# ALIAS: <旧名>` 兼容(如 `metax_gpu` 声明
+> `ALIAS: gpu_operator`), 配置开关也用厂商前缀(`METAX_GPU_ENABLED` / `NVIDIA_GPU_OPERATOR_ENABLED`)。
+
 ### 2.2 模块元数据头(必填)
 
 每个模块文件头部用注释声明元数据,框架自动解析:
@@ -95,6 +100,7 @@ modules/<NN_phase>/<NN>_<category>_<action>.sh
 # DEFAULT: 0                  # 1=默认启用; 0=需 --enable / TOGGLE / --steps
 # REPEAT: 0                   # 1=可重复执行(每次执行且不写断点状态)
 # TOGGLE: CEPH_ENABLED CEPH_CSI_ENABLED   # (可选) cluster.conf 变量名(空格分隔多变量=OR), 值为 true/1 时自动启用
+# ALIAS: old_name             # (可选) --steps/--enable/--skip 的兼容旧名(逗号分隔; 不可覆盖内置别名)
 # REQUIRES: k8s_deploy        # (可选) 依赖模块 key 列表(空格分隔), 执行前须已完成; 框架自动拓扑排序
 # UNINSTALL: 1                # (可选) 声明该模块可被 cluster-teardown 反序优雅卸载
 # 说明: <详细说明, 可选>
@@ -115,7 +121,8 @@ load_config
 | `PHASE` | 推荐 | `env`/`k8s`/`addon`,支持 `--phase` 过滤 |
 | `DEFAULT` | 推荐 | `1`=默认执行;`0`=需显式启用。缺省视为 `0` |
 | `REPEAT` | 推荐 | `1`=可重复执行(不写断点状态,每次收敛);`0`=断点续跑跳过 |
-| `TOGGLE` | 否 | cluster.conf 变量名;值为 `true/1/yes/on` 时自动默认启用(如 `TOGGLE: GPU_OPERATOR_ENABLED`) |
+| `TOGGLE` | 否 | cluster.conf 变量名;值为 `true/1/yes/on` 时自动默认启用(如 `TOGGLE: METAX_GPU_ENABLED`) |
+| `ALIAS` | 否 | `--steps`/`--enable`/`--skip` 兼容旧名(逗号分隔)。内置别名不可覆盖; 改名模块用它保留旧命令 |
 | `REQUIRES` | 否 | 依赖模块 key 列表(空格分隔);执行前须已完成。框架按 REQUIRES 做稳定拓扑排序(无依赖模块保持文件顺序),循环依赖/引用未知模块会报错。`--steps` 精确模式还会自动把依赖加入执行列表 |
 
 > ★ **远端 kubectl 统一初始化(2026-09-04 架构重构,强制)**:需要 SSH 到 master 执行 kubectl 的模块,在 `load_config` 之后**必须**调用 `init_remote_kubectl || exit 1`(lib-common.sh 幂等函数,提供 FIRST_MASTER/SSH_KEY/SSH()/K/SSH_CMD)。**禁止**在模块内手抄 `FIRST_MASTER=.../SSH() {...}/K="sudo kubectl..."` 初始化块 —— 历史事故: 新模块少复制一行 → set -u 下 `K: unbound variable`, 部署成功后崩溃。
@@ -140,7 +147,7 @@ load_config
 下并随 git 分发;模块安装时恒用这份本地副本,在线只用于比对刷新。**
 
 模板(定位/安装 chart 的模块):`deployments/scripts/modules/03_addon/02_ceph.sh` 与
-`06_gpu_operator.sh` 展示了 chart 路径定位与 `helm upgrade --install` 的完整写法。
+`06_metax_gpu.sh` 展示了 chart 路径定位与 `helm upgrade --install` 的完整写法。
 
 共享助手 `helm_chart_ensure`(用法见下面第 2 条)把"本地副本就绪 + digest 比对刷新"收敛到一处。
 operator 模块与 NVIDIA GPU operator 模块均调用它 —— 新模块**应当**直接用它,不要再手写一套比对逻辑。
@@ -236,7 +243,7 @@ operator 模块与 NVIDIA GPU operator 模块均调用它 —— 新模块**应�
 | `DASHBOARD_ENABLED` | `false` | addons.yml | dashboard |
 | `CERT_MANAGER_ENABLED` | `false` | addons.yml | cert-manager |
 | `GATEWAY_API_ENABLED` | `false` | addons.yml | Gateway API |
-| `GPU_OPERATOR_ENABLED` | `false` | `gpu_operator` 模块 | 沐曦 GPU Operator |
+| `METAX_GPU_ENABLED` | `false` | `metax_gpu` 模块 | 沐曦 GPU Operator |
 
 > 镜像仓库双定位:集群外 = Harbor(`HARBOR_ENABLED`,唯一方案);集群内 = kubespray registry addon(`REGISTRY_ENABLED`,默认不部署)。
 > `k8s_deploy`(基座)无开关:恒随全量部署(默认/--with-k8s/--with-cubestack);`--steps` 单组件模式不含基座。
@@ -293,7 +300,7 @@ addon_stub "my_component" MY_COMPONENT_STEPS
 > 现有占位模块(伪代码, 已用 `addon_stub`, 按 `grep -rl addon_stub deployments/scripts/modules/` 核实):
 > - `01_env/`: `harbor`(集群外仓库, 宿主机部署)
 > - `03_addon/`: `keycloak` / `kueue` / `kubevirt` / `lustre_csi`
-> 其余模块(gpu_operator / k8s_registry / ceph / ceph_csi 等)已是真实实现。
+> 其余模块(metax_gpu / k8s_registry / ceph / ceph_csi 等)已是真实实现。
 > 每个占位模块头部 `TODO` 注释即实现指引。
 
 ### 4.2 组件功能验证模块模板(verify_<组件>.sh)
@@ -339,8 +346,8 @@ sudo ./deploy-cluster.sh --with-scale                   # 扩容
 sudo ./deploy-cluster.sh --steps k8s_deploy,k8s_ntp  # 只跑指定模块(旧名自动映射)
 sudo ./deploy-cluster.sh --skip k8s_hosts --with-cubestack  # 跳某模块的全量部署(k8s_hosts 为 no-op, 可省略)
 sudo ./deploy-cluster.sh --phase k8s                    # 仅 k8s 阶段
-sudo ./deploy-cluster.sh --steps gpu_operator          # 立即部署某个 operator(自动带基座, 只部署指定的)
-sudo ./deploy-cluster.sh --enable gpu_operator         # 只写 cluster.conf 预启用(不部署, 下次全量生效)
+sudo ./deploy-cluster.sh --steps metax_gpu          # 只部署该 operator(精确模式; 不重跑基座)
+sudo ./deploy-cluster.sh --enable metax_gpu         # 启用并立即部署(同时写 cluster.conf)
 sudo ./deploy-cluster.sh --only <host> --with-scale     # 仅处理指定节点
 sudo ./deploy-cluster.sh --list-steps | --list | --fresh
 ```

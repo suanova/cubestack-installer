@@ -1,13 +1,17 @@
 #!/bin/bash
 # ============================================================
-# MODULE: gpu_operator
+# MODULE: metax_gpu
 # DESC: 部署沐曦 MetaX GPU Operator(镜像推送 + Helm 离线渲染安装 + GPU 资源验证)
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 0
-# TOGGLE: GPU_OPERATOR_ENABLED
+# TOGGLE: METAX_GPU_ENABLED GPU_OPERATOR_ENABLED
+# ALIAS: gpu_operator
 # UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_registry
+# 命名(2026-11-27): GPU operator 统一 <vendor>_gpu(metax_gpu/nvidia_gpu/amd_gpu/t_head_gpu),
+#   避免 gpu_operator 只指沐曦造成歧义; 旧名 gpu_operator 保留为别名。
+#   开关新名 METAX_GPU_ENABLED; 旧名 GPU_OPERATOR_ENABLED 仍识别(兼容存量 cluster.conf)。
 # 说明:
 #   · 断点续跑: REPEAT:0 → 安装成功写入状态, 重跑部署自动跳过(不重复重装); --fresh 清状态后重装。
 #     (幂等的就绪检查类模块(metallb/local_path/k8s_registry)用 REPEAT:1 每次执行)
@@ -41,8 +45,8 @@
 #     driver-manager → 旧行为下 metax-driver 必然 CrashLoop。无 GPU 的 master 的 mx-smi
 #     不可用不参与该判断; 有 PCI 但 mx-smi 不可用的节点才需要容器驱动(镜像须含对应内核模块)。
 #   · 参考: Kubernetes 沐曦GPU Operator部署文档(metax-gpu-k8s 0.15.3, MXMACA 3.7.0.7)  # secret-scan: allow(MXMACA 版本号)
-# 数据源: cluster.conf (GPU_OPERATOR_ENABLED / METAX_* / METAX_DRIVER_DEPLOY / REGISTRY_* / NODES / SSH_KEY_NAME)
-# 用法:   sudo ./deploy-cluster.sh --enable gpu_operator  或  GPU_OPERATOR_ENABLED=true
+# 数据源: cluster.conf (METAX_GPU_ENABLED(旧名 GPU_OPERATOR_ENABLED) / METAX_* / METAX_DRIVER_DEPLOY / REGISTRY_* / NODES / SSH_KEY_NAME)
+# 用法:   sudo ./deploy-cluster.sh --enable metax_gpu  或  METAX_GPU_ENABLED=true
 # ============================================================
 set -euo pipefail
 
@@ -149,7 +153,7 @@ _metax_cleanup_residual() {
 }
 
 # 卸载分支(优雅覆盖): 存在性检查 → helm uninstall(尽力) → 残留清理序列(与安装前清场同款)。
-# ⚠ 位于 TOGGLE 检查之前: GPU_OPERATOR_ENABLED=false 时旧 operator 也要能卸。
+# ⚠ 位于 TOGGLE 检查之前: METAX_GPU_ENABLED=false(旧名 GPU_OPERATOR_ENABLED)时旧 operator 也要能卸。
 if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
     init_remote_kubectl || exit 1
     _mns="${METAX_NAMESPACE:-metax-operator}"
@@ -199,7 +203,9 @@ if [ "${METAX_LIST_IMAGES:-false}" = "true" ]; then
 fi
 
 # ---- 开关 ----
-[ "${GPU_OPERATOR_ENABLED:-false}" = "true" ] || { say "GPU_OPERATOR_ENABLED=false, 跳过沐曦 GPU Operator"; exit 0; }
+# 新名 METAX_GPU_ENABLED 优先; 旧名 GPU_OPERATOR_ENABLED 兼容存量 cluster.conf。
+[ "${METAX_GPU_ENABLED:-${GPU_OPERATOR_ENABLED:-false}}" = "true" ] \
+    || { say "METAX_GPU_ENABLED=false(旧名 GPU_OPERATOR_ENABLED), 跳过沐曦 GPU Operator"; exit 0; }
 
 init_remote_kubectl || exit 1
 
@@ -762,4 +768,4 @@ echo "              后续插入沐曦 GPU 卡并确保驱动就绪后, 用 --st
 fi
 
 # 优雅覆盖登记(仅安装路径到达此处)
-record_installed_component "gpu_operator"
+record_installed_component "metax_gpu"

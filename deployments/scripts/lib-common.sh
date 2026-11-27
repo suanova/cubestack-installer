@@ -309,7 +309,7 @@ emit_ip() {
 # ---------------- skopeo 运行时最小 trust policy(/etc/containers/policy.json) ----------------
 # 本机(尤其 CLI 容器内)无容器运行时 daemon 配置目录时, skopeo copy/inspect 会因读不到
 # policy.json 而 fatal: "Error loading trust policy: open /etc/containers/policy.json: no such file or directory"。
-# 所有用 skopeo 的模块(tar 镜像推送: gpu_operator/ceph/... )source 本库后即自动就绪。
+# 所有用 skopeo 的模块(tar 镜像推送: metax_gpu/ceph/... )source 本库后即自动就绪。
 # 幂等: 已存在则不覆盖。insecureAcceptAnything 与本仓库离线内网 registry(--tls-verify=false)语义一致。
 ensure_skopeo_policy() {
     [ -f "/etc/containers/policy.json" ] && return 0
@@ -332,7 +332,7 @@ POLICY_EOF
 ensure_skopeo_policy
 
 # ---------------- 共享 skopeo 推送助手(tar → 集群内置 registry) ----------------
-# gpu_operator / metax-load 曾各自复制同一份 _push_skopeo/_reg_has_tag;
+# metax_gpu / metax-load 曾各自复制同一份 _push_skopeo/_reg_has_tag;
 # 集中到本库供新代码复用, 已有 metax/gpu 维持原状避免回归。
 # 全部为**新符号**, 不改任何现有调用方。
 
@@ -3639,7 +3639,7 @@ EOS
 #      直连 master IP, 证书 SAN 常不含该 IP → 宿主机 kubectl 会 TLS x509 校验失败;
 #   ② 调用 tools/lb/setup-api-expose.sh 幂等配置宿主机 6443→first master 的 DNAT
 #      (PREROUTING + OUTPUT), 让 API_DOMAIN 从宿主机可访问。
-# 所有连 API 的模块(gpu_operator/ceph_*/...)统一复用本函数, 不各自复制。
+# 所有连 API 的模块(metax_gpu/ceph_*/...)统一复用本函数, 不各自复制。
 # 用法: sync_kubeconfig → 退出码 0=宿主机可访问集群
 sync_kubeconfig() {
     local tmp newctx
@@ -3671,7 +3671,7 @@ sync_kubeconfig() {
     [ -n "${newctx}" ] && KUBECONFIG="${HOME}/.kube/config" kubectl config use-context "${newctx}" >/dev/null 2>&1 || true
     # ★ 强制收敛: 合并可能保留旧集群残留(如 lb.k8s.local / 直连 master IP, 不在证书 SAN → TLS 失败)。
     #   只把当前 context 对应 cluster 的 server 改写为 SAN 内 API_DOMAIN(保留证书校验), 不动其它集群。
-    #   注意: K/_ctx/_cl 必须 local —— 各 addon 模块(gpu_operator/ceph_*)顶层也有同名
+    #   注意: K/_ctx/_cl 必须 local —— 各 addon 模块(metax_gpu/ceph_*)顶层也有同名
     #   全局 K(远端 kubectl), 若此处用全局并 unset 会把调用方的 K 冲掉 → set -u 报 unbound。
     local K _ctx _cl
     K="KUBECONFIG=${HOME}/.kube/config kubectl"
@@ -3690,7 +3690,7 @@ sync_kubeconfig() {
     #     以**后写者**为准, 故宿主机曾长期把 k8s-api.cubestack.io 解析到 192.0.2.28(单点)而不是
     #     已就绪的 VIP 192.0.2.240(2026-09-28 实机)。现两处同源。
     #   · REGISTRY_DOMAIN → REGISTRY_IP(MetalLB VIP; NodePort 模式为派生出的节点 IP)。
-    #     补在这里的原因: 本函数是宿主机侧 kubectl/helm 消费者的公共入口(gpu_operator/
+    #     补在这里的原因: 本函数是宿主机侧 kubectl/helm 消费者的公共入口(metax_gpu/
     #     multus/rdma/ceph + 接入引导都会走)⇒ 受管域名**每轮安装都收敛一次**, 不必等各自的 addon 模块。
     local _api_entry
     _api_entry="$(api_entry_ip 2>/dev/null)" || _api_entry="${API_IP}"

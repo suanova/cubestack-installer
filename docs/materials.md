@@ -7,7 +7,7 @@ registry 拉取的制品，以及从哪里获取。它不存字节，只存身�
 ```yaml
 materials:
 - key: metax:k8s-images
-  module: gpu_operator
+  module: metax_gpu
   version: ${METAX_VERSION}
   file: metax-k8s-images.${METAX_VERSION}.run
   dest: offline-files/metax-gpu

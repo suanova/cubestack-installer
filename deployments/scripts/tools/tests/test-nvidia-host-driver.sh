@@ -16,7 +16,7 @@
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 LIB="${REPO_ROOT}/deployments/scripts/lib-common.sh"
-MOD="${REPO_ROOT}/deployments/scripts/modules/03_addon/08_nvidia_gpu_operator.sh"
+MOD="${REPO_ROOT}/deployments/scripts/modules/03_addon/08_nvidia_gpu.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 fail=0
 chk() { if [ "$2" = "$3" ]; then echo "  ok  $1"; else echo "  FAIL $1: 期望[$2] 实际[$3]"; fail=1; fi; }

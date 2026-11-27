@@ -262,7 +262,7 @@ fi
 export CUBESTACK_OS_CHECK_DONE=1
 export CUBESTACK_ONLINE=1
 export CUBESTACK_OPERATOR_ENABLED=false
-[ "${WITH_METAX}" = "1" ] && export GPU_OPERATOR_ENABLED=true
+[ "${WITH_METAX}" = "1" ] && export METAX_GPU_ENABLED=true
 export MODEL_IMAGES_ENABLED=false
 
 say "starting deploy-cluster.sh (online mode)"

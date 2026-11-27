@@ -119,8 +119,11 @@ REGISTRY_ENABLED="${REGISTRY_ENABLED:-1}"               # 集群内置 Registry(
 # (registry 域名/端口/容量等细节 → defaults §3.2)
 
 # ---- 附加组件开关(阶段四; 参数见 defaults §4.x) ----
-GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-true}"    # 沐曦 GPU Operator(默认启用; 见 4.1)
-NVIDIA_GPU_OPERATOR_ENABLED="${NVIDIA_GPU_OPERATOR_ENABLED:-false}"  # NVIDIA GPU Operator(默认关; --enable nvidia_gpu_operator; 见 4.7b)
+# GPU Operator 统一命名 <vendor>_gpu: metax_gpu / nvidia_gpu / amd_gpu / t_head_gpu
+METAX_GPU_ENABLED="${METAX_GPU_ENABLED:-${GPU_OPERATOR_ENABLED:-true}}"  # 沐曦 GPU Operator(默认启用; 见 4.1; --enable metax_gpu)
+# 旧名 GPU_OPERATOR_ENABLED(已废弃, 仍识别): 保持与 METAX_GPU_ENABLED 同步, 便于旧脚本/旧配置
+GPU_OPERATOR_ENABLED="${GPU_OPERATOR_ENABLED:-${METAX_GPU_ENABLED}}"
+NVIDIA_GPU_OPERATOR_ENABLED="${NVIDIA_GPU_OPERATOR_ENABLED:-false}"  # NVIDIA GPU Operator(默认关; --enable nvidia_gpu; 见 4.7b)
 ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR="${ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR:-false}"  # NVIDIA 部署模式: false=离线(tar→内置 registry; 默认) / true=在线(chart 直拉; 只可达 Harbor 时配 NVIDIA_GPU_OPERATOR_ONLINE_IMAGE_BASE, 见 4.7b)
 KEYCLOAK_ENABLED="${KEYCLOAK_ENABLED:-false}"           # 统一认证(占位; 见 4.4)
 KUEUE_ENABLED="${KUEUE_ENABLED:-false}"                 # 队列治理(占位; 见 4.4)
