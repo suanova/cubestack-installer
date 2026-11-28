@@ -59,6 +59,18 @@ CEPH_TOPOLOGY=auto                         # auto=1台走单节点、>=3台走�
 # LOCAL_PATH_ENABLED=false                 # 建议: registry 走 ceph 后彻底不装 local-path
 ```
 
+### 3.1 自动副本参数(推荐)
+
+**通常不需要手写 `CEPH_POOL_REPLICAS`/`CEPH_POOL_MIN_SIZE`/`CEPH_POOL_FAILURE_DOMAIN`**:
+- 单节点: 按可用 OSD 盘数自动选 `size=min(3, 盘数)`、`min_size=max(1,size-1)`、`failureDomain=osd`
+  - 1 盘 → `1/1/osd`(无冗余; `HEALTH_WARN: POOL_NO_REDUNDANCY` 属预期, 安装器直接放行, 不再白等 900s)
+  - 2 盘 → `2/1/osd`
+  - 3+ 盘 → `3/2/osd`
+- 多节点: 按有盘存储主机数自动选 `size=min(3, 主机数)`、`min_size=max(1,size-1)`、`failureDomain=host`
+  - 3+ 主机 → `3/2/host`
+- 显式设置的项优先; 自动值会通过 `CephCluster.spec.cephConfig` 创建期下发, `03_ceph_csi` /
+  `ceph-expose-external` 读取集群实际 `osd_pool_default_*` 保持一致。
+
 部署(03_addon 内按文件序号执行, ceph 在 k8s_registry **之前**; 全量默认 `--with-cubestack --skip-net`):
 ```bash
 sudo ./deployments/scripts/deploy-cluster.sh          # 默认全量(含 ceph/ceph_csi 若已启用)

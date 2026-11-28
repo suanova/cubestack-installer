@@ -58,6 +58,65 @@ fi
 init_remote_kubectl || { err "init_remote_kubectl 失败"; exit 1; }
 
 CEPH_NAMESPACE="${CEPH_NAMESPACE:-rook-ceph}"
+# ★ 2026-11-27 自动副本参数对齐(standalone apply): 独立执行时不知道 02_ceph 按盘数/主机数
+#   选出的 size/min_size。若用户未显式设置, 读取运行中集群的实际 osd_pool_default_*,
+#   避免单节点用默认 1/1 或多节点用 3/2 与集群不一致。
+if [ "${CEPH_MODE:-internal}" = "internal" ] \
+   && { [ "${CEPH_EXPLICIT_REPLICAS:-0}" != "1" ] || [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" != "1" ]; }; then
+    if SSH "${K}" -n "${CEPH_NAMESPACE}" get cephcluster rook-ceph >/dev/null 2>&1; then
+        _ex_size="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            timeout 15 ceph config get osd osd_pool_default_size 2>/dev/null) || true )"
+        _ex_min="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            timeout 15 ceph config get osd osd_pool_default_min_size 2>/dev/null) || true )"
+        _ex_size="$(printf '%s' "${_ex_size}" | tr -d '[:space:]')"
+        _ex_min="$(printf '%s' "${_ex_min}" | tr -d '[:space:]')"
+        case "${_ex_size}" in ''|*[!0-9]*) : ;; *)
+            [ "${CEPH_EXPLICIT_REPLICAS:-0}" = "1" ] || CEPH_EFF_POOL_REPLICAS="${_ex_size}" ;;
+        esac
+        case "${_ex_min}" in ''|*[!0-9]*) : ;; *)
+            if [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" != "1" ]; then
+                # ★ 2026-11-28(CodeRabbit 同源): 运行值可能大于最终 size(显式
+                #   CEPH_POOL_REPLICAS=1 重跑在仍沿用 3/2 默认的集群上)。照抄会导致
+                #   外部池/CephFilesystem 渲染出 min_size > size 的非法 profile。
+                case "${CEPH_EFF_POOL_REPLICAS:-}" in
+                    ''|*[!0-9]*) CEPH_EFF_POOL_MIN_SIZE="${_ex_min}" ;;   # 无有效 size 可比较, 保持原行为
+                    *)
+                        if [ "${_ex_min}" -le "${CEPH_EFF_POOL_REPLICAS}" ]; then
+                            CEPH_EFF_POOL_MIN_SIZE="${_ex_min}"
+                        else
+                            CEPH_EFF_POOL_MIN_SIZE=$(( CEPH_EFF_POOL_REPLICAS > 1 ? CEPH_EFF_POOL_REPLICAS - 1 : 1 ))
+                            warn "  集群 osd_pool_default_min_size=${_ex_min} > 最终 size=${CEPH_EFF_POOL_REPLICAS}, 自动 min_size 取 ${CEPH_EFF_POOL_MIN_SIZE}"
+                        fi ;;
+                esac
+            fi ;;
+        esac
+        # ★ 2026-11-28(CodeRabbit): 合并后成对校验 —— size/min 两个查询可独立失败:
+        #   size 读到 1 而 min 查询失败时, 旧 EFF min(如 2)会留下 1/2 的非法对。
+        #   不把半更新 profile 导出给 apply_main(池命令 / CephFilesystem 模板):
+        #   非显式 min 按最终 size 派生; 显式 min 与最终 size 冲突则直接拒绝。
+        case "${CEPH_EFF_POOL_REPLICAS:-}" in ''|*[!0-9]*) : ;; *)
+            case "${CEPH_EFF_POOL_MIN_SIZE:-}" in ''|*[!0-9]*) : ;; *)
+                if [ "${CEPH_EFF_POOL_MIN_SIZE}" -gt "${CEPH_EFF_POOL_REPLICAS}" ]; then
+                    if [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" = "1" ]; then
+                        err "  CEPH_POOL_MIN_SIZE(${CEPH_EFF_POOL_MIN_SIZE}) > 集群 osd_pool_default_size(${CEPH_EFF_POOL_REPLICAS}): 外部池/CephFilesystem profile 非法, 拒绝应用"
+                        exit 1
+                    fi
+                    CEPH_EFF_POOL_MIN_SIZE=$(( CEPH_EFF_POOL_REPLICAS > 1 ? CEPH_EFF_POOL_REPLICAS - 1 : 1 ))
+                    warn "  合并后 min_size > size, 自动 min_size 取 ${CEPH_EFF_POOL_MIN_SIZE}(size=${CEPH_EFF_POOL_REPLICAS})"
+                fi ;;
+            esac ;;
+        esac
+        case "${CEPH_EFF_POOL_REPLICAS:-}" in ''|*[!0-9]*) : ;; *)
+            if [ "${CEPH_EFF_POOL_REPLICAS}" -ge 3 ]; then
+                CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE=true
+            else
+                CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE=false
+            fi ;;
+        esac
+        export CEPH_EFF_POOL_REPLICAS CEPH_EFF_POOL_MIN_SIZE CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE
+        unset _ex_size _ex_min
+    fi
+fi
 EXPORT_CONF="${CEPH_EXTERNAL_CONF:-${REPO_ROOT}/deployments/config/external-ceph-self-define-access.conf}"
 ROOK_DIR="${CEPH_ROOK_MANIFEST_DIR:-${REPO_ROOT}/deployments/cubestack-addon/rook}"
 # ---- 外部专用资源/用户(2026-09-07 完整预定义; 对齐"外部 ceph-csi-operator 连接所需全部信息") ----

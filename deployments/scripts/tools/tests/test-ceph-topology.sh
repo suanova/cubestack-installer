@@ -76,4 +76,31 @@ chk "min>size 失败" "$(run '
     CEPH_EXPLICIT_MGR=0 CEPH_EXPLICIT_FAILURE_DOMAIN=0 CEPH_EXPLICIT_MDS=0 CEPH_EXPLICIT_MDS_STANDBY=0 CEPH_EXPLICIT_RGW=0
     if ceph_apply_effective_spec single >/dev/null 2>&1; then echo ok; else echo bad; fi')" "bad"
 
+echo "== ⑥ 自动池副本(未显式设置时按盘数/主机数) =="
+auto() {  # auto <topo> <cap> [环境变量...]
+    local _t="$1" _c="$2"; shift 2
+    run "
+      CEPH_EXPLICIT_REPLICAS=0 CEPH_EXPLICIT_MIN_SIZE=0 CEPH_EXPLICIT_FAILURE_DOMAIN=0
+      for kv in $*; do export \"\$kv\"; done
+      if ceph_auto_pool_profile '${_t}' '${_c}'; then
+        printf '%s/%s/%s/%s\n' \"\$CEPH_EFF_POOL_REPLICAS\" \"\$CEPH_EFF_POOL_MIN_SIZE\" \"\$CEPH_EFF_FAILURE_DOMAIN\" \"\$CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE\"
+      else echo bad; fi"
+}
+chk "single 1 盘 → 1/1/osd/false" "$(auto single 1)" "1/1/osd/false"
+chk "single 2 盘 → 2/1/osd/false" "$(auto single 2)" "2/1/osd/false"
+chk "single 3 盘 → 3/2/osd/true" "$(auto single 3)" "3/2/osd/true"
+chk "single 4 盘 → 3/2/osd/true" "$(auto single 4)" "3/2/osd/true"
+chk "multi 3 主机 → 3/2/host/true" "$(auto multi 3)" "3/2/host/true"
+chk "multi 5 主机 → 3/2/host/true" "$(auto multi 5)" "3/2/host/true"
+chk "显式 size2 优先 → 2/1/host/false" "$(auto multi 3 CEPH_EXPLICIT_REPLICAS=1 CEPH_POOL_REPLICAS=2)" "2/1/host/false"
+chk "显式 min3 + 3 盘 → 3/3/osd/true" "$(auto single 3 CEPH_EXPLICIT_MIN_SIZE=1 CEPH_POOL_MIN_SIZE=3)" "3/3/osd/true"
+chk "显式 min3 + 2 盘 → 失败" "$(auto single 2 CEPH_EXPLICIT_MIN_SIZE=1 CEPH_POOL_MIN_SIZE=3)" "bad"
+chk "capacity=0 → 失败" "$(auto single 0)" "bad"
+
+echo "== ⑦ 02_ceph / 03_ceph_csi 调用自动参数 =="
+MOD_CEPH="${REPO_ROOT}/deployments/scripts/modules/03_addon/02_ceph.sh"
+MOD_CSI="${REPO_ROOT}/deployments/scripts/modules/03_addon/03_ceph_csi.sh"
+grep -q 'ceph_auto_pool_profile' "${MOD_CEPH}" && echo "  ok  02_ceph 自动选参" || { echo "  FAIL 02_ceph 未调用 ceph_auto_pool_profile"; fail=1; }
+grep -q 'ceph_auto_pool_profile\|osd_pool_default_size' "${MOD_CSI}" && echo "  ok  03_ceph_csi 对齐集群参数" || { echo "  FAIL 03_ceph_csi 未对齐自动参数"; fail=1; }
+
 exit "${fail}"
