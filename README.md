@@ -54,8 +54,8 @@ installer 只消费本地树，不访问 MinIO/Harbor。
 ```bash
 sudo ./deployments/scripts/deploy-cluster.sh                    # 默认全量
 sudo ./deployments/scripts/deploy-cluster.sh --with-k8s         # 仅 kubespray 基座
-sudo ./deployments/scripts/deploy-cluster.sh --steps gpu_operator
-sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator
+sudo ./deployments/scripts/deploy-cluster.sh --steps metax_gpu    # 只装该组件(精确)
+sudo ./deployments/scripts/deploy-cluster.sh --enable metax_gpu   # 全量 + 启用该组件(同时写配置)
 ```
 
 ## 关键配置
@@ -65,7 +65,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --enable gpu_operator
 - `NODES`：节点列表；裸金属必须手动填写；
 - `SSH_DEFAULT_PASSWORD` / 节点独立密码；
 - `METALLB_POOL`：裸金属必须填写节点同网段空闲地址；
-- 组件开关：`CEPH_MODE=none|external|internal`、`MULTUS_ENABLED`、`RDMA_ENABLED`、`GPU_OPERATOR_ENABLED` 等。
+- 组件开关：`CEPH_MODE=none|external|internal`、`MULTUS_ENABLED`、`RDMA_ENABLED`、`METAX_GPU_ENABLED` 等。
 
 首次使用先复制模板：
 

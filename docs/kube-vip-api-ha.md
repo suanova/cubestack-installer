@@ -267,7 +267,7 @@ KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"      # 留空=kube-vip 自动检测
 > **2026-09-23 补充 —— 部署侧写域名的几个地方也收敛了。** 上面讲的是 kubespray 侧。部署框架
 > 自己还有若干处会写 `k8s-api.cubestack.io` 的解析(`03_k8s_hosts`、`07_k8s_scale` 推给新节点、
 > `tools/node/sync-hosts.sh`、`tools/node/prepare-workers.sh`、`tools/lb/setup-api-expose.sh`、
-> `06_gpu_operator` 等),原先是**一律写第一个 master** —— 与 kubespray 阶段二写入的
+> `06_metax_gpu` 等),原先是**一律写第一个 master** —— 与 kubespray 阶段二写入的
 > VIP **互相打架**(谁后跑谁生效),典型表现是"kube-vip 装好了,域名却还指着单台 master"。
 >
 > 现统一收敛到 `lib-common.sh` 的 **`api_entry_ip()`**: **VIP 已绑 → VIP,否则第一个 master**。

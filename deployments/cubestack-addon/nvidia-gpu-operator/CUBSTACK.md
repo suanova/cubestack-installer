@@ -3,8 +3,8 @@
 - **文件**: `gpu-operator-v26.7.2.tgz`(小 chart 的 tgz 形态)+ `.digest` 边车
 - **上游**: `oci://nvcr.io/nvidia/cloud-native-charts/gpu-operator`
   (备选经典仓库: `helm repo add nvidia https://helm.ngc.nvidia.com/nvidia`)
-- **用途**: `08_nvidia_gpu_operator.sh` 部署**恒用**本副本;在线模式仅用它比对刷新
-  (见 `helm_chart_ensure`, chart 升级手册见 `deployments/scripts/modules/03_addon/08_nvidia_gpu_operator.sh` 头注释)。
+- **用途**: `08_nvidia_gpu.sh` 部署**恒用**本副本;在线模式仅用它比对刷新
+  (见 `helm_chart_ensure`, chart 升级手册见 `deployments/scripts/modules/03_addon/08_nvidia_gpu.sh` 头注释)。
 - **镜像集**: 由 `deployments/scripts/tools/images/nvidia-chart-images.sh` 从渲染产物提取(唯一来源);
   离线 tar 由版本树的 `offline-files/nvidia-gpu-operator/` 提供。
 

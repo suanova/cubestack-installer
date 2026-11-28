@@ -15,7 +15,7 @@ description: CubeStackInstaller 新增部署模块的端到端标准流程技能
 | 事故 | 根因 | 本技能的对应规则 |
 |---|---|---|
 | `05_k8s_registry.sh: K: unbound variable` 部署成功后崩溃 | 模块引用了远端 kubectl 变量 `K` 但没定义(旧规范让各模块自己复制 4 行初始化块,新模块少复制一行就崩) | **规则 2: 必须调用 `init_remote_kubectl || exit 1`** |
-| `--steps local_path,k8s_registry` 意外带出 gpu_operator 部署 | OPERATOR_MODULES 手写列表漏配/语义不清,默认启用的 operator 被自动带出 | **规则 4: 依赖自动派生,用 `--list` 验证调度** |
+| `--steps local_path,k8s_registry` 意外带出 metax_gpu 部署 | OPERATOR_MODULES 手写列表漏配/语义不清,默认启用的 operator 被自动带出 | **规则 4: 依赖自动派生,用 `--list` 验证调度** |
 | 新模块插错序号 → registry 在 local_path 前执行 | 模块顺序全靠文件名序号,无依赖声明 | **规则 3: REQUIRES 声明依赖,拓扑排序保证顺序** |
 | 两个 deploy-cluster.sh 并发跑互相覆盖状态文件 | 无并发锁 | **规则 6: flock 已在入口生效,提醒用户不要并发** |
 | 私服抖动时组件装不上,"回退本地 chart" 空转 | 回退代码**写了**,但仓库里压根没有那份离线 chart —— 从没被提交过 | **规则 7: chart 离线副本必须 vendored 进 `cubestack-addon/<组件>/` 并随 git 分发** |
@@ -167,7 +167,7 @@ sudo ./deployments/scripts/deploy-cluster.sh --steps <key>
 ```
 
 **--steps 语义(架构规则, 不要违背)**:
-- `--steps X` 精确模式:只跑指定的 X + 其 REQUIRES 闭包依赖 + 基座(env/k8s 阶段 + metallb/local_path/k8s_registry),**不带出**默认启用的其他 operator(如 gpu_operator)
+- `--steps X` 精确模式:只跑指定的 X + 其 REQUIRES 闭包依赖 + 基座(env/k8s 阶段 + metallb/local_path/k8s_registry),**不带出**默认启用的其他 operator(如 metax_gpu)
 - `--steps verify` = 全部 verify_* 模块,不拉基座
 - operator 是**自动派生**的(有 TOGGLE 且不在 `BASE_MODULES=(k8s_deploy k8s_scale metallb local_path k8s_registry)`)= 新 operator 模块**无需**改 lib-module.sh 任何列表
 
@@ -206,7 +206,7 @@ if [ "${CUBESTACK_MODULE_ACTION:-install}" = "uninstall" ]; then
 fi
 ```
 
-- 分支**必须在 TOGGLE 跳过检查之前** —— 模块被关掉(GPU_OPERATOR_ENABLED=false 等)、但集群里还装着旧版时,也必须要能卸;卸载段自带所需变量派生与 `init_remote_kubectl`,不依赖安装路径的变量块。
+- 分支**必须在 TOGGLE 跳过检查之前** —— 模块被关掉(METAX_GPU_ENABLED=false 等)、但集群里还装着旧版时,也必须要能卸;卸载段自带所需变量派生与 `init_remote_kubectl`,不依赖安装路径的变量块。
 - `check-modules.sh` ⑲ 静态校验声明与分支位置(声明 `# UNINSTALL: 1` 必须含 `CUBESTACK_MODULE_ACTION:-install` 分支且行号在 TOGGLE 判断之前);卸载段要求与各组件卸载动作见 `docs/graceful-overwrite/design.md` §3.2。
 
 ## 修改既有模块的约束

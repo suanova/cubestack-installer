@@ -145,7 +145,7 @@ sudo ./deployments/scripts/tools/offline/verify-offline-files.sh \
 - `release` / `flat` / `sealed-dev`：失败**硬停**，输出坏文件与修复命令。
 - `unsealed-dev`：无清单只警告；`quick` 检出明确损坏时按
   `OFFLINE_VERIFY_STRICT_DEV=true`（默认）阻断。
-- 跳过：`--list`/`--list-steps`、纯 `--steps verify_*`、仅 `--enable` 写配置。
+- 跳过：`--list`/`--list-steps`、纯 `--steps verify_*`（`--enable` 现在会真正部署，不再跳过）。
 - `load_config` 在 `source release.env` 之前会校验它在 `SHA256SUMS` 里的 sha 和
   `_SUCCESS.sha256sums` 绑定；不一致直接拒绝（损坏文件不会被 root 执行）。
 

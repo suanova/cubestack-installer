@@ -21,8 +21,8 @@ description: CubeStack 集群 Operator 上架标准流程技能。当需要新�
 2. **不破坏已有**: 只新增模块/配置, 不修改他人模块的元数据头。
 3. **`cluster.conf` 为主, 职责三分**(新增/部署 operator 只记这套模型):
    - **全量部署**: `--with-cubestack` / 默认(无 flag) = 部署**基座 + cluster.conf 中已启用的全部 operator**; `--with-k8s` 仅部署 kubespray 基座(k8s + metallb/local-path/registry, 跳过全部 operator)。
-   - **预启用(写配置)**: `--enable X` = **只把 `XXX_ENABLED=true` 写入 cluster.conf(持久化), 不部署**; 下次 `--with-cubestack` / 默认部署生效。
-   - **立即部署单个**: `--steps X` = 部署被指定的 X(**自动带基座, 且只部署被指定的 operator, 不带出其它默认启用的**); `--steps verify` = 只跑全部验证模块。
+   - **启用并部署**: `--enable X` = 把 `XXX_ENABLED=true` 写入 cluster.conf(持久化)**并立即部署**; 单独执行 = 默认全量 + 该组件; `--enable X --list` 只读预览。
+   - **立即部署单个**: `--steps X` = 部署被指定的 X(**精确模式: 只跑 X + 其依赖, 不重跑基座, 不带出其它默认启用的 operator**); `--steps verify` = 只跑全部验证模块。
    - **排除**: `--skip X` = 全量部署时剔除。
    **必须**: 新增 operator **无需改任何列表** —— operator 由框架自动派生(有 `TOGGLE` 且不在 `BASE_MODULES`(k8s_deploy/k8s_scale/metallb/local_path/k8s_registry)即 operator), 写 TOGGLE 即自动进入 --steps/--enable 调度。
 4. **必须能离线**: 新增镜像进离线仓库 + `PRELOAD_IMAGE_PATTERNS`, 节点预加载。
@@ -49,13 +49,13 @@ description: CubeStack 集群 Operator 上架标准流程技能。当需要新�
 ### 2.1 配置开关进 `cluster.conf`(+ `cluster.conf.example`)
 ```bash
 # ---------------- XXX 组件(说明) ----------------
-XXX_ENABLED="${XXX_ENABLED:-false}"    # 默认 false; --with-cubestack 按此部署全部启用; --enable 写 true; 立即部署用 --steps
+XXX_ENABLED="${XXX_ENABLED:-false}"    # 默认 false; --with-cubestack 按此部署全部启用; --enable 启用并立即部署; 仅改配置请直接编辑 cluster.conf
 XXX_IP="${XXX_IP:-192.168.100.140}"         # 需要的外部 IP/端口从配置读, 勿硬编码在脚本
 ```
 > 规范: **`cluster.conf` 为主, `XXX_ENABLED=true` 才启用**(默认 false, 基座 addon metallb/local-path/registry 除外, 默认 true)。
 > - `--with-cubestack`/默认 = 基座 + cluster.conf 中为 true 的**全部** operator; `--with-k8s` = 仅基座(跳过全部 operator)。
-> - `--enable X` = 只写 `XXX_ENABLED=true` 到 cluster.conf(持久化), **不部署**; 下次 --with-cubestack 生效。
-> - `--steps X` = 立即部署被指定的 X(**自动带基座; 只部署被指定的 operator**); `--steps verify` = 只跑验证模块。
+> - `--enable X` = 写 `XXX_ENABLED=true` 到 cluster.conf(持久化)**并立即部署**(单独执行 = 默认全量 + X); 仅修改配置(不部署)请直接编辑 cluster.conf; `--enable X --list` = 只读预览(不写配置、不部署)。
+> - `--steps X` = 只部署被指定的 X(**精确模式: 只跑 X + 其依赖, 不重跑基座**); `--steps verify` = 只跑验证模块。
 > - `--skip X` = 全量部署时排除。
 > **必须**: 新增 operator 无需改任何列表 —— 框架自动派生(有 `TOGGLE` 且非 `BASE_MODULES` 即 operator), 写 TOGGLE 即自动进入调度。
 > 未实现的占位模块(addon_stub)保持 `false`。
@@ -131,8 +131,8 @@ XXX_IP="${XXX_IP:-192.168.100.140}"         # 需要的外部 IP/端口从配置
 ## 5. 常用命令
 
 ```bash
-sudo ./deployments/scripts/deploy-cluster.sh --steps <组件>            # 立即部署指定组件(自动带基座, 只部署指定的)
-sudo ./deployments/scripts/deploy-cluster.sh --enable <组件>           # 只写 cluster.conf 预启用(不部署, 下次全量生效)
+sudo ./deployments/scripts/deploy-cluster.sh --steps <组件>            # 只部署指定组件(精确模式; 不重跑基座)
+sudo ./deployments/scripts/deploy-cluster.sh --enable <组件>           # 启用并立即部署(同时写 cluster.conf)
 sudo ./deployments/scripts/deploy-cluster.sh --with-cubestack           # 部署基座 + 全部启用的 operator
 sudo ./deployments/scripts/deploy-cluster.sh --steps verify_<组件>      # 端到端验证
 sudo ./deployments/scripts/deploy-cluster.sh --list-steps               # 查看全部模块

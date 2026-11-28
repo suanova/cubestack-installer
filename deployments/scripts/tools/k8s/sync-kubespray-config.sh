@@ -772,7 +772,7 @@ PYEOF
     # ---- 6b. containerd_extra_runtime_args: 设备属主(2026-10-13) ----
     # 非 root 容器访问 MetaX GPU(/dev/mxcd)的节点前置 —— kubespray v2.32 **原生变量**
     # (注入 [plugins."io.containerd.cri.v1.runtime"] 段; 角色默认值注释里的第一个示例就是本键)。
-    # 声明式渲染 ⇒ 重装/新节点天然带上; 存量节点由 gpu_operator 模块的
+    # 声明式渲染 ⇒ 重装/新节点天然带上; 存量节点由 metax_gpu 模块的
     # tools/node/ensure-containerd-device-ownership.sh 即时落地。根因与生效时机见该工具头注释。
     # CONTAINERD_DEVICE_OWNERSHIP=false 时幂等收敛为"移除本块"(不动其它配置)。
     python3 - "${CONTAINERD_YML}" "${CONTAINERD_DEVICE_OWNERSHIP:-true}" << 'PYEOF'

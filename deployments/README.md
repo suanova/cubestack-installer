@@ -39,7 +39,7 @@
 
 > **单节点集群(仅 1 个 control-plane)**:`k8s_deploy` 部署完成后会自动移除该 master 的
 > `NoSchedule` 污点并 uncordon(设为可调度)。因为 metallb controller / local-path /
-> registry / gpu_operator 等普通 pod 无 control-plane 污点容忍, 单节点若 master 不可调度会
+> registry / metax_gpu 等普通 pod 无 control-plane 污点容忍, 单节点若 master 不可调度会
 > 全部 Pending(registry 起不来 → 镜像推不进 → `ImagePullBackOff`)。`k8s_scale` 扩容后若仍
 > 是单 control-plane 也会重新收敛一次(kubespray 扩容会重新给 control-plane 打污点)。
 
@@ -57,7 +57,7 @@
 | 阶段 | 组件 | 开关(cluster.conf) | 模块 |
 |---|---|---|---|
 | P1-4 | Harbor 镜像仓库(**集群外私有仓库**, 环境准备阶段于宿主机就绪) | `HARBOR_ENABLED` | `01_env/04_harbor.sh` |
-| P1-5 | 沐曦 MetaX GPU Operator | `GPU_OPERATOR_ENABLED` | `03_addon/01_gpu_operator.sh` |
+| P1-5 | 沐曦 MetaX GPU Operator | `METAX_GPU_ENABLED` | `03_addon/06_metax_gpu.sh` |
 | P1-6/7 | Ceph 存储集群 + Ceph CSI(RBD/RGW/CephFS) | `CEPH_ENABLED` / `CEPH_CSI_ENABLED` | `03_addon/06_ceph.sh` / `07_ceph_csi.sh` |
 | P2-1 | Keycloak 统一认证 | `KEYCLOAK_ENABLED` | `03_addon/09_keycloak.sh` |
 | P2-2 | Kueue 队列治理(DEV-29) | `KUEUE_ENABLED` | `03_addon/10_kueue.sh` |
@@ -188,7 +188,7 @@ sudo bash deployments/scripts/modules/03_addon/05_harbor.sh
 sudo ./deployments/scripts/deploy-cluster.sh --with-scale
 ```
 
-**组件开关**(`cluster.conf` 中 `true/false`):`HARBOR_ENABLED` / `CEPH_ENABLED` / `CEPH_CSI_ENABLED` / `GPU_OPERATOR_ENABLED` / `KEYCLOAK_ENABLED` / `KUEUE_ENABLED` / `KUBEVIRT_ENABLED` / `LUSTRE_CSI_ENABLED` / `LOCAL_PATH_ENABLED`(默认 false) / `REGISTRY_ENABLED`(默认 0) 等(K8s 基座 `k8s_deploy` 恒随全量部署、扩容 `k8s_scale` 仅命令行触发, 均无开关)。
+**组件开关**(`cluster.conf` 中 `true/false`):`HARBOR_ENABLED` / `CEPH_ENABLED` / `CEPH_CSI_ENABLED` / `METAX_GPU_ENABLED` / `KEYCLOAK_ENABLED` / `KUEUE_ENABLED` / `KUBEVIRT_ENABLED` / `LUSTRE_CSI_ENABLED` / `LOCAL_PATH_ENABLED`(默认 false) / `REGISTRY_ENABLED`(默认 0) 等(K8s 基座 `k8s_deploy` 恒随全量部署、扩容 `k8s_scale` 仅命令行触发, 均无开关)。
 
 ---
 

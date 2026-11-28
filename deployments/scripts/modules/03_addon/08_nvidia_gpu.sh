@@ -1,12 +1,13 @@
 #!/bin/bash
 # ============================================================
-# MODULE: nvidia_gpu_operator
+# MODULE: nvidia_gpu
 # DESC: 部署 NVIDIA GPU Operator(英伟达官方)—— 离线=镜像集推入集群内置 registry + vendored
 #       chart 安装;在线=按 chart 定义(或 Harbor 镜像前缀)直接拉取。预编译驱动容器模式(免内核包下载)。
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 0
 # TOGGLE: NVIDIA_GPU_OPERATOR_ENABLED
+# ALIAS: nvidia_gpu_operator
 # UNINSTALL: 1
 # REQUIRES: k8s_deploy k8s_registry
 # 说明:
@@ -33,7 +34,7 @@
 #     支持(镜像虽在集内, repository 未覆盖, 启用需按文档补 --set 与备料)。
 # 数据源: cluster.conf (NVIDIA_GPU_OPERATOR_* / ONLINE_DEPLOY_NVIDIA_GPU_OPERATOR / NFD_ENABLED /
 #         REGISTRY_* / NODES / SSH_KEY_NAME)
-# 用法:   sudo ./deploy-cluster.sh --steps nvidia_gpu_operator
+# 用法:   sudo ./deploy-cluster.sh --steps nvidia_gpu
 # ============================================================
 set -euo pipefail
 
@@ -126,7 +127,7 @@ fi
 
 init_remote_kubectl || exit 1
 command -v helm >/dev/null 2>&1 || { err "未找到 helm(需 3.0+); CLI 镜像已内置, 宿主手工跑请先安装"; exit 1; }
-skopeo_require "nvidia_gpu_operator"
+skopeo_require "nvidia_gpu"
 
 # Harbor 可达性(与 nvcr 同构; auto 模式 chart 刷新探测用)
 _nvcr_reachable() {
@@ -562,4 +563,4 @@ echo "  端到端验证:  sudo ./deploy-cluster.sh --steps verify_nvidia_gpu"
 echo "  卸载:        删除模块状态后重跑本模块卸载(cluster-teardown 反序优雅卸载), 或 helm uninstall ${RELEASE} -n ${NS}"
 
 # 优雅覆盖登记(仅安装路径到达此处)
-record_installed_component "nvidia_gpu_operator"
+record_installed_component "nvidia_gpu"

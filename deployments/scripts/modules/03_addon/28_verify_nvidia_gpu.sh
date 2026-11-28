@@ -6,7 +6,7 @@
 # PHASE: addon
 # DEFAULT: 0
 # REPEAT: 1
-# REQUIRES: nvidia_gpu_operator k8s_registry
+# REQUIRES: nvidia_gpu k8s_registry
 # 说明:
 #   · 有卡判据 = 节点 PCI vendor 0x10de(sysfs, 不依赖 nvidia-smi); 有卡但 allocatable 为空 ⇒ 硬失败;
 #     无卡 ⇒ 组件级通过 + 醒目边界提示(exit 0), 不把"没验卡"伪装成"已验卡"。

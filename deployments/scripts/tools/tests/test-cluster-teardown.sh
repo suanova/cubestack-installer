@@ -106,14 +106,15 @@ cat > "${INV}" <<'EOF'
 EOF
 ORDER="$(CLUSTER_CONF="${TMP}/cluster.conf" CUBESTACK_TEARDOWN_TEST_INVENTORY="${INV}" bash "${ENGINE}" --list --raw 2>/dev/null)"
 chk "③ ceph 压轴(最后一行)" "ceph" "$(printf '%s\n' "${ORDER}" | tail -1 | cut -f1)"
-chk "③ 登记 seq 降序生效(nvidia_gpu_operator 在 ceph 前)" "nvidia_gpu_operator" "$(printf '%s\n' "${ORDER}" | sed -n '1p' | cut -f1)"
+chk "③ 登记 seq 降序生效(旧名 nvidia_gpu_operator→nvidia_gpu, 在 ceph 前)" "nvidia_gpu" "$(printf '%s\n' "${ORDER}" | sed -n '1p' | cut -f1)"
+chk "③ 旧名登记归一后来源=record" "record" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '$1=="nvidia_gpu"{print $2}')"
 chk "③ 登记 seq 降序判别(multus seq5 先于 registry seq2)" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
   { n++; if ($1=="multus") a=n; if ($1=="k8s_registry") b=n }
   END { print (a>0 && b>0 && a<b) ? 1 : 0 }')"
 chk "③ metallb 无 UNINSTALL → 不进拆序" "0" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'metallb')"
 chk "③ ceph_csi 有 UNINSTALL → 进拆序" "1" "$(printf '%s\n' "${ORDER}" | cut -f1 | grep -cx 'ceph_csi')"
 chk "③ 探测降级组(netshoot)在登记组之后" "1" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '
-  { n++; if ($1=="nvidia_gpu_operator") a=n; if ($1=="netshoot") b=n }
+  { n++; if ($1=="nvidia_gpu") a=n; if ($1=="netshoot") b=n }
   END { print (a>0 && b>0 && b>a) ? 1 : 0 }')"
 chk "③ netshoot 来源=probe" "probe" "$(printf '%s\n' "${ORDER}" | awk -F'\t' '$1=="netshoot"{print $2}')"
 

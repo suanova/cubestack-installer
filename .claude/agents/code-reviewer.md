@@ -15,7 +15,7 @@ tools: Read, Grep, Glob, Bash
    - 不得引入依赖 **UDP 4789** 或**无封装直连路由**(direct/native)的方案 —— 本集群底层是 proxy-ARP fabric, 这两类不可行(见 `docs/cluster-architecture.md`)。
    - cilium 保留但仅作待验证备选, 不得设为默认。
 3. **模块元数据**: `deployments/scripts/modules/` 下模块头部必须有 `MODULE/DESC/PHASE/DEFAULT/REPEAT/TOGGLE`; 且 `set -euo pipefail` + `source lib-common.sh` + `load_config`; 开关类要有 TOGGLE 检查。
-4. **operator 调度模型(硬性)**: 职责三分 —— `--with-cubestack`/默认=部署基座+全部启用 operator; `--enable X`=只写 cluster.conf 预启用(不部署); `--steps X`=立即部署被指定的 X(自动带基座)。**新增/现有 operator 的 key 必须在 `lib-module.sh` 的 `OPERATOR_MODULES` 列表中**, 否则无法被 `--steps`/`--enable` 调度。不得再把 `--enable X` 当作"立即部署"使用。
+4. **operator 调度模型(硬性)**: 职责三分 —— `--with-cubestack`/默认=部署基座+全部启用 operator; `--enable X`=写 cluster.conf 持久化并**立即部署**(单独执行=默认全量+X; `--enable X --list`=只读预览, 不写配置不部署); `--steps X`=单组件安装模式(只跑 X+其非基座依赖, 不重跑基座)。仅改配置(不部署)请直接编辑 cluster.conf。operator 由框架按 TOGGLE 自动派生进 `OPERATOR_MODULES`, 新增 operator 无需改任何列表。
 5. **同步脚本幂等**: `tools/k8s/sync-kubespray-config.sh` 的任何改动必须幂等, 且**默认路径不得改变现有行为**; 输出 YAML 必须合法。
 6. **离线约束**: 新组件镜像必须进离线文件目录 `${OFFLINE_FILES_DIR}/<集群>/images/`(默认 `deployments/offline-files/kubespray/<集群>/images/`)并加入 `PRELOAD_IMAGE_PATTERNS`。
 7. **文档同步**: 改动功能必须同步更新 `docs/cluster-architecture.md`(架构/operator 表)、`docs/troubleshooting.md`(按 症状→根因→解法→验证 模板)、相关 skill。只留口头结论 = 不合格。

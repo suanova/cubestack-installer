@@ -124,7 +124,7 @@ ip route get <远端podIP>             # 无封装时是否 via 节点且可达
 | **Calico** | CNI(容器网络) | IPIP 封装跨节点; BIRD 分发节点间 pod 路由; Felix 数据面 | fabric 兼容性最好(见 §3); 离线镜像齐 | kubespray 内置(`kube_network_plugin=calico`) |
 | **MetalLB** | 裸金属 LoadBalancer | Layer2: speaker 用 ARP 通告 VIP; controller 分配地址池 | 无云 LB 的裸金属/VM 环境标准方案; L2 通告与 IPIP 共存 | kubespray 内置 + `verify_metallb` 端到端验证 |
 | **metrics-server** | HPA 依赖的指标 | kubelet Summary API 聚合 | kubespray 标准组件, HPA 必需 | `METRICS_SERVER_ENABLED=true` |
-| **MetaX GPU Operator** | 沐曦 GPU 驱动/识别/调度 | helm chart + CRD(ClusterOperator)驱动组件 DaemonSet; 内置 registry 存放镜像 | 裸金属沐曦 GPU 必备; 离线 tar 加载 + helm 原生安装; master 有 GPU 时自动解除不可调度 | `GPU_OPERATOR_ENABLED=true` + 见 `docs/metax-gpu-operator.md` |
+| **MetaX GPU Operator** | 沐曦 GPU 驱动/识别/调度 | helm chart + CRD(ClusterOperator)驱动组件 DaemonSet; 内置 registry 存放镜像 | 裸金属沐曦 GPU 必备; 离线 tar 加载 + helm 原生安装; master 有 GPU 时自动解除不可调度 | `METAX_GPU_ENABLED=true` + 见 `docs/metax-gpu-operator.md` |
 | **Rook-Ceph** | 企业级分布式存储(块 RBD / 可选 CephFS / RGW) | Rook v1.21.1 operator + CephCluster(mon=3, host 故障域, 3 副本); OSD 用**自动分类出的可用盘**(`free ∪ ceph`, per-node devices); 节点经 label(`ceph-storage=rook-ceph`)选择 | 可承受节点故障的高可用存储(P1-6/7 刚需); 供 registry 等 PVC 后端(替代 local-path); 离线镜像 ctr import + lvm2 离线包 | `CEPH_ENABLED=true`/`CEPH_CSI_ENABLED=true` + `--steps ceph,ceph_csi` + 见 `docs/ceph-rook.md` |
 
 > 详细部署/开关见 `cluster.conf` 组件开关段与 `deployments/scripts/modules/`。
@@ -207,8 +207,8 @@ sudo ./deployments/scripts/deploy-cluster.sh --with-k8s   # 仅 kubespray 基座
 sudo ./deployments/scripts/deploy-cluster.sh --steps verify_metallb
 # 4) 扩容 / 组件
 sudo ./deployments/scripts/deploy-cluster.sh --with-scale            # 新节点先写 NODES
-sudo ./deployments/scripts/deploy-cluster.sh --steps <组件>           # 立即部署某个 operator(自动带基座, 只部署指定的)
-sudo ./deployments/scripts/deploy-cluster.sh --enable <组件>          # 只写 cluster.conf 预启用(不部署, 下次全量生效)
+sudo ./deployments/scripts/deploy-cluster.sh --steps <组件>           # 只部署该 operator(精确模式; 不重跑基座)
+sudo ./deployments/scripts/deploy-cluster.sh --enable <组件>          # 启用并立即部署(同时写 cluster.conf)
 ```
 
 **离线要点**: 镜像预加载 `PRELOAD_IMAGE_PATTERNS`(calico 默认 + cilium 备选); 离线文件目录 `${OFFLINE_FILES_DIR}/<集群>/images/`(默认 `deployments/offline-files/kubespray/<集群>/images/`)。
