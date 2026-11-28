@@ -49,12 +49,12 @@ description: CubeStack 集群 Operator 上架标准流程技能。当需要新�
 ### 2.1 配置开关进 `cluster.conf`(+ `cluster.conf.example`)
 ```bash
 # ---------------- XXX 组件(说明) ----------------
-XXX_ENABLED="${XXX_ENABLED:-false}"    # 默认 false; --with-cubestack 按此部署全部启用; --enable 写 true; 立即部署用 --steps
+XXX_ENABLED="${XXX_ENABLED:-false}"    # 默认 false; --with-cubestack 按此部署全部启用; --enable 启用并立即部署; 仅改配置请直接编辑 cluster.conf
 XXX_IP="${XXX_IP:-192.168.100.140}"         # 需要的外部 IP/端口从配置读, 勿硬编码在脚本
 ```
 > 规范: **`cluster.conf` 为主, `XXX_ENABLED=true` 才启用**(默认 false, 基座 addon metallb/local-path/registry 除外, 默认 true)。
 > - `--with-cubestack`/默认 = 基座 + cluster.conf 中为 true 的**全部** operator; `--with-k8s` = 仅基座(跳过全部 operator)。
-> - `--enable X` = 只写 `XXX_ENABLED=true` 到 cluster.conf(持久化), **不部署**; 下次 --with-cubestack 生效。
+> - `--enable X` = 写 `XXX_ENABLED=true` 到 cluster.conf(持久化)**并立即部署**(单独执行 = 默认全量 + X); 仅修改配置(不部署)请直接编辑 cluster.conf; `--enable X --list` = 只读预览(不写配置、不部署)。
 > - `--steps X` = 只部署被指定的 X(**精确模式: 只跑 X + 其依赖, 不重跑基座**); `--steps verify` = 只跑验证模块。
 > - `--skip X` = 全量部署时排除。
 > **必须**: 新增 operator 无需改任何列表 —— 框架自动派生(有 `TOGGLE` 且非 `BASE_MODULES` 即 operator), 写 TOGGLE 即自动进入调度。
