@@ -125,7 +125,7 @@ DETECT="${REPO_ROOT}/deployments/scripts/tools/k8s/ceph-detect-disks.sh"
 chk_contains "load_config 输出走 stderr" '{ load_config; } >&2' "$(cat "${DETECT}")"
 chk_contains "预检只解析本节点机器行" 'grep -E "^${_hn}:"' "$(cat "${REPO_ROOT}/deployments/scripts/lib-common.sh")"
 
-echo "== ⑬ .mgr 池纠正行为: 成功置 size/min_size, 失败返回非 0 =="
+echo "== ⑬ .mgr 池纠正行为: 成功置 size/min_size, 失败/超时返回非 0, ENOENT 才跳过 =="
 sed -n '/_ceph_ensure_osd_crush_default() {/,/^    }$/p' "${CEPH_MOD}" > "${TMP}/mgr.sh"
 [ -s "${TMP}/mgr.sh" ] || { echo "  FAIL 无法抽取 _ceph_ensure_osd_crush_default"; fail=1; }
 # 成功路径(不注入失败点): 断言 size/min_size 调用与 size=1 确认参数
@@ -157,5 +157,121 @@ out="$( ( set +u
     . "${TMP}/mgr.sh"
     _ceph_ensure_osd_crush_default; echo "rc=$?" ) )"
 chk_contains ".mgr 规则失败 → rc=1" "rc=1" "${out}"
+# CodeRabbit 2026-11-28: 查询超时(124)/exec 失败不能被当成"池不存在"跳过纠正并 rc=0
+out="$( ( set +u
+    warn() { :; }
+    K=kubectl CEPH_NAMESPACE=rook-ceph CEPH_POOL_REPLICAS=1 CEPH_POOL_MIN_SIZE=1
+    _calls=""
+    SSH() { _calls="${_calls}$*"$'\n'; case "$*" in
+        *'crush rule ls'*)  echo cubestack-osd ;;
+        *'crush rule dump'*) echo '{"rule_id":5}' ;;
+        *'pool get .mgr size'*) echo 'Error: command timed out' >&2; return 124 ;;
+        *) return 0 ;;
+      esac; }
+    . "${TMP}/mgr.sh"
+    _ceph_ensure_osd_crush_default; echo "rc=$?"
+    printf '%s' "${_calls}" ) )"
+chk_contains "查询超时 → rc=1(等待循环重试)" "rc=1" "${out}"
+chk_not_contains "查询超时 → 不跳过纠正" "pool set .mgr" "${out}"
+# 池确实不存在(ENOENT) → 跳过纠正并 rc=0
+out="$( ( set +u
+    warn() { :; }
+    K=kubectl CEPH_NAMESPACE=rook-ceph CEPH_POOL_REPLICAS=1 CEPH_POOL_MIN_SIZE=1
+    _calls=""
+    SSH() { _calls="${_calls}$*"$'\n'; case "$*" in
+        *'crush rule ls'*)  echo cubestack-osd ;;
+        *'crush rule dump'*) echo '{"rule_id":5}' ;;
+        *'pool get .mgr size'*) echo "Error ENOENT: unrecognized pool '.mgr'" >&2; return 2 ;;
+        *) return 0 ;;
+      esac; }
+    . "${TMP}/mgr.sh"
+    _ceph_ensure_osd_crush_default; echo "rc=$?"
+    printf '%s' "${_calls}" ) )"
+chk_contains "池不存在(ENOENT) → rc=0" "rc=0" "${out}"
+chk_not_contains "池不存在 → 跳过纠正" "pool set .mgr" "${out}"
+
+echo "== ⑭ 自动副本对齐: 显式 size=1 + 自动 min_size 不得继承大于 size 的运行值 =="
+# CodeRabbit 2026-11-28: 显式 CEPH_POOL_REPLICAS=1 重跑在仍沿用 3/2 默认的集群上时,
+# 旧实现把运行值 min_size=2 抄进 EFF → min_size > size 校验中止, 合法 1/1 profile 失败。
+sed -n '/★ 2026-11-27 自动副本参数对齐/,/unset _csi_host_count _csi_topo/p' "${CSI_MOD}" > "${TMP}/csi-align.sh"
+[ -s "${TMP}/csi-align.sh" ] || { echo "  FAIL 无法抽取 csi 自动副本对齐块"; fail=1; }
+run_align() {   # <explicit_rep> <pool_rep> <explicit_min> <pool_min> <eff_rep> <eff_min> <run_size> <run_min>
+    ( set +u
+      say() { :; }; warn() { :; }; err() { echo "ERR $*" >&2; }
+      ceph_auto_pool_profile() { return 1; }
+      _ar_rs="$7" _ar_rm="$8"
+      SSH() { case "$*" in
+          *osd_pool_default_size*)    echo "${_ar_rs}" ;;
+          *osd_pool_default_min_size*) echo "${_ar_rm}" ;;
+          *) return 0 ;;
+        esac; }
+      K=kubectl CEPH_NAMESPACE=rook-ceph
+      CEPH_EXPLICIT_REPLICAS="$1" CEPH_POOL_REPLICAS="$2"
+      CEPH_EXPLICIT_MIN_SIZE="$3" CEPH_POOL_MIN_SIZE="$4"
+      CEPH_EFF_POOL_REPLICAS="$5" CEPH_EFF_POOL_MIN_SIZE="$6"
+      CEPH_EFF_FAILURE_DOMAIN=osd CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE=false
+      _csi_topo=single _csi_host_count=1
+      . "${TMP}/csi-align.sh"
+      echo "after ${CEPH_POOL_REPLICAS}/${CEPH_POOL_MIN_SIZE}" ) 2>/dev/null
+}
+out="$(run_align 1 1 0 2 1 1 3 2)"
+chk_contains "显式 size=1 + 运行 3/2 → 1/1(不中止)" "after 1/1" "${out}"
+out="$(run_align 0 3 0 2 1 1 3 2)"
+chk_contains "全自动仍镜像运行值 → 3/2" "after 3/2" "${out}"
+out="$(run_align 1 1 1 1 1 1 3 2)"
+chk_contains "显式 min_size 不被覆盖 → 1/1" "after 1/1" "${out}"
+# 子进程 ceph-expose-external.sh: 整段自动副本对齐(读运行值 → 合并 → 成对校验 → 导出)
+sed -n '/自动副本参数对齐(standalone apply)/,/^fi$/p' "${EXPOSE}" > "${TMP}/expose-align.sh"
+[ -s "${TMP}/expose-align.sh" ] || { echo "  FAIL 无法抽取 expose 自动副本对齐块"; fail=1; }
+run_expose() {   # <run_size|""> <run_min|""> <explicit_rep> <explicit_min> <eff_rep> <eff_min>
+    ( set +u
+      say() { :; }; warn() { :; }; err() { echo "ERR $*" >&2; }
+      _xr_size="$1" _xr_min="$2"
+      SSH() { case "$*" in
+          *'get cephcluster rook-ceph'*) return 0 ;;
+          *osd_pool_default_size*)       [ -n "${_xr_size}" ] && echo "${_xr_size}" || return 1 ;;
+          *osd_pool_default_min_size*)   [ -n "${_xr_min}" ] && echo "${_xr_min}" || return 1 ;;
+          *) return 0 ;;
+        esac; }
+      K=kubectl CEPH_NAMESPACE=rook-ceph CEPH_MODE=internal
+      CEPH_EXPLICIT_REPLICAS="$3" CEPH_EXPLICIT_MIN_SIZE="$4"
+      CEPH_EFF_POOL_REPLICAS="$5" CEPH_EFF_POOL_MIN_SIZE="$6"
+      . "${TMP}/expose-align.sh"
+      echo "after ${CEPH_EFF_POOL_REPLICAS}/${CEPH_EFF_POOL_MIN_SIZE}" ) 2>/dev/null
+}
+chk_contains "expose: 显式 size=1 + 运行 min=2 → 1/1" "after 1/1" "$(run_expose 3 2 1 0 1 1)"
+chk_contains "expose: 全自动镜像运行 3/2" "after 3/2" "$(run_expose 3 2 0 0 1 1)"
+chk_contains "expose: 显式 min 不被覆盖 → 1/1" "after 1/1" "$(run_expose 3 2 1 1 1 1)"
+# CodeRabbit 2026-11-28(三次): size 读到 1 而 min 查询失败时, 旧 EFF min=2 会留下 1/2;
+# 合并后必须校验成对有效性(非显式 min 按最终 size 派生; 显式冲突拒绝)。
+chk_contains "expose: size 读到 1 / min 失败 → 修正 1/1" "after 1/1" "$(run_expose 1 "" 0 0 3 2)"
+chk_not_contains "expose: 显式 min 与运行 size 冲突 → 拒绝" "after" "$(run_expose 1 "" 0 1 1 2)"
+# CodeRabbit 2026-11-28(二次): 两个查询可独立失败 —— 回退只补"读取失败且未显式"的项,
+# 已成功读取的值必须保留(size 读到 2/min 失败时不能按 3 OSD 改成 3)。
+run_align_partial() {   # <fail_size> <fail_min> <run_size> <run_min> <osd_n>
+    ( set +u
+      say() { :; }; warn() { :; }; err() { echo "ERR $*" >&2; }
+      _ap_fs="$1" _ap_fm="$2" _ap_rs="$3" _ap_rm="$4" _ap_osd="$5"
+      SSH() { case "$*" in
+          *osd_pool_default_size*)     [ "${_ap_fs}" = "1" ] && return 1; echo "${_ap_rs}" ;;
+          *osd_pool_default_min_size*) [ "${_ap_fm}" = "1" ] && return 1; echo "${_ap_rm}" ;;
+          *'ceph osd ls'*)             seq 1 "${_ap_osd}" ;;
+          *) return 0 ;;
+        esac; }
+      K=kubectl CEPH_NAMESPACE=rook-ceph
+      CEPH_EXPLICIT_REPLICAS=0 CEPH_POOL_REPLICAS=3
+      CEPH_EXPLICIT_MIN_SIZE=0 CEPH_POOL_MIN_SIZE=2
+      CEPH_EFF_POOL_REPLICAS=1 CEPH_EFF_POOL_MIN_SIZE=1
+      CEPH_EFF_FAILURE_DOMAIN=osd CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE=false
+      _csi_topo=single _csi_host_count=1
+      . "${TMP}/csi-align.sh"
+      echo "after ${CEPH_POOL_REPLICAS}/${CEPH_POOL_MIN_SIZE}" ) 2>/dev/null
+}
+out="$(run_align_partial 0 1 2 0 3)"
+chk_contains "size 读到 2 / min 失败 → 保留 2, min 按 size 回退 1" "after 2/1" "${out}"
+out="$(run_align_partial 1 0 0 1 3)"
+chk_contains "size 失败 / min 读到 1 → 回填 3, 保留 min 1" "after 3/1" "${out}"
+out="$(run_align_partial 1 1 0 0 3)"
+chk_contains "两个都失败 → 按 3 OSD 回退 3/2" "after 3/2" "${out}"
 
 exit "${fail}"

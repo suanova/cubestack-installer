@@ -1149,6 +1149,53 @@ ceph_apply_effective_spec() {
            CEPH_EFF_MDS_ACTIVE_STANDBY CEPH_EFF_RGW_INSTANCES
 }
 
+# ceph_auto_pool_profile <single|multi> <capacity>
+#   在用户**未显式设置**副本参数时, 按实际可用资源自动选择"最佳"池副本:
+#     single: capacity = 可用 OSD 盘数 → size=min(3, capacity), min_size=max(1,size-1), fd=osd
+#     multi : capacity = 有盘存储主机数 → size=min(3, capacity), min_size=max(1,size-1), fd=host
+#   显式 CEPH_EXPLICIT_REPLICAS/MIN_SIZE/FAILURE_DOMAIN 优先, 本函数只补未设置项。
+#   例: 单节点 3 盘自动 3/2(osd), 2 盘自动 2/1(osd), 1 盘自动 1/1;
+#       3 节点自动 3/2(host)。返回 1 = capacity 非法或 min_size > replicas。
+ceph_auto_pool_profile() {
+    local topo cap size eff min fd
+    topo="$(ceph_norm_lower "${1:-}")"
+    cap="${2:-0}"
+    case "${topo}" in single|multi) : ;; *) return 1 ;; esac
+    case "${cap}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${cap}" -ge 1 ] || return 1
+    if [ "${topo}" = "single" ]; then fd="osd"; else fd="host"; fi
+    size=$(( cap < 3 ? cap : 3 ))
+    eff="${size}"
+    if [ "${CEPH_EXPLICIT_REPLICAS:-0}" = "1" ]; then
+        eff="${CEPH_EFF_POOL_REPLICAS:-${CEPH_POOL_REPLICAS:-${size}}}"
+        CEPH_EFF_POOL_REPLICAS="${eff}"
+    else
+        CEPH_EFF_POOL_REPLICAS="${size}"
+    fi
+    min=$(( eff > 1 ? eff - 1 : 1 ))
+    if [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" = "1" ]; then
+        CEPH_EFF_POOL_MIN_SIZE="${CEPH_EFF_POOL_MIN_SIZE:-${CEPH_POOL_MIN_SIZE:-${min}}}"
+    else
+        CEPH_EFF_POOL_MIN_SIZE="${min}"
+    fi
+    if [ "${CEPH_EXPLICIT_FAILURE_DOMAIN:-0}" = "1" ] && [ -n "${CEPH_POOL_FAILURE_DOMAIN:-}" ]; then
+        CEPH_EFF_FAILURE_DOMAIN="${CEPH_EFF_FAILURE_DOMAIN:-${CEPH_POOL_FAILURE_DOMAIN}}"
+    else
+        CEPH_EFF_FAILURE_DOMAIN="${fd}"
+    fi
+    case "${CEPH_EFF_POOL_REPLICAS:-}" in ''|*[!0-9]*) return 1 ;; esac
+    case "${CEPH_EFF_POOL_MIN_SIZE:-}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${CEPH_EFF_POOL_MIN_SIZE}" -le "${CEPH_EFF_POOL_REPLICAS}" ] || return 1
+    if [ "${CEPH_EFF_POOL_REPLICAS}" -ge 3 ]; then
+        CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE=true
+    else
+        CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE=false
+    fi
+    export CEPH_EFF_POOL_REPLICAS CEPH_EFF_POOL_MIN_SIZE CEPH_EFF_FAILURE_DOMAIN \
+           CEPH_EFF_REQUIRE_SAFE_REPLICA_SIZE
+    return 0
+}
+
 # ---------------- 统一配置加载 ----------------
 # 环境变量优先: 配置文件内使用 ${VAR:-default},已导出的环境变量不会被覆盖
 load_config() {

@@ -39,6 +39,8 @@ chk "CephFS 启用且缺凭据 → 不满足" "$(run "CEPH_MODE=external CEPH_EX
 
 echo "== ② internal 单节点显式磁盘 =="
 chk "1 节点具备" "$(run "ceph_preflight_node_ssh() { case \"\$2\" in *df*) echo 104857600 ;; *) return 0 ;; esac; }; NODES=('master,n1,10.0.0.1,root,pw'); CEPH_MODE=internal CEPH_TOPOLOGY=auto CEPH_MIN_NODES=3 CEPH_DATA_DISKS='n1:/dev/vdb'; ceph_installable_check --probe >/dev/null 2>&1; echo \$?")" "0"
+chk "单节点 1 盘(未显式副本)具备" "$(run "ceph_preflight_node_ssh() { case \"\$2\" in *df*) echo 104857600 ;; *) return 0 ;; esac; }; NODES=('master,n1,10.0.0.1,root,pw'); CEPH_MODE=internal CEPH_TOPOLOGY=single CEPH_DATA_DISKS='n1:/dev/vdb'; ceph_installable_check --probe >/dev/null 2>&1; echo \$?")" "0"
+chk "单节点 3 盘(未显式副本)具备" "$(run "ceph_preflight_node_ssh() { case \"\$2\" in *df*) echo 104857600 ;; *) return 0 ;; esac; }; NODES=('master,n1,10.0.0.1,root,pw'); CEPH_MODE=internal CEPH_TOPOLOGY=single CEPH_DATA_DISKS='n1:/dev/vdb,/dev/vdc,/dev/vdd'; ceph_installable_check --probe >/dev/null 2>&1; echo \$?")" "0"
 
 echo "== ③ internal 2 节点 auto → 不满足 =="
 chk "2 节点不满足" "$(run "NODES=('master,n1,10.0.0.1,root,pw' 'master,n2,10.0.0.2,root,pw'); CEPH_MODE=internal CEPH_TOPOLOGY=auto CEPH_MIN_NODES=3 CEPH_DATA_DISKS='n1:/dev/vdb;n2:/dev/vdb'; ceph_installable_check >/dev/null 2>&1; echo \$?")" "1"
