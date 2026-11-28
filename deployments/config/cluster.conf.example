@@ -128,6 +128,9 @@ KUBEVIRT_ENABLED="${KUBEVIRT_ENABLED:-false}"           # 虚拟机能力(占位
 LUSTRE_CSI_ENABLED="${LUSTRE_CSI_ENABLED:-false}"       # Lustre CSI(占位; 见 4.5)
 MULTUS_ENABLED="${MULTUS_ENABLED:-true}"                # Multus CNI 容器多网卡(见 4.7)
 RDMA_ENABLED="${RDMA_ENABLED:-true}"                    # RDMA 共享设备插件(见 4.8)
+T_HEAD_PPU_ENABLED="${T_HEAD_PPU_ENABLED:-false}"       # 平头哥真武 PPU 设备插件(默认关; --enable t_head_ppu; 见 4.8c)
+# 来源切换(默认 ack): 在 cluster.conf 写 T_HEAD_PPU_PLUGIN_SOURCE=native 可切到自研 fallback;
+# 其余 T_HEAD_PPU_* 细节见 cluster.defaults.conf §4.8c 与 docs/t-head-ppu.md。
 MODEL_IMAGES_ENABLED="${MODEL_IMAGES_ENABLED:-true}"    # 模型推理镜像(sglang×2/vllm-metax ≈33G)随部署推入内置 registry(排在平台组件之后 = 最后; --skip model_images 跳过; 见 offline-files/model-collection/README.md)
 
 # ---- 节点组(可选; 配合 --only <组名> 使用) ----

@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ppu-device-plugin
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: ppu-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ppu-device-plugin
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ppu-device-plugin
+    spec:
+      priorityClassName: system-node-critical
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      # Either the NFD PCI-presence label (GPUStack convention) or the
+      # installer-managed fallback label. nodeSelectorTerms are ORed.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: feature.node.kubernetes.io/pci-1ded.present
+                    operator: In
+                    values: ["true"]
+              - matchExpressions:
+                  - key: ppu.example.com/device
+                    operator: In
+                    values: ["true"]
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: ppu-device-plugin
+          image: "@@IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/bin/ppu-device-plugin
+          args:
+            - --resource-name=alibabacloud.com/ppu
+            - --device-plugin-path=/var/lib/kubelet/device-plugins
+            - --ppu-smi=/usr/local/PPU_SDK/bin/ppu-smi
+            - --ld-library-path=/usr/local/PPU_SDK/lib:/usr/local/PPU_SDK/lib64
+            - --rescan-interval=30s
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: dev
+              mountPath: /dev
+            - name: proc-driver-alixpu
+              mountPath: /proc/driver/alixpu
+              readOnly: true
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: ppu-sdk
+              mountPath: /usr/local/PPU_SDK
+              readOnly: true
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: proc-driver-alixpu
+          hostPath:
+            path: /proc/driver/alixpu
+            type: Directory
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: ppu-sdk
+          hostPath:
+            path: /usr/local/PPU_SDK
+            type: Directory
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory
