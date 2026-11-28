@@ -74,7 +74,37 @@ if [ "${CEPH_MODE:-internal}" = "internal" ] \
             [ "${CEPH_EXPLICIT_REPLICAS:-0}" = "1" ] || CEPH_EFF_POOL_REPLICAS="${_ex_size}" ;;
         esac
         case "${_ex_min}" in ''|*[!0-9]*) : ;; *)
-            [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" = "1" ] || CEPH_EFF_POOL_MIN_SIZE="${_ex_min}" ;;
+            if [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" != "1" ]; then
+                # ★ 2026-11-28(CodeRabbit 同源): 运行值可能大于最终 size(显式
+                #   CEPH_POOL_REPLICAS=1 重跑在仍沿用 3/2 默认的集群上)。照抄会导致
+                #   外部池/CephFilesystem 渲染出 min_size > size 的非法 profile。
+                case "${CEPH_EFF_POOL_REPLICAS:-}" in
+                    ''|*[!0-9]*) CEPH_EFF_POOL_MIN_SIZE="${_ex_min}" ;;   # 无有效 size 可比较, 保持原行为
+                    *)
+                        if [ "${_ex_min}" -le "${CEPH_EFF_POOL_REPLICAS}" ]; then
+                            CEPH_EFF_POOL_MIN_SIZE="${_ex_min}"
+                        else
+                            CEPH_EFF_POOL_MIN_SIZE=$(( CEPH_EFF_POOL_REPLICAS > 1 ? CEPH_EFF_POOL_REPLICAS - 1 : 1 ))
+                            warn "  集群 osd_pool_default_min_size=${_ex_min} > 最终 size=${CEPH_EFF_POOL_REPLICAS}, 自动 min_size 取 ${CEPH_EFF_POOL_MIN_SIZE}"
+                        fi ;;
+                esac
+            fi ;;
+        esac
+        # ★ 2026-11-28(CodeRabbit): 合并后成对校验 —— size/min 两个查询可独立失败:
+        #   size 读到 1 而 min 查询失败时, 旧 EFF min(如 2)会留下 1/2 的非法对。
+        #   不把半更新 profile 导出给 apply_main(池命令 / CephFilesystem 模板):
+        #   非显式 min 按最终 size 派生; 显式 min 与最终 size 冲突则直接拒绝。
+        case "${CEPH_EFF_POOL_REPLICAS:-}" in ''|*[!0-9]*) : ;; *)
+            case "${CEPH_EFF_POOL_MIN_SIZE:-}" in ''|*[!0-9]*) : ;; *)
+                if [ "${CEPH_EFF_POOL_MIN_SIZE}" -gt "${CEPH_EFF_POOL_REPLICAS}" ]; then
+                    if [ "${CEPH_EXPLICIT_MIN_SIZE:-0}" = "1" ]; then
+                        err "  CEPH_POOL_MIN_SIZE(${CEPH_EFF_POOL_MIN_SIZE}) > 集群 osd_pool_default_size(${CEPH_EFF_POOL_REPLICAS}): 外部池/CephFilesystem profile 非法, 拒绝应用"
+                        exit 1
+                    fi
+                    CEPH_EFF_POOL_MIN_SIZE=$(( CEPH_EFF_POOL_REPLICAS > 1 ? CEPH_EFF_POOL_REPLICAS - 1 : 1 ))
+                    warn "  合并后 min_size > size, 自动 min_size 取 ${CEPH_EFF_POOL_MIN_SIZE}(size=${CEPH_EFF_POOL_REPLICAS})"
+                fi ;;
+            esac ;;
         esac
         case "${CEPH_EFF_POOL_REPLICAS:-}" in ''|*[!0-9]*) : ;; *)
             if [ "${CEPH_EFF_POOL_REPLICAS}" -ge 3 ]; then

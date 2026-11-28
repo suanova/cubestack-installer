@@ -1369,8 +1369,15 @@ rm -f "${LOCAL_CR}"
         [ -n "${_rule_id}" ] || return 1
         SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
             timeout 15 ceph config set global osd_pool_default_crush_rule "${_rule_id}" >/dev/null 2>&1 || return 1
-        if SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
-            timeout 15 ceph osd pool get .mgr size >/dev/null 2>&1; then
+        # ★ 2026-11-28(CodeRabbit): 不能把"查询超时/失败"当成"池不存在"。
+        #   旧写法 `if SSH ... timeout 15 ceph osd pool get .mgr size; then` 中, timeout(124)
+        #   或 exec/ssh 失败都会走 else 分支 → 跳过纠正并 return 0 → 调用方置 _CEPH_TUNED=1
+        #   不再重试, 单个 .mgr 池可能永远停在 host 规则(单节点 size>1 时 PG 永远 inactive)。
+        #   现在: 只有明确读到 ENOENT(池确实不存在)才跳过; 其余失败一律返回非 0 让下一轮重试。
+        local _mgr_rc=0 _mgr_out=""
+        _mgr_out="$( (SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
+            timeout 15 ceph osd pool get .mgr size 2>&1) )" || _mgr_rc=$?
+        if [ "${_mgr_rc}" -eq 0 ]; then
             # ⚠ 实机: `osd pool set <pool> crush_rule <数字ID>` 报 "crush rule N does not exist";
             #   用规则名才生效(2026-11-20)。osd_pool_default_crush_rule 仍用数字 ID(config 语义)。
             # ⚠ 已存在的 .mgr 池不会跟随 osd_pool_default_size/min_size(那两项只影响后续新建池),
@@ -1384,6 +1391,10 @@ rm -f "${LOCAL_CR}"
                 timeout 15 ceph osd pool set .mgr size "${CEPH_POOL_REPLICAS}" ${_mgr_size_flag} >/dev/null 2>&1 || return 1
             SSH "${K}" -n "${CEPH_NAMESPACE}" exec deploy/rook-ceph-tools -- \
                 timeout 15 ceph osd pool set .mgr min_size "${CEPH_POOL_MIN_SIZE}" >/dev/null 2>&1 || return 1
+        elif ! printf '%s' "${_mgr_out}" | grep -qE 'ENOENT.*(pool|\.mgr)|unrecognized pool'; then
+            # 非 ENOENT 的失败(超时 124 / exec·ssh 255 / keyring 未刷新等): 无法确认池不存在,
+            # 不能跳过纠正(CodeRabbit 2026-11-28)
+            return 1
         fi
         return 0
     }
