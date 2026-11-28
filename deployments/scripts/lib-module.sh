@@ -562,6 +562,46 @@ resolve_run_steps() {
               _had_pre_install_check _precheck_skipped _s6
     fi
 
+    # ★ 2026-11-24: 被 --skip 排除的**默认启用**依赖不得被静默忽略。
+    #   反例(实机): `--skip k8s_registry` 但 multus(REQUIRES: k8s_deploy k8s_registry)
+    #   仍留在计划里 → multus 推镜像时 registry 未配置, 60s 后失败并中断部署。
+    #   默认模式的 REQUIRES 只用于排序, 不会把依赖拉回计划; 这里在计划期直接失败。
+    #   · 仅针对**用户显式 --skip 掉的默认启用依赖**; 默认关闭的可选依赖保持旧语义
+    #     (如 k8s_deploy 的 node_pkgs/k8s_workerbm 未启用时不报错)。
+    #   · pre_install_check 是帮助明确允许 --skip 的例外(消费者自行降级)。
+    #   · local_path/metallb 是可选基座依赖(registry 可走 ceph-block/nodeport), 跳过它们
+    #     不代表 registry 不可用; 保持旧语义, 不因此判计划无效。
+    #   · 依赖已完成(done 且非 REPEAT)视为满足(断点续跑/单组件模式)。
+    local _skip_keys=" " _skip_ok=" pre_install_check local_path metallb " _s7 _k7 _i7 _d7 _d7i
+    for _s7 in ${skip_arg//,/ }; do
+        [ -n "${_s7}" ] && _skip_keys+="$(normalize_key "${_s7}") "
+    done
+    for _k7 in "${RUN_STEPS[@]:-}"; do
+        [ -n "${_k7}" ] || continue
+        _i7="$(module_index "${_k7}")"
+        [ "${_i7}" -ge 0 ] || continue
+        # 依赖者本身已完成(REPEAT=0, 断点续跑会跳过执行) → 本次不会运行, 不要求其依赖在场
+        if [ "${MODULE_REPEAT[$_i7]:-0}" != "1" ] && [ "$(get_state "${_k7}")" = "done" ]; then
+            continue
+        fi
+        for _d7 in ${MODULE_REQUIRES[$_i7]:-}; do
+            case " ${RUN_STEPS[*]} " in *" ${_d7} "*) continue ;; esac
+            _d7i="$(module_index "${_d7}")"
+            [ "${_d7i}" -ge 0 ] || continue
+            if [ "${MODULE_REPEAT[$_d7i]:-0}" != "1" ] && [ "$(get_state "${_d7}")" = "done" ]; then
+                continue
+            fi
+            case " ${_skip_keys} " in *" ${_d7} "*) ;; *) continue ;; esac
+            case " ${_skip_ok} " in *" ${_d7} "*) continue ;; esac
+            module_default_on "${_d7i}" || continue
+            err "模块 ${_k7} 依赖 ${_d7}, 但 ${_d7} 被 --skip 排除且未完成"
+            err "  不能跳过被依赖的模块: 同时 --skip ${_k7}, 或不要跳过 ${_d7}"
+            RUN_STEPS=()   # 计划无效: 不给调用方留下"可执行"的残缺计划
+            return 1
+        done
+    done
+    unset _skip_keys _skip_ok _s7 _k7 _i7 _d7 _d7i
+
     # ★ 稳定拓扑排序(REQUIRES): 依赖者排在被依赖者之后; 无依赖约束的模块保持原(文件)顺序。
     #   循环依赖 / 未知引用在此报错, 新模块声明 REQUIRES 后自动保证顺序, 无需改文件序号。
     if ! _topo_sort_requires; then
